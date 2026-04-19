@@ -41,6 +41,7 @@ type Bucket struct {
 	CreatedAt    time.Time
 	DefaultClass string
 	Versioning   string
+	ACL          string
 }
 
 type Object struct {
@@ -118,6 +119,7 @@ type Store interface {
 	DeleteBucket(ctx context.Context, name string) error
 	ListBuckets(ctx context.Context, owner string) ([]*Bucket, error)
 	SetBucketVersioning(ctx context.Context, name, state string) error
+	SetBucketACL(ctx context.Context, name, canned string) error
 
 	PutObject(ctx context.Context, o *Object, versioned bool) error
 	GetObject(ctx context.Context, bucketID uuid.UUID, key, versionID string) (*Object, error)

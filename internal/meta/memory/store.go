@@ -158,6 +158,17 @@ func (s *Store) SetBucketVersioning(ctx context.Context, name, state string) err
 	return nil
 }
 
+func (s *Store) SetBucketACL(ctx context.Context, name, canned string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.buckets[name]
+	if !ok {
+		return meta.ErrBucketNotFound
+	}
+	b.ACL = canned
+	return nil
+}
+
 func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

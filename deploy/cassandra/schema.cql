@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS buckets (
     shard_count    int,
     objectlock     frozen<objectlock_cfg>,
     tags           map<text, text>,
-    policy         text
+    policy         text,
+    acl            text
 );
 
 CREATE TABLE IF NOT EXISTS objects (

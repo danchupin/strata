@@ -91,14 +91,14 @@ func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error
 	var (
 		idG              gocql.UUID
 		owner, class     string
-		versioning       string
+		versioning, acl  string
 		createdAt        time.Time
 		shardCount       int
 	)
 	err := s.s.Query(
-		`SELECT id, owner_id, created_at, default_class, versioning, shard_count FROM buckets WHERE name=?`,
+		`SELECT id, owner_id, created_at, default_class, versioning, shard_count, acl FROM buckets WHERE name=?`,
 		name,
-	).WithContext(ctx).Scan(&idG, &owner, &createdAt, &class, &versioning, &shardCount)
+	).WithContext(ctx).Scan(&idG, &owner, &createdAt, &class, &versioning, &shardCount, &acl)
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrBucketNotFound
 	}
@@ -115,6 +115,7 @@ func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error
 		CreatedAt:    createdAt,
 		DefaultClass: class,
 		Versioning:   versioning,
+		ACL:          acl,
 	}, nil
 }
 
@@ -127,6 +128,20 @@ func (s *Store) SetBucketVersioning(ctx context.Context, name, state string) err
 	applied, err := s.s.Query(
 		`UPDATE buckets SET versioning=? WHERE name=? IF EXISTS`,
 		state, name,
+	).WithContext(ctx).SerialConsistency(gocql.LocalSerial).ScanCAS(nil)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return meta.ErrBucketNotFound
+	}
+	return nil
+}
+
+func (s *Store) SetBucketACL(ctx context.Context, name, canned string) error {
+	applied, err := s.s.Query(
+		`UPDATE buckets SET acl=? WHERE name=? IF EXISTS`,
+		canned, name,
 	).WithContext(ctx).SerialConsistency(gocql.LocalSerial).ScanCAS(nil)
 	if err != nil {
 		return err
@@ -170,17 +185,17 @@ func (s *Store) bucketIsEmpty(ctx context.Context, bucketID uuid.UUID, shardCoun
 }
 
 func (s *Store) ListBuckets(ctx context.Context, owner string) ([]*meta.Bucket, error) {
-	iter := s.s.Query(`SELECT name, id, owner_id, created_at, default_class, versioning FROM buckets`).
+	iter := s.s.Query(`SELECT name, id, owner_id, created_at, default_class, versioning, acl FROM buckets`).
 		WithContext(ctx).Iter()
 	defer iter.Close()
 
 	var (
-		out                              []*meta.Bucket
-		name, ownerID, class, versioning string
-		idG                              gocql.UUID
-		createdAt                        time.Time
+		out                                   []*meta.Bucket
+		name, ownerID, class, versioning, acl string
+		idG                                   gocql.UUID
+		createdAt                             time.Time
 	)
-	for iter.Scan(&name, &idG, &ownerID, &createdAt, &class, &versioning) {
+	for iter.Scan(&name, &idG, &ownerID, &createdAt, &class, &versioning, &acl) {
 		if owner != "" && ownerID != owner {
 			continue
 		}
@@ -194,6 +209,7 @@ func (s *Store) ListBuckets(ctx context.Context, owner string) ([]*meta.Bucket, 
 			CreatedAt:    createdAt,
 			DefaultClass: class,
 			Versioning:   versioning,
+			ACL:          acl,
 		})
 	}
 	if err := iter.Close(); err != nil {

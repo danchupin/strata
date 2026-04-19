@@ -99,6 +99,16 @@ func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request, bucket str
 		s.deleteObjects(w, r, bucket)
 		return
 	}
+	if q.Has("acl") {
+		switch r.Method {
+		case http.MethodGet:
+			s.getBucketACL(w, r, bucket)
+			return
+		case http.MethodPut:
+			s.putBucketACL(w, r, bucket)
+			return
+		}
+	}
 	if q.Has("uploads") && r.Method == http.MethodGet {
 		b, err := s.Meta.GetBucket(r.Context(), bucket)
 		if err != nil {
@@ -146,6 +156,9 @@ func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request, bucket str
 		if err != nil {
 			writeError(w, r, ErrInternal)
 			return
+		}
+		if aclHdr := r.Header.Get("x-amz-acl"); aclHdr != "" {
+			_ = s.Meta.SetBucketACL(r.Context(), bucket, normalizeCannedACL(aclHdr))
 		}
 		w.Header().Set("Location", "/"+bucket)
 		w.WriteHeader(http.StatusOK)
@@ -231,6 +244,16 @@ func (s *Server) handleObject(w http.ResponseWriter, r *http.Request, bucket, ke
 	if q.Has("uploads") && r.Method == http.MethodPost {
 		s.initiateMultipart(w, r, b, key)
 		return
+	}
+	if q.Has("acl") {
+		switch r.Method {
+		case http.MethodGet:
+			s.getObjectACL(w, r, b, key)
+			return
+		case http.MethodPut:
+			s.putObjectACL(w, r, b, key)
+			return
+		}
 	}
 	if q.Has("tagging") {
 		switch r.Method {

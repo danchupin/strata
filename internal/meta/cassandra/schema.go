@@ -25,7 +25,8 @@ var tableDDL = []string{
 		shard_count   int,
 		objectlock    frozen<objectlock_cfg>,
 		tags          map<text, text>,
-		policy        text
+		policy        text,
+		acl           text
 	)`,
 	`CREATE TABLE IF NOT EXISTS objects (
 		bucket_id        uuid,
@@ -92,6 +93,7 @@ var tableDDL = []string{
 
 var alterStatements = []string{
 	`ALTER TABLE objects ADD retain_mode text`,
+	`ALTER TABLE buckets ADD acl text`,
 }
 
 func isColumnAlreadyExists(err error) bool {
