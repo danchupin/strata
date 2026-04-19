@@ -95,6 +95,10 @@ func (s *Server) listBuckets(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request, bucket string) {
 	q := r.URL.Query()
+	if q.Has("delete") && r.Method == http.MethodPost {
+		s.deleteObjects(w, r, bucket)
+		return
+	}
 	if q.Has("uploads") && r.Method == http.MethodGet {
 		b, err := s.Meta.GetBucket(r.Context(), bucket)
 		if err != nil {
