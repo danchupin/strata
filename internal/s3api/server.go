@@ -286,6 +286,10 @@ func (s *Server) handleObject(w http.ResponseWriter, r *http.Request, bucket, ke
 
 	switch r.Method {
 	case http.MethodPut:
+		if r.Header.Get("x-amz-copy-source") != "" {
+			s.copyObject(w, r, b, key)
+			return
+		}
 		s.putObject(w, r, b, key)
 	case http.MethodGet:
 		s.getObject(w, r, b, key, true)
