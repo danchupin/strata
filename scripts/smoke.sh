@@ -26,7 +26,7 @@ curl -sf -o /dev/null -X PUT --data-binary "c" "$BASE/$BUCKET/logs/2026/05/c.log
 curl -sf -o /dev/null -X PUT --data-binary "d" "$BASE/$BUCKET/images/d.jpg"
 
 echo "== PUT 10MB blob (single-shot)"
-dd if=/dev/urandom of="$TMP/big.bin" bs=1m count=10 2>/dev/null
+dd if=/dev/urandom of="$TMP/big.bin" bs=1M count=10 2>/dev/null
 ORIG_MD5="$(md5of "$TMP/big.bin")"
 curl -sf -o /dev/null -w "  %{http_code}\n" -X PUT --data-binary @"$TMP/big.bin" "$BASE/$BUCKET/big.bin"
 
@@ -51,9 +51,9 @@ echo "== LIST with prefix=logs/2026/04/"
 curl -sf "$BASE/$BUCKET?list-type=2&prefix=logs/2026/04/" | head -c 500; echo
 
 echo "== MULTIPART upload (3 parts x 6 MiB = 18 MiB)"
-dd if=/dev/urandom of="$TMP/mp.bin" bs=1m count=18 2>/dev/null
+dd if=/dev/urandom of="$TMP/mp.bin" bs=1M count=18 2>/dev/null
 MP_MD5="$(md5of "$TMP/mp.bin")"
-split -b 6m "$TMP/mp.bin" "$TMP/mp.part."
+split -b 6M "$TMP/mp.bin" "$TMP/mp.part."
 PARTS=( "$TMP"/mp.part.* )
 
 INIT_XML="$(curl -sf -X POST "$BASE/$BUCKET/mp-object?uploads")"

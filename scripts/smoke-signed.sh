@@ -40,7 +40,7 @@ $aws s3 cp "s3://$BUCKET/greeting.txt" "$TMP/small.got" >/dev/null
 [ "$(cat $TMP/small.got)" = "hello signed" ] && echo "  match"
 
 echo "== aws-cli put-object 25 MiB (triggers multipart + streaming payload)"
-dd if=/dev/urandom of="$TMP/big.bin" bs=1m count=25 2>/dev/null
+dd if=/dev/urandom of="$TMP/big.bin" bs=1M count=25 2>/dev/null
 ORIG=$(md5of "$TMP/big.bin")
 $aws s3 cp "$TMP/big.bin" "s3://$BUCKET/big.bin" >/dev/null && echo "  uploaded"
 $aws s3 cp "s3://$BUCKET/big.bin" "$TMP/big.got" >/dev/null
