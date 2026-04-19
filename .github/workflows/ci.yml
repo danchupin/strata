@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-build:
+    name: Build + vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - run: go version
+      - run: go mod download
+      - run: go build ./...
+      - run: go vet ./...
+
+  unit:
+    name: Unit tests (-race)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - run: go test -race ./...
+
+  integration-cassandra:
+    name: Integration tests (Cassandra via testcontainers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - name: Pre-pull Cassandra image (warms cache)
+        run: docker pull cassandra:5.0
+      - run: go test -tags integration -timeout 15m ./...
+
+  docker-build:
+    name: Docker build (librados linking)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build gateway image
+        run: docker build -f deploy/docker/Dockerfile -t strata:ceph .
+      - name: Build ceph-bootstrap image
+        run: docker build -f deploy/docker/ceph-bootstrap/Dockerfile -t strata-ceph:local deploy/docker/ceph-bootstrap
+
+  e2e:
+    name: End-to-end (compose + smoke)
+    runs-on: ubuntu-latest
+    needs: docker-build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build images
+        run: |
+          docker build -f deploy/docker/Dockerfile -t strata:ceph .
+          docker build -f deploy/docker/ceph-bootstrap/Dockerfile -t strata-ceph:local deploy/docker/ceph-bootstrap
+
+      - name: Start stack
+        run: |
+          docker compose -f deploy/docker/docker-compose.yml up -d cassandra ceph
+          echo "waiting for healthy..."
+          for i in $(seq 1 60); do
+            cass=$(docker inspect -f '{{.State.Health.Status}}' strata-cassandra 2>/dev/null || echo none)
+            ceph=$(docker inspect -f '{{.State.Health.Status}}' strata-ceph 2>/dev/null || echo none)
+            echo "  cass=$cass ceph=$ceph"
+            if [ "$cass" = "healthy" ] && [ "$ceph" = "healthy" ]; then
+              break
+            fi
+            sleep 5
+          done
+
+      - name: Launch gateway + workers
+        run: |
+          docker compose -f deploy/docker/docker-compose.yml up -d gateway lifecycle gc
+          until curl -sf -o /dev/null http://127.0.0.1:9999/; do sleep 1; done
+
+      - name: Smoke (curl)
+        run: bash scripts/smoke.sh http://127.0.0.1:9999
+
+      - name: Smoke (aws-cli, SigV4 + presigned)
+        env:
+          STRATA_AUTH_MODE: required
+          STRATA_STATIC_CREDENTIALS: ciAK:ciSK:ci
+          AWS_ACCESS_KEY_ID: ciAK
+          AWS_SECRET_ACCESS_KEY: ciSK
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          docker compose -f deploy/docker/docker-compose.yml up -d --force-recreate gateway
+          until curl -s -o /dev/null http://127.0.0.1:9999/; do sleep 1; done
+          bash scripts/smoke-signed.sh http://127.0.0.1:9999
+
+      - name: RADOS integration tests (go test -tags "ceph integration")
+        run: make test-rados
+
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          for c in strata-cassandra strata-ceph strata-gateway strata-lifecycle strata-gc; do
+            echo "=== $c ==="
+            docker logs --tail 100 $c || true
+          done

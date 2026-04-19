@@ -1,0 +1,22 @@
+bin/
+dist/
+*.exe
+*.test
+*.out
+coverage.*
+.env
+.env.local
+.DS_Store
+.idea/
+.vscode/
+
+# OS / editor
+.DS_Store
+
+# Build caches
+/out
+/tmp
+
+# pytest
+.pytest_cache/
+scripts/s3-tests/report/

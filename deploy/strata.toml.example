@@ -1,0 +1,45 @@
+# Strata configuration file (TOML)
+#
+# Load it by pointing STRATA_CONFIG_FILE at this path before starting any of
+# the three binaries (strata-gateway, strata-lifecycle, strata-gc). Any value
+# in this file is overridden by an explicit environment variable with the
+# matching STRATA_* name — see README for the full mapping.
+
+listen = ":9000"
+region = "strata-local"
+data_backend = "rados"         # "memory" | "rados"
+meta_backend = "cassandra"     # "memory" | "cassandra"
+shutdown_wait = "10s"
+default_bucket_shards = 64
+
+[cassandra]
+hosts       = ["cassandra"]
+keyspace    = "strata"
+local_dc    = "datacenter1"
+replication = "{'class': 'NetworkTopologyStrategy', 'dc1': 3, 'dc2': 3}"
+username    = ""
+password    = ""
+timeout     = "10s"
+
+[rados]
+config_file = "/etc/ceph/ceph.conf"
+user        = "admin"
+keyring     = ""
+pool        = "strata.rgw.buckets.data"
+namespace   = ""
+# Format: CLASS=pool[@cluster[/namespace]], comma-separated.
+classes = "STANDARD=strata.rgw.buckets.data,STANDARD_IA=strata.rgw.buckets.ia,GLACIER_IR=strata.rgw.buckets.cold"
+
+[auth]
+mode              = "off"       # "off" | "required"
+static_credentials = ""         # "access:secret[:owner],..."
+
+[lifecycle]
+interval       = "60s"
+unit           = "day"          # "day" | "hour" | "minute" | "second"
+metrics_listen = ":9101"
+
+[gc]
+interval       = "30s"
+grace          = "5m"
+metrics_listen = ":9100"

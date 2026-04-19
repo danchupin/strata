@@ -1,0 +1,77 @@
+package s3api
+
+import (
+	"encoding/xml"
+	"net/http"
+)
+
+type APIError struct {
+	Code    string
+	Message string
+	Status  int
+}
+
+func (e APIError) Error() string { return e.Code + ": " + e.Message }
+
+var (
+	ErrSignatureDoesNotMatch = APIError{Code: "SignatureDoesNotMatch", Message: "The request signature we calculated does not match the signature you provided", Status: http.StatusForbidden}
+	ErrAccessDenied          = APIError{Code: "AccessDenied", Message: "Access denied", Status: http.StatusForbidden}
+	ErrInvalidAccessKeyId    = APIError{Code: "InvalidAccessKeyId", Message: "The access key Id you provided does not exist", Status: http.StatusForbidden}
+	ErrRequestTimeTooSkewed  = APIError{Code: "RequestTimeTooSkewed", Message: "Request time skewed too much from server time", Status: http.StatusForbidden}
+	ErrMissingAuth           = APIError{Code: "AccessDenied", Message: "Authorization is required", Status: http.StatusForbidden}
+	ErrNoSuchBucket          = APIError{Code: "NoSuchBucket", Message: "The specified bucket does not exist", Status: http.StatusNotFound}
+	ErrNoSuchKey           = APIError{Code: "NoSuchKey", Message: "The specified key does not exist", Status: http.StatusNotFound}
+	ErrNoSuchUpload        = APIError{Code: "NoSuchUpload", Message: "The specified multipart upload does not exist", Status: http.StatusNotFound}
+	ErrBucketNotEmpty      = APIError{Code: "BucketNotEmpty", Message: "The bucket you tried to delete is not empty", Status: http.StatusConflict}
+	ErrBucketExists        = APIError{Code: "BucketAlreadyOwnedByYou", Message: "Bucket already exists and is owned by you", Status: http.StatusConflict}
+	ErrInvalidBucketName   = APIError{Code: "InvalidBucketName", Message: "The specified bucket name is invalid", Status: http.StatusBadRequest}
+	ErrInvalidPart         = APIError{Code: "InvalidPart", Message: "One or more of the specified parts could not be found", Status: http.StatusBadRequest}
+	ErrInvalidPartOrder    = APIError{Code: "InvalidPartOrder", Message: "The list of parts was not in ascending order", Status: http.StatusBadRequest}
+	ErrInvalidStorageClass = APIError{Code: "InvalidStorageClass", Message: "The storage class you specified is not valid", Status: http.StatusBadRequest}
+	ErrObjectLockedErr     = APIError{Code: "AccessDenied", Message: "Object is protected by object lock retention or legal hold", Status: http.StatusForbidden}
+	ErrNoSuchLifecycleConfiguration = APIError{Code: "NoSuchLifecycleConfiguration", Message: "The lifecycle configuration does not exist", Status: http.StatusNotFound}
+	ErrMalformedXML        = APIError{Code: "MalformedXML", Message: "The XML you provided was not well-formed", Status: http.StatusBadRequest}
+	ErrInvalidArgument     = APIError{Code: "InvalidArgument", Message: "Invalid argument", Status: http.StatusBadRequest}
+	ErrNotImplemented      = APIError{Code: "NotImplemented", Message: "A header you provided implies functionality that is not implemented", Status: http.StatusNotImplemented}
+	ErrInternal            = APIError{Code: "InternalError", Message: "We encountered an internal error", Status: http.StatusInternalServerError}
+)
+
+type errorXML struct {
+	XMLName   xml.Name `xml:"Error"`
+	Code      string
+	Message   string
+	Resource  string
+	RequestID string
+}
+
+func writeError(w http.ResponseWriter, r *http.Request, err APIError) {
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(err.Status)
+	_ = xml.NewEncoder(w).Encode(errorXML{
+		Code:     err.Code,
+		Message:  err.Message,
+		Resource: r.URL.Path,
+	})
+}
+
+func WriteAuthDenied(w http.ResponseWriter, r *http.Request, err error) {
+	var apiErr APIError
+	switch {
+	case err == nil:
+		apiErr = ErrAccessDenied
+	default:
+		switch err.Error() {
+		case "signature does not match":
+			apiErr = ErrSignatureDoesNotMatch
+		case "request time outside permitted window":
+			apiErr = ErrRequestTimeTooSkewed
+		case "credential not found":
+			apiErr = ErrInvalidAccessKeyId
+		case "missing Authorization header":
+			apiErr = ErrMissingAuth
+		default:
+			apiErr = ErrAccessDenied
+		}
+	}
+	writeError(w, r, apiErr)
+}

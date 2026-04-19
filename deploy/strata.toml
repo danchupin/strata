@@ -1,0 +1,40 @@
+# Strata runtime configuration shared by all three binaries
+# (strata-gateway, strata-lifecycle, strata-gc).
+#
+# Mounted into each container at /etc/strata/strata.toml, loaded via
+# STRATA_CONFIG_FILE. Individual env variables still override anything
+# declared here — useful for CI and quick debugging.
+
+listen                 = ":9000"
+region                 = "strata-local"
+data_backend           = "rados"
+meta_backend           = "cassandra"
+shutdown_wait          = "10s"
+default_bucket_shards  = 64
+
+[cassandra]
+hosts       = ["cassandra"]
+keyspace    = "strata"
+local_dc    = "datacenter1"
+replication = "{'class': 'SimpleStrategy', 'replication_factor': '1'}"
+timeout     = "10s"
+
+[rados]
+config_file = "/etc/ceph/ceph.conf"
+user        = "admin"
+pool        = "strata.rgw.buckets.data"
+classes     = "STANDARD=strata.rgw.buckets.data,STANDARD_IA=strata.rgw.buckets.ia,GLACIER_IR=strata.rgw.buckets.cold"
+
+[auth]
+mode               = "off"
+static_credentials = ""
+
+[lifecycle]
+interval       = "30s"
+unit           = "day"
+metrics_listen = ":9101"
+
+[gc]
+interval       = "30s"
+grace          = "5m"
+metrics_listen = ":9100"
