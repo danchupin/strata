@@ -107,10 +107,20 @@ jobs:
       - name: RADOS integration tests (go test -tags "ceph integration")
         run: make test-rados
 
-      - name: Dump logs on failure
-        if: failure()
+      - name: Collect container logs
+        if: always()
         run: |
+          mkdir -p ci-logs
           for c in strata-cassandra strata-ceph strata-gateway strata-lifecycle strata-gc; do
-            echo "=== $c ==="
-            docker logs --tail 100 $c || true
+            docker logs $c > ci-logs/$c.log 2>&1 || true
           done
+          docker compose -f deploy/docker/docker-compose.yml ps > ci-logs/compose-ps.txt 2>&1 || true
+
+      - name: Upload CI logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs
+          path: ci-logs/
+          if-no-files-found: warn
+          retention-days: 14
