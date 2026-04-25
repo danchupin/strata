@@ -1414,6 +1414,16 @@ func (s *Store) DeleteBucketObjectLockConfig(ctx context.Context, bucketID uuid.
 	return s.deleteBucketBlob(ctx, "bucket_object_lock", bucketID)
 }
 
+func (s *Store) SetBucketNotificationConfig(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(ctx, "bucket_notification", "config", bucketID, blob)
+}
+func (s *Store) GetBucketNotificationConfig(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(ctx, "bucket_notification", "config", bucketID, meta.ErrNoSuchNotification)
+}
+func (s *Store) DeleteBucketNotificationConfig(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(ctx, "bucket_notification", bucketID)
+}
+
 func gocqlUUID(u uuid.UUID) gocql.UUID {
 	var g gocql.UUID
 	copy(g[:], u[:])

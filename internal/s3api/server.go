@@ -189,6 +189,16 @@ func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request, bucket str
 			return
 		}
 	}
+	if q.Has("notification") {
+		switch r.Method {
+		case http.MethodGet:
+			s.getBucketNotification(w, r, bucket)
+			return
+		case http.MethodPut:
+			s.putBucketNotification(w, r, bucket)
+			return
+		}
+	}
 	if q.Has("acl") {
 		switch r.Method {
 		case http.MethodGet:

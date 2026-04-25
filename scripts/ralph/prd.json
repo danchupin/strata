@@ -273,8 +273,8 @@
         "go test ./internal/s3api/... passes"
       ],
       "priority": 16,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "meta.ErrNoSuchNotification sentinel + meta.Store.Set/Get/DeleteBucketNotificationConfig added; both backends use the standard setBucketBlob/getBucketBlob/deleteBucketBlob helpers (memory: notification map[uuid.UUID][]byte; cassandra: new bucket_notification table appended to tableDDL). New internal/s3api/notification.go: putBucketNotification parses NotificationConfiguration XML, validates that at least one of TopicConfiguration / QueueConfiguration / CloudFunctionConfiguration / LambdaFunctionConfiguration / EventBridgeConfiguration is present (else 400 MalformedXML); empty body deletes the config; getBucketNotification serves the persisted blob or 404 NoSuchConfiguration via new ErrNoSuchNotificationConfig (Code=NoSuchConfiguration). Route ?notification GET/PUT wired in handleBucket adjacent to ?object-lock. Tests in notification_test.go cover Topic/Queue/Lambda round-trip, malformed XML 400, well-formed-but-empty 400, empty body clears (subsequent GET 404), missing bucket 404."
     },
     {
       "id": "US-017",

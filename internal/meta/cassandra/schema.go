@@ -135,6 +135,10 @@ var tableDDL = []string{
 		bucket_id uuid PRIMARY KEY,
 		config    blob
 	)`,
+	`CREATE TABLE IF NOT EXISTS bucket_notification (
+		bucket_id uuid PRIMARY KEY,
+		config    blob
+	)`,
 }
 
 var alterStatements = []string{

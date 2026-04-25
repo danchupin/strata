@@ -440,3 +440,31 @@ Started: Sat Apr 25 16:10:14 MSK 2026
   - The existing buckets table schema had an unused frozen<objectlock_cfg> UDT column — left alone to avoid touching pre-existing schemas. The new object_lock_enabled boolean is the canonical persisted flag from this point on.
   - When the AC says "this flag is required for object-lock config", the right code is 400 InvalidRequest (not 409 — AWS docs use InvalidRequest for this case). Reuse ErrObjectLockNotEnabled rather than inventing new codes for related preconditions.
 ---
+
+## 2026-04-25 - US-016 (PutBucketNotificationConfiguration / GetBucketNotificationConfiguration)
+- meta.ErrNoSuchNotification sentinel added to internal/meta/store.go.
+- meta.Store grew SetBucketNotificationConfig / GetBucketNotificationConfig / DeleteBucketNotificationConfig; both backends use the existing setBucketBlob/getBucketBlob/deleteBucketBlob helpers.
+- Memory backend: notification map[uuid.UUID][]byte added to Store struct and constructor.
+- Cassandra: new bucket_notification (bucket_id PK, config blob) appended to tableDDL.
+- New internal/s3api/notification.go:
+  - putBucketNotification: parses NotificationConfiguration XML; empty body deletes the config; well-formed but lacking Topic/Queue/CloudFunction/LambdaFunction/EventBridge → 400 MalformedXML; persists raw XML.
+  - getBucketNotification: serves the stored blob or 404 NoSuchConfiguration.
+- New ErrNoSuchNotificationConfig (Code=NoSuchConfiguration, 404) in errors.go.
+- Route ?notification GET/PUT wired in handleBucket adjacent to ?object-lock.
+- Tests in internal/s3api/notification_test.go: Topic/Queue/Lambda round-trip, malformed XML 400, well-formed-but-empty 400, empty body clears + subsequent GET 404 NoSuchConfiguration, missing bucket 404.
+- Files changed:
+  - internal/meta/store.go
+  - internal/meta/memory/store.go
+  - internal/meta/cassandra/store.go
+  - internal/meta/cassandra/schema.go
+  - internal/s3api/errors.go
+  - internal/s3api/notification.go (new)
+  - internal/s3api/notification_test.go (new)
+  - internal/s3api/server.go
+  - scripts/ralph/prd.json (passes: true)
+- Quality: go build ./... + go vet ./... + go test ./... all green.
+- **Learnings for future iterations:**
+  - AWS lets clients clear a bucket notification by PUT with an empty body OR by PUT with `<NotificationConfiguration/>`. The PRD AC explicitly required only the empty-body path — AC also says "at least one of TopicConfiguration/QueueConfiguration/LambdaFunctionConfiguration", so well-formed-but-empty is rejected with 400. If we later relax this, drop the Topic/Queue/Lambda count check and add an explicit DeleteBucketNotificationConfig branch on the empty XML envelope.
+  - LambdaFunctionConfiguration is the modern AWS name; CloudFunctionConfiguration is the legacy alias still emitted by some SDKs. Validation accepts either; the persisted XML is the client's verbatim bytes so any consumer reading back gets exactly what was sent.
+  - notificationStub uses `xml:",innerxml" []byte` so we keep the validation cheap (presence-of-children check) without committing to the full event/filter schema. Future enhancements (e.g. event-based dispatch) can swap in a richer struct without touching the meta layer.
+---

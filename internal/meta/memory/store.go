@@ -26,6 +26,7 @@ type Store struct {
 	ownership    map[uuid.UUID][]byte
 	encryption   map[uuid.UUID][]byte
 	objectLock   map[uuid.UUID][]byte
+	notification map[uuid.UUID][]byte
 	bucketGrants map[uuid.UUID][]meta.Grant
 	objectGrants map[grantKey][]meta.Grant
 	iamUsers     map[string]*meta.IAMUser
@@ -57,6 +58,7 @@ func New() *Store {
 		ownership:    make(map[uuid.UUID][]byte),
 		encryption:   make(map[uuid.UUID][]byte),
 		objectLock:   make(map[uuid.UUID][]byte),
+		notification: make(map[uuid.UUID][]byte),
 		bucketGrants: make(map[uuid.UUID][]meta.Grant),
 		objectGrants: make(map[grantKey][]meta.Grant),
 		iamUsers:     make(map[string]*meta.IAMUser),
@@ -702,6 +704,16 @@ func (s *Store) GetBucketObjectLockConfig(ctx context.Context, bucketID uuid.UUI
 }
 func (s *Store) DeleteBucketObjectLockConfig(ctx context.Context, bucketID uuid.UUID) error {
 	return s.deleteBucketBlob(s.objectLock, bucketID)
+}
+
+func (s *Store) SetBucketNotificationConfig(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(s.notification, bucketID, blob)
+}
+func (s *Store) GetBucketNotificationConfig(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(s.notification, bucketID, meta.ErrNoSuchNotification)
+}
+func (s *Store) DeleteBucketNotificationConfig(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(s.notification, bucketID)
 }
 
 func (s *Store) CreateMultipartUpload(ctx context.Context, mu *meta.MultipartUpload) error {
