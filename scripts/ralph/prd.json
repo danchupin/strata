@@ -51,8 +51,8 @@
         "go test ./internal/s3api/... passes"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "internal/s3api/access.go added requireAccess(b, action, arn). Loads bucket policy via Meta.GetBucketPolicy (ErrNoSuchBucketPolicy → bypass), parses with policy.Parse, evaluates with principalForRequest (anonymous → '*'). 403 AccessDenied on Deny/no-match. Wired into handleObject for PUT/GET/HEAD/DELETE + initiateMultipart, uploadPart, completeMultipart, abortMultipart, listParts, copyObject. ?acl/?tagging/?retention/?legal-hold subresources are out of scope."
     },
     {
       "id": "US-004",

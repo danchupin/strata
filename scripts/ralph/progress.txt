@@ -9,6 +9,7 @@ Started: Sat Apr 25 16:10:14 MSK 2026
 - s3api handlers accept XML bodies with io.ReadAll(io.LimitReader(r.Body, 1<<20)).
 - Tests live in internal/s3api as a black-box `package s3api_test` and use `newHarness(t)` from testutil_test.go.
 - IAM-style JSON policy types live in internal/auth/policy. Use policy.Evaluate(doc, principal, action, resource, ctx) where principal is "*" for anonymous, action is e.g. "s3:GetObject", resource is the AWS ARN, ctx is map[string]string of condition keys.
+- internal/s3api/access.go centralises policy gating: principalForRequest(r) returns "*" for anonymous, otherwise the AuthInfo.Owner; bucketARN/objectARN build the canonical resource strings; requireAccess(w, r, b, action, arn) returns false (and writes 403) on policy denial. No-policy buckets bypass the gate so behaviour stays unchanged when no JSON policy is set.
 ---
 
 ## 2026-04-25 - US-001 (Parse AccessControlPolicy XML body)
@@ -57,4 +58,30 @@ Started: Sat Apr 25 16:10:14 MSK 2026
   - Principal "*" is a *string*, but {"AWS": "*"} is also valid — both must set Principal.All. Cover both shapes when extending.
   - Default-deny semantics need a sentinel: track an `allow` bool and only return Allow at the end if no Deny short-circuited; never return Allow inside the loop.
   - When US-003 wires this in: anonymous principal == "*" by convention; action strings should be "s3:Op" form (no service prefix, no ARN); resources must be full AWS ARNs ("arn:aws:s3:::bucket" for bucket actions, "arn:aws:s3:::bucket/key" for object actions).
+---
+
+## 2026-04-25 - US-003 (Wire policy evaluator into request middleware and object handlers)
+- New internal/s3api/access.go with helpers: principalForRequest, bucketARN, objectARN, loadBucketPolicy, requireAccess.
+- requireAccess loads the bucket's JSON policy via Meta.GetBucketPolicy. ErrNoSuchBucketPolicy → bypass (preserves current behaviour for un-policied buckets). Otherwise policy.Parse + policy.Evaluate; Allow proceeds, anything else writes 403 ErrAccessDenied.
+- Anonymous identity (auth.FromContext returning Anonymous=true or empty Owner) maps to principal "*" so it flows naturally into policy.Principal.matches.
+- handleObject in internal/s3api/server.go gates each object-level dispatch:
+  - PUT (with or without copy-source) → s3:PutObject on objectARN
+  - GET / HEAD → s3:GetObject
+  - DELETE → s3:DeleteObject (or s3:DeleteObjectVersion when ?versionId set)
+  - ?uploads POST (initiate), ?uploadId PUT (uploadPart), ?uploadId POST (complete) → s3:PutObject
+  - ?uploadId DELETE (abort) → s3:AbortMultipartUpload
+  - ?uploadId GET (listParts) → s3:ListMultipartUploadParts
+- ?acl, ?tagging, ?retention, ?legal-hold subresources keep their current pass-through behaviour (out of scope per AC).
+- Tests internal/s3api/policy_gate_test.go cover: no-policy passthrough, anonymous Allow grants GET, anonymous Deny on no-matching-Allow, explicit Deny override on a specific key, wrong-principal Allow denied, denied response body does not leak the object payload.
+- Files changed:
+  - internal/s3api/access.go (new)
+  - internal/s3api/server.go (gate calls in handleObject)
+  - internal/s3api/policy_gate_test.go (new)
+  - scripts/ralph/prd.json (passes: true)
+- Quality: go build ./... + go vet ./... + go test ./... all green.
+- **Learnings for future iterations:**
+  - Bucket policy doc is fetched by GetBucketPolicy + ErrNoSuchBucketPolicy sentinel. ALWAYS treat the sentinel as "skip the gate", not as an error — the existing un-policied buckets must keep working.
+  - Tests using newHarness(t) hit the s3api.Server directly (no auth wrap), so every request is anonymous. That makes anonymous-principal "*" tests trivial; for non-anonymous principals you'd need an extra wrapper that injects auth.WithAuth on the context. Out of scope here.
+  - When extending the gate to a new endpoint, the action string must match what the policy author would write (e.g. "s3:PutObject", "s3:AbortMultipartUpload"); the resource is built via bucketARN(name) or objectARN(name, key) — do not hand-format ARNs.
+  - The denied-body-leak test (read body after 403) is cheap insurance against a future regression where someone calls writeError after partial response writes.
 ---
