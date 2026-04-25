@@ -23,6 +23,7 @@ Started: Sat Apr 25 16:10:14 MSK 2026
 - SSE-S3 metadata (US-011): meta.Object.SSE + meta.MultipartUpload.SSE strings round-trip through both backends (cassandra ALTER objects ADD sse text + ALTER multipart_uploads ADD sse text). Bucket-level default uses the standard setBucketBlob/getBucketBlob pattern (table bucket_encryption, ErrNoSuchEncryption sentinel). internal/s3api/encryption.go centralises validateSSEAlgorithm (AES256 ok; aws:kms/aws:kms:dsse → 501 NotImplemented; else 400) and resolveSSE(r,b) — request header wins, bucket default fills in, no config => empty. resolveSSE runs BEFORE PutChunks so kms/bogus headers reject the request without writing chunks. SSE flows: putObject sets obj.SSE, initiateMultipart sets mu.SSE, uploadPart + completeMultipart echo header, completeMultipart copies mu.SSE to obj.SSE. GetObject/HeadObject emit x-amz-server-side-encryption when obj.SSE is non-empty. Errors live in errors.go: ErrNoSuchEncryption (404 ServerSideEncryptionConfigurationNotFoundError), ErrInvalidEncryptionAlgorithm (400), ErrKMSNotImplemented (501).
 - Subresource routing in handleObject is order-sensitive: the `q.Has(...)` checks run top-to-bottom and short-circuit; place new ?<sub> branches BEFORE the generic method switch (PUT/GET/HEAD/DELETE) so the generic path doesn't intercept them. Gate every object-level subresource via requireObjectAccess (not raw requireAccess) so policy + ACL still apply.
 - Bucket-level flags on the buckets row use the same LWT idiom as SetBucketVersioning/SetBucketACL: `UPDATE buckets SET <col>=? WHERE name=? IF EXISTS` with `ScanCAS(nil)` and SerialConsistency LocalSerial. Required so the write joins the same Paxos lineage as the original CreateBucket INSERT IF NOT EXISTS — non-LWT UPDATEs on that row leave Paxos stale and LOCAL_QUORUM reads observe the pre-update value. ScanCAS(nil) (not new(bool)/new(string)) — gocql ignores the destination when CAS applies.
+- Static-site / website mode (US-017): handleBucket GET intercepts when len(q)==0, calls serveWebsiteRoot which fetches IndexDocument.Suffix on hit (200) or ErrorDocument.Key on miss (404). serveWebsiteObject sets Content-Type/ETag/Last-Modified/Content-Length and streams the object body via Data.GetChunks — does NOT call writeError (the body is the document itself, not an XML <Error/> envelope). Pagination (prefix, delimiter, max-keys, continuation-token, start-after) is preserved by the len(q)==0 guard.
 ---
 
 ## 2026-04-25 - US-001 (Parse AccessControlPolicy XML body)
@@ -467,4 +468,31 @@ Started: Sat Apr 25 16:10:14 MSK 2026
   - AWS lets clients clear a bucket notification by PUT with an empty body OR by PUT with `<NotificationConfiguration/>`. The PRD AC explicitly required only the empty-body path — AC also says "at least one of TopicConfiguration/QueueConfiguration/LambdaFunctionConfiguration", so well-formed-but-empty is rejected with 400. If we later relax this, drop the Topic/Queue/Lambda count check and add an explicit DeleteBucketNotificationConfig branch on the empty XML envelope.
   - LambdaFunctionConfiguration is the modern AWS name; CloudFunctionConfiguration is the legacy alias still emitted by some SDKs. Validation accepts either; the persisted XML is the client's verbatim bytes so any consumer reading back gets exactly what was sent.
   - notificationStub uses `xml:",innerxml" []byte` so we keep the validation cheap (presence-of-children check) without committing to the full event/filter schema. Future enhancements (e.g. event-based dispatch) can swap in a richer struct without touching the meta layer.
+---
+
+## 2026-04-26 - US-017 (PutBucketWebsite / GetBucketWebsite / DeleteBucketWebsite + index document routing)
+- meta layer: ErrNoSuchWebsite sentinel + SetBucketWebsite/GetBucketWebsite/DeleteBucketWebsite on meta.Store (memory + cassandra). Cassandra adds bucket_website (bucket_id PK, config blob) to tableDDL. Both backends reuse setBucketBlob/getBucketBlob/deleteBucketBlob.
+- internal/s3api/website.go: putBucketWebsite/getBucketWebsite/deleteBucketWebsite + serveWebsiteRoot. Body limit 1<<20. Validation: empty body 400, malformed XML 400, IndexDocument required when no RedirectAllRequestsTo, IndexDocument.Suffix may not contain '/'. websiteConfiguration uses innerxml []byte for RoutingRules so we don't commit to the full XML schema (same trick as notificationStub).
+- ErrNoSuchWebsiteConfig added (404 NoSuchWebsiteConfiguration).
+- ?website wired into handleBucket (PUT/GET/DELETE) BEFORE the generic switch.
+- handleBucket GET (key=='', no query params, len(q)==0) calls serveWebsiteRoot first: if website cfg present, GetObject(IndexDocument.Suffix); on hit serve via serveWebsiteObject (200), on miss fall through to serveWebsiteError. serveWebsiteError fetches ErrorDocument.Key and serves with 404, else writes ErrNoSuchKey. When no website cfg, returns false → existing listObjects path runs.
+- Tests in internal/s3api/website_test.go: CRUD round-trip, malformed/empty/InvalidArgument cases, index serving (200 + Content-Type passthrough), error-doc fallback (404 body), no-index-no-error (404 NoSuchKey), no-config falls through to ListBucketResult, missing bucket 404.
+- Files changed:
+  - internal/meta/store.go (sentinel + iface)
+  - internal/meta/memory/store.go (website map + 3 methods)
+  - internal/meta/cassandra/schema.go (bucket_website table)
+  - internal/meta/cassandra/store.go (3 methods)
+  - internal/s3api/errors.go (ErrNoSuchWebsiteConfig)
+  - internal/s3api/website.go (new)
+  - internal/s3api/server.go (?website route + GET intercept)
+  - internal/s3api/website_test.go (new)
+  - scripts/ralph/prd.json (passes: true; notes)
+  - scripts/ralph/progress.txt
+- Quality: go build ./... + go vet ./... + go test ./... all green.
+- **Learnings for future iterations:**
+  - GET intercept for static-site index serving must guard on `len(q) == 0` so listObjects pagination params (prefix/delimiter/continuation-token/start-after/max-keys) keep their listing behaviour. Don't accidentally route every GET on /<bucket>/ through the website fallback.
+  - serveWebsiteRoot returns bool: true means "request handled, do not fall through". This pattern keeps the website branch self-contained and lets the listObjects path remain untouched when no website cfg is set.
+  - splitPath behaviour: GET /bkt/ produces (bucket=bkt, key=""), so the website index path is reachable via the bucket handler — no separate routing rule needed.
+  - The website-mode 404 body is the ErrorDocument's content (text/html), NOT an XML <Error/> envelope. Writers must NOT call writeError for the error-doc path; serveWebsiteObject sets headers + status itself.
+  - When a future story (e.g. RedirectAllRequestsTo) needs to act differently, branch off in serveWebsiteRoot before the IndexDocument lookup; the parsed *websiteConfiguration is already in hand.
 ---

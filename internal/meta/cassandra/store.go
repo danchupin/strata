@@ -1424,6 +1424,16 @@ func (s *Store) DeleteBucketNotificationConfig(ctx context.Context, bucketID uui
 	return s.deleteBucketBlob(ctx, "bucket_notification", bucketID)
 }
 
+func (s *Store) SetBucketWebsite(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(ctx, "bucket_website", "config", bucketID, blob)
+}
+func (s *Store) GetBucketWebsite(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(ctx, "bucket_website", "config", bucketID, meta.ErrNoSuchWebsite)
+}
+func (s *Store) DeleteBucketWebsite(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(ctx, "bucket_website", bucketID)
+}
+
 func gocqlUUID(u uuid.UUID) gocql.UUID {
 	var g gocql.UUID
 	copy(g[:], u[:])

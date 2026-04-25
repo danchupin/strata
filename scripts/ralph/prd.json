@@ -290,8 +290,8 @@
         "go test ./internal/s3api/... passes"
       ],
       "priority": 17,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "meta.Store grew SetBucketWebsite/GetBucketWebsite/DeleteBucketWebsite + ErrNoSuchWebsite sentinel; both backends use the standard setBucketBlob/getBucketBlob/deleteBucketBlob helpers (cassandra: new bucket_website table). internal/s3api/website.go parses <WebsiteConfiguration> with IndexDocument/ErrorDocument/RedirectAllRequestsTo and rejects bodies missing IndexDocument (when not redirect-all) or with a Suffix containing '/'. ?website routed in handleBucket. handleBucket GET with no query params calls serveWebsiteRoot: when website is configured, fetches IndexDocument.Suffix → 200 if present, else falls back to ErrorDocument.Key with 404, else NoSuchKey. Without website config, listObjects runs as before. ErrNoSuchWebsiteConfig (404 NoSuchWebsiteConfiguration) returned by GET ?website on un-configured buckets."
     },
     {
       "id": "US-018",

@@ -27,6 +27,7 @@ type Store struct {
 	encryption   map[uuid.UUID][]byte
 	objectLock   map[uuid.UUID][]byte
 	notification map[uuid.UUID][]byte
+	website      map[uuid.UUID][]byte
 	bucketGrants map[uuid.UUID][]meta.Grant
 	objectGrants map[grantKey][]meta.Grant
 	iamUsers     map[string]*meta.IAMUser
@@ -59,6 +60,7 @@ func New() *Store {
 		encryption:   make(map[uuid.UUID][]byte),
 		objectLock:   make(map[uuid.UUID][]byte),
 		notification: make(map[uuid.UUID][]byte),
+		website:      make(map[uuid.UUID][]byte),
 		bucketGrants: make(map[uuid.UUID][]meta.Grant),
 		objectGrants: make(map[grantKey][]meta.Grant),
 		iamUsers:     make(map[string]*meta.IAMUser),
@@ -714,6 +716,16 @@ func (s *Store) GetBucketNotificationConfig(ctx context.Context, bucketID uuid.U
 }
 func (s *Store) DeleteBucketNotificationConfig(ctx context.Context, bucketID uuid.UUID) error {
 	return s.deleteBucketBlob(s.notification, bucketID)
+}
+
+func (s *Store) SetBucketWebsite(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(s.website, bucketID, blob)
+}
+func (s *Store) GetBucketWebsite(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(s.website, bucketID, meta.ErrNoSuchWebsite)
+}
+func (s *Store) DeleteBucketWebsite(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(s.website, bucketID)
 }
 
 func (s *Store) CreateMultipartUpload(ctx context.Context, mu *meta.MultipartUpload) error {

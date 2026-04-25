@@ -199,6 +199,19 @@ func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request, bucket str
 			return
 		}
 	}
+	if q.Has("website") {
+		switch r.Method {
+		case http.MethodGet:
+			s.getBucketWebsite(w, r, bucket)
+			return
+		case http.MethodPut:
+			s.putBucketWebsite(w, r, bucket)
+			return
+		case http.MethodDelete:
+			s.deleteBucketWebsite(w, r, bucket)
+			return
+		}
+	}
 	if q.Has("acl") {
 		switch r.Method {
 		case http.MethodGet:
@@ -282,6 +295,12 @@ func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request, bucket str
 		}
 		w.WriteHeader(http.StatusOK)
 	case http.MethodGet:
+		if len(q) == 0 {
+			b, err := s.Meta.GetBucket(r.Context(), bucket)
+			if err == nil && s.serveWebsiteRoot(w, r, b) {
+				return
+			}
+		}
 		s.listObjects(w, r, bucket)
 	default:
 		writeError(w, r, ErrNotImplemented)

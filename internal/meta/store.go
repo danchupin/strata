@@ -34,6 +34,7 @@ var (
 	ErrNoSuchEncryption        = errors.New("no encryption configuration for bucket")
 	ErrNoSuchObjectLockConfig  = errors.New("no object lock configuration for bucket")
 	ErrNoSuchNotification      = errors.New("no notification configuration for bucket")
+	ErrNoSuchWebsite           = errors.New("no website configuration for bucket")
 	ErrNoSuchGrants            = errors.New("no acl grants persisted for resource")
 	ErrIAMUserNotFound         = errors.New("iam user not found")
 	ErrIAMUserAlreadyExists    = errors.New("iam user already exists")
@@ -228,6 +229,10 @@ type Store interface {
 	SetBucketNotificationConfig(ctx context.Context, bucketID uuid.UUID, xmlBlob []byte) error
 	GetBucketNotificationConfig(ctx context.Context, bucketID uuid.UUID) ([]byte, error)
 	DeleteBucketNotificationConfig(ctx context.Context, bucketID uuid.UUID) error
+
+	SetBucketWebsite(ctx context.Context, bucketID uuid.UUID, xmlBlob []byte) error
+	GetBucketWebsite(ctx context.Context, bucketID uuid.UUID) ([]byte, error)
+	DeleteBucketWebsite(ctx context.Context, bucketID uuid.UUID) error
 
 	CreateIAMUser(ctx context.Context, u *IAMUser) error
 	GetIAMUser(ctx context.Context, userName string) (*IAMUser, error)
