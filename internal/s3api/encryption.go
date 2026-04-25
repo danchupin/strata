@@ -1,6 +1,8 @@
 package s3api
 
 import (
+	"crypto/md5"
+	"encoding/base64"
 	"encoding/xml"
 	"errors"
 	"io"
@@ -10,6 +12,78 @@ import (
 )
 
 const sseAlgorithmAES256 = "AES256"
+
+const (
+	hdrSSECAlgorithm = "x-amz-server-side-encryption-customer-algorithm"
+	hdrSSECKey       = "x-amz-server-side-encryption-customer-key"
+	hdrSSECKeyMD5    = "x-amz-server-side-encryption-customer-key-MD5"
+
+	hdrCopySSECAlgorithm = "x-amz-copy-source-server-side-encryption-customer-algorithm"
+	hdrCopySSECKey       = "x-amz-copy-source-server-side-encryption-customer-key"
+	hdrCopySSECKeyMD5    = "x-amz-copy-source-server-side-encryption-customer-key-MD5"
+)
+
+// ssecHeaders captures parsed and validated SSE-C customer key headers. Empty
+// when the request did not supply the customer-key triple.
+type ssecHeaders struct {
+	Algorithm string
+	KeyMD5    string
+	Present   bool
+}
+
+// parseSSECHeaders reads the regular x-amz-server-side-encryption-customer-*
+// triple. Returns (parsed, apiErr, ok). When ok=false the caller must stop and
+// write apiErr. A request with no SSE-C headers returns Present=false, ok=true.
+func parseSSECHeaders(r *http.Request) (ssecHeaders, APIError, bool) {
+	return parseSSECTriple(r, hdrSSECAlgorithm, hdrSSECKey, hdrSSECKeyMD5)
+}
+
+// parseCopySourceSSECHeaders reads the x-amz-copy-source-server-side-encryption-customer-*
+// mirror, used by CopyObject for an SSE-C-encrypted source.
+func parseCopySourceSSECHeaders(r *http.Request) (ssecHeaders, APIError, bool) {
+	return parseSSECTriple(r, hdrCopySSECAlgorithm, hdrCopySSECKey, hdrCopySSECKeyMD5)
+}
+
+func parseSSECTriple(r *http.Request, algoHdr, keyHdr, keyMD5Hdr string) (ssecHeaders, APIError, bool) {
+	algo := r.Header.Get(algoHdr)
+	rawKey := r.Header.Get(keyHdr)
+	keyMD5 := r.Header.Get(keyMD5Hdr)
+	if algo == "" && rawKey == "" && keyMD5 == "" {
+		return ssecHeaders{}, APIError{}, true
+	}
+	if algo == "" || rawKey == "" || keyMD5 == "" {
+		return ssecHeaders{}, ErrInvalidRequest, false
+	}
+	if algo != sseAlgorithmAES256 {
+		return ssecHeaders{}, ErrInvalidEncryptionAlgorithm, false
+	}
+	keyBytes, err := base64.StdEncoding.DecodeString(rawKey)
+	if err != nil || len(keyBytes) != 32 {
+		return ssecHeaders{}, ErrInvalidArgument, false
+	}
+	expected := md5.Sum(keyBytes)
+	if base64.StdEncoding.EncodeToString(expected[:]) != keyMD5 {
+		return ssecHeaders{}, ErrInvalidDigest, false
+	}
+	return ssecHeaders{Algorithm: algo, KeyMD5: keyMD5, Present: true}, APIError{}, true
+}
+
+// requireSSECMatch enforces that a GetObject/HeadObject request supplies SSE-C
+// headers matching the persisted KeyMD5 on the stored object. Caller invokes
+// only when the object actually carries SSE-C metadata.
+func requireSSECMatch(r *http.Request, storedKeyMD5 string) (APIError, bool) {
+	hdrs, apiErr, ok := parseSSECHeaders(r)
+	if !ok {
+		return apiErr, false
+	}
+	if !hdrs.Present {
+		return ErrSSECRequired, false
+	}
+	if hdrs.KeyMD5 != storedKeyMD5 {
+		return ErrSSECKeyMismatch, false
+	}
+	return APIError{}, true
+}
 
 type sseRule struct {
 	XMLName xml.Name `xml:"Rule"`

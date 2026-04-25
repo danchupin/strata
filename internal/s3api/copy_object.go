@@ -56,6 +56,27 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, dstBucket *m
 		return
 	}
 
+	srcSSEC, srcSSECErr, srcSSECOK := parseCopySourceSSECHeaders(r)
+	if !srcSSECOK {
+		writeError(w, r, srcSSECErr)
+		return
+	}
+	if srcObj.SSECKeyMD5 != "" {
+		if !srcSSEC.Present {
+			writeError(w, r, ErrSSECRequired)
+			return
+		}
+		if srcSSEC.KeyMD5 != srcObj.SSECKeyMD5 {
+			writeError(w, r, ErrSSECKeyMismatch)
+			return
+		}
+	}
+	dstSSEC, dstSSECErr, dstSSECOK := parseSSECHeaders(r)
+	if !dstSSECOK {
+		writeError(w, r, dstSSECErr)
+		return
+	}
+
 	metadataDirective := strings.ToUpper(r.Header.Get("x-amz-metadata-directive"))
 	if metadataDirective == "" {
 		metadataDirective = "COPY"
@@ -104,6 +125,9 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, dstBucket *m
 		StorageClass: m.Class,
 		Mtime:        time.Now().UTC(),
 		Manifest:     m,
+	}
+	if dstSSEC.Present {
+		obj.SSECKeyMD5 = dstSSEC.KeyMD5
 	}
 
 	if metadataDirective == "REPLACE" {

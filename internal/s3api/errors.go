@@ -39,6 +39,10 @@ var (
 	ErrNoSuchEncryption             = APIError{Code: "ServerSideEncryptionConfigurationNotFoundError", Message: "The server side encryption configuration was not found", Status: http.StatusNotFound}
 	ErrInvalidEncryptionAlgorithm   = APIError{Code: "InvalidArgument", Message: "The encryption algorithm specified is not supported", Status: http.StatusBadRequest}
 	ErrKMSNotImplemented            = APIError{Code: "NotImplemented", Message: "aws:kms server-side encryption is not supported", Status: http.StatusNotImplemented}
+	ErrInvalidRequest               = APIError{Code: "InvalidRequest", Message: "The request is invalid", Status: http.StatusBadRequest}
+	ErrInvalidDigest                = APIError{Code: "InvalidDigest", Message: "The provided digest does not match the supplied data", Status: http.StatusBadRequest}
+	ErrSSECRequired                 = APIError{Code: "InvalidRequest", Message: "The object was stored using server-side encryption with a customer-provided key; matching SSE-C headers are required", Status: http.StatusBadRequest}
+	ErrSSECKeyMismatch              = APIError{Code: "AccessDenied", Message: "The provided customer key does not match the key the object was encrypted with", Status: http.StatusBadRequest}
 	ErrCORSNotEnabled               = APIError{Code: "CORSResponse", Message: "CORS is not enabled for this bucket", Status: http.StatusForbidden}
 	ErrMalformedXML        = APIError{Code: "MalformedXML", Message: "The XML you provided was not well-formed", Status: http.StatusBadRequest}
 	ErrMalformedACLError   = APIError{Code: "MalformedACLError", Message: "The XML you provided was not well-formed or did not validate against our published schema", Status: http.StatusBadRequest}

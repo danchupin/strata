@@ -104,6 +104,7 @@ type Object struct {
 	LegalHold      bool
 	Checksums      map[string]string
 	SSE            string
+	SSECKeyMD5     string
 }
 
 type ListOptions struct {

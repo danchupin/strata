@@ -478,10 +478,20 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		writeError(w, r, ErrInvalidArgument)
 		return
 	}
-	sse, sseErr, sseOK := s.resolveSSE(r, b)
-	if !sseOK {
-		writeError(w, r, sseErr)
+	ssec, ssecErr, ssecOK := parseSSECHeaders(r)
+	if !ssecOK {
+		writeError(w, r, ssecErr)
 		return
+	}
+	var sse string
+	if !ssec.Present {
+		var sseErr APIError
+		var sseOK bool
+		sse, sseErr, sseOK = s.resolveSSE(r, b)
+		if !sseOK {
+			writeError(w, r, sseErr)
+			return
+		}
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
@@ -516,6 +526,9 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		Checksums:    sums,
 		SSE:          sse,
 	}
+	if ssec.Present {
+		obj.SSECKeyMD5 = ssec.KeyMD5
+	}
 	if rm := r.Header.Get("x-amz-object-lock-mode"); rm != "" {
 		obj.RetainMode = rm
 	}
@@ -549,6 +562,12 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		mapMetaErr(w, r, err)
 		return
 	}
+	if o.SSECKeyMD5 != "" {
+		if apiErr, ok := requireSSECMatch(r, o.SSECKeyMD5); !ok {
+			writeError(w, r, apiErr)
+			return
+		}
+	}
 	if status, ok := checkConditional(r.Header, `"`+o.ETag+`"`, o.Mtime); !ok {
 		w.Header().Set("ETag", `"`+o.ETag+`"`)
 		w.Header().Set("Last-Modified", o.Mtime.UTC().Format(http.TimeFormat))
@@ -562,6 +581,10 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	w.Header().Set("Accept-Ranges", "bytes")
 	if o.SSE != "" {
 		w.Header().Set("x-amz-server-side-encryption", o.SSE)
+	}
+	if o.SSECKeyMD5 != "" {
+		w.Header().Set(hdrSSECAlgorithm, sseAlgorithmAES256)
+		w.Header().Set(hdrSSECKeyMD5, o.SSECKeyMD5)
 	}
 	writeChecksumHeaders(w.Header(), o.Checksums)
 	if len(o.Tags) > 0 {

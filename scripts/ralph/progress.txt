@@ -330,3 +330,32 @@ Started: Sat Apr 25 16:10:14 MSK 2026
   - When extending Object/MultipartUpload struct fields (SSE here, future SSEC fields in US-012, RestoreStatus in US-014), the cassandra cursor selects in ListObjects/ListObjectVersions intentionally do NOT need to be extended unless the listing payload exposes the new field — keep them lean.
   - aws:kms:dsse is the dual-layer KMS variant; it shows up in newer SDKs alongside aws:kms. Reject both to the same NotImplemented code so the client error message is consistent regardless of SDK age.
 ---
+
+## 2026-04-25 - US-012 (SSE-C customer-key headers)
+- meta.Object.SSECKeyMD5 string added; cassandra schema appended additive ALTER objects ADD ssec_key_md5 text; PutObject INSERT + GetObject SELECT extended in both versionID branches. Memory backend round-trips via existing shallow-copy (no code change required).
+- internal/s3api/encryption.go grew parseSSECHeaders + parseCopySourceSSECHeaders + requireSSECMatch + parseSSECTriple. Validation: triple all-or-none (partial → 400 InvalidRequest), algo == AES256 (else 400 InvalidArgument), base64 key decodes to exactly 32 bytes (else 400 InvalidArgument), md5(rawKey) base64 == headerMD5 (else 400 InvalidDigest).
+- internal/s3api/server.go putObject: parseSSECHeaders BEFORE PutChunks, skip resolveSSE bucket-default lookup when SSE-C is present (mutually exclusive), persist obj.SSECKeyMD5 on success.
+- internal/s3api/server.go getObject: when o.SSECKeyMD5 != "" call requireSSECMatch (missing → ErrSSECRequired 400; mismatch → ErrSSECKeyMismatch 400 AccessDenied). On success emit x-amz-server-side-encryption-customer-algorithm + -key-MD5 echo headers.
+- internal/s3api/copy_object.go: parseCopySourceSSECHeaders required when source has SSECKeyMD5 (missing → 400 InvalidRequest, mismatch → 400 AccessDenied); parseSSECHeaders for dest, dst.SSECKeyMD5 set when present.
+- New errors in errors.go: ErrInvalidRequest (400 InvalidRequest), ErrInvalidDigest (400 InvalidDigest), ErrSSECRequired (400 InvalidRequest), ErrSSECKeyMismatch (400 AccessDenied — status 400 per AC, code AccessDenied is the AWS norm for SSE-C key mismatch).
+- Tests in internal/s3api/sse_c_test.go: TestSSECPutGetRoundTrip (PUT+GET+HEAD echo of headers + body), TestSSECGetMissingKey (400 InvalidRequest), TestSSECPutWrongMD5 (400 InvalidDigest + follow-up 404), TestSSECGetWrongMD5 (400 AccessDenied), TestSSECPutInvalidKeyLength (400 InvalidArgument), TestSSECPutBadAlgorithm (400), TestSSECPartialHeadersRejected (400 InvalidRequest), TestSSECCopyObjectMirrorHeaders (positive copy with source headers, missing source headers reject).
+- Files changed:
+  - internal/meta/store.go (Object.SSECKeyMD5)
+  - internal/meta/cassandra/schema.go (ALTER objects ADD ssec_key_md5)
+  - internal/meta/cassandra/store.go (PutObject INSERT + GetObject SELECT round-trip)
+  - internal/s3api/encryption.go (SSE-C parsers + matcher)
+  - internal/s3api/errors.go (4 new APIErrors)
+  - internal/s3api/server.go (putObject + getObject SSE-C plumbing)
+  - internal/s3api/copy_object.go (copy-source + dest SSE-C plumbing)
+  - internal/s3api/sse_c_test.go (new)
+  - scripts/ralph/prd.json (passes: true; notes)
+  - scripts/ralph/progress.txt
+- Quality: go build ./... + go vet ./... + go test ./... all green.
+- **Learnings for future iterations:**
+  - SSE-C and SSE-S3 are mutually exclusive on the same PUT — when SSE-C headers are present, SKIP resolveSSE so the bucket-default doesn't double-apply. Real AWS rejects the combo with 400; we silently prefer SSE-C, which is good enough for the s3-tests subset.
+  - The customer key itself is NEVER persisted — only its base64-encoded MD5 lands in obj.SSECKeyMD5. Anyone reading the row cannot decrypt; on GET the client must re-supply the raw key, we re-derive its MD5, and compare. (We don't actually use the key to en/decrypt because Strata stores plaintext today.)
+  - The "GetObject mismatched MD5 → 400 AccessDenied" status/code combo is unusual (AWS uses 403); the AC pins 400. Keep the status field separate from the code field in APIError so this kind of off-AWS mapping is one-line.
+  - For per-request SSE-C parsing, validate the triple ONCE at the top of putObject/getObject/copyObject — don't re-read individual headers later, because partial-triple cases can sneak through.
+  - When extending Object/MultipartUpload struct fields (SSECKeyMD5 here), the cassandra cursor SELECTs in ListObjects/ListObjectVersions still don't need to grow — listing does not expose SSE-C metadata. Keep the listing reads lean.
+  - For multipart uploads, SSE-C would need to be remembered on MultipartUpload across UploadPart/Complete (mirroring SSE field). Not in scope for US-012 AC; revisit when s3-tests adds multipart-SSE-C coverage.
+---
