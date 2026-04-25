@@ -313,7 +313,7 @@ func (s *Server) handleObject(w http.ResponseWriter, r *http.Request, bucket, ke
 	q := r.URL.Query()
 
 	if q.Has("uploads") && r.Method == http.MethodPost {
-		if !s.requireAccess(w, r, b, "s3:PutObject", objectARN(bucket, key)) {
+		if !s.requireObjectAccess(w, r, b, key, "s3:PutObject") {
 			return
 		}
 		s.initiateMultipart(w, r, b, key)
@@ -366,26 +366,26 @@ func (s *Server) handleObject(w http.ResponseWriter, r *http.Request, bucket, ke
 		switch r.Method {
 		case http.MethodPut:
 			if q.Get("partNumber") != "" {
-				if !s.requireAccess(w, r, b, "s3:PutObject", objectARN(bucket, key)) {
+				if !s.requireObjectAccess(w, r, b, key, "s3:PutObject") {
 					return
 				}
 				s.uploadPart(w, r, b, key, uploadID)
 				return
 			}
 		case http.MethodPost:
-			if !s.requireAccess(w, r, b, "s3:PutObject", objectARN(bucket, key)) {
+			if !s.requireObjectAccess(w, r, b, key, "s3:PutObject") {
 				return
 			}
 			s.completeMultipart(w, r, b, key, uploadID)
 			return
 		case http.MethodDelete:
-			if !s.requireAccess(w, r, b, "s3:AbortMultipartUpload", objectARN(bucket, key)) {
+			if !s.requireObjectAccess(w, r, b, key, "s3:AbortMultipartUpload") {
 				return
 			}
 			s.abortMultipart(w, r, b, key, uploadID)
 			return
 		case http.MethodGet:
-			if !s.requireAccess(w, r, b, "s3:ListMultipartUploadParts", objectARN(bucket, key)) {
+			if !s.requireObjectAccess(w, r, b, key, "s3:ListMultipartUploadParts") {
 				return
 			}
 			s.listParts(w, r, b, key, uploadID)
@@ -396,23 +396,23 @@ func (s *Server) handleObject(w http.ResponseWriter, r *http.Request, bucket, ke
 	switch r.Method {
 	case http.MethodPut:
 		if r.Header.Get("x-amz-copy-source") != "" {
-			if !s.requireAccess(w, r, b, "s3:PutObject", objectARN(bucket, key)) {
+			if !s.requireObjectAccess(w, r, b, key, "s3:PutObject") {
 				return
 			}
 			s.copyObject(w, r, b, key)
 			return
 		}
-		if !s.requireAccess(w, r, b, "s3:PutObject", objectARN(bucket, key)) {
+		if !s.requireObjectAccess(w, r, b, key, "s3:PutObject") {
 			return
 		}
 		s.putObject(w, r, b, key)
 	case http.MethodGet:
-		if !s.requireAccess(w, r, b, "s3:GetObject", objectARN(bucket, key)) {
+		if !s.requireObjectAccess(w, r, b, key, "s3:GetObject") {
 			return
 		}
 		s.getObject(w, r, b, key, true)
 	case http.MethodHead:
-		if !s.requireAccess(w, r, b, "s3:GetObject", objectARN(bucket, key)) {
+		if !s.requireObjectAccess(w, r, b, key, "s3:GetObject") {
 			return
 		}
 		s.getObject(w, r, b, key, false)
@@ -421,7 +421,7 @@ func (s *Server) handleObject(w http.ResponseWriter, r *http.Request, bucket, ke
 		if r.URL.Query().Get("versionId") != "" {
 			action = "s3:DeleteObjectVersion"
 		}
-		if !s.requireAccess(w, r, b, action, objectARN(bucket, key)) {
+		if !s.requireObjectAccess(w, r, b, key, action) {
 			return
 		}
 		s.deleteObject(w, r, b, key)

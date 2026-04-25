@@ -68,8 +68,8 @@
         "go test ./internal/s3api/... passes"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "internal/s3api/access.go grew requireACL + cannedAllows + grantsAllow + granteeMatches helpers; requireObjectAccess wraps requireAccess (policy) then requireACL (canned + persisted grants). Owner FC: info.Owner==b.Owner short-circuits (anonymous-owned bucket + anonymous request still passes since both Owner=='anonymous'). Per-object grants override bucket ACL on s3:GetObject only. testutil_test.go gained X-Test-Principal injection so tests can simulate owner/alt principals."
     },
     {
       "id": "US-005",

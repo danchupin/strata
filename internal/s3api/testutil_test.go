@@ -8,10 +8,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/danchupin/strata/internal/auth"
 	datamem "github.com/danchupin/strata/internal/data/memory"
 	metamem "github.com/danchupin/strata/internal/meta/memory"
 	"github.com/danchupin/strata/internal/s3api"
 )
+
+const testPrincipalHeader = "X-Test-Principal"
 
 type testHarness struct {
 	t  *testing.T
@@ -22,7 +25,14 @@ func newHarness(t *testing.T) *testHarness {
 	t.Helper()
 	api := s3api.New(datamem.New(), metamem.New())
 	api.Region = "default"
-	ts := httptest.NewServer(api)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if p := r.Header.Get(testPrincipalHeader); p != "" {
+			ctx := auth.WithAuth(r.Context(), &auth.AuthInfo{Owner: p, AccessKey: p})
+			r = r.WithContext(ctx)
+		}
+		api.ServeHTTP(w, r)
+	})
+	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 	return &testHarness{t: t, ts: ts}
 }

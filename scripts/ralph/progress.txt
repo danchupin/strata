@@ -10,6 +10,8 @@ Started: Sat Apr 25 16:10:14 MSK 2026
 - Tests live in internal/s3api as a black-box `package s3api_test` and use `newHarness(t)` from testutil_test.go.
 - IAM-style JSON policy types live in internal/auth/policy. Use policy.Evaluate(doc, principal, action, resource, ctx) where principal is "*" for anonymous, action is e.g. "s3:GetObject", resource is the AWS ARN, ctx is map[string]string of condition keys.
 - internal/s3api/access.go centralises policy gating: principalForRequest(r) returns "*" for anonymous, otherwise the AuthInfo.Owner; bucketARN/objectARN build the canonical resource strings; requireAccess(w, r, b, action, arn) returns false (and writes 403) on policy denial. No-policy buckets bypass the gate so behaviour stays unchanged when no JSON policy is set.
+- ACL gating lives in the same access.go: requireObjectAccess(w, r, b, key, action) wraps requireAccess (policy) then requireACL (canned + persisted grants). Use it for every object-level dispatch. Owner FC = info.Owner == b.Owner short-circuits both gates; per-object grants override bucket ACL on s3:GetObject only.
+- Test-only auth injection: testutil_test.go wraps the api with an X-Test-Principal header sniffer that builds &auth.AuthInfo{Owner: p}. Tests use h.doString(method, path, body, "X-Test-Principal", "owner"|"alt") to simulate non-anonymous callers. Omit the header for anonymous requests.
 ---
 
 ## 2026-04-25 - US-001 (Parse AccessControlPolicy XML body)
@@ -84,4 +86,28 @@ Started: Sat Apr 25 16:10:14 MSK 2026
   - Tests using newHarness(t) hit the s3api.Server directly (no auth wrap), so every request is anonymous. That makes anonymous-principal "*" tests trivial; for non-anonymous principals you'd need an extra wrapper that injects auth.WithAuth on the context. Out of scope here.
   - When extending the gate to a new endpoint, the action string must match what the policy author would write (e.g. "s3:PutObject", "s3:AbortMultipartUpload"); the resource is built via bucketARN(name) or objectARN(name, key) — do not hand-format ARNs.
   - The denied-body-leak test (read body after 403) is cheap insurance against a future regression where someone calls writeError after partial response writes.
+---
+
+## 2026-04-25 - US-004 (Enforce bucket and object ACL grants on object-level requests)
+- Added requireACL + requireObjectAccess to internal/s3api/access.go. requireObjectAccess runs the policy gate first (US-003) and then the ACL gate; explicit policy Deny short-circuits before ACL.
+- ACL gate: owner FC (info.Owner == b.Owner) short-circuits. For s3:GetObject, persisted per-object grants override bucket ACL when present (per AC). Otherwise falls through to bucket grants (SetBucketGrants) then canned ACL.
+- cannedAllows: private→none; public-read→READ; public-read-write→READ+WRITE; authenticated-read→READ for non-anon. cannedAllows operates per-action with action→permission mapping (s3:GetObject/ListMultipartUploadParts→READ; s3:PutObject/DeleteObject/DeleteObjectVersion/AbortMultipartUpload→WRITE).
+- grantsAllow + granteeMatches: AllUsers matches anyone; AuthenticatedUsers matches non-anon; CanonicalUser matches by ID==info.Owner; AmazonCustomerByEmail never matches (no email tracked). FULL_CONTROL covers any permission.
+- Wired requireObjectAccess at all object-level dispatch sites in handleObject (PUT/GET/HEAD/DELETE, copy, multipart initiate/uploadPart/complete/abort/listParts), replacing the single requireAccess calls from US-003. ?acl/?tagging/?retention/?legal-hold subresources unchanged (out of scope).
+- testutil_test.go: harness wraps the api with a header sniffer; X-Test-Principal: <owner> injects auth.WithAuth(&auth.AuthInfo{Owner:p}); omitted == anonymous.
+- Tests in new internal/s3api/acl_gate_test.go: 28-cell canned×method×principal matrix; per-object grants override bucket ACL on read; explicit policy Deny overrides ACL Allow; 403 does not leak object body.
+- Files changed:
+  - internal/s3api/access.go (extend with ACL helpers + requireObjectAccess)
+  - internal/s3api/server.go (handleObject uses requireObjectAccess)
+  - internal/s3api/testutil_test.go (X-Test-Principal injection)
+  - internal/s3api/acl_gate_test.go (new)
+  - scripts/ralph/prd.json (passes: true; notes)
+  - scripts/ralph/progress.txt
+- Quality: go build ./... + go vet ./... + go test ./... all green.
+- **Learnings for future iterations:**
+  - The auth context default for unauthenticated requests is &AuthInfo{Anonymous: true, Owner: "anonymous"}; do NOT guard owner-FC checks on !info.Anonymous or anonymous-owned buckets stop accepting requests from anonymous principals (breaks current US-003 NoPolicyPasses test).
+  - Per AC, per-object grants override bucket ACL on reads only; bucket-level persisted grants (SetBucketGrants) override canned ACL on every action — both must be checked before the canned fallback.
+  - AmazonCustomerByEmail is parsed and persisted (US-001) but cannot be matched by the gate because we don't store the requester's email — keep behaviour as never-match until we add email lookup.
+  - When extending the gate to a new endpoint, always go through requireObjectAccess (not raw requireAccess) so ACLs are enforced; pass action verbatim ("s3:PutObject" etc.) to keep policy authors' expectations.
+  - For non-anonymous principal tests, set X-Test-Principal in the request headers; the harness injects auth.WithAuth so the gate sees a real Owner.
 ---
