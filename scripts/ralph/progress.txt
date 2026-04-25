@@ -1,0 +1,38 @@
+# Ralph Progress Log
+Started: Sat Apr 25 16:10:14 MSK 2026
+
+## Codebase Patterns
+- meta.Store is the single interface every storage backend (memory + cassandra) must implement; adding a method requires updating both backends or builds break (compiler enforces).
+- Bucket-scoped blobs use the setBucketBlob/getBucketBlob/deleteBucketBlob helpers in both backends — model new bucket-level resources (grants, encryption, website, …) on this pattern.
+- Cassandra cannot UPDATE the buckets table by `id` (PK is `name`); for bucket_id-keyed blobs add a separate table keyed by bucket_id, not a column on `buckets`.
+- Cassandra schema evolution: append CREATE TABLE IF NOT EXISTS to tableDDL; append additive `ALTER TABLE ... ADD` to alterStatements. isColumnAlreadyExists handles re-runs.
+- s3api handlers accept XML bodies with io.ReadAll(io.LimitReader(r.Body, 1<<20)).
+- Tests live in internal/s3api as a black-box `package s3api_test` and use `newHarness(t)` from testutil_test.go.
+---
+
+## 2026-04-25 - US-001 (Parse AccessControlPolicy XML body)
+- Added `meta.Grant` type and `ErrNoSuchGrants` to internal/meta/store.go.
+- Extended meta.Store interface with SetBucketGrants/GetBucketGrants/DeleteBucketGrants and SetObjectGrants/GetObjectGrants.
+- Memory store: bucketGrants map[uuid.UUID][]Grant, objectGrants map[grantKey][]Grant keyed by (bucketID,key,versionID).
+- Cassandra: new `bucket_acl_grants` table; `grants blob` column on objects via additive ALTER. Grants encoded as JSON blob.
+- Rewrote internal/s3api/acl.go: parseACLBody validates grantee Type ∈ {CanonicalUser,Group,AmazonCustomerByEmail}, Permission ∈ {FULL_CONTROL,READ,WRITE,READ_ACP,WRITE_ACP}, Group URI in known set; CanonicalUser requires ID; AmazonCustomerByEmail requires Email. Returns 400 MalformedACLError on any failure.
+- putBucketACL accepts canned header AND XML body (mixed) — header goes to SetBucketACL, body to SetBucketGrants.
+- getBucketACL/getObjectACL prefer persisted grants, fall back to canned-derived grants.
+- Added ErrMalformedACLError to errors.go.
+- New tests: internal/s3api/acl_test.go covers round-trip, mixed header+body, malformed XML 400, unknown grantee type 400, unknown permission 400, fallback to canned.
+- Files changed:
+  - internal/meta/store.go
+  - internal/meta/memory/store.go
+  - internal/meta/cassandra/store.go
+  - internal/meta/cassandra/codec.go
+  - internal/meta/cassandra/schema.go
+  - internal/s3api/acl.go (rewrite)
+  - internal/s3api/acl_test.go (new)
+  - internal/s3api/errors.go
+- Quality: go build ./... + go vet ./... + go test ./... all green.
+- **Learnings for future iterations:**
+  - Reproduce the bucket_acl_grants table pattern when adding more bucket-level metadata: separate table keyed by bucket_id, JSON blob via setBucketBlob/getBucketBlob helpers.
+  - For object-scoped metadata that needs versionID resolution use the existing `resolveVersionID` (cassandra) / `findLatest` (memory) helpers — don't reinvent.
+  - Go XML unmarshaller correctly resolves `xsi:type` when the field tag uses the namespace-qualified form: `xml:"http://www.w3.org/2001/XMLSchema-instance type,attr"`. Required for parsing AWS ACL XML.
+  - Adding a method to the meta.Store interface immediately surfaces compile errors at every assignment site (cmd/* main.go has *.(*metamem.Store) type assertions); they re-enable once both backends gain the method. Implement before touching handlers.
+---

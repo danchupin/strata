@@ -92,6 +92,10 @@ var tableDDL = []string{
 		bucket_id uuid PRIMARY KEY,
 		config    blob
 	)`,
+	`CREATE TABLE IF NOT EXISTS bucket_acl_grants (
+		bucket_id uuid PRIMARY KEY,
+		grants    blob
+	)`,
 	`CREATE TABLE IF NOT EXISTS gc_queue (
 		region       text,
 		enqueued_at  timestamp,
@@ -110,6 +114,7 @@ var tableDDL = []string{
 var alterStatements = []string{
 	`ALTER TABLE objects ADD retain_mode text`,
 	`ALTER TABLE buckets ADD acl text`,
+	`ALTER TABLE objects ADD grants blob`,
 }
 
 func isColumnAlreadyExists(err error) bool {

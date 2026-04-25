@@ -15,17 +15,25 @@ import (
 )
 
 type Store struct {
-	mu         sync.RWMutex
-	buckets    map[string]*meta.Bucket
-	objects    map[uuid.UUID]map[string][]*meta.Object
-	multiparts map[uuid.UUID]map[string]*mpState
-	lifecycles map[uuid.UUID][]byte
-	cors       map[uuid.UUID][]byte
-	policies   map[uuid.UUID][]byte
-	pab        map[uuid.UUID][]byte
-	ownership  map[uuid.UUID][]byte
-	gc         map[string][]meta.GCEntry
-	locker     *Locker
+	mu           sync.RWMutex
+	buckets      map[string]*meta.Bucket
+	objects      map[uuid.UUID]map[string][]*meta.Object
+	multiparts   map[uuid.UUID]map[string]*mpState
+	lifecycles   map[uuid.UUID][]byte
+	cors         map[uuid.UUID][]byte
+	policies     map[uuid.UUID][]byte
+	pab          map[uuid.UUID][]byte
+	ownership    map[uuid.UUID][]byte
+	bucketGrants map[uuid.UUID][]meta.Grant
+	objectGrants map[grantKey][]meta.Grant
+	gc           map[string][]meta.GCEntry
+	locker       *Locker
+}
+
+type grantKey struct {
+	BucketID  uuid.UUID
+	Key       string
+	VersionID string
 }
 
 type mpState struct {
@@ -35,16 +43,18 @@ type mpState struct {
 
 func New() *Store {
 	return &Store{
-		buckets:    make(map[string]*meta.Bucket),
-		objects:    make(map[uuid.UUID]map[string][]*meta.Object),
-		multiparts: make(map[uuid.UUID]map[string]*mpState),
-		lifecycles: make(map[uuid.UUID][]byte),
-		cors:       make(map[uuid.UUID][]byte),
-		policies:   make(map[uuid.UUID][]byte),
-		pab:        make(map[uuid.UUID][]byte),
-		ownership:  make(map[uuid.UUID][]byte),
-		gc:         make(map[string][]meta.GCEntry),
-		locker:     NewLocker(),
+		buckets:      make(map[string]*meta.Bucket),
+		objects:      make(map[uuid.UUID]map[string][]*meta.Object),
+		multiparts:   make(map[uuid.UUID]map[string]*mpState),
+		lifecycles:   make(map[uuid.UUID][]byte),
+		cors:         make(map[uuid.UUID][]byte),
+		policies:     make(map[uuid.UUID][]byte),
+		pab:          make(map[uuid.UUID][]byte),
+		ownership:    make(map[uuid.UUID][]byte),
+		bucketGrants: make(map[uuid.UUID][]meta.Grant),
+		objectGrants: make(map[grantKey][]meta.Grant),
+		gc:           make(map[string][]meta.GCEntry),
+		locker:       NewLocker(),
 	}
 }
 
@@ -175,6 +185,60 @@ func (s *Store) SetBucketACL(ctx context.Context, name, canned string) error {
 	}
 	b.ACL = canned
 	return nil
+}
+
+func (s *Store) SetBucketGrants(ctx context.Context, bucketID uuid.UUID, grants []meta.Grant) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.objects[bucketID]; !ok {
+		return meta.ErrBucketNotFound
+	}
+	cp := append([]meta.Grant(nil), grants...)
+	s.bucketGrants[bucketID] = cp
+	return nil
+}
+
+func (s *Store) GetBucketGrants(ctx context.Context, bucketID uuid.UUID) ([]meta.Grant, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	g, ok := s.bucketGrants[bucketID]
+	if !ok {
+		return nil, meta.ErrNoSuchGrants
+	}
+	return append([]meta.Grant(nil), g...), nil
+}
+
+func (s *Store) DeleteBucketGrants(ctx context.Context, bucketID uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.bucketGrants, bucketID)
+	return nil
+}
+
+func (s *Store) SetObjectGrants(ctx context.Context, bucketID uuid.UUID, key, versionID string, grants []meta.Grant) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o, err := s.findLatest(bucketID, key, versionID)
+	if err != nil {
+		return err
+	}
+	cp := append([]meta.Grant(nil), grants...)
+	s.objectGrants[grantKey{BucketID: bucketID, Key: key, VersionID: o.VersionID}] = cp
+	return nil
+}
+
+func (s *Store) GetObjectGrants(ctx context.Context, bucketID uuid.UUID, key, versionID string) ([]meta.Grant, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	o, err := s.findLatest(bucketID, key, versionID)
+	if err != nil {
+		return nil, err
+	}
+	g, ok := s.objectGrants[grantKey{BucketID: bucketID, Key: key, VersionID: o.VersionID}]
+	if !ok {
+		return nil, meta.ErrNoSuchGrants
+	}
+	return append([]meta.Grant(nil), g...), nil
 }
 
 func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) error {

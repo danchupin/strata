@@ -138,6 +138,63 @@ func (s *Store) SetBucketVersioning(ctx context.Context, name, state string) err
 	return nil
 }
 
+func (s *Store) SetBucketGrants(ctx context.Context, bucketID uuid.UUID, grants []meta.Grant) error {
+	blob, err := encodeGrants(grants)
+	if err != nil {
+		return err
+	}
+	return s.setBucketBlob(ctx, "bucket_acl_grants", "grants", bucketID, blob)
+}
+
+func (s *Store) GetBucketGrants(ctx context.Context, bucketID uuid.UUID) ([]meta.Grant, error) {
+	blob, err := s.getBucketBlob(ctx, "bucket_acl_grants", "grants", bucketID, meta.ErrNoSuchGrants)
+	if err != nil {
+		return nil, err
+	}
+	return decodeGrants(blob)
+}
+
+func (s *Store) DeleteBucketGrants(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(ctx, "bucket_acl_grants", bucketID)
+}
+
+func (s *Store) SetObjectGrants(ctx context.Context, bucketID uuid.UUID, key, versionID string, grants []meta.Grant) error {
+	v, shard, err := s.resolveVersionID(ctx, bucketID, key, versionID)
+	if err != nil {
+		return err
+	}
+	blob, err := encodeGrants(grants)
+	if err != nil {
+		return err
+	}
+	return s.s.Query(
+		`UPDATE objects SET grants=? WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
+		blob, gocqlUUID(bucketID), shard, key, v,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) GetObjectGrants(ctx context.Context, bucketID uuid.UUID, key, versionID string) ([]meta.Grant, error) {
+	v, shard, err := s.resolveVersionID(ctx, bucketID, key, versionID)
+	if err != nil {
+		return nil, err
+	}
+	var blob []byte
+	err = s.s.Query(
+		`SELECT grants FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
+		gocqlUUID(bucketID), shard, key, v,
+	).WithContext(ctx).Scan(&blob)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return nil, meta.ErrObjectNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(blob) == 0 {
+		return nil, meta.ErrNoSuchGrants
+	}
+	return decodeGrants(blob)
+}
+
 func (s *Store) SetBucketACL(ctx context.Context, name, canned string) error {
 	applied, err := s.s.Query(
 		`UPDATE buckets SET acl=? WHERE name=? IF EXISTS`,

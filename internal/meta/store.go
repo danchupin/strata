@@ -31,7 +31,20 @@ var (
 	ErrNoSuchBucketPolicy    = errors.New("no policy configured for bucket")
 	ErrNoSuchPublicAccessBlock = errors.New("no public access block configuration for bucket")
 	ErrNoSuchOwnershipControls = errors.New("no ownership controls configured for bucket")
+	ErrNoSuchGrants            = errors.New("no acl grants persisted for resource")
 )
+
+// Grant is a single ACL grant entry persisted alongside the canned ACL.
+// GranteeType is one of: CanonicalUser, Group, AmazonCustomerByEmail.
+// Permission is one of: FULL_CONTROL, READ, WRITE, READ_ACP, WRITE_ACP.
+type Grant struct {
+	GranteeType string
+	ID          string
+	URI         string
+	DisplayName string
+	Email       string
+	Permission  string
+}
 
 const (
 	LockModeGovernance = "GOVERNANCE"
@@ -124,6 +137,11 @@ type Store interface {
 	ListBuckets(ctx context.Context, owner string) ([]*Bucket, error)
 	SetBucketVersioning(ctx context.Context, name, state string) error
 	SetBucketACL(ctx context.Context, name, canned string) error
+	SetBucketGrants(ctx context.Context, bucketID uuid.UUID, grants []Grant) error
+	GetBucketGrants(ctx context.Context, bucketID uuid.UUID) ([]Grant, error)
+	DeleteBucketGrants(ctx context.Context, bucketID uuid.UUID) error
+	SetObjectGrants(ctx context.Context, bucketID uuid.UUID, key, versionID string, grants []Grant) error
+	GetObjectGrants(ctx context.Context, bucketID uuid.UUID, key, versionID string) ([]Grant, error)
 
 	PutObject(ctx context.Context, o *Object, versioned bool) error
 	GetObject(ctx context.Context, bucketID uuid.UUID, key, versionID string) (*Object, error)

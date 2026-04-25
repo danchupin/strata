@@ -17,8 +17,8 @@
         "go test ./internal/s3api/... ./internal/meta/... passes"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Grants stored as JSON blob (bucket_acl_grants table for buckets, grants column on objects). Memory store uses bucketGrants/objectGrants maps."
     },
     {
       "id": "US-002",
