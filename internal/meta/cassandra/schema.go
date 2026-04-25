@@ -131,6 +131,10 @@ var tableDDL = []string{
 		bucket_id uuid PRIMARY KEY,
 		config    blob
 	)`,
+	`CREATE TABLE IF NOT EXISTS bucket_object_lock (
+		bucket_id uuid PRIMARY KEY,
+		config    blob
+	)`,
 }
 
 var alterStatements = []string{
@@ -144,6 +148,7 @@ var alterStatements = []string{
 	`ALTER TABLE multipart_uploads ADD sse text`,
 	`ALTER TABLE objects ADD ssec_key_md5 text`,
 	`ALTER TABLE objects ADD restore_status text`,
+	`ALTER TABLE buckets ADD object_lock_enabled boolean`,
 }
 
 func isColumnAlreadyExists(err error) bool {

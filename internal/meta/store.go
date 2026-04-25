@@ -32,6 +32,7 @@ var (
 	ErrNoSuchPublicAccessBlock = errors.New("no public access block configuration for bucket")
 	ErrNoSuchOwnershipControls = errors.New("no ownership controls configured for bucket")
 	ErrNoSuchEncryption        = errors.New("no encryption configuration for bucket")
+	ErrNoSuchObjectLockConfig  = errors.New("no object lock configuration for bucket")
 	ErrNoSuchGrants            = errors.New("no acl grants persisted for resource")
 	ErrIAMUserNotFound         = errors.New("iam user not found")
 	ErrIAMUserAlreadyExists    = errors.New("iam user already exists")
@@ -76,13 +77,14 @@ const (
 )
 
 type Bucket struct {
-	Name         string
-	ID           uuid.UUID
-	Owner        string
-	CreatedAt    time.Time
-	DefaultClass string
-	Versioning   string
-	ACL          string
+	Name              string
+	ID                uuid.UUID
+	Owner             string
+	CreatedAt         time.Time
+	DefaultClass      string
+	Versioning        string
+	ACL               string
+	ObjectLockEnabled bool
 }
 
 type Object struct {
@@ -216,6 +218,11 @@ type Store interface {
 	SetBucketEncryption(ctx context.Context, bucketID uuid.UUID, xmlBlob []byte) error
 	GetBucketEncryption(ctx context.Context, bucketID uuid.UUID) ([]byte, error)
 	DeleteBucketEncryption(ctx context.Context, bucketID uuid.UUID) error
+
+	SetBucketObjectLockEnabled(ctx context.Context, name string, enabled bool) error
+	SetBucketObjectLockConfig(ctx context.Context, bucketID uuid.UUID, xmlBlob []byte) error
+	GetBucketObjectLockConfig(ctx context.Context, bucketID uuid.UUID) ([]byte, error)
+	DeleteBucketObjectLockConfig(ctx context.Context, bucketID uuid.UUID) error
 
 	CreateIAMUser(ctx context.Context, u *IAMUser) error
 	GetIAMUser(ctx context.Context, userName string) (*IAMUser, error)

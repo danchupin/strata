@@ -37,6 +37,8 @@ var (
 	ErrNoSuchPublicAccessBlock      = APIError{Code: "NoSuchPublicAccessBlockConfiguration", Message: "The public access block configuration was not found", Status: http.StatusNotFound}
 	ErrNoSuchOwnershipControls      = APIError{Code: "OwnershipControlsNotFoundError", Message: "The bucket ownership controls were not found", Status: http.StatusNotFound}
 	ErrNoSuchEncryption             = APIError{Code: "ServerSideEncryptionConfigurationNotFoundError", Message: "The server side encryption configuration was not found", Status: http.StatusNotFound}
+	ErrNoSuchObjectLockConfig       = APIError{Code: "ObjectLockConfigurationNotFoundError", Message: "Object Lock configuration does not exist for this bucket", Status: http.StatusNotFound}
+	ErrObjectLockNotEnabled         = APIError{Code: "InvalidRequest", Message: "Bucket is missing Object Lock Configuration", Status: http.StatusBadRequest}
 	ErrInvalidEncryptionAlgorithm   = APIError{Code: "InvalidArgument", Message: "The encryption algorithm specified is not supported", Status: http.StatusBadRequest}
 	ErrKMSNotImplemented            = APIError{Code: "NotImplemented", Message: "aws:kms server-side encryption is not supported", Status: http.StatusNotImplemented}
 	ErrInvalidRequest               = APIError{Code: "InvalidRequest", Message: "The request is invalid", Status: http.StatusBadRequest}

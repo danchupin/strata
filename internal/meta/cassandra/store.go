@@ -89,16 +89,17 @@ func (s *Store) CreateBucket(ctx context.Context, name, owner, defaultClass stri
 
 func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error) {
 	var (
-		idG              gocql.UUID
-		owner, class     string
-		versioning, acl  string
-		createdAt        time.Time
-		shardCount       int
+		idG               gocql.UUID
+		owner, class      string
+		versioning, acl   string
+		createdAt         time.Time
+		shardCount        int
+		objectLockEnabled bool
 	)
 	err := s.s.Query(
-		`SELECT id, owner_id, created_at, default_class, versioning, shard_count, acl FROM buckets WHERE name=?`,
+		`SELECT id, owner_id, created_at, default_class, versioning, shard_count, acl, object_lock_enabled FROM buckets WHERE name=?`,
 		name,
-	).WithContext(ctx).Scan(&idG, &owner, &createdAt, &class, &versioning, &shardCount, &acl)
+	).WithContext(ctx).Scan(&idG, &owner, &createdAt, &class, &versioning, &shardCount, &acl, &objectLockEnabled)
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrBucketNotFound
 	}
@@ -109,13 +110,14 @@ func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error
 		versioning = meta.VersioningDisabled
 	}
 	return &meta.Bucket{
-		Name:         name,
-		ID:           uuidFromGocql(idG),
-		Owner:        owner,
-		CreatedAt:    createdAt,
-		DefaultClass: class,
-		Versioning:   versioning,
-		ACL:          acl,
+		Name:              name,
+		ID:                uuidFromGocql(idG),
+		Owner:             owner,
+		CreatedAt:         createdAt,
+		DefaultClass:      class,
+		Versioning:        versioning,
+		ACL:               acl,
+		ObjectLockEnabled: objectLockEnabled,
 	}, nil
 }
 
@@ -1386,6 +1388,30 @@ func (s *Store) GetBucketEncryption(ctx context.Context, bucketID uuid.UUID) ([]
 }
 func (s *Store) DeleteBucketEncryption(ctx context.Context, bucketID uuid.UUID) error {
 	return s.deleteBucketBlob(ctx, "bucket_encryption", bucketID)
+}
+
+func (s *Store) SetBucketObjectLockEnabled(ctx context.Context, name string, enabled bool) error {
+	applied, err := s.s.Query(
+		`UPDATE buckets SET object_lock_enabled=? WHERE name=? IF EXISTS`,
+		enabled, name,
+	).WithContext(ctx).SerialConsistency(gocql.LocalSerial).ScanCAS(nil)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return meta.ErrBucketNotFound
+	}
+	return nil
+}
+
+func (s *Store) SetBucketObjectLockConfig(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(ctx, "bucket_object_lock", "config", bucketID, blob)
+}
+func (s *Store) GetBucketObjectLockConfig(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(ctx, "bucket_object_lock", "config", bucketID, meta.ErrNoSuchObjectLockConfig)
+}
+func (s *Store) DeleteBucketObjectLockConfig(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(ctx, "bucket_object_lock", bucketID)
 }
 
 func gocqlUUID(u uuid.UUID) gocql.UUID {

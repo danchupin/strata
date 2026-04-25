@@ -179,6 +179,16 @@ func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request, bucket str
 			return
 		}
 	}
+	if q.Has("object-lock") {
+		switch r.Method {
+		case http.MethodGet:
+			s.getBucketObjectLockConfig(w, r, bucket)
+			return
+		case http.MethodPut:
+			s.putBucketObjectLockConfig(w, r, bucket)
+			return
+		}
+	}
 	if q.Has("acl") {
 		switch r.Method {
 		case http.MethodGet:
@@ -243,6 +253,9 @@ func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request, bucket str
 		}
 		if aclHdr := r.Header.Get("x-amz-acl"); aclHdr != "" {
 			_ = s.Meta.SetBucketACL(r.Context(), bucket, normalizeCannedACL(aclHdr))
+		}
+		if strings.EqualFold(r.Header.Get("x-amz-bucket-object-lock-enabled"), "true") {
+			_ = s.Meta.SetBucketObjectLockEnabled(r.Context(), bucket, true)
 		}
 		w.Header().Set("Location", "/"+bucket)
 		w.WriteHeader(http.StatusOK)
@@ -549,6 +562,12 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	if ru := r.Header.Get("x-amz-object-lock-retain-until-date"); ru != "" {
 		if t, err := time.Parse(time.RFC3339, ru); err == nil {
 			obj.RetainUntil = t
+		}
+	}
+	if obj.RetainMode == "" && obj.RetainUntil.IsZero() {
+		if mode, until := s.resolveDefaultRetention(r, b); mode != "" {
+			obj.RetainMode = mode
+			obj.RetainUntil = until
 		}
 	}
 	if r.Header.Get("x-amz-object-lock-legal-hold") == "ON" {

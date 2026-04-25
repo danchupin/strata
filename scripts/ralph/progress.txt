@@ -22,6 +22,7 @@ Started: Sat Apr 25 16:10:14 MSK 2026
 - Multipart checksums (US-010): meta.MultipartPart.Checksums map[string]string is persisted through SavePart / surfaced by ListParts in both backends (cassandra ALTER multipart_parts ADD checksums map<text,text>). uploadPart re-uses the parseRequestChecksums + io.TeeReader(checksumWriter) + verifyChecksums chain from US-009; mismatch deletes the data manifest and returns 400 BadDigest. completeMultipart calls ListParts BEFORE CompleteMultipartUpload to grab per-part Checksums (the meta-level Complete deletes parts on success), then composeMultipartChecksums computes the AWS composite (base64(hash(concat raw digests))-N) for every algo present on every requested part. The composite is set on obj.Checksums (so GetObject/HeadObject echo it) and emitted on CompleteMultipartUploadResult as both response headers and ChecksumCRC32/SHA256/etc. XML elements (omitempty).
 - SSE-S3 metadata (US-011): meta.Object.SSE + meta.MultipartUpload.SSE strings round-trip through both backends (cassandra ALTER objects ADD sse text + ALTER multipart_uploads ADD sse text). Bucket-level default uses the standard setBucketBlob/getBucketBlob pattern (table bucket_encryption, ErrNoSuchEncryption sentinel). internal/s3api/encryption.go centralises validateSSEAlgorithm (AES256 ok; aws:kms/aws:kms:dsse → 501 NotImplemented; else 400) and resolveSSE(r,b) — request header wins, bucket default fills in, no config => empty. resolveSSE runs BEFORE PutChunks so kms/bogus headers reject the request without writing chunks. SSE flows: putObject sets obj.SSE, initiateMultipart sets mu.SSE, uploadPart + completeMultipart echo header, completeMultipart copies mu.SSE to obj.SSE. GetObject/HeadObject emit x-amz-server-side-encryption when obj.SSE is non-empty. Errors live in errors.go: ErrNoSuchEncryption (404 ServerSideEncryptionConfigurationNotFoundError), ErrInvalidEncryptionAlgorithm (400), ErrKMSNotImplemented (501).
 - Subresource routing in handleObject is order-sensitive: the `q.Has(...)` checks run top-to-bottom and short-circuit; place new ?<sub> branches BEFORE the generic method switch (PUT/GET/HEAD/DELETE) so the generic path doesn't intercept them. Gate every object-level subresource via requireObjectAccess (not raw requireAccess) so policy + ACL still apply.
+- Bucket-level flags on the buckets row use the same LWT idiom as SetBucketVersioning/SetBucketACL: `UPDATE buckets SET <col>=? WHERE name=? IF EXISTS` with `ScanCAS(nil)` and SerialConsistency LocalSerial. Required so the write joins the same Paxos lineage as the original CreateBucket INSERT IF NOT EXISTS — non-LWT UPDATEs on that row leave Paxos stale and LOCAL_QUORUM reads observe the pre-update value. ScanCAS(nil) (not new(bool)/new(string)) — gocql ignores the destination when CAS applies.
 ---
 
 ## 2026-04-25 - US-001 (Parse AccessControlPolicy XML body)
@@ -401,4 +402,41 @@ Started: Sat Apr 25 16:10:14 MSK 2026
   - When extending meta.Object with a new persisted field, the cassandra column-list ordering matters for code review readability but the SQL itself only cares about positional binding — append the column at the END of both INSERT and SELECT lists (mirroring the additive ALTER) so future iterations don't have to renumber every site. The PutObject/GetObject column lists are the canonical pair to keep in sync.
   - x-amz-restore is one of those headers HEAD must include but GET typically does too; sharing getObject(body=true|false) is the existing idiom — do not split into a separate HEAD handler just to add response metadata.
   - For storage-only stub endpoints (no real backend behaviour), persist the FORMATTED header value directly into the Object field rather than storing structured state and re-formatting per request. Saves a Sprintf on the hot read path; the cost is one re-write per restore call (rare).
+---
+
+## 2026-04-25 - US-015 (PutBucketObjectLockConfiguration / GetBucketObjectLockConfiguration with default-retention inheritance)
+- meta.Bucket.ObjectLockEnabled bool added; cassandra schema appended additive ALTER buckets ADD object_lock_enabled boolean; GetBucket SELECT extended to include the column (NULL → false via gocql zero-value scan). Memory backend round-trips via existing shallow-copy.
+- New meta.ErrNoSuchObjectLockConfig sentinel + meta.Store.SetBucketObjectLockEnabled(ctx, name, enabled) / SetBucketObjectLockConfig / GetBucketObjectLockConfig / DeleteBucketObjectLockConfig interface methods.
+- Cassandra: new bucket_object_lock blob table (PK bucket_id) wired through the standard setBucketBlob/getBucketBlob/deleteBucketBlob helpers. SetBucketObjectLockEnabled uses LWT (UPDATE ... IF EXISTS, ScanCAS(nil), LocalSerial) — same pattern as SetBucketVersioning/SetBucketACL so the write joins the same Paxos lineage as the original CreateBucket INSERT IF NOT EXISTS.
+- Memory backend: objectLock map[uuid.UUID][]byte for the config blob; SetBucketObjectLockEnabled mutates the in-place Bucket struct under mu.Lock.
+- internal/s3api/objectlock.go grew:
+  - objectLockConfiguration XML type (ObjectLockEnabled string + Rule.DefaultRetention{Mode, *Days, *Years}).
+  - putBucketObjectLockConfig: requires bucket.ObjectLockEnabled (else 400 InvalidRequest via ErrObjectLockNotEnabled), 1MiB body cap, validates DefaultRetention.Mode ∈ {GOVERNANCE,COMPLIANCE}, Days/Years > 0, Days vs Years mutually exclusive. Persists raw XML blob via SetBucketObjectLockConfig.
+  - getBucketObjectLockConfig: returns blob or 404 ObjectLockConfigurationNotFoundError (ErrNoSuchObjectLockConfig).
+  - resolveDefaultRetention(r, b) helper: when bucket has ObjectLockEnabled and a persisted DefaultRetention, returns (Mode, time.Now+Days|+Years); zero values otherwise.
+- internal/s3api/server.go:
+  - handleBucket: added ?object-lock route (GET/PUT) BEFORE the bottom method switch.
+  - CreateBucket (PUT branch): when x-amz-bucket-object-lock-enabled: true header is present, calls SetBucketObjectLockEnabled(name, true) right after CreateBucket (mirrors x-amz-acl handling).
+  - putObject: after explicit x-amz-object-lock-mode/retain-until-date header parsing, if BOTH are absent calls resolveDefaultRetention(r, b) and applies the inherited (Mode, RetainUntil). Explicit per-request headers override the bucket default.
+- New errors in internal/s3api/errors.go: ErrNoSuchObjectLockConfig (404 ObjectLockConfigurationNotFoundError), ErrObjectLockNotEnabled (400 InvalidRequest 'Bucket is missing Object Lock Configuration').
+- Tests in internal/s3api/objectlock_test.go: bucket lock CRUD round-trip (PUT/GET/echo XML); PUT object-lock without x-amz-bucket-object-lock-enabled at CreateBucket → 400 InvalidRequest; malformed DefaultRetention mode → 400 MalformedXML; PUT object inherits Mode + RetainUntilDate header from bucket default on header-less PUT; COMPLIANCE-inherited PUT cannot be deleted (403 AccessDenied via existing ErrObjectLockedErr); explicit per-request headers override default (GOVERNANCE wins over default COMPLIANCE).
+- Files changed:
+  - internal/meta/store.go (Bucket.ObjectLockEnabled, ErrNoSuchObjectLockConfig, 4 interface methods)
+  - internal/meta/memory/store.go (objectLock map + 4 methods)
+  - internal/meta/cassandra/schema.go (bucket_object_lock table + ALTER buckets ADD object_lock_enabled)
+  - internal/meta/cassandra/store.go (GetBucket SELECT extended; 4 method impls)
+  - internal/s3api/objectlock.go (XML type + 2 handlers + resolveDefaultRetention helper)
+  - internal/s3api/server.go (?object-lock route; CreateBucket header; putObject inheritance)
+  - internal/s3api/errors.go (2 new APIErrors)
+  - internal/s3api/objectlock_test.go (new)
+  - scripts/ralph/prd.json (passes: true; notes)
+  - scripts/ralph/progress.txt
+- Quality: go build ./... + go vet ./... + go test ./... all green.
+- **Learnings for future iterations:**
+  - meta.Bucket fields (ObjectLockEnabled here) flow through the same LWT pattern as SetBucketVersioning/SetBucketACL. Using a non-LWT UPDATE on the buckets row breaks Paxos coherence (see CLAUDE.md gotcha) — every column added to the buckets row needs its setter to use IF EXISTS + ScanCAS(nil) + LocalSerial.
+  - CreateBucket signature stays at (name, owner, defaultClass) — new bucket-creation-time flags are applied via separate setters right after CreateBucket succeeds (mirrors x-amz-acl handling). Avoids signature churn across both backends as flags accumulate.
+  - resolveDefaultRetention mirrors resolveSSE (US-011): request header wins, bucket default fills in. Validation runs at PUT-config time, not at PUT-object time, so per-object PUT stays cheap (one GetBucketObjectLockConfig + one Unmarshal). If this becomes hot, the same TTL cache pattern used for credentials applies.
+  - For *int Days/Years XML fields, use *int (pointer) + omitempty so 0 vs absent stays distinguishable. The validator needs to reject *Days <= 0 because XML unmarshal gives 0 when the element is empty (e.g. <Days/>).
+  - The existing buckets table schema had an unused frozen<objectlock_cfg> UDT column — left alone to avoid touching pre-existing schemas. The new object_lock_enabled boolean is the canonical persisted flag from this point on.
+  - When the AC says "this flag is required for object-lock config", the right code is 400 InvalidRequest (not 409 — AWS docs use InvalidRequest for this case). Reuse ErrObjectLockNotEnabled rather than inventing new codes for related preconditions.
 ---

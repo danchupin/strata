@@ -257,8 +257,8 @@
         "go test ./internal/s3api/... passes"
       ],
       "priority": 15,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "meta.Bucket.ObjectLockEnabled bool round-trips through both backends (cassandra: additive ALTER buckets ADD object_lock_enabled boolean; GetBucket SELECT extended). New meta.ErrNoSuchObjectLockConfig sentinel + meta.Store.SetBucketObjectLockEnabled/Set/Get/DeleteBucketObjectLockConfig interface methods. Cassandra: new bucket_object_lock blob table via setBucketBlob/getBucketBlob/deleteBucketBlob; SetBucketObjectLockEnabled uses LWT (UPDATE ... IF EXISTS, ScanCAS(nil)) — same pattern as SetBucketVersioning/SetBucketACL to keep Paxos lineage consistent with the original CreateBucket INSERT IF NOT EXISTS. Memory backend mirrors via Bucket.ObjectLockEnabled field (shallow-copy on read) + objectLock blob map. internal/s3api/objectlock.go grew putBucketObjectLockConfig/getBucketObjectLockConfig + resolveDefaultRetention helper. Route ?object-lock added to handleBucket. CreateBucket (handleBucket PUT branch) calls SetBucketObjectLockEnabled when x-amz-bucket-object-lock-enabled: true. PutBucketObjectLockConfig requires bucket.ObjectLockEnabled (else 400 InvalidRequest 'Bucket is missing Object Lock Configuration' via ErrObjectLockNotEnabled), parses ObjectLockConfiguration XML, validates DefaultRetention.Mode ∈ {GOVERNANCE,COMPLIANCE}, Days/Years > 0, mutually exclusive Days vs Years. GetBucketObjectLockConfig serves the persisted blob or 404 ObjectLockConfigurationNotFoundError. putObject inheritance: when both x-amz-object-lock-mode and x-amz-object-lock-retain-until-date headers are absent, resolveDefaultRetention(r,b) reads the persisted XML and applies Mode + (now+Days|Years) to obj.RetainMode/RetainUntil — explicit headers override. Tests in objectlock_test.go: round-trip CRUD, requires-enabled (400 InvalidRequest), malformed default-retention mode (400 MalformedXML), inheritance applied on header-less PUT, COMPLIANCE-inherited delete blocked (403 AccessDenied), explicit headers override default."
     },
     {
       "id": "US-016",

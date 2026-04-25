@@ -25,6 +25,7 @@ type Store struct {
 	pab          map[uuid.UUID][]byte
 	ownership    map[uuid.UUID][]byte
 	encryption   map[uuid.UUID][]byte
+	objectLock   map[uuid.UUID][]byte
 	bucketGrants map[uuid.UUID][]meta.Grant
 	objectGrants map[grantKey][]meta.Grant
 	iamUsers     map[string]*meta.IAMUser
@@ -55,6 +56,7 @@ func New() *Store {
 		pab:          make(map[uuid.UUID][]byte),
 		ownership:    make(map[uuid.UUID][]byte),
 		encryption:   make(map[uuid.UUID][]byte),
+		objectLock:   make(map[uuid.UUID][]byte),
 		bucketGrants: make(map[uuid.UUID][]meta.Grant),
 		objectGrants: make(map[grantKey][]meta.Grant),
 		iamUsers:     make(map[string]*meta.IAMUser),
@@ -679,6 +681,27 @@ func (s *Store) GetBucketEncryption(ctx context.Context, bucketID uuid.UUID) ([]
 }
 func (s *Store) DeleteBucketEncryption(ctx context.Context, bucketID uuid.UUID) error {
 	return s.deleteBucketBlob(s.encryption, bucketID)
+}
+
+func (s *Store) SetBucketObjectLockEnabled(ctx context.Context, name string, enabled bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.buckets[name]
+	if !ok {
+		return meta.ErrBucketNotFound
+	}
+	b.ObjectLockEnabled = enabled
+	return nil
+}
+
+func (s *Store) SetBucketObjectLockConfig(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(s.objectLock, bucketID, blob)
+}
+func (s *Store) GetBucketObjectLockConfig(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(s.objectLock, bucketID, meta.ErrNoSuchObjectLockConfig)
+}
+func (s *Store) DeleteBucketObjectLockConfig(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(s.objectLock, bucketID)
 }
 
 func (s *Store) CreateMultipartUpload(ctx context.Context, mu *meta.MultipartUpload) error {
