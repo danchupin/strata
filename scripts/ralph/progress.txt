@@ -8,6 +8,7 @@ Started: Sat Apr 25 16:10:14 MSK 2026
 - Cassandra schema evolution: append CREATE TABLE IF NOT EXISTS to tableDDL; append additive `ALTER TABLE ... ADD` to alterStatements. isColumnAlreadyExists handles re-runs.
 - s3api handlers accept XML bodies with io.ReadAll(io.LimitReader(r.Body, 1<<20)).
 - Tests live in internal/s3api as a black-box `package s3api_test` and use `newHarness(t)` from testutil_test.go.
+- IAM-style JSON policy types live in internal/auth/policy. Use policy.Evaluate(doc, principal, action, resource, ctx) where principal is "*" for anonymous, action is e.g. "s3:GetObject", resource is the AWS ARN, ctx is map[string]string of condition keys.
 ---
 
 ## 2026-04-25 - US-001 (Parse AccessControlPolicy XML body)
@@ -35,4 +36,25 @@ Started: Sat Apr 25 16:10:14 MSK 2026
   - For object-scoped metadata that needs versionID resolution use the existing `resolveVersionID` (cassandra) / `findLatest` (memory) helpers — don't reinvent.
   - Go XML unmarshaller correctly resolves `xsi:type` when the field tag uses the namespace-qualified form: `xml:"http://www.w3.org/2001/XMLSchema-instance type,attr"`. Required for parsing AWS ACL XML.
   - Adding a method to the meta.Store interface immediately surfaces compile errors at every assignment site (cmd/* main.go has *.(*metamem.Store) type assertions); they re-enable once both backends gain the method. Implement before touching handlers.
+---
+
+## 2026-04-25 - US-002 (IAM-style policy evaluator package)
+- New package internal/auth/policy with:
+  - Decision (Allow/Deny) and constants EffectAllow/EffectDeny.
+  - Document, Statement, Principal types; StringOrSlice / StringSlice unmarshallers cope with the AWS "string OR list" JSON shape.
+  - Principal accepts the bare string "*" or the object form {"AWS": "arn..." | ["arn...", ...]}.
+  - Evaluate(doc, principal, action, resource, ctx) — explicit Deny short-circuits; Allow returned only when at least one statement matched and no Deny matched; otherwise Deny.
+  - glob() matches '*' and '?' wildcards (used for s3:* actions and ARN resources alike).
+  - Condition support: StringEquals only — value side may be string or array; ANY-of semantics. Unknown ops never match (same effect as Deny by default).
+  - Parse() rejects statements with Effect not in {Allow, Deny}.
+- Tests internal/auth/policy/policy_test.go cover: explicit allow, deny-overrides-allow, wildcard action (s3:Get*), wildcard resource prefix, StringEquals match/miss/missing-key, anonymous Principal=*, default-deny on no-match, wrong-principal denied, invalid Effect parse error, multi-action/multi-resource arrays, nil doc, unsupported condition op.
+- Files changed:
+  - internal/auth/policy/policy.go (new)
+  - internal/auth/policy/policy_test.go (new)
+- Quality: go build ./... + go vet ./internal/auth/... + go test ./... all green.
+- **Learnings for future iterations:**
+  - AWS's "string OR list" JSON convention is widespread (Action, Resource, Principal.AWS, Condition values). Centralised the unmarshaller (unmarshalStrings) so future condition-key arrays reuse it.
+  - Principal "*" is a *string*, but {"AWS": "*"} is also valid — both must set Principal.All. Cover both shapes when extending.
+  - Default-deny semantics need a sentinel: track an `allow` bool and only return Allow at the end if no Deny short-circuited; never return Allow inside the loop.
+  - When US-003 wires this in: anonymous principal == "*" by convention; action strings should be "s3:Op" form (no service prefix, no ARN); resources must be full AWS ARNs ("arn:aws:s3:::bucket" for bucket actions, "arn:aws:s3:::bucket/key" for object actions).
 ---

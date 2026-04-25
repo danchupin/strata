@@ -34,8 +34,8 @@
         "go test ./internal/auth/... passes"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Package internal/auth/policy: Decision (Allow/Deny), Document, Statement, Principal (string '*' or {AWS:[]}), StringOrSlice for Action/Resource, glob matcher for s3:* and ARN wildcards, StringEquals condition only, explicit Deny overrides. Default Deny on no match or nil doc. Parse() validates Effect."
     },
     {
       "id": "US-003",
