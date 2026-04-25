@@ -308,11 +308,11 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 	return s.s.Query(
 		`INSERT INTO objects (bucket_id, shard, key, version_id, is_latest, is_delete_marker,
 		 size, etag, content_type, storage_class, mtime, manifest, user_meta, tags,
-		 retain_until, retain_mode, legal_hold)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 retain_until, retain_mode, legal_hold, checksums)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		gocqlUUID(o.BucketID), shard, o.Key, versionID, true, o.IsDeleteMarker,
 		o.Size, o.ETag, o.ContentType, o.StorageClass, o.Mtime, manifestBlob, o.UserMeta, o.Tags,
-		retainUntil, nilIfEmpty(o.RetainMode), o.LegalHold,
+		retainUntil, nilIfEmpty(o.RetainMode), o.LegalHold, o.Checksums,
 	).WithContext(ctx).Exec()
 }
 
@@ -339,18 +339,19 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		retainUntil  time.Time
 		retainMode   string
 		legalHold    bool
+		checksums    map[string]string
 	)
 	var err error
 	if versionID == "" {
 		err = s.s.Query(
 			`SELECT version_id, is_latest, is_delete_marker, size, etag, content_type,
 			        storage_class, mtime, manifest, user_meta, tags,
-			        retain_until, retain_mode, legal_hold
+			        retain_until, retain_mode, legal_hold, checksums
 			 FROM objects WHERE bucket_id=? AND shard=? AND key=? LIMIT 1`,
 			gocqlUUID(bucketID), shard, key,
 		).WithContext(ctx).Scan(&versionUUID, &isLatest, &isDeleteMark, &size, &etag, &ctype,
 			&class, &mtime, &manifestBlob, &userMeta, &tags,
-			&retainUntil, &retainMode, &legalHold)
+			&retainUntil, &retainMode, &legalHold, &checksums)
 	} else {
 		vUUID, perr := gocql.ParseUUID(versionID)
 		if perr != nil {
@@ -359,12 +360,12 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		err = s.s.Query(
 			`SELECT version_id, is_latest, is_delete_marker, size, etag, content_type,
 			        storage_class, mtime, manifest, user_meta, tags,
-			        retain_until, retain_mode, legal_hold
+			        retain_until, retain_mode, legal_hold, checksums
 			 FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
 			gocqlUUID(bucketID), shard, key, vUUID,
 		).WithContext(ctx).Scan(&versionUUID, &isLatest, &isDeleteMark, &size, &etag, &ctype,
 			&class, &mtime, &manifestBlob, &userMeta, &tags,
-			&retainUntil, &retainMode, &legalHold)
+			&retainUntil, &retainMode, &legalHold, &checksums)
 	}
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrObjectNotFound
@@ -396,6 +397,7 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		RetainUntil:    retainUntil,
 		RetainMode:     retainMode,
 		LegalHold:      legalHold,
+		Checksums:      checksums,
 	}, nil
 }
 

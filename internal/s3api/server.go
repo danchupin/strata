@@ -460,15 +460,30 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	if class == "" {
 		class = b.DefaultClass
 	}
+	checksumEntries, cerr := parseRequestChecksums(r)
+	if cerr != nil {
+		writeError(w, r, ErrInvalidArgument)
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
-	m, err := s.Data.PutChunks(ctx, r.Body, class)
+	body := io.Reader(r.Body)
+	if len(checksumEntries) > 0 {
+		body = io.TeeReader(r.Body, checksumWriter(checksumEntries))
+	}
+	m, err := s.Data.PutChunks(ctx, body, class)
 	if err != nil {
 		if strings.Contains(err.Error(), "unknown storage class") {
 			writeError(w, r, ErrInvalidStorageClass)
 			return
 		}
 		writeError(w, r, ErrInternal)
+		return
+	}
+	sums, verr := verifyChecksums(checksumEntries)
+	if verr != nil {
+		_ = s.Data.Delete(r.Context(), m)
+		writeError(w, r, ErrBadDigest)
 		return
 	}
 	obj := &meta.Object{
@@ -480,6 +495,7 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		StorageClass: m.Class,
 		Mtime:        time.Now().UTC(),
 		Manifest:     m,
+		Checksums:    sums,
 	}
 	if rm := r.Header.Get("x-amz-object-lock-mode"); rm != "" {
 		obj.RetainMode = rm
@@ -525,6 +541,7 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	w.Header().Set("Last-Modified", o.Mtime.UTC().Format(http.TimeFormat))
 	w.Header().Set("x-amz-storage-class", o.StorageClass)
 	w.Header().Set("Accept-Ranges", "bytes")
+	writeChecksumHeaders(w.Header(), o.Checksums)
 	if len(o.Tags) > 0 {
 		w.Header().Set("x-amz-tagging-count", strconv.Itoa(len(o.Tags)))
 	}

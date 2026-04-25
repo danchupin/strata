@@ -101,6 +101,7 @@ type Object struct {
 	RetainUntil    time.Time
 	RetainMode     string
 	LegalHold      bool
+	Checksums      map[string]string
 }
 
 type ListOptions struct {

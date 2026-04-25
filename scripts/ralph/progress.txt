@@ -18,6 +18,7 @@ Started: Sat Apr 25 16:10:14 MSK 2026
 - IAM admin endpoints (?Action=…) live at the root path (bucket==""). extractIAMAction(r) reads Action from query OR application/x-www-form-urlencoded body; handleIAM gates on auth.FromContext(...).Owner == s3api.IAMRootPrincipal ("iam-root"). When extending IAM, add the action to the dispatch switch in handleIAM and reuse iamParam(r, "Key") to read string params from query OR PostForm. Tests pass principal via X-Test-Principal: iam-root.
 - Access keys land in two cassandra tables: access_keys (PK access_key) for SigV4 lookup, iam_access_keys_by_user (PK (user_name, access_key)) for ListAccessKeys. Writes use a logged BATCH so both stay in sync; reads come from access_keys directly. Memory backend keeps a single accessKeys map keyed by AccessKeyID. memory.CredentialStore wraps the memory backend so memory-meta gateways have a usable SigV4 credential lookup (mirrors cassandra.CredentialStore). Server.InvalidateCredential is the hook that DeleteAccessKey calls to drop the MultiStore cache entry; main.go wires it to multi.Invalidate. Tests that need a fully signed request use the in-file SigV4 helper in iam_access_keys_signed_test.go (canonical request → derive signing key → HMAC).
 - Temporary credentials (STS AssumeRole) carry Credential.SessionToken; middleware compares the request's x-amz-security-token to it after signature passes — mismatch → ErrInvalidToken. auth.STSStore implements CredentialsStore so STS keys flow through MultiStore like static/cassandra/memory creds; MultiStore skips caching creds with non-empty SessionToken so revoke/expiry take effect immediately. STSStore.SetClock(now func()) drives deterministic expiry in tests.
+- Object-level checksums (US-009): meta.Object.Checksums map[string]string round-trips through both backends (cassandra column `checksums map<text,text>` added via additive ALTER). Server-side verification lives in internal/s3api/checksum.go: parseRequestChecksums(r) reads every x-amz-checksum-<algo> header for algos in supportedChecksumAlgorithms (CRC32, CRC32C, SHA1, SHA256, CRC64NVME), checksumWriter fans body bytes to all hashers via io.TeeReader on the put path, verifyChecksums compares after PutChunks and writeChecksumHeaders echoes them on GetObject/HeadObject. Mismatch returns 400 BadDigest and deletes the freshly-written chunks. CRC-64/NVME is vendored locally (newCRC64NVME) since the stdlib lacks it.
 ---
 
 ## 2026-04-25 - US-001 (Parse AccessControlPolicy XML body)
@@ -238,4 +239,35 @@ Started: Sat Apr 25 16:10:14 MSK 2026
   - SetClock(now func() time.Time) is the cleanest way to drive expiry in tests. The clock is read inside Issue (to set Expiration) and Lookup (to check it); make sure both reads go through the hook.
   - When wiring a new CredentialsStore at gateway startup, prepend it to the chain only when faster lookups should win; the static store and DB-backed stores rely on the early-return semantics of MultiStore. STS lives at index 0 so a brief scan of in-memory sessions runs before any DB hop.
   - The handleIAM gate enforces IAMRoot — minimal STS reuses that gate so AssumeRole is admin-only. If we later need cross-account workflows, factor the gate into a per-action allowlist instead of a single principal check.
+---
+
+## 2026-04-25 - US-009 (Verify + persist x-amz-checksum-* on PutObject)
+- meta.Object grew Checksums map[string]string; cassandra schema appended additive `ALTER TABLE objects ADD checksums map<text, text>`; cassandra PutObject INSERT and GetObject SELECT extended to round-trip the column. Memory backend round-trips via the existing shallow-copy PutObject path (Checksums map ref copied alongside Tags/UserMeta).
+- New internal/s3api/checksum.go centralises the per-algo machinery. supportedChecksumAlgorithms = [CRC32, CRC32C, SHA1, SHA256, CRC64NVME]. newChecksumHasher returns a hash.Hash (hash32Adapter wraps crc32.NewIEEE / Castagnoli; hash64Adapter wraps the local CRC-64/NVME). parseRequestChecksums(r) walks the supported list, reads x-amz-checksum-<lower> headers, base64-decodes (validation only), and pairs each with a fresh hasher. checksumWriter fans body bytes to all hashers in one pass; verifyChecksums finalises and compares; writeChecksumHeaders echoes the persisted map on GetObject/HeadObject.
+- CRC-64/NVME impl: polynomial 0x9a6c9329ac4bc9b5 (reflected), init 0xFFFF...FFFF, RefIn=true, RefOut=true, XorOut 0xFFFF...FFFF. Table-based (sync.Once) hash.Hash64 implementation. Verified against the AWS-published test vector: CRC64NVME("123456789") == 0xae8b14860a799888.
+- internal/s3api/server.go putObject: parses checksum headers up-front (malformed b64 → 400 InvalidArgument), wraps r.Body in io.TeeReader(checksumWriter) before PutChunks, verifies after the chunked write, on mismatch deletes the just-written manifest and returns 400 BadDigest. On success the computed map[algo]base64 lands in obj.Checksums and is persisted via meta.PutObject. getObject sets x-amz-checksum-<algo> headers from the persisted map (always echoed when present).
+- Tests in internal/s3api/checksum_test.go:
+  - TestChecksumRoundTripPerAlgo: 5 subtests (CRC32, CRC32C, SHA1, SHA256, CRC64NVME). PUT with a correct digest succeeds and the same digest comes back on GET and HEAD.
+  - TestChecksumMismatchPerAlgo: 5 subtests; PUT with the digest of a different payload returns 400 BadDigest and the object is not visible on a follow-up GET (404).
+  - TestChecksumMissingHeaderOptional: PUT without any checksum header succeeds; GET emits no x-amz-checksum-* headers.
+  - TestChecksumInvalidBase64Rejected: malformed b64 in the header → 400.
+  - TestCRC64NVMEKnownVector: validates the AWS test vector (0xae8b14860a799888) so future refactors of the table can't silently break compatibility.
+- New helper s3api.CRC64NVMEForTest(p) is the only export in checksum.go and exists solely so checksum_test.go can compute expected CRC64NVME digests without re-deriving the reflected table.
+- Files changed:
+  - internal/meta/store.go (Object.Checksums)
+  - internal/meta/cassandra/schema.go (additive ALTER objects ADD checksums)
+  - internal/meta/cassandra/store.go (PutObject INSERT + GetObject SELECT)
+  - internal/s3api/checksum.go (new — algos + CRC64NVME + helpers + ErrBadDigest)
+  - internal/s3api/server.go (parseRequestChecksums + TeeReader + verify + writeChecksumHeaders)
+  - internal/s3api/checksum_test.go (new)
+  - scripts/ralph/prd.json (passes: true; notes)
+  - scripts/ralph/progress.txt
+- Quality: go build ./... + go vet ./... + go test ./... all green.
+- **Learnings for future iterations:**
+  - hash/crc32 returns hash.Hash32 and crypto/sha1+sha256 return hash.Hash; uniform fan-out (TeeReader) wants a single hash.Hash interface — wrap the 32/64-bit variants via tiny embed-style adapters (hash32Adapter / hash64Adapter). Reuse for any future digest endpoints.
+  - When verifying a content-derived digest, do the verify AFTER the body has been fully consumed by PutChunks (TeeReader writes to the hasher synchronously with Reads). Do NOT read the body twice — multipart parts are megabytes and second-read forces buffering.
+  - On BadDigest, MUST delete the chunks the data backend just persisted (s.Data.Delete(m)); otherwise garbage chunks accumulate. Mirror this in any future verifier (e.g. SSE-C MD5 mismatch in US-012, multipart per-part checksum in US-010).
+  - meta backends share the Object struct, so adding a field is observable everywhere with no per-backend wiring beyond the cassandra column SELECT/INSERT pair. Memory store needed no change — shallow-copy already round-trips the map ref.
+  - CRC-64/NVME is not in the stdlib; vendoring a small reflected-table implementation is the simplest path. Keep the test vector test in place — it's the cheapest possible regression guard for the polynomial constant and the reflected bit-order.
+  - For US-010 (multipart): re-use this exact verifier per-part inside uploadPart, then store the per-part base64 in meta.MultipartPart.Checksums; CompleteMultipartUpload combines them per AWS rules (concat-and-hash for SHAs, sum-of-hex for CRCs) — share newChecksumHasher and CRC64NVMEForTest.
 ---

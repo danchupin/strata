@@ -154,8 +154,8 @@
         "go test ./internal/s3api/... passes"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "meta.Object.Checksums map[string]string added (additive ALTER objects ADD checksums map<text,text>; cassandra PutObject INSERT + GetObject SELECT extended). internal/s3api/checksum.go centralises algos: CRC32 (IEEE), CRC32C (Castagnoli), SHA1, SHA256, CRC64NVME (vendored — table-based reflected impl, polynomial 0x9a6c9329ac4bc9b5, init/xor 0xFFFF...; verified against AWS test vector 0xae8b14860a799888 for '123456789'). parseRequestChecksums extracts every x-amz-checksum-<algo> header for a known algo (unknown headers are simply ignored — silent-OK is fine because AWS SDKs only set known ones); malformed base64 → 400 InvalidArgument. checksumWriter fans body bytes to all hashers via io.TeeReader on the put path; verifyChecksums compares after PutChunks and on mismatch deletes the just-written manifest and returns 400 BadDigest. writeChecksumHeaders echoes all persisted x-amz-checksum-<algo> on GetObject + HeadObject. Tests round-trip per-algo, mismatch-per-algo (404 follow-up confirms no object persisted), missing-headers no-op, and invalid base64 rejection."
     },
     {
       "id": "US-010",
