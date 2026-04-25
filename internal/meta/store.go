@@ -105,6 +105,7 @@ type Object struct {
 	Checksums      map[string]string
 	SSE            string
 	SSECKeyMD5     string
+	RestoreStatus  string
 }
 
 type ListOptions struct {
@@ -190,6 +191,7 @@ type Store interface {
 
 	SetObjectRetention(ctx context.Context, bucketID uuid.UUID, key, versionID, mode string, until time.Time) error
 	SetObjectLegalHold(ctx context.Context, bucketID uuid.UUID, key, versionID string, on bool) error
+	SetObjectRestoreStatus(ctx context.Context, bucketID uuid.UUID, key, versionID, status string) error
 
 	SetBucketLifecycle(ctx context.Context, bucketID uuid.UUID, xmlBlob []byte) error
 	GetBucketLifecycle(ctx context.Context, bucketID uuid.UUID) ([]byte, error)

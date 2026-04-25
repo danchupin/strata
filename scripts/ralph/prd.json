@@ -240,8 +240,8 @@
         "go test ./internal/s3api/... passes"
       ],
       "priority": 14,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "meta.Object.RestoreStatus added (additive ALTER objects ADD restore_status text). New meta.Store.SetObjectRestoreStatus(ctx, bucketID, key, versionID, status); both backends implement. Cassandra PutObject INSERT + GetObject SELECT extended (column appended at end of column list to keep diff additive). New internal/s3api/restore.go: postObjectRestore parses RestoreRequest XML (Days+Tier, both optional; default Days=1), 1MiB body cap matches other XML handlers; empty body OK; malformed XML → 400 MalformedXML; missing object → 404 NoSuchKey via mapMetaErr; on success persists 'ongoing-request=\"false\", expiry-date=\"<HTTP date>\"' format string into Object.RestoreStatus and returns 200. internal/s3api/server.go handleObject routes ?restore POST BEFORE the generic switch (subresource ordering rule), gates via requireObjectAccess action s3:RestoreObject. getObject sets x-amz-restore header when o.RestoreStatus != \"\" (HEAD too since shared handler). Tests in restore_test.go: round-trip (POST then HEAD echoes ongoing-request+expiry-date), 404 NoSuchKey on missing object, 400 MalformedXML on bad body, default Days when body empty."
     },
     {
       "id": "US-015",

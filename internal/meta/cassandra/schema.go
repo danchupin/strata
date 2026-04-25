@@ -143,6 +143,7 @@ var alterStatements = []string{
 	`ALTER TABLE objects ADD sse text`,
 	`ALTER TABLE multipart_uploads ADD sse text`,
 	`ALTER TABLE objects ADD ssec_key_md5 text`,
+	`ALTER TABLE objects ADD restore_status text`,
 }
 
 func isColumnAlreadyExists(err error) bool {

@@ -380,3 +380,25 @@ Started: Sat Apr 25 16:10:14 MSK 2026
   - x-amz-object-attributes is comma-separated. Tolerate whitespace via TrimSpace; reject unknown values with InvalidArgument (so clients learn quickly) rather than silently ignoring — this matches the spec and keeps the AC's "only listed fields populated" semantics auditable.
   - SSE-C gating must be repeated on every read endpoint that surfaces object metadata; do NOT factor it into a single chokepoint, because GetObject/HeadObject already inline-check it. Pattern: if o.SSECKeyMD5 != "" then requireSSECMatch(r, o.SSECKeyMD5) before writing the response.
 ---
+
+## 2026-04-25 - US-014 (RestoreObject stub endpoint)
+- Added meta.Object.RestoreStatus string + meta.Store.SetObjectRestoreStatus(ctx, bucketID, key, versionID, status) interface method.
+- Memory backend: RestoreStatus round-trips via existing shallow copy; setter calls findLatest then assigns.
+- Cassandra: additive ALTER objects ADD restore_status text; PutObject INSERT extended (column appended at end), GetObject SELECT extended, new SetObjectRestoreStatus uses UPDATE objects SET restore_status=?.
+- New internal/s3api/restore.go: postObjectRestore parses RestoreRequest XML (Days+Tier optional, default Days=1, 1MiB body cap). Empty body OK. Malformed XML → 400 MalformedXML. Missing object → 404 NoSuchKey via mapMetaErr. On success persists 'ongoing-request="false", expiry-date="<HTTP date>"' format string into Object.RestoreStatus, returns 200.
+- internal/s3api/server.go handleObject: routes ?restore POST BEFORE the bottom method switch; gates via requireObjectAccess action s3:RestoreObject. getObject sets x-amz-restore header when o.RestoreStatus != "" (HEAD shares the same handler).
+- Tests internal/s3api/restore_test.go: round-trip POST→HEAD (echoes ongoing-request + expiry-date), 404 NoSuchKey on missing key, 400 MalformedXML on bad body, default Days=1 when body empty.
+- Files changed:
+  - internal/meta/store.go (Object.RestoreStatus + interface method)
+  - internal/meta/memory/store.go (SetObjectRestoreStatus)
+  - internal/meta/cassandra/store.go (PutObject/GetObject column, SetObjectRestoreStatus)
+  - internal/meta/cassandra/schema.go (ALTER objects ADD restore_status text)
+  - internal/s3api/server.go (?restore route + x-amz-restore header in getObject)
+  - internal/s3api/restore.go (new)
+  - internal/s3api/restore_test.go (new)
+- Quality: go build ./... + go vet ./... + go test ./... all green.
+- **Learnings for future iterations:**
+  - When extending meta.Object with a new persisted field, the cassandra column-list ordering matters for code review readability but the SQL itself only cares about positional binding — append the column at the END of both INSERT and SELECT lists (mirroring the additive ALTER) so future iterations don't have to renumber every site. The PutObject/GetObject column lists are the canonical pair to keep in sync.
+  - x-amz-restore is one of those headers HEAD must include but GET typically does too; sharing getObject(body=true|false) is the existing idiom — do not split into a separate HEAD handler just to add response metadata.
+  - For storage-only stub endpoints (no real backend behaviour), persist the FORMATTED header value directly into the Object field rather than storing structured state and re-formatting per request. Saves a Sprintf on the hot read path; the cost is one re-write per restore call (rare).
+---

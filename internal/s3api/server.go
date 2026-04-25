@@ -393,6 +393,13 @@ func (s *Server) handleObject(w http.ResponseWriter, r *http.Request, bucket, ke
 		s.getObjectAttributes(w, r, b, key)
 		return
 	}
+	if q.Has("restore") && r.Method == http.MethodPost {
+		if !s.requireObjectAccess(w, r, b, key, "s3:RestoreObject") {
+			return
+		}
+		s.postObjectRestore(w, r, b, key)
+		return
+	}
 	if uploadID := q.Get("uploadId"); uploadID != "" {
 		switch r.Method {
 		case http.MethodPut:
@@ -605,6 +612,9 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	}
 	if o.LegalHold {
 		w.Header().Set("x-amz-object-lock-legal-hold", "ON")
+	}
+	if o.RestoreStatus != "" {
+		w.Header().Set("x-amz-restore", o.RestoreStatus)
 	}
 	if o.VersionID != "" && meta.IsVersioningActive(b.Versioning) {
 		w.Header().Set("x-amz-version-id", o.VersionID)

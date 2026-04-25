@@ -565,6 +565,17 @@ func (s *Store) SetObjectLegalHold(ctx context.Context, bucketID uuid.UUID, key,
 	return nil
 }
 
+func (s *Store) SetObjectRestoreStatus(ctx context.Context, bucketID uuid.UUID, key, versionID, status string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o, err := s.findLatest(bucketID, key, versionID)
+	if err != nil {
+		return err
+	}
+	o.RestoreStatus = status
+	return nil
+}
+
 func (s *Store) SetBucketLifecycle(ctx context.Context, bucketID uuid.UUID, xmlBlob []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
