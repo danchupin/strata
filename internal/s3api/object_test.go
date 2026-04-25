@@ -11,38 +11,38 @@ import (
 
 func TestObjectPutGetDelete(t *testing.T) {
 	h := newHarness(t)
-	h.mustStatus(h.doString("PUT", "/b", ""), 200)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
 
-	h.mustStatus(h.doString("PUT", "/b/greet.txt", "hello"), 200)
+	h.mustStatus(h.doString("PUT", "/bkt/greet.txt", "hello"), 200)
 
-	resp := h.doString("GET", "/b/greet.txt", "")
+	resp := h.doString("GET", "/bkt/greet.txt", "")
 	h.mustStatus(resp, 200)
 	if body := h.readBody(resp); body != "hello" {
 		t.Errorf("GET body: got %q want %q", body, "hello")
 	}
 
-	resp = h.doString("HEAD", "/b/greet.txt", "")
+	resp = h.doString("HEAD", "/bkt/greet.txt", "")
 	h.mustStatus(resp, 200)
 	if resp.Header.Get("Etag") == "" {
 		t.Errorf("HEAD missing ETag header")
 	}
 
-	h.mustStatus(h.doString("DELETE", "/b/greet.txt", ""), 204)
-	h.mustStatus(h.doString("GET", "/b/greet.txt", ""), 404)
+	h.mustStatus(h.doString("DELETE", "/bkt/greet.txt", ""), 204)
+	h.mustStatus(h.doString("GET", "/bkt/greet.txt", ""), 404)
 }
 
 func TestObjectLargeRoundTrip(t *testing.T) {
 	h := newHarness(t)
-	h.mustStatus(h.doString("PUT", "/b", ""), 200)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
 
 	src := make([]byte, 9<<20)
 	if _, err := rand.Read(src); err != nil {
 		t.Fatal(err)
 	}
 
-	h.mustStatus(h.do("PUT", "/b/big.bin", bytes.NewReader(src)), 200)
+	h.mustStatus(h.do("PUT", "/bkt/big.bin", bytes.NewReader(src)), 200)
 
-	resp := h.doString("GET", "/b/big.bin", "")
+	resp := h.doString("GET", "/bkt/big.bin", "")
 	h.mustStatus(resp, 200)
 	got, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -55,8 +55,8 @@ func TestObjectLargeRoundTrip(t *testing.T) {
 
 func TestObjectRangeGet(t *testing.T) {
 	h := newHarness(t)
-	h.mustStatus(h.doString("PUT", "/b", ""), 200)
-	h.mustStatus(h.doString("PUT", "/b/k", "0123456789"), 200)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	h.mustStatus(h.doString("PUT", "/bkt/k", "0123456789"), 200)
 
 	cases := []struct {
 		name       string
@@ -77,7 +77,7 @@ func TestObjectRangeGet(t *testing.T) {
 			if tc.hdr != "" {
 				headers = append(headers, "Range", tc.hdr)
 			}
-			resp := h.doString("GET", "/b/k", "", headers...)
+			resp := h.doString("GET", "/bkt/k", "", headers...)
 			h.mustStatus(resp, tc.wantStatus)
 			if cr := resp.Header.Get("Content-Range"); cr != tc.wantCR {
 				t.Errorf("Content-Range: got %q want %q", cr, tc.wantCR)
@@ -91,20 +91,20 @@ func TestObjectRangeGet(t *testing.T) {
 
 func TestListObjectsPrefixDelimiter(t *testing.T) {
 	h := newHarness(t)
-	h.mustStatus(h.doString("PUT", "/b", ""), 200)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
 
 	for _, k := range []string{"a.txt", "logs/2026/01/a.log", "logs/2026/01/b.log", "logs/2026/02/c.log"} {
-		h.mustStatus(h.doString("PUT", "/b/"+k, "x"), 200)
+		h.mustStatus(h.doString("PUT", "/bkt/"+k, "x"), 200)
 	}
 
-	resp := h.doString("GET", "/b?list-type=2&prefix=logs/&delimiter=/", "")
+	resp := h.doString("GET", "/bkt?list-type=2&prefix=logs/&delimiter=/", "")
 	h.mustStatus(resp, 200)
 	body := h.readBody(resp)
 	if !strings.Contains(body, "<CommonPrefixes><Prefix>logs/2026/</Prefix></CommonPrefixes>") {
 		t.Errorf("expected CommonPrefix logs/2026/, got: %s", body)
 	}
 
-	resp = h.doString("GET", "/b?list-type=2&prefix=logs/2026/01/", "")
+	resp = h.doString("GET", "/bkt?list-type=2&prefix=logs/2026/01/", "")
 	h.mustStatus(resp, 200)
 	body = h.readBody(resp)
 	if !strings.Contains(body, "<Key>logs/2026/01/a.log</Key>") ||
@@ -116,10 +116,10 @@ func TestListObjectsPrefixDelimiter(t *testing.T) {
 
 func TestStorageClassHeader(t *testing.T) {
 	h := newHarness(t)
-	h.mustStatus(h.doString("PUT", "/b", ""), 200)
-	h.mustStatus(h.doString("PUT", "/b/k", "x", "x-amz-storage-class", "STANDARD_IA"), 200)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	h.mustStatus(h.doString("PUT", "/bkt/k", "x", "x-amz-storage-class", "STANDARD_IA"), 200)
 
-	resp := h.doString("HEAD", "/b/k", "")
+	resp := h.doString("HEAD", "/bkt/k", "")
 	h.mustStatus(resp, 200)
 	if sc := resp.Header.Get("X-Amz-Storage-Class"); sc != "STANDARD_IA" {
 		t.Errorf("storage-class: got %q want STANDARD_IA", sc)

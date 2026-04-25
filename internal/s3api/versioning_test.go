@@ -22,23 +22,23 @@ func putObjectReturnVersion(t *testing.T, h *testHarness, path, body string) str
 
 func TestVersioningEnableAndReadVersion(t *testing.T) {
 	h := newHarness(t)
-	h.mustStatus(h.doString("PUT", "/b", ""), 200)
-	enableVersioning(h, "b")
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	enableVersioning(h, "bkt")
 
-	v1 := putObjectReturnVersion(t, h, "/b/doc", "v1")
-	v2 := putObjectReturnVersion(t, h, "/b/doc", "v2")
-	v3 := putObjectReturnVersion(t, h, "/b/doc", "v3")
+	v1 := putObjectReturnVersion(t, h, "/bkt/doc", "v1")
+	v2 := putObjectReturnVersion(t, h, "/bkt/doc", "v2")
+	v3 := putObjectReturnVersion(t, h, "/bkt/doc", "v3")
 	if v1 == "" || v2 == "" || v3 == "" || v1 == v2 || v2 == v3 {
 		t.Fatalf("version ids not distinct: %q %q %q", v1, v2, v3)
 	}
 
-	resp := h.doString("GET", "/b/doc", "")
+	resp := h.doString("GET", "/bkt/doc", "")
 	h.mustStatus(resp, 200)
 	if body := h.readBody(resp); body != "v3" {
 		t.Errorf("latest: got %q want v3", body)
 	}
 
-	resp = h.doString("GET", "/b/doc?versionId="+v1, "")
+	resp = h.doString("GET", "/bkt/doc?versionId="+v1, "")
 	h.mustStatus(resp, 200)
 	if body := h.readBody(resp); body != "v1" {
 		t.Errorf("versionId=v1: got %q want v1", body)
@@ -47,20 +47,20 @@ func TestVersioningEnableAndReadVersion(t *testing.T) {
 
 func TestVersioningDeleteMarker(t *testing.T) {
 	h := newHarness(t)
-	h.mustStatus(h.doString("PUT", "/b", ""), 200)
-	enableVersioning(h, "b")
-	_ = putObjectReturnVersion(t, h, "/b/doc", "v1")
-	v2 := putObjectReturnVersion(t, h, "/b/doc", "v2")
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	enableVersioning(h, "bkt")
+	_ = putObjectReturnVersion(t, h, "/bkt/doc", "v1")
+	v2 := putObjectReturnVersion(t, h, "/bkt/doc", "v2")
 
-	resp := h.doString("DELETE", "/b/doc", "")
+	resp := h.doString("DELETE", "/bkt/doc", "")
 	h.mustStatus(resp, 204)
 	if resp.Header.Get("X-Amz-Delete-Marker") != "true" {
 		t.Errorf("expected X-Amz-Delete-Marker: true")
 	}
 
-	h.mustStatus(h.doString("GET", "/b/doc", ""), 404)
+	h.mustStatus(h.doString("GET", "/bkt/doc", ""), 404)
 
-	resp = h.doString("GET", "/b/doc?versionId="+v2, "")
+	resp = h.doString("GET", "/bkt/doc?versionId="+v2, "")
 	h.mustStatus(resp, 200)
 	if body := h.readBody(resp); body != "v2" {
 		t.Errorf("old version body: got %q want v2", body)
@@ -69,12 +69,12 @@ func TestVersioningDeleteMarker(t *testing.T) {
 
 func TestListObjectVersions(t *testing.T) {
 	h := newHarness(t)
-	h.mustStatus(h.doString("PUT", "/b", ""), 200)
-	enableVersioning(h, "b")
-	putObjectReturnVersion(t, h, "/b/x", "v1")
-	putObjectReturnVersion(t, h, "/b/x", "v2")
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	enableVersioning(h, "bkt")
+	putObjectReturnVersion(t, h, "/bkt/x", "v1")
+	putObjectReturnVersion(t, h, "/bkt/x", "v2")
 
-	resp := h.doString("GET", "/b?versions", "")
+	resp := h.doString("GET", "/bkt?versions", "")
 	h.mustStatus(resp, 200)
 	body := h.readBody(resp)
 	matches := versionIDRE.FindAllStringSubmatch(body, -1)

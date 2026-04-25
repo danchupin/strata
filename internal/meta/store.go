@@ -27,6 +27,10 @@ var (
 	ErrMultipartPartMissing  = errors.New("multipart part not found")
 	ErrMultipartETagMismatch = errors.New("multipart part etag mismatch")
 	ErrNoSuchLifecycle       = errors.New("no lifecycle configuration for bucket")
+	ErrNoSuchCORS            = errors.New("no cors configuration for bucket")
+	ErrNoSuchBucketPolicy    = errors.New("no policy configured for bucket")
+	ErrNoSuchPublicAccessBlock = errors.New("no public access block configuration for bucket")
+	ErrNoSuchOwnershipControls = errors.New("no ownership controls configured for bucket")
 )
 
 const (
@@ -143,6 +147,22 @@ type Store interface {
 	SetBucketLifecycle(ctx context.Context, bucketID uuid.UUID, xmlBlob []byte) error
 	GetBucketLifecycle(ctx context.Context, bucketID uuid.UUID) ([]byte, error)
 	DeleteBucketLifecycle(ctx context.Context, bucketID uuid.UUID) error
+
+	SetBucketCORS(ctx context.Context, bucketID uuid.UUID, xmlBlob []byte) error
+	GetBucketCORS(ctx context.Context, bucketID uuid.UUID) ([]byte, error)
+	DeleteBucketCORS(ctx context.Context, bucketID uuid.UUID) error
+
+	SetBucketPolicy(ctx context.Context, bucketID uuid.UUID, jsonBlob []byte) error
+	GetBucketPolicy(ctx context.Context, bucketID uuid.UUID) ([]byte, error)
+	DeleteBucketPolicy(ctx context.Context, bucketID uuid.UUID) error
+
+	SetBucketPublicAccessBlock(ctx context.Context, bucketID uuid.UUID, xmlBlob []byte) error
+	GetBucketPublicAccessBlock(ctx context.Context, bucketID uuid.UUID) ([]byte, error)
+	DeleteBucketPublicAccessBlock(ctx context.Context, bucketID uuid.UUID) error
+
+	SetBucketOwnershipControls(ctx context.Context, bucketID uuid.UUID, xmlBlob []byte) error
+	GetBucketOwnershipControls(ctx context.Context, bucketID uuid.UUID) ([]byte, error)
+	DeleteBucketOwnershipControls(ctx context.Context, bucketID uuid.UUID) error
 
 	CreateMultipartUpload(ctx context.Context, mu *MultipartUpload) error
 	GetMultipartUpload(ctx context.Context, bucketID uuid.UUID, uploadID string) (*MultipartUpload, error)

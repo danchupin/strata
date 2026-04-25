@@ -14,9 +14,9 @@ var uploadIDRE = regexp.MustCompile(`<UploadId>([^<]+)</UploadId>`)
 
 func TestMultipartFullLifecycle(t *testing.T) {
 	h := newHarness(t)
-	h.mustStatus(h.doString("PUT", "/b", ""), 200)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
 
-	resp := h.doString("POST", "/b/mp?uploads", "")
+	resp := h.doString("POST", "/bkt/mp?uploads", "")
 	h.mustStatus(resp, 200)
 	initBody := h.readBody(resp)
 	m := uploadIDRE.FindStringSubmatch(initBody)
@@ -37,7 +37,7 @@ func TestMultipartFullLifecycle(t *testing.T) {
 	completeBody.WriteString("<CompleteMultipartUpload>")
 	for i, p := range parts {
 		pnum := i + 1
-		url := fmt.Sprintf("/b/mp?uploadId=%s&partNumber=%d", uploadID, pnum)
+		url := fmt.Sprintf("/bkt/mp?uploadId=%s&partNumber=%d", uploadID, pnum)
 		resp := h.do("PUT", url, byteReader(p))
 		h.mustStatus(resp, 200)
 		etag := strings.Trim(resp.Header.Get("Etag"), `"`)
@@ -46,14 +46,14 @@ func TestMultipartFullLifecycle(t *testing.T) {
 	}
 	completeBody.WriteString("</CompleteMultipartUpload>")
 
-	resp = h.doString("POST", "/b/mp?uploadId="+uploadID, completeBody.String())
+	resp = h.doString("POST", "/bkt/mp?uploadId="+uploadID, completeBody.String())
 	h.mustStatus(resp, 200)
 	complete := h.readBody(resp)
 	if !regexp.MustCompile(`-3&#34;</ETag>`).MatchString(complete) {
 		t.Errorf("expected composite etag with -3 suffix: %s", complete)
 	}
 
-	resp = h.doString("GET", "/b/mp", "")
+	resp = h.doString("GET", "/bkt/mp", "")
 	h.mustStatus(resp, http.StatusOK)
 	got, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -71,17 +71,17 @@ func TestMultipartFullLifecycle(t *testing.T) {
 
 func TestMultipartAbort(t *testing.T) {
 	h := newHarness(t)
-	h.mustStatus(h.doString("PUT", "/b", ""), 200)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
 
-	resp := h.doString("POST", "/b/k?uploads", "")
+	resp := h.doString("POST", "/bkt/k?uploads", "")
 	h.mustStatus(resp, 200)
 	uploadID := uploadIDRE.FindStringSubmatch(h.readBody(resp))[1]
 
-	h.mustStatus(h.do("PUT", "/b/k?uploadId="+uploadID+"&partNumber=1", byteReader([]byte("x"))), 200)
+	h.mustStatus(h.do("PUT", "/bkt/k?uploadId="+uploadID+"&partNumber=1", byteReader([]byte("x"))), 200)
 
-	h.mustStatus(h.doString("DELETE", "/b/k?uploadId="+uploadID, ""), 204)
+	h.mustStatus(h.doString("DELETE", "/bkt/k?uploadId="+uploadID, ""), 204)
 
-	resp = h.doString("GET", "/b?uploads", "")
+	resp = h.doString("GET", "/bkt?uploads", "")
 	h.mustStatus(resp, 200)
 	body := h.readBody(resp)
 	if strings.Contains(body, "<Upload>") {

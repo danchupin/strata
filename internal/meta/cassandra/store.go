@@ -1231,6 +1231,72 @@ func (s *Store) AbortMultipartUpload(ctx context.Context, bucketID uuid.UUID, up
 	return manifests, nil
 }
 
+func (s *Store) setBucketBlob(ctx context.Context, table, col string, bucketID uuid.UUID, blob []byte) error {
+	q := fmt.Sprintf("INSERT INTO %s (bucket_id, %s) VALUES (?, ?)", table, col)
+	return s.s.Query(q, gocqlUUID(bucketID), blob).WithContext(ctx).Exec()
+}
+
+func (s *Store) getBucketBlob(ctx context.Context, table, col string, bucketID uuid.UUID, missing error) ([]byte, error) {
+	var blob []byte
+	q := fmt.Sprintf("SELECT %s FROM %s WHERE bucket_id=?", col, table)
+	err := s.s.Query(q, gocqlUUID(bucketID)).WithContext(ctx).Scan(&blob)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return nil, missing
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(blob) == 0 {
+		return nil, missing
+	}
+	return blob, nil
+}
+
+func (s *Store) deleteBucketBlob(ctx context.Context, table string, bucketID uuid.UUID) error {
+	q := fmt.Sprintf("DELETE FROM %s WHERE bucket_id=?", table)
+	return s.s.Query(q, gocqlUUID(bucketID)).WithContext(ctx).Exec()
+}
+
+func (s *Store) SetBucketCORS(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(ctx, "bucket_cors", "rules", bucketID, blob)
+}
+func (s *Store) GetBucketCORS(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(ctx, "bucket_cors", "rules", bucketID, meta.ErrNoSuchCORS)
+}
+func (s *Store) DeleteBucketCORS(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(ctx, "bucket_cors", bucketID)
+}
+
+func (s *Store) SetBucketPolicy(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(ctx, "bucket_policy", "document", bucketID, blob)
+}
+func (s *Store) GetBucketPolicy(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(ctx, "bucket_policy", "document", bucketID, meta.ErrNoSuchBucketPolicy)
+}
+func (s *Store) DeleteBucketPolicy(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(ctx, "bucket_policy", bucketID)
+}
+
+func (s *Store) SetBucketPublicAccessBlock(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(ctx, "bucket_public_access_block", "config", bucketID, blob)
+}
+func (s *Store) GetBucketPublicAccessBlock(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(ctx, "bucket_public_access_block", "config", bucketID, meta.ErrNoSuchPublicAccessBlock)
+}
+func (s *Store) DeleteBucketPublicAccessBlock(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(ctx, "bucket_public_access_block", bucketID)
+}
+
+func (s *Store) SetBucketOwnershipControls(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(ctx, "bucket_ownership_controls", "config", bucketID, blob)
+}
+func (s *Store) GetBucketOwnershipControls(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(ctx, "bucket_ownership_controls", "config", bucketID, meta.ErrNoSuchOwnershipControls)
+}
+func (s *Store) DeleteBucketOwnershipControls(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(ctx, "bucket_ownership_controls", bucketID)
+}
+
 func gocqlUUID(u uuid.UUID) gocql.UUID {
 	var g gocql.UUID
 	copy(g[:], u[:])

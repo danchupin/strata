@@ -76,6 +76,22 @@ var tableDDL = []string{
 		bucket_id uuid PRIMARY KEY,
 		rules     blob
 	)`,
+	`CREATE TABLE IF NOT EXISTS bucket_cors (
+		bucket_id uuid PRIMARY KEY,
+		rules     blob
+	)`,
+	`CREATE TABLE IF NOT EXISTS bucket_policy (
+		bucket_id uuid PRIMARY KEY,
+		document  blob
+	)`,
+	`CREATE TABLE IF NOT EXISTS bucket_public_access_block (
+		bucket_id uuid PRIMARY KEY,
+		config    blob
+	)`,
+	`CREATE TABLE IF NOT EXISTS bucket_ownership_controls (
+		bucket_id uuid PRIMARY KEY,
+		config    blob
+	)`,
 	`CREATE TABLE IF NOT EXISTS gc_queue (
 		region       text,
 		enqueued_at  timestamp,

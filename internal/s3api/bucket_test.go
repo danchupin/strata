@@ -26,16 +26,16 @@ func TestBucketCRUD(t *testing.T) {
 
 func TestBucketDeleteRejectsNonEmpty(t *testing.T) {
 	h := newHarness(t)
-	h.mustStatus(h.doString("PUT", "/b", ""), 200)
-	h.mustStatus(h.doString("PUT", "/b/key.txt", "x"), 200)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	h.mustStatus(h.doString("PUT", "/bkt/key.txt", "x"), 200)
 
-	resp := h.doString("DELETE", "/b", "")
+	resp := h.doString("DELETE", "/bkt", "")
 	h.mustStatus(resp, 409)
 	body := h.readBody(resp)
 	if !strings.Contains(body, "BucketNotEmpty") {
 		t.Errorf("expected BucketNotEmpty, got: %s", body)
 	}
 
-	h.mustStatus(h.doString("DELETE", "/b/key.txt", ""), 204)
-	h.mustStatus(h.doString("DELETE", "/b", ""), 204)
+	h.mustStatus(h.doString("DELETE", "/bkt/key.txt", ""), 204)
+	h.mustStatus(h.doString("DELETE", "/bkt", ""), 204)
 }

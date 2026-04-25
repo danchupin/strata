@@ -20,6 +20,10 @@ type Store struct {
 	objects    map[uuid.UUID]map[string][]*meta.Object
 	multiparts map[uuid.UUID]map[string]*mpState
 	lifecycles map[uuid.UUID][]byte
+	cors       map[uuid.UUID][]byte
+	policies   map[uuid.UUID][]byte
+	pab        map[uuid.UUID][]byte
+	ownership  map[uuid.UUID][]byte
 	gc         map[string][]meta.GCEntry
 	locker     *Locker
 }
@@ -35,6 +39,10 @@ func New() *Store {
 		objects:    make(map[uuid.UUID]map[string][]*meta.Object),
 		multiparts: make(map[uuid.UUID]map[string]*mpState),
 		lifecycles: make(map[uuid.UUID][]byte),
+		cors:       make(map[uuid.UUID][]byte),
+		policies:   make(map[uuid.UUID][]byte),
+		pab:        make(map[uuid.UUID][]byte),
+		ownership:  make(map[uuid.UUID][]byte),
 		gc:         make(map[string][]meta.GCEntry),
 		locker:     NewLocker(),
 	}
@@ -513,6 +521,73 @@ func (s *Store) DeleteBucketLifecycle(ctx context.Context, bucketID uuid.UUID) e
 	defer s.mu.Unlock()
 	delete(s.lifecycles, bucketID)
 	return nil
+}
+
+func (s *Store) setBucketBlob(m map[uuid.UUID][]byte, bucketID uuid.UUID, blob []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.objects[bucketID]; !ok {
+		return meta.ErrBucketNotFound
+	}
+	m[bucketID] = append([]byte(nil), blob...)
+	return nil
+}
+
+func (s *Store) getBucketBlob(m map[uuid.UUID][]byte, bucketID uuid.UUID, missing error) ([]byte, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	blob, ok := m[bucketID]
+	if !ok {
+		return nil, missing
+	}
+	return append([]byte(nil), blob...), nil
+}
+
+func (s *Store) deleteBucketBlob(m map[uuid.UUID][]byte, bucketID uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(m, bucketID)
+	return nil
+}
+
+func (s *Store) SetBucketCORS(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(s.cors, bucketID, blob)
+}
+func (s *Store) GetBucketCORS(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(s.cors, bucketID, meta.ErrNoSuchCORS)
+}
+func (s *Store) DeleteBucketCORS(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(s.cors, bucketID)
+}
+
+func (s *Store) SetBucketPolicy(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(s.policies, bucketID, blob)
+}
+func (s *Store) GetBucketPolicy(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(s.policies, bucketID, meta.ErrNoSuchBucketPolicy)
+}
+func (s *Store) DeleteBucketPolicy(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(s.policies, bucketID)
+}
+
+func (s *Store) SetBucketPublicAccessBlock(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(s.pab, bucketID, blob)
+}
+func (s *Store) GetBucketPublicAccessBlock(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(s.pab, bucketID, meta.ErrNoSuchPublicAccessBlock)
+}
+func (s *Store) DeleteBucketPublicAccessBlock(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(s.pab, bucketID)
+}
+
+func (s *Store) SetBucketOwnershipControls(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(s.ownership, bucketID, blob)
+}
+func (s *Store) GetBucketOwnershipControls(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(s.ownership, bucketID, meta.ErrNoSuchOwnershipControls)
+}
+func (s *Store) DeleteBucketOwnershipControls(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(s.ownership, bucketID)
 }
 
 func (s *Store) CreateMultipartUpload(ctx context.Context, mu *meta.MultipartUpload) error {

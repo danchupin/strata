@@ -95,9 +95,65 @@ func (s *Server) listBuckets(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request, bucket string) {
 	q := r.URL.Query()
+	if r.Method == http.MethodOptions {
+		s.corsPreflight(w, r, bucket)
+		return
+	}
 	if q.Has("delete") && r.Method == http.MethodPost {
 		s.deleteObjects(w, r, bucket)
 		return
+	}
+	if q.Has("cors") {
+		switch r.Method {
+		case http.MethodGet:
+			s.getBucketCORS(w, r, bucket)
+			return
+		case http.MethodPut:
+			s.putBucketCORS(w, r, bucket)
+			return
+		case http.MethodDelete:
+			s.deleteBucketCORS(w, r, bucket)
+			return
+		}
+	}
+	if q.Has("policy") {
+		switch r.Method {
+		case http.MethodGet:
+			s.getBucketPolicy(w, r, bucket)
+			return
+		case http.MethodPut:
+			s.putBucketPolicy(w, r, bucket)
+			return
+		case http.MethodDelete:
+			s.deleteBucketPolicy(w, r, bucket)
+			return
+		}
+	}
+	if q.Has("publicAccessBlock") {
+		switch r.Method {
+		case http.MethodGet:
+			s.getBucketPublicAccessBlock(w, r, bucket)
+			return
+		case http.MethodPut:
+			s.putBucketPublicAccessBlock(w, r, bucket)
+			return
+		case http.MethodDelete:
+			s.deleteBucketPublicAccessBlock(w, r, bucket)
+			return
+		}
+	}
+	if q.Has("ownershipControls") {
+		switch r.Method {
+		case http.MethodGet:
+			s.getBucketOwnershipControls(w, r, bucket)
+			return
+		case http.MethodPut:
+			s.putBucketOwnershipControls(w, r, bucket)
+			return
+		case http.MethodDelete:
+			s.deleteBucketOwnershipControls(w, r, bucket)
+			return
+		}
 	}
 	if q.Has("acl") {
 		switch r.Method {
@@ -147,6 +203,10 @@ func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request, bucket str
 	}
 	switch r.Method {
 	case http.MethodPut:
+		if !validBucketName(bucket) {
+			writeError(w, r, ErrInvalidBucketName)
+			return
+		}
 		owner := auth.FromContext(r.Context()).Owner
 		_, err := s.Meta.CreateBucket(r.Context(), bucket, owner, "STANDARD")
 		if errors.Is(err, meta.ErrBucketAlreadyExists) {
@@ -188,9 +248,16 @@ func (s *Server) listObjects(w http.ResponseWriter, r *http.Request, bucket stri
 		return
 	}
 	q := r.URL.Query()
-	limit, _ := strconv.Atoi(q.Get("max-keys"))
-	if limit <= 0 {
-		limit = 1000
+	limit := 1000
+	if raw := q.Get("max-keys"); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil || v < 0 {
+			writeError(w, r, ErrInvalidArgument)
+			return
+		}
+		if v > 0 {
+			limit = v
+		}
 	}
 	marker := q.Get("continuation-token")
 	if marker == "" {
@@ -234,6 +301,10 @@ func (s *Server) listObjects(w http.ResponseWriter, r *http.Request, bucket stri
 }
 
 func (s *Server) handleObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	if r.Method == http.MethodOptions {
+		s.corsPreflight(w, r, bucket)
+		return
+	}
 	b, err := s.Meta.GetBucket(r.Context(), bucket)
 	if err != nil {
 		mapMetaErr(w, r, err)
@@ -326,6 +397,20 @@ func (s *Server) handleObject(w http.ResponseWriter, r *http.Request, bucket, ke
 }
 
 func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucket, key string) {
+	if ifMatch := r.Header.Get("If-Match"); ifMatch != "" {
+		existing, err := s.Meta.GetObject(r.Context(), b.ID, key, "")
+		if err != nil || !etagMatches(ifMatch, `"`+existing.ETag+`"`) {
+			writeError(w, r, ErrPreconditionFailed)
+			return
+		}
+	}
+	if ifNone := r.Header.Get("If-None-Match"); ifNone != "" {
+		existing, err := s.Meta.GetObject(r.Context(), b.ID, key, "")
+		if err == nil && (ifNone == "*" || etagMatches(ifNone, `"`+existing.ETag+`"`)) {
+			writeError(w, r, ErrPreconditionFailed)
+			return
+		}
+	}
 	class := r.Header.Get("x-amz-storage-class")
 	if class == "" {
 		class = b.DefaultClass
@@ -382,6 +467,12 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	o, err := s.Meta.GetObject(r.Context(), b.ID, key, versionID)
 	if err != nil {
 		mapMetaErr(w, r, err)
+		return
+	}
+	if status, ok := checkConditional(r.Header, `"`+o.ETag+`"`, o.Mtime); !ok {
+		w.Header().Set("ETag", `"`+o.ETag+`"`)
+		w.Header().Set("Last-Modified", o.Mtime.UTC().Format(http.TimeFormat))
+		w.WriteHeader(status)
 		return
 	}
 	w.Header().Set("Content-Type", firstNonEmpty(o.ContentType, "application/octet-stream"))
