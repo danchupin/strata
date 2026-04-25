@@ -19,6 +19,8 @@ var (
 	ErrInvalidAccessKeyId    = APIError{Code: "InvalidAccessKeyId", Message: "The access key Id you provided does not exist", Status: http.StatusForbidden}
 	ErrRequestTimeTooSkewed  = APIError{Code: "RequestTimeTooSkewed", Message: "Request time skewed too much from server time", Status: http.StatusForbidden}
 	ErrMissingAuth           = APIError{Code: "AccessDenied", Message: "Authorization is required", Status: http.StatusForbidden}
+	ErrExpiredToken          = APIError{Code: "ExpiredToken", Message: "The provided token has expired", Status: http.StatusForbidden}
+	ErrInvalidToken          = APIError{Code: "InvalidToken", Message: "The provided token is malformed or otherwise invalid", Status: http.StatusForbidden}
 	ErrNoSuchBucket          = APIError{Code: "NoSuchBucket", Message: "The specified bucket does not exist", Status: http.StatusNotFound}
 	ErrNoSuchKey           = APIError{Code: "NoSuchKey", Message: "The specified key does not exist", Status: http.StatusNotFound}
 	ErrNoSuchUpload        = APIError{Code: "NoSuchUpload", Message: "The specified multipart upload does not exist", Status: http.StatusNotFound}
@@ -75,6 +77,10 @@ func WriteAuthDenied(w http.ResponseWriter, r *http.Request, err error) {
 			apiErr = ErrInvalidAccessKeyId
 		case "missing Authorization header":
 			apiErr = ErrMissingAuth
+		case "expired token":
+			apiErr = ErrExpiredToken
+		case "invalid security token":
+			apiErr = ErrInvalidToken
 		default:
 			apiErr = ErrAccessDenied
 		}

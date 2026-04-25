@@ -136,8 +136,8 @@
         "go test ./internal/auth/... ./internal/s3api/... passes"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "auth.STSStore (internal/auth/sts.go) implements CredentialsStore over an in-memory map keyed by ASIA-prefixed AccessKey. Issue() mints (AccessKey, SecretKey, SessionToken) and stores Expiration; Lookup returns ErrExpiredToken on expired sessions (and evicts). auth.Credential.SessionToken added; middleware compares the request's x-amz-security-token against cred.SessionToken (header- or presigned-query-borne) — mismatch → ErrInvalidToken (403 InvalidToken). MultiStore skips caching creds with SessionToken so token expiry/revoke takes effect immediately. New iamAssumeRole handler in internal/s3api/sts.go gates on IAMRoot like other ?Action= endpoints; requires RoleArn + RoleSessionName, accepts optional DurationSeconds (900..43200, default 3600s). main.go prepends an STSStore to the credential chain and wires apiHandler.STS = sts. SetClock test hook drives expiry deterministically."
     },
     {
       "id": "US-009",

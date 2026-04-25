@@ -30,6 +30,9 @@ type Server struct {
 	// changes made via IAM admin endpoints (DeleteAccessKey, US-007) take
 	// effect on the next signed request. Typically wired to MultiStore.Invalidate.
 	InvalidateCredential func(accessKey string)
+	// STS, when set, enables the ?Action=AssumeRole endpoint and is the
+	// backing store for temporary credentials.
+	STS *auth.STSStore
 }
 
 func New(d data.Backend, m meta.Store) *Server {

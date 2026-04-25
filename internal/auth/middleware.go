@@ -72,6 +72,11 @@ func (m *Middleware) validateHeader(r *http.Request) (*AuthInfo, error) {
 	if !constantTimeEqual(expected, parsed.Signature) {
 		return nil, ErrSignatureInvalid
 	}
+	if cred.SessionToken != "" {
+		if r.Header.Get("X-Amz-Security-Token") != cred.SessionToken {
+			return nil, ErrInvalidToken
+		}
+	}
 
 	if bodyHash == streamingBody {
 		r.Body = newStreamingReader(r.Body)
@@ -108,6 +113,15 @@ func (m *Middleware) validatePresigned(r *http.Request) (*AuthInfo, error) {
 	expected := computeSignature(cred.Secret, parsed, reqTime.UTC().Format(sigTimeFormat), canonical)
 	if !constantTimeEqual(expected, parsed.Signature) {
 		return nil, ErrSignatureInvalid
+	}
+	if cred.SessionToken != "" {
+		token := r.Header.Get("X-Amz-Security-Token")
+		if token == "" {
+			token = r.URL.Query().Get("X-Amz-Security-Token")
+		}
+		if token != cred.SessionToken {
+			return nil, ErrInvalidToken
+		}
 	}
 	return &AuthInfo{
 		AccessKey: cred.AccessKey,

@@ -54,7 +54,12 @@ func (m *MultiStore) Lookup(ctx context.Context, accessKey string) (*Credential,
 	for _, s := range m.stores {
 		cred, err := s.Lookup(ctx, accessKey)
 		if err == nil {
-			m.put(accessKey, cred, false)
+			// Temporary STS creds carry a SessionToken and have their own
+			// expiry — never cache them, or a token revoked by the source
+			// store would survive in the cache up to ttl.
+			if cred.SessionToken == "" {
+				m.put(accessKey, cred, false)
+			}
 			return cred, nil
 		}
 		if errors.Is(err, ErrNoSuchCredential) {

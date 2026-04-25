@@ -17,6 +17,7 @@ Started: Sat Apr 25 16:10:14 MSK 2026
 - Test-only auth injection: testutil_test.go wraps the api with an X-Test-Principal header sniffer that builds &auth.AuthInfo{Owner: p}. Tests use h.doString(method, path, body, "X-Test-Principal", "owner"|"alt") to simulate non-anonymous callers. Omit the header for anonymous requests.
 - IAM admin endpoints (?Action=…) live at the root path (bucket==""). extractIAMAction(r) reads Action from query OR application/x-www-form-urlencoded body; handleIAM gates on auth.FromContext(...).Owner == s3api.IAMRootPrincipal ("iam-root"). When extending IAM, add the action to the dispatch switch in handleIAM and reuse iamParam(r, "Key") to read string params from query OR PostForm. Tests pass principal via X-Test-Principal: iam-root.
 - Access keys land in two cassandra tables: access_keys (PK access_key) for SigV4 lookup, iam_access_keys_by_user (PK (user_name, access_key)) for ListAccessKeys. Writes use a logged BATCH so both stay in sync; reads come from access_keys directly. Memory backend keeps a single accessKeys map keyed by AccessKeyID. memory.CredentialStore wraps the memory backend so memory-meta gateways have a usable SigV4 credential lookup (mirrors cassandra.CredentialStore). Server.InvalidateCredential is the hook that DeleteAccessKey calls to drop the MultiStore cache entry; main.go wires it to multi.Invalidate. Tests that need a fully signed request use the in-file SigV4 helper in iam_access_keys_signed_test.go (canonical request → derive signing key → HMAC).
+- Temporary credentials (STS AssumeRole) carry Credential.SessionToken; middleware compares the request's x-amz-security-token to it after signature passes — mismatch → ErrInvalidToken. auth.STSStore implements CredentialsStore so STS keys flow through MultiStore like static/cassandra/memory creds; MultiStore skips caching creds with non-empty SessionToken so revoke/expiry take effect immediately. STSStore.SetClock(now func()) drives deterministic expiry in tests.
 ---
 
 ## 2026-04-25 - US-001 (Parse AccessControlPolicy XML body)
@@ -202,4 +203,39 @@ Started: Sat Apr 25 16:10:14 MSK 2026
   - Server.InvalidateCredential is optional (nil-safe) — production wires it via main.go, tests can wire it via NewMultiStore + assignment. Without it, a deleted key would survive in MultiStore's cache for up to 60s, and the AC test would flake until TTL expires.
   - The signed-request test trick: pass the form via URL.RawQuery (not the body) so SigV4 signs the canonical query and the empty-body hash. The IAM dispatcher reads ?Action= via extractIAMAction, which checks the query first, so the same call path works for query-only and form-only senders.
   - SecretAccessKey is base64(30 random bytes) — 40 ASCII chars, matches AWS's secret-key alphabet (alphanumerics + /+=). Don't switch to hex unless you bump length, since AWS clients reject too-short secrets.
+---
+
+## 2026-04-25 - US-008 (Minimal STS AssumeRole endpoint)
+- New auth package additions: ErrExpiredToken/ErrInvalidToken sentinels; Credential.SessionToken field; auth.STSStore (internal/auth/sts.go) holds in-memory sessions keyed by ASIA-prefixed AccessKey, evicts on expiry, exposes Issue(owner, ttl) → STSSession, Revoke(ak), SetClock(now) test hook. Lookup returns ErrExpiredToken on expired sessions and ErrNoSuchCredential after eviction.
+- internal/auth/middleware.go: after signature verifies, if cred.SessionToken != "" then the request's X-Amz-Security-Token header (or X-Amz-Security-Token query param for presigned) must match — mismatch → ErrInvalidToken.
+- internal/auth/multi.go: skip put() for creds with non-empty SessionToken so STS revoke/expiry take effect on the next lookup; ErrExpiredToken propagates (not ErrNoSuchCredential, so MultiStore's lastErr surfaces it).
+- internal/s3api/errors.go: ErrExpiredToken (403 ExpiredToken) + ErrInvalidToken (403 InvalidToken) APIErrors; WriteAuthDenied maps "expired token" / "invalid security token" → those codes.
+- internal/s3api/sts.go: stsAssumeRole handler gated on IAMRoot via handleIAM dispatch ("AssumeRole" case in iam.go switch). Required params: RoleArn, RoleSessionName. Optional DurationSeconds (900..43200, default DefaultSTSDuration=1h). Response shape: AssumeRoleResponse > AssumeRoleResult > Credentials{AccessKeyId, SecretAccessKey, SessionToken, Expiration} + AssumedRoleUser{AssumedRoleId, Arn}; xmlns="https://sts.amazonaws.com/doc/2011-06-15/".
+- internal/s3api/server.go: Server.STS *auth.STSStore field; nil → AssumeRole returns 501 NotImplemented.
+- cmd/strata-gateway/main.go: prepend auth.NewSTSStore() to the credential chain; api.STS = sts; the "no credential stores" guard now compares against the new baseline (STS + static = 2 stores).
+- Tests:
+  - internal/auth/sts_test.go: Issue/Lookup positive, ErrNoSuchCredential on unknown key, ExpiredToken via SetClock advance, default 1h TTL when ttl<=0, Revoke drops session, unique creds across Issues, MultiStore-no-cache for SessionToken creds.
+  - internal/s3api/sts_signed_test.go: full SigV4 round-trip via newSTSHarness (re-uses signRequest from iam_access_keys_signed_test.go). Covers: AssumeRole returns the four credential fields with ASIA prefix; signed GET with the temp triple authenticates; missing/wrong x-amz-security-token → 403 InvalidToken; expired session via SetClock advance → 403 ExpiredToken; anonymous AssumeRole → 403; missing RoleArn/RoleSessionName → 400 ValidationError.
+- Files changed:
+  - internal/auth/types.go (Credential.SessionToken, ErrExpiredToken, ErrInvalidToken)
+  - internal/auth/sts.go (new)
+  - internal/auth/middleware.go (token verify after sig)
+  - internal/auth/multi.go (skip cache for temp creds)
+  - internal/auth/sts_test.go (new)
+  - internal/s3api/errors.go (ExpiredToken/InvalidToken APIErrors + WriteAuthDenied mapping)
+  - internal/s3api/iam.go (AssumeRole dispatch case)
+  - internal/s3api/sts.go (new)
+  - internal/s3api/server.go (Server.STS field)
+  - internal/s3api/sts_signed_test.go (new)
+  - cmd/strata-gateway/main.go (wire STSStore + api.STS)
+  - scripts/ralph/prd.json (passes: true; notes)
+  - scripts/ralph/progress.txt
+- Quality: go build ./... + go vet ./... + go test ./... all green.
+- **Learnings for future iterations:**
+  - STS access keys MUST use a distinct prefix (ASIA) from long-term keys (AKIA) so MultiStore's iteration order does not produce collisions if a static store happens to know the same key. Trust the prefix; the MultiStore iterates and only caches a hit when it lacks SessionToken.
+  - ErrExpiredToken is NOT ErrNoSuchCredential, so MultiStore's "continue on miss" loop surfaces it as lastErr — exactly what we want. If you ever add a third terminal error for credentials, follow the same pattern.
+  - SessionToken is verified outside of SigV4 SignedHeaders. Real AWS includes x-amz-security-token in SignedHeaders (so a tampered token also breaks the signature), but for our minimal impl the explicit header compare is enough; tests deliberately do NOT include the token in signRequest's signedHeaders to keep the helper small.
+  - SetClock(now func() time.Time) is the cleanest way to drive expiry in tests. The clock is read inside Issue (to set Expiration) and Lookup (to check it); make sure both reads go through the hook.
+  - When wiring a new CredentialsStore at gateway startup, prepend it to the chain only when faster lookups should win; the static store and DB-backed stores rely on the early-return semantics of MultiStore. STS lives at index 0 so a brief scan of in-memory sessions runs before any DB hop.
+  - The handleIAM gate enforces IAMRoot — minimal STS reuses that gate so AssumeRole is admin-only. If we later need cross-account workflows, factor the gate into a per-action allowlist instead of a single principal check.
 ---

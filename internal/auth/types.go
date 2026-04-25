@@ -12,12 +12,15 @@ var (
 	ErrSignatureInvalid = errors.New("signature does not match")
 	ErrClockSkew        = errors.New("request time outside permitted window")
 	ErrUnsupportedBody  = errors.New("unsupported x-amz-content-sha256 mode")
+	ErrExpiredToken     = errors.New("expired token")
+	ErrInvalidToken     = errors.New("invalid security token")
 )
 
 type Credential struct {
-	AccessKey string
-	Secret    string
-	Owner     string
+	AccessKey    string
+	Secret       string
+	Owner        string
+	SessionToken string
 }
 
 type CredentialsStore interface {

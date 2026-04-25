@@ -50,14 +50,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("auth credentials: %v", err)
 	}
-	stores := []auth.CredentialsStore{auth.NewStaticStore(credMap)}
+	sts := auth.NewSTSStore()
+	stores := []auth.CredentialsStore{sts, auth.NewStaticStore(credMap)}
 	if cs, ok := metaStore.(*metacassandra.Store); ok {
 		stores = append(stores, metacassandra.NewCredentialStore(cs.Session()))
 	}
 	if ms, ok := metaStore.(*metamem.Store); ok {
 		stores = append(stores, metamem.NewCredentialStore(ms))
 	}
-	if mode == auth.ModeRequired && len(credMap) == 0 && len(stores) == 1 {
+	if mode == auth.ModeRequired && len(credMap) == 0 && len(stores) == 2 {
 		log.Fatalf("auth: STRATA_AUTH_MODE=required but no credential stores are configured")
 	}
 	multi := auth.NewMultiStore(auth.DefaultCacheTTL, stores...)
@@ -70,6 +71,7 @@ func main() {
 	apiHandler := s3api.New(dataBackend, metaStore)
 	apiHandler.Region = cfg.RegionName
 	apiHandler.InvalidateCredential = multi.Invalidate
+	apiHandler.STS = sts
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())

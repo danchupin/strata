@@ -80,6 +80,8 @@ func (s *Server) handleIAM(w http.ResponseWriter, r *http.Request, action string
 		s.iamListAccessKeys(w, r)
 	case "DeleteAccessKey":
 		s.iamDeleteAccessKey(w, r)
+	case "AssumeRole":
+		s.stsAssumeRole(w, r)
 	default:
 		writeError(w, r, errIAMUnsupportedAction)
 	}
