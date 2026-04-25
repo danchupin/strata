@@ -386,6 +386,13 @@ func (s *Server) handleObject(w http.ResponseWriter, r *http.Request, bucket, ke
 			return
 		}
 	}
+	if q.Has("attributes") && r.Method == http.MethodGet {
+		if !s.requireObjectAccess(w, r, b, key, "s3:GetObject") {
+			return
+		}
+		s.getObjectAttributes(w, r, b, key)
+		return
+	}
 	if uploadID := q.Get("uploadId"); uploadID != "" {
 		switch r.Method {
 		case http.MethodPut:

@@ -223,8 +223,8 @@
         "go test ./internal/s3api/... passes"
       ],
       "priority": 13,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "New internal/s3api/object_attributes.go: GetObjectAttributesOutput XML response (ETag/Checksum/ObjectParts/StorageClass/ObjectSize). Header x-amz-object-attributes is REQUIRED — missing → 400 InvalidRequest; unknown attribute name → 400 InvalidArgument. Only listed fields are emitted (ObjectSize is *int64 so 0-byte objects can still appear; Checksum/ObjectParts are pointer-omitempty so they vanish for objects without them). Route wired in handleObject as `q.Has(\"attributes\") && GET` BEFORE the generic GET fallback; gated via requireObjectAccess action s3:GetObject so existing policy/ACL stack applies. SSE-C protected objects (o.SSECKeyMD5 != \"\") still require requireSSECMatch on this endpoint, mirroring getObject. ObjectParts is derived purely from the ETag suffix `-N` (parts rows are deleted on Complete); PartsCount alone is populated, no per-part list. Tests in object_attributes_test.go cover full attribute set, partial subset (only ETag+ObjectSize), missing key (404 NoSuchKey), missing header (400 InvalidRequest), unknown attribute (400 InvalidArgument), and multipart object PartsCount derivation."
     },
     {
       "id": "US-014",
