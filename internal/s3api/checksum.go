@@ -175,6 +175,55 @@ func (h *crc64NVMEHash) Reset()         { h.crc = 0xFFFFFFFFFFFFFFFF }
 func (h *crc64NVMEHash) Size() int      { return 8 }
 func (h *crc64NVMEHash) BlockSize() int { return 1 }
 
+// composeMultipartChecksums computes the AWS-style composite checksum
+// (BASE64(HASH(concat(rawDigest_i)))-N) for every algorithm present on every
+// requested part. Algorithms missing on any part are skipped. Returns nil when
+// no algorithm is universally present.
+func composeMultipartChecksums(parts []*checksumPart) map[string]string {
+	if len(parts) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for _, algo := range supportedChecksumAlgorithms {
+		raws := make([][]byte, 0, len(parts))
+		ok := true
+		for _, p := range parts {
+			v, has := p.Checksums[algo]
+			if !has || v == "" {
+				ok = false
+				break
+			}
+			raw, err := base64.StdEncoding.DecodeString(v)
+			if err != nil {
+				ok = false
+				break
+			}
+			raws = append(raws, raw)
+		}
+		if !ok {
+			continue
+		}
+		h, err := newChecksumHasher(algo)
+		if err != nil {
+			continue
+		}
+		for _, r := range raws {
+			_, _ = h.Write(r)
+		}
+		out[algo] = fmt.Sprintf("%s-%d", base64.StdEncoding.EncodeToString(h.Sum(nil)), len(parts))
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// checksumPart is the per-part input to composeMultipartChecksums; just the
+// fields we need so the helper does not depend on the meta package.
+type checksumPart struct {
+	Checksums map[string]string
+}
+
 // CRC64NVMEForTest exposes the CRC-64/NVME implementation for unit tests so
 // the published AWS test vector can be validated without re-deriving the
 // table here. Not part of the s3api public surface.

@@ -1130,9 +1130,9 @@ func (s *Store) SavePart(ctx context.Context, bucketID uuid.UUID, uploadID strin
 		return err
 	}
 	return s.s.Query(
-		`INSERT INTO multipart_parts (bucket_id, upload_id, part_number, etag, size, mtime, manifest)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		gocqlUUID(bucketID), uploadUUID, part.PartNumber, part.ETag, part.Size, time.Now().UTC(), manifestBlob,
+		`INSERT INTO multipart_parts (bucket_id, upload_id, part_number, etag, size, mtime, manifest, checksums)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		gocqlUUID(bucketID), uploadUUID, part.PartNumber, part.ETag, part.Size, time.Now().UTC(), manifestBlob, part.Checksums,
 	).WithContext(ctx).Exec()
 }
 
@@ -1142,7 +1142,7 @@ func (s *Store) ListParts(ctx context.Context, bucketID uuid.UUID, uploadID stri
 		return nil, meta.ErrMultipartNotFound
 	}
 	iter := s.s.Query(
-		`SELECT part_number, etag, size, mtime, manifest
+		`SELECT part_number, etag, size, mtime, manifest, checksums
 		 FROM multipart_parts WHERE bucket_id=? AND upload_id=?`,
 		gocqlUUID(bucketID), uploadUUID,
 	).WithContext(ctx).Iter()
@@ -1155,8 +1155,9 @@ func (s *Store) ListParts(ctx context.Context, bucketID uuid.UUID, uploadID stri
 		size         int64
 		mtime        time.Time
 		manifestBlob []byte
+		checksums    map[string]string
 	)
-	for iter.Scan(&partNumber, &etag, &size, &mtime, &manifestBlob) {
+	for iter.Scan(&partNumber, &etag, &size, &mtime, &manifestBlob, &checksums) {
 		m, err := decodeManifest(manifestBlob)
 		if err != nil {
 			return nil, err
@@ -1167,7 +1168,9 @@ func (s *Store) ListParts(ctx context.Context, bucketID uuid.UUID, uploadID stri
 			Size:       size,
 			Mtime:      mtime,
 			Manifest:   m,
+			Checksums:  checksums,
 		})
+		checksums = nil
 	}
 	if err := iter.Close(); err != nil {
 		return nil, err

@@ -135,6 +135,7 @@ var alterStatements = []string{
 	`ALTER TABLE objects ADD grants blob`,
 	`ALTER TABLE access_keys ADD user_name text`,
 	`ALTER TABLE objects ADD checksums map<text, text>`,
+	`ALTER TABLE multipart_parts ADD checksums map<text, text>`,
 }
 
 func isColumnAlreadyExists(err error) bool {

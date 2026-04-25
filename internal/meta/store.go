@@ -142,6 +142,7 @@ type MultipartPart struct {
 	Size       int64
 	Manifest   *data.Manifest
 	Mtime      time.Time
+	Checksums  map[string]string
 }
 
 type CompletePart struct {

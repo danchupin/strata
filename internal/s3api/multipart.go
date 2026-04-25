@@ -61,9 +61,18 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Buck
 		s.uploadPartCopy(w, r, b, uploadID, mu, partNumber)
 		return
 	}
+	checksumEntries, cerr := parseRequestChecksums(r)
+	if cerr != nil {
+		writeError(w, r, ErrInvalidArgument)
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
-	manifest, err := s.Data.PutChunks(ctx, r.Body, mu.StorageClass)
+	body := io.Reader(r.Body)
+	if len(checksumEntries) > 0 {
+		body = io.TeeReader(r.Body, checksumWriter(checksumEntries))
+	}
+	manifest, err := s.Data.PutChunks(ctx, body, mu.StorageClass)
 	if err != nil {
 		if strings.Contains(err.Error(), "unknown storage class") {
 			writeError(w, r, ErrInvalidStorageClass)
@@ -72,11 +81,18 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Buck
 		writeError(w, r, ErrInternal)
 		return
 	}
+	sums, verr := verifyChecksums(checksumEntries)
+	if verr != nil {
+		_ = s.Data.Delete(r.Context(), manifest)
+		writeError(w, r, ErrBadDigest)
+		return
+	}
 	part := &meta.MultipartPart{
 		PartNumber: partNumber,
 		ETag:       manifest.ETag,
 		Size:       manifest.Size,
 		Manifest:   manifest,
+		Checksums:  sums,
 	}
 	if err := s.Meta.SavePart(r.Context(), b.ID, uploadID, part); err != nil {
 		_ = s.Data.Delete(r.Context(), manifest)
@@ -84,6 +100,7 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Buck
 		return
 	}
 	w.Header().Set("ETag", `"`+manifest.ETag+`"`)
+	writeChecksumHeaders(w.Header(), sums)
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -219,6 +236,26 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		return
 	}
 
+	storedParts, err := s.Meta.ListParts(r.Context(), b.ID, uploadID)
+	if err != nil {
+		mapMetaErr(w, r, err)
+		return
+	}
+	byNumber := make(map[int]*meta.MultipartPart, len(storedParts))
+	for _, p := range storedParts {
+		byNumber[p.PartNumber] = p
+	}
+	requested := make([]*checksumPart, 0, len(parts))
+	for _, p := range parts {
+		sp, ok := byNumber[p.PartNumber]
+		if !ok {
+			writeError(w, r, ErrInvalidPart)
+			return
+		}
+		requested = append(requested, &checksumPart{Checksums: sp.Checksums})
+	}
+	composite := composeMultipartChecksums(requested)
+
 	finalETag, err := multipartETag(parts)
 	if err != nil {
 		writeError(w, r, ErrInvalidPart)
@@ -232,6 +269,7 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		StorageClass: mu.StorageClass,
 		ETag:         finalETag,
 		Mtime:        time.Now().UTC(),
+		Checksums:    composite,
 	}
 
 	orphans, err := s.Meta.CompleteMultipartUpload(r.Context(), obj, uploadID, parts, meta.IsVersioningActive(b.Versioning))
@@ -249,11 +287,17 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		}
 	}
 
+	writeChecksumHeaders(w.Header(), composite)
 	writeXML(w, http.StatusOK, completeMultipartResult{
-		Location: fmt.Sprintf("/%s/%s", b.Name, key),
-		Bucket:   b.Name,
-		Key:      key,
-		ETag:     `"` + finalETag + `"`,
+		Location:          fmt.Sprintf("/%s/%s", b.Name, key),
+		Bucket:            b.Name,
+		Key:               key,
+		ETag:              `"` + finalETag + `"`,
+		ChecksumCRC32:     composite["CRC32"],
+		ChecksumCRC32C:    composite["CRC32C"],
+		ChecksumSHA1:      composite["SHA1"],
+		ChecksumSHA256:    composite["SHA256"],
+		ChecksumCRC64NVME: composite["CRC64NVME"],
 	})
 }
 

@@ -171,8 +171,8 @@
         "go test ./internal/s3api/... passes"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "meta.MultipartPart.Checksums map[string]string round-trips through both backends (cassandra schema appended additive ALTER multipart_parts ADD checksums map<text,text>; SavePart INSERT and ListParts SELECT extended). uploadPart in internal/s3api/multipart.go now wraps the body with the same parseRequestChecksums + io.TeeReader(checksumWriter) + verifyChecksums chain used by putObject; mismatch deletes the just-written manifest and returns 400 BadDigest. On success the part's Checksums map is persisted via SavePart and echoed via writeChecksumHeaders on the 200. completeMultipart runs ListParts before CompleteMultipartUpload to grab per-part Checksums by part number, then composeMultipartChecksums (in checksum.go) takes algos present on every requested part, base64-decodes each part's digest, runs the algo over the concatenation, and returns base64(hash(concat))-N. The composite is set on obj.Checksums (so GetObject/HeadObject echo it) AND emitted on the response as both x-amz-checksum-<algo> headers and the corresponding ChecksumCRC32/ChecksumCRC32C/ChecksumSHA1/ChecksumSHA256/ChecksumCRC64NVME XML elements (omitempty). Tests in multipart_checksum_test.go: 3-part CRC32 happy path verifies the part-echo header, the composite header, the XML composite field, and the GET-side echo; per-part mismatch returns 400 BadDigest and ListParts shows no persisted part; complete with no part checksums emits no Checksum* fields (composite is nil)."
     },
     {
       "id": "US-011",
