@@ -32,7 +32,19 @@ var (
 	ErrNoSuchPublicAccessBlock = errors.New("no public access block configuration for bucket")
 	ErrNoSuchOwnershipControls = errors.New("no ownership controls configured for bucket")
 	ErrNoSuchGrants            = errors.New("no acl grants persisted for resource")
+	ErrIAMUserNotFound         = errors.New("iam user not found")
+	ErrIAMUserAlreadyExists    = errors.New("iam user already exists")
 )
+
+// IAMUser is a minimal IAM principal record used by the admin endpoints
+// (?Action=CreateUser etc.). Stored in the meta backend so identities outlive
+// gateway restarts.
+type IAMUser struct {
+	UserName  string
+	UserID    string
+	Path      string
+	CreatedAt time.Time
+}
 
 // Grant is a single ACL grant entry persisted alongside the canned ACL.
 // GranteeType is one of: CanonicalUser, Group, AmazonCustomerByEmail.
@@ -181,6 +193,11 @@ type Store interface {
 	SetBucketOwnershipControls(ctx context.Context, bucketID uuid.UUID, xmlBlob []byte) error
 	GetBucketOwnershipControls(ctx context.Context, bucketID uuid.UUID) ([]byte, error)
 	DeleteBucketOwnershipControls(ctx context.Context, bucketID uuid.UUID) error
+
+	CreateIAMUser(ctx context.Context, u *IAMUser) error
+	GetIAMUser(ctx context.Context, userName string) (*IAMUser, error)
+	ListIAMUsers(ctx context.Context, pathPrefix string) ([]*IAMUser, error)
+	DeleteIAMUser(ctx context.Context, userName string) error
 
 	CreateMultipartUpload(ctx context.Context, mu *MultipartUpload) error
 	GetMultipartUpload(ctx context.Context, bucketID uuid.UUID, uploadID string) (*MultipartUpload, error)

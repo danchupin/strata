@@ -26,6 +26,7 @@ type Store struct {
 	ownership    map[uuid.UUID][]byte
 	bucketGrants map[uuid.UUID][]meta.Grant
 	objectGrants map[grantKey][]meta.Grant
+	iamUsers     map[string]*meta.IAMUser
 	gc           map[string][]meta.GCEntry
 	locker       *Locker
 }
@@ -53,6 +54,7 @@ func New() *Store {
 		ownership:    make(map[uuid.UUID][]byte),
 		bucketGrants: make(map[uuid.UUID][]meta.Grant),
 		objectGrants: make(map[grantKey][]meta.Grant),
+		iamUsers:     make(map[string]*meta.IAMUser),
 		gc:           make(map[string][]meta.GCEntry),
 		locker:       NewLocker(),
 	}
@@ -845,6 +847,53 @@ func (s *Store) AbortMultipartUpload(ctx context.Context, bucketID uuid.UUID, up
 	}
 	delete(ups, uploadID)
 	return manifests, nil
+}
+
+func (s *Store) CreateIAMUser(ctx context.Context, u *meta.IAMUser) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.iamUsers[u.UserName]; ok {
+		return meta.ErrIAMUserAlreadyExists
+	}
+	cp := *u
+	s.iamUsers[u.UserName] = &cp
+	return nil
+}
+
+func (s *Store) GetIAMUser(ctx context.Context, userName string) (*meta.IAMUser, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	u, ok := s.iamUsers[userName]
+	if !ok {
+		return nil, meta.ErrIAMUserNotFound
+	}
+	cp := *u
+	return &cp, nil
+}
+
+func (s *Store) ListIAMUsers(ctx context.Context, pathPrefix string) ([]*meta.IAMUser, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*meta.IAMUser, 0, len(s.iamUsers))
+	for _, u := range s.iamUsers {
+		if pathPrefix != "" && !strings.HasPrefix(u.Path, pathPrefix) {
+			continue
+		}
+		cp := *u
+		out = append(out, &cp)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UserName < out[j].UserName })
+	return out, nil
+}
+
+func (s *Store) DeleteIAMUser(ctx context.Context, userName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.iamUsers[userName]; !ok {
+		return meta.ErrIAMUserNotFound
+	}
+	delete(s.iamUsers, userName)
+	return nil
 }
 
 func (s *Store) Close() error { return nil }

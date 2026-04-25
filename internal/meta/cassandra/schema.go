@@ -116,6 +116,12 @@ var tableDDL = []string{
 		disabled   boolean,
 		created_at timestamp
 	)`,
+	`CREATE TABLE IF NOT EXISTS iam_users (
+		user_name  text PRIMARY KEY,
+		user_id    text,
+		path       text,
+		created_at timestamp
+	)`,
 }
 
 var alterStatements = []string{

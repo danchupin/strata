@@ -102,8 +102,8 @@
         "go test ./internal/s3api/... passes"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "meta.IAMUser + ErrIAMUserNotFound/ErrIAMUserAlreadyExists added to internal/meta/store.go; CreateIAMUser/GetIAMUser/ListIAMUsers/DeleteIAMUser are part of meta.Store. Memory backend mirrors via iamUsers map[string]*meta.IAMUser. Cassandra: new iam_users table (user_name PK, user_id, path, created_at) with LWT IF NOT EXISTS / IF EXISTS to map ErrIAMUserAlreadyExists / ErrIAMUserNotFound. New internal/s3api/iam.go exports IAMRootPrincipal=\"iam-root\" — handleIAM gates every ?Action= endpoint on info.Owner==IAMRootPrincipal (anonymous fails). Action dispatch reads Action from query OR application/x-www-form-urlencoded body via extractIAMAction. Wired in ServeHTTP: bucket==\"\" + Action!=\"\" → handleIAM. Response shapes match AWS IAM XML (CreateUserResponse > CreateUserResult > User; ListUsersResponse > ListUsersResult > Users > member); errors are EntityAlreadyExists (409), NoSuchEntity (404), ValidationError (400), InvalidAction (400)."
     },
     {
       "id": "US-007",

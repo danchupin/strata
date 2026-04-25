@@ -52,6 +52,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case bucket == "":
+		if action := extractIAMAction(r); action != "" {
+			s.handleIAM(w, r, action)
+			return
+		}
 		if r.Method == http.MethodGet {
 			s.listBuckets(w, r)
 			return

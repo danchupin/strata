@@ -15,6 +15,7 @@ Started: Sat Apr 25 16:10:14 MSK 2026
 - internal/s3api/access.go centralises policy gating: principalForRequest(r) returns "*" for anonymous, otherwise the AuthInfo.Owner; bucketARN/objectARN build the canonical resource strings; requireAccess(w, r, b, action, arn) returns false (and writes 403) on policy denial. No-policy buckets bypass the gate so behaviour stays unchanged when no JSON policy is set.
 - ACL gating lives in the same access.go: requireObjectAccess(w, r, b, key, action) wraps requireAccess (policy) then requireACL (canned + persisted grants). Use it for every object-level dispatch. Owner FC = info.Owner == b.Owner short-circuits both gates; per-object grants override bucket ACL on s3:GetObject only.
 - Test-only auth injection: testutil_test.go wraps the api with an X-Test-Principal header sniffer that builds &auth.AuthInfo{Owner: p}. Tests use h.doString(method, path, body, "X-Test-Principal", "owner"|"alt") to simulate non-anonymous callers. Omit the header for anonymous requests.
+- IAM admin endpoints (?Action=…) live at the root path (bucket==""). extractIAMAction(r) reads Action from query OR application/x-www-form-urlencoded body; handleIAM gates on auth.FromContext(...).Owner == s3api.IAMRootPrincipal ("iam-root"). When extending IAM, add the action to the dispatch switch in handleIAM and reuse iamParam(r, "Key") to read string params from query OR PostForm. Tests pass principal via X-Test-Principal: iam-root.
 ---
 
 ## 2026-04-25 - US-001 (Parse AccessControlPolicy XML body)
@@ -137,4 +138,34 @@ Started: Sat Apr 25 16:10:14 MSK 2026
   - MultiStore caches negative results too — necessary defence against floods on unknown keys, but means new keys take up to ttl seconds to be visible after Put. US-007 DeleteAccessKey must call MultiStore.Invalidate; CreateAccessKey can skip Invalidate (no negative cache entry yet, or stampede acceptable).
   - For the cassandra.Store accessor: cmd uses metaStore.(*metacassandra.Store).Session() to share the session with auxiliary subsystems. When meta backend is "memory", IAM/access-key features simply don't get attached.
   - cassandra.CredentialStore.Put/Delete don't INVALIDATE the MultiStore cache directly — caller must Invalidate. Will codify this contract in IAM endpoints (US-007).
+---
+
+## 2026-04-25 - US-006 (IAM users + CreateUser/GetUser/ListUsers/DeleteUser endpoints)
+- Added meta.IAMUser type and ErrIAMUserNotFound/ErrIAMUserAlreadyExists sentinels to internal/meta/store.go; meta.Store interface grew CreateIAMUser/GetIAMUser/ListIAMUsers/DeleteIAMUser.
+- Memory backend mirrors via iamUsers map[string]*meta.IAMUser with the same map-clone-on-read pattern used elsewhere.
+- Cassandra backend: new iam_users table (user_name text PK, user_id text, path text, created_at timestamp) appended to tableDDL; new internal/meta/cassandra/iam.go uses LWT (IF NOT EXISTS / IF EXISTS) so create/delete map cleanly to the sentinel errors.
+- New internal/s3api/iam.go exports IAMRootPrincipal = "iam-root". handleIAM(action) gates every ?Action= endpoint on auth.FromContext(...).Owner == IAMRootPrincipal — anonymous and non-root principals get 403 AccessDenied.
+- extractIAMAction(r) reads the Action param from URL query OR application/x-www-form-urlencoded body; iamParam(r,k) does the same for the rest. r.PostForm is parsed once via r.ParseForm() inside extractIAMAction; subsequent iamParam calls reuse it.
+- ServeHTTP: when bucket=="" and Action != "", route to handleIAM before falling through to ListBuckets. Avoids colliding with the existing root-path GET behaviour.
+- Response shapes match the AWS IAM XML schema (CreateUserResponse > CreateUserResult > User; ListUsersResponse > ListUsersResult > Users > member). Error codes: EntityAlreadyExists (409), NoSuchEntity (404), ValidationError (400), InvalidAction (400).
+- UserId is generated as "AID" + 10-byte hex; CreateDate is RFC3339 UTC; Arn is built as "arn:aws:iam::strata:user<path><name>" with leading-slash normalization.
+- Tests in internal/s3api/iam_test.go: anonymous denied, non-root principal denied, full round-trip CreateUser→GetUser→ListUsers→DeleteUser→GetUser=NoSuchEntity, double-create=EntityAlreadyExists, delete-missing=NoSuchEntity, missing UserName=ValidationError, unknown action=InvalidAction.
+- Files changed:
+  - internal/meta/store.go (IAMUser type, sentinels, interface methods)
+  - internal/meta/memory/store.go (iamUsers map + 4 methods)
+  - internal/meta/cassandra/iam.go (new)
+  - internal/meta/cassandra/schema.go (iam_users table)
+  - internal/s3api/iam.go (new)
+  - internal/s3api/server.go (ServeHTTP IAM dispatch)
+  - internal/s3api/iam_test.go (new)
+  - scripts/ralph/prd.json (passes: true; notes)
+  - scripts/ralph/progress.txt
+- Quality: go build ./... + go vet ./... + go test ./... all green.
+- **Learnings for future iterations:**
+  - For ?Action= dispatch, branch in ServeHTTP on bucket=="" before other paths so IAM/STS endpoints (US-006/007/008) never collide with bucket-name routing. The root path is the canonical AWS IAM endpoint.
+  - r.ParseForm() consumes the body once. Read the Action ONCE via extractIAMAction and rely on r.PostForm thereafter — calling ParseForm again is fine but repeated body reads are not.
+  - LWT (IF NOT EXISTS / IF EXISTS) is the cleanest way to map create/delete to sentinel errors in cassandra; avoids a separate read-then-write round-trip.
+  - The auth gate distinguishes anonymous vs non-root via Owner: do NOT trust !Anonymous alone — testutil_test.go injection sets Owner without setting Anonymous, so checks must look at Owner directly. (Same pattern as US-004 owner-FC.)
+  - meta.Store grows with each user story; the compiler enforces both backends implement new methods, so add interface entries only after both implementations compile. The cassandra test build pulls in both.
+  - When US-007 lands, append CreateAccessKey/ListAccessKeys/DeleteAccessKey to the iam.go switch and pass the user_name as a foreign key into access_keys (reuse cassandra.CredentialStore.Put/Delete from US-005). DeleteAccessKey must also call MultiStore.Invalidate on the access_key.
 ---
