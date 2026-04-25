@@ -109,6 +109,13 @@ var tableDDL = []string{
 		name   text PRIMARY KEY,
 		holder text
 	)`,
+	`CREATE TABLE IF NOT EXISTS access_keys (
+		access_key text PRIMARY KEY,
+		secret_key text,
+		owner      text,
+		disabled   boolean,
+		created_at timestamp
+	)`,
 }
 
 var alterStatements = []string{

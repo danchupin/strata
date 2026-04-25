@@ -4,6 +4,9 @@ Started: Sat Apr 25 16:10:14 MSK 2026
 ## Codebase Patterns
 - meta.Store is the single interface every storage backend (memory + cassandra) must implement; adding a method requires updating both backends or builds break (compiler enforces).
 - Bucket-scoped blobs use the setBucketBlob/getBucketBlob/deleteBucketBlob helpers in both backends — model new bucket-level resources (grants, encryption, website, …) on this pattern.
+- Auth credentials use auth.CredentialsStore (NOT auth.Store) and auth.ErrNoSuchCredential (NOT auth.ErrCredentialNotFound). PRDs sometimes use the wrong names; trust internal/auth/types.go.
+- auth.MultiStore (internal/auth/multi.go) composes any number of CredentialsStore backends with a 60s positive+negative TTL cache and Invalidate(accessKey). Use it as the gateway's Middleware.Store; append new backends instead of replacing the static one.
+- cmd/strata-gateway/main.go obtains the cassandra session via metaStore.(*metacassandra.Store).Session() — reuse this idiom whenever an auxiliary subsystem needs CQL access without re-opening a session.
 - Cassandra cannot UPDATE the buckets table by `id` (PK is `name`); for bucket_id-keyed blobs add a separate table keyed by bucket_id, not a column on `buckets`.
 - Cassandra schema evolution: append CREATE TABLE IF NOT EXISTS to tableDDL; append additive `ALTER TABLE ... ADD` to alterStatements. isColumnAlreadyExists handles re-runs.
 - s3api handlers accept XML bodies with io.ReadAll(io.LimitReader(r.Body, 1<<20)).
@@ -110,4 +113,28 @@ Started: Sat Apr 25 16:10:14 MSK 2026
   - AmazonCustomerByEmail is parsed and persisted (US-001) but cannot be matched by the gate because we don't store the requester's email — keep behaviour as never-match until we add email lookup.
   - When extending the gate to a new endpoint, always go through requireObjectAccess (not raw requireAccess) so ACLs are enforced; pass action verbatim ("s3:PutObject" etc.) to keep policy authors' expectations.
   - For non-anonymous principal tests, set X-Test-Principal in the request headers; the harness injects auth.WithAuth so the gate sees a real Owner.
+---
+
+## 2026-04-25 - US-005 (Cassandra-backed credentials store)
+- New cassandra.CredentialStore (internal/meta/cassandra/credentials.go) implements auth.CredentialsStore against the new access_keys table; SELECT secret_key, owner, disabled. gocql.ErrNotFound and disabled=true both surface as auth.ErrNoSuchCredential (revoked == deleted).
+- access_keys table appended to tableDDL with CREATE TABLE IF NOT EXISTS (additive). Schema: access_key text PK, secret_key text, owner text, disabled boolean, created_at timestamp.
+- auth.MultiStore (internal/auth/multi.go): tries stores in order, returns first hit. 60s default TTL cache (auth.DefaultCacheTTL exported) for both positive AND negative results; transient (non-ErrNoSuchCredential) errors propagate without caching so callers can retry. Invalidate(accessKey) drops the cache entry; callers must invoke after rotating/deleting a key.
+- cmd/strata-gateway/main.go: builds []auth.CredentialsStore = [static, cassandra?] (cassandra appended only when metaStore.(*metacassandra.Store) succeeds via Session()). The required-mode credential check now allows just-cassandra setups (no static creds) — counts total stores, not credMap size.
+- Helpers on cassandra.CredentialStore: Put(ctx, cred, disabled) and Delete(ctx, accessKey) — internal-only, used by upcoming IAM endpoints (US-006/US-007). Not part of the auth.CredentialsStore interface.
+- Tests in internal/auth/multi_test.go (black-box package auth_test) cover: static-before-dynamic precedence, fall-through to dynamic, miss, disabled→missing, cache-hit avoids backend calls, negative cache, key rotation via Invalidate, deleted-key returns ErrNoSuchCredential, TTL expiry, transient-error not cached.
+- Files changed:
+  - internal/meta/cassandra/schema.go (access_keys table)
+  - internal/meta/cassandra/credentials.go (new)
+  - internal/auth/multi.go (new)
+  - internal/auth/multi_test.go (new)
+  - cmd/strata-gateway/main.go (wire MultiStore)
+  - scripts/ralph/prd.json (passes: true; notes)
+  - scripts/ralph/progress.txt
+- Quality: go build ./... + go vet ./... + go test ./... all green.
+- **Learnings for future iterations:**
+  - PRDs misname types: AC says "auth.Store" / "auth.ErrCredentialNotFound" but the actual API is auth.CredentialsStore + auth.ErrNoSuchCredential. Always grep the package before mirroring AC names.
+  - Cassandra disabled flag MUST surface as ErrNoSuchCredential, not as a separate error. The middleware path treats anything except a hit as 403 InvalidAccessKeyId; an explicit "disabled" error would create a different code path nothing else handles.
+  - MultiStore caches negative results too — necessary defence against floods on unknown keys, but means new keys take up to ttl seconds to be visible after Put. US-007 DeleteAccessKey must call MultiStore.Invalidate; CreateAccessKey can skip Invalidate (no negative cache entry yet, or stampede acceptable).
+  - For the cassandra.Store accessor: cmd uses metaStore.(*metacassandra.Store).Session() to share the session with auxiliary subsystems. When meta backend is "memory", IAM/access-key features simply don't get attached.
+  - cassandra.CredentialStore.Put/Delete don't INVALIDATE the MultiStore cache directly — caller must Invalidate. Will codify this contract in IAM endpoints (US-007).
 ---

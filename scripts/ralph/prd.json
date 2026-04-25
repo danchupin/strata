@@ -85,8 +85,8 @@
         "go test ./internal/auth/... passes"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "auth.CredentialsStore is the existing iface (not auth.Store); auth.ErrNoSuchCredential is the existing sentinel (not auth.ErrCredentialNotFound) — used both verbatim. New cassandra.CredentialStore (internal/meta/cassandra/credentials.go) selects from access_keys (PK=access_key); disabled rows are surfaced as ErrNoSuchCredential. Schema: CREATE TABLE IF NOT EXISTS access_keys appended to tableDDL (additive). New auth.MultiStore (internal/auth/multi.go) tries stores in order, caches positive AND negative results for ttl, exposes Invalidate(accessKey); transient (non-ErrNoSuchCredential) errors propagate without caching. Wired in cmd/strata-gateway/main.go: static store first; cassandra.CredentialStore appended only when meta backend is cassandra (via metaStore.(*metacassandra.Store).Session()). DefaultCacheTTL = 60s exported for callers."
     },
     {
       "id": "US-006",

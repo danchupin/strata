@@ -50,11 +50,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("auth credentials: %v", err)
 	}
-	if mode == auth.ModeRequired && len(credMap) == 0 {
-		log.Fatalf("auth: STRATA_AUTH_MODE=required but STRATA_STATIC_CREDENTIALS is empty")
+	stores := []auth.CredentialsStore{auth.NewStaticStore(credMap)}
+	if cs, ok := metaStore.(*metacassandra.Store); ok {
+		stores = append(stores, metacassandra.NewCredentialStore(cs.Session()))
+	}
+	if mode == auth.ModeRequired && len(credMap) == 0 && len(stores) == 1 {
+		log.Fatalf("auth: STRATA_AUTH_MODE=required but no credential stores are configured")
 	}
 	mw := &auth.Middleware{
-		Store: auth.NewStaticStore(credMap),
+		Store: auth.NewMultiStore(auth.DefaultCacheTTL, stores...),
 		Mode:  mode,
 	}
 
