@@ -189,8 +189,8 @@
         "go test ./internal/s3api/... passes"
       ],
       "priority": 11,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "meta.Object.SSE + meta.MultipartUpload.SSE round-trip through both backends (cassandra: additive ALTER objects ADD sse text + ALTER multipart_uploads ADD sse text; PutObject INSERT, GetObject SELECT, CreateMultipartUpload INSERT, GetMultipartUpload SELECT extended). Memory backend round-trips via shallow-copy. New meta.ErrNoSuchEncryption sentinel + Set/Get/DeleteBucketEncryption interface methods, both backends use the existing setBucketBlob/getBucketBlob/deleteBucketBlob blob helpers. internal/s3api/encryption.go: new ServerSideEncryptionConfiguration XML, putBucketEncryption/getBucketEncryption/deleteBucketEncryption, resolveSSE(r,b) — request header wins (validated), bucket default applies as fallback, missing config → no SSE. validateSSEAlgorithm: AES256 OK; aws:kms / aws:kms:dsse → 501 NotImplemented; everything else → 400 InvalidArgument. internal/s3api/server.go: ?encryption route added to handleBucket; putObject calls resolveSSE before PutChunks (so a kms/bogus header rejects the request before any data lands), persists obj.SSE; getObject sets x-amz-server-side-encryption header. internal/s3api/multipart.go: initiateMultipart resolves SSE, persists on mu.SSE, echoes header on InitiateMultipartUploadResult; uploadPart echoes mu.SSE on the part response; completeMultipart copies mu.SSE to obj.SSE and emits the header. New error codes ErrNoSuchEncryption (404 ServerSideEncryptionConfigurationNotFoundError) / ErrInvalidEncryptionAlgorithm (400) / ErrKMSNotImplemented (501). Tests in internal/s3api/encryption_test.go: per-object round-trip (PUT+GET+HEAD echo), aws:kms rejected, unknown algo rejected, bucket config CRUD, default applied on header-less PUT, bucket-level kms put rejected, malformed body rejected, multipart end-to-end with SSE round-trip through Initiate→UploadPart→Complete→HEAD."
     },
     {
       "id": "US-012",

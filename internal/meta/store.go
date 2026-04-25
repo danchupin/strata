@@ -31,6 +31,7 @@ var (
 	ErrNoSuchBucketPolicy    = errors.New("no policy configured for bucket")
 	ErrNoSuchPublicAccessBlock = errors.New("no public access block configuration for bucket")
 	ErrNoSuchOwnershipControls = errors.New("no ownership controls configured for bucket")
+	ErrNoSuchEncryption        = errors.New("no encryption configuration for bucket")
 	ErrNoSuchGrants            = errors.New("no acl grants persisted for resource")
 	ErrIAMUserNotFound         = errors.New("iam user not found")
 	ErrIAMUserAlreadyExists    = errors.New("iam user already exists")
@@ -102,6 +103,7 @@ type Object struct {
 	RetainMode     string
 	LegalHold      bool
 	Checksums      map[string]string
+	SSE            string
 }
 
 type ListOptions struct {
@@ -134,6 +136,7 @@ type MultipartUpload struct {
 	ContentType  string
 	InitiatedAt  time.Time
 	Status       string
+	SSE          string
 }
 
 type MultipartPart struct {
@@ -206,6 +209,10 @@ type Store interface {
 	SetBucketOwnershipControls(ctx context.Context, bucketID uuid.UUID, xmlBlob []byte) error
 	GetBucketOwnershipControls(ctx context.Context, bucketID uuid.UUID) ([]byte, error)
 	DeleteBucketOwnershipControls(ctx context.Context, bucketID uuid.UUID) error
+
+	SetBucketEncryption(ctx context.Context, bucketID uuid.UUID, xmlBlob []byte) error
+	GetBucketEncryption(ctx context.Context, bucketID uuid.UUID) ([]byte, error)
+	DeleteBucketEncryption(ctx context.Context, bucketID uuid.UUID) error
 
 	CreateIAMUser(ctx context.Context, u *IAMUser) error
 	GetIAMUser(ctx context.Context, userName string) (*IAMUser, error)

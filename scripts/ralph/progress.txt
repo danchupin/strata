@@ -20,6 +20,7 @@ Started: Sat Apr 25 16:10:14 MSK 2026
 - Temporary credentials (STS AssumeRole) carry Credential.SessionToken; middleware compares the request's x-amz-security-token to it after signature passes — mismatch → ErrInvalidToken. auth.STSStore implements CredentialsStore so STS keys flow through MultiStore like static/cassandra/memory creds; MultiStore skips caching creds with non-empty SessionToken so revoke/expiry take effect immediately. STSStore.SetClock(now func()) drives deterministic expiry in tests.
 - Object-level checksums (US-009): meta.Object.Checksums map[string]string round-trips through both backends (cassandra column `checksums map<text,text>` added via additive ALTER). Server-side verification lives in internal/s3api/checksum.go: parseRequestChecksums(r) reads every x-amz-checksum-<algo> header for algos in supportedChecksumAlgorithms (CRC32, CRC32C, SHA1, SHA256, CRC64NVME), checksumWriter fans body bytes to all hashers via io.TeeReader on the put path, verifyChecksums compares after PutChunks and writeChecksumHeaders echoes them on GetObject/HeadObject. Mismatch returns 400 BadDigest and deletes the freshly-written chunks. CRC-64/NVME is vendored locally (newCRC64NVME) since the stdlib lacks it.
 - Multipart checksums (US-010): meta.MultipartPart.Checksums map[string]string is persisted through SavePart / surfaced by ListParts in both backends (cassandra ALTER multipart_parts ADD checksums map<text,text>). uploadPart re-uses the parseRequestChecksums + io.TeeReader(checksumWriter) + verifyChecksums chain from US-009; mismatch deletes the data manifest and returns 400 BadDigest. completeMultipart calls ListParts BEFORE CompleteMultipartUpload to grab per-part Checksums (the meta-level Complete deletes parts on success), then composeMultipartChecksums computes the AWS composite (base64(hash(concat raw digests))-N) for every algo present on every requested part. The composite is set on obj.Checksums (so GetObject/HeadObject echo it) and emitted on CompleteMultipartUploadResult as both response headers and ChecksumCRC32/SHA256/etc. XML elements (omitempty).
+- SSE-S3 metadata (US-011): meta.Object.SSE + meta.MultipartUpload.SSE strings round-trip through both backends (cassandra ALTER objects ADD sse text + ALTER multipart_uploads ADD sse text). Bucket-level default uses the standard setBucketBlob/getBucketBlob pattern (table bucket_encryption, ErrNoSuchEncryption sentinel). internal/s3api/encryption.go centralises validateSSEAlgorithm (AES256 ok; aws:kms/aws:kms:dsse → 501 NotImplemented; else 400) and resolveSSE(r,b) — request header wins, bucket default fills in, no config => empty. resolveSSE runs BEFORE PutChunks so kms/bogus headers reject the request without writing chunks. SSE flows: putObject sets obj.SSE, initiateMultipart sets mu.SSE, uploadPart + completeMultipart echo header, completeMultipart copies mu.SSE to obj.SSE. GetObject/HeadObject emit x-amz-server-side-encryption when obj.SSE is non-empty. Errors live in errors.go: ErrNoSuchEncryption (404 ServerSideEncryptionConfigurationNotFoundError), ErrInvalidEncryptionAlgorithm (400), ErrKMSNotImplemented (501).
 ---
 
 ## 2026-04-25 - US-001 (Parse AccessControlPolicy XML body)
@@ -298,4 +299,34 @@ Started: Sat Apr 25 16:10:14 MSK 2026
   - AWS composite checksum is "base64(hash(concat(raw_digests)))-N" for ALL five algos (no separate "full-object CRC combine" math here). If we ever support the FULL_OBJECT type for CRCs, that's a separate code path triggered by x-amz-checksum-type: FULL_OBJECT on initiate.
   - The completeMultipartResult struct now has 5 Checksum<Algo> omitempty XML fields. When adding a sixth algo, remember to add the field AND wire it in the writeXML call site, in addition to extending supportedChecksumAlgorithms.
   - cassandra ListParts iter.Scan must reset the checksums map between rows; otherwise the gocql driver re-uses the same backing map across rows when the next row has no value (uncommon for a per-part column but cheap to defend).
+---
+
+## 2026-04-25 - US-011 (SSE-S3 metadata storage + bucket default)
+- meta.Object.SSE and meta.MultipartUpload.SSE strings added; ErrNoSuchEncryption sentinel + Set/Get/DeleteBucketEncryption interface methods.
+- Memory backend: encryption blob map + 3 methods using setBucketBlob/getBucketBlob/deleteBucketBlob; SSE round-trips for object + upload via existing shallow-copy paths.
+- Cassandra: new bucket_encryption table; additive ALTER objects ADD sse text + ALTER multipart_uploads ADD sse text. PutObject INSERT, GetObject SELECT, CreateMultipartUpload INSERT, GetMultipartUpload SELECT all extended (cursors used by listing intentionally do not select sse — listing does not expose SSE).
+- internal/s3api/encryption.go: ServerSideEncryptionConfiguration XML, putBucketEncryption/getBucketEncryption/deleteBucketEncryption (uses meta.SetBucketEncryption blob helpers). validateSSEAlgorithm (AES256 → ok; aws:kms/aws:kms:dsse → 501 NotImplemented; else → 400 InvalidArgument). resolveSSE(r,b) → header wins, bucket default fills in, missing config → empty.
+- internal/s3api/server.go: ?encryption route in handleBucket; putObject calls resolveSSE BEFORE PutChunks (so a kms/bogus header fails before chunks land); getObject sets x-amz-server-side-encryption when persisted.
+- internal/s3api/multipart.go: initiateMultipart resolves SSE and stores on mu.SSE; uploadPart echoes mu.SSE on the per-part response; completeMultipart copies mu.SSE to obj.SSE and emits x-amz-server-side-encryption header.
+- New errors: ErrNoSuchEncryption (ServerSideEncryptionConfigurationNotFoundError 404), ErrInvalidEncryptionAlgorithm (InvalidArgument 400), ErrKMSNotImplemented (NotImplemented 501).
+- Tests in internal/s3api/encryption_test.go: per-object PUT/GET/HEAD echo of AES256, aws:kms rejected (501), unknown algo rejected (400), bucket encryption CRUD round-trip, missing config → 404, bucket default applied to header-less PUT, bucket-level kms put rejected, malformed bucket body rejected, multipart end-to-end SSE round-trip (Initiate → UploadPart → Complete → HEAD).
+- Files changed:
+  - internal/meta/store.go (Object.SSE, MultipartUpload.SSE, ErrNoSuchEncryption, interface methods)
+  - internal/meta/memory/store.go (encryption blob map + 3 methods)
+  - internal/meta/cassandra/schema.go (bucket_encryption table + additive ALTERs for sse columns)
+  - internal/meta/cassandra/store.go (object/multipart upload sse round-trip + 3 blob methods)
+  - internal/s3api/encryption.go (new)
+  - internal/s3api/errors.go (3 new APIErrors)
+  - internal/s3api/server.go (route + putObject + getObject)
+  - internal/s3api/multipart.go (initiate/uploadPart/complete SSE plumbing)
+  - internal/s3api/encryption_test.go (new)
+  - scripts/ralph/prd.json (passes: true; notes)
+  - scripts/ralph/progress.txt
+- Quality: go build ./... + go vet ./... + go test ./... all green.
+- **Learnings for future iterations:**
+  - SSE algorithm validation must run BEFORE PutChunks. Otherwise a request with x-amz-server-side-encryption: aws:kms (or any bogus value) writes chunks to the data backend before the 4xx fires, and you have to delete them. Mirrors the BadDigest/checksum pattern but moved earlier because no body is needed to validate.
+  - For multipart, SSE is decided ONCE at initiate and persisted on the MultipartUpload row; UploadPart and Complete just echo what's already there. Don't try to read x-amz-server-side-encryption from per-part requests — AWS rejects it (we just ignore it).
+  - The bucket-default fallback path means resolveSSE issues a Meta.GetBucketEncryption per request without a header. That is one extra cassandra read on the put path; if it ever becomes hot enough to matter, the same caching trick used for credentials (TTL cache) would apply, but it's not worth pre-empting.
+  - When extending Object/MultipartUpload struct fields (SSE here, future SSEC fields in US-012, RestoreStatus in US-014), the cassandra cursor selects in ListObjects/ListObjectVersions intentionally do NOT need to be extended unless the listing payload exposes the new field — keep them lean.
+  - aws:kms:dsse is the dual-layer KMS variant; it shows up in newer SDKs alongside aws:kms. Reject both to the same NotImplemented code so the client error message is consistent regardless of SDK age.
 ---

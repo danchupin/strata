@@ -166,6 +166,19 @@ func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request, bucket str
 			return
 		}
 	}
+	if q.Has("encryption") {
+		switch r.Method {
+		case http.MethodGet:
+			s.getBucketEncryption(w, r, bucket)
+			return
+		case http.MethodPut:
+			s.putBucketEncryption(w, r, bucket)
+			return
+		case http.MethodDelete:
+			s.deleteBucketEncryption(w, r, bucket)
+			return
+		}
+	}
 	if q.Has("acl") {
 		switch r.Method {
 		case http.MethodGet:
@@ -465,6 +478,11 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		writeError(w, r, ErrInvalidArgument)
 		return
 	}
+	sse, sseErr, sseOK := s.resolveSSE(r, b)
+	if !sseOK {
+		writeError(w, r, sseErr)
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
 	body := io.Reader(r.Body)
@@ -496,6 +514,7 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		Mtime:        time.Now().UTC(),
 		Manifest:     m,
 		Checksums:    sums,
+		SSE:          sse,
 	}
 	if rm := r.Header.Get("x-amz-object-lock-mode"); rm != "" {
 		obj.RetainMode = rm
@@ -541,6 +560,9 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	w.Header().Set("Last-Modified", o.Mtime.UTC().Format(http.TimeFormat))
 	w.Header().Set("x-amz-storage-class", o.StorageClass)
 	w.Header().Set("Accept-Ranges", "bytes")
+	if o.SSE != "" {
+		w.Header().Set("x-amz-server-side-encryption", o.SSE)
+	}
 	writeChecksumHeaders(w.Header(), o.Checksums)
 	if len(o.Tags) > 0 {
 		w.Header().Set("x-amz-tagging-count", strconv.Itoa(len(o.Tags)))

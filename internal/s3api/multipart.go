@@ -25,6 +25,11 @@ func (s *Server) initiateMultipart(w http.ResponseWriter, r *http.Request, b *me
 	if class == "" {
 		class = b.DefaultClass
 	}
+	sse, sseErr, sseOK := s.resolveSSE(r, b)
+	if !sseOK {
+		writeError(w, r, sseErr)
+		return
+	}
 	mu := &meta.MultipartUpload{
 		BucketID:     b.ID,
 		UploadID:     gocql.TimeUUID().String(),
@@ -33,10 +38,14 @@ func (s *Server) initiateMultipart(w http.ResponseWriter, r *http.Request, b *me
 		ContentType:  r.Header.Get("Content-Type"),
 		InitiatedAt:  time.Now().UTC(),
 		Status:       "uploading",
+		SSE:          sse,
 	}
 	if err := s.Meta.CreateMultipartUpload(r.Context(), mu); err != nil {
 		mapMetaErr(w, r, err)
 		return
+	}
+	if sse != "" {
+		w.Header().Set("x-amz-server-side-encryption", sse)
 	}
 	writeXML(w, http.StatusOK, initiateMultipartResult{
 		Bucket:   b.Name,
@@ -101,6 +110,9 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Buck
 	}
 	w.Header().Set("ETag", `"`+manifest.ETag+`"`)
 	writeChecksumHeaders(w.Header(), sums)
+	if mu.SSE != "" {
+		w.Header().Set("x-amz-server-side-encryption", mu.SSE)
+	}
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -270,6 +282,7 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		ETag:         finalETag,
 		Mtime:        time.Now().UTC(),
 		Checksums:    composite,
+		SSE:          mu.SSE,
 	}
 
 	orphans, err := s.Meta.CompleteMultipartUpload(r.Context(), obj, uploadID, parts, meta.IsVersioningActive(b.Versioning))
@@ -288,6 +301,9 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 	}
 
 	writeChecksumHeaders(w.Header(), composite)
+	if obj.SSE != "" {
+		w.Header().Set("x-amz-server-side-encryption", obj.SSE)
+	}
 	writeXML(w, http.StatusOK, completeMultipartResult{
 		Location:          fmt.Sprintf("/%s/%s", b.Name, key),
 		Bucket:            b.Name,

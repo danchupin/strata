@@ -127,6 +127,10 @@ var tableDDL = []string{
 		access_key text,
 		PRIMARY KEY (user_name, access_key)
 	)`,
+	`CREATE TABLE IF NOT EXISTS bucket_encryption (
+		bucket_id uuid PRIMARY KEY,
+		config    blob
+	)`,
 }
 
 var alterStatements = []string{
@@ -136,6 +140,8 @@ var alterStatements = []string{
 	`ALTER TABLE access_keys ADD user_name text`,
 	`ALTER TABLE objects ADD checksums map<text, text>`,
 	`ALTER TABLE multipart_parts ADD checksums map<text, text>`,
+	`ALTER TABLE objects ADD sse text`,
+	`ALTER TABLE multipart_uploads ADD sse text`,
 }
 
 func isColumnAlreadyExists(err error) bool {

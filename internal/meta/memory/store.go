@@ -24,6 +24,7 @@ type Store struct {
 	policies     map[uuid.UUID][]byte
 	pab          map[uuid.UUID][]byte
 	ownership    map[uuid.UUID][]byte
+	encryption   map[uuid.UUID][]byte
 	bucketGrants map[uuid.UUID][]meta.Grant
 	objectGrants map[grantKey][]meta.Grant
 	iamUsers     map[string]*meta.IAMUser
@@ -53,6 +54,7 @@ func New() *Store {
 		policies:     make(map[uuid.UUID][]byte),
 		pab:          make(map[uuid.UUID][]byte),
 		ownership:    make(map[uuid.UUID][]byte),
+		encryption:   make(map[uuid.UUID][]byte),
 		bucketGrants: make(map[uuid.UUID][]meta.Grant),
 		objectGrants: make(map[grantKey][]meta.Grant),
 		iamUsers:     make(map[string]*meta.IAMUser),
@@ -656,6 +658,16 @@ func (s *Store) GetBucketOwnershipControls(ctx context.Context, bucketID uuid.UU
 }
 func (s *Store) DeleteBucketOwnershipControls(ctx context.Context, bucketID uuid.UUID) error {
 	return s.deleteBucketBlob(s.ownership, bucketID)
+}
+
+func (s *Store) SetBucketEncryption(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(s.encryption, bucketID, blob)
+}
+func (s *Store) GetBucketEncryption(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(s.encryption, bucketID, meta.ErrNoSuchEncryption)
+}
+func (s *Store) DeleteBucketEncryption(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(s.encryption, bucketID)
 }
 
 func (s *Store) CreateMultipartUpload(ctx context.Context, mu *meta.MultipartUpload) error {

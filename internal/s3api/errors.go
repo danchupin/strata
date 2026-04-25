@@ -36,6 +36,9 @@ var (
 	ErrNoSuchBucketPolicy           = APIError{Code: "NoSuchBucketPolicy", Message: "The bucket policy does not exist", Status: http.StatusNotFound}
 	ErrNoSuchPublicAccessBlock      = APIError{Code: "NoSuchPublicAccessBlockConfiguration", Message: "The public access block configuration was not found", Status: http.StatusNotFound}
 	ErrNoSuchOwnershipControls      = APIError{Code: "OwnershipControlsNotFoundError", Message: "The bucket ownership controls were not found", Status: http.StatusNotFound}
+	ErrNoSuchEncryption             = APIError{Code: "ServerSideEncryptionConfigurationNotFoundError", Message: "The server side encryption configuration was not found", Status: http.StatusNotFound}
+	ErrInvalidEncryptionAlgorithm   = APIError{Code: "InvalidArgument", Message: "The encryption algorithm specified is not supported", Status: http.StatusBadRequest}
+	ErrKMSNotImplemented            = APIError{Code: "NotImplemented", Message: "aws:kms server-side encryption is not supported", Status: http.StatusNotImplemented}
 	ErrCORSNotEnabled               = APIError{Code: "CORSResponse", Message: "CORS is not enabled for this bucket", Status: http.StatusForbidden}
 	ErrMalformedXML        = APIError{Code: "MalformedXML", Message: "The XML you provided was not well-formed", Status: http.StatusBadRequest}
 	ErrMalformedACLError   = APIError{Code: "MalformedACLError", Message: "The XML you provided was not well-formed or did not validate against our published schema", Status: http.StatusBadRequest}

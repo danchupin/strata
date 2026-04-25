@@ -308,11 +308,11 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 	return s.s.Query(
 		`INSERT INTO objects (bucket_id, shard, key, version_id, is_latest, is_delete_marker,
 		 size, etag, content_type, storage_class, mtime, manifest, user_meta, tags,
-		 retain_until, retain_mode, legal_hold, checksums)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 retain_until, retain_mode, legal_hold, checksums, sse)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		gocqlUUID(o.BucketID), shard, o.Key, versionID, true, o.IsDeleteMarker,
 		o.Size, o.ETag, o.ContentType, o.StorageClass, o.Mtime, manifestBlob, o.UserMeta, o.Tags,
-		retainUntil, nilIfEmpty(o.RetainMode), o.LegalHold, o.Checksums,
+		retainUntil, nilIfEmpty(o.RetainMode), o.LegalHold, o.Checksums, nilIfEmpty(o.SSE),
 	).WithContext(ctx).Exec()
 }
 
@@ -340,18 +340,19 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		retainMode   string
 		legalHold    bool
 		checksums    map[string]string
+		sse          string
 	)
 	var err error
 	if versionID == "" {
 		err = s.s.Query(
 			`SELECT version_id, is_latest, is_delete_marker, size, etag, content_type,
 			        storage_class, mtime, manifest, user_meta, tags,
-			        retain_until, retain_mode, legal_hold, checksums
+			        retain_until, retain_mode, legal_hold, checksums, sse
 			 FROM objects WHERE bucket_id=? AND shard=? AND key=? LIMIT 1`,
 			gocqlUUID(bucketID), shard, key,
 		).WithContext(ctx).Scan(&versionUUID, &isLatest, &isDeleteMark, &size, &etag, &ctype,
 			&class, &mtime, &manifestBlob, &userMeta, &tags,
-			&retainUntil, &retainMode, &legalHold, &checksums)
+			&retainUntil, &retainMode, &legalHold, &checksums, &sse)
 	} else {
 		vUUID, perr := gocql.ParseUUID(versionID)
 		if perr != nil {
@@ -360,12 +361,12 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		err = s.s.Query(
 			`SELECT version_id, is_latest, is_delete_marker, size, etag, content_type,
 			        storage_class, mtime, manifest, user_meta, tags,
-			        retain_until, retain_mode, legal_hold, checksums
+			        retain_until, retain_mode, legal_hold, checksums, sse
 			 FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
 			gocqlUUID(bucketID), shard, key, vUUID,
 		).WithContext(ctx).Scan(&versionUUID, &isLatest, &isDeleteMark, &size, &etag, &ctype,
 			&class, &mtime, &manifestBlob, &userMeta, &tags,
-			&retainUntil, &retainMode, &legalHold, &checksums)
+			&retainUntil, &retainMode, &legalHold, &checksums, &sse)
 	}
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrObjectNotFound
@@ -398,6 +399,7 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		RetainMode:     retainMode,
 		LegalHold:      legalHold,
 		Checksums:      checksums,
+		SSE:            sse,
 	}, nil
 }
 
@@ -1043,9 +1045,9 @@ func (s *Store) CreateMultipartUpload(ctx context.Context, mu *meta.MultipartUpl
 		return fmt.Errorf("upload_id: %w", err)
 	}
 	return s.s.Query(
-		`INSERT INTO multipart_uploads (bucket_id, upload_id, key, status, storage_class, content_type, initiated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		gocqlUUID(mu.BucketID), uploadUUID, mu.Key, "uploading", mu.StorageClass, mu.ContentType, mu.InitiatedAt,
+		`INSERT INTO multipart_uploads (bucket_id, upload_id, key, status, storage_class, content_type, initiated_at, sse)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		gocqlUUID(mu.BucketID), uploadUUID, mu.Key, "uploading", mu.StorageClass, mu.ContentType, mu.InitiatedAt, nilIfEmpty(mu.SSE),
 	).WithContext(ctx).Exec()
 }
 
@@ -1056,13 +1058,14 @@ func (s *Store) GetMultipartUpload(ctx context.Context, bucketID uuid.UUID, uplo
 	}
 	var (
 		key, status, class, ctype string
+		sse                       string
 		initiated                 time.Time
 	)
 	err = s.s.Query(
-		`SELECT key, status, storage_class, content_type, initiated_at
+		`SELECT key, status, storage_class, content_type, initiated_at, sse
 		 FROM multipart_uploads WHERE bucket_id=? AND upload_id=?`,
 		gocqlUUID(bucketID), uploadUUID,
-	).WithContext(ctx).Scan(&key, &status, &class, &ctype, &initiated)
+	).WithContext(ctx).Scan(&key, &status, &class, &ctype, &initiated, &sse)
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrMultipartNotFound
 	}
@@ -1077,6 +1080,7 @@ func (s *Store) GetMultipartUpload(ctx context.Context, bucketID uuid.UUID, uplo
 		StorageClass: class,
 		ContentType:  ctype,
 		InitiatedAt:  initiated,
+		SSE:          sse,
 	}, nil
 }
 
@@ -1357,6 +1361,16 @@ func (s *Store) GetBucketOwnershipControls(ctx context.Context, bucketID uuid.UU
 }
 func (s *Store) DeleteBucketOwnershipControls(ctx context.Context, bucketID uuid.UUID) error {
 	return s.deleteBucketBlob(ctx, "bucket_ownership_controls", bucketID)
+}
+
+func (s *Store) SetBucketEncryption(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(ctx, "bucket_encryption", "config", bucketID, blob)
+}
+func (s *Store) GetBucketEncryption(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(ctx, "bucket_encryption", "config", bucketID, meta.ErrNoSuchEncryption)
+}
+func (s *Store) DeleteBucketEncryption(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(ctx, "bucket_encryption", bucketID)
 }
 
 func gocqlUUID(u uuid.UUID) gocql.UUID {
