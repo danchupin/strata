@@ -3,7 +3,6 @@ package cassandra
 import (
 	"context"
 	"errors"
-	"time"
 
 	"github.com/gocql/gocql"
 
@@ -12,7 +11,9 @@ import (
 
 // CredentialStore looks up access keys in the Cassandra access_keys table and
 // implements auth.CredentialsStore. Disabled rows are reported as missing so
-// the gateway treats key revocation the same as deletion.
+// the gateway treats key revocation the same as deletion. Writes go through
+// meta.Store.CreateIAMAccessKey/DeleteIAMAccessKey so the per-user index table
+// stays consistent with the primary row.
 type CredentialStore struct {
 	s *gocql.Session
 }
@@ -45,22 +46,4 @@ func (c *CredentialStore) Lookup(ctx context.Context, accessKey string) (*auth.C
 		Secret:    secret,
 		Owner:     owner,
 	}, nil
-}
-
-// Put inserts or replaces a credential row. Used by IAM admin endpoints
-// (US-005/US-007) and by tests; not part of auth.CredentialsStore.
-func (c *CredentialStore) Put(ctx context.Context, cred *auth.Credential, disabled bool) error {
-	return c.s.Query(
-		`INSERT INTO access_keys (access_key, secret_key, owner, disabled, created_at) VALUES (?, ?, ?, ?, ?)`,
-		cred.AccessKey, cred.Secret, cred.Owner, disabled, time.Now().UTC(),
-	).WithContext(ctx).Exec()
-}
-
-// Delete removes a credential row. Caller is responsible for invalidating any
-// MultiStore cache entry tied to the access key.
-func (c *CredentialStore) Delete(ctx context.Context, accessKey string) error {
-	return c.s.Query(
-		`DELETE FROM access_keys WHERE access_key = ?`,
-		accessKey,
-	).WithContext(ctx).Exec()
 }

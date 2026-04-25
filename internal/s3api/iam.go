@@ -2,6 +2,7 @@ package s3api
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
@@ -12,6 +13,8 @@ import (
 	"github.com/danchupin/strata/internal/auth"
 	"github.com/danchupin/strata/internal/meta"
 )
+
+var base64Std = base64.StdEncoding
 
 // IAMRootPrincipal is the canonical owner string for the hardcoded [iam root]
 // identity. Requests to ?Action= endpoints must carry an authenticated context
@@ -71,6 +74,12 @@ func (s *Server) handleIAM(w http.ResponseWriter, r *http.Request, action string
 		s.iamListUsers(w, r)
 	case "DeleteUser":
 		s.iamDeleteUser(w, r)
+	case "CreateAccessKey":
+		s.iamCreateAccessKey(w, r)
+	case "ListAccessKeys":
+		s.iamListAccessKeys(w, r)
+	case "DeleteAccessKey":
+		s.iamDeleteAccessKey(w, r)
 	default:
 		writeError(w, r, errIAMUnsupportedAction)
 	}
@@ -232,6 +241,169 @@ func (s *Server) iamListUsers(w http.ResponseWriter, r *http.Request) {
 	writeXML(w, http.StatusOK, listUsersResponse{
 		XMLNS:    iamXMLNS,
 		Result:   out,
+		Metadata: iamResponseMetadata{RequestID: newRequestID()},
+	})
+}
+
+type iamAccessKey struct {
+	UserName        string `xml:"UserName"`
+	AccessKeyID     string `xml:"AccessKeyId"`
+	Status          string `xml:"Status"`
+	SecretAccessKey string `xml:"SecretAccessKey,omitempty"`
+	CreateDate      string `xml:"CreateDate"`
+}
+
+type iamAccessKeyMeta struct {
+	UserName    string `xml:"UserName"`
+	AccessKeyID string `xml:"AccessKeyId"`
+	Status      string `xml:"Status"`
+	CreateDate  string `xml:"CreateDate"`
+}
+
+type createAccessKeyResponse struct {
+	XMLName  xml.Name              `xml:"CreateAccessKeyResponse"`
+	XMLNS    string                `xml:"xmlns,attr"`
+	Result   createAccessKeyResult `xml:"CreateAccessKeyResult"`
+	Metadata iamResponseMetadata   `xml:"ResponseMetadata"`
+}
+
+type createAccessKeyResult struct {
+	AccessKey iamAccessKey `xml:"AccessKey"`
+}
+
+type listAccessKeysResponse struct {
+	XMLName  xml.Name             `xml:"ListAccessKeysResponse"`
+	XMLNS    string               `xml:"xmlns,attr"`
+	Result   listAccessKeysResult `xml:"ListAccessKeysResult"`
+	Metadata iamResponseMetadata  `xml:"ResponseMetadata"`
+}
+
+type listAccessKeysResult struct {
+	UserName          string                  `xml:"UserName"`
+	AccessKeyMetadata listAccessKeysMemberSet `xml:"AccessKeyMetadata"`
+	IsTruncated       bool                    `xml:"IsTruncated"`
+}
+
+type listAccessKeysMemberSet struct {
+	Members []iamAccessKeyMeta `xml:"member"`
+}
+
+type deleteAccessKeyResponse struct {
+	XMLName  xml.Name            `xml:"DeleteAccessKeyResponse"`
+	XMLNS    string              `xml:"xmlns,attr"`
+	Metadata iamResponseMetadata `xml:"ResponseMetadata"`
+}
+
+func newAccessKeyID() string {
+	var buf [10]byte
+	_, _ = rand.Read(buf[:])
+	return "AKIA" + strings.ToUpper(hex.EncodeToString(buf[:]))
+}
+
+func newSecretAccessKey() string {
+	var buf [30]byte
+	_, _ = rand.Read(buf[:])
+	return base64Std.EncodeToString(buf[:])
+}
+
+func accessKeyStatus(disabled bool) string {
+	if disabled {
+		return "Inactive"
+	}
+	return "Active"
+}
+
+func (s *Server) iamCreateAccessKey(w http.ResponseWriter, r *http.Request) {
+	userName := iamParam(r, "UserName")
+	if userName == "" {
+		writeError(w, r, errIAMValidation)
+		return
+	}
+	if _, err := s.Meta.GetIAMUser(r.Context(), userName); err != nil {
+		if errors.Is(err, meta.ErrIAMUserNotFound) {
+			writeError(w, r, errIAMNoSuchEntity)
+			return
+		}
+		writeError(w, r, ErrInternal)
+		return
+	}
+	ak := &meta.IAMAccessKey{
+		AccessKeyID:     newAccessKeyID(),
+		SecretAccessKey: newSecretAccessKey(),
+		UserName:        userName,
+		CreatedAt:       time.Now().UTC(),
+	}
+	if err := s.Meta.CreateIAMAccessKey(r.Context(), ak); err != nil {
+		writeError(w, r, ErrInternal)
+		return
+	}
+	writeXML(w, http.StatusOK, createAccessKeyResponse{
+		XMLNS: iamXMLNS,
+		Result: createAccessKeyResult{AccessKey: iamAccessKey{
+			UserName:        ak.UserName,
+			AccessKeyID:     ak.AccessKeyID,
+			Status:          accessKeyStatus(ak.Disabled),
+			SecretAccessKey: ak.SecretAccessKey,
+			CreateDate:      ak.CreatedAt.UTC().Format(time.RFC3339),
+		}},
+		Metadata: iamResponseMetadata{RequestID: newRequestID()},
+	})
+}
+
+func (s *Server) iamListAccessKeys(w http.ResponseWriter, r *http.Request) {
+	userName := iamParam(r, "UserName")
+	if userName == "" {
+		writeError(w, r, errIAMValidation)
+		return
+	}
+	if _, err := s.Meta.GetIAMUser(r.Context(), userName); err != nil {
+		if errors.Is(err, meta.ErrIAMUserNotFound) {
+			writeError(w, r, errIAMNoSuchEntity)
+			return
+		}
+		writeError(w, r, ErrInternal)
+		return
+	}
+	keys, err := s.Meta.ListIAMAccessKeys(r.Context(), userName)
+	if err != nil {
+		writeError(w, r, ErrInternal)
+		return
+	}
+	out := listAccessKeysResult{UserName: userName}
+	for _, ak := range keys {
+		out.AccessKeyMetadata.Members = append(out.AccessKeyMetadata.Members, iamAccessKeyMeta{
+			UserName:    ak.UserName,
+			AccessKeyID: ak.AccessKeyID,
+			Status:      accessKeyStatus(ak.Disabled),
+			CreateDate:  ak.CreatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	writeXML(w, http.StatusOK, listAccessKeysResponse{
+		XMLNS:    iamXMLNS,
+		Result:   out,
+		Metadata: iamResponseMetadata{RequestID: newRequestID()},
+	})
+}
+
+func (s *Server) iamDeleteAccessKey(w http.ResponseWriter, r *http.Request) {
+	accessKeyID := iamParam(r, "AccessKeyId")
+	if accessKeyID == "" {
+		writeError(w, r, errIAMValidation)
+		return
+	}
+	if _, err := s.Meta.DeleteIAMAccessKey(r.Context(), accessKeyID); err != nil {
+		if errors.Is(err, meta.ErrIAMAccessKeyNotFound) {
+			writeError(w, r, errIAMNoSuchEntity)
+			return
+		}
+		writeError(w, r, ErrInternal)
+		return
+	}
+	if s.InvalidateCredential != nil {
+		s.InvalidateCredential(accessKeyID)
+	}
+	writeXML(w, http.StatusOK, deleteAccessKeyResponse{
+		XMLNS:    iamXMLNS,
 		Metadata: iamResponseMetadata{RequestID: newRequestID()},
 	})
 }

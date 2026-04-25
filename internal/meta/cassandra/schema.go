@@ -122,12 +122,18 @@ var tableDDL = []string{
 		path       text,
 		created_at timestamp
 	)`,
+	`CREATE TABLE IF NOT EXISTS iam_access_keys_by_user (
+		user_name  text,
+		access_key text,
+		PRIMARY KEY (user_name, access_key)
+	)`,
 }
 
 var alterStatements = []string{
 	`ALTER TABLE objects ADD retain_mode text`,
 	`ALTER TABLE buckets ADD acl text`,
 	`ALTER TABLE objects ADD grants blob`,
+	`ALTER TABLE access_keys ADD user_name text`,
 }
 
 func isColumnAlreadyExists(err error) bool {

@@ -27,6 +27,7 @@ type Store struct {
 	bucketGrants map[uuid.UUID][]meta.Grant
 	objectGrants map[grantKey][]meta.Grant
 	iamUsers     map[string]*meta.IAMUser
+	accessKeys   map[string]*meta.IAMAccessKey
 	gc           map[string][]meta.GCEntry
 	locker       *Locker
 }
@@ -55,6 +56,7 @@ func New() *Store {
 		bucketGrants: make(map[uuid.UUID][]meta.Grant),
 		objectGrants: make(map[grantKey][]meta.Grant),
 		iamUsers:     make(map[string]*meta.IAMUser),
+		accessKeys:   make(map[string]*meta.IAMAccessKey),
 		gc:           make(map[string][]meta.GCEntry),
 		locker:       NewLocker(),
 	}
@@ -894,6 +896,52 @@ func (s *Store) DeleteIAMUser(ctx context.Context, userName string) error {
 	}
 	delete(s.iamUsers, userName)
 	return nil
+}
+
+func (s *Store) CreateIAMAccessKey(ctx context.Context, ak *meta.IAMAccessKey) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := *ak
+	s.accessKeys[ak.AccessKeyID] = &cp
+	return nil
+}
+
+func (s *Store) GetIAMAccessKey(ctx context.Context, accessKeyID string) (*meta.IAMAccessKey, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	ak, ok := s.accessKeys[accessKeyID]
+	if !ok {
+		return nil, meta.ErrIAMAccessKeyNotFound
+	}
+	cp := *ak
+	return &cp, nil
+}
+
+func (s *Store) ListIAMAccessKeys(ctx context.Context, userName string) ([]*meta.IAMAccessKey, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*meta.IAMAccessKey, 0)
+	for _, ak := range s.accessKeys {
+		if userName != "" && ak.UserName != userName {
+			continue
+		}
+		cp := *ak
+		out = append(out, &cp)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].AccessKeyID < out[j].AccessKeyID })
+	return out, nil
+}
+
+func (s *Store) DeleteIAMAccessKey(ctx context.Context, accessKeyID string) (*meta.IAMAccessKey, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ak, ok := s.accessKeys[accessKeyID]
+	if !ok {
+		return nil, meta.ErrIAMAccessKeyNotFound
+	}
+	cp := *ak
+	delete(s.accessKeys, accessKeyID)
+	return &cp, nil
 }
 
 func (s *Store) Close() error { return nil }

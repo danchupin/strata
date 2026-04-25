@@ -34,7 +34,18 @@ var (
 	ErrNoSuchGrants            = errors.New("no acl grants persisted for resource")
 	ErrIAMUserNotFound         = errors.New("iam user not found")
 	ErrIAMUserAlreadyExists    = errors.New("iam user already exists")
+	ErrIAMAccessKeyNotFound    = errors.New("iam access key not found")
 )
+
+// IAMAccessKey is a credential record minted by IAM CreateAccessKey. The access
+// key is the lookup primary key; UserName is a foreign key into IAMUser.
+type IAMAccessKey struct {
+	AccessKeyID     string
+	SecretAccessKey string
+	UserName        string
+	CreatedAt       time.Time
+	Disabled        bool
+}
 
 // IAMUser is a minimal IAM principal record used by the admin endpoints
 // (?Action=CreateUser etc.). Stored in the meta backend so identities outlive
@@ -198,6 +209,11 @@ type Store interface {
 	GetIAMUser(ctx context.Context, userName string) (*IAMUser, error)
 	ListIAMUsers(ctx context.Context, pathPrefix string) ([]*IAMUser, error)
 	DeleteIAMUser(ctx context.Context, userName string) error
+
+	CreateIAMAccessKey(ctx context.Context, ak *IAMAccessKey) error
+	GetIAMAccessKey(ctx context.Context, accessKeyID string) (*IAMAccessKey, error)
+	ListIAMAccessKeys(ctx context.Context, userName string) ([]*IAMAccessKey, error)
+	DeleteIAMAccessKey(ctx context.Context, accessKeyID string) (*IAMAccessKey, error)
 
 	CreateMultipartUpload(ctx context.Context, mu *MultipartUpload) error
 	GetMultipartUpload(ctx context.Context, bucketID uuid.UUID, uploadID string) (*MultipartUpload, error)

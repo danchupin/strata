@@ -26,6 +26,10 @@ type Server struct {
 	Data   data.Backend
 	Meta   meta.Store
 	Region string
+	// InvalidateCredential, when set, drops a cached credential lookup so
+	// changes made via IAM admin endpoints (DeleteAccessKey, US-007) take
+	// effect on the next signed request. Typically wired to MultiStore.Invalidate.
+	InvalidateCredential func(accessKey string)
 }
 
 func New(d data.Backend, m meta.Store) *Server {

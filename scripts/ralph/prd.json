@@ -119,8 +119,8 @@
         "go test ./internal/s3api/... passes"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "meta.IAMAccessKey + ErrIAMAccessKeyNotFound added to internal/meta/store.go; meta.Store grew CreateIAMAccessKey/GetIAMAccessKey/ListIAMAccessKeys/DeleteIAMAccessKey. Memory backend mirrors via accessKeys map (PK=AccessKeyID); new memory.CredentialStore (internal/meta/memory/credentials.go) implements auth.CredentialsStore over the same map and is wired in cmd/strata-gateway/main.go for memory-meta gateways. Cassandra: ALTER TABLE access_keys ADD user_name (additive); new iam_access_keys_by_user lookup table (PK (user_name, access_key)); new internal/meta/cassandra/access_keys.go uses logged BATCH for create/delete to keep both tables consistent; cassandra.CredentialStore.Lookup unchanged (still SELECTs from access_keys). cassandra.CredentialStore.Put/Delete removed — IAM writes go through meta.Store. iam.go switch grew CreateAccessKey/ListAccessKeys/DeleteAccessKey; CreateAccessKey returns SecretAccessKey ONCE in CreateAccessKeyResponse > CreateAccessKeyResult > AccessKey (Status=Active|Inactive, AKIA-prefixed, 30-byte base64 secret). ListAccessKeys returns AccessKeyMetadata members (no secret). DeleteAccessKey calls Server.InvalidateCredential(accessKey) when set; main.go assigns multi.Invalidate. Errors: ValidationError 400 (missing UserName/AccessKeyId), NoSuchEntity 404 (missing user, missing access key)."
     },
     {
       "id": "US-008",

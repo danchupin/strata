@@ -16,6 +16,7 @@ Started: Sat Apr 25 16:10:14 MSK 2026
 - ACL gating lives in the same access.go: requireObjectAccess(w, r, b, key, action) wraps requireAccess (policy) then requireACL (canned + persisted grants). Use it for every object-level dispatch. Owner FC = info.Owner == b.Owner short-circuits both gates; per-object grants override bucket ACL on s3:GetObject only.
 - Test-only auth injection: testutil_test.go wraps the api with an X-Test-Principal header sniffer that builds &auth.AuthInfo{Owner: p}. Tests use h.doString(method, path, body, "X-Test-Principal", "owner"|"alt") to simulate non-anonymous callers. Omit the header for anonymous requests.
 - IAM admin endpoints (?Action=…) live at the root path (bucket==""). extractIAMAction(r) reads Action from query OR application/x-www-form-urlencoded body; handleIAM gates on auth.FromContext(...).Owner == s3api.IAMRootPrincipal ("iam-root"). When extending IAM, add the action to the dispatch switch in handleIAM and reuse iamParam(r, "Key") to read string params from query OR PostForm. Tests pass principal via X-Test-Principal: iam-root.
+- Access keys land in two cassandra tables: access_keys (PK access_key) for SigV4 lookup, iam_access_keys_by_user (PK (user_name, access_key)) for ListAccessKeys. Writes use a logged BATCH so both stay in sync; reads come from access_keys directly. Memory backend keeps a single accessKeys map keyed by AccessKeyID. memory.CredentialStore wraps the memory backend so memory-meta gateways have a usable SigV4 credential lookup (mirrors cassandra.CredentialStore). Server.InvalidateCredential is the hook that DeleteAccessKey calls to drop the MultiStore cache entry; main.go wires it to multi.Invalidate. Tests that need a fully signed request use the in-file SigV4 helper in iam_access_keys_signed_test.go (canonical request → derive signing key → HMAC).
 ---
 
 ## 2026-04-25 - US-001 (Parse AccessControlPolicy XML body)
@@ -168,4 +169,37 @@ Started: Sat Apr 25 16:10:14 MSK 2026
   - The auth gate distinguishes anonymous vs non-root via Owner: do NOT trust !Anonymous alone — testutil_test.go injection sets Owner without setting Anonymous, so checks must look at Owner directly. (Same pattern as US-004 owner-FC.)
   - meta.Store grows with each user story; the compiler enforces both backends implement new methods, so add interface entries only after both implementations compile. The cassandra test build pulls in both.
   - When US-007 lands, append CreateAccessKey/ListAccessKeys/DeleteAccessKey to the iam.go switch and pass the user_name as a foreign key into access_keys (reuse cassandra.CredentialStore.Put/Delete from US-005). DeleteAccessKey must also call MultiStore.Invalidate on the access_key.
+---
+
+## 2026-04-25 - US-007 (CreateAccessKey/ListAccessKeys/DeleteAccessKey IAM endpoints)
+- meta layer: added meta.IAMAccessKey {AccessKeyID, SecretAccessKey, UserName, CreatedAt, Disabled} and ErrIAMAccessKeyNotFound. meta.Store grew CreateIAMAccessKey/GetIAMAccessKey/ListIAMAccessKeys/DeleteIAMAccessKey (delete returns the deleted record so the cassandra implementation can locate the per-user index row).
+- Memory backend: accessKeys map[string]*meta.IAMAccessKey keyed by AccessKeyID. ListIAMAccessKeys filters by UserName and sorts deterministically.
+- Cassandra backend: additive ALTER TABLE access_keys ADD user_name; new iam_access_keys_by_user (PK (user_name, access_key)) for ListAccessKeys. internal/meta/cassandra/access_keys.go uses gocql LoggedBatch for create/delete so the lookup table and the per-user index stay consistent; Get reads only access_keys. Removed unused cassandra.CredentialStore.Put/Delete (IAM writes go through meta.Store now).
+- internal/meta/memory/credentials.go: new memory.CredentialStore implements auth.CredentialsStore over the memory.Store, mirroring cassandra.CredentialStore semantics (ErrIAMAccessKeyNotFound → ErrNoSuchCredential; Disabled also surfaces as missing).
+- internal/s3api/iam.go: handleIAM switch grew CreateAccessKey/ListAccessKeys/DeleteAccessKey. CreateAccessKey verifies the user exists (NoSuchEntity 404), generates AKIA-prefixed AccessKeyId (10-byte hex) + 30-byte base64 SecretAccessKey, and returns the secret ONCE in CreateAccessKeyResponse > CreateAccessKeyResult > AccessKey. ListAccessKeys requires UserName and emits AccessKeyMetadata > member entries (no secret). DeleteAccessKey calls Server.InvalidateCredential when set so MultiStore drops the cached lookup.
+- s3api.Server.InvalidateCredential func(string) added; cmd/strata-gateway/main.go wires it to multi.Invalidate. main.go now also appends a memory.CredentialStore when the meta backend is in-memory, so memory deployments get the same dynamic credentials path that cassandra had.
+- Tests:
+  - internal/s3api/iam_access_keys_test.go (admin endpoints): anonymous-denied, non-root-denied, full Create→List→Delete round-trip with two keys, CreateAccessKey for missing user → NoSuchEntity, ListAccessKeys for missing user → 404, DeleteAccessKey missing → NoSuchEntity, missing UserName/AccessKeyId → ValidationError.
+  - internal/s3api/iam_access_keys_signed_test.go: full SigV4 round-trip via signedHarness (auth.Middleware{ModeRequired} wrapping NewMultiStore[static iam-root, memory.CredentialStore]). CreateUser → CreateAccessKey → signed GET / with the new key passes (non-403); DeleteAccessKey via root; same signed GET → 403 InvalidAccessKeyId. Signing helpers (signRequest/canonicalQuery/canonicalPath/canonicalHeaderBlock) live in the test file because internal/auth's helpers are unexported.
+- Files changed:
+  - internal/meta/store.go (IAMAccessKey type, ErrIAMAccessKeyNotFound, interface methods)
+  - internal/meta/memory/store.go (accessKeys map + 4 methods)
+  - internal/meta/memory/credentials.go (new)
+  - internal/meta/cassandra/schema.go (ALTER access_keys + iam_access_keys_by_user table)
+  - internal/meta/cassandra/access_keys.go (new)
+  - internal/meta/cassandra/credentials.go (drop unused Put/Delete)
+  - internal/s3api/server.go (Server.InvalidateCredential field)
+  - internal/s3api/iam.go (3 endpoints + dispatch)
+  - internal/s3api/iam_access_keys_test.go (new)
+  - internal/s3api/iam_access_keys_signed_test.go (new)
+  - cmd/strata-gateway/main.go (memory credential store + invalidate hook)
+  - scripts/ralph/prd.json (passes: true; notes)
+  - scripts/ralph/progress.txt
+- Quality: go build ./... + go vet ./... + go test ./... all green.
+- **Learnings for future iterations:**
+  - Cassandra-backed lists by a non-PK field require either a secondary index or a separate lookup table; this codebase prefers the lookup-table pattern (see iam_access_keys_by_user). Keep both writes inside a single LoggedBatch so a half-committed write does not orphan rows.
+  - cassandra.CredentialStore is now read-only. All credential writes must go through meta.Store so memory and cassandra paths stay symmetric and tests run on the memory backend.
+  - Server.InvalidateCredential is optional (nil-safe) — production wires it via main.go, tests can wire it via NewMultiStore + assignment. Without it, a deleted key would survive in MultiStore's cache for up to 60s, and the AC test would flake until TTL expires.
+  - The signed-request test trick: pass the form via URL.RawQuery (not the body) so SigV4 signs the canonical query and the empty-body hash. The IAM dispatcher reads ?Action= via extractIAMAction, which checks the query first, so the same call path works for query-only and form-only senders.
+  - SecretAccessKey is base64(30 random bytes) — 40 ASCII chars, matches AWS's secret-key alphabet (alphanumerics + /+=). Don't switch to hex unless you bump length, since AWS clients reject too-short secrets.
 ---
