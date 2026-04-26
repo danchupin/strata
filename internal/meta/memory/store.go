@@ -37,6 +37,7 @@ type Store struct {
 	iamUsers       map[string]*meta.IAMUser
 	accessKeys     map[string]*meta.IAMAccessKey
 	gc             map[string][]meta.GCEntry
+	notifyQueue    map[uuid.UUID][]meta.NotificationEvent
 	mpDone         map[completionKey]*completionEntry
 	rewrapProgress map[uuid.UUID]*meta.RewrapProgress
 	locker         *Locker
@@ -95,6 +96,7 @@ func New() *Store {
 		iamUsers:     make(map[string]*meta.IAMUser),
 		accessKeys:   make(map[string]*meta.IAMAccessKey),
 		gc:             make(map[string][]meta.GCEntry),
+		notifyQueue:    make(map[uuid.UUID][]meta.NotificationEvent),
 		mpDone:         make(map[completionKey]*completionEntry),
 		rewrapProgress: make(map[uuid.UUID]*meta.RewrapProgress),
 		locker:         NewLocker(),
@@ -128,6 +130,60 @@ func (s *Store) ListGCEntries(ctx context.Context, region string, before time.Ti
 		}
 	}
 	return out, nil
+}
+
+func (s *Store) EnqueueNotification(ctx context.Context, evt *meta.NotificationEvent) error {
+	if evt == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := *evt
+	if len(evt.Payload) > 0 {
+		cp.Payload = append([]byte(nil), evt.Payload...)
+	}
+	if cp.EventID == "" {
+		cp.EventID = gocql.TimeUUID().String()
+	}
+	if cp.EventTime.IsZero() {
+		cp.EventTime = time.Now().UTC()
+	}
+	s.notifyQueue[evt.BucketID] = append(s.notifyQueue[evt.BucketID], cp)
+	return nil
+}
+
+func (s *Store) ListPendingNotifications(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.NotificationEvent, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	rows := s.notifyQueue[bucketID]
+	out := make([]meta.NotificationEvent, 0, len(rows))
+	for _, e := range rows {
+		cp := e
+		if len(e.Payload) > 0 {
+			cp.Payload = append([]byte(nil), e.Payload...)
+		}
+		out = append(out, cp)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) AckNotification(ctx context.Context, evt meta.NotificationEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows := s.notifyQueue[evt.BucketID]
+	for i, e := range rows {
+		if e.EventID == evt.EventID {
+			s.notifyQueue[evt.BucketID] = append(rows[:i], rows[i+1:]...)
+			return nil
+		}
+	}
+	return nil
 }
 
 func (s *Store) AckGCEntry(ctx context.Context, region string, e meta.GCEntry) error {

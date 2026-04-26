@@ -211,6 +211,23 @@ type GCEntry struct {
 	EnqueuedAt time.Time
 }
 
+// NotificationEvent is one buffered S3-event-message payload waiting for a
+// notify worker (US-009) to deliver it to its target. One row per matching
+// configuration entry — a PUT that satisfies two TopicConfigurations enqueues
+// two rows, each carrying the per-target ARN.
+type NotificationEvent struct {
+	BucketID   uuid.UUID
+	Bucket     string
+	Key        string
+	EventID    string
+	EventName  string
+	EventTime  time.Time
+	ConfigID   string
+	TargetType string
+	TargetARN  string
+	Payload    []byte
+}
+
 type Store interface {
 	CreateBucket(ctx context.Context, name, owner, defaultClass string) (*Bucket, error)
 	GetBucket(ctx context.Context, name string) (*Bucket, error)
@@ -235,6 +252,10 @@ type Store interface {
 	EnqueueChunkDeletion(ctx context.Context, region string, chunks []data.ChunkRef) error
 	ListGCEntries(ctx context.Context, region string, before time.Time, limit int) ([]GCEntry, error)
 	AckGCEntry(ctx context.Context, region string, entry GCEntry) error
+
+	EnqueueNotification(ctx context.Context, evt *NotificationEvent) error
+	ListPendingNotifications(ctx context.Context, bucketID uuid.UUID, limit int) ([]NotificationEvent, error)
+	AckNotification(ctx context.Context, evt NotificationEvent) error
 
 	SetObjectTags(ctx context.Context, bucketID uuid.UUID, key, versionID string, tags map[string]string) error
 	GetObjectTags(ctx context.Context, bucketID uuid.UUID, key, versionID string) (map[string]string, error)

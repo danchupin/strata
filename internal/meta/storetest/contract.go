@@ -34,6 +34,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"MultipartCompletionRoundTrip", caseMultipartCompletion},
 		{"BucketMfaDeleteRoundTrip", caseBucketMfaDelete},
 		{"SSEWrapRotationRoundTrip", caseSSEWrapRotation},
+		{"NotificationQueueRoundTrip", caseNotificationQueue},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -334,6 +335,50 @@ func caseSSEWrapRotation(t *testing.T, s meta.Store) {
 	prog, err := s.GetRewrapProgress(ctx, b.ID)
 	if err != nil || !prog.Complete || prog.TargetID != "B" || prog.LastKey != "k" {
 		t.Fatalf("progress: %+v err=%v", prog, err)
+	}
+}
+
+func caseNotificationQueue(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "nfy", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	now := time.Now().UTC()
+	evt := &meta.NotificationEvent{
+		BucketID:   b.ID,
+		Bucket:     b.Name,
+		Key:        "img/cat.jpg",
+		EventID:    newTimeUUID(),
+		EventName:  "s3:ObjectCreated:Put",
+		EventTime:  now,
+		ConfigID:   "OnPut",
+		TargetType: "topic",
+		TargetARN:  "arn:aws:sns:us-east-1:0:t",
+		Payload:    []byte(`{"Records":[{"eventName":"s3:ObjectCreated:Put"}]}`),
+	}
+	if err := s.EnqueueNotification(ctx, evt); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	got, err := s.ListPendingNotifications(ctx, b.ID, 100)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d events want 1", len(got))
+	}
+	if got[0].EventName != evt.EventName || got[0].Key != evt.Key || got[0].ConfigID != evt.ConfigID {
+		t.Fatalf("row: %+v", got[0])
+	}
+	if string(got[0].Payload) != string(evt.Payload) {
+		t.Fatalf("payload: %q", string(got[0].Payload))
+	}
+	if err := s.AckNotification(ctx, got[0]); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	remaining, _ := s.ListPendingNotifications(ctx, b.ID, 100)
+	if len(remaining) != 0 {
+		t.Fatalf("after ack: %d remaining", len(remaining))
 	}
 }
 

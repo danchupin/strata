@@ -445,6 +445,15 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		w.Header().Set(k, v)
 	}
 	w.Header().Set("Content-Type", "application/xml")
+	s.emitNotificationEvent(r, b, notificationEventDetails{
+		EventName: "s3:ObjectCreated:CompleteMultipartUpload",
+		Key:       key,
+		Size:      obj.Size,
+		ETag:      obj.ETag,
+		VersionID: obj.VersionID,
+		SourceIP:  clientSourceIP(r),
+		Principal: principalFromContext(r),
+	})
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(buf.Bytes())
 }

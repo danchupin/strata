@@ -134,8 +134,8 @@
         "go test ./internal/s3api/... ./internal/meta/... passes"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "meta.NotificationEvent struct + meta.Store EnqueueNotification / ListPendingNotifications / AckNotification, implemented in both backends. Cassandra schema additive: new notify_queue table partitioned by ((bucket_id, hour)) with TimeUUID clustering; Cassandra ListPendingNotifications walks the last 48 hour partitions. internal/s3api/notification.go grew a richer notificationConfiguration / notificationEntry / notificationFilter parser (replaces the previous innerxml stub) plus emitNotificationEvent: re-parses the bucket's stored notification XML on each hook invocation, filters by Event list (literal + ':*' wildcard) and S3Key FilterRule (prefix/suffix), then enqueues one row per matching configuration entry with the AWS event-message JSON Records[*] payload. Hooks wired in putObject (s3:ObjectCreated:Put), completeMultipart (s3:ObjectCreated:CompleteMultipartUpload), deleteObject (s3:ObjectRemoved:Delete | DeleteMarkerCreated). Helpers clientSourceIP + principalFromContext live in notification.go. Tests: TestNotificationPutEventEnqueued (PUT triggers event + payload shape asserts Records[0].s3.{bucket.name,object.key,object.size}), TestNotificationDeleteEventEnqueued (DELETE triggers s3:ObjectRemoved:Delete), TestNotificationPrefixFilterMismatchSuppresses (non-matching prefix → 0 events; matching → 1), TestNotificationSuffixFilterMatch (suffix filter), TestNotificationNoConfigNoEvents (no config, no rows), TestNotificationCompleteMultipartEvent (Initiate+UploadPart+Complete → 1 CompleteMultipartUpload event). Contract test caseNotificationQueue covers both backends. Notification config blob storage uses the existing setBucketBlob helpers — already in place from the prior bucket-notification CRUD; no new bucket-config plumbing."
     },
     {
       "id": "US-009",

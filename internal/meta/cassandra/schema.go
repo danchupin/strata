@@ -173,6 +173,20 @@ var tableDDL = []string{
 		complete   boolean,
 		updated_at timestamp
 	)`,
+	`CREATE TABLE IF NOT EXISTS notify_queue (
+		bucket_id    uuid,
+		hour         timestamp,
+		event_id     timeuuid,
+		bucket_name  text,
+		object_key   text,
+		event_name   text,
+		event_time   timestamp,
+		config_id    text,
+		target_type  text,
+		target_arn   text,
+		payload      blob,
+		PRIMARY KEY ((bucket_id, hour), event_id)
+	)`,
 }
 
 var alterStatements = []string{

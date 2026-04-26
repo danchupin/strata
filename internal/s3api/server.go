@@ -846,6 +846,15 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	if status := s.replicationStatusFor(r, b, key, obj.Tags); status != "" {
 		w.Header().Set("x-amz-replication-status", status)
 	}
+	s.emitNotificationEvent(r, b, notificationEventDetails{
+		EventName: "s3:ObjectCreated:Put",
+		Key:       key,
+		Size:      obj.Size,
+		ETag:      obj.ETag,
+		VersionID: obj.VersionID,
+		SourceIP:  clientSourceIP(r),
+		Principal: principalFromContext(r),
+	})
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -1064,6 +1073,19 @@ func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request, b *meta.Bu
 		if o.IsDeleteMarker {
 			w.Header().Set("x-amz-delete-marker", "true")
 		}
+	}
+	if o != nil {
+		eventName := "s3:ObjectRemoved:Delete"
+		if o.IsDeleteMarker {
+			eventName = "s3:ObjectRemoved:DeleteMarkerCreated"
+		}
+		s.emitNotificationEvent(r, b, notificationEventDetails{
+			EventName: eventName,
+			Key:       key,
+			VersionID: o.VersionID,
+			SourceIP:  clientSourceIP(r),
+			Principal: principalFromContext(r),
+		})
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

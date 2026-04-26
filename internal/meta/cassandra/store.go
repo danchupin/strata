@@ -936,6 +936,96 @@ func (s *Store) AckGCEntry(ctx context.Context, region string, e meta.GCEntry) e
 	).WithContext(ctx).Exec()
 }
 
+func notifyHour(t time.Time) time.Time {
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, time.UTC)
+}
+
+func (s *Store) EnqueueNotification(ctx context.Context, evt *meta.NotificationEvent) error {
+	if evt == nil {
+		return nil
+	}
+	if evt.EventTime.IsZero() {
+		evt.EventTime = time.Now().UTC()
+	}
+	if evt.EventID == "" {
+		evt.EventID = gocql.TimeUUID().String()
+	}
+	eventUUID, err := gocql.ParseUUID(evt.EventID)
+	if err != nil {
+		return err
+	}
+	hour := notifyHour(evt.EventTime)
+	return s.s.Query(
+		`INSERT INTO notify_queue (bucket_id, hour, event_id, bucket_name, object_key, event_name, event_time, config_id, target_type, target_arn, payload)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		gocqlUUID(evt.BucketID), hour, eventUUID, evt.Bucket, evt.Key,
+		evt.EventName, evt.EventTime, evt.ConfigID, evt.TargetType, evt.TargetARN, evt.Payload,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) ListPendingNotifications(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.NotificationEvent, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	now := time.Now().UTC()
+	hour := notifyHour(now)
+	out := make([]meta.NotificationEvent, 0, limit)
+	// Walk the last 48 hours so the worker (US-009) and inspector tests catch
+	// recently enqueued events. Older partitions tombstone via TTL once the
+	// worker delivers them.
+	for i := 0; i < 48 && len(out) < limit; i++ {
+		partition := hour.Add(time.Duration(-i) * time.Hour)
+		iter := s.s.Query(
+			`SELECT event_id, bucket_name, object_key, event_name, event_time, config_id, target_type, target_arn, payload
+			 FROM notify_queue WHERE bucket_id=? AND hour=? LIMIT ?`,
+			gocqlUUID(bucketID), partition, limit-len(out),
+		).WithContext(ctx).Iter()
+		var (
+			eventID                                                gocql.UUID
+			bucket, key, name, configID, targetType, targetARN     string
+			eventTime                                              time.Time
+			payload                                                []byte
+		)
+		for iter.Scan(&eventID, &bucket, &key, &name, &eventTime, &configID, &targetType, &targetARN, &payload) {
+			out = append(out, meta.NotificationEvent{
+				BucketID:   bucketID,
+				Bucket:     bucket,
+				Key:        key,
+				EventID:    eventID.String(),
+				EventName:  name,
+				EventTime:  eventTime,
+				ConfigID:   configID,
+				TargetType: targetType,
+				TargetARN:  targetARN,
+				Payload:    append([]byte(nil), payload...),
+			})
+			if len(out) >= limit {
+				break
+			}
+		}
+		if err := iter.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) AckNotification(ctx context.Context, evt meta.NotificationEvent) error {
+	if evt.EventID == "" {
+		return nil
+	}
+	eventUUID, err := gocql.ParseUUID(evt.EventID)
+	if err != nil {
+		return err
+	}
+	hour := notifyHour(evt.EventTime)
+	return s.s.Query(
+		`DELETE FROM notify_queue WHERE bucket_id=? AND hour=? AND event_id=?`,
+		gocqlUUID(evt.BucketID), hour, eventUUID,
+	).WithContext(ctx).Exec()
+}
+
 func (s *Store) resolveVersionID(ctx context.Context, bucketID uuid.UUID, key, versionID string) (gocql.UUID, int, error) {
 	shard := shardOf(key, s.defaultShard)
 	if versionID != "" {
