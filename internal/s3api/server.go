@@ -607,6 +607,10 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	}
 	m, err := s.Data.PutChunks(ctx, body, class)
 	if err != nil {
+		if errors.Is(err, auth.ErrSignatureInvalid) {
+			writeError(w, r, ErrSignatureDoesNotMatch)
+			return
+		}
 		if strings.Contains(err.Error(), "unknown storage class") {
 			writeError(w, r, ErrInvalidStorageClass)
 			return

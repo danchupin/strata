@@ -79,7 +79,9 @@ func (m *Middleware) validateHeader(r *http.Request) (*AuthInfo, error) {
 	}
 
 	if bodyHash == streamingBody {
-		r.Body = newStreamingReader(r.Body)
+		signingKey := deriveSigningKey(cred.Secret, parsed.Date, parsed.Region, parsed.Service)
+		scope := credentialScope(parsed.Date, parsed.Region, parsed.Service)
+		r.Body = newStreamingReader(r.Body, signingKey, reqDate, scope, parsed.Signature)
 		if dec := r.Header.Get("X-Amz-Decoded-Content-Length"); dec != "" {
 			if n, err := strconv.ParseInt(dec, 10, 64); err == nil {
 				r.ContentLength = n

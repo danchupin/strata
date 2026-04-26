@@ -16,6 +16,7 @@ import (
 
 	"github.com/gocql/gocql"
 
+	"github.com/danchupin/strata/internal/auth"
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
 )
@@ -83,6 +84,10 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Buck
 	}
 	manifest, err := s.Data.PutChunks(ctx, body, mu.StorageClass)
 	if err != nil {
+		if errors.Is(err, auth.ErrSignatureInvalid) {
+			writeError(w, r, ErrSignatureDoesNotMatch)
+			return
+		}
 		if strings.Contains(err.Error(), "unknown storage class") {
 			writeError(w, r, ErrInvalidStorageClass)
 			return

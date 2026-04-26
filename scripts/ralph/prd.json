@@ -373,8 +373,8 @@
         "go test ./internal/auth/... passes"
       ],
       "priority": 22,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "internal/auth/streaming.go now verifies the chained per-chunk HMAC: sig(chunk_n) = HMAC(signingKey, \"AWS4-HMAC-SHA256-PAYLOAD\\n<reqDate>\\n<scope>\\n<prevSig>\\n<emptyBodyHash>\\n<sha256(chunk)>\"). newStreamingReader takes (body, signingKey, reqDate, scope, seedSig); seedSig is parsed.Signature, signingKey is deriveSigningKey(secret,date,region,service), reqDate is the X-Amz-Date timestamp form, scope is credentialScope(date,region,service). Each chunk is buffered fully (so the reader can verify before returning bytes), then released to the caller; the trailing 0-chunk is verified against an empty-body hash. Mismatch → ErrSignatureInvalid (existing sentinel) which middleware already maps to 403 SignatureDoesNotMatch on validateHeader path; in the streaming path the error surfaces from PutChunks and is mapped explicitly in s3api/server.go putObject and s3api/multipart.go uploadPart via errors.Is(err, auth.ErrSignatureInvalid) → ErrSignatureDoesNotMatch. New computeChunkSignature exported at package level for testing. Tests in streaming_test.go cover positive round-trip (2-data-chunk + terminator), broken chain (chunk2 signed against seed instead of sig1), mutated chunk data, missing terminator (returns ErrSignatureInvalid because EOF on chunk header is treated as a missing/invalid signature), missing chunk-signature attribute, tampered final chunk."
     },
     {
       "id": "US-023",
