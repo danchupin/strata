@@ -30,9 +30,9 @@ const (
 	DefaultFileKeyID = "file-1"
 )
 
-// ErrNoConfig is returned by FromEnv when neither STRATA_SSE_MASTER_KEY nor
-// STRATA_SSE_MASTER_KEY_FILE is set.
-var ErrNoConfig = errors.New("strata: no master key configured (set STRATA_SSE_MASTER_KEY or STRATA_SSE_MASTER_KEY_FILE)")
+// ErrNoConfig is returned by FromEnv when none of STRATA_SSE_MASTER_KEY,
+// STRATA_SSE_MASTER_KEY_FILE, or STRATA_SSE_MASTER_KEY_VAULT is set.
+var ErrNoConfig = errors.New("strata: no master key configured (set STRATA_SSE_MASTER_KEY, STRATA_SSE_MASTER_KEY_FILE, or STRATA_SSE_MASTER_KEY_VAULT)")
 
 // ErrInvalidKeyLength is returned when the decoded key is not exactly KeySize bytes.
 var ErrInvalidKeyLength = errors.New("strata: master key must be 32 bytes (64 hex chars)")
@@ -44,10 +44,14 @@ type Provider interface {
 	Resolve(ctx context.Context) (key []byte, keyID string, err error)
 }
 
-// FromEnv constructs a built-in provider based on which env var is set:
-// STRATA_SSE_MASTER_KEY_FILE wins over STRATA_SSE_MASTER_KEY when both are set.
-// Returns ErrNoConfig when neither is set.
+// FromEnv constructs a built-in provider based on which env var is set.
+// Precedence (highest first): STRATA_SSE_MASTER_KEY_VAULT >
+// STRATA_SSE_MASTER_KEY_FILE > STRATA_SSE_MASTER_KEY. Returns ErrNoConfig
+// when none is set.
 func FromEnv() (Provider, error) {
+	if os.Getenv(EnvMasterKeyVault) != "" {
+		return NewVaultProviderFromEnv()
+	}
 	if path := os.Getenv(EnvMasterKeyFile); path != "" {
 		return NewFileProvider(path), nil
 	}

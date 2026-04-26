@@ -33,8 +33,8 @@
         "go test ./internal/crypto/master/... passes"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "internal/crypto/master/vault.go: VaultProvider with AppRole login + Transit export-encryption-key. STRATA_SSE_MASTER_KEY_VAULT=<addr>:<transit-export-path>; key id is 'vault-v<N>' from highest version. Lazy refresh on Resolve when stale (cfg.Refresh, default 5m). Initial fetch fatal; refresh failure logs WARN via injected slog.Logger and reuses last good key. FromEnv prefers vault > file > env."
     },
     {
       "id": "US-003",

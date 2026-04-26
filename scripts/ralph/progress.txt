@@ -3,9 +3,11 @@ Started: Sun Apr 26 20:43:22 MSK 2026
 
 ## Codebase Patterns
 - Crypto packages live under `internal/crypto/<area>/`. SSE-S3 master key code is in `internal/crypto/master/`.
-- Provider interfaces return `(key, keyID, error)`. Callers (gateway main) own fatal-log on error — provider packages stay log-free so they're testable and reusable.
+- Provider interfaces return `(key, keyID, error)`. Callers (gateway main) own fatal-log on error — log-free providers are still preferred. **Exception:** when a provider needs to log non-fatal warnings (e.g. Vault refresh-failure with cached fallback), inject a `*slog.Logger` via the config struct and default to `slog.Default()`. Tests capture WARN by handing in `slog.New(slog.NewJSONHandler(&buf, …))`.
 - Sentinel errors (e.g. `master.ErrNoConfig`, `master.ErrInvalidKeyLength`) are exported from the package so callers and tests can `errors.Is` them.
 - Use `t.Setenv` / `t.TempDir` for env-var and file-backed tests. For mtime-based hot-reload tests, set the cached mtime to the past via `os.Chtimes` before rewriting so the rewrite is observable on coarse-mtime filesystems.
+- For external-service providers (Vault, AWS-KMS), inject a `Now func() time.Time` so TTL-based refresh logic is testable without `time.Sleep`. Fake `now` advances by `+= duration` between Resolves.
+- Every test that calls `master.FromEnv()` must `t.Setenv` ALL precedence vars (vault, file, env) to a known value — otherwise an ambient process env (e.g. on a developer machine) flips precedence and tests pass/fail intermittently.
 
 ---
 
@@ -23,4 +25,23 @@ Started: Sun Apr 26 20:43:22 MSK 2026
   - `STRATA_SSE_MASTER_KEY_ID` is shared by env + file providers — file provider falls back to `file-1` when unset. Future stories that introduce per-provider key IDs (Vault, US-002) will need to thread keyID source through, so revisit if collisions arise.
   - `FromEnv` prefers `STRATA_SSE_MASTER_KEY_FILE` over `STRATA_SSE_MASTER_KEY` when both are set. Document this if operator-facing docs land later.
   - This story does NOT wire the provider into the gateway. US-004 (PutObject/GetObject) is the wiring point; until then `cmd/strata-gateway/main.go` is unchanged.
+---
+
+## 2026-04-26 - US-002
+- Added `internal/crypto/master/vault.go`: `VaultProvider` resolves the master key from a HashiCorp Vault Transit `export/encryption-key/<name>` endpoint via AppRole login.
+- Config (`VaultConfig`): Addr, TransitPath, RoleID, SecretID required; HTTPClient/Logger/Refresh/Now optional. `NewVaultProviderFromEnv` reads `STRATA_SSE_MASTER_KEY_VAULT=<addr>:<transit-export-path>` plus `STRATA_SSE_VAULT_ROLE_ID` / `STRATA_SSE_VAULT_SECRET_ID`.
+- Refresh strategy: lazy (`Resolve` checks `now() - cacheTime >= cfg.Refresh`, default 5m). Initial fetch surfaces the error so the caller can fatal. Refresh failure logs `WARN vault master key refresh failed; reusing cached key` and returns the last good key.
+- Token reuse: AppRole login token cached until `lease_duration - 30s`. On 401/403 from Transit export, the provider clears the token and re-logs in once before giving up.
+- Key ID is `vault-v<N>` from the highest numeric version in the export response — operator-driven Transit rotation surfaces a new keyID without code changes.
+- `FromEnv` precedence is now: vault > file > env. Existing tests defensively `t.Setenv(EnvMasterKeyVault, "")` so an ambient vault var on a dev machine doesn't flip precedence.
+- Files added: `internal/crypto/master/vault.go`, `internal/crypto/master/vault_test.go` (11 tests). Files modified: `internal/crypto/master/master.go` (FromEnv precedence + ErrNoConfig message), `internal/crypto/master/master_test.go` (defensive vault-var resets).
+- Quality: `go build ./...`, `go vet ./...`, `go test ./...` all pass; targeted `go test ./internal/crypto/master/... -v` is 25/25 PASS.
+- **Learnings for future iterations:**
+  - `parseVaultAddrPath` splits on the **last** colon so `https://host:8200:transit/...` works; addresses with no port still parse via `http://host:transit/...`. Document this in operator docs when they land.
+  - The fakeVault httptest server in `vault_test.go` is reusable — copy/adapt for US-036 (KMS Vault Transit) and US-037 (`aws-kms` mock). Already covers login + export shape and supports forced status injection (`loginStatus.Store`, `exportStatus.Store`) for outage tests.
+  - `slog.NewJSONHandler` with `Level: slog.LevelDebug` is the canonical way to capture WARN logs in tests. Asserting on `"level":"WARN"` substring works because JSON keys are deterministic.
+  - The `Now func() time.Time` injection pattern beats `time.Sleep` for TTL tests — copy this when implementing US-006 (rotation list refresh), US-014 (5-min flush), US-046 (daily tick).
+  - Holding `mu` across the entire HTTP refresh is fine because Resolve is called per-PUT, not per-byte. If a future story (US-004) shows contention in benchmarks, switch to a single-flight pattern.
+  - Vault export `/latest` returns a map of `{"<version>":"<base64>"}`; we picked the highest numeric version. AWS-KMS / local-hsm providers (US-036/US-037) likely return a single key + version field — different decode shape, do not copy verbatim.
+  - Provider still does NOT wire into the gateway. US-004 is still the wiring point.
 ---

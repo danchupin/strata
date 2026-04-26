@@ -200,6 +200,7 @@ func TestFromEnv_FilePreferred(t *testing.T) {
 	path := filepath.Join(dir, "key")
 	writeKeyFile(t, path, hexKey32)
 
+	t.Setenv(EnvMasterKeyVault, "")
 	t.Setenv(EnvMasterKeyFile, path)
 	t.Setenv(EnvMasterKey, hexKeyB)
 
@@ -213,6 +214,7 @@ func TestFromEnv_FilePreferred(t *testing.T) {
 }
 
 func TestFromEnv_EnvFallback(t *testing.T) {
+	t.Setenv(EnvMasterKeyVault, "")
 	t.Setenv(EnvMasterKeyFile, "")
 	t.Setenv(EnvMasterKey, hexKey32)
 
@@ -226,6 +228,7 @@ func TestFromEnv_EnvFallback(t *testing.T) {
 }
 
 func TestFromEnv_NoConfig(t *testing.T) {
+	t.Setenv(EnvMasterKeyVault, "")
 	t.Setenv(EnvMasterKeyFile, "")
 	t.Setenv(EnvMasterKey, "")
 	_, err := FromEnv()
