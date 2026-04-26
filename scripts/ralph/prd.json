@@ -441,8 +441,8 @@
         "go test ./internal/s3api/... passes"
       ],
       "priority": 26,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "internal/s3api/copy_object.go grew parseDirective(raw) (returns COPY|REPLACE; default COPY when empty; anything else → *ErrInvalidArgument) used for both x-amz-metadata-directive and x-amz-tagging-directive. New checkCopySourceConditional(h, etag, mtime) verifies x-amz-copy-source-if-match / -if-none-match / -if-unmodified-since / -if-modified-since against the SOURCE object's ETag+Mtime; mismatch returns *ErrPreconditionFailed (412). Quoted/bare ETag normalized via the existing etagMatches helper. Preconditions run BEFORE any data copy. Tests in internal/s3api/copy_object_test.go cover: COPY directive preserves Content-Type/UserMeta/Tags, REPLACE directive switches Content-Type and tag set, invalid metadata-directive → 400, invalid tagging-directive → 400, if-match hit/miss, if-none-match hit/miss, if-modified-since hit/miss, if-unmodified-since hit/miss."
     },
     {
       "id": "US-027",

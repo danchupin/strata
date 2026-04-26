@@ -713,3 +713,25 @@ Started: Sat Apr 25 16:10:14 MSK 2026
   - For new bool/string flags on the buckets row, the LWT UPDATE pattern (UPDATE … IF EXISTS, ScanCAS(nil), SerialConsistency LocalSerial) is non-negotiable per CLAUDE.md. Also remember to extend BOTH GetBucket and ListBuckets SELECTs when adding a new column — ListBuckets is easy to miss because most tests exercise GetBucket.
   - When storing per-bucket flags whose values are validated in handlers (Enabled/Disabled), keep the meta layer permissive — it's an opaque string. Validation lives in s3api so the meta store stays simple and reusable for direct callers.
 ---
+
+## 2026-04-26 - US-026 (CopyObject metadata + tagging directives + copy-source preconditions)
+- internal/s3api/copy_object.go: replaced ad-hoc directive parsing with parseDirective(raw) — returns "COPY"|"REPLACE", defaults to "COPY" on empty, otherwise *ErrInvalidArgument (400). Used for both x-amz-metadata-directive and x-amz-tagging-directive.
+- New checkCopySourceConditional(h, etag, mtime) checks the four x-amz-copy-source-if-* headers against the SOURCE object's ETag (quoted) and Mtime. Mismatch → *ErrPreconditionFailed (412). Runs BEFORE any data is read so a precondition failure short-circuits without touching the data backend.
+- Preconditions covered: x-amz-copy-source-if-match (must match), x-amz-copy-source-if-none-match (must NOT match), x-amz-copy-source-if-unmodified-since (mtime must NOT be after; ±1s tolerance), x-amz-copy-source-if-modified-since (mtime must be after).
+- New internal/s3api/copy_object_test.go covers each directive value × each precondition match/miss case (14 tests):
+  - directive COPY preserves Content-Type and tags from source
+  - directive REPLACE swaps Content-Type and tag set with request headers
+  - bogus directive value → 400 InvalidArgument (both metadata and tagging variants)
+  - if-match hit/miss, if-none-match hit/miss, if-modified-since hit/miss, if-unmodified-since hit/miss
+- Files changed:
+  - internal/s3api/copy_object.go (parseDirective, checkCopySourceConditional, wired into copyObject)
+  - internal/s3api/copy_object_test.go (new)
+  - scripts/ralph/prd.json (passes: true; notes)
+  - scripts/ralph/progress.txt
+- Quality: go build ./... + go vet ./... + go test ./... all green.
+- **Learnings for future iterations:**
+  - GetObject/HeadObject in this codebase do NOT echo x-amz-meta-* headers from o.UserMeta — only Content-Type, ETag, Last-Modified, x-amz-storage-class, etc. So tests verifying CopyObject UserMeta semantics cannot use HEAD-side header asserts; rely on Content-Type changes (REPLACE) or use the ?tagging GET endpoint to verify tag preservation/replacement.
+  - copy-source preconditions diverge from the GET conditionals (checkConditional) in two ways: every miss returns 412 (not 304 for if-none-match / if-modified-since), and they apply to the SOURCE object's ETag/Mtime, not the destination. Don't reuse checkConditional verbatim.
+  - etagMatches accepts both quoted and bare ETag forms so callers can pass either. We pass `"<etag>"` here to keep behaviour aligned with how ETag headers go out on the wire.
+  - Returning *APIError (pointer) from helper functions like parseDirective/checkCopySourceConditional plays nicely with writeError since APIError is a value type — pass *err to deref. Could also return APIError + ok; both work.
+---

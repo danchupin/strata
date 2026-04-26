@@ -71,19 +71,26 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, dstBucket *m
 			return
 		}
 	}
+	if err := checkCopySourceConditional(r.Header, srcObj.ETag, srcObj.Mtime); err != nil {
+		writeError(w, r, *err)
+		return
+	}
+
 	dstSSEC, dstSSECErr, dstSSECOK := parseSSECHeaders(r)
 	if !dstSSECOK {
 		writeError(w, r, dstSSECErr)
 		return
 	}
 
-	metadataDirective := strings.ToUpper(r.Header.Get("x-amz-metadata-directive"))
-	if metadataDirective == "" {
-		metadataDirective = "COPY"
+	metadataDirective, mderr := parseDirective(r.Header.Get("x-amz-metadata-directive"))
+	if mderr != nil {
+		writeError(w, r, *mderr)
+		return
 	}
-	taggingDirective := strings.ToUpper(r.Header.Get("x-amz-tagging-directive"))
-	if taggingDirective == "" {
-		taggingDirective = "COPY"
+	taggingDirective, tderr := parseDirective(r.Header.Get("x-amz-tagging-directive"))
+	if tderr != nil {
+		writeError(w, r, *tderr)
+		return
 	}
 
 	sameBucket := dstBucket.ID == sb.ID
@@ -177,6 +184,43 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, dstBucket *m
 		ETag:         `"` + m.ETag + `"`,
 		LastModified: obj.Mtime.UTC().Format(time.RFC3339),
 	})
+}
+
+func parseDirective(raw string) (string, *APIError) {
+	v := strings.ToUpper(strings.TrimSpace(raw))
+	switch v {
+	case "":
+		return "COPY", nil
+	case "COPY", "REPLACE":
+		return v, nil
+	default:
+		return "", &ErrInvalidArgument
+	}
+}
+
+func checkCopySourceConditional(h http.Header, etag string, mtime time.Time) *APIError {
+	quoted := `"` + strings.Trim(etag, `"`) + `"`
+	if v := h.Get("x-amz-copy-source-if-match"); v != "" {
+		if !etagMatches(v, quoted) {
+			return &ErrPreconditionFailed
+		}
+	}
+	if v := h.Get("x-amz-copy-source-if-none-match"); v != "" {
+		if etagMatches(v, quoted) {
+			return &ErrPreconditionFailed
+		}
+	}
+	if v := h.Get("x-amz-copy-source-if-unmodified-since"); v != "" {
+		if t, err := http.ParseTime(v); err == nil && mtime.After(t.Add(time.Second)) {
+			return &ErrPreconditionFailed
+		}
+	}
+	if v := h.Get("x-amz-copy-source-if-modified-since"); v != "" {
+		if t, err := http.ParseTime(v); err == nil && !mtime.After(t) {
+			return &ErrPreconditionFailed
+		}
+	}
+	return nil
 }
 
 func extractUserMeta(h http.Header) map[string]string {
