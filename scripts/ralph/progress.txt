@@ -24,6 +24,7 @@ Started: Sat Apr 25 16:10:14 MSK 2026
 - Subresource routing in handleObject is order-sensitive: the `q.Has(...)` checks run top-to-bottom and short-circuit; place new ?<sub> branches BEFORE the generic method switch (PUT/GET/HEAD/DELETE) so the generic path doesn't intercept them. Gate every object-level subresource via requireObjectAccess (not raw requireAccess) so policy + ACL still apply.
 - Bucket-level flags on the buckets row use the same LWT idiom as SetBucketVersioning/SetBucketACL: `UPDATE buckets SET <col>=? WHERE name=? IF EXISTS` with `ScanCAS(nil)` and SerialConsistency LocalSerial. Required so the write joins the same Paxos lineage as the original CreateBucket INSERT IF NOT EXISTS — non-LWT UPDATEs on that row leave Paxos stale and LOCAL_QUORUM reads observe the pre-update value. ScanCAS(nil) (not new(bool)/new(string)) — gocql ignores the destination when CAS applies.
 - Static-site / website mode (US-017): handleBucket GET intercepts when len(q)==0, calls serveWebsiteRoot which fetches IndexDocument.Suffix on hit (200) or ErrorDocument.Key on miss (404). serveWebsiteObject sets Content-Type/ETag/Last-Modified/Content-Length and streams the object body via Data.GetChunks — does NOT call writeError (the body is the document itself, not an XML <Error/> envelope). Pagination (prefix, delimiter, max-keys, continuation-token, start-after) is preserved by the len(q)==0 guard.
+- Bucket replication (US-018): standard setBucketBlob/getBucketBlob/deleteBucketBlob blob in both backends (cassandra: bucket_replication table). putBucketReplication validates ≥1 Rule with non-empty Destination.Bucket; empty body → 400 (DELETE clears). getBucketReplication returns 404 ReplicationConfigurationNotFoundError on missing. replicationStatusFor(r,b,key,tags) walks Filter shapes (Prefix / Tag / And{Prefix+Tags}), skips disabled rules, returns "PENDING" on match. putObject emits x-amz-replication-status only when status is non-empty (header omitted otherwise). Filter shape pattern is reusable across lifecycle/replication.
 ---
 
 ## 2026-04-25 - US-001 (Parse AccessControlPolicy XML body)
@@ -495,4 +496,36 @@ Started: Sat Apr 25 16:10:14 MSK 2026
   - splitPath behaviour: GET /bkt/ produces (bucket=bkt, key=""), so the website index path is reachable via the bucket handler — no separate routing rule needed.
   - The website-mode 404 body is the ErrorDocument's content (text/html), NOT an XML <Error/> envelope. Writers must NOT call writeError for the error-doc path; serveWebsiteObject sets headers + status itself.
   - When a future story (e.g. RedirectAllRequestsTo) needs to act differently, branch off in serveWebsiteRoot before the IndexDocument lookup; the parsed *websiteConfiguration is already in hand.
+---
+
+## 2026-04-26 - US-018 (Bucket replication CRUD + PutObject status header)
+- meta.ErrNoSuchReplication sentinel + meta.Store.{Set,Get,Delete}BucketReplication added; both backends use the standard setBucketBlob/getBucketBlob/deleteBucketBlob helpers.
+- Cassandra: new bucket_replication table appended to tableDDL (additive). Memory: replication map[uuid.UUID][]byte initialized in New().
+- New internal/s3api/replication.go:
+  - replicationConfiguration / replicationRule / replicationFilter / replicationAndOp / replicationTag / replicationDestination XML types.
+  - putBucketReplication: GetBucket → ReadAll(LimitReader 1MiB) → empty body 400 → xml.Unmarshal → at least one Rule with non-empty Destination.Bucket → SetBucketReplication → 200.
+  - getBucketReplication: 404 ReplicationConfigurationNotFoundError when meta.ErrNoSuchReplication, else writes the persisted blob.
+  - deleteBucketReplication: 204.
+  - replicationStatusFor(r,b,key,tags): loads blob (silent-empty on error), iterates rules, skips Status != Enabled, runs replicationRuleMatches (Filter.And.Prefix+Tags / Filter.Tag+Prefix / Filter.Prefix / rule.Prefix). Returns "PENDING" on first match, else "".
+- New ErrNoSuchReplicationConfig (404 ReplicationConfigurationNotFoundError) in errors.go.
+- handleBucket gained ?replication GET/PUT/DELETE branch.
+- putObject sets x-amz-replication-status header AFTER PutObject persists, using obj.Tags (parsed from x-amz-tagging earlier in the same handler).
+- Tests (internal/s3api/replication_test.go): CRUD (GET 404 → PUT → GET 200 echoes rule → DELETE → GET 404), malformed body 400, no rules 400, rule without destination 400, prefix match emits PENDING, no-match no header, no-config no header, disabled rule no header, And { Prefix + Tag } filter (missing tag → empty, matching tag → PENDING, wrong tag value → empty, wrong prefix even with tag → empty).
+- Files changed:
+  - internal/meta/store.go
+  - internal/meta/memory/store.go
+  - internal/meta/cassandra/store.go
+  - internal/meta/cassandra/schema.go
+  - internal/s3api/errors.go
+  - internal/s3api/server.go
+  - internal/s3api/replication.go (new)
+  - internal/s3api/replication_test.go (new)
+  - scripts/ralph/prd.json (passes: true)
+  - scripts/ralph/progress.txt
+- Quality: go build ./... + go vet ./... + go test ./... all green.
+- **Learnings for future iterations:**
+  - x-amz-replication-status is an emit-only response header on PutObject (not stored). Compute it AFTER persistence using obj.Tags so future per-object replication views can be derived from the same rule evaluator.
+  - Replication Filter is the third XML shape variant for bucket-rule schemas (also seen in lifecycle): Prefix-only (legacy) | Tag-only | And { Prefix + Tags ≥1 }. replicationRuleMatches handles all three; lifecycle would have a sibling.
+  - Empty-body PUT on ?replication is malformed (rejected 400 MalformedXML), not "clear" — DELETE clears. This differs from ?notification where empty body clears. Always read the AC for clearing semantics; they vary per subresource.
+  - When a future story needs to short-circuit on load errors (e.g. policy-equivalent failure mode for replication), the silent-empty-on-error in replicationStatusFor mirrors what the website branch does on a load error: degrade to "no config" rather than 5xx.
 ---

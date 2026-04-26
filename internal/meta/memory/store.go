@@ -28,6 +28,7 @@ type Store struct {
 	objectLock   map[uuid.UUID][]byte
 	notification map[uuid.UUID][]byte
 	website      map[uuid.UUID][]byte
+	replication  map[uuid.UUID][]byte
 	bucketGrants map[uuid.UUID][]meta.Grant
 	objectGrants map[grantKey][]meta.Grant
 	iamUsers     map[string]*meta.IAMUser
@@ -61,6 +62,7 @@ func New() *Store {
 		objectLock:   make(map[uuid.UUID][]byte),
 		notification: make(map[uuid.UUID][]byte),
 		website:      make(map[uuid.UUID][]byte),
+		replication:  make(map[uuid.UUID][]byte),
 		bucketGrants: make(map[uuid.UUID][]meta.Grant),
 		objectGrants: make(map[grantKey][]meta.Grant),
 		iamUsers:     make(map[string]*meta.IAMUser),
@@ -726,6 +728,16 @@ func (s *Store) GetBucketWebsite(ctx context.Context, bucketID uuid.UUID) ([]byt
 }
 func (s *Store) DeleteBucketWebsite(ctx context.Context, bucketID uuid.UUID) error {
 	return s.deleteBucketBlob(s.website, bucketID)
+}
+
+func (s *Store) SetBucketReplication(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(s.replication, bucketID, blob)
+}
+func (s *Store) GetBucketReplication(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(s.replication, bucketID, meta.ErrNoSuchReplication)
+}
+func (s *Store) DeleteBucketReplication(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(s.replication, bucketID)
 }
 
 func (s *Store) CreateMultipartUpload(ctx context.Context, mu *meta.MultipartUpload) error {

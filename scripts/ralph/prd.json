@@ -307,8 +307,8 @@
         "go test ./internal/s3api/... passes"
       ],
       "priority": 18,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "meta.ErrNoSuchReplication sentinel + meta.Store.Set/Get/DeleteBucketReplication added; both backends use the standard setBucketBlob/getBucketBlob/deleteBucketBlob helpers (memory: replication map[uuid.UUID][]byte; cassandra: new bucket_replication table appended to tableDDL). New internal/s3api/replication.go: putBucketReplication parses ReplicationConfiguration XML, validates at least one Rule with non-empty Destination.Bucket (else 400 MalformedXML); empty body also rejected (PUT must replace, DELETE clears). getBucketReplication serves persisted blob or 404 ReplicationConfigurationNotFoundError via new ErrNoSuchReplicationConfig. Route ?replication GET/PUT/DELETE wired in handleBucket adjacent to ?website. putObject calls replicationStatusFor(r,b,key,obj.Tags) AFTER persistence and emits x-amz-replication-status: PENDING when at least one Enabled rule's Filter (Prefix / Tag / And { Prefix + Tags }) matches. Disabled rules skipped. No matching rule → header omitted. No replication config → header omitted (load error treated as no config). Tests in replication_test.go cover CRUD round-trip, malformed body 400, no rules 400, rule without destination 400, prefix match → PENDING, no-match → empty, no-config → empty, disabled rule → empty, And-with-tag filter (prefix+tag match → PENDING; missing tag, wrong tag value, wrong prefix → empty)."
     },
     {
       "id": "US-019",

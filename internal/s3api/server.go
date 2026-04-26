@@ -212,6 +212,19 @@ func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request, bucket str
 			return
 		}
 	}
+	if q.Has("replication") {
+		switch r.Method {
+		case http.MethodGet:
+			s.getBucketReplication(w, r, bucket)
+			return
+		case http.MethodPut:
+			s.putBucketReplication(w, r, bucket)
+			return
+		case http.MethodDelete:
+			s.deleteBucketReplication(w, r, bucket)
+			return
+		}
+	}
 	if q.Has("acl") {
 		switch r.Method {
 		case http.MethodGet:
@@ -613,6 +626,9 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	w.Header().Set("ETag", `"`+m.ETag+`"`)
 	if meta.IsVersioningActive(b.Versioning) && obj.VersionID != "" {
 		w.Header().Set("x-amz-version-id", obj.VersionID)
+	}
+	if status := s.replicationStatusFor(r, b, key, obj.Tags); status != "" {
+		w.Header().Set("x-amz-replication-status", status)
 	}
 	w.WriteHeader(http.StatusOK)
 }
