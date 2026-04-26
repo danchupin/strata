@@ -77,6 +77,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.handleIAM(w, r, action)
 			return
 		}
+		if r.URL.Query().Has("notify-dlq") && r.Method == http.MethodGet {
+			s.listNotificationDLQ(w, r)
+			return
+		}
 		if r.Method == http.MethodGet {
 			s.listBuckets(w, r)
 			return

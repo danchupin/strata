@@ -167,8 +167,8 @@
         "go test ./internal/notify/... passes"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "internal/notify/sqs.go: SQSSink wraps an SQSAPI interface (the SendMessage method only) so unit tests swap a fakeSQSClient. evt.Payload is the canonical wire bytes (built in s3api.buildNotificationPayload during US-008); SQSSink uses it as MessageBody verbatim — no re-marshal. router_env.go grew an EnvOption pattern: WithSQSClientFactory(factory func(region) (SQSAPI, error)) lets cmd/strata-notify inject a real *sqs.Client without dragging the AWS SDK into internal/notify's test deps. Spec format extends to 'sqs:<queueURL>|<region>' alongside the existing webhook '<url>|<secret>'. SQS spec without factory is a hard error — operators see the misconfiguration at startup. cmd/strata-notify wires sqsClientFactory via aws-sdk-go-v2/config.LoadDefaultConfig(WithRegion?) so credentials follow the standard chain (env, shared config, IRSA, EC2/ECS roles); empty region lets the SDK pick. internal/s3api/notification_dlq.go: GET /?notify-dlq&bucket=X[&limit=N&continuation=ID] handler gated to IAMRootPrincipal (anonymous + non-root → 403, missing bucket param → 400, unknown bucket → mapMetaErr → 404 NoSuchBucket); response is JSON {records, next_continuation_token}; payload is preserved as json.RawMessage when valid, otherwise quoted-string; pagination uses opaque event_id continuation token (cap 1000 per pull). Wired into Server.ServeHTTP at root path with q.Has('notify-dlq') && GET. Tests: SQSSink (5: round-trip via fake client, error propagates, missing queue URL, missing client, type/name); RouterFromEnv (5: SQS-with-factory parses URL+region, SQS-without-factory rejected, malformed-missing-region/empty-url, mixed webhook+sqs targets); DLQ HTTP (7: anonymous denied, non-root denied, missing bucket=400, unknown bucket=404, 3-row enumeration with payload preserved as JSON, continuation pagination across 5 rows@limit=2 collects all 5 in order, malformed limit=400). Compile-time check: var _ SQSAPI = (*sqs.Client)(nil)."
     },
     {
       "id": "US-011",

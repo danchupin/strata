@@ -14,6 +14,9 @@ import (
 	"syscall"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
+
 	"github.com/danchupin/strata/internal/config"
 	"github.com/danchupin/strata/internal/leader"
 	"github.com/danchupin/strata/internal/meta"
@@ -33,7 +36,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	router, err := notify.RouterFromEnv()
+	router, err := notify.RouterFromEnv(notify.WithSQSClientFactory(sqsClientFactory))
 	if err != nil {
 		logger.Error("notify router",
 			"error", err.Error(),
@@ -131,6 +134,24 @@ func buildMetaStore(cfg *config.Config) (meta.Store, error) {
 	default:
 		return nil, errors.New("unknown meta backend: " + cfg.MetaBackend)
 	}
+}
+
+// sqsClientFactory builds an AWS SDK SQS client per RouterFromEnv target.
+// Resolves credentials via the standard AWS chain (env vars, shared config,
+// IRSA, EC2/ECS instance roles). The optional region argument overrides the
+// SDK default; the empty string lets the chain pick the region from
+// AWS_REGION / EC2 metadata.
+func sqsClientFactory(region string) (notify.SQSAPI, error) {
+	ctx := context.Background()
+	var opts []func(*awsconfig.LoadOptions) error
+	if region != "" {
+		opts = append(opts, awsconfig.WithRegion(region))
+	}
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return sqs.NewFromConfig(cfg), nil
 }
 
 func parseLogLevel(s string) slog.Level {
