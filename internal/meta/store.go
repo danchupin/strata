@@ -37,6 +37,7 @@ var (
 	ErrNoSuchWebsite           = errors.New("no website configuration for bucket")
 	ErrNoSuchReplication       = errors.New("no replication configuration for bucket")
 	ErrNoSuchLogging           = errors.New("no logging configuration for bucket")
+	ErrNoSuchTagSet            = errors.New("no tag set configured for bucket")
 	ErrNoSuchGrants            = errors.New("no acl grants persisted for resource")
 	ErrIAMUserNotFound         = errors.New("iam user not found")
 	ErrIAMUserAlreadyExists    = errors.New("iam user already exists")
@@ -243,6 +244,10 @@ type Store interface {
 	SetBucketLogging(ctx context.Context, bucketID uuid.UUID, xmlBlob []byte) error
 	GetBucketLogging(ctx context.Context, bucketID uuid.UUID) ([]byte, error)
 	DeleteBucketLogging(ctx context.Context, bucketID uuid.UUID) error
+
+	SetBucketTagging(ctx context.Context, bucketID uuid.UUID, xmlBlob []byte) error
+	GetBucketTagging(ctx context.Context, bucketID uuid.UUID) ([]byte, error)
+	DeleteBucketTagging(ctx context.Context, bucketID uuid.UUID) error
 
 	CreateIAMUser(ctx context.Context, u *IAMUser) error
 	GetIAMUser(ctx context.Context, userName string) (*IAMUser, error)

@@ -339,8 +339,8 @@
         "go test ./internal/s3api/... passes"
       ],
       "priority": 20,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "meta.ErrNoSuchTagSet sentinel + meta.Store.Set/Get/DeleteBucketTagging. Both backends use the standard setBucketBlob/getBucketBlob/deleteBucketBlob helpers (memory: tagging map[uuid.UUID][]byte; cassandra: new bucket_tagging table appended to tableDDL). New internal/s3api/tagging.go handlers putBucketTagging/getBucketTagging/deleteBucketTagging: empty body PUT clears (returns 204; subsequent GET 404 NoSuchTagSet); validation rejects >50 tags, empty Key, duplicate Key (400 InvalidTag); malformed XML → 400 MalformedXML; missing config → 404 NoSuchTagSet via new ErrNoSuchTagSet APIError. Route ?tagging GET/PUT/DELETE wired in handleBucket adjacent to ?logging."
     },
     {
       "id": "US-021",

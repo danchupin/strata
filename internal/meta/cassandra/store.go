@@ -1454,6 +1454,16 @@ func (s *Store) DeleteBucketLogging(ctx context.Context, bucketID uuid.UUID) err
 	return s.deleteBucketBlob(ctx, "bucket_logging", bucketID)
 }
 
+func (s *Store) SetBucketTagging(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(ctx, "bucket_tagging", "config", bucketID, blob)
+}
+func (s *Store) GetBucketTagging(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(ctx, "bucket_tagging", "config", bucketID, meta.ErrNoSuchTagSet)
+}
+func (s *Store) DeleteBucketTagging(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(ctx, "bucket_tagging", bucketID)
+}
+
 func gocqlUUID(u uuid.UUID) gocql.UUID {
 	var g gocql.UUID
 	copy(g[:], u[:])

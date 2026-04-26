@@ -235,6 +235,19 @@ func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request, bucket str
 			return
 		}
 	}
+	if q.Has("tagging") {
+		switch r.Method {
+		case http.MethodGet:
+			s.getBucketTagging(w, r, bucket)
+			return
+		case http.MethodPut:
+			s.putBucketTagging(w, r, bucket)
+			return
+		case http.MethodDelete:
+			s.deleteBucketTagging(w, r, bucket)
+			return
+		}
+	}
 	if q.Has("acl") {
 		switch r.Method {
 		case http.MethodGet:

@@ -30,6 +30,7 @@ type Store struct {
 	website      map[uuid.UUID][]byte
 	replication  map[uuid.UUID][]byte
 	logging      map[uuid.UUID][]byte
+	tagging      map[uuid.UUID][]byte
 	bucketGrants map[uuid.UUID][]meta.Grant
 	objectGrants map[grantKey][]meta.Grant
 	iamUsers     map[string]*meta.IAMUser
@@ -65,6 +66,7 @@ func New() *Store {
 		website:      make(map[uuid.UUID][]byte),
 		replication:  make(map[uuid.UUID][]byte),
 		logging:      make(map[uuid.UUID][]byte),
+		tagging:      make(map[uuid.UUID][]byte),
 		bucketGrants: make(map[uuid.UUID][]meta.Grant),
 		objectGrants: make(map[grantKey][]meta.Grant),
 		iamUsers:     make(map[string]*meta.IAMUser),
@@ -750,6 +752,16 @@ func (s *Store) GetBucketLogging(ctx context.Context, bucketID uuid.UUID) ([]byt
 }
 func (s *Store) DeleteBucketLogging(ctx context.Context, bucketID uuid.UUID) error {
 	return s.deleteBucketBlob(s.logging, bucketID)
+}
+
+func (s *Store) SetBucketTagging(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(s.tagging, bucketID, blob)
+}
+func (s *Store) GetBucketTagging(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(s.tagging, bucketID, meta.ErrNoSuchTagSet)
+}
+func (s *Store) DeleteBucketTagging(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(s.tagging, bucketID)
 }
 
 func (s *Store) CreateMultipartUpload(ctx context.Context, mu *meta.MultipartUpload) error {

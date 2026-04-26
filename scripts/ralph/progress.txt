@@ -25,6 +25,7 @@ Started: Sat Apr 25 16:10:14 MSK 2026
 - Bucket-level flags on the buckets row use the same LWT idiom as SetBucketVersioning/SetBucketACL: `UPDATE buckets SET <col>=? WHERE name=? IF EXISTS` with `ScanCAS(nil)` and SerialConsistency LocalSerial. Required so the write joins the same Paxos lineage as the original CreateBucket INSERT IF NOT EXISTS — non-LWT UPDATEs on that row leave Paxos stale and LOCAL_QUORUM reads observe the pre-update value. ScanCAS(nil) (not new(bool)/new(string)) — gocql ignores the destination when CAS applies.
 - Static-site / website mode (US-017): handleBucket GET intercepts when len(q)==0, calls serveWebsiteRoot which fetches IndexDocument.Suffix on hit (200) or ErrorDocument.Key on miss (404). serveWebsiteObject sets Content-Type/ETag/Last-Modified/Content-Length and streams the object body via Data.GetChunks — does NOT call writeError (the body is the document itself, not an XML <Error/> envelope). Pagination (prefix, delimiter, max-keys, continuation-token, start-after) is preserved by the len(q)==0 guard.
 - Bucket replication (US-018): standard setBucketBlob/getBucketBlob/deleteBucketBlob blob in both backends (cassandra: bucket_replication table). putBucketReplication validates ≥1 Rule with non-empty Destination.Bucket; empty body → 400 (DELETE clears). getBucketReplication returns 404 ReplicationConfigurationNotFoundError on missing. replicationStatusFor(r,b,key,tags) walks Filter shapes (Prefix / Tag / And{Prefix+Tags}), skips disabled rules, returns "PENDING" on match. putObject emits x-amz-replication-status only when status is non-empty (header omitted otherwise). Filter shape pattern is reusable across lifecycle/replication.
+- Bucket tagging (US-020): standard setBucketBlob/getBucketBlob/deleteBucketBlob blob in both backends (cassandra: bucket_tagging table). Validation lives in s3api handler (≤50 tags, non-empty Key, no duplicate Key) — the meta layer stays an opaque blob store. PUT returns 204 (matches AWS), GET returns the stored XML or 404 NoSuchTagSet, empty body PUT and explicit DELETE both clear. Reuses the Tagging XML type already defined for object tagging.
 ---
 
 ## 2026-04-25 - US-001 (Parse AccessControlPolicy XML body)
@@ -550,4 +551,28 @@ Started: Sat Apr 25 16:10:14 MSK 2026
   - GET-on-fresh semantics differ per subresource: notification/replication/website return 404, logging returns 200 + empty document. Always check AC wording — "empty document" means baked-in canonical XML, not XML envelope of stored zero-value.
   - S3 has no DeleteBucketLogging endpoint; clearing is via empty-body PUT (or a BucketLoggingStatus with no LoggingEnabled). The internal Delete method on meta.Store is still useful (and called from handleBucketLogging on empty body) — keep it on the interface for symmetry and future codepaths.
   - When a config has a single optional inner element (LoggingEnabled here, ServerSideEncryptionConfiguration on encryption), validate the inner element's required attrs ONLY when present; absence = clear.
+---
+
+## 2026-04-26 - US-020 (PutBucketTagging / GetBucketTagging / DeleteBucketTagging)
+- New meta.ErrNoSuchTagSet sentinel + meta.Store.Set/Get/DeleteBucketTagging interface methods.
+- Memory backend: tagging map[uuid.UUID][]byte via the standard setBucketBlob/getBucketBlob/deleteBucketBlob helpers.
+- Cassandra backend: new bucket_tagging table appended to tableDDL (CREATE TABLE IF NOT EXISTS bucket_tagging (bucket_id uuid PRIMARY KEY, config blob)); SetBucketTagging/GetBucketTagging/DeleteBucketTagging via the same setBucketBlob helpers.
+- New internal/s3api/tagging.go handlers: putBucketTagging validates ≤50 tags, non-empty Key, no duplicate Key (over-limit / empty / dup → 400 InvalidTag); malformed XML → 400 MalformedXML; empty/whitespace body clears via DeleteBucketTagging (returns 204). getBucketTagging serves persisted blob or 404 NoSuchTagSet via new ErrNoSuchTagSet APIError. deleteBucketTagging is idempotent.
+- Route ?tagging GET/PUT/DELETE wired in handleBucket adjacent to ?logging.
+- Tests in bucket_tagging_test.go cover round-trip, GET-on-missing 404 NoSuchTagSet, DELETE clears, PUT empty body clears, over-limit (51 tags) 400 InvalidTag, malformed body 400 MalformedXML, missing bucket 404 NoSuchBucket, duplicate keys 400 InvalidTag, empty key 400 InvalidTag.
+- Files changed:
+  - internal/meta/store.go
+  - internal/meta/memory/store.go
+  - internal/meta/cassandra/store.go
+  - internal/meta/cassandra/schema.go
+  - internal/s3api/tagging.go
+  - internal/s3api/errors.go
+  - internal/s3api/server.go (handleBucket route)
+  - internal/s3api/bucket_tagging_test.go (new)
+  - scripts/ralph/prd.json
+- Quality: go build ./... + go vet ./... + go test ./... all green.
+- **Learnings for future iterations:**
+  - Bucket tagging follows the exact same setBucketBlob/getBucketBlob/deleteBucketBlob blob pattern as logging/replication/website/notification — when a bucket-scoped XML config has no per-bucket-row column, prefer this over modifying the buckets table.
+  - AWS uses 204 No Content (not 200) for successful Put/DeleteBucketTagging; PUT helpers in this repo are inconsistent (logging uses 200, replication uses 200, encryption uses 200). Tagging matches AWS Reference: 204.
+  - Tag validation belongs in the handler (XML schema + AWS limits), not in meta.Store. The meta layer is the dumb blob store; semantic validation (≤50 tags, non-empty Key, no duplicate Key, no whitespace-only) is s3api-side so the same blob can stay opaque to backends.
 ---
