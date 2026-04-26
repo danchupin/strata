@@ -33,6 +33,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"ListObjectsHidesDeleteMarkers", caseListHidesDeleteMarkers},
 		{"MultipartCompletionRoundTrip", caseMultipartCompletion},
 		{"BucketMfaDeleteRoundTrip", caseBucketMfaDelete},
+		{"SSEWrapRotationRoundTrip", caseSSEWrapRotation},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -282,6 +283,57 @@ func caseBucketMfaDelete(t *testing.T, s meta.Store) {
 	}
 	if err := s.SetBucketMfaDelete(ctx, "missing", meta.MfaDeleteEnabled); err != meta.ErrBucketNotFound {
 		t.Errorf("missing bucket: got %v want ErrBucketNotFound", err)
+	}
+}
+
+func caseSSEWrapRotation(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "rot", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+
+	o := &meta.Object{
+		BucketID:     b.ID,
+		Key:          "k",
+		StorageClass: "STANDARD",
+		ETag:         "deadbeef",
+		Size:         5,
+		Mtime:        time.Now().UTC(),
+		Manifest:     &data.Manifest{Class: "STANDARD"},
+		SSE:          "AES256",
+		SSEKey:       []byte("wrapped-under-A"),
+		SSEKeyID:     "A",
+	}
+	if err := s.PutObject(ctx, o, false); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	if err := s.UpdateObjectSSEWrap(ctx, b.ID, "k", "", []byte("wrapped-under-B"), "B"); err != nil {
+		t.Fatalf("update wrap: %v", err)
+	}
+	got, err := s.GetObject(ctx, b.ID, "k", "")
+	if err != nil {
+		t.Fatalf("get after rewrap: %v", err)
+	}
+	if got.SSEKeyID != "B" || string(got.SSEKey) != "wrapped-under-B" {
+		t.Fatalf("post-rewrap row: SSEKeyID=%q SSEKey=%q", got.SSEKeyID, string(got.SSEKey))
+	}
+
+	if _, err := s.GetRewrapProgress(ctx, b.ID); err != meta.ErrNoRewrapProgress {
+		t.Fatalf("progress before set: %v", err)
+	}
+	if err := s.SetRewrapProgress(ctx, &meta.RewrapProgress{
+		BucketID: b.ID,
+		TargetID: "B",
+		LastKey:  "k",
+		Complete: true,
+	}); err != nil {
+		t.Fatalf("set progress: %v", err)
+	}
+	prog, err := s.GetRewrapProgress(ctx, b.ID)
+	if err != nil || !prog.Complete || prog.TargetID != "B" || prog.LastKey != "k" {
+		t.Fatalf("progress: %+v err=%v", prog, err)
 	}
 }
 

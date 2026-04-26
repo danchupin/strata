@@ -321,6 +321,7 @@ func TestFromEnv_VaultPreferred(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	t.Setenv(EnvMasterKeys, "")
 	t.Setenv(EnvMasterKeyVault, "https://vault:8200:transit/export/encryption-key/strata")
 	t.Setenv(EnvVaultRoleID, "r")
 	t.Setenv(EnvVaultSecretID, "s")
@@ -337,6 +338,7 @@ func TestFromEnv_VaultPreferred(t *testing.T) {
 }
 
 func TestFromEnv_VaultMissingCreds(t *testing.T) {
+	t.Setenv(EnvMasterKeys, "")
 	t.Setenv(EnvMasterKeyVault, "https://vault:8200:transit/export/encryption-key/strata")
 	t.Setenv(EnvVaultRoleID, "")
 	t.Setenv(EnvVaultSecretID, "")

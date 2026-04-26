@@ -1599,6 +1599,76 @@ func (s *Store) DeleteBucketTagging(ctx context.Context, bucketID uuid.UUID) err
 	return s.deleteBucketBlob(ctx, "bucket_tagging", bucketID)
 }
 
+func (s *Store) UpdateObjectSSEWrap(ctx context.Context, bucketID uuid.UUID, key, versionID string, wrapped []byte, keyID string) error {
+	shard := shardOf(key, s.defaultShard)
+	if versionID == "" {
+		o, err := s.GetObject(ctx, bucketID, key, "")
+		if err != nil {
+			return err
+		}
+		versionID = o.VersionID
+	}
+	vUUID, err := gocql.ParseUUID(versionID)
+	if err != nil {
+		return meta.ErrObjectNotFound
+	}
+	return s.s.Query(
+		`UPDATE objects SET sse_key=?, sse_key_id=?
+		 WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
+		nilIfEmptyBytes(wrapped), nilIfEmpty(keyID),
+		gocqlUUID(bucketID), shard, key, vUUID,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) UpdateMultipartUploadSSEWrap(ctx context.Context, bucketID uuid.UUID, uploadID string, wrapped []byte, keyID string) error {
+	uploadUUID, err := gocql.ParseUUID(uploadID)
+	if err != nil {
+		return meta.ErrMultipartNotFound
+	}
+	return s.s.Query(
+		`UPDATE multipart_uploads SET sse_key=?, sse_key_id=?
+		 WHERE bucket_id=? AND upload_id=?`,
+		nilIfEmptyBytes(wrapped), nilIfEmpty(keyID),
+		gocqlUUID(bucketID), uploadUUID,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) SetRewrapProgress(ctx context.Context, p *meta.RewrapProgress) error {
+	if p == nil {
+		return nil
+	}
+	return s.s.Query(
+		`INSERT INTO rewrap_progress (bucket_id, target_id, last_key, complete, updated_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		gocqlUUID(p.BucketID), p.TargetID, p.LastKey, p.Complete, time.Now().UTC(),
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) GetRewrapProgress(ctx context.Context, bucketID uuid.UUID) (*meta.RewrapProgress, error) {
+	var (
+		targetID, lastKey string
+		complete          bool
+		updatedAt         time.Time
+	)
+	err := s.s.Query(
+		`SELECT target_id, last_key, complete, updated_at FROM rewrap_progress WHERE bucket_id=?`,
+		gocqlUUID(bucketID),
+	).WithContext(ctx).Scan(&targetID, &lastKey, &complete, &updatedAt)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return nil, meta.ErrNoRewrapProgress
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &meta.RewrapProgress{
+		BucketID:  bucketID,
+		TargetID:  targetID,
+		LastKey:   lastKey,
+		Complete:  complete,
+		UpdatedAt: updatedAt,
+	}, nil
+}
+
 func gocqlUUID(u uuid.UUID) gocql.UUID {
 	var g gocql.UUID
 	copy(g[:], u[:])

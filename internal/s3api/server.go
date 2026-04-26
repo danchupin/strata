@@ -932,7 +932,7 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 			writeError(w, r, ErrInternal)
 			return
 		}
-		mk, _, merr := s.Master.Resolve(r.Context())
+		mk, merr := master.ResolveByID(r.Context(), s.Master, o.SSEKeyID)
 		if merr != nil {
 			writeError(w, r, ErrInternal)
 			return

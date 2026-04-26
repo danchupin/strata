@@ -16,29 +16,30 @@ import (
 )
 
 type Store struct {
-	mu           sync.RWMutex
-	buckets      map[string]*meta.Bucket
-	objects      map[uuid.UUID]map[string][]*meta.Object
-	multiparts   map[uuid.UUID]map[string]*mpState
-	lifecycles   map[uuid.UUID][]byte
-	cors         map[uuid.UUID][]byte
-	policies     map[uuid.UUID][]byte
-	pab          map[uuid.UUID][]byte
-	ownership    map[uuid.UUID][]byte
-	encryption   map[uuid.UUID][]byte
-	objectLock   map[uuid.UUID][]byte
-	notification map[uuid.UUID][]byte
-	website      map[uuid.UUID][]byte
-	replication  map[uuid.UUID][]byte
-	logging      map[uuid.UUID][]byte
-	tagging      map[uuid.UUID][]byte
-	bucketGrants map[uuid.UUID][]meta.Grant
-	objectGrants map[grantKey][]meta.Grant
-	iamUsers     map[string]*meta.IAMUser
-	accessKeys   map[string]*meta.IAMAccessKey
-	gc           map[string][]meta.GCEntry
-	mpDone       map[completionKey]*completionEntry
-	locker       *Locker
+	mu             sync.RWMutex
+	buckets        map[string]*meta.Bucket
+	objects        map[uuid.UUID]map[string][]*meta.Object
+	multiparts     map[uuid.UUID]map[string]*mpState
+	lifecycles     map[uuid.UUID][]byte
+	cors           map[uuid.UUID][]byte
+	policies       map[uuid.UUID][]byte
+	pab            map[uuid.UUID][]byte
+	ownership      map[uuid.UUID][]byte
+	encryption     map[uuid.UUID][]byte
+	objectLock     map[uuid.UUID][]byte
+	notification   map[uuid.UUID][]byte
+	website        map[uuid.UUID][]byte
+	replication    map[uuid.UUID][]byte
+	logging        map[uuid.UUID][]byte
+	tagging        map[uuid.UUID][]byte
+	bucketGrants   map[uuid.UUID][]meta.Grant
+	objectGrants   map[grantKey][]meta.Grant
+	iamUsers       map[string]*meta.IAMUser
+	accessKeys     map[string]*meta.IAMAccessKey
+	gc             map[string][]meta.GCEntry
+	mpDone         map[completionKey]*completionEntry
+	rewrapProgress map[uuid.UUID]*meta.RewrapProgress
+	locker         *Locker
 }
 
 type completionKey struct {
@@ -93,9 +94,10 @@ func New() *Store {
 		objectGrants: make(map[grantKey][]meta.Grant),
 		iamUsers:     make(map[string]*meta.IAMUser),
 		accessKeys:   make(map[string]*meta.IAMAccessKey),
-		gc:           make(map[string][]meta.GCEntry),
-		mpDone:       make(map[completionKey]*completionEntry),
-		locker:       NewLocker(),
+		gc:             make(map[string][]meta.GCEntry),
+		mpDone:         make(map[completionKey]*completionEntry),
+		rewrapProgress: make(map[uuid.UUID]*meta.RewrapProgress),
+		locker:         NewLocker(),
 	}
 }
 
@@ -1143,6 +1145,66 @@ func (s *Store) DeleteIAMAccessKey(ctx context.Context, accessKeyID string) (*me
 	}
 	cp := *ak
 	delete(s.accessKeys, accessKeyID)
+	return &cp, nil
+}
+
+func (s *Store) UpdateObjectSSEWrap(ctx context.Context, bucketID uuid.UUID, key, versionID string, wrapped []byte, keyID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bucket, ok := s.objects[bucketID]
+	if !ok {
+		return meta.ErrBucketNotFound
+	}
+	versions, ok := bucket[key]
+	if !ok || len(versions) == 0 {
+		return meta.ErrObjectNotFound
+	}
+	for _, v := range versions {
+		if versionID == "" || v.VersionID == versionID {
+			v.SSEKey = append([]byte(nil), wrapped...)
+			v.SSEKeyID = keyID
+			return nil
+		}
+	}
+	return meta.ErrObjectNotFound
+}
+
+func (s *Store) UpdateMultipartUploadSSEWrap(ctx context.Context, bucketID uuid.UUID, uploadID string, wrapped []byte, keyID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ups, ok := s.multiparts[bucketID]
+	if !ok {
+		return meta.ErrBucketNotFound
+	}
+	st, ok := ups[uploadID]
+	if !ok {
+		return meta.ErrMultipartNotFound
+	}
+	st.upload.SSEKey = append([]byte(nil), wrapped...)
+	st.upload.SSEKeyID = keyID
+	return nil
+}
+
+func (s *Store) SetRewrapProgress(ctx context.Context, p *meta.RewrapProgress) error {
+	if p == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := *p
+	cp.UpdatedAt = time.Now().UTC()
+	s.rewrapProgress[p.BucketID] = &cp
+	return nil
+}
+
+func (s *Store) GetRewrapProgress(ctx context.Context, bucketID uuid.UUID) (*meta.RewrapProgress, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rp, ok := s.rewrapProgress[bucketID]
+	if !ok {
+		return nil, meta.ErrNoRewrapProgress
+	}
+	cp := *rp
 	return &cp, nil
 }
 

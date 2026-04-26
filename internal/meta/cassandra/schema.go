@@ -166,6 +166,13 @@ var tableDDL = []string{
 		completed_at timestamp,
 		PRIMARY KEY ((bucket_id), upload_id)
 	)`,
+	`CREATE TABLE IF NOT EXISTS rewrap_progress (
+		bucket_id  uuid PRIMARY KEY,
+		target_id  text,
+		last_key   text,
+		complete   boolean,
+		updated_at timestamp
+	)`,
 }
 
 var alterStatements = []string{

@@ -43,7 +43,18 @@ var (
 	ErrIAMUserAlreadyExists    = errors.New("iam user already exists")
 	ErrIAMAccessKeyNotFound    = errors.New("iam access key not found")
 	ErrMultipartCompletionNotFound = errors.New("multipart completion record not found or expired")
+	ErrNoRewrapProgress        = errors.New("no rewrap progress recorded for bucket")
 )
+
+// RewrapProgress tracks a master-key rewrap pass for a single bucket. Used by
+// cmd/strata-rewrap for resumability across runs.
+type RewrapProgress struct {
+	BucketID  uuid.UUID
+	TargetID  string
+	LastKey   string
+	Complete  bool
+	UpdatedAt time.Time
+}
 
 // MultipartCompletion is a short-lived idempotency record persisted after a
 // successful CompleteMultipartUpload so a retried Complete with the same
@@ -304,6 +315,11 @@ type Store interface {
 
 	RecordMultipartCompletion(ctx context.Context, rec *MultipartCompletion, ttl time.Duration) error
 	GetMultipartCompletion(ctx context.Context, bucketID uuid.UUID, uploadID string) (*MultipartCompletion, error)
+
+	UpdateObjectSSEWrap(ctx context.Context, bucketID uuid.UUID, key, versionID string, wrapped []byte, keyID string) error
+	UpdateMultipartUploadSSEWrap(ctx context.Context, bucketID uuid.UUID, uploadID string, wrapped []byte, keyID string) error
+	SetRewrapProgress(ctx context.Context, p *RewrapProgress) error
+	GetRewrapProgress(ctx context.Context, bucketID uuid.UUID) (*RewrapProgress, error)
 
 	Close() error
 }

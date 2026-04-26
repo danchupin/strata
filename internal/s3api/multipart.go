@@ -19,6 +19,7 @@ import (
 	"github.com/gocql/gocql"
 
 	"github.com/danchupin/strata/internal/auth"
+	"github.com/danchupin/strata/internal/crypto/master"
 	ssecrypto "github.com/danchupin/strata/internal/crypto/sse"
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
@@ -124,7 +125,7 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Buck
 			writeError(w, r, ErrInternal)
 			return
 		}
-		mk, _, merr := s.Master.Resolve(ctx)
+		mk, merr := master.ResolveByID(ctx, s.Master, mu.SSEKeyID)
 		if merr != nil {
 			writeError(w, r, ErrInternal)
 			return

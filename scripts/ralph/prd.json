@@ -100,8 +100,8 @@
         "go test ./... passes"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "internal/crypto/master/rotation.go: RotationProvider with STRATA_SSE_MASTER_KEYS=<id>:<hex64>,... ; first entry = active wrap key, rest = unwrap-only. New `Resolver` interface (`ResolveByID`) implemented by RotationProvider; `master.ResolveByID(ctx, p, keyID)` helper bridges single-key + rotation providers (server unwrap path uses this everywhere). FromEnv precedence is now: STRATA_SSE_MASTER_KEYS > vault > file > env. meta.Store grew UpdateObjectSSEWrap, UpdateMultipartUploadSSEWrap, SetRewrapProgress, GetRewrapProgress + meta.RewrapProgress struct + ErrNoRewrapProgress; both backends implement; contract test caseSSEWrapRotation. Cassandra additive `CREATE TABLE IF NOT EXISTS rewrap_progress`. New internal/rewrap library + cmd/strata-rewrap binary: walks ListBuckets → ListObjectVersions / ListMultipartUploads, unwraps via Provider.ResolveByID(SSEKeyID), rewraps via Provider.Resolve, persists per-bucket completion (target=activeID) so re-runs after rotation correctly re-process. Tests: rotation provider unit tests; PUT-A → rotate-B → GET works; rewrap converts A→B; rewrap idempotent + correctly re-runs after a second rotation; multipart upload-row rewrap; missing-old-key fails fast with 500 via the gateway (rather than corrupt body)."
     },
     {
       "id": "US-007",
