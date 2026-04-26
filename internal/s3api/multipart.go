@@ -35,14 +35,18 @@ func (s *Server) initiateMultipart(w http.ResponseWriter, r *http.Request, b *me
 		return
 	}
 	mu := &meta.MultipartUpload{
-		BucketID:     b.ID,
-		UploadID:     gocql.TimeUUID().String(),
-		Key:          key,
-		StorageClass: class,
-		ContentType:  r.Header.Get("Content-Type"),
-		InitiatedAt:  time.Now().UTC(),
-		Status:       "uploading",
-		SSE:          sse,
+		BucketID:          b.ID,
+		UploadID:          gocql.TimeUUID().String(),
+		Key:               key,
+		StorageClass:      class,
+		ContentType:       r.Header.Get("Content-Type"),
+		InitiatedAt:       time.Now().UTC(),
+		Status:            "uploading",
+		SSE:               sse,
+		UserMeta:          extractUserMeta(r.Header),
+		CacheControl:      r.Header.Get("Cache-Control"),
+		Expires:           r.Header.Get("Expires"),
+		ChecksumAlgorithm: strings.ToUpper(r.Header.Get("x-amz-checksum-algorithm")),
 	}
 	if err := s.Meta.CreateMultipartUpload(r.Context(), mu); err != nil {
 		mapMetaErr(w, r, err)
@@ -51,10 +55,14 @@ func (s *Server) initiateMultipart(w http.ResponseWriter, r *http.Request, b *me
 	if sse != "" {
 		w.Header().Set("x-amz-server-side-encryption", sse)
 	}
+	if mu.ChecksumAlgorithm != "" {
+		w.Header().Set("x-amz-checksum-algorithm", mu.ChecksumAlgorithm)
+	}
 	writeXML(w, http.StatusOK, initiateMultipartResult{
-		Bucket:   b.Name,
-		Key:      key,
-		UploadID: mu.UploadID,
+		Bucket:            b.Name,
+		Key:               key,
+		UploadID:          mu.UploadID,
+		ChecksumAlgorithm: mu.ChecksumAlgorithm,
 	})
 }
 
@@ -152,7 +160,7 @@ func (s *Server) uploadPartCopy(w http.ResponseWriter, r *http.Request, b *meta.
 	if rangeSpec := r.Header.Get("x-amz-copy-source-range"); rangeSpec != "" {
 		start, end, ok := parseCopySourceRange(rangeSpec, srcObj.Size)
 		if !ok {
-			writeError(w, r, ErrInvalidArgument)
+			writeError(w, r, ErrInvalidRange)
 			return
 		}
 		offset = start
@@ -211,11 +219,8 @@ func parseCopySourceRange(spec string, size int64) (start, end int64, ok bool) {
 		end = size - 1
 	} else {
 		end, err = strconv.ParseInt(hi, 10, 64)
-		if err != nil || end < start {
+		if err != nil || end < start || end >= size {
 			return 0, 0, false
-		}
-		if end >= size {
-			end = size - 1
 		}
 	}
 	return start, end, true
@@ -261,6 +266,25 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		return
 	}
 
+	if ifMatch := r.Header.Get("If-Match"); ifMatch != "" {
+		existing, gerr := s.Meta.GetObject(r.Context(), b.ID, key, "")
+		if gerr != nil {
+			mapMetaErr(w, r, gerr)
+			return
+		}
+		if !etagMatches(ifMatch, `"`+existing.ETag+`"`) {
+			writeError(w, r, ErrPreconditionFailed)
+			return
+		}
+	}
+	if ifNone := r.Header.Get("If-None-Match"); ifNone != "" {
+		existing, gerr := s.Meta.GetObject(r.Context(), b.ID, key, "")
+		if gerr == nil && (ifNone == "*" || etagMatches(ifNone, `"`+existing.ETag+`"`)) {
+			writeError(w, r, ErrPreconditionFailed)
+			return
+		}
+	}
+
 	storedParts, err := s.Meta.ListParts(r.Context(), b.ID, uploadID)
 	if err != nil {
 		mapMetaErr(w, r, err)
@@ -296,6 +320,10 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		Mtime:        time.Now().UTC(),
 		Checksums:    composite,
 		SSE:          mu.SSE,
+		UserMeta:     mu.UserMeta,
+		CacheControl: mu.CacheControl,
+		Expires:      mu.Expires,
+		PartsCount:   len(parts),
 	}
 
 	orphans, err := s.Meta.CompleteMultipartUpload(r.Context(), obj, uploadID, parts, meta.IsVersioningActive(b.Versioning))
@@ -323,6 +351,10 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		headers["x-amz-server-side-encryption"] = obj.SSE
 	}
 
+	checksumType := ""
+	if mu.ChecksumAlgorithm != "" {
+		checksumType = "COMPOSITE"
+	}
 	var buf bytes.Buffer
 	buf.WriteString(xml.Header)
 	if err := xml.NewEncoder(&buf).Encode(completeMultipartResult{
@@ -335,9 +367,13 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		ChecksumSHA1:      composite["SHA1"],
 		ChecksumSHA256:    composite["SHA256"],
 		ChecksumCRC64NVME: composite["CRC64NVME"],
+		ChecksumType:      checksumType,
 	}); err != nil {
 		writeError(w, r, ErrInternal)
 		return
+	}
+	if checksumType != "" {
+		w.Header().Set("x-amz-checksum-type", checksumType)
 	}
 
 	rec := &meta.MultipartCompletion{

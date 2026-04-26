@@ -328,6 +328,15 @@ func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request, bucket str
 		owner := auth.FromContext(r.Context()).Owner
 		_, err := s.Meta.CreateBucket(r.Context(), bucket, owner, "STANDARD")
 		if errors.Is(err, meta.ErrBucketAlreadyExists) {
+			if existing, gerr := s.Meta.GetBucket(r.Context(), bucket); gerr == nil {
+				if existing.Owner != owner {
+					writeError(w, r, ErrBucketTaken)
+					return
+				}
+				w.Header().Set("Location", "/"+bucket)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 			writeError(w, r, ErrBucketExists)
 			return
 		}
@@ -379,62 +388,161 @@ func (s *Server) listObjects(w http.ResponseWriter, r *http.Request, bucket stri
 		mapMetaErr(w, r, err)
 		return
 	}
+	if !s.requireAccess(w, r, b, "s3:ListBucket", bucketARN(b.Name)) {
+		return
+	}
+	if !s.requireACL(w, r, b, "", "s3:ListBucket") {
+		return
+	}
 	q := r.URL.Query()
-	limit := 1000
+	v2 := q.Get("list-type") == "2"
+
+	if strings.EqualFold(q.Get("allow-unordered"), "true") && q.Get("delimiter") != "" {
+		writeError(w, r, ErrInvalidArgument)
+		return
+	}
+
+	hasMaxKeys := q.Has("max-keys")
+	maxKeys := 1000
 	if raw := q.Get("max-keys"); raw != "" {
 		v, err := strconv.Atoi(raw)
 		if err != nil || v < 0 {
 			writeError(w, r, ErrInvalidArgument)
 			return
 		}
-		if v > 0 {
-			limit = v
-		}
+		maxKeys = v
 	}
-	marker := q.Get("continuation-token")
-	if marker == "" {
-		marker = q.Get("start-after")
-	}
-	opts := meta.ListOptions{
-		Prefix:    q.Get("prefix"),
-		Delimiter: q.Get("delimiter"),
-		Marker:    marker,
-		Limit:     limit,
-	}
-	res, err := s.Meta.ListObjects(r.Context(), b.ID, opts)
-	if err != nil {
-		writeError(w, r, ErrInternal)
+
+	encodingType := q.Get("encoding-type")
+	if encodingType != "" && encodingType != "url" {
+		writeError(w, r, ErrInvalidArgument)
 		return
 	}
-	resp := listBucketResultV2{
-		Name:                  bucket,
-		Prefix:                opts.Prefix,
-		Delimiter:             opts.Delimiter,
-		MaxKeys:               limit,
-		IsTruncated:           res.Truncated,
-		NextContinuationToken: res.NextMarker,
-		ContinuationToken:     q.Get("continuation-token"),
-		StartAfter:            q.Get("start-after"),
+
+	prefix := q.Get("prefix")
+	delim := q.Get("delimiter")
+	bucketOwner := firstNonEmpty(b.Owner, "strata")
+
+	var marker, contToken, startAfter string
+	if v2 {
+		contToken = q.Get("continuation-token")
+		startAfter = q.Get("start-after")
+		marker = contToken
+		if marker == "" {
+			marker = startAfter
+		}
+	} else {
+		marker = q.Get("marker")
 	}
+
+	opts := meta.ListOptions{
+		Prefix:    prefix,
+		Delimiter: delim,
+		Marker:    marker,
+		Limit:     maxKeys,
+	}
+
+	var res *meta.ListResult
+	if hasMaxKeys && maxKeys == 0 {
+		res = &meta.ListResult{}
+	} else {
+		res, err = s.Meta.ListObjects(r.Context(), b.ID, opts)
+		if err != nil {
+			writeError(w, r, ErrInternal)
+			return
+		}
+	}
+
+	contents := make([]objectEntry, 0, len(res.Objects))
 	for _, o := range res.Objects {
-		resp.Contents = append(resp.Contents, objectEntry{
-			Key:          o.Key,
+		entry := objectEntry{
+			Key:          maybeURLEncode(o.Key, encodingType),
 			LastModified: o.Mtime.UTC().Format(time.RFC3339),
 			ETag:         `"` + o.ETag + `"`,
 			Size:         o.Size,
 			StorageClass: o.StorageClass,
-		})
+		}
+		fetchOwner := !v2 || strings.EqualFold(q.Get("fetch-owner"), "true")
+		if fetchOwner {
+			entry.Owner = &owner{ID: bucketOwner, DisplayName: bucketOwner}
+		}
+		contents = append(contents, entry)
 	}
+	commonPrefixes := make([]commonPrefixEl, 0, len(res.CommonPrefixes))
 	for _, p := range res.CommonPrefixes {
-		resp.CommonPrefixes = append(resp.CommonPrefixes, commonPrefixEl{Prefix: p})
+		commonPrefixes = append(commonPrefixes, commonPrefixEl{Prefix: maybeURLEncode(p, encodingType)})
 	}
-	resp.KeyCount = len(resp.Contents) + len(resp.CommonPrefixes)
+
+	if v2 {
+		resp := listBucketResultV2{
+			Name:                  bucket,
+			Prefix:                maybeURLEncode(prefix, encodingType),
+			MaxKeys:               maxKeys,
+			Delimiter:             delim,
+			EncodingType:          encodingType,
+			IsTruncated:           res.Truncated,
+			ContinuationToken:     contToken,
+			NextContinuationToken: res.NextMarker,
+			StartAfter:            startAfter,
+			Contents:              contents,
+			CommonPrefixes:        commonPrefixes,
+		}
+		resp.KeyCount = len(contents) + len(commonPrefixes)
+		writeXML(w, http.StatusOK, resp)
+		return
+	}
+
+	resp := listBucketResultV1{
+		Name:           bucket,
+		Prefix:         maybeURLEncode(prefix, encodingType),
+		Marker:         marker,
+		MaxKeys:        maxKeys,
+		Delimiter:      delim,
+		EncodingType:   encodingType,
+		IsTruncated:    res.Truncated,
+		Contents:       contents,
+		CommonPrefixes: commonPrefixes,
+	}
+	if res.Truncated {
+		resp.NextMarker = res.NextMarker
+	}
 	writeXML(w, http.StatusOK, resp)
+}
+
+func maybeURLEncode(s, encodingType string) string {
+	if encodingType != "url" {
+		return s
+	}
+	return urlPathEncode(s)
+}
+
+// urlPathEncode percent-encodes the unreserved-but-special characters that
+// appear in object keys, matching what AWS does for encoding-type=url.
+func urlPathEncode(s string) string {
+	const upperhex = "0123456789ABCDEF"
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case 'A' <= c && c <= 'Z',
+			'a' <= c && c <= 'z',
+			'0' <= c && c <= '9',
+			c == '-', c == '_', c == '.', c == '~', c == '/':
+			out = append(out, c)
+		default:
+			out = append(out, '%', upperhex[c>>4], upperhex[c&0x0F])
+		}
+	}
+	return string(out)
 }
 
 func (s *Server) handleObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
 	if r.Method == http.MethodOptions {
 		s.corsPreflight(w, r, bucket)
+		return
+	}
+	if !validObjectKey(key) {
+		writeError(w, r, ErrInvalidURI)
 		return
 	}
 	b, err := s.Meta.GetBucket(r.Context(), bucket)
@@ -651,6 +759,9 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		Manifest:     m,
 		Checksums:    sums,
 		SSE:          sse,
+		UserMeta:     extractUserMeta(r.Header),
+		CacheControl: r.Header.Get("Cache-Control"),
+		Expires:      r.Header.Get("Expires"),
 	}
 	if ssec.Present {
 		obj.SSECKeyMD5 = ssec.KeyMD5
@@ -714,6 +825,18 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	w.Header().Set("Last-Modified", o.Mtime.UTC().Format(http.TimeFormat))
 	w.Header().Set("x-amz-storage-class", o.StorageClass)
 	w.Header().Set("Accept-Ranges", "bytes")
+	if o.CacheControl != "" {
+		w.Header().Set("Cache-Control", o.CacheControl)
+	}
+	if o.Expires != "" {
+		w.Header().Set("Expires", o.Expires)
+	}
+	for k, v := range o.UserMeta {
+		w.Header()["x-amz-meta-"+k] = []string{v}
+	}
+	if o.PartsCount > 0 {
+		w.Header().Set("x-amz-mp-parts-count", strconv.Itoa(o.PartsCount))
+	}
 	if o.SSE != "" {
 		w.Header().Set("x-amz-server-side-encryption", o.SSE)
 	}

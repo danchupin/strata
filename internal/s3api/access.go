@@ -108,7 +108,7 @@ func (s *Server) requireACL(w http.ResponseWriter, r *http.Request, b *meta.Buck
 
 func requiredPermForAction(action string) string {
 	switch action {
-	case "s3:GetObject", "s3:ListMultipartUploadParts":
+	case "s3:GetObject", "s3:ListBucket", "s3:ListBucketVersions", "s3:ListMultipartUploadParts":
 		return "READ"
 	case "s3:PutObject", "s3:DeleteObject", "s3:DeleteObjectVersion", "s3:AbortMultipartUpload":
 		return "WRITE"
@@ -119,14 +119,14 @@ func requiredPermForAction(action string) string {
 func cannedAllows(canned, action string, info *auth.AuthInfo) bool {
 	switch canned {
 	case cannedPublicRead:
-		return action == "s3:GetObject" || action == "s3:ListMultipartUploadParts"
+		return action == "s3:GetObject" || action == "s3:ListBucket" || action == "s3:ListBucketVersions" || action == "s3:ListMultipartUploadParts"
 	case cannedPublicReadWrite:
 		return true
 	case cannedAuthenticatedRead:
 		if info == nil || info.IsAnonymous {
 			return false
 		}
-		return action == "s3:GetObject" || action == "s3:ListMultipartUploadParts"
+		return action == "s3:GetObject" || action == "s3:ListBucket" || action == "s3:ListBucketVersions" || action == "s3:ListMultipartUploadParts"
 	}
 	return false
 }

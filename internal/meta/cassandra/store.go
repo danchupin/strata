@@ -313,14 +313,20 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 		t := o.RetainUntil
 		retainUntil = &t
 	}
+	var partsCount interface{}
+	if o.PartsCount > 0 {
+		partsCount = o.PartsCount
+	}
 	return s.s.Query(
 		`INSERT INTO objects (bucket_id, shard, key, version_id, is_latest, is_delete_marker,
 		 size, etag, content_type, storage_class, mtime, manifest, user_meta, tags,
-		 retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
+		 cache_control, expires, parts_count)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		gocqlUUID(o.BucketID), shard, o.Key, versionID, true, o.IsDeleteMarker,
 		o.Size, o.ETag, o.ContentType, o.StorageClass, o.Mtime, manifestBlob, o.UserMeta, o.Tags,
 		retainUntil, nilIfEmpty(o.RetainMode), o.LegalHold, o.Checksums, nilIfEmpty(o.SSE), nilIfEmpty(o.SSECKeyMD5), nilIfEmpty(o.RestoreStatus),
+		nilIfEmpty(o.CacheControl), nilIfEmpty(o.Expires), partsCount,
 	).WithContext(ctx).Exec()
 }
 
@@ -351,18 +357,23 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		sse          string
 		ssecKeyMD5   string
 		restore      string
+		cacheControl string
+		expires      string
+		partsCount   int
 	)
 	var err error
 	if versionID == "" {
 		err = s.s.Query(
 			`SELECT version_id, is_latest, is_delete_marker, size, etag, content_type,
 			        storage_class, mtime, manifest, user_meta, tags,
-			        retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status
+			        retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
+			        cache_control, expires, parts_count
 			 FROM objects WHERE bucket_id=? AND shard=? AND key=? LIMIT 1`,
 			gocqlUUID(bucketID), shard, key,
 		).WithContext(ctx).Scan(&versionUUID, &isLatest, &isDeleteMark, &size, &etag, &ctype,
 			&class, &mtime, &manifestBlob, &userMeta, &tags,
-			&retainUntil, &retainMode, &legalHold, &checksums, &sse, &ssecKeyMD5, &restore)
+			&retainUntil, &retainMode, &legalHold, &checksums, &sse, &ssecKeyMD5, &restore,
+			&cacheControl, &expires, &partsCount)
 	} else {
 		vUUID, perr := gocql.ParseUUID(versionID)
 		if perr != nil {
@@ -371,12 +382,14 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		err = s.s.Query(
 			`SELECT version_id, is_latest, is_delete_marker, size, etag, content_type,
 			        storage_class, mtime, manifest, user_meta, tags,
-			        retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status
+			        retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
+			        cache_control, expires, parts_count
 			 FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
 			gocqlUUID(bucketID), shard, key, vUUID,
 		).WithContext(ctx).Scan(&versionUUID, &isLatest, &isDeleteMark, &size, &etag, &ctype,
 			&class, &mtime, &manifestBlob, &userMeta, &tags,
-			&retainUntil, &retainMode, &legalHold, &checksums, &sse, &ssecKeyMD5, &restore)
+			&retainUntil, &retainMode, &legalHold, &checksums, &sse, &ssecKeyMD5, &restore,
+			&cacheControl, &expires, &partsCount)
 	}
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrObjectNotFound
@@ -412,6 +425,9 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		SSE:            sse,
 		SSECKeyMD5:     ssecKeyMD5,
 		RestoreStatus:  restore,
+		CacheControl:   cacheControl,
+		Expires:        expires,
+		PartsCount:     partsCount,
 	}, nil
 }
 
@@ -1068,9 +1084,10 @@ func (s *Store) CreateMultipartUpload(ctx context.Context, mu *meta.MultipartUpl
 		return fmt.Errorf("upload_id: %w", err)
 	}
 	return s.s.Query(
-		`INSERT INTO multipart_uploads (bucket_id, upload_id, key, status, storage_class, content_type, initiated_at, sse)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO multipart_uploads (bucket_id, upload_id, key, status, storage_class, content_type, initiated_at, sse, user_meta, cache_control, expires, checksum_algorithm)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		gocqlUUID(mu.BucketID), uploadUUID, mu.Key, "uploading", mu.StorageClass, mu.ContentType, mu.InitiatedAt, nilIfEmpty(mu.SSE),
+		mu.UserMeta, nilIfEmpty(mu.CacheControl), nilIfEmpty(mu.Expires), nilIfEmpty(mu.ChecksumAlgorithm),
 	).WithContext(ctx).Exec()
 }
 
@@ -1080,15 +1097,16 @@ func (s *Store) GetMultipartUpload(ctx context.Context, bucketID uuid.UUID, uplo
 		return nil, meta.ErrMultipartNotFound
 	}
 	var (
-		key, status, class, ctype string
-		sse                       string
-		initiated                 time.Time
+		key, status, class, ctype             string
+		sse, cacheControl, expires, checksum  string
+		userMeta                              map[string]string
+		initiated                             time.Time
 	)
 	err = s.s.Query(
-		`SELECT key, status, storage_class, content_type, initiated_at, sse
+		`SELECT key, status, storage_class, content_type, initiated_at, sse, user_meta, cache_control, expires, checksum_algorithm
 		 FROM multipart_uploads WHERE bucket_id=? AND upload_id=?`,
 		gocqlUUID(bucketID), uploadUUID,
-	).WithContext(ctx).Scan(&key, &status, &class, &ctype, &initiated, &sse)
+	).WithContext(ctx).Scan(&key, &status, &class, &ctype, &initiated, &sse, &userMeta, &cacheControl, &expires, &checksum)
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrMultipartNotFound
 	}
@@ -1096,14 +1114,18 @@ func (s *Store) GetMultipartUpload(ctx context.Context, bucketID uuid.UUID, uplo
 		return nil, err
 	}
 	return &meta.MultipartUpload{
-		BucketID:     bucketID,
-		UploadID:     uploadID,
-		Key:          key,
-		Status:       status,
-		StorageClass: class,
-		ContentType:  ctype,
-		InitiatedAt:  initiated,
-		SSE:          sse,
+		BucketID:          bucketID,
+		UploadID:          uploadID,
+		Key:               key,
+		Status:            status,
+		StorageClass:      class,
+		ContentType:       ctype,
+		InitiatedAt:       initiated,
+		SSE:               sse,
+		UserMeta:          userMeta,
+		CacheControl:      cacheControl,
+		Expires:           expires,
+		ChecksumAlgorithm: checksum,
 	}, nil
 }
 

@@ -19,7 +19,8 @@ func TestBucketCRUD(t *testing.T) {
 		t.Errorf("ListBuckets response missing photos: %s", body)
 	}
 
-	h.mustStatus(h.doString("PUT", "/photos", "", "X-Test-Principal", "owner"), 409)
+	// Same-owner recreate is idempotent (default region semantics) - returns 200.
+	h.mustStatus(h.doString("PUT", "/photos", "", "X-Test-Principal", "owner"), 200)
 	h.mustStatus(h.doString("DELETE", "/photos", "", "X-Test-Principal", "owner"), 204)
 	h.mustStatus(h.doString("HEAD", "/photos", ""), 404)
 }

@@ -59,6 +59,96 @@ History below — newest run on top. The default subset filter is the
 test_object_read or test_object_delete or test_multipart or
 test_versioning_obj or test_bucket_list_versions`.
 
+### 2026-04-26 — `04919a5` + Block 1 polish round (≥80% target hit)
+
+After cassandra schema migration for cache_control / expires / parts_count
+on `objects` plus user_meta / cache_control / expires / checksum_algorithm
+on `multipart_uploads`, plus the multipart precondition + ChecksumType +
+copy-source-range + bucket-recreate-idempotent + control-character key
+validation fixes:
+
+```
+tests=176  passed=141  failed=35  errors=0  skipped=0
+pass rate: 80.1%
+```
+
+**Headline target reached.** +22 over the post-Ralph baseline (114 →
+141), +3 over the pre-cleanup 138, no regressions on the 19-test
+original sample.
+
+**Remaining 35 failures** (all expected — none are easy wins):
+
+- **`test_headers.py` — 8 deliberate SigV2 gaps.** Same as ever.
+- **`test_multipart_use_cksum_helper_*` — 5 failures.** Need full
+  per-part composite-checksum response shape (`?partNumber=N` GET +
+  per-part checksum echo + `ChecksumMode=ENABLED` HEAD support). Big.
+- **`test_multipart_*_get_part` — 3 failures.** Same `?partNumber=N`
+  GET semantics. Need per-part offset tracking in the manifest.
+- **`test_multipart_copy_*` — 4 failures.** FlexibleChecksumError
+  (boto SDK auto-checksums multipart copy bodies; we don't recompute
+  on the data plane).
+- **Versioning null-version — 5 failures.** Literal "null" version-id
+  semantics for unversioned rows in versioned buckets — full
+  implementation is invasive.
+- **Listing edge cases — 5 failures.** delimiter+prefix interaction,
+  V2 continuation-token interpretation (we treat it as the marker
+  literal; AWS uses opaque tokens), prefix unreadable (control bytes
+  in prefix).
+- **Misc — 5 failures.** Multipart resend-finishes-last ordering,
+  multipart upload size-too-small, multipart checksum SHA256 input
+  validation on Complete, `test_multipart_put_current_object_if_match`
+  (wants `VersionId` on response from a versioned bucket).
+
+### 2026-04-26 — commit `04919a5` + post-Ralph cleanup
+
+After bucket-list V1/V2 dispatch, multipart user-meta passthrough,
+Cache-Control/Expires header echo, anonymous list ACL gating, and a
+handful of error-code fixes landed on top of the Ralph autorun.
+Default subset:
+
+```
+tests=176  passed=131  failed=45  errors=0  skipped=0
+pass rate: 74.4%
+```
+
+That's +9.6 pp on the same sample, **+17 newly passing tests** vs the
+prior run. `STRATA_AUTH_MODE=optional` is the right setting for the
+suite — `required` rejected anon list on public-read buckets before
+the bucket-policy/ACL gate could see them.
+
+**Remaining failure clusters** (45 total):
+
+- **`test_headers.py` — 8 failures.** Same deliberate SigV2 gaps as
+  the original baseline.
+- **`test_multipart_use_cksum_helper_*` — 6 failures.** Per-algo
+  composite-checksum + `ChecksumAlgorithm` echo on `CompleteMultipartUploadResult`
+  body (we already echo on Initiate). Last-mile wiring.
+- **Multipart preconditions on Complete — 3 failures.** `If-Match` /
+  `If-None-Match` headers on `CompleteMultipartUpload` are not gating
+  the LWT path.
+- **Multipart edge cases — 4 failures.** Min-part-size on non-last
+  parts, `UploadPartCopy` invalid-range handling, the resend-part /
+  finishes-last ordering case.
+- **Versioning null-version — 5 failures.** `test_versioning_obj_plain_null_version_*`
+  + `test_versioning_obj_suspend*`. We don't implement the literal
+  `"null"` version-id semantics that AWS / RGW expose for unversioned
+  rows in versioned buckets.
+- **Listing edge cases — 8 failures.** `test_bucket_list_delimiter_prefix*`
+  (delimiter+prefix interaction returning wrong NextMarker),
+  `test_bucket_list_marker_*` (V1 marker semantics on continuation),
+  `test_bucket_listv2_fetchowner_notempty` (Owner only when
+  `fetch-owner=true`), `test_bucket_list_unordered` /
+  `test_bucket_listv2_unordered` (allow-unordered=true unsupported),
+  `test_bucket_list_prefix_unreadable` (non-UTF-8 prefix).
+- **Other — 11 failures.** Cache-Control / Expires (likely my fix not
+  yet flushed against running stack), `test_bucket_create_exists` shape
+  (boto wants `e.status` attr on the exception class — depends on AWS
+  errorfactory mapping), `test_object_delete_key_bucket_gone` (still
+  403 for unauth client on missing bucket), `test_object_read_unreadable`
+  (URL-decoded by Go before we see it; likely already fixed but stack
+  not rebuilt), and a handful of multipart_get_part `PartsCount`
+  cases that need per-part offset tracking in the manifest.
+
 ### 2026-04-26 — commit `b6aca17`
 
 After US-001..US-027 shipped, fixtures that previously errored at

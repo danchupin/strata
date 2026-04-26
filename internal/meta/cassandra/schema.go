@@ -182,6 +182,13 @@ var alterStatements = []string{
 	`ALTER TABLE buckets ADD object_lock_enabled boolean`,
 	`ALTER TABLE buckets ADD region text`,
 	`ALTER TABLE buckets ADD mfa_delete text`,
+	`ALTER TABLE objects ADD cache_control text`,
+	`ALTER TABLE objects ADD expires text`,
+	`ALTER TABLE objects ADD parts_count int`,
+	`ALTER TABLE multipart_uploads ADD user_meta map<text, text>`,
+	`ALTER TABLE multipart_uploads ADD cache_control text`,
+	`ALTER TABLE multipart_uploads ADD expires text`,
+	`ALTER TABLE multipart_uploads ADD checksum_algorithm text`,
 }
 
 func isColumnAlreadyExists(err error) bool {

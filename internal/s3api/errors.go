@@ -26,6 +26,10 @@ var (
 	ErrNoSuchUpload        = APIError{Code: "NoSuchUpload", Message: "The specified multipart upload does not exist", Status: http.StatusNotFound}
 	ErrBucketNotEmpty      = APIError{Code: "BucketNotEmpty", Message: "The bucket you tried to delete is not empty", Status: http.StatusConflict}
 	ErrBucketExists        = APIError{Code: "BucketAlreadyOwnedByYou", Message: "Bucket already exists and is owned by you", Status: http.StatusConflict}
+	ErrBucketTaken         = APIError{Code: "BucketAlreadyExists", Message: "The requested bucket name is not available", Status: http.StatusConflict}
+	ErrInvalidURI          = APIError{Code: "InvalidURI", Message: "Couldn't parse the specified URI.", Status: http.StatusBadRequest}
+	ErrEntityTooSmall      = APIError{Code: "EntityTooSmall", Message: "Your proposed upload is smaller than the minimum allowed size", Status: http.StatusBadRequest}
+	ErrInvalidRange        = APIError{Code: "InvalidRange", Message: "The requested range is not satisfiable", Status: http.StatusRequestedRangeNotSatisfiable}
 	ErrInvalidBucketName   = APIError{Code: "InvalidBucketName", Message: "The specified bucket name is invalid", Status: http.StatusBadRequest}
 	ErrInvalidPart         = APIError{Code: "InvalidPart", Message: "One or more of the specified parts could not be found", Status: http.StatusBadRequest}
 	ErrInvalidPartOrder    = APIError{Code: "InvalidPartOrder", Message: "The list of parts was not in ascending order", Status: http.StatusBadRequest}

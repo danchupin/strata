@@ -135,6 +135,9 @@ type Object struct {
 	SSE            string
 	SSECKeyMD5     string
 	RestoreStatus  string
+	PartsCount     int
+	CacheControl   string
+	Expires        string
 }
 
 type ListOptions struct {
@@ -160,14 +163,18 @@ type ListVersionsResult struct {
 }
 
 type MultipartUpload struct {
-	BucketID     uuid.UUID
-	UploadID     string
-	Key          string
-	StorageClass string
-	ContentType  string
-	InitiatedAt  time.Time
-	Status       string
-	SSE          string
+	BucketID          uuid.UUID
+	UploadID          string
+	Key               string
+	StorageClass      string
+	ContentType       string
+	InitiatedAt       time.Time
+	Status            string
+	SSE               string
+	UserMeta          map[string]string
+	CacheControl      string
+	Expires           string
+	ChecksumAlgorithm string
 }
 
 type MultipartPart struct {
