@@ -158,6 +158,7 @@ func (w *Worker) evaluateNoncurrent(ctx context.Context, b *meta.Bucket, rule *R
 func (w *Worker) expireNoncurrent(ctx context.Context, b *meta.Bucket, v *meta.Object, ruleID string) {
 	removed, err := w.Meta.DeleteObject(ctx, b.ID, v.Key, v.VersionID, true)
 	if err != nil {
+		metrics.LifecycleTickTotal.WithLabelValues("expire_noncurrent", "error").Inc()
 		w.Logger.WarnContext(ctx, "lifecycle expire noncurrent", "bucket", b.Name, "key", v.Key, "version", v.VersionID, "error", err.Error())
 		return
 	}
@@ -173,6 +174,7 @@ func (w *Worker) expireNoncurrent(ctx context.Context, b *meta.Bucket, v *meta.O
 		}
 	}
 	metrics.LifecycleExpirations.Inc()
+	metrics.LifecycleTickTotal.WithLabelValues("expire_noncurrent", "success").Inc()
 	w.Logger.InfoContext(ctx, "lifecycle noncurrent expired", "bucket", b.Name, "key", v.Key, "rule", ruleID, "version", v.VersionID)
 }
 
@@ -193,9 +195,11 @@ func (w *Worker) abortStaleUploads(ctx context.Context, b *meta.Bucket, rule *Ru
 		}
 		manifests, err := w.Meta.AbortMultipartUpload(ctx, b.ID, u.UploadID)
 		if err != nil {
+			metrics.LifecycleTickTotal.WithLabelValues("abort_multipart", "error").Inc()
 			w.Logger.WarnContext(ctx, "lifecycle abort stale upload", "bucket", b.Name, "key", u.Key, "error", err.Error())
 			continue
 		}
+		metrics.LifecycleTickTotal.WithLabelValues("abort_multipart", "success").Inc()
 		for _, m := range manifests {
 			if m != nil {
 				if err := w.Meta.EnqueueChunkDeletion(ctx, region, m.Chunks); err == nil {
@@ -234,12 +238,14 @@ func (w *Worker) transition(ctx context.Context, b *meta.Bucket, o *meta.Object,
 	}
 	reader, err := w.Data.GetChunks(ctx, o.Manifest, 0, o.Size)
 	if err != nil {
+		metrics.LifecycleTickTotal.WithLabelValues("transition", "error").Inc()
 		w.Logger.WarnContext(ctx, "lifecycle transition read", "bucket", b.Name, "key", o.Key, "error", err.Error())
 		return
 	}
 	newManifest, err := w.Data.PutChunks(ctx, reader, newClass)
 	reader.Close()
 	if err != nil {
+		metrics.LifecycleTickTotal.WithLabelValues("transition", "error").Inc()
 		w.Logger.WarnContext(ctx, "lifecycle transition write", "bucket", b.Name, "key", o.Key, "class", newClass, "error", err.Error())
 		return
 	}
@@ -249,11 +255,13 @@ func (w *Worker) transition(ctx context.Context, b *meta.Bucket, o *meta.Object,
 		region = "default"
 	}
 	if err != nil {
+		metrics.LifecycleTickTotal.WithLabelValues("transition", "error").Inc()
 		w.Logger.WarnContext(ctx, "lifecycle flip manifest", "bucket", b.Name, "key", o.Key, "error", err.Error())
 		_ = w.Meta.EnqueueChunkDeletion(ctx, region, newManifest.Chunks)
 		return
 	}
 	if !applied {
+		metrics.LifecycleTickTotal.WithLabelValues("transition", "skipped").Inc()
 		w.Logger.InfoContext(ctx, "lifecycle race: object modified during transition, discarding", "bucket", b.Name, "key", o.Key, "rule", ruleID)
 		_ = w.Meta.EnqueueChunkDeletion(ctx, region, newManifest.Chunks)
 		return
@@ -266,6 +274,7 @@ func (w *Worker) transition(ctx context.Context, b *meta.Bucket, o *meta.Object,
 		}
 	}
 	metrics.LifecycleTransitions.WithLabelValues(newClass).Inc()
+	metrics.LifecycleTickTotal.WithLabelValues("transition", "success").Inc()
 	w.Logger.InfoContext(ctx, "lifecycle transitioned", "bucket", b.Name, "key", o.Key, "rule", ruleID, "from", o.StorageClass, "to", newClass)
 }
 
@@ -273,6 +282,7 @@ func (w *Worker) expire(ctx context.Context, b *meta.Bucket, o *meta.Object, rul
 	versioned := meta.IsVersioningActive(b.Versioning)
 	removed, err := w.Meta.DeleteObject(ctx, b.ID, o.Key, "", versioned)
 	if err != nil {
+		metrics.LifecycleTickTotal.WithLabelValues("expire", "error").Inc()
 		w.Logger.WarnContext(ctx, "lifecycle expire", "bucket", b.Name, "key", o.Key, "error", err.Error())
 		return
 	}
@@ -290,5 +300,6 @@ func (w *Worker) expire(ctx context.Context, b *meta.Bucket, o *meta.Object, rul
 		}
 	}
 	metrics.LifecycleExpirations.Inc()
+	metrics.LifecycleTickTotal.WithLabelValues("expire", "success").Inc()
 	w.Logger.InfoContext(ctx, "lifecycle expired", "bucket", b.Name, "key", o.Key, "rule", ruleID, "versioned", versioned)
 }

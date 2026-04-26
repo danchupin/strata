@@ -37,6 +37,9 @@ func (promMetrics) IncCompleted(ruleID string) {
 func (promMetrics) IncFailed(ruleID string) {
 	metrics.ReplicationFailed.WithLabelValues(ruleID).Inc()
 }
+func (promMetrics) SetQueueDepth(ruleID string, depth int) {
+	metrics.ReplicationQueueDepth.WithLabelValues(ruleID).Set(float64(depth))
+}
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: parseLogLevel(os.Getenv("STRATA_LOG_LEVEL"))}))
@@ -149,6 +152,7 @@ func buildDataBackend(cfg *config.Config, logger *slog.Logger) (data.Backend, er
 			Namespace:  cfg.RADOS.Namespace,
 			Classes:    classes,
 			Logger:     logger,
+			Metrics:    metrics.RADOSObserver{},
 		})
 	default:
 		return nil, errors.New("unknown data backend: " + cfg.DataBackend)

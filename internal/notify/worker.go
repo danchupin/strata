@@ -13,6 +13,16 @@ import (
 	"github.com/danchupin/strata/internal/meta"
 )
 
+// Metrics observes per-(sink, status) delivery outcomes. status ∈
+// {success, failure, dlq}. Cmd-layer plugs metrics.NotifyObserver{}.
+type Metrics interface {
+	IncDelivery(sink, status string)
+}
+
+type nopMetrics struct{}
+
+func (nopMetrics) IncDelivery(string, string) {}
+
 // Config wires a Worker. Defaults applied in New: Interval=5s, MaxRetries=6,
 // BackoffBase=1s, Now=time.Now, Logger=slog.Default. PollLimit caps how many
 // rows are pulled per bucket per tick.
@@ -20,6 +30,7 @@ type Config struct {
 	Meta        meta.Store
 	Router      Router
 	Logger      *slog.Logger
+	Metrics     Metrics
 	Interval    time.Duration
 	MaxRetries  int
 	BackoffBase time.Duration
@@ -49,6 +60,9 @@ func New(cfg Config) (*Worker, error) {
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
+	}
+	if cfg.Metrics == nil {
+		cfg.Metrics = nopMetrics{}
 	}
 	if cfg.Interval <= 0 {
 		cfg.Interval = 5 * time.Second
@@ -152,6 +166,7 @@ func (w *Worker) dueNow(eventID string, now time.Time) bool {
 func (w *Worker) dispatch(ctx context.Context, evt meta.NotificationEvent) {
 	sink, ok := w.cfg.Router.Resolve(evt)
 	if !ok {
+		w.cfg.Metrics.IncDelivery("none", "dlq")
 		w.cfg.Logger.Warn("notify: no sink for event; moving to DLQ",
 			"event_id", evt.EventID, "target_type", evt.TargetType, "target_arn", evt.TargetARN)
 		w.toDLQ(ctx, evt, 0, "no sink registered for target")
@@ -175,6 +190,7 @@ func (w *Worker) success(ctx context.Context, evt meta.NotificationEvent, sink S
 		w.cfg.Logger.Warn("notify: ack failed", "event_id", evt.EventID, "error", err.Error())
 		return
 	}
+	w.cfg.Metrics.IncDelivery(sink.Name(), "success")
 	w.cfg.Logger.Info("notify: delivered",
 		"event_id", evt.EventID, "sink", sink.Name(), "type", sink.Type(), "event", evt.EventName)
 }
@@ -189,6 +205,7 @@ func (w *Worker) failure(ctx context.Context, evt meta.NotificationEvent, sink S
 		delete(w.lastError, evt.EventID)
 		delete(w.nextAttempt, evt.EventID)
 		w.mu.Unlock()
+		w.cfg.Metrics.IncDelivery(sink.Name(), "dlq")
 		w.cfg.Logger.Warn("notify: retry budget exhausted; moving to DLQ",
 			"event_id", evt.EventID, "sink", sink.Name(), "attempts", attempts, "error", sendErr.Error())
 		w.toDLQ(ctx, evt, attempts, sendErr.Error())
@@ -196,6 +213,7 @@ func (w *Worker) failure(ctx context.Context, evt meta.NotificationEvent, sink S
 	}
 	w.nextAttempt[evt.EventID] = w.cfg.Now().Add(w.cfg.Backoff(attempts))
 	w.mu.Unlock()
+	w.cfg.Metrics.IncDelivery(sink.Name(), "failure")
 	w.cfg.Logger.Warn("notify: delivery failed; will retry",
 		"event_id", evt.EventID, "sink", sink.Name(), "attempts", attempts, "error", sendErr.Error())
 }

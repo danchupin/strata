@@ -10,6 +10,12 @@ import (
 	"github.com/danchupin/strata/internal/metrics"
 )
 
+// Metrics is the narrow observer the worker uses to publish queue depth.
+// Cmd-layer plugs metrics.GCObserver{}.
+type Metrics interface {
+	SetQueueDepth(region string, depth int)
+}
+
 type Worker struct {
 	Meta     meta.Store
 	Data     data.Backend
@@ -18,6 +24,7 @@ type Worker struct {
 	Grace    time.Duration
 	Batch    int
 	Logger   *slog.Logger
+	Metrics  Metrics
 }
 
 func (w *Worker) Run(ctx context.Context) error {
@@ -50,12 +57,17 @@ func (w *Worker) Run(ctx context.Context) error {
 
 func (w *Worker) drain(ctx context.Context) {
 	before := time.Now().Add(-w.Grace)
+	first := true
 	for {
 		entries, err := w.Meta.ListGCEntries(ctx, w.Region, before, w.Batch)
 		if err != nil {
 			w.Logger.WarnContext(ctx, "gc list", "error", err.Error())
 			return
 		}
+		if first && w.Metrics != nil {
+			w.Metrics.SetQueueDepth(w.Region, len(entries))
+		}
+		first = false
 		if len(entries) == 0 {
 			return
 		}

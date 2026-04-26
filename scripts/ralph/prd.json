@@ -305,8 +305,8 @@
         "go test ./internal/metrics/... passes"
       ],
       "priority": 18,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "internal/metrics: added strata_rados_op_duration_seconds{pool,op}, strata_gc_queue_depth{region}, strata_multipart_active{bucket}, strata_bucket_bytes{bucket,storage_class}, strata_lifecycle_tick_total{action,status}, strata_replication_queue_depth{rule_id}, strata_notify_delivery_total{sink,status}. Adapters: RADOSObserver, GCObserver, NotifyObserver, LifecycleObserver, BucketStatsObserver, ReplicationObserver. internal/data/rados: Metrics interface + ObserveOp(ctx, logger, m, pool, op, oid, dur, err) helper that fans out to LogOp + Metrics; backend wires Metrics into put/get/del call sites and Config.Metrics. internal/gc/worker: Metrics interface (SetQueueDepth) + samples drain entries length per region per drain pass. internal/lifecycle/worker: emits LifecycleTickTotal at every transition/expire/expire_noncurrent/abort_multipart terminal outcome (success|error|skipped). internal/replication/worker: MetricsObserver gained SetQueueDepth + worker samples per-rule depth on every drainBucket. internal/notify/worker: Metrics interface (IncDelivery) + emits success|failure|dlq per sink (uses 'none' for unrouted DLQ). New internal/bucketstats package with Sampler{Meta, Sink, Interval, PageLimit}: Run/RunOnce shape, walks ListBuckets+ListObjects per pass, aggregates per (bucket, storage_class), default Interval=1h. Gateway main wires Sampler with metrics.BucketStatsObserver{}. All 5 binaries that build the rados backend now pass Metrics: metrics.RADOSObserver{}; strata-replicator + strata-notify pass their MetricsObserver/Metrics; strata-gc passes GCObserver{}. Tests: internal/metrics/metrics_test.go grew RADOS / GC / Notify / Lifecycle / BucketStats / Replication observer tests + a metric-name presence guard for the 7 new metric names. internal/bucketstats/sampler_test.go covers per-class aggregation across multiple objects + nil-sink no-op."
     },
     {
       "id": "US-019",

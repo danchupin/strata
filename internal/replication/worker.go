@@ -31,6 +31,7 @@ type MetricsObserver interface {
 	ObserveLag(ruleID string, lagSeconds float64)
 	IncCompleted(ruleID string)
 	IncFailed(ruleID string)
+	SetQueueDepth(ruleID string, depth int)
 }
 
 // nopMetrics is a no-op observer used when cfg.Metrics is nil.
@@ -39,6 +40,7 @@ type nopMetrics struct{}
 func (nopMetrics) ObserveLag(string, float64) {}
 func (nopMetrics) IncCompleted(string)        {}
 func (nopMetrics) IncFailed(string)           {}
+func (nopMetrics) SetQueueDepth(string, int)  {}
 
 // Config wires the replicator Worker. Defaults applied in New: Interval=5s,
 // MaxRetries=6, BackoffBase=1s, Now=time.Now, Logger=slog.Default,
@@ -160,6 +162,15 @@ func (w *Worker) drainBucket(ctx context.Context, bucketID uuid.UUID) error {
 	events, err := w.cfg.Meta.ListPendingReplications(ctx, bucketID, w.cfg.PollLimit)
 	if err != nil {
 		return err
+	}
+	if len(events) > 0 {
+		depths := map[string]int{}
+		for _, evt := range events {
+			depths[evt.RuleID]++
+		}
+		for rule, n := range depths {
+			w.cfg.Metrics.SetQueueDepth(rule, n)
+		}
 	}
 	now := w.cfg.Now()
 	for _, evt := range events {

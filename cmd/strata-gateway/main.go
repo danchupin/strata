@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/danchupin/strata/internal/auth"
+	"github.com/danchupin/strata/internal/bucketstats"
 	"github.com/danchupin/strata/internal/config"
 	"github.com/danchupin/strata/internal/crypto/master"
 	"github.com/danchupin/strata/internal/data"
@@ -119,6 +120,17 @@ func main() {
 		}
 	}()
 
+	go func() {
+		sampler := &bucketstats.Sampler{
+			Meta:   metaStore,
+			Sink:   metrics.BucketStatsObserver{},
+			Logger: logger,
+		}
+		if err := sampler.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Warn("bucketstats", "error", err.Error())
+		}
+	}()
+
 	<-ctx.Done()
 	logger.Info("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownWait)
@@ -143,6 +155,7 @@ func buildDataBackend(cfg *config.Config, logger *slog.Logger) (data.Backend, er
 			Namespace:  cfg.RADOS.Namespace,
 			Classes:    classes,
 			Logger:     logger,
+			Metrics:    metrics.RADOSObserver{},
 		})
 	default:
 		return nil, errors.New("unknown data backend")

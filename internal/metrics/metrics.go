@@ -84,6 +84,63 @@ var (
 		},
 		[]string{"rule_id"},
 	)
+
+	ReplicationQueueDepth = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "strata_replication_queue_depth",
+			Help: "Pending replication_queue rows per replication rule, sampled by the replicator worker.",
+		},
+		[]string{"rule_id"},
+	)
+
+	RADOSOpDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "strata_rados_op_duration_seconds",
+			Help:    "Latency of RADOS operations (put/get/del) per pool.",
+			Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5},
+		},
+		[]string{"pool", "op"},
+	)
+
+	GCQueueDepth = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "strata_gc_queue_depth",
+			Help: "Pending gc_queue rows per region, sampled by the GC worker.",
+		},
+		[]string{"region"},
+	)
+
+	MultipartActive = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "strata_multipart_active",
+			Help: "Active multipart uploads per bucket; incremented on InitiateMultipart, decremented on Complete or Abort.",
+		},
+		[]string{"bucket"},
+	)
+
+	BucketBytes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "strata_bucket_bytes",
+			Help: "Total object bytes per bucket and storage class, sampled hourly by the gateway.",
+		},
+		[]string{"bucket", "storage_class"},
+	)
+
+	LifecycleTickTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_lifecycle_tick_total",
+			Help: "Lifecycle worker per-action outcomes; action=transition|expire|expire_noncurrent|abort_multipart, status=success|error|skipped.",
+		},
+		[]string{"action", "status"},
+	)
+
+	NotifyDeliveryTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_notify_delivery_total",
+			Help: "Notify worker delivery outcomes per sink; status=success|failure|dlq.",
+		},
+		[]string{"sink", "status"},
+	)
 )
 
 func Register() {
@@ -93,6 +150,13 @@ func Register() {
 		GCEnqueued, GCProcessed,
 		LifecycleTransitions, LifecycleExpirations,
 		ReplicationLagSeconds, ReplicationCompleted, ReplicationFailed,
+		ReplicationQueueDepth,
+		RADOSOpDuration,
+		GCQueueDepth,
+		MultipartActive,
+		BucketBytes,
+		LifecycleTickTotal,
+		NotifyDeliveryTotal,
 	)
 }
 
@@ -151,4 +215,104 @@ func (CassandraObserver) ObserveQuery(table, op string, duration time.Duration, 
 		op = "UNKNOWN"
 	}
 	CassandraQueryDuration.WithLabelValues(table, op).Observe(duration.Seconds())
+}
+
+// RADOSObserver implements the rados.Metrics interface. Cmd-layer adapter so
+// internal/data/rados stays free of prometheus imports.
+type RADOSObserver struct{}
+
+func (RADOSObserver) ObserveOp(pool, op string, duration time.Duration, err error) {
+	if pool == "" {
+		pool = "unknown"
+	}
+	if op == "" {
+		op = "unknown"
+	}
+	RADOSOpDuration.WithLabelValues(pool, op).Observe(duration.Seconds())
+}
+
+// GCObserver implements the gc.Metrics interface. SetQueueDepth updates the
+// per-region gauge sampled at each drain tick.
+type GCObserver struct{}
+
+func (GCObserver) SetQueueDepth(region string, depth int) {
+	if region == "" {
+		region = "default"
+	}
+	GCQueueDepth.WithLabelValues(region).Set(float64(depth))
+}
+
+// NotifyObserver implements the notify.Metrics interface. status ∈
+// {success, failure, dlq}.
+type NotifyObserver struct{}
+
+func (NotifyObserver) IncDelivery(sink, status string) {
+	if sink == "" {
+		sink = "unknown"
+	}
+	if status == "" {
+		status = "unknown"
+	}
+	NotifyDeliveryTotal.WithLabelValues(sink, status).Inc()
+}
+
+// LifecycleObserver implements the lifecycle.Metrics interface. action ∈
+// {transition, expire, expire_noncurrent, abort_multipart}; status ∈
+// {success, error, skipped}.
+type LifecycleObserver struct{}
+
+func (LifecycleObserver) IncTick(action, status string) {
+	if action == "" {
+		action = "unknown"
+	}
+	if status == "" {
+		status = "unknown"
+	}
+	LifecycleTickTotal.WithLabelValues(action, status).Inc()
+}
+
+// BucketStatsObserver implements the bucketstats.Sink interface. The
+// hourly sampler updates BucketBytes per (bucket, storage_class).
+type BucketStatsObserver struct{}
+
+func (BucketStatsObserver) SetBucketBytes(bucket, class string, bytes int64) {
+	if bucket == "" {
+		bucket = "unknown"
+	}
+	if class == "" {
+		class = "STANDARD"
+	}
+	BucketBytes.WithLabelValues(bucket, class).Set(float64(bytes))
+}
+
+// ReplicationObserver extends MetricsObserver with SetQueueDepth so the
+// replicator can publish per-rule pending counts.
+type ReplicationObserver struct{}
+
+func (ReplicationObserver) ObserveLag(ruleID string, lag float64) {
+	if ruleID == "" {
+		ruleID = "unknown"
+	}
+	ReplicationLagSeconds.WithLabelValues(ruleID).Observe(lag)
+}
+
+func (ReplicationObserver) IncCompleted(ruleID string) {
+	if ruleID == "" {
+		ruleID = "unknown"
+	}
+	ReplicationCompleted.WithLabelValues(ruleID).Inc()
+}
+
+func (ReplicationObserver) IncFailed(ruleID string) {
+	if ruleID == "" {
+		ruleID = "unknown"
+	}
+	ReplicationFailed.WithLabelValues(ruleID).Inc()
+}
+
+func (ReplicationObserver) SetQueueDepth(ruleID string, depth int) {
+	if ruleID == "" {
+		ruleID = "unknown"
+	}
+	ReplicationQueueDepth.WithLabelValues(ruleID).Set(float64(depth))
 }

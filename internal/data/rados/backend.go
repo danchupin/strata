@@ -23,6 +23,7 @@ type Backend struct {
 	conn    *goceph.Conn
 	classes map[string]ClassSpec
 	logger  *slog.Logger
+	metrics Metrics
 
 	mu      sync.Mutex
 	ioctxes map[string]*goceph.IOContext
@@ -69,6 +70,7 @@ func New(cfg Config) (data.Backend, error) {
 		conn:    conn,
 		classes: classes,
 		logger:  cfg.Logger,
+		metrics: cfg.Metrics,
 		ioctxes: make(map[string]*goceph.IOContext),
 	}, nil
 }
@@ -133,7 +135,7 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 			chunk := buf[:n]
 			start := time.Now()
 			werr := writeChunk(ioctx, oid, chunk)
-			LogOp(ctx, b.logger, "put", oid, time.Since(start), werr)
+			ObserveOp(ctx, b.logger, b.metrics, spec.Pool, "put", oid, time.Since(start), werr)
 			if werr != nil {
 				b.cleanupManifest(m.Chunks)
 				return nil, werr
@@ -249,7 +251,7 @@ func (r *radosReader) loadNextChunk() error {
 			buf := make([]byte, remaining)
 			start := time.Now()
 			n, rerr := ioctx.Read(c.OID, buf, uint64(off))
-			LogOp(r.ctx, r.b.logger, "get", c.OID, time.Since(start), rerr)
+			ObserveOp(r.ctx, r.b.logger, r.b.metrics, c.Pool, "get", c.OID, time.Since(start), rerr)
 			if rerr != nil {
 				return fmt.Errorf("rados: read %s: %w", c.OID, rerr)
 			}
@@ -279,7 +281,7 @@ func (b *Backend) Delete(ctx context.Context, m *data.Manifest) error {
 		}
 		start := time.Now()
 		derr := ioctx.Delete(c.OID)
-		LogOp(ctx, b.logger, "del", c.OID, time.Since(start), derr)
+		ObserveOp(ctx, b.logger, b.metrics, c.Pool, "del", c.OID, time.Since(start), derr)
 		if derr != nil && firstErr == nil {
 			firstErr = derr
 		}

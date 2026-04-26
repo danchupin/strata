@@ -29,3 +29,13 @@ func LogOp(ctx context.Context, logger *slog.Logger, op, oid string, dur time.Du
 	}
 	logger.DebugContext(ctx, "rados: op", attrs...)
 }
+
+// ObserveOp fans out one RADOS op to logger (DEBUG line via LogOp) and to the
+// Metrics interface (ObserveOp). Either side may be nil. Pool is needed for
+// the prometheus label; OID stays only in the log line.
+func ObserveOp(ctx context.Context, logger *slog.Logger, m Metrics, pool, op, oid string, dur time.Duration, err error) {
+	LogOp(ctx, logger, op, oid, dur, err)
+	if m != nil {
+		m.ObserveOp(pool, op, dur, err)
+	}
+}

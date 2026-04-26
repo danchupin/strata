@@ -53,6 +53,7 @@ func main() {
 		Interval: cfg.GC.Interval,
 		Grace:    cfg.GC.Grace,
 		Logger:   logger,
+		Metrics:  metrics.GCObserver{},
 	}
 
 	go func() {
@@ -123,6 +124,7 @@ func buildDataBackend(cfg *config.Config, logger *slog.Logger) (data.Backend, er
 			Namespace:  cfg.RADOS.Namespace,
 			Classes:    classes,
 			Logger:     logger,
+			Metrics:    metrics.RADOSObserver{},
 		})
 	default:
 		return nil, errors.New("unknown data backend")

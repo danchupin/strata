@@ -55,6 +55,7 @@ func main() {
 		Meta:        store,
 		Router:      router,
 		Logger:      logger,
+		Metrics:     metrics.NotifyObserver{},
 		Interval:    parseDuration("STRATA_NOTIFY_INTERVAL", 5*time.Second),
 		MaxRetries:  parseInt("STRATA_NOTIFY_MAX_RETRIES", 6),
 		BackoffBase: parseDuration("STRATA_NOTIFY_BACKOFF_BASE", 1*time.Second),

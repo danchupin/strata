@@ -23,6 +23,7 @@ import (
 	ssecrypto "github.com/danchupin/strata/internal/crypto/sse"
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
+	"github.com/danchupin/strata/internal/metrics"
 )
 
 const multipartCompletionTTL = 10 * time.Minute
@@ -78,6 +79,7 @@ func (s *Server) initiateMultipart(w http.ResponseWriter, r *http.Request, b *me
 		mapMetaErr(w, r, err)
 		return
 	}
+	metrics.MultipartActive.WithLabelValues(b.Name).Inc()
 	if sse != "" {
 		w.Header().Set("x-amz-server-side-encryption", sse)
 	}
@@ -388,6 +390,7 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		mapMetaErr(w, r, err)
 		return
 	}
+	metrics.MultipartActive.WithLabelValues(b.Name).Dec()
 	for _, m := range orphans {
 		if m != nil {
 			s.enqueueChunks(r.Context(), m.Chunks)
@@ -481,6 +484,7 @@ func (s *Server) abortMultipart(w http.ResponseWriter, r *http.Request, b *meta.
 		mapMetaErr(w, r, err)
 		return
 	}
+	metrics.MultipartActive.WithLabelValues(b.Name).Dec()
 	for _, m := range manifests {
 		if m != nil {
 			s.enqueueChunks(r.Context(), m.Chunks)

@@ -130,6 +130,7 @@ func buildDataBackend(cfg *config.Config, logger *slog.Logger) (data.Backend, er
 			Namespace:  cfg.RADOS.Namespace,
 			Classes:    classes,
 			Logger:     logger,
+			Metrics:    metrics.RADOSObserver{},
 		})
 	default:
 		return nil, errors.New("unknown data backend: " + cfg.DataBackend)
