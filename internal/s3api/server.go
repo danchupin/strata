@@ -258,6 +258,10 @@ func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request, bucket str
 			return
 		}
 	}
+	if q.Has("location") && r.Method == http.MethodGet {
+		s.getBucketLocation(w, r, bucket)
+		return
+	}
 	if q.Has("uploads") && r.Method == http.MethodGet {
 		b, err := s.Meta.GetBucket(r.Context(), bucket)
 		if err != nil {
@@ -300,6 +304,11 @@ func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request, bucket str
 			writeError(w, r, ErrInvalidBucketName)
 			return
 		}
+		region, regionErr, regionOK := parseCreateBucketLocation(r)
+		if !regionOK {
+			writeError(w, r, regionErr)
+			return
+		}
 		owner := auth.FromContext(r.Context()).Owner
 		_, err := s.Meta.CreateBucket(r.Context(), bucket, owner, "STANDARD")
 		if errors.Is(err, meta.ErrBucketAlreadyExists) {
@@ -309,6 +318,9 @@ func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request, bucket str
 		if err != nil {
 			writeError(w, r, ErrInternal)
 			return
+		}
+		if region != "" {
+			_ = s.Meta.SetBucketRegion(r.Context(), bucket, region)
 		}
 		if aclHdr := r.Header.Get("x-amz-acl"); aclHdr != "" {
 			_ = s.Meta.SetBucketACL(r.Context(), bucket, normalizeCannedACL(aclHdr))
@@ -325,10 +337,12 @@ func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request, bucket str
 		}
 		w.WriteHeader(http.StatusNoContent)
 	case http.MethodHead:
-		if _, err := s.Meta.GetBucket(r.Context(), bucket); err != nil {
+		b, err := s.Meta.GetBucket(r.Context(), bucket)
+		if err != nil {
 			mapMetaErr(w, r, err)
 			return
 		}
+		w.Header().Set("x-amz-bucket-region", s.bucketRegionFor(b))
 		w.WriteHeader(http.StatusOK)
 	case http.MethodGet:
 		if len(q) == 0 {

@@ -26,6 +26,7 @@ Started: Sat Apr 25 16:10:14 MSK 2026
 - Static-site / website mode (US-017): handleBucket GET intercepts when len(q)==0, calls serveWebsiteRoot which fetches IndexDocument.Suffix on hit (200) or ErrorDocument.Key on miss (404). serveWebsiteObject sets Content-Type/ETag/Last-Modified/Content-Length and streams the object body via Data.GetChunks — does NOT call writeError (the body is the document itself, not an XML <Error/> envelope). Pagination (prefix, delimiter, max-keys, continuation-token, start-after) is preserved by the len(q)==0 guard.
 - Bucket replication (US-018): standard setBucketBlob/getBucketBlob/deleteBucketBlob blob in both backends (cassandra: bucket_replication table). putBucketReplication validates ≥1 Rule with non-empty Destination.Bucket; empty body → 400 (DELETE clears). getBucketReplication returns 404 ReplicationConfigurationNotFoundError on missing. replicationStatusFor(r,b,key,tags) walks Filter shapes (Prefix / Tag / And{Prefix+Tags}), skips disabled rules, returns "PENDING" on match. putObject emits x-amz-replication-status only when status is non-empty (header omitted otherwise). Filter shape pattern is reusable across lifecycle/replication.
 - Bucket tagging (US-020): standard setBucketBlob/getBucketBlob/deleteBucketBlob blob in both backends (cassandra: bucket_tagging table). Validation lives in s3api handler (≤50 tags, non-empty Key, no duplicate Key) — the meta layer stays an opaque blob store. PUT returns 204 (matches AWS), GET returns the stored XML or 404 NoSuchTagSet, empty body PUT and explicit DELETE both clear. Reuses the Tagging XML type already defined for object tagging.
+- Bucket region (US-021): meta.Bucket.Region is a column on the buckets row (additive ALTER buckets ADD region text), not a blob. Mutated via SetBucketRegion using the LWT pattern (UPDATE … IF EXISTS / ScanCAS(nil) / LocalSerial) so the write joins the same Paxos lineage as the original CreateBucket INSERT IF NOT EXISTS. CreateBucket parses optional <CreateBucketConfiguration><LocationConstraint> from the request body BEFORE calling Meta.CreateBucket so a malformed body short-circuits with 400 MalformedXML. GetBucketLocation emits the canonical AWS xmlns ("http://s3.amazonaws.com/doc/2006-03-01/") on the LocationConstraint element via xml.Name with the namespace-qualified field tag. HEAD bucket sets x-amz-bucket-region from b.Region or falls back to s.Region (which s3api.New defaults to "default").
 ---
 
 ## 2026-04-25 - US-001 (Parse AccessControlPolicy XML body)
@@ -575,4 +576,27 @@ Started: Sat Apr 25 16:10:14 MSK 2026
   - Bucket tagging follows the exact same setBucketBlob/getBucketBlob/deleteBucketBlob blob pattern as logging/replication/website/notification — when a bucket-scoped XML config has no per-bucket-row column, prefer this over modifying the buckets table.
   - AWS uses 204 No Content (not 200) for successful Put/DeleteBucketTagging; PUT helpers in this repo are inconsistent (logging uses 200, replication uses 200, encryption uses 200). Tagging matches AWS Reference: 204.
   - Tag validation belongs in the handler (XML schema + AWS limits), not in meta.Store. The meta layer is the dumb blob store; semantic validation (≤50 tags, non-empty Key, no duplicate Key, no whitespace-only) is s3api-side so the same blob can stay opaque to backends.
+---
+
+## 2026-04-26 - US-021 (GetBucketLocation + x-amz-bucket-region + LocationConstraint body parsing)
+- Added meta.Bucket.Region field; meta.Store.SetBucketRegion(ctx, name, region).
+- Cassandra: ALTER TABLE buckets ADD region text (additive). CreateBucket INSERT, GetBucket SELECT, ListBuckets SELECT extended with region column. SetBucketRegion uses LWT (UPDATE ... IF EXISTS / ScanCAS(nil) / LocalSerial).
+- Memory store: SetBucketRegion mutates Bucket.Region under mu.Lock; CreateBucket leaves Region empty; GetBucket already shallow-copies so Region round-trips automatically.
+- internal/s3api/location.go: parseCreateBucketLocation reads optional <CreateBucketConfiguration><LocationConstraint> from PUT body (1<<16 limit, empty body returns "" with no error). getBucketLocation handler emits <LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">{region}</LocationConstraint>. bucketRegionFor(b) returns b.Region or falls back to s.Region (defaults to "default").
+- server.go: ?location GET routed in handleBucket adjacent to ?acl. PUT bucket parses LocationConstraint BEFORE CreateBucket so malformed body → 400 MalformedXML without creating a bucket. SetBucketRegion called only when region != "". HEAD bucket sets x-amz-bucket-region header via bucketRegionFor.
+- Tests in internal/s3api/location_test.go: round-trip with us-west-2 (PUT body → GET ?location echoes), default region (no body → GET ?location returns empty LocationConstraint), HEAD region header (specific + default fallback), malformed PUT body → 400, GET ?location on missing bucket → 404 NoSuchBucket.
+- Files changed:
+  - internal/meta/store.go
+  - internal/meta/cassandra/store.go
+  - internal/meta/cassandra/schema.go
+  - internal/meta/memory/store.go
+  - internal/s3api/server.go
+  - internal/s3api/location.go (new)
+  - internal/s3api/location_test.go (new)
+  - scripts/ralph/prd.json
+- Quality: go build ./... + go vet ./... + go test ./... all green.
+- **Learnings for future iterations:**
+  - x-amz-bucket-region header on HEAD bucket is required by SDK pre-flight region detection. The fallback for un-located buckets is "default" (or s.Region), never empty — the header must always be present once the bucket exists.
+  - GetBucketLocation's xmlns="http://s3.amazonaws.com/doc/2006-03-01/" is emitted by encoding/xml when the field tag uses the namespace-qualified form: `xml:"http://s3.amazonaws.com/doc/2006-03-01/ LocationConstraint"`. Same trick used for ACL xsi:type parsing.
+  - When a PUT bucket reads its body for a sub-config (location, ACL XML), parse BEFORE calling Meta.CreateBucket so a malformed body short-circuits without creating a phantom bucket. CreateBucket itself takes no body kwarg — it's a separate optional input.
 ---

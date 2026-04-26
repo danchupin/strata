@@ -704,6 +704,17 @@ func (s *Store) SetBucketObjectLockEnabled(ctx context.Context, name string, ena
 	return nil
 }
 
+func (s *Store) SetBucketRegion(ctx context.Context, name, region string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.buckets[name]
+	if !ok {
+		return meta.ErrBucketNotFound
+	}
+	b.Region = region
+	return nil
+}
+
 func (s *Store) SetBucketObjectLockConfig(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
 	return s.setBucketBlob(s.objectLock, bucketID, blob)
 }

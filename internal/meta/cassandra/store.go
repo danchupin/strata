@@ -74,9 +74,9 @@ func (s *Store) CreateBucket(ctx context.Context, name, owner, defaultClass stri
 	}
 	existing := make(map[string]interface{})
 	applied, err := s.s.Query(
-		`INSERT INTO buckets (name, id, owner_id, created_at, versioning, default_class, shard_count)
-		 VALUES (?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS`,
-		name, gocqlUUID(id), owner, b.CreatedAt, meta.VersioningDisabled, defaultClass, s.defaultShard,
+		`INSERT INTO buckets (name, id, owner_id, created_at, versioning, default_class, shard_count, region)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS`,
+		name, gocqlUUID(id), owner, b.CreatedAt, meta.VersioningDisabled, defaultClass, s.defaultShard, "",
 	).WithContext(ctx).SerialConsistency(gocql.LocalSerial).MapScanCAS(existing)
 	if err != nil {
 		return nil, err
@@ -92,14 +92,15 @@ func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error
 		idG               gocql.UUID
 		owner, class      string
 		versioning, acl   string
+		region            string
 		createdAt         time.Time
 		shardCount        int
 		objectLockEnabled bool
 	)
 	err := s.s.Query(
-		`SELECT id, owner_id, created_at, default_class, versioning, shard_count, acl, object_lock_enabled FROM buckets WHERE name=?`,
+		`SELECT id, owner_id, created_at, default_class, versioning, shard_count, acl, object_lock_enabled, region FROM buckets WHERE name=?`,
 		name,
-	).WithContext(ctx).Scan(&idG, &owner, &createdAt, &class, &versioning, &shardCount, &acl, &objectLockEnabled)
+	).WithContext(ctx).Scan(&idG, &owner, &createdAt, &class, &versioning, &shardCount, &acl, &objectLockEnabled, &region)
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrBucketNotFound
 	}
@@ -118,6 +119,7 @@ func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error
 		Versioning:        versioning,
 		ACL:               acl,
 		ObjectLockEnabled: objectLockEnabled,
+		Region:            region,
 	}, nil
 }
 
@@ -244,17 +246,17 @@ func (s *Store) bucketIsEmpty(ctx context.Context, bucketID uuid.UUID, shardCoun
 }
 
 func (s *Store) ListBuckets(ctx context.Context, owner string) ([]*meta.Bucket, error) {
-	iter := s.s.Query(`SELECT name, id, owner_id, created_at, default_class, versioning, acl FROM buckets`).
+	iter := s.s.Query(`SELECT name, id, owner_id, created_at, default_class, versioning, acl, region FROM buckets`).
 		WithContext(ctx).Iter()
 	defer iter.Close()
 
 	var (
-		out                                   []*meta.Bucket
-		name, ownerID, class, versioning, acl string
-		idG                                   gocql.UUID
-		createdAt                             time.Time
+		out                                           []*meta.Bucket
+		name, ownerID, class, versioning, acl, region string
+		idG                                           gocql.UUID
+		createdAt                                     time.Time
 	)
-	for iter.Scan(&name, &idG, &ownerID, &createdAt, &class, &versioning, &acl) {
+	for iter.Scan(&name, &idG, &ownerID, &createdAt, &class, &versioning, &acl, &region) {
 		if owner != "" && ownerID != owner {
 			continue
 		}
@@ -269,6 +271,7 @@ func (s *Store) ListBuckets(ctx context.Context, owner string) ([]*meta.Bucket, 
 			DefaultClass: class,
 			Versioning:   versioning,
 			ACL:          acl,
+			Region:       region,
 		})
 	}
 	if err := iter.Close(); err != nil {
@@ -1394,6 +1397,20 @@ func (s *Store) SetBucketObjectLockEnabled(ctx context.Context, name string, ena
 	applied, err := s.s.Query(
 		`UPDATE buckets SET object_lock_enabled=? WHERE name=? IF EXISTS`,
 		enabled, name,
+	).WithContext(ctx).SerialConsistency(gocql.LocalSerial).ScanCAS(nil)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return meta.ErrBucketNotFound
+	}
+	return nil
+}
+
+func (s *Store) SetBucketRegion(ctx context.Context, name, region string) error {
+	applied, err := s.s.Query(
+		`UPDATE buckets SET region=? WHERE name=? IF EXISTS`,
+		region, name,
 	).WithContext(ctx).SerialConsistency(gocql.LocalSerial).ScanCAS(nil)
 	if err != nil {
 		return err

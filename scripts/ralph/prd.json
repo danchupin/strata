@@ -356,8 +356,8 @@
         "go test ./internal/s3api/... passes"
       ],
       "priority": 21,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "meta.Bucket.Region string round-trips through both backends (cassandra: additive ALTER buckets ADD region text; CreateBucket INSERT and GetBucket/ListBuckets SELECT extended). New meta.Store.SetBucketRegion(ctx, name, region) uses LWT (UPDATE ... IF EXISTS, ScanCAS(nil), LocalSerial) — same Paxos-lineage pattern as SetBucketVersioning/SetBucketACL/SetBucketObjectLockEnabled. Memory backend mutates Bucket.Region under mu.Lock. New internal/s3api/location.go: parseCreateBucketLocation reads optional <CreateBucketConfiguration><LocationConstraint> from PUT body (1<<16 limit, empty body OK), getBucketLocation handler emits <LocationConstraint xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">{region}</LocationConstraint>, bucketRegionFor(b) returns b.Region or falls back to s.Region (set to \"default\" by s3api.New). server.go: ?location GET routed in handleBucket adjacent to ?acl; PUT bucket parses LocationConstraint BEFORE CreateBucket so a malformed body short-circuits with 400 MalformedXML; SetBucketRegion called only when region != \"\"; HEAD bucket sets x-amz-bucket-region header via bucketRegionFor. Tests in location_test.go: round-trip with us-west-2 (PUT body → GET ?location echoes), default region (no body → GET ?location returns empty LocationConstraint), HEAD region header (specific + default fallback), malformed PUT body → 400, GET ?location on missing bucket → 404 NoSuchBucket."
     },
     {
       "id": "US-022",

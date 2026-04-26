@@ -90,6 +90,7 @@ type Bucket struct {
 	Versioning        string
 	ACL               string
 	ObjectLockEnabled bool
+	Region            string
 }
 
 type Object struct {
@@ -225,6 +226,7 @@ type Store interface {
 	DeleteBucketEncryption(ctx context.Context, bucketID uuid.UUID) error
 
 	SetBucketObjectLockEnabled(ctx context.Context, name string, enabled bool) error
+	SetBucketRegion(ctx context.Context, name, region string) error
 	SetBucketObjectLockConfig(ctx context.Context, bucketID uuid.UUID, xmlBlob []byte) error
 	GetBucketObjectLockConfig(ctx context.Context, bucketID uuid.UUID) ([]byte, error)
 	DeleteBucketObjectLockConfig(ctx context.Context, bucketID uuid.UUID) error

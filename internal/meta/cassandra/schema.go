@@ -169,6 +169,7 @@ var alterStatements = []string{
 	`ALTER TABLE objects ADD ssec_key_md5 text`,
 	`ALTER TABLE objects ADD restore_status text`,
 	`ALTER TABLE buckets ADD object_lock_enabled boolean`,
+	`ALTER TABLE buckets ADD region text`,
 }
 
 func isColumnAlreadyExists(err error) bool {
