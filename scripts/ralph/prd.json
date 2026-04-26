@@ -457,8 +457,8 @@
         "go test ./internal/s3api/... passes"
       ],
       "priority": 27,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "internal/s3api/server.go listBuckets now reads info := auth.FromContext(r.Context()); response Owner.ID/DisplayName = info.Owner. Anonymous (info==nil || info.IsAnonymous || info.Owner==\"\") short-circuits to an empty <Buckets/>; otherwise s.Meta.ListBuckets(ctx, principal) filters to buckets where Owner==principal (both backends already supported the owner filter — memory/store.go:194 and cassandra/store.go:250). Existing TestBucketCRUD now passes X-Test-Principal: owner so the bucket is owned by a real principal and visible in the list. New list_buckets_test.go covers two-principal disjoint list, anonymous → empty + no <Bucket> entries, principal-with-no-buckets → empty list with the correct Owner echoed."
     },
     {
       "id": "US-028",

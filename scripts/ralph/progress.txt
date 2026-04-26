@@ -735,3 +735,20 @@ Started: Sat Apr 25 16:10:14 MSK 2026
   - etagMatches accepts both quoted and bare ETag forms so callers can pass either. We pass `"<etag>"` here to keep behaviour aligned with how ETag headers go out on the wire.
   - Returning *APIError (pointer) from helper functions like parseDirective/checkCopySourceConditional plays nicely with writeError since APIError is a value type — pass *err to deref. Could also return APIError + ok; both work.
 ---
+
+## 2026-04-26 - US-027 (ListBuckets returns authenticated owner + filters by ownership)
+- internal/s3api/server.go listBuckets: read auth.FromContext(r.Context()); response Owner.ID/DisplayName = info.Owner; anonymous (info==nil || info.IsAnonymous || info.Owner=="") → empty <Buckets/> short-circuit; otherwise s.Meta.ListBuckets(ctx, principal) filters by Owner==principal. Both backends (memory/store.go:194, cassandra/store.go:250) already accepted the owner filter — no meta-layer change needed.
+- internal/s3api/bucket_test.go TestBucketCRUD updated to pass X-Test-Principal: owner on PUT/GET/DELETE so the created bucket has a non-anonymous Owner and shows up in the list (anonymous list now returns empty by AC).
+- internal/s3api/list_buckets_test.go (new): TestListBuckets_FiltersByAuthenticatedOwner (alice sees alice-{one,two}, bob sees bob-one, neither sees the other's; <Owner> ID/DisplayName match the caller); TestListBuckets_AnonymousReturnsEmpty (no <Bucket> entries); TestListBuckets_NoBucketsForPrincipal (carol has no buckets but the response Owner echoes carol).
+- Files changed:
+  - internal/s3api/server.go
+  - internal/s3api/bucket_test.go
+  - internal/s3api/list_buckets_test.go (new)
+  - scripts/ralph/prd.json
+  - scripts/ralph/progress.txt
+- Quality: go build ./... + go vet ./... + go test ./... all green.
+- **Learnings for future iterations:**
+  - meta.Store.ListBuckets(ctx, owner) has had owner-filter semantics from day one in both backends — when wiring multi-tenant scoping, lean on the existing argument instead of post-filtering in the handler.
+  - Tests that PUT a bucket without a principal end up with Owner="anonymous" (auth.AnonymousIdentity().Owner). Previously list returned everything regardless of caller, masking this. After US-027 any test that needs the bucket visible in GET / must inject X-Test-Principal on the PUT and reuse it on the GET — otherwise the list comes back empty.
+  - The existing pattern for the response Owner element is the `owner` struct in xml.go — both ID and DisplayName are simple strings, no canonical-user/canonical-id distinction is enforced server-side. AWS canonical IDs are 64-char hex, but Strata uses the principal name verbatim; that's enough for s3-tests since they only assert structural roundtrip.
+---

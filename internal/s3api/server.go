@@ -96,12 +96,21 @@ func splitPath(p string) (bucket, key string) {
 }
 
 func (s *Server) listBuckets(w http.ResponseWriter, r *http.Request) {
-	buckets, err := s.Meta.ListBuckets(r.Context(), "")
+	info := auth.FromContext(r.Context())
+	principal := ""
+	if info != nil {
+		principal = info.Owner
+	}
+	resp := listAllMyBucketsResult{Owner: owner{ID: principal, DisplayName: principal}}
+	if info == nil || info.IsAnonymous || principal == "" {
+		writeXML(w, http.StatusOK, resp)
+		return
+	}
+	buckets, err := s.Meta.ListBuckets(r.Context(), principal)
 	if err != nil {
 		writeError(w, r, ErrInternal)
 		return
 	}
-	resp := listAllMyBucketsResult{Owner: owner{ID: "strata", DisplayName: "strata"}}
 	for _, b := range buckets {
 		resp.Buckets.Bucket = append(resp.Buckets.Bucket, bucketEntry{
 			Name:         b.Name,
