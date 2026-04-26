@@ -234,8 +234,8 @@
         "go test ./cmd/strata-access-log/... passes"
       ],
       "priority": 14,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "internal/accesslog package: Worker.Run(ctx)+RunOnce(ctx) ticker split (Interval default 5min, MaxFlushBytes default 5MiB, PollLimit default 10000, Now func injectable). RunOnce iterates Meta.ListBuckets, GetBucketLogging per bucket (skip ErrNoSuchLogging), parses TargetBucket/TargetPrefix from the stored XML blob via a tiny loggingDoc shape, ListPendingAccessLog (capped at PollLimit), GetBucket(target), then flushRows splits drained rows into chunks bounded by MaxFlushBytes — one Data.PutChunks + Meta.PutObject per flush, then per-row AckAccessLog. Object key = TargetPrefix + YYYY-MM-DD-HH-MM-SS-<16-hex> where the hex tail is MD5(sourceBucket|stamp|rowCount|nanos)[:8] for cheap collision avoidance. Log line FormatLine(owner, entry) emits the full 18-field AWS server-access-log shape (Bucket Owner, Bucket, [Time], Remote IP, Requester, Request-ID, Operation, Key, \"<METHOD> <PATH> HTTP/1.1\", Status, Error Code (=-), Bytes Sent, Object Size, Total Time, Turn-Around Time, \"Referrer\", \"User-Agent\", Version Id) — empty fields render as '-', quoted/bracketed fields preserved. Request-URI is reconstructed from Op (REST.<METHOD>.<RES>) + bucket + key + versionId since the entry doesn't store the raw URI. cmd/strata-access-log/main.go: leader-elected via internal/leader (Name='access-log'), STRATA_ACCESS_LOG_INTERVAL/MAX_FLUSH_BYTES/POLL_LIMIT/METRICS_LISTEN env knobs, mirrors strata-notify/strata-replicator wiring shim. Tests cover round-trip (writes one log object with reconstructed Request-URI line; drains buffer), no-flush when logging disabled (buffer untouched, no log object), MaxFlushBytes split (forces N>=2 files), and a format-compliance test asserting all 18 AWS fields land in the expected positions with quoting/bracketing intact."
     },
     {
       "id": "US-015",
