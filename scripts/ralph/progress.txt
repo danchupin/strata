@@ -2,12 +2,14 @@
 Started: Sun Apr 26 20:43:22 MSK 2026
 
 ## Codebase Patterns
-- Crypto packages live under `internal/crypto/<area>/`. SSE-S3 master key code is in `internal/crypto/master/`.
+- Crypto packages live under `internal/crypto/<area>/`. SSE-S3 master key code is in `internal/crypto/master/`; AEAD chunk + DEK wrap primitives are in `internal/crypto/sse/`.
 - Provider interfaces return `(key, keyID, error)`. Callers (gateway main) own fatal-log on error — log-free providers are still preferred. **Exception:** when a provider needs to log non-fatal warnings (e.g. Vault refresh-failure with cached fallback), inject a `*slog.Logger` via the config struct and default to `slog.Default()`. Tests capture WARN by handing in `slog.New(slog.NewJSONHandler(&buf, …))`.
-- Sentinel errors (e.g. `master.ErrNoConfig`, `master.ErrInvalidKeyLength`) are exported from the package so callers and tests can `errors.Is` them.
+- Sentinel errors (e.g. `master.ErrNoConfig`, `master.ErrInvalidKeyLength`, `sse.ErrInvalidKeySize`, `sse.ErrShortWrappedDEK`) are exported from the package so callers and tests can `errors.Is` them.
 - Use `t.Setenv` / `t.TempDir` for env-var and file-backed tests. For mtime-based hot-reload tests, set the cached mtime to the past via `os.Chtimes` before rewriting so the rewrite is observable on coarse-mtime filesystems.
 - For external-service providers (Vault, AWS-KMS), inject a `Now func() time.Time` so TTL-based refresh logic is testable without `time.Sleep`. Fake `now` advances by `+= duration` between Resolves.
 - Every test that calls `master.FromEnv()` must `t.Setenv` ALL precedence vars (vault, file, env) to a known value — otherwise an ambient process env (e.g. on a developer machine) flips precedence and tests pass/fail intermittently.
+- AEAD layout: chunk ciphertext stored as bare `gcm.Seal` output (no nonce prefix — IV recomputed via `sse.DeriveChunkIV(oid, chunkIndex)` on decrypt). Wrapped DEKs stored as `nonce(12) || gcm.Seal output` because the wrap nonce is random.
+- Don't run `go mod tidy` casually inside Ralph stories — it pulls in unrelated module drift (koanf direct/indirect flips, transitive grpc/protobuf bumps). If a new package adds a direct import that already lives in `go.sum` as indirect, Go builds fine without retidying; leave the `// indirect` annotation alone unless the story explicitly requires a deps refresh.
 
 ---
 
@@ -44,4 +46,22 @@ Started: Sun Apr 26 20:43:22 MSK 2026
   - Holding `mu` across the entire HTTP refresh is fine because Resolve is called per-PUT, not per-byte. If a future story (US-004) shows contention in benchmarks, switch to a single-flight pattern.
   - Vault export `/latest` returns a map of `{"<version>":"<base64>"}`; we picked the highest numeric version. AWS-KMS / local-hsm providers (US-036/US-037) likely return a single key + version field — different decode shape, do not copy verbatim.
   - Provider still does NOT wire into the gateway. US-004 is still the wiring point.
+---
+
+## 2026-04-26 - US-003
+- Added `internal/crypto/sse` package with AEAD primitives for SSE-S3 chunk + DEK protection.
+- API:
+  - `EncryptChunk(dek, oid, chunkIndex, plaintext) ([]byte, error)` and `DecryptChunk` symmetric — AES-256-GCM with deterministic 12-byte IV from `DeriveChunkIV` (HKDF-SHA256, IKM = `oid || chunkIndex(BE64)`, info = `"strata-sse-chunk-iv"`).
+  - `WrapDEK(masterKey, dek)` / `UnwrapDEK(masterKey, wrapped)` — AES-256-GCM with random 12-byte nonce; output blob is `nonce || ciphertext || tag` so the persisted form is self-contained.
+  - `DeriveChunkIV` exported for tests + future call sites that want IV diversity assertions.
+  - Sentinels: `ErrInvalidKeySize`, `ErrShortWrappedDEK`.
+- Files added: `internal/crypto/sse/sse.go`, `internal/crypto/sse/sse_test.go` (18 tests).
+- Quality: `go build ./...`, `go vet ./...`, `go test ./...` all pass; targeted `go test ./internal/crypto/sse/... -v` is 18/18 PASS.
+- **Learnings for future iterations:**
+  - HKDF input choice: `IKM = oid || uint64BE(chunkIndex)` and `info = "strata-sse-chunk-iv"` — salt left nil since neither side has an out-of-band entropy source. Different chunkIndex / oid produce different IVs (verified by tests). If US-049 ever needs IV diversity across rewrites, the DEK already differs per object so collisions are not a worry.
+  - Chunk ciphertext is **not** prefixed with a nonce — the receiver derives the IV deterministically from oid+chunkIndex. Saves 12 bytes per chunk on disk. The same shortcut is **not** safe for WrapDEK (random nonce, must be persisted), so the layouts differ on purpose.
+  - `gcm.Seal(nil, …)` for chunks vs `gcm.Seal(out, …)` with pre-built `out=nonce||cap` for the wrapped DEK. Standard idiom — see `WrapDEK` for the prefix pattern.
+  - The package depends on `golang.org/x/crypto/hkdf`. That module was already in `go.sum` as indirect; `go build ./...` accepts the upgrade-to-direct without complaint, so we did NOT run `go mod tidy` (would have churned unrelated transitive bumps — koanf, grpc-gateway, protobuf). Pattern: when adding a direct import that already exists indirect, just import and build. Reserve `tidy` for when a new module needs adding to `go.sum`.
+  - `sse.EncryptChunk` is deterministic in (dek, oid, chunkIndex) — same inputs yield same ciphertext byte-for-byte. This is fine for SSE-S3 (every object has a unique DEK so no cross-object reuse), and lets the GC + lifecycle stories assume bit-stable rewrites. Test `TestEncryptChunkSameInputsProduceSameCiphertext` pins this.
+  - This story does NOT wire anything into PutObject/GetObject. US-004 is the wiring point — it will need to (a) call `WrapDEK` and persist `objects.sse_key` + `sse_key_id`, and (b) walk chunk indexes and call `EncryptChunk` per chunk. The OID we feed into `DeriveChunkIV` must be deterministic per (object, version) — likely use `bucket/key/versionID` as the canonical string. Decide that in US-004; the package is agnostic.
 ---

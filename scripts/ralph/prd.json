@@ -49,8 +49,8 @@
         "go test ./internal/crypto/sse/... passes"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "internal/crypto/sse: EncryptChunk/DecryptChunk seal/open AES-256-GCM with deterministic 12-byte IV from HKDF-SHA256(oid||chunkIndexBE, info='strata-sse-chunk-iv'). WrapDEK/UnwrapDEK use AES-256-GCM with random 12-byte nonce prefixed to ciphertext. ErrInvalidKeySize / ErrShortWrappedDEK sentinels. Chunk ciphertext is just AEAD output (no nonce prefix — IV is recomputed on decrypt). 18 tests cover round-trip, mutation rejection (cipher + tag), mismatched oid/chunkIndex, wrong DEK / master, truncated wrapped blob, IV determinism + diversity, deterministic ciphertext for equal inputs."
     },
     {
       "id": "US-004",
