@@ -39,6 +39,7 @@ const replicationTagXML = `<ReplicationConfiguration>
 func TestBucketReplicationCRUD(t *testing.T) {
 	h := newHarness(t)
 	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	enableVersioning(h, "bkt")
 
 	resp := h.doString("GET", "/bkt?replication=", "")
 	h.mustStatus(resp, 404)
@@ -64,6 +65,7 @@ func TestBucketReplicationCRUD(t *testing.T) {
 func TestBucketReplicationMalformedBody(t *testing.T) {
 	h := newHarness(t)
 	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	enableVersioning(h, "bkt")
 	resp := h.doString("PUT", "/bkt?replication=", "<ReplicationConfiguration><nope")
 	h.mustStatus(resp, 400)
 	if body := h.readBody(resp); !strings.Contains(body, "MalformedXML") {
@@ -74,6 +76,7 @@ func TestBucketReplicationMalformedBody(t *testing.T) {
 func TestBucketReplicationNoRulesRejected(t *testing.T) {
 	h := newHarness(t)
 	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	enableVersioning(h, "bkt")
 	resp := h.doString("PUT", "/bkt?replication=",
 		"<ReplicationConfiguration><Role>arn:aws:iam::1:role/r</Role></ReplicationConfiguration>")
 	h.mustStatus(resp, 400)
@@ -82,6 +85,7 @@ func TestBucketReplicationNoRulesRejected(t *testing.T) {
 func TestBucketReplicationRuleWithoutDestinationRejected(t *testing.T) {
 	h := newHarness(t)
 	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	enableVersioning(h, "bkt")
 	xmlBody := `<ReplicationConfiguration>
 		<Role>arn:aws:iam::1:role/r</Role>
 		<Rule><ID>no-dest</ID><Status>Enabled</Status><Filter><Prefix></Prefix></Filter></Rule>
@@ -93,6 +97,7 @@ func TestBucketReplicationRuleWithoutDestinationRejected(t *testing.T) {
 func TestPutObjectReplicationStatusMatchPrefix(t *testing.T) {
 	h := newHarness(t)
 	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	enableVersioning(h, "bkt")
 	h.mustStatus(h.doString("PUT", "/bkt?replication=", replicationPrefixXML), 200)
 
 	resp := h.doString("PUT", "/bkt/logs/2026/04.txt", "hello")
@@ -105,6 +110,7 @@ func TestPutObjectReplicationStatusMatchPrefix(t *testing.T) {
 func TestPutObjectReplicationStatusNoMatch(t *testing.T) {
 	h := newHarness(t)
 	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	enableVersioning(h, "bkt")
 	h.mustStatus(h.doString("PUT", "/bkt?replication=", replicationPrefixXML), 200)
 
 	resp := h.doString("PUT", "/bkt/other/file.txt", "hello")
@@ -128,6 +134,7 @@ func TestPutObjectReplicationStatusNoConfig(t *testing.T) {
 func TestPutObjectReplicationStatusDisabledRuleSkipped(t *testing.T) {
 	h := newHarness(t)
 	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	enableVersioning(h, "bkt")
 	disabled := strings.Replace(replicationPrefixXML, "<Status>Enabled</Status>", "<Status>Disabled</Status>", 1)
 	h.mustStatus(h.doString("PUT", "/bkt?replication=", disabled), 200)
 
@@ -141,6 +148,7 @@ func TestPutObjectReplicationStatusDisabledRuleSkipped(t *testing.T) {
 func TestPutObjectReplicationStatusTagFilter(t *testing.T) {
 	h := newHarness(t)
 	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	enableVersioning(h, "bkt")
 	h.mustStatus(h.doString("PUT", "/bkt?replication=", replicationTagXML), 200)
 
 	// Prefix matches but tags missing → no replication.

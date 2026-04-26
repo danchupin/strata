@@ -847,7 +847,12 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	if meta.IsVersioningActive(b.Versioning) && obj.VersionID != "" {
 		w.Header().Set("x-amz-version-id", obj.VersionID)
 	}
-	if status := s.replicationStatusFor(r, b, key, obj.Tags); status != "" {
+	if status := s.emitReplicationEvent(r, b, replicationEventDetails{
+		EventName: "s3:ObjectCreated:Put",
+		Key:       key,
+		VersionID: obj.VersionID,
+		Tags:      obj.Tags,
+	}); status != "" {
 		w.Header().Set("x-amz-replication-status", status)
 	}
 	s.emitNotificationEvent(r, b, notificationEventDetails{

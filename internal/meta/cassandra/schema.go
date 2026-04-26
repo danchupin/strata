@@ -187,6 +187,20 @@ var tableDDL = []string{
 		payload      blob,
 		PRIMARY KEY ((bucket_id, hour), event_id)
 	)`,
+	`CREATE TABLE IF NOT EXISTS replication_queue (
+		bucket_id          uuid,
+		day                timestamp,
+		event_id           timeuuid,
+		bucket_name        text,
+		object_key         text,
+		version_id         text,
+		event_name         text,
+		event_time         timestamp,
+		rule_id            text,
+		destination_bucket text,
+		storage_class      text,
+		PRIMARY KEY ((bucket_id, day), event_id)
+	)`,
 	`CREATE TABLE IF NOT EXISTS notify_dlq (
 		bucket_id    uuid,
 		day          timestamp,

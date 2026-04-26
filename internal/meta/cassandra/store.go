@@ -1108,6 +1108,89 @@ func (s *Store) ListNotificationDLQ(ctx context.Context, bucketID uuid.UUID, lim
 	return out, nil
 }
 
+func (s *Store) EnqueueReplication(ctx context.Context, evt *meta.ReplicationEvent) error {
+	if evt == nil {
+		return nil
+	}
+	if evt.EventTime.IsZero() {
+		evt.EventTime = time.Now().UTC()
+	}
+	if evt.EventID == "" {
+		evt.EventID = gocql.TimeUUID().String()
+	}
+	eventUUID, err := gocql.ParseUUID(evt.EventID)
+	if err != nil {
+		return err
+	}
+	day := notifyDay(evt.EventTime)
+	return s.s.Query(
+		`INSERT INTO replication_queue (bucket_id, day, event_id, bucket_name, object_key, version_id, event_name, event_time, rule_id, destination_bucket, storage_class)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		gocqlUUID(evt.BucketID), day, eventUUID, evt.Bucket, evt.Key, evt.VersionID,
+		evt.EventName, evt.EventTime, evt.RuleID, evt.DestinationBucket, evt.StorageClass,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) ListPendingReplications(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.ReplicationEvent, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	now := time.Now().UTC()
+	day := notifyDay(now)
+	out := make([]meta.ReplicationEvent, 0, limit)
+	// Walk the last 30 days of partitions; matches notify_dlq retention so a
+	// paused replicator catches everything within the operator-visible window.
+	for i := 0; i < 30 && len(out) < limit; i++ {
+		partition := day.AddDate(0, 0, -i)
+		iter := s.s.Query(
+			`SELECT event_id, bucket_name, object_key, version_id, event_name, event_time, rule_id, destination_bucket, storage_class
+			 FROM replication_queue WHERE bucket_id=? AND day=? LIMIT ?`,
+			gocqlUUID(bucketID), partition, limit-len(out),
+		).WithContext(ctx).Iter()
+		var (
+			eventID                                                                gocql.UUID
+			bucket, key, versionID, name, ruleID, destinationBucket, storageClass string
+			eventTime                                                              time.Time
+		)
+		for iter.Scan(&eventID, &bucket, &key, &versionID, &name, &eventTime, &ruleID, &destinationBucket, &storageClass) {
+			out = append(out, meta.ReplicationEvent{
+				BucketID:          bucketID,
+				Bucket:            bucket,
+				Key:               key,
+				VersionID:         versionID,
+				EventID:           eventID.String(),
+				EventName:         name,
+				EventTime:         eventTime,
+				RuleID:            ruleID,
+				DestinationBucket: destinationBucket,
+				StorageClass:      storageClass,
+			})
+			if len(out) >= limit {
+				break
+			}
+		}
+		if err := iter.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) AckReplication(ctx context.Context, evt meta.ReplicationEvent) error {
+	if evt.EventID == "" {
+		return nil
+	}
+	eventUUID, err := gocql.ParseUUID(evt.EventID)
+	if err != nil {
+		return err
+	}
+	day := notifyDay(evt.EventTime)
+	return s.s.Query(
+		`DELETE FROM replication_queue WHERE bucket_id=? AND day=? AND event_id=?`,
+		gocqlUUID(evt.BucketID), day, eventUUID,
+	).WithContext(ctx).Exec()
+}
+
 func (s *Store) resolveVersionID(ctx context.Context, bucketID uuid.UUID, key, versionID string) (gocql.UUID, int, error) {
 	shard := shardOf(key, s.defaultShard)
 	if versionID != "" {

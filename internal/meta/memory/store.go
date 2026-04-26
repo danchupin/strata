@@ -39,6 +39,7 @@ type Store struct {
 	gc             map[string][]meta.GCEntry
 	notifyQueue    map[uuid.UUID][]meta.NotificationEvent
 	notifyDLQ      map[uuid.UUID][]meta.NotificationDLQEntry
+	replicationQueue map[uuid.UUID][]meta.ReplicationEvent
 	mpDone         map[completionKey]*completionEntry
 	rewrapProgress map[uuid.UUID]*meta.RewrapProgress
 	locker         *Locker
@@ -99,6 +100,7 @@ func New() *Store {
 		gc:             make(map[string][]meta.GCEntry),
 		notifyQueue:    make(map[uuid.UUID][]meta.NotificationEvent),
 		notifyDLQ:      make(map[uuid.UUID][]meta.NotificationDLQEntry),
+		replicationQueue: make(map[uuid.UUID][]meta.ReplicationEvent),
 		mpDone:         make(map[completionKey]*completionEntry),
 		rewrapProgress: make(map[uuid.UUID]*meta.RewrapProgress),
 		locker:         NewLocker(),
@@ -224,6 +226,53 @@ func (s *Store) ListNotificationDLQ(ctx context.Context, bucketID uuid.UUID, lim
 		}
 	}
 	return out, nil
+}
+
+func (s *Store) EnqueueReplication(ctx context.Context, evt *meta.ReplicationEvent) error {
+	if evt == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := *evt
+	if cp.EventID == "" {
+		cp.EventID = gocql.TimeUUID().String()
+	}
+	if cp.EventTime.IsZero() {
+		cp.EventTime = time.Now().UTC()
+	}
+	s.replicationQueue[evt.BucketID] = append(s.replicationQueue[evt.BucketID], cp)
+	return nil
+}
+
+func (s *Store) ListPendingReplications(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.ReplicationEvent, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	rows := s.replicationQueue[bucketID]
+	out := make([]meta.ReplicationEvent, 0, len(rows))
+	for _, e := range rows {
+		out = append(out, e)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) AckReplication(ctx context.Context, evt meta.ReplicationEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows := s.replicationQueue[evt.BucketID]
+	for i, e := range rows {
+		if e.EventID == evt.EventID {
+			s.replicationQueue[evt.BucketID] = append(rows[:i], rows[i+1:]...)
+			return nil
+		}
+	}
+	return nil
 }
 
 func (s *Store) AckGCEntry(ctx context.Context, region string, e meta.GCEntry) error {

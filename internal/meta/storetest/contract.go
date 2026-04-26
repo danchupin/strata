@@ -36,6 +36,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"SSEWrapRotationRoundTrip", caseSSEWrapRotation},
 		{"NotificationQueueRoundTrip", caseNotificationQueue},
 		{"NotificationDLQRoundTrip", caseNotificationDLQ},
+		{"ReplicationQueueRoundTrip", caseReplicationQueue},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -422,6 +423,50 @@ func caseNotificationDLQ(t *testing.T, s meta.Store) {
 	}
 	if string(got[0].Payload) != string(entry.Payload) {
 		t.Fatalf("payload: %q", string(got[0].Payload))
+	}
+}
+
+func caseReplicationQueue(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "rep", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	now := time.Now().UTC()
+	evt := &meta.ReplicationEvent{
+		BucketID:          b.ID,
+		Bucket:            b.Name,
+		Key:               "logs/2026/04/x.txt",
+		VersionID:         newTimeUUID(),
+		EventID:           newTimeUUID(),
+		EventName:         "s3:Replication:Pending",
+		EventTime:         now,
+		RuleID:            "logs",
+		DestinationBucket: "arn:aws:s3:::dest",
+		StorageClass:      "STANDARD",
+	}
+	if err := s.EnqueueReplication(ctx, evt); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	got, err := s.ListPendingReplications(ctx, b.ID, 100)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d events want 1", len(got))
+	}
+	if got[0].RuleID != evt.RuleID || got[0].Key != evt.Key || got[0].DestinationBucket != evt.DestinationBucket {
+		t.Fatalf("row: %+v", got[0])
+	}
+	if got[0].VersionID != evt.VersionID {
+		t.Fatalf("version: got %q want %q", got[0].VersionID, evt.VersionID)
+	}
+	if err := s.AckReplication(ctx, got[0]); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	remaining, _ := s.ListPendingReplications(ctx, b.ID, 100)
+	if len(remaining) != 0 {
+		t.Fatalf("after ack: %d remaining", len(remaining))
 	}
 }
 

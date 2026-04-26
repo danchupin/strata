@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/danchupin/strata/internal/meta"
 )
@@ -50,6 +51,10 @@ func (s *Server) putBucketReplication(w http.ResponseWriter, r *http.Request, bu
 	b, err := s.Meta.GetBucket(r.Context(), bucket)
 	if err != nil {
 		mapMetaErr(w, r, err)
+		return
+	}
+	if !meta.IsVersioningActive(b.Versioning) {
+		writeError(w, r, ErrInvalidRequest)
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
@@ -116,11 +121,23 @@ func (s *Server) deleteBucketReplication(w http.ResponseWriter, r *http.Request,
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// replicationStatusFor returns "PENDING" when at least one Enabled rule of the
-// bucket's replication configuration has a Filter that matches the given key
-// and tag set; empty string otherwise (no config, no matching rule, or load
-// error).
-func (s *Server) replicationStatusFor(r *http.Request, b *meta.Bucket, key string, tags map[string]string) string {
+// replicationEventDetails carries the per-event facts the emitter needs to
+// build a queue row: the source object's key, version id, tag set, and the
+// event name (PUT vs CompleteMultipart) for the replication worker.
+type replicationEventDetails struct {
+	EventName string
+	Key       string
+	VersionID string
+	Tags      map[string]string
+}
+
+// emitReplicationEvent walks the bucket's replication configuration; for each
+// Enabled rule whose Filter matches the source key+tags, enqueues a
+// replication_queue row keyed to the rule's ID and Destination.Bucket. Returns
+// "PENDING" when at least one row was enqueued, "" otherwise (no config, no
+// matching rule, or load error). Failures are best-effort — replication
+// emission must not fail the underlying request.
+func (s *Server) emitReplicationEvent(r *http.Request, b *meta.Bucket, evt replicationEventDetails) string {
 	blob, err := s.Meta.GetBucketReplication(r.Context(), b.ID)
 	if err != nil {
 		return ""
@@ -129,13 +146,37 @@ func (s *Server) replicationStatusFor(r *http.Request, b *meta.Bucket, key strin
 	if err := xml.Unmarshal(blob, &cfg); err != nil {
 		return ""
 	}
+	when := time.Now().UTC()
+	matched := false
 	for _, rule := range cfg.Rules {
 		if rule.Status != "" && !strings.EqualFold(rule.Status, "Enabled") {
 			continue
 		}
-		if replicationRuleMatches(rule, key, tags) {
-			return "PENDING"
+		if !replicationRuleMatches(rule, evt.Key, evt.Tags) {
+			continue
 		}
+		dest := ""
+		class := ""
+		if rule.Destination != nil {
+			dest = rule.Destination.Bucket
+			class = rule.Destination.StorageClass
+		}
+		row := &meta.ReplicationEvent{
+			BucketID:          b.ID,
+			Bucket:            b.Name,
+			Key:               evt.Key,
+			VersionID:         evt.VersionID,
+			EventName:         evt.EventName,
+			EventTime:         when,
+			RuleID:            rule.ID,
+			DestinationBucket: dest,
+			StorageClass:      class,
+		}
+		_ = s.Meta.EnqueueReplication(r.Context(), row)
+		matched = true
+	}
+	if matched {
+		return "PENDING"
 	}
 	return ""
 }

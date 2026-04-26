@@ -445,6 +445,14 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		w.Header().Set(k, v)
 	}
 	w.Header().Set("Content-Type", "application/xml")
+	if status := s.emitReplicationEvent(r, b, replicationEventDetails{
+		EventName: "s3:ObjectCreated:CompleteMultipartUpload",
+		Key:       key,
+		VersionID: obj.VersionID,
+		Tags:      obj.Tags,
+	}); status != "" {
+		w.Header().Set("x-amz-replication-status", status)
+	}
 	s.emitNotificationEvent(r, b, notificationEventDetails{
 		EventName: "s3:ObjectCreated:CompleteMultipartUpload",
 		Key:       key,

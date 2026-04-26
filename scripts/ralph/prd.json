@@ -184,8 +184,8 @@
         "go test ./internal/s3api/... ./internal/meta/... passes"
       ],
       "priority": 11,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "meta.ReplicationEvent struct (BucketID/Bucket/Key/VersionID/EventID/EventName/EventTime/RuleID/DestinationBucket/StorageClass) + meta.Store EnqueueReplication / ListPendingReplications / AckReplication; both backends implement; new contract test caseReplicationQueue. Cassandra additive replication_queue table partitioned by ((bucket_id, day)) with TimeUUID clustering; ListPendingReplications walks last 30 day partitions (matches notify_dlq retention). internal/s3api/replication.go: replicationStatusFor renamed to emitReplicationEvent which walks Enabled rules, enqueues one row per matching rule (rule.ID + Destination.Bucket attached), returns 'PENDING' when any matched. putObject and completeMultipart both call the hook AFTER the meta write succeeds and BEFORE WriteHeader; both set x-amz-replication-status header when matched. putBucketReplication now rejects with 400 InvalidRequest when bucket is not versioning-active (Enabled or Suspended both pass — only Disabled rejects). Existing replication tests gained `enableVersioning(h, \"bkt\")` between bucket create + PUT?replication. New tests: TestReplicationPutEnqueuesRowAndPending (PUT matches prefix → header=PENDING + 1 queue row with EventName=s3:ObjectCreated:Put + VersionID populated since bucket versioned), TestReplicationNoMatchEnqueuesNothing (non-matching prefix → empty header + 0 rows), TestReplicationPutBucketReplicationRejectsUnversioned (400 InvalidRequest body), TestReplicationPutBucketReplicationAllowsSuspended (Enabled then Suspended both accepted), TestReplicationCompleteMultipartEnqueuesRow (Initiate+UploadPart+Complete → 1 queue row with EventName=s3:ObjectCreated:CompleteMultipartUpload). extractUploadID helper reused from encryption_test.go (don't redeclare it locally)."
     },
     {
       "id": "US-012",

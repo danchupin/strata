@@ -239,6 +239,23 @@ type NotificationDLQEntry struct {
 	EnqueuedAt time.Time
 }
 
+// ReplicationEvent is one buffered cross-region replication intent waiting
+// for the strata-replicator worker (US-012) to copy the source object to the
+// destination configured by the matching rule. One row per matching rule —
+// a PUT that satisfies two rules enqueues two rows.
+type ReplicationEvent struct {
+	BucketID         uuid.UUID
+	Bucket           string
+	Key              string
+	VersionID        string
+	EventID          string
+	EventName        string
+	EventTime        time.Time
+	RuleID           string
+	DestinationBucket string
+	StorageClass    string
+}
+
 type Store interface {
 	CreateBucket(ctx context.Context, name, owner, defaultClass string) (*Bucket, error)
 	GetBucket(ctx context.Context, name string) (*Bucket, error)
@@ -270,6 +287,10 @@ type Store interface {
 
 	EnqueueNotificationDLQ(ctx context.Context, entry *NotificationDLQEntry) error
 	ListNotificationDLQ(ctx context.Context, bucketID uuid.UUID, limit int) ([]NotificationDLQEntry, error)
+
+	EnqueueReplication(ctx context.Context, evt *ReplicationEvent) error
+	ListPendingReplications(ctx context.Context, bucketID uuid.UUID, limit int) ([]ReplicationEvent, error)
+	AckReplication(ctx context.Context, evt ReplicationEvent) error
 
 	SetObjectTags(ctx context.Context, bucketID uuid.UUID, key, versionID string, tags map[string]string) error
 	GetObjectTags(ctx context.Context, bucketID uuid.UUID, key, versionID string) (map[string]string, error)
