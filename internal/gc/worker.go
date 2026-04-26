@@ -2,7 +2,7 @@ package gc
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/danchupin/strata/internal/data"
@@ -17,7 +17,7 @@ type Worker struct {
 	Interval time.Duration
 	Grace    time.Duration
 	Batch    int
-	Logger   *log.Logger
+	Logger   *slog.Logger
 }
 
 func (w *Worker) Run(ctx context.Context) error {
@@ -31,9 +31,9 @@ func (w *Worker) Run(ctx context.Context) error {
 		w.Batch = 500
 	}
 	if w.Logger == nil {
-		w.Logger = log.Default()
+		w.Logger = slog.Default()
 	}
-	w.Logger.Printf("gc: starting (region=%s interval=%s grace=%s)", w.Region, w.Interval, w.Grace)
+	w.Logger.InfoContext(ctx, "gc: starting", "region", w.Region, "interval", w.Interval.String(), "grace", w.Grace.String())
 
 	ticker := time.NewTicker(w.Interval)
 	defer ticker.Stop()
@@ -53,7 +53,7 @@ func (w *Worker) drain(ctx context.Context) {
 	for {
 		entries, err := w.Meta.ListGCEntries(ctx, w.Region, before, w.Batch)
 		if err != nil {
-			w.Logger.Printf("gc: list: %v", err)
+			w.Logger.WarnContext(ctx, "gc list", "error", err.Error())
 			return
 		}
 		if len(entries) == 0 {
@@ -62,11 +62,11 @@ func (w *Worker) drain(ctx context.Context) {
 		for _, e := range entries {
 			manifest := &data.Manifest{Chunks: []data.ChunkRef{e.Chunk}}
 			if err := w.Data.Delete(ctx, manifest); err != nil {
-				w.Logger.Printf("gc: delete %s/%s: %v", e.Chunk.Pool, e.Chunk.OID, err)
+				w.Logger.WarnContext(ctx, "gc delete", "pool", e.Chunk.Pool, "oid", e.Chunk.OID, "error", err.Error())
 				continue
 			}
 			if err := w.Meta.AckGCEntry(ctx, w.Region, e); err != nil {
-				w.Logger.Printf("gc: ack %s/%s: %v", e.Chunk.Pool, e.Chunk.OID, err)
+				w.Logger.WarnContext(ctx, "gc ack", "pool", e.Chunk.Pool, "oid", e.Chunk.OID, "error", err.Error())
 				continue
 			}
 			metrics.GCProcessed.Inc()

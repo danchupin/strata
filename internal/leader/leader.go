@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -27,7 +27,7 @@ type Session struct {
 	TTL          time.Duration
 	RenewPeriod  time.Duration
 	AcquireRetry time.Duration
-	Logger       *log.Logger
+	Logger       *slog.Logger
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -52,7 +52,7 @@ func (s *Session) applyDefaults() {
 		s.AcquireRetry = 5 * time.Second
 	}
 	if s.Logger == nil {
-		s.Logger = log.Default()
+		s.Logger = slog.Default()
 	}
 	if s.Holder == "" {
 		s.Holder = DefaultHolder()
@@ -66,9 +66,9 @@ func (s *Session) AwaitAcquire(ctx context.Context) error {
 	for {
 		ok, err := s.Locker.Acquire(ctx, s.Name, s.Holder, s.TTL)
 		if err != nil {
-			s.Logger.Printf("leader %s: acquire error: %v", s.Name, err)
+			s.Logger.WarnContext(ctx, "leader acquire error", "name", s.Name, "error", err.Error())
 		} else if ok {
-			s.Logger.Printf("leader %s: acquired by %s", s.Name, s.Holder)
+			s.Logger.InfoContext(ctx, "leader acquired", "name", s.Name, "holder", s.Holder)
 			return nil
 		}
 		select {
@@ -97,10 +97,10 @@ func (s *Session) Supervise(parent context.Context) context.Context {
 			case <-ticker.C:
 				ok, err := s.Locker.Renew(parent, s.Name, s.Holder, s.TTL)
 				if err != nil {
-					s.Logger.Printf("leader %s: renew error: %v", s.Name, err)
+					s.Logger.WarnContext(parent, "leader renew error", "name", s.Name, "error", err.Error())
 				}
 				if !ok {
-					s.Logger.Printf("leader %s: lease lost", s.Name)
+					s.Logger.WarnContext(parent, "leader lease lost", "name", s.Name)
 					cancel()
 					return
 				}
@@ -118,6 +118,6 @@ func (s *Session) Release(ctx context.Context) {
 	}
 	s.mu.Unlock()
 	if err := s.Locker.Release(ctx, s.Name, s.Holder); err != nil {
-		s.Logger.Printf("leader %s: release: %v", s.Name, err)
+		s.Logger.WarnContext(ctx, "leader release error", "name", s.Name, "error", err.Error())
 	}
 }

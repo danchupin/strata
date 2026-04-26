@@ -95,6 +95,19 @@ fields tagged `json:",omitempty"` are schema-additive — old rows decode with z
 Use this for per-object metadata that the GET path reads but Cassandra never filters on (e.g. `Manifest.PartChunks`
 for the SSE multipart locator).
 
+## Logging (slog)
+
+`internal/logging` is the canonical setup. Every `cmd/<binary>/main.go` should call `logging.Setup()` first thing
+to install a JSON-handler `*slog.Logger` driven by `STRATA_LOG_LEVEL` (DEBUG/INFO/WARN/ERROR; default INFO) and use
+the returned logger for binary-level errors. Workers (`leader.Session`, `gc.Worker`, `lifecycle.Worker`,
+`notify.Config`, etc.) take `*slog.Logger`, never `*log.Logger`. The HTTP gateway wraps its mux handler with
+`logging.NewMiddleware(logger, next)` which reads / generates `X-Request-Id`, sets it on both `r.Header` (so
+downstream middlewares like `internal/s3api/access_log.go` keep reading it via `r.Header.Get`) and `w.Header()`
+(client correlation), and attaches a child logger with `request_id` to the request context. Inside handlers, prefer
+`logging.LoggerFromContext(r.Context()).InfoContext(ctx, msg, "key", value)` — passing the bound logger keeps lines
+correlated without additional plumbing. Use `WarnContext`/`InfoContext`/`ErrorContext` (not the no-context variants)
+so future ctx-bound loggers ride through.
+
 ## Cassandra gotchas (real ones, hit during this codebase's lifetime)
 
 - **No subqueries.** CQL does not support `WHERE name IN (SELECT name FROM ... WHERE id=?)`. If you need that,

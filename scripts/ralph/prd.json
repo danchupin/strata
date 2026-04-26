@@ -251,11 +251,8 @@
         "go test ./... passes"
       ],
       "priority": 15,
-      "passes": false,
-      "notes": ""
-    },
-    {
-      "id": "US-016",
+      "passes": true,
+      "notes": "internal/logging package centralises slog setup: ParseLevel(STRATA_LOG_LEVEL env -> slog.Level; DEBUG/INFO/WARN/ERROR, default INFO), New(io.Writer) returns JSON handler logger, Setup() shorthand also installs as slog.Default. Middleware reads X-Request-Id (or uuid.NewString) and (a) sets header back on r.Header so downstream like access-log middleware sees the resolved id, (b) sets header on w.Header() so the response carries it back, (c) attaches both the raw id (RequestIDFromContext) and a logger.With('request_id', id) (LoggerFromContext) to ctx so handlers/workers can call logging.LoggerFromContext(ctx).Info(...) and get correlated lines. cmd/strata-gateway, cmd/strata-gc, cmd/strata-lifecycle migrated from stdlib log to logging.Setup() + slog.Error/Info; gateway mux wraps handler with logging.NewMiddleware(logger, ...). internal/leader.Session.Logger and internal/gc/lifecycle Worker.Logger switched from *log.Logger to *slog.Logger; all Printf calls converted to InfoContext/WarnContext with structured kv attrs. notify/replicator/access-log/rewrap binaries already used slog inline since US-009..014 — they keep working without changes (parseLogLevel locals could be unified with logging.ParseLevel later but that's churn). Tests in internal/logging cover ParseLevel cases, UUID-generation when header missing, header reuse when present, same-id across multiple log lines per request."
       "title": "slog Cassandra slow-query + RADOS DEBUG hooks",
       "description": "As an SRE, I want slow Cassandra queries logged at WARN with the request_id, and RADOS ops logged at DEBUG.",
       "acceptanceCriteria": [

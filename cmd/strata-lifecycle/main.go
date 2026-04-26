@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -15,31 +15,33 @@ import (
 	datarados "github.com/danchupin/strata/internal/data/rados"
 	"github.com/danchupin/strata/internal/leader"
 	"github.com/danchupin/strata/internal/lifecycle"
+	"github.com/danchupin/strata/internal/logging"
 	"github.com/danchupin/strata/internal/meta"
 	metacassandra "github.com/danchupin/strata/internal/meta/cassandra"
 	metamem "github.com/danchupin/strata/internal/meta/memory"
 	"github.com/danchupin/strata/internal/metrics"
-	"net/http"
 )
 
 func main() {
-	log.SetOutput(os.Stdout)
-	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	logger := logging.Setup()
 
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("config: %v", err)
+		logger.Error("config", "error", err.Error())
+		os.Exit(2)
 	}
 
 	dataBackend, err := buildDataBackend(cfg)
 	if err != nil {
-		log.Fatalf("data backend: %v", err)
+		logger.Error("data backend", "error", err.Error())
+		os.Exit(2)
 	}
 	defer dataBackend.Close()
 
 	metaStore, err := buildMetaStore(cfg)
 	if err != nil {
-		log.Fatalf("meta store: %v", err)
+		logger.Error("meta store", "error", err.Error())
+		os.Exit(2)
 	}
 	defer metaStore.Close()
 
@@ -50,12 +52,13 @@ func main() {
 		Region:   cfg.RegionName,
 		Interval: cfg.Lifecycle.Interval,
 		AgeUnit:  ageUnitFromString(cfg.Lifecycle.Unit),
+		Logger:   logger,
 	}
 
 	go func() {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", metrics.Handler())
-		log.Printf("lifecycle: metrics on %s", cfg.Lifecycle.MetricsListen)
+		logger.Info("lifecycle: metrics", "listen", cfg.Lifecycle.MetricsListen)
 		_ = http.ListenAndServe(cfg.Lifecycle.MetricsListen, mux)
 	}()
 
@@ -64,9 +67,10 @@ func main() {
 
 	locker := buildLocker(cfg, metaStore)
 	if locker == nil {
-		log.Printf("lifecycle: leader election disabled (no distributed locker for meta=%s)", cfg.MetaBackend)
+		logger.Warn("lifecycle: leader election disabled (no distributed locker)", "meta_backend", cfg.MetaBackend)
 		if err := w.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			log.Fatalf("worker: %v", err)
+			logger.Error("worker", "error", err.Error())
+			os.Exit(1)
 		}
 		return
 	}
@@ -74,6 +78,7 @@ func main() {
 		Locker: locker,
 		Name:   "lifecycle",
 		Holder: leader.DefaultHolder(),
+		Logger: logger,
 	}
 	for ctx.Err() == nil {
 		if err := session.AwaitAcquire(ctx); err != nil {
@@ -81,7 +86,7 @@ func main() {
 		}
 		workCtx := session.Supervise(ctx)
 		if err := w.Run(workCtx); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("worker: %v", err)
+			logger.Warn("worker", "error", err.Error())
 		}
 		session.Release(context.Background())
 	}

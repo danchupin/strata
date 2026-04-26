@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,6 +15,7 @@ import (
 	"github.com/danchupin/strata/internal/data"
 	datamem "github.com/danchupin/strata/internal/data/memory"
 	datarados "github.com/danchupin/strata/internal/data/rados"
+	"github.com/danchupin/strata/internal/logging"
 	"github.com/danchupin/strata/internal/meta"
 	metacassandra "github.com/danchupin/strata/internal/meta/cassandra"
 	metamem "github.com/danchupin/strata/internal/meta/memory"
@@ -23,33 +24,37 @@ import (
 )
 
 func main() {
-	log.SetOutput(os.Stdout)
-	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	logger := logging.Setup()
 
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("config: %v", err)
+		logger.Error("config", "error", err.Error())
+		os.Exit(2)
 	}
 
 	dataBackend, err := buildDataBackend(cfg)
 	if err != nil {
-		log.Fatalf("data backend: %v", err)
+		logger.Error("data backend", "error", err.Error())
+		os.Exit(2)
 	}
 	defer dataBackend.Close()
 
 	metaStore, err := buildMetaStore(cfg)
 	if err != nil {
-		log.Fatalf("meta store: %v", err)
+		logger.Error("meta store", "error", err.Error())
+		os.Exit(2)
 	}
 	defer metaStore.Close()
 
 	mode, err := auth.ParseMode(cfg.Auth.Mode)
 	if err != nil {
-		log.Fatalf("auth: %v", err)
+		logger.Error("auth", "error", err.Error())
+		os.Exit(2)
 	}
 	credMap, err := auth.ParseStaticCredentials(cfg.Auth.StaticCredentials)
 	if err != nil {
-		log.Fatalf("auth credentials: %v", err)
+		logger.Error("auth credentials", "error", err.Error())
+		os.Exit(2)
 	}
 	sts := auth.NewSTSStore()
 	stores := []auth.CredentialsStore{sts, auth.NewStaticStore(credMap)}
@@ -60,7 +65,8 @@ func main() {
 		stores = append(stores, metamem.NewCredentialStore(ms))
 	}
 	if mode == auth.ModeRequired && len(credMap) == 0 && len(stores) == 2 {
-		log.Fatalf("auth: STRATA_AUTH_MODE=required but no credential stores are configured")
+		logger.Error("auth: STRATA_AUTH_MODE=required but no credential stores are configured")
+		os.Exit(2)
 	}
 	multi := auth.NewMultiStore(auth.DefaultCacheTTL, stores...)
 	mw := &auth.Middleware{
@@ -75,12 +81,14 @@ func main() {
 	apiHandler.STS = sts
 	mfaSecrets, err := s3api.ParseMFASecrets(os.Getenv("STRATA_MFA_SECRETS"))
 	if err != nil {
-		log.Fatalf("mfa secrets: %v", err)
+		logger.Error("mfa secrets", "error", err.Error())
+		os.Exit(2)
 	}
 	apiHandler.MFASecrets = mfaSecrets
 	masterProvider, err := master.FromEnv()
 	if err != nil && !errors.Is(err, master.ErrNoConfig) {
-		log.Fatalf("sse master key: %v", err)
+		logger.Error("sse master key", "error", err.Error())
+		os.Exit(2)
 	}
 	if masterProvider != nil {
 		apiHandler.Master = masterProvider
@@ -88,7 +96,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
-	mux.Handle("/", metrics.ObserveHTTP(mw.Wrap(s3api.NewAccessLogMiddleware(metaStore, apiHandler), s3api.WriteAuthDenied)))
+	mux.Handle("/", logging.NewMiddleware(logger, metrics.ObserveHTTP(mw.Wrap(s3api.NewAccessLogMiddleware(metaStore, apiHandler), s3api.WriteAuthDenied))))
 
 	srv := &http.Server{
 		Addr:    cfg.Listen,
@@ -99,15 +107,20 @@ func main() {
 	defer stop()
 
 	go func() {
-		log.Printf("strata-gateway listening on %s (data=%s meta=%s region=%s auth=%s)",
-			cfg.Listen, cfg.DataBackend, cfg.MetaBackend, cfg.RegionName, cfg.Auth.Mode)
+		logger.Info("strata-gateway listening",
+			"listen", cfg.Listen,
+			"data", cfg.DataBackend,
+			"meta", cfg.MetaBackend,
+			"region", cfg.RegionName,
+			"auth", cfg.Auth.Mode)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("http: %v", err)
+			slog.Default().Error("http", "error", err.Error())
+			os.Exit(1)
 		}
 	}()
 
 	<-ctx.Done()
-	log.Println("shutting down")
+	logger.Info("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownWait)
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)
