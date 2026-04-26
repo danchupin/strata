@@ -1444,6 +1444,16 @@ func (s *Store) DeleteBucketReplication(ctx context.Context, bucketID uuid.UUID)
 	return s.deleteBucketBlob(ctx, "bucket_replication", bucketID)
 }
 
+func (s *Store) SetBucketLogging(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(ctx, "bucket_logging", "config", bucketID, blob)
+}
+func (s *Store) GetBucketLogging(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(ctx, "bucket_logging", "config", bucketID, meta.ErrNoSuchLogging)
+}
+func (s *Store) DeleteBucketLogging(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(ctx, "bucket_logging", bucketID)
+}
+
 func gocqlUUID(u uuid.UUID) gocql.UUID {
 	var g gocql.UUID
 	copy(g[:], u[:])

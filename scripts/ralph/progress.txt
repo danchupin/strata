@@ -529,3 +529,25 @@ Started: Sat Apr 25 16:10:14 MSK 2026
   - Empty-body PUT on ?replication is malformed (rejected 400 MalformedXML), not "clear" — DELETE clears. This differs from ?notification where empty body clears. Always read the AC for clearing semantics; they vary per subresource.
   - When a future story needs to short-circuit on load errors (e.g. policy-equivalent failure mode for replication), the silent-empty-on-error in replicationStatusFor mirrors what the website branch does on a load error: degrade to "no config" rather than 5xx.
 ---
+
+## 2026-04-26 - US-019 (PutBucketLogging / GetBucketLogging)
+- Added meta.ErrNoSuchLogging and Set/Get/DeleteBucketLogging to meta.Store; both backends mirror the standard blob pattern (memory: logging map; cassandra: bucket_logging table appended to tableDDL).
+- internal/s3api/logging.go: putBucketLogging accepts XML body — empty body OR a BucketLoggingStatus without LoggingEnabled both clear via DeleteBucketLogging; LoggingEnabled requires non-empty TargetBucket (else 400 MalformedXML); valid body persisted via SetBucketLogging.
+- getBucketLogging returns 200 + persisted blob on hit, OR 200 + canonical empty `<BucketLoggingStatus xmlns=".../">`</BucketLoggingStatus>` document on ErrNoSuchLogging (per AC). Missing bucket still surfaces 404 NoSuchBucket via mapMetaErr.
+- Wired ?logging GET/PUT into handleBucket (same shape as ?website but no DELETE — S3 has no DeleteBucketLogging endpoint; clearing is empty-body PUT).
+- Tests internal/s3api/logging_test.go: empty-on-fresh, round-trip, clear via empty body, clear via empty BucketLoggingStatus, malformed XML 400, missing TargetBucket 400, missing bucket 404.
+- Files changed:
+  - internal/meta/store.go (Set/Get/DeleteBucketLogging + ErrNoSuchLogging)
+  - internal/meta/memory/store.go (logging map + 3 methods)
+  - internal/meta/cassandra/schema.go (bucket_logging table)
+  - internal/meta/cassandra/store.go (3 methods)
+  - internal/s3api/logging.go (new)
+  - internal/s3api/server.go (handleBucket ?logging dispatch)
+  - internal/s3api/logging_test.go (new)
+  - scripts/ralph/prd.json (passes: true)
+- Quality: go build ./... + go vet ./... + go test ./... all green.
+- **Learnings for future iterations:**
+  - GET-on-fresh semantics differ per subresource: notification/replication/website return 404, logging returns 200 + empty document. Always check AC wording — "empty document" means baked-in canonical XML, not XML envelope of stored zero-value.
+  - S3 has no DeleteBucketLogging endpoint; clearing is via empty-body PUT (or a BucketLoggingStatus with no LoggingEnabled). The internal Delete method on meta.Store is still useful (and called from handleBucketLogging on empty body) — keep it on the interface for symmetry and future codepaths.
+  - When a config has a single optional inner element (LoggingEnabled here, ServerSideEncryptionConfiguration on encryption), validate the inner element's required attrs ONLY when present; absence = clear.
+---

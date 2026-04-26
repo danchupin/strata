@@ -225,6 +225,16 @@ func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request, bucket str
 			return
 		}
 	}
+	if q.Has("logging") {
+		switch r.Method {
+		case http.MethodGet:
+			s.getBucketLogging(w, r, bucket)
+			return
+		case http.MethodPut:
+			s.putBucketLogging(w, r, bucket)
+			return
+		}
+	}
 	if q.Has("acl") {
 		switch r.Method {
 		case http.MethodGet:

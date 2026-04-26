@@ -1,7 +1,7 @@
 {
   "project": "Strata",
   "branchName": "ralph/s3-compatibility",
-  "description": "S3 protocol compatibility — close gaps in ACL/policy/IAM/checksums/SSE/notifications/website/replication/auth so Strata passes >=80% of Ceph s3-tests executable subset.",
+  "description": "S3 protocol compatibility \u2014 close gaps in ACL/policy/IAM/checksums/SSE/notifications/website/replication/auth so Strata passes >=80% of Ceph s3-tests executable subset.",
   "userStories": [
     {
       "id": "US-001",
@@ -52,7 +52,7 @@
       ],
       "priority": 3,
       "passes": true,
-      "notes": "internal/s3api/access.go added requireAccess(b, action, arn). Loads bucket policy via Meta.GetBucketPolicy (ErrNoSuchBucketPolicy → bypass), parses with policy.Parse, evaluates with principalForRequest (anonymous → '*'). 403 AccessDenied on Deny/no-match. Wired into handleObject for PUT/GET/HEAD/DELETE + initiateMultipart, uploadPart, completeMultipart, abortMultipart, listParts, copyObject. ?acl/?tagging/?retention/?legal-hold subresources are out of scope."
+      "notes": "internal/s3api/access.go added requireAccess(b, action, arn). Loads bucket policy via Meta.GetBucketPolicy (ErrNoSuchBucketPolicy \u2192 bypass), parses with policy.Parse, evaluates with principalForRequest (anonymous \u2192 '*'). 403 AccessDenied on Deny/no-match. Wired into handleObject for PUT/GET/HEAD/DELETE + initiateMultipart, uploadPart, completeMultipart, abortMultipart, listParts, copyObject. ?acl/?tagging/?retention/?legal-hold subresources are out of scope."
     },
     {
       "id": "US-004",
@@ -63,7 +63,7 @@
         "Anonymous PUT succeeds only when ACL is public-read-write",
         "Per-object grants from US-001 override bucket ACL on per-object reads",
         "ACL check runs after policy check; explicit policy Deny still wins",
-        "Unit tests cover four canned values × {GET, PUT, DELETE} × {anonymous, owner, alt principal}",
+        "Unit tests cover four canned values \u00d7 {GET, PUT, DELETE} \u00d7 {anonymous, owner, alt principal}",
         "go build ./... passes",
         "go test ./internal/s3api/... passes"
       ],
@@ -86,7 +86,7 @@
       ],
       "priority": 5,
       "passes": true,
-      "notes": "auth.CredentialsStore is the existing iface (not auth.Store); auth.ErrNoSuchCredential is the existing sentinel (not auth.ErrCredentialNotFound) — used both verbatim. New cassandra.CredentialStore (internal/meta/cassandra/credentials.go) selects from access_keys (PK=access_key); disabled rows are surfaced as ErrNoSuchCredential. Schema: CREATE TABLE IF NOT EXISTS access_keys appended to tableDDL (additive). New auth.MultiStore (internal/auth/multi.go) tries stores in order, caches positive AND negative results for ttl, exposes Invalidate(accessKey); transient (non-ErrNoSuchCredential) errors propagate without caching. Wired in cmd/strata-gateway/main.go: static store first; cassandra.CredentialStore appended only when meta backend is cassandra (via metaStore.(*metacassandra.Store).Session()). DefaultCacheTTL = 60s exported for callers."
+      "notes": "auth.CredentialsStore is the existing iface (not auth.Store); auth.ErrNoSuchCredential is the existing sentinel (not auth.ErrCredentialNotFound) \u2014 used both verbatim. New cassandra.CredentialStore (internal/meta/cassandra/credentials.go) selects from access_keys (PK=access_key); disabled rows are surfaced as ErrNoSuchCredential. Schema: CREATE TABLE IF NOT EXISTS access_keys appended to tableDDL (additive). New auth.MultiStore (internal/auth/multi.go) tries stores in order, caches positive AND negative results for ttl, exposes Invalidate(accessKey); transient (non-ErrNoSuchCredential) errors propagate without caching. Wired in cmd/strata-gateway/main.go: static store first; cassandra.CredentialStore appended only when meta backend is cassandra (via metaStore.(*metacassandra.Store).Session()). DefaultCacheTTL = 60s exported for callers."
     },
     {
       "id": "US-006",
@@ -97,13 +97,13 @@
         "internal/s3api/iam.go routes ?Action=CreateUser, ?Action=GetUser, ?Action=ListUsers, ?Action=DeleteUser",
         "AWS-style XML form-encoded request/response shapes match the iam:CreateUser docs (CreateUserResponse + CreateUserResult > User)",
         "Hardcoded [iam root] credentials gate all ?Action= endpoints",
-        "Unit tests cover round-trip CreateUser → GetUser → ListUsers → DeleteUser, double-create returns 409 EntityAlreadyExists, delete-missing returns 404 NoSuchEntity",
+        "Unit tests cover round-trip CreateUser \u2192 GetUser \u2192 ListUsers \u2192 DeleteUser, double-create returns 409 EntityAlreadyExists, delete-missing returns 404 NoSuchEntity",
         "go build ./... passes",
         "go test ./internal/s3api/... passes"
       ],
       "priority": 6,
       "passes": true,
-      "notes": "meta.IAMUser + ErrIAMUserNotFound/ErrIAMUserAlreadyExists added to internal/meta/store.go; CreateIAMUser/GetIAMUser/ListIAMUsers/DeleteIAMUser are part of meta.Store. Memory backend mirrors via iamUsers map[string]*meta.IAMUser. Cassandra: new iam_users table (user_name PK, user_id, path, created_at) with LWT IF NOT EXISTS / IF EXISTS to map ErrIAMUserAlreadyExists / ErrIAMUserNotFound. New internal/s3api/iam.go exports IAMRootPrincipal=\"iam-root\" — handleIAM gates every ?Action= endpoint on info.Owner==IAMRootPrincipal (anonymous fails). Action dispatch reads Action from query OR application/x-www-form-urlencoded body via extractIAMAction. Wired in ServeHTTP: bucket==\"\" + Action!=\"\" → handleIAM. Response shapes match AWS IAM XML (CreateUserResponse > CreateUserResult > User; ListUsersResponse > ListUsersResult > Users > member); errors are EntityAlreadyExists (409), NoSuchEntity (404), ValidationError (400), InvalidAction (400)."
+      "notes": "meta.IAMUser + ErrIAMUserNotFound/ErrIAMUserAlreadyExists added to internal/meta/store.go; CreateIAMUser/GetIAMUser/ListIAMUsers/DeleteIAMUser are part of meta.Store. Memory backend mirrors via iamUsers map[string]*meta.IAMUser. Cassandra: new iam_users table (user_name PK, user_id, path, created_at) with LWT IF NOT EXISTS / IF EXISTS to map ErrIAMUserAlreadyExists / ErrIAMUserNotFound. New internal/s3api/iam.go exports IAMRootPrincipal=\"iam-root\" \u2014 handleIAM gates every ?Action= endpoint on info.Owner==IAMRootPrincipal (anonymous fails). Action dispatch reads Action from query OR application/x-www-form-urlencoded body via extractIAMAction. Wired in ServeHTTP: bucket==\"\" + Action!=\"\" \u2192 handleIAM. Response shapes match AWS IAM XML (CreateUserResponse > CreateUserResult > User; ListUsersResponse > ListUsersResult > Users > member); errors are EntityAlreadyExists (409), NoSuchEntity (404), ValidationError (400), InvalidAction (400)."
     },
     {
       "id": "US-007",
@@ -114,13 +114,13 @@
         "CreateAccessKey writes to access_keys (US-005 schema) with user_name foreign key and returns AccessKey + SecretAccessKey in XML once",
         "DeleteAccessKey removes the row and invalidates the cache (US-005 Invalidate)",
         "Hardcoded [iam root] gate enforced",
-        "Unit tests cover CreateAccessKey → use → DeleteAccessKey → 403 InvalidAccessKeyId on next request",
+        "Unit tests cover CreateAccessKey \u2192 use \u2192 DeleteAccessKey \u2192 403 InvalidAccessKeyId on next request",
         "go build ./... passes",
         "go test ./internal/s3api/... passes"
       ],
       "priority": 7,
       "passes": true,
-      "notes": "meta.IAMAccessKey + ErrIAMAccessKeyNotFound added to internal/meta/store.go; meta.Store grew CreateIAMAccessKey/GetIAMAccessKey/ListIAMAccessKeys/DeleteIAMAccessKey. Memory backend mirrors via accessKeys map (PK=AccessKeyID); new memory.CredentialStore (internal/meta/memory/credentials.go) implements auth.CredentialsStore over the same map and is wired in cmd/strata-gateway/main.go for memory-meta gateways. Cassandra: ALTER TABLE access_keys ADD user_name (additive); new iam_access_keys_by_user lookup table (PK (user_name, access_key)); new internal/meta/cassandra/access_keys.go uses logged BATCH for create/delete to keep both tables consistent; cassandra.CredentialStore.Lookup unchanged (still SELECTs from access_keys). cassandra.CredentialStore.Put/Delete removed — IAM writes go through meta.Store. iam.go switch grew CreateAccessKey/ListAccessKeys/DeleteAccessKey; CreateAccessKey returns SecretAccessKey ONCE in CreateAccessKeyResponse > CreateAccessKeyResult > AccessKey (Status=Active|Inactive, AKIA-prefixed, 30-byte base64 secret). ListAccessKeys returns AccessKeyMetadata members (no secret). DeleteAccessKey calls Server.InvalidateCredential(accessKey) when set; main.go assigns multi.Invalidate. Errors: ValidationError 400 (missing UserName/AccessKeyId), NoSuchEntity 404 (missing user, missing access key)."
+      "notes": "meta.IAMAccessKey + ErrIAMAccessKeyNotFound added to internal/meta/store.go; meta.Store grew CreateIAMAccessKey/GetIAMAccessKey/ListIAMAccessKeys/DeleteIAMAccessKey. Memory backend mirrors via accessKeys map (PK=AccessKeyID); new memory.CredentialStore (internal/meta/memory/credentials.go) implements auth.CredentialsStore over the same map and is wired in cmd/strata-gateway/main.go for memory-meta gateways. Cassandra: ALTER TABLE access_keys ADD user_name (additive); new iam_access_keys_by_user lookup table (PK (user_name, access_key)); new internal/meta/cassandra/access_keys.go uses logged BATCH for create/delete to keep both tables consistent; cassandra.CredentialStore.Lookup unchanged (still SELECTs from access_keys). cassandra.CredentialStore.Put/Delete removed \u2014 IAM writes go through meta.Store. iam.go switch grew CreateAccessKey/ListAccessKeys/DeleteAccessKey; CreateAccessKey returns SecretAccessKey ONCE in CreateAccessKeyResponse > CreateAccessKeyResult > AccessKey (Status=Active|Inactive, AKIA-prefixed, 30-byte base64 secret). ListAccessKeys returns AccessKeyMetadata members (no secret). DeleteAccessKey calls Server.InvalidateCredential(accessKey) when set; main.go assigns multi.Invalidate. Errors: ValidationError 400 (missing UserName/AccessKeyId), NoSuchEntity 404 (missing user, missing access key)."
     },
     {
       "id": "US-008",
@@ -130,14 +130,14 @@
         "POST /?Action=AssumeRole returns AccessKeyId, SecretAccessKey, SessionToken, Expiration (1h default)",
         "SigV4 middleware honors x-amz-security-token header against the temporary key store",
         "Token storage in-memory with TTL eviction (acceptable given short expiry)",
-        "Expired token → 403 ExpiredToken",
-        "Unit tests cover assume → use → expire → 403",
+        "Expired token \u2192 403 ExpiredToken",
+        "Unit tests cover assume \u2192 use \u2192 expire \u2192 403",
         "go build ./... passes",
         "go test ./internal/auth/... ./internal/s3api/... passes"
       ],
       "priority": 8,
       "passes": true,
-      "notes": "auth.STSStore (internal/auth/sts.go) implements CredentialsStore over an in-memory map keyed by ASIA-prefixed AccessKey. Issue() mints (AccessKey, SecretKey, SessionToken) and stores Expiration; Lookup returns ErrExpiredToken on expired sessions (and evicts). auth.Credential.SessionToken added; middleware compares the request's x-amz-security-token against cred.SessionToken (header- or presigned-query-borne) — mismatch → ErrInvalidToken (403 InvalidToken). MultiStore skips caching creds with SessionToken so token expiry/revoke takes effect immediately. New iamAssumeRole handler in internal/s3api/sts.go gates on IAMRoot like other ?Action= endpoints; requires RoleArn + RoleSessionName, accepts optional DurationSeconds (900..43200, default 3600s). main.go prepends an STSStore to the credential chain and wires apiHandler.STS = sts. SetClock test hook drives expiry deterministically."
+      "notes": "auth.STSStore (internal/auth/sts.go) implements CredentialsStore over an in-memory map keyed by ASIA-prefixed AccessKey. Issue() mints (AccessKey, SecretKey, SessionToken) and stores Expiration; Lookup returns ErrExpiredToken on expired sessions (and evicts). auth.Credential.SessionToken added; middleware compares the request's x-amz-security-token against cred.SessionToken (header- or presigned-query-borne) \u2014 mismatch \u2192 ErrInvalidToken (403 InvalidToken). MultiStore skips caching creds with SessionToken so token expiry/revoke takes effect immediately. New iamAssumeRole handler in internal/s3api/sts.go gates on IAMRoot like other ?Action= endpoints; requires RoleArn + RoleSessionName, accepts optional DurationSeconds (900..43200, default 3600s). main.go prepends an STSStore to the credential chain and wires apiHandler.STS = sts. SetClock test hook drives expiry deterministically."
     },
     {
       "id": "US-009",
@@ -146,7 +146,7 @@
       "acceptanceCriteria": [
         "Add meta.Object.Checksums map[string]string with additive Cassandra schema migration",
         "Parse x-amz-checksum-<algo> request headers; verify against streamed body content during PutChunks",
-        "Mismatch → 400 BadDigest",
+        "Mismatch \u2192 400 BadDigest",
         "Return x-amz-checksum-<algo> on GetObject and HeadObject",
         "Five algorithms supported: crc32, crc32c, sha1, sha256, crc64nvme (vendor a small CRC64NVME implementation if needed; AWS test vector covered)",
         "Unit tests per algorithm: positive, mismatch, missing optional",
@@ -155,7 +155,7 @@
       ],
       "priority": 9,
       "passes": true,
-      "notes": "meta.Object.Checksums map[string]string added (additive ALTER objects ADD checksums map<text,text>; cassandra PutObject INSERT + GetObject SELECT extended). internal/s3api/checksum.go centralises algos: CRC32 (IEEE), CRC32C (Castagnoli), SHA1, SHA256, CRC64NVME (vendored — table-based reflected impl, polynomial 0x9a6c9329ac4bc9b5, init/xor 0xFFFF...; verified against AWS test vector 0xae8b14860a799888 for '123456789'). parseRequestChecksums extracts every x-amz-checksum-<algo> header for a known algo (unknown headers are simply ignored — silent-OK is fine because AWS SDKs only set known ones); malformed base64 → 400 InvalidArgument. checksumWriter fans body bytes to all hashers via io.TeeReader on the put path; verifyChecksums compares after PutChunks and on mismatch deletes the just-written manifest and returns 400 BadDigest. writeChecksumHeaders echoes all persisted x-amz-checksum-<algo> on GetObject + HeadObject. Tests round-trip per-algo, mismatch-per-algo (404 follow-up confirms no object persisted), missing-headers no-op, and invalid base64 rejection."
+      "notes": "meta.Object.Checksums map[string]string added (additive ALTER objects ADD checksums map<text,text>; cassandra PutObject INSERT + GetObject SELECT extended). internal/s3api/checksum.go centralises algos: CRC32 (IEEE), CRC32C (Castagnoli), SHA1, SHA256, CRC64NVME (vendored \u2014 table-based reflected impl, polynomial 0x9a6c9329ac4bc9b5, init/xor 0xFFFF...; verified against AWS test vector 0xae8b14860a799888 for '123456789'). parseRequestChecksums extracts every x-amz-checksum-<algo> header for a known algo (unknown headers are simply ignored \u2014 silent-OK is fine because AWS SDKs only set known ones); malformed base64 \u2192 400 InvalidArgument. checksumWriter fans body bytes to all hashers via io.TeeReader on the put path; verifyChecksums compares after PutChunks and on mismatch deletes the just-written manifest and returns 400 BadDigest. writeChecksumHeaders echoes all persisted x-amz-checksum-<algo> on GetObject + HeadObject. Tests round-trip per-algo, mismatch-per-algo (404 follow-up confirms no object persisted), missing-headers no-op, and invalid base64 rejection."
     },
     {
       "id": "US-010",
@@ -165,7 +165,7 @@
         "UploadPart accepts and verifies x-amz-checksum-<algo> per part",
         "Per-part checksum stored in meta.MultipartPart.Checksums",
         "CompleteMultipartUpload computes composite checksum (algo-specific concat-and-hash rule) and returns x-amz-checksum-<algo> header",
-        "Mismatch on any part → 400 BadDigest from UploadPart, never reaches Complete",
+        "Mismatch on any part \u2192 400 BadDigest from UploadPart, never reaches Complete",
         "Unit tests round-trip a 3-part multipart with crc32 and verify response",
         "go build ./... passes",
         "go test ./internal/s3api/... passes"
@@ -177,7 +177,7 @@
     {
       "id": "US-011",
       "title": "SSE-S3 metadata storage (passthrough) on objects and bucket default",
-      "description": "As a client setting x-amz-server-side-encryption: AES256, I want the header accepted, persisted, and echoed back on Get/Head — even though Strata does not actually encrypt at rest yet.",
+      "description": "As a client setting x-amz-server-side-encryption: AES256, I want the header accepted, persisted, and echoed back on Get/Head \u2014 even though Strata does not actually encrypt at rest yet.",
       "acceptanceCriteria": [
         "meta.Object.SSE field stores algorithm string (additive Cassandra ALTER)",
         "PutObject + InitiateMultipartUpload accept x-amz-server-side-encryption (AES256 only for now; reject aws:kms with NotImplemented)",
@@ -190,17 +190,17 @@
       ],
       "priority": 11,
       "passes": true,
-      "notes": "meta.Object.SSE + meta.MultipartUpload.SSE round-trip through both backends (cassandra: additive ALTER objects ADD sse text + ALTER multipart_uploads ADD sse text; PutObject INSERT, GetObject SELECT, CreateMultipartUpload INSERT, GetMultipartUpload SELECT extended). Memory backend round-trips via shallow-copy. New meta.ErrNoSuchEncryption sentinel + Set/Get/DeleteBucketEncryption interface methods, both backends use the existing setBucketBlob/getBucketBlob/deleteBucketBlob blob helpers. internal/s3api/encryption.go: new ServerSideEncryptionConfiguration XML, putBucketEncryption/getBucketEncryption/deleteBucketEncryption, resolveSSE(r,b) — request header wins (validated), bucket default applies as fallback, missing config → no SSE. validateSSEAlgorithm: AES256 OK; aws:kms / aws:kms:dsse → 501 NotImplemented; everything else → 400 InvalidArgument. internal/s3api/server.go: ?encryption route added to handleBucket; putObject calls resolveSSE before PutChunks (so a kms/bogus header rejects the request before any data lands), persists obj.SSE; getObject sets x-amz-server-side-encryption header. internal/s3api/multipart.go: initiateMultipart resolves SSE, persists on mu.SSE, echoes header on InitiateMultipartUploadResult; uploadPart echoes mu.SSE on the part response; completeMultipart copies mu.SSE to obj.SSE and emits the header. New error codes ErrNoSuchEncryption (404 ServerSideEncryptionConfigurationNotFoundError) / ErrInvalidEncryptionAlgorithm (400) / ErrKMSNotImplemented (501). Tests in internal/s3api/encryption_test.go: per-object round-trip (PUT+GET+HEAD echo), aws:kms rejected, unknown algo rejected, bucket config CRUD, default applied on header-less PUT, bucket-level kms put rejected, malformed body rejected, multipart end-to-end with SSE round-trip through Initiate→UploadPart→Complete→HEAD."
+      "notes": "meta.Object.SSE + meta.MultipartUpload.SSE round-trip through both backends (cassandra: additive ALTER objects ADD sse text + ALTER multipart_uploads ADD sse text; PutObject INSERT, GetObject SELECT, CreateMultipartUpload INSERT, GetMultipartUpload SELECT extended). Memory backend round-trips via shallow-copy. New meta.ErrNoSuchEncryption sentinel + Set/Get/DeleteBucketEncryption interface methods, both backends use the existing setBucketBlob/getBucketBlob/deleteBucketBlob blob helpers. internal/s3api/encryption.go: new ServerSideEncryptionConfiguration XML, putBucketEncryption/getBucketEncryption/deleteBucketEncryption, resolveSSE(r,b) \u2014 request header wins (validated), bucket default applies as fallback, missing config \u2192 no SSE. validateSSEAlgorithm: AES256 OK; aws:kms / aws:kms:dsse \u2192 501 NotImplemented; everything else \u2192 400 InvalidArgument. internal/s3api/server.go: ?encryption route added to handleBucket; putObject calls resolveSSE before PutChunks (so a kms/bogus header rejects the request before any data lands), persists obj.SSE; getObject sets x-amz-server-side-encryption header. internal/s3api/multipart.go: initiateMultipart resolves SSE, persists on mu.SSE, echoes header on InitiateMultipartUploadResult; uploadPart echoes mu.SSE on the part response; completeMultipart copies mu.SSE to obj.SSE and emits the header. New error codes ErrNoSuchEncryption (404 ServerSideEncryptionConfigurationNotFoundError) / ErrInvalidEncryptionAlgorithm (400) / ErrKMSNotImplemented (501). Tests in internal/s3api/encryption_test.go: per-object round-trip (PUT+GET+HEAD echo), aws:kms rejected, unknown algo rejected, bucket config CRUD, default applied on header-less PUT, bucket-level kms put rejected, malformed body rejected, multipart end-to-end with SSE round-trip through Initiate\u2192UploadPart\u2192Complete\u2192HEAD."
     },
     {
       "id": "US-012",
-      "title": "SSE-C customer-key headers — accept, validate, gate reads",
+      "title": "SSE-C customer-key headers \u2014 accept, validate, gate reads",
       "description": "As a client uploading with SSE-C, I want the gateway to accept and validate the customer key headers and reject Get requests that omit them.",
       "acceptanceCriteria": [
         "PutObject parses x-amz-server-side-encryption-customer-{algorithm,key,key-MD5}, validates base64 key length 32 bytes and MD5 match",
         "Persist key MD5 only in meta.Object.SSECKeyMD5 (additive ALTER)",
-        "GetObject without matching headers when SSECKeyMD5 set → 400 InvalidRequest",
-        "GetObject with mismatched MD5 → 400 AccessDenied",
+        "GetObject without matching headers when SSECKeyMD5 set \u2192 400 InvalidRequest",
+        "GetObject with mismatched MD5 \u2192 400 AccessDenied",
         "CopyObject parses x-amz-copy-source-server-side-encryption-customer-* (mirror)",
         "Unit tests: positive PUT+GET round-trip, missing key on GET, wrong MD5 on PUT, wrong MD5 on GET",
         "go build ./... passes",
@@ -208,7 +208,7 @@
       ],
       "priority": 12,
       "passes": true,
-      "notes": "meta.Object.SSECKeyMD5 string round-trips through both backends (cassandra: additive ALTER objects ADD ssec_key_md5 text; PutObject INSERT and GetObject SELECT extended). Memory backend round-trips via existing shallow-copy. internal/s3api/encryption.go grew parseSSECHeaders (regular x-amz-server-side-encryption-customer-{algorithm,key,key-MD5}) and parseCopySourceSSECHeaders (x-amz-copy-source-* mirror) — both validate that the triple is fully present (any-but-not-all → 400 InvalidRequest), algorithm == AES256 (else 400 InvalidArgument via ErrInvalidEncryptionAlgorithm), base64 key decodes to exactly 32 bytes (else 400 InvalidArgument), and md5(rawKey) base64 == headerMD5 (else 400 InvalidDigest). requireSSECMatch is the GET/HEAD gate: missing triple on a stored SSECKeyMD5 → 400 InvalidRequest (ErrSSECRequired); MD5 mismatch → 400 AccessDenied (ErrSSECKeyMismatch). putObject parses SSE-C BEFORE PutChunks (so any 400 fires before chunk write); when SSE-C is present the bucket-default SSE resolveSSE call is SKIPPED so SSE-S3 default and SSE-C don't both apply. getObject runs requireSSECMatch when o.SSECKeyMD5 != \"\" and emits x-amz-server-side-encryption-customer-algorithm + -key-MD5 headers on success. CopyObject parses x-amz-copy-source-* triple; when source has SSECKeyMD5 the copy-source headers are required and must match (same 400 codes), and dest-side SSE-C (regular triple) sets dst.SSECKeyMD5. New errors: ErrInvalidRequest (400 InvalidRequest), ErrInvalidDigest (400 InvalidDigest), ErrSSECRequired (400 InvalidRequest), ErrSSECKeyMismatch (400 AccessDenied — status 400 per AC, code AccessDenied). Tests in sse_c_test.go cover positive PUT/GET/HEAD round-trip, missing key on GET (400 InvalidRequest), wrong MD5 on PUT (400 InvalidDigest, follow-up GET → 404 confirms no object persisted), wrong MD5 on GET (400 AccessDenied), invalid key length (400 InvalidArgument), bad algorithm (400), partial headers (400 InvalidRequest), copy-object mirror round-trip + missing-source-headers reject."
+      "notes": "meta.Object.SSECKeyMD5 string round-trips through both backends (cassandra: additive ALTER objects ADD ssec_key_md5 text; PutObject INSERT and GetObject SELECT extended). Memory backend round-trips via existing shallow-copy. internal/s3api/encryption.go grew parseSSECHeaders (regular x-amz-server-side-encryption-customer-{algorithm,key,key-MD5}) and parseCopySourceSSECHeaders (x-amz-copy-source-* mirror) \u2014 both validate that the triple is fully present (any-but-not-all \u2192 400 InvalidRequest), algorithm == AES256 (else 400 InvalidArgument via ErrInvalidEncryptionAlgorithm), base64 key decodes to exactly 32 bytes (else 400 InvalidArgument), and md5(rawKey) base64 == headerMD5 (else 400 InvalidDigest). requireSSECMatch is the GET/HEAD gate: missing triple on a stored SSECKeyMD5 \u2192 400 InvalidRequest (ErrSSECRequired); MD5 mismatch \u2192 400 AccessDenied (ErrSSECKeyMismatch). putObject parses SSE-C BEFORE PutChunks (so any 400 fires before chunk write); when SSE-C is present the bucket-default SSE resolveSSE call is SKIPPED so SSE-S3 default and SSE-C don't both apply. getObject runs requireSSECMatch when o.SSECKeyMD5 != \"\" and emits x-amz-server-side-encryption-customer-algorithm + -key-MD5 headers on success. CopyObject parses x-amz-copy-source-* triple; when source has SSECKeyMD5 the copy-source headers are required and must match (same 400 codes), and dest-side SSE-C (regular triple) sets dst.SSECKeyMD5. New errors: ErrInvalidRequest (400 InvalidRequest), ErrInvalidDigest (400 InvalidDigest), ErrSSECRequired (400 InvalidRequest), ErrSSECKeyMismatch (400 AccessDenied \u2014 status 400 per AC, code AccessDenied). Tests in sse_c_test.go cover positive PUT/GET/HEAD round-trip, missing key on GET (400 InvalidRequest), wrong MD5 on PUT (400 InvalidDigest, follow-up GET \u2192 404 confirms no object persisted), wrong MD5 on GET (400 AccessDenied), invalid key length (400 InvalidArgument), bad algorithm (400), partial headers (400 InvalidRequest), copy-object mirror round-trip + missing-source-headers reject."
     },
     {
       "id": "US-013",
@@ -224,7 +224,7 @@
       ],
       "priority": 13,
       "passes": true,
-      "notes": "New internal/s3api/object_attributes.go: GetObjectAttributesOutput XML response (ETag/Checksum/ObjectParts/StorageClass/ObjectSize). Header x-amz-object-attributes is REQUIRED — missing → 400 InvalidRequest; unknown attribute name → 400 InvalidArgument. Only listed fields are emitted (ObjectSize is *int64 so 0-byte objects can still appear; Checksum/ObjectParts are pointer-omitempty so they vanish for objects without them). Route wired in handleObject as `q.Has(\"attributes\") && GET` BEFORE the generic GET fallback; gated via requireObjectAccess action s3:GetObject so existing policy/ACL stack applies. SSE-C protected objects (o.SSECKeyMD5 != \"\") still require requireSSECMatch on this endpoint, mirroring getObject. ObjectParts is derived purely from the ETag suffix `-N` (parts rows are deleted on Complete); PartsCount alone is populated, no per-part list. Tests in object_attributes_test.go cover full attribute set, partial subset (only ETag+ObjectSize), missing key (404 NoSuchKey), missing header (400 InvalidRequest), unknown attribute (400 InvalidArgument), and multipart object PartsCount derivation."
+      "notes": "New internal/s3api/object_attributes.go: GetObjectAttributesOutput XML response (ETag/Checksum/ObjectParts/StorageClass/ObjectSize). Header x-amz-object-attributes is REQUIRED \u2014 missing \u2192 400 InvalidRequest; unknown attribute name \u2192 400 InvalidArgument. Only listed fields are emitted (ObjectSize is *int64 so 0-byte objects can still appear; Checksum/ObjectParts are pointer-omitempty so they vanish for objects without them). Route wired in handleObject as `q.Has(\"attributes\") && GET` BEFORE the generic GET fallback; gated via requireObjectAccess action s3:GetObject so existing policy/ACL stack applies. SSE-C protected objects (o.SSECKeyMD5 != \"\") still require requireSSECMatch on this endpoint, mirroring getObject. ObjectParts is derived purely from the ETag suffix `-N` (parts rows are deleted on Complete); PartsCount alone is populated, no per-part list. Tests in object_attributes_test.go cover full attribute set, partial subset (only ETag+ObjectSize), missing key (404 NoSuchKey), missing header (400 InvalidRequest), unknown attribute (400 InvalidArgument), and multipart object PartsCount derivation."
     },
     {
       "id": "US-014",
@@ -234,14 +234,14 @@
         "POST /<bucket>/<key>?restore parses RestoreRequest XML",
         "Returns 200 OK if object exists, 404 if not",
         "meta.Object.RestoreStatus field set; surfaced on HEAD as x-amz-restore: ongoing-request=\"false\", expiry-date=\"...\"",
-        "Malformed XML → 400 MalformedXML",
+        "Malformed XML \u2192 400 MalformedXML",
         "Unit tests: round-trip, 404, malformed XML",
         "go build ./... passes",
         "go test ./internal/s3api/... passes"
       ],
       "priority": 14,
       "passes": true,
-      "notes": "meta.Object.RestoreStatus added (additive ALTER objects ADD restore_status text). New meta.Store.SetObjectRestoreStatus(ctx, bucketID, key, versionID, status); both backends implement. Cassandra PutObject INSERT + GetObject SELECT extended (column appended at end of column list to keep diff additive). New internal/s3api/restore.go: postObjectRestore parses RestoreRequest XML (Days+Tier, both optional; default Days=1), 1MiB body cap matches other XML handlers; empty body OK; malformed XML → 400 MalformedXML; missing object → 404 NoSuchKey via mapMetaErr; on success persists 'ongoing-request=\"false\", expiry-date=\"<HTTP date>\"' format string into Object.RestoreStatus and returns 200. internal/s3api/server.go handleObject routes ?restore POST BEFORE the generic switch (subresource ordering rule), gates via requireObjectAccess action s3:RestoreObject. getObject sets x-amz-restore header when o.RestoreStatus != \"\" (HEAD too since shared handler). Tests in restore_test.go: round-trip (POST then HEAD echoes ongoing-request+expiry-date), 404 NoSuchKey on missing object, 400 MalformedXML on bad body, default Days when body empty."
+      "notes": "meta.Object.RestoreStatus added (additive ALTER objects ADD restore_status text). New meta.Store.SetObjectRestoreStatus(ctx, bucketID, key, versionID, status); both backends implement. Cassandra PutObject INSERT + GetObject SELECT extended (column appended at end of column list to keep diff additive). New internal/s3api/restore.go: postObjectRestore parses RestoreRequest XML (Days+Tier, both optional; default Days=1), 1MiB body cap matches other XML handlers; empty body OK; malformed XML \u2192 400 MalformedXML; missing object \u2192 404 NoSuchKey via mapMetaErr; on success persists 'ongoing-request=\"false\", expiry-date=\"<HTTP date>\"' format string into Object.RestoreStatus and returns 200. internal/s3api/server.go handleObject routes ?restore POST BEFORE the generic switch (subresource ordering rule), gates via requireObjectAccess action s3:RestoreObject. getObject sets x-amz-restore header when o.RestoreStatus != \"\" (HEAD too since shared handler). Tests in restore_test.go: round-trip (POST then HEAD echoes ongoing-request+expiry-date), 404 NoSuchKey on missing object, 400 MalformedXML on bad body, default Days when body empty."
     },
     {
       "id": "US-015",
@@ -258,7 +258,7 @@
       ],
       "priority": 15,
       "passes": true,
-      "notes": "meta.Bucket.ObjectLockEnabled bool round-trips through both backends (cassandra: additive ALTER buckets ADD object_lock_enabled boolean; GetBucket SELECT extended). New meta.ErrNoSuchObjectLockConfig sentinel + meta.Store.SetBucketObjectLockEnabled/Set/Get/DeleteBucketObjectLockConfig interface methods. Cassandra: new bucket_object_lock blob table via setBucketBlob/getBucketBlob/deleteBucketBlob; SetBucketObjectLockEnabled uses LWT (UPDATE ... IF EXISTS, ScanCAS(nil)) — same pattern as SetBucketVersioning/SetBucketACL to keep Paxos lineage consistent with the original CreateBucket INSERT IF NOT EXISTS. Memory backend mirrors via Bucket.ObjectLockEnabled field (shallow-copy on read) + objectLock blob map. internal/s3api/objectlock.go grew putBucketObjectLockConfig/getBucketObjectLockConfig + resolveDefaultRetention helper. Route ?object-lock added to handleBucket. CreateBucket (handleBucket PUT branch) calls SetBucketObjectLockEnabled when x-amz-bucket-object-lock-enabled: true. PutBucketObjectLockConfig requires bucket.ObjectLockEnabled (else 400 InvalidRequest 'Bucket is missing Object Lock Configuration' via ErrObjectLockNotEnabled), parses ObjectLockConfiguration XML, validates DefaultRetention.Mode ∈ {GOVERNANCE,COMPLIANCE}, Days/Years > 0, mutually exclusive Days vs Years. GetBucketObjectLockConfig serves the persisted blob or 404 ObjectLockConfigurationNotFoundError. putObject inheritance: when both x-amz-object-lock-mode and x-amz-object-lock-retain-until-date headers are absent, resolveDefaultRetention(r,b) reads the persisted XML and applies Mode + (now+Days|Years) to obj.RetainMode/RetainUntil — explicit headers override. Tests in objectlock_test.go: round-trip CRUD, requires-enabled (400 InvalidRequest), malformed default-retention mode (400 MalformedXML), inheritance applied on header-less PUT, COMPLIANCE-inherited delete blocked (403 AccessDenied), explicit headers override default."
+      "notes": "meta.Bucket.ObjectLockEnabled bool round-trips through both backends (cassandra: additive ALTER buckets ADD object_lock_enabled boolean; GetBucket SELECT extended). New meta.ErrNoSuchObjectLockConfig sentinel + meta.Store.SetBucketObjectLockEnabled/Set/Get/DeleteBucketObjectLockConfig interface methods. Cassandra: new bucket_object_lock blob table via setBucketBlob/getBucketBlob/deleteBucketBlob; SetBucketObjectLockEnabled uses LWT (UPDATE ... IF EXISTS, ScanCAS(nil)) \u2014 same pattern as SetBucketVersioning/SetBucketACL to keep Paxos lineage consistent with the original CreateBucket INSERT IF NOT EXISTS. Memory backend mirrors via Bucket.ObjectLockEnabled field (shallow-copy on read) + objectLock blob map. internal/s3api/objectlock.go grew putBucketObjectLockConfig/getBucketObjectLockConfig + resolveDefaultRetention helper. Route ?object-lock added to handleBucket. CreateBucket (handleBucket PUT branch) calls SetBucketObjectLockEnabled when x-amz-bucket-object-lock-enabled: true. PutBucketObjectLockConfig requires bucket.ObjectLockEnabled (else 400 InvalidRequest 'Bucket is missing Object Lock Configuration' via ErrObjectLockNotEnabled), parses ObjectLockConfiguration XML, validates DefaultRetention.Mode \u2208 {GOVERNANCE,COMPLIANCE}, Days/Years > 0, mutually exclusive Days vs Years. GetBucketObjectLockConfig serves the persisted blob or 404 ObjectLockConfigurationNotFoundError. putObject inheritance: when both x-amz-object-lock-mode and x-amz-object-lock-retain-until-date headers are absent, resolveDefaultRetention(r,b) reads the persisted XML and applies Mode + (now+Days|Years) to obj.RetainMode/RetainUntil \u2014 explicit headers override. Tests in objectlock_test.go: round-trip CRUD, requires-enabled (400 InvalidRequest), malformed default-retention mode (400 MalformedXML), inheritance applied on header-less PUT, COMPLIANCE-inherited delete blocked (403 AccessDenied), explicit headers override default."
     },
     {
       "id": "US-016",
@@ -291,7 +291,7 @@
       ],
       "priority": 17,
       "passes": true,
-      "notes": "meta.Store grew SetBucketWebsite/GetBucketWebsite/DeleteBucketWebsite + ErrNoSuchWebsite sentinel; both backends use the standard setBucketBlob/getBucketBlob/deleteBucketBlob helpers (cassandra: new bucket_website table). internal/s3api/website.go parses <WebsiteConfiguration> with IndexDocument/ErrorDocument/RedirectAllRequestsTo and rejects bodies missing IndexDocument (when not redirect-all) or with a Suffix containing '/'. ?website routed in handleBucket. handleBucket GET with no query params calls serveWebsiteRoot: when website is configured, fetches IndexDocument.Suffix → 200 if present, else falls back to ErrorDocument.Key with 404, else NoSuchKey. Without website config, listObjects runs as before. ErrNoSuchWebsiteConfig (404 NoSuchWebsiteConfiguration) returned by GET ?website on un-configured buckets."
+      "notes": "meta.Store grew SetBucketWebsite/GetBucketWebsite/DeleteBucketWebsite + ErrNoSuchWebsite sentinel; both backends use the standard setBucketBlob/getBucketBlob/deleteBucketBlob helpers (cassandra: new bucket_website table). internal/s3api/website.go parses <WebsiteConfiguration> with IndexDocument/ErrorDocument/RedirectAllRequestsTo and rejects bodies missing IndexDocument (when not redirect-all) or with a Suffix containing '/'. ?website routed in handleBucket. handleBucket GET with no query params calls serveWebsiteRoot: when website is configured, fetches IndexDocument.Suffix \u2192 200 if present, else falls back to ErrorDocument.Key with 404, else NoSuchKey. Without website config, listObjects runs as before. ErrNoSuchWebsiteConfig (404 NoSuchWebsiteConfiguration) returned by GET ?website on un-configured buckets."
     },
     {
       "id": "US-018",
@@ -308,7 +308,7 @@
       ],
       "priority": 18,
       "passes": true,
-      "notes": "meta.ErrNoSuchReplication sentinel + meta.Store.Set/Get/DeleteBucketReplication added; both backends use the standard setBucketBlob/getBucketBlob/deleteBucketBlob helpers (memory: replication map[uuid.UUID][]byte; cassandra: new bucket_replication table appended to tableDDL). New internal/s3api/replication.go: putBucketReplication parses ReplicationConfiguration XML, validates at least one Rule with non-empty Destination.Bucket (else 400 MalformedXML); empty body also rejected (PUT must replace, DELETE clears). getBucketReplication serves persisted blob or 404 ReplicationConfigurationNotFoundError via new ErrNoSuchReplicationConfig. Route ?replication GET/PUT/DELETE wired in handleBucket adjacent to ?website. putObject calls replicationStatusFor(r,b,key,obj.Tags) AFTER persistence and emits x-amz-replication-status: PENDING when at least one Enabled rule's Filter (Prefix / Tag / And { Prefix + Tags }) matches. Disabled rules skipped. No matching rule → header omitted. No replication config → header omitted (load error treated as no config). Tests in replication_test.go cover CRUD round-trip, malformed body 400, no rules 400, rule without destination 400, prefix match → PENDING, no-match → empty, no-config → empty, disabled rule → empty, And-with-tag filter (prefix+tag match → PENDING; missing tag, wrong tag value, wrong prefix → empty)."
+      "notes": "meta.ErrNoSuchReplication sentinel + meta.Store.Set/Get/DeleteBucketReplication added; both backends use the standard setBucketBlob/getBucketBlob/deleteBucketBlob helpers (memory: replication map[uuid.UUID][]byte; cassandra: new bucket_replication table appended to tableDDL). New internal/s3api/replication.go: putBucketReplication parses ReplicationConfiguration XML, validates at least one Rule with non-empty Destination.Bucket (else 400 MalformedXML); empty body also rejected (PUT must replace, DELETE clears). getBucketReplication serves persisted blob or 404 ReplicationConfigurationNotFoundError via new ErrNoSuchReplicationConfig. Route ?replication GET/PUT/DELETE wired in handleBucket adjacent to ?website. putObject calls replicationStatusFor(r,b,key,obj.Tags) AFTER persistence and emits x-amz-replication-status: PENDING when at least one Enabled rule's Filter (Prefix / Tag / And { Prefix + Tags }) matches. Disabled rules skipped. No matching rule \u2192 header omitted. No replication config \u2192 header omitted (load error treated as no config). Tests in replication_test.go cover CRUD round-trip, malformed body 400, no rules 400, rule without destination 400, prefix match \u2192 PENDING, no-match \u2192 empty, no-config \u2192 empty, disabled rule \u2192 empty, And-with-tag filter (prefix+tag match \u2192 PENDING; missing tag, wrong tag value, wrong prefix \u2192 empty)."
     },
     {
       "id": "US-019",
@@ -323,8 +323,8 @@
         "go test ./internal/s3api/... passes"
       ],
       "priority": 19,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "PUT/GET /<bucket>?logging round-trips XML; empty body or no LoggingEnabled clears; GET on cleared/fresh returns empty BucketLoggingStatus document; missing bucket \u2192 404. New SetBucketLogging/GetBucketLogging/DeleteBucketLogging on meta.Store; bucket_logging cassandra table; ErrNoSuchLogging sentinel."
     },
     {
       "id": "US-020",
@@ -333,7 +333,7 @@
       "acceptanceCriteria": [
         "PUT/GET/DELETE /<bucket>?tagging round-trips per AWS Tagging schema (Tag.Key/Tag.Value)",
         "Empty body on PUT or absent config returns 404 NoSuchTagSet on GET",
-        "Limit: 50 tags per bucket (matches AWS); over-limit → 400 InvalidTag",
+        "Limit: 50 tags per bucket (matches AWS); over-limit \u2192 400 InvalidTag",
         "Unit tests: round-trip, 404, over-limit",
         "go build ./... passes",
         "go test ./internal/s3api/... passes"
@@ -351,7 +351,7 @@
         "CreateBucket parses optional <CreateBucketConfiguration><LocationConstraint> body and stores Region",
         "GET /<bucket>?location returns <LocationConstraint> with the region (empty for default)",
         "HEAD /<bucket> sets x-amz-bucket-region header from the stored region (or 'default')",
-        "Unit tests: CreateBucket with region body → GET location returns it; HEAD has the header; no body still works",
+        "Unit tests: CreateBucket with region body \u2192 GET location returns it; HEAD has the header; no body still works",
         "go build ./... passes",
         "go test ./internal/s3api/... passes"
       ],
@@ -362,12 +362,12 @@
     {
       "id": "US-022",
       "title": "Per-chunk signature validation in STREAMING-AWS4-HMAC-SHA256-PAYLOAD",
-      "description": "As a security-conscious operator, I want the chained per-chunk HMAC verified — today we decode the framing but skip the chain so an attacker can mutate chunked uploads.",
+      "description": "As a security-conscious operator, I want the chained per-chunk HMAC verified \u2014 today we decode the framing but skip the chain so an attacker can mutate chunked uploads.",
       "acceptanceCriteria": [
         "Implement chain in internal/auth: sig(chunk_n) = HMAC(signing_key, \"AWS4-HMAC-SHA256-PAYLOAD\\n<date>\\n<scope>\\n<prev-sig>\\n<hash(\\\"\\\")>\\n<hash(chunk)>\")",
-        "Reject mismatched chunk → 403 SignatureDoesNotMatch (drops the body and the connection)",
+        "Reject mismatched chunk \u2192 403 SignatureDoesNotMatch (drops the body and the connection)",
         "Final empty chunk also verified",
-        "No STRATA_AUTH_RELAXED_STREAMING flag — strict by default",
+        "No STRATA_AUTH_RELAXED_STREAMING flag \u2014 strict by default",
         "Unit tests: positive AWS doc test vector; mutated chunk rejected; missing final chunk rejected",
         "go build ./... passes",
         "go test ./internal/auth/... passes"
@@ -385,7 +385,7 @@
         "Second Complete with same uploadID returns the stored CompleteMultipartUploadResult XML and the same ETag",
         "After 10 minutes, returns NoSuchUpload",
         "TTL applies in cassandra (USING TTL) and via timestamp in memory store",
-        "Unit tests: success → retry returns same XML; expiry → 404",
+        "Unit tests: success \u2192 retry returns same XML; expiry \u2192 404",
         "go build ./... passes",
         "go test ./internal/s3api/... ./internal/meta/... passes"
       ],
@@ -420,7 +420,7 @@
         "DeleteObjectVersion (delete with versionId) requires x-amz-mfa: <serial> <code> when MfaDelete is enabled",
         "Static-config TOTP secret accepted via STRATA_MFA_SECRETS=<serial>:<base32-secret> env var",
         "Bucket without MfaDelete enabled accepts DELETE without the header (current behaviour)",
-        "Unit tests: enabled + missing header → 403; enabled + valid TOTP → 204; disabled → 204 always; invalid TOTP → 403",
+        "Unit tests: enabled + missing header \u2192 403; enabled + valid TOTP \u2192 204; disabled \u2192 204 always; invalid TOTP \u2192 403",
         "go build ./... passes",
         "go test ./internal/s3api/... passes"
       ],
@@ -435,8 +435,8 @@
       "acceptanceCriteria": [
         "Parse x-amz-metadata-directive (default COPY); on REPLACE use request headers, on COPY copy from source object",
         "Parse x-amz-tagging-directive (default COPY); same semantics for tags",
-        "Honour x-amz-copy-source-if-match, if-none-match, if-modified-since, if-unmodified-since; mismatch → 412 PreconditionFailed",
-        "Unit tests cover each directive value × precondition match/miss matrix",
+        "Honour x-amz-copy-source-if-match, if-none-match, if-modified-since, if-unmodified-since; mismatch \u2192 412 PreconditionFailed",
+        "Unit tests cover each directive value \u00d7 precondition match/miss matrix",
         "go build ./... passes",
         "go test ./internal/s3api/... passes"
       ],
