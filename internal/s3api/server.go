@@ -926,6 +926,9 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	if o.RestoreStatus != "" {
 		w.Header().Set("x-amz-restore", o.RestoreStatus)
 	}
+	if o.ReplicationStatus != "" {
+		w.Header().Set("x-amz-replication-status", o.ReplicationStatus)
+	}
 	if o.VersionID != "" && meta.IsVersioningActive(b.Versioning) {
 		w.Header().Set("x-amz-version-id", o.VersionID)
 	}

@@ -49,10 +49,40 @@ var (
 		Name: "strata_lifecycle_expirations_total",
 		Help: "Objects removed by the lifecycle worker.",
 	})
+
+	ReplicationLagSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "strata_replication_lag_seconds",
+			Help:    "Time between source-write event_time and replication-worker terminal outcome (success or FAILED).",
+			Buckets: []float64{0.1, 0.5, 1, 2.5, 5, 10, 30, 60, 300, 900, 3600},
+		},
+		[]string{"rule_id"},
+	)
+
+	ReplicationCompleted = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_replication_completed_total",
+			Help: "Replication events successfully delivered to the peer.",
+		},
+		[]string{"rule_id"},
+	)
+
+	ReplicationFailed = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_replication_failed_total",
+			Help: "Replication events that exhausted their retry budget and were marked FAILED.",
+		},
+		[]string{"rule_id"},
+	)
 )
 
 func Register() {
-	prometheus.MustRegister(HTTPRequests, HTTPDuration, GCEnqueued, GCProcessed, LifecycleTransitions, LifecycleExpirations)
+	prometheus.MustRegister(
+		HTTPRequests, HTTPDuration,
+		GCEnqueued, GCProcessed,
+		LifecycleTransitions, LifecycleExpirations,
+		ReplicationLagSeconds, ReplicationCompleted, ReplicationFailed,
+	)
 }
 
 func Handler() http.Handler { return promhttp.Handler() }

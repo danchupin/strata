@@ -43,8 +43,17 @@ type replicationTag struct {
 }
 
 type replicationDestination struct {
-	Bucket       string `xml:"Bucket"`
-	StorageClass string `xml:"StorageClass,omitempty"`
+	Bucket                   string                              `xml:"Bucket"`
+	StorageClass             string                              `xml:"StorageClass,omitempty"`
+	AccessControlTranslation *replicationAccessControlTranslation `xml:"AccessControlTranslation,omitempty"`
+}
+
+// replicationAccessControlTranslation is the AWS field; in Strata-to-Strata
+// replication the Owner field is repurposed as the peer gateway endpoint
+// (host:port) so each rule encodes its own destination cluster without
+// requiring a separate config table.
+type replicationAccessControlTranslation struct {
+	Owner string `xml:"Owner,omitempty"`
 }
 
 func (s *Server) putBucketReplication(w http.ResponseWriter, r *http.Request, bucket string) {
@@ -157,20 +166,25 @@ func (s *Server) emitReplicationEvent(r *http.Request, b *meta.Bucket, evt repli
 		}
 		dest := ""
 		class := ""
+		endpoint := ""
 		if rule.Destination != nil {
 			dest = rule.Destination.Bucket
 			class = rule.Destination.StorageClass
+			if rule.Destination.AccessControlTranslation != nil {
+				endpoint = strings.TrimSpace(rule.Destination.AccessControlTranslation.Owner)
+			}
 		}
 		row := &meta.ReplicationEvent{
-			BucketID:          b.ID,
-			Bucket:            b.Name,
-			Key:               evt.Key,
-			VersionID:         evt.VersionID,
-			EventName:         evt.EventName,
-			EventTime:         when,
-			RuleID:            rule.ID,
-			DestinationBucket: dest,
-			StorageClass:      class,
+			BucketID:            b.ID,
+			Bucket:              b.Name,
+			Key:                 evt.Key,
+			VersionID:           evt.VersionID,
+			EventName:           evt.EventName,
+			EventTime:           when,
+			RuleID:              rule.ID,
+			DestinationBucket:   dest,
+			DestinationEndpoint: endpoint,
+			StorageClass:        class,
 		}
 		_ = s.Meta.EnqueueReplication(r.Context(), row)
 		matched = true

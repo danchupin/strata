@@ -151,6 +151,7 @@ type Object struct {
 	PartsCount     int
 	CacheControl   string
 	Expires        string
+	ReplicationStatus string
 }
 
 type ListOptions struct {
@@ -244,16 +245,17 @@ type NotificationDLQEntry struct {
 // destination configured by the matching rule. One row per matching rule —
 // a PUT that satisfies two rules enqueues two rows.
 type ReplicationEvent struct {
-	BucketID         uuid.UUID
-	Bucket           string
-	Key              string
-	VersionID        string
-	EventID          string
-	EventName        string
-	EventTime        time.Time
-	RuleID           string
-	DestinationBucket string
-	StorageClass    string
+	BucketID            uuid.UUID
+	Bucket              string
+	Key                 string
+	VersionID           string
+	EventID             string
+	EventName           string
+	EventTime           time.Time
+	RuleID              string
+	DestinationBucket   string
+	DestinationEndpoint string
+	StorageClass        string
 }
 
 type Store interface {
@@ -376,6 +378,8 @@ type Store interface {
 	UpdateMultipartUploadSSEWrap(ctx context.Context, bucketID uuid.UUID, uploadID string, wrapped []byte, keyID string) error
 	SetRewrapProgress(ctx context.Context, p *RewrapProgress) error
 	GetRewrapProgress(ctx context.Context, bucketID uuid.UUID) (*RewrapProgress, error)
+
+	SetObjectReplicationStatus(ctx context.Context, bucketID uuid.UUID, key, versionID, status string) error
 
 	Close() error
 }

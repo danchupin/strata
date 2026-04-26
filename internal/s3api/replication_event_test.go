@@ -118,6 +118,37 @@ func TestReplicationPutBucketReplicationAllowsSuspended(t *testing.T) {
 	h.mustStatus(h.doString("PUT", "/bkt?replication=", replicationPrefixXML), 200)
 }
 
+func TestReplicationCapturesDestinationEndpoint(t *testing.T) {
+	h := newReplicationHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	enableVersioning(h.testHarness, "bkt")
+
+	const ruleXML = `<ReplicationConfiguration>
+		<Role>arn:aws:iam::1:role/r</Role>
+		<Rule>
+			<ID>logs</ID>
+			<Status>Enabled</Status>
+			<Filter><Prefix>logs/</Prefix></Filter>
+			<Destination>
+				<Bucket>arn:aws:s3:::dest</Bucket>
+				<AccessControlTranslation><Owner>peer.example.com:443</Owner></AccessControlTranslation>
+			</Destination>
+		</Rule>
+	</ReplicationConfiguration>`
+	h.mustStatus(h.doString("PUT", "/bkt?replication=", ruleXML), 200)
+
+	resp := h.doString("PUT", "/bkt/logs/2026/04.txt", "hello")
+	h.mustStatus(resp, 200)
+
+	rows := h.listReplications("bkt")
+	if len(rows) != 1 {
+		t.Fatalf("rows=%d want 1", len(rows))
+	}
+	if rows[0].DestinationEndpoint != "peer.example.com:443" {
+		t.Fatalf("endpoint=%q want peer.example.com:443", rows[0].DestinationEndpoint)
+	}
+}
+
 func TestReplicationCompleteMultipartEnqueuesRow(t *testing.T) {
 	h := newReplicationHarness(t)
 	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)

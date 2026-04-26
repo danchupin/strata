@@ -262,6 +262,30 @@ func (s *Store) ListPendingReplications(ctx context.Context, bucketID uuid.UUID,
 	return out, nil
 }
 
+func (s *Store) SetObjectReplicationStatus(ctx context.Context, bucketID uuid.UUID, key, versionID, status string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bucket, ok := s.objects[bucketID]
+	if !ok {
+		return meta.ErrBucketNotFound
+	}
+	versions, ok := bucket[key]
+	if !ok || len(versions) == 0 {
+		return meta.ErrObjectNotFound
+	}
+	if versionID == "" {
+		versions[0].ReplicationStatus = status
+		return nil
+	}
+	for _, v := range versions {
+		if v.VersionID == versionID {
+			v.ReplicationStatus = status
+			return nil
+		}
+	}
+	return meta.ErrObjectNotFound
+}
+
 func (s *Store) AckReplication(ctx context.Context, evt meta.ReplicationEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

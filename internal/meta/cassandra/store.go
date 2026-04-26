@@ -321,12 +321,12 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 		`INSERT INTO objects (bucket_id, shard, key, version_id, is_latest, is_delete_marker,
 		 size, etag, content_type, storage_class, mtime, manifest, user_meta, tags,
 		 retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
-		 cache_control, expires, parts_count, sse_key, sse_key_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 cache_control, expires, parts_count, sse_key, sse_key_id, replication_status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		gocqlUUID(o.BucketID), shard, o.Key, versionID, true, o.IsDeleteMarker,
 		o.Size, o.ETag, o.ContentType, o.StorageClass, o.Mtime, manifestBlob, o.UserMeta, o.Tags,
 		retainUntil, nilIfEmpty(o.RetainMode), o.LegalHold, o.Checksums, nilIfEmpty(o.SSE), nilIfEmpty(o.SSECKeyMD5), nilIfEmpty(o.RestoreStatus),
-		nilIfEmpty(o.CacheControl), nilIfEmpty(o.Expires), partsCount, nilIfEmptyBytes(o.SSEKey), nilIfEmpty(o.SSEKeyID),
+		nilIfEmpty(o.CacheControl), nilIfEmpty(o.Expires), partsCount, nilIfEmptyBytes(o.SSEKey), nilIfEmpty(o.SSEKeyID), nilIfEmpty(o.ReplicationStatus),
 	).WithContext(ctx).Exec()
 }
 
@@ -369,6 +369,7 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		partsCount   int
 		sseKey       []byte
 		sseKeyID     string
+		replication  string
 	)
 	var err error
 	if versionID == "" {
@@ -376,13 +377,13 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 			`SELECT version_id, is_latest, is_delete_marker, size, etag, content_type,
 			        storage_class, mtime, manifest, user_meta, tags,
 			        retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
-			        cache_control, expires, parts_count, sse_key, sse_key_id
+			        cache_control, expires, parts_count, sse_key, sse_key_id, replication_status
 			 FROM objects WHERE bucket_id=? AND shard=? AND key=? LIMIT 1`,
 			gocqlUUID(bucketID), shard, key,
 		).WithContext(ctx).Scan(&versionUUID, &isLatest, &isDeleteMark, &size, &etag, &ctype,
 			&class, &mtime, &manifestBlob, &userMeta, &tags,
 			&retainUntil, &retainMode, &legalHold, &checksums, &sse, &ssecKeyMD5, &restore,
-			&cacheControl, &expires, &partsCount, &sseKey, &sseKeyID)
+			&cacheControl, &expires, &partsCount, &sseKey, &sseKeyID, &replication)
 	} else {
 		vUUID, perr := gocql.ParseUUID(versionID)
 		if perr != nil {
@@ -392,13 +393,13 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 			`SELECT version_id, is_latest, is_delete_marker, size, etag, content_type,
 			        storage_class, mtime, manifest, user_meta, tags,
 			        retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
-			        cache_control, expires, parts_count, sse_key, sse_key_id
+			        cache_control, expires, parts_count, sse_key, sse_key_id, replication_status
 			 FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
 			gocqlUUID(bucketID), shard, key, vUUID,
 		).WithContext(ctx).Scan(&versionUUID, &isLatest, &isDeleteMark, &size, &etag, &ctype,
 			&class, &mtime, &manifestBlob, &userMeta, &tags,
 			&retainUntil, &retainMode, &legalHold, &checksums, &sse, &ssecKeyMD5, &restore,
-			&cacheControl, &expires, &partsCount, &sseKey, &sseKeyID)
+			&cacheControl, &expires, &partsCount, &sseKey, &sseKeyID, &replication)
 	}
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrObjectNotFound
@@ -439,6 +440,7 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		CacheControl:   cacheControl,
 		Expires:        expires,
 		PartsCount:     partsCount,
+		ReplicationStatus: replication,
 	}, nil
 }
 
@@ -1124,10 +1126,10 @@ func (s *Store) EnqueueReplication(ctx context.Context, evt *meta.ReplicationEve
 	}
 	day := notifyDay(evt.EventTime)
 	return s.s.Query(
-		`INSERT INTO replication_queue (bucket_id, day, event_id, bucket_name, object_key, version_id, event_name, event_time, rule_id, destination_bucket, storage_class)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO replication_queue (bucket_id, day, event_id, bucket_name, object_key, version_id, event_name, event_time, rule_id, destination_bucket, storage_class, destination_endpoint)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		gocqlUUID(evt.BucketID), day, eventUUID, evt.Bucket, evt.Key, evt.VersionID,
-		evt.EventName, evt.EventTime, evt.RuleID, evt.DestinationBucket, evt.StorageClass,
+		evt.EventName, evt.EventTime, evt.RuleID, evt.DestinationBucket, evt.StorageClass, evt.DestinationEndpoint,
 	).WithContext(ctx).Exec()
 }
 
@@ -1143,27 +1145,28 @@ func (s *Store) ListPendingReplications(ctx context.Context, bucketID uuid.UUID,
 	for i := 0; i < 30 && len(out) < limit; i++ {
 		partition := day.AddDate(0, 0, -i)
 		iter := s.s.Query(
-			`SELECT event_id, bucket_name, object_key, version_id, event_name, event_time, rule_id, destination_bucket, storage_class
+			`SELECT event_id, bucket_name, object_key, version_id, event_name, event_time, rule_id, destination_bucket, storage_class, destination_endpoint
 			 FROM replication_queue WHERE bucket_id=? AND day=? LIMIT ?`,
 			gocqlUUID(bucketID), partition, limit-len(out),
 		).WithContext(ctx).Iter()
 		var (
-			eventID                                                                gocql.UUID
-			bucket, key, versionID, name, ruleID, destinationBucket, storageClass string
-			eventTime                                                              time.Time
+			eventID                                                                                  gocql.UUID
+			bucket, key, versionID, name, ruleID, destinationBucket, storageClass, destinationEndpoint string
+			eventTime                                                                                time.Time
 		)
-		for iter.Scan(&eventID, &bucket, &key, &versionID, &name, &eventTime, &ruleID, &destinationBucket, &storageClass) {
+		for iter.Scan(&eventID, &bucket, &key, &versionID, &name, &eventTime, &ruleID, &destinationBucket, &storageClass, &destinationEndpoint) {
 			out = append(out, meta.ReplicationEvent{
-				BucketID:          bucketID,
-				Bucket:            bucket,
-				Key:               key,
-				VersionID:         versionID,
-				EventID:           eventID.String(),
-				EventName:         name,
-				EventTime:         eventTime,
-				RuleID:            ruleID,
-				DestinationBucket: destinationBucket,
-				StorageClass:      storageClass,
+				BucketID:            bucketID,
+				Bucket:              bucket,
+				Key:                 key,
+				VersionID:           versionID,
+				EventID:             eventID.String(),
+				EventName:           name,
+				EventTime:           eventTime,
+				RuleID:              ruleID,
+				DestinationBucket:   destinationBucket,
+				DestinationEndpoint: destinationEndpoint,
+				StorageClass:        storageClass,
 			})
 			if len(out) >= limit {
 				break
@@ -1174,6 +1177,25 @@ func (s *Store) ListPendingReplications(ctx context.Context, bucketID uuid.UUID,
 		}
 	}
 	return out, nil
+}
+
+func (s *Store) SetObjectReplicationStatus(ctx context.Context, bucketID uuid.UUID, key, versionID, status string) error {
+	shard := shardOf(key, s.defaultShard)
+	if versionID == "" {
+		o, err := s.GetObject(ctx, bucketID, key, "")
+		if err != nil {
+			return err
+		}
+		versionID = o.VersionID
+	}
+	vUUID, err := gocql.ParseUUID(versionID)
+	if err != nil {
+		return meta.ErrObjectNotFound
+	}
+	return s.s.Query(
+		`UPDATE objects SET replication_status=? WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
+		nilIfEmpty(status), gocqlUUID(bucketID), shard, key, vUUID,
+	).WithContext(ctx).Exec()
 }
 
 func (s *Store) AckReplication(ctx context.Context, evt meta.ReplicationEvent) error {
