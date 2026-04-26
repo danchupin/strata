@@ -108,6 +108,13 @@ downstream middlewares like `internal/s3api/access_log.go` keep reading it via `
 correlated without additional plumbing. Use `WarnContext`/`InfoContext`/`ErrorContext` (not the no-context variants)
 so future ctx-bound loggers ride through.
 
+Per-storage observers: `cassandra.SessionConfig{Logger, SlowMS}` installs `gocql.QueryObserver`
+(`internal/meta/cassandra/observer.go::SlowQueryObserver`) — queries over `STRATA_CASSANDRA_SLOW_MS` (default 100) or
+with errors log WARN with `request_id`/`table`/`op`/`duration_ms`/`statement`. `rados.Config.Logger` enables per-op DEBUG
+(`put`/`get`/`del`) via `internal/data/rados/observer.go::LogOp`. Both observers pull `request_id` via
+`logging.RequestIDFromContext(ctx)` so per-query/per-op lines correlate with the gateway request. The RADOS observer
+helper lives in a build-tag-free file so it's unit-testable without librados; the ceph-tagged backend calls it.
+
 ## Cassandra gotchas (real ones, hit during this codebase's lifetime)
 
 - **No subqueries.** CQL does not support `WHERE name IN (SELECT name FROM ... WHERE id=?)`. If you need that,

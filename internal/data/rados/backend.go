@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
+	"time"
 
 	goceph "github.com/ceph/go-ceph/rados"
 	"github.com/google/uuid"
@@ -20,6 +22,7 @@ import (
 type Backend struct {
 	conn    *goceph.Conn
 	classes map[string]ClassSpec
+	logger  *slog.Logger
 
 	mu      sync.Mutex
 	ioctxes map[string]*goceph.IOContext
@@ -65,6 +68,7 @@ func New(cfg Config) (data.Backend, error) {
 	return &Backend{
 		conn:    conn,
 		classes: classes,
+		logger:  cfg.Logger,
 		ioctxes: make(map[string]*goceph.IOContext),
 	}, nil
 }
@@ -127,9 +131,12 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 		if n > 0 {
 			oid := fmt.Sprintf("%s.%05d", objID, idx)
 			chunk := buf[:n]
-			if err := writeChunk(ioctx, oid, chunk); err != nil {
+			start := time.Now()
+			werr := writeChunk(ioctx, oid, chunk)
+			LogOp(ctx, b.logger, "put", oid, time.Since(start), werr)
+			if werr != nil {
 				b.cleanupManifest(m.Chunks)
-				return nil, err
+				return nil, werr
 			}
 			hash.Write(chunk)
 			m.Chunks = append(m.Chunks, data.ChunkRef{
@@ -240,9 +247,11 @@ func (r *radosReader) loadNextChunk() error {
 			off := r.pos - base
 			remaining := c.Size - off
 			buf := make([]byte, remaining)
-			n, err := ioctx.Read(c.OID, buf, uint64(off))
-			if err != nil {
-				return fmt.Errorf("rados: read %s: %w", c.OID, err)
+			start := time.Now()
+			n, rerr := ioctx.Read(c.OID, buf, uint64(off))
+			LogOp(r.ctx, r.b.logger, "get", c.OID, time.Since(start), rerr)
+			if rerr != nil {
+				return fmt.Errorf("rados: read %s: %w", c.OID, rerr)
 			}
 			r.buf = buf[:n]
 			r.bufPos = 0
@@ -255,7 +264,7 @@ func (r *radosReader) loadNextChunk() error {
 
 func (r *radosReader) Close() error { return nil }
 
-func (b *Backend) Delete(_ context.Context, m *data.Manifest) error {
+func (b *Backend) Delete(ctx context.Context, m *data.Manifest) error {
 	if m == nil {
 		return nil
 	}
@@ -268,8 +277,11 @@ func (b *Backend) Delete(_ context.Context, m *data.Manifest) error {
 			}
 			continue
 		}
-		if err := ioctx.Delete(c.OID); err != nil && firstErr == nil {
-			firstErr = err
+		start := time.Now()
+		derr := ioctx.Delete(c.OID)
+		LogOp(ctx, b.logger, "del", c.OID, time.Since(start), derr)
+		if derr != nil && firstErr == nil {
+			firstErr = derr
 		}
 	}
 	return firstErr

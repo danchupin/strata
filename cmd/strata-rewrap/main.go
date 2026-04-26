@@ -43,7 +43,7 @@ func main() {
 	}
 	logger.Info("rewrap starting", "active_id", provider.ActiveID(), "all_ids", provider.IDs(), "dry_run", *dryRun)
 
-	store, err := buildMetaStore(cfg)
+	store, err := buildMetaStore(cfg, logger)
 	if err != nil {
 		logger.Error("meta store", "error", err.Error())
 		os.Exit(2)
@@ -88,7 +88,7 @@ func main() {
 	)
 }
 
-func buildMetaStore(cfg *config.Config) (meta.Store, error) {
+func buildMetaStore(cfg *config.Config, logger *slog.Logger) (meta.Store, error) {
 	switch cfg.MetaBackend {
 	case "memory":
 		return metamem.New(), nil
@@ -102,6 +102,8 @@ func buildMetaStore(cfg *config.Config) (meta.Store, error) {
 				Username:    cfg.Cassandra.Username,
 				Password:    cfg.Cassandra.Password,
 				Timeout:     cfg.Cassandra.Timeout,
+				Logger:      logger,
+				SlowMS:      metacassandra.SlowMSFromEnv(),
 			},
 			metacassandra.Options{DefaultShardCount: cfg.DefaultBucketShards},
 		)

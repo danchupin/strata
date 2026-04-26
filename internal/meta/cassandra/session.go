@@ -2,6 +2,7 @@ package cassandra
 
 import (
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/gocql/gocql"
@@ -15,6 +16,11 @@ type SessionConfig struct {
 	Username    string
 	Password    string
 	Timeout     time.Duration
+	// Logger receives slow-query WARN lines when SlowMS > 0. Nil disables.
+	Logger *slog.Logger
+	// SlowMS controls the slow-query threshold in milliseconds.
+	// 0 disables logging; defaults are loaded by callers via SlowMSFromEnv.
+	SlowMS int
 }
 
 func newCluster(cfg SessionConfig) *gocql.ClusterConfig {
@@ -36,6 +42,9 @@ func newCluster(cfg SessionConfig) *gocql.ClusterConfig {
 			Username: cfg.Username,
 			Password: cfg.Password,
 		}
+	}
+	if obs := NewSlowQueryObserver(cfg.Logger, time.Duration(cfg.SlowMS)*time.Millisecond); obs != nil {
+		c.QueryObserver = obs
 	}
 	return c
 }

@@ -48,14 +48,14 @@ func main() {
 		os.Exit(2)
 	}
 
-	dataBackend, err := buildDataBackend(cfg)
+	dataBackend, err := buildDataBackend(cfg, logger)
 	if err != nil {
 		logger.Error("data backend", "error", err.Error())
 		os.Exit(2)
 	}
 	defer dataBackend.Close()
 
-	store, err := buildMetaStore(cfg)
+	store, err := buildMetaStore(cfg, logger)
 	if err != nil {
 		logger.Error("meta store", "error", err.Error())
 		os.Exit(2)
@@ -132,7 +132,7 @@ func buildLocker(cfg *config.Config, store meta.Store) leader.Locker {
 	return nil
 }
 
-func buildDataBackend(cfg *config.Config) (data.Backend, error) {
+func buildDataBackend(cfg *config.Config, logger *slog.Logger) (data.Backend, error) {
 	switch cfg.DataBackend {
 	case "memory":
 		return datamem.New(), nil
@@ -148,13 +148,14 @@ func buildDataBackend(cfg *config.Config) (data.Backend, error) {
 			Pool:       cfg.RADOS.Pool,
 			Namespace:  cfg.RADOS.Namespace,
 			Classes:    classes,
+			Logger:     logger,
 		})
 	default:
 		return nil, errors.New("unknown data backend: " + cfg.DataBackend)
 	}
 }
 
-func buildMetaStore(cfg *config.Config) (meta.Store, error) {
+func buildMetaStore(cfg *config.Config, logger *slog.Logger) (meta.Store, error) {
 	switch cfg.MetaBackend {
 	case "memory":
 		return metamem.New(), nil
@@ -168,6 +169,8 @@ func buildMetaStore(cfg *config.Config) (meta.Store, error) {
 				Username:    cfg.Cassandra.Username,
 				Password:    cfg.Cassandra.Password,
 				Timeout:     cfg.Cassandra.Timeout,
+				Logger:      logger,
+				SlowMS:      metacassandra.SlowMSFromEnv(),
 			},
 			metacassandra.Options{DefaultShardCount: cfg.DefaultBucketShards},
 		)
