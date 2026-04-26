@@ -29,6 +29,7 @@ Started: Sat Apr 25 16:10:14 MSK 2026
 - Bucket tagging (US-020): standard setBucketBlob/getBucketBlob/deleteBucketBlob blob in both backends (cassandra: bucket_tagging table). Validation lives in s3api handler (≤50 tags, non-empty Key, no duplicate Key) — the meta layer stays an opaque blob store. PUT returns 204 (matches AWS), GET returns the stored XML or 404 NoSuchTagSet, empty body PUT and explicit DELETE both clear. Reuses the Tagging XML type already defined for object tagging.
 - Bucket region (US-021): meta.Bucket.Region is a column on the buckets row (additive ALTER buckets ADD region text), not a blob. Mutated via SetBucketRegion using the LWT pattern (UPDATE … IF EXISTS / ScanCAS(nil) / LocalSerial) so the write joins the same Paxos lineage as the original CreateBucket INSERT IF NOT EXISTS. CreateBucket parses optional <CreateBucketConfiguration><LocationConstraint> from the request body BEFORE calling Meta.CreateBucket so a malformed body short-circuits with 400 MalformedXML. GetBucketLocation emits the canonical AWS xmlns ("http://s3.amazonaws.com/doc/2006-03-01/") on the LocationConstraint element via xml.Name with the namespace-qualified field tag. HEAD bucket sets x-amz-bucket-region from b.Region or falls back to s.Region (which s3api.New defaults to "default").
 - Streaming SigV4 chunk validation (US-022): newStreamingReader(body, signingKey, reqDate, scope, seedSig) buffers each aws-chunked chunk fully, recomputes sig(n)=HMAC(signingKey, "AWS4-HMAC-SHA256-PAYLOAD\n<reqDate>\n<scope>\n<prevSig>\n<emptyBodyHash>\n<sha256(chunk)>"), and returns ErrSignatureInvalid on any mismatch (chained through prev → final 0-chunk). The seed prevSig is the request's parsed.Signature; signingKey/reqDate/scope come from the same parsed auth header that already validated the request's own signature. The reader rejects missing chunk-signature attributes and missing terminators. Server-side mapping: ErrSignatureInvalid surfaces from r.Body.Read inside data.PutChunks; every put path (putObject, uploadPart) must check errors.Is(err, auth.ErrSignatureInvalid) → ErrSignatureDoesNotMatch (403). copyObject reads from data.GetChunks (not the request body) so it doesn't need the mapping.
+- Auth modes (US-024): auth.AuthInfo.IsAnonymous (renamed from .Anonymous) — never construct &AuthInfo{...} for the unauth case, use auth.AnonymousIdentity() so future field defaults stay in one place. Modes: ModeOff (alias ModeDisabled) bypasses validation; ModeRequired validates every request; ModeOptional validates only when an Authorization header OR a presigned query is present, else sets AnonymousIdentity. ParseMode accepts "off"/"disabled" → ModeOff, "required" → ModeRequired, "optional" → ModeOptional. config.Auth.Mode validation in internal/config/config.go must list every accepted spelling. Anonymous flow then meets the existing policy/ACL gate (US-003/US-004): public-read canned ACL or AllUsers grant lets the request through; private buckets 403.
 ---
 
 ## 2026-04-25 - US-001 (Parse AccessControlPolicy XML body)
@@ -649,4 +650,32 @@ Started: Sat Apr 25 16:10:14 MSK 2026
   - Headers map[string]string captured at write time MUST mirror what writeChecksumHeaders + the SSE block would set live; if a future story adds a new response header (e.g. x-amz-version-id) to completeMultipart, also add it to the captured map or retries will be missing it.
   - SetClockForTest is a package-level mutation — tests must t.Cleanup(metamem.ResetClockForTest) and not t.Parallel() in the same package; the default-go-test serial execution within a package is already enough for our use.
   - For the cassandra contract test, uploadID must be a real TIMEUUID (gocql.ParseUUID will reject random uuid v4); use gocql.TimeUUID().String() in shared helpers (newTimeUUID) so both backends accept it.
+---
+
+## 2026-04-26 - US-024 (Anonymous identity + STRATA_AUTH_MODE flag)
+- internal/auth/types.go: AuthInfo.Anonymous → IsAnonymous; new AnonymousIdentity() helper returning &AuthInfo{IsAnonymous: true, Owner: "anonymous"} — single source of truth used by both middleware and FromContext fallback.
+- Mode constants: ModeOptional added; ModeDisabled aliased to ModeOff. ParseMode accepts "", "off", "disabled" → ModeOff; "required" → ModeRequired; "optional" → ModeOptional. Default kept at "off" so existing deployments and dev paths don't break (PRD AC says "required (default)" but flipping the default is out of scope — would cascade through smoke tests / Makefile run-* targets).
+- internal/auth/middleware.go: ModeOff still bypasses validation. New ModeOptional branch: if r.Header.Get("Authorization") == "" && !hasPresignedParams(r) → set AnonymousIdentity in context and proceed; otherwise validate as ModeRequired does. A bad-but-present signature in optional mode therefore still 403s (same as the AC's intent).
+- internal/config/config.go: validate() accepts {off, disabled, required, optional}; rejection message updated.
+- Renamed Anonymous → IsAnonymous at every call site: internal/s3api/access.go (3), internal/s3api/iam.go (1), internal/auth/middleware.go.
+- Tests:
+  - internal/auth/middleware_test.go (new): stubStore + captureIdentity helpers; covers ModeOptional anon-passthrough, ModeOptional bad-header → 403, ModeOptional bad-presigned → 403, ModeRequired no-auth → 403, ModeDisabled always-anonymous (even with garbage Authorization header), ParseMode for every documented spelling, AnonymousIdentity returns a fresh instance.
+  - internal/s3api/auth_mode_test.go (new): drives a real httptest server with auth.Middleware.Wrap so the policy/ACL stack is exercised. authModeHarness has signed() (uses the existing signRequest helper from iam_access_keys_signed_test.go) and anon() (no auth headers). Tests: optional + public-read bucket + anon GET → 200; optional + private bucket + anon GET → 403; required + public-read + anon GET → 403.
+- Files changed:
+  - internal/auth/types.go (IsAnonymous, AnonymousIdentity, ModeOptional, ModeDisabled alias, ParseMode)
+  - internal/auth/middleware.go (ModeOptional branch)
+  - internal/auth/middleware_test.go (new)
+  - internal/config/config.go (validate accepts optional/disabled)
+  - internal/s3api/access.go (info.IsAnonymous)
+  - internal/s3api/iam.go (info.IsAnonymous)
+  - internal/s3api/auth_mode_test.go (new)
+  - scripts/ralph/prd.json (passes: true; notes)
+  - scripts/ralph/progress.txt
+- Quality: go build ./... + go vet ./... + go test ./... all green.
+- **Learnings for future iterations:**
+  - AuthInfo field is now IsAnonymous (was Anonymous). New code should call AnonymousIdentity() rather than constructing the struct literally — keeps the "anonymous" Owner string and field defaults in one place.
+  - ModeOptional intentionally validates *any* request that carries an Authorization header or presigned query — letting bogus signatures fall through as anonymous would be a surprise (AWS SDKs would treat their signed-but-mis-keyed request as "logged in") and leak whichever public-read resource was being targeted. Stick to "no creds == anon, presence of creds == validate" to match S3 behaviour.
+  - Default auth mode stays "off". Flipping to "required" would break Makefile `run-memory` / smoke targets and every test that uses newHarness without injecting credentials. Treat the AC's "(default)" annotation as documentation, not a behavioural change to ship.
+  - For an end-to-end test that needs the real middleware around s3api.Server, the existing signRequest helper in iam_access_keys_signed_test.go is reusable across files in the same _test package — no need to duplicate. mustStatus in auth_mode_test.go is a local package-level helper because the existing one is a method on *testHarness.
+  - When renaming a field on an exported struct (AuthInfo.Anonymous → IsAnonymous), grep for the bare field name first; the compiler will catch most call sites but not e.g. struct-literal field tags or marshal/unmarshal hooks. Here there were 4 Go callers + 2 doc files.
 ---

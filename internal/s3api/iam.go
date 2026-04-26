@@ -61,7 +61,7 @@ func iamParam(r *http.Request, key string) string {
 
 func (s *Server) handleIAM(w http.ResponseWriter, r *http.Request, action string) {
 	info := auth.FromContext(r.Context())
-	if info == nil || info.Anonymous || info.Owner != IAMRootPrincipal {
+	if info == nil || info.IsAnonymous || info.Owner != IAMRootPrincipal {
 		writeError(w, r, ErrAccessDenied)
 		return
 	}

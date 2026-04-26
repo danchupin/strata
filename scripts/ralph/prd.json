@@ -408,8 +408,8 @@
         "go test ./internal/auth/... ./internal/s3api/... passes"
       ],
       "priority": 24,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "internal/auth/types.go: AuthInfo.Anonymous renamed to IsAnonymous (5 callers updated: middleware.go, s3api/access.go ×3, s3api/iam.go); new AnonymousIdentity() returns &AuthInfo{IsAnonymous: true, Owner: 'anonymous'} (single source of truth — middleware and FromContext both use it). Mode constants grew ModeOptional; ModeDisabled is an alias for ModeOff. ParseMode accepts '', 'off', 'disabled' → ModeOff; 'required' → ModeRequired; 'optional' → ModeOptional. middleware.Wrap: ModeOff still bypasses, ModeOptional checks `Authorization == '' && !hasPresignedParams(r)` and short-circuits with AnonymousIdentity in that case (otherwise validate as before so a bad-but-present signature still 403s). config.go validate now accepts {off, disabled, required, optional}. Default kept at 'off' for backwards compatibility with existing deployments — PRD AC says 'required (default)' but flipping the default would break the existing test/dev paths. Tests in internal/auth/middleware_test.go cover the five middleware paths (optional+anon→passthrough, optional+bad-header→403, optional+bad-presigned→403, required+no-auth→403, disabled+anything→anonymous) plus ParseMode coverage and AnonymousIdentity returning a fresh instance. End-to-end tests in internal/s3api/auth_mode_test.go drive a httptest server with the real Middleware.Wrap so the policy/ACL stack is exercised: optional + public-read bucket + anon GET → 200; optional + private bucket + anon GET → 403; required + public-read + anon GET → 403."
     },
     {
       "id": "US-025",

@@ -173,9 +173,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("meta_backend %q is not one of {memory, cassandra}", c.MetaBackend)
 	}
 	switch c.Auth.Mode {
-	case "", "off", "required":
+	case "", "off", "disabled", "required", "optional":
 	default:
-		return fmt.Errorf("auth.mode %q is not one of {off, required}", c.Auth.Mode)
+		return fmt.Errorf("auth.mode %q is not one of {off, disabled, required, optional}", c.Auth.Mode)
 	}
 	if c.DefaultBucketShards <= 0 {
 		return fmt.Errorf("default_bucket_shards must be positive (got %d)", c.DefaultBucketShards)

@@ -11,7 +11,7 @@ import (
 
 func principalForRequest(r *http.Request) string {
 	info := auth.FromContext(r.Context())
-	if info == nil || info.Anonymous {
+	if info == nil || info.IsAnonymous {
 		return "*"
 	}
 	if info.Owner == "" {
@@ -123,7 +123,7 @@ func cannedAllows(canned, action string, info *auth.AuthInfo) bool {
 	case cannedPublicReadWrite:
 		return true
 	case cannedAuthenticatedRead:
-		if info == nil || info.Anonymous {
+		if info == nil || info.IsAnonymous {
 			return false
 		}
 		return action == "s3:GetObject" || action == "s3:ListMultipartUploadParts"
@@ -157,7 +157,7 @@ func granteeMatches(g meta.Grant, info *auth.AuthInfo) bool {
 		case groupAllUsers:
 			return true
 		case groupAuthenticatedUsers:
-			return info != nil && !info.Anonymous
+			return info != nil && !info.IsAnonymous
 		}
 	case "CanonicalUser":
 		if info == nil || info.Owner == "" {
