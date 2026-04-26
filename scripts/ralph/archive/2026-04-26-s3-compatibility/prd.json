@@ -17,8 +17,8 @@
         "go test ./internal/crypto/master/... passes"
       ],
       "priority": 1,
-      "passes": true,
-      "notes": "internal/crypto/master: Provider interface, EnvProvider (STRATA_SSE_MASTER_KEY), FileProvider (mtime hot-reload), FromEnv selector. ErrNoConfig + ErrInvalidKeyLength sentinels. Caller fatals on error."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-002",
