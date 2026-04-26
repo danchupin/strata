@@ -927,6 +927,8 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 	used := make(map[int]bool, len(parts))
 	var chunks []data.ChunkRef
 	var totalSize int64
+	var ciphertextSize int64
+	partChunks := make([]int, 0, len(parts))
 	for _, cp := range parts {
 		p, ok := st.parts[cp.PartNumber]
 		if !ok {
@@ -937,19 +939,26 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 			s.mu.Unlock()
 			return nil, meta.ErrMultipartETagMismatch
 		}
+		partChunkCount := 0
 		if p.Manifest != nil {
 			chunks = append(chunks, p.Manifest.Chunks...)
+			partChunkCount = len(p.Manifest.Chunks)
+			for _, c := range p.Manifest.Chunks {
+				ciphertextSize += c.Size
+			}
 		}
+		partChunks = append(partChunks, partChunkCount)
 		totalSize += p.Size
 		used[cp.PartNumber] = true
 	}
 
 	obj.Manifest = &data.Manifest{
-		Class:     obj.StorageClass,
-		Size:      totalSize,
-		ChunkSize: data.DefaultChunkSize,
-		ETag:      obj.ETag,
-		Chunks:    chunks,
+		Class:      obj.StorageClass,
+		Size:       ciphertextSize,
+		ChunkSize:  data.DefaultChunkSize,
+		ETag:       obj.ETag,
+		Chunks:     chunks,
+		PartChunks: partChunks,
 	}
 	obj.Size = totalSize
 	obj.Mtime = time.Now().UTC()

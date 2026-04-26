@@ -1095,10 +1095,11 @@ func (s *Store) CreateMultipartUpload(ctx context.Context, mu *meta.MultipartUpl
 		return fmt.Errorf("upload_id: %w", err)
 	}
 	return s.s.Query(
-		`INSERT INTO multipart_uploads (bucket_id, upload_id, key, status, storage_class, content_type, initiated_at, sse, user_meta, cache_control, expires, checksum_algorithm)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO multipart_uploads (bucket_id, upload_id, key, status, storage_class, content_type, initiated_at, sse, user_meta, cache_control, expires, checksum_algorithm, sse_key, sse_key_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		gocqlUUID(mu.BucketID), uploadUUID, mu.Key, "uploading", mu.StorageClass, mu.ContentType, mu.InitiatedAt, nilIfEmpty(mu.SSE),
 		mu.UserMeta, nilIfEmpty(mu.CacheControl), nilIfEmpty(mu.Expires), nilIfEmpty(mu.ChecksumAlgorithm),
+		nilIfEmptyBytes(mu.SSEKey), nilIfEmpty(mu.SSEKeyID),
 	).WithContext(ctx).Exec()
 }
 
@@ -1108,16 +1109,18 @@ func (s *Store) GetMultipartUpload(ctx context.Context, bucketID uuid.UUID, uplo
 		return nil, meta.ErrMultipartNotFound
 	}
 	var (
-		key, status, class, ctype             string
-		sse, cacheControl, expires, checksum  string
-		userMeta                              map[string]string
-		initiated                             time.Time
+		key, status, class, ctype            string
+		sse, cacheControl, expires, checksum string
+		sseKeyID                             string
+		sseKey                               []byte
+		userMeta                             map[string]string
+		initiated                            time.Time
 	)
 	err = s.s.Query(
-		`SELECT key, status, storage_class, content_type, initiated_at, sse, user_meta, cache_control, expires, checksum_algorithm
+		`SELECT key, status, storage_class, content_type, initiated_at, sse, user_meta, cache_control, expires, checksum_algorithm, sse_key, sse_key_id
 		 FROM multipart_uploads WHERE bucket_id=? AND upload_id=?`,
 		gocqlUUID(bucketID), uploadUUID,
-	).WithContext(ctx).Scan(&key, &status, &class, &ctype, &initiated, &sse, &userMeta, &cacheControl, &expires, &checksum)
+	).WithContext(ctx).Scan(&key, &status, &class, &ctype, &initiated, &sse, &userMeta, &cacheControl, &expires, &checksum, &sseKey, &sseKeyID)
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrMultipartNotFound
 	}
@@ -1133,6 +1136,8 @@ func (s *Store) GetMultipartUpload(ctx context.Context, bucketID uuid.UUID, uplo
 		ContentType:       ctype,
 		InitiatedAt:       initiated,
 		SSE:               sse,
+		SSEKey:            sseKey,
+		SSEKeyID:          sseKeyID,
 		UserMeta:          userMeta,
 		CacheControl:      cacheControl,
 		Expires:           expires,
@@ -1272,6 +1277,8 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 	used := make(map[int]bool, len(parts))
 	var chunks []data.ChunkRef
 	var totalSize int64
+	var ciphertextSize int64
+	partChunks := make([]int, 0, len(parts))
 	for _, cp := range parts {
 		p, ok := byNumber[cp.PartNumber]
 		if !ok {
@@ -1280,19 +1287,26 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 		if strings.Trim(cp.ETag, `"`) != p.ETag {
 			return nil, meta.ErrMultipartETagMismatch
 		}
+		partChunkCount := 0
 		if p.Manifest != nil {
 			chunks = append(chunks, p.Manifest.Chunks...)
+			partChunkCount = len(p.Manifest.Chunks)
+			for _, c := range p.Manifest.Chunks {
+				ciphertextSize += c.Size
+			}
 		}
+		partChunks = append(partChunks, partChunkCount)
 		totalSize += p.Size
 		used[cp.PartNumber] = true
 	}
 
 	obj.Manifest = &data.Manifest{
-		Class:     obj.StorageClass,
-		Size:      totalSize,
-		ChunkSize: data.DefaultChunkSize,
-		ETag:      obj.ETag,
-		Chunks:    chunks,
+		Class:      obj.StorageClass,
+		Size:       ciphertextSize,
+		ChunkSize:  data.DefaultChunkSize,
+		ETag:       obj.ETag,
+		Chunks:     chunks,
+		PartChunks: partChunks,
 	}
 	obj.Size = totalSize
 	obj.Mtime = time.Now().UTC()

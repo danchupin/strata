@@ -107,6 +107,12 @@ func (r *sseEncryptingReader) PlaintextETag() string {
 	return hex.EncodeToString(r.srcMD5.Sum(nil))
 }
 
+// sseChunkLocator returns, for a given flat chunk index, the (oid, chunkIndex)
+// pair that was used during encryption. For single-PUT objects this is just
+// (key, idx). For multipart objects the OID and per-part chunk index vary by
+// part — see chunkLocatorFromManifest.
+type sseChunkLocator func(flatIdx int) (oid string, chunkIndexInPart uint64)
+
 // sseDecryptingReader streams plaintext from an SSE-encrypted manifest. Range
 // requests are translated from plaintext space to ciphertext space chunk by
 // chunk: each crypto chunk maps 1:1 to a backend chunk in the manifest, so
@@ -116,7 +122,7 @@ type sseDecryptingReader struct {
 	backend data.Backend
 	m       *data.Manifest
 	dek     []byte
-	oid     string
+	locator sseChunkLocator
 
 	pStart int64 // plaintext start offset (inclusive)
 	pEnd   int64 // plaintext end offset (exclusive)
@@ -131,6 +137,10 @@ type sseDecryptingReader struct {
 }
 
 func newSSEDecryptingReader(ctx context.Context, backend data.Backend, m *data.Manifest, dek []byte, oid string, pOffset, pLength int64) *sseDecryptingReader {
+	return newSSEDecryptingReaderWithLocator(ctx, backend, m, dek, singleChunkLocator(oid), pOffset, pLength)
+}
+
+func newSSEDecryptingReaderWithLocator(ctx context.Context, backend data.Backend, m *data.Manifest, dek []byte, locator sseChunkLocator, pOffset, pLength int64) *sseDecryptingReader {
 	offsets := make([]int64, len(m.Chunks))
 	psizes := make([]int64, len(m.Chunks))
 	var off int64
@@ -144,7 +154,7 @@ func newSSEDecryptingReader(ctx context.Context, backend data.Backend, m *data.M
 		backend:      backend,
 		m:            m,
 		dek:          dek,
-		oid:          oid,
+		locator:      locator,
 		pStart:       pOffset,
 		pEnd:         pOffset + pLength,
 		pPos:         pOffset,
@@ -152,6 +162,35 @@ func newSSEDecryptingReader(ctx context.Context, backend data.Backend, m *data.M
 		chunkOffsets: offsets,
 		chunkPSizes:  psizes,
 	}
+}
+
+// singleChunkLocator returns a locator that produces (oid, idx) for every
+// chunk — i.e. the single-PUT object layout where every chunk uses the same
+// OID and its flat manifest index as the chunk-index input to the IV HKDF.
+func singleChunkLocator(oid string) sseChunkLocator {
+	return func(idx int) (string, uint64) { return oid, uint64(idx) }
+}
+
+// multipartChunkLocator builds a locator over a manifest's PartChunks list.
+// For chunk i in the merged manifest, it finds which part the chunk came from
+// (and that part's local chunk index) so the IV input matches what was used
+// during UploadPart, where oid = key + ":part=" + partNumber and the
+// chunkIndex restarts at 0 inside each part.
+func multipartChunkLocator(key string, partChunks []int) sseChunkLocator {
+	return func(idx int) (string, uint64) {
+		base := 0
+		for partOffset, count := range partChunks {
+			if idx < base+count {
+				return multipartPartOID(key, partOffset+1), uint64(idx - base)
+			}
+			base += count
+		}
+		return key, uint64(idx)
+	}
+}
+
+func multipartPartOID(key string, partNumber int) string {
+	return fmt.Sprintf("%s:part=%d", key, partNumber)
 }
 
 // Preload eagerly loads and decrypts the first chunk in the requested range
@@ -204,7 +243,8 @@ func (r *sseDecryptingReader) loadChunkAt(pPos int64) error {
 	if err != nil {
 		return fmt.Errorf("sse: read ciphertext chunk %d: %w", idx, err)
 	}
-	pt, err := sse.DecryptChunk(r.dek, r.oid, uint64(idx), ct)
+	oid, chunkIndex := r.locator(idx)
+	pt, err := sse.DecryptChunk(r.dek, oid, chunkIndex, ct)
 	if err != nil {
 		return fmt.Errorf("sse: decrypt chunk %d: %w", idx, err)
 	}

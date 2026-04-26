@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
@@ -18,6 +19,7 @@ import (
 	"github.com/gocql/gocql"
 
 	"github.com/danchupin/strata/internal/auth"
+	ssecrypto "github.com/danchupin/strata/internal/crypto/sse"
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
 )
@@ -47,6 +49,29 @@ func (s *Server) initiateMultipart(w http.ResponseWriter, r *http.Request, b *me
 		CacheControl:      r.Header.Get("Cache-Control"),
 		Expires:           r.Header.Get("Expires"),
 		ChecksumAlgorithm: strings.ToUpper(r.Header.Get("x-amz-checksum-algorithm")),
+	}
+	if sse == sseAlgorithmAES256 {
+		if s.Master == nil {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		mk, mid, merr := s.Master.Resolve(r.Context())
+		if merr != nil {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		dek := make([]byte, ssecrypto.KeySize)
+		if _, rerr := rand.Read(dek); rerr != nil {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		wrapped, werr := ssecrypto.WrapDEK(mk, dek)
+		if werr != nil {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		mu.SSEKey = wrapped
+		mu.SSEKeyID = mid
 	}
 	if err := s.Meta.CreateMultipartUpload(r.Context(), mu); err != nil {
 		mapMetaErr(w, r, err)
@@ -93,6 +118,25 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Buck
 	if len(checksumEntries) > 0 {
 		body = io.TeeReader(r.Body, checksumWriter(checksumEntries))
 	}
+	var encReader *sseEncryptingReader
+	if mu.SSE == sseAlgorithmAES256 {
+		if s.Master == nil || len(mu.SSEKey) == 0 {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		mk, _, merr := s.Master.Resolve(ctx)
+		if merr != nil {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		dek, uerr := ssecrypto.UnwrapDEK(mk, mu.SSEKey)
+		if uerr != nil {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		encReader = newSSEEncryptingReader(body, dek, multipartPartOID(key, partNumber))
+		body = encReader
+	}
 	manifest, err := s.Data.PutChunks(ctx, body, mu.StorageClass)
 	if err != nil {
 		if errors.Is(err, auth.ErrSignatureInvalid) {
@@ -112,10 +156,16 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Buck
 		writeError(w, r, ErrBadDigest)
 		return
 	}
+	partETag := manifest.ETag
+	partSize := manifest.Size
+	if encReader != nil {
+		partETag = encReader.PlaintextETag()
+		partSize = encReader.PlaintextSize()
+	}
 	part := &meta.MultipartPart{
 		PartNumber: partNumber,
-		ETag:       manifest.ETag,
-		Size:       manifest.Size,
+		ETag:       partETag,
+		Size:       partSize,
 		Manifest:   manifest,
 		Checksums:  sums,
 	}
@@ -124,7 +174,7 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Buck
 		mapMetaErr(w, r, err)
 		return
 	}
-	w.Header().Set("ETag", `"`+manifest.ETag+`"`)
+	w.Header().Set("ETag", `"`+partETag+`"`)
 	writeChecksumHeaders(w.Header(), sums)
 	if mu.SSE != "" {
 		w.Header().Set("x-amz-server-side-encryption", mu.SSE)
@@ -320,6 +370,8 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		Mtime:        time.Now().UTC(),
 		Checksums:    composite,
 		SSE:          mu.SSE,
+		SSEKey:       mu.SSEKey,
+		SSEKeyID:     mu.SSEKeyID,
 		UserMeta:     mu.UserMeta,
 		CacheControl: mu.CacheControl,
 		Expires:      mu.Expires,

@@ -83,8 +83,8 @@
         "go test ./internal/s3api/... passes"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "meta.MultipartUpload grew SSEKey + SSEKeyID. Cassandra additive ALTER multipart_uploads ADD sse_key blob / sse_key_id text. data.Manifest grew PartChunks []int (json omitempty) so the SSE multipart decrypt path can map a flat chunk index back to the (partNumber, chunkIndexInPart) pair the encrypter used. initiateMultipart with AES256 resolves master, generates DEK + wraps + persists on the upload row (no master configured = 500). uploadPart unwraps the upload's DEK and wraps the request body in sseEncryptingReader with oid = key + ':part=' + partNumber so part 1 chunk 0 and part 2 chunk 0 land on different IVs. Per-part ETag persisted on multipart_parts is plaintext MD5 (matches AWS), Size is plaintext (so ListParts + composite ETag math + obj.Size all use plaintext); per-part Manifest.Size remains ciphertext. completeMultipart copies SSEKey/SSEKeyID from upload onto the object and both backends now compute obj.Manifest.Size from sum(chunk.Size) (ciphertext) while obj.Size = sum(part.Size) (plaintext). getObject picks newSSEDecryptingReaderWithLocator + multipartChunkLocator when manifest.PartChunks is non-empty. Tests cover 3-part SSE round-trip (5+5+1 MiB), plaintext multipart still working, and the existing TestMultipartSSEHeaderRoundTrip exercises the encrypt-then-decrypt path. Known limitation: re-uploading the same partNumber within a single in-flight upload reuses the deterministic IV with the same DEK on different plaintext — to be addressed by US-006 master-key rotation / per-upload DEK rotation."
     },
     {
       "id": "US-006",

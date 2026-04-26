@@ -942,7 +942,12 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 			writeError(w, r, ErrInternal)
 			return
 		}
-		dec := newSSEDecryptingReader(r.Context(), s.Data, o.Manifest, dek, key, offset, length)
+		var dec *sseDecryptingReader
+		if o.Manifest != nil && len(o.Manifest.PartChunks) > 0 {
+			dec = newSSEDecryptingReaderWithLocator(r.Context(), s.Data, o.Manifest, dek, multipartChunkLocator(key, o.Manifest.PartChunks), offset, length)
+		} else {
+			dec = newSSEDecryptingReader(r.Context(), s.Data, o.Manifest, dek, key, offset, length)
+		}
 		if err := dec.Preload(); err != nil {
 			writeError(w, r, ErrInternal)
 			return

@@ -90,6 +90,11 @@ There is a generic blob-config helper pattern for "bucket has one XML/JSON docum
 CORS, policy, public-access-block, ownership-controls). Reuse `setBucketBlob` / `getBucketBlob` / `deleteBucketBlob` in
 both backends instead of writing fresh CRUD per endpoint.
 
+`data.Manifest` is JSON-encoded into the `objects.manifest` blob column (`internal/meta/cassandra/codec.go`). New
+fields tagged `json:",omitempty"` are schema-additive — old rows decode with zero-values, and you avoid an `ALTER`.
+Use this for per-object metadata that the GET path reads but Cassandra never filters on (e.g. `Manifest.PartChunks`
+for the SSE multipart locator).
+
 ## Cassandra gotchas (real ones, hit during this codebase's lifetime)
 
 - **No subqueries.** CQL does not support `WHERE name IN (SELECT name FROM ... WHERE id=?)`. If you need that,

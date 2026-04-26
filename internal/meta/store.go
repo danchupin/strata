@@ -173,6 +173,8 @@ type MultipartUpload struct {
 	InitiatedAt       time.Time
 	Status            string
 	SSE               string
+	SSEKey            []byte
+	SSEKeyID          string
 	UserMeta          map[string]string
 	CacheControl      string
 	Expires           string

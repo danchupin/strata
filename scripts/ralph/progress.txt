@@ -15,6 +15,10 @@ Started: Sun Apr 26 20:43:22 MSK 2026
 - `internal/data/memory.Backend.CorruptFirstChunk()` is a test-only helper for tampering tests. Memory backend only — RADOS backend has no equivalent (and shouldn't).
 - Don't import `internal/crypto/sse` as `sse` inside `internal/s3api/server.go`; the file already has a local `sse` variable for the SSE algorithm string. Use the alias `ssecrypto` instead. Same caution applies whenever a file mixes SSE-algorithm-string vars with crypto package calls.
 - Don't run `go mod tidy` casually inside Ralph stories — it pulls in unrelated module drift (koanf direct/indirect flips, transitive grpc/protobuf bumps). If a new package adds a direct import that already lives in `go.sum` as indirect, Go builds fine without retidying; leave the `// indirect` annotation alone unless the story explicitly requires a deps refresh.
+- `data.Manifest` is JSON-encoded inside the meta backend (cassandra/codec.go is `json.Marshal/Unmarshal`). Adding a new field is **schema-additive** and needs zero migration if you tag it `json:",omitempty"`. Use this lever (e.g. `Manifest.PartChunks`) before adding a new Cassandra column.
+- For multipart SSE: each part gets oid = `key + ":part=" + partNumber`, chunkIndex local-to-part. After Complete, the merged manifest carries `PartChunks []int` (= chunk count per part, in part order) so the GET path can reconstruct (partNumber, chunkIndexInPart) for any flat manifest chunk index. Pattern lives in `internal/s3api/sse_io.go::multipartChunkLocator` + `multipartPartOID`.
+- For multipart objects, two sizes diverge: per-part `Size` is plaintext (used for ListParts, composite ETag, obj.Size) and per-part `Manifest.Size` is ciphertext (used by data.Backend GetChunks bounds). When constructing `obj.Manifest` in `CompleteMultipartUpload`, sum chunk sizes — not part sizes — to get ciphertext total. Same lesson as US-004 single PUT (obj.Size plaintext / manifest.Size ciphertext) but harder to spot because both backends used to use a single `totalSize` for both.
+- Per-part ETag persisted on `multipart_parts` is plaintext MD5 of the part body (AWS-compatible). Composite ETag in Complete is built by concatenating the part-ETag bytes and re-MD5-ing — works on plaintext-MD5 inputs, exactly matching the unencrypted multipart contract. Don't accidentally store ciphertext ETag on the part row.
 
 ---
 
@@ -95,4 +99,31 @@ Started: Sun Apr 26 20:43:22 MSK 2026
   - The pre-existing `internal/s3api/encryption_test.go::TestObjectSSEHeaderRoundTrip` previously passed without doing real crypto; now it exercises the full encrypt/decrypt path via the harness's default master provider. If a future story adds a way to test "no-master" semantics, follow the pattern in `TestSSEMissingMasterReturns500` (build a `Server` directly instead of `newHarness`).
   - Encryption tests for chunk-boundary range reads use 5 MiB random body so we straddle the 4 MiB-16 crypto chunk boundary. Adjust if `data.DefaultChunkSize` changes.
   - Lifecycle/GC are unchanged: chunks stored on disk are opaque ciphertext blobs. Lifecycle transitions (CAS-on-storage-class) move ciphertext between classes verbatim. GC deletes ciphertext OIDs verbatim.
+---
+
+## 2026-04-26 - US-005
+- Wired SSE-S3 through the multipart Initiate / UploadPart / Complete path.
+  - `initiateMultipart`: when AES256, resolve master, generate a per-upload DEK, wrap, persist on the multipart_uploads row (`SSEKey` blob + `SSEKeyID` text). Master not configured → 500.
+  - `uploadPart`: when `mu.SSE == AES256`, unwrap the upload's DEK and stream the body through `sseEncryptingReader` with `oid = key + ":part=" + partNumber`. Per-part `ETag` + `Size` come from `encReader.PlaintextETag()` / `PlaintextSize()` so AWS-compatible composite ETag math + ListParts both see plaintext.
+  - `completeMultipart`: copy `mu.SSEKey` / `mu.SSEKeyID` onto the new object.
+- `data.Manifest` grew `PartChunks []int` (json omitempty) — chunk count per part in order. Used at GET time to map a flat chunk index back to (partNumber, chunkIndexInPart). Both backends populate it inside `CompleteMultipartUpload` and now also distinguish `obj.Size` (= plaintext sum of part sizes) from `obj.Manifest.Size` (= sum of chunk sizes, ciphertext).
+- `internal/s3api/sse_io.go` factored to take an `sseChunkLocator` `(flatIdx) -> (oid, chunkIndex)`. Single-PUT uses `singleChunkLocator(key)`; multipart uses `multipartChunkLocator(key, manifest.PartChunks)`. `getObject` picks the latter when `len(manifest.PartChunks) > 0`.
+- Files added:
+  - `internal/s3api/sse_multipart_test.go` — 3-part SSE round-trip (5+5+1 MiB random; verifies per-part ETag = plaintext MD5; verifies header echo on Initiate, UploadPart, Complete, GET, HEAD; verifies merged GET body byte-for-byte). Plus plaintext-multipart-still-works test against the SSE harness.
+- Files modified:
+  - `internal/data/manifest.go` — `+PartChunks`.
+  - `internal/meta/store.go` — `MultipartUpload.SSEKey/SSEKeyID`.
+  - `internal/meta/cassandra/schema.go` — additive ALTERs for `multipart_uploads.sse_key` / `sse_key_id`.
+  - `internal/meta/cassandra/store.go` — INSERT/SELECT thread the new columns; `CompleteMultipartUpload` builds `partChunks` + ciphertext-sized manifest.
+  - `internal/meta/memory/store.go` — `CompleteMultipartUpload` mirrors the same logic (no schema work; struct copy already preserves new MultipartUpload fields).
+  - `internal/s3api/multipart.go` — `initiateMultipart` generates DEK; `uploadPart` encrypts when needed; `completeMultipart` propagates SSE keys onto obj.
+  - `internal/s3api/sse_io.go` — locator abstraction + multipart locator.
+  - `internal/s3api/server.go` — `getObject` picks the multipart locator when `manifest.PartChunks` is non-empty.
+- Quality: `go build ./...`, `go vet ./...`, `go test ./...`, `go test -race ./internal/s3api/... ./internal/crypto/...` all pass.
+- **Learnings for future iterations:**
+  - Storing diversity info (PartChunks) inside the existing JSON-blob manifest column is the smallest possible schema change — beats adding a new Cassandra `list<int>` column. Future stories that need per-object metadata that GETs read but lifecycle/GC don't (e.g. SSE-KMS key-version histories, US-006 rotation tags) should consider the manifest blob first. **Don't** put it there if Cassandra-side queries need to filter on the value.
+  - Multipart SSE OID scheme (`key:part=N`) gives IV diversity across parts under the same DEK, but a re-upload of partNumber N within the same upload would reuse `(DEK, IV)` against different plaintext — AEAD breaks confidentiality of those chunks. Document and revisit in US-006 (per-upload key rotation) or US-038 (SSE-KMS, where each part can pull a fresh DEK from KMS). Memory backend GC drops the orphaned chunks anyway, but Cassandra's GC queue holds them ~`gc_after` long.
+  - Both backends' `CompleteMultipartUpload` previously conflated plaintext-totalSize with manifest.Size. The fix lifts that confusion: any future multipart story (US-024 partNumber GET, US-025 HEAD checksum echo) should keep this invariant — `obj.Size` is what the client sees, `obj.Manifest.Size` is what the data backend uses for offset bounds checks.
+  - The SSE harness in `sse_object_test.go::newSSEHarness` is now reused for multipart tests too. If a future story wants a different default master (e.g. KMS provider for US-038), build a parallel harness; do not mutate `newSSEHarness` since it is shared.
+  - I did not add a contract test in `internal/meta/storetest/contract.go` for the new MultipartUpload SSEKey fields — there isn't a `caseMultipart*` for the upload row itself, only for the completion record. If US-006 adds rotation-aware multipart, add a contract case there.
 ---
