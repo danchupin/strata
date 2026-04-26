@@ -21,6 +21,10 @@ type SessionConfig struct {
 	// SlowMS controls the slow-query threshold in milliseconds.
 	// 0 disables logging; defaults are loaded by callers via SlowMSFromEnv.
 	SlowMS int
+	// Metrics, when set, records every query into a metrics sink (latency
+	// histogram by table+op). Nil disables; binaries plug in
+	// metrics.CassandraObserver{}.
+	Metrics Metrics
 }
 
 func newCluster(cfg SessionConfig) *gocql.ClusterConfig {
@@ -43,7 +47,7 @@ func newCluster(cfg SessionConfig) *gocql.ClusterConfig {
 			Password: cfg.Password,
 		}
 	}
-	if obs := NewSlowQueryObserver(cfg.Logger, time.Duration(cfg.SlowMS)*time.Millisecond); obs != nil {
+	if obs := NewQueryObserver(cfg.Logger, time.Duration(cfg.SlowMS)*time.Millisecond, cfg.Metrics); obs != nil {
 		c.QueryObserver = obs
 	}
 	return c

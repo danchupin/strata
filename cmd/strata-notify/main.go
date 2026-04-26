@@ -130,6 +130,7 @@ func buildMetaStore(cfg *config.Config, logger *slog.Logger) (meta.Store, error)
 				Timeout:     cfg.Cassandra.Timeout,
 				Logger:      logger,
 				SlowMS:      metacassandra.SlowMSFromEnv(),
+				Metrics:     metrics.CassandraObserver{},
 			},
 			metacassandra.Options{DefaultShardCount: cfg.DefaultBucketShards},
 		)

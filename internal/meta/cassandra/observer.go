@@ -19,20 +19,48 @@ const EnvSlowQueryMS = "STRATA_CASSANDRA_SLOW_MS"
 // DefaultSlowQueryMS is the default WARN threshold when STRATA_CASSANDRA_SLOW_MS is unset.
 const DefaultSlowQueryMS = 100
 
+// Metrics is the narrow callback the QueryObserver fans out to so the
+// cassandra package never imports prometheus directly. The cmd binary plugs in
+// an adapter (e.g. metrics.CassandraObserver) when registering metrics.
+type Metrics interface {
+	ObserveQuery(table, op string, duration time.Duration, err error)
+}
+
 // SlowQueryObserver implements gocql.QueryObserver. Queries that exceed
 // Threshold (or fail with an error) are logged at WARN with structured
-// attributes including request_id, table, op, duration_ms, statement.
+// attributes including request_id, table, op, duration_ms, statement. When
+// Metrics is set every query (slow or not) is also reported to the metrics
+// adapter so dashboards see the full latency distribution.
 type SlowQueryObserver struct {
 	Logger    *slog.Logger
 	Threshold time.Duration
+	Metrics   Metrics
 }
 
-// NewSlowQueryObserver returns nil when threshold <= 0 (disabled) or logger is nil.
+// NewSlowQueryObserver returns nil when there is nothing to do — no logger
+// (or zero threshold) AND no metrics sink. When at least one side is enabled
+// the observer is created and the disabled side is silently skipped per call.
 func NewSlowQueryObserver(logger *slog.Logger, threshold time.Duration) *SlowQueryObserver {
 	if logger == nil || threshold <= 0 {
 		return nil
 	}
 	return &SlowQueryObserver{Logger: logger, Threshold: threshold}
+}
+
+// NewQueryObserver builds an observer that fans out to a logger (slow + error
+// queries only) AND a metrics sink (every query). Returns nil when both are
+// disabled. Either side may be nil.
+func NewQueryObserver(logger *slog.Logger, threshold time.Duration, m Metrics) *SlowQueryObserver {
+	logEnabled := logger != nil && threshold > 0
+	if !logEnabled && m == nil {
+		return nil
+	}
+	o := &SlowQueryObserver{Metrics: m}
+	if logEnabled {
+		o.Logger = logger
+		o.Threshold = threshold
+	}
+	return o
 }
 
 // SlowMSFromEnv reads STRATA_CASSANDRA_SLOW_MS. Empty/invalid -> default (100ms).
@@ -49,14 +77,21 @@ func SlowMSFromEnv() int {
 	return n
 }
 
-// ObserveQuery is called by gocql for every query. Logs only when the elapsed
-// time meets the threshold or the query failed.
+// ObserveQuery is called by gocql for every query. The metrics sink (if set)
+// records every observation; the logger emits WARN only for slow or failed
+// queries.
 func (o *SlowQueryObserver) ObserveQuery(ctx context.Context, q gocql.ObservedQuery) {
 	dur := q.End.Sub(q.Start)
+	table, op := parseStatement(q.Statement)
+	if o.Metrics != nil {
+		o.Metrics.ObserveQuery(table, op, dur, q.Err)
+	}
+	if o.Logger == nil || o.Threshold <= 0 {
+		return
+	}
 	if q.Err == nil && dur < o.Threshold {
 		return
 	}
-	table, op := parseStatement(q.Statement)
 	attrs := []any{
 		"request_id", logging.RequestIDFromContext(ctx),
 		"table", table,

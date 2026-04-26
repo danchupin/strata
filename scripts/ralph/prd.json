@@ -285,8 +285,8 @@
         "go test ./internal/metrics/... passes"
       ],
       "priority": 17,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "internal/metrics extended: HTTPDuration histogram now labelled {method, path, status} (was {method} only). New TemplatePath collapses URL paths to a low-cardinality label set: '/', '/{bucket}', '/{bucket}/{key}', plus admin endpoints '/metrics', '/healthz', '/readyz' kept literal. ObserveHTTP middleware uses TemplatePath(r.URL.Path) + strconv.Itoa(rw.status). New CassandraQueryDuration *HistogramVec named strata_cassandra_query_duration_seconds with labels {table, op}; registered alongside other metrics in metrics.Register(). New metrics.CassandraObserver{} struct implements the cassandra.Metrics interface and is the cmd-layer adapter (keeps internal/meta/cassandra free of prometheus). internal/meta/cassandra: new Metrics interface (ObserveQuery(table, op, dur, err)). SlowQueryObserver grew an optional Metrics field; new NewQueryObserver(logger, threshold, metrics) returns a single observer that fans out to logger (slow + error queries only) AND metrics (every query). NewSlowQueryObserver kept (log-only) for backward compat. SessionConfig.Metrics field wires into the gocql QueryObserver via newCluster. All 6 /metrics-exposing binaries (gateway, gc, lifecycle, notify, replicator, access-log) now pass Metrics: metrics.CassandraObserver{} into SessionConfig; rewrap doesn't expose /metrics so wiring skipped. Tests: internal/metrics/metrics_test.go covers TemplatePath cases (admin endpoints + bucket/key shapes), ObserveHTTP labels (PUT/{bucket}/{key}/201 + default-200 path), CassandraObserver records under (table, op) and falls back to (unknown, UNKNOWN) on empty inputs, metric-name presence guard. internal/meta/cassandra/observer_test.go grew captureMetrics fake + 4 tests covering metrics-on-every-query, log-only-when-slow, metrics-only-no-logger, both-disabled-returns-nil, error forwarded to metrics. go build/vet/test all green."
     },
     {
       "id": "US-018",

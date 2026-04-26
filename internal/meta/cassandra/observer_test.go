@@ -95,6 +95,106 @@ func TestNewSlowQueryObserverDisabled(t *testing.T) {
 	}
 }
 
+type captureMetrics struct {
+	calls []struct {
+		table, op string
+		dur       time.Duration
+		err       error
+	}
+}
+
+func (c *captureMetrics) ObserveQuery(table, op string, dur time.Duration, err error) {
+	c.calls = append(c.calls, struct {
+		table, op string
+		dur       time.Duration
+		err       error
+	}{table, op, dur, err})
+}
+
+func TestQueryObserverRecordsMetricForEveryQuery(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	m := &captureMetrics{}
+	obs := NewQueryObserver(logger, 100*time.Millisecond, m)
+	if obs == nil {
+		t.Fatal("expected non-nil observer with metrics")
+	}
+
+	start := time.Now()
+	// Fast query: not logged but still recorded by metrics.
+	obs.ObserveQuery(context.Background(), gocql.ObservedQuery{
+		Statement: "SELECT * FROM buckets",
+		Start:     start,
+		End:       start.Add(10 * time.Millisecond),
+	})
+	if len(m.calls) != 1 {
+		t.Fatalf("metrics should record fast queries; got %d calls", len(m.calls))
+	}
+	if m.calls[0].table != "buckets" || m.calls[0].op != "SELECT" {
+		t.Fatalf("unexpected (table,op): (%q,%q)", m.calls[0].table, m.calls[0].op)
+	}
+	if m.calls[0].dur != 10*time.Millisecond {
+		t.Fatalf("expected dur=10ms, got %v", m.calls[0].dur)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("fast query should not log: %s", buf.String())
+	}
+
+	// Slow query: metrics + log.
+	obs.ObserveQuery(context.Background(), gocql.ObservedQuery{
+		Statement: "INSERT INTO objects (bucket_id, key) VALUES (?, ?)",
+		Start:     start,
+		End:       start.Add(250 * time.Millisecond),
+	})
+	if len(m.calls) != 2 {
+		t.Fatalf("metrics should record slow queries; got %d calls", len(m.calls))
+	}
+	if !strings.Contains(buf.String(), `"msg":"cassandra: slow query"`) {
+		t.Fatalf("slow query should log; got %s", buf.String())
+	}
+}
+
+func TestQueryObserverMetricsOnlyNoLogger(t *testing.T) {
+	m := &captureMetrics{}
+	obs := NewQueryObserver(nil, 0, m)
+	if obs == nil {
+		t.Fatal("metrics-only observer must be non-nil")
+	}
+	start := time.Now()
+	obs.ObserveQuery(context.Background(), gocql.ObservedQuery{
+		Statement: "DELETE FROM multipart_uploads WHERE upload_id = ?",
+		Start:     start,
+		End:       start.Add(2 * time.Millisecond),
+	})
+	if len(m.calls) != 1 || m.calls[0].table != "multipart_uploads" || m.calls[0].op != "DELETE" {
+		t.Fatalf("unexpected metrics calls: %+v", m.calls)
+	}
+}
+
+func TestQueryObserverDisabledWhenBothMissing(t *testing.T) {
+	if NewQueryObserver(nil, 0, nil) != nil {
+		t.Fatal("nil logger AND nil metrics must return nil observer")
+	}
+}
+
+func TestQueryObserverPassesErrorToMetrics(t *testing.T) {
+	m := &captureMetrics{}
+	obs := NewQueryObserver(nil, 0, m)
+	start := time.Now()
+	obs.ObserveQuery(context.Background(), gocql.ObservedQuery{
+		Statement: "UPDATE objects SET deleted = ?",
+		Start:     start,
+		End:       start.Add(time.Millisecond),
+		Err:       errors.New("write timeout"),
+	})
+	if len(m.calls) != 1 {
+		t.Fatalf("expected 1 metrics call, got %d", len(m.calls))
+	}
+	if m.calls[0].err == nil || m.calls[0].err.Error() != "write timeout" {
+		t.Fatalf("error not forwarded: %v", m.calls[0].err)
+	}
+}
+
 func TestSlowMSFromEnv(t *testing.T) {
 	cases := []struct {
 		set   bool
