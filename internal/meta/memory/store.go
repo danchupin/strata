@@ -38,6 +38,7 @@ type Store struct {
 	accessKeys     map[string]*meta.IAMAccessKey
 	gc             map[string][]meta.GCEntry
 	notifyQueue    map[uuid.UUID][]meta.NotificationEvent
+	notifyDLQ      map[uuid.UUID][]meta.NotificationDLQEntry
 	mpDone         map[completionKey]*completionEntry
 	rewrapProgress map[uuid.UUID]*meta.RewrapProgress
 	locker         *Locker
@@ -97,6 +98,7 @@ func New() *Store {
 		accessKeys:   make(map[string]*meta.IAMAccessKey),
 		gc:             make(map[string][]meta.GCEntry),
 		notifyQueue:    make(map[uuid.UUID][]meta.NotificationEvent),
+		notifyDLQ:      make(map[uuid.UUID][]meta.NotificationDLQEntry),
 		mpDone:         make(map[completionKey]*completionEntry),
 		rewrapProgress: make(map[uuid.UUID]*meta.RewrapProgress),
 		locker:         NewLocker(),
@@ -184,6 +186,44 @@ func (s *Store) AckNotification(ctx context.Context, evt meta.NotificationEvent)
 		}
 	}
 	return nil
+}
+
+func (s *Store) EnqueueNotificationDLQ(ctx context.Context, entry *meta.NotificationDLQEntry) error {
+	if entry == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := *entry
+	if len(entry.Payload) > 0 {
+		cp.Payload = append([]byte(nil), entry.Payload...)
+	}
+	if cp.EnqueuedAt.IsZero() {
+		cp.EnqueuedAt = time.Now().UTC()
+	}
+	s.notifyDLQ[entry.BucketID] = append(s.notifyDLQ[entry.BucketID], cp)
+	return nil
+}
+
+func (s *Store) ListNotificationDLQ(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.NotificationDLQEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	rows := s.notifyDLQ[bucketID]
+	out := make([]meta.NotificationDLQEntry, 0, len(rows))
+	for _, e := range rows {
+		cp := e
+		if len(e.Payload) > 0 {
+			cp.Payload = append([]byte(nil), e.Payload...)
+		}
+		out = append(out, cp)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
 }
 
 func (s *Store) AckGCEntry(ctx context.Context, region string, e meta.GCEntry) error {

@@ -1026,6 +1026,88 @@ func (s *Store) AckNotification(ctx context.Context, evt meta.NotificationEvent)
 	).WithContext(ctx).Exec()
 }
 
+func notifyDay(t time.Time) time.Time {
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+func (s *Store) EnqueueNotificationDLQ(ctx context.Context, entry *meta.NotificationDLQEntry) error {
+	if entry == nil {
+		return nil
+	}
+	if entry.EnqueuedAt.IsZero() {
+		entry.EnqueuedAt = time.Now().UTC()
+	}
+	if entry.EventID == "" {
+		entry.EventID = gocql.TimeUUID().String()
+	}
+	eventUUID, err := gocql.ParseUUID(entry.EventID)
+	if err != nil {
+		return err
+	}
+	day := notifyDay(entry.EnqueuedAt)
+	return s.s.Query(
+		`INSERT INTO notify_dlq (bucket_id, day, event_id, bucket_name, object_key, event_name, event_time, config_id, target_type, target_arn, payload, attempts, reason, enqueued_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		gocqlUUID(entry.BucketID), day, eventUUID, entry.Bucket, entry.Key,
+		entry.EventName, entry.EventTime, entry.ConfigID, entry.TargetType, entry.TargetARN,
+		entry.Payload, entry.Attempts, entry.Reason, entry.EnqueuedAt,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) ListNotificationDLQ(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.NotificationDLQEntry, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	now := time.Now().UTC()
+	day := notifyDay(now)
+	out := make([]meta.NotificationDLQEntry, 0, limit)
+	// Walk the last 30 days of DLQ partitions; matches the audit/retention
+	// window so an operator inspecting the queue catches everything.
+	for i := 0; i < 30 && len(out) < limit; i++ {
+		partition := day.AddDate(0, 0, -i)
+		iter := s.s.Query(
+			`SELECT event_id, bucket_name, object_key, event_name, event_time, config_id, target_type, target_arn, payload, attempts, reason, enqueued_at
+			 FROM notify_dlq WHERE bucket_id=? AND day=? LIMIT ?`,
+			gocqlUUID(bucketID), partition, limit-len(out),
+		).WithContext(ctx).Iter()
+		var (
+			eventID                                            gocql.UUID
+			bucket, key, name, configID, targetType, targetARN string
+			eventTime, enqueuedAt                              time.Time
+			payload                                            []byte
+			attempts                                           int
+			reason                                             string
+		)
+		for iter.Scan(&eventID, &bucket, &key, &name, &eventTime, &configID, &targetType, &targetARN, &payload, &attempts, &reason, &enqueuedAt) {
+			out = append(out, meta.NotificationDLQEntry{
+				NotificationEvent: meta.NotificationEvent{
+					BucketID:   bucketID,
+					Bucket:     bucket,
+					Key:        key,
+					EventID:    eventID.String(),
+					EventName:  name,
+					EventTime:  eventTime,
+					ConfigID:   configID,
+					TargetType: targetType,
+					TargetARN:  targetARN,
+					Payload:    append([]byte(nil), payload...),
+				},
+				Attempts:   attempts,
+				Reason:     reason,
+				EnqueuedAt: enqueuedAt,
+			})
+			if len(out) >= limit {
+				break
+			}
+		}
+		if err := iter.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
 func (s *Store) resolveVersionID(ctx context.Context, bucketID uuid.UUID, key, versionID string) (gocql.UUID, int, error) {
 	shard := shardOf(key, s.defaultShard)
 	if versionID != "" {

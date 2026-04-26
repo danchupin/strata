@@ -35,6 +35,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"BucketMfaDeleteRoundTrip", caseBucketMfaDelete},
 		{"SSEWrapRotationRoundTrip", caseSSEWrapRotation},
 		{"NotificationQueueRoundTrip", caseNotificationQueue},
+		{"NotificationDLQRoundTrip", caseNotificationDLQ},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -379,6 +380,48 @@ func caseNotificationQueue(t *testing.T, s meta.Store) {
 	remaining, _ := s.ListPendingNotifications(ctx, b.ID, 100)
 	if len(remaining) != 0 {
 		t.Fatalf("after ack: %d remaining", len(remaining))
+	}
+}
+
+func caseNotificationDLQ(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "dlq", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	now := time.Now().UTC()
+	entry := &meta.NotificationDLQEntry{
+		NotificationEvent: meta.NotificationEvent{
+			BucketID:   b.ID,
+			Bucket:     b.Name,
+			Key:        "img/dog.jpg",
+			EventID:    newTimeUUID(),
+			EventName:  "s3:ObjectCreated:Put",
+			EventTime:  now,
+			ConfigID:   "OnPut",
+			TargetType: "topic",
+			TargetARN:  "arn:aws:sns:us-east-1:0:t",
+			Payload:    []byte(`{"Records":[{"eventName":"s3:ObjectCreated:Put"}]}`),
+		},
+		Attempts:   6,
+		Reason:     "endpoint returned 503",
+		EnqueuedAt: now,
+	}
+	if err := s.EnqueueNotificationDLQ(ctx, entry); err != nil {
+		t.Fatalf("enqueue dlq: %v", err)
+	}
+	got, err := s.ListNotificationDLQ(ctx, b.ID, 100)
+	if err != nil {
+		t.Fatalf("list dlq: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d dlq entries want 1", len(got))
+	}
+	if got[0].Attempts != 6 || got[0].Reason != entry.Reason || got[0].Key != entry.Key {
+		t.Fatalf("dlq row: %+v", got[0])
+	}
+	if string(got[0].Payload) != string(entry.Payload) {
+		t.Fatalf("payload: %q", string(got[0].Payload))
 	}
 }
 

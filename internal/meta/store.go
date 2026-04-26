@@ -228,6 +228,17 @@ type NotificationEvent struct {
 	Payload    []byte
 }
 
+// NotificationDLQEntry is a row in notify_dlq, written by the notify worker
+// after a notification has exhausted its retry budget. The original event is
+// embedded; Reason captures the last delivery error and Attempts the number
+// of failed sends.
+type NotificationDLQEntry struct {
+	NotificationEvent
+	Attempts   int
+	Reason     string
+	EnqueuedAt time.Time
+}
+
 type Store interface {
 	CreateBucket(ctx context.Context, name, owner, defaultClass string) (*Bucket, error)
 	GetBucket(ctx context.Context, name string) (*Bucket, error)
@@ -256,6 +267,9 @@ type Store interface {
 	EnqueueNotification(ctx context.Context, evt *NotificationEvent) error
 	ListPendingNotifications(ctx context.Context, bucketID uuid.UUID, limit int) ([]NotificationEvent, error)
 	AckNotification(ctx context.Context, evt NotificationEvent) error
+
+	EnqueueNotificationDLQ(ctx context.Context, entry *NotificationDLQEntry) error
+	ListNotificationDLQ(ctx context.Context, bucketID uuid.UUID, limit int) ([]NotificationDLQEntry, error)
 
 	SetObjectTags(ctx context.Context, bucketID uuid.UUID, key, versionID string, tags map[string]string) error
 	GetObjectTags(ctx context.Context, bucketID uuid.UUID, key, versionID string) (map[string]string, error)

@@ -187,6 +187,23 @@ var tableDDL = []string{
 		payload      blob,
 		PRIMARY KEY ((bucket_id, hour), event_id)
 	)`,
+	`CREATE TABLE IF NOT EXISTS notify_dlq (
+		bucket_id    uuid,
+		day          timestamp,
+		event_id     timeuuid,
+		bucket_name  text,
+		object_key   text,
+		event_name   text,
+		event_time   timestamp,
+		config_id    text,
+		target_type  text,
+		target_arn   text,
+		payload      blob,
+		attempts     int,
+		reason       text,
+		enqueued_at  timestamp,
+		PRIMARY KEY ((bucket_id, day), event_id)
+	)`,
 }
 
 var alterStatements = []string{
