@@ -104,6 +104,12 @@ services:
     volumes:
       - strata-ceph-etc:/etc/ceph:ro
       - ../strata.toml:/etc/strata/strata.toml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/readyz >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 30s
     restart: unless-stopped
 
   prometheus:

@@ -108,6 +108,15 @@ downstream middlewares like `internal/s3api/access_log.go` keep reading it via `
 correlated without additional plumbing. Use `WarnContext`/`InfoContext`/`ErrorContext` (not the no-context variants)
 so future ctx-bound loggers ride through.
 
+Health probes: `internal/health.Handler` serves `/healthz` (always 200) and `/readyz` (fans out probes
+concurrently with a 1s timeout). Probes are injected by the cmd binary via type-assertion against
+`cassandraProber` / `radosProber` interfaces in `cmd/strata-gateway/main.go::buildHealthHandler`, so the package
+stays free of cassandra/rados imports. `cassandra.Store.Probe(ctx)` runs `SELECT now() FROM system.local`;
+`rados.Backend.Probe(ctx, oid)` stats a canary OID (`STRATA_RADOS_HEALTH_OID`, default `strata-readyz-canary`)
+and treats `goceph.ErrNotFound` as success — only transport/auth errors fail. Memory backends register no probe,
+so a pure in-memory gateway is always ready. Both endpoints sit on the mux ahead of `/`, so they bypass auth
+and the access-log middleware regardless of `STRATA_AUTH_MODE`.
+
 Per-storage observers: `cassandra.SessionConfig{Logger, SlowMS}` installs `gocql.QueryObserver`
 (`internal/meta/cassandra/observer.go::SlowQueryObserver`) — queries over `STRATA_CASSANDRA_SLOW_MS` (default 100) or
 with errors log WARN with `request_id`/`table`/`op`/`duration_ms`/`statement`. `rados.Config.Logger` enables per-op DEBUG

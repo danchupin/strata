@@ -302,3 +302,39 @@ func (b *Backend) Close() error {
 	}
 	return nil
 }
+
+// Probe stats a canary OID in the STANDARD-class pool to confirm RADOS is
+// reachable. ENOENT (canary missing) still proves connectivity and counts as
+// success — only transport / auth errors fail. Honours ctx via a goroutine
+// + select; the underlying librados Stat itself is blocking.
+func (b *Backend) Probe(ctx context.Context, oid string) error {
+	if b == nil || b.conn == nil {
+		return errors.New("rados backend closed")
+	}
+	if oid == "" {
+		return errors.New("rados probe: oid required")
+	}
+	spec, err := b.resolveClass("STANDARD")
+	if err != nil {
+		return err
+	}
+	ioctx, err := b.ioctx(spec.Pool, spec.Namespace)
+	if err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, sErr := ioctx.Stat(oid)
+		if sErr != nil && !errors.Is(sErr, goceph.ErrNotFound) {
+			done <- sErr
+			return
+		}
+		done <- nil
+	}()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-done:
+		return err
+	}
+}

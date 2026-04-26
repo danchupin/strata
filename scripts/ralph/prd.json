@@ -337,8 +337,8 @@
         "go test ./cmd/strata-gateway/... ./internal/s3api/... passes"
       ],
       "priority": 20,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "internal/health.Handler exposes Healthz (always 200 plain 'ok') + Readyz (probes fan out concurrently with 1s timeout, default; 503 + per-failure body lines on any probe error). Probes injected from cmd/strata-gateway/main.go::buildHealthHandler via type-assertion against cassandraProber/radosProber interfaces, so internal/health stays import-free of backends. cassandra.Store.Probe(ctx) runs SELECT now() FROM system.local; rados.Backend.Probe(ctx, oid) stats a canary OID (STRATA_RADOS_HEALTH_OID, default strata-readyz-canary) in the STANDARD-class pool and treats goceph.ErrNotFound as success (only transport/auth failures fail). Memory backends register no probe (always ready). /healthz and /readyz are mounted on the mux directly (mux.HandleFunc), ahead of /, so they bypass auth.Middleware + access-log middleware regardless of STRATA_AUTH_MODE. deploy/docker/docker-compose.yml gateway service got a healthcheck stanza hitting /readyz via curl. Unit tests in internal/health and cmd/strata-gateway cover: /healthz always 200 even when probes fail, /readyz 200 with all probes ok, 503 with cassandra-down (body shows failing probe name only), 503 with rados-down, ctx-timeout failure, env-var override of canary OID. ceph build still requires librados (not buildable on macOS without ceph-devel) — same constraint as existing rados code."
     },
     {
       "id": "US-021",

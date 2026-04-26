@@ -53,6 +53,17 @@ func (s *Store) Close() error {
 // (leader election, admin tooling) that need direct CQL access.
 func (s *Store) Session() *gocql.Session { return s.s }
 
+// Probe runs a lightweight `SELECT now() FROM system.local` to confirm the
+// gocql session is still attached to a live coordinator. Used by the gateway
+// /readyz endpoint; honours ctx cancellation.
+func (s *Store) Probe(ctx context.Context) error {
+	if s == nil || s.s == nil || s.s.Closed() {
+		return errors.New("cassandra session closed")
+	}
+	var t time.Time
+	return s.s.Query("SELECT now() FROM system.local").WithContext(ctx).Scan(&t)
+}
+
 func shardOf(key string, n int) int {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(key))

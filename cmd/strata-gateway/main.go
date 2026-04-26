@@ -16,6 +16,7 @@ import (
 	"github.com/danchupin/strata/internal/data"
 	datamem "github.com/danchupin/strata/internal/data/memory"
 	datarados "github.com/danchupin/strata/internal/data/rados"
+	"github.com/danchupin/strata/internal/health"
 	"github.com/danchupin/strata/internal/logging"
 	"github.com/danchupin/strata/internal/meta"
 	metacassandra "github.com/danchupin/strata/internal/meta/cassandra"
@@ -95,8 +96,12 @@ func main() {
 		apiHandler.Master = masterProvider
 	}
 
+	healthHandler := buildHealthHandler(metaStore, dataBackend)
+
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
+	mux.HandleFunc("/healthz", healthHandler.Healthz)
+	mux.HandleFunc("/readyz", healthHandler.Readyz)
 	mux.Handle("/", logging.NewMiddleware(logger, metrics.ObserveHTTP(mw.Wrap(s3api.NewAccessLogMiddleware(metaStore, apiHandler), s3api.WriteAuthDenied))))
 
 	srv := &http.Server{
@@ -160,6 +165,36 @@ func buildDataBackend(cfg *config.Config, logger *slog.Logger) (data.Backend, er
 	default:
 		return nil, errors.New("unknown data backend")
 	}
+}
+
+// healthCanaryOID returns the RADOS OID stat'd by /readyz to confirm
+// connectivity. Defaults to a fixed canary; override via env to point at a
+// known-existing OID (operator-installed).
+func healthCanaryOID() string {
+	if v := os.Getenv("STRATA_RADOS_HEALTH_OID"); v != "" {
+		return v
+	}
+	return "strata-readyz-canary"
+}
+
+type cassandraProber interface {
+	Probe(ctx context.Context) error
+}
+
+type radosProber interface {
+	Probe(ctx context.Context, oid string) error
+}
+
+func buildHealthHandler(metaStore meta.Store, dataBackend data.Backend) *health.Handler {
+	probes := map[string]health.Probe{}
+	if cp, ok := metaStore.(cassandraProber); ok {
+		probes["cassandra"] = cp.Probe
+	}
+	if rp, ok := dataBackend.(radosProber); ok {
+		oid := healthCanaryOID()
+		probes["rados"] = func(ctx context.Context) error { return rp.Probe(ctx, oid) }
+	}
+	return &health.Handler{Probes: probes}
 }
 
 func buildMetaStore(cfg *config.Config, logger *slog.Logger) (meta.Store, error) {

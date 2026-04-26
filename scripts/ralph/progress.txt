@@ -433,3 +433,21 @@ Started: Sun Apr 26 20:43:22 MSK 2026
   - The `make smoke-grafana` script depends on Python 3 for JSON parsing — minimal, but if CI runs in a barebones container, swap to `jq` (already on most CI base images).
   - Don't bake panel-id expectations into the test — Grafana accepts any int id and will renumber on UI edits. Test by metric reference instead (collect every panel target's `expr`, assert each required metric substring is present).
 ---
+
+## 2026-04-27 - US-020
+- Added `internal/health` package: `Handler{Probes map[string]Probe, Timeout time.Duration}` with `Healthz` (always 200 plain "ok") and `Readyz` (fan-out probes concurrently with default 1s timeout; returns 503 with `<name>: <error>\n` body lines on failure, 200 + "ok" otherwise).
+- Added `cassandra.Store.Probe(ctx)` — runs `SELECT now() FROM system.local`; honours ctx via gocql `WithContext`.
+- Added `rados.Backend.Probe(ctx, oid)` (ceph build only) — stats canary OID in STANDARD-class pool, treats `goceph.ErrNotFound` as success (only transport/auth errors fail). Stat is wrapped in goroutine + select{ctx.Done(), result} so the 1s readyz timeout kills a hung librados call.
+- Wired `/healthz` + `/readyz` in `cmd/strata-gateway/main.go` via `mux.HandleFunc` ahead of `/`, so they bypass `auth.Middleware` regardless of `STRATA_AUTH_MODE`. `buildHealthHandler` builds probes via type-assertion against `cassandraProber` / `radosProber` interfaces — memory backends register no probe (always ready). Canary OID configurable via `STRATA_RADOS_HEALTH_OID` (default `strata-readyz-canary`).
+- Added `deploy/docker/docker-compose.yml` healthcheck stanza on `gateway` service: `curl -fsS http://127.0.0.1:9000/readyz`, 10s interval, 30s start_period.
+- Files added: `internal/health/health.go`, `internal/health/health_test.go` (7 tests), `cmd/strata-gateway/main_test.go` (5 tests).
+- Files modified: `internal/meta/cassandra/store.go` (+Probe), `internal/data/rados/backend.go` (+Probe ceph-tagged), `cmd/strata-gateway/main.go` (+health import + buildHealthHandler + mux registration), `deploy/docker/docker-compose.yml` (+healthcheck), `CLAUDE.md` (health-probe paragraph).
+- Quality: `go build ./...`, `go vet ./...`, `go test ./...` all pass. `go test ./internal/health/...` 7/7 PASS, `go test ./cmd/strata-gateway/...` 5/5 PASS.
+- **Learnings for future iterations:**
+  - `internal/health` is the canonical add-on point for new readiness probes. Stay import-free of backends — define probes in cmd via type-assertion against narrow `<Backend>Prober` interfaces. New backends that should participate in `/readyz` add a `Probe(ctx) error` method, the cmd type-asserts and registers it. Memory/test backends don't need to implement Probe — `/readyz` for an in-memory gateway is always ready.
+  - The "stat a canary OID" pattern for RADOS: treat `goceph.ErrNotFound` as success because the canary OID may legitimately not exist on a fresh cluster — the goal is to prove librados can reach Ceph + auth, not that any particular object exists. Operators who want stricter readiness can pre-create the canary OID and point `STRATA_RADOS_HEALTH_OID` at it.
+  - librados Stat is blocking — wrap in goroutine + select{ctx.Done(), result} when you want a hard timeout (1s for /readyz). Same trick for any future blocking-CGo backend probe.
+  - `mux.HandleFunc("/healthz", ...)` ahead of `mux.Handle("/", ...)` is the bypass pattern for unauthenticated infra endpoints — `/metrics` already does this. Don't try to thread a "skip-auth" flag through `auth.Middleware`; the mux route order does it.
+  - Keep `cmd/strata-gateway/main_test.go` lightweight — it's the only place the wiring is testable without spinning up Cassandra/RADOS. Use `metamem.New()` + the small `fakeMeta` wrapper to inject probe errors. Same pattern works for any future cmd-level wiring (US-021 vhost routing, US-035 admin routes).
+  - Docker healthcheck uses `curl -fsS` from the ceph base image — `wget` is not always present; `curl` is. If a future image ditches curl, switch to a small `/healthz` ping written in Go and bundled as a sidecar binary.
+---
