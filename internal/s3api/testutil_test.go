@@ -2,6 +2,7 @@ package s3api_test
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,6 +26,7 @@ func newHarness(t *testing.T) *testHarness {
 	t.Helper()
 	api := s3api.New(datamem.New(), metamem.New())
 	api.Region = "default"
+	api.Master = harnessMasterProvider{}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if p := r.Header.Get(testPrincipalHeader); p != "" {
 			ctx := auth.WithAuth(r.Context(), &auth.AuthInfo{Owner: p, AccessKey: p})
@@ -35,6 +37,19 @@ func newHarness(t *testing.T) *testHarness {
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 	return &testHarness{t: t, ts: ts}
+}
+
+// harnessMasterProvider is a fixed-key master.Provider used by the default
+// test harness so SSE-S3 PUT/GET round-trips work without needing each test
+// to wire its own provider.
+type harnessMasterProvider struct{}
+
+func (harnessMasterProvider) Resolve(_ context.Context) ([]byte, string, error) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(0x10 + i)
+	}
+	return key, "harness-1", nil
 }
 
 func (h *testHarness) do(method, path string, body io.Reader, headers ...string) *http.Response {

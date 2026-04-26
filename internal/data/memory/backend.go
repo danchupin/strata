@@ -92,6 +92,23 @@ func (b *Backend) Delete(ctx context.Context, m *data.Manifest) error {
 
 func (b *Backend) Close() error { return nil }
 
+// CorruptFirstChunk flips a byte in the first stored chunk and returns true.
+// Test-only helper used by SSE round-trip tests to simulate at-rest tampering;
+// returns false if there are no chunks.
+func (b *Backend) CorruptFirstChunk() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for oid, data := range b.chunks {
+		if len(data) == 0 {
+			continue
+		}
+		data[0] ^= 0xFF
+		b.chunks[oid] = data
+		return true
+	}
+	return false
+}
+
 type memReader struct {
 	b        *Backend
 	m        *data.Manifest

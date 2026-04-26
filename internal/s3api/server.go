@@ -2,6 +2,7 @@ package s3api
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/xml"
 	"errors"
 	"io"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"github.com/danchupin/strata/internal/auth"
+	"github.com/danchupin/strata/internal/crypto/master"
+	ssecrypto "github.com/danchupin/strata/internal/crypto/sse"
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
 	"github.com/danchupin/strata/internal/metrics"
@@ -40,6 +43,10 @@ type Server struct {
 	// MFAClock, when set, is used instead of time.Now for TOTP validation.
 	// Tests inject a deterministic clock through this hook.
 	MFAClock func() time.Time
+	// Master, when set, supplies the SSE-S3 master key used to wrap per-object
+	// DEKs. When nil, requests with x-amz-server-side-encryption=AES256 (or a
+	// bucket-default that resolves to AES256) return 500 InternalError.
+	Master master.Provider
 }
 
 func New(d data.Backend, m meta.Store) *Server {
@@ -727,7 +734,37 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	defer cancel()
 	body := io.Reader(r.Body)
 	if len(checksumEntries) > 0 {
-		body = io.TeeReader(r.Body, checksumWriter(checksumEntries))
+		body = io.TeeReader(body, checksumWriter(checksumEntries))
+	}
+	var (
+		encReader   *sseEncryptingReader
+		wrappedDEK  []byte
+		masterKeyID string
+	)
+	if sse == sseAlgorithmAES256 {
+		if s.Master == nil {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		mk, mid, merr := s.Master.Resolve(ctx)
+		if merr != nil {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		dek := make([]byte, ssecrypto.KeySize)
+		if _, rerr := rand.Read(dek); rerr != nil {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		wrapped, werr := ssecrypto.WrapDEK(mk, dek)
+		if werr != nil {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		wrappedDEK = wrapped
+		masterKeyID = mid
+		encReader = newSSEEncryptingReader(body, dek, key)
+		body = encReader
 	}
 	m, err := s.Data.PutChunks(ctx, body, class)
 	if err != nil {
@@ -748,17 +785,25 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		writeError(w, r, ErrBadDigest)
 		return
 	}
+	objSize := m.Size
+	objETag := m.ETag
+	if encReader != nil {
+		objSize = encReader.PlaintextSize()
+		objETag = encReader.PlaintextETag()
+	}
 	obj := &meta.Object{
 		BucketID:     b.ID,
 		Key:          key,
-		Size:         m.Size,
-		ETag:         m.ETag,
+		Size:         objSize,
+		ETag:         objETag,
 		ContentType:  r.Header.Get("Content-Type"),
 		StorageClass: m.Class,
 		Mtime:        time.Now().UTC(),
 		Manifest:     m,
 		Checksums:    sums,
 		SSE:          sse,
+		SSEKey:       wrappedDEK,
+		SSEKeyID:     masterKeyID,
 		UserMeta:     extractUserMeta(r.Header),
 		CacheControl: r.Header.Get("Cache-Control"),
 		Expires:      r.Header.Get("Expires"),
@@ -791,7 +836,10 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		mapMetaErr(w, r, err)
 		return
 	}
-	w.Header().Set("ETag", `"`+m.ETag+`"`)
+	w.Header().Set("ETag", `"`+obj.ETag+`"`)
+	if obj.SSE != "" {
+		w.Header().Set("x-amz-server-side-encryption", obj.SSE)
+	}
 	if meta.IsVersioningActive(b.Versioning) && obj.VersionID != "" {
 		w.Header().Set("x-amz-version-id", obj.VersionID)
 	}
@@ -877,6 +925,32 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 
 	if !body {
 		w.WriteHeader(status)
+		return
+	}
+	if o.SSE == sseAlgorithmAES256 && len(o.SSEKey) > 0 {
+		if s.Master == nil {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		mk, _, merr := s.Master.Resolve(r.Context())
+		if merr != nil {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		dek, uerr := ssecrypto.UnwrapDEK(mk, o.SSEKey)
+		if uerr != nil {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		dec := newSSEDecryptingReader(r.Context(), s.Data, o.Manifest, dek, key, offset, length)
+		if err := dec.Preload(); err != nil {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		w.WriteHeader(status)
+		if _, copyErr := io.Copy(w, dec); copyErr != nil {
+			return
+		}
 		return
 	}
 	rc, err := s.Data.GetChunks(r.Context(), o.Manifest, offset, length)

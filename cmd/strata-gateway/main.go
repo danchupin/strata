@@ -11,6 +11,7 @@ import (
 
 	"github.com/danchupin/strata/internal/auth"
 	"github.com/danchupin/strata/internal/config"
+	"github.com/danchupin/strata/internal/crypto/master"
 	"github.com/danchupin/strata/internal/data"
 	datamem "github.com/danchupin/strata/internal/data/memory"
 	datarados "github.com/danchupin/strata/internal/data/rados"
@@ -77,6 +78,13 @@ func main() {
 		log.Fatalf("mfa secrets: %v", err)
 	}
 	apiHandler.MFASecrets = mfaSecrets
+	masterProvider, err := master.FromEnv()
+	if err != nil && !errors.Is(err, master.ErrNoConfig) {
+		log.Fatalf("sse master key: %v", err)
+	}
+	if masterProvider != nil {
+		apiHandler.Master = masterProvider
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())

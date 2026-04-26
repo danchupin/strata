@@ -189,6 +189,8 @@ var alterStatements = []string{
 	`ALTER TABLE multipart_uploads ADD cache_control text`,
 	`ALTER TABLE multipart_uploads ADD expires text`,
 	`ALTER TABLE multipart_uploads ADD checksum_algorithm text`,
+	`ALTER TABLE objects ADD sse_key blob`,
+	`ALTER TABLE objects ADD sse_key_id text`,
 }
 
 func isColumnAlreadyExists(err error) bool {

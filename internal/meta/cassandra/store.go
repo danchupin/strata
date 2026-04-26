@@ -321,13 +321,20 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 		`INSERT INTO objects (bucket_id, shard, key, version_id, is_latest, is_delete_marker,
 		 size, etag, content_type, storage_class, mtime, manifest, user_meta, tags,
 		 retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
-		 cache_control, expires, parts_count)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 cache_control, expires, parts_count, sse_key, sse_key_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		gocqlUUID(o.BucketID), shard, o.Key, versionID, true, o.IsDeleteMarker,
 		o.Size, o.ETag, o.ContentType, o.StorageClass, o.Mtime, manifestBlob, o.UserMeta, o.Tags,
 		retainUntil, nilIfEmpty(o.RetainMode), o.LegalHold, o.Checksums, nilIfEmpty(o.SSE), nilIfEmpty(o.SSECKeyMD5), nilIfEmpty(o.RestoreStatus),
-		nilIfEmpty(o.CacheControl), nilIfEmpty(o.Expires), partsCount,
+		nilIfEmpty(o.CacheControl), nilIfEmpty(o.Expires), partsCount, nilIfEmptyBytes(o.SSEKey), nilIfEmpty(o.SSEKeyID),
 	).WithContext(ctx).Exec()
+}
+
+func nilIfEmptyBytes(b []byte) interface{} {
+	if len(b) == 0 {
+		return nil
+	}
+	return b
 }
 
 func nilIfEmpty(s string) interface{} {
@@ -360,6 +367,8 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		cacheControl string
 		expires      string
 		partsCount   int
+		sseKey       []byte
+		sseKeyID     string
 	)
 	var err error
 	if versionID == "" {
@@ -367,13 +376,13 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 			`SELECT version_id, is_latest, is_delete_marker, size, etag, content_type,
 			        storage_class, mtime, manifest, user_meta, tags,
 			        retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
-			        cache_control, expires, parts_count
+			        cache_control, expires, parts_count, sse_key, sse_key_id
 			 FROM objects WHERE bucket_id=? AND shard=? AND key=? LIMIT 1`,
 			gocqlUUID(bucketID), shard, key,
 		).WithContext(ctx).Scan(&versionUUID, &isLatest, &isDeleteMark, &size, &etag, &ctype,
 			&class, &mtime, &manifestBlob, &userMeta, &tags,
 			&retainUntil, &retainMode, &legalHold, &checksums, &sse, &ssecKeyMD5, &restore,
-			&cacheControl, &expires, &partsCount)
+			&cacheControl, &expires, &partsCount, &sseKey, &sseKeyID)
 	} else {
 		vUUID, perr := gocql.ParseUUID(versionID)
 		if perr != nil {
@@ -383,13 +392,13 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 			`SELECT version_id, is_latest, is_delete_marker, size, etag, content_type,
 			        storage_class, mtime, manifest, user_meta, tags,
 			        retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
-			        cache_control, expires, parts_count
+			        cache_control, expires, parts_count, sse_key, sse_key_id
 			 FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
 			gocqlUUID(bucketID), shard, key, vUUID,
 		).WithContext(ctx).Scan(&versionUUID, &isLatest, &isDeleteMark, &size, &etag, &ctype,
 			&class, &mtime, &manifestBlob, &userMeta, &tags,
 			&retainUntil, &retainMode, &legalHold, &checksums, &sse, &ssecKeyMD5, &restore,
-			&cacheControl, &expires, &partsCount)
+			&cacheControl, &expires, &partsCount, &sseKey, &sseKeyID)
 	}
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrObjectNotFound
@@ -424,6 +433,8 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		Checksums:      checksums,
 		SSE:            sse,
 		SSECKeyMD5:     ssecKeyMD5,
+		SSEKey:         sseKey,
+		SSEKeyID:       sseKeyID,
 		RestoreStatus:  restore,
 		CacheControl:   cacheControl,
 		Expires:        expires,

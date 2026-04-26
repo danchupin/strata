@@ -66,8 +66,8 @@
         "go test ./internal/s3api/... ./internal/meta/... passes"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "meta.Object grew SSEKey []byte + SSEKeyID string. Cassandra schema additive ALTER objects ADD sse_key blob / sse_key_id text. cmd/strata-gateway/main.go calls master.FromEnv(); ErrNoConfig leaves Master nil and AES256 PUT returns 500. internal/s3api/sse_io.go: sseEncryptingReader emits 4 MiB ciphertext chunks (pChunkSize = 4 MiB - 16 byte tag) so backend chunk index == crypto chunk index. sseDecryptingReader is range-aware in plaintext space; Preload() eagerly decrypts the first chunk so AEAD failures yield 500 before the response status is committed. ETag persisted on the object row is plaintext-MD5; manifest ETag/Size remain ciphertext. OID for DeriveChunkIV is the object key (deterministic per object; DEK uniqueness is the actual security boundary). Tests cover small + multi-chunk round-trip, range across crypto-chunk boundary, plaintext interop, AES256 PUT without master configured returning 500, and corrupted-ciphertext yielding non-2xx via memory-backend CorruptFirstChunk helper."
     },
     {
       "id": "US-005",

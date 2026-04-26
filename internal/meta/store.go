@@ -134,6 +134,8 @@ type Object struct {
 	Checksums      map[string]string
 	SSE            string
 	SSECKeyMD5     string
+	SSEKey         []byte
+	SSEKeyID       string
 	RestoreStatus  string
 	PartsCount     int
 	CacheControl   string
