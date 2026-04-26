@@ -51,12 +51,74 @@ S3_TESTS_FILTER=test_multipart scripts/s3-tests/run.sh
 - A `pass rate: X%` line on stdout that is the number you cite when claiming
   "Strata is N% S3-compatible".
 
-## Baseline (as of first run)
+## Baseline
 
-Against commit `HEAD` with `auth=required`, default subset (filter matches
+History below — newest run on top. The default subset filter is the
+`DEFAULT_FILTER` in `run.sh`:
 `test_bucket_create or test_bucket_list or test_object_write or
-test_object_read or test_object_delete or test_multipart or test_versioning_obj
-or test_bucket_list_versions`):
+test_object_read or test_object_delete or test_multipart or
+test_versioning_obj or test_bucket_list_versions`.
+
+### 2026-04-26 — commit `b6aca17`
+
+After US-001..US-027 shipped, fixtures that previously errored at
+collection now resolve (IAM users, owners, checksums, bucket policy,
+ACLs, SSE, object lock, website, replication, tagging, region, MFA
+delete, anonymous identity, multipart idempotency). Default subset:
+
+```
+tests=176  passed=114  failed=62  errors=0  skipped=0
+pass rate: 64.8%
+```
+
+Executable subset grew from 19 → 176 (>9×) as the ROADMAP P-items
+closed. Headline pass rate climbed from 58% → 64.8% on a much larger
+sample. **No regressions vs the original 19-test subset:** the 11 that
+passed before still pass, and the 8 `test_headers.py` failures are the
+same deliberate SigV2 gaps.
+
+**Remaining failure clusters** (62 total):
+
+- **`test_headers.py` — 8 failures.** SigV2 / bad-auth edge cases. Same
+  as the original baseline: deliberately not implemented.
+- **List-objects shape — ~22 failures**
+  (`test_bucket_list_marker_*`, `test_bucket_list_return_data*`,
+  `test_bucket_listv2_fetchowner_*`, `test_bucket_list_delimiter_prefix*`,
+  `test_bucket_list_encoding_basic`, `test_bucket_list_maxkeys_*`,
+  `test_bucket_list_unordered`, `test_bucket_listv2_continuationtoken*`,
+  `test_bucket_list_objects_anonymous`,
+  `test_bucket_listv2_objects_anonymous`). Missing fields (`<Owner>` per
+  entry, `<Marker>`/`<NextMarker>` echo on v1 responses, `EncodingType`)
+  and pagination/encoding edge cases. ListObjects is currently V2-shape
+  only; v1 is served through the same handler.
+- **Multipart edge cases — ~15 failures** (`test_multipart_upload`,
+  `test_multipart_upload_resend_part`, `test_multipart_upload_size_too_small`,
+  `test_multipart_*_get_part`, `test_multipart_copy_*`,
+  `test_multipart_use_cksum_helper_*`, `test_multipart_put_object_if_*`,
+  `test_multipart_resend_first_finishes_last`,
+  `test_multipart_checksum_sha256`). User metadata
+  (`x-amz-meta-*`) supplied to `InitiateMultipartUpload` is not
+  preserved on the resulting object; multipart copy needs richer
+  source-range handling; `GetPart` needs `partNumber` query support;
+  conditional `If-Match`/`If-None-Match` on multipart Complete needs
+  hooking through the LWT path.
+- **Versioning — 5 failures**
+  (`test_versioning_obj_plain_null_version_*`,
+  `test_versioning_obj_suspend_versions`,
+  `test_versioning_obj_suspended_copy`). Suspend/null-version semantics:
+  on suspend, an unversioned overwrite should remove all "null"-versioned
+  ancestors atomically.
+- **Object header echo — 2 failures**
+  (`test_object_write_cache_control`, `test_object_write_expires`).
+  `Cache-Control` and `Expires` request headers are not persisted on PUT
+  and not echoed on GET/HEAD.
+- **Misc — 5 failures** (`test_bucket_create_exists`,
+  `test_bucket_create_exists_nonowner`,
+  `test_object_delete_key_bucket_gone`, `test_object_read_unreadable`,
+  `test_bucket_list_many`). CreateBucket idempotency on owner-equality,
+  DELETE on missing-bucket error code, unreadable-key 400 path.
+
+### 2026-04-12 — initial baseline
 
 ```
 tests=177  passed=11  failed=8  errors=158  skipped=0
@@ -64,22 +126,22 @@ pass rate: 6.2%
 ```
 
 Of the 177 collected, only 19 actually executed (setup succeeded); the
-remaining 158 failed at collection because their fixtures require
+remaining 158 failed at collection because their fixtures required
 not-yet-implemented features (IAM, bucket ownership, checksums, etc.).
 **Of the 19 that ran, 11 passed → 58% pass rate on the executable
-subset.** The 8 real FAILs are in `test_headers.py` covering SigV2 /
+subset.** The 8 real FAILs were in `test_headers.py` covering SigV2 /
 bad-auth edge cases we deliberately don't implement.
 
-Full suite (no filter):
+Full suite (no filter), original baseline:
 
 ```
 tests=1046  passed=3  failed=55  errors=983  skipped=5
 ```
 
-The large `errors` bucket reflects how much of S3 we don't implement yet
-— ACLs, CORS, IAM, bucket policies, website hosting, S3 Select,
-replication, checksums, etc. Each P-item closed in `ROADMAP.md` should
-shift some fraction of those errors into either pass or fail.
+The large `errors` bucket reflected how much of S3 we did not implement
+yet — ACLs, CORS, IAM, bucket policies, website hosting, S3 Select,
+replication, checksums, etc. Each P-item closed in `ROADMAP.md` shifts
+some fraction of those errors into either pass or fail.
 
 ## Interpreting failures
 
