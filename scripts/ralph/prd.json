@@ -117,8 +117,8 @@
         "go test ./internal/s3api/... passes"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "PutBucketEncryption / GetBucketEncryption / DeleteBucketEncryption already wired in internal/s3api/encryption.go via setBucketBlob/getBucketBlob (cassandra: bucket_encryption table; memory: encryption map). resolveSSE in encryption.go falls back to bucket default when x-amz-server-side-encryption header absent — applied transparently in putObject + initiateMultipart. KMS in cfg returns 501 NotImplemented; non-AES256 returns 400; missing Apply or unparseable XML returns 400 MalformedXML. After DeleteBucketEncryption the bucket reverts to plaintext on next PUT (resolveSSE returns '' on ErrNoSuchEncryption). Added tests: TestBucketEncryptionDefaultClearedAfterDelete (PUT-with-default → DELETE → PUT-without-header → no SSE header round-trip) + TestBucketEncryptionMultipartDefaultApplied (Initiate without header inherits AES256 from bucket default; UploadPart + Complete + HEAD all echo AES256). Existing tests already cover round-trip XML, default-applied-on-PUT, KMS rejected, malformed XML rejected."
     },
     {
       "id": "US-008",

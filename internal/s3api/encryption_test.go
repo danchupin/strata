@@ -99,6 +99,66 @@ func TestBucketEncryptionDefaultAppliedOnPut(t *testing.T) {
 	}
 }
 
+func TestBucketEncryptionDefaultClearedAfterDelete(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	h.mustStatus(h.doString("PUT", "/bkt?encryption=", sseConfigXML), 200)
+
+	resp := h.doString("PUT", "/bkt/k1", "before")
+	h.mustStatus(resp, 200)
+	if got := resp.Header.Get("x-amz-server-side-encryption"); got != "AES256" {
+		t.Fatalf("default SSE not applied before delete: got %q", got)
+	}
+
+	h.mustStatus(h.doString("DELETE", "/bkt?encryption=", ""), 204)
+
+	resp = h.doString("PUT", "/bkt/k2", "after")
+	h.mustStatus(resp, 200)
+	if got := resp.Header.Get("x-amz-server-side-encryption"); got != "" {
+		t.Fatalf("default still applied after delete: got %q", got)
+	}
+	resp = h.doString("HEAD", "/bkt/k2", "")
+	h.mustStatus(resp, 200)
+	if got := resp.Header.Get("x-amz-server-side-encryption"); got != "" {
+		t.Fatalf("HEAD after delete: got %q want unset", got)
+	}
+}
+
+func TestBucketEncryptionMultipartDefaultApplied(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	h.mustStatus(h.doString("PUT", "/bkt?encryption=", sseConfigXML), 200)
+
+	resp := h.doString("POST", "/bkt/k?uploads=", "")
+	h.mustStatus(resp, 200)
+	if got := resp.Header.Get("x-amz-server-side-encryption"); got != "AES256" {
+		t.Fatalf("multipart Initiate did not inherit default: got %q", got)
+	}
+	uploadID := extractUploadID(h.readBody(resp))
+	if uploadID == "" {
+		t.Fatalf("could not parse uploadId")
+	}
+
+	resp = h.doString("PUT", "/bkt/k?partNumber=1&uploadId="+uploadID, "abc")
+	h.mustStatus(resp, 200)
+	if got := resp.Header.Get("x-amz-server-side-encryption"); got != "AES256" {
+		t.Fatalf("UploadPart sse header (default-inherited): got %q", got)
+	}
+	etag := strings.Trim(resp.Header.Get("ETag"), `"`)
+	completeXML := "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"" + etag + "\"</ETag></Part></CompleteMultipartUpload>"
+	resp = h.doString("POST", "/bkt/k?uploadId="+uploadID, completeXML)
+	h.mustStatus(resp, 200)
+	if got := resp.Header.Get("x-amz-server-side-encryption"); got != "AES256" {
+		t.Fatalf("Complete sse header (default-inherited): got %q", got)
+	}
+
+	resp = h.doString("HEAD", "/bkt/k", "")
+	h.mustStatus(resp, 200)
+	if got := resp.Header.Get("x-amz-server-side-encryption"); got != "AES256" {
+		t.Fatalf("HEAD after multipart default: got %q", got)
+	}
+}
+
 func TestBucketEncryptionPutKMSRejected(t *testing.T) {
 	h := newHarness(t)
 	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
