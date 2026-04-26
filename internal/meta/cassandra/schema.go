@@ -155,6 +155,17 @@ var tableDDL = []string{
 		bucket_id uuid PRIMARY KEY,
 		config    blob
 	)`,
+	`CREATE TABLE IF NOT EXISTS multipart_completions (
+		bucket_id    uuid,
+		upload_id    timeuuid,
+		key          text,
+		etag         text,
+		version_id   text,
+		body         blob,
+		headers      map<text, text>,
+		completed_at timestamp,
+		PRIMARY KEY ((bucket_id), upload_id)
+	)`,
 }
 
 var alterStatements = []string{

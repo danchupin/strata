@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"maps"
 	"sort"
 	"strings"
 	"sync"
@@ -36,8 +37,29 @@ type Store struct {
 	iamUsers     map[string]*meta.IAMUser
 	accessKeys   map[string]*meta.IAMAccessKey
 	gc           map[string][]meta.GCEntry
+	mpDone       map[completionKey]*completionEntry
 	locker       *Locker
 }
+
+type completionKey struct {
+	BucketID uuid.UUID
+	UploadID string
+}
+
+type completionEntry struct {
+	rec       *meta.MultipartCompletion
+	expiresAt time.Time
+}
+
+// nowFn is the clock used by completion-record TTL bookkeeping; tests override it.
+var nowFn = func() time.Time { return time.Now() }
+
+// SetClockForTest overrides the package-level clock used by completion TTLs.
+// Tests must call ResetClockForTest after use.
+func SetClockForTest(now func() time.Time) { nowFn = now }
+
+// ResetClockForTest restores the default time.Now clock.
+func ResetClockForTest() { nowFn = func() time.Time { return time.Now() } }
 
 type grantKey struct {
 	BucketID  uuid.UUID
@@ -72,6 +94,7 @@ func New() *Store {
 		iamUsers:     make(map[string]*meta.IAMUser),
 		accessKeys:   make(map[string]*meta.IAMAccessKey),
 		gc:           make(map[string][]meta.GCEntry),
+		mpDone:       make(map[completionKey]*completionEntry),
 		locker:       NewLocker(),
 	}
 }
@@ -966,6 +989,48 @@ func (s *Store) AbortMultipartUpload(ctx context.Context, bucketID uuid.UUID, up
 	}
 	delete(ups, uploadID)
 	return manifests, nil
+}
+
+func (s *Store) RecordMultipartCompletion(ctx context.Context, rec *meta.MultipartCompletion, ttl time.Duration) error {
+	if rec == nil {
+		return nil
+	}
+	cp := *rec
+	if rec.Headers != nil {
+		cp.Headers = make(map[string]string, len(rec.Headers))
+		maps.Copy(cp.Headers, rec.Headers)
+	}
+	if rec.Body != nil {
+		cp.Body = append([]byte(nil), rec.Body...)
+	}
+	expires := nowFn().Add(ttl)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mpDone[completionKey{BucketID: rec.BucketID, UploadID: rec.UploadID}] = &completionEntry{rec: &cp, expiresAt: expires}
+	return nil
+}
+
+func (s *Store) GetMultipartCompletion(ctx context.Context, bucketID uuid.UUID, uploadID string) (*meta.MultipartCompletion, error) {
+	key := completionKey{BucketID: bucketID, UploadID: uploadID}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.mpDone[key]
+	if !ok {
+		return nil, meta.ErrMultipartCompletionNotFound
+	}
+	if !nowFn().Before(entry.expiresAt) {
+		delete(s.mpDone, key)
+		return nil, meta.ErrMultipartCompletionNotFound
+	}
+	out := *entry.rec
+	if entry.rec.Headers != nil {
+		out.Headers = make(map[string]string, len(entry.rec.Headers))
+		maps.Copy(out.Headers, entry.rec.Headers)
+	}
+	if entry.rec.Body != nil {
+		out.Body = append([]byte(nil), entry.rec.Body...)
+	}
+	return &out, nil
 }
 
 func (s *Store) CreateIAMUser(ctx context.Context, u *meta.IAMUser) error {

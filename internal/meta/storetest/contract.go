@@ -8,9 +8,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gocql/gocql"
+
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
 )
+
+func newTimeUUID() string { return gocql.TimeUUID().String() }
 
 // Run exercises the full meta.Store surface against the given factory.
 // The factory must return a fresh, empty store; it is called once per test.
@@ -27,6 +31,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"GCQueueRoundTrip", caseGCQueueRoundTrip},
 		{"BucketLifecycleRulesBlob", caseLifecycleBlob},
 		{"ListObjectsHidesDeleteMarkers", caseListHidesDeleteMarkers},
+		{"MultipartCompletionRoundTrip", caseMultipartCompletion},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -211,6 +216,43 @@ func caseLifecycleBlob(t *testing.T, s meta.Store) {
 	}
 	if _, err := s.GetBucketLifecycle(ctx, b.ID); err != meta.ErrNoSuchLifecycle {
 		t.Errorf("after delete: got %v want ErrNoSuchLifecycle", err)
+	}
+}
+
+func caseMultipartCompletion(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "mpc", "o", "STANDARD")
+	uploadID := newTimeUUID()
+	rec := &meta.MultipartCompletion{
+		BucketID:    b.ID,
+		UploadID:    uploadID,
+		Key:         "obj",
+		ETag:        "deadbeef-1",
+		VersionID:   "v1",
+		Body:        []byte(`<?xml version="1.0"?><CompleteMultipartUploadResult><ETag>"deadbeef-1"</ETag></CompleteMultipartUploadResult>`),
+		Headers:     map[string]string{"ETag": `"deadbeef-1"`, "x-amz-server-side-encryption": "AES256"},
+		CompletedAt: time.Now().UTC(),
+	}
+	if err := s.RecordMultipartCompletion(ctx, rec, time.Hour); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+
+	got, err := s.GetMultipartCompletion(ctx, b.ID, uploadID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.ETag != rec.ETag || got.Key != rec.Key || got.VersionID != rec.VersionID {
+		t.Errorf("scalar mismatch: %+v", got)
+	}
+	if string(got.Body) != string(rec.Body) {
+		t.Errorf("body mismatch: %q vs %q", got.Body, rec.Body)
+	}
+	if got.Headers["ETag"] != rec.Headers["ETag"] || got.Headers["x-amz-server-side-encryption"] != "AES256" {
+		t.Errorf("headers mismatch: %+v", got.Headers)
+	}
+
+	if _, err := s.GetMultipartCompletion(ctx, b.ID, newTimeUUID()); err != meta.ErrMultipartCompletionNotFound {
+		t.Errorf("missing record: got %v want ErrMultipartCompletionNotFound", err)
 	}
 }
 

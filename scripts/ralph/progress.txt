@@ -3,6 +3,7 @@ Started: Sat Apr 25 16:10:14 MSK 2026
 
 ## Codebase Patterns
 - meta.Store is the single interface every storage backend (memory + cassandra) must implement; adding a method requires updating both backends or builds break (compiler enforces).
+- Short-lived per-key idempotency records (US-023): meta.MultipartCompletion + RecordMultipartCompletion(rec, ttl)/GetMultipartCompletion are the template. Cassandra TTL via `INSERT ... USING TTL <seconds>`. Memory TTL via absolute expiresAt + lazy eviction; metamem.SetClockForTest(now func()) drives expiry deterministically in tests. Render the response into a bytes.Buffer once, persist the same bytes (+ Headers map) into the record, then write to the live ResponseWriter — replays serve byte-identical responses.
 - Bucket-scoped blobs use the setBucketBlob/getBucketBlob/deleteBucketBlob helpers in both backends — model new bucket-level resources (grants, encryption, website, …) on this pattern.
 - Auth credentials use auth.CredentialsStore (NOT auth.Store) and auth.ErrNoSuchCredential (NOT auth.ErrCredentialNotFound). PRDs sometimes use the wrong names; trust internal/auth/types.go.
 - auth.MultiStore (internal/auth/multi.go) composes any number of CredentialsStore backends with a 60s positive+negative TTL cache and Invalidate(accessKey). Use it as the gateway's Middleware.Store; append new backends instead of replacing the static one.
@@ -621,4 +622,31 @@ Started: Sat Apr 25 16:10:14 MSK 2026
   - ErrSignatureInvalid surfaces from r.Body.Read inside data.PutChunks, NOT from the auth middleware (which already validated the request signature). Every place that calls PutChunks (putObject, uploadPart, copyPart for non-streaming source) needs the errors.Is(err, auth.ErrSignatureInvalid) → ErrSignatureDoesNotMatch mapping. copyObject reads the source from data.GetChunks (server-side) so it's not affected.
   - The aws-chunked terminator line is "0;chunk-signature=<sig>\r\n[trailers]\r\n". Don't try to consume trailing CRLFs after the 0-chunk header — the body may end immediately. Only consume the trailing CRLF after non-zero data chunks.
   - constantTimeEqual is the standard hex-string compare in this package (string-typed). Reuse it for chunk-signature comparisons too — don't switch to subtle.ConstantTimeCompare on []byte.
+---
+
+## 2026-04-26 - US-023 (CompleteMultipartUpload idempotency on retry)
+- meta.MultipartCompletion {BucketID, UploadID, Key, ETag, VersionID, Body, Headers, CompletedAt} + ErrMultipartCompletionNotFound sentinel added; meta.Store grew RecordMultipartCompletion(rec, ttl) + GetMultipartCompletion(bucketID, uploadID).
+- Memory backend: mpDone map keyed by (BucketID, UploadID); each entry stores absolute expiresAt; GetMultipartCompletion drops the entry when nowFn() is past expiresAt and returns ErrMultipartCompletionNotFound. Package-level nowFn + SetClockForTest/ResetClockForTest exported so handler-level tests can drive the 10-minute window deterministically.
+- Cassandra backend: new multipart_completions table appended to tableDDL (PK ((bucket_id), upload_id) with body blob + headers map<text,text> + completed_at + key/etag/version_id text); RecordMultipartCompletion writes via INSERT ... USING TTL ? (seconds, floor 1) so cassandra evicts the row naturally.
+- internal/s3api/multipart.go completeMultipart now starts with GetMultipartCompletion(b.ID, uploadID); on hit, writeCachedCompletion replays cached Headers + Body verbatim (200) without parsing the request body or touching the upload row. On a fresh complete the result XML is rendered into a bytes.Buffer once, the response Headers map (lowercased x-amz-checksum-* + x-amz-server-side-encryption) is captured, both are persisted via RecordMultipartCompletion(multipartCompletionTTL=10*time.Minute), then the same bytes go to the live ResponseWriter.
+- New tests in internal/s3api/multipart_idempotency_test.go: TestCompleteMultipartIdempotentRetry (1-part PUT → first Complete, second Complete returns byte-identical body + composite ETag suffix '-1'); TestCompleteMultipartIdempotencyExpiry (advance metamem.SetClockForTest by 10m+1s after first success → retry returns 404 NoSuchUpload via the existing ErrMultipartNotFound mapping).
+- Contract test caseMultipartCompletion (storetest) covers RecordMultipartCompletion → GetMultipartCompletion round-trip + missing-key sentinel; runs against memory unconditionally and cassandra under -tags integration. Uses gocql.TimeUUID().String() so the cassandra TIMEUUID column accepts the value.
+- Files changed:
+  - internal/meta/store.go (MultipartCompletion type, sentinel, 2 interface methods)
+  - internal/meta/memory/store.go (mpDone map + clock hooks + 2 methods)
+  - internal/meta/cassandra/schema.go (multipart_completions table)
+  - internal/meta/cassandra/store.go (2 methods)
+  - internal/meta/storetest/contract.go (caseMultipartCompletion + newTimeUUID helper)
+  - internal/s3api/multipart.go (completeMultipart replay + persist + writeCachedCompletion helper)
+  - internal/s3api/multipart_idempotency_test.go (new)
+  - scripts/ralph/prd.json (passes: true; notes)
+  - scripts/ralph/progress.txt
+- Quality: go build ./... + go vet ./... + go test ./... all green.
+- **Learnings for future iterations:**
+  - When persisting an HTTP response for replay, render the body into a bytes.Buffer ONCE and capture the final Headers in a side map — don't re-render on retry. The original encoding/xml output and the cached blob must be byte-identical (clients use ETag/MD5 for retry idempotency checks).
+  - Cassandra USING TTL is the cheapest expiring-row primitive; it operates per-row and the floor is 1 second. Memory backend can't piggyback on a real timer — use absolute expiresAt + lazy eviction on read, plus a package-level clock hook (SetClockForTest) so tests can fast-forward without sleeping.
+  - The idempotency check must run BEFORE consuming the request body. The retried client sends the same XML envelope, but reading r.Body twice would force buffering and serializes the cache hit behind the body parse for no reason.
+  - Headers map[string]string captured at write time MUST mirror what writeChecksumHeaders + the SSE block would set live; if a future story adds a new response header (e.g. x-amz-version-id) to completeMultipart, also add it to the captured map or retries will be missing it.
+  - SetClockForTest is a package-level mutation — tests must t.Cleanup(metamem.ResetClockForTest) and not t.Parallel() in the same package; the default-go-test serial execution within a package is already enough for our use.
+  - For the cassandra contract test, uploadID must be a real TIMEUUID (gocql.ParseUUID will reject random uuid v4); use gocql.TimeUUID().String() in shared helpers (newTimeUUID) so both backends accept it.
 ---

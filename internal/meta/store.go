@@ -42,7 +42,22 @@ var (
 	ErrIAMUserNotFound         = errors.New("iam user not found")
 	ErrIAMUserAlreadyExists    = errors.New("iam user already exists")
 	ErrIAMAccessKeyNotFound    = errors.New("iam access key not found")
+	ErrMultipartCompletionNotFound = errors.New("multipart completion record not found or expired")
 )
+
+// MultipartCompletion is a short-lived idempotency record persisted after a
+// successful CompleteMultipartUpload so a retried Complete with the same
+// uploadID can replay the original response instead of returning NoSuchUpload.
+type MultipartCompletion struct {
+	BucketID    uuid.UUID
+	UploadID    string
+	Key         string
+	ETag        string
+	VersionID   string
+	Body        []byte
+	Headers     map[string]string
+	CompletedAt time.Time
+}
 
 // IAMAccessKey is a credential record minted by IAM CreateAccessKey. The access
 // key is the lookup primary key; UserName is a foreign key into IAMUser.
@@ -268,6 +283,9 @@ type Store interface {
 	ListParts(ctx context.Context, bucketID uuid.UUID, uploadID string) ([]*MultipartPart, error)
 	CompleteMultipartUpload(ctx context.Context, obj *Object, uploadID string, parts []CompletePart, versioned bool) (orphans []*data.Manifest, err error)
 	AbortMultipartUpload(ctx context.Context, bucketID uuid.UUID, uploadID string) ([]*data.Manifest, error)
+
+	RecordMultipartCompletion(ctx context.Context, rec *MultipartCompletion, ttl time.Duration) error
+	GetMultipartCompletion(ctx context.Context, bucketID uuid.UUID, uploadID string) (*MultipartCompletion, error)
 
 	Close() error
 }

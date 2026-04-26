@@ -1287,6 +1287,60 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 	return orphans, nil
 }
 
+func (s *Store) RecordMultipartCompletion(ctx context.Context, rec *meta.MultipartCompletion, ttl time.Duration) error {
+	if rec == nil {
+		return nil
+	}
+	uploadUUID, err := gocql.ParseUUID(rec.UploadID)
+	if err != nil {
+		return fmt.Errorf("upload_id: %w", err)
+	}
+	ttlSec := max(int(ttl/time.Second), 1)
+	completedAt := rec.CompletedAt
+	if completedAt.IsZero() {
+		completedAt = time.Now().UTC()
+	}
+	return s.s.Query(
+		`INSERT INTO multipart_completions (bucket_id, upload_id, key, etag, version_id, body, headers, completed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?) USING TTL ?`,
+		gocqlUUID(rec.BucketID), uploadUUID, rec.Key, rec.ETag, rec.VersionID, rec.Body, rec.Headers, completedAt, ttlSec,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) GetMultipartCompletion(ctx context.Context, bucketID uuid.UUID, uploadID string) (*meta.MultipartCompletion, error) {
+	uploadUUID, err := gocql.ParseUUID(uploadID)
+	if err != nil {
+		return nil, meta.ErrMultipartCompletionNotFound
+	}
+	var (
+		key, etag, versionID string
+		body                 []byte
+		headers              map[string]string
+		completedAt          time.Time
+	)
+	err = s.s.Query(
+		`SELECT key, etag, version_id, body, headers, completed_at
+		 FROM multipart_completions WHERE bucket_id=? AND upload_id=?`,
+		gocqlUUID(bucketID), uploadUUID,
+	).WithContext(ctx).Scan(&key, &etag, &versionID, &body, &headers, &completedAt)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return nil, meta.ErrMultipartCompletionNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &meta.MultipartCompletion{
+		BucketID:    bucketID,
+		UploadID:    uploadID,
+		Key:         key,
+		ETag:        etag,
+		VersionID:   versionID,
+		Body:        body,
+		Headers:     headers,
+		CompletedAt: completedAt,
+	}, nil
+}
+
 func (s *Store) AbortMultipartUpload(ctx context.Context, bucketID uuid.UUID, uploadID string) ([]*data.Manifest, error) {
 	uploadUUID, err := gocql.ParseUUID(uploadID)
 	if err != nil {

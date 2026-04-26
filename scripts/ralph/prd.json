@@ -390,8 +390,8 @@
         "go test ./internal/s3api/... ./internal/meta/... passes"
       ],
       "priority": 23,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "meta.MultipartCompletion {BucketID, UploadID, Key, ETag, VersionID, Body, Headers, CompletedAt} + ErrMultipartCompletionNotFound sentinel added; meta.Store grew RecordMultipartCompletion(rec, ttl) + GetMultipartCompletion(bucketID, uploadID). Memory backend stores entries in mpDone map keyed by (BucketID, UploadID) with absolute expiresAt; lazy eviction on read; SetClockForTest/ResetClockForTest exported so tests drive expiry deterministically. Cassandra: new multipart_completions table (PK ((bucket_id), upload_id)); RecordMultipartCompletion writes via INSERT ... USING TTL <seconds> so cassandra evicts naturally. completeMultipart in internal/s3api/multipart.go now starts with GetMultipartCompletion(b.ID, uploadID) — on hit, replays cached Headers + Body verbatim (200) skipping body parse and meta lookup. On a fresh complete it renders the result XML into a bytes.Buffer (so the same bytes go to the client AND to the persisted record), captures the response Headers map (x-amz-checksum-* lowercase, x-amz-server-side-encryption), persists with multipartCompletionTTL=10*time.Minute, then writes them to the live ResponseWriter. Tests in multipart_idempotency_test.go: TestCompleteMultipartIdempotentRetry (1-part PUT → first Complete returns the composite ETag suffix '-1', second Complete returns byte-identical body), TestCompleteMultipartIdempotencyExpiry (advance metamem.SetClockForTest by 10m+1s after first success → retry returns 404 NoSuchUpload). Contract test caseMultipartCompletion (storetest) covers round-trip + missing-key sentinel for memory + cassandra-integration."
     },
     {
       "id": "US-024",

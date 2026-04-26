@@ -1,6 +1,7 @@
 package s3api
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/hex"
@@ -20,6 +21,8 @@ import (
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
 )
+
+const multipartCompletionTTL = 10 * time.Minute
 
 func (s *Server) initiateMultipart(w http.ResponseWriter, r *http.Request, b *meta.Bucket, key string) {
 	class := r.Header.Get("x-amz-storage-class")
@@ -219,6 +222,11 @@ func parseCopySourceRange(spec string, size int64) (start, end int64, ok bool) {
 }
 
 func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *meta.Bucket, key, uploadID string) {
+	if cached, err := s.Meta.GetMultipartCompletion(r.Context(), b.ID, uploadID); err == nil && cached != nil {
+		writeCachedCompletion(w, cached)
+		return
+	}
+
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
 		writeError(w, r, ErrMalformedXML)
@@ -305,11 +313,19 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		}
 	}
 
-	writeChecksumHeaders(w.Header(), composite)
-	if obj.SSE != "" {
-		w.Header().Set("x-amz-server-side-encryption", obj.SSE)
+	headers := map[string]string{}
+	for algo, val := range composite {
+		if val != "" {
+			headers["x-amz-checksum-"+strings.ToLower(algo)] = val
+		}
 	}
-	writeXML(w, http.StatusOK, completeMultipartResult{
+	if obj.SSE != "" {
+		headers["x-amz-server-side-encryption"] = obj.SSE
+	}
+
+	var buf bytes.Buffer
+	buf.WriteString(xml.Header)
+	if err := xml.NewEncoder(&buf).Encode(completeMultipartResult{
 		Location:          fmt.Sprintf("/%s/%s", b.Name, key),
 		Bucket:            b.Name,
 		Key:               key,
@@ -319,7 +335,38 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		ChecksumSHA1:      composite["SHA1"],
 		ChecksumSHA256:    composite["SHA256"],
 		ChecksumCRC64NVME: composite["CRC64NVME"],
-	})
+	}); err != nil {
+		writeError(w, r, ErrInternal)
+		return
+	}
+
+	rec := &meta.MultipartCompletion{
+		BucketID:    b.ID,
+		UploadID:    uploadID,
+		Key:         key,
+		ETag:        finalETag,
+		VersionID:   obj.VersionID,
+		Body:        buf.Bytes(),
+		Headers:     headers,
+		CompletedAt: time.Now().UTC(),
+	}
+	_ = s.Meta.RecordMultipartCompletion(r.Context(), rec, multipartCompletionTTL)
+
+	for k, v := range headers {
+		w.Header().Set(k, v)
+	}
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(buf.Bytes())
+}
+
+func writeCachedCompletion(w http.ResponseWriter, rec *meta.MultipartCompletion) {
+	for k, v := range rec.Headers {
+		w.Header().Set(k, v)
+	}
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(rec.Body)
 }
 
 func (s *Server) abortMultipart(w http.ResponseWriter, r *http.Request, b *meta.Bucket, key, uploadID string) {
