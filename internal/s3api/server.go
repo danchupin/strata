@@ -33,6 +33,13 @@ type Server struct {
 	// STS, when set, enables the ?Action=AssumeRole endpoint and is the
 	// backing store for temporary credentials.
 	STS *auth.STSStore
+	// MFASecrets maps an MFA device serial to its raw TOTP secret. Populated
+	// from STRATA_MFA_SECRETS at startup; consulted when MFA Delete is enabled
+	// on a bucket and the request is a DeleteObjectVersion.
+	MFASecrets map[string][]byte
+	// MFAClock, when set, is used instead of time.Now for TOTP validation.
+	// Tests inject a deterministic clock through this hook.
+	MFAClock func() time.Time
 }
 
 func New(d data.Backend, m meta.Store) *Server {
@@ -802,6 +809,13 @@ func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request, b *meta.Bu
 	versionID := r.URL.Query().Get("versionId")
 	versioned := meta.IsVersioningActive(b.Versioning)
 	bypassGovernance := strings.EqualFold(r.Header.Get("x-amz-bypass-governance-retention"), "true")
+
+	if versionID != "" && b.MfaDelete == meta.MfaDeleteEnabled {
+		if !s.validateMFAHeader(r.Header.Get("x-amz-mfa")) {
+			writeError(w, r, ErrMFARequired)
+			return
+		}
+	}
 
 	if versionID != "" {
 		if existing, err := s.Meta.GetObject(r.Context(), b.ID, key, versionID); err == nil {

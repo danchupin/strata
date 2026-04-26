@@ -50,6 +50,7 @@ var (
 	ErrInvalidDigest                = APIError{Code: "InvalidDigest", Message: "The provided digest does not match the supplied data", Status: http.StatusBadRequest}
 	ErrSSECRequired                 = APIError{Code: "InvalidRequest", Message: "The object was stored using server-side encryption with a customer-provided key; matching SSE-C headers are required", Status: http.StatusBadRequest}
 	ErrSSECKeyMismatch              = APIError{Code: "AccessDenied", Message: "The provided customer key does not match the key the object was encrypted with", Status: http.StatusBadRequest}
+	ErrMFARequired                  = APIError{Code: "AccessDenied", Message: "Mfa Authentication must be used for this request", Status: http.StatusForbidden}
 	ErrCORSNotEnabled               = APIError{Code: "CORSResponse", Message: "CORS is not enabled for this bucket", Status: http.StatusForbidden}
 	ErrMalformedXML        = APIError{Code: "MalformedXML", Message: "The XML you provided was not well-formed", Status: http.StatusBadRequest}
 	ErrMalformedACLError   = APIError{Code: "MalformedACLError", Message: "The XML you provided was not well-formed or did not validate against our published schema", Status: http.StatusBadRequest}

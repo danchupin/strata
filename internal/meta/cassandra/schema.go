@@ -181,6 +181,7 @@ var alterStatements = []string{
 	`ALTER TABLE objects ADD restore_status text`,
 	`ALTER TABLE buckets ADD object_lock_enabled boolean`,
 	`ALTER TABLE buckets ADD region text`,
+	`ALTER TABLE buckets ADD mfa_delete text`,
 }
 
 func isColumnAlreadyExists(err error) bool {

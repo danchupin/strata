@@ -93,14 +93,15 @@ func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error
 		owner, class      string
 		versioning, acl   string
 		region            string
+		mfaDelete         string
 		createdAt         time.Time
 		shardCount        int
 		objectLockEnabled bool
 	)
 	err := s.s.Query(
-		`SELECT id, owner_id, created_at, default_class, versioning, shard_count, acl, object_lock_enabled, region FROM buckets WHERE name=?`,
+		`SELECT id, owner_id, created_at, default_class, versioning, shard_count, acl, object_lock_enabled, region, mfa_delete FROM buckets WHERE name=?`,
 		name,
-	).WithContext(ctx).Scan(&idG, &owner, &createdAt, &class, &versioning, &shardCount, &acl, &objectLockEnabled, &region)
+	).WithContext(ctx).Scan(&idG, &owner, &createdAt, &class, &versioning, &shardCount, &acl, &objectLockEnabled, &region, &mfaDelete)
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrBucketNotFound
 	}
@@ -120,6 +121,7 @@ func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error
 		ACL:               acl,
 		ObjectLockEnabled: objectLockEnabled,
 		Region:            region,
+		MfaDelete:         mfaDelete,
 	}, nil
 }
 
@@ -246,17 +248,17 @@ func (s *Store) bucketIsEmpty(ctx context.Context, bucketID uuid.UUID, shardCoun
 }
 
 func (s *Store) ListBuckets(ctx context.Context, owner string) ([]*meta.Bucket, error) {
-	iter := s.s.Query(`SELECT name, id, owner_id, created_at, default_class, versioning, acl, region FROM buckets`).
+	iter := s.s.Query(`SELECT name, id, owner_id, created_at, default_class, versioning, acl, region, mfa_delete FROM buckets`).
 		WithContext(ctx).Iter()
 	defer iter.Close()
 
 	var (
-		out                                           []*meta.Bucket
-		name, ownerID, class, versioning, acl, region string
-		idG                                           gocql.UUID
-		createdAt                                     time.Time
+		out                                                      []*meta.Bucket
+		name, ownerID, class, versioning, acl, region, mfaDelete string
+		idG                                                      gocql.UUID
+		createdAt                                                time.Time
 	)
-	for iter.Scan(&name, &idG, &ownerID, &createdAt, &class, &versioning, &acl, &region) {
+	for iter.Scan(&name, &idG, &ownerID, &createdAt, &class, &versioning, &acl, &region, &mfaDelete) {
 		if owner != "" && ownerID != owner {
 			continue
 		}
@@ -272,6 +274,7 @@ func (s *Store) ListBuckets(ctx context.Context, owner string) ([]*meta.Bucket, 
 			Versioning:   versioning,
 			ACL:          acl,
 			Region:       region,
+			MfaDelete:    mfaDelete,
 		})
 	}
 	if err := iter.Close(); err != nil {
@@ -1465,6 +1468,20 @@ func (s *Store) SetBucketRegion(ctx context.Context, name, region string) error 
 	applied, err := s.s.Query(
 		`UPDATE buckets SET region=? WHERE name=? IF EXISTS`,
 		region, name,
+	).WithContext(ctx).SerialConsistency(gocql.LocalSerial).ScanCAS(nil)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return meta.ErrBucketNotFound
+	}
+	return nil
+}
+
+func (s *Store) SetBucketMfaDelete(ctx context.Context, name, state string) error {
+	applied, err := s.s.Query(
+		`UPDATE buckets SET mfa_delete=? WHERE name=? IF EXISTS`,
+		state, name,
 	).WithContext(ctx).SerialConsistency(gocql.LocalSerial).ScanCAS(nil)
 	if err != nil {
 		return err

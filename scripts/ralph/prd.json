@@ -425,8 +425,8 @@
         "go test ./internal/s3api/... passes"
       ],
       "priority": 25,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "meta.Bucket.MfaDelete + meta.MfaDeleteEnabled/MfaDeleteDisabled constants added; meta.Store.SetBucketMfaDelete uses LWT (UPDATE buckets SET mfa_delete=? WHERE name=? IF EXISTS, ScanCAS(nil), LocalSerial). Cassandra: additive ALTER buckets ADD mfa_delete text; GetBucket and ListBuckets SELECT extended. Memory backend mutates b.MfaDelete under mu.Lock. internal/s3api/xml.go versioningConfiguration grew MfaDelete xml field. putBucketVersioning persists MfaDelete via SetBucketMfaDelete when present in body (Enabled|Disabled validated; missing = no-op). getBucketVersioning echoes b.MfaDelete. internal/s3api/mfa.go: ParseMFASecrets parses STRATA_MFA_SECRETS=<serial>:<base32> entries (comma-separated; serial split on LAST colon so AWS ARN serials with embedded ':' work; base32 padding tolerated); totpAt computes RFC 6238 6-digit HMAC-SHA1/30s TOTP; Server.validateMFAHeader splits 'x-amz-mfa: <serial> <code>' and checks ±1 window against MFASecrets. Server gained MFASecrets map[string][]byte and MFAClock func() time.Time hooks. cmd/strata-gateway/main.go reads STRATA_MFA_SECRETS via os.Getenv and assigns apiHandler.MFASecrets. server.go deleteObject: when versionID != \"\" AND b.MfaDelete == MfaDeleteEnabled, validateMFAHeader on x-amz-mfa; missing/bad → 403 AccessDenied via new ErrMFARequired. Storetest contract caseBucketMfaDelete covers default empty, Enabled, Disabled, missing-bucket sentinel for both backends. Tests in mfa_delete_test.go: enabled+missing→403, enabled+valid TOTP→204, enabled+bad code→403, enabled+unknown serial→403, disabled→204, unconfigured→204, GET ?versioning round-trip echoes MfaDelete, ParseMFASecrets error/empty/single coverage. TOTPForTest helper exported so tests compute the deterministic code at the injected MFAClock time."
     },
     {
       "id": "US-026",

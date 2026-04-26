@@ -72,6 +72,11 @@ func main() {
 	apiHandler.Region = cfg.RegionName
 	apiHandler.InvalidateCredential = multi.Invalidate
 	apiHandler.STS = sts
+	mfaSecrets, err := s3api.ParseMFASecrets(os.Getenv("STRATA_MFA_SECRETS"))
+	if err != nil {
+		log.Fatalf("mfa secrets: %v", err)
+	}
+	apiHandler.MFASecrets = mfaSecrets
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())

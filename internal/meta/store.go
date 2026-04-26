@@ -106,7 +106,13 @@ type Bucket struct {
 	ACL               string
 	ObjectLockEnabled bool
 	Region            string
+	MfaDelete         string
 }
+
+const (
+	MfaDeleteEnabled  = "Enabled"
+	MfaDeleteDisabled = "Disabled"
+)
 
 type Object struct {
 	BucketID       uuid.UUID
@@ -242,6 +248,7 @@ type Store interface {
 
 	SetBucketObjectLockEnabled(ctx context.Context, name string, enabled bool) error
 	SetBucketRegion(ctx context.Context, name, region string) error
+	SetBucketMfaDelete(ctx context.Context, name, state string) error
 	SetBucketObjectLockConfig(ctx context.Context, bucketID uuid.UUID, xmlBlob []byte) error
 	GetBucketObjectLockConfig(ctx context.Context, bucketID uuid.UUID) ([]byte, error)
 	DeleteBucketObjectLockConfig(ctx context.Context, bucketID uuid.UUID) error

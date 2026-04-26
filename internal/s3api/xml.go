@@ -114,8 +114,9 @@ type uploadEntry struct {
 }
 
 type versioningConfiguration struct {
-	XMLName xml.Name `xml:"VersioningConfiguration"`
-	Status  string   `xml:"Status,omitempty"`
+	XMLName   xml.Name `xml:"VersioningConfiguration"`
+	Status    string   `xml:"Status,omitempty"`
+	MfaDelete string   `xml:"MfaDelete,omitempty"`
 }
 
 type listVersionsResult struct {

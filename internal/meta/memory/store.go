@@ -217,6 +217,17 @@ func (s *Store) SetBucketVersioning(ctx context.Context, name, state string) err
 	return nil
 }
 
+func (s *Store) SetBucketMfaDelete(ctx context.Context, name, state string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.buckets[name]
+	if !ok {
+		return meta.ErrBucketNotFound
+	}
+	b.MfaDelete = state
+	return nil
+}
+
 func (s *Store) SetBucketACL(ctx context.Context, name, canned string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

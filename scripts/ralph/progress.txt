@@ -30,6 +30,7 @@ Started: Sat Apr 25 16:10:14 MSK 2026
 - Bucket region (US-021): meta.Bucket.Region is a column on the buckets row (additive ALTER buckets ADD region text), not a blob. Mutated via SetBucketRegion using the LWT pattern (UPDATE … IF EXISTS / ScanCAS(nil) / LocalSerial) so the write joins the same Paxos lineage as the original CreateBucket INSERT IF NOT EXISTS. CreateBucket parses optional <CreateBucketConfiguration><LocationConstraint> from the request body BEFORE calling Meta.CreateBucket so a malformed body short-circuits with 400 MalformedXML. GetBucketLocation emits the canonical AWS xmlns ("http://s3.amazonaws.com/doc/2006-03-01/") on the LocationConstraint element via xml.Name with the namespace-qualified field tag. HEAD bucket sets x-amz-bucket-region from b.Region or falls back to s.Region (which s3api.New defaults to "default").
 - Streaming SigV4 chunk validation (US-022): newStreamingReader(body, signingKey, reqDate, scope, seedSig) buffers each aws-chunked chunk fully, recomputes sig(n)=HMAC(signingKey, "AWS4-HMAC-SHA256-PAYLOAD\n<reqDate>\n<scope>\n<prevSig>\n<emptyBodyHash>\n<sha256(chunk)>"), and returns ErrSignatureInvalid on any mismatch (chained through prev → final 0-chunk). The seed prevSig is the request's parsed.Signature; signingKey/reqDate/scope come from the same parsed auth header that already validated the request's own signature. The reader rejects missing chunk-signature attributes and missing terminators. Server-side mapping: ErrSignatureInvalid surfaces from r.Body.Read inside data.PutChunks; every put path (putObject, uploadPart) must check errors.Is(err, auth.ErrSignatureInvalid) → ErrSignatureDoesNotMatch (403). copyObject reads from data.GetChunks (not the request body) so it doesn't need the mapping.
 - Auth modes (US-024): auth.AuthInfo.IsAnonymous (renamed from .Anonymous) — never construct &AuthInfo{...} for the unauth case, use auth.AnonymousIdentity() so future field defaults stay in one place. Modes: ModeOff (alias ModeDisabled) bypasses validation; ModeRequired validates every request; ModeOptional validates only when an Authorization header OR a presigned query is present, else sets AnonymousIdentity. ParseMode accepts "off"/"disabled" → ModeOff, "required" → ModeRequired, "optional" → ModeOptional. config.Auth.Mode validation in internal/config/config.go must list every accepted spelling. Anonymous flow then meets the existing policy/ACL gate (US-003/US-004): public-read canned ACL or AllUsers grant lets the request through; private buckets 403.
+- MFA Delete (US-025): meta.Bucket.MfaDelete column on buckets row (additive ALTER buckets ADD mfa_delete text), mutated via SetBucketMfaDelete using the LWT pattern. Server.MFASecrets map[string][]byte + Server.MFAClock func() time.Time are the injection points; cmd/strata-gateway/main.go reads STRATA_MFA_SECRETS=<serial>:<base32>[,...] (split on LAST colon since ARN serials embed ':'). validateMFAHeader checks 'x-amz-mfa: <serial> <code>' against TOTP (RFC 6238 / HMAC-SHA1 / 30s / ±1 window). deleteObject gates on b.MfaDelete == MfaDeleteEnabled && versionID != "" — missing/bad MFA → 403 AccessDenied via ErrMFARequired.
 ---
 
 ## 2026-04-25 - US-001 (Parse AccessControlPolicy XML body)
@@ -678,4 +679,37 @@ Started: Sat Apr 25 16:10:14 MSK 2026
   - Default auth mode stays "off". Flipping to "required" would break Makefile `run-memory` / smoke targets and every test that uses newHarness without injecting credentials. Treat the AC's "(default)" annotation as documentation, not a behavioural change to ship.
   - For an end-to-end test that needs the real middleware around s3api.Server, the existing signRequest helper in iam_access_keys_signed_test.go is reusable across files in the same _test package — no need to duplicate. mustStatus in auth_mode_test.go is a local package-level helper because the existing one is a method on *testHarness.
   - When renaming a field on an exported struct (AuthInfo.Anonymous → IsAnonymous), grep for the bare field name first; the compiler will catch most call sites but not e.g. struct-literal field tags or marshal/unmarshal hooks. Here there were 4 Go callers + 2 doc files.
+---
+
+## 2026-04-26 - US-025 (MFA Delete header gating)
+- meta.Bucket gained MfaDelete string + meta.MfaDeleteEnabled/MfaDeleteDisabled constants.
+- meta.Store grew SetBucketMfaDelete(ctx, name, state); both backends implement (memory: b.MfaDelete under mu.Lock; cassandra: LWT UPDATE buckets SET mfa_delete=? IF EXISTS / ScanCAS(nil) / LocalSerial — same Paxos-lineage idiom as SetBucketVersioning/SetBucketACL).
+- Cassandra: additive ALTER buckets ADD mfa_delete text; GetBucket and ListBuckets SELECT extended.
+- internal/s3api/xml.go versioningConfiguration grew MfaDelete element. putBucketVersioning persists when present (Enabled|Disabled validated; missing = no-op so toggling versioning doesn't clobber MfaDelete). getBucketVersioning echoes b.MfaDelete.
+- internal/s3api/mfa.go new: ParseMFASecrets parses STRATA_MFA_SECRETS=<serial>:<base32-secret>[,<serial>:<base32-secret>...] (serial split on LAST colon since AWS ARN serials embed ':'; base32 padding tolerated). totpAt = RFC 6238 6-digit HMAC-SHA1/30s. Server.validateMFAHeader splits 'x-amz-mfa: <serial> <code>' and checks ±1 window using injected MFAClock or time.Now.
+- Server fields MFASecrets map[string][]byte and MFAClock func() time.Time added; cmd/strata-gateway/main.go reads STRATA_MFA_SECRETS via os.Getenv and assigns.
+- server.go deleteObject: when versionID != "" AND b.MfaDelete == MfaDeleteEnabled, validateMFAHeader; missing/bad → 403 AccessDenied via new ErrMFARequired.
+- Storetest contract caseBucketMfaDelete (memory + cassandra-integration) covers default-empty, Enabled, Disabled, missing-bucket sentinel.
+- Tests in mfa_delete_test.go: enabled+missing→403, enabled+valid TOTP→204, enabled+bad code→403, enabled+unknown serial→403, disabled→204, unconfigured→204, GET ?versioning round-trip echoes MfaDelete, ParseMFASecrets error/empty/single coverage. TOTPForTest exported so tests compute the deterministic code at the injected MFAClock.
+- Files changed:
+  - internal/meta/store.go (Bucket.MfaDelete, MfaDeleteEnabled/Disabled, SetBucketMfaDelete)
+  - internal/meta/memory/store.go (SetBucketMfaDelete)
+  - internal/meta/cassandra/store.go (SetBucketMfaDelete + GetBucket/ListBuckets SELECT)
+  - internal/meta/cassandra/schema.go (ALTER buckets ADD mfa_delete text)
+  - internal/meta/storetest/contract.go (caseBucketMfaDelete)
+  - internal/s3api/xml.go (versioningConfiguration.MfaDelete)
+  - internal/s3api/versioning.go (parse + persist MfaDelete; echo on GET)
+  - internal/s3api/server.go (MFASecrets/MFAClock fields; deleteObject MFA gate)
+  - internal/s3api/errors.go (ErrMFARequired)
+  - internal/s3api/mfa.go (new — ParseMFASecrets, totpAt, validateMFAHeader, TOTPForTest)
+  - internal/s3api/mfa_delete_test.go (new)
+  - cmd/strata-gateway/main.go (wire STRATA_MFA_SECRETS)
+  - scripts/ralph/prd.json (passes: true; notes)
+  - scripts/ralph/progress.txt
+- Quality: go build ./... + go vet ./... + go test ./... all green.
+- **Learnings for future iterations:**
+  - When a config value is `<key>:<value>` and the key may itself contain colons (AWS ARNs do), split on the LAST colon, not the first. strings.Cut takes the first match — wrong here. Caught only when the test fixture used a real-looking serial.
+  - TOTP secrets in tests should be a fixed clock (Server.MFAClock = func() time.Time { return T }); pair with a TOTPForTest helper that the test computes against the same secret + same T. Don't re-derive in production code paths.
+  - For new bool/string flags on the buckets row, the LWT UPDATE pattern (UPDATE … IF EXISTS, ScanCAS(nil), SerialConsistency LocalSerial) is non-negotiable per CLAUDE.md. Also remember to extend BOTH GetBucket and ListBuckets SELECTs when adding a new column — ListBuckets is easy to miss because most tests exercise GetBucket.
+  - When storing per-bucket flags whose values are validated in handlers (Enabled/Disabled), keep the meta layer permissive — it's an opaque string. Validation lives in s3api so the meta store stays simple and reusable for direct callers.
 ---

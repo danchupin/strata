@@ -32,6 +32,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"BucketLifecycleRulesBlob", caseLifecycleBlob},
 		{"ListObjectsHidesDeleteMarkers", caseListHidesDeleteMarkers},
 		{"MultipartCompletionRoundTrip", caseMultipartCompletion},
+		{"BucketMfaDeleteRoundTrip", caseBucketMfaDelete},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -253,6 +254,34 @@ func caseMultipartCompletion(t *testing.T, s meta.Store) {
 
 	if _, err := s.GetMultipartCompletion(ctx, b.ID, newTimeUUID()); err != meta.ErrMultipartCompletionNotFound {
 		t.Errorf("missing record: got %v want ErrMultipartCompletionNotFound", err)
+	}
+}
+
+func caseBucketMfaDelete(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	if _, err := s.CreateBucket(ctx, "mfd", "o", "STANDARD"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	got, _ := s.GetBucket(ctx, "mfd")
+	if got.MfaDelete != "" {
+		t.Errorf("default MfaDelete should be empty, got %q", got.MfaDelete)
+	}
+	if err := s.SetBucketMfaDelete(ctx, "mfd", meta.MfaDeleteEnabled); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	got, _ = s.GetBucket(ctx, "mfd")
+	if got.MfaDelete != meta.MfaDeleteEnabled {
+		t.Errorf("MfaDelete after set: %q", got.MfaDelete)
+	}
+	if err := s.SetBucketMfaDelete(ctx, "mfd", meta.MfaDeleteDisabled); err != nil {
+		t.Fatalf("set disabled: %v", err)
+	}
+	got, _ = s.GetBucket(ctx, "mfd")
+	if got.MfaDelete != meta.MfaDeleteDisabled {
+		t.Errorf("MfaDelete after disable: %q", got.MfaDelete)
+	}
+	if err := s.SetBucketMfaDelete(ctx, "missing", meta.MfaDeleteEnabled); err != meta.ErrBucketNotFound {
+		t.Errorf("missing bucket: got %v want ErrBucketNotFound", err)
 	}
 }
 

@@ -20,7 +20,7 @@ func (s *Server) getBucketVersioning(w http.ResponseWriter, r *http.Request, buc
 	if status == meta.VersioningDisabled {
 		status = ""
 	}
-	writeXML(w, http.StatusOK, versioningConfiguration{Status: status})
+	writeXML(w, http.StatusOK, versioningConfiguration{Status: status, MfaDelete: b.MfaDelete})
 }
 
 func (s *Server) putBucketVersioning(w http.ResponseWriter, r *http.Request, bucket string) {
@@ -43,9 +43,22 @@ func (s *Server) putBucketVersioning(w http.ResponseWriter, r *http.Request, buc
 		writeError(w, r, ErrInvalidArgument)
 		return
 	}
+	mfa := doc.MfaDelete
+	switch mfa {
+	case meta.MfaDeleteEnabled, meta.MfaDeleteDisabled, "":
+	default:
+		writeError(w, r, ErrInvalidArgument)
+		return
+	}
 	if err := s.Meta.SetBucketVersioning(r.Context(), bucket, state); err != nil {
 		mapMetaErr(w, r, err)
 		return
+	}
+	if mfa != "" {
+		if err := s.Meta.SetBucketMfaDelete(r.Context(), bucket, mfa); err != nil {
+			mapMetaErr(w, r, err)
+			return
+		}
 	}
 	w.WriteHeader(http.StatusOK)
 }
