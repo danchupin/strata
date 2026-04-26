@@ -95,6 +95,7 @@ func main() {
 	if masterProvider != nil {
 		apiHandler.Master = masterProvider
 	}
+	apiHandler.VHostPatterns = vhostPatterns()
 
 	healthHandler := buildHealthHandler(metaStore, dataBackend)
 
@@ -175,6 +176,22 @@ func healthCanaryOID() string {
 		return v
 	}
 	return "strata-readyz-canary"
+}
+
+// vhostPatterns returns the configured virtual-hosted-style host patterns.
+// Reads STRATA_VHOST_PATTERN as a comma-separated list of "*.<suffix>"
+// entries; defaults to "*.s3.local" so a fresh deployment supports
+// virtual-hosted-style URLs out of the box. Set the env var to an empty
+// non-empty placeholder ("-") to disable vhost extraction entirely.
+func vhostPatterns() []string {
+	v, ok := os.LookupEnv("STRATA_VHOST_PATTERN")
+	if !ok {
+		return []string{"*.s3.local"}
+	}
+	if v == "-" {
+		return nil
+	}
+	return s3api.ParseVHostPatterns(v)
 }
 
 type cassandraProber interface {

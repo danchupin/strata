@@ -47,6 +47,12 @@ type Server struct {
 	// DEKs. When nil, requests with x-amz-server-side-encryption=AES256 (or a
 	// bucket-default that resolves to AES256) return 500 InternalError.
 	Master master.Provider
+	// VHostPatterns lists virtual-hosted-style host patterns of the form
+	// "*.<suffix>" (e.g. "*.s3.local"). When the request Host matches any
+	// pattern, the prefix becomes the bucket and the request URL.Path is
+	// rewritten to "/<bucket>/<original-path>" before path-style routing.
+	// Empty disables vhost extraction (path-style only).
+	VHostPatterns []string
 }
 
 func New(d data.Backend, m meta.Store) *Server {
@@ -69,6 +75,20 @@ func (s *Server) enqueueChunks(ctx context.Context, chunks []data.ChunkRef) {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if vhostBucket := extractVHostBucket(r.Host, s.VHostPatterns); vhostBucket != "" {
+		path := r.URL.Path
+		if !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
+		r.URL.Path = "/" + vhostBucket + path
+		if r.URL.RawPath != "" {
+			rawPath := r.URL.RawPath
+			if !strings.HasPrefix(rawPath, "/") {
+				rawPath = "/" + rawPath
+			}
+			r.URL.RawPath = "/" + vhostBucket + rawPath
+		}
+	}
 	bucket, key := splitPath(r.URL.Path)
 
 	switch {

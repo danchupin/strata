@@ -75,6 +75,11 @@ Auth lives in `internal/auth/`: SigV4 (`sigv4.go`), presigned URLs (`presigned.g
 `streaming.go`, **chain HMAC validation TODO** — see ROADMAP P2), static credentials store (`static.go`). Identity flows
 through context: `auth.FromContext(ctx).Owner`.
 
+Virtual-hosted-style routing (`internal/s3api/vhost.go`): `STRATA_VHOST_PATTERN` is a comma-separated list of
+`*.<suffix>` patterns (default `*.s3.local`; set to `-` to disable). Auth middleware runs first and signs the
+original `Host` + `URL.Path`; `Server.ServeHTTP` then strips the prefix from `r.Host` and prepends `/<bucket>` to
+`r.URL.Path` before path-style routing — never rewrite before SigV4 verification or signatures break.
+
 ## meta.Store interface — the contract
 
 `internal/meta/store.go` is the abstraction every backend must satisfy. **Both `internal/meta/memory`

@@ -354,8 +354,8 @@
         "go test ./internal/s3api/... ./internal/auth/... passes"
       ],
       "priority": 21,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "internal/s3api/vhost.go adds extractVHostBucket(host, patterns) + ParseVHostPatterns(env). Server.VHostPatterns []string drives Server.ServeHTTP: when r.Host matches any pattern (first match wins), the bucket prefix is stripped and prepended to URL.Path before splitPath; URL.RawPath is patched in lockstep so urlencoded keys keep their on-the-wire form. STRATA_VHOST_PATTERN comma-separated list (default '*.s3.local'; '-' disables); cmd/strata-gateway/main.go::vhostPatterns reads it. Crucial ordering: auth.Middleware runs first (signs r.Host + URL.Path), s3api.Server.ServeHTTP runs second (rewrites r.URL.Path) so SigV4 signature verification sees the signed request unchanged. Tests in internal/s3api/vhost_test.go: vhost PUT/GET/HEAD round-trip, path-style still works, mismatched-host falls back, vhost disabled when patterns nil, signed (header) round-trip, presigned round-trip, host-with-port stripped via net.SplitHostPort, ParseVHostPatterns whitespace/empty handling. signRequest helper overwrites req.Host with URL.Host when no Host header is set — vhost tests therefore set req.Header.Set('Host', '<vhost>') AND req.Host before calling signRequest so the helper preserves vhost; the on-the-wire Host header still comes from req.Host because Go's Transport strips explicit 'Host' headers."
     },
     {
       "id": "US-022",
