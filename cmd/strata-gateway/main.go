@@ -88,7 +88,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
-	mux.Handle("/", metrics.ObserveHTTP(mw.Wrap(apiHandler, s3api.WriteAuthDenied)))
+	mux.Handle("/", metrics.ObserveHTTP(mw.Wrap(s3api.NewAccessLogMiddleware(metaStore, apiHandler), s3api.WriteAuthDenied)))
 
 	srv := &http.Server{
 		Addr:    cfg.Listen,

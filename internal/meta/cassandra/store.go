@@ -1213,6 +1213,100 @@ func (s *Store) AckReplication(ctx context.Context, evt meta.ReplicationEvent) e
 	).WithContext(ctx).Exec()
 }
 
+func (s *Store) EnqueueAccessLog(ctx context.Context, entry *meta.AccessLogEntry) error {
+	if entry == nil {
+		return nil
+	}
+	if entry.Time.IsZero() {
+		entry.Time = time.Now().UTC()
+	}
+	if entry.EventID == "" {
+		entry.EventID = gocql.TimeUUID().String()
+	}
+	eventUUID, err := gocql.ParseUUID(entry.EventID)
+	if err != nil {
+		return err
+	}
+	hour := notifyHour(entry.Time)
+	return s.s.Query(
+		`INSERT INTO access_log_buffer (bucket_id, hour, event_id, ts, request_id, principal, source_ip, op, object_key, status, bytes_sent, object_size, total_time_ms, turn_around_ms, referrer, user_agent, version_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		gocqlUUID(entry.BucketID), hour, eventUUID, entry.Time,
+		entry.RequestID, entry.Principal, entry.SourceIP, entry.Op, entry.Key,
+		entry.Status, entry.BytesSent, entry.ObjectSize, entry.TotalTimeMS, entry.TurnAroundMS,
+		entry.Referrer, entry.UserAgent, entry.VersionID,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) ListPendingAccessLog(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.AccessLogEntry, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	now := time.Now().UTC()
+	hour := notifyHour(now)
+	out := make([]meta.AccessLogEntry, 0, limit)
+	// Walk the last 48 hours so the access-log worker (US-014) catches buffered
+	// rows even after a brief outage. Older partitions tombstone via TTL once
+	// the worker drains them.
+	for i := 0; i < 48 && len(out) < limit; i++ {
+		partition := hour.Add(time.Duration(-i) * time.Hour)
+		iter := s.s.Query(
+			`SELECT event_id, ts, request_id, principal, source_ip, op, object_key, status, bytes_sent, object_size, total_time_ms, turn_around_ms, referrer, user_agent, version_id
+			 FROM access_log_buffer WHERE bucket_id=? AND hour=? LIMIT ?`,
+			gocqlUUID(bucketID), partition, limit-len(out),
+		).WithContext(ctx).Iter()
+		var (
+			eventID                                                                  gocql.UUID
+			ts                                                                       time.Time
+			requestID, principal, sourceIP, op, key, referrer, userAgent, versionID  string
+			status, totalTimeMS, turnAroundMS                                        int
+			bytesSent, objectSize                                                    int64
+		)
+		for iter.Scan(&eventID, &ts, &requestID, &principal, &sourceIP, &op, &key, &status, &bytesSent, &objectSize, &totalTimeMS, &turnAroundMS, &referrer, &userAgent, &versionID) {
+			out = append(out, meta.AccessLogEntry{
+				BucketID:     bucketID,
+				EventID:      eventID.String(),
+				Time:         ts,
+				RequestID:    requestID,
+				Principal:    principal,
+				SourceIP:     sourceIP,
+				Op:           op,
+				Key:          key,
+				Status:       status,
+				BytesSent:    bytesSent,
+				ObjectSize:   objectSize,
+				TotalTimeMS:  totalTimeMS,
+				TurnAroundMS: turnAroundMS,
+				Referrer:     referrer,
+				UserAgent:    userAgent,
+				VersionID:    versionID,
+			})
+			if len(out) >= limit {
+				break
+			}
+		}
+		if err := iter.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) AckAccessLog(ctx context.Context, entry meta.AccessLogEntry) error {
+	if entry.EventID == "" {
+		return nil
+	}
+	eventUUID, err := gocql.ParseUUID(entry.EventID)
+	if err != nil {
+		return err
+	}
+	hour := notifyHour(entry.Time)
+	return s.s.Query(
+		`DELETE FROM access_log_buffer WHERE bucket_id=? AND hour=? AND event_id=?`,
+		gocqlUUID(entry.BucketID), hour, eventUUID,
+	).WithContext(ctx).Exec()
+}
+
 func (s *Store) resolveVersionID(ctx context.Context, bucketID uuid.UUID, key, versionID string) (gocql.UUID, int, error) {
 	shard := shardOf(key, s.defaultShard)
 	if versionID != "" {

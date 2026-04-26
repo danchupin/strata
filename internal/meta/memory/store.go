@@ -40,6 +40,7 @@ type Store struct {
 	notifyQueue    map[uuid.UUID][]meta.NotificationEvent
 	notifyDLQ      map[uuid.UUID][]meta.NotificationDLQEntry
 	replicationQueue map[uuid.UUID][]meta.ReplicationEvent
+	accessLogQueue map[uuid.UUID][]meta.AccessLogEntry
 	mpDone         map[completionKey]*completionEntry
 	rewrapProgress map[uuid.UUID]*meta.RewrapProgress
 	locker         *Locker
@@ -101,6 +102,7 @@ func New() *Store {
 		notifyQueue:    make(map[uuid.UUID][]meta.NotificationEvent),
 		notifyDLQ:      make(map[uuid.UUID][]meta.NotificationDLQEntry),
 		replicationQueue: make(map[uuid.UUID][]meta.ReplicationEvent),
+		accessLogQueue: make(map[uuid.UUID][]meta.AccessLogEntry),
 		mpDone:         make(map[completionKey]*completionEntry),
 		rewrapProgress: make(map[uuid.UUID]*meta.RewrapProgress),
 		locker:         NewLocker(),
@@ -284,6 +286,53 @@ func (s *Store) SetObjectReplicationStatus(ctx context.Context, bucketID uuid.UU
 		}
 	}
 	return meta.ErrObjectNotFound
+}
+
+func (s *Store) EnqueueAccessLog(ctx context.Context, entry *meta.AccessLogEntry) error {
+	if entry == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := *entry
+	if cp.EventID == "" {
+		cp.EventID = gocql.TimeUUID().String()
+	}
+	if cp.Time.IsZero() {
+		cp.Time = time.Now().UTC()
+	}
+	s.accessLogQueue[entry.BucketID] = append(s.accessLogQueue[entry.BucketID], cp)
+	return nil
+}
+
+func (s *Store) ListPendingAccessLog(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.AccessLogEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	rows := s.accessLogQueue[bucketID]
+	out := make([]meta.AccessLogEntry, 0, len(rows))
+	for _, e := range rows {
+		out = append(out, e)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) AckAccessLog(ctx context.Context, entry meta.AccessLogEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows := s.accessLogQueue[entry.BucketID]
+	for i, e := range rows {
+		if e.EventID == entry.EventID {
+			s.accessLogQueue[entry.BucketID] = append(rows[:i], rows[i+1:]...)
+			return nil
+		}
+	}
+	return nil
 }
 
 func (s *Store) AckReplication(ctx context.Context, evt meta.ReplicationEvent) error {

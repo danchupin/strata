@@ -217,8 +217,8 @@
         "go test ./internal/s3api/... passes"
       ],
       "priority": 13,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "meta.AccessLogEntry struct + Store EnqueueAccessLog / ListPendingAccessLog / AckAccessLog (3-method buffer-and-drain shape mirroring notify_queue / replication_queue). Cassandra schema additive: access_log_buffer table partitioned by ((bucket_id, hour)) with TimeUUID clustering; ListPendingAccessLog walks last 48 hour partitions (uses existing notifyHour helper). storetest caseAccessLogBuffer covers both backends. internal/s3api/access_log.go: AccessLogMiddleware wraps s3api.Server, captures status + bytes via accessLogWriter, runs inner handler, then splitPath → GetBucket → GetBucketLogging; on any meta error (incl. ErrNoSuchLogging) silently skips. EnqueueAccessLog is best-effort. deriveAccessLogOp walks subresource query keys (acl/policy/logging/lifecycle/versions/versioning/uploads/uploadId/partNumber/attributes/...) → REST.<METHOD>.<RES>; falls back to REST.<METHOD>.OBJECT or .BUCKET. ObjectSize: request Content-Length for PUT/POST, response Content-Length (or bytes-written) for GET/HEAD. TurnAroundMS = 0 (no first-byte-out hook yet; schema reserves column for US-014/future). cmd/strata-gateway/main.go: mux.Handle('/', metrics.ObserveHTTP(mw.Wrap(s3api.NewAccessLogMiddleware(metaStore, apiHandler), …))) — auth fires before access-log so principalFromContext resolves. Tests: PUT with logging configured writes 2 rows (PUT?logging itself + PUT object) with correct Op/Status/RequestID/UserAgent/Referrer/ObjectSize; PUT without logging writes 0 rows; GET object echoes ObjectSize from response Content-Length; ?policy GET on bucket without policy yields REST.GET.POLICY row with status 404. Known limitation: middleware logs PUT?logging= against the bucket itself (AWS-strict 'skip when bucket == target' filter deferred to US-014)."
     },
     {
       "id": "US-014",

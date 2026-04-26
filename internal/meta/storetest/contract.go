@@ -37,6 +37,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"NotificationQueueRoundTrip", caseNotificationQueue},
 		{"NotificationDLQRoundTrip", caseNotificationDLQ},
 		{"ReplicationQueueRoundTrip", caseReplicationQueue},
+		{"AccessLogBufferRoundTrip", caseAccessLogBuffer},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -423,6 +424,57 @@ func caseNotificationDLQ(t *testing.T, s meta.Store) {
 	}
 	if string(got[0].Payload) != string(entry.Payload) {
 		t.Fatalf("payload: %q", string(got[0].Payload))
+	}
+}
+
+func caseAccessLogBuffer(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "alog", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	now := time.Now().UTC()
+	entry := &meta.AccessLogEntry{
+		BucketID:    b.ID,
+		Bucket:      b.Name,
+		EventID:     newTimeUUID(),
+		Time:        now,
+		RequestID:   "req-123",
+		Principal:   "alice",
+		SourceIP:    "10.0.0.1",
+		Op:          "REST.PUT.OBJECT",
+		Key:         "img/cat.jpg",
+		Status:      200,
+		BytesSent:   1024,
+		ObjectSize:  4096,
+		TotalTimeMS: 12,
+		Referrer:    "https://example.com/",
+		UserAgent:   "aws-cli/2.0",
+		VersionID:   "",
+	}
+	if err := s.EnqueueAccessLog(ctx, entry); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	got, err := s.ListPendingAccessLog(ctx, b.ID, 100)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d rows want 1", len(got))
+	}
+	if got[0].Op != entry.Op || got[0].Key != entry.Key || got[0].Status != entry.Status ||
+		got[0].BytesSent != entry.BytesSent || got[0].ObjectSize != entry.ObjectSize ||
+		got[0].RequestID != entry.RequestID || got[0].Principal != entry.Principal ||
+		got[0].SourceIP != entry.SourceIP || got[0].Referrer != entry.Referrer ||
+		got[0].UserAgent != entry.UserAgent {
+		t.Fatalf("row: %+v", got[0])
+	}
+	if err := s.AckAccessLog(ctx, got[0]); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	remaining, _ := s.ListPendingAccessLog(ctx, b.ID, 100)
+	if len(remaining) != 0 {
+		t.Fatalf("after ack: %d remaining", len(remaining))
 	}
 }
 

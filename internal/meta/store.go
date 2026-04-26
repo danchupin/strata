@@ -240,6 +240,30 @@ type NotificationDLQEntry struct {
 	EnqueuedAt time.Time
 }
 
+// AccessLogEntry is one buffered server-access-log row written by the gateway
+// HTTP middleware (US-013) when the source bucket has logging configured. The
+// strata-access-log worker (US-014) drains this buffer into AWS-format log
+// files in the configured target bucket.
+type AccessLogEntry struct {
+	BucketID     uuid.UUID
+	Bucket       string
+	EventID      string
+	Time         time.Time
+	RequestID    string
+	Principal    string
+	SourceIP     string
+	Op           string
+	Key          string
+	Status       int
+	BytesSent    int64
+	ObjectSize   int64
+	TotalTimeMS  int
+	TurnAroundMS int
+	Referrer     string
+	UserAgent    string
+	VersionID    string
+}
+
 // ReplicationEvent is one buffered cross-region replication intent waiting
 // for the strata-replicator worker (US-012) to copy the source object to the
 // destination configured by the matching rule. One row per matching rule —
@@ -293,6 +317,10 @@ type Store interface {
 	EnqueueReplication(ctx context.Context, evt *ReplicationEvent) error
 	ListPendingReplications(ctx context.Context, bucketID uuid.UUID, limit int) ([]ReplicationEvent, error)
 	AckReplication(ctx context.Context, evt ReplicationEvent) error
+
+	EnqueueAccessLog(ctx context.Context, entry *AccessLogEntry) error
+	ListPendingAccessLog(ctx context.Context, bucketID uuid.UUID, limit int) ([]AccessLogEntry, error)
+	AckAccessLog(ctx context.Context, entry AccessLogEntry) error
 
 	SetObjectTags(ctx context.Context, bucketID uuid.UUID, key, versionID string, tags map[string]string) error
 	GetObjectTags(ctx context.Context, bucketID uuid.UUID, key, versionID string) (map[string]string, error)

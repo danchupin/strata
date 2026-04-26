@@ -201,6 +201,26 @@ var tableDDL = []string{
 		storage_class      text,
 		PRIMARY KEY ((bucket_id, day), event_id)
 	)`,
+	`CREATE TABLE IF NOT EXISTS access_log_buffer (
+		bucket_id      uuid,
+		hour           timestamp,
+		event_id       timeuuid,
+		ts             timestamp,
+		request_id     text,
+		principal      text,
+		source_ip      text,
+		op             text,
+		object_key     text,
+		status         int,
+		bytes_sent     bigint,
+		object_size    bigint,
+		total_time_ms  int,
+		turn_around_ms int,
+		referrer       text,
+		user_agent     text,
+		version_id     text,
+		PRIMARY KEY ((bucket_id, hour), event_id)
+	)`,
 	`CREATE TABLE IF NOT EXISTS notify_dlq (
 		bucket_id    uuid,
 		day          timestamp,
