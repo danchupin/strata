@@ -320,8 +320,8 @@
         "go build ./... passes"
       ],
       "priority": 19,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "deploy/grafana/strata-dashboard.json (uid=strata-overview, schemaVersion=39): rows for HTTP, Cassandra, RADOS, GC+Lifecycle, Bucket capacity, Replication, Notifications. Panels: http p50/p95/p99 (histogram_quantile over strata_http_request_duration_seconds_bucket by method,path), http req rate, cassandra p99 by table + rate by table+op, RADOS p99 by pool + rate by pool+op, gc queue depth gauge, multipart active gauge, lifecycle tick rate by action+status, bucket bytes by storage_class, replication lag p95 + queue depth + completed/failed rates per rule, notify delivery rate by sink+status. deploy/grafana/datasource.yaml provisions Prometheus as default (url=http://prometheus:9090). deploy/grafana/dashboard.yaml provider points at /var/lib/grafana/dashboards. deploy/prometheus/prometheus.yml scrapes gateway:9000, gc:9100, lifecycle:9101, notify:9102, replicator:9103, access-log:9104. docker-compose adds prometheus + grafana services with volume-mounted provisioning + dashboard JSON; Makefile up-all now starts prometheus+grafana too. Tests: deploy/grafana/dashboard_test.go validates JSON parses + asserts every required metric is referenced by at least one target + http panel covers p50/p95/p99. scripts/grafana-smoke.sh hits /api/dashboards/uid/strata-overview + /api/datasources/name/Prometheus once Grafana is up; wired as `make smoke-grafana`."
     },
     {
       "id": "US-020",

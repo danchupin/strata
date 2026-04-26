@@ -410,3 +410,26 @@ Started: Sun Apr 26 20:43:22 MSK 2026
   - **Gotcha (multipart_active is event-driven, not sampled)**: chose Inc/Dec at handler boundaries over sampling `ListMultipartUploads`. Reasons: ListMultipartUploads paginates 1000-at-a-time per bucket, sampling N buckets hourly is heavy; counter drift on crash-during-handler is acceptable because it's an active-now gauge anyway. If drift becomes visible, add a once-per-hour reconciliation pass via `ListMultipartUploads` to set the gauge to ground truth.
   - **Gotcha (prom test helpers test pkg has multiple shape needs)**: `histogramCount` was already there; added `gaugeValue` + `counterValue` helpers in the same `_test.go`. They use `prometheus.Gauge.Write(&dto.Metric{}).Gauge.GetValue()` / `.Counter.GetValue()`. Same `Reset()` discipline applies — reset every label set at the top of every metric-asserting test, since prom collectors are package-globals.
 ---
+
+## 2026-04-27 - US-019
+- Added Grafana dashboard JSON + provisioning + Prometheus scrape config + docker-compose wiring.
+- Files added:
+  - `deploy/grafana/strata-dashboard.json` — uid=strata-overview, schemaVersion=39, 7 rows / 13 panels covering every PRD-listed metric.
+  - `deploy/grafana/datasource.yaml` — Prometheus datasource (url=http://prometheus:9090) marked default, anonymous Viewer enabled.
+  - `deploy/grafana/dashboard.yaml` — file provider pointing at /var/lib/grafana/dashboards.
+  - `deploy/grafana/dashboard_test.go` — package `grafana_test` validates JSON parses + asserts every required metric is referenced + http panel covers p50/p95/p99 quantiles.
+  - `deploy/prometheus/prometheus.yml` — scrape configs for gateway:9000, gc:9100, lifecycle:9101, notify:9102, replicator:9103, access-log:9104.
+  - `scripts/grafana-smoke.sh` — curls /api/dashboards/uid/<uid> + /api/datasources/name/Prometheus to verify provisioning loaded; expects `make up-all` running.
+- Files modified:
+  - `deploy/docker/docker-compose.yml` — new `prometheus` (image: prom/prometheus:v2.54.1, port 9090) + `grafana` (image: grafana/grafana:11.2.0, port 3000, admin/admin, anonymous viewer) services; volumes for both.
+  - `Makefile` — `up-all` now starts `prometheus grafana` too; new `smoke-grafana` target wraps the smoke script.
+- Quality: `go build ./...`, `go vet ./...`, `go test ./...` all pass; targeted `go test ./deploy/grafana/...` is 2/2 PASS.
+- **Learnings for future iterations:**
+  - Grafana provisioning shape: `/etc/grafana/provisioning/datasources/<name>.yaml` (datasource), `/etc/grafana/provisioning/dashboards/<provider>.yaml` (dashboard provider pointing at a path), then drop the dashboard JSON files at that path. Provider's `path` is `/var/lib/grafana/dashboards` by convention; mount the JSON files there read-only. JSON file's `id` MUST be `null` — non-null id collides with already-imported dashboards.
+  - Dashboard JSON `datasource` field uses `{type, uid}` since Grafana 9. We hardcoded `uid: PBFA97CFB590B2093` (the default Prometheus uid Grafana auto-assigns when provisioning unnamed). If you change the datasource yaml to set `uid: prometheus`, update every panel target's datasource block to match — Grafana will silently render "no data" if the uid mismatches.
+  - The test pkg lives at `deploy/grafana/dashboard_test.go` with package `grafana_test` (external test package, no production source needed). Ralph was happy to run it via `go test ./deploy/grafana/...` — this is a clean way to ship "config validation" tests without polluting the import tree.
+  - Metric naming sticks to `strata_<area>_<thing>` always; histograms expose `_bucket` + `_count` + `_sum` series. Use `_count` for rate(), `_bucket` for histogram_quantile(). We standardised on 5m windows (`rate(...[5m])`); shorter windows magnify noise on low-traffic dev clusters.
+  - Each binary's `/metrics` endpoint listens on a distinct port: gateway=9000 (shared with main HTTP), gc=9100, lifecycle=9101, notify=9102, replicator=9103, access-log=9104. Prometheus scrape config must list all six — adding a new worker means adding a scrape job. Document this when US-020 (/healthz) lands so probes and metrics ports stay aligned.
+  - The `make smoke-grafana` script depends on Python 3 for JSON parsing — minimal, but if CI runs in a barebones container, swap to `jq` (already on most CI base images).
+  - Don't bake panel-id expectations into the test — Grafana accepts any int id and will renumber on UI edits. Test by metric reference instead (collect every panel target's `expr`, assert each required metric substring is present).
+---
