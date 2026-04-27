@@ -49,7 +49,9 @@ var (
 	ErrInvalidTag                   = APIError{Code: "InvalidTag", Message: "The TagSet contains an invalid tag", Status: http.StatusBadRequest}
 	ErrObjectLockNotEnabled         = APIError{Code: "InvalidRequest", Message: "Bucket is missing Object Lock Configuration", Status: http.StatusBadRequest}
 	ErrInvalidEncryptionAlgorithm   = APIError{Code: "InvalidArgument", Message: "The encryption algorithm specified is not supported", Status: http.StatusBadRequest}
-	ErrKMSNotImplemented            = APIError{Code: "NotImplemented", Message: "aws:kms server-side encryption is not supported", Status: http.StatusNotImplemented}
+	ErrKMSNotImplemented            = APIError{Code: "NotImplemented", Message: "aws:kms:dsse server-side encryption is not supported", Status: http.StatusNotImplemented}
+	ErrKMSKeyIDMissing              = APIError{Code: "InvalidArgument", Message: "aws:kms encryption requires x-amz-server-side-encryption-aws-kms-key-id", Status: http.StatusBadRequest}
+	ErrKMSAccessDenied              = APIError{Code: "AccessDenied", Message: "KMS key id mismatch on unwrap", Status: http.StatusForbidden}
 	ErrInvalidRequest               = APIError{Code: "InvalidRequest", Message: "The request is invalid", Status: http.StatusBadRequest}
 	ErrInvalidDigest                = APIError{Code: "InvalidDigest", Message: "The provided digest does not match the supplied data", Status: http.StatusBadRequest}
 	ErrSSECRequired                 = APIError{Code: "InvalidRequest", Message: "The object was stored using server-side encryption with a customer-provided key; matching SSE-C headers are required", Status: http.StatusBadRequest}

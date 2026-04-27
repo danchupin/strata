@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/danchupin/strata/internal/auth"
+	"github.com/danchupin/strata/internal/crypto/kms"
 	datamem "github.com/danchupin/strata/internal/data/memory"
 	metamem "github.com/danchupin/strata/internal/meta/memory"
 	"github.com/danchupin/strata/internal/s3api"
@@ -18,15 +19,18 @@ import (
 const testPrincipalHeader = "X-Test-Principal"
 
 type testHarness struct {
-	t  *testing.T
-	ts *httptest.Server
+	t    *testing.T
+	ts   *httptest.Server
+	meta *metamem.Store
 }
 
 func newHarness(t *testing.T) *testHarness {
 	t.Helper()
-	api := s3api.New(datamem.New(), metamem.New())
+	metaStore := metamem.New()
+	api := s3api.New(datamem.New(), metaStore)
 	api.Region = "default"
 	api.Master = harnessMasterProvider{}
+	api.KMS = newHarnessKMSProvider(t)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if p := r.Header.Get(testPrincipalHeader); p != "" {
 			ctx := auth.WithAuth(r.Context(), &auth.AuthInfo{Owner: p, AccessKey: p})
@@ -36,7 +40,7 @@ func newHarness(t *testing.T) *testHarness {
 	})
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
-	return &testHarness{t: t, ts: ts}
+	return &testHarness{t: t, ts: ts, meta: metaStore}
 }
 
 // harnessMasterProvider is a fixed-key master.Provider used by the default
@@ -50,6 +54,21 @@ func (harnessMasterProvider) Resolve(_ context.Context) ([]byte, string, error) 
 		key[i] = byte(0x10 + i)
 	}
 	return key, "harness-1", nil
+}
+
+// newHarnessKMSProvider installs the local-hsm provider with a deterministic
+// seed so SSE-KMS round-trips work without a real KMS dependency.
+func newHarnessKMSProvider(t *testing.T) kms.Provider {
+	t.Helper()
+	seed := make([]byte, 32)
+	for i := range seed {
+		seed[i] = byte(0xa0 + i)
+	}
+	p, err := kms.NewLocalHSMProvider(seed)
+	if err != nil {
+		t.Fatalf("kms harness provider: %v", err)
+	}
+	return p
 }
 
 func (h *testHarness) do(method, path string, body io.Reader, headers ...string) *http.Response {

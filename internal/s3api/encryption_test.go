@@ -1,6 +1,7 @@
 package s3api_test
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -38,15 +39,27 @@ func TestObjectSSEHeaderRoundTrip(t *testing.T) {
 	}
 }
 
-func TestObjectSSEKMSRejected(t *testing.T) {
+func TestObjectSSEKMSDSSERejected(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+
+	resp := h.doString("PUT", "/bkt/k", "x",
+		"x-amz-server-side-encryption", "aws:kms:dsse")
+	h.mustStatus(resp, 501)
+	if body := h.readBody(resp); !strings.Contains(body, "NotImplemented") {
+		t.Fatalf("expected NotImplemented, got: %s", body)
+	}
+}
+
+func TestObjectSSEKMSWithoutKeyIDReturns400(t *testing.T) {
 	h := newHarness(t)
 	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
 
 	resp := h.doString("PUT", "/bkt/k", "x",
 		"x-amz-server-side-encryption", "aws:kms")
-	h.mustStatus(resp, 501)
-	if body := h.readBody(resp); !strings.Contains(body, "NotImplemented") {
-		t.Fatalf("expected NotImplemented, got: %s", body)
+	h.mustStatus(resp, 400)
+	if body := h.readBody(resp); !strings.Contains(body, "InvalidArgument") {
+		t.Fatalf("expected InvalidArgument, got: %s", body)
 	}
 }
 
@@ -159,7 +172,22 @@ func TestBucketEncryptionMultipartDefaultApplied(t *testing.T) {
 	}
 }
 
-func TestBucketEncryptionPutKMSRejected(t *testing.T) {
+func TestBucketEncryptionPutKMSDSSERejected(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+
+	const kmsCfg = `<ServerSideEncryptionConfiguration>
+		<Rule>
+			<ApplyServerSideEncryptionByDefault>
+				<SSEAlgorithm>aws:kms:dsse</SSEAlgorithm>
+			</ApplyServerSideEncryptionByDefault>
+		</Rule>
+	</ServerSideEncryptionConfiguration>`
+	resp := h.doString("PUT", "/bkt?encryption=", kmsCfg)
+	h.mustStatus(resp, 501)
+}
+
+func TestBucketEncryptionPutKMSAccepted(t *testing.T) {
 	h := newHarness(t)
 	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
 
@@ -167,11 +195,162 @@ func TestBucketEncryptionPutKMSRejected(t *testing.T) {
 		<Rule>
 			<ApplyServerSideEncryptionByDefault>
 				<SSEAlgorithm>aws:kms</SSEAlgorithm>
+				<KMSMasterKeyID>alias/strata-test</KMSMasterKeyID>
 			</ApplyServerSideEncryptionByDefault>
 		</Rule>
 	</ServerSideEncryptionConfiguration>`
-	resp := h.doString("PUT", "/bkt?encryption=", kmsCfg)
-	h.mustStatus(resp, 501)
+	h.mustStatus(h.doString("PUT", "/bkt?encryption=", kmsCfg), 200)
+}
+
+func TestObjectSSEKMSRoundTrip(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+
+	resp := h.doString("PUT", "/bkt/k", "payload",
+		"x-amz-server-side-encryption", "aws:kms",
+		"x-amz-server-side-encryption-aws-kms-key-id", "alias/strata-test")
+	h.mustStatus(resp, 200)
+	if got := resp.Header.Get("x-amz-server-side-encryption"); got != "aws:kms" {
+		t.Fatalf("PUT sse header: got %q want aws:kms", got)
+	}
+	if got := resp.Header.Get("x-amz-server-side-encryption-aws-kms-key-id"); got != "alias/strata-test" {
+		t.Fatalf("PUT key id header: got %q", got)
+	}
+
+	resp = h.doString("GET", "/bkt/k", "")
+	h.mustStatus(resp, 200)
+	if got := h.readBody(resp); got != "payload" {
+		t.Fatalf("GET body: got %q want payload", got)
+	}
+	if got := resp.Header.Get("x-amz-server-side-encryption"); got != "aws:kms" {
+		t.Fatalf("GET sse header: got %q want aws:kms", got)
+	}
+	if got := resp.Header.Get("x-amz-server-side-encryption-aws-kms-key-id"); got != "alias/strata-test" {
+		t.Fatalf("GET key id header: got %q", got)
+	}
+}
+
+func TestObjectSSEKMSDefaultApplied(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+
+	const kmsCfg = `<ServerSideEncryptionConfiguration>
+		<Rule>
+			<ApplyServerSideEncryptionByDefault>
+				<SSEAlgorithm>aws:kms</SSEAlgorithm>
+				<KMSMasterKeyID>alias/strata-default</KMSMasterKeyID>
+			</ApplyServerSideEncryptionByDefault>
+		</Rule>
+	</ServerSideEncryptionConfiguration>`
+	h.mustStatus(h.doString("PUT", "/bkt?encryption=", kmsCfg), 200)
+
+	resp := h.doString("PUT", "/bkt/k", "payload")
+	h.mustStatus(resp, 200)
+	if got := resp.Header.Get("x-amz-server-side-encryption"); got != "aws:kms" {
+		t.Fatalf("PUT inherited SSE: got %q", got)
+	}
+	if got := resp.Header.Get("x-amz-server-side-encryption-aws-kms-key-id"); got != "alias/strata-default" {
+		t.Fatalf("PUT inherited key id: got %q", got)
+	}
+
+	resp = h.doString("GET", "/bkt/k", "")
+	h.mustStatus(resp, 200)
+	if got := h.readBody(resp); got != "payload" {
+		t.Fatalf("GET body: got %q", got)
+	}
+}
+
+func TestObjectSSEKMSDefaultRequiresKeyID(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+
+	// bucket default selects aws:kms but omits KMSMasterKeyID — header-less PUT
+	// must fail 400 rather than fall back to a missing-key-id wrap.
+	const kmsCfgNoID = `<ServerSideEncryptionConfiguration>
+		<Rule>
+			<ApplyServerSideEncryptionByDefault>
+				<SSEAlgorithm>aws:kms</SSEAlgorithm>
+			</ApplyServerSideEncryptionByDefault>
+		</Rule>
+	</ServerSideEncryptionConfiguration>`
+	h.mustStatus(h.doString("PUT", "/bkt?encryption=", kmsCfgNoID), 200)
+
+	resp := h.doString("PUT", "/bkt/k", "x")
+	h.mustStatus(resp, 400)
+	if body := h.readBody(resp); !strings.Contains(body, "InvalidArgument") {
+		t.Fatalf("expected InvalidArgument, got: %s", body)
+	}
+}
+
+func TestObjectSSEKMSMismatchedKeyIDForbidden(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+
+	resp := h.doString("PUT", "/bkt/k", "payload",
+		"x-amz-server-side-encryption", "aws:kms",
+		"x-amz-server-side-encryption-aws-kms-key-id", "alias/orig")
+	h.mustStatus(resp, 200)
+
+	ctx := context.Background()
+	b, err := h.meta.GetBucket(ctx, "bkt")
+	if err != nil {
+		t.Fatalf("get bucket: %v", err)
+	}
+	o, err := h.meta.GetObject(ctx, b.ID, "k", "")
+	if err != nil {
+		t.Fatalf("get object: %v", err)
+	}
+	// Tamper: leave wrapped DEK but switch persisted key id so UnwrapDEK
+	// recomputes a mac that does NOT match the stored wrap → ErrKeyIDMismatch.
+	if err := h.meta.UpdateObjectSSEWrap(ctx, b.ID, "k", o.VersionID, o.SSEKey, "alias/wrong"); err != nil {
+		t.Fatalf("tamper key id: %v", err)
+	}
+
+	resp = h.doString("GET", "/bkt/k", "")
+	h.mustStatus(resp, 403)
+	if body := h.readBody(resp); !strings.Contains(body, "AccessDenied") {
+		t.Fatalf("expected AccessDenied, got: %s", body)
+	}
+}
+
+func TestObjectSSEKMSMultipartRoundTrip(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+
+	resp := h.doString("POST", "/bkt/k?uploads=", "",
+		"x-amz-server-side-encryption", "aws:kms",
+		"x-amz-server-side-encryption-aws-kms-key-id", "alias/multi")
+	h.mustStatus(resp, 200)
+	if got := resp.Header.Get("x-amz-server-side-encryption"); got != "aws:kms" {
+		t.Fatalf("Initiate sse header: got %q", got)
+	}
+	if got := resp.Header.Get("x-amz-server-side-encryption-aws-kms-key-id"); got != "alias/multi" {
+		t.Fatalf("Initiate key id header: got %q", got)
+	}
+	uploadID := extractUploadID(h.readBody(resp))
+	if uploadID == "" {
+		t.Fatalf("could not parse uploadId")
+	}
+
+	resp = h.doString("PUT", "/bkt/k?partNumber=1&uploadId="+uploadID, "abc")
+	h.mustStatus(resp, 200)
+	etag := strings.Trim(resp.Header.Get("ETag"), `"`)
+
+	completeXML := "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"" + etag + "\"</ETag></Part></CompleteMultipartUpload>"
+	resp = h.doString("POST", "/bkt/k?uploadId="+uploadID, completeXML)
+	h.mustStatus(resp, 200)
+	if got := resp.Header.Get("x-amz-server-side-encryption"); got != "aws:kms" {
+		t.Fatalf("Complete sse header: got %q", got)
+	}
+	if got := resp.Header.Get("x-amz-server-side-encryption-aws-kms-key-id"); got != "alias/multi" {
+		t.Fatalf("Complete key id header: got %q", got)
+	}
+
+	resp = h.doString("GET", "/bkt/k", "")
+	h.mustStatus(resp, 200)
+	if got := h.readBody(resp); got != "abc" {
+		t.Fatalf("GET body: got %q", got)
+	}
 }
 
 func TestBucketEncryptionMalformedRejected(t *testing.T) {

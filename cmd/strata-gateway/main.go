@@ -10,9 +10,13 @@ import (
 	"syscall"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	awskms "github.com/aws/aws-sdk-go-v2/service/kms"
+
 	"github.com/danchupin/strata/internal/auth"
 	"github.com/danchupin/strata/internal/bucketstats"
 	"github.com/danchupin/strata/internal/config"
+	"github.com/danchupin/strata/internal/crypto/kms"
 	"github.com/danchupin/strata/internal/crypto/master"
 	"github.com/danchupin/strata/internal/data"
 	datamem "github.com/danchupin/strata/internal/data/memory"
@@ -110,6 +114,14 @@ func main() {
 	if masterProvider != nil {
 		apiHandler.Master = masterProvider
 	}
+	kmsProvider, err := kms.FromEnv(kms.WithAWSKMSClientFactory(awsKMSClientFactory))
+	if err != nil && !errors.Is(err, kms.ErrNoConfig) {
+		logger.Error("sse-kms provider", "error", err.Error())
+		os.Exit(2)
+	}
+	if kmsProvider != nil {
+		apiHandler.KMS = kmsProvider
+	}
 	apiHandler.VHostPatterns = vhostPatterns()
 
 	healthHandler := buildHealthHandler(metaStore, dataBackend)
@@ -194,6 +206,23 @@ func healthCanaryOID() string {
 		return v
 	}
 	return "strata-readyz-canary"
+}
+
+// awsKMSClientFactory builds an AWS SDK KMS client wrapped behind the narrow
+// kms.KMSAPI interface. Resolves credentials via the standard AWS credential
+// chain (env vars, shared config, IRSA, EC2/ECS instance roles). Empty region
+// lets the chain pick from AWS_REGION / EC2 metadata.
+func awsKMSClientFactory(region string) (kms.KMSAPI, error) {
+	ctx := context.Background()
+	var opts []func(*awsconfig.LoadOptions) error
+	if region != "" {
+		opts = append(opts, awsconfig.WithRegion(region))
+	}
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return awskms.NewFromConfig(cfg), nil
 }
 
 // auditRetention reads STRATA_AUDIT_RETENTION (Go duration or "<N>d") and

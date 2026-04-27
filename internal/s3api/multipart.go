@@ -19,6 +19,7 @@ import (
 	"github.com/gocql/gocql"
 
 	"github.com/danchupin/strata/internal/auth"
+	"github.com/danchupin/strata/internal/crypto/kms"
 	"github.com/danchupin/strata/internal/crypto/master"
 	ssecrypto "github.com/danchupin/strata/internal/crypto/sse"
 	"github.com/danchupin/strata/internal/data"
@@ -33,7 +34,7 @@ func (s *Server) initiateMultipart(w http.ResponseWriter, r *http.Request, b *me
 	if class == "" {
 		class = b.DefaultClass
 	}
-	sse, sseErr, sseOK := s.resolveSSE(r, b)
+	sse, kmsKeyID, sseErr, sseOK := s.resolveSSEWithKey(r, b)
 	if !sseOK {
 		writeError(w, r, sseErr)
 		return
@@ -53,7 +54,8 @@ func (s *Server) initiateMultipart(w http.ResponseWriter, r *http.Request, b *me
 		ChecksumAlgorithm: strings.ToUpper(r.Header.Get("x-amz-checksum-algorithm")),
 		ChecksumType:      normalizeChecksumType(r.Header.Get("x-amz-checksum-type")),
 	}
-	if sse == sseAlgorithmAES256 {
+	switch sse {
+	case sseAlgorithmAES256:
 		if s.Master == nil {
 			writeError(w, r, ErrInternal)
 			return
@@ -75,6 +77,18 @@ func (s *Server) initiateMultipart(w http.ResponseWriter, r *http.Request, b *me
 		}
 		mu.SSEKey = wrapped
 		mu.SSEKeyID = mid
+	case sseAlgorithmAWSKMS:
+		if s.KMS == nil {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		_, wrapped, kerr := s.KMS.GenerateDataKey(r.Context(), kmsKeyID)
+		if kerr != nil {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		mu.SSEKey = wrapped
+		mu.SSEKeyID = kmsKeyID
 	}
 	if err := s.Meta.CreateMultipartUpload(r.Context(), mu); err != nil {
 		mapMetaErr(w, r, err)
@@ -83,6 +97,9 @@ func (s *Server) initiateMultipart(w http.ResponseWriter, r *http.Request, b *me
 	metrics.MultipartActive.WithLabelValues(b.Name).Inc()
 	if sse != "" {
 		w.Header().Set("x-amz-server-side-encryption", sse)
+	}
+	if sse == sseAlgorithmAWSKMS && mu.SSEKeyID != "" {
+		w.Header().Set(hdrSSEKMSKeyID, mu.SSEKeyID)
 	}
 	if mu.ChecksumAlgorithm != "" {
 		w.Header().Set("x-amz-checksum-algorithm", mu.ChecksumAlgorithm)
@@ -141,7 +158,8 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Buck
 		body = io.TeeReader(r.Body, checksumWriter(checksumEntries))
 	}
 	var encReader *sseEncryptingReader
-	if mu.SSE == sseAlgorithmAES256 {
+	switch mu.SSE {
+	case sseAlgorithmAES256:
 		if s.Master == nil || len(mu.SSEKey) == 0 {
 			writeError(w, r, ErrInternal)
 			return
@@ -152,6 +170,22 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Buck
 			return
 		}
 		dek, uerr := ssecrypto.UnwrapDEK(mk, mu.SSEKey)
+		if uerr != nil {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		encReader = newSSEEncryptingReader(body, dek, multipartPartOID(key, partNumber))
+		body = encReader
+	case sseAlgorithmAWSKMS:
+		if s.KMS == nil || len(mu.SSEKey) == 0 || mu.SSEKeyID == "" {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		dek, uerr := s.KMS.UnwrapDEK(ctx, mu.SSEKeyID, mu.SSEKey)
+		if errors.Is(uerr, kms.ErrKeyIDMismatch) {
+			writeError(w, r, ErrKMSAccessDenied)
+			return
+		}
 		if uerr != nil {
 			writeError(w, r, ErrInternal)
 			return
@@ -433,6 +467,9 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 	}
 	if obj.SSE != "" {
 		headers["x-amz-server-side-encryption"] = obj.SSE
+	}
+	if obj.SSE == sseAlgorithmAWSKMS && obj.SSEKeyID != "" {
+		headers[hdrSSEKMSKeyID] = obj.SSEKeyID
 	}
 
 	var buf bytes.Buffer

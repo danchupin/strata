@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/danchupin/strata/internal/auth"
+	"github.com/danchupin/strata/internal/crypto/kms"
 	"github.com/danchupin/strata/internal/crypto/master"
 	ssecrypto "github.com/danchupin/strata/internal/crypto/sse"
 	"github.com/danchupin/strata/internal/data"
@@ -47,6 +48,11 @@ type Server struct {
 	// DEKs. When nil, requests with x-amz-server-side-encryption=AES256 (or a
 	// bucket-default that resolves to AES256) return 500 InternalError.
 	Master master.Provider
+	// KMS, when set, supplies the SSE-KMS provider used to wrap per-object
+	// DEKs against a tenant-named key handle. When nil, requests with
+	// x-amz-server-side-encryption=aws:kms (or a bucket-default that resolves
+	// to aws:kms) return 500 InternalError.
+	KMS kms.Provider
 	// VHostPatterns lists virtual-hosted-style host patterns of the form
 	// "*.<suffix>" (e.g. "*.s3.local"). When the request Host matches any
 	// pattern, the prefix becomes the bucket and the request URL.Path is
@@ -758,11 +764,14 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		writeError(w, r, ssecErr)
 		return
 	}
-	var sse string
+	var (
+		sse      string
+		sseKMSID string
+	)
 	if !ssec.Present {
 		var sseErr APIError
 		var sseOK bool
-		sse, sseErr, sseOK = s.resolveSSE(r, b)
+		sse, sseKMSID, sseErr, sseOK = s.resolveSSEWithKey(r, b)
 		if !sseOK {
 			writeError(w, r, sseErr)
 			return
@@ -775,11 +784,12 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		body = io.TeeReader(body, checksumWriter(checksumEntries))
 	}
 	var (
-		encReader   *sseEncryptingReader
-		wrappedDEK  []byte
-		masterKeyID string
+		encReader  *sseEncryptingReader
+		wrappedDEK []byte
+		sseKeyID   string
 	)
-	if sse == sseAlgorithmAES256 {
+	switch sse {
+	case sseAlgorithmAES256:
 		if s.Master == nil {
 			writeError(w, r, ErrInternal)
 			return
@@ -800,7 +810,25 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 			return
 		}
 		wrappedDEK = wrapped
-		masterKeyID = mid
+		sseKeyID = mid
+		encReader = newSSEEncryptingReader(body, dek, key)
+		body = encReader
+	case sseAlgorithmAWSKMS:
+		if s.KMS == nil {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		dek, wrapped, kerr := s.KMS.GenerateDataKey(ctx, sseKMSID)
+		if kerr != nil {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		if len(dek) != ssecrypto.KeySize {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		wrappedDEK = wrapped
+		sseKeyID = sseKMSID
 		encReader = newSSEEncryptingReader(body, dek, key)
 		body = encReader
 	}
@@ -841,7 +869,7 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		Checksums:    sums,
 		SSE:          sse,
 		SSEKey:       wrappedDEK,
-		SSEKeyID:     masterKeyID,
+		SSEKeyID:     sseKeyID,
 		UserMeta:     extractUserMeta(r.Header),
 		CacheControl: r.Header.Get("Cache-Control"),
 		Expires:      r.Header.Get("Expires"),
@@ -880,6 +908,9 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	w.Header().Set("ETag", `"`+obj.ETag+`"`)
 	if obj.SSE != "" {
 		w.Header().Set("x-amz-server-side-encryption", obj.SSE)
+	}
+	if obj.SSE == sseAlgorithmAWSKMS && obj.SSEKeyID != "" {
+		w.Header().Set(hdrSSEKMSKeyID, obj.SSEKeyID)
 	}
 	if meta.IsVersioningActive(b.Versioning) && obj.VersionID != "" {
 		w.Header().Set("x-amz-version-id", wireVersionID(obj))
@@ -938,6 +969,49 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		w.WriteHeader(status)
 		return
 	}
+	// Derive the DEK before any body-shaping headers (Content-Length,
+	// Content-Range) so a wrap/unwrap failure surfaces as a clean error
+	// response — Content-Length set to o.Size would otherwise truncate the
+	// XML body the client receives.
+	var dek []byte
+	if body && (o.SSE == sseAlgorithmAES256 || o.SSE == sseAlgorithmAWSKMS) && len(o.SSEKey) > 0 {
+		var derr error
+		switch o.SSE {
+		case sseAlgorithmAES256:
+			if s.Master == nil {
+				writeError(w, r, ErrInternal)
+				return
+			}
+			mk, merr := master.ResolveByID(r.Context(), s.Master, o.SSEKeyID)
+			if merr != nil {
+				writeError(w, r, ErrInternal)
+				return
+			}
+			dek, derr = ssecrypto.UnwrapDEK(mk, o.SSEKey)
+		case sseAlgorithmAWSKMS:
+			if s.KMS == nil {
+				writeError(w, r, ErrInternal)
+				return
+			}
+			if o.SSEKeyID == "" {
+				writeError(w, r, ErrKMSKeyIDMissing)
+				return
+			}
+			dek, derr = s.KMS.UnwrapDEK(r.Context(), o.SSEKeyID, o.SSEKey)
+			if errors.Is(derr, kms.ErrKeyIDMismatch) {
+				writeError(w, r, ErrKMSAccessDenied)
+				return
+			}
+			if errors.Is(derr, kms.ErrMissingKeyID) {
+				writeError(w, r, ErrKMSKeyIDMissing)
+				return
+			}
+		}
+		if derr != nil {
+			writeError(w, r, ErrInternal)
+			return
+		}
+	}
 	w.Header().Set("Content-Type", firstNonEmpty(o.ContentType, "application/octet-stream"))
 	w.Header().Set("ETag", `"`+o.ETag+`"`)
 	w.Header().Set("Last-Modified", o.Mtime.UTC().Format(http.TimeFormat))
@@ -960,6 +1034,9 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	}
 	if o.SSE != "" {
 		w.Header().Set("x-amz-server-side-encryption", o.SSE)
+	}
+	if o.SSE == sseAlgorithmAWSKMS && o.SSEKeyID != "" {
+		w.Header().Set(hdrSSEKMSKeyID, o.SSEKeyID)
 	}
 	if o.SSECKeyMD5 != "" {
 		w.Header().Set(hdrSSECAlgorithm, sseAlgorithmAES256)
@@ -1024,21 +1101,7 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		w.WriteHeader(status)
 		return
 	}
-	if o.SSE == sseAlgorithmAES256 && len(o.SSEKey) > 0 {
-		if s.Master == nil {
-			writeError(w, r, ErrInternal)
-			return
-		}
-		mk, merr := master.ResolveByID(r.Context(), s.Master, o.SSEKeyID)
-		if merr != nil {
-			writeError(w, r, ErrInternal)
-			return
-		}
-		dek, uerr := ssecrypto.UnwrapDEK(mk, o.SSEKey)
-		if uerr != nil {
-			writeError(w, r, ErrInternal)
-			return
-		}
+	if dek != nil {
 		var dec *sseDecryptingReader
 		if o.Manifest != nil && len(o.Manifest.PartChunks) > 0 {
 			dec = newSSEDecryptingReaderWithLocator(r.Context(), s.Data, o.Manifest, dek, multipartChunkLocator(key, o.Manifest.PartChunks), offset, length)

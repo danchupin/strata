@@ -11,7 +11,13 @@ import (
 	"github.com/danchupin/strata/internal/meta"
 )
 
-const sseAlgorithmAES256 = "AES256"
+const (
+	sseAlgorithmAES256  = "AES256"
+	sseAlgorithmAWSKMS  = "aws:kms"
+	sseAlgorithmKMSDSSE = "aws:kms:dsse"
+
+	hdrSSEKMSKeyID = "x-amz-server-side-encryption-aws-kms-key-id"
+)
 
 const (
 	hdrSSECAlgorithm = "x-amz-server-side-encryption-customer-algorithm"
@@ -122,8 +128,8 @@ func (s *Server) putBucketEncryption(w http.ResponseWriter, r *http.Request, buc
 			return
 		}
 		switch rule.Apply.SSEAlgorithm {
-		case sseAlgorithmAES256:
-		case "aws:kms", "aws:kms:dsse":
+		case sseAlgorithmAES256, sseAlgorithmAWSKMS:
+		case sseAlgorithmKMSDSSE:
 			writeError(w, r, ErrKMSNotImplemented)
 			return
 		default:
@@ -171,41 +177,64 @@ func (s *Server) deleteBucketEncryption(w http.ResponseWriter, r *http.Request, 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// resolveSSE picks the SSE algorithm for a new object: explicit request header
-// wins, falling back to the bucket default if configured. Returns (algo, apiErr,
-// ok). When ok=false the caller must stop and write apiErr.
-func (s *Server) resolveSSE(r *http.Request, b *meta.Bucket) (string, APIError, bool) {
-	if hdr := r.Header.Get("x-amz-server-side-encryption"); hdr != "" {
-		return validateSSEAlgorithm(hdr)
+// resolveSSEWithKey resolves the SSE algorithm + KMS key id for a new object.
+// the resolved algorithm is aws:kms. Header x-amz-server-side-encryption-aws-
+// kms-key-id wins over the bucket default's KMSMasterKeyID. Empty key id with
+// aws:kms surfaces ErrKMSKeyIDMissing so the gateway returns 400.
+func (s *Server) resolveSSEWithKey(r *http.Request, b *meta.Bucket) (string, string, APIError, bool) {
+	hdrAlgo := r.Header.Get("x-amz-server-side-encryption")
+	hdrKeyID := r.Header.Get(hdrSSEKMSKeyID)
+	if hdrAlgo != "" {
+		algo, apiErr, ok := validateSSEAlgorithm(hdrAlgo)
+		if !ok {
+			return "", "", apiErr, false
+		}
+		if algo != sseAlgorithmAWSKMS {
+			return algo, "", APIError{}, true
+		}
+		if hdrKeyID == "" {
+			return "", "", ErrKMSKeyIDMissing, false
+		}
+		return algo, hdrKeyID, APIError{}, true
 	}
 	blob, err := s.Meta.GetBucketEncryption(r.Context(), b.ID)
 	if err != nil {
-		return "", APIError{}, true
+		return "", "", APIError{}, true
 	}
-	algo := defaultSSEAlgorithm(blob)
-	return algo, APIError{}, true
+	algo, defaultKeyID := defaultSSEAlgorithmAndKey(blob)
+	if algo != sseAlgorithmAWSKMS {
+		return algo, "", APIError{}, true
+	}
+	keyID := hdrKeyID
+	if keyID == "" {
+		keyID = defaultKeyID
+	}
+	if keyID == "" {
+		return "", "", ErrKMSKeyIDMissing, false
+	}
+	return algo, keyID, APIError{}, true
 }
 
 func validateSSEAlgorithm(algo string) (string, APIError, bool) {
 	switch algo {
-	case sseAlgorithmAES256:
+	case sseAlgorithmAES256, sseAlgorithmAWSKMS:
 		return algo, APIError{}, true
-	case "aws:kms", "aws:kms:dsse":
+	case sseAlgorithmKMSDSSE:
 		return "", ErrKMSNotImplemented, false
 	default:
 		return "", ErrInvalidEncryptionAlgorithm, false
 	}
 }
 
-func defaultSSEAlgorithm(blob []byte) string {
+func defaultSSEAlgorithmAndKey(blob []byte) (string, string) {
 	var cfg serverSideEncryptionConfiguration
 	if err := xml.Unmarshal(blob, &cfg); err != nil {
-		return ""
+		return "", ""
 	}
 	for _, rule := range cfg.Rules {
 		if rule.Apply != nil && rule.Apply.SSEAlgorithm != "" {
-			return rule.Apply.SSEAlgorithm
+			return rule.Apply.SSEAlgorithm, rule.Apply.KMSMasterKeyID
 		}
 	}
-	return ""
+	return "", ""
 }
