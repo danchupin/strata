@@ -302,6 +302,8 @@ var alterStatements = []string{
 	`ALTER TABLE objects ADD checksum_type text`,
 	`ALTER TABLE multipart_uploads ADD checksum_type text`,
 	`ALTER TABLE objects ADD is_null boolean`,
+	`ALTER TABLE gc_queue ADD cluster text`,
+	`ALTER TABLE gc_queue ADD namespace text`,
 }
 
 func isColumnAlreadyExists(err error) bool {

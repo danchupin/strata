@@ -186,8 +186,8 @@ func caseSetObjectStorageCAS(t *testing.T, s meta.Store) {
 func caseGCQueueRoundTrip(t *testing.T, s meta.Store) {
 	ctx := context.Background()
 	chunks := []data.ChunkRef{
-		{Cluster: "c", Pool: "p1", OID: "o1", Size: 100},
-		{Cluster: "c", Pool: "p2", OID: "o2", Size: 200},
+		{Cluster: "default", Pool: "p1", Namespace: "n1", OID: "o1", Size: 100},
+		{Cluster: "cold-eu", Pool: "p2", OID: "o2", Size: 200},
 	}
 	if err := s.EnqueueChunkDeletion(ctx, "default", chunks); err != nil {
 		t.Fatal(err)
@@ -198,6 +198,16 @@ func caseGCQueueRoundTrip(t *testing.T, s meta.Store) {
 	}
 	if len(entries) != 2 {
 		t.Fatalf("got %d entries want 2", len(entries))
+	}
+	byOID := map[string]data.ChunkRef{}
+	for _, e := range entries {
+		byOID[e.Chunk.OID] = e.Chunk
+	}
+	if got := byOID["o1"]; got.Cluster != "default" || got.Pool != "p1" || got.Namespace != "n1" {
+		t.Errorf("o1 round-trip lost fields: %+v", got)
+	}
+	if got := byOID["o2"]; got.Cluster != "cold-eu" || got.Pool != "p2" {
+		t.Errorf("o2 round-trip lost cluster id: %+v", got)
 	}
 	for _, e := range entries {
 		if err := s.AckGCEntry(ctx, "default", e); err != nil {

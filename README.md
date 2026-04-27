@@ -75,6 +75,7 @@ A successful `make smoke` validates bucket CRUD, object PUT/GET/HEAD/DELETE (inc
 | `STRATA_RADOS_POOL` | `strata.rgw.buckets.data` | |
 | `STRATA_RADOS_NAMESPACE` | `` | optional per-tenant namespace |
 | `STRATA_RADOS_CLASSES` | `` | class routing map: `CLASS=pool[@cluster[/ns]],...`. If empty, STANDARD points at `STRATA_RADOS_POOL`. |
+| `STRATA_RADOS_CLUSTERS` | `` | multi-cluster RADOS map: `<id>:<conf>[:<keyring>],...`. Referenced by `@cluster` in `STRATA_RADOS_CLASSES`. Empty falls back to the legacy single-cluster fields under id `default`. |
 | `STRATA_AUTH_MODE` | `off` | `off` accepts anything, `required` enforces SigV4 |
 | `STRATA_STATIC_CREDENTIALS` | `` | comma-separated `accesskey:secret[:owner]` entries for dev credentials |
 | `STRATA_LIFECYCLE_INTERVAL` | `60s` | `strata-lifecycle` tick interval (Go duration) |

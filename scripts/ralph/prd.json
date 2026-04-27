@@ -723,7 +723,7 @@
         "go test -tags ceph ./internal/data/rados/... ./internal/gc/... passes"
       ],
       "priority": 44,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
