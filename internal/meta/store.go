@@ -282,6 +282,23 @@ type AuditEvent struct {
 	SourceIP  string
 }
 
+// AuditFilter is the query shape served by the [iam root]-gated /?audit
+// endpoint (US-023). Empty Start/End mean "no time filter on that side";
+// empty Principal disables principal filtering. BucketScoped=true restricts
+// the scan to the partition for BucketID (uuid.Nil is a valid value — IAM
+// global rows live there); BucketScoped=false fans out across all buckets.
+// Continuation is an opaque token returned by a prior call; both backends
+// accept the AuditEvent.EventID of the last record on the previous page.
+type AuditFilter struct {
+	BucketID     uuid.UUID
+	BucketScoped bool
+	Principal    string
+	Start        time.Time
+	End          time.Time
+	Limit        int
+	Continuation string
+}
+
 // ReplicationEvent is one buffered cross-region replication intent waiting
 // for the strata-replicator worker (US-012) to copy the source object to the
 // destination configured by the matching rule. One row per matching rule —
@@ -342,6 +359,7 @@ type Store interface {
 
 	EnqueueAudit(ctx context.Context, entry *AuditEvent, ttl time.Duration) error
 	ListAudit(ctx context.Context, bucketID uuid.UUID, limit int) ([]AuditEvent, error)
+	ListAuditFiltered(ctx context.Context, filter AuditFilter) ([]AuditEvent, string, error)
 
 	SetObjectTags(ctx context.Context, bucketID uuid.UUID, key, versionID string, tags map[string]string) error
 	GetObjectTags(ctx context.Context, bucketID uuid.UUID, key, versionID string) (map[string]string, error)

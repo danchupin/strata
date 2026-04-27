@@ -101,6 +101,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.listNotificationDLQ(w, r)
 			return
 		}
+		if r.URL.Query().Has("audit") && r.Method == http.MethodGet {
+			s.listAudit(w, r)
+			return
+		}
 		if r.Method == http.MethodGet {
 			s.listBuckets(w, r)
 			return

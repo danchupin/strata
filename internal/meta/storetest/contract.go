@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gocql/gocql"
+	"github.com/google/uuid"
 
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
@@ -39,6 +40,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"ReplicationQueueRoundTrip", caseReplicationQueue},
 		{"AccessLogBufferRoundTrip", caseAccessLogBuffer},
 		{"AuditLogRoundTrip", caseAuditLog},
+		{"AuditLogFiltered", caseAuditLogFiltered},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -513,6 +515,134 @@ func caseAuditLog(t *testing.T, s meta.Store) {
 		g.Result != row.Result || g.RequestID != row.RequestID || g.SourceIP != row.SourceIP ||
 		g.Bucket != row.Bucket {
 		t.Fatalf("row: %+v", g)
+	}
+}
+
+func caseAuditLogFiltered(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b1, err := s.CreateBucket(ctx, "filt-a", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket a: %v", err)
+	}
+	b2, err := s.CreateBucket(ctx, "filt-b", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket b: %v", err)
+	}
+	now := time.Now().UTC()
+	mk := func(bID uuid.UUID, bName, principal, action string, t time.Time) *meta.AuditEvent {
+		return &meta.AuditEvent{
+			BucketID:  bID,
+			Bucket:    bName,
+			EventID:   newTimeUUID(),
+			Time:      t,
+			Principal: principal,
+			Action:    action,
+			Resource:  "/" + bName,
+			Result:    "200",
+			RequestID: "req-" + action,
+			SourceIP:  "10.0.0.1",
+		}
+	}
+	rows := []*meta.AuditEvent{
+		mk(b1.ID, b1.Name, "alice", "PutObject", now.Add(-3*time.Hour)),
+		mk(b1.ID, b1.Name, "bob", "DeleteObject", now.Add(-2*time.Hour)),
+		mk(b2.ID, b2.Name, "alice", "PutBucketCors", now.Add(-1*time.Hour)),
+		mk(b2.ID, b2.Name, "bob", "PutObject", now.Add(-30*time.Minute)),
+	}
+	for _, r := range rows {
+		if err := s.EnqueueAudit(ctx, r, time.Hour); err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+	}
+
+	// Bucket scope.
+	got, _, err := s.ListAuditFiltered(ctx, meta.AuditFilter{BucketID: b1.ID, BucketScoped: true, Limit: 10})
+	if err != nil {
+		t.Fatalf("filter bucket: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("bucket-scoped len=%d want 2", len(got))
+	}
+	for _, e := range got {
+		if e.Bucket != b1.Name {
+			t.Fatalf("bucket leak: %+v", e)
+		}
+	}
+
+	// Principal filter, no bucket scope.
+	got, _, err = s.ListAuditFiltered(ctx, meta.AuditFilter{Principal: "alice", Limit: 10})
+	if err != nil {
+		t.Fatalf("filter principal: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("principal len=%d want 2", len(got))
+	}
+	for _, e := range got {
+		if e.Principal != "alice" {
+			t.Fatalf("principal leak: %+v", e)
+		}
+	}
+
+	// Time window.
+	got, _, err = s.ListAuditFiltered(ctx, meta.AuditFilter{
+		Start: now.Add(-90 * time.Minute),
+		End:   now,
+		Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("filter time: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("time len=%d want 2", len(got))
+	}
+
+	// Combined filters: bucket b2 + principal bob.
+	got, _, err = s.ListAuditFiltered(ctx, meta.AuditFilter{
+		BucketID:     b2.ID,
+		BucketScoped: true,
+		Principal:    "bob",
+		Limit:        10,
+	})
+	if err != nil {
+		t.Fatalf("combined: %v", err)
+	}
+	if len(got) != 1 || got[0].Action != "PutObject" || got[0].Bucket != b2.Name {
+		t.Fatalf("combined got=%+v", got)
+	}
+
+	// Pagination round-trip: limit=2 across 4 rows, no filters, walk pages.
+	page1, next, err := s.ListAuditFiltered(ctx, meta.AuditFilter{Limit: 2})
+	if err != nil {
+		t.Fatalf("page1: %v", err)
+	}
+	if len(page1) != 2 || next == "" {
+		t.Fatalf("page1 size=%d next=%q", len(page1), next)
+	}
+	page2, next2, err := s.ListAuditFiltered(ctx, meta.AuditFilter{Limit: 2, Continuation: next})
+	if err != nil {
+		t.Fatalf("page2: %v", err)
+	}
+	if len(page2) != 2 {
+		t.Fatalf("page2 size=%d", len(page2))
+	}
+	if next2 != "" {
+		page3, _, err := s.ListAuditFiltered(ctx, meta.AuditFilter{Limit: 2, Continuation: next2})
+		if err != nil {
+			t.Fatalf("page3: %v", err)
+		}
+		if len(page3) != 0 {
+			t.Fatalf("page3 size=%d want 0", len(page3))
+		}
+	}
+	seen := map[string]bool{}
+	for _, e := range append(page1, page2...) {
+		if seen[e.EventID] {
+			t.Fatalf("duplicate eventID across pages: %s", e.EventID)
+		}
+		seen[e.EventID] = true
+	}
+	if len(seen) != 4 {
+		t.Fatalf("paginated rows %d want 4", len(seen))
 	}
 }
 

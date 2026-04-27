@@ -373,6 +373,69 @@ func (s *Store) ListAudit(ctx context.Context, bucketID uuid.UUID, limit int) ([
 	return out, nil
 }
 
+func (s *Store) ListAuditFiltered(ctx context.Context, f meta.AuditFilter) ([]meta.AuditEvent, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	limit := f.Limit
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	now := nowFn()
+	var all []meta.AuditEvent
+	collect := func(bid uuid.UUID, rows []auditEntry) {
+		kept := rows[:0]
+		for _, r := range rows {
+			if !r.expiresAt.IsZero() && !now.Before(r.expiresAt) {
+				continue
+			}
+			kept = append(kept, r)
+			all = append(all, r.evt)
+		}
+		s.auditLog[bid] = kept
+	}
+	if f.BucketScoped {
+		collect(f.BucketID, s.auditLog[f.BucketID])
+	} else {
+		for k, rows := range s.auditLog {
+			collect(k, rows)
+		}
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if !all[i].Time.Equal(all[j].Time) {
+			return all[i].Time.After(all[j].Time)
+		}
+		return all[i].EventID > all[j].EventID
+	})
+	out := make([]meta.AuditEvent, 0, limit)
+	started := f.Continuation == ""
+	for _, e := range all {
+		if !f.Start.IsZero() && e.Time.Before(f.Start) {
+			continue
+		}
+		if !f.End.IsZero() && e.Time.After(f.End) {
+			continue
+		}
+		if f.Principal != "" && e.Principal != f.Principal {
+			continue
+		}
+		if !started {
+			if e.EventID == f.Continuation {
+				started = true
+			}
+			continue
+		}
+		out = append(out, e)
+		if len(out) >= limit {
+			break
+		}
+	}
+	next := ""
+	if len(out) >= limit {
+		next = out[len(out)-1].EventID
+	}
+	return out, next, nil
+}
+
 func (s *Store) AckAccessLog(ctx context.Context, entry meta.AccessLogEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

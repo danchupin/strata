@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1349,6 +1350,115 @@ func (s *Store) EnqueueAudit(ctx context.Context, entry *meta.AuditEvent, ttl ti
 		args = append(args, max(int(ttl/time.Second), 1))
 	}
 	return s.s.Query(q, args...).WithContext(ctx).Exec()
+}
+
+func (s *Store) ListAuditFiltered(ctx context.Context, f meta.AuditFilter) ([]meta.AuditEvent, string, error) {
+	limit := f.Limit
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	now := time.Now().UTC()
+	end := f.End
+	if end.IsZero() {
+		end = now
+	}
+	start := f.Start
+	if start.IsZero() {
+		start = end.AddDate(0, 0, -30)
+	}
+	type partition struct {
+		bucket gocql.UUID
+		day    time.Time
+	}
+	var parts []partition
+	endDay := notifyDay(end)
+	startDay := notifyDay(start)
+	if f.BucketScoped {
+		bid := gocqlUUID(f.BucketID)
+		for d := endDay; !d.Before(startDay); d = d.AddDate(0, 0, -1) {
+			parts = append(parts, partition{bid, d})
+		}
+	} else {
+		iter := s.s.Query(`SELECT DISTINCT bucket_id, day FROM audit_log`).WithContext(ctx).Iter()
+		var (
+			bid gocql.UUID
+			d   time.Time
+		)
+		for iter.Scan(&bid, &d) {
+			d = d.UTC()
+			if d.Before(startDay) || d.After(endDay) {
+				continue
+			}
+			parts = append(parts, partition{bid, d})
+		}
+		if err := iter.Close(); err != nil {
+			return nil, "", err
+		}
+	}
+	var all []meta.AuditEvent
+	for _, p := range parts {
+		iter := s.s.Query(
+			`SELECT event_id, ts, principal, action, resource, result, request_id, source_ip, bucket_name
+			 FROM audit_log WHERE bucket_id=? AND day=?`,
+			p.bucket, p.day,
+		).WithContext(ctx).Iter()
+		var (
+			eventID                                                              gocql.UUID
+			ts                                                                   time.Time
+			principal, action, resource, result, requestID, sourceIP, bucketName string
+		)
+		for iter.Scan(&eventID, &ts, &principal, &action, &resource, &result, &requestID, &sourceIP, &bucketName) {
+			all = append(all, meta.AuditEvent{
+				BucketID:  uuidFromGocql(p.bucket),
+				Bucket:    bucketName,
+				EventID:   eventID.String(),
+				Time:      ts,
+				Principal: principal,
+				Action:    action,
+				Resource:  resource,
+				Result:    result,
+				RequestID: requestID,
+				SourceIP:  sourceIP,
+			})
+		}
+		if err := iter.Close(); err != nil {
+			return nil, "", err
+		}
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if !all[i].Time.Equal(all[j].Time) {
+			return all[i].Time.After(all[j].Time)
+		}
+		return all[i].EventID > all[j].EventID
+	})
+	out := make([]meta.AuditEvent, 0, limit)
+	started := f.Continuation == ""
+	for _, e := range all {
+		if !f.Start.IsZero() && e.Time.Before(f.Start) {
+			continue
+		}
+		if !f.End.IsZero() && e.Time.After(f.End) {
+			continue
+		}
+		if f.Principal != "" && e.Principal != f.Principal {
+			continue
+		}
+		if !started {
+			if e.EventID == f.Continuation {
+				started = true
+			}
+			continue
+		}
+		out = append(out, e)
+		if len(out) >= limit {
+			break
+		}
+	}
+	next := ""
+	if len(out) >= limit {
+		next = out[len(out)-1].EventID
+	}
+	return out, next, nil
 }
 
 func (s *Store) ListAudit(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.AuditEvent, error) {
