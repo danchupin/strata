@@ -1318,6 +1318,84 @@ func (s *Store) AckAccessLog(ctx context.Context, entry meta.AccessLogEntry) err
 	).WithContext(ctx).Exec()
 }
 
+func (s *Store) EnqueueAudit(ctx context.Context, entry *meta.AuditEvent, ttl time.Duration) error {
+	if entry == nil {
+		return nil
+	}
+	if entry.Time.IsZero() {
+		entry.Time = time.Now().UTC()
+	}
+	if entry.EventID == "" {
+		entry.EventID = gocql.TimeUUID().String()
+	}
+	eventUUID, err := gocql.ParseUUID(entry.EventID)
+	if err != nil {
+		return err
+	}
+	day := notifyDay(entry.Time)
+	bucket := entry.Bucket
+	if bucket == "" {
+		bucket = "-"
+	}
+	q := `INSERT INTO audit_log (bucket_id, day, event_id, ts, principal, action, resource, result, request_id, source_ip, bucket_name)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	args := []any{
+		gocqlUUID(entry.BucketID), day, eventUUID, entry.Time,
+		entry.Principal, entry.Action, entry.Resource, entry.Result,
+		entry.RequestID, entry.SourceIP, bucket,
+	}
+	if ttl > 0 {
+		q += ` USING TTL ?`
+		args = append(args, max(int(ttl/time.Second), 1))
+	}
+	return s.s.Query(q, args...).WithContext(ctx).Exec()
+}
+
+func (s *Store) ListAudit(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.AuditEvent, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	now := time.Now().UTC()
+	day := notifyDay(now)
+	out := make([]meta.AuditEvent, 0, limit)
+	// Walk the last 30 days of partitions; matches the default audit retention
+	// so a fresh inspection catches everything the TTL has not yet purged.
+	for i := 0; i < 30 && len(out) < limit; i++ {
+		partition := day.AddDate(0, 0, -i)
+		iter := s.s.Query(
+			`SELECT event_id, ts, principal, action, resource, result, request_id, source_ip, bucket_name
+			 FROM audit_log WHERE bucket_id=? AND day=? LIMIT ?`,
+			gocqlUUID(bucketID), partition, limit-len(out),
+		).WithContext(ctx).Iter()
+		var (
+			eventID                                                              gocql.UUID
+			ts                                                                   time.Time
+			principal, action, resource, result, requestID, sourceIP, bucketName string
+		)
+		for iter.Scan(&eventID, &ts, &principal, &action, &resource, &result, &requestID, &sourceIP, &bucketName) {
+			out = append(out, meta.AuditEvent{
+				BucketID:  bucketID,
+				Bucket:    bucketName,
+				EventID:   eventID.String(),
+				Time:      ts,
+				Principal: principal,
+				Action:    action,
+				Resource:  resource,
+				Result:    result,
+				RequestID: requestID,
+				SourceIP:  sourceIP,
+			})
+			if len(out) >= limit {
+				break
+			}
+		}
+		if err := iter.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
 func (s *Store) resolveVersionID(ctx context.Context, bucketID uuid.UUID, key, versionID string) (gocql.UUID, int, error) {
 	shard := shardOf(key, s.defaultShard)
 	if versionID != "" {

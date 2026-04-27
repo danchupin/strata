@@ -221,6 +221,20 @@ var tableDDL = []string{
 		version_id     text,
 		PRIMARY KEY ((bucket_id, hour), event_id)
 	)`,
+	`CREATE TABLE IF NOT EXISTS audit_log (
+		bucket_id    uuid,
+		day          timestamp,
+		event_id     timeuuid,
+		ts           timestamp,
+		principal    text,
+		action       text,
+		resource     text,
+		result       text,
+		request_id   text,
+		source_ip    text,
+		bucket_name  text,
+		PRIMARY KEY ((bucket_id, day), event_id)
+	) WITH CLUSTERING ORDER BY (event_id DESC)`,
 	`CREATE TABLE IF NOT EXISTS notify_dlq (
 		bucket_id    uuid,
 		day          timestamp,

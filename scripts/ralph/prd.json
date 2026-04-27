@@ -370,8 +370,8 @@
         "go test ./internal/s3api/... ./internal/meta/... passes"
       ],
       "priority": 22,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "meta.AuditEvent struct + EnqueueAudit(ctx, *AuditEvent, ttl)/ListAudit(ctx, bucketID, limit) methods on meta.Store. Cassandra schema: new audit_log table partitioned by ((bucket_id, day)) with timeuuid event_id clustering DESC; cassandra.EnqueueAudit appends `USING TTL <sec>` when ttl>0. Memory backend stores rows with computed expiresAt and prunes lazily on ListAudit. storetest case caseAuditLog covers round-trip; runs in both backends. internal/s3api/audit.go exposes AuditMiddleware{Meta, Next, TTL, Now}: wraps the inner handler with auditWriter so it captures the inner status, and after the response writes one row when method != GET/HEAD/OPTIONS/CONNECT/TRACE. Resolves bucket->bucketID via meta.GetBucket; for IAM ?Action= requests stores BucketID=uuid.Nil + Bucket='-' + Resource='iam:<Action>'. Action label uses CamelCase AWS verbs derived from method+scope+sub-resource (CreateBucket / PutObject / PutBucketLifecycle / etc.). Result is the HTTP status as string. RequestID pulled from logging.RequestIDFromContext(ctx) with header fallback. STRATA_AUDIT_RETENTION parsed by s3api.ParseAuditRetention (Go duration like '720h' or '<N>d'; default 30 days). Wired in cmd/strata-gateway/main.go inside the access-log middleware so audit rows fire even when auth denies (auditMiddleware sits inside mw.Wrap). Best-effort: meta failures are swallowed. Tests cover (1) state-changing PUT/DELETE on bucket+object emit one row each with correct action/resource/requestID, (2) GET/HEAD do not emit rows, (3) IAM POST emits a row with iam:<Action> resource even when 403, (4) TTL purges expired rows from the memory backend, (5) ParseAuditRetention covers '', '30d', '720h', '15m', and rejects garbage."
     },
     {
       "id": "US-023",

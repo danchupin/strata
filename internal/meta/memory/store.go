@@ -41,6 +41,7 @@ type Store struct {
 	notifyDLQ      map[uuid.UUID][]meta.NotificationDLQEntry
 	replicationQueue map[uuid.UUID][]meta.ReplicationEvent
 	accessLogQueue map[uuid.UUID][]meta.AccessLogEntry
+	auditLog       map[uuid.UUID][]auditEntry
 	mpDone         map[completionKey]*completionEntry
 	rewrapProgress map[uuid.UUID]*meta.RewrapProgress
 	locker         *Locker
@@ -103,6 +104,7 @@ func New() *Store {
 		notifyDLQ:      make(map[uuid.UUID][]meta.NotificationDLQEntry),
 		replicationQueue: make(map[uuid.UUID][]meta.ReplicationEvent),
 		accessLogQueue: make(map[uuid.UUID][]meta.AccessLogEntry),
+		auditLog:       make(map[uuid.UUID][]auditEntry),
 		mpDone:         make(map[completionKey]*completionEntry),
 		rewrapProgress: make(map[uuid.UUID]*meta.RewrapProgress),
 		locker:         NewLocker(),
@@ -319,6 +321,55 @@ func (s *Store) ListPendingAccessLog(ctx context.Context, bucketID uuid.UUID, li
 			break
 		}
 	}
+	return out, nil
+}
+
+type auditEntry struct {
+	evt       meta.AuditEvent
+	expiresAt time.Time
+}
+
+func (s *Store) EnqueueAudit(ctx context.Context, entry *meta.AuditEvent, ttl time.Duration) error {
+	if entry == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := *entry
+	if cp.EventID == "" {
+		cp.EventID = gocql.TimeUUID().String()
+	}
+	if cp.Time.IsZero() {
+		cp.Time = nowFn().UTC()
+	}
+	row := auditEntry{evt: cp}
+	if ttl > 0 {
+		row.expiresAt = nowFn().Add(ttl)
+	}
+	s.auditLog[entry.BucketID] = append(s.auditLog[entry.BucketID], row)
+	return nil
+}
+
+func (s *Store) ListAudit(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.AuditEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	now := nowFn()
+	rows := s.auditLog[bucketID]
+	kept := rows[:0]
+	out := make([]meta.AuditEvent, 0, len(rows))
+	for _, r := range rows {
+		if !r.expiresAt.IsZero() && !now.Before(r.expiresAt) {
+			continue
+		}
+		kept = append(kept, r)
+		if len(out) < limit {
+			out = append(out, r.evt)
+		}
+	}
+	s.auditLog[bucketID] = kept
 	return out, nil
 }
 

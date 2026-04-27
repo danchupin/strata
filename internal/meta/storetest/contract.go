@@ -38,6 +38,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"NotificationDLQRoundTrip", caseNotificationDLQ},
 		{"ReplicationQueueRoundTrip", caseReplicationQueue},
 		{"AccessLogBufferRoundTrip", caseAccessLogBuffer},
+		{"AuditLogRoundTrip", caseAuditLog},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -475,6 +476,43 @@ func caseAccessLogBuffer(t *testing.T, s meta.Store) {
 	remaining, _ := s.ListPendingAccessLog(ctx, b.ID, 100)
 	if len(remaining) != 0 {
 		t.Fatalf("after ack: %d remaining", len(remaining))
+	}
+}
+
+func caseAuditLog(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "audit-bkt", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	now := time.Now().UTC()
+	row := &meta.AuditEvent{
+		BucketID:  b.ID,
+		Bucket:    b.Name,
+		EventID:   newTimeUUID(),
+		Time:      now,
+		Principal: "alice",
+		Action:    "PutObject",
+		Resource:  "/audit-bkt/img.jpg",
+		Result:    "200",
+		RequestID: "req-xyz",
+		SourceIP:  "10.0.0.5",
+	}
+	if err := s.EnqueueAudit(ctx, row, time.Hour); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	got, err := s.ListAudit(ctx, b.ID, 100)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d rows want 1", len(got))
+	}
+	g := got[0]
+	if g.Principal != row.Principal || g.Action != row.Action || g.Resource != row.Resource ||
+		g.Result != row.Result || g.RequestID != row.RequestID || g.SourceIP != row.SourceIP ||
+		g.Bucket != row.Bucket {
+		t.Fatalf("row: %+v", g)
 	}
 }
 

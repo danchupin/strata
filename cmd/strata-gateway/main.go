@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/danchupin/strata/internal/auth"
 	"github.com/danchupin/strata/internal/bucketstats"
@@ -103,7 +104,9 @@ func main() {
 	mux.Handle("/metrics", metrics.Handler())
 	mux.HandleFunc("/healthz", healthHandler.Healthz)
 	mux.HandleFunc("/readyz", healthHandler.Readyz)
-	mux.Handle("/", logging.NewMiddleware(logger, metrics.ObserveHTTP(mw.Wrap(s3api.NewAccessLogMiddleware(metaStore, apiHandler), s3api.WriteAuthDenied))))
+	auditTTL := auditRetention(logger)
+	auditHandler := s3api.NewAuditMiddleware(metaStore, auditTTL, apiHandler)
+	mux.Handle("/", logging.NewMiddleware(logger, metrics.ObserveHTTP(mw.Wrap(s3api.NewAccessLogMiddleware(metaStore, auditHandler), s3api.WriteAuthDenied))))
 
 	srv := &http.Server{
 		Addr:    cfg.Listen,
@@ -176,6 +179,20 @@ func healthCanaryOID() string {
 		return v
 	}
 	return "strata-readyz-canary"
+}
+
+// auditRetention reads STRATA_AUDIT_RETENTION (Go duration or "<N>d") and
+// returns the row TTL applied to audit_log writes. Falls back to
+// s3api.DefaultAuditRetention on parse error and logs a WARN.
+func auditRetention(logger *slog.Logger) time.Duration {
+	v := os.Getenv("STRATA_AUDIT_RETENTION")
+	d, err := s3api.ParseAuditRetention(v)
+	if err != nil {
+		logger.Warn("audit retention parse failed; using default",
+			"value", v, "default", s3api.DefaultAuditRetention.String(), "error", err.Error())
+		return s3api.DefaultAuditRetention
+	}
+	return d
 }
 
 // vhostPatterns returns the configured virtual-hosted-style host patterns.

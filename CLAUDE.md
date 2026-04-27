@@ -113,6 +113,17 @@ downstream middlewares like `internal/s3api/access_log.go` keep reading it via `
 correlated without additional plumbing. Use `WarnContext`/`InfoContext`/`ErrorContext` (not the no-context variants)
 so future ctx-bound loggers ride through.
 
+Audit log: `internal/s3api.AuditMiddleware` appends one row to the `audit_log`
+table per state-changing HTTP request (US-022). GET/HEAD/OPTIONS are skipped;
+PUT/POST/DELETE always emit. The middleware lives between the access-log
+middleware and the API handler so it sees the inner-handler status (auth-deny
+rows are still emitted because the audit middleware sits inside `mw.Wrap`).
+Row TTL is `STRATA_AUDIT_RETENTION` (Go duration like `720h` or `<N>d`;
+default 30 days). Cassandra applies TTL via `USING TTL`; the memory backend
+prunes lazily on `ListAudit`. IAM `?Action=` requests carry `BucketID=uuid.Nil`
++ `Bucket="-"` and `Resource="iam:<Action>"`. The middleware is best-effort —
+meta failures never fail the underlying request.
+
 Health probes: `internal/health.Handler` serves `/healthz` (always 200) and `/readyz` (fans out probes
 concurrently with a 1s timeout). Probes are injected by the cmd binary via type-assertion against
 `cassandraProber` / `radosProber` interfaces in `cmd/strata-gateway/main.go::buildHealthHandler`, so the package

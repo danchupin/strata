@@ -264,6 +264,24 @@ type AccessLogEntry struct {
 	VersionID    string
 }
 
+// AuditEvent is one append-only row in the audit_log table written by the
+// gateway HTTP middleware (US-022) for every state-changing request. Read
+// operations (GET/HEAD/list) do not emit audit events. BucketID is uuid.Nil
+// for global actions (e.g. IAM ?Action=CreateUser) that have no bucket scope;
+// in that case Bucket is set to "-" so partition queries still work.
+type AuditEvent struct {
+	BucketID  uuid.UUID
+	Bucket    string
+	EventID   string
+	Time      time.Time
+	Principal string
+	Action    string
+	Resource  string
+	Result    string
+	RequestID string
+	SourceIP  string
+}
+
 // ReplicationEvent is one buffered cross-region replication intent waiting
 // for the strata-replicator worker (US-012) to copy the source object to the
 // destination configured by the matching rule. One row per matching rule —
@@ -321,6 +339,9 @@ type Store interface {
 	EnqueueAccessLog(ctx context.Context, entry *AccessLogEntry) error
 	ListPendingAccessLog(ctx context.Context, bucketID uuid.UUID, limit int) ([]AccessLogEntry, error)
 	AckAccessLog(ctx context.Context, entry AccessLogEntry) error
+
+	EnqueueAudit(ctx context.Context, entry *AuditEvent, ttl time.Duration) error
+	ListAudit(ctx context.Context, bucketID uuid.UUID, limit int) ([]AuditEvent, error)
 
 	SetObjectTags(ctx context.Context, bucketID uuid.UUID, key, versionID string, tags map[string]string) error
 	GetObjectTags(ctx context.Context, bucketID uuid.UUID, key, versionID string) (map[string]string, error)
