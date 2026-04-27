@@ -2301,6 +2301,58 @@ func (s *Store) DeleteBucketTagging(ctx context.Context, bucketID uuid.UUID) err
 	return s.deleteBucketBlob(ctx, "bucket_tagging", bucketID)
 }
 
+func (s *Store) SetBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string, blob []byte) error {
+	return s.s.Query(
+		`INSERT INTO bucket_inventory_configs (bucket_id, config_id, config) VALUES (?, ?, ?)`,
+		gocqlUUID(bucketID), configID, blob,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) GetBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string) ([]byte, error) {
+	var blob []byte
+	err := s.s.Query(
+		`SELECT config FROM bucket_inventory_configs WHERE bucket_id=? AND config_id=?`,
+		gocqlUUID(bucketID), configID,
+	).WithContext(ctx).Scan(&blob)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return nil, meta.ErrNoSuchInventoryConfig
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(blob) == 0 {
+		return nil, meta.ErrNoSuchInventoryConfig
+	}
+	return blob, nil
+}
+
+func (s *Store) DeleteBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string) error {
+	return s.s.Query(
+		`DELETE FROM bucket_inventory_configs WHERE bucket_id=? AND config_id=?`,
+		gocqlUUID(bucketID), configID,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) ListBucketInventoryConfigs(ctx context.Context, bucketID uuid.UUID) (map[string][]byte, error) {
+	iter := s.s.Query(
+		`SELECT config_id, config FROM bucket_inventory_configs WHERE bucket_id=?`,
+		gocqlUUID(bucketID),
+	).WithContext(ctx).Iter()
+	out := make(map[string][]byte)
+	var id string
+	var blob []byte
+	for iter.Scan(&id, &blob) {
+		if len(blob) == 0 {
+			continue
+		}
+		out[id] = append([]byte(nil), blob...)
+	}
+	if err := iter.Close(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (s *Store) UpdateObjectSSEWrap(ctx context.Context, bucketID uuid.UUID, key, versionID string, wrapped []byte, keyID string) error {
 	shard := shardOf(key, s.defaultShard)
 	if versionID == "" {

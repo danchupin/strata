@@ -235,6 +235,12 @@ var tableDDL = []string{
 		bucket_name  text,
 		PRIMARY KEY ((bucket_id, day), event_id)
 	) WITH CLUSTERING ORDER BY (event_id DESC)`,
+	`CREATE TABLE IF NOT EXISTS bucket_inventory_configs (
+		bucket_id uuid,
+		config_id text,
+		config    blob,
+		PRIMARY KEY ((bucket_id), config_id)
+	)`,
 	`CREATE TABLE IF NOT EXISTS notify_dlq (
 		bucket_id    uuid,
 		day          timestamp,

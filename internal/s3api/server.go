@@ -346,6 +346,10 @@ func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request, bucket str
 		s.listObjectVersions(w, r, bucket)
 		return
 	}
+	if q.Has("inventory") {
+		s.handleBucketInventory(w, r, bucket)
+		return
+	}
 	if q.Has("lifecycle") {
 		switch r.Method {
 		case http.MethodGet:

@@ -62,6 +62,7 @@ var (
 	ErrNoSuchLogging           = errors.New("no logging configuration for bucket")
 	ErrNoSuchTagSet            = errors.New("no tag set configured for bucket")
 	ErrNoSuchGrants            = errors.New("no acl grants persisted for resource")
+	ErrNoSuchInventoryConfig   = errors.New("no inventory configuration with that id")
 	ErrIAMUserNotFound         = errors.New("iam user not found")
 	ErrIAMUserAlreadyExists    = errors.New("iam user already exists")
 	ErrIAMAccessKeyNotFound    = errors.New("iam access key not found")
@@ -474,6 +475,14 @@ type Store interface {
 	SetBucketTagging(ctx context.Context, bucketID uuid.UUID, xmlBlob []byte) error
 	GetBucketTagging(ctx context.Context, bucketID uuid.UUID) ([]byte, error)
 	DeleteBucketTagging(ctx context.Context, bucketID uuid.UUID) error
+
+	// Inventory configurations are addressed per-bucket by their config id; a
+	// bucket may carry multiple at once (AWS allows up to 1,000). The blob is
+	// the InventoryConfiguration XML document the client sent.
+	SetBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string, xmlBlob []byte) error
+	GetBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string) ([]byte, error)
+	DeleteBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string) error
+	ListBucketInventoryConfigs(ctx context.Context, bucketID uuid.UUID) (map[string][]byte, error)
 
 	CreateIAMUser(ctx context.Context, u *IAMUser) error
 	GetIAMUser(ctx context.Context, userName string) (*IAMUser, error)

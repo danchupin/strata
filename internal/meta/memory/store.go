@@ -32,6 +32,7 @@ type Store struct {
 	replication    map[uuid.UUID][]byte
 	logging        map[uuid.UUID][]byte
 	tagging        map[uuid.UUID][]byte
+	inventoryConfigs map[uuid.UUID]map[string][]byte
 	bucketGrants   map[uuid.UUID][]meta.Grant
 	objectGrants   map[grantKey][]meta.Grant
 	iamUsers       map[string]*meta.IAMUser
@@ -95,6 +96,7 @@ func New() *Store {
 		replication:  make(map[uuid.UUID][]byte),
 		logging:      make(map[uuid.UUID][]byte),
 		tagging:      make(map[uuid.UUID][]byte),
+		inventoryConfigs: make(map[uuid.UUID]map[string][]byte),
 		bucketGrants: make(map[uuid.UUID][]meta.Grant),
 		objectGrants: make(map[grantKey][]meta.Grant),
 		iamUsers:     make(map[string]*meta.IAMUser),
@@ -1214,6 +1216,61 @@ func (s *Store) GetBucketTagging(ctx context.Context, bucketID uuid.UUID) ([]byt
 }
 func (s *Store) DeleteBucketTagging(ctx context.Context, bucketID uuid.UUID) error {
 	return s.deleteBucketBlob(s.tagging, bucketID)
+}
+
+func (s *Store) SetBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string, blob []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.objects[bucketID]; !ok {
+		return meta.ErrBucketNotFound
+	}
+	m, ok := s.inventoryConfigs[bucketID]
+	if !ok {
+		m = make(map[string][]byte)
+		s.inventoryConfigs[bucketID] = m
+	}
+	m[configID] = append([]byte(nil), blob...)
+	return nil
+}
+
+func (s *Store) GetBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string) ([]byte, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	m, ok := s.inventoryConfigs[bucketID]
+	if !ok {
+		return nil, meta.ErrNoSuchInventoryConfig
+	}
+	blob, ok := m[configID]
+	if !ok {
+		return nil, meta.ErrNoSuchInventoryConfig
+	}
+	return append([]byte(nil), blob...), nil
+}
+
+func (s *Store) DeleteBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if m, ok := s.inventoryConfigs[bucketID]; ok {
+		delete(m, configID)
+		if len(m) == 0 {
+			delete(s.inventoryConfigs, bucketID)
+		}
+	}
+	return nil
+}
+
+func (s *Store) ListBucketInventoryConfigs(ctx context.Context, bucketID uuid.UUID) (map[string][]byte, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	src, ok := s.inventoryConfigs[bucketID]
+	if !ok {
+		return map[string][]byte{}, nil
+	}
+	out := make(map[string][]byte, len(src))
+	for id, blob := range src {
+		out[id] = append([]byte(nil), blob...)
+	}
+	return out, nil
 }
 
 func (s *Store) CreateMultipartUpload(ctx context.Context, mu *meta.MultipartUpload) error {
