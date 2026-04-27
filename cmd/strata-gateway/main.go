@@ -23,6 +23,7 @@ import (
 	metacassandra "github.com/danchupin/strata/internal/meta/cassandra"
 	metamem "github.com/danchupin/strata/internal/meta/memory"
 	"github.com/danchupin/strata/internal/metrics"
+	strataotel "github.com/danchupin/strata/internal/otel"
 	"github.com/danchupin/strata/internal/s3api"
 )
 
@@ -100,13 +101,26 @@ func main() {
 
 	healthHandler := buildHealthHandler(metaStore, dataBackend)
 
+	tracerProvider, err := strataotel.Init(context.Background())
+	if err != nil {
+		logger.Error("otel init", "error", err.Error())
+		os.Exit(2)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tracerProvider.Shutdown(shutdownCtx); err != nil {
+			logger.Warn("otel shutdown", "error", err.Error())
+		}
+	}()
+
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
 	mux.HandleFunc("/healthz", healthHandler.Healthz)
 	mux.HandleFunc("/readyz", healthHandler.Readyz)
 	auditTTL := auditRetention(logger)
 	auditHandler := s3api.NewAuditMiddleware(metaStore, auditTTL, apiHandler)
-	mux.Handle("/", logging.NewMiddleware(logger, metrics.ObserveHTTP(mw.Wrap(s3api.NewAccessLogMiddleware(metaStore, auditHandler), s3api.WriteAuthDenied))))
+	mux.Handle("/", strataotel.NewMiddleware(tracerProvider, logging.NewMiddleware(logger, metrics.ObserveHTTP(mw.Wrap(s3api.NewAccessLogMiddleware(metaStore, auditHandler), s3api.WriteAuthDenied)))))
 
 	srv := &http.Server{
 		Addr:    cfg.Listen,

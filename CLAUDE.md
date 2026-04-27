@@ -140,6 +140,18 @@ with errors log WARN with `request_id`/`table`/`op`/`duration_ms`/`statement`. `
 `logging.RequestIDFromContext(ctx)` so per-query/per-op lines correlate with the gateway request. The RADOS observer
 helper lives in a build-tag-free file so it's unit-testable without librados; the ceph-tagged backend calls it.
 
+OpenTelemetry tracing: `internal/otel.Init(ctx)` reads `OTEL_EXPORTER_OTLP_ENDPOINT` (W3C-spec env var) and
+returns a `*Provider`. Empty endpoint installs a `tracenoop.NewTracerProvider` and a no-op Shutdown so callers stay
+nil-free. Endpoint set builds an OTLP/HTTP exporter wrapped in a tail-sampling `SpanProcessor`
+(`internal/otel/sampler.go`) — sampling decides at OnEnd, so failing spans (`status=Error` OR
+`http.status_code` >= 500) always export regardless of `STRATA_OTEL_SAMPLE_RATIO` (default 0.01). The HTTP
+middleware `internal/otel.NewMiddleware(provider, next)` extracts traceparent via the global propagator,
+starts a server-kind span named `<METHOD> <path>`, captures status via a `responseWriter` shim and marks the
+span Error on >= 500. Wired in `cmd/strata-gateway/main.go` ahead of the logging middleware so the span
+covers the full request including auth/access-log/audit. **semconv import version must match the SDK's
+`resource.Default()` schema URL** — SDK 1.41 → `semconv/v1.39.0`; mismatch fails at runtime with
+"conflicting Schema URL". Bump together when bumping the SDK.
+
 ## Cassandra gotchas (real ones, hit during this codebase's lifetime)
 
 - **No subqueries.** CQL does not support `WHERE name IN (SELECT name FROM ... WHERE id=?)`. If you need that,
