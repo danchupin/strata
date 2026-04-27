@@ -21,14 +21,15 @@ import (
 )
 
 type Backend struct {
-	conn    *goceph.Conn
-	classes map[string]ClassSpec
-	logger  *slog.Logger
-	metrics Metrics
-	tracer  trace.Tracer
+	clusters map[string]ClusterSpec
+	classes  map[string]ClassSpec
+	logger   *slog.Logger
+	metrics  Metrics
+	tracer   trace.Tracer
 
 	mu      sync.Mutex
-	ioctxes map[string]*goceph.IOContext
+	conns   map[string]*goceph.Conn
+	ioctxes map[string]*goceph.IOContext // key: cluster|pool|ns
 }
 
 var ErrUnknownStorageClass = errors.New("unknown storage class")
@@ -36,46 +37,90 @@ var ErrUnknownStorageClass = errors.New("unknown storage class")
 func New(cfg Config) (data.Backend, error) {
 	classes := cfg.Classes
 	if len(classes) == 0 {
-		if cfg.Pool == "" {
+		if cfg.Pool == "" && len(cfg.Clusters) == 0 {
 			return nil, errors.New("rados: either Classes or Pool must be set")
 		}
-		classes = map[string]ClassSpec{
-			"STANDARD": {Cluster: DefaultCluster, Pool: cfg.Pool, Namespace: cfg.Namespace},
+		if cfg.Pool != "" {
+			classes = map[string]ClassSpec{
+				"STANDARD": {Cluster: DefaultCluster, Pool: cfg.Pool, Namespace: cfg.Namespace},
+			}
 		}
 	}
+	clusters, err := BuildClusters(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidateClusterRefs(classes, clusters); err != nil {
+		return nil, err
+	}
+	return &Backend{
+		clusters: clusters,
+		classes:  classes,
+		logger:   cfg.Logger,
+		metrics:  cfg.Metrics,
+		tracer:   cfg.Tracer,
+		conns:    make(map[string]*goceph.Conn),
+		ioctxes:  make(map[string]*goceph.IOContext),
+	}, nil
+}
 
-	user := cfg.User
+// dialCluster opens + connects a fresh *goceph.Conn for one cluster spec.
+// Lifted out of connFor so it has no lock dependencies.
+func dialCluster(spec ClusterSpec) (*goceph.Conn, error) {
+	user := spec.User
 	if user == "" {
 		user = "admin"
 	}
 	conn, err := goceph.NewConnWithUser(user)
 	if err != nil {
-		return nil, fmt.Errorf("rados: new conn: %w", err)
+		return nil, fmt.Errorf("new conn: %w", err)
 	}
-
-	if cfg.ConfigFile != "" {
-		if err := conn.ReadConfigFile(cfg.ConfigFile); err != nil {
-			return nil, fmt.Errorf("rados: read config %s: %w", cfg.ConfigFile, err)
+	if spec.ConfigFile != "" {
+		if err := conn.ReadConfigFile(spec.ConfigFile); err != nil {
+			return nil, fmt.Errorf("read config %s: %w", spec.ConfigFile, err)
 		}
 	} else if err := conn.ReadDefaultConfigFile(); err != nil {
-		return nil, fmt.Errorf("rados: read default config: %w", err)
+		return nil, fmt.Errorf("read default config: %w", err)
 	}
-	if cfg.Keyring != "" {
-		if err := conn.SetConfigOption("keyring", cfg.Keyring); err != nil {
-			return nil, fmt.Errorf("rados: set keyring: %w", err)
+	if spec.Keyring != "" {
+		if err := conn.SetConfigOption("keyring", spec.Keyring); err != nil {
+			return nil, fmt.Errorf("set keyring: %w", err)
 		}
 	}
 	if err := conn.Connect(); err != nil {
-		return nil, fmt.Errorf("rados: connect: %w", err)
+		return nil, fmt.Errorf("connect: %w", err)
 	}
-	return &Backend{
-		conn:    conn,
-		classes: classes,
-		logger:  cfg.Logger,
-		metrics: cfg.Metrics,
-		tracer:  cfg.Tracer,
-		ioctxes: make(map[string]*goceph.IOContext),
-	}, nil
+	return conn, nil
+}
+
+// connFor lazy-dials the cluster on first use. Caller must hold b.mu.
+// Logs INFO + retries once on the first dial failure so a transient
+// outage at startup doesn't poison the cached map.
+func (b *Backend) connFor(ctx context.Context, id string) (*goceph.Conn, error) {
+	if id == "" {
+		id = DefaultCluster
+	}
+	if c, ok := b.conns[id]; ok {
+		return c, nil
+	}
+	spec, ok := b.clusters[id]
+	if !ok {
+		return nil, fmt.Errorf("rados: unknown cluster %q", id)
+	}
+	c, err := dialCluster(spec)
+	if err != nil {
+		if b.logger != nil {
+			b.logger.InfoContext(ctx, "rados: cluster dial failed; retrying once",
+				"cluster", id, "error", err.Error())
+		}
+		var rerr error
+		c, rerr = dialCluster(spec)
+		if rerr != nil {
+			return nil, fmt.Errorf("rados: cluster %q dial: %w", id, rerr)
+		}
+	}
+	b.conns[id] = c
+	return c, nil
 }
 
 func (b *Backend) resolveClass(class string) (ClassSpec, error) {
@@ -89,16 +134,23 @@ func (b *Backend) resolveClass(class string) (ClassSpec, error) {
 	return spec, nil
 }
 
-func (b *Backend) ioctx(pool, ns string) (*goceph.IOContext, error) {
-	key := pool + "|" + ns
+func (b *Backend) ioctx(ctx context.Context, cluster, pool, ns string) (*goceph.IOContext, error) {
+	if cluster == "" {
+		cluster = DefaultCluster
+	}
+	key := cluster + "|" + pool + "|" + ns
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if x, ok := b.ioctxes[key]; ok {
 		return x, nil
 	}
-	x, err := b.conn.OpenIOContext(pool)
+	conn, err := b.connFor(ctx, cluster)
 	if err != nil {
-		return nil, fmt.Errorf("rados: open ioctx %s: %w", pool, err)
+		return nil, err
+	}
+	x, err := conn.OpenIOContext(pool)
+	if err != nil {
+		return nil, fmt.Errorf("rados: open ioctx %s/%s: %w", cluster, pool, err)
 	}
 	if ns != "" {
 		x.SetNamespace(ns)
@@ -112,7 +164,7 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 	if err != nil {
 		return nil, err
 	}
-	ioctx, err := b.ioctx(spec.Pool, spec.Namespace)
+	ioctx, err := b.ioctx(ctx, spec.Cluster, spec.Pool, spec.Namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +181,7 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 	idx := 0
 	for {
 		if err := ctx.Err(); err != nil {
-			b.cleanupManifest(m.Chunks)
+			b.cleanupManifest(ctx, m.Chunks)
 			return nil, err
 		}
 		n, rerr := io.ReadFull(r, buf)
@@ -140,7 +192,7 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 			werr := writeChunk(ioctx, oid, chunk)
 			ObserveOp(ctx, b.logger, b.metrics, b.tracer, spec.Pool, "put", oid, start, werr)
 			if werr != nil {
-				b.cleanupManifest(m.Chunks)
+				b.cleanupManifest(ctx, m.Chunks)
 				return nil, werr
 			}
 			hash.Write(chunk)
@@ -158,7 +210,7 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 			break
 		}
 		if rerr != nil {
-			b.cleanupManifest(m.Chunks)
+			b.cleanupManifest(ctx, m.Chunks)
 			return nil, rerr
 		}
 	}
@@ -176,9 +228,9 @@ func writeChunk(ioctx *goceph.IOContext, oid string, chunk []byte) error {
 	return nil
 }
 
-func (b *Backend) cleanupManifest(chunks []data.ChunkRef) {
+func (b *Backend) cleanupManifest(ctx context.Context, chunks []data.ChunkRef) {
 	for _, c := range chunks {
-		ioctx, err := b.ioctx(c.Pool, c.Namespace)
+		ioctx, err := b.ioctx(ctx, c.Cluster, c.Pool, c.Namespace)
 		if err != nil {
 			continue
 		}
@@ -245,7 +297,7 @@ func (r *radosReader) loadNextChunk() error {
 	var base int64
 	for _, c := range r.chunks {
 		if r.pos < base+c.Size {
-			ioctx, err := r.b.ioctx(c.Pool, c.Namespace)
+			ioctx, err := r.b.ioctx(r.ctx, c.Cluster, c.Pool, c.Namespace)
 			if err != nil {
 				return err
 			}
@@ -275,7 +327,7 @@ func (b *Backend) Delete(ctx context.Context, m *data.Manifest) error {
 	}
 	var firstErr error
 	for _, c := range m.Chunks {
-		ioctx, err := b.ioctx(c.Pool, c.Namespace)
+		ioctx, err := b.ioctx(ctx, c.Cluster, c.Pool, c.Namespace)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -299,10 +351,10 @@ func (b *Backend) Close() error {
 		x.Destroy()
 	}
 	b.ioctxes = nil
-	if b.conn != nil {
-		b.conn.Shutdown()
-		b.conn = nil
+	for _, c := range b.conns {
+		c.Shutdown()
 	}
+	b.conns = nil
 	return nil
 }
 
@@ -311,7 +363,7 @@ func (b *Backend) Close() error {
 // success — only transport / auth errors fail. Honours ctx via a goroutine
 // + select; the underlying librados Stat itself is blocking.
 func (b *Backend) Probe(ctx context.Context, oid string) error {
-	if b == nil || b.conn == nil {
+	if b == nil {
 		return errors.New("rados backend closed")
 	}
 	if oid == "" {
@@ -321,7 +373,7 @@ func (b *Backend) Probe(ctx context.Context, oid string) error {
 	if err != nil {
 		return err
 	}
-	ioctx, err := b.ioctx(spec.Pool, spec.Namespace)
+	ioctx, err := b.ioctx(ctx, spec.Cluster, spec.Pool, spec.Namespace)
 	if err != nil {
 		return err
 	}

@@ -116,6 +116,10 @@ func buildDataBackend(cfg *config.Config, logger *slog.Logger) (data.Backend, er
 		if err != nil {
 			return nil, err
 		}
+		clusters, err := datarados.ParseClusters(cfg.RADOS.Clusters)
+		if err != nil {
+			return nil, err
+		}
 		return datarados.New(datarados.Config{
 			ConfigFile: cfg.RADOS.ConfigFile,
 			User:       cfg.RADOS.User,
@@ -123,6 +127,7 @@ func buildDataBackend(cfg *config.Config, logger *slog.Logger) (data.Backend, er
 			Pool:       cfg.RADOS.Pool,
 			Namespace:  cfg.RADOS.Namespace,
 			Classes:    classes,
+			Clusters:   clusters,
 			Logger:     logger,
 			Metrics:    metrics.RADOSObserver{},
 		})
