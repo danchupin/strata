@@ -8,21 +8,11 @@ import (
 )
 
 func encodeManifest(m *data.Manifest) ([]byte, error) {
-	if m == nil {
-		return nil, nil
-	}
-	return json.Marshal(m)
+	return data.EncodeManifestJSON(m)
 }
 
 func decodeManifest(b []byte) (*data.Manifest, error) {
-	if len(b) == 0 {
-		return nil, nil
-	}
-	var m data.Manifest
-	if err := json.Unmarshal(b, &m); err != nil {
-		return nil, err
-	}
-	return &m, nil
+	return data.DecodeManifest(b)
 }
 
 func encodeGrants(g []meta.Grant) ([]byte, error) {
