@@ -135,6 +135,9 @@ func (s *Server) serveWebsiteRoot(w http.ResponseWriter, r *http.Request, b *met
 	if cfg == nil {
 		return false
 	}
+	if writeWebsiteRedirectAll(w, cfg, "") {
+		return true
+	}
 	if cfg.IndexDocument != nil && cfg.IndexDocument.Suffix != "" {
 		if obj, err := s.Meta.GetObject(r.Context(), b.ID, cfg.IndexDocument.Suffix, ""); err == nil && !obj.IsDeleteMarker {
 			s.serveWebsiteObject(w, r, obj, http.StatusOK)
@@ -142,6 +145,41 @@ func (s *Server) serveWebsiteRoot(w http.ResponseWriter, r *http.Request, b *met
 		}
 	}
 	s.serveWebsiteError(w, r, b, cfg)
+	return true
+}
+
+// tryWebsiteRedirectAll loads bucket website config and, when
+// RedirectAllRequestsTo is set, writes a 301 redirect for the given key
+// (empty key for bucket root). Returns true if the request was handled.
+func (s *Server) tryWebsiteRedirectAll(w http.ResponseWriter, r *http.Request, b *meta.Bucket, key string) bool {
+	cfg, err := s.loadWebsiteConfig(r, b)
+	if err != nil || cfg == nil {
+		return false
+	}
+	return writeWebsiteRedirectAll(w, cfg, key)
+}
+
+// writeWebsiteRedirectAll emits a 301 Location response when cfg has a
+// RedirectAllRequestsTo block. key is appended after a leading slash when
+// non-empty. Returns false (no header written) when redirect is not configured.
+func writeWebsiteRedirectAll(w http.ResponseWriter, cfg *websiteConfiguration, key string) bool {
+	if cfg == nil || cfg.RedirectAllRequestsTo == nil {
+		return false
+	}
+	host := strings.TrimSpace(cfg.RedirectAllRequestsTo.HostName)
+	if host == "" {
+		return false
+	}
+	proto := strings.ToLower(strings.TrimSpace(cfg.RedirectAllRequestsTo.Protocol))
+	if proto != "http" && proto != "https" {
+		proto = "http"
+	}
+	loc := proto + "://" + host
+	if key != "" {
+		loc += "/" + key
+	}
+	w.Header().Set("Location", loc)
+	w.WriteHeader(http.StatusMovedPermanently)
 	return true
 }
 

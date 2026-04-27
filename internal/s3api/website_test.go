@@ -1,6 +1,7 @@
 package s3api_test
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -140,4 +141,112 @@ func TestBucketWebsiteOnMissingBucket(t *testing.T) {
 	h := newHarness(t)
 	resp := h.doString("GET", "/missing?website=", "")
 	h.mustStatus(resp, 404)
+}
+
+const websiteRedirectAllXML = `<WebsiteConfiguration>
+	<RedirectAllRequestsTo>
+		<HostName>example.com</HostName>
+		<Protocol>https</Protocol>
+	</RedirectAllRequestsTo>
+</WebsiteConfiguration>`
+
+const websiteRedirectAllNoProtoXML = `<WebsiteConfiguration>
+	<RedirectAllRequestsTo>
+		<HostName>example.com</HostName>
+	</RedirectAllRequestsTo>
+</WebsiteConfiguration>`
+
+// noRedirectClient returns an http.Client that does not follow redirects so
+// tests can assert on 301 responses directly.
+func noRedirectClient() *http.Client {
+	return &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+func (h *testHarness) doNoRedirect(method, path string) *http.Response {
+	h.t.Helper()
+	req, err := http.NewRequest(method, h.ts.URL+path, nil)
+	if err != nil {
+		h.t.Fatalf("new request: %v", err)
+	}
+	resp, err := noRedirectClient().Do(req)
+	if err != nil {
+		h.t.Fatalf("request %s %s: %v", method, path, err)
+	}
+	return resp
+}
+
+func TestBucketWebsiteRedirectAllRequestsTo(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	h.mustStatus(h.doString("PUT", "/bkt?website=", websiteRedirectAllXML), 200)
+
+	// GET on bucket root returns 301 to https://example.com.
+	resp := h.doNoRedirect("GET", "/bkt/")
+	h.mustStatus(resp, 301)
+	if loc := resp.Header.Get("Location"); loc != "https://example.com" {
+		t.Fatalf("root Location: got %q want %q", loc, "https://example.com")
+	}
+	_ = h.readBody(resp)
+
+	// GET on object path returns 301 with key appended.
+	resp = h.doNoRedirect("GET", "/bkt/some/key.html")
+	h.mustStatus(resp, 301)
+	if loc := resp.Header.Get("Location"); loc != "https://example.com/some/key.html" {
+		t.Fatalf("key Location: got %q want %q", loc, "https://example.com/some/key.html")
+	}
+	_ = h.readBody(resp)
+}
+
+func TestBucketWebsiteRedirectAllDefaultsToHTTP(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	h.mustStatus(h.doString("PUT", "/bkt?website=", websiteRedirectAllNoProtoXML), 200)
+
+	resp := h.doNoRedirect("GET", "/bkt/anything")
+	h.mustStatus(resp, 301)
+	if loc := resp.Header.Get("Location"); loc != "http://example.com/anything" {
+		t.Fatalf("Location: got %q want %q", loc, "http://example.com/anything")
+	}
+	_ = h.readBody(resp)
+}
+
+func TestBucketWebsiteRedirectAllOnlyAffectsGET(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	h.mustStatus(h.doString("PUT", "/bkt?website=", websiteRedirectAllXML), 200)
+
+	// PUT continues normally — object lands without redirect.
+	h.mustStatus(h.doString("PUT", "/bkt/foo", "data"), 200)
+
+	// HEAD on existing object continues normally — 200, not 301.
+	resp := h.doNoRedirect("HEAD", "/bkt/foo")
+	if resp.StatusCode == http.StatusMovedPermanently {
+		t.Fatalf("HEAD got 301; expected normal HEAD response")
+	}
+	_ = resp.Body.Close()
+
+	// DELETE continues normally.
+	h.mustStatus(h.doString("DELETE", "/bkt/foo", ""), 204)
+}
+
+func TestBucketWebsiteNoRedirectWithoutConfig(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	h.mustStatus(h.doString("PUT", "/bkt/foo", "data"), 200)
+
+	// No website config → GET returns object body, not redirect.
+	resp := h.doNoRedirect("GET", "/bkt/foo")
+	if resp.StatusCode == http.StatusMovedPermanently {
+		t.Fatalf("expected no redirect without website config; got 301")
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if body := h.readBody(resp); body != "data" {
+		t.Fatalf("body: got %q want %q", body, "data")
+	}
 }

@@ -499,7 +499,7 @@
         "go test ./internal/s3api/... passes"
       ],
       "priority": 30,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
