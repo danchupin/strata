@@ -47,6 +47,8 @@ var (
 	ErrNoSuchReplicationConfig      = APIError{Code: "ReplicationConfigurationNotFoundError", Message: "The replication configuration was not found", Status: http.StatusNotFound}
 	ErrNoSuchTagSet                 = APIError{Code: "NoSuchTagSet", Message: "The TagSet does not exist", Status: http.StatusNotFound}
 	ErrNoSuchInventoryConfig        = APIError{Code: "NoSuchConfiguration", Message: "The inventory configuration with that id does not exist", Status: http.StatusNotFound}
+	ErrAccessPointAlreadyOwnedByYou = APIError{Code: "AccessPointAlreadyOwnedByYou", Message: "An access point with that name already exists", Status: http.StatusConflict}
+	ErrNoSuchAccessPoint            = APIError{Code: "NoSuchAccessPoint", Message: "The specified access point does not exist", Status: http.StatusNotFound}
 	ErrInvalidTag                   = APIError{Code: "InvalidTag", Message: "The TagSet contains an invalid tag", Status: http.StatusBadRequest}
 	ErrObjectLockNotEnabled         = APIError{Code: "InvalidRequest", Message: "Bucket is missing Object Lock Configuration", Status: http.StatusBadRequest}
 	ErrInvalidEncryptionAlgorithm   = APIError{Code: "InvalidArgument", Message: "The encryption algorithm specified is not supported", Status: http.StatusBadRequest}

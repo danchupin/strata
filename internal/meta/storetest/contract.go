@@ -44,6 +44,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"VersioningNullSentinel", caseVersioningNullSentinel},
 		{"VersioningNullListVersions", caseVersioningNullListVersions},
 		{"VersioningSuspendedReplaceNull", caseVersioningSuspendedReplaceNull},
+		{"AccessPointCRUD", caseAccessPointCRUD},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1056,5 +1057,71 @@ func caseVersioningSuspendedReplaceNull(t *testing.T, s meta.Store) {
 	}
 	if !sawMarker || !sawV1 {
 		t.Fatalf("missing entries (marker=%v v1=%v)", sawMarker, sawV1)
+	}
+}
+
+func caseAccessPointCRUD(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "ap-bkt", "owner-a", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	ap := &meta.AccessPoint{
+		Name:              "ap-one",
+		BucketID:          b.ID,
+		Bucket:            b.Name,
+		Alias:             "ap-aaaaaaaaaaaa",
+		NetworkOrigin:     "Internet",
+		Policy:            []byte(`{"Version":"2012-10-17"}`),
+		PublicAccessBlock: []byte(`<PublicAccessBlockConfiguration/>`),
+		CreatedAt:         time.Now().UTC().Truncate(time.Millisecond),
+	}
+	if err := s.CreateAccessPoint(ctx, ap); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := s.CreateAccessPoint(ctx, ap); err != meta.ErrAccessPointAlreadyExists {
+		t.Fatalf("dup create: got %v want ErrAccessPointAlreadyExists", err)
+	}
+	got, err := s.GetAccessPoint(ctx, "ap-one")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Name != ap.Name || got.Bucket != ap.Bucket || got.Alias != ap.Alias ||
+		got.NetworkOrigin != ap.NetworkOrigin || got.BucketID != ap.BucketID {
+		t.Fatalf("get round-trip: %+v", got)
+	}
+	if string(got.Policy) != string(ap.Policy) {
+		t.Fatalf("policy round-trip: %q", got.Policy)
+	}
+	if string(got.PublicAccessBlock) != string(ap.PublicAccessBlock) {
+		t.Fatalf("pab round-trip: %q", got.PublicAccessBlock)
+	}
+
+	if _, err := s.GetAccessPoint(ctx, "missing"); err != meta.ErrAccessPointNotFound {
+		t.Fatalf("get missing: got %v want ErrAccessPointNotFound", err)
+	}
+
+	list, err := s.ListAccessPoints(ctx, uuid.Nil)
+	if err != nil || len(list) != 1 || list[0].Name != "ap-one" {
+		t.Fatalf("list all: err=%v list=%+v", err, list)
+	}
+	listForBucket, err := s.ListAccessPoints(ctx, b.ID)
+	if err != nil || len(listForBucket) != 1 {
+		t.Fatalf("list scoped: err=%v list=%+v", err, listForBucket)
+	}
+	listOther, err := s.ListAccessPoints(ctx, uuid.New())
+	if err != nil || len(listOther) != 0 {
+		t.Fatalf("list other: err=%v list=%+v", err, listOther)
+	}
+
+	if err := s.DeleteAccessPoint(ctx, "ap-one"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if err := s.DeleteAccessPoint(ctx, "ap-one"); err != meta.ErrAccessPointNotFound {
+		t.Fatalf("delete missing: got %v want ErrAccessPointNotFound", err)
+	}
+	list, err = s.ListAccessPoints(ctx, uuid.Nil)
+	if err != nil || len(list) != 0 {
+		t.Fatalf("list after delete: err=%v list=%+v", err, list)
 	}
 }

@@ -2353,6 +2353,117 @@ func (s *Store) ListBucketInventoryConfigs(ctx context.Context, bucketID uuid.UU
 	return out, nil
 }
 
+func (s *Store) CreateAccessPoint(ctx context.Context, ap *meta.AccessPoint) error {
+	applied, err := s.s.Query(
+		`INSERT INTO access_points
+			(name, bucket_id, bucket, alias, network_origin, vpc_id, policy, public_access_block, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS`,
+		ap.Name, gocqlUUID(ap.BucketID), ap.Bucket, ap.Alias, ap.NetworkOrigin,
+		ap.VPCID, nilIfEmptyBytes(ap.Policy), nilIfEmptyBytes(ap.PublicAccessBlock),
+		ap.CreatedAt.UTC(),
+	).WithContext(ctx).MapScanCAS(map[string]interface{}{})
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return meta.ErrAccessPointAlreadyExists
+	}
+	return nil
+}
+
+func (s *Store) GetAccessPoint(ctx context.Context, name string) (*meta.AccessPoint, error) {
+	var (
+		bucketID      gocql.UUID
+		bucket        string
+		alias         string
+		networkOrigin string
+		vpcID         string
+		policy        []byte
+		pab           []byte
+		createdAt     time.Time
+	)
+	err := s.s.Query(
+		`SELECT bucket_id, bucket, alias, network_origin, vpc_id, policy, public_access_block, created_at
+		 FROM access_points WHERE name=?`,
+		name,
+	).WithContext(ctx).Scan(&bucketID, &bucket, &alias, &networkOrigin, &vpcID, &policy, &pab, &createdAt)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return nil, meta.ErrAccessPointNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &meta.AccessPoint{
+		Name:              name,
+		BucketID:          uuidFromGocql(bucketID),
+		Bucket:            bucket,
+		Alias:             alias,
+		NetworkOrigin:     networkOrigin,
+		VPCID:             vpcID,
+		Policy:            append([]byte(nil), policy...),
+		PublicAccessBlock: append([]byte(nil), pab...),
+		CreatedAt:         createdAt,
+	}, nil
+}
+
+func (s *Store) DeleteAccessPoint(ctx context.Context, name string) error {
+	applied, err := s.s.Query(
+		`DELETE FROM access_points WHERE name=? IF EXISTS`,
+		name,
+	).WithContext(ctx).MapScanCAS(map[string]interface{}{})
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return meta.ErrAccessPointNotFound
+	}
+	return nil
+}
+
+func (s *Store) ListAccessPoints(ctx context.Context, bucketID uuid.UUID) ([]*meta.AccessPoint, error) {
+	var iter *gocql.Iter
+	if bucketID == uuid.Nil {
+		iter = s.s.Query(
+			`SELECT name, bucket_id, bucket, alias, network_origin, vpc_id, policy, public_access_block, created_at FROM access_points`,
+		).WithContext(ctx).Iter()
+	} else {
+		iter = s.s.Query(
+			`SELECT name, bucket_id, bucket, alias, network_origin, vpc_id, policy, public_access_block, created_at FROM access_points WHERE bucket_id=? ALLOW FILTERING`,
+			gocqlUUID(bucketID),
+		).WithContext(ctx).Iter()
+	}
+	var out []*meta.AccessPoint
+	var (
+		name          string
+		bID           gocql.UUID
+		bucket        string
+		alias         string
+		networkOrigin string
+		vpcID         string
+		policy        []byte
+		pab           []byte
+		createdAt     time.Time
+	)
+	for iter.Scan(&name, &bID, &bucket, &alias, &networkOrigin, &vpcID, &policy, &pab, &createdAt) {
+		out = append(out, &meta.AccessPoint{
+			Name:              name,
+			BucketID:          uuidFromGocql(bID),
+			Bucket:            bucket,
+			Alias:             alias,
+			NetworkOrigin:     networkOrigin,
+			VPCID:             vpcID,
+			Policy:            append([]byte(nil), policy...),
+			PublicAccessBlock: append([]byte(nil), pab...),
+			CreatedAt:         createdAt,
+		})
+	}
+	if err := iter.Close(); err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
 func (s *Store) UpdateObjectSSEWrap(ctx context.Context, bucketID uuid.UUID, key, versionID string, wrapped []byte, keyID string) error {
 	shard := shardOf(key, s.defaultShard)
 	if versionID == "" {

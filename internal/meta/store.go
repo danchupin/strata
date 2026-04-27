@@ -63,6 +63,8 @@ var (
 	ErrNoSuchTagSet            = errors.New("no tag set configured for bucket")
 	ErrNoSuchGrants            = errors.New("no acl grants persisted for resource")
 	ErrNoSuchInventoryConfig   = errors.New("no inventory configuration with that id")
+	ErrAccessPointAlreadyExists = errors.New("access point with that name already exists")
+	ErrAccessPointNotFound      = errors.New("access point not found")
 	ErrIAMUserNotFound         = errors.New("iam user not found")
 	ErrIAMUserAlreadyExists    = errors.New("iam user already exists")
 	ErrIAMAccessKeyNotFound    = errors.New("iam access key not found")
@@ -350,6 +352,24 @@ type AuditFilter struct {
 	Continuation string
 }
 
+// AccessPoint is a named, account-scoped binding to a single bucket carrying
+// its own optional bucket policy and PublicAccessBlock configuration. Created
+// via the [iam root]-gated ?Action=CreateAccessPoint endpoint (US-040). Name
+// is unique per account; Alias is auto-generated as ap-<random12>.
+// NetworkOrigin is "Internet" (default) or "VPC". Policy and PAB blobs are
+// stored verbatim — interpretation lives in the s3api layer.
+type AccessPoint struct {
+	Name              string
+	BucketID          uuid.UUID
+	Bucket            string
+	Alias             string
+	NetworkOrigin     string
+	VPCID             string
+	Policy            []byte
+	PublicAccessBlock []byte
+	CreatedAt         time.Time
+}
+
 // ReplicationEvent is one buffered cross-region replication intent waiting
 // for the strata-replicator worker (US-012) to copy the source object to the
 // destination configured by the matching rule. One row per matching rule —
@@ -483,6 +503,14 @@ type Store interface {
 	GetBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string) ([]byte, error)
 	DeleteBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string) error
 	ListBucketInventoryConfigs(ctx context.Context, bucketID uuid.UUID) (map[string][]byte, error)
+
+	// Access points are account-scoped (name unique across the gateway). The
+	// passed bucketID filter on ListAccessPoints is uuid.Nil to return all
+	// access points; otherwise rows are filtered by binding.
+	CreateAccessPoint(ctx context.Context, ap *AccessPoint) error
+	GetAccessPoint(ctx context.Context, name string) (*AccessPoint, error)
+	DeleteAccessPoint(ctx context.Context, name string) error
+	ListAccessPoints(ctx context.Context, bucketID uuid.UUID) ([]*AccessPoint, error)
 
 	CreateIAMUser(ctx context.Context, u *IAMUser) error
 	GetIAMUser(ctx context.Context, userName string) (*IAMUser, error)

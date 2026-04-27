@@ -33,6 +33,7 @@ type Store struct {
 	logging        map[uuid.UUID][]byte
 	tagging        map[uuid.UUID][]byte
 	inventoryConfigs map[uuid.UUID]map[string][]byte
+	accessPoints     map[string]*meta.AccessPoint
 	bucketGrants   map[uuid.UUID][]meta.Grant
 	objectGrants   map[grantKey][]meta.Grant
 	iamUsers       map[string]*meta.IAMUser
@@ -97,6 +98,7 @@ func New() *Store {
 		logging:      make(map[uuid.UUID][]byte),
 		tagging:      make(map[uuid.UUID][]byte),
 		inventoryConfigs: make(map[uuid.UUID]map[string][]byte),
+		accessPoints:     make(map[string]*meta.AccessPoint),
 		bucketGrants: make(map[uuid.UUID][]meta.Grant),
 		objectGrants: make(map[grantKey][]meta.Grant),
 		iamUsers:     make(map[string]*meta.IAMUser),
@@ -1270,6 +1272,59 @@ func (s *Store) ListBucketInventoryConfigs(ctx context.Context, bucketID uuid.UU
 	for id, blob := range src {
 		out[id] = append([]byte(nil), blob...)
 	}
+	return out, nil
+}
+
+func (s *Store) CreateAccessPoint(ctx context.Context, ap *meta.AccessPoint) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.accessPoints[ap.Name]; ok {
+		return meta.ErrAccessPointAlreadyExists
+	}
+	cp := *ap
+	cp.Policy = append([]byte(nil), ap.Policy...)
+	cp.PublicAccessBlock = append([]byte(nil), ap.PublicAccessBlock...)
+	s.accessPoints[ap.Name] = &cp
+	return nil
+}
+
+func (s *Store) GetAccessPoint(ctx context.Context, name string) (*meta.AccessPoint, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	ap, ok := s.accessPoints[name]
+	if !ok {
+		return nil, meta.ErrAccessPointNotFound
+	}
+	cp := *ap
+	cp.Policy = append([]byte(nil), ap.Policy...)
+	cp.PublicAccessBlock = append([]byte(nil), ap.PublicAccessBlock...)
+	return &cp, nil
+}
+
+func (s *Store) DeleteAccessPoint(ctx context.Context, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.accessPoints[name]; !ok {
+		return meta.ErrAccessPointNotFound
+	}
+	delete(s.accessPoints, name)
+	return nil
+}
+
+func (s *Store) ListAccessPoints(ctx context.Context, bucketID uuid.UUID) ([]*meta.AccessPoint, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*meta.AccessPoint, 0, len(s.accessPoints))
+	for _, ap := range s.accessPoints {
+		if bucketID != uuid.Nil && ap.BucketID != bucketID {
+			continue
+		}
+		cp := *ap
+		cp.Policy = append([]byte(nil), ap.Policy...)
+		cp.PublicAccessBlock = append([]byte(nil), ap.PublicAccessBlock...)
+		out = append(out, &cp)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
 }
 

@@ -84,6 +84,14 @@ func (s *Server) handleIAM(w http.ResponseWriter, r *http.Request, action string
 		s.iamRotateAccessKey(w, r)
 	case "AssumeRole":
 		s.stsAssumeRole(w, r)
+	case "CreateAccessPoint":
+		s.accessPointCreate(w, r)
+	case "GetAccessPoint":
+		s.accessPointGet(w, r)
+	case "DeleteAccessPoint":
+		s.accessPointDelete(w, r)
+	case "ListAccessPoints":
+		s.accessPointList(w, r)
 	default:
 		writeError(w, r, errIAMUnsupportedAction)
 	}

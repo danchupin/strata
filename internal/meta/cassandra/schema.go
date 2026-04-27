@@ -241,6 +241,17 @@ var tableDDL = []string{
 		config    blob,
 		PRIMARY KEY ((bucket_id), config_id)
 	)`,
+	`CREATE TABLE IF NOT EXISTS access_points (
+		name                text PRIMARY KEY,
+		bucket_id           uuid,
+		bucket              text,
+		alias               text,
+		network_origin      text,
+		vpc_id              text,
+		policy              blob,
+		public_access_block blob,
+		created_at          timestamp
+	)`,
 	`CREATE TABLE IF NOT EXISTS notify_dlq (
 		bucket_id    uuid,
 		day          timestamp,
