@@ -122,10 +122,15 @@ func TestMultipartGetByPartNumberPerPartChecksum(t *testing.T) {
 
 	for i := range parts {
 		pn := i + 1
-		get := h.do("GET", fmt.Sprintf("/bkt/k?partNumber=%d", pn), nil)
+		get := h.do("GET", fmt.Sprintf("/bkt/k?partNumber=%d", pn), nil, "x-amz-checksum-mode", "ENABLED")
 		h.mustStatus(get, 206)
 		if got := get.Header.Get(hdr); got != partB64[i] {
 			t.Errorf("part %d per-part checksum: got %q want %q", pn, got, partB64[i])
+		}
+		// ?partNumber requests do not surface the object-level checksum-type;
+		// the per-part raw digest is what the client gets.
+		if got := get.Header.Get("x-amz-checksum-type"); got != "" {
+			t.Errorf("part %d unexpected x-amz-checksum-type: %q", pn, got)
 		}
 		_, _ = io.Copy(io.Discard, get.Body)
 		_ = get.Body.Close()

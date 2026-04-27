@@ -111,11 +111,14 @@ func TestMultipartChecksumRoundTripCRC32(t *testing.T) {
 		t.Fatalf("complete body missing ChecksumCRC32=%s: %s", want, body)
 	}
 
-	// Object echoes the composite on subsequent GET / HEAD.
-	get := h.doString("GET", "/mpc/k", "")
+	// Object echoes the composite on subsequent GET / HEAD when ChecksumMode=ENABLED.
+	get := h.doString("GET", "/mpc/k", "", "x-amz-checksum-mode", "ENABLED")
 	h.mustStatus(get, 200)
 	if got := get.Header.Get(hdr); got != want {
 		t.Fatalf("GET composite header: got %q want %q", got, want)
+	}
+	if got := get.Header.Get("x-amz-checksum-type"); got != "COMPOSITE" {
+		t.Fatalf("GET checksum-type: got %q want COMPOSITE", got)
 	}
 	_ = h.readBody(get)
 }

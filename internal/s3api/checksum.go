@@ -111,6 +111,15 @@ func verifyChecksums(entries []*checksumEntry) (map[string]string, error) {
 	return out, nil
 }
 
+// checksumModeEnabled returns true when the request's x-amz-checksum-mode
+// header is "ENABLED" (case-insensitive). AWS gates checksum echo on
+// HeadObject/GetObject responses behind this header — without it, no
+// x-amz-checksum-* / x-amz-checksum-type headers should appear, even when
+// the object has stored checksums.
+func checksumModeEnabled(v string) bool {
+	return strings.EqualFold(strings.TrimSpace(v), "ENABLED")
+}
+
 // writeChecksumHeaders emits any persisted x-amz-checksum-<algo> headers on a
 // GetObject/HeadObject response. Empty map is a no-op.
 func writeChecksumHeaders(h http.Header, sums map[string]string) {

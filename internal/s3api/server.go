@@ -952,10 +952,15 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		w.Header().Set(hdrSSECAlgorithm, sseAlgorithmAES256)
 		w.Header().Set(hdrSSECKeyMD5, o.SSECKeyMD5)
 	}
-	if partNumber > 0 {
-		writeChecksumHeaders(w.Header(), partChecksumsAt(o, partNumber-1))
-	} else {
-		writeChecksumHeaders(w.Header(), o.Checksums)
+	if checksumModeEnabled(r.Header.Get("x-amz-checksum-mode")) {
+		if partNumber > 0 {
+			writeChecksumHeaders(w.Header(), partChecksumsAt(o, partNumber-1))
+		} else {
+			writeChecksumHeaders(w.Header(), o.Checksums)
+			if o.ChecksumType != "" {
+				w.Header().Set("x-amz-checksum-type", o.ChecksumType)
+			}
+		}
 	}
 	if len(o.Tags) > 0 {
 		w.Header().Set("x-amz-tagging-count", strconv.Itoa(len(o.Tags)))

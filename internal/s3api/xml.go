@@ -69,6 +69,7 @@ type initiateMultipartResult struct {
 	Key               string   `xml:"Key"`
 	UploadID          string   `xml:"UploadId"`
 	ChecksumAlgorithm string   `xml:"ChecksumAlgorithm,omitempty"`
+	ChecksumType      string   `xml:"ChecksumType,omitempty"`
 }
 
 type completeMultipartBody struct {

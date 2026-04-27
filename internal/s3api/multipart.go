@@ -51,6 +51,7 @@ func (s *Server) initiateMultipart(w http.ResponseWriter, r *http.Request, b *me
 		CacheControl:      r.Header.Get("Cache-Control"),
 		Expires:           r.Header.Get("Expires"),
 		ChecksumAlgorithm: strings.ToUpper(r.Header.Get("x-amz-checksum-algorithm")),
+		ChecksumType:      normalizeChecksumType(r.Header.Get("x-amz-checksum-type")),
 	}
 	if sse == sseAlgorithmAES256 {
 		if s.Master == nil {
@@ -86,12 +87,30 @@ func (s *Server) initiateMultipart(w http.ResponseWriter, r *http.Request, b *me
 	if mu.ChecksumAlgorithm != "" {
 		w.Header().Set("x-amz-checksum-algorithm", mu.ChecksumAlgorithm)
 	}
+	if mu.ChecksumType != "" {
+		w.Header().Set("x-amz-checksum-type", mu.ChecksumType)
+	}
 	writeXML(w, http.StatusOK, initiateMultipartResult{
 		Bucket:            b.Name,
 		Key:               key,
 		UploadID:          mu.UploadID,
 		ChecksumAlgorithm: mu.ChecksumAlgorithm,
+		ChecksumType:      mu.ChecksumType,
 	})
+}
+
+// normalizeChecksumType maps the request x-amz-checksum-type header value to
+// the canonical "FULL_OBJECT" or "COMPOSITE" tokens AWS persists. Unknown
+// values are dropped (treated as no preference) so a malformed header does not
+// cause Initiate to fail; Complete then defaults to COMPOSITE.
+func normalizeChecksumType(v string) string {
+	switch strings.ToUpper(strings.TrimSpace(v)) {
+	case "FULL_OBJECT":
+		return "FULL_OBJECT"
+	case "COMPOSITE":
+		return "COMPOSITE"
+	}
+	return ""
 }
 
 func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Bucket, key, uploadID string) {
@@ -364,6 +383,14 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		return
 	}
 
+	checksumType := ""
+	switch {
+	case mu.ChecksumType != "":
+		checksumType = mu.ChecksumType
+	case len(composite) > 0:
+		checksumType = "COMPOSITE"
+	}
+
 	obj := &meta.Object{
 		BucketID:     b.ID,
 		Key:          key,
@@ -372,6 +399,7 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		ETag:         finalETag,
 		Mtime:        time.Now().UTC(),
 		Checksums:    composite,
+		ChecksumType: checksumType,
 		SSE:          mu.SSE,
 		SSEKey:       mu.SSEKey,
 		SSEKeyID:     mu.SSEKeyID,
@@ -407,10 +435,6 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		headers["x-amz-server-side-encryption"] = obj.SSE
 	}
 
-	checksumType := ""
-	if mu.ChecksumAlgorithm != "" {
-		checksumType = "COMPOSITE"
-	}
 	var buf bytes.Buffer
 	buf.WriteString(xml.Header)
 	if err := xml.NewEncoder(&buf).Encode(completeMultipartResult{

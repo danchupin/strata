@@ -158,6 +158,14 @@ type Object struct {
 	CacheControl   string
 	Expires        string
 	ReplicationStatus string
+	// ChecksumType is the AWS-defined object-checksum aggregation type:
+	// "COMPOSITE" for multipart objects whose composite checksum is
+	// HASH(concat(part_digests))-N, "FULL_OBJECT" for multipart objects
+	// uploaded with x-amz-checksum-type=FULL_OBJECT on Initiate (the part
+	// checksum was computed over the whole object), or empty for single-PUT
+	// objects with no aggregation. Surfaced on HEAD/GET via the
+	// x-amz-checksum-type response header when ChecksumMode=ENABLED.
+	ChecksumType string
 }
 
 type ListOptions struct {
@@ -197,6 +205,12 @@ type MultipartUpload struct {
 	CacheControl      string
 	Expires           string
 	ChecksumAlgorithm string
+	// ChecksumType is the client-requested aggregation mode from the Initiate
+	// x-amz-checksum-type header ("FULL_OBJECT" or "COMPOSITE"). Empty when
+	// the client did not specify it; CompleteMultipartUpload then defaults to
+	// COMPOSITE when ChecksumAlgorithm is non-empty. Persisted so Complete on
+	// a different gateway instance can preserve the client's choice.
+	ChecksumType string
 }
 
 type MultipartPart struct {

@@ -282,6 +282,8 @@ var alterStatements = []string{
 	`ALTER TABLE objects ADD replication_status text`,
 	`ALTER TABLE replication_queue ADD destination_endpoint text`,
 	`ALTER TABLE objects ADD part_sizes list<bigint>`,
+	`ALTER TABLE objects ADD checksum_type text`,
+	`ALTER TABLE multipart_uploads ADD checksum_type text`,
 }
 
 func isColumnAlreadyExists(err error) bool {

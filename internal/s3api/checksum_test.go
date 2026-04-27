@@ -65,14 +65,14 @@ func TestChecksumRoundTripPerAlgo(t *testing.T) {
 			h.mustStatus(resp, 200)
 			_ = h.readBody(resp)
 
-			get := h.doString("GET", checksumBucket+"/k", "")
+			get := h.doString("GET", checksumBucket+"/k", "", "x-amz-checksum-mode", "ENABLED")
 			h.mustStatus(get, 200)
 			if got := get.Header.Get(hdr); got != expected {
 				t.Fatalf("GET %s header: got %q want %q", hdr, got, expected)
 			}
 			_ = h.readBody(get)
 
-			head := h.doString("HEAD", checksumBucket+"/k", "")
+			head := h.doString("HEAD", checksumBucket+"/k", "", "x-amz-checksum-mode", "ENABLED")
 			h.mustStatus(head, 200)
 			if got := head.Header.Get(hdr); got != expected {
 				t.Fatalf("HEAD %s header: got %q want %q", hdr, got, expected)
