@@ -1263,6 +1263,8 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 	var totalSize int64
 	var ciphertextSize int64
 	partChunks := make([]int, 0, len(parts))
+	partSizes := make([]int64, 0, len(parts))
+	partChecksums := make([]map[string]string, 0, len(parts))
 	for _, cp := range parts {
 		p, ok := st.parts[cp.PartNumber]
 		if !ok {
@@ -1282,19 +1284,23 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 			}
 		}
 		partChunks = append(partChunks, partChunkCount)
+		partSizes = append(partSizes, p.Size)
+		partChecksums = append(partChecksums, p.Checksums)
 		totalSize += p.Size
 		used[cp.PartNumber] = true
 	}
 
 	obj.Manifest = &data.Manifest{
-		Class:      obj.StorageClass,
-		Size:       ciphertextSize,
-		ChunkSize:  data.DefaultChunkSize,
-		ETag:       obj.ETag,
-		Chunks:     chunks,
-		PartChunks: partChunks,
+		Class:         obj.StorageClass,
+		Size:          ciphertextSize,
+		ChunkSize:     data.DefaultChunkSize,
+		ETag:          obj.ETag,
+		Chunks:        chunks,
+		PartChunks:    partChunks,
+		PartChecksums: partChecksums,
 	}
 	obj.Size = totalSize
+	obj.PartSizes = partSizes
 	obj.Mtime = time.Now().UTC()
 	if obj.VersionID == "" {
 		obj.VersionID = gocql.TimeUUID().String()

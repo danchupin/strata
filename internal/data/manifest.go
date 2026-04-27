@@ -14,6 +14,12 @@ type Manifest struct {
 	// (partNumber, chunkIndexInPart) so the IV input matches what was used
 	// during UploadPart.
 	PartChunks []int `json:",omitempty"`
+	// PartChecksums records the per-part stored x-amz-checksum-<algo>
+	// values in PartNumber order. Empty for single-PUT objects.
+	// Populated by CompleteMultipartUpload so a `GET ?partNumber=N`
+	// can echo the per-part checksum the UploadPart call originally
+	// stored on multipart_parts (which is deleted after Complete).
+	PartChecksums []map[string]string `json:",omitempty"`
 }
 
 type ChunkRef struct {

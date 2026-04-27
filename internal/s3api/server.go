@@ -892,11 +892,26 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 }
 
 func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucket, key string, body bool) {
-	versionID := r.URL.Query().Get("versionId")
+	q := r.URL.Query()
+	versionID := q.Get("versionId")
 	o, err := s.Meta.GetObject(r.Context(), b.ID, key, versionID)
 	if err != nil {
 		mapMetaErr(w, r, err)
 		return
+	}
+	partNumberStr := q.Get("partNumber")
+	var partNumber int
+	if partNumberStr != "" {
+		n, perr := strconv.Atoi(partNumberStr)
+		if perr != nil || n < 1 {
+			writeError(w, r, ErrInvalidArgument)
+			return
+		}
+		if len(o.PartSizes) == 0 || n > len(o.PartSizes) {
+			writeError(w, r, ErrInvalidArgument)
+			return
+		}
+		partNumber = n
 	}
 	if o.SSECKeyMD5 != "" {
 		if apiErr, ok := requireSSECMatch(r, o.SSECKeyMD5); !ok {
@@ -924,7 +939,10 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	for k, v := range o.UserMeta {
 		w.Header()["x-amz-meta-"+k] = []string{v}
 	}
-	if o.PartsCount > 0 {
+	switch {
+	case partNumber > 0:
+		w.Header().Set("x-amz-mp-parts-count", strconv.Itoa(len(o.PartSizes)))
+	case o.PartsCount > 0:
 		w.Header().Set("x-amz-mp-parts-count", strconv.Itoa(o.PartsCount))
 	}
 	if o.SSE != "" {
@@ -934,7 +952,11 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		w.Header().Set(hdrSSECAlgorithm, sseAlgorithmAES256)
 		w.Header().Set(hdrSSECKeyMD5, o.SSECKeyMD5)
 	}
-	writeChecksumHeaders(w.Header(), o.Checksums)
+	if partNumber > 0 {
+		writeChecksumHeaders(w.Header(), partChecksumsAt(o, partNumber-1))
+	} else {
+		writeChecksumHeaders(w.Header(), o.Checksums)
+	}
 	if len(o.Tags) > 0 {
 		w.Header().Set("x-amz-tagging-count", strconv.Itoa(len(o.Tags)))
 	}
@@ -957,13 +979,25 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		w.Header().Set("x-amz-version-id", o.VersionID)
 	}
 
-	offset, length, status, ok := parseRange(r.Header.Get("Range"), o.Size)
+	var (
+		offset, length int64
+		status         int
+		ok             bool
+	)
+	if partNumber > 0 {
+		offset, length = partOffsetLength(o.PartSizes, partNumber)
+		status = http.StatusPartialContent
+		ok = true
+		w.Header().Set("Content-Range", "bytes "+strconv.FormatInt(offset, 10)+"-"+strconv.FormatInt(offset+length-1, 10)+"/"+strconv.FormatInt(o.Size, 10))
+	} else {
+		offset, length, status, ok = parseRange(r.Header.Get("Range"), o.Size)
+	}
 	if !ok {
 		w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(o.Size, 10))
 		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
 		return
 	}
-	if status == http.StatusPartialContent {
+	if status == http.StatusPartialContent && partNumber == 0 {
 		w.Header().Set("Content-Range", "bytes "+strconv.FormatInt(offset, 10)+"-"+strconv.FormatInt(offset+length-1, 10)+"/"+strconv.FormatInt(o.Size, 10))
 	}
 	w.Header().Set("Content-Length", strconv.FormatInt(length, 10))

@@ -149,6 +149,12 @@ type Object struct {
 	SSEKeyID       string
 	RestoreStatus  string
 	PartsCount     int
+	// PartSizes holds the plaintext byte size of each multipart part in
+	// PartNumber order. Empty for single-PUT objects. Populated by
+	// CompleteMultipartUpload so GET /<key>?partNumber=N can serve only
+	// part N's bytes without revisiting multipart_parts (which is deleted
+	// after Complete). Cassandra column: objects.part_sizes list<bigint>.
+	PartSizes      []int64
 	CacheControl   string
 	Expires        string
 	ReplicationStatus string

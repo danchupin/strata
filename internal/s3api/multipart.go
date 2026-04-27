@@ -469,6 +469,30 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 	_, _ = w.Write(buf.Bytes())
 }
 
+// partOffsetLength returns the (offset, length) byte range covering part
+// `partNumber` in an object whose plaintext part sizes are listed in
+// `partSizes`. partNumber is 1-indexed; caller must already have validated
+// 1 <= partNumber <= len(partSizes).
+func partOffsetLength(partSizes []int64, partNumber int) (offset, length int64) {
+	for i := 0; i < partNumber-1; i++ {
+		offset += partSizes[i]
+	}
+	return offset, partSizes[partNumber-1]
+}
+
+// partChecksumsAt returns the per-part stored checksum map for index `i`
+// (0-based) from an object's manifest, or nil if not populated.
+func partChecksumsAt(o *meta.Object, i int) map[string]string {
+	if o.Manifest == nil {
+		return nil
+	}
+	pc := o.Manifest.PartChecksums
+	if i < 0 || i >= len(pc) {
+		return nil
+	}
+	return pc[i]
+}
+
 func writeCachedCompletion(w http.ResponseWriter, rec *meta.MultipartCompletion) {
 	for k, v := range rec.Headers {
 		w.Header().Set(k, v)

@@ -329,16 +329,20 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 	if o.PartsCount > 0 {
 		partsCount = o.PartsCount
 	}
+	var partSizes interface{}
+	if len(o.PartSizes) > 0 {
+		partSizes = o.PartSizes
+	}
 	return s.s.Query(
 		`INSERT INTO objects (bucket_id, shard, key, version_id, is_latest, is_delete_marker,
 		 size, etag, content_type, storage_class, mtime, manifest, user_meta, tags,
 		 retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
-		 cache_control, expires, parts_count, sse_key, sse_key_id, replication_status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 cache_control, expires, parts_count, sse_key, sse_key_id, replication_status, part_sizes)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		gocqlUUID(o.BucketID), shard, o.Key, versionID, true, o.IsDeleteMarker,
 		o.Size, o.ETag, o.ContentType, o.StorageClass, o.Mtime, manifestBlob, o.UserMeta, o.Tags,
 		retainUntil, nilIfEmpty(o.RetainMode), o.LegalHold, o.Checksums, nilIfEmpty(o.SSE), nilIfEmpty(o.SSECKeyMD5), nilIfEmpty(o.RestoreStatus),
-		nilIfEmpty(o.CacheControl), nilIfEmpty(o.Expires), partsCount, nilIfEmptyBytes(o.SSEKey), nilIfEmpty(o.SSEKeyID), nilIfEmpty(o.ReplicationStatus),
+		nilIfEmpty(o.CacheControl), nilIfEmpty(o.Expires), partsCount, nilIfEmptyBytes(o.SSEKey), nilIfEmpty(o.SSEKeyID), nilIfEmpty(o.ReplicationStatus), partSizes,
 	).WithContext(ctx).Exec()
 }
 
@@ -382,6 +386,7 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		sseKey       []byte
 		sseKeyID     string
 		replication  string
+		partSizes    []int64
 	)
 	var err error
 	if versionID == "" {
@@ -389,13 +394,13 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 			`SELECT version_id, is_latest, is_delete_marker, size, etag, content_type,
 			        storage_class, mtime, manifest, user_meta, tags,
 			        retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
-			        cache_control, expires, parts_count, sse_key, sse_key_id, replication_status
+			        cache_control, expires, parts_count, sse_key, sse_key_id, replication_status, part_sizes
 			 FROM objects WHERE bucket_id=? AND shard=? AND key=? LIMIT 1`,
 			gocqlUUID(bucketID), shard, key,
 		).WithContext(ctx).Scan(&versionUUID, &isLatest, &isDeleteMark, &size, &etag, &ctype,
 			&class, &mtime, &manifestBlob, &userMeta, &tags,
 			&retainUntil, &retainMode, &legalHold, &checksums, &sse, &ssecKeyMD5, &restore,
-			&cacheControl, &expires, &partsCount, &sseKey, &sseKeyID, &replication)
+			&cacheControl, &expires, &partsCount, &sseKey, &sseKeyID, &replication, &partSizes)
 	} else {
 		vUUID, perr := gocql.ParseUUID(versionID)
 		if perr != nil {
@@ -405,13 +410,13 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 			`SELECT version_id, is_latest, is_delete_marker, size, etag, content_type,
 			        storage_class, mtime, manifest, user_meta, tags,
 			        retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
-			        cache_control, expires, parts_count, sse_key, sse_key_id, replication_status
+			        cache_control, expires, parts_count, sse_key, sse_key_id, replication_status, part_sizes
 			 FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
 			gocqlUUID(bucketID), shard, key, vUUID,
 		).WithContext(ctx).Scan(&versionUUID, &isLatest, &isDeleteMark, &size, &etag, &ctype,
 			&class, &mtime, &manifestBlob, &userMeta, &tags,
 			&retainUntil, &retainMode, &legalHold, &checksums, &sse, &ssecKeyMD5, &restore,
-			&cacheControl, &expires, &partsCount, &sseKey, &sseKeyID, &replication)
+			&cacheControl, &expires, &partsCount, &sseKey, &sseKeyID, &replication, &partSizes)
 	}
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrObjectNotFound
@@ -452,6 +457,7 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		CacheControl:   cacheControl,
 		Expires:        expires,
 		PartsCount:     partsCount,
+		PartSizes:      partSizes,
 		ReplicationStatus: replication,
 	}, nil
 }
@@ -1849,6 +1855,8 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 	var totalSize int64
 	var ciphertextSize int64
 	partChunks := make([]int, 0, len(parts))
+	partSizes := make([]int64, 0, len(parts))
+	partChecksums := make([]map[string]string, 0, len(parts))
 	for _, cp := range parts {
 		p, ok := byNumber[cp.PartNumber]
 		if !ok {
@@ -1866,19 +1874,23 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 			}
 		}
 		partChunks = append(partChunks, partChunkCount)
+		partSizes = append(partSizes, p.Size)
+		partChecksums = append(partChecksums, p.Checksums)
 		totalSize += p.Size
 		used[cp.PartNumber] = true
 	}
 
 	obj.Manifest = &data.Manifest{
-		Class:      obj.StorageClass,
-		Size:       ciphertextSize,
-		ChunkSize:  data.DefaultChunkSize,
-		ETag:       obj.ETag,
-		Chunks:     chunks,
-		PartChunks: partChunks,
+		Class:         obj.StorageClass,
+		Size:          ciphertextSize,
+		ChunkSize:     data.DefaultChunkSize,
+		ETag:          obj.ETag,
+		Chunks:        chunks,
+		PartChunks:    partChunks,
+		PartChecksums: partChecksums,
 	}
 	obj.Size = totalSize
+	obj.PartSizes = partSizes
 	obj.Mtime = time.Now().UTC()
 
 	if err := s.PutObject(ctx, obj, versioned); err != nil {

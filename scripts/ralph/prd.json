@@ -403,8 +403,8 @@
         "go test ./internal/s3api/... passes"
       ],
       "priority": 24,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "meta.Object grew PartSizes []int64 (per-part plaintext sizes in PartNumber order). data.Manifest grew PartChecksums []map[string]string (additive json:omitempty) so per-part stored x-amz-checksum-<algo> survives the multipart_parts row deletion in Complete. Cassandra schema additive: ALTER TABLE objects ADD part_sizes list<bigint>; PutObject INSERT + GetObject SELECT both touch the new column (nil when empty). Both backends' CompleteMultipartUpload populate obj.PartSizes from the per-part p.Size (plaintext) and obj.Manifest.PartChecksums from p.Checksums in PartNumber order. internal/s3api/server.go::getObject handles ?partNumber=N at the top: parses N, returns 400 InvalidArgument on non-int / N<1 / N > len(o.PartSizes) / non-multipart object (PartSizes empty); when valid, computes (offset, length) via partOffsetLength helper, sets Content-Range = bytes <off>-<off+len-1>/<total>, status=206, x-amz-mp-parts-count = len(o.PartSizes), and per-part checksums via partChecksumsAt(o, N-1) instead of o.Checksums. SSE decryption path is unchanged because o.Size + offset/length already work in plaintext space (same lever as Range GET). Tests in multipart_partnumber_test.go: 3-part round-trip (6MiB+5MiB+1KiB) verifies Content-Length / Content-Range / x-amz-mp-parts-count + body bytes per part; per-part checksum echo with CRC32; non-multipart object yields 400 InvalidArgument; out-of-range partNumber values (0, -1, 3, abc) all yield 400."
     },
     {
       "id": "US-025",
