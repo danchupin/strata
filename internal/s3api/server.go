@@ -699,6 +699,9 @@ func (s *Server) handleObject(w http.ResponseWriter, r *http.Request, bucket, ke
 		if s.tryWebsiteRedirectAll(w, r, b, key) {
 			return
 		}
+		if s.tryWebsiteRouting(w, r, b, key) {
+			return
+		}
 		if !s.requireObjectAccess(w, r, b, key, "s3:GetObject") {
 			return
 		}

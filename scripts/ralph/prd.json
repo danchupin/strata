@@ -515,8 +515,8 @@
         "go test ./internal/s3api/... passes"
       ],
       "priority": 31,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "internal/s3api/website.go: replaced opaque RoutingRules.Inner []byte with typed websiteRoutingRules{Rules []websiteRoutingRule}. Each rule has optional Condition (KeyPrefixEquals + HttpErrorCodeReturnedEquals) and Redirect (Protocol/HostName/ReplaceKeyPrefixWith *string/ReplaceKeyWith *string/HttpRedirectCode). PUT validates rules: Redirect must specify HostName or one of ReplaceKey*; ReplaceKeyWith and ReplaceKeyPrefixWith mutually exclusive; HttpRedirectCode in [300,400); HttpErrorCodeReturnedEquals in [400,600). New tryWebsiteRouting (object-GET path) does two passes: pass1 evaluates rules without HttpErrorCodeReturnedEquals against the request key (KeyPrefixEquals match); pass2 (only if any rule has an error-code condition) peeks the object via Meta.GetObject and evaluates 404 rules. serveWebsiteRoot got the same two-pass treatment around the index lookup (pass1 against key=''; pass2 against IndexDocument.Suffix). matchRoutingRule is the shared evaluator + key rewriter (ReplaceKeyWith verbatim; ReplaceKeyPrefixWith strips matched prefix + prepends). writeWebsiteRedirect writes Location + status, defaulting protocol to http (https when r.TLS != nil) and host to r.Host. Tests cover prefix-rule firing, error-code rule firing on 404, no redirect when object exists, index serving preserved with rules in place, and PUT rejection of an empty Redirect rule."
     },
     {
       "id": "US-032",

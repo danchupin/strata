@@ -233,6 +233,120 @@ func TestBucketWebsiteRedirectAllOnlyAffectsGET(t *testing.T) {
 	h.mustStatus(h.doString("DELETE", "/bkt/foo", ""), 204)
 }
 
+const websiteRoutingPrefixXML = `<WebsiteConfiguration>
+	<IndexDocument><Suffix>index.html</Suffix></IndexDocument>
+	<RoutingRules>
+		<RoutingRule>
+			<Condition><KeyPrefixEquals>docs/</KeyPrefixEquals></Condition>
+			<Redirect>
+				<HostName>example.com</HostName>
+				<Protocol>https</Protocol>
+				<ReplaceKeyPrefixWith>documents/</ReplaceKeyPrefixWith>
+			</Redirect>
+		</RoutingRule>
+	</RoutingRules>
+</WebsiteConfiguration>`
+
+const websiteRoutingErrorXML = `<WebsiteConfiguration>
+	<IndexDocument><Suffix>index.html</Suffix></IndexDocument>
+	<RoutingRules>
+		<RoutingRule>
+			<Condition><HttpErrorCodeReturnedEquals>404</HttpErrorCodeReturnedEquals></Condition>
+			<Redirect>
+				<HostName>example.com</HostName>
+				<Protocol>https</Protocol>
+				<ReplaceKeyWith>404.html</ReplaceKeyWith>
+			</Redirect>
+		</RoutingRule>
+	</RoutingRules>
+</WebsiteConfiguration>`
+
+func TestBucketWebsiteRoutingRulePrefix(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	h.mustStatus(h.doString("PUT", "/bkt?website=", websiteRoutingPrefixXML), 200)
+
+	resp := h.doNoRedirect("GET", "/bkt/docs/foo.html")
+	h.mustStatus(resp, 301)
+	if loc := resp.Header.Get("Location"); loc != "https://example.com/documents/foo.html" {
+		t.Fatalf("Location: got %q want %q", loc, "https://example.com/documents/foo.html")
+	}
+	_ = h.readBody(resp)
+
+	// Non-matching prefix falls through to normal lookup.
+	resp = h.doNoRedirect("GET", "/bkt/other/path.html")
+	if resp.StatusCode == http.StatusMovedPermanently {
+		t.Fatalf("non-matching prefix should not redirect")
+	}
+	_ = resp.Body.Close()
+}
+
+func TestBucketWebsiteRoutingRuleErrorCode(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	h.mustStatus(h.doString("PUT", "/bkt?website=", websiteRoutingErrorXML), 200)
+
+	// Missing object → 301 to /404.html.
+	resp := h.doNoRedirect("GET", "/bkt/missing-key")
+	h.mustStatus(resp, 301)
+	if loc := resp.Header.Get("Location"); loc != "https://example.com/404.html" {
+		t.Fatalf("Location: got %q want %q", loc, "https://example.com/404.html")
+	}
+	_ = h.readBody(resp)
+
+	// Existing object served normally — no redirect.
+	h.mustStatus(h.doString("PUT", "/bkt/exists", "data"), 200)
+	resp = h.doNoRedirect("GET", "/bkt/exists")
+	if resp.StatusCode == http.StatusMovedPermanently {
+		t.Fatalf("existing object should not redirect")
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if body := h.readBody(resp); body != "data" {
+		t.Fatalf("body: got %q want %q", body, "data")
+	}
+}
+
+func TestBucketWebsiteRoutingRulePreservesIndex(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	h.mustStatus(h.doString("PUT", "/bkt?website=", websiteRoutingPrefixXML), 200)
+
+	// Upload index doc.
+	h.mustStatus(h.doString("PUT", "/bkt/index.html", "<html>Welcome</html>",
+		"Content-Type", "text/html"), 200)
+
+	// GET / serves index — routing rule for "docs/" prefix doesn't fire.
+	resp := h.doNoRedirect("GET", "/bkt/")
+	h.mustStatus(resp, 200)
+	body := h.readBody(resp)
+	if !strings.Contains(body, "Welcome") {
+		t.Fatalf("expected index body, got: %s", body)
+	}
+}
+
+func TestBucketWebsiteRoutingRuleRejectsInvalid(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+
+	// Rule with empty Redirect (no HostName, no ReplaceKey*) → 400.
+	bad := `<WebsiteConfiguration>
+		<IndexDocument><Suffix>index.html</Suffix></IndexDocument>
+		<RoutingRules>
+			<RoutingRule>
+				<Condition><KeyPrefixEquals>x/</KeyPrefixEquals></Condition>
+				<Redirect></Redirect>
+			</RoutingRule>
+		</RoutingRules>
+	</WebsiteConfiguration>`
+	resp := h.doString("PUT", "/bkt?website=", bad)
+	h.mustStatus(resp, 400)
+	if body := h.readBody(resp); !strings.Contains(body, "InvalidArgument") {
+		t.Fatalf("expected InvalidArgument, got: %s", body)
+	}
+}
+
 func TestBucketWebsiteNoRedirectWithoutConfig(t *testing.T) {
 	h := newHarness(t)
 	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
