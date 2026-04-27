@@ -41,6 +41,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"AccessLogBufferRoundTrip", caseAccessLogBuffer},
 		{"AuditLogRoundTrip", caseAuditLog},
 		{"AuditLogFiltered", caseAuditLogFiltered},
+		{"VersioningNullSentinel", caseVersioningNullSentinel},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -741,5 +742,82 @@ func caseListHidesDeleteMarkers(t *testing.T, s meta.Store) {
 	}
 	if !seenDM {
 		t.Errorf("ListObjectVersions should include delete markers")
+	}
+}
+
+func caseVersioningNullSentinel(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "nullv", "o", "STANDARD")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if b.Versioning != meta.VersioningDisabled {
+		t.Fatalf("default versioning: %s", b.Versioning)
+	}
+	o := &meta.Object{
+		BucketID:     b.ID,
+		Key:          "doc",
+		StorageClass: "STANDARD",
+		ETag:         "first",
+		Size:         5,
+		Mtime:        time.Now().UTC(),
+		Manifest:     &data.Manifest{Class: "STANDARD", Size: 5},
+	}
+	if err := s.PutObject(ctx, o, false); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if o.VersionID != meta.NullVersionID {
+		t.Fatalf("VersionID after Disabled PUT: got %q want %q", o.VersionID, meta.NullVersionID)
+	}
+	if !o.IsNull {
+		t.Fatalf("IsNull after Disabled PUT: got false want true")
+	}
+
+	bySentinel, err := s.GetObject(ctx, b.ID, "doc", meta.NullVersionID)
+	if err != nil {
+		t.Fatalf("get by sentinel: %v", err)
+	}
+	if bySentinel.ETag != "first" || !bySentinel.IsNull || bySentinel.VersionID != meta.NullVersionID {
+		t.Fatalf("by-sentinel row: %+v", bySentinel)
+	}
+
+	byLiteral, err := s.GetObject(ctx, b.ID, "doc", meta.NullVersionLiteral)
+	if err != nil {
+		t.Fatalf("get by 'null' literal: %v", err)
+	}
+	if byLiteral.ETag != "first" || !byLiteral.IsNull || byLiteral.VersionID != meta.NullVersionID {
+		t.Fatalf("by-literal row: %+v", byLiteral)
+	}
+
+	latest, err := s.GetObject(ctx, b.ID, "doc", "")
+	if err != nil {
+		t.Fatalf("get latest: %v", err)
+	}
+	if latest.ETag != "first" || !latest.IsNull {
+		t.Fatalf("latest: %+v", latest)
+	}
+
+	// Overwrite under Disabled mode: same sentinel, new content.
+	o2 := &meta.Object{
+		BucketID:     b.ID,
+		Key:          "doc",
+		StorageClass: "STANDARD",
+		ETag:         "second",
+		Size:         6,
+		Mtime:        time.Now().UTC(),
+		Manifest:     &data.Manifest{Class: "STANDARD", Size: 6},
+	}
+	if err := s.PutObject(ctx, o2, false); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	if o2.VersionID != meta.NullVersionID {
+		t.Fatalf("overwrite VersionID: %q", o2.VersionID)
+	}
+	got, err := s.GetObject(ctx, b.ID, "doc", meta.NullVersionLiteral)
+	if err != nil {
+		t.Fatalf("get after overwrite: %v", err)
+	}
+	if got.ETag != "second" {
+		t.Fatalf("after overwrite ETag=%q want second", got.ETag)
 	}
 }

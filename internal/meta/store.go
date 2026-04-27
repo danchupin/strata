@@ -16,6 +16,29 @@ const (
 	VersioningSuspended = "Suspended"
 )
 
+// NullVersionID is the sentinel TimeUUID reserved for rows written while a
+// bucket's Versioning state is Disabled (or for the single "null" version a
+// Suspended bucket retains). Stored in objects.version_id and paired with
+// objects.is_null=true. Callers address this row from the wire by the literal
+// version-id string "null" (NullVersionLiteral) — both backends translate the
+// literal into the sentinel before scanning.
+const NullVersionID = "00000000-0000-0000-0000-000000000000"
+
+// NullVersionLiteral is the wire form S3 clients use to address the null
+// version (e.g. GET /<key>?versionId=null). Both backends accept it as an
+// alias for NullVersionID.
+const NullVersionLiteral = "null"
+
+// ResolveVersionID maps the wire form to the stored UUID. "null" → sentinel,
+// every other value passes through verbatim. Use this at the entry of any
+// meta.Store method that takes a versionID string.
+func ResolveVersionID(v string) string {
+	if v == NullVersionLiteral {
+		return NullVersionID
+	}
+	return v
+}
+
 var (
 	ErrBucketNotFound        = errors.New("bucket not found")
 	ErrBucketAlreadyExists   = errors.New("bucket already exists")
@@ -131,6 +154,11 @@ type Object struct {
 	VersionID      string
 	IsLatest       bool
 	IsDeleteMarker bool
+	// IsNull marks the row as the bucket's "null" version. Set automatically
+	// by PutObject when the bucket is in VersioningDisabled mode (and by
+	// Suspended-mode PUT/DELETE in US-029). Paired with VersionID =
+	// NullVersionID. GET ?versionId=null resolves to the row with this flag.
+	IsNull         bool
 	Size           int64
 	ETag           string
 	ContentType    string

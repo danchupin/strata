@@ -634,7 +634,10 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 	if !ok {
 		return meta.ErrBucketNotFound
 	}
-	if o.VersionID == "" {
+	if !versioned {
+		o.VersionID = meta.NullVersionID
+		o.IsNull = true
+	} else if o.VersionID == "" {
 		o.VersionID = gocql.TimeUUID().String()
 	}
 	cp := *o
@@ -665,6 +668,7 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		cp := *latest
 		return &cp, nil
 	}
+	versionID = meta.ResolveVersionID(versionID)
 	for _, v := range versions {
 		if v.VersionID == versionID {
 			cp := *v
@@ -677,6 +681,7 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versionID string, versioned bool) (*meta.Object, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	versionID = meta.ResolveVersionID(versionID)
 	bucket, ok := s.objects[bucketID]
 	if !ok {
 		return nil, meta.ErrBucketNotFound
@@ -878,6 +883,7 @@ func (s *Store) findLatest(bucketID uuid.UUID, key, versionID string) (*meta.Obj
 	if versionID == "" {
 		return versions[0], nil
 	}
+	versionID = meta.ResolveVersionID(versionID)
 	for _, v := range versions {
 		if v.VersionID == versionID {
 			return v, nil
