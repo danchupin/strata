@@ -772,8 +772,8 @@
         "go build ./... passes"
       ],
       "priority": 47,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "examples/ ships smoke.sh + lib/common.sh + 4 backends (aws-cli, boto3, mc, s3cmd) each with 7 scripts (01..07) covering bucket setup, multipart upload, presigned URL, lifecycle, replication, SSE-S3, IAM key rotation. examples/smoke.sh boots a fresh in-memory gateway (auth=required, [iam-root] static creds, STRATA_SSE_MASTER_KEY) on port 19999, runs aws-cli (required) then boto3/mc/s3cmd (each skipped per-tool if unavailable). Strata gotchas surfaced + worked around: (1) aws-cli iam command omits x-amz-content-sha256 header which Strata's SigV4 verifier requires -- workaround: sign IAM verbs via curl --aws-sigv4 / botocore.auth.SigV4Auth manually. (2) mc admin / mc replicate ls require MinIO admin endpoints Strata doesn't implement -- workaround: mc replicate import + verify/cleanup via aws-cli. (3) s3cmd signurl is SigV2-only and Strata is SigV4-only -- workaround: 03-presign.sh delegates to aws-cli. (4) mc requires secret >= 8 chars (MinIO compat) -- bumped default creds to adminAccessKey/adminSecretKey. README.md root section + per-backend READMEs document each gotcha. boto3 verified end-to-end in a venv; aws-cli/mc/s3cmd verified via examples/smoke.sh."
     },
     {
       "id": "US-048",

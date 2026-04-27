@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<LifecycleConfiguration>
+  <Rule>
+    <ID>expire-logs-after-30d</ID>
+    <Status>Enabled</Status>
+    <Filter><Prefix>logs/</Prefix></Filter>
+    <Expiration><Days>30</Days></Expiration>
+  </Rule>
+</LifecycleConfiguration>
