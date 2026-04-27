@@ -594,8 +594,8 @@
         "go test ./internal/crypto/kms/... passes"
       ],
       "priority": 36,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "internal/crypto/kms package added with Provider interface (GenerateDataKey/UnwrapDEK both ctx-scoped + keyID-scoped). VaultProvider talks to a Vault Transit mount via POST /v1/<path>/datakey/plaintext/<keyID> + POST /v1/<path>/decrypt/<keyID>; AppRole auth shares STRATA_SSE_VAULT_ROLE_ID/SECRET_ID with master.VaultProvider (US-002), addr/path live under STRATA_KMS_VAULT_ADDR + STRATA_KMS_VAULT_PATH. Token cached until lease expiry; 401/403 forces one re-login then retry — second 401 returns the wrapped error (no cached-DEK fallback because every datakey call is per-object). Wrapped DEK persisted opaquely as bytes (Vault returns 'vault:v1:<base64>' style string). Tests (vault_test.go): fakeVault httptest mux with login + datakey + decrypt; round-trip wrap/unwrap, missing key id, unknown key id, key-id mismatch on unwrap, login failure fatal, empty wrapped DEK, token cached across calls, FromEnv precedence/no-config/partial-config/missing-creds, relogin-on-401. FromEnv() returns VaultProvider when both addr+path set else ErrNoConfig; aws-kms / local-hsm slots in via US-037 alongside this branch. Quality: go build ./... + go vet ./... + go test ./... all green."
     },
     {
       "id": "US-037",
