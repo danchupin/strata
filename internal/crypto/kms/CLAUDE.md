@@ -22,6 +22,36 @@ Empty keyID → `ErrMissingKeyID`. Wrapped-DEK bytes are stored verbatim — Vau
 returns a string like `vault:v1:<base64>`, AWS returns binary; both are
 treated as opaque by Strata and persisted on `objects.sse_key`.
 
+## Provider precedence in `FromEnv`
+
+`FromEnv(opts ...EnvOption)` checks env vars in this order: vault > aws-kms >
+local-hsm. First hit wins; misconfiguration of a higher-priority provider is
+fatal (does not silently fall through). aws-kms requires
+`WithAWSKMSClientFactory(...)` — without it, setting `STRATA_KMS_AWS_REGION`
+errors at startup. local-hsm is dev/test only.
+
+## AWS KMS provider (US-037)
+
+Env: `STRATA_KMS_AWS_REGION`. The cmd binary supplies a `KMSAPI` client
+factory via `WithAWSKMSClientFactory(func(region string) (KMSAPI, error))`;
+the factory builds a real `*awskms.Client` via the standard AWS credential
+chain (env vars, shared config, IRSA, EC2/ECS roles). Same factory-injection
+shape as US-010 SQS sink — keeps the SDK out of unit-test deps via the narrow
+`KMSAPI` interface (`GenerateDataKey` + `Decrypt`). `KeySpec=AES_256` is
+hard-coded; the per-call `keyID` flows through to the SDK input. KeyID
+mismatch on `Decrypt` is detected by comparing the response's `KeyId` ARN
+suffix to the requested id and surfaces as `ErrKeyIDMismatch` (gateway maps
+to AccessDenied).
+
+## Local-HSM provider (US-037, tests/dev only)
+
+Env: `STRATA_KMS_LOCAL_HSM_SEED` (hex 32 bytes). Deterministic in-process
+keystore — DEK = `HMAC-SHA256(seed, "strata-local-hsm-dek\x00" || keyID ||
+\x00 || nonce)`. Wrapped DEK = `nonce(16) || mac(32)` where the mac binds
+the keyID, nonce, and DEK so a wrong keyID on `UnwrapDEK` produces
+`ErrKeyIDMismatch`. NOT a security boundary; the seed lives in process
+memory.
+
 ## Vault Transit provider (US-036)
 
 Env: `STRATA_KMS_VAULT_ADDR` + `STRATA_KMS_VAULT_PATH` (the Transit mount,

@@ -30,11 +30,40 @@ type Provider interface {
 	UnwrapDEK(ctx context.Context, keyID string, wrapped []byte) (plaintextDEK []byte, err error)
 }
 
+// EnvOption configures FromEnv. Use WithAWSKMSClientFactory to enable the
+// aws-kms provider.
+type EnvOption func(*envCfg)
+
+type envCfg struct {
+	awsKMSFactory func(region string) (KMSAPI, error)
+}
+
+// WithAWSKMSClientFactory wires the AWS SDK KMS client constructor used by
+// FromEnv when STRATA_KMS_AWS_REGION is set. Without the factory, FromEnv
+// rejects the aws-kms config so misconfiguration surfaces at startup rather
+// than per-object on the first PUT.
+func WithAWSKMSClientFactory(factory func(region string) (KMSAPI, error)) EnvOption {
+	return func(c *envCfg) { c.awsKMSFactory = factory }
+}
+
 // FromEnv returns a Provider built from the first env-recognised configuration.
-// Currently only the Vault Transit backend is wired; aws-kms and local-hsm
-// land in US-037.
-func FromEnv() (Provider, error) {
+// Precedence: vault > aws-kms > local-hsm.
+func FromEnv(opts ...EnvOption) (Provider, error) {
+	cfg := envCfg{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	if p, err := NewVaultProviderFromEnv(); err == nil {
+		return p, nil
+	} else if !errors.Is(err, ErrNoConfig) {
+		return nil, err
+	}
+	if p, err := NewAWSKMSProviderFromEnv(cfg.awsKMSFactory); err == nil {
+		return p, nil
+	} else if !errors.Is(err, ErrNoConfig) {
+		return nil, err
+	}
+	if p, err := NewLocalHSMProviderFromEnv(); err == nil {
 		return p, nil
 	} else if !errors.Is(err, ErrNoConfig) {
 		return nil, err

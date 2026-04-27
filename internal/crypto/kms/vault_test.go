@@ -347,6 +347,7 @@ func TestNewVaultProviderFromEnv_OK(t *testing.T) {
 }
 
 func TestFromEnv_PicksVault(t *testing.T) {
+	clearAllProviderEnv(t)
 	t.Setenv(EnvVaultAddr, "https://vault.example.com")
 	t.Setenv(EnvVaultPath, "transit")
 	t.Setenv(EnvVaultRoleID, "role-1")
@@ -361,8 +362,7 @@ func TestFromEnv_PicksVault(t *testing.T) {
 }
 
 func TestFromEnv_NoConfig(t *testing.T) {
-	t.Setenv(EnvVaultAddr, "")
-	t.Setenv(EnvVaultPath, "")
+	clearAllProviderEnv(t)
 	_, err := FromEnv()
 	if !errors.Is(err, ErrNoConfig) {
 		t.Fatalf("err = %v, want ErrNoConfig", err)
