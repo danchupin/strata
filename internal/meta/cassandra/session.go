@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gocql/gocql"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type SessionConfig struct {
@@ -25,6 +26,9 @@ type SessionConfig struct {
 	// histogram by table+op). Nil disables; binaries plug in
 	// metrics.CassandraObserver{}.
 	Metrics Metrics
+	// Tracer, when set, emits one OTel child span per query. Binaries plug
+	// in tracerProvider.Tracer("strata.meta.cassandra"). Nil disables.
+	Tracer trace.Tracer
 }
 
 func newCluster(cfg SessionConfig) *gocql.ClusterConfig {
@@ -47,7 +51,7 @@ func newCluster(cfg SessionConfig) *gocql.ClusterConfig {
 			Password: cfg.Password,
 		}
 	}
-	if obs := NewQueryObserver(cfg.Logger, time.Duration(cfg.SlowMS)*time.Millisecond, cfg.Metrics); obs != nil {
+	if obs := NewQueryObserver(cfg.Logger, time.Duration(cfg.SlowMS)*time.Millisecond, cfg.Metrics, cfg.Tracer); obs != nil {
 		c.QueryObserver = obs
 	}
 	return c

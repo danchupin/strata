@@ -152,6 +152,22 @@ covers the full request including auth/access-log/audit. **semconv import versio
 `resource.Default()` schema URL** — SDK 1.41 → `semconv/v1.39.0`; mismatch fails at runtime with
 "conflicting Schema URL". Bump together when bumping the SDK.
 
+Per-storage span emission piggybacks on the existing observer hooks. `cassandra.SessionConfig.Tracer`
+plugs a `trace.Tracer` into `SlowQueryObserver`; the observer emits one client-kind child span per
+gocql query, named `meta.cassandra.<table>.<op>`, timestamped to `(q.Start, q.End)` so the SDK records
+the actual query duration even though `ObserveQuery` runs after the query returns. `rados.Config.Tracer`
+threads a tracer onto `Backend`; `ObserveOp(ctx, logger, metrics, tracer, pool, op, oid, start, err)`
+emits `data.rados.<op>` spans (`put`/`get`/`del`) with the same retroactive-timestamp trick. Failing
+queries / ops set span status to Error so the tail-sampler exports the full trace regardless of ratio.
+Tracer wiring happens in `cmd/strata-gateway/main.go::buildMetaStore` + `buildDataBackend` after
+`strataotel.Init` runs (move OTel init ahead of meta/data construction; its lifetime spans the whole
+process). For tracing-only deploy, `deploy/docker/docker-compose.yml` ships an OTLP collector + Jaeger
+all-in-one behind the `tracing` profile (`docker compose --profile tracing up otel-collector jaeger`);
+collector config in `deploy/otel/collector-config.yaml` fans incoming OTLP traces to Jaeger at
+`jaeger:4317`. Other binaries (gc/lifecycle/replicator/access-log/notify/rewrap) currently pass nil
+tracer — add `Tracer: tp.Tracer("strata.<binary>")` to their config when their own /readyz / metrics
+story matures.
+
 ## Cassandra gotchas (real ones, hit during this codebase's lifetime)
 
 - **No subqueries.** CQL does not support `WHERE name IN (SELECT name FROM ... WHERE id=?)`. If you need that,

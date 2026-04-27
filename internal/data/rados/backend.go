@@ -15,6 +15,7 @@ import (
 
 	goceph "github.com/ceph/go-ceph/rados"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/danchupin/strata/internal/data"
 )
@@ -24,6 +25,7 @@ type Backend struct {
 	classes map[string]ClassSpec
 	logger  *slog.Logger
 	metrics Metrics
+	tracer  trace.Tracer
 
 	mu      sync.Mutex
 	ioctxes map[string]*goceph.IOContext
@@ -71,6 +73,7 @@ func New(cfg Config) (data.Backend, error) {
 		classes: classes,
 		logger:  cfg.Logger,
 		metrics: cfg.Metrics,
+		tracer:  cfg.Tracer,
 		ioctxes: make(map[string]*goceph.IOContext),
 	}, nil
 }
@@ -135,7 +138,7 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 			chunk := buf[:n]
 			start := time.Now()
 			werr := writeChunk(ioctx, oid, chunk)
-			ObserveOp(ctx, b.logger, b.metrics, spec.Pool, "put", oid, time.Since(start), werr)
+			ObserveOp(ctx, b.logger, b.metrics, b.tracer, spec.Pool, "put", oid, start, werr)
 			if werr != nil {
 				b.cleanupManifest(m.Chunks)
 				return nil, werr
@@ -251,7 +254,7 @@ func (r *radosReader) loadNextChunk() error {
 			buf := make([]byte, remaining)
 			start := time.Now()
 			n, rerr := ioctx.Read(c.OID, buf, uint64(off))
-			ObserveOp(r.ctx, r.b.logger, r.b.metrics, c.Pool, "get", c.OID, time.Since(start), rerr)
+			ObserveOp(r.ctx, r.b.logger, r.b.metrics, r.b.tracer, c.Pool, "get", c.OID, start, rerr)
 			if rerr != nil {
 				return fmt.Errorf("rados: read %s: %w", c.OID, rerr)
 			}
@@ -281,7 +284,7 @@ func (b *Backend) Delete(ctx context.Context, m *data.Manifest) error {
 		}
 		start := time.Now()
 		derr := ioctx.Delete(c.OID)
-		ObserveOp(ctx, b.logger, b.metrics, c.Pool, "del", c.OID, time.Since(start), derr)
+		ObserveOp(ctx, b.logger, b.metrics, b.tracer, c.Pool, "del", c.OID, start, derr)
 		if derr != nil && firstErr == nil {
 			firstErr = derr
 		}

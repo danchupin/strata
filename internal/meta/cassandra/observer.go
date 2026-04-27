@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"github.com/gocql/gocql"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/danchupin/strata/internal/logging"
 )
@@ -30,11 +33,14 @@ type Metrics interface {
 // Threshold (or fail with an error) are logged at WARN with structured
 // attributes including request_id, table, op, duration_ms, statement. When
 // Metrics is set every query (slow or not) is also reported to the metrics
-// adapter so dashboards see the full latency distribution.
+// adapter so dashboards see the full latency distribution. When Tracer is
+// set, each query produces a child span "meta.cassandra.<table>.<op>"
+// timestamped to (q.Start, q.End) parented to the span carried by ctx.
 type SlowQueryObserver struct {
 	Logger    *slog.Logger
 	Threshold time.Duration
 	Metrics   Metrics
+	Tracer    trace.Tracer
 }
 
 // NewSlowQueryObserver returns nil when there is nothing to do — no logger
@@ -48,14 +54,15 @@ func NewSlowQueryObserver(logger *slog.Logger, threshold time.Duration) *SlowQue
 }
 
 // NewQueryObserver builds an observer that fans out to a logger (slow + error
-// queries only) AND a metrics sink (every query). Returns nil when both are
-// disabled. Either side may be nil.
-func NewQueryObserver(logger *slog.Logger, threshold time.Duration, m Metrics) *SlowQueryObserver {
+// queries only), a metrics sink (every query), and an OTel tracer (one child
+// span per query). Returns nil when all three are disabled. Any side may be
+// nil.
+func NewQueryObserver(logger *slog.Logger, threshold time.Duration, m Metrics, tracer trace.Tracer) *SlowQueryObserver {
 	logEnabled := logger != nil && threshold > 0
-	if !logEnabled && m == nil {
+	if !logEnabled && m == nil && tracer == nil {
 		return nil
 	}
-	o := &SlowQueryObserver{Metrics: m}
+	o := &SlowQueryObserver{Metrics: m, Tracer: tracer}
 	if logEnabled {
 		o.Logger = logger
 		o.Threshold = threshold
@@ -79,12 +86,15 @@ func SlowMSFromEnv() int {
 
 // ObserveQuery is called by gocql for every query. The metrics sink (if set)
 // records every observation; the logger emits WARN only for slow or failed
-// queries.
+// queries; the tracer (if set) emits one child span per query.
 func (o *SlowQueryObserver) ObserveQuery(ctx context.Context, q gocql.ObservedQuery) {
 	dur := q.End.Sub(q.Start)
 	table, op := parseStatement(q.Statement)
 	if o.Metrics != nil {
 		o.Metrics.ObserveQuery(table, op, dur, q.Err)
+	}
+	if o.Tracer != nil {
+		o.emitSpan(ctx, q, table, op)
 	}
 	if o.Logger == nil || o.Threshold <= 0 {
 		return
@@ -103,6 +113,36 @@ func (o *SlowQueryObserver) ObserveQuery(ctx context.Context, q gocql.ObservedQu
 		attrs = append(attrs, "error", q.Err.Error())
 	}
 	o.Logger.WarnContext(ctx, "cassandra: slow query", attrs...)
+}
+
+// emitSpan creates a child span timestamped to (q.Start, q.End). Span name
+// follows "meta.cassandra.<table>.<op>" (table falls back to "unknown" when
+// parseStatement could not extract one). Failing queries flip span status to
+// Error so the tail-sampler always exports them.
+func (o *SlowQueryObserver) emitSpan(ctx context.Context, q gocql.ObservedQuery, table, op string) {
+	tableLabel := table
+	if tableLabel == "" {
+		tableLabel = "unknown"
+	}
+	opLabel := op
+	if opLabel == "" {
+		opLabel = "UNKNOWN"
+	}
+	_, span := o.Tracer.Start(ctx, "meta.cassandra."+tableLabel+"."+opLabel,
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithTimestamp(q.Start),
+		trace.WithAttributes(
+			attribute.String("db.system", "cassandra"),
+			attribute.String("db.cassandra.table", tableLabel),
+			attribute.String("db.operation", opLabel),
+			attribute.String("db.statement", truncateStatement(q.Statement)),
+		),
+	)
+	if q.Err != nil {
+		span.RecordError(q.Err)
+		span.SetStatus(codes.Error, q.Err.Error())
+	}
+	span.End(trace.WithTimestamp(q.End))
 }
 
 // parseStatement extracts (table, op) from a CQL statement. Best-effort.

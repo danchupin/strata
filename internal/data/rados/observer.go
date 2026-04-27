@@ -5,6 +5,10 @@ import (
 	"log/slog"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/danchupin/strata/internal/logging"
 )
 
@@ -30,12 +34,32 @@ func LogOp(ctx context.Context, logger *slog.Logger, op, oid string, dur time.Du
 	logger.DebugContext(ctx, "rados: op", attrs...)
 }
 
-// ObserveOp fans out one RADOS op to logger (DEBUG line via LogOp) and to the
-// Metrics interface (ObserveOp). Either side may be nil. Pool is needed for
-// the prometheus label; OID stays only in the log line.
-func ObserveOp(ctx context.Context, logger *slog.Logger, m Metrics, pool, op, oid string, dur time.Duration, err error) {
+// ObserveOp fans out one RADOS op to logger (DEBUG line via LogOp), the
+// Metrics interface (ObserveOp), and the OTel tracer (one child span named
+// "data.rados.<op>" timestamped to (start, time.Now())). Any side may be
+// nil. Pool labels the metrics histogram and the span; OID stays in the
+// log line and on the span.
+func ObserveOp(ctx context.Context, logger *slog.Logger, m Metrics, tracer trace.Tracer, pool, op, oid string, start time.Time, err error) {
+	end := time.Now()
+	dur := end.Sub(start)
 	LogOp(ctx, logger, op, oid, dur, err)
 	if m != nil {
 		m.ObserveOp(pool, op, dur, err)
+	}
+	if tracer != nil {
+		_, span := tracer.Start(ctx, "data.rados."+op,
+			trace.WithSpanKind(trace.SpanKindClient),
+			trace.WithTimestamp(start),
+			trace.WithAttributes(
+				attribute.String("data.rados.pool", pool),
+				attribute.String("data.rados.op", op),
+				attribute.String("data.rados.oid", oid),
+			),
+		)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+		span.End(trace.WithTimestamp(end))
 	}
 }

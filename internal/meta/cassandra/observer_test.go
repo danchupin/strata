@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/gocql/gocql"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/danchupin/strata/internal/logging"
 )
@@ -115,7 +117,7 @@ func TestQueryObserverRecordsMetricForEveryQuery(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	m := &captureMetrics{}
-	obs := NewQueryObserver(logger, 100*time.Millisecond, m)
+	obs := NewQueryObserver(logger, 100*time.Millisecond, m, nil)
 	if obs == nil {
 		t.Fatal("expected non-nil observer with metrics")
 	}
@@ -156,7 +158,7 @@ func TestQueryObserverRecordsMetricForEveryQuery(t *testing.T) {
 
 func TestQueryObserverMetricsOnlyNoLogger(t *testing.T) {
 	m := &captureMetrics{}
-	obs := NewQueryObserver(nil, 0, m)
+	obs := NewQueryObserver(nil, 0, m, nil)
 	if obs == nil {
 		t.Fatal("metrics-only observer must be non-nil")
 	}
@@ -171,15 +173,15 @@ func TestQueryObserverMetricsOnlyNoLogger(t *testing.T) {
 	}
 }
 
-func TestQueryObserverDisabledWhenBothMissing(t *testing.T) {
-	if NewQueryObserver(nil, 0, nil) != nil {
-		t.Fatal("nil logger AND nil metrics must return nil observer")
+func TestQueryObserverDisabledWhenAllMissing(t *testing.T) {
+	if NewQueryObserver(nil, 0, nil, nil) != nil {
+		t.Fatal("nil logger AND nil metrics AND nil tracer must return nil observer")
 	}
 }
 
 func TestQueryObserverPassesErrorToMetrics(t *testing.T) {
 	m := &captureMetrics{}
-	obs := NewQueryObserver(nil, 0, m)
+	obs := NewQueryObserver(nil, 0, m, nil)
 	start := time.Now()
 	obs.ObserveQuery(context.Background(), gocql.ObservedQuery{
 		Statement: "UPDATE objects SET deleted = ?",
@@ -251,5 +253,99 @@ func TestTruncateStatementCollapsesWhitespace(t *testing.T) {
 	want := "SELECT id FROM buckets"
 	if got := truncateStatement(in); got != want {
 		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+func TestQueryObserverEmitsSpan(t *testing.T) {
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSyncer(exp),
+	)
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	tracer := tp.Tracer("strata.meta.cassandra")
+	obs := NewQueryObserver(nil, 0, nil, tracer)
+	if obs == nil {
+		t.Fatal("expected non-nil observer with tracer")
+	}
+
+	parentTracer := tp.Tracer("strata.gateway")
+	ctx, parent := parentTracer.Start(context.Background(), "PUT /bkt/key")
+
+	start := time.Now()
+	obs.ObserveQuery(ctx, gocql.ObservedQuery{
+		Statement: "INSERT INTO objects (bucket_id, key) VALUES (?, ?)",
+		Start:     start,
+		End:       start.Add(7 * time.Millisecond),
+	})
+	parent.End()
+
+	spans := exp.GetSpans()
+	if len(spans) != 2 {
+		t.Fatalf("want 2 spans (cassandra child + parent root), got %d", len(spans))
+	}
+	var child *tracetest.SpanStub
+	for i := range spans {
+		if spans[i].Name == "meta.cassandra.objects.INSERT" {
+			child = &spans[i]
+			break
+		}
+	}
+	if child == nil {
+		names := make([]string, len(spans))
+		for i, s := range spans {
+			names[i] = s.Name
+		}
+		t.Fatalf("missing cassandra child span; got names=%v", names)
+	}
+	if child.Parent.SpanID() != parent.SpanContext().SpanID() {
+		t.Errorf("child parent=%s want %s", child.Parent.SpanID(), parent.SpanContext().SpanID())
+	}
+	if child.SpanKind.String() != "client" {
+		t.Errorf("span kind=%s want client", child.SpanKind)
+	}
+	wantAttrs := map[string]string{
+		"db.system":          "cassandra",
+		"db.cassandra.table": "objects",
+		"db.operation":       "INSERT",
+	}
+	for k, v := range wantAttrs {
+		found := false
+		for _, kv := range child.Attributes {
+			if string(kv.Key) == k && kv.Value.AsString() == v {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing attr %s=%s; got %v", k, v, child.Attributes)
+		}
+	}
+}
+
+func TestQueryObserverErrorSpanFlipsStatus(t *testing.T) {
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSyncer(exp),
+	)
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	obs := NewQueryObserver(nil, 0, nil, tp.Tracer("t"))
+	start := time.Now()
+	obs.ObserveQuery(context.Background(), gocql.ObservedQuery{
+		Statement: "DELETE FROM objects WHERE bucket_id=?",
+		Start:     start,
+		End:       start.Add(time.Millisecond),
+		Err:       errors.New("write timeout"),
+	})
+
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("want 1 span, got %d", len(spans))
+	}
+	if spans[0].Status.Code.String() != "Error" {
+		t.Errorf("status=%s want Error", spans[0].Status.Code)
 	}
 }

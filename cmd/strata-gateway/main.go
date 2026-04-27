@@ -36,14 +36,27 @@ func main() {
 		os.Exit(2)
 	}
 
-	dataBackend, err := buildDataBackend(cfg, logger)
+	tracerProvider, err := strataotel.Init(context.Background())
+	if err != nil {
+		logger.Error("otel init", "error", err.Error())
+		os.Exit(2)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tracerProvider.Shutdown(shutdownCtx); err != nil {
+			logger.Warn("otel shutdown", "error", err.Error())
+		}
+	}()
+
+	dataBackend, err := buildDataBackend(cfg, logger, tracerProvider)
 	if err != nil {
 		logger.Error("data backend", "error", err.Error())
 		os.Exit(2)
 	}
 	defer dataBackend.Close()
 
-	metaStore, err := buildMetaStore(cfg, logger)
+	metaStore, err := buildMetaStore(cfg, logger, tracerProvider)
 	if err != nil {
 		logger.Error("meta store", "error", err.Error())
 		os.Exit(2)
@@ -101,19 +114,6 @@ func main() {
 
 	healthHandler := buildHealthHandler(metaStore, dataBackend)
 
-	tracerProvider, err := strataotel.Init(context.Background())
-	if err != nil {
-		logger.Error("otel init", "error", err.Error())
-		os.Exit(2)
-	}
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := tracerProvider.Shutdown(shutdownCtx); err != nil {
-			logger.Warn("otel shutdown", "error", err.Error())
-		}
-	}()
-
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
 	mux.HandleFunc("/healthz", healthHandler.Healthz)
@@ -161,7 +161,7 @@ func main() {
 	_ = srv.Shutdown(shutdownCtx)
 }
 
-func buildDataBackend(cfg *config.Config, logger *slog.Logger) (data.Backend, error) {
+func buildDataBackend(cfg *config.Config, logger *slog.Logger, tp *strataotel.Provider) (data.Backend, error) {
 	switch cfg.DataBackend {
 	case "memory":
 		return datamem.New(), nil
@@ -179,6 +179,7 @@ func buildDataBackend(cfg *config.Config, logger *slog.Logger) (data.Backend, er
 			Classes:    classes,
 			Logger:     logger,
 			Metrics:    metrics.RADOSObserver{},
+			Tracer:     tp.Tracer("strata.data.rados"),
 		})
 	default:
 		return nil, errors.New("unknown data backend")
@@ -245,7 +246,7 @@ func buildHealthHandler(metaStore meta.Store, dataBackend data.Backend) *health.
 	return &health.Handler{Probes: probes}
 }
 
-func buildMetaStore(cfg *config.Config, logger *slog.Logger) (meta.Store, error) {
+func buildMetaStore(cfg *config.Config, logger *slog.Logger, tp *strataotel.Provider) (meta.Store, error) {
 	switch cfg.MetaBackend {
 	case "memory":
 		return metamem.New(), nil
@@ -262,6 +263,7 @@ func buildMetaStore(cfg *config.Config, logger *slog.Logger) (meta.Store, error)
 				Logger:      logger,
 				SlowMS:      metacassandra.SlowMSFromEnv(),
 				Metrics:     metrics.CassandraObserver{},
+				Tracer:      tp.Tracer("strata.meta.cassandra"),
 			},
 			metacassandra.Options{DefaultShardCount: cfg.DefaultBucketShards},
 		)

@@ -145,6 +145,36 @@ services:
       - "3000:3000"
     restart: unless-stopped
 
+  # OTLP collector + Jaeger live behind the "tracing" profile so the default
+  # `docker compose up` does not pull them in. Enable with:
+  #   docker compose --profile tracing up otel-collector jaeger
+  # The gateway exports to OTLP/HTTP at otel-collector:4318; point the
+  # gateway env (OTEL_EXPORTER_OTLP_ENDPOINT) at it to capture spans.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.110.0
+    container_name: strata-otel-collector
+    profiles: ["tracing"]
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ../otel/collector-config.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    depends_on:
+      - jaeger
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62
+    container_name: strata-jaeger
+    profiles: ["tracing"]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+      - "14250:14250"
+    restart: unless-stopped
+
 volumes:
   strata-cassandra-data:
   strata-ceph-etc:
