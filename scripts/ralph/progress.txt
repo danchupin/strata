@@ -943,3 +943,30 @@ Started: Sun Apr 26 20:43:22 MSK 2026
   - Cassandra LWT detail: `gocql.Query.ScanCAS` on UPDATE returns `(applied bool, err error)` — `IF EXISTS` UPDATEs need the two-value receiver. Reusing `MapScanCAS` for `INSERT … IF NOT EXISTS` is the canonical pattern.
   - Admin endpoint guard mirrors existing surface: `X-Amz-Signature` rejection + `info.Owner == IAMRootPrincipal`. Reuse `mapMetaErr` for NoSuchBucket; map `ErrReshardInProgress` to 409 OperationAborted, `ErrReshardInvalidTarget` to 400 InvalidArgument.
 ---
+
+## 2026-04-27 - US-046
+- Implemented `cmd/strata-audit-export` daily JSON-lines exporter for aged audit_log partitions.
+- New `internal/auditexport` package: `Worker.Run(ctx)` daily ticker + `RunOnce(ctx)` single-pass split. RunOnce enumerates every audit_log (bucket, day) partition older than `STRATA_AUDIT_EXPORT_AFTER` (default 30d), reads the rows via `Meta.ReadAuditPartition`, gzipped JSON-lines encodes them, calls `Data.PutChunks` + `Meta.PutObject` against the configured export bucket, then `Meta.DeleteAuditPartition` drops the source partition. Missing target bucket logs WARN and skips so the operator can repair without restart. `DecodeJSONLinesGzip` is exported for verifier round-trips.
+- New `meta.Store` methods (memory + cassandra in lockstep, plus contract test `caseAuditLogPartitionExport`):
+  - `ListAuditPartitionsBefore(ctx, before time.Time) ([]AuditPartition, error)` — enumerates `(bucket_id, bucket_name, day)` partitions whose UTC day is strictly older than `notifyDay(before)`; cassandra uses `SELECT DISTINCT bucket_id, day FROM audit_log` then a one-row `LIMIT 1` peek per partition to pull the human-readable bucket name.
+  - `ReadAuditPartition(ctx, bucketID, day) ([]AuditEvent, error)` — scans a single partition, sorts ascending by EventID for deterministic export output.
+  - `DeleteAuditPartition(ctx, bucketID, day) error` — single `DELETE FROM audit_log WHERE bucket_id=? AND day=?` partition tombstone.
+- Files added:
+  - `internal/auditexport/worker.go` — Worker + Config + key/encoding helpers (`exportKey`, `encodeJSONLinesGzip`, `DecodeJSONLinesGzip`).
+  - `internal/auditexport/worker_test.go` — 5 tests: 100 rows → 100 lines drained; multi-day split + fresh-row preservation; missing-target safe; IAM-scoped (uuid.Nil) partition uses `iam` suffix; New() input validation.
+  - `cmd/strata-audit-export/main.go` — leader-elected wiring shim mirrors strata-access-log; env knobs `STRATA_AUDIT_EXPORT_BUCKET` (required), `_PREFIX`, `_AFTER`, `_INTERVAL`, `_METRICS_LISTEN` (default `:9106`).
+- Files modified:
+  - `internal/meta/store.go` — `AuditPartition` struct + 3 new interface methods.
+  - `internal/meta/memory/store.go` — `auditDay` helper + 3 method impls under existing audit map.
+  - `internal/meta/cassandra/store.go` — 3 method impls; reuses existing `notifyDay` for partition normalisation.
+  - `internal/meta/storetest/contract.go` — added `caseAuditLogPartitionExport` exercising aged-vs-fresh scoping, deterministic row order, partition delete, no-aged-after-drain invariant.
+  - `CLAUDE.md` — architecture diagram entry for `cmd/strata-audit-export`.
+- Quality: `go build ./...`, `go vet ./...`, `go test ./...` all pass.
+- **Learnings for future iterations:**
+  - Cassandra `audit_log` is partitioned by `((bucket_id, day))` so `DELETE … WHERE bucket_id=? AND day=?` is a single partition-level tombstone — fast and safe for daily roll-off. Reuse the (`SELECT DISTINCT bucket_id, day` + per-partition peek) shape for any future per-day archival worker (notify_dlq day-archival, replication-event archive).
+  - The export worker writes objects via the regular `Meta.PutObject` + `Data.PutChunks` path — same pattern as US-039 inventory + US-014 access-log + US-012 replicator. Pattern #64 in this doc covers it: leader-elected workers that emit reports into a destination bucket bypass HTTP and write through the meta+data interface directly. `tgt.DefaultClass` is the right storage-class for these internal writes — operators control it via `PutBucketStorageClass` if they want a cold tier.
+  - Export key shape: `<prefix>YYYY-MM-DD/<bucket-name>-<bucket-id>.jsonl.gz`. Day-first prefix sorts daily exports lexicographically; bucket-id suffix avoids collisions if a bucket name is reused across deletes; uuid.Nil maps to literal `iam` so IAM-scoped rows stay identifiable.
+  - Meta interface refactor: any new `meta.Store` method needs four edits in lockstep — `internal/meta/store.go` (declaration + types), `internal/meta/memory/store.go` (impl), `internal/meta/cassandra/store.go` (impl), `internal/meta/storetest/contract.go` (case in Run table + case body). Skipping the contract case means cassandra integration silently diverges from memory.
+  - `DecodeJSONLinesGzip` is intentionally exported — same reasoning as `notify.VerifySignature` / `accesslog.FormatLine`: the on-wire export format is the cross-reader contract, give downstream tools a canonical decoder.
+  - The worker's `Run(ctx)` calls `RunOnce` immediately on startup (before the first ticker fire) so leader hand-off does not delay the first export by a full Interval. Mirror this for any future daily-cadence worker — 24h waits make operator iteration painful.
+---

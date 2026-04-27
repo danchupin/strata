@@ -41,6 +41,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"AccessLogBufferRoundTrip", caseAccessLogBuffer},
 		{"AuditLogRoundTrip", caseAuditLog},
 		{"AuditLogFiltered", caseAuditLogFiltered},
+		{"AuditLogPartitionExport", caseAuditLogPartitionExport},
 		{"VersioningNullSentinel", caseVersioningNullSentinel},
 		{"VersioningNullListVersions", caseVersioningNullListVersions},
 		{"VersioningSuspendedReplaceNull", caseVersioningSuspendedReplaceNull},
@@ -658,6 +659,108 @@ func caseAuditLogFiltered(t *testing.T, s meta.Store) {
 	}
 	if len(seen) != 4 {
 		t.Fatalf("paginated rows %d want 4", len(seen))
+	}
+}
+
+// caseAuditLogPartitionExport exercises the US-046 strata-audit-export
+// surface: ListAuditPartitionsBefore enumerates fully-aged (bucket, day)
+// partitions, ReadAuditPartition returns every row in deterministic order,
+// and DeleteAuditPartition drops the partition without disturbing
+// younger-day rows in the same bucket.
+func caseAuditLogPartitionExport(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b1, err := s.CreateBucket(ctx, "exp-a", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket a: %v", err)
+	}
+	b2, err := s.CreateBucket(ctx, "exp-b", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket b: %v", err)
+	}
+	now := time.Now().UTC()
+	mk := func(bID uuid.UUID, bName string, when time.Time) *meta.AuditEvent {
+		return &meta.AuditEvent{
+			BucketID:  bID,
+			Bucket:    bName,
+			EventID:   newTimeUUID(),
+			Time:      when,
+			Principal: "alice",
+			Action:    "PutObject",
+			Resource:  "/" + bName + "/k",
+			Result:    "200",
+			RequestID: "req",
+			SourceIP:  "10.0.0.1",
+		}
+	}
+	// Two old days for b1 (40d, 35d), one old day for b2 (32d), one fresh
+	// row for b1 (1d) that must NOT show up as an exportable partition.
+	old1 := now.AddDate(0, 0, -40)
+	old2 := now.AddDate(0, 0, -35)
+	old3 := now.AddDate(0, 0, -32)
+	fresh := now.AddDate(0, 0, -1)
+	for _, evt := range []*meta.AuditEvent{
+		mk(b1.ID, b1.Name, old1),
+		mk(b1.ID, b1.Name, old1.Add(time.Hour)),
+		mk(b1.ID, b1.Name, old2),
+		mk(b2.ID, b2.Name, old3),
+		mk(b1.ID, b1.Name, fresh),
+	} {
+		if err := s.EnqueueAudit(ctx, evt, time.Hour); err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+	}
+
+	cutoff := now.AddDate(0, 0, -30)
+	parts, err := s.ListAuditPartitionsBefore(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("list partitions: %v", err)
+	}
+	if len(parts) != 3 {
+		t.Fatalf("partitions=%d want 3 (%+v)", len(parts), parts)
+	}
+	totalRows := 0
+	for _, p := range parts {
+		rows, err := s.ReadAuditPartition(ctx, p.BucketID, p.Day)
+		if err != nil {
+			t.Fatalf("read partition: %v", err)
+		}
+		for i := 1; i < len(rows); i++ {
+			if rows[i-1].EventID > rows[i].EventID {
+				t.Fatalf("partition %s/%s rows not sorted by event_id", p.Bucket, p.Day)
+			}
+		}
+		totalRows += len(rows)
+		if err := s.DeleteAuditPartition(ctx, p.BucketID, p.Day); err != nil {
+			t.Fatalf("delete partition: %v", err)
+		}
+		left, err := s.ReadAuditPartition(ctx, p.BucketID, p.Day)
+		if err != nil {
+			t.Fatalf("re-read partition: %v", err)
+		}
+		if len(left) != 0 {
+			t.Fatalf("partition not empty after delete: %d rows", len(left))
+		}
+	}
+	if totalRows != 4 {
+		t.Fatalf("exported rows=%d want 4", totalRows)
+	}
+
+	// Fresh partition for b1 still has its row.
+	rest, err := s.ListAudit(ctx, b1.ID, 100)
+	if err != nil {
+		t.Fatalf("list remaining: %v", err)
+	}
+	if len(rest) != 1 {
+		t.Fatalf("fresh row missing or stale rows kept: %+v", rest)
+	}
+
+	// After deleting all aged partitions, ListAuditPartitionsBefore is empty.
+	parts2, err := s.ListAuditPartitionsBefore(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("re-list partitions: %v", err)
+	}
+	if len(parts2) != 0 {
+		t.Fatalf("expected zero aged partitions after delete, got %d", len(parts2))
 	}
 }
 

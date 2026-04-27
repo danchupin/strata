@@ -442,6 +442,93 @@ func (s *Store) ListAuditFiltered(ctx context.Context, f meta.AuditFilter) ([]me
 	return out, next, nil
 }
 
+// auditDay normalises t to UTC midnight, the partition key for audit_log
+// rows in both backends.
+func auditDay(t time.Time) time.Time {
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+func (s *Store) ListAuditPartitionsBefore(ctx context.Context, before time.Time) ([]meta.AuditPartition, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cutoff := auditDay(before)
+	now := nowFn()
+	type key struct {
+		bid uuid.UUID
+		day time.Time
+	}
+	seen := map[key]string{}
+	for bid, rows := range s.auditLog {
+		kept := rows[:0]
+		for _, r := range rows {
+			if !r.expiresAt.IsZero() && !now.Before(r.expiresAt) {
+				continue
+			}
+			kept = append(kept, r)
+			d := auditDay(r.evt.Time)
+			if !d.Before(cutoff) {
+				continue
+			}
+			k := key{bid, d}
+			if _, ok := seen[k]; !ok {
+				seen[k] = r.evt.Bucket
+			}
+		}
+		s.auditLog[bid] = kept
+	}
+	out := make([]meta.AuditPartition, 0, len(seen))
+	for k, name := range seen {
+		out = append(out, meta.AuditPartition{BucketID: k.bid, Bucket: name, Day: k.day})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Day.Equal(out[j].Day) {
+			return out[i].Day.Before(out[j].Day)
+		}
+		return out[i].BucketID.String() < out[j].BucketID.String()
+	})
+	return out, nil
+}
+
+func (s *Store) ReadAuditPartition(ctx context.Context, bucketID uuid.UUID, day time.Time) ([]meta.AuditEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := auditDay(day)
+	now := nowFn()
+	rows := s.auditLog[bucketID]
+	kept := rows[:0]
+	var out []meta.AuditEvent
+	for _, r := range rows {
+		if !r.expiresAt.IsZero() && !now.Before(r.expiresAt) {
+			continue
+		}
+		kept = append(kept, r)
+		if !auditDay(r.evt.Time).Equal(d) {
+			continue
+		}
+		out = append(out, r.evt)
+	}
+	s.auditLog[bucketID] = kept
+	sort.Slice(out, func(i, j int) bool { return out[i].EventID < out[j].EventID })
+	return out, nil
+}
+
+func (s *Store) DeleteAuditPartition(ctx context.Context, bucketID uuid.UUID, day time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := auditDay(day)
+	rows := s.auditLog[bucketID]
+	kept := rows[:0]
+	for _, r := range rows {
+		if auditDay(r.evt.Time).Equal(d) {
+			continue
+		}
+		kept = append(kept, r)
+	}
+	s.auditLog[bucketID] = kept
+	return nil
+}
+
 func (s *Store) AckAccessLog(ctx context.Context, entry meta.AccessLogEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

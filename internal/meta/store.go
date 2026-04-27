@@ -347,6 +347,18 @@ type AuditEvent struct {
 	SourceIP  string
 }
 
+// AuditPartition identifies a single (bucket_id, day) partition of the
+// audit_log table. Returned by ListAuditPartitionsBefore for the
+// strata-audit-export worker (US-046) so it can read each fully-aged
+// partition, write a gzipped JSON-lines export, then delete the partition.
+// Day is normalised to UTC midnight; Bucket carries the human-readable
+// bucket name when known (or "-" for IAM-scoped rows under uuid.Nil).
+type AuditPartition struct {
+	BucketID uuid.UUID
+	Bucket   string
+	Day      time.Time
+}
+
 // AuditFilter is the query shape served by the [iam root]-gated /?audit
 // endpoint (US-023). Empty Start/End mean "no time filter on that side";
 // empty Principal disables principal filtering. BucketScoped=true restricts
@@ -466,6 +478,19 @@ type Store interface {
 	EnqueueAudit(ctx context.Context, entry *AuditEvent, ttl time.Duration) error
 	ListAudit(ctx context.Context, bucketID uuid.UUID, limit int) ([]AuditEvent, error)
 	ListAuditFiltered(ctx context.Context, filter AuditFilter) ([]AuditEvent, string, error)
+	// ListAuditPartitionsBefore returns every audit_log (bucket, day)
+	// partition whose day is strictly older than the UTC day containing
+	// `before`. Used by strata-audit-export to enumerate fully-aged
+	// partitions ready for export+delete.
+	ListAuditPartitionsBefore(ctx context.Context, before time.Time) ([]AuditPartition, error)
+	// ReadAuditPartition returns every row in a single (bucket, day)
+	// audit_log partition, sorted ascending by EventID for deterministic
+	// export output. The day must already be normalised to UTC midnight
+	// (use the value returned from ListAuditPartitionsBefore).
+	ReadAuditPartition(ctx context.Context, bucketID uuid.UUID, day time.Time) ([]AuditEvent, error)
+	// DeleteAuditPartition drops every row in the given partition. Issued
+	// after a successful export upload by strata-audit-export.
+	DeleteAuditPartition(ctx context.Context, bucketID uuid.UUID, day time.Time) error
 
 	SetObjectTags(ctx context.Context, bucketID uuid.UUID, key, versionID string, tags map[string]string) error
 	GetObjectTags(ctx context.Context, bucketID uuid.UUID, key, versionID string) (map[string]string, error)

@@ -1591,6 +1591,99 @@ func (s *Store) ListAuditFiltered(ctx context.Context, f meta.AuditFilter) ([]me
 	return out, next, nil
 }
 
+func (s *Store) ListAuditPartitionsBefore(ctx context.Context, before time.Time) ([]meta.AuditPartition, error) {
+	cutoff := notifyDay(before)
+	type partition struct {
+		bid gocql.UUID
+		day time.Time
+	}
+	var parts []partition
+	iter := s.s.Query(`SELECT DISTINCT bucket_id, day FROM audit_log`).WithContext(ctx).Iter()
+	var (
+		bid gocql.UUID
+		d   time.Time
+	)
+	for iter.Scan(&bid, &d) {
+		d = d.UTC()
+		if !d.Before(cutoff) {
+			continue
+		}
+		parts = append(parts, partition{bid, d})
+	}
+	if err := iter.Close(); err != nil {
+		return nil, err
+	}
+	out := make([]meta.AuditPartition, 0, len(parts))
+	for _, p := range parts {
+		var bucketName string
+		// One-row peek so the export key carries the human-readable bucket
+		// name; uuid.Nil partitions return "-" so IAM rows stay routable.
+		if err := s.s.Query(
+			`SELECT bucket_name FROM audit_log WHERE bucket_id=? AND day=? LIMIT 1`,
+			p.bid, p.day,
+		).WithContext(ctx).Scan(&bucketName); err != nil && !errors.Is(err, gocql.ErrNotFound) {
+			return nil, err
+		}
+		if bucketName == "" {
+			bucketName = "-"
+		}
+		out = append(out, meta.AuditPartition{
+			BucketID: uuidFromGocql(p.bid),
+			Bucket:   bucketName,
+			Day:      p.day,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Day.Equal(out[j].Day) {
+			return out[i].Day.Before(out[j].Day)
+		}
+		return out[i].BucketID.String() < out[j].BucketID.String()
+	})
+	return out, nil
+}
+
+func (s *Store) ReadAuditPartition(ctx context.Context, bucketID uuid.UUID, day time.Time) ([]meta.AuditEvent, error) {
+	d := notifyDay(day)
+	iter := s.s.Query(
+		`SELECT event_id, ts, principal, action, resource, result, request_id, source_ip, bucket_name
+		 FROM audit_log WHERE bucket_id=? AND day=?`,
+		gocqlUUID(bucketID), d,
+	).WithContext(ctx).Iter()
+	var (
+		eventID                                                              gocql.UUID
+		ts                                                                   time.Time
+		principal, action, resource, result, requestID, sourceIP, bucketName string
+	)
+	var out []meta.AuditEvent
+	for iter.Scan(&eventID, &ts, &principal, &action, &resource, &result, &requestID, &sourceIP, &bucketName) {
+		out = append(out, meta.AuditEvent{
+			BucketID:  bucketID,
+			Bucket:    bucketName,
+			EventID:   eventID.String(),
+			Time:      ts,
+			Principal: principal,
+			Action:    action,
+			Resource:  resource,
+			Result:    result,
+			RequestID: requestID,
+			SourceIP:  sourceIP,
+		})
+	}
+	if err := iter.Close(); err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].EventID < out[j].EventID })
+	return out, nil
+}
+
+func (s *Store) DeleteAuditPartition(ctx context.Context, bucketID uuid.UUID, day time.Time) error {
+	d := notifyDay(day)
+	return s.s.Query(
+		`DELETE FROM audit_log WHERE bucket_id=? AND day=?`,
+		gocqlUUID(bucketID), d,
+	).WithContext(ctx).Exec()
+}
+
 func (s *Store) ListAudit(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.AuditEvent, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 1000

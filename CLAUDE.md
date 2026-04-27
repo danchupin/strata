@@ -67,6 +67,11 @@ testcontainers to find the engine.
                           both wrapped in internal/leader (Cassandra LWT-based lease)
   internal/reshard      -> per-bucket online shard-resize worker (US-045); driven
                           synchronously via /admin/bucket/reshard or as a daemon
+  cmd/strata-audit-export -> internal/auditexport: drains audit_log partitions
+                          older than STRATA_AUDIT_EXPORT_AFTER (default 30d) into
+                          gzipped JSON-lines objects in the configured export
+                          bucket, then deletes the source partition (US-046).
+                          Leader-elected, daily tick.
 ```
 
 The S3 router is in `internal/s3api/server.go`. Bucket-scoped queries (`?cors`, `?policy`, `?lifecycle`, …) dispatch via
