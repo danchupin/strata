@@ -45,6 +45,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"VersioningNullListVersions", caseVersioningNullListVersions},
 		{"VersioningSuspendedReplaceNull", caseVersioningSuspendedReplaceNull},
 		{"AccessPointCRUD", caseAccessPointCRUD},
+		{"OnlineReshard", caseOnlineReshard},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1146,3 +1147,100 @@ func caseAccessPointCRUD(t *testing.T, s meta.Store) {
 		t.Fatalf("list after delete: err=%v list=%+v", err, list)
 	}
 }
+
+// caseOnlineReshard exercises the US-045 reshard state machine end-to-end.
+// 1000 objects, 32→128 (memory backend may default to ShardCount=64; the test
+// just validates the contract is honoured: target stamped, list invariant,
+// CompleteReshard rotates active and clears target).
+func caseOnlineReshard(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "rsh", "o", "STANDARD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 1000; i++ {
+		key := "k" + padInt(i, 4)
+		o := &meta.Object{
+			BucketID: b.ID, Key: key,
+			StorageClass: "STANDARD", ETag: "e", Size: 1,
+			Mtime:    time.Now().UTC(),
+			Manifest: &data.Manifest{Class: "STANDARD"},
+		}
+		if err := s.PutObject(ctx, o, false); err != nil {
+			t.Fatalf("put %d: %v", i, err)
+		}
+	}
+
+	bucket, _ := s.GetBucket(ctx, "rsh")
+	startTarget := bucket.ShardCount * 4
+	if !meta.IsValidShardCount(startTarget) {
+		t.Fatalf("test backend ShardCount must be a power of two, got %d", bucket.ShardCount)
+	}
+
+	job, err := s.StartReshard(ctx, b.ID, startTarget)
+	if err != nil {
+		t.Fatalf("start reshard: %v", err)
+	}
+	if job.Source != bucket.ShardCount || job.Target != startTarget {
+		t.Fatalf("job fields: %+v", job)
+	}
+	if _, err := s.StartReshard(ctx, b.ID, startTarget*2); err != meta.ErrReshardInProgress {
+		t.Fatalf("second start: got %v want ErrReshardInProgress", err)
+	}
+
+	bucket, _ = s.GetBucket(ctx, "rsh")
+	if bucket.TargetShardCount != startTarget {
+		t.Fatalf("target after start: got %d want %d", bucket.TargetShardCount, startTarget)
+	}
+
+	res, err := s.ListObjects(ctx, b.ID, meta.ListOptions{Limit: 5000})
+	if err != nil {
+		t.Fatalf("list during reshard: %v", err)
+	}
+	if len(res.Objects) != 1000 {
+		t.Fatalf("list during reshard: %d want 1000", len(res.Objects))
+	}
+
+	jobs, err := s.ListReshardJobs(ctx)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("list jobs during run: %v len=%d", err, len(jobs))
+	}
+
+	if err := s.CompleteReshard(ctx, b.ID); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	bucket, _ = s.GetBucket(ctx, "rsh")
+	if bucket.ShardCount != startTarget {
+		t.Fatalf("post-complete shard count: %d want %d", bucket.ShardCount, startTarget)
+	}
+	if bucket.TargetShardCount != 0 {
+		t.Fatalf("post-complete target: %d want 0", bucket.TargetShardCount)
+	}
+	if _, err := s.GetReshardJob(ctx, b.ID); err != meta.ErrReshardNotFound {
+		t.Fatalf("post-complete get: %v want ErrReshardNotFound", err)
+	}
+
+	res, err = s.ListObjects(ctx, b.ID, meta.ListOptions{Limit: 5000})
+	if err != nil || len(res.Objects) != 1000 {
+		t.Fatalf("list after reshard: err=%v len=%d", err, len(res.Objects))
+	}
+
+	if _, err := s.StartReshard(ctx, b.ID, 7); err != meta.ErrReshardInvalidTarget {
+		t.Fatalf("non-power-of-two target: %v want ErrReshardInvalidTarget", err)
+	}
+}
+
+// padInt formats i with a fixed width using leading zeros.
+func padInt(i, width int) string {
+	s := []byte("0000000000")
+	out := s[:width]
+	pos := width - 1
+	for i > 0 && pos >= 0 {
+		out[pos] = byte('0' + i%10)
+		i /= 10
+		pos--
+	}
+	return string(out)
+}
+

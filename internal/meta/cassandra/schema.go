@@ -252,6 +252,16 @@ var tableDDL = []string{
 		public_access_block blob,
 		created_at          timestamp
 	)`,
+	`CREATE TABLE IF NOT EXISTS reshard_jobs (
+		bucket_id   uuid PRIMARY KEY,
+		bucket_name text,
+		source      int,
+		target      int,
+		last_key    text,
+		done        boolean,
+		created_at  timestamp,
+		updated_at  timestamp
+	)`,
 	`CREATE TABLE IF NOT EXISTS notify_dlq (
 		bucket_id    uuid,
 		day          timestamp,
@@ -304,6 +314,7 @@ var alterStatements = []string{
 	`ALTER TABLE objects ADD is_null boolean`,
 	`ALTER TABLE gc_queue ADD cluster text`,
 	`ALTER TABLE gc_queue ADD namespace text`,
+	`ALTER TABLE buckets ADD shard_count_target int`,
 }
 
 func isColumnAlreadyExists(err error) bool {

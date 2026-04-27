@@ -88,6 +88,19 @@ type BucketInspectResult struct {
 	Configs           map[string]json.RawMessage `json:"configs,omitempty"`
 }
 
+// BucketReshardResult is the payload returned by POST /admin/bucket/reshard.
+type BucketReshardResult struct {
+	OK            bool   `json:"ok"`
+	Bucket        string `json:"bucket"`
+	Source        int    `json:"source"`
+	Target        int    `json:"target"`
+	JobsScanned   int    `json:"jobs_scanned"`
+	JobsCompleted int    `json:"jobs_completed"`
+	ObjectsCopied int    `json:"objects_copied"`
+	DurationMs    int64  `json:"duration_ms"`
+	Error         string `json:"error,omitempty"`
+}
+
 // HTTPError is returned when the gateway responds with a non-2xx status.
 type HTTPError struct {
 	Status int
@@ -167,6 +180,16 @@ func (c *Client) ReplicateRetry(ctx context.Context, bucket string) (*ReplicateR
 	q := url.Values{"bucket": {bucket}}
 	var out ReplicateRetryResult
 	if err := c.adminJSON(ctx, http.MethodPost, "/admin/replicate/retry?"+q.Encode(), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// BucketReshard queues + drives a single online shard-resize pass for a bucket.
+func (c *Client) BucketReshard(ctx context.Context, bucket string, target int) (*BucketReshardResult, error) {
+	q := url.Values{"bucket": {bucket}, "target": {fmt.Sprintf("%d", target)}}
+	var out BucketReshardResult
+	if err := c.adminJSON(ctx, http.MethodPost, "/admin/bucket/reshard?"+q.Encode(), nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

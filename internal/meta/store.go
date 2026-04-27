@@ -65,6 +65,9 @@ var (
 	ErrNoSuchInventoryConfig   = errors.New("no inventory configuration with that id")
 	ErrAccessPointAlreadyExists = errors.New("access point with that name already exists")
 	ErrAccessPointNotFound      = errors.New("access point not found")
+	ErrReshardInProgress       = errors.New("a reshard is already in progress for this bucket")
+	ErrReshardNotFound         = errors.New("no reshard job for this bucket")
+	ErrReshardInvalidTarget    = errors.New("reshard target must be a positive power of two greater than the current shard count")
 	ErrIAMUserNotFound         = errors.New("iam user not found")
 	ErrIAMUserAlreadyExists    = errors.New("iam user already exists")
 	ErrIAMAccessKeyNotFound    = errors.New("iam access key not found")
@@ -144,6 +147,15 @@ type Bucket struct {
 	ObjectLockEnabled bool
 	Region            string
 	MfaDelete         string
+	// ShardCount is the active partition count for this bucket's objects
+	// table. Defaults to the gateway's STRATA_BUCKET_SHARDS at CreateBucket
+	// time. Once persisted, only CompleteReshard rotates it.
+	ShardCount int
+	// TargetShardCount is the target partition count of an in-progress
+	// reshard (US-045). Zero when no reshard is queued or running. While
+	// non-zero, ListObjects unions the active+target layouts so clients
+	// see no gap during the rewrite.
+	TargetShardCount int
 }
 
 const (
@@ -352,6 +364,24 @@ type AuditFilter struct {
 	Continuation string
 }
 
+// ReshardJob is a queued or running per-bucket online reshard pass (US-045).
+// The job is created by StartReshard at the same time the bucket's
+// TargetShardCount column is set; the worker walks every existing object key
+// and re-keys each row under the new partition layout. LastKey is the last
+// key the worker successfully copied (resumability) — the job is idempotent
+// and resumable from this watermark. Done flips true after CompleteReshard
+// has flipped buckets.shard_count and the job is then removed.
+type ReshardJob struct {
+	BucketID  uuid.UUID
+	Bucket    string
+	Source    int
+	Target    int
+	LastKey   string
+	Done      bool
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 // AccessPoint is a named, account-scoped binding to a single bucket carrying
 // its own optional bucket policy and PublicAccessBlock configuration. Created
 // via the [iam root]-gated ?Action=CreateAccessPoint endpoint (US-040). Name
@@ -541,9 +571,35 @@ type Store interface {
 
 	SetObjectReplicationStatus(ctx context.Context, bucketID uuid.UUID, key, versionID, status string) error
 
+	// StartReshard queues an online shard-resize for bucketID with the given
+	// target partition count and writes the bucket's TargetShardCount column.
+	// Returns ErrReshardInProgress when a reshard is already queued or
+	// running, ErrReshardInvalidTarget when target is not a positive integer
+	// strictly greater than the current shard count.
+	StartReshard(ctx context.Context, bucketID uuid.UUID, target int) (*ReshardJob, error)
+	// GetReshardJob returns the active or queued job, or ErrReshardNotFound.
+	GetReshardJob(ctx context.Context, bucketID uuid.UUID) (*ReshardJob, error)
+	// UpdateReshardJob persists a watermark/state update. The worker calls
+	// this after each batch so a crash resumes from LastKey.
+	UpdateReshardJob(ctx context.Context, job *ReshardJob) error
+	// CompleteReshard atomically flips buckets.shard_count to the job's
+	// target, clears TargetShardCount, marks the job Done and deletes it.
+	CompleteReshard(ctx context.Context, bucketID uuid.UUID) error
+	// ListReshardJobs returns every queued or running reshard job for the
+	// gateway. The reshard worker calls this on each tick.
+	ListReshardJobs(ctx context.Context) ([]*ReshardJob, error)
+
 	Close() error
 }
 
 func IsVersioningActive(state string) bool {
 	return state == VersioningEnabled || state == VersioningSuspended
+}
+
+// IsValidShardCount reports whether n is acceptable as a bucket shard count.
+// Constraints: positive and a power of two so cassandra fnv-modulo splits
+// remain stable when the count grows by a factor of 2 (every old shard
+// either stays or splits cleanly into two new ones).
+func IsValidShardCount(n int) bool {
+	return n > 0 && (n&(n-1)) == 0
 }

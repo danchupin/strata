@@ -65,6 +65,8 @@ testcontainers to find the engine.
   cmd/strata-lifecycle  -> meta.Store + data.Backend (transitions / expirations / mp-abort)
   cmd/strata-gc         -> meta.Store (GCEntry queue) + data.Backend (chunk delete)
                           both wrapped in internal/leader (Cassandra LWT-based lease)
+  internal/reshard      -> per-bucket online shard-resize worker (US-045); driven
+                          synchronously via /admin/bucket/reshard or as a daemon
 ```
 
 The S3 router is in `internal/s3api/server.go`. Bucket-scoped queries (`?cors`, `?policy`, `?lifecycle`, …) dispatch via

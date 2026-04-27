@@ -22,7 +22,7 @@ func TestAdmin_UnknownPathReturnsNotImplemented(t *testing.T) {
 
 func TestAdmin_AnonymousDenied(t *testing.T) {
 	h := newNotifyHarness(t)
-	for _, path := range []string{"/admin/lifecycle/tick", "/admin/gc/drain", "/admin/sse/rotate", "/admin/replicate/retry?bucket=bkt", "/admin/bucket/inspect?bucket=bkt"} {
+	for _, path := range []string{"/admin/lifecycle/tick", "/admin/gc/drain", "/admin/sse/rotate", "/admin/replicate/retry?bucket=bkt", "/admin/bucket/inspect?bucket=bkt", "/admin/bucket/reshard?bucket=bkt&target=128"} {
 		method := http.MethodPost
 		if strings.HasPrefix(path, "/admin/bucket/inspect") {
 			method = http.MethodGet
@@ -288,4 +288,80 @@ func TestAdmin_IAMRotateAccessKey_MissingParam(t *testing.T) {
 	resp := iamCall(t, h.testHarness, "RotateAccessKey", s3api.IAMRootPrincipal)
 	h.mustStatus(resp, http.StatusBadRequest)
 	resp.Body.Close()
+}
+
+func TestAdmin_BucketReshard_RoundTrip(t *testing.T) {
+	h := newNotifyHarness(t)
+	ctx := context.Background()
+	if _, err := h.store.CreateBucket(ctx, "bkt", "alice", "STANDARD"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	b, _ := h.store.GetBucket(ctx, "bkt")
+	source := b.ShardCount
+	target := source * 4
+
+	resp := h.doString("POST", "/admin/bucket/reshard?bucket=bkt&target="+itoa(target), "", testPrincipalHeader, s3api.IAMRootPrincipal)
+	h.mustStatus(resp, http.StatusOK)
+	var body struct {
+		OK            bool   `json:"ok"`
+		Bucket        string `json:"bucket"`
+		Source        int    `json:"source"`
+		Target        int    `json:"target"`
+		JobsCompleted int    `json:"jobs_completed"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	resp.Body.Close()
+	if !body.OK || body.Bucket != "bkt" || body.Source != source || body.Target != target || body.JobsCompleted != 1 {
+		t.Fatalf("body=%+v", body)
+	}
+	got, _ := h.store.GetBucket(ctx, "bkt")
+	if got.ShardCount != target {
+		t.Fatalf("post-call shard count=%d want %d", got.ShardCount, target)
+	}
+}
+
+func TestAdmin_BucketReshard_BadTarget(t *testing.T) {
+	h := newNotifyHarness(t)
+	ctx := context.Background()
+	if _, err := h.store.CreateBucket(ctx, "bkt", "alice", "STANDARD"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	for _, q := range []string{"bucket=bkt&target=0", "bucket=bkt&target=3", "bucket=bkt", "target=128"} {
+		resp := h.doString("POST", "/admin/bucket/reshard?"+q, "", testPrincipalHeader, s3api.IAMRootPrincipal)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("q=%s status=%d", q, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+}
+
+func TestAdmin_BucketReshard_UnknownBucket(t *testing.T) {
+	h := newNotifyHarness(t)
+	resp := h.doString("POST", "/admin/bucket/reshard?bucket=missing&target=128", "", testPrincipalHeader, s3api.IAMRootPrincipal)
+	h.mustStatus(resp, http.StatusNotFound)
+	resp.Body.Close()
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
 }

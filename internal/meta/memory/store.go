@@ -46,6 +46,7 @@ type Store struct {
 	auditLog       map[uuid.UUID][]auditEntry
 	mpDone         map[completionKey]*completionEntry
 	rewrapProgress map[uuid.UUID]*meta.RewrapProgress
+	reshardJobs    map[uuid.UUID]*meta.ReshardJob
 	locker         *Locker
 }
 
@@ -111,6 +112,7 @@ func New() *Store {
 		auditLog:       make(map[uuid.UUID][]auditEntry),
 		mpDone:         make(map[completionKey]*completionEntry),
 		rewrapProgress: make(map[uuid.UUID]*meta.RewrapProgress),
+		reshardJobs:    make(map[uuid.UUID]*meta.ReshardJob),
 		locker:         NewLocker(),
 	}
 }
@@ -492,6 +494,7 @@ func (s *Store) CreateBucket(ctx context.Context, name, owner, defaultClass stri
 		CreatedAt:    time.Now().UTC(),
 		DefaultClass: defaultClass,
 		Versioning:   meta.VersioningDisabled,
+		ShardCount:   64,
 	}
 	s.buckets[name] = b
 	s.objects[b.ID] = make(map[string][]*meta.Object)
@@ -1743,6 +1746,104 @@ func (s *Store) GetRewrapProgress(ctx context.Context, bucketID uuid.UUID) (*met
 	}
 	cp := *rp
 	return &cp, nil
+}
+
+// findBucketByID resolves a bucket by its UUID. The memory backend keys
+// `buckets` by name, so this is an O(N) scan; acceptable for the test backend.
+func (s *Store) findBucketByID(bucketID uuid.UUID) *meta.Bucket {
+	for _, b := range s.buckets {
+		if b.ID == bucketID {
+			return b
+		}
+	}
+	return nil
+}
+
+func (s *Store) StartReshard(ctx context.Context, bucketID uuid.UUID, target int) (*meta.ReshardJob, error) {
+	if !meta.IsValidShardCount(target) {
+		return nil, meta.ErrReshardInvalidTarget
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b := s.findBucketByID(bucketID)
+	if b == nil {
+		return nil, meta.ErrBucketNotFound
+	}
+	if target <= b.ShardCount {
+		return nil, meta.ErrReshardInvalidTarget
+	}
+	if _, ok := s.reshardJobs[bucketID]; ok {
+		return nil, meta.ErrReshardInProgress
+	}
+	now := time.Now().UTC()
+	job := &meta.ReshardJob{
+		BucketID:  bucketID,
+		Bucket:    b.Name,
+		Source:    b.ShardCount,
+		Target:    target,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	cp := *job
+	s.reshardJobs[bucketID] = &cp
+	b.TargetShardCount = target
+	out := *job
+	return &out, nil
+}
+
+func (s *Store) GetReshardJob(ctx context.Context, bucketID uuid.UUID) (*meta.ReshardJob, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	j, ok := s.reshardJobs[bucketID]
+	if !ok {
+		return nil, meta.ErrReshardNotFound
+	}
+	cp := *j
+	return &cp, nil
+}
+
+func (s *Store) UpdateReshardJob(ctx context.Context, job *meta.ReshardJob) error {
+	if job == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.reshardJobs[job.BucketID]; !ok {
+		return meta.ErrReshardNotFound
+	}
+	cp := *job
+	cp.UpdatedAt = time.Now().UTC()
+	s.reshardJobs[job.BucketID] = &cp
+	return nil
+}
+
+func (s *Store) CompleteReshard(ctx context.Context, bucketID uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job, ok := s.reshardJobs[bucketID]
+	if !ok {
+		return meta.ErrReshardNotFound
+	}
+	b := s.findBucketByID(bucketID)
+	if b == nil {
+		return meta.ErrBucketNotFound
+	}
+	b.ShardCount = job.Target
+	b.TargetShardCount = 0
+	delete(s.reshardJobs, bucketID)
+	return nil
+}
+
+func (s *Store) ListReshardJobs(ctx context.Context) ([]*meta.ReshardJob, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*meta.ReshardJob, 0, len(s.reshardJobs))
+	for _, j := range s.reshardJobs {
+		cp := *j
+		out = append(out, &cp)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Bucket < out[j].Bucket })
+	return out, nil
 }
 
 func (s *Store) Close() error { return nil }

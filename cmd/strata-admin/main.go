@@ -45,7 +45,7 @@ func (a *app) run(ctx context.Context) error {
 	principal := root.String("principal", os.Getenv("STRATA_ADMIN_PRINCIPAL"), "X-Test-Principal header value (test harness shortcut)")
 	jsonOut := root.Bool("json", false, "emit raw JSON instead of human-formatted output")
 	root.Usage = func() {
-		fmt.Fprintln(a.err, "usage: strata-admin [global flags] <iam|lifecycle|gc|sse|replicate|bucket> <subcommand> [flags]")
+		fmt.Fprintln(a.err, "usage: strata-admin [global flags] <iam|lifecycle|gc|sse|replicate|bucket> <subcommand> [flags]\n  bucket subcommands: inspect | reshard")
 		root.PrintDefaults()
 	}
 
@@ -77,6 +77,8 @@ func (a *app) run(ctx context.Context) error {
 		return a.cmdReplicateRetry(ctx, client, *jsonOut, args)
 	case "bucket inspect":
 		return a.cmdBucketInspect(ctx, client, *jsonOut, args)
+	case "bucket reshard":
+		return a.cmdBucketReshard(ctx, client, *jsonOut, args)
 	default:
 		fmt.Fprintf(a.err, "unknown command: %s %s\n", group, sub)
 		root.Usage()
@@ -253,6 +255,36 @@ func (a *app) cmdBucketInspect(ctx context.Context, c *Client, jsonOut bool, arg
 		for name := range res.Configs {
 			fmt.Fprintf(a.out, "  - %s\n", name)
 		}
+	}
+	return nil
+}
+
+func (a *app) cmdBucketReshard(ctx context.Context, c *Client, jsonOut bool, args []string) error {
+	fs := flag.NewFlagSet("bucket reshard", flag.ContinueOnError)
+	fs.SetOutput(a.err)
+	bucket := fs.String("bucket", "", "bucket name")
+	target := fs.Int("target", 0, "target shard count (positive power of two, larger than current)")
+	if err := fs.Parse(args); err != nil {
+		return errUsage
+	}
+	if *bucket == "" {
+		return errors.New("--bucket is required")
+	}
+	if *target <= 0 {
+		return errors.New("--target is required")
+	}
+	res, err := c.BucketReshard(ctx, *bucket, *target)
+	if err != nil {
+		return err
+	}
+	if jsonOut {
+		return writeJSON(a.out, res)
+	}
+	fmt.Fprintf(a.out, "bucket reshard: bucket=%s source=%d target=%d\n", res.Bucket, res.Source, res.Target)
+	fmt.Fprintf(a.out, "  jobs:    scanned=%d completed=%d\n", res.JobsScanned, res.JobsCompleted)
+	fmt.Fprintf(a.out, "  objects: copied=%d\n", res.ObjectsCopied)
+	if res.Error != "" {
+		fmt.Fprintf(a.out, "  error:   %s\n", res.Error)
 	}
 	return nil
 }

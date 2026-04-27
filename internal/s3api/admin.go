@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,6 +14,7 @@ import (
 	"github.com/danchupin/strata/internal/gc"
 	"github.com/danchupin/strata/internal/lifecycle"
 	"github.com/danchupin/strata/internal/meta"
+	"github.com/danchupin/strata/internal/reshard"
 	"github.com/danchupin/strata/internal/rewrap"
 )
 
@@ -61,6 +63,12 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, sub string)
 			return
 		}
 		s.adminBucketInspect(w, r)
+	case "bucket/reshard":
+		if r.Method != http.MethodPost {
+			writeError(w, r, errAdminMethodNotAllowed)
+			return
+		}
+		s.adminBucketReshard(w, r)
 	default:
 		writeError(w, r, ErrNotImplemented)
 	}
@@ -314,6 +322,79 @@ func encodeConfigBlob(blob []byte) json.RawMessage {
 	}
 	quoted, _ := json.Marshal(string(blob))
 	return json.RawMessage(quoted)
+}
+
+type adminBucketReshardResponse struct {
+	OK            bool   `json:"ok"`
+	Bucket        string `json:"bucket"`
+	Source        int    `json:"source"`
+	Target        int    `json:"target"`
+	JobsScanned   int    `json:"jobs_scanned"`
+	JobsCompleted int    `json:"jobs_completed"`
+	ObjectsCopied int    `json:"objects_copied"`
+	DurationMs    int64  `json:"duration_ms"`
+	Error         string `json:"error,omitempty"`
+}
+
+// adminBucketReshard queues an online shard-resize for the named bucket and
+// drives the reshard worker to completion synchronously. Operators with very
+// large buckets can prefer running strata-reshard as a daemon; this verb is
+// useful for small/medium buckets where a single HTTP call is acceptable.
+func (s *Server) adminBucketReshard(w http.ResponseWriter, r *http.Request) {
+	bucketName := r.URL.Query().Get("bucket")
+	if bucketName == "" {
+		writeError(w, r, ErrInvalidArgument)
+		return
+	}
+	target, err := strconv.Atoi(r.URL.Query().Get("target"))
+	if err != nil || !meta.IsValidShardCount(target) {
+		writeError(w, r, APIError{
+			Code:    "InvalidArgument",
+			Message: "target must be a positive power of two",
+			Status:  http.StatusBadRequest,
+		})
+		return
+	}
+	b, err := s.Meta.GetBucket(r.Context(), bucketName)
+	if err != nil {
+		mapMetaErr(w, r, err)
+		return
+	}
+	job, err := s.Meta.StartReshard(r.Context(), b.ID, target)
+	if err != nil {
+		switch err {
+		case meta.ErrReshardInProgress:
+			writeError(w, r, APIError{Code: "OperationAborted", Message: err.Error(), Status: http.StatusConflict})
+		case meta.ErrReshardInvalidTarget:
+			writeError(w, r, APIError{Code: "InvalidArgument", Message: err.Error(), Status: http.StatusBadRequest})
+		default:
+			mapMetaErr(w, r, err)
+		}
+		return
+	}
+	worker, werr := reshard.New(reshard.Config{Meta: s.Meta})
+	if werr != nil {
+		writeError(w, r, ErrInternal)
+		return
+	}
+	start := time.Now()
+	stats, runErr := worker.RunOnce(r.Context())
+	resp := adminBucketReshardResponse{
+		OK:            runErr == nil,
+		Bucket:        bucketName,
+		Source:        job.Source,
+		Target:        job.Target,
+		JobsScanned:   stats.JobsScanned,
+		JobsCompleted: stats.JobsCompleted,
+		ObjectsCopied: stats.ObjectsCopied,
+		DurationMs:    time.Since(start).Milliseconds(),
+	}
+	status := http.StatusOK
+	if runErr != nil {
+		resp.Error = runErr.Error()
+		status = http.StatusInternalServerError
+	}
+	writeAdminJSON(w, status, resp)
 }
 
 func writeAdminJSON(w http.ResponseWriter, status int, body any) {

@@ -108,12 +108,13 @@ func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error
 		mfaDelete         string
 		createdAt         time.Time
 		shardCount        int
+		shardCountTarget  int
 		objectLockEnabled bool
 	)
 	err := s.s.Query(
-		`SELECT id, owner_id, created_at, default_class, versioning, shard_count, acl, object_lock_enabled, region, mfa_delete FROM buckets WHERE name=?`,
+		`SELECT id, owner_id, created_at, default_class, versioning, shard_count, shard_count_target, acl, object_lock_enabled, region, mfa_delete FROM buckets WHERE name=?`,
 		name,
-	).WithContext(ctx).Scan(&idG, &owner, &createdAt, &class, &versioning, &shardCount, &acl, &objectLockEnabled, &region, &mfaDelete)
+	).WithContext(ctx).Scan(&idG, &owner, &createdAt, &class, &versioning, &shardCount, &shardCountTarget, &acl, &objectLockEnabled, &region, &mfaDelete)
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrBucketNotFound
 	}
@@ -134,6 +135,8 @@ func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error
 		ObjectLockEnabled: objectLockEnabled,
 		Region:            region,
 		MfaDelete:         mfaDelete,
+		ShardCount:        shardCount,
+		TargetShardCount:  shardCountTarget,
 	}, nil
 }
 
@@ -260,7 +263,7 @@ func (s *Store) bucketIsEmpty(ctx context.Context, bucketID uuid.UUID, shardCoun
 }
 
 func (s *Store) ListBuckets(ctx context.Context, owner string) ([]*meta.Bucket, error) {
-	iter := s.s.Query(`SELECT name, id, owner_id, created_at, default_class, versioning, acl, region, mfa_delete FROM buckets`).
+	iter := s.s.Query(`SELECT name, id, owner_id, created_at, default_class, versioning, shard_count, shard_count_target, acl, region, mfa_delete FROM buckets`).
 		WithContext(ctx).Iter()
 	defer iter.Close()
 
@@ -269,8 +272,9 @@ func (s *Store) ListBuckets(ctx context.Context, owner string) ([]*meta.Bucket, 
 		name, ownerID, class, versioning, acl, region, mfaDelete string
 		idG                                                      gocql.UUID
 		createdAt                                                time.Time
+		shardCount, shardCountTarget                             int
 	)
-	for iter.Scan(&name, &idG, &ownerID, &createdAt, &class, &versioning, &acl, &region, &mfaDelete) {
+	for iter.Scan(&name, &idG, &ownerID, &createdAt, &class, &versioning, &shardCount, &shardCountTarget, &acl, &region, &mfaDelete) {
 		if owner != "" && ownerID != owner {
 			continue
 		}
@@ -278,15 +282,17 @@ func (s *Store) ListBuckets(ctx context.Context, owner string) ([]*meta.Bucket, 
 			versioning = meta.VersioningDisabled
 		}
 		out = append(out, &meta.Bucket{
-			Name:         name,
-			ID:           uuidFromGocql(idG),
-			Owner:        ownerID,
-			CreatedAt:    createdAt,
-			DefaultClass: class,
-			Versioning:   versioning,
-			ACL:          acl,
-			Region:       region,
-			MfaDelete:    mfaDelete,
+			Name:             name,
+			ID:               uuidFromGocql(idG),
+			Owner:            ownerID,
+			CreatedAt:        createdAt,
+			DefaultClass:     class,
+			Versioning:       versioning,
+			ACL:              acl,
+			Region:           region,
+			MfaDelete:        mfaDelete,
+			ShardCount:       shardCount,
+			TargetShardCount: shardCountTarget,
 		})
 	}
 	if err := iter.Close(); err != nil {

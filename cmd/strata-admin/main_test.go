@@ -306,6 +306,32 @@ func TestApp_RunBucketInspect_HumanOutput(t *testing.T) {
 	}
 }
 
+func TestApp_BucketReshard(t *testing.T) {
+	h := newGatewayHarness(t, nil)
+	ctx := context.Background()
+	if _, err := h.store.CreateBucket(ctx, "bkt", "alice", "STANDARD"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	a := newApp(&stdout, &stderr, []string{
+		"--endpoint", h.ts.URL,
+		"--principal", s3api.IAMRootPrincipal,
+		"bucket", "reshard", "--bucket", "bkt", "--target", "256",
+	})
+	if err := a.run(ctx); err != nil {
+		t.Fatalf("run: %v stderr=%s", err, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "bucket=bkt") || !strings.Contains(out, "target=256") {
+		t.Fatalf("unexpected output: %q", out)
+	}
+	got, _ := h.store.GetBucket(ctx, "bkt")
+	if got.ShardCount != 256 {
+		t.Fatalf("post-reshard shard count: %d", got.ShardCount)
+	}
+}
+
 func TestApp_UnknownCommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	a := newApp(&stdout, &stderr, []string{"--endpoint", "http://nowhere", "fake", "subcmd"})
