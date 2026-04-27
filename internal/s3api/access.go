@@ -37,28 +37,46 @@ func (s *Server) loadBucketPolicy(r *http.Request, b *meta.Bucket) (*policy.Docu
 	return policy.Parse(blob)
 }
 
-// requireAccess gates a request against the bucket policy. When no policy is
-// set, the request proceeds. Otherwise the request is allowed only if a
-// statement matches with Effect=Allow and no matching statement uses Deny.
+// requireAccess gates a request against the bucket policy and, when the
+// request was routed through an access point, the access-point policy too.
+// Both gates apply additively (intersection): a side without a policy is a
+// pass-through; a side with a policy must Allow. Either side's Deny short
+// circuits to 403.
 func (s *Server) requireAccess(w http.ResponseWriter, r *http.Request, b *meta.Bucket, action, resourceARN string) bool {
 	doc, err := s.loadBucketPolicy(r, b)
 	if err != nil {
 		writeError(w, r, ErrInternal)
 		return false
 	}
-	if doc == nil {
-		return true
+	principal := principalForRequest(r)
+	if doc != nil {
+		decision, err := policy.Evaluate(doc, principal, action, resourceARN, nil)
+		if err != nil {
+			writeError(w, r, ErrInternal)
+			return false
+		}
+		if decision != policy.Allow {
+			writeError(w, r, ErrAccessDenied)
+			return false
+		}
 	}
-	decision, err := policy.Evaluate(doc, principalForRequest(r), action, resourceARN, nil)
-	if err != nil {
-		writeError(w, r, ErrInternal)
-		return false
+	if ap := accessPointFromContext(r.Context()); ap != nil && len(ap.Policy) > 0 {
+		apDoc, perr := policy.Parse(ap.Policy)
+		if perr != nil {
+			writeError(w, r, ErrInternal)
+			return false
+		}
+		decision, err := policy.Evaluate(apDoc, principal, action, resourceARN, nil)
+		if err != nil {
+			writeError(w, r, ErrInternal)
+			return false
+		}
+		if decision != policy.Allow {
+			writeError(w, r, ErrAccessDenied)
+			return false
+		}
 	}
-	if decision == policy.Allow {
-		return true
-	}
-	writeError(w, r, ErrAccessDenied)
-	return false
+	return true
 }
 
 // requireObjectAccess runs the policy gate then the ACL gate for an object

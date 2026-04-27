@@ -1301,6 +1301,20 @@ func (s *Store) GetAccessPoint(ctx context.Context, name string) (*meta.AccessPo
 	return &cp, nil
 }
 
+func (s *Store) GetAccessPointByAlias(ctx context.Context, alias string) (*meta.AccessPoint, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, ap := range s.accessPoints {
+		if ap.Alias == alias {
+			cp := *ap
+			cp.Policy = append([]byte(nil), ap.Policy...)
+			cp.PublicAccessBlock = append([]byte(nil), ap.PublicAccessBlock...)
+			return &cp, nil
+		}
+	}
+	return nil, meta.ErrAccessPointNotFound
+}
+
 func (s *Store) DeleteAccessPoint(ctx context.Context, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

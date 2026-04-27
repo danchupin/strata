@@ -509,6 +509,7 @@ type Store interface {
 	// access points; otherwise rows are filtered by binding.
 	CreateAccessPoint(ctx context.Context, ap *AccessPoint) error
 	GetAccessPoint(ctx context.Context, name string) (*AccessPoint, error)
+	GetAccessPointByAlias(ctx context.Context, alias string) (*AccessPoint, error)
 	DeleteAccessPoint(ctx context.Context, name string) error
 	ListAccessPoints(ctx context.Context, bucketID uuid.UUID) ([]*AccessPoint, error)
 

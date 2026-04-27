@@ -1101,6 +1101,17 @@ func caseAccessPointCRUD(t *testing.T, s meta.Store) {
 		t.Fatalf("get missing: got %v want ErrAccessPointNotFound", err)
 	}
 
+	byAlias, err := s.GetAccessPointByAlias(ctx, ap.Alias)
+	if err != nil {
+		t.Fatalf("get by alias: %v", err)
+	}
+	if byAlias.Name != ap.Name || byAlias.Bucket != ap.Bucket {
+		t.Fatalf("by alias round-trip: %+v", byAlias)
+	}
+	if _, err := s.GetAccessPointByAlias(ctx, "ap-missing"); err != meta.ErrAccessPointNotFound {
+		t.Fatalf("by alias missing: got %v want ErrAccessPointNotFound", err)
+	}
+
 	list, err := s.ListAccessPoints(ctx, uuid.Nil)
 	if err != nil || len(list) != 1 || list[0].Name != "ap-one" {
 		t.Fatalf("list all: err=%v list=%+v", err, list)

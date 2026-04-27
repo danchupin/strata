@@ -81,7 +81,36 @@ func (s *Server) enqueueChunks(ctx context.Context, chunks []data.ChunkRef) {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if vhostBucket := extractVHostBucket(r.Host, s.VHostPatterns); vhostBucket != "" {
+	if alias, ok := extractAccessPointAlias(r.Host); ok {
+		ap, err := s.Meta.GetAccessPointByAlias(r.Context(), alias)
+		if err != nil {
+			if errors.Is(err, meta.ErrAccessPointNotFound) {
+				writeError(w, r, ErrNoSuchAccessPoint)
+				return
+			}
+			writeError(w, r, ErrInternal)
+			return
+		}
+		if ap.NetworkOrigin == accessPointOriginVPC {
+			if r.Header.Get(accessPointVPCHeader) != ap.VPCID || ap.VPCID == "" {
+				writeError(w, r, ErrAccessDenied)
+				return
+			}
+		}
+		path := r.URL.Path
+		if !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
+		r.URL.Path = "/" + ap.Bucket + path
+		if r.URL.RawPath != "" {
+			rawPath := r.URL.RawPath
+			if !strings.HasPrefix(rawPath, "/") {
+				rawPath = "/" + rawPath
+			}
+			r.URL.RawPath = "/" + ap.Bucket + rawPath
+		}
+		r = r.WithContext(withAccessPoint(r.Context(), ap))
+	} else if vhostBucket := extractVHostBucket(r.Host, s.VHostPatterns); vhostBucket != "" {
 		path := r.URL.Path
 		if !strings.HasPrefix(path, "/") {
 			path = "/" + path

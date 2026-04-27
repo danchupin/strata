@@ -2406,6 +2406,41 @@ func (s *Store) GetAccessPoint(ctx context.Context, name string) (*meta.AccessPo
 	}, nil
 }
 
+func (s *Store) GetAccessPointByAlias(ctx context.Context, alias string) (*meta.AccessPoint, error) {
+	var (
+		name          string
+		bucketID      gocql.UUID
+		bucket        string
+		networkOrigin string
+		vpcID         string
+		policy        []byte
+		pab           []byte
+		createdAt     time.Time
+	)
+	err := s.s.Query(
+		`SELECT name, bucket_id, bucket, network_origin, vpc_id, policy, public_access_block, created_at
+		 FROM access_points WHERE alias=? LIMIT 1 ALLOW FILTERING`,
+		alias,
+	).WithContext(ctx).Scan(&name, &bucketID, &bucket, &networkOrigin, &vpcID, &policy, &pab, &createdAt)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return nil, meta.ErrAccessPointNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &meta.AccessPoint{
+		Name:              name,
+		BucketID:          uuidFromGocql(bucketID),
+		Bucket:            bucket,
+		Alias:             alias,
+		NetworkOrigin:     networkOrigin,
+		VPCID:             vpcID,
+		Policy:            append([]byte(nil), policy...),
+		PublicAccessBlock: append([]byte(nil), pab...),
+		CreatedAt:         createdAt,
+	}, nil
+}
+
 func (s *Store) DeleteAccessPoint(ctx context.Context, name string) error {
 	applied, err := s.s.Query(
 		`DELETE FROM access_points WHERE name=? IF EXISTS`,
