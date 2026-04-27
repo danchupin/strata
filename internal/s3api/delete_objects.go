@@ -97,11 +97,22 @@ func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request, bucket st
 			}
 		}
 
-		o, err := s.Meta.DeleteObject(r.Context(), b.ID, it.Key, it.VersionID, versioned)
-		if err != nil && !errors.Is(err, meta.ErrObjectNotFound) {
+		var (
+			o   *meta.Object
+			derr error
+		)
+		if it.VersionID == "" && b.Versioning == meta.VersioningSuspended {
+			if prior, perr := s.Meta.GetObject(r.Context(), b.ID, it.Key, meta.NullVersionLiteral); perr == nil && prior != nil && prior.Manifest != nil {
+				s.enqueueChunks(r.Context(), prior.Manifest.Chunks)
+			}
+			o, derr = s.Meta.DeleteObjectNullReplacement(r.Context(), b.ID, it.Key)
+		} else {
+			o, derr = s.Meta.DeleteObject(r.Context(), b.ID, it.Key, it.VersionID, versioned)
+		}
+		if derr != nil && !errors.Is(derr, meta.ErrObjectNotFound) {
 			result.Errors = append(result.Errors, deleteObjectsErrorEntE{
 				Key: it.Key, VersionID: it.VersionID,
-				Code: "InternalError", Message: err.Error(),
+				Code: "InternalError", Message: derr.Error(),
 			})
 			continue
 		}
@@ -114,9 +125,9 @@ func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request, bucket st
 		if o != nil && versioned {
 			if o.IsDeleteMarker {
 				entry.DeleteMarker = true
-				entry.DeleteMarkerVersionID = o.VersionID
+				entry.DeleteMarkerVersionID = wireVersionID(o)
 			} else if it.VersionID != "" {
-				entry.VersionID = o.VersionID
+				entry.VersionID = wireVersionID(o)
 			}
 		}
 		if !req.Quiet {

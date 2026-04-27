@@ -637,16 +637,60 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 	if !versioned {
 		o.VersionID = meta.NullVersionID
 		o.IsNull = true
+	} else if o.IsNull {
+		o.VersionID = meta.NullVersionID
 	} else if o.VersionID == "" {
 		o.VersionID = gocql.TimeUUID().String()
 	}
 	cp := *o
-	if versioned {
-		bucket[o.Key] = append([]*meta.Object{&cp}, bucket[o.Key]...)
-	} else {
+	if !versioned {
 		bucket[o.Key] = []*meta.Object{&cp}
+		return nil
 	}
+	if o.IsNull {
+		filtered := bucket[o.Key][:0]
+		for _, v := range bucket[o.Key] {
+			if v.VersionID == meta.NullVersionID {
+				continue
+			}
+			filtered = append(filtered, v)
+		}
+		bucket[o.Key] = append([]*meta.Object{&cp}, filtered...)
+		return nil
+	}
+	bucket[o.Key] = append([]*meta.Object{&cp}, bucket[o.Key]...)
 	return nil
+}
+
+// DeleteObjectNullReplacement implements US-029: a Suspended-mode unversioned
+// DELETE atomically removes the prior null-versioned row (if any) and writes
+// a fresh null-versioned delete marker. Other (TimeUUID) versions are kept.
+func (s *Store) DeleteObjectNullReplacement(ctx context.Context, bucketID uuid.UUID, key string) (*meta.Object, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bucket, ok := s.objects[bucketID]
+	if !ok {
+		return nil, meta.ErrBucketNotFound
+	}
+	versions := bucket[key]
+	filtered := versions[:0]
+	for _, v := range versions {
+		if v.VersionID == meta.NullVersionID {
+			continue
+		}
+		filtered = append(filtered, v)
+	}
+	marker := &meta.Object{
+		BucketID:       bucketID,
+		Key:            key,
+		VersionID:      meta.NullVersionID,
+		IsLatest:       true,
+		IsDeleteMarker: true,
+		IsNull:         true,
+		Mtime:          time.Now().UTC(),
+	}
+	bucket[key] = append([]*meta.Object{marker}, filtered...)
+	return marker, nil
 }
 
 func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionID string) (*meta.Object, error) {

@@ -43,6 +43,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"AuditLogFiltered", caseAuditLogFiltered},
 		{"VersioningNullSentinel", caseVersioningNullSentinel},
 		{"VersioningNullListVersions", caseVersioningNullListVersions},
+		{"VersioningSuspendedReplaceNull", caseVersioningSuspendedReplaceNull},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -920,5 +921,140 @@ func caseVersioningNullListVersions(t *testing.T, s meta.Store) {
 	}
 	if !sawLatest || !sawNull {
 		t.Fatalf("missing entries (sawLatest=%v sawNull=%v)", sawLatest, sawNull)
+	}
+}
+
+// caseVersioningSuspendedReplaceNull covers US-029: in Suspended-versioning
+// mode, an unversioned PUT atomically replaces any prior null-versioned row
+// (preserving TimeUUID-versioned ancestors), and an unversioned DELETE
+// atomically writes a null-versioned delete marker that replaces the prior
+// null row in the same way.
+func caseVersioningSuspendedReplaceNull(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "susp", "o", "STANDARD")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	put := func(body string, versioned, suspended bool) string {
+		o := &meta.Object{
+			BucketID:     b.ID,
+			Key:          "doc",
+			StorageClass: "STANDARD",
+			ETag:         body,
+			Size:         int64(len(body)),
+			Mtime:        time.Now().UTC(),
+			Manifest:     &data.Manifest{Class: "STANDARD", Size: int64(len(body))},
+		}
+		if suspended {
+			o.IsNull = true
+		}
+		if err := s.PutObject(ctx, o, versioned); err != nil {
+			t.Fatalf("put %q: %v", body, err)
+		}
+		return o.VersionID
+	}
+
+	// 1) Enabled-mode PUT lands a TimeUUID version v1.
+	if err := s.SetBucketVersioning(ctx, "susp", meta.VersioningEnabled); err != nil {
+		t.Fatalf("set enabled: %v", err)
+	}
+	v1 := put("first", true, false)
+	if v1 == meta.NullVersionID || v1 == "" {
+		t.Fatalf("v1 VersionID=%q want fresh TimeUUID", v1)
+	}
+
+	// 2) Toggle to Suspended; unversioned PUT writes a null-versioned row
+	// alongside v1.
+	if err := s.SetBucketVersioning(ctx, "susp", meta.VersioningSuspended); err != nil {
+		t.Fatalf("set suspended: %v", err)
+	}
+	nullV := put("second", true, true)
+	if nullV != meta.NullVersionID {
+		t.Fatalf("suspended put VersionID=%q want sentinel", nullV)
+	}
+
+	// 3) v1 is still addressable.
+	gotV1, err := s.GetObject(ctx, b.ID, "doc", v1)
+	if err != nil {
+		t.Fatalf("get v1: %v", err)
+	}
+	if gotV1.ETag != "first" || gotV1.IsNull {
+		t.Fatalf("v1 row: %+v", gotV1)
+	}
+
+	// 4) Latest is the null row.
+	latest, err := s.GetObject(ctx, b.ID, "doc", "")
+	if err != nil {
+		t.Fatalf("get latest: %v", err)
+	}
+	if latest.ETag != "second" || !latest.IsNull || latest.VersionID != meta.NullVersionID {
+		t.Fatalf("latest after suspended put: %+v", latest)
+	}
+
+	// 5) Suspended PUT again replaces the null row in place; v1 still present.
+	put("third", true, true)
+	gotNull, err := s.GetObject(ctx, b.ID, "doc", meta.NullVersionLiteral)
+	if err != nil {
+		t.Fatalf("get null after replace: %v", err)
+	}
+	if gotNull.ETag != "third" {
+		t.Fatalf("null after replace ETag=%q want third", gotNull.ETag)
+	}
+	gotV1, err = s.GetObject(ctx, b.ID, "doc", v1)
+	if err != nil {
+		t.Fatalf("get v1 after suspended replace: %v", err)
+	}
+	if gotV1.ETag != "first" {
+		t.Fatalf("v1 lost after suspended replace: %+v", gotV1)
+	}
+
+	// 6) Suspended unversioned DELETE writes a null-versioned delete marker
+	// that replaces the prior null row; v1 untouched.
+	dm, err := s.DeleteObjectNullReplacement(ctx, b.ID, "doc")
+	if err != nil {
+		t.Fatalf("delete null replacement: %v", err)
+	}
+	if !dm.IsDeleteMarker || !dm.IsNull || dm.VersionID != meta.NullVersionID {
+		t.Fatalf("delete marker: %+v", dm)
+	}
+	if _, err := s.GetObject(ctx, b.ID, "doc", ""); err != meta.ErrObjectNotFound {
+		t.Fatalf("get latest after marker: got err %v want ErrObjectNotFound", err)
+	}
+	gotV1, err = s.GetObject(ctx, b.ID, "doc", v1)
+	if err != nil {
+		t.Fatalf("get v1 after marker: %v", err)
+	}
+	if gotV1.ETag != "first" {
+		t.Fatalf("v1 lost after marker: %+v", gotV1)
+	}
+
+	// 7) ListObjectVersions sees the null delete marker (latest) + v1.
+	res, err := s.ListObjectVersions(ctx, b.ID, meta.ListOptions{Limit: 100})
+	if err != nil {
+		t.Fatalf("list versions: %v", err)
+	}
+	if len(res.Versions) != 2 {
+		t.Fatalf("got %d versions want 2: %+v", len(res.Versions), res.Versions)
+	}
+	var sawMarker, sawV1 bool
+	for _, v := range res.Versions {
+		switch v.VersionID {
+		case meta.NullVersionID:
+			if !v.IsLatest || !v.IsDeleteMarker || !v.IsNull {
+				t.Fatalf("marker entry: %+v", v)
+			}
+			sawMarker = true
+		case v1:
+			if v.IsLatest || v.IsNull || v.ETag != "first" {
+				t.Fatalf("v1 entry: %+v", v)
+			}
+			sawV1 = true
+		default:
+			t.Fatalf("unexpected versionID %q", v.VersionID)
+		}
+	}
+	if !sawMarker || !sawV1 {
+		t.Fatalf("missing entries (marker=%v v1=%v)", sawMarker, sawV1)
 	}
 }

@@ -155,9 +155,11 @@ type Object struct {
 	IsLatest       bool
 	IsDeleteMarker bool
 	// IsNull marks the row as the bucket's "null" version. Set automatically
-	// by PutObject when the bucket is in VersioningDisabled mode (and by
-	// Suspended-mode PUT/DELETE in US-029). Paired with VersionID =
-	// NullVersionID. GET ?versionId=null resolves to the row with this flag.
+	// by PutObject when the bucket is in VersioningDisabled mode and by
+	// Suspended-mode PUT/DELETE (caller sets IsNull=true on the Object so
+	// PutObject takes the Suspended-null path that replaces just the prior
+	// null row instead of all rows). Paired with VersionID = NullVersionID.
+	// GET ?versionId=null resolves to the row with this flag.
 	IsNull         bool
 	Size           int64
 	ETag           string
@@ -381,6 +383,11 @@ type Store interface {
 	PutObject(ctx context.Context, o *Object, versioned bool) error
 	GetObject(ctx context.Context, bucketID uuid.UUID, key, versionID string) (*Object, error)
 	DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versionID string, versioned bool) (*Object, error)
+	// DeleteObjectNullReplacement is the Suspended-mode unversioned DELETE.
+	// It atomically removes any prior null-versioned row for the key (LWT
+	// IF EXISTS) and writes a fresh null-versioned delete marker. Any
+	// TimeUUID-versioned rows for the same key are left untouched.
+	DeleteObjectNullReplacement(ctx context.Context, bucketID uuid.UUID, key string) (*Object, error)
 	ListObjects(ctx context.Context, bucketID uuid.UUID, opts ListOptions) (*ListResult, error)
 	ListObjectVersions(ctx context.Context, bucketID uuid.UUID, opts ListOptions) (*ListVersionsResult, error)
 

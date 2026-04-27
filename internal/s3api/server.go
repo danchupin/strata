@@ -859,6 +859,9 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	if tagHdr := r.Header.Get("x-amz-tagging"); tagHdr != "" {
 		obj.Tags = parseTagHeader(tagHdr)
 	}
+	if b.Versioning == meta.VersioningSuspended {
+		obj.IsNull = true
+	}
 	if err := s.Meta.PutObject(r.Context(), obj, meta.IsVersioningActive(b.Versioning)); err != nil {
 		_ = s.Data.Delete(r.Context(), m)
 		mapMetaErr(w, r, err)
@@ -869,7 +872,7 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		w.Header().Set("x-amz-server-side-encryption", obj.SSE)
 	}
 	if meta.IsVersioningActive(b.Versioning) && obj.VersionID != "" {
-		w.Header().Set("x-amz-version-id", obj.VersionID)
+		w.Header().Set("x-amz-version-id", wireVersionID(obj))
 	}
 	if status := s.emitReplicationEvent(r, b, replicationEventDetails{
 		EventName: "s3:ObjectCreated:Put",
@@ -1128,7 +1131,22 @@ func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request, b *meta.Bu
 		}
 	}
 
-	o, err := s.Meta.DeleteObject(r.Context(), b.ID, key, versionID, versioned)
+	var (
+		o   *meta.Object
+		err error
+	)
+	if versionID == "" && b.Versioning == meta.VersioningSuspended {
+		// Suspended-mode unversioned DELETE: replace any prior null-versioned
+		// row with a fresh null-versioned delete marker. The replaced row's
+		// chunks (if any) are queued for GC.
+		prior, perr := s.Meta.GetObject(r.Context(), b.ID, key, meta.NullVersionLiteral)
+		if perr == nil && prior != nil && prior.Manifest != nil {
+			s.enqueueChunks(r.Context(), prior.Manifest.Chunks)
+		}
+		o, err = s.Meta.DeleteObjectNullReplacement(r.Context(), b.ID, key)
+	} else {
+		o, err = s.Meta.DeleteObject(r.Context(), b.ID, key, versionID, versioned)
+	}
 	if err != nil {
 		if errors.Is(err, meta.ErrObjectNotFound) {
 			w.WriteHeader(http.StatusNoContent)
@@ -1144,7 +1162,7 @@ func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request, b *meta.Bu
 		s.enqueueChunks(r.Context(), o.Manifest.Chunks)
 	}
 	if o != nil && o.VersionID != "" && versioned {
-		w.Header().Set("x-amz-version-id", o.VersionID)
+		w.Header().Set("x-amz-version-id", wireVersionID(o))
 		if o.IsDeleteMarker {
 			w.Header().Set("x-amz-delete-marker", "true")
 		}

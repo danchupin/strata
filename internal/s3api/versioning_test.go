@@ -137,3 +137,87 @@ func TestListObjectVersionsNullLiteral(t *testing.T) {
 		t.Errorf("expected TimeUUID version before null version in XML; body=%s", body)
 	}
 }
+
+// TestVersioningSuspendedReplaceNull covers US-029: in Suspended mode an
+// unversioned PUT replaces just the prior null-versioned row (preserving any
+// TimeUUID-versioned ancestors), and an unversioned DELETE replaces the prior
+// null row with a delete marker addressed by VersionId="null".
+func TestVersioningSuspendedReplaceNull(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	enableVersioning(h, "bkt")
+
+	v1 := putObjectReturnVersion(t, h, "/bkt/doc", "first")
+	if v1 == "" || v1 == "null" {
+		t.Fatalf("enabled put v1=%q want TimeUUID", v1)
+	}
+
+	// Toggle to Suspended.
+	h.mustStatus(h.doString("PUT", "/bkt?versioning",
+		"<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>"), 200)
+
+	// Suspended PUT writes the null-version row.
+	resp := h.doString("PUT", "/bkt/doc", "second")
+	h.mustStatus(resp, 200)
+	if got := resp.Header.Get("X-Amz-Version-Id"); got != "null" {
+		t.Errorf("suspended PUT version-id: got %q want null", got)
+	}
+
+	// Latest is the new null row.
+	resp = h.doString("GET", "/bkt/doc", "")
+	h.mustStatus(resp, 200)
+	if body := h.readBody(resp); body != "second" {
+		t.Errorf("latest after suspended put: got %q want second", body)
+	}
+
+	// v1 still reachable.
+	resp = h.doString("GET", "/bkt/doc?versionId="+v1, "")
+	h.mustStatus(resp, 200)
+	if body := h.readBody(resp); body != "first" {
+		t.Errorf("v1 lost after suspended put: got %q", body)
+	}
+
+	// Suspended PUT again replaces the null row in place.
+	resp = h.doString("PUT", "/bkt/doc", "third")
+	h.mustStatus(resp, 200)
+	resp = h.doString("GET", "/bkt/doc?versionId=null", "")
+	h.mustStatus(resp, 200)
+	if body := h.readBody(resp); body != "third" {
+		t.Errorf("?versionId=null after replace: got %q want third", body)
+	}
+
+	// Suspended unversioned DELETE writes a null delete marker.
+	resp = h.doString("DELETE", "/bkt/doc", "")
+	h.mustStatus(resp, 204)
+	if got := resp.Header.Get("X-Amz-Version-Id"); got != "null" {
+		t.Errorf("suspended DELETE version-id: got %q want null", got)
+	}
+	if got := resp.Header.Get("X-Amz-Delete-Marker"); got != "true" {
+		t.Errorf("suspended DELETE: missing X-Amz-Delete-Marker")
+	}
+
+	// Latest GET hits the marker → 404.
+	h.mustStatus(h.doString("GET", "/bkt/doc", ""), 404)
+
+	// v1 still reachable.
+	resp = h.doString("GET", "/bkt/doc?versionId="+v1, "")
+	h.mustStatus(resp, 200)
+	if body := h.readBody(resp); body != "first" {
+		t.Errorf("v1 lost after suspended delete: got %q", body)
+	}
+
+	// ListObjectVersions reports the null delete marker + v1.
+	resp = h.doString("GET", "/bkt?versions", "")
+	h.mustStatus(resp, 200)
+	body := h.readBody(resp)
+	if !strings.Contains(body, "<VersionId>null</VersionId>") {
+		t.Errorf("null marker missing: %s", body)
+	}
+	if !strings.Contains(body, "<VersionId>"+v1+"</VersionId>") {
+		t.Errorf("v1 missing: %s", body)
+	}
+	// Delete markers go in DeleteMarker elements, not Version.
+	if !strings.Contains(body, "<DeleteMarker>") {
+		t.Errorf("expected DeleteMarker element: %s", body)
+	}
+}

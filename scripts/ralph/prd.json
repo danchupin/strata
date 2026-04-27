@@ -483,8 +483,8 @@
         "go test ./internal/s3api/... ./internal/meta/... passes"
       ],
       "priority": 29,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "meta.Store grew DeleteObjectNullReplacement(ctx, bucketID, key) — Suspended-mode unversioned DELETE that atomically removes any prior null-versioned row (cassandra LWT IF EXISTS) and writes a fresh null delete marker. Memory + cassandra both implement it; both PutObject paths now branch on `versioned=true && o.IsNull=true` to take the Suspended-null path that drops just the prior null row instead of all rows. s3api callers (putObject, copyObject, deleteObject, deleteObjects) detect Suspended buckets and (a) set obj.IsNull=true before PutObject, (b) route empty-versionId DELETE through the new method, and (c) emit `x-amz-version-id: null` via wireVersionID(). enqueueChunks for the replaced null row runs at the s3api layer (best-effort GetObject pre-DELETE) so the data backend gets cleaned up. New contract case caseVersioningSuspendedReplaceNull and s3api HTTP test TestVersioningSuspendedReplaceNull lock in PUT-replace, DELETE-replace, and version-id wire shape."
     },
     {
       "id": "US-030",

@@ -305,6 +305,8 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 	if !versioned {
 		o.VersionID = meta.NullVersionID
 		o.IsNull = true
+	} else if o.IsNull {
+		o.VersionID = meta.NullVersionID
 	}
 	if o.VersionID != "" {
 		parsed, err := gocql.ParseUUID(o.VersionID)
@@ -320,6 +322,16 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 		if err := s.s.Query(
 			`DELETE FROM objects WHERE bucket_id=? AND shard=? AND key=?`,
 			gocqlUUID(o.BucketID), shard, o.Key,
+		).WithContext(ctx).Exec(); err != nil {
+			return err
+		}
+	} else if o.IsNull {
+		// Suspended-mode null PUT: atomically drop any prior null-versioned
+		// row (LWT IF EXISTS — applied=false is fine, no prior null row).
+		nullUUID, _ := gocql.ParseUUID(meta.NullVersionID)
+		if err := s.s.Query(
+			`DELETE FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=? IF EXISTS`,
+			gocqlUUID(o.BucketID), shard, o.Key, nullUUID,
 		).WithContext(ctx).Exec(); err != nil {
 			return err
 		}
@@ -469,6 +481,26 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		ReplicationStatus: replication,
 		ChecksumType:   checksumType,
 	}, nil
+}
+
+// DeleteObjectNullReplacement implements US-029: a Suspended-mode unversioned
+// DELETE atomically removes any prior null-versioned row (LWT IF EXISTS) and
+// writes a fresh null-versioned delete marker. Other (TimeUUID) versions for
+// the key are preserved.
+func (s *Store) DeleteObjectNullReplacement(ctx context.Context, bucketID uuid.UUID, key string) (*meta.Object, error) {
+	marker := &meta.Object{
+		BucketID:       bucketID,
+		Key:            key,
+		VersionID:      meta.NullVersionID,
+		IsLatest:       true,
+		IsDeleteMarker: true,
+		IsNull:         true,
+		Mtime:          time.Now().UTC(),
+	}
+	if err := s.PutObject(ctx, marker, true); err != nil {
+		return nil, err
+	}
+	return marker, nil
 }
 
 func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versionID string, versioned bool) (*meta.Object, error) {

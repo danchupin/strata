@@ -167,6 +167,9 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, dstBucket *m
 		obj.LegalHold = true
 	}
 
+	if dstBucket.Versioning == meta.VersioningSuspended {
+		obj.IsNull = true
+	}
 	if err := s.Meta.PutObject(r.Context(), obj, meta.IsVersioningActive(dstBucket.Versioning)); err != nil {
 		_ = s.Data.Delete(r.Context(), m)
 		mapMetaErr(w, r, err)
@@ -174,10 +177,10 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, dstBucket *m
 	}
 
 	if meta.IsVersioningActive(dstBucket.Versioning) && obj.VersionID != "" {
-		w.Header().Set("x-amz-version-id", obj.VersionID)
+		w.Header().Set("x-amz-version-id", wireVersionID(obj))
 	}
 	if srcObj.VersionID != "" {
-		w.Header().Set("x-amz-copy-source-version-id", srcObj.VersionID)
+		w.Header().Set("x-amz-copy-source-version-id", wireVersionID(srcObj))
 	}
 
 	writeXML(w, http.StatusOK, copyObjectResult{
