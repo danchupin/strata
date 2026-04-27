@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"sync/atomic"
 
 	"google.golang.org/protobuf/proto"
 
@@ -14,8 +15,59 @@ import (
 // ErrEmptyManifest is returned by DecodeManifest when input is nil or zero-length.
 var ErrEmptyManifest = errors.New("empty manifest blob")
 
-// EncodeManifestJSON serialises a Manifest as JSON. This is the default
-// encoder until US-049 flips the toggle to protobuf.
+// ErrInvalidManifestFormat is returned when SetManifestFormat receives a
+// value other than "proto" or "json".
+var ErrInvalidManifestFormat = errors.New("invalid manifest format (want proto|json)")
+
+// Manifest format identifiers used by SetManifestFormat / EncodeManifest.
+const (
+	ManifestFormatProto = "proto"
+	ManifestFormatJSON  = "json"
+)
+
+// manifestFormat is the active wire format for new manifests written via
+// EncodeManifest. Default is protobuf (US-049). Stored as atomic.Value so
+// concurrent PutObject callers see consistent reads even if a hot reload
+// flipped it mid-flight.
+var manifestFormat atomic.Value
+
+func init() {
+	manifestFormat.Store(ManifestFormatProto)
+}
+
+// SetManifestFormat selects the wire format used by EncodeManifest. Callers
+// (cmd/strata-gateway, etc.) read STRATA_MANIFEST_FORMAT once at startup
+// and pass the value here.
+func SetManifestFormat(f string) error {
+	switch f {
+	case ManifestFormatProto, ManifestFormatJSON:
+		manifestFormat.Store(f)
+		return nil
+	default:
+		return fmt.Errorf("%w: %q", ErrInvalidManifestFormat, f)
+	}
+}
+
+// ManifestFormat returns the current wire format ("proto" or "json").
+func ManifestFormat() string {
+	v, _ := manifestFormat.Load().(string)
+	if v == "" {
+		return ManifestFormatProto
+	}
+	return v
+}
+
+// EncodeManifest serialises a Manifest using the format selected by
+// SetManifestFormat (default proto). All meta backends route through this
+// helper so a single env toggle flips new-row encoding everywhere.
+func EncodeManifest(m *Manifest) ([]byte, error) {
+	if ManifestFormat() == ManifestFormatJSON {
+		return EncodeManifestJSON(m)
+	}
+	return EncodeManifestProto(m)
+}
+
+// EncodeManifestJSON serialises a Manifest as JSON.
 func EncodeManifestJSON(m *Manifest) ([]byte, error) {
 	if m == nil {
 		return nil, nil
@@ -29,6 +81,13 @@ func EncodeManifestProto(m *Manifest) ([]byte, error) {
 		return nil, nil
 	}
 	return proto.Marshal(manifestToProto(m))
+}
+
+// IsManifestJSON reports whether b appears to be a JSON-encoded manifest
+// (leading whitespace then '{'). Used by the rewriter to skip rows already
+// in protobuf form. Safe on nil/empty input — returns false.
+func IsManifestJSON(b []byte) bool {
+	return isJSONManifest(b)
 }
 
 // DecodeManifest reads either a JSON-encoded or protobuf-encoded manifest.

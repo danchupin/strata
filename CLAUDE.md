@@ -72,6 +72,12 @@ testcontainers to find the engine.
                           gzipped JSON-lines objects in the configured export
                           bucket, then deletes the source partition (US-046).
                           Leader-elected, daily tick.
+  cmd/strata-manifest-rewriter -> internal/manifestrewriter: walks every bucket
+                          and converts any JSON-encoded objects.manifest blob
+                          to protobuf in place (US-049). Leader-elected,
+                          single-pass, idempotent. Run once after flipping
+                          STRATA_MANIFEST_FORMAT=proto on the gateway to
+                          shrink existing rows.
 ```
 
 The S3 router is in `internal/s3api/server.go`. Bucket-scoped queries (`?cors`, `?policy`, `?lifecycle`, …) dispatch via
@@ -102,10 +108,15 @@ There is a generic blob-config helper pattern for "bucket has one XML/JSON docum
 CORS, policy, public-access-block, ownership-controls). Reuse `setBucketBlob` / `getBucketBlob` / `deleteBucketBlob` in
 both backends instead of writing fresh CRUD per endpoint.
 
-`data.Manifest` is JSON-encoded into the `objects.manifest` blob column (`internal/meta/cassandra/codec.go`). New
-fields tagged `json:",omitempty"` are schema-additive — old rows decode with zero-values, and you avoid an `ALTER`.
-Use this for per-object metadata that the GET path reads but Cassandra never filters on (e.g. `Manifest.PartChunks`
-for the SSE multipart locator).
+`data.Manifest` is encoded into the `objects.manifest` blob column via `data.EncodeManifest` (US-049): the format
+is selected by `data.SetManifestFormat("proto"|"json")`, default `proto`. `cmd/strata-gateway` (and other binaries
+that touch the encoder) read `STRATA_MANIFEST_FORMAT` once at startup and call `SetManifestFormat`. Reads always go
+through `data.DecodeManifest` which sniffs the first non-whitespace byte (`{` → JSON, anything else → proto3 wire
+format) so JSON-vs-proto migrations are transparent. New fields tagged `json:",omitempty"` (and a fresh `protobuf` tag
+in `manifest.proto` + helper updates in `manifest_codec.go`) are schema-additive — old rows decode with zero-values,
+and you avoid an `ALTER`. Use this for per-object metadata the GET path reads but Cassandra never filters on (e.g.
+`Manifest.PartChunks` for the SSE multipart locator). To convert pre-existing JSON rows to proto, run
+`cmd/strata-manifest-rewriter` (leader-elected, idempotent — re-runs skip already-proto rows).
 
 ## Logging (slog)
 

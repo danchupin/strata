@@ -47,7 +47,18 @@ type Store struct {
 	mpDone         map[completionKey]*completionEntry
 	rewrapProgress map[uuid.UUID]*meta.RewrapProgress
 	reshardJobs    map[uuid.UUID]*meta.ReshardJob
+	// objectManifestRaw mirrors per-object manifest blobs in the on-the-wire
+	// format (JSON or proto, per data.SetManifestFormat). Populated by
+	// PutObject and mutated by UpdateObjectManifestRaw — used by the manifest
+	// rewriter (US-049) to detect and convert pre-existing JSON rows.
+	objectManifestRaw map[manifestKey][]byte
 	locker         *Locker
+}
+
+type manifestKey struct {
+	BucketID  uuid.UUID
+	Key       string
+	VersionID string
 }
 
 type completionKey struct {
@@ -113,6 +124,7 @@ func New() *Store {
 		mpDone:         make(map[completionKey]*completionEntry),
 		rewrapProgress: make(map[uuid.UUID]*meta.RewrapProgress),
 		reshardJobs:    make(map[uuid.UUID]*meta.ReshardJob),
+		objectManifestRaw: make(map[manifestKey][]byte),
 		locker:         NewLocker(),
 	}
 }
@@ -736,9 +748,14 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 	} else if o.VersionID == "" {
 		o.VersionID = gocql.TimeUUID().String()
 	}
+	raw, err := data.EncodeManifest(o.Manifest)
+	if err != nil {
+		return err
+	}
 	cp := *o
 	if !versioned {
 		bucket[o.Key] = []*meta.Object{&cp}
+		s.objectManifestRaw[manifestKey{o.BucketID, o.Key, cp.VersionID}] = raw
 		return nil
 	}
 	if o.IsNull {
@@ -750,9 +767,11 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 			filtered = append(filtered, v)
 		}
 		bucket[o.Key] = append([]*meta.Object{&cp}, filtered...)
+		s.objectManifestRaw[manifestKey{o.BucketID, o.Key, cp.VersionID}] = raw
 		return nil
 	}
 	bucket[o.Key] = append([]*meta.Object{&cp}, bucket[o.Key]...)
+	s.objectManifestRaw[manifestKey{o.BucketID, o.Key, cp.VersionID}] = raw
 	return nil
 }
 
@@ -1810,6 +1829,60 @@ func (s *Store) UpdateMultipartUploadSSEWrap(ctx context.Context, bucketID uuid.
 	st.upload.SSEKey = append([]byte(nil), wrapped...)
 	st.upload.SSEKeyID = keyID
 	return nil
+}
+
+// GetObjectManifestRaw returns the raw, persisted manifest blob for the
+// given object version (US-049). Returns ErrObjectNotFound when no row
+// exists for the version.
+func (s *Store) GetObjectManifestRaw(ctx context.Context, bucketID uuid.UUID, key, versionID string) ([]byte, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	bucket, ok := s.objects[bucketID]
+	if !ok {
+		return nil, meta.ErrBucketNotFound
+	}
+	versions, ok := bucket[key]
+	if !ok || len(versions) == 0 {
+		return nil, meta.ErrObjectNotFound
+	}
+	resolved := meta.ResolveVersionID(versionID)
+	for _, v := range versions {
+		if resolved == "" || v.VersionID == resolved {
+			raw := s.objectManifestRaw[manifestKey{bucketID, key, v.VersionID}]
+			return append([]byte(nil), raw...), nil
+		}
+	}
+	return nil, meta.ErrObjectNotFound
+}
+
+// UpdateObjectManifestRaw overwrites the raw manifest blob for the given
+// object version and re-decodes it into the live *data.Manifest pointer so
+// subsequent GetObject reads observe the same logical state. Used by the
+// manifest rewriter (US-049).
+func (s *Store) UpdateObjectManifestRaw(ctx context.Context, bucketID uuid.UUID, key, versionID string, raw []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bucket, ok := s.objects[bucketID]
+	if !ok {
+		return meta.ErrBucketNotFound
+	}
+	versions, ok := bucket[key]
+	if !ok || len(versions) == 0 {
+		return meta.ErrObjectNotFound
+	}
+	resolved := meta.ResolveVersionID(versionID)
+	for _, v := range versions {
+		if resolved == "" || v.VersionID == resolved {
+			m, err := data.DecodeManifest(raw)
+			if err != nil {
+				return err
+			}
+			v.Manifest = m
+			s.objectManifestRaw[manifestKey{bucketID, key, v.VersionID}] = append([]byte(nil), raw...)
+			return nil
+		}
+	}
+	return meta.ErrObjectNotFound
 }
 
 func (s *Store) SetRewrapProgress(ctx context.Context, p *meta.RewrapProgress) error {

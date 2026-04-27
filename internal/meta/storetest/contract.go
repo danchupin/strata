@@ -47,6 +47,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"VersioningSuspendedReplaceNull", caseVersioningSuspendedReplaceNull},
 		{"AccessPointCRUD", caseAccessPointCRUD},
 		{"OnlineReshard", caseOnlineReshard},
+		{"ManifestRawRoundTrip", caseManifestRawRoundTrip},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -357,6 +358,95 @@ func caseSSEWrapRotation(t *testing.T, s meta.Store) {
 	prog, err := s.GetRewrapProgress(ctx, b.ID)
 	if err != nil || !prog.Complete || prog.TargetID != "B" || prog.LastKey != "k" {
 		t.Fatalf("progress: %+v err=%v", prog, err)
+	}
+}
+
+func caseManifestRawRoundTrip(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "mraw", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+
+	// PutObject under the active encoder format. Tests in the meta backends
+	// don't pin SetManifestFormat — both backends MUST round-trip whichever
+	// format the package default hands them.
+	mf := &data.Manifest{
+		Class:     "STANDARD",
+		Size:      9,
+		ChunkSize: 4 * 1024 * 1024,
+		ETag:      `"abc"`,
+	}
+	o := &meta.Object{
+		BucketID:     b.ID,
+		Key:          "k",
+		StorageClass: "STANDARD",
+		ETag:         `"abc"`,
+		Size:         9,
+		Mtime:        time.Now().UTC(),
+		Manifest:     mf,
+	}
+	if err := s.PutObject(ctx, o, false); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	raw, err := s.GetObjectManifestRaw(ctx, b.ID, "k", "")
+	if err != nil {
+		t.Fatalf("get raw: %v", err)
+	}
+	if len(raw) == 0 {
+		t.Fatalf("expected non-empty manifest blob")
+	}
+	if _, err := data.DecodeManifest(raw); err != nil {
+		t.Fatalf("decode raw: %v", err)
+	}
+
+	// Force JSON, write back, verify GetObject still decodes correctly and
+	// the raw blob now reads as JSON.
+	jsonBlob, err := data.EncodeManifestJSON(mf)
+	if err != nil {
+		t.Fatalf("json encode: %v", err)
+	}
+	if err := s.UpdateObjectManifestRaw(ctx, b.ID, "k", "", jsonBlob); err != nil {
+		t.Fatalf("update raw json: %v", err)
+	}
+	roundtripped, err := s.GetObject(ctx, b.ID, "k", "")
+	if err != nil {
+		t.Fatalf("get after update: %v", err)
+	}
+	if roundtripped.Manifest == nil || roundtripped.Manifest.Class != "STANDARD" || roundtripped.Manifest.Size != 9 {
+		t.Fatalf("post-update manifest: %+v", roundtripped.Manifest)
+	}
+	rawJSON, err := s.GetObjectManifestRaw(ctx, b.ID, "k", "")
+	if err != nil {
+		t.Fatalf("get raw json: %v", err)
+	}
+	if !data.IsManifestJSON(rawJSON) {
+		t.Fatalf("expected raw to be JSON after update; first byte=%q", rawJSON[:1])
+	}
+
+	// Flip to proto and verify the rewriter-style round-trip.
+	protoBlob, err := data.EncodeManifestProto(mf)
+	if err != nil {
+		t.Fatalf("proto encode: %v", err)
+	}
+	if err := s.UpdateObjectManifestRaw(ctx, b.ID, "k", "", protoBlob); err != nil {
+		t.Fatalf("update raw proto: %v", err)
+	}
+	rawProto, err := s.GetObjectManifestRaw(ctx, b.ID, "k", "")
+	if err != nil {
+		t.Fatalf("get raw proto: %v", err)
+	}
+	if data.IsManifestJSON(rawProto) {
+		t.Fatalf("expected raw to be proto after update; first byte=%q", rawProto[:1])
+	}
+
+	// Missing object surfaces ErrObjectNotFound (not ErrBucketNotFound).
+	if _, err := s.GetObjectManifestRaw(ctx, b.ID, "nope", ""); err != meta.ErrObjectNotFound {
+		t.Fatalf("missing object: got %v want ErrObjectNotFound", err)
+	}
+	if err := s.UpdateObjectManifestRaw(ctx, b.ID, "nope", "", protoBlob); err != meta.ErrObjectNotFound {
+		t.Fatalf("update missing: got %v want ErrObjectNotFound", err)
 	}
 }
 

@@ -8,7 +8,7 @@ import (
 )
 
 func encodeManifest(m *data.Manifest) ([]byte, error) {
-	return data.EncodeManifestJSON(m)
+	return data.EncodeManifest(m)
 }
 
 func decodeManifest(b []byte) (*data.Manifest, error) {

@@ -40,6 +40,14 @@ func main() {
 		os.Exit(2)
 	}
 
+	if v := os.Getenv("STRATA_MANIFEST_FORMAT"); v != "" {
+		if err := data.SetManifestFormat(v); err != nil {
+			logger.Error("manifest format", "error", err.Error())
+			os.Exit(2)
+		}
+	}
+	logger.Info("manifest encoder", "format", data.ManifestFormat())
+
 	tracerProvider, err := strataotel.Init(context.Background())
 	if err != nil {
 		logger.Error("otel init", "error", err.Error())

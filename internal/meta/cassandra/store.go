@@ -2632,6 +2632,61 @@ func (s *Store) UpdateMultipartUploadSSEWrap(ctx context.Context, bucketID uuid.
 	).WithContext(ctx).Exec()
 }
 
+// GetObjectManifestRaw returns the raw on-disk manifest blob for the given
+// object version (US-049). When versionID is "" or "null" the latest row is
+// returned. Returns ErrObjectNotFound when no row matches.
+func (s *Store) GetObjectManifestRaw(ctx context.Context, bucketID uuid.UUID, key, versionID string) ([]byte, error) {
+	resolved := meta.ResolveVersionID(versionID)
+	if resolved == "" {
+		o, err := s.GetObject(ctx, bucketID, key, "")
+		if err != nil {
+			return nil, err
+		}
+		resolved = o.VersionID
+	}
+	vUUID, err := gocql.ParseUUID(resolved)
+	if err != nil {
+		return nil, meta.ErrObjectNotFound
+	}
+	shard := shardOf(key, s.defaultShard)
+	var blob []byte
+	err = s.s.Query(
+		`SELECT manifest FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
+		gocqlUUID(bucketID), shard, key, vUUID,
+	).WithContext(ctx).Scan(&blob)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return nil, meta.ErrObjectNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return blob, nil
+}
+
+// UpdateObjectManifestRaw overwrites just the manifest column for the given
+// object version. The store does not validate the bytes; callers are
+// expected to pass a valid JSON or proto manifest blob.
+func (s *Store) UpdateObjectManifestRaw(ctx context.Context, bucketID uuid.UUID, key, versionID string, raw []byte) error {
+	resolved := meta.ResolveVersionID(versionID)
+	if resolved == "" {
+		o, err := s.GetObject(ctx, bucketID, key, "")
+		if err != nil {
+			return err
+		}
+		resolved = o.VersionID
+	}
+	vUUID, err := gocql.ParseUUID(resolved)
+	if err != nil {
+		return meta.ErrObjectNotFound
+	}
+	shard := shardOf(key, s.defaultShard)
+	return s.s.Query(
+		`UPDATE objects SET manifest=? WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
+		nilIfEmptyBytes(raw),
+		gocqlUUID(bucketID), shard, key, vUUID,
+	).WithContext(ctx).Exec()
+}
+
 func (s *Store) SetRewrapProgress(ctx context.Context, p *meta.RewrapProgress) error {
 	if p == nil {
 		return nil

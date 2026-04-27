@@ -803,8 +803,8 @@
         "go test ./internal/data/... ./cmd/strata-manifest-rewriter/... passes"
       ],
       "priority": 49,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "internal/data: SetManifestFormat / ManifestFormat (atomic.Value, default 'proto') + EncodeManifest dispatcher; STRATA_MANIFEST_FORMAT=proto|json wired in cmd/strata-gateway main + cmd/strata-manifest-rewriter main. cassandra/codec.go::encodeManifest now calls data.EncodeManifest. memory backend grew an objectManifestRaw[manifestKey][]byte sidecar populated by PutObject via data.EncodeManifest (kept in lockstep with the live *meta.Object Manifest pointer). meta.Store grew GetObjectManifestRaw + UpdateObjectManifestRaw (both backends in lockstep + caseManifestRawRoundTrip in storetest). New internal/manifestrewriter pkg + cmd/strata-manifest-rewriter binary: leader-elected, single-pass Run() walks ListBuckets -> ListObjectVersions, reads raw blob via GetObjectManifestRaw, skips when !data.IsManifestJSON (already proto), otherwise decodes -> EncodeManifestProto -> UpdateObjectManifestRaw. Idempotent (re-runs skip already-proto), resumable via the same skip logic. data.IsManifestJSON exported for the rewriter + tests."
     }
   ]
 }

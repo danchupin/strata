@@ -594,6 +594,16 @@ type Store interface {
 	SetRewrapProgress(ctx context.Context, p *RewrapProgress) error
 	GetRewrapProgress(ctx context.Context, bucketID uuid.UUID) (*RewrapProgress, error)
 
+	// GetObjectManifestRaw returns the raw, persisted manifest blob for the
+	// given object version. Used by the manifest rewriter (US-049) to detect
+	// JSON-encoded rows and convert them to protobuf in place.
+	GetObjectManifestRaw(ctx context.Context, bucketID uuid.UUID, key, versionID string) ([]byte, error)
+	// UpdateObjectManifestRaw overwrites the raw manifest blob for the given
+	// object version. Callers are responsible for re-encoding correctly; the
+	// store does not validate the bytes. Used by the rewriter to flip a
+	// JSON-encoded manifest to protobuf without disturbing other columns.
+	UpdateObjectManifestRaw(ctx context.Context, bucketID uuid.UUID, key, versionID string, raw []byte) error
+
 	SetObjectReplicationStatus(ctx context.Context, bucketID uuid.UUID, key, versionID, status string) error
 
 	// StartReshard queues an online shard-resize for bucketID with the given
