@@ -92,6 +92,19 @@ func (b *Backend) Delete(ctx context.Context, m *data.Manifest) error {
 
 func (b *Backend) Close() error { return nil }
 
+// ChunkOIDs returns the set of OIDs currently held by the backend. Test-only
+// helper used by the race harness to assert no chunk lands outside a manifest
+// or the GC queue.
+func (b *Backend) ChunkOIDs() []string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	out := make([]string, 0, len(b.chunks))
+	for oid := range b.chunks {
+		out = append(out, oid)
+	}
+	return out
+}
+
 // CorruptFirstChunk flips a byte in the first stored chunk and returns true.
 // Test-only helper used by SSE round-trip tests to simulate at-rest tampering;
 // returns false if there are no chunks.

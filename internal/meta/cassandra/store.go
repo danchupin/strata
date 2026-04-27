@@ -761,6 +761,80 @@ func drainVersionHeap(h *versionHeap) {
 	}
 }
 
+// AllObjectVersions returns every stored object version across every shard
+// of the bucket as deep copies, with IsLatest set on the first (highest
+// version_id) row per key. Test-only escape hatch for invariant checks
+// that need the full picture without paging through ListObjectVersions
+// (whose 1000-row hard cap makes it unfit for the race-harness verification
+// pass).
+func (s *Store) AllObjectVersions(ctx context.Context, bucketID uuid.UUID) ([]*meta.Object, error) {
+	out := make([]*meta.Object, 0)
+	for shard := 0; shard < s.defaultShard; shard++ {
+		iter := s.s.Query(
+			`SELECT key, version_id, is_delete_marker, size, etag, content_type,
+			        storage_class, mtime, manifest, user_meta, is_null
+			 FROM objects WHERE bucket_id=? AND shard=?`,
+			gocqlUUID(bucketID), shard,
+		).WithContext(ctx).PageSize(2000).Iter()
+		for {
+			var (
+				key          string
+				versionID    gocql.UUID
+				isDeleteMark bool
+				size         int64
+				etag, ctype  string
+				class        string
+				mtime        time.Time
+				manifestBlob []byte
+				userMeta     map[string]string
+				isNull       bool
+			)
+			if !iter.Scan(&key, &versionID, &isDeleteMark, &size, &etag, &ctype,
+				&class, &mtime, &manifestBlob, &userMeta, &isNull) {
+				break
+			}
+			m, _ := decodeManifest(manifestBlob)
+			out = append(out, &meta.Object{
+				BucketID:       bucketID,
+				Key:            key,
+				VersionID:      versionID.String(),
+				IsDeleteMarker: isDeleteMark,
+				IsNull:         isNull,
+				Size:           size,
+				ETag:           etag,
+				ContentType:    ctype,
+				StorageClass:   class,
+				Mtime:          mtime,
+				Manifest:       m,
+				UserMeta:       userMeta,
+			})
+		}
+		if err := iter.Close(); err != nil {
+			return nil, err
+		}
+	}
+	// Sort by (key ASC, version_id DESC) so we can stamp IsLatest on the head
+	// of each per-key chain. Cassandra's clustering order delivers within a
+	// shard but across shards the merge order is not preserved.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Key != out[j].Key {
+			return out[i].Key < out[j].Key
+		}
+		return out[i].VersionID > out[j].VersionID
+	})
+	var lastKey string
+	first := true
+	for _, o := range out {
+		if o.Key != lastKey {
+			first = true
+			lastKey = o.Key
+		}
+		o.IsLatest = first
+		first = false
+	}
+	return out, nil
+}
+
 type versionCursor struct {
 	iter    *gocql.Iter
 	current *meta.Object

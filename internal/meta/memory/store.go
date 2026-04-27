@@ -842,6 +842,29 @@ func (s *Store) ListObjects(ctx context.Context, bucketID uuid.UUID, opts meta.L
 	return res, nil
 }
 
+// AllObjectVersions returns every stored version across every key in the
+// bucket as deep copies, with IsLatest set to true on the head of each key's
+// version chain. Test-only escape hatch for invariant checks that need the
+// full picture without paging through ListObjectVersions (whose 1000-row
+// hard cap makes it unfit for the race-harness verification pass).
+func (s *Store) AllObjectVersions(bucketID uuid.UUID) []*meta.Object {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	bucket, ok := s.objects[bucketID]
+	if !ok {
+		return nil
+	}
+	var out []*meta.Object
+	for _, vs := range bucket {
+		for i, v := range vs {
+			cp := *v
+			cp.IsLatest = (i == 0)
+			out = append(out, &cp)
+		}
+	}
+	return out
+}
+
 func (s *Store) ListObjectVersions(ctx context.Context, bucketID uuid.UUID, opts meta.ListOptions) (*meta.ListVersionsResult, error) {
 	s.mu.RLock()
 	bucket, ok := s.objects[bucketID]
