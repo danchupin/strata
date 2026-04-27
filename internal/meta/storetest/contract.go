@@ -42,6 +42,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"AuditLogRoundTrip", caseAuditLog},
 		{"AuditLogFiltered", caseAuditLogFiltered},
 		{"VersioningNullSentinel", caseVersioningNullSentinel},
+		{"VersioningNullListVersions", caseVersioningNullListVersions},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -819,5 +820,105 @@ func caseVersioningNullSentinel(t *testing.T, s meta.Store) {
 	}
 	if got.ETag != "second" {
 		t.Fatalf("after overwrite ETag=%q want second", got.ETag)
+	}
+}
+
+// caseVersioningNullListVersions covers US-028: the null-versioned ancestor
+// remains addressable after toggling the bucket from Disabled to Enabled, an
+// Enabled-mode PUT prepends a TimeUUID version above the null one without
+// overwriting it, and ListObjectVersions surfaces both rows with the null one
+// flagged IsNull=true.
+func caseVersioningNullListVersions(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "nlv", "o", "STANDARD")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	put := func(body string, versioned bool) string {
+		o := &meta.Object{
+			BucketID:     b.ID,
+			Key:          "doc",
+			StorageClass: "STANDARD",
+			ETag:         body,
+			Size:         int64(len(body)),
+			Mtime:        time.Now().UTC(),
+			Manifest:     &data.Manifest{Class: "STANDARD", Size: int64(len(body))},
+		}
+		if err := s.PutObject(ctx, o, versioned); err != nil {
+			t.Fatalf("put %q versioned=%v: %v", body, versioned, err)
+		}
+		return o.VersionID
+	}
+
+	// 1) Disabled-mode PUT lands the null-versioned row.
+	nullV := put("first", false)
+	if nullV != meta.NullVersionID {
+		t.Fatalf("disabled put VersionID=%q want sentinel", nullV)
+	}
+
+	// 2) Toggle to Enabled; null row stays addressable as ?versionId=null.
+	if err := s.SetBucketVersioning(ctx, "nlv", meta.VersioningEnabled); err != nil {
+		t.Fatalf("set versioning: %v", err)
+	}
+	gotNull, err := s.GetObject(ctx, b.ID, "doc", meta.NullVersionLiteral)
+	if err != nil {
+		t.Fatalf("get null after toggle: %v", err)
+	}
+	if !gotNull.IsNull || gotNull.ETag != "first" {
+		t.Fatalf("null after toggle: %+v", gotNull)
+	}
+
+	// 3) Enabled-mode PUT prepends a TimeUUID version. Null row preserved.
+	v2 := put("second", true)
+	if v2 == meta.NullVersionID || v2 == "" {
+		t.Fatalf("enabled put VersionID=%q want fresh TimeUUID", v2)
+	}
+
+	latest, err := s.GetObject(ctx, b.ID, "doc", "")
+	if err != nil {
+		t.Fatalf("get latest: %v", err)
+	}
+	if latest.VersionID != v2 || latest.ETag != "second" || latest.IsNull {
+		t.Fatalf("latest: %+v", latest)
+	}
+
+	stillNull, err := s.GetObject(ctx, b.ID, "doc", meta.NullVersionLiteral)
+	if err != nil {
+		t.Fatalf("get null after enabled put: %v", err)
+	}
+	if !stillNull.IsNull || stillNull.ETag != "first" {
+		t.Fatalf("null after enabled put: %+v", stillNull)
+	}
+
+	// 4) ListObjectVersions surfaces both rows with correct IsLatest + IsNull.
+	res, err := s.ListObjectVersions(ctx, b.ID, meta.ListOptions{Limit: 100})
+	if err != nil {
+		t.Fatalf("list versions: %v", err)
+	}
+	if len(res.Versions) != 2 {
+		t.Fatalf("got %d versions want 2", len(res.Versions))
+	}
+	var sawLatest, sawNull bool
+	for _, v := range res.Versions {
+		switch v.VersionID {
+		case v2:
+			if !v.IsLatest || v.IsNull || v.ETag != "second" {
+				t.Fatalf("latest entry: %+v", v)
+			}
+			sawLatest = true
+		case meta.NullVersionID:
+			if v.IsLatest {
+				t.Fatalf("null entry should not be latest: %+v", v)
+			}
+			if !v.IsNull || v.ETag != "first" {
+				t.Fatalf("null entry: %+v", v)
+			}
+			sawNull = true
+		default:
+			t.Fatalf("unexpected versionID %q in list", v.VersionID)
+		}
+	}
+	if !sawLatest || !sawNull {
+		t.Fatalf("missing entries (sawLatest=%v sawNull=%v)", sawLatest, sawNull)
 	}
 }

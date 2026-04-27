@@ -467,8 +467,8 @@
         "go test ./internal/s3api/... ./internal/meta/... passes"
       ],
       "priority": 28,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Cassandra version cursor scans is_null column so listed rows carry the flag. s3api wireVersionID() helper translates IsNull rows to 'null' wire literal in <VersionId> XML and in the NextVersionIdMarker continuation. Memory + cassandra share new caseVersioningNullListVersions contract test (Disabled PUT → toggle Enabled → versioned PUT prepends TimeUUID, null row preserved, list emits both rows, null IsLatest=false). s3api TestListObjectVersionsNullLiteral round-trips it over HTTP."
     },
     {
       "id": "US-029",

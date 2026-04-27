@@ -85,3 +85,55 @@ func TestListObjectVersions(t *testing.T) {
 		t.Errorf("no IsLatest=true marker: %s", body)
 	}
 }
+
+// TestListObjectVersionsNullLiteral covers US-028: a row written under
+// Versioning=Disabled stays addressable as ?versionId=null after the bucket
+// is toggled to Enabled. ListObjectVersions surfaces it with VersionId="null"
+// and IsLatest=false once a TimeUUID version is layered on top, while the
+// new TimeUUID row is IsLatest=true.
+func TestListObjectVersionsNullLiteral(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+
+	// Disabled-mode PUT (no versioning yet) → null version row.
+	h.mustStatus(h.doString("PUT", "/bkt/doc", "first"), 200)
+	enableVersioning(h, "bkt")
+
+	// Versioned PUT prepends a TimeUUID without overwriting the null row.
+	v2 := putObjectReturnVersion(t, h, "/bkt/doc", "second")
+	if v2 == "" || v2 == "null" {
+		t.Fatalf("enabled put VersionID=%q want fresh TimeUUID", v2)
+	}
+
+	// Null version still readable via the literal.
+	resp := h.doString("GET", "/bkt/doc?versionId=null", "")
+	h.mustStatus(resp, 200)
+	if body := h.readBody(resp); body != "first" {
+		t.Errorf("?versionId=null body: got %q want first", body)
+	}
+
+	// ListObjectVersions surfaces both rows.
+	resp = h.doString("GET", "/bkt?versions", "")
+	h.mustStatus(resp, 200)
+	body := h.readBody(resp)
+	matches := versionIDRE.FindAllStringSubmatch(body, -1)
+	if len(matches) != 2 {
+		t.Fatalf("expected 2 versions, got %d: %s", len(matches), body)
+	}
+	if !strings.Contains(body, "<VersionId>null</VersionId>") {
+		t.Errorf("null VersionId entry missing: %s", body)
+	}
+	if !strings.Contains(body, "<VersionId>"+v2+"</VersionId>") {
+		t.Errorf("v2 VersionId missing: %s", body)
+	}
+	// New TimeUUID row should be the latest.
+	latestIdx := strings.Index(body, "<VersionId>"+v2+"</VersionId>")
+	nullIdx := strings.Index(body, "<VersionId>null</VersionId>")
+	if latestIdx < 0 || nullIdx < 0 {
+		t.Fatalf("indexes: latest=%d null=%d body=%s", latestIdx, nullIdx, body)
+	}
+	// The XML emits Version elements; the first one (lower index) is current.
+	if latestIdx > nullIdx {
+		t.Errorf("expected TimeUUID version before null version in XML; body=%s", body)
+	}
+}

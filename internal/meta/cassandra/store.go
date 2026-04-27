@@ -753,9 +753,10 @@ func (c *versionCursor) advance() bool {
 		mtime        time.Time
 		manifestBlob []byte
 		userMeta     map[string]string
+		isNull       bool
 	)
 	if !c.iter.Scan(&key, &versionID, &isDeleteMark, &size, &etag, &ctype,
-		&class, &mtime, &manifestBlob, &userMeta) {
+		&class, &mtime, &manifestBlob, &userMeta, &isNull) {
 		return false
 	}
 	m, _ := decodeManifest(manifestBlob)
@@ -764,6 +765,7 @@ func (c *versionCursor) advance() bool {
 		Key:            key,
 		VersionID:      versionID.String(),
 		IsDeleteMarker: isDeleteMark,
+		IsNull:         isNull,
 		Size:           size,
 		ETag:           etag,
 		ContentType:    ctype,
@@ -780,14 +782,14 @@ func (s *Store) openVersionCursor(ctx context.Context, bucketID uuid.UUID, shard
 	if marker == "" {
 		iter = s.s.Query(
 			`SELECT key, version_id, is_delete_marker, size, etag, content_type,
-			        storage_class, mtime, manifest, user_meta
+			        storage_class, mtime, manifest, user_meta, is_null
 			 FROM objects WHERE bucket_id=? AND shard=?`,
 			gocqlUUID(bucketID), shard,
 		).WithContext(ctx).PageSize(pageSize).Iter()
 	} else {
 		iter = s.s.Query(
 			`SELECT key, version_id, is_delete_marker, size, etag, content_type,
-			        storage_class, mtime, manifest, user_meta
+			        storage_class, mtime, manifest, user_meta, is_null
 			 FROM objects WHERE bucket_id=? AND shard=? AND key >= ?`,
 			gocqlUUID(bucketID), shard, marker,
 		).WithContext(ctx).PageSize(pageSize).Iter()
