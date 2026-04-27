@@ -55,21 +55,42 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
+// RunOnce performs a single drain pass. Exposed for tests + the admin
+// /admin/gc/drain endpoint so an operator can trigger out-of-band cleanup.
+// Returns the count of chunks successfully ack'd this pass.
+func (w *Worker) RunOnce(ctx context.Context) int {
+	if w.Grace < 0 {
+		w.Grace = 0
+	}
+	if w.Batch == 0 {
+		w.Batch = 500
+	}
+	if w.Logger == nil {
+		w.Logger = slog.Default()
+	}
+	return w.drainCount(ctx)
+}
+
 func (w *Worker) drain(ctx context.Context) {
+	w.drainCount(ctx)
+}
+
+func (w *Worker) drainCount(ctx context.Context) int {
 	before := time.Now().Add(-w.Grace)
 	first := true
+	processed := 0
 	for {
 		entries, err := w.Meta.ListGCEntries(ctx, w.Region, before, w.Batch)
 		if err != nil {
 			w.Logger.WarnContext(ctx, "gc list", "error", err.Error())
-			return
+			return processed
 		}
 		if first && w.Metrics != nil {
 			w.Metrics.SetQueueDepth(w.Region, len(entries))
 		}
 		first = false
 		if len(entries) == 0 {
-			return
+			return processed
 		}
 		for _, e := range entries {
 			manifest := &data.Manifest{Chunks: []data.ChunkRef{e.Chunk}}
@@ -82,9 +103,10 @@ func (w *Worker) drain(ctx context.Context) {
 				continue
 			}
 			metrics.GCProcessed.Inc()
+			processed++
 		}
 		if len(entries) < w.Batch {
-			return
+			return processed
 		}
 	}
 }

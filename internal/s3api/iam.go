@@ -80,6 +80,8 @@ func (s *Server) handleIAM(w http.ResponseWriter, r *http.Request, action string
 		s.iamListAccessKeys(w, r)
 	case "DeleteAccessKey":
 		s.iamDeleteAccessKey(w, r)
+	case "RotateAccessKey":
+		s.iamRotateAccessKey(w, r)
 	case "AssumeRole":
 		s.stsAssumeRole(w, r)
 	default:
@@ -406,6 +408,57 @@ func (s *Server) iamDeleteAccessKey(w http.ResponseWriter, r *http.Request) {
 	}
 	writeXML(w, http.StatusOK, deleteAccessKeyResponse{
 		XMLNS:    iamXMLNS,
+		Metadata: iamResponseMetadata{RequestID: newRequestID()},
+	})
+}
+
+// iamRotateAccessKey is the strata-specific [iam root]-only convenience that
+// rotates an access key in one round-trip: mints a fresh key for the same user
+// and deletes the prior one. Returns the new AccessKey (id+secret) inside an
+// IAM-shaped XML envelope so the CLI can parse it with the same machinery as
+// CreateAccessKey. Caller must supply AccessKeyId of the key to rotate; the
+// owning user is looked up server-side.
+func (s *Server) iamRotateAccessKey(w http.ResponseWriter, r *http.Request) {
+	oldID := iamParam(r, "AccessKeyId")
+	if oldID == "" {
+		writeError(w, r, errIAMValidation)
+		return
+	}
+	old, err := s.Meta.GetIAMAccessKey(r.Context(), oldID)
+	if err != nil {
+		if errors.Is(err, meta.ErrIAMAccessKeyNotFound) {
+			writeError(w, r, errIAMNoSuchEntity)
+			return
+		}
+		writeError(w, r, ErrInternal)
+		return
+	}
+	ak := &meta.IAMAccessKey{
+		AccessKeyID:     newAccessKeyID(),
+		SecretAccessKey: newSecretAccessKey(),
+		UserName:        old.UserName,
+		CreatedAt:       time.Now().UTC(),
+	}
+	if err := s.Meta.CreateIAMAccessKey(r.Context(), ak); err != nil {
+		writeError(w, r, ErrInternal)
+		return
+	}
+	if _, err := s.Meta.DeleteIAMAccessKey(r.Context(), oldID); err != nil {
+		writeError(w, r, ErrInternal)
+		return
+	}
+	if s.InvalidateCredential != nil {
+		s.InvalidateCredential(oldID)
+	}
+	writeXML(w, http.StatusOK, createAccessKeyResponse{
+		XMLNS: iamXMLNS,
+		Result: createAccessKeyResult{AccessKey: iamAccessKey{
+			UserName:        ak.UserName,
+			AccessKeyID:     ak.AccessKeyID,
+			Status:          accessKeyStatus(ak.Disabled),
+			SecretAccessKey: ak.SecretAccessKey,
+			CreateDate:      ak.CreatedAt.UTC().Format(time.RFC3339),
+		}},
 		Metadata: iamResponseMetadata{RequestID: newRequestID()},
 	})
 }

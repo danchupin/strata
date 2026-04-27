@@ -89,6 +89,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			r.URL.RawPath = "/" + vhostBucket + rawPath
 		}
 	}
+	if strings.HasPrefix(r.URL.Path, "/admin/") {
+		s.handleAdmin(w, r, strings.TrimPrefix(r.URL.Path, "/admin/"))
+		return
+	}
 	bucket, key := splitPath(r.URL.Path)
 
 	switch {

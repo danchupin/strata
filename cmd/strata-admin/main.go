@@ -1,0 +1,271 @@
+// strata-admin is the operator CLI for the strata gateway. Subcommands map
+// onto IAM admin endpoints + the /admin/* HTTP surface (US-034). Output is
+// human-readable by default; --json prints the raw response payload for
+// scripting.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+)
+
+func main() {
+	app := newApp(os.Stdout, os.Stderr, os.Args[1:])
+	if err := app.run(context.Background()); err != nil {
+		if !errors.Is(err, errUsage) {
+			fmt.Fprintln(os.Stderr, "strata-admin:", err)
+		}
+		os.Exit(2)
+	}
+}
+
+var errUsage = errors.New("usage")
+
+// app encapsulates the CLI so it stays testable: tests construct an app, point
+// it at an httptest URL and assert on stdout/stderr.
+type app struct {
+	out  io.Writer
+	err  io.Writer
+	args []string
+}
+
+func newApp(out, errOut io.Writer, args []string) *app {
+	return &app{out: out, err: errOut, args: args}
+}
+
+func (a *app) run(ctx context.Context) error {
+	root := flag.NewFlagSet("strata-admin", flag.ContinueOnError)
+	root.SetOutput(a.err)
+	endpoint := root.String("endpoint", envOrDefault("STRATA_ADMIN_ENDPOINT", "http://localhost:9000"), "gateway endpoint URL")
+	principal := root.String("principal", os.Getenv("STRATA_ADMIN_PRINCIPAL"), "X-Test-Principal header value (test harness shortcut)")
+	jsonOut := root.Bool("json", false, "emit raw JSON instead of human-formatted output")
+	root.Usage = func() {
+		fmt.Fprintln(a.err, "usage: strata-admin [global flags] <iam|lifecycle|gc|sse|replicate|bucket> <subcommand> [flags]")
+		root.PrintDefaults()
+	}
+
+	if err := root.Parse(a.args); err != nil {
+		return errUsage
+	}
+	rest := root.Args()
+	if len(rest) < 2 {
+		root.Usage()
+		return errUsage
+	}
+
+	client := &Client{Endpoint: *endpoint, Principal: *principal, UserAgent: "strata-admin/1"}
+	group, sub := rest[0], rest[1]
+	args := rest[2:]
+
+	switch group + " " + sub {
+	case "iam create-access-key":
+		return a.cmdIAMCreateAccessKey(ctx, client, *jsonOut, args)
+	case "iam rotate-access-key":
+		return a.cmdIAMRotateAccessKey(ctx, client, *jsonOut, args)
+	case "lifecycle tick":
+		return a.cmdLifecycleTick(ctx, client, *jsonOut, args)
+	case "gc drain":
+		return a.cmdGCDrain(ctx, client, *jsonOut, args)
+	case "sse rotate":
+		return a.cmdSSERotate(ctx, client, *jsonOut, args)
+	case "replicate retry":
+		return a.cmdReplicateRetry(ctx, client, *jsonOut, args)
+	case "bucket inspect":
+		return a.cmdBucketInspect(ctx, client, *jsonOut, args)
+	default:
+		fmt.Fprintf(a.err, "unknown command: %s %s\n", group, sub)
+		root.Usage()
+		return errUsage
+	}
+}
+
+func (a *app) cmdIAMCreateAccessKey(ctx context.Context, c *Client, jsonOut bool, args []string) error {
+	fs := flag.NewFlagSet("iam create-access-key", flag.ContinueOnError)
+	fs.SetOutput(a.err)
+	user := fs.String("user", "", "IAM user name")
+	if err := fs.Parse(args); err != nil {
+		return errUsage
+	}
+	if *user == "" {
+		return errors.New("--user is required")
+	}
+	ak, err := c.CreateAccessKey(ctx, *user)
+	if err != nil {
+		return err
+	}
+	return a.emitAccessKey(ak, jsonOut)
+}
+
+func (a *app) cmdIAMRotateAccessKey(ctx context.Context, c *Client, jsonOut bool, args []string) error {
+	fs := flag.NewFlagSet("iam rotate-access-key", flag.ContinueOnError)
+	fs.SetOutput(a.err)
+	id := fs.String("access-key-id", "", "the access key id to rotate")
+	if err := fs.Parse(args); err != nil {
+		return errUsage
+	}
+	if *id == "" {
+		return errors.New("--access-key-id is required")
+	}
+	ak, err := c.RotateAccessKey(ctx, *id)
+	if err != nil {
+		return err
+	}
+	return a.emitAccessKey(ak, jsonOut)
+}
+
+func (a *app) emitAccessKey(ak *AccessKey, jsonOut bool) error {
+	if jsonOut {
+		return writeJSON(a.out, ak)
+	}
+	fmt.Fprintf(a.out, "user:        %s\n", ak.UserName)
+	fmt.Fprintf(a.out, "access_key:  %s\n", ak.AccessKeyID)
+	if ak.SecretAccessKey != "" {
+		fmt.Fprintf(a.out, "secret_key:  %s\n", ak.SecretAccessKey)
+	}
+	fmt.Fprintf(a.out, "status:      %s\n", ak.Status)
+	fmt.Fprintf(a.out, "created:     %s\n", ak.CreateDate)
+	return nil
+}
+
+func (a *app) cmdLifecycleTick(ctx context.Context, c *Client, jsonOut bool, args []string) error {
+	fs := flag.NewFlagSet("lifecycle tick", flag.ContinueOnError)
+	fs.SetOutput(a.err)
+	if err := fs.Parse(args); err != nil {
+		return errUsage
+	}
+	res, err := c.LifecycleTick(ctx)
+	if err != nil {
+		return err
+	}
+	if jsonOut {
+		return writeJSON(a.out, res)
+	}
+	fmt.Fprintf(a.out, "lifecycle: ok=%t duration=%dms\n", res.OK, res.DurationMs)
+	if res.Error != "" {
+		fmt.Fprintf(a.out, "error:     %s\n", res.Error)
+	}
+	return nil
+}
+
+func (a *app) cmdGCDrain(ctx context.Context, c *Client, jsonOut bool, args []string) error {
+	fs := flag.NewFlagSet("gc drain", flag.ContinueOnError)
+	fs.SetOutput(a.err)
+	if err := fs.Parse(args); err != nil {
+		return errUsage
+	}
+	res, err := c.GCDrain(ctx)
+	if err != nil {
+		return err
+	}
+	if jsonOut {
+		return writeJSON(a.out, res)
+	}
+	fmt.Fprintf(a.out, "gc: drained=%d duration=%dms\n", res.Drained, res.DurationMs)
+	return nil
+}
+
+func (a *app) cmdSSERotate(ctx context.Context, c *Client, jsonOut bool, args []string) error {
+	fs := flag.NewFlagSet("sse rotate", flag.ContinueOnError)
+	fs.SetOutput(a.err)
+	if err := fs.Parse(args); err != nil {
+		return errUsage
+	}
+	res, err := c.SSERotate(ctx)
+	if err != nil {
+		return err
+	}
+	if jsonOut {
+		return writeJSON(a.out, res)
+	}
+	fmt.Fprintf(a.out, "sse rotate: ok=%t active=%s\n", res.OK, res.ActiveID)
+	fmt.Fprintf(a.out, "  buckets:  scanned=%d skipped=%d\n", res.BucketsScanned, res.BucketsSkipped)
+	fmt.Fprintf(a.out, "  objects:  scanned=%d rewrapped=%d\n", res.ObjectsScanned, res.ObjectsRewrapped)
+	fmt.Fprintf(a.out, "  uploads:  scanned=%d rewrapped=%d\n", res.UploadsScanned, res.UploadsRewrapped)
+	if res.Error != "" {
+		fmt.Fprintf(a.out, "  error:    %s\n", res.Error)
+	}
+	return nil
+}
+
+func (a *app) cmdReplicateRetry(ctx context.Context, c *Client, jsonOut bool, args []string) error {
+	fs := flag.NewFlagSet("replicate retry", flag.ContinueOnError)
+	fs.SetOutput(a.err)
+	bucket := fs.String("bucket", "", "bucket whose FAILED replication rows should be re-emitted")
+	if err := fs.Parse(args); err != nil {
+		return errUsage
+	}
+	if *bucket == "" {
+		return errors.New("--bucket is required")
+	}
+	res, err := c.ReplicateRetry(ctx, *bucket)
+	if err != nil {
+		return err
+	}
+	if jsonOut {
+		return writeJSON(a.out, res)
+	}
+	fmt.Fprintf(a.out, "replicate retry: bucket=%s scanned=%d requeued=%d\n", res.Bucket, res.Scanned, res.Requeued)
+	if res.Error != "" {
+		fmt.Fprintf(a.out, "  error: %s\n", res.Error)
+	}
+	return nil
+}
+
+func (a *app) cmdBucketInspect(ctx context.Context, c *Client, jsonOut bool, args []string) error {
+	fs := flag.NewFlagSet("bucket inspect", flag.ContinueOnError)
+	fs.SetOutput(a.err)
+	bucket := fs.String("bucket", "", "bucket name")
+	if err := fs.Parse(args); err != nil {
+		return errUsage
+	}
+	if *bucket == "" {
+		return errors.New("--bucket is required")
+	}
+	res, err := c.BucketInspect(ctx, *bucket)
+	if err != nil {
+		return err
+	}
+	if jsonOut {
+		return writeJSON(a.out, res)
+	}
+	fmt.Fprintf(a.out, "bucket:      %s\n", res.Name)
+	fmt.Fprintf(a.out, "id:          %s\n", res.ID)
+	fmt.Fprintf(a.out, "owner:       %s\n", res.Owner)
+	fmt.Fprintf(a.out, "created_at:  %s\n", res.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
+	fmt.Fprintf(a.out, "default:     %s\n", res.DefaultClass)
+	if res.Versioning != "" {
+		fmt.Fprintf(a.out, "versioning:  %s\n", res.Versioning)
+	}
+	if res.Region != "" {
+		fmt.Fprintf(a.out, "region:      %s\n", res.Region)
+	}
+	if res.MfaDelete != "" {
+		fmt.Fprintf(a.out, "mfa_delete:  %s\n", res.MfaDelete)
+	}
+	fmt.Fprintf(a.out, "lock:        %t\n", res.ObjectLockEnabled)
+	if len(res.Configs) > 0 {
+		fmt.Fprintf(a.out, "configs:\n")
+		for name := range res.Configs {
+			fmt.Fprintf(a.out, "  - %s\n", name)
+		}
+	}
+	return nil
+}
+
+func writeJSON(w io.Writer, v any) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
+}
+
+func envOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
