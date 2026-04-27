@@ -3,7 +3,6 @@ package s3api
 import (
 	"encoding/xml"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/danchupin/strata/internal/meta"
@@ -44,11 +43,22 @@ type objectAttrChecksums struct {
 }
 
 type objectAttrParts struct {
-	PartsCount           int  `xml:"PartsCount"`
-	MaxParts             int  `xml:"MaxParts,omitempty"`
-	PartNumberMarker     int  `xml:"PartNumberMarker,omitempty"`
-	NextPartNumberMarker int  `xml:"NextPartNumberMarker,omitempty"`
-	IsTruncated          bool `xml:"IsTruncated,omitempty"`
+	PartsCount           int              `xml:"PartsCount"`
+	MaxParts             int              `xml:"MaxParts,omitempty"`
+	PartNumberMarker     int              `xml:"PartNumberMarker,omitempty"`
+	NextPartNumberMarker int              `xml:"NextPartNumberMarker,omitempty"`
+	IsTruncated          bool             `xml:"IsTruncated,omitempty"`
+	Parts                []objectAttrPart `xml:"Part,omitempty"`
+}
+
+type objectAttrPart struct {
+	PartNumber        int    `xml:"PartNumber"`
+	Size              int64  `xml:"Size"`
+	ChecksumCRC32     string `xml:"ChecksumCRC32,omitempty"`
+	ChecksumCRC32C    string `xml:"ChecksumCRC32C,omitempty"`
+	ChecksumSHA1      string `xml:"ChecksumSHA1,omitempty"`
+	ChecksumSHA256    string `xml:"ChecksumSHA256,omitempty"`
+	ChecksumCRC64NVME string `xml:"ChecksumCRC64NVME,omitempty"`
 }
 
 func (s *Server) getObjectAttributes(w http.ResponseWriter, r *http.Request, b *meta.Bucket, key string) {
@@ -104,9 +114,7 @@ func (s *Server) getObjectAttributes(w http.ResponseWriter, r *http.Request, b *
 		}
 	}
 	if _, ok := requested[objectAttrObjectParts]; ok {
-		if op := buildObjectPartsAttrs(o); op != nil {
-			resp.ObjectParts = op
-		}
+		resp.ObjectParts = buildObjectPartsAttrs(o)
 	}
 
 	w.Header().Set("Last-Modified", o.Mtime.UTC().Format(http.TimeFormat))
@@ -133,26 +141,36 @@ func buildChecksumAttrs(sums map[string]string) *objectAttrChecksums {
 	return out
 }
 
-// buildObjectPartsAttrs derives the multipart part count from the ETag suffix
-// (form "<hex>-<N>"). After CompleteMultipartUpload the per-part rows are
-// deleted so the parts list itself is empty; PartsCount alone is sufficient
-// for clients that only need the multipart fingerprint.
+// buildObjectPartsAttrs returns the ObjectParts subtree for GetObjectAttributes.
+// Multipart objects (o.PartSizes populated by CompleteMultipartUpload) yield
+// one Part entry per part with PartNumber + Size + per-part stored
+// x-amz-checksum-<algo> values pulled from o.Manifest.PartChecksums. Single-PUT
+// objects yield PartsCount=1 with the whole-object size.
 func buildObjectPartsAttrs(o *meta.Object) *objectAttrParts {
-	n := multipartPartsFromETag(o.ETag)
-	if n <= 0 {
-		return nil
+	if n := len(o.PartSizes); n > 0 {
+		op := &objectAttrParts{PartsCount: n, Parts: make([]objectAttrPart, n)}
+		for i, size := range o.PartSizes {
+			p := objectAttrPart{PartNumber: i + 1, Size: size}
+			fillPartChecksums(&p, partChecksumsAt(o, i))
+			op.Parts[i] = p
+		}
+		return op
 	}
-	return &objectAttrParts{PartsCount: n}
+	return &objectAttrParts{
+		PartsCount: 1,
+		Parts: []objectAttrPart{
+			{PartNumber: 1, Size: o.Size},
+		},
+	}
 }
 
-func multipartPartsFromETag(etag string) int {
-	i := strings.LastIndex(etag, "-")
-	if i < 0 || i == len(etag)-1 {
-		return 0
+func fillPartChecksums(p *objectAttrPart, sums map[string]string) {
+	if len(sums) == 0 {
+		return
 	}
-	n, err := strconv.Atoi(etag[i+1:])
-	if err != nil || n <= 0 {
-		return 0
-	}
-	return n
+	p.ChecksumCRC32 = sums["CRC32"]
+	p.ChecksumCRC32C = sums["CRC32C"]
+	p.ChecksumSHA1 = sums["SHA1"]
+	p.ChecksumSHA256 = sums["SHA256"]
+	p.ChecksumCRC64NVME = sums["CRC64NVME"]
 }
