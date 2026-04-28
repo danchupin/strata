@@ -1,13 +1,23 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph vet test up up-all down wait-cassandra wait-ceph ceph-pool run-memory run-cassandra run-gateway smoke smoke-grafana clean
+.PHONY: build build-ceph docker-build vet test up up-all down wait-cassandra wait-ceph ceph-pool run-memory run-cassandra run-gateway smoke smoke-grafana clean
+
+GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
 build:
 	go build ./...
 
 build-ceph:
 	$(COMPOSE) build gateway
+
+docker-build:
+	docker build \
+		--build-arg GIT_SHA=$(GIT_SHA) \
+		-f deploy/docker/Dockerfile \
+		-t strata:ceph \
+		-t strata:$(GIT_SHA) \
+		.
 
 vet:
 	go vet ./...
