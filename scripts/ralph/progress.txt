@@ -98,3 +98,19 @@ Started: Tue Apr 28 13:53:09 MSK 2026
   - Supervisor is started even with zero workers? No — `if len(selected) > 0` guard in serverapp.Run avoids the goroutine + locker requirement for gateway-only deployments. With zero workers, `workerErr` is pre-filled with nil so the select arms still drain on shutdown.
   - `strata server --workers=gc` against memory backends works locally because `metamem.Store.Locker()` is non-nil; no Cassandra needed for the smoke. For Cassandra deployments the locker comes from `metacassandra.Locker{S: cs.Session()}` (same pattern cmd/strata-gc used).
 ---
+
+## 2026-04-28 - US-006
+- Migrated lifecycle into the worker registry. New `cmd/strata/workers/lifecycle.go` registers `lifecycle` via init(); `buildLifecycle` reads STRATA_LIFECYCLE_INTERVAL (60s) / STRATA_LIFECYCLE_UNIT (day) and maps the unit string (second/minute/hour/day) to time.Duration via new local helper `ageUnitFromEnv` — mirrors the legacy `ageUnitFromString` switch in cmd/strata-lifecycle.
+- `strata server --help` "Known workers" entry for lifecycle now lists STRATA_LIFECYCLE_INTERVAL/UNIT. main_test.go::TestServer_HelpListsFlagsAndWorkers extended to assert both env vars surface.
+- Deleted `cmd/strata-lifecycle/`. Updated `deploy/docker/Dockerfile` (drop strata-lifecycle build + copy lines) and `deploy/docker/docker-compose.yml` (lifecycle service entrypoint flips to `["/usr/local/bin/strata", "server", "--workers=lifecycle"]`; dropped 9101 port mapping — unified binary serves /metrics on the gateway port; US-016 collapses the service entirely).
+- CLAUDE.md: architecture diagram bullet `cmd/strata-lifecycle -> ...` flipped to `strata server --workers=lifecycle -> ...`.
+- Files added: cmd/strata/workers/lifecycle.go, cmd/strata/workers/lifecycle_test.go.
+- Files modified: cmd/strata/server.go (lifecycle env-var docs in knownWorkers), cmd/strata/main_test.go (assert lifecycle env vars in --help), deploy/docker/Dockerfile, deploy/docker/docker-compose.yml, CLAUDE.md, scripts/ralph/prd.json (US-006 passes=true).
+- Files deleted: cmd/strata-lifecycle/main.go and the rest of cmd/strata-lifecycle/.
+- Quality: `go build ./...`, `go vet ./...`, `go test ./...` all clean. Manual smoke `STRATA_LIFECYCLE_INTERVAL=200ms ./bin/strata server --workers=lifecycle` against memory backends boots, acquires `lifecycle-leader` lease, prints "lifecycle: starting interval=200ms age_unit=24h0m0s", shuts down clean on SIGTERM.
+- **Learnings for future iterations:**
+  - The legacy cmd/strata-lifecycle's `ageUnitFromString` switch (second/minute/hour/day → Duration) lives in cmd/strata/workers/lifecycle.go now as `ageUnitFromEnv`. If sibling workers ever need similar enum-to-duration mapping, lift this helper to a shared workers/util.go — for now only lifecycle uses it.
+  - `lifecycle.Worker` does NOT take a Metrics observer (unlike gc.Worker which takes `metrics.GCObserver{}`). Don't add one defensively — match the actual struct fields in internal/lifecycle/worker.go.
+  - The fake `STRATA_LIFECYCLE_METRICS_LISTEN` env var is dead under the unified binary — `/metrics` rides on the gateway port (cfg.Listen). Keep the existing config.LifecycleConfig field for backward TOML compat but it's unread once cmd/strata-lifecycle is gone.
+  - Manual smoke knob: STRATA_LIFECYCLE_INTERVAL=200ms gets the worker to tick visibly within a 2-3s timeout window — useful for "did the worker actually start?" verification.
+---

@@ -64,7 +64,7 @@ services:
   lifecycle:
     image: strata:ceph
     container_name: strata-lifecycle
-    entrypoint: ["/usr/local/bin/strata-lifecycle"]
+    entrypoint: ["/usr/local/bin/strata", "server", "--workers=lifecycle"]
     depends_on:
       cassandra:
         condition: service_healthy
@@ -74,8 +74,6 @@ services:
       STRATA_CONFIG_FILE: /etc/strata/strata.toml
       STRATA_LIFECYCLE_INTERVAL: ${STRATA_LIFECYCLE_INTERVAL:-}
       STRATA_LIFECYCLE_UNIT: ${STRATA_LIFECYCLE_UNIT:-}
-    ports:
-      - "9101:9101"
     volumes:
       - strata-ceph-etc:/etc/ceph:ro
       - ../strata.toml:/etc/strata/strata.toml:ro

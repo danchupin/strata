@@ -62,7 +62,11 @@ testcontainers to find the engine.
                 | (sharded)     |        | (4 MiB chunks)|
                 +---------------+        +---------------+
 
-  cmd/strata-lifecycle  -> meta.Store + data.Backend (transitions / expirations / mp-abort)
+  strata server --workers=lifecycle -> meta.Store + data.Backend (transitions /
+                          expirations / mp-abort). (US-006: legacy
+                          cmd/strata-lifecycle deleted; runs as a worker inside
+                          the unified strata binary, leader-elected on
+                          `lifecycle-leader`)
   strata server --workers=gc -> meta.Store (GCEntry queue) + data.Backend (chunk delete)
                           (US-005: legacy cmd/strata-gc deleted; gc now runs as a worker
                           inside the unified strata binary, leader-elected on `gc-leader`)

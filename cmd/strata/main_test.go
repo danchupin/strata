@@ -88,10 +88,13 @@ func TestServer_HelpListsFlagsAndWorkers(t *testing.T) {
 			t.Errorf("help missing worker name %q", w.name)
 		}
 	}
-	// gc env-var documentation must surface in --help (US-005 acceptance).
-	for _, want := range []string{"STRATA_GC_INTERVAL", "STRATA_GC_GRACE", "STRATA_GC_BATCH_SIZE"} {
+	// Per-worker env-var documentation must surface in --help (US-005/US-006).
+	for _, want := range []string{
+		"STRATA_GC_INTERVAL", "STRATA_GC_GRACE", "STRATA_GC_BATCH_SIZE",
+		"STRATA_LIFECYCLE_INTERVAL", "STRATA_LIFECYCLE_UNIT",
+	} {
 		if !strings.Contains(out, want) {
-			t.Errorf("help missing gc env var %q\n--- output ---\n%s", want, out)
+			t.Errorf("help missing worker env var %q\n--- output ---\n%s", want, out)
 		}
 	}
 }

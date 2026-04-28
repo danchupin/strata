@@ -34,7 +34,10 @@ var knownWorkers = []knownWorker{
 		"STRATA_GC_GRACE (default 5m) — minimum age before a tombstoned chunk is eligible",
 		"STRATA_GC_BATCH_SIZE (default 500) — max chunks ack'd per pass",
 	}},
-	{"lifecycle", nil},
+	{"lifecycle", []string{
+		"STRATA_LIFECYCLE_INTERVAL (default 60s) — bucket scan tick interval",
+		"STRATA_LIFECYCLE_UNIT (default day) — age unit for Days-based rules: second|minute|hour|day",
+	}},
 	{"notify", nil},
 	{"replicator", nil},
 	{"access-log", nil},
