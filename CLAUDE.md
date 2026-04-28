@@ -103,12 +103,14 @@ testcontainers to find the engine.
                           legacy cmd/strata-audit-export deleted; runs inside
                           the unified strata binary, leader-elected on
                           `audit-export-leader`)
-  cmd/strata-manifest-rewriter -> internal/manifestrewriter: walks every bucket
-                          and converts any JSON-encoded objects.manifest blob
-                          to protobuf in place (US-049). Leader-elected,
-                          single-pass, idempotent. Run once after flipping
-                          STRATA_MANIFEST_FORMAT=proto on the gateway to
-                          shrink existing rows.
+  strata server --workers=manifest-rewriter -> internal/manifestrewriter:
+                          walks every bucket and converts any JSON-encoded
+                          objects.manifest blob to protobuf in place (US-049).
+                          Idempotent re-runs skip already-proto rows.
+                          (US-012: legacy cmd/strata-manifest-rewriter deleted;
+                          runs inside the unified strata binary, leader-elected
+                          on `manifest-rewriter-leader`. Pass cadence via
+                          STRATA_MANIFEST_REWRITER_INTERVAL — default 24h.)
 ```
 
 The S3 router is in `internal/s3api/server.go`. Bucket-scoped queries (`?cors`, `?policy`, `?lifecycle`, …) dispatch via
@@ -167,7 +169,7 @@ format) so JSON-vs-proto migrations are transparent. New fields tagged `json:",o
 in `manifest.proto` + helper updates in `manifest_codec.go`) are schema-additive — old rows decode with zero-values,
 and you avoid an `ALTER`. Use this for per-object metadata the GET path reads but Cassandra never filters on (e.g.
 `Manifest.PartChunks` for the SSE multipart locator). To convert pre-existing JSON rows to proto, run
-`cmd/strata-manifest-rewriter` (leader-elected, idempotent — re-runs skip already-proto rows).
+`strata server --workers=manifest-rewriter` (leader-elected, idempotent — re-runs skip already-proto rows).
 
 ## Logging (slog)
 

@@ -68,7 +68,11 @@ var knownWorkers = []knownWorker{
 		"STRATA_AUDIT_EXPORT_AFTER (default 720h / 30d) — minimum partition age before export",
 		"STRATA_AUDIT_EXPORT_INTERVAL (default 24h) — drain tick interval",
 	}},
-	{"manifest-rewriter", nil},
+	{"manifest-rewriter", []string{
+		"STRATA_MANIFEST_REWRITER_INTERVAL (default 24h) — pass interval; re-runs are idempotent (skip already-proto rows)",
+		"STRATA_MANIFEST_REWRITER_BATCH_LIMIT (default 500) — page size for ListObjectVersions",
+		"STRATA_MANIFEST_REWRITER_DRY_RUN (default false) — scan-only mode; no writes",
+	}},
 }
 
 // serverFlags is the cross-cutting flag set understood by `strata server`.

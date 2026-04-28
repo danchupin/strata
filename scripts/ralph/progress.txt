@@ -202,3 +202,20 @@ Started: Tue Apr 28 13:53:09 MSK 2026
   - No metrics observer in the auditexport package (unlike gc/notify/replicator/access-log) — internal/auditexport does not export one. Don't add defensively.
   - Legacy STRATA_AUDIT_EXPORT_METRICS_LISTEN (port 9106) is dead under the unified binary — `/metrics` rides on cfg.Listen; drop from operator runbooks.
 ---
+
+## 2026-04-28 - US-012
+- Migrated manifest-rewriter into the worker registry. New `cmd/strata/workers/manifest_rewriter.go` registers `manifest-rewriter` via init(); `buildManifestRewriter` reads STRATA_MANIFEST_REWRITER_INTERVAL (24h), STRATA_MANIFEST_REWRITER_BATCH_LIMIT (500), STRATA_MANIFEST_REWRITER_DRY_RUN (false). Wraps the legacy single-shot manifestrewriter.Worker in a new `manifestRewriterRunner` whose Run loops {pass → log stats → sleep interval} until ctx.Done — re-runs are idempotent (skip already-proto rows) so the supervisor's continue-after-success loop is safe even after the migration completes.
+- New `boolFromEnv` helper alongside existing durationFromEnv/intFromEnv/stringFromEnv/int64FromEnv (manifest-rewriter is the first worker with a boolean knob).
+- `strata server --help` "Known workers" entry for manifest-rewriter populated with all three STRATA_MANIFEST_REWRITER_* env vars (was `nil` placeholder). main_test.go::TestServer_HelpListsFlagsAndWorkers extended to assert each env var surfaces.
+- Deleted `cmd/strata-manifest-rewriter/`. No Dockerfile / docker-compose entries existed (one-shot operator command, deployed externally), so no deploy edits beyond the binary delete.
+- CLAUDE.md: architecture-diagram bullet `cmd/strata-manifest-rewriter -> ...` flipped to `strata server --workers=manifest-rewriter -> ...` noting idempotent re-runs + leader lease `manifest-rewriter-leader` + STRATA_MANIFEST_REWRITER_INTERVAL. Also updated the manifest-encoder paragraph to reference `strata server --workers=manifest-rewriter` instead of the deleted binary path. Refreshed `internal/manifestrewriter/worker.go` package doc comment.
+- Files added: cmd/strata/workers/manifest_rewriter.go, cmd/strata/workers/manifest_rewriter_test.go.
+- Files modified: cmd/strata/server.go (manifest-rewriter env-var docs in knownWorkers), cmd/strata/main_test.go (assert manifest-rewriter env vars in --help), CLAUDE.md, internal/manifestrewriter/worker.go (package doc), scripts/ralph/prd.json (US-012 passes=true).
+- Files deleted: cmd/strata-manifest-rewriter/main.go (whole directory).
+- Quality: `go build ./...`, `go vet ./...`, `go test ./...` all clean. Manual smoke `STRATA_MANIFEST_REWRITER_INTERVAL=200ms ./bin/strata server --workers=manifest-rewriter` against memory backends boots, acquires `manifest-rewriter-leader`, prints `manifestrewriter: starting interval=200000000 dry_run=false`, ticks {scanned=0 rewritten=0 already_proto=0} every 200ms, shuts down clean on SIGTERM.
+- **Learnings for future iterations:**
+  - Single-shot legacy workers (manifest-rewriter, rewrap) need a runner adapter that loops Run + sleep interval — supervisor.runOnce treats nil-return as success and `continue`s, which would hot-loop without an explicit interval sleep inside the runner. Pattern: wrap the legacy Worker, log stats, sleep on ctx-cancellable timer, repeat. New workers with internal daemon loops (gc, lifecycle, inventory, ...) don't need this — their Run only returns on ctx.Done.
+  - `boolFromEnv` joins durationFromEnv/intFromEnv/stringFromEnv/int64FromEnv as the per-type helper set in cmd/strata/workers/. With a 5th type now present, lifting them to a shared util.go is worth doing — defer to the next worker that needs a 6th type (or a refactor pass).
+  - Required-env workers (notify, audit-export) return error from Build; one-shot-style workers (manifest-rewriter) don't — env-driven defaults work fine, dry_run=false runs harmlessly against an empty cluster.
+  - manifestrewriter.New requires Meta but tolerates nil Logger (defaults to slog.Default). Build still passes deps.Logger so leader-correlated worker= attr threads through; the manifestRewriterRunner mirrors it for its own log lines.
+---

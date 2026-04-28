@@ -101,6 +101,8 @@ func TestServer_HelpListsFlagsAndWorkers(t *testing.T) {
 		"STRATA_INVENTORY_INTERVAL", "STRATA_INVENTORY_REGION",
 		"STRATA_AUDIT_EXPORT_BUCKET", "STRATA_AUDIT_EXPORT_PREFIX",
 		"STRATA_AUDIT_EXPORT_AFTER", "STRATA_AUDIT_EXPORT_INTERVAL",
+		"STRATA_MANIFEST_REWRITER_INTERVAL", "STRATA_MANIFEST_REWRITER_BATCH_LIMIT",
+		"STRATA_MANIFEST_REWRITER_DRY_RUN",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("help missing worker env var %q\n--- output ---\n%s", want, out)
