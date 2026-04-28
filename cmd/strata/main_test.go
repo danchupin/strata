@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func runApp(t *testing.T, args ...string) (stdout, stderr string, code int) {
@@ -89,13 +90,37 @@ func TestServer_HelpListsFlagsAndWorkers(t *testing.T) {
 	}
 }
 
-func TestServer_StubExitsNonZero(t *testing.T) {
-	_, errOut, code := runApp(t, "server")
-	if code == 0 {
-		t.Fatalf("server stub should not exit 0 yet (US-003 wires the real entrypoint)")
-	}
-	if !strings.Contains(errOut, "not implemented") {
-		t.Errorf("stub stderr missing 'not implemented': %s", errOut)
+func TestServer_StartsAndShutsDownOnContextCancel(t *testing.T) {
+	// Force the gateway onto an ephemeral loopback port + memory backends so
+	// the test never touches Cassandra/RADOS and does not collide with a
+	// running process. STRATA_VHOST_PATTERN=- disables vhost rewriting,
+	// keeping the harness independent of the test host's hostname.
+	t.Setenv("STRATA_LISTEN", "127.0.0.1:0")
+	t.Setenv("STRATA_DATA_BACKEND", "memory")
+	t.Setenv("STRATA_META_BACKEND", "memory")
+	t.Setenv("STRATA_AUTH_MODE", "off")
+	t.Setenv("STRATA_VHOST_PATTERN", "-")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var out, errOut bytes.Buffer
+	a := newApp(&out, &errOut, []string{"server"})
+
+	done := make(chan int, 1)
+	go func() { done <- a.run(ctx) }()
+
+	// Give the listener a moment to bind, then trigger a clean shutdown.
+	time.Sleep(150 * time.Millisecond)
+	cancel()
+
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("strata server exit code = %d, want 0\nstderr:\n%s", code, errOut.String())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("strata server did not shut down within 10s\nstderr:\n%s", errOut.String())
 	}
 }
 

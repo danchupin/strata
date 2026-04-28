@@ -59,13 +59,13 @@ ceph-pool:
 
 run-memory:
 	STRATA_LISTEN=:9999 STRATA_META_BACKEND=memory STRATA_DATA_BACKEND=memory \
-		go run ./cmd/strata-gateway
+		go run ./cmd/strata server
 
 run-cassandra:
 	STRATA_LISTEN=:9999 \
 	STRATA_META_BACKEND=cassandra STRATA_DATA_BACKEND=memory \
 	STRATA_CASSANDRA_HOSTS=127.0.0.1 STRATA_CASSANDRA_DC=datacenter1 \
-		go run ./cmd/strata-gateway
+		go run ./cmd/strata server
 
 run-gateway:
 	$(COMPOSE) up -d gateway

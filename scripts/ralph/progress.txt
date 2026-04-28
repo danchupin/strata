@@ -8,6 +8,9 @@ Started: Tue Apr 28 13:53:09 MSK 2026
 - Docs-only stories: `go vet ./...` is sufficient typecheck.
 - CLI binaries in this repo use stdlib `flag`, not Cobra (see cmd/strata-admin pattern: `app{out,err,args}` struct + `run(ctx) int|error`, subcommand dispatch via switch on `args[0]`). Match this style for new CLIs to keep deps small and tests trivial.
 - Build version comes from `runtime/debug.ReadBuildInfo().Settings` via `vcs.revision` (no -ldflags pipeline today). Fall back to literal `"unknown"` when running outside a git checkout.
+- Gateway entrypoint lives in `internal/serverapp.Run(ctx, cfg, logger) error`. Both `cmd/strata server` and the transitional `cmd/strata-gateway` delegate to it — when changing gateway wiring, edit serverapp.go (helpers buildDataBackend/buildMetaStore/buildHealthHandler/auditRetention/vhostPatterns/awsKMSClientFactory live there, with tests in serverapp_test.go).
+- Cross-cutting `strata server` flags promote to `STRATA_*` env vars via `applyServerFlagOverrides` BEFORE `config.Load` runs. New cross-cutting flags follow the same pattern (set env, never mutate the cfg struct directly).
+- Pre-existing local smoke gap: `BOGUS x-amz-storage-class` returns 200 instead of 400 (smoke.sh exits 1 at that step). Reproduces on legacy strata-gateway too — not introduced by binary consolidation.
 
 ## 2026-04-28 - US-001
 - Added new top-level `## Roadmap maintenance` section to project root CLAUDE.md.
@@ -31,4 +34,21 @@ Started: Tue Apr 28 13:53:09 MSK 2026
   - `serverFlags` struct is the place to add new cross-cutting flags. Per-worker tunables MUST stay STRATA_* env vars per PRD scope — do not add new flags to this struct for worker-specific knobs.
   - `runServer` currently returns exit 1 with "not implemented yet" — US-003 replaces the stub body with the gateway entrypoint; the test `TestServer_StubExitsNonZero` will need to flip then.
   - `buildSHA()` falls back to "unknown" when no VCS info — `go run` and `go test` builds skip vcs settings; the version test only asserts `sha=` prefix is present, not the value.
+---
+
+## 2026-04-28 - US-003
+- Extracted gateway body to new `internal/serverapp` package: `Run(ctx, cfg, logger) error` plus the buildDataBackend/buildMetaStore/buildHealthHandler/auditRetention/vhostPatterns/healthCanaryOID/awsKMSClientFactory helpers and the cassandraProber/radosProber interfaces.
+- `cmd/strata-gateway/main.go` shrunk to a thin wrapper invoking `serverapp.Run`; the directory stays (US-014 deletes it). `cmd/strata-gateway/main_test.go` moved to `internal/serverapp/serverapp_test.go` (renames test file's package only — assertions identical).
+- `cmd/strata/server.go` runServer body lands: parse flags → `applyServerFlagOverrides` (promotes --listen/--workers/--auth-mode/--vhost-pattern/--log-level to STRATA_* env so flag > env > defaults) → `config.Load` → `logging.Setup` → `signal.NotifyContext(SIGINT/SIGTERM)` → `runServer(ctx, cfg, logger)` → `serverapp.Run`.
+- Goroutine refactor: legacy main called `os.Exit(1)` from a ListenAndServe goroutine; serverapp.Run uses a `serverErr chan error` and a select against ctx.Done so the body returns clean errors.
+- Replaced `TestServer_StubExitsNonZero` with `TestServer_StartsAndShutsDownOnContextCancel`: forces memory backends + 127.0.0.1:0 + auth=off + vhost=- via t.Setenv, runs `app.run` in a goroutine, cancels ctx, asserts exit 0 within 10s.
+- Makefile: `run-memory` and `run-cassandra` now `go run ./cmd/strata server` (was `./cmd/strata-gateway`).
+- Files added: `internal/serverapp/serverapp.go`, `internal/serverapp/serverapp_test.go`. Files modified: `cmd/strata-gateway/main.go` (slim wrapper), `cmd/strata/server.go` (real runServer), `cmd/strata/main_test.go` (replaced stub test), `Makefile` (run targets), `scripts/ralph/prd.json` (US-003 passes=true). Files deleted: `cmd/strata-gateway/main_test.go`.
+- Quality: `go build ./...`, `go vet ./...`, `go test ./...` all clean. Manual smoke against `STRATA_LISTEN=:9999 ./bin/strata server` reproduces the existing legacy-binary behaviour byte-for-byte (PUT/GET/HEAD/LIST/multipart/storage-class), including the pre-existing `BOGUS storage-class` 200 gap that already failed against the legacy gateway.
+- **Learnings for future iterations:**
+  - Both binaries share one body via `internal/serverapp` — do NOT duplicate gateway wiring across `cmd/strata-gateway/main.go` and `cmd/strata/server.go`. Edit serverapp.go.
+  - `applyServerFlagOverrides` is the seam for "flag overrides env": new cross-cutting flags add a `os.Setenv("STRATA_X", flag)` line AND a koanf entry in `internal/config/envMap`. No need to mutate the cfg struct after Load.
+  - Test pattern for full-stack `strata server`: t.Setenv to memory backends + 127.0.0.1:0, run `app.run` in goroutine, cancel ctx, assert exit 0. Reusable by US-004/US-005 once workers wire in.
+  - Goroutine-driven shutdown: `serverErr chan error` + `select { case <-ctx.Done(): srv.Shutdown(); <-serverErr; return nil; case err := <-serverErr: return err }` avoids the legacy `os.Exit(1)` from inside ListenAndServe goroutine, which was a hard barrier to wrapping the body in a function.
+  - `bucketstats.Sampler` goroutine is launched but not awaited on shutdown (matches legacy behaviour). Workers in US-004+ should be awaited via the registry's WaitGroup pattern, not spawned ad-hoc inside Run.
 ---

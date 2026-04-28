@@ -2,10 +2,19 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+
+	"github.com/danchupin/strata/internal/config"
+	"github.com/danchupin/strata/internal/logging"
+	"github.com/danchupin/strata/internal/serverapp"
 )
 
 // knownWorkers lists every background-worker name a `--workers=` value may
@@ -51,13 +60,59 @@ func (a *app) runServer(ctx context.Context, args []string) int {
 	fs.Usage = func() { a.printServerHelp(fs) }
 
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 2
 	}
 
-	// US-003 wires the real gateway entrypoint here; the skeleton refuses to
-	// start so a misconfigured invocation cannot silently no-op.
-	fmt.Fprintln(a.err, "strata server: not implemented yet (see PRD US-003)")
-	return 1
+	applyServerFlagOverrides(flags)
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(a.err, "strata server: config:", err.Error())
+		return 2
+	}
+
+	logger := logging.Setup()
+
+	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := runServer(sigCtx, cfg, logger); err != nil {
+		logger.Error("strata server", "error", err.Error())
+		return 1
+	}
+	return 0
+}
+
+// runServer is the body of the server subcommand: every cross-cutting
+// initialisation has already happened (flag parse, env apply, config load,
+// logger setup). Delegates to the shared serverapp.Run so cmd/strata-gateway
+// stays bug-for-bug equivalent until US-014 deletes it.
+func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
+	return serverapp.Run(ctx, cfg, logger)
+}
+
+// applyServerFlagOverrides promotes non-empty cross-cutting flags to the
+// matching STRATA_* env vars before config.Load runs, so --flag overrides
+// env which overrides defaults — the precedence required by US-003.
+func applyServerFlagOverrides(f *serverFlags) {
+	if f.listen != "" {
+		os.Setenv("STRATA_LISTEN", f.listen)
+	}
+	if f.workers != "" {
+		os.Setenv("STRATA_WORKERS", f.workers)
+	}
+	if f.authMode != "" {
+		os.Setenv("STRATA_AUTH_MODE", f.authMode)
+	}
+	if f.vhostPattern != "" {
+		os.Setenv("STRATA_VHOST_PATTERN", f.vhostPattern)
+	}
+	if f.logLevel != "" {
+		os.Setenv("STRATA_LOG_LEVEL", f.logLevel)
+	}
 }
 
 func (a *app) printServerHelp(fs *flag.FlagSet) {
