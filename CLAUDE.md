@@ -86,6 +86,13 @@ testcontainers to find the engine.
                           (US-009: legacy cmd/strata-access-log deleted; runs
                           inside the unified strata binary, leader-elected on
                           `access-log-leader`)
+  strata server --workers=inventory -> meta.Store (bucket InventoryConfiguration
+                          blobs) + data.Backend, ticks per (bucket, configID),
+                          walks the source bucket and writes manifest.json +
+                          CSV.gz pairs into the configured target bucket.
+                          (US-010: legacy cmd/strata-inventory deleted; runs
+                          inside the unified strata binary, leader-elected on
+                          `inventory-leader`)
   internal/reshard      -> per-bucket online shard-resize worker (US-045); driven
                           synchronously via /admin/bucket/reshard or as a daemon
   cmd/strata-audit-export -> internal/auditexport: drains audit_log partitions

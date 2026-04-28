@@ -58,7 +58,10 @@ var knownWorkers = []knownWorker{
 		"STRATA_ACCESS_LOG_MAX_FLUSH_BYTES (default 5 MiB) — max bytes per flushed log object",
 		"STRATA_ACCESS_LOG_POLL_LIMIT (default 10000) — max rows drained per bucket per tick",
 	}},
-	{"inventory", nil},
+	{"inventory", []string{
+		"STRATA_INVENTORY_INTERVAL (default 5m) — bucket scan tick interval",
+		"STRATA_INVENTORY_REGION (default \"default\") — region tag for target-bucket writes; falls back to deps.Region",
+	}},
 	{"audit-export", nil},
 	{"manifest-rewriter", nil},
 }

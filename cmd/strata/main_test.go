@@ -98,6 +98,7 @@ func TestServer_HelpListsFlagsAndWorkers(t *testing.T) {
 		"STRATA_REPLICATOR_BACKOFF_BASE", "STRATA_REPLICATOR_POLL_LIMIT",
 		"STRATA_REPLICATOR_HTTP_TIMEOUT", "STRATA_REPLICATOR_PEER_SCHEME",
 		"STRATA_ACCESS_LOG_INTERVAL", "STRATA_ACCESS_LOG_MAX_FLUSH_BYTES", "STRATA_ACCESS_LOG_POLL_LIMIT",
+		"STRATA_INVENTORY_INTERVAL", "STRATA_INVENTORY_REGION",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("help missing worker env var %q\n--- output ---\n%s", want, out)

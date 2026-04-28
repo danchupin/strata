@@ -170,3 +170,18 @@ Started: Tue Apr 28 13:53:09 MSK 2026
   - access-log's `STRATA_ACCESS_LOG_METRICS_LISTEN` env var (legacy port 9104) is dead under the unified binary — `/metrics` rides on the gateway port (cfg.Listen). Drop from any operator runbooks; `strata server` exposes it once on cfg.Listen regardless of selected workers.
   - `accesslog.Config.Now` is left as default (time.Now) in Build — the legacy binary did the same. Tests inject Now via direct struct construction; no env hook needed.
 ---
+
+## 2026-04-28 - US-010
+- Migrated inventory into the worker registry. New `cmd/strata/workers/inventory.go` registers `inventory` via init(); `buildInventory` reads STRATA_INVENTORY_INTERVAL (5m) and resolves region via new `inventoryRegion(depsRegion)` helper: STRATA_INVENTORY_REGION env wins, then deps.Region, fallback "default" (matches legacy precedence).
+- `strata server --help` "Known workers" entry for inventory now lists STRATA_INVENTORY_INTERVAL/REGION. main_test.go::TestServer_HelpListsFlagsAndWorkers extended to assert both env vars surface.
+- Deleted `cmd/strata-inventory/`. No Dockerfile / docker-compose entries existed for inventory (deployed externally), so no deploy edits.
+- CLAUDE.md: architecture-diagram block gained a `strata server --workers=inventory -> ...` bullet noting bucket InventoryConfiguration walk + manifest.json + CSV.gz writes + leader lease `inventory-leader`.
+- Files added: cmd/strata/workers/inventory.go, cmd/strata/workers/inventory_test.go.
+- Files modified: cmd/strata/server.go (inventory env-var docs in knownWorkers), cmd/strata/main_test.go (assert inventory env vars in --help), CLAUDE.md, scripts/ralph/prd.json (US-010 passes=true).
+- Files deleted: cmd/strata-inventory/main.go (whole directory).
+- Quality: `go build ./...`, `go vet ./...`, `go test ./...` all clean. Manual smoke `STRATA_INVENTORY_INTERVAL=200ms ./bin/strata server --workers=inventory` against memory backends boots, acquires `inventory-leader`, prints `inventory: starting interval=200ms`, shuts down clean on SIGTERM.
+- **Learnings for future iterations:**
+  - inventory.Config.Region falls back to "default" inside inventory.New if blank — but the legacy cmd/strata-inventory plumbed STRATA_INVENTORY_REGION explicitly. Mirror that: env > deps.Region > "default" via a small helper. Sibling workers with similar 3-tier region precedence can copy `inventoryRegion`.
+  - `inventory.Worker` requires Meta + Data; Logger defaults to slog.Default if nil. No metrics observer (unlike gc/notify/replicator/access-log) — internal/inventory does not export one. Don't add one defensively.
+  - The legacy cmd/strata-inventory's `STRATA_INVENTORY_METRICS_LISTEN` (port 9105) is dead under the unified binary — `/metrics` rides on cfg.Listen; drop from operator runbooks.
+---
