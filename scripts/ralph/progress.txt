@@ -6,6 +6,8 @@ Started: Tue Apr 28 13:53:09 MSK 2026
 - ROADMAP.md is canonical project-state list. Closing items: flip bullet to `~~**P<n> — <title>.**~~ — **Done.** <summary>. (commit `<sha>`)`. New gaps: add bullet under P1/P2/P3/Known latent bugs in same commit.
 - Project root CLAUDE.md = project memory (auto-loaded by Claude Code). scripts/ralph/CLAUDE.md = Ralph task prompt. Knowledge goes in root CLAUDE.md only.
 - Docs-only stories: `go vet ./...` is sufficient typecheck.
+- CLI binaries in this repo use stdlib `flag`, not Cobra (see cmd/strata-admin pattern: `app{out,err,args}` struct + `run(ctx) int|error`, subcommand dispatch via switch on `args[0]`). Match this style for new CLIs to keep deps small and tests trivial.
+- Build version comes from `runtime/debug.ReadBuildInfo().Settings` via `vcs.revision` (no -ldflags pipeline today). Fall back to literal `"unknown"` when running outside a git checkout.
 
 ## 2026-04-28 - US-001
 - Added new top-level `## Roadmap maintenance` section to project root CLAUDE.md.
@@ -16,4 +18,17 @@ Started: Tue Apr 28 13:53:09 MSK 2026
   - Acceptance criteria "Typecheck passes" for docs-only stories satisfied by `go vet ./...` — no unit tests required when no code changes.
   - ROADMAP.md currently has zero closed items in the new format; the worked example in CLAUDE.md is the spec template.
   - `scripts/ralph/CLAUDE.md` is intentionally NOT the project memory — when adding rules that govern future work, edit the root CLAUDE.md instead (Ralph still reads the root file).
+---
+
+## 2026-04-28 - US-002
+- New `cmd/strata/` skeleton: `main.go` (root + dispatch), `version.go` (build SHA + Go runtime via runtime/debug), `server.go` (cross-cutting flag set: --listen --workers --auth-mode --vhost-pattern --log-level + known-workers list in --help; runner is a stub returning exit 1 until US-003 wires the real gateway).
+- Tests cover help (root + server), version output, unknown subcommand, server stub exit code, and `parseWorkers` dedupe.
+- Files added: cmd/strata/main.go, cmd/strata/version.go, cmd/strata/server.go, cmd/strata/main_test.go.
+- Quality: `go build ./cmd/strata` (also with `-tags ceph`), `go vet ./...`, `go test ./cmd/strata/...` all clean.
+- **Learnings for future iterations:**
+  - Followed strata-admin's stdlib `flag` pattern (no Cobra) — `app{out,err,args}` + `run(ctx) int` so tests just diff buffers. New CLI subcommands should keep this shape.
+  - `--workers` list rendered in `strata server --help` from `knownWorkers` slice in cmd/strata/server.go. Each US-005..US-012 should append its name there as it migrates (gc, lifecycle, ... are pre-listed already).
+  - `serverFlags` struct is the place to add new cross-cutting flags. Per-worker tunables MUST stay STRATA_* env vars per PRD scope — do not add new flags to this struct for worker-specific knobs.
+  - `runServer` currently returns exit 1 with "not implemented yet" — US-003 replaces the stub body with the gateway entrypoint; the test `TestServer_StubExitsNonZero` will need to flip then.
+  - `buildSHA()` falls back to "unknown" when no VCS info — `go run` and `go test` builds skip vcs settings; the version test only asserts `sha=` prefix is present, not the value.
 ---
