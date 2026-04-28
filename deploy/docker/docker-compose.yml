@@ -67,6 +67,7 @@ services:
       STRATA_GC_GRACE: ${STRATA_GC_GRACE:-}
       STRATA_LIFECYCLE_INTERVAL: ${STRATA_LIFECYCLE_INTERVAL:-}
       STRATA_LIFECYCLE_UNIT: ${STRATA_LIFECYCLE_UNIT:-}
+      STRATA_NOTIFY_TARGETS: ${STRATA_NOTIFY_TARGETS:-}
     ports:
       - "9999:9000"
     volumes:
@@ -103,6 +104,17 @@ services:
     volumes:
       - strata-ceph-etc:/etc/ceph:ro
       - ../strata.toml:/etc/strata/strata.toml:ro
+    restart: unless-stopped
+
+  # Webhook receiver used by the e2e-full CI job to verify the notify worker
+  # round-trip. Lives behind the `features` profile so the default stack does
+  # not pull it. Strata reaches it on the compose default network at
+  # http://webhook-trap:8080/. Logs are JSON to stdout so CI can grep
+  # `docker logs strata-webhook-trap` for the delivered event.
+  webhook-trap:
+    image: mendhak/http-https-echo:34
+    container_name: strata-webhook-trap
+    profiles: ["features"]
     restart: unless-stopped
 
   prometheus:
