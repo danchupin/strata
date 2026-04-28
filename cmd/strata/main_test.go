@@ -84,8 +84,14 @@ func TestServer_HelpListsFlagsAndWorkers(t *testing.T) {
 		}
 	}
 	for _, w := range knownWorkers {
-		if !strings.Contains(out, w) {
-			t.Errorf("help missing worker name %q", w)
+		if !strings.Contains(out, w.name) {
+			t.Errorf("help missing worker name %q", w.name)
+		}
+	}
+	// gc env-var documentation must surface in --help (US-005 acceptance).
+	for _, want := range []string{"STRATA_GC_INTERVAL", "STRATA_GC_GRACE", "STRATA_GC_BATCH_SIZE"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("help missing gc env var %q\n--- output ---\n%s", want, out)
 		}
 	}
 }

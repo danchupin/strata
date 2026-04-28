@@ -63,8 +63,9 @@ testcontainers to find the engine.
                 +---------------+        +---------------+
 
   cmd/strata-lifecycle  -> meta.Store + data.Backend (transitions / expirations / mp-abort)
-  cmd/strata-gc         -> meta.Store (GCEntry queue) + data.Backend (chunk delete)
-                          both wrapped in internal/leader (Cassandra LWT-based lease)
+  strata server --workers=gc -> meta.Store (GCEntry queue) + data.Backend (chunk delete)
+                          (US-005: legacy cmd/strata-gc deleted; gc now runs as a worker
+                          inside the unified strata binary, leader-elected on `gc-leader`)
   internal/reshard      -> per-bucket online shard-resize worker (US-045); driven
                           synchronously via /admin/bucket/reshard or as a daemon
   cmd/strata-audit-export -> internal/auditexport: drains audit_log partitions
@@ -105,10 +106,13 @@ healthy). Lease loss restarts immediately (no backoff). One worker's panic or le
 gateway or sibling workers.
 
 `cmd/strata/server.go::runServer` validates `STRATA_WORKERS` (or `--workers=`) via `workers.Resolve` BEFORE any
-backend is built — unknown names exit 2 immediately. The actual goroutine launch wires in alongside the gateway
-once the first concrete worker (gc) registers (US-005). When adding a new worker, register from
-`cmd/strata/workers/<name>.go`'s `init()` and let the binary pick it up; do not spawn a goroutine ad-hoc inside
-`internal/serverapp` — the supervisor owns the lifecycle.
+backend is built — unknown names exit 2 immediately. The resolved `[]workers.Worker` is then handed to
+`internal/serverapp.Run`, which builds the leader-election locker (cassandra → LWT lease, memory →
+process-local) and spawns `workers.Supervisor.Run` in a goroutine alongside the gateway. When adding a new
+worker, register from `cmd/strata/workers/<name>.go`'s `init()` and let the binary pick it up; do not spawn a
+goroutine ad-hoc inside `internal/serverapp` — the supervisor owns the lifecycle. `gc` reads
+`STRATA_GC_INTERVAL` / `STRATA_GC_GRACE` / `STRATA_GC_BATCH_SIZE` from env at Build time (no per-worker
+flags); other workers follow the same env-only convention.
 
 ## meta.Store interface — the contract
 

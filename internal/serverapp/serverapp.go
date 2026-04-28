@@ -11,11 +11,13 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	awskms "github.com/aws/aws-sdk-go-v2/service/kms"
 
+	"github.com/danchupin/strata/cmd/strata/workers"
 	"github.com/danchupin/strata/internal/auth"
 	"github.com/danchupin/strata/internal/bucketstats"
 	"github.com/danchupin/strata/internal/config"
@@ -25,6 +27,7 @@ import (
 	datamem "github.com/danchupin/strata/internal/data/memory"
 	datarados "github.com/danchupin/strata/internal/data/rados"
 	"github.com/danchupin/strata/internal/health"
+	"github.com/danchupin/strata/internal/leader"
 	"github.com/danchupin/strata/internal/logging"
 	"github.com/danchupin/strata/internal/meta"
 	metacassandra "github.com/danchupin/strata/internal/meta/cassandra"
@@ -35,10 +38,10 @@ import (
 )
 
 // Run starts the S3 gateway: builds the data + meta backends, wires the
-// HTTP handler chain, listens on cfg.Listen, and blocks until ctx is
-// cancelled or the listener fails. Returns nil on a clean ctx-driven
-// shutdown.
-func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
+// HTTP handler chain, listens on cfg.Listen, and spawns the worker
+// Supervisor with the resolved worker set. Blocks until ctx is cancelled
+// or the listener fails. Returns nil on a clean ctx-driven shutdown.
+func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected []workers.Worker) error {
 	if v := os.Getenv("STRATA_MANIFEST_FORMAT"); v != "" {
 		if err := data.SetManifestFormat(v); err != nil {
 			return fmt.Errorf("manifest format: %w", err)
@@ -162,6 +165,35 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
 		}
 	}()
 
+	workerErr := make(chan error, 1)
+	if len(selected) > 0 {
+		locker := buildLocker(cfg, metaStore)
+		if locker == nil {
+			return fmt.Errorf("workers selected (%s) but meta backend %q exposes no leader-election locker",
+				workerNames(selected), cfg.MetaBackend)
+		}
+		supervisor := &workers.Supervisor{
+			Deps: workers.Dependencies{
+				Logger: logger,
+				Meta:   metaStore,
+				Data:   dataBackend,
+				Tracer: tracerProvider,
+				Locker: locker,
+				Region: cfg.RegionName,
+			},
+		}
+		go func() {
+			err := supervisor.Run(ctx, selected)
+			if err != nil && !errors.Is(err, context.Canceled) {
+				workerErr <- err
+				return
+			}
+			workerErr <- nil
+		}()
+	} else {
+		workerErr <- nil
+	}
+
 	select {
 	case <-ctx.Done():
 		logger.Info("shutting down")
@@ -169,10 +201,38 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 		<-serverErr
+		<-workerErr
 		return nil
 	case err := <-serverErr:
 		return err
+	case err := <-workerErr:
+		return err
 	}
+}
+
+// buildLocker returns the leader-election locker exposed by the meta
+// backend. Cassandra uses LWT-backed leases; the in-memory backend ships a
+// process-local locker. Backends that lack a locker return nil.
+func buildLocker(cfg *config.Config, store meta.Store) leader.Locker {
+	if cfg.MetaBackend == "cassandra" {
+		if cs, ok := store.(*metacassandra.Store); ok {
+			return &metacassandra.Locker{S: cs.Session()}
+		}
+	}
+	if cfg.MetaBackend == "memory" {
+		if ms, ok := store.(*metamem.Store); ok {
+			return ms.Locker()
+		}
+	}
+	return nil
+}
+
+func workerNames(ws []workers.Worker) string {
+	names := make([]string, len(ws))
+	for i, w := range ws {
+		names[i] = w.Name
+	}
+	return strings.Join(names, ",")
 }
 
 func buildDataBackend(cfg *config.Config, logger *slog.Logger, tp *strataotel.Provider) (data.Backend, error) {

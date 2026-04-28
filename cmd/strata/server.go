@@ -18,19 +18,29 @@ import (
 	"github.com/danchupin/strata/internal/serverapp"
 )
 
-// knownWorkers lists every background-worker name a `--workers=` value may
-// reference. Entries land in this slice as they migrate into the registry
-// (US-005 onwards). Until then the names appear in --help so operators can
-// see the planned shape.
-var knownWorkers = []string{
-	"gc",
-	"lifecycle",
-	"notify",
-	"replicator",
-	"access-log",
-	"inventory",
-	"audit-export",
-	"manifest-rewriter",
+// knownWorker pairs a registered worker name with the per-worker env vars
+// `strata server --help` documents. Per-worker tunables stay STRATA_* env
+// vars per US-004 acceptance ("Per-worker tunables remain STRATA_*
+// environment variables; the flag set is intentionally cross-cutting
+// only.").
+type knownWorker struct {
+	name string
+	envs []string
+}
+
+var knownWorkers = []knownWorker{
+	{"gc", []string{
+		"STRATA_GC_INTERVAL (default 30s) — drain tick interval",
+		"STRATA_GC_GRACE (default 5m) — minimum age before a tombstoned chunk is eligible",
+		"STRATA_GC_BATCH_SIZE (default 500) — max chunks ack'd per pass",
+	}},
+	{"lifecycle", nil},
+	{"notify", nil},
+	{"replicator", nil},
+	{"access-log", nil},
+	{"inventory", nil},
+	{"audit-export", nil},
+	{"manifest-rewriter", nil},
 }
 
 // serverFlags is the cross-cutting flag set understood by `strata server`.
@@ -80,7 +90,8 @@ func (a *app) runServer(ctx context.Context, args []string) int {
 	// Resolve the requested worker list against the package-level registry
 	// before any backend is built so unknown names fail startup immediately
 	// (US-004 acceptance: "unknown names cause immediate startup error").
-	if _, err := workers.Resolve(parseWorkers(os.Getenv("STRATA_WORKERS"))); err != nil {
+	selected, err := workers.Resolve(parseWorkers(os.Getenv("STRATA_WORKERS")))
+	if err != nil {
 		fmt.Fprintln(a.err, "strata server: workers:", err.Error())
 		return 2
 	}
@@ -88,7 +99,7 @@ func (a *app) runServer(ctx context.Context, args []string) int {
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := runServer(sigCtx, cfg, logger); err != nil {
+	if err := runServer(sigCtx, cfg, logger, selected); err != nil {
 		logger.Error("strata server", "error", err.Error())
 		return 1
 	}
@@ -99,8 +110,8 @@ func (a *app) runServer(ctx context.Context, args []string) int {
 // initialisation has already happened (flag parse, env apply, config load,
 // logger setup). Delegates to the shared serverapp.Run so cmd/strata-gateway
 // stays bug-for-bug equivalent until US-014 deletes it.
-func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
-	return serverapp.Run(ctx, cfg, logger)
+func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected []workers.Worker) error {
+	return serverapp.Run(ctx, cfg, logger, selected)
 }
 
 // applyServerFlagOverrides promotes non-empty cross-cutting flags to the
@@ -135,8 +146,11 @@ func (a *app) printServerHelp(fs *flag.FlagSet) {
 	fs.SetOutput(a.err)
 	fmt.Fprintln(a.out)
 	fmt.Fprintln(a.out, "Known workers (selectable via --workers / STRATA_WORKERS):")
-	for _, name := range knownWorkers {
-		fmt.Fprintf(a.out, "  %s\n", name)
+	for _, kw := range knownWorkers {
+		fmt.Fprintf(a.out, "  %s\n", kw.name)
+		for _, env := range kw.envs {
+			fmt.Fprintf(a.out, "      %s\n", env)
+		}
 	}
 	fmt.Fprintln(a.out)
 	fmt.Fprintln(a.out, "Per-worker tunables remain STRATA_* environment variables; the flag set is")

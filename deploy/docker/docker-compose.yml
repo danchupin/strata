@@ -45,7 +45,7 @@ services:
   gc:
     image: strata:ceph
     container_name: strata-gc
-    entrypoint: ["/usr/local/bin/strata-gc"]
+    entrypoint: ["/usr/local/bin/strata", "server", "--workers=gc"]
     depends_on:
       cassandra:
         condition: service_healthy
@@ -56,8 +56,6 @@ services:
       # env overrides for fast-test iteration; leave empty to honour TOML
       STRATA_GC_INTERVAL: ${STRATA_GC_INTERVAL:-}
       STRATA_GC_GRACE: ${STRATA_GC_GRACE:-}
-    ports:
-      - "9100:9100"
     volumes:
       - strata-ceph-etc:/etc/ceph:ro
       - ../strata.toml:/etc/strata/strata.toml:ro

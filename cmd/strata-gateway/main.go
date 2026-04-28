@@ -26,7 +26,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := serverapp.Run(ctx, cfg, logger); err != nil {
+	if err := serverapp.Run(ctx, cfg, logger, nil); err != nil {
 		logger.Error("strata-gateway", "error", err.Error())
 		os.Exit(1)
 	}

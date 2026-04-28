@@ -33,11 +33,11 @@ RUN --mount=type=cache,target=/root/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go build -tags ceph -trimpath -o /out/strata-gateway ./cmd/strata-gateway \
  && go build -tags ceph -trimpath -o /out/strata-lifecycle ./cmd/strata-lifecycle \
- && go build -tags ceph -trimpath -o /out/strata-gc ./cmd/strata-gc
+ && go build -tags ceph -trimpath -o /out/strata ./cmd/strata
 
 FROM quay.io/ceph/ceph:v19.2.3
 COPY --from=build /out/strata-gateway /usr/local/bin/strata-gateway
 COPY --from=build /out/strata-lifecycle /usr/local/bin/strata-lifecycle
-COPY --from=build /out/strata-gc /usr/local/bin/strata-gc
+COPY --from=build /out/strata /usr/local/bin/strata
 EXPOSE 9000
 ENTRYPOINT ["/usr/local/bin/strata-gateway"]
