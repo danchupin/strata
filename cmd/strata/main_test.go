@@ -92,6 +92,8 @@ func TestServer_HelpListsFlagsAndWorkers(t *testing.T) {
 	for _, want := range []string{
 		"STRATA_GC_INTERVAL", "STRATA_GC_GRACE", "STRATA_GC_BATCH_SIZE",
 		"STRATA_LIFECYCLE_INTERVAL", "STRATA_LIFECYCLE_UNIT",
+		"STRATA_NOTIFY_TARGETS", "STRATA_NOTIFY_INTERVAL", "STRATA_NOTIFY_MAX_RETRIES",
+		"STRATA_NOTIFY_BACKOFF_BASE", "STRATA_NOTIFY_POLL_LIMIT",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("help missing worker env var %q\n--- output ---\n%s", want, out)

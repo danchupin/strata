@@ -70,6 +70,10 @@ testcontainers to find the engine.
   strata server --workers=gc -> meta.Store (GCEntry queue) + data.Backend (chunk delete)
                           (US-005: legacy cmd/strata-gc deleted; gc now runs as a worker
                           inside the unified strata binary, leader-elected on `gc-leader`)
+  strata server --workers=notify -> meta.Store (notify_queue + DLQ) -> webhook / SQS
+                          sinks via STRATA_NOTIFY_TARGETS. (US-007: legacy
+                          cmd/strata-notify deleted; runs inside the unified
+                          strata binary, leader-elected on `notify-leader`)
   internal/reshard      -> per-bucket online shard-resize worker (US-045); driven
                           synchronously via /admin/bucket/reshard or as a daemon
   cmd/strata-audit-export -> internal/auditexport: drains audit_log partitions

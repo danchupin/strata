@@ -13,9 +13,9 @@ import (
 
 // SQSAPI is the subset of *sqs.Client used by SQSSink. Defining it as an
 // interface lets unit tests swap in a mock without spinning up a real SDK
-// client. The cmd/strata-notify wiring passes a real *sqs.Client built from
-// config.LoadDefaultConfig (which honours the standard AWS credential chain:
-// env vars, shared config, IRSA, and EC2/ECS instance roles).
+// client. The cmd/strata/workers/notify.go wiring passes a real *sqs.Client
+// built from config.LoadDefaultConfig (which honours the standard AWS
+// credential chain: env vars, shared config, IRSA, and EC2/ECS instance roles).
 type SQSAPI interface {
 	SendMessage(ctx context.Context, params *sqs.SendMessageInput, optFns ...func(*sqs.Options)) (*sqs.SendMessageOutput, error)
 }
