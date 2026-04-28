@@ -3,38 +3,22 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
-  - job_name: strata-gateway
+  # Unified strata service: gateway + selected workers all expose /metrics
+  # on the gateway port (cfg.Listen, default 9000). Worker-specific
+  # counters carry a `worker` label; no separate scrape job per worker.
+  - job_name: strata
     static_configs:
-      - targets: ["gateway:9000"]
+      - targets: ["strata:9000"]
         labels:
-          binary: gateway
+          binary: strata
 
-  - job_name: strata-gc
+  # Optional features replica (notify / replicator / access-log /
+  # inventory / audit-export). Enabled via `--profile features`. Until
+  # the replica is up Prometheus logs a "no host" error which is
+  # harmless; remove the block if features are never enabled in this
+  # stack.
+  - job_name: strata-features
     static_configs:
-      - targets: ["gc:9100"]
+      - targets: ["strata-features:9000"]
         labels:
-          binary: gc
-
-  - job_name: strata-lifecycle
-    static_configs:
-      - targets: ["lifecycle:9101"]
-        labels:
-          binary: lifecycle
-
-  - job_name: strata-notify
-    static_configs:
-      - targets: ["notify:9102"]
-        labels:
-          binary: notify
-
-  - job_name: strata-replicator
-    static_configs:
-      - targets: ["replicator:9103"]
-        labels:
-          binary: replicator
-
-  - job_name: strata-access-log
-    static_configs:
-      - targets: ["access-log:9104"]
-        labels:
-          binary: access-log
+          binary: strata-features

@@ -47,11 +47,10 @@ adding more, prove what is there.
   expected 3–5× LWT speedup on Paxos hot paths (bucket-create, versioning-flip,
   multipart-complete) needs measurement. Same harness as the RGW benches, swap the
   metadata backend.
-- **P3 — Drop unused background daemons.** `cmd/strata-audit-export` runs whether or not
-  any operator asked for long-term audit retention. Move it behind an opt-in profile in
-  `deploy/docker/docker-compose.yml`. Same for `cmd/strata-inventory`,
-  `cmd/strata-access-log`, `cmd/strata-replicator`, `cmd/strata-notify` — default stack
-  is gateway + gc + lifecycle; everything else is profile-gated.
+- ~~**P3 — Drop unused background daemons.**~~ — **Done.** Default compose stack
+  is `cassandra + ceph + strata` (gateway + gc + lifecycle); the feature workers
+  (notify / replicator / access-log / inventory / audit-export) live behind a
+  single `--profile features` `strata-features` replica. (commit pending)
 
 ## Correctness & consistency
 

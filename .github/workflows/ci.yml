@@ -84,9 +84,9 @@ jobs:
             sleep 5
           done
 
-      - name: Launch gateway + workers
+      - name: Launch strata (gateway + gc + lifecycle workers)
         run: |
-          docker compose -f deploy/docker/docker-compose.yml up -d gateway lifecycle gc
+          docker compose -f deploy/docker/docker-compose.yml up -d strata
           until curl -sf -o /dev/null http://127.0.0.1:9999/; do sleep 1; done
 
       - name: Smoke (curl)
@@ -100,7 +100,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ciSK
           AWS_DEFAULT_REGION: us-east-1
         run: |
-          docker compose -f deploy/docker/docker-compose.yml up -d --force-recreate gateway
+          docker compose -f deploy/docker/docker-compose.yml up -d --force-recreate strata
           until curl -s -o /dev/null http://127.0.0.1:9999/; do sleep 1; done
           bash scripts/smoke-signed.sh http://127.0.0.1:9999
 
@@ -111,7 +111,7 @@ jobs:
         if: always()
         run: |
           mkdir -p ci-logs
-          for c in strata-cassandra strata-ceph strata-gateway strata-lifecycle strata-gc; do
+          for c in strata-cassandra strata-ceph strata; do
             docker logs $c > ci-logs/$c.log 2>&1 || true
           done
           docker compose -f deploy/docker/docker-compose.yml ps > ci-logs/compose-ps.txt 2>&1 || true

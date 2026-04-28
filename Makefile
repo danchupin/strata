@@ -1,7 +1,7 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph docker-build vet test up up-all down wait-cassandra wait-ceph ceph-pool run-memory run-cassandra run-gateway smoke smoke-grafana clean
+.PHONY: build build-ceph docker-build vet test up up-all down wait-cassandra wait-ceph ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-grafana clean
 
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
@@ -9,7 +9,7 @@ build:
 	go build ./...
 
 build-ceph:
-	$(COMPOSE) build gateway
+	$(COMPOSE) build strata
 
 docker-build:
 	docker build \
@@ -48,7 +48,7 @@ up:
 	$(COMPOSE) up -d cassandra
 
 up-all:
-	$(COMPOSE) up -d cassandra ceph gateway prometheus grafana
+	$(COMPOSE) up -d cassandra ceph strata prometheus grafana
 
 down:
 	$(COMPOSE) down
@@ -77,8 +77,11 @@ run-cassandra:
 	STRATA_CASSANDRA_HOSTS=127.0.0.1 STRATA_CASSANDRA_DC=datacenter1 \
 		go run ./cmd/strata server
 
-run-gateway:
-	$(COMPOSE) up -d gateway
+run-strata:
+	$(COMPOSE) up -d strata
+
+# Backwards-compatible alias for the old per-binary target name.
+run-gateway: run-strata
 
 smoke:
 	bash scripts/smoke.sh http://127.0.0.1:9999
