@@ -253,3 +253,49 @@ heap-merges by clustering order (key ASC, version_id DESC). See `cassandra/store
 commits per story and writes `progress.txt`. `scripts/ralph/CLAUDE.md` is Ralph's *task prompt* — do not put project
 knowledge there. This root `CLAUDE.md` is the project memory and is auto-loaded by every Claude Code invocation,
 including Ralph's. Update this file (not Ralph's) when you discover something a future iteration should know.
+
+## Roadmap maintenance
+
+`ROADMAP.md` is the canonical project state list. It MUST stay an honest reflection of what is shipped vs pending at
+every SHA. The PRDs in `tasks/` (and `scripts/ralph/prd.json`) are scoped to specific cycles and do NOT need to mirror
+the roadmap — only `ROADMAP.md` is canonical.
+
+This rule applies to **all** work — Ralph autonomous runs and human-driven commits alike.
+
+**Closing a roadmap item.** Every commit that closes a `ROADMAP.md` item MUST flip the bullet to the format:
+
+```
+~~**P<n> — <title>.**~~ — **Done.** <one-line summary>. (commit `<sha>`)
+```
+
+…in the same commit. If the closing SHA is needed inline (commit-then-amend is undesirable here — see "Commits and PRs"
+above), the immediate follow-up commit may carry the SHA edit instead.
+
+Example diff shape (close-flip):
+
+```diff
+-- **P1 — Single-binary `strata` (CockroachDB-shape).** Today there are 10 `cmd/` binaries,
+--  most of them background workers. Collapse `cmd/strata-{gateway,gc,...}` into a single
+--  `cmd/strata` ...
+++ ~~**P1 — Single-binary `strata` (CockroachDB-shape).**~~ — **Done.** Two binaries
+++  (`strata`, `strata-admin`); workers selected via `STRATA_WORKERS=`. (commit `abc1234`)
+```
+
+**Discovering a new gap, latent bug, or regression.** Every commit that surfaces something not yet on the roadmap MUST
+add a new entry in `ROADMAP.md` in the same commit. Place it under the appropriate severity section: P1 for correctness
+or production-blockers, P2 for meaningful gaps expected by serious deployments, P3 for nice-to-haves and DX, or
+`Known latent bugs` for live bugs.
+
+Example diff shape (new discovery):
+
+```diff
+ ## Correctness & consistency
+
+++- **P2 — Multipart UploadPart `Content-MD5` not validated.** `s3api.uploadPart` accepts the
+++  client-supplied `Content-MD5` header but never recomputes/compares; mismatches silently
+++  succeed. Add the check on the streaming-decoder hot path.
++
+ - **P3 — Object Lock `COMPLIANCE` audit log.** ...
+```
+
+Code-only commits that touch neither a roadmap item nor a new gap do not need a roadmap edit.
