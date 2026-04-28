@@ -79,6 +79,13 @@ testcontainers to find the engine.
                           (HTTPDispatcher). (US-008: legacy cmd/strata-replicator
                           deleted; runs inside the unified strata binary,
                           leader-elected on `replicator-leader`)
+  strata server --workers=access-log -> meta.Store (access_log_buffer) +
+                          data.Backend, drains buffered rows per source bucket
+                          and writes one AWS-format log object per flush into
+                          the target bucket configured by PutBucketLogging.
+                          (US-009: legacy cmd/strata-access-log deleted; runs
+                          inside the unified strata binary, leader-elected on
+                          `access-log-leader`)
   internal/reshard      -> per-bucket online shard-resize worker (US-045); driven
                           synchronously via /admin/bucket/reshard or as a daemon
   cmd/strata-audit-export -> internal/auditexport: drains audit_log partitions

@@ -154,3 +154,19 @@ Started: Tue Apr 28 13:53:09 MSK 2026
   - HTTPDispatcher takes `*http.Client` + `Scheme` only. No need to thread STRATA_REPLICATOR_PEER_SCHEME via flag — Build reads env directly. Empty Scheme defaults to https (HTTPDispatcher.Send applies the default).
   - durationFromEnv / intFromEnv / stringFromEnv now collectively cover the env-var idioms sibling workers need; lift them to a shared util file later if a 5th worker repeats the pattern.
 ---
+
+## 2026-04-28 - US-009
+- Migrated access-log into the worker registry. New `cmd/strata/workers/access_log.go` registers `access-log` via init(); `buildAccessLog` reads STRATA_ACCESS_LOG_INTERVAL (5m) / STRATA_ACCESS_LOG_MAX_FLUSH_BYTES (5 MiB) / STRATA_ACCESS_LOG_POLL_LIMIT (10000). New `int64FromEnv` helper alongside existing `durationFromEnv`/`intFromEnv`/`stringFromEnv` (MaxFlushBytes is int64, hence the new sibling).
+- `strata server --help` "Known workers" entry for access-log lists all three STRATA_ACCESS_LOG_* env vars. main_test.go::TestServer_HelpListsFlagsAndWorkers extended to assert each surfaces.
+- Deleted `cmd/strata-access-log/`. No Dockerfile / docker-compose entries existed for access-log (it was deployed externally), so no deploy edits beyond the binary delete.
+- CLAUDE.md: architecture-diagram block gained a `strata server --workers=access-log -> ...` bullet noting access_log_buffer drain + leader lease `access-log-leader`.
+- Files added: cmd/strata/workers/access_log.go, cmd/strata/workers/access_log_test.go.
+- Files modified: cmd/strata/server.go (access-log env-var docs in knownWorkers), cmd/strata/main_test.go (assert access-log env vars in --help), CLAUDE.md, scripts/ralph/prd.json (US-009 passes=true).
+- Files deleted: cmd/strata-access-log/main.go (whole directory).
+- Quality: `go build ./...`, `go vet ./...`, `go test ./...` all clean. Manual smoke `STRATA_ACCESS_LOG_INTERVAL=200ms ./bin/strata server --workers=access-log` against memory backends boots, acquires `access-log-leader`, prints `accesslog: starting interval=200000000 max_flush_bytes=5242880`, shuts down clean on SIGTERM.
+- **Learnings for future iterations:**
+  - `int64FromEnv` is a new sibling helper in cmd/strata/workers/access_log.go; lift to a shared util file when a 4th worker needs int64 (today only access-log's MaxFlushBytes uses it).
+  - The legacy cmd/strata-access-log used a `--once` test-only flag path. The unified binary does NOT expose `--once`; tests that need single-pass drain call `accesslog.Worker.RunOnce(ctx)` directly (existing internal/accesslog tests already do this — no new flag needed).
+  - access-log's `STRATA_ACCESS_LOG_METRICS_LISTEN` env var (legacy port 9104) is dead under the unified binary — `/metrics` rides on the gateway port (cfg.Listen). Drop from any operator runbooks; `strata server` exposes it once on cfg.Listen regardless of selected workers.
+  - `accesslog.Config.Now` is left as default (time.Now) in Build — the legacy binary did the same. Tests inject Now via direct struct construction; no env hook needed.
+---

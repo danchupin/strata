@@ -53,7 +53,11 @@ var knownWorkers = []knownWorker{
 		"STRATA_REPLICATOR_HTTP_TIMEOUT (default 30s) — peer HTTP PUT timeout",
 		"STRATA_REPLICATOR_PEER_SCHEME (default https) — http|https for peer URL",
 	}},
-	{"access-log", nil},
+	{"access-log", []string{
+		"STRATA_ACCESS_LOG_INTERVAL (default 5m) — drain tick interval",
+		"STRATA_ACCESS_LOG_MAX_FLUSH_BYTES (default 5 MiB) — max bytes per flushed log object",
+		"STRATA_ACCESS_LOG_POLL_LIMIT (default 10000) — max rows drained per bucket per tick",
+	}},
 	{"inventory", nil},
 	{"audit-export", nil},
 	{"manifest-rewriter", nil},
