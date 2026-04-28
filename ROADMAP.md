@@ -28,7 +28,7 @@ adding more, prove what is there.
   workers (gc, lifecycle, notify, replicator, access-log, inventory, audit-export,
   manifest-rewriter) selected via `STRATA_WORKERS=`. Each worker keeps its own
   `internal/leader` lease keyed on `<name>-leader`. SSE master-key rotation moved to
-  `strata-admin rewrap`. One Docker image, one compose service. (commit pending)
+  `strata-admin rewrap`. One Docker image, one compose service. (commit `ae4e338`)
 - **P1 — Race harness as a real test, not a gate.** `internal/racetest` (US-035) landed but
   has not been run at load against the full `make up-all` stack. Run it for ≥1 hour against
   Cassandra+RADOS, record observed inconsistencies (or zero, with the workload that proves
@@ -48,7 +48,7 @@ adding more, prove what is there.
 - ~~**P3 — Drop unused background daemons.**~~ — **Done.** Default compose stack
   is `cassandra + ceph + strata` (gateway + gc + lifecycle); the feature workers
   (notify / replicator / access-log / inventory / audit-export) live behind a
-  single `--profile features` `strata-features` replica. (commit pending)
+  single `--profile features` `strata-features` replica. (commit `5841043`)
 
 ## Correctness & consistency
 
