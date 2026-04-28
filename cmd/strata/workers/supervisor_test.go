@@ -60,7 +60,7 @@ func panicCounterValue(t *testing.T, name string) float64 {
 // restarts (counter increments per panic) without taking down the
 // supervisor. The supervisor exits cleanly on ctx cancel.
 func TestSupervisor_PanicRestartCycle(t *testing.T) {
-	t.Cleanup(Reset)
+	t.Cleanup(restoreInitial)
 	Reset()
 
 	const name = "panic-test"
@@ -115,7 +115,7 @@ func TestSupervisor_PanicRestartCycle(t *testing.T) {
 // affect worker B's run. Uses a fakeLocker so we can deterministically
 // expire one name's lease without touching the others.
 func TestSupervisor_LeaseLossIsolation(t *testing.T) {
-	t.Cleanup(Reset)
+	t.Cleanup(restoreInitial)
 	Reset()
 
 	var aRuns, bRuns atomic.Int32
@@ -191,7 +191,7 @@ func TestSupervisor_LeaseLossIsolation(t *testing.T) {
 // TestSupervisor_DependencyInjection: Build receives the Dependencies struct
 // the supervisor was constructed with — verify a custom field round-trips.
 func TestSupervisor_DependencyInjection(t *testing.T) {
-	t.Cleanup(Reset)
+	t.Cleanup(restoreInitial)
 	Reset()
 
 	var got Dependencies
@@ -251,7 +251,7 @@ func TestSupervisor_RejectsMissingDeps(t *testing.T) {
 // TestSupervisor_LeaseKeyedOnWorkerName: the lease name must be
 // "<worker>-leader" so US-005..US-012 follow the documented contract.
 func TestSupervisor_LeaseKeyedOnWorkerName(t *testing.T) {
-	t.Cleanup(Reset)
+	t.Cleanup(restoreInitial)
 	Reset()
 
 	Register(Worker{

@@ -74,6 +74,11 @@ testcontainers to find the engine.
                           sinks via STRATA_NOTIFY_TARGETS. (US-007: legacy
                           cmd/strata-notify deleted; runs inside the unified
                           strata binary, leader-elected on `notify-leader`)
+  strata server --workers=replicator -> meta.Store (replication_queue) +
+                          data.Backend, copies to peer Strata via HTTP PUT
+                          (HTTPDispatcher). (US-008: legacy cmd/strata-replicator
+                          deleted; runs inside the unified strata binary,
+                          leader-elected on `replicator-leader`)
   internal/reshard      -> per-bucket online shard-resize worker (US-045); driven
                           synchronously via /admin/bucket/reshard or as a daemon
   cmd/strata-audit-export -> internal/auditexport: drains audit_log partitions

@@ -18,6 +18,7 @@ Started: Tue Apr 28 13:53:09 MSK 2026
 - Each worker migration also touches `deploy/docker/Dockerfile` (replace `go build ./cmd/strata-<name>` with `go build ./cmd/strata` once + COPY the unified binary) and `deploy/docker/docker-compose.yml` (entrypoint flips to `["/usr/local/bin/strata", "server", "--workers=<name>"]`). US-015/US-016 finalise compose collapse — for now the per-worker container survives, just runs the unified binary.
 - `strata server --help` "Known workers" section now renders per-worker env-var docs from `knownWorkers []knownWorker{name, envs}` in cmd/strata/server.go. When migrating a worker, populate its `envs` slice; tests in main_test.go assert at least one env var per migrated worker shows up in --help.
 - Workers that depend on env-driven external config (notify needs STRATA_NOTIFY_TARGETS) return an error from Build when the config is missing. Supervisor logs ERROR + retries on backoff (1s→5s→30s→2m). Gateway and sibling workers continue serving — same behaviour as a transient panic. AWS SDK wiring (sqs client factory) lives in cmd/strata/workers/<worker>.go alongside the Build constructor.
+- Test registry isolation: `cmd/strata/workers/main_test.go` snapshots the production registry in TestMain and exposes `restoreInitial()`. Registry/supervisor tests must `t.Cleanup(restoreInitial)` (NOT `Reset`) so files alphabetically after `registry_test.go` (replicator_test, supervisor_test, ...) still see registered workers when their `Lookup` runs.
 
 ## 2026-04-28 - US-001
 - Added new top-level `## Roadmap maintenance` section to project root CLAUDE.md.
@@ -133,4 +134,23 @@ Started: Tue Apr 28 13:53:09 MSK 2026
   - AWS SDK direct imports inside cmd/strata/workers/ promote indirect-only deps to direct in go.mod. Run `go mod tidy` after the first such import — `go build` does not rewrite go.mod automatically.
   - notify.RouterFromEnv requires STRATA_NOTIFY_TARGETS to be non-empty and well-formed (`<type>:<arn>=<spec>`). When writing tests that exercise buildNotify, set the env via t.Setenv to a webhook spec like `type:arn=https://example.test/hook|secret` — the SQS branch needs a factory option.
   - sqsClientFactory's empty-region branch consults AWS_REGION + EC2 metadata. In CI / sandboxes without metadata access, set AWS_REGION explicitly so the test doesn't hang. The factory test pins it to us-east-1.
+---
+
+## 2026-04-28 - US-008
+- Migrated replicator into the worker registry. New `cmd/strata/workers/replicator.go` registers `replicator` via init(); `buildReplicator` constructs `replication.HTTPDispatcher` (Client timeout from STRATA_REPLICATOR_HTTP_TIMEOUT, Scheme from STRATA_REPLICATOR_PEER_SCHEME) and calls `replication.New` with STRATA_REPLICATOR_INTERVAL (5s) / MAX_RETRIES (6) / BACKOFF_BASE (1s) / POLL_LIMIT (100). Plumbed `metrics.ReplicationObserver{}` (replaces the legacy ad-hoc promMetrics struct in cmd/strata-replicator).
+- New `stringFromEnv` helper in replicator.go (reusable for sibling workers needing string env-var defaults).
+- `strata server --help` "Known workers" replicator block now lists all six STRATA_REPLICATOR_* env vars. main_test.go::TestServer_HelpListsFlagsAndWorkers extended to assert each.
+- Deleted `cmd/strata-replicator/`. No Dockerfile / docker-compose entries existed for replicator (was deployed externally), so no deploy edits.
+- CLAUDE.md: architecture-diagram block gained a `strata server --workers=replicator -> ...` bullet.
+- Test registry isolation fix: added `cmd/strata/workers/main_test.go` (TestMain + restoreInitial) so registry_test/supervisor_test cleanups restore production registrations instead of wiping them. Updated 12 `t.Cleanup(Reset)` → `t.Cleanup(restoreInitial)` in registry_test.go (8) and supervisor_test.go (4). Without this, tests in files alphabetically after registry_test (replicator_test, supervisor_test) saw an empty registry and `Lookup` failed.
+- Files added: cmd/strata/workers/replicator.go, cmd/strata/workers/replicator_test.go, cmd/strata/workers/main_test.go.
+- Files modified: cmd/strata/server.go (replicator env-var docs in knownWorkers), cmd/strata/main_test.go (assert replicator env vars in --help), cmd/strata/workers/registry_test.go (cleanups), cmd/strata/workers/supervisor_test.go (cleanups), CLAUDE.md, scripts/ralph/prd.json (US-008 passes=true).
+- Files deleted: cmd/strata-replicator/main.go (and the rest of cmd/strata-replicator/).
+- Quality: `go build ./...`, `go vet ./...`, `go test ./...` all clean. Manual smoke against memory backends with `STRATA_REPLICATOR_INTERVAL=200ms ./bin/strata server --workers=replicator` boots, acquires `replicator-leader`, prints `replication: starting interval=200000000 max_retries=6`, shuts down clean on SIGTERM.
+- **Learnings for future iterations:**
+  - The worker package is `internal/replication` (not `internal/replicator` as the PRD says). `replication.New` returns `*replication.Worker`. Don't follow the PRD wording literally on package names — grep first.
+  - Test files alphabetically after `registry_test.go` need the snapshot/restore TestMain pattern. Future workers (audit-export, manifest-rewriter, …) sort after registry but before supervisor — they will hit the same trap unless they use `restoreInitial`. Pattern is now in place; future tests just call it.
+  - `metrics.ReplicationObserver{}` already existed in internal/metrics (lines 297–327). The legacy cmd/strata-replicator's promMetrics struct duplicated it; migration drops the duplication.
+  - HTTPDispatcher takes `*http.Client` + `Scheme` only. No need to thread STRATA_REPLICATOR_PEER_SCHEME via flag — Build reads env directly. Empty Scheme defaults to https (HTTPDispatcher.Send applies the default).
+  - durationFromEnv / intFromEnv / stringFromEnv now collectively cover the env-var idioms sibling workers need; lift them to a shared util file later if a 5th worker repeats the pattern.
 ---

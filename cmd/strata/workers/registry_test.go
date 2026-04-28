@@ -7,7 +7,7 @@ import (
 )
 
 func TestRegisterAndLookup(t *testing.T) {
-	t.Cleanup(Reset)
+	t.Cleanup(restoreInitial)
 	Reset()
 
 	built := false
@@ -35,7 +35,7 @@ func TestRegisterAndLookup(t *testing.T) {
 }
 
 func TestRegisterDuplicatePanics(t *testing.T) {
-	t.Cleanup(Reset)
+	t.Cleanup(restoreInitial)
 	Reset()
 
 	Register(Worker{Name: "dup", Build: func(Dependencies) (Runner, error) { return nil, nil }})
@@ -49,7 +49,7 @@ func TestRegisterDuplicatePanics(t *testing.T) {
 }
 
 func TestRegisterNilBuildPanics(t *testing.T) {
-	t.Cleanup(Reset)
+	t.Cleanup(restoreInitial)
 	Reset()
 
 	defer func() {
@@ -61,7 +61,7 @@ func TestRegisterNilBuildPanics(t *testing.T) {
 }
 
 func TestRegisterEmptyNamePanics(t *testing.T) {
-	t.Cleanup(Reset)
+	t.Cleanup(restoreInitial)
 	Reset()
 
 	defer func() {
@@ -73,7 +73,7 @@ func TestRegisterEmptyNamePanics(t *testing.T) {
 }
 
 func TestNamesSorted(t *testing.T) {
-	t.Cleanup(Reset)
+	t.Cleanup(restoreInitial)
 	Reset()
 
 	for _, n := range []string{"gamma", "alpha", "beta"} {
@@ -92,7 +92,7 @@ func TestNamesSorted(t *testing.T) {
 }
 
 func TestResolveUnknownNameFailsImmediately(t *testing.T) {
-	t.Cleanup(Reset)
+	t.Cleanup(restoreInitial)
 	Reset()
 	Register(Worker{Name: "gc", Build: func(Dependencies) (Runner, error) { return nil, nil }})
 
@@ -103,7 +103,7 @@ func TestResolveUnknownNameFailsImmediately(t *testing.T) {
 }
 
 func TestResolveOrderPreserved(t *testing.T) {
-	t.Cleanup(Reset)
+	t.Cleanup(restoreInitial)
 	Reset()
 	for _, n := range []string{"a", "b", "c"} {
 		Register(Worker{Name: n, Build: func(Dependencies) (Runner, error) { return nil, nil }})
@@ -121,7 +121,7 @@ func TestResolveOrderPreserved(t *testing.T) {
 }
 
 func TestResolveEmptyReturnsEmpty(t *testing.T) {
-	t.Cleanup(Reset)
+	t.Cleanup(restoreInitial)
 	Reset()
 	got, err := Resolve(nil)
 	if err != nil {
