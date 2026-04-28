@@ -45,7 +45,7 @@ func (a *app) run(ctx context.Context) error {
 	principal := root.String("principal", os.Getenv("STRATA_ADMIN_PRINCIPAL"), "X-Test-Principal header value (test harness shortcut)")
 	jsonOut := root.Bool("json", false, "emit raw JSON instead of human-formatted output")
 	root.Usage = func() {
-		fmt.Fprintln(a.err, "usage: strata-admin [global flags] <iam|lifecycle|gc|sse|replicate|bucket> <subcommand> [flags]\n  bucket subcommands: inspect | reshard")
+		fmt.Fprintln(a.err, "usage: strata-admin [global flags] <iam|lifecycle|gc|sse|replicate|bucket|rewrap> <subcommand> [flags]\n  bucket subcommands: inspect | reshard\n  rewrap takes no subcommand: strata-admin rewrap [--target-key-id ID] [--dry-run] [--batch N]")
 		root.PrintDefaults()
 	}
 
@@ -53,6 +53,9 @@ func (a *app) run(ctx context.Context) error {
 		return errUsage
 	}
 	rest := root.Args()
+	if len(rest) >= 1 && rest[0] == "rewrap" {
+		return a.cmdRewrap(ctx, *jsonOut, rest[1:])
+	}
 	if len(rest) < 2 {
 		root.Usage()
 		return errUsage

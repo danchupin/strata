@@ -219,3 +219,22 @@ Started: Tue Apr 28 13:53:09 MSK 2026
   - Required-env workers (notify, audit-export) return error from Build; one-shot-style workers (manifest-rewriter) don't — env-driven defaults work fine, dry_run=false runs harmlessly against an empty cluster.
   - manifestrewriter.New requires Meta but tolerates nil Logger (defaults to slog.Default). Build still passes deps.Logger so leader-correlated worker= attr threads through; the manifestRewriterRunner mirrors it for its own log lines.
 ---
+
+## 2026-04-28 - US-013
+- Migrated rewrap from `cmd/strata-rewrap` to a top-level `strata-admin rewrap` subcommand. `cmd/strata-admin/rewrap.go` mirrors the legacy main: parses --target-key-id / --dry-run / --batch flags, builds rotation provider via `master.NewRotationProviderFromEnv()`, optionally re-orders the rotation list via new `master.RotationProvider.Entries()` so --target-key-id becomes active, opens the meta store (memory or cassandra) via `buildRewrapMetaStore`, runs `rewrap.Worker.Run` under signal.NotifyContext (SIGINT/SIGTERM), logs structured slog to stderr, prints a human summary on stdout (or JSON when --json), exits 0 on success and non-zero with a wrapped error on failure.
+- Dispatch in `cmd/strata-admin/main.go::run` special-cases `rewrap` BEFORE the group/sub `len(rest) < 2` guard since rewrap is a single-name command (other strata-admin verbs are `<group> <sub>`). Updated Usage string to list rewrap.
+- Added `master.RotationProvider.Entries() []KeyEntry` returning a defensive copy — needed so the CLI can re-order the list when --target-key-id picks a non-leading entry. master.parseRotationList stays unexported.
+- Resumption is automatic via meta.Store.SetRewrapProgress rows (no --continue / --from-bucket flags). Idempotency is covered by existing internal/rewrap/rewrap_test.go (TestRewrap_PutUnderA_RewrapToB and friends) which exercise re-run-skips-current-rows.
+- Tests added: cmd/strata-admin/rewrap_test.go covers MissingMasterKeys (env-unset error), RunsAgainstMemory (happy path, asserts active=active in stdout + "rewrap complete" in stderr), TargetKeyIDReorders (--target-key-id second flips ordering, stdout shows active=second), TargetKeyIDUnknown (error when target absent), DryRun (asserts dry-run log line surfaces).
+- Doc refreshes: internal/crypto/master/CLAUDE.md (rotation flow → strata-admin rewrap), internal/crypto/master/rotation.go (EnvMasterKeys comment), internal/meta/store.go (RewrapProgress doc).
+- Files added: cmd/strata-admin/rewrap.go, cmd/strata-admin/rewrap_test.go.
+- Files modified: cmd/strata-admin/main.go (dispatch + Usage), internal/crypto/master/rotation.go (Entries + comment), internal/crypto/master/CLAUDE.md, internal/meta/store.go (comment), scripts/ralph/prd.json (US-013 passes=true).
+- Files deleted: cmd/strata-rewrap/main.go (whole directory).
+- Quality: `go build ./...`, `go vet ./...`, `go test ./...` all clean. `go build -tags ceph ./...` blocked locally on missing librados headers (unrelated; CI has librados).
+- **Learnings for future iterations:**
+  - strata-admin's group/sub dispatch (`<group> <sub> [flags]`) needs an explicit special-case for top-level single-name verbs. `rewrap` is the first; handle it BEFORE the `len(rest) < 2` guard. If a future verb needs the same shape, factor a `singleVerbs map[string]func(...)`.
+  - --target-key-id reordering needs access to the full rotation list. Exposed `RotationProvider.Entries()` rather than re-parsing STRATA_SSE_MASTER_KEYS in the CLI — keeps the env-format parsing private to the master pkg. `idx > 0` guard avoids a no-op swap when target is already active.
+  - Meta-backed admin commands (rewrap is the first) build their own meta.Store via config.Load — they do NOT proxy through the gateway HTTP API like the existing iam/lifecycle/gc/sse/replicate verbs do. Future admin commands that touch metadata directly (vs operating on a running gateway) should follow this pattern.
+  - master.NewRotationProvider validates uniqueness + key length so `Entries()` callers can trust the round-trip. Defensive key copy is essential — `Entries()` returns deep copies so a swap doesn't mutate the source provider.
+  - signal.NotifyContext inside cmdRewrap layers on top of the parent ctx passed by main, so --json/normal exit semantics stay the same and Ctrl-C works for ad-hoc operator runs.
+---
