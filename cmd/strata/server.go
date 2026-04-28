@@ -62,7 +62,12 @@ var knownWorkers = []knownWorker{
 		"STRATA_INVENTORY_INTERVAL (default 5m) — bucket scan tick interval",
 		"STRATA_INVENTORY_REGION (default \"default\") — region tag for target-bucket writes; falls back to deps.Region",
 	}},
-	{"audit-export", nil},
+	{"audit-export", []string{
+		"STRATA_AUDIT_EXPORT_BUCKET — destination bucket for gzipped JSON-lines exports (required)",
+		"STRATA_AUDIT_EXPORT_PREFIX — optional key prefix prepended to <day>/<bucket>-<id>.jsonl.gz",
+		"STRATA_AUDIT_EXPORT_AFTER (default 720h / 30d) — minimum partition age before export",
+		"STRATA_AUDIT_EXPORT_INTERVAL (default 24h) — drain tick interval",
+	}},
 	{"manifest-rewriter", nil},
 }
 

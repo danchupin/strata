@@ -185,3 +185,20 @@ Started: Tue Apr 28 13:53:09 MSK 2026
   - `inventory.Worker` requires Meta + Data; Logger defaults to slog.Default if nil. No metrics observer (unlike gc/notify/replicator/access-log) — internal/inventory does not export one. Don't add one defensively.
   - The legacy cmd/strata-inventory's `STRATA_INVENTORY_METRICS_LISTEN` (port 9105) is dead under the unified binary — `/metrics` rides on cfg.Listen; drop from operator runbooks.
 ---
+
+## 2026-04-28 - US-011
+- Migrated audit-export into the worker registry. New `cmd/strata/workers/audit_export.go` registers `audit-export` via init(); `buildAuditExport` reads STRATA_AUDIT_EXPORT_BUCKET (required, error if empty), STRATA_AUDIT_EXPORT_PREFIX (""), STRATA_AUDIT_EXPORT_AFTER (720h/30d), STRATA_AUDIT_EXPORT_INTERVAL (24h). Bucket missing → Build returns error; Supervisor logs ERROR + retries on backoff (matches notify pattern from US-007).
+- `strata server --help` "Known workers" entry for audit-export now lists all four STRATA_AUDIT_EXPORT_* env vars. main_test.go::TestServer_HelpListsFlagsAndWorkers extended to assert each.
+- Deleted `cmd/strata-audit-export/`. No Dockerfile / docker-compose entries existed for audit-export (deployed externally), so no deploy edits beyond the binary delete.
+- CLAUDE.md: architecture-diagram bullet `cmd/strata-audit-export -> ...` flipped to `strata server --workers=audit-export -> ...` noting audit_log partition drain + leader lease `audit-export-leader`.
+- Refreshed `internal/auditexport/worker.go` doc comment + three `internal/meta/store.go` interface comments to reference "audit-export worker" instead of the deleted binary path.
+- Files added: cmd/strata/workers/audit_export.go, cmd/strata/workers/audit_export_test.go.
+- Files modified: cmd/strata/server.go (audit-export env-var docs in knownWorkers), cmd/strata/main_test.go (assert audit-export env vars in --help), CLAUDE.md, internal/auditexport/worker.go (comment), internal/meta/store.go (3 comments), scripts/ralph/prd.json (US-011 passes=true).
+- Files deleted: cmd/strata-audit-export/main.go (whole directory).
+- Quality: `go build ./...`, `go vet ./...`, `go test ./...` all clean. Manual smoke `STRATA_AUDIT_EXPORT_BUCKET=audit-archive STRATA_AUDIT_EXPORT_INTERVAL=200ms ./bin/strata server --workers=audit-export` against memory backends boots, acquires `audit-export-leader`, prints `auditexport: starting interval=200000000 after=2592000000000000 bucket=audit-archive`, ticks (warns on missing target bucket — expected since it wasn't pre-created), shuts down clean on SIGTERM.
+- **Learnings for future iterations:**
+  - Required-env-var workers: return an error from Build when the var is missing/empty (notify and audit-export both use this). Supervisor handles retry — operator can `kubectl set env` post-launch without restart.
+  - `internal/auditexport.Worker.RunOnce` returns nil on missing target bucket (logs warn instead of failing) — that's a worker-internal contract; Build still has to verify the env var was set, otherwise the worker would loop forever logging "target bucket missing" with an empty name.
+  - No metrics observer in the auditexport package (unlike gc/notify/replicator/access-log) — internal/auditexport does not export one. Don't add defensively.
+  - Legacy STRATA_AUDIT_EXPORT_METRICS_LISTEN (port 9106) is dead under the unified binary — `/metrics` rides on cfg.Listen; drop from operator runbooks.
+---

@@ -95,11 +95,14 @@ testcontainers to find the engine.
                           `inventory-leader`)
   internal/reshard      -> per-bucket online shard-resize worker (US-045); driven
                           synchronously via /admin/bucket/reshard or as a daemon
-  cmd/strata-audit-export -> internal/auditexport: drains audit_log partitions
-                          older than STRATA_AUDIT_EXPORT_AFTER (default 30d) into
-                          gzipped JSON-lines objects in the configured export
-                          bucket, then deletes the source partition (US-046).
-                          Leader-elected, daily tick.
+  strata server --workers=audit-export -> internal/auditexport: drains
+                          audit_log partitions older than
+                          STRATA_AUDIT_EXPORT_AFTER (default 30d) into gzipped
+                          JSON-lines objects in the configured export bucket,
+                          then deletes the source partition (US-046). (US-011:
+                          legacy cmd/strata-audit-export deleted; runs inside
+                          the unified strata binary, leader-elected on
+                          `audit-export-leader`)
   cmd/strata-manifest-rewriter -> internal/manifestrewriter: walks every bucket
                           and converts any JSON-encoded objects.manifest blob
                           to protobuf in place (US-049). Leader-elected,

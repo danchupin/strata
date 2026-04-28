@@ -1,7 +1,9 @@
 // Package auditexport drains aged audit_log partitions, writes one
 // gzipped JSON-lines object per (bucket, day) partition into the
 // configured export bucket, and deletes the source partition once the
-// export upload succeeds. Drives cmd/strata-audit-export (US-046).
+// export upload succeeds. Drives the audit-export worker registered in
+// cmd/strata/workers/audit_export.go (US-046, migrated to the unified
+// strata binary in US-011).
 package auditexport
 
 import (
