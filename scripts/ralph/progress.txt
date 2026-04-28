@@ -11,6 +11,8 @@ Started: Tue Apr 28 13:53:09 MSK 2026
 - Gateway entrypoint lives in `internal/serverapp.Run(ctx, cfg, logger) error`. Both `cmd/strata server` and the transitional `cmd/strata-gateway` delegate to it — when changing gateway wiring, edit serverapp.go (helpers buildDataBackend/buildMetaStore/buildHealthHandler/auditRetention/vhostPatterns/awsKMSClientFactory live there, with tests in serverapp_test.go).
 - Cross-cutting `strata server` flags promote to `STRATA_*` env vars via `applyServerFlagOverrides` BEFORE `config.Load` runs. New cross-cutting flags follow the same pattern (set env, never mutate the cfg struct directly).
 - Pre-existing local smoke gap: `BOGUS x-amz-storage-class` returns 200 instead of 400 (smoke.sh exits 1 at that step). Reproduces on legacy strata-gateway too — not introduced by binary consolidation.
+- Worker registry: `cmd/strata/workers.Register({Name, Build})` from per-worker `init()`. Build receives `workers.Dependencies` (Logger, Meta, Data, Tracer, Locker, Region) and returns a `workers.Runner`. Supervisor handles leader election (`<name>-leader`), panic recovery (`strata_worker_panic_total{worker}`), exponential backoff (1s→5s→30s→2m), and stable-after reset (5m). Lease loss restarts immediately (no backoff). US-005..US-012 each add one `cmd/strata/workers/<name>.go` registration.
+- Test seam pattern for Supervisor: `Backoff []time.Duration` (flat = `[]time.Duration{0,0,0,0}`), `Sleep Sleeper` (no-op `func(ctx, d){}`), `LeaderTTL/LeaderRenew/AcquireRetry` short. For lease-loss tests, use a `fakeLocker` with controllable `expire(name)` rather than `memory.NewLocker` — the memory Locker's TTL races with renew so you can never reliably preempt.
 
 ## 2026-04-28 - US-001
 - Added new top-level `## Roadmap maintenance` section to project root CLAUDE.md.
@@ -51,4 +53,25 @@ Started: Tue Apr 28 13:53:09 MSK 2026
   - Test pattern for full-stack `strata server`: t.Setenv to memory backends + 127.0.0.1:0, run `app.run` in goroutine, cancel ctx, assert exit 0. Reusable by US-004/US-005 once workers wire in.
   - Goroutine-driven shutdown: `serverErr chan error` + `select { case <-ctx.Done(): srv.Shutdown(); <-serverErr; return nil; case err := <-serverErr: return err }` avoids the legacy `os.Exit(1)` from inside ListenAndServe goroutine, which was a hard barrier to wrapping the body in a function.
   - `bucketstats.Sampler` goroutine is launched but not awaited on shutdown (matches legacy behaviour). Workers in US-004+ should be awaited via the registry's WaitGroup pattern, not spawned ad-hoc inside Run.
+---
+
+## 2026-04-28 - US-004
+- New `cmd/strata/workers/` package: `registry.go` (Worker, Dependencies, Runner, Register/Lookup/Names/Resolve/Reset) + `supervisor.go` (Supervisor with panic recovery, exponential backoff, ctx-aware Sleeper test seam, leader.Session per worker keyed on `<name>-leader`).
+- Added `metrics.WorkerPanicTotal` (label `worker`) registered in `metrics.Register()`.
+- Wired `cmd/strata/server.go::runServer` to call `workers.Resolve(parseWorkers(os.Getenv("STRATA_WORKERS")))` before building backends; unknown names exit 2.
+- Tests: registry round-trip, duplicate/empty/nil-Build panic, sorted Names, Resolve unknown failure + order preservation, RunnerFunc adapter, Supervisor panic-restart cycle (counter increments + sup keeps running until ctx cancel), lease-loss isolation (worker A re-acquires while B unaffected — via fakeLocker.expire), dependency injection round-trip, missing-deps rejected, lease-name keyed on `<worker>-leader`.
+- Plus `TestServer_RejectsUnknownWorkerName` in cmd/strata for the runServer seam.
+- Files added: cmd/strata/workers/registry.go, cmd/strata/workers/supervisor.go, cmd/strata/workers/registry_test.go, cmd/strata/workers/supervisor_test.go.
+- Files modified: cmd/strata/server.go (workers.Resolve at runServer entry + parseWorkers comment refresh), cmd/strata/main_test.go (+TestServer_RejectsUnknownWorkerName), internal/metrics/metrics.go (+WorkerPanicTotal), CLAUDE.md (+`## Background workers` section), scripts/ralph/prd.json (US-004 passes=true).
+- Quality: `go build ./...` clean, `go vet ./...` clean, `go test ./...` clean (no integration), `go test -race ./cmd/strata/workers/...` clean.
+- **Learnings for future iterations:**
+  - `cmd/strata/workers` is importable from anywhere because it sits under cmd/, not internal/. So future stories can import it from `internal/serverapp` if a deeper integration is needed — Go's "internal" rule does not apply.
+  - PRD's "panic-then-restart" AC is unit-testable in isolation: register a worker whose Run panics, run Supervisor with flat backoff + no-op Sleeper, count panics via `metrics.WorkerPanicTotal.WithLabelValues(name).Write(&dto.Metric{})`. No need for an end-to-end gateway test.
+  - `memory.Locker` cannot be force-released for a UUID-randomised holder — its Release matches by holder. Use a `fakeLocker` with a per-test `expire(name)` flag for lease-loss tests.
+  - Go 1.25's `sync.WaitGroup.Go(func)` replaces `wg.Add(1); go func(){ defer wg.Done(); ...}()`. Loop-var capture (`w := w`) is also unneeded — the linter flags both.
+  - Worker registration MUST happen in an `init()` of the per-worker file (cmd/strata/workers/gc.go etc.). The supervisor reads from the package-level `reg` map; if the file isn't compiled into the binary, the worker is invisible. Make sure `cmd/strata/main.go` (transitively) imports `cmd/strata/workers` — it already does via `cmd/strata/server.go`.
+  - Supervisor.Run requires non-nil Deps.Logger AND Deps.Locker. For memory backends, plumb `metamem.Store.Locker()`. For Cassandra, build via `metacassandra.Locker{S: cs.Session()}` (mirror cmd/strata-gc's existing buildLocker).
+  - Lease name convention is `<workerName>-leader` (e.g. "gc-leader") — encoded inside `runOnce`. Don't override per worker; this matches the ROADMAP-tracked lease names.
+  - Per-worker tunables (STRATA_GC_INTERVAL, STRATA_LIFECYCLE_*, …) read inside Build; do NOT extend `serverFlags` in cmd/strata/server.go for them. Cross-cutting only.
+  - `runServer`'s `workers.Resolve` runs BEFORE `serverapp.Run` so a typo in STRATA_WORKERS doesn't fire up Cassandra/RADOS connections only to abort.
 ---

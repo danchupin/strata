@@ -124,6 +124,22 @@ func TestServer_StartsAndShutsDownOnContextCancel(t *testing.T) {
 	}
 }
 
+func TestServer_RejectsUnknownWorkerName(t *testing.T) {
+	t.Setenv("STRATA_LISTEN", "127.0.0.1:0")
+	t.Setenv("STRATA_DATA_BACKEND", "memory")
+	t.Setenv("STRATA_META_BACKEND", "memory")
+	t.Setenv("STRATA_AUTH_MODE", "off")
+	t.Setenv("STRATA_VHOST_PATTERN", "-")
+
+	_, errOut, code := runApp(t, "server", "--workers=ghost")
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2 for unknown worker", code)
+	}
+	if !strings.Contains(errOut, "unknown worker") {
+		t.Errorf("stderr missing 'unknown worker': %s", errOut)
+	}
+}
+
 func TestParseWorkers(t *testing.T) {
 	cases := []struct {
 		in   string

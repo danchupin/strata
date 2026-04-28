@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/danchupin/strata/cmd/strata/workers"
 	"github.com/danchupin/strata/internal/config"
 	"github.com/danchupin/strata/internal/logging"
 	"github.com/danchupin/strata/internal/serverapp"
@@ -76,6 +77,14 @@ func (a *app) runServer(ctx context.Context, args []string) int {
 
 	logger := logging.Setup()
 
+	// Resolve the requested worker list against the package-level registry
+	// before any backend is built so unknown names fail startup immediately
+	// (US-004 acceptance: "unknown names cause immediate startup error").
+	if _, err := workers.Resolve(parseWorkers(os.Getenv("STRATA_WORKERS"))); err != nil {
+		fmt.Fprintln(a.err, "strata server: workers:", err.Error())
+		return 2
+	}
+
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -134,9 +143,9 @@ func (a *app) printServerHelp(fs *flag.FlagSet) {
 	fmt.Fprintln(a.out, "intentionally cross-cutting only.")
 }
 
-// parseWorkers splits a comma-separated worker list and dedupes; empty entries
-// are dropped. Used by US-004 once the registry lands; exposed here so the
-// skeleton has at least one helper covered by tests.
+// parseWorkers splits a comma-separated worker list and dedupes; empty
+// entries are dropped. The result feeds workers.Resolve so unknown names
+// fail startup before any backend is built.
 func parseWorkers(spec string) []string {
 	seen := make(map[string]struct{})
 	var out []string

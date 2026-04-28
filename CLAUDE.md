@@ -93,6 +93,23 @@ Virtual-hosted-style routing (`internal/s3api/vhost.go`): `STRATA_VHOST_PATTERN`
 original `Host` + `URL.Path`; `Server.ServeHTTP` then strips the prefix from `r.Host` and prepends `/<bucket>` to
 `r.URL.Path` before path-style routing — never rewrite before SigV4 verification or signatures break.
 
+## Background workers (cmd/strata/workers)
+
+Workers under `strata server` register via `workers.Register(workers.Worker{Name, Build})` from a per-worker
+`init()`. The `Build` constructor receives `workers.Dependencies` (Logger, Meta, Data, Tracer, Locker, Region) and
+returns a `workers.Runner`. `workers.Supervisor.Run(ctx, workers)` spins one goroutine per requested worker;
+each goroutine acquires a `leader.Session` keyed on `<name>-leader`, builds + runs the Runner under a supervised
+context, releases on exit, and recovers from panics. A panic increments `strata_worker_panic_total{worker=<name>}`,
+releases the lease, and restarts on an exponential backoff (1s → 5s → 30s → 2m, reset to 1s after 5 minutes
+healthy). Lease loss restarts immediately (no backoff). One worker's panic or lease loss never affects the
+gateway or sibling workers.
+
+`cmd/strata/server.go::runServer` validates `STRATA_WORKERS` (or `--workers=`) via `workers.Resolve` BEFORE any
+backend is built — unknown names exit 2 immediately. The actual goroutine launch wires in alongside the gateway
+once the first concrete worker (gc) registers (US-005). When adding a new worker, register from
+`cmd/strata/workers/<name>.go`'s `init()` and let the binary pick it up; do not spawn a goroutine ad-hoc inside
+`internal/serverapp` — the supervisor owns the lifecycle.
+
 ## meta.Store interface — the contract
 
 `internal/meta/store.go` is the abstraction every backend must satisfy. **Both `internal/meta/memory`
