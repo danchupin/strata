@@ -6,7 +6,8 @@ COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
 build:
-	go build ./...
+	go build -o bin/strata ./cmd/strata
+	go build -o bin/strata-admin ./cmd/strata-admin
 
 build-ceph:
 	$(COMPOSE) build strata
@@ -67,15 +68,16 @@ ceph-pool:
 	docker exec strata-ceph ceph osd pool create strata.rgw.buckets.data 8 8 replicated || true
 	docker exec strata-ceph ceph osd pool application enable strata.rgw.buckets.data rgw || true
 
-run-memory:
+run-memory: build
 	STRATA_LISTEN=:9999 STRATA_META_BACKEND=memory STRATA_DATA_BACKEND=memory \
-		go run ./cmd/strata server
+		./bin/strata server
 
-run-cassandra:
+run-cassandra: build
 	STRATA_LISTEN=:9999 \
 	STRATA_META_BACKEND=cassandra STRATA_DATA_BACKEND=memory \
 	STRATA_CASSANDRA_HOSTS=127.0.0.1 STRATA_CASSANDRA_DC=datacenter1 \
-		go run ./cmd/strata server
+	STRATA_WORKERS=gc,lifecycle \
+		./bin/strata server
 
 run-strata:
 	$(COMPOSE) up -d strata

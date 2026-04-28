@@ -28,10 +28,10 @@ export MAIN_AK=testMainAK MAIN_SK=testMainSK
 export ALT_AK=testAltAK   ALT_SK=testAltSK
 export TENANT_AK=testTenantAK TENANT_SK=testTenantSK
 
-# Start the gateway with those creds.
+# Start strata with those creds.
 STRATA_AUTH_MODE=required \
   STRATA_STATIC_CREDENTIALS="$MAIN_AK:$MAIN_SK:main-owner,$ALT_AK:$ALT_SK:alt-owner,$TENANT_AK:$TENANT_SK:tenant-owner" \
-  docker compose -f deploy/docker/docker-compose.yml up -d --force-recreate gateway
+  docker compose -f deploy/docker/docker-compose.yml up -d --force-recreate strata
 
 # Run the default subset (what Strata actually implements today).
 scripts/s3-tests/run.sh

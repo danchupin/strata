@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Runs Ceph's s3-tests compatibility suite against a live Strata gateway.
+# Runs Ceph's s3-tests compatibility suite against a live `strata server`.
 #
 # Prereqs: python3, pip, git. The suite lives in a scratch dir the first run
 # clones s3-tests into; subsequent runs reuse the same checkout unless
-# CLEAN_SUITE=1 is set. Gateway must be running with auth=required AND the two
-# pairs of credentials defined in this file listed in STRATA_STATIC_CREDENTIALS.
+# CLEAN_SUITE=1 is set. `strata server` must be running with auth=required AND
+# the two pairs of credentials defined in this file listed in
+# STRATA_STATIC_CREDENTIALS.
 #
 # Usage:
 #   scripts/s3-tests/run.sh                  # default subset

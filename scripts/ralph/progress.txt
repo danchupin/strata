@@ -289,3 +289,17 @@ Started: Tue Apr 28 13:53:09 MSK 2026
   - CI e2e step previously ran `up -d gateway lifecycle gc` because the old gc/lifecycle services owned their own containers and log streams. With the collapse, all three live in the single `strata` container and `docker logs strata` carries every worker line — operator runbooks pinned to `docker logs strata-gc` need updating (US-019/US-020 scope).
   - The `strata-features` service intentionally does NOT publish ports. If an operator wants direct features replica `/metrics`, expose `9000` on a non-9999 host port via a compose override. Default stack: gateway port = 9999, prometheus scrapes the features replica internally.
 ---
+
+## 2026-04-28 - US-017
+- Makefile `build` target now produces `bin/strata` and `bin/strata-admin` only — `go build -o bin/strata ./cmd/strata` + `go build -o bin/strata-admin ./cmd/strata-admin`. Previously `go build ./...` built nothing into `bin/` (compile-only check).
+- `run-memory` and `run-cassandra` depend on `build` and exec `./bin/strata server` instead of `go run ./cmd/strata server` — operator gets the same artefact CI / images use, and the second invocation is cache-warm. `run-cassandra` now sets `STRATA_WORKERS=gc,lifecycle` so the local Cassandra-backed dev loop matches the compose default.
+- scripts/s3-tests/run.sh: comment header `live Strata gateway` -> `live `strata server``. scripts/s3-tests/README.md: `up -d --force-recreate gateway` -> `--force-recreate strata` (US-016 collapsed the compose service name).
+- scripts/smoke.sh / scripts/smoke-signed.sh / scripts/grafana-smoke.sh: no edits needed — they hit the gateway by URL and never invoked a binary path. scripts/ralph/ralph.sh: no edits — it shells out to `amp` / `claude`, doesn't reference any cmd/* path.
+- Files modified: Makefile, scripts/s3-tests/README.md, scripts/s3-tests/run.sh, scripts/ralph/prd.json (US-017 passes=true).
+- Quality: `make build` produces both binaries (32MB strata, 13MB strata-admin), `go vet ./...` clean, `go test ./...` clean. `make -n run-memory` / `make -n run-cassandra` render correctly (build prereq + env line + ./bin/strata server). `./bin/strata server --help` boots and prints the full Known-workers section.
+- **Learnings for future iterations:**
+  - `go build ./...` does NOT install binaries into `bin/` — it only compiles. To produce artefacts you must `go build -o bin/<name> ./cmd/<name>` per-binary. Default Go behaviour is `./...` builds binaries to the current directory, but only when ./... resolves to a single main package; for multiple main packages it's a compile-only check.
+  - When a target depends on a built artefact, `target: build` is the cheapest pattern — Make rebuilds only when sources changed (not enforced here, but `go build` itself is fast on a warm cache). Avoid duplicating env vars across `go run` and a separate `./bin` runner.
+  - `STRATA_WORKERS=gc,lifecycle` is the canonical local dev default — matches docker-compose's strata service default. Stick with this for new dev-loop targets unless you specifically want a gateway-only run.
+  - smoke.sh / smoke-signed.sh are pure HTTP clients pinned to `BASE` URL. They don't care which binary serves; the AC "scripts/* work unchanged" was satisfied trivially. Future binary renames don't ripple here.
+---
