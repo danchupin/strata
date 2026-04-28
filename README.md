@@ -42,10 +42,10 @@ make run-cassandra         # data=memory, meta=cassandra@localhost:9042
 make smoke
 ```
 
-### Option 3: full stack in Docker (Cassandra + Ceph + gateway)
+### Option 3: full stack in Docker (Cassandra + Ceph + strata)
 
 ```bash
-make up-all                # cassandra + ceph + gateway (gateway built with -tags ceph)
+make up-all                # cassandra + ceph + strata (image built with -tags ceph)
 make wait-cassandra
 make wait-ceph
 make smoke
@@ -53,7 +53,7 @@ make smoke
 
 End-to-end with real Ceph runs natively on both arm64 and amd64. The cluster image (`deploy/docker/ceph-bootstrap/`) is a custom bootstrap on top of the multi-arch `quay.io/ceph/ceph:v19.2.3` (Squid). MON+MGR+OSD in a single container, OSD backed by `memstore` (4 GiB, held in process memory). Healthy in ~5 seconds.
 
-The gateway image (`deploy/docker/Dockerfile`) is built on the same `quay.io/ceph/ceph:v19.2.3` base so the linked librados version exactly matches the cluster. `librados-devel-19.2.3` for the build stage is pulled from `download.ceph.com/rpm-squid/el9/$arch/`.
+The runtime image (`deploy/docker/Dockerfile`) is built on the same `quay.io/ceph/ceph:v19.2.3` base so the linked librados version exactly matches the cluster. `librados-devel-19.2.3` for the build stage is pulled from `download.ceph.com/rpm-squid/el9/$arch/`. Image entrypoint is `/usr/local/bin/strata`, default `CMD ["server"]`; `strata-admin` is also installed for operator verbs.
 
 A successful `make smoke` validates bucket CRUD, object PUT/GET/HEAD/DELETE (including a 10 MiB blob that ends up as three RADOS objects in pool `strata.rgw.buckets.data`), and ListObjectsV2 with prefix/delimiter.
 
@@ -78,12 +78,11 @@ A successful `make smoke` validates bucket CRUD, object PUT/GET/HEAD/DELETE (inc
 | `STRATA_RADOS_CLUSTERS` | `` | multi-cluster RADOS map: `<id>:<conf>[:<keyring>],...`. Referenced by `@cluster` in `STRATA_RADOS_CLASSES`. Empty falls back to the legacy single-cluster fields under id `default`. |
 | `STRATA_AUTH_MODE` | `off` | `off` accepts anything, `required` enforces SigV4 |
 | `STRATA_STATIC_CREDENTIALS` | `` | comma-separated `accesskey:secret[:owner]` entries for dev credentials |
-| `STRATA_LIFECYCLE_INTERVAL` | `60s` | `strata-lifecycle` tick interval (Go duration) |
+| `STRATA_WORKERS` | `` | comma-separated worker list selected on `strata server` (e.g. `gc,lifecycle,notify,replicator,access-log,inventory,audit-export,manifest-rewriter`) |
+| `STRATA_LIFECYCLE_INTERVAL` | `60s` | `lifecycle` worker tick interval (Go duration) |
 | `STRATA_LIFECYCLE_UNIT` | `day` | interpretation of `Days` in lifecycle rules: `day`\|`hour`\|`minute`\|`second` (use `second` for fast tests) |
-| `STRATA_LIFECYCLE_METRICS_LISTEN` | `:9101` | Prometheus port for `strata-lifecycle` |
-| `STRATA_GC_INTERVAL` | `30s` | `strata-gc` tick interval |
+| `STRATA_GC_INTERVAL` | `30s` | `gc` worker tick interval |
 | `STRATA_GC_GRACE` | `5m` | how long to keep queued chunks before deleting (protects in-flight GETs) |
-| `STRATA_GC_METRICS_LISTEN` | `:9100` | Prometheus port for `strata-gc` |
 
 ## Repository layout
 

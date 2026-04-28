@@ -23,14 +23,12 @@ S3-compatibility headline: **80.1% (141/176)** on the executable subset of `ceph
 These are not feature work. The codebase shipped a lot of surface in a short window; before
 adding more, prove what is there.
 
-- **P1 — Single-binary `strata` (CockroachDB-shape).** Today there are 10 `cmd/` binaries,
-  most of them background workers. Collapse `cmd/strata-{gateway,gc,lifecycle,notify,
-  replicator,access-log,inventory,audit-export,rewrap}` into a single `cmd/strata` that
-  starts the gateway plus an opt-in subset of workers selected by `STRATA_WORKERS=` (default
-  `gc,lifecycle`). Each worker keeps its own `internal/leader` lease so N replicas of one
-  binary still elect one writer per worker. `cmd/strata-rewrap` becomes `strata-admin rewrap`.
-  Final shape: two binaries (`strata`, `strata-admin`). One Docker image, one Kubernetes
-  Deployment, one set of dashboards.
+- ~~**P1 — Single-binary `strata` (CockroachDB-shape).**~~ — **Done.** Two binaries
+  (`strata`, `strata-admin`); `strata server` runs the gateway plus an opt-in subset of
+  workers (gc, lifecycle, notify, replicator, access-log, inventory, audit-export,
+  manifest-rewriter) selected via `STRATA_WORKERS=`. Each worker keeps its own
+  `internal/leader` lease keyed on `<name>-leader`. SSE master-key rotation moved to
+  `strata-admin rewrap`. One Docker image, one compose service. (commit pending)
 - **P1 — Race harness as a real test, not a gate.** `internal/racetest` (US-035) landed but
   has not been run at load against the full `make up-all` stack. Run it for ≥1 hour against
   Cassandra+RADOS, record observed inconsistencies (or zero, with the workload that proves

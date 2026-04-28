@@ -26,9 +26,9 @@ smoke pass.
 | RADOS integration tests (in-container, requires `make up-all` running) | `make test-rados`                                                        |
 | Run a single test                                                      | `go test -run TestBucketCRUD ./internal/s3api`                           |
 | Bring up Cassandra only                                                | `make up && make wait-cassandra`                                         |
-| Bring up full stack (Cassandra + Ceph + gateway)                       | `make up-all && make wait-cassandra && make wait-ceph`                   |
-| Run gateway against in-memory backends                                 | `make run-memory`                                                        |
-| Run gateway against Cassandra metadata + memory data                   | `make run-cassandra`                                                     |
+| Bring up full stack (Cassandra + Ceph + strata)                        | `make up-all && make wait-cassandra && make wait-ceph`                   |
+| Run `strata server` against in-memory backends                         | `make run-memory`                                                        |
+| Run `strata server` against Cassandra metadata + memory data           | `make run-cassandra`                                                     |
 | Smoke pass                                                             | `make smoke` (signed: `make smoke-signed`)                               |
 | Take stack down                                                        | `make down`                                                              |
 | S3 compatibility suite                                                 | `scripts/s3-tests/run.sh` (see `scripts/s3-tests/README.md`)             |
@@ -62,55 +62,50 @@ testcontainers to find the engine.
                 | (sharded)     |        | (4 MiB chunks)|
                 +---------------+        +---------------+
 
-  strata server --workers=lifecycle -> meta.Store + data.Backend (transitions /
-                          expirations / mp-abort). (US-006: legacy
-                          cmd/strata-lifecycle deleted; runs as a worker inside
-                          the unified strata binary, leader-elected on
-                          `lifecycle-leader`)
-  strata server --workers=gc -> meta.Store (GCEntry queue) + data.Backend (chunk delete)
-                          (US-005: legacy cmd/strata-gc deleted; gc now runs as a worker
-                          inside the unified strata binary, leader-elected on `gc-leader`)
-  strata server --workers=notify -> meta.Store (notify_queue + DLQ) -> webhook / SQS
-                          sinks via STRATA_NOTIFY_TARGETS. (US-007: legacy
-                          cmd/strata-notify deleted; runs inside the unified
-                          strata binary, leader-elected on `notify-leader`)
+  strata server --workers=lifecycle -> meta.Store + data.Backend
+                          (transitions / expirations / mp-abort).
+                          Leader-elected on `lifecycle-leader`.
+  strata server --workers=gc -> meta.Store (GCEntry queue) + data.Backend
+                          (chunk delete). Leader-elected on `gc-leader`.
+  strata server --workers=notify -> meta.Store (notify_queue + DLQ) ->
+                          webhook / SQS sinks via STRATA_NOTIFY_TARGETS.
+                          Leader-elected on `notify-leader`.
   strata server --workers=replicator -> meta.Store (replication_queue) +
                           data.Backend, copies to peer Strata via HTTP PUT
-                          (HTTPDispatcher). (US-008: legacy cmd/strata-replicator
-                          deleted; runs inside the unified strata binary,
-                          leader-elected on `replicator-leader`)
+                          (HTTPDispatcher). Leader-elected on
+                          `replicator-leader`.
   strata server --workers=access-log -> meta.Store (access_log_buffer) +
-                          data.Backend, drains buffered rows per source bucket
-                          and writes one AWS-format log object per flush into
-                          the target bucket configured by PutBucketLogging.
-                          (US-009: legacy cmd/strata-access-log deleted; runs
-                          inside the unified strata binary, leader-elected on
-                          `access-log-leader`)
-  strata server --workers=inventory -> meta.Store (bucket InventoryConfiguration
-                          blobs) + data.Backend, ticks per (bucket, configID),
-                          walks the source bucket and writes manifest.json +
-                          CSV.gz pairs into the configured target bucket.
-                          (US-010: legacy cmd/strata-inventory deleted; runs
-                          inside the unified strata binary, leader-elected on
-                          `inventory-leader`)
-  internal/reshard      -> per-bucket online shard-resize worker (US-045); driven
-                          synchronously via /admin/bucket/reshard or as a daemon
+                          data.Backend, drains buffered rows per source
+                          bucket and writes one AWS-format log object per
+                          flush into the target bucket configured by
+                          PutBucketLogging. Leader-elected on
+                          `access-log-leader`.
+  strata server --workers=inventory -> meta.Store (bucket
+                          InventoryConfiguration blobs) + data.Backend,
+                          ticks per (bucket, configID), walks the source
+                          bucket and writes manifest.json + CSV.gz pairs
+                          into the configured target bucket. Leader-elected
+                          on `inventory-leader`.
+  internal/reshard      -> per-bucket online shard-resize worker (US-045);
+                          driven synchronously via /admin/bucket/reshard or
+                          as a daemon.
   strata server --workers=audit-export -> internal/auditexport: drains
                           audit_log partitions older than
-                          STRATA_AUDIT_EXPORT_AFTER (default 30d) into gzipped
-                          JSON-lines objects in the configured export bucket,
-                          then deletes the source partition (US-046). (US-011:
-                          legacy cmd/strata-audit-export deleted; runs inside
-                          the unified strata binary, leader-elected on
-                          `audit-export-leader`)
+                          STRATA_AUDIT_EXPORT_AFTER (default 30d) into
+                          gzipped JSON-lines objects in the configured
+                          export bucket, then deletes the source partition
+                          (US-046). Leader-elected on `audit-export-leader`.
   strata server --workers=manifest-rewriter -> internal/manifestrewriter:
                           walks every bucket and converts any JSON-encoded
-                          objects.manifest blob to protobuf in place (US-049).
-                          Idempotent re-runs skip already-proto rows.
-                          (US-012: legacy cmd/strata-manifest-rewriter deleted;
-                          runs inside the unified strata binary, leader-elected
-                          on `manifest-rewriter-leader`. Pass cadence via
-                          STRATA_MANIFEST_REWRITER_INTERVAL — default 24h.)
+                          objects.manifest blob to protobuf in place
+                          (US-049). Idempotent re-runs skip already-proto
+                          rows. Leader-elected on `manifest-rewriter-leader`.
+                          Cadence via STRATA_MANIFEST_REWRITER_INTERVAL
+                          (default 24h).
+  strata-admin rewrap   -> one-shot SSE master-key rotation. Walks every
+                          object and rewraps DEKs to --target-key-id (or
+                          the active key). Idempotent + resumable via
+                          rewrap_progress.
 ```
 
 The S3 router is in `internal/s3api/server.go`. Bucket-scoped queries (`?cors`, `?policy`, `?lifecycle`, …) dispatch via
@@ -173,9 +168,9 @@ and you avoid an `ALTER`. Use this for per-object metadata the GET path reads bu
 
 ## Logging (slog)
 
-`internal/logging` is the canonical setup. Every `cmd/<binary>/main.go` should call `logging.Setup()` first thing
-to install a JSON-handler `*slog.Logger` driven by `STRATA_LOG_LEVEL` (DEBUG/INFO/WARN/ERROR; default INFO) and use
-the returned logger for binary-level errors. Workers (`leader.Session`, `gc.Worker`, `lifecycle.Worker`,
+`internal/logging` is the canonical setup. Both binaries (`cmd/strata`, `cmd/strata-admin`) call
+`logging.Setup()` first thing to install a JSON-handler `*slog.Logger` driven by `STRATA_LOG_LEVEL`
+(DEBUG/INFO/WARN/ERROR; default INFO) and use the returned logger for binary-level errors. Workers (`leader.Session`, `gc.Worker`, `lifecycle.Worker`,
 `notify.Config`, etc.) take `*slog.Logger`, never `*log.Logger`. The HTTP gateway wraps its mux handler with
 `logging.NewMiddleware(logger, next)` which reads / generates `X-Request-Id`, sets it on both `r.Header` (so
 downstream middlewares like `internal/s3api/access_log.go` keep reading it via `r.Header.Get`) and `w.Header()`
@@ -235,9 +230,10 @@ Tracer wiring happens in `internal/serverapp/serverapp.go::buildMetaStore` + `bu
 process). For tracing-only deploy, `deploy/docker/docker-compose.yml` ships an OTLP collector + Jaeger
 all-in-one behind the `tracing` profile (`docker compose --profile tracing up otel-collector jaeger`);
 collector config in `deploy/otel/collector-config.yaml` fans incoming OTLP traces to Jaeger at
-`jaeger:4317`. Other binaries (gc/lifecycle/replicator/access-log/notify/rewrap) currently pass nil
-tracer — add `Tracer: tp.Tracer("strata.<binary>")` to their config when their own /readyz / metrics
-story matures.
+`jaeger:4317`. Workers under `strata server` (gc/lifecycle/replicator/access-log/notify/inventory/
+audit-export/manifest-rewriter) currently pass nil tracer — add `Tracer: tp.Tracer("strata.<worker>")`
+to their config when their own /readyz / metrics story matures. `strata-admin rewrap` is a one-shot
+operator command and stays untraced.
 
 ## Cassandra gotchas (real ones, hit during this codebase's lifetime)
 

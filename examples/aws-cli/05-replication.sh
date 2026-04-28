@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Configure cross-bucket replication. Replication PUT requires versioning
 # enabled on the source bucket. The destination is referenced by ARN; the
-# strata-replicator worker (cmd/strata-replicator) drains the queue.
+# `replicator` worker (run via `strata server --workers=replicator`) drains
+# the queue.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/../lib/common.sh"

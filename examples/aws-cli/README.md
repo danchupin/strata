@@ -42,5 +42,5 @@ bash examples/aws-cli/01-bucket-setup.sh
 - SSE-S3 requires the gateway to have a master key configured
   (`STRATA_SSE_MASTER_KEY`). `examples/smoke.sh` generates one at boot.
 - Replication PUT requires versioning enabled on the source bucket. The
-  `strata-replicator` worker drains the queue against the destination
-  endpoint configured in its env.
+  `replicator` worker (`strata server --workers=replicator`) drains the
+  queue against the destination endpoint configured in its env.
