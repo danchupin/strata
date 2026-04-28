@@ -339,3 +339,15 @@ Started: Tue Apr 28 13:53:09 MSK 2026
   - CLAUDE.md "Roadmap maintenance" section's worked example diff (lines 327-334) intentionally references `cmd/strata-{gateway,gc,...}` — the diff is the close-flip pattern spec for the very bullet US-019 is closing. Don't mistake it for a stale reference.
   - The architecture diagram inside CLAUDE.md is wrapped in a code fence, so column alignment matters — keep continuation lines indented to the same column as the leading `<-` arrow. After the rewrite a 78-column hard wrap fits all bullets without breaking ASCII flow.
 ---
+
+## 2026-04-28 - US-020
+- Wrote `docs/migrations/binary-consolidation.md` — single-page operator guide for upgrading from the eleven-binary deploy to the unified `strata` + `strata-admin` shape.
+- Sections: old-binary → new-invocation table (10 rows), env-var rename note ("none — every per-worker STRATA_* knob keeps its old spelling"), Kubernetes manifest delta (before/after Deployment YAML, plus `Job` template for `strata-admin rewrap`), dashboard/alert section (metric names unchanged; documents the new `strata_worker_panic_total{worker=}` counter + a sample PromQL alert), pre-cutover checklist.
+- Files added: docs/migrations/binary-consolidation.md. Files modified: scripts/ralph/prd.json (US-020 passes=true).
+- Quality: `go vet ./...` clean (docs-only).
+- **Learnings for future iterations:**
+  - Metric-name audit was useful — confirmed via grep over `internal/metrics/` that the only NEW metric introduced by binary consolidation is `strata_worker_panic_total{worker}` (US-004). Every other `strata_*` counter/histogram/gauge kept its name when its owning binary became a worker. Future migration guides for related sweeps should start with that grep, since "did metric labels change?" is the highest-friction question for operators with existing dashboards.
+  - The `strata_gateway_*` namespace mentioned in the PRD acceptance criteria as a hypothetical rename target never existed in the first place — gateway-side metrics were always `strata_*` (HTTP histograms, bucket stats, etc.). The guide explicitly states "metric names did not change" so operators stop worrying.
+  - `STRATA_LIFECYCLE_METRICS_LISTEN` and `STRATA_GC_METRICS_LISTEN` env keys are still parsed by koanf in `internal/config/config.go::envMap` but no longer have a consumer — US-019 dropped them from README; this guide does NOT mention them. Resist the urge to document dead knobs in a forward-looking migration guide.
+  - `docs/migrations/` was a fresh directory — only `docs/backends/scylla.md` existed under `docs/` before this story. Future operator-facing migration guides for breaking changes should land in this directory.
+---
