@@ -46,7 +46,7 @@ testcontainers to find the engine.
                   HTTP S3 (path-style URLs)
                                |
                 +--------------v--------------+
-                | cmd/strata-gateway          |
+                | cmd/strata server           |
                 |  -> auth.Middleware (SigV4) |
                 |  -> s3api.Server (router)   |
                 +-------+--------------+------+
@@ -162,8 +162,8 @@ CORS, policy, public-access-block, ownership-controls). Reuse `setBucketBlob` / 
 both backends instead of writing fresh CRUD per endpoint.
 
 `data.Manifest` is encoded into the `objects.manifest` blob column via `data.EncodeManifest` (US-049): the format
-is selected by `data.SetManifestFormat("proto"|"json")`, default `proto`. `cmd/strata-gateway` (and other binaries
-that touch the encoder) read `STRATA_MANIFEST_FORMAT` once at startup and call `SetManifestFormat`. Reads always go
+is selected by `data.SetManifestFormat("proto"|"json")`, default `proto`. `internal/serverapp` (the shared
+gateway entrypoint) reads `STRATA_MANIFEST_FORMAT` once at startup and calls `SetManifestFormat`. Reads always go
 through `data.DecodeManifest` which sniffs the first non-whitespace byte (`{` → JSON, anything else → proto3 wire
 format) so JSON-vs-proto migrations are transparent. New fields tagged `json:",omitempty"` (and a fresh `protobuf` tag
 in `manifest.proto` + helper updates in `manifest_codec.go`) are schema-additive — old rows decode with zero-values,
@@ -197,7 +197,7 @@ meta failures never fail the underlying request.
 
 Health probes: `internal/health.Handler` serves `/healthz` (always 200) and `/readyz` (fans out probes
 concurrently with a 1s timeout). Probes are injected by the cmd binary via type-assertion against
-`cassandraProber` / `radosProber` interfaces in `cmd/strata-gateway/main.go::buildHealthHandler`, so the package
+`cassandraProber` / `radosProber` interfaces in `internal/serverapp/serverapp.go::buildHealthHandler`, so the package
 stays free of cassandra/rados imports. `cassandra.Store.Probe(ctx)` runs `SELECT now() FROM system.local`;
 `rados.Backend.Probe(ctx, oid)` stats a canary OID (`STRATA_RADOS_HEALTH_OID`, default `strata-readyz-canary`)
 and treats `goceph.ErrNotFound` as success — only transport/auth errors fail. Memory backends register no probe,
@@ -218,7 +218,7 @@ nil-free. Endpoint set builds an OTLP/HTTP exporter wrapped in a tail-sampling `
 `http.status_code` >= 500) always export regardless of `STRATA_OTEL_SAMPLE_RATIO` (default 0.01). The HTTP
 middleware `internal/otel.NewMiddleware(provider, next)` extracts traceparent via the global propagator,
 starts a server-kind span named `<METHOD> <path>`, captures status via a `responseWriter` shim and marks the
-span Error on >= 500. Wired in `cmd/strata-gateway/main.go` ahead of the logging middleware so the span
+span Error on >= 500. Wired in `internal/serverapp/serverapp.go` ahead of the logging middleware so the span
 covers the full request including auth/access-log/audit. **semconv import version must match the SDK's
 `resource.Default()` schema URL** — SDK 1.41 → `semconv/v1.39.0`; mismatch fails at runtime with
 "conflicting Schema URL". Bump together when bumping the SDK.
@@ -230,7 +230,7 @@ the actual query duration even though `ObserveQuery` runs after the query return
 threads a tracer onto `Backend`; `ObserveOp(ctx, logger, metrics, tracer, pool, op, oid, start, err)`
 emits `data.rados.<op>` spans (`put`/`get`/`del`) with the same retroactive-timestamp trick. Failing
 queries / ops set span status to Error so the tail-sampler exports the full trace regardless of ratio.
-Tracer wiring happens in `cmd/strata-gateway/main.go::buildMetaStore` + `buildDataBackend` after
+Tracer wiring happens in `internal/serverapp/serverapp.go::buildMetaStore` + `buildDataBackend` after
 `strataotel.Init` runs (move OTel init ahead of meta/data construction; its lifetime spans the whole
 process). For tracing-only deploy, `deploy/docker/docker-compose.yml` ships an OTLP collector + Jaeger
 all-in-one behind the `tracing` profile (`docker compose --profile tracing up otel-collector jaeger`);

@@ -89,9 +89,11 @@ A successful `make smoke` validates bucket CRUD, object PUT/GET/HEAD/DELETE (inc
 
 ```
 cmd/
-  strata-gateway/     main S3 gateway binary
-  strata-lifecycle/   lifecycle worker (phase 7)
-  strata-gc/          GC for orphan tail objects (phase 8)
+  strata/             unified S3 gateway binary; `strata server` runs the
+                      gateway plus the workers selected via STRATA_WORKERS
+                      (gc, lifecycle, notify, replicator, access-log,
+                      inventory, audit-export, manifest-rewriter)
+  strata-admin/       operator CLI (rewrap, IAM, lifecycle ticks, ...)
 internal/
   s3api/              HTTP handlers, XML, errors, routing
   meta/

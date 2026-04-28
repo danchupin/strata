@@ -1,7 +1,6 @@
-// Package serverapp hosts the gateway entrypoint extracted from
-// cmd/strata-gateway. The unified `strata server` subcommand and the
-// transitional cmd/strata-gateway binary both delegate to Run so the body
-// of the server lives in exactly one place.
+// Package serverapp hosts the gateway entrypoint shared by the unified
+// `strata server` subcommand. Builds backends, wires the HTTP handler
+// chain, listens on cfg.Listen, and spawns the worker Supervisor.
 package serverapp
 
 import (

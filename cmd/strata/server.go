@@ -140,8 +140,7 @@ func (a *app) runServer(ctx context.Context, args []string) int {
 
 // runServer is the body of the server subcommand: every cross-cutting
 // initialisation has already happened (flag parse, env apply, config load,
-// logger setup). Delegates to the shared serverapp.Run so cmd/strata-gateway
-// stays bug-for-bug equivalent until US-014 deletes it.
+// logger setup). Delegates to the shared serverapp.Run.
 func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected []workers.Worker) error {
 	return serverapp.Run(ctx, cfg, logger, selected)
 }

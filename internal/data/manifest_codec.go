@@ -36,7 +36,7 @@ func init() {
 }
 
 // SetManifestFormat selects the wire format used by EncodeManifest. Callers
-// (cmd/strata-gateway, etc.) read STRATA_MANIFEST_FORMAT once at startup
+// (internal/serverapp, etc.) read STRATA_MANIFEST_FORMAT once at startup
 // and pass the value here.
 func SetManifestFormat(f string) error {
 	switch f {

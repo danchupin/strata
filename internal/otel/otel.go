@@ -36,7 +36,7 @@ const (
 	DefaultSampleRatio = 0.01
 	// DefaultServiceName is the resource service.name attribute used when
 	// Config.ServiceName is empty.
-	DefaultServiceName = "strata-gateway"
+	DefaultServiceName = "strata"
 	// TracerName is the instrumentation library name attached to spans.
 	TracerName = "github.com/danchupin/strata/internal/otel"
 )

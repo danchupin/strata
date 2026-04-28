@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// Client talks to a strata-gateway over the IAM admin endpoints + the
+// Client talks to a strata server over the IAM admin endpoints + the
 // /admin/* HTTP surface (US-034). The CLI carries its own test-principal
 // header for the in-memory gateway harness; production callers proxy through
 // a SigV4-signing fronting service that injects [iam root].
