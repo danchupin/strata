@@ -55,6 +55,81 @@ prior cycles found useful; remove/replace if stale for this cycle.)
 - Fixed-width integer fields in TiKV keys (partNumber, day-epoch,
   shardID) use big-endian uintN so forward range scans return them in
   ascending numerical order. Never use little-endian or varint there.
+- internal/meta/tikv has a kvBackend / kvTxn abstraction (kv.go,
+  kv_tikv.go for production *txnkv.Client wrapping, kv_mem.go for
+  unit-test in-process backend). Per-section files (buckets.go, ...)
+  call s.kv.Begin(ctx, pessimistic) and treat the txn handle as
+  Get/Set/Delete/Scan/LockKeys/Commit/Rollback only. Story-by-story
+  fills in section files; do not bypass the abstraction. openWithBackend
+  is the test-only constructor that injects memBackend.
+- Bucket-row mutators (SetBucketVersioning, SetBucketACL,
+  SetBucketObjectLockEnabled, SetBucketRegion, SetBucketMfaDelete) all
+  go through buckets.go::updateBucket — pessimistic txn that LockKeys +
+  Get + mutate + Set + Commit. Plain Set after a previous LWT-style
+  CreateBucket would risk read-after-write incoherence; mirror
+  CLAUDE.md's Cassandra LWT lesson on the TiKV side.
+- meta.Bucket persists as JSON via internal/meta/tikv/codec.go. JSON
+  keeps ops debugging cheap, additive (new fields with json:omitempty
+  skip an ALTER), and round-trips uuid.UUID + time.Time without custom
+  marshallers. Internal storage only — wire formats stay XML.
+- Use internal/meta/tikv/buckets.go::prefixEnd helper for any
+  "lex starts with prefix" range scan upper bound. Locally implemented
+  (mirrors kv.PrefixNextKey) so test code does not pull the txnkv tree.
+- Pessimistic txn boilerplate in tikv: defer rollbackOnError(txn, &err)
+  immediately after Begin, then assign the named return / outer err on
+  every step. Commit is the last statement; if it succeeds err stays
+  nil and rollbackOnError is a no-op.
+
+## 2026-04-29 - US-003
+- Bucket CRUD on TiKV: CreateBucket / GetBucket / DeleteBucket /
+  ListBuckets / SetBucketVersioning + SetBucketACL /
+  SetBucketObjectLockEnabled / SetBucketRegion / SetBucketMfaDelete.
+- All mutators use a pessimistic txn — LockKeys(bucketKey) + Get +
+  Set + Commit. CreateBucket conflicts on bucketKey already-set →
+  meta.ErrBucketAlreadyExists (Cassandra LWT mirror). DeleteBucket
+  asserts emptiness via Scan(PrefixForBucket(id), prefixEnd, limit=1)
+  before deleting the bucket-by-name row.
+- Added kv.go / kv_tikv.go (txnkv-backed) / kv_mem.go (test-only
+  in-process). Store now holds a kvBackend; Open dials PD for real,
+  openWithBackend injects memBackend for unit tests.
+- Probe became real: tikvBackend.Probe calls
+  cli.GetTimestamp(ctx); memBackend.Probe is always ready.
+- Replaced US-001's stub-Probe test with full bucket-CRUD test suite
+  driven by memBackend (eight cases: Probe ready / CreateBucket /
+  duplicate create → ErrBucketAlreadyExists / round-trip / missing
+  → ErrBucketNotFound / SetBucketVersioning happy + missing /
+  multi-attr setters independent / ListBuckets all + owner filter /
+  DeleteBucket empty / DeleteBucket missing / DeleteBucket not-empty
+  → ErrBucketNotEmpty / prefixEnd helper).
+- Files changed: internal/meta/tikv/buckets.go (new),
+  internal/meta/tikv/codec.go (new), internal/meta/tikv/kv.go (new),
+  internal/meta/tikv/kv_tikv.go (new), internal/meta/tikv/kv_mem.go
+  (new), internal/meta/tikv/store.go (Open/Close/Probe rewired,
+  duplicate stub setters removed, blank import dropped),
+  internal/meta/tikv/store_test.go (rewritten),
+  go.mod, go.sum, scripts/ralph/progress.txt, scripts/ralph/prd.json.
+- **Learnings for future iterations:**
+  - txnkv.Client.Begin returns *transaction.KVTxn; SetPessimistic(true)
+    must happen BEFORE the first LockKeys / Set / Get call.
+  - LockKeys takes *kv.LockCtx (alias `tikv` inside client-go for
+    "github.com/tikv/client-go/v2/kv"); construct with
+    kv.NewLockCtx(txn.StartTS(), math.MaxInt64, time.Now()) for
+    "wait forever" semantics — fine for unit tests; adjust to a
+    bounded wait when latency budgets matter.
+  - txnkv KVTxn.Iter returns unionstore.Iterator (an internal type);
+    only call its methods (Valid/Key/Value/Next/Close) — do not try
+    to import the type. The kvTxn.Scan adapter copies bytes out so
+    callers do not have to.
+  - txnkv KVTxn.Get returns ErrNotExist for missing keys — check via
+    tikverr.IsErrNotFound. The kvTxn.Get adapter folds that into
+    (nil, false, nil) so caller code is found-bool driven.
+  - JSON encoding of meta.Bucket is the simplest persistence shape;
+    additive forward-compat is free if every new field is
+    json:omitempty and every reader treats zero values as legal
+    defaults. Keep this as the per-row pattern for the per-bucket
+    config blobs (US-007) and IAM rows (US-008).
+---
+
 
 ## 2026-04-29 - US-001
 - Added github.com/tikv/client-go/v2 to go.mod (go mod tidy resolved

@@ -16,12 +16,6 @@ import (
 
 	"github.com/google/uuid"
 
-	// Blank import keeps github.com/tikv/client-go/v2 in go.sum / go.mod
-	// across go-mod-tidy passes until US-003 imports its txn API for
-	// real. Picked the smallest leaf package so we do not pull the full
-	// txnkv tree until needed.
-	_ "github.com/tikv/client-go/v2/config"
-
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
 )
@@ -33,48 +27,46 @@ type Config struct {
 	PDEndpoints []string
 }
 
-// Store is the TiKV-backed meta.Store. The struct is intentionally bare
-// at this stage — US-003 onwards adds the txnkv client + sweeper + etc.
+// Store is the TiKV-backed meta.Store. Concrete behaviour lives in
+// per-section files (buckets.go, ...); this file holds construction +
+// cross-cutting plumbing.
 type Store struct {
 	cfg Config
+	kv  kvBackend
 }
 
-// Open returns a Store stub. Real PD/TxnKV wiring lands with the first
-// story that needs round-trip CRUD (US-003).
+// Open dials the cluster identified by cfg.PDEndpoints and returns a Store
+// ready for use. Use openWithBackend (test-only) to inject the in-process
+// memBackend.
 func Open(cfg Config) (*Store, error) {
-	return &Store{cfg: cfg}, nil
+	b, err := newTiKVBackend(cfg.PDEndpoints)
+	if err != nil {
+		return nil, err
+	}
+	return &Store{cfg: cfg, kv: b}, nil
 }
 
-// Close releases any resources held by the Store. The stub holds none.
-func (s *Store) Close() error { return nil }
+// openWithBackend builds a Store backed by the supplied kvBackend. Used by
+// unit tests to inject memBackend without dialing PD.
+func openWithBackend(b kvBackend) *Store {
+	return &Store{kv: b}
+}
+
+// Close releases the underlying kv connection.
+func (s *Store) Close() error {
+	if s.kv == nil {
+		return nil
+	}
+	return s.kv.Close()
+}
 
 // Probe is the readiness probe consumed by the gateway /readyz endpoint
-// (see internal/health.Handler wiring in serverapp). Returns
-// ErrUnsupported until US-003 connects to PD.
-func (s *Store) Probe(ctx context.Context) error { return errors.ErrUnsupported }
-
-func (s *Store) CreateBucket(ctx context.Context, name, owner, defaultClass string) (*meta.Bucket, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) DeleteBucket(ctx context.Context, name string) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) ListBuckets(ctx context.Context, owner string) ([]*meta.Bucket, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) SetBucketVersioning(ctx context.Context, name, state string) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) SetBucketACL(ctx context.Context, name, canned string) error {
-	return errors.ErrUnsupported
+// (see internal/health.Handler wiring in serverapp).
+func (s *Store) Probe(ctx context.Context) error {
+	if s == nil || s.kv == nil {
+		return errors.New("tikv: store not opened")
+	}
+	return s.kv.Probe(ctx)
 }
 
 func (s *Store) SetBucketGrants(ctx context.Context, bucketID uuid.UUID, grants []meta.Grant) error {
@@ -298,18 +290,6 @@ func (s *Store) GetBucketEncryption(ctx context.Context, bucketID uuid.UUID) ([]
 }
 
 func (s *Store) DeleteBucketEncryption(ctx context.Context, bucketID uuid.UUID) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) SetBucketObjectLockEnabled(ctx context.Context, name string, enabled bool) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) SetBucketRegion(ctx context.Context, name, region string) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) SetBucketMfaDelete(ctx context.Context, name, state string) error {
 	return errors.ErrUnsupported
 }
 
