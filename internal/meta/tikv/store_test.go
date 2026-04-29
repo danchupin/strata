@@ -1819,3 +1819,457 @@ func TestPrefixEnd(t *testing.T) {
 		}
 	}
 }
+
+// ----------------------------------------------------------------------------
+// Audit log (US-009).
+//
+// EnqueueAudit / ListAudit / ListAuditFiltered / ListAuditPartitionsBefore /
+// ReadAuditPartition / DeleteAuditPartition + sweeper.
+
+func auditUUID(t *testing.T, s string) uuid.UUID {
+	t.Helper()
+	id, err := uuid.Parse(s)
+	if err != nil {
+		t.Fatalf("uuid.Parse(%q): %v", s, err)
+	}
+	return id
+}
+
+func TestEnqueueAuditAndListByBucket(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	bid := auditUUID(t, "11111111-2222-3333-4444-555555555555")
+	now := time.Date(2026, 4, 29, 10, 0, 0, 0, time.UTC)
+
+	for i := 0; i < 3; i++ {
+		evt := &meta.AuditEvent{
+			BucketID:  bid,
+			Bucket:    "bkt",
+			Time:      now.Add(time.Duration(i) * time.Minute),
+			Principal: "alice",
+			Action:    "PutObject",
+			Resource:  "s3:/bkt/k",
+			Result:    "success",
+			RequestID: gocql.TimeUUID().String(),
+			SourceIP:  "127.0.0.1",
+		}
+		if err := s.EnqueueAudit(ctx, evt, 0); err != nil {
+			t.Fatalf("enqueue %d: %v", i, err)
+		}
+		if evt.EventID == "" {
+			t.Fatalf("EnqueueAudit did not auto-fill EventID")
+		}
+	}
+
+	got, err := s.ListAudit(ctx, bid, 100)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("len: got %d want 3", len(got))
+	}
+	// Newest-first ordering.
+	for i := 0; i < len(got)-1; i++ {
+		if got[i].Time.Before(got[i+1].Time) {
+			t.Fatalf("not newest-first at %d: %v then %v", i, got[i].Time, got[i+1].Time)
+		}
+	}
+}
+
+func TestEnqueueAuditDefaultsAndIAMBucket(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	evt := &meta.AuditEvent{
+		BucketID:  uuid.Nil,
+		Action:    "iam:CreateUser",
+		Resource:  "iam:CreateUser",
+		Principal: "root",
+		Result:    "success",
+	}
+	if err := s.EnqueueAudit(ctx, evt, 0); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if evt.Time.IsZero() {
+		t.Fatalf("Time auto-fill missing")
+	}
+	if evt.EventID == "" {
+		t.Fatalf("EventID auto-fill missing")
+	}
+	if evt.Bucket != "-" {
+		t.Fatalf("IAM rows should default Bucket to '-': %q", evt.Bucket)
+	}
+}
+
+func TestEnqueueAuditNilNoop(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.EnqueueAudit(context.Background(), nil, 0); err != nil {
+		t.Fatalf("nil entry should be a no-op, got %v", err)
+	}
+}
+
+func TestListAuditFilteredBucketScopedAndPrincipal(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	bid := auditUUID(t, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+	other := auditUUID(t, "ffffffff-1111-2222-3333-444444444444")
+	now := time.Now().UTC()
+
+	mk := func(b uuid.UUID, name, principal string, off time.Duration) {
+		err := s.EnqueueAudit(ctx, &meta.AuditEvent{
+			BucketID:  b,
+			Bucket:    name,
+			Time:      now.Add(off),
+			Principal: principal,
+			Action:    "PutObject",
+		}, 0)
+		if err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+	}
+	mk(bid, "bkt", "alice", -2*time.Hour)
+	mk(bid, "bkt", "bob", -time.Hour)
+	mk(bid, "bkt", "alice", -30*time.Minute)
+	mk(other, "other", "alice", -15*time.Minute)
+
+	rows, _, err := s.ListAuditFiltered(ctx, meta.AuditFilter{
+		BucketID:     bid,
+		BucketScoped: true,
+		Limit:        10,
+	})
+	if err != nil {
+		t.Fatalf("filtered: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("bucket-scoped: got %d want 3", len(rows))
+	}
+
+	rows, _, err = s.ListAuditFiltered(ctx, meta.AuditFilter{
+		BucketID:     bid,
+		BucketScoped: true,
+		Principal:    "alice",
+		Limit:        10,
+	})
+	if err != nil {
+		t.Fatalf("principal-filtered: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("principal=alice: got %d want 2", len(rows))
+	}
+	for _, r := range rows {
+		if r.Principal != "alice" {
+			t.Fatalf("principal filter leaked: %+v", r)
+		}
+	}
+
+	rows, _, err = s.ListAuditFiltered(ctx, meta.AuditFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("global: %v", err)
+	}
+	if len(rows) != 4 {
+		t.Fatalf("global: got %d want 4", len(rows))
+	}
+}
+
+func TestListAuditFilteredPagination(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	bid := auditUUID(t, "12121212-3434-5656-7878-909090909090")
+	now := time.Now().UTC()
+
+	for i := 0; i < 5; i++ {
+		err := s.EnqueueAudit(ctx, &meta.AuditEvent{
+			BucketID: bid,
+			Bucket:   "bkt",
+			Time:     now.Add(-time.Duration(i) * time.Minute),
+			Action:   "PutObject",
+		}, 0)
+		if err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+	}
+	page1, next, err := s.ListAuditFiltered(ctx, meta.AuditFilter{
+		BucketID:     bid,
+		BucketScoped: true,
+		Limit:        2,
+	})
+	if err != nil {
+		t.Fatalf("page1: %v", err)
+	}
+	if len(page1) != 2 {
+		t.Fatalf("page1 len: %d", len(page1))
+	}
+	if next == "" {
+		t.Fatalf("page1 next empty")
+	}
+	page2, next2, err := s.ListAuditFiltered(ctx, meta.AuditFilter{
+		BucketID:     bid,
+		BucketScoped: true,
+		Limit:        2,
+		Continuation: next,
+	})
+	if err != nil {
+		t.Fatalf("page2: %v", err)
+	}
+	if len(page2) != 2 {
+		t.Fatalf("page2 len: %d", len(page2))
+	}
+	if next2 == "" {
+		t.Fatalf("page2 next empty")
+	}
+	page3, next3, err := s.ListAuditFiltered(ctx, meta.AuditFilter{
+		BucketID:     bid,
+		BucketScoped: true,
+		Limit:        2,
+		Continuation: next2,
+	})
+	if err != nil {
+		t.Fatalf("page3: %v", err)
+	}
+	if len(page3) != 1 {
+		t.Fatalf("page3 len: %d", len(page3))
+	}
+	if next3 != "" {
+		t.Fatalf("page3 next should be empty, got %q", next3)
+	}
+}
+
+func TestAuditPartitionsAndReadDelete(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	bid := auditUUID(t, "deadbeef-feed-cafe-babe-c0ffeec0ffee")
+	now := time.Now().UTC()
+	day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	older := day.AddDate(0, 0, -10)
+
+	mk := func(at time.Time, action string) {
+		err := s.EnqueueAudit(ctx, &meta.AuditEvent{
+			BucketID: bid,
+			Bucket:   "bkt",
+			Time:     at,
+			Action:   action,
+		}, 0)
+		if err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+	}
+	mk(older.Add(time.Hour), "GetObject")
+	mk(older.Add(2*time.Hour), "PutObject")
+	mk(now, "DeleteObject")
+
+	parts, err := s.ListAuditPartitionsBefore(ctx, day)
+	if err != nil {
+		t.Fatalf("partitions before: %v", err)
+	}
+	if len(parts) != 1 {
+		t.Fatalf("partitions: got %d want 1; %+v", len(parts), parts)
+	}
+	if !parts[0].Day.Equal(older) {
+		t.Fatalf("partition day: got %v want %v", parts[0].Day, older)
+	}
+	if parts[0].BucketID != bid || parts[0].Bucket != "bkt" {
+		t.Fatalf("partition bucket: %+v", parts[0])
+	}
+
+	rows, err := s.ReadAuditPartition(ctx, bid, older)
+	if err != nil {
+		t.Fatalf("read partition: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("partition rows: got %d want 2", len(rows))
+	}
+	// Sorted ascending by EventID.
+	for i := 0; i < len(rows)-1; i++ {
+		if rows[i].EventID > rows[i+1].EventID {
+			t.Fatalf("partition rows not eventID-asc")
+		}
+	}
+
+	if err := s.DeleteAuditPartition(ctx, bid, older); err != nil {
+		t.Fatalf("delete partition: %v", err)
+	}
+	rows, err = s.ReadAuditPartition(ctx, bid, older)
+	if err != nil {
+		t.Fatalf("read after delete: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("partition not drained: got %d rows", len(rows))
+	}
+	// Today's row survived.
+	got, err := s.ListAudit(ctx, bid, 10)
+	if err != nil {
+		t.Fatalf("list after partition delete: %v", err)
+	}
+	if len(got) != 1 || got[0].Action != "DeleteObject" {
+		t.Fatalf("today row missing: %+v", got)
+	}
+}
+
+func TestEnqueueAuditTTLLazyExpiry(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	bid := auditUUID(t, "11111111-1111-1111-1111-111111111111")
+
+	// 1ns TTL → row expires immediately. ListAudit lazy-skips it.
+	err := s.EnqueueAudit(ctx, &meta.AuditEvent{
+		BucketID: bid,
+		Bucket:   "bkt",
+		Time:     time.Now().UTC(),
+		Action:   "PutObject",
+	}, time.Nanosecond)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	// Sleep a bit so wall clock passes the 1ns ExpiresAt.
+	time.Sleep(2 * time.Millisecond)
+
+	rows, err := s.ListAudit(ctx, bid, 10)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("expected 0 rows after ttl lapse, got %d", len(rows))
+	}
+
+	// A long TTL row should still surface.
+	err = s.EnqueueAudit(ctx, &meta.AuditEvent{
+		BucketID: bid,
+		Bucket:   "bkt",
+		Time:     time.Now().UTC(),
+		Action:   "GetObject",
+	}, 10*time.Minute)
+	if err != nil {
+		t.Fatalf("enqueue keep: %v", err)
+	}
+	rows, err = s.ListAudit(ctx, bid, 10)
+	if err != nil {
+		t.Fatalf("list keep: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Action != "GetObject" {
+		t.Fatalf("kept row missing: %+v", rows)
+	}
+}
+
+func TestAuditSweeperRunOnceDeletesExpired(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	bid := auditUUID(t, "22222222-2222-2222-2222-222222222222")
+
+	// Two rows: one with a tiny TTL (will be expired), one untouched.
+	err := s.EnqueueAudit(ctx, &meta.AuditEvent{
+		BucketID: bid,
+		Bucket:   "bkt",
+		Time:     time.Now().UTC(),
+		Action:   "PutObject",
+	}, time.Nanosecond)
+	if err != nil {
+		t.Fatalf("expired enqueue: %v", err)
+	}
+	err = s.EnqueueAudit(ctx, &meta.AuditEvent{
+		BucketID: bid,
+		Bucket:   "bkt",
+		Time:     time.Now().UTC(),
+		Action:   "GetObject",
+	}, time.Hour)
+	if err != nil {
+		t.Fatalf("kept enqueue: %v", err)
+	}
+
+	time.Sleep(2 * time.Millisecond)
+
+	sw, err := NewAuditSweeper(AuditSweeperConfig{
+		Store:    s,
+		Locker:   newDummyLocker(),
+		Interval: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("new sweeper: %v", err)
+	}
+	deleted, err := sw.RunOnce(ctx)
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted: got %d want 1", deleted)
+	}
+
+	// The kept row is still readable; the expired row is gone (re-running
+	// the sweep deletes nothing further).
+	rows, err := s.ListAudit(ctx, bid, 10)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Action != "GetObject" {
+		t.Fatalf("kept row missing post-sweep: %+v", rows)
+	}
+	deleted2, err := sw.RunOnce(ctx)
+	if err != nil {
+		t.Fatalf("RunOnce idempotent: %v", err)
+	}
+	if deleted2 != 0 {
+		t.Fatalf("idempotent delete count: %d", deleted2)
+	}
+}
+
+func TestAuditSweeperLeaderElection(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	bid := auditUUID(t, "33333333-3333-3333-3333-333333333333")
+
+	if err := s.EnqueueAudit(ctx, &meta.AuditEvent{
+		BucketID: bid,
+		Bucket:   "bkt",
+		Time:     time.Now().UTC(),
+		Action:   "PutObject",
+	}, time.Nanosecond); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	time.Sleep(2 * time.Millisecond)
+
+	locker := newDummyLocker()
+	sw, err := NewAuditSweeper(AuditSweeperConfig{
+		Store:    s,
+		Locker:   locker,
+		Interval: 50 * time.Millisecond,
+		Holder:   "test",
+	})
+	if err != nil {
+		t.Fatalf("new sweeper: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- sw.Run(ctx) }()
+
+	// Wait for the immediate tick to drain the expired row.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		rows, err := s.ListAudit(ctx, bid, 10)
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		if len(rows) == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("sweeper exit: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("sweeper did not exit on ctx cancel")
+	}
+}
+

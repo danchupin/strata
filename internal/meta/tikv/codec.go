@@ -281,6 +281,64 @@ func decodeMultipartCompletion(raw []byte) (*meta.MultipartCompletion, time.Time
 	}, row.ExpiresAt, nil
 }
 
+// auditRow is the persisted shape of one audit_log row. TiKV has no native
+// TTL, so callers stamp ExpiresAt at write time and the sweeper
+// (sweeper.go) eager-deletes after expiry; readers also lazy-skip expired
+// rows so a missed sweep tick does not surface stale data.
+type auditRow struct {
+	BucketID  string    `json:"b"`
+	Bucket    string    `json:"bn"`
+	EventID   string    `json:"e"`
+	Time      time.Time `json:"t"`
+	Principal string    `json:"p,omitempty"`
+	Action    string    `json:"a,omitempty"`
+	Resource  string    `json:"r,omitempty"`
+	Result    string    `json:"rs,omitempty"`
+	RequestID string    `json:"rq,omitempty"`
+	SourceIP  string    `json:"ip,omitempty"`
+	ExpiresAt time.Time `json:"x,omitempty"`
+}
+
+func encodeAudit(evt *meta.AuditEvent, expiresAt time.Time) ([]byte, error) {
+	row := auditRow{
+		BucketID:  evt.BucketID.String(),
+		Bucket:    evt.Bucket,
+		EventID:   evt.EventID,
+		Time:      evt.Time,
+		Principal: evt.Principal,
+		Action:    evt.Action,
+		Resource:  evt.Resource,
+		Result:    evt.Result,
+		RequestID: evt.RequestID,
+		SourceIP:  evt.SourceIP,
+		ExpiresAt: expiresAt,
+	}
+	return json.Marshal(&row)
+}
+
+func decodeAudit(raw []byte) (meta.AuditEvent, time.Time, error) {
+	var row auditRow
+	if err := json.Unmarshal(raw, &row); err != nil {
+		return meta.AuditEvent{}, time.Time{}, err
+	}
+	bucketID, err := uuidFromString(row.BucketID)
+	if err != nil {
+		return meta.AuditEvent{}, time.Time{}, err
+	}
+	return meta.AuditEvent{
+		BucketID:  bucketID,
+		Bucket:    row.Bucket,
+		EventID:   row.EventID,
+		Time:      row.Time,
+		Principal: row.Principal,
+		Action:    row.Action,
+		Resource:  row.Resource,
+		Result:    row.Result,
+		RequestID: row.RequestID,
+		SourceIP:  row.SourceIP,
+	}, row.ExpiresAt, nil
+}
+
 // decodeObject reverses encodeObject. The Manifest blob is decoded via
 // data.DecodeManifest (which sniffs JSON-vs-proto by first byte) so rows
 // written under either STRATA_MANIFEST_FORMAT round-trip transparently.

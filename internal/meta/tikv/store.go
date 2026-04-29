@@ -145,30 +145,6 @@ func (s *Store) AckAccessLog(ctx context.Context, entry meta.AccessLogEntry) err
 	return errors.ErrUnsupported
 }
 
-func (s *Store) EnqueueAudit(ctx context.Context, entry *meta.AuditEvent, ttl time.Duration) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) ListAudit(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.AuditEvent, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) ListAuditFiltered(ctx context.Context, filter meta.AuditFilter) ([]meta.AuditEvent, string, error) {
-	return nil, "", errors.ErrUnsupported
-}
-
-func (s *Store) ListAuditPartitionsBefore(ctx context.Context, before time.Time) ([]meta.AuditPartition, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) ReadAuditPartition(ctx context.Context, bucketID uuid.UUID, day time.Time) ([]meta.AuditEvent, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) DeleteAuditPartition(ctx context.Context, bucketID uuid.UUID, day time.Time) error {
-	return errors.ErrUnsupported
-}
-
 func (s *Store) SetObjectTags(ctx context.Context, bucketID uuid.UUID, key, versionID string, tags map[string]string) error {
 	return errors.ErrUnsupported
 }

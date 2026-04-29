@@ -148,6 +148,81 @@ prior cycles found useful; remove/replace if stale for this cycle.)
   row body (after stripping idxPrefix), then Get each per-key row.
   Empty userName falls back to scanning prefixIAMAccessKey directly +
   in-process sort by AccessKeyID — matches memory backend semantics.
+- Audit log on TiKV stamps each row with ExpiresAt at write time (TiKV
+  has no native TTL). Readers (ListAudit, ListAuditFiltered,
+  ListAuditPartitionsBefore, ReadAuditPartition) lazy-skip expired rows
+  so a delayed sweeper tick never surfaces stale data; the leader-elected
+  AuditSweeper goroutine in sweeper.go eager-deletes them in the
+  background. Both halves are required — lazy filter alone leaks disk;
+  sweeper alone leaves a window where reads see stale rows.
+- Pattern for any "sweep N rows then more next batch" deletion on TiKV:
+  open a fresh Begin per batch, Scan(cursor, end, batchSize), Delete each
+  row that fails the keep predicate, Commit, advance cursor to lastKey +
+  0x00. Bounded txn size keeps a partition with millions of rows from
+  exceeding TiKV's per-txn limit and lets ctx cancellation bail between
+  batches without leaking a long-held lease. See deleteAuditRange in
+  audit.go.
+
+## 2026-04-29 - US-009
+- Audit log + retention sweeper on TiKV. EnqueueAudit / ListAudit /
+  ListAuditFiltered / ListAuditPartitionsBefore / ReadAuditPartition /
+  DeleteAuditPartition live in internal/meta/tikv/audit.go;
+  AuditSweeper (leader-elected goroutine) lives in
+  internal/meta/tikv/sweeper.go.
+- Each row carries ExpiresAt in the JSON payload. ttl > 0 stamps
+  ExpiresAt = now + ttl; ttl == 0 means "no expiry" (operator drives
+  retention via DeleteAuditPartition). Every reader lazy-skips
+  expired rows so a delayed sweeper tick never surfaces stale data.
+- Sweeper: leader.Session-backed goroutine on lock name
+  "audit-sweeper-leader-tikv" (distinct from Cassandra's
+  "audit-sweeper-leader" so a hybrid deployment can coexist). Run loop
+  AwaitAcquires the lease, supervises it, and ticks RunOnce on
+  cfg.Interval (default 1h). RunOnce range-scans the entire audit
+  prefix in 256-row batches, deletes any row whose ExpiresAt has
+  passed, and bumps strata_meta_tikv_audit_sweep_deleted_total.
+  Lease loss cancels the lease ctx; the outer loop re-acquires.
+  Run() is the daemon entrypoint; RunOnce is exposed for unit tests
+  that want to drive a single tick without leader plumbing.
+- Files changed: internal/meta/tikv/audit.go (new),
+  internal/meta/tikv/sweeper.go (new),
+  internal/meta/tikv/locker_test.go (new — process-local
+  leader.Locker for sweeper unit tests; the real cross-process locker
+  is US-011's job),
+  internal/meta/tikv/codec.go (auditRow + encodeAudit/decodeAudit),
+  internal/meta/tikv/store.go (six audit stubs removed),
+  internal/meta/tikv/store_test.go (8 new test cases —
+  EnqueueAuditAndListByBucket, EnqueueAuditDefaultsAndIAMBucket,
+  EnqueueAuditNilNoop, ListAuditFilteredBucketScopedAndPrincipal,
+  ListAuditFilteredPagination, AuditPartitionsAndReadDelete,
+  EnqueueAuditTTLLazyExpiry, AuditSweeperRunOnceDeletesExpired,
+  AuditSweeperLeaderElection),
+  internal/metrics/metrics.go (new MetaTikvAuditSweepDeleted counter
+  + Register entry), scripts/ralph/progress.txt,
+  scripts/ralph/prd.json.
+- **Learnings for future iterations:**
+  - The retention sweeper is half a story by itself: lazy expiry on
+    read keeps every reader honest even when the sweeper is missing /
+    deposed, but disk grows unbounded without the sweeper. Both halves
+    have to land together.
+  - For cross-replica leader election in tests, a thin process-local
+    leader.Locker (locker_test.go::dummyLocker) is enough — the real
+    cross-process locker on top of TiKV pessimistic txns ships in
+    US-011. The sweeper consumes leader.Locker as an interface so
+    swapping in the real locker is mechanical (zero sweeper changes).
+  - Per-row ExpiresAt + filter-on-read maps Cassandra's `USING TTL` to
+    TiKV without needing TiKV-side TTL support. The filter is
+    forgiving: ExpiresAt zero = no expiry, ExpiresAt in the future =
+    keep, ExpiresAt in the past = drop. New surfaces that need TTL
+    semantics can reuse the same shape (multipart completion records
+    already do — see codec.go::multipartCompletionRow).
+  - Batched delete loop (deleteAuditRange) is the canonical shape for
+    any "delete all rows in [start, end) optionally filtered by
+    predicate" operation. Reuse it for queue retention sweepers
+    (notify, replication, gc) when those land in US-010.
+  - DeleteAuditPartition is implemented via deleteAuditRange with
+    keep=nil so the partition row of the audit-export worker maps
+    cheaply to a single batched delete pass — no special case.
+---
 
 ## 2026-04-29 - US-008
 - IAM users + access keys on TiKV: CreateIAMUser / GetIAMUser /
