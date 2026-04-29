@@ -58,6 +58,7 @@ const (
 	prefixGCQueue          = Namespace + "qg/"  // s/qg/<region>\x00\x00<ts8><oid>
 	prefixAuditLog         = Namespace + "A/"   // s/A/<bucket16><day4><eventID>
 	prefixLeaderLock       = Namespace + "L/"   // s/L/<lockName>
+	prefixReshardJob       = Namespace + "Rj/"  // s/Rj/<bucket16>
 )
 
 // Bucket-scoped sub-prefixes. All are appended to a "s/B/<uuid16>/"
@@ -71,8 +72,7 @@ const (
 	subMultipart        = "u/"  // s/B/<uuid16>/u/<uploadID>
 	subMultipartPart    = "up/" // s/B/<uuid16>/up/<uploadID>\x00\x00<partNum4>
 	subMultipartCompl   = "mc/" // s/B/<uuid16>/mc/<uploadID>
-	subReshardJob       = "R"   // single key
-	subReshardCursor    = "Rc/" // s/B/<uuid16>/Rc/<shard4>
+	subReshardCursor    = "Rc/" // s/B/<uuid16>/Rc/<shard4> (per-shard progress; reserved, not yet exposed via meta.Store)
 	subRewrapProgress   = "rw"  // single key
 )
 
@@ -383,9 +383,19 @@ func MultipartCompletionKey(bucketID uuid.UUID, uploadID string) []byte {
 }
 
 // ReshardJobKey is the single-row key for the active or queued reshard
-// job for a bucket.
+// job for a bucket. Lives under a global prefix (rather than the
+// bucket-scoped one) so ListReshardJobs is a single ordered range scan
+// across every bucket without touching unrelated bucket-scoped rows —
+// mirrors the Cassandra reshard_jobs table partitioning shape.
 func ReshardJobKey(bucketID uuid.UUID) []byte {
-	return append(PrefixForBucket(bucketID), subReshardJob...)
+	out := make([]byte, 0, len(prefixReshardJob)+16)
+	out = append(out, prefixReshardJob...)
+	return append(out, bucketID[:]...)
+}
+
+// ReshardJobsPrefix is the global scan origin for ListReshardJobs.
+func ReshardJobsPrefix() []byte {
+	return []byte(prefixReshardJob)
 }
 
 // ReshardCursorKey is one row per (bucket, shardID) tracking the

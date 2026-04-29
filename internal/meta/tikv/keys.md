@@ -81,8 +81,8 @@ Helpers: `EncodeVersionDesc`, `DecodeVersionDesc`.
 | Multipart upload (status)   | `s/B/<bucketUUID16>/u/<escUploadID>` |
 | Multipart part              | `s/B/<bucketUUID16>/up/<escUploadID><partNum4-BE>` |
 | Multipart completion record | `s/B/<bucketUUID16>/mc/<escUploadID>` |
-| Reshard job                 | `s/B/<bucketUUID16>/R` |
-| Reshard cursor (per shard)  | `s/B/<bucketUUID16>/Rc/<shard4-BE>` |
+| Reshard job                 | `s/Rj/<bucket16>` |
+| Reshard cursor (per shard)  | `s/B/<bucketUUID16>/Rc/<shard4-BE>` (reserved) |
 | SSE rewrap progress         | `s/B/<bucketUUID16>/rw` |
 | IAM user                    | `s/iu/<escUserName>` |
 | IAM access key (hot path)   | `s/ik/<escAccessKey>` |

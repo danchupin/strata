@@ -339,6 +339,49 @@ func decodeAudit(raw []byte) (meta.AuditEvent, time.Time, error) {
 	}, row.ExpiresAt, nil
 }
 
+// reshardJobRow is the persisted shape of one meta.ReshardJob. The
+// global key (ReshardJobKey) carries the BucketID so we elide it from
+// the body; we stamp it on decode from the key.
+type reshardJobRow struct {
+	Bucket    string    `json:"bn"`
+	Source    int       `json:"s"`
+	Target    int       `json:"t"`
+	LastKey   string    `json:"lk,omitempty"`
+	Done      bool      `json:"d,omitempty"`
+	CreatedAt time.Time `json:"c"`
+	UpdatedAt time.Time `json:"u"`
+}
+
+func encodeReshardJob(j *meta.ReshardJob) ([]byte, error) {
+	row := reshardJobRow{
+		Bucket:    j.Bucket,
+		Source:    j.Source,
+		Target:    j.Target,
+		LastKey:   j.LastKey,
+		Done:      j.Done,
+		CreatedAt: j.CreatedAt,
+		UpdatedAt: j.UpdatedAt,
+	}
+	return json.Marshal(&row)
+}
+
+func decodeReshardJob(bucketID uuid.UUID, raw []byte) (*meta.ReshardJob, error) {
+	var row reshardJobRow
+	if err := json.Unmarshal(raw, &row); err != nil {
+		return nil, err
+	}
+	return &meta.ReshardJob{
+		BucketID:  bucketID,
+		Bucket:    row.Bucket,
+		Source:    row.Source,
+		Target:    row.Target,
+		LastKey:   row.LastKey,
+		Done:      row.Done,
+		CreatedAt: row.CreatedAt,
+		UpdatedAt: row.UpdatedAt,
+	}, nil
+}
+
 // decodeObject reverses encodeObject. The Manifest blob is decoded via
 // data.DecodeManifest (which sniffs JSON-vs-proto by first byte) so rows
 // written under either STRATA_MANIFEST_FORMAT round-trip transparently.

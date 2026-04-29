@@ -2726,3 +2726,322 @@ func TestQueueListLimitClamp(t *testing.T) {
 	}
 }
 
+// ----------------------------------------------------------------------------
+// Reshard state (US-011)
+// ----------------------------------------------------------------------------
+
+func TestReshardStartHappy(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "bkt", "alice", "STANDARD")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	job, err := s.StartReshard(ctx, b.ID, 128)
+	if err != nil {
+		t.Fatalf("StartReshard: %v", err)
+	}
+	if job.Source != 64 || job.Target != 128 {
+		t.Fatalf("source/target: %+v", job)
+	}
+	if job.Bucket != "bkt" {
+		t.Fatalf("bucket name: %q", job.Bucket)
+	}
+	if job.LastKey != "" || job.Done {
+		t.Fatalf("fresh job dirty: %+v", job)
+	}
+	got, err := s.GetBucket(ctx, "bkt")
+	if err != nil {
+		t.Fatalf("get bucket: %v", err)
+	}
+	if got.TargetShardCount != 128 {
+		t.Fatalf("target shard count not stamped: %d", got.TargetShardCount)
+	}
+}
+
+func TestReshardStartInvalidTarget(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "bkt", "alice", "STANDARD")
+	for _, target := range []int{0, -1, 3, 64, 32} {
+		if _, err := s.StartReshard(ctx, b.ID, target); !errors.Is(err, meta.ErrReshardInvalidTarget) {
+			t.Fatalf("target=%d: got %v want ErrReshardInvalidTarget", target, err)
+		}
+	}
+}
+
+func TestReshardStartConflict(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "bkt", "alice", "STANDARD")
+	if _, err := s.StartReshard(ctx, b.ID, 128); err != nil {
+		t.Fatalf("first start: %v", err)
+	}
+	if _, err := s.StartReshard(ctx, b.ID, 256); !errors.Is(err, meta.ErrReshardInProgress) {
+		t.Fatalf("conflict: got %v want ErrReshardInProgress", err)
+	}
+}
+
+func TestReshardStartUnknownBucket(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	if _, err := s.StartReshard(ctx, uuid.New(), 128); !errors.Is(err, meta.ErrBucketNotFound) {
+		t.Fatalf("unknown bucket: got %v want ErrBucketNotFound", err)
+	}
+}
+
+func TestReshardGetMissing(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	if _, err := s.GetReshardJob(ctx, uuid.New()); !errors.Is(err, meta.ErrReshardNotFound) {
+		t.Fatalf("get missing: got %v want ErrReshardNotFound", err)
+	}
+}
+
+func TestReshardUpdateHappy(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "bkt", "alice", "STANDARD")
+	if _, err := s.StartReshard(ctx, b.ID, 128); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if err := s.UpdateReshardJob(ctx, &meta.ReshardJob{
+		BucketID: b.ID,
+		LastKey:  "obj/abc",
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	got, err := s.GetReshardJob(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.LastKey != "obj/abc" {
+		t.Fatalf("watermark not persisted: %+v", got)
+	}
+	if got.Done {
+		t.Fatalf("done flipped early: %+v", got)
+	}
+	if !got.UpdatedAt.After(got.CreatedAt) && !got.UpdatedAt.Equal(got.CreatedAt) {
+		t.Fatalf("updatedAt should be ≥ createdAt: %+v", got)
+	}
+}
+
+func TestReshardUpdateMissing(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	err := s.UpdateReshardJob(ctx, &meta.ReshardJob{
+		BucketID: uuid.New(),
+		LastKey:  "obj/abc",
+	})
+	if !errors.Is(err, meta.ErrReshardNotFound) {
+		t.Fatalf("update missing: got %v want ErrReshardNotFound", err)
+	}
+}
+
+func TestReshardUpdateNilNoop(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.UpdateReshardJob(context.Background(), nil); err != nil {
+		t.Fatalf("nil update: %v", err)
+	}
+}
+
+func TestReshardCompleteHappy(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "bkt", "alice", "STANDARD")
+	if _, err := s.StartReshard(ctx, b.ID, 128); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if err := s.CompleteReshard(ctx, b.ID); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if _, err := s.GetReshardJob(ctx, b.ID); !errors.Is(err, meta.ErrReshardNotFound) {
+		t.Fatalf("get after complete: got %v want ErrReshardNotFound", err)
+	}
+	got, _ := s.GetBucket(ctx, "bkt")
+	if got.ShardCount != 128 {
+		t.Fatalf("shard count not flipped: %d", got.ShardCount)
+	}
+	if got.TargetShardCount != 0 {
+		t.Fatalf("target shard count not cleared: %d", got.TargetShardCount)
+	}
+}
+
+func TestReshardCompleteMissing(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "bkt", "alice", "STANDARD")
+	if err := s.CompleteReshard(ctx, b.ID); !errors.Is(err, meta.ErrReshardNotFound) {
+		t.Fatalf("complete missing: got %v want ErrReshardNotFound", err)
+	}
+}
+
+func TestReshardListAndCardinality(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b1, _ := s.CreateBucket(ctx, "alpha", "alice", "STANDARD")
+	b2, _ := s.CreateBucket(ctx, "beta", "alice", "STANDARD")
+	if _, err := s.StartReshard(ctx, b1.ID, 128); err != nil {
+		t.Fatalf("start b1: %v", err)
+	}
+	if _, err := s.StartReshard(ctx, b2.ID, 256); err != nil {
+		t.Fatalf("start b2: %v", err)
+	}
+	jobs, err := s.ListReshardJobs(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("len jobs: got %d want 2", len(jobs))
+	}
+	seen := map[string]int{}
+	for _, j := range jobs {
+		seen[j.Bucket] = j.Target
+	}
+	if seen["alpha"] != 128 || seen["beta"] != 256 {
+		t.Fatalf("list contents: %+v", seen)
+	}
+	if err := s.CompleteReshard(ctx, b1.ID); err != nil {
+		t.Fatalf("complete b1: %v", err)
+	}
+	jobs, _ = s.ListReshardJobs(ctx)
+	if len(jobs) != 1 || jobs[0].Bucket != "beta" {
+		t.Fatalf("after complete: %+v", jobs)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Cross-process leader-election Locker (US-011)
+// ----------------------------------------------------------------------------
+
+func TestLockerAcquireRelease(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	l := NewLocker(s)
+	if l == nil {
+		t.Fatal("NewLocker nil")
+	}
+	ok, err := l.Acquire(ctx, "gc", "host-a", time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("first acquire: ok=%v err=%v", ok, err)
+	}
+	if err := l.Release(ctx, "gc", "host-a"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	// Releasing a missing row is a no-op.
+	if err := l.Release(ctx, "gc", "host-a"); err != nil {
+		t.Fatalf("re-release: %v", err)
+	}
+}
+
+func TestLockerAcquireWhileHeld(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	l := NewLocker(s)
+	if ok, err := l.Acquire(ctx, "gc", "host-a", time.Minute); err != nil || !ok {
+		t.Fatalf("first acquire: ok=%v err=%v", ok, err)
+	}
+	// Sibling tries to acquire while alive — must lose.
+	ok, err := l.Acquire(ctx, "gc", "host-b", time.Minute)
+	if err != nil {
+		t.Fatalf("sibling acquire err: %v", err)
+	}
+	if ok {
+		t.Fatalf("sibling acquired live lease")
+	}
+	// Same holder is idempotent.
+	ok, err = l.Acquire(ctx, "gc", "host-a", time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("self acquire: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestLockerAcquireExpiredSteal(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	l := NewLocker(s)
+	// Drive time so an originally-acquired lease "expires" by the time
+	// the sibling attempts to take over.
+	t0 := time.Date(2026, 4, 29, 12, 0, 0, 0, time.UTC)
+	l.now = func() time.Time { return t0 }
+	if ok, err := l.Acquire(ctx, "gc", "host-a", time.Second); err != nil || !ok {
+		t.Fatalf("first acquire: ok=%v err=%v", ok, err)
+	}
+	l.now = func() time.Time { return t0.Add(2 * time.Second) }
+	ok, err := l.Acquire(ctx, "gc", "host-b", time.Second)
+	if err != nil || !ok {
+		t.Fatalf("steal expired: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestLockerRenew(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	l := NewLocker(s)
+	if ok, _ := l.Acquire(ctx, "gc", "host-a", time.Minute); !ok {
+		t.Fatal("acquire failed")
+	}
+	ok, err := l.Renew(ctx, "gc", "host-a", time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("renew self: ok=%v err=%v", ok, err)
+	}
+	// Renewal by a different holder — refuse.
+	ok, err = l.Renew(ctx, "gc", "host-b", time.Minute)
+	if err != nil {
+		t.Fatalf("renew other err: %v", err)
+	}
+	if ok {
+		t.Fatalf("foreign renew succeeded")
+	}
+	// Release then renew → row missing → false.
+	if err := l.Release(ctx, "gc", "host-a"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	ok, err = l.Renew(ctx, "gc", "host-a", time.Minute)
+	if err != nil {
+		t.Fatalf("renew missing err: %v", err)
+	}
+	if ok {
+		t.Fatalf("renew of missing row returned true")
+	}
+}
+
+func TestLockerReleaseForeignNoop(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	l := NewLocker(s)
+	if ok, _ := l.Acquire(ctx, "gc", "host-a", time.Minute); !ok {
+		t.Fatal("acquire failed")
+	}
+	if err := l.Release(ctx, "gc", "host-b"); err != nil {
+		t.Fatalf("foreign release: %v", err)
+	}
+	// host-a still holds.
+	ok, _ := l.Acquire(ctx, "gc", "host-c", time.Minute)
+	if ok {
+		t.Fatalf("foreign release dropped lease")
+	}
+}
+
+func TestLockerNilStore(t *testing.T) {
+	if l := NewLocker(nil); l != nil {
+		t.Fatalf("nil store: got non-nil locker")
+	}
+}
+

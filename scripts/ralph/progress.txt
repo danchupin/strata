@@ -174,6 +174,126 @@ prior cycles found useful; remove/replace if stale for this cycle.)
   nanoseconds; UnixNano matches across encode/decode). Memory backend's
   Ack-by-EventID linear scan is the divergent shape — both end up with
   the same observable behaviour. See queues.go.
+- Cross-process leader-election Locker on TiKV (locker.go) is a
+  pessimistic-txn RMW over LeaderLockKey(name): row payload is
+  {Holder, ExpiresAt}. Acquire = LockKeys + Get + (CAS on holder
+  match OR ExpiresAt < now) + Set; Renew = LockKeys + Get + assert
+  Holder + Set; Release = LockKeys + Get + assert Holder + Delete.
+  The pessimistic lock is held only for the RMW step — persistent
+  ExpiresAt is what a new gateway uses to steal an abandoned lease.
+  Plug into serverapp.buildLocker via NewLocker(store) when US-015
+  wires STRATA_META_BACKEND=tikv.
+- Bucket-by-ID lookup inside a TiKV txn: scan `s/b/` to find the row
+  key, LockKey it, RE-Get to obtain the authoritative pre-image,
+  decode, mutate, Set. The Scan alone is read-only and may race with
+  concurrent SetBucketVersioning / SetBucketRegion etc. memBackend
+  won't enforce the discipline, but real TiKV's pessimistic-txn
+  for_update read does. See findBucketKeyByID in reshard.go.
+- Cross-bucket list operations (ListReshardJobs, ListAccessPoints,
+  sweepers) are cheaper off a global key prefix than a per-bucket
+  scope + filter. When the surface needs a "list across all buckets"
+  path, promote the row to a global prefix instead of writing a
+  secondary index. Reshard job key got promoted from scoped
+  `s/B/<uuid16>/R` to global `s/Rj/<bucket16>` in US-011 for this
+  reason; cursor/lifecycle/inventory worker keys stayed scoped
+  because those workers operate per-bucket.
+
+## 2026-04-29 - US-011
+- Reshard state on TiKV: StartReshard / GetReshardJob /
+  UpdateReshardJob / CompleteReshard / ListReshardJobs. Lives in
+  internal/meta/tikv/reshard.go.
+- Reshard job key promoted to a global prefix `s/Rj/<bucket16>` (was
+  reserved as bucket-scoped `s/B/<uuid16>/R`; never used). Global
+  prefix collapses ListReshardJobs to one ordered range scan instead
+  of "scan every bucket-scoped row and filter" — mirrors the Cassandra
+  reshard_jobs partitioning shape. The bucket-scoped `subReshardCursor`
+  key shape stays reserved for a future per-shard cursor story.
+- StartReshard runs a single pessimistic txn that LockKeys the
+  bucket-by-name row + the global reshard job key, re-Gets bucket at
+  the for_update timestamp, validates target > current ShardCount,
+  asserts no job present, then writes BOTH the job row + the bucket
+  row (TargetShardCount = target). Concurrent StartReshard for the
+  same bucket waits at lock-acquire and observes the persisted job on
+  the second Get → ErrReshardInProgress.
+- CompleteReshard atomically flips bucket.ShardCount to job.Target,
+  zeros TargetShardCount, deletes the job row.
+- UpdateReshardJob is the resize-worker watermark setter — pessimistic
+  RMW with LockKeys + Get + Set; only LastKey/Done/UpdatedAt move
+  forward. ErrReshardNotFound when no job is in flight (Cassandra
+  IF EXISTS mirror). Nil job is a no-op.
+- New findBucketKeyByID helper scans `s/b/` inside the same txn and
+  returns the row key — caller then LockKeys + re-Get for fresh
+  pre-image. The Scan alone is read-only and may race with concurrent
+  bucket-row mutators; the LockKey+re-Get pattern is the correctness
+  bar for the real txnkv path (memBackend doesn't enforce it but the
+  contract suite US-013 does).
+- Cross-process leader-election Locker on TiKV: NewLocker(store)
+  returns a leader.Locker implementation backed by the same kvBackend
+  the store uses. Lives in internal/meta/tikv/locker.go.
+- Lease row carries persistent {Holder, ExpiresAt} JSON. Acquire CAS-
+  flips an unheld-or-expired row via pessimistic txn (LockKeys + Get +
+  Set + Commit); Renew refreshes ExpiresAt while holder matches;
+  Release deletes the row when holder matches. The pessimistic lock is
+  held only for the duration of the read-modify-write, not the full
+  lease lifetime — the persisted ExpiresAt is what a NEW gateway uses
+  to take over after the prior holder vanished.
+- Per-bucket inventory configs (PRD acceptance line) already shipped
+  in US-007 via the blob helper — InventoryConfigKey + Set/Get/Delete/
+  List Bucket InventoryConfig — no code needed here.
+- Per-shard SetReshardCursor (PRD acceptance line) is not on meta.Store
+  today; deferred to a future story when the interface grows. The
+  bucket-scoped `subReshardCursor` key shape stays reserved.
+- Files changed: internal/meta/tikv/reshard.go (new),
+  internal/meta/tikv/locker.go (new),
+  internal/meta/tikv/keys.go (prefixReshardJob global prefix +
+  ReshardJobKey/ReshardJobsPrefix updated; subReshardJob dropped,
+  subReshardCursor noted as reserved),
+  internal/meta/tikv/keys.md (updated reshard layout),
+  internal/meta/tikv/keys_test.go (TestUniquePrefixesNoOverlap +=
+  prefixReshardJob),
+  internal/meta/tikv/codec.go (reshardJobRow + encode/decode),
+  internal/meta/tikv/store.go (5 reshard stubs removed),
+  internal/meta/tikv/store_test.go (15 new test cases — Reshard
+  StartHappy / StartInvalidTarget / StartConflict / StartUnknownBucket
+  / GetMissing / UpdateHappy / UpdateMissing / UpdateNilNoop /
+  CompleteHappy / CompleteMissing / ListAndCardinality + Locker
+  AcquireRelease / AcquireWhileHeld / AcquireExpiredSteal / Renew /
+  ReleaseForeignNoop / NilStore),
+  scripts/ralph/progress.txt, scripts/ralph/prd.json.
+- **Learnings for future iterations:**
+  - "Look up bucket by ID inside a txn" needs a Scan over `s/b/`. Do
+    NOT trust the scanned bucket payload after the LockKey — the Scan
+    is read-only and may race with concurrent SetBucketVersioning /
+    SetBucketRegion etc. The right shape is: Scan to find the key,
+    LockKey, re-Get for the authoritative pre-image, decode, mutate,
+    Set. memBackend won't enforce the discipline but real TiKV's
+    pessimistic-txn for_update read does.
+  - Cross-bucket scans (ListReshardJobs / ListAccessPoints / sweepers)
+    are cheaper to drive off a global key prefix than a per-bucket
+    scope. When the surface needs a "list across all buckets" path,
+    promote the row to a global prefix instead of writing a secondary
+    index. Lifecycle and inventory worker keys stayed bucket-scoped
+    because their workers operate per-bucket; reshard List is a
+    gateway-wide query so it gets a global prefix.
+  - The Locker implementation pattern is generic — pessimistic txn for
+    the RMW step, persistent Holder/ExpiresAt on the row, sibling
+    "is the lease alive?" check based on ExpiresAt vs now. Same shape
+    works for any "exclusive lease + heartbeat" use case (e.g. a
+    future per-bucket reshard-worker singleton). The lease row is one
+    JSON-encoded value per name; key shape is LeaderLockKey(name).
+  - Keep the dummyLocker in locker_test.go even after this story.
+    Sweeper unit tests (US-009) consume leader.Locker as an interface
+    so they can use either the real Locker or the in-process
+    dummyLocker — the latter avoids one extra memBackend allocation
+    and keeps RunOnce-driven tests minimal. Real Locker behaviour is
+    covered by the new Locker* tests in this story.
+  - Time-mocking on Locker: locker.now is a private hook (not a
+    config field). TestLockerAcquireExpiredSteal sets it directly to
+    drive the lease past its ExpiresAt without sleep. Don't expose it
+    on the constructor — the sweeper tests already prove the real
+    time.Now path is fine.
+---
+
 
 ## 2026-04-29 - US-010
 - Worker queue + DLQ + access-log buffer surfaces on TiKV. Five queues

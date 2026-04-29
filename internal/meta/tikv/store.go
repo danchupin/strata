@@ -156,26 +156,6 @@ func (s *Store) SetObjectReplicationStatus(ctx context.Context, bucketID uuid.UU
 	return errors.ErrUnsupported
 }
 
-func (s *Store) StartReshard(ctx context.Context, bucketID uuid.UUID, target int) (*meta.ReshardJob, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) GetReshardJob(ctx context.Context, bucketID uuid.UUID) (*meta.ReshardJob, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) UpdateReshardJob(ctx context.Context, job *meta.ReshardJob) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) CompleteReshard(ctx context.Context, bucketID uuid.UUID) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) ListReshardJobs(ctx context.Context) ([]*meta.ReshardJob, error) {
-	return nil, errors.ErrUnsupported
-}
-
 // Compile-time guarantee that *Store satisfies meta.Store. Stories that
 // touch the interface should preserve this assertion.
 var _ meta.Store = (*Store)(nil)

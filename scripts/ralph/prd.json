@@ -186,8 +186,8 @@
         "Tests pass"
       ],
       "priority": 11,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented StartReshard / GetReshardJob / UpdateReshardJob / CompleteReshard / ListReshardJobs (the meta.Store-surface methods Cassandra exposes today) plus a full tikv.Locker (Acquire/Renew/Release) backed by pessimistic-txn LockKeys + persisted Holder/ExpiresAt row. The PRD-mentioned per-(bucket, configID) inventory configs already shipped under US-007's blob helper (no new code needed here — same endpoint, same shape). The PRD's per-shard SetReshardCursor is not on meta.Store today (neither Cassandra nor memory exposes it; the live reshard worker drives off the job's LastKey watermark), so that line is out of scope until the interface grows; the subReshardCursor key shape is already reserved in keys.go for that future story."
     },
     {
       "id": "US-012",
