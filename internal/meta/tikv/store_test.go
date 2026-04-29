@@ -2273,3 +2273,456 @@ func TestAuditSweeperLeaderElection(t *testing.T) {
 	}
 }
 
+// ----------------------------------------------------------------------------
+// Worker queues + DLQ + access-log buffer (US-010)
+// ----------------------------------------------------------------------------
+
+func TestGCQueueRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	chunks := []data.ChunkRef{
+		{Cluster: "default", Pool: "p1", Namespace: "n1", OID: "o1", Size: 100},
+		{Cluster: "cold-eu", Pool: "p2", OID: "o2", Size: 200},
+	}
+	if err := s.EnqueueChunkDeletion(ctx, "default", chunks); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	entries, err := s.ListGCEntries(ctx, "default", time.Now().Add(time.Hour), 100)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("got %d want 2", len(entries))
+	}
+	byOID := map[string]data.ChunkRef{}
+	for _, e := range entries {
+		byOID[e.Chunk.OID] = e.Chunk
+	}
+	if got := byOID["o1"]; got.Cluster != "default" || got.Pool != "p1" || got.Namespace != "n1" || got.Size != 100 {
+		t.Fatalf("o1 round-trip: %+v", got)
+	}
+	if got := byOID["o2"]; got.Cluster != "cold-eu" || got.Pool != "p2" || got.Size != 200 {
+		t.Fatalf("o2 round-trip: %+v", got)
+	}
+	for _, e := range entries {
+		if err := s.AckGCEntry(ctx, "default", e); err != nil {
+			t.Fatalf("ack %s: %v", e.Chunk.OID, err)
+		}
+	}
+	remaining, _ := s.ListGCEntries(ctx, "default", time.Now().Add(time.Hour), 100)
+	if len(remaining) != 0 {
+		t.Fatalf("remaining: %d", len(remaining))
+	}
+}
+
+func TestGCQueueBeforeFilter(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	if err := s.EnqueueChunkDeletion(ctx, "r", []data.ChunkRef{{OID: "o1"}}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	// Listing with a `before` strictly earlier than the row's EnqueuedAt
+	// returns nothing.
+	got, err := s.ListGCEntries(ctx, "r", time.Now().Add(-time.Hour), 10)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("before filter: got %d want 0", len(got))
+	}
+}
+
+func TestGCQueueRegionIsolation(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	if err := s.EnqueueChunkDeletion(ctx, "us", []data.ChunkRef{{OID: "u1"}}); err != nil {
+		t.Fatalf("enqueue us: %v", err)
+	}
+	if err := s.EnqueueChunkDeletion(ctx, "eu", []data.ChunkRef{{OID: "e1"}}); err != nil {
+		t.Fatalf("enqueue eu: %v", err)
+	}
+	us, _ := s.ListGCEntries(ctx, "us", time.Now().Add(time.Hour), 100)
+	eu, _ := s.ListGCEntries(ctx, "eu", time.Now().Add(time.Hour), 100)
+	if len(us) != 1 || us[0].Chunk.OID != "u1" {
+		t.Fatalf("us: %+v", us)
+	}
+	if len(eu) != 1 || eu[0].Chunk.OID != "e1" {
+		t.Fatalf("eu: %+v", eu)
+	}
+}
+
+func TestNotifyQueueRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "nfy", "owner", "STANDARD")
+
+	now := time.Now().UTC()
+	evt := &meta.NotificationEvent{
+		BucketID:   b.ID,
+		Bucket:     b.Name,
+		Key:        "img/cat.jpg",
+		EventID:    gocql.TimeUUID().String(),
+		EventName:  "s3:ObjectCreated:Put",
+		EventTime:  now,
+		ConfigID:   "OnPut",
+		TargetType: "topic",
+		TargetARN:  "arn:aws:sns:us-east-1:0:t",
+		Payload:    []byte(`{"Records":[{"eventName":"s3:ObjectCreated:Put"}]}`),
+	}
+	if err := s.EnqueueNotification(ctx, evt); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	got, err := s.ListPendingNotifications(ctx, b.ID, 100)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d want 1", len(got))
+	}
+	if got[0].EventID != evt.EventID || got[0].Key != evt.Key || got[0].ConfigID != evt.ConfigID {
+		t.Fatalf("row: %+v", got[0])
+	}
+	if string(got[0].Payload) != string(evt.Payload) {
+		t.Fatalf("payload: %q", got[0].Payload)
+	}
+	if err := s.AckNotification(ctx, got[0]); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	remaining, _ := s.ListPendingNotifications(ctx, b.ID, 100)
+	if len(remaining) != 0 {
+		t.Fatalf("after ack: %d", len(remaining))
+	}
+}
+
+func TestNotifyQueueDefaultsAutoFill(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "nfy2", "owner", "STANDARD")
+
+	evt := &meta.NotificationEvent{
+		BucketID: b.ID,
+		Bucket:   b.Name,
+		Key:      "img/zero.jpg",
+	}
+	if err := s.EnqueueNotification(ctx, evt); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if evt.EventID == "" || evt.EventTime.IsZero() {
+		t.Fatalf("auto-fill failed: %+v", evt)
+	}
+	got, _ := s.ListPendingNotifications(ctx, b.ID, 10)
+	if len(got) != 1 || got[0].EventID != evt.EventID {
+		t.Fatalf("list mismatch: %+v", got)
+	}
+}
+
+func TestNotifyQueueOldestFirst(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "nfy3", "owner", "STANDARD")
+
+	t0 := time.Date(2026, 4, 29, 1, 0, 0, 0, time.UTC)
+	for i := 0; i < 3; i++ {
+		ev := &meta.NotificationEvent{
+			BucketID:  b.ID,
+			Bucket:    b.Name,
+			EventID:   gocql.TimeUUID().String(),
+			EventTime: t0.Add(time.Duration(i) * time.Second),
+			Key:       "k",
+		}
+		if err := s.EnqueueNotification(ctx, ev); err != nil {
+			t.Fatalf("enqueue %d: %v", i, err)
+		}
+	}
+	got, _ := s.ListPendingNotifications(ctx, b.ID, 10)
+	if len(got) != 3 {
+		t.Fatalf("got %d want 3", len(got))
+	}
+	for i := 1; i < len(got); i++ {
+		if !got[i-1].EventTime.Before(got[i].EventTime) {
+			t.Fatalf("FIFO order broken: %v -> %v", got[i-1].EventTime, got[i].EventTime)
+		}
+	}
+}
+
+func TestNotifyQueueBucketIsolation(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b1, _ := s.CreateBucket(ctx, "nfya", "o", "STANDARD")
+	b2, _ := s.CreateBucket(ctx, "nfyb", "o", "STANDARD")
+
+	for _, b := range []*meta.Bucket{b1, b2} {
+		ev := &meta.NotificationEvent{
+			BucketID: b.ID,
+			Bucket:   b.Name,
+			Key:      "k",
+		}
+		if err := s.EnqueueNotification(ctx, ev); err != nil {
+			t.Fatalf("enqueue %s: %v", b.Name, err)
+		}
+	}
+	got1, _ := s.ListPendingNotifications(ctx, b1.ID, 10)
+	got2, _ := s.ListPendingNotifications(ctx, b2.ID, 10)
+	if len(got1) != 1 || len(got2) != 1 {
+		t.Fatalf("isolation: b1=%d b2=%d", len(got1), len(got2))
+	}
+	if got1[0].BucketID != b1.ID || got2[0].BucketID != b2.ID {
+		t.Fatalf("bucket id leakage: b1=%v b2=%v", got1[0].BucketID, got2[0].BucketID)
+	}
+}
+
+func TestNotifyDLQRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "dlq", "owner", "STANDARD")
+
+	now := time.Now().UTC()
+	entry := &meta.NotificationDLQEntry{
+		NotificationEvent: meta.NotificationEvent{
+			BucketID:   b.ID,
+			Bucket:     b.Name,
+			Key:        "img/dog.jpg",
+			EventID:    gocql.TimeUUID().String(),
+			EventName:  "s3:ObjectCreated:Put",
+			EventTime:  now,
+			ConfigID:   "OnPut",
+			TargetType: "topic",
+			TargetARN:  "arn:aws:sns:us-east-1:0:t",
+			Payload:    []byte(`{"Records":[]}`),
+		},
+		Attempts:   6,
+		Reason:     "endpoint returned 503",
+		EnqueuedAt: now,
+	}
+	if err := s.EnqueueNotificationDLQ(ctx, entry); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	got, err := s.ListNotificationDLQ(ctx, b.ID, 100)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d want 1", len(got))
+	}
+	if got[0].Attempts != 6 || got[0].Reason != entry.Reason || got[0].Key != entry.Key {
+		t.Fatalf("row: %+v", got[0])
+	}
+	if string(got[0].Payload) != string(entry.Payload) {
+		t.Fatalf("payload: %q", got[0].Payload)
+	}
+}
+
+func TestNotifyDLQDefaultsAutoFill(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "dlq2", "owner", "STANDARD")
+
+	entry := &meta.NotificationDLQEntry{
+		NotificationEvent: meta.NotificationEvent{
+			BucketID: b.ID,
+			Bucket:   b.Name,
+			Key:      "k",
+		},
+		Reason: "boom",
+	}
+	if err := s.EnqueueNotificationDLQ(ctx, entry); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if entry.EventID == "" || entry.EnqueuedAt.IsZero() {
+		t.Fatalf("auto-fill: %+v", entry)
+	}
+}
+
+func TestReplicationQueueRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "rep", "owner", "STANDARD")
+
+	now := time.Now().UTC()
+	evt := &meta.ReplicationEvent{
+		BucketID:          b.ID,
+		Bucket:            b.Name,
+		Key:               "logs/2026/04/x.txt",
+		VersionID:         gocql.TimeUUID().String(),
+		EventID:           gocql.TimeUUID().String(),
+		EventName:         "s3:Replication:Pending",
+		EventTime:         now,
+		RuleID:            "logs",
+		DestinationBucket: "arn:aws:s3:::dest",
+		StorageClass:      "STANDARD",
+	}
+	if err := s.EnqueueReplication(ctx, evt); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	got, err := s.ListPendingReplications(ctx, b.ID, 100)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d want 1", len(got))
+	}
+	if got[0].RuleID != evt.RuleID || got[0].Key != evt.Key || got[0].DestinationBucket != evt.DestinationBucket {
+		t.Fatalf("row: %+v", got[0])
+	}
+	if got[0].VersionID != evt.VersionID {
+		t.Fatalf("version: got %q want %q", got[0].VersionID, evt.VersionID)
+	}
+	if err := s.AckReplication(ctx, got[0]); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	remaining, _ := s.ListPendingReplications(ctx, b.ID, 100)
+	if len(remaining) != 0 {
+		t.Fatalf("after ack: %d", len(remaining))
+	}
+}
+
+func TestAccessLogBufferRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "alog", "owner", "STANDARD")
+
+	now := time.Now().UTC()
+	entry := &meta.AccessLogEntry{
+		BucketID:    b.ID,
+		Bucket:      b.Name,
+		EventID:     gocql.TimeUUID().String(),
+		Time:        now,
+		RequestID:   "req-123",
+		Principal:   "alice",
+		SourceIP:    "10.0.0.1",
+		Op:          "REST.PUT.OBJECT",
+		Key:         "img/cat.jpg",
+		Status:      200,
+		BytesSent:   1024,
+		ObjectSize:  4096,
+		TotalTimeMS: 12,
+		Referrer:    "https://example.com/",
+		UserAgent:   "aws-cli/2.0",
+	}
+	if err := s.EnqueueAccessLog(ctx, entry); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	got, err := s.ListPendingAccessLog(ctx, b.ID, 100)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d want 1", len(got))
+	}
+	g := got[0]
+	if g.Op != entry.Op || g.Key != entry.Key || g.Status != entry.Status ||
+		g.BytesSent != entry.BytesSent || g.ObjectSize != entry.ObjectSize ||
+		g.RequestID != entry.RequestID || g.Principal != entry.Principal ||
+		g.SourceIP != entry.SourceIP || g.Referrer != entry.Referrer ||
+		g.UserAgent != entry.UserAgent {
+		t.Fatalf("row: %+v", g)
+	}
+	if err := s.AckAccessLog(ctx, g); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	remaining, _ := s.ListPendingAccessLog(ctx, b.ID, 100)
+	if len(remaining) != 0 {
+		t.Fatalf("after ack: %d", len(remaining))
+	}
+}
+
+func TestQueueAckUnknownIsNoop(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	bid := uuid.New()
+	if err := s.AckNotification(ctx, meta.NotificationEvent{BucketID: bid, EventID: gocql.TimeUUID().String(), EventTime: time.Now().UTC()}); err != nil {
+		t.Fatalf("notify ack unknown: %v", err)
+	}
+	if err := s.AckReplication(ctx, meta.ReplicationEvent{BucketID: bid, EventID: gocql.TimeUUID().String(), EventTime: time.Now().UTC()}); err != nil {
+		t.Fatalf("replication ack unknown: %v", err)
+	}
+	if err := s.AckAccessLog(ctx, meta.AccessLogEntry{BucketID: bid, EventID: gocql.TimeUUID().String(), Time: time.Now().UTC()}); err != nil {
+		t.Fatalf("access-log ack unknown: %v", err)
+	}
+	if err := s.AckGCEntry(ctx, "r", meta.GCEntry{Chunk: data.ChunkRef{OID: "ghost"}, EnqueuedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("gc ack unknown: %v", err)
+	}
+}
+
+func TestQueueAckEmptyEventIDIsNoop(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	if err := s.AckNotification(ctx, meta.NotificationEvent{}); err != nil {
+		t.Fatalf("notify: %v", err)
+	}
+	if err := s.AckReplication(ctx, meta.ReplicationEvent{}); err != nil {
+		t.Fatalf("replication: %v", err)
+	}
+	if err := s.AckAccessLog(ctx, meta.AccessLogEntry{}); err != nil {
+		t.Fatalf("access-log: %v", err)
+	}
+}
+
+func TestQueueNilEnqueueIsNoop(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	if err := s.EnqueueNotification(ctx, nil); err != nil {
+		t.Fatalf("notify: %v", err)
+	}
+	if err := s.EnqueueNotificationDLQ(ctx, nil); err != nil {
+		t.Fatalf("dlq: %v", err)
+	}
+	if err := s.EnqueueReplication(ctx, nil); err != nil {
+		t.Fatalf("replication: %v", err)
+	}
+	if err := s.EnqueueAccessLog(ctx, nil); err != nil {
+		t.Fatalf("access-log: %v", err)
+	}
+	if err := s.EnqueueChunkDeletion(ctx, "r", nil); err != nil {
+		t.Fatalf("gc nil: %v", err)
+	}
+}
+
+func TestQueueListLimitClamp(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "lim", "owner", "STANDARD")
+
+	for i := 0; i < 3; i++ {
+		ev := &meta.NotificationEvent{
+			BucketID:  b.ID,
+			Bucket:    b.Name,
+			EventID:   gocql.TimeUUID().String(),
+			EventTime: time.Now().UTC().Add(time.Duration(i) * time.Microsecond),
+			Key:       "k",
+		}
+		if err := s.EnqueueNotification(ctx, ev); err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+	}
+	got, _ := s.ListPendingNotifications(ctx, b.ID, 2)
+	if len(got) != 2 {
+		t.Fatalf("limit=2: got %d", len(got))
+	}
+	got, _ = s.ListPendingNotifications(ctx, b.ID, 0)
+	if len(got) != 3 {
+		t.Fatalf("limit=0 (default): got %d", len(got))
+	}
+}
+

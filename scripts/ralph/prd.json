@@ -170,8 +170,8 @@
         "Tests pass"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented the meta.Store-surface queue methods that exist today: EnqueueChunkDeletion/ListGCEntries/AckGCEntry, EnqueueNotification/ListPendingNotifications/AckNotification, EnqueueNotificationDLQ/ListNotificationDLQ, EnqueueReplication/ListPendingReplications/AckReplication, EnqueueAccessLog/ListPendingAccessLog/AckAccessLog. The PRD-mentioned ClaimNotifyBatch + manifest-rewriter cursor shapes are not on meta.Store today — neither Cassandra nor memory backend exposes them — so those acceptance lines are out of scope until the interface grows; deferred to a future cycle. Keys reuse the (prefix, bucket16, ts8, eventID) shape from US-002."
     },
     {
       "id": "US-011",

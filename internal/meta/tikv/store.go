@@ -16,7 +16,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
 )
 
@@ -87,62 +86,6 @@ func (s *Store) SetObjectGrants(ctx context.Context, bucketID uuid.UUID, key, ve
 
 func (s *Store) GetObjectGrants(ctx context.Context, bucketID uuid.UUID, key, versionID string) ([]meta.Grant, error) {
 	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) EnqueueChunkDeletion(ctx context.Context, region string, chunks []data.ChunkRef) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) ListGCEntries(ctx context.Context, region string, before time.Time, limit int) ([]meta.GCEntry, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) AckGCEntry(ctx context.Context, region string, entry meta.GCEntry) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) EnqueueNotification(ctx context.Context, evt *meta.NotificationEvent) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) ListPendingNotifications(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.NotificationEvent, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) AckNotification(ctx context.Context, evt meta.NotificationEvent) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) EnqueueNotificationDLQ(ctx context.Context, entry *meta.NotificationDLQEntry) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) ListNotificationDLQ(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.NotificationDLQEntry, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) EnqueueReplication(ctx context.Context, evt *meta.ReplicationEvent) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) ListPendingReplications(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.ReplicationEvent, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) AckReplication(ctx context.Context, evt meta.ReplicationEvent) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) EnqueueAccessLog(ctx context.Context, entry *meta.AccessLogEntry) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) ListPendingAccessLog(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.AccessLogEntry, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) AckAccessLog(ctx context.Context, entry meta.AccessLogEntry) error {
-	return errors.ErrUnsupported
 }
 
 func (s *Store) SetObjectTags(ctx context.Context, bucketID uuid.UUID, key, versionID string, tags map[string]string) error {

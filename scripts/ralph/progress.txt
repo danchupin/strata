@@ -162,6 +162,77 @@ prior cycles found useful; remove/replace if stale for this cycle.)
   exceeding TiKV's per-txn limit and lets ctx cancellation bail between
   batches without leaking a long-held lease. See deleteAuditRange in
   audit.go.
+- Worker queues (notify / notify-DLQ / replication / access-log / GC) on
+  TiKV use one shared shape: key = `<prefix><partition><tsNano8-BE>
+  <eventID-escaped>`. Big-endian ts8 makes ascending range scan claim
+  oldest-first; escaped eventID breaks ts ties. Per-bucket queues use the
+  16-byte bucket UUID as partition; the GC queue uses the byte-stuffed
+  region string. Ack recomputes the same key from the entry's timestamp
+  + EventID and Deletes the row — no per-row secondary index. Means the
+  caller MUST round-trip the entry back through List → Ack so the
+  Time/EnqueuedAt + EventID survive (JSON RFC3339Nano preserves
+  nanoseconds; UnixNano matches across encode/decode). Memory backend's
+  Ack-by-EventID linear scan is the divergent shape — both end up with
+  the same observable behaviour. See queues.go.
+
+## 2026-04-29 - US-010
+- Worker queue + DLQ + access-log buffer surfaces on TiKV. Five queues
+  share one key shape (prefix, partition, ts8 big-endian, escaped
+  event-id) and one round-trip codec convention (JSON row, abbreviated
+  field names). Lives in internal/meta/tikv/queues.go.
+- GC queue: EnqueueChunkDeletion writes one row per ChunkRef under
+  GCQueueKey(region, now-nano, oid); ListGCEntries range-scans the
+  per-region prefix and applies the `before` filter in-process;
+  AckGCEntry recomputes the key from (region, EnqueuedAt-nano, OID) and
+  deletes. Region partition keeps US/EU traffic isolated.
+- Notification queue: EnqueueNotification auto-fills EventID/EventTime
+  if zero (mirrors memory + Cassandra); writes the row under
+  NotifyQueueKey(bucketID, EventTime-nano, eventID). Ack recomputes the
+  key from (BucketID, EventTime-nano, EventID). Per-bucket isolation
+  comes for free from the bucket16 partition. Oldest-first FIFO from
+  the big-endian ts8 segment.
+- Notify DLQ: same shape with EnqueuedAt as the partition timestamp.
+  No Ack — DLQ is operator-visible only.
+- Replication queue: EventTime-keyed; Ack mirrors notify shape.
+- Access-log buffer: Time-keyed; Ack recomputes from
+  (BucketID, Time-nano, EventID).
+- Cap: callers passing limit ≤ 0 or > 1000 get queueListLimitDefault
+  = 1000 (matches memory + Cassandra). Range scan applies the limit.
+- Files changed: internal/meta/tikv/queues.go (new),
+  internal/meta/tikv/store.go (14 stubs removed; data import dropped),
+  internal/meta/tikv/store_test.go (16 new test cases —
+  GCQueueRoundTrip / GCQueueBeforeFilter / GCQueueRegionIsolation /
+  NotifyQueueRoundTrip / NotifyQueueDefaultsAutoFill /
+  NotifyQueueOldestFirst / NotifyQueueBucketIsolation /
+  NotifyDLQRoundTrip / NotifyDLQDefaultsAutoFill /
+  ReplicationQueueRoundTrip / AccessLogBufferRoundTrip /
+  QueueAckUnknownIsNoop / QueueAckEmptyEventIDIsNoop /
+  QueueNilEnqueueIsNoop / QueueListLimitClamp),
+  scripts/ralph/progress.txt, scripts/ralph/prd.json.
+- **Learnings for future iterations:**
+  - Rebuilding a queue key from the row's own timestamp + EventID is
+    the simplest Ack shape on TiKV — no secondary index needed. The
+    caveat is that Time/EnqueuedAt + EventID MUST round-trip exactly
+    through List, which JSON RFC3339Nano + UnixNano deliver. If a
+    future story needs different Ack semantics (e.g. Cassandra-style
+    hour partition for retention TTL), revisit the shape.
+  - Auto-fill at Enqueue (EventID = TimeUUID, EventTime/EnqueuedAt =
+    now if zero) MUST mutate the caller's pointer, not a local copy.
+    Memory + Cassandra both leave the mutated row visible to callers
+    (the s3api notify producer relies on this for the post-enqueue
+    audit trail). Match that — pass `*meta.X`, mutate in place,
+    re-encode.
+  - The PRD's "ClaimNotifyBatch" / "claim_expires_at" / per-row claim
+    state machine + manifest-rewriter cursor are NOT on meta.Store
+    today (memory + Cassandra both ship the simpler Ack-on-success
+    shape). Documented as deferred in the prd.json notes; if the
+    interface ever grows those methods, this story re-opens.
+  - `queueListLimitDefault = 1000` mirrors the cap memory + Cassandra
+    apply on List* methods. New queue surfaces should reuse it via
+    the `if limit <= 0 || limit > queueListLimitDefault { limit =
+    queueListLimitDefault }` snippet at the top of every List method.
+---
+
 
 ## 2026-04-29 - US-009
 - Audit log + retention sweeper on TiKV. EnqueueAudit / ListAudit /
