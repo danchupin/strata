@@ -109,6 +109,88 @@ prior cycles found useful; remove/replace if stale for this cycle.)
   key, so for ListObjects (exclusive marker) advance start to that
   prefixEnd; for ListObjectVersions (inclusive marker) advance start
   to escaped(marker) + 0x00 0x00 itself.
+- Multipart Complete on TiKV is one pessimistic txn that holds TWO
+  locks: the upload-row key (for the LWT-equivalent status flip
+  uploading→completing) AND the final ObjectKey (so concurrent
+  PutObject / Complete on the same final key cannot race). LockKeys
+  is incremental — call it once at txn start with the upload key,
+  then again post-status-flip when the final versionID is known.
+  Status flip's Set is buffered until Commit, but LockKeys
+  participates in the conflict graph immediately so concurrent
+  Completers serialise pre-Commit; the loser observes
+  ErrMultipartInProgress (or ErrMultipartNotFound if the winner
+  already committed and removed the upload row).
+- TiKV has no native TTL — for any "row expires after N" surface
+  (RecordMultipartCompletion, audit log retention via US-009 sweeper,
+  ...) persist ExpiresAt in the row payload and lazy-expire on Get.
+  A periodic sweeper (US-009) handles eager deletion later. Mirror of
+  Cassandra `USING TTL`.
+
+## 2026-04-29 - US-006
+- Multipart upload lifecycle on TiKV: Create / Get / List / SavePart /
+  ListParts / Complete / Abort + RecordMultipartCompletion /
+  GetMultipartCompletion + UpdateMultipartUploadSSEWrap.
+- CreateMultipartUpload writes the upload status row under
+  MultipartKey(bucketID, uploadID) with Status forced to "uploading"
+  (single source of truth for the Complete CAS flip).
+- SavePart is a pessimistic txn that LockKeys(uploadKey, partKey),
+  asserts upload row exists + status=='uploading', then writes the part
+  row. Mirrors memory's stricter contract (Cassandra UPSERT-style is
+  silently lenient — TiKV picks memory's shape so ErrMultipartNotFound
+  / ErrMultipartInProgress trip cleanly).
+- CompleteMultipartUpload is the LWT-equivalent flip + materialise inside
+  a single pessimistic txn: LockKeys(uploadKey) → Get + assert
+  status=='uploading' → Set status='completing' → range-scan parts →
+  validate ETags → build final Manifest + sizes → ObjectKey LockKeys →
+  encodeObject + Set → delete every part row + delete upload row →
+  Commit. Loser of two concurrent completes observes
+  ErrMultipartInProgress (or ErrMultipartNotFound if winner already
+  committed) — verified by TestMultipartCompleteRaceOneWinner.
+- AbortMultipartUpload range-scans parts, accumulates orphan manifests
+  for the caller to GC, deletes part rows + upload row in the same
+  pessimistic txn. Idempotent — second abort returns
+  ErrMultipartNotFound.
+- TiKV has no native TTL; multipart_completion_row carries ExpiresAt
+  and GetMultipartCompletion lazy-expires on read (mirrors memory).
+- Files changed: internal/meta/tikv/multipart.go (new),
+  internal/meta/tikv/codec.go (multipartUploadRow + partRow +
+  multipartCompletionRow encoders),
+  internal/meta/tikv/store.go (multipart stubs removed),
+  internal/meta/tikv/store_test.go (15 new test cases — Create+Get,
+  Get missing, ListByPrefix, SavePart+ListParts ascending order,
+  SavePart missing upload, CompleteHappy, CompleteOrphans,
+  CompleteEtagMismatch, CompletePartMissing,
+  CompleteSecondCallInProgress, CompleteRaceOneWinner,
+  CompleteVersioned, Abort + idempotent, CompletionRecord round-trip,
+  CompletionExpired, UpdateSSEWrap),
+  scripts/ralph/progress.txt, scripts/ralph/prd.json.
+- **Learnings for future iterations:**
+  - Multipart Complete must lock TWO keys: the upload row AND the
+    final object key. Hold the upload-row lock for the whole txn so
+    the LWT flip serialises; lock the object key once we know the
+    versionID (post-status-flip) so concurrent PutObject / Complete
+    on the same final key can't race. LockKeys is incremental — call
+    it twice, the second call adds to the held set.
+  - Memory backend's mpDone uses a separate map; TiKV stores
+    completion rows under their own key prefix
+    (MultipartCompletionKey, sub "mc/"). Different prefix from the
+    multipart upload row's "u/" so prefix scans for ListMultipartUploads
+    do not accidentally pick up completion records — confirmed by the
+    TestUniquePrefixesNoOverlap key audit (US-002).
+  - status field is the single source of truth for "is this upload
+    still accepting parts" — flip it to 'completing' BEFORE building
+    the object payload so concurrent SavePart calls bounce on
+    ErrMultipartInProgress immediately. The flip's Set is buffered in
+    the txn pending map until Commit, but LockKeys participates in
+    the lock graph so concurrent Complete callers serialise even
+    pre-Commit.
+  - DO NOT call gocql.ParseUUID on uploadID inside the TiKV path —
+    Cassandra needs that because its column is type uuid; TiKV stores
+    the uploadID as an escaped string segment in the key. Storing the
+    raw string in the row payload (not parsed) keeps the abstraction
+    independent of Cassandra's CQL type system.
+---
+
 
 ## 2026-04-29 - US-005
 - Listing on TiKV: ListObjects + ListObjectVersions driven by a single

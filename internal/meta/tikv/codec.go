@@ -114,6 +114,173 @@ func encodeObject(o *meta.Object) ([]byte, error) {
 	return json.Marshal(&row)
 }
 
+// multipartUploadRow is the persisted shape for one multipart_uploads row.
+// Mirrors meta.MultipartUpload one-to-one. Short JSON keys keep the row
+// payload tight (the encoding is internal — abbreviations are safe).
+type multipartUploadRow struct {
+	BucketID          string            `json:"b"`
+	UploadID          string            `json:"u"`
+	Key               string            `json:"k"`
+	Status            string            `json:"st"`
+	StorageClass      string            `json:"sc,omitempty"`
+	ContentType       string            `json:"ct,omitempty"`
+	InitiatedAt       time.Time         `json:"ia"`
+	SSE               string            `json:"sse,omitempty"`
+	SSEKey            []byte            `json:"sk,omitempty"`
+	SSEKeyID          string            `json:"ski,omitempty"`
+	UserMeta          map[string]string `json:"um,omitempty"`
+	CacheControl      string            `json:"cc,omitempty"`
+	Expires           string            `json:"x,omitempty"`
+	ChecksumAlgorithm string            `json:"ca,omitempty"`
+	ChecksumType      string            `json:"cty,omitempty"`
+}
+
+func encodeMultipart(mu *meta.MultipartUpload) ([]byte, error) {
+	row := multipartUploadRow{
+		BucketID:          mu.BucketID.String(),
+		UploadID:          mu.UploadID,
+		Key:               mu.Key,
+		Status:            mu.Status,
+		StorageClass:      mu.StorageClass,
+		ContentType:       mu.ContentType,
+		InitiatedAt:       mu.InitiatedAt,
+		SSE:               mu.SSE,
+		SSEKey:            mu.SSEKey,
+		SSEKeyID:          mu.SSEKeyID,
+		UserMeta:          mu.UserMeta,
+		CacheControl:      mu.CacheControl,
+		Expires:           mu.Expires,
+		ChecksumAlgorithm: mu.ChecksumAlgorithm,
+		ChecksumType:      mu.ChecksumType,
+	}
+	return json.Marshal(&row)
+}
+
+func decodeMultipart(raw []byte) (*meta.MultipartUpload, error) {
+	var row multipartUploadRow
+	if err := json.Unmarshal(raw, &row); err != nil {
+		return nil, err
+	}
+	bucketID, err := uuidFromString(row.BucketID)
+	if err != nil {
+		return nil, err
+	}
+	return &meta.MultipartUpload{
+		BucketID:          bucketID,
+		UploadID:          row.UploadID,
+		Key:               row.Key,
+		Status:            row.Status,
+		StorageClass:      row.StorageClass,
+		ContentType:       row.ContentType,
+		InitiatedAt:       row.InitiatedAt,
+		SSE:               row.SSE,
+		SSEKey:            row.SSEKey,
+		SSEKeyID:          row.SSEKeyID,
+		UserMeta:          row.UserMeta,
+		CacheControl:      row.CacheControl,
+		Expires:           row.Expires,
+		ChecksumAlgorithm: row.ChecksumAlgorithm,
+		ChecksumType:      row.ChecksumType,
+	}, nil
+}
+
+// partRow is the persisted shape for one multipart_parts row. Manifest is
+// held as a raw blob so STRATA_MANIFEST_FORMAT (proto vs JSON) flows through
+// the same codec the object row uses.
+type partRow struct {
+	PartNumber  int               `json:"n"`
+	ETag        string            `json:"e"`
+	Size        int64             `json:"sz,omitempty"`
+	Mtime       time.Time         `json:"mt"`
+	ManifestRaw []byte            `json:"m,omitempty"`
+	Checksums   map[string]string `json:"cs,omitempty"`
+}
+
+func encodePart(p *meta.MultipartPart) ([]byte, error) {
+	manifestBlob, err := data.EncodeManifest(p.Manifest)
+	if err != nil {
+		return nil, err
+	}
+	row := partRow{
+		PartNumber:  p.PartNumber,
+		ETag:        p.ETag,
+		Size:        p.Size,
+		Mtime:       p.Mtime,
+		ManifestRaw: manifestBlob,
+		Checksums:   p.Checksums,
+	}
+	return json.Marshal(&row)
+}
+
+func decodePart(raw []byte) (*meta.MultipartPart, error) {
+	var row partRow
+	if err := json.Unmarshal(raw, &row); err != nil {
+		return nil, err
+	}
+	manifest, err := data.DecodeManifest(row.ManifestRaw)
+	if err != nil {
+		return nil, err
+	}
+	return &meta.MultipartPart{
+		PartNumber: row.PartNumber,
+		ETag:       row.ETag,
+		Size:       row.Size,
+		Mtime:      row.Mtime,
+		Manifest:   manifest,
+		Checksums:  row.Checksums,
+	}, nil
+}
+
+// multipartCompletionRow persists meta.MultipartCompletion alongside its
+// ExpiresAt timestamp. TiKV has no native TTL; readers lazy-expire on Get.
+type multipartCompletionRow struct {
+	BucketID    string            `json:"b"`
+	UploadID    string            `json:"u"`
+	Key         string            `json:"k"`
+	ETag        string            `json:"e"`
+	VersionID   string            `json:"v,omitempty"`
+	Body        []byte            `json:"bd,omitempty"`
+	Headers     map[string]string `json:"h,omitempty"`
+	CompletedAt time.Time         `json:"ca"`
+	ExpiresAt   time.Time         `json:"x"`
+}
+
+func encodeMultipartCompletion(rec *meta.MultipartCompletion, expiresAt time.Time) ([]byte, error) {
+	row := multipartCompletionRow{
+		BucketID:    rec.BucketID.String(),
+		UploadID:    rec.UploadID,
+		Key:         rec.Key,
+		ETag:        rec.ETag,
+		VersionID:   rec.VersionID,
+		Body:        rec.Body,
+		Headers:     rec.Headers,
+		CompletedAt: rec.CompletedAt,
+		ExpiresAt:   expiresAt,
+	}
+	return json.Marshal(&row)
+}
+
+func decodeMultipartCompletion(raw []byte) (*meta.MultipartCompletion, time.Time, error) {
+	var row multipartCompletionRow
+	if err := json.Unmarshal(raw, &row); err != nil {
+		return nil, time.Time{}, err
+	}
+	bucketID, err := uuidFromString(row.BucketID)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	return &meta.MultipartCompletion{
+		BucketID:    bucketID,
+		UploadID:    row.UploadID,
+		Key:         row.Key,
+		ETag:        row.ETag,
+		VersionID:   row.VersionID,
+		Body:        row.Body,
+		Headers:     row.Headers,
+		CompletedAt: row.CompletedAt,
+	}, row.ExpiresAt, nil
+}
+
 // decodeObject reverses encodeObject. The Manifest blob is decoded via
 // data.DecodeManifest (which sniffs JSON-vs-proto by first byte) so rows
 // written under either STRATA_MANIFEST_FORMAT round-trip transparently.

@@ -811,6 +811,421 @@ func keysOf(objs []*meta.Object) []string {
 }
 
 // ----------------------------------------------------------------------------
+// Multipart upload lifecycle (US-006).
+// ----------------------------------------------------------------------------
+
+func newMultipart(t *testing.T, s *Store, b *meta.Bucket, key string) *meta.MultipartUpload {
+	t.Helper()
+	mu := &meta.MultipartUpload{
+		BucketID:     b.ID,
+		UploadID:     gocql.TimeUUID().String(),
+		Key:          key,
+		StorageClass: "STANDARD",
+		ContentType:  "application/octet-stream",
+		InitiatedAt:  time.Now().UTC(),
+	}
+	if err := s.CreateMultipartUpload(context.Background(), mu); err != nil {
+		t.Fatalf("create multipart: %v", err)
+	}
+	return mu
+}
+
+func savePart(t *testing.T, s *Store, b *meta.Bucket, uploadID string, num int, etag string, size int64) {
+	t.Helper()
+	part := &meta.MultipartPart{
+		PartNumber: num,
+		ETag:       etag,
+		Size:       size,
+		Manifest: &data.Manifest{
+			Class:  "STANDARD",
+			Size:   size,
+			Chunks: []data.ChunkRef{{Cluster: "c", Pool: "p", OID: etag, Size: size}},
+		},
+	}
+	if err := s.SavePart(context.Background(), b.ID, uploadID, part); err != nil {
+		t.Fatalf("save part %d: %v", num, err)
+	}
+}
+
+func TestMultipartCreateAndGet(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "mp", "alice", "STANDARD")
+	mu := newMultipart(t, s, b, "obj")
+
+	got, err := s.GetMultipartUpload(ctx, b.ID, mu.UploadID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Key != "obj" || got.Status != multipartStatusUploading {
+		t.Fatalf("got: %+v", got)
+	}
+}
+
+func TestMultipartGetMissing(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "mp", "alice", "STANDARD")
+	if _, err := s.GetMultipartUpload(ctx, b.ID, gocql.TimeUUID().String()); !errors.Is(err, meta.ErrMultipartNotFound) {
+		t.Fatalf("got %v want ErrMultipartNotFound", err)
+	}
+}
+
+func TestMultipartListByPrefix(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "mp", "alice", "STANDARD")
+	newMultipart(t, s, b, "foo/a")
+	newMultipart(t, s, b, "foo/b")
+	newMultipart(t, s, b, "bar")
+
+	all, err := s.ListMultipartUploads(ctx, b.ID, "", 1000)
+	if err != nil || len(all) != 3 {
+		t.Fatalf("all: %v len=%d", err, len(all))
+	}
+	pref, err := s.ListMultipartUploads(ctx, b.ID, "foo/", 1000)
+	if err != nil || len(pref) != 2 {
+		t.Fatalf("prefix: %v len=%d", err, len(pref))
+	}
+}
+
+func TestMultipartSavePartListParts(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "mp", "alice", "STANDARD")
+	mu := newMultipart(t, s, b, "obj")
+
+	savePart(t, s, b, mu.UploadID, 2, "etag2", 200)
+	savePart(t, s, b, mu.UploadID, 1, "etag1", 100)
+	savePart(t, s, b, mu.UploadID, 3, "etag3", 300)
+
+	parts, err := s.ListParts(ctx, b.ID, mu.UploadID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(parts) != 3 {
+		t.Fatalf("len: %d want 3", len(parts))
+	}
+	for i, want := range []int{1, 2, 3} {
+		if parts[i].PartNumber != want {
+			t.Fatalf("part %d: got %d want %d (4-byte BE encoding should sort ascending)", i, parts[i].PartNumber, want)
+		}
+	}
+}
+
+func TestMultipartSavePartMissingUpload(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "mp", "alice", "STANDARD")
+	part := &meta.MultipartPart{PartNumber: 1, ETag: "x", Size: 1}
+	if err := s.SavePart(ctx, b.ID, gocql.TimeUUID().String(), part); !errors.Is(err, meta.ErrMultipartNotFound) {
+		t.Fatalf("got %v want ErrMultipartNotFound", err)
+	}
+}
+
+func TestMultipartCompleteHappy(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "mp", "alice", "STANDARD")
+	mu := newMultipart(t, s, b, "obj")
+
+	savePart(t, s, b, mu.UploadID, 1, "e1", 100)
+	savePart(t, s, b, mu.UploadID, 2, "e2", 200)
+
+	obj := &meta.Object{
+		BucketID:     b.ID,
+		Key:          mu.Key,
+		StorageClass: "STANDARD",
+		ETag:         "final-etag",
+	}
+	orphans, err := s.CompleteMultipartUpload(ctx, obj, mu.UploadID, []meta.CompletePart{
+		{PartNumber: 1, ETag: "e1"},
+		{PartNumber: 2, ETag: "e2"},
+	}, false)
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if len(orphans) != 0 {
+		t.Fatalf("orphans: %d want 0", len(orphans))
+	}
+
+	// Multipart upload + part rows must be gone after Complete.
+	if _, err := s.GetMultipartUpload(ctx, b.ID, mu.UploadID); !errors.Is(err, meta.ErrMultipartNotFound) {
+		t.Fatalf("upload row still present: %v", err)
+	}
+
+	// Final object row materialised under the latest version.
+	got, err := s.GetObject(ctx, b.ID, "obj", "")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Size != 300 || got.ETag != "final-etag" {
+		t.Fatalf("got: %+v", got)
+	}
+	if got.PartsCount != 0 || len(got.PartSizes) != 2 || got.PartSizes[0] != 100 || got.PartSizes[1] != 200 {
+		t.Fatalf("part sizes: %+v", got.PartSizes)
+	}
+}
+
+func TestMultipartCompleteOrphans(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "mp", "alice", "STANDARD")
+	mu := newMultipart(t, s, b, "obj")
+
+	savePart(t, s, b, mu.UploadID, 1, "e1", 100)
+	savePart(t, s, b, mu.UploadID, 2, "e2", 200)
+	savePart(t, s, b, mu.UploadID, 3, "stale", 50)
+
+	obj := &meta.Object{BucketID: b.ID, Key: mu.Key, StorageClass: "STANDARD", ETag: "x"}
+	orphans, err := s.CompleteMultipartUpload(ctx, obj, mu.UploadID, []meta.CompletePart{
+		{PartNumber: 1, ETag: "e1"},
+		{PartNumber: 2, ETag: "e2"},
+	}, false)
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if len(orphans) != 1 {
+		t.Fatalf("orphans: %d want 1 (part 3 unused)", len(orphans))
+	}
+}
+
+func TestMultipartCompleteEtagMismatch(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "mp", "alice", "STANDARD")
+	mu := newMultipart(t, s, b, "obj")
+	savePart(t, s, b, mu.UploadID, 1, "real", 100)
+
+	obj := &meta.Object{BucketID: b.ID, Key: mu.Key, StorageClass: "STANDARD"}
+	_, err := s.CompleteMultipartUpload(ctx, obj, mu.UploadID, []meta.CompletePart{
+		{PartNumber: 1, ETag: "wrong"},
+	}, false)
+	if !errors.Is(err, meta.ErrMultipartETagMismatch) {
+		t.Fatalf("got %v want ErrMultipartETagMismatch", err)
+	}
+}
+
+func TestMultipartCompleteMissingPart(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "mp", "alice", "STANDARD")
+	mu := newMultipart(t, s, b, "obj")
+	savePart(t, s, b, mu.UploadID, 1, "e1", 100)
+
+	obj := &meta.Object{BucketID: b.ID, Key: mu.Key, StorageClass: "STANDARD"}
+	_, err := s.CompleteMultipartUpload(ctx, obj, mu.UploadID, []meta.CompletePart{
+		{PartNumber: 1, ETag: "e1"},
+		{PartNumber: 2, ETag: "e2"},
+	}, false)
+	if !errors.Is(err, meta.ErrMultipartPartMissing) {
+		t.Fatalf("got %v want ErrMultipartPartMissing", err)
+	}
+}
+
+func TestMultipartCompleteSecondCallInProgress(t *testing.T) {
+	// Mirrors Cassandra LWT — once the first Complete flips status to
+	// 'completing' the second call observes ErrMultipartInProgress instead
+	// of racing to write the object row twice.
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "mp", "alice", "STANDARD")
+	mu := newMultipart(t, s, b, "obj")
+	savePart(t, s, b, mu.UploadID, 1, "e1", 10)
+
+	// Manually flip status to 'completing' to simulate "first Complete is
+	// mid-flight". Inject directly via the kv backend.
+	mb := s.kv.(*memBackend)
+	muRow := *mu
+	muRow.Status = multipartStatusCompleting
+	payload, err := encodeMultipart(&muRow)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	mb.data[string(MultipartKey(b.ID, mu.UploadID))] = payload
+
+	obj := &meta.Object{BucketID: b.ID, Key: mu.Key, StorageClass: "STANDARD"}
+	_, err = s.CompleteMultipartUpload(ctx, obj, mu.UploadID, []meta.CompletePart{
+		{PartNumber: 1, ETag: "e1"},
+	}, false)
+	if !errors.Is(err, meta.ErrMultipartInProgress) {
+		t.Fatalf("got %v want ErrMultipartInProgress", err)
+	}
+}
+
+func TestMultipartCompleteRaceOneWinner(t *testing.T) {
+	// Two concurrent CompleteMultipartUpload calls against the same uploadID:
+	// the pessimistic txn LockKeys serialises them, the loser observes
+	// status='completing' (from the winner's flip) and returns
+	// ErrMultipartInProgress. Mirror of the Cassandra LWT race coverage
+	// already in the contract suite.
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "mp", "alice", "STANDARD")
+	mu := newMultipart(t, s, b, "obj")
+	savePart(t, s, b, mu.UploadID, 1, "e1", 10)
+
+	results := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			obj := &meta.Object{BucketID: b.ID, Key: mu.Key, StorageClass: "STANDARD"}
+			_, err := s.CompleteMultipartUpload(ctx, obj, mu.UploadID, []meta.CompletePart{
+				{PartNumber: 1, ETag: "e1"},
+			}, false)
+			results <- err
+		}()
+	}
+	var winners, losers int
+	for i := 0; i < 2; i++ {
+		err := <-results
+		switch {
+		case err == nil:
+			winners++
+		case errors.Is(err, meta.ErrMultipartInProgress), errors.Is(err, meta.ErrMultipartNotFound):
+			// NotFound is also acceptable: by the time the loser starts, the
+			// winner committed and removed the upload row.
+			losers++
+		default:
+			t.Fatalf("unexpected err: %v", err)
+		}
+	}
+	if winners != 1 || losers != 1 {
+		t.Fatalf("expected exactly one winner, got winners=%d losers=%d", winners, losers)
+	}
+}
+
+func TestMultipartCompleteVersioned(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b := newVersionedBucket(t, s, "mpv")
+	mu := newMultipart(t, s, b, "obj")
+	savePart(t, s, b, mu.UploadID, 1, "e1", 10)
+
+	obj := &meta.Object{BucketID: b.ID, Key: mu.Key, StorageClass: "STANDARD"}
+	if _, err := s.CompleteMultipartUpload(ctx, obj, mu.UploadID, []meta.CompletePart{
+		{PartNumber: 1, ETag: "e1"},
+	}, true); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if obj.VersionID == "" || obj.VersionID == meta.NullVersionID {
+		t.Fatalf("versioned bucket should mint a TimeUUID: %q", obj.VersionID)
+	}
+}
+
+func TestMultipartAbort(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "mp", "alice", "STANDARD")
+	mu := newMultipart(t, s, b, "obj")
+	savePart(t, s, b, mu.UploadID, 1, "e1", 100)
+	savePart(t, s, b, mu.UploadID, 2, "e2", 200)
+
+	manifests, err := s.AbortMultipartUpload(ctx, b.ID, mu.UploadID)
+	if err != nil {
+		t.Fatalf("abort: %v", err)
+	}
+	if len(manifests) != 2 {
+		t.Fatalf("manifests: %d want 2", len(manifests))
+	}
+
+	if _, err := s.GetMultipartUpload(ctx, b.ID, mu.UploadID); !errors.Is(err, meta.ErrMultipartNotFound) {
+		t.Fatalf("upload row still present: %v", err)
+	}
+	// Second abort is NotFound (idempotent).
+	if _, err := s.AbortMultipartUpload(ctx, b.ID, mu.UploadID); !errors.Is(err, meta.ErrMultipartNotFound) {
+		t.Fatalf("second abort: %v want ErrMultipartNotFound", err)
+	}
+}
+
+func TestMultipartCompletionRecord(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "mc", "alice", "STANDARD")
+	uploadID := gocql.TimeUUID().String()
+	rec := &meta.MultipartCompletion{
+		BucketID:    b.ID,
+		UploadID:    uploadID,
+		Key:         "k",
+		ETag:        "etag",
+		VersionID:   "v",
+		Body:        []byte("body"),
+		Headers:     map[string]string{"ETag": `"etag"`},
+		CompletedAt: time.Now().UTC(),
+	}
+	if err := s.RecordMultipartCompletion(ctx, rec, time.Hour); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	got, err := s.GetMultipartCompletion(ctx, b.ID, uploadID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.ETag != "etag" || string(got.Body) != "body" || got.Headers["ETag"] != `"etag"` {
+		t.Fatalf("got: %+v", got)
+	}
+	if _, err := s.GetMultipartCompletion(ctx, b.ID, gocql.TimeUUID().String()); !errors.Is(err, meta.ErrMultipartCompletionNotFound) {
+		t.Fatalf("missing: %v", err)
+	}
+}
+
+func TestMultipartCompletionExpired(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "mc", "alice", "STANDARD")
+	uploadID := gocql.TimeUUID().String()
+	rec := &meta.MultipartCompletion{
+		BucketID: b.ID,
+		UploadID: uploadID,
+		Key:      "k",
+	}
+	// Record with negative TTL → ExpiresAt is in the past, GET must lazy-expire.
+	if err := s.RecordMultipartCompletion(ctx, rec, -time.Hour); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	if _, err := s.GetMultipartCompletion(ctx, b.ID, uploadID); !errors.Is(err, meta.ErrMultipartCompletionNotFound) {
+		t.Fatalf("expired: %v want ErrMultipartCompletionNotFound", err)
+	}
+}
+
+func TestMultipartUpdateSSEWrap(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "mp", "alice", "STANDARD")
+	mu := newMultipart(t, s, b, "obj")
+
+	if err := s.UpdateMultipartUploadSSEWrap(ctx, b.ID, mu.UploadID, []byte("wrapped"), "kid"); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	got, err := s.GetMultipartUpload(ctx, b.ID, mu.UploadID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if string(got.SSEKey) != "wrapped" || got.SSEKeyID != "kid" {
+		t.Fatalf("got: %+v", got)
+	}
+
+	// Missing upload → NotFound.
+	if err := s.UpdateMultipartUploadSSEWrap(ctx, b.ID, gocql.TimeUUID().String(), []byte("x"), "k"); !errors.Is(err, meta.ErrMultipartNotFound) {
+		t.Fatalf("missing: %v want NotFound", err)
+	}
+}
+
+// ----------------------------------------------------------------------------
 // TestPrefixEnd guards the helper used by every range scan.
 func TestPrefixEnd(t *testing.T) {
 	cases := []struct {

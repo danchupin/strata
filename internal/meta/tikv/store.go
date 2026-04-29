@@ -405,47 +405,7 @@ func (s *Store) DeleteIAMAccessKey(ctx context.Context, accessKeyID string) (*me
 	return nil, errors.ErrUnsupported
 }
 
-func (s *Store) CreateMultipartUpload(ctx context.Context, mu *meta.MultipartUpload) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) GetMultipartUpload(ctx context.Context, bucketID uuid.UUID, uploadID string) (*meta.MultipartUpload, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) ListMultipartUploads(ctx context.Context, bucketID uuid.UUID, prefix string, limit int) ([]*meta.MultipartUpload, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) SavePart(ctx context.Context, bucketID uuid.UUID, uploadID string, part *meta.MultipartPart) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) ListParts(ctx context.Context, bucketID uuid.UUID, uploadID string) ([]*meta.MultipartPart, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, uploadID string, parts []meta.CompletePart, versioned bool) ([]*data.Manifest, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) AbortMultipartUpload(ctx context.Context, bucketID uuid.UUID, uploadID string) ([]*data.Manifest, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) RecordMultipartCompletion(ctx context.Context, rec *meta.MultipartCompletion, ttl time.Duration) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) GetMultipartCompletion(ctx context.Context, bucketID uuid.UUID, uploadID string) (*meta.MultipartCompletion, error) {
-	return nil, errors.ErrUnsupported
-}
-
 func (s *Store) UpdateObjectSSEWrap(ctx context.Context, bucketID uuid.UUID, key, versionID string, wrapped []byte, keyID string) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) UpdateMultipartUploadSSEWrap(ctx context.Context, bucketID uuid.UUID, uploadID string, wrapped []byte, keyID string) error {
 	return errors.ErrUnsupported
 }
 
