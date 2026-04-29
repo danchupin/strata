@@ -213,38 +213,6 @@ func (s *Store) ListAccessPoints(ctx context.Context, bucketID uuid.UUID) ([]*me
 	return nil, errors.ErrUnsupported
 }
 
-func (s *Store) CreateIAMUser(ctx context.Context, u *meta.IAMUser) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) GetIAMUser(ctx context.Context, userName string) (*meta.IAMUser, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) ListIAMUsers(ctx context.Context, pathPrefix string) ([]*meta.IAMUser, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) DeleteIAMUser(ctx context.Context, userName string) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) CreateIAMAccessKey(ctx context.Context, ak *meta.IAMAccessKey) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) GetIAMAccessKey(ctx context.Context, accessKeyID string) (*meta.IAMAccessKey, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) ListIAMAccessKeys(ctx context.Context, userName string) ([]*meta.IAMAccessKey, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) DeleteIAMAccessKey(ctx context.Context, accessKeyID string) (*meta.IAMAccessKey, error) {
-	return nil, errors.ErrUnsupported
-}
-
 func (s *Store) UpdateObjectSSEWrap(ctx context.Context, bucketID uuid.UUID, key, versionID string, wrapped []byte, keyID string) error {
 	return errors.ErrUnsupported
 }

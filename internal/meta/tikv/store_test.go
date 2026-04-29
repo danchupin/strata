@@ -1472,6 +1472,335 @@ func TestInventoryConfigList(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
+// IAM (US-008).
+// ----------------------------------------------------------------------------
+
+func TestIAMUserCRUD(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	now := time.Date(2026, 4, 29, 12, 0, 0, 0, time.UTC)
+	u := &meta.IAMUser{
+		UserName:  "alice",
+		UserID:    "AID-alice",
+		Path:      "/team/eng/",
+		CreatedAt: now,
+	}
+	if err := s.CreateIAMUser(ctx, u); err != nil {
+		t.Fatalf("CreateIAMUser: %v", err)
+	}
+
+	got, err := s.GetIAMUser(ctx, "alice")
+	if err != nil {
+		t.Fatalf("GetIAMUser: %v", err)
+	}
+	if got.UserName != "alice" || got.UserID != "AID-alice" || got.Path != "/team/eng/" {
+		t.Fatalf("user round-trip: got %+v", got)
+	}
+	if !got.CreatedAt.Equal(now) {
+		t.Fatalf("CreatedAt: got %v want %v", got.CreatedAt, now)
+	}
+}
+
+func TestIAMUserCreateDuplicate(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	if err := s.CreateIAMUser(ctx, &meta.IAMUser{UserName: "alice", UserID: "1"}); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	err := s.CreateIAMUser(ctx, &meta.IAMUser{UserName: "alice", UserID: "2"})
+	if !errors.Is(err, meta.ErrIAMUserAlreadyExists) {
+		t.Fatalf("dup: got %v want ErrIAMUserAlreadyExists", err)
+	}
+}
+
+func TestIAMUserGetMissing(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	_, err := s.GetIAMUser(ctx, "nope")
+	if !errors.Is(err, meta.ErrIAMUserNotFound) {
+		t.Fatalf("missing: got %v want ErrIAMUserNotFound", err)
+	}
+}
+
+func TestIAMUserCreatedAtAutoFill(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	before := time.Now().UTC().Add(-time.Second)
+	if err := s.CreateIAMUser(ctx, &meta.IAMUser{UserName: "alice", UserID: "1"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	got, err := s.GetIAMUser(ctx, "alice")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.CreatedAt.Before(before) || got.CreatedAt.After(time.Now().UTC().Add(time.Second)) {
+		t.Fatalf("CreatedAt auto-fill out of band: %v", got.CreatedAt)
+	}
+}
+
+func TestIAMUserDeleteHappyAndMissing(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	if err := s.CreateIAMUser(ctx, &meta.IAMUser{UserName: "alice", UserID: "1"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := s.DeleteIAMUser(ctx, "alice"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if err := s.DeleteIAMUser(ctx, "alice"); !errors.Is(err, meta.ErrIAMUserNotFound) {
+		t.Fatalf("re-delete: got %v want ErrIAMUserNotFound", err)
+	}
+	if _, err := s.GetIAMUser(ctx, "alice"); !errors.Is(err, meta.ErrIAMUserNotFound) {
+		t.Fatalf("get after delete: got %v want ErrIAMUserNotFound", err)
+	}
+}
+
+func TestIAMUserListOrderingAndPathFilter(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	users := []*meta.IAMUser{
+		{UserName: "carol", UserID: "3", Path: "/team/ops/"},
+		{UserName: "alice", UserID: "1", Path: "/team/eng/"},
+		{UserName: "bob", UserID: "2", Path: "/team/eng/"},
+		{UserName: "dave", UserID: "4", Path: "/external/"},
+	}
+	for _, u := range users {
+		if err := s.CreateIAMUser(ctx, u); err != nil {
+			t.Fatalf("create %q: %v", u.UserName, err)
+		}
+	}
+
+	all, err := s.ListIAMUsers(ctx, "")
+	if err != nil {
+		t.Fatalf("ListIAMUsers: %v", err)
+	}
+	if len(all) != 4 {
+		t.Fatalf("len got=%d want=4", len(all))
+	}
+	wantOrder := []string{"alice", "bob", "carol", "dave"}
+	for i, want := range wantOrder {
+		if all[i].UserName != want {
+			t.Fatalf("order[%d]: got %q want %q (full: %v)", i, all[i].UserName, want, wantOrder)
+		}
+	}
+
+	eng, err := s.ListIAMUsers(ctx, "/team/eng/")
+	if err != nil {
+		t.Fatalf("path filter: %v", err)
+	}
+	if len(eng) != 2 || eng[0].UserName != "alice" || eng[1].UserName != "bob" {
+		t.Fatalf("path filter result: %v", eng)
+	}
+
+	if got, err := s.ListIAMUsers(ctx, "/nonexistent/"); err != nil || len(got) != 0 {
+		t.Fatalf("no-match filter: got %v err=%v", got, err)
+	}
+}
+
+func TestIAMAccessKeyCRUD(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	now := time.Date(2026, 4, 29, 12, 0, 0, 0, time.UTC)
+	ak := &meta.IAMAccessKey{
+		AccessKeyID:     "AKIA-TEST",
+		SecretAccessKey: "shhh",
+		UserName:        "alice",
+		CreatedAt:       now,
+		Disabled:        false,
+	}
+	if err := s.CreateIAMAccessKey(ctx, ak); err != nil {
+		t.Fatalf("CreateIAMAccessKey: %v", err)
+	}
+
+	got, err := s.GetIAMAccessKey(ctx, "AKIA-TEST")
+	if err != nil {
+		t.Fatalf("GetIAMAccessKey: %v", err)
+	}
+	if got.AccessKeyID != ak.AccessKeyID || got.SecretAccessKey != ak.SecretAccessKey ||
+		got.UserName != ak.UserName || !got.CreatedAt.Equal(now) {
+		t.Fatalf("round-trip mismatch: %+v", got)
+	}
+}
+
+func TestIAMAccessKeyGetMissing(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	_, err := s.GetIAMAccessKey(ctx, "AKIA-NOPE")
+	if !errors.Is(err, meta.ErrIAMAccessKeyNotFound) {
+		t.Fatalf("missing: got %v want ErrIAMAccessKeyNotFound", err)
+	}
+}
+
+func TestIAMAccessKeyDisabledFlag(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	if err := s.CreateIAMAccessKey(ctx, &meta.IAMAccessKey{
+		AccessKeyID: "AKIA-DOWN", SecretAccessKey: "x", UserName: "alice", Disabled: true,
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	got, err := s.GetIAMAccessKey(ctx, "AKIA-DOWN")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !got.Disabled {
+		t.Fatalf("Disabled flag lost: %+v", got)
+	}
+}
+
+func TestIAMAccessKeyListByUser(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	keys := []*meta.IAMAccessKey{
+		{AccessKeyID: "AKIA-A2", SecretAccessKey: "s", UserName: "alice"},
+		{AccessKeyID: "AKIA-A1", SecretAccessKey: "s", UserName: "alice"},
+		{AccessKeyID: "AKIA-B1", SecretAccessKey: "s", UserName: "bob"},
+	}
+	for _, ak := range keys {
+		if err := s.CreateIAMAccessKey(ctx, ak); err != nil {
+			t.Fatalf("create %q: %v", ak.AccessKeyID, err)
+		}
+	}
+
+	alice, err := s.ListIAMAccessKeys(ctx, "alice")
+	if err != nil {
+		t.Fatalf("list alice: %v", err)
+	}
+	if len(alice) != 2 {
+		t.Fatalf("alice len: got %d want 2 (%v)", len(alice), alice)
+	}
+	// Index range scan returns access-key IDs in ascending lex order.
+	if alice[0].AccessKeyID != "AKIA-A1" || alice[1].AccessKeyID != "AKIA-A2" {
+		t.Fatalf("alice order: %v", alice)
+	}
+
+	bob, err := s.ListIAMAccessKeys(ctx, "bob")
+	if err != nil {
+		t.Fatalf("list bob: %v", err)
+	}
+	if len(bob) != 1 || bob[0].AccessKeyID != "AKIA-B1" {
+		t.Fatalf("bob: %v", bob)
+	}
+
+	if got, err := s.ListIAMAccessKeys(ctx, "carol"); err != nil || len(got) != 0 {
+		t.Fatalf("unknown user: got %v err=%v", got, err)
+	}
+}
+
+func TestIAMAccessKeyListNoUserFilter(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	for _, ak := range []*meta.IAMAccessKey{
+		{AccessKeyID: "AKIA-Z", SecretAccessKey: "s", UserName: "alice"},
+		{AccessKeyID: "AKIA-A", SecretAccessKey: "s", UserName: "bob"},
+		{AccessKeyID: "AKIA-M", SecretAccessKey: "s", UserName: "carol"},
+	} {
+		if err := s.CreateIAMAccessKey(ctx, ak); err != nil {
+			t.Fatalf("create %q: %v", ak.AccessKeyID, err)
+		}
+	}
+
+	all, err := s.ListIAMAccessKeys(ctx, "")
+	if err != nil {
+		t.Fatalf("list all: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("len: %d want 3", len(all))
+	}
+	wantOrder := []string{"AKIA-A", "AKIA-M", "AKIA-Z"}
+	for i, want := range wantOrder {
+		if all[i].AccessKeyID != want {
+			t.Fatalf("order[%d]: got %q want %q", i, all[i].AccessKeyID, want)
+		}
+	}
+}
+
+func TestIAMAccessKeyDeleteHappyAndMissing(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	ak := &meta.IAMAccessKey{
+		AccessKeyID: "AKIA-X", SecretAccessKey: "shh", UserName: "alice",
+	}
+	if err := s.CreateIAMAccessKey(ctx, ak); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	deleted, err := s.DeleteIAMAccessKey(ctx, "AKIA-X")
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if deleted == nil || deleted.AccessKeyID != "AKIA-X" || deleted.UserName != "alice" {
+		t.Fatalf("deleted record: %+v", deleted)
+	}
+
+	if _, err := s.GetIAMAccessKey(ctx, "AKIA-X"); !errors.Is(err, meta.ErrIAMAccessKeyNotFound) {
+		t.Fatalf("get after delete: got %v want ErrIAMAccessKeyNotFound", err)
+	}
+
+	// Index row is also gone — list by user returns empty.
+	if got, err := s.ListIAMAccessKeys(ctx, "alice"); err != nil || len(got) != 0 {
+		t.Fatalf("list after delete: %v err=%v", got, err)
+	}
+
+	// Re-delete is ErrIAMAccessKeyNotFound.
+	if _, err := s.DeleteIAMAccessKey(ctx, "AKIA-X"); !errors.Is(err, meta.ErrIAMAccessKeyNotFound) {
+		t.Fatalf("re-delete: got %v want ErrIAMAccessKeyNotFound", err)
+	}
+}
+
+// TestIAMAccessKeyIndexCleanup proves the secondary (per-user) index
+// stays in sync with the per-key record after a delete: a fresh user
+// added at the same time has its access key surface in ListIAMAccessKeys
+// even after a sibling delete clears the older entries.
+func TestIAMAccessKeyIndexCleanup(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	for _, ak := range []*meta.IAMAccessKey{
+		{AccessKeyID: "AKIA-OLD", SecretAccessKey: "x", UserName: "alice"},
+		{AccessKeyID: "AKIA-KEEP", SecretAccessKey: "x", UserName: "alice"},
+	} {
+		if err := s.CreateIAMAccessKey(ctx, ak); err != nil {
+			t.Fatalf("create %q: %v", ak.AccessKeyID, err)
+		}
+	}
+	if _, err := s.DeleteIAMAccessKey(ctx, "AKIA-OLD"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	got, err := s.ListIAMAccessKeys(ctx, "alice")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 1 || got[0].AccessKeyID != "AKIA-KEEP" {
+		t.Fatalf("after delete: %v", got)
+	}
+}
+
+// ----------------------------------------------------------------------------
 // TestPrefixEnd guards the helper used by every range scan.
 func TestPrefixEnd(t *testing.T) {
 	cases := []struct {

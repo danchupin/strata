@@ -136,8 +136,8 @@
         "Tests pass"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented the meta.Store-surface IAM methods only (CreateIAMUser/GetIAMUser/ListIAMUsers/DeleteIAMUser + CreateIAMAccessKey/GetIAMAccessKey/ListIAMAccessKeys/DeleteIAMAccessKey). Attached/managed-policy methods are not in meta.Store today — neither Cassandra nor memory backend exposes them — so the matching acceptance lines are out of scope until the interface grows; deferred to a future cycle."
     },
     {
       "id": "US-009",

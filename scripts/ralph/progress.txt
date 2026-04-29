@@ -136,6 +136,81 @@ prior cycles found useful; remove/replace if stale for this cycle.)
   inventory configs use a separate sub-prefix `i/` with the configID
   byte-stuffed via appendEscaped so List can range-scan and decode
   configID via readEscaped after stripping the prefix.
+- IAM access keys carry TWO rows (per-key record + per-user index).
+  CreateIAMAccessKey writes both in one pessimistic txn so the index
+  cannot desync (mirror of Cassandra's LoggedBatch atomicity);
+  DeleteIAMAccessKey reads first to learn UserName, then deletes both
+  keys. Cassandra schema does NOT use IF NOT EXISTS on access-key
+  insert — TiKV matches that (no ErrAccessKeyAlreadyExists sentinel
+  exists; access-key IDs are gateway-minted opaque tokens, collisions
+  are not realistic). For ListIAMAccessKeys with a non-empty userName,
+  range-scan the index prefix, readEscaped the accessKeyID out of the
+  row body (after stripping idxPrefix), then Get each per-key row.
+  Empty userName falls back to scanning prefixIAMAccessKey directly +
+  in-process sort by AccessKeyID — matches memory backend semantics.
+
+## 2026-04-29 - US-008
+- IAM users + access keys on TiKV: CreateIAMUser / GetIAMUser /
+  ListIAMUsers / DeleteIAMUser + CreateIAMAccessKey / GetIAMAccessKey /
+  ListIAMAccessKeys / DeleteIAMAccessKey. Lives in
+  internal/meta/tikv/iam.go.
+- CreateIAMUser uses pessimistic txn (LockKeys + Get + Set) and
+  returns meta.ErrIAMUserAlreadyExists on duplicate userName — mirrors
+  CreateBucket's Cassandra-LWT-equivalent shape. DeleteIAMUser is a
+  pessimistic txn read-then-delete returning ErrIAMUserNotFound on
+  missing rows (Cassandra IF EXISTS mirror). GetIAMUser is a single
+  optimistic Get on IAMUserKey. ListIAMUsers range-scans IAMUserPrefix
+  and filters Path in-process — natural ascending UserName order
+  because byte-stuffed encoding is order-preserving.
+- Access keys persist as two rows in lockstep:
+    s/ik/<accessKey>      → JSON record (SigV4 hot-path Get)
+    s/iuk/<userName>\0\0<accessKey> → empty-value index row
+  Both written/deleted together in one pessimistic txn so the index
+  cannot desync from the per-key record. Mirror of Cassandra's
+  iam_access_keys_by_user LoggedBatch.
+- ListIAMAccessKeys(userName) range-scans the per-user index, strips
+  idxPrefix, readEscapes the accessKeyID, then Gets each per-key row.
+  Index-row scan returns AccessKeyID ascending naturally. Empty
+  userName falls back to scanning prefixIAMAccessKey + in-process sort
+  (mirrors memory backend's permissive shape; Cassandra path requires
+  non-empty userName but the gateway only ever passes one).
+- DeleteIAMAccessKey reads the per-key row first to learn UserName
+  (needed to compute the index row key), then deletes both keys in
+  the same pessimistic txn and returns the decoded record so callers
+  can audit-log the removed identity.
+- iamUserRow + iamAccessKeyRow JSON shapes mirror the meta types with
+  short keys ("un","ui","p","c" / "ak","sk","un","c","d") — internal
+  storage only, abbreviation safe.
+- Files changed: internal/meta/tikv/iam.go (new),
+  internal/meta/tikv/store.go (8 IAM stubs removed),
+  internal/meta/tikv/store_test.go (13 new test cases — IAMUserCRUD,
+  IAMUserCreateDuplicate, IAMUserGetMissing, IAMUserCreatedAtAutoFill,
+  IAMUserDeleteHappyAndMissing, IAMUserListOrderingAndPathFilter,
+  IAMAccessKeyCRUD, IAMAccessKeyGetMissing, IAMAccessKeyDisabledFlag,
+  IAMAccessKeyListByUser, IAMAccessKeyListNoUserFilter,
+  IAMAccessKeyDeleteHappyAndMissing, IAMAccessKeyIndexCleanup),
+  scripts/ralph/progress.txt, scripts/ralph/prd.json.
+- **Learnings for future iterations:**
+  - The "AttachPolicy / PutManagedPolicy" PRD acceptance lines do not
+    map to the meta.Store interface today — neither Cassandra nor
+    memory backend exposes them. They live above the meta layer (in
+    s3api/iam handlers as in-memory or static config). Documented
+    as deferred in the prd.json notes; if the interface ever grows
+    those methods, this story re-opens.
+  - The empty-value index row pattern (write nil bytes under the
+    composite key) is the right shape for "secondary index" use cases
+    on TiKV. The index key carries all the info; the value is a
+    placeholder. Cheap, range-scannable, decode the natural-key bits
+    out of the encoded key via readEscaped.
+  - GetIAMAccessKey is the SigV4 hot path — keep it as a single
+    optimistic Get with no scan. Index rows exist only to drive
+    ListIAMAccessKeys; the auth path never reads them.
+  - Cassandra DeleteIAMAccessKey can suppress ErrIAMAccessKeyNotFound
+    silently because GetIAMAccessKey returns it first; TiKV adopts
+    the same shape so re-deletes return ErrIAMAccessKeyNotFound. The
+    gateway-side IAM handler relies on this for idempotent DELETE.
+---
+
 
 ## 2026-04-29 - US-007
 - Bucket-level config blobs on TiKV: lifecycle / CORS / policy /
