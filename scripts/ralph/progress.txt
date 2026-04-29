@@ -41,6 +41,20 @@ prior cycles found useful; remove/replace if stale for this cycle.)
   at the bottom of internal/meta/tikv/store.go catches every
   meta.Store interface drift in CI as soon as the interface gains a
   method. Keep it across stories.
+- Variable-length string segments in TiKV keys use FoundationDB-style
+  byte-stuffing (0x00 → 0x00 0xFF, terminator 0x00 0x00) — preserves
+  lex ordering across heterogeneous lengths so prefix range scans work
+  correctly. See internal/meta/tikv/keys.md for the full layout. Never
+  add length-prefixed encoding to a key — it breaks "all keys starting
+  with prefix X" scans.
+- Object version-DESC ordering: 24-byte suffix [MaxUint64-ts8-BE]
+  [raw-uuid-16]. Inverted ts makes ascending range scan emit latest
+  version first (free GET-without-versionId path). Null sentinel UUID
+  (timestamp 0) sorts last among versions of a key — gateway resolves
+  "?versionId=null" by exact lookup, not scan position.
+- Fixed-width integer fields in TiKV keys (partNumber, day-epoch,
+  shardID) use big-endian uintN so forward range scans return them in
+  ascending numerical order. Never use little-endian or varint there.
 
 ## 2026-04-29 - US-001
 - Added github.com/tikv/client-go/v2 to go.mod (go mod tidy resolved
@@ -68,4 +82,49 @@ prior cycles found useful; remove/replace if stale for this cycle.)
     PD ≥3 / TiKV ≥3 (US-014 + US-019).
   - The transitive dep tree pulls a lot of pingcap/* and tikv/pd —
     expected. go.sum grows ~150 lines per pingcap module bump.
+---
+
+## 2026-04-29 - US-002
+- New internal/meta/tikv/keys.go: namespace prefix "s/", encoders +
+  decoders for every meta.Store entity (bucket-by-name, bucket-scoped
+  prefix, object, object grants, bucket grants, bucket blob,
+  inventory config, multipart upload + parts + completion record,
+  reshard job + per-shard cursor, rewrap progress, IAM user + access
+  key + per-user-keys index, access point + alias, notify queue, DLQ,
+  replication queue, access-log buffer, GC queue, audit log, leader
+  lock).
+- ObjectKey lex-sorts by (bucket, key, version-DESC) via 24-byte
+  suffix [MaxUint64-tsTimeUUID-100ns_8BE][raw-uuid-16]. Round-trip
+  recovers the version_id literal exactly.
+- Variable-length string segments encoded FoundationDB tuple-style:
+  0x00 → 0x00 0xFF, terminator 0x00 0x00. Property test (1k random
+  inputs incl. embedded 0x00) confirms encode↔decode identity.
+- New internal/meta/tikv/keys_test.go: TestEscapedRoundtrip (1k),
+  TestEscapedOrdering, TestObjectKeyRoundtrip (1k), TestObjectKey
+  Ordering (key ASC, version DESC under ascending TiKV scan),
+  TestVersionDescNullSentinel, TestObjectPrefixWithKey,
+  TestQueueKeyOrdering (oldest-first claim), TestUniquePrefixesNoOverlap.
+- New internal/meta/tikv/keys.md documents the layout, the rationale
+  for byte-stuffing over length-prefixing, the version-DESC trick,
+  and the per-entity key shapes in a single table.
+- Files changed: internal/meta/tikv/keys.go (new),
+  internal/meta/tikv/keys_test.go (new),
+  internal/meta/tikv/keys.md (new), scripts/ralph/progress.txt,
+  scripts/ralph/prd.json.
+- **Learnings for future iterations:**
+  - uuid.UUID.Time() returns 100-ns intervals as int64 for v1
+    timeuuids; collisions in the same tick happen — version-DESC
+    ordering tests must allow ts ties and verify ordering via the
+    full encoded key (raw uuid bytes break the tie).
+  - Bucket-scoped keys live under "s/B/<uuid16>/" while bucket-by-
+    name lookup lives under "s/b/<name>" — two namespaces because
+    inner data should remain stable across rename even though we do
+    not implement rename today.
+  - For the per-bucket multipart-part scan to return parts in
+    ascending number order without an extra sort, encode partNumber
+    as uint32 BE — same lesson applies to day-epoch in audit keys
+    and shardID in reshard cursors.
+  - TestUniquePrefixesNoOverlap is cheap insurance against later
+    stories accidentally adding e.g. "s/q/" alongside "s/qn/" — keep
+    it green when adding new top-level entity prefixes.
 ---
