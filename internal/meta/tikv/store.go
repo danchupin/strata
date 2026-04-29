@@ -89,32 +89,12 @@ func (s *Store) GetObjectGrants(ctx context.Context, bucketID uuid.UUID, key, ve
 	return nil, errors.ErrUnsupported
 }
 
-func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionID string) (*meta.Object, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versionID string, versioned bool) (*meta.Object, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) DeleteObjectNullReplacement(ctx context.Context, bucketID uuid.UUID, key string) (*meta.Object, error) {
-	return nil, errors.ErrUnsupported
-}
-
 func (s *Store) ListObjects(ctx context.Context, bucketID uuid.UUID, opts meta.ListOptions) (*meta.ListResult, error) {
 	return nil, errors.ErrUnsupported
 }
 
 func (s *Store) ListObjectVersions(ctx context.Context, bucketID uuid.UUID, opts meta.ListOptions) (*meta.ListVersionsResult, error) {
 	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) SetObjectStorage(ctx context.Context, bucketID uuid.UUID, key, versionID, expectedClass, newClass string, manifest *data.Manifest) (bool, error) {
-	return false, errors.ErrUnsupported
 }
 
 func (s *Store) EnqueueChunkDeletion(ctx context.Context, region string, chunks []data.ChunkRef) error {

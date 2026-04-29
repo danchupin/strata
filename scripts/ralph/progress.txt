@@ -79,6 +79,73 @@ prior cycles found useful; remove/replace if stale for this cycle.)
   immediately after Begin, then assign the named return / outer err on
   every step. Commit is the last statement; if it succeeds err stays
   nil and rollbackOnError is a no-op.
+- Pessimistic txns with EARLY-RETURN paths (e.g. SetObjectStorage CAS
+  reject returning applied=false, nil) MUST call txn.Rollback() before
+  returning. rollbackOnError fires only when err != nil; without an
+  explicit Rollback the LockKeys lease leaks for the txn lifetime, and
+  in the in-process memBackend it deadlocks the next caller forever.
+- Object row payload (codec.go::objectRow) is JSON {meta.Object fields,
+  ManifestRaw []byte}. Manifest is encoded via data.EncodeManifest so
+  STRATA_MANIFEST_FORMAT (proto vs JSON) flows through the same codec
+  Cassandra uses. Reading uses data.DecodeManifest which sniffs the
+  first non-whitespace byte → transparent format upgrade.
+- Range-scanning all versions of a single user-space key:
+  start = ObjectPrefixWithKey(bucketID, key) + 0x00 0x00 (the escaped
+  terminator), end = prefixEnd(start). Captures every key whose
+  escaped body equals `key` exactly, regardless of the 24-byte
+  version-DESC suffix.
+- Version-DESC ordering means: range scan with limit 1 over a key's
+  prefix returns the lex-first encoded suffix = MaxUint64-ts8 with the
+  SMALLEST inverted ts, i.e. the row with the BIGGEST timestamp. Real
+  TimeUUIDs sort BEFORE the null sentinel (which has ts=0 → MaxUint64
+  inverted). Same as Cassandra `version_id DESC` LIMIT 1 — null row
+  surfaces only via explicit ?versionId=null lookup, never as latest
+  while a TimeUUID-versioned row exists.
+
+## 2026-04-29 - US-004
+- Object CRUD on TiKV: PutObject / GetObject / DeleteObject /
+  DeleteObjectNullReplacement / SetObjectStorage. Listing is deferred
+  to US-005.
+- PutObject is a single Put under ObjectKey(bucketID, key, versionID).
+  Non-versioned writes wipe every prior version row in the same
+  pessimistic txn; Suspended-mode null PUT replaces only the prior
+  null row, leaving TimeUUID siblings intact.
+- GetObject empty version-id is a Scan(prefix, prefixEnd, limit=1) —
+  the version-DESC suffix encoding makes the lex-first row = latest
+  TimeUUID. Explicit version-id (including the "null" literal) is a
+  single Get on ObjectKey.
+- DeleteObject mirrors memory/Cassandra: by-version exact delete,
+  versioned-no-version writes a delete marker, non-versioned-no-
+  version drops the entire key prefix.
+- SetObjectStorage uses a pessimistic txn: LockKeys + Get + assert
+  storage_class==expected + Set (or unconditional update on empty
+  expected). The CAS-reject path explicitly Rolls back so the lease
+  is released — see new entry in Codebase Patterns above.
+- Files changed: internal/meta/tikv/objects.go (new),
+  internal/meta/tikv/codec.go (objectRow + encode/decodeObject +
+  uuidFromString), internal/meta/tikv/store.go (object stubs replaced
+  by per-section file; ListObjects/ListObjectVersions stubs preserved
+  for US-005), internal/meta/tikv/store_test.go (object test cases),
+  scripts/ralph/progress.txt, scripts/ralph/prd.json.
+- **Learnings for future iterations:**
+  - rollbackOnError pattern is fine for "every error path returns the
+    sentinel err" but breaks the moment a function has a happy-path
+    early return (CAS reject). Audit every pessimistic-txn function
+    for "can we exit without setting err?" — if yes, add an explicit
+    txn.Rollback() before that return.
+  - The contract test caseVersioningSuspendedReplaceNull asserts
+    "GetObject empty after marker == ErrObjectNotFound", which holds
+    on the memory backend (where Suspended PUT prepends to the version
+    slice) but is naturally not satisfied on Cassandra/TiKV (where
+    DESC by version_id puts TimeUUID rows ahead of the null sentinel).
+    Documented behaviour for now; a parity fix lives in a future cycle
+    if the deployment story requires it. US-004 matches Cassandra
+    semantics — the contract suite (US-013) will surface the divergence
+    centrally if/when we want to converge.
+  - objectRow JSON keys are short ("b","k","v","sc",...) to keep TiKV
+    row payloads tight; the encoding is internal only so the
+    abbreviations are safe. New fields land additively with
+    json:"...,omitempty".
 
 ## 2026-04-29 - US-003
 - Bucket CRUD on TiKV: CreateBucket / GetBucket / DeleteBucket /
