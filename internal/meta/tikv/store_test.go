@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gocql/gocql"
+	"github.com/google/uuid"
 
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
@@ -1222,6 +1223,251 @@ func TestMultipartUpdateSSEWrap(t *testing.T) {
 	// Missing upload → NotFound.
 	if err := s.UpdateMultipartUploadSSEWrap(ctx, b.ID, gocql.TimeUUID().String(), []byte("x"), "k"); !errors.Is(err, meta.ErrMultipartNotFound) {
 		t.Fatalf("missing: %v want NotFound", err)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// US-007 — bucket-level config blob round trips.
+//
+// Each per-config wrapper (lifecycle, CORS, policy, ...) routes through the
+// shared setBucketBlob/getBucketBlob/deleteBucketBlob trio. Per-blob tests
+// would mostly duplicate, so the table-test below covers every kind in one
+// pass, asserting:
+//
+//   - GetBucketX on a missing row returns the right ErrNoSuchX sentinel.
+//   - Set then Get round-trips the bytes verbatim.
+//   - Delete then Get returns the missing-sentinel again (idempotent re-delete
+//     remains nil).
+//   - Per-bucket isolation: the same kind under a different bucketID returns
+//     missing.
+type blobOps struct {
+	name    string
+	missing error
+	set     func(s *Store, ctx context.Context, id uuid.UUID, blob []byte) error
+	get     func(s *Store, ctx context.Context, id uuid.UUID) ([]byte, error)
+	del     func(s *Store, ctx context.Context, id uuid.UUID) error
+}
+
+func bucketBlobOps() []blobOps {
+	return []blobOps{
+		{"lifecycle", meta.ErrNoSuchLifecycle, (*Store).SetBucketLifecycle, (*Store).GetBucketLifecycle, (*Store).DeleteBucketLifecycle},
+		{"cors", meta.ErrNoSuchCORS, (*Store).SetBucketCORS, (*Store).GetBucketCORS, (*Store).DeleteBucketCORS},
+		{"policy", meta.ErrNoSuchBucketPolicy, (*Store).SetBucketPolicy, (*Store).GetBucketPolicy, (*Store).DeleteBucketPolicy},
+		{"public-access-block", meta.ErrNoSuchPublicAccessBlock, (*Store).SetBucketPublicAccessBlock, (*Store).GetBucketPublicAccessBlock, (*Store).DeleteBucketPublicAccessBlock},
+		{"ownership-controls", meta.ErrNoSuchOwnershipControls, (*Store).SetBucketOwnershipControls, (*Store).GetBucketOwnershipControls, (*Store).DeleteBucketOwnershipControls},
+		{"encryption", meta.ErrNoSuchEncryption, (*Store).SetBucketEncryption, (*Store).GetBucketEncryption, (*Store).DeleteBucketEncryption},
+		{"object-lock", meta.ErrNoSuchObjectLockConfig, (*Store).SetBucketObjectLockConfig, (*Store).GetBucketObjectLockConfig, (*Store).DeleteBucketObjectLockConfig},
+		{"notification", meta.ErrNoSuchNotification, (*Store).SetBucketNotificationConfig, (*Store).GetBucketNotificationConfig, (*Store).DeleteBucketNotificationConfig},
+		{"website", meta.ErrNoSuchWebsite, (*Store).SetBucketWebsite, (*Store).GetBucketWebsite, (*Store).DeleteBucketWebsite},
+		{"replication", meta.ErrNoSuchReplication, (*Store).SetBucketReplication, (*Store).GetBucketReplication, (*Store).DeleteBucketReplication},
+		{"logging", meta.ErrNoSuchLogging, (*Store).SetBucketLogging, (*Store).GetBucketLogging, (*Store).DeleteBucketLogging},
+		{"tagging", meta.ErrNoSuchTagSet, (*Store).SetBucketTagging, (*Store).GetBucketTagging, (*Store).DeleteBucketTagging},
+	}
+}
+
+func TestBucketBlobRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	b1, err := s.CreateBucket(ctx, "bkt1", "alice", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bkt1: %v", err)
+	}
+	b2, err := s.CreateBucket(ctx, "bkt2", "alice", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bkt2: %v", err)
+	}
+
+	for _, op := range bucketBlobOps() {
+		t.Run(op.name, func(t *testing.T) {
+			// Missing → ErrNoSuchX.
+			if _, err := op.get(s, ctx, b1.ID); !errors.Is(err, op.missing) {
+				t.Fatalf("get missing: got %v, want %v", err, op.missing)
+			}
+			// Set + Get round trip.
+			payload := []byte("<" + op.name + ">cfg</" + op.name + ">")
+			if err := op.set(s, ctx, b1.ID, payload); err != nil {
+				t.Fatalf("set: %v", err)
+			}
+			got, err := op.get(s, ctx, b1.ID)
+			if err != nil {
+				t.Fatalf("get: %v", err)
+			}
+			if string(got) != string(payload) {
+				t.Fatalf("got %q want %q", got, payload)
+			}
+			// Per-bucket isolation: bkt2 has nothing.
+			if _, err := op.get(s, ctx, b2.ID); !errors.Is(err, op.missing) {
+				t.Fatalf("isolation: got %v, want %v", err, op.missing)
+			}
+			// Delete → Get returns missing again.
+			if err := op.del(s, ctx, b1.ID); err != nil {
+				t.Fatalf("delete: %v", err)
+			}
+			if _, err := op.get(s, ctx, b1.ID); !errors.Is(err, op.missing) {
+				t.Fatalf("after delete: got %v, want %v", err, op.missing)
+			}
+			// Idempotent re-delete.
+			if err := op.del(s, ctx, b1.ID); err != nil {
+				t.Fatalf("re-delete: %v", err)
+			}
+		})
+	}
+}
+
+func TestBucketBlobOverwrite(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	b, _ := s.CreateBucket(ctx, "bkt", "alice", "STANDARD")
+	if err := s.SetBucketLifecycle(ctx, b.ID, []byte("v1")); err != nil {
+		t.Fatalf("v1: %v", err)
+	}
+	if err := s.SetBucketLifecycle(ctx, b.ID, []byte("v2")); err != nil {
+		t.Fatalf("v2: %v", err)
+	}
+	got, err := s.GetBucketLifecycle(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if string(got) != "v2" {
+		t.Fatalf("got %q want v2", got)
+	}
+}
+
+func TestBucketBlobKindsHaveDistinctKeys(t *testing.T) {
+	// Cheap insurance against two BlobX constants accidentally aliasing onto
+	// the same key — any clash would mean SetBucketCORS overwrites
+	// SetBucketLifecycle, etc.
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	b, _ := s.CreateBucket(ctx, "bkt", "alice", "STANDARD")
+	for i, op := range bucketBlobOps() {
+		if err := op.set(s, ctx, b.ID, []byte(op.name)); err != nil {
+			t.Fatalf("[%d %s] set: %v", i, op.name, err)
+		}
+	}
+	for _, op := range bucketBlobOps() {
+		got, err := op.get(s, ctx, b.ID)
+		if err != nil {
+			t.Fatalf("[%s] get: %v", op.name, err)
+		}
+		if string(got) != op.name {
+			t.Fatalf("[%s] cross-talk: got %q want %q", op.name, got, op.name)
+		}
+	}
+}
+
+// ----------------------------------------------------------------------------
+// US-007 — bucket inventory configs (per (bucket, configID)).
+
+func TestInventoryConfigRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	b, _ := s.CreateBucket(ctx, "bkt", "alice", "STANDARD")
+
+	// Missing → ErrNoSuchInventoryConfig.
+	if _, err := s.GetBucketInventoryConfig(ctx, b.ID, "weekly"); !errors.Is(err, meta.ErrNoSuchInventoryConfig) {
+		t.Fatalf("missing: %v want ErrNoSuchInventoryConfig", err)
+	}
+
+	// Set + Get round trip.
+	if err := s.SetBucketInventoryConfig(ctx, b.ID, "weekly", []byte("<inv>weekly</inv>")); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	got, err := s.GetBucketInventoryConfig(ctx, b.ID, "weekly")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if string(got) != "<inv>weekly</inv>" {
+		t.Fatalf("got %q", got)
+	}
+
+	// Overwrite.
+	if err := s.SetBucketInventoryConfig(ctx, b.ID, "weekly", []byte("v2")); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	got, _ = s.GetBucketInventoryConfig(ctx, b.ID, "weekly")
+	if string(got) != "v2" {
+		t.Fatalf("after overwrite: %q", got)
+	}
+
+	// Delete + idempotent re-delete.
+	if err := s.DeleteBucketInventoryConfig(ctx, b.ID, "weekly"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := s.GetBucketInventoryConfig(ctx, b.ID, "weekly"); !errors.Is(err, meta.ErrNoSuchInventoryConfig) {
+		t.Fatalf("after delete: %v", err)
+	}
+	if err := s.DeleteBucketInventoryConfig(ctx, b.ID, "weekly"); err != nil {
+		t.Fatalf("re-delete: %v", err)
+	}
+}
+
+func TestInventoryConfigList(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	b, _ := s.CreateBucket(ctx, "bkt", "alice", "STANDARD")
+
+	// Empty list returns an empty (non-nil) map.
+	got, err := s.ListBucketInventoryConfigs(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("empty list: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("empty len: %d", len(got))
+	}
+
+	configs := map[string]string{
+		"daily":   "<a/>",
+		"weekly":  "<b/>",
+		"monthly": "<c/>",
+		// Embed a 0x00 in the configID to exercise the byte-stuffing
+		// codec. Decoders must round-trip it.
+		"id\x00with\x00nul": "<d/>",
+	}
+	for id, blob := range configs {
+		if err := s.SetBucketInventoryConfig(ctx, b.ID, id, []byte(blob)); err != nil {
+			t.Fatalf("set %q: %v", id, err)
+		}
+	}
+
+	got, err = s.ListBucketInventoryConfigs(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != len(configs) {
+		t.Fatalf("len got=%d want=%d (%v)", len(got), len(configs), got)
+	}
+	for id, want := range configs {
+		if string(got[id]) != want {
+			t.Fatalf("[%q] got %q want %q", id, got[id], want)
+		}
+	}
+
+	// Per-bucket isolation: a sibling bucket sees an empty list.
+	other, _ := s.CreateBucket(ctx, "other", "alice", "STANDARD")
+	if got, err := s.ListBucketInventoryConfigs(ctx, other.ID); err != nil || len(got) != 0 {
+		t.Fatalf("other bucket: got %v len=%d err=%v", got, len(got), err)
+	}
+
+	// Names returned in ascending lex order would be a bonus, but the
+	// contract is map-shaped — only assert the membership above.
+	names := make([]string, 0, len(got))
+	for k := range got {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	if names[0] == "" {
+		t.Fatalf("empty configID surfaced: %v", names)
 	}
 }
 

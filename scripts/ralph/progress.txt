@@ -125,6 +125,67 @@ prior cycles found useful; remove/replace if stale for this cycle.)
   ...) persist ExpiresAt in the row payload and lazy-expire on Get.
   A periodic sweeper (US-009) handles eager deletion later. Mirror of
   Cassandra `USING TTL`.
+- Per-bucket single-document config blobs (lifecycle/CORS/policy/
+  public-access-block/ownership-controls/encryption/object-lock/
+  notification/website/replication/logging/tagging) collapse on TiKV
+  to one shared key prefix `s/B/<uuid16>/c/<kind>` where kind is a
+  fixed 2-byte BlobX constant from keys.go. Per-config Set/Get/Delete
+  are thin wrappers over setBucketBlob/getBucketBlob/deleteBucketBlob
+  in blobs.go — never write fresh CRUD per endpoint, never pass a
+  free-form kind string from a handler. Per-(bucket, configID)
+  inventory configs use a separate sub-prefix `i/` with the configID
+  byte-stuffed via appendEscaped so List can range-scan and decode
+  configID via readEscaped after stripping the prefix.
+
+## 2026-04-29 - US-007
+- Bucket-level config blobs on TiKV: lifecycle / CORS / policy /
+  public-access-block / ownership-controls / encryption / object-lock /
+  notification / website / replication / logging / tagging — every
+  Set/Get/Delete triple routes through setBucketBlob/getBucketBlob/
+  deleteBucketBlob in internal/meta/tikv/blobs.go. Per-config wrappers
+  are one-line shims that pass the right BlobX kind and ErrNoSuchX
+  sentinel; matches internal/meta/cassandra/store.go's pattern shape
+  one-to-one.
+- Per-(bucket, configID) inventory configs (Set/Get/Delete/List)
+  also live in blobs.go using a distinct sub-prefix `i/` (US-002's
+  subInventoryConfig). List range-scans the prefix, strips it, and
+  readEscaped-decodes the configID — the byte-stuffed escape codec
+  round-trips embedded 0x00 in configIDs (verified by the list test
+  case "id\x00with\x00nul").
+- Single-key writes use Begin(false) (optimistic) + Set + Commit; no
+  pessimistic LockKeys — these blob keys are independent rows, no
+  read-after-write coherence to maintain (mirrors Cassandra's plain
+  INSERT shape, last-writer-wins).
+- Files changed: internal/meta/tikv/blobs.go (new),
+  internal/meta/tikv/store.go (12 blob-method stubs + 4 inventory
+  stubs removed), internal/meta/tikv/store_test.go (table-test driving
+  every blob kind through round-trip / missing / isolation /
+  delete-then-missing / re-delete; cross-talk test asserting no two
+  BlobX constants alias onto the same key; inventory round-trip +
+  list including embedded-0x00 configIDs), scripts/ralph/progress.txt,
+  scripts/ralph/prd.json.
+- **Learnings for future iterations:**
+  - The Cassandra path uses a per-config TABLE (`bucket_cors`,
+    `bucket_policy`, ...). The TiKV path collapses to one key prefix
+    with a 2-byte kind discriminator — same logical "table-by-kind"
+    indirection, but no schema migration needed when adding a new
+    config kind. Add a new BlobX constant in keys.go, write the
+    three-line wrapper trio in blobs.go, done.
+  - Fewer types of writes (Set + Commit over an optimistic txn) means
+    less boilerplate. rollbackOnError still fires on Set/Begin
+    failures so a failure mid-flight does not leak.
+  - len(blob)==0 → ErrNoSuchX guard in getBucketBlob mirrors
+    Cassandra's same guard — protects against a tombstoned row whose
+    value column came back zero-length. Probably never hits on TiKV
+    (unlike Cassandra's ROLE-tombstone-driven nulls), but the guard
+    is cheap and keeps semantics identical.
+  - For inventory ListBucketInventoryConfigs, decoding the configID
+    out of the scanned key requires stripping len(prefix) bytes from
+    Key and readEscaped-ing the rest. Don't try to invert the encode
+    by hand — the byte-stuffing codec round-trips embedded 0x00
+    correctly only via readEscaped.
+---
+
 
 ## 2026-04-29 - US-006
 - Multipart upload lifecycle on TiKV: Create / Get / List / SavePart /
