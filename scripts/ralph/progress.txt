@@ -101,6 +101,73 @@ prior cycles found useful; remove/replace if stale for this cycle.)
   inverted). Same as Cassandra `version_id DESC` LIMIT 1 — null row
   surfaces only via explicit ?versionId=null lookup, never as latest
   while a TimeUUID-versioned row exists.
+- Listing pagination on TiKV: batched Scan loop with cursor =
+  lastKey + 0x00 between batches; exit when Scan returns fewer than
+  the batch size or empty. Pass listScanBatchSize=1024. The encoded
+  key for the "key marker" boundary is escaped(marker) + 0x00 0x00 (the
+  terminator) — and prefixEnd of THAT captures every row of the marker
+  key, so for ListObjects (exclusive marker) advance start to that
+  prefixEnd; for ListObjectVersions (inclusive marker) advance start
+  to escaped(marker) + 0x00 0x00 itself.
+
+## 2026-04-29 - US-005
+- Listing on TiKV: ListObjects + ListObjectVersions driven by a single
+  ordered range scan over the bucket's object prefix. No 64-way fan-out,
+  no heap-merge — version-DESC suffix encoding (US-002) makes the
+  lex-first row per key the latest version, so dedup-by-prior-key picks
+  out the latest in one pass.
+- ListObjects: scan range [ObjectPrefixWithKey(bucketID, prefix),
+  prefixEnd(ObjectPrefix(bucketID))). Marker advances start past every
+  row of the marker key (markerEnd = prefixEnd(escaped-marker + 0x00 0x00))
+  so keys strictly > marker are emitted (matches Cassandra `key > ?` and
+  memory `k <= marker continue`). For each key, take the FIRST row — if
+  it is a delete marker, hide the key entirely.
+- ListObjectVersions: same scan with marker-INCLUSIVE start (matches
+  Cassandra `key >= ?` shape used by openVersionCursor). Emit every
+  row; first row per key gets IsLatest=true, rest false. Delete markers
+  surface — caller decides.
+- Delimiter handling identical to memory/Cassandra: in-process group on
+  the scan iterator, append to CommonPrefixes the first time we see a
+  given delimiter-bounded segment.
+- Pagination via batched Scan(start, end, listScanBatchSize=1024) loop.
+  cursor advances to lastKey + 0x00 between batches. Truncation sets
+  NextMarker (ListObjects) or NextKeyMarker + NextVersionID (versions)
+  on the next-not-emitted row, mirroring memory/Cassandra contract.
+- Files changed: internal/meta/tikv/list.go (new),
+  internal/meta/tikv/store.go (ListObjects/ListObjectVersions stubs
+  removed), internal/meta/tikv/store_test.go (10 new test cases —
+  basic, hide-delete-markers, latest-per-key, prefix, delimiter, marker
+  exclusive, truncation, all-rows-version-listing, version-pagination),
+  scripts/ralph/progress.txt, scripts/ralph/prd.json.
+- **Learnings for future iterations:**
+  - The escape transform's prefix-preservation is what makes the
+    one-shot range scan correct: user-space "prefix" of a key always
+    yields a byte-prefix of the encoded form, because byte-stuffing is
+    pointwise (each byte maps to itself or 0x00 → 0x00 0xFF). Means
+    `ObjectPrefixWithKey(bucketID, "foo")` is a true byte prefix of
+    every encoded "foo*" object key. Don't add length-prefixed segments
+    to keys — the scan would break.
+  - NextMarker (and NextKeyMarker/NextVersionID) is set to the
+    next-not-emitted row — same as memory/Cassandra. This actually
+    LOSES that row on the next page if the gateway naively re-issues
+    with marker semantics that exclude marker; that quirk lives across
+    all backends and is not US-005's concern. The gateway side
+    handles continuation-token rewriting in s3api/server.go.
+  - prefixEnd helper (buckets.go) is the canonical "exclusive upper
+    bound for lex-starts-with" — reuse it everywhere range scan needs
+    a stop key. Mirrors github.com/tikv/client-go/v2/kv.PrefixNextKey.
+  - Pagination loop pattern: Scan(cursor, end, batchSize) → if
+    len(pairs) < batchSize OR len(pairs) == 0, exit; else cursor =
+    lastKey + 0x00 and loop. Keeps memory bounded for huge buckets and
+    works against both memBackend and real txnkv.
+  - Single-txn snapshot isolation makes one ListObjects call see a
+    consistent point-in-time view — concurrent PutObject during the
+    scan is invisible (TiKV MVCC). Memory backend's overlay map
+    re-reads on each Scan call though, so concurrent writes between
+    Scan batches there are visible (acceptable for unit tests; real
+    snapshot iso is the contract suite US-013's job).
+---
+
 
 ## 2026-04-29 - US-004
 - Object CRUD on TiKV: PutObject / GetObject / DeleteObject /

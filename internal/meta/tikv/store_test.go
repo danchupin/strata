@@ -574,6 +574,243 @@ func TestObjectKeyVersionsCoexist(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
+// ListObjects + ListObjectVersions (US-005).
+// ----------------------------------------------------------------------------
+
+func TestListObjectsBasic(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "bkt", "alice", "STANDARD")
+
+	for _, k := range []string{"a", "b", "c"} {
+		putBody(t, s, b, k, k, false)
+	}
+
+	res, err := s.ListObjects(ctx, b.ID, meta.ListOptions{Limit: 1000})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if got := keysOf(res.Objects); !equalStrings(got, []string{"a", "b", "c"}) {
+		t.Fatalf("keys: %v", got)
+	}
+	if res.Truncated {
+		t.Fatalf("should not be truncated")
+	}
+}
+
+func TestListObjectsHidesDeleteMarkers(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b := newVersionedBucket(t, s, "lst")
+
+	putBody(t, s, b, "a", "1", true)
+	putBody(t, s, b, "b", "1", true)
+	putBody(t, s, b, "c", "1", true)
+	if _, err := s.DeleteObject(ctx, b.ID, "b", "", true); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	res, err := s.ListObjects(ctx, b.ID, meta.ListOptions{Limit: 1000})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if got := keysOf(res.Objects); !equalStrings(got, []string{"a", "c"}) {
+		t.Fatalf("keys: %v want [a c]", got)
+	}
+
+	versions, err := s.ListObjectVersions(ctx, b.ID, meta.ListOptions{Limit: 1000})
+	if err != nil {
+		t.Fatalf("list versions: %v", err)
+	}
+	dm := false
+	for _, v := range versions.Versions {
+		if v.IsDeleteMarker {
+			dm = true
+		}
+	}
+	if !dm {
+		t.Fatalf("ListObjectVersions should include delete markers")
+	}
+}
+
+func TestListObjectsLatestPerKey(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b := newVersionedBucket(t, s, "lat")
+
+	putBody(t, s, b, "doc", "v1", true)
+	putBody(t, s, b, "doc", "v2", true)
+	v3 := putBody(t, s, b, "doc", "v3", true)
+
+	res, err := s.ListObjects(ctx, b.ID, meta.ListOptions{Limit: 1000})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(res.Objects) != 1 {
+		t.Fatalf("expected 1 object, got %d", len(res.Objects))
+	}
+	if res.Objects[0].VersionID != v3.VersionID || res.Objects[0].ETag != "v3" {
+		t.Fatalf("latest row: %+v want v3", res.Objects[0])
+	}
+	if !res.Objects[0].IsLatest {
+		t.Fatalf("IsLatest must be true")
+	}
+}
+
+func TestListObjectsPrefix(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "p", "alice", "STANDARD")
+
+	for _, k := range []string{"foo/a", "foo/b", "bar/a", "baz"} {
+		putBody(t, s, b, k, k, false)
+	}
+
+	res, err := s.ListObjects(ctx, b.ID, meta.ListOptions{Prefix: "foo/", Limit: 1000})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if got := keysOf(res.Objects); !equalStrings(got, []string{"foo/a", "foo/b"}) {
+		t.Fatalf("prefix: %v want [foo/a foo/b]", got)
+	}
+}
+
+func TestListObjectsDelimiter(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "d", "alice", "STANDARD")
+
+	for _, k := range []string{"a/x", "a/y", "b/z", "c"} {
+		putBody(t, s, b, k, k, false)
+	}
+
+	res, err := s.ListObjects(ctx, b.ID, meta.ListOptions{Delimiter: "/", Limit: 1000})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if got := keysOf(res.Objects); !equalStrings(got, []string{"c"}) {
+		t.Fatalf("objects: %v want [c]", got)
+	}
+	prefixes := append([]string(nil), res.CommonPrefixes...)
+	sort.Strings(prefixes)
+	if !equalStrings(prefixes, []string{"a/", "b/"}) {
+		t.Fatalf("prefixes: %v want [a/ b/]", prefixes)
+	}
+}
+
+func TestListObjectsMarkerExclusive(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "m", "alice", "STANDARD")
+
+	for _, k := range []string{"a", "b", "c", "d"} {
+		putBody(t, s, b, k, k, false)
+	}
+
+	res, err := s.ListObjects(ctx, b.ID, meta.ListOptions{Marker: "b", Limit: 1000})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if got := keysOf(res.Objects); !equalStrings(got, []string{"c", "d"}) {
+		t.Fatalf("after-marker: %v want [c d]", got)
+	}
+}
+
+func TestListObjectsTruncation(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "pg", "alice", "STANDARD")
+
+	for _, k := range []string{"a", "b", "c", "d", "e"} {
+		putBody(t, s, b, k, k, false)
+	}
+
+	res, err := s.ListObjects(ctx, b.ID, meta.ListOptions{Limit: 2})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if !res.Truncated {
+		t.Fatalf("should be truncated")
+	}
+	if got := keysOf(res.Objects); !equalStrings(got, []string{"a", "b"}) {
+		t.Fatalf("page1 keys: %v", got)
+	}
+	// NextMarker is the next-not-emitted key — matches the
+	// memory/Cassandra shape for the gateway's pagination handler.
+	if res.NextMarker != "c" {
+		t.Fatalf("next marker: %q want c", res.NextMarker)
+	}
+}
+
+func TestListObjectVersionsAllRows(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b := newVersionedBucket(t, s, "lv")
+
+	v1 := putBody(t, s, b, "doc", "v1", true)
+	v2 := putBody(t, s, b, "doc", "v2", true)
+	putBody(t, s, b, "other", "x", true)
+
+	res, err := s.ListObjectVersions(ctx, b.ID, meta.ListOptions{Limit: 1000})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(res.Versions) != 3 {
+		t.Fatalf("versions: %d want 3", len(res.Versions))
+	}
+
+	// Versions ordered (key ASC, version DESC). doc/v2 first with IsLatest,
+	// doc/v1 second without, then other.
+	if res.Versions[0].Key != "doc" || res.Versions[0].VersionID != v2.VersionID || !res.Versions[0].IsLatest {
+		t.Fatalf("v0: %+v", res.Versions[0])
+	}
+	if res.Versions[1].Key != "doc" || res.Versions[1].VersionID != v1.VersionID || res.Versions[1].IsLatest {
+		t.Fatalf("v1: %+v", res.Versions[1])
+	}
+	if res.Versions[2].Key != "other" || !res.Versions[2].IsLatest {
+		t.Fatalf("v2: %+v", res.Versions[2])
+	}
+}
+
+func TestListObjectVersionsPagination(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b := newVersionedBucket(t, s, "lvp")
+
+	putBody(t, s, b, "a", "1", true)
+	putBody(t, s, b, "a", "2", true)
+	putBody(t, s, b, "b", "1", true)
+
+	res, err := s.ListObjectVersions(ctx, b.ID, meta.ListOptions{Limit: 2})
+	if err != nil {
+		t.Fatalf("page1: %v", err)
+	}
+	if !res.Truncated || len(res.Versions) != 2 {
+		t.Fatalf("page1: %+v", res)
+	}
+	if res.NextKeyMarker == "" || res.NextVersionID == "" {
+		t.Fatalf("page1 next: %q %q", res.NextKeyMarker, res.NextVersionID)
+	}
+}
+
+func keysOf(objs []*meta.Object) []string {
+	out := make([]string, 0, len(objs))
+	for _, o := range objs {
+		out = append(out, o.Key)
+	}
+	return out
+}
+
+// ----------------------------------------------------------------------------
 // TestPrefixEnd guards the helper used by every range scan.
 func TestPrefixEnd(t *testing.T) {
 	cases := []struct {

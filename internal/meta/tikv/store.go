@@ -89,14 +89,6 @@ func (s *Store) GetObjectGrants(ctx context.Context, bucketID uuid.UUID, key, ve
 	return nil, errors.ErrUnsupported
 }
 
-func (s *Store) ListObjects(ctx context.Context, bucketID uuid.UUID, opts meta.ListOptions) (*meta.ListResult, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) ListObjectVersions(ctx context.Context, bucketID uuid.UUID, opts meta.ListOptions) (*meta.ListVersionsResult, error) {
-	return nil, errors.ErrUnsupported
-}
-
 func (s *Store) EnqueueChunkDeletion(ctx context.Context, region string, chunks []data.ChunkRef) error {
 	return errors.ErrUnsupported
 }
