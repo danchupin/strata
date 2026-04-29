@@ -32,3 +32,40 @@ prior cycles found useful; remove/replace if stale for this cycle.)
 - Tests in this cycle that need a TiKV testcontainer: use the
   same testcontainers-go pattern as internal/meta/cassandra/store_integration_test.go.
   Build tag `integration`. PD + TiKV in one container set; ~30 s start.
+- Stub-package trick to keep `go mod tidy` from dropping a dep that has
+  not yet been used: blank-import the smallest leaf subpackage from the
+  vendor (we used `_ "github.com/tikv/client-go/v2/config"` in the
+  US-001 stub). Replace with the real import once a story uses the
+  txnkv API for round-trip work.
+- Compile-time interface assertion `var _ meta.Store = (*Store)(nil)`
+  at the bottom of internal/meta/tikv/store.go catches every
+  meta.Store interface drift in CI as soon as the interface gains a
+  method. Keep it across stories.
+
+## 2026-04-29 - US-001
+- Added github.com/tikv/client-go/v2 to go.mod (go mod tidy resolved
+  PingCAP transitive deps: kvproto, failpoint, log, pd/client, etc).
+- New internal/meta/tikv/store.go: Config{PDEndpoints}, Store{cfg},
+  Open(cfg), Close(), Probe(ctx) + every meta.Store method as a stub
+  returning errors.ErrUnsupported. Compile-time assertion confirms
+  *Store satisfies meta.Store.
+- New internal/meta/tikv/store_test.go: Probe stub returns
+  errors.ErrUnsupported (errors.Is-checked).
+- STRATA_META_BACKEND=tikv intentionally NOT wired into
+  internal/serverapp dispatch — production routing lands in US-015.
+- Files changed: go.mod, go.sum, internal/meta/tikv/store.go (new),
+  internal/meta/tikv/store_test.go (new), scripts/ralph/.last-branch,
+  scripts/ralph/progress.txt, scripts/ralph/prd.json.
+- **Learnings for future iterations:**
+  - The meta.Store interface is huge (~80 methods). Stub all of them
+    in one file to land US-001; later stories replace per-section
+    (bucket → store.go, IAM → iam.go, reshard → reshard.go) mirroring
+    Cassandra's split. Do NOT pre-split for stubs — too much churn.
+  - `errors.ErrUnsupported` (Go 1.21+) is the right sentinel for
+    not-yet-implemented stubs — check via `errors.Is`, not `==`.
+  - The TiKV docker image set is PD + TiKV (PlacementDriver + storage)
+    — single PD + single TiKV is the CI shape, production needs
+    PD ≥3 / TiKV ≥3 (US-014 + US-019).
+  - The transitive dep tree pulls a lot of pingcap/* and tikv/pd —
+    expected. go.sum grows ~150 lines per pingcap module bump.
+---
