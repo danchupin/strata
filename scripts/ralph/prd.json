@@ -319,8 +319,8 @@
         "Tests pass"
       ],
       "priority": 18,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "New e2e-s3-backend job in .github/workflows/ci.yml (parallel to e2e — no needs:, no shared image build dependency since the s3 stack only needs the strata:ceph gateway image). Job builds strata:ceph locally (matches the image FROM in deploy/docker/docker-compose.yml strata-s3 build: context), invokes make up-s3-backend (cassandra + minio + init-minio + strata-s3 with health-gating) and make smoke-s3-backend-ci (codebase pattern from US-012 — destructive variant asserts make down clears strata-minio-data volume). Container logs collected from strata-cassandra/minio/init-minio/strata-s3 plus compose ps with --profile s3-backend; uploaded as e2e-s3-backend-logs artefact (retention-days: 14 matches existing e2e-logs). timeout-minutes: 30 per AC. Existing CI jobs untouched. AC literal says 'make up-s3-backend + make smoke-s3-backend' but progress.txt codebase-pattern note pins CI to smoke-s3-backend-ci (volume-cleanup assertion only runs in -ci variant); -ci subsumes the AC."
     },
     {
       "id": "US-019",

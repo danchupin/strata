@@ -349,6 +349,17 @@ Cycle: ralph/s3-over-s3-backend
   GetBucket + ListBuckets SELECT must include the new column when added;
   forgetting to update both surfaces silently returns zero-value flags
   on every lookup. Pattern works for any boolean per-bucket toggle.
+- New CI e2e variant pattern (US-018): every new e2e variant gets its
+  own job in .github/workflows/ci.yml — parallel, no `needs:` on the
+  existing e2e job (independent failure surfaces). Each job builds the
+  gateway image inline (don't try to share with docker-build), runs
+  `make up-<stack>` then `make smoke-<stack>-ci` (the destructive `-ci`
+  variant where it exists is a strict superset of the non-CI smoke),
+  collects `docker logs` per container into ci-logs/, uploads via
+  `actions/upload-artifact@v4` with `name: e2e-<stack>-logs` and
+  retention-days 14. timeout-minutes per AC. When adding a new
+  alternative-data-backend or alternative-meta-backend stack, follow
+  this template — one job, one artefact, parallel-runnable.
 - US-016 presign passthrough: data.PresignBackend (PresignGetObject(ctx,
   *Manifest, expires) → URL) is the optional capability surface. The s3
   backend implements via awss3.NewPresignClient(b.client) — local URL
@@ -1476,4 +1487,44 @@ Cycle: ralph/s3-over-s3-backend
     + cors). When adding new capability surfaces (e.g. notifications,
     replication), update the IRSA action list here AND in the s3.md
     capability matrix.
+---
+
+## 2026-05-01 — US-018
+- New job e2e-s3-backend in .github/workflows/ci.yml. Parallel to existing
+  e2e job (no needs: — both can run on same PR concurrently); independent
+  image build keeps the failure surface decoupled.
+- Build strata:ceph from deploy/docker/Dockerfile (the image strata-s3 in
+  compose builds from the same Dockerfile, so the local docker build hits
+  the same FROM image). No ceph-bootstrap build — s3 stack does not start
+  ceph services.
+- Job invokes make up-s3-backend (cassandra + minio + init-minio +
+  strata-s3 with health-gating) followed by make smoke-s3-backend-ci.
+  Codebase pattern (US-012) pins CI to the -ci variant: SKIP_DOWN=0 →
+  asserts `make down -v` clears the strata-minio-data named volume.
+- Container logs collected for strata-cassandra, strata-minio,
+  strata-init-minio, strata-s3 plus `compose ps --profile s3-backend`.
+  Uploaded as `e2e-s3-backend-logs` artefact (retention-days: 14 matches
+  e2e-logs convention).
+- timeout-minutes: 30 set on the job per AC.
+- Files: .github/workflows/ci.yml.
+- **Learnings:**
+  - AC literal said `make up-s3-backend + make smoke-s3-backend`; the
+    `-ci` suffix variant is what the codebase pattern (progress.txt,
+    "Destructive CI variant pattern") prescribes. Followed the codebase
+    pattern over the AC literal — `-ci` runs the same body plus the
+    volume-cleanup assertion, strict superset of the literal AC.
+  - `make smoke-s3-backend-ci` already depends on `up-s3-backend`. The
+    job invokes `make up-s3-backend` separately so a stack-up failure
+    surfaces in its own step (clearer log grouping in the GitHub UI vs
+    one giant `smoke-s3-backend-ci` step).
+  - No `needs: docker-build` on the new job: docker-build only builds
+    images and asserts they build; the new job builds its own image
+    inline (matches how the existing e2e job re-builds rather than
+    consuming docker-build's output). Keeping it independent means a
+    flake in docker-build doesn't hold up the s3 e2e signal.
+  - actionlint / yamllint not available in this repo's CI image — YAML
+    validation falls back to `docker compose --profile s3-backend config
+    -q` (covers the compose half) + go build/vet/test (covers the Go
+    half). YAML structure of the new job mirrors existing e2e job step
+    shape exactly to minimise drift.
 ---

@@ -124,3 +124,37 @@ jobs:
           path: ci-logs/
           if-no-files-found: warn
           retention-days: 14
+
+  e2e-s3-backend:
+    name: End-to-end S3 backend (compose + smoke against MinIO)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build gateway image
+        run: docker build -f deploy/docker/Dockerfile -t strata:ceph .
+
+      - name: Bring up s3-backend stack
+        run: make up-s3-backend
+
+      - name: Smoke (s3-backend, destructive — asserts make down volume cleanup)
+        run: make smoke-s3-backend-ci
+
+      - name: Collect container logs
+        if: always()
+        run: |
+          mkdir -p ci-logs
+          for c in strata-cassandra strata-minio strata-init-minio strata-s3; do
+            docker logs $c > ci-logs/$c.log 2>&1 || true
+          done
+          docker compose -f deploy/docker/docker-compose.yml --profile s3-backend ps > ci-logs/compose-ps.txt 2>&1 || true
+
+      - name: Upload CI logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-s3-backend-logs
+          path: ci-logs/
+          if-no-files-found: warn
+          retention-days: 14
