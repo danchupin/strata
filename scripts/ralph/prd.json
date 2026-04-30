@@ -252,8 +252,8 @@
         "Tests pass"
       ],
       "priority": 15,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Wired STRATA_META_BACKEND=tikv through internal/serverapp.buildMetaStore + buildLocker (and the same shape into cmd/strata-admin/rewrap.go::buildRewrapMetaStore so operator-side rewrap also works). config.validate gained a meta_backend=tikv arm that requires STRATA_TIKV_PD_ENDPOINTS — empty endpoints fail fast at Load time with a clear message; unreachable PD fails fast at Open() (txnkv.NewClient bubbles a dial error). New TiKVConfig{Endpoints string} block with envMap STRATA_TIKV_PD_ENDPOINTS → tikv.pd_endpoints; serverapp + strata-admin both split the comma-separated string with TrimSpace before dialling, since the koanf env provider does not auto-split slice values. New Makefile targets: smoke-tikv (port 9998 ↔ strata-tikv compose service) + smoke-signed-tikv + wait-strata-tikv (curl /readyz) — drives the existing scripts/smoke.sh / smoke-signed.sh against the TiKV-backed gateway brought up by make up-tikv. Up-tikv comment + .PHONY list both updated. Manual smoke-tikv / smoke-signed-tikv runs against a live stack are an operator concern — Docker is unavailable in this iteration's env (testcontainers-go panics on macOS+Lima as documented in US-013) so the regression-free claim rides on (1) the contract suite proving meta.Store surface equivalence, (2) the wiring unit tests landed in this story, (3) the smoke scripts being unchanged (just point at a different host port). CI gets the live exercise once US-017's ci-tikv.yml lands."
     },
     {
       "id": "US-016",

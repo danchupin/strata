@@ -20,6 +20,7 @@ type Config struct {
 	ShutdownWait time.Duration `koanf:"shutdown_wait"`
 
 	Cassandra CassandraConfig `koanf:"cassandra"`
+	TiKV      TiKVConfig      `koanf:"tikv"`
 	RADOS     RADOSConfig     `koanf:"rados"`
 	Auth      AuthConfig      `koanf:"auth"`
 	Lifecycle LifecycleConfig `koanf:"lifecycle"`
@@ -36,6 +37,14 @@ type CassandraConfig struct {
 	Username    string        `koanf:"username"`
 	Password    string        `koanf:"password"`
 	Timeout     time.Duration `koanf:"timeout"`
+}
+
+// TiKVConfig holds connection parameters for the TiKV-backed meta store
+// (US-015). Endpoints is a comma-separated PD address list; serverapp
+// splits + trims it before dialling. Empty until STRATA_META_BACKEND=tikv
+// is in play.
+type TiKVConfig struct {
+	Endpoints string `koanf:"pd_endpoints"`
 }
 
 type RADOSConfig struct {
@@ -119,6 +128,7 @@ var envMap = map[string]string{
 	"STRATA_CASSANDRA_USER":           "cassandra.username",
 	"STRATA_CASSANDRA_PASSWORD":       "cassandra.password",
 	"STRATA_CASSANDRA_TIMEOUT":        "cassandra.timeout",
+	"STRATA_TIKV_PD_ENDPOINTS":        "tikv.pd_endpoints",
 	"STRATA_RADOS_CONF":               "rados.config_file",
 	"STRATA_RADOS_USER":               "rados.user",
 	"STRATA_RADOS_KEYRING":            "rados.keyring",
@@ -175,8 +185,12 @@ func (c *Config) validate() error {
 	}
 	switch c.MetaBackend {
 	case "memory", "cassandra":
+	case "tikv":
+		if c.TiKV.Endpoints == "" {
+			return fmt.Errorf("meta_backend=tikv requires STRATA_TIKV_PD_ENDPOINTS (or [tikv].pd_endpoints) to be set")
+		}
 	default:
-		return fmt.Errorf("meta_backend %q is not one of {memory, cassandra}", c.MetaBackend)
+		return fmt.Errorf("meta_backend %q is not one of {memory, cassandra, tikv}", c.MetaBackend)
 	}
 	switch c.Auth.Mode {
 	case "", "off", "disabled", "required", "optional":

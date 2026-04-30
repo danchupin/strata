@@ -236,6 +236,25 @@ prior cycles found useful; remove/replace if stale for this cycle.)
   downstream consumers use `service_started`; the TiKV client retries
   until PD assigns regions, so transient boot races absorb in the
   application layer.
+- koanf's env.Provider stores env values as raw strings — the default
+  decoder hook only handles StringToTimeDurationHookFunc +
+  textUnmarshalerHookFunc, no comma-split into []string. For multi-value
+  config (TiKV PD endpoints, RADOS clusters), keep the Config field as
+  `string` and split with TrimSpace + drop-empty at use-site. Cleaner
+  than wiring a custom mapstructure decode hook.
+- meta_backend selection is validated in internal/config/config.go::
+  validate(), not in serverapp's buildMetaStore switch. Per-backend env
+  requirements (e.g. tikv requires STRATA_TIKV_PD_ENDPOINTS) gate at the
+  same site so misconfig fails at config.Load() with a clear message
+  before any backend dial. When adding a new backend, grow validate AND
+  grow both buildMetaStore (serverapp) AND buildRewrapMetaStore
+  (cmd/strata-admin/rewrap.go) — operators running rewrap on the new
+  backend hit "unknown meta backend" otherwise.
+- Tests that exercise config.Load must scrub STRATA_-prefixed env vars
+  set by the dev shell or CI. t.Setenv can only set, not unset, and
+  setting to "" still overrides the default with the empty string. Use
+  a small helper that saves + os.Unsetenv + t.Cleanup(restore). See
+  clearEnv in internal/config/config_test.go.
 
 ## 2026-04-30 - US-014
 - docker-compose tikv profile + sidecars. Adds three services under
@@ -1034,4 +1053,85 @@ prior cycles found useful; remove/replace if stale for this cycle.)
   - TestUniquePrefixesNoOverlap is cheap insurance against later
     stories accidentally adding e.g. "s/q/" alongside "s/qn/" — keep
     it green when adding new top-level entity prefixes.
+---
+
+## 2026-04-30 - US-015
+- Wired STRATA_META_BACKEND=tikv as a first-class meta backend pick.
+  internal/serverapp.buildMetaStore + buildLocker grew a tikv arm;
+  cmd/strata-admin/rewrap.go::buildRewrapMetaStore mirrors the same shape
+  so operator-side rewrap works against tikv too. internal/config.Config
+  grew a TiKV TiKVConfig{Endpoints string} block; envMap maps
+  STRATA_TIKV_PD_ENDPOINTS → tikv.pd_endpoints. validate() now accepts
+  meta_backend=tikv but rejects it when Endpoints is empty with the
+  message "meta_backend=tikv requires STRATA_TIKV_PD_ENDPOINTS (or
+  [tikv].pd_endpoints) to be set" — so misconfig fails fast at Load time
+  before any backend dial.
+- Endpoints are split + TrimSpace'd at use-site (parseTiKVEndpoints in
+  serverapp, splitTiKVEndpoints in strata-admin). koanf's env provider
+  does not auto-split a comma-separated string into []string (mapstructure
+  with WeaklyTypedInput=true treats "a,b,c" as a single-element slice),
+  so doing the split at use-site is cleaner than fighting decode hooks.
+- buildLocker(tikv) returns metatikv.NewLocker(store) when the metaStore
+  is *metatikv.Store; mismatched stores fall through to nil so the
+  existing "workers selected but backend has no locker" error fires.
+- Makefile: new smoke-tikv (port 9998 → scripts/smoke.sh) and
+  smoke-signed-tikv (port 9998 → scripts/smoke-signed.sh) targets, plus
+  wait-strata-tikv (curl /readyz on 127.0.0.1:9998 until 200). up-tikv
+  comment refreshed to point at the new wait + smoke targets. .PHONY
+  list updated.
+- Tests: internal/config/config_test.go (new) — TestLoadDefaultsMemoryBackend,
+  TestLoadTiKVBackendRequiresEndpoints, TestLoadTiKVBackendAcceptsEndpoints,
+  TestLoadUnknownMetaBackendRejected. internal/serverapp/serverapp_test.go
+  gained TestParseTiKVEndpoints + TestBuildMetaStoreTiKVEmptyEndpointsRejected
+  + TestBuildLockerTiKVNilWhenStoreMismatched. clearEnv helper saves +
+  restores any pre-set STRATA_ env vars so tests run deterministically
+  regardless of dev-shell pollution.
+- Files changed: internal/config/config.go (+ TiKVConfig, envMap entry,
+  validate arm), internal/config/config_test.go (new),
+  internal/serverapp/serverapp.go (metatikv import, buildMetaStore tikv
+  case, buildLocker tikv case, parseTiKVEndpoints helper),
+  internal/serverapp/serverapp_test.go (3 new test cases),
+  cmd/strata-admin/rewrap.go (metatikv import, tikv case in
+  buildRewrapMetaStore, splitTiKVEndpoints helper), Makefile (smoke-tikv,
+  smoke-signed-tikv, wait-strata-tikv, .PHONY list, up-tikv comment),
+  scripts/ralph/progress.txt, scripts/ralph/prd.json.
+- Live smoke-tikv / smoke-signed-tikv runs deferred — Docker is
+  unavailable in this env (testcontainers-go panics on macOS+Lima per
+  US-013 notes). Regression-free claim rides on (1) the storetest
+  contract suite proving surface equivalence, (2) the wiring unit tests
+  added in this story, (3) the smoke scripts being unchanged (just
+  pointed at a different host port). CI gets the live exercise when
+  US-017's ci-tikv.yml lands.
+- **Learnings for future iterations:**
+  - koanf's env.Provider stores env values as raw strings; the default
+    decoder hook only handles StringToTimeDurationHookFunc +
+    textUnmarshalerHookFunc, no comma-split. Splitting a comma-separated
+    env value into []string at use-site (with TrimSpace + drop-empty) is
+    cleaner than fighting mapstructure. The Config field stays
+    `string`; the splitter is a small helper in the consuming package.
+  - For meta_backend gating on a per-backend env var (here:
+    STRATA_TIKV_PD_ENDPOINTS), do the gate in config.validate(), not in
+    the buildMetaStore switch. Failing at config.Load() means the
+    binary exits 2 with a clear message before any backend code runs;
+    failing at buildMetaStore means a stack of "data backend"/"meta
+    store" wrapper errors that obscure the actual configuration bug.
+  - When adding a new backend to buildLocker, check the store-type
+    assertion inside the cfg.MetaBackend == "<name>" arm. The picker is
+    the source of truth for "which backend"; the type assertion is an
+    invariant check that will only fall through if a future refactor
+    routes a memory store under cfg.MetaBackend="tikv" (which the
+    existing "workers selected but backend has no locker" error handles
+    cleanly).
+  - cmd/strata-admin/rewrap.go has its own buildRewrapMetaStore that
+    mirrors serverapp.buildMetaStore. When growing serverapp's switch
+    for a new backend, also grow rewrap's — operators running rewrap
+    on the new backend will hit the "unknown meta backend" error
+    otherwise. The two stay in sync by convention; no shared helper
+    today.
+  - Tests that read os.Environ need to scrub STRATA_-prefixed vars set
+    by the dev shell (or CI) before exercising config.Load — t.Setenv
+    can only set, not delete, so use a small helper that saves +
+    os.Unsetenv + t.Cleanup(restore). Setting a STRATA_* var to "" via
+    t.Setenv is a footgun: koanf still picks it up and overrides the
+    default with the empty string.
 ---

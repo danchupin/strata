@@ -1,7 +1,7 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph docker-build vet test up up-all up-tikv down wait-cassandra wait-ceph wait-pd wait-tikv ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-grafana clean
+.PHONY: build build-ceph docker-build vet test up up-all up-tikv down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata-tikv ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana clean
 
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
@@ -54,10 +54,8 @@ up-all:
 # Bring up the TiKV-backed gateway stack (PD + TiKV + ceph + strata-tikv +
 # observability). Mutually exclusive with `up-all` in practice — running both
 # at once works (different host ports) but the cassandra service goes idle.
-# strata-tikv health depends on internal/serverapp wiring landed by US-015;
-# until then `make wait-strata-tikv` may time out. PD + TiKV come up cleanly
-# regardless, so this target is enough for `make test-integration` against
-# STRATA_TIKV_TEST_PD_ENDPOINTS=127.0.0.1:2379.
+# strata-tikv binds host port 9998 (vs the cassandra-backed strata's 9999).
+# Use `make wait-strata-tikv && make smoke-tikv` to drive the smoke suite.
 up-tikv:
 	$(COMPOSE) --profile tikv up -d pd tikv ceph strata-tikv prometheus grafana
 
@@ -89,6 +87,16 @@ wait-tikv:
 	@until (echo > /dev/tcp/127.0.0.1/20160) 2>/dev/null; do sleep 2; done
 	@echo "tikv ready"
 
+# Wait for the TiKV-backed gateway to report ready on /readyz. The
+# strata-tikv container exposes port 9998 on the host (vs the default
+# cassandra-backed strata's 9999) so both can coexist under
+# `--profile tikv`. /readyz fans out probes — a 200 means the gateway
+# dialled PD + TiKV cleanly.
+wait-strata-tikv:
+	@echo "waiting for strata-tikv /readyz to report 200..."
+	@until [ "$$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:9998/readyz)" = "200" ]; do sleep 2; done
+	@echo "strata-tikv ready"
+
 ceph-pool:
 	docker exec strata-ceph ceph osd pool create strata.rgw.buckets.data 8 8 replicated || true
 	docker exec strata-ceph ceph osd pool application enable strata.rgw.buckets.data rgw || true
@@ -113,8 +121,17 @@ run-gateway: run-strata
 smoke:
 	bash scripts/smoke.sh http://127.0.0.1:9999
 
+# Same smoke pass against the TiKV-backed gateway brought up by
+# `make up-tikv`. Host port 9998 — see wait-strata-tikv comment above.
+smoke-tikv:
+	bash scripts/smoke.sh http://127.0.0.1:9998
+
 smoke-signed:
 	bash scripts/smoke-signed.sh http://127.0.0.1:9999
+
+# SigV4-signed smoke pass against the TiKV-backed gateway.
+smoke-signed-tikv:
+	bash scripts/smoke-signed.sh http://127.0.0.1:9998
 
 smoke-grafana:
 	bash scripts/grafana-smoke.sh

@@ -5,8 +5,10 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
+	"github.com/danchupin/strata/internal/config"
 	datamem "github.com/danchupin/strata/internal/data/memory"
 	metamem "github.com/danchupin/strata/internal/meta/memory"
 )
@@ -89,6 +91,43 @@ func TestBuildHealthHandlerRadosDown(t *testing.T) {
 	h.Readyz(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("/readyz status=%d want 503", w.Code)
+	}
+}
+
+func TestParseTiKVEndpoints(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"", []string{}},
+		{"pd:2379", []string{"pd:2379"}},
+		{"pd-1:2379,pd-2:2379, pd-3:2379 ", []string{"pd-1:2379", "pd-2:2379", "pd-3:2379"}},
+		{",,pd:2379,,", []string{"pd:2379"}},
+	}
+	for _, tc := range cases {
+		got := parseTiKVEndpoints(tc.in)
+		if len(got) == 0 && len(tc.want) == 0 {
+			continue
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("parseTiKVEndpoints(%q)=%v want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestBuildMetaStoreTiKVEmptyEndpointsRejected(t *testing.T) {
+	cfg := &config.Config{MetaBackend: "tikv"}
+	store, err := buildMetaStore(cfg, nil, nil)
+	if err == nil {
+		_ = store.Close()
+		t.Fatal("buildMetaStore(tikv) with empty endpoints should fail")
+	}
+}
+
+func TestBuildLockerTiKVNilWhenStoreMismatched(t *testing.T) {
+	cfg := &config.Config{MetaBackend: "tikv"}
+	if got := buildLocker(cfg, metamem.New()); got != nil {
+		t.Fatalf("buildLocker(tikv) with non-tikv store should return nil, got %T", got)
 	}
 }
 
