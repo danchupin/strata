@@ -4,6 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"strings"
+	"sync"
 	"testing"
 
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
@@ -161,5 +165,112 @@ func TestProbeStubReturnsErrUnsupported(t *testing.T) {
 	b := New()
 	if err := b.Probe(context.Background()); !errors.Is(err, errors.ErrUnsupported) {
 		t.Fatalf("Probe on stub: want errors.ErrUnsupported, got %v", err)
+	}
+}
+
+// TestPutRetriesOn503ThenSucceeds pins US-006 retry behaviour: the SDK's
+// adaptive retryer must absorb 503 SlowDown responses on the first two
+// PutObject attempts and surface only the third (200) success to the
+// gateway. No real network — uses an in-process http.RoundTripper that
+// replays a fixed response sequence.
+func TestPutRetriesOn503ThenSucceeds(t *testing.T) {
+	ctx := context.Background()
+
+	seq := &sequenceTransport{
+		responses: []responseFn{
+			slowDownResponse,
+			slowDownResponse,
+			putObjectSuccessResponse,
+		},
+	}
+	cfg := Config{
+		Bucket:         "strata-test",
+		Region:         "us-east-1",
+		Endpoint:       "http://example.invalid",
+		AccessKey:      "ak",
+		SecretKey:      "sk",
+		ForcePathStyle: true,
+		SkipProbe:      true,
+		HTTPClient:     &http.Client{Transport: seq},
+		// MaxRetries left at default (5) — 3 attempts fits.
+	}
+
+	b, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	res, err := b.Put(ctx, "k", strings.NewReader("payload"), 7)
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if res.ETag == "" {
+		t.Fatalf("etag empty in result")
+	}
+	if got := seq.count(); got != 3 {
+		t.Fatalf("transport calls: want 3, got %d", got)
+	}
+}
+
+// responseFn synthesises an http.Response for the test sequence.
+type responseFn func(req *http.Request) *http.Response
+
+// sequenceTransport returns the i-th synthetic response on the i-th
+// RoundTrip. Surplus calls return an error so over-retry surfaces.
+type sequenceTransport struct {
+	mu        sync.Mutex
+	responses []responseFn
+	idx       int
+}
+
+func (s *sequenceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body != nil {
+		_, _ = io.Copy(io.Discard, req.Body)
+		_ = req.Body.Close()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.idx >= len(s.responses) {
+		return nil, errors.New("sequenceTransport: out of responses")
+	}
+	resp := s.responses[s.idx](req)
+	s.idx++
+	return resp, nil
+}
+
+func (s *sequenceTransport) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.idx
+}
+
+func slowDownResponse(req *http.Request) *http.Response {
+	body := `<?xml version="1.0" encoding="UTF-8"?><Error><Code>SlowDown</Code><Message>backend asks the client to slow down</Message><RequestId>test</RequestId><HostId>test</HostId></Error>`
+	return &http.Response{
+		Status:        "503 Slow Down",
+		StatusCode:    http.StatusServiceUnavailable,
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        http.Header{"Content-Type": []string{"application/xml"}},
+		Body:          io.NopCloser(strings.NewReader(body)),
+		ContentLength: int64(len(body)),
+		Request:       req,
+	}
+}
+
+func putObjectSuccessResponse(req *http.Request) *http.Response {
+	h := http.Header{}
+	h.Set("ETag", `"abc123"`)
+	return &http.Response{
+		Status:        "200 OK",
+		StatusCode:    http.StatusOK,
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        h,
+		Body:          io.NopCloser(strings.NewReader("")),
+		ContentLength: 0,
+		Request:       req,
 	}
 }

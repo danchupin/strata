@@ -83,6 +83,18 @@ func TestS3BackendValidateNonNegativeNumeric(t *testing.T) {
 			t.Fatal("want error for negative upload concurrency")
 		}
 	})
+	t.Run("negative max retries", func(t *testing.T) {
+		c := S3BackendConfig{Bucket: "b", Region: "r", MaxRetries: -1}
+		if err := c.validate(); err == nil {
+			t.Fatal("want error for negative max retries")
+		}
+	})
+	t.Run("negative op timeout secs", func(t *testing.T) {
+		c := S3BackendConfig{Bucket: "b", Region: "r", OpTimeoutSecs: -1}
+		if err := c.validate(); err == nil {
+			t.Fatal("want error for negative op timeout secs")
+		}
+	})
 	t.Run("zero numerics OK (defaults applied at Open)", func(t *testing.T) {
 		c := S3BackendConfig{Bucket: "b", Region: "r"}
 		if err := c.validate(); err != nil {
@@ -124,6 +136,30 @@ func TestLoadAcceptsS3DataBackend(t *testing.T) {
 	}
 	if cfg.S3Backend.AccessKey != "ak" || cfg.S3Backend.SecretKey != "sk" {
 		t.Fatalf("creds: want ak/sk, got %q/%q", cfg.S3Backend.AccessKey, cfg.S3Backend.SecretKey)
+	}
+}
+
+// TestLoadAcceptsS3RetryAndTimeoutEnvs pins US-006 env-var wiring:
+// STRATA_S3_BACKEND_MAX_RETRIES + STRATA_S3_BACKEND_OP_TIMEOUT_SECS
+// flow into S3BackendConfig.MaxRetries / OpTimeoutSecs and survive
+// validate(). Zero/unset still loads cleanly (defaults applied at
+// s3.Open).
+func TestLoadAcceptsS3RetryAndTimeoutEnvs(t *testing.T) {
+	t.Setenv("STRATA_DATA_BACKEND", "s3")
+	t.Setenv("STRATA_S3_BACKEND_BUCKET", "strata-backend")
+	t.Setenv("STRATA_S3_BACKEND_REGION", "us-east-1")
+	t.Setenv("STRATA_S3_BACKEND_MAX_RETRIES", "9")
+	t.Setenv("STRATA_S3_BACKEND_OP_TIMEOUT_SECS", "45")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.S3Backend.MaxRetries != 9 {
+		t.Fatalf("max_retries: want 9, got %d", cfg.S3Backend.MaxRetries)
+	}
+	if cfg.S3Backend.OpTimeoutSecs != 45 {
+		t.Fatalf("op_timeout_secs: want 45, got %d", cfg.S3Backend.OpTimeoutSecs)
 	}
 }
 

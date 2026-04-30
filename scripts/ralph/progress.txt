@@ -130,6 +130,74 @@ Cycle: ralph/s3-over-s3-backend
 - Koanf env-var loading is testable via t.Setenv — Load() reads from
   os.Getenv at each call, so per-test env override works without
   affecting other tests in the same process.
+- SDK retry config: awsconfig.WithRetryMode(aws.RetryModeAdaptive) +
+  awsconfig.WithRetryMaxAttempts(N) is the v2-canonical way to enable
+  adaptive retries with a custom cap. Default retryable codes (5xx +
+  429 + connection errors) match PRD US-006 — no need for a custom
+  IsErrorRetryable. RetryMode constants live in github.com/aws/aws-
+  sdk-go-v2/aws.
+- SDK retry log lines are emitted at Debug classification (see
+  aws-sdk-go-v2 v1.41.5 aws/retry/middleware.go:219). To honour
+  US-006's "WARN" requirement without a full custom retryer, wrap
+  o.Logger with a thin filter that re-emits any "retrying request"
+  format-prefixed line through slog.Warn. The line carries
+  service+operation+attempt; delay is NOT in this format string —
+  AC partial on the delay detail.
+- Per-op timeout pattern: opCtx + uploadCtx helper methods on Backend
+  centralise the WithTimeout/WithCancel choice. Get/GetRange must
+  NOT defer cancel — body read happens AFTER the SDK call returns
+  and is bound to the same ctx; use cancelOnCloseReader so Body.Close
+  releases the context (and the per-op timer). Side effect: opTimeout
+  bounds the entire Get lifecycle including body streaming, so
+  operators with slow-link large GETs should bump
+  STRATA_S3_BACKEND_OP_TIMEOUT_SECS.
+- Synthetic SDK responses for retry tests: an http.RoundTripper that
+  replays a fixed []responseFn sequence is enough to exercise the
+  SDK retry middleware without MinIO. Return raw 503 with a SlowDown
+  XML body; the SDK's standard retryable-status set covers it.
+  Default adaptive backoff schedules ~3 s between attempts, so a
+  three-attempt test runs in ~6 s wall-clock.
+
+## 2026-04-30 — US-006
+- Added Config.MaxRetries (default 5), Config.OpTimeout (default 30 s),
+  Config.MultipartTimeout (default 10 min) on internal/data/s3.Config.
+- Open wires SDK adaptive retry mode + max attempts via
+  awsconfig.WithRetryMode + WithRetryMaxAttempts. Client gets
+  ClientLogMode|=aws.LogRetries + retryWarnLogger wrapping the
+  default aws.Logger so retry attempt lines (service + operation +
+  attempt) surface at slog.Warn instead of SDK Debug. Backend struct
+  carries opTimeout + multipartTimeout for per-op deadline plumbing.
+- New helpers Backend.opCtx + Backend.uploadCtx wrap parent ctx with
+  the appropriate WithTimeout. Get/GetRange detach the cancel via a
+  new cancelOnCloseReader (body Close releases the context); Put uses
+  uploadCtx with deferred cancel; DeleteObject/DeleteBatch/Probe use
+  opCtx with deferred cancel.
+- New env vars STRATA_S3_BACKEND_MAX_RETRIES (s3_backend.max_retries
+  int) and STRATA_S3_BACKEND_OP_TIMEOUT_SECS (s3_backend.op_timeout
+  _secs int) in internal/config; validate() rejects negatives.
+  Documented in README.md env-var table.
+- Unit test TestPutRetriesOn503ThenSucceeds drives the SDK retry path
+  with an in-process http.RoundTripper returning SlowDown, SlowDown,
+  200; asserts Put succeeds and transport is invoked exactly 3 times.
+- Files: internal/data/s3/{backend.go,config.go,backend_test.go},
+  internal/config/{config.go,config_test.go}, README.md, go.mod, go.sum.
+- **Learnings:**
+  - aws-sdk-go-v2's retry middleware logs at Debug, not Warn. Aligning
+    with operator-facing log conventions requires a thin Logger
+    wrapper that filters on the "retrying request" format prefix —
+    full attempt-aware middleware is overkill for the AC.
+  - Get/GetRange cannot defer cancel(): the SDK's response.Body is
+    bound to the request ctx, so cancel-on-return aborts the
+    streaming read. Transferring cancel ownership to a wrapping
+    ReadCloser fixes it without requiring caller cooperation.
+  - Per-op timeout for streaming Gets is necessarily a body-read
+    ceiling, not a request-setup ceiling. Document via the env-var
+    description so operators size it for the worst-case body
+    duration, not the headers RTT.
+  - The SDK's default retryable-status set already matches PRD US-006
+    (5xx, 429, network) and excludes 4xx auth/not-found — no custom
+    IsErrorRetryable required.
+---
 
 ## 2026-04-30 — US-001
 - Added internal/data/s3 package skeleton with stub Backend that satisfies

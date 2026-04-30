@@ -16,13 +16,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
+	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go/logging"
 
 	"github.com/danchupin/strata/internal/data"
 )
@@ -31,9 +35,11 @@ import (
 // stub-only (every method returns errors.ErrUnsupported); a Backend built
 // via Open carries a live S3 client + multipart Uploader.
 type Backend struct {
-	bucket   string
-	client   *awss3.Client
-	uploader *manager.Uploader
+	bucket           string
+	client           *awss3.Client
+	uploader         *manager.Uploader
+	opTimeout        time.Duration
+	multipartTimeout time.Duration
 }
 
 // New constructs a stub Backend with no live S3 client. Every method
@@ -54,8 +60,27 @@ func Open(ctx context.Context, cfg Config) (*Backend, error) {
 		return nil, fmt.Errorf("s3: region required")
 	}
 
+	maxRetries := cfg.MaxRetries
+	if maxRetries <= 0 {
+		maxRetries = DefaultMaxRetries
+	}
+	opTimeout := cfg.OpTimeout
+	if opTimeout <= 0 {
+		opTimeout = DefaultOpTimeout
+	}
+	multipartTimeout := cfg.MultipartTimeout
+	if multipartTimeout <= 0 {
+		multipartTimeout = DefaultMultipartTimeout
+	}
+
 	loadOpts := []func(*awsconfig.LoadOptions) error{
 		awsconfig.WithRegion(cfg.Region),
+		// Adaptive retry mode rate-limits client-side under sustained
+		// 503 SlowDown / 429 TooManyRequests pressure (US-006). The
+		// SDK's standard retryable-status set covers 5xx + 429 + network
+		// errors and excludes 4xx auth/not-found — matches AC.
+		awsconfig.WithRetryMode(aws.RetryModeAdaptive),
+		awsconfig.WithRetryMaxAttempts(maxRetries),
 	}
 	if cfg.AccessKey != "" && cfg.SecretKey != "" {
 		loadOpts = append(loadOpts, awsconfig.WithCredentialsProvider(
@@ -77,6 +102,13 @@ func Open(ctx context.Context, cfg Config) (*Backend, error) {
 			o.BaseEndpoint = &endpoint
 		}
 		o.UsePathStyle = cfg.ForcePathStyle
+		// LogRetries makes the SDK emit a per-retry log line carrying
+		// service + operation + attempt number (US-006). Wrap the
+		// SDK's logger to promote those lines to slog Warn level so
+		// they reach the operator's standard log pipeline rather than
+		// hiding at SDK Debug.
+		o.ClientLogMode |= aws.LogRetries
+		o.Logger = retryWarnLogger{inner: o.Logger}
 	})
 
 	partSize := cfg.PartSize
@@ -97,9 +129,11 @@ func Open(ctx context.Context, cfg Config) (*Backend, error) {
 	})
 
 	b := &Backend{
-		bucket:   cfg.Bucket,
-		client:   client,
-		uploader: uploader,
+		bucket:           cfg.Bucket,
+		client:           client,
+		uploader:         uploader,
+		opTimeout:        opTimeout,
+		multipartTimeout: multipartTimeout,
 	}
 
 	if !cfg.SkipProbe {
@@ -127,11 +161,13 @@ func (b *Backend) Probe(ctx context.Context) error {
 	}
 	bucket := b.bucket
 	key := ProbeKey
-	out, err := b.client.PutObject(ctx, &awss3.PutObjectInput{
+	putCtx, putCancel := b.opCtx(ctx)
+	out, err := b.client.PutObject(putCtx, &awss3.PutObjectInput{
 		Bucket: &bucket,
 		Key:    &key,
 		Body:   bytes.NewReader(nil),
 	})
+	putCancel()
 	if err != nil {
 		return fmt.Errorf("s3: probe-put bucket=%s key=%s: %w", bucket, key, err)
 	}
@@ -143,10 +179,33 @@ func (b *Backend) Probe(ctx context.Context) error {
 		v := *out.VersionId
 		del.VersionId = &v
 	}
-	if _, err := b.client.DeleteObject(ctx, del); err != nil {
+	delCtx, delCancel := b.opCtx(ctx)
+	defer delCancel()
+	if _, err := b.client.DeleteObject(delCtx, del); err != nil {
 		return fmt.Errorf("s3: probe-delete bucket=%s key=%s: %w", bucket, key, err)
 	}
 	return nil
+}
+
+// opCtx returns ctx wrapped with the per-op short timeout (US-006). Used
+// by Get / GetRange / DeleteObject / DeleteBatch / Probe sub-ops. When
+// b.opTimeout is zero (only possible on a stub Backend that never went
+// through Open) the parent context is returned unchanged.
+func (b *Backend) opCtx(parent context.Context) (context.Context, context.CancelFunc) {
+	if b.opTimeout <= 0 {
+		return context.WithCancel(parent)
+	}
+	return context.WithTimeout(parent, b.opTimeout)
+}
+
+// uploadCtx returns ctx wrapped with the multipart-upload deadline
+// (US-006). Used by Put which routes through manager.Uploader and may
+// span init + parts + complete on large objects.
+func (b *Backend) uploadCtx(parent context.Context) (context.Context, context.CancelFunc) {
+	if b.multipartTimeout <= 0 {
+		return context.WithCancel(parent)
+	}
+	return context.WithTimeout(parent, b.multipartTimeout)
 }
 
 // Compile-time assertion that *Backend satisfies data.Backend.
@@ -179,7 +238,9 @@ func (b *Backend) Put(ctx context.Context, oid string, r io.Reader, size int64) 
 	}
 	bucket := b.bucket
 	key := oid
-	out, err := b.uploader.Upload(ctx, &awss3.PutObjectInput{
+	upCtx, cancel := b.uploadCtx(ctx)
+	defer cancel()
+	out, err := b.uploader.Upload(upCtx, &awss3.PutObjectInput{
 		Bucket: &bucket,
 		Key:    &key,
 		Body:   r,
@@ -207,14 +268,16 @@ func (b *Backend) Get(ctx context.Context, oid string) (io.ReadCloser, error) {
 	}
 	bucket := b.bucket
 	key := oid
-	out, err := b.client.GetObject(ctx, &awss3.GetObjectInput{
+	opCtx, cancel := b.opCtx(ctx)
+	out, err := b.client.GetObject(opCtx, &awss3.GetObjectInput{
 		Bucket: &bucket,
 		Key:    &key,
 	})
 	if err != nil {
+		cancel()
 		return nil, mapGetError(oid, err)
 	}
-	return out.Body, nil
+	return &cancelOnCloseReader{ReadCloser: out.Body, cancel: cancel}, nil
 }
 
 // GetRange streams [off, off+length) of the backend object body for oid.
@@ -234,15 +297,53 @@ func (b *Backend) GetRange(ctx context.Context, oid string, off, length int64) (
 	bucket := b.bucket
 	key := oid
 	rangeHeader := fmt.Sprintf("bytes=%d-%d", off, off+length-1)
-	out, err := b.client.GetObject(ctx, &awss3.GetObjectInput{
+	opCtx, cancel := b.opCtx(ctx)
+	out, err := b.client.GetObject(opCtx, &awss3.GetObjectInput{
 		Bucket: &bucket,
 		Key:    &key,
 		Range:  &rangeHeader,
 	})
 	if err != nil {
+		cancel()
 		return nil, mapGetError(oid, err)
 	}
-	return out.Body, nil
+	return &cancelOnCloseReader{ReadCloser: out.Body, cancel: cancel}, nil
+}
+
+// retryWarnLogger wraps the SDK's aws.Logger so retry attempt lines
+// (emitted by the SDK's retry middleware at Debug) surface in our
+// slog pipeline at Warn — matching US-006 AC. Non-retry SDK log
+// lines pass through unchanged. The retry message format is
+// `retrying request <service>/<operation>, attempt N` per
+// aws/retry/middleware.go; we filter on that prefix and re-emit.
+type retryWarnLogger struct {
+	inner logging.Logger
+}
+
+func (l retryWarnLogger) Logf(c logging.Classification, format string, args ...any) {
+	if strings.HasPrefix(format, "retrying request") {
+		slog.Warn("s3 backend retry: " + fmt.Sprintf(format, args...))
+		return
+	}
+	if l.inner != nil {
+		l.inner.Logf(c, format, args...)
+	}
+}
+
+// cancelOnCloseReader pairs an SDK response Body with the per-op
+// context.CancelFunc so the caller's Close() releases the context. The
+// per-op timeout (US-006) is still ticking until the body is closed —
+// production callers should size STRATA_S3_BACKEND_OP_TIMEOUT_SECS for
+// the worst-case body-read deadline, not just the SDK round-trip.
+type cancelOnCloseReader struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnCloseReader) Close() error {
+	err := c.ReadCloser.Close()
+	c.cancel()
+	return err
 }
 
 // mapGetError translates SDK errors that callers want to branch on into
@@ -300,7 +401,9 @@ func (b *Backend) DeleteObject(ctx context.Context, oid, versionID string) error
 		v := versionID
 		in.VersionId = &v
 	}
-	if _, err := b.client.DeleteObject(ctx, in); err != nil {
+	opCtx, cancel := b.opCtx(ctx)
+	defer cancel()
+	if _, err := b.client.DeleteObject(opCtx, in); err != nil {
 		var noSuchKey *s3types.NoSuchKey
 		if errors.As(err, &noSuchKey) {
 			return nil
@@ -343,10 +446,12 @@ func (b *Backend) DeleteBatch(ctx context.Context, refs []ObjectRef) ([]DeleteFa
 				ids[i].VersionId = &v
 			}
 		}
-		out, err := b.client.DeleteObjects(ctx, &awss3.DeleteObjectsInput{
+		opCtx, cancel := b.opCtx(ctx)
+		out, err := b.client.DeleteObjects(opCtx, &awss3.DeleteObjectsInput{
 			Bucket: &bucket,
 			Delete: &s3types.Delete{Objects: ids, Quiet: &quiet},
 		})
+		cancel()
 		if err != nil {
 			return failures, fmt.Errorf("s3: delete batch [%d:%d]: %w", start, end, err)
 		}

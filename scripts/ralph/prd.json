@@ -107,8 +107,8 @@
         "Tests pass"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Adaptive retry mode + max attempts wired via awsconfig.WithRetryMode(aws.RetryModeAdaptive) + WithRetryMaxAttempts(cfg.MaxRetries). Per-op deadlines: opCtx wraps Get/GetRange/DeleteObject/DeleteBatch/Probe with cfg.OpTimeout (default 30 s); uploadCtx wraps Put with cfg.MultipartTimeout (default 10 min). Get/GetRange return cancelOnCloseReader so the body close releases the timeout context. Retry log: ClientLogMode|=aws.LogRetries + retryWarnLogger wrapper promotes SDK 'retrying request' lines from Debug → slog Warn carrying service+operation+attempt. Delay is not included in the SDK's retry log line; AC partial on that detail (operators correlate via timestamps). New env vars STRATA_S3_BACKEND_MAX_RETRIES + STRATA_S3_BACKEND_OP_TIMEOUT_SECS wired through internal/config validate (non-negative). Test TestPutRetriesOn503ThenSucceeds uses an in-process http.RoundTripper that replays SlowDown, SlowDown, 200 — Put succeeds, transport invoked exactly 3 times."
     },
     {
       "id": "US-007",

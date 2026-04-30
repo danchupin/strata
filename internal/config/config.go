@@ -61,6 +61,14 @@ type S3BackendConfig struct {
 	ForcePathStyle    bool   `koanf:"force_path_style"`
 	PartSize          int64  `koanf:"part_size"`
 	UploadConcurrency int    `koanf:"upload_concurrency"`
+	// MaxRetries caps total SDK attempts per request (US-006). Zero
+	// applies the s3 package default (5).
+	MaxRetries int `koanf:"max_retries"`
+	// OpTimeoutSecs is the small-op deadline in whole seconds (US-006).
+	// Zero applies the s3 package default (30 s). Multipart Put gets a
+	// separate 10-min ceiling that is not operator-tunable today —
+	// bump OpTimeoutSecs only when small-op latency runs hot.
+	OpTimeoutSecs int `koanf:"op_timeout_secs"`
 }
 
 type AuthConfig struct {
@@ -144,6 +152,8 @@ var envMap = map[string]string{
 	"STRATA_S3_BACKEND_FORCE_PATH_STYLE":   "s3_backend.force_path_style",
 	"STRATA_S3_BACKEND_PART_SIZE":          "s3_backend.part_size",
 	"STRATA_S3_BACKEND_UPLOAD_CONCURRENCY": "s3_backend.upload_concurrency",
+	"STRATA_S3_BACKEND_MAX_RETRIES":        "s3_backend.max_retries",
+	"STRATA_S3_BACKEND_OP_TIMEOUT_SECS":    "s3_backend.op_timeout_secs",
 	"STRATA_AUTH_MODE":                "auth.mode",
 	"STRATA_STATIC_CREDENTIALS":       "auth.static_credentials",
 	"STRATA_LIFECYCLE_INTERVAL":       "lifecycle.interval",
@@ -230,6 +240,12 @@ func (c *S3BackendConfig) validate() error {
 	}
 	if c.UploadConcurrency < 0 {
 		return fmt.Errorf("STRATA_S3_BACKEND_UPLOAD_CONCURRENCY must be non-negative (got %d)", c.UploadConcurrency)
+	}
+	if c.MaxRetries < 0 {
+		return fmt.Errorf("STRATA_S3_BACKEND_MAX_RETRIES must be non-negative (got %d)", c.MaxRetries)
+	}
+	if c.OpTimeoutSecs < 0 {
+		return fmt.Errorf("STRATA_S3_BACKEND_OP_TIMEOUT_SECS must be non-negative (got %d)", c.OpTimeoutSecs)
 	}
 	return nil
 }
