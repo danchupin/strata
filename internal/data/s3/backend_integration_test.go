@@ -3,10 +3,13 @@
 package s3_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
+	mathrand "math/rand"
 	"runtime"
 	"strings"
 	"testing"
@@ -17,6 +20,7 @@ import (
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	tcminio "github.com/testcontainers/testcontainers-go/modules/minio"
 
+	"github.com/danchupin/strata/internal/data"
 	s3backend "github.com/danchupin/strata/internal/data/s3"
 )
 
@@ -213,6 +217,166 @@ func TestPutAbortsOnContextCancel(t *testing.T) {
 	}
 	if len(out.Uploads) != 0 {
 		t.Fatalf("expected zero in-progress multipart uploads after cancel, got %d", len(out.Uploads))
+	}
+}
+
+// TestGetRangeReads1KiBFrom100MiB exercises US-003 against MinIO: upload
+// a 100 MiB object, then GetRange a 1 KiB slice from the middle and
+// verify the bytes match exactly. The full body is never loaded into
+// memory — body is consumed via io.ReadFull on the SDK's response stream.
+func TestGetRangeReads1KiBFrom100MiB(t *testing.T) {
+	ctx := context.Background()
+
+	const (
+		username = "minioadmin"
+		password = "minioadmin"
+		bucket   = "strata-test-getrange"
+		key      = "100m-key"
+		size     = int64(100 * 1024 * 1024)
+		offset   = int64(50 * 1024 * 1024)
+		length   = int64(1024)
+	)
+
+	container, err := tcminio.Run(ctx, "minio/minio:latest",
+		tcminio.WithUsername(username),
+		tcminio.WithPassword(password),
+	)
+	if err != nil {
+		t.Fatalf("start minio: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := container.Terminate(context.Background()); err != nil {
+			t.Logf("terminate: %v", err)
+		}
+	})
+
+	hostPort, err := container.ConnectionString(ctx)
+	if err != nil {
+		t.Fatalf("connection string: %v", err)
+	}
+	endpoint := hostPort
+	if !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
+		endpoint = "http://" + endpoint
+	}
+
+	if err := createBucket(ctx, endpoint, username, password, bucket); err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+
+	cfg := s3backend.Config{
+		Endpoint:       endpoint,
+		Region:         "us-east-1",
+		Bucket:         bucket,
+		AccessKey:      username,
+		SecretKey:      password,
+		ForcePathStyle: true,
+		PartSize:       5 * 1024 * 1024,
+	}
+	b, err := s3backend.Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("open backend: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+
+	// Build a deterministic body so we can verify the range bytes
+	// exactly. mathrand seeded by zero produces a reproducible stream.
+	body := make([]byte, size)
+	prng := mathrand.New(mathrand.NewSource(1))
+	if _, err := io.ReadFull(prng, body); err != nil {
+		t.Fatalf("seed body: %v", err)
+	}
+
+	if _, err := b.Put(ctx, key, bytes.NewReader(body), size); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	rc, err := b.GetRange(ctx, key, offset, length)
+	if err != nil {
+		t.Fatalf("get range: %v", err)
+	}
+	t.Cleanup(func() { _ = rc.Close() })
+
+	got := make([]byte, length)
+	n, err := io.ReadFull(rc, got)
+	if err != nil {
+		t.Fatalf("read body: %v (read %d bytes)", err, n)
+	}
+	if int64(n) != length {
+		t.Fatalf("read length: want %d, got %d", length, n)
+	}
+
+	want := body[offset : offset+length]
+	if !bytes.Equal(got, want) {
+		t.Fatalf("range bytes mismatch: first 16 want=%x got=%x", want[:16], got[:16])
+	}
+
+	// Drain to confirm the SDK does not pad the response with extra
+	// bytes beyond the requested range.
+	tail, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("drain tail: %v", err)
+	}
+	if len(tail) != 0 {
+		t.Fatalf("expected zero tail bytes after %d, got %d", length, len(tail))
+	}
+}
+
+// TestGetReturnsErrNotFoundForMissingKey pins the US-003 NoSuchKey →
+// data.ErrNotFound mapping so the gateway can surface 404 NoSuchKey.
+func TestGetReturnsErrNotFoundForMissingKey(t *testing.T) {
+	ctx := context.Background()
+
+	const (
+		username = "minioadmin"
+		password = "minioadmin"
+		bucket   = "strata-test-notfound"
+	)
+
+	container, err := tcminio.Run(ctx, "minio/minio:latest",
+		tcminio.WithUsername(username),
+		tcminio.WithPassword(password),
+	)
+	if err != nil {
+		t.Fatalf("start minio: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := container.Terminate(context.Background()); err != nil {
+			t.Logf("terminate: %v", err)
+		}
+	})
+
+	hostPort, err := container.ConnectionString(ctx)
+	if err != nil {
+		t.Fatalf("connection string: %v", err)
+	}
+	endpoint := hostPort
+	if !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
+		endpoint = "http://" + endpoint
+	}
+
+	if err := createBucket(ctx, endpoint, username, password, bucket); err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+
+	cfg := s3backend.Config{
+		Endpoint:       endpoint,
+		Region:         "us-east-1",
+		Bucket:         bucket,
+		AccessKey:      username,
+		SecretKey:      password,
+		ForcePathStyle: true,
+	}
+	b, err := s3backend.Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("open backend: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+
+	if _, err := b.Get(ctx, "nope"); !errors.Is(err, data.ErrNotFound) {
+		t.Fatalf("Get missing: want data.ErrNotFound, got %v", err)
+	}
+	if _, err := b.GetRange(ctx, "nope", 0, 16); !errors.Is(err, data.ErrNotFound) {
+		t.Fatalf("GetRange missing: want data.ErrNotFound, got %v", err)
 	}
 }
 

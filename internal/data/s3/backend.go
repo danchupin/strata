@@ -21,6 +21,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 
 	"github.com/danchupin/strata/internal/data"
 )
@@ -144,6 +145,65 @@ func (b *Backend) Put(ctx context.Context, oid string, r io.Reader, size int64) 
 		res.VersionID = *out.VersionID
 	}
 	return res, nil
+}
+
+// Get streams the full backend object body for oid back to the caller.
+// Returned ReadCloser wraps the SDK's HTTP response body — caller MUST
+// Close. Backend NoSuchKey is mapped to data.ErrNotFound so the gateway
+// surfaces a 404 NoSuchKey instead of a 500.
+func (b *Backend) Get(ctx context.Context, oid string) (io.ReadCloser, error) {
+	if b.client == nil {
+		return nil, errors.ErrUnsupported
+	}
+	bucket := b.bucket
+	key := oid
+	out, err := b.client.GetObject(ctx, &awss3.GetObjectInput{
+		Bucket: &bucket,
+		Key:    &key,
+	})
+	if err != nil {
+		return nil, mapGetError(oid, err)
+	}
+	return out.Body, nil
+}
+
+// GetRange streams [off, off+length) of the backend object body for oid.
+// Issues GetObject with Range: bytes=<off>-<off+length-1>. Returned
+// ReadCloser wraps the SDK's HTTP response body — caller MUST Close.
+// Backend NoSuchKey is mapped to data.ErrNotFound.
+func (b *Backend) GetRange(ctx context.Context, oid string, off, length int64) (io.ReadCloser, error) {
+	if b.client == nil {
+		return nil, errors.ErrUnsupported
+	}
+	if length <= 0 {
+		return nil, fmt.Errorf("s3: range length must be positive, got %d", length)
+	}
+	if off < 0 {
+		return nil, fmt.Errorf("s3: range offset must be non-negative, got %d", off)
+	}
+	bucket := b.bucket
+	key := oid
+	rangeHeader := fmt.Sprintf("bytes=%d-%d", off, off+length-1)
+	out, err := b.client.GetObject(ctx, &awss3.GetObjectInput{
+		Bucket: &bucket,
+		Key:    &key,
+		Range:  &rangeHeader,
+	})
+	if err != nil {
+		return nil, mapGetError(oid, err)
+	}
+	return out.Body, nil
+}
+
+// mapGetError translates SDK errors that callers want to branch on into
+// the data package's sentinels. Today only NoSuchKey is mapped; other
+// errors are wrapped verbatim.
+func mapGetError(oid string, err error) error {
+	var noSuchKey *s3types.NoSuchKey
+	if errors.As(err, &noSuchKey) {
+		return fmt.Errorf("s3: get %s: %w", oid, data.ErrNotFound)
+	}
+	return fmt.Errorf("s3: get %s: %w", oid, err)
 }
 
 func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*data.Manifest, error) {

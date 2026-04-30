@@ -6,6 +6,8 @@ import (
 	"errors"
 	"testing"
 
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+
 	"github.com/danchupin/strata/internal/data"
 )
 
@@ -42,6 +44,39 @@ func TestStubPutReturnsErrUnsupported(t *testing.T) {
 	_, err := b.Put(context.Background(), "k", bytes.NewReader(nil), 0)
 	if !errors.Is(err, errors.ErrUnsupported) {
 		t.Fatalf("Put: want errors.ErrUnsupported, got %v", err)
+	}
+}
+
+// TestStubGetReturnsErrUnsupported guards US-003: a stub Backend (no
+// Open) must surface errors.ErrUnsupported on Get / GetRange — never
+// silently succeed.
+func TestStubGetReturnsErrUnsupported(t *testing.T) {
+	b := New()
+	ctx := context.Background()
+
+	if _, err := b.Get(ctx, "k"); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("Get: want errors.ErrUnsupported, got %v", err)
+	}
+	if _, err := b.GetRange(ctx, "k", 0, 1); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("GetRange: want errors.ErrUnsupported, got %v", err)
+	}
+}
+
+// TestGetRangeValidatesArguments pins US-003 input validation: negative
+// offset or non-positive length is a programmer error and must fail
+// before any network call.
+func TestGetRangeValidatesArguments(t *testing.T) {
+	b := &Backend{bucket: "b", client: &awss3.Client{}}
+	ctx := context.Background()
+
+	if _, err := b.GetRange(ctx, "k", -1, 1); err == nil {
+		t.Fatal("GetRange with negative offset: want error, got nil")
+	}
+	if _, err := b.GetRange(ctx, "k", 0, 0); err == nil {
+		t.Fatal("GetRange with zero length: want error, got nil")
+	}
+	if _, err := b.GetRange(ctx, "k", 0, -5); err == nil {
+		t.Fatal("GetRange with negative length: want error, got nil")
 	}
 }
 

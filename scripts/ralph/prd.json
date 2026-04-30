@@ -52,8 +52,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Introduced data.ErrNotFound sentinel (internal/data/errors.go) — first error sentinel in the data package; future GetChunks / future delete paths can reuse it. Map via errors.As(*s3types.NoSuchKey) — the SDK does NOT surface NoSuchKey via the smithy.GenericAPIError code field for GetObject; only the typed error works."
     },
     {
       "id": "US-004",

@@ -88,6 +88,11 @@ Cycle: ralph/s3-over-s3-backend
   bound — use a tightened test config (PartSize=5 MiB, Concurrency=2 →
   10 MiB pool) to keep the assertion provable. Don't rely on HeapAlloc
   delta — same problem (sync.Pool keeps the buffers live).
+- data.ErrNotFound (internal/data/errors.go) is the package-wide
+  sentinel for "object missing". Backend implementations wrap with %w
+  (`fmt.Errorf("...: %w", data.ErrNotFound)`); callers use errors.Is.
+  Map SDK-typed errors via errors.As on the concrete type
+  (*s3types.NoSuchKey for the s3 backend) — not via string code match.
 
 ## 2026-04-30 — US-001
 - Added internal/data/s3 package skeleton with stub Backend that satisfies
@@ -115,6 +120,49 @@ Cycle: ralph/s3-over-s3-backend
     feature/s3/transfermanager. PRD names manager; stick with PRD.
     Re-evaluate at US-002 when the migration cost is just a single import
     swap.
+---
+
+## 2026-04-30 — US-003
+- Added Backend.Get(ctx, oid) and Backend.GetRange(ctx, oid, off, length)
+  on internal/data/s3. Both wrap awss3.GetObject; GetRange formats
+  Range: bytes=<off>-<off+length-1>. Body returned is the SDK's response
+  Body — caller MUST Close.
+- Introduced data.ErrNotFound sentinel in new internal/data/errors.go;
+  s3 backend maps *s3types.NoSuchKey via errors.As → wrapped
+  data.ErrNotFound so the gateway can surface 404 NoSuchKey instead of
+  500 in US-009.
+- Stub Backend (New(), no client) returns errors.ErrUnsupported on Get /
+  GetRange — same pattern as Put. Argument validation (negative offset,
+  non-positive length) fails fast before any network call.
+- Unit tests: TestStubGetReturnsErrUnsupported,
+  TestGetRangeValidatesArguments. Integration tests (build tag
+  `integration`): TestGetRangeReads1KiBFrom100MiB (uploads 100 MiB seeded
+  via math/rand for reproducibility, GetRange middle 1 KiB, asserts
+  bytes match exactly + tail empty), TestGetReturnsErrNotFoundForMissingKey
+  (Get + GetRange against a missing key both return data.ErrNotFound).
+- Files: internal/data/errors.go (new), internal/data/s3/backend.go,
+  internal/data/s3/backend_test.go,
+  internal/data/s3/backend_integration_test.go.
+- **Learnings:**
+  - aws-sdk-go-v2/service/s3/types.NoSuchKey is the typed error for
+    GetObject 404; map via `var nsk *s3types.NoSuchKey; errors.As(err,
+    &nsk)`. Don't try to match on smithy.GenericAPIError.Code — only the
+    typed error path is reliable for s3 errors that have a dedicated
+    type.
+  - The SDK's GetObject Range header is plain `bytes=<a>-<b>` — no
+    leading "Range:". The aws-sdk-go-v2 sets the header from the input
+    Range string verbatim.
+  - For deterministic byte-level integration tests, seed math/rand with
+    a fixed seed (NewSource(1)) and ReadFull into a buffer — crypto/rand
+    does not let you replay the same bytes. Stick to crypto/rand only
+    when the test cares about uniqueness, not equality.
+  - Local dev on Mac via Lima Docker context cannot mount the docker
+    socket into a sibling container (testcontainers ryuk fails with
+    "mkdir docker.sock: operation not supported"). CI runners with
+    plain dockerd handle the integration tests correctly. No code
+    change — just don't expect `make test-integration` to work on Mac
+    without Docker Desktop.
+
 ---
 
 ## 2026-04-30 — US-002
