@@ -80,3 +80,35 @@ type LifecycleRule struct {
 	ExpirationDays            int
 	AbortIncompleteUploadDays int
 }
+
+// CORSBackend is the optional capability surface for data backends that
+// support a native bucket-CORS protocol (US-015 S3-over-S3). The gateway
+// type-asserts at every PutBucketCORS / GetBucketCORS / DeleteBucketCORS
+// entry-point and skips translation when the assertion fails — rados/memory
+// backends keep CORS purely in the meta layer.
+//
+// Strata-stored CORS is the source of truth for the Strata wire response;
+// the backend mirror exists so preflight OPTIONS requests against
+// presigned-URL responses (US-016) hit the backend with the right rules.
+// On GetBackendCORS conflicts (same rule ID), Strata's stored config wins
+// at the gateway-merge layer.
+type CORSBackend interface {
+	PutBackendCORS(ctx context.Context, rules []CORSRule) error
+	GetBackendCORS(ctx context.Context) ([]CORSRule, error)
+	DeleteBackendCORS(ctx context.Context) error
+}
+
+// CORSRule is the backend-translation input for one bucket CORS rule. The
+// shape mirrors S3's CORSRule directly so translation is field-for-field;
+// the empty string ID is allowed (S3 accepts unnamed rules).
+//
+// MaxAgeSeconds == 0 means the backend uses its default (browsers cache the
+// preflight result for the request's lifetime).
+type CORSRule struct {
+	ID             string
+	AllowedMethods []string
+	AllowedOrigins []string
+	AllowedHeaders []string
+	ExposeHeaders  []string
+	MaxAgeSeconds  int
+}

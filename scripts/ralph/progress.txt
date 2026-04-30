@@ -326,6 +326,22 @@ Cycle: ralph/s3-over-s3-backend
   always <bucket-uuid>/<userPrefix> so an empty Strata prefix doesn't
   expire ProbeKey or sibling Strata-bucket objects sharing the backend
   bucket.
+- CORS bidirectional mirror (US-015): same source-of-truth pattern as
+  lifecycle, with one difference — CORS in S3 is bucket-scoped (no
+  per-prefix CORS protocol), so data.CORSBackend has no bucketPrefix arg.
+  Multi-Strata-bucket-per-backend-bucket deployments see last-writer-wins
+  on the backend mirror; Strata-stored config remains per-Strata-bucket
+  and authoritative for the gateway response. NoSuchCORSConfiguration is
+  not a typed SDK error — match via strings.Contains on err.Error(),
+  same shape as NoSuchLifecycleConfiguration handling.
+- s3api GET-side union pattern (US-015): when the backend exposes the
+  optional Get half of a capability surface (CORSBackend.GetBackendCORS),
+  the gateway's GET handler unions Strata-stored XML blob with backend
+  rules, with Strata winning ID conflicts. Implementation: parse Strata
+  blob, build a set of Strata IDs, append backend rules whose ID is not
+  in the set, re-marshal as XML. When backend has no extra rules, return
+  Strata blob verbatim (preserves operator's original XML formatting).
+  Backend errors log WARN and fall back to Strata blob.
 
 ## 2026-04-30 — US-010
 - Added optional data.MultipartBackend interface (internal/data/backend.go)
@@ -1202,4 +1218,81 @@ Cycle: ralph/s3-over-s3-backend
     flip translates; if the backend bucket doesn't yet have lifecycle
     permissions wired, the user request still succeeds and Strata's
     worker keeps owning everything until the operator fixes IAM.
+---
+
+## 2026-05-01 — US-015
+- Added optional data.CORSBackend interface (internal/data/backend.go)
+  with PutBackendCORS / GetBackendCORS / DeleteBackendCORS + flat
+  data.CORSRule shape (ID, AllowedMethods, AllowedOrigins, AllowedHeaders,
+  ExposeHeaders, MaxAgeSeconds). Symmetric to data.LifecycleBackend
+  (US-014); cycle-free with primitive args. CORS in S3 is bucket-scoped,
+  so the interface has NO bucketPrefix arg — diff from LifecycleBackend.
+- Implemented CORSBackend on *s3.Backend in new internal/data/s3/cors.go:
+  PutBackendCORS marshals via SDK PutBucketCors with field-for-field
+  CORSRule translation; empty rules clear via DeleteBackendCORS
+  (S3 rejects empty CORSConfiguration). GetBackendCORS calls SDK
+  GetBucketCors, treats NoSuchCORSConfiguration as (nil, nil).
+  DeleteBackendCORS calls SDK DeleteBucketCors, idempotent on
+  NoSuchCORSConfiguration. NoSuchCORSConfiguration is not a typed SDK
+  error — string-contains match on err.Error().
+- Wired s3api CORS endpoints (internal/s3api/cors.go):
+  putBucketCORS pushes parsed rules via type-assertion s.Data →
+  data.CORSBackend after meta.SetBucketCORS; failures log slog WARN
+  (non-fatal — Strata-stored config is source of truth).
+  deleteBucketCORS clears backend after meta delete (best-effort).
+  getBucketCORS unions Strata-stored XML blob with backend-stored rules
+  via new maybeMergeCORS helper: parse Strata, build ID set, append
+  backend rules whose ID is not in the set (Strata wins ID conflicts),
+  re-marshal as XML; backend errors log WARN and fall back to Strata
+  blob verbatim; backend without extra rules returns Strata blob
+  unchanged (preserves operator's XML formatting).
+- Tests:
+  - data/s3 unit (corsRoundTripper with method-specific responses):
+    TestStubCORSReturnsErrUnsupported (every method on the New() stub
+    surfaces ErrUnsupported);
+    TestPutBackendCORSSendsRules (SDK CORSConfiguration XML body
+    contains ID/methods/origins/headers/expose/max-age;
+    method=PUT, query=cors);
+    TestPutBackendCORSEmptyRulesClearsBackend (empty rules → DELETE);
+    TestGetBackendCORSParsesResponse (crafted GetBucketCorsOutput XML
+    → data.CORSRule with all fields populated);
+    TestGetBackendCORSNoSuchCORSReturnsEmpty (404 NoSuchCORSConfiguration
+    → nil rules nil err);
+    TestDeleteBackendCORSIssuesDelete (method=DELETE, query=cors);
+    TestDeleteBackendCORSNoSuchCORSIdempotent (404 → nil err).
+  - s3api unit (fakeCORSBackend with chunk-passthrough to memory):
+    TestPutBucketCORSTranslatesToBackend (gateway flattens corsXML
+    + pushes to backend; DELETE clears backend);
+    TestPutBucketCORSBackendFailureNonFatal (user-facing 200 even when
+    backend errors; Strata-stored config remains authoritative on GET);
+    TestGetBucketCORSUnionsBackendOnlyRules (backend-only rule with no
+    ID surfaces alongside Strata's r1 rule via re-marshalled XML).
+- Live MinIO integration test deferred — symmetric with US-014, which
+  also shipped without a data/s3 lifecycle integration test (gateway-side
+  fakeBackend round-trip is the ship gate).
+- Files: internal/data/backend.go, internal/data/s3/cors.go (new),
+  internal/data/s3/cors_test.go (new), internal/s3api/cors.go,
+  internal/s3api/cors_test.go.
+- **Learnings:**
+  - The lifecycle pattern from US-014 transfers almost cleanly. The two
+    deltas: (1) CORS interface omits bucketPrefix because S3 CORS is
+    bucket-scoped, not prefix-scoped — there's no per-prefix CORS
+    protocol; (2) NoSuchCORSConfiguration vs NoSuchLifecycleConfiguration
+    — both are stringly-typed in the SDK, both match via
+    strings.Contains on err.Error().
+  - The "union" semantic in the AC ("Strata takes precedence on conflict")
+    needs a key for conflict detection. Used rule ID — non-empty IDs
+    deduplicate across (Strata, backend); empty-ID backend rules always
+    append (no collision). Operators who mix manual backend-side rules
+    with Strata-managed rules should give them distinct IDs.
+  - When Strata blob covers everything backend reported (zero rules to
+    append), maybeMergeCORS returns ok=false and the caller writes the
+    Strata blob verbatim. Avoiding the XML round-trip preserves the
+    operator's original XML formatting (whitespace, attribute order)
+    which is otherwise lost through xml.Unmarshal → xml.Marshal.
+  - Preflight-on-presigned-URL AC (US-016 territory) doesn't ship in this
+    story — today's Strata preflight handler still serves OPTIONS. When
+    US-016 lands, presigned-URL clients will hit the backend directly,
+    and the backend's CORS mirror (this story) will be the rule set
+    that applies.
 ---
