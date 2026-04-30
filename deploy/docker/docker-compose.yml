@@ -21,6 +21,7 @@ services:
       start_period: 60s
 
   ceph:
+    profiles: ["ceph-backend"]
     build:
       context: ceph-bootstrap
       dockerfile: Dockerfile
@@ -43,6 +44,7 @@ services:
       start_period: 30s
 
   gc:
+    profiles: ["ceph-backend"]
     image: strata:ceph
     container_name: strata-gc
     entrypoint: ["/usr/local/bin/strata-gc"]
@@ -64,6 +66,7 @@ services:
     restart: unless-stopped
 
   lifecycle:
+    profiles: ["ceph-backend"]
     image: strata:ceph
     container_name: strata-lifecycle
     entrypoint: ["/usr/local/bin/strata-lifecycle"]
@@ -84,6 +87,7 @@ services:
     restart: unless-stopped
 
   gateway:
+    profiles: ["ceph-backend"]
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
@@ -106,7 +110,92 @@ services:
       - ../strata.toml:/etc/strata/strata.toml:ro
     restart: unless-stopped
 
+  # ---------------------------------------------------------------------------
+  # S3-over-S3 data backend stack (US-011)
+  # `docker compose --profile s3-backend up -d` brings up cassandra + minio +
+  # init-minio (one-shot bucket creator) + strata-s3. No Ceph services start.
+  # The two profiles share host port 9999 — only one runs at a time.
+  # ---------------------------------------------------------------------------
+  minio:
+    profiles: ["s3-backend"]
+    image: minio/minio:latest
+    container_name: strata-minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-stratauser}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-stratapass}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - strata-minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://127.0.0.1:9000/minio/health/ready >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  init-minio:
+    profiles: ["s3-backend"]
+    image: minio/mc:latest
+    container_name: strata-init-minio
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-stratauser}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-stratapass}
+      STRATA_S3_BACKEND_BUCKET: ${STRATA_S3_BACKEND_BUCKET:-strata-backend}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        mc alias set strata http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        mc mb --ignore-existing "strata/$$STRATA_S3_BACKEND_BUCKET"
+        echo "init-minio: bucket $$STRATA_S3_BACKEND_BUCKET ready"
+    restart: "no"
+
+  strata-s3:
+    profiles: ["s3-backend"]
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    image: strata:ceph
+    container_name: strata-s3
+    depends_on:
+      cassandra:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      init-minio:
+        condition: service_completed_successfully
+    environment:
+      STRATA_CONFIG_FILE: /etc/strata/strata.toml
+      STRATA_DATA_BACKEND: s3
+      STRATA_S3_BACKEND_ENDPOINT: http://minio:9000
+      STRATA_S3_BACKEND_FORCE_PATH_STYLE: "true"
+      STRATA_S3_BACKEND_REGION: us-east-1
+      STRATA_S3_BACKEND_BUCKET: ${STRATA_S3_BACKEND_BUCKET:-strata-backend}
+      STRATA_S3_BACKEND_ACCESS_KEY: ${MINIO_ROOT_USER:-stratauser}
+      STRATA_S3_BACKEND_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-stratapass}
+      STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-}
+      STRATA_STATIC_CREDENTIALS: ${STRATA_STATIC_CREDENTIALS:-}
+    ports:
+      - "9999:9000"
+    volumes:
+      - ../strata.toml:/etc/strata/strata.toml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://127.0.0.1:9000/readyz >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
 volumes:
   strata-cassandra-data:
   strata-ceph-etc:
   strata-ceph-data:
+  strata-minio-data:

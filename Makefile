@@ -1,13 +1,18 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
+COMPOSE_CEPH := $(COMPOSE) --profile ceph-backend
+COMPOSE_S3 := $(COMPOSE) --profile s3-backend
 
-.PHONY: build build-ceph vet test up up-all down wait-cassandra wait-ceph ceph-pool run-memory run-cassandra run-gateway smoke clean
+.PHONY: build build-ceph vet test up up-all up-s3-backend down wait-cassandra wait-ceph wait-minio wait-strata-s3 ceph-pool run-memory run-cassandra run-gateway smoke smoke-s3-backend clean
 
 build:
 	go build ./...
 
 build-ceph:
-	$(COMPOSE) build gateway
+	$(COMPOSE_CEPH) build gateway
+
+build-s3-backend:
+	$(COMPOSE_S3) build strata-s3
 
 vet:
 	go vet ./...
@@ -38,10 +43,16 @@ up:
 	$(COMPOSE) up -d cassandra
 
 up-all:
-	$(COMPOSE) up -d cassandra ceph gateway
+	$(COMPOSE_CEPH) up -d cassandra ceph gateway
+
+up-s3-backend:
+	$(COMPOSE_S3) up -d cassandra minio init-minio strata-s3
+	@$(MAKE) wait-cassandra
+	@$(MAKE) wait-minio
+	@$(MAKE) wait-strata-s3
 
 down:
-	$(COMPOSE) down
+	$(COMPOSE) --profile ceph-backend --profile s3-backend down -v
 
 wait-cassandra:
 	@echo "waiting for cassandra to report healthy..."
@@ -52,6 +63,16 @@ wait-ceph:
 	@echo "waiting for ceph to report healthy..."
 	@until [ "$$($(COMPOSE) ps --format '{{.Health}}' ceph)" = "healthy" ]; do sleep 5; done
 	@echo "ceph ready"
+
+wait-minio:
+	@echo "waiting for minio to report healthy..."
+	@until [ "$$($(COMPOSE_S3) ps --format '{{.Health}}' minio)" = "healthy" ]; do sleep 2; done
+	@echo "minio ready"
+
+wait-strata-s3:
+	@echo "waiting for strata-s3 to report healthy (/readyz)..."
+	@until [ "$$($(COMPOSE_S3) ps --format '{{.Health}}' strata-s3)" = "healthy" ]; do sleep 2; done
+	@echo "strata-s3 ready"
 
 ceph-pool:
 	docker exec strata-ceph ceph osd pool create strata.rgw.buckets.data 8 8 replicated || true
@@ -68,9 +89,12 @@ run-cassandra:
 		go run ./cmd/strata-gateway
 
 run-gateway:
-	$(COMPOSE) up -d gateway
+	$(COMPOSE_CEPH) up -d gateway
 
 smoke:
+	bash scripts/smoke.sh http://127.0.0.1:9999
+
+smoke-s3-backend: up-s3-backend
 	bash scripts/smoke.sh http://127.0.0.1:9999
 
 smoke-signed:

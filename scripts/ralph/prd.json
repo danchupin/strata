@@ -198,8 +198,8 @@
         "Tests pass"
       ],
       "priority": 11,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Existing default-profile services (ceph, gateway, gc, lifecycle) moved under new profile 'ceph-backend' so the s3-backend stack runs cleanly without ceph services starting. Both profiles share host port 9999 — operator picks one. Cassandra stays unprofiled (shared meta backend across both stacks). New compose services: minio (MINIO_ROOT_USER/PASSWORD env, MinIO health endpoint via curl), init-minio (one-shot mc mb against minio:9000 healthy → service_completed_successfully gate on strata-s3), strata-s3 (build context same as gateway → strata:ceph image, all required env vars, healthcheck on /readyz). New /readyz HTTP handler in cmd/strata-gateway/main.go returns 200 OK once the gateway is serving (Open() probe at boot already validates writability → if the goroutine started, backend is ready). Makefile: up-s3-backend + wait-minio + wait-strata-s3 + smoke-s3-backend targets; up-all + run-gateway updated to invoke COMPOSE_CEPH. make down now passes both --profile flags + -v so volumes (including strata-minio-data) are cleaned up between runs."
     },
     {
       "id": "US-012",

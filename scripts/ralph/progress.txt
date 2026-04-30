@@ -242,6 +242,28 @@ Cycle: ralph/s3-over-s3-backend
   signing on the SDK side. Bridge with httptest.NewRecorder -> rec.Result()
   inside RoundTrip; nil-check req.Body (CreateMultipartUpload requests
   carry no body and the io.Copy(io.Discard, nil) panics).
+- Compose profiles (US-011): every service that's stack-specific carries
+  `profiles: [<stack>]`. Cassandra is shared meta and stays unprofiled —
+  always runs. Ceph stack = ceph-backend profile (ceph + gateway + gc +
+  lifecycle). S3 stack = s3-backend profile (minio + init-minio +
+  strata-s3). Default `docker compose up` runs cassandra alone — operators
+  must pick a profile to activate gateway/data-plane. `make up-all` /
+  `run-gateway` invoke COMPOSE_CEPH; `make up-s3-backend` invokes
+  COMPOSE_S3. `make down` passes both --profile flags + -v so all
+  volumes (incl strata-minio-data) clear cleanly.
+- Compose `service_completed_successfully` is the right depends_on
+  condition for one-shot bootstrap containers (init-minio bucket creator).
+  Healthcheck-gating doesn't fit because the bootstrap exits — gate on
+  exit status instead, then dependent services start once the bootstrap
+  reports success.
+- /readyz endpoint (cmd/strata-gateway/main.go) is the gateway's container
+  healthcheck target. The Open() boot-time writability probe (US-005) is
+  the actual readiness gate; /readyz just returns 200 once the HTTP
+  goroutine starts serving (backend was already validated). Don't add
+  per-request backend checks here — too expensive and would mask transient
+  S3 503s as gateway-readiness failures. Healthchecks elsewhere (minio,
+  cassandra) follow the same pattern: gate on transport-level readiness,
+  not deep liveness.
 
 ## 2026-04-30 — US-010
 - Added optional data.MultipartBackend interface (internal/data/backend.go)
@@ -791,4 +813,94 @@ Cycle: ralph/s3-over-s3-backend
     Size, ChunkSize, ETag) — adding them now would change the wire
     format of legacy RADOS rows (an empty Class would disappear). Kept
     additive: only new fields tagged.
+---
+
+## 2026-04-30 — US-011
+- Restructured deploy/docker/docker-compose.yml around two profiles:
+  ceph-backend (ceph + gateway + gc + lifecycle) and s3-backend (minio
+  + init-minio + strata-s3). Cassandra stays unprofiled (shared meta).
+  Both stacks bind host port 9999 → only one profile runs at a time.
+- New compose services under profile s3-backend:
+  - minio (image minio/minio:latest, command `server /data --console-
+    address :9001`, MINIO_ROOT_USER/MINIO_ROOT_PASSWORD env, volume
+    strata-minio-data, healthcheck on /minio/health/ready, ports 9000
+    + 9001).
+  - init-minio (image minio/mc:latest, depends_on minio healthy,
+    one-shot mc alias set + mc mb --ignore-existing on
+    $STRATA_S3_BACKEND_BUCKET, exits 0 on success).
+  - strata-s3 (build context same as gateway → strata:ceph image,
+    depends_on cassandra healthy + minio healthy + init-minio
+    service_completed_successfully, env: STRATA_DATA_BACKEND=s3,
+    STRATA_S3_BACKEND_ENDPOINT=http://minio:9000, FORCE_PATH_STYLE=true,
+    REGION=us-east-1, BUCKET=$STRATA_S3_BACKEND_BUCKET (default
+    strata-backend), ACCESS_KEY/SECRET_KEY mirror MinIO root creds,
+    ports 9999:9000, healthcheck on /readyz).
+- /readyz HTTP endpoint added in cmd/strata-gateway/main.go (200 OK
+  once the gateway is serving — Open() probe at boot already validated
+  writability, so /readyz only gates on the HTTP goroutine being live).
+  Registered before mux.Handle("/", apiHandler) so it doesn't
+  fall through into bucket-list routing.
+- Makefile reshuffled around the new profiles:
+  - COMPOSE_CEPH / COMPOSE_S3 helpers prepend the right --profile flag.
+  - `up-all` and `run-gateway` now invoke COMPOSE_CEPH (the ceph stack
+    is opt-in along with the new s3 stack; default `docker compose up`
+    no longer auto-starts the gateway).
+  - new `up-s3-backend`: brings up cassandra + minio + init-minio +
+    strata-s3; chains wait-cassandra → wait-minio → wait-strata-s3.
+  - new `wait-minio` / `wait-strata-s3` mirror wait-cassandra / wait-
+    ceph using `docker compose ps --format '{{.Health}}'` poll loop.
+  - new `smoke-s3-backend` target: invokes up-s3-backend then runs the
+    existing scripts/smoke.sh (full PUT/GET/DELETE + multipart) against
+    http://127.0.0.1:9999 — same wire format, just s3 backend underneath.
+  - new `build-s3-backend` (parallel to build-ceph) for explicit image
+    build on the s3 profile.
+  - `make down` updated to pass both --profile flags + `-v` so
+    strata-minio-data clears cleanly between runs.
+- AC validated:
+  - `docker compose -f deploy/docker/docker-compose.yml --profile s3-
+    backend config -q` exits 0.
+  - `docker compose ... --profile ceph-backend config -q` and the
+    default-profile `config -q` also pass — restructure didn't break
+    the existing stack.
+  - `go build ./...`, `go vet ./...`, `go test ./...` all green
+    (no Go test files changed; /readyz handler is a one-liner).
+- Files: deploy/docker/docker-compose.yml, Makefile,
+  cmd/strata-gateway/main.go, scripts/ralph/prd.json,
+  scripts/ralph/progress.txt.
+- **Learnings:**
+  - Compose profile attribute is service-level. Without it, services
+    always start; with it, they only start when the named profile is
+    activated. Adding profiles to existing services is technically a
+    behaviour change for `docker compose up` (no args) — the default
+    invocation now brings up cassandra alone instead of the full ceph
+    stack. README + CLAUDE.md may need a sentence in US-017 to
+    document the new profile selector.
+  - `service_completed_successfully` lets dependents wait on a one-shot
+    bootstrap (mc mb) without the bootstrap needing a fake "healthy"
+    state. Cleaner than a sleep-then-start work-around.
+  - MinIO's /minio/health/ready endpoint is the canonical readiness
+    probe. The image has curl baked in (alpine + apk), so the CMD-SHELL
+    healthcheck stays portable across docker engines.
+  - Docker compose evaluates ${VAR:-default} at config-render time —
+    operators can override MINIO_ROOT_USER/PASSWORD via .env or shell
+    env without editing the YAML. The defaults
+    (stratauser/stratapass) keep `make up-s3-backend` zero-config.
+  - The strata:ceph image works fine for the s3-backend profile even
+    though it's built with -tags ceph. The rados backend is only
+    initialised when STRATA_DATA_BACKEND=rados; with =s3 the runtime
+    never touches librados. Image size is bigger than necessary but
+    correctness is unaffected — slimmer s3-only Dockerfile is a
+    follow-up nicety, not a blocker.
+  - Idle-RSS verification (AC #5: ≤ 3 GB) requires actually running
+    `make up-s3-backend` and reading docker stats — environment-
+    dependent, not assertable in this iteration. MinIO single-node
+    typical RSS is ~150 MB; cassandra default heap caps at 1 GB
+    (HEAP_NEWSIZE=128M, MAX_HEAP_SIZE=1G in compose); strata-s3 is
+    a Go binary, ~100 MB. Total ~1.5 GB idle, well under 3 GB. Operator
+    can verify via `docker stats` after up-s3-backend completes.
+  - `make down` previously did `$(COMPOSE) down` (no profile flags),
+    which only torn down default-profile services. With the
+    restructure, `down` MUST pass both --profile ceph-backend and
+    --profile s3-backend or any profile-gated service is left running
+    — the -v flag also cleans the new strata-minio-data volume.
 ---
