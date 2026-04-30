@@ -60,6 +60,11 @@ func Open(ctx context.Context, cfg Config) (*Backend, error) {
 		return nil, fmt.Errorf("s3: region required")
 	}
 
+	// US-007: register metrics on the default Prometheus registry the
+	// first time a live backend is constructed. Idempotent via sync.Once
+	// so the rados-only path never pays for s3-specific collectors.
+	RegisterMetrics()
+
 	maxRetries := cfg.MaxRetries
 	if maxRetries <= 0 {
 		maxRetries = DefaultMaxRetries
@@ -109,6 +114,10 @@ func Open(ctx context.Context, cfg Config) (*Backend, error) {
 		// hiding at SDK Debug.
 		o.ClientLogMode |= aws.LogRetries
 		o.Logger = retryWarnLogger{inner: o.Logger}
+		// US-007: per-op latency + status + retry-pressure metrics via
+		// a single Initialize-step observer that brackets the full op
+		// lifecycle (serialize → retry → send → deserialize).
+		o.APIOptions = append(o.APIOptions, instrumentStack)
 	})
 
 	partSize := cfg.PartSize

@@ -124,8 +124,8 @@
         "Tests pass"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Single Initialize-step middleware (StrataS3MetricsObserver) added at the head of every s3.Client stack via APIOptions in Open(). Reads middleware.GetOperationName for op label + retry.GetAttemptResults for attempt count. Status mapping: err != nil → 'error'; attempts > 1 → 'retried'; else 'ok'. retry_total{op} += attempts-1 so adaptive-retry pressure surfaces independently of terminal status. Operations outside the eight-op label whitelist (HeadBucket, ListObjectVersions etc.) skip observation to keep cardinality bounded. RegisterMetrics is sync.Once-gated and called from Open(), so the rados-only deployment never registers s3 collectors. Unit test TestObserveOpTotalAndRetryTotal drives a synthetic three-op sequence (success Put + retry-then-success Put + NoSuchKey Get) via http.RoundTripper and asserts deltas on opTotal{put,ok}, opTotal{put,retried}, opTotal{get,error}, retryTotal{put}. go.mod gained github.com/kylelemons/godebug indirect dep via prometheus/testutil."
     },
     {
       "id": "US-008",

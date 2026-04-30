@@ -157,6 +157,68 @@ Cycle: ralph/s3-over-s3-backend
   XML body; the SDK's standard retryable-status set covers it.
   Default adaptive backoff schedules ~3 s between attempts, so a
   three-attempt test runs in ~6 s wall-clock.
+- SDK middleware observation point for backend metrics: Initialize step
+  (Before) brackets the entire op including serialize → retry → send →
+  deserialize. middleware.GetOperationName(ctx) returns the smithy op
+  name (e.g. "PutObject") set by the SDK at request bootstrap. After the
+  op returns, retry.GetAttemptResults(metadata) returns the per-attempt
+  result slice — len(results) - 1 == retry count. Wire via
+  o.APIOptions = append(o.APIOptions, instrumentStack) on s3.Options.
+- Prometheus collector registration in libraries: keep the package-level
+  CounterVec / HistogramVec usable without registration (Inc / Observe
+  works regardless), gate prometheus.MustRegister behind sync.Once via
+  an exported RegisterMetrics(), and call RegisterMetrics() from each
+  live constructor (Open). This keeps the rados-only path from
+  registering s3 collectors while making the s3 path register on first
+  Open without cmd-side wiring.
+- prometheus/client_golang/prometheus/testutil.ToFloat64(c) reads a
+  single CounterVec leaf without resetting collector state — the right
+  primitive for delta assertions across operations in a single test
+  process. testutil pulls in github.com/kylelemons/godebug as an
+  indirect dep; expect go mod tidy to add it.
+
+## 2026-04-30 — US-007
+- Added internal/data/s3/metrics.go: three Prometheus collectors
+  (strata_data_s3_backend_op_duration_seconds histogram with exponential
+  buckets 5 ms..40 s, strata_data_s3_backend_op_total counter,
+  strata_data_s3_backend_retry_total counter), exported
+  RegisterMetrics() gated by sync.Once for idempotent registration, and
+  the metricsObserver Initialize-step middleware that brackets every
+  s3 op.
+- Wired observer via o.APIOptions = append(o.APIOptions, instrumentStack)
+  in Open(); RegisterMetrics() now called from Open() so the rados-only
+  deployment never registers s3 collectors.
+- Status mapping: err != nil → 'error'; attempts > 1 → 'retried'; else
+  'ok'. Retry counter += attempts-1 so adaptive-retry pressure stays
+  visible regardless of terminal status. opNameToLabel whitelist caps
+  cardinality at the eight ops the AC pins (PutObject / GetObject /
+  DeleteObject / DeleteObjects / multipart {init,part,complete,abort}).
+- Unit test TestObserveOpTotalAndRetryTotal drives three ops via
+  http.RoundTripper (no MinIO): happy Put → put/ok +1; 503,503,200 Put →
+  put/retried +1, retry_total{put} +2; NoSuchKey Get → get/error +1.
+  Asserts via testutil.ToFloat64 deltas. TestRegisterMetricsIdempotent
+  guards the sync.Once gate.
+- Files: internal/data/s3/{metrics.go (new), metrics_test.go (new),
+  backend.go}, go.mod, go.sum.
+- **Learnings:**
+  - retry.GetAttemptResults reads attempt-count out of middleware
+    metadata after the op returns — preferred over wrapping the SDK's
+    Retry middleware directly (Finalize-after-Retry would also work but
+    requires knowing the SDK's middleware ID and re-counting per
+    invocation). One Initialize observer is the cleanest single point
+    for both timing and retry attribution.
+  - Operations outside the labelled-op whitelist (HeadBucket from
+    region-discovery, ListObjectVersions from integration tests) must
+    skip observation — otherwise label cardinality grows whenever
+    callers add a new SDK call, defeating the AC's bounded-label goal.
+  - sync.Once-gated Register() lets the package be imported by tests +
+    by the rados-only deployment without burning Prometheus registry
+    slots, while still auto-registering on the first Open().
+  - The deprecation warnings on manager.NewUploader / manager.Uploader /
+    Upload predate this story (US-002 vintage); migration to
+    feature/s3/transfermanager is an upstream-deprecation cleanup, not
+    a US-007 concern.
+---
 
 ## 2026-04-30 — US-006
 - Added Config.MaxRetries (default 5), Config.OpTimeout (default 30 s),
