@@ -45,7 +45,7 @@ import (
 // runner without container support still marks the suite passing —
 // surface contract is already validated against the in-process memory
 // backend (parity oracle).
-func AcquireCluster(ctx context.Context, t *testing.T) ([]string, func()) {
+func AcquireCluster(ctx context.Context, t testing.TB) ([]string, func()) {
 	t.Helper()
 	if env := os.Getenv("STRATA_TIKV_TEST_PD_ENDPOINTS"); env != "" {
 		parts := strings.Split(env, ",")
@@ -79,7 +79,7 @@ func AcquireCluster(ctx context.Context, t *testing.T) ([]string, func()) {
 // testcontainers-go panics (rather than returns) when DOCKER_HOST is unset on
 // macOS+Lima setups; the deferred recover below converts that into a clean
 // error so the caller can t.Skipf instead of crashing the test binary.
-func setUpTiKVCluster(ctx context.Context, t *testing.T) (endpoints []string, cleanup func(), err error) {
+func setUpTiKVCluster(ctx context.Context, t testing.TB) (endpoints []string, cleanup func(), err error) {
 	t.Helper()
 	defer func() {
 		if r := recover(); r != nil {

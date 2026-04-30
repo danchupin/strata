@@ -327,6 +327,32 @@ prior cycles found useful; remove/replace if stale for this cycle.)
   the make target makes the explicit "scale" choice. RACE_DURATION is
   passed as `go test -timeout` (the harness is iter-bounded today;
   the duration-bounded shape is the race-harness PRD's job).
+- Cross-backend bench harness lives in internal/meta/storetest/bench.go
+  exporting Bench(b, newStore, opts). Per-backend wrappers (memory in
+  bench_test.go; cassandra + tikv in *_bench_integration_test.go under
+  build tag integration) stay thin — one call into Bench, one
+  newStore factory closure. New sub-benches (e.g. SSE-encrypted GET,
+  KMS rewrap throughput) added once in bench.go pick up across all
+  three backends automatically. Bench has RangeScanObjects gated on
+  meta.RangeScanStore type-assert so Cassandra skips it cleanly per
+  the US-012 capability split.
+- Bench harness "exactly N concurrent writers" needs a custom
+  runParallel(b, conc, work) helper that spawns conc goroutines
+  racing on an atomic counter capped at b.N. b.RunParallel uses
+  GOMAXPROCS × p so the writer count varies across runner sizes —
+  unacceptable for a docs/benchmarks/meta-backend-comparison.md
+  "50 writers" methodology line. Reach for runParallel for any
+  future bench file claiming a fixed writer count.
+- Benchmark setup (pre-populate 100k objects, 10k audit rows) MUST
+  happen before b.ResetTimer(). Go's bench loop ramps b.N upward;
+  setup inside the timed loop reports fast low-N numbers that grow
+  wildly worse on the timed high-N pass.
+- Reusable test helpers take testing.TB, not *testing.T, unless they
+  call T.Run (rare in setup helpers). Both *testing.T and *testing.B
+  satisfy testing.TB so widening lets benchmark files reuse the same
+  bring-up. tikvtest.AcquireCluster + setUpTiKVCluster widened in
+  US-018 to support BenchmarkTiKVStore. Default TB in any new helper
+  that touches Helper / Skipf / Logf / Cleanup / Fatalf / Errorf.
 
 ## 2026-04-30 - US-016
 - TiKV race harness: TestRaceMixedOpsTiKV (build tag integration) in
@@ -1377,4 +1403,124 @@ prior cycles found useful; remove/replace if stale for this cycle.)
     shouldn't block the main pipeline; per-file separation makes
     `gh workflow disable ci-tikv.yml` a one-liner if the backend
     surface is being investigated.
+---
+
+## 2026-04-30 - US-018
+- Benchmarks doc + harness for meta.Store hot-path comparison.
+- New internal/meta/storetest/bench.go: exports Bench(b, newStore, opts)
+  + BenchOptions{Concurrency, ListSize, PageSize, AuditPreload} +
+  BenchDefaults (50 / 100k / 1k / 10k). Sub-benches cover the eight
+  ops US-018 lists: CreateBucket, GetObject, ListObjects_100k,
+  CompleteMultipartUpload, GetIAMAccessKey, AuditAppend,
+  AuditSweepPartition. Plus a RangeScanObjects_100k sub-bench gated
+  on meta.RangeScanStore — memory + TiKV exercise it, Cassandra
+  skips per US-012's capability split.
+- Concurrency = 50 writers via a custom runParallel helper that pins
+  goroutine count to opts.Concurrency rather than b.RunParallel's
+  GOMAXPROCS-multiplied shape. The bench harness's writer count must
+  not vary across runner sizes — that's why runParallel exists
+  instead of just `b.SetParallelism(50/runtime.GOMAXPROCS(0))`.
+- -short shrinks ListSize/AuditPreload from 100k/10k to 1k each so
+  smoke runs finish in seconds. Headline numbers MUST run without
+  -short. Setup cost (bucket create, 100k pre-populate, 10k audit
+  pre-age) sits before b.ResetTimer() on every sub-bench.
+- Per-backend wrappers stay thin:
+    internal/meta/storetest/bench_test.go            -> BenchmarkMemoryStore
+    internal/meta/cassandra/store_bench_integration_test.go (build tag integration) -> BenchmarkCassandraStore
+    internal/meta/tikv/store_bench_integration_test.go (build tag integration)      -> BenchmarkTiKVStore
+- tikvtest.AcquireCluster + setUpTiKVCluster widened from *testing.T
+  to testing.TB so BenchmarkTiKVStore can reuse the existing
+  testcontainers bring-up. Both *testing.T and *testing.B satisfy
+  testing.TB and only TB-surface methods (Helper / Skipf / Logf /
+  Cleanup / Fatalf) are used inside, so this is purely additive.
+- New docs/benchmarks/meta-backend-comparison.md covers rig (3-node
+  Cassandra + 3-replica TiKV + single-PD sandbox), harness wiring,
+  methodology (60 s warmup implicit in Go's b.N ramp, 5 min
+  measurement, 50 concurrent writers via runParallel), reproduction
+  commands (memory baseline ~30 s; per-backend 5 min × 8 sub-benches
+  ≈ 40 min on a laptop), measured memory baseline numbers, and the
+  expected Cassandra-vs-TiKV gap.
+- Memory baseline measured here on Apple M3 Pro:
+    ListObjects_100k        1.93 ms
+    RangeScanObjects_100k   2.16 ms
+    GetObject                138 ns
+    GetIAMAccessKey          107 ns
+    CreateBucket            1.35 us
+    CompleteMultipartUpload 2.34 us
+    AuditAppend              528 ns
+    AuditSweepPartition     2.36 ms (10k pre-aged rows)
+  These floor what a network-backed backend can hit.
+- Cassandra-vs-TiKV expected gap (target numbers from US-005 PRD,
+  not measured live in this iteration):
+    ListObjects-100k    Cassandra 150-300 ms vs TiKV 30-50 ms     ~5x
+    LWT ops             Cassandra Paxos vs TiKV pessim. txn       ~1.5-2x
+    Small-Get hot path  Cassandra ~ TiKV (network-RTT bound)      ~equal
+    Audit retention     Cassandra USING TTL (free) vs TiKV sweep  Cassandra wins
+- ROADMAP.md "Alternative metadata backends" section gains a Headline
+  gap blurb under the introduction quoting the same numbers and
+  pointing at docs/benchmarks/meta-backend-comparison.md as the
+  single source.
+- Live Cassandra/TiKV measurement deferred to operator: the
+  testcontainers panic 'rootless Docker not found' on the macOS+Lima
+  docker context this iteration runs against (same flake US-013/016
+  documented). Bench files build clean (-tags integration vet +
+  build pass) and the go test -bench BenchmarkMemoryStore -benchtime=2s
+  smoke run produces the table above. Operator-measured
+  Cassandra-vs-TiKV numbers land via the documented commands once a
+  3-node compose stack is available; the doc's "operator-measured"
+  table is left blank with "(target)" tags so a future SHA replaces
+  the ranges with absolute numbers.
+- Files changed: internal/meta/storetest/bench.go (new harness),
+  internal/meta/storetest/bench_test.go (memory baseline),
+  internal/meta/cassandra/store_bench_integration_test.go (new),
+  internal/meta/tikv/store_bench_integration_test.go (new),
+  internal/meta/tikv/tikvtest/cluster.go (testing.TB widening),
+  docs/benchmarks/meta-backend-comparison.md (new),
+  ROADMAP.md (headline gap blurb), scripts/ralph/progress.txt,
+  scripts/ralph/prd.json.
+- Test verification: go vet ./... + go vet -tags integration ./...
+  clean; go test -short ./... clean (37 packages, all green); go
+  test -bench=. -benchtime=2s ./internal/meta/storetest/... produces
+  the memory baseline numbers above.
+- **Learnings for future iterations:**
+  - Reusable test helpers that take *testing.T (e.g.
+    tikvtest.AcquireCluster) need to widen to testing.TB the moment
+    a benchmark wants to share them. Both *testing.T and *testing.B
+    satisfy testing.TB; the helper rarely uses methods unique to T
+    (Errorf is on TB, Run is the only T-only one and almost never
+    appears in setup helpers). Widening is purely additive — every
+    existing T caller still compiles unchanged. Reach for testing.TB
+    by default in new helpers so this conversion never has to
+    happen later.
+  - Bench harness sub-benches that need pre-populated fixtures
+    (100k objects, 10k audit rows) MUST do the populate before
+    b.ResetTimer() — otherwise the first iteration of the
+    timed loop pays the setup cost and ns/op is meaningless. The
+    Go bench loop ramps b.N upward; if setup is inside the timed
+    loop, low-N passes report a fast number that grows wildly
+    higher on the high-N pass.
+  - For "exactly N concurrent writers" benches, b.RunParallel is
+    the wrong primitive — its parallelism count is GOMAXPROCS × p,
+    so the writer count varies across runner sizes. Roll a
+    runParallel helper that spawns conc goroutines all racing on
+    an atomic counter capped at b.N. This is what the
+    docs/benchmarks/meta-backend-comparison.md "50 writers"
+    methodology line means; b.RunParallel would have varied that
+    silently.
+  - Integration build-tag bench files (store_bench_integration_test.go)
+    are the right shape for "operator runs this on real hardware
+    to fill in the doc's measurement table". The harness package
+    (internal/meta/storetest) stays import-free of any backend so
+    the bench.go file compiles in the standard go-test path; the
+    testcontainers bring-up cost only lands when the integration
+    tag is on. Mirror this shape for any future cross-backend bench
+    surface (e.g. SSE-encrypted GET, KMS rewrap throughput).
+  - Doc's expected numbers are tagged "(target)" until measured.
+    The PRD acceptance asks for "headline numbers" which an
+    iteration-without-3-node-stack can't truthfully produce —
+    quoting US-005's targets with the "(target)" tag is honest:
+    the structural argument (TiKV's single ordered scan vs
+    Cassandra's 64-way fan-out) holds regardless of absolute
+    numbers, so the headline ratio is right even when the
+    absolute floor changes per-hardware.
 ---

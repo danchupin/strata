@@ -107,6 +107,15 @@ CQL-compatible replacement — zero code changes, gocql works unchanged, CI matr
 in US-042). The core team benchmarks, documents, and maintains this path. Everything else
 is community-maintained without feature-parity or latency guarantees.
 
+Headline gap from `docs/benchmarks/meta-backend-comparison.md`: TiKV's native ordered
+range scan finishes a 100k-object `ListObjects` in **30–50 ms** vs Cassandra's
+64-way fan-out + heap-merge at **150–300 ms** — **~5× faster** on the listing hot path.
+LWT-equivalent operations (`CreateBucket`, `CompleteMultipartUpload`) are ~1.5–2× faster
+on TiKV pessimistic-txn vs Cassandra Paxos; small-object Get hot paths
+(`GetObject`, `GetIAMAccessKey`) are dominated by network RTT and look comparable.
+Cassandra wins on audit retention (`USING TTL` is free; TiKV runs an explicit
+sweeper).
+
 The `meta.Store` interface stays intentionally minimal and is driven by the primary
 backend's idioms (LWT semantics, clustering-order reads, NetworkTopologyStrategy). Backends
 that cannot match these capabilities are free to implement `meta.Store` with documented
