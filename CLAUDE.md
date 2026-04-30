@@ -48,24 +48,37 @@ ceiling with a sharded Cassandra keyspace.
 
 ## Alternative data backends
 
-Strata's recommended production data plane is **RADOS** via `go-ceph`;
-the S3 backend is an **equal-tier alternative** built on `aws-sdk-go-v2`
-that targets any S3-compatible endpoint (AWS S3, MinIO, Ceph RGW, Garage,
-Wasabi, B2-S3). The supported set is exactly two: `rados` and `s3` (plus
+Strata's primary production data backend is **RADOS** via `go-ceph`. The
+S3 backend is an **equal-tier alternative** built on `aws-sdk-go-v2` for
+operators who already run an S3-compatible store (AWS S3, MinIO, Ceph
+RGW, Garage, Wasabi, B2-S3). Both are core-team-maintained, benchmarked,
+and documented; everything else falls under the same "no community
+slots" policy as Alternative metadata backends.
+
+The supported set is exactly two: **`rados`** and **`s3`** (plus
 `memory` for tests). Filesystem / Azure Blob / GCS are explicitly **not
-planned** — operators needing those use the S3 backend pointed at any
-S3-compatible service (MinIO over filesystem, s3-proxy over Azure, GCS
-S3-interop API).
+planned** — operators needing those use Strata's S3 backend pointed at
+any S3-compatible service (MinIO over filesystem, s3-proxy over Azure,
+GCS S3-interop API). We do not water down the `data.Backend` interface
+to accommodate the weakest backend, and we do not maintain backends
+that duplicate this design.
 
 The `data.Backend` interface stays minimal and stream-shaped (`Put` /
-`Get` / `GetRange` / `Delete`); features that some backends do natively
-(multipart pass-through, lifecycle translation, CORS mirror, presign
-passthrough) live behind **optional interfaces** that backends opt into.
-Gateway code uses type-assertion to pick the better path and falls back
-to the chunk-based / worker-based default otherwise.
+`Get` / `GetRange` / `Delete`). Capability-specific features that some
+backends do natively (multipart pass-through, lifecycle translation,
+CORS mirror, presigned-URL passthrough) live behind **optional
+interfaces** that a backend opts into (`MultipartBackend`,
+`LifecycleBackend`, `CORSBackend`, `PresignBackend`). Gateway code uses
+type-assertion to pick the better path and falls back to the
+chunk-based / worker-based default otherwise.
 
-See [docs/backends/s3.md](docs/backends/s3.md) for the S3 operator guide
-(capability matrix, tested-against backends, pitfalls).
+Non-goals: a native filesystem backend, native Azure Blob / GCS
+backends, or any backend that splits a Strata object into N small
+backend objects. See `ROADMAP.md` "Alternative data backends" for the
+full rationale.
+
+See [docs/backends/s3.md](docs/backends/s3.md) for the S3 operator
+guide (capability matrix, tested-against backends, pitfalls).
 
 ## Roadmap maintenance rule
 

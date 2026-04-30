@@ -1528,3 +1528,57 @@ Cycle: ralph/s3-over-s3-backend
     half). YAML structure of the new job mirrors existing e2e job step
     shape exactly to minimise drift.
 ---
+
+## 2026-05-01 — US-019
+- Final cycle story: ROADMAP entry for alternative data backends + close-flip.
+- ROADMAP.md gains new section "Alternative data backends" right after
+  "Alternative metadata backends" (line 119). Mirrors metadata-backends
+  prose shape: RADOS primary, S3 equal-tier alternative, both core-team-
+  maintained, "no community slots" policy referenced explicitly.
+  Supported set documented as exactly two (rados + s3 + memory for tests);
+  Filesystem / Azure Blob / GCS explicitly not planned with rationale —
+  operators use S3 backend pointed at MinIO over filesystem, s3-proxy
+  over Azure, GCS S3-interop API. Optional capability surface pattern
+  (MultipartBackend / LifecycleBackend / CORSBackend / PresignBackend)
+  documented with code snippet matching internal/data/backend.go shape.
+- P1 S3-over-S3 bullet flipped to Done close-flip format per CLAUDE.md
+  Roadmap maintenance rule: `~~**P1 — S3-over-S3 ...**~~ **Done** (cycle
+  ralph/s3-over-s3-backend, commit pending)` with US-009 / US-011 /
+  US-012 / US-013 / US-014 / US-015 / US-016 / US-018 cross-references
+  and link to docs/backends/s3.md.
+- Non-goals subsection enumerates: native filesystem backend (use
+  MinIO-over-fs), native Azure / GCS (use s3-proxy / S3-interop API),
+  N-chunks-per-object data shape (request-amplification anti-pattern).
+- CLAUDE.md alternative-data-backends prose updated to mirror new ROADMAP
+  wording — single source of truth: same supported-set claim, same
+  not-planned list, same optional-interface pattern. CLAUDE.md stays
+  concise; defers full rationale to ROADMAP.md per AC ("mirror new
+  ROADMAP wording").
+- No US-002..US-018 scope was left undone — all 17 prior stories landed
+  green; bullet stays closed (no "what's missing" sub-line needed).
+- Files: ROADMAP.md, CLAUDE.md, scripts/ralph/prd.json, scripts/ralph/
+  progress.txt.
+- Quality: go build ./... + go vet ./... + go test ./... all green
+  (docs-only change, no Go source touched).
+- **Learnings:**
+  - Close-flip with `(commit pending)` is the right pattern when the
+    flip happens IN the closing commit — the SHA isn't known until
+    after `git commit`. Follow-up edit with the actual SHA can land in
+    a subsequent housekeeping commit; the inline `(commit pending)`
+    marker is what CLAUDE.md's Roadmap maintenance rule explicitly
+    allows.
+  - "No community slots" policy is a load-bearing phrase from the
+    Alternative metadata backends section established in commit 40b45de
+    (TiKV cycle). Mirroring it here keeps the two sections rhetorically
+    aligned and reinforces the "core-team-maintained set is small and
+    stable" bargain — future contributors proposing a 3rd / 4th data
+    backend can be pointed at this section without re-litigating.
+  - CLAUDE.md is a short pointer doc that defers to ROADMAP for full
+    rationale. Don't duplicate the entire ROADMAP section in CLAUDE.md —
+    the AC says "mirror" not "copy". Keeping CLAUDE.md concise keeps
+    every-conversation-context overhead low (it's loaded into every
+    session) while the full rationale lives in ROADMAP.md (loaded
+    on-demand by humans).
+  - PRD `branchName: ralph/s3-over-s3-backend` confirmed correct via
+    `git branch --show-current`. No branch flip needed.
+---

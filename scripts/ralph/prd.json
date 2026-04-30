@@ -336,8 +336,8 @@
         "Tests pass"
       ],
       "priority": 19,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "ROADMAP.md gains new section 'Alternative data backends' placed right after 'Alternative metadata backends' (line 119). Mirrors metadata-backends prose: RADOS primary, S3 equal-tier alternative, both core-team-maintained, 'no community slots' policy referenced explicitly. Supported set documented as exactly two (rados + s3 + memory for tests); Filesystem/Azure Blob/GCS explicitly not planned with rationale (operators use S3 backend pointed at MinIO over filesystem / s3-proxy over Azure / GCS S3-interop API). Optional capability surface pattern (MultipartBackend / LifecycleBackend / CORSBackend / PresignBackend) documented with code snippet matching internal/data/backend.go shape. P1 S3-over-S3 bullet flipped to Done close-flip format ('~~**P1 — S3-over-S3 (any S3-compatible endpoint).**~~ **Done** (cycle ralph/s3-over-s3-backend, commit pending)') with US-009/US-011/US-012/US-013/US-014/US-015/US-016/US-018 cross-references and link to docs/backends/s3.md per CLAUDE.md Roadmap maintenance rule. Non-goals subsection enumerates filesystem / Azure / GCS / N-chunks-per-object as not-planned with rationale. CLAUDE.md alternative-data-backends prose updated to mirror new ROADMAP wording — single source of truth: same supported-set claim, same not-planned list, same optional-interface pattern, with pointer to ROADMAP.md for full rationale. No US-002..US-018 scope was left undone — all 17 prior stories landed; bullet stays closed. go build ./..., go vet ./..., go test ./... all green (docs-only change)."
     }
   ]
 }

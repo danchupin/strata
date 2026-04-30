@@ -116,6 +116,36 @@ Non-goals:
 - A backend that cannot honor at least `LOCAL_QUORUM`-equivalent semantics. Single-node-consistent-only stores (Redis standalone, SQLite) will never be a supported production path.
 - Backends that cannot represent the `(bucket_id, shard, key, version_id DESC)` clustering natively. Anything slower than O(page_size) per page on ListObjects is not acceptable.
 
+## Alternative data backends
+
+Strata's primary production data backend is **RADOS** via `go-ceph`. The S3 backend is an **equal-tier alternative** built on `aws-sdk-go-v2` for operators who already run an S3-compatible store (AWS S3, MinIO, Ceph RGW, Garage, Wasabi, B2-S3). Both are core-team-maintained, benchmarked, and documented; everything else falls under the same "no community slots" policy as Alternative metadata backends.
+
+The supported set is exactly two: **`rados`** and **`s3`** (plus `memory` for tests). Filesystem / Azure Blob / GCS are explicitly **not planned** — operators needing those use Strata's S3 backend pointed at any S3-compatible service (MinIO over filesystem, s3-proxy over Azure, GCS S3-interop API). We do not water down the `data.Backend` interface to accommodate the weakest backend, and we do not maintain backends that duplicate this design.
+
+The `data.Backend` interface stays minimal and stream-shaped (`Put` / `Get` / `GetRange` / `Delete`). Capability-specific features that some backends do natively (multipart pass-through, lifecycle translation, CORS mirror, presigned-URL passthrough) live behind **optional interfaces** that a backend opts into:
+
+```go
+// In internal/data. Optional, not required by Backend.
+type MultipartBackend interface {
+    Backend
+    CreateBackendMultipart(ctx, key string) (handle string, err error)
+    UploadBackendPart(ctx, handle string, part int, body io.Reader, size int64) (etag string, err error)
+    CompleteBackendMultipart(ctx, handle string, parts []BackendCompletedPart) (*Manifest, error)
+    AbortBackendMultipart(ctx, handle string) error
+}
+```
+
+Gateway code uses type-assertion (`if mb, ok := backend.(data.MultipartBackend); ok {...}`) to pick the better code path when available, falling back to the chunk-based / worker-based default otherwise. Same pattern for `LifecycleBackend` (US-014), `CORSBackend` (US-015), and `PresignBackend` (US-016).
+
+Currently envisioned alternatives:
+
+- ~~**P1 — S3-over-S3 (any S3-compatible endpoint).**~~ **Done** (cycle `ralph/s3-over-s3-backend`, commit pending). Strata's data plane gains an equal-tier alternative to RADOS that stores object bytes in any S3-compatible endpoint via `aws-sdk-go-v2`. Native shape: one Strata object = one backend object via backend multipart upload (NOT N-chunks-per-object — request-count amplification kills it). Defensive backend-versioning support: per-object VersionId captured in `Manifest.BackendRef` at PUT/Complete time, passed back on Delete, so versioned-bucket backends do not silently leak storage into delete-markers. Wires `STRATA_DATA_BACKEND=s3` dispatch (US-009), docker-compose `s3-backend` profile with MinIO sidecar (US-011), smoke + CI matrix entry (US-012, US-018), full SSE config flag (passthrough/strata/both, US-013), bidirectional lifecycle mapping (US-014), CORS passthrough (US-015), presigned URL passthrough (US-016). Operator pre-creates the backend bucket; Strata refuses to start on missing bucket. See [`docs/backends/s3.md`](docs/backends/s3.md) for the operator guide (capability matrix, tested-against backends, pitfalls).
+
+Non-goals:
+- A native filesystem backend (POSIX, FUSE, NFS). Operators needing local-disk storage point the S3 backend at MinIO (or any S3-compatible service that wraps a filesystem). Owning a separate filesystem backend would duplicate maintenance for zero capability we cannot already deliver.
+- Native Azure Blob / GCS backends. Both clouds expose S3-compatible interop endpoints (s3-proxy / GCS S3-interop API); the S3 backend already covers these paths.
+- A backend that splits a Strata object into N small backend objects. Multiplies request count by N at every read; defeats the point of running on top of an S3 store. Native shape (one Strata object = one backend object) is non-negotiable.
+
 ## Known latent bugs
 
 - GET with `Range: bytes=start-` where `start >= size` returns `416` — same as AWS. `Range: bytes=-N` with `N > size` returns full body — matches AWS. Edge cases around zero-length objects: not tested.
