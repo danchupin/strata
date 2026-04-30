@@ -83,6 +83,7 @@
         "New env vars loaded via koanf-based internal/config: STRATA_S3_BACKEND_ENDPOINT (full URL; empty=AWS auto-resolve), STRATA_S3_BACKEND_REGION (required), STRATA_S3_BACKEND_BUCKET (required, single backend bucket all Strata objects land in), STRATA_S3_BACKEND_ACCESS_KEY/STRATA_S3_BACKEND_SECRET_KEY (static creds; empty falls back to SDK default chain — env / ~/.aws / IRSA / IMDS), STRATA_S3_BACKEND_FORCE_PATH_STYLE=true (required for MinIO + Ceph RGW; default false for AWS)",
         "s3.Backend constructor reads these env vars at startup via koanf and resolves credentials once",
         "Misconfiguration (empty bucket, bogus region) fails fast at startup with a clear error message — never at first request",
+        "Writability probe at startup: PutObject + DeleteObject on sentinel key '.strata-readyz-canary' against the backend bucket. Refuse to start (non-zero exit + clear error) if either fails — catches read-only mounts, missing IAM permissions, expired creds, bucket-existence regressions. Probe runs once on boot, not per-request",
         "Document the env vars in README.md's environment-variable table",
         "Typecheck passes",
         "Tests pass"
@@ -133,6 +134,7 @@
       "acceptanceCriteria": [
         "Add BackendRef *BackendRef field on data.Manifest. Struct: Backend string ('rados' | 's3'), Key string, ETag string, Size int64, VersionID string (omitempty — present only when the backend returned a version-id at write time)",
         "All struct fields tagged json:',omitempty' and registered in manifest.proto with fresh, monotonically-increasing field numbers (additive — no renumbering)",
+        "Protobuf field-number reservation (avoid collision with US-013 Manifest.SSE.Mode): inspect highest field number in manifest.proto at story-start, name it N. This story reserves N+1 for BackendRef message + N+2..N+6 for sub-fields (Backend, Key, ETag, Size, VersionID). US-013 reserves N+7 for SSE.Mode. Document the assignment in a `// US-008 / US-013 field-number assignment` comment block at the top of manifest.proto",
         "When BackendRef is set, the manifest's existing Chunks slice is empty (1:1 mapping; whole object lives at BackendRef.Key); when Chunks is non-empty, BackendRef is nil (RADOS path)",
         "BackendRef.VersionID semantics documented in struct doc-comment: '' = backend does not support versioning OR versioning off OR SDK response did not carry a version-id (plain delete works); 'null' = backend versioning Suspended (versioned-Delete with VersionId='null' cleans correctly); any other non-empty string = UUID-shaped version-id from versioning-enabled backend (versioned-Delete skips delete-marker creation)",
         "Encoder/decoder round-trips all three shapes (VersionID == '' / 'null' / <uuid>) via data.EncodeManifest / DecodeManifest in JSON and protobuf modes",
@@ -166,12 +168,13 @@
       "title": "Client multipart pass-through to backend multipart",
       "description": "As a Strata client doing an S3 multipart upload, I want each UploadPart to map 1:1 to a backend UploadPart so we end up with exactly one S3 object on the backend, not N — and CompleteMultipartUpload on Strata triggers CompleteMultipartUpload on the backend.",
       "acceptanceCriteria": [
-        "meta.MultipartUpload schema additive: BackendUploadID string (cassandra ALTER + memory backend update + tikv keys; all backends in lockstep)",
+        "meta.MultipartUpload schema additive: BackendUploadID string. All three meta backends update in lockstep: Cassandra (ALTER TABLE multipart_uploads ADD backend_upload_id text via alterStatements in internal/meta/cassandra/schema.go); Memory (struct field + serialize through copy/marshal sites); TiKV (extend multipart-upload encoder/decoder in internal/meta/tikv/keys.go or its multipart-state file so BackendUploadID round-trips — no DDL since TiKV schema is implicit in key encoding)",
+        "meta.MultipartPart schema additive: BackendETag string — same lockstep update across all three backends",
         "InitiateMultipartUpload on Strata calls CreateMultipartUpload on backend, stores returned UploadId in BackendUploadID",
-        "Strata UploadPart calls backend UploadPart with the same BackendUploadID; stores backend's per-part ETag in multipart_uploads.parts[N].backend_etag",
+        "Strata UploadPart calls backend UploadPart with the same BackendUploadID; stores backend's per-part ETag in BackendETag",
         "CompleteMultipartUpload on Strata calls CompleteMultipartUpload on backend with the part list (PartNumber + backend ETag); on success sets Manifest.BackendRef like US-009 with the multipart-completed object key. BackendRef.VersionID populated from CompleteMultipartUploadOutput.VersionId (empty / 'null' / UUID — same semantics as US-002 single-shot PUT)",
         "AbortMultipartUpload on Strata aborts the backend multipart too",
-        "Per-part composite checksum machinery (from prd-s3-tests-90 cycle if shipped, otherwise pre-existing per-part fields) flows through unchanged",
+        "Per-part composite checksum interop: if prd-s3-tests-90 cycle has shipped (manifest carries PartChunks[].ChecksumValue), backend's per-part ETags flow through Strata's checksum machinery unchanged; if not yet shipped, this AC is deferred — leave per-part checksums as today (Strata gateway computes its own, BackendETag stored for multipart passthrough but not yet wired into composite checksum response). Document deferral in commit message",
         "Test: multipart upload of 50 MiB across 5 parts produces exactly one backend object visible in `aws s3 ls s3://<backend-bucket>/`",
         "Typecheck passes",
         "Tests pass"
@@ -291,7 +294,8 @@
       "title": "docs/backends/s3.md operator guide",
       "description": "As an operator evaluating the S3 backend, I need a single-page operator guide covering setup, capability matrix, caveats, and tested-against backends.",
       "acceptanceCriteria": [
-        "New docs/backends/s3.md (alongside existing scylla.md, tikv.md) with: when to choose S3 backend over RADOS (decision matrix); required env vars + sample compose / Kubernetes config; tested-against backends — AWS S3 (us-east-1), MinIO (latest), Ceph RGW (Reef+), Garage (latest) marked supported / works-with-caveats / unsupported; capability matrix (which S3-compatibility tests pass on each backend); performance characteristics (latency floor, cost model, throughput); common operational pitfalls (force-path-style for MinIO, IRSA setup for AWS, key prefix randomization for hot-prefix avoidance, anti-pattern: don't enable backend versioning on existing Strata-managed bucket — see US-008 VersionID semantics)",
+        "New docs/backends/s3.md (alongside scylla.md and tikv.md) with: when to choose S3 backend over RADOS (decision matrix); required env vars + sample compose / Kubernetes config; tested-against backends — AWS S3 (us-east-1), MinIO (latest), Ceph RGW (Reef+), Garage (latest) marked supported / works-with-caveats / unsupported; capability matrix (which S3-compatibility tests pass on each backend); performance characteristics (latency floor, cost model, throughput); common operational pitfalls (force-path-style for MinIO, IRSA setup for AWS, key prefix randomization for hot-prefix avoidance)",
+        "Operator-required backend bucket configuration section (load-bearing, not optional notes): (a) AbortIncompleteMultipartUpload lifecycle rule on backend bucket — recommended DaysAfterInitiation: 7 — without it, gateway crashes mid-multipart leak parts indefinitely; provide copy-pasteable JSON snippet. (b) Do NOT enable versioning on a Strata-managed backend bucket already written to with empty VersionID rows — plain delete creates delete-markers for legacy rows; Strata handles versioned buckets correctly only when versioning was enabled before any writes (per US-008 defensive design). (c) Cross-region setup is anti-pattern: co-locate Strata gateway with backend bucket in same region",
         "README.md How to run section gains a 4th option: make up-s3-backend (Strata + Cassandra + MinIO, no Ceph)",
         "CLAUDE.md Big-picture architecture diagram updated: data backend box reads 'data.Backend  memory | rados | s3'",
         "Typecheck passes",
@@ -324,7 +328,7 @@
       "description": "As a maintainer, I want a new ROADMAP section for alternative data backends (mirroring the existing 'Alternative metadata backends' section) and the S3 backend item flipped to Done on this cycle's final commit.",
       "acceptanceCriteria": [
         "Add new section to ROADMAP.md titled 'Alternative data backends' (placed right after the existing 'Alternative metadata backends' section)",
-        "Section text mirrors the metadata-backends prose: RADOS is primary, S3 backend is an equal-tier alternative (this PRD); filesystem / Azure Blob / GCS are P3 community-maintained slots",
+        "Section text mirrors the metadata-backends prose AND the 'no community slots' policy already established for meta backends in the TiKV cycle (commit 40b45de). RADOS is primary, S3 backend is equal-tier alternative (this PRD). Supported set is exactly two: rados + s3 (plus memory for tests). Filesystem / Azure Blob / GCS are explicitly NOT planned — operators needing those use Strata's S3 backend pointed at any S3-compatible service (MinIO over filesystem, s3-proxy over Azure, GCS S3-interop API). Document this rationale in the section so future contributors do not propose adding them",
         "On the final cycle commit, flip the S3-backend bullet to Done close-flip format per CLAUDE.md Roadmap maintenance rule with the closing SHA inline (or `(commit pending)` for follow-up SHA edit)",
         "If any of US-002..US-018 left scope undone (e.g. lifecycle mapping partial), the bullet stays open and the partial work is documented under the bullet's 'what's missing' sub-line",
         "CLAUDE.md alternative-data-backends prose updated to mirror new ROADMAP wording (single source of truth)",
