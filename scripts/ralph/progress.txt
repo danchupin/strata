@@ -1589,3 +1589,54 @@ prior cycles found useful; remove/replace if stale for this cycle.)
     backend product name; the property is what informs reading the
     surrounding code.
 ---
+
+## 2026-04-30 - US-020
+- ROADMAP.md "Alternative metadata backends" cleanup: reworded intro to
+  "Strata supports two production metadata backends: Cassandra (with
+  ScyllaDB drop-in) and TiKV. Both are first-class. Memory is for tests
+  only", dropped the three previously-listed P3 community-backend bullets
+  (TiKV-as-P3-community, FoundationDB, PostgreSQL+Citus / Yugabyte) plus
+  the now-empty "Currently envisioned alternatives:" header. Kept the
+  headline-gap paragraph + RangeScanStore optional-interface example +
+  non-goals section. Added an explicit "TiKV implements RangeScanStore;
+  Cassandra explicitly does not" line on the example so the dispatch
+  decision is on-page.
+- Added a new close-flip entry under "Consolidation & validation":
+  "~~**P1 — TiKV first-class metadata backend.**~~ — **Done.** ...
+  (commit pending)" summarising the US-001..US-019 cycle. Per CLAUDE.md
+  Roadmap maintenance rule, the closing SHA gets edited in as a
+  follow-up commit since the close-flip and the closing commit cannot
+  carry their own SHA inline.
+- CLAUDE.md prose at the top updated to mirror the new ROADMAP wording
+  (single source of truth): "Strata ships two first-class production
+  backends... in-memory backend is for tests and the smoke pass; no
+  other backends are supported".
+- Files changed: ROADMAP.md, CLAUDE.md, scripts/ralph/prd.json,
+  scripts/ralph/progress.txt.
+- Verified: go vet ./..., go build ./..., go test ./... all clean.
+- **Learnings for future iterations:**
+  - ROADMAP cleanup stories that promote a previously-listed P3 entry
+    to first-class status need three coordinated edits in one commit:
+    (1) drop the bullet, (2) reword the section intro, (3) flip a
+    parallel "P1 done" entry into the "Consolidation & validation"
+    closed list. The CLAUDE.md "Roadmap maintenance" section calls
+    for the close-flip; missing it leaves the roadmap dishonest about
+    what just shipped.
+  - "Drop the bullet" includes the section header that introduced it
+    if the header would otherwise become an empty list. The original
+    "Currently envisioned alternatives:" header was the index for
+    three bullets — once all three are dropped, the header goes too,
+    or it reads as a TODO.
+  - The CLAUDE.md prose at the top of the file is the canonical
+    single-line summary of what backends ship; ROADMAP's
+    "Alternative metadata backends" section is the long-form. They
+    must say the same thing in different word counts. When updating
+    one, grep the other for the same nouns ("primary", "first-class",
+    "community-maintained") and reconcile.
+  - The PRD's "(commit pending)" placeholder for the close-flip SHA
+    is the documented escape valve when the close-flip and the
+    closing commit cannot share a SHA inline; the CLAUDE.md Roadmap
+    maintenance rule explicitly allows this with a follow-up SHA
+    edit. Use it; do not amend the close-flip onto the parent commit
+    after the fact.
+---

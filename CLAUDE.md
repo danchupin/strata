@@ -9,10 +9,12 @@ Cassandra (sharded `objects` table to dodge the bucket-index ceiling that bites 
 chunks, and the gateway speaks S3 over HTTP. The compatibility goal is tracked against Ceph's upstream `s3-tests`
 suite — see `tasks/prd-s3-compatibility.md` for the active PRD and `ROADMAP.md` for what is shipped vs pending.
 
-The metadata interface (`internal/meta.Store`) is intentionally minimal and Cassandra-flavoured (LWT, clustering order,
-fan-out paging). Cassandra is the primary backend; ScyllaDB is a drop-in. TiKV is a first-class equal-tier backend (raw
-KV via `tikv/client-go`, native ordered range scans short-circuit Cassandra's 64-way fan-out via the optional
-`meta.RangeScanStore` interface). The in-memory backend is for tests and the smoke pass.
+The metadata interface (`internal/meta.Store`) is intentionally minimal (LWT semantics, clustering order, range scans).
+Strata ships two first-class production backends: **Cassandra** (with **ScyllaDB** as a CQL-compatible drop-in — zero
+code changes, gocql works unchanged) and **TiKV** (raw KV via `tikv/client-go`; native ordered range scans short-circuit
+Cassandra's 64-way fan-out via the optional `meta.RangeScanStore` interface). Both are benchmarked, documented, and
+maintained by the core team — see `docs/backends/tikv.md` and `docs/benchmarks/meta-backend-comparison.md`. The
+in-memory backend is for tests and the smoke pass; no other backends are supported.
 
 ## Common commands
 

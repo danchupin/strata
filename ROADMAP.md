@@ -49,6 +49,17 @@ adding more, prove what is there.
   is `cassandra + ceph + strata` (gateway + gc + lifecycle); the feature workers
   (notify / replicator / access-log / inventory / audit-export) live behind a
   single `--profile features` `strata-features` replica. (commit `5841043`)
+- ~~**P1 — TiKV first-class metadata backend.**~~ — **Done.** `internal/meta/tikv`
+  implements the full `meta.Store` surface; native ordered range scans via the
+  optional `meta.RangeScanStore` interface short-circuit Cassandra's 64-way
+  fan-out on `ListObjects` (~5× faster on a 100k-object bucket per
+  `docs/benchmarks/meta-backend-comparison.md`). Wired through
+  `STRATA_META_BACKEND=tikv` + `STRATA_TIKV_PD_ENDPOINTS`; ships with
+  `--profile tikv` in compose, `make up-tikv` / `make smoke-tikv`,
+  `.github/workflows/ci-tikv.yml`, race-soak coverage, contract suite parity,
+  and `docs/backends/tikv.md`. Memory is now tests-only; the previously listed
+  community backends (FoundationDB, PostgreSQL+Citus / Yugabyte) are dropped
+  from the roadmap. (commit pending)
 
 ## Correctness & consistency
 
@@ -102,10 +113,13 @@ adding more, prove what is there.
 
 ## Alternative metadata backends
 
-Strata's primary production backend is **Cassandra** (and **ScyllaDB** as a drop-in
-CQL-compatible replacement — zero code changes, gocql works unchanged, CI matrix landed
-in US-042). The core team benchmarks, documents, and maintains this path. Everything else
-is community-maintained without feature-parity or latency guarantees.
+Strata supports two production metadata backends: **Cassandra** (with **ScyllaDB** as a
+CQL-compatible drop-in — zero code changes, gocql works unchanged, CI matrix landed in
+US-042) and **TiKV** (raw KV via `tikv/client-go`, native ordered range scans short-circuit
+Cassandra's 64-way fan-out via the optional `meta.RangeScanStore` interface; ships with
+`docs/backends/tikv.md`, `docs/benchmarks/meta-backend-comparison.md`, and
+`.github/workflows/ci-tikv.yml`). Both are first-class — the core team benchmarks,
+documents, and maintains both paths. Memory is for tests only.
 
 Headline gap from `docs/benchmarks/meta-backend-comparison.md`: TiKV's native ordered
 range scan finishes a 100k-object `ListObjects` in **30–50 ms** vs Cassandra's
@@ -116,13 +130,9 @@ on TiKV pessimistic-txn vs Cassandra Paxos; small-object Get hot paths
 Cassandra wins on audit retention (`USING TTL` is free; TiKV runs an explicit
 sweeper).
 
-The `meta.Store` interface stays intentionally minimal and is driven by the primary
-backend's idioms (LWT semantics, clustering-order reads, NetworkTopologyStrategy). Backends
-that cannot match these capabilities are free to implement `meta.Store` with documented
-caveats; **we do not water down the interface to accommodate the weakest backend**.
-
-Capability-specific features (e.g. native range scans across partitions) should land
-behind **optional interfaces** that a backend opts into:
+The `meta.Store` interface stays intentionally minimal (LWT semantics, clustering-order
+reads, range scans). Capability-specific features (e.g. native range scans across
+partitions) land behind **optional interfaces** that a backend opts into:
 
 ```go
 // In internal/meta. Optional, not required by Store.
@@ -134,19 +144,8 @@ type RangeScanStore interface {
 
 Gateway code uses type-assertion (`if rs, ok := store.(RangeScanStore); ok {...}`) to
 pick the better code path when available, falling back to the fan-out/heap-merge default
-otherwise.
-
-Currently envisioned alternatives:
-
-- **P3 — TiKV** as a community backend. Native ordered key range means `ListObjects`
-  becomes a single range scan instead of a 64-way fan-out. Requires a new `meta/tikv/`
-  implementation; LWT becomes TiKV transactions. Good fit for teams already running TiKV.
-- **P3 — FoundationDB** as a community backend. Best fit for exabyte-scale deployments
-  (the Snowflake / Apple pattern). Strong serializable transactions, range scans.
-  Requires learning curve.
-- **P3 — PostgreSQL + Citus / Yugabyte** as a community backend. SQL familiarity. Needs
-  advisory-lock-based emulation of LWT and custom sharding logic; not a natural fit but
-  useful for small single-node deployments.
+otherwise. TiKV implements `RangeScanStore`; Cassandra explicitly does not (the fan-out
+path is the only shape Cassandra serves efficiently).
 
 Non-goals:
 - A backend that cannot honor at least `LOCAL_QUORUM`-equivalent semantics. Single-node-

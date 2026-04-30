@@ -334,8 +334,8 @@
         "Tests pass"
       ],
       "priority": 20,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Reworded ROADMAP.md 'Alternative metadata backends' intro to 'two first-class production backends: Cassandra (+ScyllaDB drop-in) and TiKV', dropped the three previously-listed P3 community-backend bullets (TiKV-as-P3, FoundationDB, PostgreSQL+Citus/Yugabyte) and the now-empty 'Currently envisioned alternatives:' header, kept the headline-gap paragraph + RangeScanStore example block + non-goals section. Added a new close-flip entry under 'Consolidation & validation': '~~**P1 — TiKV first-class metadata backend.**~~ — **Done.** ... (commit pending)' summarising the US-001..US-019 cycle. Updated CLAUDE.md prose at the top to mirror: 'Strata ships two first-class production backends... in-memory backend is for tests and the smoke pass; no other backends are supported' (single source of truth across CLAUDE.md and ROADMAP.md). All unit tests pass; vet clean."
     }
   ]
 }
