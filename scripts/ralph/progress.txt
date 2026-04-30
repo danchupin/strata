@@ -1524,3 +1524,68 @@ prior cycles found useful; remove/replace if stale for this cycle.)
     numbers, so the headline ratio is right even when the
     absolute floor changes per-hardware.
 ---
+
+## 2026-04-30 - US-019
+- Shipped docs/backends/tikv.md: full operator guide alongside
+  docs/backends/scylla.md. Sections: when-to-choose decision matrix
+  (TiKV vs Cassandra), compatibility status, required env vars,
+  laptop-compose + Kubernetes (tidb-operator) sample configs,
+  production sizing (PD ≥3 raft majority, TiKV ≥3 default region
+  replication, gateway as separate fleet, do-not-co-locate note),
+  capability matrix (native range scan vs no native TTL, multi-DC
+  via PD region placement labels, hot/cold via PD label rules),
+  performance characteristics referencing docs/benchmarks/meta-
+  backend-comparison.md, common operational pitfalls (PD leader
+  split-brain, region replica labels, raft entry GC, PD TSO clock
+  skew, gateway dial timeouts on cold start, audit sweeper leader-
+  election requirement), CI shape (.github/workflows/ci-tikv.yml),
+  open-work backlog (sweeper-as-worker, OTel spans for TiKV ops,
+  multi-cluster TiKV), and a "Switching an existing deployment"
+  section that explicitly puts a Cassandra→TiKV migration tool out
+  of scope.
+- CLAUDE.md big-picture diagram updated: meta.Store
+  'memory | cassandra|tikv' + an OR branch under the storage layer
+  showing Cassandra/Scylla (sharded fan-out) vs TiKV (PD+TiKV,
+  ordered scan).
+- CLAUDE.md gains a 'TiKV gotchas' subsection (mirrors 'Cassandra
+  gotchas' shape) capturing the learnings from US-001..US-018:
+  LWT-on-LWT requires pessimistic txn (not plain Put); no native
+  TTL → ExpiresAt + leader-elected sweeper, both halves required;
+  pessimistic txns with EARLY-RETURN must Rollback() explicitly;
+  testutils.NewMockTiKV is NOT a full transactional fake, use real
+  PD+TiKV; variable-length string segments use FoundationDB-style
+  byte-stuffing 0x00→0x00 0xFF; object version-DESC suffix is
+  [MaxUint64-ts8-BE][raw-uuid-16]; fixed-width integer fields use
+  big-endian; testcontainers host.docker.internal pattern fails on
+  macOS+Lima → t.Skipf, CI sidesteps via STRATA_TIKV_TEST_PD_ENDPOINTS;
+  PD ≥3 in production for raft majority; docker-compose profiles
+  cannot toggle env on a single service (use distinct service names);
+  TiKV upstream image has no clean HTTP healthcheck (PD's is HTTP
+  + stable, downstream waits on pd:service_healthy + tikv:service_started);
+  koanf env provider stores raw strings, multi-value config splits
+  at use-site.
+- README.md How to run section gains Option 4: make up-tikv with
+  the wait-pd / wait-tikv / wait-strata-tikv / smoke-tikv chain
+  plus pointers to docs/backends/tikv.md and the benchmarks doc.
+  Note: PRD acceptance text reads "5th option" but README has only
+  3 options today; landed as Option 4.
+- Files changed: docs/backends/tikv.md (new), CLAUDE.md (diagram +
+  TiKV gotchas), README.md (Option 4), scripts/ralph/prd.json,
+  scripts/ralph/progress.txt.
+- Verified: go vet ./..., go build ./..., go test ./... all clean
+  (cache-warm; no live changes vs HEAD's test surface).
+- **Learnings for future iterations:**
+  - The "alternative metadata backends" prose in CLAUDE.md is owned
+    by US-020 (next story), not US-019. US-019 ships the operator
+    guide + diagram + gotchas; US-020 ships the ROADMAP cleanup +
+    CLAUDE.md prose mirror. Keeping the split avoids merge churn
+    when both stories land in the same cycle.
+  - Big-picture architecture diagrams in CLAUDE.md are ASCII art —
+    keep edits surgical, especially the bottom block where the
+    column widths matter for the box-drawing characters.
+  - When adding an OR-branch to an architecture diagram, prefer
+    naming the branches by their distinguishing structural property
+    (e.g. "sharded fan-out" vs "ordered scan") rather than the
+    backend product name; the property is what informs reading the
+    surrounding code.
+---

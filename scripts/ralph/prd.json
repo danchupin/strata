@@ -317,8 +317,8 @@
         "Tests pass"
       ],
       "priority": 19,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped docs/backends/tikv.md: when-to-choose decision matrix, env vars, sample compose + tidb-operator k8s CR, production sizing (PD ≥3 raft majority, TiKV ≥3 default region replication, gateway as separate fleet), capability matrix (native range scan yes, TTL no - sweeper, multi-DC via PD region placement labels, hot/cold via PD label rules), perf characteristics referencing docs/benchmarks/meta-backend-comparison.md, and a common-pitfalls section (PD split-brain, region replica labels, raft entry GC, TSO clock skew, audit sweeper leader-election requirement). CLAUDE.md big-picture diagram reflects 'memory|cassandra|tikv' + the OR branch under meta.Store. New 'TiKV gotchas' subsection mirrors 'Cassandra gotchas' shape, capturing learnings from US-001..US-018 (LWT-on-LWT pessimistic-txn rule, no native TTL, EARLY-RETURN rollback discipline, MockTiKV is not a full transactional fake, FoundationDB-style byte-stuffing, version-DESC suffix encoding, big-endian fixed-width integer fields, host.docker.internal advertise pattern + Lima skip path, PD ≥3 sizing, compose profile env-on-distinct-service shape, no clean TiKV HTTP healthcheck, koanf no-comma-split). README.md How to run gains Option 4: make up-tikv with the wait-pd / wait-tikv / wait-strata-tikv / smoke-tikv chain plus a pointer to the operator guide and benchmarks doc. CLAUDE.md prose update for alternative-metadata-backends is US-020's job per the PRD's split (this story owns the operator guide; US-020 owns ROADMAP + CLAUDE prose mirror)."
     },
     {
       "id": "US-020",

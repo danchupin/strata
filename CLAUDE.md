@@ -10,8 +10,9 @@ chunks, and the gateway speaks S3 over HTTP. The compatibility goal is tracked a
 suite — see `tasks/prd-s3-compatibility.md` for the active PRD and `ROADMAP.md` for what is shipped vs pending.
 
 The metadata interface (`internal/meta.Store`) is intentionally minimal and Cassandra-flavoured (LWT, clustering order,
-fan-out paging). Cassandra is the primary backend; ScyllaDB is a drop-in. The in-memory backend is for tests and the
-smoke pass.
+fan-out paging). Cassandra is the primary backend; ScyllaDB is a drop-in. TiKV is a first-class equal-tier backend (raw
+KV via `tikv/client-go`, native ordered range scans short-circuit Cassandra's 64-way fan-out via the optional
+`meta.RangeScanStore` interface). The in-memory backend is for tests and the smoke pass.
 
 ## Common commands
 
@@ -52,15 +53,18 @@ testcontainers to find the engine.
                 +-------+--------------+------+
                         |              |
                         v              v
-              +-------------------+   +---------------------+
-              | meta.Store        |   | data.Backend        |
-              |  memory | cassandra|   |  memory | rados    |
-              +---------+----------+   +---------+----------+
-                        |                        |
-                +-------v-------+        +-------v-------+
-                | Cassandra     |        | RADOS         |
-                | (sharded)     |        | (4 MiB chunks)|
-                +---------------+        +---------------+
+              +--------------------------+   +---------------------+
+              | meta.Store               |   | data.Backend        |
+              |  memory | cassandra|tikv |   |  memory | rados    |
+              +---------+----------------+   +---------+----------+
+                        |                              |
+                +-------v---------+            +-------v-------+
+                | Cassandra/Scylla|            | RADOS         |
+                | (sharded fan-out)            | (4 MiB chunks)|
+                |   OR             |           +---------------+
+                | TiKV (PD+TiKV,   |
+                |  ordered scan)   |
+                +------------------+
 
   strata server --workers=lifecycle -> meta.Store + data.Backend
                           (transitions / expirations / mp-abort).
@@ -252,6 +256,49 @@ operator command and stays untraced.
   `isColumnAlreadyExists`). Existing keyspaces need to upgrade in place — never write a destructive migration.
 - **Two UUID flavours coexist.** Outside the cassandra package use `github.com/google/uuid` (`uuid.UUID`). Inside, gocql
   exposes its own `gocql.UUID`. Convert via the `gocqlUUID()` / `uuidFromGocql()` helpers at the boundary.
+
+## TiKV gotchas (real ones, hit during the US-001..US-018 cycle)
+
+- **Plain `Put` on a key with prior LWT history breaks read-after-write coherence — same lesson as Cassandra LWT-on-LWT.**
+  Any RMW that needs read-after-write coherence must use a pessimistic txn (`Begin(pessimistic) → LockKeys → Get → Set →
+  Commit`), not a plain `Put`. `SetBucketVersioning` / `SetBucketACL` / `SetReshardState` / IAM access-key flips all use
+  the `updateBucket`-shaped helper. Bypassing the abstraction is how this gets reintroduced.
+- **TiKV has no native TTL.** Cassandra's `USING TTL` lets the storage tier expunge expired rows for free; on TiKV every
+  expirable row carries `ExpiresAt` in the payload, readers lazy-skip expired rows on `Get`/`List`, and a leader-elected
+  sweeper goroutine (`internal/meta/tikv/sweeper.go`) eager-deletes them in the background. Both halves are required —
+  lazy filter alone leaks disk; sweeper alone leaves a window where reads see stale rows.
+- **Pessimistic txns with EARLY-RETURN paths must call `txn.Rollback()` explicitly.** `defer rollbackOnError(txn, &err)`
+  fires only when `err != nil`. A CAS-reject path that returns `applied=false, nil` (e.g. `SetObjectStorage`) leaks the
+  `LockKeys` lease for the txn lifetime — and in the in-process `memBackend` (used by unit tests) it deadlocks the next
+  caller forever. Any non-error early return MUST `txn.Rollback()` first.
+- **`testutils.NewMockTiKV` is NOT a full transactional fake.** Pessimistic-txn `Commit` hangs on heartbeat indefinitely
+  against the in-process mock, even though `LockKeys`/`Get`/`Set` succeed. Use real PD+TiKV containers for any
+  contract-level exercise; reserve the mock for low-level RPC bench (single-Get RPC shape, no commit). The memory
+  backend (`internal/meta/memory`) is the parity oracle for surface contract.
+- **Variable-length string segments in keys use FoundationDB-style byte-stuffing** (`0x00 → 0x00 0xFF`, terminator
+  `0x00 0x00`) to preserve lex ordering across heterogeneous lengths. Never add length-prefixed encoding to a key — it
+  breaks "all keys starting with prefix X" scans. See `internal/meta/tikv/keys.md`.
+- **Object version-DESC ordering** uses a 24-byte suffix `[MaxUint64-ts8-BE][raw-uuid-16]`. Inverted ts makes ascending
+  range scan emit latest version first (free GET-without-versionId path). Null sentinel UUID (timestamp 0) sorts last
+  among versions of a key — gateway resolves `?versionId=null` by exact lookup, not scan position.
+- **Fixed-width integer fields** (`partNumber`, day-epoch, shardID) use big-endian uintN so forward range scans return
+  them in ascending numerical order. Never use little-endian or varint there.
+- **`testcontainers-go`'s `host.docker.internal` advertise pattern** works on Docker Desktop and Linux CI runners (via
+  `ExtraHosts: host.docker.internal:host-gateway`) but does NOT resolve from the macOS host on Lima docker contexts.
+  Tests must `t.Skipf` when the gateway alias misses. The CI workflow (`.github/workflows/ci-tikv.yml`) sidesteps this
+  by using `STRATA_TIKV_TEST_PD_ENDPOINTS` against a docker-compose-managed PD.
+- **PD ≥3 in production for raft majority.** Two PD nodes survive no failure (split-brain risk on partition). PD is
+  small; the cost is negligible. TiKV ≥3 is the default region raft factor.
+- **`docker-compose profiles` cannot toggle env on a single service.** Mutually-exclusive shapes (cassandra-backed
+  strata vs tikv-backed strata) get distinct service names sharing the same image. See `strata-tikv` (profile `tikv`)
+  vs `strata` (default) in `deploy/docker/docker-compose.yml`.
+- **TiKV's upstream container image has no clean HTTP healthcheck contract.** The status server returns plain text on a
+  non-stable contract and the alpine-glibc base ships no curl. PD's `/pd/api/v1/health` is HTTP-shaped and stable;
+  downstream consumers wait on `pd: service_healthy` and `tikv: service_started`. The TiKV client retries until PD
+  assigns regions, so transient boot races are absorbed in the application layer.
+- **`koanf` env provider stores env values as raw strings — no comma-split into `[]string`.** Multi-value config (TiKV
+  PD endpoints) keeps `Config.TiKV.Endpoints` as `string` and splits with `strings.Split` + `TrimSpace` + drop-empty
+  at use-site. Cleaner than wiring a custom mapstructure decode hook.
 
 ## Sharded objects table — listing fans out
 
