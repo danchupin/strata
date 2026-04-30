@@ -3,7 +3,7 @@ COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 COMPOSE_CEPH := $(COMPOSE) --profile ceph-backend
 COMPOSE_S3 := $(COMPOSE) --profile s3-backend
 
-.PHONY: build build-ceph vet test up up-all up-s3-backend down wait-cassandra wait-ceph wait-minio wait-strata-s3 ceph-pool run-memory run-cassandra run-gateway smoke smoke-s3-backend clean
+.PHONY: build build-ceph vet test up up-all up-s3-backend down wait-cassandra wait-ceph wait-minio wait-strata-s3 ceph-pool run-memory run-cassandra run-gateway smoke smoke-s3-backend smoke-s3-backend-ci clean
 
 build:
 	go build ./...
@@ -95,7 +95,12 @@ smoke:
 	bash scripts/smoke.sh http://127.0.0.1:9999
 
 smoke-s3-backend: up-s3-backend
-	bash scripts/smoke.sh http://127.0.0.1:9999
+	bash scripts/smoke-s3-backend.sh http://127.0.0.1:9999
+
+# CI variant: also asserts `make down` clears the strata-minio-data volume.
+# Destructive — tears down the stack at the end.
+smoke-s3-backend-ci: up-s3-backend
+	SKIP_DOWN=0 bash scripts/smoke-s3-backend.sh http://127.0.0.1:9999
 
 smoke-signed:
 	bash scripts/smoke-signed.sh http://127.0.0.1:9999

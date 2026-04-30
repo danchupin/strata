@@ -214,8 +214,8 @@
         "Tests pass"
       ],
       "priority": 12,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "New scripts/smoke-s3-backend.sh wraps scripts/smoke.sh + adds backend-side assertions via mc (run as ad-hoc docker container on COMPOSE_NETWORK, alias seeded via MC_HOST_strata env so no `mc alias set` step). Three invariant checks: (a) post-smoke backend bucket count == 0 (proves enqueueOrphan synchronously cleaned up the 12+ Strata objects smoke.sh writes+deletes — covers single PUT, multipart Complete, versioning, storage-class, tagging, object-lock, lifecycle, abort paths); (b) 5 small PUTs + 1 multipart Complete -> 6 backend objects (1:1 invariant); (c) DELETE 5 small -> 1 remaining (multipart object stays as ONE backend object, not its 3 parts). Make down volume cleanup AC validated via SKIP_DOWN=0 gate — `make smoke-s3-backend` defaults to SKIP_DOWN=1 (non-destructive, leaves stack up for local dev), `make smoke-s3-backend-ci` sets SKIP_DOWN=0 (runs `make down` and asserts docker_strata-minio-data volume removed). CI workflow (US-018) uses smoke-s3-backend-ci."
     },
     {
       "id": "US-013",

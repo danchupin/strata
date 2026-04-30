@@ -264,6 +264,28 @@ Cycle: ralph/s3-over-s3-backend
   S3 503s as gateway-readiness failures. Healthchecks elsewhere (minio,
   cassandra) follow the same pattern: gate on transport-level readiness,
   not deep liveness.
+- mc against a running compose stack (US-012): `docker run --rm --network
+  docker_default -e MC_HOST_strata=http://USER:PASS@minio:9000
+  --entrypoint mc minio/mc:latest find strata/<bucket> --type f`. Alias
+  seeded via MC_HOST_<name> env var — no stateful `mc alias set` step
+  needed. `--type f` excludes prefix-only directory entries so `wc -l`
+  yields a real object count. The compose project prefix derives from the
+  -f file's parent dir (deploy/docker → `docker_default` network +
+  `docker_strata-minio-data` volume). Override via COMPOSE_NETWORK /
+  COMPOSE_VOLUME env knobs in scripts/smoke-s3-backend.sh if you switch
+  to `-p <name>`.
+- smoke.sh end-state invariant (US-012): every PUT path has a matching
+  DELETE, so a successful smoke run leaves zero remaining objects in the
+  backend. That property doubles as the end-to-end orphan-cleanup signal
+  for the s3 backend (1 assertion = `mc find ... | wc -l == 0`) — no
+  separate synthetic test needed. Future smoke additions that PUT without
+  DELETE must add explicit cleanup or this assertion regresses.
+- Destructive CI variant pattern (US-012): `make smoke-s3-backend` is
+  safe for repeated local runs (SKIP_DOWN=1 default; non-destructive).
+  CI uses `make smoke-s3-backend-ci` which sets SKIP_DOWN=0 and runs the
+  `make down` volume-cleanup assertion at the end. Don't fold the
+  destructive teardown into the default target — operators want to poke
+  the stack after a passing smoke run.
 
 ## 2026-04-30 — US-010
 - Added optional data.MultipartBackend interface (internal/data/backend.go)
@@ -903,4 +925,56 @@ Cycle: ralph/s3-over-s3-backend
     restructure, `down` MUST pass both --profile ceph-backend and
     --profile s3-backend or any profile-gated service is left running
     — the -v flag also cleans the new strata-minio-data volume.
+---
+
+## 2026-04-30 — US-012
+- New scripts/smoke-s3-backend.sh wraps scripts/smoke.sh and adds
+  backend-side assertions through mc against the compose docker network.
+  mc spawns ad-hoc via `docker run --rm --network $COMPOSE_NETWORK
+  --entrypoint mc minio/mc:latest`; alias `strata` is seeded via the
+  MC_HOST_strata env var (no `mc alias set` step needed).
+- Three invariant checks against strata/$STRATA_S3_BACKEND_BUCKET (default
+  strata-backend) using `mc find ... --type f | wc -l`:
+  - pre-smoke: count == 0 (fresh stack)
+  - post-smoke: count == 0 (proves enqueueOrphan synchronously cleared
+    the 12+ Strata objects that smoke.sh writes + deletes; covers single
+    PUT, 10 MiB single-shot PUT, 18 MiB 3-part multipart Complete, all
+    storage-class / tagging / object-lock / lifecycle / abort / versioning
+    paths)
+  - 1:1 invariant: in a fresh test bucket, PUT 5 small + 1 multipart
+    Complete (3×6 MiB) → backend count == 6; DELETE the 5 small → backend
+    count == 1 (multipart object stays as ONE backend object, not its
+    constituent parts). Final cleanup → count == 0.
+- Make down volume cleanup AC: gated by SKIP_DOWN. Default SKIP_DOWN=1
+  (non-destructive — `make smoke-s3-backend` leaves the stack up for
+  local poking). New `make smoke-s3-backend-ci` target sets SKIP_DOWN=0,
+  runs `make down`, then asserts `docker volume inspect
+  docker_strata-minio-data` errors (volume removed). US-018 CI workflow
+  invokes smoke-s3-backend-ci.
+- Files: scripts/smoke-s3-backend.sh (new, executable), Makefile
+  (smoke-s3-backend now invokes the new wrapper script; smoke-s3-backend-ci
+  added; .PHONY updated), scripts/ralph/prd.json, scripts/ralph/progress.txt.
+- **Learnings:**
+  - mc alias seeding via MC_HOST_<name> env var skips the
+    stateful `mc alias set` step — drop-in for ad-hoc one-shot
+    containers where there's no persistent ~/.mc/config.json.
+  - The compose project name defaults to the deploy/docker dir name
+    so the network is `docker_default` and the volume is
+    `docker_strata-minio-data`. Both are exposed via env knobs
+    (COMPOSE_NETWORK / COMPOSE_VOLUME) for forward-compat with
+    explicit `-p <name>` overrides.
+  - smoke.sh leaves zero remaining objects when it succeeds (every
+    PUT path has a matching DELETE) — that property doubles as the
+    end-to-end orphan-cleanup signal for the s3 backend without
+    needing a parallel synthetic test. Future smoke tests that add
+    PUT-without-DELETE paths must be paired with explicit cleanup
+    or this assertion regresses.
+  - The smoke-s3-backend-ci split (separate target instead of an env
+    override on smoke-s3-backend) keeps `make smoke-s3-backend`
+    safe for repeated local runs — operator can re-invoke it
+    against an already-up stack and the only state change is the
+    test buckets, which are created+deleted within the run.
+  - `mc find --type f` is the right primitive for "count actual
+    objects" — it walks recursively but excludes prefix-only
+    directory entries that `mc ls` would list.
 ---
