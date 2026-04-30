@@ -8,6 +8,43 @@ Cycle: ralph/tikv-meta-backend
 (none yet — populate as US-001..US-020 land. Seed entries below mirror what
 prior cycles found useful; remove/replace if stale for this cycle.)
 
+- New CI jobs go in standalone workflow files alongside ci.yml (NOT new jobs
+  inside ci.yml). ci-scylla.yml is the precedent — single-purpose YAML, own
+  triggers, own permissions block. ci-tikv.yml follows the same shape: two
+  jobs (integration + e2e) in one file, triggered on push:main + PR per the
+  US-017 PRD line (vs ci-scylla.yml's workflow_dispatch+weekly schedule —
+  different triggering policy, same overall structure). Keeping per-backend
+  CI in its own file means a flaky TiKV env doesn't block the main ci.yml
+  pipeline and per-backend timeouts/triggers stay independent.
+- testcontainers-go's `host.docker.internal:host-gateway` ExtraHosts pattern
+  (used by tikvtest.AcquireCluster) resolves natively on GitHub-hosted
+  ubuntu-latest runners, so the testcontainers path works in CI without the
+  STRATA_TIKV_TEST_PD_ENDPOINTS env shortcut. The shortcut is the macOS+Lima
+  workaround documented in US-013/016; integration jobs on Linux CI just
+  pre-pull the pd+tikv images and run `go test -tags integration ./...`.
+- e2e CI job idiom (ci.yml + ci-tikv.yml): `docker inspect -f
+  '{{.State.Health.Status}}' <container>` polled in a `for i in $(seq 1 60)`
+  loop is the wait shape rather than the make wait-* targets. The make
+  targets work, but the inspect loop scales naturally to multiple containers
+  in one block ("wait for pd AND ceph healthy") and matches the e2e job's
+  existing idiom across the repo. For services without an HTTP healthcheck
+  (TiKV's status server is plain text on a non-stable contract) fall back
+  to a host-side TCP probe via bash `/dev/tcp/127.0.0.1/<port>` — same
+  trick `make wait-tikv` uses.
+- For SigV4-signed smoke variants in e2e jobs: re-launch the gateway with
+  `docker compose up -d --force-recreate <service>` after setting the auth
+  env vars on the job-level `env:` block. The compose file's variable
+  expansion (e.g. `STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-}`) reads from the
+  process env at compose-up time, so the recreate picks up the new mode
+  without editing the YAML. ci.yml's e2e (`strata` service) and ci-tikv.yml's
+  e2e-tikv (`strata-tikv` service) both follow this pattern.
+- CI log artefact policy: collect-always, upload-on-failure-only. The
+  `Collect container logs` step uses `if: always()` so logs land on disk
+  whether the smoke pass succeeded or not; the `Upload CI logs` step uses
+  `if: failure()` so the artefact storage bill stays bounded to red runs.
+  ci.yml's e2e uploads always (older idiom); ci-tikv.yml's e2e-tikv uploads
+  on-failure (cheaper). New CI jobs should prefer the on-failure shape.
+
 - internal/meta.Store interface is the contract; both Cassandra and TiKV
   must implement it in lockstep. Memory backend is the test reference.
   Use internal/meta/storetest/contract.go as the parity oracle.
@@ -1265,4 +1302,79 @@ prior cycles found useful; remove/replace if stale for this cycle.)
     os.Unsetenv + t.Cleanup(restore). Setting a STRATA_* var to "" via
     t.Setenv is a footgun: koanf still picks it up and overrides the
     default with the empty string.
+---
+
+## 2026-04-30 - US-017
+- New .github/workflows/ci-tikv.yml. Two jobs:
+  1. `integration-tikv` (timeout-minutes:30) — pre-pulls pingcap/pd:v8.5.0
+     + pingcap/tikv:v8.5.0 then runs
+     `go test -tags integration -timeout 15m ./internal/meta/tikv/...`.
+     Uses the testcontainers-go path (NOT the STRATA_TIKV_TEST_PD_ENDPOINTS
+     shortcut) — the host.docker.internal:host-gateway alias pattern that
+     t.Skipf'd on macOS+Lima during US-013/016 local work resolves natively
+     on GitHub-hosted ubuntu-latest runners. Mirrors ci.yml's
+     integration-cassandra job shape but scoped to ./internal/meta/tikv/...
+     (vs ./... so the cassandra integration tests don't accidentally run
+     here too).
+  2. `e2e-tikv` (timeout-minutes:30) — builds strata:ceph + strata-ceph:local
+     images, brings up `docker compose -f deploy/docker/docker-compose.yml
+     --profile tikv up -d pd tikv ceph`, polls pd+ceph health via
+     `docker inspect` and tikv RPC via host-side bash /dev/tcp probe (TiKV
+     has no stable HTTP healthcheck), then up's strata-tikv and waits for
+     /readyz on host port 9998. Runs scripts/smoke.sh, force-recreates
+     strata-tikv with STRATA_AUTH_MODE=required +
+     STRATA_STATIC_CREDENTIALS=ciAK:ciSK:ci on the job env, runs
+     scripts/smoke-signed.sh. Logs collected always (strata-pd /
+     strata-tikv-storage / strata-ceph / strata-tikv) and uploaded only on
+     failure to keep artefact storage bounded.
+- Triggers: push to main + pull_request per the PRD acceptance line (vs
+  ci-scylla.yml's workflow_dispatch+weekly schedule — different cadence
+  policy, same overall YAML structure: top-level name/permissions/jobs).
+- ci.yml + ci-scylla.yml unchanged — purely additive per the PRD's
+  acceptance line. Verified via go vet ./..., go build ./..., go test ./...
+  (all unit tests green).
+- The race-nightly-tikv CI line from US-016 is still deferred per
+  US-016's PRD branch (tasks/prd-race-harness.md hasn't shipped, no
+  .github/workflows/race-nightly.yml exists). When that PRD lands, the
+  parallel race-nightly-tikv job goes alongside its race-nightly-cassandra
+  sibling — NOT into ci-tikv.yml, since the race harness is a separate
+  cadence (nightly soak vs per-PR fast feedback).
+- Files changed: .github/workflows/ci-tikv.yml (new),
+  scripts/ralph/progress.txt, scripts/ralph/prd.json.
+- Verification: `go vet ./...` clean. `go build ./...` clean.
+  `go test ./...` clean. The integration-tikv + e2e-tikv jobs themselves
+  exercise live in CI on the next push — no way to dry-run a GH Actions
+  workflow against a real PD+TiKV+Ceph stack from inside this iteration's
+  env (Docker not available; macOS+Lima testcontainers path documented as
+  unreliable in US-013/016 progress notes). The YAML's structural sanity
+  was checked via Python tab-scan + manual mirroring of ci.yml's e2e and
+  ci-scylla.yml's integration-scylla shapes.
+- **Learnings for future iterations:**
+  - GitHub Actions runners (ubuntu-latest) resolve
+    host.docker.internal:host-gateway natively, so the testcontainers TiKV
+    path that needs the macOS+Lima workaround (STRATA_TIKV_TEST_PD_ENDPOINTS
+    against a pre-brought-up PD) is not needed in CI. New backends with
+    similar testcontainer bring-up flakiness on macOS should still ship the
+    env-shortcut for local-dev sanity but rely on the testcontainers path
+    in CI — fewer moving parts in the workflow.
+  - `docker compose --profile tikv up -d pd tikv ceph` (skipping
+    strata-tikv) gives the storage layer time to settle before the gateway
+    dials PD. Bringing strata-tikv up in the same compose-up tends to race
+    on PD region assignment and the gateway's first /readyz probe fails;
+    the two-step bring-up matches ci.yml's e2e (cassandra+ceph first, then
+    strata) and is the sturdier shape.
+  - `if: failure()` on log artefact upload (vs ci.yml's `if: always()`) is
+    the cheaper default — green runs don't need their logs pinned for 14
+    days. Keep `if: always()` on the collect step (so logs land on disk
+    even on success and an operator can `gh run view` mid-flight) but the
+    upload itself can be failure-gated.
+  - timeout-minutes on the JOB level (per PRD's "30 min" line), not the
+    workflow level — GHA has no top-level timeout knob, only per-job. Both
+    integration-tikv and e2e-tikv get their own timeout-minutes:30 budget.
+  - For per-backend CI files (ci-scylla.yml, ci-tikv.yml), keep them
+    separate from ci.yml even when the PRD line says "every PR exercises
+    the new backend". A flaky pingcap image pull or testcontainers race
+    shouldn't block the main pipeline; per-file separation makes
+    `gh workflow disable ci-tikv.yml` a one-liner if the backend
+    surface is being investigated.
 ---

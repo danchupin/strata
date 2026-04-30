@@ -285,8 +285,8 @@
         "Tests pass"
       ],
       "priority": 17,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added .github/workflows/ci-tikv.yml mirroring ci-scylla.yml's top-level shape (name/permissions) but with ci.yml's PR+push triggers per the PRD acceptance line. Two jobs: integration-tikv pre-pulls pingcap/pd:v8.5.0 + pingcap/tikv:v8.5.0 and runs `go test -tags integration -timeout 15m ./internal/meta/tikv/...` (testcontainers path — host.docker.internal alias resolves natively on Linux runners, no STRATA_TIKV_TEST_PD_ENDPOINTS shortcut needed). e2e-tikv builds strata:ceph + strata-ceph:local images, brings up `docker compose --profile tikv up -d pd tikv ceph` and waits for pd healthy + tikv TCP + ceph healthy via the same `docker inspect` loop ci.yml's e2e job uses (the make wait-* targets shell out to `docker compose ps` which in CI is fine but the inspect loop matches the existing job's idiom and proved out). Then up'd strata-tikv, polls /readyz on host port 9998, runs scripts/smoke.sh, force-recreates strata-tikv with STRATA_AUTH_MODE=required + STRATA_STATIC_CREDENTIALS=ciAK:ciSK:ci and runs scripts/smoke-signed.sh. Logs collected always (strata-pd / strata-tikv-storage / strata-ceph / strata-tikv) and uploaded only on failure (matching e2e idiom; storage cost stays bounded). Both jobs timeout-minutes:30 per PRD. ci.yml + ci-scylla.yml unchanged — purely additive. Note testcontainers-go `host.docker.internal:host-gateway` hosts modifier path that t.Skipf'd on macOS+Lima during local US-013 work resolves cleanly on GitHub-hosted ubuntu-latest runners; that's why ci.yml's integration-cassandra has shipped via this same shape for cycles."
     },
     {
       "id": "US-018",
