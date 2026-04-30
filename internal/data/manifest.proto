@@ -1,0 +1,54 @@
+// US-008 / US-013 field-number assignment
+//
+// At US-008 story-start, the highest field number in this manifest schema
+// is N=5 (Manifest.Chunks). Reservations carved out by this story:
+//
+//   N+1 = 6   Manifest.backend_ref           (BackendRef message ref) — US-008
+//   N+2 = 7   reserved (Manifest.backend)    sub-field of BackendRef if ever flattened — US-008
+//   N+3 = 8   reserved (Manifest.key)        sub-field of BackendRef if ever flattened — US-008
+//   N+4 = 9   reserved (Manifest.etag)       sub-field of BackendRef if ever flattened — US-008
+//   N+5 = 10  reserved (Manifest.size_bytes) sub-field of BackendRef if ever flattened — US-008
+//   N+6 = 11  reserved (Manifest.version_id) sub-field of BackendRef if ever flattened — US-008
+//   N+7 = 12  reserved Manifest.sse.mode     enum tag — US-013
+//
+// Numbers 7..12 are explicitly reserved (see `reserved 7 to 12;` below) so a
+// future flatten or the US-013 SSE.Mode addition cannot collide with this
+// story's allocation. New, unrelated additive fields MUST start at 13 or
+// above; renumbering is forbidden — the schema is wire-compatible across
+// RADOS-mode and S3-mode manifests both directions.
+
+syntax = "proto3";
+
+package strata.data.v1;
+
+option go_package = "github.com/danchupin/strata/internal/data";
+
+message Manifest {
+  string class = 1;
+  int64 size = 2;
+  int64 chunk_size = 3;
+  string etag = 4;
+  repeated ChunkRef chunks = 5;
+  BackendRef backend_ref = 6;
+
+  reserved 7 to 12;
+  reserved "backend", "key", "size_bytes", "version_id", "sse";
+}
+
+message ChunkRef {
+  string cluster = 1;
+  string pool = 2;
+  string namespace = 3;
+  string oid = 4;
+  int64 size = 5;
+}
+
+// BackendRef — see internal/data/manifest.go BackendRef doc-comment for the
+// canonical VersionID three-shape semantics ('' / 'null' / <uuid>).
+message BackendRef {
+  string backend = 1;
+  string key = 2;
+  string etag = 3;
+  int64 size = 4;
+  string version_id = 5;
+}

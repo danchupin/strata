@@ -176,6 +176,17 @@ Cycle: ralph/s3-over-s3-backend
   primitive for delta assertions across operations in a single test
   process. testutil pulls in github.com/kylelemons/godebug as an
   indirect dep; expect go mod tidy to add it.
+- Manifest is JSON-encoded as opaque bytes inside meta backends
+  (cassandra/codec.go, etc.). New fields are schema-additive when tagged
+  json:",omitempty" — zero migration. data.EncodeManifest /
+  data.DecodeManifest (added in US-008) are the package-level helpers;
+  internal/data/manifest.proto is a schema-reservation artifact (no proto
+  codegen pipeline yet). 1:1 invariant: when Manifest.BackendRef is set,
+  Chunks is empty; when Chunks is non-empty, BackendRef is nil. Convention
+  is enforced at the gateway construction site (US-009), not the type.
+  Field-number reservations 7..12 in manifest.proto are pre-allocated for
+  US-008 sub-field flatten + US-013 SSE.Mode — additions outside that
+  range MUST start at 13.
 
 ## 2026-04-30 — US-007
 - Added internal/data/s3/metrics.go: three Prometheus collectors
@@ -495,4 +506,49 @@ Cycle: ralph/s3-over-s3-backend
     instead of using the partially-configured static creds, leading
     to "permission denied" at runtime that's hard to debug. Fail
     fast at config-load time.
+---
+
+## 2026-04-30 — US-008
+- Added BackendRef Go struct (Backend / Key / ETag / Size / VersionID) +
+  *BackendRef field on data.Manifest, all sub-fields tagged json:",omitempty".
+  Existing Manifest fields untouched — legacy RADOS rows decode bit-for-bit
+  identical with BackendRef = nil.
+- Created internal/data/manifest.proto from scratch (no proto-codegen
+  pipeline exists in repo — schema-only artifact). Field-number assignment
+  block at top documents N=5 starting point and the AC's full reservation
+  (6=BackendRef, 7..11=flatten reservations, 12=US-013 SSE.Mode); hard
+  `reserved 7 to 12;` guard inside the Manifest message.
+- VersionID three-state semantics ('' / 'null' / <uuid>) documented in
+  the BackendRef Go doc-comment per the canonical pattern from US-002.
+- Added data.EncodeManifest / data.DecodeManifest JSON helpers — the
+  AC-named entry points. cassandra/codec.go still does its own
+  json.Marshal/Unmarshal; identical wire format, migration is mechanical
+  but out of scope for US-008.
+- Tests in new internal/data/manifest_test.go: round-trip of all three
+  VersionID shapes; empty VersionID omitted from JSON; legacy
+  RADOS-shape JSON decodes with BackendRef=nil + Chunks intact; S3-shape
+  manifest round-trips with empty Chunks + BackendRef set; nil/empty
+  encode + decode boundary cases.
+- Files: internal/data/manifest.go, internal/data/manifest.proto (new),
+  internal/data/manifest_test.go (new).
+- **Learnings:**
+  - Repo has no proto runtime / codegen pipeline — manifest.proto is a
+    schema-reservation artifact, not a generated-source input. The
+    field-number block must still be honoured because US-013 will ADD
+    SSE.Mode at the reserved slot 12. Future cycles introducing proto
+    codegen can pick up the file as-is.
+  - data.EncodeManifest / DecodeManifest exist now as the package-level
+    JSON helpers. Internal callers (cassandra/codec.go,
+    internal/meta/memory/store.go which currently has no codec — pure
+    in-memory deep-copy) can migrate piecemeal; US-008 doesn't force a
+    refactor of meta-backend codecs since the byte format is unchanged.
+  - The 1:1 invariant (Chunks empty when BackendRef set, BackendRef nil
+    when Chunks set) is a Go-level convention documented on the Manifest
+    doc-comment — not enforced by the type system. Gateway dispatch
+    (US-009) is the right place to maintain the invariant since that's
+    where the manifest is constructed.
+  - Existing Manifest struct fields don't carry omitempty tags (Class,
+    Size, ChunkSize, ETag) — adding them now would change the wire
+    format of legacy RADOS rows (an empty Class would disappear). Kept
+    additive: only new fields tagged.
 ---

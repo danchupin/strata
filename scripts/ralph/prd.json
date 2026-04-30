@@ -143,8 +143,8 @@
         "Tests pass"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "manifest.proto created from scratch (no proto-codegen pipeline exists in repo) — file is a schema/field-number reservation artifact. Highest pre-existing field number derived from the Go struct: N=5 (Manifest.Chunks). Allocations per AC: 6=BackendRef ref, 7..11 reserved for flattened sub-fields, 12 reserved for US-013 SSE.Mode. Hard `reserved 7 to 12;` block in Manifest message guards against accidental reuse. New BackendRef Go struct + *BackendRef field on Manifest, all sub-fields tagged json:',omitempty' (existing Manifest fields untouched — 1:1 wire-compatible with legacy RADOS rows). Added data.EncodeManifest / data.DecodeManifest as JSON helpers — protobuf round-trip is the schema-only side per AC since no proto runtime is wired (cassandra/codec.go remains; can migrate to data.Encode/Decode in a future cleanup but not required for US-008). Tests cover all three VersionID shapes ('', 'null', UUID), legacy-shape decode, S3-shape decode, omitempty for empty VersionID."
     },
     {
       "id": "US-009",
