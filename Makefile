@@ -1,7 +1,7 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph docker-build vet test up up-all up-tikv down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata-tikv ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana clean
+.PHONY: build build-ceph docker-build vet test up up-all up-tikv down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata-tikv ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana race-soak-tikv clean
 
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
@@ -135,6 +135,27 @@ smoke-signed-tikv:
 
 smoke-grafana:
 	bash scripts/grafana-smoke.sh
+
+# Race-soak the TiKV-backed gateway: brings up a PD + TiKV pair via
+# testcontainers (or uses STRATA_TIKV_TEST_PD_ENDPOINTS for an
+# operator-supplied cluster) and runs the integration race scenario
+# (TestRaceMixedOpsTiKV) for RACE_DURATION (default 1h, set via the
+# go test -timeout flag).
+#
+# Workload size scales with RACE_ITERS / RACE_WORKERS / RACE_KEYS env vars
+# (see race_test.go envIntDefault). Defaults yield a quick sanity pass; the
+# soak target raises RACE_ITERS to 100k so the scenario runs long enough to
+# surface any concurrency divergence vs the Cassandra-backed run.
+#
+# The race-harness PRD (tasks/prd-race-harness.md) lands a duration-bounded
+# binary (cmd/strata-racecheck) in a future cycle; this target is the
+# iter-based stop-gap that satisfies US-016 of the TiKV cycle.
+race-soak-tikv:
+	RACE_ITERS=$${RACE_ITERS:-100000} \
+	RACE_WORKERS=$${RACE_WORKERS:-32} \
+	RACE_KEYS=$${RACE_KEYS:-4} \
+	  go test -tags integration -timeout $${RACE_DURATION:-1h} \
+	  -run '^TestRaceMixedOpsTiKV$$' ./internal/s3api/...
 
 clean:
 	rm -rf bin

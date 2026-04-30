@@ -268,8 +268,8 @@
         "Tests pass"
       ],
       "priority": 16,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added TestRaceMixedOpsTiKV (build tag integration) in internal/s3api/race_integration_test.go alongside the existing memory + Cassandra variants. Drives the same runRaceScenario+verifyRaceInvariants pair against a TiKV-backed *meta.Store opened via internal/meta/tikv.Open. The PD+TiKV bring-up is shared via a new internal/meta/tikv/tikvtest helper package (extracted setUpTiKVCluster/freeTCPPort/WaitProbe out of internal/meta/tikv/store_integration_test.go so the contract suite + race test can both consume it without duplication). New tikv.Store.AllObjectVersions test-only escape hatch (mirrors the cassandra+memory shape) — single bucket-prefix range scan, version-DESC suffix encoding from US-002 already delivers (key ASC, version DESC), no extra sort needed. raceWorkers/raceIters/raceKeys promoted from package consts to env-tunable vars (RACE_WORKERS / RACE_ITERS / RACE_KEYS via envIntDefault) so the soak target can scale workload without recompiling — defaults unchanged so the existing memory + Cassandra runs are bit-for-bit identical. New `make race-soak-tikv` target: RACE_ITERS defaults to 100k, RACE_DURATION defaults to 1h (passed as go test -timeout). The future race-harness PRD (tasks/prd-race-harness.md, .github/workflows/race-nightly.yml absent today) lands a duration-bounded cmd/strata-racecheck binary; the iter-based stop-gap satisfies US-016's acceptance and the race-nightly-tikv job is deferred to that cycle per the PRD's explicit branch. Unit test pass; full `go test ./...` clean. Live testcontainers run requires Docker (not available in this env — t.Skipf path verified)."
     },
     {
       "id": "US-017",

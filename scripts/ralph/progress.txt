@@ -255,6 +255,137 @@ prior cycles found useful; remove/replace if stale for this cycle.)
   setting to "" still overrides the default with the empty string. Use
   a small helper that saves + os.Unsetenv + t.Cleanup(restore). See
   clearEnv in internal/config/config_test.go.
+- internal/meta/tikv/tikvtest is the shared test-helper package for
+  bringing up a real PD+TiKV pair. Two consumers today: the meta.Store
+  contract suite (store_integration_test.go) and the gateway race
+  harness's TiKV variant (TestRaceMixedOpsTiKV in
+  internal/s3api/race_integration_test.go). Both build-tag-gate to
+  integration. Sharing keeps the host.docker.internal advertise pattern
+  + STRATA_TIKV_TEST_PD_ENDPOINTS env override + t.Skipf-on-no-Docker
+  path in lockstep across all callers — never duplicate the
+  testcontainers bring-up; consume tikvtest.AcquireCluster +
+  tikvtest.WaitProbe.
+- WaitProbe takes an `interface { Probe(ctx) error }`, NOT a concrete
+  *tikv.Store, so the contract suite can probe via its
+  package-internal *tikvBackend handle (which it already constructs to
+  share connections across subtests) while the race test probes via
+  the public *tikv.Store. The interface keeps tikvtest from importing
+  the parent package and dragging the dep cycle in.
+- tikv.Store.AllObjectVersions is the test-only escape hatch that
+  matches cassandra.Store / memory.Store of the same name. Used by
+  the race harness to enumerate every version in a bucket without
+  hitting ListObjectVersions's 1000-row hard cap. Single bucket-prefix
+  range scan; the version-DESC suffix from US-002 already delivers
+  rows ordered (key ASC, version DESC) so no extra sort is needed
+  (vs. cassandra.AllObjectVersions which does sort because cross-shard
+  merge order is not preserved). When a future test surface needs
+  "every version of every key", reach for AllObjectVersions instead
+  of paging through ListObjectVersions.
+- Race harness workload size (raceWorkers / raceIters / raceKeys)
+  promoted from package consts to env-tunable vars in
+  internal/s3api/race_test.go via envIntDefault. Defaults unchanged
+  (32 / 1000 / 4) so existing memory + Cassandra tests are bit-for-bit
+  identical; soak targets (e.g. `make race-soak-tikv`) dial RACE_ITERS
+  up. Negative or non-numeric env values fall through to default —
+  the make target makes the explicit "scale" choice. RACE_DURATION is
+  passed as `go test -timeout` (the harness is iter-bounded today;
+  the duration-bounded shape is the race-harness PRD's job).
+
+## 2026-04-30 - US-016
+- TiKV race harness: TestRaceMixedOpsTiKV (build tag integration) in
+  internal/s3api/race_integration_test.go runs the same
+  runRaceScenario+verifyRaceInvariants pair as the memory + Cassandra
+  variants against a TiKV-backed *meta.Store. Drives the gateway over
+  HTTP via httptest, exercises PUT / DELETE / multipart Complete on a
+  versioning-Enabled bucket with raceWorkers concurrent goroutines.
+  Asserts the same three invariants: (a) exactly one IsLatest=true
+  per touched key, (b) latest row's Mtime no older than chain max
+  (1s slack), (c) every chunk in the data backend referenced by some
+  manifest OR sitting in the GC queue.
+- New internal/meta/tikv/tikvtest helper package: AcquireCluster +
+  WaitProbe + internal setUpTiKVCluster/freeTCPPort. Extracted from
+  internal/meta/tikv/store_integration_test.go (which now consumes
+  the helpers) so the contract suite + race test share one bring-up.
+  STRATA_TIKV_TEST_PD_ENDPOINTS env shortcut preserved; testcontainers
+  fall-through; t.Skipf-on-no-Docker preserved. WaitProbe takes an
+  `interface { Probe(ctx) error }` so it can probe either
+  package-internal *tikvBackend (contract test) or public *tikv.Store
+  (race test) without an import cycle.
+- New tikv.Store.AllObjectVersions test-only escape hatch in
+  internal/meta/tikv/list.go. Single bucket-prefix range scan; rows
+  arrive (key ASC, version DESC) thanks to the US-002 version-DESC
+  suffix encoding so no sort is needed (vs cassandra.Store which sorts
+  because cross-shard merge order is not preserved). Mirrors the
+  cassandra+memory shape so the race fixture's allVersions hook works
+  against TiKV identically.
+- raceWorkers / raceIters / raceKeys promoted from package consts to
+  env-tunable vars (RACE_WORKERS / RACE_ITERS / RACE_KEYS via
+  envIntDefault). Defaults unchanged (32 / 1000 / 4) so existing
+  memory + Cassandra runs are bit-for-bit identical. Negative /
+  non-numeric env values fall through to default.
+- New `make race-soak-tikv` target: defaults RACE_ITERS=100000,
+  RACE_WORKERS=32, RACE_KEYS=4, RACE_DURATION=1h (passed as
+  `go test -timeout`). Runs only TestRaceMixedOpsTiKV. Documented in
+  the Makefile as the iter-based stop-gap until the race-harness PRD
+  delivers cmd/strata-racecheck (duration-bounded harness).
+- race-nightly-tikv CI workflow line is DEFERRED per US-016 PRD's
+  explicit branch: tasks/prd-race-harness.md has not shipped yet
+  (no .github/workflows/race-nightly.yml exists), so the parallel
+  TiKV nightly job is the race-harness PRD's responsibility.
+- Files changed: internal/meta/tikv/list.go (AllObjectVersions),
+  internal/meta/tikv/tikvtest/cluster.go (new helper package),
+  internal/meta/tikv/store_integration_test.go (uses tikvtest;
+  duplicated bring-up code dropped),
+  internal/s3api/race_test.go (env-tunable vars + envIntDefault),
+  internal/s3api/race_integration_test.go (TestRaceMixedOpsTiKV +
+  tikvtest+tikv imports),
+  Makefile (race-soak-tikv target + .PHONY entry),
+  scripts/ralph/progress.txt, scripts/ralph/prd.json.
+- Test verification: `go test ./...` clean (memory variant +
+  unit tests). `go test -tags integration -v -run TestRaceMixedOpsTiKV
+  ./internal/s3api/...` t.Skipf's cleanly when Docker is unavailable
+  ("rootless Docker not found") — the live PD+TiKV exercise runs in
+  CI (US-017) once docker-compose is available, OR locally via
+  `make up-tikv && STRATA_TIKV_TEST_PD_ENDPOINTS=127.0.0.1:2379
+  make race-soak-tikv` (the env override bypasses testcontainers and
+  reuses the up-tikv compose stack).
+- **Learnings for future iterations:**
+  - tikvtest.WaitProbe takes an `interface { Probe(ctx) error }` not
+    a concrete *tikv.Store. The contract test probes via its
+    package-internal *tikvBackend handle (which it constructs anyway
+    to share connections across subtests); the race test probes via
+    the public *tikv.Store. The interface keeps tikvtest from
+    importing the parent package and triggering an import cycle.
+    Reuse this shape for any future cross-package test helper that
+    needs to probe an internal type.
+  - tikv.Store.AllObjectVersions does NOT need the post-scan sort
+    that cassandra.Store.AllObjectVersions performs. Cassandra sorts
+    because it fans out across N shard partitions and the merge order
+    is undefined; TiKV's single-prefix range scan is already
+    (key ASC, version DESC) thanks to the US-002 version-DESC suffix.
+    When porting "list everything in a bucket" surfaces from
+    Cassandra to TiKV, drop the sort — it's wasted work.
+  - Race harness defaults (32/1000/4) take ~9s on memory, ~5min on
+    Cassandra testcontainers. RACE_ITERS scaling is roughly linear —
+    100k iters ≈ 30min on memory, est. 60-90min on TiKV
+    testcontainers (PD/TiKV CPU bound, not the gateway). RACE_DURATION
+    is the safety net (-timeout); set it 2x your iter estimate so the
+    harness finishes naturally, not via timeout.
+  - The race-harness PRD (tasks/prd-race-harness.md) lands a
+    duration-bounded cmd/strata-racecheck binary that drives a
+    long-running gateway over HTTP. When it ships, the iter-based
+    `make race-soak-tikv` target should grow a sibling
+    `make race-soak-tikv-ci` (or similar) that drives the binary
+    against `make up-tikv`. Don't drop the iter-based target — it's
+    the in-tree integration variant that exercises the same code
+    path without needing the standalone binary built.
+  - Promoting test constants to vars+env+init is safer than reading
+    env at every call site: the env read happens once at process
+    start; loops keep their original `for w := 0; w < raceWorkers;
+    w++` shape. envIntDefault drops malformed or zero-or-negative
+    values so the make target's RACE_ITERS=$${RACE_ITERS:-100000}
+    expansion is the ONE place to think about override defaults.
+---
 
 ## 2026-04-30 - US-014
 - docker-compose tikv profile + sidecars. Adds three services under

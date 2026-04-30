@@ -132,6 +132,63 @@ func (s *Store) ListObjects(ctx context.Context, bucketID uuid.UUID, opts meta.L
 	return res, nil
 }
 
+// AllObjectVersions returns every stored version across every key in the
+// bucket as deep copies, with IsLatest set on the first (highest version_id)
+// row per key. Test-only escape hatch — mirrors the cassandra.Store /
+// memory.Store method of the same name. Used by the race harness invariant
+// pass which would hit ListObjectVersions's 1000-row hard cap on a
+// many-thousand-write soak.
+//
+// The version-DESC suffix encoding (US-002) plus the bucket-prefix range
+// scan delivers rows already ordered as (key ASC, version DESC) — no extra
+// sort required.
+func (s *Store) AllObjectVersions(ctx context.Context, bucketID uuid.UUID) ([]*meta.Object, error) {
+	txn, err := s.kv.Begin(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	defer txn.Rollback()
+
+	start := ObjectPrefix(bucketID)
+	end := prefixEnd(start)
+
+	out := make([]*meta.Object, 0)
+	var lastKey string
+	first := true
+	firstVersionForKey := true
+
+	cursor := start
+	for {
+		pairs, err := txn.Scan(ctx, cursor, end, listScanBatchSize)
+		if err != nil {
+			return nil, err
+		}
+		if len(pairs) == 0 {
+			break
+		}
+		for _, p := range pairs {
+			obj, decErr := decodeObject(p.Value)
+			if decErr != nil {
+				return nil, decErr
+			}
+			if first || obj.Key != lastKey {
+				firstVersionForKey = true
+				lastKey = obj.Key
+				first = false
+			}
+			obj.IsLatest = firstVersionForKey
+			firstVersionForKey = false
+			out = append(out, obj)
+		}
+		if len(pairs) < listScanBatchSize {
+			break
+		}
+		last := pairs[len(pairs)-1].Key
+		cursor = append(append([]byte(nil), last...), 0x00)
+	}
+	return out, nil
+}
+
 // ListObjectVersions emits every version row in the bucket ordered by
 // (key ASC, version-DESC). The first row encountered for each key carries
 // IsLatest=true; subsequent versions carry IsLatest=false. CommonPrefixes
