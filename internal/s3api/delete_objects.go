@@ -107,7 +107,7 @@ func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request, bucket st
 		}
 
 		if (it.VersionID != "" || !versioned) && o != nil && o.Manifest != nil {
-			s.enqueueChunks(r.Context(), o.Manifest.Chunks)
+			s.enqueueOrphan(r.Context(), o.Manifest)
 		}
 
 		entry := deleteObjectsDeletedE{Key: it.Key, VersionID: it.VersionID}

@@ -160,8 +160,8 @@
         "Tests pass"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Dispatch wired in cmd/strata-gateway buildDataBackend → datas3.Open(ctx, datas3.Config{...}) using cfg.S3Backend env-driven values. Native shape implemented as data.Backend bridge: s3.Backend.PutChunks streams via Put then returns Manifest{Class, Size, ETag, BackendRef:{Backend:'s3', Key, ETag, Size, VersionID}, Chunks:nil}; GetChunks routes through GetRange when m.BackendRef!=nil; Delete routes through DeleteObject(Key, VersionID). Bucket UUID prefix: data.WithBucketID(ctx, b.ID) threads Strata bucket UUID via context value; PutChunks reads via data.BucketIDFromContext and falls back to a random UUID prefix when absent — both shapes give random-prefix distribution. enqueueOrphan helper added in s3api/server.go: BackendRef-shape manifests are deleted synchronously through s.Data.Delete (GC worker chunk-queue path stays for rados); replaced enqueueChunks(m.Chunks) callsites in server.go (delete) + multipart.go (complete + abort) + delete_objects.go. Tests: TestPutChunksBuildsBackendRefManifest (in-process http.RoundTripper, asserts BackendRef shape + bucket-uuid prefix), TestPutChunksObjectKeyFallback (random UUID prefix when no bucket id), TestGetChunksRejectsChunksShapeManifest, TestDeleteWithoutBackendRefIsNoOp; integration TestPutChunksGetChunksDeleteRoundTrip + TestGatewayDispatchesToS3Backend (full HTTP path through s3api against MinIO testcontainer, asserts 1:1 backend object count, range GET 1 KiB through gateway, delete cleanup). make smoke against MinIO infra is US-011/US-012's compose work."
     },
     {
       "id": "US-010",

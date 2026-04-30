@@ -61,7 +61,7 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Buck
 		s.uploadPartCopy(w, r, b, uploadID, mu, partNumber)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(data.WithBucketID(r.Context(), b.ID), 10*time.Minute)
 	defer cancel()
 	manifest, err := s.Data.PutChunks(ctx, r.Body, mu.StorageClass)
 	if err != nil {
@@ -129,7 +129,7 @@ func (s *Server) uploadPartCopy(w http.ResponseWriter, r *http.Request, b *meta.
 	}
 	defer rc.Close()
 
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(data.WithBucketID(r.Context(), b.ID), 10*time.Minute)
 	defer cancel()
 	manifest, err := s.Data.PutChunks(ctx, rc, mu.StorageClass)
 	if err != nil {
@@ -245,7 +245,7 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 	}
 	for _, m := range orphans {
 		if m != nil {
-			s.enqueueChunks(r.Context(), m.Chunks)
+			s.enqueueOrphan(r.Context(), m)
 		}
 	}
 
@@ -265,7 +265,7 @@ func (s *Server) abortMultipart(w http.ResponseWriter, r *http.Request, b *meta.
 	}
 	for _, m := range manifests {
 		if m != nil {
-			s.enqueueChunks(r.Context(), m.Chunks)
+			s.enqueueOrphan(r.Context(), m)
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)

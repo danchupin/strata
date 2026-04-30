@@ -47,6 +47,24 @@ func (s *Server) enqueueChunks(ctx context.Context, chunks []data.ChunkRef) {
 	metricsGCEnqueued(len(chunks))
 }
 
+// enqueueOrphan picks the right cleanup path for a manifest whose owning
+// object has been deleted: chunks-shape manifests (rados) go through the
+// GC chunk-deletion queue, BackendRef-shape manifests (s3) are deleted
+// synchronously through the data backend (the GC worker doesn't know
+// about backend object refs yet — deferred per US-004 notes). The
+// invariant from data.Manifest holds: BackendRef set ⇒ Chunks empty, so
+// the two branches never overlap.
+func (s *Server) enqueueOrphan(ctx context.Context, m *data.Manifest) {
+	if m == nil {
+		return
+	}
+	if m.BackendRef != nil {
+		_ = s.Data.Delete(ctx, m)
+		return
+	}
+	s.enqueueChunks(ctx, m.Chunks)
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	bucket, key := splitPath(r.URL.Path)
 
@@ -415,7 +433,7 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	if class == "" {
 		class = b.DefaultClass
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(data.WithBucketID(r.Context(), b.ID), 10*time.Minute)
 	defer cancel()
 	m, err := s.Data.PutChunks(ctx, r.Body, class)
 	if err != nil {
@@ -600,10 +618,10 @@ func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request, b *meta.Bu
 		return
 	}
 	if versionID != "" && o != nil && o.Manifest != nil {
-		s.enqueueChunks(r.Context(), o.Manifest.Chunks)
+		s.enqueueOrphan(r.Context(), o.Manifest)
 	}
 	if versionID == "" && !versioned && o != nil && o.Manifest != nil {
-		s.enqueueChunks(r.Context(), o.Manifest.Chunks)
+		s.enqueueOrphan(r.Context(), o.Manifest)
 	}
 	if o != nil && o.VersionID != "" && versioned {
 		w.Header().Set("x-amz-version-id", o.VersionID)

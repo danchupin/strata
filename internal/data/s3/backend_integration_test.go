@@ -21,6 +21,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/google/uuid"
 	tcminio "github.com/testcontainers/testcontainers-go/modules/minio"
 
 	"github.com/danchupin/strata/internal/data"
@@ -831,6 +832,128 @@ func TestDeleteObjectIdempotent(t *testing.T) {
 	if err := b.DeleteObject(ctx, "never-existed", ""); err != nil {
 		t.Fatalf("DeleteObject on missing key: want nil, got %v", err)
 	}
+}
+
+// TestPutChunksGetChunksDeleteRoundTrip exercises the US-009 native shape
+// end-to-end: PutChunks streams a body into MinIO and produces a
+// BackendRef-shape manifest; GetChunks streams the bytes back; Delete
+// removes the backend object. The test also verifies the
+// <bucket-uuid>/<object-uuid> key format with the bucket id threaded via
+// data.WithBucketID.
+func TestPutChunksGetChunksDeleteRoundTrip(t *testing.T) {
+	ctx := context.Background()
+
+	const (
+		username = "minioadmin"
+		password = "minioadmin"
+		bucket   = "strata-test-roundtrip"
+	)
+
+	container, err := tcminio.Run(ctx, "minio/minio:latest",
+		tcminio.WithUsername(username),
+		tcminio.WithPassword(password),
+	)
+	if err != nil {
+		t.Fatalf("start minio: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := container.Terminate(context.Background()); err != nil {
+			t.Logf("terminate: %v", err)
+		}
+	})
+
+	endpoint := minioEndpoint(t, ctx, container)
+	if err := createBucket(ctx, endpoint, username, password, bucket); err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+
+	cfg := s3backend.Config{
+		Endpoint:       endpoint,
+		Region:         "us-east-1",
+		Bucket:         bucket,
+		AccessKey:      username,
+		SecretKey:      password,
+		ForcePathStyle: true,
+	}
+	b, err := s3backend.Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("open backend: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+
+	// Deterministic body so range-read assertion can verify byte-exact match.
+	body := make([]byte, 1024)
+	prng := mathrand.New(mathrand.NewSource(7))
+	if _, err := io.ReadFull(prng, body); err != nil {
+		t.Fatalf("seed body: %v", err)
+	}
+
+	bucketID := newUUID(t)
+	putCtx := data.WithBucketID(ctx, bucketID)
+	m, err := b.PutChunks(putCtx, bytes.NewReader(body), "STANDARD")
+	if err != nil {
+		t.Fatalf("PutChunks: %v", err)
+	}
+	if m.BackendRef == nil {
+		t.Fatal("BackendRef nil after PutChunks")
+	}
+	if m.Size != int64(len(body)) {
+		t.Fatalf("size: want %d, got %d", len(body), m.Size)
+	}
+	if !strings.HasPrefix(m.BackendRef.Key, bucketID.String()+"/") {
+		t.Fatalf("key %q missing bucket-uuid prefix %q", m.BackendRef.Key, bucketID.String())
+	}
+
+	// Full-body GET via GetChunks.
+	rc, err := b.GetChunks(ctx, m, 0, m.Size)
+	if err != nil {
+		t.Fatalf("GetChunks: %v", err)
+	}
+	got, err := io.ReadAll(rc)
+	_ = rc.Close()
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatal("GetChunks body mismatch")
+	}
+
+	// Range GET via GetChunks: middle 64 bytes.
+	const off, length = int64(256), int64(64)
+	rc, err = b.GetChunks(ctx, m, off, length)
+	if err != nil {
+		t.Fatalf("GetChunks(range): %v", err)
+	}
+	rangeGot, err := io.ReadAll(rc)
+	_ = rc.Close()
+	if err != nil {
+		t.Fatalf("read range: %v", err)
+	}
+	if !bytes.Equal(rangeGot, body[off:off+length]) {
+		t.Fatal("GetChunks range bytes mismatch")
+	}
+
+	// Delete via interface, then verify backend object is gone.
+	if err := b.Delete(ctx, m); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	admin := newAdminClient(endpoint, username, password)
+	listOut, err := admin.ListObjectsV2(ctx, &awss3.ListObjectsV2Input{Bucket: ptr(bucket)})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(listOut.Contents) != 0 {
+		t.Fatalf("expected zero objects after Delete, got %d", len(listOut.Contents))
+	}
+}
+
+func newUUID(t *testing.T) uuid.UUID {
+	t.Helper()
+	id, err := uuid.NewRandom()
+	if err != nil {
+		t.Fatalf("uuid: %v", err)
+	}
+	return id
 }
 
 // minioEndpoint returns the http://-prefixed endpoint URL for the

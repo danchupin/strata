@@ -8,12 +8,14 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/danchupin/strata/internal/auth"
 	"github.com/danchupin/strata/internal/config"
 	"github.com/danchupin/strata/internal/data"
 	datamem "github.com/danchupin/strata/internal/data/memory"
 	datarados "github.com/danchupin/strata/internal/data/rados"
+	datas3 "github.com/danchupin/strata/internal/data/s3"
 	"github.com/danchupin/strata/internal/meta"
 	metacassandra "github.com/danchupin/strata/internal/meta/cassandra"
 	metamem "github.com/danchupin/strata/internal/meta/memory"
@@ -105,6 +107,22 @@ func buildDataBackend(cfg *config.Config) (data.Backend, error) {
 			Pool:       cfg.RADOS.Pool,
 			Namespace:  cfg.RADOS.Namespace,
 			Classes:    classes,
+		})
+	case "s3":
+		// US-009: dispatch to the s3-over-s3 data backend. Open performs
+		// the boot-time writability probe (US-005) so missing/read-only
+		// buckets fail fast at startup, never at first request.
+		return datas3.Open(context.Background(), datas3.Config{
+			Endpoint:          cfg.S3Backend.Endpoint,
+			Region:            cfg.S3Backend.Region,
+			Bucket:            cfg.S3Backend.Bucket,
+			AccessKey:         cfg.S3Backend.AccessKey,
+			SecretKey:         cfg.S3Backend.SecretKey,
+			ForcePathStyle:    cfg.S3Backend.ForcePathStyle,
+			PartSize:          cfg.S3Backend.PartSize,
+			UploadConcurrency: cfg.S3Backend.UploadConcurrency,
+			MaxRetries:        cfg.S3Backend.MaxRetries,
+			OpTimeout:         time.Duration(cfg.S3Backend.OpTimeoutSecs) * time.Second,
 		})
 	default:
 		return nil, errors.New("unknown data backend")

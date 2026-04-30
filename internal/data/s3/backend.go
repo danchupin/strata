@@ -27,9 +27,17 @@ import (
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go/logging"
+	"github.com/google/uuid"
 
 	"github.com/danchupin/strata/internal/data"
 )
+
+// BackendName is the canonical Manifest.BackendRef.Backend value emitted by
+// the s3-over-s3 data backend. Stored on every manifest produced by
+// PutChunks so future code paths can branch on backend identity (the
+// rados/memory paths leave BackendRef nil; chunks-shape manifests carry
+// no Backend label).
+const BackendName = "s3"
 
 // Backend is the S3-over-S3 data backend. A zero-value / New() Backend is
 // stub-only (every method returns errors.ErrUnsupported); a Backend built
@@ -493,16 +501,125 @@ func (b *Backend) DeleteBatch(ctx context.Context, refs []ObjectRef) ([]DeleteFa
 	return failures, nil
 }
 
+// PutChunks streams r straight into the backend bucket as ONE object
+// (US-009 native shape — Strata object = backend S3 object) and returns a
+// Manifest with BackendRef populated and Chunks left empty per the
+// 1:1 invariant documented on data.Manifest.
+//
+// Object key format: <bucket-uuid>/<object-uuid>. The bucket-uuid is read
+// from data.WithBucketID(ctx, b.ID); when absent the prefix falls back to a
+// random UUID — both shapes give random-prefix distribution that
+// AWS S3's automatic prefix partitioning needs to avoid hot-prefix
+// throttling. Per-bucket grouping (`aws s3 ls s3://<bb>/<bucket-uuid>/`)
+// is forensic bonus when the bucket id is threaded through.
+//
+// Manifest.ETag carries the backend object's ETag verbatim (single-shot
+// PutObject ETag = MD5; multipart ETag = composite hash-of-hashes-suffix —
+// gateway clients understand both shapes). VersionID carries the SDK
+// response VersionId verbatim with the three-state semantics from
+// data.BackendRef ("" / "null" / <uuid>).
 func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*data.Manifest, error) {
-	return nil, errors.ErrUnsupported
+	if b.uploader == nil {
+		return nil, errors.ErrUnsupported
+	}
+	if class == "" {
+		class = "STANDARD"
+	}
+	key := b.objectKey(ctx)
+
+	// manager.UploadOutput does not surface the streamed byte count, so
+	// wrap the reader to count. Used as the manifest Size — reading the
+	// SDK response's Content-Length header is not enough because the
+	// uploader can split the request into multiple part uploads on large
+	// objects.
+	cr := &countingReader{r: r}
+	res, err := b.Put(ctx, key, cr, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	m := &data.Manifest{
+		Class:     class,
+		Size:      cr.n,
+		ChunkSize: data.DefaultChunkSize,
+		ETag:      res.ETag,
+		BackendRef: &data.BackendRef{
+			Backend:   BackendName,
+			Key:       key,
+			ETag:      res.ETag,
+			Size:      cr.n,
+			VersionID: res.VersionID,
+		},
+	}
+	return m, nil
 }
 
+// GetChunks streams [offset, offset+length) of the manifest's backend
+// object back to the caller. The s3 backend serves only BackendRef-shape
+// manifests — feeding it a chunks-shape manifest (rados-shape) returns
+// errors.ErrUnsupported, which surfaces as a 500 at the gateway.
 func (b *Backend) GetChunks(ctx context.Context, m *data.Manifest, offset, length int64) (io.ReadCloser, error) {
-	return nil, errors.ErrUnsupported
+	if b.client == nil {
+		return nil, errors.ErrUnsupported
+	}
+	if m == nil || m.BackendRef == nil {
+		return nil, errors.ErrUnsupported
+	}
+	if offset < 0 || offset > m.Size {
+		return nil, fmt.Errorf("s3: offset %d out of range (size %d)", offset, m.Size)
+	}
+	if length <= 0 || offset+length > m.Size {
+		length = m.Size - offset
+	}
+	if length == 0 {
+		return io.NopCloser(strings.NewReader("")), nil
+	}
+	return b.GetRange(ctx, m.BackendRef.Key, offset, length)
 }
 
+// Delete removes the manifest's backend object via DeleteObject. When
+// BackendRef.VersionID is set, the SDK issues a versioned delete so
+// versioning-enabled backends do not accumulate delete-markers (US-008
+// defensive design). Idempotent — NoSuchKey is success.
+//
+// Manifests without BackendRef (legacy/rados-shape) are no-ops here:
+// chunks-shape manifests are deleted via the rados backend's Delete on
+// its own client. The s3 backend never sees rados chunks, but defensive
+// nil-check keeps the contract clean.
 func (b *Backend) Delete(ctx context.Context, m *data.Manifest) error {
-	return errors.ErrUnsupported
+	if b.client == nil {
+		return errors.ErrUnsupported
+	}
+	if m == nil || m.BackendRef == nil {
+		return nil
+	}
+	return b.DeleteObject(ctx, m.BackendRef.Key, m.BackendRef.VersionID)
 }
 
 func (b *Backend) Close() error { return nil }
+
+// objectKey builds the backend object key. Format <bucket-uuid>/<object-
+// uuid> per US-009 — UUID-shaped prefix gives random distribution for
+// AWS-side automatic prefix partitioning; per-bucket grouping is
+// forensic bonus when callers thread bucket id via data.WithBucketID.
+func (b *Backend) objectKey(ctx context.Context) string {
+	objectID := uuid.NewString()
+	if bucketID, ok := data.BucketIDFromContext(ctx); ok {
+		return bucketID.String() + "/" + objectID
+	}
+	return uuid.NewString() + "/" + objectID
+}
+
+// countingReader wraps io.Reader to tally bytes seen by PutChunks. The
+// manager.Uploader streams the bytes through this wrapper on every Read,
+// so n reflects the full uploaded length when Put returns.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}

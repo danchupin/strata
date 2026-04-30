@@ -187,6 +187,108 @@ Cycle: ralph/s3-over-s3-backend
   Field-number reservations 7..12 in manifest.proto are pre-allocated for
   US-008 sub-field flatten + US-013 SSE.Mode — additions outside that
   range MUST start at 13.
+- data.WithBucketID(ctx, id) / data.BucketIDFromContext(ctx) (US-009
+  internal/data/context.go) thread the Strata bucket UUID through the
+  data.Backend interface without widening the method signatures. The s3
+  backend reads it for the <bucket-uuid>/<object-uuid> key prefix; memory
+  / rados ignore. Set at every PUT-path callsite in s3api (putObject,
+  uploadPart, uploadPartCopy, copyObject) — DON'T forget when adding new
+  PUT sites or s3-backend objects lose the per-bucket grouping affordance.
+- s3api orphan-cleanup pattern (US-009): every callsite that previously
+  did `s.enqueueChunks(ctx, m.Chunks)` for a deleted/aborted manifest now
+  calls `s.enqueueOrphan(ctx, m)` instead. enqueueOrphan branches on
+  manifest shape: BackendRef-shape → synchronous s.Data.Delete (s3
+  backend object); chunks-shape → existing GC chunk-deletion queue (rados).
+  Add new orphan-cleanup paths via enqueueOrphan, not enqueueChunks.
+- s3.Backend's data.Backend bridge (US-009): PutChunks counts bytes via a
+  countingReader wrapper around the input io.Reader because manager.
+  UploadOutput does not surface the streamed length, then builds Manifest
+  with Class+Size+ETag+BackendRef and empty Chunks (1:1 invariant).
+  GetChunks rejects chunks-shape manifests with errors.ErrUnsupported —
+  s3 backend serves only BackendRef shapes; cross-feeding never happens
+  but the defensive check prevents silent fallthrough on a misconfigured
+  gateway. Delete on chunks-shape is a no-op (rados handles its own).
+
+## 2026-04-30 — US-009
+- Wired STRATA_DATA_BACKEND=s3 dispatch in cmd/strata-gateway/main.go
+  buildDataBackend → datas3.Open(ctx, datas3.Config{...}) sourced from
+  cfg.S3Backend (env-driven via koanf). Probe runs at boot (US-005) so
+  missing bucket / read-only mount fails fast.
+- Implemented data.Backend bridge on *s3.Backend: PutChunks streams the
+  body through manager.Upload via a countingReader, returns Manifest
+  with BackendRef = {Backend:"s3", Key:<bucket-uuid>/<object-uuid>,
+  ETag, Size, VersionID} and Chunks empty. GetChunks routes through
+  GetRange when m.BackendRef != nil (validates offset/length, special-
+  cases length=0 to a no-op reader). Delete routes through DeleteObject
+  with the captured VersionID (versioned-bucket safety per US-008).
+- Added data.WithBucketID / BucketIDFromContext (internal/data/context.go)
+  for threading the Strata bucket UUID without widening data.Backend.
+- s3api PUT-path callsites (putObject + uploadPart + uploadPartCopy +
+  copyObject) wrap r.Context() with data.WithBucketID(ctx, b.ID) before
+  s.Data.PutChunks so the s3 backend can build the
+  <bucket-uuid>/<object-uuid> key. Random UUID prefix fallback covers
+  paths where the bucket id isn't threaded.
+- Replaced s.enqueueChunks(ctx, m.Chunks) at five callsites (server.go
+  delete x2, multipart complete + abort, delete_objects bulk delete) with
+  s.enqueueOrphan(ctx, m). New helper synchronously deletes BackendRef-
+  shape manifests via s.Data.Delete and routes chunks-shape manifests
+  through the existing GC chunk-queue path. Synchronous backend delete is
+  acceptable per US-004 deferred-GC note; backend bucket lifecycle
+  AbortIncompleteMultipartUpload + cross-region docs land in US-017.
+- Unit tests (no MinIO): TestPutChunksBuildsBackendRefManifest (asserts
+  BackendRef shape + bucket-uuid prefix via http.RoundTripper),
+  TestPutChunksObjectKeyFallback (random UUID prefix when no bucket id),
+  TestGetChunksRejectsChunksShapeManifest, TestDeleteWithoutBackendRefIs-
+  NoOp.
+- Integration tests (build tag `integration`): TestPutChunksGetChunks-
+  DeleteRoundTrip in internal/data/s3 (PUT 1 KiB → full GET → range GET
+  → Delete via the data.Backend interface against MinIO test-
+  container, asserts <bucket-uuid>/ prefix + zero objects post-delete).
+  TestGatewayDispatchesToS3Backend in internal/s3api (full HTTP path
+  through s3api.New(s3backend, memmeta), asserts 1:1 backend object
+  count after small + 5 MiB PUT, range GET through gateway, DELETE
+  cleanup). The end-to-end gateway-over-MinIO assertion is the AC's
+  smoke-pass equivalent until US-011/US-012 wire the docker-compose
+  profile + make smoke-s3-backend target.
+- Files: internal/data/context.go (new), internal/data/s3/{backend.go,
+  backend_test.go, backend_integration_test.go}, cmd/strata-gateway/
+  main.go, internal/s3api/{server.go, multipart.go, copy_object.go,
+  delete_objects.go, s3backend_integration_test.go (new)}.
+- **Learnings:**
+  - data.Backend.PutChunks doesn't carry the Strata bucket id but US-009
+    AC needs <bucket-uuid>/<object-uuid> keys. Choices: (a) widen the
+    interface (touches rados/memory), (b) type-assert s3.Backend in
+    s3api (couples gateway to backend type), (c) thread via context.
+    Context-value (option c) keeps rados/memory unchanged and lets new
+    PUT-path callers opt in by wrapping ctx — chosen here.
+  - manager.UploadOutput surfaces ETag + VersionID but NOT the streamed
+    byte count. Wrap the input io.Reader with a counting wrapper that
+    tallies n on each Read; the count is correct after Upload returns
+    because the SDK consumes the reader to EOF (or context cancel).
+  - GC worker (internal/gc/worker.go) drains only the chunk-deletion
+    queue and constructs `&data.Manifest{Chunks: []ChunkRef{...}}` from
+    each entry — never sees BackendRef. Backend-object cleanup runs
+    synchronously through the s3api enqueueOrphan path on the request
+    goroutine. Future cycle that adds a backend-object queue can extend
+    meta.Store.EnqueueChunkDeletion or add a separate API; out of scope.
+  - The 1:1 invariant from data.Manifest doc-comment (BackendRef set ⇒
+    Chunks empty, vice versa) is now load-bearing across PutChunks /
+    GetChunks / Delete on the s3 backend AND across enqueueOrphan in
+    s3api. Anywhere a Manifest is constructed, exactly one of the two
+    shapes must be populated.
+  - The s3 backend's GetChunks / Delete check b.client (live Backend)
+    AND m.BackendRef. Stub Backend (New(), no Open) trips the client
+    check first → ErrUnsupported preserved for the existing US-001 stub
+    contract; chunks-shape fed into a live s3 backend trips the second
+    check → ErrUnsupported (defensive, never silently fall through).
+  - cancelOnCloseReader chain still works through GetChunks → GetRange.
+    The per-op timeout (US-006) starts at GetRange and is released when
+    the gateway closes the body (`defer rc.Close()` at server.go:519).
+  - `make smoke` validation against MinIO is deferred to US-011/US-012
+    (compose profile + Makefile target + init-minio one-shot). The
+    gateway-against-MinIO integration test (TestGatewayDispatchesToS3-
+    Backend) covers the same PUT/GET/DELETE happy path with the same
+    HTTP wire format under the existing build tag.
 
 ## 2026-04-30 — US-007
 - Added internal/data/s3/metrics.go: three Prometheus collectors

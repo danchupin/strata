@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/google/uuid"
 
 	"github.com/danchupin/strata/internal/data"
 )
@@ -272,5 +273,165 @@ func putObjectSuccessResponse(req *http.Request) *http.Response {
 		Body:          io.NopCloser(strings.NewReader("")),
 		ContentLength: 0,
 		Request:       req,
+	}
+}
+
+// TestPutChunksBuildsBackendRefManifest pins the US-009 native shape:
+// PutChunks must set Manifest.BackendRef ({Backend:"s3", Key:..., ETag,
+// Size, VersionID}) and leave Chunks empty (1:1 invariant from US-008).
+// Uses an in-process http.RoundTripper instead of MinIO so the test is
+// hermetic and runs under `go test ./...`.
+func TestPutChunksBuildsBackendRefManifest(t *testing.T) {
+	ctx := context.Background()
+	const payload = "hello strata"
+
+	seq := &sequenceTransport{
+		responses: []responseFn{putObjectSuccessResponse},
+	}
+	cfg := Config{
+		Bucket:         "strata-test",
+		Region:         "us-east-1",
+		Endpoint:       "http://example.invalid",
+		AccessKey:      "ak",
+		SecretKey:      "sk",
+		ForcePathStyle: true,
+		SkipProbe:      true,
+		HTTPClient:     &http.Client{Transport: seq},
+	}
+	b, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	bucketID := uuid.New()
+	m, err := b.PutChunks(data.WithBucketID(ctx, bucketID), strings.NewReader(payload), "STANDARD")
+	if err != nil {
+		t.Fatalf("PutChunks: %v", err)
+	}
+	if m.BackendRef == nil {
+		t.Fatal("Manifest.BackendRef must be non-nil for s3 backend")
+	}
+	if len(m.Chunks) != 0 {
+		t.Fatalf("Manifest.Chunks must be empty for BackendRef-shape, got %d", len(m.Chunks))
+	}
+	if m.BackendRef.Backend != BackendName {
+		t.Fatalf("BackendRef.Backend: want %q, got %q", BackendName, m.BackendRef.Backend)
+	}
+	if !strings.HasPrefix(m.BackendRef.Key, bucketID.String()+"/") {
+		t.Fatalf("BackendRef.Key must start with bucket-uuid prefix %q, got %q", bucketID.String(), m.BackendRef.Key)
+	}
+	if m.BackendRef.ETag == "" {
+		t.Fatal("BackendRef.ETag must mirror backend ETag")
+	}
+	if m.ETag != m.BackendRef.ETag {
+		t.Fatalf("Manifest.ETag (%q) must equal BackendRef.ETag (%q)", m.ETag, m.BackendRef.ETag)
+	}
+	if m.Size != int64(len(payload)) {
+		t.Fatalf("Manifest.Size: want %d, got %d", len(payload), m.Size)
+	}
+	if m.BackendRef.Size != int64(len(payload)) {
+		t.Fatalf("BackendRef.Size: want %d, got %d", len(payload), m.BackendRef.Size)
+	}
+	if m.Class != "STANDARD" {
+		t.Fatalf("Manifest.Class: want STANDARD, got %q", m.Class)
+	}
+}
+
+// TestPutChunksObjectKeyFallback verifies the random-prefix fallback for
+// callers that don't thread a bucket id via data.WithBucketID. The key
+// still has a UUID-shaped prefix so AWS S3 prefix partitioning kicks in.
+func TestPutChunksObjectKeyFallback(t *testing.T) {
+	ctx := context.Background()
+
+	seq := &sequenceTransport{
+		responses: []responseFn{putObjectSuccessResponse},
+	}
+	cfg := Config{
+		Bucket:         "strata-test",
+		Region:         "us-east-1",
+		Endpoint:       "http://example.invalid",
+		AccessKey:      "ak",
+		SecretKey:      "sk",
+		ForcePathStyle: true,
+		SkipProbe:      true,
+		HTTPClient:     &http.Client{Transport: seq},
+	}
+	b, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	m, err := b.PutChunks(ctx, strings.NewReader("x"), "")
+	if err != nil {
+		t.Fatalf("PutChunks: %v", err)
+	}
+	if m.BackendRef == nil {
+		t.Fatal("BackendRef nil")
+	}
+	parts := strings.SplitN(m.BackendRef.Key, "/", 2)
+	if len(parts) != 2 {
+		t.Fatalf("Key must be <prefix>/<id>, got %q", m.BackendRef.Key)
+	}
+	if _, err := uuid.Parse(parts[0]); err != nil {
+		t.Fatalf("Key prefix %q must be UUID-shaped: %v", parts[0], err)
+	}
+	if _, err := uuid.Parse(parts[1]); err != nil {
+		t.Fatalf("Key suffix %q must be UUID-shaped: %v", parts[1], err)
+	}
+	if m.Class != "STANDARD" {
+		t.Fatalf("empty class default: want STANDARD, got %q", m.Class)
+	}
+}
+
+// TestGetChunksRejectsChunksShapeManifest pins the s3 backend's
+// BackendRef-only contract: a chunks-shape manifest (rados-shape) fed
+// into GetChunks returns errors.ErrUnsupported — never silently fail
+// open or panic.
+func TestGetChunksRejectsChunksShapeManifest(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		Bucket:         "strata-test",
+		Region:         "us-east-1",
+		Endpoint:       "http://example.invalid",
+		AccessKey:      "ak",
+		SecretKey:      "sk",
+		ForcePathStyle: true,
+		SkipProbe:      true,
+		HTTPClient:     &http.Client{Transport: &sequenceTransport{}},
+	}
+	b, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	m := &data.Manifest{Chunks: []data.ChunkRef{{Pool: "p", OID: "k", Size: 1}}, Size: 1}
+	if _, err := b.GetChunks(ctx, m, 0, 1); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("GetChunks(chunks-shape): want errors.ErrUnsupported, got %v", err)
+	}
+}
+
+// TestDeleteWithoutBackendRefIsNoOp pins the cleanup contract: a
+// chunks-shape (or zero-value) manifest is not the s3 backend's
+// responsibility — Delete returns nil without touching the network.
+func TestDeleteWithoutBackendRefIsNoOp(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		Bucket:         "strata-test",
+		Region:         "us-east-1",
+		Endpoint:       "http://example.invalid",
+		AccessKey:      "ak",
+		SecretKey:      "sk",
+		ForcePathStyle: true,
+		SkipProbe:      true,
+		HTTPClient:     &http.Client{Transport: &sequenceTransport{}},
+	}
+	b, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := b.Delete(ctx, nil); err != nil {
+		t.Fatalf("Delete(nil): want nil, got %v", err)
+	}
+	if err := b.Delete(ctx, &data.Manifest{Chunks: []data.ChunkRef{{OID: "k"}}}); err != nil {
+		t.Fatalf("Delete(chunks-shape): want nil, got %v", err)
 	}
 }
