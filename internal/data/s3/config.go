@@ -60,6 +60,35 @@ type Config struct {
 	// a single object since manager.Uploader already retries each
 	// part on transient failures.
 	MultipartTimeout time.Duration
+
+	// SSEMode selects the encryption disposition for backend writes
+	// (US-013). One of data.SSEMode{Passthrough,Strata,Both}; empty
+	// resolves to SSEModePassthrough at Open.
+	//
+	//   passthrough: every Strata Put forwards an
+	//     x-amz-server-side-encryption header to the backend (AES256
+	//     by default; aws:kms when SSEKMSKeyID is set). The backend
+	//     stores ciphertext; GET returns plaintext via backend
+	//     transparent decrypt. Default — matches PRD US-013.
+	//
+	//   strata:      no backend SSE header is sent. Bytes go to the
+	//     backend as-is on the assumption that gateway-side envelope
+	//     encryption already wrapped them. Compliance regimes that
+	//     keep keys away from the storage tier.
+	//
+	//   both:        backend SSE applies AND gateway-side envelope
+	//     encryption is expected. Two independent encryption
+	//     boundaries.
+	//
+	// Manifest.SSE.Mode records the chosen mode at write time so the
+	// GET path branches per-object, not per current backend config.
+	SSEMode string
+
+	// SSEKMSKeyID, when set, selects aws:kms over AES256 for the
+	// backend SSE header in passthrough/both modes. Empty falls back to
+	// AES256 (SSE-S3, the no-key-management default). Ignored in strata
+	// mode because no header is sent.
+	SSEKMSKeyID string
 }
 
 // ProbeKey is the sentinel object used by the boot-time writability

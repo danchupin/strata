@@ -49,12 +49,16 @@ func (b *Backend) CreateBackendMultipart(ctx context.Context, class string) (str
 	}
 	bucket := b.bucket
 	key := b.objectKey(ctx)
-	opCtx, cancel := b.opCtx(ctx)
-	defer cancel()
-	out, err := b.client.CreateMultipartUpload(opCtx, &awss3.CreateMultipartUploadInput{
+	createIn := &awss3.CreateMultipartUploadInput{
 		Bucket: &bucket,
 		Key:    &key,
-	})
+	}
+	// US-013: SSE is set at multipart-init only; UploadPart inherits it
+	// from the session, so the per-part path stays SSE-free.
+	b.applyMultipartSSE(createIn)
+	opCtx, cancel := b.opCtx(ctx)
+	defer cancel()
+	out, err := b.client.CreateMultipartUpload(opCtx, createIn)
 	if err != nil {
 		return "", fmt.Errorf("s3: create multipart %s: %w", key, err)
 	}
@@ -177,6 +181,7 @@ func (b *Backend) CompleteBackendMultipart(ctx context.Context, handle string, p
 			ETag:      etag,
 			VersionID: versionID,
 		},
+		SSE: b.manifestSSE(),
 	}
 	return m, nil
 }

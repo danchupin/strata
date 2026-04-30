@@ -42,6 +42,10 @@ type Manifest struct {
 	ETag       string
 	Chunks     []ChunkRef
 	BackendRef *BackendRef `json:",omitempty"`
+	// SSE records the encryption disposition chosen at write time (US-013).
+	// nil for legacy manifests written before US-013 — those decode as
+	// passthrough/none, identical to the pre-flag behaviour.
+	SSE *SSEInfo `json:",omitempty"`
 }
 
 type ChunkRef struct {
@@ -76,4 +80,51 @@ type BackendRef struct {
 	ETag      string `json:",omitempty"`
 	Size      int64  `json:",omitempty"`
 	VersionID string `json:",omitempty"`
+}
+
+// SSE encryption modes (US-013). Recorded per-object in Manifest.SSE.Mode so
+// the GET path can decrypt according to how the object was written, not the
+// current backend config (which may have been flipped after the write).
+const (
+	// SSEModePassthrough is the default: every Strata Put forwards an
+	// x-amz-server-side-encryption header to the backend. Encryption-at-rest
+	// is the backend's job; bytes leave Strata in cleartext on the wire to
+	// the backend and the backend stores ciphertext.
+	SSEModePassthrough = "passthrough"
+	// SSEModeStrata applies Strata's own envelope encryption (SSE-S3 /
+	// SSE-KMS) before the bytes hit the backend. The backend stores the
+	// already-encrypted bytes as plain application/octet-stream — no
+	// backend-side SSE header. Reserved for compliance setups that want
+	// keys never visible to the storage tier; gateway-side envelope
+	// encryption is plumbed by US-013 but not yet implemented here, so in
+	// this mode bytes pass through unmodified — the no-backend-SSE
+	// behaviour is the load-bearing observable.
+	SSEModeStrata = "strata"
+	// SSEModeBoth runs Strata's envelope encryption AND backend SSE, for
+	// regimes that mandate two independent encryption boundaries.
+	SSEModeBoth = "both"
+)
+
+// SSE algorithm tags — pinned to the AWS S3 wire vocabulary so they round-trip
+// through the SDK's typed enum without translation.
+const (
+	SSEAlgorithmAES256 = "AES256"
+	SSEAlgorithmKMS    = "aws:kms"
+)
+
+// SSEInfo records the encryption disposition of a single Strata object at
+// write time. Persisted on the Manifest so future GET / re-PUT paths can
+// branch on the mode that produced the object regardless of the backend's
+// current configuration.
+//
+// Fields:
+//   - Mode is one of SSEMode{Passthrough,Strata,Both}.
+//   - Algorithm captures the wire SSE algorithm sent to the backend
+//     (SSEAlgorithmAES256 / SSEAlgorithmKMS), or empty when no backend SSE
+//     header was sent (SSEModeStrata).
+//   - KMSKeyID carries the resolved KMS key id when Algorithm == aws:kms.
+type SSEInfo struct {
+	Mode      string `json:",omitempty"`
+	Algorithm string `json:",omitempty"`
+	KMSKeyID  string `json:",omitempty"`
 }

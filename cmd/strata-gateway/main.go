@@ -127,6 +127,8 @@ func buildDataBackend(cfg *config.Config) (data.Backend, error) {
 			UploadConcurrency: cfg.S3Backend.UploadConcurrency,
 			MaxRetries:        cfg.S3Backend.MaxRetries,
 			OpTimeout:         time.Duration(cfg.S3Backend.OpTimeoutSecs) * time.Second,
+			SSEMode:           cfg.S3Backend.SSEMode,
+			SSEKMSKeyID:       cfg.S3Backend.SSEKMSKeyID,
 		})
 	default:
 		return nil, errors.New("unknown data backend")

@@ -69,6 +69,16 @@ type S3BackendConfig struct {
 	// separate 10-min ceiling that is not operator-tunable today —
 	// bump OpTimeoutSecs only when small-op latency runs hot.
 	OpTimeoutSecs int `koanf:"op_timeout_secs"`
+	// SSEMode (US-013) selects the encryption disposition for backend
+	// writes. One of {passthrough, strata, both}; empty resolves to
+	// passthrough at s3.Open. Recorded per-object on Manifest.SSE so
+	// the GET path branches per-object regardless of current backend
+	// config. See internal/data/s3.Config.SSEMode for semantics.
+	SSEMode string `koanf:"sse_mode"`
+	// SSEKMSKeyID, when set, selects aws:kms over AES256 for the backend
+	// SSE header in passthrough/both. Empty falls back to AES256
+	// (SSE-S3). Ignored in strata mode.
+	SSEKMSKeyID string `koanf:"sse_kms_key_id"`
 }
 
 type AuthConfig struct {
@@ -154,6 +164,8 @@ var envMap = map[string]string{
 	"STRATA_S3_BACKEND_UPLOAD_CONCURRENCY": "s3_backend.upload_concurrency",
 	"STRATA_S3_BACKEND_MAX_RETRIES":        "s3_backend.max_retries",
 	"STRATA_S3_BACKEND_OP_TIMEOUT_SECS":    "s3_backend.op_timeout_secs",
+	"STRATA_S3_BACKEND_SSE_MODE":           "s3_backend.sse_mode",
+	"STRATA_S3_BACKEND_SSE_KMS_KEY_ID":     "s3_backend.sse_kms_key_id",
 	"STRATA_AUTH_MODE":                "auth.mode",
 	"STRATA_STATIC_CREDENTIALS":       "auth.static_credentials",
 	"STRATA_LIFECYCLE_INTERVAL":       "lifecycle.interval",
@@ -246,6 +258,11 @@ func (c *S3BackendConfig) validate() error {
 	}
 	if c.OpTimeoutSecs < 0 {
 		return fmt.Errorf("STRATA_S3_BACKEND_OP_TIMEOUT_SECS must be non-negative (got %d)", c.OpTimeoutSecs)
+	}
+	switch c.SSEMode {
+	case "", "passthrough", "strata", "both":
+	default:
+		return fmt.Errorf("STRATA_S3_BACKEND_SSE_MODE %q is not one of {passthrough, strata, both}", c.SSEMode)
 	}
 	return nil
 }

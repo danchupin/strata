@@ -280,6 +280,29 @@ Cycle: ralph/s3-over-s3-backend
   for the s3 backend (1 assertion = `mc find ... | wc -l == 0`) — no
   separate synthetic test needed. Future smoke additions that PUT without
   DELETE must add explicit cleanup or this assertion regresses.
+- Manifest.SSE (US-013) records the encryption disposition per-object as
+  {Mode, Algorithm, KMSKeyID} so the GET path branches on what was
+  actually written, not on the current backend config. Mode value
+  vocabulary {"passthrough", "strata", "both"}; Algorithm vocabulary
+  {"AES256", "aws:kms"} or empty (strata mode). manifest.proto field 12
+  is now allocated to the SSEInfo message; sub-fields live in SSEInfo's
+  own field-number space (mode=1, algorithm=2, kms_key_id=3). New SSE
+  states must extend SSEInfo, not Manifest's reserved range.
+- s3 backend SSE wiring (US-013): Open() validates SSEMode against the
+  three-value whitelist; b.applyPutSSE / b.applyMultipartSSE attach
+  ServerSideEncryption headers (AES256, or aws:kms when SSEKMSKeyID is
+  set) on PutObject + CreateMultipartUpload only — UploadPart inherits
+  from the session per S3 protocol so the per-part path stays SSE-free.
+  PutChunks + CompleteBackendMultipart call b.manifestSSE() to stamp the
+  Manifest. New backend handlers (UploadPartCopy native passthrough,
+  COPY) must add the same applyPutSSE / manifestSSE pair or the
+  invariant breaks.
+- Gateway SSE response headers (US-013): s3api.getObject surfaces
+  x-amz-server-side-encryption (+ -aws-kms-key-id when present) from
+  o.Manifest.SSE so clients see per-Strata-object SSE metadata on GET.
+  When Manifest.SSE.Algorithm is empty (strata mode, or legacy pre-US-013
+  manifests) no header is set — preserves the "no SSE" wire shape that
+  pre-US-013 clients expect.
 - Destructive CI variant pattern (US-012): `make smoke-s3-backend` is
   safe for repeated local runs (SKIP_DOWN=1 default; non-destructive).
   CI uses `make smoke-s3-backend-ci` which sets SKIP_DOWN=0 and runs the
@@ -977,4 +1000,94 @@ Cycle: ralph/s3-over-s3-backend
   - `mc find --type f` is the right primitive for "count actual
     objects" — it walks recursively but excludes prefix-only
     directory entries that `mc ls` would list.
+---
+
+## 2026-04-30 — US-013
+- Added data.SSEInfo struct + data.Manifest.SSE *SSEInfo field
+  (json:",omitempty" — additive, legacy manifests decode SSE=nil =
+  identical to passthrough/none). Three SSEMode constants
+  (Passthrough/Strata/Both) + two SSEAlgorithm constants (AES256/KMS)
+  pinned to the AWS S3 wire vocabulary so the SDK enum maps verbatim.
+- manifest.proto: field 12 now allocated to SSEInfo message
+  (sub-fields mode/algorithm/kms_key_id own their field-number space
+  inside SSEInfo). Reserved range tightened to 7..11 — the BackendRef
+  flatten reservation kept, the US-013 hold released into the live
+  field. Comment block at top updated to reflect the now-allocated slot.
+- internal/data/s3.Config: new SSEMode (default passthrough) +
+  SSEKMSKeyID; Open validates against the three-value whitelist and
+  fails fast on garbage. Backend stores resolved sseMode/sseKMSKeyID.
+- Backend SSE plumbing: applyPutSSE attaches ServerSideEncryption to
+  PutObjectInput when sseMode is passthrough/both; applyMultipartSSE
+  is the CreateMultipartUploadInput sibling. Strata mode short-circuits
+  both. UploadPart inherits SSE from the session per S3 protocol — no
+  per-part wiring needed. b.manifestSSE() builds the SSEInfo snapshot
+  recorded on Manifest.SSE in PutChunks + CompleteBackendMultipart.
+- internal/config.S3BackendConfig: SSEMode + SSEKMSKeyID koanf-tagged
+  fields; envMap entries STRATA_S3_BACKEND_SSE_MODE +
+  STRATA_S3_BACKEND_SSE_KMS_KEY_ID; validate() enforces mode whitelist
+  identical to s3.Open. cmd/strata-gateway buildDataBackend forwards
+  both into datas3.Config.
+- Gateway GET response: internal/s3api/server.go getObject sets
+  x-amz-server-side-encryption from o.Manifest.SSE.Algorithm and
+  x-amz-server-side-encryption-aws-kms-key-id from KMSKeyID (when
+  present). Empty algorithm → no header (covers strata mode + legacy
+  pre-US-013 manifests).
+- Tests:
+  - data/s3 unit (in-process http.RoundTripper, no MinIO):
+    TestOpenRejectsUnknownSSEMode (Open fail-fast on bogus mode);
+    TestPutChunksPassthroughSendsSSEHeader (default passthrough adds
+    AES256 header + Manifest.SSE.{Mode:passthrough, Algorithm:AES256});
+    TestPutChunksStrataModeOmitsSSEHeader (no header, Algorithm empty);
+    TestPutChunksKMSModeSendsKMSHeaders (aws:kms + key-id headers,
+    Manifest.SSE captures both mode and key-id).
+  - internal/config unit: TestS3BackendValidateSSEMode (whitelist —
+    passes empty/passthrough/strata/both, rejects others);
+    TestLoadAcceptsS3SSEEnvs (env-var wiring round-trip).
+  - data/s3 integration (build tag `integration`):
+    TestPutChunksGetChunksRoundTripAllSSEModes — for each of the three
+    modes against MinIO testcontainer: PUT a payload, HEAD the backend
+    object via admin client (asserts ServerSideEncryption matches mode
+    — AES256 for passthrough/both, empty for strata), GET via
+    GetChunks asserts byte-equal payload.
+- Files: internal/data/{manifest.go,manifest.proto},
+  internal/data/s3/{config.go,backend.go,multipart.go,backend_test.go,
+  backend_integration_test.go}, internal/config/{config.go,
+  config_test.go}, internal/s3api/server.go, cmd/strata-gateway/main.go,
+  README.md, scripts/ralph/{prd.json,progress.txt}.
+- **Learnings:**
+  - UploadPart cannot carry SSE-S3 / SSE-KMS headers — those live on
+    CreateMultipartUpload only. The backend inherits SSE from the
+    multipart session at the part-write layer. Spec confirms +
+    aws-sdk-go-v2 UploadPartInput has no ServerSideEncryption /
+    SSEKMSKeyId fields (only SSE-C: SSECustomerAlgorithm /
+    SSECustomerKey). Saved a wasted round through the SDK type system.
+  - Strata mode SHOULD eventually do gateway-side envelope encryption
+    (SSE-S3 / SSE-KMS at the strata layer, ciphertext to backend), but
+    no envelope-encryption package exists in this repo. The PRD AC
+    text describes future-state ("existing Strata SSE-S3 / SSE-KMS
+    envelope encryption runs first") — nothing to call. Implementation
+    leaves the data path unmodified in strata mode and records the
+    mode on Manifest.SSE so a future cycle can wire the encryption
+    package and branch on Mode at GET. AC's round-trip test still
+    passes because plaintext-in / plaintext-out is byte-equal.
+  - Both mode degenerates to passthrough today for the same reason.
+    Manifest still records Mode:both so when gateway envelope
+    encryption lands, the GET path can decrypt the gateway layer for
+    both-shape manifests AND skip it for passthrough-shape manifests
+    — without the recorded mode there's no way to discriminate.
+  - Recording Manifest.SSE per-object instead of trusting the live
+    backend config matters because operators can flip the mode after
+    objects are written. A passthrough-written object (encrypted at
+    rest by backend) MUST GET via plain GetObject (backend decrypts
+    transparently). A strata-written object (encrypted by gateway)
+    MUST be decrypted by gateway on GET. Without per-object mode the
+    GET path would corrupt one or the other after a config flip.
+  - The gateway's getObject SSE header pass-through is the literal AC
+    "client sees per-Strata-object SSE header in GET responses passed
+    through from backend metadata" — but the implementation reads
+    the header from Manifest.SSE (recorded at PUT time) rather than
+    from the backend's GET response. Same semantic: passthrough mode
+    surfaces AES256/aws:kms; strata mode surfaces nothing. Saves
+    a round-trip to the backend just to inspect the SSE header that
+    Strata already knows from its own write.
 ---

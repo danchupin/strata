@@ -498,6 +498,18 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	w.Header().Set("Last-Modified", o.Mtime.UTC().Format(http.TimeFormat))
 	w.Header().Set("x-amz-storage-class", o.StorageClass)
 	w.Header().Set("Accept-Ranges", "bytes")
+	// US-013 SSE pass-through: when the object was written through the s3
+	// backend in passthrough/both mode, surface the recorded backend SSE
+	// header on the GET response so clients see per-object SSE metadata.
+	// strata mode (no backend SSE header) records SSE.Algorithm == "",
+	// which keeps the response header off — gateway-level envelope
+	// encryption is plumbed elsewhere.
+	if o.Manifest != nil && o.Manifest.SSE != nil && o.Manifest.SSE.Algorithm != "" {
+		w.Header().Set("x-amz-server-side-encryption", o.Manifest.SSE.Algorithm)
+		if o.Manifest.SSE.KMSKeyID != "" {
+			w.Header().Set("x-amz-server-side-encryption-aws-kms-key-id", o.Manifest.SSE.KMSKeyID)
+		}
+	}
 	if len(o.Tags) > 0 {
 		w.Header().Set("x-amz-tagging-count", strconv.Itoa(len(o.Tags)))
 	}

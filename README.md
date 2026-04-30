@@ -85,6 +85,8 @@ A successful `make smoke` validates bucket CRUD, object PUT/GET/HEAD/DELETE (inc
 | `STRATA_S3_BACKEND_UPLOAD_CONCURRENCY` | `4` | parallel part uploads per Put. Memory peak ≈ part size × concurrency (default 64 MiB) |
 | `STRATA_S3_BACKEND_MAX_RETRIES` | `5` | total SDK attempts per request (initial + retries) under adaptive retry mode. Retries on 503 SlowDown / 429 / 5xx / network errors; never on 4xx auth/not-found |
 | `STRATA_S3_BACKEND_OP_TIMEOUT_SECS` | `30` | per-op deadline for small ops (Get / GetRange / DeleteObject / DeleteBatch / Probe). Multipart Put has a separate 10-min ceiling. Bound includes body-stream lifetime — operators with slow links should bump |
+| `STRATA_S3_BACKEND_SSE_MODE` | `passthrough` | encryption disposition for backend writes (US-013). `passthrough` (default) forwards `x-amz-server-side-encryption` to the backend per Put — backend handles encryption-at-rest, GET surfaces the SSE header back to clients via `Manifest.SSE`. `strata` sends no backend SSE header (gateway-side envelope encryption is plumbed but not yet wired here). `both` runs Strata envelope encryption AND backend SSE for two independent boundaries. Mode is recorded per-object on `Manifest.SSE.Mode` |
+| `STRATA_S3_BACKEND_SSE_KMS_KEY_ID` | `` | when set in `passthrough`/`both` mode, switches the backend SSE header from `AES256` (SSE-S3) to `aws:kms` with this key id (SSE-KMS). Ignored in `strata` mode |
 | `STRATA_AUTH_MODE` | `off` | `off` accepts anything, `required` enforces SigV4 |
 | `STRATA_STATIC_CREDENTIALS` | `` | comma-separated `accesskey:secret[:owner]` entries for dev credentials |
 | `STRATA_LIFECYCLE_INTERVAL` | `60s` | `strata-lifecycle` tick interval (Go duration) |

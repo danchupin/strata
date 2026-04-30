@@ -947,6 +947,115 @@ func TestPutChunksGetChunksDeleteRoundTrip(t *testing.T) {
 	}
 }
 
+// TestPutChunksGetChunksRoundTripAllSSEModes pins US-013 against MinIO:
+// PUT → GET round-trip in each of the three SSE modes (passthrough,
+// strata, both) must return byte-equal payload AND the backend object's
+// recorded SSE algorithm must match the mode (AES256 for passthrough +
+// both, empty for strata). Manifest.SSE is stamped per-mode.
+func TestPutChunksGetChunksRoundTripAllSSEModes(t *testing.T) {
+	ctx := context.Background()
+
+	const (
+		username = "minioadmin"
+		password = "minioadmin"
+	)
+
+	container, err := tcminio.Run(ctx, "minio/minio:latest",
+		tcminio.WithUsername(username),
+		tcminio.WithPassword(password),
+	)
+	if err != nil {
+		t.Fatalf("start minio: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := container.Terminate(context.Background()); err != nil {
+			t.Logf("terminate: %v", err)
+		}
+	})
+
+	endpoint := minioEndpoint(t, ctx, container)
+
+	cases := []struct {
+		mode         string
+		bucket       string
+		wantBackend  string // backend ServerSideEncryption header echoed by HEAD
+		wantManifest string // Manifest.SSE.Algorithm
+	}{
+		{"passthrough", "strata-test-sse-passthrough", "AES256", data.SSEAlgorithmAES256},
+		{"strata", "strata-test-sse-strata", "", ""},
+		{"both", "strata-test-sse-both", "AES256", data.SSEAlgorithmAES256},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.mode, func(t *testing.T) {
+			if err := createBucket(ctx, endpoint, username, password, tc.bucket); err != nil {
+				t.Fatalf("create bucket: %v", err)
+			}
+
+			cfg := s3backend.Config{
+				Endpoint:       endpoint,
+				Region:         "us-east-1",
+				Bucket:         tc.bucket,
+				AccessKey:      username,
+				SecretKey:      password,
+				ForcePathStyle: true,
+				SSEMode:        tc.mode,
+			}
+			b, err := s3backend.Open(ctx, cfg)
+			if err != nil {
+				t.Fatalf("open backend: %v", err)
+			}
+			t.Cleanup(func() { _ = b.Close() })
+
+			payload := []byte("US-013 round-trip payload " + tc.mode)
+			m, err := b.PutChunks(ctx, bytes.NewReader(payload), "STANDARD")
+			if err != nil {
+				t.Fatalf("PutChunks: %v", err)
+			}
+			if m.SSE == nil {
+				t.Fatalf("Manifest.SSE: must be set, got nil")
+			}
+			if m.SSE.Mode != tc.mode {
+				t.Fatalf("Manifest.SSE.Mode: want %q, got %q", tc.mode, m.SSE.Mode)
+			}
+			if m.SSE.Algorithm != tc.wantManifest {
+				t.Fatalf("Manifest.SSE.Algorithm: want %q, got %q", tc.wantManifest, m.SSE.Algorithm)
+			}
+
+			// Backend-side check via HEAD: the recorded SSE header
+			// must match the mode (or be absent in strata mode).
+			admin := newAdminClient(endpoint, username, password)
+			head, err := admin.HeadObject(ctx, &awss3.HeadObjectInput{
+				Bucket: ptr(tc.bucket),
+				Key:    ptr(m.BackendRef.Key),
+			})
+			if err != nil {
+				t.Fatalf("head: %v", err)
+			}
+			gotBackend := string(head.ServerSideEncryption)
+			if gotBackend != tc.wantBackend {
+				t.Fatalf("backend SSE header: want %q, got %q", tc.wantBackend, gotBackend)
+			}
+
+			// Bytes round-trip: backend (when SSE applies) decrypts
+			// transparently on GET; strata mode stores plaintext —
+			// either way GetChunks returns the original payload.
+			rc, err := b.GetChunks(ctx, m, 0, m.Size)
+			if err != nil {
+				t.Fatalf("GetChunks: %v", err)
+			}
+			got, err := io.ReadAll(rc)
+			_ = rc.Close()
+			if err != nil {
+				t.Fatalf("read body: %v", err)
+			}
+			if !bytes.Equal(got, payload) {
+				t.Fatalf("body mismatch: want %q, got %q", payload, got)
+			}
+		})
+	}
+}
+
 func newUUID(t *testing.T) uuid.UUID {
 	t.Helper()
 	id, err := uuid.NewRandom()

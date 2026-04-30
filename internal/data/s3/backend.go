@@ -48,6 +48,15 @@ type Backend struct {
 	uploader         *manager.Uploader
 	opTimeout        time.Duration
 	multipartTimeout time.Duration
+	// sseMode is one of data.SSEMode{Passthrough,Strata,Both}; never the
+	// empty string after Open (defaults to passthrough). Used by
+	// Put/PutChunks/CreateBackendMultipart to decide whether to set the
+	// backend ServerSideEncryption header and what to record on the
+	// Manifest.SSE.
+	sseMode string
+	// sseKMSKeyID resolves aws:kms over AES256 in passthrough/both. Empty
+	// (default) keeps AES256 / SSE-S3.
+	sseKMSKeyID string
 }
 
 // New constructs a stub Backend with no live S3 client. Every method
@@ -84,6 +93,15 @@ func Open(ctx context.Context, cfg Config) (*Backend, error) {
 	multipartTimeout := cfg.MultipartTimeout
 	if multipartTimeout <= 0 {
 		multipartTimeout = DefaultMultipartTimeout
+	}
+	sseMode := cfg.SSEMode
+	if sseMode == "" {
+		sseMode = data.SSEModePassthrough
+	}
+	switch sseMode {
+	case data.SSEModePassthrough, data.SSEModeStrata, data.SSEModeBoth:
+	default:
+		return nil, fmt.Errorf("s3: STRATA_S3_BACKEND_SSE_MODE must be one of {passthrough, strata, both}, got %q", sseMode)
 	}
 
 	loadOpts := []func(*awsconfig.LoadOptions) error{
@@ -151,6 +169,8 @@ func Open(ctx context.Context, cfg Config) (*Backend, error) {
 		uploader:         uploader,
 		opTimeout:        opTimeout,
 		multipartTimeout: multipartTimeout,
+		sseMode:          sseMode,
+		sseKMSKeyID:      cfg.SSEKMSKeyID,
 	}
 
 	if !cfg.SkipProbe {
@@ -249,19 +269,25 @@ type PutResult struct {
 // Memory bound: PartSize * UploadConcurrency (default 64 MiB peak). On
 // context cancel, manager.Uploader aborts the multipart so no orphan
 // sessions are left in the backend bucket.
+//
+// US-013: when the Backend's sseMode is passthrough or both, the SDK adds
+// the configured ServerSideEncryption header (AES256 by default; aws:kms
+// with sseKMSKeyID when set). In strata mode no SSE header is sent.
 func (b *Backend) Put(ctx context.Context, oid string, r io.Reader, size int64) (*PutResult, error) {
 	if b.uploader == nil {
 		return nil, errors.ErrUnsupported
 	}
 	bucket := b.bucket
 	key := oid
-	upCtx, cancel := b.uploadCtx(ctx)
-	defer cancel()
-	out, err := b.uploader.Upload(upCtx, &awss3.PutObjectInput{
+	in := &awss3.PutObjectInput{
 		Bucket: &bucket,
 		Key:    &key,
 		Body:   r,
-	})
+	}
+	b.applyPutSSE(in)
+	upCtx, cancel := b.uploadCtx(ctx)
+	defer cancel()
+	out, err := b.uploader.Upload(upCtx, in)
 	if err != nil {
 		return nil, fmt.Errorf("s3: upload %s: %w", oid, err)
 	}
@@ -273,6 +299,71 @@ func (b *Backend) Put(ctx context.Context, oid string, r io.Reader, size int64) 
 		res.VersionID = *out.VersionID
 	}
 	return res, nil
+}
+
+// applyPutSSE attaches the configured backend-SSE header fields onto a
+// PutObjectInput when Backend.sseMode is passthrough or both. No-op in
+// strata mode and when the mode resolves to empty (defensive — should not
+// happen post-Open).
+func (b *Backend) applyPutSSE(in *awss3.PutObjectInput) {
+	if !b.backendSSEActive() {
+		return
+	}
+	if b.sseKMSKeyID != "" {
+		in.ServerSideEncryption = s3types.ServerSideEncryptionAwsKms
+		k := b.sseKMSKeyID
+		in.SSEKMSKeyId = &k
+		return
+	}
+	in.ServerSideEncryption = s3types.ServerSideEncryptionAes256
+}
+
+// applyMultipartSSE is the CreateMultipartUploadInput sibling of
+// applyPutSSE. UploadPart cannot carry SSE-S3/SSE-KMS headers — the
+// backend inherits them from the multipart init, so the per-part path
+// stays SSE-free.
+func (b *Backend) applyMultipartSSE(in *awss3.CreateMultipartUploadInput) {
+	if !b.backendSSEActive() {
+		return
+	}
+	if b.sseKMSKeyID != "" {
+		in.ServerSideEncryption = s3types.ServerSideEncryptionAwsKms
+		k := b.sseKMSKeyID
+		in.SSEKMSKeyId = &k
+		return
+	}
+	in.ServerSideEncryption = s3types.ServerSideEncryptionAes256
+}
+
+// backendSSEActive returns true when the configured mode means the s3
+// backend must send a ServerSideEncryption header to the backing bucket.
+// Passthrough + both both send the header; strata does not.
+func (b *Backend) backendSSEActive() bool {
+	return b.sseMode == data.SSEModePassthrough || b.sseMode == data.SSEModeBoth
+}
+
+// manifestSSE builds the SSEInfo snapshot persisted on Manifest.SSE at
+// write time (US-013). Mirrors the algorithm/key-id chosen by
+// applyPutSSE so the GET path can branch per-object on the recorded mode
+// rather than the live backend config (which may have been re-toggled).
+//
+// Returns nil when no SSE state is meaningful — currently only when the
+// backend is unconfigured (zero-value, never reached after Open). All
+// three modes record at least Mode so future migrations can read it back.
+func (b *Backend) manifestSSE() *data.SSEInfo {
+	if b.sseMode == "" {
+		return nil
+	}
+	info := &data.SSEInfo{Mode: b.sseMode}
+	if b.backendSSEActive() {
+		if b.sseKMSKeyID != "" {
+			info.Algorithm = data.SSEAlgorithmKMS
+			info.KMSKeyID = b.sseKMSKeyID
+		} else {
+			info.Algorithm = data.SSEAlgorithmAES256
+		}
+	}
+	return info
 }
 
 // Get streams the full backend object body for oid back to the caller.
@@ -550,6 +641,7 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 			Size:      cr.n,
 			VersionID: res.VersionID,
 		},
+		SSE: b.manifestSSE(),
 	}
 	return m, nil
 }

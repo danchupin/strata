@@ -409,6 +409,180 @@ func TestGetChunksRejectsChunksShapeManifest(t *testing.T) {
 	}
 }
 
+// TestOpenRejectsUnknownSSEMode pins US-013 fail-fast: an unknown SSE mode
+// must error at Open, never silently fall back to a default. Operators
+// catch typos in STRATA_S3_BACKEND_SSE_MODE at startup, not at first PUT.
+func TestOpenRejectsUnknownSSEMode(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		Bucket:    "b",
+		Region:    "us-east-1",
+		SkipProbe: true,
+		SSEMode:   "garbage",
+	}
+	if _, err := Open(ctx, cfg); err == nil {
+		t.Fatal("Open with bogus SSEMode: want error, got nil")
+	}
+}
+
+// TestPutChunksPassthroughSendsSSEHeader pins US-013 default behaviour:
+// passthrough mode (the empty-string default) must add an
+// x-amz-server-side-encryption: AES256 header to backend PutObject calls
+// AND record Manifest.SSE.{Mode:passthrough, Algorithm:AES256}. Captures
+// the request via an in-process http.RoundTripper.
+func TestPutChunksPassthroughSendsSSEHeader(t *testing.T) {
+	ctx := context.Background()
+
+	captured := &headerCapturingTransport{}
+	cfg := Config{
+		Bucket:         "strata-test",
+		Region:         "us-east-1",
+		Endpoint:       "http://example.invalid",
+		AccessKey:      "ak",
+		SecretKey:      "sk",
+		ForcePathStyle: true,
+		SkipProbe:      true,
+		HTTPClient:     &http.Client{Transport: captured},
+		// SSEMode left empty — defaults to passthrough.
+	}
+	b, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	m, err := b.PutChunks(ctx, strings.NewReader("hello"), "STANDARD")
+	if err != nil {
+		t.Fatalf("PutChunks: %v", err)
+	}
+	if got := captured.lastHeader("X-Amz-Server-Side-Encryption"); got != "AES256" {
+		t.Fatalf("backend SSE header: want AES256, got %q", got)
+	}
+	if m.SSE == nil {
+		t.Fatal("Manifest.SSE: must be set in passthrough mode")
+	}
+	if m.SSE.Mode != data.SSEModePassthrough {
+		t.Fatalf("Manifest.SSE.Mode: want passthrough, got %q", m.SSE.Mode)
+	}
+	if m.SSE.Algorithm != data.SSEAlgorithmAES256 {
+		t.Fatalf("Manifest.SSE.Algorithm: want AES256, got %q", m.SSE.Algorithm)
+	}
+	if m.SSE.KMSKeyID != "" {
+		t.Fatalf("Manifest.SSE.KMSKeyID: want empty (no KMS), got %q", m.SSE.KMSKeyID)
+	}
+}
+
+// TestPutChunksStrataModeOmitsSSEHeader pins US-013 strata mode: no
+// backend SSE header is sent (gateway-side envelope encryption is the
+// plan, not yet implemented), and Manifest.SSE.Algorithm stays empty so
+// the gateway GET path knows not to surface a backend SSE header.
+func TestPutChunksStrataModeOmitsSSEHeader(t *testing.T) {
+	ctx := context.Background()
+
+	captured := &headerCapturingTransport{}
+	cfg := Config{
+		Bucket:         "strata-test",
+		Region:         "us-east-1",
+		Endpoint:       "http://example.invalid",
+		AccessKey:      "ak",
+		SecretKey:      "sk",
+		ForcePathStyle: true,
+		SkipProbe:      true,
+		HTTPClient:     &http.Client{Transport: captured},
+		SSEMode:        data.SSEModeStrata,
+	}
+	b, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	m, err := b.PutChunks(ctx, strings.NewReader("hello"), "STANDARD")
+	if err != nil {
+		t.Fatalf("PutChunks: %v", err)
+	}
+	if got := captured.lastHeader("X-Amz-Server-Side-Encryption"); got != "" {
+		t.Fatalf("backend SSE header in strata mode: want empty, got %q", got)
+	}
+	if m.SSE == nil || m.SSE.Mode != data.SSEModeStrata {
+		t.Fatalf("Manifest.SSE: want Mode=strata, got %+v", m.SSE)
+	}
+	if m.SSE.Algorithm != "" {
+		t.Fatalf("Manifest.SSE.Algorithm: want empty in strata mode, got %q", m.SSE.Algorithm)
+	}
+}
+
+// TestPutChunksKMSModeSendsKMSHeaders pins US-013 KMS routing: setting
+// SSEKMSKeyID switches the backend SSE header to aws:kms and adds the
+// x-amz-server-side-encryption-aws-kms-key-id header. Manifest.SSE
+// records both Algorithm=aws:kms AND the KMS key id so the GET path
+// can surface them.
+func TestPutChunksKMSModeSendsKMSHeaders(t *testing.T) {
+	ctx := context.Background()
+
+	captured := &headerCapturingTransport{}
+	const keyID = "arn:aws:kms:us-east-1:111122223333:key/abc-def"
+	cfg := Config{
+		Bucket:         "strata-test",
+		Region:         "us-east-1",
+		Endpoint:       "http://example.invalid",
+		AccessKey:      "ak",
+		SecretKey:      "sk",
+		ForcePathStyle: true,
+		SkipProbe:      true,
+		HTTPClient:     &http.Client{Transport: captured},
+		SSEMode:        data.SSEModeBoth,
+		SSEKMSKeyID:    keyID,
+	}
+	b, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	m, err := b.PutChunks(ctx, strings.NewReader("hello"), "STANDARD")
+	if err != nil {
+		t.Fatalf("PutChunks: %v", err)
+	}
+	if got := captured.lastHeader("X-Amz-Server-Side-Encryption"); got != "aws:kms" {
+		t.Fatalf("backend SSE header: want aws:kms, got %q", got)
+	}
+	if got := captured.lastHeader("X-Amz-Server-Side-Encryption-Aws-Kms-Key-Id"); got != keyID {
+		t.Fatalf("backend KMS-key-id header: want %q, got %q", keyID, got)
+	}
+	if m.SSE == nil || m.SSE.Mode != data.SSEModeBoth {
+		t.Fatalf("Manifest.SSE.Mode: want both, got %+v", m.SSE)
+	}
+	if m.SSE.Algorithm != data.SSEAlgorithmKMS || m.SSE.KMSKeyID != keyID {
+		t.Fatalf("Manifest.SSE: want Algorithm=aws:kms KMSKeyID=%q, got %+v", keyID, m.SSE)
+	}
+}
+
+// headerCapturingTransport stores the HTTP headers from the most recent
+// RoundTrip and serves a synthetic 200 OK PutObject response so the SDK's
+// success path is exercised end-to-end without a real S3.
+type headerCapturingTransport struct {
+	mu      sync.Mutex
+	headers http.Header
+}
+
+func (t *headerCapturingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body != nil {
+		_, _ = io.Copy(io.Discard, req.Body)
+		_ = req.Body.Close()
+	}
+	t.mu.Lock()
+	t.headers = req.Header.Clone()
+	t.mu.Unlock()
+	return putObjectSuccessResponse(req), nil
+}
+
+func (t *headerCapturingTransport) lastHeader(name string) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.headers == nil {
+		return ""
+	}
+	return t.headers.Get(name)
+}
+
 // TestDeleteWithoutBackendRefIsNoOp pins the cleanup contract: a
 // chunks-shape (or zero-value) manifest is not the s3 backend's
 // responsibility — Delete returns nil without touching the network.

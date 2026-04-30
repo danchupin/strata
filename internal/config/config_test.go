@@ -163,6 +163,57 @@ func TestLoadAcceptsS3RetryAndTimeoutEnvs(t *testing.T) {
 	}
 }
 
+// TestS3BackendValidateSSEMode pins US-013 fail-fast on the SSE mode
+// whitelist: empty (default) + the three documented values pass; anything
+// else fails Load() with a clear error.
+func TestS3BackendValidateSSEMode(t *testing.T) {
+	cases := []struct {
+		mode    string
+		wantErr bool
+	}{
+		{"", false},
+		{"passthrough", false},
+		{"strata", false},
+		{"both", false},
+		{"AES256", true},
+		{"on", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.mode, func(t *testing.T) {
+			c := S3BackendConfig{Bucket: "b", Region: "r", SSEMode: tc.mode}
+			err := c.validate()
+			if tc.wantErr && err == nil {
+				t.Fatalf("mode %q: want error, got nil", tc.mode)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("mode %q: want nil error, got %v", tc.mode, err)
+			}
+		})
+	}
+}
+
+// TestLoadAcceptsS3SSEEnvs pins US-013 env-var wiring:
+// STRATA_S3_BACKEND_SSE_MODE + STRATA_S3_BACKEND_SSE_KMS_KEY_ID flow
+// through into S3BackendConfig.
+func TestLoadAcceptsS3SSEEnvs(t *testing.T) {
+	t.Setenv("STRATA_DATA_BACKEND", "s3")
+	t.Setenv("STRATA_S3_BACKEND_BUCKET", "strata-backend")
+	t.Setenv("STRATA_S3_BACKEND_REGION", "us-east-1")
+	t.Setenv("STRATA_S3_BACKEND_SSE_MODE", "both")
+	t.Setenv("STRATA_S3_BACKEND_SSE_KMS_KEY_ID", "arn:aws:kms:us-east-1:111122223333:key/abc")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.S3Backend.SSEMode != "both" {
+		t.Fatalf("sse_mode: want both, got %q", cfg.S3Backend.SSEMode)
+	}
+	if cfg.S3Backend.SSEKMSKeyID != "arn:aws:kms:us-east-1:111122223333:key/abc" {
+		t.Fatalf("sse_kms_key_id: want arn..., got %q", cfg.S3Backend.SSEKMSKeyID)
+	}
+}
+
 // TestLoadRejectsS3WithoutBucket pins the boot-time fail-fast: setting
 // STRATA_DATA_BACKEND=s3 without the required bucket var must fail
 // Load() with a clear message — the operator finds out at startup, not
