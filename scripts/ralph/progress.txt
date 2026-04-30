@@ -197,6 +197,87 @@ prior cycles found useful; remove/replace if stale for this cycle.)
   `s/B/<uuid16>/R` to global `s/Rj/<bucket16>` in US-011 for this
   reason; cursor/lifecycle/inventory worker keys stayed scoped
   because those workers operate per-bucket.
+- testutils.NewMockTiKV (client-go/v2/testutils + tikv.NewTestTiKVStore)
+  is NOT a full transactional fake — pessimistic-txn Commit hangs on
+  heartbeat indefinitely against the in-process mock, even though
+  LockKeys/Get/Set succeed. Use real PD+TiKV containers for any
+  contract-level exercise; reserve the mock for low-level RPC bench
+  (which is what tikv/kv_test.go in upstream does — single-Get RPC
+  shape, no commit). Memory backend (internal/meta/memory) is the
+  parity oracle for surface contract.
+- TiKV testcontainer networking: PD's advertise-client-url and TiKV's
+  advertise-addr must be reachable from BOTH PD-the-container AND the
+  test client. The pattern that works across macOS/Linux/Lima docker
+  contexts is `host.docker.internal:<host-port>`. In containers add it
+  via HostConfigModifier { ExtraHosts: "host.docker.internal:host-gateway" };
+  on the host it resolves on Docker Desktop natively but on Lima docker
+  setups it does NOT resolve from the macOS host — so the test must be
+  prepared to t.Skipf when the gateway alias misses. CI workflow
+  (US-017) sidesteps this by setting STRATA_TIKV_TEST_PD_ENDPOINTS
+  directly against an existing PD it brought up via docker-compose
+  (US-014), bypassing testcontainers entirely.
+
+## 2026-04-30 - US-013
+- TiKV contract suite wired:
+  internal/meta/tikv/store_integration_test.go (build tag integration).
+  Runs the existing internal/meta/storetest contract suite against a
+  real PD+TiKV pair.
+- Cluster sourcing priority: (1) STRATA_TIKV_TEST_PD_ENDPOINTS env
+  for CI / operator-provided clusters; (2) testcontainers-go spawning
+  pingcap/pd:v8.5.0 + pingcap/tikv:v8.5.0 on a private docker network
+  using host.docker.internal:host-gateway advertise; (3) clean t.Skipf
+  with the underlying error if neither works.
+- Defensive `defer recover()` around the testcontainers setup —
+  testcontainers-go panics (not errors) when DOCKER_HOST is unset on
+  Lima/sandboxed CI runners. The recover converts the panic into an
+  err return so acquireCluster can t.Skipf rather than crash the
+  binary.
+- Files changed: internal/meta/tikv/store_integration_test.go (new),
+  go.mod / go.sum (testcontainers-go + docker/docker direct dep
+  additions for the integration build tag),
+  scripts/ralph/progress.txt, scripts/ralph/prd.json.
+- **Learnings for future iterations:**
+  - The in-process MockTiKV (client-go/v2/testutils.NewMockTiKV +
+    tikv.NewTestTiKVStore) is NOT a full transactional fake. It
+    handles low-level RPC (Get / Put / PessimisticLock /
+    TxnHeartBeat) but Commit() of a pessimistic txn never resolves —
+    heartbeats fire forever while prewrite sits unanswered. We
+    discovered this by writing the test against the mock first; the
+    BucketLifecycle case stalled at the first CreateBucket Commit
+    with `[INFO] [2pc.go:1187] ["send TxnHeartBeat"] [newTTL=30000]`
+    and never progressed. Use real PD+TiKV for anything that exercises
+    Commit; reserve the mock for tests that only touch the RPC layer.
+  - testcontainers-go panics (rather than returns) when
+    DOCKER_HOST is unset on macOS+Lima setups. Wrap the whole
+    setUpTiKVCluster in `defer func() { if r := recover(); r != nil
+    { err = fmt.Errorf(...) } }()` so the caller can t.Skipf cleanly.
+  - host.docker.internal does NOT resolve from the macOS host on
+    Lima docker setups (only inside containers via host-gateway).
+    That breaks the "advertise-as-host.docker.internal" pattern for
+    test clients running on macOS — they cannot reach the published
+    TiKV port through that name. CI runners on Linux / Docker
+    Desktop don't have this issue. The test handles this by t.Skipf
+    when probe fails, and CI workflow (US-017) bypasses
+    testcontainers via STRATA_TIKV_TEST_PD_ENDPOINTS.
+  - Wait probes (wait.ForHTTP / wait.ForLog) need the actual
+    container port the service is bound to, not the upstream
+    default. PD here listens on a dynamically-allocated host port
+    (so concurrent test runs do not collide), and the wait probe
+    must reflect that — `WithPort(nat.Port(fmt.Sprintf("%d/tcp",
+    pdPort)))`, not `"2379/tcp"`. The first iteration of the test
+    used the default and timed out without diagnostic.
+  - `freeTCPPort()` reservation pattern: net.Listen("tcp",
+    "127.0.0.1:0") + Close + return port. Race-free for one-shot
+    use because the OS won't immediately reuse the just-freed port,
+    and the testcontainers ExposedPorts publish step takes ms. Used
+    here so PD and TiKV claim distinct host ports without collision.
+  - Each test run gets a fresh PD+TiKV cluster (via testcontainers
+    Cleanup) so subsequent runs don't see stale buckets from the
+    last invocation. The contract cases use unique bucket / object
+    names per case so cross-case state leak inside a single run is
+    bounded; no per-subtest cluster reset needed.
+---
+
 
 ## 2026-04-29 - US-011
 - Reshard state on TiKV: StartReshard / GetReshardJob /
