@@ -110,6 +110,12 @@ var tableDDL = []string{
 var alterStatements = []string{
 	`ALTER TABLE objects ADD retain_mode text`,
 	`ALTER TABLE buckets ADD acl text`,
+	// US-010: backend multipart pass-through tracking. Strata's multipart
+	// session is mapped 1:1 onto the backend's own multipart upload; the
+	// backend SDK upload-id is recorded on the parent row and the backend's
+	// per-part ETag on each child row.
+	`ALTER TABLE multipart_uploads ADD backend_upload_id text`,
+	`ALTER TABLE multipart_parts ADD backend_etag text`,
 }
 
 func isColumnAlreadyExists(err error) bool {

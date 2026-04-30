@@ -34,7 +34,27 @@ func (s *Server) initiateMultipart(w http.ResponseWriter, r *http.Request, b *me
 		InitiatedAt:  time.Now().UTC(),
 		Status:       "uploading",
 	}
+	// US-010 backend pass-through: when the data backend can map a Strata
+	// multipart 1:1 onto its own multipart upload (s3-over-s3), initiate
+	// the backend session up-front and persist the opaque handle on the
+	// meta row so subsequent UploadPart / Complete / Abort calls can
+	// resume it. Threads the bucket UUID via context so the s3 backend
+	// can build its <bucket-uuid>/<object-uuid> key (US-009).
+	if mb, ok := s.Data.(data.MultipartBackend); ok {
+		ctx := data.WithBucketID(r.Context(), b.ID)
+		handle, err := mb.CreateBackendMultipart(ctx, class)
+		if err != nil {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		mu.BackendUploadID = handle
+	}
 	if err := s.Meta.CreateMultipartUpload(r.Context(), mu); err != nil {
+		// Best-effort cleanup of the backend session if meta persistence
+		// fails — leaves no orphan multipart in the backend bucket.
+		if mb, ok := s.Data.(data.MultipartBackend); ok && mu.BackendUploadID != "" {
+			_ = mb.AbortBackendMultipart(r.Context(), mu.BackendUploadID)
+		}
 		mapMetaErr(w, r, err)
 		return
 	}
@@ -59,6 +79,38 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Buck
 	}
 	if r.Header.Get("x-amz-copy-source") != "" {
 		s.uploadPartCopy(w, r, b, uploadID, mu, partNumber)
+		return
+	}
+	// US-010 backend pass-through: when the multipart session was
+	// initiated against the s3 backend's own multipart upload, stream
+	// this part straight to the backend's UploadPart instead of through
+	// PutChunks (which would write a separate backend object per part
+	// and break the 1:1 invariant).
+	if mu.BackendUploadID != "" {
+		mb, ok := s.Data.(data.MultipartBackend)
+		if !ok {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+		defer cancel()
+		etag, err := mb.UploadBackendPart(ctx, mu.BackendUploadID, int32(partNumber), r.Body, r.ContentLength)
+		if err != nil {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		part := &meta.MultipartPart{
+			PartNumber:  partNumber,
+			ETag:        etag,
+			Size:        r.ContentLength,
+			BackendETag: etag,
+		}
+		if err := s.Meta.SavePart(r.Context(), b.ID, uploadID, part); err != nil {
+			mapMetaErr(w, r, err)
+			return
+		}
+		w.Header().Set("ETag", `"`+etag+`"`)
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 	ctx, cancel := context.WithTimeout(data.WithBucketID(r.Context(), b.ID), 10*time.Minute)
@@ -234,6 +286,65 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		Mtime:        time.Now().UTC(),
 	}
 
+	// US-010 backend pass-through: finalise the backend's multipart
+	// upload and stamp obj.Manifest with the BackendRef-shape result so
+	// the meta store skips its own chunks-shape assembly and persists
+	// the BackendRef pointer instead.
+	if mu.BackendUploadID != "" {
+		mb, ok := s.Data.(data.MultipartBackend)
+		if !ok {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		stored, listErr := s.Meta.ListParts(r.Context(), b.ID, uploadID)
+		if listErr != nil {
+			mapMetaErr(w, r, listErr)
+			return
+		}
+		byNumber := make(map[int]*meta.MultipartPart, len(stored))
+		for _, p := range stored {
+			byNumber[p.PartNumber] = p
+		}
+		backendParts := make([]data.BackendCompletedPart, 0, len(parts))
+		var totalSize int64
+		for _, cp := range parts {
+			p, ok := byNumber[cp.PartNumber]
+			if !ok {
+				writeError(w, r, ErrInvalidPart)
+				return
+			}
+			etag := p.BackendETag
+			if etag == "" {
+				etag = p.ETag
+			}
+			backendParts = append(backendParts, data.BackendCompletedPart{
+				PartNumber: int32(cp.PartNumber),
+				ETag:       etag,
+			})
+			totalSize += p.Size
+		}
+		mfst, completeErr := mb.CompleteBackendMultipart(r.Context(), mu.BackendUploadID, backendParts, mu.StorageClass)
+		if completeErr != nil {
+			writeError(w, r, ErrInternal)
+			return
+		}
+		// Backend's response ETag is authoritative for the stored object
+		// — match the object's ETag to it. The backend computes the same
+		// composite hash-of-MD5s-suffix as multipartETag for non-SSE-KMS
+		// uploads, so the wire response is consistent with what the
+		// client computed.
+		if mfst.ETag != "" {
+			obj.ETag = mfst.ETag
+			finalETag = mfst.ETag
+		}
+		mfst.Size = totalSize
+		if mfst.BackendRef != nil {
+			mfst.BackendRef.Size = totalSize
+		}
+		obj.Manifest = mfst
+		obj.Size = totalSize
+	}
+
 	orphans, err := s.Meta.CompleteMultipartUpload(r.Context(), obj, uploadID, parts, meta.IsVersioningActive(b.Versioning))
 	if err != nil {
 		if errors.Is(err, meta.ErrMultipartPartMissing) || errors.Is(err, meta.ErrMultipartETagMismatch) {
@@ -258,6 +369,14 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 }
 
 func (s *Server) abortMultipart(w http.ResponseWriter, r *http.Request, b *meta.Bucket, key, uploadID string) {
+	// Capture the backend handle BEFORE clearing meta state so the backend
+	// session can be aborted even if it doesn't surface in the part-
+	// manifest list (US-010 pass-through parts have no chunks-shape
+	// manifest to enqueue).
+	var backendHandle string
+	if mu, getErr := s.Meta.GetMultipartUpload(r.Context(), b.ID, uploadID); getErr == nil {
+		backendHandle = mu.BackendUploadID
+	}
 	manifests, err := s.Meta.AbortMultipartUpload(r.Context(), b.ID, uploadID)
 	if err != nil {
 		mapMetaErr(w, r, err)
@@ -266,6 +385,11 @@ func (s *Server) abortMultipart(w http.ResponseWriter, r *http.Request, b *meta.
 	for _, m := range manifests {
 		if m != nil {
 			s.enqueueOrphan(r.Context(), m)
+		}
+	}
+	if backendHandle != "" {
+		if mb, ok := s.Data.(data.MultipartBackend); ok {
+			_ = mb.AbortBackendMultipart(r.Context(), backendHandle)
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)

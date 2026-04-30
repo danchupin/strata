@@ -984,9 +984,9 @@ func (s *Store) CreateMultipartUpload(ctx context.Context, mu *meta.MultipartUpl
 		return fmt.Errorf("upload_id: %w", err)
 	}
 	return s.s.Query(
-		`INSERT INTO multipart_uploads (bucket_id, upload_id, key, status, storage_class, content_type, initiated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		gocqlUUID(mu.BucketID), uploadUUID, mu.Key, "uploading", mu.StorageClass, mu.ContentType, mu.InitiatedAt,
+		`INSERT INTO multipart_uploads (bucket_id, upload_id, key, status, storage_class, content_type, initiated_at, backend_upload_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		gocqlUUID(mu.BucketID), uploadUUID, mu.Key, "uploading", mu.StorageClass, mu.ContentType, mu.InitiatedAt, nilIfEmpty(mu.BackendUploadID),
 	).WithContext(ctx).Exec()
 }
 
@@ -998,12 +998,13 @@ func (s *Store) GetMultipartUpload(ctx context.Context, bucketID uuid.UUID, uplo
 	var (
 		key, status, class, ctype string
 		initiated                 time.Time
+		backendUploadID           string
 	)
 	err = s.s.Query(
-		`SELECT key, status, storage_class, content_type, initiated_at
+		`SELECT key, status, storage_class, content_type, initiated_at, backend_upload_id
 		 FROM multipart_uploads WHERE bucket_id=? AND upload_id=?`,
 		gocqlUUID(bucketID), uploadUUID,
-	).WithContext(ctx).Scan(&key, &status, &class, &ctype, &initiated)
+	).WithContext(ctx).Scan(&key, &status, &class, &ctype, &initiated, &backendUploadID)
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrMultipartNotFound
 	}
@@ -1011,13 +1012,14 @@ func (s *Store) GetMultipartUpload(ctx context.Context, bucketID uuid.UUID, uplo
 		return nil, err
 	}
 	return &meta.MultipartUpload{
-		BucketID:     bucketID,
-		UploadID:     uploadID,
-		Key:          key,
-		Status:       status,
-		StorageClass: class,
-		ContentType:  ctype,
-		InitiatedAt:  initiated,
+		BucketID:        bucketID,
+		UploadID:        uploadID,
+		Key:             key,
+		Status:          status,
+		StorageClass:    class,
+		ContentType:     ctype,
+		InitiatedAt:     initiated,
+		BackendUploadID: backendUploadID,
 	}, nil
 }
 
@@ -1026,7 +1028,7 @@ func (s *Store) ListMultipartUploads(ctx context.Context, bucketID uuid.UUID, pr
 		limit = 1000
 	}
 	iter := s.s.Query(
-		`SELECT upload_id, key, status, storage_class, content_type, initiated_at
+		`SELECT upload_id, key, status, storage_class, content_type, initiated_at, backend_upload_id
 		 FROM multipart_uploads WHERE bucket_id=?`,
 		gocqlUUID(bucketID),
 	).WithContext(ctx).Iter()
@@ -1037,19 +1039,21 @@ func (s *Store) ListMultipartUploads(ctx context.Context, bucketID uuid.UUID, pr
 		uploadUUID                gocql.UUID
 		key, status, class, ctype string
 		initiated                 time.Time
+		backendUploadID           string
 	)
-	for iter.Scan(&uploadUUID, &key, &status, &class, &ctype, &initiated) {
+	for iter.Scan(&uploadUUID, &key, &status, &class, &ctype, &initiated, &backendUploadID) {
 		if prefix != "" && !strings.HasPrefix(key, prefix) {
 			continue
 		}
 		out = append(out, &meta.MultipartUpload{
-			BucketID:     bucketID,
-			UploadID:     uploadUUID.String(),
-			Key:          key,
-			Status:       status,
-			StorageClass: class,
-			ContentType:  ctype,
-			InitiatedAt:  initiated,
+			BucketID:        bucketID,
+			UploadID:        uploadUUID.String(),
+			Key:             key,
+			Status:          status,
+			StorageClass:    class,
+			ContentType:     ctype,
+			InitiatedAt:     initiated,
+			BackendUploadID: backendUploadID,
 		})
 		if len(out) >= limit {
 			break
@@ -1071,9 +1075,9 @@ func (s *Store) SavePart(ctx context.Context, bucketID uuid.UUID, uploadID strin
 		return err
 	}
 	return s.s.Query(
-		`INSERT INTO multipart_parts (bucket_id, upload_id, part_number, etag, size, mtime, manifest)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		gocqlUUID(bucketID), uploadUUID, part.PartNumber, part.ETag, part.Size, time.Now().UTC(), manifestBlob,
+		`INSERT INTO multipart_parts (bucket_id, upload_id, part_number, etag, size, mtime, manifest, backend_etag)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		gocqlUUID(bucketID), uploadUUID, part.PartNumber, part.ETag, part.Size, time.Now().UTC(), manifestBlob, nilIfEmpty(part.BackendETag),
 	).WithContext(ctx).Exec()
 }
 
@@ -1083,7 +1087,7 @@ func (s *Store) ListParts(ctx context.Context, bucketID uuid.UUID, uploadID stri
 		return nil, meta.ErrMultipartNotFound
 	}
 	iter := s.s.Query(
-		`SELECT part_number, etag, size, mtime, manifest
+		`SELECT part_number, etag, size, mtime, manifest, backend_etag
 		 FROM multipart_parts WHERE bucket_id=? AND upload_id=?`,
 		gocqlUUID(bucketID), uploadUUID,
 	).WithContext(ctx).Iter()
@@ -1096,18 +1100,20 @@ func (s *Store) ListParts(ctx context.Context, bucketID uuid.UUID, uploadID stri
 		size         int64
 		mtime        time.Time
 		manifestBlob []byte
+		backendETag  string
 	)
-	for iter.Scan(&partNumber, &etag, &size, &mtime, &manifestBlob) {
+	for iter.Scan(&partNumber, &etag, &size, &mtime, &manifestBlob, &backendETag) {
 		m, err := decodeManifest(manifestBlob)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, &meta.MultipartPart{
-			PartNumber: partNumber,
-			ETag:       etag,
-			Size:       size,
-			Mtime:      mtime,
-			Manifest:   m,
+			PartNumber:  partNumber,
+			ETag:        etag,
+			Size:        size,
+			Mtime:       mtime,
+			Manifest:    m,
+			BackendETag: backendETag,
 		})
 	}
 	if err := iter.Close(); err != nil {
@@ -1147,6 +1153,7 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 		byNumber[p.PartNumber] = p
 	}
 
+	preAssembled := obj.Manifest != nil
 	used := make(map[int]bool, len(parts))
 	var chunks []data.ChunkRef
 	var totalSize int64
@@ -1158,21 +1165,31 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 		if strings.Trim(cp.ETag, `"`) != p.ETag {
 			return nil, meta.ErrMultipartETagMismatch
 		}
-		if p.Manifest != nil {
+		if !preAssembled && p.Manifest != nil {
 			chunks = append(chunks, p.Manifest.Chunks...)
 		}
 		totalSize += p.Size
 		used[cp.PartNumber] = true
 	}
 
-	obj.Manifest = &data.Manifest{
-		Class:     obj.StorageClass,
-		Size:      totalSize,
-		ChunkSize: data.DefaultChunkSize,
-		ETag:      obj.ETag,
-		Chunks:    chunks,
+	if preAssembled {
+		// Backend pass-through (US-010): obj.Manifest is the
+		// BackendRef-shape manifest the gateway built from the backend's
+		// CompleteMultipartUpload response. Trust the supplied size when
+		// the gateway populated it; otherwise sum the parts.
+		if obj.Size == 0 {
+			obj.Size = totalSize
+		}
+	} else {
+		obj.Manifest = &data.Manifest{
+			Class:     obj.StorageClass,
+			Size:      totalSize,
+			ChunkSize: data.DefaultChunkSize,
+			ETag:      obj.ETag,
+			Chunks:    chunks,
+		}
+		obj.Size = totalSize
 	}
-	obj.Size = totalSize
 	obj.Mtime = time.Now().UTC()
 
 	if err := s.PutObject(ctx, obj, versioned); err != nil {

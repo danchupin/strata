@@ -97,6 +97,14 @@ type MultipartUpload struct {
 	ContentType  string
 	InitiatedAt  time.Time
 	Status       string
+	// BackendUploadID is set when the gateway maps this Strata multipart
+	// session 1:1 onto a backend's own multipart upload (US-010 S3-over-S3
+	// pass-through). Format is opaque to meta — the backend encodes
+	// everything it needs to resume part uploads (e.g. <backend-key>\x00
+	// <sdk-upload-id> for the s3 backend). Empty when the gateway is
+	// running over a chunk-based backend (rados/memory) and parts are
+	// stored as Strata chunks.
+	BackendUploadID string
 }
 
 type MultipartPart struct {
@@ -105,6 +113,12 @@ type MultipartPart struct {
 	Size       int64
 	Manifest   *data.Manifest
 	Mtime      time.Time
+	// BackendETag is the per-part ETag returned by the backend's UploadPart
+	// when this multipart session is mapped 1:1 onto a backend multipart
+	// upload (US-010). The backend ETag is forwarded to the backend's
+	// CompleteMultipartUpload at finalisation. Empty when running over a
+	// chunk-based backend.
+	BackendETag string
 }
 
 type CompletePart struct {

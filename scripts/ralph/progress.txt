@@ -208,6 +208,144 @@ Cycle: ralph/s3-over-s3-backend
   s3 backend serves only BackendRef shapes; cross-feeding never happens
   but the defensive check prevents silent fallthrough on a misconfigured
   gateway. Delete on chunks-shape is a no-op (rados handles its own).
+- data.MultipartBackend (US-010) is the OPTIONAL capability surface for
+  backends that support 1:1 multipart pass-through. Gateway type-asserts
+  s.Data.(data.MultipartBackend) at every multipart entry-point and falls
+  through to the chunk-based PutChunks path when the assertion fails —
+  rados/memory require no plumbing. Handle encoding (s3 backend uses
+  <key>\\x00<uploadID>) is opaque to meta + gateway; only the backend that
+  produced the handle decodes it. New surface mirrors the SDK's multipart
+  contract: CreateBackendMultipart returns handle, UploadBackendPart
+  returns per-part ETag, CompleteBackendMultipart returns BackendRef-shape
+  Manifest, AbortBackendMultipart is idempotent on NoSuchUpload.
+- meta.Store.CompleteMultipartUpload (US-010) trusts a gateway-supplied
+  obj.Manifest when non-nil and skips its own chunks-shape assembly. The
+  gateway-supplied manifest carries BackendRef from the backend's own
+  CompleteMultipartUpload; storing it preserves the 1:1 invariant from
+  US-008. Only one of (Manifest.Chunks, Manifest.BackendRef) is populated
+  per object — store layer never auto-promotes one to the other.
+- Multipart pass-through (US-010) requires meta state to span the upload
+  lifecycle: BackendUploadID on meta.MultipartUpload (set at initiate,
+  read at every UploadPart and at Complete/Abort) + BackendETag on
+  meta.MultipartPart (set at UploadPart, replayed in CompleteBackendMultipart).
+  Cassandra schema is additive ALTER TABLE (multipart_uploads +
+  multipart_parts), single-column-per-row — old rows decode with empty
+  string for the new columns, gateway treats empty as "not pass-through".
+- AWS SDK v2 quirk: s3types.NoSuchUpload IS a typed error (matches
+  errors.As). Use the typed-error pattern (var nsu *s3types.NoSuchUpload;
+  errors.As(err, &nsu)) for idempotent abort — same convention as
+  s3types.NoSuchKey for GetObject.
+- For multipart-pass-through unit tests without MinIO, an in-process
+  http.Handler that mimics the S3 multipart XML (InitiateMultipartUpload-
+  Result + ETag header per part + CompleteMultipartUploadResult) hooked
+  via http.Client.Transport keeps the SDK's serialization and request
+  signing on the SDK side. Bridge with httptest.NewRecorder -> rec.Result()
+  inside RoundTrip; nil-check req.Body (CreateMultipartUpload requests
+  carry no body and the io.Copy(io.Discard, nil) panics).
+
+## 2026-04-30 — US-010
+- Added optional data.MultipartBackend interface (internal/data/backend.go)
+  + data.BackendCompletedPart input type. Gateway type-asserts at each
+  multipart entry-point so rados/memory backends keep working unchanged.
+- Implemented MultipartBackend on *s3.Backend in new internal/data/s3/
+  multipart.go: CreateBackendMultipart issues SDK CreateMultipartUpload
+  at <bucket-uuid>/<object-uuid> (bucket id read from data.WithBucketID
+  ctx, same convention as PutChunks); UploadBackendPart streams the
+  part to SDK UploadPart and returns the per-part ETag (quote-stripped);
+  CompleteBackendMultipart issues SDK CompleteMultipartUpload and builds
+  a BackendRef-shape Manifest (Chunks empty per US-008 invariant);
+  AbortBackendMultipart is idempotent on NoSuchUpload (typed error via
+  errors.As). Backend handle = key + "\\x00" + SDK uploadID; opaque to
+  callers.
+- Schema-additive on meta types: MultipartUpload.BackendUploadID +
+  MultipartPart.BackendETag — both string, both omitempty in JSON via
+  zero-value short-circuit (no struct json tags needed since those types
+  aren't marshalled). Cassandra schema gets two ALTER TABLE statements
+  (multipart_uploads.backend_upload_id, multipart_parts.backend_etag);
+  Insert/Select/List queries on those tables now read+write the new
+  columns — empty strings on legacy rows decode cleanly. Memory store
+  carries new fields by struct copy (no codec changes).
+- meta.Store.CompleteMultipartUpload now honours a gateway-supplied
+  obj.Manifest (preAssembled = obj.Manifest != nil): when set, store
+  trusts the supplied manifest (BackendRef shape) and only computes
+  totalSize defensively when obj.Size == 0. Memory + Cassandra share
+  this contract.
+- Wired s3api multipart endpoints (internal/s3api/multipart.go):
+  initiateMultipart calls mb.CreateBackendMultipart on the
+  data.MultipartBackend type-assertion (with data.WithBucketID(ctx, b.ID)
+  for the <bucket-uuid> prefix) and persists the handle on the meta row;
+  cleanup-on-meta-failure aborts the backend session. uploadPart routes
+  to mb.UploadBackendPart when mu.BackendUploadID != ""; saves
+  BackendETag (= per-part backend ETag) on the meta row, ETag mirrors
+  backend ETag for the wire response. completeMultipart calls
+  mb.CompleteBackendMultipart with backendETag from each persisted part,
+  stamps obj.Manifest with the BackendRef-shape result + totalSize, then
+  delegates to s.Meta.CompleteMultipartUpload (which now skips its own
+  chunks-shape assembly per the preAssembled path). abortMultipart
+  fetches mu.BackendUploadID before AbortMultipartUpload, then calls
+  mb.AbortBackendMultipart so the backend session is terminated even
+  though the meta-side abort returns no chunks-shape manifests for
+  pass-through parts.
+- Tests:
+  - data/s3 unit: TestStubMultipartReturnsErrUnsupported (every method
+    on the New() stub surfaces ErrUnsupported), TestHandleEncodeDecode-
+    RoundTrip + TestDecodeHandleRejectsMalformed (handle encoding
+    invariants), TestMultipartLifecycleAgainstSyntheticBackend (in-
+    process http.Handler talks the S3 multipart XML; asserts handle
+    upload-id + per-part ETag round-trip + BackendRef shape + Create×1
+    UploadPart×2 Complete×1 + idempotent abort on NoSuchUpload).
+  - s3api unit: TestMultipartGatewayRoutesToMultipartBackend (full
+    HTTP-level lifecycle through s3api.New with a fake
+    data.MultipartBackend; asserts gateway routes to MultipartBackend
+    methods + body round-trips through GET via stored BackendRef
+    manifest + abort path).
+  - s3api integration (build tag `integration`): TestGatewayMultipart-
+    PassThroughToS3Backend (5×10 MiB parts through MinIO testcontainer,
+    asserts EXACTLY 1 backend object post-Complete + byte-equal GET +
+    DELETE cleanup), TestGatewayMultipartAbortPassThrough (initiate then
+    Abort, asserts backend ListMultipartUploads is empty).
+- Files: internal/data/backend.go, internal/data/s3/multipart.go (new),
+  internal/data/s3/multipart_test.go (new), internal/meta/store.go,
+  internal/meta/cassandra/{schema.go,store.go}, internal/meta/memory/
+  store.go, internal/s3api/multipart.go, internal/s3api/multipart_
+  passthrough_test.go (new), internal/s3api/s3backend_integration_
+  test.go.
+- **Learnings:**
+  - Optional capability interface (data.MultipartBackend) vs widening
+    data.Backend was the right call — backends without multipart-native
+    APIs (rados/memory) skip the surface entirely; gateway uses single-
+    line type-assertion at each entry-point. Adding methods to the
+    base interface would have forced 2 stub paths + a memory path that
+    re-implements multipart over chunks for no real-world benefit.
+  - manager.UploadOutput.VersionID has capital D, PutObjectOutput.
+    VersionId has lowercase. CompleteMultipartUploadOutput.VersionId
+    matches PutObjectOutput shape — lowercase. Repeat: `go doc <type>`
+    before touching the field.
+  - meta.Store.CompleteMultipartUpload had to learn a new dispatch
+    (preAssembled = obj.Manifest != nil) — but the change is fully
+    backwards-compatible because the existing path always set
+    obj.Manifest = nil before calling. The chunks-shape branch is
+    untouched for rados/memory.
+  - s3api.uploadPartCopy intentionally NOT routed through
+    UploadBackendPart in this story. The current path goes through
+    PutChunks → separate backend object → manifest stored in
+    MultipartPart.Manifest. For backend pass-through that would mean
+    the part lives at a DIFFERENT key from the multipart's target,
+    breaking the 1:1 invariant. AC US-010 only mentions UploadPart;
+    UploadPartCopy native pass-through (via SDK UploadPartCopy) is a
+    future story. Document the skip in the function header instead.
+  - Per AC: per-part composite checksum interop "if prd-s3-tests-90
+    cycle has shipped (manifest carries PartChunks[].ChecksumValue),
+    backend's per-part ETags flow through Strata's checksum machinery
+    unchanged; if not yet shipped, this AC is deferred". This repo
+    has no PartChunks / ChecksumValue mechanism — deferral is implicit.
+    BackendETag is stored, available for that future cycle.
+  - Synthetic SDK responses for multipart tests need an http.Handler
+    (not a sequence of pre-baked http.Response) because the SDK signs
+    each request and the request-line shape varies per op. Bridge via
+    httptest.NewRecorder inside http.Client.Transport — same idiom as
+    the existing US-007 metrics observer test.
+---
 
 ## 2026-04-30 — US-009
 - Wired STRATA_DATA_BACKEND=s3 dispatch in cmd/strata-gateway/main.go

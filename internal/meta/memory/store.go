@@ -705,6 +705,7 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 	}
 	st.upload.Status = "completing"
 
+	preAssembled := obj.Manifest != nil
 	used := make(map[int]bool, len(parts))
 	var chunks []data.ChunkRef
 	var totalSize int64
@@ -718,21 +719,32 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 			s.mu.Unlock()
 			return nil, meta.ErrMultipartETagMismatch
 		}
-		if p.Manifest != nil {
+		if !preAssembled && p.Manifest != nil {
 			chunks = append(chunks, p.Manifest.Chunks...)
 		}
 		totalSize += p.Size
 		used[cp.PartNumber] = true
 	}
 
-	obj.Manifest = &data.Manifest{
-		Class:     obj.StorageClass,
-		Size:      totalSize,
-		ChunkSize: data.DefaultChunkSize,
-		ETag:      obj.ETag,
-		Chunks:    chunks,
+	if preAssembled {
+		// Backend pass-through (US-010): gateway has already populated
+		// obj.Manifest with the BackendRef-shape manifest pointing at the
+		// completed backend object. The store trusts the gateway's
+		// manifest+size; chunk-assembly is skipped because no chunks were
+		// written (parts streamed straight to the backend).
+		if obj.Size == 0 {
+			obj.Size = totalSize
+		}
+	} else {
+		obj.Manifest = &data.Manifest{
+			Class:     obj.StorageClass,
+			Size:      totalSize,
+			ChunkSize: data.DefaultChunkSize,
+			ETag:      obj.ETag,
+			Chunks:    chunks,
+		}
+		obj.Size = totalSize
 	}
-	obj.Size = totalSize
 	obj.Mtime = time.Now().UTC()
 	if obj.VersionID == "" {
 		obj.VersionID = gocql.TimeUUID().String()

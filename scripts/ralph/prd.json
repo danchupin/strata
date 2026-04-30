@@ -180,8 +180,8 @@
         "Tests pass"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "MultipartBackend optional interface added to internal/data/backend.go (CreateBackendMultipart / UploadBackendPart / CompleteBackendMultipart / AbortBackendMultipart) — type-asserted at the gateway entry-points; rados/memory remain unchanged because the new surface is optional. Backend handle encoding (key + uploadID joined by '\\x00') is opaque to meta — gateway persists in single meta.MultipartUpload.BackendUploadID column per AC literal. meta.MultipartPart gains BackendETag for the per-part SDK ETag. Cassandra schema gains both columns via additive ALTER (multipart_uploads.backend_upload_id, multipart_parts.backend_etag). meta.Store.CompleteMultipartUpload now honours a gateway-supplied obj.Manifest (BackendRef shape) — skips its own chunks-shape assembly when set, preserving 1:1 invariant. Per-part composite checksum AC: backend ETag forwarded verbatim to backend.CompleteMultipartUpload AND used as the wire-response ETag (backend's composite is authoritative for stored bytes); Strata's multipartETag still computed for ErrInvalidPart validation, then overwritten by backend response. uploadPartCopy backend-pass-through deferred (still routes through PutChunks → separate backend object — uncommon path, stays chunks-shape). Tests: TestStubMultipartReturnsErrUnsupported / TestHandleEncodeDecodeRoundTrip / TestDecodeHandleRejectsMalformed / TestMultipartLifecycleAgainstSyntheticBackend (in-process http.Handler-driven SDK round trip, no MinIO); TestMultipartGatewayRoutesToMultipartBackend (s3api harness with fake MultipartBackend asserts call topology); integration TestGatewayMultipartPassThroughToS3Backend (5×10 MiB parts via gateway HTTP, asserts exactly 1 backend object after Complete + byte-equal GET) + TestGatewayMultipartAbortPassThrough (asserts backend session terminated on Abort)."
     },
     {
       "id": "US-011",
