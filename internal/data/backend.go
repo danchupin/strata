@@ -3,6 +3,7 @@ package data
 import (
 	"context"
 	"io"
+	"time"
 )
 
 type Backend interface {
@@ -96,6 +97,21 @@ type CORSBackend interface {
 	PutBackendCORS(ctx context.Context, rules []CORSRule) error
 	GetBackendCORS(ctx context.Context) ([]CORSRule, error)
 	DeleteBackendCORS(ctx context.Context) error
+}
+
+// PresignBackend is the optional capability surface for data backends that
+// can mint a presigned URL pointing directly at backend storage (US-016
+// S3-over-S3). When the gateway sees a presigned GET on a bucket whose
+// BackendPresign flag is enabled, it asks the backend for a backend-
+// credentialled URL and 307-redirects the client there — Strata stays out
+// of the data path beyond signature validation. rados/memory backends
+// don't implement this surface, so the type-assertion fails and the gateway
+// falls through to its in-process serve path.
+//
+// expires is forwarded verbatim from the original presigned request's
+// X-Amz-Expires; the backend uses this as the lifetime of the minted URL.
+type PresignBackend interface {
+	PresignGetObject(ctx context.Context, m *Manifest, expires time.Duration) (string, error)
 }
 
 // CORSRule is the backend-translation input for one bucket CORS rule. The

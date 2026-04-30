@@ -342,6 +342,28 @@ Cycle: ralph/s3-over-s3-backend
   in the set, re-marshal as XML. When backend has no extra rules, return
   Strata blob verbatim (preserves operator's original XML formatting).
   Backend errors log WARN and fall back to Strata blob.
+- Per-bucket admin flags (US-016 BackendPresign) live on meta.Bucket
+  directly + a SetBucket<Flag> method on meta.Store. Cassandra adds via
+  additive ALTER TABLE buckets ADD <col> boolean — NULL on legacy rows
+  decodes as Go zero value (false) so existing buckets default to off.
+  GetBucket + ListBuckets SELECT must include the new column when added;
+  forgetting to update both surfaces silently returns zero-value flags
+  on every lookup. Pattern works for any boolean per-bucket toggle.
+- US-016 presign passthrough: data.PresignBackend (PresignGetObject(ctx,
+  *Manifest, expires) → URL) is the optional capability surface. The s3
+  backend implements via awss3.NewPresignClient(b.client) — local URL
+  computation, no network round-trip, so tests can use a stub
+  http.RoundTripper. Forward Manifest.BackendRef.VersionID to the
+  GetObjectInput so versioning-enabled backends resolve to the same
+  version Strata recorded at write time. Default expires (when caller
+  passes 0) = SDK default 15 minutes. Gateway-side passthrough decision
+  lives in s3api.maybeBackendPresignRedirect: bucket flag on AND
+  X-Amz-Signature query param present AND data.PresignBackend assertion
+  AND Manifest.BackendRef present ⇒ 307 Temporary Redirect with Location
+  + audit slog.Info(presign_passthrough=true). Any miss falls through to
+  in-process serve. Backend mint error logs Warn and serves bytes — never
+  surfaces the failure to the client. HEAD bypasses passthrough by design
+  (presign HEAD is rare; gateway-side response is cheap).
 
 ## 2026-04-30 — US-010
 - Added optional data.MultipartBackend interface (internal/data/backend.go)
@@ -1295,4 +1317,86 @@ Cycle: ralph/s3-over-s3-backend
     US-016 lands, presigned-URL clients will hit the backend directly,
     and the backend's CORS mirror (this story) will be the rule set
     that applies.
+---
+
+## 2026-05-01 — US-016
+- Added optional data.PresignBackend interface (internal/data/backend.go)
+  with PresignGetObject(ctx, *Manifest, expires) → URL. Gateway
+  type-asserts at the GET handler and falls through to in-process serve
+  when the assertion fails (rados/memory).
+- Implemented PresignGetObject on *s3.Backend (internal/data/s3/
+  presign.go) via awss3.NewPresignClient. URL computed locally — no
+  network round-trip, so tests work with a stub http.RoundTripper. 
+  BackendRef.VersionID forwarded to GetObjectInput so versioning-enabled
+  backends resolve to the same version Strata recorded at write time.
+  Stub Backend (New()) and chunks-shape manifests return ErrUnsupported.
+  Default expires = SDK default 15 min when caller passes 0.
+- meta.Bucket gains BackendPresign bool field; meta.Store interface gains
+  SetBucketBackendPresign(ctx, name, enabled). Memory + Cassandra
+  implement; Cassandra schema adds via additive ALTER TABLE buckets ADD
+  backend_presign boolean. GetBucket + ListBuckets SELECT updated to
+  read the new column; legacy rows scan as false.
+- New admin endpoint PUT/GET /<bucket>?backendPresign in
+  internal/s3api/presign.go — body is BackendPresignConfiguration XML
+  with <Enabled>true|false</Enabled>. Wired into handleBucket switch
+  in server.go.
+- s3api.getObject calls maybeBackendPresignRedirect right after meta
+  GetObject when body=true. Four conditions must hold (bucket flag on,
+  X-Amz-Signature query present, data.PresignBackend assertion,
+  Manifest.BackendRef present); any miss falls through to in-process
+  serve. On match: mint backend URL via PresignBackend, audit-log via
+  slog.Info("s3 backend presign passthrough", presign_passthrough=true,
+  bucket, key, version_id, backend_host, expires_seconds, access_key),
+  write 307 Temporary Redirect with Location header. X-Amz-Expires
+  forwarded verbatim from the original presigned request.
+- Backend mint failure path: slog.Warn + return false from
+  maybeBackendPresignRedirect → gateway falls through to in-process
+  serve. Client never sees the backend failure.
+- Files changed:
+  - internal/data/backend.go (PresignBackend interface)
+  - internal/data/s3/presign.go (s3 impl + DefaultPresignExpires)
+  - internal/data/s3/presign_test.go
+  - internal/meta/store.go (Bucket.BackendPresign + Store interface)
+  - internal/meta/memory/store.go (SetBucketBackendPresign)
+  - internal/meta/cassandra/store.go (SetBucketBackendPresign + GetBucket
+    + ListBuckets reads new column)
+  - internal/meta/cassandra/schema.go (ALTER TABLE)
+  - internal/s3api/server.go (?backendPresign route +
+    maybeBackendPresignRedirect call in getObject)
+  - internal/s3api/presign.go (admin endpoint + redirect helper)
+  - internal/s3api/presign_test.go
+  - internal/s3api/xml.go (backendPresignConfiguration)
+- Learnings for future iterations:
+  - The auth middleware validates SigV4 query parameters on presigned
+    requests (internal/auth/middleware.go validatePresigned). By the
+    time getObject runs, the signature is verified — IAM allow GET is
+    implicit. PRD AC "Strata pre-checks before issuing the URL" needs
+    no additional handler-level check today (Strata has no per-object
+    ACL eval beyond signature). Future ACL/Policy work should add a
+    pre-check inside maybeBackendPresignRedirect.
+  - awss3.NewPresignClient does not need the SDK retry/log middleware
+    that Open() adds to the regular client — presign URLs are signed
+    locally and never executed by the SDK. The s3 backend reuses
+    b.client (which carries those middlewares) but they're a no-op on
+    the presign code path.
+  - 307 Temporary Redirect preserves method + body + headers. The
+    Range header on the original presigned GET is replayed against
+    the backend, so partial-content semantics still work post-
+    passthrough. Never use 302 here — 302 lets the client downgrade
+    to GET and drop headers.
+  - meta.Bucket lookups happen on every object request — adding fields
+    to Bucket has zero per-bucket cost beyond the SELECT column. But
+    Cassandra schema migrations require coordinating GetBucket SELECT,
+    ListBuckets SELECT, and the alterStatements list. Forgetting any
+    of the three silently returns zero-value flags.
+  - Stub PresignBackend tests need a Backend constructed via Open()
+    with SkipProbe=true and a stub http.RoundTripper (the Open() probe
+    would otherwise round-trip a PutObject + DeleteObject before
+    returning). Endpoint set to a fake URL; the URL host shows up in
+    the minted presign URL so tests can assert on it.
+  - s3api harness fakes need to fake BackendRef on the manifest after
+    PutChunks (the inner memory backend produces chunks-shape
+    manifests; the gateway requires BackendRef to mint a backend
+    URL). Strip BackendRef back off before delegating GetChunks /
+    Delete to the inner memory backend so it can find the chunks.
 ---

@@ -116,6 +116,11 @@ var alterStatements = []string{
 	// per-part ETag on each child row.
 	`ALTER TABLE multipart_uploads ADD backend_upload_id text`,
 	`ALTER TABLE multipart_parts ADD backend_etag text`,
+	// US-016: per-bucket toggle for backend presigned-URL passthrough.
+	// Default false (NULL on legacy rows decodes as false); when true,
+	// authenticated presigned GETs at this bucket get a 307 redirect to a
+	// backend-credentialled URL.
+	`ALTER TABLE buckets ADD backend_presign boolean`,
 }
 
 func isColumnAlreadyExists(err error) bool {

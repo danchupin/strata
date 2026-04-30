@@ -46,6 +46,12 @@ type Bucket struct {
 	DefaultClass string
 	Versioning   string
 	ACL          string
+	// BackendPresign is the per-bucket toggle for US-016 presigned-URL
+	// passthrough. When true, the gateway redirects authenticated
+	// presigned GETs at a backend-presigned URL so the data fetch hits
+	// the backend directly. Default false — behaves as today (Strata
+	// serves the bytes).
+	BackendPresign bool
 }
 
 type Object struct {
@@ -138,6 +144,7 @@ type Store interface {
 	ListBuckets(ctx context.Context, owner string) ([]*Bucket, error)
 	SetBucketVersioning(ctx context.Context, name, state string) error
 	SetBucketACL(ctx context.Context, name, canned string) error
+	SetBucketBackendPresign(ctx context.Context, name string, enabled bool) error
 
 	PutObject(ctx context.Context, o *Object, versioned bool) error
 	GetObject(ctx context.Context, bucketID uuid.UUID, key, versionID string) (*Object, error)

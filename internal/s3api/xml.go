@@ -113,6 +113,15 @@ type versioningConfiguration struct {
 	Status  string   `xml:"Status,omitempty"`
 }
 
+// backendPresignConfiguration is the admin payload for US-016
+// PUT /<bucket>?backendPresign — toggles the per-bucket flag that lets the
+// gateway redirect authenticated presigned GETs at a backend-credentialled
+// URL instead of serving bytes itself.
+type backendPresignConfiguration struct {
+	XMLName xml.Name `xml:"BackendPresignConfiguration"`
+	Enabled bool     `xml:"Enabled"`
+}
+
 type listVersionsResult struct {
 	XMLName        xml.Name            `xml:"ListVersionsResult"`
 	Name           string              `xml:"Name"`

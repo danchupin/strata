@@ -89,16 +89,17 @@ func (s *Store) CreateBucket(ctx context.Context, name, owner, defaultClass stri
 
 func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error) {
 	var (
-		idG              gocql.UUID
-		owner, class     string
-		versioning, acl  string
-		createdAt        time.Time
-		shardCount       int
+		idG             gocql.UUID
+		owner, class    string
+		versioning, acl string
+		createdAt       time.Time
+		shardCount      int
+		backendPresign  bool
 	)
 	err := s.s.Query(
-		`SELECT id, owner_id, created_at, default_class, versioning, shard_count, acl FROM buckets WHERE name=?`,
+		`SELECT id, owner_id, created_at, default_class, versioning, shard_count, acl, backend_presign FROM buckets WHERE name=?`,
 		name,
-	).WithContext(ctx).Scan(&idG, &owner, &createdAt, &class, &versioning, &shardCount, &acl)
+	).WithContext(ctx).Scan(&idG, &owner, &createdAt, &class, &versioning, &shardCount, &acl, &backendPresign)
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrBucketNotFound
 	}
@@ -109,13 +110,14 @@ func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error
 		versioning = meta.VersioningDisabled
 	}
 	return &meta.Bucket{
-		Name:         name,
-		ID:           uuidFromGocql(idG),
-		Owner:        owner,
-		CreatedAt:    createdAt,
-		DefaultClass: class,
-		Versioning:   versioning,
-		ACL:          acl,
+		Name:           name,
+		ID:             uuidFromGocql(idG),
+		Owner:          owner,
+		CreatedAt:      createdAt,
+		DefaultClass:   class,
+		Versioning:     versioning,
+		ACL:            acl,
+		BackendPresign: backendPresign,
 	}, nil
 }
 
@@ -142,6 +144,20 @@ func (s *Store) SetBucketACL(ctx context.Context, name, canned string) error {
 	applied, err := s.s.Query(
 		`UPDATE buckets SET acl=? WHERE name=? IF EXISTS`,
 		canned, name,
+	).WithContext(ctx).SerialConsistency(gocql.LocalSerial).ScanCAS(nil)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return meta.ErrBucketNotFound
+	}
+	return nil
+}
+
+func (s *Store) SetBucketBackendPresign(ctx context.Context, name string, enabled bool) error {
+	applied, err := s.s.Query(
+		`UPDATE buckets SET backend_presign=? WHERE name=? IF EXISTS`,
+		enabled, name,
 	).WithContext(ctx).SerialConsistency(gocql.LocalSerial).ScanCAS(nil)
 	if err != nil {
 		return err
@@ -185,7 +201,7 @@ func (s *Store) bucketIsEmpty(ctx context.Context, bucketID uuid.UUID, shardCoun
 }
 
 func (s *Store) ListBuckets(ctx context.Context, owner string) ([]*meta.Bucket, error) {
-	iter := s.s.Query(`SELECT name, id, owner_id, created_at, default_class, versioning, acl FROM buckets`).
+	iter := s.s.Query(`SELECT name, id, owner_id, created_at, default_class, versioning, acl, backend_presign FROM buckets`).
 		WithContext(ctx).Iter()
 	defer iter.Close()
 
@@ -194,8 +210,9 @@ func (s *Store) ListBuckets(ctx context.Context, owner string) ([]*meta.Bucket, 
 		name, ownerID, class, versioning, acl string
 		idG                                   gocql.UUID
 		createdAt                             time.Time
+		backendPresign                        bool
 	)
-	for iter.Scan(&name, &idG, &ownerID, &createdAt, &class, &versioning, &acl) {
+	for iter.Scan(&name, &idG, &ownerID, &createdAt, &class, &versioning, &acl, &backendPresign) {
 		if owner != "" && ownerID != owner {
 			continue
 		}
@@ -203,13 +220,14 @@ func (s *Store) ListBuckets(ctx context.Context, owner string) ([]*meta.Bucket, 
 			versioning = meta.VersioningDisabled
 		}
 		out = append(out, &meta.Bucket{
-			Name:         name,
-			ID:           uuidFromGocql(idG),
-			Owner:        ownerID,
-			CreatedAt:    createdAt,
-			DefaultClass: class,
-			Versioning:   versioning,
-			ACL:          acl,
+			Name:           name,
+			ID:             uuidFromGocql(idG),
+			Owner:          ownerID,
+			CreatedAt:      createdAt,
+			DefaultClass:   class,
+			Versioning:     versioning,
+			ACL:            acl,
+			BackendPresign: backendPresign,
 		})
 	}
 	if err := iter.Close(); err != nil {

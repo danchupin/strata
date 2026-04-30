@@ -177,6 +177,17 @@ func (s *Store) SetBucketACL(ctx context.Context, name, canned string) error {
 	return nil
 }
 
+func (s *Store) SetBucketBackendPresign(ctx context.Context, name string, enabled bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.buckets[name]
+	if !ok {
+		return meta.ErrBucketNotFound
+	}
+	b.BackendPresign = enabled
+	return nil
+}
+
 func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

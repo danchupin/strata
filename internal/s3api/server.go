@@ -206,6 +206,16 @@ func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request, bucket str
 		s.listObjectVersions(w, r, bucket)
 		return
 	}
+	if q.Has("backendPresign") {
+		switch r.Method {
+		case http.MethodGet:
+			s.getBucketBackendPresign(w, r, bucket)
+			return
+		case http.MethodPut:
+			s.putBucketBackendPresign(w, r, bucket)
+			return
+		}
+	}
 	if q.Has("lifecycle") {
 		switch r.Method {
 		case http.MethodGet:
@@ -485,6 +495,14 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	o, err := s.Meta.GetObject(r.Context(), b.ID, key, versionID)
 	if err != nil {
 		mapMetaErr(w, r, err)
+		return
+	}
+	// US-016: presigned-URL passthrough. When the bucket has BackendPresign
+	// enabled and the request itself is presigned, redirect the client at a
+	// backend-credentialled URL so the data fetch hits the backend directly.
+	// HEAD requests stay on the in-process path (HEAD presigns are rare and
+	// the gateway-side response is cheap).
+	if body && s.maybeBackendPresignRedirect(w, r, b, o) {
 		return
 	}
 	if status, ok := checkConditional(r.Header, `"`+o.ETag+`"`, o.Mtime); !ok {
