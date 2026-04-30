@@ -80,6 +80,37 @@ func TestGetRangeValidatesArguments(t *testing.T) {
 	}
 }
 
+// TestStubDeleteObjectReturnsErrUnsupported guards US-004: the stub
+// Backend (no Open) must surface errors.ErrUnsupported on DeleteObject /
+// DeleteBatch — never silently succeed against an absent client.
+func TestStubDeleteObjectReturnsErrUnsupported(t *testing.T) {
+	b := New()
+	ctx := context.Background()
+
+	if err := b.DeleteObject(ctx, "k", ""); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("DeleteObject: want errors.ErrUnsupported, got %v", err)
+	}
+	if err := b.DeleteObject(ctx, "k", "v"); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("DeleteObject(versioned): want errors.ErrUnsupported, got %v", err)
+	}
+	if _, err := b.DeleteBatch(ctx, []ObjectRef{{Key: "k"}}); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("DeleteBatch: want errors.ErrUnsupported, got %v", err)
+	}
+}
+
+// TestDeleteBatchEmpty is a no-op: empty refs returns (nil, nil) without
+// touching the network — works on stub and live Backend alike.
+func TestDeleteBatchEmpty(t *testing.T) {
+	b := &Backend{bucket: "b", client: &awss3.Client{}}
+	failures, err := b.DeleteBatch(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("DeleteBatch(nil): want nil error, got %v", err)
+	}
+	if failures != nil {
+		t.Fatalf("DeleteBatch(nil): want nil failures, got %v", failures)
+	}
+}
+
 // TestOpenValidatesRequiredConfig pins the US-002 fail-fast contract:
 // missing bucket / region must error at construction, not at first Put.
 func TestOpenValidatesRequiredConfig(t *testing.T) {

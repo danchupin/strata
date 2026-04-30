@@ -72,8 +72,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "PRD names s3.Backend.Delete(ctx, oid, versionID) and s3.Backend.DeleteBatch — but data.Backend interface already has Delete(ctx, m *Manifest) (chunk-based delete used by RADOS). To avoid same-name method collision on *Backend without refactoring all 12 chunk-Delete callers, implemented as DeleteObject(ctx, oid, versionID) and DeleteBatch(ctx, refs) — names match SDK conventions. GC worker integration deferred to US-008/US-009 (BackendRef field doesn't exist yet). Idempotent NoSuchKey handling applied at both single and batch level (per-ref Errors with code='NoSuchKey' are dropped from the failure slice)."
     },
     {
       "id": "US-005",

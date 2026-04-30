@@ -93,6 +93,26 @@ Cycle: ralph/s3-over-s3-backend
   (`fmt.Errorf("...: %w", data.ErrNotFound)`); callers use errors.Is.
   Map SDK-typed errors via errors.As on the concrete type
   (*s3types.NoSuchKey for the s3 backend) — not via string code match.
+- aws-sdk-go-v2 field-name irregularity: PutObjectOutput.VersionId
+  (lowercase d) but manager.UploadOutput.VersionID (capital D). Same
+  thing semantically; trips compile if you assume one shape. Check
+  with `go doc <type>` before referencing the field.
+- s3.Backend's per-object delete is named DeleteObject (not Delete) —
+  the interface method `Delete(ctx, m *Manifest)` already occupies the
+  Delete name and is the chunk-based RADOS-style delete. Same reason
+  Put/Get coexist with PutChunks/GetChunks. Future US-008+ may rename
+  the interface method to DeleteChunks; until then the s3-backend
+  per-object surface is DeleteObject(ctx, oid, versionID) and
+  DeleteBatch(ctx, refs).
+- Tests that need to count HTTP requests on the s3 client: inject a
+  *http.Client wrapping a counting RoundTripper via Config.HTTPClient
+  → awsconfig.WithHTTPClient. Reset the counter after seed PUTs so
+  only the operation under test is observed.
+- Test bucket versioning: enable AFTER createBucket via
+  client.PutBucketVersioning(VersioningConfiguration{Status:
+  s3types.BucketVersioningStatusEnabled}). PutObjectOutput.VersionId
+  is empty until versioning is Enabled; admin.ListObjectVersions
+  returns Versions + DeleteMarkers separately for assertion.
 
 ## 2026-04-30 — US-001
 - Added internal/data/s3 package skeleton with stub Backend that satisfies
@@ -206,4 +226,66 @@ Cycle: ralph/s3-over-s3-backend
     defaults the peak nudges 100 MiB on a fast docker-localhost upload.
     For provable bounds, use tight test config (small PartSize +
     Concurrency=2) so the pool budget stays well under the body size.
+---
+
+## 2026-04-30 — US-004
+- Added s3.Backend.DeleteObject(ctx, oid, versionID) (per-object, plain
+  delete when versionID == "", versioned delete otherwise — NoSuchKey
+  treated as success for idempotency) and
+  s3.Backend.DeleteBatch(ctx, refs []ObjectRef) ([]DeleteFailure, error)
+  (chunks the input at DeleteBatchLimit=1000 entries per S3 protocol cap;
+  per-ref soft failures returned in slice without aborting subsequent
+  batches; transport-level errors surface as the second return).
+- New types: ObjectRef{Key, VersionID} (caller-facing batch input),
+  DeleteFailure{Ref, Err} (per-ref soft-failure in batch response).
+- Added Config.HTTPClient *http.Client (optional) so tests can inject a
+  counting RoundTripper to assert per-op HTTP request counts; threads
+  through awsconfig.WithHTTPClient when non-nil.
+- Stub Backend (no Open) returns errors.ErrUnsupported on DeleteObject /
+  DeleteBatch — same pattern as Put / Get.
+- Method naming deviates from the PRD literal: PRD says
+  s3.Backend.Delete(ctx, oid, versionID), but data.Backend interface
+  already has Delete(ctx, m *Manifest) (chunk-based RADOS delete used by
+  10+ callers). Adopting the SDK-canonical names DeleteObject /
+  DeleteBatch lets both surfaces coexist on *Backend without refactoring
+  the chunk-Delete callers. Documented in PRD US-004 notes.
+- GC worker integration deferred to US-008/US-009 — Manifest.BackendRef
+  field doesn't exist yet (US-008 adds it). The per-object DeleteObject /
+  DeleteBatch surface ships now; gateway/GC wiring lands when the
+  manifest schema gains BackendRef.
+- Unit tests: TestStubDeleteObjectReturnsErrUnsupported,
+  TestDeleteBatchEmpty (no-op short-circuit before any SDK call).
+- Integration tests (build tag `integration`):
+  TestDeleteBatchUnversionedSingleHTTPCall (100 keys, plain delete on
+  versioning-OFF bucket, asserts exactly 1 HTTP request via counting
+  transport + zero remaining objects); TestDeleteBatchVersionedNoDelete-
+  Markers (100 versioned keys, asserts zero versions + zero delete-
+  markers after batch); TestDeleteBatchMixedVersionIDs (20 keys on
+  versioned bucket, half versioned-delete + half plain, asserts 10
+  versions + 10 delete-markers + correct surviving keys);
+  TestDeleteObjectIdempotent (DeleteObject on missing key returns nil).
+- Files: internal/data/s3/{backend.go, config.go, backend_test.go,
+  backend_integration_test.go}.
+- **Learnings:**
+  - PutObjectOutput.VersionId (lowercase d) vs manager.UploadOutput.
+    VersionID (capital D) — same field semantically, different casing.
+    `go doc <type>` before referencing.
+  - Counting RoundTripper pattern: wrap http.DefaultTransport with an
+    atomic.Int64-counting struct, plug into Config.HTTPClient, reset
+    after seed traffic so only the operation under test is observed.
+  - s3types.Delete{Quiet: &true} suppresses the per-success Deleted
+    list in the response, leaving only Errors. We rely on Errors-only
+    semantics for the failure-mapping path.
+  - s3types.BucketVersioningStatusEnabled is the typed enum for
+    PutBucketVersioning — string "Enabled" works too but the typed
+    constant is type-safe.
+  - Method-name collision with data.Backend.Delete(ctx, m) forced the
+    DeleteObject naming. Future cycle that renames the interface
+    Delete → DeleteChunks (mirroring PutChunks/GetChunks) would let the
+    s3-backend surface use plain Delete per the PRD literal; out of
+    scope for US-004.
+  - go vet on _test files with build tags requires `-tags integration`
+    explicitly; gopls warns "No packages found for open file" — the
+    warning is a false positive caused by gopls' default build flags,
+    not a real problem.
 ---

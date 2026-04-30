@@ -10,14 +10,17 @@ import (
 	"fmt"
 	"io"
 	mathrand "math/rand"
+	"net/http"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	tcminio "github.com/testcontainers/testcontainers-go/modules/minio"
 
 	"github.com/danchupin/strata/internal/data"
@@ -378,6 +381,406 @@ func TestGetReturnsErrNotFoundForMissingKey(t *testing.T) {
 	if _, err := b.GetRange(ctx, "nope", 0, 16); !errors.Is(err, data.ErrNotFound) {
 		t.Fatalf("GetRange missing: want data.ErrNotFound, got %v", err)
 	}
+}
+
+// TestDeleteBatchUnversionedSingleHTTPCall exercises US-004 against a
+// MinIO bucket with versioning OFF: 100 keys with empty VersionID must
+// be removed in exactly ONE DeleteObjects HTTP call (within
+// DeleteBatchLimit) and the bytes must be freed (no remaining objects).
+func TestDeleteBatchUnversionedSingleHTTPCall(t *testing.T) {
+	ctx := context.Background()
+
+	const (
+		username = "minioadmin"
+		password = "minioadmin"
+		bucket   = "strata-test-batch-unversioned"
+		count    = 100
+	)
+
+	container, err := tcminio.Run(ctx, "minio/minio:latest",
+		tcminio.WithUsername(username),
+		tcminio.WithPassword(password),
+	)
+	if err != nil {
+		t.Fatalf("start minio: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := container.Terminate(context.Background()); err != nil {
+			t.Logf("terminate: %v", err)
+		}
+	})
+
+	endpoint := minioEndpoint(t, ctx, container)
+	if err := createBucket(ctx, endpoint, username, password, bucket); err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+
+	// Counting RoundTripper attached AFTER the seed PUTs so it observes
+	// only the DeleteBatch traffic.
+	counter := &countingTransport{wrapped: http.DefaultTransport}
+	httpClient := &http.Client{Transport: counter}
+
+	cfg := s3backend.Config{
+		Endpoint:       endpoint,
+		Region:         "us-east-1",
+		Bucket:         bucket,
+		AccessKey:      username,
+		SecretKey:      password,
+		ForcePathStyle: true,
+		HTTPClient:     httpClient,
+	}
+	b, err := s3backend.Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("open backend: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+
+	admin := newAdminClient(endpoint, username, password)
+	refs := make([]s3backend.ObjectRef, count)
+	for i := 0; i < count; i++ {
+		key := fmt.Sprintf("obj-%03d", i)
+		body := []byte(fmt.Sprintf("payload-%d", i))
+		if _, err := admin.PutObject(ctx, &awss3.PutObjectInput{
+			Bucket: ptr(bucket),
+			Key:    ptr(key),
+			Body:   bytes.NewReader(body),
+		}); err != nil {
+			t.Fatalf("seed put %s: %v", key, err)
+		}
+		refs[i] = s3backend.ObjectRef{Key: key}
+	}
+
+	// Start counting now — only the DeleteBatch call should be observed.
+	counter.reset()
+
+	failures, err := b.DeleteBatch(ctx, refs)
+	if err != nil {
+		t.Fatalf("DeleteBatch: %v", err)
+	}
+	if len(failures) != 0 {
+		t.Fatalf("DeleteBatch failures: %+v", failures)
+	}
+
+	if got := counter.count(); got != 1 {
+		t.Fatalf("DeleteBatch HTTP request count: want 1, got %d", got)
+	}
+
+	listOut, err := admin.ListObjectsV2(ctx, &awss3.ListObjectsV2Input{Bucket: ptr(bucket)})
+	if err != nil {
+		t.Fatalf("list objects: %v", err)
+	}
+	if len(listOut.Contents) != 0 {
+		t.Fatalf("expected zero remaining objects, got %d", len(listOut.Contents))
+	}
+}
+
+// TestDeleteBatchVersionedNoDeleteMarkers exercises US-004 against a
+// MinIO bucket with versioning ENABLED: 100 keys, each deleted by
+// VersionId, must leave the bucket empty AND must NOT create
+// delete-markers (verified via ListObjectVersions).
+func TestDeleteBatchVersionedNoDeleteMarkers(t *testing.T) {
+	ctx := context.Background()
+
+	const (
+		username = "minioadmin"
+		password = "minioadmin"
+		bucket   = "strata-test-batch-versioned"
+		count    = 100
+	)
+
+	container, err := tcminio.Run(ctx, "minio/minio:latest",
+		tcminio.WithUsername(username),
+		tcminio.WithPassword(password),
+	)
+	if err != nil {
+		t.Fatalf("start minio: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := container.Terminate(context.Background()); err != nil {
+			t.Logf("terminate: %v", err)
+		}
+	})
+
+	endpoint := minioEndpoint(t, ctx, container)
+	if err := createBucket(ctx, endpoint, username, password, bucket); err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	if err := enableVersioning(ctx, endpoint, username, password, bucket); err != nil {
+		t.Fatalf("enable versioning: %v", err)
+	}
+
+	cfg := s3backend.Config{
+		Endpoint:       endpoint,
+		Region:         "us-east-1",
+		Bucket:         bucket,
+		AccessKey:      username,
+		SecretKey:      password,
+		ForcePathStyle: true,
+	}
+	b, err := s3backend.Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("open backend: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+
+	admin := newAdminClient(endpoint, username, password)
+	refs := make([]s3backend.ObjectRef, count)
+	for i := 0; i < count; i++ {
+		key := fmt.Sprintf("obj-%03d", i)
+		body := []byte(fmt.Sprintf("payload-%d", i))
+		out, err := admin.PutObject(ctx, &awss3.PutObjectInput{
+			Bucket: ptr(bucket),
+			Key:    ptr(key),
+			Body:   bytes.NewReader(body),
+		})
+		if err != nil {
+			t.Fatalf("seed put %s: %v", key, err)
+		}
+		if out.VersionId == nil || *out.VersionId == "" {
+			t.Fatalf("seed put %s: empty VersionId on versioned bucket", key)
+		}
+		refs[i] = s3backend.ObjectRef{Key: key, VersionID: *out.VersionId}
+	}
+
+	failures, err := b.DeleteBatch(ctx, refs)
+	if err != nil {
+		t.Fatalf("DeleteBatch: %v", err)
+	}
+	if len(failures) != 0 {
+		t.Fatalf("DeleteBatch failures: %+v", failures)
+	}
+
+	versions, err := admin.ListObjectVersions(ctx, &awss3.ListObjectVersionsInput{Bucket: ptr(bucket)})
+	if err != nil {
+		t.Fatalf("list object versions: %v", err)
+	}
+	if len(versions.Versions) != 0 {
+		t.Fatalf("expected zero remaining versions, got %d", len(versions.Versions))
+	}
+	if len(versions.DeleteMarkers) != 0 {
+		t.Fatalf("expected zero delete-markers, got %d", len(versions.DeleteMarkers))
+	}
+}
+
+// TestDeleteBatchMixedVersionIDs exercises US-004 against a versioning-
+// enabled MinIO bucket with a MIXED batch: half the refs carry the
+// captured VersionID (versioned-delete, no delete-marker), half carry
+// empty VersionID (plain delete, creates delete-marker on a versioned
+// bucket — the legacy/migration path documented in US-008). Asserts
+// each ref is handled per its own VersionID.
+func TestDeleteBatchMixedVersionIDs(t *testing.T) {
+	ctx := context.Background()
+
+	const (
+		username = "minioadmin"
+		password = "minioadmin"
+		bucket   = "strata-test-batch-mixed"
+		count    = 20 // 10 versioned + 10 plain
+	)
+
+	container, err := tcminio.Run(ctx, "minio/minio:latest",
+		tcminio.WithUsername(username),
+		tcminio.WithPassword(password),
+	)
+	if err != nil {
+		t.Fatalf("start minio: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := container.Terminate(context.Background()); err != nil {
+			t.Logf("terminate: %v", err)
+		}
+	})
+
+	endpoint := minioEndpoint(t, ctx, container)
+	if err := createBucket(ctx, endpoint, username, password, bucket); err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	if err := enableVersioning(ctx, endpoint, username, password, bucket); err != nil {
+		t.Fatalf("enable versioning: %v", err)
+	}
+
+	cfg := s3backend.Config{
+		Endpoint:       endpoint,
+		Region:         "us-east-1",
+		Bucket:         bucket,
+		AccessKey:      username,
+		SecretKey:      password,
+		ForcePathStyle: true,
+	}
+	b, err := s3backend.Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("open backend: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+
+	admin := newAdminClient(endpoint, username, password)
+	refs := make([]s3backend.ObjectRef, count)
+	for i := 0; i < count; i++ {
+		key := fmt.Sprintf("obj-%03d", i)
+		body := []byte(fmt.Sprintf("payload-%d", i))
+		out, err := admin.PutObject(ctx, &awss3.PutObjectInput{
+			Bucket: ptr(bucket),
+			Key:    ptr(key),
+			Body:   bytes.NewReader(body),
+		})
+		if err != nil {
+			t.Fatalf("seed put %s: %v", key, err)
+		}
+		if out.VersionId == nil || *out.VersionId == "" {
+			t.Fatalf("seed put %s: empty VersionId on versioned bucket", key)
+		}
+		ref := s3backend.ObjectRef{Key: key}
+		if i%2 == 0 {
+			// even indexes: versioned delete (clean — no delete-marker)
+			ref.VersionID = *out.VersionId
+		}
+		// odd indexes: empty VersionID → plain delete on a versioned
+		// bucket → leaves the seeded version intact, creates a
+		// delete-marker.
+		refs[i] = ref
+	}
+
+	failures, err := b.DeleteBatch(ctx, refs)
+	if err != nil {
+		t.Fatalf("DeleteBatch: %v", err)
+	}
+	if len(failures) != 0 {
+		t.Fatalf("DeleteBatch failures: %+v", failures)
+	}
+
+	versions, err := admin.ListObjectVersions(ctx, &awss3.ListObjectVersionsInput{Bucket: ptr(bucket)})
+	if err != nil {
+		t.Fatalf("list object versions: %v", err)
+	}
+
+	// Versioned-delete refs (10 of them, even indexes) are wiped.
+	// Plain-delete refs (10 of them, odd indexes) leave the original
+	// version + a delete-marker.
+	wantRemainingVersions := count / 2
+	wantDeleteMarkers := count / 2
+	if len(versions.Versions) != wantRemainingVersions {
+		t.Fatalf("remaining versions: want %d, got %d", wantRemainingVersions, len(versions.Versions))
+	}
+	if len(versions.DeleteMarkers) != wantDeleteMarkers {
+		t.Fatalf("delete-markers: want %d, got %d", wantDeleteMarkers, len(versions.DeleteMarkers))
+	}
+
+	// Confirm the surviving versions are exactly the odd-index keys.
+	gotKeys := map[string]struct{}{}
+	for _, v := range versions.Versions {
+		if v.Key != nil {
+			gotKeys[*v.Key] = struct{}{}
+		}
+	}
+	for i := 0; i < count; i++ {
+		key := fmt.Sprintf("obj-%03d", i)
+		_, present := gotKeys[key]
+		if i%2 == 1 && !present {
+			t.Fatalf("expected odd-index key %s to survive plain delete", key)
+		}
+		if i%2 == 0 && present {
+			t.Fatalf("even-index key %s should have been wiped by versioned delete", key)
+		}
+	}
+}
+
+// TestDeleteObjectIdempotent guards US-004's idempotency contract:
+// DeleteObject on an already-missing key must succeed without surfacing
+// the backend's NoSuchKey error.
+func TestDeleteObjectIdempotent(t *testing.T) {
+	ctx := context.Background()
+
+	const (
+		username = "minioadmin"
+		password = "minioadmin"
+		bucket   = "strata-test-delete-idempotent"
+	)
+
+	container, err := tcminio.Run(ctx, "minio/minio:latest",
+		tcminio.WithUsername(username),
+		tcminio.WithPassword(password),
+	)
+	if err != nil {
+		t.Fatalf("start minio: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := container.Terminate(context.Background()); err != nil {
+			t.Logf("terminate: %v", err)
+		}
+	})
+
+	endpoint := minioEndpoint(t, ctx, container)
+	if err := createBucket(ctx, endpoint, username, password, bucket); err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+
+	cfg := s3backend.Config{
+		Endpoint:       endpoint,
+		Region:         "us-east-1",
+		Bucket:         bucket,
+		AccessKey:      username,
+		SecretKey:      password,
+		ForcePathStyle: true,
+	}
+	b, err := s3backend.Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("open backend: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+
+	if err := b.DeleteObject(ctx, "never-existed", ""); err != nil {
+		t.Fatalf("DeleteObject on missing key: want nil, got %v", err)
+	}
+}
+
+// minioEndpoint returns the http://-prefixed endpoint URL for the
+// running MinIO container.
+func minioEndpoint(t *testing.T, ctx context.Context, container interface {
+	ConnectionString(context.Context) (string, error)
+}) string {
+	t.Helper()
+	hostPort, err := container.ConnectionString(ctx)
+	if err != nil {
+		t.Fatalf("connection string: %v", err)
+	}
+	if !strings.HasPrefix(hostPort, "http://") && !strings.HasPrefix(hostPort, "https://") {
+		hostPort = "http://" + hostPort
+	}
+	return hostPort
+}
+
+// enableVersioning flips MinIO's bucket versioning to Enabled. Required
+// for the versioned-delete tests so PutObject responses carry a
+// non-empty VersionId.
+func enableVersioning(ctx context.Context, endpoint, ak, sk, bucket string) error {
+	client := newAdminClient(endpoint, ak, sk)
+	_, err := client.PutBucketVersioning(ctx, &awss3.PutBucketVersioningInput{
+		Bucket: ptr(bucket),
+		VersioningConfiguration: &s3types.VersioningConfiguration{
+			Status: s3types.BucketVersioningStatusEnabled,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("put bucket versioning %s: %w", bucket, err)
+	}
+	return nil
+}
+
+// countingTransport tallies HTTP requests forwarded through wrapped.
+// Used by US-004 batch-delete tests to assert "exactly one HTTP call".
+type countingTransport struct {
+	wrapped http.RoundTripper
+	n       atomic.Int64
+}
+
+func (c *countingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	c.n.Add(1)
+	return c.wrapped.RoundTrip(req)
+}
+
+func (c *countingTransport) reset() { c.n.Store(0) }
+func (c *countingTransport) count() int64 {
+	return c.n.Load()
 }
 
 func createBucket(ctx context.Context, endpoint, ak, sk, bucket string) error {

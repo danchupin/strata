@@ -1,5 +1,7 @@
 package s3
 
+import "net/http"
+
 // Config carries the wiring needed to talk to a single S3-compatible
 // backend bucket. US-005 will populate it from STRATA_S3_BACKEND_* env
 // vars via koanf; until then callers (tests, US-002 streaming PUT) build
@@ -25,6 +27,11 @@ type Config struct {
 	// UploadConcurrency is the number of parallel part uploads per Put.
 	// Zero ⇒ DefaultUploadConcurrency.
 	UploadConcurrency int
+
+	// HTTPClient overrides the SDK's default HTTP client. Optional —
+	// production callers leave this nil. Tests may inject a counting
+	// transport to assert per-op request counts (US-004 batch-delete).
+	HTTPClient *http.Client
 }
 
 const (
