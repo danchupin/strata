@@ -35,8 +35,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Env-var loading deferred to US-005 (koanf wiring). US-002 ships Config struct + Open(cfg) constructor; tests build cfg directly. Heap-bound test uses tightened part-size (5 MiB * 2 concurrency = 10 MiB pool) to stay provably under 100 MiB across Go HeapInuse sawtooth — defaults stay 16 MiB * 4 = 64 MiB pool per spec."
     },
     {
       "id": "US-003",

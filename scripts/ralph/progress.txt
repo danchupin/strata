@@ -65,7 +65,29 @@ Cycle: ralph/s3-over-s3-backend
   reference. Don't rewrite the stub's signature shape (PutChunks /
   GetChunks / Delete / Close) until the data.Backend contract itself
   changes — US-002..US-004 may extend the interface, but US-001 only
-  satisfies the existing one.
+  satisfies the existing one. (deps.go removed in US-002 since all three
+  packages are now imported directly.)
+- s3 package has TWO constructors: New() returns a stub Backend (no
+  client, every op returns errors.ErrUnsupported — preserved for the
+  US-001 contract), Open(ctx, cfg) builds a live Backend wired through
+  aws-sdk-go-v2. New methods (US-002 Put, future US-003 Get/GetRange,
+  US-004 Delete) check b.uploader / b.client != nil and surface
+  errors.ErrUnsupported on the stub branch. Don't drop New() until US-009
+  flips the gateway dispatch fully to Open.
+- testcontainers-go MinIO module: github.com/testcontainers/testcontainers-go/modules/minio
+  v0.41.0. Runtime: minio.Run(ctx, "minio/minio:latest", minio.WithUsername,
+  minio.WithPassword); ConnectionString returns "host:port" without
+  scheme — prepend "http://" before passing to s3.Backend Config.Endpoint.
+  Bucket must be pre-created (s3 admin client → CreateBucket); Strata
+  refuses to auto-create per US-005 design.
+- HeapInuse-based memory bound assertion: sample HeapInuse during the
+  upload via a 20 ms ticker goroutine, take the max, assert peak delta
+  < body size. With prod defaults (16 MiB * 4 = 64 MiB pool) HeapInuse
+  drifts up to ~100 MiB on docker-localhost uploads (Go's GC sawtooth
+  + sync.Pool retention of recently-used part buffers), masking the
+  bound — use a tightened test config (PartSize=5 MiB, Concurrency=2 →
+  10 MiB pool) to keep the assertion provable. Don't rely on HeapAlloc
+  delta — same problem (sync.Pool keeps the buffers live).
 
 ## 2026-04-30 — US-001
 - Added internal/data/s3 package skeleton with stub Backend that satisfies
@@ -93,4 +115,47 @@ Cycle: ralph/s3-over-s3-backend
     feature/s3/transfermanager. PRD names manager; stick with PRD.
     Re-evaluate at US-002 when the migration cost is just a single import
     swap.
+---
+
+## 2026-04-30 — US-002
+- Added Config struct (Endpoint, Region, Bucket, AccessKey, SecretKey,
+  ForcePathStyle, PartSize, UploadConcurrency) + DefaultPartSize (16 MiB)
+  / DefaultUploadConcurrency (4) constants.
+- Added Open(ctx, cfg) constructor: validates Bucket + Region, builds the
+  aws-sdk-go-v2 client (BaseEndpoint + UsePathStyle override) and the
+  manager.Uploader with the configured PartSize / Concurrency.
+- Added Backend.Put(ctx, oid, reader, size) (*PutResult, error). PutResult
+  carries ETag (quote-stripped) + VersionID (verbatim from SDK; "" /
+  "null" / UUID per PRD) + Size. manager.Uploader's LeavePartsOnError
+  defaults to false → AbortMultipartUpload runs on context cancel / error
+  (no orphan multipart sessions).
+- New unit tests in backend_test.go: TestStubPutReturnsErrUnsupported (Put
+  on a New() stub errors), TestOpenValidatesRequiredConfig (missing
+  bucket/region fail-fast at Open).
+- New integration tests in backend_integration_test.go (build tag
+  `integration`): TestPutStreams100MiBBoundedMemory uploads 100 MiB into
+  MinIO testcontainer, samples HeapInuse via ticker, asserts peak delta <
+  100 MiB. TestPutAbortsOnContextCancel verifies that a pre-cancelled
+  context produces zero in-progress multipart sessions in the backend
+  bucket (ListMultipartUploads returns empty).
+- Removed deps.go — config / feature/s3/manager / service/s3 are now
+  imported directly. Added testcontainers-go/modules/minio v0.41.0 dep.
+- Files: go.mod, go.sum, internal/data/s3/{backend.go,backend_test.go,
+  config.go,backend_integration_test.go}, internal/data/s3/deps.go (deleted).
+- **Learnings:**
+  - manager.Uploader.LeavePartsOnError default = false handles the
+    abort-on-cancel AC for free. No explicit AbortMultipartUpload call
+    needed in user code.
+  - manager.UploadOutput.ETag includes surrounding quotes — strip via
+    strings.Trim(*out.ETag, "\""). Same convention applies to
+    GetObjectOutput.ETag (US-003).
+  - testcontainers-go MinIO ConnectionString returns "host:port" without
+    a scheme — must prepend "http://" before handing to anything that
+    expects a URL.
+  - Go HeapInuse / HeapAlloc are weak proxies for "did the SDK buffer the
+    body". sync.Pool retention of part buffers + GC pacing lets HeapInuse
+    drift up to PartSize * (Concurrency + 1) * ~1.5 — with 16 MiB * 4
+    defaults the peak nudges 100 MiB on a fast docker-localhost upload.
+    For provable bounds, use tight test config (small PartSize +
+    Concurrency=2) so the pool budget stays well under the body size.
 ---
