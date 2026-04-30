@@ -156,6 +156,10 @@ func (s *Store) SetObjectReplicationStatus(ctx context.Context, bucketID uuid.UU
 	return errors.ErrUnsupported
 }
 
-// Compile-time guarantee that *Store satisfies meta.Store. Stories that
-// touch the interface should preserve this assertion.
-var _ meta.Store = (*Store)(nil)
+// Compile-time guarantees that *Store satisfies both meta.Store and the
+// optional meta.RangeScanStore capability surface (US-012). Stories that
+// touch either interface should preserve these assertions.
+var (
+	_ meta.Store          = (*Store)(nil)
+	_ meta.RangeScanStore = (*Store)(nil)
+)

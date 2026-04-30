@@ -627,6 +627,31 @@ type Store interface {
 	Close() error
 }
 
+// RangeScanStore is the optional capability surface for backends whose
+// physical layout supports a single ordered range scan over (bucket, prefix).
+// Backends that implement it advertise to the gateway "ListObjects can be
+// served by one continuous scan instead of N-way fan-out + heap-merge". The
+// gateway type-asserts the live Store at the dispatch site (see
+// internal/s3api/server.go::listObjects) and routes through ScanObjects when
+// available, falling back to Store.ListObjects otherwise.
+//
+// Memory and TiKV both ship a true single-shot range-scan implementation —
+// memory because its in-process tree-map is naturally ordered, TiKV because
+// its KV layout (US-002 key encoding) gives a globally sorted byte-string
+// keyspace. Cassandra deliberately does NOT implement this interface: the
+// objects table is partitioned by (bucket_id, shard) so any prefix scan must
+// fan out across N partitions and heap-merge by clustering order — that
+// fan-out IS the implementation in cassandra.Store.ListObjects, and hoisting
+// it to a "single range scan" name would just hide the same code.
+//
+// ScanObjects accepts the same meta.ListOptions shape Store.ListObjects
+// takes; the result shape is identical so the dispatch site is a one-line
+// type-assertion fork.
+type RangeScanStore interface {
+	Store
+	ScanObjects(ctx context.Context, bucketID uuid.UUID, opts ListOptions) (*ListResult, error)
+}
+
 func IsVersioningActive(state string) bool {
 	return state == VersioningEnabled || state == VersioningSuspended
 }

@@ -578,6 +578,29 @@ func TestObjectKeyVersionsCoexist(t *testing.T) {
 // ListObjects + ListObjectVersions (US-005).
 // ----------------------------------------------------------------------------
 
+// TestStoreImplementsRangeScanStore confirms the TiKV backend advertises the
+// optional meta.RangeScanStore capability surface (US-012). ScanObjects must
+// produce identical output to ListObjects for the same options.
+func TestStoreImplementsRangeScanStore(t *testing.T) {
+	var ms meta.Store = newTestStore(t)
+	rs, ok := ms.(meta.RangeScanStore)
+	if !ok {
+		t.Fatal("tikv.Store must implement meta.RangeScanStore — see US-012")
+	}
+	ctx := context.Background()
+	b, _ := ms.CreateBucket(ctx, "bkt", "alice", "STANDARD")
+	for _, k := range []string{"a", "b", "c"} {
+		putBody(t, ms.(*Store), b, k, k, false)
+	}
+	res, err := rs.ScanObjects(ctx, b.ID, meta.ListOptions{Limit: 1000})
+	if err != nil {
+		t.Fatalf("ScanObjects: %v", err)
+	}
+	if got := keysOf(res.Objects); !equalStrings(got, []string{"a", "b", "c"}) {
+		t.Fatalf("ScanObjects keys: %v", got)
+	}
+}
+
 func TestListObjectsBasic(t *testing.T) {
 	s := newTestStore(t)
 	t.Cleanup(func() { _ = s.Close() })

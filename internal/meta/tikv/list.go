@@ -15,6 +15,15 @@ import (
 // tuning is the gateway's job; keep this side simple.
 const listScanBatchSize = 1024
 
+// ScanObjects satisfies meta.RangeScanStore (US-012). The TiKV layout is a
+// globally sorted byte-string keyspace, so ListObjects is already a single
+// continuous range scan; ScanObjects is the same call surfaced under the
+// optional capability interface so the gateway dispatch site can pick the
+// efficient path via type assertion.
+func (s *Store) ScanObjects(ctx context.Context, bucketID uuid.UUID, opts meta.ListOptions) (*meta.ListResult, error) {
+	return s.ListObjects(ctx, bucketID, opts)
+}
+
 // ListObjects emits one row per user-space key (the latest non-delete-marker
 // version) by issuing a single ordered range scan over the bucket's object
 // prefix. The version-DESC suffix encoding (US-002) means lex-first row per

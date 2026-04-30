@@ -18,6 +18,16 @@ import (
 	"github.com/danchupin/strata/internal/meta"
 )
 
+// Store is the Cassandra-backed meta.Store. It deliberately does NOT
+// implement the optional meta.RangeScanStore capability (US-012): the
+// objects table is partitioned by (bucket_id, shard) so a prefix scan must
+// fan out across N shard partitions and heap-merge by clustering order —
+// that fan-out IS the implementation in Store.ListObjects below. Hoisting
+// it under a "single ordered range scan" name would just rename the same
+// code. The gateway's type-assertion at the dispatch site
+// (internal/s3api/server.go::listObjects) therefore falls through to
+// Store.ListObjects on Cassandra; memory and TiKV provide the
+// RangeScanStore-shaped fast path.
 type Store struct {
 	s            *gocql.Session
 	defaultShard int
