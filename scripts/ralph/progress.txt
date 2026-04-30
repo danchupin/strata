@@ -216,6 +216,139 @@ prior cycles found useful; remove/replace if stale for this cycle.)
   (US-017) sidesteps this by setting STRATA_TIKV_TEST_PD_ENDPOINTS
   directly against an existing PD it brought up via docker-compose
   (US-014), bypassing testcontainers entirely.
+- docker-compose profiles cannot toggle env on a single service; mutually-
+  exclusive shapes (cassandra-backed strata vs tikv-backed strata) get
+  distinct service names sharing the same image. Compose's `profiles: [...]`
+  gates whether a service is started, so profile-tagged services live
+  alongside the default ones (no per-profile override of env on a default
+  service). Pattern: bake the differing env onto each variant, publish on
+  distinct host ports so both can coexist for comparison/debugging. See
+  strata-tikv (profile `tikv`) vs strata (default) in
+  deploy/docker/docker-compose.yml.
+- TiKV's upstream container image (pingcap/tikv:v8.5.0) has no clean HTTP
+  healthcheck contract — the status server returns plain text whose body
+  is not a public API, and the alpine-glibc base ships no curl. For
+  docker-compose the simplest portable wait shape is a host-side TCP probe
+  on the published RPC port (`make wait-tikv` uses bash `/dev/tcp`). The
+  PD service does have a stable HTTP health endpoint
+  (`/pd/api/v1/health`), so its compose healthcheck is HTTP-shaped and
+  downstream services can rely on `depends_on: pd: service_healthy`. TiKV
+  downstream consumers use `service_started`; the TiKV client retries
+  until PD assigns regions, so transient boot races absorb in the
+  application layer.
+
+## 2026-04-30 - US-014
+- docker-compose tikv profile + sidecars. Adds three services under
+  `profiles: ["tikv"]` to deploy/docker/docker-compose.yml:
+    pd            — pingcap/pd:v8.5.0 (single-node PlacementDriver),
+                    HTTP healthcheck on /pd/api/v1/health, port 2379,
+                    persistent volume strata-pd-data
+    tikv          — pingcap/tikv:v8.5.0 (single-node storage), depends
+                    on pd healthy, port 20160, persistent volume
+                    strata-tikv-data
+    strata-tikv   — TiKV-backed gateway replica using strata:ceph
+                    image; depends on pd healthy + tikv started + ceph
+                    healthy; bakes STRATA_META_BACKEND=tikv +
+                    STRATA_TIKV_PD_ENDPOINTS=pd:2379; host port 9998
+                    (vs the default cassandra-backed strata's 9999 so
+                    both can run side-by-side under --profile tikv for
+                    comparison)
+- Mutual exclusion at the picker level: STRATA_META_BACKEND is a single
+  string, so each gateway process picks exactly one backend. The
+  compose-level mutual exclusion is via distinct service names
+  (strata vs strata-tikv) instead of conditional env on one service —
+  compose has no per-profile env override on a default service.
+- New Makefile targets: up-tikv (brings up pd + tikv + ceph +
+  strata-tikv + prometheus + grafana via --profile tikv); wait-pd (HTTP
+  healthcheck poll); wait-tikv (host-side bash /dev/tcp probe on
+  127.0.0.1:20160 — TiKV's image has no portable HTTP health endpoint,
+  see Codebase Patterns above). down extended to drop tikv +
+  features + tracing profiles in one shot so leftover containers from
+  any profile stack get cleaned up.
+- New volumes: strata-pd-data, strata-tikv-data.
+- Validated: `docker compose -f deploy/docker/docker-compose.yml
+  --profile tikv config -q` passes; same with all four profiles
+  combined (--profile tikv --profile features --profile tracing).
+- Files changed: deploy/docker/docker-compose.yml, Makefile,
+  scripts/ralph/progress.txt, scripts/ralph/prd.json.
+- Known gap (deferred to US-015): /readyz wait on strata-tikv won't
+  succeed until internal/serverapp.buildMetaStore + config.validate
+  learn STRATA_META_BACKEND=tikv. The compose wiring is structurally
+  valid (config -q passes) and pd + tikv come up cleanly regardless,
+  so this target is enough for `make test-integration` against
+  STRATA_TIKV_TEST_PD_ENDPOINTS=127.0.0.1:2379 from US-013's contract
+  suite.
+- **Learnings for future iterations:**
+  - docker-compose profiles cannot toggle env vars on a single service.
+    `profiles: [tag]` is binary inclusion: with the profile, the
+    service is started; without, it isn't. There is no per-profile
+    env override on a default service. Mutually-exclusive shapes
+    therefore live as distinct service names sharing the same image,
+    with differing env baked on each. Distinct host ports let both
+    coexist when --profile is mixed with default; same internal port
+    (9000) keeps the gateway code agnostic.
+  - `--data-dir=/data/pd` and `--data-dir=/data/tikv` (subpaths under
+    the volume mount) work cleanly in pingcap/pd:v8.5.0 +
+    pingcap/tikv:v8.5.0 because both binaries create the leaf dir if
+    missing. Mounting the raw volume at /data and letting each
+    container own its own subpath keeps a single named volume usable
+    if anyone ever wants to share it (we don't, but the shape is
+    cheap).
+  - `make down` should drop every active profile's containers, not
+    just the default set — if `make up-tikv` brought up pd + tikv +
+    strata-tikv, a plain `docker compose down` (no --profile) leaves
+    them running. Update down to chain --profile tikv --profile
+    features --profile tracing so a single command tears down
+    whichever stack is up.
+  - PD's HTTP health endpoint /pd/api/v1/health returns
+    `[{"name":"pd","health":true}]` once the cluster has a leader;
+    grep-on-`"health":true` is a stable shape. For TiKV there is no
+    equivalent contract and the upstream image ships no curl, so
+    skip the in-container healthcheck and use a host-side TCP probe
+    via bash /dev/tcp. depends_on: tikv: service_started is enough
+    for downstream consumers — the client-go TiKV client retries
+    until PD assigns a region.
+---
+
+## 2026-04-30 - US-012
+- RangeScanStore optional capability surface (internal/meta/store.go).
+  Backends advertise via type-assert: memory + TiKV implement, Cassandra
+  deliberately stays out. Gateway dispatch site
+  (internal/s3api/server.go::listObjects) uses one type-assertion fork
+  to prefer ScanObjects when available, fall back to ListObjects
+  otherwise.
+- Memory backend's ScanObjects forwards to ListObjects (the in-process
+  tree-map iterator is already an ordered range scan). Same shape on
+  TiKV — its US-002 byte-string keyspace makes ListObjects already a
+  single continuous scan, so ScanObjects is a one-line forward there
+  too. Compile-time `var _ meta.RangeScanStore = (*Store)(nil)`
+  assertions on both lock the contract in.
+- Negative assertion test in internal/meta/cassandra/capability_test.go
+  proves cassandra.Store does NOT satisfy meta.RangeScanStore — the
+  fan-out path stays load-bearing in cassandra.Store.ListObjects and
+  hoisting it under a "single range scan" name would just rename the
+  same code. The dispatch site relies on this.
+- Files changed: internal/meta/store.go (RangeScanStore interface),
+  internal/meta/memory/store.go (ScanObjects + assertion),
+  internal/meta/memory/store_test.go (capability smoke test),
+  internal/meta/tikv/list.go (ScanObjects),
+  internal/meta/tikv/store.go (RangeScanStore assertion),
+  internal/meta/tikv/store_test.go (capability + parity smoke test),
+  internal/meta/cassandra/store.go (capability comment),
+  internal/meta/cassandra/capability_test.go (negative assertion test),
+  internal/s3api/server.go (listObjects dispatch fork).
+- **Learnings for future iterations:**
+  - Optional capability interfaces carried via type-assertion at a
+    single dispatch site keep the meta.Store contract minimal while
+    letting backends advertise faster paths when their physical
+    layout supports them. Pattern: define the optional interface as
+    Store + extra method, implement on whichever backends fit, leave
+    the others alone with a comment + a negative assertion test.
+  - The ScanObjects parameter shape mirrors ListObjects exactly so
+    the dispatch site is a one-line fork. If a future capability
+    needs different params, it can take its own shape — but matching
+    the parent shape costs nothing and keeps the dispatch readable.
+---
 
 ## 2026-04-30 - US-013
 - TiKV contract suite wired:

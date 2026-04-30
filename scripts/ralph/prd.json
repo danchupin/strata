@@ -235,8 +235,8 @@
         "Tests pass"
       ],
       "priority": 14,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Compose ships pd / tikv / strata-tikv services under profile 'tikv'. Conditional env for the gateway lives on a dedicated strata-tikv service (compose has no per-profile env override — mutually-exclusive shapes get distinct service names): STRATA_META_BACKEND=tikv + STRATA_TIKV_PD_ENDPOINTS=pd:2379 baked in, host port 9998 vs the cassandra-backed strata's 9999 so both can coexist for comparison. make up-tikv brings up pd + tikv + ceph + strata-tikv + observability; wait-pd / wait-tikv split because TiKV's status server returns plain text on a non-stable contract and the alpine-glibc base image ships no curl, so a host-side TCP probe via bash /dev/tcp is the most portable shape. /readyz wait on strata-tikv lands in US-015 (config validation rejects meta_backend=tikv until that story relaxes the picker)."
     },
     {
       "id": "US-015",

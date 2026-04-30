@@ -1,7 +1,7 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph docker-build vet test up up-all down wait-cassandra wait-ceph ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-grafana clean
+.PHONY: build build-ceph docker-build vet test up up-all up-tikv down wait-cassandra wait-ceph wait-pd wait-tikv ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-grafana clean
 
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
@@ -51,8 +51,18 @@ up:
 up-all:
 	$(COMPOSE) up -d cassandra ceph strata prometheus grafana
 
+# Bring up the TiKV-backed gateway stack (PD + TiKV + ceph + strata-tikv +
+# observability). Mutually exclusive with `up-all` in practice — running both
+# at once works (different host ports) but the cassandra service goes idle.
+# strata-tikv health depends on internal/serverapp wiring landed by US-015;
+# until then `make wait-strata-tikv` may time out. PD + TiKV come up cleanly
+# regardless, so this target is enough for `make test-integration` against
+# STRATA_TIKV_TEST_PD_ENDPOINTS=127.0.0.1:2379.
+up-tikv:
+	$(COMPOSE) --profile tikv up -d pd tikv ceph strata-tikv prometheus grafana
+
 down:
-	$(COMPOSE) down
+	$(COMPOSE) --profile tikv --profile features --profile tracing down
 
 wait-cassandra:
 	@echo "waiting for cassandra to report healthy..."
@@ -63,6 +73,21 @@ wait-ceph:
 	@echo "waiting for ceph to report healthy..."
 	@until [ "$$($(COMPOSE) ps --format '{{.Health}}' ceph)" = "healthy" ]; do sleep 5; done
 	@echo "ceph ready"
+
+wait-pd:
+	@echo "waiting for pd to report healthy..."
+	@until [ "$$($(COMPOSE) ps --format '{{.Health}}' pd)" = "healthy" ]; do sleep 3; done
+	@echo "pd ready"
+
+# TiKV has no HTTP healthcheck (the upstream image's status server returns
+# plain text and the alpine-glibc base ships no curl); a TCP probe is the
+# most portable shape across docker engines. Runs from the host, not from
+# inside the container, so it works on macOS+Lima and Linux CI. SHELL is
+# bash at the top of this file so /dev/tcp is available.
+wait-tikv:
+	@echo "waiting for tikv to accept TCP connections on 20160..."
+	@until (echo > /dev/tcp/127.0.0.1/20160) 2>/dev/null; do sleep 2; done
+	@echo "tikv ready"
 
 ceph-pool:
 	docker exec strata-ceph ceph osd pool create strata.rgw.buckets.data 8 8 replicated || true
