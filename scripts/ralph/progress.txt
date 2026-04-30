@@ -1400,3 +1400,80 @@ Cycle: ralph/s3-over-s3-backend
     URL). Strip BackendRef back off before delegating GetChunks /
     Delete to the inner memory backend so it can find the chunks.
 ---
+
+## 2026-05-01 — US-017
+- Expanded docs/backends/s3.md from US-014's lifecycle-only stub to a full
+  operator guide. New sections (in order): "When to choose S3 over RADOS"
+  decision matrix (latency budget, cost model, ops complexity, encryption
+  mandate); "Required environment variables" summary table cross-referenced
+  to README's full env-var table; docker-compose snippet for the bundled
+  `make up-s3-backend` profile + a custom AWS-target YAML snippet for
+  production deployments; "Kubernetes / IRSA" subsection enumerating the
+  required S3 IAM action set (Get/Put/Delete/AbortMultipart/ListBucket
+  + Get/Put BucketLifecycle + Get/Put BucketCors); "Operator-required
+  backend bucket configuration" as load-bearing section (a) AbortIncompleteMultipartUpload
+  lifecycle rule with copy-pasteable JSON + aws s3api put-bucket-lifecycle-configuration
+  command, (b) versioning anti-pattern tying back to US-008's defensive
+  VersionID design, (c) cross-region anti-pattern; "Tested-against backends"
+  table — AWS S3 + MinIO supported, Ceph RGW + Garage + Wasabi + B2-S3
+  works-with-caveats, R2 unsupported, GCS S3-interop works-with-caveats;
+  "Capability matrix" flagging native vs worker-fallback per backend
+  across PUT/GET, multipart, versioned delete, lifecycle native transitions,
+  lifecycle native expirations, CORS passthrough, presign passthrough,
+  SSE-S3, SSE-KMS; "Performance characteristics" — latency floor (one
+  HTTPS RTT for AWS / sub-ms for MinIO same-host), throughput (1 GB/s
+  AWS / 4-6 GB/s MinIO), cost-model (PUT-count-proportional thanks to
+  1:1 invariant; rejected 4-MiB-chunks-shape would have inflated 250x),
+  hot-prefix-throttling avoidance via UUID prefix entropy. "Common
+  operational pitfalls" enumerates force-path-style for non-AWS,
+  forgotten IRSA binding, skipped bucket pre-creation, mid-flight
+  versioning enable, cross-region setup, lifecycle ID collisions,
+  per-bucket presign-passthrough off-by-default.
+- README.md How to run gained Option 4 (make up-s3-backend / make
+  smoke-s3-backend) right after the existing Option 3 (Ceph stack), with
+  a one-paragraph orientation tying Option 4 to docs/backends/s3.md and
+  positioning MinIO as the dev-time stand-in for any S3-compatible
+  endpoint.
+- New top-level CLAUDE.md (no pre-existing top-level CLAUDE.md found in
+  the repo — only scripts/ralph/CLAUDE.md). Seeded with: big-picture
+  architecture ASCII diagram showing the data.Backend box reading
+  "memory | rados | s3" and the meta.Store box reading "memory | cassandra";
+  package-level summary of internal/s3api / internal/auth / meta.Store /
+  data.Backend with optional capability surfaces enumerated; "Alternative
+  data backends" stub prose (US-019 will expand to mirror new ROADMAP
+  wording per AC-19); roadmap-maintenance rule restated for future agents;
+  pointers section to README, ROADMAP, docs/backends/s3.md, scripts/s3-tests
+  README, and scripts/ralph cycle artifacts.
+- Files changed:
+  - docs/backends/s3.md (US-014 lifecycle stub → full operator guide)
+  - README.md (Option 4: make up-s3-backend)
+  - CLAUDE.md (new — big-picture diagram + alternative-data-backends stub)
+- Quality:
+  - go build ./...   ✓
+  - go vet ./...     ✓
+  - go test ./...    ✓ (all packages green)
+- Learnings for future iterations:
+  - Top-level CLAUDE.md did not exist before this story. AC #4 ("CLAUDE.md
+    Big-picture architecture diagram updated") implied one — created it
+    fresh rather than skipping the AC. US-019 will further update its
+    "Alternative data backends" prose to mirror ROADMAP wording (single
+    source of truth per AC-19); US-019 should re-edit, not re-create.
+  - docs/backends/scylla.md and docs/backends/tikv.md referenced in the
+    AC do not exist in the repo today — only docs/backends/s3.md. The
+    "alongside scylla.md and tikv.md" phrasing is aspirational; do not
+    block on creating those.
+  - The capability matrix is a snapshot — re-validate per backend
+    when adding a new optional capability surface (e.g. future
+    UploadPartCopy native passthrough). Any matrix cell flipping from
+    "—" to "✓" needs a corresponding integration test against the
+    listed backend before it ships.
+  - The README env-var table is the canonical source for env-var docs;
+    docs/backends/s3.md mirrors a SUMMARY of the required ones with
+    "see README" cross-reference. Don't duplicate the full table — when
+    a new env var lands, add it to README and rely on the cross-ref.
+  - The IRSA permission set listed in the operator guide is the minimum
+    superset across all current optional capability surfaces (lifecycle
+    + cors). When adding new capability surfaces (e.g. notifications,
+    replication), update the IRSA action list here AND in the s3.md
+    capability matrix.
+---

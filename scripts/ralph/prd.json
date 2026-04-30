@@ -302,8 +302,8 @@
         "Tests pass"
       ],
       "priority": 17,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "docs/backends/s3.md expanded from US-014 lifecycle stub to a full operator guide: when-to-choose decision matrix (RADOS vs S3 by latency budget, cost model, ops complexity, encryption mandate), required env-var summary table cross-referenced to README, docker-compose snippet for the bundled `make up-s3-backend` profile + a custom-AWS YAML snippet, IRSA + IAM-permission notes for EKS, operator-required backend bucket configuration as load-bearing section (a) AbortIncompleteMultipartUpload lifecycle rule with copy-pasteable JSON + aws s3api command, (b) versioning anti-pattern note tying back to US-008 defensive design, (c) cross-region anti-pattern. Tested-against backend table covers AWS / MinIO (supported) and Ceph RGW / Garage / Wasabi / B2-S3 / R2 / GCS (works-with-caveats / unsupported). Capability matrix flags native vs worker-fallback per backend across PUT/GET, multipart, versioned delete, lifecycle, CORS, presign, SSE-S3, SSE-KMS. Performance section gives latency floor / throughput / cost-model / hot-prefix-throttling expectations. Common pitfalls section enumerates force-path-style, IRSA, bucket pre-creation, mid-flight versioning, cross-region, lifecycle ID collisions, presign passthrough off-by-default. Original US-014 lifecycle bidirectional mapping section preserved verbatim at the bottom. README.md How to run gains Option 4 (make up-s3-backend / make smoke-s3-backend) with link to docs/backends/s3.md. New top-level CLAUDE.md (none existed pre-cycle) seeds big-picture architecture diagram with data backend box reading 'memory | rados | s3' + alternative-data-backends prose stub (US-019 will expand to mirror ROADMAP wording). go build ./... and go vet ./... and go test ./... all green (no Go changes — docs-only)."
     },
     {
       "id": "US-018",

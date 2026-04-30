@@ -57,6 +57,15 @@ The gateway image (`deploy/docker/Dockerfile`) is built on the same `quay.io/cep
 
 A successful `make smoke` validates bucket CRUD, object PUT/GET/HEAD/DELETE (including a 10 MiB blob that ends up as three RADOS objects in pool `strata.rgw.buckets.data`), and ListObjectsV2 with prefix/delimiter.
 
+### Option 4: Strata + Cassandra + MinIO (S3-over-S3 backend, no Ceph)
+
+```bash
+make up-s3-backend         # cassandra + minio + init-minio + strata-s3
+make smoke-s3-backend      # smoke pass + 1:1 backend object assertions
+```
+
+This stack runs the gateway with `STRATA_DATA_BACKEND=s3` against a single-node MinIO sidecar — no Ceph, no librados, smaller footprint (idle RSS ≈ 3 GB vs. the Ceph stack's larger envelope). MinIO is the development-time stand-in for any S3-compatible endpoint (AWS S3, Ceph RGW, Garage, Wasabi, B2-S3); switching to a different backend in production is an env-var change. See [docs/backends/s3.md](docs/backends/s3.md) for the operator guide, capability matrix, and pitfalls.
+
 ## Environment variables
 
 | Variable | Default | Description |
