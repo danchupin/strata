@@ -1,37 +1,38 @@
 {
   "project": "Strata",
-  "branchName": "ralph/s3-compatibility",
-  "description": "S3 protocol compatibility — close gaps in ACL/policy/IAM/checksums/SSE/notifications/website/replication/auth so Strata passes >=80% of Ceph s3-tests executable subset.",
+  "branchName": "ralph/s3-over-s3-backend",
+  "description": "First-class S3-compatible data backend (S3-over-S3) — Strata's data plane gains an equal-tier alternative to RADOS that stores object bytes in any S3-compatible endpoint (AWS S3, MinIO, Ceph RGW, Garage, Wasabi, B2-S3) via aws-sdk-go-v2. Native shape: one Strata object = one backend S3 object via backend multipart upload (NOT 4-MiB-chunks-per-object — that would 250x request count and is explicitly out of scope). Defensive backend-versioning support: per-object VersionId is captured in Manifest.BackendRef at PUT/Complete time and passed back on Delete, so versioned-bucket backends (AWS-versioning-enabled, MinIO-versioning-enabled) do not silently leak storage into delete-markers. Graceful degradation across backends without versioning support (B2-S3 returns empty VersionId; plain delete works on non-versioned buckets). Wires STRATA_DATA_BACKEND=s3 dispatch, docker-compose s3-backend profile with MinIO sidecar, smoke + CI matrix entry, full SSE config flag (passthrough/strata/both), bidirectional lifecycle mapping, CORS passthrough, presigned URL passthrough. Operator pre-creates the backend bucket; Strata refuses to start on missing bucket. New ROADMAP.md 'Alternative data backends' section seeded by US-019. Cassandra remains the recommended meta backend; RADOS remains the default data backend; this PRD adds the S3 alternative for the data plane only.",
   "userStories": [
     {
       "id": "US-001",
-      "title": "Parse AccessControlPolicy XML body for PutBucketAcl/PutObjectAcl",
-      "description": "As a client, I want PutBucketAcl/PutObjectAcl to accept a full XML grant list, not just the canned x-amz-acl header, so I can grant fine-grained permissions to specific principals.",
+      "title": "aws-sdk-go-v2 dependency + internal/data/s3 package skeleton",
+      "description": "As a developer, I want a starting internal/data/s3 package that compiles, satisfies the data.Backend interface with stub implementations, and is reachable via the existing backend factory so later stories can fill in real implementations.",
       "acceptanceCriteria": [
-        "Parse <AccessControlPolicy> with <Owner> and <AccessControlList><Grant> entries",
-        "Persist grant list in meta.Store via new SetBucketGrants/GetBucketGrants and SetObjectGrants/GetObjectGrants methods (memory + cassandra)",
-        "GetBucketAcl/GetObjectAcl return the persisted grants when present, fall back to canned otherwise",
-        "Reject grants with unknown grantee Type or Permission values with 400 MalformedACLError",
-        "Unit tests cover: round-trip XML body, mixed canned header + body, malformed body 400, unknown grantee type 400",
-        "go build ./... passes",
-        "go test ./internal/s3api/... ./internal/meta/... passes"
+        "Add github.com/aws/aws-sdk-go-v2 + submodules (config, service/s3, feature/s3/manager) to go.mod; run go mod tidy",
+        "New internal/data/s3/backend.go with type Backend struct{} and stub methods returning errors.ErrUnsupported; methods conform to data.Backend interface",
+        "Compile-time interface assertion: var _ data.Backend = (*Backend)(nil)",
+        "New internal/data/s3/backend_test.go with one happy-path unit test asserting the stub is wired (calls Put, expects ErrUnsupported via errors.Is)",
+        "STRATA_DATA_BACKEND=s3 is reserved but NOT yet wired into internal/serverapp dispatch — production routing lands in US-009",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
       "id": "US-002",
-      "title": "Add IAM-style policy evaluator package internal/auth/policy",
-      "description": "As a follow-on for bucket policy enforcement, I need a standalone evaluator that takes a policy document, principal, action, resource, and context, and returns Allow/Deny.",
+      "title": "Streaming PUT via backend multipart upload",
+      "description": "As a Strata client uploading an object, I want the bytes to stream straight to the backend without buffering, using the backend's S3 multipart-upload protocol so objects of any size go through one consistent code path with bounded memory.",
       "acceptanceCriteria": [
-        "New package internal/auth/policy with Document, Statement, Evaluate(doc, principal, action, resource, ctx) (Decision, error)",
-        "Supports Effect (Allow/Deny), Principal (string, list, or *), Action (string or list, with s3:* wildcards), Resource (string or list, with arn wildcards), Condition (StringEquals only)",
-        "Explicit Deny overrides Allow",
-        "Default decision when no statement matches: Deny",
-        "Unit tests cover: explicit allow, explicit deny override, wildcard action, wildcard resource, StringEquals condition match/miss, anonymous principal *",
-        "go build ./... passes",
-        "go test ./internal/auth/... passes"
+        "s3.Backend.Put(ctx, oid, reader, size) uses manager.NewUploader(client).Upload(...) from feature/s3/manager — handles small objects via single PutObject and large objects via multipart, transparently",
+        "Default part size = 16 MiB (configurable via STRATA_S3_BACKEND_PART_SIZE); upload concurrency = 4 (configurable via STRATA_S3_BACKEND_UPLOAD_CONCURRENCY)",
+        "Memory bound: never buffers > part_size * upload_concurrency bytes (default 64 MiB peak)",
+        "Returns the backend ETag AND backend VersionId (string; empty when backend does not support versioning, returns 'null' when versioning is suspended) in the response struct so the manifest can record both",
+        "Aborts the multipart on context cancel — no orphaned multipart sessions left in the backend bucket",
+        "Test: 100 MiB streaming upload against in-process MinIO (testcontainer) completes with peak RSS under 100 MiB",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 2,
       "passes": false,
@@ -39,16 +40,16 @@
     },
     {
       "id": "US-003",
-      "title": "Wire policy evaluator into request middleware and object handlers",
-      "description": "As a bucket owner, I want my JSON bucket policy to actually gate object-level requests; today it is stored but never enforced.",
+      "title": "Streaming GET with Range support",
+      "description": "As a Strata client GETing an object (full or partial), I want the backend to stream the body back without loading it into memory and to honor Range headers natively.",
       "acceptanceCriteria": [
-        "internal/auth middleware loads the bucket's policy document via meta.Store after SigV4/anonymous identity is resolved",
-        "Object handlers (PutObject, GetObject, HeadObject, DeleteObject, multipart endpoints) call requireAccess(action, arn) before any state change",
-        "Anonymous identity passes through evaluator with principal '*'",
-        "Policy denial returns 403 AccessDenied",
-        "Unit tests: anonymous GET allowed by s3:GetObject Allow, anonymous GET denied without, explicit Deny overrides Allow, wrong-principal Allow denied",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
+        "s3.Backend.GetRange(ctx, oid, off, len) (io.ReadCloser, error) issues GetObject with Range: bytes=<off>-<off+len-1> header to the backend",
+        "s3.Backend.Get(ctx, oid) (io.ReadCloser, error) issues plain GetObject (no Range)",
+        "Body returned is the SDK's response Body (HTTP stream); caller is responsible for Close()",
+        "Maps backend NoSuchKey → data.ErrNotFound so the gateway returns 404 NoSuchKey (not 500)",
+        "Test: 100 MiB object, range-read of [50 MiB, 50 MiB+1 KiB) returns exactly 1 KiB without loading the rest into memory",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 3,
       "passes": false,
@@ -56,16 +57,19 @@
     },
     {
       "id": "US-004",
-      "title": "Enforce bucket and object ACL grants on object-level requests",
-      "description": "As a bucket owner, when bucket ACL is public-read, anonymous GETs should succeed; when private, they should 403. Today the canned ACL is stored but never consulted on the request path.",
+      "title": "Delete + best-effort batch delete (version-aware)",
+      "description": "As Strata's GC worker, I want to delete backend objects when the manifest's reference count drops to zero, ideally batched to reduce request volume, and to delete by VersionId when one was recorded so a backend bucket with versioning enabled does not silently leak the old version into a delete-marker.",
       "acceptanceCriteria": [
-        "Anonymous GET /<bucket>/<key> succeeds when bucket ACL is public-read or public-read-write",
-        "Anonymous PUT succeeds only when ACL is public-read-write",
-        "Per-object grants from US-001 override bucket ACL on per-object reads",
-        "ACL check runs after policy check; explicit policy Deny still wins",
-        "Unit tests cover four canned values × {GET, PUT, DELETE} × {anonymous, owner, alt principal}",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
+        "s3.Backend.Delete(ctx, oid, versionID) issues DeleteObject: when versionID == '' use plain DeleteObject(key) (frees bytes immediately on non-versioned and suspended buckets); when versionID != '' use DeleteObject(key, VersionId: versionID) (deletes specific version, skips delete-marker creation on versioned backends)",
+        "Idempotent — success on already-deleted objects (NoSuchKey → no-op)",
+        "s3.Backend.DeleteBatch(ctx, refs []ObjectRef) issues DeleteObjects with up to 1000 entries per request (S3 protocol limit); ObjectRef = {Key, VersionID}; SDK's DeleteObjectsInput.Delete.Objects[].VersionId is set when non-empty",
+        "On partial failure, returns the per-ref error map",
+        "GC worker reads BackendRef.VersionID from each manifest's BackendRef, populates the ObjectRef slice, calls DeleteBatch; when BackendRef == nil (RADOS path) GC uses the existing chunk-delete code path",
+        "Test 1: batch delete 100 keys with all VersionID == '' against in-process MinIO (versioning off), asserts 1 HTTP call and bytes freed",
+        "Test 2: batch delete 100 keys with all VersionID != '' against MinIO (versioning enabled), asserts no delete-markers created (verified via ListObjectVersions empty)",
+        "Test 3: mixed batch (some with VersionID, some without) — asserts each entry handled per its own version-id",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 4,
       "passes": false,
@@ -73,16 +77,16 @@
     },
     {
       "id": "US-005",
-      "title": "Add Cassandra-backed credentials store",
-      "description": "As an operator, I want to add and rotate access keys without restarting the gateway, so I can onboard new clients in production.",
+      "title": "Configuration via env + path-style support",
+      "description": "As an operator, I want to point Strata at any S3-compatible endpoint with environment variables only — no code changes, no rebuilds.",
       "acceptanceCriteria": [
-        "New cassandra.CredentialsStore implementing the auth.Store interface against the access_keys table",
-        "Schema migration adds access_keys (access_key text PK, secret_key text, owner text, disabled boolean, created_at timestamp) via additive ALTER",
-        "Composable auth.MultiStore tries static credentials first, then Cassandra",
-        "60s in-memory cache with refresh-on-miss and explicit Invalidate(accessKey)",
-        "Unit tests cover lookup hit/miss/disabled, key rotation, deleted-key returns auth.ErrCredentialNotFound",
-        "go build ./... passes",
-        "go test ./internal/auth/... passes"
+        "New env vars loaded via koanf-based internal/config: STRATA_S3_BACKEND_ENDPOINT (full URL; empty=AWS auto-resolve), STRATA_S3_BACKEND_REGION (required), STRATA_S3_BACKEND_BUCKET (required, single backend bucket all Strata objects land in), STRATA_S3_BACKEND_ACCESS_KEY/STRATA_S3_BACKEND_SECRET_KEY (static creds; empty falls back to SDK default chain — env / ~/.aws / IRSA / IMDS), STRATA_S3_BACKEND_FORCE_PATH_STYLE=true (required for MinIO + Ceph RGW; default false for AWS)",
+        "s3.Backend constructor reads these env vars at startup via koanf and resolves credentials once",
+        "Misconfiguration (empty bucket, bogus region) fails fast at startup with a clear error message — never at first request",
+        "Writability probe at startup: PutObject + DeleteObject on sentinel key '.strata-readyz-canary' against the backend bucket. Refuse to start (non-zero exit + clear error) if either fails — catches read-only mounts, missing IAM permissions, expired creds, bucket-existence regressions. Probe runs once on boot, not per-request",
+        "Document the env vars in README.md's environment-variable table",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 5,
       "passes": false,
@@ -90,16 +94,17 @@
     },
     {
       "id": "US-006",
-      "title": "Add IAM users + access keys storage and CreateUser/ListUsers/DeleteUser endpoints",
-      "description": "As an admin tool, I want to call POST /?Action=CreateUser etc. against the gateway to provision principals so s3-tests fixtures ([iam root], [iam alt root]) can spin up isolated identities.",
+      "title": "SDK retry + per-op timeout",
+      "description": "As an operator running Strata against a remote S3 endpoint under occasional slowdowns or transient 503s, I want bounded retries and per-op timeouts so a stuck request never hangs forever.",
       "acceptanceCriteria": [
-        "iam_users table in cassandra (user_name PK, user_id, path, created_at) plus mirror in memory store",
-        "internal/s3api/iam.go routes ?Action=CreateUser, ?Action=GetUser, ?Action=ListUsers, ?Action=DeleteUser",
-        "AWS-style XML form-encoded request/response shapes match the iam:CreateUser docs (CreateUserResponse + CreateUserResult > User)",
-        "Hardcoded [iam root] credentials gate all ?Action= endpoints",
-        "Unit tests cover round-trip CreateUser → GetUser → ListUsers → DeleteUser, double-create returns 409 EntityAlreadyExists, delete-missing returns 404 NoSuchEntity",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
+        "Configure SDK retry mode = adaptive (default in v2 SDK), max attempts = 5 (configurable via STRATA_S3_BACKEND_MAX_RETRIES)",
+        "Per-op timeout via context.WithTimeout; default 30 s for small ops (Get/Put/Delete on objects under part-size), 10 min for multipart complete; configurable via STRATA_S3_BACKEND_OP_TIMEOUT_SECS",
+        "Retries on: 503 SlowDown, 429 TooManyRequests, network errors, 5xx",
+        "No retry on: 404 NoSuchKey, 403 AccessDenied, 400 malformed requests",
+        "Each retry logs at WARN with op + attempt + delay",
+        "Test: stub S3 client returns 503 for first 2 attempts then success — Put succeeds without surfacing the 503 to the gateway",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 6,
       "passes": false,
@@ -107,16 +112,16 @@
     },
     {
       "id": "US-007",
-      "title": "Add CreateAccessKey/ListAccessKeys/DeleteAccessKey IAM endpoints",
-      "description": "As an admin tool, I want CreateAccessKey to mint a (key, secret) pair tied to a user so s3-tests fixtures can authenticate.",
+      "title": "Prometheus metrics for backend ops",
+      "description": "As an operator, I want per-op latency + error rates for the S3 backend so I can alert on backend regressions.",
       "acceptanceCriteria": [
-        "?Action=CreateAccessKey, ?Action=ListAccessKeys, ?Action=DeleteAccessKey routed in internal/s3api/iam.go",
-        "CreateAccessKey writes to access_keys (US-005 schema) with user_name foreign key and returns AccessKey + SecretAccessKey in XML once",
-        "DeleteAccessKey removes the row and invalidates the cache (US-005 Invalidate)",
-        "Hardcoded [iam root] gate enforced",
-        "Unit tests cover CreateAccessKey → use → DeleteAccessKey → 403 InvalidAccessKeyId on next request",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
+        "New histogram strata_data_s3_backend_op_duration_seconds{op,status} with op in {put, get, delete, batch_delete, multipart_init, multipart_part, multipart_complete, multipart_abort} and status in {ok, error, retried}",
+        "New counter strata_data_s3_backend_op_total{op,status}",
+        "New counter strata_data_s3_backend_retry_total{op} for visibility into adaptive retry pressure",
+        "Observers piggyback on the SDK's middleware.Stack — single endOperationMiddleware registered once on client init",
+        "Test: a known sequence of ops produces matching counter values",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 7,
       "passes": false,
@@ -124,16 +129,18 @@
     },
     {
       "id": "US-008",
-      "title": "Implement minimal STS AssumeRole endpoint",
-      "description": "As a multi-account test fixture, I want temporary credentials with an expiry so cross-account scenarios in s3-tests can run.",
+      "title": "Manifest schema additive — backend object reference",
+      "description": "As a developer fixing the manifest format for the new backend, I need an additive BackendRef field on data.Manifest that records the backend S3 key + ETag + size + version-id — without breaking RADOS-mode manifests.",
       "acceptanceCriteria": [
-        "POST /?Action=AssumeRole returns AccessKeyId, SecretAccessKey, SessionToken, Expiration (1h default)",
-        "SigV4 middleware honors x-amz-security-token header against the temporary key store",
-        "Token storage in-memory with TTL eviction (acceptable given short expiry)",
-        "Expired token → 403 ExpiredToken",
-        "Unit tests cover assume → use → expire → 403",
-        "go build ./... passes",
-        "go test ./internal/auth/... ./internal/s3api/... passes"
+        "Add BackendRef *BackendRef field on data.Manifest. Struct: Backend string ('rados' | 's3'), Key string, ETag string, Size int64, VersionID string (omitempty — present only when the backend returned a version-id at write time)",
+        "All struct fields tagged json:',omitempty' and registered in manifest.proto with fresh, monotonically-increasing field numbers (additive — no renumbering)",
+        "Protobuf field-number reservation (avoid collision with US-013 Manifest.SSE.Mode): inspect highest field number in manifest.proto at story-start, name it N. This story reserves N+1 for BackendRef message + N+2..N+6 for sub-fields (Backend, Key, ETag, Size, VersionID). US-013 reserves N+7 for SSE.Mode. Document the assignment in a `// US-008 / US-013 field-number assignment` comment block at the top of manifest.proto",
+        "When BackendRef is set, the manifest's existing Chunks slice is empty (1:1 mapping; whole object lives at BackendRef.Key); when Chunks is non-empty, BackendRef is nil (RADOS path)",
+        "BackendRef.VersionID semantics documented in struct doc-comment: '' = backend does not support versioning OR versioning off OR SDK response did not carry a version-id (plain delete works); 'null' = backend versioning Suspended (versioned-Delete with VersionId='null' cleans correctly); any other non-empty string = UUID-shaped version-id from versioning-enabled backend (versioned-Delete skips delete-marker creation)",
+        "Encoder/decoder round-trips all three shapes (VersionID == '' / 'null' / <uuid>) via data.EncodeManifest / DecodeManifest in JSON and protobuf modes",
+        "Old (RADOS) manifests still decode with BackendRef=nil; gateway uses Chunks as today",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 8,
       "passes": false,
@@ -141,17 +148,16 @@
     },
     {
       "id": "US-009",
-      "title": "Verify and persist x-amz-checksum-* headers on PutObject (CRC32, CRC32C, SHA1, SHA256, CRC64NVME)",
-      "description": "As an AWS SDK v3 client (which sends checksums by default), I want my PutObject requests with x-amz-checksum-<algo> to succeed and have the checksum stored.",
+      "title": "Gateway backend dispatch — STRATA_DATA_BACKEND=s3",
+      "description": "As an operator, I want to switch the gateway's data plane to S3 by setting one env var, and have the gateway route writes/reads through the new backend without any other config changes.",
       "acceptanceCriteria": [
-        "Add meta.Object.Checksums map[string]string with additive Cassandra schema migration",
-        "Parse x-amz-checksum-<algo> request headers; verify against streamed body content during PutChunks",
-        "Mismatch → 400 BadDigest",
-        "Return x-amz-checksum-<algo> on GetObject and HeadObject",
-        "Five algorithms supported: crc32, crc32c, sha1, sha256, crc64nvme (vendor a small CRC64NVME implementation if needed; AWS test vector covered)",
-        "Unit tests per algorithm: positive, mismatch, missing optional",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
+        "internal/serverapp.buildDataBackend reads STRATA_DATA_BACKEND (existing for rados/memory) and dispatches to internal/data/s3.New(...) when value is 's3'",
+        "Gateway PUT path: when backend is S3, sets Manifest.BackendRef = {Backend: 's3', Key: <random>, ETag: <fromBackend>, Size: <total>, VersionID: <fromBackend>} and leaves Manifest.Chunks empty; VersionID is whatever the SDK returned — empty string, 'null', or UUID — without interpretation at the gateway layer",
+        "Gateway GET path: when Manifest.BackendRef != nil, calls s3.Backend.GetRange(ctx, BackendRef.Key, off, len); falls through to chunk-based path otherwise",
+        "Backend object key format: <bucket-uuid>/<object-uuid> — UUID prefix gives random prefix distribution to avoid hot-prefix throttling on AWS",
+        "Smoke pass (make smoke) passes against in-process MinIO with STRATA_DATA_BACKEND=s3",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 9,
       "passes": false,
@@ -159,16 +165,19 @@
     },
     {
       "id": "US-010",
-      "title": "Multipart UploadPart and CompleteMultipartUpload checksum support",
-      "description": "As an SDK v3 client uploading multipart, I want each part's checksum verified and the composite checksum returned by CompleteMultipartUpload.",
+      "title": "Client multipart pass-through to backend multipart",
+      "description": "As a Strata client doing an S3 multipart upload, I want each UploadPart to map 1:1 to a backend UploadPart so we end up with exactly one S3 object on the backend, not N — and CompleteMultipartUpload on Strata triggers CompleteMultipartUpload on the backend.",
       "acceptanceCriteria": [
-        "UploadPart accepts and verifies x-amz-checksum-<algo> per part",
-        "Per-part checksum stored in meta.MultipartPart.Checksums",
-        "CompleteMultipartUpload computes composite checksum (algo-specific concat-and-hash rule) and returns x-amz-checksum-<algo> header",
-        "Mismatch on any part → 400 BadDigest from UploadPart, never reaches Complete",
-        "Unit tests round-trip a 3-part multipart with crc32 and verify response",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
+        "meta.MultipartUpload schema additive: BackendUploadID string. All three meta backends update in lockstep: Cassandra (ALTER TABLE multipart_uploads ADD backend_upload_id text via alterStatements in internal/meta/cassandra/schema.go); Memory (struct field + serialize through copy/marshal sites); TiKV (extend multipart-upload encoder/decoder in internal/meta/tikv/keys.go or its multipart-state file so BackendUploadID round-trips — no DDL since TiKV schema is implicit in key encoding)",
+        "meta.MultipartPart schema additive: BackendETag string — same lockstep update across all three backends",
+        "InitiateMultipartUpload on Strata calls CreateMultipartUpload on backend, stores returned UploadId in BackendUploadID",
+        "Strata UploadPart calls backend UploadPart with the same BackendUploadID; stores backend's per-part ETag in BackendETag",
+        "CompleteMultipartUpload on Strata calls CompleteMultipartUpload on backend with the part list (PartNumber + backend ETag); on success sets Manifest.BackendRef like US-009 with the multipart-completed object key. BackendRef.VersionID populated from CompleteMultipartUploadOutput.VersionId (empty / 'null' / UUID — same semantics as US-002 single-shot PUT)",
+        "AbortMultipartUpload on Strata aborts the backend multipart too",
+        "Per-part composite checksum interop: if prd-s3-tests-90 cycle has shipped (manifest carries PartChunks[].ChecksumValue), backend's per-part ETags flow through Strata's checksum machinery unchanged; if not yet shipped, this AC is deferred — leave per-part checksums as today (Strata gateway computes its own, BackendETag stored for multipart passthrough but not yet wired into composite checksum response). Document deferral in commit message",
+        "Test: multipart upload of 50 MiB across 5 parts produces exactly one backend object visible in `aws s3 ls s3://<backend-bucket>/`",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 10,
       "passes": false,
@@ -176,17 +185,17 @@
     },
     {
       "id": "US-011",
-      "title": "SSE-S3 metadata storage (passthrough) on objects and bucket default",
-      "description": "As a client setting x-amz-server-side-encryption: AES256, I want the header accepted, persisted, and echoed back on Get/Head — even though Strata does not actually encrypt at rest yet.",
+      "title": "docker-compose s3-backend profile + MinIO sidecar",
+      "description": "As a developer or CI runner, I want to bring up Strata running on top of MinIO with one compose command.",
       "acceptanceCriteria": [
-        "meta.Object.SSE field stores algorithm string (additive Cassandra ALTER)",
-        "PutObject + InitiateMultipartUpload accept x-amz-server-side-encryption (AES256 only for now; reject aws:kms with NotImplemented)",
-        "GetObject/HeadObject return the same header",
-        "PutBucketEncryption/GetBucketEncryption/DeleteBucketEncryption endpoints round-trip the XML config blob via the existing setBucketBlob helpers",
-        "When bucket encryption default is set and a PutObject omits the header, the default is applied",
-        "Unit tests: round-trip per object, round-trip per bucket default, default applied on PUT",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
+        "deploy/docker/docker-compose.yml gains a minio service under profile s3-backend (image minio/minio:latest, data volume, MINIO_ROOT_USER/MINIO_ROOT_PASSWORD env)",
+        "Conditional strata-s3 service: when running under --profile s3-backend, sets STRATA_DATA_BACKEND=s3, STRATA_S3_BACKEND_ENDPOINT=http://minio:9000, STRATA_S3_BACKEND_FORCE_PATH_STYLE=true, STRATA_S3_BACKEND_REGION=us-east-1, STRATA_S3_BACKEND_BUCKET=strata-backend, static creds matching MinIO root creds",
+        "make up-s3-backend brings up cassandra + minio + strata-s3 (no Ceph) and waits for /readyz",
+        "An init-minio one-shot service creates the strata-backend bucket via mc mb before strata starts; depends_on healthcheck ordering",
+        "Idle stack RSS ≤ 3 GB (lighter than the Ceph stack — MinIO single node ~500 MB)",
+        "docker compose -f deploy/docker/docker-compose.yml --profile s3-backend config -q passes",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 11,
       "passes": false,
@@ -194,17 +203,15 @@
     },
     {
       "id": "US-012",
-      "title": "SSE-C customer-key headers — accept, validate, gate reads",
-      "description": "As a client uploading with SSE-C, I want the gateway to accept and validate the customer key headers and reject Get requests that omit them.",
+      "title": "Smoke test against MinIO via compose",
+      "description": "As a CI maintainer, I want make smoke to also exercise the S3 backend path against MinIO so we catch regressions in the new backend on every PR.",
       "acceptanceCriteria": [
-        "PutObject parses x-amz-server-side-encryption-customer-{algorithm,key,key-MD5}, validates base64 key length 32 bytes and MD5 match",
-        "Persist key MD5 only in meta.Object.SSECKeyMD5 (additive ALTER)",
-        "GetObject without matching headers when SSECKeyMD5 set → 400 InvalidRequest",
-        "GetObject with mismatched MD5 → 400 AccessDenied",
-        "CopyObject parses x-amz-copy-source-server-side-encryption-customer-* (mirror)",
-        "Unit tests: positive PUT+GET round-trip, missing key on GET, wrong MD5 on PUT, wrong MD5 on GET",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
+        "New make smoke-s3-backend target: brings up the s3-backend compose profile, waits for /readyz, runs the existing smoke script (PUT / GET / DELETE / multipart) — all against the same Strata gateway, just with the new backend underneath",
+        "Asserts the smoke pass produces exactly one backend object per Strata object (verified via mc ls strata-backend/)",
+        "Asserts the multipart smoke produces exactly one backend object (not N)",
+        "Asserts make down cleans up the MinIO data volume",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 12,
       "passes": false,
@@ -212,15 +219,17 @@
     },
     {
       "id": "US-013",
-      "title": "GetObjectAttributes endpoint",
-      "description": "As a client preparing a multipart copy, I want a single low-cost call returning ETag, Checksum, ObjectParts, ObjectSize, StorageClass instead of HEAD + ListParts.",
+      "title": "SSE config flag — passthrough / strata / both",
+      "description": "As a security-conscious operator, I want to choose how data-at-rest encryption is handled — let the backend handle it, let Strata handle it, or apply both layers.",
       "acceptanceCriteria": [
-        "GET /<bucket>/<key>?attributes route in internal/s3api/server.go",
-        "Honors x-amz-object-attributes header (comma-separated subset; only listed fields are populated)",
-        "XML response per AWS GetObjectAttributesOutput schema",
-        "Unit tests: full response, partial via header, missing key 404, missing object-attributes header 400",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
+        "New env var STRATA_S3_BACKEND_SSE_MODE with values 'passthrough' (default), 'strata', 'both'; validated at startup",
+        "passthrough: every Strata Put sends x-amz-server-side-encryption: AES256 (or aws:kms per STRATA_S3_BACKEND_SSE_KMS_KEY_ID if set) to the backend; client sees per-Strata-object SSE header in GET responses passed through from backend metadata",
+        "strata: existing Strata SSE-S3 / SSE-KMS envelope encryption runs first; backend stores ciphertext as plain application/octet-stream with no SSE header",
+        "both: Strata envelope encrypts AND backend SSE applies; effectively double encryption for compliance regimes that mandate separate encryption boundaries",
+        "Mode is recorded per-object in Manifest.SSE.Mode (additive enum tag); GET path decrypts according to the recorded mode",
+        "Test: round-trip PUT → GET in each of the three modes against MinIO; asserts the bytes match the input",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 13,
       "passes": false,
@@ -228,16 +237,18 @@
     },
     {
       "id": "US-014",
-      "title": "RestoreObject stub endpoint with x-amz-restore status",
-      "description": "As a client calling POST ?restore, I want a 200 acknowledgment so SDKs that issue restore-on-read for GLACIER objects do not fail outright. Restore is a no-op since Strata has no archival tier yet.",
+      "title": "Lifecycle bidirectional mapping",
+      "description": "As an operator using S3 lifecycle features, I want Strata's lifecycle rules to translate to backend S3 lifecycle policies where the semantics overlap, so backend-side transitions / expirations work without re-implementing them in Strata.",
       "acceptanceCriteria": [
-        "POST /<bucket>/<key>?restore parses RestoreRequest XML",
-        "Returns 200 OK if object exists, 404 if not",
-        "meta.Object.RestoreStatus field set; surfaced on HEAD as x-amz-restore: ongoing-request=\"false\", expiry-date=\"...\"",
-        "Malformed XML → 400 MalformedXML",
-        "Unit tests: round-trip, 404, malformed XML",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
+        "When a Strata bucket gets a PutBucketLifecycle config that contains transitions to storage classes the backend supports natively (e.g. STANDARD_IA, GLACIER, DEEP_ARCHIVE on AWS), Strata translates to a backend bucket lifecycle rule with the same filter + transition; Strata's lifecycle worker skips those objects",
+        "Strata-only transition classes (e.g. internal cold-tier pools) keep using Strata's lifecycle worker — translation is best-effort",
+        "Expirations always also translate to backend lifecycle (cleanup of orphan backend objects independent of Strata GC)",
+        "GetBucketLifecycle returns the Strata-stored config (the source of truth); backend config is derived state",
+        "If backend reports a translation failure (unsupported transition class), Strata logs WARN and falls back to its own worker for that rule",
+        "Documented in docs/backends/s3.md with a translation table",
+        "Test: PUT a lifecycle config with a STANDARD_IA transition; asserts backend bucket has the matching rule via s3api.GetBucketLifecycleConfiguration",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 14,
       "passes": false,
@@ -245,16 +256,16 @@
     },
     {
       "id": "US-015",
-      "title": "PutBucketObjectLockConfiguration / GetBucketObjectLockConfiguration with default-retention inheritance",
-      "description": "As a regulated client, I want bucket-level default retention so new objects inherit it. Today only object-level retention works.",
+      "title": "CORS passthrough",
+      "description": "As a client doing browser-side CORS-preflight requests, I want Strata's CORS responses to reflect the backend bucket's CORS configuration when in S3-backend mode.",
       "acceptanceCriteria": [
-        "PUT /<bucket>?object-lock parses ObjectLockConfiguration XML and persists per bucket via setBucketBlob helper",
-        "GET /<bucket>?object-lock returns the persisted XML or 404 ObjectLockConfigurationNotFoundError",
-        "PutObject inherits Mode and RetainUntilDate from bucket default when request headers omit them",
-        "CreateBucket with x-amz-bucket-object-lock-enabled: true sets the bucket flag; this flag is required for object-lock config",
-        "Unit tests: round-trip config, inheritance on PutObject, locked PUT cannot be deleted under COMPLIANCE",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
+        "PutBucketCors on Strata translates to PutBucketCors on the backend bucket (after Strata's own per-bucket CORS config update)",
+        "GetBucketCors on Strata returns the union of the Strata-stored config and the backend-stored config (Strata takes precedence on conflict)",
+        "Preflight OPTIONS requests on objects served via presigned URL (US-016) hit the backend directly — Strata is out of the path, backend's CORS config applies",
+        "DeleteBucketCors removes from both layers",
+        "Test: round-trip CORS config; asserts both Strata GetBucketCors and backend GetBucketCors (via aws CLI) return the same rule",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 15,
       "passes": false,
@@ -262,15 +273,17 @@
     },
     {
       "id": "US-016",
-      "title": "PutBucketNotificationConfiguration / GetBucketNotificationConfiguration (storage-only)",
-      "description": "As a client configuring event notifications, I want the gateway to accept and return my notification configuration XML, even if Strata has no event publisher yet.",
+      "title": "Presigned URL passthrough",
+      "description": "As a high-throughput GET workload (CDN origin, video streaming), I want Strata to mint a presigned URL that points the client directly at the backend, skipping Strata's IAM hop on the data plane after the initial signed request.",
       "acceptanceCriteria": [
-        "PUT/GET /<bucket>?notification round-trips the XML blob via setBucketBlob/getBucketBlob",
-        "Schema validation: at least one of TopicConfiguration, QueueConfiguration, LambdaFunctionConfiguration",
-        "Empty body on PUT clears the config (returns NoSuchConfiguration on subsequent GET)",
-        "Unit tests: round-trip, malformed body 400, empty body clears",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
+        "Strata's PresignGetObject request handler optionally returns a backend-presigned URL (controlled by per-bucket flag BackendPresignEnabled set via a new admin endpoint PUT /<bucket>?backendPresign)",
+        "When enabled, the presigned URL points at the backend bucket directly with backend-credentialed signature; expiry forwarded from the original request",
+        "When disabled (default), behaves as today — URL points at Strata",
+        "Audit log row records presign_passthrough=true so the audit trail captures the redirect even though the data fetch does not hit Strata",
+        "Strict mode: backend-presigned URLs ONLY work when the client's Strata IAM allows GET on the object — Strata pre-checks before issuing the URL",
+        "Test: PresignGetObject with passthrough enabled returns a URL whose host is the backend's; curl against that URL fetches the object",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 16,
       "passes": false,
@@ -278,16 +291,15 @@
     },
     {
       "id": "US-017",
-      "title": "PutBucketWebsite / GetBucketWebsite / DeleteBucketWebsite + index document routing",
-      "description": "As a static-site host, I want bucket website config and have GET on the bucket serve the configured index document when present.",
+      "title": "docs/backends/s3.md operator guide",
+      "description": "As an operator evaluating the S3 backend, I need a single-page operator guide covering setup, capability matrix, caveats, and tested-against backends.",
       "acceptanceCriteria": [
-        "PUT/GET/DELETE /<bucket>?website round-trips the XML blob",
-        "When website config is present, GET /<bucket>/ serves the configured IndexDocument object",
-        "When path matches no key, serve the configured ErrorDocument with 404",
-        "Without website config, current behaviour (ListObjects) is preserved",
-        "Unit tests: round-trip XML; index serving; error doc; without config",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
+        "New docs/backends/s3.md (alongside scylla.md and tikv.md) with: when to choose S3 backend over RADOS (decision matrix); required env vars + sample compose / Kubernetes config; tested-against backends — AWS S3 (us-east-1), MinIO (latest), Ceph RGW (Reef+), Garage (latest) marked supported / works-with-caveats / unsupported; capability matrix (which S3-compatibility tests pass on each backend); performance characteristics (latency floor, cost model, throughput); common operational pitfalls (force-path-style for MinIO, IRSA setup for AWS, key prefix randomization for hot-prefix avoidance)",
+        "Operator-required backend bucket configuration section (load-bearing, not optional notes): (a) AbortIncompleteMultipartUpload lifecycle rule on backend bucket — recommended DaysAfterInitiation: 7 — without it, gateway crashes mid-multipart leak parts indefinitely; provide copy-pasteable JSON snippet. (b) Do NOT enable versioning on a Strata-managed backend bucket already written to with empty VersionID rows — plain delete creates delete-markers for legacy rows; Strata handles versioned buckets correctly only when versioning was enabled before any writes (per US-008 defensive design). (c) Cross-region setup is anti-pattern: co-locate Strata gateway with backend bucket in same region",
+        "README.md How to run section gains a 4th option: make up-s3-backend (Strata + Cassandra + MinIO, no Ceph)",
+        "CLAUDE.md Big-picture architecture diagram updated: data backend box reads 'data.Backend  memory | rados | s3'",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 17,
       "passes": false,
@@ -295,16 +307,16 @@
     },
     {
       "id": "US-018",
-      "title": "PutBucketReplication / GetBucketReplication / DeleteBucketReplication (storage-only) + status header",
-      "description": "As a client wiring up cross-region replication on the source side, I want the configuration round-trip and PutObject to set replication status header when a rule's filter matches.",
+      "title": "CI matrix entry — Strata + MinIO",
+      "description": "As a maintainer, I want every PR to also exercise the S3-backend path against MinIO so regressions on the new backend surface on the same SHA.",
       "acceptanceCriteria": [
-        "PUT/GET/DELETE /<bucket>?replication round-trips XML via setBucketBlob",
-        "Validation: at least one Rule with Destination",
-        "PutObject sets x-amz-replication-status: PENDING only when at least one rule's Filter (prefix + tags) matches the object key",
-        "Buckets with replication configured but no matching rule do not emit the header",
-        "Unit tests: round-trip, status header presence on match, status header absence on no-match",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
+        "New job in .github/workflows/ci.yml named e2e-s3-backend (parallel with existing e2e job)",
+        "Job runs make up-s3-backend + make smoke-s3-backend",
+        "Job uploads container logs + Strata logs + MinIO logs as e2e-s3-backend-logs artefact",
+        "Job timeout = 30 min",
+        "Existing CI jobs unchanged; this is purely additive",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 18,
       "passes": false,
@@ -312,167 +324,18 @@
     },
     {
       "id": "US-019",
-      "title": "PutBucketLogging / GetBucketLogging",
-      "description": "As an audit setup, I want to round-trip server-access logging config on a bucket.",
+      "title": "ROADMAP entry + close-flip",
+      "description": "As a maintainer, I want a new ROADMAP section for alternative data backends (mirroring the existing 'Alternative metadata backends' section) and the S3 backend item flipped to Done on this cycle's final commit.",
       "acceptanceCriteria": [
-        "PUT/GET /<bucket>?logging round-trips XML",
-        "Empty body on PUT clears the config",
-        "Subsequent GET on cleared bucket returns valid empty BucketLoggingStatus document",
-        "Unit tests: round-trip, clear, empty-on-fresh-bucket",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
+        "Add new section to ROADMAP.md titled 'Alternative data backends' (placed right after the existing 'Alternative metadata backends' section)",
+        "Section text mirrors the metadata-backends prose AND the 'no community slots' policy already established for meta backends in the TiKV cycle (commit 40b45de). RADOS is primary, S3 backend is equal-tier alternative (this PRD). Supported set is exactly two: rados + s3 (plus memory for tests). Filesystem / Azure Blob / GCS are explicitly NOT planned — operators needing those use Strata's S3 backend pointed at any S3-compatible service (MinIO over filesystem, s3-proxy over Azure, GCS S3-interop API). Document this rationale in the section so future contributors do not propose adding them",
+        "On the final cycle commit, flip the S3-backend bullet to Done close-flip format per CLAUDE.md Roadmap maintenance rule with the closing SHA inline (or `(commit pending)` for follow-up SHA edit)",
+        "If any of US-002..US-018 left scope undone (e.g. lifecycle mapping partial), the bullet stays open and the partial work is documented under the bullet's 'what's missing' sub-line",
+        "CLAUDE.md alternative-data-backends prose updated to mirror new ROADMAP wording (single source of truth)",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 19,
-      "passes": false,
-      "notes": ""
-    },
-    {
-      "id": "US-020",
-      "title": "PutBucketTagging / GetBucketTagging / DeleteBucketTagging",
-      "description": "As a billing/audit consumer, I want bucket-level tags. Object tagging already works.",
-      "acceptanceCriteria": [
-        "PUT/GET/DELETE /<bucket>?tagging round-trips per AWS Tagging schema (Tag.Key/Tag.Value)",
-        "Empty body on PUT or absent config returns 404 NoSuchTagSet on GET",
-        "Limit: 50 tags per bucket (matches AWS); over-limit → 400 InvalidTag",
-        "Unit tests: round-trip, 404, over-limit",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
-      ],
-      "priority": 20,
-      "passes": false,
-      "notes": ""
-    },
-    {
-      "id": "US-021",
-      "title": "GetBucketLocation + x-amz-bucket-region on HEAD bucket + LocationConstraint body parsing on CreateBucket",
-      "description": "As an SDK doing pre-flight region detection, I want GET /<bucket>?location and HEAD /<bucket> to report the configured region; CreateBucket with a LocationConstraint XML body should persist the region.",
-      "acceptanceCriteria": [
-        "Add meta.Bucket.Region field via additive Cassandra ALTER",
-        "CreateBucket parses optional <CreateBucketConfiguration><LocationConstraint> body and stores Region",
-        "GET /<bucket>?location returns <LocationConstraint> with the region (empty for default)",
-        "HEAD /<bucket> sets x-amz-bucket-region header from the stored region (or 'default')",
-        "Unit tests: CreateBucket with region body → GET location returns it; HEAD has the header; no body still works",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
-      ],
-      "priority": 21,
-      "passes": false,
-      "notes": ""
-    },
-    {
-      "id": "US-022",
-      "title": "Per-chunk signature validation in STREAMING-AWS4-HMAC-SHA256-PAYLOAD",
-      "description": "As a security-conscious operator, I want the chained per-chunk HMAC verified — today we decode the framing but skip the chain so an attacker can mutate chunked uploads.",
-      "acceptanceCriteria": [
-        "Implement chain in internal/auth: sig(chunk_n) = HMAC(signing_key, \"AWS4-HMAC-SHA256-PAYLOAD\\n<date>\\n<scope>\\n<prev-sig>\\n<hash(\\\"\\\")>\\n<hash(chunk)>\")",
-        "Reject mismatched chunk → 403 SignatureDoesNotMatch (drops the body and the connection)",
-        "Final empty chunk also verified",
-        "No STRATA_AUTH_RELAXED_STREAMING flag — strict by default",
-        "Unit tests: positive AWS doc test vector; mutated chunk rejected; missing final chunk rejected",
-        "go build ./... passes",
-        "go test ./internal/auth/... passes"
-      ],
-      "priority": 22,
-      "passes": false,
-      "notes": ""
-    },
-    {
-      "id": "US-023",
-      "title": "CompleteMultipartUpload idempotency on retry",
-      "description": "As a flaky-network client, I want a retry of CompleteMultipartUpload after a successful first attempt to return success, not LWT failure.",
-      "acceptanceCriteria": [
-        "After successful Complete, persist (uploadID, etag, version_id, completed_at) for 10 minutes via meta.Store",
-        "Second Complete with same uploadID returns the stored CompleteMultipartUploadResult XML and the same ETag",
-        "After 10 minutes, returns NoSuchUpload",
-        "TTL applies in cassandra (USING TTL) and via timestamp in memory store",
-        "Unit tests: success → retry returns same XML; expiry → 404",
-        "go build ./... passes",
-        "go test ./internal/s3api/... ./internal/meta/... passes"
-      ],
-      "priority": 23,
-      "passes": false,
-      "notes": ""
-    },
-    {
-      "id": "US-024",
-      "title": "Anonymous identity + STRATA_AUTH_MODE flag",
-      "description": "As an unauthenticated client requesting a public bucket, I want the request to skip SigV4 and be authorized by the bucket policy/ACL when STRATA_AUTH_MODE=optional.",
-      "acceptanceCriteria": [
-        "internal/auth.Identity gains IsAnonymous bool",
-        "config.Config.AuthMode supports values 'required' (default), 'optional', 'disabled'",
-        "When mode=optional and request has no Authorization header and no presigned query, middleware sets auth.AnonymousIdentity and proceeds",
-        "Anonymous identity flows into policy/ACL evaluation (US-003, US-004)",
-        "Mode=required preserves current 403 behaviour",
-        "Unit tests: anon on public bucket OK in optional mode; anon on private bucket 403; anon in required mode always 403",
-        "go build ./... passes",
-        "go test ./internal/auth/... ./internal/s3api/... passes"
-      ],
-      "priority": 24,
-      "passes": false,
-      "notes": ""
-    },
-    {
-      "id": "US-025",
-      "title": "MFA Delete header gating",
-      "description": "As a bucket owner with MFA Delete enabled, I want delete-version requests without an x-amz-mfa header to be rejected.",
-      "acceptanceCriteria": [
-        "PutBucketVersioning accepts <MfaDelete>Enabled</MfaDelete> in the body and persists",
-        "DeleteObjectVersion (delete with versionId) requires x-amz-mfa: <serial> <code> when MfaDelete is enabled",
-        "Static-config TOTP secret accepted via STRATA_MFA_SECRETS=<serial>:<base32-secret> env var",
-        "Bucket without MfaDelete enabled accepts DELETE without the header (current behaviour)",
-        "Unit tests: enabled + missing header → 403; enabled + valid TOTP → 204; disabled → 204 always; invalid TOTP → 403",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
-      ],
-      "priority": 25,
-      "passes": false,
-      "notes": ""
-    },
-    {
-      "id": "US-026",
-      "title": "CopyObject metadata + tagging directives + copy-source preconditions",
-      "description": "As a client copying with metadata changes, I want x-amz-metadata-directive REPLACE to honour new content-type and user-meta headers, COPY to preserve source metadata, and copy-source-if-* preconditions to short-circuit.",
-      "acceptanceCriteria": [
-        "Parse x-amz-metadata-directive (default COPY); on REPLACE use request headers, on COPY copy from source object",
-        "Parse x-amz-tagging-directive (default COPY); same semantics for tags",
-        "Honour x-amz-copy-source-if-match, if-none-match, if-modified-since, if-unmodified-since; mismatch → 412 PreconditionFailed",
-        "Unit tests cover each directive value × precondition match/miss matrix",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
-      ],
-      "priority": 26,
-      "passes": false,
-      "notes": ""
-    },
-    {
-      "id": "US-027",
-      "title": "ListBuckets returns authenticated owner + filters by ownership",
-      "description": "Today the response hardcodes <Owner>strata</Owner> and returns every bucket. With multi-tenant credentials, every owner sees everyone's identity. Filter and label by auth.FromContext(r.Context()).Owner.",
-      "acceptanceCriteria": [
-        "Response <Owner> reflects the authenticated principal (ID and DisplayName)",
-        "ListBuckets only returns buckets where meta.Bucket.Owner equals the authenticated principal",
-        "Anonymous (when allowed) sees an empty bucket list",
-        "Unit tests: two principals see disjoint bucket lists; anonymous gets empty list",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
-      ],
-      "priority": 27,
-      "passes": false,
-      "notes": ""
-    },
-    {
-      "id": "US-028",
-      "title": "Run s3-tests after each block; record pass-rate baseline",
-      "description": "As a maintainer, after each block ships I want the s3-tests pass rate re-measured and committed so we have a tracked compatibility number.",
-      "acceptanceCriteria": [
-        "scripts/s3-tests/run.sh executes successfully against the running gateway with the default filter",
-        "scripts/s3-tests/README.md baseline section updated with the new pass-rate line including date and commit short SHA",
-        "Pass rate on executable subset is at least 80% (>=16/19 with growth as new endpoints unblock previously filtered tests)",
-        "If pass rate drops below the previous run, the regression is enumerated in the README baseline section",
-        "go build ./... passes",
-        "go test ./... passes"
-      ],
-      "priority": 28,
       "passes": false,
       "notes": ""
     }

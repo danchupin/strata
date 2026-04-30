@@ -1,0 +1,810 @@
+{
+  "project": "Strata",
+  "branchName": "ralph/modern-complete",
+  "description": "Strata 'modern complete' — close P1 (production-blockers: real SSE-S3, notification publisher, replicator, access log delivery, structured logs, full metrics, health probes, virtual-hosted URLs), P2 (audit log, per-part GET, versioning null literal, website redirects, OTel, admin CLI, race harness), and P3 (SSE-KMS, Inventory, Access Points, ScyllaDB CI, multi-cluster RADOS, shard resize, audit export, examples, protobuf manifest). No legacy, no AWS-niche.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Master-key provider interface + env/file providers",
+      "description": "As an operator, I want a pluggable Provider abstraction with built-in env-var and file-with-hot-reload backends for the SSE-S3 master key.",
+      "acceptanceCriteria": [
+        "New internal/crypto/master package with Provider interface: Resolve(ctx) (key32 []byte, keyID string, error)",
+        "Built-in env provider: STRATA_SSE_MASTER_KEY=<hex64> with optional STRATA_SSE_MASTER_KEY_ID (default 'env-1')",
+        "Built-in file provider: STRATA_SSE_MASTER_KEY_FILE=/path watches mtime for hot-reload",
+        "Invalid key length (not 32 bytes) is fatal at startup with structured-log error",
+        "Unit tests cover both providers, hot-reload, missing config",
+        "go build ./... passes",
+        "go test ./internal/crypto/master/... passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Master-key Vault provider (per-cluster role)",
+      "description": "As an operator running Vault, I want to wrap the master key via Vault Transit using a per-Strata-cluster role.",
+      "acceptanceCriteria": [
+        "Built-in vault provider: STRATA_SSE_MASTER_KEY_VAULT=<addr>:<transit-path>, plus STRATA_SSE_VAULT_ROLE_ID + STRATA_SSE_VAULT_SECRET_ID",
+        "Periodic refresh every 5 minutes; cached key reused between refreshes",
+        "Vault unreachable on first init is fatal; on refresh keep last good key with WARN log",
+        "Unit tests with httptest mock of Vault Transit endpoints",
+        "go build ./... passes",
+        "go test ./internal/crypto/master/... passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "AES-256-GCM chunk encryption package",
+      "description": "As a developer, I need a small crypto package that AEAD-encrypts and decrypts a chunk under a per-object DEK with a deterministic IV.",
+      "acceptanceCriteria": [
+        "New internal/crypto/sse package: EncryptChunk(dek, oid, chunkIndex, plaintext) ([]byte, error) and DecryptChunk symmetric",
+        "IV derived as HKDF-SHA256(oid, chunkIndex) producing 12 bytes",
+        "WrapDEK(masterKey, dek) and UnwrapDEK(masterKey, wrapped) using AES-256-GCM",
+        "Unit tests: round-trip; mutated ciphertext rejected; mismatched IV rejected",
+        "go build ./... passes",
+        "go test ./internal/crypto/sse/... passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "SSE-S3 wired into PutObject/GetObject path",
+      "description": "As a security/compliance team, when I PUT with x-amz-server-side-encryption AES256 the chunk bytes are encrypted at rest.",
+      "acceptanceCriteria": [
+        "Add objects.sse_key (blob) and objects.sse_key_id (text) columns via additive ALTER",
+        "PutObject with AES256 generates a per-object DEK, wraps under master key, stores wrapped DEK plus key id, encrypts chunks via internal/crypto/sse",
+        "GetObject and HEAD echo x-amz-server-side-encryption AES256 from persisted state and decrypt chunks transparently",
+        "Plaintext objects (no header on PUT) continue to work when sse_key column is NULL",
+        "Unit tests: round-trip per object; corrupted ciphertext yields 500 InternalError; plaintext interop",
+        "go build ./... passes",
+        "go test ./internal/s3api/... ./internal/meta/... passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "SSE-S3 wired through multipart (Initiate/UploadPart/Complete)",
+      "description": "As a multipart-aware client, I want SSE-S3 to apply across all parts of a multipart upload.",
+      "acceptanceCriteria": [
+        "InitiateMultipartUpload with x-amz-server-side-encryption AES256 generates the DEK once and stores wrapped DEK on the multipart_uploads row (additive sse_key blob column)",
+        "UploadPart inherits the upload's DEK and encrypts each part's chunks",
+        "CompleteMultipartUpload copies wrapped DEK plus key id from multipart_uploads to objects",
+        "GetObject and HEAD echo header and decrypt parts transparently",
+        "Unit tests: multipart round-trip with SSE-S3 across 3 parts; plaintext multipart still works",
+        "go build ./... passes",
+        "go test ./internal/s3api/... passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "SSE-S3 master-key rotation + cmd/strata-rewrap CLI",
+      "description": "As an operator, I want to rotate the master key without re-encrypting every chunk; old DEKs stay unwrappable.",
+      "acceptanceCriteria": [
+        "STRATA_SSE_MASTER_KEYS supports comma-separated <keyID>:<hex64> list; first entry is the wrap key, rest are unwrap-only",
+        "Each wrapped DEK persists with its keyID; unwrap path looks up the right master",
+        "New cmd/strata-rewrap binary walks objects and multipart_uploads, rewraps DEKs to the current master, writes progress to a rewrap_progress table for resumability",
+        "Idempotent: re-running on already-current rows is a no-op",
+        "Unit tests: PUT under key A, rotate to B, GET still works; new PUT uses B; rewrap CLI converts A to B and verifies",
+        "go build ./... passes",
+        "go test ./... passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "PutBucketEncryption / GetBucketEncryption / DeleteBucketEncryption + default applied",
+      "description": "As a client, I want bucket-default encryption so PUTs without x-amz-server-side-encryption inherit AES256.",
+      "acceptanceCriteria": [
+        "PUT/GET/DELETE /<bucket>?encryption round-trips ServerSideEncryptionConfiguration XML via setBucketBlob/getBucketBlob",
+        "PutObject and InitiateMultipartUpload that omit x-amz-server-side-encryption apply the bucket default transparently",
+        "DeleteBucketEncryption clears the default; subsequent PUTs without the header store unencrypted",
+        "Malformed XML body returns 400 MalformedXML",
+        "Unit tests: round-trip XML; default applied on PUT; default cleared",
+        "go build ./... passes",
+        "go test ./internal/s3api/... passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Notification queue table + hook + filter match",
+      "description": "As an event-driven app, I want PutObject/CompleteMultipart/DeleteObject to enqueue a notification event when bucket notification config Filter matches.",
+      "acceptanceCriteria": [
+        "New notify_queue table partitioned by (bucket, hour) with TimeUUID clustering",
+        "Server-side hook in PutObject/CompleteMultipart/DeleteObject inserts an Event row when the bucket has notification config",
+        "Filter match: NotificationConfiguration's Filter (Prefix/Suffix) honoured; non-matching events are not enqueued",
+        "Event payload matches AWS S3 event-message shape (Records[*] with s3.bucket, s3.object, eventName, eventTime)",
+        "Unit tests: PUT triggers event; DELETE triggers event; non-matching prefix produces no event",
+        "go build ./... passes",
+        "go test ./internal/s3api/... ./internal/meta/... passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "cmd/strata-notify worker + WebhookSink (HMAC)",
+      "description": "As an operator, I want a worker that drains the notify_queue and POSTs to configured webhook endpoints with an HMAC signature.",
+      "acceptanceCriteria": [
+        "New cmd/strata-notify binary, leader-elected via internal/leader",
+        "Polls notify_queue every 5s, fans out to per-target sinks; honours per-target shared secret for HMAC-SHA256 over JSON body",
+        "Webhook sink: HTTPS POST with X-Strata-Signature header; non-2xx triggers retry",
+        "Exponential backoff: max 6 retries, then row moves to notify_dlq table",
+        "Unit tests: webhook sink (httptest); signature verification; retry-then-DLQ; leader handoff",
+        "go build ./... passes",
+        "go test ./internal/notify/... ./cmd/strata-notify/... passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "SQSSink + DLQ inspection",
+      "description": "As an AWS-integrating user, I want to deliver events to an SQS queue using AWS SDK credentials.",
+      "acceptanceCriteria": [
+        "SQSSink: AWS SDK SendMessage with the event JSON as MessageBody; queue URL plus region from per-target config",
+        "AWS credentials resolved via standard SDK chain (env, IRSA, IAM role)",
+        "DLQ inspection endpoint GET /?notify-dlq&bucket=... gated by [iam root] returns paginated dropped events",
+        "Unit tests: SQSSink against an AWS SDK mock; DLQ enumeration",
+        "go build ./... passes",
+        "go test ./internal/notify/... passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "Replication queue + hook + status header",
+      "description": "As a replication source, when a write matches a configured replication rule, I want the write enqueued and x-amz-replication-status PENDING set.",
+      "acceptanceCriteria": [
+        "New replication_queue table partitioned by (bucket, day) with TimeUUID clustering",
+        "PutObject and CompleteMultipart hooks insert one row per object when at least one rule's Filter (Prefix and/or Tag) matches",
+        "PutObject response includes x-amz-replication-status PENDING when a rule matches; absent otherwise",
+        "PutBucketReplication on an unversioned bucket returns 400 InvalidRequest",
+        "Unit tests: matching rule yields PENDING plus queue row; no match yields no header and no row; unversioned bucket rejection",
+        "go build ./... passes",
+        "go test ./internal/s3api/... ./internal/meta/... passes"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "cmd/strata-replicator worker (Strata-to-Strata)",
+      "description": "As a DR-conscious operator, I want a worker that drains replication_queue and copies objects to a peer Strata cluster.",
+      "acceptanceCriteria": [
+        "New cmd/strata-replicator binary, leader-elected via internal/leader",
+        "Per replication rule, reads source object via meta.Store + data.Backend, PUTs to destination via boto-compatible HTTP against the peer's gateway",
+        "Destination endpoint encoded in Destination.AccessControlTranslation.Owner field as <peer-host>:<port>",
+        "On success: SET x-amz-replication-status=COMPLETED on source; on 6 retries: SET FAILED and emit replication_lag_seconds metric",
+        "Unit tests: rule match yields COMPLETED via httptest peer; destination 5xx yields FAILED after retries; with-tag-filter; with-prefix-filter",
+        "go build ./... passes",
+        "go test ./internal/replication/... ./cmd/strata-replicator/... passes"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "Server access log buffer table + middleware row writer",
+      "description": "As an audit consumer, I need every request logged into a buffer table when source bucket has logging enabled.",
+      "acceptanceCriteria": [
+        "New access_log_buffer table partitioned by (bucket, hour); columns: ts, request_id, principal, source_ip, op, key, status, bytes_sent, object_size, total_time_ms, turn_around_ms, referrer, user_agent, version_id",
+        "HTTP middleware in cmd/strata-gateway writes one row per request when meta.Store.GetBucketLogging is set",
+        "No row written when logging is not configured for the source bucket",
+        "Unit tests: PUT with logging on writes a row; PUT without logging writes no row; row format matches schema",
+        "go build ./... passes",
+        "go test ./internal/s3api/... passes"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-014",
+      "title": "cmd/strata-access-log worker (5-min flush, AWS log format)",
+      "description": "As an audit consumer, I want buffered log rows assembled into AWS-format log files and written to the configured target bucket.",
+      "acceptanceCriteria": [
+        "New cmd/strata-access-log binary, leader-elected, ticks every 5 minutes (or 5 MiB whichever first)",
+        "Reads buffered rows for each source bucket with logging configured, writes one object per flush to <target-bucket>/<target-prefix>YYYY-MM-DD-HH-MM-SS-<id>",
+        "Log line format matches AWS server-access-log: Bucket Owner, Bucket, Time, Remote IP, Requester, Request-ID, Operation, Key, Request-URI, HTTP status, Error Code, Bytes Sent, Object Size, Total Time, Turn-Around Time, Referrer, User-Agent, Version Id",
+        "After successful flush, deletes drained rows from the buffer",
+        "Unit tests: round-trip via memory backend; format compliance against an AWS sample line",
+        "go build ./... passes",
+        "go test ./cmd/strata-access-log/... passes"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-015",
+      "title": "slog migration: structured JSON logs + request_id middleware",
+      "description": "As an operator, I want JSON logs with a request_id propagated through every code path.",
+      "acceptanceCriteria": [
+        "Replace standard log calls with log/slog JSON handler in every cmd/ binary and every internal/ package that logs",
+        "HTTP middleware reads X-Request-Id or generates a UUID; threads it through context.Context via slog.With('request_id', id)",
+        "STRATA_LOG_LEVEL controls level (DEBUG/INFO/WARN/ERROR; default INFO)",
+        "Tests: a single request emits logs with the same request_id; missing header gets a generated UUID",
+        "make smoke shows JSON log lines per request",
+        "go build ./... passes",
+        "go test ./... passes"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-016",
+      "title": "slog Cassandra slow-query + RADOS DEBUG hooks",
+      "description": "As an SRE, I want slow Cassandra queries logged at WARN with the request_id, and RADOS ops logged at DEBUG.",
+      "acceptanceCriteria": [
+        "Cassandra gocql observer logs queries over 100ms at WARN with request_id, table, op, duration",
+        "RADOS read/write logs OID and duration at DEBUG with request_id",
+        "Threshold configurable via STRATA_CASSANDRA_SLOW_MS (default 100)",
+        "Tests: forced slow query produces WARN log with expected fields",
+        "go build ./... passes",
+        "go test ./internal/meta/cassandra/... passes"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-017",
+      "title": "Prometheus HTTP request + Cassandra histograms",
+      "description": "As an SRE, I want HTTP request latency histograms and per-table Cassandra query latency histograms.",
+      "acceptanceCriteria": [
+        "internal/metrics registers http_request_duration_seconds{method, path, status} histogram",
+        "internal/metrics registers cassandra_query_duration_seconds{table, op} histogram",
+        "Middleware wraps handlers to record HTTP histogram",
+        "gocql observer records Cassandra histogram",
+        "/metrics endpoint exposes both",
+        "Tests: smoke run plus scrape /metrics, expected metric names present",
+        "go build ./... passes",
+        "go test ./internal/metrics/... passes"
+      ],
+      "priority": 17,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-018",
+      "title": "Prometheus RADOS + worker metrics",
+      "description": "As an SRE, I want RADOS op latency and per-worker counters/gauges.",
+      "acceptanceCriteria": [
+        "rados_op_duration_seconds{pool, op} histogram (op = put/get/del)",
+        "gc_queue_depth{region} gauge sampled by GC worker",
+        "multipart_active{bucket} gauge",
+        "bucket_bytes{bucket, storage_class} gauge sampled hourly",
+        "lifecycle_tick_total{action, status} counter",
+        "replication_lag_seconds{rule_id} histogram and replication_queue_depth{rule_id} gauge sampled every 30s",
+        "notify_delivery_total{sink, status} counter",
+        "All workers (gateway/lifecycle/gc/notify/replicator/access-log) expose /metrics",
+        "go build ./... passes",
+        "go test ./internal/metrics/... passes"
+      ],
+      "priority": 18,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-019",
+      "title": "Grafana dashboard JSON",
+      "description": "As an operator, I want a pre-wired Grafana dashboard for Strata's metric set.",
+      "acceptanceCriteria": [
+        "deploy/grafana/strata-dashboard.json with panels: HTTP latency p50/p95/p99, Cassandra latency by table, RADOS latency by pool, GC depth, multipart active, bucket bytes by class, lifecycle tick rate, replication lag and queue depth, notify delivery rate",
+        "deploy/grafana/datasource.yaml provisions Prometheus as default datasource",
+        "make up-all brings up a Grafana container with the dashboard auto-loaded",
+        "Tests: docker-compose smoke verifies dashboard JSON validates against Grafana API",
+        "go build ./... passes"
+      ],
+      "priority": 19,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-020",
+      "title": "/healthz + /readyz endpoints",
+      "description": "As a k8s probe, I need /healthz (liveness) and /readyz (readiness Cassandra plus RADOS reachable).",
+      "acceptanceCriteria": [
+        "GET /healthz returns 200 plain text 'ok' without dependency checks",
+        "GET /readyz queries Cassandra (SELECT 1) and RADOS (stat on a known canary OID) within a 1s timeout; returns 200 only when both succeed",
+        "Both endpoints bypass SigV4 middleware regardless of STRATA_AUTH_MODE",
+        "deploy/docker/docker-compose.yml ships a healthcheck stanza using /readyz",
+        "Tests: kill the gateway's Cassandra session yields /readyz 503; same for RADOS; /healthz always 200",
+        "go build ./... passes",
+        "go test ./cmd/strata-gateway/... ./internal/s3api/... passes"
+      ],
+      "priority": 20,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-021",
+      "title": "Virtual-hosted-style URL routing",
+      "description": "As a modern AWS SDK client, I want bucket.s3.example.com/key to resolve to bucket 'bucket'.",
+      "acceptanceCriteria": [
+        "Router strips the bucket prefix from Host when host matches any pattern in STRATA_VHOST_PATTERN (comma-separated list, first match wins; default '*.s3.local')",
+        "Falls back to path-style when host doesn't match any pattern",
+        "SigV4 canonicalisation uses the original Host header for signing; bucket extraction is post-signature",
+        "Pre-signed URLs work with both styles",
+        "Tests: virtual-hosted PUT/GET/HEAD round-trip; path-style still works; signed virtual-hosted matches; mismatched host falls back",
+        "go build ./... passes",
+        "go test ./internal/s3api/... ./internal/auth/... passes"
+      ],
+      "priority": 21,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-022",
+      "title": "audit_log table + state-changing-request middleware hook",
+      "description": "As a security auditor, I need every state-changing request appended to an audit_log table with a 30-day TTL.",
+      "acceptanceCriteria": [
+        "New audit_log table partitioned by (bucket, date), columns: event_id timeuuid, ts, principal, action, resource, result, request_id, source_ip; TTL = STRATA_AUDIT_RETENTION (default 30d)",
+        "HTTP middleware writes one row per state-changing request after the response is written; reuses request_id from US-015",
+        "Read paths (GET/HEAD/list) do not emit audit rows",
+        "Tests: every CreateBucket/PutObject/DeleteObject/IAM action emits exactly one row; expired rows disappear after TTL",
+        "go build ./... passes",
+        "go test ./internal/s3api/... ./internal/meta/... passes"
+      ],
+      "priority": 22,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-023",
+      "title": "audit_log read API (?audit, [iam root] gated)",
+      "description": "As a security auditor, I want a paginated query API over the audit_log gated to admin principals.",
+      "acceptanceCriteria": [
+        "GET /?audit&start=<ISO8601>&end=<ISO8601>&principal=<id>&bucket=<name>&limit=<n>&continuation=<token> returns paginated JSON",
+        "Gated to [iam root] header auth only, no presigned URL support",
+        "Filters work in any combination; pagination via opaque continuation token",
+        "Tests: filter by each dimension; pagination round-trip; non-admin principal returns 403",
+        "go build ./... passes",
+        "go test ./internal/s3api/... passes"
+      ],
+      "priority": 23,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-024",
+      "title": "objects.part_sizes column + ?partNumber=N GET range serve",
+      "description": "As a multipart-aware client, GET /<bucket>/<key>?partNumber=N returns only that part's bytes.",
+      "acceptanceCriteria": [
+        "Add objects.part_sizes list<int> column via additive ALTER",
+        "CompleteMultipartUpload populates part_sizes with one entry per part, ordered by PartNumber",
+        "GET /<bucket>/<key>?partNumber=N returns the byte range of part N; sets x-amz-mp-parts-count, Content-Length of the part, and the per-part stored x-amz-checksum-<algo>",
+        "?partNumber on a non-multipart object returns 400 InvalidArgument",
+        "Tests: round-trip a 3-part multipart, fetch each part by number, verify checksum plus size plus ContentLength",
+        "go build ./... passes",
+        "go test ./internal/s3api/... passes"
+      ],
+      "priority": 24,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-025",
+      "title": "HEAD ChecksumMode=ENABLED + composite checksum echo",
+      "description": "As a checksum-aware client, HEAD with x-amz-checksum-mode ENABLED should return the composite checksum and ChecksumType.",
+      "acceptanceCriteria": [
+        "HEAD with x-amz-checksum-mode ENABLED returns x-amz-checksum-<algo> from object Checksums map and x-amz-checksum-type (COMPOSITE for typical multipart, FULL_OBJECT when client requested it on Initiate)",
+        "Without ChecksumMode header, HEAD does not include checksum headers (matches AWS)",
+        "GetObject with ChecksumMode behaves the same",
+        "Tests: HEAD without mode yields no checksum header; HEAD with mode returns composite; ChecksumType=COMPOSITE for multipart-initiated; FULL_OBJECT path covered",
+        "go build ./... passes",
+        "go test ./internal/s3api/... passes"
+      ],
+      "priority": 25,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-026",
+      "title": "GetObjectAttributes ObjectParts subtree fully populated",
+      "description": "As a multipart-aware client, GetObjectAttributes with ObjectParts in x-amz-object-attributes returns per-part sizes plus checksums.",
+      "acceptanceCriteria": [
+        "GET /<bucket>/<key>?attributes with x-amz-object-attributes containing ObjectParts populates the <ObjectParts> subtree with PartsCount, Parts[*].PartNumber, Parts[*].Size, Parts[*].Checksum<algo>",
+        "Non-multipart objects return PartsCount=1 with the whole-object size",
+        "Tests: 3-part multipart returns 3 entries with correct sizes plus checksums; non-multipart returns PartsCount=1",
+        "go build ./... passes",
+        "go test ./internal/s3api/... passes"
+      ],
+      "priority": 26,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-027",
+      "title": "Versioning null literal: schema + sentinel",
+      "description": "As a developer, I need a way to address rows written under Versioning=Disabled as the literal version-id 'null'.",
+      "acceptanceCriteria": [
+        "Add objects.is_null bool column via additive ALTER",
+        "Sentinel TimeUUID 00000000-0000-0000-0000-000000000000 reserved for the 'null' version",
+        "meta.Store.PutObject under Versioning=Disabled stores the row with version_id = sentinel and is_null=true",
+        "GetObject with versionID='null' resolves to the row with is_null=true",
+        "Tests: Disabled-mode PUT and GET ?versionId=null round-trip; query-by-sentinel returns the same row",
+        "go build ./... passes",
+        "go test ./internal/meta/memory/... ./internal/meta/storetest/... passes"
+      ],
+      "priority": 27,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-028",
+      "title": "Versioning null literal: PutObject + ListVersions",
+      "description": "As a versioning-aware client, after enabling versioning on a bucket that previously had unversioned writes, the original row is addressable as version 'null'.",
+      "acceptanceCriteria": [
+        "ListObjectVersions surfaces the null-versioned row with VersionId='null' and IsLatest=true if it is current",
+        "After SetBucketVersioning(Enabled), the prior null-versioned row remains addressable",
+        "PutObject in Enabled mode generates a TimeUUID version (existing behaviour) and does not overwrite a null version unless explicitly requested",
+        "Tests: Disabled PUT plus Enabled toggle plus ListObjectVersions includes a 'null' entry; subsequent Enabled PUT adds a TimeUUID version above the null one",
+        "go build ./... passes",
+        "go test ./internal/s3api/... ./internal/meta/... passes"
+      ],
+      "priority": 28,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-029",
+      "title": "Versioning null literal: Suspended PUT/DELETE replaces null atomically",
+      "description": "As a versioning-aware client, in Suspended mode, an overwrite or delete removes the prior null-versioned ancestor atomically and writes a new null-versioned row.",
+      "acceptanceCriteria": [
+        "PutObject in Suspended mode: deletes any prior null-versioned row for the key, writes a new one with sentinel and is_null=true",
+        "DeleteObject without versionId in Suspended mode: same semantics — null-versioned ancestor removed, delete marker with is_null=true written",
+        "Atomic via cassandra LWT ('IF EXISTS' on prior null-versioned row)",
+        "Tests: closes test_versioning_obj_plain_null_version_overwrite_suspended, test_versioning_obj_suspend_versions, test_versioning_obj_suspended_copy",
+        "go build ./... passes",
+        "go test ./internal/s3api/... ./internal/meta/... passes"
+      ],
+      "priority": 29,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-030",
+      "title": "Website RedirectAllRequestsTo",
+      "description": "As a static-site host, when RedirectAllRequestsTo is set on a bucket, every GET on the bucket should 301-redirect.",
+      "acceptanceCriteria": [
+        "When website config has RedirectAllRequestsTo, GET on any path under the bucket returns 301 with Location: <protocol>://<host>[/<path>]",
+        "Other request methods (PUT/DELETE/HEAD) continue to behave normally",
+        "Without website config, no redirect — current behaviour preserved",
+        "Tests: PUT website config with RedirectAllRequestsTo; GET /<bucket>/anything returns 301 to expected URL",
+        "go build ./... passes",
+        "go test ./internal/s3api/... passes"
+      ],
+      "priority": 30,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-031",
+      "title": "Website RoutingRules: Condition + Redirect",
+      "description": "As a static-site host, I want RoutingRules with KeyPrefixEquals plus HttpErrorCodeReturnedEquals conditions to drive redirects.",
+      "acceptanceCriteria": [
+        "Each rule's Condition matches the request: KeyPrefixEquals against the request key OR HttpErrorCodeReturnedEquals when an upstream lookup would 404",
+        "Matched rule's Redirect (HostName/Protocol/HttpRedirectCode/ReplaceKeyPrefixWith/ReplaceKeyWith) drives the Location header and status",
+        "Index serving (IndexDocument) still works when no rule matches",
+        "Tests: prefix routing rule fires; error-code routing rule (404 to /404.html) fires; index serving baseline preserved",
+        "go build ./... passes",
+        "go test ./internal/s3api/... passes"
+      ],
+      "priority": 31,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-032",
+      "title": "OpenTelemetry tracing init + middleware",
+      "description": "As a debugger of slow requests, I want tracer init from OTEL_EXPORTER_OTLP_ENDPOINT and traceparent ingress in middleware.",
+      "acceptanceCriteria": [
+        "internal/otel package: Init(ctx) reads OTEL_EXPORTER_OTLP_ENDPOINT; absence yields no-op tracer",
+        "HTTP middleware parses ingress traceparent, starts a span, propagates via context.Context; falls back to creating a root span when traceparent absent",
+        "Sampling: STRATA_OTEL_SAMPLE_RATIO (default 0.01) with always-on for failing requests",
+        "Tests: in-memory exporter captures one span per smoke request; absence of endpoint emits no spans",
+        "go build ./... passes",
+        "go test ./internal/otel/... passes"
+      ],
+      "priority": 32,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-033",
+      "title": "OTel spans through Cassandra and RADOS",
+      "description": "As a tracing user, I want child spans for each Cassandra query and RADOS op nested under the request span.",
+      "acceptanceCriteria": [
+        "Cassandra gocql observer creates a child span 'meta.cassandra.<table>.<op>' per query",
+        "RADOS read/write wraps in a child span 'data.rados.<op>' with pool plus oid attributes",
+        "Tests: in-memory exporter captures expected span hierarchy for a smoke PUT (root plus 1+ cassandra spans plus 1+ rados spans)",
+        "deploy/docker/docker-compose.yml ships an optional OTLP collector plus Jaeger profile",
+        "go build ./... passes",
+        "go test ./internal/otel/... passes"
+      ],
+      "priority": 33,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-034",
+      "title": "cmd/strata-admin CLI",
+      "description": "As an operator, I want a CLI wrapping admin endpoints: IAM, lifecycle, gc, bucket, sse, replicate.",
+      "acceptanceCriteria": [
+        "New cmd/strata-admin binary with subcommands: 'iam create-access-key', 'iam rotate-access-key', 'lifecycle tick', 'gc drain', 'bucket inspect', 'sse rotate', 'replicate retry'",
+        "Talks to the gateway over IAM admin endpoints plus new /admin/* HTTP routes (gated by [iam root])",
+        "--json flag for machine output; default human output",
+        "Tests: each subcommand against an in-memory gateway, asserting request shape plus parsed response",
+        "go build ./... passes",
+        "go test ./cmd/strata-admin/... passes"
+      ],
+      "priority": 34,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-035",
+      "title": "Concurrency / race harness",
+      "description": "As a maintainer, I want a race harness that hammers the gateway with parallel mixed PUT/DELETE/Multipart-Complete and asserts invariants.",
+      "acceptanceCriteria": [
+        "New internal/s3api/race_test.go: 32 goroutines x 1000 ops, mix PUT/DELETE/Multipart-Complete on a small key set",
+        "Asserts invariants: per key, exactly one is_latest=true row in objects (after operation completes); no orphaned chunks beyond the GC queue; version chain monotonic in mtime",
+        "Run with -race in CI",
+        "Memory backend variant runs in `make test`; cassandra-backed variant runs under -tags integration",
+        "go build ./... passes",
+        "go test -race ./internal/s3api/... passes"
+      ],
+      "priority": 35,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-036",
+      "title": "SSE-KMS: Provider interface + vault provider",
+      "description": "As an enterprise tenant, I want a pluggable KMS provider with HashiCorp Vault Transit as the default.",
+      "acceptanceCriteria": [
+        "internal/crypto/kms package: KMSProvider interface { GenerateDataKey(keyID string) (plaintextDEK, wrappedDEK, error); UnwrapDEK(keyID, wrapped) (plaintextDEK, error) }",
+        "vault provider: STRATA_KMS_VAULT_ADDR plus STRATA_KMS_VAULT_PATH; reuses Vault auth from US-002",
+        "Tests: vault provider against httptest mock; round-trip wrap/unwrap; missing key id returns error",
+        "go build ./... passes",
+        "go test ./internal/crypto/kms/... passes"
+      ],
+      "priority": 36,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-037",
+      "title": "SSE-KMS: aws-kms provider + local-hsm test stub",
+      "description": "As an AWS-integrating user, I want a real aws-kms provider; for tests, a deterministic local-hsm stub.",
+      "acceptanceCriteria": [
+        "aws-kms provider: AWS SDK GenerateDataKey plus Decrypt; key id resolved via STRATA_KMS_AWS_REGION plus the request key id",
+        "local-hsm provider: deterministic in-process keystore for tests, generates DEK from a hash of (key_id, nonce)",
+        "Tests: aws-kms against AWS SDK mock; local-hsm round-trip",
+        "go build ./... passes",
+        "go test ./internal/crypto/kms/... passes"
+      ],
+      "priority": 37,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-038",
+      "title": "SSE-KMS: PutObject/GetObject wiring",
+      "description": "As an enterprise tenant, x-amz-server-side-encryption aws:kms wraps the per-object DEK via KMSProvider.",
+      "acceptanceCriteria": [
+        "PutObject with aws:kms plus x-amz-server-side-encryption-aws-kms-key-id resolves the provider, calls GenerateDataKey, persists wrapped DEK plus key id in objects.sse_key plus sse_key_id (US-004 columns)",
+        "GetObject calls UnwrapDEK with the persisted key id; mismatched key id at unwrap time yields 403 AccessDenied",
+        "Bucket default encryption (US-007) supports aws:kms with a KMSMasterKeyID — applied transparently when header omitted",
+        "Tests: round-trip with vault provider; round-trip with local-hsm; missing key id yields 400; mismatched key id yields 403",
+        "go build ./... passes",
+        "go test ./internal/s3api/... passes"
+      ],
+      "priority": 38,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-039",
+      "title": "cmd/strata-inventory worker (CSV)",
+      "description": "As a billing/audit pipeline, I want PutBucketInventoryConfiguration to schedule actual CSV exports of the bucket index.",
+      "acceptanceCriteria": [
+        "New cmd/strata-inventory binary, leader-elected, ticks per inventory configuration (hourly/daily)",
+        "Walks objects rows for the source bucket, writes a manifest object (manifest.json) plus a data object (CSV.gz) to the target prefix",
+        "PUT /<bucket>?inventory&id=<id> plus GET plus DELETE round-trip InventoryConfiguration XML via setBucketBlob",
+        "CSV columns match AWS Inventory: Bucket, Key, VersionId, IsLatest, IsDeleteMarker, Size, LastModifiedDate, ETag, StorageClass, ChecksumAlgorithm",
+        "Tests: scheduled tick fires; manifest plus CSV present in target bucket; CSV header matches AWS spec",
+        "go build ./... passes",
+        "go test ./cmd/strata-inventory/... passes"
+      ],
+      "priority": 39,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-040",
+      "title": "Access Points: schema + CRUD endpoints",
+      "description": "As a multi-tenant operator, I want named access points with their own policy and alias.",
+      "acceptanceCriteria": [
+        "New access_points table: name PK, bucket_ref, policy blob, public_access_block blob, network_origin",
+        "POST /?Action=CreateAccessPoint plus GetAccessPoint plus DeleteAccessPoint plus ListAccessPoints, AWS-style XML form-encoded (gated by [iam root])",
+        "Alias generated as 'ap-<random12>'",
+        "Tests: round-trip CRUD; double-create returns AccessPointAlreadyOwnedByYou; delete-missing returns NoSuchAccessPoint",
+        "go build ./... passes",
+        "go test ./internal/s3api/... passes"
+      ],
+      "priority": 40,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-041",
+      "title": "Access Points: host routing + additive policy",
+      "description": "As an access-point client, requests to <alias>.s3-accesspoint.<region>.example.com route to the underlying bucket with the access-point policy applied additively.",
+      "acceptanceCriteria": [
+        "Router accepts <alias>.s3-accesspoint.<region>.<host> hosts; resolves alias to bucket; rewrites the request path to use the bucket name",
+        "Access-point policy is evaluated AFTER bucket policy; both must allow the action (intersection semantics)",
+        "Network origin restriction (Internet/VPC) honoured; mismatched origin yields 403",
+        "Tests: GET via access-point alias reaches underlying bucket; access-point Deny overrides bucket Allow; bucket Deny overrides access-point Allow; mismatched origin yields 403",
+        "go build ./... passes",
+        "go test ./internal/s3api/... passes"
+      ],
+      "priority": 41,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-042",
+      "title": "ScyllaDB CI matrix + docs/backends/scylla.md",
+      "description": "As a maintainer, I want CI evidence ScyllaDB is a drop-in for Cassandra and a benchmark vs Cassandra.",
+      "acceptanceCriteria": [
+        "New .github/workflows/ci-scylla.yml: weekly schedule plus manual dispatch; runs the existing testcontainers-go integration tests against ScyllaDB 5.x",
+        "docs/backends/scylla.md: deployment notes, raft-LWT confirmation, p50/p95/p99 latency table for CreateBucket / SetBucketVersioning / CompleteMultipartUpload (one column Cassandra, one column Scylla)",
+        "No code changes required to switch backends",
+        "Tests: existing storetest contract passes against ScyllaDB",
+        "go build ./... passes",
+        "go test -tags integration ./internal/meta/cassandra/... passes against Scylla"
+      ],
+      "priority": 42,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-043",
+      "title": "Multi-cluster RADOS: config + connection map",
+      "description": "As a geo-sep operator, I want RADOS connections per cluster, each with its own keyring and conf.",
+      "acceptanceCriteria": [
+        "STRATA_RADOS_CLUSTERS=<id>:<conf-path>:<keyring-path>,...",
+        "rados.Backend internally holds map[clusterID]*rados.Conn; lazy init on first use; reconnect on connection loss",
+        "Existing single-cluster config (STRATA_RADOS_CONF plus STRATA_RADOS_USER plus STRATA_RADOS_KEYRING) maps to cluster id 'default'",
+        "Tests: config parsed; missing cluster id fatal at startup; unreachable cluster yields INFO log plus retry on first PutChunks",
+        "go build -tags ceph ./... passes",
+        "go test -tags ceph ./internal/data/rados/... passes"
+      ],
+      "priority": 43,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-044",
+      "title": "Multi-cluster RADOS: PutChunks routing + GetChunks dispatch",
+      "description": "As a geo-sep operator, I want storage class to drive the cluster choice on writes, and GetChunks to dispatch by ChunkRef.Cluster.",
+      "acceptanceCriteria": [
+        "STRATA_RADOS_CLASSES extends to <CLASS>=<pool>@<cluster>[/<ns>]",
+        "PutChunks chooses the cluster from the storage class config",
+        "GetChunks dispatches by ChunkRef.Cluster (already on the type)",
+        "GC enqueueing carries the cluster id; GC worker dispatches the delete to the right cluster",
+        "Tests: lifecycle transition between hot (default) and cold (remote) cluster works end-to-end; cross-cluster GC drains both queues",
+        "go build -tags ceph ./... passes",
+        "go test -tags ceph ./internal/data/rados/... ./internal/gc/... passes"
+      ],
+      "priority": 44,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-045",
+      "title": "Online per-bucket shard resize",
+      "description": "As an operator of a bucket past tens of millions of objects, I want an online split flow that grows the partition count without downtime.",
+      "acceptanceCriteria": [
+        "strata-admin bucket reshard --bucket <name> --target <N> queues a background rewrite via a reshard_jobs table",
+        "Rewrite worker copies rows from old partition layout to new (shard_count = N), LWT-flips bucket.shard_count when done; old rows tombstone-cleaned in a follow-up tick",
+        "While shard_count_in_progress flag is set, list-objects reads union of old plus new partition layouts",
+        "Idempotent plus resumable from the reshard_jobs progress row",
+        "Tests: 1000 objects, reshard 32 to 128, list-objects returns the same set during AND after the resize",
+        "go build ./... passes",
+        "go test ./internal/meta/... passes"
+      ],
+      "priority": 45,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-046",
+      "title": "cmd/strata-audit-export daily JSON-lines worker",
+      "description": "As an operator, I want raw audit rows older than 30d exported to a designated bucket as gzipped JSON-lines and then deleted.",
+      "acceptanceCriteria": [
+        "New cmd/strata-audit-export binary, leader-elected, daily tick",
+        "Reads audit_log rows older than STRATA_AUDIT_EXPORT_AFTER (default 30d), writes one gzipped JSON-lines object per day to the configured audit-export bucket / prefix",
+        "After successful upload, deletes the source partition for that day",
+        "Tests: 100 rows yield tick yield 100 lines in the target bucket yield source partition empty",
+        "go build ./... passes",
+        "go test ./cmd/strata-audit-export/... passes"
+      ],
+      "priority": 46,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-047",
+      "title": "examples/ directory for aws-cli/boto3/mc/s3cmd + smoke",
+      "description": "As a new Strata user, I want copy-paste examples for common workflows.",
+      "acceptanceCriteria": [
+        "New examples/ directory with subdirectories: aws-cli, boto3, mc, s3cmd",
+        "Each subdirectory has a README and runnable scripts covering: bucket setup, multipart upload, presigned URL, lifecycle config, replication setup, SSE-S3 PUT/GET, IAM key rotation",
+        "examples/smoke.sh runs every example end-to-end against `make run-memory`",
+        "README.md links to examples/",
+        "Tests: examples/smoke.sh exits 0 when run against a fresh in-memory gateway",
+        "go build ./... passes"
+      ],
+      "priority": 47,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-048",
+      "title": "Protobuf manifest schema + decoder reads JSON+protobuf",
+      "description": "As a maintainer, I want the manifest blob in protobuf for smaller row size, with backwards-compatible decode.",
+      "acceptanceCriteria": [
+        "internal/data/manifest.proto defines Manifest with the same fields as the current Go struct",
+        "Generated Go via buf (vendored output under internal/data/manifestpb/)",
+        "Decoder detects format via the first byte (JSON '{' vs protobuf wire-format) and parses accordingly",
+        "Tests: round-trip a Manifest as JSON; round-trip as protobuf; decoder reads both",
+        "go build ./... passes",
+        "go test ./internal/data/... passes"
+      ],
+      "priority": 48,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-049",
+      "title": "Protobuf manifest encoder + background rewriter",
+      "description": "As a maintainer, I want new objects to serialise the manifest as protobuf, and existing rows opportunistically rewritten.",
+      "acceptanceCriteria": [
+        "Encoder writes protobuf for new objects (toggle: STRATA_MANIFEST_FORMAT=proto|json, default proto)",
+        "New cmd/strata-manifest-rewriter binary: leader-elected, walks objects, re-encodes JSON manifests to protobuf, idempotent plus resumable",
+        "Tests: PUT new object yields manifest in protobuf; rewriter converts pre-existing JSON row yield protobuf; reader still reads both formats",
+        "go build ./... passes",
+        "go test ./internal/data/... ./cmd/strata-manifest-rewriter/... passes"
+      ],
+      "priority": 49,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
