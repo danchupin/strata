@@ -684,6 +684,106 @@ func TestDeleteBatchMixedVersionIDs(t *testing.T) {
 	}
 }
 
+// TestOpenProbeFailsOnMissingBucket exercises US-005 fail-fast: when the
+// configured bucket does not exist on the backend, Open's writability
+// probe must error before returning so the gateway refuses to start.
+func TestOpenProbeFailsOnMissingBucket(t *testing.T) {
+	ctx := context.Background()
+
+	const (
+		username = "minioadmin"
+		password = "minioadmin"
+	)
+
+	container, err := tcminio.Run(ctx, "minio/minio:latest",
+		tcminio.WithUsername(username),
+		tcminio.WithPassword(password),
+	)
+	if err != nil {
+		t.Fatalf("start minio: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := container.Terminate(context.Background()); err != nil {
+			t.Logf("terminate: %v", err)
+		}
+	})
+
+	endpoint := minioEndpoint(t, ctx, container)
+	// Intentionally NOT calling createBucket — bucket is missing.
+	cfg := s3backend.Config{
+		Endpoint:       endpoint,
+		Region:         "us-east-1",
+		Bucket:         "does-not-exist",
+		AccessKey:      username,
+		SecretKey:      password,
+		ForcePathStyle: true,
+	}
+	if _, err := s3backend.Open(ctx, cfg); err == nil {
+		t.Fatal("Open with missing bucket: want error from probe, got nil")
+	}
+}
+
+// TestOpenProbeLeavesBucketCleanOnVersioned pins US-005 versioning
+// awareness: probe must capture the PutObject VersionId on a versioning-
+// enabled bucket and pass it to DeleteObject so the bucket is left
+// exactly as it was found — no canary versions, no delete-markers.
+func TestOpenProbeLeavesBucketCleanOnVersioned(t *testing.T) {
+	ctx := context.Background()
+
+	const (
+		username = "minioadmin"
+		password = "minioadmin"
+		bucket   = "strata-test-probe-versioned"
+	)
+
+	container, err := tcminio.Run(ctx, "minio/minio:latest",
+		tcminio.WithUsername(username),
+		tcminio.WithPassword(password),
+	)
+	if err != nil {
+		t.Fatalf("start minio: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := container.Terminate(context.Background()); err != nil {
+			t.Logf("terminate: %v", err)
+		}
+	})
+
+	endpoint := minioEndpoint(t, ctx, container)
+	if err := createBucket(ctx, endpoint, username, password, bucket); err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	if err := enableVersioning(ctx, endpoint, username, password, bucket); err != nil {
+		t.Fatalf("enable versioning: %v", err)
+	}
+
+	cfg := s3backend.Config{
+		Endpoint:       endpoint,
+		Region:         "us-east-1",
+		Bucket:         bucket,
+		AccessKey:      username,
+		SecretKey:      password,
+		ForcePathStyle: true,
+	}
+	b, err := s3backend.Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("open backend: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+
+	admin := newAdminClient(endpoint, username, password)
+	versions, err := admin.ListObjectVersions(ctx, &awss3.ListObjectVersionsInput{Bucket: ptr(bucket)})
+	if err != nil {
+		t.Fatalf("list object versions: %v", err)
+	}
+	if len(versions.Versions) != 0 {
+		t.Fatalf("after probe: expected zero versions, got %d", len(versions.Versions))
+	}
+	if len(versions.DeleteMarkers) != 0 {
+		t.Fatalf("after probe: expected zero delete-markers, got %d", len(versions.DeleteMarkers))
+	}
+}
+
 // TestDeleteObjectIdempotent guards US-004's idempotency contract:
 // DeleteObject on an already-missing key must succeed without surfacing
 // the backend's NoSuchKey error.

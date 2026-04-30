@@ -11,6 +11,7 @@
 package s3
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -95,11 +96,57 @@ func Open(ctx context.Context, cfg Config) (*Backend, error) {
 		// multipart sessions leak in the backend bucket.
 	})
 
-	return &Backend{
+	b := &Backend{
 		bucket:   cfg.Bucket,
 		client:   client,
 		uploader: uploader,
-	}, nil
+	}
+
+	if !cfg.SkipProbe {
+		if err := b.Probe(ctx); err != nil {
+			return nil, err
+		}
+	}
+
+	return b, nil
+}
+
+// Probe is the boot-time writability check (US-005). It does PutObject
+// followed by DeleteObject on ProbeKey against the configured bucket —
+// catches read-only mounts, missing IAM permissions, expired creds, and
+// bucket-existence regressions before the gateway accepts traffic. The
+// probe is invoked once during Open; tests that don't want network
+// traffic set Config.SkipProbe = true.
+//
+// Failure-mode error messages name the failing op (probe-put / probe-
+// delete) and include the bucket name + underlying SDK error so the
+// operator gets a clear actionable signal at the gateway log.
+func (b *Backend) Probe(ctx context.Context) error {
+	if b.client == nil {
+		return errors.ErrUnsupported
+	}
+	bucket := b.bucket
+	key := ProbeKey
+	out, err := b.client.PutObject(ctx, &awss3.PutObjectInput{
+		Bucket: &bucket,
+		Key:    &key,
+		Body:   bytes.NewReader(nil),
+	})
+	if err != nil {
+		return fmt.Errorf("s3: probe-put bucket=%s key=%s: %w", bucket, key, err)
+	}
+	del := &awss3.DeleteObjectInput{Bucket: &bucket, Key: &key}
+	// On versioning-enabled buckets, plain DeleteObject would leave a
+	// delete-marker behind for the canary key. Pass the captured
+	// VersionId so the probe leaves the bucket exactly as it found it.
+	if out.VersionId != nil && *out.VersionId != "" {
+		v := *out.VersionId
+		del.VersionId = &v
+	}
+	if _, err := b.client.DeleteObject(ctx, del); err != nil {
+		return fmt.Errorf("s3: probe-delete bucket=%s key=%s: %w", bucket, key, err)
+	}
+	return nil
 }
 
 // Compile-time assertion that *Backend satisfies data.Backend.

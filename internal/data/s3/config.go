@@ -32,7 +32,20 @@ type Config struct {
 	// production callers leave this nil. Tests may inject a counting
 	// transport to assert per-op request counts (US-004 batch-delete).
 	HTTPClient *http.Client
+
+	// SkipProbe disables the boot-time writability probe (PutObject +
+	// DeleteObject on ProbeKey, US-005). Production callers leave it
+	// false — the probe catches read-only mounts, missing IAM
+	// permissions, expired creds, and bucket-existence regressions
+	// before the first real request. Tests that don't want the probe's
+	// network round-trip flip this to true.
+	SkipProbe bool
 }
+
+// ProbeKey is the sentinel object used by the boot-time writability
+// probe (US-005). Strata writes + deletes this key against the backend
+// bucket once on startup; it never appears during steady-state traffic.
+const ProbeKey = ".strata-readyz-canary"
 
 const (
 	// DefaultPartSize matches PRD US-002: 16 MiB part size keeps the memory

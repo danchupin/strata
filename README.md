@@ -62,7 +62,7 @@ A successful `make smoke` validates bucket CRUD, object PUT/GET/HEAD/DELETE (inc
 | Variable | Default | Description |
 |---|---|---|
 | `STRATA_LISTEN` | `:9000` | HTTP listen address |
-| `STRATA_DATA_BACKEND` | `memory` | `memory`, `rados` (requires build tag `ceph`) |
+| `STRATA_DATA_BACKEND` | `memory` | `memory`, `rados` (requires build tag `ceph`), `s3` (S3-compatible endpoint) |
 | `STRATA_META_BACKEND` | `memory` | `memory`, `cassandra` |
 | `STRATA_BUCKET_SHARDS` | `64` | default partition-shard count for the `objects` table |
 | `STRATA_CASSANDRA_HOSTS` | `127.0.0.1` | comma-separated |
@@ -75,6 +75,14 @@ A successful `make smoke` validates bucket CRUD, object PUT/GET/HEAD/DELETE (inc
 | `STRATA_RADOS_POOL` | `strata.rgw.buckets.data` | |
 | `STRATA_RADOS_NAMESPACE` | `` | optional per-tenant namespace |
 | `STRATA_RADOS_CLASSES` | `` | class routing map: `CLASS=pool[@cluster[/ns]],...`. If empty, STANDARD points at `STRATA_RADOS_POOL`. |
+| `STRATA_S3_BACKEND_ENDPOINT` | `` | full backend URL (`http://host:port`); empty falls back to AWS region-based resolution. Required for MinIO / Ceph RGW / Garage / Wasabi / B2-S3 |
+| `STRATA_S3_BACKEND_REGION` | `` | required when `STRATA_DATA_BACKEND=s3` |
+| `STRATA_S3_BACKEND_BUCKET` | `` | required; single backend bucket every Strata object lands in. Must be pre-created — Strata refuses to start if missing or unwritable (boot-time PUT/DELETE probe on key `.strata-readyz-canary`) |
+| `STRATA_S3_BACKEND_ACCESS_KEY` | `` | static access key; both empty falls back to SDK default credential chain (env / `~/.aws` / IRSA / IMDS). Half-set is misconfig and fails at startup |
+| `STRATA_S3_BACKEND_SECRET_KEY` | `` | static secret key; see access-key note |
+| `STRATA_S3_BACKEND_FORCE_PATH_STYLE` | `false` | `true` for MinIO + Ceph RGW; `false` (default) for AWS / virtual-hosted-style endpoints |
+| `STRATA_S3_BACKEND_PART_SIZE` | `16777216` | multipart-upload part size in bytes (default 16 MiB; SDK minimum 5 MiB) |
+| `STRATA_S3_BACKEND_UPLOAD_CONCURRENCY` | `4` | parallel part uploads per Put. Memory peak ≈ part size × concurrency (default 64 MiB) |
 | `STRATA_AUTH_MODE` | `off` | `off` accepts anything, `required` enforces SigV4 |
 | `STRATA_STATIC_CREDENTIALS` | `` | comma-separated `accesskey:secret[:owner]` entries for dev credentials |
 | `STRATA_LIFECYCLE_INTERVAL` | `60s` | `strata-lifecycle` tick interval (Go duration) |

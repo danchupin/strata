@@ -89,8 +89,8 @@
         "Tests pass"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Production STRATA_DATA_BACKEND=s3 dispatch in cmd/strata-gateway buildDataBackend deferred to US-009 per PRD. US-005 ships internal/config.S3BackendConfig + envMap wiring + validate() (fail-fast on missing bucket/region/half-set creds/negative numerics) + s3.Open writability probe with VersionId-aware cleanup so versioned backends are left exactly as found. Config.SkipProbe escape-hatch added so unit tests don't need a live endpoint."
     },
     {
       "id": "US-006",

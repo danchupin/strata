@@ -21,6 +21,7 @@ type Config struct {
 
 	Cassandra CassandraConfig `koanf:"cassandra"`
 	RADOS     RADOSConfig     `koanf:"rados"`
+	S3Backend S3BackendConfig `koanf:"s3_backend"`
 	Auth      AuthConfig      `koanf:"auth"`
 	Lifecycle LifecycleConfig `koanf:"lifecycle"`
 	GC        GCConfig        `koanf:"gc"`
@@ -45,6 +46,21 @@ type RADOSConfig struct {
 	Pool       string `koanf:"pool"`
 	Namespace  string `koanf:"namespace"`
 	Classes    string `koanf:"classes"`
+}
+
+// S3BackendConfig wires the STRATA_S3_BACKEND_* env vars used by the
+// internal/data/s3 backend (US-005). Endpoint empty falls back to AWS
+// region-based resolution; AccessKey/SecretKey both empty falls through
+// to the SDK default credential chain (env / ~/.aws / IRSA / IMDS).
+type S3BackendConfig struct {
+	Endpoint          string `koanf:"endpoint"`
+	Region            string `koanf:"region"`
+	Bucket            string `koanf:"bucket"`
+	AccessKey         string `koanf:"access_key"`
+	SecretKey         string `koanf:"secret_key"`
+	ForcePathStyle    bool   `koanf:"force_path_style"`
+	PartSize          int64  `koanf:"part_size"`
+	UploadConcurrency int    `koanf:"upload_concurrency"`
 }
 
 type AuthConfig struct {
@@ -120,6 +136,14 @@ var envMap = map[string]string{
 	"STRATA_RADOS_POOL":               "rados.pool",
 	"STRATA_RADOS_NAMESPACE":          "rados.namespace",
 	"STRATA_RADOS_CLASSES":            "rados.classes",
+	"STRATA_S3_BACKEND_ENDPOINT":           "s3_backend.endpoint",
+	"STRATA_S3_BACKEND_REGION":             "s3_backend.region",
+	"STRATA_S3_BACKEND_BUCKET":             "s3_backend.bucket",
+	"STRATA_S3_BACKEND_ACCESS_KEY":         "s3_backend.access_key",
+	"STRATA_S3_BACKEND_SECRET_KEY":         "s3_backend.secret_key",
+	"STRATA_S3_BACKEND_FORCE_PATH_STYLE":   "s3_backend.force_path_style",
+	"STRATA_S3_BACKEND_PART_SIZE":          "s3_backend.part_size",
+	"STRATA_S3_BACKEND_UPLOAD_CONCURRENCY": "s3_backend.upload_concurrency",
 	"STRATA_AUTH_MODE":                "auth.mode",
 	"STRATA_STATIC_CREDENTIALS":       "auth.static_credentials",
 	"STRATA_LIFECYCLE_INTERVAL":       "lifecycle.interval",
@@ -164,8 +188,12 @@ func Load() (*Config, error) {
 func (c *Config) validate() error {
 	switch c.DataBackend {
 	case "memory", "rados":
+	case "s3":
+		if err := c.S3Backend.validate(); err != nil {
+			return err
+		}
 	default:
-		return fmt.Errorf("data_backend %q is not one of {memory, rados}", c.DataBackend)
+		return fmt.Errorf("data_backend %q is not one of {memory, rados, s3}", c.DataBackend)
 	}
 	switch c.MetaBackend {
 	case "memory", "cassandra":
@@ -179,6 +207,29 @@ func (c *Config) validate() error {
 	}
 	if c.DefaultBucketShards <= 0 {
 		return fmt.Errorf("default_bucket_shards must be positive (got %d)", c.DefaultBucketShards)
+	}
+	return nil
+}
+
+// validate enforces fail-fast on misconfiguration of the S3 data backend.
+// Only invoked when DataBackend == "s3" — leaves the struct unvalidated
+// otherwise so operators using rados/memory don't need to set
+// STRATA_S3_BACKEND_*.
+func (c *S3BackendConfig) validate() error {
+	if c.Bucket == "" {
+		return fmt.Errorf("STRATA_S3_BACKEND_BUCKET is required when data_backend=s3")
+	}
+	if c.Region == "" {
+		return fmt.Errorf("STRATA_S3_BACKEND_REGION is required when data_backend=s3")
+	}
+	if (c.AccessKey == "") != (c.SecretKey == "") {
+		return fmt.Errorf("STRATA_S3_BACKEND_ACCESS_KEY and STRATA_S3_BACKEND_SECRET_KEY must be set together (or both empty for SDK default chain)")
+	}
+	if c.PartSize < 0 {
+		return fmt.Errorf("STRATA_S3_BACKEND_PART_SIZE must be non-negative (got %d)", c.PartSize)
+	}
+	if c.UploadConcurrency < 0 {
+		return fmt.Errorf("STRATA_S3_BACKEND_UPLOAD_CONCURRENCY must be non-negative (got %d)", c.UploadConcurrency)
 	}
 	return nil
 }

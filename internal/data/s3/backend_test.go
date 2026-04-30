@@ -123,3 +123,43 @@ func TestOpenValidatesRequiredConfig(t *testing.T) {
 		t.Fatal("Open with empty region: want error, got nil")
 	}
 }
+
+// TestOpenSkipProbeAvoidsNetwork pins the US-005 SkipProbe escape hatch:
+// callers that don't want the boot-time writability probe (mostly tests)
+// can flip it off and Open returns a live Backend without any HTTP
+// round-trip to the configured endpoint.
+func TestOpenSkipProbeAvoidsNetwork(t *testing.T) {
+	ctx := context.Background()
+	// Endpoint points at a port no one is listening on. With SkipProbe=true
+	// Open must not connect; with SkipProbe=false (covered by integration
+	// tests against MinIO) it would fail.
+	cfg := Config{
+		Bucket:         "strata-test",
+		Region:         "us-east-1",
+		Endpoint:       "http://127.0.0.1:1",
+		AccessKey:      "ak",
+		SecretKey:      "sk",
+		ForcePathStyle: true,
+		SkipProbe:      true,
+	}
+	b, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Open with SkipProbe=true: want nil error, got %v", err)
+	}
+	if b == nil {
+		t.Fatal("Open returned nil backend with no error")
+	}
+	if b.client == nil {
+		t.Fatal("Open returned backend with nil client")
+	}
+}
+
+// TestProbeStubReturnsErrUnsupported guards Probe on a New() stub: with
+// no live client, Probe must surface errors.ErrUnsupported — never
+// silently no-op.
+func TestProbeStubReturnsErrUnsupported(t *testing.T) {
+	b := New()
+	if err := b.Probe(context.Background()); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("Probe on stub: want errors.ErrUnsupported, got %v", err)
+	}
+}

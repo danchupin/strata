@@ -113,6 +113,23 @@ Cycle: ralph/s3-over-s3-backend
   s3types.BucketVersioningStatusEnabled}). PutObjectOutput.VersionId
   is empty until versioning is Enabled; admin.ListObjectVersions
   returns Versions + DeleteMarkers separately for assertion.
+- internal/config/config.go: every new env var is wired by adding to (1)
+  the relevant per-section koanf-tagged struct, (2) defaults() if a
+  default exists, (3) envMap (explicit env→koanf-path mapping — no
+  auto-mangling), and (4) validate() if it's required or has a
+  whitelist. validate() is called once at end of Load() so misconfig
+  fails before the binary starts serving — the operator finds out at
+  startup, not at first request.
+- s3.Backend boot-time writability probe: PutObject + DeleteObject on
+  ProbeKey (".strata-readyz-canary") runs inside Open() unless
+  Config.SkipProbe = true. Probe captures PutObjectOutput.VersionId and
+  passes it to DeleteObject so versioning-enabled backends are left
+  exactly as found (no canary version slot, no delete-marker). Tests
+  that don't want the probe round-trip flip SkipProbe; tests that need
+  the bucket to exist must call createBucket before Open.
+- Koanf env-var loading is testable via t.Setenv — Load() reads from
+  os.Getenv at each call, so per-test env override works without
+  affecting other tests in the same process.
 
 ## 2026-04-30 — US-001
 - Added internal/data/s3 package skeleton with stub Backend that satisfies
@@ -288,4 +305,64 @@ Cycle: ralph/s3-over-s3-backend
     explicitly; gopls warns "No packages found for open file" — the
     warning is a false positive caused by gopls' default build flags,
     not a real problem.
+---
+
+## 2026-04-30 — US-005
+- Added internal/config.S3BackendConfig (Endpoint, Region, Bucket,
+  AccessKey, SecretKey, ForcePathStyle, PartSize, UploadConcurrency)
+  with full koanf tags. Wired STRATA_S3_BACKEND_* env vars in envMap
+  (explicit mapping per existing convention). Extended Config.validate
+  whitelist with "s3" and added per-field validate() on
+  S3BackendConfig: required Bucket+Region; both creds set or both
+  empty; non-negative PartSize/UploadConcurrency.
+- Added boot-time writability probe in s3.Open: PutObject +
+  DeleteObject on ProbeKey (".strata-readyz-canary") against the
+  configured bucket. Probe captures the SDK PutObjectOutput.VersionId
+  on versioning-enabled backends and passes it to DeleteObject so the
+  bucket is left exactly as found (no canary version, no delete-
+  marker). Probe is bypassed via Config.SkipProbe = true for tests
+  that don't want network traffic.
+- Documented STRATA_S3_BACKEND_* env vars in README.md's environment-
+  variable table; added s3 to the STRATA_DATA_BACKEND value list.
+- New unit tests:
+  internal/config/config_test.go (TestS3BackendValidateRequiresBucket-
+  AndRegion, TestS3BackendValidateCredsBothOrNeither,
+  TestS3BackendValidateNonNegativeNumeric, TestLoadAcceptsS3Data-
+  Backend, TestLoadRejectsS3WithoutBucket).
+  internal/data/s3/backend_test.go (TestOpenSkipProbeAvoidsNetwork,
+  TestProbeStubReturnsErrUnsupported).
+- New integration tests:
+  internal/data/s3/backend_integration_test.go (TestOpenProbeFailsOn-
+  MissingBucket, TestOpenProbeLeavesBucketCleanOnVersioned).
+- Files: internal/config/{config.go,config_test.go (new)},
+  internal/data/s3/{backend.go,config.go,backend_test.go,
+  backend_integration_test.go}, README.md.
+- Production-routing note: PRD says STRATA_DATA_BACKEND=s3 dispatch
+  lands in US-009. This story ships the configuration surface +
+  validation + probe; cmd/strata-gateway buildDataBackend still
+  rejects "s3" with the existing "unknown data backend" error until
+  US-009 wires the dispatch. The validate() whitelist accepts "s3" so
+  Load() doesn't reject configs preparing for US-009.
+- **Learnings:**
+  - Probe ordering matters on versioning-enabled buckets: a naive
+    PutObject + plain DeleteObject leaves a delete-marker behind for
+    the canary key. Capture VersionId from PutObjectOutput and pass
+    it to DeleteObject so probe is idempotent and leaves zero state
+    on every backend type (non-versioned, suspended, enabled).
+  - Koanf envMap keeps the env-var → struct-path mapping explicit (no
+    auto-mangling) so adding STRATA_S3_BACKEND_* required only
+    appending eight envMap entries. The pattern is to mirror the
+    naming convention of the section already in the file
+    (STRATA_RADOS_*, STRATA_CASSANDRA_*).
+  - SkipProbe is the right escape hatch for the unit-test path that
+    needs Open() to succeed without any network round-trip. The probe
+    cost (one PUT + one DELETE) is fine for boot, but expensive (and
+    flaky) for table-driven unit tests that exercise the constructor
+    in isolation.
+  - validate() of half-set creds (one of AccessKey/SecretKey set, the
+    other empty) is the easy operator footgun — without the check,
+    the SDK silently falls back to the default credential chain
+    instead of using the partially-configured static creds, leading
+    to "permission denied" at runtime that's hard to debug. Fail
+    fast at config-load time.
 ---
