@@ -37,3 +37,46 @@ type BackendCompletedPart struct {
 	PartNumber int32
 	ETag       string
 }
+
+// LifecycleBackend is the optional capability surface for data backends that
+// support a native bucket-lifecycle protocol (US-014 S3-over-S3). The gateway
+// type-asserts at every PutBucketLifecycle / DeleteBucketLifecycle entry-point
+// and skips translation when the assertion fails — rados/memory backends keep
+// running Strata's own lifecycle worker for everything.
+//
+// Translation is best-effort: rules whose StorageClass is not natively
+// understood by the backend are reported in skippedRuleIDs, and Strata's
+// worker keeps owning those transitions. Expirations + AbortIncompleteUpload
+// rules always translate so the backend can clean up orphan bytes
+// independently of Strata's GC.
+//
+// bucketPrefix scopes every emitted backend rule to a single Strata bucket —
+// the s3 backend stores Strata objects under <bucket-uuid>/<object-uuid>, so
+// the per-bucket lifecycle filter must be prefixed with <bucket-uuid>/ to
+// avoid affecting other Strata buckets sharing the same backend bucket.
+type LifecycleBackend interface {
+	PutBackendLifecycle(ctx context.Context, bucketPrefix string, rules []LifecycleRule) (skippedRuleIDs []string, err error)
+	DeleteBackendLifecycle(ctx context.Context, bucketPrefix string) error
+}
+
+// LifecycleRule is the backend-translation input for one Strata lifecycle
+// rule. Only the subset of fields the s3 backend can faithfully translate is
+// carried; richer Strata-only fields (NoncurrentVersion*, Tag filters)
+// stay with the worker.
+//
+// TransitionStorageClass is the empty string when the rule has no Transition
+// action (in that case TransitionDays is also zero). ExpirationDays == 0 means
+// the rule has no Expiration action. AbortIncompleteUploadDays == 0 means the
+// rule has no AbortIncompleteMultipartUpload action.
+//
+// At least one of (TransitionDays, ExpirationDays, AbortIncompleteUploadDays)
+// must be non-zero for the rule to be translatable — empty rules are dropped
+// at the s3api layer before reaching the backend.
+type LifecycleRule struct {
+	ID                        string
+	Prefix                    string
+	TransitionDays            int
+	TransitionStorageClass    string
+	ExpirationDays            int
+	AbortIncompleteUploadDays int
+}

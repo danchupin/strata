@@ -309,6 +309,23 @@ Cycle: ralph/s3-over-s3-backend
   `make down` volume-cleanup assertion at the end. Don't fold the
   destructive teardown into the default target — operators want to poke
   the stack after a passing smoke run.
+- Optional capability surfaces (data.MultipartBackend US-010,
+  data.LifecycleBackend US-014) live in internal/data with primitive args
+  to stay cycle-free. Pattern: define interface + flat input types in
+  internal/data, do per-feature parsing/translation in the gateway layer,
+  type-assert at the gateway entry-point and fall through to the
+  chunk/worker path when assertion fails. Don't put internal/lifecycle (or
+  any package importing internal/data) types in the interface signature —
+  importing internal/lifecycle into internal/data/s3 cycles via worker.go.
+- Lifecycle bidirectional translation (US-014): Strata-stored lifecycle is
+  the source of truth; backend lifecycle is derived state, re-pushed on
+  every PutBucketLifecycle and cleared on Delete. Translation failure logs
+  WARN and does NOT fail the user request — a rollout from rados → s3
+  with stale IAM still serves PUT lifecycle 200; worker keeps owning
+  everything until backend permissions are fixed. Backend filter prefix is
+  always <bucket-uuid>/<userPrefix> so an empty Strata prefix doesn't
+  expire ProbeKey or sibling Strata-bucket objects sharing the backend
+  bucket.
 
 ## 2026-04-30 — US-010
 - Added optional data.MultipartBackend interface (internal/data/backend.go)
@@ -1090,4 +1107,99 @@ Cycle: ralph/s3-over-s3-backend
     surfaces AES256/aws:kms; strata mode surfaces nothing. Saves
     a round-trip to the backend just to inspect the SSE header that
     Strata already knows from its own write.
+---
+
+## 2026-05-01 — US-014
+- Optional capability surface data.LifecycleBackend (PutBackendLifecycle /
+  DeleteBackendLifecycle) added in internal/data/backend.go alongside the
+  flat data.LifecycleRule input shape (ID / Prefix / TransitionDays /
+  TransitionStorageClass / ExpirationDays / AbortIncompleteUploadDays).
+  Cycle-free design: the interface lives in internal/data with primitive
+  args; gateway parses lifecycle XML via internal/lifecycle.Parse and
+  flattens into []data.LifecycleRule before handing off — keeps
+  internal/data/s3 from importing internal/lifecycle (which would cycle via
+  the worker's data import).
+- internal/data/s3/lifecycle.go implements translation on *Backend.
+  Native-class whitelist: STANDARD_IA / ONEZONE_IA / GLACIER_IR / GLACIER /
+  DEEP_ARCHIVE / INTELLIGENT_TIERING → s3types.TransitionStorageClass enum.
+  Filter.Prefix scoped to <bucket-uuid>/<userPrefix> so multiple Strata
+  buckets sharing one backend bucket don't collide. Non-native transitions
+  reported in the returned skippedRuleIDs. Expirations + abort-incomplete
+  always emitted. Rules with no translatable action dropped before the SDK
+  call. Full-skip path issues DeleteBucketLifecycle (not an empty Put — the
+  SDK rejects a zero-rule config).
+- Worker integration: lifecycle/worker.go evaluate() short-circuits on a
+  transition when w.Data implements data.LifecycleBackend AND the class is
+  native (datas3.IsNativeTransitionClass). Expirations + Abort still run on
+  worker side per AC ("Expirations always also translate" — Strata
+  handles meta-side expiration; backend lifecycle is the orphan-cleanup
+  safety net). NoncurrentVersionTransition keeps strata-side; LifecycleBackend
+  doesn't expose the noncurrent surface yet.
+- s3api.putBucketLifecycle pushes derived state via s.Data.(data.LifecycleBackend)
+  type-assertion. Translation failures log slog.Warn and DO NOT fail the
+  user request — Strata's stored config is the source of truth.
+  s3api.deleteBucketLifecycle clears the backend lifecycle too.
+- New docs/backends/s3.md (seeded by US-014; US-017 will expand to the full
+  operator guide). Translation table covers every Strata rule action,
+  whether the worker still owns it, and operator caveats.
+- Tests:
+  - internal/data/s3 unit (in-process http.RoundTripper captures lifecycle
+    XML body): TestPutBackendLifecycleTranslatesNativeTransition (the
+    AC-driving test — STANDARD_IA + Days=30 + bucket-uuid/logs/ filter
+    prefix); TestPutBackendLifecycleSkipsNonNativeTransition (DELETE on
+    full-skip + skipped-id reporting); TestPutBackendLifecycleEmitsExpiration
+    + TestPutBackendLifecycleEmitsAbortIncomplete pin always-translate ACs;
+    TestPutBackendLifecycleEmptyRulesClearsBackend; TestDeleteBackendLifecycleIssuesDelete;
+    TestStubLifecycleReturnsErrUnsupported (stub contract); TestIsNativeTransitionClass
+    (whitelist for the worker-skip path).
+  - internal/s3api unit (fakeLifecycleBackend with chunk-passthrough to
+    memory + inspectable rule capture): TestPutBucketLifecycleTranslatesToBackend
+    asserts gateway flattens a 4-rule XML into 3 backend rules (disabled
+    rule dropped; native + expiration + non-native reach backend; prefix
+    ends in /); TestPutBucketLifecycleBackendFailureNonFatal asserts user
+    request still succeeds on backend translation error + Strata-stored
+    config remains authoritative on subsequent GET.
+- Files: internal/data/backend.go, internal/data/s3/lifecycle.go (new),
+  internal/data/s3/lifecycle_test.go (new), internal/lifecycle/worker.go,
+  internal/s3api/lifecycle.go, internal/s3api/lifecycle_test.go,
+  docs/backends/s3.md (new), scripts/ralph/{prd.json,progress.txt}.
+- **Learnings:**
+  - Avoiding the import cycle was the design driver. internal/lifecycle
+    (the package) compiles all files together — worker.go's internal/data
+    import gets pulled in even if rules.go alone doesn't need it. So
+    importing internal/lifecycle from internal/data/s3 → cycle. Fixed by
+    keeping the LifecycleBackend interface in internal/data with primitive
+    args and doing the lifecycle.Parse on the gateway side. Future
+    additions to the interface should keep the same boundary — no
+    internal/lifecycle types in the data interface signatures.
+  - DeleteBucketLifecycle on full-skip is the right shape. PutBucketLifecycleConfiguration
+    with an empty Rules slice fails SDK validation ("required" Rules); the
+    SDK-correct way to express "no rules" is the dedicated
+    DeleteBucketLifecycle call. Operators will see one DELETE on the
+    backend when every rule is non-native + non-expiring.
+  - The lifecycle bucket prefix scoping (<bucket-uuid>/<userPrefix>)
+    matters even for single-bucket-per-deployment topologies because the
+    Strata-side prefix '' becomes backend-side '<bucket-uuid>/' — applies
+    to the entire bucket's objects, not the entire backend bucket. Without
+    the bucket-uuid scope, a rule with empty Strata prefix would expire
+    every backend object (including ProbeKey + objects from sibling Strata
+    buckets sharing the backend bucket).
+  - Worker's backend-skip is per-rule, not global. A rule with both
+    native transition AND noncurrent transition still partially runs in
+    the worker (the noncurrent half stays strata-side until the
+    LifecycleBackend interface grows the noncurrent surface). evaluate()
+    skips the current-version transition; applyNoncurrentActions() keeps
+    running unchanged.
+  - Skipped-rule WARN logging happens in two places: at translation time
+    in s3api (per skipped rule from the backend's response slice) and at
+    every worker tick when the worker-only path actually runs. Both are
+    expected — translation-time WARN is the operator's "you defined a
+    Strata-only class, FYI" notice; worker-time WARN is the "I'm doing
+    work" notice.
+  - Non-fatal backend translation matters for the rollout story: an
+    operator can flip STRATA_DATA_BACKEND from rados → s3 with existing
+    lifecycle configs in place. The first PUT lifecycle call after the
+    flip translates; if the backend bucket doesn't yet have lifecycle
+    permissions wired, the user request still succeeds and Strata's
+    worker keeps owning everything until the operator fixes IAM.
 ---
