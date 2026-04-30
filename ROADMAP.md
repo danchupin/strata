@@ -59,7 +59,7 @@ adding more, prove what is there.
   `.github/workflows/ci-tikv.yml`, race-soak coverage, contract suite parity,
   and `docs/backends/tikv.md`. Memory is now tests-only; the previously listed
   community backends (FoundationDB, PostgreSQL+Citus / Yugabyte) are dropped
-  from the roadmap. (commit pending)
+  from the roadmap. (commit `40b45de`)
 
 ## Correctness & consistency
 
