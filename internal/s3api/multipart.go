@@ -3,10 +3,12 @@ package s3api
 import (
 	"context"
 	"crypto/md5"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"sort"
@@ -219,18 +221,56 @@ func (s *Server) uploadPartCopy(w http.ResponseWriter, r *http.Request, b *meta.
 	}
 	defer rc.Close()
 
+	// US-004 FlexibleChecksum on multipart copy: when the request carries
+	// `x-amz-checksum-algorithm`, recompute the named digest over the
+	// streamed copy bytes via TeeReader (no buffering). The result is
+	// echoed on the response, validated against any client-supplied
+	// `x-amz-checksum-<algo>` value (mismatch → BadDigest), and stored on
+	// the multipart_parts row so US-001's PartChunks carries it forward
+	// for the COMPOSITE Complete computation.
+	checksumAlgo := normalizeChecksumAlgo(r.Header.Get("x-amz-checksum-algorithm"))
+	if checksumAlgo == "" && mu.ChecksumAlgorithm != "" {
+		checksumAlgo = mu.ChecksumAlgorithm
+	}
+	var (
+		hasher       hash.Hash
+		hdrName      string
+		clientDigest string
+		copySrc      io.Reader = rc
+	)
+	if checksumAlgo != "" {
+		hasher, hdrName = newChecksumHasher(checksumAlgo)
+		if hasher != nil {
+			copySrc = io.TeeReader(rc, hasher)
+			clientDigest = r.Header.Get(hdrName)
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(data.WithBucketID(r.Context(), b.ID), 10*time.Minute)
 	defer cancel()
-	manifest, err := s.Data.PutChunks(ctx, rc, mu.StorageClass)
+	manifest, err := s.Data.PutChunks(ctx, copySrc, mu.StorageClass)
 	if err != nil {
 		writeError(w, r, ErrInternal)
 		return
 	}
+
+	var partChecksumValue string
+	if hasher != nil {
+		partChecksumValue = base64.StdEncoding.EncodeToString(hasher.Sum(nil))
+		if clientDigest != "" && clientDigest != partChecksumValue {
+			_ = s.Data.Delete(r.Context(), manifest)
+			writeError(w, r, ErrBadDigest)
+			return
+		}
+	}
+
 	part := &meta.MultipartPart{
-		PartNumber: partNumber,
-		ETag:       manifest.ETag,
-		Size:       manifest.Size,
-		Manifest:   manifest,
+		PartNumber:        partNumber,
+		ETag:              manifest.ETag,
+		Size:              manifest.Size,
+		Manifest:          manifest,
+		ChecksumValue:     partChecksumValue,
+		ChecksumAlgorithm: ifChecksumStored(partChecksumValue, checksumAlgo),
 	}
 	if err := s.Meta.SavePart(r.Context(), b.ID, uploadID, part); err != nil {
 		_ = s.Data.Delete(r.Context(), manifest)
@@ -240,10 +280,22 @@ func (s *Server) uploadPartCopy(w http.ResponseWriter, r *http.Request, b *meta.
 	if srcObj.VersionID != "" {
 		w.Header().Set("x-amz-copy-source-version-id", srcObj.VersionID)
 	}
+	if partChecksumValue != "" && hdrName != "" {
+		w.Header().Set(hdrName, partChecksumValue)
+	}
 	writeXML(w, http.StatusOK, copyPartResult{
 		ETag:         `"` + manifest.ETag + `"`,
 		LastModified: time.Now().UTC().Format(time.RFC3339),
 	})
+}
+
+// ifChecksumStored returns the algo only when a digest was actually
+// computed; keeps zero-value rows out of multipart_parts.checksum_algorithm.
+func ifChecksumStored(value, algo string) string {
+	if value == "" {
+		return ""
+	}
+	return algo
 }
 
 func parseCopySourceRange(spec string, size int64) (start, end int64, ok bool) {

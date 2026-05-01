@@ -72,8 +72,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "uploadPartCopy now wraps the source-side ReadCloser in io.TeeReader feeding a hash.Hash when x-amz-checksum-algorithm is set on the request (or inherited from mu.ChecksumAlgorithm so boto's UploadPartCopy without a per-call header still composes through Complete). Algorithm normalization reuses normalizeChecksumAlgo + newChecksumHasher. After PutChunks drains the tee'd stream, the digest is base64-encoded; if the client supplied x-amz-checksum-<algo>, mismatches return ErrBadDigest (HTTP 400) and the just-written backend object is rolled back via Data.Delete. The computed digest lands on meta.MultipartPart.ChecksumValue + ChecksumAlgorithm so US-001's PartChunks carries it forward, and is echoed on the response header. New ErrBadDigest in errors.go (HTTP 400). Test coverage in internal/s3api/multipart_copy_checksum_test.go: TestMultipartCopyFlexibleChecksum exercises SHA256/SHA1/CRC32/CRC32C round-trip (Initiate→UploadPartCopy echo→Complete COMPOSITE composite); TestMultipartCopyChecksumMismatch pins BadDigest on bad client digest; TestMultipartCopyInheritsUploadAlgorithm pins algo inheritance from the multipart session."
     },
     {
       "id": "US-005",

@@ -90,6 +90,51 @@ Cycle: ralph/s3-tests-90
   hitchhike on obj.Manifest as a hint blob and are merged in the
   same lockstep across memory + cassandra stores.
 
+## 2026-05-01 - US-004 — Multipart copy FlexibleChecksum path
+- internal/s3api/multipart.go::uploadPartCopy now reads
+  `x-amz-checksum-algorithm` from the request (falls back to
+  mu.ChecksumAlgorithm so boto's UploadPartCopy without a per-call
+  header still composes through Complete). When set, the source-side
+  ReadCloser is wrapped in `io.TeeReader(rc, hash.Hash)` so the named
+  digest is recomputed in-stream while PutChunks drains it (no
+  buffering). After PutChunks, the digest is base64-encoded.
+- If the client also supplied `x-amz-checksum-<algo>` on the request,
+  mismatch returns ErrBadDigest (HTTP 400) and the just-written
+  backend object is rolled back via `Data.Delete(manifest)`.
+- Computed digest lands on `meta.MultipartPart.ChecksumValue` +
+  `ChecksumAlgorithm` (the algo column is left blank when the digest
+  is empty so opt-out rows stay clean) and is echoed on the response
+  via the `x-amz-checksum-<algo>` header. From there US-001's
+  PartChunks pipeline carries it into Complete's COMPOSITE formula.
+- New `ErrBadDigest` (HTTP 400, "BadDigest") in errors.go.
+- Test coverage in internal/s3api/multipart_copy_checksum_test.go:
+  TestMultipartCopyFlexibleChecksum runs SHA256/SHA1/CRC32/CRC32C
+  round-trip (Initiate→UploadPartCopy echo→Complete COMPOSITE
+  XML check). TestMultipartCopyChecksumMismatch pins BadDigest on a
+  wrong client digest. TestMultipartCopyInheritsUploadAlgorithm pins
+  algo inheritance from the multipart session.
+- **Learnings for future iterations:**
+  - `io.TeeReader` is the right pattern for "hash bytes while PutChunks
+    consumes them" — the body is never buffered, and the hasher is
+    only Sum'd after PutChunks returns successfully (so mismatched
+    digests don't poison subsequent UploadPart rows).
+  - `extractCopyPartETag` test helper: the etag in CopyPartResult
+    XML is wrapped in quotes that encoding/xml emits as `&#34;` —
+    `strings.Trim(v, "\"&#34;")` would corrupt hex digits. Strip
+    `&#34;` as a substring, then Trim `"`.
+  - `compositeExpected(newHash, [][]byte{rawDigest})` — the test
+    helper hashes the byte slices it's given as if they were the
+    concat input. Passing the part body would test the wrong
+    formula; pass the raw per-part DIGEST instead.
+  - meta.MultipartPart already carried `ChecksumValue` +
+    `ChecksumAlgorithm` from US-003 — uploadPartCopy reuses the
+    same fields, so cassandra schema needs no further ALTER.
+  - The multipart-copy flow does NOT have a backend pass-through
+    branch (mu.BackendUploadID branch exists in uploadPart only).
+    Mixing chunks-shape parts into a backend-pass-through MPU is a
+    pre-existing latent bug, untouched by this story.
+---
+
 ## 2026-05-01 - US-003 — Per-part composite-checksum response shape
 - Added MultipartChecksum{Algorithm,Type,} fields onto data.Manifest
   with `omitempty` JSON tags + protobuf field numbers 19/20/21

@@ -38,6 +38,7 @@ var (
 	ErrMalformedXML        = APIError{Code: "MalformedXML", Message: "The XML you provided was not well-formed", Status: http.StatusBadRequest}
 	ErrInvalidArgument     = APIError{Code: "InvalidArgument", Message: "Invalid argument", Status: http.StatusBadRequest}
 	ErrInvalidPartNumber   = APIError{Code: "InvalidPartNumber", Message: "The requested partnumber is not satisfiable", Status: http.StatusRequestedRangeNotSatisfiable}
+	ErrBadDigest           = APIError{Code: "BadDigest", Message: "The checksum value supplied does not match the value Strata calculated", Status: http.StatusBadRequest}
 	ErrNotImplemented      = APIError{Code: "NotImplemented", Message: "A header you provided implies functionality that is not implemented", Status: http.StatusNotImplemented}
 	ErrInternal            = APIError{Code: "InternalError", Message: "We encountered an internal error", Status: http.StatusInternalServerError}
 )
