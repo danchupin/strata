@@ -164,6 +164,48 @@ Cycle: ralph/s3-tests-90
   part has no minimum. Unit tests that previously used B-scale or
   4-MiB parts must be bumped to ≥ 5 MiB for non-last parts; memory
   backends handle the larger random data cheaply.
+- Composite-checksum validation on Complete (US-010): the COMPOSITE
+  branch in completeMultipart computes compositeValue from per-part
+  digests; if the client supplied `x-amz-checksum-<algo>` on the
+  Complete request, compare against compositeValue and 400 BadDigest
+  on mismatch BEFORE Meta.CompleteMultipartUpload. Same shape as
+  putObject + uploadPartCopy: doom-mismatch never leaks "completing"
+  state. FULL_OBJECT branch is the inverse — the client value IS the
+  digest, so the recompute-and-compare check does not apply.
+
+## 2026-05-01 - US-010 — CompleteMultipartUpload checksum input validation
+- internal/s3api/multipart.go::completeMultipart COMPOSITE branch:
+  after compositeChecksum() yields the recomputed digest, read
+  `x-amz-checksum-<algo>` from the Complete request. If the client
+  supplied a value and it != compositeValue (or compositeValue is
+  empty because parts lacked digests), 400 BadDigest BEFORE
+  Meta.CompleteMultipartUpload runs — same "validate before LWT flip"
+  shape as US-008 (preconditions) and US-009 (size-too-small).
+- internal/s3api/multipart_complete_checksum_test.go:
+  TestMultipartCompleteChecksumValidates over SHA256/SHA1/CRC32/CRC32C.
+  `_match` cases compute the expected COMPOSITE on the test side and
+  Complete with it → 200. `_mismatch` cases send a deliberately wrong
+  digest (zeros + `-2` suffix) → 400 BadDigest, then HEAD returns 404
+  asserting no object materialised (LWT flip never ran).
+- **Learnings for future iterations:**
+  - The COMPOSITE digest format is `base64(HASH(d1||d2||...||dN))-N`
+    where N is part count. Mismatch tests need the `-N` suffix to
+    look the part — without it the value still 400s but for the
+    "wrong format" reason rather than "wrong digest".
+  - FULL_OBJECT does NOT get the recompute-and-compare check: by
+    definition the client value IS the whole-object digest. We could
+    re-stream the object to validate it, but that's expensive and the
+    s3-tests headline cases all run COMPOSITE.
+  - The mismatch test asserts HEAD → 404 to pin "LWT did not flip".
+    If a future change moves validation after CompleteMultipartUpload
+    the HEAD assertion will fail loudly — protects the
+    "preconditions before mutation" invariant called out in US-008's
+    learnings.
+  - Existing TestMultipartFullObjectChecksum already exercises the
+    FULL_OBJECT pass-through path (client digest stamped on
+    response), so US-010's tests focus on COMPOSITE only — no
+    duplicate coverage.
+---
 
 ## 2026-05-01 - US-008 — Multipart Complete preconditions (If-Match / If-None-Match)
 - internal/s3api/multipart.go::completeMultipart: read If-Match /

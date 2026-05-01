@@ -174,8 +174,8 @@
         "Tests pass"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "internal/s3api/multipart.go::completeMultipart COMPOSITE branch now reads x-amz-checksum-<algo> from the Complete request after recomputing compositeValue. When client supplied a value and it does not equal the recomputed COMPOSITE digest (or compositeValue is empty because parts lacked digests), returns ErrBadDigest (HTTP 400). Validation runs BEFORE Meta.CompleteMultipartUpload (the LWT flip), mirroring putObject + uploadPartCopy: a doomed-mismatch Complete cannot leak 'completing' state. FULL_OBJECT branch is unchanged — there the client value IS the source of truth. Test coverage in internal/s3api/multipart_complete_checksum_test.go: TestMultipartCompleteChecksumValidates exercises SHA256/SHA1/CRC32/CRC32C through both the matching path (Complete with correct composite → 200) and the mismatch path (Complete with deliberately-wrong digest → 400 BadDigest, no object materialised — HEAD returns 404)."
     },
     {
       "id": "US-011",

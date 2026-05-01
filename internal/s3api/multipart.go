@@ -447,6 +447,16 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 			if v, ok := compositeChecksum(compositeAlgo, pcs); ok {
 				compositeValue = v
 			}
+			// US-010: when client supplied `x-amz-checksum-<algo>` on the
+			// Complete request, validate the recomputed COMPOSITE against
+			// it BEFORE the LWT flip. Mismatch → BadDigest, mirroring
+			// per-part validation in uploadPart / uploadPartCopy.
+			if client := r.Header.Get(checksumHeader(compositeAlgo)); client != "" {
+				if compositeValue == "" || client != compositeValue {
+					writeError(w, r, ErrBadDigest)
+					return
+				}
+			}
 		}
 	}
 
