@@ -12,6 +12,12 @@ var (
 	ErrSignatureInvalid = errors.New("signature does not match")
 	ErrClockSkew        = errors.New("request time outside permitted window")
 	ErrUnsupportedBody  = errors.New("unsupported x-amz-content-sha256 mode")
+	// ErrTrailerFormatUnsupported is returned when the request advertises
+	// the aws-chunked-trailer framing variant (x-amz-trailer header set
+	// alongside a streaming x-amz-content-sha256 sentinel). Strata does
+	// not yet implement trailer parsing; the s3api layer translates this
+	// to 501 NotImplemented (see ROADMAP "Known latent bugs").
+	ErrTrailerFormatUnsupported = errors.New("aws-chunked-trailer format not implemented")
 )
 
 type Credential struct {

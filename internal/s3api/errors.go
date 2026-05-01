@@ -2,6 +2,7 @@ package s3api
 
 import (
 	"encoding/xml"
+	"errors"
 	"net/http"
 
 	"github.com/danchupin/strata/internal/auth"
@@ -43,6 +44,7 @@ var (
 	ErrBadDigest           = APIError{Code: "BadDigest", Message: "The checksum value supplied does not match the value Strata calculated", Status: http.StatusBadRequest}
 	ErrEntityTooSmall      = APIError{Code: "EntityTooSmall", Message: "Your proposed upload is smaller than the minimum allowed object size. Each part must be at least 5 MB in size, except the last part.", Status: http.StatusBadRequest}
 	ErrNotImplemented      = APIError{Code: "NotImplemented", Message: "A header you provided implies functionality that is not implemented", Status: http.StatusNotImplemented}
+	ErrTrailerNotImplemented = APIError{Code: "NotImplemented", Message: "aws-chunked-trailer format is not yet supported; see ROADMAP 'Known latent bugs'", Status: http.StatusNotImplemented}
 	ErrInternal            = APIError{Code: "InternalError", Message: "We encountered an internal error", Status: http.StatusInternalServerError}
 )
 
@@ -83,6 +85,8 @@ func WriteAuthDenied(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case err == nil:
 		apiErr = ErrAccessDenied
+	case errors.Is(err, auth.ErrTrailerFormatUnsupported):
+		apiErr = ErrTrailerNotImplemented
 	default:
 		switch err.Error() {
 		case "signature does not match":

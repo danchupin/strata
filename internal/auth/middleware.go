@@ -73,6 +73,16 @@ func (m *Middleware) validateHeader(r *http.Request) (*AuthInfo, error) {
 		return nil, ErrSignatureInvalid
 	}
 
+	// US-003: aws-chunked-trailer framing (some aws-cli 2.x variants and
+	// the unsigned-trailer SDK path) is not yet implemented. Detect via
+	// x-amz-trailer presence + a streaming sentinel and short-circuit
+	// with a typed error so the s3api layer can render 501 NotImplemented
+	// — without this, the streaming decoder would surface a confusing
+	// framing error to clients.
+	if r.Header.Get("X-Amz-Trailer") != "" && isStreamingSentinel(bodyHash) {
+		return nil, ErrTrailerFormatUnsupported
+	}
+
 	if bodyHash == streamingBody {
 		// US-002: feed the seed signature + signing key + isoDate + scope
 		// into the streaming reader so it can chain-validate each chunk.

@@ -57,8 +57,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Detection in internal/auth/middleware.go after signature validation: when X-Amz-Trailer is non-empty AND x-amz-content-sha256 is one of {STREAMING-AWS4-HMAC-SHA256-PAYLOAD, STREAMING-UNSIGNED-PAYLOAD-TRAILER} via isStreamingSentinel helper, validateHeader returns auth.ErrTrailerFormatUnsupported. s3api.WriteAuthDenied translates that to s3api.ErrTrailerNotImplemented (501 with the PRD-specified <Message>aws-chunked-trailer format is not yet supported; see ROADMAP 'Known latent bugs'</Message>). Behavior unchanged when X-Amz-Trailer is missing — pre-existing streaming reader path runs unmodified. Tests: internal/auth/middleware_test.go covers both sentinels + the no-header pass-through; internal/s3api/errors_test.go covers the 501 XML shape. ROADMAP 'Known latent bugs' entry extended with the (commit pending) close-flip line."
     },
     {
       "id": "US-004",

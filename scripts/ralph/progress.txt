@@ -162,3 +162,60 @@ Cycle: ralph/auth-per-chunk-signature
     buildChunkedBody helper from streaming_test.go (move to a shared
     test helper file if needed by US-004).
 ---
+
+## 2026-05-01 - US-003
+- Added auth.ErrTrailerFormatUnsupported sentinel (internal/auth/types.go)
+  + streamingUnsignedTrailer constant + isStreamingSentinel helper
+  (internal/auth/sigv4.go).
+- internal/auth/middleware.go validateHeader now short-circuits with
+  ErrTrailerFormatUnsupported when X-Amz-Trailer is non-empty AND
+  x-amz-content-sha256 is one of the streaming sentinels (signed-chunked
+  STREAMING-AWS4-HMAC-SHA256-PAYLOAD or unsigned-chunked-with-trailer
+  STREAMING-UNSIGNED-PAYLOAD-TRAILER). Detection fires AFTER signature
+  validation so unauth probes can't enumerate features. When
+  X-Amz-Trailer is empty/missing, the pre-existing streaming reader path
+  runs unchanged.
+- s3api.WriteAuthDenied (internal/s3api/errors.go) translates
+  errors.Is(err, auth.ErrTrailerFormatUnsupported) → s3api.ErrTrailerNotImplemented
+  (HTTP 501, <Code>NotImplemented</Code> + the PRD-mandated trailer-format
+  message body).
+- Tests:
+  - internal/auth/middleware_test.go (new) — TestMiddlewareTrailerFormat_Rejected
+    (signed-chunked + trailer → 501-path error), …_UnsignedTrailerSentinel
+    (the unsigned-trailer variant), and …_NoTrailerHeader_PassesThrough
+    (streaming PUT without trailer header → no error, info populated).
+  - internal/s3api/errors_test.go (new) — TestWriteAuthDenied_TrailerFormat
+    asserts the 501 status + XML body shape.
+  - signRequest helper in middleware_test.go reusable for future
+    middleware-level SigV4 tests (sets X-Amz-Date, computes signature
+    via existing computeSignature/canonicalRequest helpers).
+- ROADMAP.md "Known latent bugs" entry updated to reflect that
+  trailer-format requests are now explicitly rejected with 501 instead
+  of falling into the chunk decoder.
+- Files changed: internal/auth/middleware.go, internal/auth/sigv4.go,
+  internal/auth/types.go, internal/auth/middleware_test.go (new),
+  internal/s3api/errors.go, internal/s3api/errors_test.go (new),
+  ROADMAP.md.
+- **Learnings for future iterations:**
+  - DenyHandler is the only response hook auth.Middleware exposes for
+    short-circuit errors. Rendering a 501 (vs the deny handler's usual
+    403) is done by extending the s3api WriteAuthDenied switch with an
+    errors.Is(err, auth.ErrTrailerFormatUnsupported) branch. Don't add
+    a separate "notImpl handler" hook to Middleware — one switch arm in
+    the deny handler is the lighter shape.
+  - Trailer detection fires AFTER signature validation. This keeps the
+    feature surface invisible to unauthenticated probers and matches the
+    code path's existing layering (auth → bodyHash decisions). If a
+    later story needs a pre-auth feature gate, that's a new shape.
+  - The test helper signRequest in internal/auth/middleware_test.go
+    needs the host header to be set explicitly via req.Host (not
+    req.Header.Set("Host", …)) — httptest.NewRequest pulls from URL but
+    canonicalHeaders reads from req.Host. Future SigV4 middleware tests
+    must follow this pattern.
+  - Two streaming sentinels recognised: STREAMING-AWS4-HMAC-SHA256-PAYLOAD
+    and STREAMING-UNSIGNED-PAYLOAD-TRAILER. The third
+    STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER (signed chunks + signed
+    trailer) is intentionally NOT in isStreamingSentinel — PRD lists
+    only two and current SDKs that emit it are uncommon. Add later if
+    field traffic shows up.
+---

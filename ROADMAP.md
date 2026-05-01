@@ -231,7 +231,12 @@ Non-goals:
 - Streaming chunked decoder assumes `\r\n` strictly and reads via `bufio`. Does not handle
   `aws-chunked-trailer` (newer aws-cli variants). aws-cli 2.22 observed to use plain
   `x-amz-content-sha256: <hex>` for `s3api put-object` and STREAMING for `s3 cp`, both
-  tested working.
+  tested working. As of US-003 (commit pending), trailer-format requests
+  (`x-amz-trailer` header set alongside a streaming `x-amz-content-sha256` sentinel) are
+  detected in `internal/auth/middleware.go` and rejected with `501 NotImplemented`
+  (`<Message>aws-chunked-trailer format is not yet supported; see ROADMAP 'Known latent
+  bugs'</Message>`) instead of producing a confusing decoder error. Real trailer-format
+  parsing is out of scope until a separate PRD picks it up.
 - Lifecycle worker has no retry on transient failures — next tick re-tries.
 
 ---

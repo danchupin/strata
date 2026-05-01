@@ -13,16 +13,33 @@ import (
 )
 
 const (
-	sigAlgorithm   = "AWS4-HMAC-SHA256"
-	sigTerminator  = "aws4_request"
-	sigServiceS3   = "s3"
-	sigTimeFormat  = "20060102T150405Z"
-	sigDateFormat  = "20060102"
-	sigMaxSkew     = 15 * time.Minute
-	streamingBody  = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
-	unsignedBody   = "UNSIGNED-PAYLOAD"
-	emptyBodyHash  = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	sigAlgorithm  = "AWS4-HMAC-SHA256"
+	sigTerminator = "aws4_request"
+	sigServiceS3  = "s3"
+	sigTimeFormat = "20060102T150405Z"
+	sigDateFormat = "20060102"
+	sigMaxSkew    = 15 * time.Minute
+	streamingBody = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
+	// streamingUnsignedTrailer marks the aws-chunked-trailer variant where
+	// chunks are unsigned but a checksum trailer follows the body. Paired
+	// with x-amz-trailer to detect trailer-format uploads (US-003). Strata
+	// responds 501 NotImplemented for now.
+	streamingUnsignedTrailer = "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+	unsignedBody             = "UNSIGNED-PAYLOAD"
+	emptyBodyHash            = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 )
+
+// isStreamingSentinel reports whether the x-amz-content-sha256 value is
+// one of the streaming-upload sentinels handled by the trailer-format
+// guard in middleware (US-003). The set is exactly the two sentinels
+// the PRD names: signed-chunked and unsigned-chunked-with-trailer. The
+// older STREAMING-AWS4-HMAC-SHA256-PAYLOAD does NOT imply trailer-format
+// on its own — the x-amz-trailer header presence is what marks
+// trailer-format. We list it here because it can also pair with a
+// trailer in some aws-cli 2.x variants.
+func isStreamingSentinel(s string) bool {
+	return s == streamingBody || s == streamingUnsignedTrailer
+}
 
 type parsedAuth struct {
 	AccessKey     string
