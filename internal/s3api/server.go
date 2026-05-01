@@ -289,9 +289,15 @@ func (s *Server) listObjects(w http.ResponseWriter, r *http.Request, bucket stri
 	}
 	isV2 := q.Get("list-type") == "2"
 	var marker string
+	rawToken := q.Get("continuation-token")
 	if isV2 {
-		marker = q.Get("continuation-token")
-		if marker == "" {
+		if rawToken != "" {
+			if m, ok := decodeContinuationToken(rawToken); ok {
+				marker = m
+			} else {
+				marker = rawToken
+			}
+		} else {
 			marker = q.Get("start-after")
 		}
 	} else {
@@ -329,8 +335,8 @@ func (s *Server) listObjects(w http.ResponseWriter, r *http.Request, bucket stri
 			Delimiter:             opts.Delimiter,
 			MaxKeys:               limit,
 			IsTruncated:           res.Truncated,
-			NextContinuationToken: res.NextMarker,
-			ContinuationToken:     q.Get("continuation-token"),
+			NextContinuationToken: encodeContinuationToken(res.NextMarker),
+			ContinuationToken:     rawToken,
 			StartAfter:            q.Get("start-after"),
 			Contents:              contents,
 			CommonPrefixes:        commons,

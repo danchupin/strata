@@ -185,6 +185,8 @@ func TestListV1DelimiterPrefixEndsWithDelimiter(t *testing.T) {
 }
 
 // Mirror s3-tests test_bucket_listv2_delimiter_prefix (V2 paginated).
+// V2 NextContinuationToken is OPAQUE (US-006); the test round-trips it
+// as boto would rather than asserting on its literal contents.
 func TestListV2DelimiterPrefix(t *testing.T) {
 	h := newHarness(t)
 	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
@@ -210,11 +212,11 @@ func TestListV2DelimiterPrefix(t *testing.T) {
 	}
 
 	r := get("", "/", "", 1)
-	if !r.IsTruncated || !eqSlice(keysOfV2(r), []string{"asdf"}) || len(prefsOfV2(r)) != 0 || r.NextContinuationToken != "asdf" {
+	if !r.IsTruncated || !eqSlice(keysOfV2(r), []string{"asdf"}) || len(prefsOfV2(r)) != 0 || r.NextContinuationToken == "" {
 		t.Fatalf("v2 p1: %#v", r)
 	}
 	r = get("", "/", r.NextContinuationToken, 1)
-	if !r.IsTruncated || len(keysOfV2(r)) != 0 || !eqSlice(prefsOfV2(r), []string{"boo/"}) || r.NextContinuationToken != "boo/" {
+	if !r.IsTruncated || len(keysOfV2(r)) != 0 || !eqSlice(prefsOfV2(r), []string{"boo/"}) || r.NextContinuationToken == "" {
 		t.Fatalf("v2 p2: %#v", r)
 	}
 	r = get("", "/", r.NextContinuationToken, 1)
@@ -224,7 +226,7 @@ func TestListV2DelimiterPrefix(t *testing.T) {
 
 	// prefix=boo/
 	r = get("boo/", "/", "", 1)
-	if !r.IsTruncated || !eqSlice(keysOfV2(r), []string{"boo/bar"}) || len(prefsOfV2(r)) != 0 || r.NextContinuationToken != "boo/bar" {
+	if !r.IsTruncated || !eqSlice(keysOfV2(r), []string{"boo/bar"}) || len(prefsOfV2(r)) != 0 || r.NextContinuationToken == "" {
 		t.Fatalf("v2 boo p1: %#v", r)
 	}
 	r = get("boo/", "/", r.NextContinuationToken, 1)

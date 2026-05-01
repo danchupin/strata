@@ -105,8 +105,8 @@
         "Tests pass"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "internal/s3api/list_token.go adds encode/decodeContinuationToken: wire form is base64.RawURLEncoding(JSON({Marker, Shard})) where Shard is reserved for future per-shard cursoring. internal/s3api/server.go::listObjects V2 path now decodes incoming ?continuation-token=, falling back to the literal-marker interpretation when the token is not valid base64-JSON (in-flight pre-cycle clients keep paging). NextContinuationToken in the response is the encoded form; ContinuationToken echoes the raw client-supplied token verbatim. V1 ?marker= path is untouched. TestListV2DelimiterPrefix relaxed from literal-comparison to existence/round-trip. New tests in list_v2_token_test.go: TestListV2ContinuationTokenIsOpaque pins the wire form (base64 → JSON → {Marker:'<lastEmitted>'}); TestListV2ContinuationTokenRoundTrip walks 3 pages and asserts ContinuationToken echoes back; TestListV2ContinuationTokenBackCompatLiteral pins a non-base64-JSON token still works as literal; TestListV1MarkerUnchanged pins V1 marker semantics."
     },
     {
       "id": "US-007",

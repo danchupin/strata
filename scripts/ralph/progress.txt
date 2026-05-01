@@ -87,6 +87,14 @@ Cycle: ralph/s3-tests-90
   `<ContinuationToken>` / `<NextContinuationToken>` /
   `<KeyCount>` / `<StartAfter>`. Both share the same
   meta.ListResult — the divergence is only XML-shape.
+- V2 ListObjects continuation token is OPAQUE (US-006):
+  base64.RawURLEncoding(JSON({Marker, Shard})). Decode in
+  internal/s3api/list_token.go::decodeContinuationToken; falls back
+  to literal-marker when not valid base64-JSON (back-compat for
+  in-flight pre-cycle clients). Tests that string-compare
+  NextContinuationToken to a literal key are brittle — assert
+  non-empty + round-trip instead. V1 ?marker= is unchanged: opaque
+  tokens are V2-only.
 - Multipart pass-through (US-010 of s3-over-s3 cycle) sets
   obj.Manifest BEFORE meta.CompleteMultipartUpload runs. The meta
   layer detects this and appends PartChunks onto the pre-built
@@ -99,6 +107,55 @@ Cycle: ralph/s3-tests-90
   fields onto it before persisting. Future multipart-shape additions
   hitchhike on obj.Manifest as a hint blob and are merged in the
   same lockstep across memory + cassandra stores.
+
+## 2026-05-01 - US-006 — Listing V2 continuation token as opaque base64
+- internal/s3api/list_token.go: encodeContinuationToken/decodeContinuationToken
+  helpers. Wire form is base64.RawURLEncoding(JSON({Marker, Shard})).
+  Shard is reserved (always 0 today — cassandra ListObjects uses one
+  global Marker across shards); reserving it now keeps the wire shape
+  forward-compatible.
+- internal/s3api/server.go::listObjects V2 path:
+  - On request: decode ?continuation-token= via decodeContinuationToken;
+    fall back to the literal-marker interpretation when the token is
+    not valid base64-JSON (in-flight pre-cycle clients keep paging).
+  - On response: NextContinuationToken = encodeContinuationToken(res.NextMarker);
+    ContinuationToken echoes the raw client-supplied token verbatim
+    (matches AWS observable — boto re-uses ContinuationToken to detect
+    "is this the first page or a continuation").
+- V1 marker parameter is unchanged — opaque tokens are V2-only.
+- TestListV2DelimiterPrefix relaxed from literal-token compare
+  (`r.NextContinuationToken == "asdf"`) to existence + round-trip
+  (`r.NextContinuationToken == ""`); the rest of the assertions are
+  unchanged.
+- New tests in internal/s3api/list_v2_token_test.go:
+  - TestListV2ContinuationTokenIsOpaque: pins the wire form (base64 →
+    JSON → {Marker:'<lastEmitted>'}; rejects literal token).
+  - TestListV2ContinuationTokenRoundTrip: walks 3 pages and asserts
+    ContinuationToken echoes back the raw client-supplied token.
+  - TestListV2ContinuationTokenBackCompatLiteral: pins a non-base64-JSON
+    token still works as literal marker.
+  - TestListV1MarkerUnchanged: pins V1 ?marker= semantics — V1 reads
+    the marker as a literal key, untouched by US-006.
+- **Learnings for future iterations:**
+  - boto3 V2 paginator round-trips NextContinuationToken into the next
+    request's ContinuationToken without inspecting it. Tests that
+    string-compare the token to a literal marker were brittle — once
+    the token becomes opaque the only safe assertion is "non-empty
+    when truncated, round-trips back."
+  - Use base64.RawURLEncoding (URL-safe, no `=` padding) for the wire
+    form so tokens drop into a query string without further percent-
+    encoding. Padding `=` triggers extra %3D escapes in some clients.
+  - decode falls back to base64.StdEncoding (with padding) too — some
+    SDKs / proxies may pad. Then literal-marker fallback only after
+    BOTH base64 modes fail to decode the body as JSON.
+  - ContinuationToken in the response body is a verbatim echo of the
+    client's token (not re-encoded), matching AWS. Re-encoding would
+    break clients that hash-compare request vs response tokens.
+  - Shard field is reserved on the JSON struct (json:"s,omitempty");
+    omitempty keeps the wire form compact when shard is 0 today.
+    Future per-shard cursoring (e.g., for cassandra parallel page
+    pre-fetch) lands without breaking tokens already in flight.
+---
 
 ## 2026-05-01 - US-005 — Listing delimiter+prefix interaction
 - internal/meta/memory/store.go::ListObjects + internal/meta/cassandra/
