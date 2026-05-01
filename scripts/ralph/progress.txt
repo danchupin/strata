@@ -272,3 +272,54 @@ Cycle: ralph/auth-per-chunk-signature
     differ run-to-run because chunkB's literal bytes appear once
     between two CRLF runs and the size header has fixed width.
 ---
+
+## 2026-05-01 - US-005
+- Flipped ROADMAP.md ## Auth P2 entry to ~~strikethrough~~ Done
+  close-flip per CLAUDE.md "Roadmap maintenance" rule. Body summarises
+  the fix scope (chain HMAC validator + buffer-then-validate ordering +
+  hmac.Equal constant-time compare + 16 MiB per-chunk cap + aws-chunked-
+  trailer 501 detection) and links docs/security/. SHA placeholder
+  "(commit pending)" per the follow-up SHA edit rule.
+- Created docs/security/2026-streaming-sigv4-chunk-validation.md as
+  the seed for docs/security/. One-pager covers: the gap (outer SigV4
+  doesn't cover body bytes in streaming mode), what didn't mitigate
+  (TLS, ETag, Content-Length), the fix (AWS-spec chain), SDK behaviour
+  (no client change needed), operator implication (upgrade if accepting
+  streaming uploads from networks beyond the original signer),
+  verification (the four test entry-points), and references.
+- Re-ran scripts/s3-tests/run.sh against make up-all (Cassandra + Ceph
+  RADOS) with auth=required and the standard test credentials. Result:
+  tests=177 passed=139 failed=38 errors=0 skipped=0 pass rate 78.5%.
+  Exactly matches the cycle-start floor (78.5% / 139-of-177 from
+  US-001's commit-message footer). No regression — every failure is a
+  pre-existing gap filed elsewhere in ROADMAP.md.
+- Appended the new measurement to scripts/s3-tests/README.md (newest
+  entry on top, above the 6e122903 entry, per README convention).
+- Files changed: ROADMAP.md, docs/security/2026-streaming-sigv4-
+  chunk-validation.md (new), scripts/s3-tests/README.md.
+- **Learnings for future iterations:**
+  - Floor-assertion via s3-tests is "pass rate >= captured baseline"
+    not "delta exactly zero". Both wins (new passing test) and parity
+    are acceptable; only a strict drop blocks the close. The 78.5%
+    parity here is expected because chain validation closes a gap that
+    s3-tests doesn't currently exercise (no test sends a deliberately
+    mutated chunk; boto always emits correct chains).
+  - make up-all defaults to auth="" (empty); s3-tests requires
+    auth=required PLUS the three credential pairs in
+    STRATA_STATIC_CREDENTIALS. The right shape is: `make up-all` once,
+    then re-create the gateway service with both env vars set via
+    `docker compose -f deploy/docker/docker-compose.yml up -d
+    --force-recreate gateway`. The cassandra/ceph containers stay up
+    across the recreate so the spinup cost is paid once.
+  - docs/security/ did not exist before US-005 — the directory is
+    seeded by the one-pager. Future security notes go alongside as
+    YYYY-<topic>.md.
+  - SHA placeholders use literal "(commit pending)". When the cycle's
+    closing commit lands, a follow-up edit replaces the placeholder
+    with the actual SHA. Do not attempt to predict the SHA pre-commit.
+  - When tearing down between runs use `make down` not `docker rm`;
+    the Makefile target removes the strata-cassandra-data /
+    strata-ceph-data volumes so the next `make up-all` starts clean.
+    A dirty restart shows up as a Cassandra schema-mismatch error from
+    the gateway boot logs.
+---

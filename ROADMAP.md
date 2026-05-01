@@ -132,16 +132,19 @@ adding more, prove what is there.
 
 ## Auth
 
-- **P2 — Per-chunk signature validation in streaming payload.**
-  `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` body chunks carry per-chunk signatures —
-  `internal/auth/streaming.go` decodes the framing but does NOT verify the chained
-  HMAC. An attacker that intercepts a signed request can mutate the body without
-  detection (the outer SigV4 covers headers + query but not chunk bodies).
-  Implement the chain: `sig(chunk_n) = HMAC(signing_key, "AWS4-HMAC-SHA256-PAYLOAD\n
-  <date>\n<scope>\n<prev-sig>\n<hash("")>\n<hash(chunk)>")`. Reject mismatched
-  chunks with 403 `SignatureDoesNotMatch`. Mandatory — no opt-out flag — every
-  AWS SDK already sends the correct chain. See
-  `tasks/prd-auth-per-chunk-signature.md` for the implementation plan.
+- ~~**P2 — Per-chunk signature validation in streaming payload.**~~ — **Done.**
+  `internal/auth/streaming.go` validates the chained per-chunk HMAC per the AWS
+  streaming-SigV4 spec (`sig(chunk_n) = HMAC(signing_key,
+  "AWS4-HMAC-SHA256-PAYLOAD\n<date>\n<scope>\n<prev-sig>\n<hash("")>\n
+  <hash(chunk)>")`); mismatched chunks rejected with 403 `SignatureDoesNotMatch`;
+  mutated bytes never reach the backend (buffer-then-validate ordering, ≤16 MiB
+  per-chunk cap, `hmac.Equal` constant-time compare). The newer aws-chunked-trailer
+  format (`X-Amz-Trailer`) is detected and rejected with 501 `NotImplemented`
+  instead of falling into the chunk decoder. End-to-end mutated-chunk integration
+  test in `internal/s3api/sigv4_streaming_test.go` proves the buffer-then-validate
+  invariant against the live HTTP path. See
+  `docs/security/2026-streaming-sigv4-chunk-validation.md` for the operator note.
+  (commit pending)
 - **P3 — Per-bucket request signing keys (KMS-backed).** Rotate the signing material on
   a schedule, reject keys older than `STRATA_KEY_MAX_AGE`. Hooks onto the existing
   Vault provider.

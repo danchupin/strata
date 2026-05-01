@@ -81,6 +81,27 @@ The large `errors` bucket reflects how much of S3 we don't implement yet
 replication, checksums, etc. Each P-item closed in `ROADMAP.md` should
 shift some fraction of those errors into either pass or fail.
 
+### 2026-05-01 — `(commit pending)` (closing auth-per-chunk-signature cycle, US-005)
+
+Default subset, `auth=required`, `make up-all` (Cassandra + Ceph RADOS).
+Cycle adds streaming SigV4 chain validation in `internal/auth/streaming.go`
+(buffer-then-validate, `hmac.Equal` constant-time compare, ≤16 MiB
+per-chunk cap) and aws-chunked-trailer 501 detection. Re-run asserts
+upload paths did not regress vs. the cycle-start floor:
+
+```
+tests=177  passed=139  failed=38  errors=0  skipped=0
+pass rate: 78.5%
+```
+
+`>= 78.5%` floor held. Failure breakdown is unchanged from the
+2026-05-01 `6e122903` measurement below — every failing test is a
+pre-existing gap filed under "Consolidation & validation" / multipart
+/ versioning / listing in `ROADMAP.md`. No new failures from chain
+validation: every AWS SDK that drives the s3-tests harness (boto)
+already emits a correct chain, so legitimate streaming PUTs flow
+through the validator unchanged.
+
 ### 2026-05-01 — `6e122903` (closing s3-tests-90 cycle, US-011)
 
 Default subset, `auth=required`, `make up-all` (Cassandra + Ceph RADOS):

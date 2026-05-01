@@ -90,8 +90,8 @@
         "Tests pass"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "ROADMAP.md ## Auth P2 entry flipped to ~~strikethrough~~ Done close-flip with summary of fix scope (chain validation + buffer-then-validate + hmac.Equal + 16 MiB cap + trailer 501) and (commit pending) SHA placeholder per CLAUDE.md follow-up rule. New docs/security/2026-streaming-sigv4-chunk-validation.md seeds the docs/security/ directory with the operator-facing one-pager (gap, fix, SDK behaviour, operator implication, verification, references). scripts/s3-tests/run.sh re-run against make up-all stack: 78.5% (139/177), exactly matches the cycle-start floor — no regression. New entry appended to scripts/s3-tests/README.md. go test ./internal/auth/... ./internal/s3api/... green; go vet ./... clean."
     }
   ]
 }
