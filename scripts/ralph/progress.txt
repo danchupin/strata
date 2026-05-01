@@ -219,3 +219,56 @@ Cycle: ralph/auth-per-chunk-signature
     only two and current SDKs that emit it are uncommon. Add later if
     field traffic shows up.
 ---
+
+## 2026-05-01 - US-004
+- New file internal/s3api/sigv4_streaming_test.go: end-to-end test that
+  exercises the full HTTP path through auth.Middleware{ModeRequired} so
+  the chain validator built in US-002 runs against real network bytes.
+- signedHarness helper wraps s3api.Server with auth.Middleware (test-
+  local) and exposes signRequest / putBucketSigned / getObjectSigned /
+  putStreamingObject. SigV4 signing helpers (deriveSigningKeyTest,
+  sigHmacTest, sigSha256HexTest, chainSigTest) replicate the auth
+  package's unexported constants — values are AWS-spec frozen so
+  duplication is safe and keeps the auth surface unchanged.
+- TestStreamingSigV4_PristineUpload_Succeeds (Variant A): PUT bucket →
+  streaming PUT with valid chain (chunkA, chunkB, final-empty) → 200,
+  then GET returns the concatenated body. Confirms the validator does
+  not over-reject pristine uploads.
+- TestStreamingSigV4_MutatedChunk_Rejected (Variant B): same path but
+  one byte inside chunk-2's payload is XOR'd 0x01 mid-stream (chunk-
+  signature header untouched). PUT returns 403 SignatureDoesNotMatch
+  (XML body checked); subsequent GET returns 404 NoSuchKey (XML body
+  checked) — proves buffer-then-validate dropped the mutated bytes
+  before the meta store recorded the object.
+- Files changed: internal/s3api/sigv4_streaming_test.go (new).
+- **Learnings for future iterations:**
+  - Existing testHarness in internal/s3api/testutil_test.go bypasses
+    auth (it serves s3api.Server directly via httptest). To exercise
+    middleware-driven code paths (chain validation, trailer rejection,
+    presign auth) the test must build its own wrapper —
+    httptest.NewServer(mw.Wrap(api, s3api.WriteAuthDenied)).
+  - The auth package keeps its SigV4 helpers unexported. For tests in
+    s3api_test that need to sign requests, replicate the algorithm
+    locally (deriveSigningKey is just three nested HMAC-SHA256 calls
+    seeded with "AWS4"+secret). Do NOT export auth internals just to
+    satisfy a test; the AWS-spec constants are frozen.
+  - canonicalQuery is empty when the request URL has no query string;
+    keep the explicit "" + "\n" line in canonical-request construction
+    so the four-line frame between method and signed-headers stays
+    correct.
+  - canonicalHeaders treats "host" specially — it reads from req.Host,
+    not req.Header. When using httptest the URL host is auto-populated
+    by http.NewRequest, so signing code must read req.Host (NOT
+    req.Header.Get("Host")).
+  - For streaming SigV4 the canonical-request hashedPayload is the
+    sentinel STREAMING-AWS4-HMAC-SHA256-PAYLOAD literally, not a hash
+    of the body. The chain signatures hash the actual chunk payloads.
+  - mutateAt is the absolute byte offset in the assembled chunked body
+    (NOT the offset inside the chunk payload). The pristine-build pass
+    in TestStreamingSigV4_MutatedChunk_Rejected locates chunkB inside
+    the framed body before flipping a byte; reusing this pattern lets
+    future tests target any byte the SDK could plausibly mutate.
+  - bytes.Index works on the framed body even though chain signatures
+    differ run-to-run because chunkB's literal bytes appear once
+    between two CRLF runs and the size header has fixed width.
+---

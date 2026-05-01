@@ -74,8 +74,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "New file internal/s3api/sigv4_streaming_test.go layered a mini-harness (signedHarness) that wraps s3api.Server with auth.Middleware{ModeRequired} so the streaming-SigV4 chain validator runs end-to-end. Two tests: TestStreamingSigV4_PristineUpload_Succeeds (Variant A — bucket PUT, streaming PUT with valid chain, GET returns concatenated chunkA+chunkB body) and TestStreamingSigV4_MutatedChunk_Rejected (Variant B — same body with one byte XOR'd inside chunk-2's payload returns 403 SignatureDoesNotMatch + GET 404 NoSuchKey, proving buffer-then-validate kept mutated bytes off the backend). SigV4 + chunk-chain signing helpers replicated locally in the test (deriveSigningKeyTest/sigHmacTest/sigSha256HexTest/chainSigTest) because internal/auth keeps its constants unexported — values are AWS-spec frozen so duplication is safe. Tests use the in-memory backend (no integration tag). go test ./internal/s3api/ green, go build ./... green."
     },
     {
       "id": "US-005",
