@@ -1,0 +1,97 @@
+{
+  "project": "Strata",
+  "branchName": "ralph/auth-per-chunk-signature",
+  "description": "Close the P2 ROADMAP item under ## Auth: per-chunk signature validation in STREAMING-AWS4-HMAC-SHA256-PAYLOAD bodies. Today internal/auth/streaming.go decodes chunk framing (length, signature, payload, CRLF) but does NOT recompute the chained HMAC against the client-supplied chunk-signature header — an attacker who intercepts a signed request can mutate body bytes while the outer SigV4 covers only headers + query + the constant string STREAMING-AWS4-HMAC-SHA256-PAYLOAD (never the body). This cycle implements the AWS-spec'd chain (sig(chunk_n) = HMAC-SHA256(signing_key, 'AWS4-HMAC-SHA256-PAYLOAD\\n<date>\\n<scope>\\n<prev-sig>\\n<hash(\"\")>\\n<hash(chunk)>')), buffers each chunk fully (≤16 MiB cap) before forwarding any byte to the consumer, compares signatures via hmac.Equal (constant-time), and rejects mismatches with 403 SignatureDoesNotMatch — mutated bytes never reach the storage backend. The newer aws-chunked-trailer format (some aws-cli 2.x variants) gets a friendly 501 NotImplemented detection instead of breaking with a confusing decoder error. Mandatory enforcement, no opt-out flag (every living AWS SDK sends a correct chain). Captures the s3-tests headline at cycle start, asserts no regression at cycle close. New docs/security/ one-pager seeds the security-notes directory. Follows the CLAUDE.md Roadmap-maintenance rule: ROADMAP P2 entry flips to Done close-flip in the same commit (or follow-up SHA edit) as the cycle's last story lands.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Chain-HMAC validator + AWS test-vector unit tests",
+      "description": "As a developer, I want a small chunkSigner type in internal/auth/streaming.go that, given the seed signature + signing key + scope, produces the expected per-chunk signature, so the decoder can compare bytes-by-byte.",
+      "acceptanceCriteria": [
+        "New unexported type chunkSigner in internal/auth/streaming.go with method Next(payload []byte) string that returns the hex-encoded chain signature for the next chunk and updates internal state to that signature",
+        "Construction: newChunkSigner(seedSig string, signingKey []byte, scope string) where seedSig is the outer SigV4 signature from the request's Authorization header, signingKey is the SigV4 derived key (same one the outer canonical hash used; available via internal/auth/sigv4.go::deriveSigningKey), scope is <date>/<region>/s3/aws4_request",
+        "Algorithm: sig(chunk_n) = HMAC-SHA256(signing_key, 'AWS4-HMAC-SHA256-PAYLOAD\\n' + <iso8601-date> + '\\n' + <scope> + '\\n' + <prev-sig> + '\\n' + hex(SHA256('')) + '\\n' + hex(SHA256(chunk_n_payload)))",
+        "AWS-spec test vectors transcribed verbatim into the test file as inline Go literals (NOT a runtime URL fetch). Copy the 'Example Calculations' from https://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-streaming.html — seed-sig + chunk-1 sig + chunk-2 sig + final-empty sig as a []struct{ payload []byte; expectedSig string } table in internal/auth/streaming_test.go. Inline copy so test is offline-runnable and survives AWS doc URL rotations",
+        "Final empty-chunk signature also computed correctly (zero-length payload still participates in the chain) — covered as the last entry in the table",
+        "Computed signatures compared via hmac.Equal([]byte, []byte) — constant-time (Go stdlib idiom for authentication tags)",
+        "Capture the s3-tests headline at cycle start in this story's commit message footer (e.g. 'Cycle-start s3-tests baseline: <X>% (<n>/<total>)') so US-005 can re-assert no regression at close",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "AWS streaming SigV4 'Example Calculations' verified — chunk-1 / chunk-2 / final-empty signatures match published vectors (secret in AWS S3 doc uses '/' not '+' between MDENG and bPxRfi — distinct from the canonical IAM SigV4 secret). Constructor signature deviated from PRD: newChunkSigner(seedSig, signingKey, isoDate, scope) — fourth arg added because string-to-sign embeds the X-Amz-Date timestamp separately from the credential scope. Cycle-start s3-tests baseline 78.5% (139/177) per scripts/s3-tests/README.md 2026-05-01 entry."
+    },
+    {
+      "id": "US-002",
+      "title": "Wire validator into the streaming decoder + reject on mismatch",
+      "description": "As an S3 client uploading with streaming SigV4, I want the gateway to reject my upload if any chunk signature does not match the chain — so an attacker mutating bytes mid-stream is detected and the mutated bytes never reach the storage backend.",
+      "acceptanceCriteria": [
+        "Decoder in internal/auth/streaming.go reads each chunk's framed payload fully into a per-chunk buffer (chunk size ≤8 KiB in typical SDK output; cap the per-chunk buffer at 16 MiB to defend against malformed framing) BEFORE forwarding any byte to the consumer. With the full chunk in hand, compute SHA-256 of the payload, derive the expected signature via chunkSigner.Next(payload), and compare to the client-supplied ;chunk-signature=<hex>",
+        "Signature comparison uses hmac.Equal([]byte(expected), []byte(actual)) — constant-time, defense against timing side-channels",
+        "On match: forward the buffered chunk payload to the consumer; advance to next chunk",
+        "On mismatch: return a typed error errChunkSignatureMismatch from the Read loop. No bytes from the mutated chunk reach the consumer — the buffer-then-validate ordering guarantees this",
+        "Auth middleware translates errChunkSignatureMismatch to 403 SignatureDoesNotMatch with the standard AWS XML error body",
+        "Final empty chunk validation: failure on the trailer chunk also returns 403 (a mutated trailer must not slip through)",
+        "Memory bound: the streaming decoder buffers AT MOST one chunk at a time (≤16 MiB cap). 'No full-body buffer' invariant preserved — for a 1 GiB body with 8 KiB chunks, peak buffer is still 8 KiB",
+        "If the outer SigV4 signature was missing/malformed (request rejected before the streaming decoder runs), no chain validation occurs — pre-existing 403 path unchanged",
+        "Plumbing: extend the SigV4 verifier in internal/auth/sigv4.go (or context-stash in internal/auth/middleware.go) so newStreamingReader receives the seed signature + signing key + scope. The existing AuthInfo struct may need a new unexported field or a separate context key — implementer's choice, document the picked shape in a one-line code comment",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "Plumbing: pass-through args (no AuthInfo field, no ctx stash) — newStreamingReader takes seedSig + signingKey + isoDate + scope at construction; nothing downstream looks up the chain state. Documented inline in middleware.go (line ~76). Helper s3api.MapBodyError translates auth.ErrChunkSignatureMismatch (via errors.Is) to ErrSignatureDoesNotMatch — wired into putObject (server.go), uploadPart, and uploadPart's BackendUploadID pass-through (multipart.go). Reader buffers full chunk before ANY byte forwarded — buffer-then-validate guarantee verified by TestStreamingReader_MutatedChunk_Rejects. Trailer-chunk validated too (TestStreamingReader_MutatedTrailer_Rejects) so attacker cannot truncate. maxChunkPayload = 16 MiB cap defends against malicious size headers (TestStreamingReader_OversizedChunk_Rejects)."
+    },
+    {
+      "id": "US-003",
+      "title": "Detect aws-chunked-trailer format and reject with 501",
+      "description": "As a maintainer, I want the gateway to surface a clear error when a client sends the newer aws-chunked-trailer format (used by some aws-cli 2.x variants — see ROADMAP 'Known latent bugs'), so the chunk-validation fix from US-002 does not silently break for those clients (today's decoder already breaks on trailer-format anyway, but with a confusing error).",
+      "acceptanceCriteria": [
+        "internal/auth/middleware.go detects trailer-format requests via the x-amz-trailer request header (presence of any value indicates aws-chunked-trailer framing)",
+        "When x-amz-trailer is set AND x-amz-content-sha256 is the streaming sentinel (STREAMING-AWS4-HMAC-SHA256-PAYLOAD or its trailer-variant STREAMING-UNSIGNED-PAYLOAD-TRAILER): respond with 501 NotImplemented and an XML error body <Code>NotImplemented</Code><Message>aws-chunked-trailer format is not yet supported; see ROADMAP 'Known latent bugs'</Message>",
+        "When x-amz-trailer is empty or missing: behavior unchanged (legacy chained format flows through US-002's validator)",
+        "Update ROADMAP 'Known latent bugs' entry to record that the gateway now explicitly rejects trailer-format with 501 (instead of producing a confusing decoder error)",
+        "Test: streaming PUT with x-amz-trailer: x-amz-checksum-sha256 returns 501; without the header, behavior is unchanged",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "Detection in internal/auth/middleware.go after signature validation: when X-Amz-Trailer is non-empty AND x-amz-content-sha256 is one of {STREAMING-AWS4-HMAC-SHA256-PAYLOAD, STREAMING-UNSIGNED-PAYLOAD-TRAILER} via isStreamingSentinel helper, validateHeader returns auth.ErrTrailerFormatUnsupported. s3api.WriteAuthDenied translates that to s3api.ErrTrailerNotImplemented (501 with the PRD-specified <Message>aws-chunked-trailer format is not yet supported; see ROADMAP 'Known latent bugs'</Message>). Behavior unchanged when X-Amz-Trailer is missing — pre-existing streaming reader path runs unmodified. Tests: internal/auth/middleware_test.go covers both sentinels + the no-header pass-through; internal/s3api/errors_test.go covers the 501 XML shape. ROADMAP 'Known latent bugs' entry extended with the (commit pending) close-flip line."
+    },
+    {
+      "id": "US-004",
+      "title": "Integration test — mutated chunk in flight returns 403",
+      "description": "As a security-conscious maintainer, I want an end-to-end test that issues a properly-signed streaming upload, mutates one chunk byte in flight, and asserts the gateway returns 403 (not 200), proving no bytes leaked to the backend.",
+      "acceptanceCriteria": [
+        "New test TestStreamingSigV4_MutatedChunk_Rejected in internal/s3api/sigv4_streaming_test.go (or wherever streaming smoke lives)",
+        "Test builds a 3-chunk streaming PUT body manually (chunk-1, chunk-2, final-empty) with correct chain signatures",
+        "Variant A — pristine body: PUT returns 200; subsequent GetObject(bucket, key) returns 200 with the full reconstructed body matching the original input bytes (verifies the chain validator is not over-rejecting valid uploads)",
+        "Variant B — mutated payload: same body but byte at offset N inside chunk-2's payload XOR'd with 0x01 (chunk-signature header unchanged — simulates an attacker mutating in-flight bytes). PUT returns 403 SignatureDoesNotMatch. Subsequent GetObject(bucket, key) returns 404 NoSuchKey — proving the body was never written to the backend (US-002's buffer-then-validate guarantee)",
+        "Test runs under existing go test ./internal/s3api/... (no integration tag — uses the in-memory backend)",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": "New file internal/s3api/sigv4_streaming_test.go layered a mini-harness (signedHarness) that wraps s3api.Server with auth.Middleware{ModeRequired} so the streaming-SigV4 chain validator runs end-to-end. Two tests: TestStreamingSigV4_PristineUpload_Succeeds (Variant A — bucket PUT, streaming PUT with valid chain, GET returns concatenated chunkA+chunkB body) and TestStreamingSigV4_MutatedChunk_Rejected (Variant B — same body with one byte XOR'd inside chunk-2's payload returns 403 SignatureDoesNotMatch + GET 404 NoSuchKey, proving buffer-then-validate kept mutated bytes off the backend). SigV4 + chunk-chain signing helpers replicated locally in the test (deriveSigningKeyTest/sigHmacTest/sigSha256HexTest/chainSigTest) because internal/auth keeps its constants unexported — values are AWS-spec frozen so duplication is safe. Tests use the in-memory backend (no integration tag). go test ./internal/s3api/ green, go build ./... green."
+    },
+    {
+      "id": "US-005",
+      "title": "ROADMAP close-flip + security note",
+      "description": "As a maintainer, I want the ROADMAP P2 entry flipped to Done with the closing SHA, and a brief security-note in docs/security/ flagging the fix (operators with old Strata releases should know).",
+      "acceptanceCriteria": [
+        "Flip the ## Auth P2 entry to Done close-flip format per CLAUDE.md 'Roadmap maintenance' rule: ~~**P2 — Per-chunk signature validation in streaming payload.**~~ — **Done.** internal/auth/streaming.go validates the chained per-chunk HMAC per the AWS streaming-SigV4 spec; mismatched chunks rejected with 403 SignatureDoesNotMatch; mutated bytes never reach the backend (buffer-then-validate ordering). aws-chunked-trailer format detected and rejected with 501. (commit `<sha>` or `(commit pending)` per follow-up SHA edit rule)",
+        "New docs/security/2026-streaming-sigv4-chunk-validation.md (one-pager): describes the gap, the fix, the SDK behaviour (every AWS SDK already sends correct chains, no client-side change needed), the operator implication (deployments running pre-fix releases SHOULD upgrade if they receive STREAMING uploads from untrusted networks)",
+        "If a docs/security/ directory does not exist, create it with this single file as the seed",
+        "Re-run scripts/s3-tests/run.sh and assert the new headline >= the baseline captured in US-001's commit message (chunk validation MUST NOT regress upload paths). Append the new baseline to scripts/s3-tests/README.md",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": "ROADMAP.md ## Auth P2 entry flipped to ~~strikethrough~~ Done close-flip with summary of fix scope (chain validation + buffer-then-validate + hmac.Equal + 16 MiB cap + trailer 501) and (commit pending) SHA placeholder per CLAUDE.md follow-up rule. New docs/security/2026-streaming-sigv4-chunk-validation.md seeds the docs/security/ directory with the operator-facing one-pager (gap, fix, SDK behaviour, operator implication, verification, references). scripts/s3-tests/run.sh re-run against make up-all stack: 78.5% (139/177), exactly matches the cycle-start floor — no regression. New entry appended to scripts/s3-tests/README.md. go test ./internal/auth/... ./internal/s3api/... green; go vet ./... clean."
+    }
+  ]
+}

@@ -1,325 +1,85 @@
 # Ralph Progress Log
 Started: 2026-05-01
-Cycle: ralph/auth-per-chunk-signature
+Cycle: ralph/web-ui-foundation
 ---
 
 ## Codebase Patterns
 
-(seed entries for this cycle. Replace/remove as US-001..US-005 land.)
+(seed entries for this cycle. Replace/remove as US-001..US-012 land.)
 
-- internal/auth/streaming.go (the existing streaming decoder) decodes
-  chunk framing via bufio.Reader: ReadString('\n') for size+optional
-  ;chunk-signature header, ParseInt(size, 16, 64) for hex length, then
-  forwards `size` bytes verbatim to the consumer. Today it does NOT
-  recompute the chain — US-002 changes the read loop to a
-  buffer-then-validate shape (read full chunk → SHA-256 → expected sig
-  via chunkSigner.Next → hmac.Equal → forward on match, error on
-  mismatch).
-- internal/auth/sigv4.go::deriveSigningKey(secret, date, region,
-  service) returns the 32-byte SigV4 derived signing key — the same
-  key the outer canonical-request hash used. US-001's chunkSigner
-  consumes this key directly. computeSignature is the reference for
-  HMAC-SHA256(key, string-to-sign) shape.
-- internal/auth/middleware.go:76-77 wraps r.Body with
-  newStreamingReader when r.Header.Get('x-amz-content-sha256') ==
-  streamingBody constant. US-002 extends this wire point to also pass
-  the seed-sig + signing-key + scope into the decoder so the chain
-  validator has everything it needs.
-- AuthInfo struct in internal/auth/types.go currently exposes
-  identity-only. US-002 adds either an unexported field (cycle of
-  staleness shorter) or a context.WithValue carrier for the seed
-  signature + signing key + scope. Pick one; document in a one-line
-  comment so future readers see the choice.
-- hmac.Equal([]byte, []byte) is the Go stdlib idiom for constant-time
-  authentication-tag comparison. Use it for chunk-signature compare
-  (US-001 + US-002). Plain == on hex strings is a timing footgun.
-- Streaming-shape rule: peak buffer is ONE chunk (≤16 MiB cap), never
-  the whole body. For typical SDK output the per-chunk buffer is
-  ≤8 KiB. The "no full-body buffer" invariant is preserved.
-- aws-chunked-trailer (US-003) is detected via x-amz-trailer request
-  header. ROADMAP "Known latent bugs" already documents the older
-  decoder breaking on trailer-format with a confusing error; US-003
-  promotes that to a clean 501 NotImplemented response. This is
-  detection-only; real trailer-format support is a separate future
-  PRD.
+- web/ is a NEW source tree at the repo root (sibling of cmd/,
+  internal/, docs/). React 18 + Vite 5 + TypeScript 5 + Tailwind 3 +
+  shadcn/ui + TanStack Query 5 + recharts 2 + react-router-dom 6 +
+  Playwright 1. Package manager: pnpm 9 (NOT npm/yarn — smaller
+  node_modules, reproducible install). Lockfile checked in:
+  web/pnpm-lock.yaml.
+- go:embed pattern: cmd/strata/console.go declares
+  `//go:embed all:web/dist` + `var consoleFS embed.FS` and exposes a
+  consoleHandler() with SPA fallback (any /console/<path> not matching
+  a static file falls back to index.html so client-side routes survive
+  direct navigation / refresh). The `all:` prefix matters — without it
+  Vite's .vite/-prefixed assets are silently dropped.
+- /console/ + /admin/v1/* are reserved path prefixes on the gateway
+  port. Both register ahead of the catch-all / S3 router in
+  internal/serverapp/serverapp.go. Bucket name 'console' is rejected
+  by validBucketName (verify and add to validator if missing in US-001).
+- /admin/v1/* is the JSON HTTP contract between UI and gateway.
+  Versioned (v1); future-breaking changes ship under /admin/v2/*.
+  OpenAPI 3.1 spec in internal/adminapi/openapi.yaml.
+- Auth: session cookie strata_session=<JWT> with HS256, 24h Max-Age,
+  HttpOnly + Secure + SameSite=Strict + Path=/admin. JWT secret read
+  from STRATA_CONSOLE_JWT_SECRET (random hex if unset, with WARN —
+  production deployments MUST set it explicitly to survive restarts
+  without invalidating sessions). Auth middleware on /admin/v1/* falls
+  back to existing SigV4 path for clients without the cookie (curl,
+  programmatic admin clients).
+- TanStack Query 5 global QueryClient: staleTime 5_000,
+  refetchInterval 5_000, refetchOnWindowFocus true, retry 1.
+  web/src/api/client.ts exposes typed wrappers — pages call
+  useQuery({queryKey, queryFn}); polling is automatic.
+- Heartbeat shape: cluster_nodes table with default_time_to_live=30
+  on Cassandra (alterStatements add), s/cluster_nodes/<node_id> +
+  background sweeper on TiKV, in-process map with timestamp expiry
+  on memory. Lockstep across all three meta backends. Each Strata
+  replica writes its own row every 10 s.
+- Status derivation (cluster overview): healthy if all nodes report
+  /readyz 200 in last 30 s; degraded if ≥1 fail but quorum holds;
+  unhealthy if quorum lost.
+- Polling cadence per page: 5 s for ranges ≤6 h, 30 s for 24h+, 5 min
+  for 7d (per-query refetchInterval). Mind chart re-render cost on
+  longer ranges.
+- Bundle target: ≤500 KiB gzipped initial. Use React.lazy + Suspense
+  for non-critical routes (Buckets, Bucket Detail, Metrics get
+  code-split). Verify via `vite build --report` before US-012 close.
+- recharts 2.x for charts (smaller than chart.js, declarative). Avoid
+  Apache ECharts / Plotly — bundle bloat.
+- shadcn/ui CLI copies components into web/src/components/ui/ as
+  source — NOT a dependency. We own them; tweak freely, no version
+  pin to worry about.
+- Dark mode: class='dark' on <html>; CSS variables in globals.css
+  switch values per theme. Toggle persists to
+  localStorage['strata.theme'] = 'light' | 'dark' | 'system'.
+- Playwright e2e: chromium-only on CI for speed. webServer config
+  runs `make run-memory` so e2e does not need Cassandra / RADOS up.
+  STRATA_STATIC_CREDENTIALS=test:test:owner seeds login creds.
 - ROADMAP maintenance rule (CLAUDE.md): every commit closing a
   ROADMAP item flips the bullet to ~~strikethrough~~ Done format in
   the same commit, with closing SHA inline (or `(commit pending)`
-  with a follow-up SHA edit). Every commit discovering a new gap adds
-  a fresh entry under the right severity section in the same commit.
-- s3-tests baseline lives in scripts/s3-tests/README.md as an
-  append-only history. US-001 captures the cycle-start headline in
-  its commit message footer; US-005 re-runs scripts/s3-tests/run.sh
-  and asserts the new headline >= the captured baseline. Chunk
-  validation MUST NOT regress upload paths — a regression blocks
-  cycle close.
-- AWS test vectors for the chain are transcribed verbatim into Go
-  literals in internal/auth/streaming_test.go. Inline copy so the
-  test stays offline-runnable across AWS doc URL rotations. Source:
-  https://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-streaming.html
-  "Example Calculations".
-- No metadata schema changes; no Cassandra/TiKV/memory backend
-  touches; no RADOS/S3-backend touches. Pure auth-layer fix scoped
-  to internal/auth/* + internal/s3api/sigv4_streaming_test.go +
-  ROADMAP.md + docs/security/.
-
-## 2026-05-01 - US-001
-- Added unexported chunkSigner type in internal/auth/streaming.go:
-  newChunkSigner(seedSig, signingKey, isoDate, scope) + Next(payload)
-  returning hex chain signature and advancing prevSig in-place.
-- Added internal/auth/streaming_test.go with TestChunkSignerAWSVectors
-  (AWS-published "Example Calculations" — chunk-1 65536×'a',
-  chunk-2 1024×'a', final-empty 0 bytes) and TestChunkSignerAdvancesChain
-  (chain-mutates-on-call invariant).
-- Vectors compared via hmac.Equal — constant-time idiom.
-- Cycle-start s3-tests baseline captured: 78.5% (139/177) per
-  scripts/s3-tests/README.md 2026-05-01 6e122903 entry. US-005 must
-  re-run and assert >= this floor.
-- Files changed: internal/auth/streaming.go,
-  internal/auth/streaming_test.go (new).
-- **Learnings for future iterations:**
-  - PRD Construction signature was 3-arg (seedSig, signingKey, scope) —
-    deviated to 4-arg with isoDate because AWS string-to-sign embeds
-    X-Amz-Date timestamp separately from credential scope. Documented
-    deviation in chunkSigner doc-comment.
-  - The AWS S3 streaming-sigv4 doc example uses secret
-    `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` (slash between MDENG
-    and bPxRfi) — DIFFERENT from the canonical IAM SigV4 example
-    secret which uses `+` at that position. Pre-existing
-    sigv4_test.go::vectorSecret uses the IAM `+` variant; do not
-    reuse. Streaming tests need their own secret constant.
-  - sha256Hex / hmacSHA256 / deriveSigningKey / credentialScope /
-    emptyBodyHash already exist in internal/auth/sigv4.go and are
-    unexported — package-internal access from streaming.go works
-    without re-exporting.
-  - newChunkSigner is unused after US-001; staticcheck/unusedfunc
-    flags it. Resolved by US-002 wiring it into the decoder. Do not
-    add a // nolint:unused suppression — let US-002 land naturally.
----
-
-## 2026-05-01 - US-002
-- Rewrote streamingReader (internal/auth/streaming.go) to buffer-then-
-  validate: each chunk is fully read into a per-chunk buffer (≤16 MiB
-  cap via maxChunkPayload), SHA-256-hashed, chain-validated against
-  ;chunk-signature=<hex> via chunkSigner.Next + hmac.Equal, and only
-  then forwarded to the consumer. Mismatch → ErrChunkSignatureMismatch
-  + zero bytes leaked.
-- Added exported sentinel ErrChunkSignatureMismatch and helper
-  IsChunkSignatureMismatch(err) for type-safe handler-side translation.
-- Extended newStreamingReader signature to (body, seedSig, signingKey,
-  isoDate, scope). Plumbing: pass-through args, no AuthInfo field, no
-  ctx stash — documented inline in middleware.go (US-002 comment).
-  Middleware computes signingKey via deriveSigningKey + scope via
-  credentialScope, hands them straight in.
-- Helper s3api.MapBodyError(err) returns (ErrSignatureDoesNotMatch,
-  true) when errors.Is(err, auth.ErrChunkSignatureMismatch). Wired
-  into putObject (internal/s3api/server.go), uploadPart's PutChunks
-  path AND BackendUploadID pass-through (internal/s3api/multipart.go).
-- Tests added in internal/auth/streaming_test.go:
-  - TestStreamingReader_ValidChain — pristine 3-chunk body decodes to
-    concatenated payload with no error.
-  - TestStreamingReader_MutatedChunk_Rejects — flips one byte of
-    chunk-2's payload; verifies ErrChunkSignatureMismatch AND that
-    chunk-2's bytes never reach the consumer (buffer-then-validate
-    invariant).
-  - TestStreamingReader_MutatedTrailer_Rejects — flips trailer's
-    chunk-signature value; verifies the empty-chunk's chain check
-    catches truncation attacks.
-  - TestStreamingReader_OversizedChunk_Rejects — size header claiming
-    32 MiB returns a framing error (NOT signature mismatch) without
-    OOM-allocating the payload.
-- Test helpers buildChunkedBody + intToHex craft aws-chunked framing
-  with valid chain signatures so future stories (US-004 integration
-  test) can reuse the pattern.
-- Files changed: internal/auth/streaming.go, internal/auth/middleware.go,
-  internal/auth/streaming_test.go, internal/s3api/errors.go,
-  internal/s3api/server.go, internal/s3api/multipart.go.
-- **Learnings for future iterations:**
-  - Plumbing choice: pass-through constructor args (NOT AuthInfo
-    field, NOT ctx stash). The chain state is needed only at
-    streamingReader construction; nothing downstream re-derives it.
-    Adding fields to AuthInfo would have leaked auth-internal state to
-    every handler.
-  - Empty trailer chunk MUST be chain-validated. Current AWS spec says
-    sig(final-empty) is part of the chain; skipping it lets an
-    attacker truncate the body and forge the final marker. The reader
-    treats size==0 as "validate signature, then EOF".
-  - aws-chunked framing has a trailing CRLF AFTER the payload of each
-    non-empty chunk. Empty trailer chunk format is "0;chunk-signature=
-    <hex>\r\n\r\n" — but the reader stops after consuming the size
-    line and the trailer's CRLF before the payload, since size==0 has
-    no payload and no trailing payload-CRLF.
-  - Helper MapBodyError lives in s3api/errors.go (not auth package)
-    because the APIError type is s3api-internal. Body-error translation
-    is the s3api layer's responsibility — auth surfaces a typed Go
-    error, s3api maps it to the S3 wire format.
-  - intToHex must produce LOWERCASE hex (matches AWS aws-cli output).
-    fmt.Sprintf("%x", n) also works but tiny custom impl avoids
-    dragging fmt into the test signing path.
-  - Existing tests in internal/auth/* don't construct streaming
-    bodies, so no callsite updates were needed beyond middleware.go.
-    Future tests that build streaming PUT requests can reuse the
-    buildChunkedBody helper from streaming_test.go (move to a shared
-    test helper file if needed by US-004).
----
-
-## 2026-05-01 - US-003
-- Added auth.ErrTrailerFormatUnsupported sentinel (internal/auth/types.go)
-  + streamingUnsignedTrailer constant + isStreamingSentinel helper
-  (internal/auth/sigv4.go).
-- internal/auth/middleware.go validateHeader now short-circuits with
-  ErrTrailerFormatUnsupported when X-Amz-Trailer is non-empty AND
-  x-amz-content-sha256 is one of the streaming sentinels (signed-chunked
-  STREAMING-AWS4-HMAC-SHA256-PAYLOAD or unsigned-chunked-with-trailer
-  STREAMING-UNSIGNED-PAYLOAD-TRAILER). Detection fires AFTER signature
-  validation so unauth probes can't enumerate features. When
-  X-Amz-Trailer is empty/missing, the pre-existing streaming reader path
-  runs unchanged.
-- s3api.WriteAuthDenied (internal/s3api/errors.go) translates
-  errors.Is(err, auth.ErrTrailerFormatUnsupported) → s3api.ErrTrailerNotImplemented
-  (HTTP 501, <Code>NotImplemented</Code> + the PRD-mandated trailer-format
-  message body).
-- Tests:
-  - internal/auth/middleware_test.go (new) — TestMiddlewareTrailerFormat_Rejected
-    (signed-chunked + trailer → 501-path error), …_UnsignedTrailerSentinel
-    (the unsigned-trailer variant), and …_NoTrailerHeader_PassesThrough
-    (streaming PUT without trailer header → no error, info populated).
-  - internal/s3api/errors_test.go (new) — TestWriteAuthDenied_TrailerFormat
-    asserts the 501 status + XML body shape.
-  - signRequest helper in middleware_test.go reusable for future
-    middleware-level SigV4 tests (sets X-Amz-Date, computes signature
-    via existing computeSignature/canonicalRequest helpers).
-- ROADMAP.md "Known latent bugs" entry updated to reflect that
-  trailer-format requests are now explicitly rejected with 501 instead
-  of falling into the chunk decoder.
-- Files changed: internal/auth/middleware.go, internal/auth/sigv4.go,
-  internal/auth/types.go, internal/auth/middleware_test.go (new),
-  internal/s3api/errors.go, internal/s3api/errors_test.go (new),
-  ROADMAP.md.
-- **Learnings for future iterations:**
-  - DenyHandler is the only response hook auth.Middleware exposes for
-    short-circuit errors. Rendering a 501 (vs the deny handler's usual
-    403) is done by extending the s3api WriteAuthDenied switch with an
-    errors.Is(err, auth.ErrTrailerFormatUnsupported) branch. Don't add
-    a separate "notImpl handler" hook to Middleware — one switch arm in
-    the deny handler is the lighter shape.
-  - Trailer detection fires AFTER signature validation. This keeps the
-    feature surface invisible to unauthenticated probers and matches the
-    code path's existing layering (auth → bodyHash decisions). If a
-    later story needs a pre-auth feature gate, that's a new shape.
-  - The test helper signRequest in internal/auth/middleware_test.go
-    needs the host header to be set explicitly via req.Host (not
-    req.Header.Set("Host", …)) — httptest.NewRequest pulls from URL but
-    canonicalHeaders reads from req.Host. Future SigV4 middleware tests
-    must follow this pattern.
-  - Two streaming sentinels recognised: STREAMING-AWS4-HMAC-SHA256-PAYLOAD
-    and STREAMING-UNSIGNED-PAYLOAD-TRAILER. The third
-    STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER (signed chunks + signed
-    trailer) is intentionally NOT in isStreamingSentinel — PRD lists
-    only two and current SDKs that emit it are uncommon. Add later if
-    field traffic shows up.
----
-
-## 2026-05-01 - US-004
-- New file internal/s3api/sigv4_streaming_test.go: end-to-end test that
-  exercises the full HTTP path through auth.Middleware{ModeRequired} so
-  the chain validator built in US-002 runs against real network bytes.
-- signedHarness helper wraps s3api.Server with auth.Middleware (test-
-  local) and exposes signRequest / putBucketSigned / getObjectSigned /
-  putStreamingObject. SigV4 signing helpers (deriveSigningKeyTest,
-  sigHmacTest, sigSha256HexTest, chainSigTest) replicate the auth
-  package's unexported constants — values are AWS-spec frozen so
-  duplication is safe and keeps the auth surface unchanged.
-- TestStreamingSigV4_PristineUpload_Succeeds (Variant A): PUT bucket →
-  streaming PUT with valid chain (chunkA, chunkB, final-empty) → 200,
-  then GET returns the concatenated body. Confirms the validator does
-  not over-reject pristine uploads.
-- TestStreamingSigV4_MutatedChunk_Rejected (Variant B): same path but
-  one byte inside chunk-2's payload is XOR'd 0x01 mid-stream (chunk-
-  signature header untouched). PUT returns 403 SignatureDoesNotMatch
-  (XML body checked); subsequent GET returns 404 NoSuchKey (XML body
-  checked) — proves buffer-then-validate dropped the mutated bytes
-  before the meta store recorded the object.
-- Files changed: internal/s3api/sigv4_streaming_test.go (new).
-- **Learnings for future iterations:**
-  - Existing testHarness in internal/s3api/testutil_test.go bypasses
-    auth (it serves s3api.Server directly via httptest). To exercise
-    middleware-driven code paths (chain validation, trailer rejection,
-    presign auth) the test must build its own wrapper —
-    httptest.NewServer(mw.Wrap(api, s3api.WriteAuthDenied)).
-  - The auth package keeps its SigV4 helpers unexported. For tests in
-    s3api_test that need to sign requests, replicate the algorithm
-    locally (deriveSigningKey is just three nested HMAC-SHA256 calls
-    seeded with "AWS4"+secret). Do NOT export auth internals just to
-    satisfy a test; the AWS-spec constants are frozen.
-  - canonicalQuery is empty when the request URL has no query string;
-    keep the explicit "" + "\n" line in canonical-request construction
-    so the four-line frame between method and signed-headers stays
-    correct.
-  - canonicalHeaders treats "host" specially — it reads from req.Host,
-    not req.Header. When using httptest the URL host is auto-populated
-    by http.NewRequest, so signing code must read req.Host (NOT
-    req.Header.Get("Host")).
-  - For streaming SigV4 the canonical-request hashedPayload is the
-    sentinel STREAMING-AWS4-HMAC-SHA256-PAYLOAD literally, not a hash
-    of the body. The chain signatures hash the actual chunk payloads.
-  - mutateAt is the absolute byte offset in the assembled chunked body
-    (NOT the offset inside the chunk payload). The pristine-build pass
-    in TestStreamingSigV4_MutatedChunk_Rejected locates chunkB inside
-    the framed body before flipping a byte; reusing this pattern lets
-    future tests target any byte the SDK could plausibly mutate.
-  - bytes.Index works on the framed body even though chain signatures
-    differ run-to-run because chunkB's literal bytes appear once
-    between two CRLF runs and the size header has fixed width.
----
-
-## 2026-05-01 - US-005
-- Flipped ROADMAP.md ## Auth P2 entry to ~~strikethrough~~ Done
-  close-flip per CLAUDE.md "Roadmap maintenance" rule. Body summarises
-  the fix scope (chain HMAC validator + buffer-then-validate ordering +
-  hmac.Equal constant-time compare + 16 MiB per-chunk cap + aws-chunked-
-  trailer 501 detection) and links docs/security/. SHA placeholder
-  "(commit pending)" per the follow-up SHA edit rule.
-- Created docs/security/2026-streaming-sigv4-chunk-validation.md as
-  the seed for docs/security/. One-pager covers: the gap (outer SigV4
-  doesn't cover body bytes in streaming mode), what didn't mitigate
-  (TLS, ETag, Content-Length), the fix (AWS-spec chain), SDK behaviour
-  (no client change needed), operator implication (upgrade if accepting
-  streaming uploads from networks beyond the original signer),
-  verification (the four test entry-points), and references.
-- Re-ran scripts/s3-tests/run.sh against make up-all (Cassandra + Ceph
-  RADOS) with auth=required and the standard test credentials. Result:
-  tests=177 passed=139 failed=38 errors=0 skipped=0 pass rate 78.5%.
-  Exactly matches the cycle-start floor (78.5% / 139-of-177 from
-  US-001's commit-message footer). No regression — every failure is a
-  pre-existing gap filed elsewhere in ROADMAP.md.
-- Appended the new measurement to scripts/s3-tests/README.md (newest
-  entry on top, above the 6e122903 entry, per README convention).
-- Files changed: ROADMAP.md, docs/security/2026-streaming-sigv4-
-  chunk-validation.md (new), scripts/s3-tests/README.md.
-- **Learnings for future iterations:**
-  - Floor-assertion via s3-tests is "pass rate >= captured baseline"
-    not "delta exactly zero". Both wins (new passing test) and parity
-    are acceptable; only a strict drop blocks the close. The 78.5%
-    parity here is expected because chain validation closes a gap that
-    s3-tests doesn't currently exercise (no test sends a deliberately
-    mutated chunk; boto always emits correct chains).
-  - make up-all defaults to auth="" (empty); s3-tests requires
-    auth=required PLUS the three credential pairs in
-    STRATA_STATIC_CREDENTIALS. The right shape is: `make up-all` once,
-    then re-create the gateway service with both env vars set via
-    `docker compose -f deploy/docker/docker-compose.yml up -d
-    --force-recreate gateway`. The cassandra/ceph containers stay up
-    across the recreate so the spinup cost is paid once.
-  - docs/security/ did not exist before US-005 — the directory is
-    seeded by the one-pager. Future security notes go alongside as
-    YYYY-<topic>.md.
-  - SHA placeholders use literal "(commit pending)". When the cycle's
-    closing commit lands, a follow-up edit replaces the placeholder
-    with the actual SHA. Do not attempt to predict the SHA pre-commit.
-  - When tearing down between runs use `make down` not `docker rm`;
-    the Makefile target removes the strata-cassandra-data /
-    strata-ceph-data volumes so the next `make up-all` starts clean.
-    A dirty restart shows up as a Cassandra schema-mismatch error from
-    the gateway boot logs.
----
+  with a follow-up SHA edit). New gaps: add a fresh entry under the
+  right severity section in the same commit.
+- Phase boundaries (read these BEFORE adding scope creep):
+  - Phase 1 (THIS cycle, prd-web-ui-foundation.md): read-only console.
+    No write actions.
+  - Phase 2 (prd-web-ui-admin.md): bucket admin, IAM, object actions,
+    multipart watchdog, audit viewer, settings.
+  - Phase 3 (prd-web-ui-debug.md): hot heatmaps, slow queries, OTel
+    trace browser, SSE live tail, per-node drilldown.
+  If a story tempts you toward write actions or debug tooling, STOP
+  and re-scope. Phase 1 ships first; the others land in their own
+  cycles.
+- No metadata schema changes outside the new cluster_nodes heartbeat
+  table. No data backend changes. No SSE / WebSocket — polling 5 s
+  is sufficient for Phase 1.
+- Tests for the cycle: Go side via go test ./internal/adminapi/...,
+  Playwright via cd web && pnpm exec playwright test.
+  CI has e2e-ui job that runs both.
