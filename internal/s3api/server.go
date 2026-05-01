@@ -497,6 +497,16 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		mapMetaErr(w, r, err)
 		return
 	}
+	// US-002: ?partNumber=N (without uploadId — that path is intercepted in
+	// handleObject) serves the bytes of the Nth part of a multipart-uploaded
+	// object using the per-part offsets recorded in Manifest.PartChunks.
+	// Returns 416 InvalidPartNumber when the object is not multipart or N is
+	// out of range. Skips the presign-redirect short-circuit because the
+	// backend URL would not respect part semantics.
+	if pnStr := r.URL.Query().Get("partNumber"); pnStr != "" {
+		s.getObjectPart(w, r, b, o, pnStr, body)
+		return
+	}
 	// US-016: presigned-URL passthrough. When the bucket has BackendPresign
 	// enabled and the request itself is presigned, redirect the client at a
 	// backend-credentialled URL so the data fetch hits the backend directly.
@@ -566,6 +576,80 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	}
 	defer rc.Close()
 	w.WriteHeader(status)
+	_, _ = io.Copy(w, rc)
+}
+
+// getObjectPart serves ?partNumber=N for a multipart-uploaded object.
+// Returns 416 InvalidPartNumber when the object is not multipart or N is
+// out of range. Range, when supplied alongside partNumber, is part-relative:
+// offsets resolve within the part body, the absolute byte range is shifted
+// by the part's offset, but Content-Range carries absolute coordinates
+// against the whole-object total (matching AWS observable behaviour).
+func (s *Server) getObjectPart(w http.ResponseWriter, r *http.Request, b *meta.Bucket, o *meta.Object, pnStr string, body bool) {
+	partNumber, err := strconv.Atoi(pnStr)
+	if err != nil || partNumber < 1 {
+		writeError(w, r, ErrInvalidPartNumber)
+		return
+	}
+	if o.Manifest == nil || len(o.Manifest.PartChunks) == 0 {
+		writeError(w, r, ErrInvalidPartNumber)
+		return
+	}
+	if partNumber > len(o.Manifest.PartChunks) {
+		writeError(w, r, ErrInvalidPartNumber)
+		return
+	}
+	pr := o.Manifest.PartChunks[partNumber-1]
+
+	partETag := pr.ETag
+	if partETag == "" {
+		partETag = o.ETag
+	}
+	if status, ok := checkConditional(r.Header, `"`+partETag+`"`, o.Mtime); !ok {
+		w.Header().Set("ETag", `"`+partETag+`"`)
+		w.Header().Set("Last-Modified", o.Mtime.UTC().Format(http.TimeFormat))
+		w.WriteHeader(status)
+		return
+	}
+
+	relOffset, relLength, _, ok := parseRange(r.Header.Get("Range"), pr.Size)
+	if !ok {
+		w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(o.Size, 10))
+		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+
+	w.Header().Set("Content-Type", firstNonEmpty(o.ContentType, "application/octet-stream"))
+	w.Header().Set("ETag", `"`+partETag+`"`)
+	w.Header().Set("Last-Modified", o.Mtime.UTC().Format(http.TimeFormat))
+	w.Header().Set("x-amz-storage-class", o.StorageClass)
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("x-amz-mp-parts-count", strconv.Itoa(len(o.Manifest.PartChunks)))
+	if o.Manifest.SSE != nil && o.Manifest.SSE.Algorithm != "" {
+		w.Header().Set("x-amz-server-side-encryption", o.Manifest.SSE.Algorithm)
+		if o.Manifest.SSE.KMSKeyID != "" {
+			w.Header().Set("x-amz-server-side-encryption-aws-kms-key-id", o.Manifest.SSE.KMSKeyID)
+		}
+	}
+	if o.VersionID != "" && meta.IsVersioningActive(b.Versioning) {
+		w.Header().Set("x-amz-version-id", o.VersionID)
+	}
+
+	absOffset := pr.Offset + relOffset
+	w.Header().Set("Content-Range", "bytes "+strconv.FormatInt(absOffset, 10)+"-"+strconv.FormatInt(absOffset+relLength-1, 10)+"/"+strconv.FormatInt(o.Size, 10))
+	w.Header().Set("Content-Length", strconv.FormatInt(relLength, 10))
+
+	if !body {
+		w.WriteHeader(http.StatusPartialContent)
+		return
+	}
+	rc, err := s.Data.GetChunks(r.Context(), o.Manifest, absOffset, relLength)
+	if err != nil {
+		writeError(w, r, ErrInternal)
+		return
+	}
+	defer rc.Close()
+	w.WriteHeader(http.StatusPartialContent)
 	_, _ = io.Copy(w, rc)
 }
 

@@ -86,6 +86,65 @@ Cycle: ralph/s3-tests-90
   branch — populate on the existing manifest in the preAssembled
   branch, build fresh in the chunks-shape branch.
 
+## 2026-05-01 - US-002 — ?partNumber=N GET serves the exact part body
+- Added `Server.getObjectPart` helper in internal/s3api/server.go.
+  Dispatched from `getObject` when `?partNumber=N` query param is
+  present (and the existing `uploadId` branch did NOT already steal
+  the request — that path is intercepted higher up in handleObject).
+- Reads PartChunks[N-1] for Offset/Size/ETag. 416
+  `InvalidPartNumber` for: non-multipart object (`PartChunks` nil/0),
+  N <= 0, N > len(PartChunks), unparseable N.
+- New `ErrInvalidPartNumber` (HTTP 416) in internal/s3api/errors.go.
+- Headers set on success (GET + HEAD): `x-amz-mp-parts-count`,
+  `Content-Length=<part size>`, `ETag` of the PART (not whole
+  object — falls back to whole-object ETag only if PartChunks
+  entry has empty ETag, which won't happen for memory/cassandra
+  meta but defends pre-existing rows), `Content-Range: bytes
+  <abs-off>-<abs-end>/<whole-object-size>`. SSE + version-id
+  headers mirror the regular GET path. Status is always 206
+  Partial Content.
+- Range header stacks part-relative: parseRange is run against
+  pr.Size (so `bytes=0-9` inside part 2 yields part2[0:10]); the
+  absolute byte range passed to Data.GetChunks is shifted by
+  pr.Offset; Content-Range absolute against the whole-object
+  total (matches AWS observable: a 206 always reports absolute
+  coords, never part-relative).
+- Skips the presign-redirect short-circuit — the backend URL
+  would not respect part semantics.
+- Test coverage in internal/s3api/multipart_partnumber_test.go:
+  3-part MPU (5MiB each). Subtests: part-2 body match, HEAD
+  part-3 headers, part-relative Range, part ETag differs from
+  whole-object ETag, 416 for N=4 / N=0 / N=-1, 416 for
+  single-PUT object.
+- **Learnings for future iterations:**
+  - `?partNumber=N` + `uploadId` is intercepted in handleObject
+    and routed to UploadPart — getObject only sees partNumber
+    when uploadId is absent. Don't second-guess this in the
+    GET handler.
+  - 416 wire body is `<Error><Code>InvalidPartNumber</Code>...`
+    not `InvalidRange` (S3 distinguishes these — Range
+    out-of-range is `InvalidRange`, partNumber out-of-range is
+    `InvalidPartNumber`). Both use HTTP 416.
+  - The status MUST be 206 (not 200) for a partNumber GET so
+    AWS SDKs treat the response as a Range response and
+    consult Content-Range. Returning 200 will make boto's
+    autochecker think the body is the whole object.
+  - When stacking Range on top of partNumber, Content-Range's
+    `<total>` field is the whole-object size (not the part
+    size). The relevant invariant: every 206 from S3 reports
+    absolute coords, never part-relative — matches what the
+    existing TestObjectRangeGet asserts for non-partNumber
+    206.
+  - HEAD must set Content-Length to the part size (not 0) so
+    SDKs can pre-allocate. Standard net/http does NOT strip
+    Content-Length on HEAD when WriteHeader is called
+    explicitly — set it directly.
+  - Adding the partNumber branch BEFORE
+    maybeBackendPresignRedirect is load-bearing: the presign
+    URL can't carry partNumber semantics, and a redirect
+    would short-circuit the PartChunks lookup.
+---
+
 ## 2026-05-01 - US-001 — Multipart per-part offset tracking in data.Manifest
 - Added `PartRange` struct (PartNumber, Offset, Size, ETag,
   ChecksumValue, ChecksumAlgorithm) and `Manifest.PartChunks

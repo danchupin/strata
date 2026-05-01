@@ -38,8 +38,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Wired internal/s3api/server.go::getObject to dispatch ?partNumber=N (without uploadId) to a new getObjectPart helper. PartChunks[N-1] gives Offset/Size/ETag; out-of-range or non-multipart returns 416 InvalidPartNumber. Range header stacks part-relative — absolute byte range is shifted by pr.Offset, Content-Range carries absolute coords against whole-object total (matches AWS observable). Status is always 206 Partial Content for partNumber GETs. ETag returned is the part ETag (not whole-object). HEAD path mirrors the GET path (same headers, no body). New ErrInvalidPartNumber added to errors.go (HTTP 416). Test coverage in internal/s3api/multipart_partnumber_test.go: 3-part MPU, asserts part-2 body, HEAD part-3 headers, part-relative Range, part ETag != whole, and three 416 cases (N=4, N=0, N=-1, single-PUT object)."
     },
     {
       "id": "US-003",
