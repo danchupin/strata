@@ -313,6 +313,7 @@ func (s *Store) ListObjects(ctx context.Context, bucketID uuid.UUID, opts meta.L
 
 	res := &meta.ListResult{}
 	seenPrefixes := make(map[string]struct{})
+	var lastEmitted string
 
 	for _, k := range keys {
 		if opts.Marker != "" && k <= opts.Marker {
@@ -331,25 +332,32 @@ func (s *Store) ListObjects(ctx context.Context, bucketID uuid.UUID, opts meta.L
 			rest := k[len(opts.Prefix):]
 			if idx := strings.Index(rest, opts.Delimiter); idx >= 0 {
 				pfx := opts.Prefix + rest[:idx+len(opts.Delimiter)]
-				if _, ok := seenPrefixes[pfx]; !ok {
-					if len(res.Objects)+len(res.CommonPrefixes) >= limit {
-						res.Truncated = true
-						res.NextMarker = pfx
-						return res, nil
-					}
-					seenPrefixes[pfx] = struct{}{}
-					res.CommonPrefixes = append(res.CommonPrefixes, pfx)
+				if _, seen := seenPrefixes[pfx]; seen {
+					continue
 				}
+				if opts.Marker != "" && pfx <= opts.Marker {
+					seenPrefixes[pfx] = struct{}{}
+					continue
+				}
+				if len(res.Objects)+len(res.CommonPrefixes) >= limit {
+					res.Truncated = true
+					res.NextMarker = lastEmitted
+					return res, nil
+				}
+				seenPrefixes[pfx] = struct{}{}
+				res.CommonPrefixes = append(res.CommonPrefixes, pfx)
+				lastEmitted = pfx
 				continue
 			}
 		}
 		if len(res.Objects)+len(res.CommonPrefixes) >= limit {
 			res.Truncated = true
-			res.NextMarker = k
+			res.NextMarker = lastEmitted
 			return res, nil
 		}
 		cp := *versions[0]
 		res.Objects = append(res.Objects, &cp)
+		lastEmitted = k
 	}
 	return res, nil
 }

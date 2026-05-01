@@ -88,8 +88,8 @@
         "Tests pass"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "internal/meta listObjects (memory + cassandra) now skips CommonPrefixes <= Marker (so a continuation page does not re-emit the prev page's CP) and reports NextMarker as the LAST EMITTED key/CP rather than the next-candidate CP. internal/s3api listObjects now branches on `list-type=2`: V2 keeps the existing ListBucketResult/NextContinuationToken shape; V1 (no list-type) emits a new listBucketResultV1 XML carrying <Marker>, <NextMarker> (only when truncated AND delimiter set per AWS spec), <Delimiter>, <IsTruncated>, <Contents>, <CommonPrefixes>. internal/meta/storetest contract case caseListDelimiterPrefixPaging exercises the s3-tests `boo/bar`+`cquux/*` shape across max-keys=1 paging in lockstep against memory + cassandra. internal/s3api/list_delimiter_prefix_test.go mirrors test_bucket_list_delimiter_prefix + test_bucket_list_delimiter_prefix_ends_with_delimiter (V1) and test_bucket_listv2_delimiter_prefix (V2)."
     },
     {
       "id": "US-006",

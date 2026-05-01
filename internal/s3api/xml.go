@@ -35,6 +35,19 @@ type listBucketResultV2 struct {
 	CommonPrefixes        []commonPrefixEl `xml:"CommonPrefixes"`
 }
 
+type listBucketResultV1 struct {
+	XMLName        xml.Name         `xml:"ListBucketResult"`
+	Name           string           `xml:"Name"`
+	Prefix         string           `xml:"Prefix"`
+	Marker         string           `xml:"Marker"`
+	NextMarker     string           `xml:"NextMarker,omitempty"`
+	MaxKeys        int              `xml:"MaxKeys"`
+	Delimiter      string           `xml:"Delimiter,omitempty"`
+	IsTruncated    bool             `xml:"IsTruncated"`
+	Contents       []objectEntry    `xml:"Contents"`
+	CommonPrefixes []commonPrefixEl `xml:"CommonPrefixes"`
+}
+
 type objectEntry struct {
 	Key          string `xml:"Key"`
 	LastModified string `xml:"LastModified"`

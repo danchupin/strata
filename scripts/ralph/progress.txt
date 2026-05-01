@@ -77,6 +77,16 @@ Cycle: ralph/s3-tests-90
   is a doc/spec file used to lock field-number assignments for any
   future codec, not a code-gen source. EncodeManifest/DecodeManifest
   are JSON-only — wire compatibility is across JSON shapes.
+- Listing delimiter+prefix paging (US-005) lockstep across
+  memory + cassandra: NextMarker on truncation is the LAST
+  EMITTED key/CP (not the next-candidate). Skip a CommonPrefix
+  when `pfx <= Marker` so a continuation page does not re-emit
+  the prev page's CP. V1 vs V2 response shapes diverge in
+  internal/s3api: V1 emits `<Marker>` + `<NextMarker>` (only
+  when truncated AND delimiter set), V2 emits the existing
+  `<ContinuationToken>` / `<NextContinuationToken>` /
+  `<KeyCount>` / `<StartAfter>`. Both share the same
+  meta.ListResult — the divergence is only XML-shape.
 - Multipart pass-through (US-010 of s3-over-s3 cycle) sets
   obj.Manifest BEFORE meta.CompleteMultipartUpload runs. The meta
   layer detects this and appends PartChunks onto the pre-built
@@ -89,6 +99,62 @@ Cycle: ralph/s3-tests-90
   fields onto it before persisting. Future multipart-shape additions
   hitchhike on obj.Manifest as a hint blob and are merged in the
   same lockstep across memory + cassandra stores.
+
+## 2026-05-01 - US-005 — Listing delimiter+prefix interaction
+- internal/meta/memory/store.go::ListObjects + internal/meta/cassandra/
+  store.go::ListObjects now (1) skip a CommonPrefix `pfx` when
+  `pfx <= Marker` (so a continuation page does not re-emit the prev
+  page's CP via roll-up) and (2) report `NextMarker` on truncation as
+  the LAST EMITTED key/CP, not the next-candidate CP about to be
+  rejected by the limit gate. Also marks the skipped CP as seen so
+  follow-on keys folding into it are filtered cheaply.
+- internal/s3api/server.go::listObjects now branches on
+  `list-type=2`: V2 keeps the prior ListBucketResult / KeyCount /
+  NextContinuationToken / ContinuationToken / StartAfter shape. V1
+  (no list-type) emits a NEW `listBucketResultV1` XML (added in
+  internal/s3api/xml.go) carrying `<Marker>`, `<NextMarker>` (only
+  when truncated AND delimiter set per AWS spec), `<MaxKeys>`,
+  `<Delimiter>`, `<IsTruncated>`, `<Contents>`, `<CommonPrefixes>`.
+  V1 reads `?marker=` from the query, V2 reads `?continuation-token=`
+  with `?start-after=` fallback.
+- internal/meta/storetest contract suite: new case
+  caseListDelimiterPrefixPaging mirrors s3-tests
+  `test_bucket_list_delimiter_prefix` shape (asdf, boo/bar,
+  boo/baz/xyzzy, cquux/thud, cquux/bla) — 3-page max-keys=1 paging
+  with prefix='' AND prefix='boo/'. Runs against memory + cassandra
+  (under -tags integration) lockstep.
+- internal/s3api/list_delimiter_prefix_test.go: TestListV1Delimiter
+  Prefix mirrors test_bucket_list_delimiter_prefix exactly (V1
+  Marker / NextMarker semantics). TestListV1DelimiterPrefixEndsWith
+  Delimiter mirrors test_bucket_list_delimiter_prefix_ends_with_
+  delimiter. TestListV2DelimiterPrefix mirrors
+  test_bucket_listv2_delimiter_prefix.
+- **Learnings for future iterations:**
+  - V1 vs V2 MUST be detected by `list-type=2` query param. V1
+    response shape has `<Marker>` + `<NextMarker>`; V2 has
+    `<ContinuationToken>` + `<NextContinuationToken>` + `<KeyCount>`
+    + `<StartAfter>`. boto3 `client.list_objects` (V1) reads
+    `<NextMarker>`; without it response['NextMarker'] is None.
+  - V1 NextMarker is included in the body ONLY when truncated AND a
+    delimiter was provided. Without delimiter, V1 clients use the
+    last key as the next marker. Setting NextMarker unconditionally
+    breaks AWS-conformant clients.
+  - On truncation, NextMarker = the LAST EMITTED key/CP — NOT the
+    next-candidate that the limit gate rejected. The gate must sit
+    AFTER the seenPrefixes + Marker checks, otherwise it pre-stamps
+    NextMarker to a CP that wasn't returned.
+  - When Marker IS itself a CommonPrefix the prev page returned
+    (e.g., "boo/"), the next page's roll-up must skip CPs where
+    `pfx <= Marker`. Without this filter the new page re-emits
+    "boo/" because its seenPrefixes map is per-call.
+  - Object keys in URLs need URL-encoding when they contain a slash
+    that isn't a path separator (e.g., key="asdf/" → PUT path
+    "/bkt/asdf%2F"). Otherwise the router strips the trailing
+    slash and the key becomes "asdf".
+  - meta.ListResult.NextMarker semantics: "" means not-truncated;
+    the V1 XML guard prevents emitting `<NextMarker></NextMarker>`
+    via `omitempty`.
+---
 
 ## 2026-05-01 - US-004 — Multipart copy FlexibleChecksum path
 - internal/s3api/multipart.go::uploadPartCopy now reads

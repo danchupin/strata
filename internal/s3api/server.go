@@ -287,9 +287,15 @@ func (s *Server) listObjects(w http.ResponseWriter, r *http.Request, bucket stri
 			limit = v
 		}
 	}
-	marker := q.Get("continuation-token")
-	if marker == "" {
-		marker = q.Get("start-after")
+	isV2 := q.Get("list-type") == "2"
+	var marker string
+	if isV2 {
+		marker = q.Get("continuation-token")
+		if marker == "" {
+			marker = q.Get("start-after")
+		}
+	} else {
+		marker = q.Get("marker")
 	}
 	opts := meta.ListOptions{
 		Prefix:    q.Get("prefix"),
@@ -302,18 +308,9 @@ func (s *Server) listObjects(w http.ResponseWriter, r *http.Request, bucket stri
 		writeError(w, r, ErrInternal)
 		return
 	}
-	resp := listBucketResultV2{
-		Name:                  bucket,
-		Prefix:                opts.Prefix,
-		Delimiter:             opts.Delimiter,
-		MaxKeys:               limit,
-		IsTruncated:           res.Truncated,
-		NextContinuationToken: res.NextMarker,
-		ContinuationToken:     q.Get("continuation-token"),
-		StartAfter:            q.Get("start-after"),
-	}
+	contents := make([]objectEntry, 0, len(res.Objects))
 	for _, o := range res.Objects {
-		resp.Contents = append(resp.Contents, objectEntry{
+		contents = append(contents, objectEntry{
 			Key:          o.Key,
 			LastModified: o.Mtime.UTC().Format(time.RFC3339),
 			ETag:         `"` + o.ETag + `"`,
@@ -321,11 +318,41 @@ func (s *Server) listObjects(w http.ResponseWriter, r *http.Request, bucket stri
 			StorageClass: o.StorageClass,
 		})
 	}
+	commons := make([]commonPrefixEl, 0, len(res.CommonPrefixes))
 	for _, p := range res.CommonPrefixes {
-		resp.CommonPrefixes = append(resp.CommonPrefixes, commonPrefixEl{Prefix: p})
+		commons = append(commons, commonPrefixEl{Prefix: p})
 	}
-	resp.KeyCount = len(resp.Contents) + len(resp.CommonPrefixes)
-	writeXML(w, http.StatusOK, resp)
+	if isV2 {
+		resp := listBucketResultV2{
+			Name:                  bucket,
+			Prefix:                opts.Prefix,
+			Delimiter:             opts.Delimiter,
+			MaxKeys:               limit,
+			IsTruncated:           res.Truncated,
+			NextContinuationToken: res.NextMarker,
+			ContinuationToken:     q.Get("continuation-token"),
+			StartAfter:            q.Get("start-after"),
+			Contents:              contents,
+			CommonPrefixes:        commons,
+		}
+		resp.KeyCount = len(resp.Contents) + len(resp.CommonPrefixes)
+		writeXML(w, http.StatusOK, resp)
+		return
+	}
+	respV1 := listBucketResultV1{
+		Name:           bucket,
+		Prefix:         opts.Prefix,
+		Marker:         marker,
+		MaxKeys:        limit,
+		Delimiter:      opts.Delimiter,
+		IsTruncated:    res.Truncated,
+		Contents:       contents,
+		CommonPrefixes: commons,
+	}
+	if res.Truncated && opts.Delimiter != "" {
+		respV1.NextMarker = res.NextMarker
+	}
+	writeXML(w, http.StatusOK, respV1)
 }
 
 func (s *Server) handleObject(w http.ResponseWriter, r *http.Request, bucket, key string) {

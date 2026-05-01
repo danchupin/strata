@@ -462,6 +462,7 @@ func (s *Store) ListObjects(ctx context.Context, bucketID uuid.UUID, opts meta.L
 	res := &meta.ListResult{}
 	seenPrefix := make(map[string]struct{})
 	var lastKey string
+	var lastEmitted string
 
 	for h.Len() > 0 {
 		top := heap.Pop(h).(*shardCursor)
@@ -487,26 +488,33 @@ func (s *Store) ListObjects(ctx context.Context, bucketID uuid.UUID, opts meta.L
 			rest := obj.Key[len(opts.Prefix):]
 			if idx := strings.Index(rest, opts.Delimiter); idx >= 0 {
 				pfx := opts.Prefix + rest[:idx+len(opts.Delimiter)]
-				if _, ok := seenPrefix[pfx]; !ok {
-					if len(res.Objects)+len(res.CommonPrefixes) >= limit {
-						res.Truncated = true
-						res.NextMarker = pfx
-						drainHeap(h)
-						return res, nil
-					}
-					seenPrefix[pfx] = struct{}{}
-					res.CommonPrefixes = append(res.CommonPrefixes, pfx)
+				if _, seen := seenPrefix[pfx]; seen {
+					continue
 				}
+				if opts.Marker != "" && pfx <= opts.Marker {
+					seenPrefix[pfx] = struct{}{}
+					continue
+				}
+				if len(res.Objects)+len(res.CommonPrefixes) >= limit {
+					res.Truncated = true
+					res.NextMarker = lastEmitted
+					drainHeap(h)
+					return res, nil
+				}
+				seenPrefix[pfx] = struct{}{}
+				res.CommonPrefixes = append(res.CommonPrefixes, pfx)
+				lastEmitted = pfx
 				continue
 			}
 		}
 		if len(res.Objects)+len(res.CommonPrefixes) >= limit {
 			res.Truncated = true
-			res.NextMarker = obj.Key
+			res.NextMarker = lastEmitted
 			drainHeap(h)
 			return res, nil
 		}
 		res.Objects = append(res.Objects, obj)
+		lastEmitted = obj.Key
 	}
 	return res, nil
 }

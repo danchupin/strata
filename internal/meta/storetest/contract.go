@@ -29,6 +29,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"GCQueueRoundTrip", caseGCQueueRoundTrip},
 		{"BucketLifecycleRulesBlob", caseLifecycleBlob},
 		{"ListObjectsHidesDeleteMarkers", caseListHidesDeleteMarkers},
+		{"ListObjectsDelimiterPrefixPaging", caseListDelimiterPrefixPaging},
 		{"CompleteMultipartPopulatesPartChunks", caseCompleteMultipartPopulatesPartChunks},
 	}
 	for _, tc := range cases {
@@ -336,5 +337,76 @@ func caseListHidesDeleteMarkers(t *testing.T, s meta.Store) {
 	}
 	if !seenDM {
 		t.Errorf("ListObjectVersions should include delete markers")
+	}
+}
+
+func caseListDelimiterPrefixPaging(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "dlm", "o", "STANDARD")
+	put := func(key string) {
+		o := &meta.Object{
+			BucketID:     b.ID,
+			Key:          key,
+			StorageClass: "STANDARD",
+			ETag:         "x",
+			Size:         1,
+			Mtime:        time.Now().UTC(),
+			Manifest:     &data.Manifest{Class: "STANDARD"},
+		}
+		if err := s.PutObject(ctx, o, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, k := range []string{"asdf", "boo/bar", "boo/baz/xyzzy", "cquux/thud", "cquux/bla"} {
+		put(k)
+	}
+	keysOf := func(r *meta.ListResult) []string {
+		out := make([]string, 0, len(r.Objects))
+		for _, o := range r.Objects {
+			out = append(out, o.Key)
+		}
+		return out
+	}
+	eq := func(a, b []string) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		for i := range a {
+			if a[i] != b[i] {
+				return false
+			}
+		}
+		return true
+	}
+	mustList := func(prefix, marker string, limit int) *meta.ListResult {
+		r, err := s.ListObjects(ctx, b.ID, meta.ListOptions{
+			Prefix: prefix, Delimiter: "/", Marker: marker, Limit: limit,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+
+	r := mustList("", "", 1)
+	if !r.Truncated || !eq(keysOf(r), []string{"asdf"}) || len(r.CommonPrefixes) != 0 || r.NextMarker != "asdf" {
+		t.Fatalf("p1: %+v keys=%v", r, keysOf(r))
+	}
+	r = mustList("", r.NextMarker, 1)
+	if !r.Truncated || len(r.Objects) != 0 || !eq(r.CommonPrefixes, []string{"boo/"}) || r.NextMarker != "boo/" {
+		t.Fatalf("p2: %+v", r)
+	}
+	r = mustList("", r.NextMarker, 1)
+	if r.Truncated || len(r.Objects) != 0 || !eq(r.CommonPrefixes, []string{"cquux/"}) || r.NextMarker != "" {
+		t.Fatalf("p3: %+v", r)
+	}
+
+	r = mustList("boo/", "", 1)
+	if !r.Truncated || !eq(keysOf(r), []string{"boo/bar"}) || len(r.CommonPrefixes) != 0 || r.NextMarker != "boo/bar" {
+		t.Fatalf("boo p1: %+v", r)
+	}
+	r = mustList("boo/", r.NextMarker, 1)
+	if r.Truncated || len(r.Objects) != 0 || !eq(r.CommonPrefixes, []string{"boo/baz/"}) || r.NextMarker != "" {
+		t.Fatalf("boo p2: %+v", r)
 	}
 }
