@@ -1,10 +1,22 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph vet test up up-all down wait-cassandra wait-ceph ceph-pool run-memory run-cassandra run-gateway smoke clean
+.PHONY: build build-ceph web-build web-typecheck web-clean vet test up up-all down wait-cassandra wait-ceph ceph-pool run-memory run-cassandra run-gateway smoke clean
 
-build:
+# build depends on web-build so the embedded console FS is populated
+# before `go build` runs. Direct `go build ./...` without web-build will
+# fail with: pattern web/dist: no matching files found
+build: web-build
 	go build ./...
+
+web-build:
+	cd web && pnpm install --frozen-lockfile && pnpm run build
+
+web-typecheck:
+	cd web && pnpm run typecheck
+
+web-clean:
+	rm -rf web/dist web/node_modules
 
 build-ceph:
 	$(COMPOSE) build gateway

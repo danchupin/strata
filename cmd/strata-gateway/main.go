@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	strataconsole "github.com/danchupin/strata"
 	"github.com/danchupin/strata/internal/auth"
 	"github.com/danchupin/strata/internal/config"
 	"github.com/danchupin/strata/internal/data"
@@ -64,6 +65,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
+	mux.Handle("/console/", strataconsole.ConsoleHandler())
 	mux.Handle("/", metrics.ObserveHTTP(mw.Wrap(apiHandler, s3api.WriteAuthDenied)))
 
 	srv := &http.Server{

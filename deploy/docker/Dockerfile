@@ -1,5 +1,15 @@
 # syntax=docker/dockerfile:1.7
 
+# Stage 1: build the React console with pnpm + Vite. Output (web/dist)
+# is copied into the Go build stage and embedded via go:embed.
+FROM node:20-alpine AS web
+RUN corepack disable && npm install -g pnpm@9
+WORKDIR /web
+COPY web/package.json web/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY web/ ./
+RUN pnpm run build
+
 FROM quay.io/ceph/ceph:v19.2.3 AS build
 
 RUN printf '%s\n' \
@@ -29,6 +39,7 @@ RUN --mount=type=cache,target=/root/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go mod download
 COPY . .
+COPY --from=web /web/dist ./web/dist
 RUN --mount=type=cache,target=/root/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go build -tags ceph -trimpath -o /out/strata-gateway ./cmd/strata-gateway \
