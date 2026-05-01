@@ -81,7 +81,7 @@ The large `errors` bucket reflects how much of S3 we don't implement yet
 replication, checksums, etc. Each P-item closed in `ROADMAP.md` should
 shift some fraction of those errors into either pass or fail.
 
-### 2026-05-01 — `(commit pending)` (closing auth-per-chunk-signature cycle, US-005)
+### 2026-05-01 — `e397aa3` (closing auth-per-chunk-signature cycle, US-005)
 
 Default subset, `auth=required`, `make up-all` (Cassandra + Ceph RADOS).
 Cycle adds streaming SigV4 chain validation in `internal/auth/streaming.go`

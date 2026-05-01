@@ -144,7 +144,7 @@ adding more, prove what is there.
   test in `internal/s3api/sigv4_streaming_test.go` proves the buffer-then-validate
   invariant against the live HTTP path. See
   `docs/security/2026-streaming-sigv4-chunk-validation.md` for the operator note.
-  (commit pending)
+  (commit `e397aa3`)
 - **P3 — Per-bucket request signing keys (KMS-backed).** Rotate the signing material on
   a schedule, reject keys older than `STRATA_KEY_MAX_AGE`. Hooks onto the existing
   Vault provider.
