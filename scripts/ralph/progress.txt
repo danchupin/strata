@@ -107,6 +107,106 @@ Cycle: ralph/s3-tests-90
   fields onto it before persisting. Future multipart-shape additions
   hitchhike on obj.Manifest as a hint blob and are merged in the
   same lockstep across memory + cassandra stores.
+- Literal-"null" version-id (US-007): meta.NullVersionID = "null" is
+  the wire-level identity for objects written while bucket is Disabled
+  or Suspended. Wire layer (server.putObject, copy_object,
+  multipart.completeMultipart) sets obj.VersionID=meta.NullVersionID
+  whenever bucket.Versioning != Enabled. Storage layer recognises this
+  marker:
+  * memory: PutObject + CompleteMultipartUpload Suspended branch
+    filters the prior null row from the per-key slice and prepends
+    the new one (atomic under store mutex).
+  * cassandra: new `null_version boolean` column on objects. Storage
+    `version_id` is always a fresh TimeUUID so version_id DESC
+    "latest" detection stays coherent. Suspended PutObject runs a
+    logged batch with LWT (`DELETE … IF EXISTS; INSERT …`) keyed on
+    the existing null version id resolved via findNullVersionID. The
+    helper scans the per-key partition slice (clustered by (key,
+    version_id), small) for null_version=true.
+  * resolveVersionID, GetObject, DeleteObject all route versionID==
+    "null" through findNullVersionID. ListObjectVersions cursor +
+    shardCursor read null_version and surface VersionID="null" on
+    the wire so ListObjectVersions response carries `<VersionId>null
+    </VersionId>` per AWS observable.
+- The PRD's "tikv lockstep" note in the Codebase Patterns section is
+  stale on this branch (memory + cassandra only). US-007 ships across
+  both backends only.
+
+## 2026-05-01 - US-007 — Versioning literal-"null" version-id semantics
+- internal/meta/store.go: NullVersionID = "null" const. Doc-comment
+  pins three-shape vocabulary: "" (uninit) / "null" (literal) /
+  <uuid>.
+- internal/meta/memory/store.go: PutObject + CompleteMultipartUpload
+  switch versioned=true into a new branch when o.VersionID==
+  NullVersionID — filter prior null from the per-key slice, prepend
+  new entry. Disabled-bucket path (`!versioned`) keeps the
+  wipe-and-insert behavior; the inserted row now carries
+  VersionID="null" because the wire layer sets it.
+- internal/meta/cassandra/schema.go: ALTER TABLE objects ADD
+  null_version boolean. Legacy NULL decodes as false (backwards-
+  compatible).
+- internal/meta/cassandra/store.go:
+  * PutObject: when VersionID=="null" + versioned=true (Suspended),
+    runs a logged batch (DELETE existing-null IF EXISTS; INSERT new)
+    so the swap is atomic at the partition level. Disabled-bucket
+    path keeps DELETE-then-INSERT.
+  * findNullVersionID(ctx, bucket, shard, key) scans the partition
+    slice and returns the storage version_id of the row tagged
+    null_version=true. Used by GetObject, DeleteObject,
+    resolveVersionID, and PutObject's Suspended branch.
+  * GetObject + DeleteObject + resolveVersionID switch on versionID:
+    "" / "null" / <uuid>. The "null" arm uses findNullVersionID.
+  * versionCursor + shardCursor read null_version column and emit
+    VersionID="null" when set; ListObjectVersions / ListObjects
+    surface the literal on the wire.
+- internal/s3api/server.go::putObject and
+  internal/s3api/multipart.go::completeMultipart and
+  internal/s3api/copy_object.go::copyObject set obj.VersionID=
+  NullVersionID when bucket.Versioning != Enabled (covers Disabled +
+  Suspended). x-amz-version-id header logic at the wire stays gated
+  on IsVersioningActive (so Disabled buckets emit no header per AWS).
+- internal/meta/storetest/contract.go: caseNullVersionLifecycle.
+  Walks Disabled PUT → Enable + overwrite → Suspended replace →
+  ListObjectVersions → DELETE ?versionId=null. Runs against memory
+  unconditionally and cassandra under -tags integration.
+- internal/s3api/versioning_test.go:
+  * TestNullVersionPlainPut mirrors s3-tests
+    test_versioning_obj_plain_null_version_overwrite.
+  * TestNullVersionSuspendOverwrite mirrors test_versioning_obj_
+    suspend_versions: Suspended PUT replaces null while UUID rows
+    persist.
+  * TestNullVersionDelete pins ?versionId=null DELETE leaving UUID
+    intact.
+- **Learnings for future iterations:**
+  - Cassandra version_id column type is `timeuuid`. Stuffing a
+    sentinel UUID for "null" breaks latest-detection: `LIMIT 1
+    ORDER BY version_id DESC` would skew either way (zero-UUID =
+    always last; max-UUID = always first), and Enable+overwrite +
+    later Suspended PUT need recency ordering. Solution: keep
+    version_id as a fresh TimeUUID and add a sibling
+    `null_version boolean` flag. Translate at the codec boundary.
+  - findNullVersionID scans the partition slice, not a global
+    secondary-index lookup. The (bucket_id, shard) partition
+    clustered by (key, version_id) keeps each key's version slice
+    cheap (S3 max ~1k versions/key); ALLOW FILTERING is unnecessary.
+  - Disabled-bucket PUT keeps the wipe-then-insert pattern. AWS does
+    not expose Enabled→Disabled as a legal state-machine transition,
+    so a Disabled bucket cannot accumulate UUID-versioned rows; the
+    wipe is safe.
+  - Suspended PUT's atomicity requirement is per-partition-level —
+    same (bucket_id, shard) for the existing null and the new write.
+    A logged BATCH with two LWT predicates is allowed and gives the
+    Paxos guarantee CLAUDE.md's Cassandra-gotchas section calls for.
+  - x-amz-version-id header on PUT response: emit only when bucket
+    is versioned-active (Enabled OR Suspended). Suspended emits
+    `x-amz-version-id: null` (AWS observable); Disabled emits no
+    header. Existing IsVersioningActive() gate already does this.
+  - Suspended → DELETE without versionId in the future will need
+    similar null-replace semantics (a null delete-marker that
+    overwrites an existing null version). Out of scope for US-007;
+    see s3-tests test_versioning_obj_suspend_versions_simple if
+    re-opening.
+---
 
 ## 2026-05-01 - US-006 — Listing V2 continuation token as opaque base64
 - internal/s3api/list_token.go: encodeContinuationToken/decodeContinuationToken

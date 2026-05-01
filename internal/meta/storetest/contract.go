@@ -31,6 +31,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"ListObjectsHidesDeleteMarkers", caseListHidesDeleteMarkers},
 		{"ListObjectsDelimiterPrefixPaging", caseListDelimiterPrefixPaging},
 		{"CompleteMultipartPopulatesPartChunks", caseCompleteMultipartPopulatesPartChunks},
+		{"NullVersionLifecycle", caseNullVersionLifecycle},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -337,6 +338,107 @@ func caseListHidesDeleteMarkers(t *testing.T, s meta.Store) {
 	}
 	if !seenDM {
 		t.Errorf("ListObjectVersions should include delete markers")
+	}
+}
+
+// caseNullVersionLifecycle exercises US-007: literal-"null" version-id
+// stored on PUT-to-unversioned bucket survives Enabled+overwrite, gets
+// replaced atomically on Suspended PUT, and surfaces in GET / DELETE /
+// ListObjectVersions alongside UUID-versioned rows.
+func caseNullVersionLifecycle(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "nv", "o", "STANDARD")
+
+	put := func(body, versionID string, versioned bool) *meta.Object {
+		o := &meta.Object{
+			BucketID:     b.ID,
+			Key:          "k",
+			VersionID:    versionID,
+			StorageClass: "STANDARD",
+			ETag:         body,
+			Size:         int64(len(body)),
+			Mtime:        time.Now().UTC(),
+			Manifest:     &data.Manifest{Class: "STANDARD"},
+		}
+		if err := s.PutObject(ctx, o, versioned); err != nil {
+			t.Fatalf("put %q: %v", body, err)
+		}
+		return o
+	}
+
+	// 1. PUT to unversioned (Disabled) bucket — null version.
+	o1 := put("v1-disabled", meta.NullVersionID, false)
+	if o1.VersionID != meta.NullVersionID {
+		t.Fatalf("disabled put VersionID: got %q want %q", o1.VersionID, meta.NullVersionID)
+	}
+
+	// 2. ?versionId=null resolves on Disabled bucket.
+	got, err := s.GetObject(ctx, b.ID, "k", meta.NullVersionID)
+	if err != nil || got.ETag != "v1-disabled" {
+		t.Fatalf("disabled GET ?versionId=null: %v %+v", err, got)
+	}
+
+	// 3. Enable + overwrite — prior null preserved.
+	_ = s.SetBucketVersioning(ctx, "nv", meta.VersioningEnabled)
+	o2 := put("v2-uuid", "", true)
+	if o2.VersionID == meta.NullVersionID || o2.VersionID == "" {
+		t.Fatalf("enabled put VersionID: got %q (want UUID)", o2.VersionID)
+	}
+	got, err = s.GetObject(ctx, b.ID, "k", "")
+	if err != nil || got.ETag != "v2-uuid" {
+		t.Fatalf("latest after enable: %v %+v", err, got)
+	}
+	got, err = s.GetObject(ctx, b.ID, "k", meta.NullVersionID)
+	if err != nil || got.ETag != "v1-disabled" {
+		t.Fatalf("null version still readable: %v %+v", err, got)
+	}
+
+	// 4. Suspend + overwrite — null replaced atomically, UUID preserved.
+	_ = s.SetBucketVersioning(ctx, "nv", meta.VersioningSuspended)
+	o3 := put("v3-suspended", meta.NullVersionID, true)
+	if o3.VersionID != meta.NullVersionID {
+		t.Fatalf("suspended put VersionID: got %q want null", o3.VersionID)
+	}
+	got, err = s.GetObject(ctx, b.ID, "k", meta.NullVersionID)
+	if err != nil || got.ETag != "v3-suspended" {
+		t.Fatalf("null after suspend overwrite: %v %+v", err, got)
+	}
+	got, err = s.GetObject(ctx, b.ID, "k", o2.VersionID)
+	if err != nil || got.ETag != "v2-uuid" {
+		t.Fatalf("UUID version preserved through suspend: %v %+v", err, got)
+	}
+
+	// 5. ListObjectVersions surfaces both null + UUID.
+	lst, err := s.ListObjectVersions(ctx, b.ID, meta.ListOptions{Limit: 1000})
+	if err != nil {
+		t.Fatalf("list versions: %v", err)
+	}
+	var sawNull, sawUUID bool
+	for _, v := range lst.Versions {
+		switch v.VersionID {
+		case meta.NullVersionID:
+			sawNull = true
+			if v.ETag != "v3-suspended" {
+				t.Errorf("null row ETag: got %q want v3-suspended", v.ETag)
+			}
+		case o2.VersionID:
+			sawUUID = true
+		}
+	}
+	if !sawNull || !sawUUID {
+		t.Errorf("list missing rows (null=%v uuid=%v): %+v", sawNull, sawUUID, lst.Versions)
+	}
+
+	// 6. DELETE ?versionId=null targets the null row alone.
+	if _, err := s.DeleteObject(ctx, b.ID, "k", meta.NullVersionID, true); err != nil {
+		t.Fatalf("delete null: %v", err)
+	}
+	if _, err := s.GetObject(ctx, b.ID, "k", meta.NullVersionID); err != meta.ErrObjectNotFound {
+		t.Errorf("after delete null: got %v want ErrObjectNotFound", err)
+	}
+	got, err = s.GetObject(ctx, b.ID, "k", o2.VersionID)
+	if err != nil || got.ETag != "v2-uuid" {
+		t.Errorf("UUID survives null delete: %v %+v", err, got)
 	}
 }
 

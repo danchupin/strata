@@ -130,6 +130,13 @@ var alterStatements = []string{
 	`ALTER TABLE multipart_uploads ADD checksum_type text`,
 	`ALTER TABLE multipart_parts ADD checksum_value text`,
 	`ALTER TABLE multipart_parts ADD checksum_algorithm text`,
+	// US-s3-tests-90 US-007: literal-"null" version-id tracking. Rows
+	// written while the bucket is Disabled or Suspended carry
+	// null_version=true; the version_id column still stores a fresh
+	// timeuuid so latest-detection (LIMIT 1 ORDER BY version_id DESC)
+	// keeps working alongside Enabled-era UUID-versioned rows. NULL
+	// (legacy rows) decodes as false — backwards-compatible.
+	`ALTER TABLE objects ADD null_version boolean`,
 }
 
 func isColumnAlreadyExists(err error) bool {

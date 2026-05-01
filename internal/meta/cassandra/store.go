@@ -242,39 +242,93 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 		return err
 	}
 	shard := shardOf(o.Key, s.defaultShard)
+	// US-007: literal-"null" version-id rides on a fresh timeuuid in the
+	// version_id column with null_version=true; this keeps version_id DESC
+	// "latest" detection coherent with Enabled-era UUID rows.
+	nullVersion := o.VersionID == meta.NullVersionID
 	var versionID gocql.UUID
-	if o.VersionID != "" {
+	switch {
+	case nullVersion:
+		versionID = gocql.TimeUUID()
+	case o.VersionID != "":
 		parsed, err := gocql.ParseUUID(o.VersionID)
 		if err != nil {
 			return err
 		}
 		versionID = parsed
-	} else {
+	default:
 		versionID = gocql.TimeUUID()
 		o.VersionID = versionID.String()
-	}
-	if !versioned {
-		if err := s.s.Query(
-			`DELETE FROM objects WHERE bucket_id=? AND shard=? AND key=?`,
-			gocqlUUID(o.BucketID), shard, o.Key,
-		).WithContext(ctx).Exec(); err != nil {
-			return err
-		}
 	}
 	var retainUntil *time.Time
 	if !o.RetainUntil.IsZero() {
 		t := o.RetainUntil
 		retainUntil = &t
 	}
-	return s.s.Query(
-		`INSERT INTO objects (bucket_id, shard, key, version_id, is_latest, is_delete_marker,
+	insertCols := `INSERT INTO objects (bucket_id, shard, key, version_id, is_latest, is_delete_marker,
 		 size, etag, content_type, storage_class, mtime, manifest, user_meta, tags,
-		 retain_until, retain_mode, legal_hold)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 retain_until, retain_mode, legal_hold, null_version)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	insertArgs := []any{
 		gocqlUUID(o.BucketID), shard, o.Key, versionID, true, o.IsDeleteMarker,
 		o.Size, o.ETag, o.ContentType, o.StorageClass, o.Mtime, manifestBlob, o.UserMeta, o.Tags,
-		retainUntil, nilIfEmpty(o.RetainMode), o.LegalHold,
-	).WithContext(ctx).Exec()
+		retainUntil, nilIfEmpty(o.RetainMode), o.LegalHold, nullVersion,
+	}
+
+	switch {
+	case !versioned:
+		if err := s.s.Query(
+			`DELETE FROM objects WHERE bucket_id=? AND shard=? AND key=?`,
+			gocqlUUID(o.BucketID), shard, o.Key,
+		).WithContext(ctx).Exec(); err != nil {
+			return err
+		}
+	case nullVersion:
+		// Suspended-bucket null-replace: locate existing null row (if any)
+		// and atomically swap it for the new write. Existing UUID-versioned
+		// rows from the bucket's earlier Enabled lifetime stay untouched.
+		existingNullVID, found, err := s.findNullVersionID(ctx, o.BucketID, shard, o.Key)
+		if err != nil {
+			return err
+		}
+		if found {
+			batch := s.s.NewBatch(gocql.LoggedBatch).WithContext(ctx).SerialConsistency(gocql.LocalSerial)
+			batch.Query(
+				`DELETE FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=? IF EXISTS`,
+				gocqlUUID(o.BucketID), shard, o.Key, existingNullVID,
+			)
+			batch.Query(insertCols, insertArgs...)
+			return s.s.ExecuteBatch(batch)
+		}
+	}
+	return s.s.Query(insertCols, insertArgs...).WithContext(ctx).Exec()
+}
+
+// findNullVersionID scans the partition slice for the given key and
+// returns the version_id column of the row tagged null_version=true.
+// Per S3 semantics there is at most one such row per key; the partition
+// is small (clustered by (key, version_id)) so the slice is cheap.
+func (s *Store) findNullVersionID(ctx context.Context, bucketID uuid.UUID, shard int, key string) (gocql.UUID, bool, error) {
+	iter := s.s.Query(
+		`SELECT version_id, null_version FROM objects WHERE bucket_id=? AND shard=? AND key=?`,
+		gocqlUUID(bucketID), shard, key,
+	).WithContext(ctx).Iter()
+	var (
+		v       gocql.UUID
+		isNull  bool
+		foundV  gocql.UUID
+		found   bool
+	)
+	for iter.Scan(&v, &isNull) {
+		if isNull {
+			foundV = v
+			found = true
+		}
+	}
+	if err := iter.Close(); err != nil {
+		return gocql.UUID{}, false, err
+	}
+	return foundV, found, nil
 }
 
 func nilIfEmpty(s string) interface{} {
@@ -300,19 +354,39 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		retainUntil  time.Time
 		retainMode   string
 		legalHold    bool
+		nullVersion  bool
 	)
 	var err error
-	if versionID == "" {
+	switch versionID {
+	case "":
 		err = s.s.Query(
 			`SELECT version_id, is_latest, is_delete_marker, size, etag, content_type,
 			        storage_class, mtime, manifest, user_meta, tags,
-			        retain_until, retain_mode, legal_hold
+			        retain_until, retain_mode, legal_hold, null_version
 			 FROM objects WHERE bucket_id=? AND shard=? AND key=? LIMIT 1`,
 			gocqlUUID(bucketID), shard, key,
 		).WithContext(ctx).Scan(&versionUUID, &isLatest, &isDeleteMark, &size, &etag, &ctype,
 			&class, &mtime, &manifestBlob, &userMeta, &tags,
-			&retainUntil, &retainMode, &legalHold)
-	} else {
+			&retainUntil, &retainMode, &legalHold, &nullVersion)
+	case meta.NullVersionID:
+		// US-007: scan partition slice; pick the row tagged null_version=true.
+		nullVID, found, ferr := s.findNullVersionID(ctx, bucketID, shard, key)
+		if ferr != nil {
+			return nil, ferr
+		}
+		if !found {
+			return nil, meta.ErrObjectNotFound
+		}
+		err = s.s.Query(
+			`SELECT version_id, is_latest, is_delete_marker, size, etag, content_type,
+			        storage_class, mtime, manifest, user_meta, tags,
+			        retain_until, retain_mode, legal_hold, null_version
+			 FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
+			gocqlUUID(bucketID), shard, key, nullVID,
+		).WithContext(ctx).Scan(&versionUUID, &isLatest, &isDeleteMark, &size, &etag, &ctype,
+			&class, &mtime, &manifestBlob, &userMeta, &tags,
+			&retainUntil, &retainMode, &legalHold, &nullVersion)
+	default:
 		vUUID, perr := gocql.ParseUUID(versionID)
 		if perr != nil {
 			return nil, meta.ErrObjectNotFound
@@ -320,12 +394,12 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		err = s.s.Query(
 			`SELECT version_id, is_latest, is_delete_marker, size, etag, content_type,
 			        storage_class, mtime, manifest, user_meta, tags,
-			        retain_until, retain_mode, legal_hold
+			        retain_until, retain_mode, legal_hold, null_version
 			 FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
 			gocqlUUID(bucketID), shard, key, vUUID,
 		).WithContext(ctx).Scan(&versionUUID, &isLatest, &isDeleteMark, &size, &etag, &ctype,
 			&class, &mtime, &manifestBlob, &userMeta, &tags,
-			&retainUntil, &retainMode, &legalHold)
+			&retainUntil, &retainMode, &legalHold, &nullVersion)
 	}
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrObjectNotFound
@@ -340,10 +414,14 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 	if err != nil {
 		return nil, err
 	}
+	publicVID := versionUUID.String()
+	if nullVersion {
+		publicVID = meta.NullVersionID
+	}
 	return &meta.Object{
 		BucketID:       bucketID,
 		Key:            key,
-		VersionID:      versionUUID.String(),
+		VersionID:      publicVID,
 		IsLatest:       isLatest,
 		IsDeleteMarker: isDeleteMark,
 		Size:           size,
@@ -364,13 +442,28 @@ func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versi
 	shard := shardOf(key, s.defaultShard)
 
 	if versionID != "" {
-		vUUID, err := gocql.ParseUUID(versionID)
-		if err != nil {
-			return nil, meta.ErrObjectNotFound
-		}
 		o, err := s.GetObject(ctx, bucketID, key, versionID)
 		if err != nil {
 			return nil, err
+		}
+		var vUUID gocql.UUID
+		if versionID == meta.NullVersionID {
+			// US-007: resolve the storage-side timeuuid the row was written
+			// with so the DELETE targets the exact clustering key.
+			nullVID, found, ferr := s.findNullVersionID(ctx, bucketID, shard, key)
+			if ferr != nil {
+				return nil, ferr
+			}
+			if !found {
+				return nil, meta.ErrObjectNotFound
+			}
+			vUUID = nullVID
+		} else {
+			parsed, perr := gocql.ParseUUID(versionID)
+			if perr != nil {
+				return nil, meta.ErrObjectNotFound
+			}
+			vUUID = parsed
 		}
 		if err := s.s.Query(
 			`DELETE FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
@@ -649,16 +742,21 @@ func (c *versionCursor) advance() bool {
 		mtime        time.Time
 		manifestBlob []byte
 		userMeta     map[string]string
+		nullVersion  bool
 	)
 	if !c.iter.Scan(&key, &versionID, &isDeleteMark, &size, &etag, &ctype,
-		&class, &mtime, &manifestBlob, &userMeta) {
+		&class, &mtime, &manifestBlob, &userMeta, &nullVersion) {
 		return false
 	}
 	m, _ := decodeManifest(manifestBlob)
+	publicVID := versionID.String()
+	if nullVersion {
+		publicVID = meta.NullVersionID
+	}
 	c.current = &meta.Object{
 		BucketID:       c.bucket,
 		Key:            key,
-		VersionID:      versionID.String(),
+		VersionID:      publicVID,
 		IsDeleteMarker: isDeleteMark,
 		Size:           size,
 		ETag:           etag,
@@ -676,14 +774,14 @@ func (s *Store) openVersionCursor(ctx context.Context, bucketID uuid.UUID, shard
 	if marker == "" {
 		iter = s.s.Query(
 			`SELECT key, version_id, is_delete_marker, size, etag, content_type,
-			        storage_class, mtime, manifest, user_meta
+			        storage_class, mtime, manifest, user_meta, null_version
 			 FROM objects WHERE bucket_id=? AND shard=?`,
 			gocqlUUID(bucketID), shard,
 		).WithContext(ctx).PageSize(pageSize).Iter()
 	} else {
 		iter = s.s.Query(
 			`SELECT key, version_id, is_delete_marker, size, etag, content_type,
-			        storage_class, mtime, manifest, user_meta
+			        storage_class, mtime, manifest, user_meta, null_version
 			 FROM objects WHERE bucket_id=? AND shard=? AND key >= ?`,
 			gocqlUUID(bucketID), shard, marker,
 		).WithContext(ctx).PageSize(pageSize).Iter()
@@ -743,9 +841,10 @@ func (c *shardCursor) advance() bool {
 			mtime        time.Time
 			manifestBlob []byte
 			userMeta     map[string]string
+			nullVersion  bool
 		)
 		if !c.iter.Scan(&key, &versionID, &isDeleteMark, &size, &etag, &ctype,
-			&class, &mtime, &manifestBlob, &userMeta) {
+			&class, &mtime, &manifestBlob, &userMeta, &nullVersion) {
 			return false
 		}
 		if c.current != nil && key == c.current.Key {
@@ -756,10 +855,14 @@ func (c *shardCursor) advance() bool {
 			continue
 		}
 		m, _ := decodeManifest(manifestBlob)
+		publicVID := versionID.String()
+		if nullVersion {
+			publicVID = meta.NullVersionID
+		}
 		c.current = &meta.Object{
 			BucketID:     c.bucket,
 			Key:          key,
-			VersionID:    versionID.String(),
+			VersionID:    publicVID,
 			IsLatest:     true,
 			Size:         size,
 			ETag:         etag,
@@ -778,14 +881,14 @@ func (s *Store) openShardCursor(ctx context.Context, bucketID uuid.UUID, shard i
 	if marker == "" {
 		iter = s.s.Query(
 			`SELECT key, version_id, is_delete_marker, size, etag, content_type,
-			        storage_class, mtime, manifest, user_meta
+			        storage_class, mtime, manifest, user_meta, null_version
 			 FROM objects WHERE bucket_id=? AND shard=?`,
 			gocqlUUID(bucketID), shard,
 		).WithContext(ctx).PageSize(pageSize).Iter()
 	} else {
 		iter = s.s.Query(
 			`SELECT key, version_id, is_delete_marker, size, etag, content_type,
-			        storage_class, mtime, manifest, user_meta
+			        storage_class, mtime, manifest, user_meta, null_version
 			 FROM objects WHERE bucket_id=? AND shard=? AND key > ?`,
 			gocqlUUID(bucketID), shard, marker,
 		).WithContext(ctx).PageSize(pageSize).Iter()
@@ -864,22 +967,35 @@ func (s *Store) AckGCEntry(ctx context.Context, region string, e meta.GCEntry) e
 
 func (s *Store) resolveVersionID(ctx context.Context, bucketID uuid.UUID, key, versionID string) (gocql.UUID, int, error) {
 	shard := shardOf(key, s.defaultShard)
-	if versionID != "" {
+	switch versionID {
+	case "":
+		var v gocql.UUID
+		err := s.s.Query(
+			`SELECT version_id FROM objects WHERE bucket_id=? AND shard=? AND key=? LIMIT 1`,
+			gocqlUUID(bucketID), shard, key,
+		).WithContext(ctx).Scan(&v)
+		if errors.Is(err, gocql.ErrNotFound) {
+			return gocql.UUID{}, 0, meta.ErrObjectNotFound
+		}
+		return v, shard, err
+	case meta.NullVersionID:
+		// US-007: literal-"null" rides on a fresh timeuuid; resolve via the
+		// null_version flag for tags/retention/legal-hold ops.
+		v, found, err := s.findNullVersionID(ctx, bucketID, shard, key)
+		if err != nil {
+			return gocql.UUID{}, 0, err
+		}
+		if !found {
+			return gocql.UUID{}, 0, meta.ErrObjectNotFound
+		}
+		return v, shard, nil
+	default:
 		v, err := gocql.ParseUUID(versionID)
 		if err != nil {
 			return gocql.UUID{}, 0, meta.ErrObjectNotFound
 		}
 		return v, shard, nil
 	}
-	var v gocql.UUID
-	err := s.s.Query(
-		`SELECT version_id FROM objects WHERE bucket_id=? AND shard=? AND key=? LIMIT 1`,
-		gocqlUUID(bucketID), shard, key,
-	).WithContext(ctx).Scan(&v)
-	if errors.Is(err, gocql.ErrNotFound) {
-		return gocql.UUID{}, 0, meta.ErrObjectNotFound
-	}
-	return v, shard, err
 }
 
 func (s *Store) SetObjectStorage(ctx context.Context, bucketID uuid.UUID, key, versionID, expectedClass, newClass string, manifest *data.Manifest) (bool, error) {

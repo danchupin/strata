@@ -124,8 +124,8 @@
         "Tests pass"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "meta.NullVersionID const ('null') added in store.go. Memory + cassandra stores recognise VersionID=='null' as the literal-null version: handler at putObject/copyObject/completeMultipart sets obj.VersionID=meta.NullVersionID when bucket.Versioning != Enabled (covers Disabled + Suspended). Memory store: PutObject + CompleteMultipartUpload Suspended branch filters out the prior null row from the per-key slice and prepends the new one (atomic under store mutex), preserving UUID-versioned rows from the bucket's earlier Enabled lifetime. Cassandra: ALTER TABLE objects ADD null_version boolean. Storage column version_id still receives a fresh TimeUUID so version_id DESC 'latest' detection stays coherent across null + UUID rows. Suspended PutObject runs a logged batch (DELETE existing-null IF EXISTS; INSERT new) — same Paxos lineage as CreateBucket per CLAUDE.md Cassandra LWT rule. findNullVersionID helper scans the per-key partition slice for null_version=true; resolveVersionID + GetObject + DeleteObject route 'null' lookups through it. ListObjectVersions cursor + ListObjects shardCursor read null_version and surface VersionID='null' on the wire. New caseNullVersionLifecycle in storetest/contract.go covers Disabled→Enabled→Suspended round-trip across both backends. New TestNullVersion{PlainPut,SuspendOverwrite,Delete} in s3api/versioning_test.go mirror s3-tests test_versioning_obj_plain_null_version_overwrite + test_versioning_obj_suspend_versions semantics."
     },
     {
       "id": "US-008",

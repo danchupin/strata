@@ -489,6 +489,13 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		obj.Manifest.MultipartChecksum = compositeValue
 	}
 
+	// US-007: Complete on a non-Enabled bucket lands as the literal-"null"
+	// version, mirroring putObject. The meta layer recognises the marker
+	// and applies the same atomic null-replace invariant on Suspended
+	// buckets.
+	if b.Versioning != meta.VersioningEnabled {
+		obj.VersionID = meta.NullVersionID
+	}
 	orphans, err := s.Meta.CompleteMultipartUpload(r.Context(), obj, uploadID, parts, meta.IsVersioningActive(b.Versioning))
 	if err != nil {
 		if errors.Is(err, meta.ErrMultipartPartMissing) || errors.Is(err, meta.ErrMultipartETagMismatch) {

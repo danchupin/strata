@@ -137,6 +137,11 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, dstBucket *m
 		obj.LegalHold = true
 	}
 
+	// US-007: copy destination on a non-Enabled bucket lands as the
+	// literal-"null" version, mirroring putObject.
+	if dstBucket.Versioning != meta.VersioningEnabled {
+		obj.VersionID = meta.NullVersionID
+	}
 	if err := s.Meta.PutObject(r.Context(), obj, meta.IsVersioningActive(dstBucket.Versioning)); err != nil {
 		_ = s.Data.Delete(r.Context(), m)
 		mapMetaErr(w, r, err)

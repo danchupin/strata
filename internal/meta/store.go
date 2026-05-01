@@ -16,6 +16,14 @@ const (
 	VersioningSuspended = "Suspended"
 )
 
+// NullVersionID is the literal version-id S3 emits for objects written
+// while a bucket is Disabled or Suspended. PUTs against such buckets
+// land on a single row tagged with this version-id; ?versionId=null
+// resolves the row on GET / HEAD / DELETE. Stays addressable after the
+// bucket flips to Enabled — the prior null version is preserved
+// alongside any subsequent UUID-versioned rows.
+const NullVersionID = "null"
+
 var (
 	ErrBucketNotFound        = errors.New("bucket not found")
 	ErrBucketAlreadyExists   = errors.New("bucket already exists")

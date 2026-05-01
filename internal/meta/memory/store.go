@@ -199,10 +199,24 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 		o.VersionID = gocql.TimeUUID().String()
 	}
 	cp := *o
-	if versioned {
-		bucket[o.Key] = append([]*meta.Object{&cp}, bucket[o.Key]...)
-	} else {
+	switch {
+	case !versioned:
 		bucket[o.Key] = []*meta.Object{&cp}
+	case o.VersionID == meta.NullVersionID:
+		// US-007 Suspended-bucket PUT: replace any existing null version
+		// atomically while preserving non-null rows. The new null becomes
+		// the latest entry (slot 0) — older UUID-versioned writes slide
+		// down behind it.
+		existing := bucket[o.Key]
+		filtered := make([]*meta.Object, 0, len(existing))
+		for _, v := range existing {
+			if v.VersionID != meta.NullVersionID {
+				filtered = append(filtered, v)
+			}
+		}
+		bucket[o.Key] = append([]*meta.Object{&cp}, filtered...)
+	default:
+		bucket[o.Key] = append([]*meta.Object{&cp}, bucket[o.Key]...)
 	}
 	return nil
 }
@@ -805,10 +819,22 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 		return nil, meta.ErrBucketNotFound
 	}
 	cp := *obj
-	if versioned {
-		bucket[obj.Key] = append([]*meta.Object{&cp}, bucket[obj.Key]...)
-	} else {
+	switch {
+	case !versioned:
 		bucket[obj.Key] = []*meta.Object{&cp}
+	case obj.VersionID == meta.NullVersionID:
+		// US-007 Suspended-bucket Complete: same null-replace invariant
+		// as PutObject — drop the prior null version, prepend the new.
+		existing := bucket[obj.Key]
+		filtered := make([]*meta.Object, 0, len(existing))
+		for _, v := range existing {
+			if v.VersionID != meta.NullVersionID {
+				filtered = append(filtered, v)
+			}
+		}
+		bucket[obj.Key] = append([]*meta.Object{&cp}, filtered...)
+	default:
+		bucket[obj.Key] = append([]*meta.Object{&cp}, bucket[obj.Key]...)
 	}
 
 	var orphans []*data.Manifest

@@ -511,6 +511,13 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	if tagHdr := r.Header.Get("x-amz-tagging"); tagHdr != "" {
 		obj.Tags = parseTagHeader(tagHdr)
 	}
+	// US-007: any PUT on a non-Enabled bucket lands as the literal-"null"
+	// version. Disabled wipes the prior row (single null row); Suspended
+	// atomically replaces the existing null while preserving UUID-versioned
+	// rows from the bucket's earlier Enabled lifetime.
+	if b.Versioning != meta.VersioningEnabled {
+		obj.VersionID = meta.NullVersionID
+	}
 	if err := s.Meta.PutObject(r.Context(), obj, meta.IsVersioningActive(b.Versioning)); err != nil {
 		_ = s.Data.Delete(r.Context(), m)
 		mapMetaErr(w, r, err)
