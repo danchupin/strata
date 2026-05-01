@@ -27,7 +27,7 @@
       "title": "?partNumber=N GET serves the exact part body",
       "description": "As an S3 client, when I GET an object with ?partNumber=3, I expect to receive only the bytes of part 3, plus headers x-amz-mp-parts-count and Content-Range: bytes <off>-<end>/<total>.",
       "acceptanceCriteria": [
-        "internal/s3api/object_get.go::getObject handles ?partNumber=N query param: looks up PartChunks[N-1] from the decoded manifest",
+        "internal/s3api/server.go::getObject (line ~493) handles ?partNumber=N query param when uploadId is NOT set: looks up PartChunks[N-1] from the decoded manifest. The existing ?partNumber=N + uploadId path in server.go around line 393 (UploadPart for in-progress multipart) is unchanged",
         "Returns 416 InvalidRange when N <= 0 or N > len(PartChunks)",
         "Returns 416 for non-multipart objects when partNumber is set",
         "Sets response headers: x-amz-mp-parts-count, Content-Range, Content-Length=<part size>, ETag of the part (not whole object)",
@@ -63,7 +63,7 @@
       "title": "Multipart copy FlexibleChecksum path",
       "description": "As an S3 client copying a multipart object via UploadPartCopy, the boto SDK auto-generates a checksum on the copy body and expects the gateway to recompute and validate it. Today we accept the body without checksum validation, which the SDK's FlexibleChecksumError catches.",
       "acceptanceCriteria": [
-        "internal/s3api/multipart_copy.go::uploadPartCopy reads x-amz-checksum-algorithm header from request",
+        "internal/s3api/multipart.go::uploadPartCopy (line ~148) reads x-amz-checksum-algorithm header from request",
         "When set, recompute the named checksum over the body bytes during streaming (do not buffer)",
         "Compare with x-amz-checksum-<algo> header value if client supplied; mismatch returns BadDigest",
         "Store the computed checksum in multipart_uploads.parts[N].checksum_value so US-001's PartChunks carries it forward",
@@ -80,7 +80,7 @@
       "title": "Listing — delimiter+prefix interaction",
       "description": "As an S3 client listing with both prefix and delimiter, the response must group keys under the prefix into CommonPrefixes based on the delimiter, with NextMarker reflecting the last grouped prefix correctly.",
       "acceptanceCriteria": [
-        "internal/s3api/list_objects.go handles prefix=foo/&delimiter=/ by extracting the substring between the prefix end and the next delimiter occurrence in each key",
+        "internal/s3api/server.go::listObjects (line ~272) handles prefix=foo/&delimiter=/ by extracting the substring between the prefix end and the next delimiter occurrence in each key",
         "CommonPrefixes deduplicates within a page, in lexical order",
         "NextMarker (V1) / NextContinuationToken (V2) is set to the last key OR the last CommonPrefix returned, whichever is lexically later",
         "s3-tests test_bucket_list_delimiter_prefix* pass (currently 1-2 failures in this category)",
@@ -132,7 +132,7 @@
       "title": "Multipart — Complete preconditions (If-Match / If-None-Match)",
       "description": "As an S3 client completing a multipart upload conditionally, the gateway must gate the LWT path on If-Match / If-None-Match headers referring to the eventual object ETag (not the upload ID).",
       "acceptanceCriteria": [
-        "internal/s3api/multipart.go::completeMultipartUpload reads If-Match / If-None-Match from the request",
+        "internal/s3api/multipart.go::completeMultipart (line ~239) reads If-Match / If-None-Match from the request",
         "When If-None-Match: * is set and the object exists, returns 412 PreconditionFailed",
         "When If-Match is set and does NOT match the existing object's ETag, returns 412 PreconditionFailed",
         "Precondition check happens BEFORE the LWT flip (so a conflicting Complete attempt does not leak 'completing' state)",
@@ -150,7 +150,7 @@
       "title": "Multipart — size-too-small + resend-ordering edge cases",
       "description": "As an S3 client, the gateway must reject CompleteMultipartUpload when any non-last part is smaller than 5 MiB, AND must handle the case where a resent part finishes after a later part (resend-first-finishes-last).",
       "acceptanceCriteria": [
-        "completeMultipartUpload enumerates parts in order, asserts every part except the last is ≥5 MiB (5*1024*1024 bytes); returns EntityTooSmall on violation",
+        "internal/s3api/multipart.go::completeMultipart enumerates parts in order, asserts every part except the last is ≥5 MiB (5*1024*1024 bytes); returns EntityTooSmall on violation",
         "When two UploadPart calls land for the same part number with different ETags (race), the LATER write wins (LWT on multipart_uploads.parts keyed on part_number; same shape on memory + tikv)",
         "CompleteMultipartUpload body's <Part> list specifies ETags; mismatch with stored part ETag = InvalidPart",
         "s3-tests test_multipart_upload_size_too_small, test_multipart_upload_resend_part, test_multipart_resend_first_finishes_last pass",
@@ -166,7 +166,7 @@
       "title": "Multipart — CompleteMultipartUpload SHA256 input validation",
       "description": "As an S3 client supplying a composite-checksum SHA256 on CompleteMultipartUpload, the gateway must validate the supplied digest against the recomputed value and reject mismatches.",
       "acceptanceCriteria": [
-        "completeMultipartUpload reads x-amz-checksum-sha256 from request headers",
+        "internal/s3api/multipart.go::completeMultipart reads x-amz-checksum-sha256 from request headers",
         "When set, recomputes the composite SHA-256 over part digests and compares; mismatch returns BadDigest",
         "Same handling for CRC32, CRC32C, SHA1",
         "s3-tests test_multipart_checksum_sha256 passes",
