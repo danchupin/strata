@@ -1002,9 +1002,9 @@ func (s *Store) CreateMultipartUpload(ctx context.Context, mu *meta.MultipartUpl
 		return fmt.Errorf("upload_id: %w", err)
 	}
 	return s.s.Query(
-		`INSERT INTO multipart_uploads (bucket_id, upload_id, key, status, storage_class, content_type, initiated_at, backend_upload_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		gocqlUUID(mu.BucketID), uploadUUID, mu.Key, "uploading", mu.StorageClass, mu.ContentType, mu.InitiatedAt, nilIfEmpty(mu.BackendUploadID),
+		`INSERT INTO multipart_uploads (bucket_id, upload_id, key, status, storage_class, content_type, initiated_at, backend_upload_id, checksum_algorithm, checksum_type)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		gocqlUUID(mu.BucketID), uploadUUID, mu.Key, "uploading", mu.StorageClass, mu.ContentType, mu.InitiatedAt, nilIfEmpty(mu.BackendUploadID), nilIfEmpty(mu.ChecksumAlgorithm), nilIfEmpty(mu.ChecksumType),
 	).WithContext(ctx).Exec()
 }
 
@@ -1014,15 +1014,16 @@ func (s *Store) GetMultipartUpload(ctx context.Context, bucketID uuid.UUID, uplo
 		return nil, meta.ErrMultipartNotFound
 	}
 	var (
-		key, status, class, ctype string
-		initiated                 time.Time
-		backendUploadID           string
+		key, status, class, ctype  string
+		initiated                  time.Time
+		backendUploadID            string
+		checksumAlgo, checksumType string
 	)
 	err = s.s.Query(
-		`SELECT key, status, storage_class, content_type, initiated_at, backend_upload_id
+		`SELECT key, status, storage_class, content_type, initiated_at, backend_upload_id, checksum_algorithm, checksum_type
 		 FROM multipart_uploads WHERE bucket_id=? AND upload_id=?`,
 		gocqlUUID(bucketID), uploadUUID,
-	).WithContext(ctx).Scan(&key, &status, &class, &ctype, &initiated, &backendUploadID)
+	).WithContext(ctx).Scan(&key, &status, &class, &ctype, &initiated, &backendUploadID, &checksumAlgo, &checksumType)
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrMultipartNotFound
 	}
@@ -1030,14 +1031,16 @@ func (s *Store) GetMultipartUpload(ctx context.Context, bucketID uuid.UUID, uplo
 		return nil, err
 	}
 	return &meta.MultipartUpload{
-		BucketID:        bucketID,
-		UploadID:        uploadID,
-		Key:             key,
-		Status:          status,
-		StorageClass:    class,
-		ContentType:     ctype,
-		InitiatedAt:     initiated,
-		BackendUploadID: backendUploadID,
+		BucketID:          bucketID,
+		UploadID:          uploadID,
+		Key:               key,
+		Status:            status,
+		StorageClass:      class,
+		ContentType:       ctype,
+		InitiatedAt:       initiated,
+		BackendUploadID:   backendUploadID,
+		ChecksumAlgorithm: checksumAlgo,
+		ChecksumType:      checksumType,
 	}, nil
 }
 
@@ -1046,32 +1049,35 @@ func (s *Store) ListMultipartUploads(ctx context.Context, bucketID uuid.UUID, pr
 		limit = 1000
 	}
 	iter := s.s.Query(
-		`SELECT upload_id, key, status, storage_class, content_type, initiated_at, backend_upload_id
+		`SELECT upload_id, key, status, storage_class, content_type, initiated_at, backend_upload_id, checksum_algorithm, checksum_type
 		 FROM multipart_uploads WHERE bucket_id=?`,
 		gocqlUUID(bucketID),
 	).WithContext(ctx).Iter()
 	defer iter.Close()
 
 	var (
-		out                       []*meta.MultipartUpload
-		uploadUUID                gocql.UUID
-		key, status, class, ctype string
-		initiated                 time.Time
-		backendUploadID           string
+		out                        []*meta.MultipartUpload
+		uploadUUID                 gocql.UUID
+		key, status, class, ctype  string
+		initiated                  time.Time
+		backendUploadID            string
+		checksumAlgo, checksumType string
 	)
-	for iter.Scan(&uploadUUID, &key, &status, &class, &ctype, &initiated, &backendUploadID) {
+	for iter.Scan(&uploadUUID, &key, &status, &class, &ctype, &initiated, &backendUploadID, &checksumAlgo, &checksumType) {
 		if prefix != "" && !strings.HasPrefix(key, prefix) {
 			continue
 		}
 		out = append(out, &meta.MultipartUpload{
-			BucketID:        bucketID,
-			UploadID:        uploadUUID.String(),
-			Key:             key,
-			Status:          status,
-			StorageClass:    class,
-			ContentType:     ctype,
-			InitiatedAt:     initiated,
-			BackendUploadID: backendUploadID,
+			BucketID:          bucketID,
+			UploadID:          uploadUUID.String(),
+			Key:               key,
+			Status:            status,
+			StorageClass:      class,
+			ContentType:       ctype,
+			InitiatedAt:       initiated,
+			BackendUploadID:   backendUploadID,
+			ChecksumAlgorithm: checksumAlgo,
+			ChecksumType:      checksumType,
 		})
 		if len(out) >= limit {
 			break
@@ -1093,9 +1099,9 @@ func (s *Store) SavePart(ctx context.Context, bucketID uuid.UUID, uploadID strin
 		return err
 	}
 	return s.s.Query(
-		`INSERT INTO multipart_parts (bucket_id, upload_id, part_number, etag, size, mtime, manifest, backend_etag)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		gocqlUUID(bucketID), uploadUUID, part.PartNumber, part.ETag, part.Size, time.Now().UTC(), manifestBlob, nilIfEmpty(part.BackendETag),
+		`INSERT INTO multipart_parts (bucket_id, upload_id, part_number, etag, size, mtime, manifest, backend_etag, checksum_value, checksum_algorithm)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		gocqlUUID(bucketID), uploadUUID, part.PartNumber, part.ETag, part.Size, time.Now().UTC(), manifestBlob, nilIfEmpty(part.BackendETag), nilIfEmpty(part.ChecksumValue), nilIfEmpty(part.ChecksumAlgorithm),
 	).WithContext(ctx).Exec()
 }
 
@@ -1105,33 +1111,36 @@ func (s *Store) ListParts(ctx context.Context, bucketID uuid.UUID, uploadID stri
 		return nil, meta.ErrMultipartNotFound
 	}
 	iter := s.s.Query(
-		`SELECT part_number, etag, size, mtime, manifest, backend_etag
+		`SELECT part_number, etag, size, mtime, manifest, backend_etag, checksum_value, checksum_algorithm
 		 FROM multipart_parts WHERE bucket_id=? AND upload_id=?`,
 		gocqlUUID(bucketID), uploadUUID,
 	).WithContext(ctx).Iter()
 	defer iter.Close()
 
 	var (
-		out          []*meta.MultipartPart
-		partNumber   int
-		etag         string
-		size         int64
-		mtime        time.Time
-		manifestBlob []byte
-		backendETag  string
+		out                        []*meta.MultipartPart
+		partNumber                 int
+		etag                       string
+		size                       int64
+		mtime                      time.Time
+		manifestBlob               []byte
+		backendETag                string
+		checksumValue, checksumAlg string
 	)
-	for iter.Scan(&partNumber, &etag, &size, &mtime, &manifestBlob, &backendETag) {
+	for iter.Scan(&partNumber, &etag, &size, &mtime, &manifestBlob, &backendETag, &checksumValue, &checksumAlg) {
 		m, err := decodeManifest(manifestBlob)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, &meta.MultipartPart{
-			PartNumber:  partNumber,
-			ETag:        etag,
-			Size:        size,
-			Mtime:       mtime,
-			Manifest:    m,
-			BackendETag: backendETag,
+			PartNumber:        partNumber,
+			ETag:              etag,
+			Size:              size,
+			Mtime:             mtime,
+			Manifest:          m,
+			BackendETag:       backendETag,
+			ChecksumValue:     checksumValue,
+			ChecksumAlgorithm: checksumAlg,
 		})
 	}
 	if err := iter.Close(); err != nil {
@@ -1171,7 +1180,18 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 		byNumber[p.PartNumber] = p
 	}
 
-	preAssembled := obj.Manifest != nil
+	// US-003 FlexibleChecksum: gateway pre-fills MultipartChecksum* on
+	// obj.Manifest as composite-checksum hints. Capture them now so the
+	// chunks-shape branch can replay them onto the freshly-built manifest.
+	var hintChecksumAlgo, hintChecksumType, hintChecksum string
+	if obj.Manifest != nil {
+		hintChecksumAlgo = obj.Manifest.MultipartChecksumAlgorithm
+		hintChecksumType = obj.Manifest.MultipartChecksumType
+		hintChecksum = obj.Manifest.MultipartChecksum
+	}
+	// preAssembled is the US-010 backend pass-through sentinel; a bare
+	// obj.Manifest carrying only checksum hints is NOT preAssembled.
+	preAssembled := obj.Manifest != nil && obj.Manifest.BackendRef != nil
 	used := make(map[int]bool, len(parts))
 	var chunks []data.ChunkRef
 	partRanges := make([]data.PartRange, 0, len(parts))
@@ -1188,10 +1208,12 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 			chunks = append(chunks, p.Manifest.Chunks...)
 		}
 		partRanges = append(partRanges, data.PartRange{
-			PartNumber: cp.PartNumber,
-			Offset:     totalSize,
-			Size:       p.Size,
-			ETag:       p.ETag,
+			PartNumber:        cp.PartNumber,
+			Offset:            totalSize,
+			Size:              p.Size,
+			ETag:              p.ETag,
+			ChecksumValue:     p.ChecksumValue,
+			ChecksumAlgorithm: p.ChecksumAlgorithm,
 		})
 		totalSize += p.Size
 		used[cp.PartNumber] = true
@@ -1208,12 +1230,15 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 		obj.Manifest.PartChunks = partRanges
 	} else {
 		obj.Manifest = &data.Manifest{
-			Class:      obj.StorageClass,
-			Size:       totalSize,
-			ChunkSize:  data.DefaultChunkSize,
-			ETag:       obj.ETag,
-			Chunks:     chunks,
-			PartChunks: partRanges,
+			Class:                      obj.StorageClass,
+			Size:                       totalSize,
+			ChunkSize:                  data.DefaultChunkSize,
+			ETag:                       obj.ETag,
+			Chunks:                     chunks,
+			PartChunks:                 partRanges,
+			MultipartChecksumAlgorithm: hintChecksumAlgo,
+			MultipartChecksumType:      hintChecksumType,
+			MultipartChecksum:          hintChecksum,
 		}
 		obj.Size = totalSize
 	}

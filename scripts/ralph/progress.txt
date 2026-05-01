@@ -79,12 +79,85 @@ Cycle: ralph/s3-tests-90
   are JSON-only — wire compatibility is across JSON shapes.
 - Multipart pass-through (US-010 of s3-over-s3 cycle) sets
   obj.Manifest BEFORE meta.CompleteMultipartUpload runs. The meta
-  layer detects this via `preAssembled := obj.Manifest != nil` and
-  appends PartChunks onto the pre-built manifest instead of building
-  a chunks-shape manifest. Future multipart-shape additions (US-003
-  composite checksum, US-004 per-part checksum) must follow the same
-  branch — populate on the existing manifest in the preAssembled
-  branch, build fresh in the chunks-shape branch.
+  layer detects this and appends PartChunks onto the pre-built
+  manifest instead of building a chunks-shape manifest. **US-003
+  tightened the sentinel from `obj.Manifest != nil` to
+  `obj.Manifest != nil && obj.Manifest.BackendRef != nil`** — so a
+  bare `obj.Manifest` carrying only hint fields (composite checksum
+  in US-003, future hints to come) is NOT pre-assembled and the meta
+  layer still builds the chunks-shape manifest, copying the hint
+  fields onto it before persisting. Future multipart-shape additions
+  hitchhike on obj.Manifest as a hint blob and are merged in the
+  same lockstep across memory + cassandra stores.
+
+## 2026-05-01 - US-003 — Per-part composite-checksum response shape
+- Added MultipartChecksum{Algorithm,Type,} fields onto data.Manifest
+  with `omitempty` JSON tags + protobuf field numbers 19/20/21
+  documented in manifest.proto.
+- Added ChecksumAlgorithm + ChecksumType to meta.MultipartUpload and
+  ChecksumValue + ChecksumAlgorithm to meta.MultipartPart.
+- Cassandra schema.go ALTERs add checksum_algorithm + checksum_type to
+  multipart_uploads, checksum_value + checksum_algorithm to
+  multipart_parts. INSERT/SELECT on CreateMultipartUpload /
+  GetMultipartUpload / ListMultipartUploads / SavePart / ListParts
+  carry the new columns.
+- internal/s3api/checksum.go adds normalizeChecksumAlgo,
+  newChecksumHasher, checksumHeader, compositeChecksum helpers.
+- initiateMultipart reads `x-amz-checksum-algorithm` +
+  `x-amz-checksum-type` (default COMPOSITE when algo set), stamps
+  onto MultipartUpload. Invalid type → ErrInvalidArgument.
+- uploadPart captures `x-amz-checksum-<algo>` onto MultipartPart
+  (both native and US-010 backend pass-through paths) and echoes on
+  the response. Native path stores via PutChunks; pass-through
+  routes to UploadBackendPart. Same fields reach PartChunks at
+  Complete time.
+- completeMultipart: when algorithm is set, computes COMPOSITE hash-
+  of-hashes from per-part digests (algorithm-specific:
+  sha256/sha1/crc32-IEEE/crc32-Castagnoli; raw digest concat → hash →
+  base64 → `-<numparts>`), OR adopts client-supplied
+  `x-amz-checksum-<algo>` from the Complete request for FULL_OBJECT.
+  Stamps onto obj.Manifest.MultipartChecksum* as composite-checksum
+  hints; meta layer copies them onto the persisted manifest.
+- Meta CompleteMultipartUpload preAssembled sentinel tightened from
+  `obj.Manifest != nil` to `obj.Manifest != nil && obj.Manifest.BackendRef != nil`
+  so a hint-only manifest does not short-circuit chunks-shape
+  assembly. Both memory + cassandra mirror.
+- completeMultipartResult XML expanded with ChecksumCRC32 / CRC32C /
+  SHA1 / SHA256 / ChecksumType (`omitempty` so opt-out users see the
+  pre-cycle response shape unchanged).
+- getObject (HEAD/GET, no partNumber) emits
+  `x-amz-checksum-<algo>` + `x-amz-checksum-type` from the persisted
+  manifest when `x-amz-checksum-mode: ENABLED`.
+- getObjectPart (?partNumber=N) emits the per-part checksum from
+  PartChunks[N-1].ChecksumValue under the same opt-in.
+- Test coverage in internal/s3api/multipart_checksum_test.go:
+  TestMultipartFlexibleChecksumComposite covers SHA256/SHA1/CRC32/
+  CRC32C round-trip across UploadPart echo, Complete XML composite,
+  HEAD composite, HEAD partNumber. TestMultipartFullObjectChecksum
+  pins the FULL_OBJECT pass-through. TestMultipartChecksumOptOut
+  pins the opt-out negative.
+- **Learnings for future iterations:**
+  - `obj.Manifest` was a binary "preAssembled" sentinel; this story
+    needed it to also carry composite-checksum hints in the chunks-
+    shape native path. Tightened sentinel to BackendRef!=nil. Future
+    additions that hitchhike on obj.Manifest as a hint blob can
+    layer cleanly without re-touching the sentinel.
+  - The composite digest format MATCHES the named algorithm
+    (SHA256-of-hashes for SHA256, CRC32-of-hashes for CRC32, etc.) —
+    NOT always SHA-256 as the PRD note implies. Each algo hashes
+    its own raw-digest concatenation. Wire format `<base64>-<n>`
+    for COMPOSITE; FULL_OBJECT is `<base64>` (no suffix) and only
+    legal for CRC variants in modern AWS SDKs.
+  - x-amz-checksum-<algo> header values are base64 of RAW digests
+    (binary), not hex. Decode to bytes before concatenation.
+  - HEAD without `x-amz-checksum-mode: ENABLED` must NOT emit
+    checksum headers — boto's auto-validator otherwise re-validates
+    against the body and trips when the SDK didn't expect a
+    composite.
+  - Cassandra ALTER list grows; `nilIfEmpty` keeps zero-value
+    columns NULL so legacy rows (no algorithm) decode as
+    `ChecksumAlgorithm == ""`.
+---
 
 ## 2026-05-01 - US-002 — ?partNumber=N GET serves the exact part body
 - Added `Server.getObjectPart` helper in internal/s3api/server.go.

@@ -53,6 +53,19 @@ type Manifest struct {
 	// distinction is the "is multipart" sentinel — an empty slice would
 	// be ambiguous).
 	PartChunks []PartRange `json:",omitempty"`
+	// MultipartChecksumAlgorithm names the algorithm declared on
+	// CreateMultipartUpload (CRC32 / CRC32C / SHA1 / SHA256). Empty when
+	// the client did not opt into FlexibleChecksum on Initiate.
+	MultipartChecksumAlgorithm string `json:",omitempty"`
+	// MultipartChecksumType is COMPOSITE (hash-of-hashes, default for
+	// SHA1/SHA256) or FULL_OBJECT (whole-object hash supplied by the
+	// client at Complete time, default for CRC32/CRC32C in modern SDKs).
+	MultipartChecksumType string `json:",omitempty"`
+	// MultipartChecksum carries the wire value of the composite checksum
+	// reported back to the client. For COMPOSITE the format is
+	// `<base64>-<numparts>`; for FULL_OBJECT it is `<base64>` and the value
+	// is the digest the client supplied on CompleteMultipartUpload.
+	MultipartChecksum string `json:",omitempty"`
 }
 
 // PartRange describes the byte-range and per-part metadata of one part of

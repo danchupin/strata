@@ -716,7 +716,22 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 	}
 	st.upload.Status = "completing"
 
-	preAssembled := obj.Manifest != nil
+	// US-003 FlexibleChecksum: gateway pre-fills MultipartChecksum* on
+	// obj.Manifest as composite-checksum hints. Capture them now so the
+	// chunks-shape branch can replay them onto the freshly-built manifest.
+	var hintChecksumAlgo, hintChecksumType, hintChecksum string
+	if obj.Manifest != nil {
+		hintChecksumAlgo = obj.Manifest.MultipartChecksumAlgorithm
+		hintChecksumType = obj.Manifest.MultipartChecksumType
+		hintChecksum = obj.Manifest.MultipartChecksum
+	}
+	// preAssembled is the US-010 backend pass-through sentinel: a manifest
+	// the gateway already shaped with BackendRef, where chunks-shape
+	// assembly must be skipped. A bare obj.Manifest with only checksum
+	// hints (no BackendRef, no Chunks) is NOT preAssembled — the meta
+	// layer still constructs the chunks-shape manifest, just merging the
+	// checksum hints onto it before persisting.
+	preAssembled := obj.Manifest != nil && obj.Manifest.BackendRef != nil
 	used := make(map[int]bool, len(parts))
 	var chunks []data.ChunkRef
 	partRanges := make([]data.PartRange, 0, len(parts))
@@ -735,10 +750,12 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 			chunks = append(chunks, p.Manifest.Chunks...)
 		}
 		partRanges = append(partRanges, data.PartRange{
-			PartNumber: cp.PartNumber,
-			Offset:     totalSize,
-			Size:       p.Size,
-			ETag:       p.ETag,
+			PartNumber:        cp.PartNumber,
+			Offset:            totalSize,
+			Size:              p.Size,
+			ETag:              p.ETag,
+			ChecksumValue:     p.ChecksumValue,
+			ChecksumAlgorithm: p.ChecksumAlgorithm,
 		})
 		totalSize += p.Size
 		used[cp.PartNumber] = true
@@ -756,12 +773,15 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 		obj.Manifest.PartChunks = partRanges
 	} else {
 		obj.Manifest = &data.Manifest{
-			Class:      obj.StorageClass,
-			Size:       totalSize,
-			ChunkSize:  data.DefaultChunkSize,
-			ETag:       obj.ETag,
-			Chunks:     chunks,
-			PartChunks: partRanges,
+			Class:                      obj.StorageClass,
+			Size:                       totalSize,
+			ChunkSize:                  data.DefaultChunkSize,
+			ETag:                       obj.ETag,
+			Chunks:                     chunks,
+			PartChunks:                 partRanges,
+			MultipartChecksumAlgorithm: hintChecksumAlgo,
+			MultipartChecksumType:      hintChecksumType,
+			MultipartChecksum:          hintChecksum,
 		}
 		obj.Size = totalSize
 	}

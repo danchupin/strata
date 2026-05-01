@@ -538,6 +538,19 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 			w.Header().Set("x-amz-server-side-encryption-aws-kms-key-id", o.Manifest.SSE.KMSKeyID)
 		}
 	}
+	// US-003 FlexibleChecksum: when the client opts in via
+	// `x-amz-checksum-mode: ENABLED` and the object was finalised with a
+	// composite checksum (multipart with `x-amz-checksum-algorithm` set
+	// on Initiate), echo the composite back as `x-amz-checksum-<algo>`.
+	if strings.EqualFold(r.Header.Get("x-amz-checksum-mode"), "ENABLED") &&
+		o.Manifest != nil && o.Manifest.MultipartChecksumAlgorithm != "" && o.Manifest.MultipartChecksum != "" {
+		if h := checksumHeader(o.Manifest.MultipartChecksumAlgorithm); h != "" {
+			w.Header().Set(h, o.Manifest.MultipartChecksum)
+		}
+		if o.Manifest.MultipartChecksumType != "" {
+			w.Header().Set("x-amz-checksum-type", o.Manifest.MultipartChecksumType)
+		}
+	}
 	if len(o.Tags) > 0 {
 		w.Header().Set("x-amz-tagging-count", strconv.Itoa(len(o.Tags)))
 	}
@@ -625,6 +638,19 @@ func (s *Server) getObjectPart(w http.ResponseWriter, r *http.Request, b *meta.B
 	w.Header().Set("x-amz-storage-class", o.StorageClass)
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("x-amz-mp-parts-count", strconv.Itoa(len(o.Manifest.PartChunks)))
+	// US-003 FlexibleChecksum: ?partNumber=N + `x-amz-checksum-mode: ENABLED`
+	// echoes the per-part digest captured at UploadPart time. Falls back to
+	// the upload's algorithm when the part itself didn't record one (older
+	// part rows from before US-003).
+	if strings.EqualFold(r.Header.Get("x-amz-checksum-mode"), "ENABLED") && pr.ChecksumValue != "" {
+		algo := pr.ChecksumAlgorithm
+		if algo == "" {
+			algo = o.Manifest.MultipartChecksumAlgorithm
+		}
+		if h := checksumHeader(algo); h != "" {
+			w.Header().Set(h, pr.ChecksumValue)
+		}
+	}
 	if o.Manifest.SSE != nil && o.Manifest.SSE.Algorithm != "" {
 		w.Header().Set("x-amz-server-side-encryption", o.Manifest.SSE.Algorithm)
 		if o.Manifest.SSE.KMSKeyID != "" {

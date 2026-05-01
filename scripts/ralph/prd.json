@@ -55,8 +55,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Initiate reads x-amz-checksum-algorithm + x-amz-checksum-type (default COMPOSITE) and stamps them on meta.MultipartUpload. UploadPart captures the client's per-part x-amz-checksum-<algo> header onto meta.MultipartPart and echoes it on the response. Complete computes the COMPOSITE hash-of-hashes per AWS formula (base64(HASH(d1||d2||...))-N) using the named algorithm, OR adopts the client-supplied header value for FULL_OBJECT type. Composite + algo + type land on data.Manifest.MultipartChecksum* fields and surface in CompleteMultipartUploadResult XML and on HEAD/GET when x-amz-checksum-mode=ENABLED. Per-part HEAD/GET (?partNumber=N) emits PartChunks[N-1].ChecksumValue. Cassandra ALTERs add checksum_algorithm + checksum_type to multipart_uploads, checksum_value + checksum_algorithm to multipart_parts. Meta CompleteMultipartUpload preAssembled-sentinel tightened from `obj.Manifest != nil` to `obj.Manifest != nil && obj.Manifest.BackendRef != nil` so a hint-only manifest (composite-checksum carrier) does not short-circuit chunks-shape assembly. Test coverage in internal/s3api/multipart_checksum_test.go: COMPOSITE round-trip across SHA256/SHA1/CRC32/CRC32C, FULL_OBJECT pass-through (CRC32), and opt-out negative case."
     },
     {
       "id": "US-004",

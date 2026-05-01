@@ -121,6 +121,15 @@ var alterStatements = []string{
 	// authenticated presigned GETs at this bucket get a 307 redirect to a
 	// backend-credentialled URL.
 	`ALTER TABLE buckets ADD backend_presign boolean`,
+	// US-s3-tests-90 US-003: FlexibleChecksum carries on multipart. Algo
+	// declared at Initiate, per-part digest captured at UploadPart, type
+	// (COMPOSITE/FULL_OBJECT) preserved across the upload so the
+	// CompleteMultipartUploadResult and HEAD/GET responses can echo the
+	// composite checksum the client expects.
+	`ALTER TABLE multipart_uploads ADD checksum_algorithm text`,
+	`ALTER TABLE multipart_uploads ADD checksum_type text`,
+	`ALTER TABLE multipart_parts ADD checksum_value text`,
+	`ALTER TABLE multipart_parts ADD checksum_algorithm text`,
 }
 
 func isColumnAlreadyExists(err error) bool {

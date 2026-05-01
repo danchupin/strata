@@ -111,6 +111,18 @@ type MultipartUpload struct {
 	// running over a chunk-based backend (rados/memory) and parts are
 	// stored as Strata chunks.
 	BackendUploadID string
+	// ChecksumAlgorithm carries the FlexibleChecksum algorithm (CRC32 /
+	// CRC32C / SHA1 / SHA256) declared on CreateMultipartUpload via the
+	// `x-amz-checksum-algorithm` header. Empty when the client did not
+	// opt in. Read-only after Initiate; the value is replayed on each
+	// UploadPart so per-part checksums round-trip with the matching
+	// algorithm.
+	ChecksumAlgorithm string
+	// ChecksumType is COMPOSITE (hash-of-hashes, default for SHA1/SHA256)
+	// or FULL_OBJECT (whole-object hash supplied by the client at
+	// Complete time, default for CRC32/CRC32C in modern SDKs). Empty when
+	// ChecksumAlgorithm is empty.
+	ChecksumType string
 }
 
 type MultipartPart struct {
@@ -125,6 +137,16 @@ type MultipartPart struct {
 	// CompleteMultipartUpload at finalisation. Empty when running over a
 	// chunk-based backend.
 	BackendETag string
+	// ChecksumValue is the base64-encoded raw digest of this part's body
+	// computed under MultipartUpload.ChecksumAlgorithm. Captured from the
+	// `x-amz-checksum-<algo>` request header when the client supplied it
+	// on UploadPart. Forwarded onto Manifest.PartChunks[N-1].ChecksumValue
+	// so ?partNumber=N + x-amz-checksum-mode=ENABLED can echo it on GET.
+	ChecksumValue string
+	// ChecksumAlgorithm names the algorithm used for ChecksumValue. Stored
+	// alongside the value so a heterogeneous mix of part-level algorithms
+	// (rare but possible across resends) round-trips correctly.
+	ChecksumAlgorithm string
 }
 
 type CompletePart struct {

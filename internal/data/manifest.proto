@@ -12,13 +12,16 @@
 //   N+7 = 12  Manifest.sse                   (SSEInfo message ref) — US-013 (now allocated)
 //   N+8 = 13  Manifest.part_chunks           (repeated PartRange) — US-s3-tests-90 US-001
 //   N+9..N+13 = 14..18  reserved             sub-fields of PartRange if ever flattened — US-s3-tests-90 US-001
+//   N+14 = 19 Manifest.multipart_checksum_algorithm (string)        — US-s3-tests-90 US-003
+//   N+15 = 20 Manifest.multipart_checksum_type      (string)        — US-s3-tests-90 US-003
+//   N+16 = 21 Manifest.multipart_checksum           (string)        — US-s3-tests-90 US-003
 //
 // SSEInfo sub-fields live in their own field-number space inside the SSE
 // message. PartRange sub-fields likewise live in their own field-number
 // space inside the PartRange message. Numbers 7..11 stay reserved against
 // accidental flatten of BackendRef sub-fields, and 14..18 stay reserved
 // against accidental flatten of PartRange sub-fields. New unrelated
-// additive fields MUST start at 19 or above; renumbering is forbidden —
+// additive fields MUST start at 22 or above; renumbering is forbidden —
 // the schema is wire-compatible across RADOS-mode and S3-mode manifests
 // both directions.
 
@@ -37,6 +40,9 @@ message Manifest {
   BackendRef backend_ref = 6;
   SSEInfo sse = 12;
   repeated PartRange part_chunks = 13;
+  string multipart_checksum_algorithm = 19;
+  string multipart_checksum_type = 20;
+  string multipart_checksum = 21;
 
   reserved 7 to 11;
   reserved 14 to 18;

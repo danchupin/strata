@@ -25,14 +25,28 @@ func (s *Server) initiateMultipart(w http.ResponseWriter, r *http.Request, b *me
 	if class == "" {
 		class = b.DefaultClass
 	}
+	checksumAlgo := normalizeChecksumAlgo(r.Header.Get("x-amz-checksum-algorithm"))
+	checksumType := strings.ToUpper(strings.TrimSpace(r.Header.Get("x-amz-checksum-type")))
+	if checksumAlgo != "" && checksumType == "" {
+		// AWS default: COMPOSITE for SHA-family, FULL_OBJECT for CRC-family
+		// in modern SDKs. Default COMPOSITE — the wire response carries the
+		// type back so clients see the resolved value.
+		checksumType = "COMPOSITE"
+	}
+	if checksumType != "" && checksumType != "COMPOSITE" && checksumType != "FULL_OBJECT" {
+		writeError(w, r, ErrInvalidArgument)
+		return
+	}
 	mu := &meta.MultipartUpload{
-		BucketID:     b.ID,
-		UploadID:     gocql.TimeUUID().String(),
-		Key:          key,
-		StorageClass: class,
-		ContentType:  r.Header.Get("Content-Type"),
-		InitiatedAt:  time.Now().UTC(),
-		Status:       "uploading",
+		BucketID:          b.ID,
+		UploadID:          gocql.TimeUUID().String(),
+		Key:               key,
+		StorageClass:      class,
+		ContentType:       r.Header.Get("Content-Type"),
+		InitiatedAt:       time.Now().UTC(),
+		Status:            "uploading",
+		ChecksumAlgorithm: checksumAlgo,
+		ChecksumType:      checksumType,
 	}
 	// US-010 backend pass-through: when the data backend can map a Strata
 	// multipart 1:1 onto its own multipart upload (s3-over-s3), initiate
@@ -81,6 +95,20 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Buck
 		s.uploadPartCopy(w, r, b, uploadID, mu, partNumber)
 		return
 	}
+	// US-003 FlexibleChecksum: when the multipart session was initiated
+	// with a checksum algorithm, capture the per-part digest the client
+	// supplied via `x-amz-checksum-<algo>`. The value is replayed on
+	// CompleteMultipartUpload to compute the COMPOSITE checksum and
+	// echoed on ?partNumber=N HEAD/GET when ChecksumMode=ENABLED.
+	var partChecksumValue, partChecksumAlgo string
+	if mu.ChecksumAlgorithm != "" {
+		if hdr := checksumHeader(mu.ChecksumAlgorithm); hdr != "" {
+			if v := r.Header.Get(hdr); v != "" {
+				partChecksumValue = v
+				partChecksumAlgo = mu.ChecksumAlgorithm
+			}
+		}
+	}
 	// US-010 backend pass-through: when the multipart session was
 	// initiated against the s3 backend's own multipart upload, stream
 	// this part straight to the backend's UploadPart instead of through
@@ -100,16 +128,21 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Buck
 			return
 		}
 		part := &meta.MultipartPart{
-			PartNumber:  partNumber,
-			ETag:        etag,
-			Size:        r.ContentLength,
-			BackendETag: etag,
+			PartNumber:        partNumber,
+			ETag:              etag,
+			Size:              r.ContentLength,
+			BackendETag:       etag,
+			ChecksumValue:     partChecksumValue,
+			ChecksumAlgorithm: partChecksumAlgo,
 		}
 		if err := s.Meta.SavePart(r.Context(), b.ID, uploadID, part); err != nil {
 			mapMetaErr(w, r, err)
 			return
 		}
 		w.Header().Set("ETag", `"`+etag+`"`)
+		if partChecksumValue != "" {
+			w.Header().Set(checksumHeader(partChecksumAlgo), partChecksumValue)
+		}
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -125,10 +158,12 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Buck
 		return
 	}
 	part := &meta.MultipartPart{
-		PartNumber: partNumber,
-		ETag:       manifest.ETag,
-		Size:       manifest.Size,
-		Manifest:   manifest,
+		PartNumber:        partNumber,
+		ETag:              manifest.ETag,
+		Size:              manifest.Size,
+		Manifest:          manifest,
+		ChecksumValue:     partChecksumValue,
+		ChecksumAlgorithm: partChecksumAlgo,
 	}
 	if err := s.Meta.SavePart(r.Context(), b.ID, uploadID, part); err != nil {
 		_ = s.Data.Delete(r.Context(), manifest)
@@ -136,6 +171,9 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Buck
 		return
 	}
 	w.Header().Set("ETag", `"`+manifest.ETag+`"`)
+	if partChecksumValue != "" {
+		w.Header().Set(checksumHeader(partChecksumAlgo), partChecksumValue)
+	}
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -277,6 +315,48 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		return
 	}
 
+	// US-003 FlexibleChecksum response shape: when the multipart session
+	// was opened with `x-amz-checksum-algorithm`, compute the COMPOSITE
+	// hash-of-hashes from the per-part digests captured at UploadPart
+	// time, OR adopt the FULL_OBJECT digest the client supplied on the
+	// CompleteMultipartUpload request. The result lands on obj.Manifest
+	// as a hint for the meta layer (which copies it onto the persisted
+	// manifest) and is echoed in the wire response.
+	var compositeAlgo, compositeType, compositeValue string
+	if mu.ChecksumAlgorithm != "" {
+		compositeAlgo = mu.ChecksumAlgorithm
+		compositeType = mu.ChecksumType
+		if compositeType == "" {
+			compositeType = "COMPOSITE"
+		}
+		switch compositeType {
+		case "FULL_OBJECT":
+			compositeValue = r.Header.Get(checksumHeader(compositeAlgo))
+		case "COMPOSITE":
+			stored, listErr := s.Meta.ListParts(r.Context(), b.ID, uploadID)
+			if listErr != nil {
+				mapMetaErr(w, r, listErr)
+				return
+			}
+			byNumber := make(map[int]*meta.MultipartPart, len(stored))
+			for _, p := range stored {
+				byNumber[p.PartNumber] = p
+			}
+			pcs := make([]partChecksum, 0, len(parts))
+			for _, cp := range parts {
+				p, ok := byNumber[cp.PartNumber]
+				if !ok {
+					writeError(w, r, ErrInvalidPart)
+					return
+				}
+				pcs = append(pcs, partChecksum{algo: p.ChecksumAlgorithm, value: p.ChecksumValue})
+			}
+			if v, ok := compositeChecksum(compositeAlgo, pcs); ok {
+				compositeValue = v
+			}
+		}
+	}
+
 	obj := &meta.Object{
 		BucketID:     b.ID,
 		Key:          key,
@@ -345,6 +425,18 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		obj.Size = totalSize
 	}
 
+	// US-003 FlexibleChecksum: stamp the composite hints onto obj.Manifest
+	// (creating a hints-only manifest in the chunks-shape native path; the
+	// meta layer copies the hints over to the manifest it builds).
+	if compositeAlgo != "" {
+		if obj.Manifest == nil {
+			obj.Manifest = &data.Manifest{}
+		}
+		obj.Manifest.MultipartChecksumAlgorithm = compositeAlgo
+		obj.Manifest.MultipartChecksumType = compositeType
+		obj.Manifest.MultipartChecksum = compositeValue
+	}
+
 	orphans, err := s.Meta.CompleteMultipartUpload(r.Context(), obj, uploadID, parts, meta.IsVersioningActive(b.Versioning))
 	if err != nil {
 		if errors.Is(err, meta.ErrMultipartPartMissing) || errors.Is(err, meta.ErrMultipartETagMismatch) {
@@ -360,12 +452,26 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		}
 	}
 
-	writeXML(w, http.StatusOK, completeMultipartResult{
+	resp := completeMultipartResult{
 		Location: fmt.Sprintf("/%s/%s", b.Name, key),
 		Bucket:   b.Name,
 		Key:      key,
 		ETag:     `"` + finalETag + `"`,
-	})
+	}
+	if compositeAlgo != "" && compositeValue != "" {
+		switch compositeAlgo {
+		case "CRC32":
+			resp.ChecksumCRC32 = compositeValue
+		case "CRC32C":
+			resp.ChecksumCRC32C = compositeValue
+		case "SHA1":
+			resp.ChecksumSHA1 = compositeValue
+		case "SHA256":
+			resp.ChecksumSHA256 = compositeValue
+		}
+		resp.ChecksumType = compositeType
+	}
+	writeXML(w, http.StatusOK, resp)
 }
 
 func (s *Server) abortMultipart(w http.ResponseWriter, r *http.Request, b *meta.Bucket, key, uploadID string) {
