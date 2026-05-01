@@ -40,8 +40,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Plumbing: pass-through args (no AuthInfo field, no ctx stash) — newStreamingReader takes seedSig + signingKey + isoDate + scope at construction; nothing downstream looks up the chain state. Documented inline in middleware.go (line ~76). Helper s3api.MapBodyError translates auth.ErrChunkSignatureMismatch (via errors.Is) to ErrSignatureDoesNotMatch — wired into putObject (server.go), uploadPart, and uploadPart's BackendUploadID pass-through (multipart.go). Reader buffers full chunk before ANY byte forwarded — buffer-then-validate guarantee verified by TestStreamingReader_MutatedChunk_Rejects. Trailer-chunk validated too (TestStreamingReader_MutatedTrailer_Rejects) so attacker cannot truncate. maxChunkPayload = 16 MiB cap defends against malicious size headers (TestStreamingReader_OversizedChunk_Rejects)."
     },
     {
       "id": "US-003",

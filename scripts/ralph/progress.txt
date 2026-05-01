@@ -96,3 +96,69 @@ Cycle: ralph/auth-per-chunk-signature
     flags it. Resolved by US-002 wiring it into the decoder. Do not
     add a // nolint:unused suppression — let US-002 land naturally.
 ---
+
+## 2026-05-01 - US-002
+- Rewrote streamingReader (internal/auth/streaming.go) to buffer-then-
+  validate: each chunk is fully read into a per-chunk buffer (≤16 MiB
+  cap via maxChunkPayload), SHA-256-hashed, chain-validated against
+  ;chunk-signature=<hex> via chunkSigner.Next + hmac.Equal, and only
+  then forwarded to the consumer. Mismatch → ErrChunkSignatureMismatch
+  + zero bytes leaked.
+- Added exported sentinel ErrChunkSignatureMismatch and helper
+  IsChunkSignatureMismatch(err) for type-safe handler-side translation.
+- Extended newStreamingReader signature to (body, seedSig, signingKey,
+  isoDate, scope). Plumbing: pass-through args, no AuthInfo field, no
+  ctx stash — documented inline in middleware.go (US-002 comment).
+  Middleware computes signingKey via deriveSigningKey + scope via
+  credentialScope, hands them straight in.
+- Helper s3api.MapBodyError(err) returns (ErrSignatureDoesNotMatch,
+  true) when errors.Is(err, auth.ErrChunkSignatureMismatch). Wired
+  into putObject (internal/s3api/server.go), uploadPart's PutChunks
+  path AND BackendUploadID pass-through (internal/s3api/multipart.go).
+- Tests added in internal/auth/streaming_test.go:
+  - TestStreamingReader_ValidChain — pristine 3-chunk body decodes to
+    concatenated payload with no error.
+  - TestStreamingReader_MutatedChunk_Rejects — flips one byte of
+    chunk-2's payload; verifies ErrChunkSignatureMismatch AND that
+    chunk-2's bytes never reach the consumer (buffer-then-validate
+    invariant).
+  - TestStreamingReader_MutatedTrailer_Rejects — flips trailer's
+    chunk-signature value; verifies the empty-chunk's chain check
+    catches truncation attacks.
+  - TestStreamingReader_OversizedChunk_Rejects — size header claiming
+    32 MiB returns a framing error (NOT signature mismatch) without
+    OOM-allocating the payload.
+- Test helpers buildChunkedBody + intToHex craft aws-chunked framing
+  with valid chain signatures so future stories (US-004 integration
+  test) can reuse the pattern.
+- Files changed: internal/auth/streaming.go, internal/auth/middleware.go,
+  internal/auth/streaming_test.go, internal/s3api/errors.go,
+  internal/s3api/server.go, internal/s3api/multipart.go.
+- **Learnings for future iterations:**
+  - Plumbing choice: pass-through constructor args (NOT AuthInfo
+    field, NOT ctx stash). The chain state is needed only at
+    streamingReader construction; nothing downstream re-derives it.
+    Adding fields to AuthInfo would have leaked auth-internal state to
+    every handler.
+  - Empty trailer chunk MUST be chain-validated. Current AWS spec says
+    sig(final-empty) is part of the chain; skipping it lets an
+    attacker truncate the body and forge the final marker. The reader
+    treats size==0 as "validate signature, then EOF".
+  - aws-chunked framing has a trailing CRLF AFTER the payload of each
+    non-empty chunk. Empty trailer chunk format is "0;chunk-signature=
+    <hex>\r\n\r\n" — but the reader stops after consuming the size
+    line and the trailer's CRLF before the payload, since size==0 has
+    no payload and no trailing payload-CRLF.
+  - Helper MapBodyError lives in s3api/errors.go (not auth package)
+    because the APIError type is s3api-internal. Body-error translation
+    is the s3api layer's responsibility — auth surfaces a typed Go
+    error, s3api maps it to the S3 wire format.
+  - intToHex must produce LOWERCASE hex (matches AWS aws-cli output).
+    fmt.Sprintf("%x", n) also works but tiny custom impl avoids
+    dragging fmt into the test signing path.
+  - Existing tests in internal/auth/* don't construct streaming
+    bodies, so no callsite updates were needed beyond middleware.go.
+    Future tests that build streaming PUT requests can reuse the
+    buildChunkedBody helper from streaming_test.go (move to a shared
+    test helper file if needed by US-004).
+---

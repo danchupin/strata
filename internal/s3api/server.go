@@ -480,6 +480,10 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	defer cancel()
 	m, err := s.Data.PutChunks(ctx, r.Body, class)
 	if err != nil {
+		if apiErr, ok := MapBodyError(err); ok {
+			writeError(w, r, apiErr)
+			return
+		}
 		if strings.Contains(err.Error(), "unknown storage class") {
 			writeError(w, r, ErrInvalidStorageClass)
 			return

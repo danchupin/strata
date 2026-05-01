@@ -74,7 +74,14 @@ func (m *Middleware) validateHeader(r *http.Request) (*AuthInfo, error) {
 	}
 
 	if bodyHash == streamingBody {
-		r.Body = newStreamingReader(r.Body)
+		// US-002: feed the seed signature + signing key + isoDate + scope
+		// into the streaming reader so it can chain-validate each chunk.
+		// Plumbing chosen: pass-through args (no AuthInfo field, no ctx
+		// stash) — the reader needs them only at construction time and
+		// nothing downstream looks up the chain state.
+		signingKey := deriveSigningKey(cred.Secret, parsed.Date, parsed.Region, parsed.Service)
+		scope := credentialScope(parsed.Date, parsed.Region, parsed.Service)
+		r.Body = newStreamingReader(r.Body, parsed.Signature, signingKey, reqDate, scope)
 		if dec := r.Header.Get("X-Amz-Decoded-Content-Length"); dec != "" {
 			if n, err := strconv.ParseInt(dec, 10, 64); err == nil {
 				r.ContentLength = n

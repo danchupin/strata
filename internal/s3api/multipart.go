@@ -126,6 +126,10 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Buck
 		defer cancel()
 		etag, err := mb.UploadBackendPart(ctx, mu.BackendUploadID, int32(partNumber), r.Body, r.ContentLength)
 		if err != nil {
+			if apiErr, ok := MapBodyError(err); ok {
+				writeError(w, r, apiErr)
+				return
+			}
 			writeError(w, r, ErrInternal)
 			return
 		}
@@ -152,6 +156,10 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Buck
 	defer cancel()
 	manifest, err := s.Data.PutChunks(ctx, r.Body, mu.StorageClass)
 	if err != nil {
+		if apiErr, ok := MapBodyError(err); ok {
+			writeError(w, r, apiErr)
+			return
+		}
 		if strings.Contains(err.Error(), "unknown storage class") {
 			writeError(w, r, ErrInvalidStorageClass)
 			return

@@ -3,6 +3,8 @@ package s3api
 import (
 	"encoding/xml"
 	"net/http"
+
+	"github.com/danchupin/strata/internal/auth"
 )
 
 type APIError struct {
@@ -60,6 +62,20 @@ func writeError(w http.ResponseWriter, r *http.Request, err APIError) {
 		Message:  err.Message,
 		Resource: r.URL.Path,
 	})
+}
+
+// MapBodyError translates an error returned while reading the request
+// body during a streaming-SigV4 upload into a typed APIError. Today the
+// only such error is a chunk-signature mismatch (US-002): the client's
+// per-chunk signature did not match the server-computed chain, so the
+// gateway responds 403 SignatureDoesNotMatch and the buffered bytes from
+// the mutated chunk are dropped (never reach the storage backend).
+// Returns ok=false for unrecognised errors.
+func MapBodyError(err error) (APIError, bool) {
+	if auth.IsChunkSignatureMismatch(err) {
+		return ErrSignatureDoesNotMatch, true
+	}
+	return APIError{}, false
 }
 
 func WriteAuthDenied(w http.ResponseWriter, r *http.Request, err error) {
