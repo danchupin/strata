@@ -1,0 +1,800 @@
+# Ralph Progress Log
+Started: 2026-05-01
+Cycle: ralph/s3-tests-90
+---
+
+## Codebase Patterns
+
+(seed entries for this cycle. Replace/remove as US-001..US-011 land.)
+
+- s3-tests baseline lives in scripts/s3-tests/README.md as an append-only
+  history. Every closing commit appends a new `### YYYY-MM-DD — <sha>`
+  section with passrate + failure breakdown — never replace prior
+  entries.
+- ROADMAP maintenance rule (CLAUDE.md root): every commit closing a
+  ROADMAP item flips the bullet to ~~strikethrough~~ Done format in the
+  same commit, with closing SHA inline (or `(commit pending)` with a
+  follow-up SHA edit). Every commit discovering a new gap adds a fresh
+  entry under the right severity section in the same commit.
+- internal/data/manifest.proto field-number map at cycle start:
+  1 class, 2 size, 3 chunk_size, 4 etag, 5 chunks, 6 backend_ref
+  (US-008 of s3-over-s3 cycle), 12 sse (US-013 of s3-over-s3),
+  reserved 7..11. **US-001 of THIS cycle adds PartChunks at field
+  number 13** (first available after the existing reservation block).
+  Reserve 14..18 for PartRange sub-message fields if ever flattened.
+  Update the field-number assignment header comment at the top of
+  manifest.proto. Renumbering is forbidden — the schema is wire-
+  compatible across RADOS-mode + S3-backend-mode manifests both
+  directions.
+- internal/data/manifest.go BackendRef VersionID has documented
+  three-shape semantics ('' / 'null' / <uuid>) — US-007 of THIS cycle
+  introduces 'null' for Strata-side meta.Object.VersionID with the
+  same vocabulary. Reuse the doc-comment style.
+- meta.Store interface is the contract; THREE backends update in
+  lockstep: memory + cassandra + tikv. internal/meta/storetest/contract.go
+  is the parity oracle — every meta.Store change must keep the
+  contract suite green against all three.
+- Cassandra LWT lesson (CLAUDE.md "Cassandra gotchas"): any UPDATE on
+  a row that may be read with quorum AFTER a previous LWT must itself
+  be LWT (IF EXISTS). The TiKV equivalent is "any update needing
+  read-after-write coherence must use a pessimistic txn, not plain
+  Put". US-007 (versioning Suspend → null overwrite) and US-009
+  (multipart Resend-first-finishes-last) both touch this — wire LWT /
+  pessimistic-txn paths in lockstep.
+- Per-part composite-checksum response shape (US-003) follows AWS
+  formula: concatenate raw part-digests (binary, not hex), SHA-256
+  the concatenation, base64-encode. The composite is reported in
+  CompleteMultipartUploadResult AND echoed on HEAD with
+  ChecksumMode=ENABLED.
+- Per-part offset tracking (US-001 PartChunks) is populated at
+  CompleteMultipartUpload time from multipart_uploads.parts rows.
+  Per-part checksum (added in US-004) MUST be stored at UploadPart
+  time, not recomputed at Complete — the body bytes have already
+  streamed past.
+- BackendETag column on multipart_uploads.parts already exists from
+  s3-over-s3 cycle US-010 (s3-backend-side ETag). Don't conflict
+  with US-004's `checksum_value` column — they coexist (ETag is
+  always set; ChecksumValue is set only when client sent
+  x-amz-checksum-algorithm).
+- ?partNumber=N GET (US-002) is a NEW HTTP route shape:
+  internal/s3api/server.go currently routes ?partNumber=N + uploadId
+  to UploadPart (in-progress multipart). Without uploadId,
+  ?partNumber=N must dispatch to a NEW handler in object_get.go that
+  uses the manifest's PartChunks to serve part-relative bytes.
+- Tests for the s3-tests headline target run via
+  scripts/s3-tests/run.sh against `make up-all` (Cassandra + RADOS).
+  Each story SHOULD verify the impacted s3-tests cluster passes
+  before marking complete; US-011 collects the headline number.
+- Cycle-start codebase has TWO meta backends (memory + cassandra),
+  not three. The seeded "tikv" pattern is stale — internal/meta has
+  only memory/ and cassandra/ subdirs on this branch. New meta-shape
+  tests go in internal/meta/storetest/contract.go and run against
+  both via storetest.Run. Cassandra runs the contract suite under
+  `-tags integration`; without the tag only memory exercises the
+  contract.
+- Manifest JSON encoding uses encoding/json with `omitempty` tags;
+  there is NO generated protobuf code today. internal/data/manifest.proto
+  is a doc/spec file used to lock field-number assignments for any
+  future codec, not a code-gen source. EncodeManifest/DecodeManifest
+  are JSON-only — wire compatibility is across JSON shapes.
+- Listing delimiter+prefix paging (US-005) lockstep across
+  memory + cassandra: NextMarker on truncation is the LAST
+  EMITTED key/CP (not the next-candidate). Skip a CommonPrefix
+  when `pfx <= Marker` so a continuation page does not re-emit
+  the prev page's CP. V1 vs V2 response shapes diverge in
+  internal/s3api: V1 emits `<Marker>` + `<NextMarker>` (only
+  when truncated AND delimiter set), V2 emits the existing
+  `<ContinuationToken>` / `<NextContinuationToken>` /
+  `<KeyCount>` / `<StartAfter>`. Both share the same
+  meta.ListResult — the divergence is only XML-shape.
+- V2 ListObjects continuation token is OPAQUE (US-006):
+  base64.RawURLEncoding(JSON({Marker, Shard})). Decode in
+  internal/s3api/list_token.go::decodeContinuationToken; falls back
+  to literal-marker when not valid base64-JSON (back-compat for
+  in-flight pre-cycle clients). Tests that string-compare
+  NextContinuationToken to a literal key are brittle — assert
+  non-empty + round-trip instead. V1 ?marker= is unchanged: opaque
+  tokens are V2-only.
+- Multipart pass-through (US-010 of s3-over-s3 cycle) sets
+  obj.Manifest BEFORE meta.CompleteMultipartUpload runs. The meta
+  layer detects this and appends PartChunks onto the pre-built
+  manifest instead of building a chunks-shape manifest. **US-003
+  tightened the sentinel from `obj.Manifest != nil` to
+  `obj.Manifest != nil && obj.Manifest.BackendRef != nil`** — so a
+  bare `obj.Manifest` carrying only hint fields (composite checksum
+  in US-003, future hints to come) is NOT pre-assembled and the meta
+  layer still builds the chunks-shape manifest, copying the hint
+  fields onto it before persisting. Future multipart-shape additions
+  hitchhike on obj.Manifest as a hint blob and are merged in the
+  same lockstep across memory + cassandra stores.
+- Literal-"null" version-id (US-007): meta.NullVersionID = "null" is
+  the wire-level identity for objects written while bucket is Disabled
+  or Suspended. Wire layer (server.putObject, copy_object,
+  multipart.completeMultipart) sets obj.VersionID=meta.NullVersionID
+  whenever bucket.Versioning != Enabled. Storage layer recognises this
+  marker:
+  * memory: PutObject + CompleteMultipartUpload Suspended branch
+    filters the prior null row from the per-key slice and prepends
+    the new one (atomic under store mutex).
+  * cassandra: new `null_version boolean` column on objects. Storage
+    `version_id` is always a fresh TimeUUID so version_id DESC
+    "latest" detection stays coherent. Suspended PutObject runs a
+    logged batch with LWT (`DELETE … IF EXISTS; INSERT …`) keyed on
+    the existing null version id resolved via findNullVersionID. The
+    helper scans the per-key partition slice (clustered by (key,
+    version_id), small) for null_version=true.
+  * resolveVersionID, GetObject, DeleteObject all route versionID==
+    "null" through findNullVersionID. ListObjectVersions cursor +
+    shardCursor read null_version and surface VersionID="null" on
+    the wire so ListObjectVersions response carries `<VersionId>null
+    </VersionId>` per AWS observable.
+- The PRD's "tikv lockstep" note in the Codebase Patterns section is
+  stale on this branch (memory + cassandra only). US-007 ships across
+  both backends only.
+- Conditional headers on write paths: `internal/s3api/conditional.go`
+  exposes etagMatches() + ErrPreconditionFailed; putObject (US-pre)
+  and completeMultipart (US-008) wire If-Match / If-None-Match the
+  same way: GetObject(key, "") → etagMatches against `"<etag>"`. The
+  pattern is "check before mutating Meta" — for completeMultipart that
+  means BEFORE Meta.CompleteMultipartUpload (the LWT flip) so a 412
+  cannot leak "completing" state. copyObject is the next likely site
+  if the same s3-tests bracket lights up.
+- completeMultipart cross-cutting checks (size-too-small US-009,
+  composite-checksum US-003 / US-010, backend pass-through completion
+  US-010 of s3-over-s3) all need the per-part rows. Call
+  `s.Meta.ListParts` ONCE near the top of completeMultipart and
+  reuse the resulting `byNumber map[int]*meta.MultipartPart` across
+  every branch — don't re-list per branch, the query is on the hot
+  path. Validations that must fail BEFORE the LWT flip
+  (preconditions, size-too-small, checksum-mismatch) live between
+  this hoisted ListParts and the call to s.Meta.CompleteMultipartUpload.
+- Multipart resend semantics on both backends are naturally last-
+  write-wins via the existing SavePart shape — memory's per-store
+  mutex serializes SavePart calls and overwrites
+  st.parts[partNumber]; cassandra's plain INSERT into
+  multipart_parts keyed on (bucket_id, upload_id, part_number) gets
+  the same shape via Cassandra's timestamp-based last-write-wins.
+  No LWT needed on SavePart — it's not a read-modify-write. The
+  Complete-time ETag mismatch check
+  (meta.ErrMultipartETagMismatch → ErrInvalidPart) catches a
+  client supplying a stale pre-resend ETag.
+- 5-MiB-min-non-last (US-009) is a Complete-time check, not an
+  UploadPart-time check (S3 spec: small parts allowed in flight,
+  rejected at the finaliser). Single-part uploads exempt — the last
+  part has no minimum. Unit tests that previously used B-scale or
+  4-MiB parts must be bumped to ≥ 5 MiB for non-last parts; memory
+  backends handle the larger random data cheaply.
+- Composite-checksum validation on Complete (US-010): the COMPOSITE
+  branch in completeMultipart computes compositeValue from per-part
+  digests; if the client supplied `x-amz-checksum-<algo>` on the
+  Complete request, compare against compositeValue and 400 BadDigest
+  on mismatch BEFORE Meta.CompleteMultipartUpload. Same shape as
+  putObject + uploadPartCopy: doom-mismatch never leaks "completing"
+  state. FULL_OBJECT branch is the inverse — the client value IS the
+  digest, so the recompute-and-compare check does not apply.
+- s3-tests cluster-level verification gap (US-011 cycle close):
+  per-story `internal/s3api/*_test.go` unit coverage is necessary but
+  NOT sufficient — modern boto / aws-cli 2.x exercise SDK-side
+  envelopes (FlexibleChecksum digest match, automatic ContentMD5,
+  partNumber Content-Length echo into SDK range requests) that
+  don't show up in pure `httptest.NewRecorder`-shaped tests. Future
+  per-cluster PRDs should invest in a per-story s3-tests harness
+  invocation BEFORE marking passes=true. The 2026-05-01 baseline
+  (78.5%) showed 30 cluster-level fails on stories whose unit
+  tests all passed.
+- `make up-all` needs a clean network — if a prior run leaked an
+  IP allocation in docker_default, Ceph mon fails to bind. Always
+  `make down` first when bringing up the s3-tests stack.
+
+## 2026-05-01 - US-010 — CompleteMultipartUpload checksum input validation
+- internal/s3api/multipart.go::completeMultipart COMPOSITE branch:
+  after compositeChecksum() yields the recomputed digest, read
+  `x-amz-checksum-<algo>` from the Complete request. If the client
+  supplied a value and it != compositeValue (or compositeValue is
+  empty because parts lacked digests), 400 BadDigest BEFORE
+  Meta.CompleteMultipartUpload runs — same "validate before LWT flip"
+  shape as US-008 (preconditions) and US-009 (size-too-small).
+- internal/s3api/multipart_complete_checksum_test.go:
+  TestMultipartCompleteChecksumValidates over SHA256/SHA1/CRC32/CRC32C.
+  `_match` cases compute the expected COMPOSITE on the test side and
+  Complete with it → 200. `_mismatch` cases send a deliberately wrong
+  digest (zeros + `-2` suffix) → 400 BadDigest, then HEAD returns 404
+  asserting no object materialised (LWT flip never ran).
+- **Learnings for future iterations:**
+  - The COMPOSITE digest format is `base64(HASH(d1||d2||...||dN))-N`
+    where N is part count. Mismatch tests need the `-N` suffix to
+    look the part — without it the value still 400s but for the
+    "wrong format" reason rather than "wrong digest".
+  - FULL_OBJECT does NOT get the recompute-and-compare check: by
+    definition the client value IS the whole-object digest. We could
+    re-stream the object to validate it, but that's expensive and the
+    s3-tests headline cases all run COMPOSITE.
+  - The mismatch test asserts HEAD → 404 to pin "LWT did not flip".
+    If a future change moves validation after CompleteMultipartUpload
+    the HEAD assertion will fail loudly — protects the
+    "preconditions before mutation" invariant called out in US-008's
+    learnings.
+  - Existing TestMultipartFullObjectChecksum already exercises the
+    FULL_OBJECT pass-through path (client digest stamped on
+    response), so US-010's tests focus on COMPOSITE only — no
+    duplicate coverage.
+---
+
+## 2026-05-01 - US-008 — Multipart Complete preconditions (If-Match / If-None-Match)
+- internal/s3api/multipart.go::completeMultipart: read If-Match /
+  If-None-Match at the top of the handler (before XML body parse,
+  before Meta.CompleteMultipartUpload — the LWT flip). Both arms
+  resolve via s.Meta.GetObject(b.ID, key, "") + etagMatches() in the
+  same shape as putObject. If-None-Match: * + existing object → 412;
+  If-Match supplied + missing object OR mismatched ETag → 412;
+  matching ETag → falls through to Complete.
+- After Meta.CompleteMultipartUpload succeeds, set x-amz-version-id
+  response header when meta.IsVersioningActive(b.Versioning) — Enabled
+  emits the fresh UUID, Suspended emits literal "null" (US-007 wire
+  shape, matches AWS observable). Disabled emits no header.
+- internal/s3api/multipart_preconditions_test.go: shared completeMP
+  helper drives Initiate → 2-part UploadPart → Complete with optional
+  headers. Cases:
+  * TestMultipartCompleteIfNoneMatchStarRejectsExisting → 412 + body
+    untouched
+  * TestMultipartCompleteIfNoneMatchStarAllowsCreate → 200
+  * TestMultipartCompleteIfMatchMismatch → 412 + body untouched
+  * TestMultipartCompleteIfMatchMissingObject → 412
+  * TestMultipartCompleteIfMatchHit → 200
+  * TestMultipartCompleteVersionIDHeader → Enabled UUID, Suspended
+    "null"
+  * TestMultipartCompleteVersionIDHeaderUnversioned → no header
+- **Learnings for future iterations:**
+  - Reuse internal/s3api/conditional.go::etagMatches() — it already
+    handles `*`, quoted strings, bare tokens, and comma lists. Don't
+    re-implement; pass `"<etag>"` (with surrounding quotes) on the
+    candidate side to match the wire-form ETag.
+  - Precondition checks on a write path must run BEFORE the
+    Meta-side mutation. For completeMultipart specifically, that
+    means BEFORE Meta.CompleteMultipartUpload — putting it after
+    would leak the "completing" status row even when the request
+    is doomed to 412.
+  - The conditional.go helper checkConditional() is GET/HEAD shaped
+    (returns 304 vs 412). Write paths use the lower-level
+    etagMatches() directly because semantics differ — putObject and
+    completeMultipart treat If-None-Match (any value, not just *) as
+    "abort if matches" with a 412, not 304.
+  - x-amz-version-id on Complete is gated by IsVersioningActive (=
+    Enabled OR Suspended). Don't emit on Disabled — same rule as
+    putObject. Suspended emits the literal "null" because US-007 sets
+    obj.VersionID = NullVersionID for non-Enabled buckets.
+  - boto3 sends `If-Match`/`If-None-Match` with quoted ETag
+    (`"<hex>-N"`) — the etagMatches helper strips quotes on both
+    sides, so passing the raw header straight through Just Works.
+  - Tests can drive Versioning toggling via the existing
+    `PUT /bkt?versioning` XML route — Status: Enabled / Suspended
+    (mirror s3-tests' shape). Bucket-shape XML wrapper:
+    `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>...</Status></VersioningConfiguration>`.
+---
+
+## 2026-05-01 - US-007 — Versioning literal-"null" version-id semantics
+- internal/meta/store.go: NullVersionID = "null" const. Doc-comment
+  pins three-shape vocabulary: "" (uninit) / "null" (literal) /
+  <uuid>.
+- internal/meta/memory/store.go: PutObject + CompleteMultipartUpload
+  switch versioned=true into a new branch when o.VersionID==
+  NullVersionID — filter prior null from the per-key slice, prepend
+  new entry. Disabled-bucket path (`!versioned`) keeps the
+  wipe-and-insert behavior; the inserted row now carries
+  VersionID="null" because the wire layer sets it.
+- internal/meta/cassandra/schema.go: ALTER TABLE objects ADD
+  null_version boolean. Legacy NULL decodes as false (backwards-
+  compatible).
+- internal/meta/cassandra/store.go:
+  * PutObject: when VersionID=="null" + versioned=true (Suspended),
+    runs a logged batch (DELETE existing-null IF EXISTS; INSERT new)
+    so the swap is atomic at the partition level. Disabled-bucket
+    path keeps DELETE-then-INSERT.
+  * findNullVersionID(ctx, bucket, shard, key) scans the partition
+    slice and returns the storage version_id of the row tagged
+    null_version=true. Used by GetObject, DeleteObject,
+    resolveVersionID, and PutObject's Suspended branch.
+  * GetObject + DeleteObject + resolveVersionID switch on versionID:
+    "" / "null" / <uuid>. The "null" arm uses findNullVersionID.
+  * versionCursor + shardCursor read null_version column and emit
+    VersionID="null" when set; ListObjectVersions / ListObjects
+    surface the literal on the wire.
+- internal/s3api/server.go::putObject and
+  internal/s3api/multipart.go::completeMultipart and
+  internal/s3api/copy_object.go::copyObject set obj.VersionID=
+  NullVersionID when bucket.Versioning != Enabled (covers Disabled +
+  Suspended). x-amz-version-id header logic at the wire stays gated
+  on IsVersioningActive (so Disabled buckets emit no header per AWS).
+- internal/meta/storetest/contract.go: caseNullVersionLifecycle.
+  Walks Disabled PUT → Enable + overwrite → Suspended replace →
+  ListObjectVersions → DELETE ?versionId=null. Runs against memory
+  unconditionally and cassandra under -tags integration.
+- internal/s3api/versioning_test.go:
+  * TestNullVersionPlainPut mirrors s3-tests
+    test_versioning_obj_plain_null_version_overwrite.
+  * TestNullVersionSuspendOverwrite mirrors test_versioning_obj_
+    suspend_versions: Suspended PUT replaces null while UUID rows
+    persist.
+  * TestNullVersionDelete pins ?versionId=null DELETE leaving UUID
+    intact.
+- **Learnings for future iterations:**
+  - Cassandra version_id column type is `timeuuid`. Stuffing a
+    sentinel UUID for "null" breaks latest-detection: `LIMIT 1
+    ORDER BY version_id DESC` would skew either way (zero-UUID =
+    always last; max-UUID = always first), and Enable+overwrite +
+    later Suspended PUT need recency ordering. Solution: keep
+    version_id as a fresh TimeUUID and add a sibling
+    `null_version boolean` flag. Translate at the codec boundary.
+  - findNullVersionID scans the partition slice, not a global
+    secondary-index lookup. The (bucket_id, shard) partition
+    clustered by (key, version_id) keeps each key's version slice
+    cheap (S3 max ~1k versions/key); ALLOW FILTERING is unnecessary.
+  - Disabled-bucket PUT keeps the wipe-then-insert pattern. AWS does
+    not expose Enabled→Disabled as a legal state-machine transition,
+    so a Disabled bucket cannot accumulate UUID-versioned rows; the
+    wipe is safe.
+  - Suspended PUT's atomicity requirement is per-partition-level —
+    same (bucket_id, shard) for the existing null and the new write.
+    A logged BATCH with two LWT predicates is allowed and gives the
+    Paxos guarantee CLAUDE.md's Cassandra-gotchas section calls for.
+  - x-amz-version-id header on PUT response: emit only when bucket
+    is versioned-active (Enabled OR Suspended). Suspended emits
+    `x-amz-version-id: null` (AWS observable); Disabled emits no
+    header. Existing IsVersioningActive() gate already does this.
+  - Suspended → DELETE without versionId in the future will need
+    similar null-replace semantics (a null delete-marker that
+    overwrites an existing null version). Out of scope for US-007;
+    see s3-tests test_versioning_obj_suspend_versions_simple if
+    re-opening.
+---
+
+## 2026-05-01 - US-006 — Listing V2 continuation token as opaque base64
+- internal/s3api/list_token.go: encodeContinuationToken/decodeContinuationToken
+  helpers. Wire form is base64.RawURLEncoding(JSON({Marker, Shard})).
+  Shard is reserved (always 0 today — cassandra ListObjects uses one
+  global Marker across shards); reserving it now keeps the wire shape
+  forward-compatible.
+- internal/s3api/server.go::listObjects V2 path:
+  - On request: decode ?continuation-token= via decodeContinuationToken;
+    fall back to the literal-marker interpretation when the token is
+    not valid base64-JSON (in-flight pre-cycle clients keep paging).
+  - On response: NextContinuationToken = encodeContinuationToken(res.NextMarker);
+    ContinuationToken echoes the raw client-supplied token verbatim
+    (matches AWS observable — boto re-uses ContinuationToken to detect
+    "is this the first page or a continuation").
+- V1 marker parameter is unchanged — opaque tokens are V2-only.
+- TestListV2DelimiterPrefix relaxed from literal-token compare
+  (`r.NextContinuationToken == "asdf"`) to existence + round-trip
+  (`r.NextContinuationToken == ""`); the rest of the assertions are
+  unchanged.
+- New tests in internal/s3api/list_v2_token_test.go:
+  - TestListV2ContinuationTokenIsOpaque: pins the wire form (base64 →
+    JSON → {Marker:'<lastEmitted>'}; rejects literal token).
+  - TestListV2ContinuationTokenRoundTrip: walks 3 pages and asserts
+    ContinuationToken echoes back the raw client-supplied token.
+  - TestListV2ContinuationTokenBackCompatLiteral: pins a non-base64-JSON
+    token still works as literal marker.
+  - TestListV1MarkerUnchanged: pins V1 ?marker= semantics — V1 reads
+    the marker as a literal key, untouched by US-006.
+- **Learnings for future iterations:**
+  - boto3 V2 paginator round-trips NextContinuationToken into the next
+    request's ContinuationToken without inspecting it. Tests that
+    string-compare the token to a literal marker were brittle — once
+    the token becomes opaque the only safe assertion is "non-empty
+    when truncated, round-trips back."
+  - Use base64.RawURLEncoding (URL-safe, no `=` padding) for the wire
+    form so tokens drop into a query string without further percent-
+    encoding. Padding `=` triggers extra %3D escapes in some clients.
+  - decode falls back to base64.StdEncoding (with padding) too — some
+    SDKs / proxies may pad. Then literal-marker fallback only after
+    BOTH base64 modes fail to decode the body as JSON.
+  - ContinuationToken in the response body is a verbatim echo of the
+    client's token (not re-encoded), matching AWS. Re-encoding would
+    break clients that hash-compare request vs response tokens.
+  - Shard field is reserved on the JSON struct (json:"s,omitempty");
+    omitempty keeps the wire form compact when shard is 0 today.
+    Future per-shard cursoring (e.g., for cassandra parallel page
+    pre-fetch) lands without breaking tokens already in flight.
+---
+
+## 2026-05-01 - US-005 — Listing delimiter+prefix interaction
+- internal/meta/memory/store.go::ListObjects + internal/meta/cassandra/
+  store.go::ListObjects now (1) skip a CommonPrefix `pfx` when
+  `pfx <= Marker` (so a continuation page does not re-emit the prev
+  page's CP via roll-up) and (2) report `NextMarker` on truncation as
+  the LAST EMITTED key/CP, not the next-candidate CP about to be
+  rejected by the limit gate. Also marks the skipped CP as seen so
+  follow-on keys folding into it are filtered cheaply.
+- internal/s3api/server.go::listObjects now branches on
+  `list-type=2`: V2 keeps the prior ListBucketResult / KeyCount /
+  NextContinuationToken / ContinuationToken / StartAfter shape. V1
+  (no list-type) emits a NEW `listBucketResultV1` XML (added in
+  internal/s3api/xml.go) carrying `<Marker>`, `<NextMarker>` (only
+  when truncated AND delimiter set per AWS spec), `<MaxKeys>`,
+  `<Delimiter>`, `<IsTruncated>`, `<Contents>`, `<CommonPrefixes>`.
+  V1 reads `?marker=` from the query, V2 reads `?continuation-token=`
+  with `?start-after=` fallback.
+- internal/meta/storetest contract suite: new case
+  caseListDelimiterPrefixPaging mirrors s3-tests
+  `test_bucket_list_delimiter_prefix` shape (asdf, boo/bar,
+  boo/baz/xyzzy, cquux/thud, cquux/bla) — 3-page max-keys=1 paging
+  with prefix='' AND prefix='boo/'. Runs against memory + cassandra
+  (under -tags integration) lockstep.
+- internal/s3api/list_delimiter_prefix_test.go: TestListV1Delimiter
+  Prefix mirrors test_bucket_list_delimiter_prefix exactly (V1
+  Marker / NextMarker semantics). TestListV1DelimiterPrefixEndsWith
+  Delimiter mirrors test_bucket_list_delimiter_prefix_ends_with_
+  delimiter. TestListV2DelimiterPrefix mirrors
+  test_bucket_listv2_delimiter_prefix.
+- **Learnings for future iterations:**
+  - V1 vs V2 MUST be detected by `list-type=2` query param. V1
+    response shape has `<Marker>` + `<NextMarker>`; V2 has
+    `<ContinuationToken>` + `<NextContinuationToken>` + `<KeyCount>`
+    + `<StartAfter>`. boto3 `client.list_objects` (V1) reads
+    `<NextMarker>`; without it response['NextMarker'] is None.
+  - V1 NextMarker is included in the body ONLY when truncated AND a
+    delimiter was provided. Without delimiter, V1 clients use the
+    last key as the next marker. Setting NextMarker unconditionally
+    breaks AWS-conformant clients.
+  - On truncation, NextMarker = the LAST EMITTED key/CP — NOT the
+    next-candidate that the limit gate rejected. The gate must sit
+    AFTER the seenPrefixes + Marker checks, otherwise it pre-stamps
+    NextMarker to a CP that wasn't returned.
+  - When Marker IS itself a CommonPrefix the prev page returned
+    (e.g., "boo/"), the next page's roll-up must skip CPs where
+    `pfx <= Marker`. Without this filter the new page re-emits
+    "boo/" because its seenPrefixes map is per-call.
+  - Object keys in URLs need URL-encoding when they contain a slash
+    that isn't a path separator (e.g., key="asdf/" → PUT path
+    "/bkt/asdf%2F"). Otherwise the router strips the trailing
+    slash and the key becomes "asdf".
+  - meta.ListResult.NextMarker semantics: "" means not-truncated;
+    the V1 XML guard prevents emitting `<NextMarker></NextMarker>`
+    via `omitempty`.
+---
+
+## 2026-05-01 - US-004 — Multipart copy FlexibleChecksum path
+- internal/s3api/multipart.go::uploadPartCopy now reads
+  `x-amz-checksum-algorithm` from the request (falls back to
+  mu.ChecksumAlgorithm so boto's UploadPartCopy without a per-call
+  header still composes through Complete). When set, the source-side
+  ReadCloser is wrapped in `io.TeeReader(rc, hash.Hash)` so the named
+  digest is recomputed in-stream while PutChunks drains it (no
+  buffering). After PutChunks, the digest is base64-encoded.
+- If the client also supplied `x-amz-checksum-<algo>` on the request,
+  mismatch returns ErrBadDigest (HTTP 400) and the just-written
+  backend object is rolled back via `Data.Delete(manifest)`.
+- Computed digest lands on `meta.MultipartPart.ChecksumValue` +
+  `ChecksumAlgorithm` (the algo column is left blank when the digest
+  is empty so opt-out rows stay clean) and is echoed on the response
+  via the `x-amz-checksum-<algo>` header. From there US-001's
+  PartChunks pipeline carries it into Complete's COMPOSITE formula.
+- New `ErrBadDigest` (HTTP 400, "BadDigest") in errors.go.
+- Test coverage in internal/s3api/multipart_copy_checksum_test.go:
+  TestMultipartCopyFlexibleChecksum runs SHA256/SHA1/CRC32/CRC32C
+  round-trip (Initiate→UploadPartCopy echo→Complete COMPOSITE
+  XML check). TestMultipartCopyChecksumMismatch pins BadDigest on a
+  wrong client digest. TestMultipartCopyInheritsUploadAlgorithm pins
+  algo inheritance from the multipart session.
+- **Learnings for future iterations:**
+  - `io.TeeReader` is the right pattern for "hash bytes while PutChunks
+    consumes them" — the body is never buffered, and the hasher is
+    only Sum'd after PutChunks returns successfully (so mismatched
+    digests don't poison subsequent UploadPart rows).
+  - `extractCopyPartETag` test helper: the etag in CopyPartResult
+    XML is wrapped in quotes that encoding/xml emits as `&#34;` —
+    `strings.Trim(v, "\"&#34;")` would corrupt hex digits. Strip
+    `&#34;` as a substring, then Trim `"`.
+  - `compositeExpected(newHash, [][]byte{rawDigest})` — the test
+    helper hashes the byte slices it's given as if they were the
+    concat input. Passing the part body would test the wrong
+    formula; pass the raw per-part DIGEST instead.
+  - meta.MultipartPart already carried `ChecksumValue` +
+    `ChecksumAlgorithm` from US-003 — uploadPartCopy reuses the
+    same fields, so cassandra schema needs no further ALTER.
+  - The multipart-copy flow does NOT have a backend pass-through
+    branch (mu.BackendUploadID branch exists in uploadPart only).
+    Mixing chunks-shape parts into a backend-pass-through MPU is a
+    pre-existing latent bug, untouched by this story.
+---
+
+## 2026-05-01 - US-003 — Per-part composite-checksum response shape
+- Added MultipartChecksum{Algorithm,Type,} fields onto data.Manifest
+  with `omitempty` JSON tags + protobuf field numbers 19/20/21
+  documented in manifest.proto.
+- Added ChecksumAlgorithm + ChecksumType to meta.MultipartUpload and
+  ChecksumValue + ChecksumAlgorithm to meta.MultipartPart.
+- Cassandra schema.go ALTERs add checksum_algorithm + checksum_type to
+  multipart_uploads, checksum_value + checksum_algorithm to
+  multipart_parts. INSERT/SELECT on CreateMultipartUpload /
+  GetMultipartUpload / ListMultipartUploads / SavePart / ListParts
+  carry the new columns.
+- internal/s3api/checksum.go adds normalizeChecksumAlgo,
+  newChecksumHasher, checksumHeader, compositeChecksum helpers.
+- initiateMultipart reads `x-amz-checksum-algorithm` +
+  `x-amz-checksum-type` (default COMPOSITE when algo set), stamps
+  onto MultipartUpload. Invalid type → ErrInvalidArgument.
+- uploadPart captures `x-amz-checksum-<algo>` onto MultipartPart
+  (both native and US-010 backend pass-through paths) and echoes on
+  the response. Native path stores via PutChunks; pass-through
+  routes to UploadBackendPart. Same fields reach PartChunks at
+  Complete time.
+- completeMultipart: when algorithm is set, computes COMPOSITE hash-
+  of-hashes from per-part digests (algorithm-specific:
+  sha256/sha1/crc32-IEEE/crc32-Castagnoli; raw digest concat → hash →
+  base64 → `-<numparts>`), OR adopts client-supplied
+  `x-amz-checksum-<algo>` from the Complete request for FULL_OBJECT.
+  Stamps onto obj.Manifest.MultipartChecksum* as composite-checksum
+  hints; meta layer copies them onto the persisted manifest.
+- Meta CompleteMultipartUpload preAssembled sentinel tightened from
+  `obj.Manifest != nil` to `obj.Manifest != nil && obj.Manifest.BackendRef != nil`
+  so a hint-only manifest does not short-circuit chunks-shape
+  assembly. Both memory + cassandra mirror.
+- completeMultipartResult XML expanded with ChecksumCRC32 / CRC32C /
+  SHA1 / SHA256 / ChecksumType (`omitempty` so opt-out users see the
+  pre-cycle response shape unchanged).
+- getObject (HEAD/GET, no partNumber) emits
+  `x-amz-checksum-<algo>` + `x-amz-checksum-type` from the persisted
+  manifest when `x-amz-checksum-mode: ENABLED`.
+- getObjectPart (?partNumber=N) emits the per-part checksum from
+  PartChunks[N-1].ChecksumValue under the same opt-in.
+- Test coverage in internal/s3api/multipart_checksum_test.go:
+  TestMultipartFlexibleChecksumComposite covers SHA256/SHA1/CRC32/
+  CRC32C round-trip across UploadPart echo, Complete XML composite,
+  HEAD composite, HEAD partNumber. TestMultipartFullObjectChecksum
+  pins the FULL_OBJECT pass-through. TestMultipartChecksumOptOut
+  pins the opt-out negative.
+- **Learnings for future iterations:**
+  - `obj.Manifest` was a binary "preAssembled" sentinel; this story
+    needed it to also carry composite-checksum hints in the chunks-
+    shape native path. Tightened sentinel to BackendRef!=nil. Future
+    additions that hitchhike on obj.Manifest as a hint blob can
+    layer cleanly without re-touching the sentinel.
+  - The composite digest format MATCHES the named algorithm
+    (SHA256-of-hashes for SHA256, CRC32-of-hashes for CRC32, etc.) —
+    NOT always SHA-256 as the PRD note implies. Each algo hashes
+    its own raw-digest concatenation. Wire format `<base64>-<n>`
+    for COMPOSITE; FULL_OBJECT is `<base64>` (no suffix) and only
+    legal for CRC variants in modern AWS SDKs.
+  - x-amz-checksum-<algo> header values are base64 of RAW digests
+    (binary), not hex. Decode to bytes before concatenation.
+  - HEAD without `x-amz-checksum-mode: ENABLED` must NOT emit
+    checksum headers — boto's auto-validator otherwise re-validates
+    against the body and trips when the SDK didn't expect a
+    composite.
+  - Cassandra ALTER list grows; `nilIfEmpty` keeps zero-value
+    columns NULL so legacy rows (no algorithm) decode as
+    `ChecksumAlgorithm == ""`.
+---
+
+## 2026-05-01 - US-002 — ?partNumber=N GET serves the exact part body
+- Added `Server.getObjectPart` helper in internal/s3api/server.go.
+  Dispatched from `getObject` when `?partNumber=N` query param is
+  present (and the existing `uploadId` branch did NOT already steal
+  the request — that path is intercepted higher up in handleObject).
+- Reads PartChunks[N-1] for Offset/Size/ETag. 416
+  `InvalidPartNumber` for: non-multipart object (`PartChunks` nil/0),
+  N <= 0, N > len(PartChunks), unparseable N.
+- New `ErrInvalidPartNumber` (HTTP 416) in internal/s3api/errors.go.
+- Headers set on success (GET + HEAD): `x-amz-mp-parts-count`,
+  `Content-Length=<part size>`, `ETag` of the PART (not whole
+  object — falls back to whole-object ETag only if PartChunks
+  entry has empty ETag, which won't happen for memory/cassandra
+  meta but defends pre-existing rows), `Content-Range: bytes
+  <abs-off>-<abs-end>/<whole-object-size>`. SSE + version-id
+  headers mirror the regular GET path. Status is always 206
+  Partial Content.
+- Range header stacks part-relative: parseRange is run against
+  pr.Size (so `bytes=0-9` inside part 2 yields part2[0:10]); the
+  absolute byte range passed to Data.GetChunks is shifted by
+  pr.Offset; Content-Range absolute against the whole-object
+  total (matches AWS observable: a 206 always reports absolute
+  coords, never part-relative).
+- Skips the presign-redirect short-circuit — the backend URL
+  would not respect part semantics.
+- Test coverage in internal/s3api/multipart_partnumber_test.go:
+  3-part MPU (5MiB each). Subtests: part-2 body match, HEAD
+  part-3 headers, part-relative Range, part ETag differs from
+  whole-object ETag, 416 for N=4 / N=0 / N=-1, 416 for
+  single-PUT object.
+- **Learnings for future iterations:**
+  - `?partNumber=N` + `uploadId` is intercepted in handleObject
+    and routed to UploadPart — getObject only sees partNumber
+    when uploadId is absent. Don't second-guess this in the
+    GET handler.
+  - 416 wire body is `<Error><Code>InvalidPartNumber</Code>...`
+    not `InvalidRange` (S3 distinguishes these — Range
+    out-of-range is `InvalidRange`, partNumber out-of-range is
+    `InvalidPartNumber`). Both use HTTP 416.
+  - The status MUST be 206 (not 200) for a partNumber GET so
+    AWS SDKs treat the response as a Range response and
+    consult Content-Range. Returning 200 will make boto's
+    autochecker think the body is the whole object.
+  - When stacking Range on top of partNumber, Content-Range's
+    `<total>` field is the whole-object size (not the part
+    size). The relevant invariant: every 206 from S3 reports
+    absolute coords, never part-relative — matches what the
+    existing TestObjectRangeGet asserts for non-partNumber
+    206.
+  - HEAD must set Content-Length to the part size (not 0) so
+    SDKs can pre-allocate. Standard net/http does NOT strip
+    Content-Length on HEAD when WriteHeader is called
+    explicitly — set it directly.
+  - Adding the partNumber branch BEFORE
+    maybeBackendPresignRedirect is load-bearing: the presign
+    URL can't carry partNumber semantics, and a redirect
+    would short-circuit the PartChunks lookup.
+---
+
+## 2026-05-01 - US-001 — Multipart per-part offset tracking in data.Manifest
+- Added `PartRange` struct (PartNumber, Offset, Size, ETag,
+  ChecksumValue, ChecksumAlgorithm) and `Manifest.PartChunks
+  []PartRange` (json `omitempty`) — internal/data/manifest.go.
+- Updated internal/data/manifest.proto: header field-number map now
+  includes 13 (PartChunks) + reserved 14..18 for future PartRange
+  flatten; new `PartRange` message with sub-fields 1..6.
+- Wired CompleteMultipartUpload in both internal/meta/memory/store.go
+  and internal/meta/cassandra/store.go to populate PartChunks from
+  the parts rows on the LWT-success path. Running offset is summed
+  in part-list order (already validated to be ascending PartNumber).
+  PartChunks lands in BOTH the chunks-shape (RADOS) branch AND the
+  preAssembled (US-010 backend pass-through) branch.
+- Added contract test caseCompleteMultipartPopulatesPartChunks to
+  internal/meta/storetest/contract.go covering both stores via
+  storetest.Run. Memory backend exercises it via go test;
+  cassandra picks it up under -tags integration.
+- Added internal/data/manifest_test.go round-trip + nil-omittedness
+  + legacy-decode tests for PartChunks.
+- ChecksumValue / ChecksumAlgorithm fields exist on PartRange but
+  remain empty for now — US-004 lands per-part checksum storage at
+  UploadPart time and will populate them then.
+- **Learnings for future iterations:**
+  - meta has only memory + cassandra on this branch (the seeded tikv
+    pattern is stale).
+  - manifest.proto is doc/spec only — no codegen; JSON is the wire.
+  - pre-assembled manifest path (US-010 backend pass-through) ALSO
+    needs the new field — append onto the existing manifest pointer
+    instead of rebuilding it.
+  - meta.CompleteMultipartUpload is the right place to populate
+    PartChunks (LWT-success) — keep s3api/multipart.go::completeMultipart
+    out of the per-part-row business; s3api only knows the
+    `parts []CompletePart` order from the client.
+  - PartChunks is a `[]PartRange` not a pointer slice — keep
+    `omitempty` distinguishing nil (single-PUT, "not multipart")
+    from an empty slice (zero parts, which is itself a malformed
+    multipart that the gateway already rejects upstream).
+---
+
+## 2026-05-01 - US-009 — Multipart size-too-small + resend ordering
+- internal/s3api/multipart.go::completeMultipart hoists s.Meta.ListParts
+  to a single up-front call (de-duped from the FlexibleChecksum and
+  backend pass-through branches that previously re-listed). Walks
+  doc.Parts and asserts every non-last part is >= 5 MiB; violations
+  return ErrEntityTooSmall (HTTP 400, code EntityTooSmall) BEFORE
+  Meta.CompleteMultipartUpload (the LWT flip), mirroring US-008's
+  precondition shape so a small-part Complete cannot leak
+  "completing" state.
+- ErrEntityTooSmall added to internal/s3api/errors.go (HTTP 400).
+- Resend ordering verified as naturally last-write-wins on both
+  backends — no LWT needed:
+  * memory: SavePart serializes via per-store mutex and overwrites
+    st.parts[partNumber].
+  * cassandra: SavePart is a plain INSERT into multipart_parts
+    keyed on (bucket_id, upload_id, part_number); Cassandra's
+    timestamp-based last-write-wins gives the same shape.
+- Existing meta.ErrMultipartETagMismatch path already covers the
+  stale-ETag case (Complete using the FIRST upload's ETag after a
+  resend → InvalidPart on the wire).
+- Test coverage in internal/s3api/multipart_size_resend_test.go:
+  * TestMultipartCompleteSizeTooSmall — 1 MiB non-last → 400
+    EntityTooSmall + upload survives in ListMultipartUploads.
+  * TestMultipartCompleteSingleSmallPart — single-part 5-byte
+    Complete succeeds (last-part exemption).
+  * TestMultipartResendOverwrites — resent 'B'-bytes win on full
+    GET after replacing 'A'-bytes.
+  * TestMultipartCompleteRejectsStaleETag — Complete with the
+    pre-resend ETag → 400 InvalidPart.
+- Existing tests adjusted to the new spec:
+  * TestMultipartFullLifecycle: 4/4/4 MiB → 5/5/4 MiB.
+  * TestMultipartGatewayRoutesToMultipartBackend: 5B/6B → 5MiB/6B.
+- **Learnings for future iterations:**
+  - The 5 MiB minimum is a Complete-time check, not an UploadPart-
+    time check (S3 spec: small parts are allowed in flight; the
+    finaliser refuses them). Keep Complete as the gate.
+  - When adding cross-cutting Complete-time checks, hoist
+    s.Meta.ListParts ONCE near the top of completeMultipart and
+    reuse byNumber across all branches. Avoids the same query
+    running 2-3× on the hot path.
+  - PRD's "LWT on multipart_parts keyed on part_number" is a
+    misread — both backends already give last-write-wins for free
+    via mutex (memory) and Cassandra's timestamp resolution
+    (Cassandra). Explicit LWT would only matter if SavePart became
+    a read-modify-write (it isn't).
+  - Bumping unit-test part sizes from B-scale to MiB-scale is
+    cheap on memory backends (+11 MiB random data per test) and
+    matches the new size constraint without regressing real
+    multipart shape coverage.
+---
+
+## 2026-05-01 - US-011 — Refresh s3-tests baseline + ROADMAP close-flip
+- Brought up `make up-all` (Cassandra + Ceph RADOS), recreated gateway
+  with `STRATA_AUTH_MODE=required` + `STRATA_STATIC_CREDENTIALS=
+  testMainAK:testMainSK:main-owner,testAltAK:testAltSK:alt-owner,
+  testTenantAK:testTenantSK:tenant-owner` per
+  scripts/s3-tests/README.md, ran scripts/s3-tests/run.sh on the
+  default filter at commit 6e122903.
+- Result: tests=177 passed=139 failed=38 errors=0 skipped=0 →
+  **78.5% pass rate**. BELOW the 90% floor + 94.9% stretch target.
+  Per-story unit tests under internal/s3api stayed green; the gap
+  is at the cluster-level interop boundary (boto/aws-cli SDK envelope
+  on FlexibleChecksum, ContentLength of ?partNumber=N GET, single-
+  part 416, Cassandra null-version DELETE coherence, V1 NextMarker
+  shape on max-keys=1 paging).
+- Failure breakdown (38 = 8 SigV2 deliberate + 30 real-but-cluster-
+  level):
+  * 8 SigV2 / bad-auth (test_headers.py — deliberate gap, SigV2
+    explicitly out of scope)
+  * 5 versioning null (test_versioning_obj_plain_null_version_*,
+    suspend_versions, suspended_copy) — Cassandra coherence
+  * 5 multipart cksum helper (test_multipart_use_cksum_helper_
+    {sha256,sha1,crc32,crc32c,crc64nvme}) — SDK FlexibleChecksumError
+  * 4 multipart copy (test_multipart_copy_{small,improper_range,
+    special_names,multiple_sizes})
+  * 3 ?partNumber=N GET (test_multipart_get_part, _sse_c_get_part,
+    _single_get_part) — ContentLength + 416 shape
+  * 2 listing delimiter+prefix (test_bucket_list_delimiter_prefix,
+    _delimiter_prefix_underscore)
+  * 2 listV2 continuation (test_bucket_listv2_continuationtoken,
+    _both_continuationtoken_startafter)
+  * 2 anonymous list (auth=optional + bucket policy — out of scope)
+  * 1 multipart preconditions (test_multipart_put_current_object_
+    if_match)
+  * 1 size-too-small (test_multipart_upload_size_too_small)
+  * 1 resend ordering (test_multipart_resend_first_finishes_last)
+  * 1 Complete checksum (test_multipart_checksum_sha256)
+  * 1 versioning list (test_bucket_list_return_data_versioning)
+  * 1 unreadable prefix (deliberate gap)
+  * 1 object-delete-bucket-gone
+- Per AC: did NOT flip the ROADMAP P1 entry to Done (78.5% < 90%).
+  Updated ROADMAP.md headline `80.1% (141/176)` → `78.5% (139/177)`
+  and amended the existing `s3-tests 80% → 90%+` P1 entry to record
+  the cycle's per-cluster shipment + the 2026-05-01 measurement,
+  then filed 4 new P1 + 3 new P2/P3 follow-up entries under
+  Consolidation & validation for the cluster-level interop gaps.
+- Appended `### 2026-05-01 — 6e122903` baseline section to
+  scripts/s3-tests/README.md with the 38-fail breakdown grouped by
+  cluster + per-failure US-NNN provenance + the deliberate-gap
+  clarifier for `test_bucket_list_unordered`,
+  `test_bucket_create_exists`, `test_bucket_create_exists_nonowner`,
+  `test_bucket_listv2_unordered`.
+- Files changed: scripts/s3-tests/README.md (new baseline section +
+  deliberate gaps), ROADMAP.md (headline + P1 amendment + 7 follow-
+  up entries), scripts/ralph/prd.json (US-011 passes=true), this
+  file.
+- **Learnings for future iterations:**
+  - Per-story unit tests passing internal/s3api/*_test.go is
+    NECESSARY but NOT SUFFICIENT — modern boto / aws-cli 2.x exercise
+    SDK-side envelopes (FlexibleChecksum digest match, automatic
+    ContentMD5 computation, partNumber Content-Length echo back into
+    the SDK's range request) that don't show up in pure
+    httptest.NewRecorder shaped unit tests. Future per-cluster
+    PRDs should invest in a per-story s3-tests harness invocation
+    BEFORE marking the story passes=true, not just at US-011 close.
+  - `make up-all` requires a clean network state — if a prior run
+    left the docker_default network with leaked IP allocations, the
+    Ceph mon container will fail to bind. Fix is `make down` first.
+  - The 8 SigV2 / bad-auth failures (`test_headers.py`) are stable
+    across cycles — count them once, never re-investigate. Added a
+    standing note in the README baseline section so future runs
+    don't rediscover the deliberate gap.
+  - `auth=required` on the gateway breaks
+    `test_bucket_list_objects_anonymous` and the V2 companion.
+    They're configuration-driven, not code-driven, and land with
+    the bucket-policy P-item — keep them out of the s3-tests
+    follow-up P1 set.
+  - Headline cycle close should always update ROADMAP.md headline
+    + scripts/s3-tests/README.md baseline in the SAME commit, even
+    if the cycle missed its target — the headline is the
+    customer-facing number and stale-by-cycle-end-date is worse
+    than known-missed-by-cycle-end-date.
+---
