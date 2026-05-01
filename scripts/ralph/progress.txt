@@ -172,6 +172,19 @@ Cycle: ralph/s3-tests-90
   putObject + uploadPartCopy: doom-mismatch never leaks "completing"
   state. FULL_OBJECT branch is the inverse — the client value IS the
   digest, so the recompute-and-compare check does not apply.
+- s3-tests cluster-level verification gap (US-011 cycle close):
+  per-story `internal/s3api/*_test.go` unit coverage is necessary but
+  NOT sufficient — modern boto / aws-cli 2.x exercise SDK-side
+  envelopes (FlexibleChecksum digest match, automatic ContentMD5,
+  partNumber Content-Length echo into SDK range requests) that
+  don't show up in pure `httptest.NewRecorder`-shaped tests. Future
+  per-cluster PRDs should invest in a per-story s3-tests harness
+  invocation BEFORE marking passes=true. The 2026-05-01 baseline
+  (78.5%) showed 30 cluster-level fails on stories whose unit
+  tests all passed.
+- `make up-all` needs a clean network — if a prior run leaked an
+  IP allocation in docker_default, Ceph mon fails to bind. Always
+  `make down` first when bringing up the s3-tests stack.
 
 ## 2026-05-01 - US-010 — CompleteMultipartUpload checksum input validation
 - internal/s3api/multipart.go::completeMultipart COMPOSITE branch:
@@ -701,4 +714,87 @@ Cycle: ralph/s3-tests-90
     cheap on memory backends (+11 MiB random data per test) and
     matches the new size constraint without regressing real
     multipart shape coverage.
+---
+
+## 2026-05-01 - US-011 — Refresh s3-tests baseline + ROADMAP close-flip
+- Brought up `make up-all` (Cassandra + Ceph RADOS), recreated gateway
+  with `STRATA_AUTH_MODE=required` + `STRATA_STATIC_CREDENTIALS=
+  testMainAK:testMainSK:main-owner,testAltAK:testAltSK:alt-owner,
+  testTenantAK:testTenantSK:tenant-owner` per
+  scripts/s3-tests/README.md, ran scripts/s3-tests/run.sh on the
+  default filter at commit 6e122903.
+- Result: tests=177 passed=139 failed=38 errors=0 skipped=0 →
+  **78.5% pass rate**. BELOW the 90% floor + 94.9% stretch target.
+  Per-story unit tests under internal/s3api stayed green; the gap
+  is at the cluster-level interop boundary (boto/aws-cli SDK envelope
+  on FlexibleChecksum, ContentLength of ?partNumber=N GET, single-
+  part 416, Cassandra null-version DELETE coherence, V1 NextMarker
+  shape on max-keys=1 paging).
+- Failure breakdown (38 = 8 SigV2 deliberate + 30 real-but-cluster-
+  level):
+  * 8 SigV2 / bad-auth (test_headers.py — deliberate gap, SigV2
+    explicitly out of scope)
+  * 5 versioning null (test_versioning_obj_plain_null_version_*,
+    suspend_versions, suspended_copy) — Cassandra coherence
+  * 5 multipart cksum helper (test_multipart_use_cksum_helper_
+    {sha256,sha1,crc32,crc32c,crc64nvme}) — SDK FlexibleChecksumError
+  * 4 multipart copy (test_multipart_copy_{small,improper_range,
+    special_names,multiple_sizes})
+  * 3 ?partNumber=N GET (test_multipart_get_part, _sse_c_get_part,
+    _single_get_part) — ContentLength + 416 shape
+  * 2 listing delimiter+prefix (test_bucket_list_delimiter_prefix,
+    _delimiter_prefix_underscore)
+  * 2 listV2 continuation (test_bucket_listv2_continuationtoken,
+    _both_continuationtoken_startafter)
+  * 2 anonymous list (auth=optional + bucket policy — out of scope)
+  * 1 multipart preconditions (test_multipart_put_current_object_
+    if_match)
+  * 1 size-too-small (test_multipart_upload_size_too_small)
+  * 1 resend ordering (test_multipart_resend_first_finishes_last)
+  * 1 Complete checksum (test_multipart_checksum_sha256)
+  * 1 versioning list (test_bucket_list_return_data_versioning)
+  * 1 unreadable prefix (deliberate gap)
+  * 1 object-delete-bucket-gone
+- Per AC: did NOT flip the ROADMAP P1 entry to Done (78.5% < 90%).
+  Updated ROADMAP.md headline `80.1% (141/176)` → `78.5% (139/177)`
+  and amended the existing `s3-tests 80% → 90%+` P1 entry to record
+  the cycle's per-cluster shipment + the 2026-05-01 measurement,
+  then filed 4 new P1 + 3 new P2/P3 follow-up entries under
+  Consolidation & validation for the cluster-level interop gaps.
+- Appended `### 2026-05-01 — 6e122903` baseline section to
+  scripts/s3-tests/README.md with the 38-fail breakdown grouped by
+  cluster + per-failure US-NNN provenance + the deliberate-gap
+  clarifier for `test_bucket_list_unordered`,
+  `test_bucket_create_exists`, `test_bucket_create_exists_nonowner`,
+  `test_bucket_listv2_unordered`.
+- Files changed: scripts/s3-tests/README.md (new baseline section +
+  deliberate gaps), ROADMAP.md (headline + P1 amendment + 7 follow-
+  up entries), scripts/ralph/prd.json (US-011 passes=true), this
+  file.
+- **Learnings for future iterations:**
+  - Per-story unit tests passing internal/s3api/*_test.go is
+    NECESSARY but NOT SUFFICIENT — modern boto / aws-cli 2.x exercise
+    SDK-side envelopes (FlexibleChecksum digest match, automatic
+    ContentMD5 computation, partNumber Content-Length echo back into
+    the SDK's range request) that don't show up in pure
+    httptest.NewRecorder shaped unit tests. Future per-cluster
+    PRDs should invest in a per-story s3-tests harness invocation
+    BEFORE marking the story passes=true, not just at US-011 close.
+  - `make up-all` requires a clean network state — if a prior run
+    left the docker_default network with leaked IP allocations, the
+    Ceph mon container will fail to bind. Fix is `make down` first.
+  - The 8 SigV2 / bad-auth failures (`test_headers.py`) are stable
+    across cycles — count them once, never re-investigate. Added a
+    standing note in the README baseline section so future runs
+    don't rediscover the deliberate gap.
+  - `auth=required` on the gateway breaks
+    `test_bucket_list_objects_anonymous` and the V2 companion.
+    They're configuration-driven, not code-driven, and land with
+    the bucket-policy P-item — keep them out of the s3-tests
+    follow-up P1 set.
+  - Headline cycle close should always update ROADMAP.md headline
+    + scripts/s3-tests/README.md baseline in the SAME commit, even
+    if the cycle missed its target — the headline is the
+    customer-facing number and stale-by-cycle-end-date is worse
+    than known-missed-by-cycle-end-date.
 ---

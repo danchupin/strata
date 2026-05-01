@@ -193,8 +193,8 @@
         "Tests pass"
       ],
       "priority": 11,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Ran scripts/s3-tests/run.sh against a clean make up-all stack (Cassandra + Ceph RADOS, auth=required) at commit 6e122903. Result: tests=177 passed=139 failed=38 errors=0 skipped=0 → 78.5% pass rate, BELOW the 90% floor. Per-story unit tests under internal/s3api remain green; cluster-level interop gaps (boto + aws-cli SDK envelope) still fail on FlexibleChecksum digest match, ?partNumber=N GET ContentLength echoes whole-object size, single-part-object 416 not raised, Cassandra null-version DELETE coherence, and listing fixtures with max-keys=1 paging. Per AC: did NOT flip the ROADMAP P1 entry to Done (78.5% < 90%). Updated ROADMAP.md headline 80.1% (141/176) → 78.5% (139/177) and filed the remaining cluster-level gaps as 4 new P1 + 3 new P2/P3 follow-up entries under Consolidation & validation. Appended the 2026-05-01 baseline section to scripts/s3-tests/README.md with the 38-fail breakdown grouped by cluster (8 SigV2 deliberate, 5 versioning null, 5 multipart cksum helper, 4 multipart copy, 3 ?partNumber=N GET, 2 listing delimiter+prefix, 2 listV2 continuation, 2 anonymous list config, 1 multipart preconditions, 1 size-too-small, 1 resend ordering, 1 Complete checksum, 1 versioning list, 1 unreadable prefix deliberate, 1 object-delete-bucket-gone). Documented test_bucket_list_unordered, test_bucket_create_exists, test_bucket_create_exists_nonowner, test_bucket_listv2_unordered as deliberate gaps even though they currently pass — RGW extension + SDK-quirk-driven."
     }
   ]
 }

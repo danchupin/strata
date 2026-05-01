@@ -13,7 +13,8 @@ as before:
 - **P2** — meaningful gaps; expected for serious deployments
 - **P3** — nice-to-have, visibility, DX
 
-S3-compatibility headline: **80.1% (141/176)** on the executable subset of `ceph/s3-tests`. See
+S3-compatibility headline: **78.5% (139/177)** on the executable subset of `ceph/s3-tests`
+(2026-05-01 measurement, commit `6e122903`, `make up-all` stack). See
 `scripts/s3-tests/README.md` for the gap breakdown.
 
 ---
@@ -33,10 +34,56 @@ adding more, prove what is there.
   has not been run at load against the full `make up-all` stack. Run it for ≥1 hour against
   Cassandra+RADOS, record observed inconsistencies (or zero, with the workload that proves
   it). Add the run to CI on a nightly schedule so regressions surface.
-- **P1 — s3-tests 80% → 90%+.** 27 failures excluding the deliberate SigV2 gap, clustered
-  in `scripts/s3-tests/README.md`. Closing the multipart per-part composite checksum
-  shape, the multipart copy `FlexibleChecksum` path, and the listing edge cases
-  (`delimiter+prefix`, V2 continuation token interpretation) covers most of it.
+- **P1 — s3-tests 80% → 90%+.** Cycle `ralph/s3-tests-90` (US-001..US-011) shipped the
+  per-cluster meta + handler surface (per-part offset tracking, ?partNumber=N GET, composite
+  checksum response shape, FlexibleChecksum copy, listing delimiter+prefix, V2 opaque
+  continuation token, versioning literal "null", multipart preconditions, size-too-small,
+  Complete checksum input validation). 2026-05-01 baseline run after the cycle (`make up-all`,
+  Cassandra + Ceph RADOS) lands at **78.5% (139/177)** — below the 90% floor. 30 real
+  cluster-level interop failures remain (8 SigV2 deliberate; see
+  `scripts/s3-tests/README.md`'s 2026-05-01 baseline section for the per-cluster breakdown).
+  Per-story unit tests under `internal/s3api` pass; the gap is in the boto + aws-cli SDK
+  envelope shapes (FlexibleChecksum digest match, ContentLength of ?partNumber=N GET, V1
+  NextMarker shape, Cassandra null-version DELETE coherence). Filed as the follow-ups below.
+- **P1 — s3-tests follow-up: ?partNumber=N GET ContentLength + single-part 416.**
+  `test_multipart_get_part`, `test_multipart_sse_c_get_part`, `test_multipart_single_get_part`
+  fail at cluster level: `ContentLength` echoes the whole-object size instead of the part
+  size, and a single-part object does not 416 on out-of-range `?partNumber=`. US-002 wired
+  the meta shape; the s3api response writer still emits the wrong size header when the
+  underlying chunk stream is shorter than the part window.
+- **P1 — s3-tests follow-up: versioning literal "null" Cassandra coherence.**
+  `test_versioning_obj_plain_null_version_removal`,
+  `test_versioning_obj_plain_null_version_overwrite`,
+  `test_versioning_obj_plain_null_version_overwrite_suspended`,
+  `test_versioning_obj_suspend_versions`, `test_versioning_obj_suspended_copy` all fail
+  cluster-level on Cassandra. US-007 wired memory + cassandra meta lockstep; the cassandra
+  path still leaves a deleted null version readable on subsequent GET. Likely a missing LWT
+  on the DELETE path or an `IF EXISTS` guard skip.
+- **P1 — s3-tests follow-up: multipart FlexibleChecksum SDK envelope.**
+  `test_multipart_use_cksum_helper_{sha256,sha1,crc32,crc32c,crc64nvme}` (5),
+  `test_multipart_copy_{small,improper_range,special_names,multiple_sizes}` (4),
+  `test_multipart_checksum_sha256` (1) all fail SDK-side `FlexibleChecksumError`. US-003,
+  US-004, US-010 wired the recompute paths; the SDK still rejects the digest because the
+  composite shape we emit on `CompleteMultipartUploadResult` does not match the boto
+  helper's expected envelope. CRC64NVME is a new algorithm not yet wired.
+- **P2 — s3-tests follow-up: listing edge cases (delimiter+prefix V1, V2 continuation
+  token).** `test_bucket_list_delimiter_prefix`, `test_bucket_list_delimiter_prefix_underscore`
+  (US-005), `test_bucket_listv2_continuationtoken`,
+  `test_bucket_listv2_both_continuationtoken_startafter` (US-006). Memory + cassandra unit
+  tests pass; the cluster-level fixture exposes a NextMarker-vs-NextContinuationToken
+  divergence on the `boo/bar`+`cquux/*` shape with `max-keys=1` paging.
+- **P2 — s3-tests follow-up: multipart preconditions + size-too-small + resend ordering.**
+  `test_multipart_put_current_object_if_match` (US-008),
+  `test_multipart_upload_size_too_small` (US-009),
+  `test_multipart_resend_first_finishes_last` (US-009). Per-story unit tests pass; the
+  cluster path still rejects a Complete with `InvalidPartOrder` on a body the spec accepts,
+  and the s3-tests size-too-small fixture exposes a non-last-part shape we don't reject.
+- **P2 — s3-tests follow-up: anonymous list configuration.**
+  `test_bucket_list_objects_anonymous`, `test_bucket_listv2_objects_anonymous` need
+  `auth=optional` plus a bucket policy / ACL allow-anonymous shape — out of `s3-tests-90`
+  scope, lands with the bucket-policy P-item.
+- **P3 — s3-tests follow-up: object delete on missing bucket.**
+  `test_object_delete_key_bucket_gone` — error code drift on a bucket-gone shape.
 - **P2 — Benchmarks vs RGW.** "Drop-in RGW replacement" is unproven without numbers. Run
   `warp` and `cosbench` against both gateways on the same RADOS cluster. Publish absolute
   latency / throughput per workload class (small-object PUT, large-object GET, listing,

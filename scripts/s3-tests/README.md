@@ -81,6 +81,90 @@ The large `errors` bucket reflects how much of S3 we don't implement yet
 replication, checksums, etc. Each P-item closed in `ROADMAP.md` should
 shift some fraction of those errors into either pass or fail.
 
+### 2026-05-01 — `6e122903` (closing s3-tests-90 cycle, US-011)
+
+Default subset, `auth=required`, `make up-all` (Cassandra + Ceph RADOS):
+
+```
+tests=177  passed=139  failed=38  errors=0  skipped=0
+pass rate: 78.5%
+```
+
+Headline target was ≥90% (stretch ≥94.9%). Below floor — the `s3-tests
+80% → 90%+` ROADMAP P1 entry stays open. Per-cluster gaps still failing
+are filed under "Consolidation & validation" / multipart / versioning /
+listing in `ROADMAP.md`. Per-story unit tests under `internal/s3api`
+pass green; the cluster-level interop gaps surface only when boto / aws-
+cli drives the full request shape (signed body chunks, FlexibleChecksum
+SDK helper, anonymous reads, etc.).
+
+Failure breakdown (38):
+
+- **8 SigV2 / bad-auth (deliberate gap)** — `test_headers.py`
+  `test_bucket_create_bad_*_aws2`, `test_bucket_create_bad_authorization_*`,
+  `test_bucket_create_bad_expect_mismatch`. SigV2 is intentionally
+  unsupported (see Non-Goals in `tasks/prd-s3-tests-90.md`).
+- **5 versioning null** — `test_versioning_obj_plain_null_version_removal`,
+  `test_versioning_obj_plain_null_version_overwrite`,
+  `test_versioning_obj_plain_null_version_overwrite_suspended`,
+  `test_versioning_obj_suspend_versions`,
+  `test_versioning_obj_suspended_copy`. US-007 wired the meta-shape
+  contract; the cluster-level path on Cassandra still lets a deleted
+  null version remain readable. Filed as a follow-up P1.
+- **5 multipart per-part composite checksum (FlexibleChecksum helper)** —
+  `test_multipart_use_cksum_helper_{sha256,sha1,crc32,crc32c,crc64nvme}`.
+  US-003 wired the COMPOSITE response shape; boto's helper still trips
+  the SDK-side `FlexibleChecksumError`. Filed as a follow-up P1.
+- **4 multipart copy** — `test_multipart_copy_{small,improper_range,
+  special_names,multiple_sizes}`. US-004 wired UploadPartCopy
+  FlexibleChecksum; SDK still rejects the recomputed digest on the
+  copy body for these shapes.
+- **3 ?partNumber=N GET** — `test_multipart_get_part`,
+  `test_multipart_sse_c_get_part`, `test_multipart_single_get_part`.
+  ContentLength echoes whole-object size instead of part size; single-
+  part objects do not 416 on out-of-range partNumber. US-002 follow-up.
+- **2 listing delimiter+prefix** — `test_bucket_list_delimiter_prefix`,
+  `test_bucket_list_delimiter_prefix_underscore`. V1 NextMarker shape
+  diverges from AWS observable on the s3-tests fixture set. US-005
+  follow-up.
+- **2 listV2 continuation token** — `test_bucket_listv2_continuationtoken`,
+  `test_bucket_listv2_both_continuationtoken_startafter`. US-006 wired
+  the opaque-base64 wire form; paging still drops/duplicates a row in
+  the `boo/bar`+`cquux/*` fixture. Follow-up.
+- **2 anonymous list (configuration, not bug)** —
+  `test_bucket_list_objects_anonymous`,
+  `test_bucket_listv2_objects_anonymous`. Need `auth=optional` plus a
+  bucket policy / ACL allow-anonymous shape. Out of `s3-tests-90`
+  scope; lands with the bucket-policy P-item.
+- **1 multipart preconditions** — `test_multipart_put_current_object_if_match`.
+  US-008 follow-up; bucket-versioning interaction with If-Match
+  produces 412 in a case where the spec accepts.
+- **1 multipart size-too-small** — `test_multipart_upload_size_too_small`.
+  US-009 follow-up; the s3-tests fixture exposes a `<5 MiB` non-last
+  shape we don't reject yet.
+- **1 multipart resend** — `test_multipart_resend_first_finishes_last`.
+  US-009 follow-up; gateway reports `InvalidPartOrder` on a Complete
+  body that the spec accepts.
+- **1 multipart Complete checksum** — `test_multipart_checksum_sha256`.
+  US-010 follow-up; the boto FlexibleChecksum path on Complete still
+  fails the SDK-side digest match.
+- **1 versioning list** — `test_bucket_list_return_data_versioning`.
+  Adjacent to US-007 list shape.
+- **1 unreadable prefix (deliberate gap)** —
+  `test_bucket_list_prefix_unreadable`. Non-UTF-8 prefix bytes; AWS
+  itself does not guarantee clean behaviour. Declared a deliberate
+  gap (see Non-Goals in `tasks/prd-s3-tests-90.md`).
+- **1 object delete on missing bucket** — `test_object_delete_key_bucket_gone`.
+  Edge-case error code drift; file under correctness P3.
+
+`test_bucket_list_unordered`, `test_bucket_create_exists`,
+`test_bucket_create_exists_nonowner`, and the `test_bucket_listv2_unordered`
+companion all currently pass — keeping them noted here as
+**deliberate gaps** anyway: `allow-unordered=true` is an RGW extension,
+V1 ListObjects marker / encoding-type cases are SDK-quirk-driven and
+modern SDKs (boto3, aws-sdk-go-v2, aws-cli 2.x) all use V2. If a future
+upstream s3-tests revision flips them to FAIL, do not file as new work.
+
 ## Interpreting failures
 
 Failures fall into three buckets:
