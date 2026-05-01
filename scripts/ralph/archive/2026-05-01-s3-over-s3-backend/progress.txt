@@ -1,0 +1,1584 @@
+# Ralph Progress Log
+Started: 2026-04-29
+Cycle: ralph/s3-over-s3-backend
+---
+
+## Codebase Patterns
+
+(seed entries for this cycle. Replace/remove as US-001..US-019 land.)
+
+- data.Backend interface (internal/data/backend.go) is the contract; three
+  in-tree implementations now: memory (test), rados (primary), s3 (this
+  cycle, US-001+). All four ops are stream-shaped: Put(reader, size),
+  Get/GetRange returning io.ReadCloser, Delete. New backend impls live in
+  internal/data/<name>/ — mirror the existing s3 package layout.
+- Native shape ONLY: one Strata object = one backend S3 object via the
+  backend's own multipart upload. Never split a Strata object into N
+  4-MiB-chunks-as-S3-objects — request count amplification kills it.
+  Manifest.Chunks is empty when BackendRef is set (US-008).
+- VersionId is the defensive correctness lever (US-002, US-004, US-008,
+  US-010). Capture from SDK response on every PUT/Complete; pass back on
+  every Delete. Three-state semantics: '' (backend without versioning, or
+  versioning-off — plain delete), 'null' (versioning suspended — versioned
+  delete with literal 'null'), <uuid> (versioning enabled — versioned
+  delete bypasses delete-marker creation). Never branch on backend
+  capability — let the SDK return what it returns and pass through.
+- aws-sdk-go-v2 brings ~6 transitive deps. Acceptable for a P1 first-class
+  feature. Pin via go.mod; track upstream releases manually (no
+  auto-update cron exists).
+- Streaming PUT uses feature/s3/manager.NewUploader — single-shot or
+  multipart transparently per object size. Memory bound by part-size
+  (default 16 MiB) * upload concurrency (default 4) = 64 MiB peak.
+- Operator pre-creates the backend bucket. Strata refuses to start if the
+  bucket does not exist or is not writable. Strata does NOT own the
+  backend bucket lifecycle (auto-create would leak ownership).
+- Backend object key format: <bucket-uuid>/<object-uuid> — UUIDv4 first
+  4-8 hex chars give AWS S3 enough entropy for automatic prefix
+  partitioning, per-bucket grouping is forensic bonus
+  (`aws s3 ls s3://<bb>/<bucket-uuid>/`).
+- Cross-region operation (Strata in region X, backend bucket in region Y)
+  is an operator concern. Document in docs/backends/s3.md (US-017); do
+  NOT add startup region-mismatch detection or enforcement.
+- Backend versioning on Strata-managed bucket = anti-pattern but supported
+  defensively via VersionID. If operator enables versioning on an existing
+  bucket Strata wrote to with empty VersionID rows, those rows leak on
+  delete (plain DeleteObject creates delete-marker). Document; do not
+  policy.
+- Lifecycle bidirectional mapping (US-014) is best-effort. Strata's own
+  lifecycle worker keeps running for transition classes the backend does
+  not support natively; for natively-supported classes (STANDARD_IA /
+  GLACIER / DEEP_ARCHIVE), Strata translates to backend lifecycle and
+  skips those objects.
+- ROADMAP maintenance rule (CLAUDE.md): every commit closing a ROADMAP.md
+  item flips the bullet to strikethrough Done format in the SAME commit,
+  with closing SHA inline (or `(commit pending)` with a follow-up SHA
+  edit). Every commit discovering a new gap adds a new entry under the
+  right severity section in the same commit.
+- Tests for the S3 backend that need a real MinIO: use the same
+  testcontainers-go pattern as internal/meta/cassandra/store_integration_test.go
+  + internal/meta/tikv/tikvtest/cluster.go. Build tag `integration`.
+  MinIO single-node ~30 s start; bucket created via mc mb in init step.
+- US-001 stub uses blank imports in internal/data/s3/deps.go to keep the
+  three aws-sdk-go-v2 packages in go.mod / go.sum until the first real
+  consumer lands (config → US-005, service/s3 → US-002+, manager → US-002).
+  Drop the matching blank-import line as each package gets a non-blank
+  reference. Don't rewrite the stub's signature shape (PutChunks /
+  GetChunks / Delete / Close) until the data.Backend contract itself
+  changes — US-002..US-004 may extend the interface, but US-001 only
+  satisfies the existing one. (deps.go removed in US-002 since all three
+  packages are now imported directly.)
+- s3 package has TWO constructors: New() returns a stub Backend (no
+  client, every op returns errors.ErrUnsupported — preserved for the
+  US-001 contract), Open(ctx, cfg) builds a live Backend wired through
+  aws-sdk-go-v2. New methods (US-002 Put, future US-003 Get/GetRange,
+  US-004 Delete) check b.uploader / b.client != nil and surface
+  errors.ErrUnsupported on the stub branch. Don't drop New() until US-009
+  flips the gateway dispatch fully to Open.
+- testcontainers-go MinIO module: github.com/testcontainers/testcontainers-go/modules/minio
+  v0.41.0. Runtime: minio.Run(ctx, "minio/minio:latest", minio.WithUsername,
+  minio.WithPassword); ConnectionString returns "host:port" without
+  scheme — prepend "http://" before passing to s3.Backend Config.Endpoint.
+  Bucket must be pre-created (s3 admin client → CreateBucket); Strata
+  refuses to auto-create per US-005 design.
+- HeapInuse-based memory bound assertion: sample HeapInuse during the
+  upload via a 20 ms ticker goroutine, take the max, assert peak delta
+  < body size. With prod defaults (16 MiB * 4 = 64 MiB pool) HeapInuse
+  drifts up to ~100 MiB on docker-localhost uploads (Go's GC sawtooth
+  + sync.Pool retention of recently-used part buffers), masking the
+  bound — use a tightened test config (PartSize=5 MiB, Concurrency=2 →
+  10 MiB pool) to keep the assertion provable. Don't rely on HeapAlloc
+  delta — same problem (sync.Pool keeps the buffers live).
+- data.ErrNotFound (internal/data/errors.go) is the package-wide
+  sentinel for "object missing". Backend implementations wrap with %w
+  (`fmt.Errorf("...: %w", data.ErrNotFound)`); callers use errors.Is.
+  Map SDK-typed errors via errors.As on the concrete type
+  (*s3types.NoSuchKey for the s3 backend) — not via string code match.
+- aws-sdk-go-v2 field-name irregularity: PutObjectOutput.VersionId
+  (lowercase d) but manager.UploadOutput.VersionID (capital D). Same
+  thing semantically; trips compile if you assume one shape. Check
+  with `go doc <type>` before referencing the field.
+- s3.Backend's per-object delete is named DeleteObject (not Delete) —
+  the interface method `Delete(ctx, m *Manifest)` already occupies the
+  Delete name and is the chunk-based RADOS-style delete. Same reason
+  Put/Get coexist with PutChunks/GetChunks. Future US-008+ may rename
+  the interface method to DeleteChunks; until then the s3-backend
+  per-object surface is DeleteObject(ctx, oid, versionID) and
+  DeleteBatch(ctx, refs).
+- Tests that need to count HTTP requests on the s3 client: inject a
+  *http.Client wrapping a counting RoundTripper via Config.HTTPClient
+  → awsconfig.WithHTTPClient. Reset the counter after seed PUTs so
+  only the operation under test is observed.
+- Test bucket versioning: enable AFTER createBucket via
+  client.PutBucketVersioning(VersioningConfiguration{Status:
+  s3types.BucketVersioningStatusEnabled}). PutObjectOutput.VersionId
+  is empty until versioning is Enabled; admin.ListObjectVersions
+  returns Versions + DeleteMarkers separately for assertion.
+- internal/config/config.go: every new env var is wired by adding to (1)
+  the relevant per-section koanf-tagged struct, (2) defaults() if a
+  default exists, (3) envMap (explicit env→koanf-path mapping — no
+  auto-mangling), and (4) validate() if it's required or has a
+  whitelist. validate() is called once at end of Load() so misconfig
+  fails before the binary starts serving — the operator finds out at
+  startup, not at first request.
+- s3.Backend boot-time writability probe: PutObject + DeleteObject on
+  ProbeKey (".strata-readyz-canary") runs inside Open() unless
+  Config.SkipProbe = true. Probe captures PutObjectOutput.VersionId and
+  passes it to DeleteObject so versioning-enabled backends are left
+  exactly as found (no canary version slot, no delete-marker). Tests
+  that don't want the probe round-trip flip SkipProbe; tests that need
+  the bucket to exist must call createBucket before Open.
+- Koanf env-var loading is testable via t.Setenv — Load() reads from
+  os.Getenv at each call, so per-test env override works without
+  affecting other tests in the same process.
+- SDK retry config: awsconfig.WithRetryMode(aws.RetryModeAdaptive) +
+  awsconfig.WithRetryMaxAttempts(N) is the v2-canonical way to enable
+  adaptive retries with a custom cap. Default retryable codes (5xx +
+  429 + connection errors) match PRD US-006 — no need for a custom
+  IsErrorRetryable. RetryMode constants live in github.com/aws/aws-
+  sdk-go-v2/aws.
+- SDK retry log lines are emitted at Debug classification (see
+  aws-sdk-go-v2 v1.41.5 aws/retry/middleware.go:219). To honour
+  US-006's "WARN" requirement without a full custom retryer, wrap
+  o.Logger with a thin filter that re-emits any "retrying request"
+  format-prefixed line through slog.Warn. The line carries
+  service+operation+attempt; delay is NOT in this format string —
+  AC partial on the delay detail.
+- Per-op timeout pattern: opCtx + uploadCtx helper methods on Backend
+  centralise the WithTimeout/WithCancel choice. Get/GetRange must
+  NOT defer cancel — body read happens AFTER the SDK call returns
+  and is bound to the same ctx; use cancelOnCloseReader so Body.Close
+  releases the context (and the per-op timer). Side effect: opTimeout
+  bounds the entire Get lifecycle including body streaming, so
+  operators with slow-link large GETs should bump
+  STRATA_S3_BACKEND_OP_TIMEOUT_SECS.
+- Synthetic SDK responses for retry tests: an http.RoundTripper that
+  replays a fixed []responseFn sequence is enough to exercise the
+  SDK retry middleware without MinIO. Return raw 503 with a SlowDown
+  XML body; the SDK's standard retryable-status set covers it.
+  Default adaptive backoff schedules ~3 s between attempts, so a
+  three-attempt test runs in ~6 s wall-clock.
+- SDK middleware observation point for backend metrics: Initialize step
+  (Before) brackets the entire op including serialize → retry → send →
+  deserialize. middleware.GetOperationName(ctx) returns the smithy op
+  name (e.g. "PutObject") set by the SDK at request bootstrap. After the
+  op returns, retry.GetAttemptResults(metadata) returns the per-attempt
+  result slice — len(results) - 1 == retry count. Wire via
+  o.APIOptions = append(o.APIOptions, instrumentStack) on s3.Options.
+- Prometheus collector registration in libraries: keep the package-level
+  CounterVec / HistogramVec usable without registration (Inc / Observe
+  works regardless), gate prometheus.MustRegister behind sync.Once via
+  an exported RegisterMetrics(), and call RegisterMetrics() from each
+  live constructor (Open). This keeps the rados-only path from
+  registering s3 collectors while making the s3 path register on first
+  Open without cmd-side wiring.
+- prometheus/client_golang/prometheus/testutil.ToFloat64(c) reads a
+  single CounterVec leaf without resetting collector state — the right
+  primitive for delta assertions across operations in a single test
+  process. testutil pulls in github.com/kylelemons/godebug as an
+  indirect dep; expect go mod tidy to add it.
+- Manifest is JSON-encoded as opaque bytes inside meta backends
+  (cassandra/codec.go, etc.). New fields are schema-additive when tagged
+  json:",omitempty" — zero migration. data.EncodeManifest /
+  data.DecodeManifest (added in US-008) are the package-level helpers;
+  internal/data/manifest.proto is a schema-reservation artifact (no proto
+  codegen pipeline yet). 1:1 invariant: when Manifest.BackendRef is set,
+  Chunks is empty; when Chunks is non-empty, BackendRef is nil. Convention
+  is enforced at the gateway construction site (US-009), not the type.
+  Field-number reservations 7..12 in manifest.proto are pre-allocated for
+  US-008 sub-field flatten + US-013 SSE.Mode — additions outside that
+  range MUST start at 13.
+- data.WithBucketID(ctx, id) / data.BucketIDFromContext(ctx) (US-009
+  internal/data/context.go) thread the Strata bucket UUID through the
+  data.Backend interface without widening the method signatures. The s3
+  backend reads it for the <bucket-uuid>/<object-uuid> key prefix; memory
+  / rados ignore. Set at every PUT-path callsite in s3api (putObject,
+  uploadPart, uploadPartCopy, copyObject) — DON'T forget when adding new
+  PUT sites or s3-backend objects lose the per-bucket grouping affordance.
+- s3api orphan-cleanup pattern (US-009): every callsite that previously
+  did `s.enqueueChunks(ctx, m.Chunks)` for a deleted/aborted manifest now
+  calls `s.enqueueOrphan(ctx, m)` instead. enqueueOrphan branches on
+  manifest shape: BackendRef-shape → synchronous s.Data.Delete (s3
+  backend object); chunks-shape → existing GC chunk-deletion queue (rados).
+  Add new orphan-cleanup paths via enqueueOrphan, not enqueueChunks.
+- s3.Backend's data.Backend bridge (US-009): PutChunks counts bytes via a
+  countingReader wrapper around the input io.Reader because manager.
+  UploadOutput does not surface the streamed length, then builds Manifest
+  with Class+Size+ETag+BackendRef and empty Chunks (1:1 invariant).
+  GetChunks rejects chunks-shape manifests with errors.ErrUnsupported —
+  s3 backend serves only BackendRef shapes; cross-feeding never happens
+  but the defensive check prevents silent fallthrough on a misconfigured
+  gateway. Delete on chunks-shape is a no-op (rados handles its own).
+- data.MultipartBackend (US-010) is the OPTIONAL capability surface for
+  backends that support 1:1 multipart pass-through. Gateway type-asserts
+  s.Data.(data.MultipartBackend) at every multipart entry-point and falls
+  through to the chunk-based PutChunks path when the assertion fails —
+  rados/memory require no plumbing. Handle encoding (s3 backend uses
+  <key>\\x00<uploadID>) is opaque to meta + gateway; only the backend that
+  produced the handle decodes it. New surface mirrors the SDK's multipart
+  contract: CreateBackendMultipart returns handle, UploadBackendPart
+  returns per-part ETag, CompleteBackendMultipart returns BackendRef-shape
+  Manifest, AbortBackendMultipart is idempotent on NoSuchUpload.
+- meta.Store.CompleteMultipartUpload (US-010) trusts a gateway-supplied
+  obj.Manifest when non-nil and skips its own chunks-shape assembly. The
+  gateway-supplied manifest carries BackendRef from the backend's own
+  CompleteMultipartUpload; storing it preserves the 1:1 invariant from
+  US-008. Only one of (Manifest.Chunks, Manifest.BackendRef) is populated
+  per object — store layer never auto-promotes one to the other.
+- Multipart pass-through (US-010) requires meta state to span the upload
+  lifecycle: BackendUploadID on meta.MultipartUpload (set at initiate,
+  read at every UploadPart and at Complete/Abort) + BackendETag on
+  meta.MultipartPart (set at UploadPart, replayed in CompleteBackendMultipart).
+  Cassandra schema is additive ALTER TABLE (multipart_uploads +
+  multipart_parts), single-column-per-row — old rows decode with empty
+  string for the new columns, gateway treats empty as "not pass-through".
+- AWS SDK v2 quirk: s3types.NoSuchUpload IS a typed error (matches
+  errors.As). Use the typed-error pattern (var nsu *s3types.NoSuchUpload;
+  errors.As(err, &nsu)) for idempotent abort — same convention as
+  s3types.NoSuchKey for GetObject.
+- For multipart-pass-through unit tests without MinIO, an in-process
+  http.Handler that mimics the S3 multipart XML (InitiateMultipartUpload-
+  Result + ETag header per part + CompleteMultipartUploadResult) hooked
+  via http.Client.Transport keeps the SDK's serialization and request
+  signing on the SDK side. Bridge with httptest.NewRecorder -> rec.Result()
+  inside RoundTrip; nil-check req.Body (CreateMultipartUpload requests
+  carry no body and the io.Copy(io.Discard, nil) panics).
+- Compose profiles (US-011): every service that's stack-specific carries
+  `profiles: [<stack>]`. Cassandra is shared meta and stays unprofiled —
+  always runs. Ceph stack = ceph-backend profile (ceph + gateway + gc +
+  lifecycle). S3 stack = s3-backend profile (minio + init-minio +
+  strata-s3). Default `docker compose up` runs cassandra alone — operators
+  must pick a profile to activate gateway/data-plane. `make up-all` /
+  `run-gateway` invoke COMPOSE_CEPH; `make up-s3-backend` invokes
+  COMPOSE_S3. `make down` passes both --profile flags + -v so all
+  volumes (incl strata-minio-data) clear cleanly.
+- Compose `service_completed_successfully` is the right depends_on
+  condition for one-shot bootstrap containers (init-minio bucket creator).
+  Healthcheck-gating doesn't fit because the bootstrap exits — gate on
+  exit status instead, then dependent services start once the bootstrap
+  reports success.
+- /readyz endpoint (cmd/strata-gateway/main.go) is the gateway's container
+  healthcheck target. The Open() boot-time writability probe (US-005) is
+  the actual readiness gate; /readyz just returns 200 once the HTTP
+  goroutine starts serving (backend was already validated). Don't add
+  per-request backend checks here — too expensive and would mask transient
+  S3 503s as gateway-readiness failures. Healthchecks elsewhere (minio,
+  cassandra) follow the same pattern: gate on transport-level readiness,
+  not deep liveness.
+- mc against a running compose stack (US-012): `docker run --rm --network
+  docker_default -e MC_HOST_strata=http://USER:PASS@minio:9000
+  --entrypoint mc minio/mc:latest find strata/<bucket> --type f`. Alias
+  seeded via MC_HOST_<name> env var — no stateful `mc alias set` step
+  needed. `--type f` excludes prefix-only directory entries so `wc -l`
+  yields a real object count. The compose project prefix derives from the
+  -f file's parent dir (deploy/docker → `docker_default` network +
+  `docker_strata-minio-data` volume). Override via COMPOSE_NETWORK /
+  COMPOSE_VOLUME env knobs in scripts/smoke-s3-backend.sh if you switch
+  to `-p <name>`.
+- smoke.sh end-state invariant (US-012): every PUT path has a matching
+  DELETE, so a successful smoke run leaves zero remaining objects in the
+  backend. That property doubles as the end-to-end orphan-cleanup signal
+  for the s3 backend (1 assertion = `mc find ... | wc -l == 0`) — no
+  separate synthetic test needed. Future smoke additions that PUT without
+  DELETE must add explicit cleanup or this assertion regresses.
+- Manifest.SSE (US-013) records the encryption disposition per-object as
+  {Mode, Algorithm, KMSKeyID} so the GET path branches on what was
+  actually written, not on the current backend config. Mode value
+  vocabulary {"passthrough", "strata", "both"}; Algorithm vocabulary
+  {"AES256", "aws:kms"} or empty (strata mode). manifest.proto field 12
+  is now allocated to the SSEInfo message; sub-fields live in SSEInfo's
+  own field-number space (mode=1, algorithm=2, kms_key_id=3). New SSE
+  states must extend SSEInfo, not Manifest's reserved range.
+- s3 backend SSE wiring (US-013): Open() validates SSEMode against the
+  three-value whitelist; b.applyPutSSE / b.applyMultipartSSE attach
+  ServerSideEncryption headers (AES256, or aws:kms when SSEKMSKeyID is
+  set) on PutObject + CreateMultipartUpload only — UploadPart inherits
+  from the session per S3 protocol so the per-part path stays SSE-free.
+  PutChunks + CompleteBackendMultipart call b.manifestSSE() to stamp the
+  Manifest. New backend handlers (UploadPartCopy native passthrough,
+  COPY) must add the same applyPutSSE / manifestSSE pair or the
+  invariant breaks.
+- Gateway SSE response headers (US-013): s3api.getObject surfaces
+  x-amz-server-side-encryption (+ -aws-kms-key-id when present) from
+  o.Manifest.SSE so clients see per-Strata-object SSE metadata on GET.
+  When Manifest.SSE.Algorithm is empty (strata mode, or legacy pre-US-013
+  manifests) no header is set — preserves the "no SSE" wire shape that
+  pre-US-013 clients expect.
+- Destructive CI variant pattern (US-012): `make smoke-s3-backend` is
+  safe for repeated local runs (SKIP_DOWN=1 default; non-destructive).
+  CI uses `make smoke-s3-backend-ci` which sets SKIP_DOWN=0 and runs the
+  `make down` volume-cleanup assertion at the end. Don't fold the
+  destructive teardown into the default target — operators want to poke
+  the stack after a passing smoke run.
+- Optional capability surfaces (data.MultipartBackend US-010,
+  data.LifecycleBackend US-014) live in internal/data with primitive args
+  to stay cycle-free. Pattern: define interface + flat input types in
+  internal/data, do per-feature parsing/translation in the gateway layer,
+  type-assert at the gateway entry-point and fall through to the
+  chunk/worker path when assertion fails. Don't put internal/lifecycle (or
+  any package importing internal/data) types in the interface signature —
+  importing internal/lifecycle into internal/data/s3 cycles via worker.go.
+- Lifecycle bidirectional translation (US-014): Strata-stored lifecycle is
+  the source of truth; backend lifecycle is derived state, re-pushed on
+  every PutBucketLifecycle and cleared on Delete. Translation failure logs
+  WARN and does NOT fail the user request — a rollout from rados → s3
+  with stale IAM still serves PUT lifecycle 200; worker keeps owning
+  everything until backend permissions are fixed. Backend filter prefix is
+  always <bucket-uuid>/<userPrefix> so an empty Strata prefix doesn't
+  expire ProbeKey or sibling Strata-bucket objects sharing the backend
+  bucket.
+- CORS bidirectional mirror (US-015): same source-of-truth pattern as
+  lifecycle, with one difference — CORS in S3 is bucket-scoped (no
+  per-prefix CORS protocol), so data.CORSBackend has no bucketPrefix arg.
+  Multi-Strata-bucket-per-backend-bucket deployments see last-writer-wins
+  on the backend mirror; Strata-stored config remains per-Strata-bucket
+  and authoritative for the gateway response. NoSuchCORSConfiguration is
+  not a typed SDK error — match via strings.Contains on err.Error(),
+  same shape as NoSuchLifecycleConfiguration handling.
+- s3api GET-side union pattern (US-015): when the backend exposes the
+  optional Get half of a capability surface (CORSBackend.GetBackendCORS),
+  the gateway's GET handler unions Strata-stored XML blob with backend
+  rules, with Strata winning ID conflicts. Implementation: parse Strata
+  blob, build a set of Strata IDs, append backend rules whose ID is not
+  in the set, re-marshal as XML. When backend has no extra rules, return
+  Strata blob verbatim (preserves operator's original XML formatting).
+  Backend errors log WARN and fall back to Strata blob.
+- Per-bucket admin flags (US-016 BackendPresign) live on meta.Bucket
+  directly + a SetBucket<Flag> method on meta.Store. Cassandra adds via
+  additive ALTER TABLE buckets ADD <col> boolean — NULL on legacy rows
+  decodes as Go zero value (false) so existing buckets default to off.
+  GetBucket + ListBuckets SELECT must include the new column when added;
+  forgetting to update both surfaces silently returns zero-value flags
+  on every lookup. Pattern works for any boolean per-bucket toggle.
+- New CI e2e variant pattern (US-018): every new e2e variant gets its
+  own job in .github/workflows/ci.yml — parallel, no `needs:` on the
+  existing e2e job (independent failure surfaces). Each job builds the
+  gateway image inline (don't try to share with docker-build), runs
+  `make up-<stack>` then `make smoke-<stack>-ci` (the destructive `-ci`
+  variant where it exists is a strict superset of the non-CI smoke),
+  collects `docker logs` per container into ci-logs/, uploads via
+  `actions/upload-artifact@v4` with `name: e2e-<stack>-logs` and
+  retention-days 14. timeout-minutes per AC. When adding a new
+  alternative-data-backend or alternative-meta-backend stack, follow
+  this template — one job, one artefact, parallel-runnable.
+- US-016 presign passthrough: data.PresignBackend (PresignGetObject(ctx,
+  *Manifest, expires) → URL) is the optional capability surface. The s3
+  backend implements via awss3.NewPresignClient(b.client) — local URL
+  computation, no network round-trip, so tests can use a stub
+  http.RoundTripper. Forward Manifest.BackendRef.VersionID to the
+  GetObjectInput so versioning-enabled backends resolve to the same
+  version Strata recorded at write time. Default expires (when caller
+  passes 0) = SDK default 15 minutes. Gateway-side passthrough decision
+  lives in s3api.maybeBackendPresignRedirect: bucket flag on AND
+  X-Amz-Signature query param present AND data.PresignBackend assertion
+  AND Manifest.BackendRef present ⇒ 307 Temporary Redirect with Location
+  + audit slog.Info(presign_passthrough=true). Any miss falls through to
+  in-process serve. Backend mint error logs Warn and serves bytes — never
+  surfaces the failure to the client. HEAD bypasses passthrough by design
+  (presign HEAD is rare; gateway-side response is cheap).
+
+## 2026-04-30 — US-010
+- Added optional data.MultipartBackend interface (internal/data/backend.go)
+  + data.BackendCompletedPart input type. Gateway type-asserts at each
+  multipart entry-point so rados/memory backends keep working unchanged.
+- Implemented MultipartBackend on *s3.Backend in new internal/data/s3/
+  multipart.go: CreateBackendMultipart issues SDK CreateMultipartUpload
+  at <bucket-uuid>/<object-uuid> (bucket id read from data.WithBucketID
+  ctx, same convention as PutChunks); UploadBackendPart streams the
+  part to SDK UploadPart and returns the per-part ETag (quote-stripped);
+  CompleteBackendMultipart issues SDK CompleteMultipartUpload and builds
+  a BackendRef-shape Manifest (Chunks empty per US-008 invariant);
+  AbortBackendMultipart is idempotent on NoSuchUpload (typed error via
+  errors.As). Backend handle = key + "\\x00" + SDK uploadID; opaque to
+  callers.
+- Schema-additive on meta types: MultipartUpload.BackendUploadID +
+  MultipartPart.BackendETag — both string, both omitempty in JSON via
+  zero-value short-circuit (no struct json tags needed since those types
+  aren't marshalled). Cassandra schema gets two ALTER TABLE statements
+  (multipart_uploads.backend_upload_id, multipart_parts.backend_etag);
+  Insert/Select/List queries on those tables now read+write the new
+  columns — empty strings on legacy rows decode cleanly. Memory store
+  carries new fields by struct copy (no codec changes).
+- meta.Store.CompleteMultipartUpload now honours a gateway-supplied
+  obj.Manifest (preAssembled = obj.Manifest != nil): when set, store
+  trusts the supplied manifest (BackendRef shape) and only computes
+  totalSize defensively when obj.Size == 0. Memory + Cassandra share
+  this contract.
+- Wired s3api multipart endpoints (internal/s3api/multipart.go):
+  initiateMultipart calls mb.CreateBackendMultipart on the
+  data.MultipartBackend type-assertion (with data.WithBucketID(ctx, b.ID)
+  for the <bucket-uuid> prefix) and persists the handle on the meta row;
+  cleanup-on-meta-failure aborts the backend session. uploadPart routes
+  to mb.UploadBackendPart when mu.BackendUploadID != ""; saves
+  BackendETag (= per-part backend ETag) on the meta row, ETag mirrors
+  backend ETag for the wire response. completeMultipart calls
+  mb.CompleteBackendMultipart with backendETag from each persisted part,
+  stamps obj.Manifest with the BackendRef-shape result + totalSize, then
+  delegates to s.Meta.CompleteMultipartUpload (which now skips its own
+  chunks-shape assembly per the preAssembled path). abortMultipart
+  fetches mu.BackendUploadID before AbortMultipartUpload, then calls
+  mb.AbortBackendMultipart so the backend session is terminated even
+  though the meta-side abort returns no chunks-shape manifests for
+  pass-through parts.
+- Tests:
+  - data/s3 unit: TestStubMultipartReturnsErrUnsupported (every method
+    on the New() stub surfaces ErrUnsupported), TestHandleEncodeDecode-
+    RoundTrip + TestDecodeHandleRejectsMalformed (handle encoding
+    invariants), TestMultipartLifecycleAgainstSyntheticBackend (in-
+    process http.Handler talks the S3 multipart XML; asserts handle
+    upload-id + per-part ETag round-trip + BackendRef shape + Create×1
+    UploadPart×2 Complete×1 + idempotent abort on NoSuchUpload).
+  - s3api unit: TestMultipartGatewayRoutesToMultipartBackend (full
+    HTTP-level lifecycle through s3api.New with a fake
+    data.MultipartBackend; asserts gateway routes to MultipartBackend
+    methods + body round-trips through GET via stored BackendRef
+    manifest + abort path).
+  - s3api integration (build tag `integration`): TestGatewayMultipart-
+    PassThroughToS3Backend (5×10 MiB parts through MinIO testcontainer,
+    asserts EXACTLY 1 backend object post-Complete + byte-equal GET +
+    DELETE cleanup), TestGatewayMultipartAbortPassThrough (initiate then
+    Abort, asserts backend ListMultipartUploads is empty).
+- Files: internal/data/backend.go, internal/data/s3/multipart.go (new),
+  internal/data/s3/multipart_test.go (new), internal/meta/store.go,
+  internal/meta/cassandra/{schema.go,store.go}, internal/meta/memory/
+  store.go, internal/s3api/multipart.go, internal/s3api/multipart_
+  passthrough_test.go (new), internal/s3api/s3backend_integration_
+  test.go.
+- **Learnings:**
+  - Optional capability interface (data.MultipartBackend) vs widening
+    data.Backend was the right call — backends without multipart-native
+    APIs (rados/memory) skip the surface entirely; gateway uses single-
+    line type-assertion at each entry-point. Adding methods to the
+    base interface would have forced 2 stub paths + a memory path that
+    re-implements multipart over chunks for no real-world benefit.
+  - manager.UploadOutput.VersionID has capital D, PutObjectOutput.
+    VersionId has lowercase. CompleteMultipartUploadOutput.VersionId
+    matches PutObjectOutput shape — lowercase. Repeat: `go doc <type>`
+    before touching the field.
+  - meta.Store.CompleteMultipartUpload had to learn a new dispatch
+    (preAssembled = obj.Manifest != nil) — but the change is fully
+    backwards-compatible because the existing path always set
+    obj.Manifest = nil before calling. The chunks-shape branch is
+    untouched for rados/memory.
+  - s3api.uploadPartCopy intentionally NOT routed through
+    UploadBackendPart in this story. The current path goes through
+    PutChunks → separate backend object → manifest stored in
+    MultipartPart.Manifest. For backend pass-through that would mean
+    the part lives at a DIFFERENT key from the multipart's target,
+    breaking the 1:1 invariant. AC US-010 only mentions UploadPart;
+    UploadPartCopy native pass-through (via SDK UploadPartCopy) is a
+    future story. Document the skip in the function header instead.
+  - Per AC: per-part composite checksum interop "if prd-s3-tests-90
+    cycle has shipped (manifest carries PartChunks[].ChecksumValue),
+    backend's per-part ETags flow through Strata's checksum machinery
+    unchanged; if not yet shipped, this AC is deferred". This repo
+    has no PartChunks / ChecksumValue mechanism — deferral is implicit.
+    BackendETag is stored, available for that future cycle.
+  - Synthetic SDK responses for multipart tests need an http.Handler
+    (not a sequence of pre-baked http.Response) because the SDK signs
+    each request and the request-line shape varies per op. Bridge via
+    httptest.NewRecorder inside http.Client.Transport — same idiom as
+    the existing US-007 metrics observer test.
+---
+
+## 2026-04-30 — US-009
+- Wired STRATA_DATA_BACKEND=s3 dispatch in cmd/strata-gateway/main.go
+  buildDataBackend → datas3.Open(ctx, datas3.Config{...}) sourced from
+  cfg.S3Backend (env-driven via koanf). Probe runs at boot (US-005) so
+  missing bucket / read-only mount fails fast.
+- Implemented data.Backend bridge on *s3.Backend: PutChunks streams the
+  body through manager.Upload via a countingReader, returns Manifest
+  with BackendRef = {Backend:"s3", Key:<bucket-uuid>/<object-uuid>,
+  ETag, Size, VersionID} and Chunks empty. GetChunks routes through
+  GetRange when m.BackendRef != nil (validates offset/length, special-
+  cases length=0 to a no-op reader). Delete routes through DeleteObject
+  with the captured VersionID (versioned-bucket safety per US-008).
+- Added data.WithBucketID / BucketIDFromContext (internal/data/context.go)
+  for threading the Strata bucket UUID without widening data.Backend.
+- s3api PUT-path callsites (putObject + uploadPart + uploadPartCopy +
+  copyObject) wrap r.Context() with data.WithBucketID(ctx, b.ID) before
+  s.Data.PutChunks so the s3 backend can build the
+  <bucket-uuid>/<object-uuid> key. Random UUID prefix fallback covers
+  paths where the bucket id isn't threaded.
+- Replaced s.enqueueChunks(ctx, m.Chunks) at five callsites (server.go
+  delete x2, multipart complete + abort, delete_objects bulk delete) with
+  s.enqueueOrphan(ctx, m). New helper synchronously deletes BackendRef-
+  shape manifests via s.Data.Delete and routes chunks-shape manifests
+  through the existing GC chunk-queue path. Synchronous backend delete is
+  acceptable per US-004 deferred-GC note; backend bucket lifecycle
+  AbortIncompleteMultipartUpload + cross-region docs land in US-017.
+- Unit tests (no MinIO): TestPutChunksBuildsBackendRefManifest (asserts
+  BackendRef shape + bucket-uuid prefix via http.RoundTripper),
+  TestPutChunksObjectKeyFallback (random UUID prefix when no bucket id),
+  TestGetChunksRejectsChunksShapeManifest, TestDeleteWithoutBackendRefIs-
+  NoOp.
+- Integration tests (build tag `integration`): TestPutChunksGetChunks-
+  DeleteRoundTrip in internal/data/s3 (PUT 1 KiB → full GET → range GET
+  → Delete via the data.Backend interface against MinIO test-
+  container, asserts <bucket-uuid>/ prefix + zero objects post-delete).
+  TestGatewayDispatchesToS3Backend in internal/s3api (full HTTP path
+  through s3api.New(s3backend, memmeta), asserts 1:1 backend object
+  count after small + 5 MiB PUT, range GET through gateway, DELETE
+  cleanup). The end-to-end gateway-over-MinIO assertion is the AC's
+  smoke-pass equivalent until US-011/US-012 wire the docker-compose
+  profile + make smoke-s3-backend target.
+- Files: internal/data/context.go (new), internal/data/s3/{backend.go,
+  backend_test.go, backend_integration_test.go}, cmd/strata-gateway/
+  main.go, internal/s3api/{server.go, multipart.go, copy_object.go,
+  delete_objects.go, s3backend_integration_test.go (new)}.
+- **Learnings:**
+  - data.Backend.PutChunks doesn't carry the Strata bucket id but US-009
+    AC needs <bucket-uuid>/<object-uuid> keys. Choices: (a) widen the
+    interface (touches rados/memory), (b) type-assert s3.Backend in
+    s3api (couples gateway to backend type), (c) thread via context.
+    Context-value (option c) keeps rados/memory unchanged and lets new
+    PUT-path callers opt in by wrapping ctx — chosen here.
+  - manager.UploadOutput surfaces ETag + VersionID but NOT the streamed
+    byte count. Wrap the input io.Reader with a counting wrapper that
+    tallies n on each Read; the count is correct after Upload returns
+    because the SDK consumes the reader to EOF (or context cancel).
+  - GC worker (internal/gc/worker.go) drains only the chunk-deletion
+    queue and constructs `&data.Manifest{Chunks: []ChunkRef{...}}` from
+    each entry — never sees BackendRef. Backend-object cleanup runs
+    synchronously through the s3api enqueueOrphan path on the request
+    goroutine. Future cycle that adds a backend-object queue can extend
+    meta.Store.EnqueueChunkDeletion or add a separate API; out of scope.
+  - The 1:1 invariant from data.Manifest doc-comment (BackendRef set ⇒
+    Chunks empty, vice versa) is now load-bearing across PutChunks /
+    GetChunks / Delete on the s3 backend AND across enqueueOrphan in
+    s3api. Anywhere a Manifest is constructed, exactly one of the two
+    shapes must be populated.
+  - The s3 backend's GetChunks / Delete check b.client (live Backend)
+    AND m.BackendRef. Stub Backend (New(), no Open) trips the client
+    check first → ErrUnsupported preserved for the existing US-001 stub
+    contract; chunks-shape fed into a live s3 backend trips the second
+    check → ErrUnsupported (defensive, never silently fall through).
+  - cancelOnCloseReader chain still works through GetChunks → GetRange.
+    The per-op timeout (US-006) starts at GetRange and is released when
+    the gateway closes the body (`defer rc.Close()` at server.go:519).
+  - `make smoke` validation against MinIO is deferred to US-011/US-012
+    (compose profile + Makefile target + init-minio one-shot). The
+    gateway-against-MinIO integration test (TestGatewayDispatchesToS3-
+    Backend) covers the same PUT/GET/DELETE happy path with the same
+    HTTP wire format under the existing build tag.
+
+## 2026-04-30 — US-007
+- Added internal/data/s3/metrics.go: three Prometheus collectors
+  (strata_data_s3_backend_op_duration_seconds histogram with exponential
+  buckets 5 ms..40 s, strata_data_s3_backend_op_total counter,
+  strata_data_s3_backend_retry_total counter), exported
+  RegisterMetrics() gated by sync.Once for idempotent registration, and
+  the metricsObserver Initialize-step middleware that brackets every
+  s3 op.
+- Wired observer via o.APIOptions = append(o.APIOptions, instrumentStack)
+  in Open(); RegisterMetrics() now called from Open() so the rados-only
+  deployment never registers s3 collectors.
+- Status mapping: err != nil → 'error'; attempts > 1 → 'retried'; else
+  'ok'. Retry counter += attempts-1 so adaptive-retry pressure stays
+  visible regardless of terminal status. opNameToLabel whitelist caps
+  cardinality at the eight ops the AC pins (PutObject / GetObject /
+  DeleteObject / DeleteObjects / multipart {init,part,complete,abort}).
+- Unit test TestObserveOpTotalAndRetryTotal drives three ops via
+  http.RoundTripper (no MinIO): happy Put → put/ok +1; 503,503,200 Put →
+  put/retried +1, retry_total{put} +2; NoSuchKey Get → get/error +1.
+  Asserts via testutil.ToFloat64 deltas. TestRegisterMetricsIdempotent
+  guards the sync.Once gate.
+- Files: internal/data/s3/{metrics.go (new), metrics_test.go (new),
+  backend.go}, go.mod, go.sum.
+- **Learnings:**
+  - retry.GetAttemptResults reads attempt-count out of middleware
+    metadata after the op returns — preferred over wrapping the SDK's
+    Retry middleware directly (Finalize-after-Retry would also work but
+    requires knowing the SDK's middleware ID and re-counting per
+    invocation). One Initialize observer is the cleanest single point
+    for both timing and retry attribution.
+  - Operations outside the labelled-op whitelist (HeadBucket from
+    region-discovery, ListObjectVersions from integration tests) must
+    skip observation — otherwise label cardinality grows whenever
+    callers add a new SDK call, defeating the AC's bounded-label goal.
+  - sync.Once-gated Register() lets the package be imported by tests +
+    by the rados-only deployment without burning Prometheus registry
+    slots, while still auto-registering on the first Open().
+  - The deprecation warnings on manager.NewUploader / manager.Uploader /
+    Upload predate this story (US-002 vintage); migration to
+    feature/s3/transfermanager is an upstream-deprecation cleanup, not
+    a US-007 concern.
+---
+
+## 2026-04-30 — US-006
+- Added Config.MaxRetries (default 5), Config.OpTimeout (default 30 s),
+  Config.MultipartTimeout (default 10 min) on internal/data/s3.Config.
+- Open wires SDK adaptive retry mode + max attempts via
+  awsconfig.WithRetryMode + WithRetryMaxAttempts. Client gets
+  ClientLogMode|=aws.LogRetries + retryWarnLogger wrapping the
+  default aws.Logger so retry attempt lines (service + operation +
+  attempt) surface at slog.Warn instead of SDK Debug. Backend struct
+  carries opTimeout + multipartTimeout for per-op deadline plumbing.
+- New helpers Backend.opCtx + Backend.uploadCtx wrap parent ctx with
+  the appropriate WithTimeout. Get/GetRange detach the cancel via a
+  new cancelOnCloseReader (body Close releases the context); Put uses
+  uploadCtx with deferred cancel; DeleteObject/DeleteBatch/Probe use
+  opCtx with deferred cancel.
+- New env vars STRATA_S3_BACKEND_MAX_RETRIES (s3_backend.max_retries
+  int) and STRATA_S3_BACKEND_OP_TIMEOUT_SECS (s3_backend.op_timeout
+  _secs int) in internal/config; validate() rejects negatives.
+  Documented in README.md env-var table.
+- Unit test TestPutRetriesOn503ThenSucceeds drives the SDK retry path
+  with an in-process http.RoundTripper returning SlowDown, SlowDown,
+  200; asserts Put succeeds and transport is invoked exactly 3 times.
+- Files: internal/data/s3/{backend.go,config.go,backend_test.go},
+  internal/config/{config.go,config_test.go}, README.md, go.mod, go.sum.
+- **Learnings:**
+  - aws-sdk-go-v2's retry middleware logs at Debug, not Warn. Aligning
+    with operator-facing log conventions requires a thin Logger
+    wrapper that filters on the "retrying request" format prefix —
+    full attempt-aware middleware is overkill for the AC.
+  - Get/GetRange cannot defer cancel(): the SDK's response.Body is
+    bound to the request ctx, so cancel-on-return aborts the
+    streaming read. Transferring cancel ownership to a wrapping
+    ReadCloser fixes it without requiring caller cooperation.
+  - Per-op timeout for streaming Gets is necessarily a body-read
+    ceiling, not a request-setup ceiling. Document via the env-var
+    description so operators size it for the worst-case body
+    duration, not the headers RTT.
+  - The SDK's default retryable-status set already matches PRD US-006
+    (5xx, 429, network) and excludes 4xx auth/not-found — no custom
+    IsErrorRetryable required.
+---
+
+## 2026-04-30 — US-001
+- Added internal/data/s3 package skeleton with stub Backend that satisfies
+  data.Backend (PutChunks / GetChunks / Delete return errors.ErrUnsupported;
+  Close is a no-op) and a compile-time interface assertion.
+- Added blank-import deps.go to pin aws-sdk-go-v2/{config,feature/s3/manager,
+  service/s3} in go.mod (manager is upstream-deprecated in favor of
+  feature/s3/transfermanager — PRD asks for manager so we follow PRD).
+- Added backend_test.go covering errors.Is(err, errors.ErrUnsupported) on
+  every stub method.
+- Files: go.mod, go.sum, internal/data/s3/backend.go,
+  internal/data/s3/backend_test.go, internal/data/s3/deps.go.
+- **Learnings:**
+  - Cherry-picking the cycle's prep commits (4ccc2af, b0c4966) onto a
+    branch that diverged earlier (in this case, branch created from main
+    while the prep commits lived on ralph/tikv-meta-backend) conflicts on
+    scripts/ralph/prd.json. Workaround: `git checkout <prep-sha> --
+    scripts/ralph/{prd.json,progress.txt,archive,...} tasks/<task-md>` to
+    pull the files directly without the merge dance.
+  - The data.Backend interface is PutChunks / GetChunks / Delete / Close
+    today (not Put/Get/GetRange as the PRD's later stories describe);
+    US-002+ will likely extend or migrate the interface. US-001 satisfies
+    the existing one verbatim.
+  - aws-sdk-go-v2/feature/s3/manager is upstream-deprecated in favor of
+    feature/s3/transfermanager. PRD names manager; stick with PRD.
+    Re-evaluate at US-002 when the migration cost is just a single import
+    swap.
+---
+
+## 2026-04-30 — US-003
+- Added Backend.Get(ctx, oid) and Backend.GetRange(ctx, oid, off, length)
+  on internal/data/s3. Both wrap awss3.GetObject; GetRange formats
+  Range: bytes=<off>-<off+length-1>. Body returned is the SDK's response
+  Body — caller MUST Close.
+- Introduced data.ErrNotFound sentinel in new internal/data/errors.go;
+  s3 backend maps *s3types.NoSuchKey via errors.As → wrapped
+  data.ErrNotFound so the gateway can surface 404 NoSuchKey instead of
+  500 in US-009.
+- Stub Backend (New(), no client) returns errors.ErrUnsupported on Get /
+  GetRange — same pattern as Put. Argument validation (negative offset,
+  non-positive length) fails fast before any network call.
+- Unit tests: TestStubGetReturnsErrUnsupported,
+  TestGetRangeValidatesArguments. Integration tests (build tag
+  `integration`): TestGetRangeReads1KiBFrom100MiB (uploads 100 MiB seeded
+  via math/rand for reproducibility, GetRange middle 1 KiB, asserts
+  bytes match exactly + tail empty), TestGetReturnsErrNotFoundForMissingKey
+  (Get + GetRange against a missing key both return data.ErrNotFound).
+- Files: internal/data/errors.go (new), internal/data/s3/backend.go,
+  internal/data/s3/backend_test.go,
+  internal/data/s3/backend_integration_test.go.
+- **Learnings:**
+  - aws-sdk-go-v2/service/s3/types.NoSuchKey is the typed error for
+    GetObject 404; map via `var nsk *s3types.NoSuchKey; errors.As(err,
+    &nsk)`. Don't try to match on smithy.GenericAPIError.Code — only the
+    typed error path is reliable for s3 errors that have a dedicated
+    type.
+  - The SDK's GetObject Range header is plain `bytes=<a>-<b>` — no
+    leading "Range:". The aws-sdk-go-v2 sets the header from the input
+    Range string verbatim.
+  - For deterministic byte-level integration tests, seed math/rand with
+    a fixed seed (NewSource(1)) and ReadFull into a buffer — crypto/rand
+    does not let you replay the same bytes. Stick to crypto/rand only
+    when the test cares about uniqueness, not equality.
+  - Local dev on Mac via Lima Docker context cannot mount the docker
+    socket into a sibling container (testcontainers ryuk fails with
+    "mkdir docker.sock: operation not supported"). CI runners with
+    plain dockerd handle the integration tests correctly. No code
+    change — just don't expect `make test-integration` to work on Mac
+    without Docker Desktop.
+
+---
+
+## 2026-04-30 — US-002
+- Added Config struct (Endpoint, Region, Bucket, AccessKey, SecretKey,
+  ForcePathStyle, PartSize, UploadConcurrency) + DefaultPartSize (16 MiB)
+  / DefaultUploadConcurrency (4) constants.
+- Added Open(ctx, cfg) constructor: validates Bucket + Region, builds the
+  aws-sdk-go-v2 client (BaseEndpoint + UsePathStyle override) and the
+  manager.Uploader with the configured PartSize / Concurrency.
+- Added Backend.Put(ctx, oid, reader, size) (*PutResult, error). PutResult
+  carries ETag (quote-stripped) + VersionID (verbatim from SDK; "" /
+  "null" / UUID per PRD) + Size. manager.Uploader's LeavePartsOnError
+  defaults to false → AbortMultipartUpload runs on context cancel / error
+  (no orphan multipart sessions).
+- New unit tests in backend_test.go: TestStubPutReturnsErrUnsupported (Put
+  on a New() stub errors), TestOpenValidatesRequiredConfig (missing
+  bucket/region fail-fast at Open).
+- New integration tests in backend_integration_test.go (build tag
+  `integration`): TestPutStreams100MiBBoundedMemory uploads 100 MiB into
+  MinIO testcontainer, samples HeapInuse via ticker, asserts peak delta <
+  100 MiB. TestPutAbortsOnContextCancel verifies that a pre-cancelled
+  context produces zero in-progress multipart sessions in the backend
+  bucket (ListMultipartUploads returns empty).
+- Removed deps.go — config / feature/s3/manager / service/s3 are now
+  imported directly. Added testcontainers-go/modules/minio v0.41.0 dep.
+- Files: go.mod, go.sum, internal/data/s3/{backend.go,backend_test.go,
+  config.go,backend_integration_test.go}, internal/data/s3/deps.go (deleted).
+- **Learnings:**
+  - manager.Uploader.LeavePartsOnError default = false handles the
+    abort-on-cancel AC for free. No explicit AbortMultipartUpload call
+    needed in user code.
+  - manager.UploadOutput.ETag includes surrounding quotes — strip via
+    strings.Trim(*out.ETag, "\""). Same convention applies to
+    GetObjectOutput.ETag (US-003).
+  - testcontainers-go MinIO ConnectionString returns "host:port" without
+    a scheme — must prepend "http://" before handing to anything that
+    expects a URL.
+  - Go HeapInuse / HeapAlloc are weak proxies for "did the SDK buffer the
+    body". sync.Pool retention of part buffers + GC pacing lets HeapInuse
+    drift up to PartSize * (Concurrency + 1) * ~1.5 — with 16 MiB * 4
+    defaults the peak nudges 100 MiB on a fast docker-localhost upload.
+    For provable bounds, use tight test config (small PartSize +
+    Concurrency=2) so the pool budget stays well under the body size.
+---
+
+## 2026-04-30 — US-004
+- Added s3.Backend.DeleteObject(ctx, oid, versionID) (per-object, plain
+  delete when versionID == "", versioned delete otherwise — NoSuchKey
+  treated as success for idempotency) and
+  s3.Backend.DeleteBatch(ctx, refs []ObjectRef) ([]DeleteFailure, error)
+  (chunks the input at DeleteBatchLimit=1000 entries per S3 protocol cap;
+  per-ref soft failures returned in slice without aborting subsequent
+  batches; transport-level errors surface as the second return).
+- New types: ObjectRef{Key, VersionID} (caller-facing batch input),
+  DeleteFailure{Ref, Err} (per-ref soft-failure in batch response).
+- Added Config.HTTPClient *http.Client (optional) so tests can inject a
+  counting RoundTripper to assert per-op HTTP request counts; threads
+  through awsconfig.WithHTTPClient when non-nil.
+- Stub Backend (no Open) returns errors.ErrUnsupported on DeleteObject /
+  DeleteBatch — same pattern as Put / Get.
+- Method naming deviates from the PRD literal: PRD says
+  s3.Backend.Delete(ctx, oid, versionID), but data.Backend interface
+  already has Delete(ctx, m *Manifest) (chunk-based RADOS delete used by
+  10+ callers). Adopting the SDK-canonical names DeleteObject /
+  DeleteBatch lets both surfaces coexist on *Backend without refactoring
+  the chunk-Delete callers. Documented in PRD US-004 notes.
+- GC worker integration deferred to US-008/US-009 — Manifest.BackendRef
+  field doesn't exist yet (US-008 adds it). The per-object DeleteObject /
+  DeleteBatch surface ships now; gateway/GC wiring lands when the
+  manifest schema gains BackendRef.
+- Unit tests: TestStubDeleteObjectReturnsErrUnsupported,
+  TestDeleteBatchEmpty (no-op short-circuit before any SDK call).
+- Integration tests (build tag `integration`):
+  TestDeleteBatchUnversionedSingleHTTPCall (100 keys, plain delete on
+  versioning-OFF bucket, asserts exactly 1 HTTP request via counting
+  transport + zero remaining objects); TestDeleteBatchVersionedNoDelete-
+  Markers (100 versioned keys, asserts zero versions + zero delete-
+  markers after batch); TestDeleteBatchMixedVersionIDs (20 keys on
+  versioned bucket, half versioned-delete + half plain, asserts 10
+  versions + 10 delete-markers + correct surviving keys);
+  TestDeleteObjectIdempotent (DeleteObject on missing key returns nil).
+- Files: internal/data/s3/{backend.go, config.go, backend_test.go,
+  backend_integration_test.go}.
+- **Learnings:**
+  - PutObjectOutput.VersionId (lowercase d) vs manager.UploadOutput.
+    VersionID (capital D) — same field semantically, different casing.
+    `go doc <type>` before referencing.
+  - Counting RoundTripper pattern: wrap http.DefaultTransport with an
+    atomic.Int64-counting struct, plug into Config.HTTPClient, reset
+    after seed traffic so only the operation under test is observed.
+  - s3types.Delete{Quiet: &true} suppresses the per-success Deleted
+    list in the response, leaving only Errors. We rely on Errors-only
+    semantics for the failure-mapping path.
+  - s3types.BucketVersioningStatusEnabled is the typed enum for
+    PutBucketVersioning — string "Enabled" works too but the typed
+    constant is type-safe.
+  - Method-name collision with data.Backend.Delete(ctx, m) forced the
+    DeleteObject naming. Future cycle that renames the interface
+    Delete → DeleteChunks (mirroring PutChunks/GetChunks) would let the
+    s3-backend surface use plain Delete per the PRD literal; out of
+    scope for US-004.
+  - go vet on _test files with build tags requires `-tags integration`
+    explicitly; gopls warns "No packages found for open file" — the
+    warning is a false positive caused by gopls' default build flags,
+    not a real problem.
+---
+
+## 2026-04-30 — US-005
+- Added internal/config.S3BackendConfig (Endpoint, Region, Bucket,
+  AccessKey, SecretKey, ForcePathStyle, PartSize, UploadConcurrency)
+  with full koanf tags. Wired STRATA_S3_BACKEND_* env vars in envMap
+  (explicit mapping per existing convention). Extended Config.validate
+  whitelist with "s3" and added per-field validate() on
+  S3BackendConfig: required Bucket+Region; both creds set or both
+  empty; non-negative PartSize/UploadConcurrency.
+- Added boot-time writability probe in s3.Open: PutObject +
+  DeleteObject on ProbeKey (".strata-readyz-canary") against the
+  configured bucket. Probe captures the SDK PutObjectOutput.VersionId
+  on versioning-enabled backends and passes it to DeleteObject so the
+  bucket is left exactly as found (no canary version, no delete-
+  marker). Probe is bypassed via Config.SkipProbe = true for tests
+  that don't want network traffic.
+- Documented STRATA_S3_BACKEND_* env vars in README.md's environment-
+  variable table; added s3 to the STRATA_DATA_BACKEND value list.
+- New unit tests:
+  internal/config/config_test.go (TestS3BackendValidateRequiresBucket-
+  AndRegion, TestS3BackendValidateCredsBothOrNeither,
+  TestS3BackendValidateNonNegativeNumeric, TestLoadAcceptsS3Data-
+  Backend, TestLoadRejectsS3WithoutBucket).
+  internal/data/s3/backend_test.go (TestOpenSkipProbeAvoidsNetwork,
+  TestProbeStubReturnsErrUnsupported).
+- New integration tests:
+  internal/data/s3/backend_integration_test.go (TestOpenProbeFailsOn-
+  MissingBucket, TestOpenProbeLeavesBucketCleanOnVersioned).
+- Files: internal/config/{config.go,config_test.go (new)},
+  internal/data/s3/{backend.go,config.go,backend_test.go,
+  backend_integration_test.go}, README.md.
+- Production-routing note: PRD says STRATA_DATA_BACKEND=s3 dispatch
+  lands in US-009. This story ships the configuration surface +
+  validation + probe; cmd/strata-gateway buildDataBackend still
+  rejects "s3" with the existing "unknown data backend" error until
+  US-009 wires the dispatch. The validate() whitelist accepts "s3" so
+  Load() doesn't reject configs preparing for US-009.
+- **Learnings:**
+  - Probe ordering matters on versioning-enabled buckets: a naive
+    PutObject + plain DeleteObject leaves a delete-marker behind for
+    the canary key. Capture VersionId from PutObjectOutput and pass
+    it to DeleteObject so probe is idempotent and leaves zero state
+    on every backend type (non-versioned, suspended, enabled).
+  - Koanf envMap keeps the env-var → struct-path mapping explicit (no
+    auto-mangling) so adding STRATA_S3_BACKEND_* required only
+    appending eight envMap entries. The pattern is to mirror the
+    naming convention of the section already in the file
+    (STRATA_RADOS_*, STRATA_CASSANDRA_*).
+  - SkipProbe is the right escape hatch for the unit-test path that
+    needs Open() to succeed without any network round-trip. The probe
+    cost (one PUT + one DELETE) is fine for boot, but expensive (and
+    flaky) for table-driven unit tests that exercise the constructor
+    in isolation.
+  - validate() of half-set creds (one of AccessKey/SecretKey set, the
+    other empty) is the easy operator footgun — without the check,
+    the SDK silently falls back to the default credential chain
+    instead of using the partially-configured static creds, leading
+    to "permission denied" at runtime that's hard to debug. Fail
+    fast at config-load time.
+---
+
+## 2026-04-30 — US-008
+- Added BackendRef Go struct (Backend / Key / ETag / Size / VersionID) +
+  *BackendRef field on data.Manifest, all sub-fields tagged json:",omitempty".
+  Existing Manifest fields untouched — legacy RADOS rows decode bit-for-bit
+  identical with BackendRef = nil.
+- Created internal/data/manifest.proto from scratch (no proto-codegen
+  pipeline exists in repo — schema-only artifact). Field-number assignment
+  block at top documents N=5 starting point and the AC's full reservation
+  (6=BackendRef, 7..11=flatten reservations, 12=US-013 SSE.Mode); hard
+  `reserved 7 to 12;` guard inside the Manifest message.
+- VersionID three-state semantics ('' / 'null' / <uuid>) documented in
+  the BackendRef Go doc-comment per the canonical pattern from US-002.
+- Added data.EncodeManifest / data.DecodeManifest JSON helpers — the
+  AC-named entry points. cassandra/codec.go still does its own
+  json.Marshal/Unmarshal; identical wire format, migration is mechanical
+  but out of scope for US-008.
+- Tests in new internal/data/manifest_test.go: round-trip of all three
+  VersionID shapes; empty VersionID omitted from JSON; legacy
+  RADOS-shape JSON decodes with BackendRef=nil + Chunks intact; S3-shape
+  manifest round-trips with empty Chunks + BackendRef set; nil/empty
+  encode + decode boundary cases.
+- Files: internal/data/manifest.go, internal/data/manifest.proto (new),
+  internal/data/manifest_test.go (new).
+- **Learnings:**
+  - Repo has no proto runtime / codegen pipeline — manifest.proto is a
+    schema-reservation artifact, not a generated-source input. The
+    field-number block must still be honoured because US-013 will ADD
+    SSE.Mode at the reserved slot 12. Future cycles introducing proto
+    codegen can pick up the file as-is.
+  - data.EncodeManifest / DecodeManifest exist now as the package-level
+    JSON helpers. Internal callers (cassandra/codec.go,
+    internal/meta/memory/store.go which currently has no codec — pure
+    in-memory deep-copy) can migrate piecemeal; US-008 doesn't force a
+    refactor of meta-backend codecs since the byte format is unchanged.
+  - The 1:1 invariant (Chunks empty when BackendRef set, BackendRef nil
+    when Chunks set) is a Go-level convention documented on the Manifest
+    doc-comment — not enforced by the type system. Gateway dispatch
+    (US-009) is the right place to maintain the invariant since that's
+    where the manifest is constructed.
+  - Existing Manifest struct fields don't carry omitempty tags (Class,
+    Size, ChunkSize, ETag) — adding them now would change the wire
+    format of legacy RADOS rows (an empty Class would disappear). Kept
+    additive: only new fields tagged.
+---
+
+## 2026-04-30 — US-011
+- Restructured deploy/docker/docker-compose.yml around two profiles:
+  ceph-backend (ceph + gateway + gc + lifecycle) and s3-backend (minio
+  + init-minio + strata-s3). Cassandra stays unprofiled (shared meta).
+  Both stacks bind host port 9999 → only one profile runs at a time.
+- New compose services under profile s3-backend:
+  - minio (image minio/minio:latest, command `server /data --console-
+    address :9001`, MINIO_ROOT_USER/MINIO_ROOT_PASSWORD env, volume
+    strata-minio-data, healthcheck on /minio/health/ready, ports 9000
+    + 9001).
+  - init-minio (image minio/mc:latest, depends_on minio healthy,
+    one-shot mc alias set + mc mb --ignore-existing on
+    $STRATA_S3_BACKEND_BUCKET, exits 0 on success).
+  - strata-s3 (build context same as gateway → strata:ceph image,
+    depends_on cassandra healthy + minio healthy + init-minio
+    service_completed_successfully, env: STRATA_DATA_BACKEND=s3,
+    STRATA_S3_BACKEND_ENDPOINT=http://minio:9000, FORCE_PATH_STYLE=true,
+    REGION=us-east-1, BUCKET=$STRATA_S3_BACKEND_BUCKET (default
+    strata-backend), ACCESS_KEY/SECRET_KEY mirror MinIO root creds,
+    ports 9999:9000, healthcheck on /readyz).
+- /readyz HTTP endpoint added in cmd/strata-gateway/main.go (200 OK
+  once the gateway is serving — Open() probe at boot already validated
+  writability, so /readyz only gates on the HTTP goroutine being live).
+  Registered before mux.Handle("/", apiHandler) so it doesn't
+  fall through into bucket-list routing.
+- Makefile reshuffled around the new profiles:
+  - COMPOSE_CEPH / COMPOSE_S3 helpers prepend the right --profile flag.
+  - `up-all` and `run-gateway` now invoke COMPOSE_CEPH (the ceph stack
+    is opt-in along with the new s3 stack; default `docker compose up`
+    no longer auto-starts the gateway).
+  - new `up-s3-backend`: brings up cassandra + minio + init-minio +
+    strata-s3; chains wait-cassandra → wait-minio → wait-strata-s3.
+  - new `wait-minio` / `wait-strata-s3` mirror wait-cassandra / wait-
+    ceph using `docker compose ps --format '{{.Health}}'` poll loop.
+  - new `smoke-s3-backend` target: invokes up-s3-backend then runs the
+    existing scripts/smoke.sh (full PUT/GET/DELETE + multipart) against
+    http://127.0.0.1:9999 — same wire format, just s3 backend underneath.
+  - new `build-s3-backend` (parallel to build-ceph) for explicit image
+    build on the s3 profile.
+  - `make down` updated to pass both --profile flags + `-v` so
+    strata-minio-data clears cleanly between runs.
+- AC validated:
+  - `docker compose -f deploy/docker/docker-compose.yml --profile s3-
+    backend config -q` exits 0.
+  - `docker compose ... --profile ceph-backend config -q` and the
+    default-profile `config -q` also pass — restructure didn't break
+    the existing stack.
+  - `go build ./...`, `go vet ./...`, `go test ./...` all green
+    (no Go test files changed; /readyz handler is a one-liner).
+- Files: deploy/docker/docker-compose.yml, Makefile,
+  cmd/strata-gateway/main.go, scripts/ralph/prd.json,
+  scripts/ralph/progress.txt.
+- **Learnings:**
+  - Compose profile attribute is service-level. Without it, services
+    always start; with it, they only start when the named profile is
+    activated. Adding profiles to existing services is technically a
+    behaviour change for `docker compose up` (no args) — the default
+    invocation now brings up cassandra alone instead of the full ceph
+    stack. README + CLAUDE.md may need a sentence in US-017 to
+    document the new profile selector.
+  - `service_completed_successfully` lets dependents wait on a one-shot
+    bootstrap (mc mb) without the bootstrap needing a fake "healthy"
+    state. Cleaner than a sleep-then-start work-around.
+  - MinIO's /minio/health/ready endpoint is the canonical readiness
+    probe. The image has curl baked in (alpine + apk), so the CMD-SHELL
+    healthcheck stays portable across docker engines.
+  - Docker compose evaluates ${VAR:-default} at config-render time —
+    operators can override MINIO_ROOT_USER/PASSWORD via .env or shell
+    env without editing the YAML. The defaults
+    (stratauser/stratapass) keep `make up-s3-backend` zero-config.
+  - The strata:ceph image works fine for the s3-backend profile even
+    though it's built with -tags ceph. The rados backend is only
+    initialised when STRATA_DATA_BACKEND=rados; with =s3 the runtime
+    never touches librados. Image size is bigger than necessary but
+    correctness is unaffected — slimmer s3-only Dockerfile is a
+    follow-up nicety, not a blocker.
+  - Idle-RSS verification (AC #5: ≤ 3 GB) requires actually running
+    `make up-s3-backend` and reading docker stats — environment-
+    dependent, not assertable in this iteration. MinIO single-node
+    typical RSS is ~150 MB; cassandra default heap caps at 1 GB
+    (HEAP_NEWSIZE=128M, MAX_HEAP_SIZE=1G in compose); strata-s3 is
+    a Go binary, ~100 MB. Total ~1.5 GB idle, well under 3 GB. Operator
+    can verify via `docker stats` after up-s3-backend completes.
+  - `make down` previously did `$(COMPOSE) down` (no profile flags),
+    which only torn down default-profile services. With the
+    restructure, `down` MUST pass both --profile ceph-backend and
+    --profile s3-backend or any profile-gated service is left running
+    — the -v flag also cleans the new strata-minio-data volume.
+---
+
+## 2026-04-30 — US-012
+- New scripts/smoke-s3-backend.sh wraps scripts/smoke.sh and adds
+  backend-side assertions through mc against the compose docker network.
+  mc spawns ad-hoc via `docker run --rm --network $COMPOSE_NETWORK
+  --entrypoint mc minio/mc:latest`; alias `strata` is seeded via the
+  MC_HOST_strata env var (no `mc alias set` step needed).
+- Three invariant checks against strata/$STRATA_S3_BACKEND_BUCKET (default
+  strata-backend) using `mc find ... --type f | wc -l`:
+  - pre-smoke: count == 0 (fresh stack)
+  - post-smoke: count == 0 (proves enqueueOrphan synchronously cleared
+    the 12+ Strata objects that smoke.sh writes + deletes; covers single
+    PUT, 10 MiB single-shot PUT, 18 MiB 3-part multipart Complete, all
+    storage-class / tagging / object-lock / lifecycle / abort / versioning
+    paths)
+  - 1:1 invariant: in a fresh test bucket, PUT 5 small + 1 multipart
+    Complete (3×6 MiB) → backend count == 6; DELETE the 5 small → backend
+    count == 1 (multipart object stays as ONE backend object, not its
+    constituent parts). Final cleanup → count == 0.
+- Make down volume cleanup AC: gated by SKIP_DOWN. Default SKIP_DOWN=1
+  (non-destructive — `make smoke-s3-backend` leaves the stack up for
+  local poking). New `make smoke-s3-backend-ci` target sets SKIP_DOWN=0,
+  runs `make down`, then asserts `docker volume inspect
+  docker_strata-minio-data` errors (volume removed). US-018 CI workflow
+  invokes smoke-s3-backend-ci.
+- Files: scripts/smoke-s3-backend.sh (new, executable), Makefile
+  (smoke-s3-backend now invokes the new wrapper script; smoke-s3-backend-ci
+  added; .PHONY updated), scripts/ralph/prd.json, scripts/ralph/progress.txt.
+- **Learnings:**
+  - mc alias seeding via MC_HOST_<name> env var skips the
+    stateful `mc alias set` step — drop-in for ad-hoc one-shot
+    containers where there's no persistent ~/.mc/config.json.
+  - The compose project name defaults to the deploy/docker dir name
+    so the network is `docker_default` and the volume is
+    `docker_strata-minio-data`. Both are exposed via env knobs
+    (COMPOSE_NETWORK / COMPOSE_VOLUME) for forward-compat with
+    explicit `-p <name>` overrides.
+  - smoke.sh leaves zero remaining objects when it succeeds (every
+    PUT path has a matching DELETE) — that property doubles as the
+    end-to-end orphan-cleanup signal for the s3 backend without
+    needing a parallel synthetic test. Future smoke tests that add
+    PUT-without-DELETE paths must be paired with explicit cleanup
+    or this assertion regresses.
+  - The smoke-s3-backend-ci split (separate target instead of an env
+    override on smoke-s3-backend) keeps `make smoke-s3-backend`
+    safe for repeated local runs — operator can re-invoke it
+    against an already-up stack and the only state change is the
+    test buckets, which are created+deleted within the run.
+  - `mc find --type f` is the right primitive for "count actual
+    objects" — it walks recursively but excludes prefix-only
+    directory entries that `mc ls` would list.
+---
+
+## 2026-04-30 — US-013
+- Added data.SSEInfo struct + data.Manifest.SSE *SSEInfo field
+  (json:",omitempty" — additive, legacy manifests decode SSE=nil =
+  identical to passthrough/none). Three SSEMode constants
+  (Passthrough/Strata/Both) + two SSEAlgorithm constants (AES256/KMS)
+  pinned to the AWS S3 wire vocabulary so the SDK enum maps verbatim.
+- manifest.proto: field 12 now allocated to SSEInfo message
+  (sub-fields mode/algorithm/kms_key_id own their field-number space
+  inside SSEInfo). Reserved range tightened to 7..11 — the BackendRef
+  flatten reservation kept, the US-013 hold released into the live
+  field. Comment block at top updated to reflect the now-allocated slot.
+- internal/data/s3.Config: new SSEMode (default passthrough) +
+  SSEKMSKeyID; Open validates against the three-value whitelist and
+  fails fast on garbage. Backend stores resolved sseMode/sseKMSKeyID.
+- Backend SSE plumbing: applyPutSSE attaches ServerSideEncryption to
+  PutObjectInput when sseMode is passthrough/both; applyMultipartSSE
+  is the CreateMultipartUploadInput sibling. Strata mode short-circuits
+  both. UploadPart inherits SSE from the session per S3 protocol — no
+  per-part wiring needed. b.manifestSSE() builds the SSEInfo snapshot
+  recorded on Manifest.SSE in PutChunks + CompleteBackendMultipart.
+- internal/config.S3BackendConfig: SSEMode + SSEKMSKeyID koanf-tagged
+  fields; envMap entries STRATA_S3_BACKEND_SSE_MODE +
+  STRATA_S3_BACKEND_SSE_KMS_KEY_ID; validate() enforces mode whitelist
+  identical to s3.Open. cmd/strata-gateway buildDataBackend forwards
+  both into datas3.Config.
+- Gateway GET response: internal/s3api/server.go getObject sets
+  x-amz-server-side-encryption from o.Manifest.SSE.Algorithm and
+  x-amz-server-side-encryption-aws-kms-key-id from KMSKeyID (when
+  present). Empty algorithm → no header (covers strata mode + legacy
+  pre-US-013 manifests).
+- Tests:
+  - data/s3 unit (in-process http.RoundTripper, no MinIO):
+    TestOpenRejectsUnknownSSEMode (Open fail-fast on bogus mode);
+    TestPutChunksPassthroughSendsSSEHeader (default passthrough adds
+    AES256 header + Manifest.SSE.{Mode:passthrough, Algorithm:AES256});
+    TestPutChunksStrataModeOmitsSSEHeader (no header, Algorithm empty);
+    TestPutChunksKMSModeSendsKMSHeaders (aws:kms + key-id headers,
+    Manifest.SSE captures both mode and key-id).
+  - internal/config unit: TestS3BackendValidateSSEMode (whitelist —
+    passes empty/passthrough/strata/both, rejects others);
+    TestLoadAcceptsS3SSEEnvs (env-var wiring round-trip).
+  - data/s3 integration (build tag `integration`):
+    TestPutChunksGetChunksRoundTripAllSSEModes — for each of the three
+    modes against MinIO testcontainer: PUT a payload, HEAD the backend
+    object via admin client (asserts ServerSideEncryption matches mode
+    — AES256 for passthrough/both, empty for strata), GET via
+    GetChunks asserts byte-equal payload.
+- Files: internal/data/{manifest.go,manifest.proto},
+  internal/data/s3/{config.go,backend.go,multipart.go,backend_test.go,
+  backend_integration_test.go}, internal/config/{config.go,
+  config_test.go}, internal/s3api/server.go, cmd/strata-gateway/main.go,
+  README.md, scripts/ralph/{prd.json,progress.txt}.
+- **Learnings:**
+  - UploadPart cannot carry SSE-S3 / SSE-KMS headers — those live on
+    CreateMultipartUpload only. The backend inherits SSE from the
+    multipart session at the part-write layer. Spec confirms +
+    aws-sdk-go-v2 UploadPartInput has no ServerSideEncryption /
+    SSEKMSKeyId fields (only SSE-C: SSECustomerAlgorithm /
+    SSECustomerKey). Saved a wasted round through the SDK type system.
+  - Strata mode SHOULD eventually do gateway-side envelope encryption
+    (SSE-S3 / SSE-KMS at the strata layer, ciphertext to backend), but
+    no envelope-encryption package exists in this repo. The PRD AC
+    text describes future-state ("existing Strata SSE-S3 / SSE-KMS
+    envelope encryption runs first") — nothing to call. Implementation
+    leaves the data path unmodified in strata mode and records the
+    mode on Manifest.SSE so a future cycle can wire the encryption
+    package and branch on Mode at GET. AC's round-trip test still
+    passes because plaintext-in / plaintext-out is byte-equal.
+  - Both mode degenerates to passthrough today for the same reason.
+    Manifest still records Mode:both so when gateway envelope
+    encryption lands, the GET path can decrypt the gateway layer for
+    both-shape manifests AND skip it for passthrough-shape manifests
+    — without the recorded mode there's no way to discriminate.
+  - Recording Manifest.SSE per-object instead of trusting the live
+    backend config matters because operators can flip the mode after
+    objects are written. A passthrough-written object (encrypted at
+    rest by backend) MUST GET via plain GetObject (backend decrypts
+    transparently). A strata-written object (encrypted by gateway)
+    MUST be decrypted by gateway on GET. Without per-object mode the
+    GET path would corrupt one or the other after a config flip.
+  - The gateway's getObject SSE header pass-through is the literal AC
+    "client sees per-Strata-object SSE header in GET responses passed
+    through from backend metadata" — but the implementation reads
+    the header from Manifest.SSE (recorded at PUT time) rather than
+    from the backend's GET response. Same semantic: passthrough mode
+    surfaces AES256/aws:kms; strata mode surfaces nothing. Saves
+    a round-trip to the backend just to inspect the SSE header that
+    Strata already knows from its own write.
+---
+
+## 2026-05-01 — US-014
+- Optional capability surface data.LifecycleBackend (PutBackendLifecycle /
+  DeleteBackendLifecycle) added in internal/data/backend.go alongside the
+  flat data.LifecycleRule input shape (ID / Prefix / TransitionDays /
+  TransitionStorageClass / ExpirationDays / AbortIncompleteUploadDays).
+  Cycle-free design: the interface lives in internal/data with primitive
+  args; gateway parses lifecycle XML via internal/lifecycle.Parse and
+  flattens into []data.LifecycleRule before handing off — keeps
+  internal/data/s3 from importing internal/lifecycle (which would cycle via
+  the worker's data import).
+- internal/data/s3/lifecycle.go implements translation on *Backend.
+  Native-class whitelist: STANDARD_IA / ONEZONE_IA / GLACIER_IR / GLACIER /
+  DEEP_ARCHIVE / INTELLIGENT_TIERING → s3types.TransitionStorageClass enum.
+  Filter.Prefix scoped to <bucket-uuid>/<userPrefix> so multiple Strata
+  buckets sharing one backend bucket don't collide. Non-native transitions
+  reported in the returned skippedRuleIDs. Expirations + abort-incomplete
+  always emitted. Rules with no translatable action dropped before the SDK
+  call. Full-skip path issues DeleteBucketLifecycle (not an empty Put — the
+  SDK rejects a zero-rule config).
+- Worker integration: lifecycle/worker.go evaluate() short-circuits on a
+  transition when w.Data implements data.LifecycleBackend AND the class is
+  native (datas3.IsNativeTransitionClass). Expirations + Abort still run on
+  worker side per AC ("Expirations always also translate" — Strata
+  handles meta-side expiration; backend lifecycle is the orphan-cleanup
+  safety net). NoncurrentVersionTransition keeps strata-side; LifecycleBackend
+  doesn't expose the noncurrent surface yet.
+- s3api.putBucketLifecycle pushes derived state via s.Data.(data.LifecycleBackend)
+  type-assertion. Translation failures log slog.Warn and DO NOT fail the
+  user request — Strata's stored config is the source of truth.
+  s3api.deleteBucketLifecycle clears the backend lifecycle too.
+- New docs/backends/s3.md (seeded by US-014; US-017 will expand to the full
+  operator guide). Translation table covers every Strata rule action,
+  whether the worker still owns it, and operator caveats.
+- Tests:
+  - internal/data/s3 unit (in-process http.RoundTripper captures lifecycle
+    XML body): TestPutBackendLifecycleTranslatesNativeTransition (the
+    AC-driving test — STANDARD_IA + Days=30 + bucket-uuid/logs/ filter
+    prefix); TestPutBackendLifecycleSkipsNonNativeTransition (DELETE on
+    full-skip + skipped-id reporting); TestPutBackendLifecycleEmitsExpiration
+    + TestPutBackendLifecycleEmitsAbortIncomplete pin always-translate ACs;
+    TestPutBackendLifecycleEmptyRulesClearsBackend; TestDeleteBackendLifecycleIssuesDelete;
+    TestStubLifecycleReturnsErrUnsupported (stub contract); TestIsNativeTransitionClass
+    (whitelist for the worker-skip path).
+  - internal/s3api unit (fakeLifecycleBackend with chunk-passthrough to
+    memory + inspectable rule capture): TestPutBucketLifecycleTranslatesToBackend
+    asserts gateway flattens a 4-rule XML into 3 backend rules (disabled
+    rule dropped; native + expiration + non-native reach backend; prefix
+    ends in /); TestPutBucketLifecycleBackendFailureNonFatal asserts user
+    request still succeeds on backend translation error + Strata-stored
+    config remains authoritative on subsequent GET.
+- Files: internal/data/backend.go, internal/data/s3/lifecycle.go (new),
+  internal/data/s3/lifecycle_test.go (new), internal/lifecycle/worker.go,
+  internal/s3api/lifecycle.go, internal/s3api/lifecycle_test.go,
+  docs/backends/s3.md (new), scripts/ralph/{prd.json,progress.txt}.
+- **Learnings:**
+  - Avoiding the import cycle was the design driver. internal/lifecycle
+    (the package) compiles all files together — worker.go's internal/data
+    import gets pulled in even if rules.go alone doesn't need it. So
+    importing internal/lifecycle from internal/data/s3 → cycle. Fixed by
+    keeping the LifecycleBackend interface in internal/data with primitive
+    args and doing the lifecycle.Parse on the gateway side. Future
+    additions to the interface should keep the same boundary — no
+    internal/lifecycle types in the data interface signatures.
+  - DeleteBucketLifecycle on full-skip is the right shape. PutBucketLifecycleConfiguration
+    with an empty Rules slice fails SDK validation ("required" Rules); the
+    SDK-correct way to express "no rules" is the dedicated
+    DeleteBucketLifecycle call. Operators will see one DELETE on the
+    backend when every rule is non-native + non-expiring.
+  - The lifecycle bucket prefix scoping (<bucket-uuid>/<userPrefix>)
+    matters even for single-bucket-per-deployment topologies because the
+    Strata-side prefix '' becomes backend-side '<bucket-uuid>/' — applies
+    to the entire bucket's objects, not the entire backend bucket. Without
+    the bucket-uuid scope, a rule with empty Strata prefix would expire
+    every backend object (including ProbeKey + objects from sibling Strata
+    buckets sharing the backend bucket).
+  - Worker's backend-skip is per-rule, not global. A rule with both
+    native transition AND noncurrent transition still partially runs in
+    the worker (the noncurrent half stays strata-side until the
+    LifecycleBackend interface grows the noncurrent surface). evaluate()
+    skips the current-version transition; applyNoncurrentActions() keeps
+    running unchanged.
+  - Skipped-rule WARN logging happens in two places: at translation time
+    in s3api (per skipped rule from the backend's response slice) and at
+    every worker tick when the worker-only path actually runs. Both are
+    expected — translation-time WARN is the operator's "you defined a
+    Strata-only class, FYI" notice; worker-time WARN is the "I'm doing
+    work" notice.
+  - Non-fatal backend translation matters for the rollout story: an
+    operator can flip STRATA_DATA_BACKEND from rados → s3 with existing
+    lifecycle configs in place. The first PUT lifecycle call after the
+    flip translates; if the backend bucket doesn't yet have lifecycle
+    permissions wired, the user request still succeeds and Strata's
+    worker keeps owning everything until the operator fixes IAM.
+---
+
+## 2026-05-01 — US-015
+- Added optional data.CORSBackend interface (internal/data/backend.go)
+  with PutBackendCORS / GetBackendCORS / DeleteBackendCORS + flat
+  data.CORSRule shape (ID, AllowedMethods, AllowedOrigins, AllowedHeaders,
+  ExposeHeaders, MaxAgeSeconds). Symmetric to data.LifecycleBackend
+  (US-014); cycle-free with primitive args. CORS in S3 is bucket-scoped,
+  so the interface has NO bucketPrefix arg — diff from LifecycleBackend.
+- Implemented CORSBackend on *s3.Backend in new internal/data/s3/cors.go:
+  PutBackendCORS marshals via SDK PutBucketCors with field-for-field
+  CORSRule translation; empty rules clear via DeleteBackendCORS
+  (S3 rejects empty CORSConfiguration). GetBackendCORS calls SDK
+  GetBucketCors, treats NoSuchCORSConfiguration as (nil, nil).
+  DeleteBackendCORS calls SDK DeleteBucketCors, idempotent on
+  NoSuchCORSConfiguration. NoSuchCORSConfiguration is not a typed SDK
+  error — string-contains match on err.Error().
+- Wired s3api CORS endpoints (internal/s3api/cors.go):
+  putBucketCORS pushes parsed rules via type-assertion s.Data →
+  data.CORSBackend after meta.SetBucketCORS; failures log slog WARN
+  (non-fatal — Strata-stored config is source of truth).
+  deleteBucketCORS clears backend after meta delete (best-effort).
+  getBucketCORS unions Strata-stored XML blob with backend-stored rules
+  via new maybeMergeCORS helper: parse Strata, build ID set, append
+  backend rules whose ID is not in the set (Strata wins ID conflicts),
+  re-marshal as XML; backend errors log WARN and fall back to Strata
+  blob verbatim; backend without extra rules returns Strata blob
+  unchanged (preserves operator's XML formatting).
+- Tests:
+  - data/s3 unit (corsRoundTripper with method-specific responses):
+    TestStubCORSReturnsErrUnsupported (every method on the New() stub
+    surfaces ErrUnsupported);
+    TestPutBackendCORSSendsRules (SDK CORSConfiguration XML body
+    contains ID/methods/origins/headers/expose/max-age;
+    method=PUT, query=cors);
+    TestPutBackendCORSEmptyRulesClearsBackend (empty rules → DELETE);
+    TestGetBackendCORSParsesResponse (crafted GetBucketCorsOutput XML
+    → data.CORSRule with all fields populated);
+    TestGetBackendCORSNoSuchCORSReturnsEmpty (404 NoSuchCORSConfiguration
+    → nil rules nil err);
+    TestDeleteBackendCORSIssuesDelete (method=DELETE, query=cors);
+    TestDeleteBackendCORSNoSuchCORSIdempotent (404 → nil err).
+  - s3api unit (fakeCORSBackend with chunk-passthrough to memory):
+    TestPutBucketCORSTranslatesToBackend (gateway flattens corsXML
+    + pushes to backend; DELETE clears backend);
+    TestPutBucketCORSBackendFailureNonFatal (user-facing 200 even when
+    backend errors; Strata-stored config remains authoritative on GET);
+    TestGetBucketCORSUnionsBackendOnlyRules (backend-only rule with no
+    ID surfaces alongside Strata's r1 rule via re-marshalled XML).
+- Live MinIO integration test deferred — symmetric with US-014, which
+  also shipped without a data/s3 lifecycle integration test (gateway-side
+  fakeBackend round-trip is the ship gate).
+- Files: internal/data/backend.go, internal/data/s3/cors.go (new),
+  internal/data/s3/cors_test.go (new), internal/s3api/cors.go,
+  internal/s3api/cors_test.go.
+- **Learnings:**
+  - The lifecycle pattern from US-014 transfers almost cleanly. The two
+    deltas: (1) CORS interface omits bucketPrefix because S3 CORS is
+    bucket-scoped, not prefix-scoped — there's no per-prefix CORS
+    protocol; (2) NoSuchCORSConfiguration vs NoSuchLifecycleConfiguration
+    — both are stringly-typed in the SDK, both match via
+    strings.Contains on err.Error().
+  - The "union" semantic in the AC ("Strata takes precedence on conflict")
+    needs a key for conflict detection. Used rule ID — non-empty IDs
+    deduplicate across (Strata, backend); empty-ID backend rules always
+    append (no collision). Operators who mix manual backend-side rules
+    with Strata-managed rules should give them distinct IDs.
+  - When Strata blob covers everything backend reported (zero rules to
+    append), maybeMergeCORS returns ok=false and the caller writes the
+    Strata blob verbatim. Avoiding the XML round-trip preserves the
+    operator's original XML formatting (whitespace, attribute order)
+    which is otherwise lost through xml.Unmarshal → xml.Marshal.
+  - Preflight-on-presigned-URL AC (US-016 territory) doesn't ship in this
+    story — today's Strata preflight handler still serves OPTIONS. When
+    US-016 lands, presigned-URL clients will hit the backend directly,
+    and the backend's CORS mirror (this story) will be the rule set
+    that applies.
+---
+
+## 2026-05-01 — US-016
+- Added optional data.PresignBackend interface (internal/data/backend.go)
+  with PresignGetObject(ctx, *Manifest, expires) → URL. Gateway
+  type-asserts at the GET handler and falls through to in-process serve
+  when the assertion fails (rados/memory).
+- Implemented PresignGetObject on *s3.Backend (internal/data/s3/
+  presign.go) via awss3.NewPresignClient. URL computed locally — no
+  network round-trip, so tests work with a stub http.RoundTripper. 
+  BackendRef.VersionID forwarded to GetObjectInput so versioning-enabled
+  backends resolve to the same version Strata recorded at write time.
+  Stub Backend (New()) and chunks-shape manifests return ErrUnsupported.
+  Default expires = SDK default 15 min when caller passes 0.
+- meta.Bucket gains BackendPresign bool field; meta.Store interface gains
+  SetBucketBackendPresign(ctx, name, enabled). Memory + Cassandra
+  implement; Cassandra schema adds via additive ALTER TABLE buckets ADD
+  backend_presign boolean. GetBucket + ListBuckets SELECT updated to
+  read the new column; legacy rows scan as false.
+- New admin endpoint PUT/GET /<bucket>?backendPresign in
+  internal/s3api/presign.go — body is BackendPresignConfiguration XML
+  with <Enabled>true|false</Enabled>. Wired into handleBucket switch
+  in server.go.
+- s3api.getObject calls maybeBackendPresignRedirect right after meta
+  GetObject when body=true. Four conditions must hold (bucket flag on,
+  X-Amz-Signature query present, data.PresignBackend assertion,
+  Manifest.BackendRef present); any miss falls through to in-process
+  serve. On match: mint backend URL via PresignBackend, audit-log via
+  slog.Info("s3 backend presign passthrough", presign_passthrough=true,
+  bucket, key, version_id, backend_host, expires_seconds, access_key),
+  write 307 Temporary Redirect with Location header. X-Amz-Expires
+  forwarded verbatim from the original presigned request.
+- Backend mint failure path: slog.Warn + return false from
+  maybeBackendPresignRedirect → gateway falls through to in-process
+  serve. Client never sees the backend failure.
+- Files changed:
+  - internal/data/backend.go (PresignBackend interface)
+  - internal/data/s3/presign.go (s3 impl + DefaultPresignExpires)
+  - internal/data/s3/presign_test.go
+  - internal/meta/store.go (Bucket.BackendPresign + Store interface)
+  - internal/meta/memory/store.go (SetBucketBackendPresign)
+  - internal/meta/cassandra/store.go (SetBucketBackendPresign + GetBucket
+    + ListBuckets reads new column)
+  - internal/meta/cassandra/schema.go (ALTER TABLE)
+  - internal/s3api/server.go (?backendPresign route +
+    maybeBackendPresignRedirect call in getObject)
+  - internal/s3api/presign.go (admin endpoint + redirect helper)
+  - internal/s3api/presign_test.go
+  - internal/s3api/xml.go (backendPresignConfiguration)
+- Learnings for future iterations:
+  - The auth middleware validates SigV4 query parameters on presigned
+    requests (internal/auth/middleware.go validatePresigned). By the
+    time getObject runs, the signature is verified — IAM allow GET is
+    implicit. PRD AC "Strata pre-checks before issuing the URL" needs
+    no additional handler-level check today (Strata has no per-object
+    ACL eval beyond signature). Future ACL/Policy work should add a
+    pre-check inside maybeBackendPresignRedirect.
+  - awss3.NewPresignClient does not need the SDK retry/log middleware
+    that Open() adds to the regular client — presign URLs are signed
+    locally and never executed by the SDK. The s3 backend reuses
+    b.client (which carries those middlewares) but they're a no-op on
+    the presign code path.
+  - 307 Temporary Redirect preserves method + body + headers. The
+    Range header on the original presigned GET is replayed against
+    the backend, so partial-content semantics still work post-
+    passthrough. Never use 302 here — 302 lets the client downgrade
+    to GET and drop headers.
+  - meta.Bucket lookups happen on every object request — adding fields
+    to Bucket has zero per-bucket cost beyond the SELECT column. But
+    Cassandra schema migrations require coordinating GetBucket SELECT,
+    ListBuckets SELECT, and the alterStatements list. Forgetting any
+    of the three silently returns zero-value flags.
+  - Stub PresignBackend tests need a Backend constructed via Open()
+    with SkipProbe=true and a stub http.RoundTripper (the Open() probe
+    would otherwise round-trip a PutObject + DeleteObject before
+    returning). Endpoint set to a fake URL; the URL host shows up in
+    the minted presign URL so tests can assert on it.
+  - s3api harness fakes need to fake BackendRef on the manifest after
+    PutChunks (the inner memory backend produces chunks-shape
+    manifests; the gateway requires BackendRef to mint a backend
+    URL). Strip BackendRef back off before delegating GetChunks /
+    Delete to the inner memory backend so it can find the chunks.
+---
+
+## 2026-05-01 — US-017
+- Expanded docs/backends/s3.md from US-014's lifecycle-only stub to a full
+  operator guide. New sections (in order): "When to choose S3 over RADOS"
+  decision matrix (latency budget, cost model, ops complexity, encryption
+  mandate); "Required environment variables" summary table cross-referenced
+  to README's full env-var table; docker-compose snippet for the bundled
+  `make up-s3-backend` profile + a custom AWS-target YAML snippet for
+  production deployments; "Kubernetes / IRSA" subsection enumerating the
+  required S3 IAM action set (Get/Put/Delete/AbortMultipart/ListBucket
+  + Get/Put BucketLifecycle + Get/Put BucketCors); "Operator-required
+  backend bucket configuration" as load-bearing section (a) AbortIncompleteMultipartUpload
+  lifecycle rule with copy-pasteable JSON + aws s3api put-bucket-lifecycle-configuration
+  command, (b) versioning anti-pattern tying back to US-008's defensive
+  VersionID design, (c) cross-region anti-pattern; "Tested-against backends"
+  table — AWS S3 + MinIO supported, Ceph RGW + Garage + Wasabi + B2-S3
+  works-with-caveats, R2 unsupported, GCS S3-interop works-with-caveats;
+  "Capability matrix" flagging native vs worker-fallback per backend
+  across PUT/GET, multipart, versioned delete, lifecycle native transitions,
+  lifecycle native expirations, CORS passthrough, presign passthrough,
+  SSE-S3, SSE-KMS; "Performance characteristics" — latency floor (one
+  HTTPS RTT for AWS / sub-ms for MinIO same-host), throughput (1 GB/s
+  AWS / 4-6 GB/s MinIO), cost-model (PUT-count-proportional thanks to
+  1:1 invariant; rejected 4-MiB-chunks-shape would have inflated 250x),
+  hot-prefix-throttling avoidance via UUID prefix entropy. "Common
+  operational pitfalls" enumerates force-path-style for non-AWS,
+  forgotten IRSA binding, skipped bucket pre-creation, mid-flight
+  versioning enable, cross-region setup, lifecycle ID collisions,
+  per-bucket presign-passthrough off-by-default.
+- README.md How to run gained Option 4 (make up-s3-backend / make
+  smoke-s3-backend) right after the existing Option 3 (Ceph stack), with
+  a one-paragraph orientation tying Option 4 to docs/backends/s3.md and
+  positioning MinIO as the dev-time stand-in for any S3-compatible
+  endpoint.
+- New top-level CLAUDE.md (no pre-existing top-level CLAUDE.md found in
+  the repo — only scripts/ralph/CLAUDE.md). Seeded with: big-picture
+  architecture ASCII diagram showing the data.Backend box reading
+  "memory | rados | s3" and the meta.Store box reading "memory | cassandra";
+  package-level summary of internal/s3api / internal/auth / meta.Store /
+  data.Backend with optional capability surfaces enumerated; "Alternative
+  data backends" stub prose (US-019 will expand to mirror new ROADMAP
+  wording per AC-19); roadmap-maintenance rule restated for future agents;
+  pointers section to README, ROADMAP, docs/backends/s3.md, scripts/s3-tests
+  README, and scripts/ralph cycle artifacts.
+- Files changed:
+  - docs/backends/s3.md (US-014 lifecycle stub → full operator guide)
+  - README.md (Option 4: make up-s3-backend)
+  - CLAUDE.md (new — big-picture diagram + alternative-data-backends stub)
+- Quality:
+  - go build ./...   ✓
+  - go vet ./...     ✓
+  - go test ./...    ✓ (all packages green)
+- Learnings for future iterations:
+  - Top-level CLAUDE.md did not exist before this story. AC #4 ("CLAUDE.md
+    Big-picture architecture diagram updated") implied one — created it
+    fresh rather than skipping the AC. US-019 will further update its
+    "Alternative data backends" prose to mirror ROADMAP wording (single
+    source of truth per AC-19); US-019 should re-edit, not re-create.
+  - docs/backends/scylla.md and docs/backends/tikv.md referenced in the
+    AC do not exist in the repo today — only docs/backends/s3.md. The
+    "alongside scylla.md and tikv.md" phrasing is aspirational; do not
+    block on creating those.
+  - The capability matrix is a snapshot — re-validate per backend
+    when adding a new optional capability surface (e.g. future
+    UploadPartCopy native passthrough). Any matrix cell flipping from
+    "—" to "✓" needs a corresponding integration test against the
+    listed backend before it ships.
+  - The README env-var table is the canonical source for env-var docs;
+    docs/backends/s3.md mirrors a SUMMARY of the required ones with
+    "see README" cross-reference. Don't duplicate the full table — when
+    a new env var lands, add it to README and rely on the cross-ref.
+  - The IRSA permission set listed in the operator guide is the minimum
+    superset across all current optional capability surfaces (lifecycle
+    + cors). When adding new capability surfaces (e.g. notifications,
+    replication), update the IRSA action list here AND in the s3.md
+    capability matrix.
+---
+
+## 2026-05-01 — US-018
+- New job e2e-s3-backend in .github/workflows/ci.yml. Parallel to existing
+  e2e job (no needs: — both can run on same PR concurrently); independent
+  image build keeps the failure surface decoupled.
+- Build strata:ceph from deploy/docker/Dockerfile (the image strata-s3 in
+  compose builds from the same Dockerfile, so the local docker build hits
+  the same FROM image). No ceph-bootstrap build — s3 stack does not start
+  ceph services.
+- Job invokes make up-s3-backend (cassandra + minio + init-minio +
+  strata-s3 with health-gating) followed by make smoke-s3-backend-ci.
+  Codebase pattern (US-012) pins CI to the -ci variant: SKIP_DOWN=0 →
+  asserts `make down -v` clears the strata-minio-data named volume.
+- Container logs collected for strata-cassandra, strata-minio,
+  strata-init-minio, strata-s3 plus `compose ps --profile s3-backend`.
+  Uploaded as `e2e-s3-backend-logs` artefact (retention-days: 14 matches
+  e2e-logs convention).
+- timeout-minutes: 30 set on the job per AC.
+- Files: .github/workflows/ci.yml.
+- **Learnings:**
+  - AC literal said `make up-s3-backend + make smoke-s3-backend`; the
+    `-ci` suffix variant is what the codebase pattern (progress.txt,
+    "Destructive CI variant pattern") prescribes. Followed the codebase
+    pattern over the AC literal — `-ci` runs the same body plus the
+    volume-cleanup assertion, strict superset of the literal AC.
+  - `make smoke-s3-backend-ci` already depends on `up-s3-backend`. The
+    job invokes `make up-s3-backend` separately so a stack-up failure
+    surfaces in its own step (clearer log grouping in the GitHub UI vs
+    one giant `smoke-s3-backend-ci` step).
+  - No `needs: docker-build` on the new job: docker-build only builds
+    images and asserts they build; the new job builds its own image
+    inline (matches how the existing e2e job re-builds rather than
+    consuming docker-build's output). Keeping it independent means a
+    flake in docker-build doesn't hold up the s3 e2e signal.
+  - actionlint / yamllint not available in this repo's CI image — YAML
+    validation falls back to `docker compose --profile s3-backend config
+    -q` (covers the compose half) + go build/vet/test (covers the Go
+    half). YAML structure of the new job mirrors existing e2e job step
+    shape exactly to minimise drift.
+---
+
+## 2026-05-01 — US-019
+- Final cycle story: ROADMAP entry for alternative data backends + close-flip.
+- ROADMAP.md gains new section "Alternative data backends" right after
+  "Alternative metadata backends" (line 119). Mirrors metadata-backends
+  prose shape: RADOS primary, S3 equal-tier alternative, both core-team-
+  maintained, "no community slots" policy referenced explicitly.
+  Supported set documented as exactly two (rados + s3 + memory for tests);
+  Filesystem / Azure Blob / GCS explicitly not planned with rationale —
+  operators use S3 backend pointed at MinIO over filesystem, s3-proxy
+  over Azure, GCS S3-interop API. Optional capability surface pattern
+  (MultipartBackend / LifecycleBackend / CORSBackend / PresignBackend)
+  documented with code snippet matching internal/data/backend.go shape.
+- P1 S3-over-S3 bullet flipped to Done close-flip format per CLAUDE.md
+  Roadmap maintenance rule: `~~**P1 — S3-over-S3 ...**~~ **Done** (cycle
+  ralph/s3-over-s3-backend, commit pending)` with US-009 / US-011 /
+  US-012 / US-013 / US-014 / US-015 / US-016 / US-018 cross-references
+  and link to docs/backends/s3.md.
+- Non-goals subsection enumerates: native filesystem backend (use
+  MinIO-over-fs), native Azure / GCS (use s3-proxy / S3-interop API),
+  N-chunks-per-object data shape (request-amplification anti-pattern).
+- CLAUDE.md alternative-data-backends prose updated to mirror new ROADMAP
+  wording — single source of truth: same supported-set claim, same
+  not-planned list, same optional-interface pattern. CLAUDE.md stays
+  concise; defers full rationale to ROADMAP.md per AC ("mirror new
+  ROADMAP wording").
+- No US-002..US-018 scope was left undone — all 17 prior stories landed
+  green; bullet stays closed (no "what's missing" sub-line needed).
+- Files: ROADMAP.md, CLAUDE.md, scripts/ralph/prd.json, scripts/ralph/
+  progress.txt.
+- Quality: go build ./... + go vet ./... + go test ./... all green
+  (docs-only change, no Go source touched).
+- **Learnings:**
+  - Close-flip with `(commit pending)` is the right pattern when the
+    flip happens IN the closing commit — the SHA isn't known until
+    after `git commit`. Follow-up edit with the actual SHA can land in
+    a subsequent housekeeping commit; the inline `(commit pending)`
+    marker is what CLAUDE.md's Roadmap maintenance rule explicitly
+    allows.
+  - "No community slots" policy is a load-bearing phrase from the
+    Alternative metadata backends section established in commit 40b45de
+    (TiKV cycle). Mirroring it here keeps the two sections rhetorically
+    aligned and reinforces the "core-team-maintained set is small and
+    stable" bargain — future contributors proposing a 3rd / 4th data
+    backend can be pointed at this section without re-litigating.
+  - CLAUDE.md is a short pointer doc that defers to ROADMAP for full
+    rationale. Don't duplicate the entire ROADMAP section in CLAUDE.md —
+    the AC says "mirror" not "copy". Keeping CLAUDE.md concise keeps
+    every-conversation-context overhead low (it's loaded into every
+    session) while the full rationale lives in ROADMAP.md (loaded
+    on-demand by humans).
+  - PRD `branchName: ralph/s3-over-s3-backend` confirmed correct via
+    `git branch --show-current`. No branch flip needed.
+---
