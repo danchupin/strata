@@ -327,6 +327,25 @@ func parseCopySourceRange(spec string, size int64) (start, end int64, ok bool) {
 }
 
 func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *meta.Bucket, key, uploadID string) {
+	// US-008: gate the LWT flip on If-Match / If-None-Match referring to
+	// the eventual object's ETag (not the upload ID). Mirrors putObject's
+	// shape so a concurrent Complete attempt cannot leak "completing"
+	// state — the precondition check happens BEFORE
+	// Meta.CompleteMultipartUpload runs.
+	if ifMatch := r.Header.Get("If-Match"); ifMatch != "" {
+		existing, err := s.Meta.GetObject(r.Context(), b.ID, key, "")
+		if err != nil || !etagMatches(ifMatch, `"`+existing.ETag+`"`) {
+			writeError(w, r, ErrPreconditionFailed)
+			return
+		}
+	}
+	if ifNone := r.Header.Get("If-None-Match"); ifNone != "" {
+		existing, err := s.Meta.GetObject(r.Context(), b.ID, key, "")
+		if err == nil && (ifNone == "*" || etagMatches(ifNone, `"`+existing.ETag+`"`)) {
+			writeError(w, r, ErrPreconditionFailed)
+			return
+		}
+	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
 		writeError(w, r, ErrMalformedXML)
@@ -511,6 +530,12 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		}
 	}
 
+	// US-008: surface the materialised version-id when the bucket is
+	// versioned (Enabled emits the UUID, Suspended emits the literal
+	// "null" — both observable on the AWS wire).
+	if meta.IsVersioningActive(b.Versioning) && obj.VersionID != "" {
+		w.Header().Set("x-amz-version-id", obj.VersionID)
+	}
 	resp := completeMultipartResult{
 		Location: fmt.Sprintf("/%s/%s", b.Name, key),
 		Bucket:   b.Name,

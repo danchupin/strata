@@ -131,6 +131,66 @@ Cycle: ralph/s3-tests-90
 - The PRD's "tikv lockstep" note in the Codebase Patterns section is
   stale on this branch (memory + cassandra only). US-007 ships across
   both backends only.
+- Conditional headers on write paths: `internal/s3api/conditional.go`
+  exposes etagMatches() + ErrPreconditionFailed; putObject (US-pre)
+  and completeMultipart (US-008) wire If-Match / If-None-Match the
+  same way: GetObject(key, "") → etagMatches against `"<etag>"`. The
+  pattern is "check before mutating Meta" — for completeMultipart that
+  means BEFORE Meta.CompleteMultipartUpload (the LWT flip) so a 412
+  cannot leak "completing" state. copyObject is the next likely site
+  if the same s3-tests bracket lights up.
+
+## 2026-05-01 - US-008 — Multipart Complete preconditions (If-Match / If-None-Match)
+- internal/s3api/multipart.go::completeMultipart: read If-Match /
+  If-None-Match at the top of the handler (before XML body parse,
+  before Meta.CompleteMultipartUpload — the LWT flip). Both arms
+  resolve via s.Meta.GetObject(b.ID, key, "") + etagMatches() in the
+  same shape as putObject. If-None-Match: * + existing object → 412;
+  If-Match supplied + missing object OR mismatched ETag → 412;
+  matching ETag → falls through to Complete.
+- After Meta.CompleteMultipartUpload succeeds, set x-amz-version-id
+  response header when meta.IsVersioningActive(b.Versioning) — Enabled
+  emits the fresh UUID, Suspended emits literal "null" (US-007 wire
+  shape, matches AWS observable). Disabled emits no header.
+- internal/s3api/multipart_preconditions_test.go: shared completeMP
+  helper drives Initiate → 2-part UploadPart → Complete with optional
+  headers. Cases:
+  * TestMultipartCompleteIfNoneMatchStarRejectsExisting → 412 + body
+    untouched
+  * TestMultipartCompleteIfNoneMatchStarAllowsCreate → 200
+  * TestMultipartCompleteIfMatchMismatch → 412 + body untouched
+  * TestMultipartCompleteIfMatchMissingObject → 412
+  * TestMultipartCompleteIfMatchHit → 200
+  * TestMultipartCompleteVersionIDHeader → Enabled UUID, Suspended
+    "null"
+  * TestMultipartCompleteVersionIDHeaderUnversioned → no header
+- **Learnings for future iterations:**
+  - Reuse internal/s3api/conditional.go::etagMatches() — it already
+    handles `*`, quoted strings, bare tokens, and comma lists. Don't
+    re-implement; pass `"<etag>"` (with surrounding quotes) on the
+    candidate side to match the wire-form ETag.
+  - Precondition checks on a write path must run BEFORE the
+    Meta-side mutation. For completeMultipart specifically, that
+    means BEFORE Meta.CompleteMultipartUpload — putting it after
+    would leak the "completing" status row even when the request
+    is doomed to 412.
+  - The conditional.go helper checkConditional() is GET/HEAD shaped
+    (returns 304 vs 412). Write paths use the lower-level
+    etagMatches() directly because semantics differ — putObject and
+    completeMultipart treat If-None-Match (any value, not just *) as
+    "abort if matches" with a 412, not 304.
+  - x-amz-version-id on Complete is gated by IsVersioningActive (=
+    Enabled OR Suspended). Don't emit on Disabled — same rule as
+    putObject. Suspended emits the literal "null" because US-007 sets
+    obj.VersionID = NullVersionID for non-Enabled buckets.
+  - boto3 sends `If-Match`/`If-None-Match` with quoted ETag
+    (`"<hex>-N"`) — the etagMatches helper strips quotes on both
+    sides, so passing the raw header straight through Just Works.
+  - Tests can drive Versioning toggling via the existing
+    `PUT /bkt?versioning` XML route — Status: Enabled / Suspended
+    (mirror s3-tests' shape). Bucket-shape XML wrapper:
+    `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>...</Status></VersioningConfiguration>`.
+---
 
 ## 2026-05-01 - US-007 — Versioning literal-"null" version-id semantics
 - internal/meta/store.go: NullVersionID = "null" const. Doc-comment

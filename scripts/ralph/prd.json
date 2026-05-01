@@ -142,8 +142,8 @@
         "Tests pass"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "completeMultipart now reads If-Match / If-None-Match BEFORE Meta.CompleteMultipartUpload (the LWT flip), mirroring putObject's shape so a conflicting Complete attempt cannot leak 'completing' state. If-None-Match: * + existing object → 412; If-Match supplied + missing object OR mismatched ETag → 412; If-Match supplied + matching existing ETag → completes and overwrites. Existing etagMatches() handles quoted/bare/* semantics. Reuses ErrPreconditionFailed (HTTP 412) from conditional.go. Also added x-amz-version-id response header gated on meta.IsVersioningActive(b.Versioning) — Enabled emits the fresh UUID, Suspended emits literal 'null' (matches AWS observable + US-007 wire-shape). Test coverage in internal/s3api/multipart_preconditions_test.go: If-None-Match: * rejects existing + allows create, If-Match mismatch rejects, If-Match against missing object 412s, If-Match hit on matching ETag completes; x-amz-version-id appears for Enabled + Suspended (== 'null') and stays absent for Disabled."
     },
     {
       "id": "US-009",
