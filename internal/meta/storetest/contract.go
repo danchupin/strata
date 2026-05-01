@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gocql/gocql"
+
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
 )
@@ -27,6 +29,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"GCQueueRoundTrip", caseGCQueueRoundTrip},
 		{"BucketLifecycleRulesBlob", caseLifecycleBlob},
 		{"ListObjectsHidesDeleteMarkers", caseListHidesDeleteMarkers},
+		{"CompleteMultipartPopulatesPartChunks", caseCompleteMultipartPopulatesPartChunks},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -211,6 +214,74 @@ func caseLifecycleBlob(t *testing.T, s meta.Store) {
 	}
 	if _, err := s.GetBucketLifecycle(ctx, b.ID); err != meta.ErrNoSuchLifecycle {
 		t.Errorf("after delete: got %v want ErrNoSuchLifecycle", err)
+	}
+}
+
+func caseCompleteMultipartPopulatesPartChunks(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, _ := s.CreateBucket(ctx, "mp", "o", "STANDARD")
+
+	mu := &meta.MultipartUpload{
+		BucketID:     b.ID,
+		UploadID:     gocql.TimeUUID().String(),
+		Key:          "obj",
+		StorageClass: "STANDARD",
+		ContentType:  "application/octet-stream",
+		InitiatedAt:  time.Now().UTC(),
+		Status:       "uploading",
+	}
+	if err := s.CreateMultipartUpload(ctx, mu); err != nil {
+		t.Fatalf("create mp: %v", err)
+	}
+
+	parts := []*meta.MultipartPart{
+		{PartNumber: 1, ETag: "aa", Size: 5 * 1024 * 1024, Manifest: &data.Manifest{Class: "STANDARD"}},
+		{PartNumber: 2, ETag: "bb", Size: 5 * 1024 * 1024, Manifest: &data.Manifest{Class: "STANDARD"}},
+		{PartNumber: 3, ETag: "cc", Size: 1024, Manifest: &data.Manifest{Class: "STANDARD"}},
+	}
+	for _, p := range parts {
+		if err := s.SavePart(ctx, b.ID, mu.UploadID, p); err != nil {
+			t.Fatalf("save part %d: %v", p.PartNumber, err)
+		}
+	}
+
+	obj := &meta.Object{
+		BucketID:     b.ID,
+		Key:          "obj",
+		ContentType:  "application/octet-stream",
+		StorageClass: "STANDARD",
+		ETag:         "composite",
+		Mtime:        time.Now().UTC(),
+	}
+	complete := []meta.CompletePart{
+		{PartNumber: 1, ETag: "aa"},
+		{PartNumber: 2, ETag: "bb"},
+		{PartNumber: 3, ETag: "cc"},
+	}
+	if _, err := s.CompleteMultipartUpload(ctx, obj, mu.UploadID, complete, false); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	got, err := s.GetObject(ctx, b.ID, "obj", "")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Manifest == nil {
+		t.Fatal("manifest nil after complete")
+	}
+	if len(got.Manifest.PartChunks) != 3 {
+		t.Fatalf("PartChunks len: got %d want 3 (%+v)", len(got.Manifest.PartChunks), got.Manifest.PartChunks)
+	}
+	want := []data.PartRange{
+		{PartNumber: 1, Offset: 0, Size: 5 * 1024 * 1024, ETag: "aa"},
+		{PartNumber: 2, Offset: 5 * 1024 * 1024, Size: 5 * 1024 * 1024, ETag: "bb"},
+		{PartNumber: 3, Offset: 10 * 1024 * 1024, Size: 1024, ETag: "cc"},
+	}
+	for i, w := range want {
+		g := got.Manifest.PartChunks[i]
+		if g.PartNumber != w.PartNumber || g.Offset != w.Offset || g.Size != w.Size || g.ETag != w.ETag {
+			t.Errorf("PartChunks[%d]: got %+v want %+v", i, g, w)
+		}
 	}
 }
 

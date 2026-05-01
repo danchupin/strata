@@ -19,8 +19,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "PartChunks populated by meta layer (memory + cassandra) at CompleteMultipartUpload LWT-success time, capturing PartNumber/Offset/Size/ETag for each part. Checksum fields land empty in this story; US-004 will write them at UploadPart time via a new MultipartPart.ChecksumValue/Algorithm pair. Backend pass-through (US-010) path also gets PartChunks — both shape variants now carry per-part offsets so US-002 ?partNumber=N GET works regardless of which data backend served the parts. Contract test caseCompleteMultipartPopulatesPartChunks runs against memory and cassandra (under -tags integration) lock-step."
     },
     {
       "id": "US-002",

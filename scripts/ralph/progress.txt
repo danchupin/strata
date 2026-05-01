@@ -65,3 +65,62 @@ Cycle: ralph/s3-tests-90
   scripts/s3-tests/run.sh against `make up-all` (Cassandra + RADOS).
   Each story SHOULD verify the impacted s3-tests cluster passes
   before marking complete; US-011 collects the headline number.
+- Cycle-start codebase has TWO meta backends (memory + cassandra),
+  not three. The seeded "tikv" pattern is stale — internal/meta has
+  only memory/ and cassandra/ subdirs on this branch. New meta-shape
+  tests go in internal/meta/storetest/contract.go and run against
+  both via storetest.Run. Cassandra runs the contract suite under
+  `-tags integration`; without the tag only memory exercises the
+  contract.
+- Manifest JSON encoding uses encoding/json with `omitempty` tags;
+  there is NO generated protobuf code today. internal/data/manifest.proto
+  is a doc/spec file used to lock field-number assignments for any
+  future codec, not a code-gen source. EncodeManifest/DecodeManifest
+  are JSON-only — wire compatibility is across JSON shapes.
+- Multipart pass-through (US-010 of s3-over-s3 cycle) sets
+  obj.Manifest BEFORE meta.CompleteMultipartUpload runs. The meta
+  layer detects this via `preAssembled := obj.Manifest != nil` and
+  appends PartChunks onto the pre-built manifest instead of building
+  a chunks-shape manifest. Future multipart-shape additions (US-003
+  composite checksum, US-004 per-part checksum) must follow the same
+  branch — populate on the existing manifest in the preAssembled
+  branch, build fresh in the chunks-shape branch.
+
+## 2026-05-01 - US-001 — Multipart per-part offset tracking in data.Manifest
+- Added `PartRange` struct (PartNumber, Offset, Size, ETag,
+  ChecksumValue, ChecksumAlgorithm) and `Manifest.PartChunks
+  []PartRange` (json `omitempty`) — internal/data/manifest.go.
+- Updated internal/data/manifest.proto: header field-number map now
+  includes 13 (PartChunks) + reserved 14..18 for future PartRange
+  flatten; new `PartRange` message with sub-fields 1..6.
+- Wired CompleteMultipartUpload in both internal/meta/memory/store.go
+  and internal/meta/cassandra/store.go to populate PartChunks from
+  the parts rows on the LWT-success path. Running offset is summed
+  in part-list order (already validated to be ascending PartNumber).
+  PartChunks lands in BOTH the chunks-shape (RADOS) branch AND the
+  preAssembled (US-010 backend pass-through) branch.
+- Added contract test caseCompleteMultipartPopulatesPartChunks to
+  internal/meta/storetest/contract.go covering both stores via
+  storetest.Run. Memory backend exercises it via go test;
+  cassandra picks it up under -tags integration.
+- Added internal/data/manifest_test.go round-trip + nil-omittedness
+  + legacy-decode tests for PartChunks.
+- ChecksumValue / ChecksumAlgorithm fields exist on PartRange but
+  remain empty for now — US-004 lands per-part checksum storage at
+  UploadPart time and will populate them then.
+- **Learnings for future iterations:**
+  - meta has only memory + cassandra on this branch (the seeded tikv
+    pattern is stale).
+  - manifest.proto is doc/spec only — no codegen; JSON is the wire.
+  - pre-assembled manifest path (US-010 backend pass-through) ALSO
+    needs the new field — append onto the existing manifest pointer
+    instead of rebuilding it.
+  - meta.CompleteMultipartUpload is the right place to populate
+    PartChunks (LWT-success) — keep s3api/multipart.go::completeMultipart
+    out of the per-part-row business; s3api only knows the
+    `parts []CompletePart` order from the client.
+  - PartChunks is a `[]PartRange` not a pointer slice — keep
+    `omitempty` distinguishing nil (single-PUT, "not multipart")
+    from an empty slice (zero parts, which is itself a malformed
+    multipart that the gateway already rejects upstream).
+---

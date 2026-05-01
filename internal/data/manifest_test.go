@@ -117,6 +117,59 @@ func TestLegacyRadosManifestDecodesWithoutBackendRef(t *testing.T) {
 	}
 }
 
+func TestRoundTripPartChunks(t *testing.T) {
+	in := &Manifest{
+		Class:     "STANDARD",
+		Size:      15 * 1024 * 1024,
+		ChunkSize: DefaultChunkSize,
+		ETag:      "abc-3",
+		PartChunks: []PartRange{
+			{PartNumber: 1, Offset: 0, Size: 5 * 1024 * 1024, ETag: "p1"},
+			{PartNumber: 2, Offset: 5 * 1024 * 1024, Size: 5 * 1024 * 1024, ETag: "p2", ChecksumValue: "v2", ChecksumAlgorithm: "SHA256"},
+			{PartNumber: 3, Offset: 10 * 1024 * 1024, Size: 5 * 1024 * 1024, ETag: "p3"},
+		},
+	}
+	b, err := EncodeManifest(in)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	out, err := DecodeManifest(b)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !reflect.DeepEqual(in.PartChunks, out.PartChunks) {
+		t.Fatalf("PartChunks round-trip mismatch:\n in: %+v\nout: %+v", in.PartChunks, out.PartChunks)
+	}
+}
+
+func TestNilPartChunksOmittedFromJSON(t *testing.T) {
+	in := &Manifest{
+		Class: "STANDARD",
+		Size:  10,
+		ETag:  "e",
+	}
+	b, err := EncodeManifest(in)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if strings.Contains(string(b), "PartChunks") {
+		t.Fatalf("nil PartChunks must be omitted from JSON; got %s", b)
+	}
+}
+
+func TestLegacyManifestDecodesWithNilPartChunks(t *testing.T) {
+	// Pre-US-001-of-s3-tests-90 manifests do not carry PartChunks. They
+	// must still decode with PartChunks=nil so existing rows serve normally.
+	legacy := []byte(`{"Class":"STANDARD","Size":10,"ETag":"e","Chunks":[{"Cluster":"c","Pool":"p","OID":"o","Size":10}]}`)
+	out, err := DecodeManifest(legacy)
+	if err != nil {
+		t.Fatalf("decode legacy: %v", err)
+	}
+	if out.PartChunks != nil {
+		t.Fatalf("legacy manifest must decode with PartChunks=nil, got %+v", out.PartChunks)
+	}
+}
+
 func TestS3ManifestDecodesWithEmptyChunks(t *testing.T) {
 	in := &Manifest{
 		Class:      "STANDARD",

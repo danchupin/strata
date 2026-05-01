@@ -46,6 +46,29 @@ type Manifest struct {
 	// nil for legacy manifests written before US-013 — those decode as
 	// passthrough/none, identical to the pre-flag behaviour.
 	SSE *SSEInfo `json:",omitempty"`
+	// PartChunks records the per-part byte ranges of a multipart-uploaded
+	// object so the ?partNumber=N GET path can serve part N without
+	// scanning the whole object. Populated by CompleteMultipartUpload on
+	// the LWT-success path; nil for single-PUT objects (the nil/non-nil
+	// distinction is the "is multipart" sentinel — an empty slice would
+	// be ambiguous).
+	PartChunks []PartRange `json:",omitempty"`
+}
+
+// PartRange describes the byte-range and per-part metadata of one part of
+// a multipart-uploaded object. Offset is an absolute byte offset into the
+// assembled object body; [Offset, Offset+Size) is the half-open range that
+// part N occupies. ChecksumValue / ChecksumAlgorithm are populated when
+// the client supplied x-amz-checksum-* on the matching UploadPart (set
+// to empty otherwise — the ChecksumAlgorithm == "" sentinel means "no
+// per-part checksum was recorded").
+type PartRange struct {
+	PartNumber        int    `json:",omitempty"`
+	Offset            int64  `json:",omitempty"`
+	Size              int64  `json:",omitempty"`
+	ETag              string `json:",omitempty"`
+	ChecksumValue     string `json:",omitempty"`
+	ChecksumAlgorithm string `json:",omitempty"`
 }
 
 type ChunkRef struct {

@@ -1,4 +1,4 @@
-// US-008 / US-013 field-number assignment
+// US-008 / US-013 / US-s3-tests-90 field-number assignment
 //
 // At US-008 story-start, the highest field number in this manifest schema
 // is N=5 (Manifest.Chunks). Reservations carved out by US-008/US-013:
@@ -10,12 +10,17 @@
 //   N+5 = 10  reserved (Manifest.size_bytes) sub-field of BackendRef if ever flattened — US-008
 //   N+6 = 11  reserved (Manifest.version_id) sub-field of BackendRef if ever flattened — US-008
 //   N+7 = 12  Manifest.sse                   (SSEInfo message ref) — US-013 (now allocated)
+//   N+8 = 13  Manifest.part_chunks           (repeated PartRange) — US-s3-tests-90 US-001
+//   N+9..N+13 = 14..18  reserved             sub-fields of PartRange if ever flattened — US-s3-tests-90 US-001
 //
 // SSEInfo sub-fields live in their own field-number space inside the SSE
-// message. Numbers 7..11 stay reserved against accidental flatten of
-// BackendRef sub-fields. New unrelated additive fields MUST start at 13 or
-// above; renumbering is forbidden — the schema is wire-compatible across
-// RADOS-mode and S3-mode manifests both directions.
+// message. PartRange sub-fields likewise live in their own field-number
+// space inside the PartRange message. Numbers 7..11 stay reserved against
+// accidental flatten of BackendRef sub-fields, and 14..18 stay reserved
+// against accidental flatten of PartRange sub-fields. New unrelated
+// additive fields MUST start at 19 or above; renumbering is forbidden —
+// the schema is wire-compatible across RADOS-mode and S3-mode manifests
+// both directions.
 
 syntax = "proto3";
 
@@ -31,8 +36,10 @@ message Manifest {
   repeated ChunkRef chunks = 5;
   BackendRef backend_ref = 6;
   SSEInfo sse = 12;
+  repeated PartRange part_chunks = 13;
 
   reserved 7 to 11;
+  reserved 14 to 18;
   reserved "backend", "key", "size_bytes", "version_id";
 }
 
@@ -62,4 +69,17 @@ message SSEInfo {
   string mode = 1;
   string algorithm = 2;
   string kms_key_id = 3;
+}
+
+// PartRange — see internal/data/manifest.go PartRange doc-comment for the
+// canonical multipart per-part offset semantics. Populated by
+// CompleteMultipartUpload at LWT-success time so the ?partNumber=N GET
+// path can serve part N without scanning the whole object.
+message PartRange {
+  int32 part_number = 1;
+  int64 offset = 2;
+  int64 size = 3;
+  string etag = 4;
+  string checksum_value = 5;
+  string checksum_algorithm = 6;
 }

@@ -719,6 +719,7 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 	preAssembled := obj.Manifest != nil
 	used := make(map[int]bool, len(parts))
 	var chunks []data.ChunkRef
+	partRanges := make([]data.PartRange, 0, len(parts))
 	var totalSize int64
 	for _, cp := range parts {
 		p, ok := st.parts[cp.PartNumber]
@@ -733,6 +734,12 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 		if !preAssembled && p.Manifest != nil {
 			chunks = append(chunks, p.Manifest.Chunks...)
 		}
+		partRanges = append(partRanges, data.PartRange{
+			PartNumber: cp.PartNumber,
+			Offset:     totalSize,
+			Size:       p.Size,
+			ETag:       p.ETag,
+		})
 		totalSize += p.Size
 		used[cp.PartNumber] = true
 	}
@@ -746,13 +753,15 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 		if obj.Size == 0 {
 			obj.Size = totalSize
 		}
+		obj.Manifest.PartChunks = partRanges
 	} else {
 		obj.Manifest = &data.Manifest{
-			Class:     obj.StorageClass,
-			Size:      totalSize,
-			ChunkSize: data.DefaultChunkSize,
-			ETag:      obj.ETag,
-			Chunks:    chunks,
+			Class:      obj.StorageClass,
+			Size:       totalSize,
+			ChunkSize:  data.DefaultChunkSize,
+			ETag:       obj.ETag,
+			Chunks:     chunks,
+			PartChunks: partRanges,
 		}
 		obj.Size = totalSize
 	}
