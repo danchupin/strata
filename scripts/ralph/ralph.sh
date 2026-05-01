@@ -91,8 +91,12 @@ for i in $(seq 1 $MAX_ITERATIONS); do
   if [[ "$TOOL" == "amp" ]]; then
     OUTPUT=$(cat "$SCRIPT_DIR/prompt.md" | amp --dangerously-allow-all 2>&1 | tee /dev/stderr) || true
   else
-    # Claude Code: use --dangerously-skip-permissions for autonomous operation, --print for output
-    OUTPUT=$(claude --dangerously-skip-permissions --print < "$SCRIPT_DIR/CLAUDE.md" 2>&1 | tee /dev/stderr) || true
+    # Claude Code via avito ai wrapper (corporate auth). --dangerously-skip-permissions
+    # for autonomous operation, --print for non-interactive output. The `--` separator
+    # forwards subsequent flags to the underlying claude CLI unchanged.
+    # NOTE: This wrapper is mandatory for this repo — direct `claude` invocation does
+    # not authenticate against the corporate proxy. Do not revert.
+    OUTPUT=$(avito ai claude -- --dangerously-skip-permissions --print < "$SCRIPT_DIR/CLAUDE.md" 2>&1 | tee /dev/stderr) || true
   fi
   
   # Check for completion signal
