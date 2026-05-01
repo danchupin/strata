@@ -62,3 +62,37 @@ Cycle: ralph/auth-per-chunk-signature
   touches; no RADOS/S3-backend touches. Pure auth-layer fix scoped
   to internal/auth/* + internal/s3api/sigv4_streaming_test.go +
   ROADMAP.md + docs/security/.
+
+## 2026-05-01 - US-001
+- Added unexported chunkSigner type in internal/auth/streaming.go:
+  newChunkSigner(seedSig, signingKey, isoDate, scope) + Next(payload)
+  returning hex chain signature and advancing prevSig in-place.
+- Added internal/auth/streaming_test.go with TestChunkSignerAWSVectors
+  (AWS-published "Example Calculations" — chunk-1 65536×'a',
+  chunk-2 1024×'a', final-empty 0 bytes) and TestChunkSignerAdvancesChain
+  (chain-mutates-on-call invariant).
+- Vectors compared via hmac.Equal — constant-time idiom.
+- Cycle-start s3-tests baseline captured: 78.5% (139/177) per
+  scripts/s3-tests/README.md 2026-05-01 6e122903 entry. US-005 must
+  re-run and assert >= this floor.
+- Files changed: internal/auth/streaming.go,
+  internal/auth/streaming_test.go (new).
+- **Learnings for future iterations:**
+  - PRD Construction signature was 3-arg (seedSig, signingKey, scope) —
+    deviated to 4-arg with isoDate because AWS string-to-sign embeds
+    X-Amz-Date timestamp separately from credential scope. Documented
+    deviation in chunkSigner doc-comment.
+  - The AWS S3 streaming-sigv4 doc example uses secret
+    `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` (slash between MDENG
+    and bPxRfi) — DIFFERENT from the canonical IAM SigV4 example
+    secret which uses `+` at that position. Pre-existing
+    sigv4_test.go::vectorSecret uses the IAM `+` variant; do not
+    reuse. Streaming tests need their own secret constant.
+  - sha256Hex / hmacSHA256 / deriveSigningKey / credentialScope /
+    emptyBodyHash already exist in internal/auth/sigv4.go and are
+    unexported — package-internal access from streaming.go works
+    without re-exporting.
+  - newChunkSigner is unused after US-001; staticcheck/unusedfunc
+    flags it. Resolved by US-002 wiring it into the decoder. Do not
+    add a // nolint:unused suppression — let US-002 land naturally.
+---

@@ -19,8 +19,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "AWS streaming SigV4 'Example Calculations' verified — chunk-1 / chunk-2 / final-empty signatures match published vectors (secret in AWS S3 doc uses '/' not '+' between MDENG and bPxRfi — distinct from the canonical IAM SigV4 secret). Constructor signature deviated from PRD: newChunkSigner(seedSig, signingKey, isoDate, scope) — fourth arg added because string-to-sign embeds the X-Amz-Date timestamp separately from the credential scope. Cycle-start s3-tests baseline 78.5% (139/177) per scripts/s3-tests/README.md 2026-05-01 entry."
     },
     {
       "id": "US-002",

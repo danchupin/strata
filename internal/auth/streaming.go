@@ -2,11 +2,56 @@ package auth
 
 import (
 	"bufio"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
 )
+
+// chunkSigner produces the chained per-chunk SigV4 signatures for
+// STREAMING-AWS4-HMAC-SHA256-PAYLOAD bodies. The chain is seeded with the
+// outer SigV4 signature (from the request's Authorization header) and
+// advances by one HMAC-SHA256 per chunk. Each Next call returns the
+// expected hex signature for the next chunk and updates the internal
+// previous-signature state.
+//
+// PRD listed Construction(seedSig, signingKey, scope); the AWS string-to-
+// sign also embeds the X-Amz-Date timestamp, so the constructor takes a
+// fourth isoDate argument (the X-Amz-Date timestamp, e.g.
+// "20130524T000000Z"). scope is "<date>/<region>/<service>/aws4_request".
+type chunkSigner struct {
+	signingKey []byte
+	isoDate    string
+	scope      string
+	prevSig    string
+}
+
+func newChunkSigner(seedSig string, signingKey []byte, isoDate, scope string) *chunkSigner {
+	return &chunkSigner{
+		signingKey: signingKey,
+		isoDate:    isoDate,
+		scope:      scope,
+		prevSig:    seedSig,
+	}
+}
+
+// Next returns the expected per-chunk signature for payload and advances
+// the chain. AWS string-to-sign:
+//
+//	"AWS4-HMAC-SHA256-PAYLOAD\n" + isoDate + "\n" + scope + "\n" +
+//	    prevSig + "\n" + hex(SHA256("")) + "\n" + hex(SHA256(payload))
+func (c *chunkSigner) Next(payload []byte) string {
+	sts := "AWS4-HMAC-SHA256-PAYLOAD\n" +
+		c.isoDate + "\n" +
+		c.scope + "\n" +
+		c.prevSig + "\n" +
+		emptyBodyHash + "\n" +
+		sha256Hex(payload)
+	sig := hex.EncodeToString(hmacSHA256(c.signingKey, []byte(sts)))
+	c.prevSig = sig
+	return sig
+}
 
 type streamingReader struct {
 	src  io.ReadCloser
