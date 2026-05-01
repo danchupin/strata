@@ -386,6 +386,37 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		return
 	}
 
+	storedParts, err := s.Meta.ListParts(r.Context(), b.ID, uploadID)
+	if err != nil {
+		mapMetaErr(w, r, err)
+		return
+	}
+	byNumber := make(map[int]*meta.MultipartPart, len(storedParts))
+	for _, p := range storedParts {
+		byNumber[p.PartNumber] = p
+	}
+
+	// US-009 size-too-small: every part except the last must be at least
+	// 5 MiB (S3 spec). Validates BEFORE the LWT flip so a small-part
+	// Complete cannot leak "completing" state. Single-part uploads exempt
+	// (the last part has no minimum). ETag mismatch + missing-part get
+	// resolved by the meta layer's existing checks downstream.
+	const minPartSize = 5 * 1024 * 1024
+	for i, cp := range parts {
+		if i == len(parts)-1 {
+			break
+		}
+		p, ok := byNumber[cp.PartNumber]
+		if !ok {
+			writeError(w, r, ErrInvalidPart)
+			return
+		}
+		if p.Size < minPartSize {
+			writeError(w, r, ErrEntityTooSmall)
+			return
+		}
+	}
+
 	// US-003 FlexibleChecksum response shape: when the multipart session
 	// was opened with `x-amz-checksum-algorithm`, compute the COMPOSITE
 	// hash-of-hashes from the per-part digests captured at UploadPart
@@ -404,15 +435,6 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		case "FULL_OBJECT":
 			compositeValue = r.Header.Get(checksumHeader(compositeAlgo))
 		case "COMPOSITE":
-			stored, listErr := s.Meta.ListParts(r.Context(), b.ID, uploadID)
-			if listErr != nil {
-				mapMetaErr(w, r, listErr)
-				return
-			}
-			byNumber := make(map[int]*meta.MultipartPart, len(stored))
-			for _, p := range stored {
-				byNumber[p.PartNumber] = p
-			}
 			pcs := make([]partChecksum, 0, len(parts))
 			for _, cp := range parts {
 				p, ok := byNumber[cp.PartNumber]
@@ -446,15 +468,6 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		if !ok {
 			writeError(w, r, ErrInternal)
 			return
-		}
-		stored, listErr := s.Meta.ListParts(r.Context(), b.ID, uploadID)
-		if listErr != nil {
-			mapMetaErr(w, r, listErr)
-			return
-		}
-		byNumber := make(map[int]*meta.MultipartPart, len(stored))
-		for _, p := range stored {
-			byNumber[p.PartNumber] = p
 		}
 		backendParts := make([]data.BackendCompletedPart, 0, len(parts))
 		var totalSize int64

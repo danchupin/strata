@@ -39,6 +39,7 @@ var (
 	ErrInvalidArgument     = APIError{Code: "InvalidArgument", Message: "Invalid argument", Status: http.StatusBadRequest}
 	ErrInvalidPartNumber   = APIError{Code: "InvalidPartNumber", Message: "The requested partnumber is not satisfiable", Status: http.StatusRequestedRangeNotSatisfiable}
 	ErrBadDigest           = APIError{Code: "BadDigest", Message: "The checksum value supplied does not match the value Strata calculated", Status: http.StatusBadRequest}
+	ErrEntityTooSmall      = APIError{Code: "EntityTooSmall", Message: "Your proposed upload is smaller than the minimum allowed object size. Each part must be at least 5 MB in size, except the last part.", Status: http.StatusBadRequest}
 	ErrNotImplemented      = APIError{Code: "NotImplemented", Message: "A header you provided implies functionality that is not implemented", Status: http.StatusNotImplemented}
 	ErrInternal            = APIError{Code: "InternalError", Message: "We encountered an internal error", Status: http.StatusInternalServerError}
 )

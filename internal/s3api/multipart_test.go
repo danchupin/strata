@@ -25,9 +25,15 @@ func TestMultipartFullLifecycle(t *testing.T) {
 	}
 	uploadID := m[1]
 
+	// Non-last parts must be ≥ 5 MiB (S3 spec, US-009 size-too-small);
+	// last part can be smaller.
 	parts := make([][]byte, 3)
 	for i := range parts {
-		parts[i] = make([]byte, 4<<20)
+		size := 5 << 20
+		if i == len(parts)-1 {
+			size = 4 << 20
+		}
+		parts[i] = make([]byte, size)
 		if _, err := rand.Read(parts[i]); err != nil {
 			t.Fatal(err)
 		}

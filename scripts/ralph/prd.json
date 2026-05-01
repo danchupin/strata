@@ -158,8 +158,8 @@
         "Tests pass"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "completeMultipart now hoists s.Meta.ListParts to a single up-front call (de-duped from the FlexibleChecksum and backend pass-through branches that re-listed) and walks doc.Parts asserting every non-last part has p.Size >= 5*1024*1024 — violations return ErrEntityTooSmall (HTTP 400, code EntityTooSmall) BEFORE Meta.CompleteMultipartUpload (the LWT flip), so a small-part Complete cannot leak 'completing' state. Single-part uploads exempt (the last part has no minimum). Resend ordering is naturally last-write-wins on both backends without LWT: memory SavePart serializes via the per-store mutex and overwrites st.parts[partNumber]; cassandra SavePart is a plain INSERT into multipart_parts (PK = bucket_id, upload_id, part_number) where Cassandra's last-write-wins-by-timestamp semantics give the same shape. Existing meta.ErrMultipartETagMismatch path covers the stale-ETag case (Complete with the FIRST upload's ETag after a resend → InvalidPart). New ErrEntityTooSmall in errors.go (HTTP 400). Test coverage in internal/s3api/multipart_size_resend_test.go: TestMultipartCompleteSizeTooSmall pins 1-MiB-non-last → 400 EntityTooSmall + upload still listed; TestMultipartCompleteSingleSmallPart pins single-part-5-byte exemption; TestMultipartResendOverwrites pins resent-bytes win on full GET; TestMultipartCompleteRejectsStaleETag pins stale-ETag → InvalidPart. Existing TestMultipartFullLifecycle bumped to 5/5/4 MiB and TestMultipartGatewayRoutesToMultipartBackend bumped to 5MiB+6B parts to satisfy the new spec."
     },
     {
       "id": "US-010",

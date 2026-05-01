@@ -52,8 +52,13 @@ func TestMultipartGatewayRoutesToMultipartBackend(t *testing.T) {
 		t.Fatalf("CreateBackendMultipart count: got %d, want 1", got)
 	}
 
-	// Two parts.
-	parts := [][]byte{[]byte("AAAAA"), []byte("BBBBBB")}
+	// Two parts. Non-last part ≥ 5 MiB per S3 size-too-small (US-009);
+	// last part can be smaller.
+	largePart := make([]byte, 5<<20)
+	for i := range largePart {
+		largePart[i] = 'A'
+	}
+	parts := [][]byte{largePart, []byte("BBBBBB")}
 	etags := make([]string, len(parts))
 	for i, p := range parts {
 		url := fmt.Sprintf("%s/bkt/key?uploadId=%s&partNumber=%d", ts.URL, uploadID, i+1)

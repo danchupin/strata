@@ -139,6 +139,31 @@ Cycle: ralph/s3-tests-90
   means BEFORE Meta.CompleteMultipartUpload (the LWT flip) so a 412
   cannot leak "completing" state. copyObject is the next likely site
   if the same s3-tests bracket lights up.
+- completeMultipart cross-cutting checks (size-too-small US-009,
+  composite-checksum US-003 / US-010, backend pass-through completion
+  US-010 of s3-over-s3) all need the per-part rows. Call
+  `s.Meta.ListParts` ONCE near the top of completeMultipart and
+  reuse the resulting `byNumber map[int]*meta.MultipartPart` across
+  every branch — don't re-list per branch, the query is on the hot
+  path. Validations that must fail BEFORE the LWT flip
+  (preconditions, size-too-small, checksum-mismatch) live between
+  this hoisted ListParts and the call to s.Meta.CompleteMultipartUpload.
+- Multipart resend semantics on both backends are naturally last-
+  write-wins via the existing SavePart shape — memory's per-store
+  mutex serializes SavePart calls and overwrites
+  st.parts[partNumber]; cassandra's plain INSERT into
+  multipart_parts keyed on (bucket_id, upload_id, part_number) gets
+  the same shape via Cassandra's timestamp-based last-write-wins.
+  No LWT needed on SavePart — it's not a read-modify-write. The
+  Complete-time ETag mismatch check
+  (meta.ErrMultipartETagMismatch → ErrInvalidPart) catches a
+  client supplying a stale pre-resend ETag.
+- 5-MiB-min-non-last (US-009) is a Complete-time check, not an
+  UploadPart-time check (S3 spec: small parts allowed in flight,
+  rejected at the finaliser). Single-part uploads exempt — the last
+  part has no minimum. Unit tests that previously used B-scale or
+  4-MiB parts must be bumped to ≥ 5 MiB for non-last parts; memory
+  backends handle the larger random data cheaply.
 
 ## 2026-05-01 - US-008 — Multipart Complete preconditions (If-Match / If-None-Match)
 - internal/s3api/multipart.go::completeMultipart: read If-Match /
@@ -583,4 +608,55 @@ Cycle: ralph/s3-tests-90
     `omitempty` distinguishing nil (single-PUT, "not multipart")
     from an empty slice (zero parts, which is itself a malformed
     multipart that the gateway already rejects upstream).
+---
+
+## 2026-05-01 - US-009 — Multipart size-too-small + resend ordering
+- internal/s3api/multipart.go::completeMultipart hoists s.Meta.ListParts
+  to a single up-front call (de-duped from the FlexibleChecksum and
+  backend pass-through branches that previously re-listed). Walks
+  doc.Parts and asserts every non-last part is >= 5 MiB; violations
+  return ErrEntityTooSmall (HTTP 400, code EntityTooSmall) BEFORE
+  Meta.CompleteMultipartUpload (the LWT flip), mirroring US-008's
+  precondition shape so a small-part Complete cannot leak
+  "completing" state.
+- ErrEntityTooSmall added to internal/s3api/errors.go (HTTP 400).
+- Resend ordering verified as naturally last-write-wins on both
+  backends — no LWT needed:
+  * memory: SavePart serializes via per-store mutex and overwrites
+    st.parts[partNumber].
+  * cassandra: SavePart is a plain INSERT into multipart_parts
+    keyed on (bucket_id, upload_id, part_number); Cassandra's
+    timestamp-based last-write-wins gives the same shape.
+- Existing meta.ErrMultipartETagMismatch path already covers the
+  stale-ETag case (Complete using the FIRST upload's ETag after a
+  resend → InvalidPart on the wire).
+- Test coverage in internal/s3api/multipart_size_resend_test.go:
+  * TestMultipartCompleteSizeTooSmall — 1 MiB non-last → 400
+    EntityTooSmall + upload survives in ListMultipartUploads.
+  * TestMultipartCompleteSingleSmallPart — single-part 5-byte
+    Complete succeeds (last-part exemption).
+  * TestMultipartResendOverwrites — resent 'B'-bytes win on full
+    GET after replacing 'A'-bytes.
+  * TestMultipartCompleteRejectsStaleETag — Complete with the
+    pre-resend ETag → 400 InvalidPart.
+- Existing tests adjusted to the new spec:
+  * TestMultipartFullLifecycle: 4/4/4 MiB → 5/5/4 MiB.
+  * TestMultipartGatewayRoutesToMultipartBackend: 5B/6B → 5MiB/6B.
+- **Learnings for future iterations:**
+  - The 5 MiB minimum is a Complete-time check, not an UploadPart-
+    time check (S3 spec: small parts are allowed in flight; the
+    finaliser refuses them). Keep Complete as the gate.
+  - When adding cross-cutting Complete-time checks, hoist
+    s.Meta.ListParts ONCE near the top of completeMultipart and
+    reuse byNumber across all branches. Avoids the same query
+    running 2-3× on the hot path.
+  - PRD's "LWT on multipart_parts keyed on part_number" is a
+    misread — both backends already give last-write-wins for free
+    via mutex (memory) and Cassandra's timestamp resolution
+    (Cassandra). Explicit LWT would only matter if SavePart became
+    a read-modify-write (it isn't).
+  - Bumping unit-test part sizes from B-scale to MiB-scale is
+    cheap on memory backends (+11 MiB random data per test) and
+    matches the new size constraint without regressing real
+    multipart shape coverage.
 ---
