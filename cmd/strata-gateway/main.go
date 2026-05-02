@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 
 	strataconsole "github.com/danchupin/strata"
+	"github.com/danchupin/strata/internal/adminapi"
 	"github.com/danchupin/strata/internal/auth"
 	"github.com/danchupin/strata/internal/config"
 	"github.com/danchupin/strata/internal/data"
@@ -63,9 +65,12 @@ func main() {
 	apiHandler := s3api.New(dataBackend, metaStore)
 	apiHandler.Region = cfg.RegionName
 
+	adminServer := adminapi.New(metaStore, mw.Store, buildVersion())
+
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
 	mux.Handle("/console/", strataconsole.ConsoleHandler())
+	mux.Handle("/admin/v1/", adminServer.Handler())
 	mux.Handle("/", metrics.ObserveHTTP(mw.Wrap(apiHandler, s3api.WriteAuthDenied)))
 
 	srv := &http.Server{
@@ -89,6 +94,23 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownWait)
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)
+}
+
+// buildVersion returns the VCS revision baked in by `go build` (or "dev"
+// when run without VCS metadata, e.g. in tests). Surfaced via
+// /admin/v1/cluster/status::version so the console can display it.
+func buildVersion() string {
+	if v := os.Getenv("STRATA_VERSION"); v != "" {
+		return v
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range info.Settings {
+			if s.Key == "vcs.revision" && s.Value != "" {
+				return s.Value
+			}
+		}
+	}
+	return "dev"
 }
 
 func buildDataBackend(cfg *config.Config) (data.Backend, error) {

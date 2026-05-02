@@ -59,8 +59,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented this iteration. New package internal/adminapi (server.go + cluster.go + buckets.go + consumers.go + metrics.go + types.go + openapi.yaml). Server holds Meta + CredentialsStore + Version (vcs.revision via runtime/debug.ReadBuildInfo, override STRATA_VERSION) + Started time. Handler() wraps an inner http.ServeMux (go 1.22+ method-prefixed patterns) with auth.Middleware{Mode: ModeRequired} so /admin/v1/* always demands auth regardless of global STRATA_AUTH_MODE. Anonymous → 401 JSON {code, message}. JSON deny handler writeAuthDenied (NOT s3api.WriteAuthDenied which emits XML). Routes registered: GET /admin/v1/cluster/status (stub status:'ok' + version + started_at), GET /admin/v1/cluster/nodes ({nodes:[]}), GET /admin/v1/buckets ({buckets:[], total:0}), GET /admin/v1/buckets/top ({buckets:[]}), GET /admin/v1/buckets/{bucket} (404 NoSuchBucket), GET /admin/v1/buckets/{bucket}/objects ({objects:[], common_prefixes:[], is_truncated:false}), GET /admin/v1/consumers/top ({consumers:[]}), GET /admin/v1/metrics/timeseries ({series:[]}). Wired in cmd/strata-gateway/main.go: mux.Handle('/admin/v1/', adminServer.Handler()) ahead of the catch-all '/' S3 router. OpenAPI 3.1 spec at internal/adminapi/openapi.yaml documents all endpoints + schemas + sigv4/sessionCookie security schemes (cookie auth lands US-004). Tests in internal/adminapi/server_test.go: 401 anonymous via Handler(); per-endpoint 200/404 + JSON-shape via routes() (auth-bypass for shape assertion). go vet clean, go test ./... clean, go build ./... clean, pnpm typecheck clean. Runtime smoke on :9998: curl /admin/v1/cluster/status anon → 401 JSON; /admin/v1/cluster/nodes anon → 401 JSON; /admin/v1/buckets/foo anon → 401 JSON; /console/ → 200 (regression-clean)."
     },
     {
       "id": "US-004",

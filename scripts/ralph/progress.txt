@@ -229,3 +229,94 @@ Cycle: ralph/web-ui-foundation
     roughly 100–150 KiB combined. Route-level React.lazy boundaries become
     important from US-009 onwards.
 ---
+
+## 2026-05-02 - US-003
+- New package internal/adminapi serves the JSON HTTP namespace at
+  /admin/v1/*. Server struct holds {Meta meta.Store, Creds
+  auth.CredentialsStore, Version, Started, Logger}. Handler() wraps an
+  internal http.ServeMux (go 1.22+ method-prefixed patterns) with
+  auth.Middleware{Mode: ModeRequired} so /admin/v1/* ALWAYS demands creds
+  regardless of the global STRATA_AUTH_MODE setting. Routes (all GET):
+  /cluster/status, /cluster/nodes, /buckets, /buckets/top,
+  /buckets/{bucket} (always 404 stub), /buckets/{bucket}/objects,
+  /consumers/top, /metrics/timeseries.
+- Stub payloads match the PRD JSON shapes. Types live in
+  internal/adminapi/types.go and are the stable wire contract for the UI;
+  later stories populate fields without renaming.
+- JSON deny handler: writeAuthDenied returns
+  {code:'Unauthorized', message:<reason>} with Content-Type:
+  application/json. Distinct from s3api.WriteAuthDenied which emits XML.
+  Same auth.CredentialsStore is shared with the S3 path so a single
+  STRATA_STATIC_CREDENTIALS env covers both.
+- Wired in cmd/strata-gateway/main.go:
+  mux.Handle("/admin/v1/", adminServer.Handler()) AHEAD of the catch-all
+  S3 mux.Handle("/", ...). Same prefix-routing pattern as /console/.
+  Version sourced from runtime/debug.ReadBuildInfo() vcs.revision
+  (override via STRATA_VERSION env). Default "dev" when no VCS info.
+- OpenAPI 3.1 spec at internal/adminapi/openapi.yaml documents every
+  endpoint + schema + parameter + sigv4/sessionCookie security schemes.
+  This is the contract document used by US-004+ for the UI side.
+- Tests in internal/adminapi/server_test.go (whitebox package adminapi):
+  - TestHandlerAnonymousReturns401 — full Handler() → 401 JSON.
+  - TestClusterStatusShape, TestClusterNodesShape, TestBucketsListShape,
+    TestBucketGetReturns404, TestObjectsListShape, TestBucketsTopShape,
+    TestConsumersTopShape, TestMetricsTimeseriesShape — exercise
+    s.routes() (unexported, bypasses auth) and assert the JSON shape.
+  - TestRouteCoverageMatchesPRD — drives all eight routes through
+    routes() and asserts status + content-type per the PRD AC table.
+- Files changed:
+  - internal/adminapi/server.go (new)
+  - internal/adminapi/types.go (new)
+  - internal/adminapi/cluster.go (new)
+  - internal/adminapi/buckets.go (new)
+  - internal/adminapi/consumers.go (new)
+  - internal/adminapi/metrics.go (new)
+  - internal/adminapi/openapi.yaml (new)
+  - internal/adminapi/server_test.go (new)
+  - cmd/strata-gateway/main.go (import + adminapi.New + buildVersion +
+    mux.Handle for /admin/v1/)
+- Quality checks:
+  - go vet ./... clean
+  - go test ./... clean (adminapi 8 tests pass)
+  - go build ./... clean
+  - cd web && pnpm run typecheck clean
+  - Runtime smoke on :9998 with STRATA_AUTH_MODE=required:
+    /admin/v1/cluster/status anon → 401 application/json
+    /admin/v1/cluster/nodes anon → 401 application/json
+    /admin/v1/buckets/foo anon → 401 application/json
+    /console/ → 200 text/html (regression-clean)
+- **Learnings for future iterations:**
+  - The S3 deny handler s3api.WriteAuthDenied emits an XML
+    <Error>...</Error> body — DO NOT reuse it for /admin/v1/*. Admin
+    endpoints must respond JSON. internal/adminapi/server.go has its
+    own writeAuthDenied that emits {code, message} JSON.
+  - go 1.22+ http.ServeMux method-prefixed patterns
+    (`mux.HandleFunc("GET /admin/v1/cluster/status", ...)`) are
+    sufficient for this layout — no chi/gorilla needed. Path
+    parameters via {bucket} resolve through r.PathValue("bucket")
+    when handlers need them (US-011 will). Specificity ordering on
+    nested routes is automatic — `/buckets/{bucket}/objects` wins over
+    `/buckets/{bucket}` for the longer path.
+  - adminapi auth always uses Mode: ModeRequired regardless of
+    cfg.Auth.Mode. The gateway-global ModeOff is a developer
+    convenience for the S3 API; it MUST NOT relax /admin/v1/* because
+    a future operator could leave a console exposed on staging. The
+    Server constructs its own Middleware internally — pass it the
+    same auth.CredentialsStore the S3 middleware uses, but with mode
+    pinned to required.
+  - Tests should hit s.routes() (unexported) for shape assertions and
+    s.Handler() (auth-wrapped) only for the 401 case. Constructing
+    valid SigV4 from outside package auth is awkward (signing helpers
+    are unexported); skip it — US-004 will wire the cookie path,
+    which is much easier to forge in tests.
+  - buildVersion() in cmd/strata-gateway/main.go reads vcs.revision
+    via runtime/debug.ReadBuildInfo. It returns "" when the binary is
+    built without VCS metadata (e.g. `go run` in a dirty tree),
+    which is why STRATA_VERSION is supported as a manual override.
+    Fall through is "dev". Tests in internal/adminapi pass an
+    explicit version string ("test-sha") to avoid this branch.
+  - When wiring NEW /admin/v1/* sub-routes in later stories, register
+    inside Server.routes() — that's the central place. Adding a new
+    handler only requires a route line + a method on Server. No
+    further wiring in main.go.
+---

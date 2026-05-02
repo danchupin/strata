@@ -1,0 +1,361 @@
+openapi: 3.1.0
+info:
+  title: Strata Admin API
+  version: "1.0.0"
+  description: |
+    JSON HTTP contract between the embedded Strata operator console and the
+    gateway. Phase 1 (US-003 .. US-012) defines the read-only surface; Phase 2
+    introduces write actions under a separate /admin/v1/* extension. Versioned
+    via the path prefix — breaking changes ship under /admin/v2/*.
+  contact:
+    name: Strata
+servers:
+  - url: /admin/v1
+    description: Versioned admin namespace on the gateway port
+
+components:
+  securitySchemes:
+    sigv4:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: AWS SigV4 (`AWS4-HMAC-SHA256 Credential=...`).
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: strata_session
+      description: |
+        24h JWT issued by `POST /admin/v1/auth/login` (US-004). HS256 signed
+        with the per-deployment `STRATA_CONSOLE_JWT_SECRET`.
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+
+    ClusterStatus:
+      type: object
+      required: [status, version, started_at]
+      properties:
+        status: { type: string, enum: [ok, healthy, degraded, unhealthy] }
+        version: { type: string, description: "Git SHA + tag of the running build" }
+        started_at: { type: integer, format: int64, description: "Unix epoch (seconds)" }
+        cluster_name: { type: string }
+        node_count: { type: integer }
+        node_count_healthy: { type: integer }
+        meta_backend: { type: string, enum: [cassandra, tikv, memory] }
+        data_backend: { type: string, enum: [rados, s3, memory] }
+        uptime_sec: { type: integer, format: int64 }
+
+    ClusterNode:
+      type: object
+      required: [id, address, version, started_at, status]
+      properties:
+        id: { type: string }
+        address: { type: string }
+        version: { type: string }
+        started_at: { type: integer, format: int64 }
+        uptime_sec: { type: integer, format: int64 }
+        status: { type: string, enum: [healthy, degraded, unhealthy] }
+        workers: { type: array, items: { type: string } }
+        leader_for: { type: array, items: { type: string } }
+
+    ClusterNodes:
+      type: object
+      required: [nodes]
+      properties:
+        nodes:
+          type: array
+          items: { $ref: '#/components/schemas/ClusterNode' }
+
+    BucketSummary:
+      type: object
+      required: [name, owner]
+      properties:
+        name: { type: string }
+        owner: { type: string }
+        region: { type: string }
+        created_at: { type: integer, format: int64 }
+        size_bytes: { type: integer, format: int64 }
+        object_count: { type: integer, format: int64 }
+
+    BucketsList:
+      type: object
+      required: [buckets, total]
+      properties:
+        buckets:
+          type: array
+          items: { $ref: '#/components/schemas/BucketSummary' }
+        total: { type: integer }
+
+    BucketTop:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        size_bytes: { type: integer, format: int64 }
+        object_count: { type: integer, format: int64 }
+        request_count_24h: { type: integer, format: int64 }
+
+    BucketsTop:
+      type: object
+      required: [buckets]
+      properties:
+        buckets:
+          type: array
+          items: { $ref: '#/components/schemas/BucketTop' }
+
+    ObjectSummary:
+      type: object
+      required: [key]
+      properties:
+        key: { type: string }
+        size: { type: integer, format: int64 }
+        last_modified: { type: integer, format: int64 }
+        etag: { type: string }
+        storage_class: { type: string }
+
+    ObjectsList:
+      type: object
+      required: [objects, common_prefixes, is_truncated]
+      properties:
+        objects:
+          type: array
+          items: { $ref: '#/components/schemas/ObjectSummary' }
+        common_prefixes:
+          type: array
+          items: { type: string }
+        next_marker: { type: string }
+        is_truncated: { type: boolean }
+
+    ConsumerTop:
+      type: object
+      required: [access_key]
+      properties:
+        access_key: { type: string }
+        user: { type: string }
+        request_count_24h: { type: integer, format: int64 }
+        bytes_24h: { type: integer, format: int64 }
+
+    ConsumersTop:
+      type: object
+      required: [consumers]
+      properties:
+        consumers:
+          type: array
+          items: { $ref: '#/components/schemas/ConsumerTop' }
+
+    MetricPoint:
+      type: array
+      minItems: 2
+      maxItems: 2
+      items: { type: number }
+      description: "[epoch_ms, value]"
+
+    MetricSeries:
+      type: object
+      required: [name, points]
+      properties:
+        name: { type: string }
+        points:
+          type: array
+          items: { $ref: '#/components/schemas/MetricPoint' }
+
+    MetricsTimeseries:
+      type: object
+      required: [series]
+      properties:
+        series:
+          type: array
+          items: { $ref: '#/components/schemas/MetricSeries' }
+
+  responses:
+    Unauthorized:
+      description: Authentication missing or invalid.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+security:
+  - sigv4: []
+  - sessionCookie: []
+
+paths:
+  /cluster/status:
+    get:
+      summary: Cluster status hero
+      operationId: getClusterStatus
+      responses:
+        '200':
+          description: Cluster status payload.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClusterStatus' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /cluster/nodes:
+    get:
+      summary: List cluster nodes (heartbeat table)
+      operationId: getClusterNodes
+      responses:
+        '200':
+          description: Nodes list.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClusterNodes' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /buckets:
+    get:
+      summary: List buckets
+      operationId: listBuckets
+      parameters:
+        - name: query
+          in: query
+          schema: { type: string }
+        - name: sort
+          in: query
+          schema: { type: string }
+        - name: order
+          in: query
+          schema: { type: string, enum: [asc, desc] }
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1 }
+        - name: page_size
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+      responses:
+        '200':
+          description: Buckets list.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BucketsList' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /buckets/top:
+    get:
+      summary: Top buckets by size or 24h request count
+      operationId: getBucketsTop
+      parameters:
+        - name: by
+          in: query
+          schema: { type: string, enum: [size, requests] }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 10 }
+      responses:
+        '200':
+          description: Top buckets.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BucketsTop' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /buckets/{bucket}:
+    get:
+      summary: Bucket metadata
+      operationId: getBucket
+      parameters:
+        - name: bucket
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Bucket details.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BucketSummary' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /buckets/{bucket}/objects:
+    get:
+      summary: List bucket objects (read-only browser)
+      operationId: listObjects
+      parameters:
+        - name: bucket
+          in: path
+          required: true
+          schema: { type: string }
+        - name: prefix
+          in: query
+          schema: { type: string }
+        - name: marker
+          in: query
+          schema: { type: string }
+        - name: delimiter
+          in: query
+          schema: { type: string }
+        - name: page_size
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000 }
+      responses:
+        '200':
+          description: Objects list.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ObjectsList' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /consumers/top:
+    get:
+      summary: Top consumers by 24h requests or bytes
+      operationId: getConsumersTop
+      parameters:
+        - name: by
+          in: query
+          schema: { type: string, enum: [requests, bytes] }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 10 }
+      responses:
+        '200':
+          description: Top consumers.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConsumersTop' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /metrics/timeseries:
+    get:
+      summary: Cluster metrics timeseries (Prometheus-backed)
+      operationId: getMetricsTimeseries
+      parameters:
+        - name: metric
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [request_rate, latency_p50, latency_p95, latency_p99, error_rate, bytes_in, bytes_out]
+        - name: range
+          in: query
+          required: true
+          schema: { type: string, description: "Duration string e.g. 15m, 1h, 6h, 24h, 7d" }
+        - name: step
+          in: query
+          schema: { type: string, description: "Resolution step e.g. 15s, 1m, 5m" }
+      responses:
+        '200':
+          description: Timeseries.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MetricsTimeseries' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
