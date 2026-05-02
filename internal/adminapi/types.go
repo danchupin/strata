@@ -86,7 +86,8 @@ type ConsumerTop struct {
 }
 
 type MetricsTimeseriesResponse struct {
-	Series []MetricSeries `json:"series"`
+	Series           []MetricSeries `json:"series"`
+	MetricsAvailable bool           `json:"metrics_available"`
 }
 
 type MetricSeries struct {

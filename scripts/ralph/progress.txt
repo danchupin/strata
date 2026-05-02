@@ -250,6 +250,65 @@ Cycle: ralph/web-ui-foundation
 - vite/client types live in web/src/vite-env.d.ts (`/// <reference types="vite/client" />`).
   Without it `import.meta.env` doesn't resolve in tsc. Required as soon
   as any source file reads `import.meta.env.DEV`.
+- Metrics dashboard contract (US-009): GET /admin/v1/metrics/timeseries
+  takes (metric, range, step?). Supported metric values:
+  request_rate, latency_p50, latency_p95, latency_p99, error_rate,
+  bytes_in, bytes_out. Each call returns ONE MetricSeries (server names
+  it after the public alias — 'p50', 'p95', 'p99' for the three
+  latency variants — so the React layer can layer them in one chart by
+  calling the endpoint three times). Range parser supports
+  time.ParseDuration plus a 'd' suffix (stdlib doesn't accept '7d', so
+  parseDurationParam shims '7d'→'168h'). Default step per range:
+  15m→30s, 1h→1m, 6h→5m, 24h→15m, 7d→1h. Same metrics_available bool
+  contract as buckets/top + consumers/top: 200 + {series:[],
+  metrics_available:false} when STRATA_PROMETHEUS_URL is unset OR
+  upstream non-2xx — UI then renders the "Metrics unavailable —
+  set STRATA_PROMETHEUS_URL" inline message.
+- PromQL window placeholder pattern: metricSpecs entries hold the
+  expression with a __WINDOW__ literal that is replaced at request
+  time with promDurationString(step*4). step*4 keeps the rate window
+  wider than the step so adjacent points share at least one full
+  scrape — avoids flatlining when the step is very fine. The
+  formatter promDurationString picks the largest whole-unit
+  representation (h/m/s) so PromQL sees "1m" not "60s" — purely
+  cosmetic for query logs but easier to debug.
+- Lazy-loaded routes pattern: heavy chart libraries (recharts ~110 KiB
+  gzipped) live behind React.lazy + Suspense in App.tsx. The Metrics
+  route imports `lazy(() => import('@/pages/Metrics').then((m) =>
+  ({ default: m.MetricsPage })))` so the recharts chunk is loaded
+  only on /metrics navigation. Initial home-page bundle stays under
+  the 250 KiB raw / 120 KiB gzipped headroom budget. Apply the same
+  pattern for any future heavy page (object browser hex-viewer,
+  trace UI, etc.).
+- Per-range refetchInterval: useTimeseries hook overrides the global
+  5_000 ms default with a per-range value (5s for ≤6h, 30s for 24h,
+  5min for 7d). Set staleTime = refetchInterval/2 so a tab switch
+  triggers a refresh roughly halfway through the visible period.
+- recharts patterns: ResponsiveContainer wraps every chart inside a
+  fixed-height div (h-56). XAxis dataKey='ts' type='number'
+  scale='time' domain=['dataMin','dataMax'] formatter picks
+  human-friendly tick labels per range (HH:MM:SS for ≤1h,
+  HH:MM for 6h/24h, MMM DD for 7d). YAxis tickFormatter does the
+  unit conversion (formatBytes scales to KiB/MiB/GiB; formatPercent
+  multiplies by 100; formatSeconds picks µs/ms/s). Always pass
+  isAnimationActive={false} to recharts series — animation flickers on
+  every refetch and is distracting on a polling dashboard.
+- mergePoints helper: layered charts (latency, bytes) merge multiple
+  per-metric responses into a single ChartPoint[] keyed by ts so
+  recharts can render them as overlaid Lines on the same X axis.
+  Because each query returns its own series, the React side keys the
+  resulting row by the caller-supplied 'key' (p50/p95/p99 etc.) —
+  the server's series.name is informational.
+- Metric counter coverage today: gateway emits
+  strata_http_requests_total{method,code} +
+  strata_http_request_duration_seconds (histogram). request_rate +
+  latency + error_rate widgets work today. bytes_in/bytes_out widgets
+  query strata_http_bytes_in_total / strata_http_bytes_out_total
+  which are NOT yet emitted (Phase 2 work tracked alongside the
+  bucket/access_key labels). Querying a missing metric returns an
+  empty matrix → empty chart with metrics_available=true. That's
+  intentional — empty-but-available is "no traffic", different from
+  "we don't know".
 
 ## 2026-05-02 - US-007
 - Top Buckets + Top Consumers widgets wired end-to-end on the home page,
@@ -1181,3 +1240,148 @@ Cycle: ralph/web-ui-foundation
     mutations and invalidateQueries see the same key as the original
     useQuery.
 ---
+
+## 2026-05-02 - US-009
+- Cluster metrics dashboard wired end-to-end: 4 charts (request rate,
+  latency p50/p95/p99 layered, error rate, bytes in/out layered) on
+  /console/metrics with a 15m/1h/6h/24h/7d segmented range picker and
+  per-range refetchInterval. recharts 2.15 added (lazy-loaded so the
+  recharts chunk only ships when an operator visits /metrics).
+- Go side:
+  - internal/adminapi/metrics.go fleshed out: metricSpecs map keyed by
+    public metric name → PromQL expression with __WINDOW__ token
+    replaced by promDurationString(step*4) at request time. Supported
+    metrics: request_rate, latency_p50, latency_p95, latency_p99,
+    error_rate, bytes_in, bytes_out. Range parser
+    parseDurationParam supports time.ParseDuration plus a 'd' suffix
+    shim for 7d (stdlib rejects 'd'). Default step per range
+    (rangeStepDefaults): 15m→30s, 1h→1m, 6h→5m, 24h→15m, 7d→1h.
+    Endpoint calls promclient.QueryRange and projects the result into
+    {series:[{name, points:[[epoch_ms,value]]}], metrics_available}.
+    Degrades gracefully: 200 + empty + metrics_available=false when
+    STRATA_PROMETHEUS_URL is unset OR upstream non-2xx (matches the
+    buckets/top + consumers/top widget contract). Bad metric → 400
+    with the supported list. Bad/missing range → 400. Bad step → 400.
+  - internal/adminapi/types.go: MetricsTimeseriesResponse gained
+    MetricsAvailable bool (json: metrics_available).
+  - internal/adminapi/openapi.yaml: MetricsTimeseries schema gained
+    metrics_available (required) with description.
+  - internal/adminapi/metrics_test.go (12 new tests): require-metric,
+    unknown-metric (asserts the 400 body lists supported metrics),
+    require-range, bad-range, bad-step, without-prom returns
+    metrics_available=false + non-nil empty series, with-prom
+    request_rate (asserts expr contains rate(strata_http_requests_total[)
+    + 6 points + epoch-ms conversion + 2.5 → 2.5), with-prom
+    latency_p95 (asserts histogram_quantile(0.95...) + _bucket +
+    series.name='p95'), with-prom error_rate (asserts code=~"5..)
+    pattern), upstream 500 → 200 + metrics_available=false (graceful
+    degradation), 7d+step=1h → step query param = "3600", 24h
+    default step → "900" (15min), parseDurationParam("7d") = 168h,
+    URL-escape roundtrip sanity check on the PromQL with code=~"5.."
+    pattern.
+  - internal/adminapi/server_test.go: TestMetricsTimeseriesShape now
+    passes ?metric=request_rate&range=15m and asserts
+    metrics_available=false; TestRouteCoverageMatchesPRD path bumped
+    to include the same params.
+- React side:
+  - web/src/pages/Metrics.tsx rewritten end-to-end. RangePicker
+    segmented control → useState<RangeKey>('1h'). useTimeseries hook
+    wraps useQuery with the canonical queryKeys.metrics.timeseries
+    key + per-range refetchInterval (5s for ≤6h, 30s for 24h, 5min
+    for 7d) + staleTime=refetchInterval/2 + meta:{label:`metrics ${m}`}
+    so the global toast surfaces transient failures.
+  - 4 chart cards in a 2×2 grid (xl:grid-cols-2):
+    RequestRateChart (AreaChart, blue gradient), LatencyChart
+    (LineChart layering p50/p95/p99 — green/amber/red), ErrorRateChart
+    (AreaChart in red, % formatted), BytesChart (LineChart layering
+    bytes_in/bytes_out, KiB/MiB/GiB-scaled). Layered charts call
+    useTimeseries 3× (latency) or 2× (bytes) and run mergePoints to
+    fold per-metric responses into a ChartPoint[] keyed by ts so
+    recharts renders them on the same X axis.
+  - MetricsUnavailable banner appears inside each chart when
+    q.data.metrics_available=false (after first response). Skeleton
+    placeholder before first response. "No data in this window" empty
+    state when prom is reachable but the query returned nothing.
+  - Lazy-route: web/src/App.tsx now imports MetricsPage via
+    React.lazy + Suspense fallback (Skeleton). recharts chunk
+    (~110 KiB gzipped) ships only on /metrics navigation; home-page
+    initial bundle stays small.
+- Files changed:
+  - internal/adminapi/{metrics.go (rewrite), types.go (+MetricsAvailable),
+    openapi.yaml (+metrics_available on MetricsTimeseries schema),
+    metrics_test.go (new — 12 tests),
+    server_test.go (require params on metrics shape + route coverage)}
+  - web/package.json + web/pnpm-lock.yaml (recharts 2.15.0)
+  - web/src/pages/Metrics.tsx (rewrite)
+  - web/src/App.tsx (lazy-load Metrics route)
+- Quality checks:
+  - go vet ./... clean
+  - go test ./... clean (adminapi: 41 [29 prior + 12 new])
+  - go build ./... clean
+  - cd web && pnpm typecheck clean
+  - cd web && pnpm build clean
+  - Bundle: dist/index 116.4 KiB gzipped JS (was 115.8 KiB at US-008;
+    +0.6 KiB for the lazy-route wiring); dist/Metrics 109.6 KiB
+    gzipped JS (loaded on demand). CSS 6.5 KiB gzipped unchanged.
+    Per-page initial under the ≤500 KiB budget.
+  - Runtime smoke on :9988 with mock Prom on :9991 (matrix stub
+    returning 6 points per query, expression-aware values for each
+    metric). With prom: every supported metric returns 6-point
+    series + metrics_available=true. Negative paths: bad metric=cpu
+    → 400 'unknown metric "cpu"; supported: bytes_in, bytes_out,
+    error_rate, latency_p50, latency_p95, latency_p99,
+    request_rate'; missing range → 400 'range is required';
+    bad range=banana → 400 'invalid range'; anonymous → 401.
+    Without STRATA_PROMETHEUS_URL: /metrics/timeseries?metric=
+    request_rate&range=1h → 200 {series:[], metrics_available:false}.
+    /console/ + SPA-fallback /console/metrics → 200 (regression-clean).
+- Browser MCP unavailable this iteration; full Playwright run
+  scheduled for US-012 (login → metrics dashboard renders 4 charts
+  with axis labels + at least one data point → range switch fires
+  request with the new range param).
+- **Learnings for future iterations:**
+  - PromQL rejects "7d" as a range literal in some versions, but
+    accepts "7d" as a query duration arg. The handler does its
+    OWN parseDurationParam (with 'd' shim) so the user-facing range
+    param matches the spec wording, then converts to a Prometheus-
+    safe step using promDurationString.
+  - histogram_quantile inside `sum by (le) (rate(...[W]))` is the
+    standard pattern. Without the `sum by (le)` wrapper, the
+    quantile is computed per-series-set which yields nonsense
+    when the histogram is fanned across multiple labels (method).
+  - error_rate via `sum(rate(...{code=~"5.."})) / clamp_min(sum(rate(...)),1)`
+    avoids divide-by-zero when there's no traffic in the window.
+    Returns 0 instead of NaN. recharts will silently drop NaN
+    points but the JSON shape becomes ugly (NaN is not valid
+    JSON; encoders emit "null" or fail) — the clamp_min guard
+    is load-bearing.
+  - Lazy-loading via React.lazy + Suspense at the route level
+    cuts the home-page bundle by the size of recharts. Don't
+    code-split inside a single page (e.g. lazy-loading a chart
+    component) — Suspense boundaries are easier to reason about
+    at the route boundary.
+  - rangeOptions is exported via lookup-by-key so the component
+    only stores the string key in state. This keeps the URL-
+    serialisable shape simple for a future "remember last range"
+    feature without rewriting the state machine.
+  - mergePoints folds multiple responses by timestamp into a
+    single ChartPoint[]. Recharts renders gaps when a series
+    is missing a value at a given ts — connectNulls=true on
+    the Line series eliminates the visual gap (we want a
+    continuous line even if p99 is missing one tick).
+  - Step query param is encoded as plain seconds by promclient
+    (e.g. "900" not "15m"); the step query string format is
+    flexible upstream, but tests should match what the client
+    actually sends. capturedStep="900" not "15m" in tests.
+  - Tests that capture upstream Prom calls should use a
+    non-greedy match strategy: assert on substring presence
+    (Contains "rate(strata_http_requests_total[") rather than
+    full equality — the rate window changes with step which
+    changes with range, so equality is too brittle.
+  - Recharts isAnimationActive=false everywhere on a polling
+    dashboard. Default animation is jarring when each refetch
+    re-animates from 0.
+  - recharts Type=number + scale=time + domain=['dataMin',
+    'dataMax'] gives accurate time-spaced X axis when data
+    points are not evenly spaced — without it recharts spaces
+    them by index.

@@ -178,11 +178,18 @@ components:
 
     MetricsTimeseries:
       type: object
-      required: [series]
+      required: [series, metrics_available]
       properties:
         series:
           type: array
           items: { $ref: '#/components/schemas/MetricSeries' }
+        metrics_available:
+          type: boolean
+          description: |
+            False when STRATA_PROMETHEUS_URL is unset or the upstream PromQL
+            query failed. The UI then renders a "Metrics unavailable —
+            set STRATA_PROMETHEUS_URL" inline message instead of empty
+            charts.
 
     LoginRequest:
       type: object

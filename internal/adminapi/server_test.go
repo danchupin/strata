@@ -282,7 +282,7 @@ func TestConsumersTopShape(t *testing.T) {
 func TestMetricsTimeseriesShape(t *testing.T) {
 	s := newTestServer()
 	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/admin/v1/metrics/timeseries", nil)
+	req := httptest.NewRequest(http.MethodGet, "/admin/v1/metrics/timeseries?metric=request_rate&range=15m", nil)
 	s.routes().ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
@@ -294,6 +294,9 @@ func TestMetricsTimeseriesShape(t *testing.T) {
 	}
 	if got.Series == nil {
 		t.Error("series field nil")
+	}
+	if got.MetricsAvailable {
+		t.Error("metrics_available: want false (no Prom configured)")
 	}
 }
 
@@ -310,7 +313,7 @@ func TestRouteCoverageMatchesPRD(t *testing.T) {
 		{"/admin/v1/buckets/foo", http.StatusNotFound},
 		{"/admin/v1/buckets/foo/objects", http.StatusOK},
 		{"/admin/v1/consumers/top", http.StatusOK},
-		{"/admin/v1/metrics/timeseries", http.StatusOK},
+		{"/admin/v1/metrics/timeseries?metric=request_rate&range=15m", http.StatusOK},
 	}
 	for _, tc := range cases {
 		rr := httptest.NewRecorder()
