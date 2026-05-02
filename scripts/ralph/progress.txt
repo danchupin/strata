@@ -98,6 +98,27 @@ Cycle: ralph/web-ui-foundation
 - Stdlib JWT (HS256): crypto/hmac + sha256 + base64.RawURLEncoding for
   compact serialization; hmac.Equal for constant-time signature compare.
   ~200 lines — skip jwt-go / golang-jwt and the CVE chase.
+- meta.Store ListObjects NextMarker is exclusive: marker comparison uses
+  `k <= opts.Marker` (skips up to AND INCLUDING the marker), but
+  res.NextMarker is set to the FIRST UNRETURNED key. Resuming pagination
+  with `marker=NextMarker` therefore SKIPS that key. Tests should assert
+  "first key strictly greater than marker" rather than "first key equals
+  NextMarker". Same shape across cassandra and tikv backends.
+- go 1.22+ method-prefixed mux patterns expose path values via
+  `r.PathValue("name")` for `GET /admin/v1/buckets/{name}` style routes.
+  No third-party router needed — adminapi already uses the stdlib mux.
+- For browser-side URL state (folder navigation, current prefix), use
+  `useSearchParams` from react-router-dom v6 — read with
+  `searchParams.get('prefix')`, write with `setSearchParams({prefix:...})`
+  or `setSearchParams({})` to clear. Triggers a navigation so dependent
+  pagination state should reset via `useEffect` on the prefix.
+- Sheet object-detail pattern: control open via `open=Boolean(state)` +
+  `onOpenChange={(open) => !open && onClose()}`. Trigger is a regular
+  table-row button with onClick=setSelected(row). Skip <SheetTrigger> when
+  state-controlled.
+- Phase 1 stub fields: object_lock on BucketDetail is hard-coded false
+  because meta.Bucket has no ObjectLock field today. Don't add the
+  metadata column until Phase 2 — note it in PRD notes and move on.
 - Cookie Secure flag: conditional on r.TLS != nil OR X-Forwarded-Proto=https.
   Unconditional Secure blocks dev over plain HTTP because browsers refuse
   to set Secure cookies on insecure origins. Production gateways behind
@@ -1504,4 +1525,70 @@ Cycle: ralph/web-ui-foundation
     (queryClient.invalidateQueries({queryKey:['buckets','list']})) —
     not just the current page key — so pages outside the current
     view refresh too.
+---
+
+## 2026-05-02 - US-011 - Bucket detail page (read-only object browser)
+
+- Implemented BucketDetail Go endpoint + read-only object browser:
+  - internal/adminapi/buckets.go handleBucketGet → meta.Store.GetBucket;
+    404 NoSuchBucket on miss; otherwise BucketDetail{name, owner, region,
+    created_at, versioning, object_lock=false (Phase 1 stub), size_bytes,
+    object_count} with size/count from bounded ListObjects walk.
+  - versioningLabel() maps meta-store enum (Disabled|Enabled|Suspended) to
+    operator-facing label (Off|Enabled|Suspended).
+  - handleObjectsList parses prefix/marker/delimiter (default '/')/page_size
+    (default 100, max 1000); calls Meta.ListObjects; maps res.Objects to
+    ObjectSummary; passes through CommonPrefixes/NextMarker/Truncated.
+  - 404 NoSuchBucket when bucket missing — was 200 stub before this story.
+- React side:
+  - web/src/api/client.ts BucketDetail: versioning + object_lock + size_bytes
+    + object_count are now required (were optional during the stub era).
+  - new web/src/pages/BucketDetail.tsx: header + breadcrumbs + filter +
+    table with folder/file icons + Sheet object-detail panel with disabled
+    Download/Delete (Phase 2). useSearchParams ?prefix= for URL persistence;
+    markerStack[] continuation pagination; debounce 300ms on filter; folder
+    clicks navigate, file clicks open Sheet.
+  - App.tsx: new /buckets/:name route nested under RequireAuth + AppShell.
+- types.go gained BucketDetail struct.
+- OpenAPI 3.1 spec: new BucketDetail schema; /buckets/{bucket} now references
+  it; /buckets/{bucket}/objects gained 404 + default delimiter='/' + default
+  page_size=100.
+- Tests: bucket_detail_test.go (7 new); TestObjectsListShape +
+  TestRouteCoverageMatchesPRD updated to seed buckets since the handler now
+  requires bucket existence.
+- Files changed:
+  - internal/adminapi/buckets.go (handlers + errors import)
+  - internal/adminapi/types.go (BucketDetail)
+  - internal/adminapi/openapi.yaml (BucketDetail + /buckets/{bucket}/objects)
+  - internal/adminapi/server_test.go (seed data for stubs that now require it)
+  - internal/adminapi/bucket_detail_test.go (new, 7 tests)
+  - web/src/api/client.ts (BucketDetail tightened)
+  - web/src/pages/BucketDetail.tsx (new)
+  - web/src/App.tsx (route)
+  - scripts/ralph/prd.json (passes:true + notes)
+- **Learnings for future iterations:**
+  - Memory store NextMarker semantics: marker is exclusive (`k <= opts.Marker`
+    skips), but res.NextMarker is set to the FIRST UNRETURNED key. Resuming
+    with `marker=NextMarker` therefore SKIPS that key — cassandra and tikv
+    likely walk the same way. Tests must assert "first key strictly greater
+    than the prior marker" rather than "first key equal to NextMarker".
+  - Path params: go 1.22+ ServeMux exposes `r.PathValue("bucket")` for
+    `/admin/v1/buckets/{bucket}` patterns. No third-party router needed.
+  - Existing 200-stub tests have to be revisited as stories fill them in.
+    handleObjectsList went from "always 200 with empty arrays" to
+    "404 when bucket missing"; TestObjectsListShape +
+    TestRouteCoverageMatchesPRD broke until the bucket was seeded.
+  - bucket-level ObjectLock state is not on meta.Bucket today. Phase 1 hard-
+    codes object_lock=false in BucketDetail; if/when Phase 2 adds the field,
+    update versioningLabel-style mapping in handleBucketGet.
+  - Empty `delimiter=` query is meaningful (flat listing) — don't collapse
+    empty/missing into the same default. Use `q.Has("delimiter")` to
+    distinguish the explicit-empty case from the absent case.
+  - Sheet object-detail panel pattern: open=Boolean(state), onOpenChange
+    closes via setState(null). Trigger is a regular button with onClick.
+    No SheetTrigger required when controlling open via state.
+  - useSearchParams from react-router-dom v6: read with
+    searchParams.get('prefix'); write with setSearchParams({prefix: next})
+    or setSearchParams({}) to clear. Triggers a navigation, so pagination
+    state should reset via useEffect on prefix change.
 ---

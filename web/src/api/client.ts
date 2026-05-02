@@ -72,15 +72,17 @@ export async function fetchBucketsList(params: {
   return { buckets: body.buckets ?? [], total: body.total ?? 0 };
 }
 
+export type BucketVersioning = 'Enabled' | 'Suspended' | 'Off';
+
 export interface BucketDetail {
   name: string;
   owner: string;
   region: string;
   created_at: number;
-  versioning?: 'Enabled' | 'Suspended' | 'Off' | string;
-  object_lock?: boolean;
-  size_bytes?: number;
-  object_count?: number;
+  versioning: BucketVersioning;
+  object_lock: boolean;
+  size_bytes: number;
+  object_count: number;
 }
 
 export async function fetchBucket(name: string): Promise<BucketDetail> {

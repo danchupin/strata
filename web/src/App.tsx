@@ -7,6 +7,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { LoginPage } from '@/pages/Login';
 import { OverviewPage } from '@/pages/Overview';
 import { BucketsPage } from '@/pages/Buckets';
+import { BucketDetailPage } from '@/pages/BucketDetail';
 import { ConsumersPage } from '@/pages/Consumers';
 import { SettingsPage } from '@/pages/Settings';
 
@@ -38,6 +39,7 @@ export function App() {
       >
         <Route path="/" element={<OverviewPage />} />
         <Route path="/buckets" element={<BucketsPage />} />
+        <Route path="/buckets/:name" element={<BucketDetailPage />} />
         <Route path="/consumers" element={<ConsumersPage />} />
         <Route
           path="/metrics"

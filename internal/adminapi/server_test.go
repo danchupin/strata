@@ -225,6 +225,9 @@ func TestBucketGetReturns404(t *testing.T) {
 
 func TestObjectsListShape(t *testing.T) {
 	s := newTestServer()
+	if _, err := s.Meta.CreateBucket(context.Background(), "anything", "owner", "STANDARD"); err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/admin/v1/buckets/anything/objects", nil)
 	s.routes().ServeHTTP(rr, req)
@@ -303,6 +306,9 @@ func TestMetricsTimeseriesShape(t *testing.T) {
 
 func TestRouteCoverageMatchesPRD(t *testing.T) {
 	s := newTestServer()
+	if _, err := s.Meta.CreateBucket(context.Background(), "bar", "owner", "STANDARD"); err != nil {
+		t.Fatalf("seed bucket: %v", err)
+	}
 	cases := []struct {
 		path string
 		want int
@@ -312,7 +318,8 @@ func TestRouteCoverageMatchesPRD(t *testing.T) {
 		{"/admin/v1/buckets", http.StatusOK},
 		{"/admin/v1/buckets/top", http.StatusOK},
 		{"/admin/v1/buckets/foo", http.StatusNotFound},
-		{"/admin/v1/buckets/foo/objects", http.StatusOK},
+		{"/admin/v1/buckets/bar", http.StatusOK},
+		{"/admin/v1/buckets/bar/objects", http.StatusOK},
 		{"/admin/v1/consumers/top", http.StatusOK},
 		{"/admin/v1/metrics/timeseries?metric=request_rate&range=15m", http.StatusOK},
 	}

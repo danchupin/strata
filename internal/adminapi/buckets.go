@@ -2,6 +2,7 @@ package adminapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"sort"
 	"strconv"
@@ -283,18 +284,124 @@ func (s *Server) handleBucketsTop(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleBucketGet serves GET /admin/v1/buckets/{bucket}. Phase 1 stub —
-// always 404 until US-011 wires the meta.Store lookup.
+// handleBucketGet serves GET /admin/v1/buckets/{bucket} — the bucket detail
+// header (US-011). Looks up the bucket via meta.Store; computes size_bytes
+// and object_count via a bounded ListObjects walk (capped at 50_000 objects,
+// matching the buckets/top widget cost ceiling). Versioning maps the
+// meta-store enum (Disabled|Enabled|Suspended) to the operator-facing label
+// (Off|Enabled|Suspended). Returns 404 NoSuchBucket when missing.
 func (s *Server) handleBucketGet(w http.ResponseWriter, r *http.Request) {
-	writeJSONError(w, http.StatusNotFound, "NoSuchBucket", "bucket not found")
+	name := r.PathValue("bucket")
+	if name == "" {
+		writeJSONError(w, http.StatusBadRequest, "BadRequest", "bucket name is required")
+		return
+	}
+	if s.Meta == nil {
+		writeJSONError(w, http.StatusNotFound, "NoSuchBucket", "bucket not found")
+		return
+	}
+	b, err := s.Meta.GetBucket(r.Context(), name)
+	if err != nil {
+		if errors.Is(err, meta.ErrBucketNotFound) {
+			writeJSONError(w, http.StatusNotFound, "NoSuchBucket", "bucket not found")
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, "Internal", err.Error())
+		return
+	}
+	size, count := bucketSizeAndCount(r.Context(), s.Meta, b)
+	writeJSON(w, http.StatusOK, BucketDetail{
+		Name:        b.Name,
+		Owner:       b.Owner,
+		Region:      s.Region,
+		CreatedAt:   b.CreatedAt.Unix(),
+		Versioning:  versioningLabel(b.Versioning),
+		ObjectLock:  false,
+		SizeBytes:   size,
+		ObjectCount: count,
+	})
 }
 
-// handleObjectsList serves GET /admin/v1/buckets/{bucket}/objects. Phase 1 stub.
+// versioningLabel maps the meta.Versioning* enum to the operator-facing
+// label the React badge renders. Anything unrecognised returns the raw
+// value so future states surface verbatim instead of being silently masked.
+func versioningLabel(state string) string {
+	switch state {
+	case meta.VersioningDisabled, "":
+		return "Off"
+	case meta.VersioningEnabled:
+		return "Enabled"
+	case meta.VersioningSuspended:
+		return "Suspended"
+	default:
+		return state
+	}
+}
+
+// handleObjectsList serves GET /admin/v1/buckets/{bucket}/objects — the
+// read-only object browser (US-011). Query params: prefix (folder filter),
+// marker (continuation token), delimiter (default '/' so the browser sees
+// folders; pass an empty string to get a flat listing), page_size (1..1000,
+// default 100). Returns 404 when the bucket is missing.
 func (s *Server) handleObjectsList(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, ObjectsListResponse{
-		Objects:        []ObjectSummary{},
-		CommonPrefixes: []string{},
+	name := r.PathValue("bucket")
+	if name == "" {
+		writeJSONError(w, http.StatusBadRequest, "BadRequest", "bucket name is required")
+		return
+	}
+	q := r.URL.Query()
+	prefix := q.Get("prefix")
+	marker := q.Get("marker")
+	delimiter := "/"
+	if q.Has("delimiter") {
+		// Empty string is a meaningful value here — flat listing without
+		// folder collapsing — so honour an explicit delimiter= query param
+		// and only fall back to "/" when the param is absent.
+		delimiter = q.Get("delimiter")
+	}
+	pageSize := parseRange(q.Get("page_size"), 100, 1, 1000)
+	if s.Meta == nil {
+		writeJSONError(w, http.StatusNotFound, "NoSuchBucket", "bucket not found")
+		return
+	}
+	b, err := s.Meta.GetBucket(r.Context(), name)
+	if err != nil {
+		if errors.Is(err, meta.ErrBucketNotFound) {
+			writeJSONError(w, http.StatusNotFound, "NoSuchBucket", "bucket not found")
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, "Internal", err.Error())
+		return
+	}
+	res, err := s.Meta.ListObjects(r.Context(), b.ID, meta.ListOptions{
+		Prefix:    prefix,
+		Delimiter: delimiter,
+		Marker:    marker,
+		Limit:     pageSize,
 	})
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "Internal", err.Error())
+		return
+	}
+	out := ObjectsListResponse{
+		Objects:        make([]ObjectSummary, 0, len(res.Objects)),
+		CommonPrefixes: append([]string{}, res.CommonPrefixes...),
+		NextMarker:     res.NextMarker,
+		IsTruncated:    res.Truncated,
+	}
+	if out.CommonPrefixes == nil {
+		out.CommonPrefixes = []string{}
+	}
+	for _, o := range res.Objects {
+		out.Objects = append(out.Objects, ObjectSummary{
+			Key:          o.Key,
+			Size:         o.Size,
+			LastModified: o.Mtime.Unix(),
+			ETag:         o.ETag,
+			StorageClass: o.StorageClass,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // bucketSizeAndCount walks ListObjects in pages and sums size + object count.

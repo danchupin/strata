@@ -91,6 +91,29 @@ components:
           items: { $ref: '#/components/schemas/BucketSummary' }
         total: { type: integer }
 
+    BucketDetail:
+      type: object
+      required: [name, owner, region, created_at, versioning, object_lock, size_bytes, object_count]
+      properties:
+        name: { type: string }
+        owner: { type: string }
+        region: { type: string }
+        created_at: { type: integer, format: int64 }
+        versioning:
+          type: string
+          enum: [Enabled, Suspended, Off]
+          description: |
+            Operator-facing label. Maps the meta-store enum
+            (Disabled|Enabled|Suspended) to (Off|Enabled|Suspended).
+        object_lock:
+          type: boolean
+          description: |
+            True when bucket-level object lock is on. Phase 1 always
+            reports false — bucket object-lock state is not persisted on
+            meta.Bucket today; Phase 2 lifts this.
+        size_bytes: { type: integer, format: int64 }
+        object_count: { type: integer, format: int64 }
+
     BucketTop:
       type: object
       required: [name]
@@ -371,8 +394,13 @@ paths:
 
   /buckets/{bucket}:
     get:
-      summary: Bucket metadata
+      summary: Bucket detail (US-011)
       operationId: getBucket
+      description: |
+        Returns bucket metadata + size_bytes + object_count for the bucket
+        detail page header. size_bytes/object_count come from a bounded
+        ListObjects walk (capped at 50_000 objects). Returns 404
+        NoSuchBucket when the bucket is missing.
       parameters:
         - name: bucket
           in: path
@@ -383,7 +411,7 @@ paths:
           description: Bucket details.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/BucketSummary' }
+              schema: { $ref: '#/components/schemas/BucketDetail' }
         '404':
           $ref: '#/components/responses/NotFound'
         '401':
@@ -393,6 +421,13 @@ paths:
     get:
       summary: List bucket objects (read-only browser)
       operationId: listObjects
+      description: |
+        Read-only object browser (US-011). `prefix` filters by key prefix
+        (folder); `marker` is an exclusive continuation cursor returned by
+        the previous page; `delimiter` defaults to `/` so the browser sees
+        folders — pass an empty `delimiter=` to get a flat listing.
+        `page_size` defaults to 100, max 1000. Returns 404 when the bucket
+        is missing.
       parameters:
         - name: bucket
           in: path
@@ -406,16 +441,18 @@ paths:
           schema: { type: string }
         - name: delimiter
           in: query
-          schema: { type: string }
+          schema: { type: string, default: "/" }
         - name: page_size
           in: query
-          schema: { type: integer, minimum: 1, maximum: 1000 }
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
       responses:
         '200':
           description: Objects list.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ObjectsList' }
+        '404':
+          $ref: '#/components/responses/NotFound'
         '401':
           $ref: '#/components/responses/Unauthorized'
 

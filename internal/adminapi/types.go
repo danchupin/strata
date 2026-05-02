@@ -46,6 +46,22 @@ type BucketSummary struct {
 	ObjectCount int64  `json:"object_count"`
 }
 
+// BucketDetail is the response shape for GET /admin/v1/buckets/{bucket}
+// (US-011 bucket detail page). Versioning maps the meta-store enum
+// (Disabled|Enabled|Suspended) to the operator-facing label
+// (Off|Enabled|Suspended). ObjectLock is always false in Phase 1 — bucket
+// object-lock state is not persisted on meta.Bucket today; Phase 2 lifts it.
+type BucketDetail struct {
+	Name        string `json:"name"`
+	Owner       string `json:"owner"`
+	Region      string `json:"region"`
+	CreatedAt   int64  `json:"created_at"`
+	Versioning  string `json:"versioning"`
+	ObjectLock  bool   `json:"object_lock"`
+	SizeBytes   int64  `json:"size_bytes"`
+	ObjectCount int64  `json:"object_count"`
+}
+
 type BucketsTopResponse struct {
 	Buckets          []BucketTop `json:"buckets"`
 	MetricsAvailable bool        `json:"metrics_available"`
