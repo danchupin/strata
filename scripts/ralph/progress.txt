@@ -5,6 +5,22 @@ Cycle: ralph/web-ui-foundation
 
 ## Codebase Patterns
 
+- shadcn/ui pattern: components live under web/src/components/ui/<name>.tsx as
+  SOURCE (not deps). Each component is hand-written / copy-pasted from upstream
+  shadcn-ui CLI output; we own and tweak freely. Path alias '@/*' → 'src/*' is
+  wired in vite.config.ts (resolve.alias) AND tsconfig.app.json (paths).
+  utilities helper is `cn()` in web/src/lib/utils.ts (clsx + tailwind-merge).
+  Color tokens come from CSS variables in web/src/styles/globals.css (`hsl(var(--token))`).
+  When adding new shadcn primitives, install the matching @radix-ui/react-<x>
+  dep and copy the upstream component file — do not pull a wrapper library.
+- Theme system: ThemeProvider context (web/src/components/theme-provider.tsx)
+  stores theme = 'light' | 'dark' | 'system'; resolvedTheme is derived from
+  matchMedia('(prefers-color-scheme: dark)'). Effect adds/removes
+  document.documentElement.classList.dark. Persistence:
+  localStorage['strata.theme']. ThemeToggle dropdown in the top bar uses Sun
+  (light/system) + Moon (dark) icons from lucide-react. To use theme tokens in
+  components: write `bg-background text-foreground` etc. — Tailwind picks up
+  the CSS vars from globals.css.
 - web/ is a NEW source tree at the repo root (sibling of cmd/, internal/, docs/).
   React 18 + Vite 5 + TypeScript 5. Phase 1 stack will add Tailwind 3 + shadcn/ui +
   TanStack Query 5 + recharts 2 + react-router-dom 6 + Playwright 1. Package
@@ -135,4 +151,81 @@ Cycle: ralph/web-ui-foundation
     ~150–250 KiB for them combined. Use route-level React.lazy + Suspense to keep
     the initial paint light (US-005 / US-009 / US-010 / US-011 are good code-split
     boundaries).
+---
+
+## 2026-05-02 - US-002
+- Added Tailwind 3.4.17 + PostCSS + autoprefixer + tailwindcss-animate. Wired
+  PostCSS via web/postcss.config.js, Tailwind config in web/tailwind.config.ts
+  (darkMode: ['class'], content scan src + index.html, font stack system-ui,
+  CSS-variable colour tokens for primary/secondary/destructive/success/warning/
+  muted/accent/popover/card/border/input/ring + radius).
+- Added all 13 baseline shadcn components under web/src/components/ui/: button,
+  card, input, label, tabs, dialog, sheet, dropdown-menu, table, select, toast,
+  skeleton, badge. Each is hand-copied from upstream shadcn-ui CLI output —
+  no wrapper library, no version pin to chase.
+- Added @/* path alias (src/*) in vite.config.ts (resolve.alias via
+  path.resolve(__dirname, 'src')) and tsconfig.app.json (paths). tsconfig.node
+  picked up @types/node so vite.config.ts can use 'node:path' + __dirname.
+- Design tokens in web/src/styles/globals.css: light + dark variants. Primary =
+  hsl(220 90% 56%); destructive = hsl(0 72% 50%); success = hsl(142 71% 40%);
+  warning = hsl(38 92% 50%). Imported once from main.tsx.
+- ThemeProvider (web/src/components/theme-provider.tsx) and ThemeToggle
+  (web/src/components/theme-toggle.tsx) drive Light/Dark/System.
+  System mode tracks matchMedia('(prefers-color-scheme: dark)') and reacts to
+  changes. Persists to localStorage['strata.theme']. main.tsx wraps App with
+  <ThemeProvider>.
+- App.tsx now renders a top bar with the 'Strata Console' wordmark + Phase 1
+  badge (placeholder, no logo per spec) and the ThemeToggle, plus a Card
+  describing Phase 1.
+- Files changed:
+  - web/package.json + web/pnpm-lock.yaml
+  - web/postcss.config.js (new)
+  - web/tailwind.config.ts (new)
+  - web/vite.config.ts (alias)
+  - web/tsconfig.app.json + web/tsconfig.node.json (alias + node types)
+  - web/src/styles/globals.css (new)
+  - web/src/lib/utils.ts (new)
+  - web/src/components/ui/{button,card,input,label,tabs,dialog,sheet,
+    dropdown-menu,table,select,toast,skeleton,badge}.tsx (new)
+  - web/src/components/theme-provider.tsx + theme-toggle.tsx (new)
+  - web/src/App.tsx + web/src/main.tsx
+- Quality checks:
+  - pnpm run typecheck — clean
+  - pnpm run build — 250 KiB raw / 81 KiB gzipped JS + 27 KiB raw / 5.5 KiB
+    gzipped CSS (target ≤500 KiB total ✅)
+  - go vet ./... — clean
+  - go test ./... — all pass
+  - Runtime curl: /console/ 200 (415 B), /console/assets/index-*.js 200 (250 KiB),
+    /console/buckets/foo SPA fallback 200.
+- Browser verification: no browser MCP available in this iteration. Playwright
+  snapshot pair (light + dark) is scheduled for US-012. Manual smoke: open
+  http://localhost:9999/console/ after `make run-memory`, click the theme
+  toggle in the top right; verify <html class='dark'> flips on/off and tokens
+  re-render.
+- **Learnings for future iterations:**
+  - shadcn CLI is interactive (prompts for components.json). Skip the CLI —
+    copy components directly from the canonical shadcn-ui repo. Lock-step
+    install the matching @radix-ui/react-<x> dep when adding a new primitive
+    (Tabs → react-tabs, Dialog → react-dialog, DropdownMenu → react-dropdown-
+    menu, Select → react-select, Toast → react-toast, Label → react-label;
+    Sheet reuses react-dialog).
+  - Sheet is shadcn-speak for a slide-out drawer built on @radix-ui/react-dialog
+    — there is NO @radix-ui/react-sheet. Don't try to install it.
+  - `@/lib/utils` is the conventional shadcn import path for the cn() helper.
+    Configure path alias in BOTH vite.config.ts (runtime) AND tsconfig.app.json
+    (typecheck) — missing one of the two breaks either dev server or tsc.
+  - Color tokens are CSS variables consumed via `hsl(var(--token))` in the
+    Tailwind config. Components write `bg-background text-foreground bg-primary`
+    etc. — never hard-code hsl(...) in component className. New tokens go in
+    globals.css under both `:root` and `.dark` blocks AND in tailwind.config.ts
+    `theme.extend.colors`.
+  - `text-2xl` etc. typography scale already ships with Tailwind defaults —
+    don't redefine fontSize unless the spec deviates from Tailwind's scale (it
+    doesn't here).
+  - tailwindcss-animate is needed for Radix data-state animations (in/out, fade,
+    zoom, slide). Without it the dialog/sheet/dropdown look broken.
+  - Bundle grew 46 → 81 KiB gzipped after this story. Headroom to 500 KiB is
+    ~420 KiB; recharts + TanStack Query + react-router + react-router-dom add
+    roughly 100–150 KiB combined. Route-level React.lazy boundaries become
+    important from US-009 onwards.
 ---

@@ -41,8 +41,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented this iteration. Tailwind 3.4.17 + PostCSS 8.4 + autoprefixer 10.4 + tailwindcss-animate 1.0.7. Path alias '@/*' wired in vite.config.ts + tsconfig.app.json. Design tokens light+dark in web/src/styles/globals.css (primary 220 90% 56%, destructive 0 72% 50%, success 142 71% 40%, warning 38 92% 50%). All 13 baseline shadcn components copied as source under web/src/components/ui/ (Button, Card, Input, Label, Tabs, Dialog, Sheet, DropdownMenu, Table, Select, Toast, Skeleton, Badge). ThemeProvider in web/src/components/theme-provider.tsx (Light/Dark/System, system tracks prefers-color-scheme media query, toggles class='dark' on <html>, persists to localStorage['strata.theme']). ThemeToggle in top bar uses DropdownMenu. Bundle: 81 KiB gzipped JS + 5.5 KiB gzipped CSS (was 46 KiB at US-001; budget ~250 KiB headroom remaining). Verified: pnpm typecheck clean, pnpm build clean, go vet clean, go test ./... clean, curl /console/ + asset + SPA-fallback all 200. Browser snapshot verification deferred to US-012 Playwright (no browser MCP in this iteration). Manual: load /console/ in a browser; click theme toggle in the top bar; verify light/dark/system flips <html class='dark'> on/off."
     },
     {
       "id": "US-003",
