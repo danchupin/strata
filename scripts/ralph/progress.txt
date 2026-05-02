@@ -371,6 +371,30 @@ Cycle: ralph/web-ui-foundation
   `type entry struct{...}` is a NAMED type and won't satisfy the
   anonymous-struct param. Promote the helper struct to a
   package-level named type whenever it crosses a function boundary.
+- Playwright e2e (US-012): web/playwright.config.ts is chromium-only, single
+  worker, baseURL :9999. webServer command boots `go run ./cmd/strata-gateway`
+  from cwd: '..' (the config is in web/, gateway main is in repo root) with
+  STRATA_AUTH_MODE=off + STRATA_STATIC_CREDENTIALS=test:test:owner so the
+  spec can seed buckets via plain HTTP PUT (no SigV4 in test code) while
+  /admin/v1/auth/login still validates the secret. webServer.url probes
+  /console/ so tests don't fire before the embed handler is ready.
+  reuseExistingServer:!process.env.CI keeps local iteration fast. Spec lives
+  at web/e2e/critical-path.spec.ts; pnpm scripts: `e2e` runs tests, `e2e:install`
+  installs the chromium browser. Locally: `pnpm run e2e:install` once, then
+  `pnpm run e2e`. CI job .github/workflows/ci.yml::e2e-ui caches
+  ~/.cache/ms-playwright keyed on web/pnpm-lock.yaml.
+- BrowserRouter basename='/console' yields '/console' (no trailing slash)
+  for the index route and '/console/login', '/console/buckets', etc. for
+  named routes — react-router does NOT add a trailing slash. Use
+  trailing-slash-tolerant regex matchers in Playwright assertions
+  (/\/console\/?$/, /\/console\/login\/?$/) to stay portable across router
+  internals.
+- shadcn `CardTitle` (web/src/components/ui/card.tsx) is rendered as a
+  `<div>`, NOT an `<h*>` element. Playwright `getByRole('heading', ...)`
+  will NOT find text inside CardTitle. Use `getByText(...)` or query the
+  page-level `<h1>` instead. Page headings (Cluster Overview, Buckets,
+  bucket-name on detail page) are real `<h1>`s and are reachable via
+  `getByRole('heading', { level: 1, name: ... })`.
 
 ## 2026-05-02 - US-007
 - Top Buckets + Top Consumers widgets wired end-to-end on the home page,
@@ -1591,4 +1615,130 @@ Cycle: ralph/web-ui-foundation
     searchParams.get('prefix'); write with setSearchParams({prefix: next})
     or setSearchParams({}) to clear. Triggers a navigation, so pagination
     state should reset via useEffect on prefix change.
+---
+
+## 2026-05-02 - US-012
+- Playwright e2e + critical-path tests + docs/ui.md + ROADMAP close-flip
+  shipped. Phase 1 web UI cycle is now complete end-to-end with browser
+  verification in CI.
+- Web side:
+  - @playwright/test@1.49.1 added as web devDep. New scripts:
+    `pnpm run e2e` (runs tests), `pnpm run e2e:install` (downloads chromium
+    + system deps).
+  - web/playwright.config.ts (new): chromium-only via devices['Desktop
+    Chrome'], single worker, baseURL http://127.0.0.1:9999, trace
+    retain-on-failure, screenshot only-on-failure. webServer command boots
+    `go run ./cmd/strata-gateway` from cwd:'..' with STRATA_LISTEN=:9999 +
+    STRATA_AUTH_MODE=off + STRATA_STATIC_CREDENTIALS=test:test:owner +
+    STRATA_CONSOLE_JWT_SECRET=00010203...1f (deterministic 32-byte hex for
+    repeatability) + STRATA_CLUSTER_NAME=strata-e2e + STRATA_NODE_ID=e2e-node;
+    url probe /console/, 180 s startup timeout, reuseExistingServer locally
+    only (CI always boots fresh). HTML report under web/playwright-report/,
+    already gitignored.
+  - web/e2e/critical-path.spec.ts (new, 4 tests): anonymous → /console/login
+    redirect; login(test/test) → /console (overview shows '1 of 1 nodes
+    healthy' + h1 'Cluster Overview' + cluster name 'strata-e2e' visible);
+    Buckets nav → /console/buckets renders + seeded bucket row link visible;
+    bucket row click → /console/buckets/<name> with h1=bucket name; UserMenu
+    → Sign out → /console/login + strata_session cookie cleared. beforeAll
+    seeds the bucket via Playwright's `request.put('/<bucket>')` (200 or 409
+    accepted). URL matchers use trailing-slash-tolerant regex
+    (/\\/console\\/?$/ etc.) because react-router basename strips the
+    trailing slash on the index route.
+- Go side: no production code changes needed for US-012.
+- CI side:
+  - .github/workflows/ci.yml gained an `e2e-ui` job after `e2e`: needs
+    web-build, downloads the web-dist artifact (so `go run` finds the
+    embed), pnpm install --frozen-lockfile, caches ~/.cache/ms-playwright
+    keyed on web/pnpm-lock.yaml, `pnpm exec playwright install --with-deps
+    chromium`, `pnpm exec playwright test`, uploads
+    web/playwright-report/ as e2e-ui-report on failure.
+- Docs:
+  - docs/ui.md (new): operator guide. Console-vs-aws-cli decision matrix;
+    first-login flow (seed STRATA_STATIC_CREDENTIALS, set
+    STRATA_CONSOLE_JWT_SECRET, optionally STRATA_CLUSTER_NAME +
+    STRATA_PROMETHEUS_URL, run `make run-memory`, open
+    http://localhost:9999/console/); required env vars table; ASCII
+    architecture diagram (Browser → /console/ static SPA + /admin/v1/* JSON
+    API → meta.Store + Prometheus client); Phase 1 page table; Phase 1 vs 2
+    vs 3 capability matrix; ops notes (bundle budget, polling cadence,
+    heartbeat lifecycle, label coverage, Phase 1 stub fields); local
+    Playwright run instructions.
+  - README.md How to run section gained 'Option 4: web console (read-only
+    operator UI)' with the make run-memory + open command + a one-paragraph
+    summary linking docs/ui.md. Variance from PRD AC: README only had 3
+    pre-existing options so this is the 4th, not a 6th — mechanically
+    equivalent intent (add one new option).
+  - ROADMAP.md gained ~~**P2 — Web UI — Foundation (Phase 1).**~~ — **Done.**
+    in the Operations & observability section, with the embed/admin-api/
+    auth/pages/heartbeat/TanStack/recharts/Playwright summary inline +
+    `(commit pending)` placeholder. Two new P3 stub entries added:
+    'P3 — Web UI — Phase 2 (admin)' and 'P3 — Web UI — Phase 3 (debug)'
+    pointing at tasks/prd-web-ui-admin.md and tasks/prd-web-ui-debug.md
+    (those PRDs do not exist yet — these are forward pointers per the AC).
+  - Variance: PRD AC mentioned 'CLAUDE.md Big-picture architecture diagram
+    updated' but no top-level CLAUDE.md exists in the repo (only
+    scripts/ralph/CLAUDE.md, the ralph agent prompt). The architecture
+    diagram instead lives in docs/ui.md.
+- Files changed:
+  - web/package.json (+ scripts e2e + e2e:install + devDep
+    @playwright/test 1.49.1)
+  - web/pnpm-lock.yaml (auto)
+  - web/playwright.config.ts (new)
+  - web/e2e/critical-path.spec.ts (new)
+  - .github/workflows/ci.yml (+ e2e-ui job)
+  - docs/ui.md (new)
+  - README.md (+ Option 4)
+  - ROADMAP.md (+ Done flip + 2 P3 entries)
+- Quality checks:
+  - cd web && pnpm typecheck clean (e2e/ outside tsconfig.app include
+    pattern, so specs don't get tsc'd from the app build).
+  - cd web && pnpm build clean — bundle 389.23 KiB raw / 121.13 KiB gzipped
+    JS + 33.76 KiB raw / 6.71 KiB gzipped CSS + Metrics chunk 401.90 KiB
+    raw / 109.44 KiB gzipped (lazy-loaded). Under 500 KiB per-page budget.
+  - cd web && pnpm exec playwright test → 4 passed in 2.2 s wall
+    (anon-redirect / overview / Buckets nav / Bucket detail / logout).
+  - go vet ./... clean; go test ./... clean (root + adminapi 58 + auth +
+    heartbeat + leader + lifecycle + meta/memory + promclient + s3api);
+    go build ./... clean.
+- Browser verification: the Playwright run IS the browser verification — no
+  separate browser-MCP step needed for this story.
+- **Learnings for future iterations:**
+  - Playwright config must point cwd to repo root (cwd: '..') so
+    `go run ./cmd/strata-gateway` resolves; the Go embed needs web/dist/ to
+    exist at compile time, so CI's e2e-ui job must download the web-dist
+    artifact before invoking go.
+  - shadcn CardTitle is a `<div>`, not an `<h*>`, so
+    `getByRole('heading', ...)` in Playwright will miss it. Use
+    `getByText(...)` for CardTitle text; only the page-level `<h1>` is
+    reachable via the heading role. If future stories want CardTitle to be
+    addressable by heading role, change the shadcn primitive globally
+    (it'll affect every page that uses it).
+  - react-router-dom BrowserRouter basename='/console' yields the index
+    URL '/console' WITHOUT a trailing slash (e.g. after navigating to '/').
+    Always use trailing-slash-tolerant regex (`/\/console\/?$/`) in
+    Playwright URL assertions.
+  - STRATA_AUTH_MODE=off + STRATA_STATIC_CREDENTIALS=test:test:owner is
+    the right combo for e2e: admin login validates against the creds store
+    regardless of S3 auth mode, so the spec can both log in AND seed
+    buckets via plain HTTP PUT without dragging SigV4 into the harness.
+    Switching to AUTH_MODE=required would force the spec to sign every
+    bucket-creation request — net negative for clarity.
+  - Playwright's `request` fixture inherits baseURL from `use.baseURL`, so
+    `request.put('/<bucket>')` resolves against the gateway port — useful
+    for any future fixture seeding (object PUTs, etc.).
+  - The webServer.url probe path matters: probe /console/ so Playwright
+    waits for the embed to be ready, not just the TCP socket. A bare /
+    probe would race the embed handler registration on slow boots.
+  - Playwright html-report retention: report is uploaded as artifact on
+    failure only (CI bandwidth + storage). Local runs always overwrite
+    web/playwright-report/ on each run. Both paths gitignored.
+  - When the docs say 'add a 6th option' but the README has 3, follow the
+    intent (add one new option) and note the variance — don't
+    artificially renumber existing options.
+  - When AC references files that don't exist (CLAUDE.md big-picture
+    diagram, tasks/prd-web-ui-admin.md, tasks/prd-web-ui-debug.md), put
+    the substantive content where it actually fits (docs/ui.md for the
+    diagram) and treat ROADMAP entries pointing at not-yet-written PRDs
+    as forward stubs (they're tracking pointers, not blockers).
 ---

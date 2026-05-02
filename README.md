@@ -57,6 +57,21 @@ The gateway image (`deploy/docker/Dockerfile`) is built on the same `quay.io/cep
 
 A successful `make smoke` validates bucket CRUD, object PUT/GET/HEAD/DELETE (including a 10 MiB blob that ends up as three RADOS objects in pool `strata.rgw.buckets.data`), and ListObjectsV2 with prefix/delimiter.
 
+### Option 4: web console (read-only operator UI)
+
+```bash
+make run-memory
+open http://localhost:9999/console/
+```
+
+After `make run-memory`, the embedded React+TS console is served at
+`/console/` on the gateway port. Log in with credentials seeded via
+`STRATA_STATIC_CREDENTIALS=accesskey:secret:owner`; set a stable
+`STRATA_CONSOLE_JWT_SECRET=$(openssl rand -hex 32)` so sessions survive
+restarts. Wire `STRATA_PROMETHEUS_URL` to populate the metrics dashboard
++ top-buckets / top-consumers widgets. Phase 1 is read-only — see
+[docs/ui.md](docs/ui.md) for the full operator guide.
+
 ## Environment variables
 
 | Variable | Default | Description |

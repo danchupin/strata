@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --noEmit",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "e2e": "playwright test",
+    "e2e:install": "playwright install --with-deps chromium"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "1.1.4",
@@ -28,6 +30,7 @@
     "tailwind-merge": "2.5.5"
   },
   "devDependencies": {
+    "@playwright/test": "1.49.1",
     "@tanstack/react-query-devtools": "5.62.7",
     "@types/node": "20.17.10",
     "@types/react": "18.3.12",
