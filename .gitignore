@@ -20,3 +20,9 @@ coverage.*
 # pytest
 .pytest_cache/
 scripts/s3-tests/report/
+
+# ralph wrapper bookkeeping (per-checkout state, not source)
+scripts/ralph/.last-branch
+web/playwright-report/
+web/test-results/
+web/*.tsbuildinfo

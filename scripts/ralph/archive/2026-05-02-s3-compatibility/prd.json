@@ -21,8 +21,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 1,
-      "passes": true,
-      "notes": "Implemented in commit e4094bf (web/ scaffold + root strata package console.go + ConsoleHandler + SPA fallback + /console/ wired in cmd/strata-gateway/main.go). Variance from spec: console.go lives at repo root (package strata) not cmd/strata/console.go because the gateway binary is cmd/strata-gateway/, not cmd/strata/. make run-memory uses :9999 not :9000. Build/typecheck/tests pass; curl /console/ returns 200 HTML, asset path 200, SPA deep-link fallback 200. Bundle 46 KiB gzipped (target ≤500 KiB)."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-002",
