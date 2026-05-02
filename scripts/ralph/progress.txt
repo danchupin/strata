@@ -211,6 +211,45 @@ Cycle: ralph/web-ui-foundation
   reorder; keep new fields at the bottom of Config so mainline call
   sites remain unchanged. Tests (newTestServer) leave Prom=nil; widget
   tests set s.Prom = promclient.New(httptestServer.URL) post-construction.
+- TanStack Query 5 wiring (US-008): web/src/lib/query.ts exports
+  queryClient (staleTime 5_000, refetchInterval 5_000,
+  refetchOnWindowFocus true, retry 1) + queryKeys map (one place to look
+  up the canonical key tuple per resource). queryCache.onError pipes
+  errors into a global toast via web/src/lib/toast-store.ts +
+  web/src/components/toaster.tsx; per-key throttle 30 s prevents toast
+  spam when an endpoint is wedged. Pages opt into the global error UX
+  by setting useQuery({meta: {label: 'cluster status'}}); meta.silent=true
+  suppresses toasts (used for the auth whoami probe so 401s never toast).
+  StrataQueryMeta is module-augmented onto @tanstack/react-query so meta
+  is typed end-to-end. Devtools land via React.lazy + import.meta.env.DEV
+  gate — Vite tree-shakes them out of the prod bundle.
+- Toast pattern: web/src/lib/toast-store.ts is a useSyncExternalStore-
+  backed module-level store (not a React context) so non-React modules
+  can showToast() — necessary for the QueryCache onError handler. The
+  <Toaster /> mounts the shadcn ToastProvider/ToastViewport and renders
+  records from useToasts(). Action button is a ToastAction with
+  altText (radix a11y requirement). Default duration 6_000 ms.
+- Aggregated API client: web/src/api/client.ts re-exports cluster/widgets/
+  auth wrappers under one import + adds typed wrappers for endpoints
+  landing in US-009/010/011 (fetchBucketsList, fetchBucket, fetchObjects,
+  fetchMetricsTimeseries). Pages should import from '@/api/client' rather
+  than the per-resource file so the surface is one place to audit.
+- Auth + TanStack Query: AuthProvider holds whoami() inside a
+  useQuery({queryKey: queryKeys.auth.whoami, retry: 0,
+  refetchInterval: false, staleTime: 60_000, meta:{silent:true}}). Login
+  and logout call qc.setQueryData(queryKeys.auth.whoami, session/null)
+  so the auth state stays in sync without an extra whoami round-trip.
+  Logout additionally calls qc.removeQueries() to drop per-session
+  cached data before re-seeding null whoami; otherwise next user signing
+  in would briefly see the previous user's bucket list.
+- Page error UX with TanStack Query: only render an inline error banner
+  when there is no usable cached data (`!q.data && q.error`). Transient
+  refetch failures surface via the global toast (with a Retry button
+  that calls queryClient.invalidateQueries). The page must NOT
+  blank-out on a stale-but-cached error — keep the existing UI mounted.
+- vite/client types live in web/src/vite-env.d.ts (`/// <reference types="vite/client" />`).
+  Without it `import.meta.env` doesn't resolve in tsc. Required as soon
+  as any source file reads `import.meta.env.DEV`.
 
 ## 2026-05-02 - US-007
 - Top Buckets + Top Consumers widgets wired end-to-end on the home page,
@@ -991,4 +1030,154 @@ Cycle: ralph/web-ui-foundation
     is the right pattern. Bypasses the Heartbeater goroutine and the
     interval timing — tests stay deterministic. New cluster-related
     handlers should use the same pattern.
+---
+
+## 2026-05-02 - US-008
+- TanStack Query 5 wired end-to-end + global error toast pipeline.
+  All previously-hand-rolled useEffect+setInterval polling loops
+  migrated to useQuery; the page no longer blanks-out on intermittent
+  network errors.
+- Files changed:
+  - web/package.json + web/pnpm-lock.yaml — added
+    @tanstack/react-query@5.62.7 (deps) +
+    @tanstack/react-query-devtools@5.62.7 (devDeps).
+  - web/src/lib/query.ts (new) — queryClient (staleTime 5_000,
+    refetchInterval 5_000, refetchOnWindowFocus true, retry 1) +
+    queryKeys map + StrataQueryMeta module-augmentation +
+    QueryCache.onError → showToast pipeline with per-key 30 s throttle
+    + a 'Retry' ToastAction that calls
+    queryClient.invalidateQueries({queryKey}).
+  - web/src/lib/toast-store.ts (new) — useSyncExternalStore-backed
+    module-level toast store (showToast, dismissToast, useToasts).
+    Module-level (not React context) so non-React modules like the
+    QueryCache onError handler can dispatch toasts.
+  - web/src/components/toaster.tsx (new) — mounts shadcn ToastProvider
+    + ToastViewport, renders one <Toast> per record from useToasts(),
+    handles ToastAction click + onOpenChange dismiss.
+  - web/src/api/client.ts (new) — aggregated re-export of
+    cluster/widgets/auth wrappers + new typed wrappers fetchBucketsList,
+    fetchBucket, fetchObjects, fetchMetricsTimeseries (placeholders
+    for US-009/010/011 — endpoints already stubbed in US-003).
+  - web/src/vite-env.d.ts (new) — /// <reference types="vite/client" />
+    so import.meta.env.DEV resolves under tsc.
+  - web/src/main.tsx — wraps <App /> in
+    <QueryClientProvider client={queryClient}> + mounts <Toaster />
+    inside AuthProvider; ReactQueryDevtools lazy-loaded only in dev
+    (import.meta.env.DEV gate + React.lazy dynamic import → tree-shaken
+    from prod).
+  - web/src/components/auth-provider.tsx — whoami probe migrated to
+    useQuery (staleTime 60_000, refetchInterval false, retry 0,
+    meta.silent=true). Login/logout call qc.setQueryData on
+    queryKeys.auth.whoami so AuthState stays in sync without an extra
+    round trip; logout also calls qc.removeQueries() to evict
+    per-session caches before re-seeding null whoami.
+  - web/src/components/layout/AppShell.tsx — top-bar cluster name now
+    via useQuery({queryKey:queryKeys.cluster.status,
+    queryFn:fetchClusterStatus, meta:{label:'cluster status'}}). Stale
+    bespoke useClusterStatus hook deleted.
+  - web/src/pages/Overview.tsx — useQuery for status + nodes; inline
+    error banner only when no cached data, otherwise toast surfaces
+    transient failures. POLL_INTERVAL_MS removed (handled by global
+    queryClient default).
+  - web/src/components/overview/TopWidgets.tsx — BucketTab/ConsumerTab
+    now wrap useQuery({queryKey:queryKeys.{buckets,consumers}.top(by,10),
+    queryFn:() => fetch...(by,10), meta:{label:`top X (by)`}}). Stale
+    useTopBuckets/useTopConsumers state-machine hooks deleted.
+  - web/src/pages/Login.tsx — import path swapped @/api/auth →
+    @/api/client (single API surface).
+- Quality checks:
+  - pnpm typecheck clean (only fix needed: vite-env.d.ts for
+    import.meta.env types).
+  - pnpm build clean — bundle 367.4 KiB raw / 115.8 KiB gzipped JS +
+    32.6 KiB raw / 6.5 KiB gzipped CSS (was 100.6 KiB JS at US-007;
+    +15.2 KiB for tanstack/react-query + global toast plumbing). Total
+    ~122 KiB gzipped, well under 500 KiB budget.
+  - go vet ./... clean.
+  - go test ./... clean (root + adminapi + auth + heartbeat + leader +
+    lifecycle + meta/memory + promclient + s3api).
+  - go build ./... clean.
+  - Runtime smoke on :9989 with STRATA_AUTH_MODE=required +
+    STRATA_STATIC_CREDENTIALS=test:test:owner +
+    STRATA_CONSOLE_JWT_SECRET=$(openssl rand -hex 32) +
+    STRATA_CLUSTER_NAME=ralph-us008:
+      /admin/v1/auth/login (test:test) → 200 + Set-Cookie
+        strata_session=...
+      /admin/v1/cluster/status w/ cookie → 200 {status:'healthy',
+        version:'dev', uptime_sec:2, cluster_name:'ralph-us008',
+        node_count:1, node_count_healthy:1, meta_backend:'memory',
+        data_backend:'memory'}.
+      /admin/v1/cluster/nodes w/ cookie → 1 node row (local hostname).
+      /admin/v1/buckets/top?by=size&limit=5 w/ cookie → empty +
+        metrics_available:false.
+      /admin/v1/consumers/top?by=requests&limit=5 w/ cookie → empty +
+        metrics_available:false.
+      /admin/v1/auth/whoami w/ cookie → 200 {access_key:'test',
+        expires_at:...}.
+      /console/ → 200 (regression-clean).
+- Browser MCP unavailable this iteration; full Playwright run is
+  scheduled for US-012 (login → overview → tab switch → buckets list
+  → bucket detail → logout critical path; assert toast appears with
+  Retry button when /admin/v1/* returns 5xx).
+- **Learnings for future iterations:**
+  - QueryCache.onError is the right place to centralise error UX.
+    Per-component try/catch loops are the wrong place — once you have
+    multiple polling queries, you'll re-implement the same error toast
+    3+ times. Make the global handler opt-in via meta.silent=true for
+    queries that shouldn't toast (auth probes, anything where 401 is
+    a normal control-flow signal).
+  - Throttle the global error toast per-query-key. Without it, a
+    wedged endpoint at 5 s refetchInterval × retry=1 will spam two
+    toasts every 10 s — instant user rage. 30 s throttle window is a
+    reasonable balance (still tells the user something is wrong, but
+    doesn't drown them).
+  - Toast store as a module-level useSyncExternalStore (not a React
+    context). Reason: the QueryCache onError handler runs OUTSIDE the
+    React tree, and needs to dispatch toasts. A context-based toast
+    store would force the queryClient to live inside React and have
+    a hook to access showToast — circular. Module-level store
+    side-steps this cleanly.
+  - meta.label on every useQuery. Without it the global error toast
+    shows queryKey JSON in the title — opaque to the user. Keep the
+    label short ('cluster status', 'top buckets (size)'), it'll
+    appear in the toast title 'Failed to load <label>'.
+  - Aggregate API client at web/src/api/client.ts. Re-exports per-
+    resource files + adds wrappers for endpoints not yet implemented
+    so pages can write `import { fetchBucket } from '@/api/client'`
+    today and the wrapper just lights up when the backend lands. Saves
+    a round of import-path churn per story.
+  - vite-env.d.ts triple-slash reference is mandatory the first time
+    any source file reads import.meta.env.DEV — without it tsc throws
+    'Property env does not exist on type ImportMeta'. Add it once
+    early in the project rather than per-story.
+  - AuthProvider migration to useQuery is subtle: the whoami probe
+    must NOT trigger the global error toast on 401 (which is the
+    normal "you're logged out" signal). Set meta.silent=true. retry=0
+    so a 401 doesn't double-fetch. refetchInterval=false because the
+    global default of 5 s would be wasteful for an auth probe.
+  - login/logout: use qc.setQueryData(queryKeys.auth.whoami, value)
+    to seed the cache directly instead of refetching whoami. Avoids
+    a flash of 'Checking session…' (RequireAuth) between login
+    success and the next redirect. Logout MUST call qc.removeQueries()
+    before re-seeding null whoami, otherwise the next user signing in
+    will briefly see the prior user's bucket/consumer data when the
+    UI mounts before the new whoami completes.
+  - Page error UX: only show inline error banner when there is no
+    cached data. Once useQuery has cached data, transient refetch
+    errors are surfaced via the global toast — keeping the existing
+    UI mounted is the whole point. Branching on
+    `!q.data && q.error instanceof Error` keeps both signals: the
+    blank-page-on-first-load failure case AND the
+    background-refetch-failed-but-keep-the-table-visible case.
+  - Devtools lazy-load: `import.meta.env.DEV ? lazy(() =>
+    import('@tanstack/react-query-devtools').then(...)) : null`. Vite
+    treats the dynamic import behind the false branch as dead code
+    and drops the entire devtools bundle from prod. Verified via
+    `vite build` — JS bundle stayed 115 KiB gzipped (devtools alone
+    are ~30 KiB).
+  - Co-locate queryKeys: web/src/lib/query.ts owns the central
+    queryKeys map. Pages import { queryKeys } and call
+    queryKeys.cluster.status (constant array) or queryKeys.buckets.top(by, limit)
+    (factory function). Centralising stops accidental key drift —
+    mutations and invalidateQueries see the same key as the original
+    useQuery.
 ---

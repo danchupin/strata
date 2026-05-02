@@ -1,15 +1,14 @@
-import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import { AlertTriangle } from 'lucide-react';
 
 import {
   fetchTopBuckets,
   fetchTopConsumers,
-  type BucketTop,
   type BucketsTopBy,
-  type ConsumerTop,
   type ConsumersTopBy,
-} from '@/api/widgets';
+} from '@/api/client';
+import { queryKeys } from '@/lib/query';
 import {
   Card,
   CardContent,
@@ -28,91 +27,22 @@ import {
 } from '@/components/ui/table';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 
-const POLL_INTERVAL_MS = 5_000;
-
-interface WidgetState<T> {
-  rows: T[];
-  metricsAvailable: boolean;
-  loading: boolean;
-  error: string | null;
-}
+const TOP_LIMIT = 10;
 
 function useTopBuckets(by: BucketsTopBy) {
-  const [state, setState] = useState<WidgetState<BucketTop>>({
-    rows: [],
-    metricsAvailable: false,
-    loading: true,
-    error: null,
+  return useQuery({
+    queryKey: queryKeys.buckets.top(by, TOP_LIMIT),
+    queryFn: () => fetchTopBuckets(by, TOP_LIMIT),
+    meta: { label: `top buckets (${by})` },
   });
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      try {
-        const body = await fetchTopBuckets(by);
-        if (cancelled) return;
-        setState({
-          rows: body.buckets,
-          metricsAvailable: body.metrics_available,
-          loading: false,
-          error: null,
-        });
-      } catch (e) {
-        if (cancelled) return;
-        setState((prev) => ({
-          ...prev,
-          loading: false,
-          error: e instanceof Error ? e.message : 'load failed',
-        }));
-      }
-    }
-    setState((prev) => ({ ...prev, loading: true }));
-    load();
-    const id = window.setInterval(load, POLL_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
-  }, [by]);
-  return state;
 }
 
 function useTopConsumers(by: ConsumersTopBy) {
-  const [state, setState] = useState<WidgetState<ConsumerTop>>({
-    rows: [],
-    metricsAvailable: false,
-    loading: true,
-    error: null,
+  return useQuery({
+    queryKey: queryKeys.consumers.top(by, TOP_LIMIT),
+    queryFn: () => fetchTopConsumers(by, TOP_LIMIT),
+    meta: { label: `top consumers (${by})` },
   });
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      try {
-        const body = await fetchTopConsumers(by);
-        if (cancelled) return;
-        setState({
-          rows: body.consumers,
-          metricsAvailable: body.metrics_available,
-          loading: false,
-          error: null,
-        });
-      } catch (e) {
-        if (cancelled) return;
-        setState((prev) => ({
-          ...prev,
-          loading: false,
-          error: e instanceof Error ? e.message : 'load failed',
-        }));
-      }
-    }
-    setState((prev) => ({ ...prev, loading: true }));
-    load();
-    const id = window.setInterval(load, POLL_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
-  }, [by]);
-  return state;
 }
 
 function formatBytes(bytes: number): string {
@@ -179,14 +109,18 @@ interface BucketTabProps {
 }
 
 function BucketTab({ by, valueLabel }: BucketTabProps) {
-  const { rows, metricsAvailable, loading, error } = useTopBuckets(by);
+  const q = useTopBuckets(by);
+  const rows = q.data?.buckets ?? [];
+  const metricsAvailable = q.data?.metrics_available ?? false;
+  const loading = q.isPending && !q.data;
+  const errorMsg = !q.data && q.error instanceof Error ? q.error.message : null;
   const showMetricsWarning = by === 'requests' && !metricsAvailable && !loading;
 
   return (
     <div className="space-y-2">
       {showMetricsWarning && <MetricsUnavailable />}
-      {error && (
-        <div className="text-xs text-destructive">Failed: {error}</div>
+      {errorMsg && (
+        <div className="text-xs text-destructive">Failed: {errorMsg}</div>
       )}
       <div className="overflow-x-auto">
         <Table>
@@ -270,14 +204,18 @@ interface ConsumerTabProps {
 }
 
 function ConsumerTab({ by, valueLabel }: ConsumerTabProps) {
-  const { rows, metricsAvailable, loading, error } = useTopConsumers(by);
+  const q = useTopConsumers(by);
+  const rows = q.data?.consumers ?? [];
+  const metricsAvailable = q.data?.metrics_available ?? false;
+  const loading = q.isPending && !q.data;
+  const errorMsg = !q.data && q.error instanceof Error ? q.error.message : null;
   const showMetricsWarning = !metricsAvailable && !loading;
 
   return (
     <div className="space-y-2">
       {showMetricsWarning && <MetricsUnavailable />}
-      {error && (
-        <div className="text-xs text-destructive">Failed: {error}</div>
+      {errorMsg && (
+        <div className="text-xs text-destructive">Failed: {errorMsg}</div>
       )}
       <div className="overflow-x-auto">
         <Table>

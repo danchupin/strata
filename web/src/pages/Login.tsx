@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 
-import { AuthError } from '@/api/auth';
+import { AuthError } from '@/api/client';
 import { Button } from '@/components/ui/button';
 import {
   Card,

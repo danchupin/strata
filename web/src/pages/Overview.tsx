@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { AlertCircle, Database, Server } from 'lucide-react';
 
 import {
@@ -6,7 +6,8 @@ import {
   fetchClusterStatus,
   type ClusterNode,
   type ClusterStatus,
-} from '@/api/cluster';
+} from '@/api/client';
+import { queryKeys } from '@/lib/query';
 import { Badge } from '@/components/ui/badge';
 import {
   Card,
@@ -27,54 +28,7 @@ import {
 import { TopBucketsCard, TopConsumersCard } from '@/components/overview/TopWidgets';
 import { cn } from '@/lib/utils';
 
-const POLL_INTERVAL_MS = 5_000;
-
-interface OverviewState {
-  status: ClusterStatus | null;
-  nodes: ClusterNode[];
-  loading: boolean;
-  error: string | null;
-}
-
-// useClusterOverview polls /cluster/status + /cluster/nodes every 5s. Replaced
-// by TanStack Query in US-008.
-function useClusterOverview(): OverviewState {
-  const [state, setState] = useState<OverviewState>({
-    status: null,
-    nodes: [],
-    loading: true,
-    error: null,
-  });
-
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      try {
-        const [status, nodes] = await Promise.all([
-          fetchClusterStatus(),
-          fetchClusterNodes(),
-        ]);
-        if (cancelled) return;
-        setState({ status, nodes, loading: false, error: null });
-      } catch (e) {
-        if (cancelled) return;
-        setState((prev) => ({
-          ...prev,
-          loading: false,
-          error: e instanceof Error ? e.message : 'failed to load cluster',
-        }));
-      }
-    }
-    load();
-    const id = window.setInterval(load, POLL_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
-  }, []);
-
-  return state;
-}
+const HEARTBEAT_INTERVAL_S = 5;
 
 function formatUptime(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return '—';
@@ -344,7 +298,30 @@ function NodesTable({
 }
 
 export function OverviewPage() {
-  const { status, nodes, loading, error } = useClusterOverview();
+  const statusQ = useQuery({
+    queryKey: queryKeys.cluster.status,
+    queryFn: fetchClusterStatus,
+    meta: { label: 'cluster status' },
+  });
+  const nodesQ = useQuery({
+    queryKey: queryKeys.cluster.nodes,
+    queryFn: fetchClusterNodes,
+    meta: { label: 'cluster nodes' },
+  });
+
+  const status: ClusterStatus | null = statusQ.data ?? null;
+  const nodes: ClusterNode[] = nodesQ.data ?? [];
+  // Show skeletons only while no cached data is available; subsequent refetches
+  // keep the existing UI mounted (no blank-out on intermittent network errors).
+  const loading = (statusQ.isPending && !statusQ.data) || (nodesQ.isPending && !nodesQ.data);
+  // Only render the in-page error banner when there's no usable cached data;
+  // transient refetch failures surface via the global toast (web/src/lib/query.ts).
+  const errorMessage =
+    !statusQ.data && statusQ.error instanceof Error
+      ? statusQ.error.message
+      : !nodesQ.data && nodesQ.error instanceof Error
+      ? nodesQ.error.message
+      : null;
   const sorted = sortedNodes(nodes);
   const heartbeatEmpty = !loading && nodes.length === 0;
 
@@ -357,13 +334,13 @@ export function OverviewPage() {
         </p>
       </div>
 
-      {error && (
+      {errorMessage && (
         <Card className="border-destructive/40 bg-destructive/5">
           <CardContent className="flex items-start gap-2 py-4 text-sm text-destructive">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
             <div>
               <div className="font-medium">Failed to load cluster state</div>
-              <div className="text-xs text-destructive/80">{error}</div>
+              <div className="text-xs text-destructive/80">{errorMessage}</div>
             </div>
           </CardContent>
         </Card>
@@ -379,7 +356,7 @@ export function OverviewPage() {
             <div>
               Heartbeat table empty — running single-replica or just started.
               The local node will appear once the heartbeat goroutine ticks
-              (every {Math.round(POLL_INTERVAL_MS / 1000)} s).
+              (every {HEARTBEAT_INTERVAL_S} s).
             </div>
           </CardContent>
         </Card>

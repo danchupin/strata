@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Outlet } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import {
   ChevronLeft,
   ChevronRight,
@@ -15,7 +16,8 @@ import { ThemeToggle } from '@/components/theme-toggle';
 import { UserMenu } from '@/components/user-menu';
 import { SidebarNav } from '@/components/layout/SidebarNav';
 import { cn } from '@/lib/utils';
-import { fetchClusterStatus, type ClusterStatus } from '@/api/cluster';
+import { fetchClusterStatus } from '@/api/client';
+import { queryKeys } from '@/lib/query';
 
 const COLLAPSED_KEY = 'strata.sidebar.collapsed';
 const NARROW_QUERY = '(max-width: 1023px)';
@@ -45,33 +47,16 @@ function useMediaQuery(query: string): boolean {
   return matches;
 }
 
-// useClusterStatus polls /admin/v1/cluster/status until US-008 wires
-// TanStack Query. Refresh is one-shot per mount + the auth provider
-// retriggers via component mount. Good enough for the top-bar cluster name.
-function useClusterStatus(): ClusterStatus | null {
-  const [status, setStatus] = useState<ClusterStatus | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    fetchClusterStatus()
-      .then((s) => {
-        if (!cancelled) setStatus(s);
-      })
-      .catch(() => {
-        if (!cancelled) setStatus(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-  return status;
-}
-
 export function AppShell() {
   const isMobile = useMediaQuery(MOBILE_QUERY);
   const isNarrow = useMediaQuery(NARROW_QUERY);
   const [persistedCollapsed, setPersistedCollapsed] = useState<boolean>(readCollapsed);
   const [mobileOpen, setMobileOpen] = useState(false);
-  const status = useClusterStatus();
+  const { data: status } = useQuery({
+    queryKey: queryKeys.cluster.status,
+    queryFn: fetchClusterStatus,
+    meta: { label: 'cluster status' },
+  });
 
   // On viewports <1024 px the sidebar forces icon-only; user toggle still
   // controls ≥1024 px.
