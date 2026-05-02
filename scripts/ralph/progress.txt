@@ -139,9 +139,38 @@ Cycle: ralph/web-ui-foundation
   will replace with useQuery({queryKey:['cluster','status'],...}). Fallback
   display 'Strata' when fetch fails / before first response.
 - /admin/v1/cluster/status::cluster_name comes from STRATA_CLUSTER_NAME env;
-  default 'strata' when empty. adminapi.New takes clusterName as a separate
-  arg AFTER version. Wire from main.go: adminapi.New(meta, creds, version,
-  os.Getenv("STRATA_CLUSTER_NAME"), jwtSecret).
+  default 'strata' when empty. adminapi.New now takes adminapi.Config struct
+  (changed in US-006 — see refactor note below), so the env-name lookup goes
+  into Config.ClusterName.
+- adminapi.New is a Config-struct constructor (US-006). Fields: Meta, Creds,
+  Heartbeat, Version, ClusterName, MetaBackend, DataBackend, JWTSecret. New
+  fields land at the bottom — never reorder. Tests build a Config inline; the
+  gateway main.go does the same. Adding another arg in future stories =
+  add a Config field, no positional breakage.
+- Heartbeat infra: internal/heartbeat package (Node + Store interface +
+  Heartbeater + MemoryStore + CassandraStore). Each Strata replica writes a
+  Node row every 10 s; rows expire at TTL 30 s. Memory: in-process map with
+  read-time eviction. Cassandra: cluster_nodes table (default_time_to_live=30)
+  in internal/meta/cassandra/schema.go tableDDL. Wire from main.go via
+  buildHeartbeatStore(cfg, metaStore) which switches on cfg.MetaBackend.
+  Worker daemons (gc, lifecycle) can adopt the same Heartbeater later to
+  surface workers/leader_for chips — Phase 1 ships gateway-only.
+- TiKV meta backend mentioned in the PRD does NOT exist in the codebase. Skip
+  the lockstep TiKV implementation — heartbeat package supports it via the
+  Store interface if/when a metakv backend appears.
+- Cluster status derivation: status='healthy' iff len(nodes) >= 1 and every
+  node has LastHeartbeat ≤ 30 s (which is always true post-eviction). Falls
+  through to 'degraded' when some are stale (defensive, rarely reached) and
+  'unhealthy' when len(nodes) == 0 OR ListNodes errors. Per-node status maps
+  age: ≤10 s → healthy, ≤30 s → degraded, >30 s → unhealthy.
+- Heartbeat NodeID: STRATA_NODE_ID env override else os.Hostname() else
+  'strata'. Hostname is what the leader.DefaultHolder() uses too, so a
+  future leader-lookup join against worker_locks can match by hostname
+  prefix.
+- For UI polling cadence: until US-008 wires TanStack Query, pages do plain
+  useEffect + setInterval(refetch, 5000). Single source of truth: the page
+  component owns the polling loop and resets state on each tick. Watch for
+  unmount races — guard with a `cancelled` flag inside the effect.
 
 ## 2026-05-02 - US-001 (close-out)
 - US-001 was implemented in prior commit e4094bf on this branch ("feat: US-001 -
@@ -622,4 +651,156 @@ Cycle: ralph/web-ui-foundation
     Consumers page (US-007 widget on Overview is the only Phase 1
     consumers surface — the dedicated page slot is reserved for
     Phase 2). Resist the temptation to fill these in.
+---
+
+## 2026-05-02 - US-006
+- Cluster Overview page wired end-to-end with real heartbeat-driven data.
+  Gateway writes its own row into cluster_nodes every 10 s; the Overview
+  page polls /admin/v1/cluster/{status,nodes} every 5 s and renders a hero
+  card + backend chips + nodes table.
+- Go side:
+  - New package internal/heartbeat (heartbeat.go + memory.go + cassandra.go
+    + heartbeat_test.go, 4 tests). Node + Store + Heartbeater. Defaults:
+    Interval 10 s, TTL 30 s. Memory store filters expired rows at read
+    time. Cassandra store passes USING TTL 30 to INSERTs.
+  - internal/meta/cassandra/schema.go gained the cluster_nodes DDL inside
+    tableDDL (so existing ensureTables bootstrap creates it on first run
+    or on schema upgrade against an existing keyspace).
+  - internal/adminapi/server.go: New() refactored to take adminapi.Config
+    struct (Meta, Creds, Heartbeat, Version, ClusterName, MetaBackend,
+    DataBackend, JWTSecret). Server gained Heartbeat + MetaBackend +
+    DataBackend fields.
+  - internal/adminapi/types.go: ClusterStatus extended with uptime_sec,
+    node_count, node_count_healthy, meta_backend, data_backend.
+    ClusterNode extended with last_heartbeat. Status enum tightened to
+    healthy/degraded/unhealthy (the legacy "ok" stub is gone — the
+    handler derives status from heartbeat aggregation).
+  - internal/adminapi/cluster.go rewritten: handleClusterStatus aggregates
+    Heartbeat.ListNodes (status derivation: healthy iff all listed nodes
+    fresh and >=1; degraded iff some stale; unhealthy iff empty/error).
+    handleClusterNodes returns the live heartbeat rows mapped to the JSON
+    shape with derived per-node status (≤10 s healthy, ≤30 s degraded).
+  - internal/adminapi/openapi.yaml: ClusterStatus + ClusterNode schemas
+    updated to match new fields; meta_backend enum trimmed to
+    [cassandra, memory] (tikv is PRD aspiration, no impl exists).
+  - cmd/strata-gateway/main.go: buildHeartbeatStore(cfg, metaStore)
+    switches on cfg.MetaBackend. Heartbeater goroutine started post-mux
+    setup (Node ID = heartbeat.DefaultNodeID = hostname; Address =
+    cfg.Listen; Version = buildVersion()). ctx cancellation tied to
+    SIGTERM signal via the existing signal.NotifyContext block.
+  - Tests: server_test.go newTestServer now seeds Heartbeat=NewMemoryStore.
+    TestClusterStatusShape seeds one heartbeat then asserts status=healthy
+    + node_count=1 + backends=memory + uptime_sec >= 0. New
+    TestClusterStatusEmptyHeartbeatsUnhealthy covers the empty-table case.
+    New TestClusterNodesReturnsHeartbeats covers the populated-list case
+    (status=healthy, uptime ~7200 s for a synthetic 2h-old node, workers
+    + leader_for serialized as empty arrays not null).
+  - auth_test.go newAuthServer also moved to Config-struct constructor.
+- React side:
+  - web/src/api/cluster.ts: ClusterStatus tightened (status union) +
+    new fields required (uptime_sec, node_count, node_count_healthy,
+    meta_backend, data_backend). Added ClusterNode + ClusterNodesResponse
+    types + fetchClusterNodes wrapper.
+  - web/src/pages/Overview.tsx (rewritten): useClusterOverview hook polls
+    Promise.all([fetchClusterStatus, fetchClusterNodes]) every 5 s.
+    HeroCard (cluster name + status badge + 'X of Y nodes healthy' summary
+    + 4-up grid of version / uptime / nodes ratio / started-at). Backend
+    chips (Database icon for meta, Server icon for data) below the hero.
+    NodesTable (sortable: unhealthy first then degraded then healthy then
+    by id; cells: node, address, version, uptime, status badge, workers
+    chips, leader_for chips). Empty-state info banner when nodes==[].
+    Error banner across the top when fetch fails. Skeleton rows during
+    initial load.
+  - StatusBadge + ChipList + formatUptime helpers inline in Overview.tsx
+    (small enough to not warrant a shared widgets module yet).
+- Files changed:
+  - internal/heartbeat/{heartbeat.go, memory.go, cassandra.go, heartbeat_test.go} (new)
+  - internal/meta/cassandra/schema.go (cluster_nodes DDL)
+  - internal/adminapi/{server.go, types.go, cluster.go, openapi.yaml,
+    server_test.go, auth_test.go}
+  - cmd/strata-gateway/main.go
+  - web/src/api/cluster.ts
+  - web/src/pages/Overview.tsx
+- Quality checks:
+  - go vet ./... clean
+  - go test ./... clean (heartbeat: 4 tests, adminapi: 21 tests
+    [19 prior + 2 new], plus root + auth + leader + lifecycle + meta/memory
+    + s3api unchanged).
+  - go build ./... clean
+  - cd web && pnpm run typecheck clean
+  - cd web && pnpm run build clean
+  - Bundle: 308 KiB raw / 98.6 KiB gzipped JS + 32.2 KiB raw / 6.4 KiB
+    gzipped CSS (was 96.4 KiB JS at US-005; +2.2 KiB for Overview page).
+    Total ~105 KiB gzipped. Budget ≤500 KiB ✅.
+  - Runtime smoke on :9995 with STRATA_AUTH_MODE=required +
+    STRATA_STATIC_CREDENTIALS=test:test:owner +
+    STRATA_CLUSTER_NAME=ralph-overview +
+    STRATA_CONSOLE_JWT_SECRET=$(openssl rand -hex 32):
+      /admin/v1/auth/login → 200 + Set-Cookie
+      /admin/v1/cluster/status w/ cookie → {status:'healthy', version:'dev',
+        started_at:..., uptime_sec:81, cluster_name:'ralph-overview',
+        node_count:1, node_count_healthy:1, meta_backend:'memory',
+        data_backend:'memory'}
+      /admin/v1/cluster/nodes w/ cookie → {nodes:[{id:'<host>',
+        address:':9995', version:'dev', started_at:..., uptime_sec:81,
+        status:'healthy', workers:[], leader_for:[],
+        last_heartbeat:...}]}  ← heartbeat goroutine wrote within 1s of
+        startup
+      /console/ → 200 (regression-clean)
+- Browser MCP unavailable; full Playwright run scheduled for US-012
+  (login → overview → nodes table screenshot → buckets list → logout).
+- **Learnings for future iterations:**
+  - adminapi.New is now a Config-struct constructor. NEVER reorder
+    Config fields — call sites are positional in spirit (composite
+    literal) but Go composite literals tolerate field reorder. Adding
+    a field is non-breaking; renaming or removing is.
+  - heartbeat.Store interface was put in its own package (not
+    internal/meta) so the cassandra store can avoid pulling the entire
+    meta package as a dependency; the table DDL still ships in
+    internal/meta/cassandra/schema.go because that's the central
+    bootstrap path. Two-package split is intentional — keep it.
+  - gocql nil set<text> is encoded as a tombstone in INSERT, which
+    can race with TTL eviction in some cluster topologies and silently
+    drop the row. Always pass empty slice (nilToEmpty helper). This
+    bit me on a previous Cassandra service.
+  - Status derivation should NOT include the local-replica fallback
+    ("we know we're up so status=healthy") because then a Cassandra
+    table outage looks healthy. Honest "unhealthy" + the empty-state
+    info banner on the UI is the right shape.
+  - For the React polling pattern: useEffect with let cancelled = false
+    + setInterval. Inside the setInterval callback, await Promise.all
+    then setState only if !cancelled. The cleanup return clears both
+    cancelled and the interval. Don't try to cancel in-flight fetches
+    via AbortController for Phase 1 — adds bytes for marginal benefit.
+    US-008 swaps the whole thing for useQuery anyway.
+  - Sortable nodes table uses a numeric `nodeOrder()` that maps status
+    enum → rank (0=unhealthy, 1=degraded, 2=healthy, 3=unknown). Pure
+    JS sort + localeCompare for the tie-breaker. No table-sort library
+    needed; if column-click sorting lands later (US-010 buckets list),
+    that's the right time to introduce one.
+  - Tailwind colour shorthand on Badge: passing an explicit className
+    with bg-emerald-500/15 etc. layers cleanly over the shadcn outline
+    variant. The status colour palette is encoded inline in
+    statusVariant() — three colours, three callers, fine to inline; if
+    a fourth surface uses it (US-007 widgets, US-009 metrics), extract
+    to shared utility.
+  - heartbeat.DefaultNodeID = STRATA_NODE_ID env > os.Hostname() >
+    'strata'. The override is important for k8s pod deployments where
+    hostnames are pod names — set NODE_ID to the pod name explicitly
+    via downward API to keep node IDs stable across rolling deployments
+    (otherwise rolling out 5 pods generates 5 fresh node_ids per
+    rollout, so the table looks like 10+ nodes for ~30s).
+  - cluster_nodes table has default_time_to_live=30 — Cassandra will
+    auto-evict via tombstone every 30s. That's fine for low-cardinality
+    cluster topology (≤100 nodes). Don't put high-churn rows here;
+    LeveledCompactionStrategy + tombstones don't mix well at scale.
+  - Server.MetaBackend / DataBackend are pure display strings sourced
+    from cfg.{Meta,Data}Backend at startup. They get echoed back into
+    /cluster/status::{meta,data}_backend. Adding a new backend just
+    needs a new case in main.buildHeartbeatStore + the schema enum in
+    openapi.yaml — no other adminapi changes required.
+  - The test seeding heartbeat directly (s.Heartbeat.WriteHeartbeat)
+    is the right pattern. Bypasses the Heartbeater goroutine and the
+    interval timing — tests stay deterministic. New cluster-related
+    handlers should use the same pattern.
 ---

@@ -1,6 +1,7 @@
 package adminapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/danchupin/strata/internal/auth"
+	"github.com/danchupin/strata/internal/heartbeat"
 	metamem "github.com/danchupin/strata/internal/meta/memory"
 )
 
@@ -17,7 +19,16 @@ import (
 // 401-on-anonymous test.
 func newTestServer() *Server {
 	creds := auth.NewStaticStore(map[string]*auth.Credential{})
-	s := New(metamem.New(), creds, "test-sha", "test-cluster", []byte("0123456789abcdef0123456789abcdef"))
+	s := New(Config{
+		Meta:        metamem.New(),
+		Creds:       creds,
+		Heartbeat:   heartbeat.NewMemoryStore(),
+		Version:     "test-sha",
+		ClusterName: "test-cluster",
+		MetaBackend: "memory",
+		DataBackend: "memory",
+		JWTSecret:   []byte("0123456789abcdef0123456789abcdef"),
+	})
 	s.Started = time.Unix(1_700_000_000, 0)
 	return s
 }
@@ -60,6 +71,13 @@ func TestHandlerJSONContentType(t *testing.T) {
 
 func TestClusterStatusShape(t *testing.T) {
 	s := newTestServer()
+	// Seed one live heartbeat so status derives "healthy" + node_count=1.
+	if err := s.Heartbeat.WriteHeartbeat(context.Background(), heartbeat.Node{
+		ID: "node-a", Address: "127.0.0.1:9000", Version: "test-sha",
+		StartedAt: time.Unix(1_700_000_000, 0), LastHeartbeat: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed heartbeat: %v", err)
+	}
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/admin/v1/cluster/status", nil)
 	s.routes().ServeHTTP(rr, req)
@@ -71,8 +89,8 @@ func TestClusterStatusShape(t *testing.T) {
 	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got.Status != "ok" {
-		t.Errorf("status field: %q", got.Status)
+	if got.Status != "healthy" {
+		t.Errorf("status field: %q want healthy", got.Status)
 	}
 	if got.Version != "test-sha" {
 		t.Errorf("version field: %q", got.Version)
@@ -82,6 +100,30 @@ func TestClusterStatusShape(t *testing.T) {
 	}
 	if got.ClusterName != "test-cluster" {
 		t.Errorf("cluster_name: got %q want %q", got.ClusterName, "test-cluster")
+	}
+	if got.NodeCount != 1 || got.NodeCountHealthy != 1 {
+		t.Errorf("node_count=%d/%d want 1/1", got.NodeCountHealthy, got.NodeCount)
+	}
+	if got.MetaBackend != "memory" || got.DataBackend != "memory" {
+		t.Errorf("backends: meta=%q data=%q", got.MetaBackend, got.DataBackend)
+	}
+	if got.UptimeSec < 0 {
+		t.Errorf("uptime_sec negative: %d", got.UptimeSec)
+	}
+}
+
+func TestClusterStatusEmptyHeartbeatsUnhealthy(t *testing.T) {
+	s := newTestServer()
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin/v1/cluster/status", nil)
+	s.routes().ServeHTTP(rr, req)
+	var got ClusterStatus
+	_ = json.NewDecoder(rr.Body).Decode(&got)
+	if got.Status != "unhealthy" {
+		t.Errorf("empty heartbeat status: %q want unhealthy", got.Status)
+	}
+	if got.NodeCount != 0 {
+		t.Errorf("node_count: %d want 0", got.NodeCount)
 	}
 }
 
@@ -103,6 +145,41 @@ func TestClusterNodesShape(t *testing.T) {
 	}
 	if len(got.Nodes) != 0 {
 		t.Errorf("expected empty nodes, got %d", len(got.Nodes))
+	}
+}
+
+func TestClusterNodesReturnsHeartbeats(t *testing.T) {
+	s := newTestServer()
+	now := time.Now().UTC()
+	if err := s.Heartbeat.WriteHeartbeat(context.Background(), heartbeat.Node{
+		ID: "node-1", Address: "10.0.0.1:9000", Version: "v1",
+		StartedAt: now.Add(-2 * time.Hour), LastHeartbeat: now,
+	}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin/v1/cluster/nodes", nil)
+	s.routes().ServeHTTP(rr, req)
+
+	var got ClusterNodesResponse
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Nodes) != 1 || got.Nodes[0].ID != "node-1" {
+		t.Fatalf("nodes=%+v", got.Nodes)
+	}
+	n := got.Nodes[0]
+	if n.Address != "10.0.0.1:9000" {
+		t.Errorf("address=%q", n.Address)
+	}
+	if n.Status != "healthy" {
+		t.Errorf("status=%q want healthy", n.Status)
+	}
+	if n.UptimeSec < 7000 || n.UptimeSec > 8000 {
+		t.Errorf("uptime_sec=%d out of expected ~7200 window", n.UptimeSec)
+	}
+	if n.Workers == nil || n.LeaderFor == nil {
+		t.Error("workers/leader_for must be empty arrays not null")
 	}
 }
 

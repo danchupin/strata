@@ -105,6 +105,15 @@ var tableDDL = []string{
 		name   text PRIMARY KEY,
 		holder text
 	)`,
+	`CREATE TABLE IF NOT EXISTS cluster_nodes (
+		node_id        text PRIMARY KEY,
+		address        text,
+		version        text,
+		started_at     timestamp,
+		workers        set<text>,
+		leader_for     set<text>,
+		last_heartbeat timestamp
+	) WITH default_time_to_live = 30`,
 }
 
 var alterStatements = []string{

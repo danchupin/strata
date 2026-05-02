@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/danchupin/strata/internal/auth"
+	"github.com/danchupin/strata/internal/heartbeat"
 	"github.com/danchupin/strata/internal/meta"
 )
 
@@ -24,29 +25,49 @@ import (
 type Server struct {
 	Meta        meta.Store
 	Creds       auth.CredentialsStore
+	Heartbeat   heartbeat.Store
 	Version     string
 	ClusterName string
+	MetaBackend string
+	DataBackend string
 	Started     time.Time
 	JWTSecret   []byte
 	Logger      *log.Logger
 }
 
-// New constructs a Server with the given dependencies. Started defaults to
-// now. jwtSecret is the HS256 key for session cookies; an empty value means
-// login will fail closed (the gateway logs a WARN at startup if env is unset
-// and generates an ephemeral secret). clusterName falls back to "strata"
-// when empty.
-func New(m meta.Store, creds auth.CredentialsStore, version, clusterName string, jwtSecret []byte) *Server {
+// Config carries everything New needs to build a Server. Required fields:
+// Creds + JWTSecret. Heartbeat may be nil — the cluster overview will then
+// surface only the local replica derived from Started/Version. Backend names
+// echo into ClusterStatus.{meta,data}_backend; leave empty to omit.
+type Config struct {
+	Meta        meta.Store
+	Creds       auth.CredentialsStore
+	Heartbeat   heartbeat.Store
+	Version     string
+	ClusterName string
+	MetaBackend string
+	DataBackend string
+	JWTSecret   []byte
+}
+
+// New constructs a Server. Started defaults to now. JWTSecret empty means
+// login fails closed (gateway logs a WARN at startup if env unset and
+// generates an ephemeral secret). ClusterName falls back to "strata".
+func New(c Config) *Server {
+	clusterName := c.ClusterName
 	if clusterName == "" {
 		clusterName = "strata"
 	}
 	return &Server{
-		Meta:        m,
-		Creds:       creds,
-		Version:     version,
+		Meta:        c.Meta,
+		Creds:       c.Creds,
+		Heartbeat:   c.Heartbeat,
+		Version:     c.Version,
 		ClusterName: clusterName,
+		MetaBackend: c.MetaBackend,
+		DataBackend: c.DataBackend,
 		Started:     time.Now(),
-		JWTSecret:   jwtSecret,
+		JWTSecret:   c.JWTSecret,
 		Logger:      log.Default(),
 	}
 }

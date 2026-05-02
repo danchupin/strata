@@ -17,11 +17,13 @@ import (
 	"github.com/danchupin/strata/internal/data"
 	datamem "github.com/danchupin/strata/internal/data/memory"
 	datarados "github.com/danchupin/strata/internal/data/rados"
+	"github.com/danchupin/strata/internal/heartbeat"
 	"github.com/danchupin/strata/internal/meta"
 	metacassandra "github.com/danchupin/strata/internal/meta/cassandra"
 	metamem "github.com/danchupin/strata/internal/meta/memory"
 	"github.com/danchupin/strata/internal/metrics"
 	"github.com/danchupin/strata/internal/s3api"
+	"time"
 )
 
 func main() {
@@ -68,7 +70,18 @@ func main() {
 	jwtSecret, jwtSource := loadJWTSecret()
 	log.Printf("admin: jwt secret source=%s", jwtSource)
 	clusterName := os.Getenv("STRATA_CLUSTER_NAME")
-	adminServer := adminapi.New(metaStore, mw.Store, buildVersion(), clusterName, jwtSecret)
+	hbStore := buildHeartbeatStore(cfg, metaStore)
+	version := buildVersion()
+	adminServer := adminapi.New(adminapi.Config{
+		Meta:        metaStore,
+		Creds:       mw.Store,
+		Heartbeat:   hbStore,
+		Version:     version,
+		ClusterName: clusterName,
+		MetaBackend: cfg.MetaBackend,
+		DataBackend: cfg.DataBackend,
+		JWTSecret:   jwtSecret,
+	})
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
@@ -83,6 +96,19 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if hbStore != nil {
+		hb := &heartbeat.Heartbeater{
+			Store: hbStore,
+			Node: heartbeat.Node{
+				ID:        heartbeat.DefaultNodeID(),
+				Address:   cfg.Listen,
+				Version:   version,
+				StartedAt: time.Now().UTC(),
+			},
+		}
+		go hb.Run(ctx)
+	}
 
 	go func() {
 		log.Printf("strata-gateway listening on %s (data=%s meta=%s region=%s auth=%s)",
@@ -153,6 +179,22 @@ func buildDataBackend(cfg *config.Config) (data.Backend, error) {
 	default:
 		return nil, errors.New("unknown data backend")
 	}
+}
+
+// buildHeartbeatStore returns a heartbeat.Store backed by the same backend
+// as metaStore. Returns nil for unrecognized backends — the admin handlers
+// degrade gracefully (status="unhealthy", empty nodes list) rather than
+// crashing.
+func buildHeartbeatStore(cfg *config.Config, metaStore meta.Store) heartbeat.Store {
+	switch cfg.MetaBackend {
+	case "memory":
+		return heartbeat.NewMemoryStore()
+	case "cassandra":
+		if cas, ok := metaStore.(*metacassandra.Store); ok {
+			return &heartbeat.CassandraStore{S: cas.Session()}
+		}
+	}
+	return nil
 }
 
 func buildMetaStore(cfg *config.Config) (meta.Store, error) {

@@ -37,21 +37,21 @@ components:
 
     ClusterStatus:
       type: object
-      required: [status, version, started_at]
+      required: [status, version, started_at, uptime_sec, cluster_name, node_count, node_count_healthy, meta_backend, data_backend]
       properties:
-        status: { type: string, enum: [ok, healthy, degraded, unhealthy] }
+        status: { type: string, enum: [healthy, degraded, unhealthy] }
         version: { type: string, description: "Git SHA + tag of the running build" }
         started_at: { type: integer, format: int64, description: "Unix epoch (seconds)" }
+        uptime_sec: { type: integer, format: int64 }
         cluster_name: { type: string }
         node_count: { type: integer }
         node_count_healthy: { type: integer }
-        meta_backend: { type: string, enum: [cassandra, tikv, memory] }
-        data_backend: { type: string, enum: [rados, s3, memory] }
-        uptime_sec: { type: integer, format: int64 }
+        meta_backend: { type: string, enum: [cassandra, memory] }
+        data_backend: { type: string, enum: [rados, memory] }
 
     ClusterNode:
       type: object
-      required: [id, address, version, started_at, status]
+      required: [id, address, version, started_at, uptime_sec, status, workers, leader_for, last_heartbeat]
       properties:
         id: { type: string }
         address: { type: string }
@@ -61,6 +61,7 @@ components:
         status: { type: string, enum: [healthy, degraded, unhealthy] }
         workers: { type: array, items: { type: string } }
         leader_for: { type: array, items: { type: string } }
+        last_heartbeat: { type: integer, format: int64 }
 
     ClusterNodes:
       type: object

@@ -5,10 +5,15 @@ package adminapi
 // without renaming or removing them.
 
 type ClusterStatus struct {
-	Status      string `json:"status"`
-	Version     string `json:"version"`
-	StartedAt   int64  `json:"started_at"`
-	ClusterName string `json:"cluster_name"`
+	Status           string `json:"status"`
+	Version          string `json:"version"`
+	StartedAt        int64  `json:"started_at"`
+	UptimeSec        int64  `json:"uptime_sec"`
+	ClusterName      string `json:"cluster_name"`
+	NodeCount        int    `json:"node_count"`
+	NodeCountHealthy int    `json:"node_count_healthy"`
+	MetaBackend      string `json:"meta_backend"`
+	DataBackend      string `json:"data_backend"`
 }
 
 type ClusterNodesResponse struct {
@@ -16,14 +21,15 @@ type ClusterNodesResponse struct {
 }
 
 type ClusterNode struct {
-	ID         string   `json:"id"`
-	Address    string   `json:"address"`
-	Version    string   `json:"version"`
-	StartedAt  int64    `json:"started_at"`
-	UptimeSec  int64    `json:"uptime_sec"`
-	Status     string   `json:"status"`
-	Workers    []string `json:"workers"`
-	LeaderFor  []string `json:"leader_for"`
+	ID            string   `json:"id"`
+	Address       string   `json:"address"`
+	Version       string   `json:"version"`
+	StartedAt     int64    `json:"started_at"`
+	UptimeSec     int64    `json:"uptime_sec"`
+	Status        string   `json:"status"`
+	Workers       []string `json:"workers"`
+	LeaderFor     []string `json:"leader_for"`
+	LastHeartbeat int64    `json:"last_heartbeat"`
 }
 
 type BucketsListResponse struct {
@@ -45,10 +51,10 @@ type BucketsTopResponse struct {
 }
 
 type BucketTop struct {
-	Name             string `json:"name"`
-	SizeBytes        int64  `json:"size_bytes"`
-	ObjectCount      int64  `json:"object_count"`
-	RequestCount24h  int64  `json:"request_count_24h"`
+	Name            string `json:"name"`
+	SizeBytes       int64  `json:"size_bytes"`
+	ObjectCount     int64  `json:"object_count"`
+	RequestCount24h int64  `json:"request_count_24h"`
 }
 
 type ObjectsListResponse struct {
@@ -82,8 +88,8 @@ type MetricsTimeseriesResponse struct {
 }
 
 type MetricSeries struct {
-	Name   string             `json:"name"`
-	Points []MetricPoint      `json:"points"`
+	Name   string        `json:"name"`
+	Points []MetricPoint `json:"points"`
 }
 
 // MetricPoint marshals as [<epoch-ms>, <value>] to match the standard
