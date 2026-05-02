@@ -25,6 +25,7 @@ func newTestServer() *Server {
 		Heartbeat:   heartbeat.NewMemoryStore(),
 		Version:     "test-sha",
 		ClusterName: "test-cluster",
+		Region:      "test-region",
 		MetaBackend: "memory",
 		DataBackend: "memory",
 		JWTSecret:   []byte("0123456789abcdef0123456789abcdef"),

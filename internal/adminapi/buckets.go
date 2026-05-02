@@ -5,17 +5,214 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/danchupin/strata/internal/meta"
 	"github.com/danchupin/strata/internal/promclient"
 )
 
-// handleBucketsList serves GET /admin/v1/buckets. Phase 1 stub.
+// bucketsListSortColumns enumerates the columns the React table can sort on.
+// Anything else triggers a 400 — callers must explicitly choose a known column.
+var bucketsListSortColumns = map[string]struct{}{
+	"name":         {},
+	"owner":        {},
+	"created":      {},
+	"size":         {},
+	"object_count": {},
+}
+
+// handleBucketsList serves GET /admin/v1/buckets — the Buckets page list (US-010).
+// Query params: query (case-insensitive substring on name), sort (name|owner|
+// created|size|object_count), order (asc|desc, default desc for created and
+// size, asc for name/owner), page (1-based, default 1), page_size (1..500,
+// default 50). Returns BucketsListResponse{buckets, total} where total is the
+// matching-row count BEFORE pagination so the UI can render page-count chips.
 func (s *Server) handleBucketsList(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, BucketsListResponse{
-		Buckets: []BucketSummary{},
-		Total:   0,
+	q := r.URL.Query()
+	sortCol := strings.ToLower(strings.TrimSpace(q.Get("sort")))
+	if sortCol == "" {
+		sortCol = "created"
+	}
+	if _, ok := bucketsListSortColumns[sortCol]; !ok {
+		writeJSONError(w, http.StatusBadRequest, "BadRequest",
+			"sort must be one of name, owner, created, size, object_count")
+		return
+	}
+	order := strings.ToLower(strings.TrimSpace(q.Get("order")))
+	switch order {
+	case "":
+		if sortCol == "name" || sortCol == "owner" {
+			order = "asc"
+		} else {
+			order = "desc"
+		}
+	case "asc", "desc":
+	default:
+		writeJSONError(w, http.StatusBadRequest, "BadRequest", "order must be asc or desc")
+		return
+	}
+	page := parsePositive(q.Get("page"), 1)
+	pageSize := parseRange(q.Get("page_size"), 50, 1, 500)
+	query := strings.TrimSpace(q.Get("query"))
+	queryLower := strings.ToLower(query)
+
+	resp := BucketsListResponse{Buckets: []BucketSummary{}, Total: 0}
+	if s.Meta == nil {
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	buckets, err := s.Meta.ListBuckets(r.Context(), "")
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "Internal", err.Error())
+		return
+	}
+
+	entries := make([]bucketsListEntry, 0, len(buckets))
+	for _, b := range buckets {
+		if queryLower != "" && !strings.Contains(strings.ToLower(b.Name), queryLower) {
+			continue
+		}
+		entries = append(entries, bucketsListEntry{
+			bucket: b,
+			summary: BucketSummary{
+				Name:      b.Name,
+				Owner:     b.Owner,
+				Region:    s.Region,
+				CreatedAt: b.CreatedAt.Unix(),
+			},
+		})
+	}
+	resp.Total = len(entries)
+
+	// When sorting by size or object_count, walk every matched bucket up front
+	// — the sort key needs the value. For other sorts we defer the walk to the
+	// paginated slice so a 50-row page costs at most 50 ListObjects walks.
+	if sortCol == "size" || sortCol == "object_count" {
+		for i := range entries {
+			size, count := bucketSizeAndCount(r.Context(), s.Meta, entries[i].bucket)
+			entries[i].summary.SizeBytes = size
+			entries[i].summary.ObjectCount = count
+		}
+	}
+
+	sortBucketsListEntries(entries, sortCol, order)
+
+	start := (page - 1) * pageSize
+	if start < 0 || start >= len(entries) {
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	end := start + pageSize
+	if end > len(entries) {
+		end = len(entries)
+	}
+	paged := entries[start:end]
+
+	rows := make([]BucketSummary, 0, len(paged))
+	for i := range paged {
+		row := paged[i].summary
+		if sortCol != "size" && sortCol != "object_count" {
+			row.SizeBytes, row.ObjectCount = bucketSizeAndCount(r.Context(), s.Meta, paged[i].bucket)
+		}
+		rows = append(rows, row)
+	}
+
+	resp.Buckets = rows
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// bucketsListEntry pairs a meta.Bucket pointer with the partial BucketSummary
+// projected from it. Sort + paginate operate on entries; the bucket pointer
+// stays attached so the post-pagination loop can still walk size/object_count
+// for the displayed page when the sort column did not require it.
+type bucketsListEntry struct {
+	bucket  *meta.Bucket
+	summary BucketSummary
+}
+
+// sortBucketsListEntries orders entries in-place by the requested column.
+// The secondary tie-break is always Name ASC regardless of the primary
+// direction, so two rows that compare equal on the primary key remain in a
+// predictable alphabetical sub-order. The "created" branch sorts on the
+// bucket's full-precision time.Time rather than the seconds-truncated
+// summary.CreatedAt, so sub-second-apart buckets still compare distinctly.
+func sortBucketsListEntries(entries []bucketsListEntry, col, order string) {
+	desc := order == "desc"
+	primary := func(a, b bucketsListEntry) int {
+		switch col {
+		case "name":
+			return cmpString(a.summary.Name, b.summary.Name)
+		case "owner":
+			return cmpString(a.summary.Owner, b.summary.Owner)
+		case "size":
+			return cmpInt64(a.summary.SizeBytes, b.summary.SizeBytes)
+		case "object_count":
+			return cmpInt64(a.summary.ObjectCount, b.summary.ObjectCount)
+		default: // "created"
+			ai := a.bucket.CreatedAt.UnixNano()
+			bi := b.bucket.CreatedAt.UnixNano()
+			return cmpInt64(ai, bi)
+		}
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		c := primary(entries[i], entries[j])
+		if desc {
+			c = -c
+		}
+		if c != 0 {
+			return c < 0
+		}
+		return entries[i].summary.Name < entries[j].summary.Name
 	})
+}
+
+func cmpString(a, b string) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func cmpInt64(a, b int64) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// parsePositive returns n parsed from s when n >= 1, else def.
+func parsePositive(s string, def int) int {
+	if s == "" {
+		return def
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 1 {
+		return def
+	}
+	return n
+}
+
+// parseRange returns n parsed from s, clamped to [lo, hi]. Empty/invalid → def.
+func parseRange(s string, def, lo, hi int) int {
+	if s == "" {
+		return def
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < lo {
+		return def
+	}
+	if n > hi {
+		return hi
+	}
+	return n
 }
 
 // handleBucketsTop serves GET /admin/v1/buckets/top. Aggregates the home-page

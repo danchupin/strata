@@ -30,6 +30,7 @@ type Server struct {
 	Prom        *promclient.Client
 	Version     string
 	ClusterName string
+	Region      string
 	MetaBackend string
 	DataBackend string
 	Started     time.Time
@@ -40,7 +41,9 @@ type Server struct {
 // Config carries everything New needs to build a Server. Required fields:
 // Creds + JWTSecret. Heartbeat may be nil — the cluster overview will then
 // surface only the local replica derived from Started/Version. Backend names
-// echo into ClusterStatus.{meta,data}_backend; leave empty to omit.
+// echo into ClusterStatus.{meta,data}_backend; leave empty to omit. Region
+// echoes into BucketSummary.region — Strata is single-region today, so every
+// bucket reports the gateway's configured RegionName.
 type Config struct {
 	Meta        meta.Store
 	Creds       auth.CredentialsStore
@@ -48,6 +51,7 @@ type Config struct {
 	Prom        *promclient.Client
 	Version     string
 	ClusterName string
+	Region      string
 	MetaBackend string
 	DataBackend string
 	JWTSecret   []byte
@@ -68,6 +72,7 @@ func New(c Config) *Server {
 		Prom:        c.Prom,
 		Version:     c.Version,
 		ClusterName: clusterName,
+		Region:      c.Region,
 		MetaBackend: c.MetaBackend,
 		DataBackend: c.DataBackend,
 		Started:     time.Now(),

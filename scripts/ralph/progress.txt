@@ -309,6 +309,47 @@ Cycle: ralph/web-ui-foundation
   empty matrix → empty chart with metrics_available=true. That's
   intentional — empty-but-available is "no traffic", different from
   "we don't know".
+- Strata is single-region (cfg.RegionName, default 'strata-local',
+  env STRATA_REGION). adminapi.Server.Region echoes it into
+  BucketSummary.region for every bucket — meta.Bucket has no per-bucket
+  Region field. Per-bucket region is a Phase 2 candidate if multi-region
+  lands.
+- Sortable list endpoints: comparator returns int (-1/0/1), negate on
+  desc, fall back to a fixed secondary key (Name ASC) only when primary
+  returns 0 — this keeps the secondary key direction-independent so
+  two equal-on-primary rows always tie-break alphabetically. See
+  sortBucketsListEntries in internal/adminapi/buckets.go. cmpString +
+  cmpInt64 helpers in the same file are reusable for the next
+  paginated endpoint.
+- adminapi pagination helpers: parsePositive(s, def) (default-on-empty
+  or non-positive) + parseRange(s, def, lo, hi) (clamp to [lo,hi]).
+  Re-use for any paginated /admin/v1/* endpoint instead of cloning
+  strconv.Atoi+clamp logic.
+- React paginated table pattern (US-010 Buckets, will repeat for
+  US-011 Objects): useQuery({ placeholderData: keepPreviousData })
+  so pagination/sort/refetch keeps the previous page visible until
+  the new payload lands. Pair with `q.isFetching && !showSkeleton`
+  to surface 'Refreshing…' in the card description. useEffect on
+  (debouncedSearch, sort, order) → setPage(1) so a filter change
+  doesn't strand you on a now-empty page.
+- React debounced input pattern: useDebounced hook (300 ms) + a
+  useMemo-built params object so queryKey + queryFn closure don't
+  churn on every keystroke. The fetch only fires when the debounced
+  value changes.
+- shadcn/ui Input lacks an icon slot. Wrap in a relative div with an
+  absolute-positioned Lucide icon (left-2 top-1/2 -translate-y-1/2
+  pointer-events-none) and pl-8 on the Input. Used by the Buckets
+  search input; same pattern for any toolbar filter (US-011 object
+  browser prefix filter, etc.).
+- Refresh button on a paginated query invalidates the WHOLE subtree
+  (queryClient.invalidateQueries({queryKey:['buckets','list']})) —
+  not just the current page key — so cached neighbouring pages
+  refresh too.
+- Anonymous Go struct types in a func parameter must match EXACTLY
+  the anonymous struct in the caller. A locally-declared
+  `type entry struct{...}` is a NAMED type and won't satisfy the
+  anonymous-struct param. Promote the helper struct to a
+  package-level named type whenever it crosses a function boundary.
 
 ## 2026-05-02 - US-007
 - Top Buckets + Top Consumers widgets wired end-to-end on the home page,
@@ -1385,3 +1426,82 @@ Cycle: ralph/web-ui-foundation
     'dataMax'] gives accurate time-spaced X axis when data
     points are not evenly spaced — without it recharts spaces
     them by index.
+
+## 2026-05-02 - US-010
+- Buckets list page wired end-to-end. New /admin/v1/buckets GET handler
+  with query/sort/order/page/page_size; React /console/buckets toolbar +
+  sortable table + 50-row pagination + debounced search + refresh.
+- Files changed:
+  - internal/adminapi/server.go — Server + Config gain Region field
+    (single-region today, sourced from cfg.RegionName).
+  - internal/adminapi/buckets.go — handleBucketsList rewrite with
+    sortBucketsListEntries + cmpString + cmpInt64 + parsePositive +
+    parseRange. Named type bucketsListEntry pairs *meta.Bucket with the
+    partial summary so sort/paginate keep the bucket pointer attached.
+  - internal/adminapi/openapi.yaml — /buckets parameters now enumerate
+    sort enum + asc/desc + defaults; description block documents
+    sort default 'created' and order default ASC for name/owner else DESC.
+  - internal/adminapi/server_test.go — newTestServer sets
+    Region:'test-region'.
+  - internal/adminapi/buckets_list_test.go (new) — 10 tests covering
+    default sort, name asc, owner desc tie-break, size desc, object_count
+    asc, query case-insensitive, pagination + page overflow, page_size
+    clamp, bad sort/order 400, empty store.
+  - cmd/strata-gateway/main.go — passes cfg.RegionName as adminapi.Config
+    Region.
+  - web/src/pages/Buckets.tsx — full page rewrite with toolbar (debounced
+    search + refresh), sortable column headers (Name, Owner, Region
+    (non-sortable), Created, Size, Object count), 50-row pagination
+    (prev/next + PageNumbers compact picker windowed ±2 with
+    first/last sentinels + ellipses), keepPreviousData on the useQuery
+    so pagination doesn't blank-out the table, name → /buckets/{name}
+    Link (US-011), empty state with disabled 'Create your first bucket'
+    Phase 2 placeholder.
+- **Learnings for future iterations:**
+  - Single-region: BucketSummary.region is sourced from Server.Region
+    (cfg.RegionName) — NOT per-bucket. meta.Bucket has no Region field;
+    Strata is single-region today and Phase 2 may carry a per-bucket
+    region if multi-region lands. Echoing the gateway's region is the
+    right Phase-1 read.
+  - Sort tie-break MUST stay direction-independent. The natural
+    'flip the comparator on desc' approach reverses the secondary key
+    too — so two equal-on-primary rows swap. Pattern: comparator
+    returns int (-1/0/1), negate on desc, fall back to a fixed
+    secondary key (Name ASC) only when primary returns 0. See
+    sortBucketsListEntries in buckets.go.
+  - Sort by 'created' must use bucket.CreatedAt UnixNano, NOT the
+    seconds-truncated summary.CreatedAt. Otherwise buckets created
+    within the same wall-clock second sort by the secondary tie-break
+    instead of true creation order. The wire format stays seconds
+    (consistent with started_at) — internal sort uses full precision
+    via the bucket pointer kept alongside each entry.
+  - Anonymous Go struct types in a func parameter must match
+    EXACTLY the anonymous struct in the caller. A locally-declared
+    `type entry struct{...}` is a NAMED type and won't satisfy the
+    anonymous-struct param. Promote the helper struct to a
+    package-level named type whenever it crosses a function boundary.
+  - parseRange + parsePositive are general adminapi helpers — re-use
+    them for the next paginated endpoint (US-011 ListObjects page_size
+    arg) instead of cloning strconv.Atoi clamp logic.
+  - keepPreviousData on the useQuery pattern is essential for
+    paginated tables: pagination/sort/refetch keeps the previous page
+    visible until the new payload lands (no blank-out flash). Pair
+    with `q.isFetching && !showSkeleton` to surface 'Refreshing…'
+    in the card description.
+  - Page reset on filter/sort change: useEffect on (debouncedSearch,
+    sort, order) → setPage(1). Without this, switching from a 5-page
+    'media' query back to 'all buckets' leaves you stranded on page 5
+    with maybe no rows.
+  - Search debounce: useDebounced hook (300 ms) AND a stable
+    useMemo-built params object so the queryKey + queryFn closure
+    don't churn on every keystroke. The fetch only fires when the
+    debounced value changes.
+  - shadcn/ui Input has no built-in icon slot — wrap in a relative
+    div with absolute-positioned Lucide icon (left-2 top-1/2
+    -translate-y-1/2 pointer-events-none) and pl-8 on the Input.
+    Same pattern will work for the object-browser filter (US-011).
+  - Refresh button invalidates the WHOLE ['buckets', 'list'] subtree
+    (queryClient.invalidateQueries({queryKey:['buckets','list']})) —
+    not just the current page key — so pages outside the current
+    view refresh too.
+---

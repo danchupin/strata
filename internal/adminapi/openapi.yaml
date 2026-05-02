@@ -314,22 +314,32 @@ paths:
     get:
       summary: List buckets
       operationId: listBuckets
+      description: |
+        US-010 Buckets page. `query` is a case-insensitive substring match on
+        the bucket name. `sort` defaults to `created`. `order` defaults to
+        `asc` for `name`/`owner` and `desc` for `created`/`size`/`object_count`.
+        `page` is 1-based and defaults to 1; `page_size` defaults to 50, max 500.
+        `total` is the row count BEFORE pagination so the UI can render
+        page-count chips.
       parameters:
         - name: query
           in: query
           schema: { type: string }
         - name: sort
           in: query
-          schema: { type: string }
+          schema:
+            type: string
+            enum: [name, owner, created, size, object_count]
+            default: created
         - name: order
           in: query
           schema: { type: string, enum: [asc, desc] }
         - name: page
           in: query
-          schema: { type: integer, minimum: 1 }
+          schema: { type: integer, minimum: 1, default: 1 }
         - name: page_size
           in: query
-          schema: { type: integer, minimum: 1, maximum: 500 }
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
       responses:
         '200':
           description: Buckets list.

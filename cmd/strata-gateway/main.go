@@ -84,6 +84,7 @@ func main() {
 		Prom:        prom,
 		Version:     version,
 		ClusterName: clusterName,
+		Region:      cfg.RegionName,
 		MetaBackend: cfg.MetaBackend,
 		DataBackend: cfg.DataBackend,
 		JWTSecret:   jwtSecret,
