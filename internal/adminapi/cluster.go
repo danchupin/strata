@@ -2,12 +2,14 @@ package adminapi
 
 import "net/http"
 
-// handleClusterStatus serves GET /admin/v1/cluster/status. Phase 1 stub.
+// handleClusterStatus serves GET /admin/v1/cluster/status. Phase 1 stub —
+// US-006 fills the remaining derived fields (uptime, node counts, backends).
 func (s *Server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ClusterStatus{
-		Status:    "ok",
-		Version:   s.Version,
-		StartedAt: s.Started.Unix(),
+		Status:      "ok",
+		Version:     s.Version,
+		StartedAt:   s.Started.Unix(),
+		ClusterName: s.ClusterName,
 	})
 }
 

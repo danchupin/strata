@@ -67,7 +67,8 @@ func main() {
 
 	jwtSecret, jwtSource := loadJWTSecret()
 	log.Printf("admin: jwt secret source=%s", jwtSource)
-	adminServer := adminapi.New(metaStore, mw.Store, buildVersion(), jwtSecret)
+	clusterName := os.Getenv("STRATA_CLUSTER_NAME")
+	adminServer := adminapi.New(metaStore, mw.Store, buildVersion(), clusterName, jwtSecret)
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())

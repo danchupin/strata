@@ -19,7 +19,7 @@ func newAuthServer() *Server {
 	creds := auth.NewStaticStore(map[string]*auth.Credential{
 		"test-key": {AccessKey: "test-key", Secret: "test-secret", Owner: "test"},
 	})
-	s := New(nil, creds, "test-sha", []byte("0123456789abcdef0123456789abcdef"))
+	s := New(nil, creds, "test-sha", "test-cluster", []byte("0123456789abcdef0123456789abcdef"))
 	s.Started = time.Unix(1_700_000_000, 0)
 	return s
 }

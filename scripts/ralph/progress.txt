@@ -116,6 +116,32 @@ Cycle: ralph/web-ui-foundation
 - React auth state machine: 'unknown' | 'unauthenticated' | 'authenticated'.
   The 'unknown' state during the initial whoami probe prevents a flash of
   the login page on hard-refresh of a deep link.
+- AppShell layout pattern: web/src/components/layout/AppShell.tsx is the
+  authenticated shell — sticky w-60 / w-14 sidebar (left), sticky top bar,
+  flex-1 main with <Outlet />. Wrap inside RequireAuth at the route layout
+  level (App.tsx uses `<Route element={<RequireAuth><AppShell/></RequireAuth>}>`
+  with index/child routes). Stub pages live under web/src/pages/<Name>.tsx
+  and export a single named component <NamePage>. New nav items: add to
+  web/src/components/layout/nav.ts (icon from lucide-react) AND register
+  the corresponding <Route> in App.tsx — both ends must stay in sync.
+- Sidebar collapse: useState + localStorage['strata.sidebar.collapsed']
+  ('1' | '0'). Collapsed=true forces icon-only regardless of width.
+  useMediaQuery('(max-width: 1023px)') forces collapsed when narrow even
+  if persistedCollapsed=false; the user toggle is hidden in that range so
+  the sidebar can't be expanded against the breakpoint policy.
+- Mobile sidebar (<640px via useMediaQuery): desktop <aside> hidden;
+  hamburger Menu button in the top bar opens a Sheet side='left' wrapping
+  the same SidebarNav. Pass onNavigate=()=>setMobileOpen(false) so tapping
+  a link closes the sheet — Radix Dialog does NOT auto-close on Link
+  navigation.
+- Top-bar cluster name: fetch /admin/v1/cluster/status::cluster_name once
+  on mount via useClusterStatus (single useEffect, no polling yet). US-008
+  will replace with useQuery({queryKey:['cluster','status'],...}). Fallback
+  display 'Strata' when fetch fails / before first response.
+- /admin/v1/cluster/status::cluster_name comes from STRATA_CLUSTER_NAME env;
+  default 'strata' when empty. adminapi.New takes clusterName as a separate
+  arg AFTER version. Wire from main.go: adminapi.New(meta, creds, version,
+  os.Getenv("STRATA_CLUSTER_NAME"), jwtSecret).
 
 ## 2026-05-02 - US-001 (close-out)
 - US-001 was implemented in prior commit e4094bf on this branch ("feat: US-001 -
@@ -478,4 +504,122 @@ Cycle: ralph/web-ui-foundation
     Authorization header (the auth middleware does the parsing); for
     the cookie path, mint a JWT directly via signSession() — much
     simpler than constructing SigV4 from scratch.
+---
+
+## 2026-05-02 - US-005
+- Authenticated app shell with sidebar + top bar + content Outlet wired
+  end-to-end. Replaces the Phase-1 placeholder HomeShell from US-004.
+- Go side (one small change in service of the top-bar cluster name):
+  - internal/adminapi/types.go ClusterStatus gained ClusterName (json
+    cluster_name).
+  - internal/adminapi/server.go Server.ClusterName + adminapi.New now
+    takes clusterName arg (defaults to 'strata' when empty).
+  - internal/adminapi/cluster.go handleClusterStatus echoes
+    s.ClusterName.
+  - internal/adminapi/server_test.go + auth_test.go updated to pass
+    'test-cluster' through New(); TestClusterStatusShape now asserts
+    the new field.
+  - cmd/strata-gateway/main.go reads os.Getenv('STRATA_CLUSTER_NAME')
+    and passes it to adminapi.New.
+- React side:
+  - web/src/api/cluster.ts (new) — fetchClusterStatus + ClusterStatus
+    type with optional fields for US-006 expansion (uptime_sec,
+    node_count, node_count_healthy, meta_backend, data_backend).
+  - web/src/components/layout/nav.ts (new) — primaryNav array shared
+    between desktop sidebar + mobile sheet + future breadcrumb hooks.
+    Each item: { to, label, icon, end? } using lucide-react icons.
+  - web/src/components/layout/SidebarNav.tsx (new) — NavLink-based
+    nav list. collapsed=true → icon-only with sr-only label + title
+    tooltip. onNavigate fires after click so the mobile Sheet can
+    close itself.
+  - web/src/components/layout/AppShell.tsx (new) — sticky <aside>
+    (w-60 expanded / w-14 collapsed, transition-[width] 200ms), top
+    bar (cluster name from useClusterStatus, Phase 1 badge, disabled
+    global search input md+ only, ThemeToggle, UserMenu), main with
+    <Outlet />. useMediaQuery hooks for (max-width: 1023px) → forces
+    collapsed; (max-width: 639px) → swaps the desktop sidebar for a
+    Sheet triggered by hamburger Menu button. Collapse toggle button
+    persists state to localStorage['strata.sidebar.collapsed'].
+  - web/src/pages/{Overview,Buckets,Consumers,Metrics,Settings}.tsx
+    (new) — header + 'coming soon' Card placeholders so the nav has
+    real targets. Overview is the index route (path '/').
+  - web/src/App.tsx — restructured: /login standalone; nested layout
+    route wraps AppShell inside RequireAuth; child routes map to the
+    five stub pages; '*' redirects to '/'. HomeShell deleted (replaced
+    by AppShell + OverviewPage).
+- Files changed:
+  - internal/adminapi/{types.go, server.go, cluster.go, server_test.go,
+    auth_test.go}
+  - cmd/strata-gateway/main.go
+  - web/src/api/cluster.ts (new)
+  - web/src/components/layout/{nav.ts, SidebarNav.tsx, AppShell.tsx} (new)
+  - web/src/pages/{Overview,Buckets,Consumers,Metrics,Settings}.tsx (new)
+  - web/src/App.tsx
+- Quality checks:
+  - go vet ./... clean
+  - go test ./... clean (root + adminapi + auth + leader + lifecycle +
+    meta/memory + s3api)
+  - go build ./... clean
+  - cd web && pnpm run typecheck clean
+  - cd web && pnpm run build clean
+  - Bundle: 299 KiB raw / 96.4 KiB gzipped JS + 29.7 KiB raw / 5.9 KiB
+    gzipped CSS (was 90.6 KiB JS at US-004; +5.8 KiB for AppShell + 5
+    stub pages + cluster fetch wrapper). Total ≈102 KiB gzipped, well
+    under the 500 KiB budget.
+  - Runtime smoke on :9996 with STRATA_CLUSTER_NAME=ralph-shell +
+    STRATA_AUTH_MODE=required + STRATA_STATIC_CREDENTIALS=test:test:owner:
+      /console/ → 200 (415 B index.html)
+      /admin/v1/auth/whoami anon → 401
+      /admin/v1/auth/login (test:test) → 200 + Set-Cookie strata_session
+      /admin/v1/cluster/status w/ cookie → 200
+        {status:'ok',version:'dev',started_at:...,cluster_name:'ralph-shell'}
+      /console/buckets SPA fallback → 200 (router-handled deep link)
+- Browser MCP unavailable this iteration; full Playwright run is
+  scheduled for US-012 (login → overview → buckets → logout critical
+  path will exercise the AppShell across viewports).
+- **Learnings for future iterations:**
+  - React Router v6 layout pattern: <Route element={<Wrapper />}> with
+    NO `path` prop wraps its children in <Wrapper>. The wrapper renders
+    <Outlet /> in place of the child route's element. AppShell uses
+    this — RequireAuth is the auth gate, AppShell is the chrome, child
+    routes are pages. Don't put the wrapper inside `element` of every
+    page route; the layout-route pattern is cleaner and avoids
+    re-mounting AppShell on navigation (which would discard sidebar
+    state + cluster-status fetch).
+  - useMediaQuery initializer must guard typeof window !== 'undefined'
+    even though the app only runs in the browser today — Vite's SSR-ish
+    pre-bundling can hit the initializer in a non-window context. Cheap
+    insurance.
+  - Radix Dialog / Sheet does NOT auto-close on internal navigation
+    (Link / NavLink). Pass an explicit onNavigate callback into
+    SidebarNav and call setOpen(false) — otherwise the mobile drawer
+    stays open after a route change, which feels broken.
+  - NavLink className supports both string and ({isActive}) => string;
+    using the function form is the standard way to apply active
+    styling without writing a useMatch hook.
+  - 'NavLink end' prop matters for the index route ('/') — without
+    end:true the Overview link stays active on every '/buckets' /
+    '/metrics' page because they all start with '/'.
+  - localStorage reads in useState initializers must be lazy
+    (`useState(readCollapsed)` not `useState(readCollapsed())`) to
+    avoid running during SSR if we ever add it. Trivial habit.
+  - The sticky sidebar uses `top-0 h-screen` + `sticky` so it follows
+    the scroll without layout shift; the top bar uses `sticky top-0`
+    + `bg-background/95 backdrop-blur` so content scrolls underneath
+    it cleanly. supports-[backdrop-filter] guard skips the blur on
+    browsers without it.
+  - cluster_name display should fall back to a hardcoded 'Strata'
+    when fetch fails — the alternative (blank top bar) looks broken
+    on slow links. The actual cluster name swaps in once status
+    arrives, no flicker.
+  - adminapi.New signature change cascaded into 2 test files. Future
+    constructor changes: grep `adminapi.New(` first to find every
+    call site; keep the call sites narrow (currently main.go +
+    server_test.go + auth_test.go) so the cascade stays small.
+  - Phase 2 things that are intentionally placeholder UI in this
+    story (do NOT wire them into Phase 1): global search input
+    (disabled, 'coming in Phase 2' placeholder), Settings page card,
+    Consumers page (US-007 widget on Overview is the only Phase 1
+    consumers surface — the dedicated page slot is reserved for
+    Phase 2). Resist the temptation to fill these in.
 ---

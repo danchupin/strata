@@ -22,26 +22,32 @@ import (
 
 // Server holds dependencies the /admin/v1/* handlers need.
 type Server struct {
-	Meta      meta.Store
-	Creds     auth.CredentialsStore
-	Version   string
-	Started   time.Time
-	JWTSecret []byte
-	Logger    *log.Logger
+	Meta        meta.Store
+	Creds       auth.CredentialsStore
+	Version     string
+	ClusterName string
+	Started     time.Time
+	JWTSecret   []byte
+	Logger      *log.Logger
 }
 
 // New constructs a Server with the given dependencies. Started defaults to
 // now. jwtSecret is the HS256 key for session cookies; an empty value means
 // login will fail closed (the gateway logs a WARN at startup if env is unset
-// and generates an ephemeral secret).
-func New(m meta.Store, creds auth.CredentialsStore, version string, jwtSecret []byte) *Server {
+// and generates an ephemeral secret). clusterName falls back to "strata"
+// when empty.
+func New(m meta.Store, creds auth.CredentialsStore, version, clusterName string, jwtSecret []byte) *Server {
+	if clusterName == "" {
+		clusterName = "strata"
+	}
 	return &Server{
-		Meta:      m,
-		Creds:     creds,
-		Version:   version,
-		Started:   time.Now(),
-		JWTSecret: jwtSecret,
-		Logger:    log.Default(),
+		Meta:        m,
+		Creds:       creds,
+		Version:     version,
+		ClusterName: clusterName,
+		Started:     time.Now(),
+		JWTSecret:   jwtSecret,
+		Logger:      log.Default(),
 	}
 }
 

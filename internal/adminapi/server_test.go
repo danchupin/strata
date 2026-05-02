@@ -17,7 +17,7 @@ import (
 // 401-on-anonymous test.
 func newTestServer() *Server {
 	creds := auth.NewStaticStore(map[string]*auth.Credential{})
-	s := New(metamem.New(), creds, "test-sha", []byte("0123456789abcdef0123456789abcdef"))
+	s := New(metamem.New(), creds, "test-sha", "test-cluster", []byte("0123456789abcdef0123456789abcdef"))
 	s.Started = time.Unix(1_700_000_000, 0)
 	return s
 }
@@ -79,6 +79,9 @@ func TestClusterStatusShape(t *testing.T) {
 	}
 	if got.StartedAt != 1_700_000_000 {
 		t.Errorf("started_at: got %d", got.StartedAt)
+	}
+	if got.ClusterName != "test-cluster" {
+		t.Errorf("cluster_name: got %q want %q", got.ClusterName, "test-cluster")
 	}
 }
 

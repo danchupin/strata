@@ -5,9 +5,10 @@ package adminapi
 // without renaming or removing them.
 
 type ClusterStatus struct {
-	Status    string `json:"status"`
-	Version   string `json:"version"`
-	StartedAt int64  `json:"started_at"`
+	Status      string `json:"status"`
+	Version     string `json:"version"`
+	StartedAt   int64  `json:"started_at"`
+	ClusterName string `json:"cluster_name"`
 }
 
 type ClusterNodesResponse struct {
