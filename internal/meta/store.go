@@ -76,7 +76,7 @@ var (
 )
 
 // RewrapProgress tracks a master-key rewrap pass for a single bucket. Used by
-// cmd/strata-rewrap for resumability across runs.
+// `strata-admin rewrap` for resumability across runs.
 type RewrapProgress struct {
 	BucketID  uuid.UUID
 	TargetID  string
@@ -349,7 +349,7 @@ type AuditEvent struct {
 
 // AuditPartition identifies a single (bucket_id, day) partition of the
 // audit_log table. Returned by ListAuditPartitionsBefore for the
-// strata-audit-export worker (US-046) so it can read each fully-aged
+// audit-export worker (US-046) so it can read each fully-aged
 // partition, write a gzipped JSON-lines export, then delete the partition.
 // Day is normalised to UTC midnight; Bucket carries the human-readable
 // bucket name when known (or "-" for IAM-scoped rows under uuid.Nil).
@@ -480,7 +480,7 @@ type Store interface {
 	ListAuditFiltered(ctx context.Context, filter AuditFilter) ([]AuditEvent, string, error)
 	// ListAuditPartitionsBefore returns every audit_log (bucket, day)
 	// partition whose day is strictly older than the UTC day containing
-	// `before`. Used by strata-audit-export to enumerate fully-aged
+	// `before`. Used by the audit-export worker to enumerate fully-aged
 	// partitions ready for export+delete.
 	ListAuditPartitionsBefore(ctx context.Context, before time.Time) ([]AuditPartition, error)
 	// ReadAuditPartition returns every row in a single (bucket, day)
@@ -489,7 +489,7 @@ type Store interface {
 	// (use the value returned from ListAuditPartitionsBefore).
 	ReadAuditPartition(ctx context.Context, bucketID uuid.UUID, day time.Time) ([]AuditEvent, error)
 	// DeleteAuditPartition drops every row in the given partition. Issued
-	// after a successful export upload by strata-audit-export.
+	// after a successful export upload by the audit-export worker.
 	DeleteAuditPartition(ctx context.Context, bucketID uuid.UUID, day time.Time) error
 
 	SetObjectTags(ctx context.Context, bucketID uuid.UUID, key, versionID string, tags map[string]string) error

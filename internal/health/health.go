@@ -1,5 +1,5 @@
 // Package health exposes /healthz (liveness) and /readyz (readiness)
-// endpoints for the strata-gateway. Probes are injected by the cmd layer so
+// endpoints for the strata server. Probes are injected by the cmd layer so
 // the package stays free of backend imports (cassandra, rados).
 package health
 

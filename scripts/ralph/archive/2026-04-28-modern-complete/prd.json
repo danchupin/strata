@@ -1,0 +1,356 @@
+{
+  "project": "Strata",
+  "branchName": "ralph/binary-consolidation",
+  "description": "Collapse the eleven cmd/* binaries into two: a single `strata` binary with subcommands (CockroachDB-shape: `strata server`, `strata version`, ...) and a separate `strata-admin` operator CLI. Every background worker (gc, lifecycle, notify, replicator, access-log, inventory, audit-export, manifest-rewriter) becomes a goroutine inside `strata server`, selected by --workers / STRATA_WORKERS, each holding its own internal/leader lease keyed on the worker name. The one-shot SSE key rotation moves into `strata-admin rewrap`. Hard cut, no symlinks, no thin wrappers. End state: two binaries, one Docker image, one Kubernetes Deployment per replica.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Roadmap maintenance rule in project CLAUDE.md",
+      "description": "As a developer or autonomous agent doing feature work on Strata, I need an explicit, durable rule in the project root CLAUDE.md that any commit which closes or discovers a ROADMAP.md item must update the roadmap in the same commit, so the roadmap stays an honest reflection of project state at every SHA. Lands first so all subsequent stories follow the rule.",
+      "acceptanceCriteria": [
+        "New top-level section `## Roadmap maintenance` appended to project root CLAUDE.md (the file at the repo root, NOT scripts/ralph/CLAUDE.md)",
+        "Rule states: every commit that closes a ROADMAP.md item MUST flip the bullet to the format `~~**P<n> — <title>.**~~ — **Done.** <one-line summary>. (commit `<sha>`)` in the same commit, or the immediate follow-up if the closing SHA is needed inline",
+        "Rule states: every commit that discovers a new gap, latent bug, or regression MUST add a new entry under the appropriate ROADMAP.md section (P1/P2/P3 by severity, or `Known latent bugs` for bugs)",
+        "Rule applies to all work — Ralph autorun and human-driven commits alike",
+        "Section includes one explicit example each of close-flip and new-discovery diff shapes so a junior reader knows the exact pattern",
+        "Rule notes ROADMAP.md is the canonical project state list; PRDs in tasks/ are scoped to specific cycles and do not need to mirror the roadmap",
+        "No code or test changes (docs-only story)",
+        "git diff CLAUDE.md shows only the new section added; no unrelated edits",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Cobra/flag skeleton for unified strata command",
+      "description": "As a developer, I need a root cmd/strata/main.go that dispatches subcommands, so each worker becomes a subcommand of one binary.",
+      "acceptanceCriteria": [
+        "New cmd/strata/main.go with a root command that prints help and exits 0",
+        "`strata version` subcommand prints the build's git SHA + Go runtime",
+        "`strata server --help` prints flags and the --workers list",
+        "Flag set is cross-cutting only: --listen, --workers, --auth-mode, --vhost-pattern, --log-level — no per-worker tunable flags",
+        "`go build -o bin/strata ./cmd/strata` succeeds with and without -tags ceph",
+        "`go vet ./cmd/strata/...` passes",
+        "Unit tests cover help and version paths",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "strata server subcommand wires existing gateway entrypoint",
+      "description": "As a developer, I want `strata server` to run what cmd/strata-gateway/main.go runs today, so the migration is a refactor not a rewrite.",
+      "acceptanceCriteria": [
+        "cmd/strata-gateway/main.go content moves to cmd/strata/server.go as `func runServer(ctx, cfg) error` with no behavioural changes",
+        "`strata server` reads the same STRATA_* env vars cmd/strata-gateway reads today",
+        "Cross-cutting flags (--listen, --auth-mode, --vhost-pattern) override env which overrides defaults",
+        "make smoke passes pointing at `bin/strata server`",
+        "make smoke-signed passes against the new binary",
+        "cmd/strata-gateway/ NOT yet deleted (US-013 deletes it after worker migrations land)",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Worker registry + leader-elected goroutine pattern + panic recovery",
+      "description": "As a developer, I need a cmd/strata/workers/ package that registers workers by name and runs each in its own leader-elected goroutine with panic recovery + exponential-backoff restart, so a single worker panic never kills the gateway or sibling workers.",
+      "acceptanceCriteria": [
+        "New cmd/strata/workers/registry.go with `type Worker struct { Name string; Build func(deps Dependencies) (Runner, error) }` and a `Register(w Worker)` function",
+        "Dependencies carries *slog.Logger, meta.Store, data.Backend, *otel.Provider, prometheus.Registerer, plus per-worker env hooks",
+        "Each registered worker runs in its own goroutine with its own leader.Session keyed on the worker name (gc-leader, lifecycle-leader, ...)",
+        "Loss-of-lease cancels only that worker's context, never the gateway's or another worker's",
+        "PANIC RECOVERY: each worker goroutine wraps Run(ctx) in `defer recover()`. Caught panic logs ERROR with stack trace, increments `strata_worker_panic_total{worker=<name>}` Prometheus counter, releases the leader lease, then re-acquires + restarts the worker after a backoff",
+        "Restart backoff is exponential: 1s -> 5s -> 30s -> 2m cap; resets to 1s after the worker stays up >= 5 minutes. Backoff function injectable so tests flatten it to zero",
+        "Process must NOT exit on a worker panic; gateway and sibling workers must continue serving",
+        "--workers= parses comma-separated names into a deduplicated set; unknown names cause immediate startup error",
+        "STRATA_WORKERS env var sets the same list; flag overrides env",
+        "Unit tests cover: registry round-trip, unknown name rejection, dependency injection, lease loss isolation, panic-then-restart cycle (inject panic in fake worker -> verify counter increments, lease released, worker restarts within backoff, gateway + sibling workers untouched)",
+        "go test ./cmd/strata/workers/... passes",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Migrate gc worker into the registry",
+      "description": "As a developer, I want gc registered as a worker so `strata server --workers=gc` runs what cmd/strata-gc runs today.",
+      "acceptanceCriteria": [
+        "cmd/strata/workers/gc.go registers a worker named `gc` whose Build mirrors cmd/strata-gc/main.go",
+        "Per-worker env vars (STRATA_GC_INTERVAL, STRATA_GC_BATCH_SIZE, ...) documented in `strata server --help` worker section",
+        "cmd/strata-gc/ directory deleted (no thin wrapper)",
+        "Existing internal/gc unit tests unchanged and still pass",
+        "make smoke still cleans up tombstoned chunks under `strata server --workers=gc`",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Migrate lifecycle worker into the registry",
+      "description": "As a developer, I want lifecycle registered as a worker.",
+      "acceptanceCriteria": [
+        "cmd/strata/workers/lifecycle.go registers `lifecycle`",
+        "Per-worker env vars documented in --help",
+        "cmd/strata-lifecycle/ deleted",
+        "Existing internal/lifecycle unit + integration tests pass",
+        "Lifecycle smoke (transition + expiration + MP-abort) succeeds under `strata server --workers=lifecycle`",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Migrate notify worker into the registry",
+      "description": "As a developer, I want the notify worker registered so `strata server --workers=notify` runs what cmd/strata-notify runs today.",
+      "acceptanceCriteria": [
+        "cmd/strata/workers/notify.go registers `notify`",
+        "Per-worker env vars (STRATA_NOTIFY_*) documented in --help",
+        "cmd/strata-notify/ deleted",
+        "Existing internal/notify tests unchanged and still pass",
+        "Webhook + SQS sink dispatch verified by an integration smoke against the unified binary",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Migrate replicator worker into the registry",
+      "description": "As a developer, I want the replicator registered so `strata server --workers=replicator` runs what cmd/strata-replicator runs today.",
+      "acceptanceCriteria": [
+        "cmd/strata/workers/replicator.go registers `replicator`",
+        "Per-worker env vars (STRATA_REPLICATOR_*) documented in --help",
+        "cmd/strata-replicator/ deleted",
+        "Existing internal/replicator tests unchanged and still pass",
+        "Strata-to-Strata replication round-trip verified under the unified binary",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Migrate access-log worker into the registry",
+      "description": "As a developer, I want the access-log worker registered so `strata server --workers=access-log` runs what cmd/strata-access-log runs today.",
+      "acceptanceCriteria": [
+        "cmd/strata/workers/access_log.go registers `access-log`",
+        "Per-worker env vars (STRATA_ACCESS_LOG_*) documented in --help",
+        "cmd/strata-access-log/ deleted",
+        "Existing internal/accesslog tests unchanged and still pass",
+        "5-minute flush of the access_log_buffer table into AWS-format log objects verified by an integration test",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Migrate inventory worker into the registry",
+      "description": "As a developer, I want the inventory worker registered so `strata server --workers=inventory` runs what cmd/strata-inventory runs today.",
+      "acceptanceCriteria": [
+        "cmd/strata/workers/inventory.go registers `inventory`",
+        "Per-worker env vars (STRATA_INVENTORY_*) documented in --help",
+        "cmd/strata-inventory/ deleted",
+        "Existing internal/inventory tests unchanged and still pass",
+        "Manifest.json + CSV.gz report round-trip verified under the unified binary",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "Migrate audit-export worker into the registry",
+      "description": "As a developer, I want the audit-export worker registered so `strata server --workers=audit-export` runs what cmd/strata-audit-export runs today.",
+      "acceptanceCriteria": [
+        "cmd/strata/workers/audit_export.go registers `audit-export`",
+        "Per-worker env vars (STRATA_AUDIT_EXPORT_*) documented in --help",
+        "cmd/strata-audit-export/ deleted",
+        "Existing internal/auditexport tests unchanged and still pass",
+        "Daily JSON-lines drain + source-partition delete round-trip verified under the unified binary",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "Migrate manifest-rewriter worker into the registry",
+      "description": "As a developer, I want manifest-rewriter (US-049 of the prior cycle) registered so the JSON to protobuf manifest migration runs inside the unified binary.",
+      "acceptanceCriteria": [
+        "cmd/strata/workers/manifest_rewriter.go registers `manifest-rewriter`",
+        "Per-worker env vars documented in --help",
+        "cmd/strata-manifest-rewriter/ deleted",
+        "Existing internal/manifestrewriter tests unchanged and still pass",
+        "Idempotent re-run (skip already-proto rows) verified",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "Move rewrap into strata-admin as a subcommand",
+      "description": "As an operator, I want `strata-admin rewrap` to run the SSE master key rotation worker, since it is a one-shot human-invoked operation rather than a long-running daemon.",
+      "acceptanceCriteria": [
+        "cmd/strata-admin/rewrap.go adds a `rewrap` subcommand wiring up internal/rewrap exactly as cmd/strata-rewrap/main.go does today",
+        "--target-key-id <id> flag selects the destination wrap key; defaults match the env-driven flow",
+        "Logs progress to stderr; exits 0 when every bucket completes; exits non-zero with structured error if a bucket fails",
+        "No --continue / --from-bucket flags — resumption is automatic via the persisted per-bucket progress rows (meta.Store.SetRewrapProgress)",
+        "cmd/strata-rewrap/ deleted",
+        "Idempotency preserved (re-run skips already-rewrapped rows) — covered by an existing or new integration test",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-014",
+      "title": "Delete cmd/strata-gateway/ and reroute helpers",
+      "description": "As a developer, I want the old gateway binary directory removed once `strata server` is the supported entrypoint, so there is one source of truth.",
+      "acceptanceCriteria": [
+        "cmd/strata-gateway/ deleted",
+        "Helper packages it owned that are not reused are removed; reusable ones moved to internal/<area> with the rename in the same commit",
+        "No file outside cmd/strata/ references cmd/strata-gateway",
+        "go build ./... passes",
+        "go build -tags ceph ./... passes",
+        "make smoke and make smoke-signed pass",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-015",
+      "title": "Dockerfile single-binary entrypoint",
+      "description": "As an operator, I want one Docker image whose entrypoint is the unified strata binary.",
+      "acceptanceCriteria": [
+        "deploy/docker/Dockerfile builds only `strata` and `strata-admin`",
+        "Image ENTRYPOINT [\"/usr/local/bin/strata\"], default CMD [\"server\"]",
+        "Final image size does not regress more than 5% vs the previous gateway-only image",
+        "make docker-build succeeds",
+        "Image labels include the git SHA",
+        "Typecheck passes"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-016",
+      "title": "docker-compose collapse to single strata service",
+      "description": "As a developer running make up-all, I want one strata service in compose with workers selected by environment.",
+      "acceptanceCriteria": [
+        "deploy/docker/docker-compose.yml collapses strata-gateway/strata-gc/strata-lifecycle/... services into a single `strata` service running `strata server`",
+        "Default STRATA_WORKERS=gc,lifecycle on the strata service",
+        "Optional `--profile features` (or compose override) enables a second strata replica with the larger worker list (notify,replicator,access-log,inventory,audit-export)",
+        "make up, make up-all, make wait-cassandra, make wait-ceph all work against the new compose shape",
+        "make smoke and make smoke-signed pass against the new compose stack",
+        "Typecheck passes"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-017",
+      "title": "Makefile and scripts update to unified binary",
+      "description": "As a developer, I want make run-memory / make run-cassandra to launch the unified binary.",
+      "acceptanceCriteria": [
+        "make build builds bin/strata and bin/strata-admin (no other binaries)",
+        "make run-memory runs `./bin/strata server` against in-memory backends",
+        "make run-cassandra runs `./bin/strata server` against Cassandra metadata + memory data with STRATA_WORKERS=gc,lifecycle",
+        "scripts/s3-tests/run.sh invokes the new binary",
+        "scripts/ralph/ralph.sh invokes the new binary path where applicable",
+        "scripts/smoke.sh and scripts/smoke-signed.sh work unchanged or with minimal env-var-only tweaks",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 17,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-018",
+      "title": "CI matrix shrink to two binaries",
+      "description": "As a developer, I want CI to build, vet, and test only the two binaries we ship.",
+      "acceptanceCriteria": [
+        ".github/workflows/ci.yml has build steps for `strata` and `strata-admin` only",
+        "lint-build, unit, integration-cassandra, docker-build, e2e jobs all pass",
+        "e2e runs against the unified binary (gateway + gc + lifecycle workers enabled by default)",
+        "One additional e2e-full job (or matrix axis) runs with all S3-feature workers enabled (notify,replicator,access-log,inventory,audit-export) and verifies /readyz plus a notification round-trip",
+        "Typecheck passes"
+      ],
+      "priority": 18,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-019",
+      "title": "Documentation update for two-binary shape",
+      "description": "As a user reading the repo, I want every doc, example, and architecture diagram to reflect the new two-binary shape.",
+      "acceptanceCriteria": [
+        "CLAUDE.md updated: architecture diagram shows one strata binary running gateway + workers; cmd/<binary> references replaced with `strata server` and `strata-admin <subcommand>`",
+        "README.md (if present) mirrors the change",
+        "docs/backends/scylla.md and any docs/ guides reference the new binary",
+        "examples/ directory commands point at the unified binary",
+        "ROADMAP.md Consolidation P1 bullet for `Single-binary strata` flips to Done with a link to the merge commit",
+        "No stale references to cmd/strata-gateway, cmd/strata-gc, cmd/strata-lifecycle, cmd/strata-notify, cmd/strata-replicator, cmd/strata-access-log, cmd/strata-inventory, cmd/strata-audit-export, cmd/strata-manifest-rewriter, cmd/strata-rewrap remain in any markdown or example",
+        "Typecheck passes"
+      ],
+      "priority": 19,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-020",
+      "title": "Migration guide doc",
+      "description": "As an operator upgrading an existing deploy, I need a one-page guide explaining which old binary maps to which new subcommand and which dashboards/alerts to retire.",
+      "acceptanceCriteria": [
+        "docs/migrations/binary-consolidation.md created",
+        "Old-binary -> new-subcommand mapping table included (cmd/strata-gateway -> strata server, cmd/strata-gc -> strata server --workers=gc, cmd/strata-rewrap -> strata-admin rewrap, ...)",
+        "Env-var renames documented (none expected; explicitly state none if so)",
+        "Kubernetes manifest delta shown (single Deployment + STRATA_WORKERS replacing N Deployments)",
+        "Dashboard / alert renames documented (strata_gateway_* -> strata_* if metric labels change)",
+        "Typecheck passes"
+      ],
+      "priority": 20,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

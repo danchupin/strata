@@ -46,10 +46,11 @@ machine flips precedence and tests pass/fail intermittently.
 - Operators set `STRATA_SSE_MASTER_KEYS=newID:newHex,oldID:oldHex,...` —
   newID becomes the wrap key for new PUTs; old ids stay unwrap-only so
   pre-rotation objects keep working.
-- `cmd/strata-rewrap` walks every bucket and rewraps DEKs from old keys to
+- `strata-admin rewrap` walks every bucket and rewraps DEKs from old keys to
   the active key (idempotent on already-current rows). Per-bucket completion
   is recorded in `meta.RewrapProgress` so re-runs skip done buckets unless
-  the active id changed.
+  the active id changed. `--target-key-id <id>` selects the destination wrap
+  key (defaults to the first STRATA_SSE_MASTER_KEYS entry).
 - Rewrap is **layered above the data backend** — only the wrapped DEK on
   `objects.sse_key` changes. Chunk ciphertext on disk is untouched (the DEK
   itself is unchanged; only its wrap key rotates).

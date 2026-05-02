@@ -32,7 +32,7 @@ type envCfg struct {
 // WithSQSClientFactory wires the AWS SDK SQS client constructor used by
 // RouterFromEnv when it encounters a "sqs:" spec. The factory receives the
 // per-target region (or "" if absent) and returns a sqs.Client (or compatible
-// mock). cmd/strata-notify wires this from config.LoadDefaultConfig.
+// mock). cmd/strata/workers/notify.go wires this from config.LoadDefaultConfig.
 func WithSQSClientFactory(factory func(region string) (SQSAPI, error)) EnvOption {
 	return func(c *envCfg) { c.sqsFactory = factory }
 }

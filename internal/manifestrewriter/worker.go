@@ -1,8 +1,8 @@
 // Package manifestrewriter walks every bucket's object versions and
 // re-encodes any JSON-format manifest blob into protobuf. Idempotent:
 // rows whose stored blob is already protobuf are skipped, so re-running
-// after a crash or partial pass is safe. Drives cmd/strata-manifest-rewriter
-// (US-049).
+// after a crash or partial pass is safe. Drives the manifest-rewriter
+// worker registered in cmd/strata/workers (US-049 / US-012).
 package manifestrewriter
 
 import (

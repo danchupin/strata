@@ -22,7 +22,7 @@ const (
 
 // KMSAPI is the subset of *awskms.Client used by AWSKMSProvider. Defining it
 // as an interface lets unit tests swap a fake without compiling the real SDK
-// transport. cmd/strata-gateway wires a real *awskms.Client via the standard
+// transport. internal/serverapp wires a real *awskms.Client via the standard
 // AWS credential chain (env vars, shared config, IRSA, EC2/ECS roles).
 type KMSAPI interface {
 	GenerateDataKey(ctx context.Context, params *awskms.GenerateDataKeyInput, optFns ...func(*awskms.Options)) (*awskms.GenerateDataKeyOutput, error)
@@ -118,7 +118,7 @@ func sameKeyARN(reported, requested string) bool {
 // NewAWSKMSProviderFromEnv reads STRATA_KMS_AWS_REGION and returns ErrNoConfig
 // when unset. The factory is required: it builds a real *awskms.Client via the
 // standard AWS SDK credential chain (env vars, shared config, IRSA, EC2/ECS
-// roles); cmd/strata-gateway supplies it.
+// roles); internal/serverapp supplies it.
 func NewAWSKMSProviderFromEnv(factory func(region string) (KMSAPI, error)) (*AWSKMSProvider, error) {
 	region := strings.TrimSpace(os.Getenv(EnvAWSKMSRegion))
 	if region == "" {

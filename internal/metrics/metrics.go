@@ -134,6 +134,14 @@ var (
 		[]string{"action", "status"},
 	)
 
+	WorkerPanicTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_worker_panic_total",
+			Help: "Number of panics caught and recovered by the worker supervisor, per worker name.",
+		},
+		[]string{"worker"},
+	)
+
 	NotifyDeliveryTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "strata_notify_delivery_total",
@@ -157,6 +165,7 @@ func Register() {
 		BucketBytes,
 		LifecycleTickTotal,
 		NotifyDeliveryTotal,
+		WorkerPanicTotal,
 	)
 }
 

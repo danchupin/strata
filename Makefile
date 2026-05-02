@@ -1,13 +1,24 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph vet test up up-all down wait-cassandra wait-ceph ceph-pool run-memory run-cassandra run-gateway smoke smoke-grafana clean
+.PHONY: build build-ceph docker-build vet test up up-all down wait-cassandra wait-ceph ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-grafana clean
+
+GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
 build:
-	go build ./...
+	go build -o bin/strata ./cmd/strata
+	go build -o bin/strata-admin ./cmd/strata-admin
 
 build-ceph:
-	$(COMPOSE) build gateway
+	$(COMPOSE) build strata
+
+docker-build:
+	docker build \
+		--build-arg GIT_SHA=$(GIT_SHA) \
+		-f deploy/docker/Dockerfile \
+		-t strata:ceph \
+		-t strata:$(GIT_SHA) \
+		.
 
 vet:
 	go vet ./...
@@ -38,7 +49,7 @@ up:
 	$(COMPOSE) up -d cassandra
 
 up-all:
-	$(COMPOSE) up -d cassandra ceph gateway prometheus grafana
+	$(COMPOSE) up -d cassandra ceph strata prometheus grafana
 
 down:
 	$(COMPOSE) down
@@ -57,18 +68,22 @@ ceph-pool:
 	docker exec strata-ceph ceph osd pool create strata.rgw.buckets.data 8 8 replicated || true
 	docker exec strata-ceph ceph osd pool application enable strata.rgw.buckets.data rgw || true
 
-run-memory:
+run-memory: build
 	STRATA_LISTEN=:9999 STRATA_META_BACKEND=memory STRATA_DATA_BACKEND=memory \
-		go run ./cmd/strata-gateway
+		./bin/strata server
 
-run-cassandra:
+run-cassandra: build
 	STRATA_LISTEN=:9999 \
 	STRATA_META_BACKEND=cassandra STRATA_DATA_BACKEND=memory \
 	STRATA_CASSANDRA_HOSTS=127.0.0.1 STRATA_CASSANDRA_DC=datacenter1 \
-		go run ./cmd/strata-gateway
+	STRATA_WORKERS=gc,lifecycle \
+		./bin/strata server
 
-run-gateway:
-	$(COMPOSE) up -d gateway
+run-strata:
+	$(COMPOSE) up -d strata
+
+# Backwards-compatible alias for the old per-binary target name.
+run-gateway: run-strata
 
 smoke:
 	bash scripts/smoke.sh http://127.0.0.1:9999

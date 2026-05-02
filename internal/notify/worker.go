@@ -118,7 +118,7 @@ func (w *Worker) Run(ctx context.Context) error {
 }
 
 // RunOnce performs a single poll-and-dispatch pass over every bucket.
-// Exposed for tests and for cmd/strata-notify --once.
+// Exposed for tests.
 func (w *Worker) RunOnce(ctx context.Context) error {
 	buckets, err := w.cfg.Meta.ListBuckets(ctx, "")
 	if err != nil {

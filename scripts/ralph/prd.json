@@ -1,810 +1,341 @@
 {
   "project": "Strata",
-  "branchName": "ralph/modern-complete",
-  "description": "Strata 'modern complete' \u2014 close P1 (production-blockers: real SSE-S3, notification publisher, replicator, access log delivery, structured logs, full metrics, health probes, virtual-hosted URLs), P2 (audit log, per-part GET, versioning null literal, website redirects, OTel, admin CLI, race harness), and P3 (SSE-KMS, Inventory, Access Points, ScyllaDB CI, multi-cluster RADOS, shard resize, audit export, examples, protobuf manifest). No legacy, no AWS-niche.",
+  "branchName": "ralph/tikv-meta-backend",
+  "description": "TiKV as a first-class metadata backend on equal footing with Cassandra. Adds internal/meta/tikv/ implementing the full meta.Store interface, introduces an optional RangeScanStore interface so the gateway uses native TiKV ordered range scans on ListObjects (vs Cassandra's 64-way fan-out), wires a docker-compose tikv profile + smoke tests + storetest contract suite, adds a parallel CI workflow mirroring ci-scylla.yml, gives the race harness a TiKV variant, publishes docs/backends/tikv.md + benchmarks vs Cassandra, and cleans up ROADMAP.md by promoting TiKV to equal-tier and dropping FoundationDB / Postgres+Citus / generic-TiDB from the alternative-metadata-backends list. The supported set after this cycle is memory + cassandra (with scylla drop-in) + tikv. No additional community backends. New deployments only — no Cassandra-to-TiKV migration tool. TiKV chosen over TiDB: Strata's meta surface is pure KV (Get/Put/CAS/Range/Txn); SQL layer adds latency without benefit.",
   "userStories": [
     {
       "id": "US-001",
-      "title": "Master-key provider interface + env/file providers",
-      "description": "As an operator, I want a pluggable Provider abstraction with built-in env-var and file-with-hot-reload backends for the SSE-S3 master key.",
+      "title": "tikv/client-go dep + internal/meta/tikv skeleton",
+      "description": "As a developer, I want a starting internal/meta/tikv package that compiles, satisfies the meta.Store interface with stub implementations, and is reachable via the existing backend factory so later stories can fill in real implementations.",
       "acceptanceCriteria": [
-        "New internal/crypto/master package with Provider interface: Resolve(ctx) (key32 []byte, keyID string, error)",
-        "Built-in env provider: STRATA_SSE_MASTER_KEY=<hex64> with optional STRATA_SSE_MASTER_KEY_ID (default 'env-1')",
-        "Built-in file provider: STRATA_SSE_MASTER_KEY_FILE=/path watches mtime for hot-reload",
-        "Invalid key length (not 32 bytes) is fatal at startup with structured-log error",
-        "Unit tests cover both providers, hot-reload, missing config",
-        "go build ./... passes",
-        "go test ./internal/crypto/master/... passes"
+        "Add github.com/tikv/client-go/v2 to go.mod; run go mod tidy",
+        "New internal/meta/tikv/store.go with type Store struct{} and stub methods returning errors.ErrUnsupported; methods conform to meta.Store interface",
+        "New internal/meta/tikv/store_test.go with one happy-path unit test asserting the stub is wired (calls Probe, expects ErrUnsupported)",
+        "STRATA_META_BACKEND=tikv is reserved but NOT selectable yet — production dispatch lands in US-015",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 1,
-      "passes": true,
-      "notes": "internal/crypto/master: Provider interface, EnvProvider (STRATA_SSE_MASTER_KEY), FileProvider (mtime hot-reload), FromEnv selector. ErrNoConfig + ErrInvalidKeyLength sentinels. Caller fatals on error."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-002",
-      "title": "Master-key Vault provider (per-cluster role)",
-      "description": "As an operator running Vault, I want to wrap the master key via Vault Transit using a per-Strata-cluster role.",
+      "title": "Key encoding scheme + namespace prefix design",
+      "description": "As a developer, I need a documented key-encoding scheme that maps Strata's compound keys (bucket-id + shard + object-key + version-id) onto TiKV's flat byte-keyed KV store, so every later story uses the same convention.",
       "acceptanceCriteria": [
-        "Built-in vault provider: STRATA_SSE_MASTER_KEY_VAULT=<addr>:<transit-path>, plus STRATA_SSE_VAULT_ROLE_ID + STRATA_SSE_VAULT_SECRET_ID",
-        "Periodic refresh every 5 minutes; cached key reused between refreshes",
-        "Vault unreachable on first init is fatal; on refresh keep last good key with WARN log",
-        "Unit tests with httptest mock of Vault Transit endpoints",
-        "go build ./... passes",
-        "go test ./internal/crypto/master/... passes"
+        "New internal/meta/tikv/keys.go exposes ObjectKey(bucketID, key, versionID), BucketKey(bucketID), MultipartKey(bucketID, key, uploadID), PrefixForBucket(bucketID), IAMUserKey(accessKey), and equivalents for every meta.Store entity",
+        "ObjectKey lex-sorts by (bucket_id, key, version_id-DESC) — version-id-DESC implemented via two's-complement of timestamp prefix so range scans return latest version first",
+        "Top-level prefix 's/' (single byte for namespace; cheap to keep out of the way of other tenants on shared TiKV)",
+        "All keys round-trip via decoder: encode → decode produces input back; property-test 1k random inputs",
+        "Document the format in internal/meta/tikv/keys.md",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 2,
-      "passes": true,
-      "notes": "internal/crypto/master/vault.go: VaultProvider with AppRole login + Transit export-encryption-key. STRATA_SSE_MASTER_KEY_VAULT=<addr>:<transit-export-path>; key id is 'vault-v<N>' from highest version. Lazy refresh on Resolve when stale (cfg.Refresh, default 5m). Initial fetch fatal; refresh failure logs WARN via injected slog.Logger and reuses last good key. FromEnv prefers vault > file > env."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-003",
-      "title": "AES-256-GCM chunk encryption package",
-      "description": "As a developer, I need a small crypto package that AEAD-encrypts and decrypts a chunk under a per-object DEK with a deterministic IV.",
+      "title": "Bucket CRUD + versioning state",
+      "description": "As Strata's gateway, I want to Create/Get/Delete/List buckets and update bucket-level state on TiKV with the same semantics Cassandra provides today (LWT-equivalent for create-if-not-exists, update-if-versioning-state).",
       "acceptanceCriteria": [
-        "New internal/crypto/sse package: EncryptChunk(dek, oid, chunkIndex, plaintext) ([]byte, error) and DecryptChunk symmetric",
-        "IV derived as HKDF-SHA256(oid, chunkIndex) producing 12 bytes",
-        "WrapDEK(masterKey, dek) and UnwrapDEK(masterKey, wrapped) using AES-256-GCM",
-        "Unit tests: round-trip; mutated ciphertext rejected; mismatched IV rejected",
-        "go build ./... passes",
-        "go test ./internal/crypto/sse/... passes"
+        "Store.CreateBucket uses TiKV pessimistic txn Get(bucketKey) + Put with conflict → returns meta.ErrBucketExists on conflict (Cassandra LWT equivalent)",
+        "Store.GetBucket is a single Get",
+        "Store.DeleteBucket uses pessimistic txn that asserts bucket is empty (no objects under prefix) before delete; returns ErrBucketNotEmpty otherwise",
+        "Store.ListBuckets is a range scan over bucket-prefix",
+        "Store.SetBucketVersioning uses pessimistic txn (READ_FOR_UPDATE semantics) — must NOT use plain Put because read-after-write coherence requires it (mirrors Cassandra LWT lesson documented in CLAUDE.md)",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 3,
-      "passes": true,
-      "notes": "internal/crypto/sse: EncryptChunk/DecryptChunk seal/open AES-256-GCM with deterministic 12-byte IV from HKDF-SHA256(oid||chunkIndexBE, info='strata-sse-chunk-iv'). WrapDEK/UnwrapDEK use AES-256-GCM with random 12-byte nonce prefixed to ciphertext. ErrInvalidKeySize / ErrShortWrappedDEK sentinels. Chunk ciphertext is just AEAD output (no nonce prefix \u2014 IV is recomputed on decrypt). 18 tests cover round-trip, mutation rejection (cipher + tag), mismatched oid/chunkIndex, wrong DEK / master, truncated wrapped blob, IV determinism + diversity, deterministic ciphertext for equal inputs."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-004",
-      "title": "SSE-S3 wired into PutObject/GetObject path",
-      "description": "As a security/compliance team, when I PUT with x-amz-server-side-encryption AES256 the chunk bytes are encrypted at rest.",
+      "title": "Object CRUD with version-id-DESC ordering",
+      "description": "As Strata, I want object writes/reads/deletes against TiKV that produce the same observable behaviour as the Cassandra path — including correct ordering of versions (latest first) for ListObjectVersions and HEAD-of-clustering-row reads.",
       "acceptanceCriteria": [
-        "Add objects.sse_key (blob) and objects.sse_key_id (text) columns via additive ALTER",
-        "PutObject with AES256 generates a per-object DEK, wraps under master key, stores wrapped DEK plus key id, encrypts chunks via internal/crypto/sse",
-        "GetObject and HEAD echo x-amz-server-side-encryption AES256 from persisted state and decrypt chunks transparently",
-        "Plaintext objects (no header on PUT) continue to work when sse_key column is NULL",
-        "Unit tests: round-trip per object; corrupted ciphertext yields 500 InternalError; plaintext interop",
-        "go build ./... passes",
-        "go test ./internal/s3api/... ./internal/meta/... passes"
+        "Store.PutObject is a single Put against ObjectKey(bucketID, key, versionID)",
+        "Store.GetObject without versionID uses range scan with Limit(1) over Prefix(bucketID, key) — returns the lex-first key, which under our encoding is the latest version",
+        "Store.GetObject with versionID is a single Get",
+        "Store.DeleteObject removes the row + creates a delete-marker row (versioned-bucket case)",
+        "Store.SetObjectStorage (lifecycle CAS) uses pessimistic txn — asserts current.StorageClass == expected before flipping; returns applied=false on conflict (mirrors Cassandra-CAS API)",
+        "Conditional PUT (If-Match / If-None-Match) maps to pessimistic txn read + asserted Put",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 4,
-      "passes": true,
-      "notes": "meta.Object grew SSEKey []byte + SSEKeyID string. Cassandra schema additive ALTER objects ADD sse_key blob / sse_key_id text. cmd/strata-gateway/main.go calls master.FromEnv(); ErrNoConfig leaves Master nil and AES256 PUT returns 500. internal/s3api/sse_io.go: sseEncryptingReader emits 4 MiB ciphertext chunks (pChunkSize = 4 MiB - 16 byte tag) so backend chunk index == crypto chunk index. sseDecryptingReader is range-aware in plaintext space; Preload() eagerly decrypts the first chunk so AEAD failures yield 500 before the response status is committed. ETag persisted on the object row is plaintext-MD5; manifest ETag/Size remain ciphertext. OID for DeriveChunkIV is the object key (deterministic per object; DEK uniqueness is the actual security boundary). Tests cover small + multi-chunk round-trip, range across crypto-chunk boundary, plaintext interop, AES256 PUT without master configured returning 500, and corrupted-ciphertext yielding non-2xx via memory-backend CorruptFirstChunk helper."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-005",
-      "title": "SSE-S3 wired through multipart (Initiate/UploadPart/Complete)",
-      "description": "As a multipart-aware client, I want SSE-S3 to apply across all parts of a multipart upload.",
+      "title": "ListObjects + ListObjectVersions via native range scan",
+      "description": "As Strata, I want listing operations against TiKV to use a single ordered range scan instead of the 64-way fan-out the Cassandra path needs.",
       "acceptanceCriteria": [
-        "InitiateMultipartUpload with x-amz-server-side-encryption AES256 generates the DEK once and stores wrapped DEK on the multipart_uploads row (additive sse_key blob column)",
-        "UploadPart inherits the upload's DEK and encrypts each part's chunks",
-        "CompleteMultipartUpload copies wrapped DEK plus key id from multipart_uploads to objects",
-        "GetObject and HEAD echo header and decrypt parts transparently",
-        "Unit tests: multipart round-trip with SSE-S3 across 3 parts; plaintext multipart still works",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
+        "Store.ListObjects(ctx, bucketID, prefix, marker, delimiter, limit) issues ONE TiKV range scan with start = ObjectKey(bucketID, marker OR prefix), end = ObjectKey(bucketID, prefix-upper-bound) — no fan-out, no heap-merge",
+        "Delimiter handling done in-process on the scan iterator — group keys into CommonPrefixes as keys are emitted",
+        "NextMarker / NextContinuationToken is the last-emitted key; on next page, scan resumes from marker + 0x00 (next-key)",
+        "Store.ListObjectVersions similar shape, no version filtering",
+        "Concurrent writes during scan produce results consistent with TiKV's snapshot isolation — every page is from the snapshot at scan-start time",
+        "Performance: 100k-object bucket, page size 1000, TiKV scan completes in <50 ms (vs Cassandra 64-way fan-out ~150-300 ms) — capture in US-018 benchmarks doc",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 5,
-      "passes": true,
-      "notes": "meta.MultipartUpload grew SSEKey + SSEKeyID. Cassandra additive ALTER multipart_uploads ADD sse_key blob / sse_key_id text. data.Manifest grew PartChunks []int (json omitempty) so the SSE multipart decrypt path can map a flat chunk index back to the (partNumber, chunkIndexInPart) pair the encrypter used. initiateMultipart with AES256 resolves master, generates DEK + wraps + persists on the upload row (no master configured = 500). uploadPart unwraps the upload's DEK and wraps the request body in sseEncryptingReader with oid = key + ':part=' + partNumber so part 1 chunk 0 and part 2 chunk 0 land on different IVs. Per-part ETag persisted on multipart_parts is plaintext MD5 (matches AWS), Size is plaintext (so ListParts + composite ETag math + obj.Size all use plaintext); per-part Manifest.Size remains ciphertext. completeMultipart copies SSEKey/SSEKeyID from upload onto the object and both backends now compute obj.Manifest.Size from sum(chunk.Size) (ciphertext) while obj.Size = sum(part.Size) (plaintext). getObject picks newSSEDecryptingReaderWithLocator + multipartChunkLocator when manifest.PartChunks is non-empty. Tests cover 3-part SSE round-trip (5+5+1 MiB), plaintext multipart still working, and the existing TestMultipartSSEHeaderRoundTrip exercises the encrypt-then-decrypt path. Known limitation: re-uploading the same partNumber within a single in-flight upload reuses the deterministic IV with the same DEK on different plaintext \u2014 to be addressed by US-006 master-key rotation / per-upload DEK rotation."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-006",
-      "title": "SSE-S3 master-key rotation + cmd/strata-rewrap CLI",
-      "description": "As an operator, I want to rotate the master key without re-encrypting every chunk; old DEKs stay unwrappable.",
+      "title": "Multipart upload state lifecycle",
+      "description": "As Strata, I want multipart upload state (init/parts/complete/abort) on TiKV with the same LWT-equivalent flip on Complete that Cassandra provides today.",
       "acceptanceCriteria": [
-        "STRATA_SSE_MASTER_KEYS supports comma-separated <keyID>:<hex64> list; first entry is the wrap key, rest are unwrap-only",
-        "Each wrapped DEK persists with its keyID; unwrap path looks up the right master",
-        "New cmd/strata-rewrap binary walks objects and multipart_uploads, rewraps DEKs to the current master, writes progress to a rewrap_progress table for resumability",
-        "Idempotent: re-running on already-current rows is a no-op",
-        "Unit tests: PUT under key A, rotate to B, GET still works; new PUT uses B; rewrap CLI converts A to B and verifies",
-        "go build ./... passes",
-        "go test ./... passes"
+        "Store.InitiateMultipartUpload writes MultipartKey(bucketID, key, uploadID) with status='uploading'",
+        "Store.UploadPart writes MultipartKey(bucketID, key, uploadID, partNumber) part rows",
+        "Store.CompleteMultipartUpload uses pessimistic txn: Get(multipartKey) → assert status=='uploading' → Put(multipartKey, status='completing') (CAS-style flip) → on success copy parts info into final object row → Delete the multipart rows; on status != 'uploading' returns ErrMultipartInProgress (mirrors Cassandra LWT)",
+        "Store.AbortMultipartUpload is a single delete of the multipart rows; idempotent",
+        "Store.ListMultipartUploads is a range scan over multipart-prefix",
+        "Concurrent Complete attempts: only ONE succeeds (LWT-equivalent via TiKV txn) — verified later in race harness US-016",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 6,
-      "passes": true,
-      "notes": "internal/crypto/master/rotation.go: RotationProvider with STRATA_SSE_MASTER_KEYS=<id>:<hex64>,... ; first entry = active wrap key, rest = unwrap-only. New `Resolver` interface (`ResolveByID`) implemented by RotationProvider; `master.ResolveByID(ctx, p, keyID)` helper bridges single-key + rotation providers (server unwrap path uses this everywhere). FromEnv precedence is now: STRATA_SSE_MASTER_KEYS > vault > file > env. meta.Store grew UpdateObjectSSEWrap, UpdateMultipartUploadSSEWrap, SetRewrapProgress, GetRewrapProgress + meta.RewrapProgress struct + ErrNoRewrapProgress; both backends implement; contract test caseSSEWrapRotation. Cassandra additive `CREATE TABLE IF NOT EXISTS rewrap_progress`. New internal/rewrap library + cmd/strata-rewrap binary: walks ListBuckets \u2192 ListObjectVersions / ListMultipartUploads, unwraps via Provider.ResolveByID(SSEKeyID), rewraps via Provider.Resolve, persists per-bucket completion (target=activeID) so re-runs after rotation correctly re-process. Tests: rotation provider unit tests; PUT-A \u2192 rotate-B \u2192 GET works; rewrap converts A\u2192B; rewrap idempotent + correctly re-runs after a second rotation; multipart upload-row rewrap; missing-old-key fails fast with 500 via the gateway (rather than corrupt body)."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-007",
-      "title": "PutBucketEncryption / GetBucketEncryption / DeleteBucketEncryption + default applied",
-      "description": "As a client, I want bucket-default encryption so PUTs without x-amz-server-side-encryption inherit AES256.",
+      "title": "All bucket-level config blobs via blob helper",
+      "description": "As Strata, I want every bucket-level XML/JSON config endpoint (lifecycle, CORS, policy, public-access-block, ownership-controls, notification, replication, encryption, accelerate, request-payment, tagging, intelligent-tiering, inventory, website, logging, access-points) to use a single shared blob-helper pattern on TiKV — same shape as the Cassandra setBucketBlob/getBucketBlob/deleteBucketBlob trio.",
       "acceptanceCriteria": [
-        "PUT/GET/DELETE /<bucket>?encryption round-trips ServerSideEncryptionConfiguration XML via setBucketBlob/getBucketBlob",
-        "PutObject and InitiateMultipartUpload that omit x-amz-server-side-encryption apply the bucket default transparently",
-        "DeleteBucketEncryption clears the default; subsequent PUTs without the header store unencrypted",
-        "Malformed XML body returns 400 MalformedXML",
-        "Unit tests: round-trip XML; default applied on PUT; default cleared",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
+        "New internal/meta/tikv/blobs.go with setBucketBlob(ctx, bucketID, kind, payload), getBucketBlob(ctx, bucketID, kind) ([]byte, error), deleteBucketBlob(ctx, bucketID, kind) — keys BucketBlobKey(bucketID, kind)",
+        "All Store.{Set,Get,Delete}<Config> methods route through the helper (just like internal/meta/cassandra/buckets.go pattern)",
+        "Helper is tested once; per-config wrapper methods are thin",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 7,
-      "passes": true,
-      "notes": "PutBucketEncryption / GetBucketEncryption / DeleteBucketEncryption already wired in internal/s3api/encryption.go via setBucketBlob/getBucketBlob (cassandra: bucket_encryption table; memory: encryption map). resolveSSE in encryption.go falls back to bucket default when x-amz-server-side-encryption header absent \u2014 applied transparently in putObject + initiateMultipart. KMS in cfg returns 501 NotImplemented; non-AES256 returns 400; missing Apply or unparseable XML returns 400 MalformedXML. After DeleteBucketEncryption the bucket reverts to plaintext on next PUT (resolveSSE returns '' on ErrNoSuchEncryption). Added tests: TestBucketEncryptionDefaultClearedAfterDelete (PUT-with-default \u2192 DELETE \u2192 PUT-without-header \u2192 no SSE header round-trip) + TestBucketEncryptionMultipartDefaultApplied (Initiate without header inherits AES256 from bucket default; UploadPart + Complete + HEAD all echo AES256). Existing tests already cover round-trip XML, default-applied-on-PUT, KMS rejected, malformed XML rejected."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-008",
-      "title": "Notification queue table + hook + filter match",
-      "description": "As an event-driven app, I want PutObject/CompleteMultipart/DeleteObject to enqueue a notification event when bucket notification config Filter matches.",
+      "title": "IAM — users, access keys, policies",
+      "description": "As Strata, I want IAM entities (users, access keys, attached policies, role bindings) backed by TiKV with the same operations Cassandra provides today.",
       "acceptanceCriteria": [
-        "New notify_queue table partitioned by (bucket, hour) with TimeUUID clustering",
-        "Server-side hook in PutObject/CompleteMultipart/DeleteObject inserts an Event row when the bucket has notification config",
-        "Filter match: NotificationConfiguration's Filter (Prefix/Suffix) honoured; non-matching events are not enqueued",
-        "Event payload matches AWS S3 event-message shape (Records[*] with s3.bucket, s3.object, eventName, eventTime)",
-        "Unit tests: PUT triggers event; DELETE triggers event; non-matching prefix produces no event",
-        "go build ./... passes",
-        "go test ./internal/s3api/... ./internal/meta/... passes"
+        "Store.CreateIAMUser / GetIAMUser / DeleteIAMUser / ListIAMUsers implemented",
+        "Store.PutAccessKey / GetAccessKey / DeleteAccessKey — access-key lookups (used by SigV4 verifier on every request) are hot-path; ensure single-Get latency",
+        "Store.AttachPolicy / DetachPolicy / ListAttachedPolicies use range scan over per-user prefix",
+        "Store.PutManagedPolicy / GetManagedPolicy / ListManagedPolicies",
+        "All entity-creation operations use CreateBucket-style pessimistic txn for create-if-not-exists semantics",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 8,
-      "passes": true,
-      "notes": "meta.NotificationEvent struct + meta.Store EnqueueNotification / ListPendingNotifications / AckNotification, implemented in both backends. Cassandra schema additive: new notify_queue table partitioned by ((bucket_id, hour)) with TimeUUID clustering; Cassandra ListPendingNotifications walks the last 48 hour partitions. internal/s3api/notification.go grew a richer notificationConfiguration / notificationEntry / notificationFilter parser (replaces the previous innerxml stub) plus emitNotificationEvent: re-parses the bucket's stored notification XML on each hook invocation, filters by Event list (literal + ':*' wildcard) and S3Key FilterRule (prefix/suffix), then enqueues one row per matching configuration entry with the AWS event-message JSON Records[*] payload. Hooks wired in putObject (s3:ObjectCreated:Put), completeMultipart (s3:ObjectCreated:CompleteMultipartUpload), deleteObject (s3:ObjectRemoved:Delete | DeleteMarkerCreated). Helpers clientSourceIP + principalFromContext live in notification.go. Tests: TestNotificationPutEventEnqueued (PUT triggers event + payload shape asserts Records[0].s3.{bucket.name,object.key,object.size}), TestNotificationDeleteEventEnqueued (DELETE triggers s3:ObjectRemoved:Delete), TestNotificationPrefixFilterMismatchSuppresses (non-matching prefix \u2192 0 events; matching \u2192 1), TestNotificationSuffixFilterMatch (suffix filter), TestNotificationNoConfigNoEvents (no config, no rows), TestNotificationCompleteMultipartEvent (Initiate+UploadPart+Complete \u2192 1 CompleteMultipartUpload event). Contract test caseNotificationQueue covers both backends. Notification config blob storage uses the existing setBucketBlob helpers \u2014 already in place from the prior bucket-notification CRUD; no new bucket-config plumbing."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-009",
-      "title": "cmd/strata-notify worker + WebhookSink (HMAC)",
-      "description": "As an operator, I want a worker that drains the notify_queue and POSTs to configured webhook endpoints with an HMAC signature.",
+      "title": "Audit log with retention sweep",
+      "description": "As Strata, I want the audit log on TiKV with the same retention semantics Cassandra provides via USING TTL — except TiKV does not have a native TTL, so this story implements a periodic sweeper.",
       "acceptanceCriteria": [
-        "New cmd/strata-notify binary, leader-elected via internal/leader",
-        "Polls notify_queue every 5s, fans out to per-target sinks; honours per-target shared secret for HMAC-SHA256 over JSON body",
-        "Webhook sink: HTTPS POST with X-Strata-Signature header; non-2xx triggers retry",
-        "Exponential backoff: max 6 retries, then row moves to notify_dlq table",
-        "Unit tests: webhook sink (httptest); signature verification; retry-then-DLQ; leader handoff",
-        "go build ./... passes",
-        "go test ./internal/notify/... ./cmd/strata-notify/... passes"
+        "Store.AppendAudit(ctx, event) writes AuditKey(timestampNano, requestID) with payload (timestamp prefix makes ordered scans cheap and sweeping efficient)",
+        "Store.ListAudit(ctx, bucketID, after, before, limit) is a range scan filtered by bucket-id (filter in-process on the iterator)",
+        "New internal/meta/tikv/sweeper.go: a goroutine started by Store.Open that runs every STRATA_AUDIT_SWEEP_INTERVAL (default 1h) and deletes audit rows where timestampNano < now - STRATA_AUDIT_RETENTION (default 30d)",
+        "Sweeper is leader-elected (uses internal/leader with key 'audit-sweeper-leader-tikv') so multiple Strata replicas don't race on deletion",
+        "Sweeper observable via strata_meta_tikv_audit_sweep_deleted_total counter",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 9,
-      "passes": true,
-      "notes": "internal/notify: Sink interface (Type/Name/Send), WebhookSink with HMAC-SHA256 signature in X-Strata-Signature header (lowercase hex), Router + StaticRouter (key = '<type>:<arn>' with arn-only fallback), Worker with poll-and-dispatch RunOnce + ticker-driven Run, in-memory attempts/lastError/nextAttempt tracking. Exponential backoff capped at 5m (overridable via Backoff func injection). meta.NotificationDLQEntry struct (embeds NotificationEvent + Attempts + Reason + EnqueuedAt). meta.Store grew EnqueueNotificationDLQ + ListNotificationDLQ; both backends + contract caseNotificationDLQ. Cassandra additive notify_dlq table partitioned by ((bucket_id, day)) with TimeUUID clustering, ListNotificationDLQ walks last 30 day partitions. Retry-then-DLQ flow: failure increments attempt counter, schedules next attempt via Backoff(attempt); when attempts >= MaxRetries the row is enqueued to notify_dlq (with attempts + reason) and acked off the live queue. Unknown-target rows shortcut to DLQ with reason='no sink registered for target'. RouterFromEnv parses STRATA_NOTIFY_TARGETS=<type>:<arn>=<url>|<secret>,... into a StaticRouter of WebhookSinks. cmd/strata-notify binary: leader-elected (reuses internal/leader.Session + per-backend Locker), JSON slog logger, /metrics endpoint, env knobs STRATA_NOTIFY_INTERVAL/MAX_RETRIES/BACKOFF_BASE/POLL_LIMIT/METRICS_LISTEN. Tests: signature compute+verify (good/wrong-secret/non-hex/bit-flip), webhook httptest delivery (signs body, sets headers, posts JSON), webhook 502 yields error with body preview, webhook respects ctx cancel, StaticRouter type+arn vs arn-only resolution, RouterFromEnv (empty/single/multi/malformed), Worker delivers+acks on success, Worker retries N then moves to DLQ with attempts+reason, Worker recovers when transient failures end (no DLQ), Worker routes unknown target to DLQ, Worker.Run stops on ctx cancel (leader-handoff surrogate \u2014 internal/leader covers actual lock semantics), Worker honours backoff window (skips re-attempt before nextAttempt). All tests run in -race. cmd/strata-notify intentionally untested per existing cmd/<worker> + internal/<feature> split (mirrors cmd/strata-rewrap + internal/rewrap)."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-010",
-      "title": "SQSSink + DLQ inspection",
-      "description": "As an AWS-integrating user, I want to deliver events to an SQS queue using AWS SDK credentials.",
+      "title": "Worker queues + DLQ + access-log buffer",
+      "description": "As Strata's background workers (notify / replicator / access-log / manifest-rewriter), I want their queue/state surfaces backed by TiKV with the same ordering / claim / DLQ semantics the Cassandra path provides.",
       "acceptanceCriteria": [
-        "SQSSink: AWS SDK SendMessage with the event JSON as MessageBody; queue URL plus region from per-target config",
-        "AWS credentials resolved via standard SDK chain (env, IRSA, IAM role)",
-        "DLQ inspection endpoint GET /?notify-dlq&bucket=... gated by [iam root] returns paginated dropped events",
-        "Unit tests: SQSSink against an AWS SDK mock; DLQ enumeration",
-        "go build ./... passes",
-        "go test ./internal/notify/... passes"
+        "notify_queue, replication_queue, access_log_buffer, manifest-rewriter cursor — all modelled as keyed prefixes with timestamp-ordered keys for FIFO claim semantics",
+        "Store.EnqueueNotify(event) writes one row keyed on (now-nano, requestID); ordered iteration claims oldest first",
+        "Store.ClaimNotifyBatch(workerID, limit) is a range scan + per-row pessimistic txn (status: pending → claimed); claim TTL via row's claim_expires_at field; sweeper reclaims expired claims",
+        "DLQ for notify uses 'DLQ:<original-key>' prefix; queryable via Store.ListDLQ for operator visibility",
+        "Same shape mirrored for replication_queue + manifest-rewriter cursor; access_log_buffer rotates per-bucket on flush",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 10,
-      "passes": true,
-      "notes": "internal/notify/sqs.go: SQSSink wraps an SQSAPI interface (the SendMessage method only) so unit tests swap a fakeSQSClient. evt.Payload is the canonical wire bytes (built in s3api.buildNotificationPayload during US-008); SQSSink uses it as MessageBody verbatim \u2014 no re-marshal. router_env.go grew an EnvOption pattern: WithSQSClientFactory(factory func(region) (SQSAPI, error)) lets cmd/strata-notify inject a real *sqs.Client without dragging the AWS SDK into internal/notify's test deps. Spec format extends to 'sqs:<queueURL>|<region>' alongside the existing webhook '<url>|<secret>'. SQS spec without factory is a hard error \u2014 operators see the misconfiguration at startup. cmd/strata-notify wires sqsClientFactory via aws-sdk-go-v2/config.LoadDefaultConfig(WithRegion?) so credentials follow the standard chain (env, shared config, IRSA, EC2/ECS roles); empty region lets the SDK pick. internal/s3api/notification_dlq.go: GET /?notify-dlq&bucket=X[&limit=N&continuation=ID] handler gated to IAMRootPrincipal (anonymous + non-root \u2192 403, missing bucket param \u2192 400, unknown bucket \u2192 mapMetaErr \u2192 404 NoSuchBucket); response is JSON {records, next_continuation_token}; payload is preserved as json.RawMessage when valid, otherwise quoted-string; pagination uses opaque event_id continuation token (cap 1000 per pull). Wired into Server.ServeHTTP at root path with q.Has('notify-dlq') && GET. Tests: SQSSink (5: round-trip via fake client, error propagates, missing queue URL, missing client, type/name); RouterFromEnv (5: SQS-with-factory parses URL+region, SQS-without-factory rejected, malformed-missing-region/empty-url, mixed webhook+sqs targets); DLQ HTTP (7: anonymous denied, non-root denied, missing bucket=400, unknown bucket=404, 3-row enumeration with payload preserved as JSON, continuation pagination across 5 rows@limit=2 collects all 5 in order, malformed limit=400). Compile-time check: var _ SQSAPI = (*sqs.Client)(nil)."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-011",
-      "title": "Replication queue + hook + status header",
-      "description": "As a replication source, when a write matches a configured replication rule, I want the write enqueued and x-amz-replication-status PENDING set.",
+      "title": "Reshard state + leader election + per-bucket inventory",
+      "description": "As Strata's online-shard-resize worker, its leader-election locker, and the inventory worker, I want their state on TiKV with the same primitives Cassandra provides today.",
       "acceptanceCriteria": [
-        "New replication_queue table partitioned by (bucket, day) with TimeUUID clustering",
-        "PutObject and CompleteMultipart hooks insert one row per object when at least one rule's Filter (Prefix and/or Tag) matches",
-        "PutObject response includes x-amz-replication-status PENDING when a rule matches; absent otherwise",
-        "PutBucketReplication on an unversioned bucket returns 400 InvalidRequest",
-        "Unit tests: matching rule yields PENDING plus queue row; no match yields no header and no row; unversioned bucket rejection",
-        "go build ./... passes",
-        "go test ./internal/s3api/... ./internal/meta/... passes"
+        "Provide internal/meta/tikv.Locker (Cassandra has internal/meta/cassandra.Locker) backing the existing Locker interface; lease via TiKV pessimistic txn with row TTL",
+        "Store.SetReshardState / Store.GetReshardState — single-row blob, pessimistic-txn updates only (LWT-equivalent for state-machine transitions)",
+        "Store.PutInventoryConfig / Get / Delete / List — same blob-helper pattern as US-007 but per (bucket-id, config-id) key",
+        "Store.SetReshardCursor(bucketID, shardID, cursor) — per-shard progress tracker for the resize worker; pessimistic-txn updates",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 11,
-      "passes": true,
-      "notes": "meta.ReplicationEvent struct (BucketID/Bucket/Key/VersionID/EventID/EventName/EventTime/RuleID/DestinationBucket/StorageClass) + meta.Store EnqueueReplication / ListPendingReplications / AckReplication; both backends implement; new contract test caseReplicationQueue. Cassandra additive replication_queue table partitioned by ((bucket_id, day)) with TimeUUID clustering; ListPendingReplications walks last 30 day partitions (matches notify_dlq retention). internal/s3api/replication.go: replicationStatusFor renamed to emitReplicationEvent which walks Enabled rules, enqueues one row per matching rule (rule.ID + Destination.Bucket attached), returns 'PENDING' when any matched. putObject and completeMultipart both call the hook AFTER the meta write succeeds and BEFORE WriteHeader; both set x-amz-replication-status header when matched. putBucketReplication now rejects with 400 InvalidRequest when bucket is not versioning-active (Enabled or Suspended both pass \u2014 only Disabled rejects). Existing replication tests gained `enableVersioning(h, \"bkt\")` between bucket create + PUT?replication. New tests: TestReplicationPutEnqueuesRowAndPending (PUT matches prefix \u2192 header=PENDING + 1 queue row with EventName=s3:ObjectCreated:Put + VersionID populated since bucket versioned), TestReplicationNoMatchEnqueuesNothing (non-matching prefix \u2192 empty header + 0 rows), TestReplicationPutBucketReplicationRejectsUnversioned (400 InvalidRequest body), TestReplicationPutBucketReplicationAllowsSuspended (Enabled then Suspended both accepted), TestReplicationCompleteMultipartEnqueuesRow (Initiate+UploadPart+Complete \u2192 1 queue row with EventName=s3:ObjectCreated:CompleteMultipartUpload). extractUploadID helper reused from encryption_test.go (don't redeclare it locally)."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-012",
-      "title": "cmd/strata-replicator worker (Strata-to-Strata)",
-      "description": "As a DR-conscious operator, I want a worker that drains replication_queue and copies objects to a peer Strata cluster.",
+      "title": "RangeScanStore optional interface in meta.Store",
+      "description": "As an architecture maintainer, I want the gateway to discover at runtime whether the meta backend supports native range scans, and use the better code path when available — without forcing every backend to implement the same shape.",
       "acceptanceCriteria": [
-        "New cmd/strata-replicator binary, leader-elected via internal/leader",
-        "Per replication rule, reads source object via meta.Store + data.Backend, PUTs to destination via boto-compatible HTTP against the peer's gateway",
-        "Destination endpoint encoded in Destination.AccessControlTranslation.Owner field as <peer-host>:<port>",
-        "On success: SET x-amz-replication-status=COMPLETED on source; on 6 retries: SET FAILED and emit replication_lag_seconds metric",
-        "Unit tests: rule match yields COMPLETED via httptest peer; destination 5xx yields FAILED after retries; with-tag-filter; with-prefix-filter",
-        "go build ./... passes",
-        "go test ./internal/replication/... ./cmd/strata-replicator/... passes"
+        "New optional interface in internal/meta/store.go: type RangeScanStore interface { Store; ScanObjects(ctx, bucketID, prefix, marker, delimiter, limit) (*ListResult, error) }",
+        "Memory backend implements RangeScanStore (wraps the existing in-memory tree map's iterator)",
+        "TiKV backend implements RangeScanStore (single ordered range scan)",
+        "Cassandra backend explicitly does NOT implement RangeScanStore (keeps the fan-out path — only shape Cassandra serves efficiently); document this decision in a comment on cassandra.Store",
+        "Gateway ListObjects handler: type-assert if rs, ok := store.(meta.RangeScanStore); ok then return rs.ScanObjects(...) else fall back to current store.ListObjects(...); single dispatch site",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 12,
-      "passes": true,
-      "notes": "internal/replication package: Dispatcher interface (Send(ctx, evt, *Source)), HTTPDispatcher (PUTs to <scheme>://<endpoint>/<destBucket>/<key>; ARN bucket prefix stripped via stripBucketARN), Worker (Run/RunOnce, retries with exponential backoff capped at 5m, deterministic via injectable Now+Backoff). MetricsObserver interface so internal/replication doesn't import prometheus; cmd binary plugs metrics.ReplicationLagSeconds/Completed/Failed via promMetrics{}. meta.Object grew ReplicationStatus string; meta.ReplicationEvent grew DestinationEndpoint string. Cassandra schema additive: ALTER TABLE objects ADD replication_status text + ALTER TABLE replication_queue ADD destination_endpoint text. New meta.Store.SetObjectReplicationStatus(ctx, bucketID, key, versionID, status); both backends implement. internal/s3api/replication.go grew replicationAccessControlTranslation parser + emitReplicationEvent now captures Destination.AccessControlTranslation.Owner into evt.DestinationEndpoint. server.go GET/HEAD echo x-amz-replication-status header from o.ReplicationStatus when non-empty. cmd/strata-replicator: leader-elected via internal/leader (lock name='replicator', distinct from notify/gc/lifecycle so outages don't cascade), JSON slog logger, /metrics on :9103, env knobs STRATA_REPLICATOR_INTERVAL/MAX_RETRIES/BACKOFF_BASE/POLL_LIMIT/PEER_SCHEME/HTTP_TIMEOUT/METRICS_LISTEN. Tests: HTTPDispatcher (PUT path round-trip with body+headers, peer 503 fails, missing endpoint/bucket fail-fast, ARN strip helper, body always closed even on early return), Worker (matched rule yields COMPLETED + ack + lag metric, retries=6 yields FAILED + lag metric + counter, transient failures recover before retry budget, backoff window honoured via injected clock, New rejects missing meta/data/dispatcher), s3api (TestReplicationCapturesDestinationEndpoint asserts Owner field flows through XML parse \u2192 emit \u2192 row.DestinationEndpoint). Source body comes from data.Backend.GetChunks(manifest, 0, size) \u2014 for SSE-encrypted objects that is ciphertext; the peer stores it verbatim and operators with cross-cluster SSE need shared master keys (out of scope for US-012)."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-013",
-      "title": "Server access log buffer table + middleware row writer",
-      "description": "As an audit consumer, I need every request logged into a buffer table when source bucket has logging enabled.",
+      "title": "storetest contract suite — TiKV factory",
+      "description": "As a maintainer, I want every test in internal/meta/storetest/contract.go to pass against TiKV via testcontainers, so we know surface-equivalence with Cassandra holds at every commit.",
       "acceptanceCriteria": [
-        "New access_log_buffer table partitioned by (bucket, hour); columns: ts, request_id, principal, source_ip, op, key, status, bytes_sent, object_size, total_time_ms, turn_around_ms, referrer, user_agent, version_id",
-        "HTTP middleware in cmd/strata-gateway writes one row per request when meta.Store.GetBucketLogging is set",
-        "No row written when logging is not configured for the source bucket",
-        "Unit tests: PUT with logging on writes a row; PUT without logging writes no row; row format matches schema",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
+        "New internal/meta/tikv/store_integration_test.go (build tag integration) starts a TiKV testcontainer (PD + TiKV in one compose file via dockertest or testcontainers-go), configures the client, runs storetest.Run(t, factory)",
+        "All existing contract test cases pass without modification, OR use t.Skipf with explicit reason for tests that exercise Cassandra-specific semantics like USING TTL (those skip on TiKV — audit sweeper covers the use case via its own unit tests in US-009)",
+        "Test runs in <5 min on CI runner (testcontainers TiKV start ~30 s, bench ~3 min, teardown ~30 s)",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 13,
-      "passes": true,
-      "notes": "meta.AccessLogEntry struct + Store EnqueueAccessLog / ListPendingAccessLog / AckAccessLog (3-method buffer-and-drain shape mirroring notify_queue / replication_queue). Cassandra schema additive: access_log_buffer table partitioned by ((bucket_id, hour)) with TimeUUID clustering; ListPendingAccessLog walks last 48 hour partitions (uses existing notifyHour helper). storetest caseAccessLogBuffer covers both backends. internal/s3api/access_log.go: AccessLogMiddleware wraps s3api.Server, captures status + bytes via accessLogWriter, runs inner handler, then splitPath \u2192 GetBucket \u2192 GetBucketLogging; on any meta error (incl. ErrNoSuchLogging) silently skips. EnqueueAccessLog is best-effort. deriveAccessLogOp walks subresource query keys (acl/policy/logging/lifecycle/versions/versioning/uploads/uploadId/partNumber/attributes/...) \u2192 REST.<METHOD>.<RES>; falls back to REST.<METHOD>.OBJECT or .BUCKET. ObjectSize: request Content-Length for PUT/POST, response Content-Length (or bytes-written) for GET/HEAD. TurnAroundMS = 0 (no first-byte-out hook yet; schema reserves column for US-014/future). cmd/strata-gateway/main.go: mux.Handle('/', metrics.ObserveHTTP(mw.Wrap(s3api.NewAccessLogMiddleware(metaStore, apiHandler), \u2026))) \u2014 auth fires before access-log so principalFromContext resolves. Tests: PUT with logging configured writes 2 rows (PUT?logging itself + PUT object) with correct Op/Status/RequestID/UserAgent/Referrer/ObjectSize; PUT without logging writes 0 rows; GET object echoes ObjectSize from response Content-Length; ?policy GET on bucket without policy yields REST.GET.POLICY row with status 404. Known limitation: middleware logs PUT?logging= against the bucket itself (AWS-strict 'skip when bucket == target' filter deferred to US-014)."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-014",
-      "title": "cmd/strata-access-log worker (5-min flush, AWS log format)",
-      "description": "As an audit consumer, I want buffered log rows assembled into AWS-format log files and written to the configured target bucket.",
+      "title": "docker-compose tikv profile + sidecars",
+      "description": "As a developer or CI runner, I want to bring up Strata running on top of TiKV with one compose command.",
       "acceptanceCriteria": [
-        "New cmd/strata-access-log binary, leader-elected, ticks every 5 minutes (or 5 MiB whichever first)",
-        "Reads buffered rows for each source bucket with logging configured, writes one object per flush to <target-bucket>/<target-prefix>YYYY-MM-DD-HH-MM-SS-<id>",
-        "Log line format matches AWS server-access-log: Bucket Owner, Bucket, Time, Remote IP, Requester, Request-ID, Operation, Key, Request-URI, HTTP status, Error Code, Bytes Sent, Object Size, Total Time, Turn-Around Time, Referrer, User-Agent, Version Id",
-        "After successful flush, deletes drained rows from the buffer",
-        "Unit tests: round-trip via memory backend; format compliance against an AWS sample line",
-        "go build ./... passes",
-        "go test ./cmd/strata-access-log/... passes"
+        "deploy/docker/docker-compose.yml gains pd (PlacementDriver) and tikv services under profile 'tikv'; use upstream images pingcap/pd:v8.x and pingcap/tikv:v8.x (latest stable at authoring time)",
+        "Single PD + single TiKV (production-shape PD ≥3 + TiKV ≥3 is operator concern; CI shape is single-node)",
+        "strata service gains conditional env: when running under --profile tikv sets STRATA_META_BACKEND=tikv, STRATA_TIKV_PD_ENDPOINTS=pd:2379; mutually exclusive with STRATA_META_BACKEND=cassandra — picker validates exactly-one",
+        "make up-tikv brings up tikv-pd + tikv + ceph + strata (no Cassandra) and waits for /readyz",
+        "docker compose -f deploy/docker/docker-compose.yml --profile tikv config -q passes",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 14,
-      "passes": true,
-      "notes": "internal/accesslog package: Worker.Run(ctx)+RunOnce(ctx) ticker split (Interval default 5min, MaxFlushBytes default 5MiB, PollLimit default 10000, Now func injectable). RunOnce iterates Meta.ListBuckets, GetBucketLogging per bucket (skip ErrNoSuchLogging), parses TargetBucket/TargetPrefix from the stored XML blob via a tiny loggingDoc shape, ListPendingAccessLog (capped at PollLimit), GetBucket(target), then flushRows splits drained rows into chunks bounded by MaxFlushBytes \u2014 one Data.PutChunks + Meta.PutObject per flush, then per-row AckAccessLog. Object key = TargetPrefix + YYYY-MM-DD-HH-MM-SS-<16-hex> where the hex tail is MD5(sourceBucket|stamp|rowCount|nanos)[:8] for cheap collision avoidance. Log line FormatLine(owner, entry) emits the full 18-field AWS server-access-log shape (Bucket Owner, Bucket, [Time], Remote IP, Requester, Request-ID, Operation, Key, \"<METHOD> <PATH> HTTP/1.1\", Status, Error Code (=-), Bytes Sent, Object Size, Total Time, Turn-Around Time, \"Referrer\", \"User-Agent\", Version Id) \u2014 empty fields render as '-', quoted/bracketed fields preserved. Request-URI is reconstructed from Op (REST.<METHOD>.<RES>) + bucket + key + versionId since the entry doesn't store the raw URI. cmd/strata-access-log/main.go: leader-elected via internal/leader (Name='access-log'), STRATA_ACCESS_LOG_INTERVAL/MAX_FLUSH_BYTES/POLL_LIMIT/METRICS_LISTEN env knobs, mirrors strata-notify/strata-replicator wiring shim. Tests cover round-trip (writes one log object with reconstructed Request-URI line; drains buffer), no-flush when logging disabled (buffer untouched, no log object), MaxFlushBytes split (forces N>=2 files), and a format-compliance test asserting all 18 AWS fields land in the expected positions with quoting/bracketing intact."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-015",
-      "title": "slog migration: structured JSON logs + request_id middleware",
-      "description": "As an operator, I want JSON logs with a request_id propagated through every code path.",
+      "title": "Smoke test + Strata wiring (STRATA_META_BACKEND=tikv)",
+      "description": "As a CI maintainer, I want make smoke and make smoke-signed to work with the TiKV backend, and the gateway to dispatch through the new meta.Store impl when STRATA_META_BACKEND=tikv is set.",
       "acceptanceCriteria": [
-        "Replace standard log calls with log/slog JSON handler in every cmd/ binary and every internal/ package that logs",
-        "HTTP middleware reads X-Request-Id or generates a UUID; threads it through context.Context via slog.With('request_id', id)",
-        "STRATA_LOG_LEVEL controls level (DEBUG/INFO/WARN/ERROR; default INFO)",
-        "Tests: a single request emits logs with the same request_id; missing header gets a generated UUID",
-        "make smoke shows JSON log lines per request",
-        "go build ./... passes",
-        "go test ./... passes"
+        "internal/serverapp.buildMetaStore reads STRATA_META_BACKEND, dispatches to internal/meta/tikv.Open(...) when value is 'tikv'",
+        "Misconfiguration (empty STRATA_TIKV_PD_ENDPOINTS, unreachable PD) fails fast at startup with a clear message",
+        "New make smoke-tikv target runs the existing smoke script against make up-tikv — all PUT / GET / DELETE / multipart / ACL / lifecycle paths exercised",
+        "make smoke-signed-tikv runs the SigV4-signed variant",
+        "Both pass with no regressions vs the Cassandra-backed smoke",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 15,
-      "passes": true,
-      "notes": "internal/logging package centralises slog setup: ParseLevel(STRATA_LOG_LEVEL env -> slog.Level; DEBUG/INFO/WARN/ERROR, default INFO), New(io.Writer) returns JSON handler logger, Setup() shorthand also installs as slog.Default. Middleware reads X-Request-Id (or uuid.NewString) and (a) sets header back on r.Header so downstream like access-log middleware sees the resolved id, (b) sets header on w.Header() so the response carries it back, (c) attaches both the raw id (RequestIDFromContext) and a logger.With('request_id', id) (LoggerFromContext) to ctx so handlers/workers can call logging.LoggerFromContext(ctx).Info(...) and get correlated lines. cmd/strata-gateway, cmd/strata-gc, cmd/strata-lifecycle migrated from stdlib log to logging.Setup() + slog.Error/Info; gateway mux wraps handler with logging.NewMiddleware(logger, ...). internal/leader.Session.Logger and internal/gc/lifecycle Worker.Logger switched from *log.Logger to *slog.Logger; all Printf calls converted to InfoContext/WarnContext with structured kv attrs. notify/replicator/access-log/rewrap binaries already used slog inline since US-009..014 \u2014 they keep working without changes (parseLogLevel locals could be unified with logging.ParseLevel later but that's churn). Tests in internal/logging cover ParseLevel cases, UUID-generation when header missing, header reuse when present, same-id across multiple log lines per request."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-016",
-      "title": "slog Cassandra slow-query + RADOS DEBUG hooks",
-      "description": "As an SRE, I want slow Cassandra queries logged at WARN with the request_id, and RADOS ops logged at DEBUG.",
+      "title": "Race harness coverage against TiKV",
+      "description": "As a correctness maintainer, I want the race harness (the existing internal/s3api/race_test.go + race_integration_test.go harness; if prd-race-harness.md cycle has shipped, also the cmd/strata-racecheck binary from there) to also run against the TiKV backend so LWT-equivalent semantics are validated under sustained concurrent load.",
       "acceptanceCriteria": [
-        "Cassandra gocql observer logs queries over 100ms at WARN with request_id, table, op, duration",
-        "RADOS read/write logs OID and duration at DEBUG with request_id",
-        "Threshold configurable via STRATA_CASSANDRA_SLOW_MS (default 100)",
-        "Tests: forced slow query produces WARN log with expected fields",
-        "go build ./... passes",
-        "go test ./internal/meta/cassandra/... passes"
+        "Race harness can target a TiKV-backed gateway via env var or flag (STRATA_META_BACKEND=tikv on the gateway under test)",
+        "make race-soak-tikv brings up the TiKV stack instead of the RADOS+Cassandra stack and runs the harness for 1 h (or RACE_DURATION env override)",
+        "Concurrent versioning flip + Complete + DeleteObjects races all produce the same observable behaviour as the Cassandra-backed run (zero inconsistencies)",
+        "If prd-race-harness.md has shipped (.github/workflows/race-nightly.yml exists): nightly CI workflow gains a parallel race-nightly-tikv job. If not: defer this acceptance line to that PRD's cycle, document in the commit message",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 16,
-      "passes": true,
-      "notes": "internal/meta/cassandra/observer.go: SlowQueryObserver implements gocql.QueryObserver; logs WARN with request_id (from logging.RequestIDFromContext), table, op, duration_ms, statement, error when q.End-q.Start >= Threshold OR q.Err != nil. NewSlowQueryObserver(logger, threshold) returns nil when logger is nil or threshold<=0 (disabled). SlowMSFromEnv reads STRATA_CASSANDRA_SLOW_MS (default 100, literal '0' disables, garbage falls back to default). parseStatement is a best-effort SELECT/INSERT/UPDATE/DELETE/CREATE/ALTER table extractor that handles 'CREATE TABLE IF NOT EXISTS <name>' via skipIfNotExists. truncateStatement collapses whitespace + caps at 240 chars so log lines stay bounded. session.go: SessionConfig grew Logger *slog.Logger + SlowMS int; newCluster wires c.QueryObserver = NewSlowQueryObserver(...) when both are set. internal/data/rados/observer.go (no build tag): LogOp(ctx, logger, op, oid, dur, err) emits DEBUG with request_id/op/oid/duration_ms (+error), short-circuits if logger nil or DEBUG filtered. internal/data/rados/config.go grew Logger *slog.Logger; backend.go (ceph-tagged) wires b.logger=cfg.Logger and calls LogOp around writeChunk in PutChunks (op='put'), around ioctx.Read in radosReader.loadNextChunk (op='get'), and around ioctx.Delete in Backend.Delete (op='del'). Delete signature changed from `_ context.Context` to `ctx context.Context` so DEBUG lines carry the caller's request_id. All 6 cmd binaries (strata-gateway, strata-gc, strata-lifecycle, strata-notify, strata-rewrap, strata-replicator, strata-access-log) updated to pass logger + SlowMSFromEnv into SessionConfig and logger into rados.Config. Tests: observer_test.go covers above-threshold WARN with full attr set + below-threshold silence + error-fast-path WARN + nil-logger/0-threshold disabled + SlowMSFromEnv env matrix + parseStatement across SELECT/INSERT/UPDATE/DELETE/CREATE TABLE IF NOT EXISTS/ALTER TABLE/empty + truncateStatement whitespace collapse. internal/data/rados/observer_test.go (no build tag, runs without ceph) covers DEBUG attr emission, error attr inclusion, INFO-level filtering, nil-logger no-op."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-017",
-      "title": "Prometheus HTTP request + Cassandra histograms",
-      "description": "As an SRE, I want HTTP request latency histograms and per-table Cassandra query latency histograms.",
+      "title": "CI matrix entry — .github/workflows/ci-tikv.yml",
+      "description": "As a maintainer, I want every PR to also exercise the TiKV backend via the contract test + smoke pass on CI, so regressions on the new backend surface on the same SHA.",
       "acceptanceCriteria": [
-        "internal/metrics registers http_request_duration_seconds{method, path, status} histogram",
-        "internal/metrics registers cassandra_query_duration_seconds{table, op} histogram",
-        "Middleware wraps handlers to record HTTP histogram",
-        "gocql observer records Cassandra histogram",
-        "/metrics endpoint exposes both",
-        "Tests: smoke run plus scrape /metrics, expected metric names present",
-        "go build ./... passes",
-        "go test ./internal/metrics/... passes"
+        "New .github/workflows/ci-tikv.yml mirrors .github/workflows/ci-scylla.yml shape",
+        "Job 1: integration-tikv runs go test -tags integration -timeout 15m ./internal/meta/tikv/... against testcontainers TiKV",
+        "Job 2: e2e-tikv brings up make up-tikv + make smoke-tikv + make smoke-signed-tikv; uploads logs as artefact on failure",
+        "Both run on pull_request and push to main; timeout 30 min",
+        "Existing ci.yml and ci-scylla.yml jobs unchanged — purely additive",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 17,
-      "passes": true,
-      "notes": "internal/metrics extended: HTTPDuration histogram now labelled {method, path, status} (was {method} only). New TemplatePath collapses URL paths to a low-cardinality label set: '/', '/{bucket}', '/{bucket}/{key}', plus admin endpoints '/metrics', '/healthz', '/readyz' kept literal. ObserveHTTP middleware uses TemplatePath(r.URL.Path) + strconv.Itoa(rw.status). New CassandraQueryDuration *HistogramVec named strata_cassandra_query_duration_seconds with labels {table, op}; registered alongside other metrics in metrics.Register(). New metrics.CassandraObserver{} struct implements the cassandra.Metrics interface and is the cmd-layer adapter (keeps internal/meta/cassandra free of prometheus). internal/meta/cassandra: new Metrics interface (ObserveQuery(table, op, dur, err)). SlowQueryObserver grew an optional Metrics field; new NewQueryObserver(logger, threshold, metrics) returns a single observer that fans out to logger (slow + error queries only) AND metrics (every query). NewSlowQueryObserver kept (log-only) for backward compat. SessionConfig.Metrics field wires into the gocql QueryObserver via newCluster. All 6 /metrics-exposing binaries (gateway, gc, lifecycle, notify, replicator, access-log) now pass Metrics: metrics.CassandraObserver{} into SessionConfig; rewrap doesn't expose /metrics so wiring skipped. Tests: internal/metrics/metrics_test.go covers TemplatePath cases (admin endpoints + bucket/key shapes), ObserveHTTP labels (PUT/{bucket}/{key}/201 + default-200 path), CassandraObserver records under (table, op) and falls back to (unknown, UNKNOWN) on empty inputs, metric-name presence guard. internal/meta/cassandra/observer_test.go grew captureMetrics fake + 4 tests covering metrics-on-every-query, log-only-when-slow, metrics-only-no-logger, both-disabled-returns-nil, error forwarded to metrics. go build/vet/test all green."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-018",
-      "title": "Prometheus RADOS + worker metrics",
-      "description": "As an SRE, I want RADOS op latency and per-worker counters/gauges.",
+      "title": "Benchmarks doc — TiKV vs Cassandra hot-path latency",
+      "description": "As an operator picking a meta backend, I want documented latency / throughput numbers comparing TiKV and Cassandra on Strata's hot operations so the decision is data-driven.",
       "acceptanceCriteria": [
-        "rados_op_duration_seconds{pool, op} histogram (op = put/get/del)",
-        "gc_queue_depth{region} gauge sampled by GC worker",
-        "multipart_active{bucket} gauge",
-        "bucket_bytes{bucket, storage_class} gauge sampled hourly",
-        "lifecycle_tick_total{action, status} counter",
-        "replication_lag_seconds{rule_id} histogram and replication_queue_depth{rule_id} gauge sampled every 30s",
-        "notify_delivery_total{sink, status} counter",
-        "All workers (gateway/lifecycle/gc/notify/replicator/access-log) expose /metrics",
-        "go build ./... passes",
-        "go test ./internal/metrics/... passes"
+        "New docs/benchmarks/meta-backend-comparison.md with measurements for: CreateBucket (LWT-equivalent), GetObject (single Get), ListObjects 100k-object bucket page=1000, CompleteMultipartUpload (LWT-flip), GetAccessKey (hot-path SigV4), audit append + retention sweep",
+        "Numbers measured on a single laptop docker stack (3-node TiKV cluster + 3-node Cassandra cluster) — operator-runnable, not production-grade; document the rig",
+        "Methodology: 60 s warmup, 5 min measurement, 50 concurrent writers; tool: go-benchmark style harness in internal/meta/storetest/bench_test.go (new file) with -bench flags",
+        "Update ROADMAP.md alternative-metadata-backends section introduction with the headline numbers (e.g. 'TiKV: ListObjects-100k 50 ms; Cassandra: same workload 250 ms — 5x')",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 18,
-      "passes": true,
-      "notes": "internal/metrics: added strata_rados_op_duration_seconds{pool,op}, strata_gc_queue_depth{region}, strata_multipart_active{bucket}, strata_bucket_bytes{bucket,storage_class}, strata_lifecycle_tick_total{action,status}, strata_replication_queue_depth{rule_id}, strata_notify_delivery_total{sink,status}. Adapters: RADOSObserver, GCObserver, NotifyObserver, LifecycleObserver, BucketStatsObserver, ReplicationObserver. internal/data/rados: Metrics interface + ObserveOp(ctx, logger, m, pool, op, oid, dur, err) helper that fans out to LogOp + Metrics; backend wires Metrics into put/get/del call sites and Config.Metrics. internal/gc/worker: Metrics interface (SetQueueDepth) + samples drain entries length per region per drain pass. internal/lifecycle/worker: emits LifecycleTickTotal at every transition/expire/expire_noncurrent/abort_multipart terminal outcome (success|error|skipped). internal/replication/worker: MetricsObserver gained SetQueueDepth + worker samples per-rule depth on every drainBucket. internal/notify/worker: Metrics interface (IncDelivery) + emits success|failure|dlq per sink (uses 'none' for unrouted DLQ). New internal/bucketstats package with Sampler{Meta, Sink, Interval, PageLimit}: Run/RunOnce shape, walks ListBuckets+ListObjects per pass, aggregates per (bucket, storage_class), default Interval=1h. Gateway main wires Sampler with metrics.BucketStatsObserver{}. All 5 binaries that build the rados backend now pass Metrics: metrics.RADOSObserver{}; strata-replicator + strata-notify pass their MetricsObserver/Metrics; strata-gc passes GCObserver{}. Tests: internal/metrics/metrics_test.go grew RADOS / GC / Notify / Lifecycle / BucketStats / Replication observer tests + a metric-name presence guard for the 7 new metric names. internal/bucketstats/sampler_test.go covers per-class aggregation across multiple objects + nil-sink no-op."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-019",
-      "title": "Grafana dashboard JSON",
-      "description": "As an operator, I want a pre-wired Grafana dashboard for Strata's metric set.",
+      "title": "docs/backends/tikv.md operator guide",
+      "description": "As an operator evaluating TiKV, I need a single-page operator guide covering setup, ops topology, capability matrix, and caveats.",
       "acceptanceCriteria": [
-        "deploy/grafana/strata-dashboard.json with panels: HTTP latency p50/p95/p99, Cassandra latency by table, RADOS latency by pool, GC depth, multipart active, bucket bytes by class, lifecycle tick rate, replication lag and queue depth, notify delivery rate",
-        "deploy/grafana/datasource.yaml provisions Prometheus as default datasource",
-        "make up-all brings up a Grafana container with the dashboard auto-loaded",
-        "Tests: docker-compose smoke verifies dashboard JSON validates against Grafana API",
-        "go build ./... passes"
+        "New docs/backends/tikv.md (alongside existing docs/backends/scylla.md) with: when to choose TiKV over Cassandra (decision matrix); required env vars + sample compose / Kubernetes config (TiKV operator on k8s, plain compose for laptop); production sizing (PD ≥3 raft majority, TiKV ≥3 default-3 replication, Strata gateway as separate fleet); capability matrix (native range scan yes, TTL no — sweeper, multi-DC yes via TiKV regions, hot/cold tier yes via PD label rules); performance characteristics (latency floor, throughput per node, cost model on-prem-friendly); common operational pitfalls (PD leader split-brain on partition, Region replica placement labels, raft entry GC)",
+        "CLAUDE.md Big-picture architecture diagram updated: 'meta.Store memory | cassandra | tikv' (vs current 'memory | cassandra')",
+        "CLAUDE.md gains a 'TiKV gotchas' subsection mirroring 'Cassandra gotchas' shape, capturing learnings from US-001..US-016",
+        "README.md How to run section gains 'make up-tikv' as a 5th option",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 19,
-      "passes": true,
-      "notes": "deploy/grafana/strata-dashboard.json (uid=strata-overview, schemaVersion=39): rows for HTTP, Cassandra, RADOS, GC+Lifecycle, Bucket capacity, Replication, Notifications. Panels: http p50/p95/p99 (histogram_quantile over strata_http_request_duration_seconds_bucket by method,path), http req rate, cassandra p99 by table + rate by table+op, RADOS p99 by pool + rate by pool+op, gc queue depth gauge, multipart active gauge, lifecycle tick rate by action+status, bucket bytes by storage_class, replication lag p95 + queue depth + completed/failed rates per rule, notify delivery rate by sink+status. deploy/grafana/datasource.yaml provisions Prometheus as default (url=http://prometheus:9090). deploy/grafana/dashboard.yaml provider points at /var/lib/grafana/dashboards. deploy/prometheus/prometheus.yml scrapes gateway:9000, gc:9100, lifecycle:9101, notify:9102, replicator:9103, access-log:9104. docker-compose adds prometheus + grafana services with volume-mounted provisioning + dashboard JSON; Makefile up-all now starts prometheus+grafana too. Tests: deploy/grafana/dashboard_test.go validates JSON parses + asserts every required metric is referenced by at least one target + http panel covers p50/p95/p99. scripts/grafana-smoke.sh hits /api/dashboards/uid/strata-overview + /api/datasources/name/Prometheus once Grafana is up; wired as `make smoke-grafana`."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-020",
-      "title": "/healthz + /readyz endpoints",
-      "description": "As a k8s probe, I need /healthz (liveness) and /readyz (readiness Cassandra plus RADOS reachable).",
+      "title": "ROADMAP cleanup — promote TiKV, drop FDB / Postgres / TiDB",
+      "description": "As a maintainer, I want ROADMAP.md's 'alternative metadata backends' section to honestly reflect the supported set after this PRD: cassandra + tikv as primary (memory for tests). Drop the previously-listed P3 community candidates (TiKV-as-P3, FDB, Postgres+Citus, generic TiDB) that no longer have a path.",
       "acceptanceCriteria": [
-        "GET /healthz returns 200 plain text 'ok' without dependency checks",
-        "GET /readyz queries Cassandra (SELECT 1) and RADOS (stat on a known canary OID) within a 1s timeout; returns 200 only when both succeed",
-        "Both endpoints bypass SigV4 middleware regardless of STRATA_AUTH_MODE",
-        "deploy/docker/docker-compose.yml ships a healthcheck stanza using /readyz",
-        "Tests: kill the gateway's Cassandra session yields /readyz 503; same for RADOS; /healthz always 200",
-        "go build ./... passes",
-        "go test ./cmd/strata-gateway/... ./internal/s3api/... passes"
+        "Edit ROADMAP.md 'Alternative metadata backends' section: reword introduction to 'Strata supports two production metadata backends: Cassandra (with ScyllaDB as a CQL-compatible drop-in) and TiKV. Both are first-class. Memory is for tests only'",
+        "Drop the bullets for TiKV-as-P3-community, FoundationDB, PostgreSQL+Citus/Yugabyte (those are no longer goals)",
+        "Keep 'non-goals' section listing single-node-only stores",
+        "Add ROADMAP entry to 'Consolidation & validation' closed list using close-flip format per CLAUDE.md Roadmap maintenance rule: ~~**P1 — TiKV first-class metadata backend.**~~ — **Done.** ... (commit `<sha>` or `(commit pending)`)",
+        "CLAUDE.md alternative-metadata-backends prose updated to mirror new ROADMAP wording (single source of truth)",
+        "Typecheck passes",
+        "Tests pass"
       ],
       "priority": 20,
-      "passes": true,
-      "notes": "internal/health.Handler exposes Healthz (always 200 plain 'ok') + Readyz (probes fan out concurrently with 1s timeout, default; 503 + per-failure body lines on any probe error). Probes injected from cmd/strata-gateway/main.go::buildHealthHandler via type-assertion against cassandraProber/radosProber interfaces, so internal/health stays import-free of backends. cassandra.Store.Probe(ctx) runs SELECT now() FROM system.local; rados.Backend.Probe(ctx, oid) stats a canary OID (STRATA_RADOS_HEALTH_OID, default strata-readyz-canary) in the STANDARD-class pool and treats goceph.ErrNotFound as success (only transport/auth failures fail). Memory backends register no probe (always ready). /healthz and /readyz are mounted on the mux directly (mux.HandleFunc), ahead of /, so they bypass auth.Middleware + access-log middleware regardless of STRATA_AUTH_MODE. deploy/docker/docker-compose.yml gateway service got a healthcheck stanza hitting /readyz via curl. Unit tests in internal/health and cmd/strata-gateway cover: /healthz always 200 even when probes fail, /readyz 200 with all probes ok, 503 with cassandra-down (body shows failing probe name only), 503 with rados-down, ctx-timeout failure, env-var override of canary OID. ceph build still requires librados (not buildable on macOS without ceph-devel) \u2014 same constraint as existing rados code."
-    },
-    {
-      "id": "US-021",
-      "title": "Virtual-hosted-style URL routing",
-      "description": "As a modern AWS SDK client, I want bucket.s3.example.com/key to resolve to bucket 'bucket'.",
-      "acceptanceCriteria": [
-        "Router strips the bucket prefix from Host when host matches any pattern in STRATA_VHOST_PATTERN (comma-separated list, first match wins; default '*.s3.local')",
-        "Falls back to path-style when host doesn't match any pattern",
-        "SigV4 canonicalisation uses the original Host header for signing; bucket extraction is post-signature",
-        "Pre-signed URLs work with both styles",
-        "Tests: virtual-hosted PUT/GET/HEAD round-trip; path-style still works; signed virtual-hosted matches; mismatched host falls back",
-        "go build ./... passes",
-        "go test ./internal/s3api/... ./internal/auth/... passes"
-      ],
-      "priority": 21,
-      "passes": true,
-      "notes": "internal/s3api/vhost.go adds extractVHostBucket(host, patterns) + ParseVHostPatterns(env). Server.VHostPatterns []string drives Server.ServeHTTP: when r.Host matches any pattern (first match wins), the bucket prefix is stripped and prepended to URL.Path before splitPath; URL.RawPath is patched in lockstep so urlencoded keys keep their on-the-wire form. STRATA_VHOST_PATTERN comma-separated list (default '*.s3.local'; '-' disables); cmd/strata-gateway/main.go::vhostPatterns reads it. Crucial ordering: auth.Middleware runs first (signs r.Host + URL.Path), s3api.Server.ServeHTTP runs second (rewrites r.URL.Path) so SigV4 signature verification sees the signed request unchanged. Tests in internal/s3api/vhost_test.go: vhost PUT/GET/HEAD round-trip, path-style still works, mismatched-host falls back, vhost disabled when patterns nil, signed (header) round-trip, presigned round-trip, host-with-port stripped via net.SplitHostPort, ParseVHostPatterns whitespace/empty handling. signRequest helper overwrites req.Host with URL.Host when no Host header is set \u2014 vhost tests therefore set req.Header.Set('Host', '<vhost>') AND req.Host before calling signRequest so the helper preserves vhost; the on-the-wire Host header still comes from req.Host because Go's Transport strips explicit 'Host' headers."
-    },
-    {
-      "id": "US-022",
-      "title": "audit_log table + state-changing-request middleware hook",
-      "description": "As a security auditor, I need every state-changing request appended to an audit_log table with a 30-day TTL.",
-      "acceptanceCriteria": [
-        "New audit_log table partitioned by (bucket, date), columns: event_id timeuuid, ts, principal, action, resource, result, request_id, source_ip; TTL = STRATA_AUDIT_RETENTION (default 30d)",
-        "HTTP middleware writes one row per state-changing request after the response is written; reuses request_id from US-015",
-        "Read paths (GET/HEAD/list) do not emit audit rows",
-        "Tests: every CreateBucket/PutObject/DeleteObject/IAM action emits exactly one row; expired rows disappear after TTL",
-        "go build ./... passes",
-        "go test ./internal/s3api/... ./internal/meta/... passes"
-      ],
-      "priority": 22,
-      "passes": true,
-      "notes": "meta.AuditEvent struct + EnqueueAudit(ctx, *AuditEvent, ttl)/ListAudit(ctx, bucketID, limit) methods on meta.Store. Cassandra schema: new audit_log table partitioned by ((bucket_id, day)) with timeuuid event_id clustering DESC; cassandra.EnqueueAudit appends `USING TTL <sec>` when ttl>0. Memory backend stores rows with computed expiresAt and prunes lazily on ListAudit. storetest case caseAuditLog covers round-trip; runs in both backends. internal/s3api/audit.go exposes AuditMiddleware{Meta, Next, TTL, Now}: wraps the inner handler with auditWriter so it captures the inner status, and after the response writes one row when method != GET/HEAD/OPTIONS/CONNECT/TRACE. Resolves bucket->bucketID via meta.GetBucket; for IAM ?Action= requests stores BucketID=uuid.Nil + Bucket='-' + Resource='iam:<Action>'. Action label uses CamelCase AWS verbs derived from method+scope+sub-resource (CreateBucket / PutObject / PutBucketLifecycle / etc.). Result is the HTTP status as string. RequestID pulled from logging.RequestIDFromContext(ctx) with header fallback. STRATA_AUDIT_RETENTION parsed by s3api.ParseAuditRetention (Go duration like '720h' or '<N>d'; default 30 days). Wired in cmd/strata-gateway/main.go inside the access-log middleware so audit rows fire even when auth denies (auditMiddleware sits inside mw.Wrap). Best-effort: meta failures are swallowed. Tests cover (1) state-changing PUT/DELETE on bucket+object emit one row each with correct action/resource/requestID, (2) GET/HEAD do not emit rows, (3) IAM POST emits a row with iam:<Action> resource even when 403, (4) TTL purges expired rows from the memory backend, (5) ParseAuditRetention covers '', '30d', '720h', '15m', and rejects garbage."
-    },
-    {
-      "id": "US-023",
-      "title": "audit_log read API (?audit, [iam root] gated)",
-      "description": "As a security auditor, I want a paginated query API over the audit_log gated to admin principals.",
-      "acceptanceCriteria": [
-        "GET /?audit&start=<ISO8601>&end=<ISO8601>&principal=<id>&bucket=<name>&limit=<n>&continuation=<token> returns paginated JSON",
-        "Gated to [iam root] header auth only, no presigned URL support",
-        "Filters work in any combination; pagination via opaque continuation token",
-        "Tests: filter by each dimension; pagination round-trip; non-admin principal returns 403",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
-      ],
-      "priority": 23,
-      "passes": true,
+      "passes": false,
       "notes": ""
-    },
-    {
-      "id": "US-024",
-      "title": "objects.part_sizes column + ?partNumber=N GET range serve",
-      "description": "As a multipart-aware client, GET /<bucket>/<key>?partNumber=N returns only that part's bytes.",
-      "acceptanceCriteria": [
-        "Add objects.part_sizes list<int> column via additive ALTER",
-        "CompleteMultipartUpload populates part_sizes with one entry per part, ordered by PartNumber",
-        "GET /<bucket>/<key>?partNumber=N returns the byte range of part N; sets x-amz-mp-parts-count, Content-Length of the part, and the per-part stored x-amz-checksum-<algo>",
-        "?partNumber on a non-multipart object returns 400 InvalidArgument",
-        "Tests: round-trip a 3-part multipart, fetch each part by number, verify checksum plus size plus ContentLength",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
-      ],
-      "priority": 24,
-      "passes": true,
-      "notes": "meta.Object grew PartSizes []int64 (per-part plaintext sizes in PartNumber order). data.Manifest grew PartChecksums []map[string]string (additive json:omitempty) so per-part stored x-amz-checksum-<algo> survives the multipart_parts row deletion in Complete. Cassandra schema additive: ALTER TABLE objects ADD part_sizes list<bigint>; PutObject INSERT + GetObject SELECT both touch the new column (nil when empty). Both backends' CompleteMultipartUpload populate obj.PartSizes from the per-part p.Size (plaintext) and obj.Manifest.PartChecksums from p.Checksums in PartNumber order. internal/s3api/server.go::getObject handles ?partNumber=N at the top: parses N, returns 400 InvalidArgument on non-int / N<1 / N > len(o.PartSizes) / non-multipart object (PartSizes empty); when valid, computes (offset, length) via partOffsetLength helper, sets Content-Range = bytes <off>-<off+len-1>/<total>, status=206, x-amz-mp-parts-count = len(o.PartSizes), and per-part checksums via partChecksumsAt(o, N-1) instead of o.Checksums. SSE decryption path is unchanged because o.Size + offset/length already work in plaintext space (same lever as Range GET). Tests in multipart_partnumber_test.go: 3-part round-trip (6MiB+5MiB+1KiB) verifies Content-Length / Content-Range / x-amz-mp-parts-count + body bytes per part; per-part checksum echo with CRC32; non-multipart object yields 400 InvalidArgument; out-of-range partNumber values (0, -1, 3, abc) all yield 400."
-    },
-    {
-      "id": "US-025",
-      "title": "HEAD ChecksumMode=ENABLED + composite checksum echo",
-      "description": "As a checksum-aware client, HEAD with x-amz-checksum-mode ENABLED should return the composite checksum and ChecksumType.",
-      "acceptanceCriteria": [
-        "HEAD with x-amz-checksum-mode ENABLED returns x-amz-checksum-<algo> from object Checksums map and x-amz-checksum-type (COMPOSITE for typical multipart, FULL_OBJECT when client requested it on Initiate)",
-        "Without ChecksumMode header, HEAD does not include checksum headers (matches AWS)",
-        "GetObject with ChecksumMode behaves the same",
-        "Tests: HEAD without mode yields no checksum header; HEAD with mode returns composite; ChecksumType=COMPOSITE for multipart-initiated; FULL_OBJECT path covered",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
-      ],
-      "priority": 25,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-026",
-      "title": "GetObjectAttributes ObjectParts subtree fully populated",
-      "description": "As a multipart-aware client, GetObjectAttributes with ObjectParts in x-amz-object-attributes returns per-part sizes plus checksums.",
-      "acceptanceCriteria": [
-        "GET /<bucket>/<key>?attributes with x-amz-object-attributes containing ObjectParts populates the <ObjectParts> subtree with PartsCount, Parts[*].PartNumber, Parts[*].Size, Parts[*].Checksum<algo>",
-        "Non-multipart objects return PartsCount=1 with the whole-object size",
-        "Tests: 3-part multipart returns 3 entries with correct sizes plus checksums; non-multipart returns PartsCount=1",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
-      ],
-      "priority": 26,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-027",
-      "title": "Versioning null literal: schema + sentinel",
-      "description": "As a developer, I need a way to address rows written under Versioning=Disabled as the literal version-id 'null'.",
-      "acceptanceCriteria": [
-        "Add objects.is_null bool column via additive ALTER",
-        "Sentinel TimeUUID 00000000-0000-0000-0000-000000000000 reserved for the 'null' version",
-        "meta.Store.PutObject under Versioning=Disabled stores the row with version_id = sentinel and is_null=true",
-        "GetObject with versionID='null' resolves to the row with is_null=true",
-        "Tests: Disabled-mode PUT and GET ?versionId=null round-trip; query-by-sentinel returns the same row",
-        "go build ./... passes",
-        "go test ./internal/meta/memory/... ./internal/meta/storetest/... passes"
-      ],
-      "priority": 27,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-028",
-      "title": "Versioning null literal: PutObject + ListVersions",
-      "description": "As a versioning-aware client, after enabling versioning on a bucket that previously had unversioned writes, the original row is addressable as version 'null'.",
-      "acceptanceCriteria": [
-        "ListObjectVersions surfaces the null-versioned row with VersionId='null' and IsLatest=true if it is current",
-        "After SetBucketVersioning(Enabled), the prior null-versioned row remains addressable",
-        "PutObject in Enabled mode generates a TimeUUID version (existing behaviour) and does not overwrite a null version unless explicitly requested",
-        "Tests: Disabled PUT plus Enabled toggle plus ListObjectVersions includes a 'null' entry; subsequent Enabled PUT adds a TimeUUID version above the null one",
-        "go build ./... passes",
-        "go test ./internal/s3api/... ./internal/meta/... passes"
-      ],
-      "priority": 28,
-      "passes": true,
-      "notes": "Cassandra version cursor scans is_null column so listed rows carry the flag. s3api wireVersionID() helper translates IsNull rows to 'null' wire literal in <VersionId> XML and in the NextVersionIdMarker continuation. Memory + cassandra share new caseVersioningNullListVersions contract test (Disabled PUT \u2192 toggle Enabled \u2192 versioned PUT prepends TimeUUID, null row preserved, list emits both rows, null IsLatest=false). s3api TestListObjectVersionsNullLiteral round-trips it over HTTP."
-    },
-    {
-      "id": "US-029",
-      "title": "Versioning null literal: Suspended PUT/DELETE replaces null atomically",
-      "description": "As a versioning-aware client, in Suspended mode, an overwrite or delete removes the prior null-versioned ancestor atomically and writes a new null-versioned row.",
-      "acceptanceCriteria": [
-        "PutObject in Suspended mode: deletes any prior null-versioned row for the key, writes a new one with sentinel and is_null=true",
-        "DeleteObject without versionId in Suspended mode: same semantics \u2014 null-versioned ancestor removed, delete marker with is_null=true written",
-        "Atomic via cassandra LWT ('IF EXISTS' on prior null-versioned row)",
-        "Tests: closes test_versioning_obj_plain_null_version_overwrite_suspended, test_versioning_obj_suspend_versions, test_versioning_obj_suspended_copy",
-        "go build ./... passes",
-        "go test ./internal/s3api/... ./internal/meta/... passes"
-      ],
-      "priority": 29,
-      "passes": true,
-      "notes": "meta.Store grew DeleteObjectNullReplacement(ctx, bucketID, key) \u2014 Suspended-mode unversioned DELETE that atomically removes any prior null-versioned row (cassandra LWT IF EXISTS) and writes a fresh null delete marker. Memory + cassandra both implement it; both PutObject paths now branch on `versioned=true && o.IsNull=true` to take the Suspended-null path that drops just the prior null row instead of all rows. s3api callers (putObject, copyObject, deleteObject, deleteObjects) detect Suspended buckets and (a) set obj.IsNull=true before PutObject, (b) route empty-versionId DELETE through the new method, and (c) emit `x-amz-version-id: null` via wireVersionID(). enqueueChunks for the replaced null row runs at the s3api layer (best-effort GetObject pre-DELETE) so the data backend gets cleaned up. New contract case caseVersioningSuspendedReplaceNull and s3api HTTP test TestVersioningSuspendedReplaceNull lock in PUT-replace, DELETE-replace, and version-id wire shape."
-    },
-    {
-      "id": "US-030",
-      "title": "Website RedirectAllRequestsTo",
-      "description": "As a static-site host, when RedirectAllRequestsTo is set on a bucket, every GET on the bucket should 301-redirect.",
-      "acceptanceCriteria": [
-        "When website config has RedirectAllRequestsTo, GET on any path under the bucket returns 301 with Location: <protocol>://<host>[/<path>]",
-        "Other request methods (PUT/DELETE/HEAD) continue to behave normally",
-        "Without website config, no redirect \u2014 current behaviour preserved",
-        "Tests: PUT website config with RedirectAllRequestsTo; GET /<bucket>/anything returns 301 to expected URL",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
-      ],
-      "priority": 30,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-031",
-      "title": "Website RoutingRules: Condition + Redirect",
-      "description": "As a static-site host, I want RoutingRules with KeyPrefixEquals plus HttpErrorCodeReturnedEquals conditions to drive redirects.",
-      "acceptanceCriteria": [
-        "Each rule's Condition matches the request: KeyPrefixEquals against the request key OR HttpErrorCodeReturnedEquals when an upstream lookup would 404",
-        "Matched rule's Redirect (HostName/Protocol/HttpRedirectCode/ReplaceKeyPrefixWith/ReplaceKeyWith) drives the Location header and status",
-        "Index serving (IndexDocument) still works when no rule matches",
-        "Tests: prefix routing rule fires; error-code routing rule (404 to /404.html) fires; index serving baseline preserved",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
-      ],
-      "priority": 31,
-      "passes": true,
-      "notes": "internal/s3api/website.go: replaced opaque RoutingRules.Inner []byte with typed websiteRoutingRules{Rules []websiteRoutingRule}. Each rule has optional Condition (KeyPrefixEquals + HttpErrorCodeReturnedEquals) and Redirect (Protocol/HostName/ReplaceKeyPrefixWith *string/ReplaceKeyWith *string/HttpRedirectCode). PUT validates rules: Redirect must specify HostName or one of ReplaceKey*; ReplaceKeyWith and ReplaceKeyPrefixWith mutually exclusive; HttpRedirectCode in [300,400); HttpErrorCodeReturnedEquals in [400,600). New tryWebsiteRouting (object-GET path) does two passes: pass1 evaluates rules without HttpErrorCodeReturnedEquals against the request key (KeyPrefixEquals match); pass2 (only if any rule has an error-code condition) peeks the object via Meta.GetObject and evaluates 404 rules. serveWebsiteRoot got the same two-pass treatment around the index lookup (pass1 against key=''; pass2 against IndexDocument.Suffix). matchRoutingRule is the shared evaluator + key rewriter (ReplaceKeyWith verbatim; ReplaceKeyPrefixWith strips matched prefix + prepends). writeWebsiteRedirect writes Location + status, defaulting protocol to http (https when r.TLS != nil) and host to r.Host. Tests cover prefix-rule firing, error-code rule firing on 404, no redirect when object exists, index serving preserved with rules in place, and PUT rejection of an empty Redirect rule."
-    },
-    {
-      "id": "US-032",
-      "title": "OpenTelemetry tracing init + middleware",
-      "description": "As a debugger of slow requests, I want tracer init from OTEL_EXPORTER_OTLP_ENDPOINT and traceparent ingress in middleware.",
-      "acceptanceCriteria": [
-        "internal/otel package: Init(ctx) reads OTEL_EXPORTER_OTLP_ENDPOINT; absence yields no-op tracer",
-        "HTTP middleware parses ingress traceparent, starts a span, propagates via context.Context; falls back to creating a root span when traceparent absent",
-        "Sampling: STRATA_OTEL_SAMPLE_RATIO (default 0.01) with always-on for failing requests",
-        "Tests: in-memory exporter captures one span per smoke request; absence of endpoint emits no spans",
-        "go build ./... passes",
-        "go test ./internal/otel/... passes"
-      ],
-      "priority": 32,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-033",
-      "title": "OTel spans through Cassandra and RADOS",
-      "description": "As a tracing user, I want child spans for each Cassandra query and RADOS op nested under the request span.",
-      "acceptanceCriteria": [
-        "Cassandra gocql observer creates a child span 'meta.cassandra.<table>.<op>' per query",
-        "RADOS read/write wraps in a child span 'data.rados.<op>' with pool plus oid attributes",
-        "Tests: in-memory exporter captures expected span hierarchy for a smoke PUT (root plus 1+ cassandra spans plus 1+ rados spans)",
-        "deploy/docker/docker-compose.yml ships an optional OTLP collector plus Jaeger profile",
-        "go build ./... passes",
-        "go test ./internal/otel/... passes"
-      ],
-      "priority": 33,
-      "passes": true,
-      "notes": "internal/meta/cassandra/observer.go: SlowQueryObserver gained Tracer trace.Tracer field; NewQueryObserver(logger, threshold, m, tracer) returns nil only when ALL three sinks are disabled. ObserveQuery calls emitSpan when Tracer!=nil; span name 'meta.cassandra.<table>.<op>' (table/op fall back to 'unknown'/'UNKNOWN'); span kind=client; attributes db.system=cassandra, db.cassandra.table, db.operation, db.statement (truncated); timestamps pulled from q.Start/q.End so the SDK records actual query duration even though ObserveQuery runs after the fact; q.Err sets span status=Error + RecordError. SessionConfig.Tracer field threads through newCluster. internal/data/rados/config.go: Config.Tracer trace.Tracer field. internal/data/rados/observer.go: ObserveOp signature changed to (ctx, logger, m, tracer, pool, op, oid, start time.Time, err) \u2014 dur is now computed inside as time.Now().Sub(start) so backends pass the start timestamp instead of pre-computed dur. When tracer!=nil emits 'data.rados.<op>' span (kind=client) with attrs data.rados.pool/op/oid; timestamped (start, time.Now()); failing op sets status=Error. internal/data/rados/backend.go (ceph-tagged): Backend gained tracer field wired from cfg.Tracer; 3 ObserveOp call sites (PutChunks writeChunk 'put', radosReader.loadNextChunk 'get', Delete 'del') updated to pass b.tracer + start instead of dur. cmd/strata-gateway/main.go: strataotel.Init moved ahead of buildDataBackend/buildMetaStore so the provider is available; buildDataBackend(cfg, logger, tp) and buildMetaStore(cfg, logger, tp) now plug tp.Tracer('strata.data.rados') and tp.Tracer('strata.meta.cassandra') into the respective configs. Other binaries (gc/lifecycle/replicator/access-log/notify/rewrap) leave Tracer nil \u2014 backwards compatible since nil tracer is short-circuited. deploy/docker/docker-compose.yml: new otel-collector + jaeger services behind 'tracing' profile (docker compose --profile tracing up otel-collector jaeger); collector listens on 4317/4318 and forwards to jaeger:4317; jaeger UI on 16686. deploy/otel/collector-config.yaml: minimal pipeline that fans OTLP traces to Jaeger + debug exporter. Tests: internal/otel/spans_test.go end-to-end harness \u2014 InitWithConfig with InMemoryExporter, start root span, run cassandra observer ObserveQuery + rados ObserveOp under root ctx, assert >=3 spans (root + cassandra child + rados child) with Parent.SpanID==rootID. internal/meta/cassandra/observer_test.go: TestQueryObserverEmitsSpan verifies span name + kind=client + attrs (db.system/table/operation) + parent linkage; TestQueryObserverErrorSpanFlipsStatus verifies q.Err -> status=Error; TestQueryObserverDisabledWhenAllMissing renamed (was BothMissing). Existing NewQueryObserver call sites updated with nil tracer arg. internal/data/rados/observer_test.go: TestObserveOpEmitsSpan + TestObserveOpErrorSpanFlipsStatus + TestObserveOpNilTracerNoop. go build/vet/test all green."
-    },
-    {
-      "id": "US-034",
-      "title": "cmd/strata-admin CLI",
-      "description": "As an operator, I want a CLI wrapping admin endpoints: IAM, lifecycle, gc, bucket, sse, replicate.",
-      "acceptanceCriteria": [
-        "New cmd/strata-admin binary with subcommands: 'iam create-access-key', 'iam rotate-access-key', 'lifecycle tick', 'gc drain', 'bucket inspect', 'sse rotate', 'replicate retry'",
-        "Talks to the gateway over IAM admin endpoints plus new /admin/* HTTP routes (gated by [iam root])",
-        "--json flag for machine output; default human output",
-        "Tests: each subcommand against an in-memory gateway, asserting request shape plus parsed response",
-        "go build ./... passes",
-        "go test ./cmd/strata-admin/... passes"
-      ],
-      "priority": 34,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-035",
-      "title": "Concurrency / race harness",
-      "description": "As a maintainer, I want a race harness that hammers the gateway with parallel mixed PUT/DELETE/Multipart-Complete and asserts invariants.",
-      "acceptanceCriteria": [
-        "New internal/s3api/race_test.go: 32 goroutines x 1000 ops, mix PUT/DELETE/Multipart-Complete on a small key set",
-        "Asserts invariants: per key, exactly one is_latest=true row in objects (after operation completes); no orphaned chunks beyond the GC queue; version chain monotonic in mtime",
-        "Run with -race in CI",
-        "Memory backend variant runs in `make test`; cassandra-backed variant runs under -tags integration",
-        "go build ./... passes",
-        "go test -race ./internal/s3api/... passes"
-      ],
-      "priority": 35,
-      "passes": true,
-      "notes": "internal/s3api/race_test.go (memory variant, always-on) + race_integration_test.go (cassandra variant, build-tag integration). Both share runRaceScenario + verifyRaceInvariants over a raceFixture (server, ts, client, memData, allVersions). Scenario: PUT bucket, enable Versioning=Enabled, fan out 32 goroutines x 1000 ops on 4 keys. Each iter picks PUT / DELETE / Multipart-Complete uniformly; multipart path Initiates -> UploadPart -> Complete (1 byte part) and aborts on any failure so chunk accounting stays clean. Every multipart upload still in flight at the end is drained via ListMultipartUploads + AbortMultipartUpload + EnqueueChunkDeletion to keep the orphan-chunk invariant tight. Invariant checks: per key (1) exactly one IsLatest=true row, (2) latest Mtime is within 1s of max Mtime in chain (slack absorbs the tiny stamp-before-lock window \u2014 Mtime is set in s3api before the meta backend acquires its lock, so under sustained contention a slightly older PUT can occasionally win the lock; 1s tolerance catches structurally broken ordering without flaking on the microsecond-scale natural race), (3) every OID in the data backend appears in some manifest OR in the GC queue (no orphans). Pooled http.Client (MaxIdleConnsPerHost=64) avoids macOS ephemeral-port exhaustion at 32k requests; f.do returns nil on transport error and the per-iter switch treats nil as a skipped op so the run continues. Two new test-only meta helpers added so the verification pass does not have to fight the 1000-row hard cap on ListObjectVersions: memory.Store.AllObjectVersions(bucketID) and cassandra.Store.AllObjectVersions(ctx, bucketID); both return per-key chains with IsLatest stamped on the head. data/memory.Backend.ChunkOIDs() exposes the live OID set. Cassandra integration test spins testcontainers cassandra:5.0, opens a fresh keyspace per run (DefaultShardCount=16), wires the same fixture, runs the same scenario + invariants. Quality: go build ./... + go vet ./... + go test ./... + go test -race ./internal/s3api/... all green."
-    },
-    {
-      "id": "US-036",
-      "title": "SSE-KMS: Provider interface + vault provider",
-      "description": "As an enterprise tenant, I want a pluggable KMS provider with HashiCorp Vault Transit as the default.",
-      "acceptanceCriteria": [
-        "internal/crypto/kms package: KMSProvider interface { GenerateDataKey(keyID string) (plaintextDEK, wrappedDEK, error); UnwrapDEK(keyID, wrapped) (plaintextDEK, error) }",
-        "vault provider: STRATA_KMS_VAULT_ADDR plus STRATA_KMS_VAULT_PATH; reuses Vault auth from US-002",
-        "Tests: vault provider against httptest mock; round-trip wrap/unwrap; missing key id returns error",
-        "go build ./... passes",
-        "go test ./internal/crypto/kms/... passes"
-      ],
-      "priority": 36,
-      "passes": true,
-      "notes": "internal/crypto/kms package added with Provider interface (GenerateDataKey/UnwrapDEK both ctx-scoped + keyID-scoped). VaultProvider talks to a Vault Transit mount via POST /v1/<path>/datakey/plaintext/<keyID> + POST /v1/<path>/decrypt/<keyID>; AppRole auth shares STRATA_SSE_VAULT_ROLE_ID/SECRET_ID with master.VaultProvider (US-002), addr/path live under STRATA_KMS_VAULT_ADDR + STRATA_KMS_VAULT_PATH. Token cached until lease expiry; 401/403 forces one re-login then retry \u2014 second 401 returns the wrapped error (no cached-DEK fallback because every datakey call is per-object). Wrapped DEK persisted opaquely as bytes (Vault returns 'vault:v1:<base64>' style string). Tests (vault_test.go): fakeVault httptest mux with login + datakey + decrypt; round-trip wrap/unwrap, missing key id, unknown key id, key-id mismatch on unwrap, login failure fatal, empty wrapped DEK, token cached across calls, FromEnv precedence/no-config/partial-config/missing-creds, relogin-on-401. FromEnv() returns VaultProvider when both addr+path set else ErrNoConfig; aws-kms / local-hsm slots in via US-037 alongside this branch. Quality: go build ./... + go vet ./... + go test ./... all green."
-    },
-    {
-      "id": "US-037",
-      "title": "SSE-KMS: aws-kms provider + local-hsm test stub",
-      "description": "As an AWS-integrating user, I want a real aws-kms provider; for tests, a deterministic local-hsm stub.",
-      "acceptanceCriteria": [
-        "aws-kms provider: AWS SDK GenerateDataKey plus Decrypt; key id resolved via STRATA_KMS_AWS_REGION plus the request key id",
-        "local-hsm provider: deterministic in-process keystore for tests, generates DEK from a hash of (key_id, nonce)",
-        "Tests: aws-kms against AWS SDK mock; local-hsm round-trip",
-        "go build ./... passes",
-        "go test ./internal/crypto/kms/... passes"
-      ],
-      "priority": 37,
-      "passes": true,
-      "notes": "internal/crypto/kms/aws.go: AWSKMSProvider over a narrow KMSAPI interface (GenerateDataKey + Decrypt subset of *awskms.Client) \u2014 same SDK-injection shape as US-010 SQSSink so kms unit tests don't pull in SDK transport. NewAWSKMSProvider(client, region); GenerateDataKey hard-codes KeySpec=AES_256, returns Plaintext + opaque CiphertextBlob. UnwrapDEK calls Decrypt with both CiphertextBlob and KeyId, then verifies out.KeyId matches the requested id (handles bare-id <-> ARN equivalence via sameKeyARN suffix match) \u2014 mismatch surfaces ErrKeyIDMismatch which the gateway will map to AccessDenied in US-038. NewAWSKMSProviderFromEnv(factory) reads STRATA_KMS_AWS_REGION; missing region -> ErrNoConfig, region without factory -> hard error (not ErrNoConfig) so misconfig is caught at startup. internal/crypto/kms/local_hsm.go: LocalHSMProvider seeded from STRATA_KMS_LOCAL_HSM_SEED (hex 64 chars). Deterministic DEK derivation: DEK = HMAC-SHA256(seed, 'strata-local-hsm-dek\\x00' || keyID || \\x00 || nonce); wrapped = nonce(16) || mac(32) where mac binds keyID+nonce+DEK so wrong keyID on UnwrapDEK fails with ErrKeyIDMismatch. Compile-time check `var _ KMSAPI = (*awskms.Client)(nil)` in aws_test.go. internal/crypto/kms/kms.go: EnvOption pattern, WithAWSKMSClientFactory; FromEnv precedence vault > aws-kms > local-hsm; misconfigured higher-priority provider is fatal (does not silently fall through). Tests: aws round-trip via fake KMSAPI, missing keyID, unknown keyID, key-id mismatch via fake returning a different ARN, empty wrapped, nil client, FromEnv (no env -> ErrNoConfig, region-no-factory -> error, factory error propagates), sameKeyARN cases (bare/ARN/ARN-vs-bare/non-match/empty); local-hsm round-trip, key-id mismatch, deterministic across instances (same seed two providers cross-decrypt), unique DEKs per call (random nonce), missing keyID, bad seed length, bad wrapped length, FromEnv (empty -> ErrNoConfig, non-hex error, valid round-trip, short seed via env error). Env precedence tests: clearAllProviderEnv helper sets all 6 vars empty before each FromEnv test (matches the master-key 'set ALL precedence vars' rule from progress.txt pattern #6). Dep added: github.com/aws/aws-sdk-go-v2/service/kms v1.50.4 via go get; left annotated `// indirect` per existing pattern (other AWS SDK pkgs in go.mod are also indirect despite being direct imports). go build/vet/test all green."
-    },
-    {
-      "id": "US-038",
-      "title": "SSE-KMS: PutObject/GetObject wiring",
-      "description": "As an enterprise tenant, x-amz-server-side-encryption aws:kms wraps the per-object DEK via KMSProvider.",
-      "acceptanceCriteria": [
-        "PutObject with aws:kms plus x-amz-server-side-encryption-aws-kms-key-id resolves the provider, calls GenerateDataKey, persists wrapped DEK plus key id in objects.sse_key plus sse_key_id (US-004 columns)",
-        "GetObject calls UnwrapDEK with the persisted key id; mismatched key id at unwrap time yields 403 AccessDenied",
-        "Bucket default encryption (US-007) supports aws:kms with a KMSMasterKeyID \u2014 applied transparently when header omitted",
-        "Tests: round-trip with vault provider; round-trip with local-hsm; missing key id yields 400; mismatched key id yields 403",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
-      ],
-      "priority": 38,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-039",
-      "title": "cmd/strata-inventory worker (CSV)",
-      "description": "As a billing/audit pipeline, I want PutBucketInventoryConfiguration to schedule actual CSV exports of the bucket index.",
-      "acceptanceCriteria": [
-        "New cmd/strata-inventory binary, leader-elected, ticks per inventory configuration (hourly/daily)",
-        "Walks objects rows for the source bucket, writes a manifest object (manifest.json) plus a data object (CSV.gz) to the target prefix",
-        "PUT /<bucket>?inventory&id=<id> plus GET plus DELETE round-trip InventoryConfiguration XML via setBucketBlob",
-        "CSV columns match AWS Inventory: Bucket, Key, VersionId, IsLatest, IsDeleteMarker, Size, LastModifiedDate, ETag, StorageClass, ChecksumAlgorithm",
-        "Tests: scheduled tick fires; manifest plus CSV present in target bucket; CSV header matches AWS spec",
-        "go build ./... passes",
-        "go test ./cmd/strata-inventory/... passes"
-      ],
-      "priority": 39,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-040",
-      "title": "Access Points: schema + CRUD endpoints",
-      "description": "As a multi-tenant operator, I want named access points with their own policy and alias.",
-      "acceptanceCriteria": [
-        "New access_points table: name PK, bucket_ref, policy blob, public_access_block blob, network_origin",
-        "POST /?Action=CreateAccessPoint plus GetAccessPoint plus DeleteAccessPoint plus ListAccessPoints, AWS-style XML form-encoded (gated by [iam root])",
-        "Alias generated as 'ap-<random12>'",
-        "Tests: round-trip CRUD; double-create returns AccessPointAlreadyOwnedByYou; delete-missing returns NoSuchAccessPoint",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
-      ],
-      "priority": 40,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-041",
-      "title": "Access Points: host routing + additive policy",
-      "description": "As an access-point client, requests to <alias>.s3-accesspoint.<region>.example.com route to the underlying bucket with the access-point policy applied additively.",
-      "acceptanceCriteria": [
-        "Router accepts <alias>.s3-accesspoint.<region>.<host> hosts; resolves alias to bucket; rewrites the request path to use the bucket name",
-        "Access-point policy is evaluated AFTER bucket policy; both must allow the action (intersection semantics)",
-        "Network origin restriction (Internet/VPC) honoured; mismatched origin yields 403",
-        "Tests: GET via access-point alias reaches underlying bucket; access-point Deny overrides bucket Allow; bucket Deny overrides access-point Allow; mismatched origin yields 403",
-        "go build ./... passes",
-        "go test ./internal/s3api/... passes"
-      ],
-      "priority": 41,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-042",
-      "title": "ScyllaDB CI matrix + docs/backends/scylla.md",
-      "description": "As a maintainer, I want CI evidence ScyllaDB is a drop-in for Cassandra and a benchmark vs Cassandra.",
-      "acceptanceCriteria": [
-        "New .github/workflows/ci-scylla.yml: weekly schedule plus manual dispatch; runs the existing testcontainers-go integration tests against ScyllaDB 5.x",
-        "docs/backends/scylla.md: deployment notes, raft-LWT confirmation, p50/p95/p99 latency table for CreateBucket / SetBucketVersioning / CompleteMultipartUpload (one column Cassandra, one column Scylla)",
-        "No code changes required to switch backends",
-        "Tests: existing storetest contract passes against ScyllaDB",
-        "go build ./... passes",
-        "go test -tags integration ./internal/meta/cassandra/... passes against Scylla"
-      ],
-      "priority": 42,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-043",
-      "title": "Multi-cluster RADOS: config + connection map",
-      "description": "As a geo-sep operator, I want RADOS connections per cluster, each with its own keyring and conf.",
-      "acceptanceCriteria": [
-        "STRATA_RADOS_CLUSTERS=<id>:<conf-path>:<keyring-path>,...",
-        "rados.Backend internally holds map[clusterID]*rados.Conn; lazy init on first use; reconnect on connection loss",
-        "Existing single-cluster config (STRATA_RADOS_CONF plus STRATA_RADOS_USER plus STRATA_RADOS_KEYRING) maps to cluster id 'default'",
-        "Tests: config parsed; missing cluster id fatal at startup; unreachable cluster yields INFO log plus retry on first PutChunks",
-        "go build -tags ceph ./... passes",
-        "go test -tags ceph ./internal/data/rados/... passes"
-      ],
-      "priority": 43,
-      "passes": true,
-      "notes": "internal/data/rados/clusters.go: new ClusterSpec struct + ParseClusters parser (STRATA_RADOS_CLUSTERS=<id>:<conf-path>:<keyring-path>,...; keyring optional; whitespace-tolerant; rejects empty id / empty conf / duplicate id) + BuildClusters resolver (multi-cluster map wins; legacy single-cluster fields fold in under DefaultCluster only when the multi-map omits 'default') + ValidateClusterRefs (every Class.Cluster \u2014 empty defaulting to DefaultCluster \u2014 must resolve in the cluster map; missing-cluster id surfaces as a fatal error from rados.New). All three live in the no-build-tag file so they unit-test without librados. internal/data/rados/config.go: Config grew Clusters map[string]ClusterSpec field. internal/data/rados/backend.go (ceph-tagged): Backend now holds clusters map[string]ClusterSpec + conns map[string]*goceph.Conn keyed by cluster id + ioctxes map keyed by 'cluster|pool|ns'. New helper dialCluster(spec) (Conn open + ReadConfigFile + SetConfigOption keyring + Connect, no lock dependency) and connFor(ctx, id) (lazy dial; on first dial failure logs INFO with cluster id + error, retries dialCluster once before giving up; caller must hold b.mu). ioctx() now takes (ctx, cluster, pool, ns) and routes to the right Conn via connFor. PutChunks / cleanupManifest / radosReader.loadNextChunk / Delete / Probe all updated to thread cluster (from ChunkRef.Cluster on read paths, from ClassSpec.Cluster on write/probe). Close() iterates b.conns map instead of single conn. Empty cluster fields (legacy ChunkRef written before this story) default to DefaultCluster so old manifests stay readable. internal/config/config.go: RADOSConfig.Clusters string + STRATA_RADOS_CLUSTERS \u2192 rados.clusters env mapping. All 6 cmd binaries that build the rados backend (gateway/gc/lifecycle/inventory/access-log/replicator) parse cfg.RADOS.Clusters via datarados.ParseClusters and pass into Config. Tests (clusters_test.go, no build tag): ParseClusters {empty/single/multi/optional-keyring/whitespace/error-cases (no separator, empty id, empty conf, duplicate id)}, BuildClusters {multi-only, legacy-only threads conf+keyring+user, mixed legacy+multi yields 2 entries, multi explicit 'default' is not clobbered by legacy, both empty errors}, ValidateClusterRefs {ok, empty cluster defaults to DefaultCluster, missing id error mentions the id}. Quality: go build ./..., go vet ./..., go test ./..., go test -race ./internal/data/rados/... all green; ceph-tagged backend.go syntactically validates via go vet -tags ceph (cgo headers unavailable on macOS but Go compile up to that point passes)."
-    },
-    {
-      "id": "US-044",
-      "title": "Multi-cluster RADOS: PutChunks routing + GetChunks dispatch",
-      "description": "As a geo-sep operator, I want storage class to drive the cluster choice on writes, and GetChunks to dispatch by ChunkRef.Cluster.",
-      "acceptanceCriteria": [
-        "STRATA_RADOS_CLASSES extends to <CLASS>=<pool>@<cluster>[/<ns>]",
-        "PutChunks chooses the cluster from the storage class config",
-        "GetChunks dispatches by ChunkRef.Cluster (already on the type)",
-        "GC enqueueing carries the cluster id; GC worker dispatches the delete to the right cluster",
-        "Tests: lifecycle transition between hot (default) and cold (remote) cluster works end-to-end; cross-cluster GC drains both queues",
-        "go build -tags ceph ./... passes",
-        "go test -tags ceph ./internal/data/rados/... ./internal/gc/... passes"
-      ],
-      "priority": 44,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-045",
-      "title": "Online per-bucket shard resize",
-      "description": "As an operator of a bucket past tens of millions of objects, I want an online split flow that grows the partition count without downtime.",
-      "acceptanceCriteria": [
-        "strata-admin bucket reshard --bucket <name> --target <N> queues a background rewrite via a reshard_jobs table",
-        "Rewrite worker copies rows from old partition layout to new (shard_count = N), LWT-flips bucket.shard_count when done; old rows tombstone-cleaned in a follow-up tick",
-        "While shard_count_in_progress flag is set, list-objects reads union of old plus new partition layouts",
-        "Idempotent plus resumable from the reshard_jobs progress row",
-        "Tests: 1000 objects, reshard 32 to 128, list-objects returns the same set during AND after the resize",
-        "go build ./... passes",
-        "go test ./internal/meta/... passes"
-      ],
-      "priority": 45,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-046",
-      "title": "cmd/strata-audit-export daily JSON-lines worker",
-      "description": "As an operator, I want raw audit rows older than 30d exported to a designated bucket as gzipped JSON-lines and then deleted.",
-      "acceptanceCriteria": [
-        "New cmd/strata-audit-export binary, leader-elected, daily tick",
-        "Reads audit_log rows older than STRATA_AUDIT_EXPORT_AFTER (default 30d), writes one gzipped JSON-lines object per day to the configured audit-export bucket / prefix",
-        "After successful upload, deletes the source partition for that day",
-        "Tests: 100 rows yield tick yield 100 lines in the target bucket yield source partition empty",
-        "go build ./... passes",
-        "go test ./cmd/strata-audit-export/... passes"
-      ],
-      "priority": 46,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-047",
-      "title": "examples/ directory for aws-cli/boto3/mc/s3cmd + smoke",
-      "description": "As a new Strata user, I want copy-paste examples for common workflows.",
-      "acceptanceCriteria": [
-        "New examples/ directory with subdirectories: aws-cli, boto3, mc, s3cmd",
-        "Each subdirectory has a README and runnable scripts covering: bucket setup, multipart upload, presigned URL, lifecycle config, replication setup, SSE-S3 PUT/GET, IAM key rotation",
-        "examples/smoke.sh runs every example end-to-end against `make run-memory`",
-        "README.md links to examples/",
-        "Tests: examples/smoke.sh exits 0 when run against a fresh in-memory gateway",
-        "go build ./... passes"
-      ],
-      "priority": 47,
-      "passes": true,
-      "notes": "examples/ ships smoke.sh + lib/common.sh + 4 backends (aws-cli, boto3, mc, s3cmd) each with 7 scripts (01..07) covering bucket setup, multipart upload, presigned URL, lifecycle, replication, SSE-S3, IAM key rotation. examples/smoke.sh boots a fresh in-memory gateway (auth=required, [iam-root] static creds, STRATA_SSE_MASTER_KEY) on port 19999, runs aws-cli (required) then boto3/mc/s3cmd (each skipped per-tool if unavailable). Strata gotchas surfaced + worked around: (1) aws-cli iam command omits x-amz-content-sha256 header which Strata's SigV4 verifier requires -- workaround: sign IAM verbs via curl --aws-sigv4 / botocore.auth.SigV4Auth manually. (2) mc admin / mc replicate ls require MinIO admin endpoints Strata doesn't implement -- workaround: mc replicate import + verify/cleanup via aws-cli. (3) s3cmd signurl is SigV2-only and Strata is SigV4-only -- workaround: 03-presign.sh delegates to aws-cli. (4) mc requires secret >= 8 chars (MinIO compat) -- bumped default creds to adminAccessKey/adminSecretKey. README.md root section + per-backend READMEs document each gotcha. boto3 verified end-to-end in a venv; aws-cli/mc/s3cmd verified via examples/smoke.sh."
-    },
-    {
-      "id": "US-048",
-      "title": "Protobuf manifest schema + decoder reads JSON+protobuf",
-      "description": "As a maintainer, I want the manifest blob in protobuf for smaller row size, with backwards-compatible decode.",
-      "acceptanceCriteria": [
-        "internal/data/manifest.proto defines Manifest with the same fields as the current Go struct",
-        "Generated Go via buf (vendored output under internal/data/manifestpb/)",
-        "Decoder detects format via the first byte (JSON '{' vs protobuf wire-format) and parses accordingly",
-        "Tests: round-trip a Manifest as JSON; round-trip as protobuf; decoder reads both",
-        "go build ./... passes",
-        "go test ./internal/data/... passes"
-      ],
-      "priority": 48,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-049",
-      "title": "Protobuf manifest encoder + background rewriter",
-      "description": "As a maintainer, I want new objects to serialise the manifest as protobuf, and existing rows opportunistically rewritten.",
-      "acceptanceCriteria": [
-        "Encoder writes protobuf for new objects (toggle: STRATA_MANIFEST_FORMAT=proto|json, default proto)",
-        "New cmd/strata-manifest-rewriter binary: leader-elected, walks objects, re-encodes JSON manifests to protobuf, idempotent plus resumable",
-        "Tests: PUT new object yields manifest in protobuf; rewriter converts pre-existing JSON row yield protobuf; reader still reads both formats",
-        "go build ./... passes",
-        "go test ./internal/data/... ./cmd/strata-manifest-rewriter/... passes"
-      ],
-      "priority": 49,
-      "passes": true,
-      "notes": "internal/data: SetManifestFormat / ManifestFormat (atomic.Value, default 'proto') + EncodeManifest dispatcher; STRATA_MANIFEST_FORMAT=proto|json wired in cmd/strata-gateway main + cmd/strata-manifest-rewriter main. cassandra/codec.go::encodeManifest now calls data.EncodeManifest. memory backend grew an objectManifestRaw[manifestKey][]byte sidecar populated by PutObject via data.EncodeManifest (kept in lockstep with the live *meta.Object Manifest pointer). meta.Store grew GetObjectManifestRaw + UpdateObjectManifestRaw (both backends in lockstep + caseManifestRawRoundTrip in storetest). New internal/manifestrewriter pkg + cmd/strata-manifest-rewriter binary: leader-elected, single-pass Run() walks ListBuckets -> ListObjectVersions, reads raw blob via GetObjectManifestRaw, skips when !data.IsManifestJSON (already proto), otherwise decodes -> EncodeManifestProto -> UpdateObjectManifestRaw. Idempotent (re-runs skip already-proto), resumable via the same skip logic. data.IsManifestJSON exported for the rewriter + tests."
     }
   ]
 }

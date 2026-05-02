@@ -42,53 +42,16 @@ services:
       retries: 60
       start_period: 30s
 
-  gc:
-    image: strata:ceph
-    container_name: strata-gc
-    entrypoint: ["/usr/local/bin/strata-gc"]
-    depends_on:
-      cassandra:
-        condition: service_healthy
-      ceph:
-        condition: service_healthy
-    environment:
-      STRATA_CONFIG_FILE: /etc/strata/strata.toml
-      # env overrides for fast-test iteration; leave empty to honour TOML
-      STRATA_GC_INTERVAL: ${STRATA_GC_INTERVAL:-}
-      STRATA_GC_GRACE: ${STRATA_GC_GRACE:-}
-    ports:
-      - "9100:9100"
-    volumes:
-      - strata-ceph-etc:/etc/ceph:ro
-      - ../strata.toml:/etc/strata/strata.toml:ro
-    restart: unless-stopped
-
-  lifecycle:
-    image: strata:ceph
-    container_name: strata-lifecycle
-    entrypoint: ["/usr/local/bin/strata-lifecycle"]
-    depends_on:
-      cassandra:
-        condition: service_healthy
-      ceph:
-        condition: service_healthy
-    environment:
-      STRATA_CONFIG_FILE: /etc/strata/strata.toml
-      STRATA_LIFECYCLE_INTERVAL: ${STRATA_LIFECYCLE_INTERVAL:-}
-      STRATA_LIFECYCLE_UNIT: ${STRATA_LIFECYCLE_UNIT:-}
-    ports:
-      - "9101:9101"
-    volumes:
-      - strata-ceph-etc:/etc/ceph:ro
-      - ../strata.toml:/etc/strata/strata.toml:ro
-    restart: unless-stopped
-
-  gateway:
+  # Single unified strata service: gateway + opt-in workers selected via
+  # STRATA_WORKERS. Default stack runs gc + lifecycle. The wider feature
+  # workers (notify / replicator / access-log / inventory / audit-export)
+  # live behind the `features` profile on the strata-features service.
+  strata:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
     image: strata:ceph
-    container_name: strata-gateway
+    container_name: strata
     depends_on:
       cassandra:
         condition: service_healthy
@@ -96,9 +59,15 @@ services:
         condition: service_healthy
     environment:
       STRATA_CONFIG_FILE: /etc/strata/strata.toml
+      STRATA_WORKERS: ${STRATA_WORKERS:-gc,lifecycle}
       # overrides for local experimentation (auth on/off, alt classes, ...)
       STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-}
       STRATA_STATIC_CREDENTIALS: ${STRATA_STATIC_CREDENTIALS:-}
+      STRATA_GC_INTERVAL: ${STRATA_GC_INTERVAL:-}
+      STRATA_GC_GRACE: ${STRATA_GC_GRACE:-}
+      STRATA_LIFECYCLE_INTERVAL: ${STRATA_LIFECYCLE_INTERVAL:-}
+      STRATA_LIFECYCLE_UNIT: ${STRATA_LIFECYCLE_UNIT:-}
+      STRATA_NOTIFY_TARGETS: ${STRATA_NOTIFY_TARGETS:-}
     ports:
       - "9999:9000"
     volumes:
@@ -110,6 +79,42 @@ services:
       timeout: 3s
       retries: 6
       start_period: 30s
+    restart: unless-stopped
+
+  # Optional second strata replica that hosts the feature workers
+  # (notify / replicator / access-log / inventory / audit-export). Enable
+  # with `docker compose --profile features up strata-features`.
+  # Each worker still leader-elects on its own lease so the primary strata
+  # service may run the same names without conflict.
+  strata-features:
+    image: strata:ceph
+    container_name: strata-features
+    profiles: ["features"]
+    depends_on:
+      cassandra:
+        condition: service_healthy
+      ceph:
+        condition: service_healthy
+    environment:
+      STRATA_CONFIG_FILE: /etc/strata/strata.toml
+      STRATA_WORKERS: ${STRATA_FEATURES_WORKERS:-notify,replicator,access-log,inventory,audit-export}
+      STRATA_NOTIFY_TARGETS: ${STRATA_NOTIFY_TARGETS:-}
+      STRATA_AUDIT_EXPORT_BUCKET: ${STRATA_AUDIT_EXPORT_BUCKET:-}
+      STRATA_INVENTORY_REGION: ${STRATA_INVENTORY_REGION:-}
+    volumes:
+      - strata-ceph-etc:/etc/ceph:ro
+      - ../strata.toml:/etc/strata/strata.toml:ro
+    restart: unless-stopped
+
+  # Webhook receiver used by the e2e-full CI job to verify the notify worker
+  # round-trip. Lives behind the `features` profile so the default stack does
+  # not pull it. Strata reaches it on the compose default network at
+  # http://webhook-trap:8080/. Logs are JSON to stdout so CI can grep
+  # `docker logs strata-webhook-trap` for the delivered event.
+  webhook-trap:
+    image: mendhak/http-https-echo:34
+    container_name: strata-webhook-trap
+    profiles: ["features"]
     restart: unless-stopped
 
   prometheus:

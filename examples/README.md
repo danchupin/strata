@@ -29,7 +29,7 @@ examples/
 ## Running
 
 ```bash
-# Boots strata-gateway in-memory + runs every example end-to-end:
+# Boots strata server in-memory + runs every example end-to-end:
 bash examples/smoke.sh
 
 # Or point at any other Strata deployment + run a single script:

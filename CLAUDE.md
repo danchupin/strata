@@ -26,9 +26,9 @@ smoke pass.
 | RADOS integration tests (in-container, requires `make up-all` running) | `make test-rados`                                                        |
 | Run a single test                                                      | `go test -run TestBucketCRUD ./internal/s3api`                           |
 | Bring up Cassandra only                                                | `make up && make wait-cassandra`                                         |
-| Bring up full stack (Cassandra + Ceph + gateway)                       | `make up-all && make wait-cassandra && make wait-ceph`                   |
-| Run gateway against in-memory backends                                 | `make run-memory`                                                        |
-| Run gateway against Cassandra metadata + memory data                   | `make run-cassandra`                                                     |
+| Bring up full stack (Cassandra + Ceph + strata)                        | `make up-all && make wait-cassandra && make wait-ceph`                   |
+| Run `strata server` against in-memory backends                         | `make run-memory`                                                        |
+| Run `strata server` against Cassandra metadata + memory data           | `make run-cassandra`                                                     |
 | Smoke pass                                                             | `make smoke` (signed: `make smoke-signed`)                               |
 | Take stack down                                                        | `make down`                                                              |
 | S3 compatibility suite                                                 | `scripts/s3-tests/run.sh` (see `scripts/s3-tests/README.md`)             |
@@ -46,7 +46,7 @@ testcontainers to find the engine.
                   HTTP S3 (path-style URLs)
                                |
                 +--------------v--------------+
-                | cmd/strata-gateway          |
+                | cmd/strata server           |
                 |  -> auth.Middleware (SigV4) |
                 |  -> s3api.Server (router)   |
                 +-------+--------------+------+
@@ -62,22 +62,50 @@ testcontainers to find the engine.
                 | (sharded)     |        | (4 MiB chunks)|
                 +---------------+        +---------------+
 
-  cmd/strata-lifecycle  -> meta.Store + data.Backend (transitions / expirations / mp-abort)
-  cmd/strata-gc         -> meta.Store (GCEntry queue) + data.Backend (chunk delete)
-                          both wrapped in internal/leader (Cassandra LWT-based lease)
-  internal/reshard      -> per-bucket online shard-resize worker (US-045); driven
-                          synchronously via /admin/bucket/reshard or as a daemon
-  cmd/strata-audit-export -> internal/auditexport: drains audit_log partitions
-                          older than STRATA_AUDIT_EXPORT_AFTER (default 30d) into
-                          gzipped JSON-lines objects in the configured export
-                          bucket, then deletes the source partition (US-046).
-                          Leader-elected, daily tick.
-  cmd/strata-manifest-rewriter -> internal/manifestrewriter: walks every bucket
-                          and converts any JSON-encoded objects.manifest blob
-                          to protobuf in place (US-049). Leader-elected,
-                          single-pass, idempotent. Run once after flipping
-                          STRATA_MANIFEST_FORMAT=proto on the gateway to
-                          shrink existing rows.
+  strata server --workers=lifecycle -> meta.Store + data.Backend
+                          (transitions / expirations / mp-abort).
+                          Leader-elected on `lifecycle-leader`.
+  strata server --workers=gc -> meta.Store (GCEntry queue) + data.Backend
+                          (chunk delete). Leader-elected on `gc-leader`.
+  strata server --workers=notify -> meta.Store (notify_queue + DLQ) ->
+                          webhook / SQS sinks via STRATA_NOTIFY_TARGETS.
+                          Leader-elected on `notify-leader`.
+  strata server --workers=replicator -> meta.Store (replication_queue) +
+                          data.Backend, copies to peer Strata via HTTP PUT
+                          (HTTPDispatcher). Leader-elected on
+                          `replicator-leader`.
+  strata server --workers=access-log -> meta.Store (access_log_buffer) +
+                          data.Backend, drains buffered rows per source
+                          bucket and writes one AWS-format log object per
+                          flush into the target bucket configured by
+                          PutBucketLogging. Leader-elected on
+                          `access-log-leader`.
+  strata server --workers=inventory -> meta.Store (bucket
+                          InventoryConfiguration blobs) + data.Backend,
+                          ticks per (bucket, configID), walks the source
+                          bucket and writes manifest.json + CSV.gz pairs
+                          into the configured target bucket. Leader-elected
+                          on `inventory-leader`.
+  internal/reshard      -> per-bucket online shard-resize worker (US-045);
+                          driven synchronously via /admin/bucket/reshard or
+                          as a daemon.
+  strata server --workers=audit-export -> internal/auditexport: drains
+                          audit_log partitions older than
+                          STRATA_AUDIT_EXPORT_AFTER (default 30d) into
+                          gzipped JSON-lines objects in the configured
+                          export bucket, then deletes the source partition
+                          (US-046). Leader-elected on `audit-export-leader`.
+  strata server --workers=manifest-rewriter -> internal/manifestrewriter:
+                          walks every bucket and converts any JSON-encoded
+                          objects.manifest blob to protobuf in place
+                          (US-049). Idempotent re-runs skip already-proto
+                          rows. Leader-elected on `manifest-rewriter-leader`.
+                          Cadence via STRATA_MANIFEST_REWRITER_INTERVAL
+                          (default 24h).
+  strata-admin rewrap   -> one-shot SSE master-key rotation. Walks every
+                          object and rewraps DEKs to --target-key-id (or
+                          the active key). Idempotent + resumable via
+                          rewrap_progress.
 ```
 
 The S3 router is in `internal/s3api/server.go`. Bucket-scoped queries (`?cors`, `?policy`, `?lifecycle`, …) dispatch via
@@ -92,6 +120,26 @@ Virtual-hosted-style routing (`internal/s3api/vhost.go`): `STRATA_VHOST_PATTERN`
 `*.<suffix>` patterns (default `*.s3.local`; set to `-` to disable). Auth middleware runs first and signs the
 original `Host` + `URL.Path`; `Server.ServeHTTP` then strips the prefix from `r.Host` and prepends `/<bucket>` to
 `r.URL.Path` before path-style routing — never rewrite before SigV4 verification or signatures break.
+
+## Background workers (cmd/strata/workers)
+
+Workers under `strata server` register via `workers.Register(workers.Worker{Name, Build})` from a per-worker
+`init()`. The `Build` constructor receives `workers.Dependencies` (Logger, Meta, Data, Tracer, Locker, Region) and
+returns a `workers.Runner`. `workers.Supervisor.Run(ctx, workers)` spins one goroutine per requested worker;
+each goroutine acquires a `leader.Session` keyed on `<name>-leader`, builds + runs the Runner under a supervised
+context, releases on exit, and recovers from panics. A panic increments `strata_worker_panic_total{worker=<name>}`,
+releases the lease, and restarts on an exponential backoff (1s → 5s → 30s → 2m, reset to 1s after 5 minutes
+healthy). Lease loss restarts immediately (no backoff). One worker's panic or lease loss never affects the
+gateway or sibling workers.
+
+`cmd/strata/server.go::runServer` validates `STRATA_WORKERS` (or `--workers=`) via `workers.Resolve` BEFORE any
+backend is built — unknown names exit 2 immediately. The resolved `[]workers.Worker` is then handed to
+`internal/serverapp.Run`, which builds the leader-election locker (cassandra → LWT lease, memory →
+process-local) and spawns `workers.Supervisor.Run` in a goroutine alongside the gateway. When adding a new
+worker, register from `cmd/strata/workers/<name>.go`'s `init()` and let the binary pick it up; do not spawn a
+goroutine ad-hoc inside `internal/serverapp` — the supervisor owns the lifecycle. `gc` reads
+`STRATA_GC_INTERVAL` / `STRATA_GC_GRACE` / `STRATA_GC_BATCH_SIZE` from env at Build time (no per-worker
+flags); other workers follow the same env-only convention.
 
 ## meta.Store interface — the contract
 
@@ -109,20 +157,20 @@ CORS, policy, public-access-block, ownership-controls). Reuse `setBucketBlob` / 
 both backends instead of writing fresh CRUD per endpoint.
 
 `data.Manifest` is encoded into the `objects.manifest` blob column via `data.EncodeManifest` (US-049): the format
-is selected by `data.SetManifestFormat("proto"|"json")`, default `proto`. `cmd/strata-gateway` (and other binaries
-that touch the encoder) read `STRATA_MANIFEST_FORMAT` once at startup and call `SetManifestFormat`. Reads always go
+is selected by `data.SetManifestFormat("proto"|"json")`, default `proto`. `internal/serverapp` (the shared
+gateway entrypoint) reads `STRATA_MANIFEST_FORMAT` once at startup and calls `SetManifestFormat`. Reads always go
 through `data.DecodeManifest` which sniffs the first non-whitespace byte (`{` → JSON, anything else → proto3 wire
 format) so JSON-vs-proto migrations are transparent. New fields tagged `json:",omitempty"` (and a fresh `protobuf` tag
 in `manifest.proto` + helper updates in `manifest_codec.go`) are schema-additive — old rows decode with zero-values,
 and you avoid an `ALTER`. Use this for per-object metadata the GET path reads but Cassandra never filters on (e.g.
 `Manifest.PartChunks` for the SSE multipart locator). To convert pre-existing JSON rows to proto, run
-`cmd/strata-manifest-rewriter` (leader-elected, idempotent — re-runs skip already-proto rows).
+`strata server --workers=manifest-rewriter` (leader-elected, idempotent — re-runs skip already-proto rows).
 
 ## Logging (slog)
 
-`internal/logging` is the canonical setup. Every `cmd/<binary>/main.go` should call `logging.Setup()` first thing
-to install a JSON-handler `*slog.Logger` driven by `STRATA_LOG_LEVEL` (DEBUG/INFO/WARN/ERROR; default INFO) and use
-the returned logger for binary-level errors. Workers (`leader.Session`, `gc.Worker`, `lifecycle.Worker`,
+`internal/logging` is the canonical setup. Both binaries (`cmd/strata`, `cmd/strata-admin`) call
+`logging.Setup()` first thing to install a JSON-handler `*slog.Logger` driven by `STRATA_LOG_LEVEL`
+(DEBUG/INFO/WARN/ERROR; default INFO) and use the returned logger for binary-level errors. Workers (`leader.Session`, `gc.Worker`, `lifecycle.Worker`,
 `notify.Config`, etc.) take `*slog.Logger`, never `*log.Logger`. The HTTP gateway wraps its mux handler with
 `logging.NewMiddleware(logger, next)` which reads / generates `X-Request-Id`, sets it on both `r.Header` (so
 downstream middlewares like `internal/s3api/access_log.go` keep reading it via `r.Header.Get`) and `w.Header()`
@@ -144,7 +192,7 @@ meta failures never fail the underlying request.
 
 Health probes: `internal/health.Handler` serves `/healthz` (always 200) and `/readyz` (fans out probes
 concurrently with a 1s timeout). Probes are injected by the cmd binary via type-assertion against
-`cassandraProber` / `radosProber` interfaces in `cmd/strata-gateway/main.go::buildHealthHandler`, so the package
+`cassandraProber` / `radosProber` interfaces in `internal/serverapp/serverapp.go::buildHealthHandler`, so the package
 stays free of cassandra/rados imports. `cassandra.Store.Probe(ctx)` runs `SELECT now() FROM system.local`;
 `rados.Backend.Probe(ctx, oid)` stats a canary OID (`STRATA_RADOS_HEALTH_OID`, default `strata-readyz-canary`)
 and treats `goceph.ErrNotFound` as success — only transport/auth errors fail. Memory backends register no probe,
@@ -165,7 +213,7 @@ nil-free. Endpoint set builds an OTLP/HTTP exporter wrapped in a tail-sampling `
 `http.status_code` >= 500) always export regardless of `STRATA_OTEL_SAMPLE_RATIO` (default 0.01). The HTTP
 middleware `internal/otel.NewMiddleware(provider, next)` extracts traceparent via the global propagator,
 starts a server-kind span named `<METHOD> <path>`, captures status via a `responseWriter` shim and marks the
-span Error on >= 500. Wired in `cmd/strata-gateway/main.go` ahead of the logging middleware so the span
+span Error on >= 500. Wired in `internal/serverapp/serverapp.go` ahead of the logging middleware so the span
 covers the full request including auth/access-log/audit. **semconv import version must match the SDK's
 `resource.Default()` schema URL** — SDK 1.41 → `semconv/v1.39.0`; mismatch fails at runtime with
 "conflicting Schema URL". Bump together when bumping the SDK.
@@ -177,14 +225,15 @@ the actual query duration even though `ObserveQuery` runs after the query return
 threads a tracer onto `Backend`; `ObserveOp(ctx, logger, metrics, tracer, pool, op, oid, start, err)`
 emits `data.rados.<op>` spans (`put`/`get`/`del`) with the same retroactive-timestamp trick. Failing
 queries / ops set span status to Error so the tail-sampler exports the full trace regardless of ratio.
-Tracer wiring happens in `cmd/strata-gateway/main.go::buildMetaStore` + `buildDataBackend` after
+Tracer wiring happens in `internal/serverapp/serverapp.go::buildMetaStore` + `buildDataBackend` after
 `strataotel.Init` runs (move OTel init ahead of meta/data construction; its lifetime spans the whole
 process). For tracing-only deploy, `deploy/docker/docker-compose.yml` ships an OTLP collector + Jaeger
 all-in-one behind the `tracing` profile (`docker compose --profile tracing up otel-collector jaeger`);
 collector config in `deploy/otel/collector-config.yaml` fans incoming OTLP traces to Jaeger at
-`jaeger:4317`. Other binaries (gc/lifecycle/replicator/access-log/notify/rewrap) currently pass nil
-tracer — add `Tracer: tp.Tracer("strata.<binary>")` to their config when their own /readyz / metrics
-story matures.
+`jaeger:4317`. Workers under `strata server` (gc/lifecycle/replicator/access-log/notify/inventory/
+audit-export/manifest-rewriter) currently pass nil tracer — add `Tracer: tp.Tracer("strata.<worker>")`
+to their config when their own /readyz / metrics story matures. `strata-admin rewrap` is a one-shot
+operator command and stays untraced.
 
 ## Cassandra gotchas (real ones, hit during this codebase's lifetime)
 
@@ -253,3 +302,49 @@ heap-merges by clustering order (key ASC, version_id DESC). See `cassandra/store
 commits per story and writes `progress.txt`. `scripts/ralph/CLAUDE.md` is Ralph's *task prompt* — do not put project
 knowledge there. This root `CLAUDE.md` is the project memory and is auto-loaded by every Claude Code invocation,
 including Ralph's. Update this file (not Ralph's) when you discover something a future iteration should know.
+
+## Roadmap maintenance
+
+`ROADMAP.md` is the canonical project state list. It MUST stay an honest reflection of what is shipped vs pending at
+every SHA. The PRDs in `tasks/` (and `scripts/ralph/prd.json`) are scoped to specific cycles and do NOT need to mirror
+the roadmap — only `ROADMAP.md` is canonical.
+
+This rule applies to **all** work — Ralph autonomous runs and human-driven commits alike.
+
+**Closing a roadmap item.** Every commit that closes a `ROADMAP.md` item MUST flip the bullet to the format:
+
+```
+~~**P<n> — <title>.**~~ — **Done.** <one-line summary>. (commit `<sha>`)
+```
+
+…in the same commit. If the closing SHA is needed inline (commit-then-amend is undesirable here — see "Commits and PRs"
+above), the immediate follow-up commit may carry the SHA edit instead.
+
+Example diff shape (close-flip):
+
+```diff
+-- **P1 — Single-binary `strata` (CockroachDB-shape).** Today there are 10 `cmd/` binaries,
+--  most of them background workers. Collapse `cmd/strata-{gateway,gc,...}` into a single
+--  `cmd/strata` ...
+++ ~~**P1 — Single-binary `strata` (CockroachDB-shape).**~~ — **Done.** Two binaries
+++  (`strata`, `strata-admin`); workers selected via `STRATA_WORKERS=`. (commit `abc1234`)
+```
+
+**Discovering a new gap, latent bug, or regression.** Every commit that surfaces something not yet on the roadmap MUST
+add a new entry in `ROADMAP.md` in the same commit. Place it under the appropriate severity section: P1 for correctness
+or production-blockers, P2 for meaningful gaps expected by serious deployments, P3 for nice-to-haves and DX, or
+`Known latent bugs` for live bugs.
+
+Example diff shape (new discovery):
+
+```diff
+ ## Correctness & consistency
+
+++- **P2 — Multipart UploadPart `Content-MD5` not validated.** `s3api.uploadPart` accepts the
+++  client-supplied `Content-MD5` header but never recomputes/compares; mismatches silently
+++  succeed. Add the check on the streaming-decoder hot path.
++
+ - **P3 — Object Lock `COMPLIANCE` audit log.** ...
+```
+
+Code-only commits that touch neither a roadmap item nor a new gap do not need a roadmap edit.

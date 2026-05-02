@@ -31,13 +31,17 @@ RUN --mount=type=cache,target=/root/go/pkg/mod \
 COPY . .
 RUN --mount=type=cache,target=/root/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    go build -tags ceph -trimpath -o /out/strata-gateway ./cmd/strata-gateway \
- && go build -tags ceph -trimpath -o /out/strata-lifecycle ./cmd/strata-lifecycle \
- && go build -tags ceph -trimpath -o /out/strata-gc ./cmd/strata-gc
+    go build -tags ceph -trimpath -o /out/strata ./cmd/strata \
+ && go build -tags ceph -trimpath -o /out/strata-admin ./cmd/strata-admin
 
 FROM quay.io/ceph/ceph:v19.2.3
-COPY --from=build /out/strata-gateway /usr/local/bin/strata-gateway
-COPY --from=build /out/strata-lifecycle /usr/local/bin/strata-lifecycle
-COPY --from=build /out/strata-gc /usr/local/bin/strata-gc
+ARG GIT_SHA=unknown
+LABEL org.opencontainers.image.title="strata" \
+      org.opencontainers.image.description="S3-compatible object gateway (unified strata + strata-admin binaries)" \
+      org.opencontainers.image.source="https://github.com/danchupin/strata" \
+      org.opencontainers.image.revision="${GIT_SHA}"
+COPY --from=build /out/strata /usr/local/bin/strata
+COPY --from=build /out/strata-admin /usr/local/bin/strata-admin
 EXPOSE 9000
-ENTRYPOINT ["/usr/local/bin/strata-gateway"]
+ENTRYPOINT ["/usr/local/bin/strata"]
+CMD ["server"]

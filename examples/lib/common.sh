@@ -6,8 +6,8 @@
 #   STRATA_ACCESS_KEY     (default adminAK)
 #   STRATA_SECRET_KEY     (default adminSK)
 #
-# All scripts expect a Strata gateway already running. examples/smoke.sh
-# launches a fresh in-memory gateway with creds + master key configured;
+# All scripts expect a strata server already running. examples/smoke.sh
+# launches a fresh in-memory server with creds + master key configured;
 # you can also point at any other Strata deploy by exporting STRATA_ENDPOINT.
 
 export STRATA_ENDPOINT="${STRATA_ENDPOINT:-http://127.0.0.1:9999}"
@@ -38,7 +38,7 @@ strata_wait_ready() {
         fi
         sleep 0.5
     done
-    echo "strata-gateway not ready at $STRATA_ENDPOINT" >&2
+    echo "strata server not ready at $STRATA_ENDPOINT" >&2
     return 1
 }
 

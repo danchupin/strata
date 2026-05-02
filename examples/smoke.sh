@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boot a fresh in-memory Strata gateway and run every example script
+# Boot a fresh in-memory strata server and run every example script
 # end-to-end. Exits 0 on success, non-zero on first failure.
 #
 # - aws-cli scripts are required.
@@ -47,7 +47,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "== Booting strata-gateway on $STRATA_ENDPOINT (logs: $LOG)"
+echo "== Booting strata server on $STRATA_ENDPOINT (logs: $LOG)"
 (
     cd "$ROOT"
     STRATA_LISTEN=":$PORT" \
@@ -57,7 +57,7 @@ echo "== Booting strata-gateway on $STRATA_ENDPOINT (logs: $LOG)"
     STRATA_STATIC_CREDENTIALS="$STRATA_ACCESS_KEY:$STRATA_SECRET_KEY:iam-root" \
     STRATA_SSE_MASTER_KEY="$SSE_KEY" \
     STRATA_LOG_LEVEL=WARN \
-    go run ./cmd/strata-gateway >"$LOG" 2>&1 &
+    go run ./cmd/strata server >"$LOG" 2>&1 &
     echo $! > "$PIDFILE"
 )
 strata_wait_ready
