@@ -102,11 +102,17 @@ components:
 
     BucketsTop:
       type: object
-      required: [buckets]
+      required: [buckets, metrics_available]
       properties:
         buckets:
           type: array
           items: { $ref: '#/components/schemas/BucketTop' }
+        metrics_available:
+          type: boolean
+          description: |
+            False when STRATA_PROMETHEUS_URL is unset or the upstream PromQL
+            query failed. The UI then renders '—' in the request column and
+            a "Metrics unavailable" warning under the card title.
 
     ObjectSummary:
       type: object
@@ -142,11 +148,17 @@ components:
 
     ConsumersTop:
       type: object
-      required: [consumers]
+      required: [consumers, metrics_available]
       properties:
         consumers:
           type: array
           items: { $ref: '#/components/schemas/ConsumerTop' }
+        metrics_available:
+          type: boolean
+          description: |
+            False when STRATA_PROMETHEUS_URL is unset or the upstream PromQL
+            query failed. The UI then renders the "Metrics unavailable"
+            warning instead of empty rows.
 
     MetricPoint:
       type: array

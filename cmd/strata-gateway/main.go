@@ -22,6 +22,7 @@ import (
 	metacassandra "github.com/danchupin/strata/internal/meta/cassandra"
 	metamem "github.com/danchupin/strata/internal/meta/memory"
 	"github.com/danchupin/strata/internal/metrics"
+	"github.com/danchupin/strata/internal/promclient"
 	"github.com/danchupin/strata/internal/s3api"
 	"time"
 )
@@ -72,10 +73,15 @@ func main() {
 	clusterName := os.Getenv("STRATA_CLUSTER_NAME")
 	hbStore := buildHeartbeatStore(cfg, metaStore)
 	version := buildVersion()
+	prom := promclient.New(os.Getenv("STRATA_PROMETHEUS_URL"))
+	if !prom.Available() {
+		log.Printf("admin: STRATA_PROMETHEUS_URL unset; top-buckets/consumers + metrics dashboard will report metrics_available=false")
+	}
 	adminServer := adminapi.New(adminapi.Config{
 		Meta:        metaStore,
 		Creds:       mw.Store,
 		Heartbeat:   hbStore,
+		Prom:        prom,
 		Version:     version,
 		ClusterName: clusterName,
 		MetaBackend: cfg.MetaBackend,

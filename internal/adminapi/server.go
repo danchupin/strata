@@ -19,6 +19,7 @@ import (
 	"github.com/danchupin/strata/internal/auth"
 	"github.com/danchupin/strata/internal/heartbeat"
 	"github.com/danchupin/strata/internal/meta"
+	"github.com/danchupin/strata/internal/promclient"
 )
 
 // Server holds dependencies the /admin/v1/* handlers need.
@@ -26,6 +27,7 @@ type Server struct {
 	Meta        meta.Store
 	Creds       auth.CredentialsStore
 	Heartbeat   heartbeat.Store
+	Prom        *promclient.Client
 	Version     string
 	ClusterName string
 	MetaBackend string
@@ -43,6 +45,7 @@ type Config struct {
 	Meta        meta.Store
 	Creds       auth.CredentialsStore
 	Heartbeat   heartbeat.Store
+	Prom        *promclient.Client
 	Version     string
 	ClusterName string
 	MetaBackend string
@@ -62,6 +65,7 @@ func New(c Config) *Server {
 		Meta:        c.Meta,
 		Creds:       c.Creds,
 		Heartbeat:   c.Heartbeat,
+		Prom:        c.Prom,
 		Version:     c.Version,
 		ClusterName: clusterName,
 		MetaBackend: c.MetaBackend,

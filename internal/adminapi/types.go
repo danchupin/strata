@@ -47,7 +47,8 @@ type BucketSummary struct {
 }
 
 type BucketsTopResponse struct {
-	Buckets []BucketTop `json:"buckets"`
+	Buckets          []BucketTop `json:"buckets"`
+	MetricsAvailable bool        `json:"metrics_available"`
 }
 
 type BucketTop struct {
@@ -73,7 +74,8 @@ type ObjectSummary struct {
 }
 
 type ConsumersTopResponse struct {
-	Consumers []ConsumerTop `json:"consumers"`
+	Consumers        []ConsumerTop `json:"consumers"`
+	MetricsAvailable bool          `json:"metrics_available"`
 }
 
 type ConsumerTop struct {

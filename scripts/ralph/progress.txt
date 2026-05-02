@@ -171,6 +171,194 @@ Cycle: ralph/web-ui-foundation
   useEffect + setInterval(refetch, 5000). Single source of truth: the page
   component owns the polling loop and resets state on each tick. Watch for
   unmount races — guard with a `cancelled` flag inside the effect.
+- Prometheus client: internal/promclient (stdlib net/http, no
+  prometheus/client_golang/api dep). New(baseURL) — empty URL is legal and
+  Available()=false. Both Query (instant vector) + QueryRange (matrix) return
+  ErrUnavailable when BaseURL=="" OR upstream non-2xx. Wraps errors with
+  ErrUnavailable so callers `errors.Is(err, promclient.ErrUnavailable)` to
+  branch into "metrics unavailable" UI without distinguishing root cause.
+  Hard timeout 5 s per request — admin widget polls don't get to wedge a
+  whole gateway shutdown.
+- Top-N widget contract: BucketsTopResponse + ConsumersTopResponse both
+  carry a top-level metrics_available bool in addition to the rows. UI uses
+  this flag (NOT empty-rows heuristic) to decide whether to render '—' in
+  the value cell + a "Metrics unavailable — set STRATA_PROMETHEUS_URL"
+  warning under the card title. For buckets/top: size_bytes + object_count
+  come from meta.Store walks and remain populated even when prom is down;
+  only request_count_24h degrades. For consumers/top: the entire response
+  is prom-driven, so prom-down ⇒ rows=[] + metrics_available=false. PromQL
+  shapes: `sum by (bucket) (increase(strata_http_requests_total[24h]))` for
+  buckets; same with by (access_key) for consumer requests; analogous
+  strata_http_bytes_total for consumer bytes. Note: the gateway's existing
+  metrics counter is `strata_http_requests_total` with labels (method,
+  code) — adding (bucket, access_key) labels is Phase 2 work tracked
+  separately. Today the queries return empty vectors, so rows arrive empty
+  with metrics_available=true (the warning does NOT fire — it only fires
+  on Available()=false / Query error). That's intentional: empty-but-available
+  is "no traffic in the last 24 h", which is different from "we don't know".
+- bucketSizeAndCount caps per-bucket scans at 50_000 objects (50 pages of
+  1000) so pathological buckets don't wedge the home-page widget. The
+  widget is "top N", not authoritative inventory — Phase 2 will introduce a
+  proper bucketstats package with per-bucket counters maintained on
+  PutObject/DeleteObject paths so this synchronous walk goes away.
+- Consumer row's `user` field is joined from CredentialsStore.Lookup —
+  only known access keys get a populated User; unknown keys (e.g. expired
+  static creds, programmatic clients) show user='—' in the UI. That is
+  correct: the widget reflects 24h Prom totals, which include keys that
+  may no longer be in the store.
+- adminapi.Config grew a Prom *promclient.Client field (US-007). Field
+  ordering: positional in spirit (composite literal) but Go tolerates
+  reorder; keep new fields at the bottom of Config so mainline call
+  sites remain unchanged. Tests (newTestServer) leave Prom=nil; widget
+  tests set s.Prom = promclient.New(httptestServer.URL) post-construction.
+
+## 2026-05-02 - US-007
+- Top Buckets + Top Consumers widgets wired end-to-end on the home page,
+  backed by a new Prometheus query client and the existing meta.Store walk
+  for bucket size/object count.
+- Go side:
+  - New package internal/promclient (promclient.go + promclient_test.go,
+    4 tests). Stdlib-only Prometheus HTTP API wrapper: Query (instant
+    vector), QueryRange (matrix), ErrUnavailable + Available() guard so
+    callers degrade gracefully when STRATA_PROMETHEUS_URL is unset.
+    5 s default timeout.
+  - internal/adminapi/buckets.go handleBucketsTop rewritten: parses
+    by=size|requests (default size) + limit (1..100, default 10).
+    Walks meta.Store.ListBuckets(ctx, "") + per-bucket ListObjects
+    (capped 50_000 objects) to compute size_bytes + object_count.
+    Queries Prom via `sum by (bucket) (increase(strata_http_requests_total[24h]))`
+    for request_count_24h. Sorts by chosen column (DESC, name as
+    tiebreaker), truncates to limit, returns BucketsTopResponse. Bad
+    by= → 400 BadRequest.
+  - internal/adminapi/consumers.go handleConsumersTop rewritten: parses
+    by=requests|bytes (default requests) + limit. Queries Prom for
+    sum by (access_key) of strata_http_requests_total[24h] AND
+    strata_http_bytes_total[24h]. Joins access_key → user via
+    s.Creds.Lookup. Sorts + truncates. Returns ConsumersTopResponse.
+    Prom unavailable → empty rows + metrics_available=false.
+  - internal/adminapi/types.go: BucketsTopResponse + ConsumersTopResponse
+    gained MetricsAvailable bool (json: metrics_available). UI keys on
+    this flag to decide '—' vs concrete value rendering.
+  - internal/adminapi/server.go: Server + Config gained Prom field
+    (added at the bottom — no positional break).
+  - internal/adminapi/openapi.yaml: BucketsTop + ConsumersTop schemas
+    gained metrics_available (required) with description.
+  - cmd/strata-gateway/main.go: reads STRATA_PROMETHEUS_URL env, builds
+    promclient.New(url), passes via Config.Prom. Logs an info line when
+    unset (top widgets + metrics dashboard report metrics_available=false
+    until set).
+  - Tests: internal/adminapi/widgets_test.go (7 new) covering both
+    by=values, with-prom + without-prom, sort order, owner join, bad
+    by= → 400. Plus internal/promclient/promclient_test.go (4) covering
+    Available() gate, vector parse, upstream 5xx → ErrUnavailable, and
+    matrix parse for QueryRange.
+- React side:
+  - web/src/api/widgets.ts (new) — typed fetchTopBuckets(by, limit=10) +
+    fetchTopConsumers(by, limit=10) with credentials:'same-origin'.
+  - web/src/components/overview/TopWidgets.tsx (new) — TopBucketsCard
+    (Tabs: By Size / By Requests; per-tab table rank|bucket|value with
+    bucket-name Link to /buckets/:name; formatBytes for size column;
+    formatCount + '—' fallback for request column when
+    metrics_available=false; MetricsUnavailable banner inside the
+    requests tab when prom missing) + TopConsumersCard (Tabs: By
+    Requests / By Bytes; rank|access_key (8-char truncate + title=full)
+    | user | value; '—' + warning shown for both tabs since the endpoint
+    is Prom-only). Each tab owns its own useTopBuckets/useTopConsumers
+    hook (plain useEffect+setInterval @5 s; US-008 swaps for
+    TanStack Query useQuery).
+  - web/src/pages/Overview.tsx — imports the two cards and renders them
+    in a 2-column grid (xl:grid-cols-2) below NodesTable.
+- Files changed:
+  - internal/promclient/{promclient.go, promclient_test.go} (new)
+  - internal/adminapi/{server.go, types.go, buckets.go, consumers.go,
+    openapi.yaml, widgets_test.go (new)}
+  - cmd/strata-gateway/main.go (Prom env + Config.Prom wiring)
+  - web/src/api/widgets.ts (new)
+  - web/src/components/overview/TopWidgets.tsx (new)
+  - web/src/pages/Overview.tsx (mount widgets)
+- Quality checks:
+  - go vet ./... clean
+  - go test ./... clean (promclient: 4, adminapi: 28 [21 prior + 7 new])
+  - go build ./... clean
+  - cd web && pnpm run typecheck clean
+  - cd web && pnpm run build clean
+  - Bundle: 317.97 KiB raw / 100.6 KiB gzipped JS + 32.44 KiB raw /
+    6.41 KiB gzipped CSS (was 98.6 KiB JS at US-006; +2.0 KiB for
+    widgets module + api/widgets.ts). Total ~107 KiB gzipped, well
+    under 500 KiB budget.
+  - Runtime smoke on :9994 with httptest mock Prom on :9993 (vector
+    results for both per-bucket and per-access-key queries):
+      /admin/v1/auth/login → 200 + Set-Cookie.
+      mb s3://alpha + s3://beta + cp 6-byte file to alpha + 10240-byte
+        file to beta via aws-cli to seed real buckets + objects.
+      /admin/v1/buckets/top?by=size → beta(size=10240, oc=1, rc=77),
+        alpha(size=6, oc=1, rc=7); metrics_available=true.
+      /admin/v1/buckets/top?by=requests → beta(rc=77), alpha(rc=7).
+      /admin/v1/consumers/top?by=requests → [{access_key:test,
+        user:owner, request_count_24h:4242, bytes_24h:1048576}];
+        metrics_available=true.
+      /admin/v1/consumers/top?by=bytes → same row.
+      Without STRATA_PROMETHEUS_URL: both endpoints return
+        metrics_available:false (bucket size/count still populated;
+        only request column degrades).
+      /console/ → 200 (regression-clean).
+- Browser MCP unavailable this iteration; full Playwright run is
+  scheduled for US-012 (login → overview → widgets visible → tab
+  switch → buckets list → logout critical path).
+- **Learnings for future iterations:**
+  - PromQL `increase()` over a 24h range correctly handles counter
+    resets (process restarts) — prefer it to a hand-rolled
+    `delta(counter[24h])` which can show negative deltas across
+    restarts. The widget rounds the float result to int64 via `int64(s.Value)`
+    — fine for "tens of thousands of requests" but be aware that
+    Prometheus' increase() rate extrapolation can yield non-integer
+    counts; if precision matters in Phase 2, store the float.
+  - The current `strata_http_requests_total` counter has labels
+    {method, code} only — there is NO `bucket` or `access_key` label.
+    The widget endpoints query labels that don't exist yet, which
+    means PromQL returns an empty vector ⇒ rows=[] +
+    metrics_available=true. That's intentional: empty-but-available
+    is "no traffic", different from "we don't know". When Phase 2
+    adds (bucket, access_key) labels to the counter (US-009-adjacent
+    work) the widgets will start populating without further code
+    changes.
+  - bucketSizeAndCount walks ListObjects sequentially and uncached.
+    For Phase 1 read-only home page this is fine on memory + small
+    Cassandra clusters; it will NOT scale to 100k+ buckets.
+    Phase 2 must introduce internal/bucketstats with on-write
+    counters maintained in PutObject/DeleteObject so the widget
+    reads a single row per bucket. Cap at 50_000 objects per bucket
+    bounds the worst case today.
+  - Sort tiebreaker in widget handlers is alphabetical by
+    name/access_key. Stable sort is important — without it tied
+    rows shuffle on every 5 s poll which makes the table look
+    jittery in the UI.
+  - shadcn Tabs: defaultValue must match a TabsTrigger value AND a
+    TabsContent value. TabsContent renders inside the Tabs root —
+    don't try to portal it into a sibling. Tabs uncontrolled state
+    is fine for these widgets; controlled state would be needed
+    only if the URL needs to remember the active tab (Phase 2,
+    not now).
+  - Consumer access keys are truncated to 8 chars + ellipsis with
+    a `title=` attr carrying the full key for hover. Don't show
+    the full ~20-char AKIA*** key in the UI by default — it makes
+    the card too wide.
+  - When mounting two TanStack-Query-shaped polling widgets that
+    each own their own useEffect+setInterval, you get N independent
+    fetch loops. That's wasteful pre-US-008 (multiple HTTP requests
+    per tick) but acceptable for ~5 widgets at 5 s. US-008 will
+    coalesce into one global QueryClient; widget hooks will become
+    `useQuery({queryKey:['buckets','top',by],...})`.
+  - Mock Prometheus for runtime smoke: a 30-line Go file with
+    http.HandleFunc("/api/v1/query", ...) that returns canned
+    `{status:"success",data:{resultType:"vector",result:[...]}}`
+    payloads is enough. Don't pull in the real prometheus binary
+    for local widget testing — it's overkill.
+  - The cookie path /admin still applies — widgets endpoints inherit
+    the same auth gate as cluster/status. No special handling
+    needed in the React layer; same fetch wrapper pattern as
+    cluster.ts.
+---
 
 ## 2026-05-02 - US-001 (close-out)
 - US-001 was implemented in prior commit e4094bf on this branch ("feat: US-001 -

@@ -24,6 +24,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { TopBucketsCard, TopConsumersCard } from '@/components/overview/TopWidgets';
 import { cn } from '@/lib/utils';
 
 const POLL_INTERVAL_MS = 5_000;
@@ -385,6 +386,11 @@ export function OverviewPage() {
       )}
 
       <NodesTable nodes={sorted} loading={loading} />
+
+      <div className="grid gap-6 xl:grid-cols-2">
+        <TopBucketsCard />
+        <TopConsumersCard />
+      </div>
     </div>
   );
 }
