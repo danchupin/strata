@@ -149,6 +149,11 @@ var (
 		},
 		[]string{"sink", "status"},
 	)
+
+	MetaTikvAuditSweepDeleted = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "strata_meta_tikv_audit_sweep_deleted_total",
+		Help: "Audit rows expunged by the TiKV audit-retention sweeper (TiKV has no native TTL).",
+	})
 )
 
 func Register() {
@@ -166,6 +171,7 @@ func Register() {
 		LifecycleTickTotal,
 		NotifyDeliveryTotal,
 		WorkerPanicTotal,
+		MetaTikvAuditSweepDeleted,
 	)
 }
 

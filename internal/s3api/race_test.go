@@ -7,6 +7,8 @@ import (
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -24,13 +26,31 @@ import (
 
 // raceWorkers / raceIters / raceKeys are tuned to produce a high density of
 // PUT/DELETE/Multipart-Complete races on a small key set without making the
-// memory-backed test slow under -race. The cassandra-tagged variant reuses
-// the same constants.
-const (
-	raceWorkers = 32
-	raceIters   = 1000
-	raceKeys    = 4
+// memory-backed test slow under -race. The cassandra- and tikv-tagged
+// variants reuse the same constants.
+//
+// Defaults match the original prd-race-harness US-035 shape; env overrides
+// (RACE_WORKERS / RACE_ITERS / RACE_KEYS) let the integration soak targets
+// (e.g. `make race-soak-tikv`) dial up workload size without recompiling.
+// Negative or zero env values fall through to the default — the make
+// targets do the explicit "scale" choice.
+var (
+	raceWorkers = envIntDefault("RACE_WORKERS", 32)
+	raceIters   = envIntDefault("RACE_ITERS", 1000)
+	raceKeys    = envIntDefault("RACE_KEYS", 4)
 )
+
+func envIntDefault(name string, def int) int {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
+}
 
 // raceFixture is the test fixture wired by the per-backend constructor. The
 // same runRaceScenario+verifyRaceInvariants pair drives both the memory

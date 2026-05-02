@@ -893,6 +893,13 @@ func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versi
 	return &cp, nil
 }
 
+// ScanObjects satisfies meta.RangeScanStore. The in-process tree-map iterates
+// keys in sorted order natively, so we can serve a single-shot range scan
+// instead of a fan-out + heap-merge — matches the TiKV path's shape.
+func (s *Store) ScanObjects(ctx context.Context, bucketID uuid.UUID, opts meta.ListOptions) (*meta.ListResult, error) {
+	return s.ListObjects(ctx, bucketID, opts)
+}
+
 func (s *Store) ListObjects(ctx context.Context, bucketID uuid.UUID, opts meta.ListOptions) (*meta.ListResult, error) {
 	s.mu.RLock()
 	bucket, ok := s.objects[bucketID]
@@ -2007,3 +2014,10 @@ func (s *Store) ListReshardJobs(ctx context.Context) ([]*meta.ReshardJob, error)
 }
 
 func (s *Store) Close() error { return nil }
+
+// Compile-time guarantees that *Store satisfies both meta.Store and the
+// optional meta.RangeScanStore capability surface (US-012).
+var (
+	_ meta.Store          = (*Store)(nil)
+	_ meta.RangeScanStore = (*Store)(nil)
+)

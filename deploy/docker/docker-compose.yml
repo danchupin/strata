@@ -150,6 +150,110 @@ services:
       - "3000:3000"
     restart: unless-stopped
 
+  # PD + TiKV + a TiKV-backed strata replica live behind the "tikv" profile
+  # so the default `docker compose up` keeps the cassandra-backed shape.
+  # Enable with:
+  #   docker compose --profile tikv up -d pd tikv ceph strata-tikv prometheus grafana
+  # or `make up-tikv`. The tikv-backed strata replica is mutually exclusive
+  # with the cassandra-backed one (both want STRATA_META_BACKEND, but only
+  # one value is legal per process — the picker in internal/serverapp
+  # validates exactly-one). For laptop / CI the shape is single-PD +
+  # single-TiKV; production needs PD ≥3 (raft majority) + TiKV ≥3 — see
+  # docs/backends/tikv.md (US-019).
+  pd:
+    image: pingcap/pd:v8.5.0
+    container_name: strata-pd
+    profiles: ["tikv"]
+    command:
+      - --name=pd
+      - --client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://pd:2379
+      - --peer-urls=http://0.0.0.0:2380
+      - --advertise-peer-urls=http://pd:2380
+      - --initial-cluster=pd=http://pd:2380
+      - --data-dir=/data/pd
+    ports:
+      - "2379:2379"
+    volumes:
+      - strata-pd-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- --tries=1 --timeout=2 http://127.0.0.1:2379/pd/api/v1/health 2>/dev/null | grep -q '\"health\":true' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  tikv:
+    image: pingcap/tikv:v8.5.0
+    container_name: strata-tikv-storage
+    profiles: ["tikv"]
+    depends_on:
+      pd:
+        condition: service_healthy
+    command:
+      - --pd-endpoints=pd:2379
+      - --addr=0.0.0.0:20160
+      - --advertise-addr=tikv:20160
+      - --status-addr=0.0.0.0:20180
+      - --advertise-status-addr=tikv:20180
+      - --data-dir=/data/tikv
+    ports:
+      - "20160:20160"
+    volumes:
+      - strata-tikv-data:/data
+    # No HTTP healthcheck: pingcap/tikv's status server returns plain text
+    # and the alpine-glibc base ships no curl. wget against /status mostly
+    # works but the response body is not a stable contract. depends_on
+    # `service_started` is enough for downstream consumers — the strata
+    # gateway's TiKV client retries until PD assigns regions, so transient
+    # boot races are absorbed there.
+    restart: unless-stopped
+
+  # strata-tikv is the TiKV-backed gateway replica. Mutually exclusive with
+  # the cassandra-backed `strata` service: both bind the same listen port
+  # internally, but the host port differs (9998 vs 9999) so a curious
+  # operator can run both side-by-side under `--profile tikv` if they
+  # really want to compare shapes.
+  strata-tikv:
+    image: strata:ceph
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    container_name: strata-tikv
+    profiles: ["tikv"]
+    depends_on:
+      pd:
+        condition: service_healthy
+      tikv:
+        condition: service_started
+      ceph:
+        condition: service_healthy
+    environment:
+      STRATA_CONFIG_FILE: /etc/strata/strata.toml
+      STRATA_META_BACKEND: tikv
+      STRATA_TIKV_PD_ENDPOINTS: pd:2379
+      STRATA_WORKERS: ${STRATA_WORKERS:-gc,lifecycle}
+      STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-}
+      STRATA_STATIC_CREDENTIALS: ${STRATA_STATIC_CREDENTIALS:-}
+      STRATA_GC_INTERVAL: ${STRATA_GC_INTERVAL:-}
+      STRATA_GC_GRACE: ${STRATA_GC_GRACE:-}
+      STRATA_LIFECYCLE_INTERVAL: ${STRATA_LIFECYCLE_INTERVAL:-}
+      STRATA_LIFECYCLE_UNIT: ${STRATA_LIFECYCLE_UNIT:-}
+      STRATA_NOTIFY_TARGETS: ${STRATA_NOTIFY_TARGETS:-}
+    ports:
+      - "9998:9000"
+    volumes:
+      - strata-ceph-etc:/etc/ceph:ro
+      - ../strata.toml:/etc/strata/strata.toml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/readyz >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 30s
+    restart: unless-stopped
+
   # OTLP collector + Jaeger live behind the "tracing" profile so the default
   # `docker compose up` does not pull them in. Enable with:
   #   docker compose --profile tracing up otel-collector jaeger
@@ -184,5 +288,7 @@ volumes:
   strata-cassandra-data:
   strata-ceph-etc:
   strata-ceph-data:
+  strata-pd-data:
+  strata-tikv-data:
   strata-prometheus-data:
   strata-grafana-data:

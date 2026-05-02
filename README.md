@@ -51,6 +51,22 @@ make wait-ceph
 make smoke
 ```
 
+### Option 4: TiKV-backed metadata (PD + TiKV + Ceph + strata)
+
+```bash
+make up-tikv               # pd + tikv + ceph + strata-tikv (host port 9998)
+make wait-pd
+make wait-tikv
+make wait-strata-tikv
+make smoke-tikv            # bash scripts/smoke.sh http://127.0.0.1:9998
+```
+
+TiKV is a first-class equal-tier metadata backend (`STRATA_META_BACKEND=tikv`).
+Native ordered range scans short-circuit Cassandra's 64-way fan-out on
+`ListObjects`. See [`docs/backends/tikv.md`](docs/backends/tikv.md) for the
+operator guide and [`docs/benchmarks/meta-backend-comparison.md`](docs/benchmarks/meta-backend-comparison.md)
+for the comparison numbers.
+
 End-to-end with real Ceph runs natively on both arm64 and amd64. The cluster image (`deploy/docker/ceph-bootstrap/`) is a custom bootstrap on top of the multi-arch `quay.io/ceph/ceph:v19.2.3` (Squid). MON+MGR+OSD in a single container, OSD backed by `memstore` (4 GiB, held in process memory). Healthy in ~5 seconds.
 
 The runtime image (`deploy/docker/Dockerfile`) is built on the same `quay.io/ceph/ceph:v19.2.3` base so the linked librados version exactly matches the cluster. `librados-devel-19.2.3` for the build stage is pulled from `download.ceph.com/rpm-squid/el9/$arch/`. Image entrypoint is `/usr/local/bin/strata`, default `CMD ["server"]`; `strata-admin` is also installed for operator verbs.

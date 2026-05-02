@@ -31,6 +31,7 @@ import (
 	"github.com/danchupin/strata/internal/meta"
 	metacassandra "github.com/danchupin/strata/internal/meta/cassandra"
 	metamem "github.com/danchupin/strata/internal/meta/memory"
+	metatikv "github.com/danchupin/strata/internal/meta/tikv"
 	"github.com/danchupin/strata/internal/metrics"
 	strataotel "github.com/danchupin/strata/internal/otel"
 	"github.com/danchupin/strata/internal/s3api"
@@ -210,12 +211,18 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 }
 
 // buildLocker returns the leader-election locker exposed by the meta
-// backend. Cassandra uses LWT-backed leases; the in-memory backend ships a
-// process-local locker. Backends that lack a locker return nil.
+// backend. Cassandra uses LWT-backed leases; TiKV uses pessimistic-txn
+// leases (US-011); the in-memory backend ships a process-local locker.
+// Backends that lack a locker return nil.
 func buildLocker(cfg *config.Config, store meta.Store) leader.Locker {
 	if cfg.MetaBackend == "cassandra" {
 		if cs, ok := store.(*metacassandra.Store); ok {
 			return &metacassandra.Locker{S: cs.Session()}
+		}
+	}
+	if cfg.MetaBackend == "tikv" {
+		if ts, ok := store.(*metatikv.Store); ok {
+			return metatikv.NewLocker(ts)
 		}
 	}
 	if cfg.MetaBackend == "memory" {
@@ -362,7 +369,28 @@ func buildMetaStore(cfg *config.Config, logger *slog.Logger, tp *strataotel.Prov
 			},
 			metacassandra.Options{DefaultShardCount: cfg.DefaultBucketShards},
 		)
+	case "tikv":
+		eps := parseTiKVEndpoints(cfg.TiKV.Endpoints)
+		if len(eps) == 0 {
+			return nil, errors.New("tikv: STRATA_TIKV_PD_ENDPOINTS is empty")
+		}
+		return metatikv.Open(metatikv.Config{PDEndpoints: eps})
 	default:
 		return nil, errors.New("unknown meta backend")
 	}
+}
+
+// parseTiKVEndpoints splits a comma-separated PD endpoint list, trims
+// whitespace, and drops empty entries. The koanf env provider does not
+// auto-split slice values (it stores the raw string), so we do the split
+// at use-site instead of fighting mapstructure decode hooks.
+func parseTiKVEndpoints(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if v := strings.TrimSpace(p); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }

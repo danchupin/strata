@@ -1,7 +1,7 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph docker-build vet test up up-all down wait-cassandra wait-ceph ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-grafana clean
+.PHONY: build build-ceph docker-build vet test up up-all up-tikv down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata-tikv ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana race-soak-tikv clean
 
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
@@ -51,8 +51,16 @@ up:
 up-all:
 	$(COMPOSE) up -d cassandra ceph strata prometheus grafana
 
+# Bring up the TiKV-backed gateway stack (PD + TiKV + ceph + strata-tikv +
+# observability). Mutually exclusive with `up-all` in practice — running both
+# at once works (different host ports) but the cassandra service goes idle.
+# strata-tikv binds host port 9998 (vs the cassandra-backed strata's 9999).
+# Use `make wait-strata-tikv && make smoke-tikv` to drive the smoke suite.
+up-tikv:
+	$(COMPOSE) --profile tikv up -d pd tikv ceph strata-tikv prometheus grafana
+
 down:
-	$(COMPOSE) down
+	$(COMPOSE) --profile tikv --profile features --profile tracing down
 
 wait-cassandra:
 	@echo "waiting for cassandra to report healthy..."
@@ -63,6 +71,31 @@ wait-ceph:
 	@echo "waiting for ceph to report healthy..."
 	@until [ "$$($(COMPOSE) ps --format '{{.Health}}' ceph)" = "healthy" ]; do sleep 5; done
 	@echo "ceph ready"
+
+wait-pd:
+	@echo "waiting for pd to report healthy..."
+	@until [ "$$($(COMPOSE) ps --format '{{.Health}}' pd)" = "healthy" ]; do sleep 3; done
+	@echo "pd ready"
+
+# TiKV has no HTTP healthcheck (the upstream image's status server returns
+# plain text and the alpine-glibc base ships no curl); a TCP probe is the
+# most portable shape across docker engines. Runs from the host, not from
+# inside the container, so it works on macOS+Lima and Linux CI. SHELL is
+# bash at the top of this file so /dev/tcp is available.
+wait-tikv:
+	@echo "waiting for tikv to accept TCP connections on 20160..."
+	@until (echo > /dev/tcp/127.0.0.1/20160) 2>/dev/null; do sleep 2; done
+	@echo "tikv ready"
+
+# Wait for the TiKV-backed gateway to report ready on /readyz. The
+# strata-tikv container exposes port 9998 on the host (vs the default
+# cassandra-backed strata's 9999) so both can coexist under
+# `--profile tikv`. /readyz fans out probes — a 200 means the gateway
+# dialled PD + TiKV cleanly.
+wait-strata-tikv:
+	@echo "waiting for strata-tikv /readyz to report 200..."
+	@until [ "$$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:9998/readyz)" = "200" ]; do sleep 2; done
+	@echo "strata-tikv ready"
 
 ceph-pool:
 	docker exec strata-ceph ceph osd pool create strata.rgw.buckets.data 8 8 replicated || true
@@ -88,11 +121,41 @@ run-gateway: run-strata
 smoke:
 	bash scripts/smoke.sh http://127.0.0.1:9999
 
+# Same smoke pass against the TiKV-backed gateway brought up by
+# `make up-tikv`. Host port 9998 — see wait-strata-tikv comment above.
+smoke-tikv:
+	bash scripts/smoke.sh http://127.0.0.1:9998
+
 smoke-signed:
 	bash scripts/smoke-signed.sh http://127.0.0.1:9999
 
+# SigV4-signed smoke pass against the TiKV-backed gateway.
+smoke-signed-tikv:
+	bash scripts/smoke-signed.sh http://127.0.0.1:9998
+
 smoke-grafana:
 	bash scripts/grafana-smoke.sh
+
+# Race-soak the TiKV-backed gateway: brings up a PD + TiKV pair via
+# testcontainers (or uses STRATA_TIKV_TEST_PD_ENDPOINTS for an
+# operator-supplied cluster) and runs the integration race scenario
+# (TestRaceMixedOpsTiKV) for RACE_DURATION (default 1h, set via the
+# go test -timeout flag).
+#
+# Workload size scales with RACE_ITERS / RACE_WORKERS / RACE_KEYS env vars
+# (see race_test.go envIntDefault). Defaults yield a quick sanity pass; the
+# soak target raises RACE_ITERS to 100k so the scenario runs long enough to
+# surface any concurrency divergence vs the Cassandra-backed run.
+#
+# The race-harness PRD (tasks/prd-race-harness.md) lands a duration-bounded
+# binary (cmd/strata-racecheck) in a future cycle; this target is the
+# iter-based stop-gap that satisfies US-016 of the TiKV cycle.
+race-soak-tikv:
+	RACE_ITERS=$${RACE_ITERS:-100000} \
+	RACE_WORKERS=$${RACE_WORKERS:-32} \
+	RACE_KEYS=$${RACE_KEYS:-4} \
+	  go test -tags integration -timeout $${RACE_DURATION:-1h} \
+	  -run '^TestRaceMixedOpsTiKV$$' ./internal/s3api/...
 
 clean:
 	rm -rf bin

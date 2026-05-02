@@ -1,0 +1,99 @@
+name: CI (TiKV)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  integration-tikv:
+    name: Integration tests (TiKV via testcontainers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - name: Pre-pull PD + TiKV images (warms cache)
+        run: |
+          docker pull pingcap/pd:v8.5.0
+          docker pull pingcap/tikv:v8.5.0
+      - name: Run storetest contract against TiKV
+        run: go test -tags integration -timeout 15m ./internal/meta/tikv/...
+
+  e2e-tikv:
+    name: End-to-end (compose --profile tikv + smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build images
+        run: |
+          docker build -f deploy/docker/Dockerfile -t strata:ceph .
+          docker build -f deploy/docker/ceph-bootstrap/Dockerfile -t strata-ceph:local deploy/docker/ceph-bootstrap
+
+      - name: Start backends (pd + tikv + ceph)
+        run: |
+          docker compose -f deploy/docker/docker-compose.yml --profile tikv up -d pd tikv ceph
+          echo "waiting for healthy..."
+          for i in $(seq 1 60); do
+            pd=$(docker inspect -f '{{.State.Health.Status}}' strata-pd 2>/dev/null || echo none)
+            ceph=$(docker inspect -f '{{.State.Health.Status}}' strata-ceph 2>/dev/null || echo none)
+            echo "  pd=$pd ceph=$ceph"
+            if [ "$pd" = "healthy" ] && [ "$ceph" = "healthy" ]; then
+              break
+            fi
+            sleep 5
+          done
+          # TiKV has no HTTP healthcheck — TCP probe on the published RPC port.
+          for i in $(seq 1 60); do
+            if (echo > /dev/tcp/127.0.0.1/20160) 2>/dev/null; then
+              echo "  tikv RPC ready"
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Launch strata-tikv (gateway + gc + lifecycle workers)
+        run: |
+          docker compose -f deploy/docker/docker-compose.yml --profile tikv up -d strata-tikv
+          until curl -sf -o /dev/null http://127.0.0.1:9998/readyz; do sleep 1; done
+
+      - name: Smoke (curl)
+        run: bash scripts/smoke.sh http://127.0.0.1:9998
+
+      - name: Smoke (aws-cli, SigV4 + presigned)
+        env:
+          STRATA_AUTH_MODE: required
+          STRATA_STATIC_CREDENTIALS: ciAK:ciSK:ci
+          AWS_ACCESS_KEY_ID: ciAK
+          AWS_SECRET_ACCESS_KEY: ciSK
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          docker compose -f deploy/docker/docker-compose.yml --profile tikv up -d --force-recreate strata-tikv
+          until curl -s -o /dev/null http://127.0.0.1:9998/readyz; do sleep 1; done
+          bash scripts/smoke-signed.sh http://127.0.0.1:9998
+
+      - name: Collect container logs
+        if: always()
+        run: |
+          mkdir -p ci-logs
+          for c in strata-pd strata-tikv-storage strata-ceph strata-tikv; do
+            docker logs $c > ci-logs/$c.log 2>&1 || true
+          done
+          docker compose -f deploy/docker/docker-compose.yml --profile tikv ps > ci-logs/compose-ps.txt 2>&1 || true
+
+      - name: Upload CI logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-tikv-logs
+          path: ci-logs/
+          if-no-files-found: warn
+          retention-days: 14

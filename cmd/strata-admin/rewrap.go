@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/danchupin/strata/internal/config"
@@ -15,6 +16,7 @@ import (
 	"github.com/danchupin/strata/internal/meta"
 	metacassandra "github.com/danchupin/strata/internal/meta/cassandra"
 	metamem "github.com/danchupin/strata/internal/meta/memory"
+	metatikv "github.com/danchupin/strata/internal/meta/tikv"
 	"github.com/danchupin/strata/internal/rewrap"
 )
 
@@ -145,7 +147,24 @@ func buildRewrapMetaStore(cfg *config.Config, logger *slog.Logger) (meta.Store, 
 			},
 			metacassandra.Options{DefaultShardCount: cfg.DefaultBucketShards},
 		)
+	case "tikv":
+		eps := splitTiKVEndpoints(cfg.TiKV.Endpoints)
+		if len(eps) == 0 {
+			return nil, errors.New("tikv: STRATA_TIKV_PD_ENDPOINTS is empty")
+		}
+		return metatikv.Open(metatikv.Config{PDEndpoints: eps})
 	default:
 		return nil, fmt.Errorf("unknown meta backend: %s", cfg.MetaBackend)
 	}
+}
+
+func splitTiKVEndpoints(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if v := strings.TrimSpace(p); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }

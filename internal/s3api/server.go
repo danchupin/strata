@@ -524,7 +524,14 @@ func (s *Server) listObjects(w http.ResponseWriter, r *http.Request, bucket stri
 	if hasMaxKeys && maxKeys == 0 {
 		res = &meta.ListResult{}
 	} else {
-		res, err = s.Meta.ListObjects(r.Context(), b.ID, opts)
+		// US-012: prefer the optional RangeScanStore capability when the
+		// backend advertises it (memory + TiKV); fall through to the fan-out
+		// path for backends that don't (Cassandra).
+		if rs, ok := s.Meta.(meta.RangeScanStore); ok {
+			res, err = rs.ScanObjects(r.Context(), b.ID, opts)
+		} else {
+			res, err = s.Meta.ListObjects(r.Context(), b.ID, opts)
+		}
 		if err != nil {
 			writeError(w, r, ErrInternal)
 			return
