@@ -65,7 +65,9 @@ func main() {
 	apiHandler := s3api.New(dataBackend, metaStore)
 	apiHandler.Region = cfg.RegionName
 
-	adminServer := adminapi.New(metaStore, mw.Store, buildVersion())
+	jwtSecret, jwtSource := loadJWTSecret()
+	log.Printf("admin: jwt secret source=%s", jwtSource)
+	adminServer := adminapi.New(metaStore, mw.Store, buildVersion(), jwtSecret)
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
@@ -94,6 +96,23 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownWait)
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)
+}
+
+// loadJWTSecret returns the HS256 key used to sign /admin/v1 session cookies.
+// Production deployments MUST set STRATA_CONSOLE_JWT_SECRET (32 bytes hex,
+// `openssl rand -hex 32`); when unset we generate an ephemeral random key
+// and emit a WARN — sessions then invalidate on restart, which is fine for
+// dev but unacceptable for prod.
+func loadJWTSecret() ([]byte, string) {
+	if v := os.Getenv("STRATA_CONSOLE_JWT_SECRET"); v != "" {
+		return adminapi.DecodeSecret(v), "STRATA_CONSOLE_JWT_SECRET"
+	}
+	b, err := adminapi.GenerateSecret()
+	if err != nil {
+		log.Fatalf("admin: generate jwt secret: %v", err)
+	}
+	log.Printf("WARN admin: STRATA_CONSOLE_JWT_SECRET unset; generated ephemeral 32-byte secret. Sessions invalidate on restart. Set the env explicitly in production.")
+	return b, "ephemeral"
 }
 
 // buildVersion returns the VCS revision baked in by `go build` (or "dev"

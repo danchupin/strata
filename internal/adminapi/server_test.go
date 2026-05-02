@@ -17,7 +17,7 @@ import (
 // 401-on-anonymous test.
 func newTestServer() *Server {
 	creds := auth.NewStaticStore(map[string]*auth.Credential{})
-	s := New(metamem.New(), creds, "test-sha")
+	s := New(metamem.New(), creds, "test-sha", []byte("0123456789abcdef0123456789abcdef"))
 	s.Started = time.Unix(1_700_000_000, 0)
 	return s
 }

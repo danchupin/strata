@@ -1,3 +1,5 @@
+import { Navigate, Route, Routes } from 'react-router-dom';
+
 import { Badge } from '@/components/ui/badge';
 import {
   Card,
@@ -7,8 +9,11 @@ import {
   CardTitle,
 } from '@/components/ui/card';
 import { ThemeToggle } from '@/components/theme-toggle';
+import { UserMenu } from '@/components/user-menu';
+import { RequireAuth } from '@/components/require-auth';
+import { LoginPage } from '@/pages/Login';
 
-export function App() {
+function HomeShell() {
   return (
     <div className="min-h-screen bg-background text-foreground">
       <header className="border-b">
@@ -19,7 +24,10 @@ export function App() {
             </span>
             <Badge variant="outline">Phase 1</Badge>
           </div>
-          <ThemeToggle />
+          <div className="flex items-center gap-2">
+            <ThemeToggle />
+            <UserMenu />
+          </div>
         </div>
       </header>
       <main className="container py-8">
@@ -27,17 +35,33 @@ export function App() {
           <CardHeader>
             <CardTitle>Strata Console — coming soon</CardTitle>
             <CardDescription>
-              Foundation bundle (Phase 1, US-002). Tailwind + shadcn/ui design
-              system + dark mode. Next stories add login, cluster overview,
-              buckets, metrics.
+              Foundation bundle (Phase 1). Login is wired (US-004); cluster
+              overview, buckets, and metrics land in following stories.
             </CardDescription>
           </CardHeader>
           <CardContent className="text-sm text-muted-foreground">
-            Toggle the theme in the top-right corner. Light, dark, and system
-            modes are persisted to <code>localStorage['strata.theme']</code>.
+            Toggle the theme in the top-right corner. Use the user menu to
+            sign out — sessions expire after 24h.
           </CardContent>
         </Card>
       </main>
     </div>
+  );
+}
+
+export function App() {
+  return (
+    <Routes>
+      <Route path="/login" element={<LoginPage />} />
+      <Route
+        path="/*"
+        element={
+          <RequireAuth>
+            <HomeShell />
+          </RequireAuth>
+        }
+      />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
   );
 }

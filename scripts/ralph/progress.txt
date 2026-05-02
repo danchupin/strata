@@ -95,6 +95,27 @@ Cycle: ralph/web-ui-foundation
   Phase 1.
 - Tests for the cycle: Go side via `go test ./internal/adminapi/...`, Playwright
   via `cd web && pnpm exec playwright test`. CI has e2e-ui job that runs both.
+- Stdlib JWT (HS256): crypto/hmac + sha256 + base64.RawURLEncoding for
+  compact serialization; hmac.Equal for constant-time signature compare.
+  ~200 lines — skip jwt-go / golang-jwt and the CVE chase.
+- Cookie Secure flag: conditional on r.TLS != nil OR X-Forwarded-Proto=https.
+  Unconditional Secure blocks dev over plain HTTP because browsers refuse
+  to set Secure cookies on insecure origins. Production gateways behind
+  TLS terminators still hit the secure branch; dev with `make run-memory`
+  keeps working. Path=/admin keeps the cookie off /console/ static asset
+  requests — only the API picks it up.
+- subtle.ConstantTimeCompare on the secret AND a fake compare on the
+  unknown-access-key branch — equalises wall-clock latency so attackers
+  can't distinguish "unknown key" from "wrong secret".
+- adminapi.authMiddleware resolution order: path bypass list (/auth/login,
+  /auth/logout) → cookie JWT path → SigV4 fallback → 401. Whoami requires
+  auth so the UI uses it as a session probe.
+- BrowserRouter basename='/console' means React Router paths are '/login'
+  and '/*' — NOT '/console/login'. Basename prefix is added by the router;
+  don't double-prefix in <Link to=...> or <Navigate to=...>.
+- React auth state machine: 'unknown' | 'unauthenticated' | 'authenticated'.
+  The 'unknown' state during the initial whoami probe prevents a flash of
+  the login page on hard-refresh of a deep link.
 
 ## 2026-05-02 - US-001 (close-out)
 - US-001 was implemented in prior commit e4094bf on this branch ("feat: US-001 -
@@ -319,4 +340,142 @@ Cycle: ralph/web-ui-foundation
     inside Server.routes() — that's the central place. Adding a new
     handler only requires a route line + a method on Server. No
     further wiring in main.go.
+---
+
+## 2026-05-02 - US-004
+- Go side: HS256 JWT session cookie + login/logout/whoami endpoints.
+  internal/adminapi/session.go (signSession + verifySession + DecodeSecret +
+  GenerateSecret) uses stdlib only — crypto/hmac, crypto/sha256,
+  encoding/base64.RawURLEncoding. No jwt-go / golang-jwt dependency.
+- internal/adminapi/auth.go: handleLogin reads JSON {access_key, secret_key},
+  validates via auth.CredentialsStore + subtle.ConstantTimeCompare on the
+  secret; constant-time fake compare on the unknown-access-key branch to
+  avoid leaking existence. Sets cookie strata_session=<jwt>, HttpOnly +
+  SameSite=Strict + Path=/admin + Max-Age=86400 + Secure conditional on
+  r.TLS != nil OR X-Forwarded-Proto=https so dev over plain HTTP works.
+  handleLogout sets Max-Age=-1 (clear cookie) regardless of session state.
+  handleWhoami requires auth; returns access_key + expires_at (from the
+  cookie's JWT exp claim, or 0 when authenticated via SigV4 instead).
+- internal/adminapi/server.go authMiddleware rewrite. Resolution per
+  request: (1) /admin/v1/auth/login + /auth/logout bypass auth entirely;
+  (2) cookie present → verify JWT + lookup subject in CredentialsStore +
+  attach AuthInfo; (3) Authorization header present → fall through to
+  SigV4 path; (4) anonymous → 401. The cookie path is preferred for
+  browser traffic; SigV4 is the fallback for CLI clients.
+- adminapi.New signature gained jwtSecret []byte.
+  cmd/strata-gateway/main.go loadJWTSecret() reads
+  STRATA_CONSOLE_JWT_SECRET (hex preferred; raw bytes fallback when not
+  hex) or generates an ephemeral 32-byte secret with a WARN log line —
+  production deployments MUST set the env to survive restarts without
+  invalidating sessions.
+- internal/adminapi/openapi.yaml documents POST /auth/login (security:
+  [] override — anonymous), POST /auth/logout (anonymous), GET
+  /auth/whoami (cookie/sigv4 secured) + LoginRequest/SessionInfo
+  schemas. Set-Cookie header description matches the runtime shape.
+- React side: react-router-dom@6.28 added.
+  web/src/api/auth.ts — fetch wrappers (login/logout/whoami) +
+    AuthError class; credentials: 'same-origin' so the browser carries
+    the HttpOnly cookie automatically.
+  web/src/components/auth-provider.tsx — AuthProvider context with
+    state 'unknown' | 'unauthenticated' | 'authenticated'; whoami
+    probe on mount populates state.
+  web/src/components/require-auth.tsx — Navigate to /login on
+    unauthenticated; renders 'Checking session…' during the initial
+    probe (avoids flicker).
+  web/src/components/user-menu.tsx — DropdownMenu with access key +
+    Sign out item that calls logout + navigate('/login').
+  web/src/pages/Login.tsx — Card form with AccessKey + SecretKey
+    (type=password) inputs; inline error on failure; redirects to the
+    intended location after successful login (location.state.from).
+  web/src/App.tsx — Routes: /login (LoginPage), /* wrapped in
+    RequireAuth → HomeShell.
+  web/src/main.tsx — BrowserRouter basename='/console' wraps the app.
+- Files changed:
+  - internal/adminapi/session.go (new)
+  - internal/adminapi/auth.go (new)
+  - internal/adminapi/auth_test.go (new — 11 tests)
+  - internal/adminapi/server.go (Server.JWTSecret field +
+    authMiddleware rewrite + auth route registrations)
+  - internal/adminapi/server_test.go (newTestServer signature)
+  - internal/adminapi/openapi.yaml (+3 paths, +2 schemas)
+  - cmd/strata-gateway/main.go (loadJWTSecret + adminapi.New arg)
+  - web/package.json + web/pnpm-lock.yaml (+react-router-dom@6.28)
+  - web/src/api/auth.ts (new)
+  - web/src/components/auth-provider.tsx (new)
+  - web/src/components/require-auth.tsx (new)
+  - web/src/components/user-menu.tsx (new)
+  - web/src/pages/Login.tsx (new)
+  - web/src/App.tsx (Routes + HomeShell + UserMenu in top bar)
+  - web/src/main.tsx (BrowserRouter basename='/console' +
+    AuthProvider)
+- Quality checks:
+  - go vet ./... clean
+  - go test ./... clean (internal/adminapi: 19 tests pass,
+    8 prior + 11 new)
+  - go build ./... clean
+  - cd web && pnpm run typecheck clean
+  - cd web && pnpm run build clean
+  - Bundle: 277.4 KiB raw / 90.6 KiB gzipped JS
+    (was 81 KiB gzipped at US-002 — +9.6 KiB for react-router-dom +
+    auth UI). 27.5 KiB raw / 5.5 KiB gzipped CSS. Total ≈96 KiB
+    gzipped, within ≤500 KiB target.
+  - Runtime smoke on :9997 with STRATA_AUTH_MODE=required,
+    STRATA_STATIC_CREDENTIALS=test:test:owner, JWT secret from
+    openssl rand -hex 32:
+      whoami anon → 401
+      login wrong secret → 401 InvalidCredentials
+      login correct → 200 + Set-Cookie strata_session=…
+      whoami w/ cookie → 200 {access_key,expires_at}
+      cluster/status w/ cookie → 200 (proves cookie auth applies to
+        all /admin/v1/* routes, not just /auth/*)
+      logout → 200 + Set-Cookie strata_session=… Max-Age=0
+      whoami after logout → 401 missing Authorization header
+- Browser MCP unavailable this iteration; full browser run is
+  scheduled for US-012 Playwright (login → overview → buckets →
+  logout critical path).
+- **Learnings for future iterations:**
+  - Stdlib JWT is fine. base64.RawURLEncoding (NOT StdEncoding) per
+    JWT compact serialization; hmac.Equal for the signature compare
+    (constant-time). 200 lines total — no need to import a JWT
+    library and chase its CVEs.
+  - The cookie's Secure attribute breaks dev-over-plain-HTTP because
+    browsers refuse to set Secure cookies on insecure origins.
+    Conditional on r.TLS != nil OR X-Forwarded-Proto=https keeps
+    `make run-memory` working AND honours the spec in production
+    (where the gateway is behind a TLS terminator). Path=/admin
+    means the cookie does NOT travel with /console/ static asset
+    requests — only the API path picks it up. That's intentional.
+  - subtle.ConstantTimeCompare returns int (0 or 1). Add a fake
+    compare on the unknown-access-key branch so the unauth branch
+    times the same as the bad-secret branch — otherwise a wall-clock
+    attacker can distinguish "unknown key" from "wrong secret" by
+    response latency. Cheap defence; do it.
+  - The auth middleware's path-based bypass list is hard-coded
+    (/admin/v1/auth/login, /admin/v1/auth/logout). Adding any future
+    anonymous endpoint means updating isAuthBypassPath. Worth
+    keeping the list short — most /admin/v1/* MUST require auth.
+  - hasPresignedQuery(r) is a fast pre-filter that avoids handing a
+    plain anonymous browser request off to the SigV4 middleware
+    just to get the same 401 back; it short-circuits to
+    writeAuthDenied(ErrMissingSignature) so the JSON error message
+    is consistent across cookie + sigv4 absent paths.
+  - React state machine pattern: 'unknown' | 'unauthenticated' |
+    'authenticated' avoids the "flash of login page" on initial
+    load while whoami() is in flight. RequireAuth renders a
+    skeleton during the unknown state; this matters when the user
+    hard-refreshes a deep-linked page.
+  - BrowserRouter basename='/console' means the React Router paths
+    are '/login' and '/*' (NOT '/console/login'); the basename
+    prefix is added automatically. Don't double-prefix.
+  - react-router-dom@6 useNavigate replaces useHistory from v5;
+    location.state is plain unknown — cast to your own type when
+    reading state.from (see Login.tsx LocationState interface).
+  - Bundle gain after US-004: +9.6 KiB gzipped for react-router-dom
+    + auth UI. Headroom to 500 KiB ≈400 KiB; recharts 2.x adds the
+    most weight downstream (~50 KiB gzipped). Route-level lazy
+    loading from US-009 onward keeps the initial paint light.
+  - To test the SigV4 fallback in the future, use a real
+    Authorization header (the auth middleware does the parsing); for
+    the cookie path, mint a JWT directly via signSession() — much
+    simpler than constructing SigV4 from scratch.
 ---

@@ -171,6 +171,20 @@ components:
           type: array
           items: { $ref: '#/components/schemas/MetricSeries' }
 
+    LoginRequest:
+      type: object
+      required: [access_key, secret_key]
+      properties:
+        access_key: { type: string }
+        secret_key: { type: string }
+
+    SessionInfo:
+      type: object
+      required: [access_key, expires_at]
+      properties:
+        access_key: { type: string }
+        expires_at: { type: integer, format: int64, description: "Unix epoch (seconds) when the session JWT expires" }
+
   responses:
     Unauthorized:
       description: Authentication missing or invalid.
@@ -188,6 +202,68 @@ security:
   - sessionCookie: []
 
 paths:
+  /auth/login:
+    post:
+      summary: Issue a 24h session cookie from IAM credentials
+      operationId: authLogin
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Login succeeded; session cookie set in Set-Cookie.
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+              description: "strata_session=<jwt>; HttpOnly; Secure; SameSite=Strict; Path=/admin; Max-Age=86400"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionInfo' }
+        '400':
+          description: Invalid JSON body or missing fields.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          description: Invalid access key or secret.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /auth/logout:
+    post:
+      summary: Clear the session cookie
+      operationId: authLogout
+      security: []
+      responses:
+        '200':
+          description: Cookie cleared (always returns 200, regardless of prior state).
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+              description: "strata_session=; Max-Age=0; Path=/admin"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { ok: { type: boolean } }
+
+  /auth/whoami:
+    get:
+      summary: Probe current session
+      operationId: authWhoami
+      responses:
+        '200':
+          description: Active session info.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionInfo' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   /cluster/status:
     get:
       summary: Cluster status hero
