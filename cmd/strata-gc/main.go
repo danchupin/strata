@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,6 +15,7 @@ import (
 	datarados "github.com/danchupin/strata/internal/data/rados"
 	"github.com/danchupin/strata/internal/gc"
 	"github.com/danchupin/strata/internal/leader"
+	"github.com/danchupin/strata/internal/logging"
 	"github.com/danchupin/strata/internal/meta"
 	metacassandra "github.com/danchupin/strata/internal/meta/cassandra"
 	metamem "github.com/danchupin/strata/internal/meta/memory"
@@ -22,23 +23,25 @@ import (
 )
 
 func main() {
-	log.SetOutput(os.Stdout)
-	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	logger := logging.Setup()
 
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("config: %v", err)
+		logger.Error("config", "error", err.Error())
+		os.Exit(2)
 	}
 
-	dataBackend, err := buildDataBackend(cfg)
+	dataBackend, err := buildDataBackend(cfg, logger)
 	if err != nil {
-		log.Fatalf("data backend: %v", err)
+		logger.Error("data backend", "error", err.Error())
+		os.Exit(2)
 	}
 	defer dataBackend.Close()
 
-	metaStore, err := buildMetaStore(cfg)
+	metaStore, err := buildMetaStore(cfg, logger)
 	if err != nil {
-		log.Fatalf("meta store: %v", err)
+		logger.Error("meta store", "error", err.Error())
+		os.Exit(2)
 	}
 	defer metaStore.Close()
 
@@ -49,12 +52,14 @@ func main() {
 		Region:   cfg.RegionName,
 		Interval: cfg.GC.Interval,
 		Grace:    cfg.GC.Grace,
+		Logger:   logger,
+		Metrics:  metrics.GCObserver{},
 	}
 
 	go func() {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", metrics.Handler())
-		log.Printf("gc: metrics on %s", cfg.GC.MetricsListen)
+		logger.Info("gc: metrics", "listen", cfg.GC.MetricsListen)
 		_ = http.ListenAndServe(cfg.GC.MetricsListen, mux)
 	}()
 
@@ -63,9 +68,10 @@ func main() {
 
 	locker := buildLocker(cfg, metaStore)
 	if locker == nil {
-		log.Printf("gc: leader election disabled (no distributed locker for meta=%s)", cfg.MetaBackend)
+		logger.Warn("gc: leader election disabled (no distributed locker)", "meta_backend", cfg.MetaBackend)
 		if err := w.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			log.Fatalf("worker: %v", err)
+			logger.Error("worker", "error", err.Error())
+			os.Exit(1)
 		}
 		return
 	}
@@ -73,6 +79,7 @@ func main() {
 		Locker: locker,
 		Name:   "gc",
 		Holder: leader.DefaultHolder(),
+		Logger: logger,
 	}
 	for ctx.Err() == nil {
 		if err := session.AwaitAcquire(ctx); err != nil {
@@ -80,7 +87,7 @@ func main() {
 		}
 		workCtx := session.Supervise(ctx)
 		if err := w.Run(workCtx); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("worker: %v", err)
+			logger.Warn("worker", "error", err.Error())
 		}
 		session.Release(context.Background())
 	}
@@ -100,12 +107,16 @@ func buildLocker(cfg *config.Config, store meta.Store) leader.Locker {
 	return nil
 }
 
-func buildDataBackend(cfg *config.Config) (data.Backend, error) {
+func buildDataBackend(cfg *config.Config, logger *slog.Logger) (data.Backend, error) {
 	switch cfg.DataBackend {
 	case "memory":
 		return datamem.New(), nil
 	case "rados":
 		classes, err := datarados.ParseClasses(cfg.RADOS.Classes)
+		if err != nil {
+			return nil, err
+		}
+		clusters, err := datarados.ParseClusters(cfg.RADOS.Clusters)
 		if err != nil {
 			return nil, err
 		}
@@ -116,13 +127,16 @@ func buildDataBackend(cfg *config.Config) (data.Backend, error) {
 			Pool:       cfg.RADOS.Pool,
 			Namespace:  cfg.RADOS.Namespace,
 			Classes:    classes,
+			Clusters:   clusters,
+			Logger:     logger,
+			Metrics:    metrics.RADOSObserver{},
 		})
 	default:
 		return nil, errors.New("unknown data backend")
 	}
 }
 
-func buildMetaStore(cfg *config.Config) (meta.Store, error) {
+func buildMetaStore(cfg *config.Config, logger *slog.Logger) (meta.Store, error) {
 	switch cfg.MetaBackend {
 	case "memory":
 		return metamem.New(), nil
@@ -136,6 +150,9 @@ func buildMetaStore(cfg *config.Config) (meta.Store, error) {
 				Username:    cfg.Cassandra.Username,
 				Password:    cfg.Cassandra.Password,
 				Timeout:     cfg.Cassandra.Timeout,
+				Logger:      logger,
+				SlowMS:      metacassandra.SlowMSFromEnv(),
+				Metrics:     metrics.CassandraObserver{},
 			},
 			metacassandra.Options{DefaultShardCount: cfg.DefaultBucketShards},
 		)
@@ -143,4 +160,3 @@ func buildMetaStore(cfg *config.Config) (meta.Store, error) {
 		return nil, errors.New("unknown meta backend")
 	}
 }
-

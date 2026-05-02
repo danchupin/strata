@@ -1,7 +1,7 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph vet test up up-all down wait-cassandra wait-ceph ceph-pool run-memory run-cassandra run-gateway smoke clean
+.PHONY: build build-ceph vet test up up-all down wait-cassandra wait-ceph ceph-pool run-memory run-cassandra run-gateway smoke smoke-grafana clean
 
 build:
 	go build ./...
@@ -38,7 +38,7 @@ up:
 	$(COMPOSE) up -d cassandra
 
 up-all:
-	$(COMPOSE) up -d cassandra ceph gateway
+	$(COMPOSE) up -d cassandra ceph gateway prometheus grafana
 
 down:
 	$(COMPOSE) down
@@ -75,6 +75,9 @@ smoke:
 
 smoke-signed:
 	bash scripts/smoke-signed.sh http://127.0.0.1:9999
+
+smoke-grafana:
+	bash scripts/grafana-smoke.sh
 
 clean:
 	rm -rf bin

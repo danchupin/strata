@@ -20,7 +20,7 @@ func (s *Server) getBucketVersioning(w http.ResponseWriter, r *http.Request, buc
 	if status == meta.VersioningDisabled {
 		status = ""
 	}
-	writeXML(w, http.StatusOK, versioningConfiguration{Status: status})
+	writeXML(w, http.StatusOK, versioningConfiguration{Status: status, MfaDelete: b.MfaDelete})
 }
 
 func (s *Server) putBucketVersioning(w http.ResponseWriter, r *http.Request, bucket string) {
@@ -43,11 +43,53 @@ func (s *Server) putBucketVersioning(w http.ResponseWriter, r *http.Request, buc
 		writeError(w, r, ErrInvalidArgument)
 		return
 	}
+	mfa := doc.MfaDelete
+	switch mfa {
+	case meta.MfaDeleteEnabled, meta.MfaDeleteDisabled, "":
+	default:
+		writeError(w, r, ErrInvalidArgument)
+		return
+	}
 	if err := s.Meta.SetBucketVersioning(r.Context(), bucket, state); err != nil {
 		mapMetaErr(w, r, err)
 		return
 	}
+	if mfa != "" {
+		if err := s.Meta.SetBucketMfaDelete(r.Context(), bucket, mfa); err != nil {
+			mapMetaErr(w, r, err)
+			return
+		}
+	}
 	w.WriteHeader(http.StatusOK)
+}
+
+// wireVersionID returns the wire form of a version-id: meta.NullVersionLiteral
+// ("null") for rows flagged IsNull (the bucket's null-versioned row), and the
+// stored TimeUUID otherwise. Use it everywhere a VersionID is rendered into
+// XML or response headers so clients see "null" for the AWS-spec null version
+// rather than the zero-UUID sentinel.
+func wireVersionID(o *meta.Object) string {
+	if o == nil {
+		return ""
+	}
+	if o.IsNull {
+		return meta.NullVersionLiteral
+	}
+	return o.VersionID
+}
+
+// nextWireVersionID renders the continuation marker for a paginated
+// ListObjectVersions response. The meta backend returns the raw VersionID of
+// the last row on the page; we translate the sentinel to "null" so the
+// next request can pass it back unchanged via key-version-id-marker.
+func nextWireVersionID(res *meta.ListVersionsResult) string {
+	if res == nil || res.NextVersionID == "" {
+		return ""
+	}
+	if res.NextVersionID == meta.NullVersionID {
+		return meta.NullVersionLiteral
+	}
+	return res.NextVersionID
 }
 
 func (s *Server) listObjectVersions(w http.ResponseWriter, r *http.Request, bucket string) {
@@ -79,20 +121,20 @@ func (s *Server) listObjectVersions(w http.ResponseWriter, r *http.Request, buck
 		MaxKeys:         limit,
 		IsTruncated:     res.Truncated,
 		NextKeyMarker:   res.NextKeyMarker,
-		NextVersionID:   res.NextVersionID,
+		NextVersionID:   nextWireVersionID(res),
 	}
 	for _, v := range res.Versions {
 		if v.IsDeleteMarker {
 			resp.DeleteMarkers = append(resp.DeleteMarkers, deleteMarkerEntry{
 				Key:          v.Key,
-				VersionID:    v.VersionID,
+				VersionID:    wireVersionID(v),
 				IsLatest:     v.IsLatest,
 				LastModified: v.Mtime.UTC().Format(time.RFC3339),
 			})
 		} else {
 			resp.Versions = append(resp.Versions, versionEntry{
 				Key:          v.Key,
-				VersionID:    v.VersionID,
+				VersionID:    wireVersionID(v),
 				IsLatest:     v.IsLatest,
 				LastModified: v.Mtime.UTC().Format(time.RFC3339),
 				ETag:         `"` + v.ETag + `"`,

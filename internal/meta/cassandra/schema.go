@@ -92,6 +92,10 @@ var tableDDL = []string{
 		bucket_id uuid PRIMARY KEY,
 		config    blob
 	)`,
+	`CREATE TABLE IF NOT EXISTS bucket_acl_grants (
+		bucket_id uuid PRIMARY KEY,
+		grants    blob
+	)`,
 	`CREATE TABLE IF NOT EXISTS gc_queue (
 		region       text,
 		enqueued_at  timestamp,
@@ -105,11 +109,212 @@ var tableDDL = []string{
 		name   text PRIMARY KEY,
 		holder text
 	)`,
+	`CREATE TABLE IF NOT EXISTS access_keys (
+		access_key text PRIMARY KEY,
+		secret_key text,
+		owner      text,
+		disabled   boolean,
+		created_at timestamp
+	)`,
+	`CREATE TABLE IF NOT EXISTS iam_users (
+		user_name  text PRIMARY KEY,
+		user_id    text,
+		path       text,
+		created_at timestamp
+	)`,
+	`CREATE TABLE IF NOT EXISTS iam_access_keys_by_user (
+		user_name  text,
+		access_key text,
+		PRIMARY KEY (user_name, access_key)
+	)`,
+	`CREATE TABLE IF NOT EXISTS bucket_encryption (
+		bucket_id uuid PRIMARY KEY,
+		config    blob
+	)`,
+	`CREATE TABLE IF NOT EXISTS bucket_object_lock (
+		bucket_id uuid PRIMARY KEY,
+		config    blob
+	)`,
+	`CREATE TABLE IF NOT EXISTS bucket_notification (
+		bucket_id uuid PRIMARY KEY,
+		config    blob
+	)`,
+	`CREATE TABLE IF NOT EXISTS bucket_website (
+		bucket_id uuid PRIMARY KEY,
+		config    blob
+	)`,
+	`CREATE TABLE IF NOT EXISTS bucket_replication (
+		bucket_id uuid PRIMARY KEY,
+		config    blob
+	)`,
+	`CREATE TABLE IF NOT EXISTS bucket_logging (
+		bucket_id uuid PRIMARY KEY,
+		config    blob
+	)`,
+	`CREATE TABLE IF NOT EXISTS bucket_tagging (
+		bucket_id uuid PRIMARY KEY,
+		config    blob
+	)`,
+	`CREATE TABLE IF NOT EXISTS multipart_completions (
+		bucket_id    uuid,
+		upload_id    timeuuid,
+		key          text,
+		etag         text,
+		version_id   text,
+		body         blob,
+		headers      map<text, text>,
+		completed_at timestamp,
+		PRIMARY KEY ((bucket_id), upload_id)
+	)`,
+	`CREATE TABLE IF NOT EXISTS rewrap_progress (
+		bucket_id  uuid PRIMARY KEY,
+		target_id  text,
+		last_key   text,
+		complete   boolean,
+		updated_at timestamp
+	)`,
+	`CREATE TABLE IF NOT EXISTS notify_queue (
+		bucket_id    uuid,
+		hour         timestamp,
+		event_id     timeuuid,
+		bucket_name  text,
+		object_key   text,
+		event_name   text,
+		event_time   timestamp,
+		config_id    text,
+		target_type  text,
+		target_arn   text,
+		payload      blob,
+		PRIMARY KEY ((bucket_id, hour), event_id)
+	)`,
+	`CREATE TABLE IF NOT EXISTS replication_queue (
+		bucket_id          uuid,
+		day                timestamp,
+		event_id           timeuuid,
+		bucket_name        text,
+		object_key         text,
+		version_id         text,
+		event_name         text,
+		event_time         timestamp,
+		rule_id            text,
+		destination_bucket text,
+		storage_class      text,
+		PRIMARY KEY ((bucket_id, day), event_id)
+	)`,
+	`CREATE TABLE IF NOT EXISTS access_log_buffer (
+		bucket_id      uuid,
+		hour           timestamp,
+		event_id       timeuuid,
+		ts             timestamp,
+		request_id     text,
+		principal      text,
+		source_ip      text,
+		op             text,
+		object_key     text,
+		status         int,
+		bytes_sent     bigint,
+		object_size    bigint,
+		total_time_ms  int,
+		turn_around_ms int,
+		referrer       text,
+		user_agent     text,
+		version_id     text,
+		PRIMARY KEY ((bucket_id, hour), event_id)
+	)`,
+	`CREATE TABLE IF NOT EXISTS audit_log (
+		bucket_id    uuid,
+		day          timestamp,
+		event_id     timeuuid,
+		ts           timestamp,
+		principal    text,
+		action       text,
+		resource     text,
+		result       text,
+		request_id   text,
+		source_ip    text,
+		bucket_name  text,
+		PRIMARY KEY ((bucket_id, day), event_id)
+	) WITH CLUSTERING ORDER BY (event_id DESC)`,
+	`CREATE TABLE IF NOT EXISTS bucket_inventory_configs (
+		bucket_id uuid,
+		config_id text,
+		config    blob,
+		PRIMARY KEY ((bucket_id), config_id)
+	)`,
+	`CREATE TABLE IF NOT EXISTS access_points (
+		name                text PRIMARY KEY,
+		bucket_id           uuid,
+		bucket              text,
+		alias               text,
+		network_origin      text,
+		vpc_id              text,
+		policy              blob,
+		public_access_block blob,
+		created_at          timestamp
+	)`,
+	`CREATE TABLE IF NOT EXISTS reshard_jobs (
+		bucket_id   uuid PRIMARY KEY,
+		bucket_name text,
+		source      int,
+		target      int,
+		last_key    text,
+		done        boolean,
+		created_at  timestamp,
+		updated_at  timestamp
+	)`,
+	`CREATE TABLE IF NOT EXISTS notify_dlq (
+		bucket_id    uuid,
+		day          timestamp,
+		event_id     timeuuid,
+		bucket_name  text,
+		object_key   text,
+		event_name   text,
+		event_time   timestamp,
+		config_id    text,
+		target_type  text,
+		target_arn   text,
+		payload      blob,
+		attempts     int,
+		reason       text,
+		enqueued_at  timestamp,
+		PRIMARY KEY ((bucket_id, day), event_id)
+	)`,
 }
 
 var alterStatements = []string{
 	`ALTER TABLE objects ADD retain_mode text`,
 	`ALTER TABLE buckets ADD acl text`,
+	`ALTER TABLE objects ADD grants blob`,
+	`ALTER TABLE access_keys ADD user_name text`,
+	`ALTER TABLE objects ADD checksums map<text, text>`,
+	`ALTER TABLE multipart_parts ADD checksums map<text, text>`,
+	`ALTER TABLE objects ADD sse text`,
+	`ALTER TABLE multipart_uploads ADD sse text`,
+	`ALTER TABLE objects ADD ssec_key_md5 text`,
+	`ALTER TABLE objects ADD restore_status text`,
+	`ALTER TABLE buckets ADD object_lock_enabled boolean`,
+	`ALTER TABLE buckets ADD region text`,
+	`ALTER TABLE buckets ADD mfa_delete text`,
+	`ALTER TABLE objects ADD cache_control text`,
+	`ALTER TABLE objects ADD expires text`,
+	`ALTER TABLE objects ADD parts_count int`,
+	`ALTER TABLE multipart_uploads ADD user_meta map<text, text>`,
+	`ALTER TABLE multipart_uploads ADD cache_control text`,
+	`ALTER TABLE multipart_uploads ADD expires text`,
+	`ALTER TABLE multipart_uploads ADD checksum_algorithm text`,
+	`ALTER TABLE objects ADD sse_key blob`,
+	`ALTER TABLE objects ADD sse_key_id text`,
+	`ALTER TABLE multipart_uploads ADD sse_key blob`,
+	`ALTER TABLE multipart_uploads ADD sse_key_id text`,
+	`ALTER TABLE objects ADD replication_status text`,
+	`ALTER TABLE replication_queue ADD destination_endpoint text`,
+	`ALTER TABLE objects ADD part_sizes list<bigint>`,
+	`ALTER TABLE objects ADD checksum_type text`,
+	`ALTER TABLE multipart_uploads ADD checksum_type text`,
+	`ALTER TABLE objects ADD is_null boolean`,
+	`ALTER TABLE gc_queue ADD cluster text`,
+	`ALTER TABLE gc_queue ADD namespace text`,
+	`ALTER TABLE buckets ADD shard_count_target int`,
 }
 
 func isColumnAlreadyExists(err error) bool {

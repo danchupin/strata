@@ -5,6 +5,7 @@ package cassandra_test
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,8 +21,13 @@ import (
 // Cassandra instance spun up via testcontainers. The container boots once per
 // test function; each subtest gets its own fresh keyspace for isolation.
 //
-// Runs only under `go test -tags integration`.
+// Runs only under `go test -tags integration`. Skipped when STRATA_SCYLLA_TEST=1
+// so the ScyllaDB CI workflow runs the Scylla suite alone.
 func TestCassandraStoreContract(t *testing.T) {
+	if os.Getenv("STRATA_SCYLLA_TEST") == "1" {
+		t.Skip("STRATA_SCYLLA_TEST=1: ScyllaDB suite runs in TestScyllaStoreContract")
+	}
+
 	ctx := context.Background()
 
 	container, err := tccassandra.Run(ctx, "cassandra:5.0")

@@ -3,7 +3,7 @@ package lifecycle
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/danchupin/strata/internal/data"
@@ -17,7 +17,7 @@ type Worker struct {
 	Region   string
 	Interval time.Duration
 	AgeUnit  time.Duration
-	Logger   *log.Logger
+	Logger   *slog.Logger
 }
 
 func (w *Worker) Run(ctx context.Context) error {
@@ -28,9 +28,9 @@ func (w *Worker) Run(ctx context.Context) error {
 		w.AgeUnit = 24 * time.Hour
 	}
 	if w.Logger == nil {
-		w.Logger = log.Default()
+		w.Logger = slog.Default()
 	}
-	w.Logger.Printf("lifecycle: starting (interval=%s age-unit=%s)", w.Interval, w.AgeUnit)
+	w.Logger.InfoContext(ctx, "lifecycle: starting", "interval", w.Interval.String(), "age_unit", w.AgeUnit.String())
 
 	ticker := time.NewTicker(w.Interval)
 	defer ticker.Stop()
@@ -41,7 +41,7 @@ func (w *Worker) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-ticker.C:
 			if err := w.runOnce(ctx); err != nil {
-				w.Logger.Printf("lifecycle: tick failed: %v", err)
+				w.Logger.WarnContext(ctx, "lifecycle tick failed", "error", err.Error())
 			}
 		}
 	}
@@ -60,12 +60,12 @@ func (w *Worker) runOnce(ctx context.Context) error {
 			if errors.Is(err, meta.ErrNoSuchLifecycle) {
 				continue
 			}
-			w.Logger.Printf("lifecycle: bucket %s: get rules: %v", b.Name, err)
+			w.Logger.WarnContext(ctx, "lifecycle get rules", "bucket", b.Name, "error", err.Error())
 			continue
 		}
 		cfg, err := Parse(blob)
 		if err != nil {
-			w.Logger.Printf("lifecycle: bucket %s: parse: %v", b.Name, err)
+			w.Logger.WarnContext(ctx, "lifecycle parse", "bucket", b.Name, "error", err.Error())
 			continue
 		}
 		for i := range cfg.Rules {
@@ -74,7 +74,7 @@ func (w *Worker) runOnce(ctx context.Context) error {
 				continue
 			}
 			if err := w.applyRule(ctx, b, rule); err != nil {
-				w.Logger.Printf("lifecycle: bucket %s rule %q: %v", b.Name, rule.ID, err)
+				w.Logger.WarnContext(ctx, "lifecycle apply rule", "bucket", b.Name, "rule", rule.ID, "error", err.Error())
 			}
 		}
 	}
@@ -158,7 +158,8 @@ func (w *Worker) evaluateNoncurrent(ctx context.Context, b *meta.Bucket, rule *R
 func (w *Worker) expireNoncurrent(ctx context.Context, b *meta.Bucket, v *meta.Object, ruleID string) {
 	removed, err := w.Meta.DeleteObject(ctx, b.ID, v.Key, v.VersionID, true)
 	if err != nil {
-		w.Logger.Printf("lifecycle: %s/%s version %s expire: %v", b.Name, v.Key, v.VersionID, err)
+		metrics.LifecycleTickTotal.WithLabelValues("expire_noncurrent", "error").Inc()
+		w.Logger.WarnContext(ctx, "lifecycle expire noncurrent", "bucket", b.Name, "key", v.Key, "version", v.VersionID, "error", err.Error())
 		return
 	}
 	region := w.Region
@@ -173,13 +174,14 @@ func (w *Worker) expireNoncurrent(ctx context.Context, b *meta.Bucket, v *meta.O
 		}
 	}
 	metrics.LifecycleExpirations.Inc()
-	w.Logger.Printf("lifecycle: %s/%s [%s] noncurrent version %s expired", b.Name, v.Key, ruleID, v.VersionID)
+	metrics.LifecycleTickTotal.WithLabelValues("expire_noncurrent", "success").Inc()
+	w.Logger.InfoContext(ctx, "lifecycle noncurrent expired", "bucket", b.Name, "key", v.Key, "rule", ruleID, "version", v.VersionID)
 }
 
 func (w *Worker) abortStaleUploads(ctx context.Context, b *meta.Bucket, rule *Rule) {
 	uploads, err := w.Meta.ListMultipartUploads(ctx, b.ID, rule.PrefixMatch(), 1000)
 	if err != nil {
-		w.Logger.Printf("lifecycle: %s list uploads: %v", b.Name, err)
+		w.Logger.WarnContext(ctx, "lifecycle list uploads", "bucket", b.Name, "error", err.Error())
 		return
 	}
 	cutoff := time.Now().Add(-time.Duration(rule.AbortIncompleteMultipartUpload.DaysAfterInitiation) * w.AgeUnit)
@@ -193,9 +195,11 @@ func (w *Worker) abortStaleUploads(ctx context.Context, b *meta.Bucket, rule *Ru
 		}
 		manifests, err := w.Meta.AbortMultipartUpload(ctx, b.ID, u.UploadID)
 		if err != nil {
-			w.Logger.Printf("lifecycle: %s/%s abort stale upload: %v", b.Name, u.Key, err)
+			metrics.LifecycleTickTotal.WithLabelValues("abort_multipart", "error").Inc()
+			w.Logger.WarnContext(ctx, "lifecycle abort stale upload", "bucket", b.Name, "key", u.Key, "error", err.Error())
 			continue
 		}
+		metrics.LifecycleTickTotal.WithLabelValues("abort_multipart", "success").Inc()
 		for _, m := range manifests {
 			if m != nil {
 				if err := w.Meta.EnqueueChunkDeletion(ctx, region, m.Chunks); err == nil {
@@ -205,7 +209,7 @@ func (w *Worker) abortStaleUploads(ctx context.Context, b *meta.Bucket, rule *Ru
 				}
 			}
 		}
-		w.Logger.Printf("lifecycle: %s/%s [%s] aborted stale multipart %s (age %s)", b.Name, u.Key, rule.ID, u.UploadID, time.Since(u.InitiatedAt))
+		w.Logger.InfoContext(ctx, "lifecycle aborted stale multipart", "bucket", b.Name, "key", u.Key, "rule", rule.ID, "upload_id", u.UploadID, "age", time.Since(u.InitiatedAt).String())
 	}
 }
 
@@ -234,13 +238,15 @@ func (w *Worker) transition(ctx context.Context, b *meta.Bucket, o *meta.Object,
 	}
 	reader, err := w.Data.GetChunks(ctx, o.Manifest, 0, o.Size)
 	if err != nil {
-		w.Logger.Printf("lifecycle: %s/%s transition read: %v", b.Name, o.Key, err)
+		metrics.LifecycleTickTotal.WithLabelValues("transition", "error").Inc()
+		w.Logger.WarnContext(ctx, "lifecycle transition read", "bucket", b.Name, "key", o.Key, "error", err.Error())
 		return
 	}
 	newManifest, err := w.Data.PutChunks(ctx, reader, newClass)
 	reader.Close()
 	if err != nil {
-		w.Logger.Printf("lifecycle: %s/%s transition write %s: %v", b.Name, o.Key, newClass, err)
+		metrics.LifecycleTickTotal.WithLabelValues("transition", "error").Inc()
+		w.Logger.WarnContext(ctx, "lifecycle transition write", "bucket", b.Name, "key", o.Key, "class", newClass, "error", err.Error())
 		return
 	}
 	applied, err := w.Meta.SetObjectStorage(ctx, b.ID, o.Key, o.VersionID, o.StorageClass, newClass, newManifest)
@@ -249,31 +255,35 @@ func (w *Worker) transition(ctx context.Context, b *meta.Bucket, o *meta.Object,
 		region = "default"
 	}
 	if err != nil {
-		w.Logger.Printf("lifecycle: %s/%s flip manifest: %v", b.Name, o.Key, err)
+		metrics.LifecycleTickTotal.WithLabelValues("transition", "error").Inc()
+		w.Logger.WarnContext(ctx, "lifecycle flip manifest", "bucket", b.Name, "key", o.Key, "error", err.Error())
 		_ = w.Meta.EnqueueChunkDeletion(ctx, region, newManifest.Chunks)
 		return
 	}
 	if !applied {
-		w.Logger.Printf("lifecycle: %s/%s [%s] race: object modified during transition, discarding", b.Name, o.Key, ruleID)
+		metrics.LifecycleTickTotal.WithLabelValues("transition", "skipped").Inc()
+		w.Logger.InfoContext(ctx, "lifecycle race: object modified during transition, discarding", "bucket", b.Name, "key", o.Key, "rule", ruleID)
 		_ = w.Meta.EnqueueChunkDeletion(ctx, region, newManifest.Chunks)
 		return
 	}
 	if err := w.Meta.EnqueueChunkDeletion(ctx, region, o.Manifest.Chunks); err != nil {
-		w.Logger.Printf("lifecycle: %s/%s enqueue old chunks: %v", b.Name, o.Key, err)
+		w.Logger.WarnContext(ctx, "lifecycle enqueue old chunks", "bucket", b.Name, "key", o.Key, "error", err.Error())
 	} else {
 		for range o.Manifest.Chunks {
 			metrics.GCEnqueued.Inc()
 		}
 	}
 	metrics.LifecycleTransitions.WithLabelValues(newClass).Inc()
-	w.Logger.Printf("lifecycle: %s/%s [%s] %s -> %s", b.Name, o.Key, ruleID, o.StorageClass, newClass)
+	metrics.LifecycleTickTotal.WithLabelValues("transition", "success").Inc()
+	w.Logger.InfoContext(ctx, "lifecycle transitioned", "bucket", b.Name, "key", o.Key, "rule", ruleID, "from", o.StorageClass, "to", newClass)
 }
 
 func (w *Worker) expire(ctx context.Context, b *meta.Bucket, o *meta.Object, ruleID string) {
 	versioned := meta.IsVersioningActive(b.Versioning)
 	removed, err := w.Meta.DeleteObject(ctx, b.ID, o.Key, "", versioned)
 	if err != nil {
-		w.Logger.Printf("lifecycle: %s/%s expire: %v", b.Name, o.Key, err)
+		metrics.LifecycleTickTotal.WithLabelValues("expire", "error").Inc()
+		w.Logger.WarnContext(ctx, "lifecycle expire", "bucket", b.Name, "key", o.Key, "error", err.Error())
 		return
 	}
 	if !versioned && removed != nil && removed.Manifest != nil {
@@ -282,7 +292,7 @@ func (w *Worker) expire(ctx context.Context, b *meta.Bucket, o *meta.Object, rul
 			region = "default"
 		}
 		if err := w.Meta.EnqueueChunkDeletion(ctx, region, removed.Manifest.Chunks); err != nil {
-			w.Logger.Printf("lifecycle: %s/%s enqueue chunks: %v", b.Name, o.Key, err)
+			w.Logger.WarnContext(ctx, "lifecycle enqueue chunks", "bucket", b.Name, "key", o.Key, "error", err.Error())
 		} else {
 			for range removed.Manifest.Chunks {
 				metrics.GCEnqueued.Inc()
@@ -290,5 +300,6 @@ func (w *Worker) expire(ctx context.Context, b *meta.Bucket, o *meta.Object, rul
 		}
 	}
 	metrics.LifecycleExpirations.Inc()
-	w.Logger.Printf("lifecycle: %s/%s [%s] expired (versioned=%v)", b.Name, o.Key, ruleID, versioned)
+	metrics.LifecycleTickTotal.WithLabelValues("expire", "success").Inc()
+	w.Logger.InfoContext(ctx, "lifecycle expired", "bucket", b.Name, "key", o.Key, "rule", ruleID, "versioned", versioned)
 }

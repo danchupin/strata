@@ -1,0 +1,16 @@
+{
+  "Rules": [
+    {
+      "ID": "expire-logs-after-30d",
+      "Status": "Enabled",
+      "Filter": {"Prefix": "logs/"},
+      "Expiration": {"Days": 30}
+    },
+    {
+      "ID": "abort-stale-multipart-after-7d",
+      "Status": "Enabled",
+      "Filter": {"Prefix": ""},
+      "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 7}
+    }
+  ]
+}

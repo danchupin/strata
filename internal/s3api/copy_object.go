@@ -56,13 +56,41 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, dstBucket *m
 		return
 	}
 
-	metadataDirective := strings.ToUpper(r.Header.Get("x-amz-metadata-directive"))
-	if metadataDirective == "" {
-		metadataDirective = "COPY"
+	srcSSEC, srcSSECErr, srcSSECOK := parseCopySourceSSECHeaders(r)
+	if !srcSSECOK {
+		writeError(w, r, srcSSECErr)
+		return
 	}
-	taggingDirective := strings.ToUpper(r.Header.Get("x-amz-tagging-directive"))
-	if taggingDirective == "" {
-		taggingDirective = "COPY"
+	if srcObj.SSECKeyMD5 != "" {
+		if !srcSSEC.Present {
+			writeError(w, r, ErrSSECRequired)
+			return
+		}
+		if srcSSEC.KeyMD5 != srcObj.SSECKeyMD5 {
+			writeError(w, r, ErrSSECKeyMismatch)
+			return
+		}
+	}
+	if err := checkCopySourceConditional(r.Header, srcObj.ETag, srcObj.Mtime); err != nil {
+		writeError(w, r, *err)
+		return
+	}
+
+	dstSSEC, dstSSECErr, dstSSECOK := parseSSECHeaders(r)
+	if !dstSSECOK {
+		writeError(w, r, dstSSECErr)
+		return
+	}
+
+	metadataDirective, mderr := parseDirective(r.Header.Get("x-amz-metadata-directive"))
+	if mderr != nil {
+		writeError(w, r, *mderr)
+		return
+	}
+	taggingDirective, tderr := parseDirective(r.Header.Get("x-amz-tagging-directive"))
+	if tderr != nil {
+		writeError(w, r, *tderr)
+		return
 	}
 
 	sameBucket := dstBucket.ID == sb.ID
@@ -105,6 +133,9 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, dstBucket *m
 		Mtime:        time.Now().UTC(),
 		Manifest:     m,
 	}
+	if dstSSEC.Present {
+		obj.SSECKeyMD5 = dstSSEC.KeyMD5
+	}
 
 	if metadataDirective == "REPLACE" {
 		obj.ContentType = r.Header.Get("Content-Type")
@@ -136,6 +167,9 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, dstBucket *m
 		obj.LegalHold = true
 	}
 
+	if dstBucket.Versioning == meta.VersioningSuspended {
+		obj.IsNull = true
+	}
 	if err := s.Meta.PutObject(r.Context(), obj, meta.IsVersioningActive(dstBucket.Versioning)); err != nil {
 		_ = s.Data.Delete(r.Context(), m)
 		mapMetaErr(w, r, err)
@@ -143,16 +177,53 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, dstBucket *m
 	}
 
 	if meta.IsVersioningActive(dstBucket.Versioning) && obj.VersionID != "" {
-		w.Header().Set("x-amz-version-id", obj.VersionID)
+		w.Header().Set("x-amz-version-id", wireVersionID(obj))
 	}
 	if srcObj.VersionID != "" {
-		w.Header().Set("x-amz-copy-source-version-id", srcObj.VersionID)
+		w.Header().Set("x-amz-copy-source-version-id", wireVersionID(srcObj))
 	}
 
 	writeXML(w, http.StatusOK, copyObjectResult{
 		ETag:         `"` + m.ETag + `"`,
 		LastModified: obj.Mtime.UTC().Format(time.RFC3339),
 	})
+}
+
+func parseDirective(raw string) (string, *APIError) {
+	v := strings.ToUpper(strings.TrimSpace(raw))
+	switch v {
+	case "":
+		return "COPY", nil
+	case "COPY", "REPLACE":
+		return v, nil
+	default:
+		return "", &ErrInvalidArgument
+	}
+}
+
+func checkCopySourceConditional(h http.Header, etag string, mtime time.Time) *APIError {
+	quoted := `"` + strings.Trim(etag, `"`) + `"`
+	if v := h.Get("x-amz-copy-source-if-match"); v != "" {
+		if !etagMatches(v, quoted) {
+			return &ErrPreconditionFailed
+		}
+	}
+	if v := h.Get("x-amz-copy-source-if-none-match"); v != "" {
+		if etagMatches(v, quoted) {
+			return &ErrPreconditionFailed
+		}
+	}
+	if v := h.Get("x-amz-copy-source-if-unmodified-since"); v != "" {
+		if t, err := http.ParseTime(v); err == nil && mtime.After(t.Add(time.Second)) {
+			return &ErrPreconditionFailed
+		}
+	}
+	if v := h.Get("x-amz-copy-source-if-modified-since"); v != "" {
+		if t, err := http.ParseTime(v); err == nil && !mtime.After(t) {
+			return &ErrPreconditionFailed
+		}
+	}
+	return nil
 }
 
 func extractUserMeta(h http.Header) map[string]string {

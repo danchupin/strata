@@ -16,7 +16,12 @@ type DenyHandler func(w http.ResponseWriter, r *http.Request, err error)
 func (m *Middleware) Wrap(next http.Handler, deny DenyHandler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if m.Mode == ModeOff {
-			ctx := WithAuth(r.Context(), &AuthInfo{Anonymous: true, Owner: "anonymous"})
+			ctx := WithAuth(r.Context(), AnonymousIdentity())
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+		if m.Mode == ModeOptional && r.Header.Get("Authorization") == "" && !hasPresignedParams(r) {
+			ctx := WithAuth(r.Context(), AnonymousIdentity())
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -72,9 +77,16 @@ func (m *Middleware) validateHeader(r *http.Request) (*AuthInfo, error) {
 	if !constantTimeEqual(expected, parsed.Signature) {
 		return nil, ErrSignatureInvalid
 	}
+	if cred.SessionToken != "" {
+		if r.Header.Get("X-Amz-Security-Token") != cred.SessionToken {
+			return nil, ErrInvalidToken
+		}
+	}
 
 	if bodyHash == streamingBody {
-		r.Body = newStreamingReader(r.Body)
+		signingKey := deriveSigningKey(cred.Secret, parsed.Date, parsed.Region, parsed.Service)
+		scope := credentialScope(parsed.Date, parsed.Region, parsed.Service)
+		r.Body = newStreamingReader(r.Body, signingKey, reqDate, scope, parsed.Signature)
 		if dec := r.Header.Get("X-Amz-Decoded-Content-Length"); dec != "" {
 			if n, err := strconv.ParseInt(dec, 10, 64); err == nil {
 				r.ContentLength = n
@@ -108,6 +120,15 @@ func (m *Middleware) validatePresigned(r *http.Request) (*AuthInfo, error) {
 	expected := computeSignature(cred.Secret, parsed, reqTime.UTC().Format(sigTimeFormat), canonical)
 	if !constantTimeEqual(expected, parsed.Signature) {
 		return nil, ErrSignatureInvalid
+	}
+	if cred.SessionToken != "" {
+		token := r.Header.Get("X-Amz-Security-Token")
+		if token == "" {
+			token = r.URL.Query().Get("X-Amz-Security-Token")
+		}
+		if token != cred.SessionToken {
+			return nil, ErrInvalidToken
+		}
 	}
 	return &AuthInfo{
 		AccessKey: cred.AccessKey,

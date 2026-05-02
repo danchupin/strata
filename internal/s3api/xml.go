@@ -20,16 +20,31 @@ type bucketEntry struct {
 	CreationDate string `xml:"CreationDate"`
 }
 
+type listBucketResultV1 struct {
+	XMLName        xml.Name         `xml:"ListBucketResult"`
+	Name           string           `xml:"Name"`
+	Prefix         string           `xml:"Prefix"`
+	Marker         string           `xml:"Marker"`
+	NextMarker     string           `xml:"NextMarker,omitempty"`
+	MaxKeys        int              `xml:"MaxKeys"`
+	Delimiter      string           `xml:"Delimiter,omitempty"`
+	EncodingType   string           `xml:"EncodingType,omitempty"`
+	IsTruncated    bool             `xml:"IsTruncated"`
+	Contents       []objectEntry    `xml:"Contents"`
+	CommonPrefixes []commonPrefixEl `xml:"CommonPrefixes"`
+}
+
 type listBucketResultV2 struct {
 	XMLName               xml.Name         `xml:"ListBucketResult"`
 	Name                  string           `xml:"Name"`
 	Prefix                string           `xml:"Prefix"`
-	Delimiter             string           `xml:"Delimiter,omitempty"`
 	KeyCount              int              `xml:"KeyCount"`
 	MaxKeys               int              `xml:"MaxKeys"`
+	Delimiter             string           `xml:"Delimiter,omitempty"`
+	EncodingType          string           `xml:"EncodingType,omitempty"`
 	IsTruncated           bool             `xml:"IsTruncated"`
+	ContinuationToken     string           `xml:"ContinuationToken"`
 	NextContinuationToken string           `xml:"NextContinuationToken,omitempty"`
-	ContinuationToken     string           `xml:"ContinuationToken,omitempty"`
 	StartAfter            string           `xml:"StartAfter,omitempty"`
 	Contents              []objectEntry    `xml:"Contents"`
 	CommonPrefixes        []commonPrefixEl `xml:"CommonPrefixes"`
@@ -41,6 +56,7 @@ type objectEntry struct {
 	ETag         string `xml:"ETag"`
 	Size         int64  `xml:"Size"`
 	StorageClass string `xml:"StorageClass"`
+	Owner        *owner `xml:"Owner,omitempty"`
 }
 
 type commonPrefixEl struct {
@@ -48,10 +64,12 @@ type commonPrefixEl struct {
 }
 
 type initiateMultipartResult struct {
-	XMLName  xml.Name `xml:"InitiateMultipartUploadResult"`
-	Bucket   string   `xml:"Bucket"`
-	Key      string   `xml:"Key"`
-	UploadID string   `xml:"UploadId"`
+	XMLName           xml.Name `xml:"InitiateMultipartUploadResult"`
+	Bucket            string   `xml:"Bucket"`
+	Key               string   `xml:"Key"`
+	UploadID          string   `xml:"UploadId"`
+	ChecksumAlgorithm string   `xml:"ChecksumAlgorithm,omitempty"`
+	ChecksumType      string   `xml:"ChecksumType,omitempty"`
 }
 
 type completeMultipartBody struct {
@@ -65,11 +83,17 @@ type completeBodyPart struct {
 }
 
 type completeMultipartResult struct {
-	XMLName  xml.Name `xml:"CompleteMultipartUploadResult"`
-	Location string   `xml:"Location"`
-	Bucket   string   `xml:"Bucket"`
-	Key      string   `xml:"Key"`
-	ETag     string   `xml:"ETag"`
+	XMLName           xml.Name `xml:"CompleteMultipartUploadResult"`
+	Location          string   `xml:"Location"`
+	Bucket            string   `xml:"Bucket"`
+	Key               string   `xml:"Key"`
+	ETag              string   `xml:"ETag"`
+	ChecksumCRC32     string   `xml:"ChecksumCRC32,omitempty"`
+	ChecksumCRC32C    string   `xml:"ChecksumCRC32C,omitempty"`
+	ChecksumSHA1      string   `xml:"ChecksumSHA1,omitempty"`
+	ChecksumSHA256    string   `xml:"ChecksumSHA256,omitempty"`
+	ChecksumCRC64NVME string   `xml:"ChecksumCRC64NVME,omitempty"`
+	ChecksumType      string   `xml:"ChecksumType,omitempty"`
 }
 
 type listPartsResult struct {
@@ -109,8 +133,9 @@ type uploadEntry struct {
 }
 
 type versioningConfiguration struct {
-	XMLName xml.Name `xml:"VersioningConfiguration"`
-	Status  string   `xml:"Status,omitempty"`
+	XMLName   xml.Name `xml:"VersioningConfiguration"`
+	Status    string   `xml:"Status,omitempty"`
+	MfaDelete string   `xml:"MfaDelete,omitempty"`
 }
 
 type listVersionsResult struct {

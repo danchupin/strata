@@ -19,11 +19,17 @@ var (
 	ErrInvalidAccessKeyId    = APIError{Code: "InvalidAccessKeyId", Message: "The access key Id you provided does not exist", Status: http.StatusForbidden}
 	ErrRequestTimeTooSkewed  = APIError{Code: "RequestTimeTooSkewed", Message: "Request time skewed too much from server time", Status: http.StatusForbidden}
 	ErrMissingAuth           = APIError{Code: "AccessDenied", Message: "Authorization is required", Status: http.StatusForbidden}
+	ErrExpiredToken          = APIError{Code: "ExpiredToken", Message: "The provided token has expired", Status: http.StatusForbidden}
+	ErrInvalidToken          = APIError{Code: "InvalidToken", Message: "The provided token is malformed or otherwise invalid", Status: http.StatusForbidden}
 	ErrNoSuchBucket          = APIError{Code: "NoSuchBucket", Message: "The specified bucket does not exist", Status: http.StatusNotFound}
 	ErrNoSuchKey           = APIError{Code: "NoSuchKey", Message: "The specified key does not exist", Status: http.StatusNotFound}
 	ErrNoSuchUpload        = APIError{Code: "NoSuchUpload", Message: "The specified multipart upload does not exist", Status: http.StatusNotFound}
 	ErrBucketNotEmpty      = APIError{Code: "BucketNotEmpty", Message: "The bucket you tried to delete is not empty", Status: http.StatusConflict}
 	ErrBucketExists        = APIError{Code: "BucketAlreadyOwnedByYou", Message: "Bucket already exists and is owned by you", Status: http.StatusConflict}
+	ErrBucketTaken         = APIError{Code: "BucketAlreadyExists", Message: "The requested bucket name is not available", Status: http.StatusConflict}
+	ErrInvalidURI          = APIError{Code: "InvalidURI", Message: "Couldn't parse the specified URI.", Status: http.StatusBadRequest}
+	ErrEntityTooSmall      = APIError{Code: "EntityTooSmall", Message: "Your proposed upload is smaller than the minimum allowed size", Status: http.StatusBadRequest}
+	ErrInvalidRange        = APIError{Code: "InvalidRange", Message: "The requested range is not satisfiable", Status: http.StatusRequestedRangeNotSatisfiable}
 	ErrInvalidBucketName   = APIError{Code: "InvalidBucketName", Message: "The specified bucket name is invalid", Status: http.StatusBadRequest}
 	ErrInvalidPart         = APIError{Code: "InvalidPart", Message: "One or more of the specified parts could not be found", Status: http.StatusBadRequest}
 	ErrInvalidPartOrder    = APIError{Code: "InvalidPartOrder", Message: "The list of parts was not in ascending order", Status: http.StatusBadRequest}
@@ -34,8 +40,29 @@ var (
 	ErrNoSuchBucketPolicy           = APIError{Code: "NoSuchBucketPolicy", Message: "The bucket policy does not exist", Status: http.StatusNotFound}
 	ErrNoSuchPublicAccessBlock      = APIError{Code: "NoSuchPublicAccessBlockConfiguration", Message: "The public access block configuration was not found", Status: http.StatusNotFound}
 	ErrNoSuchOwnershipControls      = APIError{Code: "OwnershipControlsNotFoundError", Message: "The bucket ownership controls were not found", Status: http.StatusNotFound}
+	ErrNoSuchEncryption             = APIError{Code: "ServerSideEncryptionConfigurationNotFoundError", Message: "The server side encryption configuration was not found", Status: http.StatusNotFound}
+	ErrNoSuchObjectLockConfig       = APIError{Code: "ObjectLockConfigurationNotFoundError", Message: "Object Lock configuration does not exist for this bucket", Status: http.StatusNotFound}
+	ErrNoSuchNotificationConfig     = APIError{Code: "NoSuchConfiguration", Message: "The notification configuration does not exist", Status: http.StatusNotFound}
+	ErrNoSuchWebsiteConfig          = APIError{Code: "NoSuchWebsiteConfiguration", Message: "The specified bucket does not have a website configuration", Status: http.StatusNotFound}
+	ErrNoSuchReplicationConfig      = APIError{Code: "ReplicationConfigurationNotFoundError", Message: "The replication configuration was not found", Status: http.StatusNotFound}
+	ErrNoSuchTagSet                 = APIError{Code: "NoSuchTagSet", Message: "The TagSet does not exist", Status: http.StatusNotFound}
+	ErrNoSuchInventoryConfig        = APIError{Code: "NoSuchConfiguration", Message: "The inventory configuration with that id does not exist", Status: http.StatusNotFound}
+	ErrAccessPointAlreadyOwnedByYou = APIError{Code: "AccessPointAlreadyOwnedByYou", Message: "An access point with that name already exists", Status: http.StatusConflict}
+	ErrNoSuchAccessPoint            = APIError{Code: "NoSuchAccessPoint", Message: "The specified access point does not exist", Status: http.StatusNotFound}
+	ErrInvalidTag                   = APIError{Code: "InvalidTag", Message: "The TagSet contains an invalid tag", Status: http.StatusBadRequest}
+	ErrObjectLockNotEnabled         = APIError{Code: "InvalidRequest", Message: "Bucket is missing Object Lock Configuration", Status: http.StatusBadRequest}
+	ErrInvalidEncryptionAlgorithm   = APIError{Code: "InvalidArgument", Message: "The encryption algorithm specified is not supported", Status: http.StatusBadRequest}
+	ErrKMSNotImplemented            = APIError{Code: "NotImplemented", Message: "aws:kms:dsse server-side encryption is not supported", Status: http.StatusNotImplemented}
+	ErrKMSKeyIDMissing              = APIError{Code: "InvalidArgument", Message: "aws:kms encryption requires x-amz-server-side-encryption-aws-kms-key-id", Status: http.StatusBadRequest}
+	ErrKMSAccessDenied              = APIError{Code: "AccessDenied", Message: "KMS key id mismatch on unwrap", Status: http.StatusForbidden}
+	ErrInvalidRequest               = APIError{Code: "InvalidRequest", Message: "The request is invalid", Status: http.StatusBadRequest}
+	ErrInvalidDigest                = APIError{Code: "InvalidDigest", Message: "The provided digest does not match the supplied data", Status: http.StatusBadRequest}
+	ErrSSECRequired                 = APIError{Code: "InvalidRequest", Message: "The object was stored using server-side encryption with a customer-provided key; matching SSE-C headers are required", Status: http.StatusBadRequest}
+	ErrSSECKeyMismatch              = APIError{Code: "AccessDenied", Message: "The provided customer key does not match the key the object was encrypted with", Status: http.StatusBadRequest}
+	ErrMFARequired                  = APIError{Code: "AccessDenied", Message: "Mfa Authentication must be used for this request", Status: http.StatusForbidden}
 	ErrCORSNotEnabled               = APIError{Code: "CORSResponse", Message: "CORS is not enabled for this bucket", Status: http.StatusForbidden}
 	ErrMalformedXML        = APIError{Code: "MalformedXML", Message: "The XML you provided was not well-formed", Status: http.StatusBadRequest}
+	ErrMalformedACLError   = APIError{Code: "MalformedACLError", Message: "The XML you provided was not well-formed or did not validate against our published schema", Status: http.StatusBadRequest}
 	ErrInvalidArgument     = APIError{Code: "InvalidArgument", Message: "Invalid argument", Status: http.StatusBadRequest}
 	ErrNotImplemented      = APIError{Code: "NotImplemented", Message: "A header you provided implies functionality that is not implemented", Status: http.StatusNotImplemented}
 	ErrInternal            = APIError{Code: "InternalError", Message: "We encountered an internal error", Status: http.StatusInternalServerError}
@@ -74,6 +101,10 @@ func WriteAuthDenied(w http.ResponseWriter, r *http.Request, err error) {
 			apiErr = ErrInvalidAccessKeyId
 		case "missing Authorization header":
 			apiErr = ErrMissingAuth
+		case "expired token":
+			apiErr = ErrExpiredToken
+		case "invalid security token":
+			apiErr = ErrInvalidToken
 		default:
 			apiErr = ErrAccessDenied
 		}

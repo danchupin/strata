@@ -2,13 +2,19 @@ package gc
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
 	"github.com/danchupin/strata/internal/metrics"
 )
+
+// Metrics is the narrow observer the worker uses to publish queue depth.
+// Cmd-layer plugs metrics.GCObserver{}.
+type Metrics interface {
+	SetQueueDepth(region string, depth int)
+}
 
 type Worker struct {
 	Meta     meta.Store
@@ -17,7 +23,8 @@ type Worker struct {
 	Interval time.Duration
 	Grace    time.Duration
 	Batch    int
-	Logger   *log.Logger
+	Logger   *slog.Logger
+	Metrics  Metrics
 }
 
 func (w *Worker) Run(ctx context.Context) error {
@@ -31,9 +38,9 @@ func (w *Worker) Run(ctx context.Context) error {
 		w.Batch = 500
 	}
 	if w.Logger == nil {
-		w.Logger = log.Default()
+		w.Logger = slog.Default()
 	}
-	w.Logger.Printf("gc: starting (region=%s interval=%s grace=%s)", w.Region, w.Interval, w.Grace)
+	w.Logger.InfoContext(ctx, "gc: starting", "region", w.Region, "interval", w.Interval.String(), "grace", w.Grace.String())
 
 	ticker := time.NewTicker(w.Interval)
 	defer ticker.Stop()
@@ -48,31 +55,58 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
+// RunOnce performs a single drain pass. Exposed for tests + the admin
+// /admin/gc/drain endpoint so an operator can trigger out-of-band cleanup.
+// Returns the count of chunks successfully ack'd this pass.
+func (w *Worker) RunOnce(ctx context.Context) int {
+	if w.Grace < 0 {
+		w.Grace = 0
+	}
+	if w.Batch == 0 {
+		w.Batch = 500
+	}
+	if w.Logger == nil {
+		w.Logger = slog.Default()
+	}
+	return w.drainCount(ctx)
+}
+
 func (w *Worker) drain(ctx context.Context) {
+	w.drainCount(ctx)
+}
+
+func (w *Worker) drainCount(ctx context.Context) int {
 	before := time.Now().Add(-w.Grace)
+	first := true
+	processed := 0
 	for {
 		entries, err := w.Meta.ListGCEntries(ctx, w.Region, before, w.Batch)
 		if err != nil {
-			w.Logger.Printf("gc: list: %v", err)
-			return
+			w.Logger.WarnContext(ctx, "gc list", "error", err.Error())
+			return processed
 		}
+		if first && w.Metrics != nil {
+			w.Metrics.SetQueueDepth(w.Region, len(entries))
+		}
+		first = false
 		if len(entries) == 0 {
-			return
+			return processed
 		}
 		for _, e := range entries {
 			manifest := &data.Manifest{Chunks: []data.ChunkRef{e.Chunk}}
 			if err := w.Data.Delete(ctx, manifest); err != nil {
-				w.Logger.Printf("gc: delete %s/%s: %v", e.Chunk.Pool, e.Chunk.OID, err)
+				w.Logger.WarnContext(ctx, "gc delete", "pool", e.Chunk.Pool, "oid", e.Chunk.OID, "error", err.Error())
 				continue
 			}
 			if err := w.Meta.AckGCEntry(ctx, w.Region, e); err != nil {
-				w.Logger.Printf("gc: ack %s/%s: %v", e.Chunk.Pool, e.Chunk.OID, err)
+				w.Logger.WarnContext(ctx, "gc ack", "pool", e.Chunk.Pool, "oid", e.Chunk.OID, "error", err.Error())
 				continue
 			}
 			metrics.GCProcessed.Inc()
+			processed++
 		}
 		if len(entries) < w.Batch {
-			return
+			return processed
 		}
 	}
 }

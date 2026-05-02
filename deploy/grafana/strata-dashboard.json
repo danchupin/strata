@@ -1,0 +1,387 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "HTTP",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "HTTP latency (p50/p95/p99)",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 1},
+      "fieldConfig": {
+        "defaults": {"unit": "s"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, method, path) (rate(strata_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50 {{method}} {{path}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, method, path) (rate(strata_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95 {{method}} {{path}}",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, method, path) (rate(strata_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99 {{method}} {{path}}",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "HTTP request rate",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 1},
+      "fieldConfig": {
+        "defaults": {"unit": "reqps"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (method, code) (rate(strata_http_requests_total[5m]))",
+          "legendFormat": "{{method}} {{code}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "Cassandra",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 9},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Cassandra query latency p99 by table",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 10},
+      "fieldConfig": {
+        "defaults": {"unit": "s"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, table) (rate(strata_cassandra_query_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99 {{table}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Cassandra query rate by table+op",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 10},
+      "fieldConfig": {
+        "defaults": {"unit": "ops"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (table, op) (rate(strata_cassandra_query_duration_seconds_count[5m]))",
+          "legendFormat": "{{table}} {{op}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "RADOS",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 18},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "RADOS op latency p99 by pool",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 19},
+      "fieldConfig": {
+        "defaults": {"unit": "s"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, pool, op) (rate(strata_rados_op_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99 {{pool}} {{op}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "RADOS op rate",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 19},
+      "fieldConfig": {
+        "defaults": {"unit": "ops"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (pool, op) (rate(strata_rados_op_duration_seconds_count[5m]))",
+          "legendFormat": "{{pool}} {{op}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "GC + Lifecycle",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 27},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "GC queue depth by region",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 28},
+      "fieldConfig": {
+        "defaults": {"unit": "short"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "strata_gc_queue_depth",
+          "legendFormat": "{{region}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Multipart active by bucket",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 28},
+      "fieldConfig": {
+        "defaults": {"unit": "short"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "strata_multipart_active",
+          "legendFormat": "{{bucket}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "Lifecycle tick rate (action/status)",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 28},
+      "fieldConfig": {
+        "defaults": {"unit": "ops"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (action, status) (rate(strata_lifecycle_tick_total[5m]))",
+          "legendFormat": "{{action}}/{{status}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "type": "row",
+      "title": "Bucket capacity",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 36},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 41,
+      "type": "timeseries",
+      "title": "Bucket bytes by storage class",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 37},
+      "fieldConfig": {
+        "defaults": {"unit": "bytes"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (bucket, storage_class) (strata_bucket_bytes)",
+          "legendFormat": "{{bucket}} {{storage_class}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 50,
+      "type": "row",
+      "title": "Replication",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 45},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 51,
+      "type": "timeseries",
+      "title": "Replication lag p95 by rule",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 46},
+      "fieldConfig": {
+        "defaults": {"unit": "s"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, rule_id) (rate(strata_replication_lag_seconds_bucket[5m])))",
+          "legendFormat": "p95 {{rule_id}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 52,
+      "type": "timeseries",
+      "title": "Replication queue depth + outcomes",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 46},
+      "fieldConfig": {
+        "defaults": {"unit": "short"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "strata_replication_queue_depth",
+          "legendFormat": "depth {{rule_id}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (rule_id) (rate(strata_replication_completed_total[5m]))",
+          "legendFormat": "completed/s {{rule_id}}",
+          "refId": "B"
+        },
+        {
+          "expr": "sum by (rule_id) (rate(strata_replication_failed_total[5m]))",
+          "legendFormat": "failed/s {{rule_id}}",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 60,
+      "type": "row",
+      "title": "Notifications",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 54},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 61,
+      "type": "timeseries",
+      "title": "Notify delivery rate by sink+status",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 55},
+      "fieldConfig": {
+        "defaults": {"unit": "ops"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (sink, status) (rate(strata_notify_delivery_total[5m]))",
+          "legendFormat": "{{sink}}/{{status}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["strata", "s3"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "Strata Overview",
+  "uid": "strata-overview",
+  "version": 1,
+  "weekStart": ""
+}

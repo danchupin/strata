@@ -75,6 +75,7 @@ A successful `make smoke` validates bucket CRUD, object PUT/GET/HEAD/DELETE (inc
 | `STRATA_RADOS_POOL` | `strata.rgw.buckets.data` | |
 | `STRATA_RADOS_NAMESPACE` | `` | optional per-tenant namespace |
 | `STRATA_RADOS_CLASSES` | `` | class routing map: `CLASS=pool[@cluster[/ns]],...`. If empty, STANDARD points at `STRATA_RADOS_POOL`. |
+| `STRATA_RADOS_CLUSTERS` | `` | multi-cluster RADOS map: `<id>:<conf>[:<keyring>],...`. Referenced by `@cluster` in `STRATA_RADOS_CLASSES`. Empty falls back to the legacy single-cluster fields under id `default`. |
 | `STRATA_AUTH_MODE` | `off` | `off` accepts anything, `required` enforces SigV4 |
 | `STRATA_STATIC_CREDENTIALS` | `` | comma-separated `accesskey:secret[:owner]` entries for dev credentials |
 | `STRATA_LIFECYCLE_INTERVAL` | `60s` | `strata-lifecycle` tick interval (Go duration) |
@@ -110,4 +111,21 @@ deploy/
       bootstrap.sh                  MON + OSD (memstore) + MGR bootstrap
 scripts/
   smoke.sh            curl-driven sanity pass over bucket/object/list/delete
+examples/             copy-paste aws-cli / boto3 / mc / s3cmd workflows
+                      (see examples/README.md). examples/smoke.sh boots a
+                      fresh in-memory gateway and runs every example.
 ```
+
+## Examples
+
+`examples/` ships runnable scripts covering bucket setup, multipart upload,
+presigned URLs, lifecycle, replication, SSE-S3, and IAM access-key
+rotation for `aws-cli`, `boto3`, `mc`, and `s3cmd`. Run them all in one
+shot against a fresh in-memory gateway:
+
+```bash
+bash examples/smoke.sh
+```
+
+Pick one to copy-paste from, e.g. [`examples/aws-cli/06-sse-s3.sh`](examples/aws-cli/06-sse-s3.sh)
+or [`examples/boto3/07-rotate-key.py`](examples/boto3/07-rotate-key.py).

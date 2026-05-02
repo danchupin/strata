@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +54,17 @@ func (s *Store) Close() error {
 // (leader election, admin tooling) that need direct CQL access.
 func (s *Store) Session() *gocql.Session { return s.s }
 
+// Probe runs a lightweight `SELECT now() FROM system.local` to confirm the
+// gocql session is still attached to a live coordinator. Used by the gateway
+// /readyz endpoint; honours ctx cancellation.
+func (s *Store) Probe(ctx context.Context) error {
+	if s == nil || s.s == nil || s.s.Closed() {
+		return errors.New("cassandra session closed")
+	}
+	var t time.Time
+	return s.s.Query("SELECT now() FROM system.local").WithContext(ctx).Scan(&t)
+}
+
 func shardOf(key string, n int) int {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(key))
@@ -74,9 +86,9 @@ func (s *Store) CreateBucket(ctx context.Context, name, owner, defaultClass stri
 	}
 	existing := make(map[string]interface{})
 	applied, err := s.s.Query(
-		`INSERT INTO buckets (name, id, owner_id, created_at, versioning, default_class, shard_count)
-		 VALUES (?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS`,
-		name, gocqlUUID(id), owner, b.CreatedAt, meta.VersioningDisabled, defaultClass, s.defaultShard,
+		`INSERT INTO buckets (name, id, owner_id, created_at, versioning, default_class, shard_count, region)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS`,
+		name, gocqlUUID(id), owner, b.CreatedAt, meta.VersioningDisabled, defaultClass, s.defaultShard, "",
 	).WithContext(ctx).SerialConsistency(gocql.LocalSerial).MapScanCAS(existing)
 	if err != nil {
 		return nil, err
@@ -89,16 +101,20 @@ func (s *Store) CreateBucket(ctx context.Context, name, owner, defaultClass stri
 
 func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error) {
 	var (
-		idG              gocql.UUID
-		owner, class     string
-		versioning, acl  string
-		createdAt        time.Time
-		shardCount       int
+		idG               gocql.UUID
+		owner, class      string
+		versioning, acl   string
+		region            string
+		mfaDelete         string
+		createdAt         time.Time
+		shardCount        int
+		shardCountTarget  int
+		objectLockEnabled bool
 	)
 	err := s.s.Query(
-		`SELECT id, owner_id, created_at, default_class, versioning, shard_count, acl FROM buckets WHERE name=?`,
+		`SELECT id, owner_id, created_at, default_class, versioning, shard_count, shard_count_target, acl, object_lock_enabled, region, mfa_delete FROM buckets WHERE name=?`,
 		name,
-	).WithContext(ctx).Scan(&idG, &owner, &createdAt, &class, &versioning, &shardCount, &acl)
+	).WithContext(ctx).Scan(&idG, &owner, &createdAt, &class, &versioning, &shardCount, &shardCountTarget, &acl, &objectLockEnabled, &region, &mfaDelete)
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrBucketNotFound
 	}
@@ -109,13 +125,18 @@ func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error
 		versioning = meta.VersioningDisabled
 	}
 	return &meta.Bucket{
-		Name:         name,
-		ID:           uuidFromGocql(idG),
-		Owner:        owner,
-		CreatedAt:    createdAt,
-		DefaultClass: class,
-		Versioning:   versioning,
-		ACL:          acl,
+		Name:              name,
+		ID:                uuidFromGocql(idG),
+		Owner:             owner,
+		CreatedAt:         createdAt,
+		DefaultClass:      class,
+		Versioning:        versioning,
+		ACL:               acl,
+		ObjectLockEnabled: objectLockEnabled,
+		Region:            region,
+		MfaDelete:         mfaDelete,
+		ShardCount:        shardCount,
+		TargetShardCount:  shardCountTarget,
 	}, nil
 }
 
@@ -136,6 +157,63 @@ func (s *Store) SetBucketVersioning(ctx context.Context, name, state string) err
 		return meta.ErrBucketNotFound
 	}
 	return nil
+}
+
+func (s *Store) SetBucketGrants(ctx context.Context, bucketID uuid.UUID, grants []meta.Grant) error {
+	blob, err := encodeGrants(grants)
+	if err != nil {
+		return err
+	}
+	return s.setBucketBlob(ctx, "bucket_acl_grants", "grants", bucketID, blob)
+}
+
+func (s *Store) GetBucketGrants(ctx context.Context, bucketID uuid.UUID) ([]meta.Grant, error) {
+	blob, err := s.getBucketBlob(ctx, "bucket_acl_grants", "grants", bucketID, meta.ErrNoSuchGrants)
+	if err != nil {
+		return nil, err
+	}
+	return decodeGrants(blob)
+}
+
+func (s *Store) DeleteBucketGrants(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(ctx, "bucket_acl_grants", bucketID)
+}
+
+func (s *Store) SetObjectGrants(ctx context.Context, bucketID uuid.UUID, key, versionID string, grants []meta.Grant) error {
+	v, shard, err := s.resolveVersionID(ctx, bucketID, key, versionID)
+	if err != nil {
+		return err
+	}
+	blob, err := encodeGrants(grants)
+	if err != nil {
+		return err
+	}
+	return s.s.Query(
+		`UPDATE objects SET grants=? WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
+		blob, gocqlUUID(bucketID), shard, key, v,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) GetObjectGrants(ctx context.Context, bucketID uuid.UUID, key, versionID string) ([]meta.Grant, error) {
+	v, shard, err := s.resolveVersionID(ctx, bucketID, key, versionID)
+	if err != nil {
+		return nil, err
+	}
+	var blob []byte
+	err = s.s.Query(
+		`SELECT grants FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
+		gocqlUUID(bucketID), shard, key, v,
+	).WithContext(ctx).Scan(&blob)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return nil, meta.ErrObjectNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(blob) == 0 {
+		return nil, meta.ErrNoSuchGrants
+	}
+	return decodeGrants(blob)
 }
 
 func (s *Store) SetBucketACL(ctx context.Context, name, canned string) error {
@@ -185,17 +263,18 @@ func (s *Store) bucketIsEmpty(ctx context.Context, bucketID uuid.UUID, shardCoun
 }
 
 func (s *Store) ListBuckets(ctx context.Context, owner string) ([]*meta.Bucket, error) {
-	iter := s.s.Query(`SELECT name, id, owner_id, created_at, default_class, versioning, acl FROM buckets`).
+	iter := s.s.Query(`SELECT name, id, owner_id, created_at, default_class, versioning, shard_count, shard_count_target, acl, region, mfa_delete FROM buckets`).
 		WithContext(ctx).Iter()
 	defer iter.Close()
 
 	var (
-		out                                   []*meta.Bucket
-		name, ownerID, class, versioning, acl string
-		idG                                   gocql.UUID
-		createdAt                             time.Time
+		out                                                      []*meta.Bucket
+		name, ownerID, class, versioning, acl, region, mfaDelete string
+		idG                                                      gocql.UUID
+		createdAt                                                time.Time
+		shardCount, shardCountTarget                             int
 	)
-	for iter.Scan(&name, &idG, &ownerID, &createdAt, &class, &versioning, &acl) {
+	for iter.Scan(&name, &idG, &ownerID, &createdAt, &class, &versioning, &shardCount, &shardCountTarget, &acl, &region, &mfaDelete) {
 		if owner != "" && ownerID != owner {
 			continue
 		}
@@ -203,13 +282,17 @@ func (s *Store) ListBuckets(ctx context.Context, owner string) ([]*meta.Bucket, 
 			versioning = meta.VersioningDisabled
 		}
 		out = append(out, &meta.Bucket{
-			Name:         name,
-			ID:           uuidFromGocql(idG),
-			Owner:        ownerID,
-			CreatedAt:    createdAt,
-			DefaultClass: class,
-			Versioning:   versioning,
-			ACL:          acl,
+			Name:             name,
+			ID:               uuidFromGocql(idG),
+			Owner:            ownerID,
+			CreatedAt:        createdAt,
+			DefaultClass:     class,
+			Versioning:       versioning,
+			ACL:              acl,
+			Region:           region,
+			MfaDelete:        mfaDelete,
+			ShardCount:       shardCount,
+			TargetShardCount: shardCountTarget,
 		})
 	}
 	if err := iter.Close(); err != nil {
@@ -225,6 +308,12 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 	}
 	shard := shardOf(o.Key, s.defaultShard)
 	var versionID gocql.UUID
+	if !versioned {
+		o.VersionID = meta.NullVersionID
+		o.IsNull = true
+	} else if o.IsNull {
+		o.VersionID = meta.NullVersionID
+	}
 	if o.VersionID != "" {
 		parsed, err := gocql.ParseUUID(o.VersionID)
 		if err != nil {
@@ -242,21 +331,48 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 		).WithContext(ctx).Exec(); err != nil {
 			return err
 		}
+	} else if o.IsNull {
+		// Suspended-mode null PUT: atomically drop any prior null-versioned
+		// row (LWT IF EXISTS — applied=false is fine, no prior null row).
+		nullUUID, _ := gocql.ParseUUID(meta.NullVersionID)
+		if err := s.s.Query(
+			`DELETE FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=? IF EXISTS`,
+			gocqlUUID(o.BucketID), shard, o.Key, nullUUID,
+		).WithContext(ctx).Exec(); err != nil {
+			return err
+		}
 	}
 	var retainUntil *time.Time
 	if !o.RetainUntil.IsZero() {
 		t := o.RetainUntil
 		retainUntil = &t
 	}
+	var partsCount interface{}
+	if o.PartsCount > 0 {
+		partsCount = o.PartsCount
+	}
+	var partSizes interface{}
+	if len(o.PartSizes) > 0 {
+		partSizes = o.PartSizes
+	}
 	return s.s.Query(
 		`INSERT INTO objects (bucket_id, shard, key, version_id, is_latest, is_delete_marker,
 		 size, etag, content_type, storage_class, mtime, manifest, user_meta, tags,
-		 retain_until, retain_mode, legal_hold)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
+		 cache_control, expires, parts_count, sse_key, sse_key_id, replication_status, part_sizes, checksum_type, is_null)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		gocqlUUID(o.BucketID), shard, o.Key, versionID, true, o.IsDeleteMarker,
 		o.Size, o.ETag, o.ContentType, o.StorageClass, o.Mtime, manifestBlob, o.UserMeta, o.Tags,
-		retainUntil, nilIfEmpty(o.RetainMode), o.LegalHold,
+		retainUntil, nilIfEmpty(o.RetainMode), o.LegalHold, o.Checksums, nilIfEmpty(o.SSE), nilIfEmpty(o.SSECKeyMD5), nilIfEmpty(o.RestoreStatus),
+		nilIfEmpty(o.CacheControl), nilIfEmpty(o.Expires), partsCount, nilIfEmptyBytes(o.SSEKey), nilIfEmpty(o.SSEKeyID), nilIfEmpty(o.ReplicationStatus), partSizes, nilIfEmpty(o.ChecksumType), o.IsNull,
 	).WithContext(ctx).Exec()
+}
+
+func nilIfEmptyBytes(b []byte) interface{} {
+	if len(b) == 0 {
+		return nil
+	}
+	return b
 }
 
 func nilIfEmpty(s string) interface{} {
@@ -267,6 +383,7 @@ func nilIfEmpty(s string) interface{} {
 }
 
 func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionID string) (*meta.Object, error) {
+	versionID = meta.ResolveVersionID(versionID)
 	shard := shardOf(key, s.defaultShard)
 	var (
 		versionUUID  gocql.UUID
@@ -282,18 +399,33 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		retainUntil  time.Time
 		retainMode   string
 		legalHold    bool
+		checksums    map[string]string
+		sse          string
+		ssecKeyMD5   string
+		restore      string
+		cacheControl string
+		expires      string
+		partsCount   int
+		sseKey       []byte
+		sseKeyID     string
+		replication  string
+		partSizes    []int64
+		checksumType string
+		isNull       bool
 	)
 	var err error
 	if versionID == "" {
 		err = s.s.Query(
 			`SELECT version_id, is_latest, is_delete_marker, size, etag, content_type,
 			        storage_class, mtime, manifest, user_meta, tags,
-			        retain_until, retain_mode, legal_hold
+			        retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
+			        cache_control, expires, parts_count, sse_key, sse_key_id, replication_status, part_sizes, checksum_type, is_null
 			 FROM objects WHERE bucket_id=? AND shard=? AND key=? LIMIT 1`,
 			gocqlUUID(bucketID), shard, key,
 		).WithContext(ctx).Scan(&versionUUID, &isLatest, &isDeleteMark, &size, &etag, &ctype,
 			&class, &mtime, &manifestBlob, &userMeta, &tags,
-			&retainUntil, &retainMode, &legalHold)
+			&retainUntil, &retainMode, &legalHold, &checksums, &sse, &ssecKeyMD5, &restore,
+			&cacheControl, &expires, &partsCount, &sseKey, &sseKeyID, &replication, &partSizes, &checksumType, &isNull)
 	} else {
 		vUUID, perr := gocql.ParseUUID(versionID)
 		if perr != nil {
@@ -302,12 +434,14 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		err = s.s.Query(
 			`SELECT version_id, is_latest, is_delete_marker, size, etag, content_type,
 			        storage_class, mtime, manifest, user_meta, tags,
-			        retain_until, retain_mode, legal_hold
+			        retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
+			        cache_control, expires, parts_count, sse_key, sse_key_id, replication_status, part_sizes, checksum_type, is_null
 			 FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
 			gocqlUUID(bucketID), shard, key, vUUID,
 		).WithContext(ctx).Scan(&versionUUID, &isLatest, &isDeleteMark, &size, &etag, &ctype,
 			&class, &mtime, &manifestBlob, &userMeta, &tags,
-			&retainUntil, &retainMode, &legalHold)
+			&retainUntil, &retainMode, &legalHold, &checksums, &sse, &ssecKeyMD5, &restore,
+			&cacheControl, &expires, &partsCount, &sseKey, &sseKeyID, &replication, &partSizes, &checksumType, &isNull)
 	}
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrObjectNotFound
@@ -328,6 +462,7 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		VersionID:      versionUUID.String(),
 		IsLatest:       isLatest,
 		IsDeleteMarker: isDeleteMark,
+		IsNull:         isNull,
 		Size:           size,
 		ETag:           etag,
 		ContentType:    ctype,
@@ -339,10 +474,43 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		RetainUntil:    retainUntil,
 		RetainMode:     retainMode,
 		LegalHold:      legalHold,
+		Checksums:      checksums,
+		SSE:            sse,
+		SSECKeyMD5:     ssecKeyMD5,
+		SSEKey:         sseKey,
+		SSEKeyID:       sseKeyID,
+		RestoreStatus:  restore,
+		CacheControl:   cacheControl,
+		Expires:        expires,
+		PartsCount:     partsCount,
+		PartSizes:      partSizes,
+		ReplicationStatus: replication,
+		ChecksumType:   checksumType,
 	}, nil
 }
 
+// DeleteObjectNullReplacement implements US-029: a Suspended-mode unversioned
+// DELETE atomically removes any prior null-versioned row (LWT IF EXISTS) and
+// writes a fresh null-versioned delete marker. Other (TimeUUID) versions for
+// the key are preserved.
+func (s *Store) DeleteObjectNullReplacement(ctx context.Context, bucketID uuid.UUID, key string) (*meta.Object, error) {
+	marker := &meta.Object{
+		BucketID:       bucketID,
+		Key:            key,
+		VersionID:      meta.NullVersionID,
+		IsLatest:       true,
+		IsDeleteMarker: true,
+		IsNull:         true,
+		Mtime:          time.Now().UTC(),
+	}
+	if err := s.PutObject(ctx, marker, true); err != nil {
+		return nil, err
+	}
+	return marker, nil
+}
+
 func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versionID string, versioned bool) (*meta.Object, error) {
+	versionID = meta.ResolveVersionID(versionID)
 	shard := shardOf(key, s.defaultShard)
 
 	if versionID != "" {
@@ -599,6 +767,80 @@ func drainVersionHeap(h *versionHeap) {
 	}
 }
 
+// AllObjectVersions returns every stored object version across every shard
+// of the bucket as deep copies, with IsLatest set on the first (highest
+// version_id) row per key. Test-only escape hatch for invariant checks
+// that need the full picture without paging through ListObjectVersions
+// (whose 1000-row hard cap makes it unfit for the race-harness verification
+// pass).
+func (s *Store) AllObjectVersions(ctx context.Context, bucketID uuid.UUID) ([]*meta.Object, error) {
+	out := make([]*meta.Object, 0)
+	for shard := 0; shard < s.defaultShard; shard++ {
+		iter := s.s.Query(
+			`SELECT key, version_id, is_delete_marker, size, etag, content_type,
+			        storage_class, mtime, manifest, user_meta, is_null
+			 FROM objects WHERE bucket_id=? AND shard=?`,
+			gocqlUUID(bucketID), shard,
+		).WithContext(ctx).PageSize(2000).Iter()
+		for {
+			var (
+				key          string
+				versionID    gocql.UUID
+				isDeleteMark bool
+				size         int64
+				etag, ctype  string
+				class        string
+				mtime        time.Time
+				manifestBlob []byte
+				userMeta     map[string]string
+				isNull       bool
+			)
+			if !iter.Scan(&key, &versionID, &isDeleteMark, &size, &etag, &ctype,
+				&class, &mtime, &manifestBlob, &userMeta, &isNull) {
+				break
+			}
+			m, _ := decodeManifest(manifestBlob)
+			out = append(out, &meta.Object{
+				BucketID:       bucketID,
+				Key:            key,
+				VersionID:      versionID.String(),
+				IsDeleteMarker: isDeleteMark,
+				IsNull:         isNull,
+				Size:           size,
+				ETag:           etag,
+				ContentType:    ctype,
+				StorageClass:   class,
+				Mtime:          mtime,
+				Manifest:       m,
+				UserMeta:       userMeta,
+			})
+		}
+		if err := iter.Close(); err != nil {
+			return nil, err
+		}
+	}
+	// Sort by (key ASC, version_id DESC) so we can stamp IsLatest on the head
+	// of each per-key chain. Cassandra's clustering order delivers within a
+	// shard but across shards the merge order is not preserved.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Key != out[j].Key {
+			return out[i].Key < out[j].Key
+		}
+		return out[i].VersionID > out[j].VersionID
+	})
+	var lastKey string
+	first := true
+	for _, o := range out {
+		if o.Key != lastKey {
+			first = true
+			lastKey = o.Key
+		}
+		o.IsLatest = first
+		first = false
+	}
+	return out, nil
+}
+
 type versionCursor struct {
 	iter    *gocql.Iter
 	current *meta.Object
@@ -623,9 +865,10 @@ func (c *versionCursor) advance() bool {
 		mtime        time.Time
 		manifestBlob []byte
 		userMeta     map[string]string
+		isNull       bool
 	)
 	if !c.iter.Scan(&key, &versionID, &isDeleteMark, &size, &etag, &ctype,
-		&class, &mtime, &manifestBlob, &userMeta) {
+		&class, &mtime, &manifestBlob, &userMeta, &isNull) {
 		return false
 	}
 	m, _ := decodeManifest(manifestBlob)
@@ -634,6 +877,7 @@ func (c *versionCursor) advance() bool {
 		Key:            key,
 		VersionID:      versionID.String(),
 		IsDeleteMarker: isDeleteMark,
+		IsNull:         isNull,
 		Size:           size,
 		ETag:           etag,
 		ContentType:    ctype,
@@ -650,14 +894,14 @@ func (s *Store) openVersionCursor(ctx context.Context, bucketID uuid.UUID, shard
 	if marker == "" {
 		iter = s.s.Query(
 			`SELECT key, version_id, is_delete_marker, size, etag, content_type,
-			        storage_class, mtime, manifest, user_meta
+			        storage_class, mtime, manifest, user_meta, is_null
 			 FROM objects WHERE bucket_id=? AND shard=?`,
 			gocqlUUID(bucketID), shard,
 		).WithContext(ctx).PageSize(pageSize).Iter()
 	} else {
 		iter = s.s.Query(
 			`SELECT key, version_id, is_delete_marker, size, etag, content_type,
-			        storage_class, mtime, manifest, user_meta
+			        storage_class, mtime, manifest, user_meta, is_null
 			 FROM objects WHERE bucket_id=? AND shard=? AND key >= ?`,
 			gocqlUUID(bucketID), shard, marker,
 		).WithContext(ctx).PageSize(pageSize).Iter()
@@ -836,6 +1080,655 @@ func (s *Store) AckGCEntry(ctx context.Context, region string, e meta.GCEntry) e
 	).WithContext(ctx).Exec()
 }
 
+func notifyHour(t time.Time) time.Time {
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, time.UTC)
+}
+
+func (s *Store) EnqueueNotification(ctx context.Context, evt *meta.NotificationEvent) error {
+	if evt == nil {
+		return nil
+	}
+	if evt.EventTime.IsZero() {
+		evt.EventTime = time.Now().UTC()
+	}
+	if evt.EventID == "" {
+		evt.EventID = gocql.TimeUUID().String()
+	}
+	eventUUID, err := gocql.ParseUUID(evt.EventID)
+	if err != nil {
+		return err
+	}
+	hour := notifyHour(evt.EventTime)
+	return s.s.Query(
+		`INSERT INTO notify_queue (bucket_id, hour, event_id, bucket_name, object_key, event_name, event_time, config_id, target_type, target_arn, payload)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		gocqlUUID(evt.BucketID), hour, eventUUID, evt.Bucket, evt.Key,
+		evt.EventName, evt.EventTime, evt.ConfigID, evt.TargetType, evt.TargetARN, evt.Payload,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) ListPendingNotifications(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.NotificationEvent, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	now := time.Now().UTC()
+	hour := notifyHour(now)
+	out := make([]meta.NotificationEvent, 0, limit)
+	// Walk the last 48 hours so the worker (US-009) and inspector tests catch
+	// recently enqueued events. Older partitions tombstone via TTL once the
+	// worker delivers them.
+	for i := 0; i < 48 && len(out) < limit; i++ {
+		partition := hour.Add(time.Duration(-i) * time.Hour)
+		iter := s.s.Query(
+			`SELECT event_id, bucket_name, object_key, event_name, event_time, config_id, target_type, target_arn, payload
+			 FROM notify_queue WHERE bucket_id=? AND hour=? LIMIT ?`,
+			gocqlUUID(bucketID), partition, limit-len(out),
+		).WithContext(ctx).Iter()
+		var (
+			eventID                                                gocql.UUID
+			bucket, key, name, configID, targetType, targetARN     string
+			eventTime                                              time.Time
+			payload                                                []byte
+		)
+		for iter.Scan(&eventID, &bucket, &key, &name, &eventTime, &configID, &targetType, &targetARN, &payload) {
+			out = append(out, meta.NotificationEvent{
+				BucketID:   bucketID,
+				Bucket:     bucket,
+				Key:        key,
+				EventID:    eventID.String(),
+				EventName:  name,
+				EventTime:  eventTime,
+				ConfigID:   configID,
+				TargetType: targetType,
+				TargetARN:  targetARN,
+				Payload:    append([]byte(nil), payload...),
+			})
+			if len(out) >= limit {
+				break
+			}
+		}
+		if err := iter.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) AckNotification(ctx context.Context, evt meta.NotificationEvent) error {
+	if evt.EventID == "" {
+		return nil
+	}
+	eventUUID, err := gocql.ParseUUID(evt.EventID)
+	if err != nil {
+		return err
+	}
+	hour := notifyHour(evt.EventTime)
+	return s.s.Query(
+		`DELETE FROM notify_queue WHERE bucket_id=? AND hour=? AND event_id=?`,
+		gocqlUUID(evt.BucketID), hour, eventUUID,
+	).WithContext(ctx).Exec()
+}
+
+func notifyDay(t time.Time) time.Time {
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+func (s *Store) EnqueueNotificationDLQ(ctx context.Context, entry *meta.NotificationDLQEntry) error {
+	if entry == nil {
+		return nil
+	}
+	if entry.EnqueuedAt.IsZero() {
+		entry.EnqueuedAt = time.Now().UTC()
+	}
+	if entry.EventID == "" {
+		entry.EventID = gocql.TimeUUID().String()
+	}
+	eventUUID, err := gocql.ParseUUID(entry.EventID)
+	if err != nil {
+		return err
+	}
+	day := notifyDay(entry.EnqueuedAt)
+	return s.s.Query(
+		`INSERT INTO notify_dlq (bucket_id, day, event_id, bucket_name, object_key, event_name, event_time, config_id, target_type, target_arn, payload, attempts, reason, enqueued_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		gocqlUUID(entry.BucketID), day, eventUUID, entry.Bucket, entry.Key,
+		entry.EventName, entry.EventTime, entry.ConfigID, entry.TargetType, entry.TargetARN,
+		entry.Payload, entry.Attempts, entry.Reason, entry.EnqueuedAt,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) ListNotificationDLQ(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.NotificationDLQEntry, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	now := time.Now().UTC()
+	day := notifyDay(now)
+	out := make([]meta.NotificationDLQEntry, 0, limit)
+	// Walk the last 30 days of DLQ partitions; matches the audit/retention
+	// window so an operator inspecting the queue catches everything.
+	for i := 0; i < 30 && len(out) < limit; i++ {
+		partition := day.AddDate(0, 0, -i)
+		iter := s.s.Query(
+			`SELECT event_id, bucket_name, object_key, event_name, event_time, config_id, target_type, target_arn, payload, attempts, reason, enqueued_at
+			 FROM notify_dlq WHERE bucket_id=? AND day=? LIMIT ?`,
+			gocqlUUID(bucketID), partition, limit-len(out),
+		).WithContext(ctx).Iter()
+		var (
+			eventID                                            gocql.UUID
+			bucket, key, name, configID, targetType, targetARN string
+			eventTime, enqueuedAt                              time.Time
+			payload                                            []byte
+			attempts                                           int
+			reason                                             string
+		)
+		for iter.Scan(&eventID, &bucket, &key, &name, &eventTime, &configID, &targetType, &targetARN, &payload, &attempts, &reason, &enqueuedAt) {
+			out = append(out, meta.NotificationDLQEntry{
+				NotificationEvent: meta.NotificationEvent{
+					BucketID:   bucketID,
+					Bucket:     bucket,
+					Key:        key,
+					EventID:    eventID.String(),
+					EventName:  name,
+					EventTime:  eventTime,
+					ConfigID:   configID,
+					TargetType: targetType,
+					TargetARN:  targetARN,
+					Payload:    append([]byte(nil), payload...),
+				},
+				Attempts:   attempts,
+				Reason:     reason,
+				EnqueuedAt: enqueuedAt,
+			})
+			if len(out) >= limit {
+				break
+			}
+		}
+		if err := iter.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) EnqueueReplication(ctx context.Context, evt *meta.ReplicationEvent) error {
+	if evt == nil {
+		return nil
+	}
+	if evt.EventTime.IsZero() {
+		evt.EventTime = time.Now().UTC()
+	}
+	if evt.EventID == "" {
+		evt.EventID = gocql.TimeUUID().String()
+	}
+	eventUUID, err := gocql.ParseUUID(evt.EventID)
+	if err != nil {
+		return err
+	}
+	day := notifyDay(evt.EventTime)
+	return s.s.Query(
+		`INSERT INTO replication_queue (bucket_id, day, event_id, bucket_name, object_key, version_id, event_name, event_time, rule_id, destination_bucket, storage_class, destination_endpoint)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		gocqlUUID(evt.BucketID), day, eventUUID, evt.Bucket, evt.Key, evt.VersionID,
+		evt.EventName, evt.EventTime, evt.RuleID, evt.DestinationBucket, evt.StorageClass, evt.DestinationEndpoint,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) ListPendingReplications(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.ReplicationEvent, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	now := time.Now().UTC()
+	day := notifyDay(now)
+	out := make([]meta.ReplicationEvent, 0, limit)
+	// Walk the last 30 days of partitions; matches notify_dlq retention so a
+	// paused replicator catches everything within the operator-visible window.
+	for i := 0; i < 30 && len(out) < limit; i++ {
+		partition := day.AddDate(0, 0, -i)
+		iter := s.s.Query(
+			`SELECT event_id, bucket_name, object_key, version_id, event_name, event_time, rule_id, destination_bucket, storage_class, destination_endpoint
+			 FROM replication_queue WHERE bucket_id=? AND day=? LIMIT ?`,
+			gocqlUUID(bucketID), partition, limit-len(out),
+		).WithContext(ctx).Iter()
+		var (
+			eventID                                                                                  gocql.UUID
+			bucket, key, versionID, name, ruleID, destinationBucket, storageClass, destinationEndpoint string
+			eventTime                                                                                time.Time
+		)
+		for iter.Scan(&eventID, &bucket, &key, &versionID, &name, &eventTime, &ruleID, &destinationBucket, &storageClass, &destinationEndpoint) {
+			out = append(out, meta.ReplicationEvent{
+				BucketID:            bucketID,
+				Bucket:              bucket,
+				Key:                 key,
+				VersionID:           versionID,
+				EventID:             eventID.String(),
+				EventName:           name,
+				EventTime:           eventTime,
+				RuleID:              ruleID,
+				DestinationBucket:   destinationBucket,
+				DestinationEndpoint: destinationEndpoint,
+				StorageClass:        storageClass,
+			})
+			if len(out) >= limit {
+				break
+			}
+		}
+		if err := iter.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) SetObjectReplicationStatus(ctx context.Context, bucketID uuid.UUID, key, versionID, status string) error {
+	shard := shardOf(key, s.defaultShard)
+	if versionID == "" {
+		o, err := s.GetObject(ctx, bucketID, key, "")
+		if err != nil {
+			return err
+		}
+		versionID = o.VersionID
+	}
+	vUUID, err := gocql.ParseUUID(versionID)
+	if err != nil {
+		return meta.ErrObjectNotFound
+	}
+	return s.s.Query(
+		`UPDATE objects SET replication_status=? WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
+		nilIfEmpty(status), gocqlUUID(bucketID), shard, key, vUUID,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) AckReplication(ctx context.Context, evt meta.ReplicationEvent) error {
+	if evt.EventID == "" {
+		return nil
+	}
+	eventUUID, err := gocql.ParseUUID(evt.EventID)
+	if err != nil {
+		return err
+	}
+	day := notifyDay(evt.EventTime)
+	return s.s.Query(
+		`DELETE FROM replication_queue WHERE bucket_id=? AND day=? AND event_id=?`,
+		gocqlUUID(evt.BucketID), day, eventUUID,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) EnqueueAccessLog(ctx context.Context, entry *meta.AccessLogEntry) error {
+	if entry == nil {
+		return nil
+	}
+	if entry.Time.IsZero() {
+		entry.Time = time.Now().UTC()
+	}
+	if entry.EventID == "" {
+		entry.EventID = gocql.TimeUUID().String()
+	}
+	eventUUID, err := gocql.ParseUUID(entry.EventID)
+	if err != nil {
+		return err
+	}
+	hour := notifyHour(entry.Time)
+	return s.s.Query(
+		`INSERT INTO access_log_buffer (bucket_id, hour, event_id, ts, request_id, principal, source_ip, op, object_key, status, bytes_sent, object_size, total_time_ms, turn_around_ms, referrer, user_agent, version_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		gocqlUUID(entry.BucketID), hour, eventUUID, entry.Time,
+		entry.RequestID, entry.Principal, entry.SourceIP, entry.Op, entry.Key,
+		entry.Status, entry.BytesSent, entry.ObjectSize, entry.TotalTimeMS, entry.TurnAroundMS,
+		entry.Referrer, entry.UserAgent, entry.VersionID,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) ListPendingAccessLog(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.AccessLogEntry, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	now := time.Now().UTC()
+	hour := notifyHour(now)
+	out := make([]meta.AccessLogEntry, 0, limit)
+	// Walk the last 48 hours so the access-log worker (US-014) catches buffered
+	// rows even after a brief outage. Older partitions tombstone via TTL once
+	// the worker drains them.
+	for i := 0; i < 48 && len(out) < limit; i++ {
+		partition := hour.Add(time.Duration(-i) * time.Hour)
+		iter := s.s.Query(
+			`SELECT event_id, ts, request_id, principal, source_ip, op, object_key, status, bytes_sent, object_size, total_time_ms, turn_around_ms, referrer, user_agent, version_id
+			 FROM access_log_buffer WHERE bucket_id=? AND hour=? LIMIT ?`,
+			gocqlUUID(bucketID), partition, limit-len(out),
+		).WithContext(ctx).Iter()
+		var (
+			eventID                                                                  gocql.UUID
+			ts                                                                       time.Time
+			requestID, principal, sourceIP, op, key, referrer, userAgent, versionID  string
+			status, totalTimeMS, turnAroundMS                                        int
+			bytesSent, objectSize                                                    int64
+		)
+		for iter.Scan(&eventID, &ts, &requestID, &principal, &sourceIP, &op, &key, &status, &bytesSent, &objectSize, &totalTimeMS, &turnAroundMS, &referrer, &userAgent, &versionID) {
+			out = append(out, meta.AccessLogEntry{
+				BucketID:     bucketID,
+				EventID:      eventID.String(),
+				Time:         ts,
+				RequestID:    requestID,
+				Principal:    principal,
+				SourceIP:     sourceIP,
+				Op:           op,
+				Key:          key,
+				Status:       status,
+				BytesSent:    bytesSent,
+				ObjectSize:   objectSize,
+				TotalTimeMS:  totalTimeMS,
+				TurnAroundMS: turnAroundMS,
+				Referrer:     referrer,
+				UserAgent:    userAgent,
+				VersionID:    versionID,
+			})
+			if len(out) >= limit {
+				break
+			}
+		}
+		if err := iter.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) AckAccessLog(ctx context.Context, entry meta.AccessLogEntry) error {
+	if entry.EventID == "" {
+		return nil
+	}
+	eventUUID, err := gocql.ParseUUID(entry.EventID)
+	if err != nil {
+		return err
+	}
+	hour := notifyHour(entry.Time)
+	return s.s.Query(
+		`DELETE FROM access_log_buffer WHERE bucket_id=? AND hour=? AND event_id=?`,
+		gocqlUUID(entry.BucketID), hour, eventUUID,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) EnqueueAudit(ctx context.Context, entry *meta.AuditEvent, ttl time.Duration) error {
+	if entry == nil {
+		return nil
+	}
+	if entry.Time.IsZero() {
+		entry.Time = time.Now().UTC()
+	}
+	if entry.EventID == "" {
+		entry.EventID = gocql.TimeUUID().String()
+	}
+	eventUUID, err := gocql.ParseUUID(entry.EventID)
+	if err != nil {
+		return err
+	}
+	day := notifyDay(entry.Time)
+	bucket := entry.Bucket
+	if bucket == "" {
+		bucket = "-"
+	}
+	q := `INSERT INTO audit_log (bucket_id, day, event_id, ts, principal, action, resource, result, request_id, source_ip, bucket_name)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	args := []any{
+		gocqlUUID(entry.BucketID), day, eventUUID, entry.Time,
+		entry.Principal, entry.Action, entry.Resource, entry.Result,
+		entry.RequestID, entry.SourceIP, bucket,
+	}
+	if ttl > 0 {
+		q += ` USING TTL ?`
+		args = append(args, max(int(ttl/time.Second), 1))
+	}
+	return s.s.Query(q, args...).WithContext(ctx).Exec()
+}
+
+func (s *Store) ListAuditFiltered(ctx context.Context, f meta.AuditFilter) ([]meta.AuditEvent, string, error) {
+	limit := f.Limit
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	now := time.Now().UTC()
+	end := f.End
+	if end.IsZero() {
+		end = now
+	}
+	start := f.Start
+	if start.IsZero() {
+		start = end.AddDate(0, 0, -30)
+	}
+	type partition struct {
+		bucket gocql.UUID
+		day    time.Time
+	}
+	var parts []partition
+	endDay := notifyDay(end)
+	startDay := notifyDay(start)
+	if f.BucketScoped {
+		bid := gocqlUUID(f.BucketID)
+		for d := endDay; !d.Before(startDay); d = d.AddDate(0, 0, -1) {
+			parts = append(parts, partition{bid, d})
+		}
+	} else {
+		iter := s.s.Query(`SELECT DISTINCT bucket_id, day FROM audit_log`).WithContext(ctx).Iter()
+		var (
+			bid gocql.UUID
+			d   time.Time
+		)
+		for iter.Scan(&bid, &d) {
+			d = d.UTC()
+			if d.Before(startDay) || d.After(endDay) {
+				continue
+			}
+			parts = append(parts, partition{bid, d})
+		}
+		if err := iter.Close(); err != nil {
+			return nil, "", err
+		}
+	}
+	var all []meta.AuditEvent
+	for _, p := range parts {
+		iter := s.s.Query(
+			`SELECT event_id, ts, principal, action, resource, result, request_id, source_ip, bucket_name
+			 FROM audit_log WHERE bucket_id=? AND day=?`,
+			p.bucket, p.day,
+		).WithContext(ctx).Iter()
+		var (
+			eventID                                                              gocql.UUID
+			ts                                                                   time.Time
+			principal, action, resource, result, requestID, sourceIP, bucketName string
+		)
+		for iter.Scan(&eventID, &ts, &principal, &action, &resource, &result, &requestID, &sourceIP, &bucketName) {
+			all = append(all, meta.AuditEvent{
+				BucketID:  uuidFromGocql(p.bucket),
+				Bucket:    bucketName,
+				EventID:   eventID.String(),
+				Time:      ts,
+				Principal: principal,
+				Action:    action,
+				Resource:  resource,
+				Result:    result,
+				RequestID: requestID,
+				SourceIP:  sourceIP,
+			})
+		}
+		if err := iter.Close(); err != nil {
+			return nil, "", err
+		}
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if !all[i].Time.Equal(all[j].Time) {
+			return all[i].Time.After(all[j].Time)
+		}
+		return all[i].EventID > all[j].EventID
+	})
+	out := make([]meta.AuditEvent, 0, limit)
+	started := f.Continuation == ""
+	for _, e := range all {
+		if !f.Start.IsZero() && e.Time.Before(f.Start) {
+			continue
+		}
+		if !f.End.IsZero() && e.Time.After(f.End) {
+			continue
+		}
+		if f.Principal != "" && e.Principal != f.Principal {
+			continue
+		}
+		if !started {
+			if e.EventID == f.Continuation {
+				started = true
+			}
+			continue
+		}
+		out = append(out, e)
+		if len(out) >= limit {
+			break
+		}
+	}
+	next := ""
+	if len(out) >= limit {
+		next = out[len(out)-1].EventID
+	}
+	return out, next, nil
+}
+
+func (s *Store) ListAuditPartitionsBefore(ctx context.Context, before time.Time) ([]meta.AuditPartition, error) {
+	cutoff := notifyDay(before)
+	type partition struct {
+		bid gocql.UUID
+		day time.Time
+	}
+	var parts []partition
+	iter := s.s.Query(`SELECT DISTINCT bucket_id, day FROM audit_log`).WithContext(ctx).Iter()
+	var (
+		bid gocql.UUID
+		d   time.Time
+	)
+	for iter.Scan(&bid, &d) {
+		d = d.UTC()
+		if !d.Before(cutoff) {
+			continue
+		}
+		parts = append(parts, partition{bid, d})
+	}
+	if err := iter.Close(); err != nil {
+		return nil, err
+	}
+	out := make([]meta.AuditPartition, 0, len(parts))
+	for _, p := range parts {
+		var bucketName string
+		// One-row peek so the export key carries the human-readable bucket
+		// name; uuid.Nil partitions return "-" so IAM rows stay routable.
+		if err := s.s.Query(
+			`SELECT bucket_name FROM audit_log WHERE bucket_id=? AND day=? LIMIT 1`,
+			p.bid, p.day,
+		).WithContext(ctx).Scan(&bucketName); err != nil && !errors.Is(err, gocql.ErrNotFound) {
+			return nil, err
+		}
+		if bucketName == "" {
+			bucketName = "-"
+		}
+		out = append(out, meta.AuditPartition{
+			BucketID: uuidFromGocql(p.bid),
+			Bucket:   bucketName,
+			Day:      p.day,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Day.Equal(out[j].Day) {
+			return out[i].Day.Before(out[j].Day)
+		}
+		return out[i].BucketID.String() < out[j].BucketID.String()
+	})
+	return out, nil
+}
+
+func (s *Store) ReadAuditPartition(ctx context.Context, bucketID uuid.UUID, day time.Time) ([]meta.AuditEvent, error) {
+	d := notifyDay(day)
+	iter := s.s.Query(
+		`SELECT event_id, ts, principal, action, resource, result, request_id, source_ip, bucket_name
+		 FROM audit_log WHERE bucket_id=? AND day=?`,
+		gocqlUUID(bucketID), d,
+	).WithContext(ctx).Iter()
+	var (
+		eventID                                                              gocql.UUID
+		ts                                                                   time.Time
+		principal, action, resource, result, requestID, sourceIP, bucketName string
+	)
+	var out []meta.AuditEvent
+	for iter.Scan(&eventID, &ts, &principal, &action, &resource, &result, &requestID, &sourceIP, &bucketName) {
+		out = append(out, meta.AuditEvent{
+			BucketID:  bucketID,
+			Bucket:    bucketName,
+			EventID:   eventID.String(),
+			Time:      ts,
+			Principal: principal,
+			Action:    action,
+			Resource:  resource,
+			Result:    result,
+			RequestID: requestID,
+			SourceIP:  sourceIP,
+		})
+	}
+	if err := iter.Close(); err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].EventID < out[j].EventID })
+	return out, nil
+}
+
+func (s *Store) DeleteAuditPartition(ctx context.Context, bucketID uuid.UUID, day time.Time) error {
+	d := notifyDay(day)
+	return s.s.Query(
+		`DELETE FROM audit_log WHERE bucket_id=? AND day=?`,
+		gocqlUUID(bucketID), d,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) ListAudit(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.AuditEvent, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	now := time.Now().UTC()
+	day := notifyDay(now)
+	out := make([]meta.AuditEvent, 0, limit)
+	// Walk the last 30 days of partitions; matches the default audit retention
+	// so a fresh inspection catches everything the TTL has not yet purged.
+	for i := 0; i < 30 && len(out) < limit; i++ {
+		partition := day.AddDate(0, 0, -i)
+		iter := s.s.Query(
+			`SELECT event_id, ts, principal, action, resource, result, request_id, source_ip, bucket_name
+			 FROM audit_log WHERE bucket_id=? AND day=? LIMIT ?`,
+			gocqlUUID(bucketID), partition, limit-len(out),
+		).WithContext(ctx).Iter()
+		var (
+			eventID                                                              gocql.UUID
+			ts                                                                   time.Time
+			principal, action, resource, result, requestID, sourceIP, bucketName string
+		)
+		for iter.Scan(&eventID, &ts, &principal, &action, &resource, &result, &requestID, &sourceIP, &bucketName) {
+			out = append(out, meta.AuditEvent{
+				BucketID:  bucketID,
+				Bucket:    bucketName,
+				EventID:   eventID.String(),
+				Time:      ts,
+				Principal: principal,
+				Action:    action,
+				Resource:  resource,
+				Result:    result,
+				RequestID: requestID,
+				SourceIP:  sourceIP,
+			})
+			if len(out) >= limit {
+				break
+			}
+		}
+		if err := iter.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
 func (s *Store) resolveVersionID(ctx context.Context, bucketID uuid.UUID, key, versionID string) (gocql.UUID, int, error) {
 	shard := shardOf(key, s.defaultShard)
 	if versionID != "" {
@@ -946,6 +1839,17 @@ func (s *Store) SetObjectLegalHold(ctx context.Context, bucketID uuid.UUID, key,
 	).WithContext(ctx).Exec()
 }
 
+func (s *Store) SetObjectRestoreStatus(ctx context.Context, bucketID uuid.UUID, key, versionID, status string) error {
+	v, shard, err := s.resolveVersionID(ctx, bucketID, key, versionID)
+	if err != nil {
+		return err
+	}
+	return s.s.Query(
+		`UPDATE objects SET restore_status=? WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
+		nilIfEmpty(status), gocqlUUID(bucketID), shard, key, v,
+	).WithContext(ctx).Exec()
+}
+
 func (s *Store) SetBucketLifecycle(ctx context.Context, bucketID uuid.UUID, xmlBlob []byte) error {
 	return s.s.Query(
 		`INSERT INTO bucket_lifecycle (bucket_id, rules) VALUES (?, ?)`,
@@ -984,9 +1888,11 @@ func (s *Store) CreateMultipartUpload(ctx context.Context, mu *meta.MultipartUpl
 		return fmt.Errorf("upload_id: %w", err)
 	}
 	return s.s.Query(
-		`INSERT INTO multipart_uploads (bucket_id, upload_id, key, status, storage_class, content_type, initiated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		gocqlUUID(mu.BucketID), uploadUUID, mu.Key, "uploading", mu.StorageClass, mu.ContentType, mu.InitiatedAt,
+		`INSERT INTO multipart_uploads (bucket_id, upload_id, key, status, storage_class, content_type, initiated_at, sse, user_meta, cache_control, expires, checksum_algorithm, sse_key, sse_key_id, checksum_type)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		gocqlUUID(mu.BucketID), uploadUUID, mu.Key, "uploading", mu.StorageClass, mu.ContentType, mu.InitiatedAt, nilIfEmpty(mu.SSE),
+		mu.UserMeta, nilIfEmpty(mu.CacheControl), nilIfEmpty(mu.Expires), nilIfEmpty(mu.ChecksumAlgorithm),
+		nilIfEmptyBytes(mu.SSEKey), nilIfEmpty(mu.SSEKeyID), nilIfEmpty(mu.ChecksumType),
 	).WithContext(ctx).Exec()
 }
 
@@ -996,14 +1902,19 @@ func (s *Store) GetMultipartUpload(ctx context.Context, bucketID uuid.UUID, uplo
 		return nil, meta.ErrMultipartNotFound
 	}
 	var (
-		key, status, class, ctype string
-		initiated                 time.Time
+		key, status, class, ctype            string
+		sse, cacheControl, expires, checksum string
+		checksumType                         string
+		sseKeyID                             string
+		sseKey                               []byte
+		userMeta                             map[string]string
+		initiated                            time.Time
 	)
 	err = s.s.Query(
-		`SELECT key, status, storage_class, content_type, initiated_at
+		`SELECT key, status, storage_class, content_type, initiated_at, sse, user_meta, cache_control, expires, checksum_algorithm, sse_key, sse_key_id, checksum_type
 		 FROM multipart_uploads WHERE bucket_id=? AND upload_id=?`,
 		gocqlUUID(bucketID), uploadUUID,
-	).WithContext(ctx).Scan(&key, &status, &class, &ctype, &initiated)
+	).WithContext(ctx).Scan(&key, &status, &class, &ctype, &initiated, &sse, &userMeta, &cacheControl, &expires, &checksum, &sseKey, &sseKeyID, &checksumType)
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrMultipartNotFound
 	}
@@ -1011,13 +1922,21 @@ func (s *Store) GetMultipartUpload(ctx context.Context, bucketID uuid.UUID, uplo
 		return nil, err
 	}
 	return &meta.MultipartUpload{
-		BucketID:     bucketID,
-		UploadID:     uploadID,
-		Key:          key,
-		Status:       status,
-		StorageClass: class,
-		ContentType:  ctype,
-		InitiatedAt:  initiated,
+		BucketID:          bucketID,
+		UploadID:          uploadID,
+		Key:               key,
+		Status:            status,
+		StorageClass:      class,
+		ContentType:       ctype,
+		InitiatedAt:       initiated,
+		SSE:               sse,
+		SSEKey:            sseKey,
+		SSEKeyID:          sseKeyID,
+		UserMeta:          userMeta,
+		CacheControl:      cacheControl,
+		Expires:           expires,
+		ChecksumAlgorithm: checksum,
+		ChecksumType:      checksumType,
 	}, nil
 }
 
@@ -1071,9 +1990,9 @@ func (s *Store) SavePart(ctx context.Context, bucketID uuid.UUID, uploadID strin
 		return err
 	}
 	return s.s.Query(
-		`INSERT INTO multipart_parts (bucket_id, upload_id, part_number, etag, size, mtime, manifest)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		gocqlUUID(bucketID), uploadUUID, part.PartNumber, part.ETag, part.Size, time.Now().UTC(), manifestBlob,
+		`INSERT INTO multipart_parts (bucket_id, upload_id, part_number, etag, size, mtime, manifest, checksums)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		gocqlUUID(bucketID), uploadUUID, part.PartNumber, part.ETag, part.Size, time.Now().UTC(), manifestBlob, part.Checksums,
 	).WithContext(ctx).Exec()
 }
 
@@ -1083,7 +2002,7 @@ func (s *Store) ListParts(ctx context.Context, bucketID uuid.UUID, uploadID stri
 		return nil, meta.ErrMultipartNotFound
 	}
 	iter := s.s.Query(
-		`SELECT part_number, etag, size, mtime, manifest
+		`SELECT part_number, etag, size, mtime, manifest, checksums
 		 FROM multipart_parts WHERE bucket_id=? AND upload_id=?`,
 		gocqlUUID(bucketID), uploadUUID,
 	).WithContext(ctx).Iter()
@@ -1096,8 +2015,9 @@ func (s *Store) ListParts(ctx context.Context, bucketID uuid.UUID, uploadID stri
 		size         int64
 		mtime        time.Time
 		manifestBlob []byte
+		checksums    map[string]string
 	)
-	for iter.Scan(&partNumber, &etag, &size, &mtime, &manifestBlob) {
+	for iter.Scan(&partNumber, &etag, &size, &mtime, &manifestBlob, &checksums) {
 		m, err := decodeManifest(manifestBlob)
 		if err != nil {
 			return nil, err
@@ -1108,7 +2028,9 @@ func (s *Store) ListParts(ctx context.Context, bucketID uuid.UUID, uploadID stri
 			Size:       size,
 			Mtime:      mtime,
 			Manifest:   m,
+			Checksums:  checksums,
 		})
+		checksums = nil
 	}
 	if err := iter.Close(); err != nil {
 		return nil, err
@@ -1150,6 +2072,10 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 	used := make(map[int]bool, len(parts))
 	var chunks []data.ChunkRef
 	var totalSize int64
+	var ciphertextSize int64
+	partChunks := make([]int, 0, len(parts))
+	partSizes := make([]int64, 0, len(parts))
+	partChecksums := make([]map[string]string, 0, len(parts))
 	for _, cp := range parts {
 		p, ok := byNumber[cp.PartNumber]
 		if !ok {
@@ -1158,21 +2084,32 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 		if strings.Trim(cp.ETag, `"`) != p.ETag {
 			return nil, meta.ErrMultipartETagMismatch
 		}
+		partChunkCount := 0
 		if p.Manifest != nil {
 			chunks = append(chunks, p.Manifest.Chunks...)
+			partChunkCount = len(p.Manifest.Chunks)
+			for _, c := range p.Manifest.Chunks {
+				ciphertextSize += c.Size
+			}
 		}
+		partChunks = append(partChunks, partChunkCount)
+		partSizes = append(partSizes, p.Size)
+		partChecksums = append(partChecksums, p.Checksums)
 		totalSize += p.Size
 		used[cp.PartNumber] = true
 	}
 
 	obj.Manifest = &data.Manifest{
-		Class:     obj.StorageClass,
-		Size:      totalSize,
-		ChunkSize: data.DefaultChunkSize,
-		ETag:      obj.ETag,
-		Chunks:    chunks,
+		Class:         obj.StorageClass,
+		Size:          ciphertextSize,
+		ChunkSize:     data.DefaultChunkSize,
+		ETag:          obj.ETag,
+		Chunks:        chunks,
+		PartChunks:    partChunks,
+		PartChecksums: partChecksums,
 	}
 	obj.Size = totalSize
+	obj.PartSizes = partSizes
 	obj.Mtime = time.Now().UTC()
 
 	if err := s.PutObject(ctx, obj, versioned); err != nil {
@@ -1199,6 +2136,60 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 		return orphans, err
 	}
 	return orphans, nil
+}
+
+func (s *Store) RecordMultipartCompletion(ctx context.Context, rec *meta.MultipartCompletion, ttl time.Duration) error {
+	if rec == nil {
+		return nil
+	}
+	uploadUUID, err := gocql.ParseUUID(rec.UploadID)
+	if err != nil {
+		return fmt.Errorf("upload_id: %w", err)
+	}
+	ttlSec := max(int(ttl/time.Second), 1)
+	completedAt := rec.CompletedAt
+	if completedAt.IsZero() {
+		completedAt = time.Now().UTC()
+	}
+	return s.s.Query(
+		`INSERT INTO multipart_completions (bucket_id, upload_id, key, etag, version_id, body, headers, completed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?) USING TTL ?`,
+		gocqlUUID(rec.BucketID), uploadUUID, rec.Key, rec.ETag, rec.VersionID, rec.Body, rec.Headers, completedAt, ttlSec,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) GetMultipartCompletion(ctx context.Context, bucketID uuid.UUID, uploadID string) (*meta.MultipartCompletion, error) {
+	uploadUUID, err := gocql.ParseUUID(uploadID)
+	if err != nil {
+		return nil, meta.ErrMultipartCompletionNotFound
+	}
+	var (
+		key, etag, versionID string
+		body                 []byte
+		headers              map[string]string
+		completedAt          time.Time
+	)
+	err = s.s.Query(
+		`SELECT key, etag, version_id, body, headers, completed_at
+		 FROM multipart_completions WHERE bucket_id=? AND upload_id=?`,
+		gocqlUUID(bucketID), uploadUUID,
+	).WithContext(ctx).Scan(&key, &etag, &versionID, &body, &headers, &completedAt)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return nil, meta.ErrMultipartCompletionNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &meta.MultipartCompletion{
+		BucketID:    bucketID,
+		UploadID:    uploadID,
+		Key:         key,
+		ETag:        etag,
+		VersionID:   versionID,
+		Body:        body,
+		Headers:     headers,
+		CompletedAt: completedAt,
+	}, nil
 }
 
 func (s *Store) AbortMultipartUpload(ctx context.Context, bucketID uuid.UUID, uploadID string) ([]*data.Manifest, error) {
@@ -1295,6 +2286,441 @@ func (s *Store) GetBucketOwnershipControls(ctx context.Context, bucketID uuid.UU
 }
 func (s *Store) DeleteBucketOwnershipControls(ctx context.Context, bucketID uuid.UUID) error {
 	return s.deleteBucketBlob(ctx, "bucket_ownership_controls", bucketID)
+}
+
+func (s *Store) SetBucketEncryption(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(ctx, "bucket_encryption", "config", bucketID, blob)
+}
+func (s *Store) GetBucketEncryption(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(ctx, "bucket_encryption", "config", bucketID, meta.ErrNoSuchEncryption)
+}
+func (s *Store) DeleteBucketEncryption(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(ctx, "bucket_encryption", bucketID)
+}
+
+func (s *Store) SetBucketObjectLockEnabled(ctx context.Context, name string, enabled bool) error {
+	applied, err := s.s.Query(
+		`UPDATE buckets SET object_lock_enabled=? WHERE name=? IF EXISTS`,
+		enabled, name,
+	).WithContext(ctx).SerialConsistency(gocql.LocalSerial).ScanCAS(nil)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return meta.ErrBucketNotFound
+	}
+	return nil
+}
+
+func (s *Store) SetBucketRegion(ctx context.Context, name, region string) error {
+	applied, err := s.s.Query(
+		`UPDATE buckets SET region=? WHERE name=? IF EXISTS`,
+		region, name,
+	).WithContext(ctx).SerialConsistency(gocql.LocalSerial).ScanCAS(nil)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return meta.ErrBucketNotFound
+	}
+	return nil
+}
+
+func (s *Store) SetBucketMfaDelete(ctx context.Context, name, state string) error {
+	applied, err := s.s.Query(
+		`UPDATE buckets SET mfa_delete=? WHERE name=? IF EXISTS`,
+		state, name,
+	).WithContext(ctx).SerialConsistency(gocql.LocalSerial).ScanCAS(nil)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return meta.ErrBucketNotFound
+	}
+	return nil
+}
+
+func (s *Store) SetBucketObjectLockConfig(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(ctx, "bucket_object_lock", "config", bucketID, blob)
+}
+func (s *Store) GetBucketObjectLockConfig(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(ctx, "bucket_object_lock", "config", bucketID, meta.ErrNoSuchObjectLockConfig)
+}
+func (s *Store) DeleteBucketObjectLockConfig(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(ctx, "bucket_object_lock", bucketID)
+}
+
+func (s *Store) SetBucketNotificationConfig(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(ctx, "bucket_notification", "config", bucketID, blob)
+}
+func (s *Store) GetBucketNotificationConfig(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(ctx, "bucket_notification", "config", bucketID, meta.ErrNoSuchNotification)
+}
+func (s *Store) DeleteBucketNotificationConfig(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(ctx, "bucket_notification", bucketID)
+}
+
+func (s *Store) SetBucketWebsite(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(ctx, "bucket_website", "config", bucketID, blob)
+}
+func (s *Store) GetBucketWebsite(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(ctx, "bucket_website", "config", bucketID, meta.ErrNoSuchWebsite)
+}
+func (s *Store) DeleteBucketWebsite(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(ctx, "bucket_website", bucketID)
+}
+
+func (s *Store) SetBucketReplication(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(ctx, "bucket_replication", "config", bucketID, blob)
+}
+func (s *Store) GetBucketReplication(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(ctx, "bucket_replication", "config", bucketID, meta.ErrNoSuchReplication)
+}
+func (s *Store) DeleteBucketReplication(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(ctx, "bucket_replication", bucketID)
+}
+
+func (s *Store) SetBucketLogging(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(ctx, "bucket_logging", "config", bucketID, blob)
+}
+func (s *Store) GetBucketLogging(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(ctx, "bucket_logging", "config", bucketID, meta.ErrNoSuchLogging)
+}
+func (s *Store) DeleteBucketLogging(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(ctx, "bucket_logging", bucketID)
+}
+
+func (s *Store) SetBucketTagging(ctx context.Context, bucketID uuid.UUID, blob []byte) error {
+	return s.setBucketBlob(ctx, "bucket_tagging", "config", bucketID, blob)
+}
+func (s *Store) GetBucketTagging(ctx context.Context, bucketID uuid.UUID) ([]byte, error) {
+	return s.getBucketBlob(ctx, "bucket_tagging", "config", bucketID, meta.ErrNoSuchTagSet)
+}
+func (s *Store) DeleteBucketTagging(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(ctx, "bucket_tagging", bucketID)
+}
+
+func (s *Store) SetBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string, blob []byte) error {
+	return s.s.Query(
+		`INSERT INTO bucket_inventory_configs (bucket_id, config_id, config) VALUES (?, ?, ?)`,
+		gocqlUUID(bucketID), configID, blob,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) GetBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string) ([]byte, error) {
+	var blob []byte
+	err := s.s.Query(
+		`SELECT config FROM bucket_inventory_configs WHERE bucket_id=? AND config_id=?`,
+		gocqlUUID(bucketID), configID,
+	).WithContext(ctx).Scan(&blob)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return nil, meta.ErrNoSuchInventoryConfig
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(blob) == 0 {
+		return nil, meta.ErrNoSuchInventoryConfig
+	}
+	return blob, nil
+}
+
+func (s *Store) DeleteBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string) error {
+	return s.s.Query(
+		`DELETE FROM bucket_inventory_configs WHERE bucket_id=? AND config_id=?`,
+		gocqlUUID(bucketID), configID,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) ListBucketInventoryConfigs(ctx context.Context, bucketID uuid.UUID) (map[string][]byte, error) {
+	iter := s.s.Query(
+		`SELECT config_id, config FROM bucket_inventory_configs WHERE bucket_id=?`,
+		gocqlUUID(bucketID),
+	).WithContext(ctx).Iter()
+	out := make(map[string][]byte)
+	var id string
+	var blob []byte
+	for iter.Scan(&id, &blob) {
+		if len(blob) == 0 {
+			continue
+		}
+		out[id] = append([]byte(nil), blob...)
+	}
+	if err := iter.Close(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *Store) CreateAccessPoint(ctx context.Context, ap *meta.AccessPoint) error {
+	applied, err := s.s.Query(
+		`INSERT INTO access_points
+			(name, bucket_id, bucket, alias, network_origin, vpc_id, policy, public_access_block, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS`,
+		ap.Name, gocqlUUID(ap.BucketID), ap.Bucket, ap.Alias, ap.NetworkOrigin,
+		ap.VPCID, nilIfEmptyBytes(ap.Policy), nilIfEmptyBytes(ap.PublicAccessBlock),
+		ap.CreatedAt.UTC(),
+	).WithContext(ctx).MapScanCAS(map[string]interface{}{})
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return meta.ErrAccessPointAlreadyExists
+	}
+	return nil
+}
+
+func (s *Store) GetAccessPoint(ctx context.Context, name string) (*meta.AccessPoint, error) {
+	var (
+		bucketID      gocql.UUID
+		bucket        string
+		alias         string
+		networkOrigin string
+		vpcID         string
+		policy        []byte
+		pab           []byte
+		createdAt     time.Time
+	)
+	err := s.s.Query(
+		`SELECT bucket_id, bucket, alias, network_origin, vpc_id, policy, public_access_block, created_at
+		 FROM access_points WHERE name=?`,
+		name,
+	).WithContext(ctx).Scan(&bucketID, &bucket, &alias, &networkOrigin, &vpcID, &policy, &pab, &createdAt)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return nil, meta.ErrAccessPointNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &meta.AccessPoint{
+		Name:              name,
+		BucketID:          uuidFromGocql(bucketID),
+		Bucket:            bucket,
+		Alias:             alias,
+		NetworkOrigin:     networkOrigin,
+		VPCID:             vpcID,
+		Policy:            append([]byte(nil), policy...),
+		PublicAccessBlock: append([]byte(nil), pab...),
+		CreatedAt:         createdAt,
+	}, nil
+}
+
+func (s *Store) GetAccessPointByAlias(ctx context.Context, alias string) (*meta.AccessPoint, error) {
+	var (
+		name          string
+		bucketID      gocql.UUID
+		bucket        string
+		networkOrigin string
+		vpcID         string
+		policy        []byte
+		pab           []byte
+		createdAt     time.Time
+	)
+	err := s.s.Query(
+		`SELECT name, bucket_id, bucket, network_origin, vpc_id, policy, public_access_block, created_at
+		 FROM access_points WHERE alias=? LIMIT 1 ALLOW FILTERING`,
+		alias,
+	).WithContext(ctx).Scan(&name, &bucketID, &bucket, &networkOrigin, &vpcID, &policy, &pab, &createdAt)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return nil, meta.ErrAccessPointNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &meta.AccessPoint{
+		Name:              name,
+		BucketID:          uuidFromGocql(bucketID),
+		Bucket:            bucket,
+		Alias:             alias,
+		NetworkOrigin:     networkOrigin,
+		VPCID:             vpcID,
+		Policy:            append([]byte(nil), policy...),
+		PublicAccessBlock: append([]byte(nil), pab...),
+		CreatedAt:         createdAt,
+	}, nil
+}
+
+func (s *Store) DeleteAccessPoint(ctx context.Context, name string) error {
+	applied, err := s.s.Query(
+		`DELETE FROM access_points WHERE name=? IF EXISTS`,
+		name,
+	).WithContext(ctx).MapScanCAS(map[string]interface{}{})
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return meta.ErrAccessPointNotFound
+	}
+	return nil
+}
+
+func (s *Store) ListAccessPoints(ctx context.Context, bucketID uuid.UUID) ([]*meta.AccessPoint, error) {
+	var iter *gocql.Iter
+	if bucketID == uuid.Nil {
+		iter = s.s.Query(
+			`SELECT name, bucket_id, bucket, alias, network_origin, vpc_id, policy, public_access_block, created_at FROM access_points`,
+		).WithContext(ctx).Iter()
+	} else {
+		iter = s.s.Query(
+			`SELECT name, bucket_id, bucket, alias, network_origin, vpc_id, policy, public_access_block, created_at FROM access_points WHERE bucket_id=? ALLOW FILTERING`,
+			gocqlUUID(bucketID),
+		).WithContext(ctx).Iter()
+	}
+	var out []*meta.AccessPoint
+	var (
+		name          string
+		bID           gocql.UUID
+		bucket        string
+		alias         string
+		networkOrigin string
+		vpcID         string
+		policy        []byte
+		pab           []byte
+		createdAt     time.Time
+	)
+	for iter.Scan(&name, &bID, &bucket, &alias, &networkOrigin, &vpcID, &policy, &pab, &createdAt) {
+		out = append(out, &meta.AccessPoint{
+			Name:              name,
+			BucketID:          uuidFromGocql(bID),
+			Bucket:            bucket,
+			Alias:             alias,
+			NetworkOrigin:     networkOrigin,
+			VPCID:             vpcID,
+			Policy:            append([]byte(nil), policy...),
+			PublicAccessBlock: append([]byte(nil), pab...),
+			CreatedAt:         createdAt,
+		})
+	}
+	if err := iter.Close(); err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func (s *Store) UpdateObjectSSEWrap(ctx context.Context, bucketID uuid.UUID, key, versionID string, wrapped []byte, keyID string) error {
+	shard := shardOf(key, s.defaultShard)
+	if versionID == "" {
+		o, err := s.GetObject(ctx, bucketID, key, "")
+		if err != nil {
+			return err
+		}
+		versionID = o.VersionID
+	}
+	vUUID, err := gocql.ParseUUID(versionID)
+	if err != nil {
+		return meta.ErrObjectNotFound
+	}
+	return s.s.Query(
+		`UPDATE objects SET sse_key=?, sse_key_id=?
+		 WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
+		nilIfEmptyBytes(wrapped), nilIfEmpty(keyID),
+		gocqlUUID(bucketID), shard, key, vUUID,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) UpdateMultipartUploadSSEWrap(ctx context.Context, bucketID uuid.UUID, uploadID string, wrapped []byte, keyID string) error {
+	uploadUUID, err := gocql.ParseUUID(uploadID)
+	if err != nil {
+		return meta.ErrMultipartNotFound
+	}
+	return s.s.Query(
+		`UPDATE multipart_uploads SET sse_key=?, sse_key_id=?
+		 WHERE bucket_id=? AND upload_id=?`,
+		nilIfEmptyBytes(wrapped), nilIfEmpty(keyID),
+		gocqlUUID(bucketID), uploadUUID,
+	).WithContext(ctx).Exec()
+}
+
+// GetObjectManifestRaw returns the raw on-disk manifest blob for the given
+// object version (US-049). When versionID is "" or "null" the latest row is
+// returned. Returns ErrObjectNotFound when no row matches.
+func (s *Store) GetObjectManifestRaw(ctx context.Context, bucketID uuid.UUID, key, versionID string) ([]byte, error) {
+	resolved := meta.ResolveVersionID(versionID)
+	if resolved == "" {
+		o, err := s.GetObject(ctx, bucketID, key, "")
+		if err != nil {
+			return nil, err
+		}
+		resolved = o.VersionID
+	}
+	vUUID, err := gocql.ParseUUID(resolved)
+	if err != nil {
+		return nil, meta.ErrObjectNotFound
+	}
+	shard := shardOf(key, s.defaultShard)
+	var blob []byte
+	err = s.s.Query(
+		`SELECT manifest FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
+		gocqlUUID(bucketID), shard, key, vUUID,
+	).WithContext(ctx).Scan(&blob)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return nil, meta.ErrObjectNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return blob, nil
+}
+
+// UpdateObjectManifestRaw overwrites just the manifest column for the given
+// object version. The store does not validate the bytes; callers are
+// expected to pass a valid JSON or proto manifest blob.
+func (s *Store) UpdateObjectManifestRaw(ctx context.Context, bucketID uuid.UUID, key, versionID string, raw []byte) error {
+	resolved := meta.ResolveVersionID(versionID)
+	if resolved == "" {
+		o, err := s.GetObject(ctx, bucketID, key, "")
+		if err != nil {
+			return err
+		}
+		resolved = o.VersionID
+	}
+	vUUID, err := gocql.ParseUUID(resolved)
+	if err != nil {
+		return meta.ErrObjectNotFound
+	}
+	shard := shardOf(key, s.defaultShard)
+	return s.s.Query(
+		`UPDATE objects SET manifest=? WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
+		nilIfEmptyBytes(raw),
+		gocqlUUID(bucketID), shard, key, vUUID,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) SetRewrapProgress(ctx context.Context, p *meta.RewrapProgress) error {
+	if p == nil {
+		return nil
+	}
+	return s.s.Query(
+		`INSERT INTO rewrap_progress (bucket_id, target_id, last_key, complete, updated_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		gocqlUUID(p.BucketID), p.TargetID, p.LastKey, p.Complete, time.Now().UTC(),
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) GetRewrapProgress(ctx context.Context, bucketID uuid.UUID) (*meta.RewrapProgress, error) {
+	var (
+		targetID, lastKey string
+		complete          bool
+		updatedAt         time.Time
+	)
+	err := s.s.Query(
+		`SELECT target_id, last_key, complete, updated_at FROM rewrap_progress WHERE bucket_id=?`,
+		gocqlUUID(bucketID),
+	).WithContext(ctx).Scan(&targetID, &lastKey, &complete, &updatedAt)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return nil, meta.ErrNoRewrapProgress
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &meta.RewrapProgress{
+		BucketID:  bucketID,
+		TargetID:  targetID,
+		LastKey:   lastKey,
+		Complete:  complete,
+		UpdatedAt: updatedAt,
+	}, nil
 }
 
 func gocqlUUID(u uuid.UUID) gocql.UUID {

@@ -1,0 +1,40 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: strata-gateway
+    static_configs:
+      - targets: ["gateway:9000"]
+        labels:
+          binary: gateway
+
+  - job_name: strata-gc
+    static_configs:
+      - targets: ["gc:9100"]
+        labels:
+          binary: gc
+
+  - job_name: strata-lifecycle
+    static_configs:
+      - targets: ["lifecycle:9101"]
+        labels:
+          binary: lifecycle
+
+  - job_name: strata-notify
+    static_configs:
+      - targets: ["notify:9102"]
+        labels:
+          binary: notify
+
+  - job_name: strata-replicator
+    static_configs:
+      - targets: ["replicator:9103"]
+        labels:
+          binary: replicator
+
+  - job_name: strata-access-log
+    static_configs:
+      - targets: ["access-log:9104"]
+        labels:
+          binary: access-log

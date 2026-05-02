@@ -45,6 +45,11 @@ type RADOSConfig struct {
 	Pool       string `koanf:"pool"`
 	Namespace  string `koanf:"namespace"`
 	Classes    string `koanf:"classes"`
+	// Clusters lists per-cluster connection specs as a comma-separated
+	// "<id>:<conf-path>:<keyring-path>" list. See rados.ParseClusters for
+	// format details. Existing single-cluster fields above coexist as the
+	// implicit "default" cluster.
+	Clusters string `koanf:"clusters"`
 }
 
 type AuthConfig struct {
@@ -120,6 +125,7 @@ var envMap = map[string]string{
 	"STRATA_RADOS_POOL":               "rados.pool",
 	"STRATA_RADOS_NAMESPACE":          "rados.namespace",
 	"STRATA_RADOS_CLASSES":            "rados.classes",
+	"STRATA_RADOS_CLUSTERS":           "rados.clusters",
 	"STRATA_AUTH_MODE":                "auth.mode",
 	"STRATA_STATIC_CREDENTIALS":       "auth.static_credentials",
 	"STRATA_LIFECYCLE_INTERVAL":       "lifecycle.interval",
@@ -173,9 +179,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("meta_backend %q is not one of {memory, cassandra}", c.MetaBackend)
 	}
 	switch c.Auth.Mode {
-	case "", "off", "required":
+	case "", "off", "disabled", "required", "optional":
 	default:
-		return fmt.Errorf("auth.mode %q is not one of {off, required}", c.Auth.Mode)
+		return fmt.Errorf("auth.mode %q is not one of {off, disabled, required, optional}", c.Auth.Mode)
 	}
 	if c.DefaultBucketShards <= 0 {
 		return fmt.Errorf("default_bucket_shards must be positive (got %d)", c.DefaultBucketShards)

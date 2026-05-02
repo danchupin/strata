@@ -3,7 +3,22 @@ package s3api
 import (
 	"net"
 	"strings"
+	"unicode/utf8"
 )
+
+// validObjectKey rejects keys that AWS rejects with InvalidURI: invalid UTF-8
+// or any C0/C1 control codepoint (U+0000..U+001F or U+007F..U+009F).
+func validObjectKey(key string) bool {
+	if !utf8.ValidString(key) {
+		return false
+	}
+	for _, r := range key {
+		if (r >= 0x00 && r <= 0x1f) || (r >= 0x7f && r <= 0x9f) {
+			return false
+		}
+	}
+	return true
+}
 
 // validBucketName checks the S3 DNS-safe bucket name rules:
 //   length 3..63, lowercase letters / digits / hyphen / dot,

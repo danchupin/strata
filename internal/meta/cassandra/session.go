@@ -2,9 +2,11 @@ package cassandra
 
 import (
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/gocql/gocql"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type SessionConfig struct {
@@ -15,6 +17,18 @@ type SessionConfig struct {
 	Username    string
 	Password    string
 	Timeout     time.Duration
+	// Logger receives slow-query WARN lines when SlowMS > 0. Nil disables.
+	Logger *slog.Logger
+	// SlowMS controls the slow-query threshold in milliseconds.
+	// 0 disables logging; defaults are loaded by callers via SlowMSFromEnv.
+	SlowMS int
+	// Metrics, when set, records every query into a metrics sink (latency
+	// histogram by table+op). Nil disables; binaries plug in
+	// metrics.CassandraObserver{}.
+	Metrics Metrics
+	// Tracer, when set, emits one OTel child span per query. Binaries plug
+	// in tracerProvider.Tracer("strata.meta.cassandra"). Nil disables.
+	Tracer trace.Tracer
 }
 
 func newCluster(cfg SessionConfig) *gocql.ClusterConfig {
@@ -36,6 +50,9 @@ func newCluster(cfg SessionConfig) *gocql.ClusterConfig {
 			Username: cfg.Username,
 			Password: cfg.Password,
 		}
+	}
+	if obs := NewQueryObserver(cfg.Logger, time.Duration(cfg.SlowMS)*time.Millisecond, cfg.Metrics, cfg.Tracer); obs != nil {
+		c.QueryObserver = obs
 	}
 	return c
 }
