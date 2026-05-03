@@ -25,6 +25,9 @@ Started: Sun May  3 17:17:18 MSK 2026
 - For JSON-document configs (bucket policy) where validation lives in a sibling Go package (not s3api), still expose the validator from `internal/s3api/validate.go` as `s3api.Validate<Thing>Blob` — adminapi imports only s3api, never auth/policy directly, so the surface stays consistent across config tabs (CORS/Policy/ACL/Lifecycle).
 - Bucket-policy storage is the raw operator-supplied JSON (no XML translation). PUT canonicalises via `json.Marshal`+2-space indent (`canonicalisePolicyJSON`) before SetBucketPolicy so re-loads after Save are byte-stable in Monaco — avoids whitespace-only diffs surprising the operator.
 - Bucket ACL split: canned lives on bucket (SetBucketACL by name), explicit grants live separately (SetBucketGrants by bucketID). GetBucketGrants returns `meta.ErrNoSuchGrants` when none stored — tolerate with errors.Is, don't 500. log-delivery-write is a valid canned value at the admin layer even though s3api's normalizeCannedACL maps unknown values back to private; the admin endpoint persists the literal string for buckets that opt into S3 access logging.
+- "Multiple configs of one kind per bucket" surfaces (Inventory, future LifecycleRule overrides) use GET-list returning 200 + empty array (NOT 404 — 404 is reserved for "bucket missing"). Lets the React component render an empty state without a try/catch shim. Single-document configs (CORS/Policy/Lifecycle whole) keep returning 404 NoSuch* on absent.
+- Refactor pattern when s3api validation is inline in a handler (not a free function): pull the validation into a `validateXxxBlob` helper in the s3api package, then expose `s3api.ValidateXxxBlob` from validate.go for adminapi to call. The s3api handler still uses the helper directly. See US-008 Inventory for the canonical refactor.
+- Native HTML <datalist> is the zero-dep autocomplete primitive — pairs with shadcn <Input> via the `list=` attribute. Used for "destination bucket" / "target bucket" pickers (US-008, future US-009/US-013) without pulling shadcn Combobox.
 
 ## Sun May  3 17:27 MSK 2026 - US-001
 - Implemented CreateBucket dialog (POST /admin/v1/buckets + UI) per PRD AC.
@@ -314,4 +317,47 @@ Started: Sun May  3 17:17:18 MSK 2026
   - The full reserved canned-ACL list is mirrored in adminapi/buckets_acl.go::allowedCannedACLs and again client-side in BucketACLTab.tsx::CANNED_OPTIONS — keep the two in sync if the canned set ever expands (e.g. bucket-owner-read / bucket-owner-full-control for S3-on-Outposts).
   - The Group URI preset list in CANNED_OPTIONS adjacent GROUP_URIS mirrors internal/s3api/acl.go::allowedGroupURIs. If s3api's URI allow-list grows, copy the new URI into both the s3api map AND the admin component preset list.
   - BucketACLTab.tsx is the canonical chip-free per-row editor pattern; the Multipart watchdog (US-017) and Audit log (US-018) filter panels can lift the 'Select primitive + Input + Remove button + Add row' shape directly.
+---
+
+## Sun May  3 21:05 MSK 2026 - US-008
+- Implemented Inventory configurations CRUD (GET list / PUT / DELETE admin endpoints + new Inventory tab) per PRD AC.
+
+### Backend
+- internal/s3api/inventory.go: extracted putBucketInventory's inline validation into a new `validateInventoryBlob([]byte, expectedID string) error` helper. The s3api putBucketInventory now calls the helper directly (with a sentinel `errInventoryIDMismatch` separating id-mismatch from shape errors so it still returns ErrInvalidArgument vs ErrMalformedXML the same way).
+- internal/s3api/validate.go: added `s3api.ValidateInventoryBlob([]byte, expectedID string) error` thin public wrapper. Adminapi calls it after rendering its JSON shape to AWS XML.
+- internal/adminapi/buckets_inventory.go (new): handleBucketListInventory (GET → {configurations:[…]} sorted by ID; empty list is 200, not 404, so the empty-state UI renders), handleBucketSetInventory (PUT — validates JSON shape, encodes XML, runs s3api.ValidateInventoryBlob preflight, persists via meta.Store.SetBucketInventoryConfig), handleBucketDeleteInventory (DELETE — idempotent, ErrNoSuchInventoryConfig → 204). JSON↔XML translation via encodeInventoryXML/decodeInventoryXML covering ID, IsEnabled, Destination(S3BucketDestination{Bucket, Format, Prefix, AccountId}), Schedule.Frequency, IncludedObjectVersions, Filter.Prefix, OptionalFields[Field]. Validation: ID required, Format ∈ {CSV|ORC|Parquet}, Frequency ∈ {Daily|Hourly|Weekly}, IncludedObjectVersions ∈ {All|Current}, Destination.Bucket required. Audit overrides admin:SetInventoryConfig / admin:DeleteInventoryConfig with resource shape bucket-inventory:<bucket>/<configID>. PUT body ID falls back to URL configID when empty.
+- internal/adminapi/server.go: registered GET/PUT/DELETE routes (/admin/v1/buckets/{bucket}/inventory and /admin/v1/buckets/{bucket}/inventory/{configID}).
+- internal/adminapi/buckets_inventory_test.go (new): 16 cases — ListEmpty, ListBucketNotFound, PutHappyAndRoundTrip (filter + 3 optional_fields), PutBucketNotFound 404, PutIDMismatchRejected 400, PutBadFormat/PutBadFrequency/PutBadVersions/PutMissingDestBucket 400, PutMalformedJSON 400, PutBodyIDFallsBackToConfigID, DeleteHappy + post-delete list empty, DeleteIdempotent (DELETE on missing configID returns 204), DeleteBucketNotFound 404, TwoConfigsListedSorted (alpha,zeta listed in lex order), StoredAsXMLForS3APIConsumption (asserts the persisted blob is `<InventoryConfiguration>…<Frequency>Daily</Frequency>…</InventoryConfiguration>` so the s3api consumer / inventory worker reads the AWS XML it expects unchanged).
+
+### Frontend
+- web/src/api/client.ts: InventoryFormat/InventoryFrequency/InventoryVersions string-literal types + InventoryConfig/InventoryDestination/InventoryFilter/InventorySchedule/InventoryConfigsList types. listBucketInventory / setBucketInventory / deleteBucketInventory wrappers. All throw AdminApiError on 4xx/5xx; deleteBucketInventory absorbs 204 OK silently.
+- web/src/lib/query.ts: queryKeys.buckets.inventory(name) cache slot.
+- web/src/components/BucketInventoryTab.tsx (new): configurations table (ID | Schedule | Destination | Format | Versions | Enabled | Edit/Delete actions) + InventoryEditorDialog (shadcn <Dialog>) for Add/Edit. Editor form: ID (Input — locked when editing), Status checkbox, Schedule (Select Daily|Hourly|Weekly), Versions (Select Current|All), Format (Select CSV|ORC|Parquet), Destination Bucket (Input + native HTML <datalist> populated by fetchBucketsList for autocomplete; falls back to free-typed cluster bucket names), Destination Prefix, Filter Prefix (optional), Optional Fields multi-checkbox grid. Save invalidates queryKeys.buckets.inventory(name); Delete row uses window.confirm guard. Client-side preflight: ID required, no ID collision on Add, Destination Bucket required.
+- web/src/pages/BucketDetail.tsx: added Inventory tab trigger + content alongside existing Overview/Lifecycle/CORS/Policy/ACL/Objects.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` — all packages pass (incl. new buckets_inventory_test.go and the s3api inventory_test.go round-trip after the validation refactor).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean. Bundle sizes (gzipped):
+  - main: 143.30 KiB ✓ (under the 500 KiB AC ceiling; +2.34 KiB vs US-007 baseline of 140.96 — Inventory tab + dialog + datalist autocomplete)
+  - Metrics route: 109.44 KiB (unchanged)
+  - MonacoJsonEditor lazy chunk: 591.94 KiB (unchanged — Inventory tab does NOT pull Monaco; visual editor only, JSON tab not in AC)
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - When an s3api consumer has its validation inline in the handler (not a free-standing parser), extract a `validateXxxBlob([]byte, args…) error` helper in the s3api package + expose a `s3api.ValidateXxxBlob` wrapper from validate.go. The s3api handler keeps using the helper directly; adminapi calls the wrapper. Cleaner than duplicating the rules across both packages or making adminapi import internal/auth/policy-style transitive deps.
+  - For "list of single-document configs" (Inventory, future LifecycleRule overrides if any), GET-list returns 200 + empty array on no-configs (NOT 404). The 404 sentinel is reserved for "no such bucket". This lets the React component render an empty state without a try/catch shim.
+  - Native HTML <datalist> is a zero-dep autocomplete primitive that pairs cleanly with shadcn <Input> — no Combobox dep needed for the "destination bucket" picker. Free-typed values still go through; the datalist just suggests known bucket names. Lift if a future page needs Combobox semantics (filter while typing, keyboard nav of suggestions).
+  - The PRD said "PUT /admin/v1/buckets/{bucket}/inventory/{configID} parses via s3api.parseInventoryConfig" — that function does not exist as a free symbol on main (validation was inline in putBucketInventory). The right adapter is to extract the inline checks into `validateInventoryBlob` + expose `ValidateInventoryBlob` from validate.go. Future PRDs that name an unexported s3api helper should follow the same shape: refactor s3api first to expose an ergonomic public surface, then call it from adminapi.
+- Gotchas:
+  - `meta.Store.SetBucketInventoryConfig(ctx, bucketID, configID, blob)` stores the blob verbatim — the s3api list handler reads bytes back via xml.Unmarshal. Admin endpoint MUST persist the AWS InventoryConfiguration XML shape, not the JSON wire shape, otherwise the inventory worker (which reads the same blobs via meta.Store.ListBucketInventoryConfigs) will fail at unmarshal time.
+  - The body ID can disagree with the URL configID — handler MUST reject the mismatch with 400 InvalidArgument (not silently overwrite). Body ID falling back to URL configID when EMPTY is fine for ergonomics; but a non-empty body ID that disagrees is operator error.
+  - Accept "Hourly" frequency in addition to "Daily"/"Weekly" — the PRD lists "Daily | Weekly" but the s3api validateInventoryBlob has accepted Hourly since the s3api work landed. Don't tighten the admin layer relative to the s3api consumer or pre-existing valid configs become un-PUT-able.
+  - DELETE is idempotent (404 → 204) per the established pattern (US-005 CORS, US-006 Policy). Avoids the dialog needing a "did anything exist?" pre-check round-trip and matches the AWS S3 semantic.
+- Useful context:
+  - The inventory worker (internal/inventory/inventory.go) emits a fixed CSV header — Bucket, Key, VersionId, IsLatest, IsDeleteMarker, Size, LastModifiedDate, ETag, StorageClass, ChecksumAlgorithm — regardless of the OptionalFields list on the configuration. The OptionalFields list is preserved on the blob for forward-compat with future consumers that filter on the configured set; today it's metadata-only.
+  - `internal/adminapi/buckets_inventory.go::encodeInventoryXML` is the canonical JSON→XML "single-document with nested elements" template. Future stories (US-009 access-log target editor) can lift the same shape: typed JSON wire struct, parallel xml-tagged Go struct duplicated in adminapi (so s3api parsers stay unexported), encode-on-PUT / decode-on-GET, optional s3api.ValidateXxxBlob preflight before persist.
+  - The `<datalist>` autocomplete pattern used in BucketInventoryTab.tsx for destination bucket can be reused for US-009 access-log target bucket and US-013 ManagedPolicy attach-target picker without pulling shadcn Combobox.
 ---

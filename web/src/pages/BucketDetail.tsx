@@ -50,6 +50,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
 import { BucketACLTab } from '@/components/BucketACLTab';
 import { BucketCORSTab } from '@/components/BucketCORSTab';
+import { BucketInventoryTab } from '@/components/BucketInventoryTab';
 import { BucketLifecycleTab } from '@/components/BucketLifecycleTab';
 import { BucketOverviewTab } from '@/components/BucketOverviewTab';
 import { BucketPolicyTab } from '@/components/BucketPolicyTab';
@@ -275,6 +276,9 @@ export function BucketDetailPage() {
           <TabsTrigger value="acl" disabled={!detail}>
             ACL
           </TabsTrigger>
+          <TabsTrigger value="inventory" disabled={!detail}>
+            Inventory
+          </TabsTrigger>
         </TabsList>
         <TabsContent value="overview" className="space-y-4">
           {detail && <BucketOverviewTab bucket={detail} />}
@@ -290,6 +294,9 @@ export function BucketDetailPage() {
         </TabsContent>
         <TabsContent value="acl" className="space-y-4">
           {detail && <BucketACLTab bucket={detail} />}
+        </TabsContent>
+        <TabsContent value="inventory" className="space-y-4">
+          {detail && <BucketInventoryTab bucket={detail} />}
         </TabsContent>
         <TabsContent value="objects">
       <Card>

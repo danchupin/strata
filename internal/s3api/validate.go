@@ -47,6 +47,16 @@ func ValidCORSBlob(blob []byte) bool {
 	return err == nil
 }
 
+// ValidateInventoryBlob runs the same shape-validation putBucketInventory
+// performs on the s3api surface. Adminapi calls it after rendering its
+// JSON-shape request to XML, so anything the admin-layer JSON validator
+// missed gets caught before SetBucketInventoryConfig persists. expectedID
+// is the configID the URL carried; pass an empty string to skip the
+// id-match check.
+func ValidateInventoryBlob(blob []byte, expectedID string) error {
+	return validateInventoryBlob(blob, expectedID)
+}
+
 // ValidateBucketPolicyBlob runs the same IAM-policy parser the gateway uses
 // at request-time on a candidate bucket-policy JSON blob. Returns nil when
 // the policy parses + every Statement has Effect ∈ {Allow, Deny}; otherwise

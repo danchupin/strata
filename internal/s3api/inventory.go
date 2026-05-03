@@ -85,37 +85,11 @@ func (s *Server) putBucketInventory(w http.ResponseWriter, r *http.Request, buck
 		writeError(w, r, ErrMalformedXML)
 		return
 	}
-	var cfg inventoryConfigurationXML
-	if err := xml.Unmarshal(body, &cfg); err != nil {
-		writeError(w, r, ErrMalformedXML)
-		return
-	}
-	if cfg.ID == "" || cfg.ID != id {
-		writeError(w, r, ErrInvalidArgument)
-		return
-	}
-	if cfg.Destination == nil || cfg.Destination.S3BucketDestination == nil ||
-		strings.TrimSpace(cfg.Destination.S3BucketDestination.Bucket) == "" ||
-		strings.TrimSpace(cfg.Destination.S3BucketDestination.Format) == "" {
-		writeError(w, r, ErrMalformedXML)
-		return
-	}
-	if cfg.Schedule == nil || cfg.Schedule.Frequency == "" {
-		writeError(w, r, ErrMalformedXML)
-		return
-	}
-	switch strings.ToLower(cfg.Schedule.Frequency) {
-	case "daily", "hourly", "weekly":
-	default:
-		writeError(w, r, ErrMalformedXML)
-		return
-	}
-	switch cfg.IncludedObjectVersions {
-	case "All", "Current":
-	case "":
-		writeError(w, r, ErrMalformedXML)
-		return
-	default:
+	if err := validateInventoryBlob(body, id); err != nil {
+		if errors.Is(err, errInventoryIDMismatch) {
+			writeError(w, r, ErrInvalidArgument)
+			return
+		}
 		writeError(w, r, ErrMalformedXML)
 		return
 	}
@@ -124,6 +98,47 @@ func (s *Server) putBucketInventory(w http.ResponseWriter, r *http.Request, buck
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+// errInventoryIDMismatch is returned by validateInventoryBlob when the URL id
+// does not equal the body's <Id> element. Adminapi distinguishes it from a
+// schema-shape failure so it can return a precise error code.
+var errInventoryIDMismatch = errors.New("inventory: id mismatch")
+
+// validateInventoryBlob mirrors the inline validation putBucketInventory used
+// to do — extracted so adminapi can preflight an admin-side blob without
+// duplicating the rules. Returns errInventoryIDMismatch when expectedID is
+// non-empty and disagrees with cfg.ID.
+func validateInventoryBlob(body []byte, expectedID string) error {
+	var cfg inventoryConfigurationXML
+	if err := xml.Unmarshal(body, &cfg); err != nil {
+		return err
+	}
+	if cfg.ID == "" {
+		return errors.New("inventory: id is required")
+	}
+	if expectedID != "" && cfg.ID != expectedID {
+		return errInventoryIDMismatch
+	}
+	if cfg.Destination == nil || cfg.Destination.S3BucketDestination == nil ||
+		strings.TrimSpace(cfg.Destination.S3BucketDestination.Bucket) == "" ||
+		strings.TrimSpace(cfg.Destination.S3BucketDestination.Format) == "" {
+		return errors.New("inventory: destination bucket+format required")
+	}
+	if cfg.Schedule == nil || cfg.Schedule.Frequency == "" {
+		return errors.New("inventory: schedule frequency required")
+	}
+	switch strings.ToLower(cfg.Schedule.Frequency) {
+	case "daily", "hourly", "weekly":
+	default:
+		return errors.New("inventory: schedule frequency must be Daily|Hourly|Weekly")
+	}
+	switch cfg.IncludedObjectVersions {
+	case "All", "Current":
+	default:
+		return errors.New("inventory: included_object_versions must be All|Current")
+	}
+	return nil
 }
 
 func (s *Server) getBucketInventory(w http.ResponseWriter, r *http.Request, bucket, id string) {

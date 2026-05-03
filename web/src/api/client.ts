@@ -436,6 +436,81 @@ export async function setBucketACL(name: string, body: ACLConfig): Promise<void>
   if (!resp.ok) throw await buildAdminError(resp, 'set acl failed');
 }
 
+// Inventory (US-008) — JSON wire shape mirrors InventoryConfigJSON in
+// internal/adminapi/buckets_inventory.go. The admin layer translates JSON↔XML
+// so the s3api consumer keeps reading the AWS XML shape unchanged.
+export type InventoryFormat = 'CSV' | 'ORC' | 'Parquet';
+export type InventoryFrequency = 'Daily' | 'Hourly' | 'Weekly';
+export type InventoryVersions = 'All' | 'Current';
+
+export interface InventoryDestination {
+  bucket: string;
+  format: InventoryFormat;
+  prefix?: string;
+  account_id?: string;
+}
+
+export interface InventorySchedule {
+  frequency: InventoryFrequency;
+}
+
+export interface InventoryFilter {
+  prefix?: string;
+}
+
+export interface InventoryConfig {
+  id: string;
+  is_enabled: boolean;
+  destination: InventoryDestination;
+  schedule: InventorySchedule;
+  included_object_versions: InventoryVersions;
+  filter?: InventoryFilter;
+  optional_fields?: string[];
+}
+
+export interface InventoryConfigsList {
+  configurations: InventoryConfig[];
+}
+
+export async function listBucketInventory(name: string): Promise<InventoryConfigsList> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(name)}/inventory`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'list inventory failed');
+  const body = (await resp.json()) as InventoryConfigsList;
+  return { configurations: body.configurations ?? [] };
+}
+
+export async function setBucketInventory(
+  name: string,
+  configID: string,
+  cfg: InventoryConfig,
+): Promise<void> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(name)}/inventory/${encodeURIComponent(configID)}`,
+    {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg),
+    },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'set inventory failed');
+}
+
+export async function deleteBucketInventory(
+  name: string,
+  configID: string,
+): Promise<void> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(name)}/inventory/${encodeURIComponent(configID)}`,
+    { method: 'DELETE', credentials: 'same-origin' },
+  );
+  if (resp.status === 204) return;
+  throw await buildAdminError(resp, 'delete inventory failed');
+}
+
 export async function fetchBucket(name: string): Promise<BucketDetail> {
   const resp = await fetch(`/admin/v1/buckets/${encodeURIComponent(name)}`, {
     method: 'GET',

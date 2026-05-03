@@ -78,6 +78,7 @@ export const queryKeys = {
     cors: (name: string) => ['buckets', 'cors', name] as const,
     policy: (name: string) => ['buckets', 'policy', name] as const,
     acl: (name: string) => ['buckets', 'acl', name] as const,
+    inventory: (name: string) => ['buckets', 'inventory', name] as const,
   },
   consumers: {
     top: (by: string, limit: number) => ['consumers', 'top', by, limit] as const,
