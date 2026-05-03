@@ -1,0 +1,611 @@
+package s3
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"strings"
+	"sync"
+	"testing"
+
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/google/uuid"
+
+	"github.com/danchupin/strata/internal/data"
+)
+
+// TestStubReturnsErrUnsupported pins the US-001 acceptance: a New() stub
+// must satisfy data.Backend and surface errors.ErrUnsupported on every
+// mutating method until the real implementation lands.
+func TestStubReturnsErrUnsupported(t *testing.T) {
+	b := New()
+
+	var _ data.Backend = b
+
+	ctx := context.Background()
+
+	if _, err := b.PutChunks(ctx, bytes.NewReader(nil), "STANDARD"); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("PutChunks: want errors.ErrUnsupported, got %v", err)
+	}
+	if _, err := b.GetChunks(ctx, &data.Manifest{}, 0, 0); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("GetChunks: want errors.ErrUnsupported, got %v", err)
+	}
+	if err := b.Delete(ctx, &data.Manifest{}); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("Delete: want errors.ErrUnsupported, got %v", err)
+	}
+	if err := b.Close(); err != nil {
+		t.Fatalf("Close: want nil, got %v", err)
+	}
+}
+
+// TestStubPutReturnsErrUnsupported guards the US-002 streaming Put: a
+// stub Backend (no Open) must not silently succeed — callers without a
+// live S3 client get errors.ErrUnsupported.
+func TestStubPutReturnsErrUnsupported(t *testing.T) {
+	b := New()
+
+	_, err := b.Put(context.Background(), "k", bytes.NewReader(nil), 0)
+	if !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("Put: want errors.ErrUnsupported, got %v", err)
+	}
+}
+
+// TestStubGetReturnsErrUnsupported guards US-003: a stub Backend (no
+// Open) must surface errors.ErrUnsupported on Get / GetRange — never
+// silently succeed.
+func TestStubGetReturnsErrUnsupported(t *testing.T) {
+	b := New()
+	ctx := context.Background()
+
+	if _, err := b.Get(ctx, "k"); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("Get: want errors.ErrUnsupported, got %v", err)
+	}
+	if _, err := b.GetRange(ctx, "k", 0, 1); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("GetRange: want errors.ErrUnsupported, got %v", err)
+	}
+}
+
+// TestGetRangeValidatesArguments pins US-003 input validation: negative
+// offset or non-positive length is a programmer error and must fail
+// before any network call.
+func TestGetRangeValidatesArguments(t *testing.T) {
+	b := &Backend{bucket: "b", client: &awss3.Client{}}
+	ctx := context.Background()
+
+	if _, err := b.GetRange(ctx, "k", -1, 1); err == nil {
+		t.Fatal("GetRange with negative offset: want error, got nil")
+	}
+	if _, err := b.GetRange(ctx, "k", 0, 0); err == nil {
+		t.Fatal("GetRange with zero length: want error, got nil")
+	}
+	if _, err := b.GetRange(ctx, "k", 0, -5); err == nil {
+		t.Fatal("GetRange with negative length: want error, got nil")
+	}
+}
+
+// TestStubDeleteObjectReturnsErrUnsupported guards US-004: the stub
+// Backend (no Open) must surface errors.ErrUnsupported on DeleteObject /
+// DeleteBatch — never silently succeed against an absent client.
+func TestStubDeleteObjectReturnsErrUnsupported(t *testing.T) {
+	b := New()
+	ctx := context.Background()
+
+	if err := b.DeleteObject(ctx, "k", ""); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("DeleteObject: want errors.ErrUnsupported, got %v", err)
+	}
+	if err := b.DeleteObject(ctx, "k", "v"); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("DeleteObject(versioned): want errors.ErrUnsupported, got %v", err)
+	}
+	if _, err := b.DeleteBatch(ctx, []ObjectRef{{Key: "k"}}); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("DeleteBatch: want errors.ErrUnsupported, got %v", err)
+	}
+}
+
+// TestDeleteBatchEmpty is a no-op: empty refs returns (nil, nil) without
+// touching the network — works on stub and live Backend alike.
+func TestDeleteBatchEmpty(t *testing.T) {
+	b := &Backend{bucket: "b", client: &awss3.Client{}}
+	failures, err := b.DeleteBatch(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("DeleteBatch(nil): want nil error, got %v", err)
+	}
+	if failures != nil {
+		t.Fatalf("DeleteBatch(nil): want nil failures, got %v", failures)
+	}
+}
+
+// TestOpenValidatesRequiredConfig pins the US-002 fail-fast contract:
+// missing bucket / region must error at construction, not at first Put.
+func TestOpenValidatesRequiredConfig(t *testing.T) {
+	ctx := context.Background()
+
+	if _, err := Open(ctx, Config{Region: "us-east-1"}); err == nil {
+		t.Fatal("Open with empty bucket: want error, got nil")
+	}
+	if _, err := Open(ctx, Config{Bucket: "x"}); err == nil {
+		t.Fatal("Open with empty region: want error, got nil")
+	}
+}
+
+// TestOpenSkipProbeAvoidsNetwork pins the US-005 SkipProbe escape hatch:
+// callers that don't want the boot-time writability probe (mostly tests)
+// can flip it off and Open returns a live Backend without any HTTP
+// round-trip to the configured endpoint.
+func TestOpenSkipProbeAvoidsNetwork(t *testing.T) {
+	ctx := context.Background()
+	// Endpoint points at a port no one is listening on. With SkipProbe=true
+	// Open must not connect; with SkipProbe=false (covered by integration
+	// tests against MinIO) it would fail.
+	cfg := Config{
+		Bucket:         "strata-test",
+		Region:         "us-east-1",
+		Endpoint:       "http://127.0.0.1:1",
+		AccessKey:      "ak",
+		SecretKey:      "sk",
+		ForcePathStyle: true,
+		SkipProbe:      true,
+	}
+	b, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Open with SkipProbe=true: want nil error, got %v", err)
+	}
+	if b == nil {
+		t.Fatal("Open returned nil backend with no error")
+	}
+	if b.client == nil {
+		t.Fatal("Open returned backend with nil client")
+	}
+}
+
+// TestProbeStubReturnsErrUnsupported guards Probe on a New() stub: with
+// no live client, Probe must surface errors.ErrUnsupported — never
+// silently no-op.
+func TestProbeStubReturnsErrUnsupported(t *testing.T) {
+	b := New()
+	if err := b.Probe(context.Background()); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("Probe on stub: want errors.ErrUnsupported, got %v", err)
+	}
+}
+
+// TestPutRetriesOn503ThenSucceeds pins US-006 retry behaviour: the SDK's
+// adaptive retryer must absorb 503 SlowDown responses on the first two
+// PutObject attempts and surface only the third (200) success to the
+// gateway. No real network — uses an in-process http.RoundTripper that
+// replays a fixed response sequence.
+func TestPutRetriesOn503ThenSucceeds(t *testing.T) {
+	ctx := context.Background()
+
+	seq := &sequenceTransport{
+		responses: []responseFn{
+			slowDownResponse,
+			slowDownResponse,
+			putObjectSuccessResponse,
+		},
+	}
+	cfg := Config{
+		Bucket:         "strata-test",
+		Region:         "us-east-1",
+		Endpoint:       "http://example.invalid",
+		AccessKey:      "ak",
+		SecretKey:      "sk",
+		ForcePathStyle: true,
+		SkipProbe:      true,
+		HTTPClient:     &http.Client{Transport: seq},
+		// MaxRetries left at default (5) — 3 attempts fits.
+	}
+
+	b, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	res, err := b.Put(ctx, "k", strings.NewReader("payload"), 7)
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if res.ETag == "" {
+		t.Fatalf("etag empty in result")
+	}
+	if got := seq.count(); got != 3 {
+		t.Fatalf("transport calls: want 3, got %d", got)
+	}
+}
+
+// responseFn synthesises an http.Response for the test sequence.
+type responseFn func(req *http.Request) *http.Response
+
+// sequenceTransport returns the i-th synthetic response on the i-th
+// RoundTrip. Surplus calls return an error so over-retry surfaces.
+type sequenceTransport struct {
+	mu        sync.Mutex
+	responses []responseFn
+	idx       int
+}
+
+func (s *sequenceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body != nil {
+		_, _ = io.Copy(io.Discard, req.Body)
+		_ = req.Body.Close()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.idx >= len(s.responses) {
+		return nil, errors.New("sequenceTransport: out of responses")
+	}
+	resp := s.responses[s.idx](req)
+	s.idx++
+	return resp, nil
+}
+
+func (s *sequenceTransport) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.idx
+}
+
+func slowDownResponse(req *http.Request) *http.Response {
+	body := `<?xml version="1.0" encoding="UTF-8"?><Error><Code>SlowDown</Code><Message>backend asks the client to slow down</Message><RequestId>test</RequestId><HostId>test</HostId></Error>`
+	return &http.Response{
+		Status:        "503 Slow Down",
+		StatusCode:    http.StatusServiceUnavailable,
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        http.Header{"Content-Type": []string{"application/xml"}},
+		Body:          io.NopCloser(strings.NewReader(body)),
+		ContentLength: int64(len(body)),
+		Request:       req,
+	}
+}
+
+func putObjectSuccessResponse(req *http.Request) *http.Response {
+	h := http.Header{}
+	h.Set("ETag", `"abc123"`)
+	return &http.Response{
+		Status:        "200 OK",
+		StatusCode:    http.StatusOK,
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        h,
+		Body:          io.NopCloser(strings.NewReader("")),
+		ContentLength: 0,
+		Request:       req,
+	}
+}
+
+// TestPutChunksBuildsBackendRefManifest pins the US-009 native shape:
+// PutChunks must set Manifest.BackendRef ({Backend:"s3", Key:..., ETag,
+// Size, VersionID}) and leave Chunks empty (1:1 invariant from US-008).
+// Uses an in-process http.RoundTripper instead of MinIO so the test is
+// hermetic and runs under `go test ./...`.
+func TestPutChunksBuildsBackendRefManifest(t *testing.T) {
+	ctx := context.Background()
+	const payload = "hello strata"
+
+	seq := &sequenceTransport{
+		responses: []responseFn{putObjectSuccessResponse},
+	}
+	cfg := Config{
+		Bucket:         "strata-test",
+		Region:         "us-east-1",
+		Endpoint:       "http://example.invalid",
+		AccessKey:      "ak",
+		SecretKey:      "sk",
+		ForcePathStyle: true,
+		SkipProbe:      true,
+		HTTPClient:     &http.Client{Transport: seq},
+	}
+	b, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	bucketID := uuid.New()
+	m, err := b.PutChunks(data.WithBucketID(ctx, bucketID), strings.NewReader(payload), "STANDARD")
+	if err != nil {
+		t.Fatalf("PutChunks: %v", err)
+	}
+	if m.BackendRef == nil {
+		t.Fatal("Manifest.BackendRef must be non-nil for s3 backend")
+	}
+	if len(m.Chunks) != 0 {
+		t.Fatalf("Manifest.Chunks must be empty for BackendRef-shape, got %d", len(m.Chunks))
+	}
+	if m.BackendRef.Backend != BackendName {
+		t.Fatalf("BackendRef.Backend: want %q, got %q", BackendName, m.BackendRef.Backend)
+	}
+	if !strings.HasPrefix(m.BackendRef.Key, bucketID.String()+"/") {
+		t.Fatalf("BackendRef.Key must start with bucket-uuid prefix %q, got %q", bucketID.String(), m.BackendRef.Key)
+	}
+	if m.BackendRef.ETag == "" {
+		t.Fatal("BackendRef.ETag must mirror backend ETag")
+	}
+	if m.ETag != m.BackendRef.ETag {
+		t.Fatalf("Manifest.ETag (%q) must equal BackendRef.ETag (%q)", m.ETag, m.BackendRef.ETag)
+	}
+	if m.Size != int64(len(payload)) {
+		t.Fatalf("Manifest.Size: want %d, got %d", len(payload), m.Size)
+	}
+	if m.BackendRef.Size != int64(len(payload)) {
+		t.Fatalf("BackendRef.Size: want %d, got %d", len(payload), m.BackendRef.Size)
+	}
+	if m.Class != "STANDARD" {
+		t.Fatalf("Manifest.Class: want STANDARD, got %q", m.Class)
+	}
+}
+
+// TestPutChunksObjectKeyFallback verifies the random-prefix fallback for
+// callers that don't thread a bucket id via data.WithBucketID. The key
+// still has a UUID-shaped prefix so AWS S3 prefix partitioning kicks in.
+func TestPutChunksObjectKeyFallback(t *testing.T) {
+	ctx := context.Background()
+
+	seq := &sequenceTransport{
+		responses: []responseFn{putObjectSuccessResponse},
+	}
+	cfg := Config{
+		Bucket:         "strata-test",
+		Region:         "us-east-1",
+		Endpoint:       "http://example.invalid",
+		AccessKey:      "ak",
+		SecretKey:      "sk",
+		ForcePathStyle: true,
+		SkipProbe:      true,
+		HTTPClient:     &http.Client{Transport: seq},
+	}
+	b, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	m, err := b.PutChunks(ctx, strings.NewReader("x"), "")
+	if err != nil {
+		t.Fatalf("PutChunks: %v", err)
+	}
+	if m.BackendRef == nil {
+		t.Fatal("BackendRef nil")
+	}
+	parts := strings.SplitN(m.BackendRef.Key, "/", 2)
+	if len(parts) != 2 {
+		t.Fatalf("Key must be <prefix>/<id>, got %q", m.BackendRef.Key)
+	}
+	if _, err := uuid.Parse(parts[0]); err != nil {
+		t.Fatalf("Key prefix %q must be UUID-shaped: %v", parts[0], err)
+	}
+	if _, err := uuid.Parse(parts[1]); err != nil {
+		t.Fatalf("Key suffix %q must be UUID-shaped: %v", parts[1], err)
+	}
+	if m.Class != "STANDARD" {
+		t.Fatalf("empty class default: want STANDARD, got %q", m.Class)
+	}
+}
+
+// TestGetChunksRejectsChunksShapeManifest pins the s3 backend's
+// BackendRef-only contract: a chunks-shape manifest (rados-shape) fed
+// into GetChunks returns errors.ErrUnsupported — never silently fail
+// open or panic.
+func TestGetChunksRejectsChunksShapeManifest(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		Bucket:         "strata-test",
+		Region:         "us-east-1",
+		Endpoint:       "http://example.invalid",
+		AccessKey:      "ak",
+		SecretKey:      "sk",
+		ForcePathStyle: true,
+		SkipProbe:      true,
+		HTTPClient:     &http.Client{Transport: &sequenceTransport{}},
+	}
+	b, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	m := &data.Manifest{Chunks: []data.ChunkRef{{Pool: "p", OID: "k", Size: 1}}, Size: 1}
+	if _, err := b.GetChunks(ctx, m, 0, 1); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("GetChunks(chunks-shape): want errors.ErrUnsupported, got %v", err)
+	}
+}
+
+// TestOpenRejectsUnknownSSEMode pins US-013 fail-fast: an unknown SSE mode
+// must error at Open, never silently fall back to a default. Operators
+// catch typos in STRATA_S3_BACKEND_SSE_MODE at startup, not at first PUT.
+func TestOpenRejectsUnknownSSEMode(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		Bucket:    "b",
+		Region:    "us-east-1",
+		SkipProbe: true,
+		SSEMode:   "garbage",
+	}
+	if _, err := Open(ctx, cfg); err == nil {
+		t.Fatal("Open with bogus SSEMode: want error, got nil")
+	}
+}
+
+// TestPutChunksPassthroughSendsSSEHeader pins US-013 default behaviour:
+// passthrough mode (the empty-string default) must add an
+// x-amz-server-side-encryption: AES256 header to backend PutObject calls
+// AND record Manifest.SSE.{Mode:passthrough, Algorithm:AES256}. Captures
+// the request via an in-process http.RoundTripper.
+func TestPutChunksPassthroughSendsSSEHeader(t *testing.T) {
+	ctx := context.Background()
+
+	captured := &headerCapturingTransport{}
+	cfg := Config{
+		Bucket:         "strata-test",
+		Region:         "us-east-1",
+		Endpoint:       "http://example.invalid",
+		AccessKey:      "ak",
+		SecretKey:      "sk",
+		ForcePathStyle: true,
+		SkipProbe:      true,
+		HTTPClient:     &http.Client{Transport: captured},
+		// SSEMode left empty — defaults to passthrough.
+	}
+	b, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	m, err := b.PutChunks(ctx, strings.NewReader("hello"), "STANDARD")
+	if err != nil {
+		t.Fatalf("PutChunks: %v", err)
+	}
+	if got := captured.lastHeader("X-Amz-Server-Side-Encryption"); got != "AES256" {
+		t.Fatalf("backend SSE header: want AES256, got %q", got)
+	}
+	if m.SSE == nil {
+		t.Fatal("Manifest.SSE: must be set in passthrough mode")
+	}
+	if m.SSE.Mode != data.SSEModePassthrough {
+		t.Fatalf("Manifest.SSE.Mode: want passthrough, got %q", m.SSE.Mode)
+	}
+	if m.SSE.Algorithm != data.SSEAlgorithmAES256 {
+		t.Fatalf("Manifest.SSE.Algorithm: want AES256, got %q", m.SSE.Algorithm)
+	}
+	if m.SSE.KMSKeyID != "" {
+		t.Fatalf("Manifest.SSE.KMSKeyID: want empty (no KMS), got %q", m.SSE.KMSKeyID)
+	}
+}
+
+// TestPutChunksStrataModeOmitsSSEHeader pins US-013 strata mode: no
+// backend SSE header is sent (gateway-side envelope encryption is the
+// plan, not yet implemented), and Manifest.SSE.Algorithm stays empty so
+// the gateway GET path knows not to surface a backend SSE header.
+func TestPutChunksStrataModeOmitsSSEHeader(t *testing.T) {
+	ctx := context.Background()
+
+	captured := &headerCapturingTransport{}
+	cfg := Config{
+		Bucket:         "strata-test",
+		Region:         "us-east-1",
+		Endpoint:       "http://example.invalid",
+		AccessKey:      "ak",
+		SecretKey:      "sk",
+		ForcePathStyle: true,
+		SkipProbe:      true,
+		HTTPClient:     &http.Client{Transport: captured},
+		SSEMode:        data.SSEModeStrata,
+	}
+	b, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	m, err := b.PutChunks(ctx, strings.NewReader("hello"), "STANDARD")
+	if err != nil {
+		t.Fatalf("PutChunks: %v", err)
+	}
+	if got := captured.lastHeader("X-Amz-Server-Side-Encryption"); got != "" {
+		t.Fatalf("backend SSE header in strata mode: want empty, got %q", got)
+	}
+	if m.SSE == nil || m.SSE.Mode != data.SSEModeStrata {
+		t.Fatalf("Manifest.SSE: want Mode=strata, got %+v", m.SSE)
+	}
+	if m.SSE.Algorithm != "" {
+		t.Fatalf("Manifest.SSE.Algorithm: want empty in strata mode, got %q", m.SSE.Algorithm)
+	}
+}
+
+// TestPutChunksKMSModeSendsKMSHeaders pins US-013 KMS routing: setting
+// SSEKMSKeyID switches the backend SSE header to aws:kms and adds the
+// x-amz-server-side-encryption-aws-kms-key-id header. Manifest.SSE
+// records both Algorithm=aws:kms AND the KMS key id so the GET path
+// can surface them.
+func TestPutChunksKMSModeSendsKMSHeaders(t *testing.T) {
+	ctx := context.Background()
+
+	captured := &headerCapturingTransport{}
+	const keyID = "arn:aws:kms:us-east-1:111122223333:key/abc-def"
+	cfg := Config{
+		Bucket:         "strata-test",
+		Region:         "us-east-1",
+		Endpoint:       "http://example.invalid",
+		AccessKey:      "ak",
+		SecretKey:      "sk",
+		ForcePathStyle: true,
+		SkipProbe:      true,
+		HTTPClient:     &http.Client{Transport: captured},
+		SSEMode:        data.SSEModeBoth,
+		SSEKMSKeyID:    keyID,
+	}
+	b, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	m, err := b.PutChunks(ctx, strings.NewReader("hello"), "STANDARD")
+	if err != nil {
+		t.Fatalf("PutChunks: %v", err)
+	}
+	if got := captured.lastHeader("X-Amz-Server-Side-Encryption"); got != "aws:kms" {
+		t.Fatalf("backend SSE header: want aws:kms, got %q", got)
+	}
+	if got := captured.lastHeader("X-Amz-Server-Side-Encryption-Aws-Kms-Key-Id"); got != keyID {
+		t.Fatalf("backend KMS-key-id header: want %q, got %q", keyID, got)
+	}
+	if m.SSE == nil || m.SSE.Mode != data.SSEModeBoth {
+		t.Fatalf("Manifest.SSE.Mode: want both, got %+v", m.SSE)
+	}
+	if m.SSE.Algorithm != data.SSEAlgorithmKMS || m.SSE.KMSKeyID != keyID {
+		t.Fatalf("Manifest.SSE: want Algorithm=aws:kms KMSKeyID=%q, got %+v", keyID, m.SSE)
+	}
+}
+
+// headerCapturingTransport stores the HTTP headers from the most recent
+// RoundTrip and serves a synthetic 200 OK PutObject response so the SDK's
+// success path is exercised end-to-end without a real S3.
+type headerCapturingTransport struct {
+	mu      sync.Mutex
+	headers http.Header
+}
+
+func (t *headerCapturingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body != nil {
+		_, _ = io.Copy(io.Discard, req.Body)
+		_ = req.Body.Close()
+	}
+	t.mu.Lock()
+	t.headers = req.Header.Clone()
+	t.mu.Unlock()
+	return putObjectSuccessResponse(req), nil
+}
+
+func (t *headerCapturingTransport) lastHeader(name string) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.headers == nil {
+		return ""
+	}
+	return t.headers.Get(name)
+}
+
+// TestDeleteWithoutBackendRefIsNoOp pins the cleanup contract: a
+// chunks-shape (or zero-value) manifest is not the s3 backend's
+// responsibility — Delete returns nil without touching the network.
+func TestDeleteWithoutBackendRefIsNoOp(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		Bucket:         "strata-test",
+		Region:         "us-east-1",
+		Endpoint:       "http://example.invalid",
+		AccessKey:      "ak",
+		SecretKey:      "sk",
+		ForcePathStyle: true,
+		SkipProbe:      true,
+		HTTPClient:     &http.Client{Transport: &sequenceTransport{}},
+	}
+	b, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := b.Delete(ctx, nil); err != nil {
+		t.Fatalf("Delete(nil): want nil, got %v", err)
+	}
+	if err := b.Delete(ctx, &data.Manifest{Chunks: []data.ChunkRef{{OID: "k"}}}); err != nil {
+		t.Fatalf("Delete(chunks-shape): want nil, got %v", err)
+	}
+}

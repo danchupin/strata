@@ -65,6 +65,21 @@ func New(d data.Backend, m meta.Store) *Server {
 	return &Server{Data: d, Meta: m, Region: "default"}
 }
 
+// enqueueOrphan dispatches abandoned object bytes to the right cleanup path.
+// For S3-over-S3 manifests (BackendRef != nil) the gateway issues an immediate
+// backend Delete since there is no chunk-level GC. For chunk-based manifests
+// the chunks queue into the GC worker via enqueueChunks.
+func (s *Server) enqueueOrphan(ctx context.Context, m *data.Manifest) {
+	if m == nil {
+		return
+	}
+	if m.BackendRef != nil {
+		_ = s.Data.Delete(ctx, m)
+		return
+	}
+	s.enqueueChunks(ctx, m.Chunks)
+}
+
 func (s *Server) enqueueChunks(ctx context.Context, chunks []data.ChunkRef) {
 	if len(chunks) == 0 {
 		return

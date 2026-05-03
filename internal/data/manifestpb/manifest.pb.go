@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.6
 // 	protoc        v6.32.0
-// source: internal/data/manifest.proto
+// source: manifest.proto
 
 package manifestpb
 
@@ -23,26 +23,31 @@ const (
 
 // Manifest mirrors data.Manifest (internal/data/manifest.go). New fields must
 // keep wire compatibility — append-only field numbers, no renumbering.
+//
+// Field-number ledger:
+//
+//	1..5   Class / Size / ChunkSize / ETag / Chunks
+//	6..7   PartChunks / PartChecksums (US-049 multipart SSE)
+//	8      BackendRef (US-008 S3-over-S3 data backend)
+//	12     SSEInfo (US-013 SSE mode wire record)
 type Manifest struct {
-	state     protoimpl.MessageState `protogen:"open.v1"`
-	Class     string                 `protobuf:"bytes,1,opt,name=class,proto3" json:"class,omitempty"`
-	Size      int64                  `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"`
-	ChunkSize int64                  `protobuf:"varint,3,opt,name=chunk_size,json=chunkSize,proto3" json:"chunk_size,omitempty"`
-	Etag      string                 `protobuf:"bytes,4,opt,name=etag,proto3" json:"etag,omitempty"`
-	Chunks    []*ChunkRef            `protobuf:"bytes,5,rep,name=chunks,proto3" json:"chunks,omitempty"`
-	// part_chunks records the number of chunks contributed by each part of a
-	// multipart upload, in part order.
-	PartChunks []int64 `protobuf:"varint,6,rep,packed,name=part_chunks,json=partChunks,proto3" json:"part_chunks,omitempty"`
-	// part_checksums is the per-part stored checksum map (algo -> value), one
-	// entry per part in PartNumber order.
-	PartChecksums []*PartChecksum `protobuf:"bytes,7,rep,name=part_checksums,json=partChecksums,proto3" json:"part_checksums,omitempty"`
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Class         string                 `protobuf:"bytes,1,opt,name=class,proto3" json:"class,omitempty"`
+	Size          int64                  `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"`
+	ChunkSize     int64                  `protobuf:"varint,3,opt,name=chunk_size,json=chunkSize,proto3" json:"chunk_size,omitempty"`
+	Etag          string                 `protobuf:"bytes,4,opt,name=etag,proto3" json:"etag,omitempty"`
+	Chunks        []*ChunkRef            `protobuf:"bytes,5,rep,name=chunks,proto3" json:"chunks,omitempty"`
+	PartChunks    []int64                `protobuf:"varint,6,rep,packed,name=part_chunks,json=partChunks,proto3" json:"part_chunks,omitempty"`
+	PartChecksums []*PartChecksum        `protobuf:"bytes,7,rep,name=part_checksums,json=partChecksums,proto3" json:"part_checksums,omitempty"`
+	BackendRef    *BackendRef            `protobuf:"bytes,8,opt,name=backend_ref,json=backendRef,proto3" json:"backend_ref,omitempty"`
+	Sse           *SSEInfo               `protobuf:"bytes,12,opt,name=sse,proto3" json:"sse,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Manifest) Reset() {
 	*x = Manifest{}
-	mi := &file_internal_data_manifest_proto_msgTypes[0]
+	mi := &file_manifest_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -54,7 +59,7 @@ func (x *Manifest) String() string {
 func (*Manifest) ProtoMessage() {}
 
 func (x *Manifest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_data_manifest_proto_msgTypes[0]
+	mi := &file_manifest_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -67,7 +72,7 @@ func (x *Manifest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Manifest.ProtoReflect.Descriptor instead.
 func (*Manifest) Descriptor() ([]byte, []int) {
-	return file_internal_data_manifest_proto_rawDescGZIP(), []int{0}
+	return file_manifest_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *Manifest) GetClass() string {
@@ -119,6 +124,20 @@ func (x *Manifest) GetPartChecksums() []*PartChecksum {
 	return nil
 }
 
+func (x *Manifest) GetBackendRef() *BackendRef {
+	if x != nil {
+		return x.BackendRef
+	}
+	return nil
+}
+
+func (x *Manifest) GetSse() *SSEInfo {
+	if x != nil {
+		return x.Sse
+	}
+	return nil
+}
+
 type ChunkRef struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Cluster       string                 `protobuf:"bytes,1,opt,name=cluster,proto3" json:"cluster,omitempty"`
@@ -132,7 +151,7 @@ type ChunkRef struct {
 
 func (x *ChunkRef) Reset() {
 	*x = ChunkRef{}
-	mi := &file_internal_data_manifest_proto_msgTypes[1]
+	mi := &file_manifest_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -144,7 +163,7 @@ func (x *ChunkRef) String() string {
 func (*ChunkRef) ProtoMessage() {}
 
 func (x *ChunkRef) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_data_manifest_proto_msgTypes[1]
+	mi := &file_manifest_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -157,7 +176,7 @@ func (x *ChunkRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChunkRef.ProtoReflect.Descriptor instead.
 func (*ChunkRef) Descriptor() ([]byte, []int) {
-	return file_internal_data_manifest_proto_rawDescGZIP(), []int{1}
+	return file_manifest_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *ChunkRef) GetCluster() string {
@@ -204,7 +223,7 @@ type PartChecksum struct {
 
 func (x *PartChecksum) Reset() {
 	*x = PartChecksum{}
-	mi := &file_internal_data_manifest_proto_msgTypes[2]
+	mi := &file_manifest_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -216,7 +235,7 @@ func (x *PartChecksum) String() string {
 func (*PartChecksum) ProtoMessage() {}
 
 func (x *PartChecksum) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_data_manifest_proto_msgTypes[2]
+	mi := &file_manifest_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -229,7 +248,7 @@ func (x *PartChecksum) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PartChecksum.ProtoReflect.Descriptor instead.
 func (*PartChecksum) Descriptor() ([]byte, []int) {
-	return file_internal_data_manifest_proto_rawDescGZIP(), []int{2}
+	return file_manifest_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *PartChecksum) GetValues() map[string]string {
@@ -239,11 +258,147 @@ func (x *PartChecksum) GetValues() map[string]string {
 	return nil
 }
 
-var File_internal_data_manifest_proto protoreflect.FileDescriptor
+type BackendRef struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Backend       string                 `protobuf:"bytes,1,opt,name=backend,proto3" json:"backend,omitempty"`
+	Key           string                 `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
+	Etag          string                 `protobuf:"bytes,3,opt,name=etag,proto3" json:"etag,omitempty"`
+	Size          int64                  `protobuf:"varint,4,opt,name=size,proto3" json:"size,omitempty"`
+	VersionId     string                 `protobuf:"bytes,5,opt,name=version_id,json=versionId,proto3" json:"version_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
 
-const file_internal_data_manifest_proto_rawDesc = "" +
+func (x *BackendRef) Reset() {
+	*x = BackendRef{}
+	mi := &file_manifest_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BackendRef) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BackendRef) ProtoMessage() {}
+
+func (x *BackendRef) ProtoReflect() protoreflect.Message {
+	mi := &file_manifest_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BackendRef.ProtoReflect.Descriptor instead.
+func (*BackendRef) Descriptor() ([]byte, []int) {
+	return file_manifest_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *BackendRef) GetBackend() string {
+	if x != nil {
+		return x.Backend
+	}
+	return ""
+}
+
+func (x *BackendRef) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *BackendRef) GetEtag() string {
+	if x != nil {
+		return x.Etag
+	}
+	return ""
+}
+
+func (x *BackendRef) GetSize() int64 {
+	if x != nil {
+		return x.Size
+	}
+	return 0
+}
+
+func (x *BackendRef) GetVersionId() string {
+	if x != nil {
+		return x.VersionId
+	}
+	return ""
+}
+
+type SSEInfo struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Mode          string                 `protobuf:"bytes,1,opt,name=mode,proto3" json:"mode,omitempty"`
+	Algorithm     string                 `protobuf:"bytes,2,opt,name=algorithm,proto3" json:"algorithm,omitempty"`
+	KmsKeyId      string                 `protobuf:"bytes,3,opt,name=kms_key_id,json=kmsKeyId,proto3" json:"kms_key_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SSEInfo) Reset() {
+	*x = SSEInfo{}
+	mi := &file_manifest_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SSEInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SSEInfo) ProtoMessage() {}
+
+func (x *SSEInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_manifest_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SSEInfo.ProtoReflect.Descriptor instead.
+func (*SSEInfo) Descriptor() ([]byte, []int) {
+	return file_manifest_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *SSEInfo) GetMode() string {
+	if x != nil {
+		return x.Mode
+	}
+	return ""
+}
+
+func (x *SSEInfo) GetAlgorithm() string {
+	if x != nil {
+		return x.Algorithm
+	}
+	return ""
+}
+
+func (x *SSEInfo) GetKmsKeyId() string {
+	if x != nil {
+		return x.KmsKeyId
+	}
+	return ""
+}
+
+var File_manifest_proto protoreflect.FileDescriptor
+
+const file_manifest_proto_rawDesc = "" +
 	"\n" +
-	"\x1cinternal/data/manifest.proto\x12\x0estrata.data.v1\"\xff\x01\n" +
+	"\x0emanifest.proto\x12\x0estrata.data.v1\"\xed\x02\n" +
 	"\bManifest\x12\x14\n" +
 	"\x05class\x18\x01 \x01(\tR\x05class\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x03R\x04size\x12\x1d\n" +
@@ -253,7 +408,10 @@ const file_internal_data_manifest_proto_rawDesc = "" +
 	"\x06chunks\x18\x05 \x03(\v2\x18.strata.data.v1.ChunkRefR\x06chunks\x12\x1f\n" +
 	"\vpart_chunks\x18\x06 \x03(\x03R\n" +
 	"partChunks\x12C\n" +
-	"\x0epart_checksums\x18\a \x03(\v2\x1c.strata.data.v1.PartChecksumR\rpartChecksums\"|\n" +
+	"\x0epart_checksums\x18\a \x03(\v2\x1c.strata.data.v1.PartChecksumR\rpartChecksums\x12;\n" +
+	"\vbackend_ref\x18\b \x01(\v2\x1a.strata.data.v1.BackendRefR\n" +
+	"backendRef\x12)\n" +
+	"\x03sse\x18\f \x01(\v2\x17.strata.data.v1.SSEInfoR\x03sseJ\x04\b\t\x10\f\"|\n" +
 	"\bChunkRef\x12\x18\n" +
 	"\acluster\x18\x01 \x01(\tR\acluster\x12\x12\n" +
 	"\x04pool\x18\x02 \x01(\tR\x04pool\x12\x1c\n" +
@@ -264,58 +422,75 @@ const file_internal_data_manifest_proto_rawDesc = "" +
 	"\x06values\x18\x01 \x03(\v2(.strata.data.v1.PartChecksum.ValuesEntryR\x06values\x1a9\n" +
 	"\vValuesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01BAZ?github.com/danchupin/strata/internal/data/manifestpb;manifestpbb\x06proto3"
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x7f\n" +
+	"\n" +
+	"BackendRef\x12\x18\n" +
+	"\abackend\x18\x01 \x01(\tR\abackend\x12\x10\n" +
+	"\x03key\x18\x02 \x01(\tR\x03key\x12\x12\n" +
+	"\x04etag\x18\x03 \x01(\tR\x04etag\x12\x12\n" +
+	"\x04size\x18\x04 \x01(\x03R\x04size\x12\x1d\n" +
+	"\n" +
+	"version_id\x18\x05 \x01(\tR\tversionId\"Y\n" +
+	"\aSSEInfo\x12\x12\n" +
+	"\x04mode\x18\x01 \x01(\tR\x04mode\x12\x1c\n" +
+	"\talgorithm\x18\x02 \x01(\tR\talgorithm\x12\x1c\n" +
+	"\n" +
+	"kms_key_id\x18\x03 \x01(\tR\bkmsKeyIdBAZ?github.com/danchupin/strata/internal/data/manifestpb;manifestpbb\x06proto3"
 
 var (
-	file_internal_data_manifest_proto_rawDescOnce sync.Once
-	file_internal_data_manifest_proto_rawDescData []byte
+	file_manifest_proto_rawDescOnce sync.Once
+	file_manifest_proto_rawDescData []byte
 )
 
-func file_internal_data_manifest_proto_rawDescGZIP() []byte {
-	file_internal_data_manifest_proto_rawDescOnce.Do(func() {
-		file_internal_data_manifest_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_internal_data_manifest_proto_rawDesc), len(file_internal_data_manifest_proto_rawDesc)))
+func file_manifest_proto_rawDescGZIP() []byte {
+	file_manifest_proto_rawDescOnce.Do(func() {
+		file_manifest_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_manifest_proto_rawDesc), len(file_manifest_proto_rawDesc)))
 	})
-	return file_internal_data_manifest_proto_rawDescData
+	return file_manifest_proto_rawDescData
 }
 
-var file_internal_data_manifest_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
-var file_internal_data_manifest_proto_goTypes = []any{
+var file_manifest_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_manifest_proto_goTypes = []any{
 	(*Manifest)(nil),     // 0: strata.data.v1.Manifest
 	(*ChunkRef)(nil),     // 1: strata.data.v1.ChunkRef
 	(*PartChecksum)(nil), // 2: strata.data.v1.PartChecksum
-	nil,                  // 3: strata.data.v1.PartChecksum.ValuesEntry
+	(*BackendRef)(nil),   // 3: strata.data.v1.BackendRef
+	(*SSEInfo)(nil),      // 4: strata.data.v1.SSEInfo
+	nil,                  // 5: strata.data.v1.PartChecksum.ValuesEntry
 }
-var file_internal_data_manifest_proto_depIdxs = []int32{
+var file_manifest_proto_depIdxs = []int32{
 	1, // 0: strata.data.v1.Manifest.chunks:type_name -> strata.data.v1.ChunkRef
 	2, // 1: strata.data.v1.Manifest.part_checksums:type_name -> strata.data.v1.PartChecksum
-	3, // 2: strata.data.v1.PartChecksum.values:type_name -> strata.data.v1.PartChecksum.ValuesEntry
-	3, // [3:3] is the sub-list for method output_type
-	3, // [3:3] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	3, // 2: strata.data.v1.Manifest.backend_ref:type_name -> strata.data.v1.BackendRef
+	4, // 3: strata.data.v1.Manifest.sse:type_name -> strata.data.v1.SSEInfo
+	5, // 4: strata.data.v1.PartChecksum.values:type_name -> strata.data.v1.PartChecksum.ValuesEntry
+	5, // [5:5] is the sub-list for method output_type
+	5, // [5:5] is the sub-list for method input_type
+	5, // [5:5] is the sub-list for extension type_name
+	5, // [5:5] is the sub-list for extension extendee
+	0, // [0:5] is the sub-list for field type_name
 }
 
-func init() { file_internal_data_manifest_proto_init() }
-func file_internal_data_manifest_proto_init() {
-	if File_internal_data_manifest_proto != nil {
+func init() { file_manifest_proto_init() }
+func file_manifest_proto_init() {
+	if File_manifest_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_data_manifest_proto_rawDesc), len(file_internal_data_manifest_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_manifest_proto_rawDesc), len(file_manifest_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   4,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
-		GoTypes:           file_internal_data_manifest_proto_goTypes,
-		DependencyIndexes: file_internal_data_manifest_proto_depIdxs,
-		MessageInfos:      file_internal_data_manifest_proto_msgTypes,
+		GoTypes:           file_manifest_proto_goTypes,
+		DependencyIndexes: file_manifest_proto_depIdxs,
+		MessageInfos:      file_manifest_proto_msgTypes,
 	}.Build()
-	File_internal_data_manifest_proto = out.File
-	file_internal_data_manifest_proto_goTypes = nil
-	file_internal_data_manifest_proto_depIdxs = nil
+	File_manifest_proto = out.File
+	file_manifest_proto_goTypes = nil
+	file_manifest_proto_depIdxs = nil
 }

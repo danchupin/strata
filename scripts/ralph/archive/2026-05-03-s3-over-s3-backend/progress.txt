@@ -1,0 +1,67 @@
+# Ralph Progress Log
+Started: 2026-05-01
+Cycle: ralph/s3-tests-90
+---
+
+## Codebase Patterns
+
+(seed entries for this cycle. Replace/remove as US-001..US-011 land.)
+
+- s3-tests baseline lives in scripts/s3-tests/README.md as an append-only
+  history. Every closing commit appends a new `### YYYY-MM-DD — <sha>`
+  section with passrate + failure breakdown — never replace prior
+  entries.
+- ROADMAP maintenance rule (CLAUDE.md root): every commit closing a
+  ROADMAP item flips the bullet to ~~strikethrough~~ Done format in the
+  same commit, with closing SHA inline (or `(commit pending)` with a
+  follow-up SHA edit). Every commit discovering a new gap adds a fresh
+  entry under the right severity section in the same commit.
+- internal/data/manifest.proto field-number map at cycle start:
+  1 class, 2 size, 3 chunk_size, 4 etag, 5 chunks, 6 backend_ref
+  (US-008 of s3-over-s3 cycle), 12 sse (US-013 of s3-over-s3),
+  reserved 7..11. **US-001 of THIS cycle adds PartChunks at field
+  number 13** (first available after the existing reservation block).
+  Reserve 14..18 for PartRange sub-message fields if ever flattened.
+  Update the field-number assignment header comment at the top of
+  manifest.proto. Renumbering is forbidden — the schema is wire-
+  compatible across RADOS-mode + S3-backend-mode manifests both
+  directions.
+- internal/data/manifest.go BackendRef VersionID has documented
+  three-shape semantics ('' / 'null' / <uuid>) — US-007 of THIS cycle
+  introduces 'null' for Strata-side meta.Object.VersionID with the
+  same vocabulary. Reuse the doc-comment style.
+- meta.Store interface is the contract; THREE backends update in
+  lockstep: memory + cassandra + tikv. internal/meta/storetest/contract.go
+  is the parity oracle — every meta.Store change must keep the
+  contract suite green against all three.
+- Cassandra LWT lesson (CLAUDE.md "Cassandra gotchas"): any UPDATE on
+  a row that may be read with quorum AFTER a previous LWT must itself
+  be LWT (IF EXISTS). The TiKV equivalent is "any update needing
+  read-after-write coherence must use a pessimistic txn, not plain
+  Put". US-007 (versioning Suspend → null overwrite) and US-009
+  (multipart Resend-first-finishes-last) both touch this — wire LWT /
+  pessimistic-txn paths in lockstep.
+- Per-part composite-checksum response shape (US-003) follows AWS
+  formula: concatenate raw part-digests (binary, not hex), SHA-256
+  the concatenation, base64-encode. The composite is reported in
+  CompleteMultipartUploadResult AND echoed on HEAD with
+  ChecksumMode=ENABLED.
+- Per-part offset tracking (US-001 PartChunks) is populated at
+  CompleteMultipartUpload time from multipart_uploads.parts rows.
+  Per-part checksum (added in US-004) MUST be stored at UploadPart
+  time, not recomputed at Complete — the body bytes have already
+  streamed past.
+- BackendETag column on multipart_uploads.parts already exists from
+  s3-over-s3 cycle US-010 (s3-backend-side ETag). Don't conflict
+  with US-004's `checksum_value` column — they coexist (ETag is
+  always set; ChecksumValue is set only when client sent
+  x-amz-checksum-algorithm).
+- ?partNumber=N GET (US-002) is a NEW HTTP route shape:
+  internal/s3api/server.go currently routes ?partNumber=N + uploadId
+  to UploadPart (in-progress multipart). Without uploadId,
+  ?partNumber=N must dispatch to a NEW handler in object_get.go that
+  uses the manifest's PartChunks to serve part-relative bytes.
+- Tests for the s3-tests headline target run via
+  scripts/s3-tests/run.sh against `make up-all` (Cassandra + RADOS).
+  Each story SHOULD verify the impacted s3-tests cluster passes
+  before marking complete; US-011 collects the headline number.

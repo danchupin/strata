@@ -147,15 +147,9 @@ type Bucket struct {
 	ObjectLockEnabled bool
 	Region            string
 	MfaDelete         string
-	// ShardCount is the active partition count for this bucket's objects
-	// table. Defaults to the gateway's STRATA_BUCKET_SHARDS at CreateBucket
-	// time. Once persisted, only CompleteReshard rotates it.
-	ShardCount int
-	// TargetShardCount is the target partition count of an in-progress
-	// reshard (US-045). Zero when no reshard is queued or running. While
-	// non-zero, ListObjects unions the active+target layouts so clients
-	// see no gap during the rewrite.
-	TargetShardCount int
+	ShardCount        int
+	TargetShardCount  int
+	BackendPresign    bool
 }
 
 const (
@@ -250,12 +244,11 @@ type MultipartUpload struct {
 	CacheControl      string
 	Expires           string
 	ChecksumAlgorithm string
-	// ChecksumType is the client-requested aggregation mode from the Initiate
-	// x-amz-checksum-type header ("FULL_OBJECT" or "COMPOSITE"). Empty when
-	// the client did not specify it; CompleteMultipartUpload then defaults to
-	// COMPOSITE when ChecksumAlgorithm is non-empty. Persisted so Complete on
-	// a different gateway instance can preserve the client's choice.
-	ChecksumType string
+	ChecksumType      string
+	// BackendUploadID is set when the gateway maps this Strata multipart
+	// session 1:1 onto a backend's own multipart upload (US-010 S3-over-S3
+	// pass-through). Empty when running over a chunk-based backend.
+	BackendUploadID string
 }
 
 type MultipartPart struct {
@@ -265,6 +258,9 @@ type MultipartPart struct {
 	Manifest   *data.Manifest
 	Mtime      time.Time
 	Checksums  map[string]string
+	// BackendETag is the per-part ETag returned by the backend's UploadPart
+	// (US-010). Empty when running over a chunk-based backend.
+	BackendETag string
 }
 
 type CompletePart struct {
@@ -437,6 +433,7 @@ type Store interface {
 	ListBuckets(ctx context.Context, owner string) ([]*Bucket, error)
 	SetBucketVersioning(ctx context.Context, name, state string) error
 	SetBucketACL(ctx context.Context, name, canned string) error
+	SetBucketBackendPresign(ctx context.Context, name string, enabled bool) error
 	SetBucketGrants(ctx context.Context, bucketID uuid.UUID, grants []Grant) error
 	GetBucketGrants(ctx context.Context, bucketID uuid.UUID) ([]Grant, error)
 	DeleteBucketGrants(ctx context.Context, bucketID uuid.UUID) error

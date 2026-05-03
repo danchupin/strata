@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/danchupin/strata/internal/data"
+	datas3 "github.com/danchupin/strata/internal/data/s3"
 	"github.com/danchupin/strata/internal/meta"
 	"github.com/danchupin/strata/internal/metrics"
 )
@@ -148,6 +149,9 @@ func (w *Worker) evaluateNoncurrent(ctx context.Context, b *meta.Bucket, rule *R
 		if v.StorageClass == rule.NoncurrentVersionTransition.StorageClass || v.IsDeleteMarker {
 			return
 		}
+		// US-014: noncurrent-transition translation isn't wired through
+		// LifecycleBackend yet — the worker still owns it. When that lands,
+		// add the same w.backendOwnsTransition() short-circuit as evaluate.
 		threshold := time.Duration(rule.NoncurrentVersionTransition.NoncurrentDays) * w.AgeUnit
 		if age >= threshold {
 			w.transition(ctx, b, v, rule.NoncurrentVersionTransition.StorageClass, rule.ID)
@@ -223,6 +227,14 @@ func (w *Worker) evaluate(ctx context.Context, b *meta.Bucket, rule *Rule, o *me
 		}
 	}
 	if rule.Transition != nil && rule.Transition.Days > 0 && rule.Transition.StorageClass != "" {
+		// US-014: when the data backend translates this transition into a
+		// native backend lifecycle rule (s3 backend + native storage class),
+		// the worker no longer owns the transition — skip it to avoid
+		// double-work and a redundant rewrite of the manifest's storage
+		// class.
+		if w.backendOwnsTransition(rule.Transition.StorageClass) {
+			return
+		}
 		if o.StorageClass == rule.Transition.StorageClass {
 			return
 		}
@@ -230,6 +242,18 @@ func (w *Worker) evaluate(ctx context.Context, b *meta.Bucket, rule *Rule, o *me
 			w.transition(ctx, b, o, rule.Transition.StorageClass, rule.ID)
 		}
 	}
+}
+
+// backendOwnsTransition reports whether the configured data backend
+// translates a transition to the supplied storage class into a native
+// backend lifecycle rule (US-014). Today only the s3 backend implements
+// LifecycleBackend AND only for the AWS-native classes documented in
+// docs/backends/s3.md.
+func (w *Worker) backendOwnsTransition(class string) bool {
+	if _, ok := w.Data.(data.LifecycleBackend); !ok {
+		return false
+	}
+	return datas3.IsNativeTransitionClass(class)
 }
 
 func (w *Worker) transition(ctx context.Context, b *meta.Bucket, o *meta.Object, newClass, ruleID string) {

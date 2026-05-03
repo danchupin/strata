@@ -324,6 +324,7 @@ var alterStatements = []string{
 	`ALTER TABLE gc_queue ADD cluster text`,
 	`ALTER TABLE gc_queue ADD namespace text`,
 	`ALTER TABLE buckets ADD shard_count_target int`,
+	`ALTER TABLE buckets ADD backend_presign boolean`,
 }
 
 func isColumnAlreadyExists(err error) bool {

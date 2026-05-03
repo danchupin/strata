@@ -163,6 +163,22 @@ func manifestToProto(m *Manifest) *pb.Manifest {
 			out.PartChecksums[i] = pc
 		}
 	}
+	if m.BackendRef != nil {
+		out.BackendRef = &pb.BackendRef{
+			Backend:   m.BackendRef.Backend,
+			Key:       m.BackendRef.Key,
+			Etag:      m.BackendRef.ETag,
+			Size:      m.BackendRef.Size,
+			VersionId: m.BackendRef.VersionID,
+		}
+	}
+	if m.SSE != nil {
+		out.Sse = &pb.SSEInfo{
+			Mode:      m.SSE.Mode,
+			Algorithm: m.SSE.Algorithm,
+			KmsKeyId:  m.SSE.KMSKeyID,
+		}
+	}
 	return out
 }
 
@@ -201,6 +217,22 @@ func manifestFromProto(p *pb.Manifest) *Manifest {
 			cp := make(map[string]string, len(vals))
 			maps.Copy(cp, vals)
 			out.PartChecksums[i] = cp
+		}
+	}
+	if br := p.GetBackendRef(); br != nil {
+		out.BackendRef = &BackendRef{
+			Backend:   br.GetBackend(),
+			Key:       br.GetKey(),
+			ETag:      br.GetEtag(),
+			Size:      br.GetSize(),
+			VersionID: br.GetVersionId(),
+		}
+	}
+	if s := p.GetSse(); s != nil {
+		out.SSE = &SSEInfo{
+			Mode:      s.GetMode(),
+			Algorithm: s.GetAlgorithm(),
+			KMSKeyID:  s.GetKmsKeyId(),
 		}
 	}
 	return out

@@ -6,18 +6,24 @@ option go_package = "github.com/danchupin/strata/internal/data/manifestpb;manife
 
 // Manifest mirrors data.Manifest (internal/data/manifest.go). New fields must
 // keep wire compatibility — append-only field numbers, no renumbering.
+//
+// Field-number ledger:
+//   1..5   Class / Size / ChunkSize / ETag / Chunks
+//   6..7   PartChunks / PartChecksums (US-049 multipart SSE)
+//   8      BackendRef (US-008 S3-over-S3 data backend)
+//   12     SSEInfo (US-013 SSE mode wire record)
 message Manifest {
   string class = 1;
   int64 size = 2;
   int64 chunk_size = 3;
   string etag = 4;
   repeated ChunkRef chunks = 5;
-  // part_chunks records the number of chunks contributed by each part of a
-  // multipart upload, in part order.
   repeated int64 part_chunks = 6;
-  // part_checksums is the per-part stored checksum map (algo -> value), one
-  // entry per part in PartNumber order.
   repeated PartChecksum part_checksums = 7;
+  BackendRef backend_ref = 8;
+  SSEInfo sse = 12;
+
+  reserved 9 to 11;
 }
 
 message ChunkRef {
@@ -30,4 +36,18 @@ message ChunkRef {
 
 message PartChecksum {
   map<string, string> values = 1;
+}
+
+message BackendRef {
+  string backend = 1;
+  string key = 2;
+  string etag = 3;
+  int64 size = 4;
+  string version_id = 5;
+}
+
+message SSEInfo {
+  string mode = 1;
+  string algorithm = 2;
+  string kms_key_id = 3;
 }
