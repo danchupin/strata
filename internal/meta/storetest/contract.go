@@ -49,6 +49,8 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"OnlineReshard", caseOnlineReshard},
 		{"ManifestRawRoundTrip", caseManifestRawRoundTrip},
 		{"AdminJobRoundTrip", caseAdminJobRoundTrip},
+		{"ManagedPolicyCRUD", caseManagedPolicyCRUD},
+		{"UserPolicyAttach", caseUserPolicyAttach},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1472,6 +1474,168 @@ func caseAdminJobRoundTrip(t *testing.T, s meta.Store) {
 	}
 	if err := s.UpdateAdminJob(ctx, &meta.AdminJob{ID: "nonexistent"}); err != meta.ErrAdminJobNotFound {
 		t.Errorf("missing update: %v want ErrAdminJobNotFound", err)
+	}
+}
+
+// caseManagedPolicyCRUD exercises the ManagedPolicy storage surface (US-010):
+// create + duplicate + get + list (including path-prefix filter) + update +
+// delete + sentinel errors on missing rows.
+func caseManagedPolicyCRUD(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	first := &meta.ManagedPolicy{
+		Arn:         "arn:aws:iam::strata:policy/AdminAccess",
+		Name:        "AdminAccess",
+		Path:        "/",
+		Description: "operator full access",
+		Document:    []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}`),
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	second := &meta.ManagedPolicy{
+		Arn:       "arn:aws:iam::strata:policy/team/ReadOnly",
+		Name:      "ReadOnly",
+		Path:      "/team/",
+		Document:  []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:Get*","Resource":"*"}]}`),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := s.CreateManagedPolicy(ctx, first); err != nil {
+		t.Fatalf("create first: %v", err)
+	}
+	if err := s.CreateManagedPolicy(ctx, first); err != meta.ErrManagedPolicyAlreadyExists {
+		t.Errorf("duplicate: got %v want ErrManagedPolicyAlreadyExists", err)
+	}
+	if err := s.CreateManagedPolicy(ctx, second); err != nil {
+		t.Fatalf("create second: %v", err)
+	}
+
+	got, err := s.GetManagedPolicy(ctx, first.Arn)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Name != first.Name || got.Path != first.Path || string(got.Document) != string(first.Document) {
+		t.Fatalf("get round-trip: %+v", got)
+	}
+
+	all, err := s.ListManagedPolicies(ctx, "")
+	if err != nil || len(all) != 2 {
+		t.Fatalf("list all: err=%v len=%d", err, len(all))
+	}
+	if all[0].Arn != first.Arn || all[1].Arn != second.Arn {
+		t.Fatalf("list ordering: %s,%s", all[0].Arn, all[1].Arn)
+	}
+
+	teamOnly, err := s.ListManagedPolicies(ctx, "/team/")
+	if err != nil || len(teamOnly) != 1 || teamOnly[0].Arn != second.Arn {
+		t.Fatalf("list path filter: err=%v %+v", err, teamOnly)
+	}
+
+	newDoc := []byte(`{"Version":"2012-10-17","Statement":[]}`)
+	updatedAt := now.Add(time.Hour)
+	if err := s.UpdateManagedPolicyDocument(ctx, first.Arn, newDoc, updatedAt); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	got2, err := s.GetManagedPolicy(ctx, first.Arn)
+	if err != nil {
+		t.Fatalf("re-get: %v", err)
+	}
+	if string(got2.Document) != string(newDoc) {
+		t.Fatalf("document not updated: %q", string(got2.Document))
+	}
+	if !got2.UpdatedAt.Equal(updatedAt) {
+		t.Fatalf("updated_at: got %v want %v", got2.UpdatedAt, updatedAt)
+	}
+
+	if err := s.UpdateManagedPolicyDocument(ctx, "arn:aws:iam::strata:policy/Missing", newDoc, updatedAt); err != meta.ErrManagedPolicyNotFound {
+		t.Errorf("update missing: got %v want ErrManagedPolicyNotFound", err)
+	}
+	if _, err := s.GetManagedPolicy(ctx, "arn:aws:iam::strata:policy/Missing"); err != meta.ErrManagedPolicyNotFound {
+		t.Errorf("get missing: got %v want ErrManagedPolicyNotFound", err)
+	}
+
+	if err := s.DeleteManagedPolicy(ctx, first.Arn); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := s.GetManagedPolicy(ctx, first.Arn); err != meta.ErrManagedPolicyNotFound {
+		t.Errorf("post-delete get: %v want ErrManagedPolicyNotFound", err)
+	}
+	if err := s.DeleteManagedPolicy(ctx, first.Arn); err != meta.ErrManagedPolicyNotFound {
+		t.Errorf("delete missing: got %v want ErrManagedPolicyNotFound", err)
+	}
+}
+
+// caseUserPolicyAttach exercises the user-policy attachment surface
+// (US-010): attach + duplicate + list + detach + ErrPolicyAttached on
+// DeleteManagedPolicy + missing-user / missing-policy sentinels.
+func caseUserPolicyAttach(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	user := &meta.IAMUser{
+		UserName:  "alice",
+		UserID:    "AIDAALICEUUID",
+		Path:      "/",
+		CreatedAt: now,
+	}
+	if err := s.CreateIAMUser(ctx, user); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	policy := &meta.ManagedPolicy{
+		Arn:       "arn:aws:iam::strata:policy/ReadOnly",
+		Name:      "ReadOnly",
+		Path:      "/",
+		Document:  []byte(`{"Version":"2012-10-17","Statement":[]}`),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := s.CreateManagedPolicy(ctx, policy); err != nil {
+		t.Fatalf("create policy: %v", err)
+	}
+
+	if err := s.AttachUserPolicy(ctx, "ghost", policy.Arn); err != meta.ErrIAMUserNotFound {
+		t.Errorf("attach missing user: got %v want ErrIAMUserNotFound", err)
+	}
+	if err := s.AttachUserPolicy(ctx, user.UserName, "arn:aws:iam::strata:policy/Ghost"); err != meta.ErrManagedPolicyNotFound {
+		t.Errorf("attach missing policy: got %v want ErrManagedPolicyNotFound", err)
+	}
+
+	if err := s.AttachUserPolicy(ctx, user.UserName, policy.Arn); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	if err := s.AttachUserPolicy(ctx, user.UserName, policy.Arn); err != meta.ErrUserPolicyAlreadyAttached {
+		t.Errorf("dup attach: got %v want ErrUserPolicyAlreadyAttached", err)
+	}
+
+	attached, err := s.ListUserPolicies(ctx, user.UserName)
+	if err != nil || len(attached) != 1 || attached[0] != policy.Arn {
+		t.Fatalf("list: err=%v %+v", err, attached)
+	}
+
+	if _, err := s.ListUserPolicies(ctx, "ghost"); err != meta.ErrIAMUserNotFound {
+		t.Errorf("list missing user: got %v want ErrIAMUserNotFound", err)
+	}
+
+	if err := s.DeleteManagedPolicy(ctx, policy.Arn); err != meta.ErrPolicyAttached {
+		t.Errorf("delete attached policy: got %v want ErrPolicyAttached", err)
+	}
+
+	if err := s.DetachUserPolicy(ctx, user.UserName, "arn:aws:iam::strata:policy/Other"); err != meta.ErrUserPolicyNotAttached {
+		t.Errorf("detach missing: got %v want ErrUserPolicyNotAttached", err)
+	}
+	if err := s.DetachUserPolicy(ctx, user.UserName, policy.Arn); err != nil {
+		t.Fatalf("detach: %v", err)
+	}
+	if err := s.DetachUserPolicy(ctx, user.UserName, policy.Arn); err != meta.ErrUserPolicyNotAttached {
+		t.Errorf("dup detach: got %v want ErrUserPolicyNotAttached", err)
+	}
+
+	post, err := s.ListUserPolicies(ctx, user.UserName)
+	if err != nil || len(post) != 0 {
+		t.Fatalf("post-detach list: err=%v %+v", err, post)
+	}
+
+	if err := s.DeleteManagedPolicy(ctx, policy.Arn); err != nil {
+		t.Fatalf("delete after detach: %v", err)
 	}
 }
 

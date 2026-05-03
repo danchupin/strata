@@ -282,6 +282,27 @@ var tableDDL = []string{
 		updated_at   timestamp,
 		finished_at  timestamp
 	)`,
+	`CREATE TABLE IF NOT EXISTS iam_managed_policies (
+		arn         text PRIMARY KEY,
+		name        text,
+		path        text,
+		description text,
+		document    blob,
+		created_at  timestamp,
+		updated_at  timestamp
+	)`,
+	`CREATE TABLE IF NOT EXISTS iam_user_policies (
+		user_name   text,
+		policy_arn  text,
+		attached_at timestamp,
+		PRIMARY KEY (user_name, policy_arn)
+	)`,
+	`CREATE TABLE IF NOT EXISTS iam_policy_attachments (
+		policy_arn  text,
+		user_name   text,
+		attached_at timestamp,
+		PRIMARY KEY (policy_arn, user_name)
+	)`,
 	`CREATE TABLE IF NOT EXISTS notify_dlq (
 		bucket_id    uuid,
 		day          timestamp,

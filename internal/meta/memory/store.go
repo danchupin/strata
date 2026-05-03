@@ -38,6 +38,12 @@ type Store struct {
 	objectGrants   map[grantKey][]meta.Grant
 	iamUsers       map[string]*meta.IAMUser
 	accessKeys     map[string]*meta.IAMAccessKey
+	managedPolicies map[string]*meta.ManagedPolicy
+	// userPolicies maps userName -> policyArn -> attached_at.
+	userPolicies   map[string]map[string]time.Time
+	// policyUsers is the inverse index (policyArn -> set of userNames) used
+	// by DeleteManagedPolicy to detect attachments without scanning.
+	policyUsers    map[string]map[string]struct{}
 	gc             map[string][]meta.GCEntry
 	notifyQueue    map[uuid.UUID][]meta.NotificationEvent
 	notifyDLQ      map[uuid.UUID][]meta.NotificationDLQEntry
@@ -116,6 +122,9 @@ func New() *Store {
 		objectGrants: make(map[grantKey][]meta.Grant),
 		iamUsers:     make(map[string]*meta.IAMUser),
 		accessKeys:   make(map[string]*meta.IAMAccessKey),
+		managedPolicies: make(map[string]*meta.ManagedPolicy),
+		userPolicies:    make(map[string]map[string]time.Time),
+		policyUsers:     make(map[string]map[string]struct{}),
 		gc:             make(map[string][]meta.GCEntry),
 		notifyQueue:    make(map[uuid.UUID][]meta.NotificationEvent),
 		notifyDLQ:      make(map[uuid.UUID][]meta.NotificationDLQEntry),
@@ -1801,6 +1810,153 @@ func (s *Store) DeleteIAMAccessKey(ctx context.Context, accessKeyID string) (*me
 	cp := *ak
 	delete(s.accessKeys, accessKeyID)
 	return &cp, nil
+}
+
+func cloneManagedPolicy(p *meta.ManagedPolicy) *meta.ManagedPolicy {
+	cp := *p
+	if p.Document != nil {
+		cp.Document = append([]byte(nil), p.Document...)
+	}
+	return &cp
+}
+
+func (s *Store) CreateManagedPolicy(ctx context.Context, p *meta.ManagedPolicy) error {
+	if p == nil || p.Arn == "" {
+		return meta.ErrManagedPolicyNotFound
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.managedPolicies[p.Arn]; ok {
+		return meta.ErrManagedPolicyAlreadyExists
+	}
+	row := *p
+	if row.CreatedAt.IsZero() {
+		row.CreatedAt = time.Now().UTC()
+	}
+	if row.UpdatedAt.IsZero() {
+		row.UpdatedAt = row.CreatedAt
+	}
+	if row.Document != nil {
+		row.Document = append([]byte(nil), row.Document...)
+	}
+	s.managedPolicies[p.Arn] = &row
+	return nil
+}
+
+func (s *Store) GetManagedPolicy(ctx context.Context, arn string) (*meta.ManagedPolicy, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	p, ok := s.managedPolicies[arn]
+	if !ok {
+		return nil, meta.ErrManagedPolicyNotFound
+	}
+	return cloneManagedPolicy(p), nil
+}
+
+func (s *Store) ListManagedPolicies(ctx context.Context, pathPrefix string) ([]*meta.ManagedPolicy, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*meta.ManagedPolicy, 0, len(s.managedPolicies))
+	for _, p := range s.managedPolicies {
+		if pathPrefix != "" && !strings.HasPrefix(p.Path, pathPrefix) {
+			continue
+		}
+		out = append(out, cloneManagedPolicy(p))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Arn < out[j].Arn })
+	return out, nil
+}
+
+func (s *Store) UpdateManagedPolicyDocument(ctx context.Context, arn string, document []byte, updatedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.managedPolicies[arn]
+	if !ok {
+		return meta.ErrManagedPolicyNotFound
+	}
+	p.Document = append([]byte(nil), document...)
+	if updatedAt.IsZero() {
+		updatedAt = time.Now().UTC()
+	}
+	p.UpdatedAt = updatedAt
+	return nil
+}
+
+func (s *Store) DeleteManagedPolicy(ctx context.Context, arn string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.managedPolicies[arn]; !ok {
+		return meta.ErrManagedPolicyNotFound
+	}
+	if attached, ok := s.policyUsers[arn]; ok && len(attached) > 0 {
+		return meta.ErrPolicyAttached
+	}
+	delete(s.managedPolicies, arn)
+	delete(s.policyUsers, arn)
+	return nil
+}
+
+func (s *Store) AttachUserPolicy(ctx context.Context, userName, policyArn string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.iamUsers[userName]; !ok {
+		return meta.ErrIAMUserNotFound
+	}
+	if _, ok := s.managedPolicies[policyArn]; !ok {
+		return meta.ErrManagedPolicyNotFound
+	}
+	if attached, ok := s.userPolicies[userName]; ok {
+		if _, dup := attached[policyArn]; dup {
+			return meta.ErrUserPolicyAlreadyAttached
+		}
+	}
+	if s.userPolicies[userName] == nil {
+		s.userPolicies[userName] = make(map[string]time.Time)
+	}
+	s.userPolicies[userName][policyArn] = time.Now().UTC()
+	if s.policyUsers[policyArn] == nil {
+		s.policyUsers[policyArn] = make(map[string]struct{})
+	}
+	s.policyUsers[policyArn][userName] = struct{}{}
+	return nil
+}
+
+func (s *Store) DetachUserPolicy(ctx context.Context, userName, policyArn string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	attached, ok := s.userPolicies[userName]
+	if !ok {
+		return meta.ErrUserPolicyNotAttached
+	}
+	if _, dup := attached[policyArn]; !dup {
+		return meta.ErrUserPolicyNotAttached
+	}
+	delete(attached, policyArn)
+	if len(attached) == 0 {
+		delete(s.userPolicies, userName)
+	}
+	if users, ok := s.policyUsers[policyArn]; ok {
+		delete(users, userName)
+		if len(users) == 0 {
+			delete(s.policyUsers, policyArn)
+		}
+	}
+	return nil
+}
+
+func (s *Store) ListUserPolicies(ctx context.Context, userName string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, ok := s.iamUsers[userName]; !ok {
+		return nil, meta.ErrIAMUserNotFound
+	}
+	attached := s.userPolicies[userName]
+	out := make([]string, 0, len(attached))
+	for arn := range attached {
+		out = append(out, arn)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func (s *Store) UpdateObjectSSEWrap(ctx context.Context, bucketID uuid.UUID, key, versionID string, wrapped []byte, keyID string) error {

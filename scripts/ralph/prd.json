@@ -191,8 +191,8 @@
         "Tests pass (memory contract + cassandra integration + tikv contract)"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "meta.ManagedPolicy struct + sentinels (ErrManagedPolicyNotFound/AlreadyExists, ErrPolicyAttached, ErrUserPolicyNotAttached/AlreadyAttached) + Store interface methods (CreateManagedPolicy/Get/List/UpdateManagedPolicyDocument/Delete + AttachUserPolicy/Detach/ListUserPolicies). Cassandra schema additive: iam_managed_policies (PK arn, columns name/path/description/document/created_at/updated_at), iam_user_policies (PK (user_name, policy_arn) with attached_at), and an internal-only inverse-index iam_policy_attachments (PK (policy_arn, user_name)) so DeleteManagedPolicy's attachment check is one partition read instead of ALLOW FILTERING. Cassandra impl: Create uses INSERT IF NOT EXISTS + MapScanCAS; Update uses UPDATE IF EXISTS + ScanCAS (LWT-on-LWT per CLAUDE.md gotcha); Attach/Detach write both rows in a LoggedBatch so the inverse view never desyncs. TiKV: 3 new key prefixes (s/mp/<arn>, s/ups/<userName>\\x00\\x00<arn>, s/pus/<arn>\\x00\\x00<userName>) all under the IAM keys section; pessimistic-txn helpers mirror the iam.go shape (LockKeys + Get + Set with explicit Rollback on CAS-style early returns). Memory: managedPolicies map + userPolicies map[user]map[arn]time + policyUsers inverse map; locks under existing s.mu. Contract tests in storetest/contract.go: ManagedPolicyCRUD (create/dup/get/list+pathPrefix/update/delete + missing sentinels) and UserPolicyAttach (attach/dup/list/detach + ErrPolicyAttached on DeleteManagedPolicy with attachment + ErrIAMUserNotFound/ErrManagedPolicyNotFound on missing referents). Memory contract green; tikv/cassandra integration suites compile under -tags integration."
     },
     {
       "id": "US-011",

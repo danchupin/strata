@@ -71,6 +71,11 @@ var (
 	ErrIAMUserNotFound         = errors.New("iam user not found")
 	ErrIAMUserAlreadyExists    = errors.New("iam user already exists")
 	ErrIAMAccessKeyNotFound    = errors.New("iam access key not found")
+	ErrManagedPolicyNotFound      = errors.New("managed policy not found")
+	ErrManagedPolicyAlreadyExists = errors.New("managed policy already exists")
+	ErrPolicyAttached             = errors.New("managed policy is attached to one or more users")
+	ErrUserPolicyNotAttached      = errors.New("managed policy is not attached to user")
+	ErrUserPolicyAlreadyAttached  = errors.New("managed policy is already attached to user")
 	ErrMultipartCompletionNotFound = errors.New("multipart completion record not found or expired")
 	ErrNoRewrapProgress        = errors.New("no rewrap progress recorded for bucket")
 	ErrAdminJobNotFound        = errors.New("admin job not found")
@@ -149,6 +154,19 @@ type IAMUser struct {
 	UserID    string
 	Path      string
 	CreatedAt time.Time
+}
+
+// ManagedPolicy is an IAM managed-policy document operators can create from
+// the embedded console (US-013) and attach to IAM users (US-014). Arn is the
+// primary key; Document carries the raw IAM-policy JSON the operator saved.
+type ManagedPolicy struct {
+	Arn         string
+	Name        string
+	Path        string
+	Description string
+	Document    []byte
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 // Grant is a single ACL grant entry persisted alongside the canned ACL.
@@ -606,6 +624,40 @@ type Store interface {
 	GetIAMAccessKey(ctx context.Context, accessKeyID string) (*IAMAccessKey, error)
 	ListIAMAccessKeys(ctx context.Context, userName string) ([]*IAMAccessKey, error)
 	DeleteIAMAccessKey(ctx context.Context, accessKeyID string) (*IAMAccessKey, error)
+
+	// CreateManagedPolicy persists a fresh managed-policy row keyed on
+	// policy.Arn. Returns ErrManagedPolicyAlreadyExists if a row with the
+	// same arn already exists.
+	CreateManagedPolicy(ctx context.Context, policy *ManagedPolicy) error
+	// GetManagedPolicy returns the row addressed by arn, or
+	// ErrManagedPolicyNotFound.
+	GetManagedPolicy(ctx context.Context, arn string) (*ManagedPolicy, error)
+	// ListManagedPolicies returns every managed policy whose Path begins
+	// with pathPrefix (empty string returns all). Result is sorted by Arn
+	// ascending.
+	ListManagedPolicies(ctx context.Context, pathPrefix string) ([]*ManagedPolicy, error)
+	// UpdateManagedPolicyDocument overwrites the Document blob and bumps
+	// UpdatedAt. Returns ErrManagedPolicyNotFound if no row exists.
+	UpdateManagedPolicyDocument(ctx context.Context, arn string, document []byte, updatedAt time.Time) error
+	// DeleteManagedPolicy deletes the row addressed by arn. Returns
+	// ErrPolicyAttached when at least one row in iam_user_policies (or
+	// equivalent backend index) references arn — callers must detach
+	// first.
+	DeleteManagedPolicy(ctx context.Context, arn string) error
+
+	// AttachUserPolicy records that userName has policyArn attached.
+	// Returns ErrIAMUserNotFound if the user does not exist,
+	// ErrManagedPolicyNotFound if the policy does not exist,
+	// ErrUserPolicyAlreadyAttached if the attachment row already exists.
+	AttachUserPolicy(ctx context.Context, userName, policyArn string) error
+	// DetachUserPolicy removes the attachment between userName and
+	// policyArn. Returns ErrUserPolicyNotAttached if the row does not
+	// exist.
+	DetachUserPolicy(ctx context.Context, userName, policyArn string) error
+	// ListUserPolicies returns every policy ARN attached to userName,
+	// sorted ascending. Returns ErrIAMUserNotFound if the user does not
+	// exist.
+	ListUserPolicies(ctx context.Context, userName string) ([]string, error)
 
 	CreateMultipartUpload(ctx context.Context, mu *MultipartUpload) error
 	GetMultipartUpload(ctx context.Context, bucketID uuid.UUID, uploadID string) (*MultipartUpload, error)
