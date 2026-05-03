@@ -119,7 +119,8 @@ The S3 router is in `internal/s3api/server.go`. Bucket-scoped queries (`?cors`, 
 same query-string router pattern.
 
 Auth lives in `internal/auth/`: SigV4 (`sigv4.go`), presigned URLs (`presigned.go`), streaming chunk decoder (
-`streaming.go`, **chain HMAC validation TODO** — see ROADMAP P2), static credentials store (`static.go`). Identity flows
+`streaming.go` — chain HMAC validation enforced via `computeChunkSignature` + `prevSig` chaining, mismatch returns
+`ErrSignatureInvalid`, shipped under US-022), static credentials store (`static.go`). Identity flows
 through context: `auth.FromContext(ctx).Owner`.
 
 Virtual-hosted-style routing (`internal/s3api/vhost.go`): `STRATA_VHOST_PATTERN` is a comma-separated list of
