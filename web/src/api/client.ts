@@ -187,6 +187,89 @@ export async function setBucketObjectLock(
   if (!resp.ok) throw await buildAdminError(resp, 'set object-lock failed');
 }
 
+// Lifecycle (US-004) — JSON wire shape. Mirrors LifecycleConfigJSON in
+// internal/adminapi/buckets_lifecycle.go. The visual editor binds to this
+// shape directly; the JSON tab paste-path round-trips through it too.
+export interface LifecycleTag {
+  key: string;
+  value: string;
+}
+
+export interface LifecycleFilter {
+  prefix?: string;
+  tags?: LifecycleTag[];
+}
+
+export interface LifecycleExpiration {
+  days?: number;
+  date?: string;
+  expired_object_delete_marker?: boolean;
+}
+
+export interface LifecycleTransition {
+  days?: number;
+  date?: string;
+  storage_class: string;
+}
+
+export interface NoncurrentExpiration {
+  noncurrent_days: number;
+}
+
+export interface NoncurrentTransition {
+  noncurrent_days: number;
+  storage_class: string;
+}
+
+export interface AbortIncompleteMultipart {
+  days_after_initiation: number;
+}
+
+export interface LifecycleRule {
+  id: string;
+  status: 'Enabled' | 'Disabled';
+  prefix?: string;
+  filter?: LifecycleFilter;
+  expiration?: LifecycleExpiration;
+  transitions?: LifecycleTransition[];
+  noncurrent_version_expiration?: NoncurrentExpiration;
+  noncurrent_version_transitions?: NoncurrentTransition[];
+  abort_incomplete_multipart_upload?: AbortIncompleteMultipart;
+}
+
+export interface LifecycleConfig {
+  rules: LifecycleRule[];
+}
+
+// fetchBucketLifecycle returns the bucket's LifecycleConfig (US-004).
+// Returns null on 404 NoSuchLifecycleConfiguration so the editor can render
+// the empty-state without forcing the caller to catch the error.
+export async function fetchBucketLifecycle(name: string): Promise<LifecycleConfig | null> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(name)}/lifecycle`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (resp.status === 404) return null;
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch lifecycle failed');
+  return (await resp.json()) as LifecycleConfig;
+}
+
+export async function setBucketLifecycle(
+  name: string,
+  cfg: LifecycleConfig,
+): Promise<void> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(name)}/lifecycle`,
+    {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg),
+    },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'set lifecycle failed');
+}
+
 export async function fetchBucket(name: string): Promise<BucketDetail> {
   const resp = await fetch(`/admin/v1/buckets/${encodeURIComponent(name)}`, {
     method: 'GET',

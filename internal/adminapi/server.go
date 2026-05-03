@@ -123,6 +123,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("PUT /admin/v1/buckets/{bucket}/versioning", s.handleBucketSetVersioning)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/object-lock", s.handleBucketGetObjectLock)
 	mux.HandleFunc("PUT /admin/v1/buckets/{bucket}/object-lock", s.handleBucketSetObjectLock)
+	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/lifecycle", s.handleBucketGetLifecycle)
+	mux.HandleFunc("PUT /admin/v1/buckets/{bucket}/lifecycle", s.handleBucketSetLifecycle)
 	mux.HandleFunc("GET /admin/v1/buckets/top", s.handleBucketsTop)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}", s.handleBucketGet)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/objects", s.handleObjectsList)

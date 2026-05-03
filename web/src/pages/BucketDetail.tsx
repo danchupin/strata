@@ -48,6 +48,7 @@ import {
 } from '@/components/ui/table';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
+import { BucketLifecycleTab } from '@/components/BucketLifecycleTab';
 import { BucketOverviewTab } from '@/components/BucketOverviewTab';
 import { DeleteBucketDialog } from '@/components/DeleteBucketDialog';
 
@@ -259,9 +260,15 @@ export function BucketDetailPage() {
             Overview
           </TabsTrigger>
           <TabsTrigger value="objects">Objects</TabsTrigger>
+          <TabsTrigger value="lifecycle" disabled={!detail}>
+            Lifecycle
+          </TabsTrigger>
         </TabsList>
         <TabsContent value="overview" className="space-y-4">
           {detail && <BucketOverviewTab bucket={detail} />}
+        </TabsContent>
+        <TabsContent value="lifecycle" className="space-y-4">
+          {detail && <BucketLifecycleTab bucket={detail} />}
         </TabsContent>
         <TabsContent value="objects">
       <Card>

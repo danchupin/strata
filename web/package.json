@@ -12,6 +12,7 @@
     "e2e:install": "playwright install --with-deps chromium"
   },
   "dependencies": {
+    "@monaco-editor/react": "4.6.0",
     "@radix-ui/react-dialog": "1.1.4",
     "@radix-ui/react-dropdown-menu": "2.1.4",
     "@radix-ui/react-label": "2.1.0",
@@ -23,6 +24,7 @@
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
     "lucide-react": "0.468.0",
+    "monaco-editor": "0.52.2",
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "react-router-dom": "6.28.0",

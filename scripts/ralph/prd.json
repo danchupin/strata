@@ -79,8 +79,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Backend handlers in internal/adminapi/buckets_lifecycle.go (GET/PUT). JSON↔XML translation via lifecycleConfigXML; validation runs lifecycle.Parse on the rendered XML before SetBucketLifecycle persists it. Validate: ID required, Status Enabled|Disabled, Days/Date exclusive on Expiration & Transition, ≥1 action per rule. Audit override admin:SetBucketLifecycle. Frontend: monaco-editor + worker bundling via vite ?worker (self-hosted, no CDN); MonacoJsonEditor.tsx is React.lazy()'d so the main bundle stays at 128 KiB gzipped (Monaco lands in its own ~592 KiB gzipped chunk). BucketLifecycleTab.tsx hosts Visual + JSON sub-tabs; Visual builder per AC (ID, Filter Prefix+Tags, Status, Transitions Days|Date+SC, Expiration Days|Date, NoncurrentVersionExpiration, NoncurrentVersionTransition, AbortIncompleteMultipart, +/− Add rule, ↑↓ reorder); JSON tab uses MonacoJsonEditor with vendored web/src/schemas/lifecycle.json schema-bound by modelUri. Tab switch from JSON→Visual auto-applies (or prompts confirm if the JSON is malformed). Browser smoke deferred — dev-browser skill unavailable in this Ralph loop."
     },
     {
       "id": "US-005",

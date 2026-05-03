@@ -18,6 +18,8 @@ Started: Sun May  3 17:17:18 MSK 2026
 - Bucket detail page now hosts shadcn `Tabs` (web/src/pages/BucketDetail.tsx). Add new bucket-config tabs (Lifecycle/CORS/Policy/ACL/Inventory/Logging) by inserting `<TabsTrigger value="..." />` + `<TabsContent value="...">…</TabsContent>` siblings; keep `defaultValue="objects"` so the default landing screen stays the file browser.
 - Bucket Object-Lock JSON ↔ XML translation lives in `internal/adminapi/buckets_config.go::objectLockXML`. SetBucketObjectLockConfig stores XML bytes (s3api.objectlock.go consumer reads back via xml.Unmarshal); admin endpoint marshals the JSON shape into the same XML before calling SetBucketObjectLockConfig so default-retention resolution keeps working unchanged.
 - Saving a bucket-scoped config? Pattern: typed wrapper in `web/src/api/client.ts` returning Promise<void> + throwing AdminApiError; component calls it inside `try {…} catch (err) { setServerError({code, message}) }`; on success invalidate `queryKeys.buckets.one(name)` and the per-config key. See BucketOverviewTab.tsx for the canonical shape.
+- Heavyweight modules (Monaco) are lazy-loaded via `lazy(() => import('./MonacoJsonEditor'))` so the per-tab bundle stays under the 500 KiB gzipped budget. MonacoJsonEditor.tsx imports from `monaco-editor/esm/vs/editor/editor.api` + `…/language/json/monaco.contribution` (NOT the package main!) to skip every other language; workers go via vite's `?worker` suffix so we self-host (no CDN). Schema validation: bind a vendored JSON schema by `modelUri` via `monaco.languages.json.jsonDefaults.setDiagnosticsOptions` — dedupe by `uri` so re-mounts don't accumulate.
+- Vendored JSON schemas live under `web/src/schemas/<thing>.json` and import directly via `@/schemas/lifecycle.json` (resolveJsonModule:true is on in tsconfig).
 
 ## Sun May  3 17:27 MSK 2026 - US-001
 - Implemented CreateBucket dialog (POST /admin/v1/buckets + UI) per PRD AC.
@@ -103,6 +105,50 @@ Started: Sun May  3 17:17:18 MSK 2026
   - `internal/serverapp/serverapp.go::buildLocker` returns `nil` if the meta backend exposes no locker. Admin handlers that depend on the lease must `if s.Locker == nil { 503 }` so dev rigs without the locker fail loud rather than dropping the lease silently.
   - The drain loop calls ListObjectVersions first (so versioned buckets surrender every version cleanly) and falls back to ListObjects when the bucket has no version rows. memory.Store mirrors both surfaces; cassandra/tikv use the same code path.
   - `AdminApiError` + `buildAdminError` in `web/src/api/client.ts` is the canonical error shape for admin API wrappers — replace the bespoke `CreateBucketError` (US-001) with the shared shape on the next dialog touch-up; new wrappers (US-003+) should use `AdminApiError` from day one.
+---
+
+## Sun May  3 18:25 MSK 2026 - US-004
+- Implemented Lifecycle rule editor with Visual + JSON (Monaco) sub-tabs per PRD AC.
+
+### Backend
+- internal/adminapi/buckets_lifecycle.go (new): handleBucketGetLifecycle (GET → JSON, 404 NoSuchLifecycleConfiguration when blob absent), handleBucketSetLifecycle (PUT JSON, validate per-rule, marshal to AWS XML, double-check via lifecycle.Parse, persist via meta.Store.SetBucketLifecycle). JSON↔XML translation lives in encodeLifecycleXML / decodeLifecycleXML covering Filter (Prefix+Tag/And), Expiration (Days|Date|ExpiredObjectDeleteMarker), Transitions (Days|Date+SC), NoncurrentVersionExpiration/Transition, AbortIncompleteMultipartUpload. Validation: ID required, Status Enabled|Disabled, Days/Date mutually exclusive, ≥1 action per rule. Audit override admin:SetBucketLifecycle.
+- internal/adminapi/server.go: registered GET/PUT /admin/v1/buckets/{bucket}/lifecycle.
+- internal/adminapi/buckets_lifecycle_test.go (new): 9 cases — NotConfigured 404, BucketNotFound 404, PutHappyExpirationDays + round-trip, PutAllRuleSurfaces (filter prefix+tags, two transitions, expiration, noncurrent expiration+transition, abort), EmptyRulesRejected, BadStatusRejected, DaysAndDateExclusive, NoActionRejected, BucketNotFound, MalformedJSON, TagOnlyFilterRoundTrips.
+
+### Frontend
+- web/package.json: added `monaco-editor` 0.52.2 + `@monaco-editor/react` 4.6.0 (the React wrapper isn't actually used — direct import of `monaco-editor/esm/...` is enough, but keeping the wrapper for parity with the package ecosystem doesn't hurt).
+- web/src/components/MonacoJsonEditor.tsx (new): heavyweight JSON editor. Imports only `monaco-editor/esm/vs/editor/editor.api` + the JSON contribution to skip every other language; workers via `?worker` (self-hosted). schema prop binds a vendored JSON schema by `modelUri`. Designed to be reused by US-005 CORS, US-006 Policy, US-013 ManagedPolicies — all single-document JSON editors.
+- web/src/schemas/lifecycle.json (new): vendored schema covering rules, filter, expiration, transitions, noncurrent variants, abort-incomplete-multipart.
+- web/src/components/BucketLifecycleTab.tsx (new): Visual tab (per-rule cards: ID, Status, Filter Prefix+Tags, Expiration Days|Date, Transitions list with +/− and SC select, NoncurrentVersionExpiration, AbortIncompleteMultipart, ↑↓ reorder, delete) and JSON tab (Suspense-wrapped lazy MonacoJsonEditor). Tab switch JSON→Visual auto-applies parsed state; if JSON has unsaved errors, prompts confirm and reverts. Save invalidates `queryKeys.buckets.lifecycle(name)`.
+- web/src/api/client.ts: fetchBucketLifecycle (404 → null) / setBucketLifecycle wrappers + LifecycleConfig / LifecycleRule type tree (mirrors backend JSON shape).
+- web/src/lib/query.ts: queryKeys.buckets.lifecycle(name).
+- web/src/pages/BucketDetail.tsx: added Lifecycle tab trigger + content alongside existing Overview/Objects.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` — all packages green (incl. new buckets_lifecycle_test.go suite).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean. Bundle sizes (gzipped):
+  - main: 128.70 KiB ✓ (well under the 500 KiB AC ceiling)
+  - Metrics route: 109.44 KiB (unchanged)
+  - MonacoJsonEditor lazy chunk: 591.94 KiB (per-AC: lives in its own lazy chunk, only fetched when the JSON tab activates)
+  - editor.worker / json.worker / jsonMode chunks load on first JSON tab open
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - The lifecycle XML the s3api worker reads is the AWS shape verbatim — no normalisation. Admin endpoints stay schema-additive by translating JSON → XML on PUT and XML → JSON on GET, persisting the XML so existing s3api consumers (lifecycle worker, GetBucketLifecycle s3 surface) keep working unchanged.
+  - The `lifecycle.Parse` package-level function is the single source of truth for "will the worker accept this configuration?" — call it on the rendered XML inside the admin handler to catch edge cases the type-system doesn't capture (unmapped storage classes, malformed dates).
+  - When a heavy library has its own ESM entry that bundles every language/feature (Monaco), import the slim subset (`/esm/vs/editor/editor.api` + the per-language contribution you need) — the package main loads everything. Saved ~250 KiB gzipped on the lazy chunk.
+  - The ?worker suffix is vite's recommended way to bundle Web Workers — emits each worker as its own asset and the constructor is the URL. Combined with `self.MonacoEnvironment.getWorker(_, label)`, Monaco self-hosts without a CDN.
+- Gotchas:
+  - Monaco's `monaco.languages.json.jsonDefaults.setDiagnosticsOptions` REPLACES the schemas array. Component must dedupe by `uri` and merge with the existing list, otherwise re-mounts (route navigation back to the bucket detail) lose previously registered schemas.
+  - When the lifecycle XML stores both a `<Filter><Prefix>X</Prefix></Filter>` and Tags via `<And>`, AWS spec mandates wrapping in `<And>`. encodeLifecycleXML implements that branching — single tag goes under `<Filter><Tag>`, prefix+1+tags goes under `<Filter><And>`.
+  - lifecycle.Parse rejects an empty blob (`errors.New("empty lifecycle blob")`). The admin PUT body validation must reject `{rules: []}` first so we don't try to encode an empty `<LifecycleConfiguration></LifecycleConfiguration>`.
+- Useful context:
+  - `web/src/components/BucketLifecycleTab.tsx` is the canonical pattern for the upcoming US-005 (CORS) and US-006 (Policy) bucket-config tabs: lazy-loaded MonacoJsonEditor + visual editor side-by-side, vendored JSON schema, save → invalidate the per-config queryKey.
+  - `internal/adminapi/buckets_lifecycle.go::encodeLifecycleXML` shape doubles as the reference for "JSON in / XML out" translation — copy the XML struct definition pattern into US-005's CORS handler instead of leaning on the s3api package's unexported parser.
+  - The MonacoJsonEditor wrapper accepts a `schema` prop with `{uri, modelUri, schema}` — `uri` is the schema identifier, `modelUri` is the model file path that triggers binding via `fileMatch`. Pass distinct `modelUri`s per page so two different schemas (lifecycle vs IAM policy) don't collide.
 ---
 
 ## Sun May  3 17:53 MSK 2026 - US-003
