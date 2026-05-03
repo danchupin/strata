@@ -664,6 +664,12 @@ type Store interface {
 	// sorted ascending. Returns ErrIAMUserNotFound if the user does not
 	// exist.
 	ListUserPolicies(ctx context.Context, userName string) ([]string, error)
+	// ListPolicyUsers returns every user name attached to policyArn, sorted
+	// ascending. Returns an empty slice (no error) when the policy has no
+	// attachments. Returns ErrManagedPolicyNotFound if the policy does not
+	// exist. The inverse of ListUserPolicies — backed by the same per-policy
+	// inverse-index used by DeleteManagedPolicy's attachment check (US-013).
+	ListPolicyUsers(ctx context.Context, policyArn string) ([]string, error)
 
 	CreateMultipartUpload(ctx context.Context, mu *MultipartUpload) error
 	GetMultipartUpload(ctx context.Context, bucketID uuid.UUID, uploadID string) (*MultipartUpload, error)

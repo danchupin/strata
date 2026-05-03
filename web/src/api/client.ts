@@ -850,6 +850,102 @@ export async function deleteIAMAccessKey(accessKeyID: string): Promise<void> {
   throw await buildAdminError(resp, 'delete access key failed');
 }
 
+// Managed policies (US-013). The admin layer mints ARNs under the
+// `arn:aws:iam::strata:policy<path><name>` namespace; PUT/DELETE accept the
+// full ARN as a trailing-wildcard URL segment so slashes inside the ARN do
+// not break Go's mux pattern matching.
+export interface ManagedPolicySummary {
+  arn: string;
+  name: string;
+  path: string;
+  description?: string;
+  document: string;
+  created_at: number;
+  updated_at: number;
+  attachment_count: number;
+}
+
+export interface ManagedPoliciesListResponse {
+  policies: ManagedPolicySummary[];
+}
+
+export interface CreateManagedPolicyBody {
+  name: string;
+  path?: string;
+  description?: string;
+  document: string;
+}
+
+// PolicyAttachedError carries the attached_to user list returned by a 409
+// from DELETE /admin/v1/iam/policies/{arn} — surfaced inline in the delete
+// dialog so the operator can detach those users (US-014) before retrying.
+export interface PolicyAttachedError extends AdminApiError {
+  code: 'PolicyAttached';
+  attachedTo: string[];
+}
+
+export async function fetchManagedPolicies(): Promise<ManagedPolicySummary[]> {
+  const resp = await fetch('/admin/v1/iam/policies', {
+    method: 'GET',
+    credentials: 'same-origin',
+  });
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch managed policies failed');
+  const body = (await resp.json()) as ManagedPoliciesListResponse;
+  return body.policies ?? [];
+}
+
+export async function createManagedPolicy(
+  body: CreateManagedPolicyBody,
+): Promise<ManagedPolicySummary> {
+  const resp = await fetch('/admin/v1/iam/policies', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) throw await buildAdminError(resp, 'create managed policy failed');
+  return (await resp.json()) as ManagedPolicySummary;
+}
+
+export async function updateManagedPolicyDocument(
+  arn: string,
+  document: string,
+): Promise<ManagedPolicySummary> {
+  const resp = await fetch(`/admin/v1/iam/policies/${arn}`, {
+    method: 'PUT',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ document }),
+  });
+  if (!resp.ok) throw await buildAdminError(resp, 'update managed policy failed');
+  return (await resp.json()) as ManagedPolicySummary;
+}
+
+export async function deleteManagedPolicy(arn: string): Promise<void> {
+  const resp = await fetch(`/admin/v1/iam/policies/${arn}`, {
+    method: 'DELETE',
+    credentials: 'same-origin',
+  });
+  if (resp.status === 204) return;
+  if (resp.status === 409) {
+    let attachedTo: string[] = [];
+    let message = 'managed policy is attached to one or more users';
+    try {
+      const j = (await resp.json()) as { message?: string; attached_to?: string[] };
+      if (j.message) message = j.message;
+      if (Array.isArray(j.attached_to)) attachedTo = j.attached_to;
+    } catch {
+      // body wasn't JSON — keep defaults
+    }
+    const err = new Error(message) as PolicyAttachedError;
+    err.code = 'PolicyAttached';
+    err.status = 409;
+    err.attachedTo = attachedTo;
+    throw err;
+  }
+  throw await buildAdminError(resp, 'delete managed policy failed');
+}
+
 export async function fetchIAMUser(userName: string): Promise<IAMUserSummary> {
   // The admin API has no per-user GET endpoint — emulate via the list endpoint
   // with a query filter so the user-detail page can render cheap metadata

@@ -1971,6 +1971,21 @@ func (s *Store) ListUserPolicies(ctx context.Context, userName string) ([]string
 	return out, nil
 }
 
+func (s *Store) ListPolicyUsers(ctx context.Context, policyArn string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, ok := s.managedPolicies[policyArn]; !ok {
+		return nil, meta.ErrManagedPolicyNotFound
+	}
+	users := s.policyUsers[policyArn]
+	out := make([]string, 0, len(users))
+	for u := range users {
+		out = append(out, u)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 func (s *Store) UpdateObjectSSEWrap(ctx context.Context, bucketID uuid.UUID, key, versionID string, wrapped []byte, keyID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

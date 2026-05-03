@@ -1,9 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
-import { AlertCircle, Plus, RefreshCw, Search, Trash2 } from 'lucide-react';
+import { AlertCircle, Pencil, Plus, RefreshCw, Search, Trash2 } from 'lucide-react';
 
-import { fetchIAMUsers, type IAMUserSummary } from '@/api/client';
+import {
+  fetchIAMUsers,
+  fetchManagedPolicies,
+  type IAMUserSummary,
+  type ManagedPolicySummary,
+} from '@/api/client';
 import { queryClient, queryKeys } from '@/lib/query';
 import { Button } from '@/components/ui/button';
 import {
@@ -31,6 +36,8 @@ import {
 } from '@/components/ui/table';
 import { CreateIAMUserDialog } from '@/components/CreateIAMUserDialog';
 import { DeleteIAMUserDialog } from '@/components/DeleteIAMUserDialog';
+import { ManagedPolicyEditorDialog } from '@/components/ManagedPolicyEditorDialog';
+import { DeleteManagedPolicyDialog } from '@/components/DeleteManagedPolicyDialog';
 import { cn } from '@/lib/utils';
 
 const PAGE_SIZE = 50;
@@ -87,10 +94,7 @@ export function IAMPage() {
           />
         </TabsContent>
         <TabsContent value="policies" className="mt-4">
-          <PlaceholderTab
-            title="Managed policies"
-            description="Managed-policy CRUD + attachments ship with US-013/US-014."
-          />
+          <PoliciesTab />
         </TabsContent>
       </Tabs>
     </div>
@@ -329,6 +333,193 @@ function UsersTab() {
               </div>
             </div>
           )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function PoliciesTab() {
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editing, setEditing] = useState<ManagedPolicySummary | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ManagedPolicySummary | null>(null);
+
+  const q = useQuery({
+    queryKey: queryKeys.iam.policies,
+    queryFn: () => fetchManagedPolicies(),
+    meta: { label: 'managed policies' },
+  });
+
+  const policies = q.data ?? [];
+  const showSkeleton = q.isPending && !q.data;
+  const errorMessage = !q.data && q.error instanceof Error ? q.error.message : null;
+
+  function handleRefresh() {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.iam.policies });
+  }
+
+  function openCreate() {
+    setEditing(null);
+    setEditorOpen(true);
+  }
+
+  function openEdit(policy: ManagedPolicySummary) {
+    setEditing(policy);
+    setEditorOpen(true);
+  }
+
+  return (
+    <div className="space-y-4">
+      <ManagedPolicyEditorDialog
+        open={editorOpen}
+        editing={editing}
+        onOpenChange={(open) => {
+          setEditorOpen(open);
+          if (!open) setEditing(null);
+        }}
+      />
+      <DeleteManagedPolicyDialog
+        open={deleteTarget !== null}
+        policy={deleteTarget}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null);
+        }}
+      />
+
+      {errorMessage && (
+        <Card className="border-destructive/40 bg-destructive/5">
+          <CardContent className="flex items-start gap-2 py-4 text-sm text-destructive">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+            <div>
+              <div className="font-medium">Failed to load managed policies</div>
+              <div className="text-xs text-destructive/80">{errorMessage}</div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      <Card>
+        <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <CardTitle className="text-base">Managed policies</CardTitle>
+            <CardDescription>
+              {q.isFetching && !showSkeleton
+                ? 'Refreshing…'
+                : `${policies.length} ${policies.length === 1 ? 'policy' : 'policies'}`}
+            </CardDescription>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleRefresh}
+              disabled={q.isFetching}
+              aria-label="Refresh managed policies"
+            >
+              <RefreshCw
+                className={cn('mr-1.5 h-3.5 w-3.5', q.isFetching && 'animate-spin')}
+                aria-hidden
+              />
+              Refresh
+            </Button>
+            <Button type="button" onClick={openCreate}>
+              <Plus className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+              Create policy
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="px-0 sm:px-0">
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="pl-4 sm:pl-6">Name</TableHead>
+                  <TableHead>Path</TableHead>
+                  <TableHead>Created</TableHead>
+                  <TableHead>Updated</TableHead>
+                  <TableHead className="text-right">Attachments</TableHead>
+                  <TableHead className="pr-4 text-right sm:pr-6">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {showSkeleton &&
+                  Array.from({ length: 3 }).map((_, i) => (
+                    <TableRow key={`sk-${i}`}>
+                      <TableCell colSpan={6} className="py-3">
+                        <Skeleton className="h-5 w-full" />
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                {!showSkeleton && policies.length === 0 && (
+                  <TableRow>
+                    <TableCell colSpan={6} className="py-10 text-center">
+                      <div className="space-y-2">
+                        <div className="text-sm font-medium">No managed policies</div>
+                        <div className="text-xs text-muted-foreground">
+                          Create a managed policy to attach to one or more IAM users.
+                        </div>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={openCreate}
+                          className="mt-2"
+                        >
+                          Create your first policy
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                )}
+                {policies.map((p) => (
+                  <TableRow key={p.arn}>
+                    <TableCell className="pl-4 font-medium sm:pl-6">
+                      <div className="font-medium">{p.name}</div>
+                      <div className="font-mono text-xs text-muted-foreground">
+                        {p.arn}
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">{p.path || '/'}</TableCell>
+                    <TableCell
+                      title={p.created_at ? new Date(p.created_at * 1000).toISOString() : ''}
+                    >
+                      {formatRelative(p.created_at)}
+                    </TableCell>
+                    <TableCell
+                      title={p.updated_at ? new Date(p.updated_at * 1000).toISOString() : ''}
+                    >
+                      {formatRelative(p.updated_at)}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {p.attachment_count}
+                    </TableCell>
+                    <TableCell className="pr-4 text-right sm:pr-6">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => openEdit(p)}
+                        aria-label={`Edit policy ${p.name}`}
+                      >
+                        <Pencil className="h-3.5 w-3.5" aria-hidden />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setDeleteTarget(p)}
+                        className="text-destructive hover:text-destructive"
+                        aria-label={`Delete policy ${p.name}`}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" aria-hidden />
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
         </CardContent>
       </Card>
     </div>

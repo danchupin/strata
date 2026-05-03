@@ -295,6 +295,38 @@ func (s *Store) DetachUserPolicy(ctx context.Context, userName, policyArn string
 	return txn.Commit(ctx)
 }
 
+// ListPolicyUsers range-scans the inverse-index prefix (s/pus/<arn>\x00\x00)
+// in lex order (= userName ascending). ErrManagedPolicyNotFound when the
+// policy itself does not exist.
+func (s *Store) ListPolicyUsers(ctx context.Context, policyArn string) ([]string, error) {
+	txn, err := s.kv.Begin(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	defer txn.Rollback()
+	if _, found, err := txn.Get(ctx, ManagedPolicyKey(policyArn)); err != nil {
+		return nil, err
+	} else if !found {
+		return nil, meta.ErrManagedPolicyNotFound
+	}
+	idxPrefix := PolicyUserPrefix(policyArn)
+	pairs, err := txn.Scan(ctx, idxPrefix, prefixEnd(idxPrefix), 0)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(pairs))
+	for _, p := range pairs {
+		body := p.Key[len(idxPrefix):]
+		userName, _, err := readEscaped(body)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, userName)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 // ListUserPolicies range-scans the per-user attachment prefix in lex order
 // (= policyArn ascending). ErrIAMUserNotFound when the user does not exist.
 func (s *Store) ListUserPolicies(ctx context.Context, userName string) ([]string, error) {

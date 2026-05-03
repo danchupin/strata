@@ -233,3 +233,29 @@ func (s *Store) ListUserPolicies(ctx context.Context, userName string) ([]string
 	}
 	return out, nil
 }
+
+// ListPolicyUsers returns every user_name attached to policyArn, scanned from
+// the inverse-index partition iam_policy_attachments (PK policy_arn,
+// user_name) in clustering order. ErrManagedPolicyNotFound when the policy
+// itself does not exist.
+func (s *Store) ListPolicyUsers(ctx context.Context, policyArn string) ([]string, error) {
+	if _, err := s.GetManagedPolicy(ctx, policyArn); err != nil {
+		return nil, err
+	}
+	iter := s.s.Query(
+		`SELECT user_name FROM iam_policy_attachments WHERE policy_arn=?`,
+		policyArn,
+	).WithContext(ctx).Iter()
+	defer iter.Close()
+	var (
+		out  []string
+		user string
+	)
+	for iter.Scan(&user) {
+		out = append(out, user)
+	}
+	if err := iter.Close(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}

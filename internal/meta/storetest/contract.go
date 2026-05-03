@@ -1616,6 +1616,14 @@ func caseUserPolicyAttach(t *testing.T, s meta.Store) {
 		t.Errorf("list missing user: got %v want ErrIAMUserNotFound", err)
 	}
 
+	users, err := s.ListPolicyUsers(ctx, policy.Arn)
+	if err != nil || len(users) != 1 || users[0] != user.UserName {
+		t.Fatalf("list policy users: err=%v %+v", err, users)
+	}
+	if _, err := s.ListPolicyUsers(ctx, "arn:aws:iam::strata:policy/Ghost"); err != meta.ErrManagedPolicyNotFound {
+		t.Errorf("list missing policy users: got %v want ErrManagedPolicyNotFound", err)
+	}
+
 	if err := s.DeleteManagedPolicy(ctx, policy.Arn); err != meta.ErrPolicyAttached {
 		t.Errorf("delete attached policy: got %v want ErrPolicyAttached", err)
 	}

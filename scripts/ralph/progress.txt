@@ -543,3 +543,49 @@ Started: Sun May  3 17:17:18 MSK 2026
   - The IAM page's top-level "Access keys" tab is intentionally a placeholder — per-user keys live on the detail page. Keep it that way; bringing it back into a single page would conflict with IAM cardinality (a user with 50+ keys at the org-list level is noisy).
   - `internal/adminapi/iam_access_keys_test.go::iamRequestRaw` is the canonical helper for "send a malformed body" tests — reuse for any future PATCH endpoint that needs a "rejects garbage" assertion.
 ---
+
+## Sun May  3 21:30 MSK 2026 - US-013
+- Implemented Managed policies CRUD page (backend + Policies tab UI) per PRD AC.
+
+### Backend
+- internal/meta/store.go: added `ListPolicyUsers(ctx, policyArn) ([]string, error)` method to the Store interface (sentinel ErrManagedPolicyNotFound on missing policy). Drives both the AttachmentCount column on the list page and the 409 PolicyAttached body's attached_to user list.
+- internal/meta/memory/store.go: ListPolicyUsers — read s.policyUsers[arn] under s.mu RLock; returns sorted []string + sentinel.
+- internal/meta/cassandra/managed_policies.go: ListPolicyUsers — single-partition `SELECT user_name FROM iam_policy_attachments WHERE policy_arn=?` (clustering order asc on user_name); ErrManagedPolicyNotFound bubbled from GetManagedPolicy preflight.
+- internal/meta/tikv/managed_policies.go: ListPolicyUsers — range-scan `s/pus/<arn>\x00\x00` prefix, parse user_name out of each key via readEscaped; ErrManagedPolicyNotFound when ManagedPolicyKey is absent.
+- internal/meta/storetest/contract.go: caseUserPolicyAttach gained ListPolicyUsers happy + missing-policy assertions; runs against memory + cassandra + tikv via the existing factory pattern.
+- internal/adminapi/iam_policies.go (new): GET /admin/v1/iam/policies (list + AttachmentCount via ListPolicyUsers per row), POST /admin/v1/iam/policies (mints `arn:aws:iam::strata:policy<path><name>`; validates name regex `^[A-Za-z0-9_+=,.@-]{1,128}$` + path begins/ends with `/`; document validated via s3api.ValidateBucketPolicyBlob and canonicalised via canonicalisePolicyJSON; 409 EntityAlreadyExists), PUT /admin/v1/iam/policies/{arn...} (trailing-wildcard captures full ARN incl. slashes; replaces document; bumps UpdatedAt), DELETE /admin/v1/iam/policies/{arn...} (returns 409 PolicyAttached body `{code, message, attached_to: [userName...]}` on ErrPolicyAttached; 404 NoSuchEntity on missing). Audit overrides: admin:CreateManagedPolicy / admin:UpdateManagedPolicy / admin:DeleteManagedPolicy.
+- internal/adminapi/server.go: routes wired between access-keys and consumers.
+- **Deviation from AC**: Go 1.22 mux trailing wildcards must be at the end of the pattern — so AC's literal `PUT /admin/v1/iam/policies/{arn}/document` is impossible without URL-encoding the ARN. Used PUT/DELETE on `{arn...}` with the same body shape; semantically PUT replaces the policy document (the /document suffix is redundant). Documented in PRD notes.
+- internal/adminapi/iam_policies_test.go (new): 17 in-package unit tests covering ListEmpty (Policies non-nil), ListPopulatedWithAttachmentCount (2 policies + 2 attached users), CreateHappyAndCanonicaliseDoc, CreateDefaultPath, CreateInvalidName (4 cases), CreateInvalidPath, CreateMalformedDoc, CreateEmptyDocRejected, CreateConflict (409), CreateMalformedJSON, UpdateHappyAndBumpsUpdatedAt, UpdateNotFound, UpdateMalformedDoc, DeleteHappy, DeleteNotFound, DeleteAttachedReturns409WithUserList (alice + bob both surfaced; policy must remain after 409), ArnRoundTripWithSlashes (proves the trailing-wildcard route accepts /team/ path ARNs).
+
+### Frontend
+- web/src/lib/query.ts: queryKeys.iam.policies cache slot.
+- web/src/api/client.ts: ManagedPolicySummary / ManagedPoliciesListResponse / CreateManagedPolicyBody types + fetchManagedPolicies / createManagedPolicy / updateManagedPolicyDocument / deleteManagedPolicy wrappers. PolicyAttachedError extends AdminApiError carrying attachedTo: string[] — deleteManagedPolicy parses the 409 body branch so the UI sees who blocks the delete without a second round-trip.
+- web/src/components/ManagedPolicyEditorDialog.tsx (new): unified Create/Edit dialog (editing prop ≠ null toggles edit mode); name+path Inputs disabled on edit per AC ('Name and path are immutable'); lazy-loaded MonacoJsonEditor schema-bound to vendored web/src/schemas/iam-policy.json (reuses the chunk shared with US-004/005/006). Pre-create starter doc auto-fills a sensible AllowReadAll IAM policy. Submit → invalidate queryKeys.iam.policies.
+- web/src/components/DeleteManagedPolicyDialog.tsx (new): type-to-confirm dialog with a pre-warn banner when attachment_count > 0 ('Detach this policy from every user before deleting (US-014)'); on 409 PolicyAttached the error block expands to render the attachedTo user list inline.
+- web/src/pages/IAM.tsx: Policies tab (was placeholder) now renders a table (Name+ARN | Path | Created | Updated | Attachments | Edit/Delete) + Create / Refresh buttons + empty-state CTA; per-row Pencil opens the editor in edit mode, Trash2 opens the delete dialog.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` all pass (incl. new internal/adminapi/iam_policies_test.go and the extended storetest contract case).
+- `go test -race ./internal/adminapi/ ./internal/meta/memory/` clean.
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean. Bundle sizes (gzipped):
+  - main: 151.60 KiB ✓ (well under 500 KiB AC ceiling; +4.72 KiB vs US-012 baseline of 146.88)
+  - Metrics route: 109.44 KiB (unchanged)
+  - MonacoJsonEditor lazy chunk: 591.94 KiB (shared with US-004/005/006/012 — no duplication)
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - When a meta.Store method needs an inverse-index lookup (ListPolicyUsers, future "users with role X" or "objects in storage class Y at scale"), wire up the inverse-index TABLE first (cassandra: PK (target, source) partition; tikv: separate prefix; memory: second map) — then expose the scan via a dedicated Store method. Pair the operator-spec'd table with the inverse and write/delete in lockstep so the views never desync. US-010 already shipped the inverse-index plumbing; US-013 just exposed it on the public Store.
+  - Go 1.22 net/http mux trailing wildcards are powerful for path segments containing slashes (S3 keys, IAM ARNs, RBAC subjects) BUT cannot have a static suffix after the wildcard — `{arn...}/document` is rejected. When AC names a URL with both, drop the suffix and overload the verb (PUT replaces the document; the policy ARN IS the resource). Document the deviation in the PRD notes — this is a clean REST collapse, not a capability drop. Reuse this trick for any future AC that puts an ARN/key in the middle of a URL.
+- Gotchas:
+  - The existing inverse-index from US-010 (PolicyUserPrefix in tikv, iam_policy_attachments in cassandra, policyUsers map in memory) was already populated by AttachUserPolicy/DetachUserPolicy across all 3 backends, so US-013's ListPolicyUsers was a *read-only* surface addition — no schema migration. Adding a public Store method on top of an existing inverse index is the cheap path; don't go inventing a new index when one already exists.
+  - The contract test at internal/meta/storetest/contract.go tests against ALL 3 backends via the same factory. When extending an existing case (here caseUserPolicyAttach), the new assertions must work for every backend — cassandra integration tests and tikv contract tests pick them up automatically via the same Run(t, factory) entrypoint.
+  - PolicyAttachedError vs AdminApiError: when a 409 body carries structured fields beyond `{code, message}`, add a sub-type that extends AdminApiError + parse the extra fields manually in the wrapper (deleteManagedPolicy). Existing buildAdminError discards anything beyond {code, message}, so a generic `throw await buildAdminError(resp, ...)` would lose the user list. Keep the status branch explicit when you need extra fields.
+- Useful context:
+  - The iam-policy.json schema vendored at web/src/schemas/iam-policy.json is the same one US-006 (BucketPolicyTab) uses. Future schema additions (Condition operators, IAM Conditions/Resources/Sid edge cases) only need to land in one place.
+  - The ManagedPolicyEditorDialog's `editing` prop is the canonical pattern for "single dialog handles Create AND Edit" — toggle behaviors (immutable name on edit, starter doc on create, different submit verb) via the prop. Reuse for any future CRUD dialogs (US-015 file upload form mode, US-016 retention edit, …).
+  - Strata-minted ARN namespace is `arn:aws:iam::strata:<resource><path><name>` — user (US-011 iam.go), managed policy (US-013, this commit). When US-014 lands, the AttachUserPolicy attached_to list returned by DELETE 409 will already match the ARN format the operator console renders, so the click-through link can be hard-wired without a separate "look up by name" step.
+---
