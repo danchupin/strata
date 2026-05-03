@@ -1,0 +1,343 @@
+{
+  "project": "Strata",
+  "branchName": "ralph/s3-over-s3-backend",
+  "description": "First-class S3-compatible data backend (S3-over-S3) — Strata's data plane gains an equal-tier alternative to RADOS that stores object bytes in any S3-compatible endpoint (AWS S3, MinIO, Ceph RGW, Garage, Wasabi, B2-S3) via aws-sdk-go-v2. Native shape: one Strata object = one backend S3 object via backend multipart upload (NOT 4-MiB-chunks-per-object — that would 250x request count and is explicitly out of scope). Defensive backend-versioning support: per-object VersionId is captured in Manifest.BackendRef at PUT/Complete time and passed back on Delete, so versioned-bucket backends (AWS-versioning-enabled, MinIO-versioning-enabled) do not silently leak storage into delete-markers. Graceful degradation across backends without versioning support (B2-S3 returns empty VersionId; plain delete works on non-versioned buckets). Wires STRATA_DATA_BACKEND=s3 dispatch, docker-compose s3-backend profile with MinIO sidecar, smoke + CI matrix entry, full SSE config flag (passthrough/strata/both), bidirectional lifecycle mapping, CORS passthrough, presigned URL passthrough. Operator pre-creates the backend bucket; Strata refuses to start on missing bucket. New ROADMAP.md 'Alternative data backends' section seeded by US-019. Cassandra remains the recommended meta backend; RADOS remains the default data backend; this PRD adds the S3 alternative for the data plane only.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "aws-sdk-go-v2 dependency + internal/data/s3 package skeleton",
+      "description": "As a developer, I want a starting internal/data/s3 package that compiles, satisfies the data.Backend interface with stub implementations, and is reachable via the existing backend factory so later stories can fill in real implementations.",
+      "acceptanceCriteria": [
+        "Add github.com/aws/aws-sdk-go-v2 + submodules (config, service/s3, feature/s3/manager) to go.mod; run go mod tidy",
+        "New internal/data/s3/backend.go with type Backend struct{} and stub methods returning errors.ErrUnsupported; methods conform to data.Backend interface",
+        "Compile-time interface assertion: var _ data.Backend = (*Backend)(nil)",
+        "New internal/data/s3/backend_test.go with one happy-path unit test asserting the stub is wired (calls Put, expects ErrUnsupported via errors.Is)",
+        "STRATA_DATA_BACKEND=s3 is reserved but NOT yet wired into internal/serverapp dispatch — production routing lands in US-009",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Streaming PUT via backend multipart upload",
+      "description": "As a Strata client uploading an object, I want the bytes to stream straight to the backend without buffering, using the backend's S3 multipart-upload protocol so objects of any size go through one consistent code path with bounded memory.",
+      "acceptanceCriteria": [
+        "s3.Backend.Put(ctx, oid, reader, size) uses manager.NewUploader(client).Upload(...) from feature/s3/manager — handles small objects via single PutObject and large objects via multipart, transparently",
+        "Default part size = 16 MiB (configurable via STRATA_S3_BACKEND_PART_SIZE); upload concurrency = 4 (configurable via STRATA_S3_BACKEND_UPLOAD_CONCURRENCY)",
+        "Memory bound: never buffers > part_size * upload_concurrency bytes (default 64 MiB peak)",
+        "Returns the backend ETag AND backend VersionId (string; empty when backend does not support versioning, returns 'null' when versioning is suspended) in the response struct so the manifest can record both",
+        "Aborts the multipart on context cancel — no orphaned multipart sessions left in the backend bucket",
+        "Test: 100 MiB streaming upload against in-process MinIO (testcontainer) completes with peak RSS under 100 MiB",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Streaming GET with Range support",
+      "description": "As a Strata client GETing an object (full or partial), I want the backend to stream the body back without loading it into memory and to honor Range headers natively.",
+      "acceptanceCriteria": [
+        "s3.Backend.GetRange(ctx, oid, off, len) (io.ReadCloser, error) issues GetObject with Range: bytes=<off>-<off+len-1> header to the backend",
+        "s3.Backend.Get(ctx, oid) (io.ReadCloser, error) issues plain GetObject (no Range)",
+        "Body returned is the SDK's response Body (HTTP stream); caller is responsible for Close()",
+        "Maps backend NoSuchKey → data.ErrNotFound so the gateway returns 404 NoSuchKey (not 500)",
+        "Test: 100 MiB object, range-read of [50 MiB, 50 MiB+1 KiB) returns exactly 1 KiB without loading the rest into memory",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Delete + best-effort batch delete (version-aware)",
+      "description": "As Strata's GC worker, I want to delete backend objects when the manifest's reference count drops to zero, ideally batched to reduce request volume, and to delete by VersionId when one was recorded so a backend bucket with versioning enabled does not silently leak the old version into a delete-marker.",
+      "acceptanceCriteria": [
+        "s3.Backend.Delete(ctx, oid, versionID) issues DeleteObject: when versionID == '' use plain DeleteObject(key) (frees bytes immediately on non-versioned and suspended buckets); when versionID != '' use DeleteObject(key, VersionId: versionID) (deletes specific version, skips delete-marker creation on versioned backends)",
+        "Idempotent — success on already-deleted objects (NoSuchKey → no-op)",
+        "s3.Backend.DeleteBatch(ctx, refs []ObjectRef) issues DeleteObjects with up to 1000 entries per request (S3 protocol limit); ObjectRef = {Key, VersionID}; SDK's DeleteObjectsInput.Delete.Objects[].VersionId is set when non-empty",
+        "On partial failure, returns the per-ref error map",
+        "GC worker reads BackendRef.VersionID from each manifest's BackendRef, populates the ObjectRef slice, calls DeleteBatch; when BackendRef == nil (RADOS path) GC uses the existing chunk-delete code path",
+        "Test 1: batch delete 100 keys with all VersionID == '' against in-process MinIO (versioning off), asserts 1 HTTP call and bytes freed",
+        "Test 2: batch delete 100 keys with all VersionID != '' against MinIO (versioning enabled), asserts no delete-markers created (verified via ListObjectVersions empty)",
+        "Test 3: mixed batch (some with VersionID, some without) — asserts each entry handled per its own version-id",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Configuration via env + path-style support",
+      "description": "As an operator, I want to point Strata at any S3-compatible endpoint with environment variables only — no code changes, no rebuilds.",
+      "acceptanceCriteria": [
+        "New env vars loaded via koanf-based internal/config: STRATA_S3_BACKEND_ENDPOINT (full URL; empty=AWS auto-resolve), STRATA_S3_BACKEND_REGION (required), STRATA_S3_BACKEND_BUCKET (required, single backend bucket all Strata objects land in), STRATA_S3_BACKEND_ACCESS_KEY/STRATA_S3_BACKEND_SECRET_KEY (static creds; empty falls back to SDK default chain — env / ~/.aws / IRSA / IMDS), STRATA_S3_BACKEND_FORCE_PATH_STYLE=true (required for MinIO + Ceph RGW; default false for AWS)",
+        "s3.Backend constructor reads these env vars at startup via koanf and resolves credentials once",
+        "Misconfiguration (empty bucket, bogus region) fails fast at startup with a clear error message — never at first request",
+        "Writability probe at startup: PutObject + DeleteObject on sentinel key '.strata-readyz-canary' against the backend bucket. Refuse to start (non-zero exit + clear error) if either fails — catches read-only mounts, missing IAM permissions, expired creds, bucket-existence regressions. Probe runs once on boot, not per-request",
+        "Document the env vars in README.md's environment-variable table",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "SDK retry + per-op timeout",
+      "description": "As an operator running Strata against a remote S3 endpoint under occasional slowdowns or transient 503s, I want bounded retries and per-op timeouts so a stuck request never hangs forever.",
+      "acceptanceCriteria": [
+        "Configure SDK retry mode = adaptive (default in v2 SDK), max attempts = 5 (configurable via STRATA_S3_BACKEND_MAX_RETRIES)",
+        "Per-op timeout via context.WithTimeout; default 30 s for small ops (Get/Put/Delete on objects under part-size), 10 min for multipart complete; configurable via STRATA_S3_BACKEND_OP_TIMEOUT_SECS",
+        "Retries on: 503 SlowDown, 429 TooManyRequests, network errors, 5xx",
+        "No retry on: 404 NoSuchKey, 403 AccessDenied, 400 malformed requests",
+        "Each retry logs at WARN with op + attempt + delay",
+        "Test: stub S3 client returns 503 for first 2 attempts then success — Put succeeds without surfacing the 503 to the gateway",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Prometheus metrics for backend ops",
+      "description": "As an operator, I want per-op latency + error rates for the S3 backend so I can alert on backend regressions.",
+      "acceptanceCriteria": [
+        "New histogram strata_data_s3_backend_op_duration_seconds{op,status} with op in {put, get, delete, batch_delete, multipart_init, multipart_part, multipart_complete, multipart_abort} and status in {ok, error, retried}",
+        "New counter strata_data_s3_backend_op_total{op,status}",
+        "New counter strata_data_s3_backend_retry_total{op} for visibility into adaptive retry pressure",
+        "Observers piggyback on the SDK's middleware.Stack — single endOperationMiddleware registered once on client init",
+        "Test: a known sequence of ops produces matching counter values",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Manifest schema additive — backend object reference",
+      "description": "As a developer fixing the manifest format for the new backend, I need an additive BackendRef field on data.Manifest that records the backend S3 key + ETag + size + version-id — without breaking RADOS-mode manifests.",
+      "acceptanceCriteria": [
+        "Add BackendRef *BackendRef field on data.Manifest. Struct: Backend string ('rados' | 's3'), Key string, ETag string, Size int64, VersionID string (omitempty — present only when the backend returned a version-id at write time)",
+        "All struct fields tagged json:',omitempty' and registered in manifest.proto with fresh, monotonically-increasing field numbers (additive — no renumbering)",
+        "Protobuf field-number reservation (avoid collision with US-013 Manifest.SSE.Mode): inspect highest field number in manifest.proto at story-start, name it N. This story reserves N+1 for BackendRef message + N+2..N+6 for sub-fields (Backend, Key, ETag, Size, VersionID). US-013 reserves N+7 for SSE.Mode. Document the assignment in a `// US-008 / US-013 field-number assignment` comment block at the top of manifest.proto",
+        "When BackendRef is set, the manifest's existing Chunks slice is empty (1:1 mapping; whole object lives at BackendRef.Key); when Chunks is non-empty, BackendRef is nil (RADOS path)",
+        "BackendRef.VersionID semantics documented in struct doc-comment: '' = backend does not support versioning OR versioning off OR SDK response did not carry a version-id (plain delete works); 'null' = backend versioning Suspended (versioned-Delete with VersionId='null' cleans correctly); any other non-empty string = UUID-shaped version-id from versioning-enabled backend (versioned-Delete skips delete-marker creation)",
+        "Encoder/decoder round-trips all three shapes (VersionID == '' / 'null' / <uuid>) via data.EncodeManifest / DecodeManifest in JSON and protobuf modes",
+        "Old (RADOS) manifests still decode with BackendRef=nil; gateway uses Chunks as today",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Gateway backend dispatch — STRATA_DATA_BACKEND=s3",
+      "description": "As an operator, I want to switch the gateway's data plane to S3 by setting one env var, and have the gateway route writes/reads through the new backend without any other config changes.",
+      "acceptanceCriteria": [
+        "internal/serverapp.buildDataBackend reads STRATA_DATA_BACKEND (existing for rados/memory) and dispatches to internal/data/s3.New(...) when value is 's3'",
+        "Gateway PUT path: when backend is S3, sets Manifest.BackendRef = {Backend: 's3', Key: <random>, ETag: <fromBackend>, Size: <total>, VersionID: <fromBackend>} and leaves Manifest.Chunks empty; VersionID is whatever the SDK returned — empty string, 'null', or UUID — without interpretation at the gateway layer",
+        "Gateway GET path: when Manifest.BackendRef != nil, calls s3.Backend.GetRange(ctx, BackendRef.Key, off, len); falls through to chunk-based path otherwise",
+        "Backend object key format: <bucket-uuid>/<object-uuid> — UUID prefix gives random prefix distribution to avoid hot-prefix throttling on AWS",
+        "Smoke pass (make smoke) passes against in-process MinIO with STRATA_DATA_BACKEND=s3",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Client multipart pass-through to backend multipart",
+      "description": "As a Strata client doing an S3 multipart upload, I want each UploadPart to map 1:1 to a backend UploadPart so we end up with exactly one S3 object on the backend, not N — and CompleteMultipartUpload on Strata triggers CompleteMultipartUpload on the backend.",
+      "acceptanceCriteria": [
+        "meta.MultipartUpload schema additive: BackendUploadID string. All three meta backends update in lockstep: Cassandra (ALTER TABLE multipart_uploads ADD backend_upload_id text via alterStatements in internal/meta/cassandra/schema.go); Memory (struct field + serialize through copy/marshal sites); TiKV (extend multipart-upload encoder/decoder in internal/meta/tikv/keys.go or its multipart-state file so BackendUploadID round-trips — no DDL since TiKV schema is implicit in key encoding)",
+        "meta.MultipartPart schema additive: BackendETag string — same lockstep update across all three backends",
+        "InitiateMultipartUpload on Strata calls CreateMultipartUpload on backend, stores returned UploadId in BackendUploadID",
+        "Strata UploadPart calls backend UploadPart with the same BackendUploadID; stores backend's per-part ETag in BackendETag",
+        "CompleteMultipartUpload on Strata calls CompleteMultipartUpload on backend with the part list (PartNumber + backend ETag); on success sets Manifest.BackendRef like US-009 with the multipart-completed object key. BackendRef.VersionID populated from CompleteMultipartUploadOutput.VersionId (empty / 'null' / UUID — same semantics as US-002 single-shot PUT)",
+        "AbortMultipartUpload on Strata aborts the backend multipart too",
+        "Per-part composite checksum interop: if prd-s3-tests-90 cycle has shipped (manifest carries PartChunks[].ChecksumValue), backend's per-part ETags flow through Strata's checksum machinery unchanged; if not yet shipped, this AC is deferred — leave per-part checksums as today (Strata gateway computes its own, BackendETag stored for multipart passthrough but not yet wired into composite checksum response). Document deferral in commit message",
+        "Test: multipart upload of 50 MiB across 5 parts produces exactly one backend object visible in `aws s3 ls s3://<backend-bucket>/`",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "docker-compose s3-backend profile + MinIO sidecar",
+      "description": "As a developer or CI runner, I want to bring up Strata running on top of MinIO with one compose command.",
+      "acceptanceCriteria": [
+        "deploy/docker/docker-compose.yml gains a minio service under profile s3-backend (image minio/minio:latest, data volume, MINIO_ROOT_USER/MINIO_ROOT_PASSWORD env)",
+        "Conditional strata-s3 service: when running under --profile s3-backend, sets STRATA_DATA_BACKEND=s3, STRATA_S3_BACKEND_ENDPOINT=http://minio:9000, STRATA_S3_BACKEND_FORCE_PATH_STYLE=true, STRATA_S3_BACKEND_REGION=us-east-1, STRATA_S3_BACKEND_BUCKET=strata-backend, static creds matching MinIO root creds",
+        "make up-s3-backend brings up cassandra + minio + strata-s3 (no Ceph) and waits for /readyz",
+        "An init-minio one-shot service creates the strata-backend bucket via mc mb before strata starts; depends_on healthcheck ordering",
+        "Idle stack RSS ≤ 3 GB (lighter than the Ceph stack — MinIO single node ~500 MB)",
+        "docker compose -f deploy/docker/docker-compose.yml --profile s3-backend config -q passes",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "Smoke test against MinIO via compose",
+      "description": "As a CI maintainer, I want make smoke to also exercise the S3 backend path against MinIO so we catch regressions in the new backend on every PR.",
+      "acceptanceCriteria": [
+        "New make smoke-s3-backend target: brings up the s3-backend compose profile, waits for /readyz, runs the existing smoke script (PUT / GET / DELETE / multipart) — all against the same Strata gateway, just with the new backend underneath",
+        "Asserts the smoke pass produces exactly one backend object per Strata object (verified via mc ls strata-backend/)",
+        "Asserts the multipart smoke produces exactly one backend object (not N)",
+        "Asserts make down cleans up the MinIO data volume",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "SSE config flag — passthrough / strata / both",
+      "description": "As a security-conscious operator, I want to choose how data-at-rest encryption is handled — let the backend handle it, let Strata handle it, or apply both layers.",
+      "acceptanceCriteria": [
+        "New env var STRATA_S3_BACKEND_SSE_MODE with values 'passthrough' (default), 'strata', 'both'; validated at startup",
+        "passthrough: every Strata Put sends x-amz-server-side-encryption: AES256 (or aws:kms per STRATA_S3_BACKEND_SSE_KMS_KEY_ID if set) to the backend; client sees per-Strata-object SSE header in GET responses passed through from backend metadata",
+        "strata: existing Strata SSE-S3 / SSE-KMS envelope encryption runs first; backend stores ciphertext as plain application/octet-stream with no SSE header",
+        "both: Strata envelope encrypts AND backend SSE applies; effectively double encryption for compliance regimes that mandate separate encryption boundaries",
+        "Mode is recorded per-object in Manifest.SSE.Mode (additive enum tag); GET path decrypts according to the recorded mode",
+        "Test: round-trip PUT → GET in each of the three modes against MinIO; asserts the bytes match the input",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-014",
+      "title": "Lifecycle bidirectional mapping",
+      "description": "As an operator using S3 lifecycle features, I want Strata's lifecycle rules to translate to backend S3 lifecycle policies where the semantics overlap, so backend-side transitions / expirations work without re-implementing them in Strata.",
+      "acceptanceCriteria": [
+        "When a Strata bucket gets a PutBucketLifecycle config that contains transitions to storage classes the backend supports natively (e.g. STANDARD_IA, GLACIER, DEEP_ARCHIVE on AWS), Strata translates to a backend bucket lifecycle rule with the same filter + transition; Strata's lifecycle worker skips those objects",
+        "Strata-only transition classes (e.g. internal cold-tier pools) keep using Strata's lifecycle worker — translation is best-effort",
+        "Expirations always also translate to backend lifecycle (cleanup of orphan backend objects independent of Strata GC)",
+        "GetBucketLifecycle returns the Strata-stored config (the source of truth); backend config is derived state",
+        "If backend reports a translation failure (unsupported transition class), Strata logs WARN and falls back to its own worker for that rule",
+        "Documented in docs/backends/s3.md with a translation table",
+        "Test: PUT a lifecycle config with a STANDARD_IA transition; asserts backend bucket has the matching rule via s3api.GetBucketLifecycleConfiguration",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-015",
+      "title": "CORS passthrough",
+      "description": "As a client doing browser-side CORS-preflight requests, I want Strata's CORS responses to reflect the backend bucket's CORS configuration when in S3-backend mode.",
+      "acceptanceCriteria": [
+        "PutBucketCors on Strata translates to PutBucketCors on the backend bucket (after Strata's own per-bucket CORS config update)",
+        "GetBucketCors on Strata returns the union of the Strata-stored config and the backend-stored config (Strata takes precedence on conflict)",
+        "Preflight OPTIONS requests on objects served via presigned URL (US-016) hit the backend directly — Strata is out of the path, backend's CORS config applies",
+        "DeleteBucketCors removes from both layers",
+        "Test: round-trip CORS config; asserts both Strata GetBucketCors and backend GetBucketCors (via aws CLI) return the same rule",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-016",
+      "title": "Presigned URL passthrough",
+      "description": "As a high-throughput GET workload (CDN origin, video streaming), I want Strata to mint a presigned URL that points the client directly at the backend, skipping Strata's IAM hop on the data plane after the initial signed request.",
+      "acceptanceCriteria": [
+        "Strata's PresignGetObject request handler optionally returns a backend-presigned URL (controlled by per-bucket flag BackendPresignEnabled set via a new admin endpoint PUT /<bucket>?backendPresign)",
+        "When enabled, the presigned URL points at the backend bucket directly with backend-credentialed signature; expiry forwarded from the original request",
+        "When disabled (default), behaves as today — URL points at Strata",
+        "Audit log row records presign_passthrough=true so the audit trail captures the redirect even though the data fetch does not hit Strata",
+        "Strict mode: backend-presigned URLs ONLY work when the client's Strata IAM allows GET on the object — Strata pre-checks before issuing the URL",
+        "Test: PresignGetObject with passthrough enabled returns a URL whose host is the backend's; curl against that URL fetches the object",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-017",
+      "title": "docs/backends/s3.md operator guide",
+      "description": "As an operator evaluating the S3 backend, I need a single-page operator guide covering setup, capability matrix, caveats, and tested-against backends.",
+      "acceptanceCriteria": [
+        "New docs/backends/s3.md (alongside scylla.md and tikv.md) with: when to choose S3 backend over RADOS (decision matrix); required env vars + sample compose / Kubernetes config; tested-against backends — AWS S3 (us-east-1), MinIO (latest), Ceph RGW (Reef+), Garage (latest) marked supported / works-with-caveats / unsupported; capability matrix (which S3-compatibility tests pass on each backend); performance characteristics (latency floor, cost model, throughput); common operational pitfalls (force-path-style for MinIO, IRSA setup for AWS, key prefix randomization for hot-prefix avoidance)",
+        "Operator-required backend bucket configuration section (load-bearing, not optional notes): (a) AbortIncompleteMultipartUpload lifecycle rule on backend bucket — recommended DaysAfterInitiation: 7 — without it, gateway crashes mid-multipart leak parts indefinitely; provide copy-pasteable JSON snippet. (b) Do NOT enable versioning on a Strata-managed backend bucket already written to with empty VersionID rows — plain delete creates delete-markers for legacy rows; Strata handles versioned buckets correctly only when versioning was enabled before any writes (per US-008 defensive design). (c) Cross-region setup is anti-pattern: co-locate Strata gateway with backend bucket in same region",
+        "README.md How to run section gains a 4th option: make up-s3-backend (Strata + Cassandra + MinIO, no Ceph)",
+        "CLAUDE.md Big-picture architecture diagram updated: data backend box reads 'data.Backend  memory | rados | s3'",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 17,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-018",
+      "title": "CI matrix entry — Strata + MinIO",
+      "description": "As a maintainer, I want every PR to also exercise the S3-backend path against MinIO so regressions on the new backend surface on the same SHA.",
+      "acceptanceCriteria": [
+        "New job in .github/workflows/ci.yml named e2e-s3-backend (parallel with existing e2e job)",
+        "Job runs make up-s3-backend + make smoke-s3-backend",
+        "Job uploads container logs + Strata logs + MinIO logs as e2e-s3-backend-logs artefact",
+        "Job timeout = 30 min",
+        "Existing CI jobs unchanged; this is purely additive",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 18,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-019",
+      "title": "ROADMAP entry + close-flip",
+      "description": "As a maintainer, I want a new ROADMAP section for alternative data backends (mirroring the existing 'Alternative metadata backends' section) and the S3 backend item flipped to Done on this cycle's final commit.",
+      "acceptanceCriteria": [
+        "Add new section to ROADMAP.md titled 'Alternative data backends' (placed right after the existing 'Alternative metadata backends' section)",
+        "Section text mirrors the metadata-backends prose AND the 'no community slots' policy already established for meta backends in the TiKV cycle (commit 40b45de). RADOS is primary, S3 backend is equal-tier alternative (this PRD). Supported set is exactly two: rados + s3 (plus memory for tests). Filesystem / Azure Blob / GCS are explicitly NOT planned — operators needing those use Strata's S3 backend pointed at any S3-compatible service (MinIO over filesystem, s3-proxy over Azure, GCS S3-interop API). Document this rationale in the section so future contributors do not propose adding them",
+        "On the final cycle commit, flip the S3-backend bullet to Done close-flip format per CLAUDE.md Roadmap maintenance rule with the closing SHA inline (or `(commit pending)` for follow-up SHA edit)",
+        "If any of US-002..US-018 left scope undone (e.g. lifecycle mapping partial), the bullet stays open and the partial work is documented under the bullet's 'what's missing' sub-line",
+        "CLAUDE.md alternative-data-backends prose updated to mirror new ROADMAP wording (single source of truth)",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 19,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+# Ralph Progress Log
+Started: 2026-04-29
+Cycle: ralph/s3-over-s3-backend
+---
+
+## Codebase Patterns
+
+(seed entries for this cycle. Replace/remove as US-001..US-019 land.)
+
+- data.Backend interface (internal/data/backend.go) is the contract; three
+  in-tree implementations now: memory (test), rados (primary), s3 (this
+  cycle, US-001+). All four ops are stream-shaped: Put(reader, size),
+  Get/GetRange returning io.ReadCloser, Delete. New backend impls live in
+  internal/data/<name>/ — mirror the existing s3 package layout.
+- Native shape ONLY: one Strata object = one backend S3 object via the
+  backend's own multipart upload. Never split a Strata object into N
+  4-MiB-chunks-as-S3-objects — request count amplification kills it.
+  Manifest.Chunks is empty when BackendRef is set (US-008).
+- VersionId is the defensive correctness lever (US-002, US-004, US-008,
+  US-010). Capture from SDK response on every PUT/Complete; pass back on
+  every Delete. Three-state semantics: '' (backend without versioning, or
+  versioning-off — plain delete), 'null' (versioning suspended — versioned
+  delete with literal 'null'), <uuid> (versioning enabled — versioned
+  delete bypasses delete-marker creation). Never branch on backend
+  capability — let the SDK return what it returns and pass through.
+- aws-sdk-go-v2 brings ~6 transitive deps. Acceptable for a P1 first-class
+  feature. Pin via go.mod; track upstream releases manually (no
+  auto-update cron exists).
+- Streaming PUT uses feature/s3/manager.NewUploader — single-shot or
+  multipart transparently per object size. Memory bound by part-size
+  (default 16 MiB) * upload concurrency (default 4) = 64 MiB peak.
+- Operator pre-creates the backend bucket. Strata refuses to start if the
+  bucket does not exist or is not writable. Strata does NOT own the
+  backend bucket lifecycle (auto-create would leak ownership).
+- Backend object key format: <bucket-uuid>/<object-uuid> — UUIDv4 first
+  4-8 hex chars give AWS S3 enough entropy for automatic prefix
+  partitioning, per-bucket grouping is forensic bonus
+  (`aws s3 ls s3://<bb>/<bucket-uuid>/`).
+- Cross-region operation (Strata in region X, backend bucket in region Y)
+  is an operator concern. Document in docs/backends/s3.md (US-017); do
+  NOT add startup region-mismatch detection or enforcement.
+- Backend versioning on Strata-managed bucket = anti-pattern but supported
+  defensively via VersionID. If operator enables versioning on an existing
+  bucket Strata wrote to with empty VersionID rows, those rows leak on
+  delete (plain DeleteObject creates delete-marker). Document; do not
+  policy.
+- Lifecycle bidirectional mapping (US-014) is best-effort. Strata's own
+  lifecycle worker keeps running for transition classes the backend does
+  not support natively; for natively-supported classes (STANDARD_IA /
+  GLACIER / DEEP_ARCHIVE), Strata translates to backend lifecycle and
+  skips those objects.
+- ROADMAP maintenance rule (CLAUDE.md): every commit closing a ROADMAP.md
+  item flips the bullet to strikethrough Done format in the SAME commit,
+  with closing SHA inline (or `(commit pending)` with a follow-up SHA
+  edit). Every commit discovering a new gap adds a new entry under the
+  right severity section in the same commit.
+- Tests for the S3 backend that need a real MinIO: use the same
+  testcontainers-go pattern as internal/meta/cassandra/store_integration_test.go
+  + internal/meta/tikv/tikvtest/cluster.go. Build tag `integration`.
+  MinIO single-node ~30 s start; bucket created via mc mb in init step.
