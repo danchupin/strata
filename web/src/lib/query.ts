@@ -75,6 +75,7 @@ export const queryKeys = {
       ['buckets', 'objects', name, { prefix, marker }] as const,
     objectLock: (name: string) => ['buckets', 'object-lock', name] as const,
     lifecycle: (name: string) => ['buckets', 'lifecycle', name] as const,
+    cors: (name: string) => ['buckets', 'cors', name] as const,
   },
   consumers: {
     top: (by: string, limit: number) => ['consumers', 'top', by, limit] as const,

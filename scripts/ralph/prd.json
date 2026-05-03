@@ -97,8 +97,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Backend handlers in internal/adminapi/buckets_cors.go (GET/PUT/DELETE). JSON↔XML translation via encodeCORSXML/decodeCORSXML; PUT validates ≥1 method, ≥1 origin, methods restricted to GET|PUT|POST|DELETE|HEAD (case-normalized to UPPER), max_age_seconds ≥ 0; final s3api.ValidCORSBlob round-trip catches anything the JSON-shape layer missed. Audit overrides admin:SetBucketCORS / admin:DeleteBucketCORS. DELETE is idempotent (404→204) so the dialog can fire blindly. Frontend: BucketCORSTab.tsx with Visual + JSON sub-tabs (lazy MonacoJsonEditor reuses the existing chunk from US-004). Visual builder per AC: ID, AllowedMethods multi-select chips, AllowedOrigins/AllowedHeaders/ExposeHeaders chip lists (Enter or Add to commit), MaxAgeSeconds, +/− Add rule. JSON tab uses MonacoJsonEditor with vendored web/src/schemas/cors.json schema-bound by modelUri. JSON→Visual auto-applies on tab switch (or prompts confirm if JSON malformed). 'Delete configuration' calls deleteBucketCORS with window.confirm guard. New queryKeys.buckets.cors(name). Browser smoke deferred — dev-browser skill unavailable in this Ralph loop."
     },
     {
       "id": "US-006",

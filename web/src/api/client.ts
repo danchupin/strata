@@ -270,6 +270,55 @@ export async function setBucketLifecycle(
   if (!resp.ok) throw await buildAdminError(resp, 'set lifecycle failed');
 }
 
+// CORS (US-005) — JSON wire shape mirrors CORSConfigJSON in
+// internal/adminapi/buckets_cors.go. The visual editor binds to this shape;
+// the JSON tab paste-path round-trips through it too.
+export interface CORSRule {
+  id?: string;
+  allowed_methods: string[];
+  allowed_origins: string[];
+  allowed_headers?: string[];
+  expose_headers?: string[];
+  max_age_seconds?: number;
+}
+
+export interface CORSConfig {
+  rules: CORSRule[];
+}
+
+// fetchBucketCORS returns the bucket's CORSConfig (US-005). Returns null on
+// 404 NoSuchCORSConfiguration so the editor can render the empty-state
+// without forcing the caller to catch the error.
+export async function fetchBucketCORS(name: string): Promise<CORSConfig | null> {
+  const resp = await fetch(`/admin/v1/buckets/${encodeURIComponent(name)}/cors`, {
+    method: 'GET',
+    credentials: 'same-origin',
+  });
+  if (resp.status === 404) return null;
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch cors failed');
+  return (await resp.json()) as CORSConfig;
+}
+
+export async function setBucketCORS(name: string, cfg: CORSConfig): Promise<void> {
+  const resp = await fetch(`/admin/v1/buckets/${encodeURIComponent(name)}/cors`, {
+    method: 'PUT',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(cfg),
+  });
+  if (!resp.ok) throw await buildAdminError(resp, 'set cors failed');
+}
+
+export async function deleteBucketCORS(name: string): Promise<void> {
+  const resp = await fetch(`/admin/v1/buckets/${encodeURIComponent(name)}/cors`, {
+    method: 'DELETE',
+    credentials: 'same-origin',
+  });
+  if (resp.status === 204) return;
+  if (resp.status === 404) return;
+  throw await buildAdminError(resp, 'delete cors failed');
+}
+
 export async function fetchBucket(name: string): Promise<BucketDetail> {
   const resp = await fetch(`/admin/v1/buckets/${encodeURIComponent(name)}`, {
     method: 'GET',

@@ -37,6 +37,14 @@ var reservedBucketNames = map[string]struct{}{
 // duplicating the regex.
 func ValidBucketName(name string) bool { return validBucketName(name) }
 
+// ValidCORSBlob runs the s3api parser on a candidate CORS XML blob and
+// returns true when the s3api consumer would accept it. Used by adminapi to
+// pre-flight operator-supplied configurations before SetBucketCORS persists.
+func ValidCORSBlob(blob []byte) bool {
+	_, err := parseCORSConfig(blob)
+	return err == nil
+}
+
 // validBucketName checks the S3 DNS-safe bucket name rules:
 //
 //	length 3..63, lowercase letters / digits / hyphen / dot,

@@ -20,6 +20,8 @@ Started: Sun May  3 17:17:18 MSK 2026
 - Saving a bucket-scoped config? Pattern: typed wrapper in `web/src/api/client.ts` returning Promise<void> + throwing AdminApiError; component calls it inside `try {…} catch (err) { setServerError({code, message}) }`; on success invalidate `queryKeys.buckets.one(name)` and the per-config key. See BucketOverviewTab.tsx for the canonical shape.
 - Heavyweight modules (Monaco) are lazy-loaded via `lazy(() => import('./MonacoJsonEditor'))` so the per-tab bundle stays under the 500 KiB gzipped budget. MonacoJsonEditor.tsx imports from `monaco-editor/esm/vs/editor/editor.api` + `…/language/json/monaco.contribution` (NOT the package main!) to skip every other language; workers go via vite's `?worker` suffix so we self-host (no CDN). Schema validation: bind a vendored JSON schema by `modelUri` via `monaco.languages.json.jsonDefaults.setDiagnosticsOptions` — dedupe by `uri` so re-mounts don't accumulate.
 - Vendored JSON schemas live under `web/src/schemas/<thing>.json` and import directly via `@/schemas/lifecycle.json` (resolveJsonModule:true is on in tsconfig).
+- s3api keeps its XML parsers unexported. To pre-flight an admin-side blob without duplicating the parser, expose a `ValidXxxBlob([]byte) bool` thin wrapper in `internal/s3api/validate.go` (see `ValidBucketName`, `ValidCORSBlob`). Admin handlers call the wrapper after JSON→XML render so anything the JSON-shape layer missed gets caught before SetBucket* persists.
+- DELETE endpoints for "bucket has one optional config document" (CORS, future Policy, Logging, etc.) MUST be idempotent — `errors.Is(err, meta.ErrNoSuch*) → 204`. Avoids the client needing a pre-check round-trip and matches the AWS S3 contract.
 
 ## Sun May  3 17:27 MSK 2026 - US-001
 - Implemented CreateBucket dialog (POST /admin/v1/buckets + UI) per PRD AC.
@@ -149,6 +151,48 @@ Started: Sun May  3 17:17:18 MSK 2026
   - `web/src/components/BucketLifecycleTab.tsx` is the canonical pattern for the upcoming US-005 (CORS) and US-006 (Policy) bucket-config tabs: lazy-loaded MonacoJsonEditor + visual editor side-by-side, vendored JSON schema, save → invalidate the per-config queryKey.
   - `internal/adminapi/buckets_lifecycle.go::encodeLifecycleXML` shape doubles as the reference for "JSON in / XML out" translation — copy the XML struct definition pattern into US-005's CORS handler instead of leaning on the s3api package's unexported parser.
   - The MonacoJsonEditor wrapper accepts a `schema` prop with `{uri, modelUri, schema}` — `uri` is the schema identifier, `modelUri` is the model file path that triggers binding via `fileMatch`. Pass distinct `modelUri`s per page so two different schemas (lifecycle vs IAM policy) don't collide.
+---
+
+## Sun May  3 18:55 MSK 2026 - US-005
+- Implemented CORS rule editor with Visual + JSON (Monaco) sub-tabs per PRD AC.
+
+### Backend
+- internal/s3api/validate.go: exported `ValidCORSBlob([]byte) bool` thin wrapper around the unexported `parseCORSConfig`. Lets adminapi pre-flight a rendered CORS XML blob without duplicating the s3api parser.
+- internal/adminapi/buckets_cors.go (new): handleBucketGetCORS (GET → JSON, 404 NoSuchCORSConfiguration when blob absent, 404 NoSuchBucket when bucket missing), handleBucketSetCORS (PUT JSON, validate per-rule, marshal to XML, double-check via s3api.ValidCORSBlob, persist via meta.Store.SetBucketCORS), handleBucketDeleteCORS (DELETE, idempotent — ErrNoSuchCORS → 204). JSON↔XML translation via encodeCORSXML / decodeCORSXML keeps the field shape lossless across round-trip. Validation: ≥1 method, ≥1 origin, methods restricted to GET|PUT|POST|DELETE|HEAD (case-normalized to UPPER), max_age_seconds ≥ 0. Audit overrides admin:SetBucketCORS / admin:DeleteBucketCORS.
+- internal/adminapi/server.go: registered GET/PUT/DELETE /admin/v1/buckets/{bucket}/cors.
+- internal/adminapi/buckets_cors_test.go (new): 11 cases — GetNotConfigured 404 NoSuchCORSConfiguration, GetBucketNotFound 404, PutHappyAndRoundTrip (two rules: methods normalized + max_age + expose_headers + 2nd rule with PUT/POST/DELETE + wildcard origin), PutEmptyRulesRejected 400, PutMissingMethodsRejected 400, PutBadMethodRejected 400 ("PURGE"), PutBucketNotFound 404, PutMalformedJSON 400, DeleteHappy 204 + then GET 404, DeleteIdempotent 204 (no-op delete), DeleteBucketNotFound 404.
+
+### Frontend
+- web/src/api/client.ts: fetchBucketCORS (404 → null) / setBucketCORS / deleteBucketCORS wrappers + CORSConfig / CORSRule types (mirrors backend JSON shape).
+- web/src/lib/query.ts: queryKeys.buckets.cors(name).
+- web/src/schemas/cors.json (new): vendored draft-07 schema (rules ≥1, allowed_methods enum, allowed_origins ≥1 minLength=1, optional allowed_headers / expose_headers / max_age_seconds ≥ 0).
+- web/src/components/BucketCORSTab.tsx (new): Visual tab (per-rule cards: ID input, AllowedMethods chip toggles, AllowedOrigins/AllowedHeaders/ExposeHeaders chip lists with Enter-to-commit + Add button + dedupe, MaxAgeSeconds, +/− Add rule, delete) and JSON tab (Suspense-wrapped lazy MonacoJsonEditor reusing the existing US-004 chunk; schema-bound by modelUri inmemory://cors/<name>.json). Tab switch JSON→Visual auto-applies parsed state; if JSON has unsaved errors prompts confirm and reverts. Save invalidates queryKeys.buckets.cors(name). 'Delete configuration' button (red, disabled when no config loaded) calls deleteBucketCORS via window.confirm guard.
+- web/src/pages/BucketDetail.tsx: added CORS tab trigger + content alongside existing Overview/Lifecycle/Objects.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` — all packages pass (incl. new buckets_cors_test.go).
+- `go test -race ./internal/adminapi/ ./internal/s3api/` clean.
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean. Bundle sizes (gzipped):
+  - main: 130.96 KiB ✓ (well under the 500 KiB AC ceiling; +2.26 KiB vs US-004 baseline of 128.70)
+  - Metrics route: 109.44 KiB (unchanged)
+  - MonacoJsonEditor lazy chunk: 591.94 KiB (shared with US-004 — no duplication)
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - The CORS XML the s3api consumer reads is the AWS shape verbatim. Same lesson as US-004: keep the s3api parser the source of truth for "will the consumer accept this", expose a `ValidXxxBlob([]byte) bool` thin wrapper from s3api, and pre-flight inside the admin handler. Adds zero coupling — no new exported types — and it catches things the JSON-shape layer missed.
+  - For multi-string fields (origins, headers, methods) the chip list + Enter/Add commit + dedupe combo is a clean reusable pattern for the rest of Phase 2 (US-007 ACL grants, US-008 inventory OptionalFields). Ripped here as a private `ChipList` component because two separate use-sites this cycle would be premature; lift if a third tab needs it.
+  - DELETE endpoints for "single-document config" (CORS, lifecycle, policy) should be idempotent — server returns 204 even when no config existed. Avoids the dialog needing a "did anything exist?" pre-check round-trip.
+- Gotchas:
+  - Go embedded XML structs need lowercase-prefix Go field names AND XML attr tags to roundtrip empty slices cleanly. AllowedHeaders/ExposeHeaders use `xml:"AllowedHeader,omitempty"` so the rendered XML omits the empty repeated tag rather than emitting a single self-closing one.
+  - HTTP method casing: AWS spec is uppercase; users will type "get" / "Head". The handler normalizes to UPPER in-place on the request struct so the round-trip GET sees the canonical value. Don't skip — `parseCORSConfig` doesn't care about case but the s3api preflight matcher does (case-sensitive method match). Catching it server-side on PUT means the visual editor doesn't have to.
+  - Schema validation in Monaco: schema must be re-registered on remount via the dedupe-by-uri pattern (see MonacoJsonEditor.tsx). The first US-005 mount after a US-004 visit should NOT collide because the schemas have different `uri`s (`.../cors.json` vs `.../lifecycle.json`).
+- Useful context:
+  - `internal/s3api/cors.go::parseCORSConfig` is the upstream consumer; the ValidCORSBlob wrapper hits it. If a future story needs to add a new field (e.g. multi-region wildcard syntax), update the s3api struct first, then mirror in adminapi/buckets_cors.go's `corsRuleXML` + `CORSRuleJSON`.
+  - `web/src/components/BucketCORSTab.tsx::ChipList` is the chip-input component shape the upcoming US-007 (Bucket ACL grant editor) and US-008 (Inventory OptionalFields multi-select) will likely lift — promote to `web/src/components/ChipList.tsx` on the second copy-paste, not the first.
+  - The shared MonacoJsonEditor lazy chunk now serves Lifecycle + CORS without bundle-size penalty (chunk reused). US-006 (Policy with IAM schema) and US-013 (ManagedPolicy editor) will continue piggybacking on the same chunk.
 ---
 
 ## Sun May  3 17:53 MSK 2026 - US-003
