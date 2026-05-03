@@ -116,8 +116,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Backend handlers in internal/adminapi/buckets_policy.go (GET/PUT/DELETE/dry-run). Validation via new s3api.ValidateBucketPolicyBlob wrapper around internal/auth/policy.Parse — same parser the gateway runs at request-time. PUT canonicalises JSON via json.Marshal+2-space indent so reload after Save is byte-stable in Monaco. DELETE idempotent (ErrNoSuchBucketPolicy → 204). Dry-run returns 200 {valid:true} or 400 {valid:false, message} without persisting. Audit overrides admin:SetBucketPolicy / admin:DeleteBucketPolicy. Frontend: BucketPolicyTab.tsx Monaco-only editor (no Visual sub-tab — IAM policy syntax has no clean visual form), schema-bound to vendored web/src/schemas/iam-policy.json by modelUri. Validate button calls dryRunBucketPolicy and surfaces valid/invalid banner inline. Generate template Select dropdown inserts PublicRead | ReadOnlyAuthenticated | DenyAllExceptUser starters with Resource pre-filled with the bucket name. Delete opens a type-to-confirm Dialog (operator types the bucket name). Reuses the existing US-004/US-005 lazy Monaco chunk. Browser smoke deferred — dev-browser skill unavailable in this Ralph loop."
     },
     {
       "id": "US-007",

@@ -22,6 +22,8 @@ Started: Sun May  3 17:17:18 MSK 2026
 - Vendored JSON schemas live under `web/src/schemas/<thing>.json` and import directly via `@/schemas/lifecycle.json` (resolveJsonModule:true is on in tsconfig).
 - s3api keeps its XML parsers unexported. To pre-flight an admin-side blob without duplicating the parser, expose a `ValidXxxBlob([]byte) bool` thin wrapper in `internal/s3api/validate.go` (see `ValidBucketName`, `ValidCORSBlob`). Admin handlers call the wrapper after JSON→XML render so anything the JSON-shape layer missed gets caught before SetBucket* persists.
 - DELETE endpoints for "bucket has one optional config document" (CORS, future Policy, Logging, etc.) MUST be idempotent — `errors.Is(err, meta.ErrNoSuch*) → 204`. Avoids the client needing a pre-check round-trip and matches the AWS S3 contract.
+- For JSON-document configs (bucket policy) where validation lives in a sibling Go package (not s3api), still expose the validator from `internal/s3api/validate.go` as `s3api.Validate<Thing>Blob` — adminapi imports only s3api, never auth/policy directly, so the surface stays consistent across config tabs (CORS/Policy/ACL/Lifecycle).
+- Bucket-policy storage is the raw operator-supplied JSON (no XML translation). PUT canonicalises via `json.Marshal`+2-space indent (`canonicalisePolicyJSON`) before SetBucketPolicy so re-loads after Save are byte-stable in Monaco — avoids whitespace-only diffs surprising the operator.
 
 ## Sun May  3 17:27 MSK 2026 - US-001
 - Implemented CreateBucket dialog (POST /admin/v1/buckets + UI) per PRD AC.
@@ -231,4 +233,45 @@ Started: Sun May  3 17:17:18 MSK 2026
   - `BucketOverviewTab.tsx::deriveRuleState` is the single source of truth for translating `ObjectLockConfig` (server JSON) into the `(mode, unit, amount)` triple the form binds to. Future Mode-aware tabs (Lifecycle, CORS) can reuse the JSON-config / form-state split shape: a derive function + a useEffect that resets local state when the query data changes.
   - `web/src/components/ui/tabs.tsx` is a thin shadcn wrapper around Radix Tabs (already vendored). No additional install needed for US-004..US-009.
   - `internal/adminapi/buckets_config_test.go::putAdmin` is a generic helper for body-bearing admin requests (PUT / POST / DELETE). Reuse for US-005..US-009 instead of duplicating the auth-context + JSON-encode boilerplate.
+---
+
+## Sun May  3 20:29 MSK 2026 - US-006
+- Implemented Bucket Policy JSON editor (Monaco + IAM schema + dry-run) per PRD AC.
+
+### Backend
+- internal/s3api/validate.go: added `s3api.ValidateBucketPolicyBlob([]byte) error` thin wrapper around `internal/auth/policy.Parse`. Empty blob short-circuits to ErrEmptyPolicy. Lets adminapi run the same validator the gateway uses at request-time without re-importing internal/auth/policy across packages.
+- internal/adminapi/buckets_policy.go (new): handleBucketGetPolicy (GET → raw JSON, 404 NoSuchBucketPolicy when absent, 404 NoSuchBucket when bucket missing), handleBucketSetPolicy (PUT — validates via s3api.ValidateBucketPolicyBlob, canonicalises JSON via 2-space indent for stable Monaco round-trip, persists via SetBucketPolicy), handleBucketDeletePolicy (DELETE — idempotent, ErrNoSuchBucketPolicy → 204), handleBucketDryRunPolicy (POST /policy/dry-run — same validation, no persist; 200 {valid:true} on accept, 400 {valid:false, message} on parse error). Audit overrides admin:SetBucketPolicy / admin:DeleteBucketPolicy.
+- internal/adminapi/server.go: registered four new routes (GET/PUT/DELETE /admin/v1/buckets/{bucket}/policy + POST /policy/dry-run).
+- internal/adminapi/buckets_policy_test.go (new): 12 cases — GetNotConfigured 404 NoSuchBucketPolicy, GetBucketNotFound 404 NoSuchBucket, PutHappyAndRoundTrip, PutBucketNotFound 404, PutInvalidEffect 400 MalformedPolicy ("Maybe"), PutEmptyRejected 400, PutMalformedJSON 400, DeleteHappy + GET-after-404, DeleteIdempotent (no-op delete), DeleteBucketNotFound, DryRunValid 200 valid:true, DryRunInvalid 400 valid:false+message, DryRunDoesNotPersist (valid dry-run leaves the bucket policy-less).
+
+### Frontend
+- web/src/api/client.ts: fetchBucketPolicyText (404→null) / setBucketPolicy / deleteBucketPolicy / dryRunBucketPolicy wrappers + PolicyDryRunResult type. Wire shape is the raw JSON document (no JSON-shape translation needed — admin endpoint persists what the operator types verbatim).
+- web/src/lib/query.ts: queryKeys.buckets.policy(name).
+- web/src/schemas/iam-policy.json (new): vendored draft-07 JSON schema covering Version (2008-10-17 | 2012-10-17), Id, Statement (single-or-array), Effect (Allow|Deny), Principal (* or {AWS|Service|Federated|CanonicalUser}), Action/NotAction, Resource/NotResource, Condition (op→key→value-or-array). Same shape will drive US-013 ManagedPolicy editor.
+- web/src/components/BucketPolicyTab.tsx (new): Monaco-only editor (no Visual sub-tab — IAM policy syntax has no clean visual form) with schema-bound validation via modelUri inmemory://policy/<name>.json. 'Validate' button calls dryRunBucketPolicy, surfaces valid/invalid banner inline. 'Generate template' Select dropdown inserts PublicRead | ReadOnlyAuthenticated | DenyAllExceptUser starter (Resource pre-filled with the bucket name). 'Save policy' button persists via setBucketPolicy + invalidates the query. 'Delete policy' opens a type-to-confirm Dialog (operator types the bucket name) — Delete button enabled only when input matches. Reuses the existing US-004/US-005 lazy Monaco chunk (no per-page bundle penalty).
+- web/src/pages/BucketDetail.tsx: added Policy tab trigger + content alongside existing Overview/Lifecycle/CORS/Objects.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` — all packages pass (incl. new buckets_policy_test.go).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean. Bundle sizes (gzipped):
+  - main: 139.60 KiB ✓ (under the 500 KiB AC ceiling; +8.64 KiB vs US-005 baseline of 130.96 — Select primitive + dialog+IAM schema)
+  - Metrics route: 109.44 KiB (unchanged)
+  - MonacoJsonEditor lazy chunk: 591.94 KiB (shared with US-004/US-005 — no duplication)
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - Bucket policy storage is the raw JSON document — no XML translation. Server-side canonicalisation via `json.Marshal` + 2-space indent (see `canonicalisePolicyJSON`) keeps Save→reload byte-stable in Monaco; without it the editor would show whitespace-only diffs after every save when the user pasted minified JSON.
+  - When validation lives in `internal/auth/policy` (not s3api), still expose the wrapper from `internal/s3api/validate.go` as `s3api.ValidateXxxBlob` — adminapi already imports s3api for ValidBucketName / SetAuditOverride, so adding a new direct dep on internal/auth/policy is unnecessary import surface. Single import root keeps the contract one place to audit.
+  - dry-run endpoints should return 200/4xx based on the validator outcome (not always 200) so React-Query / fetch wrappers naturally route the result through the error path. Body shape is the same JSON for both — `{valid:bool, message?:string}` — so the wrapper just deserialises the body in either branch and returns it without throwing.
+- Gotchas:
+  - `policy.Parse` is permissive on empty Statement — the `[]Statement` decodes as nil and the loop doesn't fire. Add an explicit "policy document is empty" check in the s3api wrapper before calling Parse, otherwise empty/whitespace bodies persist a useless `{}` document.
+  - The PRD says "validates via s3api.parseBucketPolicy" but no such function exists on main — current putBucketPolicy in s3api only does `json.Unmarshal(&map[string]any)` (probe). Adapt to reality: expose `s3api.ValidateBucketPolicyBlob` that calls the gateway's actual evaluator (`policy.Parse`) — that's the single source of truth for "will the request-time evaluator accept this".
+  - Monaco's IAM schema validation is ADVISORY (red squigglies in the gutter); the dry-run round-trip is the AUTHORITATIVE check because it runs the real Go parser. The client-side schema lives at web/src/schemas/iam-policy.json and is more permissive than `policy.Parse` (e.g. accepts `Service`/`Federated` principals the parser doesn't evaluate yet) — that's intentional, the schema mirrors AWS IAM spec; validation comes from the dry-run.
+- Useful context:
+  - `internal/auth/policy/policy.go::Parse` is the authoritative validator. Version field is optional; Effect ∈ {Allow, Deny} is the only required string-enum; Action / Resource accept "*"/"?" globs; Principal accepts "*" or {AWS:[…]}; Condition accepts only StringEquals semantics today (more operators ignored, not rejected).
+  - `web/src/components/BucketPolicyTab.tsx` is the canonical Monaco-only template for US-013 (Managed Policy editor). The visual-editor sibling pattern (US-004/US-005) does NOT apply — IAM policy semantics don't decompose cleanly into UI controls.
+  - The Generate template Select uses `value=""` + `onValueChange` so picking an item doesn't pin a selection on the trigger — every pick resets to placeholder "Insert starter policy…" so consecutive picks work without an extra reset click.
 ---

@@ -4,6 +4,8 @@ import (
 	"net"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/danchupin/strata/internal/auth/policy"
 )
 
 // validObjectKey rejects keys that AWS rejects with InvalidURI: invalid UTF-8
@@ -44,6 +46,27 @@ func ValidCORSBlob(blob []byte) bool {
 	_, err := parseCORSConfig(blob)
 	return err == nil
 }
+
+// ValidateBucketPolicyBlob runs the same IAM-policy parser the gateway uses
+// at request-time on a candidate bucket-policy JSON blob. Returns nil when
+// the policy parses + every Statement has Effect ∈ {Allow, Deny}; otherwise
+// returns the underlying parse error so adminapi callers can surface the
+// reason inline. Empty / whitespace-only blob → ErrEmptyPolicy.
+func ValidateBucketPolicyBlob(blob []byte) error {
+	if len(strings.TrimSpace(string(blob))) == 0 {
+		return ErrEmptyPolicy
+	}
+	_, err := policy.Parse(blob)
+	return err
+}
+
+// ErrEmptyPolicy is returned by ValidateBucketPolicyBlob when the input is
+// empty or whitespace-only. Adminapi maps to 400 InvalidArgument.
+var ErrEmptyPolicy = errEmptyPolicy{}
+
+type errEmptyPolicy struct{}
+
+func (errEmptyPolicy) Error() string { return "policy document is empty" }
 
 // validBucketName checks the S3 DNS-safe bucket name rules:
 //

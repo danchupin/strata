@@ -51,6 +51,7 @@ import { cn } from '@/lib/utils';
 import { BucketCORSTab } from '@/components/BucketCORSTab';
 import { BucketLifecycleTab } from '@/components/BucketLifecycleTab';
 import { BucketOverviewTab } from '@/components/BucketOverviewTab';
+import { BucketPolicyTab } from '@/components/BucketPolicyTab';
 import { DeleteBucketDialog } from '@/components/DeleteBucketDialog';
 
 const PAGE_SIZE = 100;
@@ -267,6 +268,9 @@ export function BucketDetailPage() {
           <TabsTrigger value="cors" disabled={!detail}>
             CORS
           </TabsTrigger>
+          <TabsTrigger value="policy" disabled={!detail}>
+            Policy
+          </TabsTrigger>
         </TabsList>
         <TabsContent value="overview" className="space-y-4">
           {detail && <BucketOverviewTab bucket={detail} />}
@@ -276,6 +280,9 @@ export function BucketDetailPage() {
         </TabsContent>
         <TabsContent value="cors" className="space-y-4">
           {detail && <BucketCORSTab bucket={detail} />}
+        </TabsContent>
+        <TabsContent value="policy" className="space-y-4">
+          {detail && <BucketPolicyTab bucket={detail} />}
         </TabsContent>
         <TabsContent value="objects">
       <Card>

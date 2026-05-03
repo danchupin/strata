@@ -319,6 +319,72 @@ export async function deleteBucketCORS(name: string): Promise<void> {
   throw await buildAdminError(resp, 'delete cors failed');
 }
 
+// Bucket Policy (US-006) — the wire shape is the raw IAM policy JSON document
+// (Version, Statement[Effect, Action, Resource, Principal, Condition]). The
+// admin API persists what the operator types verbatim (after canonical
+// re-indenting); the GET response Content-Type is application/json so we
+// return the parsed JSON value untouched and let the editor format it.
+
+// fetchBucketPolicyText returns the stored policy as a JSON string. Returns
+// null on 404 NoSuchBucketPolicy so the editor can render an empty state.
+export async function fetchBucketPolicyText(name: string): Promise<string | null> {
+  const resp = await fetch(`/admin/v1/buckets/${encodeURIComponent(name)}/policy`, {
+    method: 'GET',
+    credentials: 'same-origin',
+  });
+  if (resp.status === 404) return null;
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch policy failed');
+  return await resp.text();
+}
+
+export async function setBucketPolicy(name: string, policy: string): Promise<void> {
+  const resp = await fetch(`/admin/v1/buckets/${encodeURIComponent(name)}/policy`, {
+    method: 'PUT',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: policy,
+  });
+  if (!resp.ok) throw await buildAdminError(resp, 'set policy failed');
+}
+
+export async function deleteBucketPolicy(name: string): Promise<void> {
+  const resp = await fetch(`/admin/v1/buckets/${encodeURIComponent(name)}/policy`, {
+    method: 'DELETE',
+    credentials: 'same-origin',
+  });
+  if (resp.status === 204) return;
+  if (resp.status === 404) return;
+  throw await buildAdminError(resp, 'delete policy failed');
+}
+
+export interface PolicyDryRunResult {
+  valid: boolean;
+  message?: string;
+}
+
+// dryRunBucketPolicy validates the policy server-side without persisting.
+// Server returns 200 {valid:true} on accept, 400 {valid:false, message} on
+// parse error — both deserialise to PolicyDryRunResult so callers can
+// branch on .valid.
+export async function dryRunBucketPolicy(
+  name: string,
+  policy: string,
+): Promise<PolicyDryRunResult> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(name)}/policy/dry-run`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: policy,
+    },
+  );
+  if (resp.status === 200 || resp.status === 400) {
+    return (await resp.json()) as PolicyDryRunResult;
+  }
+  throw await buildAdminError(resp, 'dry-run policy failed');
+}
+
 export async function fetchBucket(name: string): Promise<BucketDetail> {
   const resp = await fetch(`/admin/v1/buckets/${encodeURIComponent(name)}`, {
     method: 'GET',
