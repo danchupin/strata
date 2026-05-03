@@ -73,6 +73,7 @@ export const queryKeys = {
     one: (name: string) => ['buckets', 'detail', name] as const,
     objects: (name: string, prefix: string, marker: string) =>
       ['buckets', 'objects', name, { prefix, marker }] as const,
+    objectLock: (name: string) => ['buckets', 'object-lock', name] as const,
   },
   consumers: {
     top: (by: string, limit: number) => ['consumers', 'top', by, limit] as const,

@@ -15,6 +15,9 @@ Started: Sun May  3 17:17:18 MSK 2026
 - adminapi.Server now carries a `leader.Locker` (Config.Locker). serverapp.buildLocker is the single source — call it once and pass the result both to adminapi.Config.Locker and the workers Supervisor (see `internal/serverapp/serverapp.go::Run`). The locker is non-nil for cassandra/tikv/memory backends; admin handlers that take long actions (force-empty, future ones) MUST acquire `bucket-<kind>:<bucket>` against it before kicking a goroutine and release on exit.
 - Admin background jobs persist in the new `meta.AdminJob` shape (kind/state/deleted/started_at/updated_at/finished_at). Cassandra: `admin_jobs` table (added in tableDDL); memory: in-process map; tikv: `s/Aj/<id>` row. Pattern: handler creates job in `pending`, kicks goroutine which flips to `running`, drives work, terminal flip to `done|error` + sets FinishedAt. Always pass a *copy* of the job pointer to the goroutine — handler still uses the original to write the 202 response and a shared mutable AdminJob is a race.
 - Reusable shared error shape on the React side: `AdminApiError` in `web/src/api/client.ts`. Wrapper helper `buildAdminError(resp, fallback)` parses `{code, message}` + status. Reuse instead of inventing one error type per endpoint.
+- Bucket detail page now hosts shadcn `Tabs` (web/src/pages/BucketDetail.tsx). Add new bucket-config tabs (Lifecycle/CORS/Policy/ACL/Inventory/Logging) by inserting `<TabsTrigger value="..." />` + `<TabsContent value="...">…</TabsContent>` siblings; keep `defaultValue="objects"` so the default landing screen stays the file browser.
+- Bucket Object-Lock JSON ↔ XML translation lives in `internal/adminapi/buckets_config.go::objectLockXML`. SetBucketObjectLockConfig stores XML bytes (s3api.objectlock.go consumer reads back via xml.Unmarshal); admin endpoint marshals the JSON shape into the same XML before calling SetBucketObjectLockConfig so default-retention resolution keeps working unchanged.
+- Saving a bucket-scoped config? Pattern: typed wrapper in `web/src/api/client.ts` returning Promise<void> + throwing AdminApiError; component calls it inside `try {…} catch (err) { setServerError({code, message}) }`; on success invalidate `queryKeys.buckets.one(name)` and the per-config key. See BucketOverviewTab.tsx for the canonical shape.
 
 ## Sun May  3 17:27 MSK 2026 - US-001
 - Implemented CreateBucket dialog (POST /admin/v1/buckets + UI) per PRD AC.
@@ -100,4 +103,42 @@ Started: Sun May  3 17:17:18 MSK 2026
   - `internal/serverapp/serverapp.go::buildLocker` returns `nil` if the meta backend exposes no locker. Admin handlers that depend on the lease must `if s.Locker == nil { 503 }` so dev rigs without the locker fail loud rather than dropping the lease silently.
   - The drain loop calls ListObjectVersions first (so versioned buckets surrender every version cleanly) and falls back to ListObjects when the bucket has no version rows. memory.Store mirrors both surfaces; cassandra/tikv use the same code path.
   - `AdminApiError` + `buildAdminError` in `web/src/api/client.ts` is the canonical error shape for admin API wrappers — replace the bespoke `CreateBucketError` (US-001) with the shared shape on the next dialog touch-up; new wrappers (US-003+) should use `AdminApiError` from day one.
+---
+
+## Sun May  3 17:53 MSK 2026 - US-003
+- Implemented Versioning + Object-Lock toggles on bucket detail (PUT /admin/v1/buckets/{bucket}/versioning, PUT/GET .../object-lock + new Overview tab).
+
+### Backend
+- internal/adminapi/buckets_config.go (new): handleBucketSetVersioning (PUT, rejects "Disabled" → 400 InvalidArgument), handleBucketGetObjectLock (GET → ObjectLockConfigJSON; parses stored XML blob back into JSON), handleBucketSetObjectLock (PUT JSON → XML via xml.Marshal → meta.Store.SetBucketObjectLockConfig). Validation: Mode in {GOVERNANCE, COMPLIANCE}, Days/Years > 0, Days/Years mutually exclusive, Mode requires Days OR Years. Pre-flight 409 ObjectLockNotEnabled when bucket.ObjectLockEnabled=false. Audit overrides admin:SetBucketVersioning / admin:SetBucketObjectLockConfig.
+- internal/adminapi/types.go: SetVersioningRequest, ObjectLockConfigJSON / ObjectLockRuleJSON / ObjectLockDefaultRetentionJSON wire shapes.
+- internal/adminapi/server.go: registered three new routes (PUT versioning, GET/PUT object-lock).
+- internal/adminapi/buckets.go::handleBucketGet: BucketDetail.ObjectLock now reflects b.ObjectLockEnabled instead of being hardcoded false.
+- internal/adminapi/buckets_config_test.go (new): 11 cases — versioning Enabled/Suspended/Disabled-rejected/NotFound/Malformed; object-lock Happy GOVERNANCE+Days / RejectsBucketWithoutLock 409 / NotFound / DaysAndYearsExclusive 400 / BadMode 400 / ClearRule (PUT without rule clears default) / GetRoundTrip COMPLIANCE+Years / GetNoRule (object_lock_enabled=Enabled, rule=nil) / GetNotFound / BucketDetailObjectLockReflectsBucketFlag.
+
+### Frontend
+- web/src/api/client.ts: setBucketVersioning, fetchBucketObjectLock, setBucketObjectLock wrappers + ObjectLockConfig / ObjectLockRule / ObjectLockDefaultRetention / ObjectLockMode types. All throw AdminApiError on 4xx/5xx for inline rendering.
+- web/src/lib/query.ts: queryKeys.buckets.objectLock(name) for the per-bucket cache slot.
+- web/src/components/BucketOverviewTab.tsx (new): two cards. VersioningCard: radio Enabled|Suspended, disabled when no change, save invalidates buckets.one. Tooltip "Once enabled, versioning cannot be disabled, only suspended" when flipping Suspended → Enabled. ObjectLockCard: Mode select (Off|Governance|Compliance), Retention number + Days|Years unit; greyed-out + tooltip "Object-Lock requires Versioning=Enabled" (or "Object-Lock must be enabled at bucket creation" when bucket flag is off).
+- web/src/pages/BucketDetail.tsx: wrapped Objects card in shadcn `Tabs` with sibling Overview tab. defaultValue="objects" so the file browser stays the default landing screen.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` — all packages pass (incl. new buckets_config_test.go suite).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean — main bundle 409 KiB JS / 125 KiB gzipped (well under the 500 KiB AC ceiling; Monaco lands in US-004 as a separate lazy chunk).
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - The s3api object-lock parser (`internal/s3api/objectlock.go::objectLockConfiguration`) reads XML bytes from meta.Store. To accept JSON on the admin endpoint while preserving the existing s3api consumer, marshal the JSON request body to XML inside the handler before calling SetBucketObjectLockConfig — adds one xml.Marshal per write, no new store contract. Duplicating the xml-tagged struct in adminapi keeps the s3api package surface stable (its xml struct stays unexported).
+  - For bucket-config endpoints that read-modify-write a single document, you don't need a Locker — the meta.Store implementations already serialize the write (cassandra LWT, memory mutex, tikv pessimistic txn). Locker is only needed for goroutine-driven background jobs.
+  - When a bucket-detail panel needs both a feature flag AND a flag-derived config, prefer one query per layer instead of bundling — the BucketDetail one() carries the bucket-level boolean, and a separate objectLock(name) carries the rule body. UI greys the form on the boolean before fetching the body.
+- Gotchas:
+  - SetBucketObjectLockConfig is keyed by bucket UUID; SetBucketVersioning by bucket name. Don't normalize them in the handler — use the meta.Store API as-is.
+  - The bucket-level `ObjectLockEnabled` flag is set via a SEPARATE call (`SetBucketObjectLockEnabled`) at create time. The console cannot retroactively flip it on for an existing bucket — S3 semantics. The Object-Lock card surfaces the constraint via tooltip + greyed-out form; the server returns 409 ObjectLockNotEnabled if the client bypasses the UI guard.
+  - In React Tabs, `defaultValue` controls the initial active tab; setting `disabled` on `<TabsTrigger>` keeps a tab visible but unclickable until its data is loaded — useful when the body needs `detail` to render.
+- Useful context:
+  - `BucketOverviewTab.tsx::deriveRuleState` is the single source of truth for translating `ObjectLockConfig` (server JSON) into the `(mode, unit, amount)` triple the form binds to. Future Mode-aware tabs (Lifecycle, CORS) can reuse the JSON-config / form-state split shape: a derive function + a useEffect that resets local state when the query data changes.
+  - `web/src/components/ui/tabs.tsx` is a thin shadcn wrapper around Radix Tabs (already vendored). No additional install needed for US-004..US-009.
+  - `internal/adminapi/buckets_config_test.go::putAdmin` is a generic helper for body-bearing admin requests (PUT / POST / DELETE). Reuse for US-005..US-009 instead of duplicating the auth-context + JSON-encode boilerplate.
 ---

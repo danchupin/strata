@@ -127,6 +127,34 @@ type MetricSeries struct {
 // Prometheus instant-vector point shape.
 type MetricPoint [2]float64
 
+// SetVersioningRequest is the JSON body accepted by PUT /admin/v1/buckets/
+// {bucket}/versioning. State must be "Enabled" or "Suspended"; "Disabled"
+// is rejected with 400 (a freshly-created bucket starts at Disabled and
+// cannot be flipped back to it via the operator console).
+type SetVersioningRequest struct {
+	State string `json:"state"`
+}
+
+// ObjectLockConfigJSON is the AWS ObjectLockConfiguration shape rendered as
+// JSON for /admin/v1/buckets/{bucket}/object-lock. Mirrors the XML form
+// served on the S3 surface (PutObjectLockConfiguration). Rule omitted means
+// "no default retention". Mode is GOVERNANCE or COMPLIANCE; Days and Years
+// are mutually exclusive (server returns 400 InvalidArgument otherwise).
+type ObjectLockConfigJSON struct {
+	ObjectLockEnabled string                   `json:"object_lock_enabled,omitempty"`
+	Rule              *ObjectLockRuleJSON      `json:"rule,omitempty"`
+}
+
+type ObjectLockRuleJSON struct {
+	DefaultRetention *ObjectLockDefaultRetentionJSON `json:"default_retention,omitempty"`
+}
+
+type ObjectLockDefaultRetentionJSON struct {
+	Mode  string `json:"mode,omitempty"`
+	Days  *int   `json:"days,omitempty"`
+	Years *int   `json:"years,omitempty"`
+}
+
 // ForceEmptyJobResponse is the JSON shape of POST /admin/v1/buckets/{bucket}
 // /force-empty (returns 202 + body) and GET .../force-empty/{jobID}. State
 // is one of meta.AdminJobState{Pending,Running,Done,Error}. Deleted is the

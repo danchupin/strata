@@ -46,7 +46,9 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
+import { BucketOverviewTab } from '@/components/BucketOverviewTab';
 import { DeleteBucketDialog } from '@/components/DeleteBucketDialog';
 
 const PAGE_SIZE = 100;
@@ -251,6 +253,17 @@ export function BucketDetailPage() {
 
       <StatsBar detail={detail} loading={detailQ.isPending && !detail} />
 
+      <Tabs defaultValue="objects">
+        <TabsList>
+          <TabsTrigger value="overview" disabled={!detail}>
+            Overview
+          </TabsTrigger>
+          <TabsTrigger value="objects">Objects</TabsTrigger>
+        </TabsList>
+        <TabsContent value="overview" className="space-y-4">
+          {detail && <BucketOverviewTab bucket={detail} />}
+        </TabsContent>
+        <TabsContent value="objects">
       <Card>
         <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
@@ -433,6 +446,8 @@ export function BucketDetailPage() {
           </div>
         </CardContent>
       </Card>
+        </TabsContent>
+      </Tabs>
 
       <ObjectDetailSheet
         bucket={name}

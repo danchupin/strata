@@ -316,7 +316,7 @@ func (s *Server) handleBucketGet(w http.ResponseWriter, r *http.Request) {
 		Region:      s.Region,
 		CreatedAt:   b.CreatedAt.Unix(),
 		Versioning:  versioningLabel(b.Versioning),
-		ObjectLock:  false,
+		ObjectLock:  b.ObjectLockEnabled,
 		SizeBytes:   size,
 		ObjectCount: count,
 	})

@@ -125,6 +125,68 @@ export async function createBucket(body: CreateBucketBody): Promise<BucketDetail
   return (await resp.json()) as BucketDetail;
 }
 
+// setBucketVersioning calls PUT /admin/v1/buckets/{name}/versioning (US-003).
+// Throws AdminApiError on 4xx/5xx so the form can render code+message inline.
+export async function setBucketVersioning(
+  name: string,
+  state: 'Enabled' | 'Suspended',
+): Promise<void> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(name)}/versioning`,
+    {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state }),
+    },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'set versioning failed');
+}
+
+export type ObjectLockMode = 'GOVERNANCE' | 'COMPLIANCE';
+
+export interface ObjectLockDefaultRetention {
+  mode?: ObjectLockMode;
+  days?: number;
+  years?: number;
+}
+
+export interface ObjectLockRule {
+  default_retention?: ObjectLockDefaultRetention;
+}
+
+export interface ObjectLockConfig {
+  object_lock_enabled?: string;
+  rule?: ObjectLockRule;
+}
+
+// fetchBucketObjectLock fetches the bucket's ObjectLockConfiguration (US-003).
+// Returns the AWS-shape JSON. 404 if the bucket is missing.
+export async function fetchBucketObjectLock(name: string): Promise<ObjectLockConfig> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(name)}/object-lock`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch object-lock failed');
+  return (await resp.json()) as ObjectLockConfig;
+}
+
+export async function setBucketObjectLock(
+  name: string,
+  cfg: ObjectLockConfig,
+): Promise<void> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(name)}/object-lock`,
+    {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg),
+    },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'set object-lock failed');
+}
+
 export async function fetchBucket(name: string): Promise<BucketDetail> {
   const resp = await fetch(`/admin/v1/buckets/${encodeURIComponent(name)}`, {
     method: 'GET',
