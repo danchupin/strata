@@ -84,6 +84,10 @@ export const queryKeys = {
   consumers: {
     top: (by: string, limit: number) => ['consumers', 'top', by, limit] as const,
   },
+  iam: {
+    users: (query: string, page: number, pageSize: number) =>
+      ['iam', 'users', { query, page, pageSize }] as const,
+  },
   metrics: {
     timeseries: (metric: string, range: string, step: string) =>
       ['metrics', 'timeseries', metric, range, step] as const,

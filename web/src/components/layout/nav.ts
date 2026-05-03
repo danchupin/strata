@@ -1,6 +1,7 @@
 import {
   Boxes,
   Gauge,
+  KeyRound,
   LayoutDashboard,
   Settings,
   Users,
@@ -21,6 +22,7 @@ export const primaryNav: NavItem[] = [
   { to: '/', label: 'Overview', icon: LayoutDashboard, end: true },
   { to: '/buckets', label: 'Buckets', icon: Boxes },
   { to: '/consumers', label: 'Consumers', icon: Users },
+  { to: '/iam', label: 'IAM', icon: KeyRound },
   { to: '/metrics', label: 'Metrics', icon: Gauge },
   { to: '/settings', label: 'Settings', icon: Settings },
 ];

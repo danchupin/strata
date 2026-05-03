@@ -723,3 +723,62 @@ export async function fetchMetricsTimeseries(params: {
   const body = (await resp.json()) as MetricsTimeseriesResponse;
   return { series: body.series ?? [], metrics_available: body.metrics_available };
 }
+
+// IAM Users (US-011) — paginated list + create + cascading delete. Wire shape
+// mirrors internal/adminapi/iam_users.go.
+export interface IAMUserSummary {
+  user_name: string;
+  user_id: string;
+  path: string;
+  created_at: number;
+  access_key_count: number;
+}
+
+export interface IAMUsersListResponse {
+  users: IAMUserSummary[];
+  total: number;
+}
+
+export async function fetchIAMUsers(params: {
+  query?: string;
+  page?: number;
+  pageSize?: number;
+}): Promise<IAMUsersListResponse> {
+  const usp = new URLSearchParams();
+  if (params.query) usp.set('query', params.query);
+  if (params.page != null) usp.set('page', String(params.page));
+  if (params.pageSize != null) usp.set('page_size', String(params.pageSize));
+  const qs = usp.toString();
+  const resp = await fetch(`/admin/v1/iam/users${qs ? `?${qs}` : ''}`, {
+    method: 'GET',
+    credentials: 'same-origin',
+  });
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch iam users failed');
+  const body = (await resp.json()) as IAMUsersListResponse;
+  return { users: body.users ?? [], total: body.total ?? 0 };
+}
+
+export interface CreateIAMUserBody {
+  user_name: string;
+  path?: string;
+}
+
+export async function createIAMUser(body: CreateIAMUserBody): Promise<IAMUserSummary> {
+  const resp = await fetch('/admin/v1/iam/users', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) throw await buildAdminError(resp, 'create iam user failed');
+  return (await resp.json()) as IAMUserSummary;
+}
+
+export async function deleteIAMUser(userName: string): Promise<void> {
+  const resp = await fetch(
+    `/admin/v1/iam/users/${encodeURIComponent(userName)}`,
+    { method: 'DELETE', credentials: 'same-origin' },
+  );
+  if (resp.status === 204) return;
+  throw await buildAdminError(resp, 'delete iam user failed');
+}

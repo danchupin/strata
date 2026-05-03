@@ -141,6 +141,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		logger.Info("admin: STRATA_PROMETHEUS_URL unset; top-buckets/consumers + metrics dashboard will report metrics_available=false")
 	}
 	adminLocker := buildLocker(cfg, metaStore)
+	auditTTL := auditRetention(logger)
 	adminServer := adminapi.New(adminapi.Config{
 		Meta:        metaStore,
 		Creds:       multi,
@@ -153,6 +154,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		MetaBackend: cfg.MetaBackend,
 		DataBackend: cfg.DataBackend,
 		JWTSecret:   jwtSecret,
+		AuditTTL:    auditTTL,
 	})
 
 	mux := http.NewServeMux()
@@ -160,7 +162,6 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	mux.HandleFunc("/healthz", healthHandler.Healthz)
 	mux.HandleFunc("/readyz", healthHandler.Readyz)
 	mux.Handle("/console/", strataconsole.ConsoleHandler())
-	auditTTL := auditRetention(logger)
 	mux.Handle("/admin/v1/", s3api.NewAuditMiddleware(metaStore, auditTTL, adminServer.Handler()))
 	auditHandler := s3api.NewAuditMiddleware(metaStore, auditTTL, apiHandler)
 	mux.Handle("/", strataotel.NewMiddleware(tracerProvider, logging.NewMiddleware(logger, metrics.ObserveHTTP(mw.Wrap(s3api.NewAccessLogMiddleware(metaStore, auditHandler), s3api.WriteAuthDenied)))))

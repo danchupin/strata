@@ -31,6 +31,10 @@ Started: Sun May  3 17:17:18 MSK 2026
 - For "single-document optional config that the s3api consumer ALREADY parses" (Logging XML, future analytics/replication blobs) — translate JSON↔XML in adminapi WITHOUT exposing a `Validate*Blob` from s3api when the consumer parser is permissive (ignores unknown fields). Both s3api.logging.go::bucketLoggingStatus and accesslog.worker's parser silently skip unknown elements like TargetGrants, so the admin layer can persist a richer XML (with TargetGrants) and the consumer reads only the fields it cares about. Only add a ValidXxxBlob preflight when s3api strictly validates the blob.
 - TargetGrants permission set in BucketLoggingStatus is NARROWER than bucket-ACL grants: AWS spec accepts only FULL_CONTROL | READ | WRITE here (no READ_ACP / WRITE_ACP). Keep the validator's permission map distinct from acl's allowedGrantPermissions. Reuse `allowedGranteeTypes` for the grantee-type set — that is identical across both surfaces.
 - "X is referenced by Y" deletion checks (DeleteManagedPolicy → ErrPolicyAttached) need a per-X reverse-index in Cassandra (a second table partitioned by X) — ALLOW FILTERING and secondary indexes are antipatterns. Pair the operator-spec'd table (e.g. iam_user_policies PK (user_name, policy_arn)) with an internal inverse table (iam_policy_attachments PK (policy_arn, user_name)); write/delete both rows in one LoggedBatch so the views never desync. TiKV mirrors this with a second key prefix (s/pus/<arn>\x00\x00<user>); memory uses a second map[string]map[string]struct{}. Used in US-010 — reuse the pattern for any future "block delete while referenced" surface.
+- Cascaded admin operations need MORE than one audit_log row per HTTP request — the AuditMiddleware override only emits ONE row per request, so additional rows must be written directly via `meta.Store.EnqueueAudit` from the handler. adminapi.Server gained an `AuditTTL` field (mirroring serverapp's STRATA_AUDIT_RETENTION-derived value) so cascaded rows use the same TTL as the middleware. Helper `Server.emitAuditRow(ctx, r, *meta.AuditEvent)` in iam_users.go is the canonical shape: stamps Bucket="-" + RequestID from ctx, falls back to s3api.DefaultAuditRetention when AuditTTL is zero. Reuse for future cascaded admin operations (DeleteIAMUser → DeleteAccessKey×N is the first; future bulk-detach / bulk-key-rotation will follow the same shape).
+- Per-target admin handler leases follow the existing force-empty (US-002) shape: acquire `<scope>:<name>` against `s.Locker` with `leader.DefaultHolder()`, defer release on exit. iam-user delete uses `iam-user:<userName>` with a 2-minute TTL — generous for a single user's key cascade; bumps if a future cascade is heavier. 409 `<Operation>InProgress` on contention; 503 LockerUnavailable when `s.Locker == nil` so dev rigs without the locker fail loud.
+- AC sometimes names a meta.Store method that doesn't exist on main (US-011 cited `ListIAMAccessKeysByUser` — actual method is `ListIAMAccessKeys(ctx, userName)`). Adapt to the real surface; don't grow the interface to match the AC verbatim.
+- Sidebar nav additions go in `web/src/components/layout/nav.ts::primaryNav`. Pick a lucide-react icon that fits the page's mental model (KeyRound for IAM, Boxes for Buckets, Users for Consumers). New page routes go alongside existing entries in `web/src/App.tsx` Routes; preserve the order in nav.ts ↔ App.tsx for consistency.
 
 ## Sun May  3 17:27 MSK 2026 - US-001
 - Implemented CreateBucket dialog (POST /admin/v1/buckets + UI) per PRD AC.
@@ -437,4 +441,48 @@ Started: Sun May  3 17:17:18 MSK 2026
 - Useful context:
   - The contract case lives BEFORE caseUserPolicyAttach in the slice — UserPolicyAttach reuses the user/policy creation shape from the CRUD case but starts fresh; if a future contract case wants to chain (e.g. exercise list-user-policies after a user delete cascade), keep ordering deterministic in the slice.
   - The new Cassandra schema is purely additive — existing keyspaces upgrade in place via the idempotent `CREATE TABLE IF NOT EXISTS` in `tableDDL`. No `alterStatements` row needed because the tables start wide.
+---
+
+## Sun May  3 21:17 MSK 2026 - US-011
+- Implemented IAM Users CRUD page (GET list / POST create / DELETE cascade admin endpoints + new IAM page with Users tab + stub Access keys / Policies tabs) per PRD AC.
+
+### Backend
+- internal/adminapi/server.go: Server gained `AuditTTL time.Duration` field (mirroring serverapp's STRATA_AUDIT_RETENTION-derived value); Config carries it through. Used by handlers that write extra audit rows via meta.Store.EnqueueAudit so cascaded rows match the AuditMiddleware row TTL. Falls back to s3api.DefaultAuditRetention when zero. Routes registered: GET/POST /admin/v1/iam/users, DELETE /admin/v1/iam/users/{userName}.
+- internal/adminapi/iam_users.go (new): handleIAMUsersList (paginated; query substring filter; AccessKeyCount computed via meta.Store.ListIAMAccessKeys per row), handleIAMUserCreate (validates user_name regex `^[a-zA-Z0-9_+=,.@-]{1,64}$` + path begins/ends with '/'; mints UserID 'AID<UPPER-uuid>' shape; 409 EntityAlreadyExists on collision; audit override `admin:CreateUser` with resource `iam:<userName>`), handleIAMUserDelete (acquires `iam-user:<name>` lease via leader.Locker with 2-minute TTL; cascades by listing IAMAccessKeys + DeleteIAMAccessKey per row, emitting one `admin:DeleteAccessKey` row each via meta.Store.EnqueueAudit for cascade visibility; then DeleteIAMUser; audit override `admin:DeleteUser`; 503 LockerUnavailable when s.Locker is nil; 409 DeleteUserInProgress on concurrent acquire; 404 NoSuchEntity). Helper `Server.emitAuditRow(ctx, r, *meta.AuditEvent)` is the cascaded-audit-row shape — stamps Bucket="-" + RequestID from ctx, falls back to s3api.DefaultAuditRetention when AuditTTL zero. Reusable for future cascaded admin operations.
+- internal/serverapp/serverapp.go: reorder `auditTTL := auditRetention(logger)` ahead of `adminapi.New(...)` and pass it as AuditTTL on adminapi.Config. Both `/admin/v1/` and `/` mounts use the SAME auditTTL value so admin + S3 audit rows have identical TTLs.
+- internal/adminapi/iam_users_test.go (new): 14 in-package unit tests cover ListEmpty + Users non-nil array (React empty-state branch), PopulatedAndKeyCounts (alice with 2 keys + bob with 0), QueryFilter (substring), Pagination (page=2 page_size=2), Create happy + default path '/', Create invalid name (4 cases: empty / whitespace / spaces / >64 chars), Create invalid path ('/no-trailing'), Create 409 EntityAlreadyExists, Create malformed JSON 400, Delete happy + GetIAMUser→ErrIAMUserNotFound, Delete cascade access keys (2 keys → 0 keys post-delete), Delete 404 NoSuchEntity, Delete 503 LockerUnavailable (no Locker on Server).
+
+### Frontend
+- web/src/api/client.ts: IAMUserSummary / IAMUsersListResponse / CreateIAMUserBody types + fetchIAMUsers / createIAMUser / deleteIAMUser wrappers. All throw AdminApiError on 4xx/5xx; deleteIAMUser absorbs 204 silently.
+- web/src/lib/query.ts: queryKeys.iam.users(query, page, pageSize) cache slot.
+- web/src/pages/IAM.tsx (new): hosts shadcn Tabs with Users (active), Access keys (stub placeholder for US-012), Policies (stub placeholder for US-013/US-014). UsersTab mirrors the BucketsPage shape — search input (300ms debounce), Refresh button, Create user button, paginated table (User name | User ID | Path | Created | Access keys | Delete action), shadcn pagination. Empty-state CTA opens the create dialog. Per-row Delete button opens DeleteIAMUserDialog with the target user.
+- web/src/components/CreateIAMUserDialog.tsx (new): client-side preflight matches the server regex `^[a-zA-Z0-9_+=,.@-]{1,64}$`; path violation when not begin/end with '/'. Submit invalidates ['iam','users'] so the table refetches; surfaces server `{code, message}` inline; dialog stays open on error.
+- web/src/components/DeleteIAMUserDialog.tsx (new): type-to-confirm guard requiring the operator to type the user name verbatim. Banner shows the access key count that will cascade alongside (e.g. "2 access keys owned by this user will be deleted alongside"). Submit calls deleteIAMUser; success → invalidate cache + toast + close.
+- web/src/App.tsx: added /iam route between /consumers and /metrics.
+- web/src/components/layout/nav.ts: added IAM nav entry with KeyRound icon between Consumers and Metrics.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` — all packages pass (incl. new iam_users_test.go).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean. Bundle sizes (gzipped):
+  - main: 146.88 KiB ✓ (well under 500 KiB AC ceiling; +2.28 KiB vs US-009 baseline of 144.60 — IAM page + 2 dialogs + table)
+  - Metrics route: 109.44 KiB (unchanged)
+  - MonacoJsonEditor lazy chunk: 591.94 KiB (unchanged — IAM page does NOT pull Monaco; arrives in US-013 ManagedPolicy editor)
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - Cascaded admin operations need MORE than one audit_log row per HTTP request — the AuditMiddleware override emits exactly ONE row. Additional rows must be written directly via `meta.Store.EnqueueAudit` from the handler. `Server.emitAuditRow(ctx, r, *meta.AuditEvent)` in iam_users.go is the canonical shape for "stamp Bucket='-' + RequestID + AuditTTL fallback"; reuse for future bulk-cascade flows.
+  - Per-target admin leases follow the existing force-empty (US-002) shape — acquire `<scope>:<name>` via `s.Locker` with `leader.DefaultHolder()`, defer release on exit. 503 `LockerUnavailable` when `s.Locker == nil` so dev rigs fail loud rather than silently dropping the lease.
+  - Sidebar nav additions go in `web/src/components/layout/nav.ts::primaryNav` in the same order as the route definitions in `App.tsx`. Keep the two ordering-aligned.
+  - Stub tabs (Access keys, Policies) inside an enabled top-level page — render a `PlaceholderTab` card that explains the tab will land in a later story. Avoids "ghost tab" awkwardness where the trigger is visible but the body is empty.
+- Gotchas:
+  - PRD US-011 cited `meta.Store.ListIAMAccessKeysByUser` — actual method is `ListIAMAccessKeys(ctx, userName)`. Adapt to the real surface; don't grow the interface.
+  - `s.Logger.Printf(...)` is the canonical lazy-init slog-shaped logger across adminapi handlers (Server.Logger defaults to `log.Default()` — not slog — because Printf-style is enough for ad-hoc diagnostics; the structured slog tree starts in serverapp/middleware).
+  - When a handler kicks ContextBackground for the lease release (deferred), use `context.Background()` not `r.Context()` so a client-cancelled request still releases the lease. Same lesson as the force-empty handler.
+- Useful context:
+  - `meta.IAMUser.UserID` shape (`AID<UPPER-uuid>`) mirrors AWS IAM's UserID format (AID/AIDA prefix). The s3api `iamCreateUser` handler uses a different `newUserID()` helper; admin endpoint mints its own to avoid leaking s3api internals.
+  - The /iam page is the anchor for US-012 (Access keys CRUD per user — adds a /iam/users/:userName detail route), US-013 (Managed policies tab), US-014 (attach/detach policies). All three lift the "table + create dialog + per-row action" shape from UsersTab.
+  - `internal/adminapi/iam_users_test.go::iamRequest` is a generic helper for body-bearing admin requests via `s.routes()` with an authenticated owner stamped in ctx — reuse it for US-012/US-013/US-014 tests instead of duplicating the auth-context boilerplate.
 ---

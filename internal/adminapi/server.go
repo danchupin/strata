@@ -38,7 +38,14 @@ type Server struct {
 	DataBackend string
 	Started     time.Time
 	JWTSecret   []byte
-	Logger      *log.Logger
+	// AuditTTL is the row TTL applied when an admin handler writes an extra
+	// audit_log row directly via meta.Store.EnqueueAudit (e.g. the
+	// DeleteIAMUser cascade in US-011 emits one admin:DeleteAccessKey row
+	// per cascaded key in addition to the request-scoped admin:DeleteUser
+	// row stamped by the AuditMiddleware override). Zero falls back to
+	// s3api.DefaultAuditRetention.
+	AuditTTL time.Duration
+	Logger   *log.Logger
 
 	// jobsMu guards background-job goroutines. Currently only the
 	// force-empty drain (US-002) registers here; we cancel the goroutine
@@ -69,6 +76,10 @@ type Config struct {
 	MetaBackend string
 	DataBackend string
 	JWTSecret   []byte
+	// AuditTTL mirrors the gateway's STRATA_AUDIT_RETENTION-derived value so
+	// admin handlers that write extra audit rows (cascaded key deletes,
+	// future bulk operations) match the row TTL of the AuditMiddleware.
+	AuditTTL time.Duration
 }
 
 // New constructs a Server. Started defaults to now. JWTSecret empty means
@@ -92,6 +103,7 @@ func New(c Config) *Server {
 		DataBackend: c.DataBackend,
 		Started:     time.Now(),
 		JWTSecret:   c.JWTSecret,
+		AuditTTL:    c.AuditTTL,
 		Logger:      log.Default(),
 	}
 }
@@ -143,6 +155,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/v1/buckets/top", s.handleBucketsTop)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}", s.handleBucketGet)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/objects", s.handleObjectsList)
+	mux.HandleFunc("GET /admin/v1/iam/users", s.handleIAMUsersList)
+	mux.HandleFunc("POST /admin/v1/iam/users", s.handleIAMUserCreate)
+	mux.HandleFunc("DELETE /admin/v1/iam/users/{userName}", s.handleIAMUserDelete)
 	mux.HandleFunc("GET /admin/v1/consumers/top", s.handleConsumersTop)
 	mux.HandleFunc("GET /admin/v1/metrics/timeseries", s.handleMetricsTimeseries)
 	return mux
