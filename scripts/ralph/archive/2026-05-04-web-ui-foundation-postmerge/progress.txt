@@ -1,0 +1,96 @@
+# Ralph Progress Log
+Started: 2026-05-03
+Cycle: ralph/web-ui-foundation
+---
+
+## Codebase Patterns
+
+(seed entries for this cycle. Replace/remove as US-001..US-012 land.)
+
+- Branch policy (memory/feedback_ralph_branch_policy.md): every cycle
+  ends with merge back into main; new cycle starts from main. This
+  cycle starts from main = modern-complete + binary-consolidation +
+  tikv-meta-backend (89 stories shipped). Cycle end (US-012) merges
+  ralph/web-ui-foundation back into main and pushes origin main.
+- web/ is a NEW source tree at the repo root (sibling of cmd/,
+  internal/, docs/). React 18 + Vite 5 + TypeScript 5 + Tailwind 3 +
+  shadcn/ui + TanStack Query 5 + recharts 2 + react-router-dom 6 +
+  Playwright 1. Package manager: pnpm 9 (NOT npm/yarn — smaller
+  node_modules, reproducible install). Lockfile checked in:
+  web/pnpm-lock.yaml.
+- go:embed pattern: cmd/strata/console.go declares
+  `//go:embed all:web/dist` + `var consoleFS embed.FS` and exposes a
+  consoleHandler() with SPA fallback (any /console/<path> not matching
+  a static file falls back to index.html so client-side routes survive
+  direct navigation / refresh). The `all:` prefix matters — without it
+  Vite's .vite/-prefixed assets are silently dropped.
+- /console/ + /admin/v1/* are reserved path prefixes on the gateway
+  port. Both register ahead of the catch-all / S3 router in
+  internal/serverapp/serverapp.go. **CRITICAL:** validBucketName on
+  main currently ACCEPTS `console`, `admin`, `health`, `metrics` as
+  valid bucket names — collision risk. US-001 hard requirement: add a
+  reservedBucketNames set in internal/s3api/validate.go that rejects
+  {console, admin, health, metrics, readyz, healthz, .well-known} with
+  400 InvalidBucketName.
+- /admin/v1/* is the JSON HTTP contract between UI and gateway.
+  Versioned (v1); future-breaking changes ship under /admin/v2/*.
+  OpenAPI 3.1 spec in internal/adminapi/openapi.yaml.
+- Auth: session cookie strata_session=<JWT> with HS256, 24h Max-Age,
+  HttpOnly + Secure + SameSite=Strict + Path=/admin. JWT secret read
+  from STRATA_CONSOLE_JWT_SECRET (random hex if unset, with WARN —
+  production deployments MUST set it explicitly to survive restarts
+  without invalidating sessions). Auth middleware on /admin/v1/* falls
+  back to existing SigV4 path for clients without the cookie.
+- TanStack Query 5 global QueryClient: staleTime 5_000,
+  refetchInterval 5_000, refetchOnWindowFocus true, retry 1.
+  web/src/api/client.ts exposes typed wrappers — pages call
+  useQuery({queryKey, queryFn}); polling is automatic.
+- Heartbeat shape: cluster_nodes table with default_time_to_live=30
+  on Cassandra (alterStatements add), s/cluster_nodes/<node_id> +
+  background sweeper goroutine on TiKV (same shape as the existing
+  audit-sweeper in internal/meta/tikv/sweeper.go), in-process map
+  with timestamp expiry on memory. Lockstep across all three meta
+  backends — they all exist on main.
+- Status derivation (cluster overview): healthy if all nodes report
+  /readyz 200 in last 30 s; degraded if ≥1 fail but quorum holds;
+  unhealthy if quorum lost.
+- meta_backend / data_backend in cluster/status response are
+  pass-through cfg strings (no enum validation in handler) so future
+  cycles adding 's3' to data_backend don't require UI changes.
+- Polling cadence per page: 5 s for ranges ≤6 h, 30 s for 24h+, 5 min
+  for 7d (per-query refetchInterval).
+- Bundle target: ≤500 KiB gzipped initial. Use React.lazy + Suspense
+  for non-critical routes (Buckets, Bucket Detail, Metrics get
+  code-split). Verify via `vite build --report` before US-012 close.
+- recharts 2.x for charts (smaller than chart.js, declarative). Avoid
+  Apache ECharts / Plotly — bundle bloat.
+- shadcn/ui CLI copies components into web/src/components/ui/ as
+  source — NOT a dependency. We own them; tweak freely, no version
+  pin to worry about.
+- Dark mode: class='dark' on <html>; CSS variables in globals.css
+  switch values per theme. Toggle persists to
+  localStorage['strata.theme'] = 'light' | 'dark' | 'system'.
+- Playwright e2e: chromium-only on CI for speed. webServer config
+  runs `make run-memory` so e2e does not need Cassandra / RADOS up.
+  STRATA_STATIC_CREDENTIALS=test:test:owner seeds login creds.
+- ROADMAP maintenance rule (CLAUDE.md): every commit closing a
+  ROADMAP item flips the bullet to ~~strikethrough~~ Done format in
+  the same commit, with closing SHA inline (or `(commit pending)`
+  with a follow-up SHA edit). New gaps: add a fresh entry under the
+  right severity section in the same commit.
+- Phase boundaries (read these BEFORE adding scope creep):
+  - Phase 1 (THIS cycle, prd-web-ui-foundation.md): read-only console.
+    No write actions.
+  - Phase 2 (prd-web-ui-admin.md): bucket admin, IAM, object actions,
+    multipart watchdog, audit viewer, settings.
+  - Phase 3 (prd-web-ui-debug.md): hot heatmaps, slow queries, OTel
+    trace browser, SSE live tail, per-node drilldown.
+  If a story tempts you toward write actions or debug tooling, STOP
+  and re-scope. Phase 1 ships first; the others land in their own
+  cycles.
+- No metadata schema changes outside the new cluster_nodes heartbeat
+  table. No data backend changes. No SSE / WebSocket — polling 5 s
+  is sufficient for Phase 1.
+- Tests for the cycle: Go side via go test ./internal/adminapi/...,
+  Playwright via cd web && pnpm exec playwright test.
+  CI has e2e-ui job that runs both.

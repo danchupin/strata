@@ -1,96 +1,95 @@
 # Ralph Progress Log
-Started: 2026-05-03
-Cycle: ralph/web-ui-foundation
+Started: 2026-05-04
+Cycle: ralph/web-ui-admin
 ---
 
 ## Codebase Patterns
 
-(seed entries for this cycle. Replace/remove as US-001..US-012 land.)
+(seed entries for this cycle. Replace/remove as US-001..US-022 land.)
 
 - Branch policy (memory/feedback_ralph_branch_policy.md): every cycle
   ends with merge back into main; new cycle starts from main. This
   cycle starts from main = modern-complete + binary-consolidation +
-  tikv-meta-backend (89 stories shipped). Cycle end (US-012) merges
-  ralph/web-ui-foundation back into main and pushes origin main.
-- web/ is a NEW source tree at the repo root (sibling of cmd/,
-  internal/, docs/). React 18 + Vite 5 + TypeScript 5 + Tailwind 3 +
-  shadcn/ui + TanStack Query 5 + recharts 2 + react-router-dom 6 +
-  Playwright 1. Package manager: pnpm 9 (NOT npm/yarn — smaller
-  node_modules, reproducible install). Lockfile checked in:
-  web/pnpm-lock.yaml.
-- go:embed pattern: cmd/strata/console.go declares
-  `//go:embed all:web/dist` + `var consoleFS embed.FS` and exposes a
-  consoleHandler() with SPA fallback (any /console/<path> not matching
-  a static file falls back to index.html so client-side routes survive
-  direct navigation / refresh). The `all:` prefix matters — without it
-  Vite's .vite/-prefixed assets are silently dropped.
-- /console/ + /admin/v1/* are reserved path prefixes on the gateway
-  port. Both register ahead of the catch-all / S3 router in
-  internal/serverapp/serverapp.go. **CRITICAL:** validBucketName on
-  main currently ACCEPTS `console`, `admin`, `health`, `metrics` as
-  valid bucket names — collision risk. US-001 hard requirement: add a
-  reservedBucketNames set in internal/s3api/validate.go that rejects
-  {console, admin, health, metrics, readyz, healthz, .well-known} with
-  400 InvalidBucketName.
-- /admin/v1/* is the JSON HTTP contract between UI and gateway.
-  Versioned (v1); future-breaking changes ship under /admin/v2/*.
-  OpenAPI 3.1 spec in internal/adminapi/openapi.yaml.
-- Auth: session cookie strata_session=<JWT> with HS256, 24h Max-Age,
-  HttpOnly + Secure + SameSite=Strict + Path=/admin. JWT secret read
-  from STRATA_CONSOLE_JWT_SECRET (random hex if unset, with WARN —
-  production deployments MUST set it explicitly to survive restarts
-  without invalidating sessions). Auth middleware on /admin/v1/* falls
-  back to existing SigV4 path for clients without the cookie.
-- TanStack Query 5 global QueryClient: staleTime 5_000,
-  refetchInterval 5_000, refetchOnWindowFocus true, retry 1.
-  web/src/api/client.ts exposes typed wrappers — pages call
-  useQuery({queryKey, queryFn}); polling is automatic.
-- Heartbeat shape: cluster_nodes table with default_time_to_live=30
-  on Cassandra (alterStatements add), s/cluster_nodes/<node_id> +
-  background sweeper goroutine on TiKV (same shape as the existing
-  audit-sweeper in internal/meta/tikv/sweeper.go), in-process map
-  with timestamp expiry on memory. Lockstep across all three meta
-  backends — they all exist on main.
-- Status derivation (cluster overview): healthy if all nodes report
-  /readyz 200 in last 30 s; degraded if ≥1 fail but quorum holds;
-  unhealthy if quorum lost.
-- meta_backend / data_backend in cluster/status response are
-  pass-through cfg strings (no enum validation in handler) so future
-  cycles adding 's3' to data_backend don't require UI changes.
-- Polling cadence per page: 5 s for ranges ≤6 h, 30 s for 24h+, 5 min
-  for 7d (per-query refetchInterval).
-- Bundle target: ≤500 KiB gzipped initial. Use React.lazy + Suspense
-  for non-critical routes (Buckets, Bucket Detail, Metrics get
-  code-split). Verify via `vite build --report` before US-012 close.
-- recharts 2.x for charts (smaller than chart.js, declarative). Avoid
-  Apache ECharts / Plotly — bundle bloat.
-- shadcn/ui CLI copies components into web/src/components/ui/ as
-  source — NOT a dependency. We own them; tweak freely, no version
-  pin to worry about.
-- Dark mode: class='dark' on <html>; CSS variables in globals.css
-  switch values per theme. Toggle persists to
-  localStorage['strata.theme'] = 'light' | 'dark' | 'system'.
-- Playwright e2e: chromium-only on CI for speed. webServer config
-  runs `make run-memory` so e2e does not need Cassandra / RADOS up.
-  STRATA_STATIC_CREDENTIALS=test:test:owner seeds login creds.
+  tikv-meta-backend + web-ui-foundation + s3-over-s3-backend
+  (Phase 1 web UI shipped via e27cf21; s3-over-s3 backend via
+  12ec0f1). Cycle end (US-022) merges ralph/web-ui-admin back into
+  main + pushes origin main.
+- Phase 1 surface available on main: /console/ (embedded React+TS),
+  /admin/v1/* JSON API (read-only handlers), HS256 JWT session-cookie
+  auth (24 h, HttpOnly+SameSite=Strict+Path=/admin) + SigV4 fallback,
+  internal/adminapi + internal/heartbeat packages, web/src/pages/*
+  (Login, Overview, Buckets, BucketDetail, Metrics, Consumers,
+  Settings stub). Phase 2 ADDS write endpoints under /admin/v1/* and
+  new pages (IAM, Multipart, AuditLog, Settings, Buckets-with-tabs).
+- internal/adminapi/server.go: every new handler registered in routes()
+  via mux.HandleFunc("METHOD /admin/v1/<path>", s.handleX). Errors
+  via writeJSONError(w, status, code, message). Auth path is
+  authMiddleware -> sigv4 fallback -> session cookie verify; leave
+  the chain alone, just register handlers.
+- meta.Store admin surface ALL exists for the bucket-config triple
+  (Get / Set / Delete) for: Lifecycle, CORS, Policy, PublicAccessBlock,
+  OwnershipControls, Encryption, ObjectLockConfig, Notification,
+  Website, Replication, Logging, Tagging, ACL+Grants, Inventory.
+  IAM (CreateIAMUser / DeleteIAMUser / ListIAMUsers /
+  CreateIAMAccessKey / DeleteIAMAccessKey / UpdateIAMAccessKeyDisabled
+  / ListIAMAccessKeysByUser) all on main. ManagedPolicy +
+  AttachUserPolicy SHAPES ARE NEW (US-010 ships them in lockstep
+  across cassandra + memory + tikv with storetest contract entries).
+- Cassandra schema migrations are additive: alterStatements in
+  internal/meta/cassandra/schema.go via idempotent ALTER TABLE ADD
+  swallowed by isColumnAlreadyExists. New tables go in tableDDL
+  (idempotent CREATE TABLE IF NOT EXISTS). Memory + tikv mirror.
+- Audit middleware (internal/s3api/AuditMiddleware) wraps both S3 +
+  /admin/v1/* requests. Every Phase 2 write endpoint emits one
+  admin:<Action> row. Resource pattern: bucket:<name> for bucket
+  ops, object:<bucket>/<key> for object ops, iam:<UserName> /
+  iam-key:<AccessKey> / iam-policy:<Arn> for IAM ops.
+- Monaco editor: install monaco-editor + @monaco-editor/react. Lazy-
+  load via React.lazy + dynamic import inside the editor pages
+  (Lifecycle JSON tab, CORS JSON tab, Policy editor, ManagedPolicy
+  editor). Verify via vite build --report that monaco lives in its
+  own chunk under web/dist/assets/ and the home/metrics/buckets-
+  list bundles stay <=500 KiB gzipped.
+- Browser-side multipart upload (US-015): operator's session-cookie
+  identity is checked at presign-mint time; the URL is signed with a
+  server-held credential (not the operator's personal AK/SK). Web
+  Worker (web/src/workers/upload.ts) drives the part PUTs in
+  parallel so the UI thread stays responsive.
+- TanStack Query 5 invalidate pattern: every successful write calls
+  queryClient.invalidateQueries({queryKey: ['buckets']}) (or the
+  matching key) so the next read reflects the write. NO optimistic
+  UI; LWT round-trips are slow enough that fake-success leads to
+  confusing rollbacks.
+- Form state: react-hook-form (already in package.json) for every
+  form. Zod schemas mirror Go validators where practical.
+- shadcn/ui: extend the Phase 1 shadcn components rather than add
+  new libraries. Toast, Dialog, Select, Tabs, Table, Form, Sheet,
+  DropdownMenu, Skeleton, Card all exist under web/src/components/
+  ui/. Generate new shadcn components via pnpm exec shadcn add
+  <component> when needed.
+- BackendPresign toggle (US-020): meta.Store.SetBucketBackendPresign
+  + meta.Bucket.BackendPresign already on main from the s3-over-s3
+  merge. UI just calls PUT and reads from /admin/v1/cluster/status to
+  decide grey-out (cluster.data_backend != 's3').
 - ROADMAP maintenance rule (CLAUDE.md): every commit closing a
   ROADMAP item flips the bullet to ~~strikethrough~~ Done format in
   the same commit, with closing SHA inline (or `(commit pending)`
   with a follow-up SHA edit). New gaps: add a fresh entry under the
   right severity section in the same commit.
 - Phase boundaries (read these BEFORE adding scope creep):
-  - Phase 1 (THIS cycle, prd-web-ui-foundation.md): read-only console.
-    No write actions.
-  - Phase 2 (prd-web-ui-admin.md): bucket admin, IAM, object actions,
-    multipart watchdog, audit viewer, settings.
-  - Phase 3 (prd-web-ui-debug.md): hot heatmaps, slow queries, OTel
-    trace browser, SSE live tail, per-node drilldown.
-  If a story tempts you toward write actions or debug tooling, STOP
-  and re-scope. Phase 1 ships first; the others land in their own
-  cycles.
-- No metadata schema changes outside the new cluster_nodes heartbeat
-  table. No data backend changes. No SSE / WebSocket — polling 5 s
-  is sufficient for Phase 1.
-- Tests for the cycle: Go side via go test ./internal/adminapi/...,
-  Playwright via cd web && pnpm exec playwright test.
-  CI has e2e-ui job that runs both.
+  - Phase 1 (SHIPPED, prd-archive/prd-web-ui-foundation.md): read-only
+    console.
+  - Phase 2 (THIS cycle, prd-web-ui-admin.md): write actions.
+  - Phase 3 (prd-web-ui-debug.md): performance debug tooling.
+  If a story tempts you toward debug heatmaps / OTel trace browser /
+  SSE audit-tail, STOP — those land in Phase 3. Phase 2 ships
+  write surface only.
+- Tests for the cycle: Go side via go test ./internal/adminapi/...
+  + go test ./internal/meta/... (storetest contract for new
+  ManagedPolicy/UserPolicy methods) + go test ./internal/s3api/...
+  (audit row assertion). Playwright via cd web && pnpm exec
+  playwright test admin.spec.ts. CI e2e-ui job runs both.
+- No metadata schema changes outside US-010 (ManagedPolicy +
+  UserPolicy attachment) and US-002 (admin_jobs for force-empty
+  job persistence). No data backend changes. No SSE / WebSocket
+  in Phase 2 (Phase 3 territory).
