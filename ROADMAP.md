@@ -91,6 +91,13 @@ adding more, prove what is there.
 - **P3 — Connection pool tuning.** Benchmark one `*rados.Conn` vs several for write-heavy
   workloads; measure CGO contention inside librados.
 
+## Web UI
+
+- ~~**P2 — Web UI — Foundation (Phase 1).**~~ **Done.** Embedded React+TS console served at `/console/` on the gateway port (`go:embed` + SPA fallback). Versioned `/admin/v1/*` JSON API + OpenAPI 3.1 spec at `internal/adminapi/openapi.yaml`. Session-cookie auth (HS256 JWT, 24 h, `HttpOnly`+`SameSite=Strict`+`Path=/admin`) backed by the existing static-credentials store, with SigV4 fallback for programmatic clients. Pages: login, cluster overview (CockroachDB-shape hero + nodes table + top-buckets + top-consumers widgets), buckets list (search/sort/paginate), bucket detail (read-only object browser with folder navigation + object detail panel), metrics dashboard (request rate / latency p50/p95/p99 / error rate / bytes — 15m/1h/6h/24h/7d ranges). Heartbeat infra in `internal/heartbeat` (memory + Cassandra; 10 s write, 30 s TTL). TanStack Query 5 polling (5 s default, per-range overrides on Metrics). Recharts 2 lazy-loaded. Bundle ≤500 KiB gzipped initial. Critical-path Playwright e2e (`web/e2e/critical-path.spec.ts`) running in CI under the `e2e-ui` job. Operator guide at `docs/ui.md`. (commit pending)
+- **P3 — Web UI — Phase 2 (admin).** Per `tasks/prd-web-ui-admin.md`: bucket admin (create / delete / versioning toggle), object actions (download / delete / presign), IAM (Cassandra-backed credentials + admin endpoints to create/rotate keys), multipart watchdog, audit viewer, settings page. Adds `{bucket, access_key}` labels to `strata_http_requests_total` so the top widgets populate. Bucket-level object-lock state persisted on `meta.Bucket`.
+- **P3 — Web UI — Phase 3 (debug).** Per `tasks/prd-web-ui-debug.md`: hot-key heatmaps, slow-query browser, OpenTelemetry trace UI (paired with the `P3 — OpenTelemetry tracing` item below), SSE / WebSocket live tail, per-node drilldown panel. Workers (`strata-gc`, `strata-lifecycle`) write heartbeat rows so the workers + leader chips populate.
+- **P3 — Web UI — TiKV heartbeat backend.** `internal/heartbeat` ships memory + cassandra stores. TiKV heartbeat store needed so `--meta-backend=tikv` populates the cluster overview nodes panel. Same shape as the existing audit-sweeper in `internal/meta/tikv/sweeper.go`.
+
 ## S3 API surface
 
 - **P3 — Intelligent-Tiering.** Access-time tracking + auto-transition. Needs hot/cold

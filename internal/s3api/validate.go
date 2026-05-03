@@ -20,11 +20,28 @@ func validObjectKey(key string) bool {
 	return true
 }
 
+// reservedBucketNames are gateway-internal path prefixes that must not
+// collide with bucket names (path-style addressing puts the bucket at
+// /<name>/...). Add new entries when registering new top-level routes.
+var reservedBucketNames = map[string]struct{}{
+	"console":     {}, // /console/* serves the embedded operator UI
+	"admin":       {}, // /admin/v1/* JSON API (Phase 1 web UI)
+	"metrics":     {}, // /metrics is the Prometheus exposition endpoint
+	"healthz":     {}, // /healthz liveness probe
+	"readyz":      {}, // /readyz readiness probe
+	".well-known": {}, // RFC 5785 reserved
+}
+
 // validBucketName checks the S3 DNS-safe bucket name rules:
-//   length 3..63, lowercase letters / digits / hyphen / dot,
-//   starts and ends with letter or digit, no consecutive dots,
-//   not an IP address, no ".-" or "-." joins.
+//
+//	length 3..63, lowercase letters / digits / hyphen / dot,
+//	starts and ends with letter or digit, no consecutive dots,
+//	not an IP address, no ".-" or "-." joins,
+//	not a reserved gateway-internal route name.
 func validBucketName(name string) bool {
+	if _, reserved := reservedBucketNames[name]; reserved {
+		return false
+	}
 	if len(name) < 3 || len(name) > 63 {
 		return false
 	}

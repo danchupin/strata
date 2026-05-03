@@ -1,13 +1,25 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph docker-build vet test up up-all up-tikv down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata-tikv ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana race-soak-tikv clean
+.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-tikv down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata-tikv ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana race-soak-tikv clean
 
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
-build:
+# build depends on web-build so the embedded console FS is populated
+# before `go build` runs. Direct `go build` for cmd/strata without web-build
+# will fail with: pattern web/dist: no matching files found
+build: web-build
 	go build -o bin/strata ./cmd/strata
 	go build -o bin/strata-admin ./cmd/strata-admin
+
+web-build:
+	cd web && pnpm install --frozen-lockfile && pnpm run build
+
+web-typecheck:
+	cd web && pnpm run typecheck
+
+web-clean:
+	rm -rf web/dist web/node_modules
 
 build-ceph:
 	$(COMPOSE) build strata

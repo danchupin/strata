@@ -1,0 +1,1744 @@
+# Ralph Progress Log
+Started: 2026-05-02
+Cycle: ralph/web-ui-foundation
+---
+
+## Codebase Patterns
+
+- shadcn/ui pattern: components live under web/src/components/ui/<name>.tsx as
+  SOURCE (not deps). Each component is hand-written / copy-pasted from upstream
+  shadcn-ui CLI output; we own and tweak freely. Path alias '@/*' → 'src/*' is
+  wired in vite.config.ts (resolve.alias) AND tsconfig.app.json (paths).
+  utilities helper is `cn()` in web/src/lib/utils.ts (clsx + tailwind-merge).
+  Color tokens come from CSS variables in web/src/styles/globals.css (`hsl(var(--token))`).
+  When adding new shadcn primitives, install the matching @radix-ui/react-<x>
+  dep and copy the upstream component file — do not pull a wrapper library.
+- Theme system: ThemeProvider context (web/src/components/theme-provider.tsx)
+  stores theme = 'light' | 'dark' | 'system'; resolvedTheme is derived from
+  matchMedia('(prefers-color-scheme: dark)'). Effect adds/removes
+  document.documentElement.classList.dark. Persistence:
+  localStorage['strata.theme']. ThemeToggle dropdown in the top bar uses Sun
+  (light/system) + Moon (dark) icons from lucide-react. To use theme tokens in
+  components: write `bg-background text-foreground` etc. — Tailwind picks up
+  the CSS vars from globals.css.
+- web/ is a NEW source tree at the repo root (sibling of cmd/, internal/, docs/).
+  React 18 + Vite 5 + TypeScript 5. Phase 1 stack will add Tailwind 3 + shadcn/ui +
+  TanStack Query 5 + recharts 2 + react-router-dom 6 + Playwright 1. Package
+  manager: pnpm 9 (NOT npm/yarn — smaller node_modules, reproducible install).
+  Lockfile checked in: web/pnpm-lock.yaml.
+- go:embed pattern: ROOT package `strata` (not cmd/strata/) owns console.go +
+  console_test.go. Declares `//go:embed all:web/dist` + `var consoleFS embed.FS`
+  and exposes `ConsoleHandler()` with SPA fallback (any /console/<path> not matching
+  a static file falls back to index.html so client-side routes survive direct
+  navigation / refresh). The `all:` prefix matters — without it Vite's .vite/-
+  prefixed assets are silently dropped. cmd/strata-gateway imports this as
+  `strataconsole "github.com/danchupin/strata"`.
+- /console/ + /admin/v1/* are reserved path prefixes on the gateway port. Both
+  register ahead of the catch-all / S3 router in cmd/strata-gateway/main.go (no
+  internal/serverapp package — wiring is inline in main.go). reservedBucketNames
+  in internal/s3api/validate.go already includes 'console', 'admin', 'metrics' so
+  path-style addressing cannot shadow gateway-internal routes.
+- /admin/v1/* is the JSON HTTP contract between UI and gateway. Versioned (v1);
+  future-breaking changes ship under /admin/v2/*. OpenAPI 3.1 spec lives at
+  internal/adminapi/openapi.yaml (US-003).
+- Auth: session cookie strata_session=<JWT> with HS256, 24h Max-Age, HttpOnly +
+  Secure + SameSite=Strict + Path=/admin. JWT secret read from
+  STRATA_CONSOLE_JWT_SECRET (random hex if unset, with WARN — production
+  deployments MUST set it explicitly to survive restarts without invalidating
+  sessions). Auth middleware on /admin/v1/* falls back to existing SigV4 path for
+  clients without the cookie (curl, programmatic admin clients).
+- TanStack Query 5 global QueryClient: staleTime 5_000, refetchInterval 5_000,
+  refetchOnWindowFocus true, retry 1. web/src/api/client.ts exposes typed
+  wrappers — pages call useQuery({queryKey, queryFn}); polling is automatic.
+- Heartbeat shape: cluster_nodes table with default_time_to_live=30 on Cassandra
+  (alterStatements add), s/cluster_nodes/<node_id> + background sweeper on TiKV,
+  in-process map with timestamp expiry on memory. Lockstep across all three meta
+  backends. Each Strata replica writes its own row every 10 s.
+- Status derivation (cluster overview): healthy if all nodes report /readyz 200
+  in last 30 s; degraded if ≥1 fail but quorum holds; unhealthy if quorum lost.
+- Polling cadence per page: 5 s for ranges ≤6 h, 30 s for 24h+, 5 min for 7d
+  (per-query refetchInterval). Mind chart re-render cost on longer ranges.
+- Bundle target: ≤500 KiB gzipped initial. Use React.lazy + Suspense for
+  non-critical routes (Buckets, Bucket Detail, Metrics get code-split). Verify
+  via `vite build --report` before US-012 close. Current bundle: 46 KiB gzipped.
+- recharts 2.x for charts (smaller than chart.js, declarative). Avoid Apache
+  ECharts / Plotly — bundle bloat.
+- shadcn/ui CLI copies components into web/src/components/ui/ as source — NOT a
+  dependency. We own them; tweak freely, no version pin to worry about.
+- Dark mode: class='dark' on <html>; CSS variables in globals.css switch values
+  per theme. Toggle persists to localStorage['strata.theme'] = 'light' | 'dark' |
+  'system'.
+- Playwright e2e: chromium-only on CI for speed. webServer config runs
+  `make run-memory` so e2e does not need Cassandra / RADOS up.
+  STRATA_STATIC_CREDENTIALS=test:test:owner seeds login creds.
+- Gateway dev port: make run-memory uses :9999 (NOT :9000 as some PRD ACs
+  suggest). Update Playwright baseURL to http://localhost:9999 to match the
+  Makefile.
+- Makefile: top-level `build` depends on `web-build`. `make web-typecheck` and
+  `make web-clean` available. CI ci.yml has a web-build job that produces the
+  web/dist artifact downloaded by go jobs (go test/build needs it for the embed).
+- ROADMAP maintenance rule (CLAUDE.md): every commit closing a ROADMAP item
+  flips the bullet to ~~strikethrough~~ Done format in the same commit, with
+  closing SHA inline (or `(commit pending)` with a follow-up SHA edit). New gaps:
+  add a fresh entry under the right severity section in the same commit.
+- Phase boundaries (read these BEFORE adding scope creep):
+  - Phase 1 (THIS cycle, prd-web-ui-foundation.md): read-only console.
+    No write actions.
+  - Phase 2 (prd-web-ui-admin.md): bucket admin, IAM, object actions, multipart
+    watchdog, audit viewer, settings.
+  - Phase 3 (prd-web-ui-debug.md): hot heatmaps, slow queries, OTel trace
+    browser, SSE live tail, per-node drilldown.
+  If a story tempts you toward write actions or debug tooling, STOP and re-scope.
+  Phase 1 ships first; the others land in their own cycles.
+- No metadata schema changes outside the new cluster_nodes heartbeat table. No
+  data backend changes. No SSE / WebSocket — polling 5 s is sufficient for
+  Phase 1.
+- Tests for the cycle: Go side via `go test ./internal/adminapi/...`, Playwright
+  via `cd web && pnpm exec playwright test`. CI has e2e-ui job that runs both.
+- Stdlib JWT (HS256): crypto/hmac + sha256 + base64.RawURLEncoding for
+  compact serialization; hmac.Equal for constant-time signature compare.
+  ~200 lines — skip jwt-go / golang-jwt and the CVE chase.
+- meta.Store ListObjects NextMarker is exclusive: marker comparison uses
+  `k <= opts.Marker` (skips up to AND INCLUDING the marker), but
+  res.NextMarker is set to the FIRST UNRETURNED key. Resuming pagination
+  with `marker=NextMarker` therefore SKIPS that key. Tests should assert
+  "first key strictly greater than marker" rather than "first key equals
+  NextMarker". Same shape across cassandra and tikv backends.
+- go 1.22+ method-prefixed mux patterns expose path values via
+  `r.PathValue("name")` for `GET /admin/v1/buckets/{name}` style routes.
+  No third-party router needed — adminapi already uses the stdlib mux.
+- For browser-side URL state (folder navigation, current prefix), use
+  `useSearchParams` from react-router-dom v6 — read with
+  `searchParams.get('prefix')`, write with `setSearchParams({prefix:...})`
+  or `setSearchParams({})` to clear. Triggers a navigation so dependent
+  pagination state should reset via `useEffect` on the prefix.
+- Sheet object-detail pattern: control open via `open=Boolean(state)` +
+  `onOpenChange={(open) => !open && onClose()}`. Trigger is a regular
+  table-row button with onClick=setSelected(row). Skip <SheetTrigger> when
+  state-controlled.
+- Phase 1 stub fields: object_lock on BucketDetail is hard-coded false
+  because meta.Bucket has no ObjectLock field today. Don't add the
+  metadata column until Phase 2 — note it in PRD notes and move on.
+- Cookie Secure flag: conditional on r.TLS != nil OR X-Forwarded-Proto=https.
+  Unconditional Secure blocks dev over plain HTTP because browsers refuse
+  to set Secure cookies on insecure origins. Production gateways behind
+  TLS terminators still hit the secure branch; dev with `make run-memory`
+  keeps working. Path=/admin keeps the cookie off /console/ static asset
+  requests — only the API picks it up.
+- subtle.ConstantTimeCompare on the secret AND a fake compare on the
+  unknown-access-key branch — equalises wall-clock latency so attackers
+  can't distinguish "unknown key" from "wrong secret".
+- adminapi.authMiddleware resolution order: path bypass list (/auth/login,
+  /auth/logout) → cookie JWT path → SigV4 fallback → 401. Whoami requires
+  auth so the UI uses it as a session probe.
+- BrowserRouter basename='/console' means React Router paths are '/login'
+  and '/*' — NOT '/console/login'. Basename prefix is added by the router;
+  don't double-prefix in <Link to=...> or <Navigate to=...>.
+- React auth state machine: 'unknown' | 'unauthenticated' | 'authenticated'.
+  The 'unknown' state during the initial whoami probe prevents a flash of
+  the login page on hard-refresh of a deep link.
+- AppShell layout pattern: web/src/components/layout/AppShell.tsx is the
+  authenticated shell — sticky w-60 / w-14 sidebar (left), sticky top bar,
+  flex-1 main with <Outlet />. Wrap inside RequireAuth at the route layout
+  level (App.tsx uses `<Route element={<RequireAuth><AppShell/></RequireAuth>}>`
+  with index/child routes). Stub pages live under web/src/pages/<Name>.tsx
+  and export a single named component <NamePage>. New nav items: add to
+  web/src/components/layout/nav.ts (icon from lucide-react) AND register
+  the corresponding <Route> in App.tsx — both ends must stay in sync.
+- Sidebar collapse: useState + localStorage['strata.sidebar.collapsed']
+  ('1' | '0'). Collapsed=true forces icon-only regardless of width.
+  useMediaQuery('(max-width: 1023px)') forces collapsed when narrow even
+  if persistedCollapsed=false; the user toggle is hidden in that range so
+  the sidebar can't be expanded against the breakpoint policy.
+- Mobile sidebar (<640px via useMediaQuery): desktop <aside> hidden;
+  hamburger Menu button in the top bar opens a Sheet side='left' wrapping
+  the same SidebarNav. Pass onNavigate=()=>setMobileOpen(false) so tapping
+  a link closes the sheet — Radix Dialog does NOT auto-close on Link
+  navigation.
+- Top-bar cluster name: fetch /admin/v1/cluster/status::cluster_name once
+  on mount via useClusterStatus (single useEffect, no polling yet). US-008
+  will replace with useQuery({queryKey:['cluster','status'],...}). Fallback
+  display 'Strata' when fetch fails / before first response.
+- /admin/v1/cluster/status::cluster_name comes from STRATA_CLUSTER_NAME env;
+  default 'strata' when empty. adminapi.New now takes adminapi.Config struct
+  (changed in US-006 — see refactor note below), so the env-name lookup goes
+  into Config.ClusterName.
+- adminapi.New is a Config-struct constructor (US-006). Fields: Meta, Creds,
+  Heartbeat, Version, ClusterName, MetaBackend, DataBackend, JWTSecret. New
+  fields land at the bottom — never reorder. Tests build a Config inline; the
+  gateway main.go does the same. Adding another arg in future stories =
+  add a Config field, no positional breakage.
+- Heartbeat infra: internal/heartbeat package (Node + Store interface +
+  Heartbeater + MemoryStore + CassandraStore). Each Strata replica writes a
+  Node row every 10 s; rows expire at TTL 30 s. Memory: in-process map with
+  read-time eviction. Cassandra: cluster_nodes table (default_time_to_live=30)
+  in internal/meta/cassandra/schema.go tableDDL. Wire from main.go via
+  buildHeartbeatStore(cfg, metaStore) which switches on cfg.MetaBackend.
+  Worker daemons (gc, lifecycle) can adopt the same Heartbeater later to
+  surface workers/leader_for chips — Phase 1 ships gateway-only.
+- TiKV meta backend mentioned in the PRD does NOT exist in the codebase. Skip
+  the lockstep TiKV implementation — heartbeat package supports it via the
+  Store interface if/when a metakv backend appears.
+- Cluster status derivation: status='healthy' iff len(nodes) >= 1 and every
+  node has LastHeartbeat ≤ 30 s (which is always true post-eviction). Falls
+  through to 'degraded' when some are stale (defensive, rarely reached) and
+  'unhealthy' when len(nodes) == 0 OR ListNodes errors. Per-node status maps
+  age: ≤10 s → healthy, ≤30 s → degraded, >30 s → unhealthy.
+- Heartbeat NodeID: STRATA_NODE_ID env override else os.Hostname() else
+  'strata'. Hostname is what the leader.DefaultHolder() uses too, so a
+  future leader-lookup join against worker_locks can match by hostname
+  prefix.
+- For UI polling cadence: until US-008 wires TanStack Query, pages do plain
+  useEffect + setInterval(refetch, 5000). Single source of truth: the page
+  component owns the polling loop and resets state on each tick. Watch for
+  unmount races — guard with a `cancelled` flag inside the effect.
+- Prometheus client: internal/promclient (stdlib net/http, no
+  prometheus/client_golang/api dep). New(baseURL) — empty URL is legal and
+  Available()=false. Both Query (instant vector) + QueryRange (matrix) return
+  ErrUnavailable when BaseURL=="" OR upstream non-2xx. Wraps errors with
+  ErrUnavailable so callers `errors.Is(err, promclient.ErrUnavailable)` to
+  branch into "metrics unavailable" UI without distinguishing root cause.
+  Hard timeout 5 s per request — admin widget polls don't get to wedge a
+  whole gateway shutdown.
+- Top-N widget contract: BucketsTopResponse + ConsumersTopResponse both
+  carry a top-level metrics_available bool in addition to the rows. UI uses
+  this flag (NOT empty-rows heuristic) to decide whether to render '—' in
+  the value cell + a "Metrics unavailable — set STRATA_PROMETHEUS_URL"
+  warning under the card title. For buckets/top: size_bytes + object_count
+  come from meta.Store walks and remain populated even when prom is down;
+  only request_count_24h degrades. For consumers/top: the entire response
+  is prom-driven, so prom-down ⇒ rows=[] + metrics_available=false. PromQL
+  shapes: `sum by (bucket) (increase(strata_http_requests_total[24h]))` for
+  buckets; same with by (access_key) for consumer requests; analogous
+  strata_http_bytes_total for consumer bytes. Note: the gateway's existing
+  metrics counter is `strata_http_requests_total` with labels (method,
+  code) — adding (bucket, access_key) labels is Phase 2 work tracked
+  separately. Today the queries return empty vectors, so rows arrive empty
+  with metrics_available=true (the warning does NOT fire — it only fires
+  on Available()=false / Query error). That's intentional: empty-but-available
+  is "no traffic in the last 24 h", which is different from "we don't know".
+- bucketSizeAndCount caps per-bucket scans at 50_000 objects (50 pages of
+  1000) so pathological buckets don't wedge the home-page widget. The
+  widget is "top N", not authoritative inventory — Phase 2 will introduce a
+  proper bucketstats package with per-bucket counters maintained on
+  PutObject/DeleteObject paths so this synchronous walk goes away.
+- Consumer row's `user` field is joined from CredentialsStore.Lookup —
+  only known access keys get a populated User; unknown keys (e.g. expired
+  static creds, programmatic clients) show user='—' in the UI. That is
+  correct: the widget reflects 24h Prom totals, which include keys that
+  may no longer be in the store.
+- adminapi.Config grew a Prom *promclient.Client field (US-007). Field
+  ordering: positional in spirit (composite literal) but Go tolerates
+  reorder; keep new fields at the bottom of Config so mainline call
+  sites remain unchanged. Tests (newTestServer) leave Prom=nil; widget
+  tests set s.Prom = promclient.New(httptestServer.URL) post-construction.
+- TanStack Query 5 wiring (US-008): web/src/lib/query.ts exports
+  queryClient (staleTime 5_000, refetchInterval 5_000,
+  refetchOnWindowFocus true, retry 1) + queryKeys map (one place to look
+  up the canonical key tuple per resource). queryCache.onError pipes
+  errors into a global toast via web/src/lib/toast-store.ts +
+  web/src/components/toaster.tsx; per-key throttle 30 s prevents toast
+  spam when an endpoint is wedged. Pages opt into the global error UX
+  by setting useQuery({meta: {label: 'cluster status'}}); meta.silent=true
+  suppresses toasts (used for the auth whoami probe so 401s never toast).
+  StrataQueryMeta is module-augmented onto @tanstack/react-query so meta
+  is typed end-to-end. Devtools land via React.lazy + import.meta.env.DEV
+  gate — Vite tree-shakes them out of the prod bundle.
+- Toast pattern: web/src/lib/toast-store.ts is a useSyncExternalStore-
+  backed module-level store (not a React context) so non-React modules
+  can showToast() — necessary for the QueryCache onError handler. The
+  <Toaster /> mounts the shadcn ToastProvider/ToastViewport and renders
+  records from useToasts(). Action button is a ToastAction with
+  altText (radix a11y requirement). Default duration 6_000 ms.
+- Aggregated API client: web/src/api/client.ts re-exports cluster/widgets/
+  auth wrappers under one import + adds typed wrappers for endpoints
+  landing in US-009/010/011 (fetchBucketsList, fetchBucket, fetchObjects,
+  fetchMetricsTimeseries). Pages should import from '@/api/client' rather
+  than the per-resource file so the surface is one place to audit.
+- Auth + TanStack Query: AuthProvider holds whoami() inside a
+  useQuery({queryKey: queryKeys.auth.whoami, retry: 0,
+  refetchInterval: false, staleTime: 60_000, meta:{silent:true}}). Login
+  and logout call qc.setQueryData(queryKeys.auth.whoami, session/null)
+  so the auth state stays in sync without an extra whoami round-trip.
+  Logout additionally calls qc.removeQueries() to drop per-session
+  cached data before re-seeding null whoami; otherwise next user signing
+  in would briefly see the previous user's bucket list.
+- Page error UX with TanStack Query: only render an inline error banner
+  when there is no usable cached data (`!q.data && q.error`). Transient
+  refetch failures surface via the global toast (with a Retry button
+  that calls queryClient.invalidateQueries). The page must NOT
+  blank-out on a stale-but-cached error — keep the existing UI mounted.
+- vite/client types live in web/src/vite-env.d.ts (`/// <reference types="vite/client" />`).
+  Without it `import.meta.env` doesn't resolve in tsc. Required as soon
+  as any source file reads `import.meta.env.DEV`.
+- Metrics dashboard contract (US-009): GET /admin/v1/metrics/timeseries
+  takes (metric, range, step?). Supported metric values:
+  request_rate, latency_p50, latency_p95, latency_p99, error_rate,
+  bytes_in, bytes_out. Each call returns ONE MetricSeries (server names
+  it after the public alias — 'p50', 'p95', 'p99' for the three
+  latency variants — so the React layer can layer them in one chart by
+  calling the endpoint three times). Range parser supports
+  time.ParseDuration plus a 'd' suffix (stdlib doesn't accept '7d', so
+  parseDurationParam shims '7d'→'168h'). Default step per range:
+  15m→30s, 1h→1m, 6h→5m, 24h→15m, 7d→1h. Same metrics_available bool
+  contract as buckets/top + consumers/top: 200 + {series:[],
+  metrics_available:false} when STRATA_PROMETHEUS_URL is unset OR
+  upstream non-2xx — UI then renders the "Metrics unavailable —
+  set STRATA_PROMETHEUS_URL" inline message.
+- PromQL window placeholder pattern: metricSpecs entries hold the
+  expression with a __WINDOW__ literal that is replaced at request
+  time with promDurationString(step*4). step*4 keeps the rate window
+  wider than the step so adjacent points share at least one full
+  scrape — avoids flatlining when the step is very fine. The
+  formatter promDurationString picks the largest whole-unit
+  representation (h/m/s) so PromQL sees "1m" not "60s" — purely
+  cosmetic for query logs but easier to debug.
+- Lazy-loaded routes pattern: heavy chart libraries (recharts ~110 KiB
+  gzipped) live behind React.lazy + Suspense in App.tsx. The Metrics
+  route imports `lazy(() => import('@/pages/Metrics').then((m) =>
+  ({ default: m.MetricsPage })))` so the recharts chunk is loaded
+  only on /metrics navigation. Initial home-page bundle stays under
+  the 250 KiB raw / 120 KiB gzipped headroom budget. Apply the same
+  pattern for any future heavy page (object browser hex-viewer,
+  trace UI, etc.).
+- Per-range refetchInterval: useTimeseries hook overrides the global
+  5_000 ms default with a per-range value (5s for ≤6h, 30s for 24h,
+  5min for 7d). Set staleTime = refetchInterval/2 so a tab switch
+  triggers a refresh roughly halfway through the visible period.
+- recharts patterns: ResponsiveContainer wraps every chart inside a
+  fixed-height div (h-56). XAxis dataKey='ts' type='number'
+  scale='time' domain=['dataMin','dataMax'] formatter picks
+  human-friendly tick labels per range (HH:MM:SS for ≤1h,
+  HH:MM for 6h/24h, MMM DD for 7d). YAxis tickFormatter does the
+  unit conversion (formatBytes scales to KiB/MiB/GiB; formatPercent
+  multiplies by 100; formatSeconds picks µs/ms/s). Always pass
+  isAnimationActive={false} to recharts series — animation flickers on
+  every refetch and is distracting on a polling dashboard.
+- mergePoints helper: layered charts (latency, bytes) merge multiple
+  per-metric responses into a single ChartPoint[] keyed by ts so
+  recharts can render them as overlaid Lines on the same X axis.
+  Because each query returns its own series, the React side keys the
+  resulting row by the caller-supplied 'key' (p50/p95/p99 etc.) —
+  the server's series.name is informational.
+- Metric counter coverage today: gateway emits
+  strata_http_requests_total{method,code} +
+  strata_http_request_duration_seconds (histogram). request_rate +
+  latency + error_rate widgets work today. bytes_in/bytes_out widgets
+  query strata_http_bytes_in_total / strata_http_bytes_out_total
+  which are NOT yet emitted (Phase 2 work tracked alongside the
+  bucket/access_key labels). Querying a missing metric returns an
+  empty matrix → empty chart with metrics_available=true. That's
+  intentional — empty-but-available is "no traffic", different from
+  "we don't know".
+- Strata is single-region (cfg.RegionName, default 'strata-local',
+  env STRATA_REGION). adminapi.Server.Region echoes it into
+  BucketSummary.region for every bucket — meta.Bucket has no per-bucket
+  Region field. Per-bucket region is a Phase 2 candidate if multi-region
+  lands.
+- Sortable list endpoints: comparator returns int (-1/0/1), negate on
+  desc, fall back to a fixed secondary key (Name ASC) only when primary
+  returns 0 — this keeps the secondary key direction-independent so
+  two equal-on-primary rows always tie-break alphabetically. See
+  sortBucketsListEntries in internal/adminapi/buckets.go. cmpString +
+  cmpInt64 helpers in the same file are reusable for the next
+  paginated endpoint.
+- adminapi pagination helpers: parsePositive(s, def) (default-on-empty
+  or non-positive) + parseRange(s, def, lo, hi) (clamp to [lo,hi]).
+  Re-use for any paginated /admin/v1/* endpoint instead of cloning
+  strconv.Atoi+clamp logic.
+- React paginated table pattern (US-010 Buckets, will repeat for
+  US-011 Objects): useQuery({ placeholderData: keepPreviousData })
+  so pagination/sort/refetch keeps the previous page visible until
+  the new payload lands. Pair with `q.isFetching && !showSkeleton`
+  to surface 'Refreshing…' in the card description. useEffect on
+  (debouncedSearch, sort, order) → setPage(1) so a filter change
+  doesn't strand you on a now-empty page.
+- React debounced input pattern: useDebounced hook (300 ms) + a
+  useMemo-built params object so queryKey + queryFn closure don't
+  churn on every keystroke. The fetch only fires when the debounced
+  value changes.
+- shadcn/ui Input lacks an icon slot. Wrap in a relative div with an
+  absolute-positioned Lucide icon (left-2 top-1/2 -translate-y-1/2
+  pointer-events-none) and pl-8 on the Input. Used by the Buckets
+  search input; same pattern for any toolbar filter (US-011 object
+  browser prefix filter, etc.).
+- Refresh button on a paginated query invalidates the WHOLE subtree
+  (queryClient.invalidateQueries({queryKey:['buckets','list']})) —
+  not just the current page key — so cached neighbouring pages
+  refresh too.
+- Anonymous Go struct types in a func parameter must match EXACTLY
+  the anonymous struct in the caller. A locally-declared
+  `type entry struct{...}` is a NAMED type and won't satisfy the
+  anonymous-struct param. Promote the helper struct to a
+  package-level named type whenever it crosses a function boundary.
+- Playwright e2e (US-012): web/playwright.config.ts is chromium-only, single
+  worker, baseURL :9999. webServer command boots `go run ./cmd/strata-gateway`
+  from cwd: '..' (the config is in web/, gateway main is in repo root) with
+  STRATA_AUTH_MODE=off + STRATA_STATIC_CREDENTIALS=test:test:owner so the
+  spec can seed buckets via plain HTTP PUT (no SigV4 in test code) while
+  /admin/v1/auth/login still validates the secret. webServer.url probes
+  /console/ so tests don't fire before the embed handler is ready.
+  reuseExistingServer:!process.env.CI keeps local iteration fast. Spec lives
+  at web/e2e/critical-path.spec.ts; pnpm scripts: `e2e` runs tests, `e2e:install`
+  installs the chromium browser. Locally: `pnpm run e2e:install` once, then
+  `pnpm run e2e`. CI job .github/workflows/ci.yml::e2e-ui caches
+  ~/.cache/ms-playwright keyed on web/pnpm-lock.yaml.
+- BrowserRouter basename='/console' yields '/console' (no trailing slash)
+  for the index route and '/console/login', '/console/buckets', etc. for
+  named routes — react-router does NOT add a trailing slash. Use
+  trailing-slash-tolerant regex matchers in Playwright assertions
+  (/\/console\/?$/, /\/console\/login\/?$/) to stay portable across router
+  internals.
+- shadcn `CardTitle` (web/src/components/ui/card.tsx) is rendered as a
+  `<div>`, NOT an `<h*>` element. Playwright `getByRole('heading', ...)`
+  will NOT find text inside CardTitle. Use `getByText(...)` or query the
+  page-level `<h1>` instead. Page headings (Cluster Overview, Buckets,
+  bucket-name on detail page) are real `<h1>`s and are reachable via
+  `getByRole('heading', { level: 1, name: ... })`.
+
+## 2026-05-02 - US-007
+- Top Buckets + Top Consumers widgets wired end-to-end on the home page,
+  backed by a new Prometheus query client and the existing meta.Store walk
+  for bucket size/object count.
+- Go side:
+  - New package internal/promclient (promclient.go + promclient_test.go,
+    4 tests). Stdlib-only Prometheus HTTP API wrapper: Query (instant
+    vector), QueryRange (matrix), ErrUnavailable + Available() guard so
+    callers degrade gracefully when STRATA_PROMETHEUS_URL is unset.
+    5 s default timeout.
+  - internal/adminapi/buckets.go handleBucketsTop rewritten: parses
+    by=size|requests (default size) + limit (1..100, default 10).
+    Walks meta.Store.ListBuckets(ctx, "") + per-bucket ListObjects
+    (capped 50_000 objects) to compute size_bytes + object_count.
+    Queries Prom via `sum by (bucket) (increase(strata_http_requests_total[24h]))`
+    for request_count_24h. Sorts by chosen column (DESC, name as
+    tiebreaker), truncates to limit, returns BucketsTopResponse. Bad
+    by= → 400 BadRequest.
+  - internal/adminapi/consumers.go handleConsumersTop rewritten: parses
+    by=requests|bytes (default requests) + limit. Queries Prom for
+    sum by (access_key) of strata_http_requests_total[24h] AND
+    strata_http_bytes_total[24h]. Joins access_key → user via
+    s.Creds.Lookup. Sorts + truncates. Returns ConsumersTopResponse.
+    Prom unavailable → empty rows + metrics_available=false.
+  - internal/adminapi/types.go: BucketsTopResponse + ConsumersTopResponse
+    gained MetricsAvailable bool (json: metrics_available). UI keys on
+    this flag to decide '—' vs concrete value rendering.
+  - internal/adminapi/server.go: Server + Config gained Prom field
+    (added at the bottom — no positional break).
+  - internal/adminapi/openapi.yaml: BucketsTop + ConsumersTop schemas
+    gained metrics_available (required) with description.
+  - cmd/strata-gateway/main.go: reads STRATA_PROMETHEUS_URL env, builds
+    promclient.New(url), passes via Config.Prom. Logs an info line when
+    unset (top widgets + metrics dashboard report metrics_available=false
+    until set).
+  - Tests: internal/adminapi/widgets_test.go (7 new) covering both
+    by=values, with-prom + without-prom, sort order, owner join, bad
+    by= → 400. Plus internal/promclient/promclient_test.go (4) covering
+    Available() gate, vector parse, upstream 5xx → ErrUnavailable, and
+    matrix parse for QueryRange.
+- React side:
+  - web/src/api/widgets.ts (new) — typed fetchTopBuckets(by, limit=10) +
+    fetchTopConsumers(by, limit=10) with credentials:'same-origin'.
+  - web/src/components/overview/TopWidgets.tsx (new) — TopBucketsCard
+    (Tabs: By Size / By Requests; per-tab table rank|bucket|value with
+    bucket-name Link to /buckets/:name; formatBytes for size column;
+    formatCount + '—' fallback for request column when
+    metrics_available=false; MetricsUnavailable banner inside the
+    requests tab when prom missing) + TopConsumersCard (Tabs: By
+    Requests / By Bytes; rank|access_key (8-char truncate + title=full)
+    | user | value; '—' + warning shown for both tabs since the endpoint
+    is Prom-only). Each tab owns its own useTopBuckets/useTopConsumers
+    hook (plain useEffect+setInterval @5 s; US-008 swaps for
+    TanStack Query useQuery).
+  - web/src/pages/Overview.tsx — imports the two cards and renders them
+    in a 2-column grid (xl:grid-cols-2) below NodesTable.
+- Files changed:
+  - internal/promclient/{promclient.go, promclient_test.go} (new)
+  - internal/adminapi/{server.go, types.go, buckets.go, consumers.go,
+    openapi.yaml, widgets_test.go (new)}
+  - cmd/strata-gateway/main.go (Prom env + Config.Prom wiring)
+  - web/src/api/widgets.ts (new)
+  - web/src/components/overview/TopWidgets.tsx (new)
+  - web/src/pages/Overview.tsx (mount widgets)
+- Quality checks:
+  - go vet ./... clean
+  - go test ./... clean (promclient: 4, adminapi: 28 [21 prior + 7 new])
+  - go build ./... clean
+  - cd web && pnpm run typecheck clean
+  - cd web && pnpm run build clean
+  - Bundle: 317.97 KiB raw / 100.6 KiB gzipped JS + 32.44 KiB raw /
+    6.41 KiB gzipped CSS (was 98.6 KiB JS at US-006; +2.0 KiB for
+    widgets module + api/widgets.ts). Total ~107 KiB gzipped, well
+    under 500 KiB budget.
+  - Runtime smoke on :9994 with httptest mock Prom on :9993 (vector
+    results for both per-bucket and per-access-key queries):
+      /admin/v1/auth/login → 200 + Set-Cookie.
+      mb s3://alpha + s3://beta + cp 6-byte file to alpha + 10240-byte
+        file to beta via aws-cli to seed real buckets + objects.
+      /admin/v1/buckets/top?by=size → beta(size=10240, oc=1, rc=77),
+        alpha(size=6, oc=1, rc=7); metrics_available=true.
+      /admin/v1/buckets/top?by=requests → beta(rc=77), alpha(rc=7).
+      /admin/v1/consumers/top?by=requests → [{access_key:test,
+        user:owner, request_count_24h:4242, bytes_24h:1048576}];
+        metrics_available=true.
+      /admin/v1/consumers/top?by=bytes → same row.
+      Without STRATA_PROMETHEUS_URL: both endpoints return
+        metrics_available:false (bucket size/count still populated;
+        only request column degrades).
+      /console/ → 200 (regression-clean).
+- Browser MCP unavailable this iteration; full Playwright run is
+  scheduled for US-012 (login → overview → widgets visible → tab
+  switch → buckets list → logout critical path).
+- **Learnings for future iterations:**
+  - PromQL `increase()` over a 24h range correctly handles counter
+    resets (process restarts) — prefer it to a hand-rolled
+    `delta(counter[24h])` which can show negative deltas across
+    restarts. The widget rounds the float result to int64 via `int64(s.Value)`
+    — fine for "tens of thousands of requests" but be aware that
+    Prometheus' increase() rate extrapolation can yield non-integer
+    counts; if precision matters in Phase 2, store the float.
+  - The current `strata_http_requests_total` counter has labels
+    {method, code} only — there is NO `bucket` or `access_key` label.
+    The widget endpoints query labels that don't exist yet, which
+    means PromQL returns an empty vector ⇒ rows=[] +
+    metrics_available=true. That's intentional: empty-but-available
+    is "no traffic", different from "we don't know". When Phase 2
+    adds (bucket, access_key) labels to the counter (US-009-adjacent
+    work) the widgets will start populating without further code
+    changes.
+  - bucketSizeAndCount walks ListObjects sequentially and uncached.
+    For Phase 1 read-only home page this is fine on memory + small
+    Cassandra clusters; it will NOT scale to 100k+ buckets.
+    Phase 2 must introduce internal/bucketstats with on-write
+    counters maintained in PutObject/DeleteObject so the widget
+    reads a single row per bucket. Cap at 50_000 objects per bucket
+    bounds the worst case today.
+  - Sort tiebreaker in widget handlers is alphabetical by
+    name/access_key. Stable sort is important — without it tied
+    rows shuffle on every 5 s poll which makes the table look
+    jittery in the UI.
+  - shadcn Tabs: defaultValue must match a TabsTrigger value AND a
+    TabsContent value. TabsContent renders inside the Tabs root —
+    don't try to portal it into a sibling. Tabs uncontrolled state
+    is fine for these widgets; controlled state would be needed
+    only if the URL needs to remember the active tab (Phase 2,
+    not now).
+  - Consumer access keys are truncated to 8 chars + ellipsis with
+    a `title=` attr carrying the full key for hover. Don't show
+    the full ~20-char AKIA*** key in the UI by default — it makes
+    the card too wide.
+  - When mounting two TanStack-Query-shaped polling widgets that
+    each own their own useEffect+setInterval, you get N independent
+    fetch loops. That's wasteful pre-US-008 (multiple HTTP requests
+    per tick) but acceptable for ~5 widgets at 5 s. US-008 will
+    coalesce into one global QueryClient; widget hooks will become
+    `useQuery({queryKey:['buckets','top',by],...})`.
+  - Mock Prometheus for runtime smoke: a 30-line Go file with
+    http.HandleFunc("/api/v1/query", ...) that returns canned
+    `{status:"success",data:{resultType:"vector",result:[...]}}`
+    payloads is enough. Don't pull in the real prometheus binary
+    for local widget testing — it's overkill.
+  - The cookie path /admin still applies — widgets endpoints inherit
+    the same auth gate as cluster/status. No special handling
+    needed in the React layer; same fetch wrapper pattern as
+    cluster.ts.
+---
+
+## 2026-05-02 - US-001 (close-out)
+- US-001 was implemented in prior commit e4094bf on this branch ("feat: US-001 -
+  Vite + React + TS skeleton + go:embed console") before the PRD cycle started.
+  This iteration restored scripts/ralph/prd.json (which had been overwritten with
+  the old s3-compatibility PRD) to the web-ui-foundation 12-story shape and
+  flipped US-001 passes:true after re-verifying the implementation.
+- Files verified on disk:
+  - web/{package.json,pnpm-lock.yaml,vite.config.ts,tsconfig.*.json,index.html,
+    src/main.tsx,src/App.tsx} — Vite + React 18.3 + TS 5.6 (pinned), pnpm 9.15.
+  - console.go + console_test.go at REPO ROOT (package strata) — `//go:embed
+    all:web/dist`, ConsoleHandler() with SPA fallback, ServeFileFS for assets,
+    Cache-Control: no-cache on index.html.
+  - cmd/strata-gateway/main.go imports as strataconsole and registers
+    `mux.Handle("/console/", strataconsole.ConsoleHandler())` ahead of the S3
+    catch-all `/`.
+  - internal/s3api/validate.go reservedBucketNames includes 'console', 'admin',
+    'metrics' (with corresponding test).
+  - Makefile: `build: web-build`, web-build runs cd web && pnpm install
+    --frozen-lockfile && pnpm run build. web-typecheck and web-clean available.
+  - .github/workflows/ci.yml has a web-build job (node@20, pnpm@9, store cache);
+    go jobs depend on web-build via `needs: web-build`.
+- Quality checks run this iteration:
+  - go vet ./... — clean
+  - go test ./... — all pass (cmd, root strata package, internal/auth, leader,
+    lifecycle, meta/memory, s3api)
+  - cd web && pnpm run typecheck — clean
+  - cd web && pnpm run build — bundle 46 KiB gzipped (target ≤500 KiB ✅)
+  - go build ./... — clean
+  - Runtime: STRATA_LISTEN=:9999 STRATA_META_BACKEND=memory
+    STRATA_DATA_BACKEND=memory go run ./cmd/strata-gateway →
+    curl /console/ → 200 text/html (index.html);
+    curl /console/assets/index-*.js → 200;
+    curl /console/buckets/foo → 200 (SPA fallback to index.html).
+- **Learnings for future iterations:**
+  - The gateway binary is cmd/strata-gateway/, not cmd/strata/. The PRD AC text
+    "cmd/strata/console.go" was descriptive shorthand — actual location is the
+    REPO ROOT (package strata) so go:embed can see web/dist. Don't try to "fix"
+    this by moving files into cmd/strata-gateway/.
+  - There is NO internal/serverapp/ package in this codebase (PRD AC mentions
+    one). Mux wiring is inline in cmd/strata-gateway/main.go. Future stories that
+    need to register handlers should add them in main.go alongside the existing
+    /metrics, /console/ handlers — same pattern.
+  - `make run-memory` listens on :9999 not :9000. Playwright config baseURL must
+    match (http://localhost:9999). aws-cli + curl examples in docs/ui.md should
+    use 9999 too.
+  - When the ralph wrapper rotates a cycle, the on-disk prd.json may carry stale
+    content from the previous cycle (s3-compatibility) until the first iteration
+    of the new cycle restores it. Check branchName in prd.json before picking a
+    story; if it doesn't match scripts/ralph/.last-branch, restore the PRD body
+    first.
+  - The bundle is 46 KiB gzipped at the bare-skeleton stage. Tailwind + shadcn
+    primitives + TanStack Query + recharts + react-router will add weight; budget
+    ~150–250 KiB for them combined. Use route-level React.lazy + Suspense to keep
+    the initial paint light (US-005 / US-009 / US-010 / US-011 are good code-split
+    boundaries).
+---
+
+## 2026-05-02 - US-002
+- Added Tailwind 3.4.17 + PostCSS + autoprefixer + tailwindcss-animate. Wired
+  PostCSS via web/postcss.config.js, Tailwind config in web/tailwind.config.ts
+  (darkMode: ['class'], content scan src + index.html, font stack system-ui,
+  CSS-variable colour tokens for primary/secondary/destructive/success/warning/
+  muted/accent/popover/card/border/input/ring + radius).
+- Added all 13 baseline shadcn components under web/src/components/ui/: button,
+  card, input, label, tabs, dialog, sheet, dropdown-menu, table, select, toast,
+  skeleton, badge. Each is hand-copied from upstream shadcn-ui CLI output —
+  no wrapper library, no version pin to chase.
+- Added @/* path alias (src/*) in vite.config.ts (resolve.alias via
+  path.resolve(__dirname, 'src')) and tsconfig.app.json (paths). tsconfig.node
+  picked up @types/node so vite.config.ts can use 'node:path' + __dirname.
+- Design tokens in web/src/styles/globals.css: light + dark variants. Primary =
+  hsl(220 90% 56%); destructive = hsl(0 72% 50%); success = hsl(142 71% 40%);
+  warning = hsl(38 92% 50%). Imported once from main.tsx.
+- ThemeProvider (web/src/components/theme-provider.tsx) and ThemeToggle
+  (web/src/components/theme-toggle.tsx) drive Light/Dark/System.
+  System mode tracks matchMedia('(prefers-color-scheme: dark)') and reacts to
+  changes. Persists to localStorage['strata.theme']. main.tsx wraps App with
+  <ThemeProvider>.
+- App.tsx now renders a top bar with the 'Strata Console' wordmark + Phase 1
+  badge (placeholder, no logo per spec) and the ThemeToggle, plus a Card
+  describing Phase 1.
+- Files changed:
+  - web/package.json + web/pnpm-lock.yaml
+  - web/postcss.config.js (new)
+  - web/tailwind.config.ts (new)
+  - web/vite.config.ts (alias)
+  - web/tsconfig.app.json + web/tsconfig.node.json (alias + node types)
+  - web/src/styles/globals.css (new)
+  - web/src/lib/utils.ts (new)
+  - web/src/components/ui/{button,card,input,label,tabs,dialog,sheet,
+    dropdown-menu,table,select,toast,skeleton,badge}.tsx (new)
+  - web/src/components/theme-provider.tsx + theme-toggle.tsx (new)
+  - web/src/App.tsx + web/src/main.tsx
+- Quality checks:
+  - pnpm run typecheck — clean
+  - pnpm run build — 250 KiB raw / 81 KiB gzipped JS + 27 KiB raw / 5.5 KiB
+    gzipped CSS (target ≤500 KiB total ✅)
+  - go vet ./... — clean
+  - go test ./... — all pass
+  - Runtime curl: /console/ 200 (415 B), /console/assets/index-*.js 200 (250 KiB),
+    /console/buckets/foo SPA fallback 200.
+- Browser verification: no browser MCP available in this iteration. Playwright
+  snapshot pair (light + dark) is scheduled for US-012. Manual smoke: open
+  http://localhost:9999/console/ after `make run-memory`, click the theme
+  toggle in the top right; verify <html class='dark'> flips on/off and tokens
+  re-render.
+- **Learnings for future iterations:**
+  - shadcn CLI is interactive (prompts for components.json). Skip the CLI —
+    copy components directly from the canonical shadcn-ui repo. Lock-step
+    install the matching @radix-ui/react-<x> dep when adding a new primitive
+    (Tabs → react-tabs, Dialog → react-dialog, DropdownMenu → react-dropdown-
+    menu, Select → react-select, Toast → react-toast, Label → react-label;
+    Sheet reuses react-dialog).
+  - Sheet is shadcn-speak for a slide-out drawer built on @radix-ui/react-dialog
+    — there is NO @radix-ui/react-sheet. Don't try to install it.
+  - `@/lib/utils` is the conventional shadcn import path for the cn() helper.
+    Configure path alias in BOTH vite.config.ts (runtime) AND tsconfig.app.json
+    (typecheck) — missing one of the two breaks either dev server or tsc.
+  - Color tokens are CSS variables consumed via `hsl(var(--token))` in the
+    Tailwind config. Components write `bg-background text-foreground bg-primary`
+    etc. — never hard-code hsl(...) in component className. New tokens go in
+    globals.css under both `:root` and `.dark` blocks AND in tailwind.config.ts
+    `theme.extend.colors`.
+  - `text-2xl` etc. typography scale already ships with Tailwind defaults —
+    don't redefine fontSize unless the spec deviates from Tailwind's scale (it
+    doesn't here).
+  - tailwindcss-animate is needed for Radix data-state animations (in/out, fade,
+    zoom, slide). Without it the dialog/sheet/dropdown look broken.
+  - Bundle grew 46 → 81 KiB gzipped after this story. Headroom to 500 KiB is
+    ~420 KiB; recharts + TanStack Query + react-router + react-router-dom add
+    roughly 100–150 KiB combined. Route-level React.lazy boundaries become
+    important from US-009 onwards.
+---
+
+## 2026-05-02 - US-003
+- New package internal/adminapi serves the JSON HTTP namespace at
+  /admin/v1/*. Server struct holds {Meta meta.Store, Creds
+  auth.CredentialsStore, Version, Started, Logger}. Handler() wraps an
+  internal http.ServeMux (go 1.22+ method-prefixed patterns) with
+  auth.Middleware{Mode: ModeRequired} so /admin/v1/* ALWAYS demands creds
+  regardless of the global STRATA_AUTH_MODE setting. Routes (all GET):
+  /cluster/status, /cluster/nodes, /buckets, /buckets/top,
+  /buckets/{bucket} (always 404 stub), /buckets/{bucket}/objects,
+  /consumers/top, /metrics/timeseries.
+- Stub payloads match the PRD JSON shapes. Types live in
+  internal/adminapi/types.go and are the stable wire contract for the UI;
+  later stories populate fields without renaming.
+- JSON deny handler: writeAuthDenied returns
+  {code:'Unauthorized', message:<reason>} with Content-Type:
+  application/json. Distinct from s3api.WriteAuthDenied which emits XML.
+  Same auth.CredentialsStore is shared with the S3 path so a single
+  STRATA_STATIC_CREDENTIALS env covers both.
+- Wired in cmd/strata-gateway/main.go:
+  mux.Handle("/admin/v1/", adminServer.Handler()) AHEAD of the catch-all
+  S3 mux.Handle("/", ...). Same prefix-routing pattern as /console/.
+  Version sourced from runtime/debug.ReadBuildInfo() vcs.revision
+  (override via STRATA_VERSION env). Default "dev" when no VCS info.
+- OpenAPI 3.1 spec at internal/adminapi/openapi.yaml documents every
+  endpoint + schema + parameter + sigv4/sessionCookie security schemes.
+  This is the contract document used by US-004+ for the UI side.
+- Tests in internal/adminapi/server_test.go (whitebox package adminapi):
+  - TestHandlerAnonymousReturns401 — full Handler() → 401 JSON.
+  - TestClusterStatusShape, TestClusterNodesShape, TestBucketsListShape,
+    TestBucketGetReturns404, TestObjectsListShape, TestBucketsTopShape,
+    TestConsumersTopShape, TestMetricsTimeseriesShape — exercise
+    s.routes() (unexported, bypasses auth) and assert the JSON shape.
+  - TestRouteCoverageMatchesPRD — drives all eight routes through
+    routes() and asserts status + content-type per the PRD AC table.
+- Files changed:
+  - internal/adminapi/server.go (new)
+  - internal/adminapi/types.go (new)
+  - internal/adminapi/cluster.go (new)
+  - internal/adminapi/buckets.go (new)
+  - internal/adminapi/consumers.go (new)
+  - internal/adminapi/metrics.go (new)
+  - internal/adminapi/openapi.yaml (new)
+  - internal/adminapi/server_test.go (new)
+  - cmd/strata-gateway/main.go (import + adminapi.New + buildVersion +
+    mux.Handle for /admin/v1/)
+- Quality checks:
+  - go vet ./... clean
+  - go test ./... clean (adminapi 8 tests pass)
+  - go build ./... clean
+  - cd web && pnpm run typecheck clean
+  - Runtime smoke on :9998 with STRATA_AUTH_MODE=required:
+    /admin/v1/cluster/status anon → 401 application/json
+    /admin/v1/cluster/nodes anon → 401 application/json
+    /admin/v1/buckets/foo anon → 401 application/json
+    /console/ → 200 text/html (regression-clean)
+- **Learnings for future iterations:**
+  - The S3 deny handler s3api.WriteAuthDenied emits an XML
+    <Error>...</Error> body — DO NOT reuse it for /admin/v1/*. Admin
+    endpoints must respond JSON. internal/adminapi/server.go has its
+    own writeAuthDenied that emits {code, message} JSON.
+  - go 1.22+ http.ServeMux method-prefixed patterns
+    (`mux.HandleFunc("GET /admin/v1/cluster/status", ...)`) are
+    sufficient for this layout — no chi/gorilla needed. Path
+    parameters via {bucket} resolve through r.PathValue("bucket")
+    when handlers need them (US-011 will). Specificity ordering on
+    nested routes is automatic — `/buckets/{bucket}/objects` wins over
+    `/buckets/{bucket}` for the longer path.
+  - adminapi auth always uses Mode: ModeRequired regardless of
+    cfg.Auth.Mode. The gateway-global ModeOff is a developer
+    convenience for the S3 API; it MUST NOT relax /admin/v1/* because
+    a future operator could leave a console exposed on staging. The
+    Server constructs its own Middleware internally — pass it the
+    same auth.CredentialsStore the S3 middleware uses, but with mode
+    pinned to required.
+  - Tests should hit s.routes() (unexported) for shape assertions and
+    s.Handler() (auth-wrapped) only for the 401 case. Constructing
+    valid SigV4 from outside package auth is awkward (signing helpers
+    are unexported); skip it — US-004 will wire the cookie path,
+    which is much easier to forge in tests.
+  - buildVersion() in cmd/strata-gateway/main.go reads vcs.revision
+    via runtime/debug.ReadBuildInfo. It returns "" when the binary is
+    built without VCS metadata (e.g. `go run` in a dirty tree),
+    which is why STRATA_VERSION is supported as a manual override.
+    Fall through is "dev". Tests in internal/adminapi pass an
+    explicit version string ("test-sha") to avoid this branch.
+  - When wiring NEW /admin/v1/* sub-routes in later stories, register
+    inside Server.routes() — that's the central place. Adding a new
+    handler only requires a route line + a method on Server. No
+    further wiring in main.go.
+---
+
+## 2026-05-02 - US-004
+- Go side: HS256 JWT session cookie + login/logout/whoami endpoints.
+  internal/adminapi/session.go (signSession + verifySession + DecodeSecret +
+  GenerateSecret) uses stdlib only — crypto/hmac, crypto/sha256,
+  encoding/base64.RawURLEncoding. No jwt-go / golang-jwt dependency.
+- internal/adminapi/auth.go: handleLogin reads JSON {access_key, secret_key},
+  validates via auth.CredentialsStore + subtle.ConstantTimeCompare on the
+  secret; constant-time fake compare on the unknown-access-key branch to
+  avoid leaking existence. Sets cookie strata_session=<jwt>, HttpOnly +
+  SameSite=Strict + Path=/admin + Max-Age=86400 + Secure conditional on
+  r.TLS != nil OR X-Forwarded-Proto=https so dev over plain HTTP works.
+  handleLogout sets Max-Age=-1 (clear cookie) regardless of session state.
+  handleWhoami requires auth; returns access_key + expires_at (from the
+  cookie's JWT exp claim, or 0 when authenticated via SigV4 instead).
+- internal/adminapi/server.go authMiddleware rewrite. Resolution per
+  request: (1) /admin/v1/auth/login + /auth/logout bypass auth entirely;
+  (2) cookie present → verify JWT + lookup subject in CredentialsStore +
+  attach AuthInfo; (3) Authorization header present → fall through to
+  SigV4 path; (4) anonymous → 401. The cookie path is preferred for
+  browser traffic; SigV4 is the fallback for CLI clients.
+- adminapi.New signature gained jwtSecret []byte.
+  cmd/strata-gateway/main.go loadJWTSecret() reads
+  STRATA_CONSOLE_JWT_SECRET (hex preferred; raw bytes fallback when not
+  hex) or generates an ephemeral 32-byte secret with a WARN log line —
+  production deployments MUST set the env to survive restarts without
+  invalidating sessions.
+- internal/adminapi/openapi.yaml documents POST /auth/login (security:
+  [] override — anonymous), POST /auth/logout (anonymous), GET
+  /auth/whoami (cookie/sigv4 secured) + LoginRequest/SessionInfo
+  schemas. Set-Cookie header description matches the runtime shape.
+- React side: react-router-dom@6.28 added.
+  web/src/api/auth.ts — fetch wrappers (login/logout/whoami) +
+    AuthError class; credentials: 'same-origin' so the browser carries
+    the HttpOnly cookie automatically.
+  web/src/components/auth-provider.tsx — AuthProvider context with
+    state 'unknown' | 'unauthenticated' | 'authenticated'; whoami
+    probe on mount populates state.
+  web/src/components/require-auth.tsx — Navigate to /login on
+    unauthenticated; renders 'Checking session…' during the initial
+    probe (avoids flicker).
+  web/src/components/user-menu.tsx — DropdownMenu with access key +
+    Sign out item that calls logout + navigate('/login').
+  web/src/pages/Login.tsx — Card form with AccessKey + SecretKey
+    (type=password) inputs; inline error on failure; redirects to the
+    intended location after successful login (location.state.from).
+  web/src/App.tsx — Routes: /login (LoginPage), /* wrapped in
+    RequireAuth → HomeShell.
+  web/src/main.tsx — BrowserRouter basename='/console' wraps the app.
+- Files changed:
+  - internal/adminapi/session.go (new)
+  - internal/adminapi/auth.go (new)
+  - internal/adminapi/auth_test.go (new — 11 tests)
+  - internal/adminapi/server.go (Server.JWTSecret field +
+    authMiddleware rewrite + auth route registrations)
+  - internal/adminapi/server_test.go (newTestServer signature)
+  - internal/adminapi/openapi.yaml (+3 paths, +2 schemas)
+  - cmd/strata-gateway/main.go (loadJWTSecret + adminapi.New arg)
+  - web/package.json + web/pnpm-lock.yaml (+react-router-dom@6.28)
+  - web/src/api/auth.ts (new)
+  - web/src/components/auth-provider.tsx (new)
+  - web/src/components/require-auth.tsx (new)
+  - web/src/components/user-menu.tsx (new)
+  - web/src/pages/Login.tsx (new)
+  - web/src/App.tsx (Routes + HomeShell + UserMenu in top bar)
+  - web/src/main.tsx (BrowserRouter basename='/console' +
+    AuthProvider)
+- Quality checks:
+  - go vet ./... clean
+  - go test ./... clean (internal/adminapi: 19 tests pass,
+    8 prior + 11 new)
+  - go build ./... clean
+  - cd web && pnpm run typecheck clean
+  - cd web && pnpm run build clean
+  - Bundle: 277.4 KiB raw / 90.6 KiB gzipped JS
+    (was 81 KiB gzipped at US-002 — +9.6 KiB for react-router-dom +
+    auth UI). 27.5 KiB raw / 5.5 KiB gzipped CSS. Total ≈96 KiB
+    gzipped, within ≤500 KiB target.
+  - Runtime smoke on :9997 with STRATA_AUTH_MODE=required,
+    STRATA_STATIC_CREDENTIALS=test:test:owner, JWT secret from
+    openssl rand -hex 32:
+      whoami anon → 401
+      login wrong secret → 401 InvalidCredentials
+      login correct → 200 + Set-Cookie strata_session=…
+      whoami w/ cookie → 200 {access_key,expires_at}
+      cluster/status w/ cookie → 200 (proves cookie auth applies to
+        all /admin/v1/* routes, not just /auth/*)
+      logout → 200 + Set-Cookie strata_session=… Max-Age=0
+      whoami after logout → 401 missing Authorization header
+- Browser MCP unavailable this iteration; full browser run is
+  scheduled for US-012 Playwright (login → overview → buckets →
+  logout critical path).
+- **Learnings for future iterations:**
+  - Stdlib JWT is fine. base64.RawURLEncoding (NOT StdEncoding) per
+    JWT compact serialization; hmac.Equal for the signature compare
+    (constant-time). 200 lines total — no need to import a JWT
+    library and chase its CVEs.
+  - The cookie's Secure attribute breaks dev-over-plain-HTTP because
+    browsers refuse to set Secure cookies on insecure origins.
+    Conditional on r.TLS != nil OR X-Forwarded-Proto=https keeps
+    `make run-memory` working AND honours the spec in production
+    (where the gateway is behind a TLS terminator). Path=/admin
+    means the cookie does NOT travel with /console/ static asset
+    requests — only the API path picks it up. That's intentional.
+  - subtle.ConstantTimeCompare returns int (0 or 1). Add a fake
+    compare on the unknown-access-key branch so the unauth branch
+    times the same as the bad-secret branch — otherwise a wall-clock
+    attacker can distinguish "unknown key" from "wrong secret" by
+    response latency. Cheap defence; do it.
+  - The auth middleware's path-based bypass list is hard-coded
+    (/admin/v1/auth/login, /admin/v1/auth/logout). Adding any future
+    anonymous endpoint means updating isAuthBypassPath. Worth
+    keeping the list short — most /admin/v1/* MUST require auth.
+  - hasPresignedQuery(r) is a fast pre-filter that avoids handing a
+    plain anonymous browser request off to the SigV4 middleware
+    just to get the same 401 back; it short-circuits to
+    writeAuthDenied(ErrMissingSignature) so the JSON error message
+    is consistent across cookie + sigv4 absent paths.
+  - React state machine pattern: 'unknown' | 'unauthenticated' |
+    'authenticated' avoids the "flash of login page" on initial
+    load while whoami() is in flight. RequireAuth renders a
+    skeleton during the unknown state; this matters when the user
+    hard-refreshes a deep-linked page.
+  - BrowserRouter basename='/console' means the React Router paths
+    are '/login' and '/*' (NOT '/console/login'); the basename
+    prefix is added automatically. Don't double-prefix.
+  - react-router-dom@6 useNavigate replaces useHistory from v5;
+    location.state is plain unknown — cast to your own type when
+    reading state.from (see Login.tsx LocationState interface).
+  - Bundle gain after US-004: +9.6 KiB gzipped for react-router-dom
+    + auth UI. Headroom to 500 KiB ≈400 KiB; recharts 2.x adds the
+    most weight downstream (~50 KiB gzipped). Route-level lazy
+    loading from US-009 onward keeps the initial paint light.
+  - To test the SigV4 fallback in the future, use a real
+    Authorization header (the auth middleware does the parsing); for
+    the cookie path, mint a JWT directly via signSession() — much
+    simpler than constructing SigV4 from scratch.
+---
+
+## 2026-05-02 - US-005
+- Authenticated app shell with sidebar + top bar + content Outlet wired
+  end-to-end. Replaces the Phase-1 placeholder HomeShell from US-004.
+- Go side (one small change in service of the top-bar cluster name):
+  - internal/adminapi/types.go ClusterStatus gained ClusterName (json
+    cluster_name).
+  - internal/adminapi/server.go Server.ClusterName + adminapi.New now
+    takes clusterName arg (defaults to 'strata' when empty).
+  - internal/adminapi/cluster.go handleClusterStatus echoes
+    s.ClusterName.
+  - internal/adminapi/server_test.go + auth_test.go updated to pass
+    'test-cluster' through New(); TestClusterStatusShape now asserts
+    the new field.
+  - cmd/strata-gateway/main.go reads os.Getenv('STRATA_CLUSTER_NAME')
+    and passes it to adminapi.New.
+- React side:
+  - web/src/api/cluster.ts (new) — fetchClusterStatus + ClusterStatus
+    type with optional fields for US-006 expansion (uptime_sec,
+    node_count, node_count_healthy, meta_backend, data_backend).
+  - web/src/components/layout/nav.ts (new) — primaryNav array shared
+    between desktop sidebar + mobile sheet + future breadcrumb hooks.
+    Each item: { to, label, icon, end? } using lucide-react icons.
+  - web/src/components/layout/SidebarNav.tsx (new) — NavLink-based
+    nav list. collapsed=true → icon-only with sr-only label + title
+    tooltip. onNavigate fires after click so the mobile Sheet can
+    close itself.
+  - web/src/components/layout/AppShell.tsx (new) — sticky <aside>
+    (w-60 expanded / w-14 collapsed, transition-[width] 200ms), top
+    bar (cluster name from useClusterStatus, Phase 1 badge, disabled
+    global search input md+ only, ThemeToggle, UserMenu), main with
+    <Outlet />. useMediaQuery hooks for (max-width: 1023px) → forces
+    collapsed; (max-width: 639px) → swaps the desktop sidebar for a
+    Sheet triggered by hamburger Menu button. Collapse toggle button
+    persists state to localStorage['strata.sidebar.collapsed'].
+  - web/src/pages/{Overview,Buckets,Consumers,Metrics,Settings}.tsx
+    (new) — header + 'coming soon' Card placeholders so the nav has
+    real targets. Overview is the index route (path '/').
+  - web/src/App.tsx — restructured: /login standalone; nested layout
+    route wraps AppShell inside RequireAuth; child routes map to the
+    five stub pages; '*' redirects to '/'. HomeShell deleted (replaced
+    by AppShell + OverviewPage).
+- Files changed:
+  - internal/adminapi/{types.go, server.go, cluster.go, server_test.go,
+    auth_test.go}
+  - cmd/strata-gateway/main.go
+  - web/src/api/cluster.ts (new)
+  - web/src/components/layout/{nav.ts, SidebarNav.tsx, AppShell.tsx} (new)
+  - web/src/pages/{Overview,Buckets,Consumers,Metrics,Settings}.tsx (new)
+  - web/src/App.tsx
+- Quality checks:
+  - go vet ./... clean
+  - go test ./... clean (root + adminapi + auth + leader + lifecycle +
+    meta/memory + s3api)
+  - go build ./... clean
+  - cd web && pnpm run typecheck clean
+  - cd web && pnpm run build clean
+  - Bundle: 299 KiB raw / 96.4 KiB gzipped JS + 29.7 KiB raw / 5.9 KiB
+    gzipped CSS (was 90.6 KiB JS at US-004; +5.8 KiB for AppShell + 5
+    stub pages + cluster fetch wrapper). Total ≈102 KiB gzipped, well
+    under the 500 KiB budget.
+  - Runtime smoke on :9996 with STRATA_CLUSTER_NAME=ralph-shell +
+    STRATA_AUTH_MODE=required + STRATA_STATIC_CREDENTIALS=test:test:owner:
+      /console/ → 200 (415 B index.html)
+      /admin/v1/auth/whoami anon → 401
+      /admin/v1/auth/login (test:test) → 200 + Set-Cookie strata_session
+      /admin/v1/cluster/status w/ cookie → 200
+        {status:'ok',version:'dev',started_at:...,cluster_name:'ralph-shell'}
+      /console/buckets SPA fallback → 200 (router-handled deep link)
+- Browser MCP unavailable this iteration; full Playwright run is
+  scheduled for US-012 (login → overview → buckets → logout critical
+  path will exercise the AppShell across viewports).
+- **Learnings for future iterations:**
+  - React Router v6 layout pattern: <Route element={<Wrapper />}> with
+    NO `path` prop wraps its children in <Wrapper>. The wrapper renders
+    <Outlet /> in place of the child route's element. AppShell uses
+    this — RequireAuth is the auth gate, AppShell is the chrome, child
+    routes are pages. Don't put the wrapper inside `element` of every
+    page route; the layout-route pattern is cleaner and avoids
+    re-mounting AppShell on navigation (which would discard sidebar
+    state + cluster-status fetch).
+  - useMediaQuery initializer must guard typeof window !== 'undefined'
+    even though the app only runs in the browser today — Vite's SSR-ish
+    pre-bundling can hit the initializer in a non-window context. Cheap
+    insurance.
+  - Radix Dialog / Sheet does NOT auto-close on internal navigation
+    (Link / NavLink). Pass an explicit onNavigate callback into
+    SidebarNav and call setOpen(false) — otherwise the mobile drawer
+    stays open after a route change, which feels broken.
+  - NavLink className supports both string and ({isActive}) => string;
+    using the function form is the standard way to apply active
+    styling without writing a useMatch hook.
+  - 'NavLink end' prop matters for the index route ('/') — without
+    end:true the Overview link stays active on every '/buckets' /
+    '/metrics' page because they all start with '/'.
+  - localStorage reads in useState initializers must be lazy
+    (`useState(readCollapsed)` not `useState(readCollapsed())`) to
+    avoid running during SSR if we ever add it. Trivial habit.
+  - The sticky sidebar uses `top-0 h-screen` + `sticky` so it follows
+    the scroll without layout shift; the top bar uses `sticky top-0`
+    + `bg-background/95 backdrop-blur` so content scrolls underneath
+    it cleanly. supports-[backdrop-filter] guard skips the blur on
+    browsers without it.
+  - cluster_name display should fall back to a hardcoded 'Strata'
+    when fetch fails — the alternative (blank top bar) looks broken
+    on slow links. The actual cluster name swaps in once status
+    arrives, no flicker.
+  - adminapi.New signature change cascaded into 2 test files. Future
+    constructor changes: grep `adminapi.New(` first to find every
+    call site; keep the call sites narrow (currently main.go +
+    server_test.go + auth_test.go) so the cascade stays small.
+  - Phase 2 things that are intentionally placeholder UI in this
+    story (do NOT wire them into Phase 1): global search input
+    (disabled, 'coming in Phase 2' placeholder), Settings page card,
+    Consumers page (US-007 widget on Overview is the only Phase 1
+    consumers surface — the dedicated page slot is reserved for
+    Phase 2). Resist the temptation to fill these in.
+---
+
+## 2026-05-02 - US-006
+- Cluster Overview page wired end-to-end with real heartbeat-driven data.
+  Gateway writes its own row into cluster_nodes every 10 s; the Overview
+  page polls /admin/v1/cluster/{status,nodes} every 5 s and renders a hero
+  card + backend chips + nodes table.
+- Go side:
+  - New package internal/heartbeat (heartbeat.go + memory.go + cassandra.go
+    + heartbeat_test.go, 4 tests). Node + Store + Heartbeater. Defaults:
+    Interval 10 s, TTL 30 s. Memory store filters expired rows at read
+    time. Cassandra store passes USING TTL 30 to INSERTs.
+  - internal/meta/cassandra/schema.go gained the cluster_nodes DDL inside
+    tableDDL (so existing ensureTables bootstrap creates it on first run
+    or on schema upgrade against an existing keyspace).
+  - internal/adminapi/server.go: New() refactored to take adminapi.Config
+    struct (Meta, Creds, Heartbeat, Version, ClusterName, MetaBackend,
+    DataBackend, JWTSecret). Server gained Heartbeat + MetaBackend +
+    DataBackend fields.
+  - internal/adminapi/types.go: ClusterStatus extended with uptime_sec,
+    node_count, node_count_healthy, meta_backend, data_backend.
+    ClusterNode extended with last_heartbeat. Status enum tightened to
+    healthy/degraded/unhealthy (the legacy "ok" stub is gone — the
+    handler derives status from heartbeat aggregation).
+  - internal/adminapi/cluster.go rewritten: handleClusterStatus aggregates
+    Heartbeat.ListNodes (status derivation: healthy iff all listed nodes
+    fresh and >=1; degraded iff some stale; unhealthy iff empty/error).
+    handleClusterNodes returns the live heartbeat rows mapped to the JSON
+    shape with derived per-node status (≤10 s healthy, ≤30 s degraded).
+  - internal/adminapi/openapi.yaml: ClusterStatus + ClusterNode schemas
+    updated to match new fields; meta_backend enum trimmed to
+    [cassandra, memory] (tikv is PRD aspiration, no impl exists).
+  - cmd/strata-gateway/main.go: buildHeartbeatStore(cfg, metaStore)
+    switches on cfg.MetaBackend. Heartbeater goroutine started post-mux
+    setup (Node ID = heartbeat.DefaultNodeID = hostname; Address =
+    cfg.Listen; Version = buildVersion()). ctx cancellation tied to
+    SIGTERM signal via the existing signal.NotifyContext block.
+  - Tests: server_test.go newTestServer now seeds Heartbeat=NewMemoryStore.
+    TestClusterStatusShape seeds one heartbeat then asserts status=healthy
+    + node_count=1 + backends=memory + uptime_sec >= 0. New
+    TestClusterStatusEmptyHeartbeatsUnhealthy covers the empty-table case.
+    New TestClusterNodesReturnsHeartbeats covers the populated-list case
+    (status=healthy, uptime ~7200 s for a synthetic 2h-old node, workers
+    + leader_for serialized as empty arrays not null).
+  - auth_test.go newAuthServer also moved to Config-struct constructor.
+- React side:
+  - web/src/api/cluster.ts: ClusterStatus tightened (status union) +
+    new fields required (uptime_sec, node_count, node_count_healthy,
+    meta_backend, data_backend). Added ClusterNode + ClusterNodesResponse
+    types + fetchClusterNodes wrapper.
+  - web/src/pages/Overview.tsx (rewritten): useClusterOverview hook polls
+    Promise.all([fetchClusterStatus, fetchClusterNodes]) every 5 s.
+    HeroCard (cluster name + status badge + 'X of Y nodes healthy' summary
+    + 4-up grid of version / uptime / nodes ratio / started-at). Backend
+    chips (Database icon for meta, Server icon for data) below the hero.
+    NodesTable (sortable: unhealthy first then degraded then healthy then
+    by id; cells: node, address, version, uptime, status badge, workers
+    chips, leader_for chips). Empty-state info banner when nodes==[].
+    Error banner across the top when fetch fails. Skeleton rows during
+    initial load.
+  - StatusBadge + ChipList + formatUptime helpers inline in Overview.tsx
+    (small enough to not warrant a shared widgets module yet).
+- Files changed:
+  - internal/heartbeat/{heartbeat.go, memory.go, cassandra.go, heartbeat_test.go} (new)
+  - internal/meta/cassandra/schema.go (cluster_nodes DDL)
+  - internal/adminapi/{server.go, types.go, cluster.go, openapi.yaml,
+    server_test.go, auth_test.go}
+  - cmd/strata-gateway/main.go
+  - web/src/api/cluster.ts
+  - web/src/pages/Overview.tsx
+- Quality checks:
+  - go vet ./... clean
+  - go test ./... clean (heartbeat: 4 tests, adminapi: 21 tests
+    [19 prior + 2 new], plus root + auth + leader + lifecycle + meta/memory
+    + s3api unchanged).
+  - go build ./... clean
+  - cd web && pnpm run typecheck clean
+  - cd web && pnpm run build clean
+  - Bundle: 308 KiB raw / 98.6 KiB gzipped JS + 32.2 KiB raw / 6.4 KiB
+    gzipped CSS (was 96.4 KiB JS at US-005; +2.2 KiB for Overview page).
+    Total ~105 KiB gzipped. Budget ≤500 KiB ✅.
+  - Runtime smoke on :9995 with STRATA_AUTH_MODE=required +
+    STRATA_STATIC_CREDENTIALS=test:test:owner +
+    STRATA_CLUSTER_NAME=ralph-overview +
+    STRATA_CONSOLE_JWT_SECRET=$(openssl rand -hex 32):
+      /admin/v1/auth/login → 200 + Set-Cookie
+      /admin/v1/cluster/status w/ cookie → {status:'healthy', version:'dev',
+        started_at:..., uptime_sec:81, cluster_name:'ralph-overview',
+        node_count:1, node_count_healthy:1, meta_backend:'memory',
+        data_backend:'memory'}
+      /admin/v1/cluster/nodes w/ cookie → {nodes:[{id:'<host>',
+        address:':9995', version:'dev', started_at:..., uptime_sec:81,
+        status:'healthy', workers:[], leader_for:[],
+        last_heartbeat:...}]}  ← heartbeat goroutine wrote within 1s of
+        startup
+      /console/ → 200 (regression-clean)
+- Browser MCP unavailable; full Playwright run scheduled for US-012
+  (login → overview → nodes table screenshot → buckets list → logout).
+- **Learnings for future iterations:**
+  - adminapi.New is now a Config-struct constructor. NEVER reorder
+    Config fields — call sites are positional in spirit (composite
+    literal) but Go composite literals tolerate field reorder. Adding
+    a field is non-breaking; renaming or removing is.
+  - heartbeat.Store interface was put in its own package (not
+    internal/meta) so the cassandra store can avoid pulling the entire
+    meta package as a dependency; the table DDL still ships in
+    internal/meta/cassandra/schema.go because that's the central
+    bootstrap path. Two-package split is intentional — keep it.
+  - gocql nil set<text> is encoded as a tombstone in INSERT, which
+    can race with TTL eviction in some cluster topologies and silently
+    drop the row. Always pass empty slice (nilToEmpty helper). This
+    bit me on a previous Cassandra service.
+  - Status derivation should NOT include the local-replica fallback
+    ("we know we're up so status=healthy") because then a Cassandra
+    table outage looks healthy. Honest "unhealthy" + the empty-state
+    info banner on the UI is the right shape.
+  - For the React polling pattern: useEffect with let cancelled = false
+    + setInterval. Inside the setInterval callback, await Promise.all
+    then setState only if !cancelled. The cleanup return clears both
+    cancelled and the interval. Don't try to cancel in-flight fetches
+    via AbortController for Phase 1 — adds bytes for marginal benefit.
+    US-008 swaps the whole thing for useQuery anyway.
+  - Sortable nodes table uses a numeric `nodeOrder()` that maps status
+    enum → rank (0=unhealthy, 1=degraded, 2=healthy, 3=unknown). Pure
+    JS sort + localeCompare for the tie-breaker. No table-sort library
+    needed; if column-click sorting lands later (US-010 buckets list),
+    that's the right time to introduce one.
+  - Tailwind colour shorthand on Badge: passing an explicit className
+    with bg-emerald-500/15 etc. layers cleanly over the shadcn outline
+    variant. The status colour palette is encoded inline in
+    statusVariant() — three colours, three callers, fine to inline; if
+    a fourth surface uses it (US-007 widgets, US-009 metrics), extract
+    to shared utility.
+  - heartbeat.DefaultNodeID = STRATA_NODE_ID env > os.Hostname() >
+    'strata'. The override is important for k8s pod deployments where
+    hostnames are pod names — set NODE_ID to the pod name explicitly
+    via downward API to keep node IDs stable across rolling deployments
+    (otherwise rolling out 5 pods generates 5 fresh node_ids per
+    rollout, so the table looks like 10+ nodes for ~30s).
+  - cluster_nodes table has default_time_to_live=30 — Cassandra will
+    auto-evict via tombstone every 30s. That's fine for low-cardinality
+    cluster topology (≤100 nodes). Don't put high-churn rows here;
+    LeveledCompactionStrategy + tombstones don't mix well at scale.
+  - Server.MetaBackend / DataBackend are pure display strings sourced
+    from cfg.{Meta,Data}Backend at startup. They get echoed back into
+    /cluster/status::{meta,data}_backend. Adding a new backend just
+    needs a new case in main.buildHeartbeatStore + the schema enum in
+    openapi.yaml — no other adminapi changes required.
+  - The test seeding heartbeat directly (s.Heartbeat.WriteHeartbeat)
+    is the right pattern. Bypasses the Heartbeater goroutine and the
+    interval timing — tests stay deterministic. New cluster-related
+    handlers should use the same pattern.
+---
+
+## 2026-05-02 - US-008
+- TanStack Query 5 wired end-to-end + global error toast pipeline.
+  All previously-hand-rolled useEffect+setInterval polling loops
+  migrated to useQuery; the page no longer blanks-out on intermittent
+  network errors.
+- Files changed:
+  - web/package.json + web/pnpm-lock.yaml — added
+    @tanstack/react-query@5.62.7 (deps) +
+    @tanstack/react-query-devtools@5.62.7 (devDeps).
+  - web/src/lib/query.ts (new) — queryClient (staleTime 5_000,
+    refetchInterval 5_000, refetchOnWindowFocus true, retry 1) +
+    queryKeys map + StrataQueryMeta module-augmentation +
+    QueryCache.onError → showToast pipeline with per-key 30 s throttle
+    + a 'Retry' ToastAction that calls
+    queryClient.invalidateQueries({queryKey}).
+  - web/src/lib/toast-store.ts (new) — useSyncExternalStore-backed
+    module-level toast store (showToast, dismissToast, useToasts).
+    Module-level (not React context) so non-React modules like the
+    QueryCache onError handler can dispatch toasts.
+  - web/src/components/toaster.tsx (new) — mounts shadcn ToastProvider
+    + ToastViewport, renders one <Toast> per record from useToasts(),
+    handles ToastAction click + onOpenChange dismiss.
+  - web/src/api/client.ts (new) — aggregated re-export of
+    cluster/widgets/auth wrappers + new typed wrappers fetchBucketsList,
+    fetchBucket, fetchObjects, fetchMetricsTimeseries (placeholders
+    for US-009/010/011 — endpoints already stubbed in US-003).
+  - web/src/vite-env.d.ts (new) — /// <reference types="vite/client" />
+    so import.meta.env.DEV resolves under tsc.
+  - web/src/main.tsx — wraps <App /> in
+    <QueryClientProvider client={queryClient}> + mounts <Toaster />
+    inside AuthProvider; ReactQueryDevtools lazy-loaded only in dev
+    (import.meta.env.DEV gate + React.lazy dynamic import → tree-shaken
+    from prod).
+  - web/src/components/auth-provider.tsx — whoami probe migrated to
+    useQuery (staleTime 60_000, refetchInterval false, retry 0,
+    meta.silent=true). Login/logout call qc.setQueryData on
+    queryKeys.auth.whoami so AuthState stays in sync without an extra
+    round trip; logout also calls qc.removeQueries() to evict
+    per-session caches before re-seeding null whoami.
+  - web/src/components/layout/AppShell.tsx — top-bar cluster name now
+    via useQuery({queryKey:queryKeys.cluster.status,
+    queryFn:fetchClusterStatus, meta:{label:'cluster status'}}). Stale
+    bespoke useClusterStatus hook deleted.
+  - web/src/pages/Overview.tsx — useQuery for status + nodes; inline
+    error banner only when no cached data, otherwise toast surfaces
+    transient failures. POLL_INTERVAL_MS removed (handled by global
+    queryClient default).
+  - web/src/components/overview/TopWidgets.tsx — BucketTab/ConsumerTab
+    now wrap useQuery({queryKey:queryKeys.{buckets,consumers}.top(by,10),
+    queryFn:() => fetch...(by,10), meta:{label:`top X (by)`}}). Stale
+    useTopBuckets/useTopConsumers state-machine hooks deleted.
+  - web/src/pages/Login.tsx — import path swapped @/api/auth →
+    @/api/client (single API surface).
+- Quality checks:
+  - pnpm typecheck clean (only fix needed: vite-env.d.ts for
+    import.meta.env types).
+  - pnpm build clean — bundle 367.4 KiB raw / 115.8 KiB gzipped JS +
+    32.6 KiB raw / 6.5 KiB gzipped CSS (was 100.6 KiB JS at US-007;
+    +15.2 KiB for tanstack/react-query + global toast plumbing). Total
+    ~122 KiB gzipped, well under 500 KiB budget.
+  - go vet ./... clean.
+  - go test ./... clean (root + adminapi + auth + heartbeat + leader +
+    lifecycle + meta/memory + promclient + s3api).
+  - go build ./... clean.
+  - Runtime smoke on :9989 with STRATA_AUTH_MODE=required +
+    STRATA_STATIC_CREDENTIALS=test:test:owner +
+    STRATA_CONSOLE_JWT_SECRET=$(openssl rand -hex 32) +
+    STRATA_CLUSTER_NAME=ralph-us008:
+      /admin/v1/auth/login (test:test) → 200 + Set-Cookie
+        strata_session=...
+      /admin/v1/cluster/status w/ cookie → 200 {status:'healthy',
+        version:'dev', uptime_sec:2, cluster_name:'ralph-us008',
+        node_count:1, node_count_healthy:1, meta_backend:'memory',
+        data_backend:'memory'}.
+      /admin/v1/cluster/nodes w/ cookie → 1 node row (local hostname).
+      /admin/v1/buckets/top?by=size&limit=5 w/ cookie → empty +
+        metrics_available:false.
+      /admin/v1/consumers/top?by=requests&limit=5 w/ cookie → empty +
+        metrics_available:false.
+      /admin/v1/auth/whoami w/ cookie → 200 {access_key:'test',
+        expires_at:...}.
+      /console/ → 200 (regression-clean).
+- Browser MCP unavailable this iteration; full Playwright run is
+  scheduled for US-012 (login → overview → tab switch → buckets list
+  → bucket detail → logout critical path; assert toast appears with
+  Retry button when /admin/v1/* returns 5xx).
+- **Learnings for future iterations:**
+  - QueryCache.onError is the right place to centralise error UX.
+    Per-component try/catch loops are the wrong place — once you have
+    multiple polling queries, you'll re-implement the same error toast
+    3+ times. Make the global handler opt-in via meta.silent=true for
+    queries that shouldn't toast (auth probes, anything where 401 is
+    a normal control-flow signal).
+  - Throttle the global error toast per-query-key. Without it, a
+    wedged endpoint at 5 s refetchInterval × retry=1 will spam two
+    toasts every 10 s — instant user rage. 30 s throttle window is a
+    reasonable balance (still tells the user something is wrong, but
+    doesn't drown them).
+  - Toast store as a module-level useSyncExternalStore (not a React
+    context). Reason: the QueryCache onError handler runs OUTSIDE the
+    React tree, and needs to dispatch toasts. A context-based toast
+    store would force the queryClient to live inside React and have
+    a hook to access showToast — circular. Module-level store
+    side-steps this cleanly.
+  - meta.label on every useQuery. Without it the global error toast
+    shows queryKey JSON in the title — opaque to the user. Keep the
+    label short ('cluster status', 'top buckets (size)'), it'll
+    appear in the toast title 'Failed to load <label>'.
+  - Aggregate API client at web/src/api/client.ts. Re-exports per-
+    resource files + adds wrappers for endpoints not yet implemented
+    so pages can write `import { fetchBucket } from '@/api/client'`
+    today and the wrapper just lights up when the backend lands. Saves
+    a round of import-path churn per story.
+  - vite-env.d.ts triple-slash reference is mandatory the first time
+    any source file reads import.meta.env.DEV — without it tsc throws
+    'Property env does not exist on type ImportMeta'. Add it once
+    early in the project rather than per-story.
+  - AuthProvider migration to useQuery is subtle: the whoami probe
+    must NOT trigger the global error toast on 401 (which is the
+    normal "you're logged out" signal). Set meta.silent=true. retry=0
+    so a 401 doesn't double-fetch. refetchInterval=false because the
+    global default of 5 s would be wasteful for an auth probe.
+  - login/logout: use qc.setQueryData(queryKeys.auth.whoami, value)
+    to seed the cache directly instead of refetching whoami. Avoids
+    a flash of 'Checking session…' (RequireAuth) between login
+    success and the next redirect. Logout MUST call qc.removeQueries()
+    before re-seeding null whoami, otherwise the next user signing in
+    will briefly see the prior user's bucket/consumer data when the
+    UI mounts before the new whoami completes.
+  - Page error UX: only show inline error banner when there is no
+    cached data. Once useQuery has cached data, transient refetch
+    errors are surfaced via the global toast — keeping the existing
+    UI mounted is the whole point. Branching on
+    `!q.data && q.error instanceof Error` keeps both signals: the
+    blank-page-on-first-load failure case AND the
+    background-refetch-failed-but-keep-the-table-visible case.
+  - Devtools lazy-load: `import.meta.env.DEV ? lazy(() =>
+    import('@tanstack/react-query-devtools').then(...)) : null`. Vite
+    treats the dynamic import behind the false branch as dead code
+    and drops the entire devtools bundle from prod. Verified via
+    `vite build` — JS bundle stayed 115 KiB gzipped (devtools alone
+    are ~30 KiB).
+  - Co-locate queryKeys: web/src/lib/query.ts owns the central
+    queryKeys map. Pages import { queryKeys } and call
+    queryKeys.cluster.status (constant array) or queryKeys.buckets.top(by, limit)
+    (factory function). Centralising stops accidental key drift —
+    mutations and invalidateQueries see the same key as the original
+    useQuery.
+---
+
+## 2026-05-02 - US-009
+- Cluster metrics dashboard wired end-to-end: 4 charts (request rate,
+  latency p50/p95/p99 layered, error rate, bytes in/out layered) on
+  /console/metrics with a 15m/1h/6h/24h/7d segmented range picker and
+  per-range refetchInterval. recharts 2.15 added (lazy-loaded so the
+  recharts chunk only ships when an operator visits /metrics).
+- Go side:
+  - internal/adminapi/metrics.go fleshed out: metricSpecs map keyed by
+    public metric name → PromQL expression with __WINDOW__ token
+    replaced by promDurationString(step*4) at request time. Supported
+    metrics: request_rate, latency_p50, latency_p95, latency_p99,
+    error_rate, bytes_in, bytes_out. Range parser
+    parseDurationParam supports time.ParseDuration plus a 'd' suffix
+    shim for 7d (stdlib rejects 'd'). Default step per range
+    (rangeStepDefaults): 15m→30s, 1h→1m, 6h→5m, 24h→15m, 7d→1h.
+    Endpoint calls promclient.QueryRange and projects the result into
+    {series:[{name, points:[[epoch_ms,value]]}], metrics_available}.
+    Degrades gracefully: 200 + empty + metrics_available=false when
+    STRATA_PROMETHEUS_URL is unset OR upstream non-2xx (matches the
+    buckets/top + consumers/top widget contract). Bad metric → 400
+    with the supported list. Bad/missing range → 400. Bad step → 400.
+  - internal/adminapi/types.go: MetricsTimeseriesResponse gained
+    MetricsAvailable bool (json: metrics_available).
+  - internal/adminapi/openapi.yaml: MetricsTimeseries schema gained
+    metrics_available (required) with description.
+  - internal/adminapi/metrics_test.go (12 new tests): require-metric,
+    unknown-metric (asserts the 400 body lists supported metrics),
+    require-range, bad-range, bad-step, without-prom returns
+    metrics_available=false + non-nil empty series, with-prom
+    request_rate (asserts expr contains rate(strata_http_requests_total[)
+    + 6 points + epoch-ms conversion + 2.5 → 2.5), with-prom
+    latency_p95 (asserts histogram_quantile(0.95...) + _bucket +
+    series.name='p95'), with-prom error_rate (asserts code=~"5..)
+    pattern), upstream 500 → 200 + metrics_available=false (graceful
+    degradation), 7d+step=1h → step query param = "3600", 24h
+    default step → "900" (15min), parseDurationParam("7d") = 168h,
+    URL-escape roundtrip sanity check on the PromQL with code=~"5.."
+    pattern.
+  - internal/adminapi/server_test.go: TestMetricsTimeseriesShape now
+    passes ?metric=request_rate&range=15m and asserts
+    metrics_available=false; TestRouteCoverageMatchesPRD path bumped
+    to include the same params.
+- React side:
+  - web/src/pages/Metrics.tsx rewritten end-to-end. RangePicker
+    segmented control → useState<RangeKey>('1h'). useTimeseries hook
+    wraps useQuery with the canonical queryKeys.metrics.timeseries
+    key + per-range refetchInterval (5s for ≤6h, 30s for 24h, 5min
+    for 7d) + staleTime=refetchInterval/2 + meta:{label:`metrics ${m}`}
+    so the global toast surfaces transient failures.
+  - 4 chart cards in a 2×2 grid (xl:grid-cols-2):
+    RequestRateChart (AreaChart, blue gradient), LatencyChart
+    (LineChart layering p50/p95/p99 — green/amber/red), ErrorRateChart
+    (AreaChart in red, % formatted), BytesChart (LineChart layering
+    bytes_in/bytes_out, KiB/MiB/GiB-scaled). Layered charts call
+    useTimeseries 3× (latency) or 2× (bytes) and run mergePoints to
+    fold per-metric responses into a ChartPoint[] keyed by ts so
+    recharts renders them on the same X axis.
+  - MetricsUnavailable banner appears inside each chart when
+    q.data.metrics_available=false (after first response). Skeleton
+    placeholder before first response. "No data in this window" empty
+    state when prom is reachable but the query returned nothing.
+  - Lazy-route: web/src/App.tsx now imports MetricsPage via
+    React.lazy + Suspense fallback (Skeleton). recharts chunk
+    (~110 KiB gzipped) ships only on /metrics navigation; home-page
+    initial bundle stays small.
+- Files changed:
+  - internal/adminapi/{metrics.go (rewrite), types.go (+MetricsAvailable),
+    openapi.yaml (+metrics_available on MetricsTimeseries schema),
+    metrics_test.go (new — 12 tests),
+    server_test.go (require params on metrics shape + route coverage)}
+  - web/package.json + web/pnpm-lock.yaml (recharts 2.15.0)
+  - web/src/pages/Metrics.tsx (rewrite)
+  - web/src/App.tsx (lazy-load Metrics route)
+- Quality checks:
+  - go vet ./... clean
+  - go test ./... clean (adminapi: 41 [29 prior + 12 new])
+  - go build ./... clean
+  - cd web && pnpm typecheck clean
+  - cd web && pnpm build clean
+  - Bundle: dist/index 116.4 KiB gzipped JS (was 115.8 KiB at US-008;
+    +0.6 KiB for the lazy-route wiring); dist/Metrics 109.6 KiB
+    gzipped JS (loaded on demand). CSS 6.5 KiB gzipped unchanged.
+    Per-page initial under the ≤500 KiB budget.
+  - Runtime smoke on :9988 with mock Prom on :9991 (matrix stub
+    returning 6 points per query, expression-aware values for each
+    metric). With prom: every supported metric returns 6-point
+    series + metrics_available=true. Negative paths: bad metric=cpu
+    → 400 'unknown metric "cpu"; supported: bytes_in, bytes_out,
+    error_rate, latency_p50, latency_p95, latency_p99,
+    request_rate'; missing range → 400 'range is required';
+    bad range=banana → 400 'invalid range'; anonymous → 401.
+    Without STRATA_PROMETHEUS_URL: /metrics/timeseries?metric=
+    request_rate&range=1h → 200 {series:[], metrics_available:false}.
+    /console/ + SPA-fallback /console/metrics → 200 (regression-clean).
+- Browser MCP unavailable this iteration; full Playwright run
+  scheduled for US-012 (login → metrics dashboard renders 4 charts
+  with axis labels + at least one data point → range switch fires
+  request with the new range param).
+- **Learnings for future iterations:**
+  - PromQL rejects "7d" as a range literal in some versions, but
+    accepts "7d" as a query duration arg. The handler does its
+    OWN parseDurationParam (with 'd' shim) so the user-facing range
+    param matches the spec wording, then converts to a Prometheus-
+    safe step using promDurationString.
+  - histogram_quantile inside `sum by (le) (rate(...[W]))` is the
+    standard pattern. Without the `sum by (le)` wrapper, the
+    quantile is computed per-series-set which yields nonsense
+    when the histogram is fanned across multiple labels (method).
+  - error_rate via `sum(rate(...{code=~"5.."})) / clamp_min(sum(rate(...)),1)`
+    avoids divide-by-zero when there's no traffic in the window.
+    Returns 0 instead of NaN. recharts will silently drop NaN
+    points but the JSON shape becomes ugly (NaN is not valid
+    JSON; encoders emit "null" or fail) — the clamp_min guard
+    is load-bearing.
+  - Lazy-loading via React.lazy + Suspense at the route level
+    cuts the home-page bundle by the size of recharts. Don't
+    code-split inside a single page (e.g. lazy-loading a chart
+    component) — Suspense boundaries are easier to reason about
+    at the route boundary.
+  - rangeOptions is exported via lookup-by-key so the component
+    only stores the string key in state. This keeps the URL-
+    serialisable shape simple for a future "remember last range"
+    feature without rewriting the state machine.
+  - mergePoints folds multiple responses by timestamp into a
+    single ChartPoint[]. Recharts renders gaps when a series
+    is missing a value at a given ts — connectNulls=true on
+    the Line series eliminates the visual gap (we want a
+    continuous line even if p99 is missing one tick).
+  - Step query param is encoded as plain seconds by promclient
+    (e.g. "900" not "15m"); the step query string format is
+    flexible upstream, but tests should match what the client
+    actually sends. capturedStep="900" not "15m" in tests.
+  - Tests that capture upstream Prom calls should use a
+    non-greedy match strategy: assert on substring presence
+    (Contains "rate(strata_http_requests_total[") rather than
+    full equality — the rate window changes with step which
+    changes with range, so equality is too brittle.
+  - Recharts isAnimationActive=false everywhere on a polling
+    dashboard. Default animation is jarring when each refetch
+    re-animates from 0.
+  - recharts Type=number + scale=time + domain=['dataMin',
+    'dataMax'] gives accurate time-spaced X axis when data
+    points are not evenly spaced — without it recharts spaces
+    them by index.
+
+## 2026-05-02 - US-010
+- Buckets list page wired end-to-end. New /admin/v1/buckets GET handler
+  with query/sort/order/page/page_size; React /console/buckets toolbar +
+  sortable table + 50-row pagination + debounced search + refresh.
+- Files changed:
+  - internal/adminapi/server.go — Server + Config gain Region field
+    (single-region today, sourced from cfg.RegionName).
+  - internal/adminapi/buckets.go — handleBucketsList rewrite with
+    sortBucketsListEntries + cmpString + cmpInt64 + parsePositive +
+    parseRange. Named type bucketsListEntry pairs *meta.Bucket with the
+    partial summary so sort/paginate keep the bucket pointer attached.
+  - internal/adminapi/openapi.yaml — /buckets parameters now enumerate
+    sort enum + asc/desc + defaults; description block documents
+    sort default 'created' and order default ASC for name/owner else DESC.
+  - internal/adminapi/server_test.go — newTestServer sets
+    Region:'test-region'.
+  - internal/adminapi/buckets_list_test.go (new) — 10 tests covering
+    default sort, name asc, owner desc tie-break, size desc, object_count
+    asc, query case-insensitive, pagination + page overflow, page_size
+    clamp, bad sort/order 400, empty store.
+  - cmd/strata-gateway/main.go — passes cfg.RegionName as adminapi.Config
+    Region.
+  - web/src/pages/Buckets.tsx — full page rewrite with toolbar (debounced
+    search + refresh), sortable column headers (Name, Owner, Region
+    (non-sortable), Created, Size, Object count), 50-row pagination
+    (prev/next + PageNumbers compact picker windowed ±2 with
+    first/last sentinels + ellipses), keepPreviousData on the useQuery
+    so pagination doesn't blank-out the table, name → /buckets/{name}
+    Link (US-011), empty state with disabled 'Create your first bucket'
+    Phase 2 placeholder.
+- **Learnings for future iterations:**
+  - Single-region: BucketSummary.region is sourced from Server.Region
+    (cfg.RegionName) — NOT per-bucket. meta.Bucket has no Region field;
+    Strata is single-region today and Phase 2 may carry a per-bucket
+    region if multi-region lands. Echoing the gateway's region is the
+    right Phase-1 read.
+  - Sort tie-break MUST stay direction-independent. The natural
+    'flip the comparator on desc' approach reverses the secondary key
+    too — so two equal-on-primary rows swap. Pattern: comparator
+    returns int (-1/0/1), negate on desc, fall back to a fixed
+    secondary key (Name ASC) only when primary returns 0. See
+    sortBucketsListEntries in buckets.go.
+  - Sort by 'created' must use bucket.CreatedAt UnixNano, NOT the
+    seconds-truncated summary.CreatedAt. Otherwise buckets created
+    within the same wall-clock second sort by the secondary tie-break
+    instead of true creation order. The wire format stays seconds
+    (consistent with started_at) — internal sort uses full precision
+    via the bucket pointer kept alongside each entry.
+  - Anonymous Go struct types in a func parameter must match
+    EXACTLY the anonymous struct in the caller. A locally-declared
+    `type entry struct{...}` is a NAMED type and won't satisfy the
+    anonymous-struct param. Promote the helper struct to a
+    package-level named type whenever it crosses a function boundary.
+  - parseRange + parsePositive are general adminapi helpers — re-use
+    them for the next paginated endpoint (US-011 ListObjects page_size
+    arg) instead of cloning strconv.Atoi clamp logic.
+  - keepPreviousData on the useQuery pattern is essential for
+    paginated tables: pagination/sort/refetch keeps the previous page
+    visible until the new payload lands (no blank-out flash). Pair
+    with `q.isFetching && !showSkeleton` to surface 'Refreshing…'
+    in the card description.
+  - Page reset on filter/sort change: useEffect on (debouncedSearch,
+    sort, order) → setPage(1). Without this, switching from a 5-page
+    'media' query back to 'all buckets' leaves you stranded on page 5
+    with maybe no rows.
+  - Search debounce: useDebounced hook (300 ms) AND a stable
+    useMemo-built params object so the queryKey + queryFn closure
+    don't churn on every keystroke. The fetch only fires when the
+    debounced value changes.
+  - shadcn/ui Input has no built-in icon slot — wrap in a relative
+    div with absolute-positioned Lucide icon (left-2 top-1/2
+    -translate-y-1/2 pointer-events-none) and pl-8 on the Input.
+    Same pattern will work for the object-browser filter (US-011).
+  - Refresh button invalidates the WHOLE ['buckets', 'list'] subtree
+    (queryClient.invalidateQueries({queryKey:['buckets','list']})) —
+    not just the current page key — so pages outside the current
+    view refresh too.
+---
+
+## 2026-05-02 - US-011 - Bucket detail page (read-only object browser)
+
+- Implemented BucketDetail Go endpoint + read-only object browser:
+  - internal/adminapi/buckets.go handleBucketGet → meta.Store.GetBucket;
+    404 NoSuchBucket on miss; otherwise BucketDetail{name, owner, region,
+    created_at, versioning, object_lock=false (Phase 1 stub), size_bytes,
+    object_count} with size/count from bounded ListObjects walk.
+  - versioningLabel() maps meta-store enum (Disabled|Enabled|Suspended) to
+    operator-facing label (Off|Enabled|Suspended).
+  - handleObjectsList parses prefix/marker/delimiter (default '/')/page_size
+    (default 100, max 1000); calls Meta.ListObjects; maps res.Objects to
+    ObjectSummary; passes through CommonPrefixes/NextMarker/Truncated.
+  - 404 NoSuchBucket when bucket missing — was 200 stub before this story.
+- React side:
+  - web/src/api/client.ts BucketDetail: versioning + object_lock + size_bytes
+    + object_count are now required (were optional during the stub era).
+  - new web/src/pages/BucketDetail.tsx: header + breadcrumbs + filter +
+    table with folder/file icons + Sheet object-detail panel with disabled
+    Download/Delete (Phase 2). useSearchParams ?prefix= for URL persistence;
+    markerStack[] continuation pagination; debounce 300ms on filter; folder
+    clicks navigate, file clicks open Sheet.
+  - App.tsx: new /buckets/:name route nested under RequireAuth + AppShell.
+- types.go gained BucketDetail struct.
+- OpenAPI 3.1 spec: new BucketDetail schema; /buckets/{bucket} now references
+  it; /buckets/{bucket}/objects gained 404 + default delimiter='/' + default
+  page_size=100.
+- Tests: bucket_detail_test.go (7 new); TestObjectsListShape +
+  TestRouteCoverageMatchesPRD updated to seed buckets since the handler now
+  requires bucket existence.
+- Files changed:
+  - internal/adminapi/buckets.go (handlers + errors import)
+  - internal/adminapi/types.go (BucketDetail)
+  - internal/adminapi/openapi.yaml (BucketDetail + /buckets/{bucket}/objects)
+  - internal/adminapi/server_test.go (seed data for stubs that now require it)
+  - internal/adminapi/bucket_detail_test.go (new, 7 tests)
+  - web/src/api/client.ts (BucketDetail tightened)
+  - web/src/pages/BucketDetail.tsx (new)
+  - web/src/App.tsx (route)
+  - scripts/ralph/prd.json (passes:true + notes)
+- **Learnings for future iterations:**
+  - Memory store NextMarker semantics: marker is exclusive (`k <= opts.Marker`
+    skips), but res.NextMarker is set to the FIRST UNRETURNED key. Resuming
+    with `marker=NextMarker` therefore SKIPS that key — cassandra and tikv
+    likely walk the same way. Tests must assert "first key strictly greater
+    than the prior marker" rather than "first key equal to NextMarker".
+  - Path params: go 1.22+ ServeMux exposes `r.PathValue("bucket")` for
+    `/admin/v1/buckets/{bucket}` patterns. No third-party router needed.
+  - Existing 200-stub tests have to be revisited as stories fill them in.
+    handleObjectsList went from "always 200 with empty arrays" to
+    "404 when bucket missing"; TestObjectsListShape +
+    TestRouteCoverageMatchesPRD broke until the bucket was seeded.
+  - bucket-level ObjectLock state is not on meta.Bucket today. Phase 1 hard-
+    codes object_lock=false in BucketDetail; if/when Phase 2 adds the field,
+    update versioningLabel-style mapping in handleBucketGet.
+  - Empty `delimiter=` query is meaningful (flat listing) — don't collapse
+    empty/missing into the same default. Use `q.Has("delimiter")` to
+    distinguish the explicit-empty case from the absent case.
+  - Sheet object-detail panel pattern: open=Boolean(state), onOpenChange
+    closes via setState(null). Trigger is a regular button with onClick.
+    No SheetTrigger required when controlling open via state.
+  - useSearchParams from react-router-dom v6: read with
+    searchParams.get('prefix'); write with setSearchParams({prefix: next})
+    or setSearchParams({}) to clear. Triggers a navigation, so pagination
+    state should reset via useEffect on prefix change.
+---
+
+## 2026-05-02 - US-012
+- Playwright e2e + critical-path tests + docs/ui.md + ROADMAP close-flip
+  shipped. Phase 1 web UI cycle is now complete end-to-end with browser
+  verification in CI.
+- Web side:
+  - @playwright/test@1.49.1 added as web devDep. New scripts:
+    `pnpm run e2e` (runs tests), `pnpm run e2e:install` (downloads chromium
+    + system deps).
+  - web/playwright.config.ts (new): chromium-only via devices['Desktop
+    Chrome'], single worker, baseURL http://127.0.0.1:9999, trace
+    retain-on-failure, screenshot only-on-failure. webServer command boots
+    `go run ./cmd/strata-gateway` from cwd:'..' with STRATA_LISTEN=:9999 +
+    STRATA_AUTH_MODE=off + STRATA_STATIC_CREDENTIALS=test:test:owner +
+    STRATA_CONSOLE_JWT_SECRET=00010203...1f (deterministic 32-byte hex for
+    repeatability) + STRATA_CLUSTER_NAME=strata-e2e + STRATA_NODE_ID=e2e-node;
+    url probe /console/, 180 s startup timeout, reuseExistingServer locally
+    only (CI always boots fresh). HTML report under web/playwright-report/,
+    already gitignored.
+  - web/e2e/critical-path.spec.ts (new, 4 tests): anonymous → /console/login
+    redirect; login(test/test) → /console (overview shows '1 of 1 nodes
+    healthy' + h1 'Cluster Overview' + cluster name 'strata-e2e' visible);
+    Buckets nav → /console/buckets renders + seeded bucket row link visible;
+    bucket row click → /console/buckets/<name> with h1=bucket name; UserMenu
+    → Sign out → /console/login + strata_session cookie cleared. beforeAll
+    seeds the bucket via Playwright's `request.put('/<bucket>')` (200 or 409
+    accepted). URL matchers use trailing-slash-tolerant regex
+    (/\\/console\\/?$/ etc.) because react-router basename strips the
+    trailing slash on the index route.
+- Go side: no production code changes needed for US-012.
+- CI side:
+  - .github/workflows/ci.yml gained an `e2e-ui` job after `e2e`: needs
+    web-build, downloads the web-dist artifact (so `go run` finds the
+    embed), pnpm install --frozen-lockfile, caches ~/.cache/ms-playwright
+    keyed on web/pnpm-lock.yaml, `pnpm exec playwright install --with-deps
+    chromium`, `pnpm exec playwright test`, uploads
+    web/playwright-report/ as e2e-ui-report on failure.
+- Docs:
+  - docs/ui.md (new): operator guide. Console-vs-aws-cli decision matrix;
+    first-login flow (seed STRATA_STATIC_CREDENTIALS, set
+    STRATA_CONSOLE_JWT_SECRET, optionally STRATA_CLUSTER_NAME +
+    STRATA_PROMETHEUS_URL, run `make run-memory`, open
+    http://localhost:9999/console/); required env vars table; ASCII
+    architecture diagram (Browser → /console/ static SPA + /admin/v1/* JSON
+    API → meta.Store + Prometheus client); Phase 1 page table; Phase 1 vs 2
+    vs 3 capability matrix; ops notes (bundle budget, polling cadence,
+    heartbeat lifecycle, label coverage, Phase 1 stub fields); local
+    Playwright run instructions.
+  - README.md How to run section gained 'Option 4: web console (read-only
+    operator UI)' with the make run-memory + open command + a one-paragraph
+    summary linking docs/ui.md. Variance from PRD AC: README only had 3
+    pre-existing options so this is the 4th, not a 6th — mechanically
+    equivalent intent (add one new option).
+  - ROADMAP.md gained ~~**P2 — Web UI — Foundation (Phase 1).**~~ — **Done.**
+    in the Operations & observability section, with the embed/admin-api/
+    auth/pages/heartbeat/TanStack/recharts/Playwright summary inline +
+    `(commit pending)` placeholder. Two new P3 stub entries added:
+    'P3 — Web UI — Phase 2 (admin)' and 'P3 — Web UI — Phase 3 (debug)'
+    pointing at tasks/prd-web-ui-admin.md and tasks/prd-web-ui-debug.md
+    (those PRDs do not exist yet — these are forward pointers per the AC).
+  - Variance: PRD AC mentioned 'CLAUDE.md Big-picture architecture diagram
+    updated' but no top-level CLAUDE.md exists in the repo (only
+    scripts/ralph/CLAUDE.md, the ralph agent prompt). The architecture
+    diagram instead lives in docs/ui.md.
+- Files changed:
+  - web/package.json (+ scripts e2e + e2e:install + devDep
+    @playwright/test 1.49.1)
+  - web/pnpm-lock.yaml (auto)
+  - web/playwright.config.ts (new)
+  - web/e2e/critical-path.spec.ts (new)
+  - .github/workflows/ci.yml (+ e2e-ui job)
+  - docs/ui.md (new)
+  - README.md (+ Option 4)
+  - ROADMAP.md (+ Done flip + 2 P3 entries)
+- Quality checks:
+  - cd web && pnpm typecheck clean (e2e/ outside tsconfig.app include
+    pattern, so specs don't get tsc'd from the app build).
+  - cd web && pnpm build clean — bundle 389.23 KiB raw / 121.13 KiB gzipped
+    JS + 33.76 KiB raw / 6.71 KiB gzipped CSS + Metrics chunk 401.90 KiB
+    raw / 109.44 KiB gzipped (lazy-loaded). Under 500 KiB per-page budget.
+  - cd web && pnpm exec playwright test → 4 passed in 2.2 s wall
+    (anon-redirect / overview / Buckets nav / Bucket detail / logout).
+  - go vet ./... clean; go test ./... clean (root + adminapi 58 + auth +
+    heartbeat + leader + lifecycle + meta/memory + promclient + s3api);
+    go build ./... clean.
+- Browser verification: the Playwright run IS the browser verification — no
+  separate browser-MCP step needed for this story.
+- **Learnings for future iterations:**
+  - Playwright config must point cwd to repo root (cwd: '..') so
+    `go run ./cmd/strata-gateway` resolves; the Go embed needs web/dist/ to
+    exist at compile time, so CI's e2e-ui job must download the web-dist
+    artifact before invoking go.
+  - shadcn CardTitle is a `<div>`, not an `<h*>`, so
+    `getByRole('heading', ...)` in Playwright will miss it. Use
+    `getByText(...)` for CardTitle text; only the page-level `<h1>` is
+    reachable via the heading role. If future stories want CardTitle to be
+    addressable by heading role, change the shadcn primitive globally
+    (it'll affect every page that uses it).
+  - react-router-dom BrowserRouter basename='/console' yields the index
+    URL '/console' WITHOUT a trailing slash (e.g. after navigating to '/').
+    Always use trailing-slash-tolerant regex (`/\/console\/?$/`) in
+    Playwright URL assertions.
+  - STRATA_AUTH_MODE=off + STRATA_STATIC_CREDENTIALS=test:test:owner is
+    the right combo for e2e: admin login validates against the creds store
+    regardless of S3 auth mode, so the spec can both log in AND seed
+    buckets via plain HTTP PUT without dragging SigV4 into the harness.
+    Switching to AUTH_MODE=required would force the spec to sign every
+    bucket-creation request — net negative for clarity.
+  - Playwright's `request` fixture inherits baseURL from `use.baseURL`, so
+    `request.put('/<bucket>')` resolves against the gateway port — useful
+    for any future fixture seeding (object PUTs, etc.).
+  - The webServer.url probe path matters: probe /console/ so Playwright
+    waits for the embed to be ready, not just the TCP socket. A bare /
+    probe would race the embed handler registration on slow boots.
+  - Playwright html-report retention: report is uploaded as artifact on
+    failure only (CI bandwidth + storage). Local runs always overwrite
+    web/playwright-report/ on each run. Both paths gitignored.
+  - When the docs say 'add a 6th option' but the README has 3, follow the
+    intent (add one new option) and note the variance — don't
+    artificially renumber existing options.
+  - When AC references files that don't exist (CLAUDE.md big-picture
+    diagram, tasks/prd-web-ui-admin.md, tasks/prd-web-ui-debug.md), put
+    the substantive content where it actually fits (docs/ui.md for the
+    diagram) and treat ROADMAP entries pointing at not-yet-written PRDs
+    as forward stubs (they're tracking pointers, not blockers).
+---

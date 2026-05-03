@@ -24,3 +24,12 @@ scripts/s3-tests/report/
 # python bytecode
 __pycache__/
 *.pyc
+
+# ralph wrapper bookkeeping (per-checkout state, not source)
+scripts/ralph/.last-branch
+web/node_modules/
+web/dist/*
+!web/dist/index.html
+web/playwright-report/
+web/test-results/
+web/*.tsbuildinfo

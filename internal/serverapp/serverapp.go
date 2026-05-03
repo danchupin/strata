@@ -10,13 +10,16 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"strings"
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	awskms "github.com/aws/aws-sdk-go-v2/service/kms"
 
+	strataconsole "github.com/danchupin/strata"
 	"github.com/danchupin/strata/cmd/strata/workers"
+	"github.com/danchupin/strata/internal/adminapi"
 	"github.com/danchupin/strata/internal/auth"
 	"github.com/danchupin/strata/internal/bucketstats"
 	"github.com/danchupin/strata/internal/config"
@@ -26,6 +29,7 @@ import (
 	datamem "github.com/danchupin/strata/internal/data/memory"
 	datarados "github.com/danchupin/strata/internal/data/rados"
 	"github.com/danchupin/strata/internal/health"
+	"github.com/danchupin/strata/internal/heartbeat"
 	"github.com/danchupin/strata/internal/leader"
 	"github.com/danchupin/strata/internal/logging"
 	"github.com/danchupin/strata/internal/meta"
@@ -34,6 +38,7 @@ import (
 	metatikv "github.com/danchupin/strata/internal/meta/tikv"
 	"github.com/danchupin/strata/internal/metrics"
 	strataotel "github.com/danchupin/strata/internal/otel"
+	"github.com/danchupin/strata/internal/promclient"
 	"github.com/danchupin/strata/internal/s3api"
 )
 
@@ -126,10 +131,34 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 
 	healthHandler := buildHealthHandler(metaStore, dataBackend)
 
+	jwtSecret, jwtSource := loadJWTSecret(logger)
+	logger.Info("admin jwt secret", "source", jwtSource)
+	clusterName := os.Getenv("STRATA_CLUSTER_NAME")
+	hbStore := buildHeartbeatStore(cfg, metaStore)
+	version := buildVersion()
+	prom := promclient.New(os.Getenv("STRATA_PROMETHEUS_URL"))
+	if !prom.Available() {
+		logger.Info("admin: STRATA_PROMETHEUS_URL unset; top-buckets/consumers + metrics dashboard will report metrics_available=false")
+	}
+	adminServer := adminapi.New(adminapi.Config{
+		Meta:        metaStore,
+		Creds:       multi,
+		Heartbeat:   hbStore,
+		Prom:        prom,
+		Version:     version,
+		ClusterName: clusterName,
+		Region:      cfg.RegionName,
+		MetaBackend: cfg.MetaBackend,
+		DataBackend: cfg.DataBackend,
+		JWTSecret:   jwtSecret,
+	})
+
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
 	mux.HandleFunc("/healthz", healthHandler.Healthz)
 	mux.HandleFunc("/readyz", healthHandler.Readyz)
+	mux.Handle("/console/", strataconsole.ConsoleHandler())
+	mux.Handle("/admin/v1/", adminServer.Handler())
 	auditTTL := auditRetention(logger)
 	auditHandler := s3api.NewAuditMiddleware(metaStore, auditTTL, apiHandler)
 	mux.Handle("/", strataotel.NewMiddleware(tracerProvider, logging.NewMiddleware(logger, metrics.ObserveHTTP(mw.Wrap(s3api.NewAccessLogMiddleware(metaStore, auditHandler), s3api.WriteAuthDenied)))))
@@ -164,6 +193,20 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 			logger.Warn("bucketstats", "error", err.Error())
 		}
 	}()
+
+	if hbStore != nil {
+		hb := &heartbeat.Heartbeater{
+			Store: hbStore,
+			Node: heartbeat.Node{
+				ID:        heartbeat.DefaultNodeID(),
+				Address:   cfg.Listen,
+				Version:   version,
+				StartedAt: time.Now().UTC(),
+				Workers:   workerNamesFromList(selected),
+			},
+		}
+		go hb.Run(ctx)
+	}
 
 	workerErr := make(chan error, 1)
 	if len(selected) > 0 {
@@ -391,6 +434,62 @@ func parseTiKVEndpoints(s string) []string {
 		if v := strings.TrimSpace(p); v != "" {
 			out = append(out, v)
 		}
+	}
+	return out
+}
+
+// loadJWTSecret returns the HS256 key used to sign /admin/v1 session cookies.
+// Production deployments MUST set STRATA_CONSOLE_JWT_SECRET (32 bytes hex);
+// when unset we generate an ephemeral random key and emit a WARN.
+func loadJWTSecret(logger *slog.Logger) ([]byte, string) {
+	if v := os.Getenv("STRATA_CONSOLE_JWT_SECRET"); v != "" {
+		return adminapi.DecodeSecret(v), "STRATA_CONSOLE_JWT_SECRET"
+	}
+	b, err := adminapi.GenerateSecret()
+	if err != nil {
+		logger.Warn("admin: generate jwt secret", "error", err.Error())
+		return nil, "ephemeral-error"
+	}
+	logger.Warn("admin: STRATA_CONSOLE_JWT_SECRET unset; generated ephemeral 32-byte secret. Sessions invalidate on restart. Set the env explicitly in production.")
+	return b, "ephemeral"
+}
+
+// buildVersion returns the VCS revision baked in by `go build` (or "dev"
+// when run without VCS metadata, e.g. in tests).
+func buildVersion() string {
+	if v := os.Getenv("STRATA_VERSION"); v != "" {
+		return v
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range info.Settings {
+			if s.Key == "vcs.revision" && s.Value != "" {
+				return s.Value
+			}
+		}
+	}
+	return "dev"
+}
+
+// buildHeartbeatStore returns a heartbeat.Store backed by the same backend
+// as metaStore. Returns nil for backends without a heartbeat implementation
+// (currently TiKV) — the admin handlers degrade gracefully.
+func buildHeartbeatStore(cfg *config.Config, metaStore meta.Store) heartbeat.Store {
+	switch cfg.MetaBackend {
+	case "memory":
+		return heartbeat.NewMemoryStore()
+	case "cassandra":
+		if cas, ok := metaStore.(*metacassandra.Store); ok {
+			return &heartbeat.CassandraStore{S: cas.Session()}
+		}
+	}
+	return nil
+}
+
+// workerNamesFromList extracts worker names for the heartbeat row.
+func workerNamesFromList(ws []workers.Worker) []string {
+	out := make([]string, 0, len(ws))
+	for _, w := range ws {
+		out = append(out, w.Name)
 	}
 	return out
 }
