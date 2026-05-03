@@ -14,10 +14,12 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/danchupin/strata/internal/auth"
 	"github.com/danchupin/strata/internal/heartbeat"
+	"github.com/danchupin/strata/internal/leader"
 	"github.com/danchupin/strata/internal/meta"
 	"github.com/danchupin/strata/internal/promclient"
 )
@@ -28,6 +30,7 @@ type Server struct {
 	Creds       auth.CredentialsStore
 	Heartbeat   heartbeat.Store
 	Prom        *promclient.Client
+	Locker      leader.Locker
 	Version     string
 	ClusterName string
 	Region      string
@@ -36,6 +39,12 @@ type Server struct {
 	Started     time.Time
 	JWTSecret   []byte
 	Logger      *log.Logger
+
+	// jobsMu guards background-job goroutines. Currently only the
+	// force-empty drain (US-002) registers here; we cancel the goroutine
+	// on Server shutdown so a graceful drain doesn't outlive the gateway.
+	jobsMu sync.Mutex
+	jobsWG sync.WaitGroup
 }
 
 // Config carries everything New needs to build a Server. Required fields:
@@ -49,6 +58,11 @@ type Config struct {
 	Creds       auth.CredentialsStore
 	Heartbeat   heartbeat.Store
 	Prom        *promclient.Client
+	// Locker carries the meta-backed leader-election locker so admin-side
+	// background jobs (force-empty, US-002) can claim a per-bucket lease
+	// in worker_locks before kicking their goroutine. nil → memory or
+	// unsupported backend; the force-empty endpoint fails closed.
+	Locker      leader.Locker
 	Version     string
 	ClusterName string
 	Region      string
@@ -70,6 +84,7 @@ func New(c Config) *Server {
 		Creds:       c.Creds,
 		Heartbeat:   c.Heartbeat,
 		Prom:        c.Prom,
+		Locker:      c.Locker,
 		Version:     c.Version,
 		ClusterName: clusterName,
 		Region:      c.Region,
@@ -102,6 +117,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/v1/cluster/nodes", s.handleClusterNodes)
 	mux.HandleFunc("GET /admin/v1/buckets", s.handleBucketsList)
 	mux.HandleFunc("POST /admin/v1/buckets", s.handleBucketCreate)
+	mux.HandleFunc("DELETE /admin/v1/buckets/{bucket}", s.handleBucketDelete)
+	mux.HandleFunc("POST /admin/v1/buckets/{bucket}/force-empty", s.handleBucketForceEmpty)
+	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/force-empty/{jobID}", s.handleBucketForceEmptyStatus)
 	mux.HandleFunc("GET /admin/v1/buckets/top", s.handleBucketsTop)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}", s.handleBucketGet)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/objects", s.handleObjectsList)

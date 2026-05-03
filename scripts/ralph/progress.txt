@@ -12,6 +12,9 @@ Started: Sun May  3 17:17:18 MSK 2026
 - TanStack Query invalidation pattern after a write: `queryClient.invalidateQueries({ queryKey: ['buckets', 'list'] })` — partial key prefix matches all (sort/order/page/pageSize) variants.
 - shadcn Dialog primitives in web/src/components/ui/dialog.tsx — wrap content in `<Dialog open onOpenChange><DialogContent><DialogHeader/><form/><DialogFooter/></DialogContent></Dialog>`.
 - Toasts: `import { showToast } from '@/lib/toast-store'` — fire-and-forget; ToastProvider already mounted in App.
+- adminapi.Server now carries a `leader.Locker` (Config.Locker). serverapp.buildLocker is the single source — call it once and pass the result both to adminapi.Config.Locker and the workers Supervisor (see `internal/serverapp/serverapp.go::Run`). The locker is non-nil for cassandra/tikv/memory backends; admin handlers that take long actions (force-empty, future ones) MUST acquire `bucket-<kind>:<bucket>` against it before kicking a goroutine and release on exit.
+- Admin background jobs persist in the new `meta.AdminJob` shape (kind/state/deleted/started_at/updated_at/finished_at). Cassandra: `admin_jobs` table (added in tableDDL); memory: in-process map; tikv: `s/Aj/<id>` row. Pattern: handler creates job in `pending`, kicks goroutine which flips to `running`, drives work, terminal flip to `done|error` + sets FinishedAt. Always pass a *copy* of the job pointer to the goroutine — handler still uses the original to write the 202 response and a shared mutable AdminJob is a race.
+- Reusable shared error shape on the React side: `AdminApiError` in `web/src/api/client.ts`. Wrapper helper `buildAdminError(resp, fallback)` parses `{code, message}` + status. Reuse instead of inventing one error type per endpoint.
 
 ## Sun May  3 17:27 MSK 2026 - US-001
 - Implemented CreateBucket dialog (POST /admin/v1/buckets + UI) per PRD AC.
@@ -53,4 +56,48 @@ Started: Sun May  3 17:17:18 MSK 2026
   - `internal/adminapi/buckets_list_test.go::seedBucketWithOwner` is a handy test helper for pre-loading buckets+objects with a chosen owner.
   - `internal/adminapi/server_test.go::newTestServer` builds an in-memory adminapi.Server with Region="test-region" and a JWTSecret so cookie-auth tests work without external deps.
   - The Buckets page (web/src/pages/Buckets.tsx) is the central anchor for bucket-related operator actions; future stories add the Delete button, force-empty job UI, and lifecycle/CORS/Policy tabs to BucketDetail.tsx.
+---
+
+## Sun May  3 17:45 MSK 2026 - US-002
+- Implemented DeleteBucket flow + force-empty job (DELETE/POST/GET admin endpoints + DeleteBucketDialog) per PRD AC.
+
+### Backend
+- internal/meta/store.go: added `meta.AdminJob` struct, sentinels `ErrAdminJobNotFound`/`ErrAdminJobAlreadyExists`, kind/state constants. New methods on meta.Store interface: `CreateAdminJob`, `GetAdminJob`, `UpdateAdminJob`.
+- internal/meta/memory/store.go: `adminJobs map[string]*meta.AdminJob` field + 3 methods.
+- internal/meta/cassandra/admin_jobs.go (new) + schema.go: new `admin_jobs` table in tableDDL (id text PK, kind, bucket, state, message, deleted, started_at, updated_at, finished_at). Create uses LWT (`IF NOT EXISTS` + MapScanCAS); Update uses `IF EXISTS` + ScanCAS so the read-after-write coherence rule holds.
+- internal/meta/tikv/admin_jobs.go (new) + keys.go: prefix `s/Aj/<escaped-id>`. Pessimistic txn + LockKeys for create+update; create rolls back the txn before returning ErrAdminJobAlreadyExists so the in-process memBackend used by tests does not deadlock.
+- internal/meta/storetest/contract.go: new `AdminJobRoundTrip` case (create / duplicate / get / update / not-found shapes). Wired into Run().
+- internal/adminapi/server.go: Server gained `Locker leader.Locker` (passed via Config). 3 new routes registered.
+- internal/adminapi/buckets_delete.go (new): handleBucketDelete (204 / 404 / 409), handleBucketForceEmpty (acquire bucket-force-empty:<bucket> via Locker.Acquire, persist AdminJob in pending, kick goroutine, return 202), handleBucketForceEmptyStatus (poll). Goroutine `runForceEmptyJob` walks ListObjectVersions/DeleteObject in pages, updates Deleted+UpdatedAt every page, terminal flip done|error, releases lease on exit. Audit overrides: admin:DeleteBucket, admin:ForceEmpty.
+- internal/adminapi/types.go: ForceEmptyJobResponse wire shape.
+- internal/serverapp/serverapp.go: `adminLocker := buildLocker(...)` constructed once, threaded into both `adminapi.Config.Locker` and the workers Supervisor (no double-build).
+- internal/adminapi/buckets_delete_test.go (new): 6 cases — empty delete / not-found / not-empty 409 / force-empty drains 5 objects / not-found force-empty / concurrent lease acquire returns 409 ForceEmptyInProgress / force-empty-status round-trip + cross-bucket 404. `newTestServerWithLocker` helper wires the in-process `metamem.Store.Locker()`.
+
+### Frontend
+- web/src/api/client.ts: added shared `AdminApiError` shape + `buildAdminError`. New wrappers `deleteBucket`, `startForceEmpty`, `fetchForceEmptyJob` and `ForceEmptyJob`/`ForceEmptyJobState` types.
+- web/src/components/DeleteBucketDialog.tsx (new): shadcn Dialog with type-to-confirm name input, force-empty checkbox auto-shown when objectCount>0, drain progress bar driven by 750 ms polling of GET /admin/v1/buckets/{bucket}/force-empty/{jobID}. On force=true the dialog calls startForceEmpty -> polls until state=done -> issues DELETE. Success → invalidate ['buckets','list'/'top'] + bucket-detail key, toast, navigate to /buckets. Error path renders server `{code, message}` inline; cancel disabled while in flight.
+- web/src/pages/BucketDetail.tsx: red destructive Delete button in the page header (`Trash2` icon), wired to the dialog + passing the live object_count.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` all pass.
+- `go test -race ./internal/adminapi/ ./internal/meta/memory/` clean (force-empty drain race fixed by handing a copy of the AdminJob pointer to the goroutine; the original stays on the handler stack for the 202 response).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean (vite bundle OK; size unchanged within noise).
+- Browser verification: deferred — dev-browser skill unavailable in this loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - Long-running admin background jobs follow a fixed shape: meta.AdminJob row + worker_locks lease + goroutine that flips state pending→running→done|error. Reuse `internal/adminapi/buckets_delete.go::startForceEmptyJob` + `runForceEmptyJob` as the template — kind constants live in meta/store.go (`AdminJobKind*`, `AdminJobState*`).
+  - When a handler kicks a goroutine that mutates the same struct it then writes to the response, the goroutine MUST receive a *copy* of the pointer (or the handler must build the response *before* spawning). Race-detector will catch the latter eventually but it's faster to be defensive at the boundary.
+  - The leader.Locker is a fully working primitive for ad-hoc admin-handler leases — not just worker leader-elections. Acquire with TTL ~10 minutes (force-empty default), release in the goroutine's defer. The same pattern will fit "audit-export run-now", "manifest-rewriter run-now", etc. in later phases.
+  - shadcn doesn't ship a Progress component out of the box. A two-div CSS bar (`<div className="h-2 ... bg-muted"><div style={{width: <pct>%}}/></div>`) is enough for slow-poll progress UI; pulling Radix/Progress for a single use-site is not warranted.
+- Gotchas:
+  - The TiKV pessimistic-txn `LockKeys` lease is held for the txn lifetime; CAS-style early returns (e.g. CreateAdminJob seeing the key already exists) MUST `txn.Rollback()` explicitly before returning the non-error result, otherwise the mock memBackend used by unit tests deadlocks the next caller.
+  - Memory `Locker` is in-process. Tests that simulate "another node holds the lease" must pre-`Acquire` with a distinct holder string and Cleanup-Release; otherwise the handler's own subsequent acquire would simply succeed (single-locker, single-process semantics).
+  - Cassandra `admin_jobs` schema is new — existing keyspaces upgrade additively via the idempotent CREATE TABLE IF NOT EXISTS in `tableDDL`. No `alterStatements` row needed because the table starts wide.
+- Useful context:
+  - `internal/serverapp/serverapp.go::buildLocker` returns `nil` if the meta backend exposes no locker. Admin handlers that depend on the lease must `if s.Locker == nil { 503 }` so dev rigs without the locker fail loud rather than dropping the lease silently.
+  - The drain loop calls ListObjectVersions first (so versioned buckets surrender every version cleanly) and falls back to ListObjects when the bucket has no version rows. memory.Store mirrors both surfaces; cassandra/tikv use the same code path.
+  - `AdminApiError` + `buildAdminError` in `web/src/api/client.ts` is the canonical error shape for admin API wrappers — replace the bespoke `CreateBucketError` (US-001) with the shared shape on the next dialog touch-up; new wrappers (US-003+) should use `AdminApiError` from day one.
 ---

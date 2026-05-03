@@ -134,6 +134,81 @@ export async function fetchBucket(name: string): Promise<BucketDetail> {
   return (await resp.json()) as BucketDetail;
 }
 
+// AdminApiError is the shared error shape thrown by admin API wrappers when
+// the server returns a structured {code, message} JSON body. Callers render
+// the code+message inline in dialogs/banners.
+export interface AdminApiError extends Error {
+  code: string;
+  status: number;
+}
+
+async function buildAdminError(resp: Response, fallback: string): Promise<AdminApiError> {
+  let code = `HTTP${resp.status}`;
+  let message = resp.statusText || fallback;
+  try {
+    const j = (await resp.json()) as { code?: string; message?: string };
+    if (j.code) code = j.code;
+    if (j.message) message = j.message;
+  } catch {
+    // body wasn't JSON — keep statusText
+  }
+  const err = new Error(message) as AdminApiError;
+  err.code = code;
+  err.status = resp.status;
+  return err;
+}
+
+// deleteBucket calls DELETE /admin/v1/buckets/{name} (US-002). Resolves to
+// void on 204; throws an AdminApiError on 4xx/5xx so the dialog can render
+// the {code, message} pair (e.g. BucketNotEmpty/NoSuchBucket).
+export async function deleteBucket(name: string): Promise<void> {
+  const resp = await fetch(`/admin/v1/buckets/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+    credentials: 'same-origin',
+  });
+  if (resp.status === 204) return;
+  throw await buildAdminError(resp, 'delete bucket failed');
+}
+
+export type ForceEmptyJobState = 'pending' | 'running' | 'done' | 'error';
+
+export interface ForceEmptyJob {
+  job_id: string;
+  bucket: string;
+  state: ForceEmptyJobState;
+  deleted: number;
+  message?: string;
+  started_at: number;
+  updated_at: number;
+  finished_at?: number;
+}
+
+// startForceEmpty kicks the per-bucket force-empty drain. Returns the
+// initial job row (state="pending"). Throws AdminApiError on 4xx/5xx —
+// e.g. ForceEmptyInProgress when another job is already running.
+export async function startForceEmpty(bucket: string): Promise<ForceEmptyJob> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(bucket)}/force-empty`,
+    { method: 'POST', credentials: 'same-origin' },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'force-empty start failed');
+  return (await resp.json()) as ForceEmptyJob;
+}
+
+// fetchForceEmptyJob polls the job status. Throws on 4xx/5xx so the
+// caller can stop the polling loop on JobNotFound or transient failure.
+export async function fetchForceEmptyJob(
+  bucket: string,
+  jobID: string,
+): Promise<ForceEmptyJob> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(bucket)}/force-empty/${encodeURIComponent(jobID)}`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'force-empty status failed');
+  return (await resp.json()) as ForceEmptyJob;
+}
+
 export interface ObjectEntry {
   key: string;
   size: number;

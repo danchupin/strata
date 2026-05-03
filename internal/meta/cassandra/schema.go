@@ -271,6 +271,17 @@ var tableDDL = []string{
 		created_at  timestamp,
 		updated_at  timestamp
 	)`,
+	`CREATE TABLE IF NOT EXISTS admin_jobs (
+		id           text PRIMARY KEY,
+		kind         text,
+		bucket       text,
+		state        text,
+		message      text,
+		deleted      bigint,
+		started_at   timestamp,
+		updated_at   timestamp,
+		finished_at  timestamp
+	)`,
 	`CREATE TABLE IF NOT EXISTS notify_dlq (
 		bucket_id    uuid,
 		day          timestamp,

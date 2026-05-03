@@ -48,6 +48,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"AccessPointCRUD", caseAccessPointCRUD},
 		{"OnlineReshard", caseOnlineReshard},
 		{"ManifestRawRoundTrip", caseManifestRawRoundTrip},
+		{"AdminJobRoundTrip", caseAdminJobRoundTrip},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1421,6 +1422,56 @@ func caseOnlineReshard(t *testing.T, s meta.Store) {
 
 	if _, err := s.StartReshard(ctx, b.ID, 7); err != meta.ErrReshardInvalidTarget {
 		t.Fatalf("non-power-of-two target: %v want ErrReshardInvalidTarget", err)
+	}
+}
+
+// caseAdminJobRoundTrip exercises the AdminJob CRUD surface used by US-002
+// (the embedded console's force-empty job). Covers create + duplicate +
+// not-found + state forward roll.
+func caseAdminJobRoundTrip(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	job := &meta.AdminJob{
+		ID:        uuid.NewString(),
+		Kind:      meta.AdminJobKindForceEmpty,
+		Bucket:    "fe-bucket",
+		State:     meta.AdminJobStatePending,
+		StartedAt: now,
+		UpdatedAt: now,
+	}
+	if err := s.CreateAdminJob(ctx, job); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := s.CreateAdminJob(ctx, job); err != meta.ErrAdminJobAlreadyExists {
+		t.Errorf("duplicate: got %v want ErrAdminJobAlreadyExists", err)
+	}
+	got, err := s.GetAdminJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Kind != job.Kind || got.Bucket != job.Bucket || got.State != meta.AdminJobStatePending {
+		t.Fatalf("get round-trip: %+v", got)
+	}
+
+	got.State = meta.AdminJobStateRunning
+	got.Deleted = 42
+	got.UpdatedAt = now.Add(time.Second)
+	if err := s.UpdateAdminJob(ctx, got); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	got2, err := s.GetAdminJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("re-get: %v", err)
+	}
+	if got2.State != meta.AdminJobStateRunning || got2.Deleted != 42 {
+		t.Fatalf("update round-trip: %+v", got2)
+	}
+
+	if _, err := s.GetAdminJob(ctx, "nonexistent"); err != meta.ErrAdminJobNotFound {
+		t.Errorf("missing get: %v want ErrAdminJobNotFound", err)
+	}
+	if err := s.UpdateAdminJob(ctx, &meta.AdminJob{ID: "nonexistent"}); err != meta.ErrAdminJobNotFound {
+		t.Errorf("missing update: %v want ErrAdminJobNotFound", err)
 	}
 }
 

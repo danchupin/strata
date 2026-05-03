@@ -73,6 +73,38 @@ var (
 	ErrIAMAccessKeyNotFound    = errors.New("iam access key not found")
 	ErrMultipartCompletionNotFound = errors.New("multipart completion record not found or expired")
 	ErrNoRewrapProgress        = errors.New("no rewrap progress recorded for bucket")
+	ErrAdminJobNotFound        = errors.New("admin job not found")
+	ErrAdminJobAlreadyExists   = errors.New("admin job already exists")
+)
+
+// AdminJob tracks a long-running operator-facing background job kicked off by
+// the embedded console (US-002). Today only kind="force-empty" is used: the
+// force-empty handler creates an AdminJob, kicks a goroutine that drains the
+// bucket via paginated ListObjects + DeleteObject, and updates the row with
+// Deleted/State/Message as it progresses. Polled via the
+// /admin/v1/buckets/{bucket}/force-empty/{jobID} endpoint.
+//
+// State transitions: pending -> running -> done | error. Once a job leaves
+// pending, only Deleted, UpdatedAt, FinishedAt, State and Message change.
+type AdminJob struct {
+	ID         string
+	Kind       string
+	Bucket     string
+	State      string
+	Message    string
+	Deleted    int64
+	StartedAt  time.Time
+	UpdatedAt  time.Time
+	FinishedAt time.Time
+}
+
+const (
+	AdminJobKindForceEmpty = "force-empty"
+
+	AdminJobStatePending = "pending"
+	AdminJobStateRunning = "running"
+	AdminJobStateDone    = "done"
+	AdminJobStateError   = "error"
 )
 
 // RewrapProgress tracks a master-key rewrap pass for a single bucket. Used by
@@ -620,6 +652,15 @@ type Store interface {
 	// ListReshardJobs returns every queued or running reshard job for the
 	// gateway. The reshard worker calls this on each tick.
 	ListReshardJobs(ctx context.Context) ([]*ReshardJob, error)
+
+	// CreateAdminJob persists a fresh AdminJob row keyed on job.ID. Returns
+	// ErrAdminJobAlreadyExists if a row with the same ID already exists.
+	CreateAdminJob(ctx context.Context, job *AdminJob) error
+	// GetAdminJob returns the row addressed by id, or ErrAdminJobNotFound.
+	GetAdminJob(ctx context.Context, id string) (*AdminJob, error)
+	// UpdateAdminJob overwrites the State/Message/Deleted/UpdatedAt/
+	// FinishedAt columns. Returns ErrAdminJobNotFound when no row exists.
+	UpdateAdminJob(ctx context.Context, job *AdminJob) error
 
 	Close() error
 }

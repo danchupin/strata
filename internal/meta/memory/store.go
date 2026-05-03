@@ -52,6 +52,7 @@ type Store struct {
 	// PutObject and mutated by UpdateObjectManifestRaw — used by the manifest
 	// rewriter (US-049) to detect and convert pre-existing JSON rows.
 	objectManifestRaw map[manifestKey][]byte
+	adminJobs      map[string]*meta.AdminJob
 	locker         *Locker
 }
 
@@ -125,6 +126,7 @@ func New() *Store {
 		rewrapProgress: make(map[uuid.UUID]*meta.RewrapProgress),
 		reshardJobs:    make(map[uuid.UUID]*meta.ReshardJob),
 		objectManifestRaw: make(map[manifestKey][]byte),
+		adminJobs:      make(map[string]*meta.AdminJob),
 		locker:         NewLocker(),
 	}
 }
@@ -2011,6 +2013,55 @@ func (s *Store) ListReshardJobs(ctx context.Context) ([]*meta.ReshardJob, error)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Bucket < out[j].Bucket })
 	return out, nil
+}
+
+// CreateAdminJob persists a fresh admin job row keyed on job.ID. Returns
+// ErrAdminJobAlreadyExists if a row already exists.
+func (s *Store) CreateAdminJob(ctx context.Context, job *meta.AdminJob) error {
+	if job == nil || job.ID == "" {
+		return meta.ErrAdminJobNotFound
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.adminJobs[job.ID]; ok {
+		return meta.ErrAdminJobAlreadyExists
+	}
+	cp := *job
+	s.adminJobs[job.ID] = &cp
+	return nil
+}
+
+// GetAdminJob returns the row addressed by id; ErrAdminJobNotFound otherwise.
+func (s *Store) GetAdminJob(ctx context.Context, id string) (*meta.AdminJob, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	j, ok := s.adminJobs[id]
+	if !ok {
+		return nil, meta.ErrAdminJobNotFound
+	}
+	cp := *j
+	return &cp, nil
+}
+
+// UpdateAdminJob overwrites State/Message/Deleted/UpdatedAt/FinishedAt for
+// the existing row. ErrAdminJobNotFound when no row exists. Kind/Bucket/
+// StartedAt are immutable post-create; this method ignores any new value.
+func (s *Store) UpdateAdminJob(ctx context.Context, job *meta.AdminJob) error {
+	if job == nil || job.ID == "" {
+		return meta.ErrAdminJobNotFound
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.adminJobs[job.ID]
+	if !ok {
+		return meta.ErrAdminJobNotFound
+	}
+	cur.State = job.State
+	cur.Message = job.Message
+	cur.Deleted = job.Deleted
+	cur.UpdatedAt = job.UpdatedAt
+	cur.FinishedAt = job.FinishedAt
+	return nil
 }
 
 func (s *Store) Close() error { return nil }

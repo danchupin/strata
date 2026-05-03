@@ -126,3 +126,19 @@ type MetricSeries struct {
 // MetricPoint marshals as [<epoch-ms>, <value>] to match the standard
 // Prometheus instant-vector point shape.
 type MetricPoint [2]float64
+
+// ForceEmptyJobResponse is the JSON shape of POST /admin/v1/buckets/{bucket}
+// /force-empty (returns 202 + body) and GET .../force-empty/{jobID}. State
+// is one of meta.AdminJobState{Pending,Running,Done,Error}. Deleted is the
+// running tally of objects deleted so far. Message carries the last-error
+// blurb when State == "error".
+type ForceEmptyJobResponse struct {
+	JobID      string `json:"job_id"`
+	Bucket     string `json:"bucket"`
+	State      string `json:"state"`
+	Deleted    int64  `json:"deleted"`
+	Message    string `json:"message,omitempty"`
+	StartedAt  int64  `json:"started_at"`
+	UpdatedAt  int64  `json:"updated_at"`
+	FinishedAt int64  `json:"finished_at,omitempty"`
+}

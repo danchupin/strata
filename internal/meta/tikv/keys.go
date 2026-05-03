@@ -59,6 +59,7 @@ const (
 	prefixAuditLog         = Namespace + "A/"   // s/A/<bucket16><day4><eventID>
 	prefixLeaderLock       = Namespace + "L/"   // s/L/<lockName>
 	prefixReshardJob       = Namespace + "Rj/"  // s/Rj/<bucket16>
+	prefixAdminJob         = Namespace + "Aj/"  // s/Aj/<id>
 )
 
 // Bucket-scoped sub-prefixes. All are appended to a "s/B/<uuid16>/"
@@ -396,6 +397,13 @@ func ReshardJobKey(bucketID uuid.UUID) []byte {
 // ReshardJobsPrefix is the global scan origin for ListReshardJobs.
 func ReshardJobsPrefix() []byte {
 	return []byte(prefixReshardJob)
+}
+
+// AdminJobKey is the per-id row for an admin background job (US-002).
+// IDs are server-minted UUIDs but escaped + terminated to keep the same
+// shape as other variable-length-segment encodings in this file.
+func AdminJobKey(id string) []byte {
+	return appendEscaped([]byte(prefixAdminJob), id)
 }
 
 // ReshardCursorKey is one row per (bucket, shardID) tracking the

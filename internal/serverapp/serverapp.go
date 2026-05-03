@@ -140,11 +140,13 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	if !prom.Available() {
 		logger.Info("admin: STRATA_PROMETHEUS_URL unset; top-buckets/consumers + metrics dashboard will report metrics_available=false")
 	}
+	adminLocker := buildLocker(cfg, metaStore)
 	adminServer := adminapi.New(adminapi.Config{
 		Meta:        metaStore,
 		Creds:       multi,
 		Heartbeat:   hbStore,
 		Prom:        prom,
+		Locker:      adminLocker,
 		Version:     version,
 		ClusterName: clusterName,
 		Region:      cfg.RegionName,
@@ -210,8 +212,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 
 	workerErr := make(chan error, 1)
 	if len(selected) > 0 {
-		locker := buildLocker(cfg, metaStore)
-		if locker == nil {
+		if adminLocker == nil {
 			return fmt.Errorf("workers selected (%s) but meta backend %q exposes no leader-election locker",
 				workerNames(selected), cfg.MetaBackend)
 		}
@@ -221,7 +222,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 				Meta:   metaStore,
 				Data:   dataBackend,
 				Tracer: tracerProvider,
-				Locker: locker,
+				Locker: adminLocker,
 				Region: cfg.RegionName,
 			},
 		}

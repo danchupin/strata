@@ -9,6 +9,7 @@ import {
   Home,
   RefreshCw,
   Search,
+  Trash2,
 } from 'lucide-react';
 
 import {
@@ -46,6 +47,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { cn } from '@/lib/utils';
+import { DeleteBucketDialog } from '@/components/DeleteBucketDialog';
 
 const PAGE_SIZE = 100;
 const FILTER_DEBOUNCE_MS = 300;
@@ -122,6 +124,7 @@ export function BucketDetailPage() {
   // the marker that started page N+1. Empty means we're on page 1.
   const [markerStack, setMarkerStack] = useState<string[]>([]);
   const [selected, setSelected] = useState<ObjectEntry | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   // The active prefix is the URL prefix joined with the debounced filter so
   // the operator can drill in via folder click OR by typing a deeper prefix.
@@ -231,6 +234,18 @@ export function BucketDetailPage() {
         <div className="flex flex-wrap items-center gap-3">
           <h1 className="text-2xl font-semibold tracking-tight">{name}</h1>
           {detail && <BucketBadges detail={detail} />}
+          <div className="ml-auto">
+            <Button
+              type="button"
+              variant="destructive"
+              size="sm"
+              onClick={() => setDeleteOpen(true)}
+              disabled={!detail}
+            >
+              <Trash2 className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+              Delete bucket
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -423,6 +438,13 @@ export function BucketDetailPage() {
         bucket={name}
         object={selected}
         onClose={() => setSelected(null)}
+      />
+
+      <DeleteBucketDialog
+        open={deleteOpen}
+        onOpenChange={setDeleteOpen}
+        bucketName={name}
+        objectCount={detail?.object_count ?? 0}
       />
     </div>
   );
