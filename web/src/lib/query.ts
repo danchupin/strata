@@ -90,6 +90,8 @@ export const queryKeys = {
     user: (userName: string) => ['iam', 'user', userName] as const,
     accessKeys: (userName: string) =>
       ['iam', 'user', userName, 'access-keys'] as const,
+    userPolicies: (userName: string) =>
+      ['iam', 'user', userName, 'policies'] as const,
     policies: ['iam', 'policies'] as const,
   },
   metrics: {

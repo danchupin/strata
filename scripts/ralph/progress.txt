@@ -589,3 +589,39 @@ Started: Sun May  3 17:17:18 MSK 2026
   - The ManagedPolicyEditorDialog's `editing` prop is the canonical pattern for "single dialog handles Create AND Edit" — toggle behaviors (immutable name on edit, starter doc on create, different submit verb) via the prop. Reuse for any future CRUD dialogs (US-015 file upload form mode, US-016 retention edit, …).
   - Strata-minted ARN namespace is `arn:aws:iam::strata:<resource><path><name>` — user (US-011 iam.go), managed policy (US-013, this commit). When US-014 lands, the AttachUserPolicy attached_to list returned by DELETE 409 will already match the ARN format the operator console renders, so the click-through link can be hard-wired without a separate "look up by name" step.
 ---
+
+## Sun May  3 21:30 MSK 2026 - US-014
+- Implemented Attach / detach managed policies UI: new admin endpoints + Policies tab on the per-user detail page.
+
+### Backend
+- internal/adminapi/iam_user_policies.go (new): handleIAMUserPoliciesList (GET /admin/v1/iam/users/{userName}/policies → enriched per-row name+path via GetManagedPolicy lookup; 404 NoSuchEntity on missing user; 200 + policies:[] on empty), handleIAMUserPolicyAttach (POST .../policies; body {policy_arn}; maps ErrIAMUserNotFound→404, ErrManagedPolicyNotFound→404, ErrUserPolicyAlreadyAttached→409 EntityAlreadyExists; 400 BadRequest on missing arn), handleIAMUserPolicyDetach (DELETE .../policies/{policyArn...}; trailing-wildcard so slashes inside the strata-minted ARN survive Go mux pattern matching; ErrUserPolicyNotAttached→404 NoSuchEntity). Audit overrides admin:AttachUserPolicy / admin:DetachUserPolicy, resource shape iam:<userName>.
+- internal/adminapi/server.go: registered the 3 new routes between iam_policies and consumers blocks.
+- internal/adminapi/iam_user_policies_test.go (new): 11 in-package unit tests — ListEmpty + Policies non-nil array, ListPopulatedWithMetadata (verifies name+path enrichment for both / and /team/ paths), ListUserMissing 404, AttachHappy + persistence verified via ListUserPolicies, AttachUserMissing 404, AttachPolicyMissing 404, AttachAlreadyAttached 409 EntityAlreadyExists, AttachMissingArn 400, AttachMalformedJSON 400 (raw-body via iamRequestRaw), DetachHappy + post-detach list empty, DetachNotAttached 404, DetachArnRoundTripWithSlashes (proves /team/ path ARN survives the trailing-wildcard route), AttachThenDeleteManagedPolicyBlocked (full flow: attach via admin → DELETE /admin/v1/iam/policies/{arn} returns 409 PolicyAttached with attached_to:[alice] → detach → DELETE policy returns 204 — locks down the US-013 PolicyAttachmentsResponse path).
+
+### Frontend
+- web/src/lib/query.ts: added queryKeys.iam.userPolicies(userName) cache slot.
+- web/src/api/client.ts: added UserPolicyAttachment / UserPoliciesListResponse types + fetchIAMUserPolicies / attachUserPolicy / detachUserPolicy wrappers (all throw AdminApiError on non-204).
+- web/src/components/AttachPolicyDialog.tsx (new): searchable picker (shadcn Dialog + Input search box with Search icon prefix) — fetches the full managed-policies list via fetchManagedPolicies (reuses the queryKeys.iam.policies cache slot from US-013) and filters client-side by name/ARN/description substring (case-insensitive). Each row is a button (lucide ShieldCheck icon + name + ARN + description); already-attached rows render an emerald 'Attached' chip and are disabled (the server would 409 anyway). Click → useMutation → attachUserPolicy → on success invalidates queryKeys.iam.userPolicies(userName) + queryKeys.iam.policies (so US-013's AttachmentCount column re-fetches), toasts, closes the dialog. Server errors render inline {code, message} above the list.
+- web/src/pages/IAMUserDetail.tsx: replaced the US-014 placeholder card with PoliciesTab — attached-policies table (Name | ARN | Path | Detach action) + Refresh + Attach policy buttons + empty-state CTA. Per-row detach uses window.confirm guard (same pattern as US-005 CORS delete) → useMutation → detachUserPolicy → invalidates both queryKeys + toast. Imported X icon from lucide-react.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` all packages pass (incl. the 11 new in-package tests).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean. Bundle sizes (gzipped):
+  - main: 152.76 KiB ✓ (well under the 500 KiB AC ceiling; +1.16 KiB vs US-013 baseline of 151.60)
+  - Metrics route: 109.44 KiB (unchanged)
+  - MonacoJsonEditor lazy chunk: 591.94 KiB (shared with US-004/005/006/012/013 — no duplication)
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - The "searchable picker dialog" shape (Input search box at the top, scrollable max-h-80 list of clickable rows underneath, footer Close button) is a clean alternative to shadcn Combobox when the operator picks one item from a small-cardinality list. Avoids the Radix Popover + cmdk dependency tree and stays within the existing primitives. Reusable for any future "choose one of N" surface — bucket-policy attach (if it ever surfaces), inventory destination-bucket picker on its own dialog, etc.
+  - Cache slot naming for "X attached to Y" surfaces: the per-user cache slot is keyed under `['iam', 'user', userName, 'policies']` (parallel to `accessKeys`), and the global pool stays under `['iam', 'policies']` (US-013). Mutations that flip the per-X count MUST invalidate BOTH — without invalidating the global pool, the IAM Policies tab's AttachmentCount column would stay stale until the user navigates away and back.
+- Gotchas:
+  - Trailing-wildcard route patterns in Go 1.22 mux must be at the END of the pattern — there can be no static suffix after `{policyArn...}`. So `DELETE /admin/v1/iam/users/{userName}/policies/{policyArn...}` works but `DELETE .../policies/{policyArn...}/detach` does NOT compile-load. Same lesson hit on US-013 with `.../document` — the URL design has to absorb the constraint.
+  - The PoliciesTab component must be defined BEFORE the AccessKeysTab usage in the file IF you want hoisted JSX references — but since both are referenced via TabsContent siblings in the same parent, declaration order doesn't matter. Function declarations hoist.
+- Useful context:
+  - The AttachPolicyDialog disabled-row affordance ('Attached' chip on already-attached entries) is the cheapest way to keep the operator from triggering a 409 round-trip. The server-side check stays — UI affordance is a UX nicety, not a security boundary.
+  - With US-014 closed, the cycle's IAM scope (US-010..US-014) is fully implemented end-to-end: storage shapes (US-010), users CRUD (US-011), access keys CRUD (US-012), managed policies CRUD (US-013), and now user-policy attachments (US-014). US-015 onward shifts focus to object-level operations (upload wizard, delete, tags, retention/legal-hold).
+---

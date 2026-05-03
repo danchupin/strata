@@ -178,6 +178,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /admin/v1/iam/policies", s.handleIAMPolicyCreate)
 	mux.HandleFunc("PUT /admin/v1/iam/policies/{arn...}", s.handleIAMPolicyUpdate)
 	mux.HandleFunc("DELETE /admin/v1/iam/policies/{arn...}", s.handleIAMPolicyDelete)
+	mux.HandleFunc("GET /admin/v1/iam/users/{userName}/policies", s.handleIAMUserPoliciesList)
+	mux.HandleFunc("POST /admin/v1/iam/users/{userName}/policies", s.handleIAMUserPolicyAttach)
+	mux.HandleFunc("DELETE /admin/v1/iam/users/{userName}/policies/{policyArn...}", s.handleIAMUserPolicyDetach)
 	mux.HandleFunc("GET /admin/v1/consumers/top", s.handleConsumersTop)
 	mux.HandleFunc("GET /admin/v1/metrics/timeseries", s.handleMetricsTimeseries)
 	return mux

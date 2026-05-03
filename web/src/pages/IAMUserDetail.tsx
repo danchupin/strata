@@ -10,14 +10,18 @@ import {
   RefreshCw,
   ShieldOff,
   Trash2,
+  X,
 } from 'lucide-react';
 
 import {
+  detachUserPolicy,
   fetchIAMAccessKeys,
   fetchIAMUser,
+  fetchIAMUserPolicies,
   updateIAMAccessKeyDisabled,
   type AdminApiError,
   type IAMAccessKeySummary,
+  type UserPolicyAttachment,
 } from '@/api/client';
 import { queryClient, queryKeys } from '@/lib/query';
 import { Button } from '@/components/ui/button';
@@ -43,6 +47,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { AttachPolicyDialog } from '@/components/AttachPolicyDialog';
 import { CreateAccessKeyDialog } from '@/components/CreateAccessKeyDialog';
 import { DeleteAccessKeyDialog } from '@/components/DeleteAccessKeyDialog';
 import { showToast } from '@/lib/toast-store';
@@ -140,17 +145,190 @@ export function IAMUserDetailPage() {
             <AccessKeysTab userName={userName} />
           </TabsContent>
           <TabsContent value="policies" className="mt-4">
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">Attached policies</CardTitle>
-                <CardDescription>
-                  Managed-policy attachments ship with US-014.
-                </CardDescription>
-              </CardHeader>
-            </Card>
+            <PoliciesTab userName={userName} />
           </TabsContent>
         </Tabs>
       )}
+    </div>
+  );
+}
+
+function PoliciesTab({ userName }: { userName: string }) {
+  const [attachOpen, setAttachOpen] = useState(false);
+  const [detachTarget, setDetachTarget] = useState<UserPolicyAttachment | null>(null);
+
+  const q = useQuery({
+    queryKey: queryKeys.iam.userPolicies(userName),
+    queryFn: () => fetchIAMUserPolicies(userName),
+    meta: { label: 'attached policies' },
+  });
+
+  const detachM = useMutation({
+    mutationFn: (arn: string) => detachUserPolicy(userName, arn),
+    onSuccess: (_data, arn) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.iam.userPolicies(userName) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.iam.policies });
+      showToast({
+        title: 'Policy detached',
+        description: arn,
+      });
+      setDetachTarget(null);
+    },
+    onError: (err) => {
+      const e = err as AdminApiError | Error;
+      showToast({
+        title: 'Failed to detach policy',
+        description: e.message,
+        variant: 'destructive',
+      });
+    },
+  });
+
+  function handleRefresh() {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.iam.userPolicies(userName) });
+  }
+
+  const policies: UserPolicyAttachment[] = q.data ?? [];
+  const showSkeleton = q.isPending && !q.data;
+  const errorMessage = !q.data && q.error instanceof Error ? q.error.message : null;
+  const attachedArns = useMemo(() => policies.map((p) => p.arn), [policies]);
+
+  return (
+    <div className="space-y-4">
+      <AttachPolicyDialog
+        open={attachOpen}
+        userName={userName}
+        attachedArns={attachedArns}
+        onOpenChange={setAttachOpen}
+      />
+      {errorMessage && (
+        <Card className="border-destructive/40 bg-destructive/5">
+          <CardContent className="flex items-start gap-2 py-4 text-sm text-destructive">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+            <div>
+              <div className="font-medium">Failed to load attached policies</div>
+              <div className="text-xs text-destructive/80">{errorMessage}</div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+      <Card>
+        <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <CardTitle className="text-base">Attached policies</CardTitle>
+            <CardDescription>
+              {q.isFetching && !showSkeleton
+                ? 'Refreshing…'
+                : `${policies.length} ${policies.length === 1 ? 'policy' : 'policies'}`}
+            </CardDescription>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleRefresh}
+              disabled={q.isFetching}
+              aria-label="Refresh attached policies"
+            >
+              <RefreshCw
+                className={cn('mr-1.5 h-3.5 w-3.5', q.isFetching && 'animate-spin')}
+                aria-hidden
+              />
+              Refresh
+            </Button>
+            <Button type="button" onClick={() => setAttachOpen(true)}>
+              <Plus className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+              Attach policy
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="px-0 sm:px-0">
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="pl-4 sm:pl-6">Name</TableHead>
+                  <TableHead>ARN</TableHead>
+                  <TableHead>Path</TableHead>
+                  <TableHead className="pr-4 text-right sm:pr-6">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {showSkeleton &&
+                  Array.from({ length: 3 }).map((_, i) => (
+                    <TableRow key={`sk-${i}`}>
+                      <TableCell colSpan={4} className="py-3">
+                        <Skeleton className="h-5 w-full" />
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                {!showSkeleton && policies.length === 0 && (
+                  <TableRow>
+                    <TableCell colSpan={4} className="py-10 text-center">
+                      <div className="space-y-2">
+                        <KeyRound
+                          className="mx-auto h-6 w-6 text-muted-foreground"
+                          aria-hidden
+                        />
+                        <div className="text-sm font-medium">No policies attached</div>
+                        <div className="text-xs text-muted-foreground">
+                          Attach a managed policy to grant this user access.
+                        </div>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setAttachOpen(true)}
+                          className="mt-2"
+                        >
+                          Attach a policy
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                )}
+                {policies.map((p) => {
+                  const isPending = detachM.isPending && detachTarget?.arn === p.arn;
+                  return (
+                    <TableRow key={p.arn}>
+                      <TableCell className="pl-4 font-medium sm:pl-6">
+                        {p.name || <span className="text-muted-foreground">—</span>}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">{p.arn}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">
+                        {p.path || '/'}
+                      </TableCell>
+                      <TableCell className="pr-4 text-right sm:pr-6">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="text-destructive hover:text-destructive"
+                          disabled={isPending || detachM.isPending}
+                          onClick={() => {
+                            if (
+                              window.confirm(
+                                `Detach policy ${p.name || p.arn} from ${userName}?`,
+                              )
+                            ) {
+                              setDetachTarget(p);
+                              detachM.mutate(p.arn);
+                            }
+                          }}
+                          aria-label={`Detach ${p.name || p.arn}`}
+                        >
+                          <X className="h-3.5 w-3.5" aria-hidden />
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }

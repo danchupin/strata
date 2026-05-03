@@ -946,6 +946,52 @@ export async function deleteManagedPolicy(arn: string): Promise<void> {
   throw await buildAdminError(resp, 'delete managed policy failed');
 }
 
+// User-policy attachments (US-014). The list endpoint enriches each ARN with
+// the policy name+path via a server-side GetManagedPolicy lookup so the table
+// can render an operator-friendly row without re-fetching every policy.
+export interface UserPolicyAttachment {
+  arn: string;
+  name: string;
+  path: string;
+}
+
+export interface UserPoliciesListResponse {
+  policies: UserPolicyAttachment[];
+}
+
+export async function fetchIAMUserPolicies(userName: string): Promise<UserPolicyAttachment[]> {
+  const resp = await fetch(
+    `/admin/v1/iam/users/${encodeURIComponent(userName)}/policies`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch user policies failed');
+  const body = (await resp.json()) as UserPoliciesListResponse;
+  return body.policies ?? [];
+}
+
+export async function attachUserPolicy(userName: string, policyArn: string): Promise<void> {
+  const resp = await fetch(
+    `/admin/v1/iam/users/${encodeURIComponent(userName)}/policies`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ policy_arn: policyArn }),
+    },
+  );
+  if (resp.status === 204) return;
+  throw await buildAdminError(resp, 'attach policy failed');
+}
+
+export async function detachUserPolicy(userName: string, policyArn: string): Promise<void> {
+  const resp = await fetch(
+    `/admin/v1/iam/users/${encodeURIComponent(userName)}/policies/${policyArn}`,
+    { method: 'DELETE', credentials: 'same-origin' },
+  );
+  if (resp.status === 204) return;
+  throw await buildAdminError(resp, 'detach policy failed');
+}
+
 export async function fetchIAMUser(userName: string): Promise<IAMUserSummary> {
   // The admin API has no per-user GET endpoint — emulate via the list endpoint
   // with a query filter so the user-detail page can render cheap metadata
