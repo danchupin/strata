@@ -45,7 +45,14 @@ type Server struct {
 	// row stamped by the AuditMiddleware override). Zero falls back to
 	// s3api.DefaultAuditRetention.
 	AuditTTL time.Duration
-	Logger   *log.Logger
+	// InvalidateCredential, when set, drops a cached credential lookup so
+	// the next SigV4 verification re-fetches the underlying record from
+	// meta. Wired by serverapp to auth.MultiStore.Invalidate; admin handlers
+	// that flip Disabled / Delete on an access key call this so an
+	// in-flight cache hit cannot keep a freshly-disabled key alive past the
+	// auth.DefaultCacheTTL window.
+	InvalidateCredential func(accessKey string)
+	Logger               *log.Logger
 
 	// jobsMu guards background-job goroutines. Currently only the
 	// force-empty drain (US-002) registers here; we cancel the goroutine
@@ -80,6 +87,10 @@ type Config struct {
 	// admin handlers that write extra audit rows (cascaded key deletes,
 	// future bulk operations) match the row TTL of the AuditMiddleware.
 	AuditTTL time.Duration
+	// InvalidateCredential is the auth.MultiStore.Invalidate hook so admin
+	// access-key disable/delete handlers can drop the cache entry the
+	// gateway holds for the affected access key.
+	InvalidateCredential func(accessKey string)
 }
 
 // New constructs a Server. Started defaults to now. JWTSecret empty means
@@ -103,8 +114,9 @@ func New(c Config) *Server {
 		DataBackend: c.DataBackend,
 		Started:     time.Now(),
 		JWTSecret:   c.JWTSecret,
-		AuditTTL:    c.AuditTTL,
-		Logger:      log.Default(),
+		AuditTTL:             c.AuditTTL,
+		InvalidateCredential: c.InvalidateCredential,
+		Logger:               log.Default(),
 	}
 }
 
@@ -158,6 +170,10 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/v1/iam/users", s.handleIAMUsersList)
 	mux.HandleFunc("POST /admin/v1/iam/users", s.handleIAMUserCreate)
 	mux.HandleFunc("DELETE /admin/v1/iam/users/{userName}", s.handleIAMUserDelete)
+	mux.HandleFunc("GET /admin/v1/iam/users/{userName}/access-keys", s.handleIAMAccessKeyList)
+	mux.HandleFunc("POST /admin/v1/iam/users/{userName}/access-keys", s.handleIAMAccessKeyCreate)
+	mux.HandleFunc("PATCH /admin/v1/iam/access-keys/{accessKey}", s.handleIAMAccessKeyUpdate)
+	mux.HandleFunc("DELETE /admin/v1/iam/access-keys/{accessKey}", s.handleIAMAccessKeyDelete)
 	mux.HandleFunc("GET /admin/v1/consumers/top", s.handleConsumersTop)
 	mux.HandleFunc("GET /admin/v1/metrics/timeseries", s.handleMetricsTimeseries)
 	return mux

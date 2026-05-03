@@ -51,6 +51,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"AdminJobRoundTrip", caseAdminJobRoundTrip},
 		{"ManagedPolicyCRUD", caseManagedPolicyCRUD},
 		{"UserPolicyAttach", caseUserPolicyAttach},
+		{"IAMAccessKeyDisabled", caseIAMAccessKeyDisabled},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1636,6 +1637,65 @@ func caseUserPolicyAttach(t *testing.T, s meta.Store) {
 
 	if err := s.DeleteManagedPolicy(ctx, policy.Arn); err != nil {
 		t.Fatalf("delete after detach: %v", err)
+	}
+}
+
+// caseIAMAccessKeyDisabled exercises UpdateIAMAccessKeyDisabled across
+// happy-path flip + flip-back + missing-row sentinel + post-disable read
+// (US-012). Every backend round-trips the bool flag through GetIAMAccessKey.
+func caseIAMAccessKeyDisabled(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	if err := s.CreateIAMUser(ctx, &meta.IAMUser{
+		UserName:  "carol",
+		UserID:    "AIDACAROLUUID",
+		Path:      "/",
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	ak := &meta.IAMAccessKey{
+		AccessKeyID:     "AKIATESTDISABLE001",
+		SecretAccessKey: "secret-x",
+		UserName:        "carol",
+		CreatedAt:       now,
+	}
+	if err := s.CreateIAMAccessKey(ctx, ak); err != nil {
+		t.Fatalf("create access key: %v", err)
+	}
+
+	got, err := s.UpdateIAMAccessKeyDisabled(ctx, ak.AccessKeyID, true)
+	if err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if !got.Disabled {
+		t.Fatalf("disable returned Disabled=false")
+	}
+	read, err := s.GetIAMAccessKey(ctx, ak.AccessKeyID)
+	if err != nil {
+		t.Fatalf("get post-disable: %v", err)
+	}
+	if !read.Disabled {
+		t.Fatalf("get post-disable: Disabled=false")
+	}
+
+	got, err = s.UpdateIAMAccessKeyDisabled(ctx, ak.AccessKeyID, false)
+	if err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	if got.Disabled {
+		t.Fatalf("enable returned Disabled=true")
+	}
+	read, err = s.GetIAMAccessKey(ctx, ak.AccessKeyID)
+	if err != nil {
+		t.Fatalf("get post-enable: %v", err)
+	}
+	if read.Disabled {
+		t.Fatalf("get post-enable: Disabled=true")
+	}
+
+	if _, err := s.UpdateIAMAccessKeyDisabled(ctx, "AKIA-MISSING", true); err != meta.ErrIAMAccessKeyNotFound {
+		t.Errorf("missing: got %v want ErrIAMAccessKeyNotFound", err)
 	}
 }
 

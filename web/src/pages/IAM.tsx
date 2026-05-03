@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { AlertCircle, Plus, RefreshCw, Search, Trash2 } from 'lucide-react';
 
@@ -82,7 +83,7 @@ export function IAMPage() {
         <TabsContent value="access-keys" className="mt-4">
           <PlaceholderTab
             title="Access keys"
-            description="Per-user access key management ships with US-012."
+            description="Open a user from the Users tab to manage their access keys."
           />
         </TabsContent>
         <TabsContent value="policies" className="mt-4">
@@ -264,7 +265,14 @@ function UsersTab() {
                 )}
                 {users.map((u) => (
                   <TableRow key={u.user_name}>
-                    <TableCell className="pl-4 font-medium sm:pl-6">{u.user_name}</TableCell>
+                    <TableCell className="pl-4 font-medium sm:pl-6">
+                      <Link
+                        to={`/iam/users/${encodeURIComponent(u.user_name)}`}
+                        className="hover:underline"
+                      >
+                        {u.user_name}
+                      </Link>
+                    </TableCell>
                     <TableCell className="font-mono text-xs text-muted-foreground">
                       {u.user_id}
                     </TableCell>

@@ -300,6 +300,47 @@ func (s *Store) ListIAMAccessKeys(ctx context.Context, userName string) ([]*meta
 	return out, nil
 }
 
+// UpdateIAMAccessKeyDisabled flips the Disabled bit on the per-key record
+// in a pessimistic txn (LockKeys + Get + Set). Returns the post-flip row.
+// Returns ErrIAMAccessKeyNotFound when no row exists; the early-return path
+// calls txn.Rollback() explicitly so the in-process memBackend used in unit
+// tests does not leak the LockKeys lease.
+func (s *Store) UpdateIAMAccessKeyDisabled(ctx context.Context, accessKeyID string, disabled bool) (ak *meta.IAMAccessKey, err error) {
+	akKey := IAMAccessKeyKey(accessKeyID)
+	txn, err := s.kv.Begin(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	defer rollbackOnError(txn, &err)
+	if err = txn.LockKeys(ctx, akKey); err != nil {
+		return nil, err
+	}
+	raw, found, err := txn.Get(ctx, akKey)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		_ = txn.Rollback()
+		return nil, meta.ErrIAMAccessKeyNotFound
+	}
+	row, err := decodeIAMAccessKey(raw)
+	if err != nil {
+		return nil, err
+	}
+	row.Disabled = disabled
+	payload, err := encodeIAMAccessKey(row)
+	if err != nil {
+		return nil, err
+	}
+	if err = txn.Set(akKey, payload); err != nil {
+		return nil, err
+	}
+	if err = txn.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return row, nil
+}
+
 // DeleteIAMAccessKey reads the row to learn UserName (so the secondary
 // index can be cleaned), then deletes both rows in one pessimistic txn.
 // Returns the deleted record so callers can audit-log the removed

@@ -1812,6 +1812,18 @@ func (s *Store) DeleteIAMAccessKey(ctx context.Context, accessKeyID string) (*me
 	return &cp, nil
 }
 
+func (s *Store) UpdateIAMAccessKeyDisabled(ctx context.Context, accessKeyID string, disabled bool) (*meta.IAMAccessKey, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ak, ok := s.accessKeys[accessKeyID]
+	if !ok {
+		return nil, meta.ErrIAMAccessKeyNotFound
+	}
+	ak.Disabled = disabled
+	cp := *ak
+	return &cp, nil
+}
+
 func cloneManagedPolicy(p *meta.ManagedPolicy) *meta.ManagedPolicy {
 	cp := *p
 	if p.Document != nil {

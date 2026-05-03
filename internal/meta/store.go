@@ -624,6 +624,12 @@ type Store interface {
 	GetIAMAccessKey(ctx context.Context, accessKeyID string) (*IAMAccessKey, error)
 	ListIAMAccessKeys(ctx context.Context, userName string) ([]*IAMAccessKey, error)
 	DeleteIAMAccessKey(ctx context.Context, accessKeyID string) (*IAMAccessKey, error)
+	// UpdateIAMAccessKeyDisabled flips the Disabled bit on the row addressed
+	// by accessKeyID. Returns the updated row. Returns ErrIAMAccessKeyNotFound
+	// when no row exists. Callers must invalidate any in-memory credential
+	// caches that key off accessKeyID after a successful flip — the meta
+	// layer carries no cache of its own.
+	UpdateIAMAccessKeyDisabled(ctx context.Context, accessKeyID string, disabled bool) (*IAMAccessKey, error)
 
 	// CreateManagedPolicy persists a fresh managed-policy row keyed on
 	// policy.Arn. Returns ErrManagedPolicyAlreadyExists if a row with the

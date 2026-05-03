@@ -153,8 +153,9 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		Region:      cfg.RegionName,
 		MetaBackend: cfg.MetaBackend,
 		DataBackend: cfg.DataBackend,
-		JWTSecret:   jwtSecret,
-		AuditTTL:    auditTTL,
+		JWTSecret:            jwtSecret,
+		AuditTTL:             auditTTL,
+		InvalidateCredential: multi.Invalidate,
 	})
 
 	mux := http.NewServeMux()

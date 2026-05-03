@@ -80,6 +80,24 @@ func (s *Store) ListIAMAccessKeys(ctx context.Context, userName string) ([]*meta
 	return out, nil
 }
 
+// UpdateIAMAccessKeyDisabled flips the disabled column on the row addressed by
+// accessKeyID. Uses an LWT (`UPDATE … IF EXISTS`) so any prior LWT-on-create
+// path stays read-after-write coherent — same lesson as SetBucketVersioning.
+// Returns the post-flip row.
+func (s *Store) UpdateIAMAccessKeyDisabled(ctx context.Context, accessKeyID string, disabled bool) (*meta.IAMAccessKey, error) {
+	applied, err := s.s.Query(
+		`UPDATE access_keys SET disabled=? WHERE access_key=? IF EXISTS`,
+		disabled, accessKeyID,
+	).WithContext(ctx).ScanCAS()
+	if err != nil {
+		return nil, err
+	}
+	if !applied {
+		return nil, meta.ErrIAMAccessKeyNotFound
+	}
+	return s.GetIAMAccessKey(ctx, accessKeyID)
+}
+
 func (s *Store) DeleteIAMAccessKey(ctx context.Context, accessKeyID string) (*meta.IAMAccessKey, error) {
 	ak, err := s.GetIAMAccessKey(ctx, accessKeyID)
 	if err != nil {

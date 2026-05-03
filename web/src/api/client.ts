@@ -782,3 +782,85 @@ export async function deleteIAMUser(userName: string): Promise<void> {
   if (resp.status === 204) return;
   throw await buildAdminError(resp, 'delete iam user failed');
 }
+
+// IAM Access Keys (US-012). Per-user list + secret-once create + flip
+// disabled + delete. The SecretAccessKey only ever appears in the
+// IAMAccessKeyCreateResponse — every other shape strips it.
+export interface IAMAccessKeySummary {
+  access_key_id: string;
+  user_name: string;
+  created_at: number;
+  disabled: boolean;
+}
+
+export interface IAMAccessKeyListResponse {
+  access_keys: IAMAccessKeySummary[];
+}
+
+export interface IAMAccessKeyCreateResponse {
+  access_key_id: string;
+  secret_access_key: string;
+  user_name: string;
+  created_at: number;
+  disabled: boolean;
+}
+
+export async function fetchIAMAccessKeys(userName: string): Promise<IAMAccessKeySummary[]> {
+  const resp = await fetch(
+    `/admin/v1/iam/users/${encodeURIComponent(userName)}/access-keys`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch access keys failed');
+  const body = (await resp.json()) as IAMAccessKeyListResponse;
+  return body.access_keys ?? [];
+}
+
+export async function createIAMAccessKey(userName: string): Promise<IAMAccessKeyCreateResponse> {
+  const resp = await fetch(
+    `/admin/v1/iam/users/${encodeURIComponent(userName)}/access-keys`,
+    { method: 'POST', credentials: 'same-origin' },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'create access key failed');
+  return (await resp.json()) as IAMAccessKeyCreateResponse;
+}
+
+export async function updateIAMAccessKeyDisabled(
+  accessKeyID: string,
+  disabled: boolean,
+): Promise<IAMAccessKeySummary> {
+  const resp = await fetch(
+    `/admin/v1/iam/access-keys/${encodeURIComponent(accessKeyID)}`,
+    {
+      method: 'PATCH',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ disabled }),
+    },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'update access key failed');
+  return (await resp.json()) as IAMAccessKeySummary;
+}
+
+export async function deleteIAMAccessKey(accessKeyID: string): Promise<void> {
+  const resp = await fetch(
+    `/admin/v1/iam/access-keys/${encodeURIComponent(accessKeyID)}`,
+    { method: 'DELETE', credentials: 'same-origin' },
+  );
+  if (resp.status === 204) return;
+  throw await buildAdminError(resp, 'delete access key failed');
+}
+
+export async function fetchIAMUser(userName: string): Promise<IAMUserSummary> {
+  // The admin API has no per-user GET endpoint — emulate via the list endpoint
+  // with a query filter so the user-detail page can render cheap metadata
+  // without a dedicated /admin/v1/iam/users/{name} round-trip.
+  const list = await fetchIAMUsers({ query: userName, page: 1, pageSize: 50 });
+  const exact = list.users.find((u) => u.user_name === userName);
+  if (!exact) {
+    const err = new Error(`user ${userName} not found`) as AdminApiError;
+    err.code = 'NoSuchEntity';
+    err.status = 404;
+    throw err;
+  }
+  return exact;
+}
