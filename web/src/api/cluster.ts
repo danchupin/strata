@@ -7,6 +7,7 @@ export interface ClusterStatus {
   started_at: number;
   uptime_sec: number;
   cluster_name: string;
+  region: string;
   node_count: number;
   node_count_healthy: number;
   meta_backend: string;

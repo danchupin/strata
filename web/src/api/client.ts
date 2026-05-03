@@ -85,6 +85,46 @@ export interface BucketDetail {
   object_count: number;
 }
 
+export interface CreateBucketBody {
+  name: string;
+  region?: string;
+  versioning?: 'Enabled' | 'Suspended';
+  object_lock_enabled?: boolean;
+}
+
+export interface CreateBucketError extends Error {
+  code: string;
+  status: number;
+}
+
+// createBucket calls POST /admin/v1/buckets (US-001). Throws a CreateBucketError
+// carrying the {code, status} pair the dialog renders inline so the operator
+// gets a server-validated error message rather than a generic "Failed to fetch".
+export async function createBucket(body: CreateBucketBody): Promise<BucketDetail> {
+  const resp = await fetch('/admin/v1/buckets', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    let code = `HTTP${resp.status}`;
+    let message = resp.statusText || 'request failed';
+    try {
+      const j = (await resp.json()) as { code?: string; message?: string };
+      if (j.code) code = j.code;
+      if (j.message) message = j.message;
+    } catch {
+      // body wasn't JSON — keep statusText
+    }
+    const err = new Error(message) as CreateBucketError;
+    err.code = code;
+    err.status = resp.status;
+    throw err;
+  }
+  return (await resp.json()) as BucketDetail;
+}
+
 export async function fetchBucket(name: string): Promise<BucketDetail> {
   const resp = await fetch(`/admin/v1/buckets/${encodeURIComponent(name)}`, {
     method: 'GET',

@@ -101,6 +101,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/v1/cluster/status", s.handleClusterStatus)
 	mux.HandleFunc("GET /admin/v1/cluster/nodes", s.handleClusterNodes)
 	mux.HandleFunc("GET /admin/v1/buckets", s.handleBucketsList)
+	mux.HandleFunc("POST /admin/v1/buckets", s.handleBucketCreate)
 	mux.HandleFunc("GET /admin/v1/buckets/top", s.handleBucketsTop)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}", s.handleBucketGet)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/objects", s.handleObjectsList)

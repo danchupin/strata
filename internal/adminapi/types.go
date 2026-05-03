@@ -10,10 +10,22 @@ type ClusterStatus struct {
 	StartedAt        int64  `json:"started_at"`
 	UptimeSec        int64  `json:"uptime_sec"`
 	ClusterName      string `json:"cluster_name"`
+	Region           string `json:"region"`
 	NodeCount        int    `json:"node_count"`
 	NodeCountHealthy int    `json:"node_count_healthy"`
 	MetaBackend      string `json:"meta_backend"`
 	DataBackend      string `json:"data_backend"`
+}
+
+// CreateBucketRequest is the JSON body accepted by POST /admin/v1/buckets.
+// Region defaults to the gateway's configured RegionName when empty.
+// Versioning accepts "Enabled" or "Suspended" (case-insensitive); empty
+// means Suspended. ObjectLockEnabled requires Versioning="Enabled".
+type CreateBucketRequest struct {
+	Name              string `json:"name"`
+	Region            string `json:"region"`
+	Versioning        string `json:"versioning"`
+	ObjectLockEnabled bool   `json:"object_lock_enabled"`
 }
 
 type ClusterNodesResponse struct {

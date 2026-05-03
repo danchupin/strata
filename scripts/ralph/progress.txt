@@ -1,95 +1,56 @@
 # Ralph Progress Log
-Started: 2026-05-04
-Cycle: ralph/web-ui-admin
+Started: Sun May  3 17:17:18 MSK 2026
 ---
 
 ## Codebase Patterns
+- /admin/v1/* now sits behind `s3api.NewAuditMiddleware`. Admin handlers stamp the operator-meaningful audit row via `s3api.SetAuditOverride(ctx, action, resource, bucket, principal)` — bypassing the path-derived `PostBucket` default. Action="" means fall back to default.
+- New admin handler? Wire `mux.HandleFunc("METHOD /admin/v1/...", s.handleX)` in `internal/adminapi/server.go::routes()`. Handlers go in `internal/adminapi/<topic>.go`. JSON helpers `writeJSON` / `writeJSONError` are in server.go.
+- Admin auth: `auth.FromContext(ctx).Owner` is set by `adminapi.authMiddleware` via session-cookie `Lookup` and is the value to use as the `owner` argument to `meta.Store.CreateBucket`.
+- Bucket-name validation: call `s3api.ValidBucketName(name)` (public alias of `validBucketName` in internal/s3api/validate.go); rules include reserved gateway-internal route names (`console`, `admin`, etc.) — duplicate the same regex client-side in dialogs for live inline feedback.
+- Versioning enum: `meta.VersioningDisabled` ("Disabled") — the freshly-created default; `meta.VersioningEnabled`; `meta.VersioningSuspended`. `versioningLabel()` in adminapi/buckets.go maps Disabled→"Off" for the operator-facing label. Public dialog accepts only Enabled|Suspended.
+- Object-Lock requires `meta.SetBucketObjectLockEnabled` (separate per-bucket flag). Server-side guard: reject `object_lock_enabled=true` unless versioning=Enabled.
+- TanStack Query invalidation pattern after a write: `queryClient.invalidateQueries({ queryKey: ['buckets', 'list'] })` — partial key prefix matches all (sort/order/page/pageSize) variants.
+- shadcn Dialog primitives in web/src/components/ui/dialog.tsx — wrap content in `<Dialog open onOpenChange><DialogContent><DialogHeader/><form/><DialogFooter/></DialogContent></Dialog>`.
+- Toasts: `import { showToast } from '@/lib/toast-store'` — fire-and-forget; ToastProvider already mounted in App.
 
-(seed entries for this cycle. Replace/remove as US-001..US-022 land.)
+## Sun May  3 17:27 MSK 2026 - US-001
+- Implemented CreateBucket dialog (POST /admin/v1/buckets + UI) per PRD AC.
 
-- Branch policy (memory/feedback_ralph_branch_policy.md): every cycle
-  ends with merge back into main; new cycle starts from main. This
-  cycle starts from main = modern-complete + binary-consolidation +
-  tikv-meta-backend + web-ui-foundation + s3-over-s3-backend
-  (Phase 1 web UI shipped via e27cf21; s3-over-s3 backend via
-  12ec0f1). Cycle end (US-022) merges ralph/web-ui-admin back into
-  main + pushes origin main.
-- Phase 1 surface available on main: /console/ (embedded React+TS),
-  /admin/v1/* JSON API (read-only handlers), HS256 JWT session-cookie
-  auth (24 h, HttpOnly+SameSite=Strict+Path=/admin) + SigV4 fallback,
-  internal/adminapi + internal/heartbeat packages, web/src/pages/*
-  (Login, Overview, Buckets, BucketDetail, Metrics, Consumers,
-  Settings stub). Phase 2 ADDS write endpoints under /admin/v1/* and
-  new pages (IAM, Multipart, AuditLog, Settings, Buckets-with-tabs).
-- internal/adminapi/server.go: every new handler registered in routes()
-  via mux.HandleFunc("METHOD /admin/v1/<path>", s.handleX). Errors
-  via writeJSONError(w, status, code, message). Auth path is
-  authMiddleware -> sigv4 fallback -> session cookie verify; leave
-  the chain alone, just register handlers.
-- meta.Store admin surface ALL exists for the bucket-config triple
-  (Get / Set / Delete) for: Lifecycle, CORS, Policy, PublicAccessBlock,
-  OwnershipControls, Encryption, ObjectLockConfig, Notification,
-  Website, Replication, Logging, Tagging, ACL+Grants, Inventory.
-  IAM (CreateIAMUser / DeleteIAMUser / ListIAMUsers /
-  CreateIAMAccessKey / DeleteIAMAccessKey / UpdateIAMAccessKeyDisabled
-  / ListIAMAccessKeysByUser) all on main. ManagedPolicy +
-  AttachUserPolicy SHAPES ARE NEW (US-010 ships them in lockstep
-  across cassandra + memory + tikv with storetest contract entries).
-- Cassandra schema migrations are additive: alterStatements in
-  internal/meta/cassandra/schema.go via idempotent ALTER TABLE ADD
-  swallowed by isColumnAlreadyExists. New tables go in tableDDL
-  (idempotent CREATE TABLE IF NOT EXISTS). Memory + tikv mirror.
-- Audit middleware (internal/s3api/AuditMiddleware) wraps both S3 +
-  /admin/v1/* requests. Every Phase 2 write endpoint emits one
-  admin:<Action> row. Resource pattern: bucket:<name> for bucket
-  ops, object:<bucket>/<key> for object ops, iam:<UserName> /
-  iam-key:<AccessKey> / iam-policy:<Arn> for IAM ops.
-- Monaco editor: install monaco-editor + @monaco-editor/react. Lazy-
-  load via React.lazy + dynamic import inside the editor pages
-  (Lifecycle JSON tab, CORS JSON tab, Policy editor, ManagedPolicy
-  editor). Verify via vite build --report that monaco lives in its
-  own chunk under web/dist/assets/ and the home/metrics/buckets-
-  list bundles stay <=500 KiB gzipped.
-- Browser-side multipart upload (US-015): operator's session-cookie
-  identity is checked at presign-mint time; the URL is signed with a
-  server-held credential (not the operator's personal AK/SK). Web
-  Worker (web/src/workers/upload.ts) drives the part PUTs in
-  parallel so the UI thread stays responsive.
-- TanStack Query 5 invalidate pattern: every successful write calls
-  queryClient.invalidateQueries({queryKey: ['buckets']}) (or the
-  matching key) so the next read reflects the write. NO optimistic
-  UI; LWT round-trips are slow enough that fake-success leads to
-  confusing rollbacks.
-- Form state: react-hook-form (already in package.json) for every
-  form. Zod schemas mirror Go validators where practical.
-- shadcn/ui: extend the Phase 1 shadcn components rather than add
-  new libraries. Toast, Dialog, Select, Tabs, Table, Form, Sheet,
-  DropdownMenu, Skeleton, Card all exist under web/src/components/
-  ui/. Generate new shadcn components via pnpm exec shadcn add
-  <component> when needed.
-- BackendPresign toggle (US-020): meta.Store.SetBucketBackendPresign
-  + meta.Bucket.BackendPresign already on main from the s3-over-s3
-  merge. UI just calls PUT and reads from /admin/v1/cluster/status to
-  decide grey-out (cluster.data_backend != 's3').
-- ROADMAP maintenance rule (CLAUDE.md): every commit closing a
-  ROADMAP item flips the bullet to ~~strikethrough~~ Done format in
-  the same commit, with closing SHA inline (or `(commit pending)`
-  with a follow-up SHA edit). New gaps: add a fresh entry under the
-  right severity section in the same commit.
-- Phase boundaries (read these BEFORE adding scope creep):
-  - Phase 1 (SHIPPED, prd-archive/prd-web-ui-foundation.md): read-only
-    console.
-  - Phase 2 (THIS cycle, prd-web-ui-admin.md): write actions.
-  - Phase 3 (prd-web-ui-debug.md): performance debug tooling.
-  If a story tempts you toward debug heatmaps / OTel trace browser /
-  SSE audit-tail, STOP — those land in Phase 3. Phase 2 ships
-  write surface only.
-- Tests for the cycle: Go side via go test ./internal/adminapi/...
-  + go test ./internal/meta/... (storetest contract for new
-  ManagedPolicy/UserPolicy methods) + go test ./internal/s3api/...
-  (audit row assertion). Playwright via cd web && pnpm exec
-  playwright test admin.spec.ts. CI e2e-ui job runs both.
-- No metadata schema changes outside US-010 (ManagedPolicy +
-  UserPolicy attachment) and US-002 (admin_jobs for force-empty
-  job persistence). No data backend changes. No SSE / WebSocket
-  in Phase 2 (Phase 3 territory).
+### Backend
+- internal/s3api/validate.go: exported `ValidBucketName` wrapper for cross-package use.
+- internal/s3api/audit.go: added `AuditOverride` + `SetAuditOverride(ctx, action, resource, bucket, principal)` context-pointer mechanism. `AuditMiddleware.ServeHTTP` installs a fresh override pointer in ctx before calling Next; if the inner handler stamped an override, the middleware emits an audit row with the supplied action/resource/principal/bucket instead of the path-derived default. Unit-tested via TestAuditOverrideEmitsHandlerStampedRow in internal/s3api/audit_test.go.
+- internal/adminapi/types.go: added `Region` to `ClusterStatus` (so the create dialog can prefill the field) and `CreateBucketRequest` body type.
+- internal/adminapi/cluster.go: populate `Region: s.Region` in handleClusterStatus.
+- internal/adminapi/buckets_create.go (new): `POST /admin/v1/buckets` handler. Validates name via s3api.ValidBucketName (returns 400 InvalidBucketName); rejects versioning="Disabled" or object_lock_enabled+non-Enabled versioning with 400 InvalidArgument; CreateBucket -> 409 BucketAlreadyExists on collision; SetBucketRegion / SetBucketVersioning / SetBucketObjectLockEnabled invoked in sequence; stamps audit override (admin:CreateBucket, bucket:<name>); returns 201 + BucketDetail.
+- internal/adminapi/server.go: registered `POST /admin/v1/buckets` route.
+- internal/serverapp/serverapp.go: wrap `/admin/v1/` mux entry with `s3api.NewAuditMiddleware` so admin actions land in audit_log alongside S3 ones.
+- internal/adminapi/buckets_create_test.go (new): 8 cases — happy / default-versioning / invalid-name / reserved-name / 409 conflict / versioning=Disabled rejected / object_lock requires versioning=Enabled / object_lock happy / malformed JSON.
+
+### Frontend
+- web/src/api/cluster.ts: added `region` field to ClusterStatus type.
+- web/src/api/client.ts: added `createBucket(body)` wrapper + `CreateBucketBody` / `CreateBucketError` types. Throws CreateBucketError carrying `{code, status, message}` parsed from server JSON for inline rendering.
+- web/src/components/CreateBucketDialog.tsx (new): shadcn Dialog with name (live-validated against the same rules as s3api.ValidBucketName), region (defaults to /admin/v1/cluster/status `region`), Versioning radio (Suspended | Enabled, default Suspended), Object-Lock checkbox (greyed-out + tooltip when versioning=Suspended). Submit: POST /admin/v1/buckets; success -> close + invalidate `['buckets','list']` + `['buckets','top']` + toast; error -> inline server code+message, dialog stays open.
+- web/src/pages/Buckets.tsx: added Create button (top-right of header) wired to dialog; activated previously-disabled "Create your first bucket" empty-state CTA.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` all pass (incl. internal/adminapi, internal/s3api, internal/serverapp).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean (vite bundle OK).
+- Browser verification: deferred — dev-browser skill unavailable in this loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - Override-pointer-in-context is the cleanest way to let downstream handlers feed metadata back to outer middleware. The outer puts a `*T` into ctx before Next; the inner mutates the same struct; outer reads after Next returns. Avoids needing trailers / response-writer shims.
+  - The admin audit story will repeat across US-002..US-022 — every admin write should stamp `s3api.SetAuditOverride(ctx, "admin:<Verb>", "<resource-shape>", bucket, owner)`. Prefix = "admin:". Bucket-scoped ⇒ resource="bucket:<name>"; object-scoped ⇒ "object:<bucket>/<key>"; iam-scoped ⇒ "iam:<UserName>" or "iam-policy:<arn>".
+  - Frontend-side bucket-name validation must mirror the reserved-name set in internal/s3api/validate.go::reservedBucketNames; if the gateway adds another reserved prefix, update the dialog regex too. Helper `nameViolation()` in CreateBucketDialog.tsx is the place.
+- Gotchas:
+  - `errorResponse` is unexported in internal/adminapi/server.go — tests in the same package can decode it directly; from outside packages you need to define your own. Keep adminapi tests in-package.
+  - When wrapping /admin/v1/ with audit middleware, the middleware stamps the override pointer onto the inner ctx. Admin handlers must call `s3api.SetAuditOverride` on `r.Context()` *inside* the handler — not before returning the response — because the middleware reads the override after Next.ServeHTTP returns.
+  - shadcn `<Dialog onOpenChange>` fires both on ESC and on the X button — so a single state setter is enough; no separate close handler needed.
+  - `auth.WithAuth(ctx, &AuthInfo{Owner: ...})` is how unit tests can inject an authenticated identity when bypassing authMiddleware via `s.routes()` directly.
+- Useful context:
+  - `internal/adminapi/buckets_list_test.go::seedBucketWithOwner` is a handy test helper for pre-loading buckets+objects with a chosen owner.
+  - `internal/adminapi/server_test.go::newTestServer` builds an in-memory adminapi.Server with Region="test-region" and a JWTSecret so cookie-auth tests work without external deps.
+  - The Buckets page (web/src/pages/Buckets.tsx) is the central anchor for bucket-related operator actions; future stories add the Delete button, force-empty job UI, and lifecycle/CORS/Policy tabs to BucketDetail.tsx.
+---

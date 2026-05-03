@@ -32,6 +32,11 @@ var reservedBucketNames = map[string]struct{}{
 	".well-known": {}, // RFC 5785 reserved
 }
 
+// ValidBucketName is the public alias for validBucketName so packages outside
+// s3api (e.g. adminapi) can validate names against the same rules without
+// duplicating the regex.
+func ValidBucketName(name string) bool { return validBucketName(name) }
+
 // validBucketName checks the S3 DNS-safe bucket name rules:
 //
 //	length 3..63, lowercase letters / digits / hyphen / dot,
