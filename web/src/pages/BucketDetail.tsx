@@ -49,6 +49,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
 import { BucketACLTab } from '@/components/BucketACLTab';
+import { BucketAccessLogTab } from '@/components/BucketAccessLogTab';
 import { BucketCORSTab } from '@/components/BucketCORSTab';
 import { BucketInventoryTab } from '@/components/BucketInventoryTab';
 import { BucketLifecycleTab } from '@/components/BucketLifecycleTab';
@@ -279,6 +280,9 @@ export function BucketDetailPage() {
           <TabsTrigger value="inventory" disabled={!detail}>
             Inventory
           </TabsTrigger>
+          <TabsTrigger value="access-log" disabled={!detail}>
+            Access Log
+          </TabsTrigger>
         </TabsList>
         <TabsContent value="overview" className="space-y-4">
           {detail && <BucketOverviewTab bucket={detail} />}
@@ -297,6 +301,9 @@ export function BucketDetailPage() {
         </TabsContent>
         <TabsContent value="inventory" className="space-y-4">
           {detail && <BucketInventoryTab bucket={detail} />}
+        </TabsContent>
+        <TabsContent value="access-log" className="space-y-4">
+          {detail && <BucketAccessLogTab bucket={detail} />}
         </TabsContent>
         <TabsContent value="objects">
       <Card>

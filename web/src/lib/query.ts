@@ -79,6 +79,7 @@ export const queryKeys = {
     policy: (name: string) => ['buckets', 'policy', name] as const,
     acl: (name: string) => ['buckets', 'acl', name] as const,
     inventory: (name: string) => ['buckets', 'inventory', name] as const,
+    logging: (name: string) => ['buckets', 'logging', name] as const,
   },
   consumers: {
     top: (by: string, limit: number) => ['consumers', 'top', by, limit] as const,

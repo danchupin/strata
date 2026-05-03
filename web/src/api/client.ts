@@ -511,6 +511,65 @@ export async function deleteBucketInventory(
   throw await buildAdminError(resp, 'delete inventory failed');
 }
 
+// Logging (US-009) — JSON wire shape mirrors LoggingConfigJSON in
+// internal/adminapi/buckets_logging.go. The admin layer translates JSON↔XML
+// so the s3api consumer / access-log worker keep reading the AWS XML shape
+// unchanged.
+export type LoggingPermission = 'FULL_CONTROL' | 'READ' | 'WRITE';
+
+export interface LoggingGrant {
+  grantee_type: ACLGranteeType;
+  id?: string;
+  uri?: string;
+  display_name?: string;
+  email?: string;
+  permission: LoggingPermission;
+}
+
+export interface LoggingConfig {
+  target_bucket: string;
+  target_prefix: string;
+  target_grants?: LoggingGrant[];
+}
+
+// fetchBucketLogging returns the bucket's logging configuration. Returns null
+// on 404 NoSuchBucketLoggingConfiguration so the editor can render the empty
+// state without forcing the caller to catch the error.
+export async function fetchBucketLogging(name: string): Promise<LoggingConfig | null> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(name)}/logging`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (resp.status === 404) return null;
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch logging failed');
+  return (await resp.json()) as LoggingConfig;
+}
+
+export async function setBucketLogging(
+  name: string,
+  cfg: LoggingConfig,
+): Promise<void> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(name)}/logging`,
+    {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg),
+    },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'set logging failed');
+}
+
+export async function deleteBucketLogging(name: string): Promise<void> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(name)}/logging`,
+    { method: 'DELETE', credentials: 'same-origin' },
+  );
+  if (resp.status === 204) return;
+  throw await buildAdminError(resp, 'delete logging failed');
+}
+
 export async function fetchBucket(name: string): Promise<BucketDetail> {
   const resp = await fetch(`/admin/v1/buckets/${encodeURIComponent(name)}`, {
     method: 'GET',
