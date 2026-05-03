@@ -132,6 +132,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("PUT /admin/v1/buckets/{bucket}/policy", s.handleBucketSetPolicy)
 	mux.HandleFunc("DELETE /admin/v1/buckets/{bucket}/policy", s.handleBucketDeletePolicy)
 	mux.HandleFunc("POST /admin/v1/buckets/{bucket}/policy/dry-run", s.handleBucketDryRunPolicy)
+	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/acl", s.handleBucketGetACL)
+	mux.HandleFunc("PUT /admin/v1/buckets/{bucket}/acl", s.handleBucketSetACL)
 	mux.HandleFunc("GET /admin/v1/buckets/top", s.handleBucketsTop)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}", s.handleBucketGet)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/objects", s.handleObjectsList)

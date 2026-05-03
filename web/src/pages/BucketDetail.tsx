@@ -48,6 +48,7 @@ import {
 } from '@/components/ui/table';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
+import { BucketACLTab } from '@/components/BucketACLTab';
 import { BucketCORSTab } from '@/components/BucketCORSTab';
 import { BucketLifecycleTab } from '@/components/BucketLifecycleTab';
 import { BucketOverviewTab } from '@/components/BucketOverviewTab';
@@ -271,6 +272,9 @@ export function BucketDetailPage() {
           <TabsTrigger value="policy" disabled={!detail}>
             Policy
           </TabsTrigger>
+          <TabsTrigger value="acl" disabled={!detail}>
+            ACL
+          </TabsTrigger>
         </TabsList>
         <TabsContent value="overview" className="space-y-4">
           {detail && <BucketOverviewTab bucket={detail} />}
@@ -283,6 +287,9 @@ export function BucketDetailPage() {
         </TabsContent>
         <TabsContent value="policy" className="space-y-4">
           {detail && <BucketPolicyTab bucket={detail} />}
+        </TabsContent>
+        <TabsContent value="acl" className="space-y-4">
+          {detail && <BucketACLTab bucket={detail} />}
         </TabsContent>
         <TabsContent value="objects">
       <Card>

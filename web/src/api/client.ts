@@ -385,6 +385,57 @@ export async function dryRunBucketPolicy(
   throw await buildAdminError(resp, 'dry-run policy failed');
 }
 
+// ACL types (US-007). canned is one of:
+//   private | public-read | public-read-write | authenticated-read | log-delivery-write
+// grants is the explicit Grant list (independent of canned).
+export type ACLCanned =
+  | 'private'
+  | 'public-read'
+  | 'public-read-write'
+  | 'authenticated-read'
+  | 'log-delivery-write';
+
+export type ACLGranteeType = 'CanonicalUser' | 'Group' | 'AmazonCustomerByEmail';
+export type ACLPermission =
+  | 'FULL_CONTROL'
+  | 'READ'
+  | 'WRITE'
+  | 'READ_ACP'
+  | 'WRITE_ACP';
+
+export interface ACLGrant {
+  grantee_type: ACLGranteeType;
+  id?: string;
+  uri?: string;
+  display_name?: string;
+  email?: string;
+  permission: ACLPermission;
+}
+
+export interface ACLConfig {
+  canned: ACLCanned;
+  grants: ACLGrant[];
+}
+
+export async function fetchBucketACL(name: string): Promise<ACLConfig> {
+  const resp = await fetch(`/admin/v1/buckets/${encodeURIComponent(name)}/acl`, {
+    method: 'GET',
+    credentials: 'same-origin',
+  });
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch acl failed');
+  return (await resp.json()) as ACLConfig;
+}
+
+export async function setBucketACL(name: string, body: ACLConfig): Promise<void> {
+  const resp = await fetch(`/admin/v1/buckets/${encodeURIComponent(name)}/acl`, {
+    method: 'PUT',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) throw await buildAdminError(resp, 'set acl failed');
+}
+
 export async function fetchBucket(name: string): Promise<BucketDetail> {
   const resp = await fetch(`/admin/v1/buckets/${encodeURIComponent(name)}`, {
     method: 'GET',

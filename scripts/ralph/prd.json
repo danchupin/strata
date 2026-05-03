@@ -135,8 +135,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Backend handlers in internal/adminapi/buckets_acl.go (GET/PUT). GET returns {canned, grants[]}; canned defaults to 'private' when bucket has no ACL header set; missing grants tolerated via errors.Is(ErrNoSuchGrants). PUT accepts canned in {private|public-read|public-read-write|authenticated-read|log-delivery-write} (lower-cased server-side; rejects others 400 InvalidArgument); validates per-grant grantee_type ∈ {CanonicalUser|Group|AmazonCustomerByEmail}, permission ∈ {FULL_CONTROL|READ|WRITE|READ_ACP|WRITE_ACP}, and that CanonicalUser grants carry id, Group grants carry uri, AmazonCustomerByEmail grants carry email. Persists in two store calls: SetBucketACL(name, canned) + SetBucketGrants(bucketID, grants). Audit override admin:SetBucketACL. 14 in-package unit tests cover happy round-trip across all three grantee shapes, log-delivery-write canned, bad canned/grantee/permission, missing-id/missing-uri/missing-email, malformed JSON, bucket-not-found, empty-grants-clears, and case-normalisation. Frontend: BucketACLTab.tsx with two cards — Canned ACL radio (5 options with hint copy) and Explicit grants (per-row Grantee Type select + identifier field that swaps shape on grantee_type change + Permission select + display_name on CanonicalUser + Remove button + Add grant). Group grants offer a preset URI dropdown of canonical AWS groups (AllUsers/AuthenticatedUsers/LogDelivery) plus 'Custom URI…' to type a freeform URI. Save calls setBucketACL then invalidates queryKeys.buckets.acl(name) so the form reloads from GetBucketGrants per AC. Browser smoke deferred — dev-browser skill unavailable in this Ralph loop."
     },
     {
       "id": "US-008",

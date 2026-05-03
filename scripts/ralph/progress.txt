@@ -24,6 +24,7 @@ Started: Sun May  3 17:17:18 MSK 2026
 - DELETE endpoints for "bucket has one optional config document" (CORS, future Policy, Logging, etc.) MUST be idempotent — `errors.Is(err, meta.ErrNoSuch*) → 204`. Avoids the client needing a pre-check round-trip and matches the AWS S3 contract.
 - For JSON-document configs (bucket policy) where validation lives in a sibling Go package (not s3api), still expose the validator from `internal/s3api/validate.go` as `s3api.Validate<Thing>Blob` — adminapi imports only s3api, never auth/policy directly, so the surface stays consistent across config tabs (CORS/Policy/ACL/Lifecycle).
 - Bucket-policy storage is the raw operator-supplied JSON (no XML translation). PUT canonicalises via `json.Marshal`+2-space indent (`canonicalisePolicyJSON`) before SetBucketPolicy so re-loads after Save are byte-stable in Monaco — avoids whitespace-only diffs surprising the operator.
+- Bucket ACL split: canned lives on bucket (SetBucketACL by name), explicit grants live separately (SetBucketGrants by bucketID). GetBucketGrants returns `meta.ErrNoSuchGrants` when none stored — tolerate with errors.Is, don't 500. log-delivery-write is a valid canned value at the admin layer even though s3api's normalizeCannedACL maps unknown values back to private; the admin endpoint persists the literal string for buckets that opt into S3 access logging.
 
 ## Sun May  3 17:27 MSK 2026 - US-001
 - Implemented CreateBucket dialog (POST /admin/v1/buckets + UI) per PRD AC.
@@ -274,4 +275,43 @@ Started: Sun May  3 17:17:18 MSK 2026
   - `internal/auth/policy/policy.go::Parse` is the authoritative validator. Version field is optional; Effect ∈ {Allow, Deny} is the only required string-enum; Action / Resource accept "*"/"?" globs; Principal accepts "*" or {AWS:[…]}; Condition accepts only StringEquals semantics today (more operators ignored, not rejected).
   - `web/src/components/BucketPolicyTab.tsx` is the canonical Monaco-only template for US-013 (Managed Policy editor). The visual-editor sibling pattern (US-004/US-005) does NOT apply — IAM policy semantics don't decompose cleanly into UI controls.
   - The Generate template Select uses `value=""` + `onValueChange` so picking an item doesn't pin a selection on the trigger — every pick resets to placeholder "Insert starter policy…" so consecutive picks work without an extra reset click.
+---
+
+## Sun May  3 20:37 MSK 2026 - US-007
+- Implemented Bucket ACL editor (canned + grants) per PRD AC.
+
+### Backend
+- internal/adminapi/buckets_acl.go (new): handleBucketGetACL (GET → {canned, grants}; defaults canned='private' when bucket has no ACL set; tolerates `meta.ErrNoSuchGrants` via errors.Is so a fresh bucket returns []), handleBucketSetACL (PUT — canned in {private|public-read|public-read-write|authenticated-read|log-delivery-write} lower-cased server-side; per-grant validation: grantee_type ∈ {CanonicalUser|Group|AmazonCustomerByEmail}, permission ∈ {FULL_CONTROL|READ|WRITE|READ_ACP|WRITE_ACP}; CanonicalUser requires id, Group requires uri, AmazonCustomerByEmail requires email). Two-step persist: SetBucketACL(name, canned) + SetBucketGrants(bucketID, grants). Audit override admin:SetBucketACL.
+- internal/adminapi/server.go: registered GET/PUT /admin/v1/buckets/{bucket}/acl.
+- internal/adminapi/buckets_acl_test.go (new): 14 cases — GetDefault (no ACL → private + empty grants), GetBucketNotFound 404, PutCannedAndGrantsRoundTrip (all three grantee shapes), PutLogDeliveryWriteCanned, PutBadCanned 400, PutBadGranteeType 400, PutCanonicalRequiresID/PutGroupRequiresURI/PutEmailRequiresEmail 400, PutBadPermission 400, PutBucketNotFound 404, PutEmptyGrantsClears (round-trip with empty list), PutCannedNormalizedLower (whitespace+casing trimmed), PutMalformedJSON 400, GrantsPersistedInMeta (direct GetBucketGrants assertion).
+
+### Frontend
+- web/src/api/client.ts: ACLCanned/ACLGranteeType/ACLPermission/ACLGrant/ACLConfig types + fetchBucketACL/setBucketACL wrappers (PUT returns 204; GET returns {canned, grants}).
+- web/src/lib/query.ts: queryKeys.buckets.acl(name).
+- web/src/components/BucketACLTab.tsx (new): two cards. Canned ACL card with 5 radio options + hint copy per option. Explicit grants card with per-row Grantee Type select + identifier field that swaps shape on grantee_type change + Permission select + optional display_name input on CanonicalUser + Remove button + 'Add grant' inserter. Group grants offer a preset URI dropdown (AllUsers/AuthenticatedUsers/LogDelivery) + 'Custom URI…' for freeform input. AmazonCustomerByEmail uses an email input. Client-side preflight catches missing-id/uri/email before the network round-trip; server-side validation is the authoritative check. Save calls setBucketACL then invalidates queryKeys.buckets.acl(name) so the form reloads from GetBucketGrants per AC ("Save reloads from GetBucketGrants to confirm round-trip").
+- web/src/pages/BucketDetail.tsx: added ACL tab trigger + content alongside existing Overview/Lifecycle/CORS/Policy/Objects.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` — all packages pass (incl. new buckets_acl_test.go suite).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean. Bundle sizes (gzipped):
+  - main: 140.96 KiB ✓ (under the 500 KiB AC ceiling; +1.36 KiB vs US-006 baseline of 139.60)
+  - Metrics route: 109.44 KiB (unchanged)
+  - MonacoJsonEditor lazy chunk: 591.94 KiB (unchanged — ACL tab does NOT pull Monaco)
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - Two-call persist (SetBucketACL by name + SetBucketGrants by ID) is the existing meta surface — don't try to consolidate into one. The two columns serve distinct semantics: canned is the bucket-wide preset (string column), grants is the explicit override list (separate table). The s3api gateway's `getBucketACL` already prefers grants over canned when both exist; the admin endpoint mirrors that priority.
+  - `meta.ErrNoSuchGrants` is the sentinel for "no explicit grants" — admin GET handlers must `errors.Is(err, meta.ErrNoSuchGrants)` and return an empty list, not 500. Same shape as ErrNoSuchCORS / ErrNoSuchBucketPolicy / ErrNoSuchLifecycle.
+  - log-delivery-write is a 5th valid canned ACL the admin endpoint must accept literally — s3api's normalizeCannedACL falls back to private for unknown values, but that's a request-time normalization for x-amz-acl headers, NOT a write-side gate. Admin endpoints persist the literal string so buckets used as access-log targets keep their canned value across round-trips.
+- Gotchas:
+  - When swapping grantee_type on an existing row, clear the type-incompatible identifier fields (id/uri/email) so the next save doesn't accidentally carry stale data the validator would reject. See `changeGranteeType` in BucketACLTab.tsx — the type switch resets the appropriate fields.
+  - The Select primitive does NOT accept value="" when the SelectItem list excludes empty string — Radix throws "A <Select.Item /> must have a value prop that is not an empty string". For the Group preset dropdown, use a sentinel `'custom'` value and detect it explicitly.
+  - Backend 'PutEmptyGrantsClears' relies on SetBucketGrants accepting `[]meta.Grant{}` — verified via the test. Memory backend wipes the bucket→grants slice; cassandra/tikv replace it. No special-casing needed.
+- Useful context:
+  - The full reserved canned-ACL list is mirrored in adminapi/buckets_acl.go::allowedCannedACLs and again client-side in BucketACLTab.tsx::CANNED_OPTIONS — keep the two in sync if the canned set ever expands (e.g. bucket-owner-read / bucket-owner-full-control for S3-on-Outposts).
+  - The Group URI preset list in CANNED_OPTIONS adjacent GROUP_URIS mirrors internal/s3api/acl.go::allowedGroupURIs. If s3api's URI allow-list grows, copy the new URI into both the s3api map AND the admin component preset list.
+  - BucketACLTab.tsx is the canonical chip-free per-row editor pattern; the Multipart watchdog (US-017) and Audit log (US-018) filter panels can lift the 'Select primitive + Input + Remove button + Add row' shape directly.
 ---
