@@ -1,19 +1,38 @@
 # PRD: Web UI — Debug Tooling (Phase 3 of 3)
 
-> **Status:** Outline. Detailed AC will be authored when
-> `prd-web-ui-foundation.md` and `prd-web-ui-admin.md` ship.
+> **Status:** Outline. Detailed AC will be authored at story-start.
+> Phase 1 (`prd-web-ui-foundation.md`) shipped 2026-05-03 (`e27cf21`).
+> Phase 2 (`prd-web-ui-admin.md`) is queued. Phase 3 ships after Phase 2.
 >
-> **Backend audit (2026-05-02 — main = modern-complete + binary-
-> consolidation + tikv-meta-backend merged):** every backing surface
-> Phase 3 reads from already exists on main. OTel tracing through
-> Cassandra + RADOS shipped in `modern-complete` (US-033). Audit log
-> + per-request `request_id` correlation shipped (US-022). Per-bucket
-> shard layout via `meta.Bucket.ShardCount` shipped. Prometheus
-> request metrics shipped. Per-Strata-replica heartbeat lands in
-> Phase 1 (US-006). The new surfaces this PRD adds are: SSE audit
-> stream endpoint, slow-queries table backed by audit-log filter,
-> OTel trace buffer / forward, hot-bucket / hot-shard heatmap
-> aggregations.
+> **Backend audit (2026-05-03, post-merge `main` = modern-complete +
+> binary-consolidation + tikv-meta-backend + web-ui-foundation +
+> s3-over-s3-backend):**
+>
+> - Every backing surface Phase 3 reads from already exists on main.
+>   OTel tracing through Cassandra + RADOS (`modern-complete` US-033).
+>   Audit log + per-request `request_id` correlation (US-022).
+>   Per-bucket shard layout via `meta.Bucket.ShardCount`. Prometheus
+>   request metrics. Per-Strata-replica heartbeat is **shipped on main**
+>   via `internal/heartbeat` (memory + cassandra stores) — was Phase 1
+>   US-006, no longer forward-looking.
+> - **TiKV heartbeat gap:** `internal/heartbeat` ships memory + cassandra
+>   only. TiKV-backed deployments need a TiKV heartbeat store before the
+>   Per-node Drilldown story (US-011 below) populates. Tracked under
+>   ROADMAP "Web UI — TiKV heartbeat backend" (P3).
+> - **Hot Shards on s3-over-s3 backend:** the s3-backend stores one
+>   Strata object as one backend object via backend multipart upload —
+>   no chunking, no shards. Hot-Shards heatmap is meaningful only for
+>   RADOS-backed clusters; on s3-backend the page should display a
+>   short explanatory note instead of the empty heatmap.
+> - **Object-store SSE shape:** s3-over-s3 records SSE disposition per
+>   object on `Manifest.SSE`. Slow-Queries / OTel trace browser should
+>   surface this when relevant (encrypted-vs-cleartext branches differ
+>   in latency on some backends).
+>
+> The new surfaces this PRD adds: SSE audit stream endpoint, slow-queries
+> table backed by audit-log filter, OTel trace buffer / forward, hot-
+> bucket / hot-shard heatmap aggregations, per-node drilldown,
+> bucket-shard distribution view.
 
 ## Introduction
 
@@ -68,8 +87,10 @@ After Phase 3 an operator can answer:
 - US-006: OTel trace waterfall renderer
 - US-007: Hot Buckets heatmap backend
 - US-008: Hot Buckets heatmap UI
-- US-009: Hot Shards heatmap backend (per-bucket)
-- US-010: Hot Shards heatmap UI
+- US-009: Hot Shards heatmap backend (per-bucket; RADOS-backed clusters
+  only — s3-over-s3 has no shards)
+- US-010: Hot Shards heatmap UI (renders empty-state with explainer
+  when `STRATA_DATA_BACKEND=s3`)
 - US-011: Per-node drilldown panel (CPU / RAM / FD / goroutines / GC)
 - US-012: Bucket-Shard Distribution tab on bucket detail page
 - US-013: Replication Lag chart

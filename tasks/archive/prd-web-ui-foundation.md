@@ -1,5 +1,17 @@
 # PRD: Web UI — Foundation (Phase 1 of 3)
 
+> **Status: SHIPPED.** All 12 stories merged into `main` via commit
+> `e27cf21` on 2026-05-03. The embedded React+TS console is live at
+> `/console/` on the gateway port; `/admin/v1/*` JSON API serves the
+> read-only dashboards. `internal/heartbeat` (memory + cassandra) and
+> `internal/adminapi` packages exist on `main`. `reservedBucketNames`
+> is closed in `internal/s3api/validate.go` (rejects `console`, `admin`,
+> `metrics`, `healthz`, `readyz`, `.well-known`). The branch's executed
+> snapshot is preserved at
+> `scripts/ralph/archive/2026-05-03-web-ui-foundation/`. Phase 2
+> (`prd-web-ui-admin.md`) and Phase 3 (`prd-web-ui-debug.md`) build on
+> this foundation.
+
 ## Introduction
 
 Strata today ships two binaries (`strata`, `strata-admin`) and exposes

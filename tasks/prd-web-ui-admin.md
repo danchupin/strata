@@ -1,19 +1,34 @@
 # PRD: Web UI — Admin (Phase 2 of 3)
 
-> **Status:** Outline. Detailed AC will be authored when
-> `prd-web-ui-foundation.md` ships and the embedded console is live.
-> This file holds the scope sketch so the foundation PRD's Non-Goals
-> have a concrete forward pointer.
+> **Status:** Outline. Detailed AC will be authored at story-start.
+> Phase 1 (`prd-web-ui-foundation.md`) shipped on 2026-05-03 via commit
+> `e27cf21` — embedded console at `/console/`, `/admin/v1/*` JSON API
+> with read-only handlers, `internal/adminapi` + `internal/heartbeat`
+> packages live on `main`. Phase 2 builds on this foundation.
 >
-> **Backend audit (2026-05-02 — main = modern-complete + binary-
-> consolidation + tikv-meta-backend merged):** every admin surface
-> Phase 2 wraps already exists on main. Bucket lifecycle / CORS /
-> policy / ACL / inventory / access-log endpoints shipped in
-> `modern-complete`. IAM users + access keys + STS shipped in
-> `modern-complete` (US-036 family). Object Lock retention + legal-
-> hold shipped. Audit log + retention sweeper shipped. Multipart
-> upload tracking shipped. Phase 2 wraps these in UI; no backend
-> changes required.
+> **Backend audit (2026-05-03, post-merge `main` = modern-complete +
+> binary-consolidation + tikv-meta-backend + web-ui-foundation +
+> s3-over-s3-backend):**
+>
+> - Every S3 admin surface Phase 2 wraps already exists on main: bucket
+>   lifecycle / CORS / policy / ACL / inventory / access-log /
+>   notification / replication / website / encryption / object-lock
+>   endpoints (modern-complete). IAM users + access keys + STS
+>   (modern-complete US-036 family). Audit log + retention sweeper.
+>   Multipart upload tracking. Phase 2 wraps these in UI; no backend
+>   changes required.
+> - **NEW (s3-over-s3 merge):** `meta.Bucket.BackendPresign` per-bucket
+>   toggle and `meta.Store.SetBucketBackendPresign` data-side
+>   implementation already exist (US-016 of `prd-s3-over-s3-backend`).
+>   Phase 2 needs an admin endpoint + UI toggle on bucket detail
+>   to flip the flag — see new US-021 below.
+> - **NEW (s3-over-s3 merge):** `STRATA_S3_BACKEND_*` env vars (endpoint,
+>   region, bucket, force-path-style, part-size, retries, SSE mode +
+>   KMS key). Settings page should expose these read-only.
+> - **Phase 1 surface available to Phase 2:** versioned `/admin/v1/*`
+>   API with HS256 JWT session cookies (24 h, HttpOnly, SameSite=Strict,
+>   Path=/admin) + SigV4 fallback. Add Phase 2 write endpoints under
+>   `/admin/v1/`.
 
 ## Introduction
 
@@ -72,6 +87,17 @@ tooling lives there.
 - US-019: Playwright e2e for admin flows
 - US-020: docs/ui.md Phase 2 capability matrix update + ROADMAP
   close-flip
+- US-021: BackendPresign toggle (s3-over-s3 backends only).
+  PUT `/admin/v1/buckets/{bucket}/backend-presign` flips
+  `meta.Bucket.BackendPresign` via the existing
+  `meta.Store.SetBucketBackendPresign` helper. UI toggle on bucket
+  detail; greyed-out + tooltip when `STRATA_DATA_BACKEND != s3`
+- US-022: Settings page exposes S3-backend config read-only —
+  `STRATA_S3_BACKEND_ENDPOINT / REGION / BUCKET / FORCE_PATH_STYLE /
+  PART_SIZE / UPLOAD_CONCURRENCY / MAX_RETRIES / OP_TIMEOUT_SECS /
+  SSE_MODE / SSE_KMS_KEY_ID`. Reads from `cfg.S3Backend` via a new
+  `GET /admin/v1/cluster/data-backend` endpoint that returns the
+  effective config (secrets masked)
 
 ## Non-Goals
 
