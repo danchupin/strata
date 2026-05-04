@@ -125,7 +125,7 @@
         "Tests pass — fake `promclient.Client` matrix response + cache-hit second call asserts no second Prom call"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

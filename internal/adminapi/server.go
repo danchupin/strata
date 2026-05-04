@@ -106,6 +106,12 @@ type Server struct {
 	// the endpoint with 503 RingbufUnavailable.
 	TraceRingbuf *ringbuf.RingBuffer
 
+	// hotBucketsMu guards lazy initialisation of hotBucketsCacheVal — the
+	// 30s TTL cache that absorbs burst polls of /admin/v1/diagnostics/
+	// hot-buckets (US-007).
+	hotBucketsMu       sync.Mutex
+	hotBucketsCacheVal *hotBucketsCache
+
 	// jobsMu guards background-job goroutines. Currently only the
 	// force-empty drain (US-002) registers here; we cancel the goroutine
 	// on Server shutdown so a graceful drain doesn't outlive the gateway.
@@ -341,6 +347,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/v1/audit/stream", s.handleAuditStream)
 	mux.HandleFunc("GET /admin/v1/diagnostics/slow-queries", s.handleDiagnosticsSlowQueries)
 	mux.HandleFunc("GET /admin/v1/diagnostics/trace/{requestID}", s.handleDiagnosticsTrace)
+	mux.HandleFunc("GET /admin/v1/diagnostics/hot-buckets", s.handleDiagnosticsHotBuckets)
 	mux.HandleFunc("GET /admin/v1/settings", s.handleGetSettings)
 	mux.HandleFunc("GET /admin/v1/settings/data-backend", s.handleGetSettingsDataBackend)
 	mux.HandleFunc("POST /admin/v1/settings/jwt/rotate", s.handleRotateJWTSecret)

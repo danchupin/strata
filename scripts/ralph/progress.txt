@@ -18,6 +18,8 @@ Cycle: ralph/web-ui-debug
 - Custom `sdktrace.SpanProcessor` impls (e.g. `internal/otel/ringbuf`) install alongside the OTLP tail-sampler in `otel.InitWithConfig` via `WithSpanProcessor` repeated. Test by feeding `tracetest.SpanStubs{...}.Snapshots()` into `OnEnd` directly — the SDK's `ReadOnlySpan` interface is unexported.
 - New OTel/observability options ride on `otel.InitOptions{Logger, RingbufMetrics}` rather than as new free-standing env vars. Production reads env in `Init`, tests inject directly via `InitWithConfig`. Keep prometheus out of leaf otel packages — adapter type lives in `internal/metrics/metrics.go`.
 - Operator-config-derived fields on `ClusterStatus` (the JSON returned by `/admin/v1/cluster/status`) plumb through `adminapi.Config → Server → handler`, are tagged `,omitempty` on the Go side / `?: string` on the TS side, and read their value once in `internal/serverapp/serverapp.go`. UI branches on presence — no sentinel strings. Pair every new field with an omitempty assertion (see `TestClusterStatusOtelEndpoint`).
+- PromQL-backed admin endpoints follow a uniform shape: parse `range`/`step` with `parsePositiveDuration` (default-fallback + reject-non-positive), 503 `MetricsUnavailable` when `s.Prom.Available()` is false, run `prom.QueryRange`, top-N trim by sum-of-values, response shape `{matrix: [{label_value, values: [{ts, value}]}]}`. Cache responses behind a tiny TTL map keyed on `(range, step)` (lazy-init via mutex on `*Server`); inject the clock as `cache.now func() time.Time` so tests can pin it.
+- `internal/promclient.Client` caps in-flight queries via a buffered-channel semaphore (`DefaultMaxInflight=10`) — `Query`/`QueryRange` `acquire` before dispatching the HTTP request, `release` on defer, ctx-cancel returns wrapped `ErrUnavailable`. New PromQL endpoints inherit the cap automatically.
 
 ## 2026-05-04 — US-001 — SSE audit-tail backend
 - Implemented `internal/auditstream` package with `Broadcaster`, `Filter`, `MetricsSink` interface, 256-buffer per-subscriber channel, non-blocking publish, once/minute slow-sub WARN, ctx-cancel removes subscriber.
@@ -133,3 +135,21 @@ Cycle: ralph/web-ui-debug
   - Attribute key→value sorting and `db.statement` 200-char truncation live in the page (`spanHoverText` + `attrToString`). The ring buffer round-trips raw values; truncation is a UI concern only.
 ---
 
+
+
+## 2026-05-04 — US-007 — Hot Buckets heatmap backend (PromQL)
+- Added `DefaultMaxInflight=10` semaphore to `internal/promclient.Client` — `Query`/`QueryRange` acquire before HTTP dispatch, ctx-cancel returns wrapped `ErrUnavailable`. Allocated in `New`, nil-safe for zero-value Client.
+- New `internal/adminapi/diagnostics_hot_buckets.go` handler `GET /admin/v1/diagnostics/hot-buckets` — parses `range`/`step` (defaults 1h / 1m), 400 InvalidArgument on non-positive, 503 `MetricsUnavailable` when Prom unset. Runs PromQL `sum by (bucket) (rate(strata_http_requests_total[1m]))` over `QueryRange(now-range, now, step)`, trims to top-50 by total request count, tie-broken by bucket name.
+- Wire shape `{matrix: [{bucket, values: [{ts, value}]}]}` so the heatmap UI in US-008 can render directly without re-shaping. Stamps `admin:GetHotBuckets` audit override against `diagnostics:hot-buckets`.
+- 30s TTL cache (`hotBucketsCache`) keyed on `(range, step)` with overridable `now` clock — lazy-initialised via `s.hotBucketsMu` so the empty-test-server constructor stays unchanged. Cache sits inline (no LRU eviction needed: keyspace is bounded by the UI dropdown).
+- Wired `mux.HandleFunc("GET /admin/v1/diagnostics/hot-buckets", s.handleDiagnosticsHotBuckets)` in `Server.routes()`.
+- Tests: `TestDiagnosticsHotBucketsReturnsMatrix` (fake Prom matrix → bucket ranking by total-rate DESC), `TestDiagnosticsHotBucketsCachesPerRangeStep` (asserts second call to same `(range,step)` does NOT hit Prom; distinct `(range,step)` does), `TestDiagnosticsHotBucketsCacheRespectsTTL` (clock injection; advance past 30s → re-fetches), `TestDiagnosticsHotBucketsRejectsBadRange` (5 sub-cases for invalid `range`/`step`), `TestDiagnosticsHotBucketsPromUnavailable` (503 + `MetricsUnavailable` code), `TestDiagnosticsHotBucketsTrimsToTopN` (55 buckets in → exactly 50 out, top-ranked retained).
+- Files changed: `internal/promclient/promclient.go`, `internal/adminapi/{diagnostics_hot_buckets,diagnostics_hot_buckets_test,server}.go`.
+- Quality: `go vet ./...` ✓, `go build ./...` ✓, `go test ./...` ✓.
+- **Learnings for future iterations:**
+  - The semaphore lives on `Client.sem` (buffered chan struct{}) and acquire/release cooperate with ctx cancellation via `select`. Tests that build literals (no `New`) get a nil sem — `acquire` no-ops in that case so unit tests stay one-line. New PromQL callers inherit the cap automatically without per-handler wiring.
+  - Cache clock injection trick: store `now func() time.Time` on the cache struct (default `time.Now`), expose via `s.hotBuckets()` so the test can swap it after the lazy-init. Avoids `time.Sleep(30s)` in the TTL test (~instant).
+  - `QueryRange`'s response Series's `Metric` map carries the labels — `s.Metric["bucket"]` extracts the dimension. Empty bucket label means a series without the grouping label (fan-out artifact); skip it rather than render a blank-named heatmap row.
+  - For top-N selection use `sort.SliceStable` with secondary tie-breaker on bucket name — keeps the heatmap row order deterministic across polls so the UI doesn't shuffle visually.
+  - 503 `MetricsUnavailable` is the right status when Prom is unset (vs the bucket-list endpoint's `metrics_available=false` payload). Reason: this endpoint has NO non-Prom path — there is nothing meaningful to render without metrics. The UI in US-008 reads the 503 status as the empty-state trigger; do NOT change to a 200 with an empty matrix.
+---
