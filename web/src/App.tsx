@@ -11,6 +11,7 @@ import { BucketDetailPage } from '@/pages/BucketDetail';
 import { ConsumersPage } from '@/pages/Consumers';
 import { IAMPage } from '@/pages/IAM';
 import { IAMUserDetailPage } from '@/pages/IAMUserDetail';
+import { MultipartPage } from '@/pages/Multipart';
 import { SettingsPage } from '@/pages/Settings';
 
 // Metrics page lazy-loads recharts (~110 KiB gzipped) only when the operator
@@ -45,6 +46,7 @@ export function App() {
         <Route path="/consumers" element={<ConsumersPage />} />
         <Route path="/iam" element={<IAMPage />} />
         <Route path="/iam/users/:userName" element={<IAMUserDetailPage />} />
+        <Route path="/multipart" element={<MultipartPage />} />
         <Route
           path="/metrics"
           element={

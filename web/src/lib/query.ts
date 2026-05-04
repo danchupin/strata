@@ -102,6 +102,20 @@ export const queryKeys = {
     timeseries: (metric: string, range: string, step: string) =>
       ['metrics', 'timeseries', metric, range, step] as const,
   },
+  multipart: {
+    active: (
+      bucket: string,
+      minAgeHours: number,
+      initiator: string,
+      page: number,
+      pageSize: number,
+    ) =>
+      [
+        'multipart',
+        'active',
+        { bucket, minAgeHours, initiator, page, pageSize },
+      ] as const,
+  },
   auth: {
     whoami: ['auth', 'whoami'] as const,
   },

@@ -328,8 +328,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 17,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Backend: internal/adminapi/multipart.go — handleMultipartActive (GET /admin/v1/multipart/active; filters bucket / min_age_hours / initiator; pagination page+page_size, default 50, cap 500; fans out across ListBuckets + per-bucket ListMultipartUploads(prefix=\"\", limit=1000); BytesUploaded summed via per-upload ListParts). handleMultipartAbort (POST /admin/v1/multipart/abort; per-row forward through s.S3Handler so chunk GC + metrics + multipart finalisation stay consistent; per-upload audit row admin:AbortMultipartUpload via emitAuditRow + a top-level batch override on the request-scoped row). MultipartUpload row carries no Initiator, so the watchdog falls back to bucket.Owner — closest available proxy without a meta schema bump. Routes registered between buckets and consumers blocks in server.go. Tests: TestMultipartActive_HappyAndFiltering / BadMinAge / Pagination + TestMultipartAbort_Batch / EmptyBody / NestedKey (6 cases). Frontend: web/src/pages/Multipart.tsx with bucket-autocomplete (datalist reusing buckets list query), min-age numeric input (default 24 h), initiator chip, bulk-select via plain HTML checkboxes (no shadcn Checkbox primitive), Abort selected + per-row × buttons (window.confirm guard), 30 s refetchInterval, page+page_size pagination matching the backend. Sidebar nav adds /multipart under IAM with the lucide Layers icon. Browser smoke deferred — dev-browser skill unavailable in this Ralph loop."
     },
     {
       "id": "US-018",

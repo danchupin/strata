@@ -47,6 +47,10 @@ Started: Sun May  3 17:17:18 MSK 2026
 - Web Worker pattern for browser uploads with progress: vite ?worker-imported worker (web/src/workers/upload.ts) owns the slicing + per-part PUT loop. Per-part presign happens on the PARENT (cookies don't auto-share into workers in some browsers) and the URL is shipped down via postMessage. Use XMLHttpRequest (not fetch) — fetch lacks upload progress events. Generalises to any "long-running batch operation that wants per-step progress without freezing the UI".
 - Path encoding for nested object keys on the client (US-016): `key.split('/').map(encodeURIComponent).join('/')` preserves '/' separators so the gateway mux's trailing-wildcard `{key...}` pattern sees the full nested key. Plain `encodeURIComponent(key)` would escape '/' and route as a single segment.
 - Admin object operations on a bucket (US-016): tags/retention/legal-hold endpoints carry the key in JSON body — Go 1.22 mux trailing-wildcards must be the LAST segment, so `/objects/{key...}/tags` is unrepresentable. DELETE keeps `{key...}` because no subroute follows.
+- Cluster-wide fan-out admin lists (US-017 multipart watchdog): walk meta.Store.ListBuckets("") then per-bucket ListMultipartUploads(prefix="", limit=N). MultipartUpload row carries no Initiator field, so the watchdog falls back to bucket.Owner — closest available proxy without a meta schema bump. Reuse the pattern for any future cluster-wide aggregation (e.g. cross-bucket replication queue dashboard).
+- Batch admin operations that the AC says emit "one audit row per affected entity" need both halves: the AuditMiddleware override on the request-scoped row (so the operator-facing action surfaces in the audit-log filter) AND per-entity emitAuditRow calls inside the loop. The middleware emits exactly one row per HTTP request, so the per-entity rows MUST be enqueued directly via meta.Store.EnqueueAudit — same pattern as US-011's DeleteIAMUser cascade.
+- Bulk-select tables: shadcn doesn't ship a Checkbox primitive, so use plain `<input type="checkbox">` with `ref` for the indeterminate state when some-but-not-all visible rows are selected. Selection state lives in a `Set<string>` keyed by `${bucket}\x00${id}` (NUL separator avoids collisions on user-controlled fields). Clean up stale selections on data refetch via a `useEffect` that intersects with the current visible page.
+- Cluster-wide cluster-state pages that need fresh-ish data without manual refresh: `useQuery({ refetchInterval: 30_000 })` is the default cadence — short enough that a stalled upload appears on the watchdog within one cycle, long enough to keep gateway list-fan-out bounded. Don't drop the explicit Refresh button; operators reach for it after they kick a fix.
 
 ## Sun May  3 17:27 MSK 2026 - US-001
 - Implemented CreateBucket dialog (POST /admin/v1/buckets + UI) per PRD AC.
@@ -716,4 +720,45 @@ Started: Sun May  3 17:17:18 MSK 2026
   - The audit middleware emits exactly one row per request via the override pointer; for a multi-step admin path (e.g. cascading version deletes from the Versions tab) each per-row request is its own audit row (one per click). No need for `emitAuditRow` here.
   - The client's bucketDetail.object_lock value is passed into the side panel so Retention/LegalHold can render their disabled-state UI without an extra round trip; the bucket detail query is already loaded by the parent BucketDetailPage.
   - For "click the row to open side panel" pattern, store `selectedKey: string | null` rather than the full `ObjectEntry` — the panel re-fetches via fetchObjectDetail anyway, and a string key is stable across pagination/refetch (an ObjectEntry reference would point at a stale snapshot after invalidation).
+---
+
+## Mon May  4 13:30 MSK 2026 - US-017
+- Implemented Multipart watchdog page: GET /admin/v1/multipart/active + POST /admin/v1/multipart/abort + Multipart.tsx with bulk-abort + 30 s polling.
+
+### Backend
+- internal/adminapi/multipart.go (new): handleMultipartActive (GET /admin/v1/multipart/active; query params: bucket, min_age_hours, initiator, page, page_size; fans out across ListBuckets("") + per-bucket ListMultipartUploads(prefix="", limit=multipartListMaxPerBucket=1000); per-row BytesUploaded summed via ListParts; sort by AgeSeconds DESC then bucket+upload_id; pagination matches the bucketsList shape — total reflects post-filter row count). MultipartUpload row carries no Initiator field, so the watchdog falls back to bucket.Owner — closest available proxy without a meta schema bump. handleMultipartAbort (POST /admin/v1/multipart/abort; body {uploads:[{bucket, upload_id}]}; per-target forward through s.S3Handler with httptest.NewRequest("DELETE", "/<bucket>/<key>?uploadId=<id>") so the existing s3api abort path runs unchanged — chunk GC + metrics + manifests stay consistent; per-entity audit row admin:AbortMultipartUpload via emitAuditRow PLUS top-level batch override on the request-scoped row).
+- internal/adminapi/server.go: registered GET /admin/v1/multipart/active + POST /admin/v1/multipart/abort between the buckets and consumers blocks.
+- internal/adminapi/multipart_test.go (new): 6 in-package unit tests — Active happy + filtering (sort order, age filter, bucket filter, initiator filter, BytesUploaded sum from per-part rows), Active bad min_age_hours 400, Active pagination with page=2 page_size=2, Abort batch (mix of success + NoSuchUpload + NoSuchBucket — all per-row outcomes returned in one 200 response), Abort empty-body 400, Abort nested-key (logs/2026/05/abort.bin survives the inner-request synthesis).
+
+### Frontend
+- web/src/api/client.ts: added MultipartActiveRow / MultipartActiveResponse / MultipartActiveParams / fetchMultipartActive + MultipartAbortTarget / MultipartAbortResult / MultipartAbortResponse / abortMultipartBatch wrappers. All throw AdminApiError on 4xx/5xx.
+- web/src/lib/query.ts: added queryKeys.multipart.active(bucket, minAgeHours, initiator, page, pageSize) cache slot.
+- web/src/pages/Multipart.tsx (new): 30 s refetchInterval; filter card with bucket autocomplete (datalist sourced from fetchBucketsList page=1 size=1000), min-age numeric input (default 24 h), initiator string filter; results table with bulk-select via plain HTML <input type="checkbox"> (no shadcn Checkbox primitive — use ref for indeterminate state when some-but-not-all visible rows are selected); rows keyed by `${bucket}\x00${upload_id}` so cross-bucket collisions on operator-defined upload-id aliases are impossible; per-row × button + Abort selected button (window.confirm guard) → useMutation → abortMultipartBatch → on success showToast for aborted count + destructive showToast for any per-row errors + invalidate ['multipart','active'] prefix; pagination via Previous/Next.
+- web/src/App.tsx: route /multipart → MultipartPage.
+- web/src/components/layout/nav.ts: sidebar nav adds /multipart between IAM and Metrics, lucide-react Layers icon.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` all packages pass (incl. internal/adminapi 6 new cases).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean. Bundle sizes (gzipped):
+  - main: 160.36 KiB ✓ (well under 500 KiB AC ceiling; +2.26 KiB vs US-016 baseline of 158.10 — Multipart page + filter UI)
+  - upload worker: 1.59 KiB (unchanged)
+  - Metrics route: 109.44 KiB (unchanged)
+  - MonacoJsonEditor lazy chunk: 591.94 KiB (unchanged)
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop. Manual smoke recommended (kick a multipart upload via aws-cli, then visit /multipart with min_age=0 → row appears within 30 s → Abort selected → row disappears + audit_log row stamped).
+
+### Learnings for future iterations
+- Patterns discovered:
+  - Cluster-wide fan-out lists (multipart watchdog, future cross-bucket replication-queue dashboard, future cross-bucket access-key audit) walk ListBuckets("") + a per-bucket list endpoint. The cap on the per-bucket page (multipartListMaxPerBucket=1000) bounds the worst-case request size; rows are sort+filter+paginate post-fan-out so the UI's page semantics are deterministic regardless of bucket distribution. Don't paginate per-bucket — it would force the operator to flip pages bucket-by-bucket.
+  - Batch admin audit shape: one top-level override on the request-scoped row (action="admin:<Verb>", resource="<scope>:batch:<N>") + one emitAuditRow per affected entity. The middleware-stamped row gives the audit-log filter a single hit per HTTP request; per-entity rows give the operator the precise list of affected resources. Reuse for any future bulk surface (US-019's bulk-detach if it materialises, future bulk-disable-key, etc.).
+  - shadcn doesn't ship a Checkbox primitive — use plain `<input type="checkbox">` with `ref={(el) => { if (el) el.indeterminate = ... }}` for the all/some/none tri-state header checkbox. Set on the DOM node directly because React doesn't know about the indeterminate property. h-4 w-4 cursor-pointer matches the rest of the table-row chrome.
+- Gotchas:
+  - httptest.NewRequest panics if the URL path contains an unescaped space — the inner-request synthesis in the abort fan-out works for normal S3 keys (which are URL-safe by convention), but a key with `' '` would break. The s3api gateway-side path doesn't have this issue because the path arrives URL-encoded over the wire. If the watchdog ever needs to abort a key with literal whitespace, switch the inner-request constructor to url.PathEscape on each segment first. Test surface today picks nested keys without spaces.
+  - useEffect that prunes stale selections must be careful about the dep array — listing both `rows` AND `selected` would loop because the prune also calls setSelected. Guard with a `changed` flag and only call setSelected when something actually fell off the visible page.
+  - The MultipartUpload struct lacks an Initiator field — propagating "the principal that initiated the upload" through the meta layer would be a Cassandra ALTER + tikv key-shape bump + memory-store schema change. For US-017 the watchdog reports bucket.Owner as the initiator instead; if a future cycle needs the real initiator, the right move is to add `Initiator string` to MultipartUpload and stamp it from auth.FromContext at CreateMultipartUpload time on the s3api side, then mirror in the admin POST /uploads handler.
+- Useful context:
+  - The 30 s poll cadence (POLL_INTERVAL_MS) is the AC default; tune via the constant in Multipart.tsx if operator feedback says it should be tighter (10 s would catch a stalled upload sooner) or looser (120 s if the meta backend struggles under fan-out).
+  - The bucket-autocomplete datalist reuses the existing buckets-list query (page=1, pageSize=1000) — cache hit when the operator visited /buckets in the same session.
+  - emitAuditRow is the canonical per-entity audit shape; lives in internal/adminapi/iam_users.go (next to the DeleteIAMUser cascade that birthed it). Future bulk handlers should use the same helper, not invent their own EnqueueAudit call.
 ---

@@ -1272,3 +1272,80 @@ export async function deleteObject(
   if (resp.status === 204) return;
   throw await buildAdminError(resp, 'delete object failed');
 }
+
+// MultipartActiveRow is one in-flight multipart upload row surfaced by the
+// watchdog page (US-017). bytes_uploaded sums the parts uploaded so far;
+// initiator falls back to the bucket owner since the gateway does not
+// record the originating principal on the multipart row.
+export interface MultipartActiveRow {
+  bucket: string;
+  key: string;
+  upload_id: string;
+  initiated_at: number;
+  age_seconds: number;
+  storage_class: string;
+  initiator: string;
+  bytes_uploaded: number;
+}
+
+export interface MultipartActiveResponse {
+  uploads: MultipartActiveRow[];
+  total: number;
+}
+
+export interface MultipartActiveParams {
+  bucket?: string;
+  minAgeHours?: number;
+  initiator?: string;
+  page?: number;
+  pageSize?: number;
+}
+
+export async function fetchMultipartActive(
+  params: MultipartActiveParams,
+): Promise<MultipartActiveResponse> {
+  const usp = new URLSearchParams();
+  if (params.bucket) usp.set('bucket', params.bucket);
+  if (params.minAgeHours != null) usp.set('min_age_hours', String(params.minAgeHours));
+  if (params.initiator) usp.set('initiator', params.initiator);
+  if (params.page != null) usp.set('page', String(params.page));
+  if (params.pageSize != null) usp.set('page_size', String(params.pageSize));
+  const qs = usp.toString();
+  const resp = await fetch(`/admin/v1/multipart/active${qs ? `?${qs}` : ''}`, {
+    method: 'GET',
+    credentials: 'same-origin',
+  });
+  if (!resp.ok) throw await buildAdminError(resp, 'multipart list failed');
+  const body = (await resp.json()) as MultipartActiveResponse;
+  return { uploads: body.uploads ?? [], total: body.total ?? 0 };
+}
+
+export interface MultipartAbortTarget {
+  bucket: string;
+  upload_id: string;
+}
+
+export interface MultipartAbortResult {
+  bucket: string;
+  upload_id: string;
+  status: 'aborted' | 'error';
+  code?: string;
+  message?: string;
+}
+
+export interface MultipartAbortResponse {
+  results: MultipartAbortResult[];
+}
+
+export async function abortMultipartBatch(
+  uploads: MultipartAbortTarget[],
+): Promise<MultipartAbortResponse> {
+  const resp = await fetch('/admin/v1/multipart/abort', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ uploads }),
+  });
+  if (!resp.ok) throw await buildAdminError(resp, 'multipart abort failed');
+  return (await resp.json()) as MultipartAbortResponse;
+}

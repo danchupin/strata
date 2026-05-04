@@ -3,6 +3,7 @@ import {
   Gauge,
   KeyRound,
   LayoutDashboard,
+  Layers,
   Settings,
   Users,
   type LucideIcon,
@@ -23,6 +24,7 @@ export const primaryNav: NavItem[] = [
   { to: '/buckets', label: 'Buckets', icon: Boxes },
   { to: '/consumers', label: 'Consumers', icon: Users },
   { to: '/iam', label: 'IAM', icon: KeyRound },
+  { to: '/multipart', label: 'Multipart', icon: Layers },
   { to: '/metrics', label: 'Metrics', icon: Gauge },
   { to: '/settings', label: 'Settings', icon: Settings },
 ];
