@@ -1,0 +1,63 @@
+# Ralph Progress Log
+Started: Mon May  4 MSK 2026
+Cycle: ralph/web-ui-debug (Web UI Phase 3 — debug tooling)
+---
+
+## Codebase Patterns
+
+### Branch policy (REQUIRED)
+- Every Ralph cycle starts from main, ends merging back to main. US-015 (last story) MUST fast-forward / squash-merge `ralph/web-ui-debug` into `main`, push origin/main, and archive prd.json + progress.txt under `scripts/ralph/archive/2026-MM-DD-web-ui-debug/`. Mirror the web-ui-admin close commit shape (`5a6058b` merge + `f808d88` archive).
+- The shell wrapper `scripts/ralph/ralph.sh` MUST invoke `avito ai claude --` (not bare `claude`) — regression-resistant; revert on sight.
+
+### Shipped surfaces on main (do NOT re-implement)
+- **Phase 1 web UI** (commit `e27cf21`): Vite + React + TS skeleton, go:embed `web/dist`, JWT session cookies (HS256, 24h, HttpOnly+Secure+SameSite=Strict+Path=/admin), `/console/` static handler, `/admin/v1/*` API mount, login form, sidebar+top-bar layout, Cluster Overview, Top Buckets/Consumers, Cluster Metrics dashboard, TanStack Query 5s polling, Buckets list, Bucket detail (read-only object browser), Playwright `critical-path.spec.ts`.
+- **Phase 2 web UI** (commit `5a6058b`): full bucket admin (CreateBucket/DeleteBucket/Versioning/ObjectLock/Lifecycle/CORS/Policy/ACL/Inventory/Logging), IAM CRUD (users/access-keys/managed-policies/attach-detach), object actions (per-part presign upload via Web Worker, delete/tags/retention/legal-hold), multipart watchdog, audit-log viewer, settings page (JWT secret rotation), BackendPresign toggle, S3-backend config exposure, Playwright `admin.spec.ts`.
+- **/admin/v1/\*** sits behind `s3api.NewAuditMiddleware`. Admin handlers stamp the operator-meaningful audit row via `s3api.SetAuditOverride(ctx, action, resource, bucket, principal)`.
+- **OTel pipeline** (commit `ea93cbf` US-033): Cassandra + RADOS observer-emitted spans, gateway HTTP middleware, tail-sampler exports failing spans regardless of `STRATA_OTEL_SAMPLE_RATIO`. Phase 3 layers a ring-buffer span-processor in parallel — never replace the OTLP forwarder; install both when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
+- **Audit log** (US-022): `audit_log` table + `s3api.AuditMiddleware`. PUT/POST/DELETE always emit. `total_time_ms` column populated by `s3api.AccessLogMiddleware`. Phase 3 SSE hooks publish AFTER the row persists (never blocks the audit-write hot path).
+- **Heartbeat** (`internal/heartbeat`): memory + cassandra impls. **TiKV impl missing** — tracked under ROADMAP `Web UI — TiKV heartbeat backend` (P3); blocks per-node drilldown on tikv clusters but not Phase 3 itself. Cassandra-backed clusters get the full drilldown experience day-one.
+- **PromQL via `internal/promclient.Client`**: existing — Phase 3 adds a `Semaphore(10)` chan to cap concurrent in-flight queries.
+- **Bucketstats Sampler** (`internal/bucketstats`): currently emits `(bucket, total_bytes, total_objects)`. US-012 extends to per-shard.
+
+### Phase 3 new packages
+- `internal/auditstream` — pub-sub broadcaster. `Broadcaster.Subscribe(ctx, filter) <-chan AuditRow` + non-blocking `Publish(row)` from `s3api.AuditMiddleware`. Slow subs drop frames + WARN once/min.
+- `internal/otel/ringbuf` — span-level ring buffer, bytes-budget capped, LRU-evicts oldest traces when over budget. Secondary index `requestID → traceID`. Per-trace span cap 256.
+- Both integrate via `internal/serverapp/serverapp.go` — construct once, pass to consumers.
+
+### Admin handler patterns (reuse)
+- New admin handler? Wire `mux.HandleFunc("METHOD /admin/v1/...", s.handleX)` in `internal/adminapi/server.go::routes()`. Handlers go in `internal/adminapi/<topic>.go`. JSON helpers `writeJSON` / `writeJSONError` are in server.go.
+- Admin auth: `auth.FromContext(ctx).Owner` set by `adminapi.authMiddleware` via session-cookie `Lookup`.
+- Audit override: `s3api.SetAuditOverride(ctx, action, resource, bucket, principal)` — Action="" falls back to default. ALL Phase 3 endpoints are read-only (audit middleware skips GET); no override needed.
+- Shared error shape on the React side: `AdminApiError` in `web/src/api/client.ts` + helper `buildAdminError(resp, fallback)`.
+- Admin handlers passing through to s3api: synthesise `httptest.NewRequest` with full URL, copy auth context via `inner.WithContext(r.Context())`, then `s.S3Handler.ServeHTTP(rec, inner)`.
+
+### Frontend patterns (reuse)
+- TanStack Query invalidation pattern after a write: `queryClient.invalidateQueries({ queryKey: ['buckets', 'list'] })` — partial key prefix matches all variants. **Phase 3 is read-only** so the pattern collapses to `useQuery({ refetchInterval: 30_000 })`.
+- shadcn Dialog primitives — wrap content in `<Dialog open onOpenChange><DialogContent><DialogHeader/><form/><DialogFooter/></DialogContent></Dialog>`.
+- shadcn Sheet — for the per-node drilldown drawer (US-011), right-side slide-in.
+- Toasts: `import { showToast } from '@/lib/toast-store'`.
+- Sidebar nav: `web/src/components/layout/nav.ts::primaryNav`. Phase 3 adds a new `Diagnostics` section: AuditTail, SlowQueries, TraceBrowser, HotBuckets. Bucket-scoped tabs (HotShards, Distribution, Replication) live under `BucketDetail.tsx`'s `Tabs`.
+- Recharts: existing dep. Phase 3 LineChart (sparklines, lag), BarChart (histogram, distribution). NO `@nivo/heatmap` — build a 200-line raw-canvas `web/src/components/Heatmap.tsx` instead (bundle budget ≤500 KiB gzipped).
+- Native HTML `<datalist>` is the zero-dep autocomplete primitive — pairs with shadcn `<Input>` via `list=` attr. Used for principal/bucket autocompletes.
+- Heavyweight modules (Monaco) lazy-loaded via `lazy(() => import('./MonacoJsonEditor'))` so per-tab bundle stays under budget.
+
+### Browser EventSource pattern (NEW for Phase 3)
+- `EventSource` is browser-native — no third-party lib needed. New helper hook `web/src/hooks/useEventSource.ts` wraps reconnect with exponential backoff (1s → 30s cap). Sends new query string on filter change → close + reopen.
+- Filter applied SERVER-SIDE — the SSE handler reads action/principal/bucket query params and the broadcaster filters per subscriber. Wire-payload stays small.
+- `:keep-alive\n\n` ping every 25s defeats idle-connection proxies (nginx, AWS ALB).
+
+### Cassandra/meta gotchas (still apply)
+- Both `internal/meta/memory` and `internal/meta/cassandra` and `internal/meta/tikv` implement `meta.Store` in lockstep. Adding `ListSlowQueries` (US-003) means updating all three + the storetest contract (`internal/meta/storetest/contract.go`).
+- LWT (`IF EXISTS` / `IF NOT EXISTS`) required for read-after-write coherence on the same row. Phase 3 is read-only so this rarely bites here, but US-009's observer-label change is metric-emission only — no schema migration.
+- Schema migrations are additive — `internal/meta/cassandra/schema.go::tableDDL` (idempotent CREATE) + `alterStatements` (idempotent ADD COLUMN). No destructive migration ever.
+
+### CI / quality bar
+- Every story commit MUST pass: `go vet ./...`, `go test ./...`, `pnpm run typecheck`, `pnpm run build`. Browser verification deferred when dev-browser skill unavailable; note in progress log + recommend manual smoke.
+- Phase 3 closes ROADMAP `Web UI — Phase 3 (debug)` P3. US-015 flips the entry to Done with the merge commit SHA.
+
+### Empty-state rule (Phase 3 specific)
+- Every page that depends on Prom / OTel / replication-config renders a polished empty-state when the dependency is missing — never a broken chart. The empty-state links to `docs/ui.md#prometheus-setup` (or topic-specific anchor) so operators can self-serve fix.
+
+### Read-only invariant
+- Phase 3 pages do NOT mutate state. Aborting a multipart from the watchdog (Phase 2 US-017) is the only debug write action and lives there. Resist the temptation to add destructive actions to debug pages.
+

@@ -1,0 +1,269 @@
+{
+  "project": "Strata",
+  "branchName": "ralph/web-ui-debug",
+  "description": "Web UI Phase 3 — Debug Tooling. Performance debug surface (live audit-tail SSE, slow-queries, OTel ring-buffer + waterfall, hot-buckets/hot-shards heatmaps, per-node drilldown, bucket-shard distribution, replication-lag) modeled on CockroachDB DB Console.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "SSE audit-tail backend (auditstream package)",
+      "description": "As a debug-tool author, I want a Server-Sent Events endpoint that streams new audit-log rows so the live-tail UI can subscribe without polling.",
+      "acceptanceCriteria": [
+        "New `internal/auditstream` package with `Broadcaster` — in-process pub-sub. `Subscribe(ctx, filter) <-chan AuditRow` returns per-subscriber channel sized 256; cancel via ctx.",
+        "Hooks into existing `s3api.AuditMiddleware` ack path: after the row persists, non-blocking send onto a fan-out channel. Slow subscribers drop frames (logged once/min via WARN, never blocks audit-write hot path).",
+        "`GET /admin/v1/audit/stream?action=<str>&principal=<str>&bucket=<str>` sets `Content-Type: text/event-stream` and emits `data: <audit-row-json>\\n\\n` per matching row. Filter is server-side (filtered subs do not receive irrelevant frames).",
+        "Closes on ctx done; emits `:keep-alive\\n\\n` ping every 25s to defeat idle-connection proxies.",
+        "Prometheus gauge `strata_audit_stream_subscribers` exposed via `metrics.AuditStreamSubscribers`.",
+        "Wired through serverapp: `internal/auditstream.New()` constructed once and passed to both `s3api.NewAuditMiddleware` (publisher) and `adminapi.Server` (subscriber endpoint).",
+        "Typecheck passes",
+        "Tests pass — Broadcaster fan-out test (multi-subscriber, slow-subscriber drop, ctx cancel) + handler test asserting SSE framing shape"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Live audit-tail UI page",
+      "description": "As an operator, I want a live-tailing page that streams audit events with filter / pause / resume so I can watch traffic in real time.",
+      "acceptanceCriteria": [
+        "New `web/src/pages/AuditTail.tsx` + route `/diagnostics/audit-tail` + sidebar entry under a new `Diagnostics` section.",
+        "Subscribes to `/admin/v1/audit/stream` via the EventSource API. Re-subscribes with new query string when filters change. Reconnect helper hook `web/src/hooks/useEventSource.ts` with exponential backoff (1s → 30s cap).",
+        "Top bar: filters (Action multi-select, Principal autocomplete via existing IAM list, Bucket autocomplete via existing buckets list), buttons Pause | Resume | Clear, counter `<n> events streamed`.",
+        "Event list: virtualised via `@tanstack/react-virtual` (10k+ events stay smooth). Each row: relative time | Action | Principal | Resource | Result. Click → opens the same side panel as the Phase 2 audit viewer.",
+        "Pause stops appending; EventSource stays subscribed. Resume re-attaches with banner `<n> events skipped while paused`. Clear empties the ring; subscription stays alive.",
+        "Disconnected banner `Connection lost — reconnecting in N s` + auto-reconnect.",
+        "Typecheck passes",
+        "Tests pass",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Slow-queries backend (ListSlowQueries + endpoint)",
+      "description": "As a debug-tool author, I want an endpoint that returns the last N requests above a latency threshold so the slow-queries UI table has data.",
+      "acceptanceCriteria": [
+        "New `meta.Store.ListSlowQueries(ctx, since time.Duration, minMs int, pageToken string) ([]AuditEvent, string, error)` — wraps existing `ListAudit` with a `total_time_ms >= ?` filter. Lockstep impls: cassandra (server-side filter under existing `(bucket_id, day)` partitioning, `ALLOW FILTERING` only on the latency column inside the partition is acceptable here), memory (filter in-process), tikv (filter on range scan).",
+        "`internal/meta/storetest/contract.go` gets `caseListSlowQueries` exercising all three backends with filter cutoffs + pagination round-trip.",
+        "`GET /admin/v1/diagnostics/slow-queries?since=<dur>&min_ms=<int>&page_token=<base64>` returns `{rows, next_page_token}`. Defaults: `since=15m`, `min_ms=100`. 400 InvalidArgument on unparseable `since` / negative `min_ms`.",
+        "Row shape: `{ts, bucket, op, latency_ms, status, request_id, principal, source_ip, object_key (truncated to 100 chars)}`. Sortable server-side by `latency_ms DESC` (default).",
+        "Typecheck passes",
+        "Tests pass — meta storetest contract case + handler unit test"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Slow-queries UI page",
+      "description": "As an operator, I want a slow-queries page with filters and request-id click-through so I can find latency offenders.",
+      "acceptanceCriteria": [
+        "New `web/src/pages/SlowQueries.tsx` + route `/diagnostics/slow-queries` + sidebar entry.",
+        "Filter bar: Time window (15m | 1h | 6h | 24h | 7d), Min latency (input ms), Bucket (autocomplete), Op (multi-select GET / PUT / DELETE / HEAD / Multipart*).",
+        "TanStack Query polls every 30s. Pagination via `Load more` using the page-token.",
+        "Latency badge: red ≥1000ms, orange ≥500ms, yellow ≥100ms, gray <100ms.",
+        "RequestID column: link → `/diagnostics/trace/<request-id>` (US-006). Tooltip `Trace` on hover.",
+        "Tabbed alternate view `Latency histogram`: log-scale recharts BarChart, 8 buckets (0–10ms … ≥10s) over the current filtered set.",
+        "Typecheck passes",
+        "Tests pass",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "OTel trace ring buffer + endpoint",
+      "description": "As a debug-tool author, I want an in-process ring buffer that retains the last ~10 minutes of OTel spans keyed by request-id so the UI can render trace waterfalls without a Jaeger / Tempo deployment.",
+      "acceptanceCriteria": [
+        "New `internal/otel/ringbuf` package. `RingBuffer{}` holds spans grouped by `traceID` with secondary index `requestID → traceID`. Two indices because the SDK keys by traceID; the operator pastes the X-Request-Id header value.",
+        "`OnEnd(span)` implements `sdktrace.SpanProcessor`. Records every span. Capacity bytes-budget configurable via `STRATA_OTEL_RINGBUF_BYTES` (default 4 MiB). LRU-evicts oldest traces when over budget. Per-trace span cap 256 (drops further spans with one WARN per trace).",
+        "Wire into `internal/otel.Init`: when `STRATA_OTEL_RINGBUF=on` (default `on`), install the ring-buffer span-processor. When `OTEL_EXPORTER_OTLP_ENDPOINT` is set, install BOTH the OTLP forwarder AND the ring buffer in parallel.",
+        "`GET /admin/v1/diagnostics/trace/{requestID}` returns `{trace_id, request_id, root, spans: [{span_id, parent, name, start_ns, end_ns, attributes, status}]}`. 404 NotFound when request-id not present.",
+        "Prometheus: gauge `strata_otel_ringbuf_traces` (retained-trace count) + counter `strata_otel_ringbuf_evicted_total` (evictions).",
+        "Typecheck passes",
+        "Tests pass — ringbuf bytes-budget + LRU eviction order + per-trace span cap + handler 200/404 cases"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "OTel trace waterfall renderer",
+      "description": "As an operator, I want a waterfall view for a single trace so I can see where time was spent.",
+      "acceptanceCriteria": [
+        "New `web/src/pages/TraceBrowser.tsx` + route `/diagnostics/trace/:requestID`.",
+        "Top bar: search input `Paste a request-id`, recent-traces list (sessionStorage, last 10).",
+        "Waterfall canvas: each span = horizontal bar, indented by parent → child, ms-scale axis. Hover tooltip shows span name, duration, status, attribute subset (`http.method`, `http.target`, `http.status_code`, `db.statement` truncated to 200 chars). Color by service: gateway=blue, meta=green, data=orange. Errored spans = red border.",
+        "Right column span details panel on click: full attribute table, events, status. Copy-to-clipboard for trace JSON.",
+        "`Open in Jaeger` link visible only when `cluster.otel_endpoint` is non-empty (read from `/admin/v1/cluster/status`); URL pattern `<jaeger-ui>/trace/<traceID>`.",
+        "Typecheck passes",
+        "Tests pass",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Hot Buckets heatmap backend (PromQL)",
+      "description": "As a debug-tool author, I want an endpoint that aggregates request rate per bucket per time bucket via PromQL so the heatmap UI has data.",
+      "acceptanceCriteria": [
+        "`GET /admin/v1/diagnostics/hot-buckets?range=<dur>&step=<dur>` issues PromQL `sum by (bucket) (rate(strata_http_requests_total[1m]))` over the requested range via `internal/promclient.Client`. Defaults: `range=1h`, `step=1m`.",
+        "Top-N filter trims to top-50 buckets by total request count over the range (server-side trim — keeps wire payload small).",
+        "Returns `{matrix: [{bucket: string, values: [{ts, value}]}]}`.",
+        "503 with code `MetricsUnavailable` when Prom is unset (`cfg.PrometheusURL == \"\"`).",
+        "30s in-process LRU cache keyed on `(range, step)` to reduce Prom load when multiple operators view.",
+        "`internal/promclient.Client` gains a `Semaphore(10)` chan capping concurrent in-flight queries.",
+        "Typecheck passes",
+        "Tests pass — fake `promclient.Client` matrix response + cache-hit second call asserts no second Prom call"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Hot Buckets heatmap UI",
+      "description": "As an operator, I want a heatmap of bucket request rate so I can spot the busiest buckets at a glance.",
+      "acceptanceCriteria": [
+        "New `web/src/pages/HotBuckets.tsx` + route `/diagnostics/hot-buckets` + sidebar entry.",
+        "Range selector: 15m | 1h | 6h | 24h. Step auto-derived (1m / 5m / 30m / 1h).",
+        "Custom raw-canvas heatmap component (`web/src/components/Heatmap.tsx`, ≤200 lines). X-axis = time buckets, Y-axis = bucket name, cell color = log-scale of request rate. NO `@nivo/heatmap` (would add ~100 KiB; bundle budget is ≤500 KiB gzipped).",
+        "Click cell → drill into bucket detail page filtered by timespan (`?since=<RFC3339>&until=<RFC3339>`).",
+        "Empty-state when `cluster.metrics_available=false`: explainer + link to `docs/ui.md#prometheus-setup`.",
+        "Polls every 30s.",
+        "Typecheck passes",
+        "Tests pass",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Hot Shards heatmap backend (RADOS-only, PromQL)",
+      "description": "As a debug-tool author, I want an endpoint that aggregates LWT-conflict rate per shard per time bucket so the hot-shards UI can spot key-distribution skew.",
+      "acceptanceCriteria": [
+        "**Prerequisite metric labels**: extend `internal/meta/cassandra/observer.go::SlowQueryObserver` to emit `bucket` + `shard` labels on `strata_cassandra_lwt_conflicts_total`. Cardinality ≤ 1000 buckets × 64 shards = 64k series — within Prom's typical limits; documented inline.",
+        "`GET /admin/v1/diagnostics/hot-shards/{bucket}?range=<dur>&step=<dur>` issues PromQL `sum by (shard) (rate(strata_cassandra_lwt_conflicts_total{bucket=\"<bucket>\"}[1m]))`. Returns same matrix shape as US-007.",
+        "When the active data-backend is `s3` (read from cfg): returns 200 with `{empty: true, reason: \"s3-over-s3 stores objects 1:1, no shards\"}` and skips the PromQL roundtrip.",
+        "503 `MetricsUnavailable` when Prom is unset. Reuses the cache + Semaphore from US-007.",
+        "Typecheck passes",
+        "Tests pass — observer label emission test + handler test (RADOS-backend matrix shape, s3-backend empty-state shape, Prom-unset 503)"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Hot Shards heatmap UI tab",
+      "description": "As an operator, I want a per-bucket shard heatmap that highlights LWT-contention skew on RADOS-backed deployments.",
+      "acceptanceCriteria": [
+        "Bucket detail page (`web/src/pages/BucketDetail.tsx`) gains a new `Hot Shards` tab. Reuses the heatmap component from US-008.",
+        "When backend returns `empty: true`: renders empty-state card `Shard heatmap is meaningful only for RADOS-backed clusters. The s3-over-s3 backend stores each Strata object as one backend object — no shards.`",
+        "Click cell → drill panel listing top contended keys for that shard in the timespan. Reads from existing `meta.Store.ListAudit` filtered by bucket + reconstructs shard via `hash(key) % bucket.ShardCount`. Object-key truncation at 200 chars (Cassandra schema limit) is acceptable; documented in tooltip on truncated rows.",
+        "Typecheck passes",
+        "Tests pass",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "Per-node drilldown drawer",
+      "description": "As an operator, I want a per-node panel with CPU / RAM / FD-count / goroutine / GC sparklines when I click a node in the cluster overview.",
+      "acceptanceCriteria": [
+        "Verify the standard process metrics are emitted via `metrics.Handler()`: `process_cpu_seconds_total`, `process_resident_memory_bytes`, `process_open_fds`, `go_goroutines`, `go_gc_duration_seconds`. (prometheus/client_golang ships them by default — confirm + smoke.)",
+        "`GET /admin/v1/diagnostics/node/{nodeID}?range=<dur>` issues 5 PromQL queries (one per sparkline) with `instance=\"<node-address>\"`. Returns `{cpu, mem, fds, goroutines, gc_pause}` — each a matrix.",
+        "Cluster overview page (`web/src/pages/ClusterOverview.tsx`) — node row click opens `<NodeDetailDrawer>` (right-side shadcn Sheet). Header: NodeID, Address, Version, Uptime, Workers (chips), Leader-For (chips). Body: 5 stacked recharts LineChart sparklines.",
+        "Range selector inside drawer: 15m | 1h | 6h.",
+        "TiKV-backed clusters today only show local replica until the `Web UI — TiKV heartbeat backend` ROADMAP P3 lands — drawer empty-state explains this. (Cassandra-backed clusters get full multi-node experience.)",
+        "Typecheck passes",
+        "Tests pass",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "Bucket-Shard Distribution: bucketstats per-shard sampler",
+      "description": "As a debug-tool author, I need the bucketstats sampler to emit per-shard bytes/objects so the Distribution tab has data.",
+      "acceptanceCriteria": [
+        "Extend `internal/bucketstats.Sampler` from `(bucket, total_bytes, total_objects)` to `(bucket, shard, bytes, objects)`. New gauges `strata_bucket_shard_bytes` + `strata_bucket_shard_objects` keyed `{bucket, shard}`.",
+        "Lockstep meta backends: cassandra reads `objects` rows aggregated per `(bucket_id, shard)` via per-shard `SELECT … WHERE shard=?`. Memory computes from in-process map. TiKV uses the existing range-scan and groups in-process by `hash(key) % bucket.ShardCount`.",
+        "Cardinality cap: per-shard sampling honours the existing `STRATA_BUCKETSTATS_TOPN` (default 100). Sampler skips buckets outside top-N.",
+        "Tests pass — sampler test in storetest contract (memory + cassandra + tikv) + a metrics-output assertion.",
+        "Typecheck passes"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "Bucket-Shard Distribution tab UI",
+      "description": "As an operator, I want to see bytes per shard + object-count per shard for a bucket so I can spot hot-spot risk before it bites.",
+      "acceptanceCriteria": [
+        "`GET /admin/v1/buckets/{bucket}/distribution` reads the `strata_bucket_shard_bytes` + `strata_bucket_shard_objects` gauges (US-012). Returns `{shards: [{shard, bytes, objects}]}`.",
+        "Bucket detail gains a `Distribution` tab. Two recharts BarCharts side-by-side: bytes per shard, objects per shard. X-axis = shard ID (0..N-1), Y-axis = log-scale value.",
+        "Skew banner: when `max(shard) / median(shard) > 5`, render yellow warning `Shard skew detected — consider resharding` with link to `docs/ui.md#bucket-resharding`.",
+        "Typecheck passes",
+        "Tests pass",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-014",
+      "title": "Replication-Lag chart tab",
+      "description": "As an operator, I want a per-bucket replication-lag chart so I can see whether the replicator worker is keeping up.",
+      "acceptanceCriteria": [
+        "`GET /admin/v1/buckets/{bucket}/replication-lag?range=<dur>` returns recharts-friendly time-series. PromQL: `strata_replication_queue_age_seconds{bucket=\"<bucket>\"}`. Returns `{empty: true}` when bucket has no replication configured (`meta.Store.GetBucketReplication` returns `ErrNoSuchReplication`).",
+        "Bucket detail `Replication` tab — visible only when bucket has a replication configuration. Renders recharts LineChart over selected range.",
+        "Threshold dashed lines at 1s / 60s / 600s. Red color band when lag exceeds 600s.",
+        "Polls every 30s.",
+        "Range selector: 15m | 1h | 6h | 24h.",
+        "Typecheck passes",
+        "Tests pass",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-015",
+      "title": "Playwright debug.spec.ts + docs/ui.md + ROADMAP close-flip + cycle-end merge to main",
+      "description": "As a maintainer, I want Playwright e2e for critical debug flows AND the cycle artifacts updated AND the cycle merged to main per branch policy.",
+      "acceptanceCriteria": [
+        "New `web/e2e/debug.spec.ts` with flows: `audit-tail` (login → AuditTail → trigger PutObject via fetch → assert event appears in live tail), `slow-queries` (set min_ms=0 → assert recent rows render), `trace-browser` (trigger request → grab request-id from response header → paste → assert ≥1 span), `hot-buckets-empty` (no Prom configured → empty-state card renders), `hot-shards-s3` (s3 backend bucket → s3-explainer empty-state renders).",
+        "CI workflow `.github/workflows/ci.yml` `e2e-ui` job adds `pnpm exec playwright test debug.spec.ts` after the existing `critical-path.spec.ts` and `admin.spec.ts` invocations.",
+        "Tests run against `make run-memory` — OTel ring buffer + audit log + bucketstats sampler all run on memory backends.",
+        "`docs/ui.md` `Capability Matrix` gains a Phase 3 column with rows: AuditTail | SlowQueries | OTelTraceBrowser | HotBuckets | HotShards | NodeDrilldown | ShardDistribution | ReplicationLag.",
+        "ROADMAP `Web UI — Phase 3 (debug)` P3 entry flips to `~~**P3 — Web UI — Phase 3 (debug).**~~ — **Done.** <one-line summary>. (commit `<sha>`)`.",
+        "Add a new ROADMAP entry under Web UI for any P3 hardening surfaced by the cycle (e.g. `OTel ring-buffer eviction policy under burst load needs benchmark-driven cap-tuning`).",
+        "**Cycle-end merge**: after all preceding stories pass, fast-forward / squash-merge `ralph/web-ui-debug` into `main`, push origin/main, and archive `scripts/ralph/prd.json` + `scripts/ralph/progress.txt` under `scripts/ralph/archive/2026-MM-DD-web-ui-debug/`. Same shape as the web-ui-admin cycle close (`5a6058b` / `f808d88`).",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
