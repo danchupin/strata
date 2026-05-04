@@ -43,6 +43,7 @@ import { cn } from '@/lib/utils';
 import { BucketACLTab } from '@/components/BucketACLTab';
 import { BucketAccessLogTab } from '@/components/BucketAccessLogTab';
 import { BucketCORSTab } from '@/components/BucketCORSTab';
+import { BucketHotShardsTab } from '@/components/BucketHotShardsTab';
 import { BucketInventoryTab } from '@/components/BucketInventoryTab';
 import { BucketLifecycleTab } from '@/components/BucketLifecycleTab';
 import { BucketOverviewTab } from '@/components/BucketOverviewTab';
@@ -278,6 +279,9 @@ export function BucketDetailPage() {
           <TabsTrigger value="access-log" disabled={!detail}>
             Access Log
           </TabsTrigger>
+          <TabsTrigger value="hot-shards" disabled={!detail}>
+            Hot Shards
+          </TabsTrigger>
         </TabsList>
         <TabsContent value="overview" className="space-y-4">
           {detail && <BucketOverviewTab bucket={detail} />}
@@ -299,6 +303,9 @@ export function BucketDetailPage() {
         </TabsContent>
         <TabsContent value="access-log" className="space-y-4">
           {detail && <BucketAccessLogTab bucket={detail} />}
+        </TabsContent>
+        <TabsContent value="hot-shards" className="space-y-4">
+          {detail && <BucketHotShardsTab bucket={detail} />}
         </TabsContent>
         <TabsContent value="objects">
       <Card>

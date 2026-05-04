@@ -121,6 +121,9 @@ func TestBucketGetReturnsDetail(t *testing.T) {
 	if got.CreatedAt <= 0 {
 		t.Errorf("created_at=%d want >0", got.CreatedAt)
 	}
+	if got.ShardCount != 64 {
+		t.Errorf("shard_count=%d want 64 (memory store default)", got.ShardCount)
+	}
 }
 
 func TestBucketGetReportsVersioning(t *testing.T) {

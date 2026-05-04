@@ -84,6 +84,10 @@ export interface BucketDetail {
   size_bytes: number;
   object_count: number;
   backend_presign: boolean;
+  // shard_count is the active sharding factor for the bucket's `objects`
+  // table partition. The Hot Shards drill panel reproduces shard via
+  // FNV-1a(key) % shard_count to match the Go shardOf helper.
+  shard_count: number;
 }
 
 export interface CreateBucketBody {
@@ -1651,4 +1655,49 @@ export async function fetchHotBuckets(
   if (!resp.ok) throw await buildAdminError(resp, 'fetch hot buckets failed');
   const body = (await resp.json()) as HotBucketsResponse;
   return { matrix: body.matrix ?? [] };
+}
+
+// US-009/US-010 — Hot Shards matrix for a single bucket. Wire shape mirrors
+// HotShardsResponse in internal/adminapi/diagnostics_hot_shards.go. When the
+// data backend is `s3` (no shards) the response shape is
+// `{empty: true, reason: ...}` and the UI renders an explainer card.
+export interface HotShardPoint {
+  ts: string;
+  value: number;
+}
+
+export interface HotShardSeries {
+  shard: string;
+  values: HotShardPoint[];
+}
+
+export interface HotShardsResponse {
+  empty?: boolean;
+  reason?: string;
+  matrix?: HotShardSeries[];
+}
+
+export interface HotShardsQuery {
+  bucket: string;
+  range: string;
+  step: string;
+}
+
+export async function fetchHotShards(
+  q: HotShardsQuery,
+): Promise<HotShardsResponse> {
+  const usp = new URLSearchParams();
+  usp.set('range', q.range);
+  usp.set('step', q.step);
+  const resp = await fetch(
+    `/admin/v1/diagnostics/hot-shards/${encodeURIComponent(q.bucket)}?${usp.toString()}`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch hot shards failed');
+  const body = (await resp.json()) as HotShardsResponse;
+  return {
+    empty: body.empty ?? false,
+    reason: body.reason ?? '',
+    matrix: body.matrix ?? [],
+  };
 }

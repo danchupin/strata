@@ -138,6 +138,8 @@ export const queryKeys = {
       ['diagnostics', 'trace', idOrRequestID] as const,
     hotBuckets: (range: string, step: string) =>
       ['diagnostics', 'hot-buckets', { range, step }] as const,
+    hotShards: (bucket: string, range: string, step: string) =>
+      ['diagnostics', 'hot-shards', bucket, { range, step }] as const,
   },
   auth: {
     whoami: ['auth', 'whoami'] as const,

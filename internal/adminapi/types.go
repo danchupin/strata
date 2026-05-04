@@ -78,6 +78,11 @@ type BucketDetail struct {
 	SizeBytes      int64  `json:"size_bytes"`
 	ObjectCount    int64  `json:"object_count"`
 	BackendPresign bool   `json:"backend_presign"`
+	// ShardCount is the active sharding factor for the bucket's `objects`
+	// table partition (Cassandra/TiKV: hash(key)%N → partition). Surfaced so
+	// the Hot Shards drill panel can reconstruct shard from key client-side
+	// using FNV-1a, matching `internal/meta/cassandra/store.go::shardOf`.
+	ShardCount int `json:"shard_count"`
 }
 
 // SetBackendPresignRequest is the JSON body accepted by PUT /admin/v1/buckets/

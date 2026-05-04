@@ -102,6 +102,7 @@ func (s *Server) handleBucketCreate(w http.ResponseWriter, r *http.Request) {
 		SizeBytes:      0,
 		ObjectCount:    0,
 		BackendPresign: b.BackendPresign,
+		ShardCount:     b.ShardCount,
 	}
 	writeJSON(w, http.StatusCreated, resp)
 }

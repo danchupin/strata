@@ -320,6 +320,7 @@ func (s *Server) handleBucketGet(w http.ResponseWriter, r *http.Request) {
 		SizeBytes:      size,
 		ObjectCount:    count,
 		BackendPresign: b.BackendPresign,
+		ShardCount:     b.ShardCount,
 	})
 }
 

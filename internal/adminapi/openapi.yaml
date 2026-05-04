@@ -113,6 +113,13 @@ components:
             meta.Bucket today; Phase 2 lifts this.
         size_bytes: { type: integer, format: int64 }
         object_count: { type: integer, format: int64 }
+        backend_presign: { type: boolean }
+        shard_count:
+          type: integer
+          description: |
+            Active sharding factor for the bucket's `objects` table partition
+            (hash(key)%N). Surfaced for the Hot Shards drill panel which
+            reconstructs shard from key client-side via FNV-1a.
 
     BucketTop:
       type: object
