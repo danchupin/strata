@@ -1,7 +1,10 @@
 import {
   Boxes,
+  ClipboardList,
   Gauge,
+  KeyRound,
   LayoutDashboard,
+  Layers,
   Settings,
   Users,
   type LucideIcon,
@@ -21,6 +24,9 @@ export const primaryNav: NavItem[] = [
   { to: '/', label: 'Overview', icon: LayoutDashboard, end: true },
   { to: '/buckets', label: 'Buckets', icon: Boxes },
   { to: '/consumers', label: 'Consumers', icon: Users },
+  { to: '/iam', label: 'IAM', icon: KeyRound },
+  { to: '/multipart', label: 'Multipart', icon: Layers },
+  { to: '/audit', label: 'Audit log', icon: ClipboardList },
   { to: '/metrics', label: 'Metrics', icon: Gauge },
   { to: '/settings', label: 'Settings', icon: Settings },
 ];

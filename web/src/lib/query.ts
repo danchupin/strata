@@ -73,15 +73,69 @@ export const queryKeys = {
     one: (name: string) => ['buckets', 'detail', name] as const,
     objects: (name: string, prefix: string, marker: string) =>
       ['buckets', 'objects', name, { prefix, marker }] as const,
+    objectLock: (name: string) => ['buckets', 'object-lock', name] as const,
+    lifecycle: (name: string) => ['buckets', 'lifecycle', name] as const,
+    cors: (name: string) => ['buckets', 'cors', name] as const,
+    policy: (name: string) => ['buckets', 'policy', name] as const,
+    acl: (name: string) => ['buckets', 'acl', name] as const,
+    inventory: (name: string) => ['buckets', 'inventory', name] as const,
+    logging: (name: string) => ['buckets', 'logging', name] as const,
+    object: (name: string, key: string, versionID: string) =>
+      ['buckets', 'object', name, key, versionID] as const,
+    objectVersions: (name: string, key: string) =>
+      ['buckets', 'object-versions', name, key] as const,
   },
   consumers: {
     top: (by: string, limit: number) => ['consumers', 'top', by, limit] as const,
+  },
+  iam: {
+    users: (query: string, page: number, pageSize: number) =>
+      ['iam', 'users', { query, page, pageSize }] as const,
+    user: (userName: string) => ['iam', 'user', userName] as const,
+    accessKeys: (userName: string) =>
+      ['iam', 'user', userName, 'access-keys'] as const,
+    userPolicies: (userName: string) =>
+      ['iam', 'user', userName, 'policies'] as const,
+    policies: ['iam', 'policies'] as const,
   },
   metrics: {
     timeseries: (metric: string, range: string, step: string) =>
       ['metrics', 'timeseries', metric, range, step] as const,
   },
+  multipart: {
+    active: (
+      bucket: string,
+      minAgeHours: number,
+      initiator: string,
+      page: number,
+      pageSize: number,
+    ) =>
+      [
+        'multipart',
+        'active',
+        { bucket, minAgeHours, initiator, page, pageSize },
+      ] as const,
+  },
+  audit: {
+    list: (
+      since: string,
+      until: string,
+      action: string,
+      principal: string,
+      bucket: string,
+      pageToken: string,
+    ) =>
+      [
+        'audit',
+        'list',
+        { since, until, action, principal, bucket, pageToken },
+      ] as const,
+  },
   auth: {
     whoami: ['auth', 'whoami'] as const,
+  },
+  settings: {
+    all: ['settings', 'all'] as const,
+    dataBackend: ['settings', 'data-backend'] as const,
   },
 };

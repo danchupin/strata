@@ -178,6 +178,57 @@ func TestAuditEmitsRowForIAMActions(t *testing.T) {
 	}
 }
 
+// TestAuditOverrideEmitsHandlerStampedRow exercises the SetAuditOverride
+// path used by /admin/v1/* handlers so the recorded row carries the
+// admin:<verb> action + bucket:<name> resource the operator console set,
+// rather than the path-derived "PostBucket" label.
+func TestAuditOverrideEmitsHandlerStampedRow(t *testing.T) {
+	store := metamem.New()
+	if _, err := store.CreateBucket(context.Background(), "bkt", "alice", "STANDARD"); err != nil {
+		t.Fatalf("seed bucket: %v", err)
+	}
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s3api.SetAuditOverride(r.Context(), "admin:CreateBucket", "bucket:bkt", "bkt", "alice")
+		w.WriteHeader(http.StatusCreated)
+	})
+	mw := &s3api.AuditMiddleware{Meta: store, Next: inner, TTL: time.Hour}
+	ts := httptest.NewServer(mw)
+	t.Cleanup(ts.Close)
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/admin/v1/buckets", strings.NewReader("{}"))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status: %d want 201", resp.StatusCode)
+	}
+
+	b, err := store.GetBucket(context.Background(), "bkt")
+	if err != nil {
+		t.Fatalf("get bucket: %v", err)
+	}
+	rows, _ := store.ListAudit(context.Background(), b.ID, 10)
+	if len(rows) != 1 {
+		t.Fatalf("rows=%d want 1: %+v", len(rows), rows)
+	}
+	r := rows[0]
+	if r.Action != "admin:CreateBucket" {
+		t.Errorf("action=%q want admin:CreateBucket", r.Action)
+	}
+	if r.Resource != "bucket:bkt" {
+		t.Errorf("resource=%q want bucket:bkt", r.Resource)
+	}
+	if r.Principal != "alice" {
+		t.Errorf("principal=%q want alice", r.Principal)
+	}
+	if r.Result != "201" {
+		t.Errorf("result=%q want 201", r.Result)
+	}
+}
+
 func TestAuditTTLPurgesExpiredRows(t *testing.T) {
 	store := metamem.New()
 	api := s3api.New(datamem.New(), store)

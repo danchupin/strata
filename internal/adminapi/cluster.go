@@ -56,6 +56,7 @@ func (s *Server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
 		StartedAt:        s.Started.Unix(),
 		UptimeSec:        uptime,
 		ClusterName:      s.ClusterName,
+		Region:           s.Region,
 		NodeCount:        len(nodes),
 		NodeCountHealthy: healthy,
 		MetaBackend:      s.MetaBackend,

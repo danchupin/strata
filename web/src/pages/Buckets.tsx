@@ -6,6 +6,7 @@ import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
+  Plus,
   RefreshCw,
   Search,
 } from 'lucide-react';
@@ -13,6 +14,7 @@ import {
 import { fetchBucketsList, type BucketSummary } from '@/api/client';
 import { queryClient, queryKeys } from '@/lib/query';
 import { Button } from '@/components/ui/button';
+import { CreateBucketDialog } from '@/components/CreateBucketDialog';
 import {
   Card,
   CardContent,
@@ -129,6 +131,7 @@ export function BucketsPage() {
   const [sort, setSort] = useState<SortColumn>('created');
   const [order, setOrder] = useState<SortOrder>('desc');
   const [page, setPage] = useState(1);
+  const [createOpen, setCreateOpen] = useState(false);
 
   // Reset to page 1 whenever the filter or sort changes — the row count under
   // page 2 is meaningless for the new query.
@@ -182,12 +185,23 @@ export function BucketsPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Buckets</h1>
-        <p className="text-sm text-muted-foreground">
-          List, search, and inspect every bucket in the cluster.
-        </p>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Buckets</h1>
+          <p className="text-sm text-muted-foreground">
+            List, search, and inspect every bucket in the cluster.
+          </p>
+        </div>
+        <Button
+          type="button"
+          onClick={() => setCreateOpen(true)}
+          className="self-start"
+        >
+          <Plus className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+          Create
+        </Button>
       </div>
+      <CreateBucketDialog open={createOpen} onOpenChange={setCreateOpen} />
 
       {errorMessage && (
         <Card className="border-destructive/40 bg-destructive/5">
@@ -315,8 +329,7 @@ export function BucketsPage() {
                           type="button"
                           variant="outline"
                           size="sm"
-                          disabled
-                          title="Coming in Phase 2"
+                          onClick={() => setCreateOpen(true)}
                           className="mt-2"
                         >
                           Create your first bucket

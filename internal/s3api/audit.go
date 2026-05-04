@@ -1,6 +1,7 @@
 package s3api
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -12,6 +13,44 @@ import (
 	"github.com/danchupin/strata/internal/logging"
 	"github.com/danchupin/strata/internal/meta"
 )
+
+// AuditOverride lets a downstream handler (e.g. /admin/v1/* under adminapi)
+// stamp the action/resource/principal it wants AuditMiddleware to record
+// instead of the path-derived defaults. AuditMiddleware installs a fresh
+// pointer in the request context before calling Next; the inner handler
+// mutates the same struct via SetAuditOverride, and AuditMiddleware reads
+// the result on the way back out. Action="" means "no override; fall back
+// to path-derived audit row".
+type AuditOverride struct {
+	Action    string
+	Resource  string
+	Bucket    string
+	Principal string
+}
+
+type auditOverrideKey struct{}
+
+// withAuditOverride attaches a fresh AuditOverride pointer to ctx. The
+// pointer is shared with the inner handler so SetAuditOverride mutations
+// are visible to the audit middleware after Next returns.
+func withAuditOverride(ctx context.Context) (context.Context, *AuditOverride) {
+	o := &AuditOverride{}
+	return context.WithValue(ctx, auditOverrideKey{}, o), o
+}
+
+// SetAuditOverride records the audit action/resource/bucket/principal that
+// AuditMiddleware should emit for the current request. Bucket is optional
+// and used to resolve the row's BucketID via meta.Store.GetBucket; pass ""
+// for non-bucket-scoped actions. Calls outside an AuditMiddleware-wrapped
+// chain are no-ops.
+func SetAuditOverride(ctx context.Context, action, resource, bucket, principal string) {
+	if ov, ok := ctx.Value(auditOverrideKey{}).(*AuditOverride); ok {
+		ov.Action = action
+		ov.Resource = resource
+		ov.Bucket = bucket
+		ov.Principal = principal
+	}
+}
 
 // DefaultAuditRetention is the row TTL applied when STRATA_AUDIT_RETENTION
 // is unset or empty.
@@ -58,9 +97,14 @@ func (m *AuditMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		now = time.Now
 	}
 	rw := &auditWriter{ResponseWriter: w, status: http.StatusOK}
-	m.Next.ServeHTTP(rw, r)
+	innerCtx, ov := withAuditOverride(r.Context())
+	m.Next.ServeHTTP(rw, r.WithContext(innerCtx))
 
 	if !auditableMethod(r.Method) {
+		return
+	}
+	if ov.Action != "" {
+		m.recordOverride(r, rw, ov, now)
 		return
 	}
 	bucket, key := splitPath(r.URL.Path)
@@ -91,6 +135,42 @@ func (m *AuditMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Result:    strconv.Itoa(rw.status),
 		RequestID: logging.RequestIDFromContext(ctx),
 		SourceIP:  clientSourceIP(r),
+		UserAgent: r.UserAgent(),
+	}
+	if entry.RequestID == "" {
+		entry.RequestID = r.Header.Get(logging.HeaderRequestID)
+	}
+	_ = m.Meta.EnqueueAudit(ctx, entry, m.TTL)
+}
+
+// recordOverride emits an audit row built from the AuditOverride that the
+// inner handler stamped onto the request context. Path-derived bucket/key
+// inspection is skipped because admin endpoints sit at /admin/v1/* and the
+// resource string the operator cares about is supplied verbatim by the
+// handler.
+func (m *AuditMiddleware) recordOverride(r *http.Request, rw *auditWriter, ov *AuditOverride, now func() time.Time) {
+	ctx := r.Context()
+	var bucketID uuid.UUID
+	storedBucket := ov.Bucket
+	if storedBucket != "" && m.Meta != nil {
+		if b, err := m.Meta.GetBucket(ctx, storedBucket); err == nil {
+			bucketID = b.ID
+		}
+	}
+	if storedBucket == "" {
+		storedBucket = "-"
+	}
+	entry := &meta.AuditEvent{
+		BucketID:  bucketID,
+		Bucket:    storedBucket,
+		Time:      now().UTC(),
+		Principal: ov.Principal,
+		Action:    ov.Action,
+		Resource:  ov.Resource,
+		Result:    strconv.Itoa(rw.status),
+		RequestID: logging.RequestIDFromContext(ctx),
+		SourceIP:  clientSourceIP(r),
+		UserAgent: r.UserAgent(),
 	}
 	if entry.RequestID == "" {
 		entry.RequestID = r.Header.Get(logging.HeaderRequestID)

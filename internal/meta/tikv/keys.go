@@ -49,6 +49,9 @@ const (
 	prefixIAMUser          = Namespace + "iu/"  // s/iu/<userName>
 	prefixIAMAccessKey     = Namespace + "ik/"  // s/ik/<accessKey>
 	prefixIAMUserKeyIndex  = Namespace + "iuk/" // s/iuk/<userName>\x00\x00<accessKey>
+	prefixManagedPolicy    = Namespace + "mp/"  // s/mp/<arn>
+	prefixUserPolicy       = Namespace + "ups/" // s/ups/<userName>\x00\x00<policyArn>
+	prefixPolicyUser       = Namespace + "pus/" // s/pus/<policyArn>\x00\x00<userName>
 	prefixAccessPoint      = Namespace + "ap/"  // s/ap/<name>
 	prefixAccessPointAlias = Namespace + "aa/"  // s/aa/<alias>
 	prefixNotifyQueue      = Namespace + "qn/"  // s/qn/<bucket16><ts8><eventID>
@@ -59,6 +62,7 @@ const (
 	prefixAuditLog         = Namespace + "A/"   // s/A/<bucket16><day4><eventID>
 	prefixLeaderLock       = Namespace + "L/"   // s/L/<lockName>
 	prefixReshardJob       = Namespace + "Rj/"  // s/Rj/<bucket16>
+	prefixAdminJob         = Namespace + "Aj/"  // s/Aj/<id>
 )
 
 // Bucket-scoped sub-prefixes. All are appended to a "s/B/<uuid16>/"
@@ -398,6 +402,13 @@ func ReshardJobsPrefix() []byte {
 	return []byte(prefixReshardJob)
 }
 
+// AdminJobKey is the per-id row for an admin background job (US-002).
+// IDs are server-minted UUIDs but escaped + terminated to keep the same
+// shape as other variable-length-segment encodings in this file.
+func AdminJobKey(id string) []byte {
+	return appendEscaped([]byte(prefixAdminJob), id)
+}
+
 // ReshardCursorKey is one row per (bucket, shardID) tracking the
 // per-shard progress watermark of an in-progress reshard.
 func ReshardCursorKey(bucketID uuid.UUID, shardID int) []byte {
@@ -450,6 +461,47 @@ func IAMUserAccessKeyKey(userName, accessKeyID string) []byte {
 func IAMUserAccessKeyPrefix(userName string) []byte {
 	out := []byte(prefixIAMUserKeyIndex)
 	return appendEscaped(out, userName)
+}
+
+// ManagedPolicyKey is the per-policy record key (lookup by ARN). Mirrors
+// IAMUserKey shape — global single-document slot.
+func ManagedPolicyKey(arn string) []byte {
+	return appendEscaped([]byte(prefixManagedPolicy), arn)
+}
+
+// ManagedPolicyPrefix is the start of all managed-policy rows — origin for
+// ListManagedPolicies.
+func ManagedPolicyPrefix() []byte {
+	return []byte(prefixManagedPolicy)
+}
+
+// UserPolicyKey is the per-attachment row keyed (userName, policyArn). The
+// userName segment is escaped + terminated so per-user range scans
+// (ListUserPolicies) emit attachments cleanly.
+func UserPolicyKey(userName, policyArn string) []byte {
+	out := []byte(prefixUserPolicy)
+	out = appendEscaped(out, userName)
+	return appendEscaped(out, policyArn)
+}
+
+// UserPolicyPrefix is the start of all attachment rows for userName.
+func UserPolicyPrefix(userName string) []byte {
+	out := []byte(prefixUserPolicy)
+	return appendEscaped(out, userName)
+}
+
+// PolicyUserKey is the inverse-index row keyed (policyArn, userName) used by
+// DeleteManagedPolicy to detect attachments without a global scan.
+func PolicyUserKey(policyArn, userName string) []byte {
+	out := []byte(prefixPolicyUser)
+	out = appendEscaped(out, policyArn)
+	return appendEscaped(out, userName)
+}
+
+// PolicyUserPrefix is the start of all inverse-index rows for policyArn.
+func PolicyUserPrefix(policyArn string) []byte {
+	out := []byte(prefixPolicyUser)
+	return appendEscaped(out, policyArn)
 }
 
 // ----------------------------------------------------------------------------

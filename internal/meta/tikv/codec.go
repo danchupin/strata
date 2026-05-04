@@ -296,6 +296,7 @@ type auditRow struct {
 	Result    string    `json:"rs,omitempty"`
 	RequestID string    `json:"rq,omitempty"`
 	SourceIP  string    `json:"ip,omitempty"`
+	UserAgent string    `json:"ua,omitempty"`
 	ExpiresAt time.Time `json:"x,omitempty"`
 }
 
@@ -311,6 +312,7 @@ func encodeAudit(evt *meta.AuditEvent, expiresAt time.Time) ([]byte, error) {
 		Result:    evt.Result,
 		RequestID: evt.RequestID,
 		SourceIP:  evt.SourceIP,
+		UserAgent: evt.UserAgent,
 		ExpiresAt: expiresAt,
 	}
 	return json.Marshal(&row)
@@ -336,6 +338,7 @@ func decodeAudit(raw []byte) (meta.AuditEvent, time.Time, error) {
 		Result:    row.Result,
 		RequestID: row.RequestID,
 		SourceIP:  row.SourceIP,
+		UserAgent: row.UserAgent,
 	}, row.ExpiresAt, nil
 }
 

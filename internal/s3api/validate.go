@@ -4,6 +4,8 @@ import (
 	"net"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/danchupin/strata/internal/auth/policy"
 )
 
 // validObjectKey rejects keys that AWS rejects with InvalidURI: invalid UTF-8
@@ -31,6 +33,50 @@ var reservedBucketNames = map[string]struct{}{
 	"readyz":      {}, // /readyz readiness probe
 	".well-known": {}, // RFC 5785 reserved
 }
+
+// ValidBucketName is the public alias for validBucketName so packages outside
+// s3api (e.g. adminapi) can validate names against the same rules without
+// duplicating the regex.
+func ValidBucketName(name string) bool { return validBucketName(name) }
+
+// ValidCORSBlob runs the s3api parser on a candidate CORS XML blob and
+// returns true when the s3api consumer would accept it. Used by adminapi to
+// pre-flight operator-supplied configurations before SetBucketCORS persists.
+func ValidCORSBlob(blob []byte) bool {
+	_, err := parseCORSConfig(blob)
+	return err == nil
+}
+
+// ValidateInventoryBlob runs the same shape-validation putBucketInventory
+// performs on the s3api surface. Adminapi calls it after rendering its
+// JSON-shape request to XML, so anything the admin-layer JSON validator
+// missed gets caught before SetBucketInventoryConfig persists. expectedID
+// is the configID the URL carried; pass an empty string to skip the
+// id-match check.
+func ValidateInventoryBlob(blob []byte, expectedID string) error {
+	return validateInventoryBlob(blob, expectedID)
+}
+
+// ValidateBucketPolicyBlob runs the same IAM-policy parser the gateway uses
+// at request-time on a candidate bucket-policy JSON blob. Returns nil when
+// the policy parses + every Statement has Effect ∈ {Allow, Deny}; otherwise
+// returns the underlying parse error so adminapi callers can surface the
+// reason inline. Empty / whitespace-only blob → ErrEmptyPolicy.
+func ValidateBucketPolicyBlob(blob []byte) error {
+	if len(strings.TrimSpace(string(blob))) == 0 {
+		return ErrEmptyPolicy
+	}
+	_, err := policy.Parse(blob)
+	return err
+}
+
+// ErrEmptyPolicy is returned by ValidateBucketPolicyBlob when the input is
+// empty or whitespace-only. Adminapi maps to 400 InvalidArgument.
+var ErrEmptyPolicy = errEmptyPolicy{}
+
+type errEmptyPolicy struct{}
+
+func (errEmptyPolicy) Error() string { return "policy document is empty" }
 
 // validBucketName checks the S3 DNS-safe bucket name rules:
 //

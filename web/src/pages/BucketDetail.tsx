@@ -9,13 +9,13 @@ import {
   Home,
   RefreshCw,
   Search,
+  Trash2,
 } from 'lucide-react';
 
 import {
   fetchBucket,
   fetchObjects,
   type BucketDetail,
-  type ObjectEntry,
   type ObjectsResponse,
 } from '@/api/client';
 import { queryClient, queryKeys } from '@/lib/query';
@@ -29,13 +29,6 @@ import {
   CardTitle,
 } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from '@/components/ui/sheet';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   Table,
@@ -45,7 +38,18 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
+import { BucketACLTab } from '@/components/BucketACLTab';
+import { BucketAccessLogTab } from '@/components/BucketAccessLogTab';
+import { BucketCORSTab } from '@/components/BucketCORSTab';
+import { BucketInventoryTab } from '@/components/BucketInventoryTab';
+import { BucketLifecycleTab } from '@/components/BucketLifecycleTab';
+import { BucketOverviewTab } from '@/components/BucketOverviewTab';
+import { BucketPolicyTab } from '@/components/BucketPolicyTab';
+import { DeleteBucketDialog } from '@/components/DeleteBucketDialog';
+import { ObjectDetailSheet } from '@/components/ObjectDetailSheet';
+import { UploadDialog } from '@/components/UploadDialog';
 
 const PAGE_SIZE = 100;
 const FILTER_DEBOUNCE_MS = 300;
@@ -121,7 +125,9 @@ export function BucketDetailPage() {
   // markerStack is the navigation history of continuation tokens — index N is
   // the marker that started page N+1. Empty means we're on page 1.
   const [markerStack, setMarkerStack] = useState<string[]>([]);
-  const [selected, setSelected] = useState<ObjectEntry | null>(null);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [uploadOpen, setUploadOpen] = useState(false);
 
   // The active prefix is the URL prefix joined with the debounced filter so
   // the operator can drill in via folder click OR by typing a deeper prefix.
@@ -169,7 +175,7 @@ export function BucketDetailPage() {
     detailQ.error instanceof Error && /404/.test(detailQ.error.message);
 
   function navigatePrefix(next: string) {
-    setSelected(null);
+    setSelectedKey(null);
     if (next) {
       setSearchParams({ prefix: next });
     } else {
@@ -231,11 +237,70 @@ export function BucketDetailPage() {
         <div className="flex flex-wrap items-center gap-3">
           <h1 className="text-2xl font-semibold tracking-tight">{name}</h1>
           {detail && <BucketBadges detail={detail} />}
+          <div className="ml-auto">
+            <Button
+              type="button"
+              variant="destructive"
+              size="sm"
+              onClick={() => setDeleteOpen(true)}
+              disabled={!detail}
+            >
+              <Trash2 className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+              Delete bucket
+            </Button>
+          </div>
         </div>
       </div>
 
       <StatsBar detail={detail} loading={detailQ.isPending && !detail} />
 
+      <Tabs defaultValue="objects">
+        <TabsList>
+          <TabsTrigger value="overview" disabled={!detail}>
+            Overview
+          </TabsTrigger>
+          <TabsTrigger value="objects">Objects</TabsTrigger>
+          <TabsTrigger value="lifecycle" disabled={!detail}>
+            Lifecycle
+          </TabsTrigger>
+          <TabsTrigger value="cors" disabled={!detail}>
+            CORS
+          </TabsTrigger>
+          <TabsTrigger value="policy" disabled={!detail}>
+            Policy
+          </TabsTrigger>
+          <TabsTrigger value="acl" disabled={!detail}>
+            ACL
+          </TabsTrigger>
+          <TabsTrigger value="inventory" disabled={!detail}>
+            Inventory
+          </TabsTrigger>
+          <TabsTrigger value="access-log" disabled={!detail}>
+            Access Log
+          </TabsTrigger>
+        </TabsList>
+        <TabsContent value="overview" className="space-y-4">
+          {detail && <BucketOverviewTab bucket={detail} />}
+        </TabsContent>
+        <TabsContent value="lifecycle" className="space-y-4">
+          {detail && <BucketLifecycleTab bucket={detail} />}
+        </TabsContent>
+        <TabsContent value="cors" className="space-y-4">
+          {detail && <BucketCORSTab bucket={detail} />}
+        </TabsContent>
+        <TabsContent value="policy" className="space-y-4">
+          {detail && <BucketPolicyTab bucket={detail} />}
+        </TabsContent>
+        <TabsContent value="acl" className="space-y-4">
+          {detail && <BucketACLTab bucket={detail} />}
+        </TabsContent>
+        <TabsContent value="inventory" className="space-y-4">
+          {detail && <BucketInventoryTab bucket={detail} />}
+        </TabsContent>
+        <TabsContent value="access-log" className="space-y-4">
+          {detail && <BucketAccessLogTab bucket={detail} />}
+        </TabsContent>
+        <TabsContent value="objects">
       <Card>
         <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
@@ -278,6 +343,14 @@ export function BucketDetailPage() {
                 aria-hidden
               />
               Refresh
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => setUploadOpen(true)}
+              disabled={!detail}
+            >
+              Upload
             </Button>
           </div>
         </CardHeader>
@@ -349,7 +422,7 @@ export function BucketDetailPage() {
                     <TableCell className="pl-4 font-medium sm:pl-6">
                       <button
                         type="button"
-                        onClick={() => setSelected(o)}
+                        onClick={() => setSelectedKey(o.key)}
                         className="inline-flex items-center gap-2 text-left text-primary underline-offset-2 hover:underline"
                       >
                         <File className="h-4 w-4" aria-hidden />
@@ -418,11 +491,28 @@ export function BucketDetailPage() {
           </div>
         </CardContent>
       </Card>
+        </TabsContent>
+      </Tabs>
 
       <ObjectDetailSheet
         bucket={name}
-        object={selected}
-        onClose={() => setSelected(null)}
+        bucketDetail={detail}
+        objectKey={selectedKey}
+        onClose={() => setSelectedKey(null)}
+      />
+
+      <DeleteBucketDialog
+        open={deleteOpen}
+        onOpenChange={setDeleteOpen}
+        bucketName={name}
+        objectCount={detail?.object_count ?? 0}
+      />
+
+      <UploadDialog
+        open={uploadOpen}
+        onOpenChange={setUploadOpen}
+        bucket={name}
+        prefix={effectivePrefix}
       />
     </div>
   );
@@ -525,80 +615,3 @@ function Breadcrumbs({
   );
 }
 
-function ObjectDetailSheet({
-  bucket,
-  object,
-  onClose,
-}: {
-  bucket: string;
-  object: ObjectEntry | null;
-  onClose: () => void;
-}) {
-  return (
-    <Sheet open={Boolean(object)} onOpenChange={(open) => !open && onClose()}>
-      <SheetContent side="right" className="sm:max-w-md">
-        {object && (
-          <>
-            <SheetHeader>
-              <SheetTitle className="break-all">{object.key}</SheetTitle>
-              <SheetDescription className="break-all">
-                <code className="text-xs">{bucket}/{object.key}</code>
-              </SheetDescription>
-            </SheetHeader>
-            <dl className="mt-4 grid grid-cols-1 gap-3 text-sm">
-              <DetailRow label="Size" value={formatBytes(object.size)} />
-              <DetailRow
-                label="Last modified"
-                value={
-                  object.last_modified
-                    ? new Date(object.last_modified * 1000).toLocaleString()
-                    : '—'
-                }
-              />
-              <DetailRow label="Storage class" value={object.storage_class || '—'} />
-              <DetailRow
-                label="ETag"
-                value={
-                  <code className="break-all font-mono text-xs">
-                    {object.etag || '—'}
-                  </code>
-                }
-              />
-            </dl>
-            <div className="mt-6 flex flex-col gap-2 sm:flex-row">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled
-                title="Coming in Phase 2"
-              >
-                Download
-              </Button>
-              <Button
-                type="button"
-                variant="destructive"
-                size="sm"
-                disabled
-                title="Coming in Phase 2"
-              >
-                Delete
-              </Button>
-            </div>
-          </>
-        )}
-      </SheetContent>
-    </Sheet>
-  );
-}
-
-function DetailRow({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div className="grid grid-cols-[120px_1fr] items-baseline gap-2">
-      <dt className="text-xs uppercase tracking-wide text-muted-foreground">
-        {label}
-      </dt>
-      <dd className="text-sm">{value}</dd>
-    </div>
-  );
-}

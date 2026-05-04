@@ -197,6 +197,17 @@ prunes lazily on `ListAudit`. IAM `?Action=` requests carry `BucketID=uuid.Nil`
 + `Bucket="-"` and `Resource="iam:<Action>"`. The middleware is best-effort —
 meta failures never fail the underlying request.
 
+`/admin/v1/*` (the embedded operator console JSON API) is also wrapped in
+`AuditMiddleware`. Admin handlers stamp the operator-meaningful audit row by
+calling `s3api.SetAuditOverride(ctx, action, resource, bucket, principal)`
+inside the handler — `action` is `admin:<Verb>` (e.g. `admin:CreateBucket`),
+`resource` is the operator-facing label (`bucket:<name>`, `iam:<UserName>`,
+…). The middleware installs an `*AuditOverride` pointer in ctx before
+`Next.ServeHTTP` and reads it back after; if `Action == ""` the middleware
+falls back to the path-derived shape used by S3 traffic. Add the override
+stamp to every new admin write — listing handlers (GET) skip audit by
+`auditableMethod`.
+
 Health probes: `internal/health.Handler` serves `/healthz` (always 200) and `/readyz` (fans out probes
 concurrently with a 1s timeout). Probes are injected by the cmd binary via type-assertion against
 `cassandraProber` / `radosProber` interfaces in `internal/serverapp/serverapp.go::buildHealthHandler`, so the package

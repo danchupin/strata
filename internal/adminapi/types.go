@@ -10,10 +10,22 @@ type ClusterStatus struct {
 	StartedAt        int64  `json:"started_at"`
 	UptimeSec        int64  `json:"uptime_sec"`
 	ClusterName      string `json:"cluster_name"`
+	Region           string `json:"region"`
 	NodeCount        int    `json:"node_count"`
 	NodeCountHealthy int    `json:"node_count_healthy"`
 	MetaBackend      string `json:"meta_backend"`
 	DataBackend      string `json:"data_backend"`
+}
+
+// CreateBucketRequest is the JSON body accepted by POST /admin/v1/buckets.
+// Region defaults to the gateway's configured RegionName when empty.
+// Versioning accepts "Enabled" or "Suspended" (case-insensitive); empty
+// means Suspended. ObjectLockEnabled requires Versioning="Enabled".
+type CreateBucketRequest struct {
+	Name              string `json:"name"`
+	Region            string `json:"region"`
+	Versioning        string `json:"versioning"`
+	ObjectLockEnabled bool   `json:"object_lock_enabled"`
 }
 
 type ClusterNodesResponse struct {
@@ -52,14 +64,22 @@ type BucketSummary struct {
 // (Off|Enabled|Suspended). ObjectLock is always false in Phase 1 — bucket
 // object-lock state is not persisted on meta.Bucket today; Phase 2 lifts it.
 type BucketDetail struct {
-	Name        string `json:"name"`
-	Owner       string `json:"owner"`
-	Region      string `json:"region"`
-	CreatedAt   int64  `json:"created_at"`
-	Versioning  string `json:"versioning"`
-	ObjectLock  bool   `json:"object_lock"`
-	SizeBytes   int64  `json:"size_bytes"`
-	ObjectCount int64  `json:"object_count"`
+	Name           string `json:"name"`
+	Owner          string `json:"owner"`
+	Region         string `json:"region"`
+	CreatedAt      int64  `json:"created_at"`
+	Versioning     string `json:"versioning"`
+	ObjectLock     bool   `json:"object_lock"`
+	SizeBytes      int64  `json:"size_bytes"`
+	ObjectCount    int64  `json:"object_count"`
+	BackendPresign bool   `json:"backend_presign"`
+}
+
+// SetBackendPresignRequest is the JSON body accepted by PUT /admin/v1/buckets/
+// {bucket}/backend-presign (US-020). Flips the per-bucket s3-over-s3 backend
+// presign-passthrough flag.
+type SetBackendPresignRequest struct {
+	Enabled bool `json:"enabled"`
 }
 
 type BucketsTopResponse struct {
@@ -114,3 +134,47 @@ type MetricSeries struct {
 // MetricPoint marshals as [<epoch-ms>, <value>] to match the standard
 // Prometheus instant-vector point shape.
 type MetricPoint [2]float64
+
+// SetVersioningRequest is the JSON body accepted by PUT /admin/v1/buckets/
+// {bucket}/versioning. State must be "Enabled" or "Suspended"; "Disabled"
+// is rejected with 400 (a freshly-created bucket starts at Disabled and
+// cannot be flipped back to it via the operator console).
+type SetVersioningRequest struct {
+	State string `json:"state"`
+}
+
+// ObjectLockConfigJSON is the AWS ObjectLockConfiguration shape rendered as
+// JSON for /admin/v1/buckets/{bucket}/object-lock. Mirrors the XML form
+// served on the S3 surface (PutObjectLockConfiguration). Rule omitted means
+// "no default retention". Mode is GOVERNANCE or COMPLIANCE; Days and Years
+// are mutually exclusive (server returns 400 InvalidArgument otherwise).
+type ObjectLockConfigJSON struct {
+	ObjectLockEnabled string                   `json:"object_lock_enabled,omitempty"`
+	Rule              *ObjectLockRuleJSON      `json:"rule,omitempty"`
+}
+
+type ObjectLockRuleJSON struct {
+	DefaultRetention *ObjectLockDefaultRetentionJSON `json:"default_retention,omitempty"`
+}
+
+type ObjectLockDefaultRetentionJSON struct {
+	Mode  string `json:"mode,omitempty"`
+	Days  *int   `json:"days,omitempty"`
+	Years *int   `json:"years,omitempty"`
+}
+
+// ForceEmptyJobResponse is the JSON shape of POST /admin/v1/buckets/{bucket}
+// /force-empty (returns 202 + body) and GET .../force-empty/{jobID}. State
+// is one of meta.AdminJobState{Pending,Running,Done,Error}. Deleted is the
+// running tally of objects deleted so far. Message carries the last-error
+// blurb when State == "error".
+type ForceEmptyJobResponse struct {
+	JobID      string `json:"job_id"`
+	Bucket     string `json:"bucket"`
+	State      string `json:"state"`
+	Deleted    int64  `json:"deleted"`
+	Message    string `json:"message,omitempty"`
+	StartedAt  int64  `json:"started_at"`
+	UpdatedAt  int64  `json:"updated_at"`
+	FinishedAt int64  `json:"finished_at,omitempty"`
+}

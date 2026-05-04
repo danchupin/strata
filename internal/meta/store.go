@@ -71,8 +71,45 @@ var (
 	ErrIAMUserNotFound         = errors.New("iam user not found")
 	ErrIAMUserAlreadyExists    = errors.New("iam user already exists")
 	ErrIAMAccessKeyNotFound    = errors.New("iam access key not found")
+	ErrManagedPolicyNotFound      = errors.New("managed policy not found")
+	ErrManagedPolicyAlreadyExists = errors.New("managed policy already exists")
+	ErrPolicyAttached             = errors.New("managed policy is attached to one or more users")
+	ErrUserPolicyNotAttached      = errors.New("managed policy is not attached to user")
+	ErrUserPolicyAlreadyAttached  = errors.New("managed policy is already attached to user")
 	ErrMultipartCompletionNotFound = errors.New("multipart completion record not found or expired")
 	ErrNoRewrapProgress        = errors.New("no rewrap progress recorded for bucket")
+	ErrAdminJobNotFound        = errors.New("admin job not found")
+	ErrAdminJobAlreadyExists   = errors.New("admin job already exists")
+)
+
+// AdminJob tracks a long-running operator-facing background job kicked off by
+// the embedded console (US-002). Today only kind="force-empty" is used: the
+// force-empty handler creates an AdminJob, kicks a goroutine that drains the
+// bucket via paginated ListObjects + DeleteObject, and updates the row with
+// Deleted/State/Message as it progresses. Polled via the
+// /admin/v1/buckets/{bucket}/force-empty/{jobID} endpoint.
+//
+// State transitions: pending -> running -> done | error. Once a job leaves
+// pending, only Deleted, UpdatedAt, FinishedAt, State and Message change.
+type AdminJob struct {
+	ID         string
+	Kind       string
+	Bucket     string
+	State      string
+	Message    string
+	Deleted    int64
+	StartedAt  time.Time
+	UpdatedAt  time.Time
+	FinishedAt time.Time
+}
+
+const (
+	AdminJobKindForceEmpty = "force-empty"
+
+	AdminJobStatePending = "pending"
+	AdminJobStateRunning = "running"
+	AdminJobStateDone    = "done"
+	AdminJobStateError   = "error"
 )
 
 // RewrapProgress tracks a master-key rewrap pass for a single bucket. Used by
@@ -117,6 +154,19 @@ type IAMUser struct {
 	UserID    string
 	Path      string
 	CreatedAt time.Time
+}
+
+// ManagedPolicy is an IAM managed-policy document operators can create from
+// the embedded console (US-013) and attach to IAM users (US-014). Arn is the
+// primary key; Document carries the raw IAM-policy JSON the operator saved.
+type ManagedPolicy struct {
+	Arn         string
+	Name        string
+	Path        string
+	Description string
+	Document    []byte
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 // Grant is a single ACL grant entry persisted alongside the canned ACL.
@@ -341,6 +391,10 @@ type AuditEvent struct {
 	Result    string
 	RequestID string
 	SourceIP  string
+	// UserAgent is the HTTP User-Agent header captured by the audit
+	// middleware (US-018). Old rows pre-dating the column read back
+	// empty — admin/UI consumers must tolerate "".
+	UserAgent string
 }
 
 // AuditPartition identifies a single (bucket_id, day) partition of the
@@ -574,6 +628,52 @@ type Store interface {
 	GetIAMAccessKey(ctx context.Context, accessKeyID string) (*IAMAccessKey, error)
 	ListIAMAccessKeys(ctx context.Context, userName string) ([]*IAMAccessKey, error)
 	DeleteIAMAccessKey(ctx context.Context, accessKeyID string) (*IAMAccessKey, error)
+	// UpdateIAMAccessKeyDisabled flips the Disabled bit on the row addressed
+	// by accessKeyID. Returns the updated row. Returns ErrIAMAccessKeyNotFound
+	// when no row exists. Callers must invalidate any in-memory credential
+	// caches that key off accessKeyID after a successful flip — the meta
+	// layer carries no cache of its own.
+	UpdateIAMAccessKeyDisabled(ctx context.Context, accessKeyID string, disabled bool) (*IAMAccessKey, error)
+
+	// CreateManagedPolicy persists a fresh managed-policy row keyed on
+	// policy.Arn. Returns ErrManagedPolicyAlreadyExists if a row with the
+	// same arn already exists.
+	CreateManagedPolicy(ctx context.Context, policy *ManagedPolicy) error
+	// GetManagedPolicy returns the row addressed by arn, or
+	// ErrManagedPolicyNotFound.
+	GetManagedPolicy(ctx context.Context, arn string) (*ManagedPolicy, error)
+	// ListManagedPolicies returns every managed policy whose Path begins
+	// with pathPrefix (empty string returns all). Result is sorted by Arn
+	// ascending.
+	ListManagedPolicies(ctx context.Context, pathPrefix string) ([]*ManagedPolicy, error)
+	// UpdateManagedPolicyDocument overwrites the Document blob and bumps
+	// UpdatedAt. Returns ErrManagedPolicyNotFound if no row exists.
+	UpdateManagedPolicyDocument(ctx context.Context, arn string, document []byte, updatedAt time.Time) error
+	// DeleteManagedPolicy deletes the row addressed by arn. Returns
+	// ErrPolicyAttached when at least one row in iam_user_policies (or
+	// equivalent backend index) references arn — callers must detach
+	// first.
+	DeleteManagedPolicy(ctx context.Context, arn string) error
+
+	// AttachUserPolicy records that userName has policyArn attached.
+	// Returns ErrIAMUserNotFound if the user does not exist,
+	// ErrManagedPolicyNotFound if the policy does not exist,
+	// ErrUserPolicyAlreadyAttached if the attachment row already exists.
+	AttachUserPolicy(ctx context.Context, userName, policyArn string) error
+	// DetachUserPolicy removes the attachment between userName and
+	// policyArn. Returns ErrUserPolicyNotAttached if the row does not
+	// exist.
+	DetachUserPolicy(ctx context.Context, userName, policyArn string) error
+	// ListUserPolicies returns every policy ARN attached to userName,
+	// sorted ascending. Returns ErrIAMUserNotFound if the user does not
+	// exist.
+	ListUserPolicies(ctx context.Context, userName string) ([]string, error)
+	// ListPolicyUsers returns every user name attached to policyArn, sorted
+	// ascending. Returns an empty slice (no error) when the policy has no
+	// attachments. Returns ErrManagedPolicyNotFound if the policy does not
+	// exist. The inverse of ListUserPolicies — backed by the same per-policy
+	// inverse-index used by DeleteManagedPolicy's attachment check (US-013).
+	ListPolicyUsers(ctx context.Context, policyArn string) ([]string, error)
 
 	CreateMultipartUpload(ctx context.Context, mu *MultipartUpload) error
 	GetMultipartUpload(ctx context.Context, bucketID uuid.UUID, uploadID string) (*MultipartUpload, error)
@@ -620,6 +720,15 @@ type Store interface {
 	// ListReshardJobs returns every queued or running reshard job for the
 	// gateway. The reshard worker calls this on each tick.
 	ListReshardJobs(ctx context.Context) ([]*ReshardJob, error)
+
+	// CreateAdminJob persists a fresh AdminJob row keyed on job.ID. Returns
+	// ErrAdminJobAlreadyExists if a row with the same ID already exists.
+	CreateAdminJob(ctx context.Context, job *AdminJob) error
+	// GetAdminJob returns the row addressed by id, or ErrAdminJobNotFound.
+	GetAdminJob(ctx context.Context, id string) (*AdminJob, error)
+	// UpdateAdminJob overwrites the State/Message/Deleted/UpdatedAt/
+	// FinishedAt columns. Returns ErrAdminJobNotFound when no row exists.
+	UpdateAdminJob(ctx context.Context, job *AdminJob) error
 
 	Close() error
 }

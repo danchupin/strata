@@ -311,14 +311,15 @@ func (s *Server) handleBucketGet(w http.ResponseWriter, r *http.Request) {
 	}
 	size, count := bucketSizeAndCount(r.Context(), s.Meta, b)
 	writeJSON(w, http.StatusOK, BucketDetail{
-		Name:        b.Name,
-		Owner:       b.Owner,
-		Region:      s.Region,
-		CreatedAt:   b.CreatedAt.Unix(),
-		Versioning:  versioningLabel(b.Versioning),
-		ObjectLock:  false,
-		SizeBytes:   size,
-		ObjectCount: count,
+		Name:           b.Name,
+		Owner:          b.Owner,
+		Region:         s.Region,
+		CreatedAt:      b.CreatedAt.Unix(),
+		Versioning:     versioningLabel(b.Versioning),
+		ObjectLock:     b.ObjectLockEnabled,
+		SizeBytes:      size,
+		ObjectCount:    count,
+		BackendPresign: b.BackendPresign,
 	})
 }
 

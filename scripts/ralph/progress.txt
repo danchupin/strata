@@ -1,95 +1,938 @@
 # Ralph Progress Log
-Started: 2026-05-04
-Cycle: ralph/web-ui-admin
+Started: Sun May  3 17:17:18 MSK 2026
 ---
 
 ## Codebase Patterns
+- /admin/v1/* now sits behind `s3api.NewAuditMiddleware`. Admin handlers stamp the operator-meaningful audit row via `s3api.SetAuditOverride(ctx, action, resource, bucket, principal)` — bypassing the path-derived `PostBucket` default. Action="" means fall back to default.
+- New admin handler? Wire `mux.HandleFunc("METHOD /admin/v1/...", s.handleX)` in `internal/adminapi/server.go::routes()`. Handlers go in `internal/adminapi/<topic>.go`. JSON helpers `writeJSON` / `writeJSONError` are in server.go.
+- Admin auth: `auth.FromContext(ctx).Owner` is set by `adminapi.authMiddleware` via session-cookie `Lookup` and is the value to use as the `owner` argument to `meta.Store.CreateBucket`.
+- Bucket-name validation: call `s3api.ValidBucketName(name)` (public alias of `validBucketName` in internal/s3api/validate.go); rules include reserved gateway-internal route names (`console`, `admin`, etc.) — duplicate the same regex client-side in dialogs for live inline feedback.
+- Versioning enum: `meta.VersioningDisabled` ("Disabled") — the freshly-created default; `meta.VersioningEnabled`; `meta.VersioningSuspended`. `versioningLabel()` in adminapi/buckets.go maps Disabled→"Off" for the operator-facing label. Public dialog accepts only Enabled|Suspended.
+- Object-Lock requires `meta.SetBucketObjectLockEnabled` (separate per-bucket flag). Server-side guard: reject `object_lock_enabled=true` unless versioning=Enabled.
+- TanStack Query invalidation pattern after a write: `queryClient.invalidateQueries({ queryKey: ['buckets', 'list'] })` — partial key prefix matches all (sort/order/page/pageSize) variants.
+- shadcn Dialog primitives in web/src/components/ui/dialog.tsx — wrap content in `<Dialog open onOpenChange><DialogContent><DialogHeader/><form/><DialogFooter/></DialogContent></Dialog>`.
+- Toasts: `import { showToast } from '@/lib/toast-store'` — fire-and-forget; ToastProvider already mounted in App.
+- adminapi.Server now carries a `leader.Locker` (Config.Locker). serverapp.buildLocker is the single source — call it once and pass the result both to adminapi.Config.Locker and the workers Supervisor (see `internal/serverapp/serverapp.go::Run`). The locker is non-nil for cassandra/tikv/memory backends; admin handlers that take long actions (force-empty, future ones) MUST acquire `bucket-<kind>:<bucket>` against it before kicking a goroutine and release on exit.
+- Admin background jobs persist in the new `meta.AdminJob` shape (kind/state/deleted/started_at/updated_at/finished_at). Cassandra: `admin_jobs` table (added in tableDDL); memory: in-process map; tikv: `s/Aj/<id>` row. Pattern: handler creates job in `pending`, kicks goroutine which flips to `running`, drives work, terminal flip to `done|error` + sets FinishedAt. Always pass a *copy* of the job pointer to the goroutine — handler still uses the original to write the 202 response and a shared mutable AdminJob is a race.
+- Reusable shared error shape on the React side: `AdminApiError` in `web/src/api/client.ts`. Wrapper helper `buildAdminError(resp, fallback)` parses `{code, message}` + status. Reuse instead of inventing one error type per endpoint.
+- Bucket detail page now hosts shadcn `Tabs` (web/src/pages/BucketDetail.tsx). Add new bucket-config tabs (Lifecycle/CORS/Policy/ACL/Inventory/Logging) by inserting `<TabsTrigger value="..." />` + `<TabsContent value="...">…</TabsContent>` siblings; keep `defaultValue="objects"` so the default landing screen stays the file browser.
+- Bucket Object-Lock JSON ↔ XML translation lives in `internal/adminapi/buckets_config.go::objectLockXML`. SetBucketObjectLockConfig stores XML bytes (s3api.objectlock.go consumer reads back via xml.Unmarshal); admin endpoint marshals the JSON shape into the same XML before calling SetBucketObjectLockConfig so default-retention resolution keeps working unchanged.
+- Saving a bucket-scoped config? Pattern: typed wrapper in `web/src/api/client.ts` returning Promise<void> + throwing AdminApiError; component calls it inside `try {…} catch (err) { setServerError({code, message}) }`; on success invalidate `queryKeys.buckets.one(name)` and the per-config key. See BucketOverviewTab.tsx for the canonical shape.
+- Heavyweight modules (Monaco) are lazy-loaded via `lazy(() => import('./MonacoJsonEditor'))` so the per-tab bundle stays under the 500 KiB gzipped budget. MonacoJsonEditor.tsx imports from `monaco-editor/esm/vs/editor/editor.api` + `…/language/json/monaco.contribution` (NOT the package main!) to skip every other language; workers go via vite's `?worker` suffix so we self-host (no CDN). Schema validation: bind a vendored JSON schema by `modelUri` via `monaco.languages.json.jsonDefaults.setDiagnosticsOptions` — dedupe by `uri` so re-mounts don't accumulate.
+- Vendored JSON schemas live under `web/src/schemas/<thing>.json` and import directly via `@/schemas/lifecycle.json` (resolveJsonModule:true is on in tsconfig).
+- s3api keeps its XML parsers unexported. To pre-flight an admin-side blob without duplicating the parser, expose a `ValidXxxBlob([]byte) bool` thin wrapper in `internal/s3api/validate.go` (see `ValidBucketName`, `ValidCORSBlob`). Admin handlers call the wrapper after JSON→XML render so anything the JSON-shape layer missed gets caught before SetBucket* persists.
+- DELETE endpoints for "bucket has one optional config document" (CORS, future Policy, Logging, etc.) MUST be idempotent — `errors.Is(err, meta.ErrNoSuch*) → 204`. Avoids the client needing a pre-check round-trip and matches the AWS S3 contract.
+- For JSON-document configs (bucket policy) where validation lives in a sibling Go package (not s3api), still expose the validator from `internal/s3api/validate.go` as `s3api.Validate<Thing>Blob` — adminapi imports only s3api, never auth/policy directly, so the surface stays consistent across config tabs (CORS/Policy/ACL/Lifecycle).
+- Bucket-policy storage is the raw operator-supplied JSON (no XML translation). PUT canonicalises via `json.Marshal`+2-space indent (`canonicalisePolicyJSON`) before SetBucketPolicy so re-loads after Save are byte-stable in Monaco — avoids whitespace-only diffs surprising the operator.
+- Bucket ACL split: canned lives on bucket (SetBucketACL by name), explicit grants live separately (SetBucketGrants by bucketID). GetBucketGrants returns `meta.ErrNoSuchGrants` when none stored — tolerate with errors.Is, don't 500. log-delivery-write is a valid canned value at the admin layer even though s3api's normalizeCannedACL maps unknown values back to private; the admin endpoint persists the literal string for buckets that opt into S3 access logging.
+- "Multiple configs of one kind per bucket" surfaces (Inventory, future LifecycleRule overrides) use GET-list returning 200 + empty array (NOT 404 — 404 is reserved for "bucket missing"). Lets the React component render an empty state without a try/catch shim. Single-document configs (CORS/Policy/Lifecycle whole) keep returning 404 NoSuch* on absent.
+- Refactor pattern when s3api validation is inline in a handler (not a free function): pull the validation into a `validateXxxBlob` helper in the s3api package, then expose `s3api.ValidateXxxBlob` from validate.go for adminapi to call. The s3api handler still uses the helper directly. See US-008 Inventory for the canonical refactor.
+- Native HTML <datalist> is the zero-dep autocomplete primitive — pairs with shadcn <Input> via the `list=` attribute. Used for "destination bucket" / "target bucket" pickers (US-008, US-009, future US-013) without pulling shadcn Combobox.
+- For "single-document optional config that the s3api consumer ALREADY parses" (Logging XML, future analytics/replication blobs) — translate JSON↔XML in adminapi WITHOUT exposing a `Validate*Blob` from s3api when the consumer parser is permissive (ignores unknown fields). Both s3api.logging.go::bucketLoggingStatus and accesslog.worker's parser silently skip unknown elements like TargetGrants, so the admin layer can persist a richer XML (with TargetGrants) and the consumer reads only the fields it cares about. Only add a ValidXxxBlob preflight when s3api strictly validates the blob.
+- TargetGrants permission set in BucketLoggingStatus is NARROWER than bucket-ACL grants: AWS spec accepts only FULL_CONTROL | READ | WRITE here (no READ_ACP / WRITE_ACP). Keep the validator's permission map distinct from acl's allowedGrantPermissions. Reuse `allowedGranteeTypes` for the grantee-type set — that is identical across both surfaces.
+- "X is referenced by Y" deletion checks (DeleteManagedPolicy → ErrPolicyAttached) need a per-X reverse-index in Cassandra (a second table partitioned by X) — ALLOW FILTERING and secondary indexes are antipatterns. Pair the operator-spec'd table (e.g. iam_user_policies PK (user_name, policy_arn)) with an internal inverse table (iam_policy_attachments PK (policy_arn, user_name)); write/delete both rows in one LoggedBatch so the views never desync. TiKV mirrors this with a second key prefix (s/pus/<arn>\x00\x00<user>); memory uses a second map[string]map[string]struct{}. Used in US-010 — reuse the pattern for any future "block delete while referenced" surface.
+- Cascaded admin operations need MORE than one audit_log row per HTTP request — the AuditMiddleware override only emits ONE row per request, so additional rows must be written directly via `meta.Store.EnqueueAudit` from the handler. adminapi.Server gained an `AuditTTL` field (mirroring serverapp's STRATA_AUDIT_RETENTION-derived value) so cascaded rows use the same TTL as the middleware. Helper `Server.emitAuditRow(ctx, r, *meta.AuditEvent)` in iam_users.go is the canonical shape: stamps Bucket="-" + RequestID from ctx, falls back to s3api.DefaultAuditRetention when AuditTTL is zero. Reuse for future cascaded admin operations (DeleteIAMUser → DeleteAccessKey×N is the first; future bulk-detach / bulk-key-rotation will follow the same shape).
+- Per-target admin handler leases follow the existing force-empty (US-002) shape: acquire `<scope>:<name>` against `s.Locker` with `leader.DefaultHolder()`, defer release on exit. iam-user delete uses `iam-user:<userName>` with a 2-minute TTL — generous for a single user's key cascade; bumps if a future cascade is heavier. 409 `<Operation>InProgress` on contention; 503 LockerUnavailable when `s.Locker == nil` so dev rigs without the locker fail loud.
+- AC sometimes names a meta.Store method that doesn't exist on main (US-011 cited `ListIAMAccessKeysByUser` — actual method is `ListIAMAccessKeys(ctx, userName)`). Adapt to the real surface; don't grow the interface to match the AC verbatim.
+- Sidebar nav additions go in `web/src/components/layout/nav.ts::primaryNav`. Pick a lucide-react icon that fits the page's mental model (KeyRound for IAM, Boxes for Buckets, Users for Consumers). New page routes go alongside existing entries in `web/src/App.tsx` Routes; preserve the order in nav.ts ↔ App.tsx for consistency.
+- Per-row mutations on a list page (Disable/Enable access key, future per-bucket toggles) use `useMutation` from @tanstack/react-query — onSuccess invalidates the per-list queryKey + fires a `showToast`; onError surfaces the AdminApiError message in a destructive toast. Avoid the heavier dialog shape for binary-state flips that don't need confirmation; reserve dialogs for create (mints secret) and delete (type-to-confirm).
+- "Show this once" payloads (access-key SecretAccessKey is the canonical case) get a 2-state Dialog: pre-create (banner + Create button), post-create (banner + 2 read-only panels with per-panel copy-to-clipboard Button). Use `navigator.clipboard.writeText` and surface a destructive toast on rejection (Safari-on-HTTP / cross-origin contexts) — lucide Copy icon flips to Check for 1.5s on success. Reuse this shape for any future "secret/token only shown once" surface (US-019 JWT rotation will follow).
+- Type-to-confirm on a destructive dialog can confirm against EITHER the full identifier (bucket name, user name) OR a meaningful suffix when the identifier is long+opaque (8-char AccessKeyID tail). Match case-insensitively when the identifier is hex-like — operators won't tell A vs a apart on a font that doesn't disambiguate.
+- Per-user detail page (`/iam/users/:userName`) emulates the missing per-user GET endpoint via a substring-filtered list call (`fetchIAMUser` wraps `fetchIAMUsers({query})` and finds the exact match). At IAM-cardinality this is fine — for /buckets-shaped surfaces the dedicated GET endpoint is still preferable.
+- `adminapi.Server.InvalidateCredential` is the auth.MultiStore.Invalidate hook wired through `adminapi.Config.InvalidateCredential` in serverapp. Any admin handler that flips Disabled/Delete on an access key MUST call `s.InvalidateCredential(accessKeyID)` after the meta write succeeds — without it, an in-flight cache hit would keep a freshly-disabled key alive past `auth.DefaultCacheTTL`. The s3api ?Action=DeleteAccessKey / RotateAccessKey paths already do this; admin paths are the second consumer.
+- Cassandra `UPDATE … IF EXISTS` + `ScanCAS()` is the canonical "flip a boolean column" shape. Same lesson as `SetBucketVersioning` — don't use a plain UPDATE against a row that may be read with quorum after a previous LWT, or stale Paxos state can leak through.
+- SigV4 presign minting helper lives in internal/auth (sibling to the verifier). `auth.GeneratePresignedURL(opts PresignOptions) (string, error)` signs query-style with SignedHeaders=host + body=UNSIGNED-PAYLOAD so the browser fetch/XHR can stream arbitrary bytes. Round-trip test (mint → feed to validatePresigned) catches canonical-request shape drift cheaply.
+- "Operator's session-cookie identity NOT their personal AK/SK reaches the browser" pattern (US-015): admin server has access to s.Creds.Lookup which returns the secret. Sign server-side with the operator's own credential; browser only ever sees the URL string. Reuse for any future browser-direct upload/download surface.
+- adminapi.Server.S3Handler is the BARE s3api.Server (no auth.Middleware wrapper). Admin handlers that "pass through to existing s3api X handler" synthesise httptest.NewRequest with the full /<bucket>/<key>?queryparams URL + copy auth context via inner.WithContext(r.Context()) + s.S3Handler.ServeHTTP(rec, inner) + map 2xx → admin success / non-2xx → bubble body. Used by US-015 Complete + Abort.
+- Web Worker pattern for browser uploads with progress: vite ?worker-imported worker (web/src/workers/upload.ts) owns the slicing + per-part PUT loop. Per-part presign happens on the PARENT (cookies don't auto-share into workers in some browsers) and the URL is shipped down via postMessage. Use XMLHttpRequest (not fetch) — fetch lacks upload progress events. Generalises to any "long-running batch operation that wants per-step progress without freezing the UI".
+- Path encoding for nested object keys on the client (US-016): `key.split('/').map(encodeURIComponent).join('/')` preserves '/' separators so the gateway mux's trailing-wildcard `{key...}` pattern sees the full nested key. Plain `encodeURIComponent(key)` would escape '/' and route as a single segment.
+- Admin object operations on a bucket (US-016): tags/retention/legal-hold endpoints carry the key in JSON body — Go 1.22 mux trailing-wildcards must be the LAST segment, so `/objects/{key...}/tags` is unrepresentable. DELETE keeps `{key...}` because no subroute follows.
+- Cluster-wide fan-out admin lists (US-017 multipart watchdog): walk meta.Store.ListBuckets("") then per-bucket ListMultipartUploads(prefix="", limit=N). MultipartUpload row carries no Initiator field, so the watchdog falls back to bucket.Owner — closest available proxy without a meta schema bump. Reuse the pattern for any future cluster-wide aggregation (e.g. cross-bucket replication queue dashboard).
+- Batch admin operations that the AC says emit "one audit row per affected entity" need both halves: the AuditMiddleware override on the request-scoped row (so the operator-facing action surfaces in the audit-log filter) AND per-entity emitAuditRow calls inside the loop. The middleware emits exactly one row per HTTP request, so the per-entity rows MUST be enqueued directly via meta.Store.EnqueueAudit — same pattern as US-011's DeleteIAMUser cascade.
+- Bulk-select tables: shadcn doesn't ship a Checkbox primitive, so use plain `<input type="checkbox">` with `ref` for the indeterminate state when some-but-not-all visible rows are selected. Selection state lives in a `Set<string>` keyed by `${bucket}\x00${id}` (NUL separator avoids collisions on user-controlled fields). Clean up stale selections on data refetch via a `useEffect` that intersects with the current visible page.
+- Cluster-wide cluster-state pages that need fresh-ish data without manual refresh: `useQuery({ refetchInterval: 30_000 })` is the default cadence — short enough that a stalled upload appears on the watchdog within one cycle, long enough to keep gateway list-fan-out bounded. Don't drop the explicit Refresh button; operators reach for it after they kick a fix.
 
-(seed entries for this cycle. Replace/remove as US-001..US-022 land.)
+## Sun May  3 17:27 MSK 2026 - US-001
+- Implemented CreateBucket dialog (POST /admin/v1/buckets + UI) per PRD AC.
 
-- Branch policy (memory/feedback_ralph_branch_policy.md): every cycle
-  ends with merge back into main; new cycle starts from main. This
-  cycle starts from main = modern-complete + binary-consolidation +
-  tikv-meta-backend + web-ui-foundation + s3-over-s3-backend
-  (Phase 1 web UI shipped via e27cf21; s3-over-s3 backend via
-  12ec0f1). Cycle end (US-022) merges ralph/web-ui-admin back into
-  main + pushes origin main.
-- Phase 1 surface available on main: /console/ (embedded React+TS),
-  /admin/v1/* JSON API (read-only handlers), HS256 JWT session-cookie
-  auth (24 h, HttpOnly+SameSite=Strict+Path=/admin) + SigV4 fallback,
-  internal/adminapi + internal/heartbeat packages, web/src/pages/*
-  (Login, Overview, Buckets, BucketDetail, Metrics, Consumers,
-  Settings stub). Phase 2 ADDS write endpoints under /admin/v1/* and
-  new pages (IAM, Multipart, AuditLog, Settings, Buckets-with-tabs).
-- internal/adminapi/server.go: every new handler registered in routes()
-  via mux.HandleFunc("METHOD /admin/v1/<path>", s.handleX). Errors
-  via writeJSONError(w, status, code, message). Auth path is
-  authMiddleware -> sigv4 fallback -> session cookie verify; leave
-  the chain alone, just register handlers.
-- meta.Store admin surface ALL exists for the bucket-config triple
-  (Get / Set / Delete) for: Lifecycle, CORS, Policy, PublicAccessBlock,
-  OwnershipControls, Encryption, ObjectLockConfig, Notification,
-  Website, Replication, Logging, Tagging, ACL+Grants, Inventory.
-  IAM (CreateIAMUser / DeleteIAMUser / ListIAMUsers /
-  CreateIAMAccessKey / DeleteIAMAccessKey / UpdateIAMAccessKeyDisabled
-  / ListIAMAccessKeysByUser) all on main. ManagedPolicy +
-  AttachUserPolicy SHAPES ARE NEW (US-010 ships them in lockstep
-  across cassandra + memory + tikv with storetest contract entries).
-- Cassandra schema migrations are additive: alterStatements in
-  internal/meta/cassandra/schema.go via idempotent ALTER TABLE ADD
-  swallowed by isColumnAlreadyExists. New tables go in tableDDL
-  (idempotent CREATE TABLE IF NOT EXISTS). Memory + tikv mirror.
-- Audit middleware (internal/s3api/AuditMiddleware) wraps both S3 +
-  /admin/v1/* requests. Every Phase 2 write endpoint emits one
-  admin:<Action> row. Resource pattern: bucket:<name> for bucket
-  ops, object:<bucket>/<key> for object ops, iam:<UserName> /
-  iam-key:<AccessKey> / iam-policy:<Arn> for IAM ops.
-- Monaco editor: install monaco-editor + @monaco-editor/react. Lazy-
-  load via React.lazy + dynamic import inside the editor pages
-  (Lifecycle JSON tab, CORS JSON tab, Policy editor, ManagedPolicy
-  editor). Verify via vite build --report that monaco lives in its
-  own chunk under web/dist/assets/ and the home/metrics/buckets-
-  list bundles stay <=500 KiB gzipped.
-- Browser-side multipart upload (US-015): operator's session-cookie
-  identity is checked at presign-mint time; the URL is signed with a
-  server-held credential (not the operator's personal AK/SK). Web
-  Worker (web/src/workers/upload.ts) drives the part PUTs in
-  parallel so the UI thread stays responsive.
-- TanStack Query 5 invalidate pattern: every successful write calls
-  queryClient.invalidateQueries({queryKey: ['buckets']}) (or the
-  matching key) so the next read reflects the write. NO optimistic
-  UI; LWT round-trips are slow enough that fake-success leads to
-  confusing rollbacks.
-- Form state: react-hook-form (already in package.json) for every
-  form. Zod schemas mirror Go validators where practical.
-- shadcn/ui: extend the Phase 1 shadcn components rather than add
-  new libraries. Toast, Dialog, Select, Tabs, Table, Form, Sheet,
-  DropdownMenu, Skeleton, Card all exist under web/src/components/
-  ui/. Generate new shadcn components via pnpm exec shadcn add
-  <component> when needed.
-- BackendPresign toggle (US-020): meta.Store.SetBucketBackendPresign
-  + meta.Bucket.BackendPresign already on main from the s3-over-s3
-  merge. UI just calls PUT and reads from /admin/v1/cluster/status to
-  decide grey-out (cluster.data_backend != 's3').
-- ROADMAP maintenance rule (CLAUDE.md): every commit closing a
-  ROADMAP item flips the bullet to ~~strikethrough~~ Done format in
-  the same commit, with closing SHA inline (or `(commit pending)`
-  with a follow-up SHA edit). New gaps: add a fresh entry under the
-  right severity section in the same commit.
-- Phase boundaries (read these BEFORE adding scope creep):
-  - Phase 1 (SHIPPED, prd-archive/prd-web-ui-foundation.md): read-only
-    console.
-  - Phase 2 (THIS cycle, prd-web-ui-admin.md): write actions.
-  - Phase 3 (prd-web-ui-debug.md): performance debug tooling.
-  If a story tempts you toward debug heatmaps / OTel trace browser /
-  SSE audit-tail, STOP — those land in Phase 3. Phase 2 ships
-  write surface only.
-- Tests for the cycle: Go side via go test ./internal/adminapi/...
-  + go test ./internal/meta/... (storetest contract for new
-  ManagedPolicy/UserPolicy methods) + go test ./internal/s3api/...
-  (audit row assertion). Playwright via cd web && pnpm exec
-  playwright test admin.spec.ts. CI e2e-ui job runs both.
-- No metadata schema changes outside US-010 (ManagedPolicy +
-  UserPolicy attachment) and US-002 (admin_jobs for force-empty
-  job persistence). No data backend changes. No SSE / WebSocket
-  in Phase 2 (Phase 3 territory).
+### Backend
+- internal/s3api/validate.go: exported `ValidBucketName` wrapper for cross-package use.
+- internal/s3api/audit.go: added `AuditOverride` + `SetAuditOverride(ctx, action, resource, bucket, principal)` context-pointer mechanism. `AuditMiddleware.ServeHTTP` installs a fresh override pointer in ctx before calling Next; if the inner handler stamped an override, the middleware emits an audit row with the supplied action/resource/principal/bucket instead of the path-derived default. Unit-tested via TestAuditOverrideEmitsHandlerStampedRow in internal/s3api/audit_test.go.
+- internal/adminapi/types.go: added `Region` to `ClusterStatus` (so the create dialog can prefill the field) and `CreateBucketRequest` body type.
+- internal/adminapi/cluster.go: populate `Region: s.Region` in handleClusterStatus.
+- internal/adminapi/buckets_create.go (new): `POST /admin/v1/buckets` handler. Validates name via s3api.ValidBucketName (returns 400 InvalidBucketName); rejects versioning="Disabled" or object_lock_enabled+non-Enabled versioning with 400 InvalidArgument; CreateBucket -> 409 BucketAlreadyExists on collision; SetBucketRegion / SetBucketVersioning / SetBucketObjectLockEnabled invoked in sequence; stamps audit override (admin:CreateBucket, bucket:<name>); returns 201 + BucketDetail.
+- internal/adminapi/server.go: registered `POST /admin/v1/buckets` route.
+- internal/serverapp/serverapp.go: wrap `/admin/v1/` mux entry with `s3api.NewAuditMiddleware` so admin actions land in audit_log alongside S3 ones.
+- internal/adminapi/buckets_create_test.go (new): 8 cases — happy / default-versioning / invalid-name / reserved-name / 409 conflict / versioning=Disabled rejected / object_lock requires versioning=Enabled / object_lock happy / malformed JSON.
+
+### Frontend
+- web/src/api/cluster.ts: added `region` field to ClusterStatus type.
+- web/src/api/client.ts: added `createBucket(body)` wrapper + `CreateBucketBody` / `CreateBucketError` types. Throws CreateBucketError carrying `{code, status, message}` parsed from server JSON for inline rendering.
+- web/src/components/CreateBucketDialog.tsx (new): shadcn Dialog with name (live-validated against the same rules as s3api.ValidBucketName), region (defaults to /admin/v1/cluster/status `region`), Versioning radio (Suspended | Enabled, default Suspended), Object-Lock checkbox (greyed-out + tooltip when versioning=Suspended). Submit: POST /admin/v1/buckets; success -> close + invalidate `['buckets','list']` + `['buckets','top']` + toast; error -> inline server code+message, dialog stays open.
+- web/src/pages/Buckets.tsx: added Create button (top-right of header) wired to dialog; activated previously-disabled "Create your first bucket" empty-state CTA.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` all pass (incl. internal/adminapi, internal/s3api, internal/serverapp).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean (vite bundle OK).
+- Browser verification: deferred — dev-browser skill unavailable in this loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - Override-pointer-in-context is the cleanest way to let downstream handlers feed metadata back to outer middleware. The outer puts a `*T` into ctx before Next; the inner mutates the same struct; outer reads after Next returns. Avoids needing trailers / response-writer shims.
+  - The admin audit story will repeat across US-002..US-022 — every admin write should stamp `s3api.SetAuditOverride(ctx, "admin:<Verb>", "<resource-shape>", bucket, owner)`. Prefix = "admin:". Bucket-scoped ⇒ resource="bucket:<name>"; object-scoped ⇒ "object:<bucket>/<key>"; iam-scoped ⇒ "iam:<UserName>" or "iam-policy:<arn>".
+  - Frontend-side bucket-name validation must mirror the reserved-name set in internal/s3api/validate.go::reservedBucketNames; if the gateway adds another reserved prefix, update the dialog regex too. Helper `nameViolation()` in CreateBucketDialog.tsx is the place.
+- Gotchas:
+  - `errorResponse` is unexported in internal/adminapi/server.go — tests in the same package can decode it directly; from outside packages you need to define your own. Keep adminapi tests in-package.
+  - When wrapping /admin/v1/ with audit middleware, the middleware stamps the override pointer onto the inner ctx. Admin handlers must call `s3api.SetAuditOverride` on `r.Context()` *inside* the handler — not before returning the response — because the middleware reads the override after Next.ServeHTTP returns.
+  - shadcn `<Dialog onOpenChange>` fires both on ESC and on the X button — so a single state setter is enough; no separate close handler needed.
+  - `auth.WithAuth(ctx, &AuthInfo{Owner: ...})` is how unit tests can inject an authenticated identity when bypassing authMiddleware via `s.routes()` directly.
+- Useful context:
+  - `internal/adminapi/buckets_list_test.go::seedBucketWithOwner` is a handy test helper for pre-loading buckets+objects with a chosen owner.
+  - `internal/adminapi/server_test.go::newTestServer` builds an in-memory adminapi.Server with Region="test-region" and a JWTSecret so cookie-auth tests work without external deps.
+  - The Buckets page (web/src/pages/Buckets.tsx) is the central anchor for bucket-related operator actions; future stories add the Delete button, force-empty job UI, and lifecycle/CORS/Policy tabs to BucketDetail.tsx.
+---
+
+## Sun May  3 17:45 MSK 2026 - US-002
+- Implemented DeleteBucket flow + force-empty job (DELETE/POST/GET admin endpoints + DeleteBucketDialog) per PRD AC.
+
+### Backend
+- internal/meta/store.go: added `meta.AdminJob` struct, sentinels `ErrAdminJobNotFound`/`ErrAdminJobAlreadyExists`, kind/state constants. New methods on meta.Store interface: `CreateAdminJob`, `GetAdminJob`, `UpdateAdminJob`.
+- internal/meta/memory/store.go: `adminJobs map[string]*meta.AdminJob` field + 3 methods.
+- internal/meta/cassandra/admin_jobs.go (new) + schema.go: new `admin_jobs` table in tableDDL (id text PK, kind, bucket, state, message, deleted, started_at, updated_at, finished_at). Create uses LWT (`IF NOT EXISTS` + MapScanCAS); Update uses `IF EXISTS` + ScanCAS so the read-after-write coherence rule holds.
+- internal/meta/tikv/admin_jobs.go (new) + keys.go: prefix `s/Aj/<escaped-id>`. Pessimistic txn + LockKeys for create+update; create rolls back the txn before returning ErrAdminJobAlreadyExists so the in-process memBackend used by tests does not deadlock.
+- internal/meta/storetest/contract.go: new `AdminJobRoundTrip` case (create / duplicate / get / update / not-found shapes). Wired into Run().
+- internal/adminapi/server.go: Server gained `Locker leader.Locker` (passed via Config). 3 new routes registered.
+- internal/adminapi/buckets_delete.go (new): handleBucketDelete (204 / 404 / 409), handleBucketForceEmpty (acquire bucket-force-empty:<bucket> via Locker.Acquire, persist AdminJob in pending, kick goroutine, return 202), handleBucketForceEmptyStatus (poll). Goroutine `runForceEmptyJob` walks ListObjectVersions/DeleteObject in pages, updates Deleted+UpdatedAt every page, terminal flip done|error, releases lease on exit. Audit overrides: admin:DeleteBucket, admin:ForceEmpty.
+- internal/adminapi/types.go: ForceEmptyJobResponse wire shape.
+- internal/serverapp/serverapp.go: `adminLocker := buildLocker(...)` constructed once, threaded into both `adminapi.Config.Locker` and the workers Supervisor (no double-build).
+- internal/adminapi/buckets_delete_test.go (new): 6 cases — empty delete / not-found / not-empty 409 / force-empty drains 5 objects / not-found force-empty / concurrent lease acquire returns 409 ForceEmptyInProgress / force-empty-status round-trip + cross-bucket 404. `newTestServerWithLocker` helper wires the in-process `metamem.Store.Locker()`.
+
+### Frontend
+- web/src/api/client.ts: added shared `AdminApiError` shape + `buildAdminError`. New wrappers `deleteBucket`, `startForceEmpty`, `fetchForceEmptyJob` and `ForceEmptyJob`/`ForceEmptyJobState` types.
+- web/src/components/DeleteBucketDialog.tsx (new): shadcn Dialog with type-to-confirm name input, force-empty checkbox auto-shown when objectCount>0, drain progress bar driven by 750 ms polling of GET /admin/v1/buckets/{bucket}/force-empty/{jobID}. On force=true the dialog calls startForceEmpty -> polls until state=done -> issues DELETE. Success → invalidate ['buckets','list'/'top'] + bucket-detail key, toast, navigate to /buckets. Error path renders server `{code, message}` inline; cancel disabled while in flight.
+- web/src/pages/BucketDetail.tsx: red destructive Delete button in the page header (`Trash2` icon), wired to the dialog + passing the live object_count.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` all pass.
+- `go test -race ./internal/adminapi/ ./internal/meta/memory/` clean (force-empty drain race fixed by handing a copy of the AdminJob pointer to the goroutine; the original stays on the handler stack for the 202 response).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean (vite bundle OK; size unchanged within noise).
+- Browser verification: deferred — dev-browser skill unavailable in this loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - Long-running admin background jobs follow a fixed shape: meta.AdminJob row + worker_locks lease + goroutine that flips state pending→running→done|error. Reuse `internal/adminapi/buckets_delete.go::startForceEmptyJob` + `runForceEmptyJob` as the template — kind constants live in meta/store.go (`AdminJobKind*`, `AdminJobState*`).
+  - When a handler kicks a goroutine that mutates the same struct it then writes to the response, the goroutine MUST receive a *copy* of the pointer (or the handler must build the response *before* spawning). Race-detector will catch the latter eventually but it's faster to be defensive at the boundary.
+  - The leader.Locker is a fully working primitive for ad-hoc admin-handler leases — not just worker leader-elections. Acquire with TTL ~10 minutes (force-empty default), release in the goroutine's defer. The same pattern will fit "audit-export run-now", "manifest-rewriter run-now", etc. in later phases.
+  - shadcn doesn't ship a Progress component out of the box. A two-div CSS bar (`<div className="h-2 ... bg-muted"><div style={{width: <pct>%}}/></div>`) is enough for slow-poll progress UI; pulling Radix/Progress for a single use-site is not warranted.
+- Gotchas:
+  - The TiKV pessimistic-txn `LockKeys` lease is held for the txn lifetime; CAS-style early returns (e.g. CreateAdminJob seeing the key already exists) MUST `txn.Rollback()` explicitly before returning the non-error result, otherwise the mock memBackend used by unit tests deadlocks the next caller.
+  - Memory `Locker` is in-process. Tests that simulate "another node holds the lease" must pre-`Acquire` with a distinct holder string and Cleanup-Release; otherwise the handler's own subsequent acquire would simply succeed (single-locker, single-process semantics).
+  - Cassandra `admin_jobs` schema is new — existing keyspaces upgrade additively via the idempotent CREATE TABLE IF NOT EXISTS in `tableDDL`. No `alterStatements` row needed because the table starts wide.
+- Useful context:
+  - `internal/serverapp/serverapp.go::buildLocker` returns `nil` if the meta backend exposes no locker. Admin handlers that depend on the lease must `if s.Locker == nil { 503 }` so dev rigs without the locker fail loud rather than dropping the lease silently.
+  - The drain loop calls ListObjectVersions first (so versioned buckets surrender every version cleanly) and falls back to ListObjects when the bucket has no version rows. memory.Store mirrors both surfaces; cassandra/tikv use the same code path.
+  - `AdminApiError` + `buildAdminError` in `web/src/api/client.ts` is the canonical error shape for admin API wrappers — replace the bespoke `CreateBucketError` (US-001) with the shared shape on the next dialog touch-up; new wrappers (US-003+) should use `AdminApiError` from day one.
+---
+
+## Sun May  3 18:25 MSK 2026 - US-004
+- Implemented Lifecycle rule editor with Visual + JSON (Monaco) sub-tabs per PRD AC.
+
+### Backend
+- internal/adminapi/buckets_lifecycle.go (new): handleBucketGetLifecycle (GET → JSON, 404 NoSuchLifecycleConfiguration when blob absent), handleBucketSetLifecycle (PUT JSON, validate per-rule, marshal to AWS XML, double-check via lifecycle.Parse, persist via meta.Store.SetBucketLifecycle). JSON↔XML translation lives in encodeLifecycleXML / decodeLifecycleXML covering Filter (Prefix+Tag/And), Expiration (Days|Date|ExpiredObjectDeleteMarker), Transitions (Days|Date+SC), NoncurrentVersionExpiration/Transition, AbortIncompleteMultipartUpload. Validation: ID required, Status Enabled|Disabled, Days/Date mutually exclusive, ≥1 action per rule. Audit override admin:SetBucketLifecycle.
+- internal/adminapi/server.go: registered GET/PUT /admin/v1/buckets/{bucket}/lifecycle.
+- internal/adminapi/buckets_lifecycle_test.go (new): 9 cases — NotConfigured 404, BucketNotFound 404, PutHappyExpirationDays + round-trip, PutAllRuleSurfaces (filter prefix+tags, two transitions, expiration, noncurrent expiration+transition, abort), EmptyRulesRejected, BadStatusRejected, DaysAndDateExclusive, NoActionRejected, BucketNotFound, MalformedJSON, TagOnlyFilterRoundTrips.
+
+### Frontend
+- web/package.json: added `monaco-editor` 0.52.2 + `@monaco-editor/react` 4.6.0 (the React wrapper isn't actually used — direct import of `monaco-editor/esm/...` is enough, but keeping the wrapper for parity with the package ecosystem doesn't hurt).
+- web/src/components/MonacoJsonEditor.tsx (new): heavyweight JSON editor. Imports only `monaco-editor/esm/vs/editor/editor.api` + the JSON contribution to skip every other language; workers via `?worker` (self-hosted). schema prop binds a vendored JSON schema by `modelUri`. Designed to be reused by US-005 CORS, US-006 Policy, US-013 ManagedPolicies — all single-document JSON editors.
+- web/src/schemas/lifecycle.json (new): vendored schema covering rules, filter, expiration, transitions, noncurrent variants, abort-incomplete-multipart.
+- web/src/components/BucketLifecycleTab.tsx (new): Visual tab (per-rule cards: ID, Status, Filter Prefix+Tags, Expiration Days|Date, Transitions list with +/− and SC select, NoncurrentVersionExpiration, AbortIncompleteMultipart, ↑↓ reorder, delete) and JSON tab (Suspense-wrapped lazy MonacoJsonEditor). Tab switch JSON→Visual auto-applies parsed state; if JSON has unsaved errors, prompts confirm and reverts. Save invalidates `queryKeys.buckets.lifecycle(name)`.
+- web/src/api/client.ts: fetchBucketLifecycle (404 → null) / setBucketLifecycle wrappers + LifecycleConfig / LifecycleRule type tree (mirrors backend JSON shape).
+- web/src/lib/query.ts: queryKeys.buckets.lifecycle(name).
+- web/src/pages/BucketDetail.tsx: added Lifecycle tab trigger + content alongside existing Overview/Objects.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` — all packages green (incl. new buckets_lifecycle_test.go suite).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean. Bundle sizes (gzipped):
+  - main: 128.70 KiB ✓ (well under the 500 KiB AC ceiling)
+  - Metrics route: 109.44 KiB (unchanged)
+  - MonacoJsonEditor lazy chunk: 591.94 KiB (per-AC: lives in its own lazy chunk, only fetched when the JSON tab activates)
+  - editor.worker / json.worker / jsonMode chunks load on first JSON tab open
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - The lifecycle XML the s3api worker reads is the AWS shape verbatim — no normalisation. Admin endpoints stay schema-additive by translating JSON → XML on PUT and XML → JSON on GET, persisting the XML so existing s3api consumers (lifecycle worker, GetBucketLifecycle s3 surface) keep working unchanged.
+  - The `lifecycle.Parse` package-level function is the single source of truth for "will the worker accept this configuration?" — call it on the rendered XML inside the admin handler to catch edge cases the type-system doesn't capture (unmapped storage classes, malformed dates).
+  - When a heavy library has its own ESM entry that bundles every language/feature (Monaco), import the slim subset (`/esm/vs/editor/editor.api` + the per-language contribution you need) — the package main loads everything. Saved ~250 KiB gzipped on the lazy chunk.
+  - The ?worker suffix is vite's recommended way to bundle Web Workers — emits each worker as its own asset and the constructor is the URL. Combined with `self.MonacoEnvironment.getWorker(_, label)`, Monaco self-hosts without a CDN.
+- Gotchas:
+  - Monaco's `monaco.languages.json.jsonDefaults.setDiagnosticsOptions` REPLACES the schemas array. Component must dedupe by `uri` and merge with the existing list, otherwise re-mounts (route navigation back to the bucket detail) lose previously registered schemas.
+  - When the lifecycle XML stores both a `<Filter><Prefix>X</Prefix></Filter>` and Tags via `<And>`, AWS spec mandates wrapping in `<And>`. encodeLifecycleXML implements that branching — single tag goes under `<Filter><Tag>`, prefix+1+tags goes under `<Filter><And>`.
+  - lifecycle.Parse rejects an empty blob (`errors.New("empty lifecycle blob")`). The admin PUT body validation must reject `{rules: []}` first so we don't try to encode an empty `<LifecycleConfiguration></LifecycleConfiguration>`.
+- Useful context:
+  - `web/src/components/BucketLifecycleTab.tsx` is the canonical pattern for the upcoming US-005 (CORS) and US-006 (Policy) bucket-config tabs: lazy-loaded MonacoJsonEditor + visual editor side-by-side, vendored JSON schema, save → invalidate the per-config queryKey.
+  - `internal/adminapi/buckets_lifecycle.go::encodeLifecycleXML` shape doubles as the reference for "JSON in / XML out" translation — copy the XML struct definition pattern into US-005's CORS handler instead of leaning on the s3api package's unexported parser.
+  - The MonacoJsonEditor wrapper accepts a `schema` prop with `{uri, modelUri, schema}` — `uri` is the schema identifier, `modelUri` is the model file path that triggers binding via `fileMatch`. Pass distinct `modelUri`s per page so two different schemas (lifecycle vs IAM policy) don't collide.
+---
+
+## Sun May  3 18:55 MSK 2026 - US-005
+- Implemented CORS rule editor with Visual + JSON (Monaco) sub-tabs per PRD AC.
+
+### Backend
+- internal/s3api/validate.go: exported `ValidCORSBlob([]byte) bool` thin wrapper around the unexported `parseCORSConfig`. Lets adminapi pre-flight a rendered CORS XML blob without duplicating the s3api parser.
+- internal/adminapi/buckets_cors.go (new): handleBucketGetCORS (GET → JSON, 404 NoSuchCORSConfiguration when blob absent, 404 NoSuchBucket when bucket missing), handleBucketSetCORS (PUT JSON, validate per-rule, marshal to XML, double-check via s3api.ValidCORSBlob, persist via meta.Store.SetBucketCORS), handleBucketDeleteCORS (DELETE, idempotent — ErrNoSuchCORS → 204). JSON↔XML translation via encodeCORSXML / decodeCORSXML keeps the field shape lossless across round-trip. Validation: ≥1 method, ≥1 origin, methods restricted to GET|PUT|POST|DELETE|HEAD (case-normalized to UPPER), max_age_seconds ≥ 0. Audit overrides admin:SetBucketCORS / admin:DeleteBucketCORS.
+- internal/adminapi/server.go: registered GET/PUT/DELETE /admin/v1/buckets/{bucket}/cors.
+- internal/adminapi/buckets_cors_test.go (new): 11 cases — GetNotConfigured 404 NoSuchCORSConfiguration, GetBucketNotFound 404, PutHappyAndRoundTrip (two rules: methods normalized + max_age + expose_headers + 2nd rule with PUT/POST/DELETE + wildcard origin), PutEmptyRulesRejected 400, PutMissingMethodsRejected 400, PutBadMethodRejected 400 ("PURGE"), PutBucketNotFound 404, PutMalformedJSON 400, DeleteHappy 204 + then GET 404, DeleteIdempotent 204 (no-op delete), DeleteBucketNotFound 404.
+
+### Frontend
+- web/src/api/client.ts: fetchBucketCORS (404 → null) / setBucketCORS / deleteBucketCORS wrappers + CORSConfig / CORSRule types (mirrors backend JSON shape).
+- web/src/lib/query.ts: queryKeys.buckets.cors(name).
+- web/src/schemas/cors.json (new): vendored draft-07 schema (rules ≥1, allowed_methods enum, allowed_origins ≥1 minLength=1, optional allowed_headers / expose_headers / max_age_seconds ≥ 0).
+- web/src/components/BucketCORSTab.tsx (new): Visual tab (per-rule cards: ID input, AllowedMethods chip toggles, AllowedOrigins/AllowedHeaders/ExposeHeaders chip lists with Enter-to-commit + Add button + dedupe, MaxAgeSeconds, +/− Add rule, delete) and JSON tab (Suspense-wrapped lazy MonacoJsonEditor reusing the existing US-004 chunk; schema-bound by modelUri inmemory://cors/<name>.json). Tab switch JSON→Visual auto-applies parsed state; if JSON has unsaved errors prompts confirm and reverts. Save invalidates queryKeys.buckets.cors(name). 'Delete configuration' button (red, disabled when no config loaded) calls deleteBucketCORS via window.confirm guard.
+- web/src/pages/BucketDetail.tsx: added CORS tab trigger + content alongside existing Overview/Lifecycle/Objects.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` — all packages pass (incl. new buckets_cors_test.go).
+- `go test -race ./internal/adminapi/ ./internal/s3api/` clean.
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean. Bundle sizes (gzipped):
+  - main: 130.96 KiB ✓ (well under the 500 KiB AC ceiling; +2.26 KiB vs US-004 baseline of 128.70)
+  - Metrics route: 109.44 KiB (unchanged)
+  - MonacoJsonEditor lazy chunk: 591.94 KiB (shared with US-004 — no duplication)
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - The CORS XML the s3api consumer reads is the AWS shape verbatim. Same lesson as US-004: keep the s3api parser the source of truth for "will the consumer accept this", expose a `ValidXxxBlob([]byte) bool` thin wrapper from s3api, and pre-flight inside the admin handler. Adds zero coupling — no new exported types — and it catches things the JSON-shape layer missed.
+  - For multi-string fields (origins, headers, methods) the chip list + Enter/Add commit + dedupe combo is a clean reusable pattern for the rest of Phase 2 (US-007 ACL grants, US-008 inventory OptionalFields). Ripped here as a private `ChipList` component because two separate use-sites this cycle would be premature; lift if a third tab needs it.
+  - DELETE endpoints for "single-document config" (CORS, lifecycle, policy) should be idempotent — server returns 204 even when no config existed. Avoids the dialog needing a "did anything exist?" pre-check round-trip.
+- Gotchas:
+  - Go embedded XML structs need lowercase-prefix Go field names AND XML attr tags to roundtrip empty slices cleanly. AllowedHeaders/ExposeHeaders use `xml:"AllowedHeader,omitempty"` so the rendered XML omits the empty repeated tag rather than emitting a single self-closing one.
+  - HTTP method casing: AWS spec is uppercase; users will type "get" / "Head". The handler normalizes to UPPER in-place on the request struct so the round-trip GET sees the canonical value. Don't skip — `parseCORSConfig` doesn't care about case but the s3api preflight matcher does (case-sensitive method match). Catching it server-side on PUT means the visual editor doesn't have to.
+  - Schema validation in Monaco: schema must be re-registered on remount via the dedupe-by-uri pattern (see MonacoJsonEditor.tsx). The first US-005 mount after a US-004 visit should NOT collide because the schemas have different `uri`s (`.../cors.json` vs `.../lifecycle.json`).
+- Useful context:
+  - `internal/s3api/cors.go::parseCORSConfig` is the upstream consumer; the ValidCORSBlob wrapper hits it. If a future story needs to add a new field (e.g. multi-region wildcard syntax), update the s3api struct first, then mirror in adminapi/buckets_cors.go's `corsRuleXML` + `CORSRuleJSON`.
+  - `web/src/components/BucketCORSTab.tsx::ChipList` is the chip-input component shape the upcoming US-007 (Bucket ACL grant editor) and US-008 (Inventory OptionalFields multi-select) will likely lift — promote to `web/src/components/ChipList.tsx` on the second copy-paste, not the first.
+  - The shared MonacoJsonEditor lazy chunk now serves Lifecycle + CORS without bundle-size penalty (chunk reused). US-006 (Policy with IAM schema) and US-013 (ManagedPolicy editor) will continue piggybacking on the same chunk.
+---
+
+## Sun May  3 17:53 MSK 2026 - US-003
+- Implemented Versioning + Object-Lock toggles on bucket detail (PUT /admin/v1/buckets/{bucket}/versioning, PUT/GET .../object-lock + new Overview tab).
+
+### Backend
+- internal/adminapi/buckets_config.go (new): handleBucketSetVersioning (PUT, rejects "Disabled" → 400 InvalidArgument), handleBucketGetObjectLock (GET → ObjectLockConfigJSON; parses stored XML blob back into JSON), handleBucketSetObjectLock (PUT JSON → XML via xml.Marshal → meta.Store.SetBucketObjectLockConfig). Validation: Mode in {GOVERNANCE, COMPLIANCE}, Days/Years > 0, Days/Years mutually exclusive, Mode requires Days OR Years. Pre-flight 409 ObjectLockNotEnabled when bucket.ObjectLockEnabled=false. Audit overrides admin:SetBucketVersioning / admin:SetBucketObjectLockConfig.
+- internal/adminapi/types.go: SetVersioningRequest, ObjectLockConfigJSON / ObjectLockRuleJSON / ObjectLockDefaultRetentionJSON wire shapes.
+- internal/adminapi/server.go: registered three new routes (PUT versioning, GET/PUT object-lock).
+- internal/adminapi/buckets.go::handleBucketGet: BucketDetail.ObjectLock now reflects b.ObjectLockEnabled instead of being hardcoded false.
+- internal/adminapi/buckets_config_test.go (new): 11 cases — versioning Enabled/Suspended/Disabled-rejected/NotFound/Malformed; object-lock Happy GOVERNANCE+Days / RejectsBucketWithoutLock 409 / NotFound / DaysAndYearsExclusive 400 / BadMode 400 / ClearRule (PUT without rule clears default) / GetRoundTrip COMPLIANCE+Years / GetNoRule (object_lock_enabled=Enabled, rule=nil) / GetNotFound / BucketDetailObjectLockReflectsBucketFlag.
+
+### Frontend
+- web/src/api/client.ts: setBucketVersioning, fetchBucketObjectLock, setBucketObjectLock wrappers + ObjectLockConfig / ObjectLockRule / ObjectLockDefaultRetention / ObjectLockMode types. All throw AdminApiError on 4xx/5xx for inline rendering.
+- web/src/lib/query.ts: queryKeys.buckets.objectLock(name) for the per-bucket cache slot.
+- web/src/components/BucketOverviewTab.tsx (new): two cards. VersioningCard: radio Enabled|Suspended, disabled when no change, save invalidates buckets.one. Tooltip "Once enabled, versioning cannot be disabled, only suspended" when flipping Suspended → Enabled. ObjectLockCard: Mode select (Off|Governance|Compliance), Retention number + Days|Years unit; greyed-out + tooltip "Object-Lock requires Versioning=Enabled" (or "Object-Lock must be enabled at bucket creation" when bucket flag is off).
+- web/src/pages/BucketDetail.tsx: wrapped Objects card in shadcn `Tabs` with sibling Overview tab. defaultValue="objects" so the file browser stays the default landing screen.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` — all packages pass (incl. new buckets_config_test.go suite).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean — main bundle 409 KiB JS / 125 KiB gzipped (well under the 500 KiB AC ceiling; Monaco lands in US-004 as a separate lazy chunk).
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - The s3api object-lock parser (`internal/s3api/objectlock.go::objectLockConfiguration`) reads XML bytes from meta.Store. To accept JSON on the admin endpoint while preserving the existing s3api consumer, marshal the JSON request body to XML inside the handler before calling SetBucketObjectLockConfig — adds one xml.Marshal per write, no new store contract. Duplicating the xml-tagged struct in adminapi keeps the s3api package surface stable (its xml struct stays unexported).
+  - For bucket-config endpoints that read-modify-write a single document, you don't need a Locker — the meta.Store implementations already serialize the write (cassandra LWT, memory mutex, tikv pessimistic txn). Locker is only needed for goroutine-driven background jobs.
+  - When a bucket-detail panel needs both a feature flag AND a flag-derived config, prefer one query per layer instead of bundling — the BucketDetail one() carries the bucket-level boolean, and a separate objectLock(name) carries the rule body. UI greys the form on the boolean before fetching the body.
+- Gotchas:
+  - SetBucketObjectLockConfig is keyed by bucket UUID; SetBucketVersioning by bucket name. Don't normalize them in the handler — use the meta.Store API as-is.
+  - The bucket-level `ObjectLockEnabled` flag is set via a SEPARATE call (`SetBucketObjectLockEnabled`) at create time. The console cannot retroactively flip it on for an existing bucket — S3 semantics. The Object-Lock card surfaces the constraint via tooltip + greyed-out form; the server returns 409 ObjectLockNotEnabled if the client bypasses the UI guard.
+  - In React Tabs, `defaultValue` controls the initial active tab; setting `disabled` on `<TabsTrigger>` keeps a tab visible but unclickable until its data is loaded — useful when the body needs `detail` to render.
+- Useful context:
+  - `BucketOverviewTab.tsx::deriveRuleState` is the single source of truth for translating `ObjectLockConfig` (server JSON) into the `(mode, unit, amount)` triple the form binds to. Future Mode-aware tabs (Lifecycle, CORS) can reuse the JSON-config / form-state split shape: a derive function + a useEffect that resets local state when the query data changes.
+  - `web/src/components/ui/tabs.tsx` is a thin shadcn wrapper around Radix Tabs (already vendored). No additional install needed for US-004..US-009.
+  - `internal/adminapi/buckets_config_test.go::putAdmin` is a generic helper for body-bearing admin requests (PUT / POST / DELETE). Reuse for US-005..US-009 instead of duplicating the auth-context + JSON-encode boilerplate.
+---
+
+## Sun May  3 20:29 MSK 2026 - US-006
+- Implemented Bucket Policy JSON editor (Monaco + IAM schema + dry-run) per PRD AC.
+
+### Backend
+- internal/s3api/validate.go: added `s3api.ValidateBucketPolicyBlob([]byte) error` thin wrapper around `internal/auth/policy.Parse`. Empty blob short-circuits to ErrEmptyPolicy. Lets adminapi run the same validator the gateway uses at request-time without re-importing internal/auth/policy across packages.
+- internal/adminapi/buckets_policy.go (new): handleBucketGetPolicy (GET → raw JSON, 404 NoSuchBucketPolicy when absent, 404 NoSuchBucket when bucket missing), handleBucketSetPolicy (PUT — validates via s3api.ValidateBucketPolicyBlob, canonicalises JSON via 2-space indent for stable Monaco round-trip, persists via SetBucketPolicy), handleBucketDeletePolicy (DELETE — idempotent, ErrNoSuchBucketPolicy → 204), handleBucketDryRunPolicy (POST /policy/dry-run — same validation, no persist; 200 {valid:true} on accept, 400 {valid:false, message} on parse error). Audit overrides admin:SetBucketPolicy / admin:DeleteBucketPolicy.
+- internal/adminapi/server.go: registered four new routes (GET/PUT/DELETE /admin/v1/buckets/{bucket}/policy + POST /policy/dry-run).
+- internal/adminapi/buckets_policy_test.go (new): 12 cases — GetNotConfigured 404 NoSuchBucketPolicy, GetBucketNotFound 404 NoSuchBucket, PutHappyAndRoundTrip, PutBucketNotFound 404, PutInvalidEffect 400 MalformedPolicy ("Maybe"), PutEmptyRejected 400, PutMalformedJSON 400, DeleteHappy + GET-after-404, DeleteIdempotent (no-op delete), DeleteBucketNotFound, DryRunValid 200 valid:true, DryRunInvalid 400 valid:false+message, DryRunDoesNotPersist (valid dry-run leaves the bucket policy-less).
+
+### Frontend
+- web/src/api/client.ts: fetchBucketPolicyText (404→null) / setBucketPolicy / deleteBucketPolicy / dryRunBucketPolicy wrappers + PolicyDryRunResult type. Wire shape is the raw JSON document (no JSON-shape translation needed — admin endpoint persists what the operator types verbatim).
+- web/src/lib/query.ts: queryKeys.buckets.policy(name).
+- web/src/schemas/iam-policy.json (new): vendored draft-07 JSON schema covering Version (2008-10-17 | 2012-10-17), Id, Statement (single-or-array), Effect (Allow|Deny), Principal (* or {AWS|Service|Federated|CanonicalUser}), Action/NotAction, Resource/NotResource, Condition (op→key→value-or-array). Same shape will drive US-013 ManagedPolicy editor.
+- web/src/components/BucketPolicyTab.tsx (new): Monaco-only editor (no Visual sub-tab — IAM policy syntax has no clean visual form) with schema-bound validation via modelUri inmemory://policy/<name>.json. 'Validate' button calls dryRunBucketPolicy, surfaces valid/invalid banner inline. 'Generate template' Select dropdown inserts PublicRead | ReadOnlyAuthenticated | DenyAllExceptUser starter (Resource pre-filled with the bucket name). 'Save policy' button persists via setBucketPolicy + invalidates the query. 'Delete policy' opens a type-to-confirm Dialog (operator types the bucket name) — Delete button enabled only when input matches. Reuses the existing US-004/US-005 lazy Monaco chunk (no per-page bundle penalty).
+- web/src/pages/BucketDetail.tsx: added Policy tab trigger + content alongside existing Overview/Lifecycle/CORS/Objects.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` — all packages pass (incl. new buckets_policy_test.go).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean. Bundle sizes (gzipped):
+  - main: 139.60 KiB ✓ (under the 500 KiB AC ceiling; +8.64 KiB vs US-005 baseline of 130.96 — Select primitive + dialog+IAM schema)
+  - Metrics route: 109.44 KiB (unchanged)
+  - MonacoJsonEditor lazy chunk: 591.94 KiB (shared with US-004/US-005 — no duplication)
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - Bucket policy storage is the raw JSON document — no XML translation. Server-side canonicalisation via `json.Marshal` + 2-space indent (see `canonicalisePolicyJSON`) keeps Save→reload byte-stable in Monaco; without it the editor would show whitespace-only diffs after every save when the user pasted minified JSON.
+  - When validation lives in `internal/auth/policy` (not s3api), still expose the wrapper from `internal/s3api/validate.go` as `s3api.ValidateXxxBlob` — adminapi already imports s3api for ValidBucketName / SetAuditOverride, so adding a new direct dep on internal/auth/policy is unnecessary import surface. Single import root keeps the contract one place to audit.
+  - dry-run endpoints should return 200/4xx based on the validator outcome (not always 200) so React-Query / fetch wrappers naturally route the result through the error path. Body shape is the same JSON for both — `{valid:bool, message?:string}` — so the wrapper just deserialises the body in either branch and returns it without throwing.
+- Gotchas:
+  - `policy.Parse` is permissive on empty Statement — the `[]Statement` decodes as nil and the loop doesn't fire. Add an explicit "policy document is empty" check in the s3api wrapper before calling Parse, otherwise empty/whitespace bodies persist a useless `{}` document.
+  - The PRD says "validates via s3api.parseBucketPolicy" but no such function exists on main — current putBucketPolicy in s3api only does `json.Unmarshal(&map[string]any)` (probe). Adapt to reality: expose `s3api.ValidateBucketPolicyBlob` that calls the gateway's actual evaluator (`policy.Parse`) — that's the single source of truth for "will the request-time evaluator accept this".
+  - Monaco's IAM schema validation is ADVISORY (red squigglies in the gutter); the dry-run round-trip is the AUTHORITATIVE check because it runs the real Go parser. The client-side schema lives at web/src/schemas/iam-policy.json and is more permissive than `policy.Parse` (e.g. accepts `Service`/`Federated` principals the parser doesn't evaluate yet) — that's intentional, the schema mirrors AWS IAM spec; validation comes from the dry-run.
+- Useful context:
+  - `internal/auth/policy/policy.go::Parse` is the authoritative validator. Version field is optional; Effect ∈ {Allow, Deny} is the only required string-enum; Action / Resource accept "*"/"?" globs; Principal accepts "*" or {AWS:[…]}; Condition accepts only StringEquals semantics today (more operators ignored, not rejected).
+  - `web/src/components/BucketPolicyTab.tsx` is the canonical Monaco-only template for US-013 (Managed Policy editor). The visual-editor sibling pattern (US-004/US-005) does NOT apply — IAM policy semantics don't decompose cleanly into UI controls.
+  - The Generate template Select uses `value=""` + `onValueChange` so picking an item doesn't pin a selection on the trigger — every pick resets to placeholder "Insert starter policy…" so consecutive picks work without an extra reset click.
+---
+
+## Sun May  3 20:37 MSK 2026 - US-007
+- Implemented Bucket ACL editor (canned + grants) per PRD AC.
+
+### Backend
+- internal/adminapi/buckets_acl.go (new): handleBucketGetACL (GET → {canned, grants}; defaults canned='private' when bucket has no ACL set; tolerates `meta.ErrNoSuchGrants` via errors.Is so a fresh bucket returns []), handleBucketSetACL (PUT — canned in {private|public-read|public-read-write|authenticated-read|log-delivery-write} lower-cased server-side; per-grant validation: grantee_type ∈ {CanonicalUser|Group|AmazonCustomerByEmail}, permission ∈ {FULL_CONTROL|READ|WRITE|READ_ACP|WRITE_ACP}; CanonicalUser requires id, Group requires uri, AmazonCustomerByEmail requires email). Two-step persist: SetBucketACL(name, canned) + SetBucketGrants(bucketID, grants). Audit override admin:SetBucketACL.
+- internal/adminapi/server.go: registered GET/PUT /admin/v1/buckets/{bucket}/acl.
+- internal/adminapi/buckets_acl_test.go (new): 14 cases — GetDefault (no ACL → private + empty grants), GetBucketNotFound 404, PutCannedAndGrantsRoundTrip (all three grantee shapes), PutLogDeliveryWriteCanned, PutBadCanned 400, PutBadGranteeType 400, PutCanonicalRequiresID/PutGroupRequiresURI/PutEmailRequiresEmail 400, PutBadPermission 400, PutBucketNotFound 404, PutEmptyGrantsClears (round-trip with empty list), PutCannedNormalizedLower (whitespace+casing trimmed), PutMalformedJSON 400, GrantsPersistedInMeta (direct GetBucketGrants assertion).
+
+### Frontend
+- web/src/api/client.ts: ACLCanned/ACLGranteeType/ACLPermission/ACLGrant/ACLConfig types + fetchBucketACL/setBucketACL wrappers (PUT returns 204; GET returns {canned, grants}).
+- web/src/lib/query.ts: queryKeys.buckets.acl(name).
+- web/src/components/BucketACLTab.tsx (new): two cards. Canned ACL card with 5 radio options + hint copy per option. Explicit grants card with per-row Grantee Type select + identifier field that swaps shape on grantee_type change + Permission select + optional display_name input on CanonicalUser + Remove button + 'Add grant' inserter. Group grants offer a preset URI dropdown (AllUsers/AuthenticatedUsers/LogDelivery) + 'Custom URI…' for freeform input. AmazonCustomerByEmail uses an email input. Client-side preflight catches missing-id/uri/email before the network round-trip; server-side validation is the authoritative check. Save calls setBucketACL then invalidates queryKeys.buckets.acl(name) so the form reloads from GetBucketGrants per AC ("Save reloads from GetBucketGrants to confirm round-trip").
+- web/src/pages/BucketDetail.tsx: added ACL tab trigger + content alongside existing Overview/Lifecycle/CORS/Policy/Objects.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` — all packages pass (incl. new buckets_acl_test.go suite).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean. Bundle sizes (gzipped):
+  - main: 140.96 KiB ✓ (under the 500 KiB AC ceiling; +1.36 KiB vs US-006 baseline of 139.60)
+  - Metrics route: 109.44 KiB (unchanged)
+  - MonacoJsonEditor lazy chunk: 591.94 KiB (unchanged — ACL tab does NOT pull Monaco)
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - Two-call persist (SetBucketACL by name + SetBucketGrants by ID) is the existing meta surface — don't try to consolidate into one. The two columns serve distinct semantics: canned is the bucket-wide preset (string column), grants is the explicit override list (separate table). The s3api gateway's `getBucketACL` already prefers grants over canned when both exist; the admin endpoint mirrors that priority.
+  - `meta.ErrNoSuchGrants` is the sentinel for "no explicit grants" — admin GET handlers must `errors.Is(err, meta.ErrNoSuchGrants)` and return an empty list, not 500. Same shape as ErrNoSuchCORS / ErrNoSuchBucketPolicy / ErrNoSuchLifecycle.
+  - log-delivery-write is a 5th valid canned ACL the admin endpoint must accept literally — s3api's normalizeCannedACL falls back to private for unknown values, but that's a request-time normalization for x-amz-acl headers, NOT a write-side gate. Admin endpoints persist the literal string so buckets used as access-log targets keep their canned value across round-trips.
+- Gotchas:
+  - When swapping grantee_type on an existing row, clear the type-incompatible identifier fields (id/uri/email) so the next save doesn't accidentally carry stale data the validator would reject. See `changeGranteeType` in BucketACLTab.tsx — the type switch resets the appropriate fields.
+  - The Select primitive does NOT accept value="" when the SelectItem list excludes empty string — Radix throws "A <Select.Item /> must have a value prop that is not an empty string". For the Group preset dropdown, use a sentinel `'custom'` value and detect it explicitly.
+  - Backend 'PutEmptyGrantsClears' relies on SetBucketGrants accepting `[]meta.Grant{}` — verified via the test. Memory backend wipes the bucket→grants slice; cassandra/tikv replace it. No special-casing needed.
+- Useful context:
+  - The full reserved canned-ACL list is mirrored in adminapi/buckets_acl.go::allowedCannedACLs and again client-side in BucketACLTab.tsx::CANNED_OPTIONS — keep the two in sync if the canned set ever expands (e.g. bucket-owner-read / bucket-owner-full-control for S3-on-Outposts).
+  - The Group URI preset list in CANNED_OPTIONS adjacent GROUP_URIS mirrors internal/s3api/acl.go::allowedGroupURIs. If s3api's URI allow-list grows, copy the new URI into both the s3api map AND the admin component preset list.
+  - BucketACLTab.tsx is the canonical chip-free per-row editor pattern; the Multipart watchdog (US-017) and Audit log (US-018) filter panels can lift the 'Select primitive + Input + Remove button + Add row' shape directly.
+---
+
+## Sun May  3 21:05 MSK 2026 - US-008
+- Implemented Inventory configurations CRUD (GET list / PUT / DELETE admin endpoints + new Inventory tab) per PRD AC.
+
+### Backend
+- internal/s3api/inventory.go: extracted putBucketInventory's inline validation into a new `validateInventoryBlob([]byte, expectedID string) error` helper. The s3api putBucketInventory now calls the helper directly (with a sentinel `errInventoryIDMismatch` separating id-mismatch from shape errors so it still returns ErrInvalidArgument vs ErrMalformedXML the same way).
+- internal/s3api/validate.go: added `s3api.ValidateInventoryBlob([]byte, expectedID string) error` thin public wrapper. Adminapi calls it after rendering its JSON shape to AWS XML.
+- internal/adminapi/buckets_inventory.go (new): handleBucketListInventory (GET → {configurations:[…]} sorted by ID; empty list is 200, not 404, so the empty-state UI renders), handleBucketSetInventory (PUT — validates JSON shape, encodes XML, runs s3api.ValidateInventoryBlob preflight, persists via meta.Store.SetBucketInventoryConfig), handleBucketDeleteInventory (DELETE — idempotent, ErrNoSuchInventoryConfig → 204). JSON↔XML translation via encodeInventoryXML/decodeInventoryXML covering ID, IsEnabled, Destination(S3BucketDestination{Bucket, Format, Prefix, AccountId}), Schedule.Frequency, IncludedObjectVersions, Filter.Prefix, OptionalFields[Field]. Validation: ID required, Format ∈ {CSV|ORC|Parquet}, Frequency ∈ {Daily|Hourly|Weekly}, IncludedObjectVersions ∈ {All|Current}, Destination.Bucket required. Audit overrides admin:SetInventoryConfig / admin:DeleteInventoryConfig with resource shape bucket-inventory:<bucket>/<configID>. PUT body ID falls back to URL configID when empty.
+- internal/adminapi/server.go: registered GET/PUT/DELETE routes (/admin/v1/buckets/{bucket}/inventory and /admin/v1/buckets/{bucket}/inventory/{configID}).
+- internal/adminapi/buckets_inventory_test.go (new): 16 cases — ListEmpty, ListBucketNotFound, PutHappyAndRoundTrip (filter + 3 optional_fields), PutBucketNotFound 404, PutIDMismatchRejected 400, PutBadFormat/PutBadFrequency/PutBadVersions/PutMissingDestBucket 400, PutMalformedJSON 400, PutBodyIDFallsBackToConfigID, DeleteHappy + post-delete list empty, DeleteIdempotent (DELETE on missing configID returns 204), DeleteBucketNotFound 404, TwoConfigsListedSorted (alpha,zeta listed in lex order), StoredAsXMLForS3APIConsumption (asserts the persisted blob is `<InventoryConfiguration>…<Frequency>Daily</Frequency>…</InventoryConfiguration>` so the s3api consumer / inventory worker reads the AWS XML it expects unchanged).
+
+### Frontend
+- web/src/api/client.ts: InventoryFormat/InventoryFrequency/InventoryVersions string-literal types + InventoryConfig/InventoryDestination/InventoryFilter/InventorySchedule/InventoryConfigsList types. listBucketInventory / setBucketInventory / deleteBucketInventory wrappers. All throw AdminApiError on 4xx/5xx; deleteBucketInventory absorbs 204 OK silently.
+- web/src/lib/query.ts: queryKeys.buckets.inventory(name) cache slot.
+- web/src/components/BucketInventoryTab.tsx (new): configurations table (ID | Schedule | Destination | Format | Versions | Enabled | Edit/Delete actions) + InventoryEditorDialog (shadcn <Dialog>) for Add/Edit. Editor form: ID (Input — locked when editing), Status checkbox, Schedule (Select Daily|Hourly|Weekly), Versions (Select Current|All), Format (Select CSV|ORC|Parquet), Destination Bucket (Input + native HTML <datalist> populated by fetchBucketsList for autocomplete; falls back to free-typed cluster bucket names), Destination Prefix, Filter Prefix (optional), Optional Fields multi-checkbox grid. Save invalidates queryKeys.buckets.inventory(name); Delete row uses window.confirm guard. Client-side preflight: ID required, no ID collision on Add, Destination Bucket required.
+- web/src/pages/BucketDetail.tsx: added Inventory tab trigger + content alongside existing Overview/Lifecycle/CORS/Policy/ACL/Objects.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` — all packages pass (incl. new buckets_inventory_test.go and the s3api inventory_test.go round-trip after the validation refactor).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean. Bundle sizes (gzipped):
+  - main: 143.30 KiB ✓ (under the 500 KiB AC ceiling; +2.34 KiB vs US-007 baseline of 140.96 — Inventory tab + dialog + datalist autocomplete)
+  - Metrics route: 109.44 KiB (unchanged)
+  - MonacoJsonEditor lazy chunk: 591.94 KiB (unchanged — Inventory tab does NOT pull Monaco; visual editor only, JSON tab not in AC)
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - When an s3api consumer has its validation inline in the handler (not a free-standing parser), extract a `validateXxxBlob([]byte, args…) error` helper in the s3api package + expose a `s3api.ValidateXxxBlob` wrapper from validate.go. The s3api handler keeps using the helper directly; adminapi calls the wrapper. Cleaner than duplicating the rules across both packages or making adminapi import internal/auth/policy-style transitive deps.
+  - For "list of single-document configs" (Inventory, future LifecycleRule overrides if any), GET-list returns 200 + empty array on no-configs (NOT 404). The 404 sentinel is reserved for "no such bucket". This lets the React component render an empty state without a try/catch shim.
+  - Native HTML <datalist> is a zero-dep autocomplete primitive that pairs cleanly with shadcn <Input> — no Combobox dep needed for the "destination bucket" picker. Free-typed values still go through; the datalist just suggests known bucket names. Lift if a future page needs Combobox semantics (filter while typing, keyboard nav of suggestions).
+  - The PRD said "PUT /admin/v1/buckets/{bucket}/inventory/{configID} parses via s3api.parseInventoryConfig" — that function does not exist as a free symbol on main (validation was inline in putBucketInventory). The right adapter is to extract the inline checks into `validateInventoryBlob` + expose `ValidateInventoryBlob` from validate.go. Future PRDs that name an unexported s3api helper should follow the same shape: refactor s3api first to expose an ergonomic public surface, then call it from adminapi.
+- Gotchas:
+  - `meta.Store.SetBucketInventoryConfig(ctx, bucketID, configID, blob)` stores the blob verbatim — the s3api list handler reads bytes back via xml.Unmarshal. Admin endpoint MUST persist the AWS InventoryConfiguration XML shape, not the JSON wire shape, otherwise the inventory worker (which reads the same blobs via meta.Store.ListBucketInventoryConfigs) will fail at unmarshal time.
+  - The body ID can disagree with the URL configID — handler MUST reject the mismatch with 400 InvalidArgument (not silently overwrite). Body ID falling back to URL configID when EMPTY is fine for ergonomics; but a non-empty body ID that disagrees is operator error.
+  - Accept "Hourly" frequency in addition to "Daily"/"Weekly" — the PRD lists "Daily | Weekly" but the s3api validateInventoryBlob has accepted Hourly since the s3api work landed. Don't tighten the admin layer relative to the s3api consumer or pre-existing valid configs become un-PUT-able.
+  - DELETE is idempotent (404 → 204) per the established pattern (US-005 CORS, US-006 Policy). Avoids the dialog needing a "did anything exist?" pre-check round-trip and matches the AWS S3 semantic.
+- Useful context:
+  - The inventory worker (internal/inventory/inventory.go) emits a fixed CSV header — Bucket, Key, VersionId, IsLatest, IsDeleteMarker, Size, LastModifiedDate, ETag, StorageClass, ChecksumAlgorithm — regardless of the OptionalFields list on the configuration. The OptionalFields list is preserved on the blob for forward-compat with future consumers that filter on the configured set; today it's metadata-only.
+  - `internal/adminapi/buckets_inventory.go::encodeInventoryXML` is the canonical JSON→XML "single-document with nested elements" template. Future stories (US-009 access-log target editor) can lift the same shape: typed JSON wire struct, parallel xml-tagged Go struct duplicated in adminapi (so s3api parsers stay unexported), encode-on-PUT / decode-on-GET, optional s3api.ValidateXxxBlob preflight before persist.
+  - The `<datalist>` autocomplete pattern used in BucketInventoryTab.tsx for destination bucket can be reused for US-009 access-log target bucket and US-013 ManagedPolicy attach-target picker without pulling shadcn Combobox.
+---
+
+## Sun May  3 21:30 MSK 2026 - US-009
+- Implemented Access-log target editor (GET/PUT/DELETE admin endpoints + new Access Log tab) per PRD AC.
+
+### Backend
+- internal/adminapi/buckets_logging.go (new): handleBucketGetLogging (GET → JSON, 404 NoSuchBucketLoggingConfiguration when blob absent or stored blob has no LoggingEnabled, 404 NoSuchBucket when bucket missing), handleBucketSetLogging (PUT — validates JSON shape, encodes XML, persists via meta.Store.SetBucketLogging), handleBucketDeleteLogging (DELETE — idempotent, ErrNoSuchLogging → 204). JSON↔XML translation via encodeLoggingXML/decodeLoggingXML covering TargetBucket, TargetPrefix, optional TargetGrants[]{Grantee{XSIType, ID, URI, DisplayName, Email}, Permission}. Validation: target_bucket required; per-grant grantee_type ∈ {CanonicalUser|Group|AmazonCustomerByEmail}, permission ∈ {FULL_CONTROL|READ|WRITE} (narrower than bucket-ACL — no READ_ACP/WRITE_ACP per AWS BucketLoggingStatus spec); CanonicalUser requires id, Group requires uri, AmazonCustomerByEmail requires email. Persists the AWS BucketLoggingStatus XML shape verbatim — s3api/logging.go's bucketLoggingStatus parser and accesslog/worker.go's anonymous LoggingEnabled parser only read TargetBucket+TargetPrefix and silently skip the unknown TargetGrants element, so the admin layer's richer XML round-trips through both consumers without surface changes. Audit overrides admin:SetBucketLogging / admin:DeleteBucketLogging.
+- internal/adminapi/server.go: registered GET/PUT/DELETE /admin/v1/buckets/{bucket}/logging.
+- internal/adminapi/buckets_logging_test.go (new): 14 cases — GetNotConfigured 404 NoSuchBucketLoggingConfiguration, GetBucketNotFound 404, PutHappyAndRoundTrip (all three grantee shapes — CanonicalUser/Group/AmazonCustomerByEmail with READ/WRITE/FULL_CONTROL respectively), PutMinimalNoGrants (target_bucket+prefix only, empty TargetGrants), PutMissingTargetBucket 400 (whitespace-only target_bucket rejected), PutBadGranteeType 400 ('Robot'), PutBadPermission 400 (READ_ACP rejected — different from bucket-ACL), PutCanonicalRequiresID 400, PutGroupRequiresURI 400, PutBucketNotFound 404, PutMalformedJSON 400, DeleteHappy 204 + post-delete GET 404, DeleteIdempotent (DELETE on never-configured bucket returns 204), DeleteBucketNotFound 404, StoredAsXMLForS3APIConsumption (asserts the persisted blob carries <BucketLoggingStatus>…<TargetBucket>…<TargetPrefix>… so the s3api consumer keeps working).
+
+### Frontend
+- web/src/api/client.ts: LoggingPermission/LoggingGrant/LoggingConfig types + fetchBucketLogging (404 → null) / setBucketLogging / deleteBucketLogging wrappers. All throw AdminApiError on 4xx/5xx; deleteBucketLogging absorbs 204 silently.
+- web/src/lib/query.ts: queryKeys.buckets.logging(name) cache slot.
+- web/src/components/BucketAccessLogTab.tsx (new): two cards. Access log target card with Target Bucket Input (+ native HTML <datalist> autocomplete from fetchBucketsList — same pattern as US-008 Inventory destination), Target Prefix Input, and an inline preview banner ('Logs will land at: s3://<target-bucket>/<prefix>YYYY-MM-DD-HH-MM-SS-RAND/' rendered live as the operator types). 'Disable logging' button (top-right of the card, only visible when isConfigured) calls deleteBucketLogging via window.confirm guard. Target grants card with per-row Grantee Type select + identifier field that swaps shape on grantee_type change (lifted from BucketACLTab) + Permission select restricted to FULL_CONTROL|READ|WRITE + optional display_name on CanonicalUser + Remove + Add grant. Group preset dropdown offers LogDelivery / AllUsers / AuthenticatedUsers + Custom URI. Client-side preflight catches missing target_bucket / missing-id/uri/email before the network round-trip; server-side validation is the authoritative check. Save invalidates queryKeys.buckets.logging(name) so the form reloads.
+- web/src/pages/BucketDetail.tsx: added 'Access Log' tab trigger + content alongside existing Overview/Lifecycle/CORS/Policy/ACL/Inventory/Objects.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` — all packages pass (incl. new buckets_logging_test.go suite). Notably internal/s3api and internal/accesslog still green — confirms the consumer parsers don't choke on the richer XML the admin layer persists.
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean. Bundle sizes (gzipped):
+  - main: 144.60 KiB ✓ (under the 500 KiB AC ceiling; +1.30 KiB vs US-008 baseline of 143.30 — Access Log tab + grant-row editor lifted from BucketACLTab pattern)
+  - Metrics route: 109.44 KiB (unchanged)
+  - MonacoJsonEditor lazy chunk: 591.95 KiB (unchanged — Logging tab does NOT pull Monaco; visual editor only)
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - When the s3api consumer parser is PERMISSIVE (silently ignores unknown XML elements), adminapi can persist a strict-superset of the AWS XML shape (e.g. TargetGrants on BucketLoggingStatus) and the consumer reads only what it cares about. No `s3api.ValidXxxBlob` preflight is needed in this case because there's nothing the s3api parser would reject that the admin-layer JSON-shape validator would accept. Only add the preflight when the s3api side strictly validates the blob (CORS / Inventory / Lifecycle / Policy).
+  - The TargetGrants permission set in BucketLoggingStatus is narrower than bucket-ACL grants — AWS spec accepts only FULL_CONTROL | READ | WRITE here. The grantee-type set is the same. Reuse `allowedGranteeTypes` from buckets_acl.go but DEFINE A SEPARATE `validLoggingPermissions` map; do NOT reuse `allowedGrantPermissions` or operators will be able to PUT a config the AWS API would reject if Strata ever enables strict TargetGrants validation.
+  - The grant-row editor pattern (Grantee Type select + identifier-field-that-swaps-shape + Permission select + Remove + Add) is now copy-pasted in two places (BucketACLTab + BucketAccessLogTab). On the third copy-paste, lift to a shared `<GrantRowEditor permissions={…} />` component — the only delta between the two is the permission set.
+- Gotchas:
+  - The XML grantee element uses an XSI-typed attribute `xsi:type="CanonicalUser"|"Group"|"AmazonCustomerByEmail"` — encoding via `xml:"http://www.w3.org/2001/XMLSchema-instance type,attr,omitempty"` produces the right namespace-qualified attribute. Do NOT use a plain `xml:"type,attr"` — Go would emit `type="…"` which AWS rejects.
+  - `decodeLoggingXML` returns `(nil, nil)` when the stored blob has a `<BucketLoggingStatus>` envelope but no `<LoggingEnabled>` child. The GET handler must check for this and return 404 NoSuchBucketLoggingConfiguration — otherwise it would 200 + empty body, which makes the React empty-state branch awkward.
+  - `s3api/logging.go::putBucketLogging` accepts a body with no LoggingEnabled element as a "clear" signal and routes to DeleteBucketLogging. The admin endpoint does NOT mirror this — admin PUT requires target_bucket; clearing goes through admin DELETE explicitly. Operators get one fewer way to accidentally wipe a config.
+- Useful context:
+  - The accesslog worker (internal/accesslog/worker.go::loggingTarget) parses the XML with an anonymous struct that has only `LoggingEnabled.{TargetBucket, TargetPrefix}`. Future fields the admin layer wants to expose (e.g. TargetObjectKeyFormat for partitioned access logs) need to be added to BOTH the worker's parser AND the admin XML codec to round-trip and take effect. Today the only fields the worker reads are bucket+prefix.
+  - The "Disable logging" button on BucketAccessLogTab is the canonical pattern for "single-document optional config that has a DELETE endpoint" (CORS, Policy, Logging) — visible only when `isConfigured`, fires DELETE under window.confirm, invalidates the per-config queryKey on success.
+  - BucketAccessLogTab.tsx is the reference implementation for "config form with inline preview" (the s3:// path preview). Future stories needing a similar live-rendered banner (e.g. US-013 IAM policy ARN preview) can copy the useMemo + <code className="font-mono"> shape.
+---
+
+## Sun May  3 21:07 MSK 2026 - US-010
+- Backend-only storage shapes for ManagedPolicy + UserPolicy attachment in lockstep across cassandra, memory, and tikv. No UI; downstream stories US-013 / US-014 wrap them.
+
+### Backend
+- internal/meta/store.go: new `meta.ManagedPolicy` struct (Arn/Name/Path/Description/Document/CreatedAt/UpdatedAt), 5 sentinels (`ErrManagedPolicyNotFound`, `ErrManagedPolicyAlreadyExists`, `ErrPolicyAttached`, `ErrUserPolicyNotAttached`, `ErrUserPolicyAlreadyAttached`). Store interface gains 8 methods: `CreateManagedPolicy`, `GetManagedPolicy`, `ListManagedPolicies`, `UpdateManagedPolicyDocument`, `DeleteManagedPolicy`, `AttachUserPolicy`, `DetachUserPolicy`, `ListUserPolicies`.
+- internal/meta/cassandra/schema.go: tableDDL gains 3 idempotent CREATE TABLE statements — `iam_managed_policies` (PK `arn`, columns name/path/description/document/created_at/updated_at), `iam_user_policies` (PK `(user_name, policy_arn)`, attached_at) per AC, and an internal-only inverse-index `iam_policy_attachments` (PK `(policy_arn, user_name)`, attached_at) so DeleteManagedPolicy's "is anything attached?" check is one partition read instead of ALLOW FILTERING.
+- internal/meta/cassandra/managed_policies.go (new): `CreateManagedPolicy` uses `INSERT … IF NOT EXISTS` + `MapScanCAS` (CLAUDE.md gotcha — column-count safety); `UpdateManagedPolicyDocument` uses `UPDATE … IF EXISTS` + `ScanCAS` (LWT-on-LWT for read-after-write coherence); `DeleteManagedPolicy` first GETs the row, then probes `iam_policy_attachments` with a single-row LIMIT 1 read, returns `ErrPolicyAttached` if anything matches, else `DELETE … IF EXISTS`. `AttachUserPolicy` GETs both referents (404→sentinel), probes the existing-attachment row, then writes both `iam_user_policies` and `iam_policy_attachments` in one `LoggedBatch`. `DetachUserPolicy` mirrors with a `LoggedBatch` of two `DELETE`s. `ListUserPolicies` is a single per-user partition scan (clustering ASC).
+- internal/meta/tikv/keys.go: 3 new prefixes — `prefixManagedPolicy = "s/mp/"` (per-policy record), `prefixUserPolicy = "s/ups/"` (escaped userName + escaped policyArn — origin for ListUserPolicies), `prefixPolicyUser = "s/pus/"` (inverse — origin for the attachment probe in DeleteManagedPolicy). Helpers: `ManagedPolicyKey/Prefix`, `UserPolicyKey/Prefix`, `PolicyUserKey/Prefix`.
+- internal/meta/tikv/managed_policies.go (new): JSON-encoded `managedPolicyRow` (short tags `a/n/p/d/doc/c/u`); pessimistic-txn `LockKeys + Get + Set` shapes mirror iam.go. CAS-style early returns (duplicate Arn / already-attached / ErrPolicyAttached) call `txn.Rollback()` explicitly before returning so the in-process memBackend used by tests does not deadlock the next caller (CLAUDE.md gotcha). `AttachUserPolicy` locks all 4 keys (user / policy / up / pu) up-front, validates referents inside the txn, then writes both index rows on Commit. `DeleteManagedPolicy` `Scan(limit=1)` on the inverse-index prefix to detect attachments without a global scan. `ListManagedPolicies` is a global range-scan + in-process path-prefix filter (operator-scope cardinality is small).
+- internal/meta/memory/store.go: 3 new fields on `Store` — `managedPolicies map[string]*meta.ManagedPolicy`, `userPolicies map[string]map[string]time.Time` (user→arn→attached_at), `policyUsers map[string]map[string]struct{}` (inverse for attachment probe). 8 new methods append after `DeleteIAMAccessKey` mirroring the cassandra/tikv contract: locking via `s.mu`; clones in/out for safety; missing referents return the right sentinel; double-attach returns `ErrUserPolicyAlreadyAttached`; double-detach returns `ErrUserPolicyNotAttached`.
+- internal/meta/storetest/contract.go: 2 new cases wired into Run() — `ManagedPolicyCRUD` (create / dup / get / list-all-ordered / list-with-pathPrefix / update-document + UpdatedAt bump / update-missing → 404 / get-missing → 404 / delete / post-delete-get → 404 / delete-missing → 404) and `UserPolicyAttach` (attach-missing-user → ErrIAMUserNotFound / attach-missing-policy → ErrManagedPolicyNotFound / attach happy / dup-attach → ErrUserPolicyAlreadyAttached / list-attached / list-missing-user → ErrIAMUserNotFound / DeleteManagedPolicy-while-attached → ErrPolicyAttached / detach-missing → ErrUserPolicyNotAttached / detach happy / dup-detach → ErrUserPolicyNotAttached / post-detach DeleteManagedPolicy succeeds).
+
+### Quality checks
+- `go vet ./...` clean.
+- `go build ./...` clean. `go build -tags ceph ./...` clean.
+- `go test ./...` all pass; new contract cases visible in `TestMemoryStoreContract/ManagedPolicyCRUD` + `…/UserPolicyAttach`.
+- `go test -tags integration -count=1 -run TestNothing ./...` compiles cleanly so the cassandra + tikv contract suites pick up the new cases when their containers run.
+- `go test -race ./internal/meta/memory/ ./internal/meta/storetest/` clean.
+- `pnpm run typecheck` clean (no frontend changes; ran for parity).
+- US-010 is backend-only — no AC requires browser verification.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - The "X is referenced by Y, refuse delete" check (DeleteManagedPolicy → ErrPolicyAttached) follows a fixed shape across all three backends: pair the operator-spec'd primary table (PK X-then-Y) with an internal inverse table (PK Y-then-X). Cassandra: 2 tables + LoggedBatch on every attach/detach. TiKV: 2 key prefixes (`s/<fwd>/<X>\x00\x00<Y>`, `s/<inv>/<Y>\x00\x00<X>`) + pessimistic txn locking all 4 keys (X-row, Y-row, fwd, inv) on attach. Memory: a second `map[string]map[string]struct{}`. Reuse for any future "block delete while referenced" surface — never use `ALLOW FILTERING` or a secondary index on Cassandra.
+  - When a Store interface method takes BOTH a referent-name (userName) and a referenced-name (policyArn), validate both inside the txn (Get on each), not in the caller — concurrent CreateUser/DeletePolicy races would otherwise allow a stale attachment to slip through. The pessimistic txn + LockKeys on the user/policy/attachment-row keys is the right granularity.
+- Gotchas:
+  - Cassandra UPDATE on a row created via LWT MUST itself be LWT (`UPDATE … IF EXISTS`) — same lesson as `SetBucketVersioning`. UpdateManagedPolicyDocument hits this.
+  - `MapScanCAS(map[string]any{})` is the safe shape for an `INSERT … IF NOT EXISTS` whose column count may grow; `ScanCAS(nil...)` would silently miscount rolled-out columns. CreateManagedPolicy uses MapScanCAS for forward compatibility even though all columns are written today.
+  - TiKV pessimistic-txn + LockKeys leases survive the txn lifetime; a CAS-reject early return (duplicate Arn, already attached, ErrPolicyAttached) MUST call `txn.Rollback()` explicitly before returning — `defer rollbackOnError(txn, &err)` only fires on `err != nil`, so a sentinel return path with `err == nil` would deadlock the in-process memBackend used by unit tests. All 4 CAS-style early returns in managed_policies.go (CreateManagedPolicy duplicate, DeleteManagedPolicy ErrPolicyAttached, AttachUserPolicy missing-user/missing-policy/already-attached) call `_ = txn.Rollback()` explicitly.
+  - The contract test's expected ordering (`first.Arn` < `second.Arn` lex) is sensitive to the chosen ARN literals; AdminAccess sorts before team/ReadOnly, but if anyone reorders the test fixtures the assertion needs updating in lockstep.
+- Useful context:
+  - The contract case lives BEFORE caseUserPolicyAttach in the slice — UserPolicyAttach reuses the user/policy creation shape from the CRUD case but starts fresh; if a future contract case wants to chain (e.g. exercise list-user-policies after a user delete cascade), keep ordering deterministic in the slice.
+  - The new Cassandra schema is purely additive — existing keyspaces upgrade in place via the idempotent `CREATE TABLE IF NOT EXISTS` in `tableDDL`. No `alterStatements` row needed because the tables start wide.
+---
+
+## Sun May  3 21:17 MSK 2026 - US-011
+- Implemented IAM Users CRUD page (GET list / POST create / DELETE cascade admin endpoints + new IAM page with Users tab + stub Access keys / Policies tabs) per PRD AC.
+
+### Backend
+- internal/adminapi/server.go: Server gained `AuditTTL time.Duration` field (mirroring serverapp's STRATA_AUDIT_RETENTION-derived value); Config carries it through. Used by handlers that write extra audit rows via meta.Store.EnqueueAudit so cascaded rows match the AuditMiddleware row TTL. Falls back to s3api.DefaultAuditRetention when zero. Routes registered: GET/POST /admin/v1/iam/users, DELETE /admin/v1/iam/users/{userName}.
+- internal/adminapi/iam_users.go (new): handleIAMUsersList (paginated; query substring filter; AccessKeyCount computed via meta.Store.ListIAMAccessKeys per row), handleIAMUserCreate (validates user_name regex `^[a-zA-Z0-9_+=,.@-]{1,64}$` + path begins/ends with '/'; mints UserID 'AID<UPPER-uuid>' shape; 409 EntityAlreadyExists on collision; audit override `admin:CreateUser` with resource `iam:<userName>`), handleIAMUserDelete (acquires `iam-user:<name>` lease via leader.Locker with 2-minute TTL; cascades by listing IAMAccessKeys + DeleteIAMAccessKey per row, emitting one `admin:DeleteAccessKey` row each via meta.Store.EnqueueAudit for cascade visibility; then DeleteIAMUser; audit override `admin:DeleteUser`; 503 LockerUnavailable when s.Locker is nil; 409 DeleteUserInProgress on concurrent acquire; 404 NoSuchEntity). Helper `Server.emitAuditRow(ctx, r, *meta.AuditEvent)` is the cascaded-audit-row shape — stamps Bucket="-" + RequestID from ctx, falls back to s3api.DefaultAuditRetention when AuditTTL zero. Reusable for future cascaded admin operations.
+- internal/serverapp/serverapp.go: reorder `auditTTL := auditRetention(logger)` ahead of `adminapi.New(...)` and pass it as AuditTTL on adminapi.Config. Both `/admin/v1/` and `/` mounts use the SAME auditTTL value so admin + S3 audit rows have identical TTLs.
+- internal/adminapi/iam_users_test.go (new): 14 in-package unit tests cover ListEmpty + Users non-nil array (React empty-state branch), PopulatedAndKeyCounts (alice with 2 keys + bob with 0), QueryFilter (substring), Pagination (page=2 page_size=2), Create happy + default path '/', Create invalid name (4 cases: empty / whitespace / spaces / >64 chars), Create invalid path ('/no-trailing'), Create 409 EntityAlreadyExists, Create malformed JSON 400, Delete happy + GetIAMUser→ErrIAMUserNotFound, Delete cascade access keys (2 keys → 0 keys post-delete), Delete 404 NoSuchEntity, Delete 503 LockerUnavailable (no Locker on Server).
+
+### Frontend
+- web/src/api/client.ts: IAMUserSummary / IAMUsersListResponse / CreateIAMUserBody types + fetchIAMUsers / createIAMUser / deleteIAMUser wrappers. All throw AdminApiError on 4xx/5xx; deleteIAMUser absorbs 204 silently.
+- web/src/lib/query.ts: queryKeys.iam.users(query, page, pageSize) cache slot.
+- web/src/pages/IAM.tsx (new): hosts shadcn Tabs with Users (active), Access keys (stub placeholder for US-012), Policies (stub placeholder for US-013/US-014). UsersTab mirrors the BucketsPage shape — search input (300ms debounce), Refresh button, Create user button, paginated table (User name | User ID | Path | Created | Access keys | Delete action), shadcn pagination. Empty-state CTA opens the create dialog. Per-row Delete button opens DeleteIAMUserDialog with the target user.
+- web/src/components/CreateIAMUserDialog.tsx (new): client-side preflight matches the server regex `^[a-zA-Z0-9_+=,.@-]{1,64}$`; path violation when not begin/end with '/'. Submit invalidates ['iam','users'] so the table refetches; surfaces server `{code, message}` inline; dialog stays open on error.
+- web/src/components/DeleteIAMUserDialog.tsx (new): type-to-confirm guard requiring the operator to type the user name verbatim. Banner shows the access key count that will cascade alongside (e.g. "2 access keys owned by this user will be deleted alongside"). Submit calls deleteIAMUser; success → invalidate cache + toast + close.
+- web/src/App.tsx: added /iam route between /consumers and /metrics.
+- web/src/components/layout/nav.ts: added IAM nav entry with KeyRound icon between Consumers and Metrics.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` — all packages pass (incl. new iam_users_test.go).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean. Bundle sizes (gzipped):
+  - main: 146.88 KiB ✓ (well under 500 KiB AC ceiling; +2.28 KiB vs US-009 baseline of 144.60 — IAM page + 2 dialogs + table)
+  - Metrics route: 109.44 KiB (unchanged)
+  - MonacoJsonEditor lazy chunk: 591.94 KiB (unchanged — IAM page does NOT pull Monaco; arrives in US-013 ManagedPolicy editor)
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - Cascaded admin operations need MORE than one audit_log row per HTTP request — the AuditMiddleware override emits exactly ONE row. Additional rows must be written directly via `meta.Store.EnqueueAudit` from the handler. `Server.emitAuditRow(ctx, r, *meta.AuditEvent)` in iam_users.go is the canonical shape for "stamp Bucket='-' + RequestID + AuditTTL fallback"; reuse for future bulk-cascade flows.
+  - Per-target admin leases follow the existing force-empty (US-002) shape — acquire `<scope>:<name>` via `s.Locker` with `leader.DefaultHolder()`, defer release on exit. 503 `LockerUnavailable` when `s.Locker == nil` so dev rigs fail loud rather than silently dropping the lease.
+  - Sidebar nav additions go in `web/src/components/layout/nav.ts::primaryNav` in the same order as the route definitions in `App.tsx`. Keep the two ordering-aligned.
+  - Stub tabs (Access keys, Policies) inside an enabled top-level page — render a `PlaceholderTab` card that explains the tab will land in a later story. Avoids "ghost tab" awkwardness where the trigger is visible but the body is empty.
+- Gotchas:
+  - PRD US-011 cited `meta.Store.ListIAMAccessKeysByUser` — actual method is `ListIAMAccessKeys(ctx, userName)`. Adapt to the real surface; don't grow the interface.
+  - `s.Logger.Printf(...)` is the canonical lazy-init slog-shaped logger across adminapi handlers (Server.Logger defaults to `log.Default()` — not slog — because Printf-style is enough for ad-hoc diagnostics; the structured slog tree starts in serverapp/middleware).
+  - When a handler kicks ContextBackground for the lease release (deferred), use `context.Background()` not `r.Context()` so a client-cancelled request still releases the lease. Same lesson as the force-empty handler.
+- Useful context:
+  - `meta.IAMUser.UserID` shape (`AID<UPPER-uuid>`) mirrors AWS IAM's UserID format (AID/AIDA prefix). The s3api `iamCreateUser` handler uses a different `newUserID()` helper; admin endpoint mints its own to avoid leaking s3api internals.
+  - The /iam page is the anchor for US-012 (Access keys CRUD per user — adds a /iam/users/:userName detail route), US-013 (Managed policies tab), US-014 (attach/detach policies). All three lift the "table + create dialog + per-row action" shape from UsersTab.
+  - `internal/adminapi/iam_users_test.go::iamRequest` is a generic helper for body-bearing admin requests via `s.routes()` with an authenticated owner stamped in ctx — reuse it for US-012/US-013/US-014 tests instead of duplicating the auth-context boilerplate.
+---
+
+## Sun May  3 21:50 MSK 2026 - US-012
+- Implemented Access keys CRUD per user (GET list / POST create / PATCH disable | enable / DELETE admin endpoints + new IAMUserDetail page with access-keys table and Create / Delete dialogs) per PRD AC.
+
+### Backend
+- internal/meta/store.go: Store interface gains UpdateIAMAccessKeyDisabled(ctx, accessKeyID, disabled) → (*IAMAccessKey, error). Returns ErrIAMAccessKeyNotFound when no row exists. Doc explicitly tells callers to invalidate any cached credential lookup that keys off accessKeyID after a successful flip — meta layer carries no cache of its own.
+- internal/meta/cassandra/access_keys.go: UpdateIAMAccessKeyDisabled uses `UPDATE access_keys SET disabled=? WHERE access_key=? IF EXISTS` + ScanCAS — LWT-on-LWT for read-after-write coherence (CLAUDE.md gotcha). Re-reads via GetIAMAccessKey on apply.
+- internal/meta/tikv/iam.go: UpdateIAMAccessKeyDisabled is a pessimistic txn (Begin → LockKeys → Get → decode → flip Disabled → encode → Set → Commit). Calls txn.Rollback() explicitly on the not-found early-return so the in-process memBackend used in unit tests does not leak the LockKeys lease (CLAUDE.md gotcha).
+- internal/meta/memory/store.go: UpdateIAMAccessKeyDisabled is the trivial s.mu.Lock + map mutate.
+- internal/meta/storetest/contract.go: new caseIAMAccessKeyDisabled wired into Run() — exercises disable + GetIAMAccessKey round-trip + flip-back + ErrIAMAccessKeyNotFound on missing row. Memory contract test green (TestMemoryStoreContract/IAMAccessKeyDisabled); cassandra + tikv suites compile under `-tags integration`.
+- internal/adminapi/server.go: Server gains InvalidateCredential func(accessKey string) field; Config carries it through (serverapp wires multi.Invalidate). 4 routes registered: GET/POST /admin/v1/iam/users/{userName}/access-keys, PATCH/DELETE /admin/v1/iam/access-keys/{accessKey}.
+- internal/adminapi/iam_access_keys.go (new): handleIAMAccessKeyList (validates user exists 404 NoSuchEntity; lists via meta.Store.ListIAMAccessKeys; sorted by AccessKeyID; SecretAccessKey omitted from every row), handleIAMAccessKeyCreate (validates user exists 404 NoSuchEntity; mints AKIA+20-hex AccessKeyID + 40-byte base64 SecretAccessKey via package-local newAccessKeyID/newSecretAccessKey to avoid leaking s3api internals; returns IAMAccessKeyCreateResponse with both fields once; audit override admin:CreateAccessKey resource iam-access-key:<id>), handleIAMAccessKeyUpdate (decodes IAMAccessKeyUpdateRequest{disabled} from JSON body; calls UpdateIAMAccessKeyDisabled; calls InvalidateCredential when set; stamps audit override admin:DisableAccessKey | admin:EnableAccessKey based on the new state), handleIAMAccessKeyDelete (calls DeleteIAMAccessKey; calls InvalidateCredential; audit override admin:DeleteAccessKey; 404 NoSuchEntity on missing). 10 in-package unit tests cover ListEmpty + AccessKeys non-nil, ListPopulated (ordering + disabled bool round-trip + secret-omitted-from-list sanity check via case-insensitive substring search), ListUserMissing 404, Create happy + persistence verified via ListIAMAccessKeys, Create user missing 404, UpdateDisableThenEnable + InvalidateCredential called twice, Update missing 404, Update malformed JSON 400 (via new iamRequestRaw helper), Delete happy + post-delete Get returns ErrIAMAccessKeyNotFound + InvalidateCredential called with the deleted key, Delete missing 404.
+- internal/serverapp/serverapp.go: pass `InvalidateCredential: multi.Invalidate` on adminapi.Config so admin handlers flip cache state alongside the meta write.
+
+### Frontend
+- web/src/api/client.ts: added IAMAccessKeySummary / IAMAccessKeyListResponse / IAMAccessKeyCreateResponse types + fetchIAMAccessKeys (returns []IAMAccessKeySummary; SecretAccessKey absent from every row), createIAMAccessKey (returns IAMAccessKeyCreateResponse — the only place SecretAccessKey is observable), updateIAMAccessKeyDisabled (returns IAMAccessKeySummary), deleteIAMAccessKey (void on 204), fetchIAMUser (emulates the missing per-user GET endpoint via a substring-filtered list call — at IAM-cardinality this is fine).
+- web/src/lib/query.ts: queryKeys.iam.user(userName) and queryKeys.iam.accessKeys(userName) cache slots.
+- web/src/pages/IAMUserDetail.tsx (new): hosts a header (back-to-IAM Button + UserName/UserID/path/created-relative) and shadcn Tabs (Access keys default + Policies stub for US-014). AccessKeysTab renders a table (Access key ID | Status | Created | Actions); per-row Active (emerald) / Disabled (amber) pill; Disable/Enable button uses useMutation → updateIAMAccessKeyDisabled → invalidate + toast; per-row destructive Delete (Trash2 icon ghost variant) opens DeleteAccessKeyDialog. Empty state CTA opens the Create dialog.
+- web/src/components/CreateAccessKeyDialog.tsx (new): 2-state Dialog. Pre-create: banner copy 'The secret access key is shown only once after creation. Strata cannot recover it later — copy it into a credentials store before closing this dialog' + Cancel/Create buttons. Post-create: amber ShieldAlert banner 'This is the only time the secret will be shown. Copy it now' + AccessKeyID + SecretAccessKey panels, each wrapped with a copy-to-clipboard Button (lucide Copy icon flips to Check for 1.5s on success). Falls back to a destructive toast when navigator.clipboard rejects (Safari-on-HTTP / cross-origin). On submit invalidates queryKeys.iam.accessKeys(userName) + ['iam','users'] (so the IAM page's AccessKeyCount column refetches).
+- web/src/components/DeleteAccessKeyDialog.tsx (new): requires operator to type the last 8 chars of the AccessKeyID before the destructive button enables (case-insensitive match — hex-like identifiers don't disambiguate well at small font sizes). On submit invalidates queryKeys.iam.accessKeys(userName) + ['iam','users'].
+- web/src/pages/IAM.tsx: UserName table cell now wraps in <Link to="/iam/users/<encoded>"> for click-through; Access keys top-level tab placeholder copy updated to point operators at the user detail page.
+- web/src/App.tsx: added /iam/users/:userName route between /iam and /metrics.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` — all packages pass (incl. new iam_access_keys_test.go + storetest contract case).
+- `go test -race ./internal/adminapi/ ./internal/meta/memory/` clean.
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean. Bundle sizes (gzipped):
+  - main: 149.94 KiB ✓ (well under 500 KiB AC ceiling; +3.06 KiB vs US-011 baseline of 146.88 — IAMUserDetail page + 2 dialogs + access-key table + per-row mutation hook)
+  - Metrics route: 109.44 KiB (unchanged)
+  - MonacoJsonEditor lazy chunk: 591.94 KiB (unchanged — IAMUserDetail does NOT pull Monaco; arrives in US-013 ManagedPolicy editor)
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - Per-row mutations on a list page (Disable/Enable access key) use `useMutation` directly — onSuccess invalidates the per-list queryKey + fires a `showToast`; onError surfaces the AdminApiError message in a destructive toast. Avoid the heavier dialog shape for binary-state flips that don't need confirmation; reserve dialogs for create (mints secret) and delete (type-to-confirm).
+  - "Show this once" payloads (access-key SecretAccessKey today; future US-019 JWT rotation tomorrow) get a 2-state Dialog: pre-create (banner copy + Create button), post-create (banner + 2 read-only panels with per-panel copy-to-clipboard Button via lucide Copy → Check checkmark for 1.5s on success). Surface a destructive toast on `navigator.clipboard.writeText` rejection (Safari on plain HTTP / cross-origin contexts). Done dismissal button only — there is no "Cancel" once the secret is on screen.
+  - Type-to-confirm on a destructive dialog can confirm against the full identifier (bucket name, user name) OR a meaningful suffix (8-char AccessKeyID tail). Match case-insensitively when the identifier is hex-like — operators won't disambiguate A vs a on a small monospace font.
+  - Per-user detail page (`/iam/users/:userName`) emulates the missing per-user GET endpoint via a substring-filtered list call (`fetchIAMUser` wraps `fetchIAMUsers({query})` and finds the exact match). At IAM-cardinality this is fine — for /buckets-shaped surfaces the dedicated GET endpoint is still preferable.
+  - `adminapi.Server.InvalidateCredential` is the auth.MultiStore.Invalidate hook wired through `adminapi.Config.InvalidateCredential` in serverapp. Any admin handler that flips Disabled/Delete on an access key MUST call `s.InvalidateCredential(accessKeyID)` after the meta write — without it, an in-flight cache hit would keep a freshly-disabled key alive past `auth.DefaultCacheTTL`. The s3api ?Action=DeleteAccessKey / RotateAccessKey paths already do this; admin paths are the second consumer.
+- Gotchas:
+  - meta.Store interface change drives a wave of compile errors in the unit-test files that built `*memory.Store` literals — the diagnostics framework caught these immediately, so fix order is: interface → cassandra → tikv → memory before running any test target. The ImpossibleAssert / InvalidIfaceAssign messages all point at the same root cause (missing method).
+  - Cassandra UPDATE on a row created via plain INSERT does NOT strictly require LWT-on-LWT — but using `UPDATE … IF EXISTS` defensively is safer than reasoning about whether any Quorum read could observe stale Paxos state. Same lesson as `SetBucketVersioning` and `UpdateManagedPolicyDocument`.
+  - TiKV pessimistic-txn lease holds for the txn lifetime; CAS-style early returns (e.g. `UpdateIAMAccessKeyDisabled` finding the row missing) MUST call `txn.Rollback()` explicitly before returning the sentinel error — `defer rollbackOnError(txn, &err)` only fires on `err != nil`, but the assignment-to-named-err path means rollback fires correctly here. The explicit Rollback above is belt-and-braces for the in-process memBackend.
+  - Frontend: `AdminApiError` is an INTERFACE in client.ts, not a class — synthesise via `new Error(msg) as AdminApiError; err.code = ...; err.status = ...`. The TypeScript compiler will reject `new AdminApiError({...})` with TS2693.
+- Useful context:
+  - Per-user user-detail page is the pattern for the upcoming US-014 (attach/detach managed policies). The Policies sub-tab placeholder in IAMUserDetail.tsx is the slot — replace with a list of attached policies + an "Attach" dialog.
+  - The IAM page's top-level "Access keys" tab is intentionally a placeholder — per-user keys live on the detail page. Keep it that way; bringing it back into a single page would conflict with IAM cardinality (a user with 50+ keys at the org-list level is noisy).
+  - `internal/adminapi/iam_access_keys_test.go::iamRequestRaw` is the canonical helper for "send a malformed body" tests — reuse for any future PATCH endpoint that needs a "rejects garbage" assertion.
+---
+
+## Sun May  3 21:30 MSK 2026 - US-013
+- Implemented Managed policies CRUD page (backend + Policies tab UI) per PRD AC.
+
+### Backend
+- internal/meta/store.go: added `ListPolicyUsers(ctx, policyArn) ([]string, error)` method to the Store interface (sentinel ErrManagedPolicyNotFound on missing policy). Drives both the AttachmentCount column on the list page and the 409 PolicyAttached body's attached_to user list.
+- internal/meta/memory/store.go: ListPolicyUsers — read s.policyUsers[arn] under s.mu RLock; returns sorted []string + sentinel.
+- internal/meta/cassandra/managed_policies.go: ListPolicyUsers — single-partition `SELECT user_name FROM iam_policy_attachments WHERE policy_arn=?` (clustering order asc on user_name); ErrManagedPolicyNotFound bubbled from GetManagedPolicy preflight.
+- internal/meta/tikv/managed_policies.go: ListPolicyUsers — range-scan `s/pus/<arn>\x00\x00` prefix, parse user_name out of each key via readEscaped; ErrManagedPolicyNotFound when ManagedPolicyKey is absent.
+- internal/meta/storetest/contract.go: caseUserPolicyAttach gained ListPolicyUsers happy + missing-policy assertions; runs against memory + cassandra + tikv via the existing factory pattern.
+- internal/adminapi/iam_policies.go (new): GET /admin/v1/iam/policies (list + AttachmentCount via ListPolicyUsers per row), POST /admin/v1/iam/policies (mints `arn:aws:iam::strata:policy<path><name>`; validates name regex `^[A-Za-z0-9_+=,.@-]{1,128}$` + path begins/ends with `/`; document validated via s3api.ValidateBucketPolicyBlob and canonicalised via canonicalisePolicyJSON; 409 EntityAlreadyExists), PUT /admin/v1/iam/policies/{arn...} (trailing-wildcard captures full ARN incl. slashes; replaces document; bumps UpdatedAt), DELETE /admin/v1/iam/policies/{arn...} (returns 409 PolicyAttached body `{code, message, attached_to: [userName...]}` on ErrPolicyAttached; 404 NoSuchEntity on missing). Audit overrides: admin:CreateManagedPolicy / admin:UpdateManagedPolicy / admin:DeleteManagedPolicy.
+- internal/adminapi/server.go: routes wired between access-keys and consumers.
+- **Deviation from AC**: Go 1.22 mux trailing wildcards must be at the end of the pattern — so AC's literal `PUT /admin/v1/iam/policies/{arn}/document` is impossible without URL-encoding the ARN. Used PUT/DELETE on `{arn...}` with the same body shape; semantically PUT replaces the policy document (the /document suffix is redundant). Documented in PRD notes.
+- internal/adminapi/iam_policies_test.go (new): 17 in-package unit tests covering ListEmpty (Policies non-nil), ListPopulatedWithAttachmentCount (2 policies + 2 attached users), CreateHappyAndCanonicaliseDoc, CreateDefaultPath, CreateInvalidName (4 cases), CreateInvalidPath, CreateMalformedDoc, CreateEmptyDocRejected, CreateConflict (409), CreateMalformedJSON, UpdateHappyAndBumpsUpdatedAt, UpdateNotFound, UpdateMalformedDoc, DeleteHappy, DeleteNotFound, DeleteAttachedReturns409WithUserList (alice + bob both surfaced; policy must remain after 409), ArnRoundTripWithSlashes (proves the trailing-wildcard route accepts /team/ path ARNs).
+
+### Frontend
+- web/src/lib/query.ts: queryKeys.iam.policies cache slot.
+- web/src/api/client.ts: ManagedPolicySummary / ManagedPoliciesListResponse / CreateManagedPolicyBody types + fetchManagedPolicies / createManagedPolicy / updateManagedPolicyDocument / deleteManagedPolicy wrappers. PolicyAttachedError extends AdminApiError carrying attachedTo: string[] — deleteManagedPolicy parses the 409 body branch so the UI sees who blocks the delete without a second round-trip.
+- web/src/components/ManagedPolicyEditorDialog.tsx (new): unified Create/Edit dialog (editing prop ≠ null toggles edit mode); name+path Inputs disabled on edit per AC ('Name and path are immutable'); lazy-loaded MonacoJsonEditor schema-bound to vendored web/src/schemas/iam-policy.json (reuses the chunk shared with US-004/005/006). Pre-create starter doc auto-fills a sensible AllowReadAll IAM policy. Submit → invalidate queryKeys.iam.policies.
+- web/src/components/DeleteManagedPolicyDialog.tsx (new): type-to-confirm dialog with a pre-warn banner when attachment_count > 0 ('Detach this policy from every user before deleting (US-014)'); on 409 PolicyAttached the error block expands to render the attachedTo user list inline.
+- web/src/pages/IAM.tsx: Policies tab (was placeholder) now renders a table (Name+ARN | Path | Created | Updated | Attachments | Edit/Delete) + Create / Refresh buttons + empty-state CTA; per-row Pencil opens the editor in edit mode, Trash2 opens the delete dialog.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` all pass (incl. new internal/adminapi/iam_policies_test.go and the extended storetest contract case).
+- `go test -race ./internal/adminapi/ ./internal/meta/memory/` clean.
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean. Bundle sizes (gzipped):
+  - main: 151.60 KiB ✓ (well under 500 KiB AC ceiling; +4.72 KiB vs US-012 baseline of 146.88)
+  - Metrics route: 109.44 KiB (unchanged)
+  - MonacoJsonEditor lazy chunk: 591.94 KiB (shared with US-004/005/006/012 — no duplication)
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - When a meta.Store method needs an inverse-index lookup (ListPolicyUsers, future "users with role X" or "objects in storage class Y at scale"), wire up the inverse-index TABLE first (cassandra: PK (target, source) partition; tikv: separate prefix; memory: second map) — then expose the scan via a dedicated Store method. Pair the operator-spec'd table with the inverse and write/delete in lockstep so the views never desync. US-010 already shipped the inverse-index plumbing; US-013 just exposed it on the public Store.
+  - Go 1.22 net/http mux trailing wildcards are powerful for path segments containing slashes (S3 keys, IAM ARNs, RBAC subjects) BUT cannot have a static suffix after the wildcard — `{arn...}/document` is rejected. When AC names a URL with both, drop the suffix and overload the verb (PUT replaces the document; the policy ARN IS the resource). Document the deviation in the PRD notes — this is a clean REST collapse, not a capability drop. Reuse this trick for any future AC that puts an ARN/key in the middle of a URL.
+- Gotchas:
+  - The existing inverse-index from US-010 (PolicyUserPrefix in tikv, iam_policy_attachments in cassandra, policyUsers map in memory) was already populated by AttachUserPolicy/DetachUserPolicy across all 3 backends, so US-013's ListPolicyUsers was a *read-only* surface addition — no schema migration. Adding a public Store method on top of an existing inverse index is the cheap path; don't go inventing a new index when one already exists.
+  - The contract test at internal/meta/storetest/contract.go tests against ALL 3 backends via the same factory. When extending an existing case (here caseUserPolicyAttach), the new assertions must work for every backend — cassandra integration tests and tikv contract tests pick them up automatically via the same Run(t, factory) entrypoint.
+  - PolicyAttachedError vs AdminApiError: when a 409 body carries structured fields beyond `{code, message}`, add a sub-type that extends AdminApiError + parse the extra fields manually in the wrapper (deleteManagedPolicy). Existing buildAdminError discards anything beyond {code, message}, so a generic `throw await buildAdminError(resp, ...)` would lose the user list. Keep the status branch explicit when you need extra fields.
+- Useful context:
+  - The iam-policy.json schema vendored at web/src/schemas/iam-policy.json is the same one US-006 (BucketPolicyTab) uses. Future schema additions (Condition operators, IAM Conditions/Resources/Sid edge cases) only need to land in one place.
+  - The ManagedPolicyEditorDialog's `editing` prop is the canonical pattern for "single dialog handles Create AND Edit" — toggle behaviors (immutable name on edit, starter doc on create, different submit verb) via the prop. Reuse for any future CRUD dialogs (US-015 file upload form mode, US-016 retention edit, …).
+  - Strata-minted ARN namespace is `arn:aws:iam::strata:<resource><path><name>` — user (US-011 iam.go), managed policy (US-013, this commit). When US-014 lands, the AttachUserPolicy attached_to list returned by DELETE 409 will already match the ARN format the operator console renders, so the click-through link can be hard-wired without a separate "look up by name" step.
+---
+
+## Sun May  3 21:30 MSK 2026 - US-014
+- Implemented Attach / detach managed policies UI: new admin endpoints + Policies tab on the per-user detail page.
+
+### Backend
+- internal/adminapi/iam_user_policies.go (new): handleIAMUserPoliciesList (GET /admin/v1/iam/users/{userName}/policies → enriched per-row name+path via GetManagedPolicy lookup; 404 NoSuchEntity on missing user; 200 + policies:[] on empty), handleIAMUserPolicyAttach (POST .../policies; body {policy_arn}; maps ErrIAMUserNotFound→404, ErrManagedPolicyNotFound→404, ErrUserPolicyAlreadyAttached→409 EntityAlreadyExists; 400 BadRequest on missing arn), handleIAMUserPolicyDetach (DELETE .../policies/{policyArn...}; trailing-wildcard so slashes inside the strata-minted ARN survive Go mux pattern matching; ErrUserPolicyNotAttached→404 NoSuchEntity). Audit overrides admin:AttachUserPolicy / admin:DetachUserPolicy, resource shape iam:<userName>.
+- internal/adminapi/server.go: registered the 3 new routes between iam_policies and consumers blocks.
+- internal/adminapi/iam_user_policies_test.go (new): 11 in-package unit tests — ListEmpty + Policies non-nil array, ListPopulatedWithMetadata (verifies name+path enrichment for both / and /team/ paths), ListUserMissing 404, AttachHappy + persistence verified via ListUserPolicies, AttachUserMissing 404, AttachPolicyMissing 404, AttachAlreadyAttached 409 EntityAlreadyExists, AttachMissingArn 400, AttachMalformedJSON 400 (raw-body via iamRequestRaw), DetachHappy + post-detach list empty, DetachNotAttached 404, DetachArnRoundTripWithSlashes (proves /team/ path ARN survives the trailing-wildcard route), AttachThenDeleteManagedPolicyBlocked (full flow: attach via admin → DELETE /admin/v1/iam/policies/{arn} returns 409 PolicyAttached with attached_to:[alice] → detach → DELETE policy returns 204 — locks down the US-013 PolicyAttachmentsResponse path).
+
+### Frontend
+- web/src/lib/query.ts: added queryKeys.iam.userPolicies(userName) cache slot.
+- web/src/api/client.ts: added UserPolicyAttachment / UserPoliciesListResponse types + fetchIAMUserPolicies / attachUserPolicy / detachUserPolicy wrappers (all throw AdminApiError on non-204).
+- web/src/components/AttachPolicyDialog.tsx (new): searchable picker (shadcn Dialog + Input search box with Search icon prefix) — fetches the full managed-policies list via fetchManagedPolicies (reuses the queryKeys.iam.policies cache slot from US-013) and filters client-side by name/ARN/description substring (case-insensitive). Each row is a button (lucide ShieldCheck icon + name + ARN + description); already-attached rows render an emerald 'Attached' chip and are disabled (the server would 409 anyway). Click → useMutation → attachUserPolicy → on success invalidates queryKeys.iam.userPolicies(userName) + queryKeys.iam.policies (so US-013's AttachmentCount column re-fetches), toasts, closes the dialog. Server errors render inline {code, message} above the list.
+- web/src/pages/IAMUserDetail.tsx: replaced the US-014 placeholder card with PoliciesTab — attached-policies table (Name | ARN | Path | Detach action) + Refresh + Attach policy buttons + empty-state CTA. Per-row detach uses window.confirm guard (same pattern as US-005 CORS delete) → useMutation → detachUserPolicy → invalidates both queryKeys + toast. Imported X icon from lucide-react.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` all packages pass (incl. the 11 new in-package tests).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean. Bundle sizes (gzipped):
+  - main: 152.76 KiB ✓ (well under the 500 KiB AC ceiling; +1.16 KiB vs US-013 baseline of 151.60)
+  - Metrics route: 109.44 KiB (unchanged)
+  - MonacoJsonEditor lazy chunk: 591.94 KiB (shared with US-004/005/006/012/013 — no duplication)
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - The "searchable picker dialog" shape (Input search box at the top, scrollable max-h-80 list of clickable rows underneath, footer Close button) is a clean alternative to shadcn Combobox when the operator picks one item from a small-cardinality list. Avoids the Radix Popover + cmdk dependency tree and stays within the existing primitives. Reusable for any future "choose one of N" surface — bucket-policy attach (if it ever surfaces), inventory destination-bucket picker on its own dialog, etc.
+  - Cache slot naming for "X attached to Y" surfaces: the per-user cache slot is keyed under `['iam', 'user', userName, 'policies']` (parallel to `accessKeys`), and the global pool stays under `['iam', 'policies']` (US-013). Mutations that flip the per-X count MUST invalidate BOTH — without invalidating the global pool, the IAM Policies tab's AttachmentCount column would stay stale until the user navigates away and back.
+- Gotchas:
+  - Trailing-wildcard route patterns in Go 1.22 mux must be at the END of the pattern — there can be no static suffix after `{policyArn...}`. So `DELETE /admin/v1/iam/users/{userName}/policies/{policyArn...}` works but `DELETE .../policies/{policyArn...}/detach` does NOT compile-load. Same lesson hit on US-013 with `.../document` — the URL design has to absorb the constraint.
+  - The PoliciesTab component must be defined BEFORE the AccessKeysTab usage in the file IF you want hoisted JSX references — but since both are referenced via TabsContent siblings in the same parent, declaration order doesn't matter. Function declarations hoist.
+- Useful context:
+  - The AttachPolicyDialog disabled-row affordance ('Attached' chip on already-attached entries) is the cheapest way to keep the operator from triggering a 409 round-trip. The server-side check stays — UI affordance is a UX nicety, not a security boundary.
+  - With US-014 closed, the cycle's IAM scope (US-010..US-014) is fully implemented end-to-end: storage shapes (US-010), users CRUD (US-011), access keys CRUD (US-012), managed policies CRUD (US-013), and now user-policy attachments (US-014). US-015 onward shifts focus to object-level operations (upload wizard, delete, tags, retention/legal-hold).
+---
+
+## Mon May  4 12:00 MSK 2026 - US-015
+- Implemented Object upload wizard: 5 admin endpoints + browser Web Worker + UploadDialog wired into bucket detail.
+
+### Backend
+- internal/auth/presign_mint.go (new): exported `GeneratePresignedURL(opts PresignOptions) (string, error)`. SigV4 query-style; signs only `host` so the browser fetch/XHR can issue the request with no extra headers; body=UNSIGNED-PAYLOAD so the browser streams arbitrary bytes without recomputing the hash. Defaults Expires=5min, capped at 7d. Round-trip test (TestGeneratePresignedURLRoundTrip) signs a URL and feeds it back into the existing `validatePresigned` path so canonical-request shape stays in lockstep with verification.
+- internal/adminapi/uploads.go (new): 5 handlers — handleUploadInit (POST /admin/v1/buckets/{bucket}/uploads — calls meta.Store.CreateMultipartUpload directly with operator-supplied storage_class/content_type/cache_control/user_meta; returns {upload_id, key, bucket, part_size: 8 MiB}), handleUploadPartPresign (POST .../uploads/{uploadID}/parts/{partNumber}/presign — looks up the multipart upload to find the key, mints PUT URL pointing at /<bucket>/<key>?partNumber=N&uploadId=ID with 5-min TTL via mintPresignedURL helper), handleUploadComplete (POST .../uploads/{uploadID}/complete — synthesises AWS CompleteMultipartUpload XML from the JSON parts list and forwards through s.S3Handler.ServeHTTP so chunk composition / etag / replication / notify all stay consistent — audit override admin:UploadObject), handleUploadAbort (DELETE .../uploads/{uploadID} — forwards through s.S3Handler so chunk GC + metrics fire — audit override admin:AbortMultipartUpload), handleSinglePutPresign (POST /admin/v1/buckets/{bucket}/single-presign — mints 5-min PUT URL for a small file; key in JSON body — see deviation below).
+- mintPresignedURL helper looks up the operator's session-cookie credential via s.Creds.Lookup(info.AccessKey) to retrieve the secret, signs server-side; the browser never sees the secret. Host is lifted from r.Host so the URL points back at the same gateway origin the operator is talking to.
+- internal/adminapi/server.go: Server gained S3Handler http.Handler (Config.S3Handler injected by serverapp). Routes registered between buckets and iam blocks.
+- **Deviation from AC**: AC names POST /admin/v1/buckets/{bucket}/objects/{key...}/single-presign but Go 1.22 mux trailing wildcards must be at the END of the pattern — {key...}/single-presign cannot register. Collapsed to POST /admin/v1/buckets/{bucket}/single-presign with the key in the JSON body. Same trick used in US-013/US-014 for ARN routes. Documented inline in server.go.
+- internal/serverapp/serverapp.go: pass S3Handler: apiHandler on adminapi.Config so Complete + Abort can forward to the unwrapped s3api.Server (no auth.Middleware wrapper needed — admin handler already verified the operator's session).
+- internal/adminapi/uploads_test.go (new): 12 in-package unit tests using a real s3api.Server wired against in-memory data + meta backends — UploadInit happy + part-size, init bucket-missing 404, init key-required 400, UploadPartPresign happy URL shape (verifies path ends with /<bucket>/<key>, query carries partNumber+uploadId+X-Amz-Signature+X-Amz-Expires=300), UploadPartPresign partNumber range (0/10001/abc), UploadPartPresign upload-missing 404, UploadAbort forwards to s3api + post-abort GetMultipartUpload returns ErrMultipartNotFound, UploadAbort missing 404, UploadComplete parts-required 400, SinglePresign happy URL shape, SinglePresign bucket-missing 404, SinglePresign key-required 400, presign anonymous-blocked 500.
+
+### Frontend
+- web/src/api/client.ts: 5 new wrappers (initiateUpload, presignUploadPart, completeUpload, abortUpload, presignSinglePut) + 6 types (UploadInitBody, UploadInitResponse, UploadPartPresignResponse, UploadCompletePart, SinglePresignResponse). All throw AdminApiError on non-2xx.
+- web/src/workers/upload.ts (new): vite ?worker-imported Web Worker that owns one upload. Slices the file via Blob.slice; for each part posts {kind:'needPartUrl', partNumber} to the parent (cookies don't auto-share into workers in some browsers, so the parent owns the presign call and ships the URL back via {kind:'partUrl', partNumber, url}); PUTs the chunk via XMLHttpRequest (XHR has upload progress events; fetch doesn't); posts {kind:'progress', uploaded, total} cumulative bytes back to the parent. Single-PUT path takes one URL up-front via {kind:'startSingle'}.
+- web/src/components/UploadDialog.tsx (new): operator-facing form with file picker (multi-file), Storage Class select (STANDARD|STANDARD_IA|GLACIER|DEEP_ARCHIVE), Encryption select (None|AES256|aws:kms with KMS Key ID input when aws:kms picked), Tags textarea (key=value per line, parsed client-side via parseTagsRaw), per-file row with name + size + status + per-row Abort button (running) or × remove button (pending) + per-row inline progress bar (h-1.5 div with width style — no shadcn Progress primitive needed). Files <=5 MiB take the single-PUT path (presignSinglePut → worker.startSingle); larger files take the multipart path (initiateUpload → worker.startMultipart with parent-side per-part presign + Complete on done). On any per-part error the parent issues a best-effort abortUpload so dangling parts go to GC.
+- web/src/pages/BucketDetail.tsx: Objects card now has Upload button (right of Refresh) wired to UploadDialog; on dialog close success invalidates queryKeys.buckets.one(name) + ['objects', bucket] so the freshly-uploaded files appear immediately. UploadDialog passes the active prefix (effectivePrefix) so the operator's pick lands inside the folder they're browsing.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` all packages pass (incl. new internal/adminapi/uploads_test.go and internal/auth/presign_mint_test.go).
+- `go test -race ./internal/adminapi/ ./internal/auth/` clean.
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean. Bundle sizes (gzipped):
+  - main: 155.72 KiB ✓ (well under the 500 KiB AC ceiling; +2.96 KiB vs US-014 baseline of 152.76 — UploadDialog + worker shell)
+  - upload worker: 1.59 KiB (its own chunk via vite ?worker)
+  - Metrics route: 109.44 KiB (unchanged)
+  - MonacoJsonEditor lazy chunk: 591.94 KiB (unchanged)
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop. Manual smoke recommended (drag-drop a 6 MiB file into the dialog → verify multipart parts each get a fresh presigned URL + per-part progress + final Complete → object appears in the bucket Objects table).
+
+### Learnings for future iterations
+- Patterns discovered:
+  - SigV4 presign minting helper belongs in internal/auth (where the verifier already lives) so canonical-request shape stays in lockstep — verify is the consumer, mint is the producer; share helpers (canonicalRequestWithQuery / canonicalQueryValues / deriveSigningKey / sigAlgorithm constants). A round-trip test (mint → feed back through validatePresigned) is the cheapest way to catch shape drift.
+  - "Operator's session-cookie identity NOT their personal AK/SK reaches the browser" pattern: the admin server has access to s.Creds.Lookup which returns the secret. Sign server-side with the operator's own credential; the browser only ever sees the resulting URL string. Reuse for any future "browser-direct upload/download" surface.
+  - For browser uploads with progress, XMLHttpRequest is required (fetch lacks upload progress events). Web Worker isolates the slicing + PUT loop from the UI thread; per-part presign happens on the parent (cookies don't auto-share into workers in Safari) and the URL is shipped down via postMessage. This shape generalises to any "long-running batch operation that wants per-step progress without freezing the UI".
+  - Forwarding an admin endpoint to the s3api handler is the right call when the AC says "passes through to existing s3api X handler" — synthesise an httptest.NewRequest with the full /<bucket>/<key>?queryparams URL, copy the auth context via inner.WithContext(r.Context()), and call s.S3Handler.ServeHTTP(rec, inner). Map 2xx → admin success; non-2xx → bubble the body up. Avoids duplicating the s3api logic. Note: s.S3Handler must be the BARE s3api.Server (no auth.Middleware wrapper) since admin already verified the session.
+- Gotchas:
+  - Go 1.22 mux trailing wildcards must be at the END of the pattern. Same lesson hit on US-013/US-014. AC's `/objects/{key...}/single-presign` is unrepresentable; collapsed to body-shaped key. Document the deviation in the PRD notes.
+  - The s3api ACL check uses bucket Owner == request principal — when wiring a test that forwards through s3api, the bucket Owner field must match the AccessKey stamped via auth.WithAuth. Otherwise the inner request returns 403 AccessDenied. Set both sides to the same identity.
+  - Vite ?worker-imported Web Workers ship as their own chunk; types declared via the worker's own export type WorkerToParent / ParentToWorker are imported back into the parent for end-to-end type safety. Do NOT import the worker's runtime code; only the types (export {}; at the bottom of the worker file).
+  - signRequest helper isn't used here — the gateway-side verification path (validatePresigned) consumes the URL; the helper signs the URL via SigV4 query-style. Don't confuse the two.
+- Useful context:
+  - The presign-mint helper sets `Expires=5min` by default. To raise the ceiling for a future surface, pass `opts.Expires` explicitly; helper caps at 7d (AWS max).
+  - The Web Worker's progress reporting is cumulative bytes (uploaded across all parts so far / total). Parent computes per-file pct and overall pct from per-file totals.
+  - Files <=5 MiB shortcut to the single-PUT path so the operator doesn't pay multipart bookkeeping for a logo.png — same threshold AWS uses for the SDK default. Tune via SINGLE_PUT_MAX_BYTES in UploadDialog.tsx.
+---
+
+## Mon May  4 10:33 MSK 2026 - US-016
+- Implemented object delete + tag editor + retention/legal-hold panel per PRD AC.
+
+### Backend
+- internal/adminapi/objects.go (new): handleObjectDelete (DELETE /buckets/{bucket}/objects/{key...} forwards through s.S3Handler so the existing object-lock / replication / GC pipeline runs unchanged), handleObjectGet (GET /buckets/{bucket}/object?key=&versionId= -> ObjectDetailResponse incl. tags/retain/legal-hold), handleObjectVersions (GET /buckets/{bucket}/object-versions?key= filters ListObjectVersions to the exact key), handleObjectTags (PUT /buckets/{bucket}/object-tags body {key, version_id?, tags} — empty map clears), handleObjectRetention (PUT body {key, version_id?, mode, retain_until} — None clears, GOVERNANCE/COMPLIANCE require RFC3339 retain_until + bucket.ObjectLockEnabled), handleObjectLegalHold (PUT body {key, version_id?, enabled} — true requires bucket.ObjectLockEnabled, false ignores). Audit overrides admin:DeleteObject / admin:SetObjectTags / admin:SetObjectRetention / admin:SetObjectLegalHold.
+- internal/adminapi/server.go: registered the six new routes. Route deviation: AC names PUT /admin/v1/buckets/{bucket}/objects/{key}/tags etc., but Go 1.22 mux trailing wildcards must be the LAST segment. DELETE keeps {key...} (no subroute follows); tags/retention/legal-hold collapse to /object-tags / /object-retention / /object-legal-hold with the key carried in the JSON body. Same trick used in US-015 single-presign + US-013/14 ARN routes.
+- internal/adminapi/objects_test.go (new): 15 cases — Get happy/shape, Get NoSuchKey, Get NoSuchBucket, Tags happy + clear round-trip, Tags missing-key 400, Tags NoSuchKey 404, Retention requires-lock 400 ObjectLockNotEnabled, Retention happy + None clears, Retention bad mode 400, Retention retain_until required, LegalHold happy + clear, LegalHold true requires lock, Versions list filters per key + IsLatest count, Versions BucketNotFound 404, Delete happy proxies s3api, Delete nested key (logs/2026/05.txt), Delete versionId-scoped.
+
+### Frontend
+- web/src/api/client.ts: added ObjectDetail / ObjectVersionEntry / ObjectRetentionMode types + fetchObjectDetail / fetchObjectVersions / setObjectTags / setObjectRetention / setObjectLegalHold / deleteObject wrappers. The deleteObject wrapper splits the key on '/' and encodeURIComponent's each segment so the gateway mux sees the full nested key under {key...}.
+- web/src/lib/query.ts: queryKeys.buckets.object(name, key, versionID) + queryKeys.buckets.objectVersions(name, key).
+- web/src/components/ObjectDetailSheet.tsx (new): shadcn Sheet + Tabs (Overview | Tags | Retention | Legal Hold | Versions). Overview surfaces size/last-modified/storage-class/ETag/version + Latest/DeleteMarker badges + a confirm-then-delete button (invalidates the bucket-level object query). Tags is an editable key/value list with Add/Remove + Save (empty map clears). Retention is a Mode chip group (None | GOVERNANCE | COMPLIANCE) + datetime-local "Retain until" input; greyed-out + tooltip when bucketDetail.object_lock=false. Legal Hold is a checkbox; turning it ON requires ObjectLock; turning OFF works regardless. Versions calls fetchObjectVersions and renders per-row Delete buttons (versionId-scoped); Delete-marker rows highlight via warning-tinted border. All mutations use TanStack Query useMutation + invalidate the relevant queryKeys + showToast.
+- web/src/pages/BucketDetail.tsx: dropped the placeholder Sheet and DetailRow defined inline; selectedKey state + onObjectDeleted prop wire to the new ObjectDetailSheet. Pass the live BucketDetail down so Retention/LegalHold tabs can read object_lock.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` all green (incl. internal/adminapi/ — 15 new tests pass).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean. Bundle deltas (gzipped):
+  - main: 158.10 KiB (was 137.32 KiB before US-015) — ObjectDetailSheet adds ~3 KiB after minification.
+  - MonacoJsonEditor lazy chunk: 591.94 KiB (unchanged — Monaco not used by ObjectDetailSheet).
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - When AC names a URL shape that Go 1.22 mux's trailing-wildcard requirement makes unrepresentable (e.g. `{key}/tags`), keep the AC URL where it works (DELETE which has no subroute) and collapse the conflicting endpoints to per-shape paths with the key carried in the JSON body. This yields a self-consistent surface across endpoints AND survives Go's pattern parser.
+  - Path encoding for nested keys on the client: `key.split('/').map(encodeURIComponent).join('/')` preserves '/' separators so the trailing-wildcard `{key...}` mux entry sees the full path. `encodeURIComponent(key)` alone would escape '/' and route as a single segment.
+  - `requireObjectAccess` on the s3api side short-circuits via `info.Owner == b.Owner` — admin proxy tests that wire a real s3api.Server can simply set the seeded bucket's owner equal to the test's stamped AccessKey/Owner pair to bypass policy + ACL gates without seeding grants.
+  - For long-lived per-bucket queries that need to react to per-row mutations (delete-version), invalidate BOTH the per-key queryKey AND the broader `['buckets', 'objects', bucket]` prefix — TanStack Query's prefix matching invalidates all sort/marker variants.
+- Gotchas:
+  - meta.Store.SetObjectTags / SetObjectRetention / SetObjectLegalHold accept versionID="" as "latest" — wired through `findLatest` in memory and through `ResolveVersionID` in cassandra/tikv. No need for the admin handler to resolve "latest" → version_id manually.
+  - The retention endpoint must check `bucket.ObjectLockEnabled` BEFORE writing; the meta.Store layer does NOT validate this. Same applies to legal-hold ON. Clearing legal hold (enabled=false) and clearing retention (mode=None) are both permitted regardless of bucket lock state.
+  - meta.Store.ListObjectVersions does not support an exact-key query — it accepts a prefix. The handler filters by `v.Key == key` post-listing. At per-key cardinality (S3 caps version history at ~10k) this is fine; for a future heavy version walker, add a per-key index.
+- Useful context:
+  - The audit middleware emits exactly one row per request via the override pointer; for a multi-step admin path (e.g. cascading version deletes from the Versions tab) each per-row request is its own audit row (one per click). No need for `emitAuditRow` here.
+  - The client's bucketDetail.object_lock value is passed into the side panel so Retention/LegalHold can render their disabled-state UI without an extra round trip; the bucket detail query is already loaded by the parent BucketDetailPage.
+  - For "click the row to open side panel" pattern, store `selectedKey: string | null` rather than the full `ObjectEntry` — the panel re-fetches via fetchObjectDetail anyway, and a string key is stable across pagination/refetch (an ObjectEntry reference would point at a stale snapshot after invalidation).
+---
+
+## Mon May  4 13:30 MSK 2026 - US-017
+- Implemented Multipart watchdog page: GET /admin/v1/multipart/active + POST /admin/v1/multipart/abort + Multipart.tsx with bulk-abort + 30 s polling.
+
+### Backend
+- internal/adminapi/multipart.go (new): handleMultipartActive (GET /admin/v1/multipart/active; query params: bucket, min_age_hours, initiator, page, page_size; fans out across ListBuckets("") + per-bucket ListMultipartUploads(prefix="", limit=multipartListMaxPerBucket=1000); per-row BytesUploaded summed via ListParts; sort by AgeSeconds DESC then bucket+upload_id; pagination matches the bucketsList shape — total reflects post-filter row count). MultipartUpload row carries no Initiator field, so the watchdog falls back to bucket.Owner — closest available proxy without a meta schema bump. handleMultipartAbort (POST /admin/v1/multipart/abort; body {uploads:[{bucket, upload_id}]}; per-target forward through s.S3Handler with httptest.NewRequest("DELETE", "/<bucket>/<key>?uploadId=<id>") so the existing s3api abort path runs unchanged — chunk GC + metrics + manifests stay consistent; per-entity audit row admin:AbortMultipartUpload via emitAuditRow PLUS top-level batch override on the request-scoped row).
+- internal/adminapi/server.go: registered GET /admin/v1/multipart/active + POST /admin/v1/multipart/abort between the buckets and consumers blocks.
+- internal/adminapi/multipart_test.go (new): 6 in-package unit tests — Active happy + filtering (sort order, age filter, bucket filter, initiator filter, BytesUploaded sum from per-part rows), Active bad min_age_hours 400, Active pagination with page=2 page_size=2, Abort batch (mix of success + NoSuchUpload + NoSuchBucket — all per-row outcomes returned in one 200 response), Abort empty-body 400, Abort nested-key (logs/2026/05/abort.bin survives the inner-request synthesis).
+
+### Frontend
+- web/src/api/client.ts: added MultipartActiveRow / MultipartActiveResponse / MultipartActiveParams / fetchMultipartActive + MultipartAbortTarget / MultipartAbortResult / MultipartAbortResponse / abortMultipartBatch wrappers. All throw AdminApiError on 4xx/5xx.
+- web/src/lib/query.ts: added queryKeys.multipart.active(bucket, minAgeHours, initiator, page, pageSize) cache slot.
+- web/src/pages/Multipart.tsx (new): 30 s refetchInterval; filter card with bucket autocomplete (datalist sourced from fetchBucketsList page=1 size=1000), min-age numeric input (default 24 h), initiator string filter; results table with bulk-select via plain HTML <input type="checkbox"> (no shadcn Checkbox primitive — use ref for indeterminate state when some-but-not-all visible rows are selected); rows keyed by `${bucket}\x00${upload_id}` so cross-bucket collisions on operator-defined upload-id aliases are impossible; per-row × button + Abort selected button (window.confirm guard) → useMutation → abortMultipartBatch → on success showToast for aborted count + destructive showToast for any per-row errors + invalidate ['multipart','active'] prefix; pagination via Previous/Next.
+- web/src/App.tsx: route /multipart → MultipartPage.
+- web/src/components/layout/nav.ts: sidebar nav adds /multipart between IAM and Metrics, lucide-react Layers icon.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` all packages pass (incl. internal/adminapi 6 new cases).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean. Bundle sizes (gzipped):
+  - main: 160.36 KiB ✓ (well under 500 KiB AC ceiling; +2.26 KiB vs US-016 baseline of 158.10 — Multipart page + filter UI)
+  - upload worker: 1.59 KiB (unchanged)
+  - Metrics route: 109.44 KiB (unchanged)
+  - MonacoJsonEditor lazy chunk: 591.94 KiB (unchanged)
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop. Manual smoke recommended (kick a multipart upload via aws-cli, then visit /multipart with min_age=0 → row appears within 30 s → Abort selected → row disappears + audit_log row stamped).
+
+### Learnings for future iterations
+- Patterns discovered:
+  - Cluster-wide fan-out lists (multipart watchdog, future cross-bucket replication-queue dashboard, future cross-bucket access-key audit) walk ListBuckets("") + a per-bucket list endpoint. The cap on the per-bucket page (multipartListMaxPerBucket=1000) bounds the worst-case request size; rows are sort+filter+paginate post-fan-out so the UI's page semantics are deterministic regardless of bucket distribution. Don't paginate per-bucket — it would force the operator to flip pages bucket-by-bucket.
+  - Batch admin audit shape: one top-level override on the request-scoped row (action="admin:<Verb>", resource="<scope>:batch:<N>") + one emitAuditRow per affected entity. The middleware-stamped row gives the audit-log filter a single hit per HTTP request; per-entity rows give the operator the precise list of affected resources. Reuse for any future bulk surface (US-019's bulk-detach if it materialises, future bulk-disable-key, etc.).
+  - shadcn doesn't ship a Checkbox primitive — use plain `<input type="checkbox">` with `ref={(el) => { if (el) el.indeterminate = ... }}` for the all/some/none tri-state header checkbox. Set on the DOM node directly because React doesn't know about the indeterminate property. h-4 w-4 cursor-pointer matches the rest of the table-row chrome.
+- Gotchas:
+  - httptest.NewRequest panics if the URL path contains an unescaped space — the inner-request synthesis in the abort fan-out works for normal S3 keys (which are URL-safe by convention), but a key with `' '` would break. The s3api gateway-side path doesn't have this issue because the path arrives URL-encoded over the wire. If the watchdog ever needs to abort a key with literal whitespace, switch the inner-request constructor to url.PathEscape on each segment first. Test surface today picks nested keys without spaces.
+  - useEffect that prunes stale selections must be careful about the dep array — listing both `rows` AND `selected` would loop because the prune also calls setSelected. Guard with a `changed` flag and only call setSelected when something actually fell off the visible page.
+  - The MultipartUpload struct lacks an Initiator field — propagating "the principal that initiated the upload" through the meta layer would be a Cassandra ALTER + tikv key-shape bump + memory-store schema change. For US-017 the watchdog reports bucket.Owner as the initiator instead; if a future cycle needs the real initiator, the right move is to add `Initiator string` to MultipartUpload and stamp it from auth.FromContext at CreateMultipartUpload time on the s3api side, then mirror in the admin POST /uploads handler.
+- Useful context:
+  - The 30 s poll cadence (POLL_INTERVAL_MS) is the AC default; tune via the constant in Multipart.tsx if operator feedback says it should be tighter (10 s would catch a stalled upload sooner) or looser (120 s if the meta backend struggles under fan-out).
+  - The bucket-autocomplete datalist reuses the existing buckets-list query (page=1, pageSize=1000) — cache hit when the operator visited /buckets in the same session.
+  - emitAuditRow is the canonical per-entity audit shape; lives in internal/adminapi/iam_users.go (next to the DeleteIAMUser cascade that birthed it). Future bulk handlers should use the same helper, not invent their own EnqueueAudit call.
+---
+
+## Mon May  4 12:30 MSK 2026 - US-018
+- Implemented Audit-log viewer: GET /admin/v1/audit JSON + GET /admin/v1/audit.csv streaming exporter, per PRD AC.
+
+### Backend
+- internal/meta/store.go: added `meta.AuditEvent.UserAgent` (additive). Old rows pre-dating the column read back empty; admin/UI tolerate "".
+- internal/s3api/audit.go: stamp `r.UserAgent()` in both AuditMiddleware paths (default + override).
+- internal/meta/cassandra/schema.go: tableDDL `audit_log` adds `user_agent text`; alterStatements grow one `ALTER TABLE audit_log ADD user_agent text` row so existing keyspaces upgrade in place.
+- internal/meta/cassandra/store.go: INSERT + 3 SELECT statements (ListAudit / ListAuditFiltered / ReadAuditPartition) carry the new column.
+- internal/meta/tikv/codec.go: auditRow gains `UserAgent string `json:"ua,omitempty"`; encode/decode mirror.
+- internal/meta/storetest/contract.go: caseAuditLog asserts UserAgent round-trips.
+- internal/adminapi/audit.go (new): handleAuditList wraps meta.Store.ListAuditFiltered. Filters: since/until (RFC3339), action (comma-separated multi-select, post-filter), principal, bucket (resolved name→ID via meta.GetBucket → 400 NoSuchBucket on miss), page_token (base64.RawURLEncoding wrapper around the EventID continuation). Returns {records:[], next_page_token: "<base64>"}. handleAuditCSV streams text/csv with `Content-Disposition: attachment; filename="audit.csv"` — capped at 100k rows total via auditCSVRowCap; emits #TRUNCATED marker on cap-hit. Audit overrides admin:ListAudit / admin:ExportAuditCSV.
+- internal/adminapi/server.go: registered GET /admin/v1/audit + GET /admin/v1/audit.csv.
+- internal/adminapi/audit_test.go (new): 10 cases — empty, newest-first ordering + UserAgent surfaces, principal filter, multi-action filter, bucket name resolution, NoSuchBucket, invalid since RFC3339, pagination round-trip with base64 token validation, invalid page_token, CSV happy + CSV action-filter.
+
+### Frontend
+- web/src/api/client.ts: added AuditRecord / AuditListResponse / AuditQuery types + fetchAuditLog wrapper + auditCSVUrl helper (returns the URL the browser navigates to so Content-Disposition kicks the native download flow with the existing session cookie).
+- web/src/lib/query.ts: queryKeys.audit.list(...) for the per-filter cache key.
+- web/src/components/layout/nav.ts: Audit log entry (lucide ClipboardList icon) inserted between Multipart and Metrics.
+- web/src/App.tsx: route `/audit` → AuditLogPage.
+- web/src/pages/AuditLog.tsx (new): filter panel (Since/Until datetime-local, Action multi-select picker, Principal autocomplete via fetchIAMUsers, Bucket autocomplete via fetchBucketsList) + table (Time | RequestID | Principal | Action | Resource | Result | SourceIP | UserAgent — RequestID gets a `title="Trace available in Phase 3"` tooltip per AC) + Load more / back-to-first explicit pagination (no infinite scroll) + Export CSV button (window.location.href = auditCSVUrl) + 60s auto-refetch + Refresh button.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` green (incl. new audit_test.go + storetest contract assertion).
+- `go test -race ./internal/adminapi/` clean.
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean. Bundle: main 162.82 KiB gzipped (was 162.79; +30 B for the AuditLog page + nav entry — within budget).
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - Adding a column to meta.AuditEvent (or any meta struct that all 3 backends own) is one PR-shape change: struct field + cassandra DDL/alter + INSERT + every SELECT + tikv codec + storetest contract assertion. Grep for the existing fields' string in store.go to find every SELECT site — tikv is JSON-encoded so codec is the single touch-point.
+  - Opaque pagination tokens to the frontend: backend's continuation token is already opaque (an EventID), but operator URL inspection / log redaction is cleaner if we wrap it in base64 at the admin boundary. base64.RawURLEncoding (no `=` padding) keeps the token URL-safe without extra escaping.
+  - "Multi-select that backend can't filter" → post-filter in the admin handler with a `for inner in [0, maxInnerScans)` loop that re-pages ListAuditFiltered until either page is full or maxInnerScans budget exhausted. Prevents one HTTP call from spinning forever on a filter that matches zero rows in a deep window.
+  - CSV export: GET (not POST) so the browser can trigger a normal download via window.location.href; the session cookie auths the request, no XHR/fetch wrapper needed. Stream via encoding/csv.NewWriter directly to ResponseWriter — bounded memory regardless of row count. Cap row count to make the worst case knowable.
+- Gotchas:
+  - r.URL.Query() returns url.Values which IS map[string][]string — handler helper functions can take that type directly, no extra conversion.
+  - Go 1.22 mux pattern `GET /admin/v1/audit.csv` works fine — `.csv` is just a literal in the path; no trailing-wildcard restrictions like the `{key...}` ones from US-015/US-016.
+  - The browser's <input type="datetime-local"> emits "YYYY-MM-DDTHH:mm" with NO timezone — the React side must `new Date(local).toISOString()` to convert to RFC3339 the backend accepts. Operators in non-UTC zones get correct local-→UTC translation that way.
+- Useful context:
+  - ACTION_OPTIONS in AuditLog.tsx is a curated subset of the action stamps the codebase emits (s3api derives via deriveAuditAction; admin overrides use `admin:<Verb>`). When adding a new admin write, add the override stamp to the handler AND append the new action to ACTION_OPTIONS so operators can filter by it. The list intentionally stays manual rather than auto-generated — keeps the picker scoped to operator-meaningful verbs.
+  - The audit endpoint is wired into the request-scoped audit row (admin:ListAudit / admin:ExportAuditCSV) — viewing the audit log is itself an audited action. Useful when correlating operator actions against the gateway's audit history later.
+---
+
+## Mon May  4 14:30 MSK 2026 - US-019
+- Implemented Settings page with JWT secret rotation per AC.
+
+### Backend
+- internal/adminapi/server.go: added jwtMu sync.RWMutex guarding JWTSecret + new JWTEphemeral/JWTSecretFile fields. Server methods jwtSecret(), jwtEphemeral(), SetJWTSecret(b) — call sites in server.go authMiddleware + auth.go handleLogin/handleWhoami switched over.
+- internal/adminapi/server.go: Server gained PrometheusURL, HeartbeatInterval, ConsoleThemeDefault, CassandraSettings, RADOSSettings, TiKVSettings, S3Backend fields; Config mirrors. Plumbed through New(). Routes added: GET /admin/v1/settings, GET /admin/v1/settings/data-backend, POST /admin/v1/settings/jwt/rotate.
+- internal/adminapi/settings.go (new): Settings + per-backend JSON shapes. handleGetSettings emits jwt_secret = "<set>"|"<ephemeral>" — never the bytes. handleGetSettingsDataBackend masks AccessKey/SecretKey to booleans (US-021 ready). handleRotateJWTSecret generates 32 random bytes, persists hex-encoded to JWTSecretFile (default /etc/strata/jwt-secret) via temp+fsync+rename @0600, then SetJWTSecret atomic-replaces in-memory key. Stamps audit override admin:RotateJWTSecret resource=settings:jwt principal=auth.FromContext owner.
+- internal/adminapi/settings_test.go (new): 6 cases — settings shape (cluster identity + heartbeat/audit ms + masked jwt + cassandra/rados/tikv backends), masked label flips on persisted vs ephemeral, rotation actually changes in-memory key + writes hex-encoded file @0600, rotation invalidates pre-rotation cookie (next request → 401), rotation emits admin:RotateJWTSecret audit row through s3api.NewAuditMiddleware override pathway, data-backend kind="" on memory and kind="s3" with masked keys when backend=s3.
+- internal/serverapp/serverapp.go: loadJWTSecret signature → ([]byte, source, file). Resolution order STRATA_CONSOLE_JWT_SECRET → STRATA_JWT_SECRET_FILE (default /etc/strata/jwt-secret, hex-decoded) → ephemeral random + WARN. Helpers consoleThemeDefault / cassandraSettings / radosSettings / tikvSettings / s3BackendSettings populate the new Config fields. JWTEphemeral derives from `strings.HasPrefix(jwtSource, "ephemeral")`.
+
+### Frontend
+- web/src/api/client.ts: appended fetchSettings, fetchSettingsDataBackend, rotateJWTSecret + their typed shapes (ClusterSettings, CassandraSettings, RADOSSettings, TiKVSettings, SettingsResponse, S3BackendSettings, RotateJWTResponse). All throw AdminApiError on 4xx/5xx via the shared buildAdminError helper.
+- web/src/lib/query.ts: added queryKeys.settings.{all, dataBackend}.
+- web/src/pages/Settings.tsx: full rewrite. Tabs: Cluster | Console | Backends. Cluster tab renders cluster_name/region/version/prometheus_url/heartbeat_interval/audit_retention. Console tab renders console_theme_default + JWT secret label + JWT secret file path + a Rotate JWT button (red) that opens a type-to-confirm dialog (operator types "rotate"). On success: toast + setTimeout(redirect to /login, 1500ms) since the next /admin/v1 fetch will 401. Backends tab renders Active backends KV card always, plus per-backend cards for cassandra/tikv (when meta=that) and rados (when data=rados); s3 backend card lazy-loads from /settings/data-backend (US-021 wired).
+
+### Quality checks
+- `go build ./...` clean; `go vet ./...` clean; `go test ./...` all packages pass.
+- `pnpm run typecheck` clean; `pnpm run build` clean (no new chunks > 500KB beyond pre-existing Monaco).
+- Browser verification: deferred — dev-browser skill unavailable in this loop. Manual smoke recommended (cookie-rotation should bounce to /login).
+
+### Learnings for future iterations
+- Patterns discovered:
+  - Mutex+accessor pattern for atomically-replaceable Server fields: `Server.fooMu sync.RWMutex` + `s.foo() T` getter + `s.SetFoo(T)` setter. Internal call sites swap from `s.Foo` → `s.foo()` (one-line edit per site). Use this for any field that: 1) gates auth, 2) can change at runtime, 3) is read on every request. JWTSecret is the canonical case; future candidates: per-tenant signing keys, hot-reloaded auth.MultiStore. Public field stays for `Config{Foo: ...}` init/test ergonomics — only the in-process reads must funnel through the accessor.
+  - Atomic file write for operator-rotated secrets: `os.CreateTemp(dir, ".prefix.*")` → Chmod 0600 → write → fsync → close → rename. The temp file lives in the SAME dir as the target so rename is atomic; fsync before close so a crash mid-rotation doesn't ship a half-written secret to disk. Reuse for any future "operator rotates this credential and the bytes must survive a process kill" surface.
+  - Type-to-confirm dialogs work well for rotations (not just deletes): `armed = confirm.toLowerCase() === 'rotate'` is enough. The action verb itself is the confirmation token — same idiom as DeleteBucketDialog typing the bucket name. Reuse for any future "irreversible operator action that affects the whole cluster" (KMS key rotation, cluster reshard, etc.).
+  - Settings response splits Settings (cluster identity/console knobs) from Backends (per-backend connection blobs). Lets a single GET serve all three tabs without a JOIN on the React side. The s3-backend config still gets its own endpoint /settings/data-backend (US-021) because it has masked secrets and per-mode validation — keep it separate so future per-backend "is this connection healthy?" probes can attach to the same shape.
+- Gotchas:
+  - meta.Store.ListAudit takes `(ctx, bucketID uuid.UUID, limit int)` — bucketID=uuid.Nil + limit=N. `uuid.Nil` is the conventional "no bucket filter" sentinel used by the audit-export and admin audit-list paths. Don't pass nil for the 2nd arg — the signature is positional.
+  - `pnpm run` works from web/ but the project root has no package.json, so run quality checks from web/ explicitly. (typecheck/build do; there is no `lint` script today.)
+  - When a rotate-secret endpoint replaces the in-memory verification key, the operator's cookie is still sitting in the browser jar — the next request still sends it but now fails verifySession. Don't try to clear the cookie server-side; let the 401 land and let the SPA redirect. Frontend just needs a `setTimeout(window.location.href = '/login', 1500)` after the toast so the operator sees the success message before the bounce.
+- Useful context:
+  - heartbeat.DefaultInterval = 10s, heartbeat.DefaultTTL = 30s — both are package-level constants; surface them through the admin API as ms (not Go duration strings) so the React side doesn't need a Go-duration parser.
+  - s3api.NewAuditMiddleware(meta, ttl, next) is the canonical wrapper used by both the admin-side and the s3 path; tests can wrap `s.routes()` with it directly to verify override-stamped rows reach meta.Store.EnqueueAudit.
+  - The Settings page uses the existing query.ts queryClient/queryKeys plumbing — no new global. Future settings sub-tabs (e.g. policy defaults, OAuth IdP config) just slot into the existing SettingsResponse + tabs scaffold.
+---
+
+## Mon May  4 16:56 MSK 2026 - US-020
+- Implemented BackendPresign toggle on bucket Overview tab (PUT /admin/v1/buckets/{bucket}/backend-presign + UI card greyed when data_backend != s3).
+
+### Backend
+- internal/adminapi/types.go: added `BackendPresign bool` to `BucketDetail` (json:"backend_presign") + new `SetBackendPresignRequest` body shape.
+- internal/adminapi/buckets_backend_presign.go (new): `handleBucketSetBackendPresign` — PUT /admin/v1/buckets/{bucket}/backend-presign. Decodes `{enabled: bool}`; stamps `s3api.SetAuditOverride(ctx, "admin:SetBucketBackendPresign", "bucket:<name>", name, owner)`; calls `meta.Store.SetBucketBackendPresign`; returns 200 + `{enabled}` on success, 400 BadRequest on malformed JSON, 404 NoSuchBucket on missing bucket. The endpoint persists the flag regardless of cluster.data_backend (so the toggle state survives a backend swap); the UI greys out the card when not s3.
+- internal/adminapi/buckets.go: extended `handleBucketGet` to surface `BackendPresign: b.BackendPresign` in the BucketDetail JSON.
+- internal/adminapi/buckets_create.go: include `BackendPresign: b.BackendPresign` (always false on create — bucket starts with the flag off).
+- internal/adminapi/server.go: registered `PUT /admin/v1/buckets/{bucket}/backend-presign`.
+- internal/adminapi/buckets_backend_presign_test.go (new): 4 cases — enable→disable round trip + meta verify; 404 NoSuchBucket on missing bucket; 400 BadRequest on malformed JSON; GET /admin/v1/buckets/{bucket} surfaces backend_presign=true after a flip.
+
+### Frontend
+- web/src/api/client.ts: added `backend_presign: boolean` to `BucketDetail` + new `setBucketBackendPresign(name, enabled)` wrapper that throws AdminApiError on 4xx/5xx.
+- web/src/components/BucketOverviewTab.tsx: added `BackendPresignCard`. Reads cluster status via the existing `queryKeys.cluster.status` query; the card is greyed-out (`opacity-60` + `disabled`-fieldset + `title="Available only on s3-over-s3 backends"` tooltip + Info banner) when `data_backend !== 's3'`. Save flow mirrors VersioningCard: setBucketBackendPresign → invalidate `queryKeys.buckets.one(bucket.name)` → showToast on success; AdminApiError lands inline via ErrorBanner. Reset reverts to the bucket's persisted value.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` clean (new tests pass; no regressions in adminapi/s3api/serverapp).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean.
+- Browser verification: deferred — dev-browser skill unavailable in this loop.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - "Greyed-out card when cluster.data_backend != X" pattern: `useQuery({ queryKey: queryKeys.cluster.status, queryFn: fetchClusterStatus, meta: { silent: true } })` + `cn(disabled && 'opacity-60')` on the Card + `disabled` fieldset + Info banner reusing the AC's tooltip text. Reuse for any future per-bucket toggle whose meaning depends on the active data backend.
+  - Per-bucket boolean flag handler shape (US-020): JSON body `{enabled: bool}`, audit override, single meta.Store write, 200 + `{enabled}` echo on success. Mirror this for any future SetBucket<Flag> endpoint instead of inventing a new wire shape.
+- Gotchas:
+  - meta.Bucket.BackendPresign already lives on main from the s3-over-s3 merge — no schema migration needed. Both memory + cassandra + tikv backends already implement SetBucketBackendPresign; do not re-add the method to the meta.Store interface.
+  - BucketDetail is constructed in TWO places (buckets.go::handleBucketGet + buckets_create.go::handleBucketCreate) — when adding fields, update both, otherwise the dialog's optimistic create path will surface a stale shape and downstream consumers (e.g. cards that read bucket.<field> on first render) will show the wrong default until the next refetch.
+- Useful context:
+  - The bucket Overview tab is `BucketOverviewTab` in web/src/components/BucketOverviewTab.tsx; cards live as siblings inside a `lg:grid-cols-2` grid — adding a third card just appends a sibling and the layout flows on its own.
+  - Cluster status queryKey for backend-aware UI gating: `queryKeys.cluster.status` (defined in lib/query.ts) — already used by AppShell, Overview hero, and CreateBucketDialog so a per-card useQuery just shares the in-memory cache via TanStack Query's query-key dedupe.
+---
+
+## Mon May  4 17:30 MSK 2026 - US-021
+- Locked down the S3-backend settings wire shape via three new serverapp tests; backend handler + Settings.tsx S3 Backend card already shipped during US-019.
+
+### Backend
+- internal/serverapp/serverapp_test.go: imported adminapi; added TestS3BackendSettingsNonS3DataBackendIsZero (asserts s3BackendSettings(cfg) returns the empty struct for data_backend ∈ {"", "memory", "rados"} so the React BackendsTab subsection guard cannot surface a stray card on non-s3 clusters), TestS3BackendSettingsMasksKeys (wire-shape lockdown — every cfg.S3Backend field surfaces verbatim EXCEPT AccessKey/SecretKey which collapse to AccessKeySet/SecretKeySet booleans; raw secrets never reach admin layer), TestS3BackendSettingsKeyPresenceFlags (4 ak/sk presence combinations including the SDK-default-chain shape both-empty).
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` all packages pass (3 new serverapp tests included).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean (bundle unchanged from US-020 baseline — no UI changes).
+- Browser verification: deferred — dev-browser skill unavailable in this loop.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - When an upcoming PRD story pre-builds the surface during a closely-related earlier story (US-019 wired the S3 Backend card during the JWT rotation cycle, marking the handler "US-021 ready"), the pending story's commit is a thin lockdown layer — add coverage for the bridge helper(s) that no other test layer hits, plus a notes-field paper-trail in prd.json. Don't re-implement; don't skip the test layer. The serverapp helper s3BackendSettings(cfg) was the missing rung between config_test.go (env→cfg) and adminapi/settings_test.go (Server.S3Backend→handler output).
+  - "Boolean-presence flag mirroring a secret string" (AccessKey→AccessKeySet, SecretKey→SecretKeySet) is the canonical "mask but expose presence" shape. Test all 4 ak/sk presence combinations explicitly: both-empty (SDK-default-chain — flags false), ak-only (rare misconfig — caught by config.validate but flag still meaningful), sk-only (same), both-set (typical). Covers the truth table without assuming.
+  - serverapp_test.go is the right home for cfg→admin wiring tests — the adminapi package shouldn't import config (would create a knot), and config tests don't know about adminapi shapes. The existing serverapp tests focus on health probes + tikv endpoint parsing; adding cfg→adminapi field-level wiring tests fits the existing scope.
+- Gotchas:
+  - serverapp tests must run from the project root (not web/) — the web/ subdirectory has its own pnpm workspace and Go's module resolution gets confused if cwd is web/. Recoverable via `cd /path/to/strata && go test ./internal/serverapp/`.
+  - When a prior story's notes claim "US-XXX ready" or "US-XXX wired", verify the actual code state instead of trusting the claim — the upcoming story's AC may have shifted between the claim and the close (e.g. additional fields added to the wire shape). For US-021 the US-019 claim held: every AC field was already on S3BackendSettings.
+- Useful context:
+  - The S3 Backend card lives in web/src/pages/Settings.tsx::S3BackendCard; it's rendered conditionally inside BackendsTab when data === 's3' && dataBackendQuery.data?.kind === 's3'. The dataBackendQuery uses queryKeys.settings.dataBackend (defined in web/src/lib/query.ts) and meta: { label: 'data-backend settings' } so transient errors surface in the global error toast pipeline.
+  - Test-helper pattern for the cfg→admin wiring layer: construct config.Config{DataBackend: ..., S3Backend: config.S3BackendConfig{...}} directly — no need to drive via env vars (config_test.go already covers env→cfg).
+---
+
+## Mon May  4 17:14 MSK 2026 - US-022
+- Implemented Phase 2 e2e suite + docs/ROADMAP close per AC.
+
+### Files changed
+- web/e2e/admin.spec.ts (new): five flows — bucket-lifecycle, iam-keys, lifecycle-rule, policy-editor, multipart-watchdog. All run against memory-mode `cmd/strata server` with STRATA_AUTH_MODE=off so plain HTTP S3 PUTs work without SigV4.
+- web/playwright.config.ts: webServer command updated from stale `cmd/strata-gateway` (deleted post-binary-collapse) to `cmd/strata server`.
+- .github/workflows/ci.yml: e2e-ui job now runs critical-path.spec.ts first, then admin.spec.ts as a follow-up step (matches AC verbatim ordering).
+- docs/ui.md: new "Capability Matrix" section enumerates all 20 admin Phase 2 surfaces (CreateBucket, DeleteBucket, Lifecycle, CORS, Policy, ACL, Inventory, Logging, IAM Users, AccessKeys, ManagedPolicies, UploadObject, DeleteObject, ObjectTags, ObjectRetention, LegalHold, MultipartWatchdog, AuditLog, Settings, BackendPresign). End-to-end tests section refreshed to describe both specs.
+- ROADMAP.md: P3 "Web UI — Phase 2 (admin)" entry flipped to Done close-flip per project convention.
+
+### Quality checks
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean (bundle sizes unchanged from US-021 baseline; Monaco lazy chunk 591.94 KiB gzipped).
+- `go vet ./...` clean. `go test ./internal/adminapi/ ./internal/s3api/ ./internal/serverapp/` green.
+- `go build ./...` clean.
+- e2e: deferred — Playwright harness boots a real `go run ./cmd/strata server` and is best run in CI / via `pnpm run e2e` locally; added to CI ordering per AC.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - Playwright `request` fixture does NOT share cookies with the page context — admin-API assertions in a logged-in spec must use `page.request` so the session JWT rides along. Plain `request.put`/`request.post` against the S3 surface still work because STRATA_AUTH_MODE=off bypasses auth there.
+  - The S3 surface remains the cleanest seed-channel for browser e2es: PUT /{bucket}/{key} for one-shot uploads, POST /{bucket}/{key}?uploads for multipart-init. Beats driving the multi-step UI dialog (UploadDialog with web-worker per-part presign) for fixture seeding.
+  - Visual-tab defaults are gold for declarative e2es: `BucketLifecycleTab.handleAddRule` seeds `expiration: { days: 30 }` so the AC-mandated "30-day expiration rule" is one button click + Save — no per-field typing required.
+  - Driving Monaco directly is brittle; prefer "side-channel" inputs that mutate the same React state. `BucketPolicyTab` exposes a Radix Select for starter templates (PublicRead etc.) which set the editor's `text` state via `setText` — much simpler than `page.keyboard.type` on the editor surface.
+- Gotchas:
+  - Radix Select renders as `role=combobox`; option list as `role=option`. `getByRole('combobox')` + `getByRole('option', { name })` is the canonical handle pair.
+  - Native `<input type="checkbox">` with `aria-label` is reachable via `getByRole('checkbox', { name })` — no shadcn primitive needed for the multipart bulk-select pattern.
+  - The multipart watchdog page polls every 30 s; tests should explicitly click the "Refresh multipart uploads" button after seeding to avoid waiting a full poll cycle.
+  - DeleteBucketDialog's primary submit button text varies between "Delete" (empty bucket) and "Force delete" (force_empty=true). Scope the click to the dialog and use `name: 'Delete', exact: true` to disambiguate from the page-header "Delete bucket" trigger.
+- Useful context:
+  - Playwright `webServer.command` is one long string; setting env vars inline (`KEY=value KEY2=value2 go run ...`) sidesteps having to wire `webServer.env` for every var. The config keeps `STRATA_AUTH_MODE=off` so the spec can speak plain HTTP to the S3 surface.
+  - `go run ./cmd/strata server` is the post-collapse entrypoint (replaces the deleted `cmd/strata-gateway`). Both Playwright config and CI assume it.
+  - Each spec test case generates uniquely-named buckets/users via `Date.now()` so reuseExistingServer locally doesn't poison cross-run state.
+---

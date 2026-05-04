@@ -242,6 +242,7 @@ var tableDDL = []string{
 		request_id   text,
 		source_ip    text,
 		bucket_name  text,
+		user_agent   text,
 		PRIMARY KEY ((bucket_id, day), event_id)
 	) WITH CLUSTERING ORDER BY (event_id DESC)`,
 	`CREATE TABLE IF NOT EXISTS bucket_inventory_configs (
@@ -270,6 +271,38 @@ var tableDDL = []string{
 		done        boolean,
 		created_at  timestamp,
 		updated_at  timestamp
+	)`,
+	`CREATE TABLE IF NOT EXISTS admin_jobs (
+		id           text PRIMARY KEY,
+		kind         text,
+		bucket       text,
+		state        text,
+		message      text,
+		deleted      bigint,
+		started_at   timestamp,
+		updated_at   timestamp,
+		finished_at  timestamp
+	)`,
+	`CREATE TABLE IF NOT EXISTS iam_managed_policies (
+		arn         text PRIMARY KEY,
+		name        text,
+		path        text,
+		description text,
+		document    blob,
+		created_at  timestamp,
+		updated_at  timestamp
+	)`,
+	`CREATE TABLE IF NOT EXISTS iam_user_policies (
+		user_name   text,
+		policy_arn  text,
+		attached_at timestamp,
+		PRIMARY KEY (user_name, policy_arn)
+	)`,
+	`CREATE TABLE IF NOT EXISTS iam_policy_attachments (
+		policy_arn  text,
+		user_name   text,
+		attached_at timestamp,
+		PRIMARY KEY (policy_arn, user_name)
 	)`,
 	`CREATE TABLE IF NOT EXISTS notify_dlq (
 		bucket_id    uuid,
@@ -325,6 +358,7 @@ var alterStatements = []string{
 	`ALTER TABLE gc_queue ADD namespace text`,
 	`ALTER TABLE buckets ADD shard_count_target int`,
 	`ALTER TABLE buckets ADD backend_presign boolean`,
+	`ALTER TABLE audit_log ADD user_agent text`,
 }
 
 func isColumnAlreadyExists(err error) bool {

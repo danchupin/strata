@@ -131,6 +131,34 @@ catch-all S3 router so they never collide with bucket names; `console`,
 | OpenTelemetry trace UI | — | — | ✓ |
 | SSE / WebSocket live tail | — | — | ✓ |
 
+## Capability Matrix
+
+Per-surface admin coverage. Phase 2 ships every Phase 2 column tick below;
+Phase 3 layers debug tooling on top without removing Phase 2 surface.
+
+| Surface | Phase 1 | Phase 2 | Phase 3 |
+|---|---|---|---|
+| CreateBucket | — | ✓ | ✓ |
+| DeleteBucket | — | ✓ | ✓ |
+| Lifecycle | — | ✓ | ✓ |
+| CORS | — | ✓ | ✓ |
+| Policy | — | ✓ | ✓ |
+| ACL | — | ✓ | ✓ |
+| Inventory | — | ✓ | ✓ |
+| Logging | — | ✓ | ✓ |
+| IAM Users | — | ✓ | ✓ |
+| AccessKeys | — | ✓ | ✓ |
+| ManagedPolicies | — | ✓ | ✓ |
+| UploadObject | — | ✓ | ✓ |
+| DeleteObject | — | ✓ | ✓ |
+| ObjectTags | — | ✓ | ✓ |
+| ObjectRetention | — | ✓ | ✓ |
+| LegalHold | — | ✓ | ✓ |
+| MultipartWatchdog | — | ✓ | ✓ |
+| AuditLog | — | ✓ | ✓ |
+| Settings | — | ✓ | ✓ |
+| BackendPresign | — | ✓ | ✓ |
+
 ## Operational notes
 
 - Bundle size budget is ≤500 KiB gzipped initial. Heavy routes (Metrics
@@ -154,8 +182,17 @@ catch-all S3 router so they never collide with bucket names; `console`,
 
 ## End-to-end tests
 
-Critical-path Playwright spec lives at
-`web/e2e/critical-path.spec.ts` and runs in CI under the `e2e-ui` job.
+Two Playwright specs run in CI under the `e2e-ui` job:
+
+- `web/e2e/critical-path.spec.ts` — Phase 1 read-only flows
+  (login → overview → buckets list → bucket detail → logout).
+- `web/e2e/admin.spec.ts` — Phase 2 admin flows (US-022): bucket-lifecycle
+  (create → upload 5 MB → delete object → delete bucket), iam-keys
+  (create user → mint key → disable → delete key → delete user),
+  lifecycle-rule (add 30-day expiration → save → reload → assert),
+  policy-editor (PublicRead template → validate → save → reload → assert),
+  multipart-watchdog (initiate via fetch → list → bulk-abort → assert empty).
+
 Run locally with:
 
 ```bash
@@ -165,6 +202,6 @@ pnpm run e2e:install   # one-time chromium download
 pnpm run e2e
 ```
 
-The spec boots `make run-memory` (memory backend, `STRATA_AUTH_MODE=off`,
-seeded `test:test:owner` credentials) and walks the
-login → overview → buckets list → bucket detail → logout flow.
+Both specs boot `cmd/strata server` against memory-mode meta + data
+(`STRATA_AUTH_MODE=off`, seeded `test:test:owner` credentials) so no
+Cassandra / RADOS dependency is required.

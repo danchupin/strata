@@ -287,11 +287,16 @@ jobs:
       - name: Install Playwright (chromium + deps)
         working-directory: web
         run: pnpm exec playwright install --with-deps chromium
-      - name: Run Playwright e2e
+      - name: Run Playwright e2e (critical-path)
         working-directory: web
         env:
           CI: 'true'
-        run: pnpm exec playwright test
+        run: pnpm exec playwright test critical-path.spec.ts
+      - name: Run Playwright e2e (admin Phase 2)
+        working-directory: web
+        env:
+          CI: 'true'
+        run: pnpm exec playwright test admin.spec.ts
       - name: Upload Playwright report
         if: failure()
         uses: actions/upload-artifact@v4
