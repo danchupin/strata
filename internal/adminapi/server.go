@@ -52,6 +52,10 @@ type Server struct {
 	// PrometheusURL surfaces on GET /admin/v1/settings (US-019); empty
 	// when STRATA_PROMETHEUS_URL is unset.
 	PrometheusURL string
+	// OtelEndpoint mirrors OTEL_EXPORTER_OTLP_ENDPOINT and surfaces on
+	// GET /admin/v1/cluster/status (US-006) so the trace browser can render
+	// the "Open in Jaeger" deep link only when an OTLP collector is wired.
+	OtelEndpoint string
 	// HeartbeatInterval echoes heartbeat.DefaultInterval into the Settings
 	// view so operators can verify the cadence without grepping the source.
 	HeartbeatInterval time.Duration
@@ -137,6 +141,10 @@ type Config struct {
 	JWTSecretFile string
 	// PrometheusURL is echoed into GET /admin/v1/settings (US-019).
 	PrometheusURL string
+	// OtelEndpoint mirrors OTEL_EXPORTER_OTLP_ENDPOINT — surfaced on
+	// GET /admin/v1/cluster/status (US-006) so the trace browser UI can
+	// gate its "Open in Jaeger" link.
+	OtelEndpoint string
 	// HeartbeatInterval mirrors heartbeat.DefaultInterval; surfaced on the
 	// Settings page Cluster tab.
 	HeartbeatInterval time.Duration
@@ -195,6 +203,7 @@ func New(c Config) *Server {
 		JWTEphemeral:         c.JWTEphemeral,
 		JWTSecretFile:        c.JWTSecretFile,
 		PrometheusURL:        c.PrometheusURL,
+		OtelEndpoint:         c.OtelEndpoint,
 		HeartbeatInterval:    c.HeartbeatInterval,
 		ConsoleThemeDefault:  c.ConsoleThemeDefault,
 		CassandraSettings:    c.CassandraSettings,

@@ -6,6 +6,7 @@ import {
   KeyRound,
   LayoutDashboard,
   Layers,
+  Network,
   Settings,
   Timer,
   Users,
@@ -47,6 +48,7 @@ export const primaryNav: NavSection[] = [
     items: [
       { to: '/diagnostics/audit-tail', label: 'Audit tail', icon: Activity },
       { to: '/diagnostics/slow-queries', label: 'Slow queries', icon: Timer },
+      { to: '/diagnostics/trace', label: 'Trace browser', icon: Network },
     ],
   },
 ];

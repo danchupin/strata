@@ -1532,6 +1532,42 @@ export async function rotateJWTSecret(): Promise<RotateJWTResponse> {
   return (await resp.json()) as RotateJWTResponse;
 }
 
+// US-005 — OTel trace ring buffer. The wire shape mirrors ringbuf.Trace
+// (internal/otel/ringbuf/ringbuf.go). Spans land in the order the SDK fired
+// OnEnd; the UI reorders for the waterfall (root first, depth-first).
+export interface TraceSpan {
+  span_id: string;
+  parent?: string;
+  name: string;
+  start_ns: number;
+  end_ns: number;
+  status: 'OK' | 'Error' | 'Unset' | string;
+  attributes?: Record<string, unknown>;
+}
+
+export interface TraceDoc {
+  trace_id: string;
+  request_id?: string;
+  root?: string;
+  spans: TraceSpan[];
+}
+
+// fetchTrace pulls a single trace from the in-process ring buffer. Returns
+// null on 404 NotFound (request id has aged out / never seen) so the page
+// can render an empty-state without forcing the caller to catch.
+// AdminApiError on other 4xx/5xx (e.g. RingbufUnavailable 503) so the UI
+// can surface the {code, message} pair.
+export async function fetchTrace(idOrRequestID: string): Promise<TraceDoc | null> {
+  const resp = await fetch(
+    `/admin/v1/diagnostics/trace/${encodeURIComponent(idOrRequestID)}`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (resp.status === 404) return null;
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch trace failed');
+  const body = (await resp.json()) as TraceDoc;
+  return { ...body, spans: body.spans ?? [] };
+}
+
 // US-003 — slow-queries diagnostics. The wire shape mirrors slowQueriesResponse
 // in internal/adminapi/diagnostics_slow_queries.go. The handler returns rows
 // sorted by latency_ms DESC and a base64 page-token continuation cursor.

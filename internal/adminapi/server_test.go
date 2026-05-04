@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -125,6 +126,34 @@ func TestClusterStatusEmptyHeartbeatsUnhealthy(t *testing.T) {
 	}
 	if got.NodeCount != 0 {
 		t.Errorf("node_count: %d want 0", got.NodeCount)
+	}
+}
+
+// TestClusterStatusOtelEndpoint asserts the trace-browser AC contract: the
+// cluster/status response carries otel_endpoint when set on Server (so the
+// "Open in Jaeger" link can render) and omits it when unset (UI hides the
+// link).
+func TestClusterStatusOtelEndpoint(t *testing.T) {
+	s := newTestServer()
+	s.OtelEndpoint = "https://collector.example:4318"
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin/v1/cluster/status", nil)
+	s.routes().ServeHTTP(rr, req)
+	var got ClusterStatus
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.OtelEndpoint != "https://collector.example:4318" {
+		t.Errorf("otel_endpoint = %q want set", got.OtelEndpoint)
+	}
+
+	s.OtelEndpoint = ""
+	rr = httptest.NewRecorder()
+	s.routes().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/admin/v1/cluster/status", nil))
+	body := rr.Body.String()
+	if strings.Contains(body, "otel_endpoint") {
+		t.Errorf("otel_endpoint should be omitted when empty; body=%s", body)
 	}
 }
 

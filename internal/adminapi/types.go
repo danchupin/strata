@@ -15,6 +15,11 @@ type ClusterStatus struct {
 	NodeCountHealthy int    `json:"node_count_healthy"`
 	MetaBackend      string `json:"meta_backend"`
 	DataBackend      string `json:"data_backend"`
+	// OtelEndpoint mirrors OTEL_EXPORTER_OTLP_ENDPOINT. When non-empty the
+	// trace browser UI (US-006) renders an "Open in Jaeger" deep link so
+	// operators can pivot from the in-process ring buffer to the long-term
+	// trace store. Omitted from the response when unset.
+	OtelEndpoint string `json:"otel_endpoint,omitempty"`
 }
 
 // CreateBucketRequest is the JSON body accepted by POST /admin/v1/buckets.

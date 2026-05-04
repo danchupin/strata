@@ -134,6 +134,8 @@ export const queryKeys = {
   diagnostics: {
     slowQueries: (since: string, minMs: number, pageToken: string) =>
       ['diagnostics', 'slow-queries', { since, minMs, pageToken }] as const,
+    trace: (idOrRequestID: string) =>
+      ['diagnostics', 'trace', idOrRequestID] as const,
   },
   auth: {
     whoami: ['auth', 'whoami'] as const,

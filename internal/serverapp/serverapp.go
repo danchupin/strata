@@ -163,6 +163,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		JWTEphemeral:         jwtEphemeral,
 		JWTSecretFile:        jwtFile,
 		PrometheusURL:        os.Getenv("STRATA_PROMETHEUS_URL"),
+		OtelEndpoint:         os.Getenv(strataotel.EnvEndpoint),
 		HeartbeatInterval:    heartbeat.DefaultInterval,
 		ConsoleThemeDefault:  consoleThemeDefault(),
 		CassandraSettings:    cassandraSettings(cfg),
