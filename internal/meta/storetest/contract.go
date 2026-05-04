@@ -609,6 +609,7 @@ func caseAuditLog(t *testing.T, s meta.Store) {
 		Result:    "200",
 		RequestID: "req-xyz",
 		SourceIP:  "10.0.0.5",
+		UserAgent: "aws-cli/2.15 boto3/1.34",
 	}
 	if err := s.EnqueueAudit(ctx, row, time.Hour); err != nil {
 		t.Fatalf("enqueue: %v", err)
@@ -623,7 +624,7 @@ func caseAuditLog(t *testing.T, s meta.Store) {
 	g := got[0]
 	if g.Principal != row.Principal || g.Action != row.Action || g.Resource != row.Resource ||
 		g.Result != row.Result || g.RequestID != row.RequestID || g.SourceIP != row.SourceIP ||
-		g.Bucket != row.Bucket {
+		g.Bucket != row.Bucket || g.UserAgent != row.UserAgent {
 		t.Fatalf("row: %+v", g)
 	}
 }

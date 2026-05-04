@@ -116,6 +116,21 @@ export const queryKeys = {
         { bucket, minAgeHours, initiator, page, pageSize },
       ] as const,
   },
+  audit: {
+    list: (
+      since: string,
+      until: string,
+      action: string,
+      principal: string,
+      bucket: string,
+      pageToken: string,
+    ) =>
+      [
+        'audit',
+        'list',
+        { since, until, action, principal, bucket, pageToken },
+      ] as const,
+  },
   auth: {
     whoami: ['auth', 'whoami'] as const,
   },

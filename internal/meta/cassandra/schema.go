@@ -242,6 +242,7 @@ var tableDDL = []string{
 		request_id   text,
 		source_ip    text,
 		bucket_name  text,
+		user_agent   text,
 		PRIMARY KEY ((bucket_id, day), event_id)
 	) WITH CLUSTERING ORDER BY (event_id DESC)`,
 	`CREATE TABLE IF NOT EXISTS bucket_inventory_configs (
@@ -357,6 +358,7 @@ var alterStatements = []string{
 	`ALTER TABLE gc_queue ADD namespace text`,
 	`ALTER TABLE buckets ADD shard_count_target int`,
 	`ALTER TABLE buckets ADD backend_presign boolean`,
+	`ALTER TABLE audit_log ADD user_agent text`,
 }
 
 func isColumnAlreadyExists(err error) bool {

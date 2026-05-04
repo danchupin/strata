@@ -6,6 +6,7 @@ import { RequireAuth } from '@/components/require-auth';
 import { Skeleton } from '@/components/ui/skeleton';
 import { LoginPage } from '@/pages/Login';
 import { OverviewPage } from '@/pages/Overview';
+import { AuditLogPage } from '@/pages/AuditLog';
 import { BucketsPage } from '@/pages/Buckets';
 import { BucketDetailPage } from '@/pages/BucketDetail';
 import { ConsumersPage } from '@/pages/Consumers';
@@ -47,6 +48,7 @@ export function App() {
         <Route path="/iam" element={<IAMPage />} />
         <Route path="/iam/users/:userName" element={<IAMUserDetailPage />} />
         <Route path="/multipart" element={<MultipartPage />} />
+        <Route path="/audit" element={<AuditLogPage />} />
         <Route
           path="/metrics"
           element={

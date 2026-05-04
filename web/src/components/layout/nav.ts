@@ -1,5 +1,6 @@
 import {
   Boxes,
+  ClipboardList,
   Gauge,
   KeyRound,
   LayoutDashboard,
@@ -25,6 +26,7 @@ export const primaryNav: NavItem[] = [
   { to: '/consumers', label: 'Consumers', icon: Users },
   { to: '/iam', label: 'IAM', icon: KeyRound },
   { to: '/multipart', label: 'Multipart', icon: Layers },
+  { to: '/audit', label: 'Audit log', icon: ClipboardList },
   { to: '/metrics', label: 'Metrics', icon: Gauge },
   { to: '/settings', label: 'Settings', icon: Settings },
 ];

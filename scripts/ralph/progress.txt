@@ -762,3 +762,47 @@ Started: Sun May  3 17:17:18 MSK 2026
   - The bucket-autocomplete datalist reuses the existing buckets-list query (page=1, pageSize=1000) — cache hit when the operator visited /buckets in the same session.
   - emitAuditRow is the canonical per-entity audit shape; lives in internal/adminapi/iam_users.go (next to the DeleteIAMUser cascade that birthed it). Future bulk handlers should use the same helper, not invent their own EnqueueAudit call.
 ---
+
+## Mon May  4 12:30 MSK 2026 - US-018
+- Implemented Audit-log viewer: GET /admin/v1/audit JSON + GET /admin/v1/audit.csv streaming exporter, per PRD AC.
+
+### Backend
+- internal/meta/store.go: added `meta.AuditEvent.UserAgent` (additive). Old rows pre-dating the column read back empty; admin/UI tolerate "".
+- internal/s3api/audit.go: stamp `r.UserAgent()` in both AuditMiddleware paths (default + override).
+- internal/meta/cassandra/schema.go: tableDDL `audit_log` adds `user_agent text`; alterStatements grow one `ALTER TABLE audit_log ADD user_agent text` row so existing keyspaces upgrade in place.
+- internal/meta/cassandra/store.go: INSERT + 3 SELECT statements (ListAudit / ListAuditFiltered / ReadAuditPartition) carry the new column.
+- internal/meta/tikv/codec.go: auditRow gains `UserAgent string `json:"ua,omitempty"`; encode/decode mirror.
+- internal/meta/storetest/contract.go: caseAuditLog asserts UserAgent round-trips.
+- internal/adminapi/audit.go (new): handleAuditList wraps meta.Store.ListAuditFiltered. Filters: since/until (RFC3339), action (comma-separated multi-select, post-filter), principal, bucket (resolved name→ID via meta.GetBucket → 400 NoSuchBucket on miss), page_token (base64.RawURLEncoding wrapper around the EventID continuation). Returns {records:[], next_page_token: "<base64>"}. handleAuditCSV streams text/csv with `Content-Disposition: attachment; filename="audit.csv"` — capped at 100k rows total via auditCSVRowCap; emits #TRUNCATED marker on cap-hit. Audit overrides admin:ListAudit / admin:ExportAuditCSV.
+- internal/adminapi/server.go: registered GET /admin/v1/audit + GET /admin/v1/audit.csv.
+- internal/adminapi/audit_test.go (new): 10 cases — empty, newest-first ordering + UserAgent surfaces, principal filter, multi-action filter, bucket name resolution, NoSuchBucket, invalid since RFC3339, pagination round-trip with base64 token validation, invalid page_token, CSV happy + CSV action-filter.
+
+### Frontend
+- web/src/api/client.ts: added AuditRecord / AuditListResponse / AuditQuery types + fetchAuditLog wrapper + auditCSVUrl helper (returns the URL the browser navigates to so Content-Disposition kicks the native download flow with the existing session cookie).
+- web/src/lib/query.ts: queryKeys.audit.list(...) for the per-filter cache key.
+- web/src/components/layout/nav.ts: Audit log entry (lucide ClipboardList icon) inserted between Multipart and Metrics.
+- web/src/App.tsx: route `/audit` → AuditLogPage.
+- web/src/pages/AuditLog.tsx (new): filter panel (Since/Until datetime-local, Action multi-select picker, Principal autocomplete via fetchIAMUsers, Bucket autocomplete via fetchBucketsList) + table (Time | RequestID | Principal | Action | Resource | Result | SourceIP | UserAgent — RequestID gets a `title="Trace available in Phase 3"` tooltip per AC) + Load more / back-to-first explicit pagination (no infinite scroll) + Export CSV button (window.location.href = auditCSVUrl) + 60s auto-refetch + Refresh button.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` green (incl. new audit_test.go + storetest contract assertion).
+- `go test -race ./internal/adminapi/` clean.
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean. Bundle: main 162.82 KiB gzipped (was 162.79; +30 B for the AuditLog page + nav entry — within budget).
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - Adding a column to meta.AuditEvent (or any meta struct that all 3 backends own) is one PR-shape change: struct field + cassandra DDL/alter + INSERT + every SELECT + tikv codec + storetest contract assertion. Grep for the existing fields' string in store.go to find every SELECT site — tikv is JSON-encoded so codec is the single touch-point.
+  - Opaque pagination tokens to the frontend: backend's continuation token is already opaque (an EventID), but operator URL inspection / log redaction is cleaner if we wrap it in base64 at the admin boundary. base64.RawURLEncoding (no `=` padding) keeps the token URL-safe without extra escaping.
+  - "Multi-select that backend can't filter" → post-filter in the admin handler with a `for inner in [0, maxInnerScans)` loop that re-pages ListAuditFiltered until either page is full or maxInnerScans budget exhausted. Prevents one HTTP call from spinning forever on a filter that matches zero rows in a deep window.
+  - CSV export: GET (not POST) so the browser can trigger a normal download via window.location.href; the session cookie auths the request, no XHR/fetch wrapper needed. Stream via encoding/csv.NewWriter directly to ResponseWriter — bounded memory regardless of row count. Cap row count to make the worst case knowable.
+- Gotchas:
+  - r.URL.Query() returns url.Values which IS map[string][]string — handler helper functions can take that type directly, no extra conversion.
+  - Go 1.22 mux pattern `GET /admin/v1/audit.csv` works fine — `.csv` is just a literal in the path; no trailing-wildcard restrictions like the `{key...}` ones from US-015/US-016.
+  - The browser's <input type="datetime-local"> emits "YYYY-MM-DDTHH:mm" with NO timezone — the React side must `new Date(local).toISOString()` to convert to RFC3339 the backend accepts. Operators in non-UTC zones get correct local-→UTC translation that way.
+- Useful context:
+  - ACTION_OPTIONS in AuditLog.tsx is a curated subset of the action stamps the codebase emits (s3api derives via deriveAuditAction; admin overrides use `admin:<Verb>`). When adding a new admin write, add the override stamp to the handler AND append the new action to ACTION_OPTIONS so operators can filter by it. The list intentionally stays manual rather than auto-generated — keeps the picker scoped to operator-meaningful verbs.
+  - The audit endpoint is wired into the request-scoped audit row (admin:ListAudit / admin:ExportAuditCSV) — viewing the audit log is itself an audited action. Useful when correlating operator actions against the gateway's audit history later.
+---

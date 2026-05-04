@@ -391,6 +391,10 @@ type AuditEvent struct {
 	Result    string
 	RequestID string
 	SourceIP  string
+	// UserAgent is the HTTP User-Agent header captured by the audit
+	// middleware (US-018). Old rows pre-dating the column read back
+	// empty — admin/UI consumers must tolerate "".
+	UserAgent string
 }
 
 // AuditPartition identifies a single (bucket_id, day) partition of the

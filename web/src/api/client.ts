@@ -1349,3 +1349,70 @@ export async function abortMultipartBatch(
   if (!resp.ok) throw await buildAdminError(resp, 'multipart abort failed');
   return (await resp.json()) as MultipartAbortResponse;
 }
+
+// US-018: audit-log viewer.
+export interface AuditRecord {
+  bucket_id: string;
+  bucket: string;
+  event_id: string;
+  time: string;
+  principal: string;
+  action: string;
+  resource: string;
+  result: string;
+  request_id: string;
+  source_ip: string;
+  user_agent: string;
+}
+
+export interface AuditListResponse {
+  records: AuditRecord[];
+  next_page_token: string;
+}
+
+export interface AuditQuery {
+  since?: string;
+  until?: string;
+  action?: string;
+  principal?: string;
+  bucket?: string;
+  pageToken?: string;
+  limit?: number;
+}
+
+function buildAuditQuery(q: AuditQuery): URLSearchParams {
+  const usp = new URLSearchParams();
+  if (q.since) usp.set('since', q.since);
+  if (q.until) usp.set('until', q.until);
+  if (q.action) usp.set('action', q.action);
+  if (q.principal) usp.set('principal', q.principal);
+  if (q.bucket) usp.set('bucket', q.bucket);
+  if (q.pageToken) usp.set('page_token', q.pageToken);
+  if (q.limit != null) usp.set('limit', String(q.limit));
+  return usp;
+}
+
+export async function fetchAuditLog(q: AuditQuery): Promise<AuditListResponse> {
+  const usp = buildAuditQuery(q);
+  const qs = usp.toString();
+  const resp = await fetch(`/admin/v1/audit${qs ? `?${qs}` : ''}`, {
+    method: 'GET',
+    credentials: 'same-origin',
+  });
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch audit log failed');
+  const body = (await resp.json()) as AuditListResponse;
+  return {
+    records: body.records ?? [],
+    next_page_token: body.next_page_token ?? '',
+  };
+}
+
+// auditCSVUrl returns the URL the operator's browser hits to download the
+// CSV. Using window.location.href triggers the browser's normal download flow
+// (Content-Disposition attachment) and lets the same session cookie auth
+// the request — no extra fetch wrapper needed.
+export function auditCSVUrl(q: AuditQuery): string {
+  const usp = buildAuditQuery(q);
+  const qs = usp.toString();
+  return `/admin/v1/audit.csv${qs ? `?${qs}` : ''}`;
+}

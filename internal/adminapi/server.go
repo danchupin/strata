@@ -218,6 +218,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /admin/v1/iam/users/{userName}/policies/{policyArn...}", s.handleIAMUserPolicyDetach)
 	mux.HandleFunc("GET /admin/v1/multipart/active", s.handleMultipartActive)
 	mux.HandleFunc("POST /admin/v1/multipart/abort", s.handleMultipartAbort)
+	mux.HandleFunc("GET /admin/v1/audit", s.handleAuditList)
+	mux.HandleFunc("GET /admin/v1/audit.csv", s.handleAuditCSV)
 	mux.HandleFunc("GET /admin/v1/consumers/top", s.handleConsumersTop)
 	mux.HandleFunc("GET /admin/v1/metrics/timeseries", s.handleMetricsTimeseries)
 	return mux

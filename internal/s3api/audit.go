@@ -135,6 +135,7 @@ func (m *AuditMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Result:    strconv.Itoa(rw.status),
 		RequestID: logging.RequestIDFromContext(ctx),
 		SourceIP:  clientSourceIP(r),
+		UserAgent: r.UserAgent(),
 	}
 	if entry.RequestID == "" {
 		entry.RequestID = r.Header.Get(logging.HeaderRequestID)
@@ -169,6 +170,7 @@ func (m *AuditMiddleware) recordOverride(r *http.Request, rw *auditWriter, ov *A
 		Result:    strconv.Itoa(rw.status),
 		RequestID: logging.RequestIDFromContext(ctx),
 		SourceIP:  clientSourceIP(r),
+		UserAgent: r.UserAgent(),
 	}
 	if entry.RequestID == "" {
 		entry.RequestID = r.Header.Get(logging.HeaderRequestID)
