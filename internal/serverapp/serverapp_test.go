@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/danchupin/strata/internal/adminapi"
 	"github.com/danchupin/strata/internal/config"
 	datamem "github.com/danchupin/strata/internal/data/memory"
 	metamem "github.com/danchupin/strata/internal/meta/memory"
@@ -128,6 +129,92 @@ func TestBuildLockerTiKVNilWhenStoreMismatched(t *testing.T) {
 	cfg := &config.Config{MetaBackend: "tikv"}
 	if got := buildLocker(cfg, metamem.New()); got != nil {
 		t.Fatalf("buildLocker(tikv) with non-tikv store should return nil, got %T", got)
+	}
+}
+
+// TestS3BackendSettingsNonS3DataBackendIsZero asserts the helper returns the
+// empty struct (Kind="") whenever the gateway is not running on the s3 data
+// backend. The Settings page Backends tab keys the "S3 Backend" subsection
+// off Kind=="s3" — non-s3 deployments must not surface a stray card.
+func TestS3BackendSettingsNonS3DataBackendIsZero(t *testing.T) {
+	for _, kind := range []string{"", "memory", "rados"} {
+		cfg := &config.Config{DataBackend: kind}
+		got := s3BackendSettings(cfg)
+		if got != (adminapi.S3BackendSettings{}) {
+			t.Fatalf("data_backend=%q: want zero S3BackendSettings, got %+v", kind, got)
+		}
+	}
+}
+
+// TestS3BackendSettingsMasksKeys is the US-021 wire-shape lockdown: when
+// data_backend=s3, every config field surfaces verbatim EXCEPT AccessKey /
+// SecretKey, which collapse into AccessKeySet / SecretKeySet booleans. The
+// raw secrets must never reach the admin layer.
+func TestS3BackendSettingsMasksKeys(t *testing.T) {
+	cfg := &config.Config{
+		DataBackend: "s3",
+		S3Backend: config.S3BackendConfig{
+			Endpoint:          "https://minio:9000",
+			Region:            "us-east-1",
+			Bucket:            "primary",
+			AccessKey:         "AKIAEXAMPLE",
+			SecretKey:         "supersecret",
+			ForcePathStyle:    true,
+			PartSize:          16 * 1024 * 1024,
+			UploadConcurrency: 8,
+			MaxRetries:        5,
+			OpTimeoutSecs:     30,
+			SSEMode:           "passthrough",
+			SSEKMSKeyID:       "arn:aws:kms:us-east-1:111122223333:key/abc",
+		},
+	}
+	got := s3BackendSettings(cfg)
+	want := adminapi.S3BackendSettings{
+		Kind:              "s3",
+		Endpoint:          "https://minio:9000",
+		Region:            "us-east-1",
+		Bucket:            "primary",
+		ForcePathStyle:    true,
+		PartSize:          16 * 1024 * 1024,
+		UploadConcurrency: 8,
+		MaxRetries:        5,
+		OpTimeoutSecs:     30,
+		SSEMode:           "passthrough",
+		SSEKMSKeyID:       "arn:aws:kms:us-east-1:111122223333:key/abc",
+		AccessKeySet:      true,
+		SecretKeySet:      true,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("s3BackendSettings:\n got=%+v\nwant=%+v", got, want)
+	}
+}
+
+// TestS3BackendSettingsKeyPresenceFlags asserts AccessKeySet / SecretKeySet
+// flip independently with key presence — covers the SDK-default-chain shape
+// (both empty, both flags false) plus partial-set rows for completeness.
+func TestS3BackendSettingsKeyPresenceFlags(t *testing.T) {
+	cases := []struct {
+		ak, sk           string
+		wantAK, wantSK   bool
+	}{
+		{"", "", false, false},
+		{"AKIA", "", true, false},
+		{"", "secret", false, true},
+		{"AKIA", "secret", true, true},
+	}
+	for _, tc := range cases {
+		cfg := &config.Config{
+			DataBackend: "s3",
+			S3Backend: config.S3BackendConfig{
+				Bucket: "b", Region: "r",
+				AccessKey: tc.ak, SecretKey: tc.sk,
+			},
+		}
+		got := s3BackendSettings(cfg)
+		if got.AccessKeySet != tc.wantAK || got.SecretKeySet != tc.wantSK {
+			t.Errorf("ak=%q sk=%q: AccessKeySet=%v SecretKeySet=%v want %v / %v",
+				tc.ak, tc.sk, got.AccessKeySet, got.SecretKeySet, tc.wantAK, tc.wantSK)
+		}
 	}
 }
 

@@ -876,3 +876,29 @@ Started: Sun May  3 17:17:18 MSK 2026
   - The bucket Overview tab is `BucketOverviewTab` in web/src/components/BucketOverviewTab.tsx; cards live as siblings inside a `lg:grid-cols-2` grid — adding a third card just appends a sibling and the layout flows on its own.
   - Cluster status queryKey for backend-aware UI gating: `queryKeys.cluster.status` (defined in lib/query.ts) — already used by AppShell, Overview hero, and CreateBucketDialog so a per-card useQuery just shares the in-memory cache via TanStack Query's query-key dedupe.
 ---
+
+## Mon May  4 17:30 MSK 2026 - US-021
+- Locked down the S3-backend settings wire shape via three new serverapp tests; backend handler + Settings.tsx S3 Backend card already shipped during US-019.
+
+### Backend
+- internal/serverapp/serverapp_test.go: imported adminapi; added TestS3BackendSettingsNonS3DataBackendIsZero (asserts s3BackendSettings(cfg) returns the empty struct for data_backend ∈ {"", "memory", "rados"} so the React BackendsTab subsection guard cannot surface a stray card on non-s3 clusters), TestS3BackendSettingsMasksKeys (wire-shape lockdown — every cfg.S3Backend field surfaces verbatim EXCEPT AccessKey/SecretKey which collapse to AccessKeySet/SecretKeySet booleans; raw secrets never reach admin layer), TestS3BackendSettingsKeyPresenceFlags (4 ak/sk presence combinations including the SDK-default-chain shape both-empty).
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` all packages pass (3 new serverapp tests included).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean (bundle unchanged from US-020 baseline — no UI changes).
+- Browser verification: deferred — dev-browser skill unavailable in this loop.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - When an upcoming PRD story pre-builds the surface during a closely-related earlier story (US-019 wired the S3 Backend card during the JWT rotation cycle, marking the handler "US-021 ready"), the pending story's commit is a thin lockdown layer — add coverage for the bridge helper(s) that no other test layer hits, plus a notes-field paper-trail in prd.json. Don't re-implement; don't skip the test layer. The serverapp helper s3BackendSettings(cfg) was the missing rung between config_test.go (env→cfg) and adminapi/settings_test.go (Server.S3Backend→handler output).
+  - "Boolean-presence flag mirroring a secret string" (AccessKey→AccessKeySet, SecretKey→SecretKeySet) is the canonical "mask but expose presence" shape. Test all 4 ak/sk presence combinations explicitly: both-empty (SDK-default-chain — flags false), ak-only (rare misconfig — caught by config.validate but flag still meaningful), sk-only (same), both-set (typical). Covers the truth table without assuming.
+  - serverapp_test.go is the right home for cfg→admin wiring tests — the adminapi package shouldn't import config (would create a knot), and config tests don't know about adminapi shapes. The existing serverapp tests focus on health probes + tikv endpoint parsing; adding cfg→adminapi field-level wiring tests fits the existing scope.
+- Gotchas:
+  - serverapp tests must run from the project root (not web/) — the web/ subdirectory has its own pnpm workspace and Go's module resolution gets confused if cwd is web/. Recoverable via `cd /path/to/strata && go test ./internal/serverapp/`.
+  - When a prior story's notes claim "US-XXX ready" or "US-XXX wired", verify the actual code state instead of trusting the claim — the upcoming story's AC may have shifted between the claim and the close (e.g. additional fields added to the wire shape). For US-021 the US-019 claim held: every AC field was already on S3BackendSettings.
+- Useful context:
+  - The S3 Backend card lives in web/src/pages/Settings.tsx::S3BackendCard; it's rendered conditionally inside BackendsTab when data === 's3' && dataBackendQuery.data?.kind === 's3'. The dataBackendQuery uses queryKeys.settings.dataBackend (defined in web/src/lib/query.ts) and meta: { label: 'data-backend settings' } so transient errors surface in the global error toast pipeline.
+  - Test-helper pattern for the cfg→admin wiring layer: construct config.Config{DataBackend: ..., S3Backend: config.S3BackendConfig{...}} directly — no need to drive via env vars (config_test.go already covers env→cfg).
+---
