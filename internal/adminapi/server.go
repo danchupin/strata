@@ -178,6 +178,19 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/v1/buckets/top", s.handleBucketsTop)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}", s.handleBucketGet)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/objects", s.handleObjectsList)
+	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/object", s.handleObjectGet)
+	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/object-versions", s.handleObjectVersions)
+	// Deviation from US-016 AC: the AC names PUT /admin/v1/buckets/{bucket}/
+	// objects/{key}/tags etc., but Go 1.22 mux trailing wildcards must be the
+	// LAST segment of the pattern — `{key...}/tags` is rejected at register
+	// time. The DELETE shape keeps {key...} (no subroute follows) so the AC
+	// URL works there; tags / retention / legal-hold collapse to per-shape
+	// endpoints with the key carried in the JSON body. Same trick used in
+	// US-015 single-presign and US-013 / US-014 ARN routes.
+	mux.HandleFunc("PUT /admin/v1/buckets/{bucket}/object-tags", s.handleObjectTags)
+	mux.HandleFunc("PUT /admin/v1/buckets/{bucket}/object-retention", s.handleObjectRetention)
+	mux.HandleFunc("PUT /admin/v1/buckets/{bucket}/object-legal-hold", s.handleObjectLegalHold)
+	mux.HandleFunc("DELETE /admin/v1/buckets/{bucket}/objects/{key...}", s.handleObjectDelete)
 	mux.HandleFunc("POST /admin/v1/buckets/{bucket}/uploads", s.handleUploadInit)
 	mux.HandleFunc("POST /admin/v1/buckets/{bucket}/uploads/{uploadID}/parts/{partNumber}/presign", s.handleUploadPartPresign)
 	mux.HandleFunc("POST /admin/v1/buckets/{bucket}/uploads/{uploadID}/complete", s.handleUploadComplete)

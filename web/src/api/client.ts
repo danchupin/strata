@@ -1131,3 +1131,144 @@ export async function presignSinglePut(
   if (!resp.ok) throw await buildAdminError(resp, 'single-PUT presign failed');
   return (await resp.json()) as SinglePresignResponse;
 }
+
+// US-016 — Object detail / tags / retention / legal-hold / versions / delete.
+// AC names PUT /objects/{key}/tags etc but Go 1.22 mux trailing wildcards
+// must be the LAST segment, so the per-shape endpoints carry the key in
+// the JSON body. The DELETE shape keeps {key...} (no subroute follows) so
+// the AC URL works there.
+
+export interface ObjectDetail {
+  key: string;
+  version_id?: string;
+  is_latest: boolean;
+  is_delete_marker: boolean;
+  size: number;
+  etag: string;
+  content_type?: string;
+  storage_class?: string;
+  last_modified: number;
+  tags: Record<string, string>;
+  retain_mode?: 'GOVERNANCE' | 'COMPLIANCE' | '';
+  retain_until?: number;
+  legal_hold: boolean;
+}
+
+export async function fetchObjectDetail(
+  bucket: string,
+  key: string,
+  versionID?: string,
+): Promise<ObjectDetail> {
+  const usp = new URLSearchParams();
+  usp.set('key', key);
+  if (versionID) usp.set('versionId', versionID);
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(bucket)}/object?${usp.toString()}`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch object failed');
+  return (await resp.json()) as ObjectDetail;
+}
+
+export interface ObjectVersionEntry {
+  version_id: string;
+  is_latest: boolean;
+  is_delete_marker: boolean;
+  size: number;
+  etag: string;
+  storage_class?: string;
+  last_modified: number;
+}
+
+export async function fetchObjectVersions(
+  bucket: string,
+  key: string,
+): Promise<ObjectVersionEntry[]> {
+  const usp = new URLSearchParams();
+  usp.set('key', key);
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(bucket)}/object-versions?${usp.toString()}`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch object versions failed');
+  const body = (await resp.json()) as { versions?: ObjectVersionEntry[] };
+  return body.versions ?? [];
+}
+
+export async function setObjectTags(
+  bucket: string,
+  key: string,
+  tags: Record<string, string>,
+  versionID?: string,
+): Promise<void> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(bucket)}/object-tags`,
+    {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, version_id: versionID, tags }),
+    },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'set object tags failed');
+}
+
+export type ObjectRetentionMode = 'GOVERNANCE' | 'COMPLIANCE' | 'None';
+
+export async function setObjectRetention(
+  bucket: string,
+  key: string,
+  mode: ObjectRetentionMode,
+  retainUntil: string | null,
+  versionID?: string,
+): Promise<void> {
+  const body: Record<string, unknown> = { key, version_id: versionID, mode };
+  if (mode !== 'None' && retainUntil) body.retain_until = retainUntil;
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(bucket)}/object-retention`,
+    {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'set object retention failed');
+}
+
+export async function setObjectLegalHold(
+  bucket: string,
+  key: string,
+  enabled: boolean,
+  versionID?: string,
+): Promise<void> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(bucket)}/object-legal-hold`,
+    {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, version_id: versionID, enabled }),
+    },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'set object legal hold failed');
+}
+
+export async function deleteObject(
+  bucket: string,
+  key: string,
+  versionID?: string,
+): Promise<void> {
+  // Encode each path segment but preserve '/' separators so the gateway mux
+  // sees the full nested key (the trailing-wildcard {key...} pattern).
+  const encodedKey = key.split('/').map(encodeURIComponent).join('/');
+  const usp = new URLSearchParams();
+  if (versionID) usp.set('versionId', versionID);
+  const qs = usp.toString();
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(bucket)}/objects/${encodedKey}${qs ? `?${qs}` : ''}`,
+    { method: 'DELETE', credentials: 'same-origin' },
+  );
+  if (resp.status === 204) return;
+  throw await buildAdminError(resp, 'delete object failed');
+}

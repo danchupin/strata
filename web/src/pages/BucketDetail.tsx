@@ -16,7 +16,6 @@ import {
   fetchBucket,
   fetchObjects,
   type BucketDetail,
-  type ObjectEntry,
   type ObjectsResponse,
 } from '@/api/client';
 import { queryClient, queryKeys } from '@/lib/query';
@@ -30,13 +29,6 @@ import {
   CardTitle,
 } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from '@/components/ui/sheet';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   Table,
@@ -56,6 +48,7 @@ import { BucketLifecycleTab } from '@/components/BucketLifecycleTab';
 import { BucketOverviewTab } from '@/components/BucketOverviewTab';
 import { BucketPolicyTab } from '@/components/BucketPolicyTab';
 import { DeleteBucketDialog } from '@/components/DeleteBucketDialog';
+import { ObjectDetailSheet } from '@/components/ObjectDetailSheet';
 import { UploadDialog } from '@/components/UploadDialog';
 
 const PAGE_SIZE = 100;
@@ -132,7 +125,7 @@ export function BucketDetailPage() {
   // markerStack is the navigation history of continuation tokens — index N is
   // the marker that started page N+1. Empty means we're on page 1.
   const [markerStack, setMarkerStack] = useState<string[]>([]);
-  const [selected, setSelected] = useState<ObjectEntry | null>(null);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
 
@@ -182,7 +175,7 @@ export function BucketDetailPage() {
     detailQ.error instanceof Error && /404/.test(detailQ.error.message);
 
   function navigatePrefix(next: string) {
-    setSelected(null);
+    setSelectedKey(null);
     if (next) {
       setSearchParams({ prefix: next });
     } else {
@@ -429,7 +422,7 @@ export function BucketDetailPage() {
                     <TableCell className="pl-4 font-medium sm:pl-6">
                       <button
                         type="button"
-                        onClick={() => setSelected(o)}
+                        onClick={() => setSelectedKey(o.key)}
                         className="inline-flex items-center gap-2 text-left text-primary underline-offset-2 hover:underline"
                       >
                         <File className="h-4 w-4" aria-hidden />
@@ -503,8 +496,9 @@ export function BucketDetailPage() {
 
       <ObjectDetailSheet
         bucket={name}
-        object={selected}
-        onClose={() => setSelected(null)}
+        bucketDetail={detail}
+        objectKey={selectedKey}
+        onClose={() => setSelectedKey(null)}
       />
 
       <DeleteBucketDialog
@@ -621,80 +615,3 @@ function Breadcrumbs({
   );
 }
 
-function ObjectDetailSheet({
-  bucket,
-  object,
-  onClose,
-}: {
-  bucket: string;
-  object: ObjectEntry | null;
-  onClose: () => void;
-}) {
-  return (
-    <Sheet open={Boolean(object)} onOpenChange={(open) => !open && onClose()}>
-      <SheetContent side="right" className="sm:max-w-md">
-        {object && (
-          <>
-            <SheetHeader>
-              <SheetTitle className="break-all">{object.key}</SheetTitle>
-              <SheetDescription className="break-all">
-                <code className="text-xs">{bucket}/{object.key}</code>
-              </SheetDescription>
-            </SheetHeader>
-            <dl className="mt-4 grid grid-cols-1 gap-3 text-sm">
-              <DetailRow label="Size" value={formatBytes(object.size)} />
-              <DetailRow
-                label="Last modified"
-                value={
-                  object.last_modified
-                    ? new Date(object.last_modified * 1000).toLocaleString()
-                    : '—'
-                }
-              />
-              <DetailRow label="Storage class" value={object.storage_class || '—'} />
-              <DetailRow
-                label="ETag"
-                value={
-                  <code className="break-all font-mono text-xs">
-                    {object.etag || '—'}
-                  </code>
-                }
-              />
-            </dl>
-            <div className="mt-6 flex flex-col gap-2 sm:flex-row">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled
-                title="Coming in Phase 2"
-              >
-                Download
-              </Button>
-              <Button
-                type="button"
-                variant="destructive"
-                size="sm"
-                disabled
-                title="Coming in Phase 2"
-              >
-                Delete
-              </Button>
-            </div>
-          </>
-        )}
-      </SheetContent>
-    </Sheet>
-  );
-}
-
-function DetailRow({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div className="grid grid-cols-[120px_1fr] items-baseline gap-2">
-      <dt className="text-xs uppercase tracking-wide text-muted-foreground">
-        {label}
-      </dt>
-      <dd className="text-sm">{value}</dd>
-    </div>
-  );
-}

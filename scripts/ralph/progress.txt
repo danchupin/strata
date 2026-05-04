@@ -45,6 +45,8 @@ Started: Sun May  3 17:17:18 MSK 2026
 - "Operator's session-cookie identity NOT their personal AK/SK reaches the browser" pattern (US-015): admin server has access to s.Creds.Lookup which returns the secret. Sign server-side with the operator's own credential; browser only ever sees the URL string. Reuse for any future browser-direct upload/download surface.
 - adminapi.Server.S3Handler is the BARE s3api.Server (no auth.Middleware wrapper). Admin handlers that "pass through to existing s3api X handler" synthesise httptest.NewRequest with the full /<bucket>/<key>?queryparams URL + copy auth context via inner.WithContext(r.Context()) + s.S3Handler.ServeHTTP(rec, inner) + map 2xx → admin success / non-2xx → bubble body. Used by US-015 Complete + Abort.
 - Web Worker pattern for browser uploads with progress: vite ?worker-imported worker (web/src/workers/upload.ts) owns the slicing + per-part PUT loop. Per-part presign happens on the PARENT (cookies don't auto-share into workers in some browsers) and the URL is shipped down via postMessage. Use XMLHttpRequest (not fetch) — fetch lacks upload progress events. Generalises to any "long-running batch operation that wants per-step progress without freezing the UI".
+- Path encoding for nested object keys on the client (US-016): `key.split('/').map(encodeURIComponent).join('/')` preserves '/' separators so the gateway mux's trailing-wildcard `{key...}` pattern sees the full nested key. Plain `encodeURIComponent(key)` would escape '/' and route as a single segment.
+- Admin object operations on a bucket (US-016): tags/retention/legal-hold endpoints carry the key in JSON body — Go 1.22 mux trailing-wildcards must be the LAST segment, so `/objects/{key...}/tags` is unrepresentable. DELETE keeps `{key...}` because no subroute follows.
 
 ## Sun May  3 17:27 MSK 2026 - US-001
 - Implemented CreateBucket dialog (POST /admin/v1/buckets + UI) per PRD AC.
@@ -675,4 +677,43 @@ Started: Sun May  3 17:17:18 MSK 2026
   - The presign-mint helper sets `Expires=5min` by default. To raise the ceiling for a future surface, pass `opts.Expires` explicitly; helper caps at 7d (AWS max).
   - The Web Worker's progress reporting is cumulative bytes (uploaded across all parts so far / total). Parent computes per-file pct and overall pct from per-file totals.
   - Files <=5 MiB shortcut to the single-PUT path so the operator doesn't pay multipart bookkeeping for a logo.png — same threshold AWS uses for the SDK default. Tune via SINGLE_PUT_MAX_BYTES in UploadDialog.tsx.
+---
+
+## Mon May  4 10:33 MSK 2026 - US-016
+- Implemented object delete + tag editor + retention/legal-hold panel per PRD AC.
+
+### Backend
+- internal/adminapi/objects.go (new): handleObjectDelete (DELETE /buckets/{bucket}/objects/{key...} forwards through s.S3Handler so the existing object-lock / replication / GC pipeline runs unchanged), handleObjectGet (GET /buckets/{bucket}/object?key=&versionId= -> ObjectDetailResponse incl. tags/retain/legal-hold), handleObjectVersions (GET /buckets/{bucket}/object-versions?key= filters ListObjectVersions to the exact key), handleObjectTags (PUT /buckets/{bucket}/object-tags body {key, version_id?, tags} — empty map clears), handleObjectRetention (PUT body {key, version_id?, mode, retain_until} — None clears, GOVERNANCE/COMPLIANCE require RFC3339 retain_until + bucket.ObjectLockEnabled), handleObjectLegalHold (PUT body {key, version_id?, enabled} — true requires bucket.ObjectLockEnabled, false ignores). Audit overrides admin:DeleteObject / admin:SetObjectTags / admin:SetObjectRetention / admin:SetObjectLegalHold.
+- internal/adminapi/server.go: registered the six new routes. Route deviation: AC names PUT /admin/v1/buckets/{bucket}/objects/{key}/tags etc., but Go 1.22 mux trailing wildcards must be the LAST segment. DELETE keeps {key...} (no subroute follows); tags/retention/legal-hold collapse to /object-tags / /object-retention / /object-legal-hold with the key carried in the JSON body. Same trick used in US-015 single-presign + US-013/14 ARN routes.
+- internal/adminapi/objects_test.go (new): 15 cases — Get happy/shape, Get NoSuchKey, Get NoSuchBucket, Tags happy + clear round-trip, Tags missing-key 400, Tags NoSuchKey 404, Retention requires-lock 400 ObjectLockNotEnabled, Retention happy + None clears, Retention bad mode 400, Retention retain_until required, LegalHold happy + clear, LegalHold true requires lock, Versions list filters per key + IsLatest count, Versions BucketNotFound 404, Delete happy proxies s3api, Delete nested key (logs/2026/05.txt), Delete versionId-scoped.
+
+### Frontend
+- web/src/api/client.ts: added ObjectDetail / ObjectVersionEntry / ObjectRetentionMode types + fetchObjectDetail / fetchObjectVersions / setObjectTags / setObjectRetention / setObjectLegalHold / deleteObject wrappers. The deleteObject wrapper splits the key on '/' and encodeURIComponent's each segment so the gateway mux sees the full nested key under {key...}.
+- web/src/lib/query.ts: queryKeys.buckets.object(name, key, versionID) + queryKeys.buckets.objectVersions(name, key).
+- web/src/components/ObjectDetailSheet.tsx (new): shadcn Sheet + Tabs (Overview | Tags | Retention | Legal Hold | Versions). Overview surfaces size/last-modified/storage-class/ETag/version + Latest/DeleteMarker badges + a confirm-then-delete button (invalidates the bucket-level object query). Tags is an editable key/value list with Add/Remove + Save (empty map clears). Retention is a Mode chip group (None | GOVERNANCE | COMPLIANCE) + datetime-local "Retain until" input; greyed-out + tooltip when bucketDetail.object_lock=false. Legal Hold is a checkbox; turning it ON requires ObjectLock; turning OFF works regardless. Versions calls fetchObjectVersions and renders per-row Delete buttons (versionId-scoped); Delete-marker rows highlight via warning-tinted border. All mutations use TanStack Query useMutation + invalidate the relevant queryKeys + showToast.
+- web/src/pages/BucketDetail.tsx: dropped the placeholder Sheet and DetailRow defined inline; selectedKey state + onObjectDeleted prop wire to the new ObjectDetailSheet. Pass the live BucketDetail down so Retention/LegalHold tabs can read object_lock.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` all green (incl. internal/adminapi/ — 15 new tests pass).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean. Bundle deltas (gzipped):
+  - main: 158.10 KiB (was 137.32 KiB before US-015) — ObjectDetailSheet adds ~3 KiB after minification.
+  - MonacoJsonEditor lazy chunk: 591.94 KiB (unchanged — Monaco not used by ObjectDetailSheet).
+- Browser verification: deferred — dev-browser skill unavailable in this Ralph loop. Manual smoke recommended.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - When AC names a URL shape that Go 1.22 mux's trailing-wildcard requirement makes unrepresentable (e.g. `{key}/tags`), keep the AC URL where it works (DELETE which has no subroute) and collapse the conflicting endpoints to per-shape paths with the key carried in the JSON body. This yields a self-consistent surface across endpoints AND survives Go's pattern parser.
+  - Path encoding for nested keys on the client: `key.split('/').map(encodeURIComponent).join('/')` preserves '/' separators so the trailing-wildcard `{key...}` mux entry sees the full path. `encodeURIComponent(key)` alone would escape '/' and route as a single segment.
+  - `requireObjectAccess` on the s3api side short-circuits via `info.Owner == b.Owner` — admin proxy tests that wire a real s3api.Server can simply set the seeded bucket's owner equal to the test's stamped AccessKey/Owner pair to bypass policy + ACL gates without seeding grants.
+  - For long-lived per-bucket queries that need to react to per-row mutations (delete-version), invalidate BOTH the per-key queryKey AND the broader `['buckets', 'objects', bucket]` prefix — TanStack Query's prefix matching invalidates all sort/marker variants.
+- Gotchas:
+  - meta.Store.SetObjectTags / SetObjectRetention / SetObjectLegalHold accept versionID="" as "latest" — wired through `findLatest` in memory and through `ResolveVersionID` in cassandra/tikv. No need for the admin handler to resolve "latest" → version_id manually.
+  - The retention endpoint must check `bucket.ObjectLockEnabled` BEFORE writing; the meta.Store layer does NOT validate this. Same applies to legal-hold ON. Clearing legal hold (enabled=false) and clearing retention (mode=None) are both permitted regardless of bucket lock state.
+  - meta.Store.ListObjectVersions does not support an exact-key query — it accepts a prefix. The handler filters by `v.Key == key` post-listing. At per-key cardinality (S3 caps version history at ~10k) this is fine; for a future heavy version walker, add a per-key index.
+- Useful context:
+  - The audit middleware emits exactly one row per request via the override pointer; for a multi-step admin path (e.g. cascading version deletes from the Versions tab) each per-row request is its own audit row (one per click). No need for `emitAuditRow` here.
+  - The client's bucketDetail.object_lock value is passed into the side panel so Retention/LegalHold can render their disabled-state UI without an extra round trip; the bucket detail query is already loaded by the parent BucketDetailPage.
+  - For "click the row to open side panel" pattern, store `selectedKey: string | null` rather than the full `ObjectEntry` — the panel re-fetches via fetchObjectDetail anyway, and a string key is stable across pagination/refetch (an ObjectEntry reference would point at a stale snapshot after invalidation).
 ---
