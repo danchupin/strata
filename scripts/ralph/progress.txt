@@ -806,3 +806,39 @@ Started: Sun May  3 17:17:18 MSK 2026
   - ACTION_OPTIONS in AuditLog.tsx is a curated subset of the action stamps the codebase emits (s3api derives via deriveAuditAction; admin overrides use `admin:<Verb>`). When adding a new admin write, add the override stamp to the handler AND append the new action to ACTION_OPTIONS so operators can filter by it. The list intentionally stays manual rather than auto-generated — keeps the picker scoped to operator-meaningful verbs.
   - The audit endpoint is wired into the request-scoped audit row (admin:ListAudit / admin:ExportAuditCSV) — viewing the audit log is itself an audited action. Useful when correlating operator actions against the gateway's audit history later.
 ---
+
+## Mon May  4 14:30 MSK 2026 - US-019
+- Implemented Settings page with JWT secret rotation per AC.
+
+### Backend
+- internal/adminapi/server.go: added jwtMu sync.RWMutex guarding JWTSecret + new JWTEphemeral/JWTSecretFile fields. Server methods jwtSecret(), jwtEphemeral(), SetJWTSecret(b) — call sites in server.go authMiddleware + auth.go handleLogin/handleWhoami switched over.
+- internal/adminapi/server.go: Server gained PrometheusURL, HeartbeatInterval, ConsoleThemeDefault, CassandraSettings, RADOSSettings, TiKVSettings, S3Backend fields; Config mirrors. Plumbed through New(). Routes added: GET /admin/v1/settings, GET /admin/v1/settings/data-backend, POST /admin/v1/settings/jwt/rotate.
+- internal/adminapi/settings.go (new): Settings + per-backend JSON shapes. handleGetSettings emits jwt_secret = "<set>"|"<ephemeral>" — never the bytes. handleGetSettingsDataBackend masks AccessKey/SecretKey to booleans (US-021 ready). handleRotateJWTSecret generates 32 random bytes, persists hex-encoded to JWTSecretFile (default /etc/strata/jwt-secret) via temp+fsync+rename @0600, then SetJWTSecret atomic-replaces in-memory key. Stamps audit override admin:RotateJWTSecret resource=settings:jwt principal=auth.FromContext owner.
+- internal/adminapi/settings_test.go (new): 6 cases — settings shape (cluster identity + heartbeat/audit ms + masked jwt + cassandra/rados/tikv backends), masked label flips on persisted vs ephemeral, rotation actually changes in-memory key + writes hex-encoded file @0600, rotation invalidates pre-rotation cookie (next request → 401), rotation emits admin:RotateJWTSecret audit row through s3api.NewAuditMiddleware override pathway, data-backend kind="" on memory and kind="s3" with masked keys when backend=s3.
+- internal/serverapp/serverapp.go: loadJWTSecret signature → ([]byte, source, file). Resolution order STRATA_CONSOLE_JWT_SECRET → STRATA_JWT_SECRET_FILE (default /etc/strata/jwt-secret, hex-decoded) → ephemeral random + WARN. Helpers consoleThemeDefault / cassandraSettings / radosSettings / tikvSettings / s3BackendSettings populate the new Config fields. JWTEphemeral derives from `strings.HasPrefix(jwtSource, "ephemeral")`.
+
+### Frontend
+- web/src/api/client.ts: appended fetchSettings, fetchSettingsDataBackend, rotateJWTSecret + their typed shapes (ClusterSettings, CassandraSettings, RADOSSettings, TiKVSettings, SettingsResponse, S3BackendSettings, RotateJWTResponse). All throw AdminApiError on 4xx/5xx via the shared buildAdminError helper.
+- web/src/lib/query.ts: added queryKeys.settings.{all, dataBackend}.
+- web/src/pages/Settings.tsx: full rewrite. Tabs: Cluster | Console | Backends. Cluster tab renders cluster_name/region/version/prometheus_url/heartbeat_interval/audit_retention. Console tab renders console_theme_default + JWT secret label + JWT secret file path + a Rotate JWT button (red) that opens a type-to-confirm dialog (operator types "rotate"). On success: toast + setTimeout(redirect to /login, 1500ms) since the next /admin/v1 fetch will 401. Backends tab renders Active backends KV card always, plus per-backend cards for cassandra/tikv (when meta=that) and rados (when data=rados); s3 backend card lazy-loads from /settings/data-backend (US-021 wired).
+
+### Quality checks
+- `go build ./...` clean; `go vet ./...` clean; `go test ./...` all packages pass.
+- `pnpm run typecheck` clean; `pnpm run build` clean (no new chunks > 500KB beyond pre-existing Monaco).
+- Browser verification: deferred — dev-browser skill unavailable in this loop. Manual smoke recommended (cookie-rotation should bounce to /login).
+
+### Learnings for future iterations
+- Patterns discovered:
+  - Mutex+accessor pattern for atomically-replaceable Server fields: `Server.fooMu sync.RWMutex` + `s.foo() T` getter + `s.SetFoo(T)` setter. Internal call sites swap from `s.Foo` → `s.foo()` (one-line edit per site). Use this for any field that: 1) gates auth, 2) can change at runtime, 3) is read on every request. JWTSecret is the canonical case; future candidates: per-tenant signing keys, hot-reloaded auth.MultiStore. Public field stays for `Config{Foo: ...}` init/test ergonomics — only the in-process reads must funnel through the accessor.
+  - Atomic file write for operator-rotated secrets: `os.CreateTemp(dir, ".prefix.*")` → Chmod 0600 → write → fsync → close → rename. The temp file lives in the SAME dir as the target so rename is atomic; fsync before close so a crash mid-rotation doesn't ship a half-written secret to disk. Reuse for any future "operator rotates this credential and the bytes must survive a process kill" surface.
+  - Type-to-confirm dialogs work well for rotations (not just deletes): `armed = confirm.toLowerCase() === 'rotate'` is enough. The action verb itself is the confirmation token — same idiom as DeleteBucketDialog typing the bucket name. Reuse for any future "irreversible operator action that affects the whole cluster" (KMS key rotation, cluster reshard, etc.).
+  - Settings response splits Settings (cluster identity/console knobs) from Backends (per-backend connection blobs). Lets a single GET serve all three tabs without a JOIN on the React side. The s3-backend config still gets its own endpoint /settings/data-backend (US-021) because it has masked secrets and per-mode validation — keep it separate so future per-backend "is this connection healthy?" probes can attach to the same shape.
+- Gotchas:
+  - meta.Store.ListAudit takes `(ctx, bucketID uuid.UUID, limit int)` — bucketID=uuid.Nil + limit=N. `uuid.Nil` is the conventional "no bucket filter" sentinel used by the audit-export and admin audit-list paths. Don't pass nil for the 2nd arg — the signature is positional.
+  - `pnpm run` works from web/ but the project root has no package.json, so run quality checks from web/ explicitly. (typecheck/build do; there is no `lint` script today.)
+  - When a rotate-secret endpoint replaces the in-memory verification key, the operator's cookie is still sitting in the browser jar — the next request still sends it but now fails verifySession. Don't try to clear the cookie server-side; let the 401 land and let the SPA redirect. Frontend just needs a `setTimeout(window.location.href = '/login', 1500)` after the toast so the operator sees the success message before the bounce.
+- Useful context:
+  - heartbeat.DefaultInterval = 10s, heartbeat.DefaultTTL = 30s — both are package-level constants; surface them through the admin API as ms (not Go duration strings) so the React side doesn't need a Go-duration parser.
+  - s3api.NewAuditMiddleware(meta, ttl, next) is the canonical wrapper used by both the admin-side and the s3 path; tests can wrap `s.routes()` with it directly to verify override-stamped rows reach meta.Store.EnqueueAudit.
+  - The Settings page uses the existing query.ts queryClient/queryKeys plumbing — no new global. Future settings sub-tabs (e.g. policy defaults, OAuth IdP config) just slot into the existing SettingsResponse + tabs scaffold.
+---

@@ -23,7 +23,8 @@ type sessionResponse struct {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if len(s.JWTSecret) == 0 {
+	jwtSecret := s.jwtSecret()
+	if len(jwtSecret) == 0 {
 		writeJSONError(w, http.StatusInternalServerError, "InternalError", "session signing key unconfigured")
 		return
 	}
@@ -47,7 +48,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusUnauthorized, "InvalidCredentials", "invalid access key or secret")
 		return
 	}
-	tok, claims, err := signSession(s.JWTSecret, cred.AccessKey, time.Now())
+	tok, claims, err := signSession(jwtSecret, cred.AccessKey, time.Now())
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "InternalError", "issue session token")
 		return
@@ -69,7 +70,7 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	}
 	exp := int64(0)
 	if c, err := r.Cookie(sessionCookieName); err == nil {
-		if claims, err := verifySession(s.JWTSecret, c.Value); err == nil {
+		if claims, err := verifySession(s.jwtSecret(), c.Value); err == nil {
 			exp = claims.Exp
 		}
 	}

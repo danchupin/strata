@@ -37,7 +37,34 @@ type Server struct {
 	MetaBackend string
 	DataBackend string
 	Started     time.Time
-	JWTSecret   []byte
+	// jwtMu guards JWTSecret + JWTEphemeral. Reads in the auth path use
+	// jwtSecret() / jwtEphemeral(); writes via SetJWTSecret() (US-019
+	// Rotate JWT secret).
+	jwtMu        sync.RWMutex
+	JWTSecret    []byte
+	JWTEphemeral bool
+	// JWTSecretFile is the on-disk path used by SetJWTSecret to persist a
+	// freshly-rotated key. Empty disables the rotate endpoint with 503
+	// SecretFileUnavailable so dev rigs without a writable path fail loud.
+	JWTSecretFile string
+	// PrometheusURL surfaces on GET /admin/v1/settings (US-019); empty
+	// when STRATA_PROMETHEUS_URL is unset.
+	PrometheusURL string
+	// HeartbeatInterval echoes heartbeat.DefaultInterval into the Settings
+	// view so operators can verify the cadence without grepping the source.
+	HeartbeatInterval time.Duration
+	// ConsoleThemeDefault is "system" today; reserved for future
+	// operator-set defaults.
+	ConsoleThemeDefault string
+	// CassandraSettings / RADOSSettings / TiKVSettings carry per-backend
+	// connection parameters surfaced (read-only) on the Settings →
+	// Backends tab. Populated only for the currently-selected backend.
+	CassandraSettings CassandraSettings
+	RADOSSettings     RADOSSettings
+	TiKVSettings      TiKVSettings
+	// S3Backend exposes s3-over-s3 backend config on /admin/v1/settings/
+	// data-backend (US-021). Populated when DataBackend == "s3".
+	S3Backend S3BackendSettings
 	// AuditTTL is the row TTL applied when an admin handler writes an extra
 	// audit_log row directly via meta.Store.EnqueueAudit (e.g. the
 	// DeleteIAMUser cascade in US-011 emits one admin:DeleteAccessKey row
@@ -88,7 +115,27 @@ type Config struct {
 	Region      string
 	MetaBackend string
 	DataBackend string
-	JWTSecret   []byte
+	JWTSecret    []byte
+	JWTEphemeral bool
+	// JWTSecretFile is the persistence path used by POST /admin/v1/settings/
+	// jwt/rotate. Empty falls back to /etc/strata/jwt-secret.
+	JWTSecretFile string
+	// PrometheusURL is echoed into GET /admin/v1/settings (US-019).
+	PrometheusURL string
+	// HeartbeatInterval mirrors heartbeat.DefaultInterval; surfaced on the
+	// Settings page Cluster tab.
+	HeartbeatInterval time.Duration
+	// ConsoleThemeDefault is the default theme reported on the Console tab.
+	ConsoleThemeDefault string
+	// CassandraSettings / RADOSSettings / TiKVSettings carry per-backend
+	// connection parameters surfaced (read-only) on the Settings →
+	// Backends tab.
+	CassandraSettings CassandraSettings
+	RADOSSettings     RADOSSettings
+	TiKVSettings      TiKVSettings
+	// S3Backend exposes s3-over-s3 backend config on /admin/v1/settings/
+	// data-backend (US-021). Populated when DataBackend == "s3".
+	S3Backend S3BackendSettings
 	// AuditTTL mirrors the gateway's STRATA_AUDIT_RETENTION-derived value so
 	// admin handlers that write extra audit rows (cascaded key deletes,
 	// future bulk operations) match the row TTL of the AuditMiddleware.
@@ -112,23 +159,61 @@ func New(c Config) *Server {
 		clusterName = "strata"
 	}
 	return &Server{
-		Meta:        c.Meta,
-		Creds:       c.Creds,
-		Heartbeat:   c.Heartbeat,
-		Prom:        c.Prom,
-		Locker:      c.Locker,
-		Version:     c.Version,
-		ClusterName: clusterName,
-		Region:      c.Region,
-		MetaBackend: c.MetaBackend,
-		DataBackend: c.DataBackend,
-		Started:     time.Now(),
-		JWTSecret:   c.JWTSecret,
+		Meta:                 c.Meta,
+		Creds:                c.Creds,
+		Heartbeat:            c.Heartbeat,
+		Prom:                 c.Prom,
+		Locker:               c.Locker,
+		Version:              c.Version,
+		ClusterName:          clusterName,
+		Region:               c.Region,
+		MetaBackend:          c.MetaBackend,
+		DataBackend:          c.DataBackend,
+		Started:              time.Now(),
+		JWTSecret:            c.JWTSecret,
+		JWTEphemeral:         c.JWTEphemeral,
+		JWTSecretFile:        c.JWTSecretFile,
+		PrometheusURL:        c.PrometheusURL,
+		HeartbeatInterval:    c.HeartbeatInterval,
+		ConsoleThemeDefault:  c.ConsoleThemeDefault,
+		CassandraSettings:    c.CassandraSettings,
+		RADOSSettings:        c.RADOSSettings,
+		TiKVSettings:         c.TiKVSettings,
+		S3Backend:            c.S3Backend,
 		AuditTTL:             c.AuditTTL,
 		InvalidateCredential: c.InvalidateCredential,
 		S3Handler:            c.S3Handler,
 		Logger:               log.Default(),
 	}
+}
+
+// jwtSecret returns the active session-signing key. Goroutine-safe; rotate
+// via SetJWTSecret. Used by authMiddleware + handleLogin / handleWhoami.
+func (s *Server) jwtSecret() []byte {
+	s.jwtMu.RLock()
+	defer s.jwtMu.RUnlock()
+	return s.JWTSecret
+}
+
+// jwtEphemeral reports whether the active key was generated at startup.
+// Used only on GET /admin/v1/settings to surface the operator-facing source
+// label.
+func (s *Server) jwtEphemeral() bool {
+	s.jwtMu.RLock()
+	defer s.jwtMu.RUnlock()
+	return s.JWTEphemeral
+}
+
+// SetJWTSecret atomically replaces the in-memory session-signing key. The
+// in-flight cookie state on the operator's browser is implicitly invalidated:
+// every cookie signed by the previous key now fails verifySession with
+// ErrSessionSignature, so the next request returns 401 and the UI reroutes
+// to /login. Wired by handleRotateJWTSecret (US-019).
+func (s *Server) SetJWTSecret(b []byte) {
+	s.jwtMu.Lock()
+	s.JWTSecret = b
+	s.JWTEphemeral = false
+	s.jwtMu.Unlock()
 }
 
 // Handler returns the auth-wrapped HTTP handler suitable for mounting under
@@ -220,6 +305,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /admin/v1/multipart/abort", s.handleMultipartAbort)
 	mux.HandleFunc("GET /admin/v1/audit", s.handleAuditList)
 	mux.HandleFunc("GET /admin/v1/audit.csv", s.handleAuditCSV)
+	mux.HandleFunc("GET /admin/v1/settings", s.handleGetSettings)
+	mux.HandleFunc("GET /admin/v1/settings/data-backend", s.handleGetSettingsDataBackend)
+	mux.HandleFunc("POST /admin/v1/settings/jwt/rotate", s.handleRotateJWTSecret)
 	mux.HandleFunc("GET /admin/v1/consumers/top", s.handleConsumersTop)
 	mux.HandleFunc("GET /admin/v1/metrics/timeseries", s.handleMetricsTimeseries)
 	return mux
@@ -241,7 +329,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
-			claims, vErr := verifySession(s.JWTSecret, c.Value)
+			claims, vErr := verifySession(s.jwtSecret(), c.Value)
 			if vErr != nil {
 				writeAuthDenied(w, r, vErr)
 				return

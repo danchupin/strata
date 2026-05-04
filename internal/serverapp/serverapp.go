@@ -131,8 +131,9 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 
 	healthHandler := buildHealthHandler(metaStore, dataBackend)
 
-	jwtSecret, jwtSource := loadJWTSecret(logger)
-	logger.Info("admin jwt secret", "source", jwtSource)
+	jwtSecret, jwtSource, jwtFile := loadJWTSecret(logger)
+	logger.Info("admin jwt secret", "source", jwtSource, "file", jwtFile)
+	jwtEphemeral := strings.HasPrefix(jwtSource, "ephemeral")
 	clusterName := os.Getenv("STRATA_CLUSTER_NAME")
 	hbStore := buildHeartbeatStore(cfg, metaStore)
 	version := buildVersion()
@@ -143,17 +144,26 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	adminLocker := buildLocker(cfg, metaStore)
 	auditTTL := auditRetention(logger)
 	adminServer := adminapi.New(adminapi.Config{
-		Meta:        metaStore,
-		Creds:       multi,
-		Heartbeat:   hbStore,
-		Prom:        prom,
-		Locker:      adminLocker,
-		Version:     version,
-		ClusterName: clusterName,
-		Region:      cfg.RegionName,
-		MetaBackend: cfg.MetaBackend,
-		DataBackend: cfg.DataBackend,
+		Meta:                 metaStore,
+		Creds:                multi,
+		Heartbeat:            hbStore,
+		Prom:                 prom,
+		Locker:               adminLocker,
+		Version:              version,
+		ClusterName:          clusterName,
+		Region:               cfg.RegionName,
+		MetaBackend:          cfg.MetaBackend,
+		DataBackend:          cfg.DataBackend,
 		JWTSecret:            jwtSecret,
+		JWTEphemeral:         jwtEphemeral,
+		JWTSecretFile:        jwtFile,
+		PrometheusURL:        os.Getenv("STRATA_PROMETHEUS_URL"),
+		HeartbeatInterval:    heartbeat.DefaultInterval,
+		ConsoleThemeDefault:  consoleThemeDefault(),
+		CassandraSettings:    cassandraSettings(cfg),
+		RADOSSettings:        radosSettings(cfg),
+		TiKVSettings:         tikvSettings(cfg),
+		S3Backend:            s3BackendSettings(cfg),
 		AuditTTL:             auditTTL,
 		InvalidateCredential: multi.Invalidate,
 		S3Handler:            apiHandler,
@@ -442,20 +452,126 @@ func parseTiKVEndpoints(s string) []string {
 	return out
 }
 
-// loadJWTSecret returns the HS256 key used to sign /admin/v1 session cookies.
-// Production deployments MUST set STRATA_CONSOLE_JWT_SECRET (32 bytes hex);
-// when unset we generate an ephemeral random key and emit a WARN.
-func loadJWTSecret(logger *slog.Logger) ([]byte, string) {
+// loadJWTSecret returns the HS256 key used to sign /admin/v1 session cookies
+// plus the file path used by the rotate-secret endpoint (US-019).
+//
+// Resolution order:
+//  1. STRATA_CONSOLE_JWT_SECRET (32 bytes hex)            — env wins
+//  2. STRATA_JWT_SECRET_FILE (default /etc/strata/jwt-secret) — read at boot
+//     so rotated keys persist across restarts
+//  3. generate ephemeral 32-byte secret + WARN
+//
+// The returned file path is what handleRotateJWTSecret writes to; an empty
+// string means rotation falls back to adminapi.DefaultJWTSecretFile.
+func loadJWTSecret(logger *slog.Logger) ([]byte, string, string) {
+	target := os.Getenv("STRATA_JWT_SECRET_FILE")
+	if target == "" {
+		target = adminapi.DefaultJWTSecretFile
+	}
 	if v := os.Getenv("STRATA_CONSOLE_JWT_SECRET"); v != "" {
-		return adminapi.DecodeSecret(v), "STRATA_CONSOLE_JWT_SECRET"
+		return adminapi.DecodeSecret(v), "STRATA_CONSOLE_JWT_SECRET", target
+	}
+	if b, ok := readJWTSecretFile(target, logger); ok {
+		return b, "STRATA_JWT_SECRET_FILE", target
 	}
 	b, err := adminapi.GenerateSecret()
 	if err != nil {
 		logger.Warn("admin: generate jwt secret", "error", err.Error())
-		return nil, "ephemeral-error"
+		return nil, "ephemeral-error", target
 	}
 	logger.Warn("admin: STRATA_CONSOLE_JWT_SECRET unset; generated ephemeral 32-byte secret. Sessions invalidate on restart. Set the env explicitly in production.")
-	return b, "ephemeral"
+	return b, "ephemeral", target
+}
+
+// readJWTSecretFile reads a hex-encoded secret previously written by
+// handleRotateJWTSecret. Missing path returns ok=false (not an error —
+// fresh deployments fall through to ephemeral generation).
+func readJWTSecretFile(path string, logger *slog.Logger) ([]byte, bool) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			logger.Warn("admin: read jwt secret file", "path", path, "error", err.Error())
+		}
+		return nil, false
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return nil, false
+	}
+	b := adminapi.DecodeSecret(trimmed)
+	if len(b) < 16 {
+		logger.Warn("admin: jwt secret file too short; ignoring", "path", path, "len", len(b))
+		return nil, false
+	}
+	return b, true
+}
+
+// consoleThemeDefault reads STRATA_CONSOLE_THEME_DEFAULT (system|light|dark);
+// empty / invalid resolves to "system".
+func consoleThemeDefault() string {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("STRATA_CONSOLE_THEME_DEFAULT")))
+	switch v {
+	case "system", "light", "dark":
+		return v
+	default:
+		return "system"
+	}
+}
+
+func cassandraSettings(cfg *config.Config) adminapi.CassandraSettings {
+	if cfg.MetaBackend != "cassandra" {
+		return adminapi.CassandraSettings{}
+	}
+	hosts := append([]string(nil), cfg.Cassandra.Hosts...)
+	return adminapi.CassandraSettings{
+		Hosts:       hosts,
+		Keyspace:    cfg.Cassandra.Keyspace,
+		LocalDC:     cfg.Cassandra.LocalDC,
+		Replication: cfg.Cassandra.Replication,
+		Username:    cfg.Cassandra.Username,
+	}
+}
+
+func radosSettings(cfg *config.Config) adminapi.RADOSSettings {
+	if cfg.DataBackend != "rados" {
+		return adminapi.RADOSSettings{}
+	}
+	return adminapi.RADOSSettings{
+		ConfigFile: cfg.RADOS.ConfigFile,
+		User:       cfg.RADOS.User,
+		Pool:       cfg.RADOS.Pool,
+		Namespace:  cfg.RADOS.Namespace,
+		Classes:    cfg.RADOS.Classes,
+		Clusters:   cfg.RADOS.Clusters,
+	}
+}
+
+func tikvSettings(cfg *config.Config) adminapi.TiKVSettings {
+	if cfg.MetaBackend != "tikv" {
+		return adminapi.TiKVSettings{}
+	}
+	return adminapi.TiKVSettings{Endpoints: parseTiKVEndpoints(cfg.TiKV.Endpoints)}
+}
+
+func s3BackendSettings(cfg *config.Config) adminapi.S3BackendSettings {
+	if cfg.DataBackend != "s3" {
+		return adminapi.S3BackendSettings{}
+	}
+	return adminapi.S3BackendSettings{
+		Kind:              "s3",
+		Endpoint:          cfg.S3Backend.Endpoint,
+		Region:            cfg.S3Backend.Region,
+		Bucket:            cfg.S3Backend.Bucket,
+		ForcePathStyle:    cfg.S3Backend.ForcePathStyle,
+		PartSize:          cfg.S3Backend.PartSize,
+		UploadConcurrency: cfg.S3Backend.UploadConcurrency,
+		MaxRetries:        cfg.S3Backend.MaxRetries,
+		OpTimeoutSecs:     cfg.S3Backend.OpTimeoutSecs,
+		SSEMode:           cfg.S3Backend.SSEMode,
+		SSEKMSKeyID:       cfg.S3Backend.SSEKMSKeyID,
+		AccessKeySet:      cfg.S3Backend.AccessKey != "",
+		SecretKeySet:      cfg.S3Backend.SecretKey != "",
+	}
 }
 
 // buildVersion returns the VCS revision baked in by `go build` (or "dev"

@@ -1416,3 +1416,99 @@ export function auditCSVUrl(q: AuditQuery): string {
   const qs = usp.toString();
   return `/admin/v1/audit.csv${qs ? `?${qs}` : ''}`;
 }
+
+// Settings (US-019, US-021) — read-only Settings page payloads + JWT rotation.
+export interface ClusterSettings {
+  cluster_name: string;
+  region: string;
+  version: string;
+  prometheus_url: string;
+  heartbeat_interval_ms: number;
+  jwt_secret: string;
+  jwt_ephemeral: boolean;
+  jwt_secret_file: string;
+  console_theme_default: string;
+  audit_retention_ms: number;
+  meta_backend: string;
+  data_backend: string;
+}
+
+export interface CassandraSettings {
+  hosts: string[];
+  keyspace: string;
+  local_dc: string;
+  replication: string;
+  username?: string;
+}
+
+export interface RADOSSettings {
+  config_file: string;
+  user: string;
+  pool: string;
+  namespace?: string;
+  classes?: string;
+  clusters?: string;
+}
+
+export interface TiKVSettings {
+  endpoints: string[];
+}
+
+export interface SettingsBackends {
+  cassandra: CassandraSettings;
+  rados: RADOSSettings;
+  tikv: TiKVSettings;
+}
+
+export interface SettingsResponse {
+  settings: ClusterSettings;
+  backends: SettingsBackends;
+}
+
+export async function fetchSettings(): Promise<SettingsResponse> {
+  const resp = await fetch('/admin/v1/settings', {
+    method: 'GET',
+    credentials: 'same-origin',
+  });
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch settings failed');
+  return (await resp.json()) as SettingsResponse;
+}
+
+export interface S3BackendSettings {
+  kind: string;
+  endpoint: string;
+  region: string;
+  bucket: string;
+  force_path_style: boolean;
+  part_size: number;
+  upload_concurrency: number;
+  max_retries: number;
+  op_timeout_secs: number;
+  sse_mode: string;
+  sse_kms_key_id: string;
+  access_key_set: boolean;
+  secret_key_set: boolean;
+}
+
+export async function fetchSettingsDataBackend(): Promise<S3BackendSettings> {
+  const resp = await fetch('/admin/v1/settings/data-backend', {
+    method: 'GET',
+    credentials: 'same-origin',
+  });
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch data-backend settings failed');
+  return (await resp.json()) as S3BackendSettings;
+}
+
+export interface RotateJWTResponse {
+  rotated_at: number;
+  file: string;
+}
+
+export async function rotateJWTSecret(): Promise<RotateJWTResponse> {
+  const resp = await fetch('/admin/v1/settings/jwt/rotate', {
+    method: 'POST',
+    credentials: 'same-origin',
+  });
+  if (!resp.ok) throw await buildAdminError(resp, 'rotate JWT secret failed');
+  return (await resp.json()) as RotateJWTResponse;
+}

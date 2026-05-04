@@ -134,4 +134,8 @@ export const queryKeys = {
   auth: {
     whoami: ['auth', 'whoami'] as const,
   },
+  settings: {
+    all: ['settings', 'all'] as const,
+    dataBackend: ['settings', 'data-backend'] as const,
+  },
 };
