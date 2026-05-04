@@ -112,6 +112,11 @@ type Server struct {
 	hotBucketsMu       sync.Mutex
 	hotBucketsCacheVal *hotBucketsCache
 
+	// hotShardsMu guards lazy initialisation of hotShardsCacheVal — the
+	// 30s TTL cache for /admin/v1/diagnostics/hot-shards/{bucket} (US-009).
+	hotShardsMu       sync.Mutex
+	hotShardsCacheVal *hotShardsCache
+
 	// jobsMu guards background-job goroutines. Currently only the
 	// force-empty drain (US-002) registers here; we cancel the goroutine
 	// on Server shutdown so a graceful drain doesn't outlive the gateway.
@@ -348,6 +353,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/v1/diagnostics/slow-queries", s.handleDiagnosticsSlowQueries)
 	mux.HandleFunc("GET /admin/v1/diagnostics/trace/{requestID}", s.handleDiagnosticsTrace)
 	mux.HandleFunc("GET /admin/v1/diagnostics/hot-buckets", s.handleDiagnosticsHotBuckets)
+	mux.HandleFunc("GET /admin/v1/diagnostics/hot-shards/{bucket}", s.handleDiagnosticsHotShards)
 	mux.HandleFunc("GET /admin/v1/settings", s.handleGetSettings)
 	mux.HandleFunc("GET /admin/v1/settings/data-backend", s.handleGetSettingsDataBackend)
 	mux.HandleFunc("POST /admin/v1/settings/jwt/rotate", s.handleRotateJWTSecret)

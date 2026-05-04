@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +32,20 @@ import (
 type Store struct {
 	s            *gocql.Session
 	defaultShard int
+
+	// obs is the SlowQueryObserver attached to the gocql session. The Store
+	// reuses it as the LWT-conflict sink (US-009): on applied=false from a
+	// CAS the Store calls obs.RecordLWTConflict(ctx, table, bucket, shard).
+	// nil when no observer was wired (memory-only tests / metrics-disabled).
+	obs *SlowQueryObserver
+
+	// bucketNames caches bucketID → name lookups so the LWT-conflict
+	// emitter can stamp a human-readable `bucket=<name>` label without an
+	// extra round-trip per CAS. Populated as a side-effect of GetBucket /
+	// CreateBucket; misses fall back to the UUID string. Eviction is by
+	// process restart — bucket renames don't happen.
+	bucketNamesMu sync.RWMutex
+	bucketNames   map[uuid.UUID]string
 }
 
 type Options struct {
@@ -52,7 +67,13 @@ func Open(cfg SessionConfig, opts Options) (*Store, error) {
 	if opts.DefaultShardCount <= 0 {
 		opts.DefaultShardCount = 64
 	}
-	return &Store{s: s, defaultShard: opts.DefaultShardCount}, nil
+	store := &Store{
+		s:            s,
+		defaultShard: opts.DefaultShardCount,
+		bucketNames:  make(map[uuid.UUID]string),
+	}
+	store.obs = NewQueryObserver(cfg.Logger, time.Duration(cfg.SlowMS)*time.Millisecond, cfg.Metrics, cfg.Tracer)
+	return store, nil
 }
 
 func (s *Store) Close() error {
@@ -106,6 +127,7 @@ func (s *Store) CreateBucket(ctx context.Context, name, owner, defaultClass stri
 	if !applied {
 		return nil, meta.ErrBucketAlreadyExists
 	}
+	s.cacheBucketName(id, name)
 	return b, nil
 }
 
@@ -134,9 +156,11 @@ func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error
 	if versioning == "" {
 		versioning = meta.VersioningDisabled
 	}
+	bID := uuidFromGocql(idG)
+	s.cacheBucketName(bID, name)
 	return &meta.Bucket{
 		Name:              name,
-		ID:                uuidFromGocql(idG),
+		ID:                bID,
 		Owner:             owner,
 		CreatedAt:         createdAt,
 		DefaultClass:      class,
@@ -148,6 +172,46 @@ func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error
 		ShardCount:        shardCount,
 		TargetShardCount:  shardCountTarget,
 	}, nil
+}
+
+// cacheBucketName populates the bucketID→name cache used by the LWT-conflict
+// emitter (US-009). Safe to call from any path that already knows the
+// (id, name) pair; misses fall back to the UUID string at lookup time.
+func (s *Store) cacheBucketName(id uuid.UUID, name string) {
+	if name == "" {
+		return
+	}
+	s.bucketNamesMu.Lock()
+	if s.bucketNames == nil {
+		s.bucketNames = make(map[uuid.UUID]string)
+	}
+	s.bucketNames[id] = name
+	s.bucketNamesMu.Unlock()
+}
+
+// bucketLabelForLWT returns the operator-readable bucket label used on the
+// strata_cassandra_lwt_conflicts_total counter. Cache-hit returns the name;
+// miss falls back to the bucket-id UUID string so the metric never silently
+// drops a conflict on a cold cache.
+func (s *Store) bucketLabelForLWT(id uuid.UUID) string {
+	s.bucketNamesMu.RLock()
+	name := s.bucketNames[id]
+	s.bucketNamesMu.RUnlock()
+	if name != "" {
+		return name
+	}
+	return id.String()
+}
+
+// recordLWTConflict fans out to the SlowQueryObserver-attached metrics sink
+// when set. Used by every LWT call site on the `objects` table that observes
+// applied=false. No-op when the observer or its metrics sink is nil
+// (memory-only tests / metrics-disabled builds).
+func (s *Store) recordLWTConflict(ctx context.Context, table string, bucketID uuid.UUID, shard int) {
+	if s.obs == nil || s.obs.Metrics == nil {
+		return
+	}
+	s.obs.RecordLWTConflict(ctx, table, s.bucketLabelForLWT(bucketID), strconv.Itoa(shard))
 }
 
 func (s *Store) SetBucketVersioning(ctx context.Context, name, state string) error {
@@ -291,9 +355,11 @@ func (s *Store) ListBuckets(ctx context.Context, owner string) ([]*meta.Bucket, 
 		if versioning == "" {
 			versioning = meta.VersioningDisabled
 		}
+		bID := uuidFromGocql(idG)
+		s.cacheBucketName(bID, name)
 		out = append(out, &meta.Bucket{
 			Name:             name,
-			ID:               uuidFromGocql(idG),
+			ID:               bID,
 			Owner:            ownerID,
 			CreatedAt:        createdAt,
 			DefaultClass:     class,
@@ -1895,6 +1961,9 @@ func (s *Store) SetObjectStorage(ctx context.Context, bucketID uuid.UUID, key, v
 		 IF storage_class=?`,
 		newClass, manifestBlob, gocqlUUID(bucketID), shard, key, v, expectedClass,
 	).WithContext(ctx).SerialConsistency(gocql.LocalSerial).ScanCAS(&currentClass)
+	if err == nil && !applied {
+		s.recordLWTConflict(ctx, "objects", bucketID, shard)
+	}
 	return applied, err
 }
 

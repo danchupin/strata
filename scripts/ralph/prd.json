@@ -160,7 +160,7 @@
         "Tests pass — observer label emission test + handler test (RADOS-backend matrix shape, s3-backend empty-state shape, Prom-unset 503)"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

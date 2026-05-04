@@ -169,6 +169,14 @@ var (
 		Name: "strata_otel_ringbuf_evicted_total",
 		Help: "Traces evicted from the in-process OTel ring buffer due to bytes-budget pressure (US-005).",
 	})
+
+	CassandraLWTConflictsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_cassandra_lwt_conflicts_total",
+			Help: "Cassandra LWT (compare-and-set) conflicts per (table, bucket, shard); incremented when applied=false. Backs the Hot Shards heatmap (US-009). Cardinality bound: ~1000 buckets * 64 shards.",
+		},
+		[]string{"table", "bucket", "shard"},
+	)
 )
 
 func Register() {
@@ -190,6 +198,7 @@ func Register() {
 		AuditStreamSubscribers,
 		OTelRingbufTraces,
 		OTelRingbufEvicted,
+		CassandraLWTConflictsTotal,
 	)
 }
 
@@ -248,6 +257,22 @@ func (CassandraObserver) ObserveQuery(table, op string, duration time.Duration, 
 		op = "UNKNOWN"
 	}
 	CassandraQueryDuration.WithLabelValues(table, op).Observe(duration.Seconds())
+}
+
+// IncLWTConflict bumps the Hot Shards LWT-conflict counter (US-009). Empty
+// labels collapse to "unknown" / "-" placeholders so a missing bucket-name
+// resolution never silently drops the conflict.
+func (CassandraObserver) IncLWTConflict(table, bucket, shard string) {
+	if table == "" {
+		table = "unknown"
+	}
+	if bucket == "" {
+		bucket = "-"
+	}
+	if shard == "" {
+		shard = "-"
+	}
+	CassandraLWTConflictsTotal.WithLabelValues(table, bucket, shard).Inc()
 }
 
 // RADOSObserver implements the rados.Metrics interface. Cmd-layer adapter so
