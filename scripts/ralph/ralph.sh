@@ -39,32 +39,65 @@ PROGRESS_FILE="$SCRIPT_DIR/progress.txt"
 ARCHIVE_DIR="$SCRIPT_DIR/archive"
 LAST_BRANCH_FILE="$SCRIPT_DIR/.last-branch"
 
-# Archive previous run if branch changed
+# Archive helper: snapshot prd.json + progress.txt under a folder named after
+# the cycle's branchName (read from prd.json itself — folder name always
+# matches content). Stamped with the current date.
+archive_cycle() {
+  local prd="$1"
+  local progress="$2"
+  local label="$3"  # human-readable trigger ("complete", "abandoned", etc.)
+
+  if [ ! -f "$prd" ]; then
+    return 0
+  fi
+
+  local branch
+  branch=$(jq -r '.branchName // empty' "$prd" 2>/dev/null || echo "")
+  if [ -z "$branch" ]; then
+    return 0
+  fi
+
+  local date_stamp folder_name archive_folder
+  date_stamp=$(date +%Y-%m-%d)
+  folder_name=$(echo "$branch" | sed 's|^ralph/||')
+  archive_folder="$ARCHIVE_DIR/$date_stamp-$folder_name"
+
+  # If the folder already exists from an earlier same-day archive, suffix.
+  if [ -d "$archive_folder" ]; then
+    archive_folder="$archive_folder-$label"
+  fi
+
+  echo "Archiving cycle ($label): $branch -> $archive_folder"
+  mkdir -p "$archive_folder"
+  cp "$prd" "$archive_folder/"
+  [ -f "$progress" ] && cp "$progress" "$archive_folder/"
+}
+
+# Detect a branch transition that bypassed cycle-end archiving. The user's
+# /ralph-skills:ralph flow overwrites prd.json directly — when that happens
+# the previous cycle's prd.json content is already gone, but we still log
+# that the previous branch was abandoned mid-flight so future audits can
+# see the gap. We do NOT try to archive prd.json under the old branch name
+# (that mislabels the new cycle's content as the old one's, which is the
+# bug this rewrite fixes).
 if [ -f "$PRD_FILE" ] && [ -f "$LAST_BRANCH_FILE" ]; then
   CURRENT_BRANCH=$(jq -r '.branchName // empty' "$PRD_FILE" 2>/dev/null || echo "")
   LAST_BRANCH=$(cat "$LAST_BRANCH_FILE" 2>/dev/null || echo "")
-  
+
   if [ -n "$CURRENT_BRANCH" ] && [ -n "$LAST_BRANCH" ] && [ "$CURRENT_BRANCH" != "$LAST_BRANCH" ]; then
-    # Archive the previous run
-    DATE=$(date +%Y-%m-%d)
-    # Strip "ralph/" prefix from branch name for folder
-    FOLDER_NAME=$(echo "$LAST_BRANCH" | sed 's|^ralph/||')
-    ARCHIVE_FOLDER="$ARCHIVE_DIR/$DATE-$FOLDER_NAME"
-    
-    echo "Archiving previous run: $LAST_BRANCH"
-    mkdir -p "$ARCHIVE_FOLDER"
-    [ -f "$PRD_FILE" ] && cp "$PRD_FILE" "$ARCHIVE_FOLDER/"
-    [ -f "$PROGRESS_FILE" ] && cp "$PROGRESS_FILE" "$ARCHIVE_FOLDER/"
-    echo "   Archived to: $ARCHIVE_FOLDER"
-    
-    # Reset progress file for new run
+    echo "WARN: branch transition $LAST_BRANCH -> $CURRENT_BRANCH detected without prior cycle-end archive."
+    echo "      If $LAST_BRANCH cycle ended, its prd.json was already overwritten and its artifacts"
+    echo "      are not recoverable from this script. Future cycles should archive on completion"
+    echo "      via the COMPLETE handler below or via the prep-cycle skill."
+    # Reset progress file so the new cycle starts clean.
     echo "# Ralph Progress Log" > "$PROGRESS_FILE"
     echo "Started: $(date)" >> "$PROGRESS_FILE"
+    echo "Cycle: $CURRENT_BRANCH" >> "$PROGRESS_FILE"
     echo "---" >> "$PROGRESS_FILE"
   fi
 fi
 
-# Track current branch
+# Track current branch for transition detection on next run.
 if [ -f "$PRD_FILE" ]; then
   CURRENT_BRANCH=$(jq -r '.branchName // empty' "$PRD_FILE" 2>/dev/null || echo "")
   if [ -n "$CURRENT_BRANCH" ]; then
@@ -104,6 +137,9 @@ for i in $(seq 1 $MAX_ITERATIONS); do
     echo ""
     echo "Ralph completed all tasks!"
     echo "Completed at iteration $i of $MAX_ITERATIONS"
+    # Archive the just-completed cycle's artifacts. Folder name is derived
+    # from prd.json's own branchName so it always matches content.
+    archive_cycle "$PRD_FILE" "$PROGRESS_FILE" "complete"
     exit 0
   fi
   
