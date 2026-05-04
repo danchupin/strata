@@ -246,6 +246,32 @@ func TestExposedMetricNames(t *testing.T) {
 	}
 }
 
+// TestHandlerExposesProcessAndGoMetrics asserts the prometheus default
+// registerer exposes the standard process collector + go collector metrics
+// the per-node drilldown (US-011) reads. client_golang auto-registers them
+// in init(); this test guards against a future custom registry that omits
+// them.
+func TestHandlerExposesProcessAndGoMetrics(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"process_cpu_seconds_total",
+		"process_resident_memory_bytes",
+		"process_open_fds",
+		"go_goroutines",
+		"go_gc_duration_seconds",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metric %q absent from /metrics output", want)
+		}
+	}
+}
+
 func gaugeValue(t *testing.T, g prometheus.Gauge) float64 {
 	t.Helper()
 	var m dto.Metric

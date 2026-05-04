@@ -354,6 +354,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/v1/diagnostics/trace/{requestID}", s.handleDiagnosticsTrace)
 	mux.HandleFunc("GET /admin/v1/diagnostics/hot-buckets", s.handleDiagnosticsHotBuckets)
 	mux.HandleFunc("GET /admin/v1/diagnostics/hot-shards/{bucket}", s.handleDiagnosticsHotShards)
+	mux.HandleFunc("GET /admin/v1/diagnostics/node/{nodeID}", s.handleDiagnosticsNode)
 	mux.HandleFunc("GET /admin/v1/settings", s.handleGetSettings)
 	mux.HandleFunc("GET /admin/v1/settings/data-backend", s.handleGetSettingsDataBackend)
 	mux.HandleFunc("POST /admin/v1/settings/jwt/rotate", s.handleRotateJWTSecret)

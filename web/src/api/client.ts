@@ -1701,3 +1701,56 @@ export async function fetchHotShards(
     matrix: body.matrix ?? [],
   };
 }
+
+// US-011 — per-node drilldown. Wire shape mirrors NodeDrilldownResponse in
+// internal/adminapi/diagnostics_node.go. The handler issues 5 PromQL queries
+// scoped by `instance="<node-address>"` and returns CPU / memory / open-FDs /
+// goroutines / GC-pause sparklines plus the heartbeat row for the drawer
+// header.
+export interface NodeMetricPoint {
+  ts: string;
+  value: number;
+}
+
+export interface NodeDrilldownNode {
+  id: string;
+  address: string;
+  version: string;
+  started_at: number;
+  uptime_sec: number;
+  status: string;
+  workers: string[];
+  leader_for: string[];
+  last_heartbeat: number;
+}
+
+export interface NodeDrilldownResponse {
+  node: NodeDrilldownNode;
+  cpu: NodeMetricPoint[];
+  mem: NodeMetricPoint[];
+  fds: NodeMetricPoint[];
+  goroutines: NodeMetricPoint[];
+  gc_pause: NodeMetricPoint[];
+}
+
+export async function fetchNodeDrilldown(
+  nodeID: string,
+  range: string,
+): Promise<NodeDrilldownResponse> {
+  const usp = new URLSearchParams();
+  usp.set('range', range);
+  const resp = await fetch(
+    `/admin/v1/diagnostics/node/${encodeURIComponent(nodeID)}?${usp.toString()}`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch node drilldown failed');
+  const body = (await resp.json()) as NodeDrilldownResponse;
+  return {
+    node: body.node,
+    cpu: body.cpu ?? [],
+    mem: body.mem ?? [],
+    fds: body.fds ?? [],
+    goroutines: body.goroutines ?? [],
+    gc_pause: body.gc_pause ?? [],
+  };
+}
