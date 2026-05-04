@@ -359,6 +359,7 @@ var alterStatements = []string{
 	`ALTER TABLE buckets ADD shard_count_target int`,
 	`ALTER TABLE buckets ADD backend_presign boolean`,
 	`ALTER TABLE audit_log ADD user_agent text`,
+	`ALTER TABLE audit_log ADD total_time_ms int`,
 }
 
 func isColumnAlreadyExists(err error) bool {

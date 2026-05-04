@@ -465,6 +465,69 @@ func (s *Store) ListAuditFiltered(ctx context.Context, f meta.AuditFilter) ([]me
 	return out, next, nil
 }
 
+// ListSlowQueries serves the US-003 slow-queries debug endpoint. Filters
+// in-process: rows with TotalTimeMS >= minMs whose Time falls within the
+// trailing `since` window, sorted by TotalTimeMS desc.
+func (s *Store) ListSlowQueries(ctx context.Context, since time.Duration, minMs int, pageToken string) ([]meta.AuditEvent, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	const limit = 100
+	if since <= 0 {
+		since = 15 * time.Minute
+	}
+	if minMs < 0 {
+		minMs = 0
+	}
+	now := nowFn()
+	cutoff := now.Add(-since)
+	var all []meta.AuditEvent
+	for bid, rows := range s.auditLog {
+		kept := rows[:0]
+		for _, r := range rows {
+			if !r.expiresAt.IsZero() && !now.Before(r.expiresAt) {
+				continue
+			}
+			kept = append(kept, r)
+			if r.evt.TotalTimeMS < minMs {
+				continue
+			}
+			if r.evt.Time.Before(cutoff) {
+				continue
+			}
+			all = append(all, r.evt)
+		}
+		s.auditLog[bid] = kept
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].TotalTimeMS != all[j].TotalTimeMS {
+			return all[i].TotalTimeMS > all[j].TotalTimeMS
+		}
+		if !all[i].Time.Equal(all[j].Time) {
+			return all[i].Time.After(all[j].Time)
+		}
+		return all[i].EventID > all[j].EventID
+	})
+	out := make([]meta.AuditEvent, 0, limit)
+	started := pageToken == ""
+	for _, e := range all {
+		if !started {
+			if e.EventID == pageToken {
+				started = true
+			}
+			continue
+		}
+		out = append(out, e)
+		if len(out) >= limit {
+			break
+		}
+	}
+	next := ""
+	if len(out) >= limit {
+		next = out[len(out)-1].EventID
+	}
+	return out, next, nil
+}
+
 // auditDay normalises t to UTC midnight, the partition key for audit_log
 // rows in both backends.
 func auditDay(t time.Time) time.Time {

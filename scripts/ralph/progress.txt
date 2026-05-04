@@ -12,6 +12,8 @@ Cycle: ralph/web-ui-debug
 - Web sidebar nav is sectioned (`web/src/components/layout/nav.ts` exports `NavSection[]`). Add Phase-N pages by appending to an existing section or pushing a new `{label, items}` block; `SidebarNav.tsx` renders headers automatically and hides them in collapsed mode.
 - SSE consumers in the UI use `web/src/hooks/useEventSource.ts`. Hook owns reconnect/backoff (1s→30s) and exposes `state` + `retryInSeconds` for status banners. Filter changes that need to re-subscribe go through the URL prop — do NOT add filter state inside the hook.
 - Audit-row detail rendering (both historical viewer + live tail) goes through `web/src/components/AuditEventDetailSheet.tsx`. Wire row-clicks to `setDetailRecord(r)` and pass `record + open` into the sheet — keeps the schema in lockstep across surfaces.
+- Adding a column to `audit_log`: push DDL into `cassandra/schema.go::alterStatements`, then update INSERT + every SELECT (Enqueue/ListAuditFiltered/ReadAuditPartition/ListAudit). TiKV `auditRow` JSON tags accept a new `,omitempty` field with no migration. `meta.AuditEvent` is the lockstep struct.
+- Admin paginated handlers: default page size lives inside the meta layer; surface `next_page_token` via base64(EventID) using `encodePageToken`/`decodePageToken` from `internal/adminapi/audit.go`. Stamp `admin:<Verb>` via `stampAuditOverride`.
 
 ## 2026-05-04 — US-001 — SSE audit-tail backend
 - Implemented `internal/auditstream` package with `Broadcaster`, `Filter`, `MetricsSink` interface, 256-buffer per-subscriber channel, non-blocking publish, once/minute slow-sub WARN, ctx-cancel removes subscriber.
@@ -45,4 +47,22 @@ Cycle: ralph/web-ui-debug
   - `pausedRef` mirror is necessary so the live closure inside `onMessage` can decide to drop frames vs. append without re-subscribing on every Pause toggle. EventSource stays connected so Resume picks up new events without a reconnect window.
   - `@tanstack/react-virtual` `getScrollElement` returns the scroll container ref; rows use `position: absolute` + `transform: translateY()`. Estimated size 40px works for the audit row layout; adjust `estimateSize` if row height changes.
   - Keep filter URL → re-subscribe coupled at the page level; the hook itself doesn't know about audit filters.
+---
+
+
+## 2026-05-04 — US-003 — Slow-queries backend (ListSlowQueries + endpoint)
+- Extended `meta.AuditEvent` with `TotalTimeMS int`. Added `ALTER TABLE audit_log ADD total_time_ms int` to the additive Cassandra migration list; updated INSERT + every SELECT (audit_log) to round-trip the new column. TiKV `auditRow` JSON gained a `tt` field with `omitempty` so old rows decode with zero. Memory backend just stores the struct copy.
+- New `meta.Store.ListSlowQueries(ctx, since, minMs, pageToken)` — implemented in lockstep across memory, cassandra (`ALLOW FILTERING` inside the `(bucket_id, day)` partition on `total_time_ms`), and tikv (in-process filter on the audit prefix scan). All three sort by latency desc → time desc → eventID desc and paginate via `EventID` of the last row.
+- `s3api.AuditMiddleware` now stamps wall-clock latency on the row before EnqueueAudit (both the path-derived path and the admin override path). Same `now()` clock the middleware already uses, so tests injecting `Now` keep working.
+- New admin handler `GET /admin/v1/diagnostics/slow-queries` (`internal/adminapi/diagnostics_slow_queries.go`). Defaults `since=15m`, `min_ms=100`. Validates `since`/`min_ms`/`page_token` with 400 InvalidArgument. Stamps `admin:ListSlowQueries` audit override. Object-key truncation at 100 chars (with trailing ellipsis).
+- New shared storetest case `caseListSlowQueries` exercises latency cutoff, time-window cutoff, default sort, and pagination round-trip across all three backends.
+- New handler tests in `internal/adminapi/diagnostics_slow_queries_test.go`: filter+window, pagination round-trip (110 rows, default page size 100), 400-error envelope shape.
+- Files changed: `internal/meta/store.go`, `internal/meta/cassandra/{schema,store}.go`, `internal/meta/memory/store.go`, `internal/meta/tikv/{audit,codec}.go`, `internal/meta/storetest/contract.go`, `internal/s3api/audit.go`, `internal/adminapi/server.go`, `internal/adminapi/diagnostics_slow_queries{,_test}.go`.
+- Quality: `go vet ./...` ✓, `go vet -tags integration ./...` ✓, `go build ./...` ✓, `go test ./...` ✓ (incl. cassandra+tikv contract suites under their existing test runs).
+- **Learnings for future iterations:**
+  - Adding a column to `audit_log` is additive — push the DDL into `internal/meta/cassandra/schema.go::alterStatements`, then update every `INSERT INTO audit_log` and every `SELECT … FROM audit_log` in `internal/meta/cassandra/store.go` (there are four: EnqueueAudit / ListAuditFiltered / ReadAuditPartition / ListAudit). Missing one corrupts the row shape silently.
+  - TiKV's `auditRow` is JSON-tagged, so adding a new field with `,omitempty` is forward+backward compatible — old rows decode with zero, new rows with old readers ignore unknown fields.
+  - `ALLOW FILTERING` is only safe when the filter column is inside an already-narrow partition. `(bucket_id, day)` is small enough that filtering by `total_time_ms` per partition is fine; any cross-partition `ALLOW FILTERING` would be a correctness/perf trap.
+  - Default page size 100 lives inside the meta layer (no `limit` on the signature). When wiring a new admin paginated handler, just call once and surface `next_page_token = base64(EventID)` via the existing `encodePageToken`/`decodePageToken` helpers in `internal/adminapi/audit.go`.
+  - The audit middleware capture pattern: `start := now()` BEFORE `Next.ServeHTTP`, `totalMS := int(now().Sub(start) / time.Millisecond)` AFTER. Reuse the same `Now` clock the middleware already accepts so tests with injected clocks still work.
 ---

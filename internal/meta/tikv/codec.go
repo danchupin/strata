@@ -286,34 +286,36 @@ func decodeMultipartCompletion(raw []byte) (*meta.MultipartCompletion, time.Time
 // (sweeper.go) eager-deletes after expiry; readers also lazy-skip expired
 // rows so a missed sweep tick does not surface stale data.
 type auditRow struct {
-	BucketID  string    `json:"b"`
-	Bucket    string    `json:"bn"`
-	EventID   string    `json:"e"`
-	Time      time.Time `json:"t"`
-	Principal string    `json:"p,omitempty"`
-	Action    string    `json:"a,omitempty"`
-	Resource  string    `json:"r,omitempty"`
-	Result    string    `json:"rs,omitempty"`
-	RequestID string    `json:"rq,omitempty"`
-	SourceIP  string    `json:"ip,omitempty"`
-	UserAgent string    `json:"ua,omitempty"`
-	ExpiresAt time.Time `json:"x,omitempty"`
+	BucketID    string    `json:"b"`
+	Bucket      string    `json:"bn"`
+	EventID     string    `json:"e"`
+	Time        time.Time `json:"t"`
+	Principal   string    `json:"p,omitempty"`
+	Action      string    `json:"a,omitempty"`
+	Resource    string    `json:"r,omitempty"`
+	Result      string    `json:"rs,omitempty"`
+	RequestID   string    `json:"rq,omitempty"`
+	SourceIP    string    `json:"ip,omitempty"`
+	UserAgent   string    `json:"ua,omitempty"`
+	TotalTimeMS int       `json:"tt,omitempty"`
+	ExpiresAt   time.Time `json:"x,omitempty"`
 }
 
 func encodeAudit(evt *meta.AuditEvent, expiresAt time.Time) ([]byte, error) {
 	row := auditRow{
-		BucketID:  evt.BucketID.String(),
-		Bucket:    evt.Bucket,
-		EventID:   evt.EventID,
-		Time:      evt.Time,
-		Principal: evt.Principal,
-		Action:    evt.Action,
-		Resource:  evt.Resource,
-		Result:    evt.Result,
-		RequestID: evt.RequestID,
-		SourceIP:  evt.SourceIP,
-		UserAgent: evt.UserAgent,
-		ExpiresAt: expiresAt,
+		BucketID:    evt.BucketID.String(),
+		Bucket:      evt.Bucket,
+		EventID:     evt.EventID,
+		Time:        evt.Time,
+		Principal:   evt.Principal,
+		Action:      evt.Action,
+		Resource:    evt.Resource,
+		Result:      evt.Result,
+		RequestID:   evt.RequestID,
+		SourceIP:    evt.SourceIP,
+		UserAgent:   evt.UserAgent,
+		TotalTimeMS: evt.TotalTimeMS,
+		ExpiresAt:   expiresAt,
 	}
 	return json.Marshal(&row)
 }
@@ -328,17 +330,18 @@ func decodeAudit(raw []byte) (meta.AuditEvent, time.Time, error) {
 		return meta.AuditEvent{}, time.Time{}, err
 	}
 	return meta.AuditEvent{
-		BucketID:  bucketID,
-		Bucket:    row.Bucket,
-		EventID:   row.EventID,
-		Time:      row.Time,
-		Principal: row.Principal,
-		Action:    row.Action,
-		Resource:  row.Resource,
-		Result:    row.Result,
-		RequestID: row.RequestID,
-		SourceIP:  row.SourceIP,
-		UserAgent: row.UserAgent,
+		BucketID:    bucketID,
+		Bucket:      row.Bucket,
+		EventID:     row.EventID,
+		Time:        row.Time,
+		Principal:   row.Principal,
+		Action:      row.Action,
+		Resource:    row.Resource,
+		Result:      row.Result,
+		RequestID:   row.RequestID,
+		SourceIP:    row.SourceIP,
+		UserAgent:   row.UserAgent,
+		TotalTimeMS: row.TotalTimeMS,
 	}, row.ExpiresAt, nil
 }
 

@@ -1478,12 +1478,12 @@ func (s *Store) EnqueueAudit(ctx context.Context, entry *meta.AuditEvent, ttl ti
 	if bucket == "" {
 		bucket = "-"
 	}
-	q := `INSERT INTO audit_log (bucket_id, day, event_id, ts, principal, action, resource, result, request_id, source_ip, bucket_name, user_agent)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	q := `INSERT INTO audit_log (bucket_id, day, event_id, ts, principal, action, resource, result, request_id, source_ip, bucket_name, user_agent, total_time_ms)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	args := []any{
 		gocqlUUID(entry.BucketID), day, eventUUID, entry.Time,
 		entry.Principal, entry.Action, entry.Resource, entry.Result,
-		entry.RequestID, entry.SourceIP, bucket, entry.UserAgent,
+		entry.RequestID, entry.SourceIP, bucket, entry.UserAgent, entry.TotalTimeMS,
 	}
 	if ttl > 0 {
 		q += ` USING TTL ?`
@@ -1538,7 +1538,7 @@ func (s *Store) ListAuditFiltered(ctx context.Context, f meta.AuditFilter) ([]me
 	var all []meta.AuditEvent
 	for _, p := range parts {
 		iter := s.s.Query(
-			`SELECT event_id, ts, principal, action, resource, result, request_id, source_ip, bucket_name, user_agent
+			`SELECT event_id, ts, principal, action, resource, result, request_id, source_ip, bucket_name, user_agent, total_time_ms
 			 FROM audit_log WHERE bucket_id=? AND day=?`,
 			p.bucket, p.day,
 		).WithContext(ctx).Iter()
@@ -1546,20 +1546,22 @@ func (s *Store) ListAuditFiltered(ctx context.Context, f meta.AuditFilter) ([]me
 			eventID                                                                         gocql.UUID
 			ts                                                                              time.Time
 			principal, action, resource, result, requestID, sourceIP, bucketName, userAgent string
+			totalTimeMS                                                                     int
 		)
-		for iter.Scan(&eventID, &ts, &principal, &action, &resource, &result, &requestID, &sourceIP, &bucketName, &userAgent) {
+		for iter.Scan(&eventID, &ts, &principal, &action, &resource, &result, &requestID, &sourceIP, &bucketName, &userAgent, &totalTimeMS) {
 			all = append(all, meta.AuditEvent{
-				BucketID:  uuidFromGocql(p.bucket),
-				Bucket:    bucketName,
-				EventID:   eventID.String(),
-				Time:      ts,
-				Principal: principal,
-				Action:    action,
-				Resource:  resource,
-				Result:    result,
-				RequestID: requestID,
-				SourceIP:  sourceIP,
-				UserAgent: userAgent,
+				BucketID:    uuidFromGocql(p.bucket),
+				Bucket:      bucketName,
+				EventID:     eventID.String(),
+				Time:        ts,
+				Principal:   principal,
+				Action:      action,
+				Resource:    resource,
+				Result:      result,
+				RequestID:   requestID,
+				SourceIP:    sourceIP,
+				UserAgent:   userAgent,
+				TotalTimeMS: totalTimeMS,
 			})
 		}
 		if err := iter.Close(); err != nil {
@@ -1656,7 +1658,7 @@ func (s *Store) ListAuditPartitionsBefore(ctx context.Context, before time.Time)
 func (s *Store) ReadAuditPartition(ctx context.Context, bucketID uuid.UUID, day time.Time) ([]meta.AuditEvent, error) {
 	d := notifyDay(day)
 	iter := s.s.Query(
-		`SELECT event_id, ts, principal, action, resource, result, request_id, source_ip, bucket_name, user_agent
+		`SELECT event_id, ts, principal, action, resource, result, request_id, source_ip, bucket_name, user_agent, total_time_ms
 		 FROM audit_log WHERE bucket_id=? AND day=?`,
 		gocqlUUID(bucketID), d,
 	).WithContext(ctx).Iter()
@@ -1664,21 +1666,23 @@ func (s *Store) ReadAuditPartition(ctx context.Context, bucketID uuid.UUID, day 
 		eventID                                                                         gocql.UUID
 		ts                                                                              time.Time
 		principal, action, resource, result, requestID, sourceIP, bucketName, userAgent string
+		totalTimeMS                                                                     int
 	)
 	var out []meta.AuditEvent
-	for iter.Scan(&eventID, &ts, &principal, &action, &resource, &result, &requestID, &sourceIP, &bucketName, &userAgent) {
+	for iter.Scan(&eventID, &ts, &principal, &action, &resource, &result, &requestID, &sourceIP, &bucketName, &userAgent, &totalTimeMS) {
 		out = append(out, meta.AuditEvent{
-			BucketID:  bucketID,
-			Bucket:    bucketName,
-			EventID:   eventID.String(),
-			Time:      ts,
-			Principal: principal,
-			Action:    action,
-			Resource:  resource,
-			Result:    result,
-			RequestID: requestID,
-			SourceIP:  sourceIP,
-			UserAgent: userAgent,
+			BucketID:    bucketID,
+			Bucket:      bucketName,
+			EventID:     eventID.String(),
+			Time:        ts,
+			Principal:   principal,
+			Action:      action,
+			Resource:    resource,
+			Result:      result,
+			RequestID:   requestID,
+			SourceIP:    sourceIP,
+			UserAgent:   userAgent,
+			TotalTimeMS: totalTimeMS,
 		})
 	}
 	if err := iter.Close(); err != nil {
@@ -1708,7 +1712,7 @@ func (s *Store) ListAudit(ctx context.Context, bucketID uuid.UUID, limit int) ([
 	for i := 0; i < 30 && len(out) < limit; i++ {
 		partition := day.AddDate(0, 0, -i)
 		iter := s.s.Query(
-			`SELECT event_id, ts, principal, action, resource, result, request_id, source_ip, bucket_name, user_agent
+			`SELECT event_id, ts, principal, action, resource, result, request_id, source_ip, bucket_name, user_agent, total_time_ms
 			 FROM audit_log WHERE bucket_id=? AND day=? LIMIT ?`,
 			gocqlUUID(bucketID), partition, limit-len(out),
 		).WithContext(ctx).Iter()
@@ -1716,20 +1720,22 @@ func (s *Store) ListAudit(ctx context.Context, bucketID uuid.UUID, limit int) ([
 			eventID                                                                         gocql.UUID
 			ts                                                                              time.Time
 			principal, action, resource, result, requestID, sourceIP, bucketName, userAgent string
+			totalTimeMS                                                                     int
 		)
-		for iter.Scan(&eventID, &ts, &principal, &action, &resource, &result, &requestID, &sourceIP, &bucketName, &userAgent) {
+		for iter.Scan(&eventID, &ts, &principal, &action, &resource, &result, &requestID, &sourceIP, &bucketName, &userAgent, &totalTimeMS) {
 			out = append(out, meta.AuditEvent{
-				BucketID:  bucketID,
-				Bucket:    bucketName,
-				EventID:   eventID.String(),
-				Time:      ts,
-				Principal: principal,
-				Action:    action,
-				Resource:  resource,
-				Result:    result,
-				RequestID: requestID,
-				SourceIP:  sourceIP,
-				UserAgent: userAgent,
+				BucketID:    bucketID,
+				Bucket:      bucketName,
+				EventID:     eventID.String(),
+				Time:        ts,
+				Principal:   principal,
+				Action:      action,
+				Resource:    resource,
+				Result:      result,
+				RequestID:   requestID,
+				SourceIP:    sourceIP,
+				UserAgent:   userAgent,
+				TotalTimeMS: totalTimeMS,
 			})
 			if len(out) >= limit {
 				break
@@ -1740,6 +1746,110 @@ func (s *Store) ListAudit(ctx context.Context, bucketID uuid.UUID, limit int) ([
 		}
 	}
 	return out, nil
+}
+
+// ListSlowQueries serves the US-003 slow-queries debug endpoint. Walks every
+// (bucket, day) partition that overlaps the trailing `since` window and
+// applies a server-side `total_time_ms >= ?` filter inside each partition
+// (ALLOW FILTERING is acceptable here — the partition is already narrow
+// because (bucket_id, day) is the PK). Results are merged and sorted by
+// TotalTimeMS DESC; ties broken by Time DESC, then EventID DESC.
+func (s *Store) ListSlowQueries(ctx context.Context, since time.Duration, minMs int, pageToken string) ([]meta.AuditEvent, string, error) {
+	const limit = 100
+	if since <= 0 {
+		since = 15 * time.Minute
+	}
+	if minMs < 0 {
+		minMs = 0
+	}
+	now := time.Now().UTC()
+	startCutoff := now.Add(-since)
+	endDay := notifyDay(now)
+	startDay := notifyDay(startCutoff)
+	type partition struct {
+		bid gocql.UUID
+		day time.Time
+	}
+	var parts []partition
+	iter := s.s.Query(`SELECT DISTINCT bucket_id, day FROM audit_log`).WithContext(ctx).Iter()
+	var (
+		bid gocql.UUID
+		d   time.Time
+	)
+	for iter.Scan(&bid, &d) {
+		d = d.UTC()
+		if d.Before(startDay) || d.After(endDay) {
+			continue
+		}
+		parts = append(parts, partition{bid, d})
+	}
+	if err := iter.Close(); err != nil {
+		return nil, "", err
+	}
+	var all []meta.AuditEvent
+	for _, p := range parts {
+		row := s.s.Query(
+			`SELECT event_id, ts, principal, action, resource, result, request_id, source_ip, bucket_name, user_agent, total_time_ms
+			 FROM audit_log WHERE bucket_id=? AND day=? AND total_time_ms >= ? ALLOW FILTERING`,
+			p.bid, p.day, minMs,
+		).WithContext(ctx).Iter()
+		var (
+			eventID                                                                         gocql.UUID
+			ts                                                                              time.Time
+			principal, action, resource, result, requestID, sourceIP, bucketName, userAgent string
+			totalTimeMS                                                                     int
+		)
+		for row.Scan(&eventID, &ts, &principal, &action, &resource, &result, &requestID, &sourceIP, &bucketName, &userAgent, &totalTimeMS) {
+			if ts.Before(startCutoff) {
+				continue
+			}
+			all = append(all, meta.AuditEvent{
+				BucketID:    uuidFromGocql(p.bid),
+				Bucket:      bucketName,
+				EventID:     eventID.String(),
+				Time:        ts,
+				Principal:   principal,
+				Action:      action,
+				Resource:    resource,
+				Result:      result,
+				RequestID:   requestID,
+				SourceIP:    sourceIP,
+				UserAgent:   userAgent,
+				TotalTimeMS: totalTimeMS,
+			})
+		}
+		if err := row.Close(); err != nil {
+			return nil, "", err
+		}
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].TotalTimeMS != all[j].TotalTimeMS {
+			return all[i].TotalTimeMS > all[j].TotalTimeMS
+		}
+		if !all[i].Time.Equal(all[j].Time) {
+			return all[i].Time.After(all[j].Time)
+		}
+		return all[i].EventID > all[j].EventID
+	})
+	out := make([]meta.AuditEvent, 0, limit)
+	started := pageToken == ""
+	for _, e := range all {
+		if !started {
+			if e.EventID == pageToken {
+				started = true
+			}
+			continue
+		}
+		out = append(out, e)
+		if len(out) >= limit {
+			break
+		}
+	}
+	next := ""
+	if len(out) >= limit {
+		next = out[len(out)-1].EventID
+	}
+	return out, next, nil
 }
 
 func (s *Store) resolveVersionID(ctx context.Context, bucketID uuid.UUID, key, versionID string) (gocql.UUID, int, error) {

@@ -53,7 +53,7 @@
         "Tests pass — meta storetest contract case + handler unit test"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

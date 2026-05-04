@@ -42,6 +42,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"AuditLogRoundTrip", caseAuditLog},
 		{"AuditLogFiltered", caseAuditLogFiltered},
 		{"AuditLogPartitionExport", caseAuditLogPartitionExport},
+		{"ListSlowQueries", caseListSlowQueries},
 		{"VersioningNullSentinel", caseVersioningNullSentinel},
 		{"VersioningNullListVersions", caseVersioningNullListVersions},
 		{"VersioningSuspendedReplaceNull", caseVersioningSuspendedReplaceNull},
@@ -856,6 +857,93 @@ func caseAuditLogPartitionExport(t *testing.T, s meta.Store) {
 	}
 	if len(parts2) != 0 {
 		t.Fatalf("expected zero aged partitions after delete, got %d", len(parts2))
+	}
+}
+
+// caseListSlowQueries exercises the US-003 ListSlowQueries surface across all
+// backends: the trailing time window honours `since`, the latency cutoff is
+// applied server-side, results sort by latency descending, and pageToken
+// drives a stable pagination roundtrip.
+func caseListSlowQueries(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "slowq", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	now := time.Now().UTC()
+	mk := func(action string, latencyMS int, age time.Duration) *meta.AuditEvent {
+		return &meta.AuditEvent{
+			BucketID:    b.ID,
+			Bucket:      b.Name,
+			EventID:     newTimeUUID(),
+			Time:        now.Add(-age),
+			Principal:   "alice",
+			Action:      action,
+			Resource:    "/" + b.Name + "/k",
+			Result:      "200",
+			RequestID:   "req-" + action,
+			SourceIP:    "10.0.0.1",
+			TotalTimeMS: latencyMS,
+		}
+	}
+	rows := []*meta.AuditEvent{
+		mk("PutObject", 1500, 1*time.Minute),    // slow + fresh: should rank #1
+		mk("DeleteObject", 250, 30*time.Second), // mid + fresh: should appear above the 100ms row
+		mk("PutObject", 50, 30*time.Second),     // fast: filtered out by min_ms=100
+		mk("PutObject", 800, 2*time.Hour),       // outside since=15m: filtered by window
+		mk("DeleteObject", 100, 5*time.Minute),  // exact cutoff: appears as last
+	}
+	for _, r := range rows {
+		if err := s.EnqueueAudit(ctx, r, time.Hour); err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+	}
+
+	got, next, err := s.ListSlowQueries(ctx, 15*time.Minute, 100, "")
+	if err != nil {
+		t.Fatalf("list slow queries: %v", err)
+	}
+	if next != "" {
+		t.Fatalf("unexpected next-page token: %q", next)
+	}
+	if len(got) != 3 {
+		t.Fatalf("rows=%d want 3 (%+v)", len(got), got)
+	}
+	if got[0].TotalTimeMS != 1500 || got[1].TotalTimeMS != 250 || got[2].TotalTimeMS != 100 {
+		t.Fatalf("rows not sorted by latency desc: %+v", got)
+	}
+
+	// min_ms=0 returns every row in the window (fast + mid + slow + cutoff).
+	all, _, err := s.ListSlowQueries(ctx, 15*time.Minute, 0, "")
+	if err != nil {
+		t.Fatalf("list min_ms=0: %v", err)
+	}
+	if len(all) != 4 {
+		t.Fatalf("min_ms=0 rows=%d want 4 (%+v)", len(all), all)
+	}
+
+	// Pagination round-trip: prime continuation after row #2, expect the
+	// remaining row to come back on page 2.
+	page1 := got[:2]
+	cont := page1[len(page1)-1].EventID
+	page2, _, err := s.ListSlowQueries(ctx, 15*time.Minute, 100, cont)
+	if err != nil {
+		t.Fatalf("page2: %v", err)
+	}
+	if len(page2) != 1 {
+		t.Fatalf("page2 size=%d want 1", len(page2))
+	}
+	if page2[0].EventID != got[2].EventID {
+		t.Fatalf("page2 wrong row: got %s want %s", page2[0].EventID, got[2].EventID)
+	}
+
+	// Wider since pulls in the 2h-old row when its latency clears the cutoff.
+	wide, _, err := s.ListSlowQueries(ctx, 6*time.Hour, 100, "")
+	if err != nil {
+		t.Fatalf("wide window: %v", err)
+	}
+	if len(wide) != 4 {
+		t.Fatalf("wide rows=%d want 4 (%+v)", len(wide), wide)
 	}
 }
 

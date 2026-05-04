@@ -395,6 +395,12 @@ type AuditEvent struct {
 	// middleware (US-018). Old rows pre-dating the column read back
 	// empty — admin/UI consumers must tolerate "".
 	UserAgent string
+	// TotalTimeMS is the wall-clock duration (in milliseconds) of the
+	// originating HTTP request, captured by the audit middleware (US-003).
+	// Powers ListSlowQueries / the Slow Queries debug page. Zero for rows
+	// pre-dating the column or for admin-override rows that never hit the
+	// HTTP timing path.
+	TotalTimeMS int
 }
 
 // AuditPartition identifies a single (bucket_id, day) partition of the
@@ -529,6 +535,13 @@ type Store interface {
 	EnqueueAudit(ctx context.Context, entry *AuditEvent, ttl time.Duration) error
 	ListAudit(ctx context.Context, bucketID uuid.UUID, limit int) ([]AuditEvent, error)
 	ListAuditFiltered(ctx context.Context, filter AuditFilter) ([]AuditEvent, string, error)
+	// ListSlowQueries returns audit rows with TotalTimeMS >= minMs whose
+	// Time falls within the trailing `since` window, sorted by TotalTimeMS
+	// descending (ties broken by Time desc, then EventID desc). pageToken
+	// is the EventID of the last row from the previous page, or "" for
+	// the first page. The next-page token is the EventID of the last row
+	// returned (or "" when the result set is exhausted).
+	ListSlowQueries(ctx context.Context, since time.Duration, minMs int, pageToken string) ([]AuditEvent, string, error)
 	// ListAuditPartitionsBefore returns every audit_log (bucket, day)
 	// partition whose day is strictly older than the UTC day containing
 	// `before`. Used by the audit-export worker to enumerate fully-aged
