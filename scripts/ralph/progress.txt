@@ -842,3 +842,37 @@ Started: Sun May  3 17:17:18 MSK 2026
   - s3api.NewAuditMiddleware(meta, ttl, next) is the canonical wrapper used by both the admin-side and the s3 path; tests can wrap `s.routes()` with it directly to verify override-stamped rows reach meta.Store.EnqueueAudit.
   - The Settings page uses the existing query.ts queryClient/queryKeys plumbing — no new global. Future settings sub-tabs (e.g. policy defaults, OAuth IdP config) just slot into the existing SettingsResponse + tabs scaffold.
 ---
+
+## Mon May  4 16:56 MSK 2026 - US-020
+- Implemented BackendPresign toggle on bucket Overview tab (PUT /admin/v1/buckets/{bucket}/backend-presign + UI card greyed when data_backend != s3).
+
+### Backend
+- internal/adminapi/types.go: added `BackendPresign bool` to `BucketDetail` (json:"backend_presign") + new `SetBackendPresignRequest` body shape.
+- internal/adminapi/buckets_backend_presign.go (new): `handleBucketSetBackendPresign` — PUT /admin/v1/buckets/{bucket}/backend-presign. Decodes `{enabled: bool}`; stamps `s3api.SetAuditOverride(ctx, "admin:SetBucketBackendPresign", "bucket:<name>", name, owner)`; calls `meta.Store.SetBucketBackendPresign`; returns 200 + `{enabled}` on success, 400 BadRequest on malformed JSON, 404 NoSuchBucket on missing bucket. The endpoint persists the flag regardless of cluster.data_backend (so the toggle state survives a backend swap); the UI greys out the card when not s3.
+- internal/adminapi/buckets.go: extended `handleBucketGet` to surface `BackendPresign: b.BackendPresign` in the BucketDetail JSON.
+- internal/adminapi/buckets_create.go: include `BackendPresign: b.BackendPresign` (always false on create — bucket starts with the flag off).
+- internal/adminapi/server.go: registered `PUT /admin/v1/buckets/{bucket}/backend-presign`.
+- internal/adminapi/buckets_backend_presign_test.go (new): 4 cases — enable→disable round trip + meta verify; 404 NoSuchBucket on missing bucket; 400 BadRequest on malformed JSON; GET /admin/v1/buckets/{bucket} surfaces backend_presign=true after a flip.
+
+### Frontend
+- web/src/api/client.ts: added `backend_presign: boolean` to `BucketDetail` + new `setBucketBackendPresign(name, enabled)` wrapper that throws AdminApiError on 4xx/5xx.
+- web/src/components/BucketOverviewTab.tsx: added `BackendPresignCard`. Reads cluster status via the existing `queryKeys.cluster.status` query; the card is greyed-out (`opacity-60` + `disabled`-fieldset + `title="Available only on s3-over-s3 backends"` tooltip + Info banner) when `data_backend !== 's3'`. Save flow mirrors VersioningCard: setBucketBackendPresign → invalidate `queryKeys.buckets.one(bucket.name)` → showToast on success; AdminApiError lands inline via ErrorBanner. Reset reverts to the bucket's persisted value.
+
+### Quality checks
+- `go vet ./...` clean.
+- `go test ./...` clean (new tests pass; no regressions in adminapi/s3api/serverapp).
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean.
+- Browser verification: deferred — dev-browser skill unavailable in this loop.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - "Greyed-out card when cluster.data_backend != X" pattern: `useQuery({ queryKey: queryKeys.cluster.status, queryFn: fetchClusterStatus, meta: { silent: true } })` + `cn(disabled && 'opacity-60')` on the Card + `disabled` fieldset + Info banner reusing the AC's tooltip text. Reuse for any future per-bucket toggle whose meaning depends on the active data backend.
+  - Per-bucket boolean flag handler shape (US-020): JSON body `{enabled: bool}`, audit override, single meta.Store write, 200 + `{enabled}` echo on success. Mirror this for any future SetBucket<Flag> endpoint instead of inventing a new wire shape.
+- Gotchas:
+  - meta.Bucket.BackendPresign already lives on main from the s3-over-s3 merge — no schema migration needed. Both memory + cassandra + tikv backends already implement SetBucketBackendPresign; do not re-add the method to the meta.Store interface.
+  - BucketDetail is constructed in TWO places (buckets.go::handleBucketGet + buckets_create.go::handleBucketCreate) — when adding fields, update both, otherwise the dialog's optimistic create path will surface a stale shape and downstream consumers (e.g. cards that read bucket.<field> on first render) will show the wrong default until the next refetch.
+- Useful context:
+  - The bucket Overview tab is `BucketOverviewTab` in web/src/components/BucketOverviewTab.tsx; cards live as siblings inside a `lg:grid-cols-2` grid — adding a third card just appends a sibling and the layout flows on its own.
+  - Cluster status queryKey for backend-aware UI gating: `queryKeys.cluster.status` (defined in lib/query.ts) — already used by AppShell, Overview hero, and CreateBucketDialog so a per-card useQuery just shares the in-memory cache via TanStack Query's query-key dedupe.
+---

@@ -83,6 +83,7 @@ export interface BucketDetail {
   object_lock: boolean;
   size_bytes: number;
   object_count: number;
+  backend_presign: boolean;
 }
 
 export interface CreateBucketBody {
@@ -141,6 +142,24 @@ export async function setBucketVersioning(
     },
   );
   if (!resp.ok) throw await buildAdminError(resp, 'set versioning failed');
+}
+
+// setBucketBackendPresign calls PUT /admin/v1/buckets/{name}/backend-presign
+// (US-020). Flips the per-bucket s3-over-s3 presign-passthrough flag.
+export async function setBucketBackendPresign(
+  name: string,
+  enabled: boolean,
+): Promise<void> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(name)}/backend-presign`,
+    {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'set backend-presign failed');
 }
 
 export type ObjectLockMode = 'GOVERNANCE' | 'COMPLIANCE';

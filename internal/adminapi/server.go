@@ -241,6 +241,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /admin/v1/buckets/{bucket}/force-empty", s.handleBucketForceEmpty)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/force-empty/{jobID}", s.handleBucketForceEmptyStatus)
 	mux.HandleFunc("PUT /admin/v1/buckets/{bucket}/versioning", s.handleBucketSetVersioning)
+	mux.HandleFunc("PUT /admin/v1/buckets/{bucket}/backend-presign", s.handleBucketSetBackendPresign)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/object-lock", s.handleBucketGetObjectLock)
 	mux.HandleFunc("PUT /admin/v1/buckets/{bucket}/object-lock", s.handleBucketSetObjectLock)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/lifecycle", s.handleBucketGetLifecycle)

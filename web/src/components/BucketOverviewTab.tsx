@@ -4,6 +4,7 @@ import { AlertCircle, Info, Loader2 } from 'lucide-react';
 
 import {
   fetchBucketObjectLock,
+  setBucketBackendPresign,
   setBucketObjectLock,
   setBucketVersioning,
   type AdminApiError,
@@ -11,6 +12,7 @@ import {
   type ObjectLockConfig,
   type ObjectLockMode,
 } from '@/api/client';
+import { fetchClusterStatus } from '@/api/cluster';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -39,7 +41,105 @@ export function BucketOverviewTab({ bucket }: Props) {
     <div className="grid gap-4 lg:grid-cols-2">
       <VersioningCard bucket={bucket} />
       <ObjectLockCard bucket={bucket} />
+      <BackendPresignCard bucket={bucket} />
     </div>
+  );
+}
+
+function BackendPresignCard({ bucket }: { bucket: BucketDetail }) {
+  const clusterQ = useQuery({
+    queryKey: queryKeys.cluster.status,
+    queryFn: fetchClusterStatus,
+    meta: { silent: true },
+  });
+  const isS3Backend = clusterQ.data?.data_backend === 's3';
+  const disabled = !isS3Backend;
+  const tooltip = disabled ? 'Available only on s3-over-s3 backends' : undefined;
+
+  const [enabled, setEnabled] = useState<boolean>(bucket.backend_presign);
+  const [saving, setSaving] = useState(false);
+  const [serverError, setServerError] = useState<{ code: string; message: string } | null>(
+    null,
+  );
+  const dirty = enabled !== bucket.backend_presign;
+
+  useEffect(() => {
+    setEnabled(bucket.backend_presign);
+    setServerError(null);
+  }, [bucket.backend_presign]);
+
+  async function handleSave() {
+    if (disabled) return;
+    setSaving(true);
+    setServerError(null);
+    try {
+      await setBucketBackendPresign(bucket.name, enabled);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.buckets.one(bucket.name) });
+      showToast({
+        title: `Backend presign · ${enabled ? 'Enabled' : 'Disabled'}`,
+        description: bucket.name,
+      });
+    } catch (err) {
+      const e = err as AdminApiError;
+      setServerError({ code: e.code ?? 'Error', message: e.message });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Card className={cn(disabled && 'opacity-60')}>
+      <CardHeader>
+        <CardTitle className="text-base">Backend Presigned URL Passthrough</CardTitle>
+        <CardDescription>
+          Hand back the s3-over-s3 backend's own presigned URL so clients fetch
+          objects directly from the upstream bucket, skipping the gateway data
+          path.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <fieldset disabled={disabled || saving} title={tooltip}>
+          <label className="inline-flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={enabled}
+              onChange={(e) => setEnabled(e.target.checked)}
+              aria-label="Backend presigned URL passthrough"
+            />
+            Enabled
+          </label>
+        </fieldset>
+        {tooltip && (
+          <p className="inline-flex items-start gap-2 text-xs text-muted-foreground">
+            <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+            {tooltip}
+          </p>
+        )}
+        {serverError && (
+          <ErrorBanner code={serverError.code} message={serverError.message} />
+        )}
+      </CardContent>
+      <CardFooter className="justify-end gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={!dirty || saving || disabled}
+          onClick={() => setEnabled(bucket.backend_presign)}
+        >
+          Reset
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          disabled={disabled || !dirty || saving}
+          onClick={handleSave}
+        >
+          {saving && <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" aria-hidden />}
+          Save
+        </Button>
+      </CardFooter>
+    </Card>
   );
 }
 

@@ -64,14 +64,22 @@ type BucketSummary struct {
 // (Off|Enabled|Suspended). ObjectLock is always false in Phase 1 — bucket
 // object-lock state is not persisted on meta.Bucket today; Phase 2 lifts it.
 type BucketDetail struct {
-	Name        string `json:"name"`
-	Owner       string `json:"owner"`
-	Region      string `json:"region"`
-	CreatedAt   int64  `json:"created_at"`
-	Versioning  string `json:"versioning"`
-	ObjectLock  bool   `json:"object_lock"`
-	SizeBytes   int64  `json:"size_bytes"`
-	ObjectCount int64  `json:"object_count"`
+	Name           string `json:"name"`
+	Owner          string `json:"owner"`
+	Region         string `json:"region"`
+	CreatedAt      int64  `json:"created_at"`
+	Versioning     string `json:"versioning"`
+	ObjectLock     bool   `json:"object_lock"`
+	SizeBytes      int64  `json:"size_bytes"`
+	ObjectCount    int64  `json:"object_count"`
+	BackendPresign bool   `json:"backend_presign"`
+}
+
+// SetBackendPresignRequest is the JSON body accepted by PUT /admin/v1/buckets/
+// {bucket}/backend-presign (US-020). Flips the per-bucket s3-over-s3 backend
+// presign-passthrough flag.
+type SetBackendPresignRequest struct {
+	Enabled bool `json:"enabled"`
 }
 
 type BucketsTopResponse struct {
