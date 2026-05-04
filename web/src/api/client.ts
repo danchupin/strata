@@ -1006,3 +1006,128 @@ export async function fetchIAMUser(userName: string): Promise<IAMUserSummary> {
   }
   return exact;
 }
+
+// US-015: Object upload wizard via per-part presigned URLs.
+//
+// The browser:
+//   1. POSTs an Initiate -> gets {upload_id, part_size}
+//   2. Slices the file into part_size chunks; per chunk asks the admin API
+//      to mint a 5-minute presigned PUT URL, then PUTs the bytes directly
+//      to the gateway with progress reported via XHR upload events.
+//   3. POSTs Complete with the part list -> admin forwards to s3api which
+//      composes the final ETag and persists the object row.
+//
+// For files <=5 MiB the single-PUT path is preferred (one presigned URL,
+// one PUT, no multipart bookkeeping).
+
+export interface UploadInitBody {
+  key: string;
+  storage_class?: string;
+  content_type?: string;
+  cache_control?: string;
+  content_disposition?: string;
+  user_meta?: Record<string, string>;
+  tags?: Record<string, string>;
+}
+
+export interface UploadInitResponse {
+  upload_id: string;
+  key: string;
+  bucket: string;
+  part_size: number;
+}
+
+export async function initiateUpload(
+  bucket: string,
+  body: UploadInitBody,
+): Promise<UploadInitResponse> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(bucket)}/uploads`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'initiate upload failed');
+  return (await resp.json()) as UploadInitResponse;
+}
+
+export interface UploadPartPresignResponse {
+  url: string;
+  expires_at: number;
+  part_number: number;
+}
+
+export async function presignUploadPart(
+  bucket: string,
+  uploadID: string,
+  partNumber: number,
+): Promise<UploadPartPresignResponse> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(bucket)}/uploads/${encodeURIComponent(uploadID)}/parts/${partNumber}/presign`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+    },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'presign part failed');
+  return (await resp.json()) as UploadPartPresignResponse;
+}
+
+export interface UploadCompletePart {
+  part_number: number;
+  etag: string;
+}
+
+export async function completeUpload(
+  bucket: string,
+  uploadID: string,
+  parts: UploadCompletePart[],
+): Promise<void> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(bucket)}/uploads/${encodeURIComponent(uploadID)}/complete`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ parts }),
+    },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'complete upload failed');
+}
+
+export async function abortUpload(bucket: string, uploadID: string): Promise<void> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(bucket)}/uploads/${encodeURIComponent(uploadID)}`,
+    {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    },
+  );
+  if (resp.status === 204) return;
+  throw await buildAdminError(resp, 'abort upload failed');
+}
+
+export interface SinglePresignResponse {
+  url: string;
+  expires_at: number;
+}
+
+export async function presignSinglePut(
+  bucket: string,
+  key: string,
+): Promise<SinglePresignResponse> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(bucket)}/single-presign`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key }),
+    },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'single-PUT presign failed');
+  return (await resp.json()) as SinglePresignResponse;
+}

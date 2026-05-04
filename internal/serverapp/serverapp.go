@@ -156,6 +156,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		JWTSecret:            jwtSecret,
 		AuditTTL:             auditTTL,
 		InvalidateCredential: multi.Invalidate,
+		S3Handler:            apiHandler,
 	})
 
 	mux := http.NewServeMux()

@@ -56,6 +56,7 @@ import { BucketLifecycleTab } from '@/components/BucketLifecycleTab';
 import { BucketOverviewTab } from '@/components/BucketOverviewTab';
 import { BucketPolicyTab } from '@/components/BucketPolicyTab';
 import { DeleteBucketDialog } from '@/components/DeleteBucketDialog';
+import { UploadDialog } from '@/components/UploadDialog';
 
 const PAGE_SIZE = 100;
 const FILTER_DEBOUNCE_MS = 300;
@@ -133,6 +134,7 @@ export function BucketDetailPage() {
   const [markerStack, setMarkerStack] = useState<string[]>([]);
   const [selected, setSelected] = useState<ObjectEntry | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [uploadOpen, setUploadOpen] = useState(false);
 
   // The active prefix is the URL prefix joined with the debounced filter so
   // the operator can drill in via folder click OR by typing a deeper prefix.
@@ -349,6 +351,14 @@ export function BucketDetailPage() {
               />
               Refresh
             </Button>
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => setUploadOpen(true)}
+              disabled={!detail}
+            >
+              Upload
+            </Button>
           </div>
         </CardHeader>
 
@@ -502,6 +512,13 @@ export function BucketDetailPage() {
         onOpenChange={setDeleteOpen}
         bucketName={name}
         objectCount={detail?.object_count ?? 0}
+      />
+
+      <UploadDialog
+        open={uploadOpen}
+        onOpenChange={setUploadOpen}
+        bucket={name}
+        prefix={effectivePrefix}
       />
     </div>
   );

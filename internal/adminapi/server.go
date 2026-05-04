@@ -52,7 +52,13 @@ type Server struct {
 	// in-flight cache hit cannot keep a freshly-disabled key alive past the
 	// auth.DefaultCacheTTL window.
 	InvalidateCredential func(accessKey string)
-	Logger               *log.Logger
+	// S3Handler, when set, is the gateway's S3 router (s3api.Server). Admin
+	// upload handlers (US-015) forward CompleteMultipartUpload + AbortMultipart
+	// through it so chunk cleanup / etag composition / replication / notify
+	// stay consistent with the gateway-side multipart path. Set by serverapp;
+	// nil disables the upload-complete + upload-abort endpoints.
+	S3Handler http.Handler
+	Logger    *log.Logger
 
 	// jobsMu guards background-job goroutines. Currently only the
 	// force-empty drain (US-002) registers here; we cancel the goroutine
@@ -91,6 +97,10 @@ type Config struct {
 	// access-key disable/delete handlers can drop the cache entry the
 	// gateway holds for the affected access key.
 	InvalidateCredential func(accessKey string)
+	// S3Handler is the gateway's S3 router (s3api.Server). Admin upload
+	// Complete / Abort handlers forward through it so the existing
+	// multipart finalisation logic stays the single source of truth.
+	S3Handler http.Handler
 }
 
 // New constructs a Server. Started defaults to now. JWTSecret empty means
@@ -116,6 +126,7 @@ func New(c Config) *Server {
 		JWTSecret:   c.JWTSecret,
 		AuditTTL:             c.AuditTTL,
 		InvalidateCredential: c.InvalidateCredential,
+		S3Handler:            c.S3Handler,
 		Logger:               log.Default(),
 	}
 }
@@ -167,6 +178,17 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/v1/buckets/top", s.handleBucketsTop)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}", s.handleBucketGet)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/objects", s.handleObjectsList)
+	mux.HandleFunc("POST /admin/v1/buckets/{bucket}/uploads", s.handleUploadInit)
+	mux.HandleFunc("POST /admin/v1/buckets/{bucket}/uploads/{uploadID}/parts/{partNumber}/presign", s.handleUploadPartPresign)
+	mux.HandleFunc("POST /admin/v1/buckets/{bucket}/uploads/{uploadID}/complete", s.handleUploadComplete)
+	mux.HandleFunc("DELETE /admin/v1/buckets/{bucket}/uploads/{uploadID}", s.handleUploadAbort)
+	// Deviation from US-015 AC: AC names POST /admin/v1/buckets/{bucket}/objects/
+	// {key}/single-presign, but Go 1.22 mux trailing wildcards must be at the
+	// END of the pattern — `{key...}/single-presign` is rejected at register
+	// time. Collapsed to POST /admin/v1/buckets/{bucket}/single-presign with
+	// the key carried in the JSON body. Same trick used in US-013 / US-014
+	// for ARN routes.
+	mux.HandleFunc("POST /admin/v1/buckets/{bucket}/single-presign", s.handleSinglePutPresign)
 	mux.HandleFunc("GET /admin/v1/iam/users", s.handleIAMUsersList)
 	mux.HandleFunc("POST /admin/v1/iam/users", s.handleIAMUserCreate)
 	mux.HandleFunc("DELETE /admin/v1/iam/users/{userName}", s.handleIAMUserDelete)
