@@ -902,3 +902,37 @@ Started: Sun May  3 17:17:18 MSK 2026
   - The S3 Backend card lives in web/src/pages/Settings.tsx::S3BackendCard; it's rendered conditionally inside BackendsTab when data === 's3' && dataBackendQuery.data?.kind === 's3'. The dataBackendQuery uses queryKeys.settings.dataBackend (defined in web/src/lib/query.ts) and meta: { label: 'data-backend settings' } so transient errors surface in the global error toast pipeline.
   - Test-helper pattern for the cfg→admin wiring layer: construct config.Config{DataBackend: ..., S3Backend: config.S3BackendConfig{...}} directly — no need to drive via env vars (config_test.go already covers env→cfg).
 ---
+
+## Mon May  4 17:14 MSK 2026 - US-022
+- Implemented Phase 2 e2e suite + docs/ROADMAP close per AC.
+
+### Files changed
+- web/e2e/admin.spec.ts (new): five flows — bucket-lifecycle, iam-keys, lifecycle-rule, policy-editor, multipart-watchdog. All run against memory-mode `cmd/strata server` with STRATA_AUTH_MODE=off so plain HTTP S3 PUTs work without SigV4.
+- web/playwright.config.ts: webServer command updated from stale `cmd/strata-gateway` (deleted post-binary-collapse) to `cmd/strata server`.
+- .github/workflows/ci.yml: e2e-ui job now runs critical-path.spec.ts first, then admin.spec.ts as a follow-up step (matches AC verbatim ordering).
+- docs/ui.md: new "Capability Matrix" section enumerates all 20 admin Phase 2 surfaces (CreateBucket, DeleteBucket, Lifecycle, CORS, Policy, ACL, Inventory, Logging, IAM Users, AccessKeys, ManagedPolicies, UploadObject, DeleteObject, ObjectTags, ObjectRetention, LegalHold, MultipartWatchdog, AuditLog, Settings, BackendPresign). End-to-end tests section refreshed to describe both specs.
+- ROADMAP.md: P3 "Web UI — Phase 2 (admin)" entry flipped to Done close-flip per project convention.
+
+### Quality checks
+- `pnpm run typecheck` clean.
+- `pnpm run build` clean (bundle sizes unchanged from US-021 baseline; Monaco lazy chunk 591.94 KiB gzipped).
+- `go vet ./...` clean. `go test ./internal/adminapi/ ./internal/s3api/ ./internal/serverapp/` green.
+- `go build ./...` clean.
+- e2e: deferred — Playwright harness boots a real `go run ./cmd/strata server` and is best run in CI / via `pnpm run e2e` locally; added to CI ordering per AC.
+
+### Learnings for future iterations
+- Patterns discovered:
+  - Playwright `request` fixture does NOT share cookies with the page context — admin-API assertions in a logged-in spec must use `page.request` so the session JWT rides along. Plain `request.put`/`request.post` against the S3 surface still work because STRATA_AUTH_MODE=off bypasses auth there.
+  - The S3 surface remains the cleanest seed-channel for browser e2es: PUT /{bucket}/{key} for one-shot uploads, POST /{bucket}/{key}?uploads for multipart-init. Beats driving the multi-step UI dialog (UploadDialog with web-worker per-part presign) for fixture seeding.
+  - Visual-tab defaults are gold for declarative e2es: `BucketLifecycleTab.handleAddRule` seeds `expiration: { days: 30 }` so the AC-mandated "30-day expiration rule" is one button click + Save — no per-field typing required.
+  - Driving Monaco directly is brittle; prefer "side-channel" inputs that mutate the same React state. `BucketPolicyTab` exposes a Radix Select for starter templates (PublicRead etc.) which set the editor's `text` state via `setText` — much simpler than `page.keyboard.type` on the editor surface.
+- Gotchas:
+  - Radix Select renders as `role=combobox`; option list as `role=option`. `getByRole('combobox')` + `getByRole('option', { name })` is the canonical handle pair.
+  - Native `<input type="checkbox">` with `aria-label` is reachable via `getByRole('checkbox', { name })` — no shadcn primitive needed for the multipart bulk-select pattern.
+  - The multipart watchdog page polls every 30 s; tests should explicitly click the "Refresh multipart uploads" button after seeding to avoid waiting a full poll cycle.
+  - DeleteBucketDialog's primary submit button text varies between "Delete" (empty bucket) and "Force delete" (force_empty=true). Scope the click to the dialog and use `name: 'Delete', exact: true` to disambiguate from the page-header "Delete bucket" trigger.
+- Useful context:
+  - Playwright `webServer.command` is one long string; setting env vars inline (`KEY=value KEY2=value2 go run ...`) sidesteps having to wire `webServer.env` for every var. The config keeps `STRATA_AUTH_MODE=off` so the spec can speak plain HTTP to the S3 surface.
+  - `go run ./cmd/strata server` is the post-collapse entrypoint (replaces the deleted `cmd/strata-gateway`). Both Playwright config and CI assume it.
+  - Each spec test case generates uniquely-named buckets/users via `Date.now()` so reuseExistingServer locally doesn't poison cross-run state.
+---

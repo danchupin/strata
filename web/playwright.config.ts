@@ -44,7 +44,7 @@ export default defineConfig({
       'STRATA_CONSOLE_JWT_SECRET=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f',
       'STRATA_CLUSTER_NAME=strata-e2e',
       'STRATA_NODE_ID=e2e-node',
-      'go run ./cmd/strata-gateway',
+      'go run ./cmd/strata server',
     ].join(' '),
     cwd: '..',
     url: `http://127.0.0.1:${PORT}/console/`,
