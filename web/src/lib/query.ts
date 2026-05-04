@@ -136,6 +136,8 @@ export const queryKeys = {
       ['diagnostics', 'slow-queries', { since, minMs, pageToken }] as const,
     trace: (idOrRequestID: string) =>
       ['diagnostics', 'trace', idOrRequestID] as const,
+    hotBuckets: (range: string, step: string) =>
+      ['diagnostics', 'hot-buckets', { range, step }] as const,
   },
   auth: {
     whoami: ['auth', 'whoami'] as const,

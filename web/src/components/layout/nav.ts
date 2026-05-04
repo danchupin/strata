@@ -2,6 +2,7 @@ import {
   Activity,
   Boxes,
   ClipboardList,
+  Flame,
   Gauge,
   KeyRound,
   LayoutDashboard,
@@ -49,6 +50,7 @@ export const primaryNav: NavSection[] = [
       { to: '/diagnostics/audit-tail', label: 'Audit tail', icon: Activity },
       { to: '/diagnostics/slow-queries', label: 'Slow queries', icon: Timer },
       { to: '/diagnostics/trace', label: 'Trace browser', icon: Network },
+      { to: '/diagnostics/hot-buckets', label: 'Hot buckets', icon: Flame },
     ],
   },
 ];

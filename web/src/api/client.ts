@@ -1611,3 +1611,44 @@ export async function fetchSlowQueries(
   const body = (await resp.json()) as SlowQueriesResponse;
   return { rows: body.rows ?? [], next_page_token: body.next_page_token ?? '' };
 }
+
+// US-007 — Hot Buckets matrix. Wire shape mirrors HotBucketsResponse in
+// internal/adminapi/diagnostics_hot_buckets.go. Each series is one bucket
+// with a list of (timestamp, value) points across the requested range.
+export interface HotBucketPoint {
+  ts: string;
+  value: number;
+}
+
+export interface HotBucketSeries {
+  bucket: string;
+  values: HotBucketPoint[];
+}
+
+export interface HotBucketsResponse {
+  matrix: HotBucketSeries[];
+}
+
+export interface HotBucketsQuery {
+  range: string;
+  step: string;
+}
+
+// fetchHotBuckets pulls the per-bucket request-rate matrix. 503
+// `MetricsUnavailable` (Prom not configured) is preserved as an
+// AdminApiError so the page can render the empty-state card by branching
+// on `error.code === 'MetricsUnavailable'`.
+export async function fetchHotBuckets(
+  q: HotBucketsQuery,
+): Promise<HotBucketsResponse> {
+  const usp = new URLSearchParams();
+  usp.set('range', q.range);
+  usp.set('step', q.step);
+  const resp = await fetch(
+    `/admin/v1/diagnostics/hot-buckets?${usp.toString()}`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch hot buckets failed');
+  const body = (await resp.json()) as HotBucketsResponse;
+  return { matrix: body.matrix ?? [] };
+}
