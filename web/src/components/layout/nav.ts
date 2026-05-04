@@ -7,6 +7,7 @@ import {
   LayoutDashboard,
   Layers,
   Settings,
+  Timer,
   Users,
   type LucideIcon,
 } from 'lucide-react';
@@ -45,6 +46,7 @@ export const primaryNav: NavSection[] = [
     label: 'Diagnostics',
     items: [
       { to: '/diagnostics/audit-tail', label: 'Audit tail', icon: Activity },
+      { to: '/diagnostics/slow-queries', label: 'Slow queries', icon: Timer },
     ],
   },
 ];

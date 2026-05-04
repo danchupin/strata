@@ -1531,3 +1531,47 @@ export async function rotateJWTSecret(): Promise<RotateJWTResponse> {
   if (!resp.ok) throw await buildAdminError(resp, 'rotate JWT secret failed');
   return (await resp.json()) as RotateJWTResponse;
 }
+
+// US-003 — slow-queries diagnostics. The wire shape mirrors slowQueriesResponse
+// in internal/adminapi/diagnostics_slow_queries.go. The handler returns rows
+// sorted by latency_ms DESC and a base64 page-token continuation cursor.
+export interface SlowQueryRow {
+  ts: string;
+  bucket: string;
+  bucket_id: string;
+  op: string;
+  latency_ms: number;
+  status: number;
+  request_id: string;
+  principal: string;
+  source_ip: string;
+  object_key: string;
+}
+
+export interface SlowQueriesResponse {
+  rows: SlowQueryRow[];
+  next_page_token: string;
+}
+
+export interface SlowQueriesQuery {
+  since?: string;
+  minMs?: number;
+  pageToken?: string;
+}
+
+export async function fetchSlowQueries(
+  q: SlowQueriesQuery,
+): Promise<SlowQueriesResponse> {
+  const usp = new URLSearchParams();
+  if (q.since) usp.set('since', q.since);
+  if (q.minMs != null) usp.set('min_ms', String(q.minMs));
+  if (q.pageToken) usp.set('page_token', q.pageToken);
+  const qs = usp.toString();
+  const resp = await fetch(
+    `/admin/v1/diagnostics/slow-queries${qs ? `?${qs}` : ''}`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch slow queries failed');
+  const body = (await resp.json()) as SlowQueriesResponse;
+  return { rows: body.rows ?? [], next_page_token: body.next_page_token ?? '' };
+}

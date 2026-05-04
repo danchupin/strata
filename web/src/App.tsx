@@ -22,6 +22,12 @@ const MetricsPage = lazy(() =>
   import('@/pages/Metrics').then((m) => ({ default: m.MetricsPage })),
 );
 
+// SlowQueries also pulls in recharts (BarChart histogram) — lazy-load so the
+// /diagnostics surface only pays the bundle cost on demand.
+const SlowQueriesPage = lazy(() =>
+  import('@/pages/SlowQueries').then((m) => ({ default: m.SlowQueriesPage })),
+);
+
 function PageFallback() {
   return (
     <div className="space-y-4">
@@ -51,6 +57,14 @@ export function App() {
         <Route path="/multipart" element={<MultipartPage />} />
         <Route path="/audit" element={<AuditLogPage />} />
         <Route path="/diagnostics/audit-tail" element={<AuditTailPage />} />
+        <Route
+          path="/diagnostics/slow-queries"
+          element={
+            <Suspense fallback={<PageFallback />}>
+              <SlowQueriesPage />
+            </Suspense>
+          }
+        />
         <Route
           path="/metrics"
           element={

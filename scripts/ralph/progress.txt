@@ -14,6 +14,7 @@ Cycle: ralph/web-ui-debug
 - Audit-row detail rendering (both historical viewer + live tail) goes through `web/src/components/AuditEventDetailSheet.tsx`. Wire row-clicks to `setDetailRecord(r)` and pass `record + open` into the sheet — keeps the schema in lockstep across surfaces.
 - Adding a column to `audit_log`: push DDL into `cassandra/schema.go::alterStatements`, then update INSERT + every SELECT (Enqueue/ListAuditFiltered/ReadAuditPartition/ListAudit). TiKV `auditRow` JSON tags accept a new `,omitempty` field with no migration. `meta.AuditEvent` is the lockstep struct.
 - Admin paginated handlers: default page size lives inside the meta layer; surface `next_page_token` via base64(EventID) using `encodePageToken`/`decodePageToken` from `internal/adminapi/audit.go`. Stamp `admin:<Verb>` via `stampAuditOverride`.
+- Pages that pull recharts (~110 KiB gz) are lazy-loaded via `React.lazy(() => import(...))` in `App.tsx` + a `<Suspense fallback={<PageFallback />}>` route element. Mirrors the Metrics + SlowQueries pattern so the home-page initial bundle stays small.
 
 ## 2026-05-04 — US-001 — SSE audit-tail backend
 - Implemented `internal/auditstream` package with `Broadcaster`, `Filter`, `MetricsSink` interface, 256-buffer per-subscriber channel, non-blocking publish, once/minute slow-sub WARN, ctx-cancel removes subscriber.
@@ -66,3 +67,25 @@ Cycle: ralph/web-ui-debug
   - Default page size 100 lives inside the meta layer (no `limit` on the signature). When wiring a new admin paginated handler, just call once and surface `next_page_token = base64(EventID)` via the existing `encodePageToken`/`decodePageToken` helpers in `internal/adminapi/audit.go`.
   - The audit middleware capture pattern: `start := now()` BEFORE `Next.ServeHTTP`, `totalMS := int(now().Sub(start) / time.Millisecond)` AFTER. Reuse the same `Now` clock the middleware already accepts so tests with injected clocks still work.
 ---
+
+
+## 2026-05-04 — US-004 — Slow-queries UI page
+- New `web/src/pages/SlowQueries.tsx` + lazy-loaded route `/diagnostics/slow-queries` mounted in `App.tsx` behind `<Suspense fallback={<PageFallback />}>` so recharts (BarChart histogram) only ships when the page is visited. Added a Diagnostics sidebar entry (Timer icon).
+- Filter bar: time-window segmented control (15m / 1h / 6h / 24h / 7d → Go duration string `since=`), Min latency input (server `min_ms`), Bucket autocomplete reusing the buckets-list query, Op multi-select chips (GET / PUT / DELETE / HEAD / Multipart*).
+- Server filters: `since` + `min_ms` go to the wire. Bucket + Op are applied client-side to the current page since the endpoint exposes only those two filters and the page-token continuation. Documented in the page subtitle.
+- TanStack Query polls every 30 s (`POLL_INTERVAL_MS`), `placeholderData: keepPreviousData` so the table doesn't flash between refetches. Pagination via `Load more` pushes the returned `next_page_token` into a `pageTokens` stack (same pattern as `AuditLogPage`).
+- Latency badge: red ≥1000 ms, orange ≥500 ms, yellow ≥100 ms, gray <100 ms — rendered inline with the latency cell (no extra dep beyond Tailwind utility classes).
+- RequestID column: `<Link to="/diagnostics/trace/<request-id>">` with tooltip `Trace`. The route lands in US-006; the link is harmless until then (the SPA falls back to `<Navigate to="/" />`).
+- Tabbed view via shadcn `Tabs`: `Rows` (table) + `Latency histogram` (recharts BarChart, 8 log-scale buckets 0–10ms…≥10s, computed client-side from the visible rows).
+- New API wrapper `fetchSlowQueries(...)` in `web/src/api/client.ts` mirroring the wire shape from `internal/adminapi/diagnostics_slow_queries.go`. New query key `queryKeys.diagnostics.slowQueries(since, minMs, pageToken)`.
+- Files changed: `web/src/api/client.ts`, `web/src/lib/query.ts`, `web/src/pages/SlowQueries.tsx` (new), `web/src/components/layout/nav.ts`, `web/src/App.tsx`.
+- Quality: `pnpm typecheck` ✓, `pnpm build` ✓ (SlowQueries chunk 11.14 KiB / 4.15 KiB gz; recharts shared chunk 371 KiB / 102 KiB gz already present from Metrics; main index 172 KiB gz < 500 KiB budget). `go vet ./...` ✓, `go test ./internal/adminapi/...` ✓.
+- **Manual browser verification deferred** — no dev-browser MCP available in this iteration. Open `/console/diagnostics/slow-queries`, set Min latency to 0, drive a few PUT/DELETE requests via the s3api or admin endpoints, assert rows render with badges, the histogram tab renders, the request-id link points at `/diagnostics/trace/<id>`, and `Load more` flips through pages.
+- **Learnings for future iterations:**
+  - The slow-queries endpoint deliberately exposes only `since`/`min_ms`/`page_token`; bucket + op are client-side because audit storage is partitioned by `(bucket_id, day)` and adding cross-partition filters would re-introduce the `ALLOW FILTERING` antipattern. Keep this in mind when adding more filters: anything but a tighter latency cutoff or a smaller window must filter on the page in JS.
+  - `classifyOp(action)` in `SlowQueries.tsx` is the canonical action→Op-bucket mapping — `Multipart*` is detected first (it would otherwise classify as PUT/DELETE), and an `admin:` prefix is stripped so admin verbs categorise alongside their user-facing counterparts (`admin:DeleteIAMUser` → DELETE).
+  - Histogram buckets live in `HISTOGRAM_BUCKETS` and use `[min, max)` half-open intervals + a `Number.POSITIVE_INFINITY` upper bound for the `≥10s` bucket. Recharts `YAxis scale="log"` needs a non-zero `domain` lower bound (we use `[0.5, 'auto']` + `allowDataOverflow`) — passing `[0, 'auto']` to a log scale silently emits NaN ticks.
+  - Two pages now lazy-load recharts (Metrics + SlowQueries). Vite already extracts `generateCategoricalChart` into a shared chunk so the second page's bundle cost is only the page glue (~4 KiB gz). Future debug pages that need recharts should follow the same `lazy(() => import(...))` pattern in `App.tsx`.
+  - When adding a new query key under `queryKeys.diagnostics.*`, mirror the existing tuple shape `[area, kind, args]` so cache invalidation via `queryClient.invalidateQueries({ queryKey: ['diagnostics', 'slow-queries'] })` matches partial keys.
+---
+
