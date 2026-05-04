@@ -20,6 +20,7 @@ import (
 	strataconsole "github.com/danchupin/strata"
 	"github.com/danchupin/strata/cmd/strata/workers"
 	"github.com/danchupin/strata/internal/adminapi"
+	"github.com/danchupin/strata/internal/auditstream"
 	"github.com/danchupin/strata/internal/auth"
 	"github.com/danchupin/strata/internal/bucketstats"
 	"github.com/danchupin/strata/internal/config"
@@ -143,6 +144,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	}
 	adminLocker := buildLocker(cfg, metaStore)
 	auditTTL := auditRetention(logger)
+	auditBroadcaster := auditstream.New(logger, metrics.AuditStreamObserver{})
 	adminServer := adminapi.New(adminapi.Config{
 		Meta:                 metaStore,
 		Creds:                multi,
@@ -167,6 +169,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		AuditTTL:             auditTTL,
 		InvalidateCredential: multi.Invalidate,
 		S3Handler:            apiHandler,
+		AuditStream:          auditBroadcaster,
 	})
 
 	mux := http.NewServeMux()
@@ -174,8 +177,11 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	mux.HandleFunc("/healthz", healthHandler.Healthz)
 	mux.HandleFunc("/readyz", healthHandler.Readyz)
 	mux.Handle("/console/", strataconsole.ConsoleHandler())
-	mux.Handle("/admin/v1/", s3api.NewAuditMiddleware(metaStore, auditTTL, adminServer.Handler()))
+	adminAudit := s3api.NewAuditMiddleware(metaStore, auditTTL, adminServer.Handler())
+	adminAudit.Publisher = auditBroadcaster
+	mux.Handle("/admin/v1/", adminAudit)
 	auditHandler := s3api.NewAuditMiddleware(metaStore, auditTTL, apiHandler)
+	auditHandler.Publisher = auditBroadcaster
 	mux.Handle("/", strataotel.NewMiddleware(tracerProvider, logging.NewMiddleware(logger, metrics.ObserveHTTP(mw.Wrap(s3api.NewAccessLogMiddleware(metaStore, auditHandler), s3api.WriteAuthDenied)))))
 
 	srv := &http.Server{

@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/danchupin/strata/internal/auditstream"
 	"github.com/danchupin/strata/internal/auth"
 	"github.com/danchupin/strata/internal/heartbeat"
 	"github.com/danchupin/strata/internal/leader"
@@ -87,6 +88,14 @@ type Server struct {
 	S3Handler http.Handler
 	Logger    *log.Logger
 
+	// AuditStream is the in-process pub-sub fan-out backing
+	// GET /admin/v1/audit/stream (US-001). Wired by serverapp; nil disables
+	// the SSE endpoint with 503 Unavailable.
+	AuditStream *auditstream.Broadcaster
+	// AuditStreamKeepAliveInterval overrides the default 25s SSE keep-alive
+	// ping cadence. Set by tests; production uses the default.
+	AuditStreamKeepAliveInterval time.Duration
+
 	// jobsMu guards background-job goroutines. Currently only the
 	// force-empty drain (US-002) registers here; we cancel the goroutine
 	// on Server shutdown so a graceful drain doesn't outlive the gateway.
@@ -148,6 +157,9 @@ type Config struct {
 	// Complete / Abort handlers forward through it so the existing
 	// multipart finalisation logic stays the single source of truth.
 	S3Handler http.Handler
+	// AuditStream is the live audit-tail broadcaster passed in by serverapp;
+	// the same handle is given to s3api.AuditMiddleware as the publisher.
+	AuditStream *auditstream.Broadcaster
 }
 
 // New constructs a Server. Started defaults to now. JWTSecret empty means
@@ -183,6 +195,7 @@ func New(c Config) *Server {
 		AuditTTL:             c.AuditTTL,
 		InvalidateCredential: c.InvalidateCredential,
 		S3Handler:            c.S3Handler,
+		AuditStream:          c.AuditStream,
 		Logger:               log.Default(),
 	}
 }
@@ -306,6 +319,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /admin/v1/multipart/abort", s.handleMultipartAbort)
 	mux.HandleFunc("GET /admin/v1/audit", s.handleAuditList)
 	mux.HandleFunc("GET /admin/v1/audit.csv", s.handleAuditCSV)
+	mux.HandleFunc("GET /admin/v1/audit/stream", s.handleAuditStream)
 	mux.HandleFunc("GET /admin/v1/settings", s.handleGetSettings)
 	mux.HandleFunc("GET /admin/v1/settings/data-backend", s.handleGetSettingsDataBackend)
 	mux.HandleFunc("POST /admin/v1/settings/jwt/rotate", s.handleRotateJWTSecret)

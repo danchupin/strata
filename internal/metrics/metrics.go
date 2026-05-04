@@ -154,6 +154,11 @@ var (
 		Name: "strata_meta_tikv_audit_sweep_deleted_total",
 		Help: "Audit rows expunged by the TiKV audit-retention sweeper (TiKV has no native TTL).",
 	})
+
+	AuditStreamSubscribers = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "strata_audit_stream_subscribers",
+		Help: "Live audit-tail subscribers attached to the in-process auditstream.Broadcaster.",
+	})
 )
 
 func Register() {
@@ -172,6 +177,7 @@ func Register() {
 		NotifyDeliveryTotal,
 		WorkerPanicTotal,
 		MetaTikvAuditSweepDeleted,
+		AuditStreamSubscribers,
 	)
 }
 
@@ -298,6 +304,14 @@ func (BucketStatsObserver) SetBucketBytes(bucket, class string, bytes int64) {
 		class = "STANDARD"
 	}
 	BucketBytes.WithLabelValues(bucket, class).Set(float64(bytes))
+}
+
+// AuditStreamObserver implements the auditstream.MetricsSink interface. The
+// gauge tracks the in-process subscriber count for /admin/v1/audit/stream.
+type AuditStreamObserver struct{}
+
+func (AuditStreamObserver) SetSubscribers(n int) {
+	AuditStreamSubscribers.Set(float64(n))
 }
 
 // ReplicationObserver extends MetricsObserver with SetQueueDepth so the
