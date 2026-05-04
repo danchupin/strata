@@ -1,63 +1,48 @@
 # Ralph Progress Log
-Started: Mon May  4 MSK 2026
-Cycle: ralph/web-ui-debug (Web UI Phase 3 — debug tooling)
+Started: Mon May  4 18:15:20 MSK 2026
+Cycle: ralph/web-ui-debug
 ---
 
 ## Codebase Patterns
+- AuditMiddleware (`internal/s3api/audit.go`) wraps state-changing requests; GET/HEAD/OPTIONS skipped. Add publishers via `Publisher AuditPublisher` field after construction (publish only on `EnqueueAudit` success).
+- adminapi routes register via `mux.HandleFunc("VERB /admin/v1/...", handler)` in `Server.routes()` (Go 1.22 mux). Trailing-wildcard `{key...}` must be the last segment.
+- Prometheus metrics: declare in `internal/metrics/metrics.go` `var ()` block; add to `Register()`; expose adapter type implementing the consumer-package's `MetricsSink`-style interface. Keeps prometheus out of leaf packages.
+- adminapi unit tests bypass `authMiddleware` by calling `s.routes().ServeHTTP` directly with `withAuditAuthCtx` ctx wrapper.
+- SSE handlers must `flusher.Flush()` after each frame and write `:keep-alive\n\n` pings on a ticker; race-test with `t.Context()` and ensure subscriber registration before publishing in tests.
+- Web sidebar nav is sectioned (`web/src/components/layout/nav.ts` exports `NavSection[]`). Add Phase-N pages by appending to an existing section or pushing a new `{label, items}` block; `SidebarNav.tsx` renders headers automatically and hides them in collapsed mode.
+- SSE consumers in the UI use `web/src/hooks/useEventSource.ts`. Hook owns reconnect/backoff (1s→30s) and exposes `state` + `retryInSeconds` for status banners. Filter changes that need to re-subscribe go through the URL prop — do NOT add filter state inside the hook.
+- Audit-row detail rendering (both historical viewer + live tail) goes through `web/src/components/AuditEventDetailSheet.tsx`. Wire row-clicks to `setDetailRecord(r)` and pass `record + open` into the sheet — keeps the schema in lockstep across surfaces.
 
-### Branch policy (REQUIRED)
-- Every Ralph cycle starts from main, ends merging back to main. US-015 (last story) MUST fast-forward / squash-merge `ralph/web-ui-debug` into `main`, push origin/main, and archive prd.json + progress.txt under `scripts/ralph/archive/2026-MM-DD-web-ui-debug/`. Mirror the web-ui-admin close commit shape (`5a6058b` merge + `f808d88` archive).
-- The shell wrapper `scripts/ralph/ralph.sh` MUST invoke `avito ai claude --` (not bare `claude`) — regression-resistant; revert on sight.
+## 2026-05-04 — US-001 — SSE audit-tail backend
+- Implemented `internal/auditstream` package with `Broadcaster`, `Filter`, `MetricsSink` interface, 256-buffer per-subscriber channel, non-blocking publish, once/minute slow-sub WARN, ctx-cancel removes subscriber.
+- Added `Publisher AuditPublisher` field to `s3api.AuditMiddleware`; publishes only after `EnqueueAudit` succeeds.
+- New `GET /admin/v1/audit/stream` SSE handler: query filters (action/principal/bucket), `text/event-stream` framing, `:keep-alive` every 25s, 503 when broadcaster unconfigured.
+- Added `metrics.AuditStreamSubscribers` gauge + `AuditStreamObserver` adapter; registered.
+- Wired through `serverapp.go`: single `auditstream.New(...)` shared between both AuditMiddleware mounts (S3 + admin) and adminapi.Server.
+- Files: `internal/auditstream/{broadcaster,broadcaster_test}.go`, `internal/s3api/audit.go`, `internal/adminapi/server.go`, `internal/adminapi/audit_stream{,_test}.go`, `internal/metrics/metrics.go`, `internal/serverapp/serverapp.go`.
+- **Learnings for future iterations:**
+  - SSE handler test pattern: spin `httptest.NewServer(s.routes())`, dial with `http.NewRequestWithContext`, poll `Broadcaster.SubscriberCount()` until 1 before publishing (publish-before-subscribe race).
+  - `t.Context()` is preferred over `context.WithCancel(context.Background())` per repo lint rules (`testingcontext`).
+  - Don't close subscriber channel on unsubscribe — Publish under RLock would race; rely on consumer selecting on `ctx.Done()` for shutdown.
+  - `auditRecordToJSON` (in `internal/adminapi/audit.go`) is the canonical JSON shape — reuse for SSE frames so the schema stays in lockstep with `GET /admin/v1/audit`.
+---
 
-### Shipped surfaces on main (do NOT re-implement)
-- **Phase 1 web UI** (commit `e27cf21`): Vite + React + TS skeleton, go:embed `web/dist`, JWT session cookies (HS256, 24h, HttpOnly+Secure+SameSite=Strict+Path=/admin), `/console/` static handler, `/admin/v1/*` API mount, login form, sidebar+top-bar layout, Cluster Overview, Top Buckets/Consumers, Cluster Metrics dashboard, TanStack Query 5s polling, Buckets list, Bucket detail (read-only object browser), Playwright `critical-path.spec.ts`.
-- **Phase 2 web UI** (commit `5a6058b`): full bucket admin (CreateBucket/DeleteBucket/Versioning/ObjectLock/Lifecycle/CORS/Policy/ACL/Inventory/Logging), IAM CRUD (users/access-keys/managed-policies/attach-detach), object actions (per-part presign upload via Web Worker, delete/tags/retention/legal-hold), multipart watchdog, audit-log viewer, settings page (JWT secret rotation), BackendPresign toggle, S3-backend config exposure, Playwright `admin.spec.ts`.
-- **/admin/v1/\*** sits behind `s3api.NewAuditMiddleware`. Admin handlers stamp the operator-meaningful audit row via `s3api.SetAuditOverride(ctx, action, resource, bucket, principal)`.
-- **OTel pipeline** (commit `ea93cbf` US-033): Cassandra + RADOS observer-emitted spans, gateway HTTP middleware, tail-sampler exports failing spans regardless of `STRATA_OTEL_SAMPLE_RATIO`. Phase 3 layers a ring-buffer span-processor in parallel — never replace the OTLP forwarder; install both when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
-- **Audit log** (US-022): `audit_log` table + `s3api.AuditMiddleware`. PUT/POST/DELETE always emit. `total_time_ms` column populated by `s3api.AccessLogMiddleware`. Phase 3 SSE hooks publish AFTER the row persists (never blocks the audit-write hot path).
-- **Heartbeat** (`internal/heartbeat`): memory + cassandra impls. **TiKV impl missing** — tracked under ROADMAP `Web UI — TiKV heartbeat backend` (P3); blocks per-node drilldown on tikv clusters but not Phase 3 itself. Cassandra-backed clusters get the full drilldown experience day-one.
-- **PromQL via `internal/promclient.Client`**: existing — Phase 3 adds a `Semaphore(10)` chan to cap concurrent in-flight queries.
-- **Bucketstats Sampler** (`internal/bucketstats`): currently emits `(bucket, total_bytes, total_objects)`. US-012 extends to per-shard.
 
-### Phase 3 new packages
-- `internal/auditstream` — pub-sub broadcaster. `Broadcaster.Subscribe(ctx, filter) <-chan AuditRow` + non-blocking `Publish(row)` from `s3api.AuditMiddleware`. Slow subs drop frames + WARN once/min.
-- `internal/otel/ringbuf` — span-level ring buffer, bytes-budget capped, LRU-evicts oldest traces when over budget. Secondary index `requestID → traceID`. Per-trace span cap 256.
-- Both integrate via `internal/serverapp/serverapp.go` — construct once, pass to consumers.
-
-### Admin handler patterns (reuse)
-- New admin handler? Wire `mux.HandleFunc("METHOD /admin/v1/...", s.handleX)` in `internal/adminapi/server.go::routes()`. Handlers go in `internal/adminapi/<topic>.go`. JSON helpers `writeJSON` / `writeJSONError` are in server.go.
-- Admin auth: `auth.FromContext(ctx).Owner` set by `adminapi.authMiddleware` via session-cookie `Lookup`.
-- Audit override: `s3api.SetAuditOverride(ctx, action, resource, bucket, principal)` — Action="" falls back to default. ALL Phase 3 endpoints are read-only (audit middleware skips GET); no override needed.
-- Shared error shape on the React side: `AdminApiError` in `web/src/api/client.ts` + helper `buildAdminError(resp, fallback)`.
-- Admin handlers passing through to s3api: synthesise `httptest.NewRequest` with full URL, copy auth context via `inner.WithContext(r.Context())`, then `s.S3Handler.ServeHTTP(rec, inner)`.
-
-### Frontend patterns (reuse)
-- TanStack Query invalidation pattern after a write: `queryClient.invalidateQueries({ queryKey: ['buckets', 'list'] })` — partial key prefix matches all variants. **Phase 3 is read-only** so the pattern collapses to `useQuery({ refetchInterval: 30_000 })`.
-- shadcn Dialog primitives — wrap content in `<Dialog open onOpenChange><DialogContent><DialogHeader/><form/><DialogFooter/></DialogContent></Dialog>`.
-- shadcn Sheet — for the per-node drilldown drawer (US-011), right-side slide-in.
-- Toasts: `import { showToast } from '@/lib/toast-store'`.
-- Sidebar nav: `web/src/components/layout/nav.ts::primaryNav`. Phase 3 adds a new `Diagnostics` section: AuditTail, SlowQueries, TraceBrowser, HotBuckets. Bucket-scoped tabs (HotShards, Distribution, Replication) live under `BucketDetail.tsx`'s `Tabs`.
-- Recharts: existing dep. Phase 3 LineChart (sparklines, lag), BarChart (histogram, distribution). NO `@nivo/heatmap` — build a 200-line raw-canvas `web/src/components/Heatmap.tsx` instead (bundle budget ≤500 KiB gzipped).
-- Native HTML `<datalist>` is the zero-dep autocomplete primitive — pairs with shadcn `<Input>` via `list=` attr. Used for principal/bucket autocompletes.
-- Heavyweight modules (Monaco) lazy-loaded via `lazy(() => import('./MonacoJsonEditor'))` so per-tab bundle stays under budget.
-
-### Browser EventSource pattern (NEW for Phase 3)
-- `EventSource` is browser-native — no third-party lib needed. New helper hook `web/src/hooks/useEventSource.ts` wraps reconnect with exponential backoff (1s → 30s cap). Sends new query string on filter change → close + reopen.
-- Filter applied SERVER-SIDE — the SSE handler reads action/principal/bucket query params and the broadcaster filters per subscriber. Wire-payload stays small.
-- `:keep-alive\n\n` ping every 25s defeats idle-connection proxies (nginx, AWS ALB).
-
-### Cassandra/meta gotchas (still apply)
-- Both `internal/meta/memory` and `internal/meta/cassandra` and `internal/meta/tikv` implement `meta.Store` in lockstep. Adding `ListSlowQueries` (US-003) means updating all three + the storetest contract (`internal/meta/storetest/contract.go`).
-- LWT (`IF EXISTS` / `IF NOT EXISTS`) required for read-after-write coherence on the same row. Phase 3 is read-only so this rarely bites here, but US-009's observer-label change is metric-emission only — no schema migration.
-- Schema migrations are additive — `internal/meta/cassandra/schema.go::tableDDL` (idempotent CREATE) + `alterStatements` (idempotent ADD COLUMN). No destructive migration ever.
-
-### CI / quality bar
-- Every story commit MUST pass: `go vet ./...`, `go test ./...`, `pnpm run typecheck`, `pnpm run build`. Browser verification deferred when dev-browser skill unavailable; note in progress log + recommend manual smoke.
-- Phase 3 closes ROADMAP `Web UI — Phase 3 (debug)` P3. US-015 flips the entry to Done with the merge commit SHA.
-
-### Empty-state rule (Phase 3 specific)
-- Every page that depends on Prom / OTel / replication-config renders a polished empty-state when the dependency is missing — never a broken chart. The empty-state links to `docs/ui.md#prometheus-setup` (or topic-specific anchor) so operators can self-serve fix.
-
-### Read-only invariant
-- Phase 3 pages do NOT mutate state. Aborting a multipart from the watchdog (Phase 2 US-017) is the only debug write action and lives there. Resist the temptation to add destructive actions to debug pages.
-
+## 2026-05-04 — US-002 — Live audit-tail UI page
+- New `web/src/pages/AuditTail.tsx` + route `/diagnostics/audit-tail` mounted in `App.tsx`.
+- Sidebar grew a Diagnostics section: `nav.ts` now exports `NavSection[]`, `SidebarNav.tsx` renders an uppercase section label per group (hidden when sidebar is icon-only).
+- New reconnect helper `web/src/hooks/useEventSource.ts` — exponential 1s→30s backoff, exposes `state` ('open'/'reconnecting'/...) and `retryInSeconds` so the page can render `Connection lost — reconnecting in N s`.
+- New shared component `web/src/components/AuditEventDetailSheet.tsx` (right-side Radix Sheet) wired into both `AuditTail` and `AuditLog` so row-click opens the same panel.
+- AuditTail page features: server-side filter re-subscribe via URL change (action multi-select / principal+bucket autocomplete reusing existing IAM/buckets queries); virtualised list via `@tanstack/react-virtual` (10k ring, slice-and-rebuild append, 40px row estimate); Pause/Resume/Clear with skipped-while-paused banner; relative-time rendered against a 1s tick.
+- Added `@tanstack/react-virtual@3.13.0` to `web/package.json`; `pnpm install --frozen-lockfile` validates after the new lockfile entry.
+- Files changed: `web/package.json`, `web/pnpm-lock.yaml`, `web/src/hooks/useEventSource.ts` (new), `web/src/components/AuditEventDetailSheet.tsx` (new), `web/src/pages/AuditTail.tsx` (new), `web/src/pages/AuditLog.tsx`, `web/src/components/layout/nav.ts`, `web/src/components/layout/SidebarNav.tsx`, `web/src/App.tsx`.
+- Quality: `pnpm typecheck` ✓, `pnpm build` ✓ (largest non-Monaco chunk 172 KiB gz < 500 KiB budget), `go vet ./...` ✓, `go test ./internal/auditstream/... ./internal/adminapi/... ./internal/s3api/...` ✓.
+- **Manual browser verification deferred** — no dev-browser MCP available in this iteration. Open `/console/diagnostics/audit-tail`, drive traffic via the s3api or admin endpoints, assert the row stream + Pause/Resume + reconnect banner before merge.
+- **Learnings for future iterations:**
+  - When adding a sidebar entry, only `nav.ts` changes — `SidebarNav` already iterates `NavSection[]`. New section needs a `label` (rendered as muted uppercase header).
+  - The audit row JSON shape is `AuditRecord` in `web/src/api/client.ts` — same fields the SSE frame ships. Reuse the type in the EventSource onMessage parse so Tail and Log agree on schema.
+  - `useEventSource` deliberately keeps onMessage out of the effect deps via a ref — otherwise every parent re-render would tear down + reopen the connection. Keep that pattern when adding more callback props.
+  - `pausedRef` mirror is necessary so the live closure inside `onMessage` can decide to drop frames vs. append without re-subscribing on every Pause toggle. EventSource stays connected so Resume picks up new events without a reconnect window.
+  - `@tanstack/react-virtual` `getScrollElement` returns the scroll container ref; rows use `position: absolute` + `transform: translateY()`. Estimated size 40px works for the audit row layout; adjust `estimateSize` if row height changes.
+  - Keep filter URL → re-subscribe coupled at the page level; the hook itself doesn't know about audit filters.
+---

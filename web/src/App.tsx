@@ -7,6 +7,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { LoginPage } from '@/pages/Login';
 import { OverviewPage } from '@/pages/Overview';
 import { AuditLogPage } from '@/pages/AuditLog';
+import { AuditTailPage } from '@/pages/AuditTail';
 import { BucketsPage } from '@/pages/Buckets';
 import { BucketDetailPage } from '@/pages/BucketDetail';
 import { ConsumersPage } from '@/pages/Consumers';
@@ -49,6 +50,7 @@ export function App() {
         <Route path="/iam/users/:userName" element={<IAMUserDetailPage />} />
         <Route path="/multipart" element={<MultipartPage />} />
         <Route path="/audit" element={<AuditLogPage />} />
+        <Route path="/diagnostics/audit-tail" element={<AuditTailPage />} />
         <Route
           path="/metrics"
           element={

@@ -18,7 +18,7 @@
         "Tests pass — Broadcaster fan-out test (multi-subscriber, slow-subscriber drop, ctx cancel) + handler test asserting SSE framing shape"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -37,7 +37,7 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

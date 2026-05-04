@@ -11,6 +11,7 @@ import {
   type AuditRecord,
 } from '@/api/client';
 import { queryClient, queryKeys } from '@/lib/query';
+import { AuditEventDetailSheet } from '@/components/AuditEventDetailSheet';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -140,6 +141,7 @@ export function AuditLogPage() {
   const [principal, setPrincipal] = useState('');
   const [bucket, setBucket] = useState('');
   const [pageTokens, setPageTokens] = useState<string[]>(['']);
+  const [detailRecord, setDetailRecord] = useState<AuditRecord | null>(null);
 
   const debouncedPrincipal = useDebounced(principal.trim(), FILTER_DEBOUNCE_MS);
   const debouncedBucket = useDebounced(bucket.trim(), FILTER_DEBOUNCE_MS);
@@ -457,7 +459,11 @@ export function AuditLogPage() {
                   </TableRow>
                 )}
                 {rows.map((r) => (
-                  <TableRow key={rowKey(r)}>
+                  <TableRow
+                    key={rowKey(r)}
+                    className="cursor-pointer hover:bg-accent/50"
+                    onClick={() => setDetailRecord(r)}
+                  >
                     <TableCell title={r.time}>
                       {new Date(r.time).toLocaleString()}
                     </TableCell>
@@ -516,6 +522,14 @@ export function AuditLogPage() {
           </div>
         </CardContent>
       </Card>
+
+      <AuditEventDetailSheet
+        record={detailRecord}
+        open={detailRecord !== null}
+        onOpenChange={(o) => {
+          if (!o) setDetailRecord(null);
+        }}
+      />
     </div>
   );
 }
