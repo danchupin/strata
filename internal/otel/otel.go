@@ -13,8 +13,10 @@ package otel
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
@@ -25,6 +27,8 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.39.0"
 	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
+
+	"github.com/danchupin/strata/internal/otel/ringbuf"
 )
 
 const (
@@ -32,6 +36,12 @@ const (
 	EnvEndpoint = "OTEL_EXPORTER_OTLP_ENDPOINT"
 	// EnvSampleRatio is the strata-specific tail-sampling ratio (0..1).
 	EnvSampleRatio = "STRATA_OTEL_SAMPLE_RATIO"
+	// EnvRingbuf toggles the in-process trace ring buffer (US-005). Default
+	// "on"; set to "off"/"false"/"0" to disable.
+	EnvRingbuf = "STRATA_OTEL_RINGBUF"
+	// EnvRingbufBytes overrides the ring buffer's bytes budget. Default
+	// ringbuf.DefaultBytesBudget (4 MiB).
+	EnvRingbufBytes = "STRATA_OTEL_RINGBUF_BYTES"
 	// DefaultSampleRatio is applied when EnvSampleRatio is unset / invalid.
 	DefaultSampleRatio = 0.01
 	// DefaultServiceName is the resource service.name attribute used when
@@ -41,14 +51,31 @@ const (
 	TracerName = "github.com/danchupin/strata/internal/otel"
 )
 
-// Config tunes Init. Endpoint empty => no-op provider. Exporter overrides
-// the default OTLP/HTTP exporter (used by tests).
+// Config tunes Init. Endpoint empty + Exporter nil + Ringbuf=false yields a
+// no-op provider. Exporter overrides the default OTLP/HTTP exporter (used by
+// tests). When Ringbuf is true an in-process ring buffer span processor
+// (US-005) is installed alongside any configured OTLP forwarder so the
+// /admin/v1/diagnostics/trace/{requestID} handler always has data even when
+// no Jaeger / Tempo deployment is wired up.
 type Config struct {
 	Endpoint    string
 	SampleRatio float64
 	ServiceName string
 
 	Exporter sdktrace.SpanExporter
+
+	Ringbuf        bool
+	RingbufBytes   int
+	RingbufLogger  *slog.Logger
+	RingbufMetrics ringbuf.MetricsSink
+}
+
+// InitOptions plugs binary-side dependencies into Init without forcing the
+// caller to read the env. Logger seeds the ring buffer's WARN sink;
+// RingbufMetrics is the Prometheus adapter.
+type InitOptions struct {
+	Logger         *slog.Logger
+	RingbufMetrics ringbuf.MetricsSink
 }
 
 // Provider holds the SDK tracer provider plus a Shutdown shim. Methods
@@ -57,6 +84,17 @@ type Config struct {
 type Provider struct {
 	tp       *sdktrace.TracerProvider
 	shutdown func(context.Context) error
+	rb       *ringbuf.RingBuffer
+}
+
+// Ringbuf returns the in-process trace ring buffer if installed, else nil.
+// adminapi consumes this for the /admin/v1/diagnostics/trace/{requestID}
+// endpoint.
+func (p *Provider) Ringbuf() *ringbuf.RingBuffer {
+	if p == nil {
+		return nil
+	}
+	return p.rb
 }
 
 // Tracer returns a tracer scoped to name. Falls back to the global
@@ -86,12 +124,19 @@ func (p *Provider) Shutdown(ctx context.Context) error {
 	return p.shutdown(ctx)
 }
 
-// Init builds a Provider from the environment.
-func Init(ctx context.Context) (*Provider, error) {
+// Init builds a Provider from the environment. Reads OTEL_EXPORTER_OTLP_ENDPOINT,
+// STRATA_OTEL_SAMPLE_RATIO, STRATA_OTEL_RINGBUF, STRATA_OTEL_RINGBUF_BYTES.
+// Pass logger + metrics through opts so the ring buffer's WARN/gauge wiring
+// stays out of the env layer.
+func Init(ctx context.Context, opts InitOptions) (*Provider, error) {
 	return InitWithConfig(ctx, Config{
-		Endpoint:    os.Getenv(EnvEndpoint),
-		SampleRatio: ratioFromEnv(),
-		ServiceName: DefaultServiceName,
+		Endpoint:       os.Getenv(EnvEndpoint),
+		SampleRatio:    ratioFromEnv(),
+		ServiceName:    DefaultServiceName,
+		Ringbuf:        ringbufFromEnv(),
+		RingbufBytes:   ringbufBytesFromEnv(),
+		RingbufLogger:  opts.Logger,
+		RingbufMetrics: opts.RingbufMetrics,
 	})
 }
 
@@ -101,23 +146,41 @@ func InitWithConfig(ctx context.Context, cfg Config) (*Provider, error) {
 	if cfg.ServiceName == "" {
 		cfg.ServiceName = DefaultServiceName
 	}
-	if cfg.Exporter == nil && cfg.Endpoint == "" {
+
+	wantOTLP := cfg.Exporter != nil || cfg.Endpoint != ""
+
+	if !wantOTLP && !cfg.Ringbuf {
 		otel.SetTracerProvider(tracenoop.NewTracerProvider())
 		otel.SetTextMapPropagator(propagation.TraceContext{})
 		return &Provider{}, nil
 	}
 
-	exporter := cfg.Exporter
-	if exporter == nil {
-		opts, err := otlpHTTPOptions(cfg.Endpoint)
-		if err != nil {
-			return nil, err
+	var processors []sdktrace.SpanProcessor
+	if wantOTLP {
+		exporter := cfg.Exporter
+		if exporter == nil {
+			opts, err := otlpHTTPOptions(cfg.Endpoint)
+			if err != nil {
+				return nil, err
+			}
+			exp, err := otlptrace.New(ctx, otlptracehttp.NewClient(opts...))
+			if err != nil {
+				return nil, fmt.Errorf("otlp exporter: %w", err)
+			}
+			exporter = exp
 		}
-		exp, err := otlptrace.New(ctx, otlptracehttp.NewClient(opts...))
-		if err != nil {
-			return nil, fmt.Errorf("otlp exporter: %w", err)
-		}
-		exporter = exp
+		bsp := sdktrace.NewBatchSpanProcessor(exporter)
+		processors = append(processors, newSamplingProcessor(bsp, cfg.SampleRatio))
+	}
+
+	var rb *ringbuf.RingBuffer
+	if cfg.Ringbuf {
+		rb = ringbuf.New(
+			ringbuf.WithBytes(cfg.RingbufBytes),
+			ringbuf.WithMetrics(cfg.RingbufMetrics),
+			ringbuf.WithLogger(cfg.RingbufLogger),
+		)
+		processors = append(processors, rb)
 	}
 
 	res, err := resource.Merge(resource.Default(), resource.NewWithAttributes(
@@ -128,18 +191,43 @@ func InitWithConfig(ctx context.Context, cfg Config) (*Provider, error) {
 		return nil, fmt.Errorf("otel resource: %w", err)
 	}
 
-	bsp := sdktrace.NewBatchSpanProcessor(exporter)
-	sampling := newSamplingProcessor(bsp, cfg.SampleRatio)
-
-	tp := sdktrace.NewTracerProvider(
+	tpOpts := []sdktrace.TracerProviderOption{
 		sdktrace.WithSampler(sdktrace.AlwaysSample()),
-		sdktrace.WithSpanProcessor(sampling),
 		sdktrace.WithResource(res),
-	)
+	}
+	for _, p := range processors {
+		tpOpts = append(tpOpts, sdktrace.WithSpanProcessor(p))
+	}
+	tp := sdktrace.NewTracerProvider(tpOpts...)
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 
-	return &Provider{tp: tp, shutdown: tp.Shutdown}, nil
+	return &Provider{tp: tp, shutdown: tp.Shutdown, rb: rb}, nil
+}
+
+func ringbufFromEnv() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(EnvRingbuf)))
+	if v == "" {
+		return true
+	}
+	switch v {
+	case "off", "false", "0", "no":
+		return false
+	default:
+		return true
+	}
+}
+
+func ringbufBytesFromEnv() int {
+	v := os.Getenv(EnvRingbufBytes)
+	if v == "" {
+		return ringbuf.DefaultBytesBudget
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return ringbuf.DefaultBytesBudget
+	}
+	return n
 }
 
 func ratioFromEnv() float64 {

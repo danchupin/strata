@@ -22,6 +22,7 @@ import (
 	"github.com/danchupin/strata/internal/heartbeat"
 	"github.com/danchupin/strata/internal/leader"
 	"github.com/danchupin/strata/internal/meta"
+	"github.com/danchupin/strata/internal/otel/ringbuf"
 	"github.com/danchupin/strata/internal/promclient"
 )
 
@@ -96,6 +97,11 @@ type Server struct {
 	// ping cadence. Set by tests; production uses the default.
 	AuditStreamKeepAliveInterval time.Duration
 
+	// TraceRingbuf is the in-process OTel trace ring buffer (US-005)
+	// backing GET /admin/v1/diagnostics/trace/{requestID}. nil disables
+	// the endpoint with 503 RingbufUnavailable.
+	TraceRingbuf *ringbuf.RingBuffer
+
 	// jobsMu guards background-job goroutines. Currently only the
 	// force-empty drain (US-002) registers here; we cancel the goroutine
 	// on Server shutdown so a graceful drain doesn't outlive the gateway.
@@ -160,6 +166,9 @@ type Config struct {
 	// AuditStream is the live audit-tail broadcaster passed in by serverapp;
 	// the same handle is given to s3api.AuditMiddleware as the publisher.
 	AuditStream *auditstream.Broadcaster
+	// TraceRingbuf is the in-process OTel trace ring buffer (US-005). nil
+	// disables the trace browser endpoint with 503 RingbufUnavailable.
+	TraceRingbuf *ringbuf.RingBuffer
 }
 
 // New constructs a Server. Started defaults to now. JWTSecret empty means
@@ -196,6 +205,7 @@ func New(c Config) *Server {
 		InvalidateCredential: c.InvalidateCredential,
 		S3Handler:            c.S3Handler,
 		AuditStream:          c.AuditStream,
+		TraceRingbuf:         c.TraceRingbuf,
 		Logger:               log.Default(),
 	}
 }
@@ -321,6 +331,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/v1/audit.csv", s.handleAuditCSV)
 	mux.HandleFunc("GET /admin/v1/audit/stream", s.handleAuditStream)
 	mux.HandleFunc("GET /admin/v1/diagnostics/slow-queries", s.handleDiagnosticsSlowQueries)
+	mux.HandleFunc("GET /admin/v1/diagnostics/trace/{requestID}", s.handleDiagnosticsTrace)
 	mux.HandleFunc("GET /admin/v1/settings", s.handleGetSettings)
 	mux.HandleFunc("GET /admin/v1/settings/data-backend", s.handleGetSettingsDataBackend)
 	mux.HandleFunc("POST /admin/v1/settings/jwt/rotate", s.handleRotateJWTSecret)

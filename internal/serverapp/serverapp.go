@@ -55,7 +55,10 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	}
 	logger.Info("manifest encoder", "format", data.ManifestFormat())
 
-	tracerProvider, err := strataotel.Init(ctx)
+	tracerProvider, err := strataotel.Init(ctx, strataotel.InitOptions{
+		Logger:         logger,
+		RingbufMetrics: metrics.OTelRingbufObserver{},
+	})
 	if err != nil {
 		return fmt.Errorf("otel init: %w", err)
 	}
@@ -170,6 +173,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		InvalidateCredential: multi.Invalidate,
 		S3Handler:            apiHandler,
 		AuditStream:          auditBroadcaster,
+		TraceRingbuf:         tracerProvider.Ringbuf(),
 	})
 
 	mux := http.NewServeMux()

@@ -159,6 +159,16 @@ var (
 		Name: "strata_audit_stream_subscribers",
 		Help: "Live audit-tail subscribers attached to the in-process auditstream.Broadcaster.",
 	})
+
+	OTelRingbufTraces = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "strata_otel_ringbuf_traces",
+		Help: "Traces retained in the in-process OTel ring buffer (US-005).",
+	})
+
+	OTelRingbufEvicted = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "strata_otel_ringbuf_evicted_total",
+		Help: "Traces evicted from the in-process OTel ring buffer due to bytes-budget pressure (US-005).",
+	})
 )
 
 func Register() {
@@ -178,6 +188,8 @@ func Register() {
 		WorkerPanicTotal,
 		MetaTikvAuditSweepDeleted,
 		AuditStreamSubscribers,
+		OTelRingbufTraces,
+		OTelRingbufEvicted,
 	)
 }
 
@@ -313,6 +325,14 @@ type AuditStreamObserver struct{}
 func (AuditStreamObserver) SetSubscribers(n int) {
 	AuditStreamSubscribers.Set(float64(n))
 }
+
+// OTelRingbufObserver implements the ringbuf.MetricsSink interface. Used by
+// the otel package wiring so the prometheus dependency stays in cmd-layer
+// adapters.
+type OTelRingbufObserver struct{}
+
+func (OTelRingbufObserver) SetTraces(n int) { OTelRingbufTraces.Set(float64(n)) }
+func (OTelRingbufObserver) IncEvicted()     { OTelRingbufEvicted.Inc() }
 
 // ReplicationObserver extends MetricsObserver with SetQueueDepth so the
 // replicator can publish per-rule pending counts.

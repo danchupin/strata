@@ -89,7 +89,7 @@
         "Tests pass — ringbuf bytes-budget + LRU eviction order + per-trace span cap + handler 200/404 cases"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
