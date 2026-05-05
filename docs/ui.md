@@ -158,6 +158,14 @@ Phase 3 layers debug tooling on top without removing Phase 2 surface.
 | AuditLog | — | ✓ | ✓ |
 | Settings | — | ✓ | ✓ |
 | BackendPresign | — | ✓ | ✓ |
+| AuditTail | — | — | ✓ |
+| SlowQueries | — | — | ✓ |
+| OTelTraceBrowser | — | — | ✓ |
+| HotBuckets | — | — | ✓ |
+| HotShards | — | — | ✓ |
+| NodeDrilldown | — | — | ✓ |
+| ShardDistribution | — | — | ✓ |
+| ReplicationLag | — | — | ✓ |
 
 ## Operational notes
 
@@ -182,7 +190,7 @@ Phase 3 layers debug tooling on top without removing Phase 2 surface.
 
 ## End-to-end tests
 
-Two Playwright specs run in CI under the `e2e-ui` job:
+Three Playwright specs run in CI under the `e2e-ui` job:
 
 - `web/e2e/critical-path.spec.ts` — Phase 1 read-only flows
   (login → overview → buckets list → bucket detail → logout).
@@ -192,6 +200,11 @@ Two Playwright specs run in CI under the `e2e-ui` job:
   lifecycle-rule (add 30-day expiration → save → reload → assert),
   policy-editor (PublicRead template → validate → save → reload → assert),
   multipart-watchdog (initiate via fetch → list → bulk-abort → assert empty).
+- `web/e2e/debug.spec.ts` — Phase 3 debug flows (US-015): audit-tail
+  (PUT object → row appears in live tail), slow-queries (min_ms=0 → recent
+  rows render), trace-browser (paste request-id → spans render),
+  hot-buckets-empty (Prom unset → MetricsUnavailable card renders),
+  hot-shards-s3 (`empty:true` mocked → s3-explainer card renders).
 
 Run locally with:
 
