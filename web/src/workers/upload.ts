@@ -46,7 +46,7 @@ export type ParentToWorker =
       partSize: number;
       uploadId: string;
     }
-  | { kind: 'startSingle'; file: Blob; url: string }
+  | { kind: 'startSingle'; file: Blob; url: string; storageClass?: string }
   | { kind: 'partUrl'; partNumber: number; url: string }
   | { kind: 'abort' };
 
@@ -62,7 +62,7 @@ self.onmessage = (event: MessageEvent<ParentToWorker>) => {
   const msg = event.data;
   switch (msg.kind) {
     case 'startSingle':
-      void runSinglePut(msg.file, msg.url);
+      void runSinglePut(msg.file, msg.url, msg.storageClass);
       break;
     case 'startMultipart':
       void runMultipart(msg.file, msg.partSize, msg.uploadId);
@@ -85,9 +85,11 @@ function post(msg: WorkerToParent): void {
   (self as unknown as Worker).postMessage(msg);
 }
 
-async function runSinglePut(file: Blob, url: string): Promise<void> {
+async function runSinglePut(file: Blob, url: string, storageClass?: string): Promise<void> {
   try {
-    const etag = await putWithProgress(url, file, file.size, 0);
+    const headers: Record<string, string> = {};
+    if (storageClass) headers['x-amz-storage-class'] = storageClass;
+    const etag = await putWithProgress(url, file, file.size, 0, headers);
     post({ kind: 'progress', uploaded: file.size, total: file.size });
     post({ kind: 'done', etag });
   } catch (err) {
@@ -140,10 +142,14 @@ function putWithProgress(
   body: Blob,
   total: number,
   base: number,
+  headers?: Record<string, string>,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('PUT', url, true);
+    if (headers) {
+      for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
+    }
     xhr.upload.onprogress = (ev) => {
       if (!ev.lengthComputable) return;
       post({ kind: 'progress', uploaded: base + ev.loaded, total });

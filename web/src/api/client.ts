@@ -1141,19 +1141,25 @@ export async function abortUpload(bucket: string, uploadID: string): Promise<voi
 export interface SinglePresignResponse {
   url: string;
   expires_at: number;
+  storage_class?: string;
 }
 
 export async function presignSinglePut(
   bucket: string,
   key: string,
+  storageClass?: string,
 ): Promise<SinglePresignResponse> {
+  const body: Record<string, string> = { key };
+  if (storageClass && storageClass !== 'STANDARD') {
+    body.storage_class = storageClass;
+  }
   const resp = await fetch(
     `/admin/v1/buckets/${encodeURIComponent(bucket)}/single-presign`,
     {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key }),
+      body: JSON.stringify(body),
     },
   );
   if (!resp.ok) throw await buildAdminError(resp, 'single-PUT presign failed');

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -13,17 +14,24 @@ import (
 // Secret are required. Query carries any pre-existing query parameters that
 // must be part of the signature (e.g. partNumber + uploadId on UploadPart).
 // Expires <= 0 falls back to 5 minutes; capped to AWS's 7-day maximum.
+//
+// ExtraHeaders names additional request headers that the client MUST send
+// when issuing the presigned request. The mint commits to their values at
+// signing time — used for `x-amz-storage-class` and similar S3 PUT
+// directives that only have a header surface (the gateway reads them
+// server-side). Header names are lower-cased per SigV4 spec.
 type PresignOptions struct {
-	Method    string
-	Scheme    string
-	Host      string
-	Path      string
-	Query     url.Values
-	Region    string
-	AccessKey string
-	Secret    string
-	Expires   time.Duration
-	Now       time.Time
+	Method       string
+	Scheme       string
+	Host         string
+	Path         string
+	Query        url.Values
+	Region       string
+	AccessKey    string
+	Secret       string
+	Expires      time.Duration
+	Now          time.Time
+	ExtraHeaders http.Header
 }
 
 const (
@@ -71,6 +79,10 @@ func GeneratePresignedURL(opts PresignOptions) (string, error) {
 	day := now.Format(sigDateFormat)
 	scope := credentialScope(day, opts.Region, sigServiceS3)
 	signedHeaders := []string{"host"}
+	for name := range opts.ExtraHeaders {
+		signedHeaders = append(signedHeaders, strings.ToLower(name))
+	}
+	sort.Strings(signedHeaders)
 
 	q := url.Values{}
 	if opts.Query != nil {
@@ -94,6 +106,11 @@ func GeneratePresignedURL(opts PresignOptions) (string, error) {
 		},
 		Host:   opts.Host,
 		Header: http.Header{},
+	}
+	for name, vs := range opts.ExtraHeaders {
+		for _, v := range vs {
+			req.Header.Add(name, v)
+		}
 	}
 	canonical := canonicalRequestWithQuery(req, canonicalQuery, signedHeaders, unsignedBody)
 	sts := stringToSign(sigAlgorithm, amzDate, scope, sha256Hex([]byte(canonical)))

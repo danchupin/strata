@@ -149,7 +149,7 @@ export function UploadDialog({ open, bucket, prefix, onOpenChange }: Props) {
     updateFile(index, { status: 'running' });
     let presign;
     try {
-      presign = await presignSinglePut(bucket, f.key);
+      presign = await presignSinglePut(bucket, f.key, storageClass);
     } catch (err) {
       const e = err as AdminApiError;
       updateFile(index, { status: 'error', errorMessage: e.message ?? String(err) });
@@ -172,7 +172,12 @@ export function UploadDialog({ open, bucket, prefix, onOpenChange }: Props) {
           reject(new Error(msg.message));
         }
       };
-      const start: ParentToWorker = { kind: 'startSingle', file: f.file, url: presign.url };
+      const start: ParentToWorker = {
+        kind: 'startSingle',
+        file: f.file,
+        url: presign.url,
+        storageClass: presign.storage_class || undefined,
+      };
       worker.postMessage(start);
     });
   }

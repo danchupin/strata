@@ -80,8 +80,9 @@ type UploadCompletePart struct {
 // SinglePresignResponse mirrors UploadPartPresignResponse but for the
 // single-PUT (small-file) path — no PartNumber.
 type SinglePresignResponse struct {
-	URL       string `json:"url"`
-	ExpiresAt int64  `json:"expires_at"`
+	URL          string `json:"url"`
+	ExpiresAt    int64  `json:"expires_at"`
+	StorageClass string `json:"storage_class,omitempty"`
 }
 
 // handleUploadInit serves POST /admin/v1/buckets/{bucket}/uploads. Wraps
@@ -198,7 +199,7 @@ func (s *Server) handleUploadPartPresign(w http.ResponseWriter, r *http.Request)
 	q := url.Values{}
 	q.Set("partNumber", strconv.Itoa(partNumber))
 	q.Set("uploadId", uploadID)
-	urlStr, perr := s.mintPresignedURL(r, http.MethodPut, presignPath(bucket, mu.Key), q)
+	urlStr, perr := s.mintPresignedURL(r, http.MethodPut, presignPath(bucket, mu.Key), q, nil)
 	if perr != nil {
 		writeJSONError(w, http.StatusInternalServerError, "Internal", perr.Error())
 		return
@@ -354,7 +355,8 @@ func (s *Server) handleUploadAbort(w http.ResponseWriter, r *http.Request) {
 // so `/objects/{key...}/single-presign` is unrepresentable — see the
 // route registration block in server.go for the deviation note.
 type SinglePresignRequest struct {
-	Key string `json:"key"`
+	Key          string `json:"key"`
+	StorageClass string `json:"storage_class,omitempty"`
 }
 
 // handleSinglePutPresign serves POST /admin/v1/buckets/{bucket}/single-presign.
@@ -395,14 +397,21 @@ func (s *Server) handleSinglePutPresign(w http.ResponseWriter, r *http.Request) 
 		writeJSONError(w, http.StatusInternalServerError, "Internal", err.Error())
 		return
 	}
-	urlStr, perr := s.mintPresignedURL(r, http.MethodPut, presignPath(bucket, key), nil)
+	var extra http.Header
+	storageClass := strings.TrimSpace(req.StorageClass)
+	if storageClass != "" {
+		extra = http.Header{}
+		extra.Set("x-amz-storage-class", storageClass)
+	}
+	urlStr, perr := s.mintPresignedURL(r, http.MethodPut, presignPath(bucket, key), nil, extra)
 	if perr != nil {
 		writeJSONError(w, http.StatusInternalServerError, "Internal", perr.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, SinglePresignResponse{
-		URL:       urlStr,
-		ExpiresAt: time.Now().Add(uploadPresignTTL).Unix(),
+		URL:          urlStr,
+		ExpiresAt:    time.Now().Add(uploadPresignTTL).Unix(),
+		StorageClass: storageClass,
 	})
 }
 
@@ -411,7 +420,7 @@ func (s *Server) handleSinglePutPresign(w http.ResponseWriter, r *http.Request) 
 // never sees the secret — it only gets the resulting URL string. Host is
 // lifted from the inbound request so the URL points back at the same
 // gateway origin the operator is talking to.
-func (s *Server) mintPresignedURL(r *http.Request, method, path string, query url.Values) (string, error) {
+func (s *Server) mintPresignedURL(r *http.Request, method, path string, query url.Values, extraHeaders http.Header) (string, error) {
 	if s.Creds == nil {
 		return "", errors.New("credentials store not configured")
 	}
@@ -436,15 +445,16 @@ func (s *Server) mintPresignedURL(r *http.Request, method, path string, query ur
 		host = "localhost"
 	}
 	return auth.GeneratePresignedURL(auth.PresignOptions{
-		Method:    method,
-		Scheme:    scheme,
-		Host:      host,
-		Path:      path,
-		Query:     query,
-		Region:    region,
-		AccessKey: cred.AccessKey,
-		Secret:    cred.Secret,
-		Expires:   uploadPresignTTL,
+		Method:       method,
+		Scheme:       scheme,
+		Host:         host,
+		Path:         path,
+		Query:        query,
+		Region:       region,
+		AccessKey:    cred.AccessKey,
+		Secret:       cred.Secret,
+		Expires:      uploadPresignTTL,
+		ExtraHeaders: extraHeaders,
 	})
 }
 
