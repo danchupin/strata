@@ -84,6 +84,9 @@ export const queryKeys = {
       ['buckets', 'object', name, key, versionID] as const,
     objectVersions: (name: string, key: string) =>
       ['buckets', 'object-versions', name, key] as const,
+    distribution: (name: string) => ['buckets', 'distribution', name] as const,
+    replicationLag: (name: string, range: string) =>
+      ['buckets', 'replication-lag', name, range] as const,
   },
   consumers: {
     top: (by: string, limit: number) => ['consumers', 'top', by, limit] as const,
@@ -130,6 +133,18 @@ export const queryKeys = {
         'list',
         { since, until, action, principal, bucket, pageToken },
       ] as const,
+  },
+  diagnostics: {
+    slowQueries: (since: string, minMs: number, pageToken: string) =>
+      ['diagnostics', 'slow-queries', { since, minMs, pageToken }] as const,
+    trace: (idOrRequestID: string) =>
+      ['diagnostics', 'trace', idOrRequestID] as const,
+    hotBuckets: (range: string, step: string) =>
+      ['diagnostics', 'hot-buckets', { range, step }] as const,
+    hotShards: (bucket: string, range: string, step: string) =>
+      ['diagnostics', 'hot-shards', bucket, { range, step }] as const,
+    node: (nodeID: string, range: string) =>
+      ['diagnostics', 'node', nodeID, range] as const,
   },
   auth: {
     whoami: ['auth', 'whoami'] as const,

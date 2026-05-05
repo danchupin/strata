@@ -93,6 +93,14 @@ var (
 		[]string{"rule_id"},
 	)
 
+	ReplicationQueueAge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "strata_replication_queue_age_seconds",
+			Help: "Oldest pending replication_queue row age (seconds) per source bucket, sampled by the replicator worker. Backs the per-bucket Replication tab (US-014).",
+		},
+		[]string{"bucket"},
+	)
+
 	RADOSOpDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "strata_rados_op_duration_seconds",
@@ -126,6 +134,22 @@ var (
 		[]string{"bucket", "storage_class"},
 	)
 
+	BucketShardBytes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "strata_bucket_shard_bytes",
+			Help: "Total object bytes per (bucket, shard) for the top-N largest buckets (US-012). Backs the Distribution tab (US-013). Cardinality bound: top-N buckets * shard_count.",
+		},
+		[]string{"bucket", "shard"},
+	)
+
+	BucketShardObjects = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "strata_bucket_shard_objects",
+			Help: "Total object count per (bucket, shard) for the top-N largest buckets (US-012). Backs the Distribution tab (US-013). Cardinality bound: top-N buckets * shard_count.",
+		},
+		[]string{"bucket", "shard"},
+	)
+
 	LifecycleTickTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "strata_lifecycle_tick_total",
@@ -154,6 +178,29 @@ var (
 		Name: "strata_meta_tikv_audit_sweep_deleted_total",
 		Help: "Audit rows expunged by the TiKV audit-retention sweeper (TiKV has no native TTL).",
 	})
+
+	AuditStreamSubscribers = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "strata_audit_stream_subscribers",
+		Help: "Live audit-tail subscribers attached to the in-process auditstream.Broadcaster.",
+	})
+
+	OTelRingbufTraces = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "strata_otel_ringbuf_traces",
+		Help: "Traces retained in the in-process OTel ring buffer (US-005).",
+	})
+
+	OTelRingbufEvicted = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "strata_otel_ringbuf_evicted_total",
+		Help: "Traces evicted from the in-process OTel ring buffer due to bytes-budget pressure (US-005).",
+	})
+
+	CassandraLWTConflictsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_cassandra_lwt_conflicts_total",
+			Help: "Cassandra LWT (compare-and-set) conflicts per (table, bucket, shard); incremented when applied=false. Backs the Hot Shards heatmap (US-009). Cardinality bound: ~1000 buckets * 64 shards.",
+		},
+		[]string{"table", "bucket", "shard"},
+	)
 )
 
 func Register() {
@@ -163,15 +210,21 @@ func Register() {
 		GCEnqueued, GCProcessed,
 		LifecycleTransitions, LifecycleExpirations,
 		ReplicationLagSeconds, ReplicationCompleted, ReplicationFailed,
-		ReplicationQueueDepth,
+		ReplicationQueueDepth, ReplicationQueueAge,
 		RADOSOpDuration,
 		GCQueueDepth,
 		MultipartActive,
 		BucketBytes,
+		BucketShardBytes,
+		BucketShardObjects,
 		LifecycleTickTotal,
 		NotifyDeliveryTotal,
 		WorkerPanicTotal,
 		MetaTikvAuditSweepDeleted,
+		AuditStreamSubscribers,
+		OTelRingbufTraces,
+		OTelRingbufEvicted,
+		CassandraLWTConflictsTotal,
 	)
 }
 
@@ -230,6 +283,22 @@ func (CassandraObserver) ObserveQuery(table, op string, duration time.Duration, 
 		op = "UNKNOWN"
 	}
 	CassandraQueryDuration.WithLabelValues(table, op).Observe(duration.Seconds())
+}
+
+// IncLWTConflict bumps the Hot Shards LWT-conflict counter (US-009). Empty
+// labels collapse to "unknown" / "-" placeholders so a missing bucket-name
+// resolution never silently drops the conflict.
+func (CassandraObserver) IncLWTConflict(table, bucket, shard string) {
+	if table == "" {
+		table = "unknown"
+	}
+	if bucket == "" {
+		bucket = "-"
+	}
+	if shard == "" {
+		shard = "-"
+	}
+	CassandraLWTConflictsTotal.WithLabelValues(table, bucket, shard).Inc()
 }
 
 // RADOSObserver implements the rados.Metrics interface. Cmd-layer adapter so
@@ -300,6 +369,52 @@ func (BucketStatsObserver) SetBucketBytes(bucket, class string, bytes int64) {
 	BucketBytes.WithLabelValues(bucket, class).Set(float64(bytes))
 }
 
+// SetBucketShardBytes / SetBucketShardObjects publish per-shard distribution
+// gauges populated by the bucketstats sampler for the top-N buckets (US-012).
+// shard is the integer partition index; the label is stringified once at the
+// adapter so prometheus stays string-typed.
+func (BucketStatsObserver) SetBucketShardBytes(bucket string, shard int, bytes int64) {
+	if bucket == "" {
+		bucket = "unknown"
+	}
+	BucketShardBytes.WithLabelValues(bucket, strconv.Itoa(shard)).Set(float64(bytes))
+}
+
+func (BucketStatsObserver) SetBucketShardObjects(bucket string, shard int, objects int64) {
+	if bucket == "" {
+		bucket = "unknown"
+	}
+	BucketShardObjects.WithLabelValues(bucket, strconv.Itoa(shard)).Set(float64(objects))
+}
+
+// ResetBucketShard removes per-(bucket, shard) gauge series so a freshly
+// dropped-from-top-N bucket does not linger as stale data in the
+// strata_bucket_shard_* metrics. The sampler invokes this between passes for
+// any bucket that exited the top-N window.
+func (BucketStatsObserver) ResetBucketShard(bucket string) {
+	if bucket == "" {
+		return
+	}
+	BucketShardBytes.DeletePartialMatch(prometheus.Labels{"bucket": bucket})
+	BucketShardObjects.DeletePartialMatch(prometheus.Labels{"bucket": bucket})
+}
+
+// AuditStreamObserver implements the auditstream.MetricsSink interface. The
+// gauge tracks the in-process subscriber count for /admin/v1/audit/stream.
+type AuditStreamObserver struct{}
+
+func (AuditStreamObserver) SetSubscribers(n int) {
+	AuditStreamSubscribers.Set(float64(n))
+}
+
+// OTelRingbufObserver implements the ringbuf.MetricsSink interface. Used by
+// the otel package wiring so the prometheus dependency stays in cmd-layer
+// adapters.
+type OTelRingbufObserver struct{}
+
+func (OTelRingbufObserver) SetTraces(n int) { OTelRingbufTraces.Set(float64(n)) }
+func (OTelRingbufObserver) IncEvicted()     { OTelRingbufEvicted.Inc() }
+
 // ReplicationObserver extends MetricsObserver with SetQueueDepth so the
 // replicator can publish per-rule pending counts.
 type ReplicationObserver struct{}
@@ -330,4 +445,14 @@ func (ReplicationObserver) SetQueueDepth(ruleID string, depth int) {
 		ruleID = "unknown"
 	}
 	ReplicationQueueDepth.WithLabelValues(ruleID).Set(float64(depth))
+}
+
+// SetQueueAge publishes the oldest pending row age (seconds) for the given
+// source bucket. Backs the per-bucket Replication tab (US-014). Empty bucket
+// collapses to "unknown" so a missing label never silently drops the sample.
+func (ReplicationObserver) SetQueueAge(bucket string, ageSeconds float64) {
+	if bucket == "" {
+		bucket = "unknown"
+	}
+	ReplicationQueueAge.WithLabelValues(bucket).Set(ageSeconds)
 }

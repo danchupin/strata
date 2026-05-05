@@ -395,6 +395,12 @@ type AuditEvent struct {
 	// middleware (US-018). Old rows pre-dating the column read back
 	// empty — admin/UI consumers must tolerate "".
 	UserAgent string
+	// TotalTimeMS is the wall-clock duration (in milliseconds) of the
+	// originating HTTP request, captured by the audit middleware (US-003).
+	// Powers ListSlowQueries / the Slow Queries debug page. Zero for rows
+	// pre-dating the column or for admin-override rows that never hit the
+	// HTTP timing path.
+	TotalTimeMS int
 }
 
 // AuditPartition identifies a single (bucket_id, day) partition of the
@@ -442,6 +448,16 @@ type ReshardJob struct {
 	Done      bool
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+// ShardStat is a per-shard byte+object total returned by
+// SampleBucketShardStats. The bucketstats sampler emits these via
+// strata_bucket_shard_{bytes,objects} gauges so the Bucket-Shard
+// Distribution UI (US-013) can spot key-distribution skew before it bites.
+// Only the latest non-delete-marker version of each key contributes.
+type ShardStat struct {
+	Bytes   int64
+	Objects int64
 }
 
 // AccessPoint is a named, account-scoped binding to a single bucket carrying
@@ -504,6 +520,14 @@ type Store interface {
 	DeleteObjectNullReplacement(ctx context.Context, bucketID uuid.UUID, key string) (*Object, error)
 	ListObjects(ctx context.Context, bucketID uuid.UUID, opts ListOptions) (*ListResult, error)
 	ListObjectVersions(ctx context.Context, bucketID uuid.UUID, opts ListOptions) (*ListVersionsResult, error)
+	// SampleBucketShardStats returns per-shard byte/object totals for the
+	// bucket. Only the latest non-delete-marker version of each key
+	// contributes. shardCount must equal bucket.ShardCount; backends use
+	// it to scope per-shard SELECTs (cassandra) or to compute the
+	// destination shard from the key (memory, tikv). Used by the
+	// bucketstats sampler to publish strata_bucket_shard_bytes /
+	// strata_bucket_shard_objects (US-012).
+	SampleBucketShardStats(ctx context.Context, bucketID uuid.UUID, shardCount int) (map[int]ShardStat, error)
 
 	SetObjectStorage(ctx context.Context, bucketID uuid.UUID, key, versionID, expectedClass, newClass string, manifest *data.Manifest) (applied bool, err error)
 
@@ -529,6 +553,13 @@ type Store interface {
 	EnqueueAudit(ctx context.Context, entry *AuditEvent, ttl time.Duration) error
 	ListAudit(ctx context.Context, bucketID uuid.UUID, limit int) ([]AuditEvent, error)
 	ListAuditFiltered(ctx context.Context, filter AuditFilter) ([]AuditEvent, string, error)
+	// ListSlowQueries returns audit rows with TotalTimeMS >= minMs whose
+	// Time falls within the trailing `since` window, sorted by TotalTimeMS
+	// descending (ties broken by Time desc, then EventID desc). pageToken
+	// is the EventID of the last row from the previous page, or "" for
+	// the first page. The next-page token is the EventID of the last row
+	// returned (or "" when the result set is exhausted).
+	ListSlowQueries(ctx context.Context, since time.Duration, minMs int, pageToken string) ([]AuditEvent, string, error)
 	// ListAuditPartitionsBefore returns every audit_log (bucket, day)
 	// partition whose day is strictly older than the UTC day containing
 	// `before`. Used by the audit-export worker to enumerate fully-aged

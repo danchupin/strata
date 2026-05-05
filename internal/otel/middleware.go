@@ -8,6 +8,8 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/danchupin/strata/internal/otel/ringbuf"
 )
 
 // NewMiddleware wraps next so each HTTP request runs inside a server
@@ -45,11 +47,19 @@ func (m *middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rec := &statusRecorder{ResponseWriter: w, code: http.StatusOK}
 	m.next.ServeHTTP(rec, r.WithContext(ctx))
 
+	if id := r.Header.Get(headerRequestID); id != "" {
+		span.SetAttributes(attribute.String(ringbuf.AttributeKeyRequestID, id))
+	}
 	span.SetAttributes(attribute.Int("http.status_code", rec.code))
 	if rec.code >= 500 {
 		span.SetStatus(codes.Error, http.StatusText(rec.code))
 	}
 }
+
+// headerRequestID is the standard X-Request-Id header. Hard-coded here to
+// avoid importing internal/logging from the otel package; the value matches
+// logging.HeaderRequestID and tests pin both ends.
+const headerRequestID = "X-Request-Id"
 
 type statusRecorder struct {
 	http.ResponseWriter

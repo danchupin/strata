@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { useQuery, keepPreviousData } from '@tanstack/react-query';
 import {
@@ -43,6 +43,22 @@ import { cn } from '@/lib/utils';
 import { BucketACLTab } from '@/components/BucketACLTab';
 import { BucketAccessLogTab } from '@/components/BucketAccessLogTab';
 import { BucketCORSTab } from '@/components/BucketCORSTab';
+import { BucketHotShardsTab } from '@/components/BucketHotShardsTab';
+// BucketDistributionTab pulls recharts (~110 KiB gz). Lazy-load so the bundle
+// cost only lands when an operator opens the Distribution tab. Mirrors the
+// Metrics + SlowQueries lazy-recharts pattern from App.tsx but at tab-grain.
+const BucketDistributionTab = lazy(() =>
+  import('@/components/BucketDistributionTab').then((m) => ({
+    default: m.BucketDistributionTab,
+  })),
+);
+// BucketReplicationLagTab also pulls recharts. Same lazy treatment as the
+// Distribution tab — keep it out of the index bundle.
+const BucketReplicationLagTab = lazy(() =>
+  import('@/components/BucketReplicationLagTab').then((m) => ({
+    default: m.BucketReplicationLagTab,
+  })),
+);
 import { BucketInventoryTab } from '@/components/BucketInventoryTab';
 import { BucketLifecycleTab } from '@/components/BucketLifecycleTab';
 import { BucketOverviewTab } from '@/components/BucketOverviewTab';
@@ -278,6 +294,17 @@ export function BucketDetailPage() {
           <TabsTrigger value="access-log" disabled={!detail}>
             Access Log
           </TabsTrigger>
+          <TabsTrigger value="hot-shards" disabled={!detail}>
+            Hot Shards
+          </TabsTrigger>
+          <TabsTrigger value="distribution" disabled={!detail}>
+            Distribution
+          </TabsTrigger>
+          {detail?.replication_configured && (
+            <TabsTrigger value="replication" disabled={!detail}>
+              Replication
+            </TabsTrigger>
+          )}
         </TabsList>
         <TabsContent value="overview" className="space-y-4">
           {detail && <BucketOverviewTab bucket={detail} />}
@@ -299,6 +326,23 @@ export function BucketDetailPage() {
         </TabsContent>
         <TabsContent value="access-log" className="space-y-4">
           {detail && <BucketAccessLogTab bucket={detail} />}
+        </TabsContent>
+        <TabsContent value="hot-shards" className="space-y-4">
+          {detail && <BucketHotShardsTab bucket={detail} />}
+        </TabsContent>
+        <TabsContent value="distribution" className="space-y-4">
+          {detail && (
+            <Suspense fallback={<Skeleton className="h-72 w-full" />}>
+              <BucketDistributionTab bucket={detail} />
+            </Suspense>
+          )}
+        </TabsContent>
+        <TabsContent value="replication" className="space-y-4">
+          {detail?.replication_configured && (
+            <Suspense fallback={<Skeleton className="h-72 w-full" />}>
+              <BucketReplicationLagTab bucket={detail} />
+            </Suspense>
+          )}
         </TabsContent>
         <TabsContent value="objects">
       <Card>

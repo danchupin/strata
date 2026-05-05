@@ -103,6 +103,7 @@ type captureMetrics struct {
 		dur       time.Duration
 		err       error
 	}
+	lwtCalls []struct{ table, bucket, shard string }
 }
 
 func (c *captureMetrics) ObserveQuery(table, op string, dur time.Duration, err error) {
@@ -111,6 +112,10 @@ func (c *captureMetrics) ObserveQuery(table, op string, dur time.Duration, err e
 		dur       time.Duration
 		err       error
 	}{table, op, dur, err})
+}
+
+func (c *captureMetrics) IncLWTConflict(table, bucket, shard string) {
+	c.lwtCalls = append(c.lwtCalls, struct{ table, bucket, shard string }{table, bucket, shard})
 }
 
 func TestQueryObserverRecordsMetricForEveryQuery(t *testing.T) {
@@ -322,6 +327,36 @@ func TestQueryObserverEmitsSpan(t *testing.T) {
 			t.Errorf("missing attr %s=%s; got %v", k, v, child.Attributes)
 		}
 	}
+}
+
+func TestObserverRecordLWTConflictFansOutToMetrics(t *testing.T) {
+	m := &captureMetrics{}
+	obs := NewQueryObserver(nil, 0, m, nil)
+	if obs == nil {
+		t.Fatal("metrics-only observer must be non-nil")
+	}
+	obs.RecordLWTConflict(context.Background(), "objects", "bkt-alpha", "17")
+	obs.RecordLWTConflict(context.Background(), "objects", "bkt-beta", "3")
+
+	if len(m.lwtCalls) != 2 {
+		t.Fatalf("got %d LWT calls; want 2", len(m.lwtCalls))
+	}
+	if m.lwtCalls[0].table != "objects" || m.lwtCalls[0].bucket != "bkt-alpha" || m.lwtCalls[0].shard != "17" {
+		t.Errorf("first call=%+v", m.lwtCalls[0])
+	}
+	if m.lwtCalls[1].bucket != "bkt-beta" || m.lwtCalls[1].shard != "3" {
+		t.Errorf("second call=%+v", m.lwtCalls[1])
+	}
+}
+
+func TestObserverRecordLWTConflictNoSinkIsNoop(t *testing.T) {
+	// Logger-only observer: no Metrics sink. RecordLWTConflict must not panic.
+	obs, _ := newTestObserver(t, 100*time.Millisecond)
+	obs.RecordLWTConflict(context.Background(), "objects", "bkt", "0")
+
+	// nil receiver is also a no-op.
+	var nilObs *SlowQueryObserver
+	nilObs.RecordLWTConflict(context.Background(), "objects", "bkt", "0")
 }
 
 func TestQueryObserverErrorSpanFlipsStatus(t *testing.T) {

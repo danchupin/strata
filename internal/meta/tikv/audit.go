@@ -204,6 +204,66 @@ func (s *Store) ListAuditFiltered(ctx context.Context, f meta.AuditFilter) ([]me
 	return out, next, nil
 }
 
+// ListSlowQueries serves the US-003 slow-queries debug endpoint. The
+// TiKV layout has no native predicate index — the implementation scans
+// the audit prefix and filters in-process for rows whose TotalTimeMS
+// >= minMs and whose Time falls within the trailing `since` window.
+// Rows are sorted by TotalTimeMS desc; pagination uses EventID of the
+// last row as the next-page token.
+func (s *Store) ListSlowQueries(ctx context.Context, since time.Duration, minMs int, pageToken string) ([]meta.AuditEvent, string, error) {
+	const limit = 100
+	if since <= 0 {
+		since = 15 * time.Minute
+	}
+	if minMs < 0 {
+		minMs = 0
+	}
+	rows, err := s.scanAuditRange(ctx, []byte(prefixAuditLog), prefixEnd([]byte(prefixAuditLog)))
+	if err != nil {
+		return nil, "", err
+	}
+	now := time.Now().UTC()
+	cutoff := now.Add(-since)
+	filtered := rows[:0]
+	for _, r := range rows {
+		if r.TotalTimeMS < minMs {
+			continue
+		}
+		if r.Time.Before(cutoff) {
+			continue
+		}
+		filtered = append(filtered, r)
+	}
+	sort.Slice(filtered, func(i, j int) bool {
+		if filtered[i].TotalTimeMS != filtered[j].TotalTimeMS {
+			return filtered[i].TotalTimeMS > filtered[j].TotalTimeMS
+		}
+		if !filtered[i].Time.Equal(filtered[j].Time) {
+			return filtered[i].Time.After(filtered[j].Time)
+		}
+		return filtered[i].EventID > filtered[j].EventID
+	})
+	out := make([]meta.AuditEvent, 0, limit)
+	started := pageToken == ""
+	for _, e := range filtered {
+		if !started {
+			if e.EventID == pageToken {
+				started = true
+			}
+			continue
+		}
+		out = append(out, e)
+		if len(out) >= limit {
+			break
+		}
+	}
+	next := ""
+	if len(out) >= limit {
+		next = out[len(out)-1].EventID
+	}
+	return out, next, nil
+}
+
 // ListAuditPartitionsBefore returns every (bucket, day) partition whose
 // day is strictly older than the UTC day containing `before`. The
 // audit-export worker uses this to enumerate fully-aged partitions

@@ -61,6 +61,7 @@ func (s *Server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
 		NodeCountHealthy: healthy,
 		MetaBackend:      s.MetaBackend,
 		DataBackend:      s.DataBackend,
+		OtelEndpoint:     s.OtelEndpoint,
 	})
 }
 

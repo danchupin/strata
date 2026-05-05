@@ -17,10 +17,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/danchupin/strata/internal/auditstream"
 	"github.com/danchupin/strata/internal/auth"
 	"github.com/danchupin/strata/internal/heartbeat"
 	"github.com/danchupin/strata/internal/leader"
 	"github.com/danchupin/strata/internal/meta"
+	"github.com/danchupin/strata/internal/otel/ringbuf"
 	"github.com/danchupin/strata/internal/promclient"
 )
 
@@ -50,6 +52,10 @@ type Server struct {
 	// PrometheusURL surfaces on GET /admin/v1/settings (US-019); empty
 	// when STRATA_PROMETHEUS_URL is unset.
 	PrometheusURL string
+	// OtelEndpoint mirrors OTEL_EXPORTER_OTLP_ENDPOINT and surfaces on
+	// GET /admin/v1/cluster/status (US-006) so the trace browser can render
+	// the "Open in Jaeger" deep link only when an OTLP collector is wired.
+	OtelEndpoint string
 	// HeartbeatInterval echoes heartbeat.DefaultInterval into the Settings
 	// view so operators can verify the cadence without grepping the source.
 	HeartbeatInterval time.Duration
@@ -87,6 +93,30 @@ type Server struct {
 	S3Handler http.Handler
 	Logger    *log.Logger
 
+	// AuditStream is the in-process pub-sub fan-out backing
+	// GET /admin/v1/audit/stream (US-001). Wired by serverapp; nil disables
+	// the SSE endpoint with 503 Unavailable.
+	AuditStream *auditstream.Broadcaster
+	// AuditStreamKeepAliveInterval overrides the default 25s SSE keep-alive
+	// ping cadence. Set by tests; production uses the default.
+	AuditStreamKeepAliveInterval time.Duration
+
+	// TraceRingbuf is the in-process OTel trace ring buffer (US-005)
+	// backing GET /admin/v1/diagnostics/trace/{requestID}. nil disables
+	// the endpoint with 503 RingbufUnavailable.
+	TraceRingbuf *ringbuf.RingBuffer
+
+	// hotBucketsMu guards lazy initialisation of hotBucketsCacheVal — the
+	// 30s TTL cache that absorbs burst polls of /admin/v1/diagnostics/
+	// hot-buckets (US-007).
+	hotBucketsMu       sync.Mutex
+	hotBucketsCacheVal *hotBucketsCache
+
+	// hotShardsMu guards lazy initialisation of hotShardsCacheVal — the
+	// 30s TTL cache for /admin/v1/diagnostics/hot-shards/{bucket} (US-009).
+	hotShardsMu       sync.Mutex
+	hotShardsCacheVal *hotShardsCache
+
 	// jobsMu guards background-job goroutines. Currently only the
 	// force-empty drain (US-002) registers here; we cancel the goroutine
 	// on Server shutdown so a graceful drain doesn't outlive the gateway.
@@ -122,6 +152,10 @@ type Config struct {
 	JWTSecretFile string
 	// PrometheusURL is echoed into GET /admin/v1/settings (US-019).
 	PrometheusURL string
+	// OtelEndpoint mirrors OTEL_EXPORTER_OTLP_ENDPOINT — surfaced on
+	// GET /admin/v1/cluster/status (US-006) so the trace browser UI can
+	// gate its "Open in Jaeger" link.
+	OtelEndpoint string
 	// HeartbeatInterval mirrors heartbeat.DefaultInterval; surfaced on the
 	// Settings page Cluster tab.
 	HeartbeatInterval time.Duration
@@ -148,6 +182,12 @@ type Config struct {
 	// Complete / Abort handlers forward through it so the existing
 	// multipart finalisation logic stays the single source of truth.
 	S3Handler http.Handler
+	// AuditStream is the live audit-tail broadcaster passed in by serverapp;
+	// the same handle is given to s3api.AuditMiddleware as the publisher.
+	AuditStream *auditstream.Broadcaster
+	// TraceRingbuf is the in-process OTel trace ring buffer (US-005). nil
+	// disables the trace browser endpoint with 503 RingbufUnavailable.
+	TraceRingbuf *ringbuf.RingBuffer
 }
 
 // New constructs a Server. Started defaults to now. JWTSecret empty means
@@ -174,6 +214,7 @@ func New(c Config) *Server {
 		JWTEphemeral:         c.JWTEphemeral,
 		JWTSecretFile:        c.JWTSecretFile,
 		PrometheusURL:        c.PrometheusURL,
+		OtelEndpoint:         c.OtelEndpoint,
 		HeartbeatInterval:    c.HeartbeatInterval,
 		ConsoleThemeDefault:  c.ConsoleThemeDefault,
 		CassandraSettings:    c.CassandraSettings,
@@ -183,6 +224,8 @@ func New(c Config) *Server {
 		AuditTTL:             c.AuditTTL,
 		InvalidateCredential: c.InvalidateCredential,
 		S3Handler:            c.S3Handler,
+		AuditStream:          c.AuditStream,
+		TraceRingbuf:         c.TraceRingbuf,
 		Logger:               log.Default(),
 	}
 }
@@ -263,6 +306,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /admin/v1/buckets/{bucket}/logging", s.handleBucketDeleteLogging)
 	mux.HandleFunc("GET /admin/v1/buckets/top", s.handleBucketsTop)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}", s.handleBucketGet)
+	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/distribution", s.handleBucketDistribution)
+	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/replication-lag", s.handleBucketReplicationLag)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/objects", s.handleObjectsList)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/object", s.handleObjectGet)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/object-versions", s.handleObjectVersions)
@@ -306,6 +351,12 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /admin/v1/multipart/abort", s.handleMultipartAbort)
 	mux.HandleFunc("GET /admin/v1/audit", s.handleAuditList)
 	mux.HandleFunc("GET /admin/v1/audit.csv", s.handleAuditCSV)
+	mux.HandleFunc("GET /admin/v1/audit/stream", s.handleAuditStream)
+	mux.HandleFunc("GET /admin/v1/diagnostics/slow-queries", s.handleDiagnosticsSlowQueries)
+	mux.HandleFunc("GET /admin/v1/diagnostics/trace/{requestID}", s.handleDiagnosticsTrace)
+	mux.HandleFunc("GET /admin/v1/diagnostics/hot-buckets", s.handleDiagnosticsHotBuckets)
+	mux.HandleFunc("GET /admin/v1/diagnostics/hot-shards/{bucket}", s.handleDiagnosticsHotShards)
+	mux.HandleFunc("GET /admin/v1/diagnostics/node/{nodeID}", s.handleDiagnosticsNode)
 	mux.HandleFunc("GET /admin/v1/settings", s.handleGetSettings)
 	mux.HandleFunc("GET /admin/v1/settings/data-backend", s.handleGetSettingsDataBackend)
 	mux.HandleFunc("POST /admin/v1/settings/jwt/rotate", s.handleRotateJWTSecret)

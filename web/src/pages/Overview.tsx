@@ -1,3 +1,4 @@
+import { Suspense, lazy, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { AlertCircle, Database, Server } from 'lucide-react';
 
@@ -7,6 +8,14 @@ import {
   type ClusterNode,
   type ClusterStatus,
 } from '@/api/client';
+
+// NodeDetailDrawer pulls recharts (~110 KiB gz). Lazy-load so the home page
+// does not pay the recharts bundle cost until the operator clicks a node row.
+const NodeDetailDrawer = lazy(() =>
+  import('@/components/NodeDetailDrawer').then((m) => ({
+    default: m.NodeDetailDrawer,
+  })),
+);
 import { queryKeys } from '@/lib/query';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -222,9 +231,11 @@ function BackendChips({ status }: { status: ClusterStatus | null }) {
 function NodesTable({
   nodes,
   loading,
+  onSelect,
 }: {
   nodes: ClusterNode[];
   loading: boolean;
+  onSelect: (n: ClusterNode) => void;
 }) {
   return (
     <Card>
@@ -269,7 +280,19 @@ function NodesTable({
                   </TableRow>
                 ))}
               {nodes.map((n) => (
-                <TableRow key={n.id}>
+                <TableRow
+                  key={n.id}
+                  className="cursor-pointer hover:bg-muted/50"
+                  onClick={() => onSelect(n)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      onSelect(n);
+                    }
+                  }}
+                >
                   <TableCell className="pl-4 font-medium sm:pl-6">{n.id}</TableCell>
                   <TableCell className="font-mono text-xs">
                     {n.address || '—'}
@@ -324,6 +347,7 @@ export function OverviewPage() {
       : null;
   const sorted = sortedNodes(nodes);
   const heartbeatEmpty = !loading && nodes.length === 0;
+  const [drilldown, setDrilldown] = useState<ClusterNode | null>(null);
 
   return (
     <div className="space-y-6">
@@ -362,12 +386,25 @@ export function OverviewPage() {
         </Card>
       )}
 
-      <NodesTable nodes={sorted} loading={loading} />
+      <NodesTable nodes={sorted} loading={loading} onSelect={setDrilldown} />
 
       <div className="grid gap-6 xl:grid-cols-2">
         <TopBucketsCard />
         <TopConsumersCard />
       </div>
+
+      {drilldown && (
+        <Suspense fallback={null}>
+          <NodeDetailDrawer
+            node={drilldown}
+            open={drilldown !== null}
+            onOpenChange={(open) => {
+              if (!open) setDrilldown(null);
+            }}
+            metaBackend={status?.meta_backend}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }

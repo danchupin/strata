@@ -47,6 +47,7 @@ type recordingMetrics struct {
 	completed map[string]int
 	failed    map[string]int
 	depth     map[string]int
+	age       map[string]float64
 }
 
 func newRecordingMetrics() *recordingMetrics {
@@ -55,6 +56,7 @@ func newRecordingMetrics() *recordingMetrics {
 		completed: make(map[string]int),
 		failed:    make(map[string]int),
 		depth:     make(map[string]int),
+		age:       make(map[string]float64),
 	}
 }
 
@@ -80,6 +82,12 @@ func (m *recordingMetrics) SetQueueDepth(rule string, depth int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.depth[rule] = depth
+}
+
+func (m *recordingMetrics) SetQueueAge(bucket string, age float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.age[bucket] = age
 }
 
 type harness struct {

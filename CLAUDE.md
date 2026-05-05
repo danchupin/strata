@@ -224,17 +224,24 @@ with errors log WARN with `request_id`/`table`/`op`/`duration_ms`/`statement`. `
 `logging.RequestIDFromContext(ctx)` so per-query/per-op lines correlate with the gateway request. The RADOS observer
 helper lives in a build-tag-free file so it's unit-testable without librados; the ceph-tagged backend calls it.
 
-OpenTelemetry tracing: `internal/otel.Init(ctx)` reads `OTEL_EXPORTER_OTLP_ENDPOINT` (W3C-spec env var) and
-returns a `*Provider`. Empty endpoint installs a `tracenoop.NewTracerProvider` and a no-op Shutdown so callers stay
-nil-free. Endpoint set builds an OTLP/HTTP exporter wrapped in a tail-sampling `SpanProcessor`
+OpenTelemetry tracing: `internal/otel.Init(ctx, InitOptions{Logger, RingbufMetrics})` reads
+`OTEL_EXPORTER_OTLP_ENDPOINT` (W3C-spec env var), `STRATA_OTEL_SAMPLE_RATIO`, and the ring-buffer toggle
+(`STRATA_OTEL_RINGBUF` default `on`, `STRATA_OTEL_RINGBUF_BYTES` default 4 MiB) and returns a `*Provider`.
+Empty endpoint + ringbuf disabled installs a `tracenoop.NewTracerProvider` and a no-op Shutdown so callers
+stay nil-free. Endpoint set builds an OTLP/HTTP exporter wrapped in a tail-sampling `SpanProcessor`
 (`internal/otel/sampler.go`) — sampling decides at OnEnd, so failing spans (`status=Error` OR
-`http.status_code` >= 500) always export regardless of `STRATA_OTEL_SAMPLE_RATIO` (default 0.01). The HTTP
+`http.status_code` >= 500) always export regardless of `STRATA_OTEL_SAMPLE_RATIO` (default 0.01). When the
+ring buffer is on, `internal/otel/ringbuf.RingBuffer` is registered as a parallel SpanProcessor so it
+retains every span (regardless of sample ratio) under a bytes-budgeted LRU; the
+`/admin/v1/diagnostics/trace/{requestID}` admin endpoint reads it via `Provider.Ringbuf()`. The HTTP
 middleware `internal/otel.NewMiddleware(provider, next)` extracts traceparent via the global propagator,
-starts a server-kind span named `<METHOD> <path>`, captures status via a `responseWriter` shim and marks the
-span Error on >= 500. Wired in `internal/serverapp/serverapp.go` ahead of the logging middleware so the span
-covers the full request including auth/access-log/audit. **semconv import version must match the SDK's
-`resource.Default()` schema URL** — SDK 1.41 → `semconv/v1.39.0`; mismatch fails at runtime with
-"conflicting Schema URL". Bump together when bumping the SDK.
+starts a server-kind span named `<METHOD> <path>`, captures status via a `responseWriter` shim, marks the
+span Error on >= 500, and stamps `request_id` on the span (read from `r.Header["X-Request-Id"]` after the
+inner logging middleware has set it) so the ring buffer can index by request id. Wired in
+`internal/serverapp/serverapp.go` ahead of the logging middleware so the span covers the full request
+including auth/access-log/audit. **semconv import version must match the SDK's `resource.Default()`
+schema URL** — SDK 1.41 → `semconv/v1.39.0`; mismatch fails at runtime with "conflicting Schema URL".
+Bump together when bumping the SDK.
 
 Per-storage span emission piggybacks on the existing observer hooks. `cassandra.SessionConfig.Tracer`
 plugs a `trace.Tracer` into `SlowQueryObserver`; the observer emits one client-kind child span per

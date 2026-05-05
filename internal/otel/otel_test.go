@@ -39,11 +39,12 @@ func TestRatioFromEnvParses(t *testing.T) {
 func TestInitNoEndpointInstallsNoopProvider(t *testing.T) {
 	t.Setenv(EnvEndpoint, "")
 	t.Setenv(EnvSampleRatio, "")
+	t.Setenv(EnvRingbuf, "off")
 
 	prev := otel.GetTracerProvider()
 	t.Cleanup(func() { otel.SetTracerProvider(prev) })
 
-	p, err := Init(context.Background())
+	p, err := Init(context.Background(), InitOptions{})
 	if err != nil {
 		t.Fatalf("init: %v", err)
 	}
@@ -238,10 +239,11 @@ func TestNoEndpointMiddlewareEmitsNoSpansViaExporter(t *testing.T) {
 	// (the noop tracer provider returns non-recording spans).
 	t.Setenv(EnvEndpoint, "")
 	t.Setenv(EnvSampleRatio, "")
+	t.Setenv(EnvRingbuf, "off")
 	prev := otel.GetTracerProvider()
 	t.Cleanup(func() { otel.SetTracerProvider(prev) })
 
-	p, err := Init(context.Background())
+	p, err := Init(context.Background(), InitOptions{})
 	if err != nil {
 		t.Fatalf("init: %v", err)
 	}

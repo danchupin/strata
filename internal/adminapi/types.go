@@ -15,6 +15,11 @@ type ClusterStatus struct {
 	NodeCountHealthy int    `json:"node_count_healthy"`
 	MetaBackend      string `json:"meta_backend"`
 	DataBackend      string `json:"data_backend"`
+	// OtelEndpoint mirrors OTEL_EXPORTER_OTLP_ENDPOINT. When non-empty the
+	// trace browser UI (US-006) renders an "Open in Jaeger" deep link so
+	// operators can pivot from the in-process ring buffer to the long-term
+	// trace store. Omitted from the response when unset.
+	OtelEndpoint string `json:"otel_endpoint,omitempty"`
 }
 
 // CreateBucketRequest is the JSON body accepted by POST /admin/v1/buckets.
@@ -73,6 +78,16 @@ type BucketDetail struct {
 	SizeBytes      int64  `json:"size_bytes"`
 	ObjectCount    int64  `json:"object_count"`
 	BackendPresign bool   `json:"backend_presign"`
+	// ShardCount is the active sharding factor for the bucket's `objects`
+	// table partition (Cassandra/TiKV: hash(key)%N → partition). Surfaced so
+	// the Hot Shards drill panel can reconstruct shard from key client-side
+	// using FNV-1a, matching `internal/meta/cassandra/store.go::shardOf`.
+	ShardCount int `json:"shard_count"`
+	// ReplicationConfigured is true when the bucket has a non-empty
+	// replication configuration (set via PutBucketReplication). The UI uses
+	// this flag to gate the per-bucket Replication tab (US-014); only buckets
+	// with a configuration get the tab.
+	ReplicationConfigured bool `json:"replication_configured"`
 }
 
 // SetBackendPresignRequest is the JSON body accepted by PUT /admin/v1/buckets/

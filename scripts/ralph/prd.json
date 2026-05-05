@@ -18,7 +18,7 @@
         "Tests pass — Broadcaster fan-out test (multi-subscriber, slow-subscriber drop, ctx cancel) + handler test asserting SSE framing shape"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -37,7 +37,7 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -53,7 +53,7 @@
         "Tests pass — meta storetest contract case + handler unit test"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -72,7 +72,7 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -89,7 +89,7 @@
         "Tests pass — ringbuf bytes-budget + LRU eviction order + per-trace span cap + handler 200/404 cases"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -107,7 +107,7 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -125,7 +125,7 @@
         "Tests pass — fake `promclient.Client` matrix response + cache-hit second call asserts no second Prom call"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -144,7 +144,7 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -160,7 +160,7 @@
         "Tests pass — observer label emission test + handler test (RADOS-backend matrix shape, s3-backend empty-state shape, Prom-unset 503)"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -176,7 +176,7 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -194,7 +194,7 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 11,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -209,7 +209,7 @@
         "Typecheck passes"
       ],
       "priority": 12,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -225,7 +225,7 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 13,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -243,7 +243,7 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 14,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -262,7 +262,7 @@
         "Tests pass"
       ],
       "priority": 15,
-      "passes": false,
+      "passes": true,
       "notes": ""
     }
   ]

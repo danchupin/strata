@@ -73,16 +73,24 @@ func ParseAuditRetention(s string) (time.Duration, error) {
 	return time.ParseDuration(s)
 }
 
+// AuditPublisher fans out persisted audit rows to live subscribers — wired
+// to internal/auditstream.Broadcaster in serverapp. Optional: nil disables
+// the publish step on the audit-write path.
+type AuditPublisher interface {
+	Publish(*meta.AuditEvent)
+}
+
 // AuditMiddleware appends one audit_log row per state-changing HTTP request
 // (US-022). Read-only requests (GET/HEAD) and OPTIONS preflight are skipped.
 // The row carries the request_id installed by logging.Middleware so audit and
 // access logs correlate. Best-effort: meta failures are swallowed so a flaky
 // audit path never fails the underlying request.
 type AuditMiddleware struct {
-	Meta meta.Store
-	Next http.Handler
-	TTL  time.Duration
-	Now  func() time.Time
+	Meta      meta.Store
+	Next      http.Handler
+	TTL       time.Duration
+	Now       func() time.Time
+	Publisher AuditPublisher
 }
 
 // NewAuditMiddleware wraps next so each state-changing request is appended to
@@ -96,15 +104,17 @@ func (m *AuditMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if now == nil {
 		now = time.Now
 	}
+	start := now()
 	rw := &auditWriter{ResponseWriter: w, status: http.StatusOK}
 	innerCtx, ov := withAuditOverride(r.Context())
 	m.Next.ServeHTTP(rw, r.WithContext(innerCtx))
+	totalMS := int(now().Sub(start) / time.Millisecond)
 
 	if !auditableMethod(r.Method) {
 		return
 	}
 	if ov.Action != "" {
-		m.recordOverride(r, rw, ov, now)
+		m.recordOverride(r, rw, ov, now, totalMS)
 		return
 	}
 	bucket, key := splitPath(r.URL.Path)
@@ -126,21 +136,24 @@ func (m *AuditMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		storedBucket = "-"
 	}
 	entry := &meta.AuditEvent{
-		BucketID:  bucketID,
-		Bucket:    storedBucket,
-		Time:      now().UTC(),
-		Principal: principalFromContext(r),
-		Action:    deriveAuditAction(r.Method, bucket, key, q, iamAction),
-		Resource:  deriveAuditResource(bucket, key, iamAction),
-		Result:    strconv.Itoa(rw.status),
-		RequestID: logging.RequestIDFromContext(ctx),
-		SourceIP:  clientSourceIP(r),
-		UserAgent: r.UserAgent(),
+		BucketID:    bucketID,
+		Bucket:      storedBucket,
+		Time:        now().UTC(),
+		Principal:   principalFromContext(r),
+		Action:      deriveAuditAction(r.Method, bucket, key, q, iamAction),
+		Resource:    deriveAuditResource(bucket, key, iamAction),
+		Result:      strconv.Itoa(rw.status),
+		RequestID:   logging.RequestIDFromContext(ctx),
+		SourceIP:    clientSourceIP(r),
+		UserAgent:   r.UserAgent(),
+		TotalTimeMS: totalMS,
 	}
 	if entry.RequestID == "" {
 		entry.RequestID = r.Header.Get(logging.HeaderRequestID)
 	}
-	_ = m.Meta.EnqueueAudit(ctx, entry, m.TTL)
+	if err := m.Meta.EnqueueAudit(ctx, entry, m.TTL); err == nil && m.Publisher != nil {
+		m.Publisher.Publish(entry)
+	}
 }
 
 // recordOverride emits an audit row built from the AuditOverride that the
@@ -148,7 +161,7 @@ func (m *AuditMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // inspection is skipped because admin endpoints sit at /admin/v1/* and the
 // resource string the operator cares about is supplied verbatim by the
 // handler.
-func (m *AuditMiddleware) recordOverride(r *http.Request, rw *auditWriter, ov *AuditOverride, now func() time.Time) {
+func (m *AuditMiddleware) recordOverride(r *http.Request, rw *auditWriter, ov *AuditOverride, now func() time.Time, totalMS int) {
 	ctx := r.Context()
 	var bucketID uuid.UUID
 	storedBucket := ov.Bucket
@@ -161,21 +174,24 @@ func (m *AuditMiddleware) recordOverride(r *http.Request, rw *auditWriter, ov *A
 		storedBucket = "-"
 	}
 	entry := &meta.AuditEvent{
-		BucketID:  bucketID,
-		Bucket:    storedBucket,
-		Time:      now().UTC(),
-		Principal: ov.Principal,
-		Action:    ov.Action,
-		Resource:  ov.Resource,
-		Result:    strconv.Itoa(rw.status),
-		RequestID: logging.RequestIDFromContext(ctx),
-		SourceIP:  clientSourceIP(r),
-		UserAgent: r.UserAgent(),
+		BucketID:    bucketID,
+		Bucket:      storedBucket,
+		Time:        now().UTC(),
+		Principal:   ov.Principal,
+		Action:      ov.Action,
+		Resource:    ov.Resource,
+		Result:      strconv.Itoa(rw.status),
+		RequestID:   logging.RequestIDFromContext(ctx),
+		SourceIP:    clientSourceIP(r),
+		UserAgent:   r.UserAgent(),
+		TotalTimeMS: totalMS,
 	}
 	if entry.RequestID == "" {
 		entry.RequestID = r.Header.Get(logging.HeaderRequestID)
 	}
-	_ = m.Meta.EnqueueAudit(ctx, entry, m.TTL)
+	if err := m.Meta.EnqueueAudit(ctx, entry, m.TTL); err == nil && m.Publisher != nil {
+		m.Publisher.Publish(entry)
+	}
 }
 
 func auditableMethod(method string) bool {

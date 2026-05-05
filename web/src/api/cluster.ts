@@ -12,6 +12,10 @@ export interface ClusterStatus {
   node_count_healthy: number;
   meta_backend: string;
   data_backend: string;
+  // otel_endpoint mirrors OTEL_EXPORTER_OTLP_ENDPOINT — present (non-empty)
+  // when an OTLP collector is wired on the gateway. The trace browser uses
+  // it to render the "Open in Jaeger" deep link only when set.
+  otel_endpoint?: string;
 }
 
 export interface ClusterNode {

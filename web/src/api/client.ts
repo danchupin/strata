@@ -84,6 +84,15 @@ export interface BucketDetail {
   size_bytes: number;
   object_count: number;
   backend_presign: boolean;
+  // shard_count is the active sharding factor for the bucket's `objects`
+  // table partition. The Hot Shards drill panel reproduces shard via
+  // FNV-1a(key) % shard_count to match the Go shardOf helper.
+  shard_count: number;
+  // replication_configured is true when the bucket has a non-empty
+  // replication configuration (set via PutBucketReplication on the S3
+  // surface). Gates the per-bucket Replication tab (US-014) — only buckets
+  // with a configuration get the tab.
+  replication_configured?: boolean;
 }
 
 export interface CreateBucketBody {
@@ -1530,4 +1539,284 @@ export async function rotateJWTSecret(): Promise<RotateJWTResponse> {
   });
   if (!resp.ok) throw await buildAdminError(resp, 'rotate JWT secret failed');
   return (await resp.json()) as RotateJWTResponse;
+}
+
+// US-005 — OTel trace ring buffer. The wire shape mirrors ringbuf.Trace
+// (internal/otel/ringbuf/ringbuf.go). Spans land in the order the SDK fired
+// OnEnd; the UI reorders for the waterfall (root first, depth-first).
+export interface TraceSpan {
+  span_id: string;
+  parent?: string;
+  name: string;
+  start_ns: number;
+  end_ns: number;
+  status: 'OK' | 'Error' | 'Unset' | string;
+  attributes?: Record<string, unknown>;
+}
+
+export interface TraceDoc {
+  trace_id: string;
+  request_id?: string;
+  root?: string;
+  spans: TraceSpan[];
+}
+
+// fetchTrace pulls a single trace from the in-process ring buffer. Returns
+// null on 404 NotFound (request id has aged out / never seen) so the page
+// can render an empty-state without forcing the caller to catch.
+// AdminApiError on other 4xx/5xx (e.g. RingbufUnavailable 503) so the UI
+// can surface the {code, message} pair.
+export async function fetchTrace(idOrRequestID: string): Promise<TraceDoc | null> {
+  const resp = await fetch(
+    `/admin/v1/diagnostics/trace/${encodeURIComponent(idOrRequestID)}`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (resp.status === 404) return null;
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch trace failed');
+  const body = (await resp.json()) as TraceDoc;
+  return { ...body, spans: body.spans ?? [] };
+}
+
+// US-003 — slow-queries diagnostics. The wire shape mirrors slowQueriesResponse
+// in internal/adminapi/diagnostics_slow_queries.go. The handler returns rows
+// sorted by latency_ms DESC and a base64 page-token continuation cursor.
+export interface SlowQueryRow {
+  ts: string;
+  bucket: string;
+  bucket_id: string;
+  op: string;
+  latency_ms: number;
+  status: number;
+  request_id: string;
+  principal: string;
+  source_ip: string;
+  object_key: string;
+}
+
+export interface SlowQueriesResponse {
+  rows: SlowQueryRow[];
+  next_page_token: string;
+}
+
+export interface SlowQueriesQuery {
+  since?: string;
+  minMs?: number;
+  pageToken?: string;
+}
+
+export async function fetchSlowQueries(
+  q: SlowQueriesQuery,
+): Promise<SlowQueriesResponse> {
+  const usp = new URLSearchParams();
+  if (q.since) usp.set('since', q.since);
+  if (q.minMs != null) usp.set('min_ms', String(q.minMs));
+  if (q.pageToken) usp.set('page_token', q.pageToken);
+  const qs = usp.toString();
+  const resp = await fetch(
+    `/admin/v1/diagnostics/slow-queries${qs ? `?${qs}` : ''}`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch slow queries failed');
+  const body = (await resp.json()) as SlowQueriesResponse;
+  return { rows: body.rows ?? [], next_page_token: body.next_page_token ?? '' };
+}
+
+// US-007 — Hot Buckets matrix. Wire shape mirrors HotBucketsResponse in
+// internal/adminapi/diagnostics_hot_buckets.go. Each series is one bucket
+// with a list of (timestamp, value) points across the requested range.
+export interface HotBucketPoint {
+  ts: string;
+  value: number;
+}
+
+export interface HotBucketSeries {
+  bucket: string;
+  values: HotBucketPoint[];
+}
+
+export interface HotBucketsResponse {
+  matrix: HotBucketSeries[];
+}
+
+export interface HotBucketsQuery {
+  range: string;
+  step: string;
+}
+
+// fetchHotBuckets pulls the per-bucket request-rate matrix. 503
+// `MetricsUnavailable` (Prom not configured) is preserved as an
+// AdminApiError so the page can render the empty-state card by branching
+// on `error.code === 'MetricsUnavailable'`.
+export async function fetchHotBuckets(
+  q: HotBucketsQuery,
+): Promise<HotBucketsResponse> {
+  const usp = new URLSearchParams();
+  usp.set('range', q.range);
+  usp.set('step', q.step);
+  const resp = await fetch(
+    `/admin/v1/diagnostics/hot-buckets?${usp.toString()}`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch hot buckets failed');
+  const body = (await resp.json()) as HotBucketsResponse;
+  return { matrix: body.matrix ?? [] };
+}
+
+// US-013 — Bucket-Shard Distribution. Wire shape mirrors
+// BucketDistributionResponse in internal/adminapi/buckets_distribution.go.
+// One row per shard ID 0..N-1, contiguous and zero-filled when a shard has no
+// live objects — same data the bucketstats sampler emits via the
+// `strata_bucket_shard_{bytes,objects}` gauges.
+export interface BucketShardStat {
+  shard: number;
+  bytes: number;
+  objects: number;
+}
+
+export interface BucketDistributionResponse {
+  shards: BucketShardStat[];
+}
+
+export async function fetchBucketDistribution(
+  bucket: string,
+): Promise<BucketDistributionResponse> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(bucket)}/distribution`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch bucket distribution failed');
+  const body = (await resp.json()) as BucketDistributionResponse;
+  return { shards: body.shards ?? [] };
+}
+
+// US-014 — Per-bucket replication queue age time-series. Wire shape mirrors
+// BucketReplicationLagResponse in internal/adminapi/buckets_replication_lag.go.
+// When the bucket has no replication configuration the response is
+// `{empty: true}` and the UI tab hides itself.
+export interface BucketReplicationLagPoint {
+  ts: string;
+  value: number;
+}
+
+export interface BucketReplicationLagResponse {
+  empty?: boolean;
+  reason?: string;
+  values?: BucketReplicationLagPoint[];
+}
+
+export async function fetchBucketReplicationLag(
+  bucket: string,
+  range: string,
+): Promise<BucketReplicationLagResponse> {
+  const usp = new URLSearchParams();
+  usp.set('range', range);
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(bucket)}/replication-lag?${usp.toString()}`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch replication lag failed');
+  const body = (await resp.json()) as BucketReplicationLagResponse;
+  return {
+    empty: body.empty ?? false,
+    reason: body.reason ?? '',
+    values: body.values ?? [],
+  };
+}
+
+// US-009/US-010 — Hot Shards matrix for a single bucket. Wire shape mirrors
+// HotShardsResponse in internal/adminapi/diagnostics_hot_shards.go. When the
+// data backend is `s3` (no shards) the response shape is
+// `{empty: true, reason: ...}` and the UI renders an explainer card.
+export interface HotShardPoint {
+  ts: string;
+  value: number;
+}
+
+export interface HotShardSeries {
+  shard: string;
+  values: HotShardPoint[];
+}
+
+export interface HotShardsResponse {
+  empty?: boolean;
+  reason?: string;
+  matrix?: HotShardSeries[];
+}
+
+export interface HotShardsQuery {
+  bucket: string;
+  range: string;
+  step: string;
+}
+
+export async function fetchHotShards(
+  q: HotShardsQuery,
+): Promise<HotShardsResponse> {
+  const usp = new URLSearchParams();
+  usp.set('range', q.range);
+  usp.set('step', q.step);
+  const resp = await fetch(
+    `/admin/v1/diagnostics/hot-shards/${encodeURIComponent(q.bucket)}?${usp.toString()}`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch hot shards failed');
+  const body = (await resp.json()) as HotShardsResponse;
+  return {
+    empty: body.empty ?? false,
+    reason: body.reason ?? '',
+    matrix: body.matrix ?? [],
+  };
+}
+
+// US-011 — per-node drilldown. Wire shape mirrors NodeDrilldownResponse in
+// internal/adminapi/diagnostics_node.go. The handler issues 5 PromQL queries
+// scoped by `instance="<node-address>"` and returns CPU / memory / open-FDs /
+// goroutines / GC-pause sparklines plus the heartbeat row for the drawer
+// header.
+export interface NodeMetricPoint {
+  ts: string;
+  value: number;
+}
+
+export interface NodeDrilldownNode {
+  id: string;
+  address: string;
+  version: string;
+  started_at: number;
+  uptime_sec: number;
+  status: string;
+  workers: string[];
+  leader_for: string[];
+  last_heartbeat: number;
+}
+
+export interface NodeDrilldownResponse {
+  node: NodeDrilldownNode;
+  cpu: NodeMetricPoint[];
+  mem: NodeMetricPoint[];
+  fds: NodeMetricPoint[];
+  goroutines: NodeMetricPoint[];
+  gc_pause: NodeMetricPoint[];
+}
+
+export async function fetchNodeDrilldown(
+  nodeID: string,
+  range: string,
+): Promise<NodeDrilldownResponse> {
+  const usp = new URLSearchParams();
+  usp.set('range', range);
+  const resp = await fetch(
+    `/admin/v1/diagnostics/node/${encodeURIComponent(nodeID)}?${usp.toString()}`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch node drilldown failed');
+  const body = (await resp.json()) as NodeDrilldownResponse;
+  return {
+    node: body.node,
+    cpu: body.cpu ?? [],
+    mem: body.mem ?? [],
+    fds: body.fds ?? [],
+    goroutines: body.goroutines ?? [],
+    gc_pause: body.gc_pause ?? [],
+  };
 }

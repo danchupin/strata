@@ -7,6 +7,9 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { LoginPage } from '@/pages/Login';
 import { OverviewPage } from '@/pages/Overview';
 import { AuditLogPage } from '@/pages/AuditLog';
+import { AuditTailPage } from '@/pages/AuditTail';
+import { HotBucketsPage } from '@/pages/HotBuckets';
+import { TraceBrowserPage } from '@/pages/TraceBrowser';
 import { BucketsPage } from '@/pages/Buckets';
 import { BucketDetailPage } from '@/pages/BucketDetail';
 import { ConsumersPage } from '@/pages/Consumers';
@@ -19,6 +22,12 @@ import { SettingsPage } from '@/pages/Settings';
 // navigates to /metrics — keeps the home-page initial bundle small.
 const MetricsPage = lazy(() =>
   import('@/pages/Metrics').then((m) => ({ default: m.MetricsPage })),
+);
+
+// SlowQueries also pulls in recharts (BarChart histogram) — lazy-load so the
+// /diagnostics surface only pays the bundle cost on demand.
+const SlowQueriesPage = lazy(() =>
+  import('@/pages/SlowQueries').then((m) => ({ default: m.SlowQueriesPage })),
 );
 
 function PageFallback() {
@@ -49,6 +58,18 @@ export function App() {
         <Route path="/iam/users/:userName" element={<IAMUserDetailPage />} />
         <Route path="/multipart" element={<MultipartPage />} />
         <Route path="/audit" element={<AuditLogPage />} />
+        <Route path="/diagnostics/audit-tail" element={<AuditTailPage />} />
+        <Route path="/diagnostics/trace" element={<TraceBrowserPage />} />
+        <Route path="/diagnostics/trace/:requestID" element={<TraceBrowserPage />} />
+        <Route path="/diagnostics/hot-buckets" element={<HotBucketsPage />} />
+        <Route
+          path="/diagnostics/slow-queries"
+          element={
+            <Suspense fallback={<PageFallback />}>
+              <SlowQueriesPage />
+            </Suspense>
+          }
+        />
         <Route
           path="/metrics"
           element={

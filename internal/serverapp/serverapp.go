@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	strataconsole "github.com/danchupin/strata"
 	"github.com/danchupin/strata/cmd/strata/workers"
 	"github.com/danchupin/strata/internal/adminapi"
+	"github.com/danchupin/strata/internal/auditstream"
 	"github.com/danchupin/strata/internal/auth"
 	"github.com/danchupin/strata/internal/bucketstats"
 	"github.com/danchupin/strata/internal/config"
@@ -54,7 +56,10 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	}
 	logger.Info("manifest encoder", "format", data.ManifestFormat())
 
-	tracerProvider, err := strataotel.Init(ctx)
+	tracerProvider, err := strataotel.Init(ctx, strataotel.InitOptions{
+		Logger:         logger,
+		RingbufMetrics: metrics.OTelRingbufObserver{},
+	})
 	if err != nil {
 		return fmt.Errorf("otel init: %w", err)
 	}
@@ -143,6 +148,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	}
 	adminLocker := buildLocker(cfg, metaStore)
 	auditTTL := auditRetention(logger)
+	auditBroadcaster := auditstream.New(logger, metrics.AuditStreamObserver{})
 	adminServer := adminapi.New(adminapi.Config{
 		Meta:                 metaStore,
 		Creds:                multi,
@@ -158,6 +164,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		JWTEphemeral:         jwtEphemeral,
 		JWTSecretFile:        jwtFile,
 		PrometheusURL:        os.Getenv("STRATA_PROMETHEUS_URL"),
+		OtelEndpoint:         os.Getenv(strataotel.EnvEndpoint),
 		HeartbeatInterval:    heartbeat.DefaultInterval,
 		ConsoleThemeDefault:  consoleThemeDefault(),
 		CassandraSettings:    cassandraSettings(cfg),
@@ -167,6 +174,8 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		AuditTTL:             auditTTL,
 		InvalidateCredential: multi.Invalidate,
 		S3Handler:            apiHandler,
+		AuditStream:          auditBroadcaster,
+		TraceRingbuf:         tracerProvider.Ringbuf(),
 	})
 
 	mux := http.NewServeMux()
@@ -174,8 +183,11 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	mux.HandleFunc("/healthz", healthHandler.Healthz)
 	mux.HandleFunc("/readyz", healthHandler.Readyz)
 	mux.Handle("/console/", strataconsole.ConsoleHandler())
-	mux.Handle("/admin/v1/", s3api.NewAuditMiddleware(metaStore, auditTTL, adminServer.Handler()))
+	adminAudit := s3api.NewAuditMiddleware(metaStore, auditTTL, adminServer.Handler())
+	adminAudit.Publisher = auditBroadcaster
+	mux.Handle("/admin/v1/", adminAudit)
 	auditHandler := s3api.NewAuditMiddleware(metaStore, auditTTL, apiHandler)
+	auditHandler.Publisher = auditBroadcaster
 	mux.Handle("/", strataotel.NewMiddleware(tracerProvider, logging.NewMiddleware(logger, metrics.ObserveHTTP(mw.Wrap(s3api.NewAccessLogMiddleware(metaStore, auditHandler), s3api.WriteAuthDenied)))))
 
 	srv := &http.Server{
@@ -200,9 +212,11 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 
 	go func() {
 		sampler := &bucketstats.Sampler{
-			Meta:   metaStore,
-			Sink:   metrics.BucketStatsObserver{},
-			Logger: logger,
+			Meta:      metaStore,
+			Sink:      metrics.BucketStatsObserver{},
+			ShardSink: metrics.BucketStatsObserver{},
+			Logger:    logger,
+			TopN:      bucketStatsTopN(logger),
 		}
 		if err := sampler.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			logger.Warn("bucketstats", "error", err.Error())
@@ -353,6 +367,30 @@ func awsKMSClientFactory(region string) (kms.KMSAPI, error) {
 		return nil, err
 	}
 	return awskms.NewFromConfig(cfg), nil
+}
+
+// bucketStatsTopN reads STRATA_BUCKETSTATS_TOPN and returns the cap for the
+// per-shard distribution sampling pass (US-012). Falls back to
+// bucketstats.DefaultTopN on unset / parse error / non-positive value.
+func bucketStatsTopN(logger *slog.Logger) int {
+	v := strings.TrimSpace(os.Getenv("STRATA_BUCKETSTATS_TOPN"))
+	if v == "" {
+		return bucketstats.DefaultTopN
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		logger.Warn("bucketstats topN parse failed; using default",
+			"value", v, "default", bucketstats.DefaultTopN, "error", errString(err))
+		return bucketstats.DefaultTopN
+	}
+	return n
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // auditRetention reads STRATA_AUDIT_RETENTION (Go duration or "<N>d") and

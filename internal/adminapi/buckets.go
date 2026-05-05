@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/danchupin/strata/internal/meta"
 	"github.com/danchupin/strata/internal/promclient"
 )
@@ -311,16 +313,33 @@ func (s *Server) handleBucketGet(w http.ResponseWriter, r *http.Request) {
 	}
 	size, count := bucketSizeAndCount(r.Context(), s.Meta, b)
 	writeJSON(w, http.StatusOK, BucketDetail{
-		Name:           b.Name,
-		Owner:          b.Owner,
-		Region:         s.Region,
-		CreatedAt:      b.CreatedAt.Unix(),
-		Versioning:     versioningLabel(b.Versioning),
-		ObjectLock:     b.ObjectLockEnabled,
-		SizeBytes:      size,
-		ObjectCount:    count,
-		BackendPresign: b.BackendPresign,
+		Name:                  b.Name,
+		Owner:                 b.Owner,
+		Region:                s.Region,
+		CreatedAt:             b.CreatedAt.Unix(),
+		Versioning:            versioningLabel(b.Versioning),
+		ObjectLock:            b.ObjectLockEnabled,
+		SizeBytes:             size,
+		ObjectCount:           count,
+		BackendPresign:        b.BackendPresign,
+		ShardCount:            b.ShardCount,
+		ReplicationConfigured: bucketHasReplication(r.Context(), s.Meta, b.ID),
 	})
+}
+
+// bucketHasReplication probes meta.Store.GetBucketReplication; returns false
+// on ErrNoSuchReplication (the common case) and on any unexpected error so
+// the bucket detail handler never 500s on a transient meta error here. The
+// per-bucket Replication tab (US-014) gates on this flag.
+func bucketHasReplication(ctx context.Context, store meta.Store, bucketID uuid.UUID) bool {
+	if store == nil {
+		return false
+	}
+	blob, err := store.GetBucketReplication(ctx, bucketID)
+	if err != nil {
+		return false
+	}
+	return len(blob) > 0
 }
 
 // versioningLabel maps the meta.Versioning* enum to the operator-facing

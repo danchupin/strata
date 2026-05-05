@@ -25,10 +25,22 @@ import (
 // "metrics unavailable" state, not a crash.
 var ErrUnavailable = errors.New("prometheus unavailable")
 
+// DefaultMaxInflight caps concurrent in-flight Prometheus HTTP requests. A
+// burst of admin-console viewers (hot-buckets, hot-shards, slow-queries
+// dashboards) all polling the same Prom instance should not be able to
+// exhaust the upstream's connection budget. 10 is loose enough for normal
+// polling cadences (≥30s) and tight enough that a thundering herd backs off.
+const DefaultMaxInflight = 10
+
 // Client speaks PromQL against a Prometheus-compatible HTTP endpoint.
 type Client struct {
 	BaseURL string
 	HTTP    *http.Client
+	// sem is a buffered channel acting as a counting semaphore that caps
+	// the number of concurrent in-flight Query/QueryRange calls. Allocated
+	// by New; nil-safe (an unconfigured Client just degrades to ErrUnavailable
+	// before reaching the HTTP path).
+	sem chan struct{}
 }
 
 // New returns a Client. baseURL may be empty — Available() will then return
@@ -37,6 +49,22 @@ func New(baseURL string) *Client {
 	return &Client{
 		BaseURL: baseURL,
 		HTTP:    &http.Client{Timeout: 5 * time.Second},
+		sem:     make(chan struct{}, DefaultMaxInflight),
+	}
+}
+
+// acquire blocks until a slot in the in-flight semaphore is free or ctx is
+// cancelled. Returns the matching release fn. nil sem (zero-value Client) is
+// a no-op so unit tests that build Client literals stay one-line.
+func (c *Client) acquire(ctx context.Context) (release func(), err error) {
+	if c == nil || c.sem == nil {
+		return func() {}, nil
+	}
+	select {
+	case c.sem <- struct{}{}:
+		return func() { <-c.sem }, nil
+	case <-ctx.Done():
+		return func() {}, ctx.Err()
 	}
 }
 
@@ -59,6 +87,11 @@ func (c *Client) Query(ctx context.Context, expr string) ([]Sample, error) {
 	if !c.Available() {
 		return nil, ErrUnavailable
 	}
+	release, err := c.acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+	defer release()
 	q := url.Values{}
 	q.Set("query", expr)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/api/v1/query?"+q.Encode(), nil)
@@ -103,6 +136,11 @@ func (c *Client) QueryRange(ctx context.Context, expr string, start, end time.Ti
 	if !c.Available() {
 		return nil, ErrUnavailable
 	}
+	release, err := c.acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+	defer release()
 	q := url.Values{}
 	q.Set("query", expr)
 	q.Set("start", strconv.FormatFloat(float64(start.Unix()), 'f', -1, 64))

@@ -25,8 +25,14 @@ const DefaultSlowQueryMS = 100
 // Metrics is the narrow callback the QueryObserver fans out to so the
 // cassandra package never imports prometheus directly. The cmd binary plugs in
 // an adapter (e.g. metrics.CassandraObserver) when registering metrics.
+//
+// IncLWTConflict is called by the Store at LWT call sites that observe
+// applied=false. The (bucket, shard) labels back the Hot Shards heatmap
+// (US-009). bucket carries the bucket name when resolvable, else the
+// bucket-id UUID string.
 type Metrics interface {
 	ObserveQuery(table, op string, duration time.Duration, err error)
+	IncLWTConflict(table, bucket, shard string)
 }
 
 // SlowQueryObserver implements gocql.QueryObserver. Queries that exceed
@@ -113,6 +119,18 @@ func (o *SlowQueryObserver) ObserveQuery(ctx context.Context, q gocql.ObservedQu
 		attrs = append(attrs, "error", q.Err.Error())
 	}
 	o.Logger.WarnContext(ctx, "cassandra: slow query", attrs...)
+}
+
+// RecordLWTConflict is called by the Store when an LWT (compare-and-set)
+// query returned applied=false. It fans out to the Metrics sink (so the
+// CassandraLWTConflictsTotal counter on the prometheus side gets the
+// {table, bucket, shard} labels needed by the Hot Shards heatmap, US-009).
+// No-op when Metrics is nil.
+func (o *SlowQueryObserver) RecordLWTConflict(_ context.Context, table, bucket, shard string) {
+	if o == nil || o.Metrics == nil {
+		return
+	}
+	o.Metrics.IncLWTConflict(table, bucket, shard)
 }
 
 // emitSpan creates a child span timestamped to (q.Start, q.End). Span name

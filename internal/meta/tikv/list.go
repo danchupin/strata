@@ -3,6 +3,7 @@ package tikv
 import (
 	"bytes"
 	"context"
+	"hash/fnv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -130,6 +131,75 @@ func (s *Store) ListObjects(ctx context.Context, bucketID uuid.UUID, opts meta.L
 		cursor = append(append([]byte(nil), last...), 0x00)
 	}
 	return res, nil
+}
+
+// SampleBucketShardStats walks the bucket's object prefix once, picks the
+// latest non-delete-marker version per key, and groups its byte size into the
+// shard computed via fnv-1a(key) % shardCount — same hash the cassandra layout
+// uses so the per-shard distribution is comparable across backends. Native
+// ordered range scan; no fan-out required (US-012).
+func (s *Store) SampleBucketShardStats(ctx context.Context, bucketID uuid.UUID, shardCount int) (map[int]meta.ShardStat, error) {
+	if shardCount <= 0 {
+		return nil, nil
+	}
+	txn, err := s.kv.Begin(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	defer txn.Rollback()
+
+	start := ObjectPrefix(bucketID)
+	end := prefixEnd(start)
+
+	out := make(map[int]meta.ShardStat, shardCount)
+	var lastKey string
+	firstKey := true
+
+	cursor := start
+	for {
+		pairs, err := txn.Scan(ctx, cursor, end, listScanBatchSize)
+		if err != nil {
+			return nil, err
+		}
+		if len(pairs) == 0 {
+			break
+		}
+		for _, p := range pairs {
+			_, key, _, decErr := DecodeObjectKey(p.Key)
+			if decErr != nil {
+				return nil, decErr
+			}
+			if !firstKey && key == lastKey {
+				continue
+			}
+			firstKey = false
+			lastKey = key
+			obj, decObjErr := decodeObject(p.Value)
+			if decObjErr != nil {
+				return nil, decObjErr
+			}
+			if obj.IsDeleteMarker {
+				continue
+			}
+			shard := shardFromKey(key, shardCount)
+			st := out[shard]
+			st.Bytes += obj.Size
+			st.Objects++
+			out[shard] = st
+		}
+		if len(pairs) < listScanBatchSize {
+			break
+		}
+		last := pairs[len(pairs)-1].Key
+		cursor = append(append([]byte(nil), last...), 0x00)
+	}
+	return out, nil
+}
+
+func shardFromKey(key string, n int) int {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(key))
+	return int(h.Sum32() % uint32(n))
 }
 
 // AllObjectVersions returns every stored version across every key in the
