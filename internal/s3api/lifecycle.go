@@ -22,6 +22,15 @@ func (s *Server) putBucketLifecycle(w http.ResponseWriter, r *http.Request, buck
 		writeError(w, r, ErrMalformedXML)
 		return
 	}
+	cfg, parseErr := lifecycle.Parse(body)
+	if parseErr != nil {
+		writeError(w, r, ErrMalformedXML)
+		return
+	}
+	if vErr := cfg.Validate(); vErr != nil {
+		writeError(w, r, APIError{Code: "InvalidArgument", Message: vErr.Error(), Status: http.StatusBadRequest})
+		return
+	}
 	if err := s.Meta.SetBucketLifecycle(r.Context(), b.ID, body); err != nil {
 		mapMetaErr(w, r, err)
 		return
@@ -33,21 +42,15 @@ func (s *Server) putBucketLifecycle(w http.ResponseWriter, r *http.Request, buck
 	// derived state. Translation failures log WARN and do NOT fail the
 	// user request — the worker keeps owning everything.
 	if lb, ok := s.Data.(data.LifecycleBackend); ok {
-		cfg, parseErr := lifecycle.Parse(body)
-		if parseErr != nil {
-			slog.Warn("s3 lifecycle backend translation: parse failed",
-				"bucket", bucket, "err", parseErr)
-		} else {
-			rules := translateLifecycleRules(cfg)
-			skipped, err := lb.PutBackendLifecycle(r.Context(), b.ID.String()+"/", rules)
-			if err != nil {
-				slog.Warn("s3 lifecycle backend translation: push failed",
-					"bucket", bucket, "err", err)
-			}
-			for _, id := range skipped {
-				slog.Warn("s3 lifecycle backend translation: rule kept on strata worker (non-native transition)",
-					"bucket", bucket, "rule", id)
-			}
+		rules := translateLifecycleRules(cfg)
+		skipped, err := lb.PutBackendLifecycle(r.Context(), b.ID.String()+"/", rules)
+		if err != nil {
+			slog.Warn("s3 lifecycle backend translation: push failed",
+				"bucket", bucket, "err", err)
+		}
+		for _, id := range skipped {
+			slog.Warn("s3 lifecycle backend translation: rule kept on strata worker (non-native transition)",
+				"bucket", bucket, "rule", id)
 		}
 	}
 	w.WriteHeader(http.StatusOK)

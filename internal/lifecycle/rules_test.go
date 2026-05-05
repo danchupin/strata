@@ -97,3 +97,38 @@ func TestDisabledRuleIsNotEnabled(t *testing.T) {
 		t.Error("Disabled rule should not be enabled")
 	}
 }
+
+func TestValidateRejectsZeroDaysTransition(t *testing.T) {
+	blob := []byte(`<LifecycleConfiguration><Rule><ID>r</ID><Status>Enabled</Status><Transition><Days>0</Days><StorageClass>STANDARD_IA</StorageClass></Transition></Rule></LifecycleConfiguration>`)
+	cfg, err := Parse(blob)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if vErr := cfg.Validate(); vErr == nil {
+		t.Fatal("expected Validate to reject Days=0 on Transition")
+	}
+}
+
+func TestValidateRejectsZeroDaysExpiration(t *testing.T) {
+	blob := []byte(`<LifecycleConfiguration><Rule><ID>r</ID><Status>Enabled</Status><Expiration><Days>0</Days></Expiration></Rule></LifecycleConfiguration>`)
+	cfg, _ := Parse(blob)
+	if vErr := cfg.Validate(); vErr == nil {
+		t.Fatal("expected Validate to reject Days=0 on Expiration")
+	}
+}
+
+func TestValidateAllowsExpiredObjectDeleteMarkerWithoutDays(t *testing.T) {
+	blob := []byte(`<LifecycleConfiguration><Rule><ID>r</ID><Status>Enabled</Status><Expiration><ExpiredObjectDeleteMarker>true</ExpiredObjectDeleteMarker></Expiration></Rule></LifecycleConfiguration>`)
+	cfg, _ := Parse(blob)
+	if vErr := cfg.Validate(); vErr != nil {
+		t.Fatalf("Validate should accept ExpiredObjectDeleteMarker without Days: %v", vErr)
+	}
+}
+
+func TestValidateAcceptsPositiveDays(t *testing.T) {
+	blob := []byte(`<LifecycleConfiguration><Rule><ID>r</ID><Status>Enabled</Status><Transition><Days>30</Days><StorageClass>STANDARD_IA</StorageClass></Transition><Expiration><Days>365</Days></Expiration></Rule></LifecycleConfiguration>`)
+	cfg, _ := Parse(blob)
+	if vErr := cfg.Validate(); vErr != nil {
+		t.Fatalf("Validate should accept positive Days: %v", vErr)
+	}
+}

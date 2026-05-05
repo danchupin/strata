@@ -65,6 +65,49 @@ func Parse(blob []byte) (*Configuration, error) {
 	return &cfg, nil
 }
 
+// Validate checks the lifecycle configuration for AWS-compatible
+// constraints that the worker silently skips. Returns nil when the config
+// is acceptable; otherwise an error suitable for surfacing as
+// `InvalidArgument` on PutBucketLifecycleConfiguration.
+//
+// AWS rejects Days=0 (and negative values) with `InvalidArgument` for both
+// `Transition` and `Expiration`. Without this check Strata used to accept
+// the bad config and the worker would skip the rule on every tick — the
+// operator saw no error but transitions never fired.
+func (c *Configuration) Validate() error {
+	for i := range c.Rules {
+		r := &c.Rules[i]
+		if r.Transition != nil && r.Transition.StorageClass != "" {
+			if r.Transition.Days < 1 {
+				return errors.New("'Days' for Transition action must be a positive integer")
+			}
+		}
+		if r.Expiration != nil {
+			// Expiration may be ExpiredObjectDeleteMarker-only with Days=0;
+			// only the Days-positive case requires the gate.
+			if !r.Expiration.ExpiredObjectDeleteMarker && r.Expiration.Days < 1 {
+				return errors.New("'Days' for Expiration action must be a positive integer")
+			}
+		}
+		if r.NoncurrentVersionTransition != nil && r.NoncurrentVersionTransition.StorageClass != "" {
+			if r.NoncurrentVersionTransition.NoncurrentDays < 1 {
+				return errors.New("'NoncurrentDays' for NoncurrentVersionTransition must be a positive integer")
+			}
+		}
+		if r.NoncurrentVersionExpiration != nil {
+			if r.NoncurrentVersionExpiration.NoncurrentDays < 1 {
+				return errors.New("'NoncurrentDays' for NoncurrentVersionExpiration must be a positive integer")
+			}
+		}
+		if r.AbortIncompleteMultipartUpload != nil {
+			if r.AbortIncompleteMultipartUpload.DaysAfterInitiation < 1 {
+				return errors.New("'DaysAfterInitiation' for AbortIncompleteMultipartUpload must be a positive integer")
+			}
+		}
+	}
+	return nil
+}
+
 func (r *Rule) IsEnabled() bool {
 	return strings.EqualFold(r.Status, "Enabled")
 }
