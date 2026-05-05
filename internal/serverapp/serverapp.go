@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -211,9 +212,11 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 
 	go func() {
 		sampler := &bucketstats.Sampler{
-			Meta:   metaStore,
-			Sink:   metrics.BucketStatsObserver{},
-			Logger: logger,
+			Meta:      metaStore,
+			Sink:      metrics.BucketStatsObserver{},
+			ShardSink: metrics.BucketStatsObserver{},
+			Logger:    logger,
+			TopN:      bucketStatsTopN(logger),
 		}
 		if err := sampler.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			logger.Warn("bucketstats", "error", err.Error())
@@ -364,6 +367,30 @@ func awsKMSClientFactory(region string) (kms.KMSAPI, error) {
 		return nil, err
 	}
 	return awskms.NewFromConfig(cfg), nil
+}
+
+// bucketStatsTopN reads STRATA_BUCKETSTATS_TOPN and returns the cap for the
+// per-shard distribution sampling pass (US-012). Falls back to
+// bucketstats.DefaultTopN on unset / parse error / non-positive value.
+func bucketStatsTopN(logger *slog.Logger) int {
+	v := strings.TrimSpace(os.Getenv("STRATA_BUCKETSTATS_TOPN"))
+	if v == "" {
+		return bucketstats.DefaultTopN
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		logger.Warn("bucketstats topN parse failed; using default",
+			"value", v, "default", bucketstats.DefaultTopN, "error", errString(err))
+		return bucketstats.DefaultTopN
+	}
+	return n
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // auditRetention reads STRATA_AUDIT_RETENTION (Go duration or "<N>d") and

@@ -246,6 +246,56 @@ func TestExposedMetricNames(t *testing.T) {
 	}
 }
 
+func TestBucketShardObserverSetsAndResets(t *testing.T) {
+	BucketShardBytes.Reset()
+	BucketShardObjects.Reset()
+	var obs BucketStatsObserver
+	obs.SetBucketShardBytes("bkt", 0, 1000)
+	obs.SetBucketShardBytes("bkt", 1, 2000)
+	obs.SetBucketShardObjects("bkt", 0, 5)
+	obs.SetBucketShardObjects("bkt", 1, 7)
+	obs.SetBucketShardBytes("other", 0, 99)
+
+	if v := gaugeValue(t, BucketShardBytes.WithLabelValues("bkt", "0")); v != 1000 {
+		t.Fatalf("bkt|0 bytes: %v", v)
+	}
+	if v := gaugeValue(t, BucketShardBytes.WithLabelValues("bkt", "1")); v != 2000 {
+		t.Fatalf("bkt|1 bytes: %v", v)
+	}
+	if v := gaugeValue(t, BucketShardObjects.WithLabelValues("bkt", "0")); v != 5 {
+		t.Fatalf("bkt|0 objects: %v", v)
+	}
+
+	// Reset wipes only the requested bucket's series.
+	obs.ResetBucketShard("bkt")
+	for _, shard := range []string{"0", "1"} {
+		ch := make(chan prometheus.Metric, 4)
+		BucketShardBytes.Collect(ch)
+		close(ch)
+		for m := range ch {
+			var dm dto.Metric
+			if err := m.Write(&dm); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			gotBucket, gotShard := "", ""
+			for _, lp := range dm.Label {
+				switch lp.GetName() {
+				case "bucket":
+					gotBucket = lp.GetValue()
+				case "shard":
+					gotShard = lp.GetValue()
+				}
+			}
+			if gotBucket == "bkt" && gotShard == shard {
+				t.Fatalf("expected bkt|%s wiped after reset; still present", shard)
+			}
+		}
+	}
+	if v := gaugeValue(t, BucketShardBytes.WithLabelValues("other", "0")); v != 99 {
+		t.Fatalf("unrelated series clobbered: %v", v)
+	}
+}
+
 // TestHandlerExposesProcessAndGoMetrics asserts the prometheus default
 // registerer exposes the standard process collector + go collector metrics
 // the per-node drilldown (US-011) reads. client_golang auto-registers them

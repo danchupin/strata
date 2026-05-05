@@ -126,6 +126,22 @@ var (
 		[]string{"bucket", "storage_class"},
 	)
 
+	BucketShardBytes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "strata_bucket_shard_bytes",
+			Help: "Total object bytes per (bucket, shard) for the top-N largest buckets (US-012). Backs the Distribution tab (US-013). Cardinality bound: top-N buckets * shard_count.",
+		},
+		[]string{"bucket", "shard"},
+	)
+
+	BucketShardObjects = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "strata_bucket_shard_objects",
+			Help: "Total object count per (bucket, shard) for the top-N largest buckets (US-012). Backs the Distribution tab (US-013). Cardinality bound: top-N buckets * shard_count.",
+		},
+		[]string{"bucket", "shard"},
+	)
+
 	LifecycleTickTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "strata_lifecycle_tick_total",
@@ -191,6 +207,8 @@ func Register() {
 		GCQueueDepth,
 		MultipartActive,
 		BucketBytes,
+		BucketShardBytes,
+		BucketShardObjects,
 		LifecycleTickTotal,
 		NotifyDeliveryTotal,
 		WorkerPanicTotal,
@@ -341,6 +359,36 @@ func (BucketStatsObserver) SetBucketBytes(bucket, class string, bytes int64) {
 		class = "STANDARD"
 	}
 	BucketBytes.WithLabelValues(bucket, class).Set(float64(bytes))
+}
+
+// SetBucketShardBytes / SetBucketShardObjects publish per-shard distribution
+// gauges populated by the bucketstats sampler for the top-N buckets (US-012).
+// shard is the integer partition index; the label is stringified once at the
+// adapter so prometheus stays string-typed.
+func (BucketStatsObserver) SetBucketShardBytes(bucket string, shard int, bytes int64) {
+	if bucket == "" {
+		bucket = "unknown"
+	}
+	BucketShardBytes.WithLabelValues(bucket, strconv.Itoa(shard)).Set(float64(bytes))
+}
+
+func (BucketStatsObserver) SetBucketShardObjects(bucket string, shard int, objects int64) {
+	if bucket == "" {
+		bucket = "unknown"
+	}
+	BucketShardObjects.WithLabelValues(bucket, strconv.Itoa(shard)).Set(float64(objects))
+}
+
+// ResetBucketShard removes per-(bucket, shard) gauge series so a freshly
+// dropped-from-top-N bucket does not linger as stale data in the
+// strata_bucket_shard_* metrics. The sampler invokes this between passes for
+// any bucket that exited the top-N window.
+func (BucketStatsObserver) ResetBucketShard(bucket string) {
+	if bucket == "" {
+		return
+	}
+	BucketShardBytes.DeletePartialMatch(prometheus.Labels{"bucket": bucket})
+	BucketShardObjects.DeletePartialMatch(prometheus.Labels{"bucket": bucket})
 }
 
 // AuditStreamObserver implements the auditstream.MetricsSink interface. The

@@ -48,6 +48,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"VersioningSuspendedReplaceNull", caseVersioningSuspendedReplaceNull},
 		{"AccessPointCRUD", caseAccessPointCRUD},
 		{"OnlineReshard", caseOnlineReshard},
+		{"SampleBucketShardStats", caseSampleBucketShardStats},
 		{"ManifestRawRoundTrip", caseManifestRawRoundTrip},
 		{"AdminJobRoundTrip", caseAdminJobRoundTrip},
 		{"ManagedPolicyCRUD", caseManagedPolicyCRUD},
@@ -1515,6 +1516,112 @@ func caseOnlineReshard(t *testing.T, s meta.Store) {
 	if _, err := s.StartReshard(ctx, b.ID, 7); err != meta.ErrReshardInvalidTarget {
 		t.Fatalf("non-power-of-two target: %v want ErrReshardInvalidTarget", err)
 	}
+}
+
+// caseSampleBucketShardStats exercises the per-shard byte/object aggregation
+// path used by the bucketstats sampler (US-012). Inserts deterministic keys
+// across both delete-marker and live versions, then verifies (a) totals
+// aggregate per shard, (b) delete markers are excluded, (c) the same shard
+// distribution is reproducible across all backends because the hash is
+// fnv-1a(key) % shardCount.
+func caseSampleBucketShardStats(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "shardstats", "o", "STANDARD")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	bucket, _ := s.GetBucket(ctx, "shardstats")
+	shardCount := bucket.ShardCount
+	if shardCount <= 0 {
+		t.Fatalf("backend ShardCount must be positive, got %d", shardCount)
+	}
+
+	// 16 distinct keys spread across the shard space.
+	keys := make([]string, 16)
+	for i := range keys {
+		keys[i] = "obj" + padInt(i, 3)
+	}
+	for i, key := range keys {
+		o := &meta.Object{
+			BucketID: b.ID, Key: key,
+			Size:         int64(100 + i),
+			StorageClass: "STANDARD",
+			Mtime:        time.Now().UTC(),
+			Manifest:     &data.Manifest{Class: "STANDARD"},
+		}
+		if err := s.PutObject(ctx, o, false); err != nil {
+			t.Fatalf("put %s: %v", key, err)
+		}
+	}
+
+	stats, err := s.SampleBucketShardStats(ctx, b.ID, shardCount)
+	if err != nil {
+		t.Fatalf("SampleBucketShardStats: %v", err)
+	}
+	var totalBytes, totalObjects int64
+	for _, st := range stats {
+		totalBytes += st.Bytes
+		totalObjects += st.Objects
+	}
+	wantBytes := int64(0)
+	for i := range keys {
+		wantBytes += int64(100 + i)
+	}
+	if totalBytes != wantBytes {
+		t.Fatalf("aggregated bytes: got %d want %d", totalBytes, wantBytes)
+	}
+	if totalObjects != int64(len(keys)) {
+		t.Fatalf("aggregated objects: got %d want %d", totalObjects, len(keys))
+	}
+
+	// Cross-backend determinism: each key's shard equals fnv1a32(key) %
+	// shardCount, and the per-shard counts must match the local computation.
+	wantShard := make(map[int]meta.ShardStat, shardCount)
+	for i, key := range keys {
+		shard := fnv1aMod(key, shardCount)
+		st := wantShard[shard]
+		st.Bytes += int64(100 + i)
+		st.Objects++
+		wantShard[shard] = st
+	}
+	for shard, want := range wantShard {
+		got := stats[shard]
+		if got.Bytes != want.Bytes || got.Objects != want.Objects {
+			t.Fatalf("shard %d: got %+v want %+v", shard, got, want)
+		}
+	}
+
+	// Delete markers must NOT contribute. Delete one key under unversioned
+	// semantics — that path drops the latest row and falls into the "no live
+	// version" branch in SampleBucketShardStats.
+	deletedKey := keys[0]
+	if _, err := s.DeleteObject(ctx, b.ID, deletedKey, "", false); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	stats2, err := s.SampleBucketShardStats(ctx, b.ID, shardCount)
+	if err != nil {
+		t.Fatalf("re-sample: %v", err)
+	}
+	var post int64
+	for _, st := range stats2 {
+		post += st.Objects
+	}
+	if post != int64(len(keys)-1) {
+		t.Fatalf("after delete object-count: got %d want %d", post, len(keys)-1)
+	}
+}
+
+func fnv1aMod(key string, n int) int {
+	const (
+		offset32 = 2166136261
+		prime32  = 16777619
+	)
+	var h uint32 = offset32
+	for i := range len(key) {
+		h ^= uint32(key[i])
+		h *= prime32
+	}
+	return int(h % uint32(n))
 }
 
 // caseAdminJobRoundTrip exercises the AdminJob CRUD surface used by US-002

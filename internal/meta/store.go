@@ -450,6 +450,16 @@ type ReshardJob struct {
 	UpdatedAt time.Time
 }
 
+// ShardStat is a per-shard byte+object total returned by
+// SampleBucketShardStats. The bucketstats sampler emits these via
+// strata_bucket_shard_{bytes,objects} gauges so the Bucket-Shard
+// Distribution UI (US-013) can spot key-distribution skew before it bites.
+// Only the latest non-delete-marker version of each key contributes.
+type ShardStat struct {
+	Bytes   int64
+	Objects int64
+}
+
 // AccessPoint is a named, account-scoped binding to a single bucket carrying
 // its own optional bucket policy and PublicAccessBlock configuration. Created
 // via the [iam root]-gated ?Action=CreateAccessPoint endpoint (US-040). Name
@@ -510,6 +520,14 @@ type Store interface {
 	DeleteObjectNullReplacement(ctx context.Context, bucketID uuid.UUID, key string) (*Object, error)
 	ListObjects(ctx context.Context, bucketID uuid.UUID, opts ListOptions) (*ListResult, error)
 	ListObjectVersions(ctx context.Context, bucketID uuid.UUID, opts ListOptions) (*ListVersionsResult, error)
+	// SampleBucketShardStats returns per-shard byte/object totals for the
+	// bucket. Only the latest non-delete-marker version of each key
+	// contributes. shardCount must equal bucket.ShardCount; backends use
+	// it to scope per-shard SELECTs (cassandra) or to compute the
+	// destination shard from the key (memory, tikv). Used by the
+	// bucketstats sampler to publish strata_bucket_shard_bytes /
+	// strata_bucket_shard_objects (US-012).
+	SampleBucketShardStats(ctx context.Context, bucketID uuid.UUID, shardCount int) (map[int]ShardStat, error)
 
 	SetObjectStorage(ctx context.Context, bucketID uuid.UUID, key, versionID, expectedClass, newClass string, manifest *data.Manifest) (applied bool, err error)
 

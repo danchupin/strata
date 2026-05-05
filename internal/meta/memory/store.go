@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"hash/fnv"
 	"maps"
 	"sort"
 	"strings"
@@ -965,6 +966,49 @@ func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versi
 	delete(bucket, key)
 	cp := *latest
 	return &cp, nil
+}
+
+// SampleBucketShardStats walks the in-process bucket map, picks the latest
+// non-delete-marker version per key, and groups its byte size into the shard
+// computed via fnv-1a(key) % shardCount — matching the cassandra layout so
+// per-shard distributions are comparable across backends.
+func (s *Store) SampleBucketShardStats(ctx context.Context, bucketID uuid.UUID, shardCount int) (map[int]meta.ShardStat, error) {
+	if shardCount <= 0 {
+		return nil, nil
+	}
+	s.mu.RLock()
+	bucket, ok := s.objects[bucketID]
+	if !ok {
+		s.mu.RUnlock()
+		return nil, meta.ErrBucketNotFound
+	}
+	out := make(map[int]meta.ShardStat, shardCount)
+	for key, versions := range bucket {
+		if err := ctx.Err(); err != nil {
+			s.mu.RUnlock()
+			return nil, err
+		}
+		if len(versions) == 0 {
+			continue
+		}
+		latest := versions[0]
+		if latest.IsDeleteMarker {
+			continue
+		}
+		shard := shardOf(key, shardCount)
+		st := out[shard]
+		st.Bytes += latest.Size
+		st.Objects++
+		out[shard] = st
+	}
+	s.mu.RUnlock()
+	return out, nil
+}
+
+func shardOf(key string, n int) int {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(key))
+	return int(h.Sum32() % uint32(n))
 }
 
 // ScanObjects satisfies meta.RangeScanStore. The in-process tree-map iterates

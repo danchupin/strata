@@ -917,6 +917,75 @@ func (s *Store) AllObjectVersions(ctx context.Context, bucketID uuid.UUID) ([]*m
 	return out, nil
 }
 
+// SampleBucketShardStats issues one `SELECT key, version_id, is_delete_marker,
+// size FROM objects WHERE bucket_id=? AND shard=?` per shard, picks the latest
+// (highest version_id) non-delete-marker row per key, and returns the per-shard
+// byte/object totals. Per-partition scan keeps cardinality bounded; no
+// ALLOW FILTERING. Used by the bucketstats sampler (US-012).
+func (s *Store) SampleBucketShardStats(ctx context.Context, bucketID uuid.UUID, shardCount int) (map[int]meta.ShardStat, error) {
+	if shardCount <= 0 {
+		shardCount = s.defaultShard
+	}
+	out := make(map[int]meta.ShardStat, shardCount)
+	for shard := 0; shard < shardCount; shard++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		iter := s.s.Query(
+			`SELECT key, version_id, is_delete_marker, size
+			 FROM objects WHERE bucket_id=? AND shard=?`,
+			gocqlUUID(bucketID), shard,
+		).WithContext(ctx).PageSize(2000).Iter()
+		var (
+			key            string
+			versionID      gocql.UUID
+			isDeleteMarker bool
+			size           int64
+
+			lastKey         string
+			haveLast        bool
+			latestVersion   gocql.UUID
+			latestSize      int64
+			latestIsDelete  bool
+		)
+		flush := func() {
+			if !haveLast {
+				return
+			}
+			if !latestIsDelete {
+				st := out[shard]
+				st.Bytes += latestSize
+				st.Objects++
+				out[shard] = st
+			}
+			haveLast = false
+		}
+		for iter.Scan(&key, &versionID, &isDeleteMarker, &size) {
+			if !haveLast || key != lastKey {
+				flush()
+				lastKey = key
+				latestVersion = versionID
+				latestSize = size
+				latestIsDelete = isDeleteMarker
+				haveLast = true
+				continue
+			}
+			// Same key — clustering order is version_id DESC so the first row
+			// is already the latest. Defensive: keep the higher version_id.
+			if versionID.String() > latestVersion.String() {
+				latestVersion = versionID
+				latestSize = size
+				latestIsDelete = isDeleteMarker
+			}
+		}
+		flush()
+		if err := iter.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
 type versionCursor struct {
 	iter    *gocql.Iter
 	current *meta.Object
