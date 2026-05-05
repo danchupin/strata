@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/danchupin/strata/internal/auth"
 	"github.com/danchupin/strata/internal/crypto/kms"
 	"github.com/danchupin/strata/internal/crypto/master"
@@ -538,6 +540,15 @@ func (s *Server) listObjects(w http.ResponseWriter, r *http.Request, bucket stri
 	var res *meta.ListResult
 	if hasMaxKeys && maxKeys == 0 {
 		res = &meta.ListResult{}
+	} else if delim != "" {
+		// US-005: fold delimiter+prefix at the response-shape layer so the
+		// CommonPrefix dedup, marker filter, and NextMarker shape match the
+		// AWS spec exactly (last emitted item, not the unadded next item).
+		res, err = s.listObjectsFolded(r.Context(), b.ID, opts, maxKeys)
+		if err != nil {
+			writeError(w, r, ErrInternal)
+			return
+		}
 	} else {
 		// US-012: prefer the optional RangeScanStore capability when the
 		// backend advertises it (memory + TiKV); fall through to the fan-out
@@ -607,6 +618,88 @@ func (s *Server) listObjects(w http.ResponseWriter, r *http.Request, bucket stri
 		resp.NextMarker = res.NextMarker
 	}
 	writeXML(w, http.StatusOK, resp)
+}
+
+// listObjectsFolded re-implements ListObjects' delimiter+prefix folding at
+// the response-shape layer (US-005). The meta backends accumulate
+// CommonPrefixes themselves, but they (a) re-emit prefixes already returned
+// in a prior page (no `pfx <= marker` filter), (b) set NextMarker to the
+// next-unadded item rather than the last-emitted item, and (c) over-truncate
+// when the limit is hit exactly on the boundary. Folding at s3api lets us
+// strip Delimiter from the meta call, request raw keys, and apply the AWS
+// semantics directly without touching the cassandra fan-out / heap-merge path.
+//
+// Truncation rule: emit up to maxKeys items; if a (maxKeys+1)th would-emit
+// is encountered, set Truncated=true and NextMarker to the lexically-last
+// item already emitted in this page (key OR CommonPrefix).
+func (s *Server) listObjectsFolded(ctx context.Context, bucketID uuid.UUID, opts meta.ListOptions, maxKeys int) (*meta.ListResult, error) {
+	res := &meta.ListResult{}
+	seenPrefixes := make(map[string]struct{})
+	delim := opts.Delimiter
+	prefix := opts.Prefix
+	marker := opts.Marker
+	cursor := marker
+	var lastEmitted string
+
+	const scanCap = 100000
+	scanned := 0
+
+	for scanned < scanCap {
+		scanOpts := meta.ListOptions{
+			Prefix: prefix,
+			Marker: cursor,
+			Limit:  1000,
+		}
+		var batch *meta.ListResult
+		var err error
+		if rs, ok := s.Meta.(meta.RangeScanStore); ok {
+			batch, err = rs.ScanObjects(ctx, bucketID, scanOpts)
+		} else {
+			batch, err = s.Meta.ListObjects(ctx, bucketID, scanOpts)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if len(batch.Objects) == 0 {
+			return res, nil
+		}
+		for _, obj := range batch.Objects {
+			scanned++
+			cursor = obj.Key
+			rest := obj.Key[len(prefix):]
+			if idx := strings.Index(rest, delim); idx >= 0 {
+				pfx := prefix + rest[:idx+len(delim)]
+				if marker != "" && pfx <= marker {
+					continue
+				}
+				if _, dup := seenPrefixes[pfx]; dup {
+					continue
+				}
+				if len(res.Objects)+len(res.CommonPrefixes) >= maxKeys {
+					res.Truncated = true
+					res.NextMarker = lastEmitted
+					return res, nil
+				}
+				seenPrefixes[pfx] = struct{}{}
+				res.CommonPrefixes = append(res.CommonPrefixes, pfx)
+				lastEmitted = pfx
+				continue
+			}
+			if len(res.Objects)+len(res.CommonPrefixes) >= maxKeys {
+				res.Truncated = true
+				res.NextMarker = lastEmitted
+				return res, nil
+			}
+			res.Objects = append(res.Objects, obj)
+			lastEmitted = obj.Key
+		}
+		if !batch.Truncated {
+			return res, nil
+		}
+	}
+	res.Truncated = true
+	res.NextMarker = lastEmitted
+	return res, nil
 }
 
 func maybeURLEncode(s, encodingType string) string {

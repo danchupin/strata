@@ -88,8 +88,8 @@
         "Tests pass"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Folded delimiter+prefix into a new s3api-layer helper `Server.listObjectsFolded` (internal/s3api/server.go). When delim != \"\", the gateway strips Delimiter from the meta call, requests raw keys (Limit=1000 batch, scan-cap=100k), and applies CommonPrefix dedup, the missing `pfx <= marker` filter, and AWS-spec NextMarker shape (last-emitted item, not next-unadded) directly. Cassandra fan-out / heap-merge path untouched per AC. Existing memory/cassandra/tikv backends still compute CommonPrefixes for the no-delim listObjects path and for ListObjectVersions, which doesn't share the same continuation semantics (NextKeyMarker shape). New tests TestListObjectsDelimiterPrefixV1 + TestListObjectsDelimiterPrefixEndsWithDelimiter mirror the upstream ceph s3-tests `validate_bucket_list` flow exactly."
     },
     {
       "id": "US-006",
