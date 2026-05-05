@@ -8,7 +8,6 @@ import {
   Search,
 } from 'lucide-react';
 
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from '@/components/ui/sheet';
@@ -140,9 +139,6 @@ export function AppShell() {
             <span className="truncate text-sm font-semibold tracking-tight" title={clusterName}>
               {clusterName}
             </span>
-            <Badge variant="outline" className="hidden sm:inline-flex">
-              Phase 1
-            </Badge>
           </div>
 
           <div className="ml-2 hidden flex-1 max-w-md md:flex">
@@ -153,7 +149,7 @@ export function AppShell() {
               />
               <Input
                 type="search"
-                placeholder="Search (coming in Phase 2)"
+                placeholder="Global search (coming soon)"
                 className="pl-8"
                 disabled
                 aria-label="Global search (disabled)"
