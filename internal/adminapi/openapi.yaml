@@ -121,6 +121,26 @@ components:
             (hash(key)%N). Surfaced for the Hot Shards drill panel which
             reconstructs shard from key client-side via FNV-1a.
 
+    BucketShardStat:
+      type: object
+      required: [shard, bytes, objects]
+      properties:
+        shard: { type: integer, description: "Shard ID (0..N-1)." }
+        bytes: { type: integer, format: int64 }
+        objects: { type: integer, format: int64 }
+
+    BucketDistributionResponse:
+      type: object
+      required: [shards]
+      properties:
+        shards:
+          type: array
+          items: { $ref: '#/components/schemas/BucketShardStat' }
+          description: |
+            One row per shard ID 0..N-1, contiguous and zero-filled when a
+            shard has no live objects. Same data the bucketstats sampler
+            emits via `strata_bucket_shard_{bytes,objects}` gauges.
+
     BucketTop:
       type: object
       required: [name]
@@ -419,6 +439,33 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/BucketDetail' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /buckets/{bucket}/distribution:
+    get:
+      summary: Per-shard byte/object distribution (US-013)
+      operationId: getBucketDistribution
+      description: |
+        Returns one row per shard ID 0..N-1 carrying live (latest
+        non-delete-marker) byte and object totals — same data the bucketstats
+        sampler emits via `strata_bucket_shard_{bytes,objects}` gauges. The
+        Bucket-Shard Distribution tab renders bytes-per-shard +
+        objects-per-shard side-by-side BarCharts and surfaces a skew banner
+        when `max(shard) / median(shard) > 5`. 404 NoSuchBucket when missing.
+      parameters:
+        - name: bucket
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Per-shard byte/object distribution.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BucketDistributionResponse' }
         '404':
           $ref: '#/components/responses/NotFound'
         '401':

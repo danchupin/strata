@@ -1657,6 +1657,33 @@ export async function fetchHotBuckets(
   return { matrix: body.matrix ?? [] };
 }
 
+// US-013 — Bucket-Shard Distribution. Wire shape mirrors
+// BucketDistributionResponse in internal/adminapi/buckets_distribution.go.
+// One row per shard ID 0..N-1, contiguous and zero-filled when a shard has no
+// live objects — same data the bucketstats sampler emits via the
+// `strata_bucket_shard_{bytes,objects}` gauges.
+export interface BucketShardStat {
+  shard: number;
+  bytes: number;
+  objects: number;
+}
+
+export interface BucketDistributionResponse {
+  shards: BucketShardStat[];
+}
+
+export async function fetchBucketDistribution(
+  bucket: string,
+): Promise<BucketDistributionResponse> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(bucket)}/distribution`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch bucket distribution failed');
+  const body = (await resp.json()) as BucketDistributionResponse;
+  return { shards: body.shards ?? [] };
+}
+
 // US-009/US-010 — Hot Shards matrix for a single bucket. Wire shape mirrors
 // HotShardsResponse in internal/adminapi/diagnostics_hot_shards.go. When the
 // data backend is `s3` (no shards) the response shape is

@@ -84,6 +84,7 @@ export const queryKeys = {
       ['buckets', 'object', name, key, versionID] as const,
     objectVersions: (name: string, key: string) =>
       ['buckets', 'object-versions', name, key] as const,
+    distribution: (name: string) => ['buckets', 'distribution', name] as const,
   },
   consumers: {
     top: (by: string, limit: number) => ['consumers', 'top', by, limit] as const,
