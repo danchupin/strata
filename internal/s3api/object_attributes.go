@@ -40,6 +40,7 @@ type objectAttrChecksums struct {
 	ChecksumSHA1      string `xml:"ChecksumSHA1,omitempty"`
 	ChecksumSHA256    string `xml:"ChecksumSHA256,omitempty"`
 	ChecksumCRC64NVME string `xml:"ChecksumCRC64NVME,omitempty"`
+	ChecksumType      string `xml:"ChecksumType,omitempty"`
 }
 
 type objectAttrParts struct {
@@ -110,6 +111,7 @@ func (s *Server) getObjectAttributes(w http.ResponseWriter, r *http.Request, b *
 	}
 	if _, ok := requested[objectAttrChecksum]; ok {
 		if c := buildChecksumAttrs(o.Checksums); c != nil {
+			c.ChecksumType = o.ChecksumType
 			resp.Checksum = c
 		}
 	}

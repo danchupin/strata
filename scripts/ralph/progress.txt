@@ -8,6 +8,21 @@ Cycle: ralph/s3-compat-90
 - Per-backend manifest construction lives inside `Store.CompleteMultipartUpload` in each meta backend (memory/cassandra/tikv). Shared shape goes through an exported helper in `internal/meta/store.go` (e.g. `meta.BuildPartRange`) so all three backends stay lockstep.
 - After editing `internal/data/manifest.proto`, regenerate via `protoc -I internal/data --go_out=. --go_opt=module=github.com/danchupin/strata internal/data/manifest.proto` (NOT `--go_opt=paths=source_relative` — that drops the file alongside the .proto, ignoring the `manifestpb` package directory).
 
+## 2026-05-05 - US-003 Per-part composite-checksum response shape
+- `internal/s3api/server.go::getObject`: ?partNumber=N + ChecksumMode=ENABLED now emits `x-amz-checksum-type` alongside the per-part digest. Matches AWS-parity for boto3 `response['ChecksumType']` round-trip; s3-tests `multipart_checksum_3parts_helper` (5 tests) asserts `response4['ChecksumType'] == checksum_type` on per-part GET.
+- `internal/s3api/object_attributes.go`: `objectAttrChecksums` gains a `ChecksumType` XML field; `getObjectAttributes` populates it from `o.ChecksumType`. The s3-tests helper checks `response3['Checksum']['ChecksumType']` on the GetObjectAttributes path.
+- `internal/s3api/multipart_partnumber_test.go::TestMultipartGetByPartNumberPerPartChecksum`: flipped assertion from "x-amz-checksum-type must be empty on partNumber GET" to "must equal COMPOSITE". The previous expectation was a deliberate stub — AWS S3 emits the label.
+- `internal/s3api/checksum_mode_test.go`: added `TestMultipartUseCksumHelperShape` mirroring the boto-side `multipart_checksum_3parts_helper` flow end-to-end (Initiate→PUT 3 parts→Complete→HEAD bare/ENABLED→GetObjectAttributes Checksum→GET partNumber=1..3 ENABLED). Verifies composite header, ChecksumType label, and per-part digest at every checkpoint.
+- Composite ChecksumCRC32/CRC32C/SHA1/SHA256/CRC64NVME body fields + ChecksumType on CompleteMultipartUploadResult were already shipped by US-024/US-025; no XML schema change needed.
+- Files changed: `internal/s3api/server.go`, `internal/s3api/object_attributes.go`, `internal/s3api/multipart_partnumber_test.go`, `internal/s3api/checksum_mode_test.go`, `scripts/ralph/prd.json`.
+- Tests: `go test ./internal/s3api/` green; full unit suite (`go test ./... -short`) green.
+- **Learnings for future iterations:**
+  - boto3 ≥1.36 default `response_checksum_validation: when_supported` auto-attaches `x-amz-checksum-mode: ENABLED` to GetObject/HeadObject. The per-part GET path therefore *will* see `ChecksumMode=ENABLED` from the s3-tests boto client even though the test code never sets it explicitly. Implementations gating on the header still work; emitting unconditionally is unnecessary.
+  - AWS S3 emits `x-amz-checksum-type` (the object-level label) on per-part GET responses, *not* per-part-specific. Per-part requests still surface the COMPOSITE/FULL_OBJECT label even though the digest itself is part-relative. Don't try to invent a per-part type.
+  - `s3-tests/test_s3.py:multipart_checksum_3parts_helper` is the canonical exerciser for the cksum-helper failures. It hits 7 endpoints in sequence (CreateMPU/UploadPart×3/Complete/HEAD bare/HEAD ENABLED/GetObjectAttributes/GetObject partNumber×3). All seven need the `ChecksumType` + `Checksum<algo>` shape — fixing one without the others leaves the test red.
+  - GetObjectAttributes' `<Checksum>` subtree includes `<ChecksumType>` (full_object/composite). Missing this XML field caused the boto-side `response3['Checksum']['ChecksumType']` to be absent. Add it via `objectAttrChecksums.ChecksumType` + populate from `o.ChecksumType`. Don't put it on `objectAttrParts` per-Part — that's a separate AWS shape.
+---
+
 ## 2026-05-05 - US-002 ?partNumber=N GET serves the exact part body
 - `internal/s3api/server.go::getObject`: ?partNumber=N now resolves Manifest.PartChunks first, falls back to PartSizes for legacy rows.
 - Bad N (out-of-range, non-numeric, ≤0, or ?partNumber on non-multipart) → 416 InvalidRange (matches AWS shape; PRD AC).

@@ -128,10 +128,11 @@ func TestMultipartGetByPartNumberPerPartChecksum(t *testing.T) {
 		if got := get.Header.Get(hdr); got != partB64[i] {
 			t.Errorf("part %d per-part checksum: got %q want %q", pn, got, partB64[i])
 		}
-		// ?partNumber requests do not surface the object-level checksum-type;
-		// the per-part raw digest is what the client gets.
-		if got := get.Header.Get("x-amz-checksum-type"); got != "" {
-			t.Errorf("part %d unexpected x-amz-checksum-type: %q", pn, got)
+		// AWS-parity: ?partNumber GET emits x-amz-checksum-type alongside the
+		// per-part digest so boto3 `response['ChecksumType']` round-trips —
+		// s3-tests `test_multipart_use_cksum_helper_*` depends on it.
+		if got := get.Header.Get("x-amz-checksum-type"); got != "COMPOSITE" {
+			t.Errorf("part %d x-amz-checksum-type: got %q want COMPOSITE", pn, got)
 		}
 		_, _ = io.Copy(io.Discard, get.Body)
 		_ = get.Body.Close()

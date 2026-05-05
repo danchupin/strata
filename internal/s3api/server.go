@@ -1120,6 +1120,13 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 				sums[partRange.ChecksumAlgorithm] = partRange.ChecksumValue
 			}
 			writeChecksumHeaders(w.Header(), sums)
+			// AWS-parity: ?partNumber= GET/HEAD echoes the object-level
+			// ChecksumType alongside the per-part digest so SDKs (boto3
+			// `response['ChecksumType']`) round-trip the COMPOSITE/FULL_OBJECT
+			// label. s3-tests `test_multipart_use_cksum_helper_*` asserts this.
+			if len(sums) > 0 && o.ChecksumType != "" {
+				w.Header().Set("x-amz-checksum-type", o.ChecksumType)
+			}
 		} else {
 			writeChecksumHeaders(w.Header(), o.Checksums)
 			if o.ChecksumType != "" {

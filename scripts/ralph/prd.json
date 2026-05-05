@@ -54,8 +54,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Composite ChecksumCRC32/CRC32C/SHA1/SHA256/CRC64NVME + ChecksumType already on CompleteMultipartUploadResult (US-024). HEAD without ChecksumMode hides headers (US-025). HEAD/GET with ChecksumMode=ENABLED echoes composite + ChecksumType. New: ?partNumber=N + ChecksumMode=ENABLED now also emits x-amz-checksum-type alongside the per-part digest, matching boto3's `response['ChecksumType']` field shape that s3-tests `multipart_checksum_3parts_helper` asserts. Existing TestMultipartGetByPartNumberPerPartChecksum flipped from \"ChecksumType must be empty\" to \"ChecksumType must equal COMPOSITE\". Added TestMultipartUseCksumHelperShape end-to-end (Initiate→Upload→Complete→HEAD→GetObjectAttributes→GET partNumber). objectAttrChecksums now carries ChecksumType so GetObjectAttributes Checksum subtree includes it."
     },
     {
       "id": "US-004",
