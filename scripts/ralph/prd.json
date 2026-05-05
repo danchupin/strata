@@ -143,8 +143,8 @@
         "Tests pass"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "completeMultipart already had If-Match/If-None-Match logic from prior work, but the If-Match flow returned 404 NoSuchKey when no object existed (mismatch with putObject's 412 contract per RFC 7232 §3.1). Aligned with putObject: missing object on If-Match → ErrPreconditionFailed. Added x-amz-version-id response header on Complete in versioned buckets — gated by `meta.IsVersioningActive(b.Versioning) && obj.VersionID != ''` and routed through `wireVersionID(obj)` so the null-version sentinel surfaces as the literal 'null'. Header also persisted into the headers map handed to RecordMultipartCompletion so retried Completes (writeCachedCompletion path) echo it. New test file `multipart_preconditions_test.go` with 8 cases covering the full matrix: If-Match matches/mismatches/no-object/precondition-doesn't-leak-completing-state, If-None-Match=*-no-object/exists/etag, and version-id-on-versioned-bucket."
     },
     {
       "id": "US-009",

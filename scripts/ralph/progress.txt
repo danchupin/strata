@@ -134,3 +134,25 @@ Cycle: ralph/s3-compat-90
   - Token tolerance: accept Std-encoded form on decode (some buggy clients normalize) AND fall back to literal-marker AND reject empty-inner-marker. Three layers of defense keep the contract loose-on-receive / strict-on-send.
   - V1 marker parameter is intentionally untouched per AC. Mixing opaque tokens into V1 would break long-lived pagers and is not what AWS S3 does.
 ---
+
+## 2026-05-05 - US-008 Multipart Complete preconditions (If-Match / If-None-Match)
+- `internal/s3api/multipart.go::completeMultipart` already had If-Match/If-None-Match gating from earlier work, but the If-Match path returned 404 NoSuchKey when the object did not exist instead of 412 PreconditionFailed. Aligned with `putObject`'s pattern (server.go:902-907): collapse `gerr != nil || !etagMatches(...)` into a single PreconditionFailed branch. Matches RFC 7232 §3.1 + AWS S3 behaviour the s3-tests `test_multipart_put_object_if_match_nonexisting_failed` asserts.
+- Added `x-amz-version-id` response header on Complete when the bucket is versioned: `meta.IsVersioningActive(b.Versioning) && obj.VersionID != ""` → write `wireVersionID(obj)` (so the null sentinel surfaces as the literal `"null"`). Also added to the `headers` map handed to `RecordMultipartCompletion`, so retried Completes that hit `writeCachedCompletion` echo the same header.
+- Precondition check already happens BEFORE the LWT flip (it's inside `completeMultipart` before `s.Meta.CompleteMultipartUpload` runs). Added `TestMultipartCompleteIfMatchPreconditionDoesNotLeakCompletingState` to lock that invariant: a 412 must leave the upload in `uploading` state so a subsequent retry without preconditions completes successfully.
+- New test file `internal/s3api/multipart_preconditions_test.go` with 8 cases mirroring the upstream s3-tests verbatim:
+  - `TestMultipartCompleteIfMatchOverwriteExisting` — `test_multipart_put_object_if_match_overwrite_existing_good`
+  - `TestMultipartCompleteIfMatchNonExistingFails` — `test_multipart_put_object_if_match_nonexisting_failed`
+  - `TestMultipartCompleteIfMatchExistingMismatchFails` — `test_multipart_put_object_if_match_existing_failed`
+  - `TestMultipartCompleteIfNoneMatchStarNoObject` — `test_multipart_put_object_if_none_match`
+  - `TestMultipartCompleteIfNoneMatchStarExistingFails` — `test_multipart_put_object_if_none_match_failed`
+  - `TestMultipartCompleteIfNoneMatchEtagFails` — covers the etag-form rejection path
+  - `TestMultipartCompleteIfMatchPreconditionDoesNotLeakCompletingState` — completing-state invariant
+  - `TestMultipartCompleteSetsVersionIDOnVersionedBucket` — `test_multipart_put_current_object_if_match`
+- Files changed: `internal/s3api/multipart.go`, `internal/s3api/multipart_preconditions_test.go` (new), `scripts/ralph/prd.json`.
+- Tests: `go test ./internal/s3api/ -count=1` green; full short suite `go test ./... -short -count=1` green; `go vet ./...` clean.
+- **Learnings for future iterations:**
+  - When mirroring putObject's precondition contract on a multipart Complete (or any other "PUT-shaped" endpoint), collapse the `GetObject` error into the same PreconditionFailed branch — `if gerr != nil || !etagMatches(...) { return 412 }`. Returning NoSuchKey on a missing-object If-Match is RFC 7232 non-conformant and the s3-tests catch it with the `_nonexisting_failed` case.
+  - Headers added on the Complete response that need to survive a retried Complete (idempotent re-call landing on the cached completion) MUST go through the `headers` map persisted via `RecordMultipartCompletion`. The `writeCachedCompletion` path replays only those headers — if you only `w.Header().Set(...)` on the live path, retries lose the header.
+  - `wireVersionID(obj)` is the canonical wire-form helper. Use it for `x-amz-version-id` on Complete the same way putObject / copyObject / getObject do, so the null sentinel surfaces as the literal `"null"` per the US-007 wire-form contract.
+  - Version-id surfacing is gated on `meta.IsVersioningActive(b.Versioning)`. Even though memory/cassandra/tikv all assign a TimeUUID to `obj.VersionID` on Complete unconditionally, the response header is suppressed for unversioned buckets to match AWS S3's wire shape (no header on a never-versioned bucket).
+---

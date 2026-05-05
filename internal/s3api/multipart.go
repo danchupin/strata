@@ -418,11 +418,7 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 
 	if ifMatch := r.Header.Get("If-Match"); ifMatch != "" {
 		existing, gerr := s.Meta.GetObject(r.Context(), b.ID, key, "")
-		if gerr != nil {
-			mapMetaErr(w, r, gerr)
-			return
-		}
-		if !etagMatches(ifMatch, `"`+existing.ETag+`"`) {
+		if gerr != nil || !etagMatches(ifMatch, `"`+existing.ETag+`"`) {
 			writeError(w, r, ErrPreconditionFailed)
 			return
 		}
@@ -514,6 +510,9 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 	}
 	if obj.SSE == sseAlgorithmAWSKMS && obj.SSEKeyID != "" {
 		headers[hdrSSEKMSKeyID] = obj.SSEKeyID
+	}
+	if meta.IsVersioningActive(b.Versioning) && obj.VersionID != "" {
+		headers["x-amz-version-id"] = wireVersionID(obj)
 	}
 
 	var buf bytes.Buffer
