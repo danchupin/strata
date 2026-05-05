@@ -175,8 +175,8 @@
         "Tests pass"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Composite-checksum input validation slotted into completeMultipart between composeMultipartChecksums and the LWT flip (internal/s3api/multipart.go:464-473): walk supportedChecksumAlgorithms, read x-amz-checksum-<lower(algo)> from request, return ErrBadDigest on mismatch with composite[algo]. The pre-LWT placement leaves no `completing` state when the rejected client retries without the bogus header — TestMultipartCompleteCompositeChecksumMismatch locks this invariant by re-attempting the same Complete body successfully right after the 400. New table-driven tests in internal/s3api/multipart_complete_checksum_test.go cover all 4 PRD-named algos (CRC32, CRC32C, SHA1, SHA256) for both match and mismatch shapes; TestMultipartCompleteCompositeChecksumMissingAlgo locks the case where the client claims SHA1 composite for a SHA256-tracked upload (composite[SHA1] is empty) — also returns BadDigest. Reused the existing partChecksum + composite test helpers from multipart_checksum_test.go, plus a small uploadPartsWithChecksum helper to factor the per-part PUT loop."
     },
     {
       "id": "US-011",

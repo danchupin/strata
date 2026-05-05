@@ -461,6 +461,17 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 	}
 	composite := composeMultipartChecksums(requested)
 
+	for _, algo := range supportedChecksumAlgorithms {
+		expected := r.Header.Get("x-amz-checksum-" + strings.ToLower(algo))
+		if expected == "" {
+			continue
+		}
+		if composite[algo] != expected {
+			writeError(w, r, ErrBadDigest)
+			return
+		}
+	}
+
 	finalETag, err := multipartETag(parts)
 	if err != nil {
 		writeError(w, r, ErrInvalidPart)
