@@ -9,21 +9,34 @@ option go_package = "github.com/danchupin/strata/internal/data/manifestpb;manife
 //
 // Field-number ledger:
 //   1..5   Class / Size / ChunkSize / ETag / Chunks
-//   6..7   PartChunks / PartChecksums (US-049 multipart SSE)
+//   6      PartChunkCounts (US-049 multipart SSE; pre-US-001 label
+//          part_chunks; wire format unchanged)
+//   7      PartChecksums (US-049 multipart SSE)
 //   8      BackendRef (US-008 S3-over-S3 data backend)
 //   12     SSEInfo (US-013 SSE mode wire record)
+//   13     PartChunks (US-001 per-part byte ranges)
 message Manifest {
   string class = 1;
   int64 size = 2;
   int64 chunk_size = 3;
   string etag = 4;
   repeated ChunkRef chunks = 5;
-  repeated int64 part_chunks = 6;
+  repeated int64 part_chunk_counts = 6;
   repeated PartChecksum part_checksums = 7;
   BackendRef backend_ref = 8;
   SSEInfo sse = 12;
+  repeated PartRange part_chunks = 13;
 
   reserved 9 to 11;
+}
+
+message PartRange {
+  int32 part_number = 1;
+  int64 offset = 2;
+  int64 size = 3;
+  string etag = 4;
+  string checksum_value = 5;
+  string checksum_algorithm = 6;
 }
 
 message ChunkRef {

@@ -1,6 +1,7 @@
 package data
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 )
@@ -15,7 +16,12 @@ func sampleManifest() *Manifest {
 			{Cluster: "default", Pool: "rgw.buckets.data", Namespace: "", OID: "k/0", Size: 4 * 1024 * 1024},
 			{Cluster: "default", Pool: "rgw.buckets.data", Namespace: "ns", OID: "k/1", Size: 17},
 		},
-		PartChunks: []int{2, 1, 3},
+		PartChunks: []PartRange{
+			{PartNumber: 1, Offset: 0, Size: 5 * 1024 * 1024, ETag: "p1etag", ChecksumAlgorithm: "SHA256", ChecksumValue: "p1cs"},
+			{PartNumber: 2, Offset: 5 * 1024 * 1024, Size: 5 * 1024 * 1024, ETag: "p2etag"},
+			{PartNumber: 3, Offset: 10 * 1024 * 1024, Size: 17, ETag: "p3etag", ChecksumAlgorithm: "CRC32", ChecksumValue: "p3cs"},
+		},
+		PartChunkCounts: []int{2, 1, 3},
 		PartChecksums: []map[string]string{
 			{"x-amz-checksum-crc32": "AAAAAA=="},
 			{},
@@ -104,6 +110,86 @@ func TestDecodeManifestReadsBoth(t *testing.T) {
 	}
 	if !reflect.DeepEqual(jOut.PartChunks, pOut.PartChunks) {
 		t.Fatalf("part_chunks mismatch json=%v proto=%v", jOut.PartChunks, pOut.PartChunks)
+	}
+	if !reflect.DeepEqual(jOut.PartChunkCounts, pOut.PartChunkCounts) {
+		t.Fatalf("part_chunk_counts mismatch json=%v proto=%v", jOut.PartChunkCounts, pOut.PartChunkCounts)
+	}
+}
+
+// TestManifestLegacyJSONPartChunksDecodes verifies that pre-US-001
+// manifests where "PartChunks" was a []int (chunk-counts) still decode
+// cleanly: the legacy slice migrates into PartChunkCounts, and the new
+// PartChunks field remains nil (which is the "not multipart" sentinel
+// for the per-part-range path).
+func TestManifestLegacyJSONPartChunksDecodes(t *testing.T) {
+	legacy := `{"Class":"STANDARD","Size":17,"ChunkSize":4194304,"ETag":"\"x\"","PartChunks":[2,1,3]}`
+	got, err := DecodeManifest([]byte(legacy))
+	if err != nil {
+		t.Fatalf("decode legacy json: %v", err)
+	}
+	if got.PartChunks != nil {
+		t.Fatalf("legacy PartChunks should decode as nil for the new field; got %+v", got.PartChunks)
+	}
+	want := []int{2, 1, 3}
+	if !reflect.DeepEqual(got.PartChunkCounts, want) {
+		t.Fatalf("legacy PartChunks should migrate to PartChunkCounts: got %v want %v", got.PartChunkCounts, want)
+	}
+}
+
+// TestManifestNewJSONPartChunksDecodes verifies that the new []PartRange
+// shape decodes correctly when "PartChunks" is an array of objects.
+func TestManifestNewJSONPartChunksDecodes(t *testing.T) {
+	m := &Manifest{
+		Class:    "STANDARD",
+		Size:     1024,
+		ETag:     `"y"`,
+		PartChunks: []PartRange{
+			{PartNumber: 1, Offset: 0, Size: 512, ETag: "a"},
+			{PartNumber: 2, Offset: 512, Size: 512, ETag: "b"},
+		},
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got, err := DecodeManifest(b)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !reflect.DeepEqual(got.PartChunks, m.PartChunks) {
+		t.Fatalf("PartChunks round-trip: got %+v want %+v", got.PartChunks, m.PartChunks)
+	}
+	if got.PartChunkCounts != nil {
+		t.Fatalf("PartChunkCounts should be nil when only PartChunks is set; got %v", got.PartChunkCounts)
+	}
+}
+
+// TestManifestSinglePutLeavesPartChunksNil documents the contract: the
+// nil-vs-empty distinction signals "not multipart". Encoding+decoding a
+// single-PUT manifest must keep PartChunks nil through both wire formats.
+func TestManifestSinglePutLeavesPartChunksNil(t *testing.T) {
+	m := &Manifest{Class: "STANDARD", Size: 17, ETag: `"z"`}
+	for _, format := range []string{"json", "proto"} {
+		var b []byte
+		var err error
+		if format == "json" {
+			b, err = EncodeManifestJSON(m)
+		} else {
+			b, err = EncodeManifestProto(m)
+		}
+		if err != nil {
+			t.Fatalf("%s encode: %v", format, err)
+		}
+		got, derr := DecodeManifest(b)
+		if derr != nil {
+			t.Fatalf("%s decode: %v", format, derr)
+		}
+		if got.PartChunks != nil {
+			t.Fatalf("%s: single-PUT manifest must keep PartChunks nil; got %v", format, got.PartChunks)
+		}
+		if got.PartChunkCounts != nil {
+			t.Fatalf("%s: single-PUT manifest must keep PartChunkCounts nil; got %v", format, got.PartChunkCounts)
+		}
 	}
 }
 

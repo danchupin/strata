@@ -1,5 +1,9 @@
 package data
 
+import (
+	"encoding/json"
+)
+
 const DefaultChunkSize int64 = 4 * 1024 * 1024
 
 // Manifest describes how an object's bytes are stored in the data plane.
@@ -19,13 +23,66 @@ type Manifest struct {
 	BackendRef *BackendRef `json:",omitempty"`
 	// SSE records the encryption disposition chosen at write time (US-013).
 	SSE *SSEInfo `json:",omitempty"`
-	// PartChunks records the number of chunks contributed by each part of a
-	// multipart upload, in part order. Empty for single-PUT objects. Used by
-	// the SSE-S3 multipart decrypt path.
-	PartChunks []int `json:",omitempty"`
+	// PartChunks records the per-part byte range of a multipart upload, in
+	// part order. Used by ?partNumber=N GET (US-001 / US-002) to serve the
+	// exact part body without scanning. Nil for single-PUT objects (the
+	// nil-vs-empty distinction is the "not multipart" sentinel).
+	PartChunks []PartRange `json:",omitempty"`
+	// PartChunkCounts records the number of data-backend chunks contributed
+	// by each part of a multipart upload, in part order. Used by the SSE-S3
+	// multipart decrypt locator (chunk index ↔ part lookup). Empty for
+	// single-PUT objects. Pre-US-001 rows JSON-encoded this field as
+	// "PartChunks"; UnmarshalJSON sniffs and migrates so old rows keep
+	// decoding even after the field rename.
+	PartChunkCounts []int `json:",omitempty"`
 	// PartChecksums records the per-part stored x-amz-checksum-<algo>
 	// values in PartNumber order. Empty for single-PUT objects.
 	PartChecksums []map[string]string `json:",omitempty"`
+}
+
+// PartRange describes one part of a multipart upload at byte-range
+// granularity. Offset/Size are in object plaintext space (so ?partNumber=N
+// GET maps directly to bytes [Offset, Offset+Size) of the object). ETag,
+// ChecksumValue, and ChecksumAlgorithm carry the part-level metadata
+// surfaced by HEAD ?partNumber=N + ChecksumMode=ENABLED.
+type PartRange struct {
+	PartNumber        int    `json:",omitempty"`
+	Offset            int64  `json:",omitempty"`
+	Size              int64  `json:",omitempty"`
+	ETag              string `json:",omitempty"`
+	ChecksumValue     string `json:",omitempty"`
+	ChecksumAlgorithm string `json:",omitempty"`
+}
+
+// UnmarshalJSON migrates pre-US-001 manifests where "PartChunks" was a
+// []int (chunk-counts shape) into the new PartChunkCounts field. New rows
+// where "PartChunks" is a []PartRange decode straight into PartChunks. The
+// rest of the struct decodes via the type-alias trick that suppresses
+// recursion into this method.
+func (m *Manifest) UnmarshalJSON(b []byte) error {
+	type alias Manifest
+	aux := &struct {
+		PartChunks json.RawMessage `json:"PartChunks,omitempty"`
+		*alias
+	}{alias: (*alias)(m)}
+	if err := json.Unmarshal(b, aux); err != nil {
+		return err
+	}
+	m.PartChunks = nil
+	if len(aux.PartChunks) == 0 {
+		return nil
+	}
+	var ranges []PartRange
+	if err := json.Unmarshal(aux.PartChunks, &ranges); err == nil {
+		m.PartChunks = ranges
+		return nil
+	}
+	var counts []int
+	if err := json.Unmarshal(aux.PartChunks, &counts); err != nil {
+		return err
+	}
+	m.PartChunkCounts = counts
+	return nil
 }
 
 type ChunkRef struct {

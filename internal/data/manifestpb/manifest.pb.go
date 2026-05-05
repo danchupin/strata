@@ -27,22 +27,26 @@ const (
 // Field-number ledger:
 //
 //	1..5   Class / Size / ChunkSize / ETag / Chunks
-//	6..7   PartChunks / PartChecksums (US-049 multipart SSE)
+//	6      PartChunkCounts (US-049 multipart SSE; pre-US-001 label
+//	       part_chunks; wire format unchanged)
+//	7      PartChecksums (US-049 multipart SSE)
 //	8      BackendRef (US-008 S3-over-S3 data backend)
 //	12     SSEInfo (US-013 SSE mode wire record)
+//	13     PartChunks (US-001 per-part byte ranges)
 type Manifest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Class         string                 `protobuf:"bytes,1,opt,name=class,proto3" json:"class,omitempty"`
-	Size          int64                  `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"`
-	ChunkSize     int64                  `protobuf:"varint,3,opt,name=chunk_size,json=chunkSize,proto3" json:"chunk_size,omitempty"`
-	Etag          string                 `protobuf:"bytes,4,opt,name=etag,proto3" json:"etag,omitempty"`
-	Chunks        []*ChunkRef            `protobuf:"bytes,5,rep,name=chunks,proto3" json:"chunks,omitempty"`
-	PartChunks    []int64                `protobuf:"varint,6,rep,packed,name=part_chunks,json=partChunks,proto3" json:"part_chunks,omitempty"`
-	PartChecksums []*PartChecksum        `protobuf:"bytes,7,rep,name=part_checksums,json=partChecksums,proto3" json:"part_checksums,omitempty"`
-	BackendRef    *BackendRef            `protobuf:"bytes,8,opt,name=backend_ref,json=backendRef,proto3" json:"backend_ref,omitempty"`
-	Sse           *SSEInfo               `protobuf:"bytes,12,opt,name=sse,proto3" json:"sse,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Class           string                 `protobuf:"bytes,1,opt,name=class,proto3" json:"class,omitempty"`
+	Size            int64                  `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"`
+	ChunkSize       int64                  `protobuf:"varint,3,opt,name=chunk_size,json=chunkSize,proto3" json:"chunk_size,omitempty"`
+	Etag            string                 `protobuf:"bytes,4,opt,name=etag,proto3" json:"etag,omitempty"`
+	Chunks          []*ChunkRef            `protobuf:"bytes,5,rep,name=chunks,proto3" json:"chunks,omitempty"`
+	PartChunkCounts []int64                `protobuf:"varint,6,rep,packed,name=part_chunk_counts,json=partChunkCounts,proto3" json:"part_chunk_counts,omitempty"`
+	PartChecksums   []*PartChecksum        `protobuf:"bytes,7,rep,name=part_checksums,json=partChecksums,proto3" json:"part_checksums,omitempty"`
+	BackendRef      *BackendRef            `protobuf:"bytes,8,opt,name=backend_ref,json=backendRef,proto3" json:"backend_ref,omitempty"`
+	Sse             *SSEInfo               `protobuf:"bytes,12,opt,name=sse,proto3" json:"sse,omitempty"`
+	PartChunks      []*PartRange           `protobuf:"bytes,13,rep,name=part_chunks,json=partChunks,proto3" json:"part_chunks,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *Manifest) Reset() {
@@ -110,9 +114,9 @@ func (x *Manifest) GetChunks() []*ChunkRef {
 	return nil
 }
 
-func (x *Manifest) GetPartChunks() []int64 {
+func (x *Manifest) GetPartChunkCounts() []int64 {
 	if x != nil {
-		return x.PartChunks
+		return x.PartChunkCounts
 	}
 	return nil
 }
@@ -138,6 +142,97 @@ func (x *Manifest) GetSse() *SSEInfo {
 	return nil
 }
 
+func (x *Manifest) GetPartChunks() []*PartRange {
+	if x != nil {
+		return x.PartChunks
+	}
+	return nil
+}
+
+type PartRange struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	PartNumber        int32                  `protobuf:"varint,1,opt,name=part_number,json=partNumber,proto3" json:"part_number,omitempty"`
+	Offset            int64                  `protobuf:"varint,2,opt,name=offset,proto3" json:"offset,omitempty"`
+	Size              int64                  `protobuf:"varint,3,opt,name=size,proto3" json:"size,omitempty"`
+	Etag              string                 `protobuf:"bytes,4,opt,name=etag,proto3" json:"etag,omitempty"`
+	ChecksumValue     string                 `protobuf:"bytes,5,opt,name=checksum_value,json=checksumValue,proto3" json:"checksum_value,omitempty"`
+	ChecksumAlgorithm string                 `protobuf:"bytes,6,opt,name=checksum_algorithm,json=checksumAlgorithm,proto3" json:"checksum_algorithm,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *PartRange) Reset() {
+	*x = PartRange{}
+	mi := &file_manifest_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PartRange) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PartRange) ProtoMessage() {}
+
+func (x *PartRange) ProtoReflect() protoreflect.Message {
+	mi := &file_manifest_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PartRange.ProtoReflect.Descriptor instead.
+func (*PartRange) Descriptor() ([]byte, []int) {
+	return file_manifest_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *PartRange) GetPartNumber() int32 {
+	if x != nil {
+		return x.PartNumber
+	}
+	return 0
+}
+
+func (x *PartRange) GetOffset() int64 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
+}
+
+func (x *PartRange) GetSize() int64 {
+	if x != nil {
+		return x.Size
+	}
+	return 0
+}
+
+func (x *PartRange) GetEtag() string {
+	if x != nil {
+		return x.Etag
+	}
+	return ""
+}
+
+func (x *PartRange) GetChecksumValue() string {
+	if x != nil {
+		return x.ChecksumValue
+	}
+	return ""
+}
+
+func (x *PartRange) GetChecksumAlgorithm() string {
+	if x != nil {
+		return x.ChecksumAlgorithm
+	}
+	return ""
+}
+
 type ChunkRef struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Cluster       string                 `protobuf:"bytes,1,opt,name=cluster,proto3" json:"cluster,omitempty"`
@@ -151,7 +246,7 @@ type ChunkRef struct {
 
 func (x *ChunkRef) Reset() {
 	*x = ChunkRef{}
-	mi := &file_manifest_proto_msgTypes[1]
+	mi := &file_manifest_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -163,7 +258,7 @@ func (x *ChunkRef) String() string {
 func (*ChunkRef) ProtoMessage() {}
 
 func (x *ChunkRef) ProtoReflect() protoreflect.Message {
-	mi := &file_manifest_proto_msgTypes[1]
+	mi := &file_manifest_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -176,7 +271,7 @@ func (x *ChunkRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChunkRef.ProtoReflect.Descriptor instead.
 func (*ChunkRef) Descriptor() ([]byte, []int) {
-	return file_manifest_proto_rawDescGZIP(), []int{1}
+	return file_manifest_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *ChunkRef) GetCluster() string {
@@ -223,7 +318,7 @@ type PartChecksum struct {
 
 func (x *PartChecksum) Reset() {
 	*x = PartChecksum{}
-	mi := &file_manifest_proto_msgTypes[2]
+	mi := &file_manifest_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -235,7 +330,7 @@ func (x *PartChecksum) String() string {
 func (*PartChecksum) ProtoMessage() {}
 
 func (x *PartChecksum) ProtoReflect() protoreflect.Message {
-	mi := &file_manifest_proto_msgTypes[2]
+	mi := &file_manifest_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -248,7 +343,7 @@ func (x *PartChecksum) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PartChecksum.ProtoReflect.Descriptor instead.
 func (*PartChecksum) Descriptor() ([]byte, []int) {
-	return file_manifest_proto_rawDescGZIP(), []int{2}
+	return file_manifest_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *PartChecksum) GetValues() map[string]string {
@@ -271,7 +366,7 @@ type BackendRef struct {
 
 func (x *BackendRef) Reset() {
 	*x = BackendRef{}
-	mi := &file_manifest_proto_msgTypes[3]
+	mi := &file_manifest_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -283,7 +378,7 @@ func (x *BackendRef) String() string {
 func (*BackendRef) ProtoMessage() {}
 
 func (x *BackendRef) ProtoReflect() protoreflect.Message {
-	mi := &file_manifest_proto_msgTypes[3]
+	mi := &file_manifest_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -296,7 +391,7 @@ func (x *BackendRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BackendRef.ProtoReflect.Descriptor instead.
 func (*BackendRef) Descriptor() ([]byte, []int) {
-	return file_manifest_proto_rawDescGZIP(), []int{3}
+	return file_manifest_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *BackendRef) GetBackend() string {
@@ -345,7 +440,7 @@ type SSEInfo struct {
 
 func (x *SSEInfo) Reset() {
 	*x = SSEInfo{}
-	mi := &file_manifest_proto_msgTypes[4]
+	mi := &file_manifest_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -357,7 +452,7 @@ func (x *SSEInfo) String() string {
 func (*SSEInfo) ProtoMessage() {}
 
 func (x *SSEInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_manifest_proto_msgTypes[4]
+	mi := &file_manifest_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -370,7 +465,7 @@ func (x *SSEInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SSEInfo.ProtoReflect.Descriptor instead.
 func (*SSEInfo) Descriptor() ([]byte, []int) {
-	return file_manifest_proto_rawDescGZIP(), []int{4}
+	return file_manifest_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *SSEInfo) GetMode() string {
@@ -398,20 +493,29 @@ var File_manifest_proto protoreflect.FileDescriptor
 
 const file_manifest_proto_rawDesc = "" +
 	"\n" +
-	"\x0emanifest.proto\x12\x0estrata.data.v1\"\xed\x02\n" +
+	"\x0emanifest.proto\x12\x0estrata.data.v1\"\xb4\x03\n" +
 	"\bManifest\x12\x14\n" +
 	"\x05class\x18\x01 \x01(\tR\x05class\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x03R\x04size\x12\x1d\n" +
 	"\n" +
 	"chunk_size\x18\x03 \x01(\x03R\tchunkSize\x12\x12\n" +
 	"\x04etag\x18\x04 \x01(\tR\x04etag\x120\n" +
-	"\x06chunks\x18\x05 \x03(\v2\x18.strata.data.v1.ChunkRefR\x06chunks\x12\x1f\n" +
-	"\vpart_chunks\x18\x06 \x03(\x03R\n" +
-	"partChunks\x12C\n" +
+	"\x06chunks\x18\x05 \x03(\v2\x18.strata.data.v1.ChunkRefR\x06chunks\x12*\n" +
+	"\x11part_chunk_counts\x18\x06 \x03(\x03R\x0fpartChunkCounts\x12C\n" +
 	"\x0epart_checksums\x18\a \x03(\v2\x1c.strata.data.v1.PartChecksumR\rpartChecksums\x12;\n" +
 	"\vbackend_ref\x18\b \x01(\v2\x1a.strata.data.v1.BackendRefR\n" +
 	"backendRef\x12)\n" +
-	"\x03sse\x18\f \x01(\v2\x17.strata.data.v1.SSEInfoR\x03sseJ\x04\b\t\x10\f\"|\n" +
+	"\x03sse\x18\f \x01(\v2\x17.strata.data.v1.SSEInfoR\x03sse\x12:\n" +
+	"\vpart_chunks\x18\r \x03(\v2\x19.strata.data.v1.PartRangeR\n" +
+	"partChunksJ\x04\b\t\x10\f\"\xc2\x01\n" +
+	"\tPartRange\x12\x1f\n" +
+	"\vpart_number\x18\x01 \x01(\x05R\n" +
+	"partNumber\x12\x16\n" +
+	"\x06offset\x18\x02 \x01(\x03R\x06offset\x12\x12\n" +
+	"\x04size\x18\x03 \x01(\x03R\x04size\x12\x12\n" +
+	"\x04etag\x18\x04 \x01(\tR\x04etag\x12%\n" +
+	"\x0echecksum_value\x18\x05 \x01(\tR\rchecksumValue\x12-\n" +
+	"\x12checksum_algorithm\x18\x06 \x01(\tR\x11checksumAlgorithm\"|\n" +
 	"\bChunkRef\x12\x18\n" +
 	"\acluster\x18\x01 \x01(\tR\acluster\x12\x12\n" +
 	"\x04pool\x18\x02 \x01(\tR\x04pool\x12\x1c\n" +
@@ -449,26 +553,28 @@ func file_manifest_proto_rawDescGZIP() []byte {
 	return file_manifest_proto_rawDescData
 }
 
-var file_manifest_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_manifest_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_manifest_proto_goTypes = []any{
 	(*Manifest)(nil),     // 0: strata.data.v1.Manifest
-	(*ChunkRef)(nil),     // 1: strata.data.v1.ChunkRef
-	(*PartChecksum)(nil), // 2: strata.data.v1.PartChecksum
-	(*BackendRef)(nil),   // 3: strata.data.v1.BackendRef
-	(*SSEInfo)(nil),      // 4: strata.data.v1.SSEInfo
-	nil,                  // 5: strata.data.v1.PartChecksum.ValuesEntry
+	(*PartRange)(nil),    // 1: strata.data.v1.PartRange
+	(*ChunkRef)(nil),     // 2: strata.data.v1.ChunkRef
+	(*PartChecksum)(nil), // 3: strata.data.v1.PartChecksum
+	(*BackendRef)(nil),   // 4: strata.data.v1.BackendRef
+	(*SSEInfo)(nil),      // 5: strata.data.v1.SSEInfo
+	nil,                  // 6: strata.data.v1.PartChecksum.ValuesEntry
 }
 var file_manifest_proto_depIdxs = []int32{
-	1, // 0: strata.data.v1.Manifest.chunks:type_name -> strata.data.v1.ChunkRef
-	2, // 1: strata.data.v1.Manifest.part_checksums:type_name -> strata.data.v1.PartChecksum
-	3, // 2: strata.data.v1.Manifest.backend_ref:type_name -> strata.data.v1.BackendRef
-	4, // 3: strata.data.v1.Manifest.sse:type_name -> strata.data.v1.SSEInfo
-	5, // 4: strata.data.v1.PartChecksum.values:type_name -> strata.data.v1.PartChecksum.ValuesEntry
-	5, // [5:5] is the sub-list for method output_type
-	5, // [5:5] is the sub-list for method input_type
-	5, // [5:5] is the sub-list for extension type_name
-	5, // [5:5] is the sub-list for extension extendee
-	0, // [0:5] is the sub-list for field type_name
+	2, // 0: strata.data.v1.Manifest.chunks:type_name -> strata.data.v1.ChunkRef
+	3, // 1: strata.data.v1.Manifest.part_checksums:type_name -> strata.data.v1.PartChecksum
+	4, // 2: strata.data.v1.Manifest.backend_ref:type_name -> strata.data.v1.BackendRef
+	5, // 3: strata.data.v1.Manifest.sse:type_name -> strata.data.v1.SSEInfo
+	1, // 4: strata.data.v1.Manifest.part_chunks:type_name -> strata.data.v1.PartRange
+	6, // 5: strata.data.v1.PartChecksum.values:type_name -> strata.data.v1.PartChecksum.ValuesEntry
+	6, // [6:6] is the sub-list for method output_type
+	6, // [6:6] is the sub-list for method input_type
+	6, // [6:6] is the sub-list for extension type_name
+	6, // [6:6] is the sub-list for extension extendee
+	0, // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_manifest_proto_init() }
@@ -482,7 +588,7 @@ func file_manifest_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_manifest_proto_rawDesc), len(file_manifest_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -171,15 +171,15 @@ func singleChunkLocator(oid string) sseChunkLocator {
 	return func(idx int) (string, uint64) { return oid, uint64(idx) }
 }
 
-// multipartChunkLocator builds a locator over a manifest's PartChunks list.
-// For chunk i in the merged manifest, it finds which part the chunk came from
-// (and that part's local chunk index) so the IV input matches what was used
-// during UploadPart, where oid = key + ":part=" + partNumber and the
-// chunkIndex restarts at 0 inside each part.
-func multipartChunkLocator(key string, partChunks []int) sseChunkLocator {
+// multipartChunkLocator builds a locator over a manifest's PartChunkCounts
+// list. For chunk i in the merged manifest, it finds which part the chunk
+// came from (and that part's local chunk index) so the IV input matches what
+// was used during UploadPart, where oid = key + ":part=" + partNumber and
+// the chunkIndex restarts at 0 inside each part.
+func multipartChunkLocator(key string, partChunkCounts []int) sseChunkLocator {
 	return func(idx int) (string, uint64) {
 		base := 0
-		for partOffset, count := range partChunks {
+		for partOffset, count := range partChunkCounts {
 			if idx < base+count {
 				return multipartPartOID(key, partOffset+1), uint64(idx - base)
 			}

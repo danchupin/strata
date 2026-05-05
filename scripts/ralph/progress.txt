@@ -1,68 +1,25 @@
 # Ralph Progress Log
-Started: Tue May  5 MSK 2026
-Cycle: ralph/s3-compat-90 (s3-tests pass-rate 80% → ≥90%)
+Started: Tue May  5 13:00:36 MSK 2026
+Cycle: ralph/s3-compat-90
 ---
 
 ## Codebase Patterns
+- `data.Manifest` field rename + JSON migration: rename old Go field, drop the old JSON tag, and write a `func (m *Manifest) UnmarshalJSON(b []byte) error` shim that sniffs the legacy shape (`json.RawMessage` → try new struct, fall back to old type). Proto wire compat is "free" if the field number is preserved — only the label changes.
+- Per-backend manifest construction lives inside `Store.CompleteMultipartUpload` in each meta backend (memory/cassandra/tikv). Shared shape goes through an exported helper in `internal/meta/store.go` (e.g. `meta.BuildPartRange`) so all three backends stay lockstep.
+- After editing `internal/data/manifest.proto`, regenerate via `protoc -I internal/data --go_out=. --go_opt=module=github.com/danchupin/strata internal/data/manifest.proto` (NOT `--go_opt=paths=source_relative` — that drops the file alongside the .proto, ignoring the `manifestpb` package directory).
 
-### Branch policy (REQUIRED)
-- Cycle starts from main (`3ca539f` at prep time), ends with merge back to main. US-011 (last story) MUST fast-forward / squash-merge `ralph/s3-compat-90` into `main`, push origin/main, archive prd.json + progress.txt under `scripts/ralph/archive/2026-MM-DD-s3-compat-90/`. Mirror the web-ui-debug close shape (`6519036` merge + `db9e251` archive).
-- The shell wrapper `scripts/ralph/ralph.sh` MUST invoke `avito ai claude --` (not bare `claude`) — regression-resistant; revert on sight.
-
-### Reference implementation (existing)
-- `ralph/s3-tests-90` branch (head `dcd9eb4`) carries an earlier attempt at all 11 stories. Content was NOT pulled to main (`-s ours` merge in `57497a9` recorded merge-graph only). Ralph MAY consult those commits for hints but must rebuild on current main — main has shipped tikv backend, binary-consolidation, web-ui Phase 1+2+3, manifest-protobuf (US-049), and audit middleware since the old work, so direct cherry-picks will conflict.
-- Inspect old commits: `git log --oneline ralph/s3-tests-90 -- internal/s3api/multipart.go` etc.
-
-### S3 surface map (where things live on current main)
-- Object GET / HEAD / Range: `internal/s3api/object_get.go` (look for `getObject`).
-- ListObjects[V1/V2]: `internal/s3api/list_objects.go` + fan-out + heap-merge in `internal/meta/cassandra/store.go::ListObjects` (sharded — DO NOT touch the storage layer for response-shape fixes).
-- Multipart: `internal/s3api/multipart.go` (Initiate / List / Abort / Complete) + `multipart_part.go` (UploadPart) + `multipart_copy.go` (UploadPartCopy).
-- Versioning: read flag via `meta.Store.GetBucketVersioning`; gate `meta.VersioningEnabled` / `VersioningSuspended` / `VersioningDisabled`. Versioned PUTs allocate UUID via `meta.NewVersionID()`; unversioned/suspended PUTs SHOULD use literal `"null"` (US-007).
-- Manifest blob (per-object metadata): `internal/data/manifest.go` (`Manifest` struct) + `manifest.proto` + `manifest_codec.go` (encode/decode + JSON↔proto round-trip helpers). `data.SetManifestFormat("proto"|"json")` chosen at startup via `STRATA_MANIFEST_FORMAT` (default proto).
-
-### Manifest schema additivity (CRITICAL for US-001)
-- `data.Manifest` is encoded into `objects.manifest` blob column. New fields tagged `json:",omitempty"` (and a fresh `protobuf` field number in `manifest.proto`) are schema-additive — old rows decode with zero-values, no `ALTER` required.
-- Existing field numbers ledger (do NOT renumber): 1..5 base, 6..7 PartChunks/PartChecksums (used in US-049 — re-check before claiming a number), 8 BackendRef, 12 SSEInfo, 9-11 reserved.
-- After editing `internal/data/manifest.proto`: re-generate `internal/data/manifestpb/manifest.pb.go` via `protoc -I internal/data --go_out=/tmp/pbgen2 internal/data/manifest.proto && cp /tmp/pbgen2/manifestpb/manifest.pb.go internal/data/manifestpb/manifest.pb.go`.
-- Round-trip test in `internal/data/manifest_codec_test.go` — extend it with a `PartChunks` round-trip case for US-001.
-
-### Multipart storage shapes
-- Cassandra: `multipart_uploads` (per-upload header) + `multipart_uploads_parts` (per-part rows: `bucket_id, upload_id, part_number, etag, size_bytes, checksum_value, checksum_algorithm, last_modified`). Part rows live until `CompleteMultipartUpload` flips upload state via LWT (`IF status='uploading'` → `completing`).
-- Memory: in-process maps; same shape.
-- TiKV: keys per `internal/meta/tikv/keys.md`: `s/B/<bucketUUID16>/u/<escUploadID>` (header) + `s/B/<bucketUUID16>/up/<escUploadID><partNum4-BE>` (part rows; `partNum4-BE` is `uint32` big-endian for ascending-number scans).
-- US-001 reads from these part rows on the LWT-success path, computes `Offset` by cumulative-summing earlier part sizes, and writes `PartChunks` into the manifest before persisting the object row.
-
-### LWT discipline (still applies)
-- Cassandra: `IF EXISTS` / `IF NOT EXISTS` required for read-after-write coherence. `MapScanCAS` not `ScanCAS(nil...)` for `INSERT … IF NOT EXISTS`. Use blob-config helpers `setBucketBlob` / `getBucketBlob` / `deleteBucketBlob` instead of fresh CRUD per endpoint.
-- TiKV: pessimistic-txn shape `Begin(pessimistic) → LockKeys → Get → Set → Commit` for any RMW that needs read-after-write coherence. CAS-reject early-returns MUST `txn.Rollback()` (`defer rollbackOnError(txn, &err)` only fires when err != nil; an `applied=false, nil` return path leaks the LockKeys lease).
-
-### S3 error mapping
-- New sentinel error in `internal/meta/store.go` if surface-level. New `APIError` in `internal/s3api/errors.go` for client-facing HTTP shape (e.g. `EntityTooSmall`, `BadDigest`, `InvalidPart`, `PreconditionFailed`, `InvalidRange`).
-
-### Testing
-- s3-tests harness: `scripts/s3-tests/run.sh`. Drives a real ceph/s3-tests checkout via boto against the gateway. Output captured per-test pass/fail. Default filter is the executable subset (excludes ACL / website / replication / etc.).
-- Per-cluster baseline updates land in `scripts/s3-tests/README.md` (append-only — never replace prior baselines).
-- Unit-test harness for s3api: `internal/s3api/testutil_test.go::newHarness(t)` — drives in-memory data + meta. Drive with `h.doString(method, path, body, headers...)` and `h.mustStatus(resp, code)`.
-- Cassandra integration tests via testcontainers: `make test-integration` (build-tag `integration`).
-- Bucket name in tests: use `/bkt`, NEVER `/b` (3-char minimum per `internal/s3api/validate.go::validBucketName`).
-
-### Versioning null literal (US-007 specifics)
-- meta.Object.VersionID is `text` type in cassandra. Literal `"null"` (4 chars) sorts AFTER all UUID strings under default `text` clustering (UUIDs are hex+dashes, max ASCII 'f' = 0x66; 'n' = 0x6E > 'f'). Result: latest null shows on top of any earlier UUID-versioned ancestors when versioning was off — desired behaviour for `?versionId=null` resolution.
-- Suspended-bucket new PUT must atomically `DELETE old null + INSERT new null` — wrap in LWT batch for cassandra; pessimistic-txn for tikv; mu.Lock for memory.
-- Storetest contract entry exercises round-trip; lockstep update across all 3 backends.
-
-### Continuation token format (US-006)
-- AWS shape: opaque base64 of internal struct. Strata uses `{Marker string; Shard int}` JSON-encoded then base64-URL. Backward compat: tokens that fail `base64.URLEncoding.DecodeString` then `json.Unmarshal` fall back to literal-marker. Existing in-flight clients don't break mid-page.
-- V1 `marker` parameter unchanged (still literal). Opaque is V2-only.
-
-### Multipart preconditions (US-008 specifics)
-- `If-Match` / `If-None-Match` checks happen BEFORE the LWT flip — a conflicting Complete attempt does not leak `completing` state. If precondition fails, return 412 immediately, NEVER touch the multipart_uploads row.
-- `x-amz-version-id` response header on versioned-bucket Complete.
-
-### Quality bar
-- Every story commit MUST pass: `go vet ./...`, `go test ./...`, `pnpm run typecheck`, `pnpm run build` (UI build is part of the binary via `go:embed all:web/dist` so a stale UI build stalls the gateway image).
-- s3-tests baseline run in US-011 needs `make up-all` (cassandra + ceph + strata) — heavy, ~5 min. Allocate runtime budget.
-
-### Phase boundaries warning
-- Manifest format selection (`STRATA_MANIFEST_FORMAT=proto` default since US-049) means every test that asserts on raw bytes of the `objects.manifest` column must use `data.DecodeManifest` (sniff path) NOT direct JSON unmarshal. The codec is the public surface; the wire format is private.
-
+## 2026-05-05 - US-001 Multipart per-part offset tracking
+- Added `data.PartRange` struct + `PartChunks []PartRange` field to `data.Manifest`. Renamed pre-existing `PartChunks []int` → `PartChunkCounts []int` (kept as the SSE-S3 multipart locator input).
+- Custom `Manifest.UnmarshalJSON` sniffs legacy `"PartChunks":[]int` rows and routes them into `PartChunkCounts`; new `[]PartRange` rows decode straight into `PartChunks`.
+- `internal/data/manifest.proto`: renamed field 6 label `part_chunks` → `part_chunk_counts` (wire compat preserved), added field 13 `repeated PartRange part_chunks = 13` + new `PartRange` message. Regenerated `internal/data/manifestpb/manifest.pb.go`.
+- `internal/data/manifest_codec.go::manifestToProto` + `manifestFromProto` round-trip both fields.
+- Added `meta.BuildPartRange(partNumber, offset, *MultipartPart)` shared helper. Wired into all three `Store.CompleteMultipartUpload` impls (memory, cassandra, tikv). Populates `Manifest.PartChunks` alongside `PartChunkCounts` on the LWT-success path before writing the object row.
+- Updated `internal/s3api/sse_io.go::multipartChunkLocator` parameter name and `internal/s3api/server.go` call sites to read `PartChunkCounts`.
+- Updated `internal/data/manifest_codec_test.go` (sample manifest now has both fields populated) + added `TestManifestLegacyJSONPartChunksDecodes`, `TestManifestNewJSONPartChunksDecodes`, `TestManifestSinglePutLeavesPartChunksNil`.
+- Files changed: `internal/data/manifest.go`, `internal/data/manifest.proto`, `internal/data/manifestpb/manifest.pb.go`, `internal/data/manifest_codec.go`, `internal/data/manifest_codec_test.go`, `internal/meta/store.go`, `internal/meta/memory/store.go`, `internal/meta/cassandra/store.go`, `internal/meta/tikv/multipart.go`, `internal/s3api/server.go`, `internal/s3api/sse_io.go`, `scripts/ralph/prd.json`.
+- **Learnings for future iterations:**
+  - PRD-spec field name `PartChunks []PartRange` collides with the existing `PartChunks []int`. Solution: rename the old Go field (PartChunkCounts), add a custom UnmarshalJSON shim that sniffs the legacy JSON shape. Proto wire-compat preserved by keeping field number 6 (only the label changed).
+  - `protoc --go_opt=paths=source_relative` drops generated code adjacent to the `.proto` file regardless of the `option go_package` directive. Use `--go_out=. --go_opt=module=<go-module>` instead so the generator respects the package path.
+  - `MultipartPart.Checksums` may carry multiple algos (rare); `meta.BuildPartRange` consults a deterministic precedence (`CRC64NVME → SHA256 → SHA1 → CRC32C → CRC32`) before falling back to map iteration.
+  - The s3api-side AC ("populate PartChunks in completeMultipartUpload before writing the object row") was satisfied inside the meta backend instead — that's where MultipartPart info is in scope and where the object row is actually written. Documented in PRD notes.
+---

@@ -170,7 +170,11 @@ through `data.DecodeManifest` which sniffs the first non-whitespace byte (`{` �
 format) so JSON-vs-proto migrations are transparent. New fields tagged `json:",omitempty"` (and a fresh `protobuf` tag
 in `manifest.proto` + helper updates in `manifest_codec.go`) are schema-additive — old rows decode with zero-values,
 and you avoid an `ALTER`. Use this for per-object metadata the GET path reads but Cassandra never filters on (e.g.
-`Manifest.PartChunks` for the SSE multipart locator). To convert pre-existing JSON rows to proto, run
+`Manifest.PartChunkCounts` for the SSE multipart locator, `Manifest.PartChunks []PartRange` for ?partNumber=N GET).
+**Field-rename gotcha**: when the new field collides with an existing JSON key, rename the old Go field, drop its
+JSON tag, and write a custom `UnmarshalJSON` on `Manifest` that sniffs `json.RawMessage` of the colliding key —
+try the new shape first, fall back to the legacy shape. The proto side stays wire-compatible if you keep the
+field number and only rename the label. To convert pre-existing JSON rows to proto, run
 `strata server --workers=manifest-rewriter` (leader-elected, idempotent — re-runs skip already-proto rows).
 
 ## Logging (slog)

@@ -146,10 +146,23 @@ func manifestToProto(m *Manifest) *pb.Manifest {
 			}
 		}
 	}
+	if len(m.PartChunkCounts) > 0 {
+		out.PartChunkCounts = make([]int64, len(m.PartChunkCounts))
+		for i, n := range m.PartChunkCounts {
+			out.PartChunkCounts[i] = int64(n)
+		}
+	}
 	if len(m.PartChunks) > 0 {
-		out.PartChunks = make([]int64, len(m.PartChunks))
-		for i, n := range m.PartChunks {
-			out.PartChunks[i] = int64(n)
+		out.PartChunks = make([]*pb.PartRange, len(m.PartChunks))
+		for i, pr := range m.PartChunks {
+			out.PartChunks[i] = &pb.PartRange{
+				PartNumber:        int32(pr.PartNumber),
+				Offset:            pr.Offset,
+				Size:              pr.Size,
+				Etag:              pr.ETag,
+				ChecksumValue:     pr.ChecksumValue,
+				ChecksumAlgorithm: pr.ChecksumAlgorithm,
+			}
 		}
 	}
 	if len(m.PartChecksums) > 0 {
@@ -201,10 +214,23 @@ func manifestFromProto(p *pb.Manifest) *Manifest {
 			}
 		}
 	}
+	if pc := p.GetPartChunkCounts(); len(pc) > 0 {
+		out.PartChunkCounts = make([]int, len(pc))
+		for i, n := range pc {
+			out.PartChunkCounts[i] = int(n)
+		}
+	}
 	if pp := p.GetPartChunks(); len(pp) > 0 {
-		out.PartChunks = make([]int, len(pp))
-		for i, n := range pp {
-			out.PartChunks[i] = int(n)
+		out.PartChunks = make([]PartRange, len(pp))
+		for i, pr := range pp {
+			out.PartChunks[i] = PartRange{
+				PartNumber:        int(pr.GetPartNumber()),
+				Offset:            pr.GetOffset(),
+				Size:              pr.GetSize(),
+				ETag:              pr.GetEtag(),
+				ChecksumValue:     pr.GetChecksumValue(),
+				ChecksumAlgorithm: pr.GetChecksumAlgorithm(),
+			}
 		}
 	}
 	if ps := p.GetPartChecksums(); len(ps) > 0 {

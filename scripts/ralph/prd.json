@@ -19,8 +19,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Existing `PartChunks []int` (chunk-counts for SSE-S3 multipart locator) renamed to PartChunkCounts to free the name. Custom UnmarshalJSON migrates pre-US-001 JSON rows with \"PartChunks\":[]int into PartChunkCounts. Proto wire-compat preserved (field 6 label change, same wire type). New Go field `PartChunks []PartRange` on JSON key \"PartChunks\" + proto field 13. PartRange struct + helper meta.BuildPartRange shared by all three meta backends; population happens inside Store.CompleteMultipartUpload (where MultipartPart info is in scope), satisfying the spirit of the s3api-side AC."
     },
     {
       "id": "US-002",
