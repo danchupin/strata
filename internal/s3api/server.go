@@ -522,7 +522,10 @@ func (s *Server) listObjects(w http.ResponseWriter, r *http.Request, bucket stri
 	if v2 {
 		contToken = q.Get("continuation-token")
 		startAfter = q.Get("start-after")
-		marker = contToken
+		// US-006: ContinuationToken is opaque (base64-URL of JSON
+		// listV2Token). Fall back to literal-marker if decode fails so
+		// in-flight clients carrying older tokens keep paging.
+		marker = decodeListV2Token(contToken)
 		if marker == "" {
 			marker = startAfter
 		}
@@ -585,6 +588,18 @@ func (s *Server) listObjects(w http.ResponseWriter, r *http.Request, bucket stri
 	}
 
 	if v2 {
+		// US-006: NextContinuationToken is opaque base64-URL JSON of
+		// listV2Token{Marker}. The meta-backend NextMarker shape is
+		// "next-unadded" for the no-delim path (exclusive marker on
+		// next call would skip that row); override with the last
+		// actually-emitted key so the opaque-token resume is lossless.
+		// listObjectsFolded (delim path) already returns NextMarker as
+		// the lexically-last item emitted, so its NextMarker rides
+		// through unchanged.
+		nextMarker := res.NextMarker
+		if res.Truncated && delim == "" && len(res.Objects) > 0 {
+			nextMarker = res.Objects[len(res.Objects)-1].Key
+		}
 		resp := listBucketResultV2{
 			Name:                  bucket,
 			Prefix:                maybeURLEncode(prefix, encodingType),
@@ -593,7 +608,7 @@ func (s *Server) listObjects(w http.ResponseWriter, r *http.Request, bucket stri
 			EncodingType:          encodingType,
 			IsTruncated:           res.Truncated,
 			ContinuationToken:     contToken,
-			NextContinuationToken: res.NextMarker,
+			NextContinuationToken: encodeListV2Token(nextMarker),
 			StartAfter:            startAfter,
 			Contents:              contents,
 			CommonPrefixes:        commonPrefixes,

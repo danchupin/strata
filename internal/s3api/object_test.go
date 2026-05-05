@@ -3,9 +3,11 @@ package s3api_test
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/xml"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -246,6 +248,104 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// listV2Parsed is a flat decode of <ListBucketResult> for V2 listing tests.
+type listV2Parsed struct {
+	XMLName               xml.Name `xml:"ListBucketResult"`
+	IsTruncated           bool     `xml:"IsTruncated"`
+	ContinuationToken     string   `xml:"ContinuationToken"`
+	NextContinuationToken string   `xml:"NextContinuationToken"`
+	KeyCount              int      `xml:"KeyCount"`
+	Contents              []struct {
+		Key string `xml:"Key"`
+	} `xml:"Contents"`
+	CommonPrefixes []struct {
+		Prefix string `xml:"Prefix"`
+	} `xml:"CommonPrefixes"`
+}
+
+func (l *listV2Parsed) Keys() []string {
+	out := make([]string, 0, len(l.Contents))
+	for _, c := range l.Contents {
+		out = append(out, c.Key)
+	}
+	return out
+}
+
+func parseListV2(t *testing.T, body string) *listV2Parsed {
+	t.Helper()
+	var out listV2Parsed
+	if err := xml.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatalf("parseListV2: %v: body=%s", err, body)
+	}
+	return &out
+}
+
+// TestListObjectsV2OpaqueContinuationToken verifies that
+// NextContinuationToken is base64-URL of a JSON struct (not a literal
+// marker) and that round-tripping the token paginates through every key
+// exactly once.
+func TestListObjectsV2OpaqueContinuationToken(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	keys := []string{"k1", "k2", "k3", "k4", "k5"}
+	for _, k := range keys {
+		h.mustStatus(h.doString("PUT", "/bkt/"+k, "x"), 200)
+	}
+
+	var seen []string
+	token := ""
+	for i := 0; i < 10; i++ {
+		path := "/bkt?list-type=2&max-keys=2"
+		if token != "" {
+			path += "&continuation-token=" + url.QueryEscape(token)
+		}
+		resp := h.doString("GET", path, "")
+		h.mustStatus(resp, 200)
+		got := parseListV2(t, h.readBody(resp))
+		seen = append(seen, got.Keys()...)
+		if !got.IsTruncated {
+			if got.NextContinuationToken != "" {
+				t.Fatalf("non-truncated page leaked NextContinuationToken=%q", got.NextContinuationToken)
+			}
+			break
+		}
+		if got.NextContinuationToken == "" {
+			t.Fatalf("truncated page missing NextContinuationToken")
+		}
+		// Token must be opaque base64-URL JSON, NOT a literal key.
+		raw, err := base64.RawURLEncoding.DecodeString(got.NextContinuationToken)
+		if err != nil {
+			t.Fatalf("NextContinuationToken not base64-RawURL: %v (token=%q)", err, got.NextContinuationToken)
+		}
+		if !bytes.HasPrefix(bytes.TrimSpace(raw), []byte("{")) {
+			t.Fatalf("decoded token not JSON: raw=%q", raw)
+		}
+		token = got.NextContinuationToken
+	}
+	if !equalStrings(seen, keys) {
+		t.Fatalf("paged keys: got %v want %v", seen, keys)
+	}
+}
+
+// TestListObjectsV2LegacyLiteralTokenFallback covers backward compat: a
+// caller passing a pre-US-006 literal-marker token continues paging
+// from that key without error.
+func TestListObjectsV2LegacyLiteralTokenFallback(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	for _, k := range []string{"k1", "k2", "k3", "k4"} {
+		h.mustStatus(h.doString("PUT", "/bkt/"+k, "x"), 200)
+	}
+
+	resp := h.doString("GET", "/bkt?list-type=2&continuation-token="+url.QueryEscape("k2"), "")
+	h.mustStatus(resp, 200)
+	got := parseListV2(t, h.readBody(resp))
+	// Marker semantics: emit keys strictly greater than k2.
+	if !equalStrings(got.Keys(), []string{"k3", "k4"}) {
+		t.Errorf("legacy-literal marker: got %v want [k3 k4]", got.Keys())
+	}
 }
 
 func TestStorageClassHeader(t *testing.T) {

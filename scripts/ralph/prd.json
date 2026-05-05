@@ -105,8 +105,8 @@
         "Tests pass"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "New `internal/s3api/listv2_token.go` defines `listV2Token{Marker, Shard}` + `encodeListV2Token` (base64-RawURL of JSON, empty marker → empty token) + `decodeListV2Token` (RawURL→Std fallback→literal-marker fallback when not valid base64-JSON). `server.go::listObjects` decodes the incoming `continuation-token` for V2 only (V1 marker untouched), and encodes `NextContinuationToken` with last-emitted-key shape (override the meta backend's next-unadded NextMarker for the no-delim path; listObjectsFolded already returns last-emitted so its NextMarker rides through unchanged). Tests in `listv2_token_test.go` (codec round-trip + legacy-literal fallback + base64-with-empty-marker rejection) and `object_test.go::TestListObjectsV2OpaqueContinuationToken` (5-key paging through max-keys=2 with token must be opaque base64 JSON, not literal) + `TestListObjectsV2LegacyLiteralTokenFallback` (pre-US-006 literal `k2` token resumes from k3)."
     },
     {
       "id": "US-007",
