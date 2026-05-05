@@ -243,7 +243,8 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 	var chunks []data.ChunkRef
 	var totalSize int64
 	var ciphertextSize int64
-	partChunks := make([]int, 0, len(parts))
+	partChunkCounts := make([]int, 0, len(parts))
+	partRanges := make([]data.PartRange, 0, len(parts))
 	partSizes := make([]int64, 0, len(parts))
 	partChecksums := make([]map[string]string, 0, len(parts))
 	for _, cp := range parts {
@@ -264,7 +265,8 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 				ciphertextSize += c.Size
 			}
 		}
-		partChunks = append(partChunks, partChunkCount)
+		partChunkCounts = append(partChunkCounts, partChunkCount)
+		partRanges = append(partRanges, meta.BuildPartRange(cp.PartNumber, totalSize, p))
 		partSizes = append(partSizes, p.Size)
 		partChecksums = append(partChecksums, p.Checksums)
 		totalSize += p.Size
@@ -272,13 +274,14 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 	}
 
 	obj.Manifest = &data.Manifest{
-		Class:         obj.StorageClass,
-		Size:          ciphertextSize,
-		ChunkSize:     data.DefaultChunkSize,
-		ETag:          obj.ETag,
-		Chunks:        chunks,
-		PartChunks:    partChunks,
-		PartChecksums: partChecksums,
+		Class:           obj.StorageClass,
+		Size:            ciphertextSize,
+		ChunkSize:       data.DefaultChunkSize,
+		ETag:            obj.ETag,
+		Chunks:          chunks,
+		PartChunks:      partRanges,
+		PartChunkCounts: partChunkCounts,
+		PartChecksums:   partChecksums,
 	}
 	obj.Size = totalSize
 	obj.PartSizes = partSizes

@@ -318,6 +318,43 @@ type CompletePart struct {
 	ETag       string
 }
 
+// preferredChecksumAlgos is the deterministic precedence used by
+// BuildPartRange when a multipart part carries more than one stored
+// x-amz-checksum-<algo> value. The order mirrors the precedence S3 itself
+// surfaces in HEAD responses.
+var preferredChecksumAlgos = []string{"CRC64NVME", "SHA256", "SHA1", "CRC32C", "CRC32"}
+
+// BuildPartRange constructs a data.PartRange describing one part of a
+// multipart upload at byte-range granularity. offset is the cumulative
+// plaintext offset of this part inside the eventual object. The function is
+// shared by all meta backends so a future field addition flows through one
+// place. p.Checksums may carry multiple algos; the deterministic precedence
+// above is consulted before falling back to a stable map iteration.
+func BuildPartRange(partNumber int, offset int64, p *MultipartPart) data.PartRange {
+	pr := data.PartRange{
+		PartNumber: partNumber,
+		Offset:     offset,
+		Size:       p.Size,
+		ETag:       p.ETag,
+	}
+	for _, algo := range preferredChecksumAlgos {
+		if v, ok := p.Checksums[algo]; ok && v != "" {
+			pr.ChecksumAlgorithm = algo
+			pr.ChecksumValue = v
+			return pr
+		}
+	}
+	for algo, v := range p.Checksums {
+		if v == "" {
+			continue
+		}
+		pr.ChecksumAlgorithm = algo
+		pr.ChecksumValue = v
+		return pr
+	}
+	return pr
+}
+
 type GCEntry struct {
 	Chunk      data.ChunkRef
 	EnqueuedAt time.Time

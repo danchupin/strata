@@ -391,7 +391,7 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 		o.VersionID = meta.NullVersionID
 	}
 	if o.VersionID != "" {
-		parsed, err := gocql.ParseUUID(o.VersionID)
+		parsed, err := versionToCQL(o.VersionID)
 		if err != nil {
 			return err
 		}
@@ -410,7 +410,7 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 	} else if o.IsNull {
 		// Suspended-mode null PUT: atomically drop any prior null-versioned
 		// row (LWT IF EXISTS — applied=false is fine, no prior null row).
-		nullUUID, _ := gocql.ParseUUID(meta.NullVersionID)
+		nullUUID, _ := versionToCQL(meta.NullVersionID)
 		if err := s.s.Query(
 			`DELETE FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=? IF EXISTS`,
 			gocqlUUID(o.BucketID), shard, o.Key, nullUUID,
@@ -503,7 +503,7 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 			&retainUntil, &retainMode, &legalHold, &checksums, &sse, &ssecKeyMD5, &restore,
 			&cacheControl, &expires, &partsCount, &sseKey, &sseKeyID, &replication, &partSizes, &checksumType, &isNull)
 	} else {
-		vUUID, perr := gocql.ParseUUID(versionID)
+		vUUID, perr := versionToCQL(versionID)
 		if perr != nil {
 			return nil, meta.ErrObjectNotFound
 		}
@@ -535,7 +535,7 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 	return &meta.Object{
 		BucketID:       bucketID,
 		Key:            key,
-		VersionID:      versionUUID.String(),
+		VersionID:      versionFromCQL(versionUUID),
 		IsLatest:       isLatest,
 		IsDeleteMarker: isDeleteMark,
 		IsNull:         isNull,
@@ -590,7 +590,7 @@ func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versi
 	shard := shardOf(key, s.defaultShard)
 
 	if versionID != "" {
-		vUUID, err := gocql.ParseUUID(versionID)
+		vUUID, err := versionToCQL(versionID)
 		if err != nil {
 			return nil, meta.ErrObjectNotFound
 		}
@@ -879,7 +879,7 @@ func (s *Store) AllObjectVersions(ctx context.Context, bucketID uuid.UUID) ([]*m
 			out = append(out, &meta.Object{
 				BucketID:       bucketID,
 				Key:            key,
-				VersionID:      versionID.String(),
+				VersionID:      versionFromCQL(versionID),
 				IsDeleteMarker: isDeleteMark,
 				IsNull:         isNull,
 				Size:           size,
@@ -1020,7 +1020,7 @@ func (c *versionCursor) advance() bool {
 	c.current = &meta.Object{
 		BucketID:       c.bucket,
 		Key:            key,
-		VersionID:      versionID.String(),
+		VersionID:      versionFromCQL(versionID),
 		IsDeleteMarker: isDeleteMark,
 		IsNull:         isNull,
 		Size:           size,
@@ -1122,7 +1122,7 @@ func (c *shardCursor) advance() bool {
 		c.current = &meta.Object{
 			BucketID:     c.bucket,
 			Key:          key,
-			VersionID:    versionID.String(),
+			VersionID:    versionFromCQL(versionID),
 			IsLatest:     true,
 			Size:         size,
 			ETag:         etag,
@@ -1475,7 +1475,7 @@ func (s *Store) SetObjectReplicationStatus(ctx context.Context, bucketID uuid.UU
 		}
 		versionID = o.VersionID
 	}
-	vUUID, err := gocql.ParseUUID(versionID)
+	vUUID, err := versionToCQL(versionID)
 	if err != nil {
 		return meta.ErrObjectNotFound
 	}
@@ -1990,7 +1990,7 @@ func (s *Store) ListSlowQueries(ctx context.Context, since time.Duration, minMs 
 func (s *Store) resolveVersionID(ctx context.Context, bucketID uuid.UUID, key, versionID string) (gocql.UUID, int, error) {
 	shard := shardOf(key, s.defaultShard)
 	if versionID != "" {
-		v, err := gocql.ParseUUID(versionID)
+		v, err := versionToCQL(versionID)
 		if err != nil {
 			return gocql.UUID{}, 0, meta.ErrObjectNotFound
 		}
@@ -2334,7 +2334,8 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 	var chunks []data.ChunkRef
 	var totalSize int64
 	var ciphertextSize int64
-	partChunks := make([]int, 0, len(parts))
+	partChunkCounts := make([]int, 0, len(parts))
+	partRanges := make([]data.PartRange, 0, len(parts))
 	partSizes := make([]int64, 0, len(parts))
 	partChecksums := make([]map[string]string, 0, len(parts))
 	for _, cp := range parts {
@@ -2353,7 +2354,8 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 				ciphertextSize += c.Size
 			}
 		}
-		partChunks = append(partChunks, partChunkCount)
+		partChunkCounts = append(partChunkCounts, partChunkCount)
+		partRanges = append(partRanges, meta.BuildPartRange(cp.PartNumber, totalSize, p))
 		partSizes = append(partSizes, p.Size)
 		partChecksums = append(partChecksums, p.Checksums)
 		totalSize += p.Size
@@ -2361,13 +2363,14 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 	}
 
 	obj.Manifest = &data.Manifest{
-		Class:         obj.StorageClass,
-		Size:          ciphertextSize,
-		ChunkSize:     data.DefaultChunkSize,
-		ETag:          obj.ETag,
-		Chunks:        chunks,
-		PartChunks:    partChunks,
-		PartChecksums: partChecksums,
+		Class:           obj.StorageClass,
+		Size:            ciphertextSize,
+		ChunkSize:       data.DefaultChunkSize,
+		ETag:            obj.ETag,
+		Chunks:          chunks,
+		PartChunks:      partRanges,
+		PartChunkCounts: partChunkCounts,
+		PartChecksums:   partChecksums,
 	}
 	obj.Size = totalSize
 	obj.PartSizes = partSizes
@@ -2868,7 +2871,7 @@ func (s *Store) UpdateObjectSSEWrap(ctx context.Context, bucketID uuid.UUID, key
 		}
 		versionID = o.VersionID
 	}
-	vUUID, err := gocql.ParseUUID(versionID)
+	vUUID, err := versionToCQL(versionID)
 	if err != nil {
 		return meta.ErrObjectNotFound
 	}
@@ -2905,7 +2908,7 @@ func (s *Store) GetObjectManifestRaw(ctx context.Context, bucketID uuid.UUID, ke
 		}
 		resolved = o.VersionID
 	}
-	vUUID, err := gocql.ParseUUID(resolved)
+	vUUID, err := versionToCQL(resolved)
 	if err != nil {
 		return nil, meta.ErrObjectNotFound
 	}
@@ -2936,7 +2939,7 @@ func (s *Store) UpdateObjectManifestRaw(ctx context.Context, bucketID uuid.UUID,
 		}
 		resolved = o.VersionID
 	}
-	vUUID, err := gocql.ParseUUID(resolved)
+	vUUID, err := versionToCQL(resolved)
 	if err != nil {
 		return meta.ErrObjectNotFound
 	}
@@ -2994,4 +2997,35 @@ func uuidFromGocql(g gocql.UUID) uuid.UUID {
 	var u uuid.UUID
 	copy(u[:], g[:])
 	return u
+}
+
+// cassandraNullSentinel is a valid v1 timeuuid (version=1, variant=8, all
+// other bits zero) used inside the Cassandra backend to represent the null
+// version. The all-zero UUID exposed via meta.NullVersionID is not a valid
+// timeuuid (Cassandra server-side validation rejects it on INSERT into
+// `objects.version_id`), but we still want a single deterministic sentinel
+// that sorts last under the `version_id DESC` clustering order. The chosen
+// value has timestamp=0, so it sorts after every real v1 TimeUUID emitted at
+// PUT time. Translation between the wire form (cassandra) and the canonical
+// meta.NullVersionID happens at every gocql.ParseUUID / .String() boundary.
+const cassandraNullSentinel = "00000000-0000-1000-8000-000000000000"
+
+// versionToCQL maps the canonical meta.NullVersionID (zero UUID) onto the
+// cassandra-internal v1 sentinel before going to the wire. All other inputs
+// pass through gocql.ParseUUID unchanged. Empty strings are an error.
+func versionToCQL(s string) (gocql.UUID, error) {
+	if s == meta.NullVersionID {
+		return gocql.ParseUUID(cassandraNullSentinel)
+	}
+	return gocql.ParseUUID(s)
+}
+
+// versionFromCQL is the inverse of versionToCQL — it converts a gocql.UUID
+// scanned out of `objects.version_id` back into the canonical sentinel form
+// when it matches the cassandra-internal v1 sentinel.
+func versionFromCQL(g gocql.UUID) string {
+	if g.String() == cassandraNullSentinel {
+		return meta.NullVersionID
+	}
+	return g.String()
 }
