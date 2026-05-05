@@ -159,8 +159,8 @@
         "Tests pass"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "5 MiB minimum-part-size enforcement: `multipartMinPartSize int64 = 5 * 1024 * 1024` declared in `internal/s3api/multipart.go` (var, not const, so tests for unrelated multipart surfaces can lower it). `completeMultipart` walks the part list in order; for every index `i < len(parts)-1`, returns `ErrEntityTooSmall` when `byNumber[p.PartNumber].Size < multipartMinPartSize`. Last part is exempt per AWS spec. Resend last-write-wins is already satisfied by all 3 backends: memory `st.parts[part.PartNumber] = &cp` overwrites, cassandra plain `INSERT` is an UPSERT on the (bucket_id, upload_id, part_number) PK, tikv pessimistic-txn `txn.Set(partKey, ...)` overwrites the row. ETag mismatch on Complete already returns `meta.ErrMultipartETagMismatch` → mapped to `ErrInvalidPart` via existing `errors.Is` branch in completeMultipart and server.go's mapMetaErr. New tests in `multipart_size_test.go`: TestMultipartCompleteSizeTooSmall, TestMultipartCompleteLastPartCanBeSmall, TestMultipartUploadResendPart, TestMultipartResendFirstFinishesLast, TestMultipartCompleteWrongETagInvalidPart. Test scaffolding: `internal/s3api/export_test.go` exposes `SetMultipartMinPartSizeForTest`, and a new `main_test.go` TestMain disables enforcement by default (set to 0) so the existing 4 MiB / 32-byte / KiB-sized multipart tests across checksum/partNumber/preconditions/object-attributes still run; the two size-aware tests re-arm the bound via `armMultipartMinPartSize(t)`. Latent bug surfaced: `meta.ErrMultipartETagMismatch` in CompleteMultipartUpload corrupts upload state to `completing` before the per-part ETag check fires, so a retry with a corrected ETag fails as `NoSuchUpload` (`ErrMultipartInProgress` mapping). Out of scope here; documented in progress.txt for a future cycle."
     },
     {
       "id": "US-010",

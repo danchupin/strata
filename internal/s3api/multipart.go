@@ -31,6 +31,12 @@ import (
 
 const multipartCompletionTTL = 10 * time.Minute
 
+// multipartMinPartSize is AWS S3's 5 MiB lower bound on every multipart
+// part except the last. Violations on Complete return EntityTooSmall.
+// Declared as var (not const) so tests that exercise other multipart
+// surfaces with smaller bodies can lower it via export_test.go.
+var multipartMinPartSize int64 = 5 * 1024 * 1024
+
 func (s *Server) initiateMultipart(w http.ResponseWriter, r *http.Request, b *meta.Bucket, key string) {
 	class := r.Header.Get("x-amz-storage-class")
 	if class == "" {
@@ -441,10 +447,14 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		byNumber[p.PartNumber] = p
 	}
 	requested := make([]*checksumPart, 0, len(parts))
-	for _, p := range parts {
+	for i, p := range parts {
 		sp, ok := byNumber[p.PartNumber]
 		if !ok {
 			writeError(w, r, ErrInvalidPart)
+			return
+		}
+		if i < len(parts)-1 && sp.Size < multipartMinPartSize {
+			writeError(w, r, ErrEntityTooSmall)
 			return
 		}
 		requested = append(requested, &checksumPart{Checksums: sp.Checksums})

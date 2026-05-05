@@ -66,6 +66,16 @@ adding more, prove what is there.
 
 ## Correctness & consistency
 
+- **P2 — Multipart Complete leaks `completing` state on per-part ETag mismatch.**
+  `meta.Store.CompleteMultipartUpload` flips the upload row to `completing` *before*
+  validating per-part ETags in all 3 backends (memory `store.go:1692`, cassandra
+  `store.go:2347` LWT, tikv `multipart.go:257`). When the client supplies a stale
+  ETag (e.g. after a part resend), the request returns `InvalidPart` but the upload
+  is now stuck in `completing`. A subsequent retry with corrected ETags maps to
+  `ErrMultipartInProgress` → `NoSuchUpload`, breaking idempotency. Fix: defer the
+  status flip until after the per-part ETag scan succeeds, or revert the flip on
+  ETag-mismatch return paths in all 3 backends. Surfaced by US-009's resend tests.
+
 - **P3 — Object Lock `COMPLIANCE` audit log.** `audit_log` (US-022) records all
   state-changing requests, but a denied DELETE under `COMPLIANCE` is not flagged
   distinctly. Regulated customers want a queryable "blocked retention violation" feed —
