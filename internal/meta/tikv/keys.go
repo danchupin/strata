@@ -63,6 +63,7 @@ const (
 	prefixLeaderLock       = Namespace + "L/"   // s/L/<lockName>
 	prefixReshardJob       = Namespace + "Rj/"  // s/Rj/<bucket16>
 	prefixAdminJob         = Namespace + "Aj/"  // s/Aj/<id>
+	prefixHeartbeat        = Namespace + "hb/"  // s/hb/<nodeID>
 )
 
 // Bucket-scoped sub-prefixes. All are appended to a "s/B/<uuid16>/"

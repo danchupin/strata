@@ -629,8 +629,10 @@ func buildVersion() string {
 }
 
 // buildHeartbeatStore returns a heartbeat.Store backed by the same backend
-// as metaStore. Returns nil for backends without a heartbeat implementation
-// (currently TiKV) — the admin handlers degrade gracefully.
+// as metaStore. The store is per-backend because heartbeat semantics differ
+// at the storage layer (Cassandra uses USING TTL; TiKV encodes ExpiresAt in
+// the row payload; memory filters at read time). Returns nil only when the
+// backend type-assertion fails — admin handlers degrade gracefully.
 func buildHeartbeatStore(cfg *config.Config, metaStore meta.Store) heartbeat.Store {
 	switch cfg.MetaBackend {
 	case "memory":
@@ -638,6 +640,10 @@ func buildHeartbeatStore(cfg *config.Config, metaStore meta.Store) heartbeat.Sto
 	case "cassandra":
 		if cas, ok := metaStore.(*metacassandra.Store); ok {
 			return &heartbeat.CassandraStore{S: cas.Session()}
+		}
+	case "tikv":
+		if ts, ok := metaStore.(*metatikv.Store); ok {
+			return metatikv.NewHeartbeatStore(ts)
 		}
 	}
 	return nil
