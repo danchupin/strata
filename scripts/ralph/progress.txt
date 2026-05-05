@@ -8,6 +8,22 @@ Cycle: ralph/s3-compat-90
 - Per-backend manifest construction lives inside `Store.CompleteMultipartUpload` in each meta backend (memory/cassandra/tikv). Shared shape goes through an exported helper in `internal/meta/store.go` (e.g. `meta.BuildPartRange`) so all three backends stay lockstep.
 - After editing `internal/data/manifest.proto`, regenerate via `protoc -I internal/data --go_out=. --go_opt=module=github.com/danchupin/strata internal/data/manifest.proto` (NOT `--go_opt=paths=source_relative` — that drops the file alongside the .proto, ignoring the `manifestpb` package directory).
 
+## 2026-05-05 - US-002 ?partNumber=N GET serves the exact part body
+- `internal/s3api/server.go::getObject`: ?partNumber=N now resolves Manifest.PartChunks first, falls back to PartSizes for legacy rows.
+- Bad N (out-of-range, non-numeric, ≤0, or ?partNumber on non-multipart) → 416 InvalidRange (matches AWS shape; PRD AC).
+- ETag header echoes per-part `PartChunks[N-1].ETag` when present (whole-object ETag previously leaked through).
+- x-amz-mp-parts-count drives off len(PartChunks) when present (else len(PartSizes)).
+- `Range:` + `?partNumber=` is part-relative: subOff/subLen resolved against partLen via parseRange, then offset = partOff + subOff. Out-of-range subRange yields 416.
+- ChecksumMode=ENABLED + partNumber merges PartChunks[i].ChecksumValue (US-001 carry-forward) into the response checksum-headers.
+- Files changed: `internal/s3api/server.go`, `internal/s3api/multipart_partnumber_test.go`, `scripts/ralph/prd.json`.
+- Tests: existing `TestMultipartGetByPartNumber` + `TestMultipartGetByPartNumberPerPartChecksum` still green; `TestGetByPartNumberNonMultipartReturns400`/`TestGetByPartNumberOutOfRange` retargeted to 416 (renamed `…Returns416`); new `TestMultipartGetByPartNumberRange` exercises the Range+partNumber part-relative path and the OOB-subrange 416.
+- **Learnings for future iterations:**
+  - AWS S3 returns `416 InvalidRange` (not `400 InvalidArgument`) for bad ?partNumber=N — including the non-multipart-object case. Match that exactly; the s3-tests upstream relies on it.
+  - The Range header parser (`parseRange`) is reusable: for Range+partNumber, call it with `partLen` as the size and re-base the resulting offset onto `partOff`. Avoids re-implementing the byte-range grammar.
+  - When PartChunks exists, prefer it for ETag/Offset/Size lookups over PartSizes — the latter only carries sizes, so per-part ETag would otherwise leak the whole-object ETag.
+  - Single-PUT objects keep `PartChunks=nil` (US-001 contract), so `partsTotal == 0` for them — that's the signal to reject `?partNumber` with 416.
+---
+
 ## 2026-05-05 - US-001 Multipart per-part offset tracking
 - Added `data.PartRange` struct + `PartChunks []PartRange` field to `data.Manifest`. Renamed pre-existing `PartChunks []int` → `PartChunkCounts []int` (kept as the SSE-S3 multipart locator input).
 - Custom `Manifest.UnmarshalJSON` sniffs legacy `"PartChunks":[]int` rows and routes them into `PartChunkCounts`; new `[]PartRange` rows decode straight into `PartChunks`.

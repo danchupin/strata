@@ -1,6 +1,7 @@
 package s3api_test
 
 import (
+	"bytes"
 	"crypto/rand"
 	"fmt"
 	"io"
@@ -137,22 +138,22 @@ func TestMultipartGetByPartNumberPerPartChecksum(t *testing.T) {
 	}
 }
 
-// TestGetByPartNumberNonMultipartReturns400 asserts that ?partNumber=N on a
-// single-PUT object yields 400 InvalidArgument (PartSizes is empty for
-// non-multipart objects).
-func TestGetByPartNumberNonMultipartReturns400(t *testing.T) {
+// TestGetByPartNumberNonMultipartReturns416 asserts that ?partNumber=N on a
+// single-PUT object yields 416 InvalidRange (matches AWS S3 behaviour for
+// objects without a multipart manifest).
+func TestGetByPartNumberNonMultipartReturns416(t *testing.T) {
 	h := newHarness(t)
 	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
 	h.mustStatus(h.do("PUT", "/bkt/single", byteReader([]byte("hello"))), 200)
 
 	get := h.do("GET", "/bkt/single?partNumber=1", nil)
-	h.mustStatus(get, 400)
-	if !strings.Contains(h.readBody(get), "InvalidArgument") {
-		t.Fatal("expected InvalidArgument on partNumber against non-multipart object")
+	h.mustStatus(get, 416)
+	if !strings.Contains(h.readBody(get), "InvalidRange") {
+		t.Fatal("expected InvalidRange on partNumber against non-multipart object")
 	}
 }
 
-// TestGetByPartNumberOutOfRange asserts partNumber > parts count yields 400.
+// TestGetByPartNumberOutOfRange asserts partNumber out of range yields 416 InvalidRange.
 func TestGetByPartNumberOutOfRange(t *testing.T) {
 	h := newHarness(t)
 	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
@@ -174,9 +175,62 @@ func TestGetByPartNumberOutOfRange(t *testing.T) {
 
 	for _, n := range []string{"0", "-1", "3", "abc"} {
 		get := h.do("GET", "/bkt/mp?partNumber="+n, nil)
-		if get.StatusCode != 400 {
-			t.Errorf("partNumber=%s: status=%d want 400", n, get.StatusCode)
+		if get.StatusCode != 416 {
+			t.Errorf("partNumber=%s: status=%d want 416", n, get.StatusCode)
 		}
 		_ = get.Body.Close()
 	}
+}
+
+// TestMultipartGetByPartNumberRange combines ?partNumber=N with Range: bytes=…
+// and asserts the range is part-relative — offset + length resolve inside the
+// part rather than the whole object.
+func TestMultipartGetByPartNumberRange(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+
+	resp := h.doString("POST", "/bkt/mpr?uploads", "")
+	h.mustStatus(resp, 200)
+	uploadID := uploadIDRE.FindStringSubmatch(h.readBody(resp))[1]
+
+	parts := [][]byte{
+		bytes.Repeat([]byte("A"), 5<<20),
+		bytes.Repeat([]byte("B"), 1<<20),
+	}
+	var completeBody strings.Builder
+	completeBody.WriteString("<CompleteMultipartUpload>")
+	for i, p := range parts {
+		pn := i + 1
+		r := h.do("PUT", fmt.Sprintf("/bkt/mpr?uploadId=%s&partNumber=%d", uploadID, pn), byteReader(p))
+		h.mustStatus(r, 200)
+		etag := strings.Trim(r.Header.Get("Etag"), `"`)
+		fmt.Fprintf(&completeBody, `<Part><PartNumber>%d</PartNumber><ETag>"%s"</ETag></Part>`, pn, etag)
+	}
+	completeBody.WriteString("</CompleteMultipartUpload>")
+	h.mustStatus(h.doString("POST", "/bkt/mpr?uploadId="+uploadID, completeBody.String()), 200)
+
+	totalSize := len(parts[0]) + len(parts[1])
+	part2Off := len(parts[0])
+
+	get := h.do("GET", "/bkt/mpr?partNumber=2", nil, "Range", "bytes=0-15")
+	h.mustStatus(get, 206)
+	wantRange := fmt.Sprintf("bytes %d-%d/%d", part2Off, part2Off+15, totalSize)
+	if got := get.Header.Get("Content-Range"); got != wantRange {
+		t.Errorf("Content-Range=%q want %q", got, wantRange)
+	}
+	if got := get.Header.Get("Content-Length"); got != "16" {
+		t.Errorf("Content-Length=%q want 16", got)
+	}
+	body, err := io.ReadAll(get.Body)
+	_ = get.Body.Close()
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !bytes.Equal(body, bytes.Repeat([]byte("B"), 16)) {
+		t.Fatalf("body=%q want 16 'B' bytes", body)
+	}
+
+	bad := h.do("GET", "/bkt/mpr?partNumber=2", nil, "Range", "bytes=99999999-")
+	h.mustStatus(bad, 416)
+	_ = bad.Body.Close()
 }

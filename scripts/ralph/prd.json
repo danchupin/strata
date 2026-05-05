@@ -37,8 +37,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Existing uncommitted s3api/server.go work brought ?partNumber=N onto Manifest.PartChunks: 416 InvalidRange on bad N (matches AWS), per-part ETag echoed when PartChunks[i].ETag set, x-amz-mp-parts-count uses len(PartChunks), Range+partNumber is part-relative (subOff resolved against partLen, then added to partOff). Tests retargeted from 400 InvalidArgument → 416 InvalidRange to match the PRD-specified shape; new TestMultipartGetByPartNumberRange covers the part-relative Range case."
     },
     {
       "id": "US-003",

@@ -999,18 +999,27 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		return
 	}
 	partNumberStr := q.Get("partNumber")
-	var partNumber int
+	var (
+		partNumber int
+		partRange  *data.PartRange
+		partsTotal int
+	)
+	if o.Manifest != nil && len(o.Manifest.PartChunks) > 0 {
+		partsTotal = len(o.Manifest.PartChunks)
+	} else {
+		partsTotal = len(o.PartSizes)
+	}
 	if partNumberStr != "" {
 		n, perr := strconv.Atoi(partNumberStr)
-		if perr != nil || n < 1 {
-			writeError(w, r, ErrInvalidArgument)
-			return
-		}
-		if len(o.PartSizes) == 0 || n > len(o.PartSizes) {
-			writeError(w, r, ErrInvalidArgument)
+		if perr != nil || n < 1 || partsTotal == 0 || n > partsTotal {
+			writeError(w, r, ErrInvalidRange)
 			return
 		}
 		partNumber = n
+		if o.Manifest != nil && len(o.Manifest.PartChunks) >= n {
+			pr := o.Manifest.PartChunks[n-1]
+			partRange = &pr
+		}
 	}
 	if o.SSECKeyMD5 != "" {
 		if apiErr, ok := requireSSECMatch(r, o.SSECKeyMD5); !ok {
@@ -1068,7 +1077,11 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		}
 	}
 	w.Header().Set("Content-Type", firstNonEmpty(o.ContentType, "application/octet-stream"))
-	w.Header().Set("ETag", `"`+o.ETag+`"`)
+	etag := o.ETag
+	if partRange != nil && partRange.ETag != "" {
+		etag = partRange.ETag
+	}
+	w.Header().Set("ETag", `"`+etag+`"`)
 	w.Header().Set("Last-Modified", o.Mtime.UTC().Format(http.TimeFormat))
 	w.Header().Set("x-amz-storage-class", o.StorageClass)
 	w.Header().Set("Accept-Ranges", "bytes")
@@ -1083,7 +1096,7 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	}
 	switch {
 	case partNumber > 0:
-		w.Header().Set("x-amz-mp-parts-count", strconv.Itoa(len(o.PartSizes)))
+		w.Header().Set("x-amz-mp-parts-count", strconv.Itoa(partsTotal))
 	case o.PartsCount > 0:
 		w.Header().Set("x-amz-mp-parts-count", strconv.Itoa(o.PartsCount))
 	}
@@ -1099,7 +1112,14 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	}
 	if checksumModeEnabled(r.Header.Get("x-amz-checksum-mode")) {
 		if partNumber > 0 {
-			writeChecksumHeaders(w.Header(), partChecksumsAt(o, partNumber-1))
+			sums := partChecksumsAt(o, partNumber-1)
+			if partRange != nil && partRange.ChecksumValue != "" && partRange.ChecksumAlgorithm != "" {
+				if sums == nil {
+					sums = map[string]string{}
+				}
+				sums[partRange.ChecksumAlgorithm] = partRange.ChecksumValue
+			}
+			writeChecksumHeaders(w.Header(), sums)
 		} else {
 			writeChecksumHeaders(w.Header(), o.Checksums)
 			if o.ChecksumType != "" {
@@ -1135,9 +1155,26 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		ok             bool
 	)
 	if partNumber > 0 {
-		offset, length = partOffsetLength(o.PartSizes, partNumber)
+		var partOff, partLen int64
+		if partRange != nil {
+			partOff = partRange.Offset
+			partLen = partRange.Size
+		} else {
+			partOff, partLen = partOffsetLength(o.PartSizes, partNumber)
+		}
+		offset, length = partOff, partLen
 		status = http.StatusPartialContent
 		ok = true
+		if rh := r.Header.Get("Range"); rh != "" {
+			subOff, subLen, _, subOK := parseRange(rh, partLen)
+			if !subOK {
+				w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(o.Size, 10))
+				w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+			offset = partOff + subOff
+			length = subLen
+		}
 		w.Header().Set("Content-Range", "bytes "+strconv.FormatInt(offset, 10)+"-"+strconv.FormatInt(offset+length-1, 10)+"/"+strconv.FormatInt(o.Size, 10))
 	} else {
 		offset, length, status, ok = parseRange(r.Header.Get("Range"), o.Size)
