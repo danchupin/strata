@@ -5,10 +5,12 @@ import (
 	"context"
 	"crypto/md5"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"sort"
@@ -239,9 +241,14 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Buck
 }
 
 type copyPartResult struct {
-	XMLName      xml.Name `xml:"CopyPartResult"`
-	ETag         string   `xml:"ETag"`
-	LastModified string   `xml:"LastModified"`
+	XMLName           xml.Name `xml:"CopyPartResult"`
+	ETag              string   `xml:"ETag"`
+	LastModified      string   `xml:"LastModified"`
+	ChecksumCRC32     string   `xml:"ChecksumCRC32,omitempty"`
+	ChecksumCRC32C    string   `xml:"ChecksumCRC32C,omitempty"`
+	ChecksumSHA1      string   `xml:"ChecksumSHA1,omitempty"`
+	ChecksumSHA256    string   `xml:"ChecksumSHA256,omitempty"`
+	ChecksumCRC64NVME string   `xml:"ChecksumCRC64NVME,omitempty"`
 }
 
 func (s *Server) uploadPartCopy(w http.ResponseWriter, r *http.Request, b *meta.Bucket, uploadID string, mu *meta.MultipartUpload, partNumber int) {
@@ -273,6 +280,21 @@ func (s *Server) uploadPartCopy(w http.ResponseWriter, r *http.Request, b *meta.
 		length = end - start + 1
 	}
 
+	algo := strings.ToUpper(strings.TrimSpace(r.Header.Get("x-amz-checksum-algorithm")))
+	var hasher hash.Hash
+	if algo != "" {
+		h, herr := newChecksumHasher(algo)
+		if herr != nil {
+			writeError(w, r, ErrInvalidArgument)
+			return
+		}
+		hasher = h
+	}
+	expected := ""
+	if algo != "" {
+		expected = r.Header.Get("x-amz-checksum-" + strings.ToLower(algo))
+	}
+
 	rc, err := s.Data.GetChunks(r.Context(), srcObj.Manifest, offset, length)
 	if err != nil {
 		writeError(w, r, ErrInternal)
@@ -282,16 +304,31 @@ func (s *Server) uploadPartCopy(w http.ResponseWriter, r *http.Request, b *meta.
 
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
-	manifest, err := s.Data.PutChunks(ctx, rc, mu.StorageClass)
+	body := io.Reader(rc)
+	if hasher != nil {
+		body = io.TeeReader(rc, hasher)
+	}
+	manifest, err := s.Data.PutChunks(ctx, body, mu.StorageClass)
 	if err != nil {
 		writeError(w, r, ErrInternal)
 		return
+	}
+	var sums map[string]string
+	if hasher != nil {
+		got := base64.StdEncoding.EncodeToString(hasher.Sum(nil))
+		if expected != "" && got != expected {
+			_ = s.Data.Delete(r.Context(), manifest)
+			writeError(w, r, ErrBadDigest)
+			return
+		}
+		sums = map[string]string{algo: got}
 	}
 	part := &meta.MultipartPart{
 		PartNumber: partNumber,
 		ETag:       manifest.ETag,
 		Size:       manifest.Size,
 		Manifest:   manifest,
+		Checksums:  sums,
 	}
 	if err := s.Meta.SavePart(r.Context(), b.ID, uploadID, part); err != nil {
 		_ = s.Data.Delete(r.Context(), manifest)
@@ -301,9 +338,16 @@ func (s *Server) uploadPartCopy(w http.ResponseWriter, r *http.Request, b *meta.
 	if srcObj.VersionID != "" {
 		w.Header().Set("x-amz-copy-source-version-id", srcObj.VersionID)
 	}
+	w.Header().Set("ETag", `"`+manifest.ETag+`"`)
+	writeChecksumHeaders(w.Header(), sums)
 	writeXML(w, http.StatusOK, copyPartResult{
-		ETag:         `"` + manifest.ETag + `"`,
-		LastModified: time.Now().UTC().Format(time.RFC3339),
+		ETag:              `"` + manifest.ETag + `"`,
+		LastModified:      time.Now().UTC().Format(time.RFC3339),
+		ChecksumCRC32:     sums["CRC32"],
+		ChecksumCRC32C:    sums["CRC32C"],
+		ChecksumSHA1:      sums["SHA1"],
+		ChecksumSHA256:    sums["SHA256"],
+		ChecksumCRC64NVME: sums["CRC64NVME"],
 	})
 }
 

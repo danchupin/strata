@@ -71,8 +71,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "uploadPartCopy now reads x-amz-checksum-algorithm; pipes the GetChunks→PutChunks body through io.TeeReader into the named hasher; on completion encodes base64 and (if client also supplied x-amz-checksum-<algo>) compares — mismatch returns BadDigest after deleting the freshly written chunks. Computed digest persists into MultipartPart.Checksums so US-001's PartChunks and Complete's composeMultipartChecksums carry it forward into both per-part and composite responses. copyPartResult XML grew ChecksumCRC32/CRC32C/SHA1/SHA256/CRC64NVME omitempty fields; response also gains the ETag header (was XML-only before, but Complete needs the header so the client can echo it). Tests in multipart_copy_test.go: per-part SHA256 round-trip, BadDigest on mismatch, and composite-on-Complete using the per-part digest."
     },
     {
       "id": "US-005",
