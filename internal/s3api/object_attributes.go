@@ -121,7 +121,7 @@ func (s *Server) getObjectAttributes(w http.ResponseWriter, r *http.Request, b *
 
 	w.Header().Set("Last-Modified", o.Mtime.UTC().Format(http.TimeFormat))
 	if o.VersionID != "" && meta.IsVersioningActive(b.Versioning) {
-		w.Header().Set("x-amz-version-id", o.VersionID)
+		w.Header().Set("x-amz-version-id", wireVersionID(o))
 	}
 	writeXML(w, http.StatusOK, resp)
 }

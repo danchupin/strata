@@ -125,8 +125,8 @@
         "Tests pass"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Null-version semantics already wired by US-028/029: meta.NullVersionID + NullVersionLiteral + ResolveVersionID in `internal/meta/store.go`, lockstep PutObject/GetObject/DeleteObject/DeleteObjectNullReplacement in memory/cassandra/tikv backends, storetest contract entries (caseVersioningNullSentinel, caseVersioningNullListVersions, caseVersioningSuspendedReplaceNull) all green. This US verifies the 5 boto-driven s3-tests `test_versioning_obj_plain_null_version_*` + `test_versioning_obj_suspend*` actually pass end-to-end against the harness, and closes a wire-form leak: GET/HEAD/GetObjectACL/GetObjectAttributes were emitting the raw zero-UUID sentinel in `x-amz-version-id` instead of the literal `\"null\"`. Routed through `wireVersionID(o)` (the canonical wire-form helper from US-028) at server.go:1264, acl.go:246, object_attributes.go:124. New tests in versioning_test.go mirror the 5 upstream s3-tests verbatim: TestVersioningObjPlainNullVersionRemoval, TestVersioningObjPlainNullVersionOverwrite, TestVersioningObjPlainNullVersionOverwriteSuspended, TestVersioningObjSuspendVersions, TestVersioningObjSuspendedCopy."
     },
     {
       "id": "US-008",

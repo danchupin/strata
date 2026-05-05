@@ -243,7 +243,7 @@ func (s *Server) getObjectACL(w http.ResponseWriter, r *http.Request, b *meta.Bu
 		return
 	}
 	if o.VersionID != "" {
-		w.Header().Set("x-amz-version-id", o.VersionID)
+		w.Header().Set("x-amz-version-id", wireVersionID(o))
 	}
 	if grants, gerr := s.Meta.GetObjectGrants(r.Context(), b.ID, key, o.VersionID); gerr == nil {
 		writeXML(w, http.StatusOK, buildACLFromGrants(b.Owner, grants))

@@ -1261,7 +1261,7 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		w.Header().Set("x-amz-replication-status", o.ReplicationStatus)
 	}
 	if o.VersionID != "" && meta.IsVersioningActive(b.Versioning) {
-		w.Header().Set("x-amz-version-id", o.VersionID)
+		w.Header().Set("x-amz-version-id", wireVersionID(o))
 	}
 
 	var (
