@@ -32,15 +32,21 @@ type MetricsObserver interface {
 	IncCompleted(ruleID string)
 	IncFailed(ruleID string)
 	SetQueueDepth(ruleID string, depth int)
+	// SetQueueAge publishes the oldest pending replication_queue row age
+	// (seconds) for a source bucket. Sampled at every drain tick — including
+	// 0 for buckets with an empty queue so the per-bucket Replication tab
+	// (US-014) sees a flatline instead of staleness.
+	SetQueueAge(bucket string, ageSeconds float64)
 }
 
 // nopMetrics is a no-op observer used when cfg.Metrics is nil.
 type nopMetrics struct{}
 
-func (nopMetrics) ObserveLag(string, float64) {}
-func (nopMetrics) IncCompleted(string)        {}
-func (nopMetrics) IncFailed(string)           {}
-func (nopMetrics) SetQueueDepth(string, int)  {}
+func (nopMetrics) ObserveLag(string, float64)   {}
+func (nopMetrics) IncCompleted(string)          {}
+func (nopMetrics) IncFailed(string)             {}
+func (nopMetrics) SetQueueDepth(string, int)    {}
+func (nopMetrics) SetQueueAge(string, float64)  {}
 
 // Config wires the replicator Worker. Defaults applied in New: Interval=5s,
 // MaxRetries=6, BackoffBase=1s, Now=time.Now, Logger=slog.Default,
@@ -151,28 +157,42 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err := w.drainBucket(ctx, b.ID); err != nil {
+		if err := w.drainBucket(ctx, b.ID, b.Name); err != nil {
 			w.cfg.Logger.Warn("replication: drain bucket failed", "bucket", b.Name, "error", err.Error())
 		}
 	}
 	return nil
 }
 
-func (w *Worker) drainBucket(ctx context.Context, bucketID uuid.UUID) error {
+func (w *Worker) drainBucket(ctx context.Context, bucketID uuid.UUID, bucketName string) error {
 	events, err := w.cfg.Meta.ListPendingReplications(ctx, bucketID, w.cfg.PollLimit)
 	if err != nil {
 		return err
 	}
-	if len(events) > 0 {
+	now := w.cfg.Now()
+	// Per-bucket queue age: oldest pending event_time delta. Emitted every
+	// tick (including 0 when empty) so the per-bucket Replication tab
+	// (US-014) sees a flatline rather than a stale gauge.
+	if len(events) == 0 {
+		w.cfg.Metrics.SetQueueAge(bucketName, 0)
+	} else {
 		depths := map[string]int{}
+		oldest := events[0].EventTime
 		for _, evt := range events {
 			depths[evt.RuleID]++
+			if evt.EventTime.Before(oldest) {
+				oldest = evt.EventTime
+			}
 		}
 		for rule, n := range depths {
 			w.cfg.Metrics.SetQueueDepth(rule, n)
 		}
+		age := now.Sub(oldest).Seconds()
+		if age < 0 {
+			age = 0
+		}
+		w.cfg.Metrics.SetQueueAge(bucketName, age)
 	}
-	now := w.cfg.Now()
 	for _, evt := range events {
 		if ctx.Err() != nil {
 			return ctx.Err()

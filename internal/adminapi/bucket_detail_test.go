@@ -124,6 +124,25 @@ func TestBucketGetReturnsDetail(t *testing.T) {
 	if got.ShardCount != 64 {
 		t.Errorf("shard_count=%d want 64 (memory store default)", got.ShardCount)
 	}
+	if got.ReplicationConfigured {
+		t.Errorf("replication_configured=true on a bucket without replication config")
+	}
+}
+
+func TestBucketGetReportsReplicationConfigured(t *testing.T) {
+	s := newTestServer()
+	seedBucketWithOwner(t, s.Meta, "repl", "alice", 0, 0)
+	b, err := s.Meta.GetBucket(context.Background(), "repl")
+	if err != nil {
+		t.Fatalf("get bucket: %v", err)
+	}
+	if err := s.Meta.SetBucketReplication(context.Background(), b.ID, []byte("<stub/>")); err != nil {
+		t.Fatalf("set replication: %v", err)
+	}
+	_, got := bucketDetailGET(t, s, "repl")
+	if !got.ReplicationConfigured {
+		t.Errorf("replication_configured=false after SetBucketReplication")
+	}
 }
 
 func TestBucketGetReportsVersioning(t *testing.T) {

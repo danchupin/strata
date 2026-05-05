@@ -307,6 +307,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/v1/buckets/top", s.handleBucketsTop)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}", s.handleBucketGet)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/distribution", s.handleBucketDistribution)
+	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/replication-lag", s.handleBucketReplicationLag)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/objects", s.handleObjectsList)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/object", s.handleObjectGet)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/object-versions", s.handleObjectVersions)

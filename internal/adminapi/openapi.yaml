@@ -120,6 +120,12 @@ components:
             Active sharding factor for the bucket's `objects` table partition
             (hash(key)%N). Surfaced for the Hot Shards drill panel which
             reconstructs shard from key client-side via FNV-1a.
+        replication_configured:
+          type: boolean
+          description: |
+            True when the bucket has a non-empty replication configuration.
+            The UI uses this flag to gate the per-bucket Replication tab
+            (US-014); only buckets with a configuration get the tab.
 
     BucketShardStat:
       type: object
@@ -140,6 +146,26 @@ components:
             One row per shard ID 0..N-1, contiguous and zero-filled when a
             shard has no live objects. Same data the bucketstats sampler
             emits via `strata_bucket_shard_{bytes,objects}` gauges.
+
+    BucketReplicationLagPoint:
+      type: object
+      required: [ts, value]
+      properties:
+        ts: { type: string, format: date-time }
+        value: { type: number, format: float }
+
+    BucketReplicationLagResponse:
+      type: object
+      properties:
+        empty:
+          type: boolean
+          description: True when the bucket has no replication configuration.
+        reason:
+          type: string
+          description: Human-readable explanation when `empty=true`.
+        values:
+          type: array
+          items: { $ref: '#/components/schemas/BucketReplicationLagPoint' }
 
     BucketTop:
       type: object
@@ -468,6 +494,37 @@ paths:
               schema: { $ref: '#/components/schemas/BucketDistributionResponse' }
         '404':
           $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /buckets/{bucket}/replication-lag:
+    get:
+      summary: Per-bucket replication queue age time-series (US-014)
+      operationId: getBucketReplicationLag
+      description: |
+        Returns the per-bucket replication queue age (`strata_replication_queue_age_seconds`)
+        as a recharts-friendly time-series over the requested range. When the bucket has
+        no replication configuration the body is `{empty: true}` and the UI tab hides
+        itself. 503 MetricsUnavailable when STRATA_PROMETHEUS_URL is unset.
+      parameters:
+        - name: bucket
+          in: path
+          required: true
+          schema: { type: string }
+        - name: range
+          in: query
+          schema: { type: string, default: "1h" }
+          description: Go duration string (e.g. `15m`, `1h`, `6h`, `24h`); capped at 24h.
+      responses:
+        '200':
+          description: Replication queue age time-series.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BucketReplicationLagResponse' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          description: Prometheus is unavailable (STRATA_PROMETHEUS_URL is empty).
         '401':
           $ref: '#/components/responses/Unauthorized'
 

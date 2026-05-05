@@ -93,6 +93,14 @@ var (
 		[]string{"rule_id"},
 	)
 
+	ReplicationQueueAge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "strata_replication_queue_age_seconds",
+			Help: "Oldest pending replication_queue row age (seconds) per source bucket, sampled by the replicator worker. Backs the per-bucket Replication tab (US-014).",
+		},
+		[]string{"bucket"},
+	)
+
 	RADOSOpDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "strata_rados_op_duration_seconds",
@@ -202,7 +210,7 @@ func Register() {
 		GCEnqueued, GCProcessed,
 		LifecycleTransitions, LifecycleExpirations,
 		ReplicationLagSeconds, ReplicationCompleted, ReplicationFailed,
-		ReplicationQueueDepth,
+		ReplicationQueueDepth, ReplicationQueueAge,
 		RADOSOpDuration,
 		GCQueueDepth,
 		MultipartActive,
@@ -437,4 +445,14 @@ func (ReplicationObserver) SetQueueDepth(ruleID string, depth int) {
 		ruleID = "unknown"
 	}
 	ReplicationQueueDepth.WithLabelValues(ruleID).Set(float64(depth))
+}
+
+// SetQueueAge publishes the oldest pending row age (seconds) for the given
+// source bucket. Backs the per-bucket Replication tab (US-014). Empty bucket
+// collapses to "unknown" so a missing label never silently drops the sample.
+func (ReplicationObserver) SetQueueAge(bucket string, ageSeconds float64) {
+	if bucket == "" {
+		bucket = "unknown"
+	}
+	ReplicationQueueAge.WithLabelValues(bucket).Set(ageSeconds)
 }

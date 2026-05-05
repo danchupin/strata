@@ -52,6 +52,13 @@ const BucketDistributionTab = lazy(() =>
     default: m.BucketDistributionTab,
   })),
 );
+// BucketReplicationLagTab also pulls recharts. Same lazy treatment as the
+// Distribution tab — keep it out of the index bundle.
+const BucketReplicationLagTab = lazy(() =>
+  import('@/components/BucketReplicationLagTab').then((m) => ({
+    default: m.BucketReplicationLagTab,
+  })),
+);
 import { BucketInventoryTab } from '@/components/BucketInventoryTab';
 import { BucketLifecycleTab } from '@/components/BucketLifecycleTab';
 import { BucketOverviewTab } from '@/components/BucketOverviewTab';
@@ -293,6 +300,11 @@ export function BucketDetailPage() {
           <TabsTrigger value="distribution" disabled={!detail}>
             Distribution
           </TabsTrigger>
+          {detail?.replication_configured && (
+            <TabsTrigger value="replication" disabled={!detail}>
+              Replication
+            </TabsTrigger>
+          )}
         </TabsList>
         <TabsContent value="overview" className="space-y-4">
           {detail && <BucketOverviewTab bucket={detail} />}
@@ -322,6 +334,13 @@ export function BucketDetailPage() {
           {detail && (
             <Suspense fallback={<Skeleton className="h-72 w-full" />}>
               <BucketDistributionTab bucket={detail} />
+            </Suspense>
+          )}
+        </TabsContent>
+        <TabsContent value="replication" className="space-y-4">
+          {detail?.replication_configured && (
+            <Suspense fallback={<Skeleton className="h-72 w-full" />}>
+              <BucketReplicationLagTab bucket={detail} />
             </Suspense>
           )}
         </TabsContent>

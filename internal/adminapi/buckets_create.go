@@ -93,16 +93,17 @@ func (s *Server) handleBucketCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := BucketDetail{
-		Name:           b.Name,
-		Owner:          b.Owner,
-		Region:         region,
-		CreatedAt:      b.CreatedAt.Unix(),
-		Versioning:     versioningLabel(b.Versioning),
-		ObjectLock:     b.ObjectLockEnabled,
-		SizeBytes:      0,
-		ObjectCount:    0,
-		BackendPresign: b.BackendPresign,
-		ShardCount:     b.ShardCount,
+		Name:                  b.Name,
+		Owner:                 b.Owner,
+		Region:                region,
+		CreatedAt:             b.CreatedAt.Unix(),
+		Versioning:            versioningLabel(b.Versioning),
+		ObjectLock:            b.ObjectLockEnabled,
+		SizeBytes:             0,
+		ObjectCount:           0,
+		BackendPresign:        b.BackendPresign,
+		ShardCount:            b.ShardCount,
+		ReplicationConfigured: false,
 	}
 	writeJSON(w, http.StatusCreated, resp)
 }

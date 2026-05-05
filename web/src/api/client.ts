@@ -88,6 +88,11 @@ export interface BucketDetail {
   // table partition. The Hot Shards drill panel reproduces shard via
   // FNV-1a(key) % shard_count to match the Go shardOf helper.
   shard_count: number;
+  // replication_configured is true when the bucket has a non-empty
+  // replication configuration (set via PutBucketReplication on the S3
+  // surface). Gates the per-bucket Replication tab (US-014) — only buckets
+  // with a configuration get the tab.
+  replication_configured?: boolean;
 }
 
 export interface CreateBucketBody {
@@ -1682,6 +1687,40 @@ export async function fetchBucketDistribution(
   if (!resp.ok) throw await buildAdminError(resp, 'fetch bucket distribution failed');
   const body = (await resp.json()) as BucketDistributionResponse;
   return { shards: body.shards ?? [] };
+}
+
+// US-014 — Per-bucket replication queue age time-series. Wire shape mirrors
+// BucketReplicationLagResponse in internal/adminapi/buckets_replication_lag.go.
+// When the bucket has no replication configuration the response is
+// `{empty: true}` and the UI tab hides itself.
+export interface BucketReplicationLagPoint {
+  ts: string;
+  value: number;
+}
+
+export interface BucketReplicationLagResponse {
+  empty?: boolean;
+  reason?: string;
+  values?: BucketReplicationLagPoint[];
+}
+
+export async function fetchBucketReplicationLag(
+  bucket: string,
+  range: string,
+): Promise<BucketReplicationLagResponse> {
+  const usp = new URLSearchParams();
+  usp.set('range', range);
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(bucket)}/replication-lag?${usp.toString()}`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch replication lag failed');
+  const body = (await resp.json()) as BucketReplicationLagResponse;
+  return {
+    empty: body.empty ?? false,
+    reason: body.reason ?? '',
+    values: body.values ?? [],
+  };
 }
 
 // US-009/US-010 — Hot Shards matrix for a single bucket. Wire shape mirrors

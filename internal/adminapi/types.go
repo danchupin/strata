@@ -83,6 +83,11 @@ type BucketDetail struct {
 	// the Hot Shards drill panel can reconstruct shard from key client-side
 	// using FNV-1a, matching `internal/meta/cassandra/store.go::shardOf`.
 	ShardCount int `json:"shard_count"`
+	// ReplicationConfigured is true when the bucket has a non-empty
+	// replication configuration (set via PutBucketReplication). The UI uses
+	// this flag to gate the per-bucket Replication tab (US-014); only buckets
+	// with a configuration get the tab.
+	ReplicationConfigured bool `json:"replication_configured"`
 }
 
 // SetBackendPresignRequest is the JSON body accepted by PUT /admin/v1/buckets/
