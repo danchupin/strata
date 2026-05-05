@@ -13,7 +13,7 @@ as before:
 - **P2** — meaningful gaps; expected for serious deployments
 - **P3** — nice-to-have, visibility, DX
 
-S3-compatibility headline: **80.1% (141/176)** on the executable subset of `ceph/s3-tests`. See
+S3-compatibility headline: **84.7% (150/177)** on the executable subset of `ceph/s3-tests`. See
 `scripts/s3-tests/README.md` for the gap breakdown.
 
 ---
@@ -36,10 +36,14 @@ adding more, prove what is there.
   binary, run it ≥1 h against Cassandra+RADOS, record observed inconsistencies (or
   zero, with the workload that proves it). Add the run to CI on a nightly schedule
   so regressions surface.
-- **P1 — s3-tests 80% → 90%+.** 27 failures excluding the deliberate SigV2 gap, clustered
-  in `scripts/s3-tests/README.md`. Closing the multipart per-part composite checksum
-  shape, the multipart copy `FlexibleChecksum` path, and the listing edge cases
-  (`delimiter+prefix`, V2 continuation token interpretation) covers most of it.
+- **P1 — s3-tests 80% → 90%+.** Lifted to 84.7% (150/177) by the `ralph/s3-compat-90`
+  cycle (US-001..US-010 — multipart per-part offset tracking, ?partNumber=N GET, per-part
+  composite-checksum, multipart copy FlexibleChecksum, listing delimiter+prefix folding,
+  V2 opaque continuation token, versioning literal "null", multipart Complete
+  preconditions + size-too-small + composite-checksum input validation). 16 real
+  failures remain, clustered in multipart copy edges, ?partNumber=N quoted-ETag shape,
+  CRC32-family composite checksum, multipart If-Match-on-missing-object. See
+  `scripts/s3-tests/README.md` for the per-test gap breakdown.
 - **P2 — Benchmarks vs RGW.** "Drop-in RGW replacement" is unproven without numbers. Run
   `warp` and `cosbench` against both gateways on the same RADOS cluster. Publish absolute
   latency / throughput per workload class (small-object PUT, large-object GET, listing,
@@ -65,6 +69,59 @@ adding more, prove what is there.
   from the roadmap. (commit `40b45de`)
 
 ## Correctness & consistency
+
+- **P2 — Multipart copy edges (UploadPartCopy).** US-004 closed the boto SDK
+  `FlexibleChecksum` path on the data plane, but four upstream s3-tests still fail:
+  `test_multipart_copy_small`, `_improper_range`, `_special_names`, `_multiple_sizes`.
+  Need: copy-source-range parser handling `bytes=0-0` / out-of-bounds inputs cleanly,
+  per-special-char (`+`, space, `?`) copy-source URL decoding, and the resulting copy
+  ETag wire shape on the multi-part response. Surfaced under `ralph/s3-compat-90`.
+
+- **P2 — `?partNumber=N` GET quoted-ETag wire shape.** US-002 ships per-part ETag
+  echo via `Manifest.PartChunks[N-1].ETag`, but three upstream s3-tests
+  (`test_multipart_get_part`, `_sse_c_get_part`, `_single_get_part`) still fail
+  because the boto-side compares the response `ETag` header, double-quoted, against
+  the part-upload response's quoted ETag. Strata emits `"<hex>"` (single quotes
+  around hex) but `internal/s3api/server.go::getObject` may strip or re-quote
+  inconsistently. Audit the partNumber path's ETag header set vs the response_quote
+  helper used by the regular GET.
+
+- **P2 — Multipart composite checksum CRC32 / CRC32C / CRC64NVME.** US-003 closed
+  SHA1 / SHA256 composite formula; the CRC32-family is still off by a fold:
+  `test_multipart_use_cksum_helper_crc32`, `_crc32c`, `_crc64nvme`. Boto3 ≥1.35
+  ships CRC64NVME as the auto-default, so this is the most-noticed remaining gap.
+  Composite formula for CRC algos differs from the SHA ones — needs the BoringSSL-
+  style fold over per-part raw checksums.
+
+- **P2 — Multipart `If-Match`-on-missing-object error code.** US-008 aligned
+  CompleteMultipartUpload's If-Match path with putObject's RFC 7232 §3.1
+  contract (return `412 PreconditionFailed`), but the upstream s3-test
+  `test_multipart_put_object_if_match` / `_put_current_object_if_match`
+  asserts `404 NoSuchKey` for the missing-object branch (matches AWS S3
+  rather than RFC). Revert the alignment for this specific branch.
+
+- **P1 — Cassandra null-version timeuuid sentinel.** Cassandra's `objects.version_id`
+  column is `timeuuid`, which the server rejects on INSERT with the all-zero
+  `meta.NullVersionID` (v0 not a valid v1). US-007 + US-028 + US-029 broke every
+  PUT to a Disabled-or-Suspended bucket against the Cassandra backend (~70 s3-tests
+  red). Fixed in this cycle by introducing a cassandra-internal v1 sentinel
+  (`00000000-0000-1000-8000-000000000000`) translated at every gocql.ParseUUID /
+  .String() boundary; see `internal/meta/cassandra/store.go::versionToCQL`. Caught
+  end-to-end via the `ralph/s3-compat-90` rerun. The contract test
+  `caseVersioningNullSentinel` did not catch this (CI cassandra-integration ran
+  the test but apparently passed — needs a follow-up to verify the test actually
+  exercises an INSERT with `o.IsNull=true && o.VersionID==NullVersionID` against a
+  real Cassandra container).
+
+- **P1 — `koanf` env provider does not skip empty env values.** When a non-empty
+  TOML default exists for a duration/integer field and the docker-compose
+  `${VAR:-}` shape passes through with VAR unset, koanf overrides the default
+  with `""` and unmarshal fails (`'gc.interval' time: invalid duration`). Fixed
+  in this cycle by switching from `env.Provider` → `env.ProviderWithValue` with
+  a callback that returns an empty key for empty values; see
+  `internal/config/config.go::Load`. The bug blocked `make up-all` startup of the
+  cassandra-backed `strata` service for the entire `ralph/s3-compat-90` cycle
+  before discovery.
 
 - **P2 — Multipart Complete leaks `completing` state on per-part ETag mismatch.**
   `meta.Store.CompleteMultipartUpload` flips the upload row to `completing` *before*

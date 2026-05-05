@@ -59,6 +59,78 @@ History below — newest run on top. The default subset filter is the
 test_object_read or test_object_delete or test_multipart or
 test_versioning_obj or test_bucket_list_versions`.
 
+### 2026-05-05 — `2bb7fd0` + ralph/s3-compat-90 cycle (84.7%)
+
+After the US-001..US-010 cycle landed (multipart per-part offset tracking
+in `data.Manifest`, `?partNumber=N` GET serving the exact part body, per-part
+composite-checksum response shape, multipart copy `FlexibleChecksum` path,
+listing delimiter+prefix folding at the s3api layer, V2 continuation token
+as opaque base64, versioning literal `"null"` semantics, multipart Complete
+preconditions, multipart size-too-small + resend-ordering, and multipart
+composite-checksum input validation), plus two cycle-discovered fixes
+(cassandra null-version timeuuid sentinel, `koanf` empty-env override
+filter):
+
+```
+tests=177  passed=150  failed=27  errors=0  skipped=0
+pass rate: 84.7%
+```
+
+**+9 newly passing tests** vs the post-Ralph 80.1% baseline (`141/176 → 150/177`).
+Headline 90% target NOT hit; remaining 16 real failures are clustered in the
+multipart copy / get-part / cksum-helper-32* paths and need a follow-up cycle.
+
+**Remaining 27 failures** fall into two buckets:
+
+**A. Deliberate gaps (11 — count toward the headline; do NOT track as ROADMAP P-items):**
+
+- `test_headers.py` — 8 SigV2 / bad-auth shape failures
+  (`test_bucket_create_bad_expect_mismatch`,
+  `test_bucket_create_bad_authorization_*`,
+  `test_bucket_create_bad_ua_*_aws2`,
+  `test_bucket_create_bad_date_*_aws2`).
+  SigV2 was deprecated in 2018; we've never implemented it.
+- `test_bucket_list_prefix_unreadable` — boto3 URL-decodes the prefix
+  before transmit; Go's `net/http` URL-decodes again; the unreadable byte
+  is gone before our handler sees it. Architectural drift, not a bug.
+- `test_bucket_list_objects_anonymous` + `test_bucket_listv2_objects_anonymous`
+  — auth-mode=required rejects anonymous list before the
+  bucket-policy/ACL gate can grant. Set `STRATA_AUTH_MODE=optional` to pass;
+  intentional posture for this run.
+- `test_bucket_create_exists` — boto wants `e.status` attr on the
+  exception; depends on the AWS errorfactory shape mapping.
+
+**B. Real surface bugs to chase next cycle (16 — file as P1/P2 in ROADMAP):**
+
+- `test_multipart_copy_small`, `_improper_range`, `_special_names`,
+  `_multiple_sizes` — UploadPartCopy edge cases. US-004 closed
+  the FlexibleChecksum path but range / size / special-chars edges remain.
+- `test_multipart_get_part`, `test_multipart_sse_c_get_part`,
+  `test_multipart_single_get_part` — quoted-ETag mismatch in the
+  `?partNumber=N` GET response (US-002 ships per-part ETag echo, but
+  the boto-side double-quote shape diverges).
+- `test_multipart_resend_first_finishes_last` — known: documented
+  as a separate P2 in ROADMAP (`Multipart Complete leaks completing
+  state on per-part ETag mismatch`).
+- `test_versioning_obj_suspended_copy` — copy from suspended-bucket
+  null row now writes the dst correctly, but the test additionally
+  asserts the src null row's wire VersionId was preserved on the
+  dst-side response — partial coverage in US-007.
+- `test_multipart_use_cksum_helper_crc64nvme` / `crc32` / `crc32c` —
+  composite formula CRC32-class (boto3 ≥1.35 ships `crc64nvme` as a
+  default). US-003 closed sha1 / sha256; the CRC32-family composite
+  needs the `BoringSSL`-style fold.
+- `test_multipart_put_object_if_match` /
+  `test_multipart_put_current_object_if_match` — US-008 changed the
+  `If-Match`-on-missing-object path to 412 PreconditionFailed; the
+  upstream s3-test asserts 404 NoSuchKey on that branch. Revert the
+  US-008 alignment for the missing-object case only.
+- `test_object_delete_key_bucket_gone` — DELETE on missing-bucket
+  still returns 403 (auth path) before the bucket-not-found check.
+- `test_bucket_list_return_data_versioning` — `<Owner>` field on V1
+  list-versions response uses `display_name=""`; upstream wants the
+  owner display name set to a non-empty value.
+
 ### 2026-04-26 — `04919a5` + Block 1 polish round (≥80% target hit)
 
 After cassandra schema migration for cache_control / expires / parts_count

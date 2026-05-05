@@ -206,8 +206,11 @@ func Load() (*Config, error) {
 		}
 	}
 
-	if err := k.Load(env.Provider("STRATA_", ".", func(s string) string {
-		return envMap[s]
+	if err := k.Load(env.ProviderWithValue("STRATA_", ".", func(s, v string) (string, any) {
+		if v == "" {
+			return "", nil
+		}
+		return envMap[s], v
 	}), nil); err != nil {
 		return nil, fmt.Errorf("config env: %w", err)
 	}
