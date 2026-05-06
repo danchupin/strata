@@ -1119,14 +1119,29 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	}
 	if partNumberStr != "" {
 		n, perr := strconv.Atoi(partNumberStr)
-		if perr != nil || n < 1 || partsTotal == 0 || n > partsTotal {
-			writeError(w, r, ErrInvalidRange)
+		if perr != nil || n < 1 {
+			writeError(w, r, ErrInvalidPart)
 			return
 		}
-		partNumber = n
-		if o.Manifest != nil && len(o.Manifest.PartChunks) >= n {
-			pr := o.Manifest.PartChunks[n-1]
-			partRange = &pr
+		if partsTotal == 0 {
+			// Non-multipart object. AWS-parity (s3-tests
+			// `test_non_multipart_get_part`): partNumber=1 returns the
+			// whole object (200 OK, whole-object ETag); any other N is
+			// InvalidPart. Treat as no partNumber by leaving partNumber=0.
+			if n != 1 {
+				writeError(w, r, ErrInvalidPart)
+				return
+			}
+		} else {
+			if n > partsTotal {
+				writeError(w, r, ErrInvalidPart)
+				return
+			}
+			partNumber = n
+			if o.Manifest != nil && len(o.Manifest.PartChunks) >= n {
+				pr := o.Manifest.PartChunks[n-1]
+				partRange = &pr
+			}
 		}
 	}
 	if o.SSECKeyMD5 != "" {
@@ -1185,11 +1200,12 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		}
 	}
 	w.Header().Set("Content-Type", firstNonEmpty(o.ContentType, "application/octet-stream"))
-	etag := o.ETag
-	if partRange != nil && partRange.ETag != "" {
-		etag = partRange.ETag
-	}
-	w.Header().Set("ETag", `"`+etag+`"`)
+	// AWS-parity: ?partNumber=N GET/HEAD echoes the whole-object multipart
+	// ETag (the composite "<32hex>-<count>" produced by CompleteMultipartUpload),
+	// NOT the per-part ETag. Verified by s3-tests test_multipart_get_part /
+	// _sse_c_get_part / _single_get_part which assert
+	// response['ETag'] == complete_multipart_upload['ETag'].
+	w.Header().Set("ETag", `"`+o.ETag+`"`)
 	w.Header().Set("Last-Modified", o.Mtime.UTC().Format(http.TimeFormat))
 	w.Header().Set("x-amz-storage-class", o.StorageClass)
 	w.Header().Set("Accept-Ranges", "bytes")

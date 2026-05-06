@@ -3,6 +3,7 @@ package s3api_test
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"strconv"
@@ -88,6 +89,68 @@ func TestMultipartGetByPartNumber(t *testing.T) {
 	}
 }
 
+// TestMultipartGetByPartNumberEchoesWholeObjectETag asserts the
+// AWS-parity wire shape for ?partNumber=N: the response ETag header
+// equals the whole-object multipart ETag (`"<32hex>-<count>"`), NOT the
+// per-part raw ETag. Mirrors s3-tests test_multipart_get_part /
+// _single_get_part assertion `response['ETag'] == complete['ETag']`.
+func TestMultipartGetByPartNumberEchoesWholeObjectETag(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+
+	for _, tc := range []struct {
+		name  string
+		parts [][]byte
+	}{
+		{"single-part", [][]byte{bytes.Repeat([]byte("A"), 1<<10)}},
+		{"multi-part", [][]byte{
+			bytes.Repeat([]byte("A"), 5<<20),
+			bytes.Repeat([]byte("B"), 1<<10),
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			key := "k-" + tc.name
+			resp := h.doString("POST", "/bkt/"+key+"?uploads", "")
+			h.mustStatus(resp, 200)
+			uploadID := uploadIDRE.FindStringSubmatch(h.readBody(resp))[1]
+
+			var completeBody strings.Builder
+			completeBody.WriteString("<CompleteMultipartUpload>")
+			for i, p := range tc.parts {
+				pn := i + 1
+				r := h.do("PUT", fmt.Sprintf("/bkt/%s?uploadId=%s&partNumber=%d", key, uploadID, pn), byteReader(p))
+				h.mustStatus(r, 200)
+				etag := strings.Trim(r.Header.Get("Etag"), `"`)
+				fmt.Fprintf(&completeBody, `<Part><PartNumber>%d</PartNumber><ETag>"%s"</ETag></Part>`, pn, etag)
+			}
+			completeBody.WriteString("</CompleteMultipartUpload>")
+			complete := h.doString("POST", "/bkt/"+key+"?uploadId="+uploadID, completeBody.String())
+			h.mustStatus(complete, 200)
+			var completeRes struct {
+				ETag string `xml:"ETag"`
+			}
+			if err := xml.Unmarshal([]byte(h.readBody(complete)), &completeRes); err != nil {
+				t.Fatalf("decode complete response: %v", err)
+			}
+			wantETag := completeRes.ETag
+
+			head := h.do("HEAD", fmt.Sprintf("/bkt/%s?partNumber=1", key), nil)
+			h.mustStatus(head, 206)
+			if got := head.Header.Get("Etag"); got != wantETag {
+				t.Errorf("HEAD partNumber=1 ETag=%q want %q (whole-object multipart)", got, wantETag)
+			}
+
+			get := h.do("GET", fmt.Sprintf("/bkt/%s?partNumber=1", key), nil)
+			h.mustStatus(get, 206)
+			if got := get.Header.Get("Etag"); got != wantETag {
+				t.Errorf("GET partNumber=1 ETag=%q want %q (whole-object multipart)", got, wantETag)
+			}
+			_, _ = io.Copy(io.Discard, get.Body)
+			_ = get.Body.Close()
+		})
+	}
+}
+
 // TestMultipartGetByPartNumberPerPartChecksum asserts that GET ?partNumber=N
 // echoes the per-part stored x-amz-checksum-<algo> header (not the composite
 // object-level one) for each fetched part.
@@ -139,22 +202,37 @@ func TestMultipartGetByPartNumberPerPartChecksum(t *testing.T) {
 	}
 }
 
-// TestGetByPartNumberNonMultipartReturns416 asserts that ?partNumber=N on a
-// single-PUT object yields 416 InvalidRange (matches AWS S3 behaviour for
-// objects without a multipart manifest).
-func TestGetByPartNumberNonMultipartReturns416(t *testing.T) {
+// TestGetByPartNumberNonMultipart asserts AWS-parity for ?partNumber=N on a
+// single-PUT object: partNumber=1 returns the whole object (200 OK with the
+// single-PUT ETag); partNumber>1 returns 400 InvalidPart. Mirrors s3-tests
+// `test_non_multipart_get_part`.
+func TestGetByPartNumberNonMultipart(t *testing.T) {
 	h := newHarness(t)
 	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
-	h.mustStatus(h.do("PUT", "/bkt/single", byteReader([]byte("hello"))), 200)
+	put := h.do("PUT", "/bkt/single", byteReader([]byte("hello")))
+	h.mustStatus(put, 200)
+	wantETag := put.Header.Get("Etag")
 
 	get := h.do("GET", "/bkt/single?partNumber=1", nil)
-	h.mustStatus(get, 416)
-	if !strings.Contains(h.readBody(get), "InvalidRange") {
-		t.Fatal("expected InvalidRange on partNumber against non-multipart object")
+	h.mustStatus(get, 200)
+	if got := get.Header.Get("Etag"); got != wantETag {
+		t.Errorf("partNumber=1 ETag=%q want %q", got, wantETag)
+	}
+	if body := h.readBody(get); body != "hello" {
+		t.Errorf("partNumber=1 body=%q want %q", body, "hello")
+	}
+
+	bad := h.do("GET", "/bkt/single?partNumber=2", nil)
+	h.mustStatus(bad, 400)
+	if !strings.Contains(h.readBody(bad), "InvalidPart") {
+		t.Fatal("expected InvalidPart on partNumber=2 against non-multipart object")
 	}
 }
 
-// TestGetByPartNumberOutOfRange asserts partNumber out of range yields 416 InvalidRange.
+// TestGetByPartNumberOutOfRange asserts partNumber out of range yields
+// 400 InvalidPart (AWS-parity — see s3-tests test_multipart_get_part /
+// _single_get_part: PartNumber > parts_count → 400 InvalidPart). Earlier
+// behaviour returned 416 InvalidRange, which diverged from AWS.
 func TestGetByPartNumberOutOfRange(t *testing.T) {
 	h := newHarness(t)
 	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
@@ -176,8 +254,8 @@ func TestGetByPartNumberOutOfRange(t *testing.T) {
 
 	for _, n := range []string{"0", "-1", "3", "abc"} {
 		get := h.do("GET", "/bkt/mp?partNumber="+n, nil)
-		if get.StatusCode != 416 {
-			t.Errorf("partNumber=%s: status=%d want 416", n, get.StatusCode)
+		if get.StatusCode != 400 {
+			t.Errorf("partNumber=%s: status=%d want 400", n, get.StatusCode)
 		}
 		_ = get.Body.Close()
 	}

@@ -32,8 +32,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Surprise: PRD AC #1 said per-part GET should return per-part `\"<32hex>\"` shape. AWS-parity is the OPPOSITE — `?partNumber=N` GET returns the WHOLE-OBJECT multipart ETag (`\"<32hex>-<count>\"`). The s3-tests assert `response['ETag'] == complete_multipart_upload['ETag']`. Removed the partRange.ETag override in `internal/s3api/server.go::getObject`. Also flipped out-of-range partNumber from 416 InvalidRange to 400 InvalidPart (AWS-parity). Non-multipart partNumber=1 now returns whole object (200 OK)."
     },
     {
       "id": "US-003",

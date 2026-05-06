@@ -70,3 +70,18 @@ Cycle: ralph/s3-compat-95 (close remaining 16 real failures, target >=90% strict
   - **Per-part ETag in `copyPartResult`** was already returning `"<32hex>"` (manifest.ETag of the per-part bytes, double-quoted). Don't refactor it — boto3 round-trips fine.
   - **s3-tests cache lives at `/tmp/strata-s3tests.MO5E/s3-tests/`** in this dev env; `s3tests/functional/test_s3.py` is the canonical source for the failing tests' wire-level assertions when the live suite isn't running.
 ---
+
+## 2026-05-06 - US-002 ?partNumber=N GET ETag wire shape
+- Implemented:
+  - `internal/s3api/server.go::getObject` partNumber path: dropped the `partRange.ETag` override. The response ETag header now always echoes `o.ETag` (the whole-object multipart composite `"<32hex>-<count>"`), matching what boto3 sees in the CompleteMultipartUpload response. Prior code overrode with the per-part raw ETag, which diverged from AWS.
+  - Out-of-range partNumber (`n < 1`, `n > partsTotal`, non-numeric, or partNumber on a non-multipart object with `n != 1`) now returns `400 InvalidPart` instead of `416 InvalidRange`. AWS-parity confirmed against s3-tests test_multipart_get_part / _single_get_part.
+  - Non-multipart object `?partNumber=1` now returns the whole object (`200 OK`, single-PUT ETag) instead of `416 InvalidRange`. Mirrors s3-tests test_non_multipart_get_part.
+- Files changed:
+  - `internal/s3api/server.go`
+  - `internal/s3api/multipart_partnumber_test.go` — replaced `TestGetByPartNumberNonMultipartReturns416` with `TestGetByPartNumberNonMultipart` (asserts 200 + ETag for n=1, 400 InvalidPart for n=2). Flipped `TestGetByPartNumberOutOfRange` to assert 400. Added `TestMultipartGetByPartNumberEchoesWholeObjectETag` with single-part + multi-part subtests asserting GET/HEAD partNumber=N ETag equals the CompleteMultipartUpload XML `<ETag>` value.
+- Learnings for future iterations:
+  - **AWS `?partNumber=N` ETag is the WHOLE-OBJECT multipart ETag, not the per-part ETag.** boto3's `response['ETag']` on a `client.get_object(...PartNumber=N)` call must equal `client.complete_multipart_upload(...)['ETag']`. The PRD note in this story said the opposite — trust the s3-test source over the PRD when they conflict. Verified by reading test_multipart_get_part / _sse_c_get_part / _single_get_part directly.
+  - **AWS error code for partNumber out-of-range is `400 InvalidPart`, NOT `416 InvalidRange`.** Range-shape errors (e.g. `Range: bytes=99999999-` inside a valid partNumber) stay 416 — that's the inner range parser, not the part selector. Two error codes for two different failure modes.
+  - **Non-multipart object `?partNumber=1` returns the whole object** (200 OK, normal ETag). Only `?partNumber=2+` on non-multipart yields InvalidPart. Implementation: when `partsTotal == 0 && n == 1`, leave `partNumber=0` so the rest of the GET path treats the request as plain (no Content-Range, no 206 status).
+  - **XML test fixture parsing**: `<ETag>"abc"</ETag>` in the response body becomes `<ETag>&#34;abc&#34;</ETag>` in raw bytes (Go's `encoding/xml` escapes the inner quotes). Decode via `xml.Unmarshal` not raw `strings.Index` — the round-trip is `"<32hex>-<count>"` (with literal quote bytes) once decoded, matching what boto3 receives over the wire.
+---
