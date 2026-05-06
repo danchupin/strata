@@ -4,6 +4,7 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash"
@@ -184,15 +185,25 @@ func (h *crc64NVMEHash) Reset()         { h.crc = 0xFFFFFFFFFFFFFFFF }
 func (h *crc64NVMEHash) Size() int      { return 8 }
 func (h *crc64NVMEHash) BlockSize() int { return 1 }
 
-// composeMultipartChecksums computes the AWS-style composite checksum
-// (BASE64(HASH(concat(rawDigest_i)))-N) for every algorithm present on every
-// requested part. Algorithms missing on any part are skipped. Returns nil when
-// no algorithm is universally present.
-func composeMultipartChecksums(parts []*checksumPart) map[string]string {
+// composeMultipartChecksums computes the per-algorithm checksum echoed on
+// CompleteMultipartUpload. checksumType selects between AWS's two shapes:
+//   - "" / "COMPOSITE": BASE64(HASH(concat(rawDigest_i)))-N — concat raw
+//     per-part digests, hash the concat, append "-N".
+//   - "FULL_OBJECT": for the CRC family (CRC32 / CRC32C / CRC64NVME) compute
+//     the CRC of the concatenated bodies via standard CRC-combine math from
+//     each part's stored CRC + size; emit the raw base64 with no "-N" suffix.
+//     SHA1 / SHA256 fall back to COMPOSITE — AWS rejects SHA + FULL_OBJECT on
+//     Initiate, so this branch is unreachable in practice and we keep the
+//     response well-formed if a misbehaving client gets here.
+//
+// Algorithms missing on any part are skipped. Returns nil when no algorithm is
+// universally present.
+func composeMultipartChecksums(parts []*checksumPart, checksumType string) map[string]string {
 	if len(parts) == 0 {
 		return nil
 	}
 	out := map[string]string{}
+	fullObject := strings.EqualFold(strings.TrimSpace(checksumType), "FULL_OBJECT")
 	for _, algo := range supportedChecksumAlgorithms {
 		raws := make([][]byte, 0, len(parts))
 		ok := true
@@ -212,6 +223,14 @@ func composeMultipartChecksums(parts []*checksumPart) map[string]string {
 		if !ok {
 			continue
 		}
+		if fullObject && isCRCAlgo(algo) {
+			combined, err := combineCRCParts(algo, raws, parts)
+			if err != nil {
+				continue
+			}
+			out[algo] = combined
+			continue
+		}
 		h, err := newChecksumHasher(algo)
 		if err != nil {
 			continue
@@ -228,9 +247,224 @@ func composeMultipartChecksums(parts []*checksumPart) map[string]string {
 }
 
 // checksumPart is the per-part input to composeMultipartChecksums; just the
-// fields we need so the helper does not depend on the meta package.
+// fields we need so the helper does not depend on the meta package. Size is
+// the plaintext byte length of the part — required by the FULL_OBJECT CRC
+// combine path.
 type checksumPart struct {
 	Checksums map[string]string
+	Size      int64
+}
+
+// isCRCAlgo reports whether algo is one of the three CRC variants AWS supports
+// for the FULL_OBJECT checksum shape on multipart uploads.
+func isCRCAlgo(algo string) bool {
+	switch algo {
+	case "CRC32", "CRC32C", "CRC64NVME":
+		return true
+	}
+	return false
+}
+
+// CRC polynomials in zlib's reversed/right-shift convention used by
+// hash/crc32 and our CRC-64/NVME implementation. crc32_combine math operates
+// in this representation.
+const (
+	crc32IEEEPolyRev   uint32 = 0xedb88320
+	crc32CastagnoliRev uint32 = 0x82f63b78
+)
+
+// combineCRCParts produces the FULL_OBJECT CRC by chaining each part's stored
+// CRC via the standard zlib crc32_combine / crc64_combine algorithm. The
+// returned value is the base64 of the combined CRC's big-endian bytes — no
+// "-N" suffix (AWS's FULL_OBJECT shape).
+func combineCRCParts(algo string, raws [][]byte, parts []*checksumPart) (string, error) {
+	if len(raws) != len(parts) {
+		return "", fmt.Errorf("composeMultipartChecksums: parts/raws length mismatch")
+	}
+	switch algo {
+	case "CRC32":
+		var combined uint32
+		for i, r := range raws {
+			if len(r) != 4 {
+				return "", fmt.Errorf("CRC32: per-part digest must be 4 bytes, got %d", len(r))
+			}
+			crc := binary.BigEndian.Uint32(r)
+			if i == 0 {
+				combined = crc
+			} else {
+				combined = crc32Combine(crc32IEEEPolyRev, combined, crc, parts[i].Size)
+			}
+		}
+		var b [4]byte
+		binary.BigEndian.PutUint32(b[:], combined)
+		return base64.StdEncoding.EncodeToString(b[:]), nil
+	case "CRC32C":
+		var combined uint32
+		for i, r := range raws {
+			if len(r) != 4 {
+				return "", fmt.Errorf("CRC32C: per-part digest must be 4 bytes, got %d", len(r))
+			}
+			crc := binary.BigEndian.Uint32(r)
+			if i == 0 {
+				combined = crc
+			} else {
+				combined = crc32Combine(crc32CastagnoliRev, combined, crc, parts[i].Size)
+			}
+		}
+		var b [4]byte
+		binary.BigEndian.PutUint32(b[:], combined)
+		return base64.StdEncoding.EncodeToString(b[:]), nil
+	case "CRC64NVME":
+		var combined uint64
+		for i, r := range raws {
+			if len(r) != 8 {
+				return "", fmt.Errorf("CRC64NVME: per-part digest must be 8 bytes, got %d", len(r))
+			}
+			crc := binary.BigEndian.Uint64(r)
+			if i == 0 {
+				combined = crc
+			} else {
+				combined = crc64Combine(crc64NVMEPoly, combined, crc, parts[i].Size)
+			}
+		}
+		var b [8]byte
+		binary.BigEndian.PutUint64(b[:], combined)
+		return base64.StdEncoding.EncodeToString(b[:]), nil
+	}
+	return "", fmt.Errorf("combineCRCParts: unsupported algo %q", algo)
+}
+
+// crc32Combine implements zlib's crc32_combine: given two finalized CRC values
+// crc1, crc2 and the byte length of the second segment len2, returns the CRC
+// of the concatenation. Operates in the reversed-polynomial representation
+// (the right-shift convention used by hash/crc32). Math is GF(2)[x] / poly.
+func crc32Combine(poly, crc1, crc2 uint32, len2 int64) uint32 {
+	if len2 <= 0 {
+		return crc1
+	}
+	var even, odd [32]uint32
+	odd[0] = poly
+	row := uint32(1)
+	for n := 1; n < 32; n++ {
+		odd[n] = row
+		row <<= 1
+	}
+	gf2MatrixSquare32(&even, &odd)
+	gf2MatrixSquare32(&odd, &even)
+	for {
+		gf2MatrixSquare32(&even, &odd)
+		if len2&1 != 0 {
+			crc1 = gf2MatrixTimes32(&even, crc1)
+		}
+		len2 >>= 1
+		if len2 == 0 {
+			break
+		}
+		gf2MatrixSquare32(&odd, &even)
+		if len2&1 != 0 {
+			crc1 = gf2MatrixTimes32(&odd, crc1)
+		}
+		len2 >>= 1
+		if len2 == 0 {
+			break
+		}
+	}
+	return crc1 ^ crc2
+}
+
+func gf2MatrixTimes32(mat *[32]uint32, vec uint32) uint32 {
+	var sum uint32
+	i := 0
+	for vec != 0 {
+		if vec&1 != 0 {
+			sum ^= mat[i]
+		}
+		vec >>= 1
+		i++
+	}
+	return sum
+}
+
+func gf2MatrixSquare32(square, mat *[32]uint32) {
+	for n := 0; n < 32; n++ {
+		square[n] = gf2MatrixTimes32(mat, mat[n])
+	}
+}
+
+// crc64Combine is the 64-bit twin of crc32Combine. Used to compose CRC-64/NVME
+// per-part values into the whole-stream CRC.
+func crc64Combine(poly, crc1, crc2 uint64, len2 int64) uint64 {
+	if len2 <= 0 {
+		return crc1
+	}
+	var even, odd [64]uint64
+	odd[0] = poly
+	row := uint64(1)
+	for n := 1; n < 64; n++ {
+		odd[n] = row
+		row <<= 1
+	}
+	gf2MatrixSquare64(&even, &odd)
+	gf2MatrixSquare64(&odd, &even)
+	for {
+		gf2MatrixSquare64(&even, &odd)
+		if len2&1 != 0 {
+			crc1 = gf2MatrixTimes64(&even, crc1)
+		}
+		len2 >>= 1
+		if len2 == 0 {
+			break
+		}
+		gf2MatrixSquare64(&odd, &even)
+		if len2&1 != 0 {
+			crc1 = gf2MatrixTimes64(&odd, crc1)
+		}
+		len2 >>= 1
+		if len2 == 0 {
+			break
+		}
+	}
+	return crc1 ^ crc2
+}
+
+func gf2MatrixTimes64(mat *[64]uint64, vec uint64) uint64 {
+	var sum uint64
+	i := 0
+	for vec != 0 {
+		if vec&1 != 0 {
+			sum ^= mat[i]
+		}
+		vec >>= 1
+		i++
+	}
+	return sum
+}
+
+func gf2MatrixSquare64(square, mat *[64]uint64) {
+	for n := 0; n < 64; n++ {
+		square[n] = gf2MatrixTimes64(mat, mat[n])
+	}
+}
+
+// CombineCRCPartsForTest exposes combineCRCParts so unit tests can lock in
+// the s3-tests-published vectors without going through the full multipart
+// HTTP harness. partSizes[i] is the byte length of partB64[i]; both slices
+// must be the same length.
+func CombineCRCPartsForTest(algo string, partB64 []string, partSizes []int64) (string, error) {
+	if len(partB64) != len(partSizes) {
+		return "", fmt.Errorf("partB64/partSizes length mismatch")
+	}
+	raws := make([][]byte, len(partB64))
+	parts := make([]*checksumPart, len(partB64))
+	for i, b := range partB64 {
+		r, err := base64.StdEncoding.DecodeString(b)
+		if err != nil {
+			return "", fmt.Errorf("decode part %d: %w", i, err)
+		}
+		raws[i] = r
+		parts[i] = &checksumPart{Size: partSizes[i]}
+	}
+	return combineCRCParts(algo, raws, parts)
 }
 
 // CRC64NVMEForTest exposes the CRC-64/NVME implementation for unit tests so

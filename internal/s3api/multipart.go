@@ -469,9 +469,9 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 			writeError(w, r, ErrEntityTooSmall)
 			return
 		}
-		requested = append(requested, &checksumPart{Checksums: sp.Checksums})
+		requested = append(requested, &checksumPart{Checksums: sp.Checksums, Size: sp.Size})
 	}
-	composite := composeMultipartChecksums(requested)
+	composite := composeMultipartChecksums(requested, mu.ChecksumType)
 
 	for _, algo := range supportedChecksumAlgorithms {
 		expected := r.Header.Get("x-amz-checksum-" + strings.ToLower(algo))

@@ -9,6 +9,8 @@ import (
 	"hash/crc32"
 	"strings"
 	"testing"
+
+	"github.com/danchupin/strata/internal/s3api"
 )
 
 func partChecksum(t *testing.T, algo string, payload []byte) string {
@@ -146,6 +148,161 @@ func TestMultipartUploadPartChecksumMismatch(t *testing.T) {
 	h.mustStatus(list, 200)
 	if strings.Contains(h.readBody(list), "<Part>") {
 		t.Fatal("rejected part still persisted in ListParts")
+	}
+}
+
+// fullObjectCRC computes the whole-stream CRC of `concat(parts...)` for the
+// CRC family and returns the base64 of the big-endian bytes — the AWS
+// FULL_OBJECT shape (no "-N" suffix). Used as the expected value when
+// asserting the gateway-side combine path.
+func fullObjectCRC(t *testing.T, algo string, parts [][]byte) string {
+	t.Helper()
+	var concat []byte
+	for _, p := range parts {
+		concat = append(concat, p...)
+	}
+	switch algo {
+	case "CRC32":
+		var b [4]byte
+		binary.BigEndian.PutUint32(b[:], crc32.ChecksumIEEE(concat))
+		return base64.StdEncoding.EncodeToString(b[:])
+	case "CRC32C":
+		var b [4]byte
+		binary.BigEndian.PutUint32(b[:], crc32.Checksum(concat, crc32.MakeTable(crc32.Castagnoli)))
+		return base64.StdEncoding.EncodeToString(b[:])
+	case "CRC64NVME":
+		var b [8]byte
+		binary.BigEndian.PutUint64(b[:], s3api.CRC64NVMEForTest(concat))
+		return base64.StdEncoding.EncodeToString(b[:])
+	default:
+		t.Fatalf("fullObjectCRC: unsupported algo %s", algo)
+		return ""
+	}
+}
+
+func partChecksumCRC64(t *testing.T, payload []byte) string {
+	t.Helper()
+	var b [8]byte
+	binary.BigEndian.PutUint64(b[:], s3api.CRC64NVMEForTest(payload))
+	return base64.StdEncoding.EncodeToString(b[:])
+}
+
+// TestFullObjectCRCS3TestVectors locks in the AWS-published s3-tests vectors
+// for `test_multipart_use_cksum_helper_crc{32,32c,64nvme}` — three 5 MiB parts
+// of single-byte fills, per-part CRCs and the FULL_OBJECT composite.
+// Validating against the live test buffers is too slow for unit; instead we
+// drive composeMultipartChecksums directly with the published per-part values
+// and assert the combine math reproduces the published composite.
+func TestFullObjectCRCS3TestVectors(t *testing.T) {
+	const partSize int64 = 5 * 1024 * 1024
+	cases := []struct {
+		algo  string
+		parts []string
+		want  string
+	}{
+		{"CRC32", []string{"JRTCyQ==", "QoZTGg==", "YAgjqw=="}, "WgDhBQ=="},
+		{"CRC32C", []string{"MDaLrw==", "TH4EZg==", "Z7mBIQ=="}, "xU+Krw=="},
+		{"CRC64NVME", []string{"L/E4WYn8v98=", "xW1l19VobYM=", "cK5MnNaWrW4="}, "i+6LR0y3eFo="},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.algo, func(t *testing.T) {
+			got, err := s3api.CombineCRCPartsForTest(tc.algo, tc.parts, []int64{partSize, partSize, partSize})
+			if err != nil {
+				t.Fatalf("CombineCRCParts: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("%s: got %q want %q", tc.algo, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMultipartFullObjectCRCCombine drives the s3-tests
+// `test_multipart_use_cksum_helper_crc{32,32c,64nvme}` shape: Initiate with
+// ChecksumType=FULL_OBJECT, upload N parts each carrying the algo's per-part
+// digest, Complete must echo the whole-stream CRC (combined via crc_combine
+// from per-part CRCs), with no "-N" suffix.
+func TestMultipartFullObjectCRCCombine(t *testing.T) {
+	parts := [][]byte{
+		[]byte(strings.Repeat("A", 1024)),
+		[]byte(strings.Repeat("B", 1024)),
+		[]byte(strings.Repeat("C", 700)),
+	}
+	cases := []struct {
+		name string
+		algo string
+	}{
+		{"CRC32", "CRC32"},
+		{"CRC32C", "CRC32C"},
+		{"CRC64NVME", "CRC64NVME"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			hdr := "x-amz-checksum-" + strings.ToLower(tc.algo)
+
+			h := newHarness(t)
+			h.mustStatus(h.doString("PUT", "/mpf", ""), 200)
+			resp := h.doString("POST", "/mpf/k?uploads", "",
+				"x-amz-checksum-algorithm", tc.algo,
+				"x-amz-checksum-type", "FULL_OBJECT")
+			h.mustStatus(resp, 200)
+			body := h.readBody(resp)
+			if !strings.Contains(body, "<ChecksumType>FULL_OBJECT</ChecksumType>") {
+				t.Fatalf("Initiate body missing ChecksumType=FULL_OBJECT: %s", body)
+			}
+			uploadID := uploadIDRE.FindStringSubmatch(body)[1]
+
+			partB64 := make([]string, len(parts))
+			var completeBody strings.Builder
+			completeBody.WriteString("<CompleteMultipartUpload>")
+			for i, p := range parts {
+				pn := i + 1
+				if tc.algo == "CRC64NVME" {
+					partB64[i] = partChecksumCRC64(t, p)
+				} else {
+					partB64[i] = partChecksum(t, tc.algo, p)
+				}
+				url := fmt.Sprintf("/mpf/k?uploadId=%s&partNumber=%d", uploadID, pn)
+				r := h.do("PUT", url, byteReader(p), hdr, partB64[i])
+				h.mustStatus(r, 200)
+				if got := r.Header.Get(hdr); got != partB64[i] {
+					t.Fatalf("part %d echo header: got %q want %q", pn, got, partB64[i])
+				}
+				etag := strings.Trim(r.Header.Get("Etag"), `"`)
+				fmt.Fprintf(&completeBody, `<Part><PartNumber>%d</PartNumber><ETag>"%s"</ETag></Part>`, pn, etag)
+			}
+			completeBody.WriteString("</CompleteMultipartUpload>")
+			want := fullObjectCRC(t, tc.algo, parts)
+
+			complete := h.doString("POST", "/mpf/k?uploadId="+uploadID, completeBody.String())
+			h.mustStatus(complete, 200)
+			completeStr := h.readBody(complete)
+			elem := fmt.Sprintf("<Checksum%s>%s</Checksum%s>", tc.algo, want, tc.algo)
+			if !strings.Contains(completeStr, elem) {
+				t.Fatalf("Complete body missing %s: %s", elem, completeStr)
+			}
+			if strings.Contains(completeStr, want+"-3") {
+				t.Fatalf("FULL_OBJECT shape must not have -N suffix; body: %s", completeStr)
+			}
+			if got := complete.Header.Get(hdr); got != want {
+				t.Errorf("Complete %s: got %q want %q", hdr, got, want)
+			}
+			if got := complete.Header.Get("x-amz-checksum-type"); got != "FULL_OBJECT" {
+				t.Errorf("Complete checksum-type: got %q want FULL_OBJECT", got)
+			}
+
+			head := h.doString("HEAD", "/mpf/k", "", "x-amz-checksum-mode", "ENABLED")
+			h.mustStatus(head, 200)
+			_ = h.readBody(head)
+			if got := head.Header.Get(hdr); got != want {
+				t.Errorf("HEAD %s: got %q want %q", hdr, got, want)
+			}
+			if got := head.Header.Get("x-amz-checksum-type"); got != "FULL_OBJECT" {
+				t.Errorf("HEAD checksum-type: got %q want FULL_OBJECT", got)
+			}
+		})
 	}
 }
 

@@ -49,8 +49,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Surprise vs PRD wording (concat-then-CRC): the s3-tests pass `checksum_type=\"FULL_OBJECT\"` for CRC32/CRC32C/CRC64NVME. AWS's FULL_OBJECT shape is the CRC of the concatenated stream (no `-N` suffix), composed via standard zlib `crc32_combine` from per-part (CRC, size). SHA family stays COMPOSITE. `composeMultipartChecksums(parts, checksumType)` dispatches; `combineCRCParts` lives in `internal/s3api/checksum.go` along with reusable `crc32Combine` / `crc64Combine` helpers. `checksumPart` grew a `Size int64` field. Locked s3-tests vectors via `TestFullObjectCRCS3TestVectors` (per-part CRCs + 5 MiB sizes → published composite) plus a HTTP round-trip `TestMultipartFullObjectCRCCombine` for all 3 algos."
     },
     {
       "id": "US-004",
