@@ -1689,6 +1689,22 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 		s.mu.Unlock()
 		return nil, meta.ErrMultipartInProgress
 	}
+
+	// Validate every requested part exists with a matching ETag BEFORE flipping
+	// the upload to "completing". A stale-ETag retry must leave the upload
+	// re-completable rather than wedging it in the completing state.
+	// (US-005 resend-finishes-last regression.)
+	for _, cp := range parts {
+		p, ok := st.parts[cp.PartNumber]
+		if !ok {
+			s.mu.Unlock()
+			return nil, meta.ErrMultipartPartMissing
+		}
+		if strings.Trim(cp.ETag, `"`) != p.ETag {
+			s.mu.Unlock()
+			return nil, meta.ErrMultipartETagMismatch
+		}
+	}
 	st.upload.Status = "completing"
 
 	used := make(map[int]bool, len(parts))
@@ -1700,15 +1716,7 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 	partSizes := make([]int64, 0, len(parts))
 	partChecksums := make([]map[string]string, 0, len(parts))
 	for _, cp := range parts {
-		p, ok := st.parts[cp.PartNumber]
-		if !ok {
-			s.mu.Unlock()
-			return nil, meta.ErrMultipartPartMissing
-		}
-		if strings.Trim(cp.ETag, `"`) != p.ETag {
-			s.mu.Unlock()
-			return nil, meta.ErrMultipartETagMismatch
-		}
+		p := st.parts[cp.PartNumber]
 		partChunkCount := 0
 		if p.Manifest != nil {
 			chunks = append(chunks, p.Manifest.Chunks...)

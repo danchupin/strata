@@ -188,7 +188,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	mux.Handle("/admin/v1/", adminAudit)
 	auditHandler := s3api.NewAuditMiddleware(metaStore, auditTTL, apiHandler)
 	auditHandler.Publisher = auditBroadcaster
-	mux.Handle("/", strataotel.NewMiddleware(tracerProvider, logging.NewMiddleware(logger, metrics.ObserveHTTP(mw.Wrap(s3api.NewAccessLogMiddleware(metaStore, auditHandler), s3api.WriteAuthDenied)))))
+	mux.Handle("/", strataotel.NewMiddleware(tracerProvider, logging.NewMiddleware(logger, metrics.ObserveHTTP(mw.Wrap(s3api.NewAccessLogMiddleware(metaStore, auditHandler), s3api.NewAuthDenyHandler(metaStore))))))
 
 	srv := &http.Server{
 		Addr:    cfg.Listen,

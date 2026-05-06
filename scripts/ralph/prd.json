@@ -81,8 +81,8 @@
         "Tests pass"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Four edges, all four backends touched. (a) suspended_copy: cassandra/tikv GetObject(versionID=\"\") was clustering-DESC LIMIT 1 only — null sentinel sorts LAST in DESC so a Suspended PUT after Enabled v1 was returning the stale v1 row. Fix: probe both highest-clustering AND null sentinel directly, return whichever has later mtime (cassandra: scanObjectLimit1 + scanObjectByVersion helpers; tikv: parallel txn.Get on null sentinel). Memory backend was already correct (slice prepend). (b) delete_key_bucket_gone: WriteAuthDenied is unaware of the metastore so unsigned DELETE on a missing bucket returned 403. Added s3api.NewAuthDenyHandler(metaStore) DenyHandler that special-cases path-style /<bucket>/<key> DELETE: GetBucket → ErrBucketNotFound → 404 NoSuchBucket; everything else falls through to WriteAuthDenied. Wired in serverapp/serverapp.go. (c) return_data_versioning: added Owner *owner pointer field on versionEntry/deleteMarkerEntry, listObjectVersions stamps {ID: b.Owner, DisplayName: b.Owner} on every entry. (d) resend_finishes_last: cassandra+memory CompleteMultipartUpload flipped status='completing' BEFORE per-part ETag validation, so a stale-ETag retry left the upload wedged. Fix: ListParts + ETag validation FIRST, then LWT/in-mem flip. TiKV already correct because the txn rolls back on error."
     },
     {
       "id": "US-006",

@@ -170,6 +170,7 @@ type versionEntry struct {
 	ETag         string `xml:"ETag"`
 	Size         int64  `xml:"Size"`
 	StorageClass string `xml:"StorageClass"`
+	Owner        *owner `xml:"Owner,omitempty"`
 }
 
 type deleteMarkerEntry struct {
@@ -177,6 +178,7 @@ type deleteMarkerEntry struct {
 	VersionID    string `xml:"VersionId"`
 	IsLatest     bool   `xml:"IsLatest"`
 	LastModified string `xml:"LastModified"`
+	Owner        *owner `xml:"Owner,omitempty"`
 }
 
 type tagging struct {

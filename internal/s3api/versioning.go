@@ -123,6 +123,7 @@ func (s *Server) listObjectVersions(w http.ResponseWriter, r *http.Request, buck
 		NextKeyMarker:   res.NextKeyMarker,
 		NextVersionID:   nextWireVersionID(res),
 	}
+	ownerEntry := &owner{ID: b.Owner, DisplayName: b.Owner}
 	for _, v := range res.Versions {
 		if v.IsDeleteMarker {
 			resp.DeleteMarkers = append(resp.DeleteMarkers, deleteMarkerEntry{
@@ -130,6 +131,7 @@ func (s *Server) listObjectVersions(w http.ResponseWriter, r *http.Request, buck
 				VersionID:    wireVersionID(v),
 				IsLatest:     v.IsLatest,
 				LastModified: v.Mtime.UTC().Format(time.RFC3339),
+				Owner:        ownerEntry,
 			})
 		} else {
 			resp.Versions = append(resp.Versions, versionEntry{
@@ -140,6 +142,7 @@ func (s *Server) listObjectVersions(w http.ResponseWriter, r *http.Request, buck
 				ETag:         `"` + v.ETag + `"`,
 				Size:         v.Size,
 				StorageClass: v.StorageClass,
+				Owner:        ownerEntry,
 			})
 		}
 	}

@@ -2,7 +2,11 @@ package s3api
 
 import (
 	"encoding/xml"
+	"errors"
 	"net/http"
+
+	"github.com/danchupin/strata/internal/auth"
+	"github.com/danchupin/strata/internal/meta"
 )
 
 type APIError struct {
@@ -84,6 +88,25 @@ func writeError(w http.ResponseWriter, r *http.Request, err APIError) {
 		Message:  err.Message,
 		Resource: r.URL.Path,
 	})
+}
+
+// NewAuthDenyHandler returns a DenyHandler that, before falling back to
+// WriteAuthDenied, special-cases DELETE on a path-style /<bucket>/<key>
+// targeting a non-existent bucket: AWS S3 returns 404 NoSuchBucket there,
+// not the auth-failure 403. Other shapes flow through unchanged.
+func NewAuthDenyHandler(metaStore meta.Store) auth.DenyHandler {
+	return func(w http.ResponseWriter, r *http.Request, authErr error) {
+		if r.Method == http.MethodDelete {
+			bucket, key := splitPath(r.URL.Path)
+			if bucket != "" && key != "" {
+				if _, gerr := metaStore.GetBucket(r.Context(), bucket); errors.Is(gerr, meta.ErrBucketNotFound) {
+					writeError(w, r, ErrNoSuchBucket)
+					return
+				}
+			}
+		}
+		WriteAuthDenied(w, r, authErr)
+	}
 }
 
 func WriteAuthDenied(w http.ResponseWriter, r *http.Request, err error) {

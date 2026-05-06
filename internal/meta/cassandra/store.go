@@ -461,6 +461,73 @@ func nilIfEmpty(s string) interface{} {
 func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionID string) (*meta.Object, error) {
 	versionID = meta.ResolveVersionID(versionID)
 	shard := shardOf(key, s.defaultShard)
+	if versionID == "" {
+		// "Latest" with versioning history requires comparing the highest-
+		// clustering row against the null sentinel by mtime: a Suspended PUT
+		// writes a v1-zero null-sentinel row that sorts LAST in version_id DESC,
+		// so the LIMIT-1 query alone returns a stale prior real-timeuuid row
+		// even when the null row is the most recent write. (US-005 suspended-copy.)
+		latestByVersion, errA := s.scanObjectLimit1(ctx, bucketID, shard, key)
+		if errA != nil && !errors.Is(errA, meta.ErrObjectNotFound) {
+			return nil, errA
+		}
+		nullUUID, _ := versionToCQL(meta.NullVersionID)
+		nullRow, errB := s.scanObjectByVersion(ctx, bucketID, shard, key, nullUUID)
+		if errB != nil && !errors.Is(errB, meta.ErrObjectNotFound) {
+			return nil, errB
+		}
+		var winner *meta.Object
+		switch {
+		case latestByVersion != nil && nullRow != nil:
+			if !latestByVersion.IsNull && nullRow.Mtime.After(latestByVersion.Mtime) {
+				winner = nullRow
+			} else {
+				winner = latestByVersion
+			}
+		case latestByVersion != nil:
+			winner = latestByVersion
+		case nullRow != nil:
+			winner = nullRow
+		default:
+			return nil, meta.ErrObjectNotFound
+		}
+		if winner.IsDeleteMarker {
+			return nil, meta.ErrObjectNotFound
+		}
+		return winner, nil
+	}
+	vUUID, perr := versionToCQL(versionID)
+	if perr != nil {
+		return nil, meta.ErrObjectNotFound
+	}
+	return s.scanObjectByVersion(ctx, bucketID, shard, key, vUUID)
+}
+
+func (s *Store) scanObjectLimit1(ctx context.Context, bucketID uuid.UUID, shard int, key string) (*meta.Object, error) {
+	q := s.s.Query(
+		`SELECT version_id, is_latest, is_delete_marker, size, etag, content_type,
+		        storage_class, mtime, manifest, user_meta, tags,
+		        retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
+		        cache_control, expires, parts_count, sse_key, sse_key_id, replication_status, part_sizes, checksum_type, is_null
+		 FROM objects WHERE bucket_id=? AND shard=? AND key=? LIMIT 1`,
+		gocqlUUID(bucketID), shard, key,
+	).WithContext(ctx)
+	return scanObjectQuery(q, bucketID, key)
+}
+
+func (s *Store) scanObjectByVersion(ctx context.Context, bucketID uuid.UUID, shard int, key string, vUUID gocql.UUID) (*meta.Object, error) {
+	q := s.s.Query(
+		`SELECT version_id, is_latest, is_delete_marker, size, etag, content_type,
+		        storage_class, mtime, manifest, user_meta, tags,
+		        retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
+		        cache_control, expires, parts_count, sse_key, sse_key_id, replication_status, part_sizes, checksum_type, is_null
+		 FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
+		gocqlUUID(bucketID), shard, key, vUUID,
+	).WithContext(ctx)
+	return scanObjectQuery(q, bucketID, key)
+}
+
+func scanObjectQuery(q *gocql.Query, bucketID uuid.UUID, key string) (*meta.Object, error) {
 	var (
 		versionUUID  gocql.UUID
 		isLatest     bool
@@ -489,79 +556,50 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		checksumType string
 		isNull       bool
 	)
-	var err error
-	if versionID == "" {
-		err = s.s.Query(
-			`SELECT version_id, is_latest, is_delete_marker, size, etag, content_type,
-			        storage_class, mtime, manifest, user_meta, tags,
-			        retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
-			        cache_control, expires, parts_count, sse_key, sse_key_id, replication_status, part_sizes, checksum_type, is_null
-			 FROM objects WHERE bucket_id=? AND shard=? AND key=? LIMIT 1`,
-			gocqlUUID(bucketID), shard, key,
-		).WithContext(ctx).Scan(&versionUUID, &isLatest, &isDeleteMark, &size, &etag, &ctype,
-			&class, &mtime, &manifestBlob, &userMeta, &tags,
-			&retainUntil, &retainMode, &legalHold, &checksums, &sse, &ssecKeyMD5, &restore,
-			&cacheControl, &expires, &partsCount, &sseKey, &sseKeyID, &replication, &partSizes, &checksumType, &isNull)
-	} else {
-		vUUID, perr := versionToCQL(versionID)
-		if perr != nil {
-			return nil, meta.ErrObjectNotFound
-		}
-		err = s.s.Query(
-			`SELECT version_id, is_latest, is_delete_marker, size, etag, content_type,
-			        storage_class, mtime, manifest, user_meta, tags,
-			        retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
-			        cache_control, expires, parts_count, sse_key, sse_key_id, replication_status, part_sizes, checksum_type, is_null
-			 FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
-			gocqlUUID(bucketID), shard, key, vUUID,
-		).WithContext(ctx).Scan(&versionUUID, &isLatest, &isDeleteMark, &size, &etag, &ctype,
-			&class, &mtime, &manifestBlob, &userMeta, &tags,
-			&retainUntil, &retainMode, &legalHold, &checksums, &sse, &ssecKeyMD5, &restore,
-			&cacheControl, &expires, &partsCount, &sseKey, &sseKeyID, &replication, &partSizes, &checksumType, &isNull)
-	}
+	err := q.Scan(&versionUUID, &isLatest, &isDeleteMark, &size, &etag, &ctype,
+		&class, &mtime, &manifestBlob, &userMeta, &tags,
+		&retainUntil, &retainMode, &legalHold, &checksums, &sse, &ssecKeyMD5, &restore,
+		&cacheControl, &expires, &partsCount, &sseKey, &sseKeyID, &replication, &partSizes, &checksumType, &isNull)
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrObjectNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	if versionID == "" && isDeleteMark {
-		return nil, meta.ErrObjectNotFound
-	}
 	m, err := decodeManifest(manifestBlob)
 	if err != nil {
 		return nil, err
 	}
 	return &meta.Object{
-		BucketID:       bucketID,
-		Key:            key,
-		VersionID:      versionFromCQL(versionUUID),
-		IsLatest:       isLatest,
-		IsDeleteMarker: isDeleteMark,
-		IsNull:         isNull,
-		Size:           size,
-		ETag:           etag,
-		ContentType:    ctype,
-		StorageClass:   class,
-		Mtime:          mtime,
-		Manifest:       m,
-		UserMeta:       userMeta,
-		Tags:           tags,
-		RetainUntil:    retainUntil,
-		RetainMode:     retainMode,
-		LegalHold:      legalHold,
-		Checksums:      checksums,
-		SSE:            sse,
-		SSECKeyMD5:     ssecKeyMD5,
-		SSEKey:         sseKey,
-		SSEKeyID:       sseKeyID,
-		RestoreStatus:  restore,
-		CacheControl:   cacheControl,
-		Expires:        expires,
-		PartsCount:     partsCount,
-		PartSizes:      partSizes,
+		BucketID:          bucketID,
+		Key:               key,
+		VersionID:         versionFromCQL(versionUUID),
+		IsLatest:          isLatest,
+		IsDeleteMarker:    isDeleteMark,
+		IsNull:            isNull,
+		Size:              size,
+		ETag:              etag,
+		ContentType:       ctype,
+		StorageClass:      class,
+		Mtime:             mtime,
+		Manifest:          m,
+		UserMeta:          userMeta,
+		Tags:              tags,
+		RetainUntil:       retainUntil,
+		RetainMode:        retainMode,
+		LegalHold:         legalHold,
+		Checksums:         checksums,
+		SSE:               sse,
+		SSECKeyMD5:        ssecKeyMD5,
+		SSEKey:            sseKey,
+		SSEKeyID:          sseKeyID,
+		RestoreStatus:     restore,
+		CacheControl:      cacheControl,
+		Expires:           expires,
+		PartsCount:        partsCount,
+		PartSizes:         partSizes,
 		ReplicationStatus: replication,
-		ChecksumType:   checksumType,
+		ChecksumType:      checksumType,
 	}, nil
 }
 
@@ -2305,6 +2343,27 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 		return nil, meta.ErrMultipartNotFound
 	}
 
+	// Read parts and validate every requested ETag BEFORE flipping the upload
+	// to 'completing'. A stale-ETag Complete must leave the upload re-completable
+	// rather than wedging it in the completing state. (US-005 resend-finishes-last.)
+	storedParts, err := s.ListParts(ctx, obj.BucketID, uploadID)
+	if err != nil {
+		return nil, err
+	}
+	byNumber := make(map[int]*meta.MultipartPart, len(storedParts))
+	for _, p := range storedParts {
+		byNumber[p.PartNumber] = p
+	}
+	for _, cp := range parts {
+		p, ok := byNumber[cp.PartNumber]
+		if !ok {
+			return nil, meta.ErrMultipartPartMissing
+		}
+		if strings.Trim(cp.ETag, `"`) != p.ETag {
+			return nil, meta.ErrMultipartETagMismatch
+		}
+	}
+
 	var currentStatus string
 	applied, err := s.s.Query(
 		`UPDATE multipart_uploads SET status='completing'
@@ -2321,15 +2380,6 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 		return nil, meta.ErrMultipartInProgress
 	}
 
-	storedParts, err := s.ListParts(ctx, obj.BucketID, uploadID)
-	if err != nil {
-		return nil, err
-	}
-	byNumber := make(map[int]*meta.MultipartPart, len(storedParts))
-	for _, p := range storedParts {
-		byNumber[p.PartNumber] = p
-	}
-
 	used := make(map[int]bool, len(parts))
 	var chunks []data.ChunkRef
 	var totalSize int64
@@ -2339,13 +2389,7 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 	partSizes := make([]int64, 0, len(parts))
 	partChecksums := make([]map[string]string, 0, len(parts))
 	for _, cp := range parts {
-		p, ok := byNumber[cp.PartNumber]
-		if !ok {
-			return nil, meta.ErrMultipartPartMissing
-		}
-		if strings.Trim(cp.ETag, `"`) != p.ETag {
-			return nil, meta.ErrMultipartETagMismatch
-		}
+		p := byNumber[cp.PartNumber]
 		partChunkCount := 0
 		if p.Manifest != nil {
 			chunks = append(chunks, p.Manifest.Chunks...)

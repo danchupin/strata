@@ -95,23 +95,60 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		return decodeObject(raw)
 	}
 
+	// "Latest" with versioning history requires comparing the highest-clustering
+	// row against the null sentinel by mtime: a Suspended PUT writes a null-
+	// sentinel row whose inverted-ts suffix sorts LAST, so the limit-1 scan
+	// alone misses it when older real-timeuuid rows exist. (US-005 suspended-copy.)
 	start := append(ObjectPrefixWithKey(bucketID, key), 0x00, 0x00)
 	end := prefixEnd(start)
 	pairs, err := txn.Scan(ctx, start, end, 1)
 	if err != nil {
 		return nil, err
 	}
-	if len(pairs) == 0 {
+	var latestByVersion *meta.Object
+	if len(pairs) > 0 {
+		o, derr := decodeObject(pairs[0].Value)
+		if derr != nil {
+			return nil, derr
+		}
+		latestByVersion = o
+	}
+	var nullRow *meta.Object
+	if latestByVersion == nil || !latestByVersion.IsNull {
+		nullKey, kerr := ObjectKey(bucketID, key, meta.NullVersionID)
+		if kerr == nil {
+			raw, found, gerr := txn.Get(ctx, nullKey)
+			if gerr != nil {
+				return nil, gerr
+			}
+			if found {
+				nr, derr := decodeObject(raw)
+				if derr != nil {
+					return nil, derr
+				}
+				nullRow = nr
+			}
+		}
+	}
+	var winner *meta.Object
+	switch {
+	case latestByVersion != nil && nullRow != nil:
+		if nullRow.Mtime.After(latestByVersion.Mtime) {
+			winner = nullRow
+		} else {
+			winner = latestByVersion
+		}
+	case latestByVersion != nil:
+		winner = latestByVersion
+	case nullRow != nil:
+		winner = nullRow
+	default:
 		return nil, meta.ErrObjectNotFound
 	}
-	o, err := decodeObject(pairs[0].Value)
-	if err != nil {
-		return nil, err
-	}
-	if o.IsDeleteMarker {
+	if winner.IsDeleteMarker {
 		return nil, meta.ErrObjectNotFound
 	}
-	return o, nil
+	return winner, nil
 }
 
 // DeleteObject mirrors the memory/Cassandra path:
