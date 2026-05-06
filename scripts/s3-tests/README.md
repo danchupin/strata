@@ -59,6 +59,63 @@ History below — newest run on top. The default subset filter is the
 test_object_read or test_object_delete or test_multipart or
 test_versioning_obj or test_bucket_list_versions`.
 
+### 2026-05-06 — `494b62b` + ralph/s3-compat-95 cycle (91.5%)
+
+After the US-001..US-006 cycle landed (multipart copy range + special-char
+edges, `?partNumber=N` GET wire shape flip to whole-object multipart ETag,
+CRC32 / CRC32C / CRC64NVME `FULL_OBJECT` composite combine math, Multipart
+Complete `If-Match`-on-missing-object → 404 NoSuchKey, suspended-bucket
+GET stale-row dual-probe fix, missing-bucket DELETE → 404 NoSuchBucket
+ahead of auth, ListObjectVersions Owner DisplayName, validate-then-flip
+on multipart Complete in cassandra+memory, koanf empty-env regression
+test + Cassandra null-sentinel integration test):
+
+```
+tests=177  passed=162  failed=15  errors=0  skipped=0
+pass rate: 91.5%
+```
+
+**+12 newly passing tests** vs the prior 84.7% baseline (`150/177 → 162/177`).
+**Headline 90% target hit.** ROADMAP P1 entry `s3-tests 80% → 90%+` flips to
+Done.
+
+**Remaining 15 failures** fall into two buckets:
+
+**A. Deliberate gaps (11 — count toward the headline; do NOT track as ROADMAP P-items):**
+
+- `test_headers.py` — 8 SigV2 / bad-auth shape failures
+  (`test_bucket_create_bad_expect_mismatch`,
+  `test_bucket_create_bad_authorization_*`,
+  `test_bucket_create_bad_ua_*_aws2`,
+  `test_bucket_create_bad_date_*_aws2`).
+  SigV2 was deprecated in 2018; we've never implemented it.
+- `test_bucket_list_prefix_unreadable` — boto3 URL-decodes the prefix
+  before transmit; Go's `net/http` URL-decodes again; the unreadable byte
+  is gone before our handler sees it. Architectural drift, not a bug.
+- `test_bucket_list_objects_anonymous` + `test_bucket_listv2_objects_anonymous`
+  — `auth-mode=required` rejects anonymous list before the
+  bucket-policy/ACL gate can grant. Set `STRATA_AUTH_MODE=optional` to pass;
+  intentional posture for this run.
+
+**B. Real surface bugs to chase next cycle (4 — file as P2 in ROADMAP):**
+
+- `test_multipart_copy_small`, `_special_names`, `_multiple_sizes` — the
+  GET response on the multipart-copied destination object fails boto3's
+  `FlexibleChecksum` validation: server-emitted `x-amz-checksum-*` does
+  not match the body bytes. The copy-source-range parser + special-char
+  URL handling were closed by US-001 (`_improper_range` passes); the
+  remaining gap is on the data plane recomputing the destination's
+  checksum from the actual stored bytes rather than echoing the source
+  composite. Filed as P2 `Multipart copy GET-side checksum echo divergence`.
+- `test_multipart_resend_first_finishes_last` — the test re-uploads
+  `PartNumber=1` while a prior `PartNumber=1` upload is mid-stream, then
+  Complete is called with a `Parts` list that contains BOTH ETags under
+  the same PartNumber. Strata rejects with `InvalidPartOrder` (per the
+  `prev < curr` strict-ascending check in `multipart.go`). AWS / RGW
+  apparently accept duplicate PartNumber by deduplicating to the latest
+  storage-side write. Filed as P2 `Multipart Complete rejects duplicate
+  PartNumber in Parts list`.
+
 ### 2026-05-05 — `2bb7fd0` + ralph/s3-compat-90 cycle (84.7%)
 
 After the US-001..US-010 cycle landed (multipart per-part offset tracking
