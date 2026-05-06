@@ -277,9 +277,9 @@ func (s *Server) uploadPartCopy(w http.ResponseWriter, r *http.Request, b *meta.
 	offset := int64(0)
 	length := srcObj.Size
 	if rangeSpec := r.Header.Get("x-amz-copy-source-range"); rangeSpec != "" {
-		start, end, ok := parseCopySourceRange(rangeSpec, srcObj.Size)
-		if !ok {
-			writeError(w, r, ErrInvalidRange)
+		start, end, apiErr := parseCopySourceRangeStrict(rangeSpec, srcObj.Size)
+		if apiErr != nil {
+			writeError(w, r, *apiErr)
 			return
 		}
 		offset = start
@@ -357,29 +357,41 @@ func (s *Server) uploadPartCopy(w http.ResponseWriter, r *http.Request, b *meta.
 	})
 }
 
-func parseCopySourceRange(spec string, size int64) (start, end int64, ok bool) {
+// parseCopySourceRangeStrict parses an `x-amz-copy-source-range: bytes=lo-hi`
+// header. AWS distinguishes two error shapes here:
+//   - syntax errors (missing `bytes=`, missing `-`, non-numeric, multi-range,
+//     blank lo or hi) → 400 InvalidArgument
+//   - syntactically valid but out-of-bounds (start >= size, end < start,
+//     end >= size) → 416 InvalidRange
+//
+// The s3-test `test_multipart_copy_improper_range` exercises every syntax
+// edge and asserts InvalidArgument; `test_multipart_copy_invalid_range`
+// hits the out-of-bounds path and asserts InvalidRange.
+func parseCopySourceRangeStrict(spec string, size int64) (start, end int64, apiErr *APIError) {
 	if !strings.HasPrefix(spec, "bytes=") {
-		return 0, 0, false
+		return 0, 0, &ErrInvalidArgument
 	}
 	spec = strings.TrimPrefix(spec, "bytes=")
+	if strings.Contains(spec, ",") {
+		return 0, 0, &ErrInvalidArgument
+	}
 	lo, hi, has := strings.Cut(spec, "-")
-	if !has {
-		return 0, 0, false
+	if !has || lo == "" || hi == "" {
+		return 0, 0, &ErrInvalidArgument
 	}
 	var err error
 	start, err = strconv.ParseInt(lo, 10, 64)
-	if err != nil || start < 0 || start >= size {
-		return 0, 0, false
+	if err != nil || start < 0 {
+		return 0, 0, &ErrInvalidArgument
 	}
-	if hi == "" {
-		end = size - 1
-	} else {
-		end, err = strconv.ParseInt(hi, 10, 64)
-		if err != nil || end < start || end >= size {
-			return 0, 0, false
-		}
+	end, err = strconv.ParseInt(hi, 10, 64)
+	if err != nil {
+		return 0, 0, &ErrInvalidArgument
 	}
-	return start, end, true
+	if start >= size || end < start || end >= size {
+		return 0, 0, &ErrInvalidRange
+	}
+	return start, end, nil
 }
 
 func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *meta.Bucket, key, uploadID string) {

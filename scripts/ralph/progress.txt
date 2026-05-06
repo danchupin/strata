@@ -1,5 +1,5 @@
 # Ralph Progress Log
-Started: Wed May  6 MSK 2026
+Started: Wed May  6 14:31:06 MSK 2026
 Cycle: ralph/s3-compat-95 (close remaining 16 real failures, target >=90% strict / ~95%)
 ---
 
@@ -56,3 +56,17 @@ Cycle: ralph/s3-compat-95 (close remaining 16 real failures, target >=90% strict
 - TiKV heartbeat shipped (commit `c37487b`). Don't touch internal/heartbeat.
 - Manifest format defaults to proto (US-049). New manifest fields are schema-additive via proto field-number ledger — don't renumber.
 
+## 2026-05-06 - US-001 Multipart copy edges
+- Implemented:
+  - `internal/s3api/copy_object.go::parseCopySource` now splits the header on `?` BEFORE `url.PathUnescape`. boto3 percent-encodes literal `?` in keys as `%3F`, so the legacy "decode-then-split" path corrupted `?versionId`-shaped keys. Bucket and key segments are now decoded independently after the split.
+  - `internal/s3api/multipart.go::parseCopySourceRangeStrict` replaces the old `(start,end,bool)` parser. It returns a typed `*APIError`, distinguishing 400 InvalidArgument (syntax: missing `bytes=`, missing `-`, blank lo/hi, non-numeric, multi-range) from 416 InvalidRange (syntactically valid but `start >= size`, `end < start`, or `end >= size`). `uploadPartCopy` writes the returned error directly.
+- Files changed:
+  - `internal/s3api/copy_object.go`
+  - `internal/s3api/multipart.go`
+  - `internal/s3api/multipart_copy_test.go` — added `TestUploadPartCopyImproperRangeReturnsInvalidArgument`, `TestUploadPartCopyOutOfBoundsRangeReturnsInvalidRange`, `TestUploadPartCopySpecialSourceKeyNames`.
+- Learnings for future iterations:
+  - **boto3 wire shape for x-amz-copy-source**: `?` in source keys is `%3F`. Splitting on raw (encoded) form preserves the distinction between literal `?` and the `?versionId=…` query separator. PathUnescape order matters — decode AFTER the split, not before.
+  - **AWS error-code split for copy-range**: the two s3-tests (`improper_range` vs `invalid_range`) test exactly this distinction. Bundling both as `InvalidRange` is what the prior cycle did and is exactly why `improper_range` failed. Always model the parser as a small state machine returning a typed error.
+  - **Per-part ETag in `copyPartResult`** was already returning `"<32hex>"` (manifest.ETag of the per-part bytes, double-quoted). Don't refactor it — boto3 round-trips fine.
+  - **s3-tests cache lives at `/tmp/strata-s3tests.MO5E/s3-tests/`** in this dev env; `s3tests/functional/test_s3.py` is the canonical source for the failing tests' wire-level assertions when the live suite isn't running.
+---

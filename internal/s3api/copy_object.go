@@ -17,26 +17,36 @@ type copyObjectResult struct {
 	LastModified string   `xml:"LastModified"`
 }
 
+// parseCopySource splits an `x-amz-copy-source` header value into bucket, key,
+// and optional ?versionId. The split-on-`?` MUST happen on the wire-encoded
+// form so a literal `?` inside a key (e.g. `?versionId`) — which boto3 sends
+// as `%3FversionId` — is not mistaken for the query-string sentinel. We then
+// PathUnescape the path and query parts independently.
 func parseCopySource(raw string) (bucket, key, versionID string, ok bool) {
 	if raw == "" {
 		return "", "", "", false
 	}
-	if decoded, err := url.PathUnescape(raw); err == nil {
-		raw = decoded
-	}
 	raw = strings.TrimPrefix(raw, "/")
+	pathPart := raw
 	if q := strings.Index(raw, "?"); q >= 0 {
-		params, err := url.ParseQuery(raw[q+1:])
-		if err == nil {
+		pathPart = raw[:q]
+		if params, err := url.ParseQuery(raw[q+1:]); err == nil {
 			versionID = params.Get("versionId")
 		}
-		raw = raw[:q]
 	}
-	slash := strings.Index(raw, "/")
-	if slash <= 0 || slash == len(raw)-1 {
+	slash := strings.Index(pathPart, "/")
+	if slash <= 0 || slash == len(pathPart)-1 {
 		return "", "", "", false
 	}
-	return raw[:slash], raw[slash+1:], versionID, true
+	bucket = pathPart[:slash]
+	key = pathPart[slash+1:]
+	if decoded, err := url.PathUnescape(key); err == nil {
+		key = decoded
+	}
+	if decoded, err := url.PathUnescape(bucket); err == nil {
+		bucket = decoded
+	}
+	return bucket, key, versionID, true
 }
 
 func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, dstBucket *meta.Bucket, dstKey string) {

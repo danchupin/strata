@@ -2,6 +2,7 @@ package s3api_test
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -54,6 +55,88 @@ func TestUploadPartCopyChecksumMismatchReturnsBadDigest(t *testing.T) {
 	h.mustStatus(resp, http.StatusBadRequest)
 	if !strings.Contains(h.readBody(resp), "<Code>BadDigest</Code>") {
 		t.Fatalf("expected BadDigest")
+	}
+}
+
+// TestUploadPartCopyImproperRangeReturnsInvalidArgument mirrors the s3-test
+// `test_multipart_copy_improper_range`: every syntactically malformed range
+// value must return 400 InvalidArgument, not 416 InvalidRange.
+func TestUploadPartCopyImproperRangeReturnsInvalidArgument(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+
+	body := strings.Repeat("a", 6<<20)
+	h.mustStatus(h.do("PUT", "/bkt/src", strings.NewReader(body)), 200)
+
+	resp := h.doString("POST", "/bkt/dst?uploads", "")
+	h.mustStatus(resp, 200)
+	uploadID := uploadIDRE.FindStringSubmatch(h.readBody(resp))[1]
+
+	improper := []string{
+		"0-2",
+		"bytes=0",
+		"bytes=hello-world",
+		"bytes=0-bar",
+		"bytes=hello-",
+		"bytes=0-2,3-5",
+	}
+	for _, spec := range improper {
+		resp := h.doString("PUT", "/bkt/dst?uploadId="+uploadID+"&partNumber=1", "",
+			"x-amz-copy-source", "/bkt/src",
+			"x-amz-copy-source-range", spec)
+		h.mustStatus(resp, http.StatusBadRequest)
+		body := h.readBody(resp)
+		if !strings.Contains(body, "<Code>InvalidArgument</Code>") {
+			t.Fatalf("range %q: expected InvalidArgument, got %s", spec, body)
+		}
+	}
+}
+
+// TestUploadPartCopyOutOfBoundsRangeReturnsInvalidRange covers
+// `test_multipart_copy_invalid_range` — syntactically valid but extends past
+// the source size.
+func TestUploadPartCopyOutOfBoundsRangeReturnsInvalidRange(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+
+	h.mustStatus(h.doString("PUT", "/bkt/src", "12345"), 200)
+
+	resp := h.doString("POST", "/bkt/dst?uploads", "")
+	h.mustStatus(resp, 200)
+	uploadID := uploadIDRE.FindStringSubmatch(h.readBody(resp))[1]
+
+	resp = h.doString("PUT", "/bkt/dst?uploadId="+uploadID+"&partNumber=1", "",
+		"x-amz-copy-source", "/bkt/src",
+		"x-amz-copy-source-range", "bytes=0-21")
+	h.mustStatus(resp, http.StatusRequestedRangeNotSatisfiable)
+	body := h.readBody(resp)
+	if !strings.Contains(body, "<Code>InvalidRange</Code>") {
+		t.Fatalf("expected InvalidRange, got %s", body)
+	}
+}
+
+// TestUploadPartCopySpecialSourceKeyNames covers `test_multipart_copy_special_names`:
+// boto3 percent-encodes special chars (' ', '_', '__', '?versionId') in the
+// `x-amz-copy-source` header. The path-vs-query split MUST happen before
+// PathUnescape so a literal `?` in the key is not treated as a query
+// separator.
+func TestUploadPartCopySpecialSourceKeyNames(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+
+	for _, srcKey := range []string{" ", "_", "__", "?versionId"} {
+		body := strings.Repeat("x", 6<<20)
+		// PUT to /bkt/<percent-encoded-key>
+		h.mustStatus(h.do("PUT", "/bkt/"+url.PathEscape(srcKey), strings.NewReader(body)), 200)
+
+		resp := h.doString("POST", "/bkt/dst?uploads", "")
+		h.mustStatus(resp, 200)
+		uploadID := uploadIDRE.FindStringSubmatch(h.readBody(resp))[1]
+
+		copySource := "/bkt/" + url.PathEscape(srcKey)
+		resp = h.doString("PUT", "/bkt/dst?uploadId="+uploadID+"&partNumber=1", "",
+			"x-amz-copy-source", copySource)
+		h.mustStatus(resp, http.StatusOK)
 	}
 }
 

@@ -16,8 +16,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "parseCopySourceRangeStrict differentiates parse errors (InvalidArgument 400) from out-of-bounds (InvalidRange 416). parseCopySource splits on `?` BEFORE PathUnescape so literal `?` in keys (sent as `%3F` by boto3) does not get treated as query separator. Per-part ETag wire shape already correct in copyPartResult."
     },
     {
       "id": "US-002",
