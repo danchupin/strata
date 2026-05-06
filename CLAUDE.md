@@ -375,6 +375,15 @@ commits per story and writes `progress.txt`. `scripts/ralph/CLAUDE.md` is Ralph'
 knowledge there. This root `CLAUDE.md` is the project memory and is auto-loaded by every Claude Code invocation,
 including Ralph's. Update this file (not Ralph's) when you discover something a future iteration should know.
 
+**PRD lifecycle — single source of truth is the Ralph snapshot.** A markdown PRD in `tasks/prd-<feature>.md` is a
+disposable design draft used to brief operators / Claude Code during the prep step. Once `scripts/ralph/prd.json` is
+committed (cycle prep) and Ralph runs, the canonical record of what was actually built is the auto-archived pair
+`scripts/ralph/archive/<YYYY-MM-DD>-<branch>/{prd.json,progress.txt}` (created by `archive_cycle` in `ralph.sh` on
+`<promise>COMPLETE</promise>`). Markdown PRD must NOT be copied to `tasks/archive/` on close-flip — delete it from
+`tasks/` instead. `tasks/archive/` is reserved for design intent that has no Ralph snapshot (work folded into another
+cycle, or pre-`archive_cycle` legacy). Active drafts that are pre-cycle prep stay under `tasks/prd-*.md`; once the
+cycle is merged into main, the markdown is removed in the same commit that flips the ROADMAP entry to Done.
+
 ## Roadmap maintenance
 
 `ROADMAP.md` is the canonical project state list. It MUST stay an honest reflection of what is shipped vs pending at
