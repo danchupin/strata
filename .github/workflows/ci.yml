@@ -98,7 +98,12 @@ jobs:
           path: web/dist
       - name: Pre-pull Cassandra image (warms cache)
         run: docker pull cassandra:5.0
-      - run: go test -tags integration -timeout 15m ./...
+      # `-v` prints every running test name so the regression-pinned
+      # null-sentinel tests (US-006 of ralph/s3-compat-95) are visibly
+      # exercised — CI grep the log for `TestCassandraNullSentinelOnDisk`
+      # and the `VersioningNullSentinel` storetest case to confirm neither
+      # silently went `Skip`-ed.
+      - run: go test -v -tags integration -timeout 15m ./...
 
   docker-build:
     name: Docker build (librados linking)

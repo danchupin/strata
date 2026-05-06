@@ -2,8 +2,10 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadDefaultsMemoryBackend(t *testing.T) {
@@ -289,6 +291,37 @@ func TestLoadAcceptsS3SSEEnvs(t *testing.T) {
 	}
 	if cfg.S3Backend.SSEKMSKeyID != "arn:aws:kms:us-east-1:111122223333:key/abc" {
 		t.Fatalf("sse_kms_key_id: want arn..., got %q", cfg.S3Backend.SSEKMSKeyID)
+	}
+}
+
+// TestLoadEmptyEnvDoesNotOverrideTOMLValue pins the koanf empty-env regression
+// surfaced by the prior cycle (US-006 of ralph/s3-compat-95): an empty-string
+// STRATA_* env var must NOT clobber a TOML-loaded value (or the in-memory
+// default). The fix lives in Load's env.ProviderWithValue callback, which now
+// returns ("", nil) when the env value is empty so koanf treats the slot as
+// unset. Without that callback, koanf's env provider stomped TOML/defaults
+// with the empty string and the typed Unmarshal silently zeroed the field.
+//
+// The TOML shape exercises both code paths (file-load + env-merge) so a future
+// regression in either provider's empty-handling fails this test.
+func TestLoadEmptyEnvDoesNotOverrideTOMLValue(t *testing.T) {
+	clearEnv(t)
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "strata.toml")
+	if err := os.WriteFile(cfgPath, []byte("[gc]\ninterval = \"30s\"\n"), 0o600); err != nil {
+		t.Fatalf("write toml: %v", err)
+	}
+	t.Setenv("STRATA_CONFIG_FILE", cfgPath)
+	t.Setenv("STRATA_GC_INTERVAL", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.GC.Interval != 30*time.Second {
+		t.Fatalf("gc.interval after empty STRATA_GC_INTERVAL: got %s want 30s "+
+			"(empty env regressed: re-clobbering TOML/default)", cfg.GC.Interval)
 	}
 }
 

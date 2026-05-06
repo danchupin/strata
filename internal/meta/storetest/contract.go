@@ -1121,6 +1121,42 @@ func caseVersioningNullSentinel(t *testing.T, s meta.Store) {
 	if got.ETag != "second" {
 		t.Fatalf("after overwrite ETag=%q want second", got.ETag)
 	}
+
+	// Suspended-mode INSERT with an explicit IsNull=true row exercises the
+	// LWT-IF-EXISTS path (cassandra) / direct null-sentinel write (tikv) /
+	// slice-prepend (memory) — the `versioned=true` branch that the prior
+	// Disabled overwrite above bypassed. Regression-locks the cassandra
+	// timeuuid sentinel translation (versionToCQL / versionFromCQL): a v0
+	// UUID is rejected by Cassandra server-side validation, so the round-trip
+	// MUST go through the v1 sentinel `00000000-0000-1000-8000-000000000000`
+	// without any wire-shape leakage.
+	if err := s.SetBucketVersioning(ctx, "nullv", meta.VersioningSuspended); err != nil {
+		t.Fatalf("set suspended: %v", err)
+	}
+	o3 := &meta.Object{
+		BucketID:     b.ID,
+		Key:          "doc",
+		StorageClass: "STANDARD",
+		ETag:         "third",
+		Size:         5,
+		IsNull:       true,
+		Mtime:        time.Now().UTC(),
+		Manifest:     &data.Manifest{Class: "STANDARD", Size: 5},
+	}
+	if err := s.PutObject(ctx, o3, true); err != nil {
+		t.Fatalf("suspended put with explicit null sentinel: %v", err)
+	}
+	if o3.VersionID != meta.NullVersionID {
+		t.Fatalf("suspended put VersionID: got %q want %q", o3.VersionID, meta.NullVersionID)
+	}
+	roundTrip, err := s.GetObject(ctx, b.ID, "doc", meta.NullVersionID)
+	if err != nil {
+		t.Fatalf("get after suspended put: %v", err)
+	}
+	if roundTrip.VersionID != meta.NullVersionID || !roundTrip.IsNull || roundTrip.ETag != "third" {
+		t.Fatalf("suspended round-trip: %+v want VersionID=%q IsNull=true ETag=third",
+			roundTrip, meta.NullVersionID)
+	}
 }
 
 // caseVersioningNullListVersions covers US-028: the null-versioned ancestor

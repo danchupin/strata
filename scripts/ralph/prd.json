@@ -97,8 +97,8 @@
         "Tests pass — including `make test-integration` against a real Cassandra container"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Three test additions, no production code change. (a) `internal/config/config_test.go::TestLoadEmptyEnvDoesNotOverrideTOMLValue` writes `[gc] interval = \"30s\"` to a TempDir TOML, sets `STRATA_CONFIG_FILE` to that path, sets `STRATA_GC_INTERVAL=\"\"` (empty), calls Load(), asserts `cfg.GC.Interval == 30*time.Second`. Locks the env.ProviderWithValue empty-skip callback. (b) `internal/meta/storetest/contract.go::caseVersioningNullSentinel` extended with a Suspended-mode INSERT step (`PutObject` with `IsNull=true`, `versioned=true`) — exercises the v1-sentinel-IF-EXISTS LWT path that the prior Disabled-overwrite branch bypassed. Round-trips through `meta.NullVersionID` on the wire. Runs against memory, cassandra, tikv (all 3 backends pick up the case via storetest.Run). (c) `internal/meta/cassandra/store_integration_test.go::TestCassandraNullSentinelOnDisk` — separate-container test that PUTs into a Suspended bucket, GETs back via both `meta.NullVersionID` and `meta.NullVersionLiteral`, then runs a raw `SELECT version_id FROM objects WHERE bucket_id=? AND key=? ALLOW FILTERING` via `store.Session()` to verify the on-disk timeuuid is the v1 sentinel `00000000-0000-1000-8000-000000000000` (NOT the canonical v0 wire form). Catches both INSERT-side regression (cassandra rejects v0) and read-side regression (versionFromCQL leaking v1 to clients). (d) `.github/workflows/ci.yml` integration step now uses `go test -v` so the new test names show up in CI logs (verifies they aren't skipped). Quality: `go vet`, `go build`, `go test ./...`, `pnpm run typecheck` all green."
     },
     {
       "id": "US-007",
