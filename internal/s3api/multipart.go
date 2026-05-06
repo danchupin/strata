@@ -436,7 +436,15 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 
 	if ifMatch := r.Header.Get("If-Match"); ifMatch != "" {
 		existing, gerr := s.Meta.GetObject(r.Context(), b.ID, key, "")
-		if gerr != nil || !etagMatches(ifMatch, `"`+existing.ETag+`"`) {
+		if gerr != nil {
+			if errors.Is(gerr, meta.ErrObjectNotFound) {
+				writeError(w, r, ErrNoSuchKey)
+				return
+			}
+			mapMetaErr(w, r, gerr)
+			return
+		}
+		if !etagMatches(ifMatch, `"`+existing.ETag+`"`) {
 			writeError(w, r, ErrPreconditionFailed)
 			return
 		}

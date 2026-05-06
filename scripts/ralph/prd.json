@@ -64,8 +64,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "completeMultipartUpload If-Match path now branches: errors.Is(gerr, meta.ErrObjectNotFound) → ErrNoSuchKey (404); any other gerr → mapMetaErr; existing-object ETag mismatch stays ErrPreconditionFailed (412). putObject (server.go:902) untouched — single-PUT If-Match-on-missing stays 412 per RFC 7232 §3.1. Tests flipped/added in multipart_preconditions_test.go: TestMultipartCompleteIfMatchNonExistingReturnsNoSuchKey + TestMultipartCompleteIfMatchMissingObjectDoesNotLeakCompletingState (404 + retry without If-Match → 200, no completing-state leak)."
     },
     {
       "id": "US-005",

@@ -104,3 +104,17 @@ Cycle: ralph/s3-compat-95 (close remaining 16 real failures, target >=90% strict
   - **SHA + FULL_OBJECT is unreachable in normal flow.** AWS rejects `ChecksumType=FULL_OBJECT` + SHA on Initiate. We fall back to COMPOSITE shape for SHA in the helper anyway, so a misbehaving client still gets a well-formed (if technically wrong-typed) response.
   - **s3-tests vector locking pattern**: when a story closes a wire-shape gap, lock the published vectors as a unit test. The 3-line `cases := []struct{...}` table with per-part b64 + sizes + expected composite is cheap; it catches polynomial / reversal / size-handling regressions without needing the live s3-tests run.
 ---
+
+## 2026-05-06 - US-004 Multipart If-Match-on-missing-object → 404 NoSuchKey
+- Implemented:
+  - `internal/s3api/multipart.go::completeMultipartUpload` precondition path: split the prior `gerr != nil || !etagMatches(...)` two-arm OR. The missing-object arm now returns `ErrNoSuchKey` (404) when `errors.Is(gerr, meta.ErrObjectNotFound)`; other gerrs route through `mapMetaErr`. ETag-mismatch on an existing object stays `ErrPreconditionFailed` (412). `errors` package was already imported.
+  - `internal/s3api/server.go::putObject` (line 902) untouched — single-PUT `If-Match` on a missing object stays 412 per RFC 7232 §3.1. The AWS-divergence is Complete-only, and tests assert that shape.
+- Files changed:
+  - `internal/s3api/multipart.go`
+  - `internal/s3api/multipart_preconditions_test.go` — flipped `TestMultipartCompleteIfMatchNonExistingFails` to `TestMultipartCompleteIfMatchNonExistingReturnsNoSuchKey` (404 + body `NoSuchKey`). Added `TestMultipartCompleteIfMatchMissingObjectDoesNotLeakCompletingState` — 404 path then retry without preconditions → 200 (proves no `completing` state leak on the 404 branch). Existing 412 tests for ETag-mismatch / If-None-Match unchanged.
+- Learnings for future iterations:
+  - **AWS-vs-RFC divergence is per-endpoint, not gateway-wide.** Multipart Complete returns 404 NoSuchKey on If-Match-missing, while single-PUT keeps the RFC 7232 §3.1 412. Don't unify the precondition helper across putObject + completeMultipartUpload — the wire shape differs and s3-tests asserts both.
+  - **`If-None-Match=*` keeps the canonical 412.** Only the `If-Match` + missing-object combination flips. Verified by the still-green `TestMultipartCompleteIfNoneMatchStarNoObject` (succeeds when missing) + `TestMultipartCompleteIfNoneMatchStarExistingFails` (412 when present).
+  - **Precondition runs BEFORE the LWT flip.** Both 404 (missing) and 412 (mismatch) branches preserve `uploading` state — a retry without preconditions completes successfully. The two `*DoesNotLeakCompletingState` tests lock that invariant for both error codes; if you reorder the precondition past the LWT flip, both will catch the regression.
+  - **Test fixture: bucket name `/bkt`** (3-char minimum). Request shape `POST /bkt/k?uploadId=...` with the multipart-Complete XML body and `If-Match: "<etag>"` (literal double quotes around hex per S3 wire shape).
+---

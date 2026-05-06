@@ -63,10 +63,11 @@ func TestMultipartCompleteIfMatchOverwriteExisting(t *testing.T) {
 	h.mustStatus(resp, http.StatusOK)
 }
 
-// TestMultipartCompleteIfMatchNonExistingFails mirrors s3-tests
-// test_multipart_put_object_if_match_nonexisting_failed: If-Match on a key
-// that does NOT yet exist must fail Complete with 412 PreconditionFailed.
-func TestMultipartCompleteIfMatchNonExistingFails(t *testing.T) {
+// TestMultipartCompleteIfMatchNonExistingReturnsNoSuchKey mirrors s3-tests
+// test_multipart_put_object_if_match (object does NOT exist branch): AWS
+// returns 404 NoSuchKey rather than RFC-7232's 412 PreconditionFailed when
+// the destination object is absent on Complete with If-Match.
+func TestMultipartCompleteIfMatchNonExistingReturnsNoSuchKey(t *testing.T) {
 	h := newHarness(t)
 	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
 
@@ -74,7 +75,10 @@ func TestMultipartCompleteIfMatchNonExistingFails(t *testing.T) {
 	completeBody := uploadThreeParts(t, h, "bkt/k", uploadID)
 
 	resp := h.doString("POST", "/bkt/k?uploadId="+uploadID, completeBody, "If-Match", `"deadbeef"`)
-	h.mustStatus(resp, http.StatusPreconditionFailed)
+	h.mustStatus(resp, http.StatusNotFound)
+	if !strings.Contains(h.readBody(resp), "NoSuchKey") {
+		t.Fatalf("expected NoSuchKey in body")
+	}
 }
 
 // TestMultipartCompleteIfMatchExistingMismatchFails mirrors s3-tests
@@ -138,9 +142,9 @@ func TestMultipartCompleteIfNoneMatchEtagFails(t *testing.T) {
 }
 
 // TestMultipartCompleteIfMatchPreconditionDoesNotLeakCompletingState verifies
-// the precondition check runs BEFORE the LWT flip — a 412 must leave the
-// upload in 'uploading' state so a subsequent retry without preconditions
-// completes successfully.
+// the precondition check runs BEFORE the LWT flip — a 412 (existing-object,
+// mismatched ETag) must leave the upload in 'uploading' state so a subsequent
+// retry without preconditions completes successfully.
 func TestMultipartCompleteIfMatchPreconditionDoesNotLeakCompletingState(t *testing.T) {
 	h := newHarness(t)
 	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
@@ -151,6 +155,24 @@ func TestMultipartCompleteIfMatchPreconditionDoesNotLeakCompletingState(t *testi
 
 	resp := h.doString("POST", "/bkt/k?uploadId="+uploadID, completeBody, "If-Match", `"deadbeef"`)
 	h.mustStatus(resp, http.StatusPreconditionFailed)
+
+	resp = h.doString("POST", "/bkt/k?uploadId="+uploadID, completeBody)
+	h.mustStatus(resp, http.StatusOK)
+}
+
+// TestMultipartCompleteIfMatchMissingObjectDoesNotLeakCompletingState mirrors
+// the same invariant for the 404 NoSuchKey branch (object absent + If-Match):
+// a retry without preconditions must still succeed because the upload row was
+// not flipped to 'completing'.
+func TestMultipartCompleteIfMatchMissingObjectDoesNotLeakCompletingState(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+
+	uploadID := initiateMultipart(t, h, "bkt/k")
+	completeBody := uploadThreeParts(t, h, "bkt/k", uploadID)
+
+	resp := h.doString("POST", "/bkt/k?uploadId="+uploadID, completeBody, "If-Match", `"deadbeef"`)
+	h.mustStatus(resp, http.StatusNotFound)
 
 	resp = h.doString("POST", "/bkt/k?uploadId="+uploadID, completeBody)
 	h.mustStatus(resp, http.StatusOK)
