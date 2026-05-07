@@ -1,66 +1,24 @@
 # Ralph Progress Log
-Started: Thu May  7 18:25:00 MSK 2026
-Cycle: ralph/gc-lifecycle-scale (Phase 1 — internal worker concurrency + bench harness)
+Started: Thu May  7 18:29:16 MSK 2026
+Cycle: ralph/gc-lifecycle-scale
 ---
 
 ## Codebase Patterns
+- Worker concurrency knobs are read at Build time in `cmd/strata/workers/<name>.go` from `STRATA_*` envs (sibling of existing `STRATA_GC_INTERVAL` etc); no per-worker flags.
+- Bounded errgroup pattern for per-entry parallelism: `eg := new(errgroup.Group); eg.SetLimit(N); eg.Go(func() error { ...; return nil })`. Always return nil from goroutines so per-entry failure does not cancel siblings (log-and-continue). Wrap each goroutine in `defer recover()` — supervisor's panic backoff is for top-level panics only.
+- Counters under concurrent writes use `atomic.Int64` instead of plain `int`.
+- `golang.org/x/sync` lives in `go.mod`; it was indirect — bumping to direct via `go mod tidy` after first errgroup import.
+- Go 1.25 modernization: `for i := 0; i < n; i++` flagged as `rangeint`; use `for i := range n`. Loop var aliasing (`e := e`) is also flagged (`forvar`); not needed since Go 1.22.
 
-### Branch policy (REQUIRED)
-- Cycle starts from main (HEAD `3688375` at prep time, after multi-replica-cluster + lab-walkthrough fixes). The cycle MUST end with a fast-forward merge back to main: US-005 (last story) ff-merges `ralph/gc-lifecycle-scale` into `main`, pushes `origin/main`, lets `archive_cycle` (in `scripts/ralph/ralph.sh`) snapshot prd.json + progress.txt under `scripts/ralph/archive/2026-MM-DD-gc-lifecycle-scale-complete/` on `<promise>COMPLETE</promise>`. Mirror the multi-replica-cluster close shape (commit `0dee924`).
-- The shell wrapper `scripts/ralph/ralph.sh` MUST invoke `avito ai claude --` (not bare `claude`) — regression-resistant per memory feedback rule.
-- Ff-only merge pattern, NOT `merge:` commit (older shape from web-ui-debug `6519036` is OBSOLETE — current pattern is ff-only + single follow-up archive commit on main).
-
-### PRD lifecycle (REQUIRED — codified in root CLAUDE.md `b45d633`)
-- The markdown PRD `tasks/prd-gc-lifecycle-scale.md` is a disposable design draft. The canonical record is the auto-archived `scripts/ralph/archive/<date>-gc-lifecycle-scale-complete/{prd.json,progress.txt}` snapshot. US-005 close-flip MUST `git rm tasks/prd-gc-lifecycle-scale.md` in the same commit that flips the ROADMAP entry to Done.
-
-### Phase 1 vs Phase 2 (this cycle is Phase 1)
-- Phase 1 = bounded errgroup INSIDE the existing single-leader worker. Single replica still holds the lease. Throughput cap rises ~32× per worker via internal goroutine fan-out. Quick win + bench harness lands.
-- Phase 2 (separate FUTURE cycle, NOT in this PRD): sharded leader-election (`gc-leader-0..N-1`, per-bucket `lifecycle-leader-<bucket>`) so multiple replicas process disjoint slices in parallel. Needs new `Meta.ListGCEntriesShard(ctx, region, shardID, shardCount, …)` API + per-bucket lease keying. Will compound on top of Phase 1's per-worker concurrency (M shards × C goroutines each = M×C parallel).
-- Phase 1 is NOT wasted: (a) prep for Phase 2 — bench harness is a prerequisite for sizing Phase 2's targets; (b) single-replica deployments (dev/lab) win immediately; (c) errgroup pattern + log-and-continue reusable inside Phase 2's shard workers.
-
-### gc.Worker structure (where to wedge errgroup)
-- `internal/gc/worker.go::Worker` struct: Meta, Region, Interval, Grace, Batch, Logger, Metrics. Add `Concurrency int` as 7th field; zero/negative falls back to 1.
-- `internal/gc/worker.go::drainCount` — outer loop paginates `ListGCEntries` (keep sequential, batch=500 default); INNER `for _, e := range entries { rados.Delete + meta.AckGCEntry }` is the wedge point. Wrap in `errgroup.Group` with `eg.SetLimit(w.Concurrency)`. `eg.Go(func() error { … log + return nil })` — log-and-continue, never bubble error to errgroup (the parent ctx must NOT be cancelled on per-entry failure).
-- `processed` counter under `atomic.Int64` (not sync.Mutex — single counter, no compound state).
-- Per-goroutine `defer func() { if r := recover(); r != nil { logger.Warn("gc panic", "entry", e, "recover", r) } }()` so a single bad entry never crashes the worker. Supervisor's panic backoff is for top-level panics, not per-entry.
-
-### lifecycle.Worker structure
-- `internal/lifecycle/worker.go::Worker` struct: Meta, Data, Region, Interval, AgeUnit, Logger. Add `Concurrency int` as 7th field.
-- Nested loops: `runOnce` → `processBucket` → `for _, o := range res.Objects` → `for _, v := range res.Versions` → `for _, u := range uploads` (multipart sweep). Apply errgroup at the LEAF level (per-object / per-version / per-upload), NOT at the bucket level. Per-bucket parallelism is Phase 2 territory.
-- CAS conflict path stays the same: `Store.SetObjectStorage` returning `applied=false` discards the freshly-written tier-2 chunks via the GC queue. Concurrent siblings see different `expectedClass` snapshots — the LWT enforces correctness regardless of order.
-
-### Worker registration (existing pattern, do NOT change shape)
-- `cmd/strata/workers/gc.go::init()` registers via `workers.Register(workers.Worker{Name: "gc", Build: …})`. Build constructor reads envs at Build time and returns the Runner. Add STRATA_GC_CONCURRENCY parse next to existing STRATA_GC_INTERVAL / STRATA_GC_GRACE / STRATA_GC_BATCH_SIZE.
-- Same shape `cmd/strata/workers/lifecycle.go::init()` — STRATA_LIFECYCLE_CONCURRENCY env at Build time.
-
-### errgroup dep
-- `golang.org/x/sync` is in `go.mod` as INDIRECT (transitive). First direct use (this PRD) promotes to direct require — `go mod tidy` after the import handles it. No new external dep.
-- No existing direct usage of `errgroup` in `internal/`. The pattern is fresh; reference the canonical Go documentation `pkg.go.dev/golang.org/x/sync/errgroup` for SetLimit semantics.
-
-### `strata-admin` subcommand pattern (US-003)
-- Two binaries rule (CLAUDE.md `## Common commands`): `strata`, `strata-admin`. Adding a 3rd binary violates this rule.
-- New benchmarks land as `strata-admin` SUBCOMMANDS, not separate binaries.
-- Existing example: `cmd/strata-admin/rewrap.go` — one-shot operator command. Mirror its skeleton (cobra-style command struct, env-driven config, `defer` cleanup).
-- Files: `cmd/strata-admin/bench_gc.go` + `cmd/strata-admin/bench_lifecycle.go` + smoke test `cmd/strata-admin/bench_gc_test.go` (asserts `--entries=10 --concurrency=1` exits 0 against in-memory backends).
-- New env `STRATA_PROM_PUSHGATEWAY` — optional pushgateway URL. When unset, JSON-line stdout is the only output. CI doesn't have a pushgateway.
-
-### Lab stack (where bench runs against)
-- `make up-lab-tikv` brings up the canonical lab stack (TiKV + RADOS + 2 strata replicas behind nginx LB, ports 9001/9002/9999). The bench harness connects via the same `STRATA_*` envs the gateway uses.
-- `make wait-strata-lab` polls `/readyz` on all three ports until 200.
-- Recent ceph quirks fixed (commits `72c357c`, `7a116c1`): single-mon HEALTH_WARN suppressed at bootstrap; PD healthcheck uses `wget -qO /dev/null` (GET, not HEAD).
-
-### Bench results placement
-- New file `docs/benchmarks/gc-lifecycle.md` — Markdown table with `concurrency | gc chunks/s | lifecycle objects/s` rows for `--concurrency=1,4,16,64,256`. Document the bottleneck observed at each tier + the "knee" (concurrency above which per-additional-goroutine yield is < 10 % of the previous step).
-- The "knee" becomes the recommended production default in the docs — but DEFAULT in code stays 1 (no behaviour change for existing operators; flipping the default needs more bench coverage including Cassandra path + multi-replica HA).
-
-### CI gotchas
-- `go build ./...` — canonical typecheck for Go side. With ceph build tag too if you touched RADOS files: `go build -tags ceph ./...`.
-- `cd web && pnpm typecheck` — TS side. Not relevant this cycle (no UI changes).
-- Race tests need `-tags integration` only for the Cassandra suite. Memory + TiKV unit specs run vanilla.
-
-### ROADMAP close-flip discipline
-- The close-flip commit and the work commit are the SAME commit (CLAUDE.md `## Closing a roadmap item` rule). US-005 is the close-flip — diff includes ROADMAP edit + docs + markdown PRD removal in one atomic commit.
-- Phase 2 P1 entry stays open in ROADMAP after this cycle — surfaced + queued for the next prep.
-- New gaps surfaced during this cycle (e.g. atomic.Int64 contention at very high concurrency, CGO librados thread pinning) get fresh entries under `## Scalability & performance` per CLAUDE.md `## Discovering a new gap` rule, in the same commit that surfaces them.
-
+## 2026-05-07 - US-001
+- Implemented STRATA_GC_CONCURRENCY: bounded errgroup inside `gc.Worker.drainCount` with per-goroutine recover + log-and-continue.
+- `gc.Worker.Concurrency` int field, zero/negative -> 1, clamped to [1, 256] via `effectiveConcurrency()` at runtime; cmd-side env wired in `cmd/strata/workers/gc.go::clampConcurrency` reading `STRATA_GC_CONCURRENCY`.
+- `processed` counter changed to `atomic.Int64`. Inner per-entry loop wraps body in errgroup with `eg.SetLimit(limit)`, errors logged + return nil so siblings continue.
+- New TestWorker_DrainConcurrency: 1k entries, concurrency=32, slowBackend with 2ms per-entry latency, asserts wall-clock < 4× ideal-parallel time AND max in-flight > 1.
+- Files changed: `internal/gc/worker.go`, `internal/gc/worker_test.go`, `cmd/strata/workers/gc.go`, `go.mod`, `go.sum`.
+- **Learnings for future iterations:**
+  - The existing `gc.Metrics` interface (`SetQueueDepth`) only fires once per drain pass (first batch). Concurrency does not change that contract.
+  - `metrics.GCProcessed.Inc()` is goroutine-safe (Prometheus counter has internal atomic).
+  - The slowBackend pattern (latency + max-in-flight tracker via atomic CAS loop) is reusable for US-002's lifecycle concurrency test — copy/adapt.
+  - `gc.Worker.Run()` now logs `concurrency` at startup INFO. Mirror in lifecycle.
 ---

@@ -3,7 +3,10 @@ package gc
 import (
 	"context"
 	"log/slog"
+	"sync/atomic"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
@@ -17,14 +20,15 @@ type Metrics interface {
 }
 
 type Worker struct {
-	Meta     meta.Store
-	Data     data.Backend
-	Region   string
-	Interval time.Duration
-	Grace    time.Duration
-	Batch    int
-	Logger   *slog.Logger
-	Metrics  Metrics
+	Meta        meta.Store
+	Data        data.Backend
+	Region      string
+	Interval    time.Duration
+	Grace       time.Duration
+	Batch       int
+	Concurrency int
+	Logger      *slog.Logger
+	Metrics     Metrics
 }
 
 func (w *Worker) Run(ctx context.Context) error {
@@ -40,7 +44,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	if w.Logger == nil {
 		w.Logger = slog.Default()
 	}
-	w.Logger.InfoContext(ctx, "gc: starting", "region", w.Region, "interval", w.Interval.String(), "grace", w.Grace.String())
+	w.Logger.InfoContext(ctx, "gc: starting", "region", w.Region, "interval", w.Interval.String(), "grace", w.Grace.String(), "concurrency", w.effectiveConcurrency())
 
 	ticker := time.NewTicker(w.Interval)
 	defer ticker.Stop()
@@ -75,38 +79,63 @@ func (w *Worker) drain(ctx context.Context) {
 	w.drainCount(ctx)
 }
 
+// effectiveConcurrency clamps Concurrency to [1, 256]; zero/negative -> 1.
+func (w *Worker) effectiveConcurrency() int {
+	c := w.Concurrency
+	if c < 1 {
+		return 1
+	}
+	if c > 256 {
+		return 256
+	}
+	return c
+}
+
 func (w *Worker) drainCount(ctx context.Context) int {
 	before := time.Now().Add(-w.Grace)
 	first := true
-	processed := 0
+	var processed atomic.Int64
+	limit := w.effectiveConcurrency()
 	for {
 		entries, err := w.Meta.ListGCEntries(ctx, w.Region, before, w.Batch)
 		if err != nil {
 			w.Logger.WarnContext(ctx, "gc list", "error", err.Error())
-			return processed
+			return int(processed.Load())
 		}
 		if first && w.Metrics != nil {
 			w.Metrics.SetQueueDepth(w.Region, len(entries))
 		}
 		first = false
 		if len(entries) == 0 {
-			return processed
+			return int(processed.Load())
 		}
+		eg := new(errgroup.Group)
+		eg.SetLimit(limit)
 		for _, e := range entries {
-			manifest := &data.Manifest{Chunks: []data.ChunkRef{e.Chunk}}
-			if err := w.Data.Delete(ctx, manifest); err != nil {
-				w.Logger.WarnContext(ctx, "gc delete", "pool", e.Chunk.Pool, "oid", e.Chunk.OID, "error", err.Error())
-				continue
-			}
-			if err := w.Meta.AckGCEntry(ctx, w.Region, e); err != nil {
-				w.Logger.WarnContext(ctx, "gc ack", "pool", e.Chunk.Pool, "oid", e.Chunk.OID, "error", err.Error())
-				continue
-			}
-			metrics.GCProcessed.Inc()
-			processed++
+			eg.Go(func() error {
+				defer func() {
+					if r := recover(); r != nil {
+						w.Logger.WarnContext(ctx, "gc panic",
+							"pool", e.Chunk.Pool, "oid", e.Chunk.OID, "panic", r)
+					}
+				}()
+				manifest := &data.Manifest{Chunks: []data.ChunkRef{e.Chunk}}
+				if err := w.Data.Delete(ctx, manifest); err != nil {
+					w.Logger.WarnContext(ctx, "gc delete", "pool", e.Chunk.Pool, "oid", e.Chunk.OID, "error", err.Error())
+					return nil
+				}
+				if err := w.Meta.AckGCEntry(ctx, w.Region, e); err != nil {
+					w.Logger.WarnContext(ctx, "gc ack", "pool", e.Chunk.Pool, "oid", e.Chunk.OID, "error", err.Error())
+					return nil
+				}
+				metrics.GCProcessed.Inc()
+				processed.Add(1)
+				return nil
+			})
 		}
+		_ = eg.Wait()
 		if len(entries) < w.Batch {
-			return processed
+			return int(processed.Load())
 		}
 	}
 }
