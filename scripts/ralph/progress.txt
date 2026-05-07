@@ -21,6 +21,18 @@ Cycle: ralph/web-ui-storage-status
   via adminapi.Config from internal/serverapp. New deps go on both
   Server + Config, propagate through New(), and the test harness
   newTestServer() in server_test.go is wired with in-memory defaults.
+- Cluster-wide cross-bucket aggregates (per-class totals, etc.) hang off
+  bucketstats.Sampler via a typed `Snapshot` pointer shared with the
+  adminapi handler. Sampler.SetX writes; handler reads through copy-on-
+  read accessors. Avoid growing meta.Store with new aggregation methods
+  — piggyback on the existing ListObjects iteration instead. The same
+  `Snapshot` is constructed once in serverapp and threaded into both the
+  sampler config and the adminapi.Config.
+- Top-N-bound sinks on bucketstats.Sampler share the `prevTopN` exit-set
+  loop: when a bucket leaves the window, every Reset hook fires together
+  (ShardSink.ResetBucketShard + ClassSink.ResetBucketClass + ...). New
+  sinks should plug into the same loop instead of tracking their own
+  previous-set map.
 
 ## 2026-05-07 - US-001
 - Added optional `meta.HealthProbe` interface + `MetaHealthReport` /
@@ -118,4 +130,63 @@ Cycle: ralph/web-ui-storage-status
   - Adding a new dependency to the adminapi Server takes 4 spots:
     Server struct, Config struct, New() body, newTestServer() in
     server_test.go. Forgetting any of them leaks compile / test errors.
+---
+
+## 2026-05-07 - US-003
+- Extended `bucketstats.Sampler` with optional `ClassSink` and `Snapshot`
+  fields. `sampleBucket` now returns `map[string]ClassStat{Bytes,Objects}`
+  per bucket; `RunOnce` aggregates a cluster-wide per-class total and pushes
+  it into `Snapshot.SetClasses` after every pass. Per-(bucket, class)
+  bytes/objects are emitted via `ClassSink` only for top-N buckets,
+  reusing the same `prevTopN` exit-set logic that drives `ShardSink` so a
+  bucket leaving the window resets BOTH sinks in lockstep.
+- New gauges `strata_storage_class_bytes{class,bucket}` and
+  `strata_storage_class_objects{class,bucket}` registered in
+  `internal/metrics`. `BucketStatsObserver` gains
+  `SetStorageClassBytes/Objects` + `ResetBucketClass` (delete-partial-match
+  by bucket label). Cardinality bound: top-N * |classes|.
+- New `bucketstats.Snapshot` (snapshot.go) with RWMutex-guarded copy-on-read
+  semantics — `NewSnapshot(poolsByClass)` seeds the static class -> pool
+  map; `SetClasses` replaces totals atomically; nil receiver no-ops on every
+  method so test rigs without a sampler still get a usable handler.
+- Adminapi: new `StorageClasses *bucketstats.Snapshot` field on
+  `Server`+`Config`; `handleStorageClasses` returns
+  `{classes:[{class,bytes,objects}], pools_by_class:{...}}` sorted
+  bytes-desc / class-asc tiebreak. Route registered at
+  `GET /admin/v1/storage/classes`.
+- Serverapp: `poolsByClass(cfg, logger)` parses `cfg.RADOS.Classes` into
+  `class -> pool name` (empty for memory/s3 backends or on parse error
+  with a logged warning). The same `*Snapshot` is passed to both the
+  bucketstats sampler and the adminapi config so writes/reads share state
+  in-process.
+- Files changed:
+  - internal/bucketstats/sampler.go (ClassStat, ClassSink, Snapshot wiring,
+    sampleBucket bytes+objects, RunOnce class sink + snapshot updates)
+  - internal/bucketstats/snapshot.go (new)
+  - internal/bucketstats/sampler_test.go (per-class sink + snapshot tests,
+    top-N respect for class sink)
+  - internal/metrics/metrics.go (StorageClassBytes / StorageClassObjects
+    gauges, BucketStatsObserver class methods, Register additions)
+  - internal/adminapi/server.go (StorageClasses on Server+Config, route)
+  - internal/adminapi/storage.go (handleStorageClasses + types)
+  - internal/adminapi/storage_test.go (empty + populated snapshot tests)
+  - internal/serverapp/serverapp.go (snapshot ctor, poolsByClass helper,
+    sampler ClassSink+Snapshot, adminapi StorageClasses wire)
+- **Learnings for future iterations:**
+  - The bucketstats sampler is the natural home for "walk every bucket
+    once per hour and aggregate something" cluster-wide views — adding a
+    Snapshot pointer is cheaper than adding a meta.Store method and works
+    lockstep across all backends because it piggybacks on the existing
+    ListObjects iteration. New per-class/per-anything cluster aggregates
+    should follow this Sampler.Snapshot pattern instead of growing the
+    meta.Store interface.
+  - `prevTopN` tracking in the sampler is a single source of truth for
+    "which buckets are currently in the top-N window" — both ShardSink and
+    ClassSink reset together when a bucket exits, so the sinks never
+    diverge. New top-N-bound sinks should plug into the same exit-set loop
+    instead of carrying their own previous-set map.
+  - The pools_by_class map is empty for non-RADOS backends (memory / s3)
+    by design — UI consumers must render "n/a" or hide the column when a
+    class has no pool entry. RADOS is the only backend with a meaningful
+    class -> pool mapping today.
 ---

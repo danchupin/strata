@@ -149,6 +149,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	adminLocker := buildLocker(cfg, metaStore)
 	auditTTL := auditRetention(logger)
 	auditBroadcaster := auditstream.New(logger, metrics.AuditStreamObserver{})
+	storageClassSnapshot := bucketstats.NewSnapshot(poolsByClass(cfg, logger))
 	adminServer := adminapi.New(adminapi.Config{
 		Meta:                 metaStore,
 		Data:                 dataBackend,
@@ -177,6 +178,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		S3Handler:            apiHandler,
 		AuditStream:          auditBroadcaster,
 		TraceRingbuf:         tracerProvider.Ringbuf(),
+		StorageClasses:       storageClassSnapshot,
 	})
 
 	mux := http.NewServeMux()
@@ -216,6 +218,8 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 			Meta:      metaStore,
 			Sink:      metrics.BucketStatsObserver{},
 			ShardSink: metrics.BucketStatsObserver{},
+			ClassSink: metrics.BucketStatsObserver{},
+			Snapshot:  storageClassSnapshot,
 			Logger:    logger,
 			TopN:      bucketStatsTopN(logger),
 		}
@@ -368,6 +372,27 @@ func awsKMSClientFactory(region string) (kms.KMSAPI, error) {
 		return nil, err
 	}
 	return awskms.NewFromConfig(cfg), nil
+}
+
+// poolsByClass parses cfg.RADOS.Classes into a class -> pool name map for
+// the storage-classes admin endpoint (US-003 storage cycle). Empty for
+// non-RADOS backends or when the env var is unset / malformed (a parse
+// error is logged and an empty map returned so the gateway still boots).
+func poolsByClass(cfg *config.Config, logger *slog.Logger) map[string]string {
+	if cfg.DataBackend != "rados" || cfg.RADOS.Classes == "" {
+		return map[string]string{}
+	}
+	classes, err := datarados.ParseClasses(cfg.RADOS.Classes)
+	if err != nil {
+		logger.Warn("rados classes parse failed; storage classes pool map empty",
+			"error", err.Error())
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(classes))
+	for class, spec := range classes {
+		out[class] = spec.Pool
+	}
+	return out
 }
 
 // bucketStatsTopN reads STRATA_BUCKETSTATS_TOPN and returns the cap for the

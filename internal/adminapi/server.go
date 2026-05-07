@@ -19,6 +19,7 @@ import (
 
 	"github.com/danchupin/strata/internal/auditstream"
 	"github.com/danchupin/strata/internal/auth"
+	"github.com/danchupin/strata/internal/bucketstats"
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/heartbeat"
 	"github.com/danchupin/strata/internal/leader"
@@ -108,6 +109,12 @@ type Server struct {
 	// the endpoint with 503 RingbufUnavailable.
 	TraceRingbuf *ringbuf.RingBuffer
 
+	// StorageClasses is the in-process per-storage-class snapshot updated
+	// by the bucketstats sampler (US-003 storage cycle). Backs
+	// GET /admin/v1/storage/classes. nil renders empty arrays so the UI
+	// can still mount the page.
+	StorageClasses *bucketstats.Snapshot
+
 	// hotBucketsMu guards lazy initialisation of hotBucketsCacheVal — the
 	// 30s TTL cache that absorbs burst polls of /admin/v1/diagnostics/
 	// hot-buckets (US-007).
@@ -191,6 +198,9 @@ type Config struct {
 	// TraceRingbuf is the in-process OTel trace ring buffer (US-005). nil
 	// disables the trace browser endpoint with 503 RingbufUnavailable.
 	TraceRingbuf *ringbuf.RingBuffer
+	// StorageClasses is the per-storage-class aggregate snapshot updated by
+	// the bucketstats sampler. Backs GET /admin/v1/storage/classes.
+	StorageClasses *bucketstats.Snapshot
 }
 
 // New constructs a Server. Started defaults to now. JWTSecret empty means
@@ -230,6 +240,7 @@ func New(c Config) *Server {
 		S3Handler:            c.S3Handler,
 		AuditStream:          c.AuditStream,
 		TraceRingbuf:         c.TraceRingbuf,
+		StorageClasses:       c.StorageClasses,
 		Logger:               log.Default(),
 	}
 }
@@ -366,6 +377,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /admin/v1/settings/jwt/rotate", s.handleRotateJWTSecret)
 	mux.HandleFunc("GET /admin/v1/storage/meta", s.handleStorageMeta)
 	mux.HandleFunc("GET /admin/v1/storage/data", s.handleStorageData)
+	mux.HandleFunc("GET /admin/v1/storage/classes", s.handleStorageClasses)
 	mux.HandleFunc("GET /admin/v1/consumers/top", s.handleConsumersTop)
 	mux.HandleFunc("GET /admin/v1/metrics/timeseries", s.handleMetricsTimeseries)
 	return mux

@@ -25,6 +25,49 @@ func (s *recordingSink) SetBucketBytes(bucket, class string, bytes int64) {
 	s.values[bucket+"|"+class] = bytes
 }
 
+type recordingClassSink struct {
+	mu      sync.Mutex
+	bytes   map[string]int64 // bucket|class -> bytes
+	objects map[string]int64 // bucket|class -> count
+	resets  map[string]int   // bucket -> resetCount
+}
+
+func newClassSink() *recordingClassSink {
+	return &recordingClassSink{
+		bytes:   map[string]int64{},
+		objects: map[string]int64{},
+		resets:  map[string]int{},
+	}
+}
+
+func (s *recordingClassSink) SetStorageClassBytes(bucket, class string, bytes int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.bytes[bucket+"|"+class] = bytes
+}
+
+func (s *recordingClassSink) SetStorageClassObjects(bucket, class string, objects int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.objects[bucket+"|"+class] = objects
+}
+
+func (s *recordingClassSink) ResetBucketClass(bucket string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.resets[bucket]++
+	for k := range s.bytes {
+		if hasBucketPrefix(k, bucket) {
+			delete(s.bytes, k)
+		}
+	}
+	for k := range s.objects {
+		if hasBucketPrefix(k, bucket) {
+			delete(s.objects, k)
+		}
+	}
+}
+
 type recordingShardSink struct {
 	mu      sync.Mutex
 	bytes   map[string]int64 // bucket|shard -> bytes
@@ -195,6 +238,129 @@ func TestSamplerEmitsPerShardForTopN(t *testing.T) {
 	shardSink.mu.Unlock()
 	if bigSum != 6000 {
 		t.Fatalf("big shard-sum: got %d want 6000", bigSum)
+	}
+}
+
+func TestSamplerEmitsPerClassAndUpdatesSnapshot(t *testing.T) {
+	store := metamem.New()
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	mkBucket := func(name string, byClass map[string][]int64) {
+		b, err := store.CreateBucket(ctx, name, "o", "STANDARD")
+		if err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+		i := 0
+		for class, sizes := range byClass {
+			for _, sz := range sizes {
+				o := &meta.Object{
+					BucketID: b.ID, Key: fmt.Sprintf("%s-%s-%d", name, class, i),
+					Size:         sz,
+					StorageClass: class,
+					Mtime:        now,
+					Manifest:     &data.Manifest{Size: sz, Class: class},
+				}
+				if err := store.PutObject(ctx, o, false); err != nil {
+					t.Fatalf("put: %v", err)
+				}
+				i++
+			}
+		}
+	}
+	mkBucket("alpha", map[string][]int64{
+		"STANDARD": {100, 200},
+		"GLACIER":  {1000},
+	})
+	mkBucket("beta", map[string][]int64{
+		"STANDARD": {50},
+	})
+
+	classSink := newClassSink()
+	snap := NewSnapshot(map[string]string{
+		"STANDARD": "p1",
+		"GLACIER":  "p2",
+	})
+	s := &Sampler{
+		Meta:      store,
+		ClassSink: classSink,
+		Snapshot:  snap,
+		PageLimit: 100,
+		TopN:      10,
+	}
+	if err := s.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	// Per-(bucket, class) sink populated for both buckets.
+	if got := classSink.bytes["alpha|STANDARD"]; got != 300 {
+		t.Errorf("alpha|STANDARD bytes: got %d want 300", got)
+	}
+	if got := classSink.objects["alpha|STANDARD"]; got != 2 {
+		t.Errorf("alpha|STANDARD objects: got %d want 2", got)
+	}
+	if got := classSink.bytes["alpha|GLACIER"]; got != 1000 {
+		t.Errorf("alpha|GLACIER bytes: got %d want 1000", got)
+	}
+	if got := classSink.objects["alpha|GLACIER"]; got != 1 {
+		t.Errorf("alpha|GLACIER objects: got %d want 1", got)
+	}
+	if got := classSink.bytes["beta|STANDARD"]; got != 50 {
+		t.Errorf("beta|STANDARD bytes: got %d want 50", got)
+	}
+
+	// Snapshot carries cluster-wide totals.
+	totals := snap.Classes()
+	if totals["STANDARD"].Bytes != 350 || totals["STANDARD"].Objects != 3 {
+		t.Errorf("snapshot STANDARD: %+v want bytes=350 objects=3", totals["STANDARD"])
+	}
+	if totals["GLACIER"].Bytes != 1000 || totals["GLACIER"].Objects != 1 {
+		t.Errorf("snapshot GLACIER: %+v want bytes=1000 objects=1", totals["GLACIER"])
+	}
+	pools := snap.Pools()
+	if pools["STANDARD"] != "p1" || pools["GLACIER"] != "p2" {
+		t.Errorf("snapshot pools: %+v", pools)
+	}
+}
+
+func TestSamplerClassSinkRespectsTopN(t *testing.T) {
+	store := metamem.New()
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	mk := func(name string, sz int64) {
+		b, err := store.CreateBucket(ctx, name, "o", "STANDARD")
+		if err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+		o := &meta.Object{
+			BucketID: b.ID, Key: name + "-k",
+			Size:         sz,
+			StorageClass: "STANDARD",
+			Mtime:        now,
+			Manifest:     &data.Manifest{Size: sz, Class: "STANDARD"},
+		}
+		if err := store.PutObject(ctx, o, false); err != nil {
+			t.Fatalf("put: %v", err)
+		}
+	}
+	mk("big", 5000)
+	mk("mid", 100)
+	mk("tiny", 1)
+
+	classSink := newClassSink()
+	s := &Sampler{Meta: store, ClassSink: classSink, PageLimit: 100, TopN: 2}
+	if err := s.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if _, ok := classSink.bytes["big|STANDARD"]; !ok {
+		t.Errorf("big should be in top-N class sink")
+	}
+	if _, ok := classSink.bytes["mid|STANDARD"]; !ok {
+		t.Errorf("mid should be in top-N class sink")
+	}
+	if _, ok := classSink.bytes["tiny|STANDARD"]; ok {
+		t.Errorf("tiny must NOT be in top-N class sink (TopN=2)")
 	}
 }
 

@@ -150,6 +150,22 @@ var (
 		[]string{"bucket", "shard"},
 	)
 
+	StorageClassBytes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "strata_storage_class_bytes",
+			Help: "Total object bytes per (storage_class, bucket) for the top-N largest buckets (US-003 storage cycle). Cardinality bound: top-N buckets * |classes|.",
+		},
+		[]string{"class", "bucket"},
+	)
+
+	StorageClassObjects = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "strata_storage_class_objects",
+			Help: "Total object count per (storage_class, bucket) for the top-N largest buckets (US-003 storage cycle). Cardinality bound: top-N buckets * |classes|.",
+		},
+		[]string{"class", "bucket"},
+	)
+
 	LifecycleTickTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "strata_lifecycle_tick_total",
@@ -217,6 +233,8 @@ func Register() {
 		BucketBytes,
 		BucketShardBytes,
 		BucketShardObjects,
+		StorageClassBytes,
+		StorageClassObjects,
 		LifecycleTickTotal,
 		NotifyDeliveryTotal,
 		WorkerPanicTotal,
@@ -397,6 +415,39 @@ func (BucketStatsObserver) ResetBucketShard(bucket string) {
 	}
 	BucketShardBytes.DeletePartialMatch(prometheus.Labels{"bucket": bucket})
 	BucketShardObjects.DeletePartialMatch(prometheus.Labels{"bucket": bucket})
+}
+
+// SetStorageClassBytes / SetStorageClassObjects publish per-(bucket, class)
+// gauges populated by the bucketstats sampler for the top-N buckets (US-003
+// storage cycle).
+func (BucketStatsObserver) SetStorageClassBytes(bucket, class string, bytes int64) {
+	if bucket == "" {
+		bucket = "unknown"
+	}
+	if class == "" {
+		class = "STANDARD"
+	}
+	StorageClassBytes.WithLabelValues(class, bucket).Set(float64(bytes))
+}
+
+func (BucketStatsObserver) SetStorageClassObjects(bucket, class string, objects int64) {
+	if bucket == "" {
+		bucket = "unknown"
+	}
+	if class == "" {
+		class = "STANDARD"
+	}
+	StorageClassObjects.WithLabelValues(class, bucket).Set(float64(objects))
+}
+
+// ResetBucketClass drops every (class, bucket) series for bucket so a
+// freshly dropped-from-top-N bucket does not linger as stale data.
+func (BucketStatsObserver) ResetBucketClass(bucket string) {
+	if bucket == "" {
+		return
+	}
+	StorageClassBytes.DeletePartialMatch(prometheus.Labels{"bucket": bucket})
+	StorageClassObjects.DeletePartialMatch(prometheus.Labels{"bucket": bucket})
 }
 
 // AuditStreamObserver implements the auditstream.MetricsSink interface. The

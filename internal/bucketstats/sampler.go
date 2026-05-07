@@ -35,15 +35,38 @@ type ShardSink interface {
 	ResetBucketShard(bucket string)
 }
 
+// ClassSink receives per-(bucket, class) byte and object totals for the
+// top-N buckets at the end of each sample pass (US-003 of the storage
+// cycle). Cardinality is bounded to top-N * |classes|; ResetBucketClass
+// drops every (bucket, *) series so buckets leaving the top-N window do not
+// linger.
+type ClassSink interface {
+	SetStorageClassBytes(bucket, class string, bytes int64)
+	SetStorageClassObjects(bucket, class string, objects int64)
+	ResetBucketClass(bucket string)
+}
+
+// ClassStat is per-class bytes + object count for a single bucket pass, and
+// (separately) the per-class cluster-wide totals stored in Snapshot.
+type ClassStat struct {
+	Bytes   int64
+	Objects int64
+}
+
 // Sampler walks ListBuckets + ListObjects on every Tick and reports totals
 // per (bucket, storage_class) to the Sink. Default Interval=1h. Now and
 // PageLimit are testing seams. When ShardSink is set, the sampler also
 // emits per-shard bytes/objects for the top-N buckets via
-// meta.Store.SampleBucketShardStats (US-012).
+// meta.Store.SampleBucketShardStats (US-012). When ClassSink and/or
+// Snapshot are set, the sampler additionally emits per-(bucket, class)
+// bytes+objects for the top-N buckets and updates Snapshot with the
+// cluster-wide per-class totals (US-003 storage cycle).
 type Sampler struct {
 	Meta      meta.Store
 	Sink      Sink
 	ShardSink ShardSink
+	ClassSink ClassSink
+	Snapshot  *Snapshot
 	Interval  time.Duration
 	Logger    *slog.Logger
 	PageLimit int
@@ -52,7 +75,8 @@ type Sampler struct {
 	TopN int
 
 	// prevTopN tracks bucket names from the previous per-shard pass so the
-	// sampler can ResetBucketShard for buckets that exit the top-N window.
+	// sampler can ResetBucketShard / ResetBucketClass for buckets that exit
+	// the top-N window.
 	prevTopN map[string]struct{}
 }
 
@@ -80,7 +104,7 @@ func (s *Sampler) Run(ctx context.Context) error {
 
 // RunOnce runs a single sample pass; exported for tests + cmd --once flag.
 func (s *Sampler) RunOnce(ctx context.Context) error {
-	if s.Sink == nil && s.ShardSink == nil {
+	if s.Sink == nil && s.ShardSink == nil && s.ClassSink == nil && s.Snapshot == nil {
 		return nil
 	}
 	if s.PageLimit <= 0 {
@@ -100,28 +124,38 @@ func (s *Sampler) RunOnce(ctx context.Context) error {
 	type bucketTotal struct {
 		bucket *meta.Bucket
 		bytes  int64
+		stats  map[string]ClassStat
 	}
 	totalsPerBucket := make([]bucketTotal, 0, len(buckets))
+	classTotals := map[string]ClassStat{}
 	for _, b := range buckets {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		totals, err := s.sampleBucket(ctx, b.ID)
+		stats, err := s.sampleBucket(ctx, b.ID)
 		if err != nil {
 			s.Logger.WarnContext(ctx, "bucketstats: bucket failed", "bucket", b.Name, "error", err.Error())
 			continue
 		}
 		var sum int64
-		for class, bytes := range totals {
+		for class, st := range stats {
 			if s.Sink != nil {
-				s.Sink.SetBucketBytes(b.Name, class, bytes)
+				s.Sink.SetBucketBytes(b.Name, class, st.Bytes)
 			}
-			sum += bytes
+			sum += st.Bytes
+			agg := classTotals[class]
+			agg.Bytes += st.Bytes
+			agg.Objects += st.Objects
+			classTotals[class] = agg
 		}
-		totalsPerBucket = append(totalsPerBucket, bucketTotal{bucket: b, bytes: sum})
+		totalsPerBucket = append(totalsPerBucket, bucketTotal{bucket: b, bytes: sum, stats: stats})
 	}
 
-	if s.ShardSink == nil {
+	if s.Snapshot != nil {
+		s.Snapshot.SetClasses(classTotals)
+	}
+
+	if s.ShardSink == nil && s.ClassSink == nil {
 		return nil
 	}
 
@@ -141,7 +175,12 @@ func (s *Sampler) RunOnce(ctx context.Context) error {
 	}
 	for prev := range s.prevTopN {
 		if _, still := currentTopN[prev]; !still {
-			s.ShardSink.ResetBucketShard(prev)
+			if s.ShardSink != nil {
+				s.ShardSink.ResetBucketShard(prev)
+			}
+			if s.ClassSink != nil {
+				s.ClassSink.ResetBucketClass(prev)
+			}
 		}
 	}
 	s.prevTopN = currentTopN
@@ -149,6 +188,18 @@ func (s *Sampler) RunOnce(ctx context.Context) error {
 	for _, bt := range totalsPerBucket {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if s.ClassSink != nil {
+			// Reset BEFORE re-emitting so a class that drained to zero
+			// since the last pass disappears from the gauge set.
+			s.ClassSink.ResetBucketClass(bt.bucket.Name)
+			for class, st := range bt.stats {
+				s.ClassSink.SetStorageClassBytes(bt.bucket.Name, class, st.Bytes)
+				s.ClassSink.SetStorageClassObjects(bt.bucket.Name, class, st.Objects)
+			}
+		}
+		if s.ShardSink == nil {
+			continue
 		}
 		shardCount := bt.bucket.ShardCount
 		if shardCount <= 0 {
@@ -170,8 +221,8 @@ func (s *Sampler) RunOnce(ctx context.Context) error {
 	return nil
 }
 
-func (s *Sampler) sampleBucket(ctx context.Context, bucketID uuid.UUID) (map[string]int64, error) {
-	totals := map[string]int64{}
+func (s *Sampler) sampleBucket(ctx context.Context, bucketID uuid.UUID) (map[string]ClassStat, error) {
+	totals := map[string]ClassStat{}
 	opts := meta.ListOptions{Limit: s.PageLimit}
 	for {
 		res, err := s.Meta.ListObjects(ctx, bucketID, opts)
@@ -183,7 +234,10 @@ func (s *Sampler) sampleBucket(ctx context.Context, bucketID uuid.UUID) (map[str
 			if class == "" {
 				class = "STANDARD"
 			}
-			totals[class] += o.Size
+			cs := totals[class]
+			cs.Bytes += o.Size
+			cs.Objects++
+			totals[class] = cs
 		}
 		if !res.Truncated {
 			return totals, nil
