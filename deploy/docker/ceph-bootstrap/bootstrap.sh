@@ -141,6 +141,14 @@ for pool in ${STRATA_POOL} ${STRATA_EXTRA_POOLS}; do
   fi
 done
 
+# Quiet two single-mon lab quirks that otherwise trip HEALTH_WARN on every
+# fresh boot and trigger Strata's storage-degraded banner:
+#  - AUTH_INSECURE_GLOBAL_ID_RECLAIM_ALLOWED: lab single-mon default; safe to
+#    flip off because clients in this stack always present new-style cephx.
+#  - MON_MSGR2_NOT_ENABLED: monmap was initialised with v1 only; enable v2.
+ceph config set mon auth_allow_insecure_global_id_reclaim false 2>/dev/null || true
+ceph mon enable-msgr2 2>/dev/null || true
+
 echo "bootstrap: cluster ready"
 ceph -s
 
