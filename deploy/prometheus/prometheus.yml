@@ -22,3 +22,15 @@ scrape_configs:
       - targets: ["strata-features:9000"]
         labels:
           binary: strata-features
+
+  # TiKV-backed lab profile: 2 replicas behind nginx LB at 9999 (host).
+  # `--profile lab-tikv` activates these; until then the scrape just
+  # logs "no host" — harmless.
+  - job_name: strata-tikv-lab
+    static_configs:
+      - targets:
+          - "strata-tikv-a:9000"
+          - "strata-tikv-b:9000"
+        labels:
+          binary: strata
+          profile: lab-tikv

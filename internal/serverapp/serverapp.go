@@ -110,6 +110,15 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	}
 
 	metrics.Register()
+	// Wire access_key extraction for the strata_http_requests_total counter
+	// (kept here to avoid an internal/metrics → internal/auth import cycle).
+	metrics.HTTPMetricsLabeler = func(r *http.Request) string {
+		ai := auth.FromContext(r.Context())
+		if ai == nil || ai.IsAnonymous || ai.AccessKey == "" {
+			return "_anon"
+		}
+		return ai.AccessKey
+	}
 	apiHandler := s3api.New(dataBackend, metaStore)
 	apiHandler.Region = cfg.RegionName
 	apiHandler.InvalidateCredential = multi.Invalidate

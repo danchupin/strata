@@ -14,9 +14,9 @@ var (
 	HTTPRequests = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "strata_http_requests_total",
-			Help: "Total HTTP requests served by the gateway, partitioned by method and response code.",
+			Help: "Total HTTP requests served by the gateway, partitioned by method, response code, bucket, and access_key. bucket=\"_admin\" for /admin/v1, /metrics, /healthz, /readyz, /console; bucket=\"_root\" for the empty path. access_key=\"_anon\" for unauthenticated requests.",
 		},
-		[]string{"method", "code"},
+		[]string{"method", "code", "bucket", "access_key"},
 	)
 
 	HTTPDuration = prometheus.NewHistogramVec(
@@ -258,15 +258,53 @@ func (w *wrappedWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
+// HTTPMetricsLabeler resolves per-request access_key for the
+// strata_http_requests_total counter. ObserveHTTP runs in `internal/metrics`
+// which must not import auth (it would create a cycle with `internal/auth`),
+// so the gateway wires this hook in `internal/serverapp` to call
+// `auth.FromContext`.
+//
+// nil hook → access_key="_anon" (default during early-boot wiring; the
+// gateway sets the hook before serving traffic).
+var HTTPMetricsLabeler func(*http.Request) (accessKey string)
+
 func ObserveHTTP(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rw := &wrappedWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rw, r)
 		code := strconv.Itoa(rw.status)
-		HTTPRequests.WithLabelValues(r.Method, code).Inc()
+		bucket := bucketLabel(r.URL.Path)
+		accessKey := "_anon"
+		if HTTPMetricsLabeler != nil {
+			if k := HTTPMetricsLabeler(r); k != "" {
+				accessKey = k
+			}
+		}
+		HTTPRequests.WithLabelValues(r.Method, code, bucket, accessKey).Inc()
 		HTTPDuration.WithLabelValues(r.Method, TemplatePath(r.URL.Path), code).Observe(time.Since(start).Seconds())
 	})
+}
+
+// bucketLabel extracts the bucket portion of the URL path for the
+// strata_http_requests_total bucket label. Path-style S3 URLs put the
+// bucket as the first segment (e.g. `/lab-test/file.txt` → `lab-test`).
+// Admin / observability endpoints share the literal "_admin" value to keep
+// cardinality bounded.
+func bucketLabel(p string) string {
+	p = strings.TrimPrefix(p, "/")
+	if p == "" {
+		return "_root"
+	}
+	first := p
+	if i := strings.IndexByte(p, '/'); i >= 0 {
+		first = p[:i]
+	}
+	switch first {
+	case "admin", "metrics", "healthz", "readyz", "console":
+		return "_admin"
+	}
+	return first
 }
 
 // TemplatePath collapses a URL path into a low-cardinality label for the
