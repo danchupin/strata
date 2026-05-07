@@ -26,12 +26,14 @@ export {
   fetchStorageMeta,
   fetchStorageData,
   fetchStorageClasses,
+  fetchStorageHealth,
   type NodeStatus,
   type MetaHealthReport,
   type PoolStatus,
   type DataHealthReport,
   type StorageClassEntry,
   type StorageClassesResponse,
+  type StorageHealthResponse,
 } from './storage';
 
 export {

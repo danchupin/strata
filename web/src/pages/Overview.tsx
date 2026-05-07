@@ -1,12 +1,15 @@
 import { Suspense, lazy, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { AlertCircle, Database, Server } from 'lucide-react';
+import { AlertCircle, Database, HardDrive, Server } from 'lucide-react';
+import { Link } from 'react-router-dom';
 
 import {
   fetchClusterNodes,
   fetchClusterStatus,
+  fetchStorageClasses,
   type ClusterNode,
   type ClusterStatus,
+  type StorageClassesResponse,
 } from '@/api/client';
 
 // NodeDetailDrawer pulls recharts (~110 KiB gz). Lazy-load so the home page
@@ -228,6 +231,95 @@ function BackendChips({ status }: { status: ClusterStatus | null }) {
   );
 }
 
+// formatBytes is the same helper used on the Storage page; duplicated here so
+// the home-page hero can stay free of recharts and other Storage page deps.
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
+  let i = 0;
+  let v = bytes;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+const STORAGE_HERO_TOPN = 5;
+
+function StorageHeroCard() {
+  // 60 s cache per the AC — the hero card is a glance summary, not a live
+  // dashboard. The /storage page itself polls every 30 s.
+  const q = useQuery({
+    queryKey: ['storage', 'classes', 'hero'] as const,
+    queryFn: fetchStorageClasses,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+    meta: { label: 'storage classes', silent: true },
+  });
+  const data: StorageClassesResponse | undefined = q.data;
+  const classes = data?.classes ?? [];
+  const total = classes.reduce((acc, c) => acc + c.bytes, 0);
+  const top = classes.slice(0, STORAGE_HERO_TOPN);
+  const more = classes.length - top.length;
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div className="space-y-1">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <HardDrive className="h-4 w-4" aria-hidden />
+            Storage
+          </CardTitle>
+          <CardDescription>
+            Total {formatBytes(total)} across {classes.length}{' '}
+            {classes.length === 1 ? 'class' : 'classes'}
+          </CardDescription>
+        </div>
+        <Link
+          to="/storage"
+          className="text-xs font-medium text-muted-foreground underline-offset-2 hover:underline"
+        >
+          View Storage page
+        </Link>
+      </CardHeader>
+      <CardContent>
+        {q.isPending && !q.data ? (
+          <Skeleton className="h-6 w-full" />
+        ) : classes.length === 0 ? (
+          <div className="text-sm text-muted-foreground">
+            No per-class breakdown yet — bucketstats sampler runs once per
+            cycle.
+          </div>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {top.map((c) => (
+              <Badge
+                key={c.class}
+                variant="outline"
+                className="gap-1.5 font-normal"
+              >
+                <span className="font-medium">{c.class}</span>
+                <span className="text-muted-foreground">
+                  {formatBytes(c.bytes)}
+                </span>
+              </Badge>
+            ))}
+            {more > 0 && (
+              <Link
+                to="/storage"
+                className="inline-flex items-center text-xs font-medium underline underline-offset-2"
+              >
+                +{more} more
+              </Link>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function NodesTable({
   nodes,
   loading,
@@ -372,6 +464,7 @@ export function OverviewPage() {
 
       <HeroCard status={status} />
       <BackendChips status={status} />
+      <StorageHeroCard />
 
       {heartbeatEmpty && status && (
         <Card className="border-amber-500/40 bg-amber-500/5">

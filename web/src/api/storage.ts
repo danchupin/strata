@@ -45,6 +45,12 @@ export interface StorageClassesResponse {
   pools_by_class: Record<string, string>;
 }
 
+export interface StorageHealthResponse {
+  ok: boolean;
+  warnings: string[];
+  source?: 'meta' | 'data' | string;
+}
+
 async function fetchJSON<T>(url: string, label: string): Promise<T> {
   const resp = await fetch(url, { method: 'GET', credentials: 'same-origin' });
   if (!resp.ok) throw new Error(`${label}: ${resp.status} ${resp.statusText}`);
@@ -84,5 +90,17 @@ export async function fetchStorageClasses(): Promise<StorageClassesResponse> {
   return {
     classes: body.classes ?? [],
     pools_by_class: body.pools_by_class ?? {},
+  };
+}
+
+export async function fetchStorageHealth(): Promise<StorageHealthResponse> {
+  const body = await fetchJSON<StorageHealthResponse>(
+    '/admin/v1/storage/health',
+    'storage/health',
+  );
+  return {
+    ok: body.ok ?? true,
+    warnings: body.warnings ?? [],
+    source: body.source,
   };
 }

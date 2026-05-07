@@ -378,6 +378,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/v1/storage/meta", s.handleStorageMeta)
 	mux.HandleFunc("GET /admin/v1/storage/data", s.handleStorageData)
 	mux.HandleFunc("GET /admin/v1/storage/classes", s.handleStorageClasses)
+	mux.HandleFunc("GET /admin/v1/storage/health", s.handleStorageHealth)
 	mux.HandleFunc("GET /admin/v1/consumers/top", s.handleConsumersTop)
 	mux.HandleFunc("GET /admin/v1/metrics/timeseries", s.handleMetricsTimeseries)
 	return mux

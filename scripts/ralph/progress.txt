@@ -41,6 +41,12 @@ Cycle: ralph/web-ui-storage-status
   primaryNav. Top-level (between Buckets and Consumers) for first-class
   pages; under the "Diagnostics" section for debug-only views. Icons
   come from lucide-react.
+- Per-session dismissible alerts (banners, toasts that survive the tab
+  but reset on close) key on a stable signature of the alerting payload
+  so a fresh distinct condition re-alerts even if the previous one was
+  dismissed. Wrap sessionStorage reads/writes in try/catch — privacy-
+  mode browsers throw and uncaught exceptions in top-level shell
+  components blank the whole UI.
 
 ## 2026-05-07 - US-001
 - Added optional `meta.HealthProbe` interface + `MetaHealthReport` /
@@ -254,4 +260,81 @@ Cycle: ralph/web-ui-storage-status
     explainer card (not an empty table) so the operator understands why
     the topology is single-row. Both Meta and Data tabs follow the same
     pattern — keep them lockstep when adding a new backend variant.
+---
+
+## 2026-05-07 - US-005
+- New aggregate handler `handleStorageHealth` (GET
+  /admin/v1/storage/health) in internal/adminapi/storage.go combines
+  meta.HealthProbe + data.HealthProbe into {ok, warnings, source}. ok=false
+  when either probe reports Warnings.length > 0 or any node/pool state is
+  not in {UP, ok, reachable} (case-insensitive). source is "meta" if the
+  meta probe flips ok first, else "data"; empty when ok=true.
+- STRATA_STORAGE_HEALTH_OVERRIDE env: when set to a valid JSON object the
+  handler returns it verbatim — Playwright e2e drives this for the degraded
+  banner spec. Invalid JSON falls through to the live computation with a
+  WARN log so a misconfigured env-var doesn't blank the banner permanently.
+- internal/adminapi/storage_health_test.go covers the happy path
+  (memory + memory → ok=true), override echo, and invalid-override
+  fall-through. Live degraded path is exercised via override since the
+  in-memory backends never report degraded state.
+- New web/src/components/StorageDegradedBanner.tsx polls
+  /admin/v1/storage/health every 30s. Renders top-3 warnings + "+N more"
+  hint + "View Storage page" link when ok=false. Dismiss per session via
+  sessionStorage["strata.storage-degraded.dismissed"] keyed on a stable
+  signature `${source}|${sorted-warnings}` so the banner reappears when
+  the warning set changes (new condition surfaces) but stays dismissed
+  for the same payload across page navigations.
+- Banner is wired into web/src/App.tsx as a sibling above <AppShell />
+  inside the RequireAuth route element so it renders above the outermost
+  flex div on every authed page (per AC).
+- web/src/pages/Overview.tsx StorageHeroCard reads
+  /admin/v1/storage/classes via TanStack Query (60s staleTime + 60s
+  refetchInterval per AC). Cap top-5 classes by bytes; "+N more" link to
+  /storage covers the long tail. lucide HardDrive icon matches the
+  sidebar entry. formatBytes is duplicated from Storage.tsx so the home
+  page bundle stays free of recharts.
+- Files changed:
+  - internal/adminapi/storage.go (handleStorageHealth + helpers)
+  - internal/adminapi/server.go (route registration)
+  - internal/adminapi/storage_health_test.go (new)
+  - web/src/api/storage.ts (fetchStorageHealth + StorageHealthResponse)
+  - web/src/api/client.ts (re-export)
+  - web/src/lib/query.ts (queryKeys.storage.health)
+  - web/src/components/StorageDegradedBanner.tsx (new)
+  - web/src/App.tsx (banner above AppShell)
+  - web/src/pages/Overview.tsx (StorageHeroCard, HardDrive import)
+- Browser verification deferred to US-006 (Playwright spec lands there;
+  no MCP browser tooling in this Ralph environment). Manual verification
+  on a live dev server: load /, see Storage hero card with class chips
+  (or empty-state hint until bucketstats sampler runs); set
+  STRATA_STORAGE_HEALTH_OVERRIDE='{"ok":false,"warnings":["test"],
+  "source":"meta"}' on the gateway, refresh — degraded banner appears
+  above shell on every page, dismiss button hides it for the rest of the
+  session, page refresh re-shows.
+- **Learnings for future iterations:**
+  - The PRD-spec ok=false rule "any node/pool in non-OK state" needs a
+    concrete allow-list, not a rejection list — TiKV PD emits arbitrary
+    StateNames (Up/Disconnected/Down/Tombstone/Offline/...). Stick to a
+    case-insensitive allow set {up, ok, reachable} so future per-backend
+    state strings don't silently slip through as "healthy".
+  - Banner-dismissal MUST key on the warning payload, not a single
+    boolean. The AC says "re-shows on refresh if still degraded", but a
+    fresh distinct degraded condition (e.g., yesterday a Cassandra peer
+    was down, today it's rados HEALTH_WARN) should re-alert even if the
+    operator dismissed the previous notice. Stable signature = source +
+    sorted warnings.
+  - sessionStorage may throw under privacy modes; wrap reads/writes in
+    try/catch or the banner crashes the whole shell. Same for any future
+    top-level component that persists ephemeral state.
+  - The Overview hero card duplicates formatBytes from Storage.tsx
+    intentionally — importing Storage.tsx into Overview.tsx would pull
+    recharts into the home-page initial bundle. Tiny duplicate string is
+    cheaper than an extra ~100 KiB gz.
+  - Banner is rendered inside the same TanStack QueryClient as the
+    /storage page; the queryKey ['storage', 'health'] is shared so a
+    refresh-button on /storage will refetch the banner's data too. The
+    home-page hero card uses a separate ['storage', 'classes', 'hero']
+    key with a 60 s cache so it doesn't fight the /storage page's 30 s
+    poll.
+---
 ---

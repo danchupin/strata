@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 
 import { AppShell } from '@/components/layout/AppShell';
 import { RequireAuth } from '@/components/require-auth';
+import { StorageDegradedBanner } from '@/components/StorageDegradedBanner';
 import { Skeleton } from '@/components/ui/skeleton';
 import { LoginPage } from '@/pages/Login';
 import { OverviewPage } from '@/pages/Overview';
@@ -52,7 +53,10 @@ export function App() {
       <Route
         element={
           <RequireAuth>
-            <AppShell />
+            <>
+              <StorageDegradedBanner />
+              <AppShell />
+            </>
           </RequireAuth>
         }
       >

@@ -157,5 +157,6 @@ export const queryKeys = {
     meta: ['storage', 'meta'] as const,
     data: ['storage', 'data'] as const,
     classes: ['storage', 'classes'] as const,
+    health: ['storage', 'health'] as const,
   },
 };

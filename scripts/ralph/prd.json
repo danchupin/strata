@@ -91,7 +91,7 @@
         "Verify in browser using dev-browser skill (use STRATA_STORAGE_HEALTH_OVERRIDE to simulate degraded state)"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
