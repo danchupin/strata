@@ -292,8 +292,12 @@ services:
       STRATA_TIKV_PD_ENDPOINTS: ${STRATA_TIKV_PD_ENDPOINTS:-pd:2379}
       STRATA_NODE_ID: strata-a
       STRATA_WORKERS: ${STRATA_WORKERS:-gc,lifecycle}
-      STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-}
-      STRATA_STATIC_CREDENTIALS: ${STRATA_STATIC_CREDENTIALS:-}
+      # `optional` (not `off`) so presigned URLs minted by the console
+      # carry through to a real identity check at PUT time. With `off`
+      # the gateway treats every request as anonymous and an admin-
+      # owned bucket then ACL-denies the upload.
+      STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-optional}
+      STRATA_STATIC_CREDENTIALS: ${STRATA_STATIC_CREDENTIALS:-admin:adminpass:owner}
       STRATA_GC_INTERVAL: ${STRATA_GC_INTERVAL:-}
       STRATA_GC_GRACE: ${STRATA_GC_GRACE:-}
       STRATA_LIFECYCLE_INTERVAL: ${STRATA_LIFECYCLE_INTERVAL:-}
@@ -334,8 +338,9 @@ services:
       STRATA_TIKV_PD_ENDPOINTS: ${STRATA_TIKV_PD_ENDPOINTS:-pd:2379}
       STRATA_NODE_ID: strata-b
       STRATA_WORKERS: ${STRATA_WORKERS:-gc,lifecycle}
-      STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-}
-      STRATA_STATIC_CREDENTIALS: ${STRATA_STATIC_CREDENTIALS:-}
+      # See strata-tikv-a above for rationale on the `optional` default.
+      STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-optional}
+      STRATA_STATIC_CREDENTIALS: ${STRATA_STATIC_CREDENTIALS:-admin:adminpass:owner}
       STRATA_GC_INTERVAL: ${STRATA_GC_INTERVAL:-}
       STRATA_GC_GRACE: ${STRATA_GC_GRACE:-}
       STRATA_LIFECYCLE_INTERVAL: ${STRATA_LIFECYCLE_INTERVAL:-}
