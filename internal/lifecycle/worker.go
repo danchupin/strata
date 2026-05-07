@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/danchupin/strata/internal/data"
 	datas3 "github.com/danchupin/strata/internal/data/s3"
 	"github.com/danchupin/strata/internal/meta"
@@ -13,12 +15,25 @@ import (
 )
 
 type Worker struct {
-	Meta     meta.Store
-	Data     data.Backend
-	Region   string
-	Interval time.Duration
-	AgeUnit  time.Duration
-	Logger   *slog.Logger
+	Meta        meta.Store
+	Data        data.Backend
+	Region      string
+	Interval    time.Duration
+	AgeUnit     time.Duration
+	Concurrency int
+	Logger      *slog.Logger
+}
+
+// effectiveConcurrency clamps Concurrency to [1, 256]; zero/negative -> 1.
+func (w *Worker) effectiveConcurrency() int {
+	c := w.Concurrency
+	if c < 1 {
+		return 1
+	}
+	if c > 256 {
+		return 256
+	}
+	return c
 }
 
 func (w *Worker) Run(ctx context.Context) error {
@@ -31,7 +46,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	if w.Logger == nil {
 		w.Logger = slog.Default()
 	}
-	w.Logger.InfoContext(ctx, "lifecycle: starting", "interval", w.Interval.String(), "age_unit", w.AgeUnit.String())
+	w.Logger.InfoContext(ctx, "lifecycle: starting", "interval", w.Interval.String(), "age_unit", w.AgeUnit.String(), "concurrency", w.effectiveConcurrency())
 
 	ticker := time.NewTicker(w.Interval)
 	defer ticker.Stop()
@@ -94,15 +109,28 @@ func (w *Worker) applyRule(ctx context.Context, b *meta.Bucket, rule *Rule) erro
 	if rule.Transition == nil && rule.Expiration == nil {
 		return nil
 	}
+	limit := w.effectiveConcurrency()
 	opts := meta.ListOptions{Prefix: rule.PrefixMatch(), Limit: 1000}
 	for {
 		res, err := w.Meta.ListObjects(ctx, b.ID, opts)
 		if err != nil {
 			return err
 		}
+		eg := new(errgroup.Group)
+		eg.SetLimit(limit)
 		for _, o := range res.Objects {
-			w.evaluate(ctx, b, rule, o)
+			eg.Go(func() error {
+				defer func() {
+					if r := recover(); r != nil {
+						w.Logger.WarnContext(ctx, "lifecycle evaluate panic",
+							"bucket", b.Name, "key", o.Key, "panic", r)
+					}
+				}()
+				w.evaluate(ctx, b, rule, o)
+				return nil
+			})
 		}
+		_ = eg.Wait()
 		if !res.Truncated {
 			return nil
 		}
@@ -111,12 +139,20 @@ func (w *Worker) applyRule(ctx context.Context, b *meta.Bucket, rule *Rule) erro
 }
 
 func (w *Worker) applyNoncurrentActions(ctx context.Context, b *meta.Bucket, rule *Rule) error {
+	limit := w.effectiveConcurrency()
 	opts := meta.ListOptions{Prefix: rule.PrefixMatch(), Limit: 1000}
 	for {
 		res, err := w.Meta.ListObjectVersions(ctx, b.ID, opts)
 		if err != nil {
 			return err
 		}
+		// Walk versions sequentially to track per-key prevMtime; dispatch
+		// each (v, age) pair to the bounded errgroup once age is known.
+		type ncJob struct {
+			v   *meta.Object
+			age time.Duration
+		}
+		var jobs []ncJob
 		var prevKey string
 		var prevMtime time.Time
 		for _, v := range res.Versions {
@@ -127,9 +163,23 @@ func (w *Worker) applyNoncurrentActions(ctx context.Context, b *meta.Bucket, rul
 			}
 			noncurrentSince := prevMtime
 			prevMtime = v.Mtime
-			age := time.Since(noncurrentSince)
-			w.evaluateNoncurrent(ctx, b, rule, v, age)
+			jobs = append(jobs, ncJob{v: v, age: time.Since(noncurrentSince)})
 		}
+		eg := new(errgroup.Group)
+		eg.SetLimit(limit)
+		for _, j := range jobs {
+			eg.Go(func() error {
+				defer func() {
+					if r := recover(); r != nil {
+						w.Logger.WarnContext(ctx, "lifecycle noncurrent panic",
+							"bucket", b.Name, "key", j.v.Key, "version", j.v.VersionID, "panic", r)
+					}
+				}()
+				w.evaluateNoncurrent(ctx, b, rule, j.v, j.age)
+				return nil
+			})
+		}
+		_ = eg.Wait()
 		if !res.Truncated {
 			return nil
 		}
@@ -193,28 +243,41 @@ func (w *Worker) abortStaleUploads(ctx context.Context, b *meta.Bucket, rule *Ru
 	if region == "" {
 		region = "default"
 	}
+	limit := w.effectiveConcurrency()
+	eg := new(errgroup.Group)
+	eg.SetLimit(limit)
 	for _, u := range uploads {
 		if u.InitiatedAt.After(cutoff) {
 			continue
 		}
-		manifests, err := w.Meta.AbortMultipartUpload(ctx, b.ID, u.UploadID)
-		if err != nil {
-			metrics.LifecycleTickTotal.WithLabelValues("abort_multipart", "error").Inc()
-			w.Logger.WarnContext(ctx, "lifecycle abort stale upload", "bucket", b.Name, "key", u.Key, "error", err.Error())
-			continue
-		}
-		metrics.LifecycleTickTotal.WithLabelValues("abort_multipart", "success").Inc()
-		for _, m := range manifests {
-			if m != nil {
-				if err := w.Meta.EnqueueChunkDeletion(ctx, region, m.Chunks); err == nil {
-					for range m.Chunks {
-						metrics.GCEnqueued.Inc()
+		eg.Go(func() error {
+			defer func() {
+				if r := recover(); r != nil {
+					w.Logger.WarnContext(ctx, "lifecycle abort panic",
+						"bucket", b.Name, "key", u.Key, "upload_id", u.UploadID, "panic", r)
+				}
+			}()
+			manifests, err := w.Meta.AbortMultipartUpload(ctx, b.ID, u.UploadID)
+			if err != nil {
+				metrics.LifecycleTickTotal.WithLabelValues("abort_multipart", "error").Inc()
+				w.Logger.WarnContext(ctx, "lifecycle abort stale upload", "bucket", b.Name, "key", u.Key, "error", err.Error())
+				return nil
+			}
+			metrics.LifecycleTickTotal.WithLabelValues("abort_multipart", "success").Inc()
+			for _, m := range manifests {
+				if m != nil {
+					if err := w.Meta.EnqueueChunkDeletion(ctx, region, m.Chunks); err == nil {
+						for range m.Chunks {
+							metrics.GCEnqueued.Inc()
+						}
 					}
 				}
 			}
-		}
-		w.Logger.InfoContext(ctx, "lifecycle aborted stale multipart", "bucket", b.Name, "key", u.Key, "rule", rule.ID, "upload_id", u.UploadID, "age", time.Since(u.InitiatedAt).String())
+			w.Logger.InfoContext(ctx, "lifecycle aborted stale multipart", "bucket", b.Name, "key", u.Key, "rule", rule.ID, "upload_id", u.UploadID, "age", time.Since(u.InitiatedAt).String())
+			return nil
+		})
 	}
+	_ = eg.Wait()
 }
 
 func (w *Worker) evaluate(ctx context.Context, b *meta.Bucket, rule *Rule, o *meta.Object) {

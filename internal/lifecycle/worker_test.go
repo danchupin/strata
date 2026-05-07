@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -205,5 +206,181 @@ func TestLifecycleTransitionAcrossClusters(t *testing.T) {
 	}
 	if entries[0].Chunk.Cluster != "default" {
 		t.Errorf("queued chunk cluster=%q want default", entries[0].Chunk.Cluster)
+	}
+}
+
+// slowDataBackend serves single-class objects with a sleep on every PutChunks
+// + GetChunks call so the lifecycle worker's per-object transition latency is
+// observable in wall-clock terms. Tracks max in-flight Put concurrency.
+type slowDataBackend struct {
+	latency time.Duration
+
+	mu     sync.Mutex
+	chunks map[string][]byte
+	seq    int64
+
+	inFlight int64
+	maxInFly int64
+}
+
+func newSlowDataBackend(latency time.Duration) *slowDataBackend {
+	return &slowDataBackend{latency: latency, chunks: map[string][]byte{}}
+}
+
+func (b *slowDataBackend) PutChunks(ctx context.Context, r io.Reader, class string) (*data.Manifest, error) {
+	cur := atomic.AddInt64(&b.inFlight, 1)
+	defer atomic.AddInt64(&b.inFlight, -1)
+	for {
+		old := atomic.LoadInt64(&b.maxInFly)
+		if cur <= old || atomic.CompareAndSwapInt64(&b.maxInFly, old, cur) {
+			break
+		}
+	}
+	body, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	time.Sleep(b.latency)
+	if class == "" {
+		class = "STANDARD"
+	}
+	h := md5.New()
+	h.Write(body)
+	id := atomic.AddInt64(&b.seq, 1)
+	oid := fmt.Sprintf("oid-%d", id)
+	b.mu.Lock()
+	b.chunks[oid] = body
+	b.mu.Unlock()
+	return &data.Manifest{
+		Class:  class,
+		Size:   int64(len(body)),
+		ETag:   hex.EncodeToString(h.Sum(nil)),
+		Chunks: []data.ChunkRef{{Cluster: "default", Pool: "p", OID: oid, Size: int64(len(body))}},
+	}, nil
+}
+
+func (b *slowDataBackend) GetChunks(ctx context.Context, m *data.Manifest, off, length int64) (io.ReadCloser, error) {
+	var bufs [][]byte
+	b.mu.Lock()
+	for _, c := range m.Chunks {
+		d, ok := b.chunks[c.OID]
+		if !ok {
+			b.mu.Unlock()
+			return nil, fmt.Errorf("missing chunk %s", c.OID)
+		}
+		bufs = append(bufs, append([]byte(nil), d...))
+	}
+	b.mu.Unlock()
+	full := bytes.Join(bufs, nil)
+	if off > int64(len(full)) {
+		off = int64(len(full))
+	}
+	if length <= 0 || off+length > int64(len(full)) {
+		length = int64(len(full)) - off
+	}
+	return io.NopCloser(bytes.NewReader(full[off : off+length])), nil
+}
+
+func (b *slowDataBackend) Delete(ctx context.Context, m *data.Manifest) error {
+	if m == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, c := range m.Chunks {
+		delete(b.chunks, c.OID)
+	}
+	return nil
+}
+
+func (b *slowDataBackend) Close() error { return nil }
+
+// TestWorker_TransitionConcurrency seeds a bucket with N objects matching a
+// transition rule, runs the worker with Concurrency=32, and asserts wall-clock
+// is well below the sequential baseline AND max in-flight Put > 1. US-002.
+func TestWorker_TransitionConcurrency(t *testing.T) {
+	const n = 320
+	const concurrency = 32
+	const perEntry = 5 * time.Millisecond
+
+	ctx := context.Background()
+	store := memory.New()
+	be := newSlowDataBackend(perEntry)
+
+	b, err := store.CreateBucket(ctx, "lc-conc", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+
+	for i := range n {
+		payload := []byte(fmt.Sprintf("v-%d", i))
+		manifest, err := be.PutChunks(ctx, bytes.NewReader(payload), "STANDARD")
+		if err != nil {
+			t.Fatalf("seed PutChunks[%d]: %v", i, err)
+		}
+		obj := &meta.Object{
+			BucketID:     b.ID,
+			Key:          fmt.Sprintf("k-%04d", i),
+			Size:         int64(len(payload)),
+			ETag:         manifest.ETag,
+			StorageClass: "STANDARD",
+			Mtime:        time.Now().Add(-2 * time.Hour),
+			Manifest:     manifest,
+		}
+		if err := store.PutObject(ctx, obj, false); err != nil {
+			t.Fatalf("seed PutObject[%d]: %v", i, err)
+		}
+	}
+	// Reset counters: seeding paid Put latency too.
+	atomic.StoreInt64(&be.maxInFly, 0)
+
+	blob := []byte(`<LifecycleConfiguration><Rule><ID>r</ID><Status>Enabled</Status>
+		<Filter><Prefix></Prefix></Filter>
+		<Transition><Days>1</Days><StorageClass>COLD</StorageClass></Transition>
+	</Rule></LifecycleConfiguration>`)
+	if err := store.SetBucketLifecycle(ctx, b.ID, blob); err != nil {
+		t.Fatalf("SetBucketLifecycle: %v", err)
+	}
+
+	w := &Worker{
+		Meta:        store,
+		Data:        be,
+		Region:      "default",
+		AgeUnit:     time.Hour,
+		Concurrency: concurrency,
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	start := time.Now()
+	if err := w.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	// All objects flipped.
+	flipped := 0
+	for i := range n {
+		o, err := store.GetObject(ctx, b.ID, fmt.Sprintf("k-%04d", i), "")
+		if err != nil {
+			t.Fatalf("GetObject[%d]: %v", i, err)
+		}
+		if o.StorageClass == "COLD" {
+			flipped++
+		}
+	}
+	if flipped != n {
+		t.Fatalf("transitioned=%d want %d", flipped, n)
+	}
+
+	if max := atomic.LoadInt64(&be.maxInFly); max < 2 {
+		t.Fatalf("max in-flight=%d, expected >1 with concurrency=%d", max, concurrency)
+	}
+
+	// Each object pays ~2× perEntry (Get + Put). Bound is 4× ideal-parallel.
+	idealParallel := time.Duration(int64(2*perEntry) * int64(n) / int64(concurrency))
+	cap := 4 * idealParallel
+	if elapsed > cap {
+		t.Fatalf("RunOnce elapsed=%s, expected < %s (4× ideal-parallel %s)",
+			elapsed, cap, idealParallel)
 	}
 }

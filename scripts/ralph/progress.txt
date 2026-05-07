@@ -22,3 +22,17 @@ Cycle: ralph/gc-lifecycle-scale
   - The slowBackend pattern (latency + max-in-flight tracker via atomic CAS loop) is reusable for US-002's lifecycle concurrency test — copy/adapt.
   - `gc.Worker.Run()` now logs `concurrency` at startup INFO. Mirror in lifecycle.
 ---
+
+## 2026-05-07 - US-002
+- Implemented STRATA_LIFECYCLE_CONCURRENCY: bounded errgroup wraps three per-entry loops in `lifecycle.Worker` — `applyRule` (objects), `applyNoncurrentActions` (versions), `abortStaleUploads` (multipart). Each goroutine has `defer recover() { log + return nil }` and `errgroup.SetLimit(limit)`. Per-bucket outer loop stays sequential by design (Phase 2 territory).
+- `lifecycle.Worker.Concurrency` int field, zero/negative -> 1, clamped to [1, 256] via shared `effectiveConcurrency()` helper. `cmd/strata/workers/lifecycle.go` wires `STRATA_LIFECYCLE_CONCURRENCY` via the existing `clampConcurrency(intFromEnv(...))` helpers from US-001.
+- `applyNoncurrentActions` walks versions sequentially first to compute prevMtime → noncurrentSince age, then dispatches the `(version, age)` pairs into the bounded errgroup. Sequential prevMtime tracking is essential — concurrent dispatch would race on the prevKey/prevMtime cursor.
+- `abortStaleUploads` filters cutoff sequentially (cheap), only `AbortMultipartUpload + EnqueueChunkDeletion` go inside the errgroup.
+- Run-startup INFO logs `concurrency` alongside `interval` + `age_unit`.
+- New TestWorker_TransitionConcurrency: 320 objects, concurrency=32, slowDataBackend with 5ms per-PutChunks latency + max-in-flight tracker; asserts all 320 transitioned to COLD, max in-flight > 1, wall-clock < 4× ideal-parallel.
+- Files changed: `internal/lifecycle/worker.go`, `internal/lifecycle/worker_test.go`, `cmd/strata/workers/lifecycle.go`.
+- **Learnings for future iterations:**
+  - The `applyNoncurrentActions` prevMtime cursor walk must stay sequential — only the final `(v, age)` dispatch parallelises. Trying to parallelise the cursor walk would race on `prevKey`/`prevMtime`.
+  - Phase 2 (sharded per-bucket leader-election) is what unlocks cross-bucket parallelism. Don't try to wrap the per-bucket outer loop here — single elected lifecycle leader is the bottleneck by design.
+  - The slowDataBackend pattern (sleep + atomic max-in-flight CAS) is reusable for any concurrency benchmark — copy across to bench-lifecycle (US-003).
+---

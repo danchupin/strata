@@ -16,12 +16,13 @@ func init() {
 
 func buildLifecycle(deps Dependencies) (Runner, error) {
 	return &lifecycle.Worker{
-		Meta:     deps.Meta,
-		Data:     deps.Data,
-		Region:   deps.Region,
-		Interval: durationFromEnv("STRATA_LIFECYCLE_INTERVAL", 60*time.Second),
-		AgeUnit:  ageUnitFromEnv("STRATA_LIFECYCLE_UNIT", 24*time.Hour),
-		Logger:   deps.Logger,
+		Meta:        deps.Meta,
+		Data:        deps.Data,
+		Region:      deps.Region,
+		Interval:    durationFromEnv("STRATA_LIFECYCLE_INTERVAL", 60*time.Second),
+		AgeUnit:     ageUnitFromEnv("STRATA_LIFECYCLE_UNIT", 24*time.Hour),
+		Concurrency: clampConcurrency(intFromEnv("STRATA_LIFECYCLE_CONCURRENCY", 1)),
+		Logger:      deps.Logger,
 	}, nil
 }
 
