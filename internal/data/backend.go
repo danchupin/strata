@@ -114,6 +114,38 @@ type PresignBackend interface {
 	PresignGetObject(ctx context.Context, m *Manifest, expires time.Duration) (string, error)
 }
 
+// DataHealthReport is the operator-facing snapshot returned by HealthProbe.
+// One row per backing pool / bucket. Warnings carry cluster-wide anomalies
+// that don't fit on a per-pool row (RADOS HEALTH_WARN/HEALTH_ERR check
+// summaries, S3 reachability errors, etc.).
+type DataHealthReport struct {
+	Backend  string       `json:"backend"`
+	Pools    []PoolStatus `json:"pools"`
+	Warnings []string     `json:"warnings,omitempty"`
+}
+
+// PoolStatus is a single pool / backend-bucket row in DataHealthReport.
+// Class is the storage-class label from the configured classes map; for
+// backends that map every class to one bucket / pool (s3, memory) it is
+// the comma-joined list of classes.
+type PoolStatus struct {
+	Name        string `json:"name"`
+	Class       string `json:"class"`
+	BytesUsed   uint64 `json:"bytes_used"`
+	ObjectCount uint64 `json:"object_count"`
+	NumReplicas int    `json:"num_replicas"`
+	State       string `json:"state"`
+}
+
+// HealthProbe is the optional capability surface that lets the storage page
+// (US-002 of the web-ui-storage-status cycle) render data backend pool
+// topology. RADOS, s3, and the in-memory backend implement it; the gateway
+// adminapi type-asserts the live Backend and surfaces the report at
+// GET /admin/v1/storage/data.
+type HealthProbe interface {
+	DataHealth(ctx context.Context) (*DataHealthReport, error)
+}
+
 // CORSRule is the backend-translation input for one bucket CORS rule. The
 // shape mirrors S3's CORSRule directly so translation is field-for-field;
 // the empty string ID is allowed (S3 accepts unnamed rules).

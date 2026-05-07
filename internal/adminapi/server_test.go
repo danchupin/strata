@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/danchupin/strata/internal/auth"
+	datamem "github.com/danchupin/strata/internal/data/memory"
 	"github.com/danchupin/strata/internal/heartbeat"
 	metamem "github.com/danchupin/strata/internal/meta/memory"
 )
@@ -22,6 +23,7 @@ func newTestServer() *Server {
 	creds := auth.NewStaticStore(map[string]*auth.Credential{})
 	s := New(Config{
 		Meta:        metamem.New(),
+		Data:        datamem.New(),
 		Creds:       creds,
 		Heartbeat:   heartbeat.NewMemoryStore(),
 		Version:     "test-sha",

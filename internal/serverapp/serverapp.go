@@ -151,6 +151,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	auditBroadcaster := auditstream.New(logger, metrics.AuditStreamObserver{})
 	adminServer := adminapi.New(adminapi.Config{
 		Meta:                 metaStore,
+		Data:                 dataBackend,
 		Creds:                multi,
 		Heartbeat:            hbStore,
 		Prom:                 prom,

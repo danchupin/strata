@@ -92,6 +92,32 @@ func (b *Backend) Delete(ctx context.Context, m *data.Manifest) error {
 
 func (b *Backend) Close() error { return nil }
 
+// DataHealth implements data.HealthProbe — returns a single in-process pool
+// row whose BytesUsed is the sum of currently-held chunk bytes (process-RSS
+// proxy) and ObjectCount is the chunk count. Class is "*" since the memory
+// backend serves every storage class out of the same map.
+func (b *Backend) DataHealth(ctx context.Context) (*data.DataHealthReport, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	var bytes uint64
+	for _, c := range b.chunks {
+		bytes += uint64(len(c))
+	}
+	return &data.DataHealthReport{
+		Backend: "memory",
+		Pools: []data.PoolStatus{{
+			Name:        "memory",
+			Class:       "*",
+			BytesUsed:   bytes,
+			ObjectCount: uint64(len(b.chunks)),
+			NumReplicas: 1,
+			State:       "reachable",
+		}},
+	}, nil
+}
+
+var _ data.HealthProbe = (*Backend)(nil)
+
 // ChunkOIDs returns the set of OIDs currently held by the backend. Test-only
 // helper used by the race harness to assert no chunk lands outside a manifest
 // or the GC queue.

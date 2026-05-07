@@ -4,11 +4,12 @@ Cycle: ralph/web-ui-storage-status
 ---
 
 ## Codebase Patterns
-- Optional capability surfaces (RangeScanStore, HealthProbe) hang off the
-  base meta.Store interface. Backends implement them via type-assertion at
-  the call site (e.g. internal/adminapi handler) — keeps the base interface
-  small while allowing per-backend differentiation. Add a compile-time
-  `var _ meta.<Iface> = (*Store)(nil)` assertion in each backend.
+- Optional capability surfaces (RangeScanStore, meta.HealthProbe,
+  data.HealthProbe) hang off the base interface. Backends implement
+  them via type-assertion at the call site (e.g. internal/adminapi
+  handler) — keeps the base interface small while allowing per-backend
+  differentiation. Add a compile-time
+  `var _ <pkg>.<Iface> = (*Backend)(nil)` assertion in each backend.
 - Cassandra system-table queries use Consistency(gocql.LocalOne) for
   cluster-introspection (not LOCAL_QUORUM), since system.* tables are
   per-node and quorum reads make no sense.
@@ -16,6 +17,10 @@ Cycle: ralph/web-ui-storage-status
   own file (storage.go, cluster.go, ...). Tests for those endpoints live
   next to them as <name>_test.go and use newTestServer() to drive
   s.routes().ServeHTTP(rr, req) directly without auth.
+- adminapi.Server holds dependencies (Meta, Data, Creds, ...) injected
+  via adminapi.Config from internal/serverapp. New deps go on both
+  Server + Config, propagate through New(), and the test harness
+  newTestServer() in server_test.go is wired with in-memory defaults.
 
 ## 2026-05-07 - US-001
 - Added optional `meta.HealthProbe` interface + `MetaHealthReport` /
@@ -63,4 +68,54 @@ Cycle: ralph/web-ui-storage-status
     cassandra/tikv integration tests — keep new cases compatible with
     every backend (tolerate degraded paths via Warnings instead of
     requiring node rows).
+---
+
+## 2026-05-07 - US-002
+- Added optional `data.HealthProbe` interface + `DataHealthReport` /
+  `PoolStatus` types to internal/data/backend.go.
+- Memory backend DataHealth returns one PoolStatus row keyed Name="memory"
+  with BytesUsed = sum(chunks) and ObjectCount = len(chunks); class "*"
+  since the memory map serves every storage class.
+- RADOS impl (build tag ceph) in internal/data/rados/health.go: groups
+  configured classes by unique (cluster, pool, ns), opens IOContext via
+  the existing b.ioctx() helper, calls (*IOContext).GetPoolStats() and
+  reports BytesUsed = Num_kb*1024 + ObjectCount = Num_objects. Cluster-
+  wide health via (*Conn).MonCommand({"prefix":"status","format":"json"})
+  per unique cluster — HEALTH_OK suppresses warnings; otherwise the
+  status string + up to 5 sorted check summaries land in Warnings. Per-
+  pool / per-cluster errors degrade the row + emit a warning instead of
+  failing the whole report.
+- S3 backend DataHealth: HeadBucket on the configured backend bucket;
+  state reachable|error; bytes/objects 0 (the upstream S3 API does not
+  expose them in O(1) and US-003's bucketstats sampler covers the
+  Strata-side dimensions).
+- New GET /admin/v1/storage/data endpoint in adminapi (storage.go) wired
+  into routes(). Type-asserts s.Data against data.HealthProbe; 503 on
+  missing surface (or nil Data), 502 on probe error.
+- adminapi.Server + Config gained a Data field; serverapp passes the
+  dataBackend through; newTestServer() seeds a datamem.New() so the
+  storage/data path returns the expected memory-backend report.
+- Files changed:
+  - internal/data/backend.go (DataHealthReport / PoolStatus / HealthProbe)
+  - internal/data/memory/backend.go (DataHealth + assertion)
+  - internal/data/rados/health.go (new, build tag ceph)
+  - internal/data/s3/health.go (new)
+  - internal/adminapi/server.go (Data field + Config + route)
+  - internal/adminapi/storage.go (handleStorageData)
+  - internal/adminapi/storage_test.go (shape + 503-on-nil tests)
+  - internal/adminapi/server_test.go (newTestServer wires Data)
+  - internal/serverapp/serverapp.go (passes dataBackend to adminapi)
+- **Learnings for future iterations:**
+  - go-ceph's PoolStat fields use snake_case (Num_kb, Num_bytes,
+    Num_objects). Older Ceph builds report 0 for Num_bytes; the PRD-
+    documented Num_kb*1024 path is the stable contract.
+  - (*Conn).MonCommand returns ([]byte, string, error); marshal the
+    args as JSON with prefix=status format=json. Status JSON shape is
+    {health:{status, checks:{<code>:{summary:{message}}}}}.
+  - HeadBucket is the cheapest reachability check for the s3 backend —
+    no body, returns 200 / 403 / 404. The existing b.opCtx() short-
+    timeout wrapper bounds the call.
+  - Adding a new dependency to the adminapi Server takes 4 spots:
+    Server struct, Config struct, New() body, newTestServer() in
+    server_test.go. Forgetting any of them leaks compile / test errors.
 ---

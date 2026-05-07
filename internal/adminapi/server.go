@@ -19,6 +19,7 @@ import (
 
 	"github.com/danchupin/strata/internal/auditstream"
 	"github.com/danchupin/strata/internal/auth"
+	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/heartbeat"
 	"github.com/danchupin/strata/internal/leader"
 	"github.com/danchupin/strata/internal/meta"
@@ -29,6 +30,7 @@ import (
 // Server holds dependencies the /admin/v1/* handlers need.
 type Server struct {
 	Meta        meta.Store
+	Data        data.Backend
 	Creds       auth.CredentialsStore
 	Heartbeat   heartbeat.Store
 	Prom        *promclient.Client
@@ -132,6 +134,7 @@ type Server struct {
 // bucket reports the gateway's configured RegionName.
 type Config struct {
 	Meta        meta.Store
+	Data        data.Backend
 	Creds       auth.CredentialsStore
 	Heartbeat   heartbeat.Store
 	Prom        *promclient.Client
@@ -200,6 +203,7 @@ func New(c Config) *Server {
 	}
 	return &Server{
 		Meta:                 c.Meta,
+		Data:                 c.Data,
 		Creds:                c.Creds,
 		Heartbeat:            c.Heartbeat,
 		Prom:                 c.Prom,
@@ -361,6 +365,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/v1/settings/data-backend", s.handleGetSettingsDataBackend)
 	mux.HandleFunc("POST /admin/v1/settings/jwt/rotate", s.handleRotateJWTSecret)
 	mux.HandleFunc("GET /admin/v1/storage/meta", s.handleStorageMeta)
+	mux.HandleFunc("GET /admin/v1/storage/data", s.handleStorageData)
 	mux.HandleFunc("GET /admin/v1/consumers/top", s.handleConsumersTop)
 	mux.HandleFunc("GET /admin/v1/metrics/timeseries", s.handleMetricsTimeseries)
 	return mux
