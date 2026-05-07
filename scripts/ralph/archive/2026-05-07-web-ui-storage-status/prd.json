@@ -1,0 +1,119 @@
+{
+  "project": "Strata",
+  "branchName": "ralph/web-ui-storage-status",
+  "description": "Web UI — Storage status. Add a /storage page (Meta + Data tabs + per-class card) plus a Cluster Overview hero summary and a top-level degraded banner. New /admin/v1/storage/* endpoints back the UI via meta.HealthProbe + data.HealthProbe interfaces (Cassandra peers / TiKV PD stores / RADOS pool stats / S3-over-S3 reachability). Extends the bucketstats sampler with per-(bucket, class) aggregation. Closes ROADMAP P3 'Web UI — Storage status (meta + data backend observability)'. 6 stories.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Meta backend health probe (Cassandra peers / TiKV PD stores / memory)",
+      "description": "As a debug-tool author, I want a meta.Store-shaped probe that returns peer / store health so the storage page has data.",
+      "acceptanceCriteria": [
+        "New optional interface internal/meta.HealthProbe: MetaHealth(ctx) (*meta.MetaHealthReport, error) with fields {Backend string, Nodes []NodeStatus, ReplicationFactor int, Warnings []string}; NodeStatus = {Address, State, SchemaVersion, DataCenter, Rack}",
+        "Cassandra impl: TWO separate queries (CQL has no UNION ALL) — SELECT peer, data_center, rack, release_version, schema_version FROM system.peers AND SELECT broadcast_address, data_center, rack, release_version, schema_version FROM system.local — merged Go-side into a single []NodeStatus. Consistency: LOCAL_ONE. Aggregate schema-version drift into Warnings. 10 s in-process cache to avoid re-querying on each adminapi hit.",
+        "TiKV impl: dedicated thin client internal/meta/tikv/pdclient.go that takes []string PD endpoints (bootstrap-only, no /pd/api/v1/members refresh — client-go owns cross-PD failover for the data path), tries endpoints in order with 2 s per-endpoint timeout, returns first non-error. HTTP GET /pd/api/v1/stores parsed into NodeStatus. Raft-leader imbalance (any store has 0 leaders while peers have >0) folded into Warnings.",
+        "Memory impl returns single-node report",
+        "storetest contract caseMetaHealth exercises all three backends",
+        "Endpoint GET /admin/v1/storage/meta in adminapi returns the report as JSON, JWT-auth + audit middleware (read-only, GET => skipped audit per existing rule)",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Data backend health probe (RADOS pool stats / S3-over-S3 reachability / memory)",
+      "description": "As a debug-tool author, I want a data.Backend-shaped probe that returns per-pool stats so the storage page has data.",
+      "acceptanceCriteria": [
+        "New optional interface internal/data.HealthProbe: DataHealth(ctx) (*data.DataHealthReport, error) with fields {Backend string, Pools []PoolStatus, Warnings []string}; PoolStatus = {Name, Class, BytesUsed uint64, ObjectCount uint64, NumReplicas int, State}",
+        "RADOS impl (build tag ceph): iterate the configured [rados] classes map; for each unique (cluster, pool, ns) tuple open / reuse the existing *goceph.IOContext (same shape as internal/data/rados/backend.go::ioctx) and call (*IOContext).GetPoolStats() (rados.PoolStat, error) — note plural 'Stats', method on IOContext NOT on Conn. Translate Num_kb * 1024 -> BytesUsed. Populate PoolStatus.",
+        "Cluster-wide health via (*Conn).MonCommand(args []byte) ([]byte, string, error) with args = json.Marshal({\"prefix\":\"status\",\"format\":\"json\"}); parse response {health: {status: \"HEALTH_OK|HEALTH_WARN|HEALTH_ERR\", checks: {...}}}; surface up to 5 check summaries in Warnings (cap at 5 to keep wire payload small). Headline only this cycle; per-pool degraded-object counts (ceph osd df JSON parse) is a deliberate future P3.",
+        "S3-over-S3 impl: HEAD on the configured backend bucket, returns one PoolStatus with Name=<backend bucket>, Class=<all classes mapped>, BytesUsed=0/ObjectCount=0 (document gap), State=reachable|error",
+        "Memory impl returns one PoolStatus with size=process-RSS proxy",
+        "Endpoint GET /admin/v1/storage/data in adminapi returns the report as JSON",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Per-storage-class breakdown via bucketstats sampler",
+      "description": "As an operator, I want bytes + object count per storage class so I can see which class is consuming the most space.",
+      "acceptanceCriteria": [
+        "Extend the existing bucketstats.Sampler (already per-shard from Phase 3 US-012) to ALSO emit per-(bucket, class) aggregates",
+        "New gauges strata_storage_class_bytes + strata_storage_class_objects keyed {class, bucket}",
+        "Lockstep meta backends: cassandra reads objects rows aggregated per (bucket_id, storage_class); memory computes from in-process map; tikv scans existing range-scan and groups in-process by o.StorageClass",
+        "Cardinality bounded by existing STRATA_BUCKETSTATS_TOPN envvar",
+        "Endpoint GET /admin/v1/storage/classes returns {classes: [{class, bytes, objects}], pools_by_class: {class: pool_name}} (the latter from the configured [rados] classes map for UI rendering)",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "/storage page UI (Meta + Data tabs + classes card)",
+      "description": "As an operator, I want a single page where I can see meta + data backend health and per-class breakdown.",
+      "acceptanceCriteria": [
+        "New web/src/pages/Storage.tsx + route /storage; lazy-loaded via React.lazy to keep initial bundle <=500 KiB gzipped",
+        "Sidebar entry under primary nav (NOT nested under Diagnostics) between Buckets and Consumers; icon lucide HardDrive or Database",
+        "Two shadcn Tabs: Meta (default) + Data",
+        "Meta tab: header card 'Backend = cassandra / tikv / memory' + table of NodeStatus rows (Address / State / DC / Rack / SchemaVersion); warning banner at top when report.Warnings.length > 0",
+        "Data tab: header card 'Backend = rados / s3 / memory' + table of PoolStatus rows (Name / Class / Bytes used / Objects / Replicas / State); below table a 'Storage classes' subsection with bytes-per-class horizontal stacked bar (recharts BarChart, already in bundle) + per-class chip list",
+        "TanStack Query 30s polling; refresh button mirrors Consumers/Buckets shape; empty / loading / error states; memory-backend rows render with explainer",
+        "Typecheck passes",
+        "Tests pass",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Cluster Overview hero summary + degraded warning banner",
+      "description": "As an operator, I want a glance-level storage summary on the home page AND a top-level banner when storage is degraded so I notice problems before navigating.",
+      "acceptanceCriteria": [
+        "Cluster Overview hero (web/src/pages/Overview.tsx, exported as OverviewPage — note: file is Overview.tsx NOT ClusterOverview.tsx) gains a 'Storage' card: total bytes across all pools + per-class chip strip (e.g., STANDARD: 800 GiB | STANDARD_IA: 400 GiB | GLACIER_IR: 50 GiB); reads from /admin/v1/storage/classes (cached 60 s in TanStack Query)",
+        "Hero card cardinality: cap at top-5 classes by bytes; rest collapse into '+N more' link to /storage",
+        "New /admin/v1/storage/health aggregate endpoint returns {ok: bool, warnings: []string, source: meta|data}; combines Meta + Data probes; ok=false when either reports Warnings.length > 0 or any node/pool is in non-OK state",
+        "Test-only env STRATA_STORAGE_HEALTH_OVERRIDE: when set to a JSON string the handler returns it verbatim; documented in internal/adminapi/storage_health_test.go",
+        "New <StorageDegradedBanner> component (web/src/components/StorageDegradedBanner.tsx); polls /admin/v1/storage/health every 30s; visible when ok=false; lists worst 3 warnings + 'View Storage page' link; dismissible per session via sessionStorage flag (re-shows on refresh if still degraded)",
+        "Banner position: above AppShell header (sibling above the outermost flex div) so operator sees it on every page",
+        "Typecheck passes",
+        "Tests pass",
+        "Verify in browser using dev-browser skill (use STRATA_STORAGE_HEALTH_OVERRIDE to simulate degraded state)"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Playwright storage.spec.ts + docs + ROADMAP close + cycle merge",
+      "description": "As a maintainer, I want Playwright e2e + operator docs + ROADMAP closed in one commit at cycle end.",
+      "acceptanceCriteria": [
+        "New web/e2e/storage.spec.ts: storage-page-renders (login -> /storage -> Meta+Data tabs visible, NodeStatus row count >= 1, PoolStatus row count >= 1)",
+        "Spec: cluster-hero-shows-storage-card (login -> home -> 'Storage' card visible with at least one class chip)",
+        "Spec: degraded-banner-on-warn (CI sets STRATA_STORAGE_HEALTH_OVERRIDE for the e2e job -> assert banner visible above shell + dismiss button works)",
+        "CI e2e-ui job adds pnpm exec playwright test storage.spec.ts after existing specs",
+        "New docs/storage.md covers env vars per backend, Warnings entry meanings, RADOS HEALTH_WARN interpretation (link to ceph docs), per-class pool mapping",
+        "docs/ui.md Capability Matrix gains a row referencing the Storage page",
+        "ROADMAP gets ~~**P3 — Web UI — Storage status (meta + data backend observability).**~~ — **Done.** <one-line summary>. (commit `<sha>`) under ## Web UI section",
+        "Cycle-end merge: fast-forward / squash-merge ralph/web-ui-storage-status into main, push, archive scripts/ralph/prd.json + scripts/ralph/progress.txt under scripts/ralph/archive/2026-MM-DD-web-ui-storage-status-complete/ via archive_cycle on <promise>COMPLETE</promise>",
+        "Markdown PRD tasks/prd-web-ui-storage-status.md is REMOVED in the close-flip commit per CLAUDE.md PRD lifecycle rule (canonical record is the ralph snapshot)",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": ""
+    }
+  ]
+}
