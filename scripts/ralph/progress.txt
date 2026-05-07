@@ -26,10 +26,17 @@ Cycle: ralph/web-ui-storage-status (Web UI — meta + data backend observability
 - `internal/meta.Store` is the core interface; optional capabilities use type-assertion at adminapi (e.g., `meta.RangeScanStore` for TiKV native scans). New interface goes alongside: `internal/meta/healthprobe.go` defining `HealthProbe interface { MetaHealth(ctx) (*MetaHealthReport, error) }`.
 - Cassandra impl in `internal/meta/cassandra/healthprobe.go`. Memory impl in `internal/meta/memory/healthprobe.go`. TiKV impl in `internal/meta/tikv/healthprobe.go`. Adminapi handler does the type assertion: `if hp, ok := s.Meta.(meta.HealthProbe); ok { ... }` — backends without the capability return a degenerate report.
 - Contract test pattern: extend `internal/meta/storetest/contract.go` with `caseMetaHealth` that runs against all factories — same shape as existing cases.
+- **Cassandra peers query**: CQL has NO `UNION ALL`. Issue TWO queries with `gocql`:
+  1. `SELECT peer, data_center, rack, release_version, schema_version FROM system.peers`
+  2. `SELECT broadcast_address, data_center, rack, release_version, schema_version FROM system.local`
+  Merge Go-side into `[]NodeStatus`. Use `gocql.LocalOne` consistency. Wrap in a 10 s in-process cache (sync.Map or a tiny ttlcache) so adminapi hits don't hammer Cassandra.
 
 ### Data backend optional interface pattern (US-002)
 - `internal/data.Backend` similar — new optional interface `internal/data.HealthProbe` defining `DataHealth(ctx) (*DataHealthReport, error)`.
-- RADOS impl is build-tagged (ceph): `internal/data/rados/healthprobe.go` (with `//go:build ceph`). librados.GetPoolStat is the per-pool call; librados.MonCommand("status") is the cluster-wide call. Both defined in goceph; check existing `internal/data/rados/observer.go` for the librados import shape.
+- RADOS impl is build-tagged (ceph): `internal/data/rados/healthprobe.go` (with `//go:build ceph`). Counterpart stub in `internal/data/rados/healthprobe_stub.go` (with `//go:build !ceph`) returns a degenerate report so non-ceph builds still satisfy the interface assertion.
+- **CORRECT goceph v0.39.0 API names** (PRD got the names wrong on first pass):
+  - Per-pool stats: `(*goceph.IOContext).GetPoolStats() (rados.PoolStat, error)` — note plural `Stats`, on `*IOContext`. Open / reuse one IOContext per (cluster, pool, ns) tuple via the existing `internal/data/rados/backend.go::ioctx` helper. Translate `Num_kb * 1024` → `BytesUsed`. Other fields: `Num_objects`, `Num_object_clones`, `Num_rd`, `Num_wr`.
+  - Cluster health: `(*goceph.Conn).MonCommand(args []byte) ([]byte, string, error)` where `args = json.Marshal({"prefix":"status","format":"json"})`. Response is JSON: `{health: {status: "HEALTH_OK|HEALTH_WARN|HEALTH_ERR", checks: {...}}}`.
 - S3-over-S3 impl in `internal/data/s3/healthprobe.go` — HEAD on the configured backend bucket via the AWS SDK already wired into the gateway.
 - Memory impl returns process-RSS proxy (use `runtime.ReadMemStats` `Sys` value).
 
@@ -42,7 +49,7 @@ Cycle: ralph/web-ui-storage-status (Web UI — meta + data backend observability
   - TiKV: range-scan via `meta.RangeScanStore` interface, group by `o.StorageClass` in the worker.
 
 ### Web UI conventions (US-004 / US-005 — frontend)
-- React+TS console under `web/src/`. Vite-built into `web/dist/`, served via `go:embed` from `internal/adminapi/console.go`. After UI changes the embedded bundle MUST be rebuilt: `cd web && pnpm install && pnpm build`. Commit `web/dist/` (gitignored at the directory level — use `git add -f web/dist/index.html web/dist/assets/*` per prior cycle pattern).
+- React+TS console under `web/src/`. Vite-built into `web/dist/`, served via `go:embed all:web/dist` from REPO-ROOT `console.go` (package `strata`, NOT `internal/adminapi/console.go`). After UI changes the embedded bundle MUST be rebuilt: `cd web && pnpm install && pnpm build`. Commit `web/dist/` (gitignored at the directory level — use `git add -f web/dist/index.html web/dist/assets/*` per prior cycle pattern).
 - Sidebar nav definitions in `web/src/components/layout/SidebarNav.tsx`. Lazy-loaded routes registered in `web/src/App.tsx`.
 - TanStack Query client + queryKeys in `web/src/lib/query.ts`. Query polling: cluster status every 5s, metrics every 30s, audit-log every 5s. Storage page = 30s. Hero card = 60s. Banner = 30s.
 - Recharts is already in bundle (used by Metrics + Hot-buckets). BarChart import works without bundle bloat. Custom canvas heatmap pattern from Phase 3 US-009 if recharts limits hit.
@@ -52,8 +59,8 @@ Cycle: ralph/web-ui-storage-status (Web UI — meta + data backend observability
 - Bundle budget: ≤500 KiB gzipped initial. The Recharts bar adds ~10-15 KiB; lazy-load `Storage.tsx` route to keep initial bundle below cap.
 
 ### Playwright e2e (US-006)
-- Specs live under `web/e2e/*.spec.ts`. CI job `e2e-ui` in `.github/workflows/ci.yml`. New spec must be added to the e2e job's invocation list.
-- Test-only knob pattern (STRATA_STORAGE_HEALTH_OVERRIDE): see `STRATA_AUDIT_TAIL_OVERRIDE` from Phase 3 — env-driven response override + clearly documented as test-only in the handler unit-test file.
+- Specs live under `web/e2e/*.spec.ts`. CI job `e2e-ui` in `.github/workflows/ci.yml` (currently runs critical-path → admin → debug specs sequentially). New spec must be added as a fourth `pnpm exec playwright test storage.spec.ts` step after the existing three.
+- Test-only knob `STRATA_STORAGE_HEALTH_OVERRIDE` is a NEW pattern this cycle (no prior precedent in the codebase — do NOT cite a fictional precedent). Env-driven response override read inside the `/admin/v1/storage/health` handler: when set to a JSON string, the handler returns it verbatim without invoking probes. Document: in `internal/adminapi/storage_health_test.go` and in `docs/storage.md` "Test-only environment variables" subsection.
 - Login fixture: `web/e2e/fixtures/login.ts`. Reuse for the new spec.
 
 ### CI gotchas

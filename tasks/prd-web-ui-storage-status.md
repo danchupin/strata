@@ -31,8 +31,8 @@ The new endpoints sit under `/admin/v1/storage/*` with the same JWT session-cook
 
 **Acceptance Criteria:**
 - [ ] New `internal/meta.HealthProbe` interface: `MetaHealth(ctx) (*meta.MetaHealthReport, error)` with fields `{Backend string, Nodes []NodeStatus, ReplicationFactor int, Warnings []string}` where `NodeStatus = {Address string, State string, SchemaVersion string, DataCenter string, Rack string}`.
-- [ ] Cassandra impl: `SELECT peer, data_center, rack, release_version, schema_version FROM system.peers` UNION ALL `SELECT broadcast_address … FROM system.local`. Aggregates schema-version drift into `Warnings`.
-- [ ] TiKV impl: HTTP GET `http://{pdEndpoint}/pd/api/v1/stores` → parse `{stores: [{store: {id, address, state_name, ...}, status: {region_count, ...}}]}` into NodeStatus. Aggregates raft-leader imbalance into `Warnings` if any store has 0 leaders while peers have >0.
+- [ ] Cassandra impl: TWO separate queries (CQL has no `UNION ALL`) — `SELECT peer, data_center, rack, release_version, schema_version FROM system.peers` AND `SELECT broadcast_address, data_center, rack, release_version, schema_version FROM system.local` — merged Go-side into a single `[]NodeStatus`. Consistency: `LOCAL_ONE` (peer info is local). Aggregates schema-version drift into `Warnings`.
+- [ ] TiKV impl: HTTP GET `http://{pdEndpoint}/pd/api/v1/stores` → parse `{stores: [{store: {id, address, state_name, ...}, status: {region_count, leader_count, ...}}]}` into NodeStatus. Bootstrap-only endpoint discovery from `STRATA_TIKV_PD_ENDPOINTS` (no `/pd/api/v1/members` refresh — client-go owns cross-PD failover for the data path; this probe is informational). Aggregates raft-leader imbalance into `Warnings` if any store has 0 leaders while peers have >0.
 - [ ] Memory impl returns a single-node report for completeness.
 - [ ] storetest contract `caseMetaHealth` exercises all three.
 - [ ] Endpoint `GET /admin/v1/storage/meta` in adminapi returns the report as JSON.
@@ -44,7 +44,8 @@ The new endpoints sit under `/admin/v1/storage/*` with the same JWT session-cook
 
 **Acceptance Criteria:**
 - [ ] New `internal/data.HealthProbe` interface: `DataHealth(ctx) (*data.DataHealthReport, error)` with fields `{Backend string, Pools []PoolStatus, Warnings []string}` where `PoolStatus = {Name string, Class string, BytesUsed uint64, ObjectCount uint64, NumReplicas int, State string}`.
-- [ ] RADOS impl: iterate the configured `[rados] classes` map, call `librados.GetPoolStat` per pool, populate PoolStatus. Pulls cluster `HEALTH_OK/HEALTH_WARN/HEALTH_ERR` via `librados.MonCommand("status")` with summarised JSON parse — surface in `Warnings`.
+- [ ] RADOS impl (build tag `ceph`): iterate the configured `[rados] classes` map; for each unique (cluster, pool, ns) tuple open / reuse the existing `*goceph.IOContext` (same shape as `internal/data/rados/backend.go::ioctx`) and call `(*IOContext).GetPoolStats() (rados.PoolStat, error)` — fields `Num_kb`, `Num_objects`, `Num_object_clones`, etc. Translate `Num_kb * 1024` → `BytesUsed`. Populate PoolStatus.
+- [ ] Cluster-wide health via `(*Conn).MonCommand(args []byte) ([]byte, string, error)` with `args = json.Marshal({"prefix":"status","format":"json"})`; parse response `{health: {status: "HEALTH_OK|HEALTH_WARN|HEALTH_ERR", checks: {...}}}`; surface up to 5 check summaries in `Warnings`. Cap warning count at 5 to keep wire payload small. This cycle covers ONLY the headline `HEALTH_*` summary; per-pool degraded-object counts (`ceph osd df` parsing) is a future P3.
 - [ ] S3-over-S3 impl: HEAD on the configured backend bucket, returns one PoolStatus with `Name=<backend bucket>`, `Class=<all classes mapped to this single bucket>`, `BytesUsed=0`/`ObjectCount=0` (S3 backend has no native stats endpoint; document gap), `State=reachable|error`.
 - [ ] Memory impl returns one PoolStatus with size=process-RSS proxy.
 - [ ] Endpoint `GET /admin/v1/storage/data` returns the report.
@@ -81,7 +82,7 @@ The new endpoints sit under `/admin/v1/storage/*` with the same JWT session-cook
 **Description:** As an operator, I want a glance-level storage summary on the home page AND a top-level banner when storage is degraded so I notice problems before navigating.
 
 **Acceptance Criteria:**
-- [ ] Cluster Overview hero (`web/src/pages/ClusterOverview.tsx`) gains a "Storage" card — total bytes across all pools + per-class chip strip (e.g., `STANDARD: 800 GiB | STANDARD_IA: 400 GiB | GLACIER_IR: 50 GiB`). Reads from `/admin/v1/storage/classes` (cached 30 s).
+- [ ] Cluster Overview hero (`web/src/pages/Overview.tsx`, exported as `OverviewPage`) gains a "Storage" card — total bytes across all pools + per-class chip strip (e.g., `STANDARD: 800 GiB | STANDARD_IA: 400 GiB | GLACIER_IR: 50 GiB`). Reads from `/admin/v1/storage/classes` (cached 60 s in TanStack Query). Cap visible classes at top-5 by bytes; remainder collapses into `+N more` link to `/storage`.
 - [ ] New `/admin/v1/storage/health` aggregate endpoint returns `{ok: bool, warnings: []string, source: meta|data}`. Combines the worst-state of Meta + Data probes — `ok=false` when either reports `Warnings.length > 0` or any node/pool is in a non-OK state.
 - [ ] New `<StorageDegradedBanner>` component (`web/src/components/StorageDegradedBanner.tsx`) renders above the page layout (above sidebar + content). Polls `/admin/v1/storage/health` every 30 s; visible when `ok=false`. Lists the worst 3 warnings + "View Storage page" link. Dismissible per session via sessionStorage flag (re-shows on next refresh if still degraded).
 - [ ] Banner position: above `<AppShell>` header — operator sees it on every page.
@@ -139,11 +140,11 @@ The new endpoints sit under `/admin/v1/storage/*` with the same JWT session-cook
 
 - **Cassandra `system.peers` query**: simple read; avoid `LOCAL_QUORUM` because peer info is local. Use `LOCAL_ONE`. Cache 10 s in-process to avoid re-querying on each adminapi hit.
 - **PD HTTP API**: `internal/promclient.Client` shape doesn't fit; create a dedicated thin client `internal/meta/tikv/pdclient.go` that takes `[]string` PD endpoints + tries them in order with a 2 s timeout each, returns first non-error.
-- **`librados.MonCommand`**: returns JSON; parse `{health: {status: "HEALTH_WARN|HEALTH_OK", checks: {...}}}` into `Warnings`. Cap warning count at 5 to keep the wire payload small.
-- **`librados.GetPoolStat`**: returns `(num_kb, num_objects, num_object_clones, ...)`. Translate kb → bytes for the wire shape.
+- **`(*goceph.Conn).MonCommand(args []byte) ([]byte, string, error)`**: args is JSON-marshalled command (e.g., `{"prefix":"status","format":"json"}`); response parsed into `{health: {status: "HEALTH_WARN|HEALTH_OK|HEALTH_ERR", checks: {...}}}`. Cap warning count at 5 to keep the wire payload small. The MonCommand call lives ONLY in the `ceph`-build-tagged file; the no-tag stub returns "memory" backend report.
+- **`(*goceph.IOContext).GetPoolStats() (rados.PoolStat, error)`** (NB: plural `Stats`, on IOContext not Conn): returns `{Num_kb, Num_objects, Num_object_clones, ...}`. Translate `Num_kb * 1024` → bytes for the wire shape.
 - **bucketstats per-class extension**: similar shape to per-shard (US-012 of Phase 3). Cassandra reads `objects` rows aggregated per `(bucket_id, storage_class)`. Memory: in-process map by class. TiKV: scan with existing range-scan, group in-process by `o.StorageClass`.
 - **Health banner above shell**: AppShell (`web/src/components/layout/AppShell.tsx`) is currently the outermost layout. Add `<StorageDegradedBanner>` as a sibling above the existing `<div className="flex">` so it occupies its own row at the top of the viewport.
-- **STRATA_STORAGE_HEALTH_OVERRIDE env**: test-only knob; when set to a JSON string, the `/admin/v1/storage/health` handler returns it verbatim. Used by Playwright fixture to simulate degraded state without poking the real backend. Document in `internal/adminapi/storage_health_test.go`.
+- **STRATA_STORAGE_HEALTH_OVERRIDE env**: test-only knob; when set to a JSON string, the `/admin/v1/storage/health` handler returns it verbatim. Used by Playwright fixture to simulate degraded state without poking the real backend. NEW pattern this cycle (no precedent in the codebase). Document in `internal/adminapi/storage_health_test.go` + `docs/storage.md` "Test-only environment variables" subsection.
 
 ## Success Metrics
 
@@ -152,9 +153,9 @@ The new endpoints sit under `/admin/v1/storage/*` with the same JWT session-cook
 - Playwright `storage.spec.ts` runs in <60 s on CI with no flaky retries.
 - ROADMAP P3 entry `Web UI — Storage status` flips to Done at cycle close.
 
-## Open Questions
+## Open Questions — RESOLVED before cycle launch
 
-- **Cassandra `system.peers` quorum semantics**: `LOCAL_ONE` is fine for read-but-might-be-stale. If operators want fresher peer info, fall back to `EACH_QUORUM`. Decision at story-start of US-001 — start with LOCAL_ONE; bump if real operator complaints.
-- **PD endpoint discovery**: today the gateway is configured with one or more PD endpoints in `STRATA_TIKV_PD_ENDPOINTS`. The PD HTTP API has its own discovery path (`/pd/api/v1/members`); should `internal/meta/tikv/pdclient.go` use the configured list as bootstrap and then refresh from `/members`? Keeping bootstrap-only for simplicity unless we need cross-PD failover beyond client-go's built-in.
-- **RADOS replication state granularity**: `librados.GetPoolStat` returns numeric replicas; degraded objects vs healthy objects requires `ceph osd df` + parsing. For this cycle we surface only the headline `HEALTH_OK/WARN/ERR` from `librados.MonCommand`. Per-pool detailed degradation is a future P3 if operators ask.
-- **Hero card cardinality**: with many storage classes (>10), the chip strip overflows. Cap at top-5 by bytes; rest collapse into "+N more" link to `/storage`. Decision baked in US-005 visual review.
+- **Cassandra `system.peers` quorum semantics** — RESOLVED: ship `LOCAL_ONE`. Peer info is locally maintained by each Cassandra node and a short staleness window is acceptable for an observability page. If operators report missing rows in steady state, the future fix is to layer a `EACH_QUORUM` retry on the warning path, not the default read. Cached 10 s in-process to avoid hammering on each adminapi hit.
+- **PD endpoint discovery** — RESOLVED: bootstrap-only. Use the configured `STRATA_TIKV_PD_ENDPOINTS` list verbatim, try in order with a 2 s per-endpoint timeout, return first non-error. No `/pd/api/v1/members` refresh — `tikv/client-go` already owns cross-PD failover for the data path; the storage probe is informational, and adding a discovery layer doubles the failure surface for negligible value.
+- **RADOS replication state granularity** — RESOLVED: surface ONLY the headline `HEALTH_OK/HEALTH_WARN/HEALTH_ERR` summary from `(*Conn).MonCommand("status")` this cycle. Numeric replicas come from `(*IOContext).GetPoolStats` indirectly via pool config (read once at backend startup). Per-pool degraded-object counts (`ceph osd df` JSON parse) is a deliberate future P3 — file under `## Web UI` in ROADMAP if/when an operator asks.
+- **Hero card cardinality** — RESOLVED: cap at top-5 by bytes; remainder collapses into a `+N more` link to `/storage`. Baked into US-005 acceptance criterion.

@@ -9,8 +9,8 @@
       "description": "As a debug-tool author, I want a meta.Store-shaped probe that returns peer / store health so the storage page has data.",
       "acceptanceCriteria": [
         "New optional interface internal/meta.HealthProbe: MetaHealth(ctx) (*meta.MetaHealthReport, error) with fields {Backend string, Nodes []NodeStatus, ReplicationFactor int, Warnings []string}; NodeStatus = {Address, State, SchemaVersion, DataCenter, Rack}",
-        "Cassandra impl: SELECT peer, data_center, rack, release_version, schema_version FROM system.peers UNION ALL SELECT broadcast_address ... FROM system.local; aggregate schema-version drift into Warnings; LOCAL_ONE consistency with 10s in-process cache",
-        "TiKV impl: dedicated thin client internal/meta/tikv/pdclient.go that takes []string PD endpoints, tries them in order with 2s timeout each, returns first non-error; HTTP GET /pd/api/v1/stores parsed into NodeStatus; raft-leader imbalance (any store has 0 leaders while peers have >0) folded into Warnings",
+        "Cassandra impl: TWO separate queries (CQL has no UNION ALL) — SELECT peer, data_center, rack, release_version, schema_version FROM system.peers AND SELECT broadcast_address, data_center, rack, release_version, schema_version FROM system.local — merged Go-side into a single []NodeStatus. Consistency: LOCAL_ONE. Aggregate schema-version drift into Warnings. 10 s in-process cache to avoid re-querying on each adminapi hit.",
+        "TiKV impl: dedicated thin client internal/meta/tikv/pdclient.go that takes []string PD endpoints (bootstrap-only, no /pd/api/v1/members refresh — client-go owns cross-PD failover for the data path), tries endpoints in order with 2 s per-endpoint timeout, returns first non-error. HTTP GET /pd/api/v1/stores parsed into NodeStatus. Raft-leader imbalance (any store has 0 leaders while peers have >0) folded into Warnings.",
         "Memory impl returns single-node report",
         "storetest contract caseMetaHealth exercises all three backends",
         "Endpoint GET /admin/v1/storage/meta in adminapi returns the report as JSON, JWT-auth + audit middleware (read-only, GET => skipped audit per existing rule)",
@@ -27,7 +27,8 @@
       "description": "As a debug-tool author, I want a data.Backend-shaped probe that returns per-pool stats so the storage page has data.",
       "acceptanceCriteria": [
         "New optional interface internal/data.HealthProbe: DataHealth(ctx) (*data.DataHealthReport, error) with fields {Backend string, Pools []PoolStatus, Warnings []string}; PoolStatus = {Name, Class, BytesUsed uint64, ObjectCount uint64, NumReplicas int, State}",
-        "RADOS impl: iterate the configured [rados] classes map, call librados.GetPoolStat per pool (kb -> bytes), populate PoolStatus; pull cluster HEALTH_OK/HEALTH_WARN/HEALTH_ERR via librados.MonCommand(\"status\") with summarised JSON parse, cap warnings at 5",
+        "RADOS impl (build tag ceph): iterate the configured [rados] classes map; for each unique (cluster, pool, ns) tuple open / reuse the existing *goceph.IOContext (same shape as internal/data/rados/backend.go::ioctx) and call (*IOContext).GetPoolStats() (rados.PoolStat, error) — note plural 'Stats', method on IOContext NOT on Conn. Translate Num_kb * 1024 -> BytesUsed. Populate PoolStatus.",
+        "Cluster-wide health via (*Conn).MonCommand(args []byte) ([]byte, string, error) with args = json.Marshal({\"prefix\":\"status\",\"format\":\"json\"}); parse response {health: {status: \"HEALTH_OK|HEALTH_WARN|HEALTH_ERR\", checks: {...}}}; surface up to 5 check summaries in Warnings (cap at 5 to keep wire payload small). Headline only this cycle; per-pool degraded-object counts (ceph osd df JSON parse) is a deliberate future P3.",
         "S3-over-S3 impl: HEAD on the configured backend bucket, returns one PoolStatus with Name=<backend bucket>, Class=<all classes mapped>, BytesUsed=0/ObjectCount=0 (document gap), State=reachable|error",
         "Memory impl returns one PoolStatus with size=process-RSS proxy",
         "Endpoint GET /admin/v1/storage/data in adminapi returns the report as JSON",
@@ -79,7 +80,7 @@
       "title": "Cluster Overview hero summary + degraded warning banner",
       "description": "As an operator, I want a glance-level storage summary on the home page AND a top-level banner when storage is degraded so I notice problems before navigating.",
       "acceptanceCriteria": [
-        "Cluster Overview hero (web/src/pages/ClusterOverview.tsx) gains a 'Storage' card: total bytes across all pools + per-class chip strip (e.g., STANDARD: 800 GiB | STANDARD_IA: 400 GiB | GLACIER_IR: 50 GiB); reads from /admin/v1/storage/classes (cached 60 s in TanStack Query)",
+        "Cluster Overview hero (web/src/pages/Overview.tsx, exported as OverviewPage — note: file is Overview.tsx NOT ClusterOverview.tsx) gains a 'Storage' card: total bytes across all pools + per-class chip strip (e.g., STANDARD: 800 GiB | STANDARD_IA: 400 GiB | GLACIER_IR: 50 GiB); reads from /admin/v1/storage/classes (cached 60 s in TanStack Query)",
         "Hero card cardinality: cap at top-5 classes by bytes; rest collapse into '+N more' link to /storage",
         "New /admin/v1/storage/health aggregate endpoint returns {ok: bool, warnings: []string, source: meta|data}; combines Meta + Data probes; ok=false when either reports Warnings.length > 0 or any node/pool is in non-OK state",
         "Test-only env STRATA_STORAGE_HEALTH_OVERRIDE: when set to a JSON string the handler returns it verbatim; documented in internal/adminapi/storage_health_test.go",
