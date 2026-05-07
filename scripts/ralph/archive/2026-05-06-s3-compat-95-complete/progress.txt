@@ -1,0 +1,196 @@
+# Ralph Progress Log
+Started: Wed May  6 14:31:06 MSK 2026
+Cycle: ralph/s3-compat-95 (close remaining 16 real failures, target >=90% strict / ~95%)
+---
+
+## Codebase Patterns
+
+### Branch policy (REQUIRED)
+- Cycle starts from main (`35438a7` at prep time), ends with merge to main. US-007 (last story) MUST fast-forward / squash-merge `ralph/s3-compat-95` into `main`, push origin/main, archive prd.json + progress.txt under `scripts/ralph/archive/2026-MM-DD-s3-compat-95/`. Mirror the s3-compat-90 close shape (`8ad9aa2` merge in this repo's history).
+- The shell wrapper `scripts/ralph/ralph.sh` MUST invoke `avito ai claude --` (not bare `claude`) — regression-resistant.
+
+### Prior cycle context
+- `ralph/s3-compat-90` cycle (HEAD `3791ac9`, merged into main `35438a7`) lifted pass-rate `80.1% (141/176)` → `84.7% (150/177)`. 11 stories shipped.
+- Two P1 latent bugs surfaced + fixed: koanf empty-env override and Cassandra null-version timeuuid sentinel. Both fixes live on main; this cycle's US-006 adds CI test coverage so they cannot regress silently.
+- Failing-test list is the canonical source: `scripts/s3-tests/README.md` section `### 2026-05-05 — \`2bb7fd0\` + ralph/s3-compat-90 cycle (84.7%)` lists the 16 real failures clustered into 4 P2 ROADMAP entries.
+
+### S3 surface map (where things live on current main)
+- Multipart copy: `internal/s3api/multipart_copy.go::uploadPartCopy`. URL parsing today: `parseCopySource(r)` returns (bucket, key) — extend to URL-decode special chars BEFORE bucket validation.
+- Multipart Complete: `internal/s3api/multipart.go::completeMultipartUpload`. Per-part ETag validation happens AFTER status flip — see prior cycle's US-009 progress note about the latent bug.
+- Object GET / partNumber: `internal/s3api/server.go::getObject`. ETag header set in two places — direct GET (line ~1000) and partNumber GET (line ~570). Audit both for quoted-shape consistency.
+- Object DELETE: `internal/s3api/server.go::deleteObject`. Auth gate runs in middleware BEFORE the bucket-existence check; need a special-case for DELETE on missing bucket OR move bucket-check ahead of auth in the dispatcher.
+- ListObjectVersions: `internal/s3api/list_objects.go::listObjectVersions`. Owner field XML emit currently `<DisplayName></DisplayName>`; wire bucket.Owner via `bucket.OwnerDisplayName` (may need to add the field on `meta.Bucket`).
+
+### CRC algorithms (US-003)
+- AWS composite CRC formula details: https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity.html
+- AWS composite for CRC32/CRC32C/CRC64NVME = `crc(concat(raw_part_crcs))` — concat raw checksum bytes per part, then compute the CRC of the concat, encode base64. (NOT the SHA-style "concat then SHA-256".)
+- Helper packages on main:
+  - `hash/crc32` for CRC32 + Castagnoli (CRC32C — `crc32.MakeTable(crc32.Castagnoli)`)
+  - `github.com/danchupin/strata/internal/checksum` (verify exists; if not, add) for CRC64NVME (`hash/crc64` + iso/ecma table OR vendored Go 1.21+ NVME polynomial)
+- Algorithm dispatch: existing `manifest.PartChunks[N].ChecksumAlgorithm` field (US-001 of prior cycle) carries the per-part algo string.
+
+### Test patterns (reuse)
+- s3api tests: `h := newHarness(t)` from `internal/s3api/testutil_test.go` drives in-memory backend. `h.do(method, path, body)` returns response; `h.mustStatus(resp, code)` asserts.
+- For multipart tests: `h.do("POST", "/bkt/key?uploads", nil)` initiates, returns upload_id; `h.do("PUT", "/bkt/key?partNumber=1&uploadId=...", body)` uploads part.
+- Bucket name in tests: `/bkt` (3-char minimum per `internal/s3api/validate.go::validBucketName`).
+- s3-tests harness: `scripts/s3-tests/run.sh` against `make up-all` stack. ~15 min full run. Cache via `S3TESTS_DIR=/tmp/strata-s3tests.X/s3-tests` env.
+
+### Lockstep meta backends (US-005, US-006)
+- Both `internal/meta/memory` and `internal/meta/cassandra` and `internal/meta/tikv` implement `meta.Store` in lockstep. Touching `CompleteMultipartUpload` (US-005's resend-finishes-last fix) requires updating all three + the storetest contract.
+- LWT (`IF EXISTS`) discipline still applies. Cassandra: use `MapScanCAS` not `ScanCAS(nil...)` for `INSERT … IF NOT EXISTS`.
+- TiKV: pessimistic-txn shape `Begin(pessimistic) → LockKeys → Get → Set → Commit` for any RMW that needs read-after-write coherence. CAS-reject early-returns MUST `txn.Rollback()`.
+
+### CI / quality bar
+- Every story commit MUST pass: `go vet ./...`, `go test ./...`, `pnpm run typecheck`, `pnpm run build`. Manual s3-tests rerun in US-007 only.
+- Headline target: `pass rate >= 90% strict`. With all 16 real failures closed: 166/177 = 93.8% strict.
+- ROADMAP P1 entry `s3-tests 80% -> 90%+` flips to Done in US-007 IF threshold met; otherwise stays open with refreshed numbers.
+
+### Cassandra timeuuid sentinel (already fixed on main, do NOT reintroduce)
+- `meta.NullVersionID = "00000000-0000-0000-0000-000000000000"` (zero UUID) is the WIRE shape — what S3 clients see / set via `?versionId=null`.
+- Cassandra `objects.version_id` column type `timeuuid` rejects v0; on-disk sentinel is v1 `00000000-0000-1000-8000-000000000000`.
+- `internal/meta/cassandra/store.go::versionToCQL` and `versionFromCQL` translate at every gocql.ParseUUID / .String() boundary.
+- US-006 of THIS cycle adds the integration test that the prior cycle's storetest contract didn't catch.
+
+### Phase boundaries (do NOT touch unrelated surface)
+- Web UI Phase 1+2+3 shipped. Don't refactor adminapi or web/src/ in this cycle.
+- TiKV heartbeat shipped (commit `c37487b`). Don't touch internal/heartbeat.
+- Manifest format defaults to proto (US-049). New manifest fields are schema-additive via proto field-number ledger — don't renumber.
+
+## 2026-05-06 - US-001 Multipart copy edges
+- Implemented:
+  - `internal/s3api/copy_object.go::parseCopySource` now splits the header on `?` BEFORE `url.PathUnescape`. boto3 percent-encodes literal `?` in keys as `%3F`, so the legacy "decode-then-split" path corrupted `?versionId`-shaped keys. Bucket and key segments are now decoded independently after the split.
+  - `internal/s3api/multipart.go::parseCopySourceRangeStrict` replaces the old `(start,end,bool)` parser. It returns a typed `*APIError`, distinguishing 400 InvalidArgument (syntax: missing `bytes=`, missing `-`, blank lo/hi, non-numeric, multi-range) from 416 InvalidRange (syntactically valid but `start >= size`, `end < start`, or `end >= size`). `uploadPartCopy` writes the returned error directly.
+- Files changed:
+  - `internal/s3api/copy_object.go`
+  - `internal/s3api/multipart.go`
+  - `internal/s3api/multipart_copy_test.go` — added `TestUploadPartCopyImproperRangeReturnsInvalidArgument`, `TestUploadPartCopyOutOfBoundsRangeReturnsInvalidRange`, `TestUploadPartCopySpecialSourceKeyNames`.
+- Learnings for future iterations:
+  - **boto3 wire shape for x-amz-copy-source**: `?` in source keys is `%3F`. Splitting on raw (encoded) form preserves the distinction between literal `?` and the `?versionId=…` query separator. PathUnescape order matters — decode AFTER the split, not before.
+  - **AWS error-code split for copy-range**: the two s3-tests (`improper_range` vs `invalid_range`) test exactly this distinction. Bundling both as `InvalidRange` is what the prior cycle did and is exactly why `improper_range` failed. Always model the parser as a small state machine returning a typed error.
+  - **Per-part ETag in `copyPartResult`** was already returning `"<32hex>"` (manifest.ETag of the per-part bytes, double-quoted). Don't refactor it — boto3 round-trips fine.
+  - **s3-tests cache lives at `/tmp/strata-s3tests.MO5E/s3-tests/`** in this dev env; `s3tests/functional/test_s3.py` is the canonical source for the failing tests' wire-level assertions when the live suite isn't running.
+---
+
+## 2026-05-06 - US-002 ?partNumber=N GET ETag wire shape
+- Implemented:
+  - `internal/s3api/server.go::getObject` partNumber path: dropped the `partRange.ETag` override. The response ETag header now always echoes `o.ETag` (the whole-object multipart composite `"<32hex>-<count>"`), matching what boto3 sees in the CompleteMultipartUpload response. Prior code overrode with the per-part raw ETag, which diverged from AWS.
+  - Out-of-range partNumber (`n < 1`, `n > partsTotal`, non-numeric, or partNumber on a non-multipart object with `n != 1`) now returns `400 InvalidPart` instead of `416 InvalidRange`. AWS-parity confirmed against s3-tests test_multipart_get_part / _single_get_part.
+  - Non-multipart object `?partNumber=1` now returns the whole object (`200 OK`, single-PUT ETag) instead of `416 InvalidRange`. Mirrors s3-tests test_non_multipart_get_part.
+- Files changed:
+  - `internal/s3api/server.go`
+  - `internal/s3api/multipart_partnumber_test.go` — replaced `TestGetByPartNumberNonMultipartReturns416` with `TestGetByPartNumberNonMultipart` (asserts 200 + ETag for n=1, 400 InvalidPart for n=2). Flipped `TestGetByPartNumberOutOfRange` to assert 400. Added `TestMultipartGetByPartNumberEchoesWholeObjectETag` with single-part + multi-part subtests asserting GET/HEAD partNumber=N ETag equals the CompleteMultipartUpload XML `<ETag>` value.
+- Learnings for future iterations:
+  - **AWS `?partNumber=N` ETag is the WHOLE-OBJECT multipart ETag, not the per-part ETag.** boto3's `response['ETag']` on a `client.get_object(...PartNumber=N)` call must equal `client.complete_multipart_upload(...)['ETag']`. The PRD note in this story said the opposite — trust the s3-test source over the PRD when they conflict. Verified by reading test_multipart_get_part / _sse_c_get_part / _single_get_part directly.
+  - **AWS error code for partNumber out-of-range is `400 InvalidPart`, NOT `416 InvalidRange`.** Range-shape errors (e.g. `Range: bytes=99999999-` inside a valid partNumber) stay 416 — that's the inner range parser, not the part selector. Two error codes for two different failure modes.
+  - **Non-multipart object `?partNumber=1` returns the whole object** (200 OK, normal ETag). Only `?partNumber=2+` on non-multipart yields InvalidPart. Implementation: when `partsTotal == 0 && n == 1`, leave `partNumber=0` so the rest of the GET path treats the request as plain (no Content-Range, no 206 status).
+  - **XML test fixture parsing**: `<ETag>"abc"</ETag>` in the response body becomes `<ETag>&#34;abc&#34;</ETag>` in raw bytes (Go's `encoding/xml` escapes the inner quotes). Decode via `xml.Unmarshal` not raw `strings.Index` — the round-trip is `"<32hex>-<count>"` (with literal quote bytes) once decoded, matching what boto3 receives over the wire.
+---
+
+## 2026-05-06 - US-003 Multipart composite checksum CRC32 / CRC32C / CRC64NVME
+- Implemented:
+  - `internal/s3api/checksum.go`: extended `composeMultipartChecksums` to take a `checksumType` arg. SHA1/SHA256 stay on the COMPOSITE shape (`BASE64(HASH(concat(raw_i)))-N`). CRC32 / CRC32C / CRC64NVME branch on `checksumType="FULL_OBJECT"` and combine per-part CRCs into the whole-stream CRC via standard zlib-style `crc32_combine` / `crc64_combine` math (no `-N` suffix). When `checksumType` is empty or `COMPOSITE`, CRC family keeps the legacy concat-then-hash shape (still passes today's tests + boto3 default).
+  - New helpers in the same file: `combineCRCParts(algo, raws, parts)`, `crc32Combine(poly, crc1, crc2, len2)`, `crc64Combine(poly, crc1, crc2, len2)`, plus their `gf2MatrixTimes/Square` workhorses. Polynomials use the reversed/right-shift convention (`0xedb88320` IEEE, `0x82f63b78` Castagnoli, `crc64NVMEPoly` for NVME) so they line up with `hash/crc32` and our `crc64NVMEHash` Sum values without an extra inversion.
+  - `checksumPart` grew a `Size int64` field — required to feed `len2` into the combine math. Multipart Complete site already has this on `meta.MultipartPart`, so the wire is `requested = append(requested, &checksumPart{Checksums: sp.Checksums, Size: sp.Size})`.
+  - `multipart.go::completeMultipartUpload` now passes `mu.ChecksumType` into `composeMultipartChecksums`. The XML response and HEAD/GET (with `ChecksumMode=ENABLED`) echo the FULL_OBJECT shape unchanged via the existing `o.Checksums` + `o.ChecksumType` plumbing.
+  - Added `internal/s3api.CombineCRCPartsForTest` (test-only export) to drive the FULL_OBJECT combine math against the AWS-published s3-tests vectors without spinning up the HTTP harness.
+- Files changed:
+  - `internal/s3api/checksum.go`
+  - `internal/s3api/multipart.go`
+  - `internal/s3api/multipart_checksum_test.go` — added `TestFullObjectCRCS3TestVectors` (locks the published `test_multipart_use_cksum_helper_crc{32,32c,64nvme}` per-part + composite values for the 5 MiB / 5 MiB / 5 MiB shape) and `TestMultipartFullObjectCRCCombine` (HTTP round-trip for all 3 CRC algos with non-uniform part sizes, asserts no `-N` suffix and ChecksumType=FULL_OBJECT on Complete + HEAD).
+- Learnings for future iterations:
+  - **AWS FULL_OBJECT for CRC family = `crc(concat(bytes))`, NOT `crc(concat(raw_per_part_crcs))`.** PRD AC #2 said "may be concat-then-CRC; verify against AWS docs at story start" — that's the COMPOSITE shape, not what s3-tests assert. The s3-test calls explicitly set `ChecksumType="FULL_OBJECT"` for CRC* and the published composite values have no `-N` suffix; reproducing them required the standard `crc32_combine` formula (zlib's gf2 matrix square+times pattern) and per-part sizes. This is the third PRD-vs-s3-tests divergence in this cycle (US-002 was the same pattern — trust the s3-test source).
+  - **Per-part Size is required for combine math.** Don't drop `Size` from `checksumPart`. Even though the existing COMPOSITE path doesn't read it, the FULL_OBJECT branch needs `len2` for every i>0 step. Sourced from `meta.MultipartPart.Size`, already plaintext (SSE-aware in `uploadPart`).
+  - **Reversed polynomial convention.** Go's `hash/crc32` and our CRC-64/NVME implementation operate on the right-shift / reflected polynomial. zlib's `crc32_combine` does too — feed `0xedb88320` (IEEE), `0x82f63b78` (Castagnoli), `crc64NVMEPoly` (NVME) into the `odd[0]` slot. Don't flip with the forward-poly form (`0x04c11db7` etc.) — combine results will be off by the reflection.
+  - **SHA + FULL_OBJECT is unreachable in normal flow.** AWS rejects `ChecksumType=FULL_OBJECT` + SHA on Initiate. We fall back to COMPOSITE shape for SHA in the helper anyway, so a misbehaving client still gets a well-formed (if technically wrong-typed) response.
+  - **s3-tests vector locking pattern**: when a story closes a wire-shape gap, lock the published vectors as a unit test. The 3-line `cases := []struct{...}` table with per-part b64 + sizes + expected composite is cheap; it catches polynomial / reversal / size-handling regressions without needing the live s3-tests run.
+---
+
+## 2026-05-06 - US-005 Misc edges: suspended_copy / delete_key_bucket_gone / return_data_versioning / resend_finishes_last
+- Implemented:
+  - **suspended_copy** (`internal/meta/cassandra/store.go`, `internal/meta/tikv/objects.go`): `GetObject(ctx,..., versionID="")` now probes BOTH the highest-clustering row AND the null sentinel directly, returning whichever has the later mtime. Without this, a Suspended PUT layered on top of an Enabled v1 left the null sentinel at the END of the DESC clustering — `LIMIT 1` returned the stale v1 row instead of the latest write. cassandra: refactored the inline scan into `scanObjectLimit1`/`scanObjectByVersion`/`scanObjectQuery` helpers (single source of column wiring) so the dual-probe path stays readable. tikv: ObjectKey suffix is `[MaxUint64-ts8-BE][raw-uuid-16]` — null timestamp 0 → MaxUint64 prefix → sorts last in ASC range scan, same hazard. Pull the null sentinel via direct `txn.Get(ObjectKey(..., NullVersionID))` whenever the limit-1 winner is non-null. Memory backend untouched — slice-prepend ordering already prefers the most-recent write.
+  - **delete_key_bucket_gone** (`internal/s3api/errors.go`, `internal/serverapp/serverapp.go`): added `s3api.NewAuthDenyHandler(metaStore)` returning an `auth.DenyHandler` that, on path-style DELETE `/bucket/key`, runs `metaStore.GetBucket` first and returns `404 NoSuchBucket` when the bucket is gone. Other shapes fall through to the existing `WriteAuthDenied`. Wired into `serverapp.Run` (`mux.Handle("/", ... mw.Wrap(... NewAuthDenyHandler(metaStore))) ...`).
+  - **return_data_versioning** (`internal/s3api/xml.go`, `internal/s3api/versioning.go`): added `Owner *owner \`xml:"Owner,omitempty"\`` to both `versionEntry` and `deleteMarkerEntry`. `listObjectVersions` builds one `&owner{ID: b.Owner, DisplayName: b.Owner}` and stamps every entry. boto3 reads `obj['Owner']['DisplayName']` and the s3-test asserts non-empty.
+  - **resend_finishes_last** (`internal/meta/cassandra/store.go`, `internal/meta/memory/store.go`): both `CompleteMultipartUpload` paths now ListParts + walk the request, validating every per-part ETag, BEFORE flipping `status='completing'`. Prior shape flipped first (cassandra LWT, memory in-place mutation), and a stale-ETag retry returned `ErrMultipartETagMismatch` while leaving the upload in the `completing` state — subsequent retries got `ErrMultipartInProgress` forever. TiKV needed no change: the existing pessimistic-txn shape already rolls the status flip back when a part validation fails (deferred `rollbackOnError(txn, &err)`), so the read-after-write coherence stays correct.
+- Files changed:
+  - `internal/meta/cassandra/store.go`
+  - `internal/meta/memory/store.go`
+  - `internal/meta/tikv/objects.go`
+  - `internal/s3api/errors.go`
+  - `internal/s3api/multipart.go` (no — touched only the cassandra/memory backends; `multipart.go` validation order unchanged)
+  - `internal/s3api/versioning.go`
+  - `internal/s3api/xml.go`
+  - `internal/serverapp/serverapp.go`
+  - `internal/s3api/us005_test.go` — new file with `TestAuthDeny_DeleteOnMissingBucket_Returns404NoSuchBucket`, `TestAuthDeny_DeleteOnExistingBucket_Returns403`, `TestListObjectVersions_OwnerDisplayName`, `TestMultipartResendFinishesLast_StaleETagDoesNotWedgeCompleting`, `TestCopyObject_SuspendedBucketNullSource`.
+- Learnings for future iterations:
+  - **Cassandra DESC LIMIT 1 + null sentinel = silent staleness.** With `objects.version_id` clustering DESC and the v1-zero sentinel `00000000-0000-1000-8000-000000000000`, any real timeuuid sorts AHEAD of the sentinel. So `LIMIT 1` returns the most-recent timeuuid row, NOT the most-recent WRITE — and a Suspended PUT after an Enabled PUT silently breaks "GET latest" by returning the stale Enabled body. The storetest contract case `caseVersioningSuspendedReplaceNull` exercises the latest-after-suspend assertion (line 1290 expects ETag="second"), so the prior cycle's null-sentinel fix may have shipped without that contract running cleanly on Cassandra. Dual-probe (clustering-LIMIT-1 + direct null-sentinel Get, return later-mtime winner) is the safe shape; modifying the sentinel UUID itself would change the wire round-trip pinned by US-006's integration test.
+  - **TiKV's same hazard, different bytes.** The `[MaxUint64 - ts8-BE][raw uuid]` 24-byte suffix puts the null sentinel (ts=0 → MaxUint64) at the END of an ascending range scan. `txn.Scan(..., limit=1)` thus sees real timeuuids first. Same dual-probe fix; cleaner because the second lookup is a direct `txn.Get` on `ObjectKey(..., NullVersionID)` (no scan needed).
+  - **Auth deny handler must be metaStore-aware for the `delete_key_bucket_gone` shape.** The auth middleware sits OUTSIDE `Server.ServeHTTP`, so by the time the bucket-existence check would run we've already 403'd. Pattern: a `DenyHandler` closure that captures `metaStore` and short-circuits the missing-bucket case. Don't try to push the bucket check INTO the middleware itself — it'd entangle every call site of `Middleware.Wrap`.
+  - **Cassandra LWT-flip-then-validate is a wedging hazard for any Complete-shape op.** The fix (validate first, flip second) is mirrored across cassandra+memory; tikv was already correct because its txn shape rollbacks on error. When refactoring multipart-Complete-style ops in the future: if there's a status-flip-via-LWT and a payload-validation step, validation MUST come first so the flip never happens when the request itself is invalid.
+  - **`<Owner>` is OMITEMPTY-friendly with a pointer, not a value.** `versionEntry` previously had no Owner at all; making it `Owner *owner \`xml:"Owner,omitempty"\`` lets the XML omit the element when nil (same shape `objectEntry` uses) and inline the bucket owner when listing. The s3-test asserts `obj['Owner']['DisplayName']` non-empty — boto3 silently returns empty string when the element is absent, so just having an empty `<Owner></Owner>` in the response would NOT pass.
+---
+
+## 2026-05-06 - US-004 Multipart If-Match-on-missing-object → 404 NoSuchKey
+- Implemented:
+  - `internal/s3api/multipart.go::completeMultipartUpload` precondition path: split the prior `gerr != nil || !etagMatches(...)` two-arm OR. The missing-object arm now returns `ErrNoSuchKey` (404) when `errors.Is(gerr, meta.ErrObjectNotFound)`; other gerrs route through `mapMetaErr`. ETag-mismatch on an existing object stays `ErrPreconditionFailed` (412). `errors` package was already imported.
+  - `internal/s3api/server.go::putObject` (line 902) untouched — single-PUT `If-Match` on a missing object stays 412 per RFC 7232 §3.1. The AWS-divergence is Complete-only, and tests assert that shape.
+- Files changed:
+  - `internal/s3api/multipart.go`
+  - `internal/s3api/multipart_preconditions_test.go` — flipped `TestMultipartCompleteIfMatchNonExistingFails` to `TestMultipartCompleteIfMatchNonExistingReturnsNoSuchKey` (404 + body `NoSuchKey`). Added `TestMultipartCompleteIfMatchMissingObjectDoesNotLeakCompletingState` — 404 path then retry without preconditions → 200 (proves no `completing` state leak on the 404 branch). Existing 412 tests for ETag-mismatch / If-None-Match unchanged.
+- Learnings for future iterations:
+  - **AWS-vs-RFC divergence is per-endpoint, not gateway-wide.** Multipart Complete returns 404 NoSuchKey on If-Match-missing, while single-PUT keeps the RFC 7232 §3.1 412. Don't unify the precondition helper across putObject + completeMultipartUpload — the wire shape differs and s3-tests asserts both.
+  - **`If-None-Match=*` keeps the canonical 412.** Only the `If-Match` + missing-object combination flips. Verified by the still-green `TestMultipartCompleteIfNoneMatchStarNoObject` (succeeds when missing) + `TestMultipartCompleteIfNoneMatchStarExistingFails` (412 when present).
+  - **Precondition runs BEFORE the LWT flip.** Both 404 (missing) and 412 (mismatch) branches preserve `uploading` state — a retry without preconditions completes successfully. The two `*DoesNotLeakCompletingState` tests lock that invariant for both error codes; if you reorder the precondition past the LWT flip, both will catch the regression.
+  - **Test fixture: bucket name `/bkt`** (3-char minimum). Request shape `POST /bkt/k?uploadId=...` with the multipart-Complete XML body and `If-Match: "<etag>"` (literal double quotes around hex per S3 wire shape).
+---
+
+## 2026-05-06 - US-006 P1 follow-up tests: koanf empty-env regression + Cassandra null-sentinel integration
+- Implemented:
+  - **koanf empty-env regression test** (`internal/config/config_test.go::TestLoadEmptyEnvDoesNotOverrideTOMLValue`): writes `[gc]\ninterval = "30s"\n` to a TempDir TOML, points `STRATA_CONFIG_FILE` at it, sets `STRATA_GC_INTERVAL=""` (empty string), asserts `cfg.GC.Interval == 30*time.Second` after `Load()`. Locks the `env.ProviderWithValue` callback that returns `("", nil)` on empty values — without that callback koanf stomps the TOML/default with the empty string and the typed Unmarshal silently zeros the Duration.
+  - **Storetest contract extension** (`internal/meta/storetest/contract.go::caseVersioningNullSentinel`): appended a Suspended-mode INSERT step at the end. After the existing Disabled overwrite, the case now toggles the bucket to `VersioningSuspended`, calls `PutObject(o, true)` with `IsNull=true`, asserts `o.VersionID == meta.NullVersionID` post-stamp, then `GetObject(..., meta.NullVersionID)` round-trip. Exercises the explicit-null-sentinel-INSERT-with-LWT-IF-EXISTS path (cassandra) / direct null-sentinel write (tikv) / slice-prepend (memory) — the path that the Disabled-mode plain-DELETE branch above bypassed. All 3 backends pick this up via `storetest.Run`.
+  - **Cassandra integration test** (`internal/meta/cassandra/store_integration_test.go::TestCassandraNullSentinelOnDisk`): separate-container test (its own `tccassandra.Run` to keep the existing `TestCassandraStoreContract` shape untouched). Creates `strata_nullsentinel` keyspace, opens a Store, `CreateBucket` + `SetBucketVersioning(Suspended)` + `PutObject(IsNull=true, versioned=true)`. Asserts in-memory `obj.VersionID == meta.NullVersionID` (canonical zero UUID, NOT the v1 sentinel). Round-trips through `GetObject(..., meta.NullVersionID)` AND `GetObject(..., meta.NullVersionLiteral)` to lock both the sentinel-as-string and the wire-literal "null" resolution paths. Then runs a raw `SELECT version_id FROM objects WHERE bucket_id=? AND key=? ALLOW FILTERING` via `store.Session()` to assert the on-disk timeuuid is exactly `00000000-0000-1000-8000-000000000000` (cassandra v1 sentinel) — catches both INSERT-side regression (cassandra rejects v0 outright) and read-side leak (versionFromCQL bypassed → v1 sentinel surfaces to S3 clients).
+  - **CI visibility** (`.github/workflows/ci.yml::integration-cassandra`): flipped `go test -tags integration` to `go test -v -tags integration` so the per-test names print in CI logs. Operators can grep for `TestCassandraNullSentinelOnDisk` and `TestCassandraStoreContract/VersioningNullSentinel` to confirm neither was silently skipped.
+- Files changed:
+  - `internal/config/config_test.go`
+  - `internal/meta/storetest/contract.go`
+  - `internal/meta/cassandra/store_integration_test.go`
+  - `.github/workflows/ci.yml`
+- Learnings for future iterations:
+  - **The `clearEnv(t)` helper in `internal/config/config_test.go` is required for any env-merge test.** Without it, the parent shell's `STRATA_*` vars leak into Load() and cause flaky pass/fail. The helper saves + unsets all `STRATA_*` keys at start and restores on `t.Cleanup`. Reuse it on every new config test that pokes `t.Setenv`.
+  - **`t.Setenv("X", "")` sets X to the empty string** (not unsetenv). On unix, `os.Setenv` with an empty value writes an empty string into the env block and `os.Getenv` returns `""` with the second return `true`. That is exactly what the koanf env provider sees and is what triggers the empty-value callback. Don't use `t.Setenv` to "unset" — use the `clearEnv` helper that calls `os.Unsetenv`.
+  - **TOML default for empty-env regression must come via `STRATA_CONFIG_FILE`, not just `defaults()`.** The defaults() in-memory path pre-loads via the `structs.Provider` BEFORE the env merge — so it always passes the `30s` assertion regardless. Routing through the file-load proves both the file provider AND the env provider treat empty values consistently.
+  - **Cassandra raw SELECT in the test file:** `store.Session() *gocql.Session` is the public hook; `cassandra_test` package has it. To convert `uuid.UUID` (google) → `gocql.UUID`, copy bytes via `var bg gocql.UUID; copy(bg[:], u[:])`. Don't reach for the private `gocqlUUID()` helper — exporting it just to be tested would widen the API surface for no production benefit.
+  - **`ALLOW FILTERING` is fine for single-row test fixtures** but NEVER in production code. The cassandra-gotchas section of CLAUDE.md flags this; the test comment also calls it out so it doesn't get copied into a hot path by a future refactor.
+  - **Separate test functions vs shared container:** added a second `tccassandra.Run` rather than refactoring `TestCassandraStoreContract` to share. ~30s extra cold boot is well under the 15-min CI integration budget; the alternative (TestMain or sync.Once package var) would entangle test lifecycles. Reuse this pattern when adding focused integration tests.
+  - **`tccassandra.Run` second-test discovered keyspace name uniqueness matters** — the contract test uses `strata_<seq>` with an atomic counter; `TestCassandraNullSentinelOnDisk` uses a fixed `strata_nullsentinel` since it's a single-keyspace test. Don't reuse a numbered keyspace name across separate containers — they don't share state but the visibility/labeling stays clearer with distinct names.
+---
+
+## 2026-05-06 - US-007 Refresh s3-tests baseline + ROADMAP close-flip + cycle-end merge to main
+- Implemented:
+  - **s3-tests rerun** against rebuilt `strata:ceph` (494b62b) on the cassandra+ceph stack (`make up-all` already up; rebuild + `docker compose up -d --force-recreate strata` with `STRATA_AUTH_MODE=required` + `STRATA_STATIC_CREDENTIALS` for main/alt/tenant + iam-root/iam-alt-root). Default subset (`run.sh`'s `DEFAULT_FILTER`): **162/177 = 91.5%** in 122s. **+12** over the prior 84.7% baseline. >= 90% threshold hit.
+  - **README baseline section** (`scripts/s3-tests/README.md`) appended with the `2026-05-06 — 494b62b + ralph/s3-compat-95 cycle (91.5%)` block: tests=177 / passed=162 / failed=15 / pass_rate=91.5%, deliberate-gaps split (8 SigV2 + 1 unreadable-prefix + 2 anonymous-listing under auth=required = 11), real-bugs split (3 multipart_copy GET-side checksum echo + 1 resend-finishes-last duplicate PartNumber = 4).
+  - **ROADMAP close-flips**:
+    - Headline: `84.7% (150/177)` → `91.5% (162/177)`.
+    - P1 `s3-tests 80% → 90%+` flipped Done with one-line summary + remaining-failure breakdown (commit `494b62b`).
+    - Both P1 latent entries flipped Done: `Cassandra null-version timeuuid sentinel` (prior cycle fix + US-006 contract test + integration test) and `koanf env provider does not skip empty env values` (prior cycle fix + US-006 regression test).
+    - 5 P2 entries flipped Done with cycle-of-record SHAs:
+      - `Multipart copy edges (UploadPartCopy)` — US-001 closed range parser + special-char URL handling; `_improper_range` passes; the remaining `_small`/`_special_names`/`_multiple_sizes` failures are on a separate axis. (`968a32a`)
+      - `?partNumber=N GET quoted-ETag wire shape` — US-002 wire-shape flip to whole-object multipart ETag. (`6b4e304`)
+      - `Multipart composite checksum CRC32 / CRC32C / CRC64NVME` — US-003 FULL_OBJECT combine math. (`798ab58`)
+      - `Multipart If-Match-on-missing-object error code` — US-004 404 NoSuchKey AWS-parity. (`8b5ca84`)
+      - `Multipart Complete leaks completing state on per-part ETag mismatch` — US-005 validate-then-flip (cassandra+memory; tikv was already correct). (`ba9368a`)
+  - **2 NEW P2 entries** filed under `## Correctness & consistency` for the 4 remaining real failures:
+    - `Multipart copy GET-side checksum echo divergence` — 3 tests (`_small`, `_special_names`, `_multiple_sizes`) fail boto3's `FlexibleChecksumError` on GET response read; data plane needs to recompute dest checksum from stored bytes rather than echo source manifest's composite.
+    - `Multipart Complete rejects duplicate PartNumber in Parts list` — `test_multipart_resend_first_finishes_last` sends `[{B-etag, 1}, {A-etag, 1}]` (re-upload of PartNumber=1 races a prior in-flight upload); Strata returns InvalidPartOrder via the strict-ascending `p.PartNumber <= prev` check. AWS/RGW dedupe by latest storage-side write.
+- Files changed:
+  - `scripts/s3-tests/README.md`
+  - `ROADMAP.md`
+  - `scripts/ralph/prd.json` (US-007 passes:true)
+  - `scripts/ralph/progress.txt` (this entry)
+  - `scripts/ralph/archive/2026-05-06-s3-compat-95/{prd.json,progress.txt}` (cycle-end snapshot)
+- Learnings for future iterations:
+  - **PRD claim vs s3-test reality.** US-001 / US-005 acceptance criteria listed specific s3-tests (`test_multipart_copy_small`, `_special_names`, `_multiple_sizes`, `test_multipart_resend_first_finishes_last`) as "must pass" — but those tests fail on AXES that the cycle's user stories did not actually cover. US-001 closed the range-parser + special-char-URL axis; the GET-side checksum echo axis was never touched. US-005 closed the completing-state-leak axis; the duplicate-PartNumber-in-Complete axis was never touched. Pattern: when a test fails on multiple independent failure modes, fixing one mode does not close the test. Future cycle prep should run the s3-tests once per story (not once per cycle) so the diagnostic surface is per-story, not per-cycle. Or: the story should explicitly enumerate the failure axis (parser? checksum? state-flip?) rather than just naming the test.
+  - **Rebuild cadence on `make up-all` stack.** The strata container was 24h old; running s3-tests against a stale image would have shown phantom "still-failing" tests. `docker compose -f deploy/docker/docker-compose.yml build strata && up -d --force-recreate strata` is the right re-run shape. Healthz/readyz check before pytest invocation catches pre-warm container state. Cassandra + ceph containers stay up across cycles (24h+ uptime is fine; their schema is created idempotently on strata startup).
+  - **s3-tests cache reuse**: `S3TESTS_DIR=/tmp/strata-s3tests.MO5E/s3-tests scripts/s3-tests/run.sh` skips the ~2-min virtualenv bootstrap. `/tmp/strata-s3tests.*` checkouts persist across reboot; reuse one rather than letting `mktemp -d` cold-clone every time.
+  - **Cycle-end merge shape**: `git checkout main && git merge --ff-only ralph/s3-compat-95 && git push origin main` (squash-merge gates this if branch policy demands; this repo accepts ff-only based on s3-compat-90 history `8ad9aa2`). Archive ahead of merge so the snapshot lives on the cycle branch (and after merge, on main).
+  - **ROADMAP close-flip discipline**: the close-flip MUST land in the same commit that closes the work. For US-007 the flip is the work, so it lands here. Never lazy-flip in a follow-up: future SHAs lose the connection between the entry-Done line and the SHA that closed it. New gaps (multipart copy GET-side checksum, duplicate-PartNumber Complete) get fresh entries under `## Correctness & consistency` per CLAUDE.md `Discovering a new gap` rule.
+---
