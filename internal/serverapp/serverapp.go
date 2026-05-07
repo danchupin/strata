@@ -5,6 +5,7 @@ package serverapp
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -548,6 +549,13 @@ func parseTiKVEndpoints(s string) []string {
 	return out
 }
 
+// jwtSharedSecretFile is the on-disk path consulted as the third stage of
+// loadJWTSecret. Mounted via the `strata-jwt-shared` named volume in the
+// `lab-tikv` compose profile so multi-replica deployments converge on the
+// same HS256 key without operator coordination. Variable (not const) so
+// tests can substitute a tempdir.
+var jwtSharedSecretFile = "/etc/strata/jwt-shared/secret"
+
 // loadJWTSecret returns the HS256 key used to sign /admin/v1 session cookies
 // plus the file path used by the rotate-secret endpoint (US-019).
 //
@@ -555,7 +563,10 @@ func parseTiKVEndpoints(s string) []string {
 //  1. STRATA_CONSOLE_JWT_SECRET (32 bytes hex)            — env wins
 //  2. STRATA_JWT_SECRET_FILE (default /etc/strata/jwt-secret) — read at boot
 //     so rotated keys persist across restarts
-//  3. generate ephemeral 32-byte secret + WARN
+//  3. /etc/strata/jwt-shared/secret — file-based atomic bootstrap shared
+//     across replicas via a docker volume; first writer wins per POSIX
+//     O_EXCL, losers re-read with backoff
+//  4. generate ephemeral 32-byte secret + WARN
 //
 // The returned file path is what handleRotateJWTSecret writes to; an empty
 // string means rotation falls back to adminapi.DefaultJWTSecretFile.
@@ -564,19 +575,75 @@ func loadJWTSecret(logger *slog.Logger) ([]byte, string, string) {
 	if target == "" {
 		target = adminapi.DefaultJWTSecretFile
 	}
-	if v := os.Getenv("STRATA_CONSOLE_JWT_SECRET"); v != "" {
-		return adminapi.DecodeSecret(v), "STRATA_CONSOLE_JWT_SECRET", target
+	return loadJWTSecretFrom(os.Getenv("STRATA_CONSOLE_JWT_SECRET"), target, jwtSharedSecretFile, logger)
+}
+
+func loadJWTSecretFrom(envSecret, secretFile, sharedFile string, logger *slog.Logger) ([]byte, string, string) {
+	if envSecret != "" {
+		return adminapi.DecodeSecret(envSecret), "STRATA_CONSOLE_JWT_SECRET", secretFile
 	}
-	if b, ok := readJWTSecretFile(target, logger); ok {
-		return b, "STRATA_JWT_SECRET_FILE", target
+	if b, ok := readJWTSecretFile(secretFile, logger); ok {
+		return b, "STRATA_JWT_SECRET_FILE", secretFile
+	}
+	if b, ok := bootstrapSharedJWTSecret(sharedFile, logger); ok {
+		return b, "STRATA_JWT_SHARED", secretFile
 	}
 	b, err := adminapi.GenerateSecret()
 	if err != nil {
 		logger.Warn("admin: generate jwt secret", "error", err.Error())
-		return nil, "ephemeral-error", target
+		return nil, "ephemeral-error", secretFile
 	}
 	logger.Warn("admin: STRATA_CONSOLE_JWT_SECRET unset; generated ephemeral 32-byte secret. Sessions invalidate on restart. Set the env explicitly in production.")
-	return b, "ephemeral", target
+	return b, "ephemeral", secretFile
+}
+
+// bootstrapSharedJWTSecret implements the file-based atomic bootstrap used
+// by the multi-replica lab profile. Fast path: read an existing file. Cold
+// path: try O_EXCL write, on success persist a fresh hex-encoded 32-byte
+// secret, on EEXIST re-read with up to 3 × 100 ms retries to absorb the
+// fsync race window between the writer's create and its WriteString. Any
+// other error (parent dir missing, permission denied) returns ok=false so
+// the caller falls through to the ephemeral generator.
+func bootstrapSharedJWTSecret(path string, logger *slog.Logger) ([]byte, bool) {
+	if path == "" {
+		return nil, false
+	}
+	if b, ok := readJWTSecretFile(path, logger); ok {
+		return b, true
+	}
+	secret, err := adminapi.GenerateSecret()
+	if err != nil {
+		logger.Warn("admin: shared jwt: generate", "path", path, "error", err.Error())
+		return nil, false
+	}
+	encoded := hex.EncodeToString(secret)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	switch {
+	case err == nil:
+		if _, werr := f.WriteString(encoded); werr != nil {
+			_ = f.Close()
+			_ = os.Remove(path)
+			logger.Warn("admin: shared jwt: write", "path", path, "error", werr.Error())
+			return nil, false
+		}
+		if cerr := f.Close(); cerr != nil {
+			logger.Warn("admin: shared jwt: close", "path", path, "error", cerr.Error())
+			return nil, false
+		}
+		return secret, true
+	case errors.Is(err, os.ErrExist):
+		for range 3 {
+			time.Sleep(100 * time.Millisecond)
+			if b, ok := readJWTSecretFile(path, logger); ok {
+				return b, true
+			}
+		}
+		logger.Warn("admin: shared jwt: lost create race but peer file never readable", "path", path)
+		return nil, false
+	default:
+		logger.Warn("admin: shared jwt: open", "path", path, "error", err.Error())
+		return nil, false
+	}
 }
 
 // readJWTSecretFile reads a hex-encoded secret previously written by

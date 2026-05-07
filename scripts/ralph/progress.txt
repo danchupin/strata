@@ -9,6 +9,7 @@ Cycle: ralph/multi-replica-cluster
 - ROADMAP close-flip: new entry under ## Web UI, format `~~**P3 — title.**~~ — **Done.** ... (commit `<sha>`)`. Use `<pending>` placeholder if SHA needed inline; follow-up commit fills it (per CLAUDE.md).
 - compose `depends_on` only resolves services in the active profile. To depend on a profile-gated service from a different profile, list BOTH profiles on the dependency (e.g. `pd` carries `profiles: ["tikv", "lab-tikv"]`). Otherwise `compose config -q` rejects with "depends on undefined service".
 - nginx `nginx -t` resolves upstream hostnames at parse time; if the upstream block names docker service hosts (e.g. `strata-tikv-a`), the syntax-test container needs `--add-host=<name>:127.0.0.1` to resolve. Real DNS happens via Docker embedded resolver at runtime.
+- File-based atomic-bootstrap pattern (POSIX O_EXCL): `os.OpenFile(path, O_WRONLY|O_CREATE|O_EXCL, 0600)`. Writer-side success → write → close → return. Loser EEXIST → re-read up to 3× with 100 ms backoff to absorb fsync race. No lock-manager / no leader.Session needed when the bootstrap precedes locker construction. Used by `serverapp.bootstrapSharedJWTSecret` for /etc/strata/jwt-shared/secret.
 ---
 
 ## 2026-05-07 16:10 - US-001
@@ -53,4 +54,20 @@ Cycle: ralph/multi-replica-cluster
   - `client_max_body_size 0` is required so multipart uploads (which can be hundreds of MB) aren't bounced with 413 at the LB tier. Without this default 1m kicks in for nginx 1.27.
   - `proxy_request_buffering off` + `proxy_buffering off` together let the gateway stream large PUTs straight through the LB instead of staging the whole body in nginx's tmpdir first. Required for SigV4 streaming (chunked-encoded uploads must reach upstream verbatim, not via re-buffer).
   - Default `proxy_http_version 1.0` strips chunked encoding; setting it to 1.1 keeps chunking + keepalive working end-to-end.
+---
+
+## 2026-05-07 17:10 - US-004
+- Added jwt_secret loadJWTSecretFrom(envSecret, secretFile, sharedFile, logger) split out of loadJWTSecret. Resolution order now: STRATA_CONSOLE_JWT_SECRET (env) > STRATA_JWT_SECRET_FILE > /etc/strata/jwt-shared/secret > ephemeral.
+- New bootstrapSharedJWTSecret(path, logger) implements POSIX O_EXCL atomic bootstrap: fast-path read → on miss, generate 32 random bytes, write hex with O_EXCL 0600. EEXIST (race loser) → re-read up to 3× / 100 ms backoff. Missing parent dir / unexpected error → false (caller falls through to ephemeral).
+- Source label "STRATA_JWT_SHARED" surfaces via the existing `admin jwt secret` info-log. Ephemeral-prefix check unchanged so the rotate-banner UX stays identical.
+- Env-set path NEVER touches the shared file (verified by TestLoadJWTSecretFrom_EnvWinsAndDoesNotTouchSharedFile + TestLoadJWTSecretFrom_SecretFileWinsAndDoesNotTouchSharedFile).
+- Tests in internal/serverapp/jwt_secret_test.go: empty-dir creates file, pre-existing returned verbatim, 4-way concurrent goroutines all converge on identical 32 bytes, empty-path skip, missing-parent-dir falls through, env-wins-no-shared-touch, secret-file-wins-no-shared-touch, fall-through-to-shared.
+- jwtSharedSecretFile is a package-level var (not const) so tests don't need to override the production path. loadJWTSecretFrom takes the shared path as a parameter — unit-testable without env juggling.
+- Files changed: internal/serverapp/serverapp.go, internal/serverapp/jwt_secret_test.go, scripts/ralph/prd.json, scripts/ralph/progress.txt.
+- **Learnings for future iterations:**
+  - POSIX O_EXCL at file-open is the cheapest "first writer wins" primitive that doesn't need a lock manager. Works across processes / containers as long as both share the underlying filesystem (named docker volume satisfies that).
+  - Don't try to be clever with tmp-file + rename here: PRD prescribed O_EXCL on the actual path because the loser must see the same path EEXIST and read THAT path. Tmp+rename hides EEXIST under "rename-replaces-existing" semantics on POSIX, defeating the race detection.
+  - The 100ms × 3 retry isn't paranoia — write→close happens after O_EXCL create, so a concurrent reader can see an empty/short file in the kernel page cache between the writer's `OpenFile` return and `Close`. The re-read loop converges as soon as the writer finishes (typically <1 ms; 300 ms cap is generous).
+  - readJWTSecretFile already handles short / empty files by returning ok=false. Reusing it for both fast-path and post-race read keeps the contract uniform (>= 16 byte length minimum).
+  - Splitting loadJWTSecret into loadJWTSecret (env-reading) + loadJWTSecretFrom (pure) made the env-not-touching-file invariant trivially testable. The same pattern should replace any "env + filesystem + fallback" function whose unit tests want to assert side-effect absence.
 ---
