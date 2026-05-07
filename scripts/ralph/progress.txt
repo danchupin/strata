@@ -116,3 +116,19 @@ Cycle: ralph/multi-replica-cluster
   - For the worker-rotation rollback, `dockerStart(...).catch(() => undefined)` in the finally branch protects against test-already-failed paths — the docker daemon may have already cleaned up the container, and we don't want the cleanup error to mask the real assertion failure.
   - Playwright's `page.request` shares cookies with the page navigation, so `await page.request.get('/admin/v1/cluster/nodes')` after `login(page)` carries the `strata_session` cookie automatically — no manual header plumbing.
 ---
+
+## 2026-05-07 18:10 - US-007
+- New docs/multi-replica.md operator runbook: why-replicas + replica-count table, JWT secret distribution model (env > STRATA_JWT_SECRET_FILE > shared file via O_EXCL atomic bootstrap > ephemeral), nginx LB wiring + streaming-friendly knobs, bring-up via make up-lab-tikv, failure-scenario expected-behaviour table, propagation budget for chip-rotation (T+0 holder dies → ≤35s chip moves), smoke + e2e tooling matrix.
+- ROADMAP.md ## Web UI: new entry `~~**P3 — Multi-replica lab (TiKV).**~~ — **Done.** ... (commit `<pending>`)` — close-flip lands in this same commit per CLAUDE.md rule. SHA backfilled by follow-up commit on main.
+- docs/ui.md Capability Matrix: new `MultiReplicaCluster` row (Phase 3 ✓) keeps the matrix shape consistent.
+- tasks/prd-multi-replica-cluster.md removed per CLAUDE.md PRD lifecycle rule (canonical record after this point is the ralph snapshot, archived by ralph.sh on COMPLETE).
+- prd.json US-007 flipped to passes:true; progress.txt this entry appended.
+- go vet ./... clean.
+- Cycle-end merge plan: ff-only merge ralph/multi-replica-cluster into main → push origin/main → SHA-backfill commit on main (mirrors web-ui-storage-status `c373762` shape) → archive_cycle (handled by ralph.sh on COMPLETE) commits prd.json + progress.txt under scripts/ralph/archive/2026-05-07-multi-replica-cluster-complete/.
+- Files changed: docs/multi-replica.md (new), docs/ui.md, ROADMAP.md, tasks/prd-multi-replica-cluster.md (deleted), scripts/ralph/prd.json, scripts/ralph/progress.txt.
+- **Learnings for future iterations:**
+  - Cycle-close commit should land the ROADMAP entry with `(commit `<pending>`)` then a single follow-up "docs: roadmap — stamp closing SHA" commit on main. Same shape as web-ui-storage-status (`cde5581` then `c373762`). Don't try to amend; CI gating + reviewer subscriptions hate amend-races.
+  - Capability Matrix in docs/ui.md is the canonical "what surfaces does the console cover" registry; new cycles that touch console UX or operator-visible behaviour add a row here even when the surface isn't a brand-new page (multi-replica is observed via Cluster Overview, but the matrix row makes the cycle's contribution discoverable).
+  - tasks/prd-*.md gets DELETED at cycle close (not moved to tasks/archive/) — the ralph snapshot is the canonical record. tasks/archive/ is reserved for design intent that has no ralph snapshot.
+  - docs/multi-replica.md uses the same shape as docs/storage.md: short why, table of replica-count tradeoffs, env-resolution table, failure-scenarios table, smoke+e2e tooling table, deploy considerations footer. Operator-facing docs in this repo follow this spine.
+---

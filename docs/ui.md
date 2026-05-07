@@ -167,6 +167,7 @@ Phase 3 layers debug tooling on top without removing Phase 2 surface.
 | ShardDistribution | — | — | ✓ |
 | ReplicationLag | — | — | ✓ |
 | StorageStatus | — | — | ✓ |
+| MultiReplicaCluster | — | — | ✓ |
 
 ## Operational notes
 
