@@ -41,17 +41,17 @@ Both `internal/gc/worker.go::drainCount` and `internal/lifecycle/worker.go` walk
 - [ ] Typecheck passes
 - [ ] Tests pass
 
-### US-003: Bench harness — cmd/strata-bench-gc + cmd/strata-bench-lifecycle
+### US-003: Bench subcommands — strata-admin bench-gc + strata-admin bench-lifecycle
 **Description:** As a maintainer, I want a one-shot benchmark harness that quantifies the throughput curve for both workers across concurrency levels so the Phase 1 win is documented and Phase 2 targets are quantified.
 
 **Acceptance Criteria:**
-- [ ] New `cmd/strata-bench-gc/main.go`: connects to a configured `meta.Store` + `data.Backend` (via `STRATA_*` envs, same shape as `strata server`); pre-seeds N synthetic GCEntry rows (default N=10000, override via `--entries=`); runs the gc worker once with `--concurrency=N` (default 1); reports `{entries, concurrency, elapsed_ms, throughput_per_sec}` as a single JSON line on stdout and as a `strata_gc_bench_throughput{concurrency="N"}` Prometheus gauge published to the configured push gateway (`STRATA_PROM_PUSHGATEWAY` env, optional).
-- [ ] Same shape `cmd/strata-bench-lifecycle/main.go`: pre-seeds a bucket with N objects with a 1-day expiration rule + an Mtime in the past; runs lifecycle once with the configured concurrency; reports as above.
-- [ ] Both bench commands clean up state at exit (`defer` block deletes seeded entries / objects) so the same lab can run benchmarks repeatedly without disk leak.
-- [ ] `Makefile` adds `bench-gc` + `bench-lifecycle` targets that run the bench against `up-lab-tikv` for `--concurrency=1,4,16,64,256` (one process per concurrency level) and `tee` the JSON-line output to `bench-gc-results.jsonl` / `bench-lifecycle-results.jsonl`.
+- [ ] **NO new top-level binary.** The repo's "two binaries" rule (CLAUDE.md `## Common commands`: `strata`, `strata-admin`) holds — add benchmarks as `strata-admin` subcommands instead. New file `cmd/strata-admin/bench_gc.go`: connects to a configured `meta.Store` + `data.Backend` (via the same `STRATA_*` envs `strata-admin rewrap` already consumes); pre-seeds N synthetic GCEntry rows (default N=10000, override via `--entries=`); runs the gc worker once with `--concurrency=N` (default 1); reports `{entries, concurrency, elapsed_ms, throughput_per_sec}` as a single JSON line on stdout AND as a `strata_gc_bench_throughput{concurrency="N"}` Prometheus gauge published to the optional push gateway (`STRATA_PROM_PUSHGATEWAY` env — NEW env, no existing reference; document in `docs/benchmarks/gc-lifecycle.md`).
+- [ ] Same shape `cmd/strata-admin/bench_lifecycle.go`: pre-seeds a bucket with N objects with a 1-day expiration rule + an Mtime in the past; runs lifecycle once with the configured concurrency; reports as above.
+- [ ] Both subcommands clean up state at exit (`defer` block deletes seeded entries / objects) so the same lab can run benchmarks repeatedly without disk leak.
+- [ ] `Makefile` adds `bench-gc` + `bench-lifecycle` targets that invoke `strata-admin bench-gc` / `bench-lifecycle` against `make up-lab-tikv` for `--concurrency=1,4,16,64,256` (one invocation per level) and `tee` the JSON-line output to `bench-gc-results.jsonl` / `bench-lifecycle-results.jsonl`.
 - [ ] Bench results land in `docs/benchmarks/gc-lifecycle.md` (US-005 — separate doc story).
 - [ ] Typecheck passes
-- [ ] Tests pass (the bench commands themselves don't have unit tests — they ARE the tests; add a smoke test ensuring they exit 0 against in-memory backends with --entries=10).
+- [ ] Tests pass (subcommands themselves don't have unit tests — they ARE the tests; add a smoke test in `cmd/strata-admin/bench_gc_test.go` ensuring `bench-gc --entries=10 --concurrency=1` exits 0 against in-memory backends).
 
 ### US-004: Run the bench against lab-tikv + capture throughput curve
 **Description:** As a maintainer, I want the actual numbers measured on the canonical lab-tikv stack so the Phase 1 win is concrete (not a hypothetical 32× speedup).
@@ -104,7 +104,7 @@ Both `internal/gc/worker.go::drainCount` and `internal/lifecycle/worker.go` walk
 
 ## Design Considerations
 
-- **errgroup + SetLimit** is the canonical Go idiom for bounded parallelism. `golang.org/x/sync/errgroup` is already in `go.mod` (used by `internal/s3api/multipart.go`). No new dep.
+- **errgroup + SetLimit** is the canonical Go idiom for bounded parallelism. `golang.org/x/sync` is in `go.mod` as an INDIRECT require (transitive). The first direct use (this PRD) will promote it to a direct require — `go mod tidy` after the import is added handles this. No new external dep, just a reclassification in go.mod.
 - **Per-entry log on failure, not whole-batch fail.** Matches today's behaviour. The whole point is "drain as much as possible per tick" — abandoning the batch on the first failure halves throughput when one OSD flakes.
 - **`atomic.Int64` for the `processed` counter.** Cleaner than `sync.Mutex` for a single counter; matches Go idiom for atomic increments.
 - **Concurrency cap = 256.** Above that the meta backend's LWT throughput (Cassandra ~1k/s per node, TiKV ~5k/s per region) becomes the bottleneck — pumping more goroutines at it just queues. Phase 2 sharding is the right move at that scale.
@@ -113,7 +113,7 @@ Both `internal/gc/worker.go::drainCount` and `internal/lifecycle/worker.go` walk
 ## Technical Considerations
 
 - **`gc.Worker.drainCount` already returns the count.** Wrap the inner loop in errgroup; outer per-batch logic (paginate `ListGCEntries` until short batch) stays unchanged. Test path: in-memory `data.Backend` + `meta.Store` give synchronous deletes — concurrency win is measurable but smaller; against RADOS/TiKV the round-trip latency dominates and the speedup approaches Concurrency × (within meta backend's LWT cap).
-- **Lifecycle worker has nested loops** (bucket → rule → object → version). Apply errgroup at the per-object level (most leaf-y); the per-bucket loop stays sequential because cross-bucket parallelism is Phase 2 territory (per-bucket sharded leaders) and applying errgroup at the bucket level would pin the elected leader as a wider bottleneck.
+- **Lifecycle worker has nested loops** (`runOnce` → `processBucket` → `for _, o := range res.Objects` → `for _, v := range res.Versions`). Apply errgroup at the per-object / per-version level (most leaf-y, where the meta+data round-trip blocks). Per-bucket outer loop stays sequential because cross-bucket parallelism is Phase 2 territory (per-bucket sharded leaders) and applying errgroup at the bucket level would pin the elected leader as a wider bottleneck. `gc.Worker` simpler — single per-entry loop in `drainCount`, errgroup goes there directly.
 - **Per-entry failures don't cancel siblings.** errgroup's default behaviour DOES cancel the parent ctx on first error. Use `errgroup.Group` with the ctx returned BUT capture errors per-goroutine into a `slog.Logger.Warn` line + return nil from the goroutine — the group never sees an error, so the ctx is never cancelled. (This is the standard "log + continue" pattern.)
 - **Bench harness pushgateway hop is optional.** Only push if `STRATA_PROM_PUSHGATEWAY` is set; otherwise stdout JSON is the only output. CI doesn't have a pushgateway and shouldn't need one.
 - **Lab-tikv stack** (TiKV + RADOS) is the canonical bench target. Cassandra path probably has different LWT throughput but the same shape; future work — bench against `up-all` profile too.
