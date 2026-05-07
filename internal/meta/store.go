@@ -801,6 +801,36 @@ type Store interface {
 	Close() error
 }
 
+// MetaHealthReport is the operator-facing snapshot returned by HealthProbe.
+// One row per peer (Cassandra: system.peers + system.local merge; TiKV: PD
+// /pd/api/v1/stores; memory: a single self-row). Warnings carry cluster-wide
+// anomalies that don't fit on a per-node row (schema drift, raft-leader
+// imbalance, etc.).
+type MetaHealthReport struct {
+	Backend           string       `json:"backend"`
+	Nodes             []NodeStatus `json:"nodes"`
+	ReplicationFactor int          `json:"replication_factor"`
+	Warnings          []string     `json:"warnings,omitempty"`
+}
+
+// NodeStatus is a single peer/store row in MetaHealthReport.
+type NodeStatus struct {
+	Address       string `json:"address"`
+	State         string `json:"state"`
+	SchemaVersion string `json:"schema_version,omitempty"`
+	DataCenter    string `json:"data_center,omitempty"`
+	Rack          string `json:"rack,omitempty"`
+}
+
+// HealthProbe is the optional capability surface that lets the storage page
+// (US-001 of the web-ui-storage-status cycle) render meta backend topology.
+// Cassandra/Scylla, TiKV, and the in-memory store all implement it; the
+// gateway adminapi type-asserts the live Store and surfaces the report at
+// GET /admin/v1/storage/meta.
+type HealthProbe interface {
+	MetaHealth(ctx context.Context) (*MetaHealthReport, error)
+}
+
 // RangeScanStore is the optional capability surface for backends whose
 // physical layout supports a single ordered range scan over (bucket, prefix).
 // Backends that implement it advertise to the gateway "ListObjects can be

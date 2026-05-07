@@ -2367,9 +2367,25 @@ func (s *Store) UpdateAdminJob(ctx context.Context, job *meta.AdminJob) error {
 
 func (s *Store) Close() error { return nil }
 
+// MetaHealth returns a single-node report describing the in-process memory
+// backend. Used for /admin/v1/storage/meta in dev / smoke deployments.
+func (s *Store) MetaHealth(ctx context.Context) (*meta.MetaHealthReport, error) {
+	return &meta.MetaHealthReport{
+		Backend: "memory",
+		Nodes: []meta.NodeStatus{{
+			Address:    "in-process",
+			State:      "UP",
+			DataCenter: "local",
+			Rack:       "local",
+		}},
+		ReplicationFactor: 1,
+	}, nil
+}
+
 // Compile-time guarantees that *Store satisfies both meta.Store and the
 // optional meta.RangeScanStore capability surface (US-012).
 var (
 	_ meta.Store          = (*Store)(nil)
 	_ meta.RangeScanStore = (*Store)(nil)
+	_ meta.HealthProbe    = (*Store)(nil)
 )

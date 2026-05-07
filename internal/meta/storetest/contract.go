@@ -54,6 +54,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"ManagedPolicyCRUD", caseManagedPolicyCRUD},
 		{"UserPolicyAttach", caseUserPolicyAttach},
 		{"IAMAccessKeyDisabled", caseIAMAccessKeyDisabled},
+		{"MetaHealth", caseMetaHealth},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1936,6 +1937,41 @@ func caseIAMAccessKeyDisabled(t *testing.T, s meta.Store) {
 
 	if _, err := s.UpdateIAMAccessKeyDisabled(ctx, "AKIA-MISSING", true); err != meta.ErrIAMAccessKeyNotFound {
 		t.Errorf("missing: got %v want ErrIAMAccessKeyNotFound", err)
+	}
+}
+
+// caseMetaHealth checks the optional meta.HealthProbe surface on backends
+// that opt into it. Memory + Cassandra + TiKV implement it; this case
+// type-asserts and skips for any future backend that doesn't.
+func caseMetaHealth(t *testing.T, s meta.Store) {
+	probe, ok := s.(meta.HealthProbe)
+	if !ok {
+		t.Skip("backend does not implement meta.HealthProbe")
+	}
+	ctx := context.Background()
+	report, err := probe.MetaHealth(ctx)
+	if err != nil {
+		t.Fatalf("MetaHealth: %v", err)
+	}
+	if report == nil {
+		t.Fatal("MetaHealth: nil report")
+	}
+	if report.Backend == "" {
+		t.Errorf("MetaHealth: backend label empty")
+	}
+	// Allow either nodes or warnings (the TiKV in-process test rig drives
+	// the Store via openWithBackend without PD endpoints, so MetaHealth
+	// degrades to a no-PD warning row instead of failing).
+	if len(report.Nodes) == 0 && len(report.Warnings) == 0 {
+		t.Errorf("MetaHealth: report has no nodes and no warnings")
+	}
+	for i, n := range report.Nodes {
+		if n.Address == "" {
+			t.Errorf("MetaHealth: node[%d] missing Address", i)
+		}
+		if n.State == "" {
+			t.Errorf("MetaHealth: node[%d] missing State", i)
+		}
 	}
 }
 

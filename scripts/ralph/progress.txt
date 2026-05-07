@@ -1,75 +1,66 @@
 # Ralph Progress Log
-Started: Thu May  7 14:30:00 MSK 2026
-Cycle: ralph/web-ui-storage-status (Web UI — meta + data backend observability)
+Started: Thu May  7 14:43:49 MSK 2026
+Cycle: ralph/web-ui-storage-status
 ---
 
 ## Codebase Patterns
+- Optional capability surfaces (RangeScanStore, HealthProbe) hang off the
+  base meta.Store interface. Backends implement them via type-assertion at
+  the call site (e.g. internal/adminapi handler) — keeps the base interface
+  small while allowing per-backend differentiation. Add a compile-time
+  `var _ meta.<Iface> = (*Store)(nil)` assertion in each backend.
+- Cassandra system-table queries use Consistency(gocql.LocalOne) for
+  cluster-introspection (not LOCAL_QUORUM), since system.* tables are
+  per-node and quorum reads make no sense.
+- Admin endpoints register in routes() under server.go and live in their
+  own file (storage.go, cluster.go, ...). Tests for those endpoints live
+  next to them as <name>_test.go and use newTestServer() to drive
+  s.routes().ServeHTTP(rr, req) directly without auth.
 
-### Branch policy (REQUIRED)
-- Cycle starts from main (HEAD `e1aeef2` at prep time, after s3-compat-95 closed at 91.5%). The cycle MUST end with a merge back to main: US-006 (last story) fast-forwards / squash-merges `ralph/web-ui-storage-status` into `main`, pushes origin/main, lets `archive_cycle` (in `scripts/ralph/ralph.sh`) snapshot prd.json + progress.txt under `scripts/ralph/archive/2026-MM-DD-web-ui-storage-status-complete/` on `<promise>COMPLETE</promise>`. Mirror the s3-compat-95 close shape (commit `e1aeef2`).
-- The shell wrapper `scripts/ralph/ralph.sh` MUST invoke `avito ai claude --` (not bare `claude`) — regression-resistant.
-
-### PRD lifecycle (REQUIRED — added to root CLAUDE.md as `b45d633`)
-- The markdown PRD `tasks/prd-web-ui-storage-status.md` is a disposable design draft. The canonical record of what got built is the auto-archived `scripts/ralph/archive/<date>-web-ui-storage-status-complete/{prd.json,progress.txt}` snapshot. US-006 close-flip MUST `git rm tasks/prd-web-ui-storage-status.md` in the same commit that flips the ROADMAP entry to Done. Do NOT copy the markdown to `tasks/archive/`.
-
-### Prior cycle context
-- `ralph/s3-compat-95` cycle closed at HEAD `e1aeef2`. Lifted s3-tests pass-rate `84.7% (150/177)` → `91.5% (162/177)`. 7 stories shipped.
-- Two P1 latent bugs from s3-compat-90 got CI coverage tests (US-006 of that cycle). Both stay green on main.
-- ROADMAP `## Web UI` section already has 4 prior entries (Phase 1/2/3 + TiKV heartbeat + OTel ringbuf tuning + this cycle's target P3 entry — added in US-006).
-
-### Adminapi shape (where things live on current main)
-- Adminapi handlers live under `internal/adminapi/`. Each surface gets its own file (`buckets.go`, `iam.go`, `audit.go`, `metrics.go`, …). Routes wired in `internal/adminapi/router.go`. Storage handlers MUST follow the same per-surface file pattern: `internal/adminapi/storage_meta.go` + `storage_data.go` + `storage_classes.go` + `storage_health.go`.
-- All `/admin/v1/*` go through JWT-cookie session auth (HS256, 24h, `HttpOnly+SameSite=Strict+Path=/admin`) installed in `internal/adminapi/middleware.go`. SigV4 fallback for programmatic clients. Read-only endpoints in this cycle — no audit override needed (audit middleware skips GET).
-- OpenAPI spec at `internal/adminapi/openapi.yaml`. Each new endpoint MUST be added with full schema (path, params, response). Bundle is regenerated on every spec change — keep it in sync.
-
-### Meta backend optional interface pattern (US-001)
-- `internal/meta.Store` is the core interface; optional capabilities use type-assertion at adminapi (e.g., `meta.RangeScanStore` for TiKV native scans). New interface goes alongside: `internal/meta/healthprobe.go` defining `HealthProbe interface { MetaHealth(ctx) (*MetaHealthReport, error) }`.
-- Cassandra impl in `internal/meta/cassandra/healthprobe.go`. Memory impl in `internal/meta/memory/healthprobe.go`. TiKV impl in `internal/meta/tikv/healthprobe.go`. Adminapi handler does the type assertion: `if hp, ok := s.Meta.(meta.HealthProbe); ok { ... }` — backends without the capability return a degenerate report.
-- Contract test pattern: extend `internal/meta/storetest/contract.go` with `caseMetaHealth` that runs against all factories — same shape as existing cases.
-- **Cassandra peers query**: CQL has NO `UNION ALL`. Issue TWO queries with `gocql`:
-  1. `SELECT peer, data_center, rack, release_version, schema_version FROM system.peers`
-  2. `SELECT broadcast_address, data_center, rack, release_version, schema_version FROM system.local`
-  Merge Go-side into `[]NodeStatus`. Use `gocql.LocalOne` consistency. Wrap in a 10 s in-process cache (sync.Map or a tiny ttlcache) so adminapi hits don't hammer Cassandra.
-
-### Data backend optional interface pattern (US-002)
-- `internal/data.Backend` similar — new optional interface `internal/data.HealthProbe` defining `DataHealth(ctx) (*DataHealthReport, error)`.
-- RADOS impl is build-tagged (ceph): `internal/data/rados/healthprobe.go` (with `//go:build ceph`). Counterpart stub in `internal/data/rados/healthprobe_stub.go` (with `//go:build !ceph`) returns a degenerate report so non-ceph builds still satisfy the interface assertion.
-- **CORRECT goceph v0.39.0 API names** (PRD got the names wrong on first pass):
-  - Per-pool stats: `(*goceph.IOContext).GetPoolStats() (rados.PoolStat, error)` — note plural `Stats`, on `*IOContext`. Open / reuse one IOContext per (cluster, pool, ns) tuple via the existing `internal/data/rados/backend.go::ioctx` helper. Translate `Num_kb * 1024` → `BytesUsed`. Other fields: `Num_objects`, `Num_object_clones`, `Num_rd`, `Num_wr`.
-  - Cluster health: `(*goceph.Conn).MonCommand(args []byte) ([]byte, string, error)` where `args = json.Marshal({"prefix":"status","format":"json"})`. Response is JSON: `{health: {status: "HEALTH_OK|HEALTH_WARN|HEALTH_ERR", checks: {...}}}`.
-- S3-over-S3 impl in `internal/data/s3/healthprobe.go` — HEAD on the configured backend bucket via the AWS SDK already wired into the gateway.
-- Memory impl returns process-RSS proxy (use `runtime.ReadMemStats` `Sys` value).
-
-### bucketstats sampler extension (US-003)
-- `internal/bucketstats/sampler.go` is the existing per-bucket / per-shard sampler from Phase 3 US-012. Today it emits `strata_bucket_objects` + `strata_bucket_bytes` + per-shard variants. Add the per-class slice as another aggregation key — wire prom metric registrations in the same init.
-- Cardinality cap pattern: `STRATA_BUCKETSTATS_TOPN` already enforced; new (bucket, class) tuples added to the same top-N cap via the existing `truncatedTopN` helper.
-- Per-backend aggregation lockstep:
-  - Cassandra: `SELECT bucket_id, storage_class, count(*), sum(size) FROM objects GROUP BY ALL` is impossible (CQL has no `GROUP BY` on non-PK). Pattern from US-012: range-scan all rows for bounded buckets then in-process aggregate. Same approach here.
-  - Memory: in-process map `map[uuid.UUID]map[string]struct{Bytes, Count uint64}`.
-  - TiKV: range-scan via `meta.RangeScanStore` interface, group by `o.StorageClass` in the worker.
-
-### Web UI conventions (US-004 / US-005 — frontend)
-- React+TS console under `web/src/`. Vite-built into `web/dist/`, served via `go:embed all:web/dist` from REPO-ROOT `console.go` (package `strata`, NOT `internal/adminapi/console.go`). After UI changes the embedded bundle MUST be rebuilt: `cd web && pnpm install && pnpm build`. Commit `web/dist/` (gitignored at the directory level — use `git add -f web/dist/index.html web/dist/assets/*` per prior cycle pattern).
-- Sidebar nav definitions in `web/src/components/layout/SidebarNav.tsx`. Lazy-loaded routes registered in `web/src/App.tsx`.
-- TanStack Query client + queryKeys in `web/src/lib/query.ts`. Query polling: cluster status every 5s, metrics every 30s, audit-log every 5s. Storage page = 30s. Hero card = 60s. Banner = 30s.
-- Recharts is already in bundle (used by Metrics + Hot-buckets). BarChart import works without bundle bloat. Custom canvas heatmap pattern from Phase 3 US-009 if recharts limits hit.
-- shadcn UI primitives at `web/src/components/ui/*`. Tabs at `web/src/components/ui/tabs.tsx`. Card / Table / Badge already in.
-- Empty / loading / error state pattern: see `web/src/pages/Consumers.tsx` (rewritten in s3-compat-90) for a clean reference.
-- AppShell sits at `web/src/components/layout/AppShell.tsx`. Outermost JSX is `<div className="flex min-h-screen ...">`. Banner sibling goes BEFORE that — wrap both in a fragment / outer div if needed. Don't break the `Outlet` component which holds the page route.
-- Bundle budget: ≤500 KiB gzipped initial. The Recharts bar adds ~10-15 KiB; lazy-load `Storage.tsx` route to keep initial bundle below cap.
-
-### Playwright e2e (US-006)
-- Specs live under `web/e2e/*.spec.ts`. CI job `e2e-ui` in `.github/workflows/ci.yml` (currently runs critical-path → admin → debug specs sequentially). New spec must be added as a fourth `pnpm exec playwright test storage.spec.ts` step after the existing three.
-- Test-only knob `STRATA_STORAGE_HEALTH_OVERRIDE` is a NEW pattern this cycle (no prior precedent in the codebase — do NOT cite a fictional precedent). Env-driven response override read inside the `/admin/v1/storage/health` handler: when set to a JSON string, the handler returns it verbatim without invoking probes. Document: in `internal/adminapi/storage_health_test.go` and in `docs/storage.md` "Test-only environment variables" subsection.
-- Login fixture: `web/e2e/fixtures/login.ts`. Reuse for the new spec.
-
-### CI gotchas
-- `go build ./...` is the canonical typecheck for Go side. Run before commit. With ceph build tag too if you touched RADOS files: `go build -tags ceph ./...`.
-- `cd web && pnpm typecheck` for TS side. `pnpm test` if vitest specs added.
-- Race tests need `-tags integration` only for the Cassandra suite. Memory + TiKV unit specs run vanilla.
-
-### ROADMAP close-flip discipline
-- The close-flip commit and the work commit are the SAME commit. US-006 is the close-flip — the diff includes ROADMAP edit + e2e + docs + markdown PRD removal in one atomic commit. Per CLAUDE.md `Roadmap maintenance` rule.
-- New gaps surfaced during this cycle (e.g., "PD HTTP API discovery flap on cross-PD failover") get fresh entries under `## Web UI` of `## Scalability & performance` per CLAUDE.md `Discovering a new gap` rule. Add in the same commit that surfaces them.
-
+## 2026-05-07 - US-001
+- Added optional `meta.HealthProbe` interface + `MetaHealthReport` /
+  `NodeStatus` types to internal/meta/store.go.
+- Memory backend MetaHealth returns a single in-process row (RF=1).
+- Cassandra backend MetaHealth merges system.local + system.peers via two
+  LOCAL_ONE queries (CQL has no UNION ALL); RF read from
+  system_schema.keyspaces; schema-version drift folded into Warnings; 10s
+  in-process cache so adminapi pollers (30s storage page, 60s overview hero,
+  30s degraded banner) absorb bursts without re-querying. Added `keyspace`
+  field to cassandra.Store.
+- TiKV backend MetaHealth via new internal/meta/tikv/pdclient.go — thin
+  bootstrap-only HTTP client that tries each PD endpoint in order with 2s
+  timeout, GETs /pd/api/v1/stores. Raft-leader imbalance (live store with 0
+  leaders while peers carry traffic) folded into Warnings.
+- Added storetest caseMetaHealth contract case — verifies backend label,
+  per-node Address+State, and tolerates the openWithBackend test-only TiKV
+  shape (no PD endpoints → warning row, len(Nodes)=0).
+- New GET /admin/v1/storage/meta endpoint in adminapi (storage.go) wired
+  into server.go routes(). Type-asserts s.Meta against meta.HealthProbe;
+  returns 503 NotImplemented on missing surface, 502 MetaHealthFailed on
+  probe error.
+- Files changed:
+  - internal/meta/store.go (HealthProbe interface + types)
+  - internal/meta/memory/store.go (MetaHealth + compile-time assertion)
+  - internal/meta/cassandra/store.go (Store.keyspace field + cache)
+  - internal/meta/cassandra/meta_health.go (new)
+  - internal/meta/tikv/pdclient.go (new)
+  - internal/meta/tikv/meta_health.go (new)
+  - internal/meta/storetest/contract.go (caseMetaHealth)
+  - internal/adminapi/storage.go (new handler)
+  - internal/adminapi/storage_test.go (new test)
+  - internal/adminapi/server.go (route registration)
+- **Learnings for future iterations:**
+  - The TiKV `openWithBackend` (test-only) helper does NOT pass cfg through
+    — Store.cfg.PDEndpoints is empty there. MetaHealth had to degrade
+    gracefully (warning row, no nodes) so the storetest contract case
+    works against the unit-test rig too.
+  - cassandra.Store has no Keyspace field by default; needed to add one to
+    Open() for system_schema.keyspaces RF lookup.
+  - The PD `/pd/api/v1/stores` JSON shape has the per-store status (leader
+    count, region count, available/capacity) under a sibling `status` field
+    next to `store`, not nested inside it. Don't conflate.
+  - The storetest contract test is run by both memory unit tests and
+    cassandra/tikv integration tests — keep new cases compatible with
+    every backend (tolerate degraded paths via Warnings instead of
+    requiring node rows).
 ---

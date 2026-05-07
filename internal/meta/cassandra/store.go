@@ -32,6 +32,7 @@ import (
 type Store struct {
 	s            *gocql.Session
 	defaultShard int
+	keyspace     string
 
 	// obs is the SlowQueryObserver attached to the gocql session. The Store
 	// reuses it as the LWT-conflict sink (US-009): on applied=false from a
@@ -46,6 +47,14 @@ type Store struct {
 	// process restart — bucket renames don't happen.
 	bucketNamesMu sync.RWMutex
 	bucketNames   map[uuid.UUID]string
+
+	// metaHealthMu guards the 10s in-process cache used by MetaHealth so
+	// adminapi pollers (storage page TanStack Query 30s + Overview hero
+	// 60s + degraded banner 30s) don't re-issue system.peers / system.local
+	// queries on every hit.
+	metaHealthMu     sync.Mutex
+	metaHealthCache  *meta.MetaHealthReport
+	metaHealthExpiry time.Time
 }
 
 type Options struct {
@@ -70,6 +79,7 @@ func Open(cfg SessionConfig, opts Options) (*Store, error) {
 	store := &Store{
 		s:            s,
 		defaultShard: opts.DefaultShardCount,
+		keyspace:     cfg.Keyspace,
 		bucketNames:  make(map[uuid.UUID]string),
 	}
 	store.obs = NewQueryObserver(cfg.Logger, time.Duration(cfg.SlowMS)*time.Millisecond, cfg.Metrics, cfg.Tracer)
