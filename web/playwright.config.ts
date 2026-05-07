@@ -44,6 +44,10 @@ export default defineConfig({
       'STRATA_CONSOLE_JWT_SECRET=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f',
       'STRATA_CLUSTER_NAME=strata-e2e',
       'STRATA_NODE_ID=e2e-node',
+      // storage.spec.ts asserts the cluster hero card chip strip; drive the
+      // bucketstats sampler at sub-second cadence so a freshly PUT object
+      // shows up before the spec timeout. Production default is 1h.
+      'STRATA_BUCKETSTATS_INTERVAL=500ms',
       'go run ./cmd/strata server',
     ].join(' '),
     cwd: '..',

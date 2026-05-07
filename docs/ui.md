@@ -166,6 +166,7 @@ Phase 3 layers debug tooling on top without removing Phase 2 surface.
 | NodeDrilldown | — | — | ✓ |
 | ShardDistribution | — | — | ✓ |
 | ReplicationLag | — | — | ✓ |
+| StorageStatus | — | — | ✓ |
 
 ## Operational notes
 
@@ -205,6 +206,14 @@ Three Playwright specs run in CI under the `e2e-ui` job:
   rows render), trace-browser (paste request-id → spans render),
   hot-buckets-empty (Prom unset → MetricsUnavailable card renders),
   hot-shards-s3 (`empty:true` mocked → s3-explainer card renders).
+- `web/e2e/storage.spec.ts` — Storage status cycle (US-006):
+  storage-page-renders (login → /storage → Meta + Data tabs visible),
+  cluster-hero-shows-storage-card (login → home → "Storage" hero card
+  visible with at least one class chip), degraded-banner-on-warn
+  (`/admin/v1/storage/health` spoofed via `page.route` → banner appears
+  above shell, dismiss button hides it for the rest of the context).
+  Operator guide for the underlying endpoints + warning meanings is at
+  [`docs/storage.md`](storage.md).
 
 Run locally with:
 

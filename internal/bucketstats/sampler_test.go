@@ -161,6 +161,55 @@ func TestSamplerNilSinkNoop(t *testing.T) {
 	}
 }
 
+// TestSamplerRunInitialPass verifies Sampler.Run emits a sample pass before
+// the first ticker fires — the storage hero card relies on this so a fresh
+// gateway boot does not have to wait an hour to populate the snapshot.
+func TestSamplerRunInitialPass(t *testing.T) {
+	store := metamem.New()
+	ctx := context.Background()
+	b, err := store.CreateBucket(ctx, "bk-initial", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	if err := store.PutObject(ctx, &meta.Object{
+		BucketID:     b.ID,
+		Key:          "k",
+		Size:         5,
+		StorageClass: "STANDARD",
+		Mtime:        time.Now().UTC(),
+		Manifest:     &data.Manifest{Size: 5, Class: "STANDARD"},
+	}, false); err != nil {
+		t.Fatalf("put object: %v", err)
+	}
+
+	snap := NewSnapshot(map[string]string{})
+	s := &Sampler{
+		Meta:     store,
+		Snapshot: snap,
+		// Long interval — test asserts initial pass before any tick.
+		Interval: time.Hour,
+	}
+	runCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		_ = s.Run(runCtx)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(snap.Classes()) > 0 {
+			cancel()
+			<-done
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	t.Fatalf("snapshot still empty after initial pass deadline")
+}
+
 func TestSamplerEmitsPerShardForTopN(t *testing.T) {
 	store := metamem.New()
 	ctx := context.Background()

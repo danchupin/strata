@@ -81,12 +81,18 @@ type Sampler struct {
 }
 
 // Run loops on Interval until ctx is cancelled. Use RunOnce for tests.
+// Performs an initial sample pass before the first tick so freshly booted
+// gateways do not have to wait Interval before the per-class snapshot is
+// populated (matters for e2e + the storage-page hero card).
 func (s *Sampler) Run(ctx context.Context) error {
 	if s.Interval <= 0 {
 		s.Interval = time.Hour
 	}
 	if s.Logger == nil {
 		s.Logger = slog.Default()
+	}
+	if err := s.RunOnce(ctx); err != nil && ctx.Err() == nil {
+		s.Logger.WarnContext(ctx, "bucketstats: initial sample failed", "error", err.Error())
 	}
 	ticker := time.NewTicker(s.Interval)
 	defer ticker.Stop()

@@ -4,6 +4,20 @@ Cycle: ralph/web-ui-storage-status
 ---
 
 ## Codebase Patterns
+- Test-only env knobs that short-circuit a handler (e.g.
+  STRATA_STORAGE_HEALTH_OVERRIDE) carry the same risk as any global env:
+  flipping them on the shared e2e webServer pollutes every other spec.
+  Prefer Playwright `page.route()` to fake the response per-test when the
+  same-shape override exists; keep the env path documented for manual
+  operator flows but don't route specs through it.
+- Sampler-style background workers should do an initial RunOnce inside Run()
+  before entering the ticker loop. Otherwise pages backed by snapshot data
+  show empty until the first tick (1h default) — bad for both freshly-booted
+  prod gateways and e2e timing. The corresponding interval should be
+  env-overridable (STRATA_BUCKETSTATS_INTERVAL) so e2e specs can drive at
+  sub-second cadence without changing production behavior.
+
+
 - Optional capability surfaces (RangeScanStore, meta.HealthProbe,
   data.HealthProbe) hang off the base interface. Backends implement
   them via type-assertion at the call site (e.g. internal/adminapi
@@ -337,4 +351,72 @@ Cycle: ralph/web-ui-storage-status
     key with a 60 s cache so it doesn't fight the /storage page's 30 s
     poll.
 ---
+
+## 2026-05-07 - US-006
+- New web/e2e/storage.spec.ts with three flows:
+  - storage-page-renders: login → /storage → Meta + Data tabs visible →
+    "Backend = Memory" surfaces on both → "Storage classes" subsection
+    mounts.
+  - cluster-hero-shows-storage-card: login → home → "Storage" hero card
+    with at least one class chip (a seed bucket + object PUT in
+    beforeAll feeds the bucketstats sampler).
+  - degraded-banner-on-warn: page.route() spoofs
+    /admin/v1/storage/health to ok=false → banner above shell visible →
+    dismiss button hides for the rest of context. (The
+    STRATA_STORAGE_HEALTH_OVERRIDE env path is also documented but not
+    used in the spec to avoid polluting other specs sharing the
+    webServer.)
+- Sampler now does an initial RunOnce in Run() before entering the
+  ticker loop, so a freshly booted gateway populates the per-class
+  snapshot without waiting Interval (default 1h). New
+  STRATA_BUCKETSTATS_INTERVAL env knob lets the e2e webServer drive the
+  sampler at 500ms cadence so the chip strip materialises within the
+  spec timeout. internal/bucketstats/sampler_test.go covers the initial-
+  pass behavior.
+- New CI step in .github/workflows/ci.yml e2e-ui job adds
+  `pnpm exec playwright test storage.spec.ts` after debug.spec.ts.
+- New docs/storage.md operator guide covers env vars per backend,
+  warning-row meanings (Cassandra schema drift / TiKV raft leader
+  imbalance / RADOS HEALTH_WARN with link to ceph docs), per-class pool
+  mapping, and the aggregate degraded-banner contract.
+- docs/ui.md gains a Capability Matrix StorageStatus row + an e2e-tests
+  bullet for storage.spec.ts that links to docs/storage.md.
+- ROADMAP gets ~~**P3 — Web UI — Storage status (meta + data backend
+  observability).**~~ — **Done.** under ## Web UI section. Closing SHA
+  is added in a follow-up commit per CLAUDE.md "commit-then-amend is
+  undesirable" rule.
+- tasks/prd-web-ui-storage-status.md removed in this close-flip per the
+  CLAUDE.md PRD lifecycle rule (canonical record is the ralph snapshot
+  archived under scripts/ralph/archive/<date>-web-ui-storage-status* by
+  archive_cycle on COMPLETE).
+- Files changed:
+  - internal/bucketstats/sampler.go (initial RunOnce inside Run)
+  - internal/bucketstats/sampler_test.go (TestSamplerRunInitialPass)
+  - internal/serverapp/serverapp.go (bucketStatsInterval env)
+  - web/e2e/storage.spec.ts (new)
+  - web/playwright.config.ts (STRATA_BUCKETSTATS_INTERVAL=500ms)
+  - .github/workflows/ci.yml (storage.spec.ts CI step)
+  - docs/storage.md (new)
+  - docs/ui.md (Capability Matrix + e2e bullet)
+  - ROADMAP.md (close-flip)
+  - tasks/prd-web-ui-storage-status.md (removed)
+- **Learnings for future iterations:**
+  - reuseExistingServer:!process.env.CI in playwright.config.ts will
+    reuse ANY listener on the dev port even if it's misconfigured (e.g.
+    a previously-launched gateway with STRATA_AUTH_MODE=required), so a
+    local `pnpm exec playwright test` may fail with 401/403 on bucket
+    seed even when the spec is correct. CI runs do not hit this — they
+    boot a fresh gateway. When debugging locally, kill any prior
+    gateway on :9999 first.
+  - The cluster hero card chip strip depends on the bucketstats sampler
+    having ticked at least once with a non-empty snapshot. Default
+    Interval=1h means a fresh boot shows "No per-class breakdown yet"
+    until the first tick — fixed in this story by adding initial
+    RunOnce in Sampler.Run plus the STRATA_BUCKETSTATS_INTERVAL env.
+  - page.route() pattern (intercept /admin/v1/storage/health and
+    fulfill a degraded JSON shape) is the cleanest way to exercise the
+    StorageDegradedBanner in e2e without polluting sibling specs. The
+    server-side STRATA_STORAGE_HEALTH_OVERRIDE env still exists for
+    operators reproducing the path manually, but specs should not rely
+    on it.
 ---

@@ -222,6 +222,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 			Snapshot:  storageClassSnapshot,
 			Logger:    logger,
 			TopN:      bucketStatsTopN(logger),
+			Interval:  bucketStatsInterval(logger),
 		}
 		if err := sampler.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			logger.Warn("bucketstats", "error", err.Error())
@@ -393,6 +394,24 @@ func poolsByClass(cfg *config.Config, logger *slog.Logger) map[string]string {
 		out[class] = spec.Pool
 	}
 	return out
+}
+
+// bucketStatsInterval reads STRATA_BUCKETSTATS_INTERVAL (Go duration). Empty
+// or unparseable falls back to the sampler default (1h via Sampler.Run).
+// Surfaced primarily so e2e specs can drive the sampler at sub-second cadence
+// without waiting the production-shape default.
+func bucketStatsInterval(logger *slog.Logger) time.Duration {
+	v := strings.TrimSpace(os.Getenv("STRATA_BUCKETSTATS_INTERVAL"))
+	if v == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		logger.Warn("bucketstats interval parse failed; using default",
+			"value", v, "error", errString(err))
+		return 0
+	}
+	return d
 }
 
 // bucketStatsTopN reads STRATA_BUCKETSTATS_TOPN and returns the cap for the
