@@ -72,3 +72,19 @@ Cycle: ralph/gc-lifecycle-scale
   - At c=256 the wall-clock for gc dropped to 99 ms which puts the measurement near the floor of useful precision on this lab; the 100k chunks/s number should be read as "≥100k, can't pin closer with N=10000 on this hardware". A future `BENCH_GC_ENTRIES=100000` re-run on dedicated hardware would tighten the high-concurrency tail of the curve.
   - PD v8.5 client logs to stderr at INFO level on every `Begin`; bench runs go through the slog handler (also stderr) so `STRATA_LOG_LEVEL=ERROR` quiets the slog side but the PD-client logs ride through regardless. The JSON line on stdout is the source of truth — pipe stderr to /dev/null when scripting around the bench.
 ---
+
+## 2026-05-07 - US-005
+- Close-flipped ROADMAP P1 `gc / lifecycle workers serialise inside a single goroutine` to Done with measured numbers (gc 11108→100275 chunks/s c=1→c=256 knee at c=64; lifecycle 485→9150 obj/s c=1→c=256 no knee inside swept range), recommended defaults (`STRATA_GC_CONCURRENCY=64` / `STRATA_LIFECYCLE_CONCURRENCY=64`), and pointer to `docs/benchmarks/gc-lifecycle.md`. Closing-SHA placeholder is `<pending>` per CLAUDE.md "Closing a roadmap item" rule; backfilled by a follow-up `docs: roadmap — stamp closing SHA` commit on main, mirroring the multi-replica close shape (9e36975 → d4d85e6 → 0dee924).
+- New ROADMAP entry under ## Scalability & performance: P1 `gc / lifecycle Phase 2 — sharded leader-election`. Carries the deferred Phase 2 scope (sharded `gc-leader-0..N-1` + per-bucket `lifecycle-leader-<bucketID>`) into the next cycle.
+- `docs/migrations/binary-consolidation.md` env list: appended `STRATA_GC_CONCURRENCY` + `STRATA_LIFECYCLE_CONCURRENCY` to the `[gc/*, lifecycle/*]` worker-env entries with a pointer to the bench doc. README env table already lists both (US-004 commit bb5d371). docs/benchmarks/gc-lifecycle.md is the canonical operator reference for the curve + recommended defaults.
+- Removed `tasks/prd-gc-lifecycle-scale.md` per CLAUDE.md PRD lifecycle rule (canonical record after this point is the ralph snapshot, archived by ralph.sh on COMPLETE).
+- prd.json US-005 flipped to passes:true; this entry appended to progress.txt; ralph.sh archive_cycle will snapshot prd.json + progress.txt under scripts/ralph/archive/2026-05-07-gc-lifecycle-scale-complete/ on the COMPLETE signal.
+- Cycle-end merge plan: ff-only merge ralph/gc-lifecycle-scale into main → push origin/main → SHA-backfill commit on main (mirrors web-ui-storage-status / multi-replica-cluster shape) → archive_cycle snapshot via ralph.sh.
+- go vet ./... clean; go build ./... clean. US-005 is docs-only (no code touched in internal/ or cmd/) so the unit-test pass from US-001..US-004 is the standing baseline.
+- Files changed: ROADMAP.md, docs/migrations/binary-consolidation.md, tasks/prd-gc-lifecycle-scale.md (deleted), scripts/ralph/prd.json, scripts/ralph/progress.txt.
+- **Learnings for future iterations:**
+  - The ROADMAP close-flip line shape `(commit `<pending>`)` is the established convention for cycle-close commits; the SHA stamping is a follow-up commit on main, not an amend. CI gates + reviewer subscriptions hate amend-races (per the multi-replica cycle's learnings).
+  - When the AC mentions `docs/operators.md (or whichever exists)` and the repo has no `operators.md`, the existing operator-facing env-listing doc is `docs/migrations/binary-consolidation.md` — not `docs/ui.md` (UI / console-focused) and not the README (top-level summary). Add new env knobs there alongside the existing per-worker env list.
+  - Phase-2 follow-ups should land as a NEW P1 entry under the matching `## Scalability & performance` section in the same close-flip commit so the next cycle's prep skill picks it up immediately. Don't spread the work across two commits.
+---
+

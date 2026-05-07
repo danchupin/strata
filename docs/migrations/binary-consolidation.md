@@ -39,8 +39,12 @@ gc and one active lifecycle between them.
 
 **None.** Every per-worker `STRATA_*` knob keeps its old spelling:
 
-- `STRATA_GC_INTERVAL`, `STRATA_GC_GRACE`, `STRATA_GC_BATCH_SIZE`
-- `STRATA_LIFECYCLE_INTERVAL`, `STRATA_LIFECYCLE_UNIT`
+- `STRATA_GC_INTERVAL`, `STRATA_GC_GRACE`, `STRATA_GC_BATCH_SIZE`,
+  `STRATA_GC_CONCURRENCY` (Phase 1 fan-out, default `1`, max `256` —
+  see `docs/benchmarks/gc-lifecycle.md`)
+- `STRATA_LIFECYCLE_INTERVAL`, `STRATA_LIFECYCLE_UNIT`,
+  `STRATA_LIFECYCLE_CONCURRENCY` (same shape as
+  `STRATA_GC_CONCURRENCY`)
 - `STRATA_NOTIFY_TARGETS`, `STRATA_NOTIFY_*`
 - `STRATA_REPLICATOR_*`
 - `STRATA_ACCESS_LOG_*`
