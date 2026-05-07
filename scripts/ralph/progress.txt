@@ -7,6 +7,7 @@ Cycle: ralph/multi-replica-cluster
 - Supervisor.LeaderEvents() (cap-8 buffered) emits per-worker (name, acquired) on lease acquire/release; non-blocking send drops on consumer stall. Channel allocated lazily on first call, closed by Run() after wg.Wait().
 - Heartbeater.SetLeaderFor(worker, owned) mutates Node.LeaderFor under mu; write() copies slice under same mu before WriteHeartbeat. Idempotent re-acquire / release-of-unowned.
 - ROADMAP close-flip: new entry under ## Web UI, format `~~**P3 — title.**~~ — **Done.** ... (commit `<sha>`)`. Use `<pending>` placeholder if SHA needed inline; follow-up commit fills it (per CLAUDE.md).
+- compose `depends_on` only resolves services in the active profile. To depend on a profile-gated service from a different profile, list BOTH profiles on the dependency (e.g. `pd` carries `profiles: ["tikv", "lab-tikv"]`). Otherwise `compose config -q` rejects with "depends on undefined service".
 ---
 
 ## 2026-05-07 16:10 - US-001
@@ -23,4 +24,19 @@ Cycle: ralph/multi-replica-cluster
   - Heartbeater.write() must copy LeaderFor slice under the same mutex that SetLeaderFor uses — otherwise WriteHeartbeat (slow path) reads a slice racing with append.
   - `sync.Once` for lazy channel alloc avoids ordering bugs when LeaderEvents() is called both before and after Run() begins.
   - serverapp restructure: build supervisor BEFORE hb so we can pass supervisor.LeaderEvents() into the consumer goroutine wired alongside hb.Run.
+---
+
+## 2026-05-07 16:30 - US-002
+- Added strata-tikv-a + strata-tikv-b services under profile `lab-tikv` in deploy/docker/docker-compose.yml. Distinct STRATA_NODE_ID (strata-a / strata-b), distinct host ports (9001 / 9002), shared STRATA_STATIC_CREDENTIALS / STRATA_AUTH_MODE / STRATA_TIKV_PD_ENDPOINTS / STRATA_WORKERS via host env so cross-replica SigV4 verifies.
+- Added strata-lb-nginx service stub under same profile (image nginx:1.27-alpine, host 9999 -> 80, bind-mount of ../nginx/strata-lab.conf — created in US-003).
+- Added named volume `strata-jwt-shared` (mounted at /etc/strata/jwt-shared on both replicas) — payload arrives in US-004.
+- Extended pd + tikv `profiles` arrays with `lab-tikv` so `--profile lab-tikv config -q` resolves the depends_on chain.
+- Makefile: new `up-lab-tikv` target (single-command bring-up) and `wait-strata-lab` target (polls 9001 + 9002 + 9999/readyz). Updated `down` to include `--profile lab-tikv`.
+- Verified: `docker compose --profile lab-tikv config -q` exits 0; default + tikv + features + tracing profiles still validate.
+- Files changed: deploy/docker/docker-compose.yml, Makefile, scripts/ralph/prd.json, scripts/ralph/progress.txt.
+- **Learnings for future iterations:**
+  - compose treats `depends_on` strictly within the activated profile set. A service that lists `profiles: ["tikv"]` is invisible to a sibling under `profiles: ["lab-tikv"]` even though both physically exist in the YAML. Fix is to widen the profiles array on the dependency, not the dependant.
+  - `docker compose config -q` does NOT validate bind-mount source files exist on disk — the nginx conf file referenced by strata-lb-nginx (../nginx/strata-lab.conf) is fine to add now even though US-003 lands it. Only YAML+variable resolution is checked.
+  - Ports 9001 / 9002 / 9999 chosen carefully: 9998 is already taken by the standalone `strata-tikv` (profile `tikv`). Leaving the existing port to avoid collisions when an operator runs `--profile tikv` and `--profile lab-tikv` side-by-side.
+  - Both replicas mount strata-jwt-shared at /etc/strata/jwt-shared — wiring side is US-004 (loadJWTSecret consults the file). Adding the volume mount now keeps the compose service skeleton stable across the cycle's commits.
 ---

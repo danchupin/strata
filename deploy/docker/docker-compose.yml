@@ -163,7 +163,7 @@ services:
   pd:
     image: pingcap/pd:v8.5.0
     container_name: strata-pd
-    profiles: ["tikv"]
+    profiles: ["tikv", "lab-tikv"]
     command:
       - --name=pd
       - --client-urls=http://0.0.0.0:2379
@@ -187,7 +187,7 @@ services:
   tikv:
     image: pingcap/tikv:v8.5.0
     container_name: strata-tikv-storage
-    profiles: ["tikv"]
+    profiles: ["tikv", "lab-tikv"]
     depends_on:
       pd:
         condition: service_healthy
@@ -254,6 +254,115 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  # ------------------------------------------------------------------
+  # lab-tikv profile: 2 TiKV-backed strata replicas behind nginx LB on
+  # host port 9999. Use for the multi-replica HA scenarios in
+  # docs/multi-replica.md (US-002..US-007). Bring up with:
+  #   docker compose --profile lab-tikv up -d \
+  #     pd tikv ceph strata-tikv-a strata-tikv-b strata-lb-nginx \
+  #     prometheus grafana
+  # or `make up-lab-tikv`. Both replicas share STRATA_STATIC_CREDENTIALS
+  # / STRATA_AUTH_MODE / STRATA_TIKV_PD_ENDPOINTS / STRATA_WORKERS via
+  # host env so cross-replica SigV4 verifies. Distinct STRATA_NODE_ID
+  # keeps the heartbeat rows readable; distinct host ports (9001, 9002)
+  # let smoke tests poke each replica directly.
+  strata-tikv-a:
+    image: strata:ceph
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    container_name: strata-tikv-a
+    profiles: ["lab-tikv"]
+    depends_on:
+      pd:
+        condition: service_healthy
+      tikv:
+        condition: service_started
+      ceph:
+        condition: service_healthy
+    environment:
+      STRATA_CONFIG_FILE: /etc/strata/strata.toml
+      STRATA_META_BACKEND: tikv
+      STRATA_TIKV_PD_ENDPOINTS: ${STRATA_TIKV_PD_ENDPOINTS:-pd:2379}
+      STRATA_NODE_ID: strata-a
+      STRATA_WORKERS: ${STRATA_WORKERS:-gc,lifecycle}
+      STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-}
+      STRATA_STATIC_CREDENTIALS: ${STRATA_STATIC_CREDENTIALS:-}
+      STRATA_GC_INTERVAL: ${STRATA_GC_INTERVAL:-}
+      STRATA_GC_GRACE: ${STRATA_GC_GRACE:-}
+      STRATA_LIFECYCLE_INTERVAL: ${STRATA_LIFECYCLE_INTERVAL:-}
+      STRATA_LIFECYCLE_UNIT: ${STRATA_LIFECYCLE_UNIT:-}
+      STRATA_NOTIFY_TARGETS: ${STRATA_NOTIFY_TARGETS:-}
+    ports:
+      - "9001:9000"
+    volumes:
+      - strata-ceph-etc:/etc/ceph:ro
+      - ../strata.toml:/etc/strata/strata.toml:ro
+      - strata-jwt-shared:/etc/strata/jwt-shared
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/readyz >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 30s
+    restart: unless-stopped
+
+  strata-tikv-b:
+    image: strata:ceph
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    container_name: strata-tikv-b
+    profiles: ["lab-tikv"]
+    depends_on:
+      pd:
+        condition: service_healthy
+      tikv:
+        condition: service_started
+      ceph:
+        condition: service_healthy
+    environment:
+      STRATA_CONFIG_FILE: /etc/strata/strata.toml
+      STRATA_META_BACKEND: tikv
+      STRATA_TIKV_PD_ENDPOINTS: ${STRATA_TIKV_PD_ENDPOINTS:-pd:2379}
+      STRATA_NODE_ID: strata-b
+      STRATA_WORKERS: ${STRATA_WORKERS:-gc,lifecycle}
+      STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-}
+      STRATA_STATIC_CREDENTIALS: ${STRATA_STATIC_CREDENTIALS:-}
+      STRATA_GC_INTERVAL: ${STRATA_GC_INTERVAL:-}
+      STRATA_GC_GRACE: ${STRATA_GC_GRACE:-}
+      STRATA_LIFECYCLE_INTERVAL: ${STRATA_LIFECYCLE_INTERVAL:-}
+      STRATA_LIFECYCLE_UNIT: ${STRATA_LIFECYCLE_UNIT:-}
+      STRATA_NOTIFY_TARGETS: ${STRATA_NOTIFY_TARGETS:-}
+    ports:
+      - "9002:9000"
+    volumes:
+      - strata-ceph-etc:/etc/ceph:ro
+      - ../strata.toml:/etc/strata/strata.toml:ro
+      - strata-jwt-shared:/etc/strata/jwt-shared
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/readyz >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 30s
+    restart: unless-stopped
+
+  # nginx LB fronting both lab-tikv replicas at host port 9999. Wired in
+  # US-003. Config lives in deploy/nginx/strata-lab.conf.
+  strata-lb-nginx:
+    image: nginx:1.27-alpine
+    container_name: strata-lb-nginx
+    profiles: ["lab-tikv"]
+    depends_on:
+      - strata-tikv-a
+      - strata-tikv-b
+    volumes:
+      - ../nginx/strata-lab.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "9999:80"
+    restart: unless-stopped
+
   # OTLP collector + Jaeger live behind the "tracing" profile so the default
   # `docker compose up` does not pull them in. Enable with:
   #   docker compose --profile tracing up otel-collector jaeger
@@ -292,3 +401,4 @@ volumes:
   strata-tikv-data:
   strata-prometheus-data:
   strata-grafana-data:
+  strata-jwt-shared:

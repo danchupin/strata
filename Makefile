@@ -1,7 +1,7 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-tikv down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata-tikv ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana race-soak-tikv clean
+.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-tikv up-lab-tikv down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana race-soak-tikv clean
 
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
@@ -71,8 +71,16 @@ up-all:
 up-tikv:
 	$(COMPOSE) --profile tikv up -d pd tikv ceph strata-tikv prometheus grafana
 
+# Bring up the multi-replica lab: 2 TiKV-backed strata replicas behind nginx LB
+# at host port 9999. PD + TiKV + ceph back the metadata + data tier; the
+# strata-tikv-{a,b} replicas hit them via the lab-tikv profile. Replica-direct
+# host ports are 9001 (strata-tikv-a) and 9002 (strata-tikv-b). See
+# docs/multi-replica.md for the failure-scenario walkthrough.
+up-lab-tikv:
+	$(COMPOSE) --profile lab-tikv up -d pd tikv ceph strata-tikv-a strata-tikv-b strata-lb-nginx prometheus grafana
+
 down:
-	$(COMPOSE) --profile tikv --profile features --profile tracing down
+	$(COMPOSE) --profile tikv --profile lab-tikv --profile features --profile tracing down
 
 wait-cassandra:
 	@echo "waiting for cassandra to report healthy..."
@@ -108,6 +116,20 @@ wait-strata-tikv:
 	@echo "waiting for strata-tikv /readyz to report 200..."
 	@until [ "$$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:9998/readyz)" = "200" ]; do sleep 2; done
 	@echo "strata-tikv ready"
+
+# Poll readyz on the lab-tikv profile: the LB at 9999 + both replica-direct
+# ports (9001, 9002). All three must come up green before the smoke harness
+# (US-005) drives the multi-replica scenarios.
+wait-strata-lab:
+	@echo "waiting for strata-tikv-a /readyz on 9001..."
+	@until [ "$$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:9001/readyz)" = "200" ]; do sleep 2; done
+	@echo "strata-tikv-a ready"
+	@echo "waiting for strata-tikv-b /readyz on 9002..."
+	@until [ "$$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:9002/readyz)" = "200" ]; do sleep 2; done
+	@echo "strata-tikv-b ready"
+	@echo "waiting for nginx LB /readyz on 9999..."
+	@until [ "$$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:9999/readyz)" = "200" ]; do sleep 2; done
+	@echo "strata-lb-nginx ready"
 
 ceph-pool:
 	docker exec strata-ceph ceph osd pool create strata.rgw.buckets.data 8 8 replicated || true
