@@ -114,6 +114,8 @@ restarts. Wire `STRATA_PROMETHEUS_URL` to populate the metrics dashboard
 | `STRATA_LIFECYCLE_UNIT` | `day` | interpretation of `Days` in lifecycle rules: `day`\|`hour`\|`minute`\|`second` (use `second` for fast tests) |
 | `STRATA_GC_INTERVAL` | `30s` | `gc` worker tick interval |
 | `STRATA_GC_GRACE` | `5m` | how long to keep queued chunks before deleting (protects in-flight GETs) |
+| `STRATA_GC_CONCURRENCY` | `1` | bounded errgroup limit inside the elected `gc` leader (1..256). See `docs/benchmarks/gc-lifecycle.md` for the throughput curve and recommended production defaults. |
+| `STRATA_LIFECYCLE_CONCURRENCY` | `1` | bounded errgroup limit per-bucket inner loop in the elected `lifecycle` leader (1..256). Same caveats / curve as `STRATA_GC_CONCURRENCY`. |
 
 ## Repository layout
 
