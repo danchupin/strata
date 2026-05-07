@@ -174,6 +174,7 @@ adding more, prove what is there.
 
 ## Scalability & performance
 
+- **P1 — gc / lifecycle workers serialise inside a single goroutine; throughput cap ~50–500 ops/s.** `internal/gc/worker.go::drainCount` and `internal/lifecycle/worker.go` walk entries with `for _, e := range entries { … }` — every chunk delete or object expire blocks on a sequential RADOS round-trip + meta ack. At one chunk/object per round-trip, a single worker tops out around 50–200 chunks/s (gc) and 100–500 objects/s (lifecycle). For prod-scale churn (10k object PUTs/s × ~4 chunks each = 40k chunks/s) the queue grows linearly forever. Phase 1: bounded `errgroup` inside the existing single-leader worker (`STRATA_GC_CONCURRENCY` / `STRATA_LIFECYCLE_CONCURRENCY`, default 1, max ~256) hides the round-trip latency without changing leader-election semantics. Phase 2 (separate cycle): sharded leader-election (`gc-leader-0..N-1`, per-bucket `lifecycle-leader-<bucket>`) so multiple replicas process disjoint slices in parallel — needs new `Meta.ListGCEntriesShard(ctx, region, shardID, shardCount, …)` API + per-bucket lease keying. Bench harness lands with Phase 1 to quantify the speedup curve.
 - **P2 — Parallel chunk upload in `PutChunks`.** Chunks are written sequentially. A
   bounded worker pool (32–64) hides RADOS latency on multi-chunk objects. Same shape on
   the multi-cluster path (US-044) — fan out per cluster.
