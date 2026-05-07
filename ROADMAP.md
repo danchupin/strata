@@ -165,9 +165,7 @@ adding more, prove what is there.
 
 ## Auth
 
-- **P3 — STS / assume-role.** Temporary credentials with expiry. Useful for multi-tenant
-  deployments. Today an access key in Cassandra (US-036 family of IAM stories) is the
-  only way to authenticate.
+- ~~**P3 — STS / assume-role.**~~ — **Done.** Minimal AssumeRole endpoint at `?Action=AssumeRole` (`internal/s3api/sts.go` + `internal/auth/sts.go`). Issues a temporary credential triple (`STSSession{AccessKey, Secret, SessionToken}`) with `DefaultSTSDuration` validity; verifier honours `SessionToken` on subsequent SigV4 requests. (commit `cec9c06`)
 - **P3 — Per-bucket request signing keys (KMS-backed).** Rotate the signing material on
   a schedule, reject keys older than `STRATA_KEY_MAX_AGE`. Hooks onto the existing
   Vault provider.
