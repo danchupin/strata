@@ -43,6 +43,14 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  lint-nginx-lab:
+    name: Lint lab-tikv nginx config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: nginx -t deploy/nginx/strata-lab.conf
+        run: make lint-nginx-lab
+
   lint-build:
     name: Build + vet
     runs-on: ubuntu-latest

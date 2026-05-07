@@ -1,7 +1,7 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-tikv up-lab-tikv down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana race-soak-tikv clean
+.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-tikv up-lab-tikv down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana race-soak-tikv lint-nginx-lab clean
 
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
@@ -190,6 +190,17 @@ race-soak-tikv:
 	RACE_KEYS=$${RACE_KEYS:-4} \
 	  go test -tags integration -timeout $${RACE_DURATION:-1h} \
 	  -run '^TestRaceMixedOpsTiKV$$' ./internal/s3api/...
+
+# Validate the nginx LB config used by the lab-tikv profile.
+# nginx -t resolves upstream hostnames at parse time, so the test container
+# carries --add-host stubs for strata-tikv-{a,b}; the real names resolve via
+# Docker's embedded DNS at runtime when the lab-tikv profile is up.
+lint-nginx-lab:
+	docker run --rm \
+		--add-host=strata-tikv-a:127.0.0.1 \
+		--add-host=strata-tikv-b:127.0.0.1 \
+		-v $(CURDIR)/deploy/nginx/strata-lab.conf:/etc/nginx/conf.d/default.conf:ro \
+		nginx:1.27-alpine nginx -t
 
 clean:
 	rm -rf bin

@@ -8,6 +8,7 @@ Cycle: ralph/multi-replica-cluster
 - Heartbeater.SetLeaderFor(worker, owned) mutates Node.LeaderFor under mu; write() copies slice under same mu before WriteHeartbeat. Idempotent re-acquire / release-of-unowned.
 - ROADMAP close-flip: new entry under ## Web UI, format `~~**P3 — title.**~~ — **Done.** ... (commit `<sha>`)`. Use `<pending>` placeholder if SHA needed inline; follow-up commit fills it (per CLAUDE.md).
 - compose `depends_on` only resolves services in the active profile. To depend on a profile-gated service from a different profile, list BOTH profiles on the dependency (e.g. `pd` carries `profiles: ["tikv", "lab-tikv"]`). Otherwise `compose config -q` rejects with "depends on undefined service".
+- nginx `nginx -t` resolves upstream hostnames at parse time; if the upstream block names docker service hosts (e.g. `strata-tikv-a`), the syntax-test container needs `--add-host=<name>:127.0.0.1` to resolve. Real DNS happens via Docker embedded resolver at runtime.
 ---
 
 ## 2026-05-07 16:10 - US-001
@@ -39,4 +40,17 @@ Cycle: ralph/multi-replica-cluster
   - `docker compose config -q` does NOT validate bind-mount source files exist on disk — the nginx conf file referenced by strata-lb-nginx (../nginx/strata-lab.conf) is fine to add now even though US-003 lands it. Only YAML+variable resolution is checked.
   - Ports 9001 / 9002 / 9999 chosen carefully: 9998 is already taken by the standalone `strata-tikv` (profile `tikv`). Leaving the existing port to avoid collisions when an operator runs `--profile tikv` and `--profile lab-tikv` side-by-side.
   - Both replicas mount strata-jwt-shared at /etc/strata/jwt-shared — wiring side is US-004 (loadJWTSecret consults the file). Adding the volume mount now keeps the compose service skeleton stable across the cycle's commits.
+---
+
+## 2026-05-07 16:50 - US-003
+- New deploy/nginx/strata-lab.conf: upstream `strata` block (least_conn) fronting strata-tikv-a:9000 + strata-tikv-b:9000 (max_fails=2, fail_timeout=10s). Streaming-friendly settings (proxy_request_buffering off, proxy_buffering off, client_max_body_size 0, proxy_read_timeout 300s, proxy_send_timeout 300s, proxy_http_version 1.1). proxy_set_header Host/X-Real-IP/X-Forwarded-For/X-Forwarded-Proto preserved; proxy_pass http://strata.
+- New Makefile target `lint-nginx-lab` runs `docker run --rm --add-host=strata-tikv-{a,b}:127.0.0.1 -v deploy/nginx/strata-lab.conf:/etc/nginx/conf.d/default.conf:ro nginx:1.27-alpine nginx -t`.
+- New CI job `lint-nginx-lab` in .github/workflows/ci.yml invokes the makefile target. Sits alongside existing lint-build/unit jobs (no `needs:` dependency).
+- Verified: nginx -t exits 0 with --add-host stubs; `docker compose --profile lab-tikv config -q` exits 0 with the new conf file on disk; `go vet ./...` clean.
+- Files changed: deploy/nginx/strata-lab.conf (new), Makefile, .github/workflows/ci.yml, scripts/ralph/prd.json, scripts/ralph/progress.txt.
+- **Learnings for future iterations:**
+  - `nginx -t` against a config that names docker-network hostnames in its `upstream { server X:port; }` block fails resolution at parse time (not at request time). Use `--add-host=NAME:127.0.0.1` flags on the test container to satisfy the resolver. The `resolver` directive doesn't help for upstream blocks (those resolve at config load).
+  - `client_max_body_size 0` is required so multipart uploads (which can be hundreds of MB) aren't bounced with 413 at the LB tier. Without this default 1m kicks in for nginx 1.27.
+  - `proxy_request_buffering off` + `proxy_buffering off` together let the gateway stream large PUTs straight through the LB instead of staging the whole body in nginx's tmpdir first. Required for SigV4 streaming (chunked-encoded uploads must reach upstream verbatim, not via re-buffer).
+  - Default `proxy_http_version 1.0` strips chunked encoding; setting it to 1.1 keeps chunking + keepalive working end-to-end.
 ---
