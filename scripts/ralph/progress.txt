@@ -33,6 +33,14 @@ Cycle: ralph/web-ui-storage-status
   (ShardSink.ResetBucketShard + ClassSink.ResetBucketClass + ...). New
   sinks should plug into the same loop instead of tracking their own
   previous-set map.
+- Web pages that pull recharts must lazy-load via React.lazy in App.tsx
+  (Suspense + PageFallback wrapper). Recharts is split into a shared
+  `generateCategoricalChart-*.js` chunk; loading it lazily keeps the
+  home-page initial bundle under 500 KiB gzipped.
+- Web sidebar entries live in web/src/components/layout/nav.ts under
+  primaryNav. Top-level (between Buckets and Consumers) for first-class
+  pages; under the "Diagnostics" section for debug-only views. Icons
+  come from lucide-react.
 
 ## 2026-05-07 - US-001
 - Added optional `meta.HealthProbe` interface + `MetaHealthReport` /
@@ -189,4 +197,61 @@ Cycle: ralph/web-ui-storage-status
     by design — UI consumers must render "n/a" or hide the column when a
     class has no pool entry. RADOS is the only backend with a meaningful
     class -> pool mapping today.
+---
+
+## 2026-05-07 - US-004
+- New web/src/pages/Storage.tsx + /storage route, lazy-loaded via
+  React.lazy so the recharts bundle stays out of the home-page initial
+  download (Storage chunk = 3.69 KiB gz, recharts split = 102.9 KiB gz).
+- Sidebar entry "Storage" inserted between "Buckets" and "Consumers" with
+  the lucide HardDrive icon (in primaryNav under the first section, NOT
+  under Diagnostics, per the PRD).
+- Two shadcn Tabs (Meta default + Data). Meta tab: header card "Backend =
+  <kind>" + table of NodeStatus rows (Address / State / DC / Rack /
+  SchemaVersion); warnings render in a top banner when
+  report.warnings.length > 0. Memory backend renders an explainer card
+  rather than an empty table. Data tab: header card + PoolStatus table
+  (Name / Class / Bytes used / Objects / Replicas / State); below the
+  table a Storage classes subsection renders a horizontal stacked
+  recharts BarChart of bytes-per-class plus a chip strip with class color
+  swatch, bytes/objects/percent-of-total, and the configured pool name
+  (when RADOS).
+- TanStack Query polls every 30 s (queryKeys.storage.{meta,data,classes});
+  refresh button uses useIsFetching() filtered to ['storage', ...] keys to
+  reflect the spinning-icon state across all three queries; refresh
+  invalidates each storage queryKey through queryClient.invalidateQueries.
+- New web/src/api/storage.ts exporting fetchStorageMeta /
+  fetchStorageData / fetchStorageClasses + the wire-shape types; re-
+  exported through api/client.ts so pages can keep importing from one
+  module.
+- Files changed:
+  - web/src/api/storage.ts (new)
+  - web/src/api/client.ts (re-export storage wrappers + types)
+  - web/src/lib/query.ts (storage query keys)
+  - web/src/pages/Storage.tsx (new)
+  - web/src/App.tsx (lazy route + Suspense fallback)
+  - web/src/components/layout/nav.ts (HardDrive icon + Storage entry)
+  - web/dist/index.html (vite build output)
+- Browser verification: deferred to US-006 (no MCP browser tooling
+  available in this Ralph environment); typecheck + vite build both
+  pass cleanly. Manual verification once a dev server is running:
+  /storage renders, Meta tab shows the in-memory single-row report,
+  Data tab shows the in-memory pool, Storage classes section is empty
+  until the bucketstats sampler runs once.
+- **Learnings for future iterations:**
+  - useIsFetching({ predicate }) is the cleanest way to reflect "any of
+    these 3 queries currently fetching" on a single shared refresh button
+    without prop-drilling each query's isFetching back up. Filter on
+    queryKey[0] === '<namespace>'.
+  - The current vite build chunks recharts into one shared
+    `generateCategoricalChart-*.js` (102.94 KiB gz). Any new lazy-loaded
+    page that imports recharts pays the load only on first navigation;
+    the home-page initial bundle stays at index-*.js = 183 KiB gz, well
+    under the 500 KiB gz target the AC mentions.
+  - The shadcn Tabs primitive does not require a wrapping form element;
+    `defaultValue="meta"` makes the Meta tab the landing default per AC.
+  - When a backend is "memory" the storage page should render an
+    explainer card (not an empty table) so the operator understands why
+    the topology is single-row. Both Meta and Data tabs follow the same
+    pattern — keep them lockstep when adding a new backend variant.
 ---

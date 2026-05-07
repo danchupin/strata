@@ -23,6 +23,18 @@ export {
 } from './widgets';
 
 export {
+  fetchStorageMeta,
+  fetchStorageData,
+  fetchStorageClasses,
+  type NodeStatus,
+  type MetaHealthReport,
+  type PoolStatus,
+  type DataHealthReport,
+  type StorageClassEntry,
+  type StorageClassesResponse,
+} from './storage';
+
+export {
   login,
   logout,
   whoami,

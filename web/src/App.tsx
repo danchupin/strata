@@ -30,6 +30,12 @@ const SlowQueriesPage = lazy(() =>
   import('@/pages/SlowQueries').then((m) => ({ default: m.SlowQueriesPage })),
 );
 
+// Storage page lazy-loads recharts (stacked bar for per-class breakdown) on
+// demand to keep the home-page initial bundle small (<=500 KiB gzipped).
+const StoragePage = lazy(() =>
+  import('@/pages/Storage').then((m) => ({ default: m.StoragePage })),
+);
+
 function PageFallback() {
   return (
     <div className="space-y-4">
@@ -53,6 +59,14 @@ export function App() {
         <Route path="/" element={<OverviewPage />} />
         <Route path="/buckets" element={<BucketsPage />} />
         <Route path="/buckets/:name" element={<BucketDetailPage />} />
+        <Route
+          path="/storage"
+          element={
+            <Suspense fallback={<PageFallback />}>
+              <StoragePage />
+            </Suspense>
+          }
+        />
         <Route path="/consumers" element={<ConsumersPage />} />
         <Route path="/iam" element={<IAMPage />} />
         <Route path="/iam/users/:userName" element={<IAMUserDetailPage />} />

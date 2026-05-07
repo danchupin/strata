@@ -153,4 +153,9 @@ export const queryKeys = {
     all: ['settings', 'all'] as const,
     dataBackend: ['settings', 'data-backend'] as const,
   },
+  storage: {
+    meta: ['storage', 'meta'] as const,
+    data: ['storage', 'data'] as const,
+    classes: ['storage', 'classes'] as const,
+  },
 };

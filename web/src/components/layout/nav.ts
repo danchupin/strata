@@ -4,6 +4,7 @@ import {
   ClipboardList,
   Flame,
   Gauge,
+  HardDrive,
   KeyRound,
   LayoutDashboard,
   Layers,
@@ -36,6 +37,7 @@ export const primaryNav: NavSection[] = [
     items: [
       { to: '/', label: 'Overview', icon: LayoutDashboard, end: true },
       { to: '/buckets', label: 'Buckets', icon: Boxes },
+      { to: '/storage', label: 'Storage', icon: HardDrive },
       { to: '/consumers', label: 'Consumers', icon: Users },
       { to: '/iam', label: 'IAM', icon: KeyRound },
       { to: '/multipart', label: 'Multipart', icon: Layers },
