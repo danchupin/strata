@@ -1,81 +1,26 @@
 # Ralph Progress Log
-Started: Thu May  7 16:00:00 MSK 2026
-Cycle: ralph/multi-replica-cluster (HA lab profile — 2 TiKV replicas + nginx LB + shared JWT)
+Started: Thu May  7 16:03:24 MSK 2026
+Cycle: ralph/multi-replica-cluster
 ---
 
 ## Codebase Patterns
+- Supervisor.LeaderEvents() (cap-8 buffered) emits per-worker (name, acquired) on lease acquire/release; non-blocking send drops on consumer stall. Channel allocated lazily on first call, closed by Run() after wg.Wait().
+- Heartbeater.SetLeaderFor(worker, owned) mutates Node.LeaderFor under mu; write() copies slice under same mu before WriteHeartbeat. Idempotent re-acquire / release-of-unowned.
+- ROADMAP close-flip: new entry under ## Web UI, format `~~**P3 — title.**~~ — **Done.** ... (commit `<sha>`)`. Use `<pending>` placeholder if SHA needed inline; follow-up commit fills it (per CLAUDE.md).
+---
 
-### Branch policy (REQUIRED)
-- Cycle starts from main (HEAD `9d839fc` at prep time, after web-ui-storage-status closed). The cycle MUST end with a fast-forward merge back to main: US-007 (last story) ff-merges `ralph/multi-replica-cluster` into `main`, pushes `origin/main`, lets `archive_cycle` (in `scripts/ralph/ralph.sh`) snapshot prd.json + progress.txt under `scripts/ralph/archive/2026-MM-DD-multi-replica-cluster-complete/` on `<promise>COMPLETE</promise>`. Mirror the web-ui-storage-status close shape (commit `9d839fc`).
-- The shell wrapper `scripts/ralph/ralph.sh` MUST invoke `avito ai claude --` (not bare `claude`) — regression-resistant per memory feedback rule.
-- Ff-only merge pattern: do NOT create a `merge:` commit (older web-ui-debug shape `6519036` is OBSOLETE — current pattern is ff-only + single follow-up archive commit on main).
-
-### PRD lifecycle (REQUIRED — codified in root CLAUDE.md `b45d633`)
-- The markdown PRD `tasks/prd-multi-replica-cluster.md` is a disposable design draft. The canonical record of what got built is the auto-archived `scripts/ralph/archive/<date>-multi-replica-cluster-complete/{prd.json,progress.txt}` snapshot. US-007 close-flip MUST `git rm tasks/prd-multi-replica-cluster.md` in the same commit that flips the ROADMAP entry to Done. Do NOT copy the markdown to `tasks/archive/`.
-
-### Prior cycle context (where things sit on current main, 9d839fc)
-- ralph/web-ui-storage-status closed 2026-05-07: storage page + meta+data health probes + per-class breakdown + Cluster Overview hero card + degraded banner. 6 stories shipped.
-- TiKV heartbeat backend shipped earlier in `c37487b` — `internal/meta/tikv/heartbeat.go` implements `heartbeat.Store` with payload-encoded ExpiresAt + lazy-skip + eager-GC pattern. **This is the foundation US-001/US-002 build on**: cluster_nodes-equivalent rows already exist on TiKV; this cycle adds the second replica writing into the same TiKV cluster.
-- **Phase 1/2/3 web UI is shipped** — Overview page, Cluster Overview, NodeDetailDrawer all exist. `web/src/pages/Overview.tsx:403` already renders `<ChipList items={n.leader_for} />`; the chip is wired through cluster.go adminapi handler. The ONLY gap is no source ever WRITES `Heartbeater.Node.LeaderFor` after construct — that's US-001's reason for being.
-
-### US-001 — Supervisor lease state → Heartbeater wiring
-- `cmd/strata/workers/supervisor.go::Supervisor` runs one goroutine per worker via `superviseOne` -> `runOnce`. `runOnce` is where the lease is held (acquired before, released on return). Add a `LeaderEvents() <-chan LeaderEvent` accessor; emit `{Worker: w.Name, Acquired: true}` on `runOnce` enter and `{Acquired: false}` on `runOnce` exit. Channel buffered cap 8 — if consumer stalls, supervisor never blocks (drops oldest event via `select { case ch <- evt: default: }` is too lossy; cap-8 + drop-on-full is acceptable since chip-state is eventually consistent).
-- `internal/heartbeat.Heartbeater.Node` is set ONCE at construct time. Add `(*Heartbeater).SetLeaderFor(worker string, owned bool)` that mutates `h.Node.LeaderFor` under a sync.Mutex. The `write` method (line 75) already snapshots `h.Node` before sending — make it copy under the same mutex.
-- `internal/serverapp.runApp` (the main wire-up) launches the supervisor in one goroutine and the heartbeater in another. Add a third goroutine: `go consumeLeaderEvents(ctx, supervisor.LeaderEvents(), hb)`. Exits on channel close (supervisor shutdown).
-- Test pattern: drive a fake worker through one acquire+release; assert two events in order on the channel; assert `hb.Node.LeaderFor` snapshots at expected points.
-- ROADMAP gap: nothing exists today for `leader_for stays empty`. US-001 surfaces the gap AND closes it in the same commit per CLAUDE.md `## Discovering a new gap` + `## Closing a roadmap item` rules.
-
-### US-002 — compose lab-tikv profile
-- Existing `strata-tikv` service in `deploy/docker/docker-compose.yml:218` is a single-replica TiKV-backed gateway under profile `tikv` at host port 9998. Don't modify it — add NEW services `strata-tikv-a` + `strata-tikv-b` under profile `lab-tikv` so the two lab profiles coexist.
-- `STRATA_NODE_ID` env required — defaults to hostname (which is the container name when set explicitly). Pin per-replica: `STRATA_NODE_ID=strata-a` / `strata-b`.
-- All shared env vars threaded through `${VAR_NAME:-}` so the host shell exports propagate (matches existing strata-tikv pattern at lines 232-243).
-- Compose YAML lint: `docker compose --profile lab-tikv config -q` returns exit 0 + an empty stdout when valid.
-
-### US-003 — nginx LB
-- nginx 1.27-alpine ships `nginx -t` for config syntax check. CI-friendly: `docker run --rm -v <conf>:/etc/nginx/conf.d/default.conf nginx:1.27-alpine nginx -t`.
-- **Streaming-aware settings (CRITICAL)** — without these, multipart UploadPart on parts >100 MiB get buffered to nginx temp dir and either fill disk or time out at the default `proxy_read_timeout 60s`. Required:
-  - `proxy_request_buffering off` — pipe upload body chunked to upstream rather than buffering.
-  - `proxy_buffering off` — stream GET response back to client without buffering.
-  - `client_max_body_size 0` — disable upload cap (rely on gateway's own enforcement; AWS S3 spec allows 5 GiB single PUT, 5 GiB per multipart part).
-  - `proxy_read_timeout 300s` + `proxy_send_timeout 300s` — large uploads.
-  - `proxy_http_version 1.1` — persistent connections + chunked encoding.
-- least_conn upstream load balancing (not round-robin) — long uploads do not pin one replica.
-- Headers preserved: `Host` ($host), `X-Forwarded-For` ($proxy_add_x_forwarded_for), `X-Forwarded-Proto` ($scheme).
-
-### US-004 — JWT shared file (atomic bootstrap)
-- `internal/serverapp.loadJWTSecret` (line 538) — current precedence: `STRATA_CONSOLE_JWT_SECRET` env > `STRATA_JWT_SECRET_FILE` (default `/etc/strata/jwt-secret`) > ephemeral. Insert NEW source `/etc/strata/jwt-shared/secret` AFTER STRATA_JWT_SECRET_FILE, BEFORE ephemeral.
-- **No `leader.Session`**: the locker is built in serverapp AFTER loadJWTSecret runs. Use POSIX file primitives instead.
-- Bootstrap shape: `os.OpenFile(path, O_WRONLY|O_CREATE|O_EXCL, 0600)` — exactly one writer wins; loser's `O_EXCL` returns `EEXIST`. On EEXIST, fall through to a read of the existing file. Add 3-retry read-back loop with 100 ms backoff to absorb the fsync race window (writer commits but readers see partial file).
-- 32 random bytes via `crypto/rand`. Hex-encode to wire format that matches existing `STRATA_CONSOLE_JWT_SECRET` decoding (see `adminapi.DecodeSecret`).
-- When env is set, the shared-file path is NOT touched (no surprising file write on first boot of an env-configured replica).
-- Test pattern: t.TempDir() + run loadJWTSecret with two parallel goroutines via sync.WaitGroup + assert both return identical bytes.
-
-### US-005 — smoke shell script
-- Login flow: POST `/admin/v1/auth/login` with `{"access_key":"<...>","secret_key":"<...>"}`; capture the `Set-Cookie: strata_session=...` header; subsequent curls use `-b <cookie>`.
-- Cluster nodes endpoint: `GET /admin/v1/cluster/nodes` returns `{nodes: [{id, address, version, started_at, workers, leader_for, last_heartbeat, healthy}]}`. Parse with `jq` (already in CI ubuntu-latest base image).
-- `docker stop` evicts heartbeat row after `heartbeat.DefaultTTL` = 30 s. Smoke sleeps 35 s for safety.
-- Worker rotation: lease `lifecycle-leader` releases on container stop; the surviving replica's leader.Session AwaitAcquire grabs it within `leader.DefaultTTL` (30 s default). Combined with heartbeat tick (10 s), total observation lag is ≤40 s. Smoke sleeps 35 s — boundary case. If flaky, bump to 45 s.
-
-### US-006 — Playwright gated CI job
-- Existing `e2e-ui` job (`.github/workflows/ci.yml:252`) runs critical-path/admin/debug/storage specs against an in-memory `go run ./cmd/strata server` driven by `web/playwright.config.ts:webServer`. **Do NOT modify this job.** Adding multi-replica.spec.ts to the default invocation would balloon CI to 10+ minutes per PR.
-- NEW job `e2e-ui-multi-replica`:
-  - Trigger: `if: contains(github.event.pull_request.title, '[multi-replica]') || github.event_name == 'workflow_dispatch'`.
-  - Runner: `ubuntu-latest` with the docker socket available by default (docker is preinstalled on GitHub-hosted ubuntu runners).
-  - Steps: checkout → setup-go → setup-node → pnpm install → playwright install → `make up-lab-tikv` → `make wait-strata-lab` → `pnpm exec playwright test multi-replica.spec.ts` (or via a dedicated `--project` if you split playwright.config.ts) → `make down`.
-  - `timeout-minutes: 15` covers 5 min stack boot + 5 min spec + slack.
-- testIgnore on the default project: `testIgnore: '**/multi-replica.spec.ts'` in `web/playwright.config.ts` so the spec doesn't run in the existing fast job.
-- Multi-replica project: a SECOND project entry in playwright.config.ts (`name: 'multi-replica'`) without an inline `webServer` block — instead it expects a docker-compose-managed nginx LB at http://127.0.0.1:9999. Run with `pnpm exec playwright test --project=multi-replica`.
-- `web/e2e/fixtures/docker.ts` — wrap `child_process.execFile('docker', [...])` in async helpers `dockerStop(name)` / `dockerStart(name)`. Tests import these directly.
-
-### US-007 — close-flip
-- Close-flip lands in the same commit as the work (CLAUDE.md `## Closing a roadmap item` rule). Run order: implement → typecheck → tests → ROADMAP edit → commit (close-flip + work atomic) → ff-merge to main → archive snapshot follow-up commit.
-- ROADMAP entry placement: under `## Web UI` if you treat multi-replica as console observability story; under `## Developer experience` if you treat it as ops tooling. Pick `## Web UI` since US-001 closes a UI gap and the smoke + Playwright are about observability.
-- New gaps surfaced during this cycle (e.g. nginx config edge cases) get fresh entries under `## Web UI` or `## Scalability & performance` per CLAUDE.md `## Discovering a new gap` rule. Add in the same commit that surfaces them.
-
-### CI gotchas
-- `go build ./...` — canonical typecheck for Go side. Run before commit. With ceph build tag too if you touched RADOS files: `go build -tags ceph ./...`.
-- `cd web && pnpm typecheck` — TS side. `pnpm test` if vitest specs added (none expected this cycle; e2e is the test surface).
-- Docker socket access on GitHub ubuntu-latest: `docker ps` works out of the box; no need for `services: docker` in the job spec.
-- Compose YAML check: `docker compose -f deploy/docker/docker-compose.yml --profile lab-tikv config -q`.
-
+## 2026-05-07 16:10 - US-001
+- Implemented Supervisor.LeaderEvents() + LeaderEvent struct in cmd/strata/workers/supervisor.go (lazy alloc cap 8, non-blocking send, closed after wg.Wait).
+- Added emitLeader() calls in runOnce: emit acquire after AwaitAcquire success, defer emit release before defer session.Release (so release event fires post-actual-release).
+- Added Heartbeater.SetLeaderFor(worker, owned) in internal/heartbeat/heartbeat.go under sync.Mutex; write() now copies slice under same mutex.
+- Wired internal/serverapp.Run: supervisor + hb constructed before goroutines; supervisor.LeaderEvents() drained into hb.SetLeaderFor in dedicated goroutine, exits on channel close.
+- Tests: cmd/strata/workers/supervisor_test.go::TestSupervisor_LeaderEventsAcquireRelease + internal/heartbeat/heartbeat_test.go::{TestSetLeaderForAddRemove,TestRunPicksUpLeaderForOnTick}.
+- ROADMAP: new entry under ## Web UI: P3 Heartbeat 'leader_for' chip wired to actual lease state. Done. (SHA backfilled by follow-up commit.)
+- Files changed: cmd/strata/workers/supervisor.go, cmd/strata/workers/supervisor_test.go, internal/heartbeat/heartbeat.go, internal/heartbeat/heartbeat_test.go, internal/serverapp/serverapp.go, ROADMAP.md, scripts/ralph/prd.json, scripts/ralph/progress.txt.
+- **Learnings for future iterations:**
+  - Supervisor.Run order: <-ctx.Done() then wg.Wait() then close(leaderEvents). The close is what unblocks the serverapp consumer goroutine on shutdown.
+  - Defer LIFO matters for emit-release: register emit-release defer FIRST, session.Release defer SECOND, so Release fires before emit (semantically: lease actually released by the time consumer sees the event).
+  - Heartbeater.write() must copy LeaderFor slice under the same mutex that SetLeaderFor uses — otherwise WriteHeartbeat (slow path) reads a slice racing with append.
+  - `sync.Once` for lazy channel alloc avoids ordering bugs when LeaderEvents() is called both before and after Run() begins.
+  - serverapp restructure: build supervisor BEFORE hb so we can pass supervisor.LeaderEvents() into the consumer goroutine wired alongside hb.Run.
 ---

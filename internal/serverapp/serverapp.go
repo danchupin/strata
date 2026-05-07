@@ -229,27 +229,13 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		}
 	}()
 
-	if hbStore != nil {
-		hb := &heartbeat.Heartbeater{
-			Store: hbStore,
-			Node: heartbeat.Node{
-				ID:        heartbeat.DefaultNodeID(),
-				Address:   cfg.Listen,
-				Version:   version,
-				StartedAt: time.Now().UTC(),
-				Workers:   workerNamesFromList(selected),
-			},
-		}
-		go hb.Run(ctx)
-	}
-
-	workerErr := make(chan error, 1)
+	var supervisor *workers.Supervisor
 	if len(selected) > 0 {
 		if adminLocker == nil {
 			return fmt.Errorf("workers selected (%s) but meta backend %q exposes no leader-election locker",
 				workerNames(selected), cfg.MetaBackend)
 		}
-		supervisor := &workers.Supervisor{
+		supervisor = &workers.Supervisor{
 			Deps: workers.Dependencies{
 				Logger: logger,
 				Meta:   metaStore,
@@ -259,6 +245,33 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 				Region: cfg.RegionName,
 			},
 		}
+	}
+
+	var hb *heartbeat.Heartbeater
+	if hbStore != nil {
+		hb = &heartbeat.Heartbeater{
+			Store: hbStore,
+			Node: heartbeat.Node{
+				ID:        heartbeat.DefaultNodeID(),
+				Address:   cfg.Listen,
+				Version:   version,
+				StartedAt: time.Now().UTC(),
+				Workers:   workerNamesFromList(selected),
+			},
+		}
+		if supervisor != nil {
+			events := supervisor.LeaderEvents()
+			go func() {
+				for ev := range events {
+					hb.SetLeaderFor(ev.Worker, ev.Acquired)
+				}
+			}()
+		}
+		go hb.Run(ctx)
+	}
+
+	workerErr := make(chan error, 1)
+	if supervisor != nil {
 		go func() {
 			err := supervisor.Run(ctx, selected)
 			if err != nil && !errors.Is(err, context.Canceled) {

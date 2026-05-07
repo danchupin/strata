@@ -293,6 +293,81 @@ func TestSupervisor_LeaseKeyedOnWorkerName(t *testing.T) {
 	<-done
 }
 
+// TestSupervisor_LeaderEventsAcquireRelease: single-worker run emits an
+// acquire event when the lease is won, and a release event after the
+// supervised ctx cancels (US-001 leader_for chip wiring).
+func TestSupervisor_LeaderEventsAcquireRelease(t *testing.T) {
+	t.Cleanup(restoreInitial)
+	Reset()
+
+	started := make(chan struct{})
+	var startedOnce sync.Once
+	Register(Worker{
+		Name: "evt",
+		Build: func(Dependencies) (Runner, error) {
+			return RunnerFunc(func(ctx context.Context) error {
+				startedOnce.Do(func() { close(started) })
+				<-ctx.Done()
+				return ctx.Err()
+			}), nil
+		},
+	})
+
+	deps := Dependencies{Logger: silentLogger(), Locker: memory.NewLocker()}
+	sup := newSupervisor(t, deps)
+	events := sup.LeaderEvents()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- sup.Run(ctx, []Worker{mustLookup(t, "evt")}) }()
+
+	select {
+	case ev := <-events:
+		if ev.Worker != "evt" || !ev.Acquired {
+			t.Fatalf("first event = %+v, want {evt true}", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no acquire event within 2s")
+	}
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker Run never started")
+	}
+
+	cancel()
+
+	var sawRelease bool
+	deadline := time.After(2 * time.Second)
+loop:
+	for {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				break loop
+			}
+			if ev.Worker == "evt" && !ev.Acquired {
+				sawRelease = true
+			}
+		case <-deadline:
+			t.Fatal("events channel did not close within 2s of cancel")
+		}
+	}
+	if !sawRelease {
+		t.Fatal("never observed release event")
+	}
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Supervisor.Run returned %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Supervisor.Run did not return after ctx cancel")
+	}
+}
+
 func mustLookup(t *testing.T, name string) Worker {
 	t.Helper()
 	w, ok := Lookup(name)

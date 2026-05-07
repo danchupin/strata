@@ -85,6 +85,74 @@ func TestHeartbeaterWritesOnRun(t *testing.T) {
 	}
 }
 
+func TestSetLeaderForAddRemove(t *testing.T) {
+	hb := &Heartbeater{Node: Node{ID: "n1"}}
+
+	hb.SetLeaderFor("gc", true)
+	hb.SetLeaderFor("lifecycle", true)
+	hb.SetLeaderFor("gc", true) // idempotent re-acquire
+	if got, want := hb.Node.LeaderFor, []string{"gc", "lifecycle"}; !equalSlice(got, want) {
+		t.Fatalf("after acquires, LeaderFor=%v want %v", got, want)
+	}
+
+	hb.SetLeaderFor("notify", false) // release something never owned
+	hb.SetLeaderFor("gc", false)
+	if got, want := hb.Node.LeaderFor, []string{"lifecycle"}; !equalSlice(got, want) {
+		t.Fatalf("after release, LeaderFor=%v want %v", got, want)
+	}
+}
+
+func TestRunPicksUpLeaderForOnTick(t *testing.T) {
+	s := NewMemoryStore()
+	hb := &Heartbeater{
+		Store:    s,
+		Node:     Node{ID: "n1", Address: ":9000", Version: "v", StartedAt: time.Now().UTC()},
+		Interval: 5 * time.Millisecond,
+	}
+	hb.SetLeaderFor("gc", true)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	hb.Run(ctx)
+
+	nodes, err := s.ListNodes(context.Background())
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("nodes=%d", len(nodes))
+	}
+	if got, want := nodes[0].LeaderFor, []string{"gc"}; !equalSlice(got, want) {
+		t.Fatalf("first run LeaderFor=%v want %v", got, want)
+	}
+
+	hb.SetLeaderFor("gc", false)
+	hb.SetLeaderFor("lifecycle", true)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel2()
+	hb.Run(ctx2)
+
+	nodes, err = s.ListNodes(context.Background())
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if got, want := nodes[0].LeaderFor, []string{"lifecycle"}; !equalSlice(got, want) {
+		t.Fatalf("second run LeaderFor=%v want %v", got, want)
+	}
+}
+
+func equalSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestIsAlive(t *testing.T) {
 	now := time.Now()
 	cases := []struct {

@@ -14,6 +14,8 @@ import (
 	"context"
 	"log"
 	"os"
+	"sort"
+	"sync"
 	"time"
 )
 
@@ -49,6 +51,8 @@ type Heartbeater struct {
 	Node     Node
 	Interval time.Duration
 	Logger   *log.Logger
+
+	mu sync.Mutex
 }
 
 // Run blocks until ctx is cancelled.
@@ -73,11 +77,58 @@ func (h *Heartbeater) Run(ctx context.Context) {
 }
 
 func (h *Heartbeater) write(ctx context.Context) {
+	h.mu.Lock()
 	n := h.Node
+	if len(h.Node.LeaderFor) > 0 {
+		n.LeaderFor = append([]string(nil), h.Node.LeaderFor...)
+	} else {
+		n.LeaderFor = nil
+	}
+	h.mu.Unlock()
 	n.LastHeartbeat = time.Now().UTC()
 	if err := h.Store.WriteHeartbeat(ctx, n); err != nil {
 		h.Logger.Printf("heartbeat: write %s: %v", n.ID, err)
 	}
+}
+
+// SetLeaderFor mutates Heartbeater.Node.LeaderFor under a mutex; the next
+// write tick picks up the new slice. Idempotent: re-acquiring an already
+// owned worker, or releasing one that isn't owned, is a no-op. The slice
+// stays sorted for deterministic comparison in tests.
+func (h *Heartbeater) SetLeaderFor(worker string, owned bool) {
+	if worker == "" {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	cur := h.Node.LeaderFor
+	idx := -1
+	for i, w := range cur {
+		if w == worker {
+			idx = i
+			break
+		}
+	}
+	if owned {
+		if idx >= 0 {
+			return
+		}
+		next := append(append([]string(nil), cur...), worker)
+		sort.Strings(next)
+		h.Node.LeaderFor = next
+		return
+	}
+	if idx < 0 {
+		return
+	}
+	next := make([]string, 0, len(cur)-1)
+	for i, w := range cur {
+		if i == idx {
+			continue
+		}
+		next = append(next, w)
+	}
+	h.Node.LeaderFor = next
 }
 
 // IsAlive reports whether the node's last heartbeat falls within ttl.

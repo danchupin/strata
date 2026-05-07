@@ -67,6 +67,37 @@ type Supervisor struct {
 	LeaderTTL    time.Duration
 	LeaderRenew  time.Duration
 	AcquireRetry time.Duration
+
+	eventsOnce   sync.Once
+	leaderEvents chan LeaderEvent
+}
+
+// LeaderEvent is emitted on every per-worker lease state transition:
+// Acquired=true once runOnce has won the lease, Acquired=false once the
+// session has been released (including lease-loss exits and panics).
+type LeaderEvent struct {
+	Worker   string
+	Acquired bool
+}
+
+// LeaderEvents returns a buffered channel (cap 8) that receives a
+// LeaderEvent on every lease acquire / release. The channel is allocated
+// on first call and closed by Run() once every per-worker goroutine has
+// shut down. Sends are non-blocking — a stalled consumer drops events
+// rather than stalling supervision.
+func (s *Supervisor) LeaderEvents() <-chan LeaderEvent {
+	s.eventsOnce.Do(func() { s.leaderEvents = make(chan LeaderEvent, 8) })
+	return s.leaderEvents
+}
+
+func (s *Supervisor) emitLeader(name string, acquired bool) {
+	if s.leaderEvents == nil {
+		return
+	}
+	select {
+	case s.leaderEvents <- LeaderEvent{Worker: name, Acquired: acquired}:
+	default:
+	}
 }
 
 // Run starts each worker in its own goroutine and blocks until ctx is
@@ -101,6 +132,9 @@ func (s *Supervisor) Run(ctx context.Context, workers []Worker) error {
 	}
 	<-ctx.Done()
 	wg.Wait()
+	if s.leaderEvents != nil {
+		close(s.leaderEvents)
+	}
 	return ctx.Err()
 }
 
@@ -169,6 +203,8 @@ func (s *Supervisor) runOnce(parent context.Context, w Worker, logger *slog.Logg
 	if err := session.AwaitAcquire(parent); err != nil {
 		return false
 	}
+	s.emitLeader(w.Name, true)
+	defer s.emitLeader(w.Name, false)
 	workCtx := session.Supervise(parent)
 	defer session.Release(context.Background())
 
