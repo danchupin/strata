@@ -10,6 +10,9 @@ Cycle: ralph/multi-replica-cluster
 - compose `depends_on` only resolves services in the active profile. To depend on a profile-gated service from a different profile, list BOTH profiles on the dependency (e.g. `pd` carries `profiles: ["tikv", "lab-tikv"]`). Otherwise `compose config -q` rejects with "depends on undefined service".
 - nginx `nginx -t` resolves upstream hostnames at parse time; if the upstream block names docker service hosts (e.g. `strata-tikv-a`), the syntax-test container needs `--add-host=<name>:127.0.0.1` to resolve. Real DNS happens via Docker embedded resolver at runtime.
 - File-based atomic-bootstrap pattern (POSIX O_EXCL): `os.OpenFile(path, O_WRONLY|O_CREATE|O_EXCL, 0600)`. Writer-side success → write → close → return. Loser EEXIST → re-read up to 3× with 100 ms backoff to absorb fsync race. No lock-manager / no leader.Session needed when the bootstrap precedes locker construction. Used by `serverapp.bootstrapSharedJWTSecret` for /etc/strata/jwt-shared/secret.
+- Heartbeat row eviction asymmetry: cassandra applies `USING TTL 30` (row gone server-side); tikv stamps `ExpiresAt` in the JSON payload and ListNodes filters `now > ExpiresAt` at read time; memory backend GCs lazily on read AND write. All three converge on "row vanishes within 30s of the writer dying", so post-stop assertions like `count(status==healthy)==1` hold uniformly. Lease TTL in `internal/leader.Session` defaults to 30s, RenewPeriod TTL/3 — chip rotation lands within ~30-35s after holder kill.
+- `STRATA_STATIC_CREDENTIALS` is comma-separated `accesskey:secret[:owner]` entries. First entry is the conventional admin/login key in dev-stack scripts. Parse with `${VAL%%,*}` then `${ENTRY%%:*}` / `${ENTRY#*:%%:*}` — no awk/cut dependency.
+- Admin session cookie: `strata_session`, path=/admin, signed with the JWT secret. In a multi-replica deployment the secret is shared via the strata-jwt-shared volume (US-004), so a cookie issued by replica A is accepted by replica B / the LB.
 ---
 
 ## 2026-05-07 16:10 - US-001
@@ -70,4 +73,25 @@ Cycle: ralph/multi-replica-cluster
   - The 100ms × 3 retry isn't paranoia — write→close happens after O_EXCL create, so a concurrent reader can see an empty/short file in the kernel page cache between the writer's `OpenFile` return and `Close`. The re-read loop converges as soon as the writer finishes (typically <1 ms; 300 ms cap is generous).
   - readJWTSecretFile already handles short / empty files by returning ok=false. Reusing it for both fast-path and post-race read keeps the contract uniform (>= 16 byte length minimum).
   - Splitting loadJWTSecret into loadJWTSecret (env-reading) + loadJWTSecretFrom (pure) made the env-not-touching-file invariant trivially testable. The same pattern should replace any "env + filesystem + fallback" function whose unit tests want to assert side-effect absence.
+---
+
+## 2026-05-07 17:30 - US-005
+- New scripts/multi-replica-smoke.sh drives the five lab scenarios (a)–(e) end-to-end against `make up-lab-tikv`.
+  (a) login via $LB; nodes list shows 2 healthy + lifecycle-leader + gc-leader chips each held by exactly 1 node.
+  (b) `docker stop strata-tikv-a` → sleep $DEAD_GRACE (35s) → expect 1 healthy + survivor carries BOTH chips.
+  (c) `docker start strata-tikv-a` → wait_ready + sleep $REJOIN_GRACE (30s) → 2 healthy again.
+  (d) SigV4 PUT 4MiB blob via 9001, GET via 9002, byte-equal md5 (creates lab-mr-<unix> bucket; cleanup in trap).
+  (e) Identify lifecycle-leader holder, `docker kill` it, sleep 35s, assert OTHER replica picked up the chip; restart killed container.
+- Auth: parses STRATA_STATIC_CREDENTIALS first comma-entry (`access:secret[:owner]`), POSTs to /admin/v1/auth/login (cookie jar in $TMP/cookies). All admin curls reuse `-b $JAR`.
+- jq is the JSON-parsing tool (vs sed/grep used in the older smoke.sh — admin API is JSON not XML so jq pays off in clarity).
+- Exit semantics: `pass:` lines per scenario; first failure prints `FAIL: <scenario> <detail>` and exits 1. Required prereq misses (env unset / missing curl/jq/aws/docker) exit 2.
+- New Makefile target `smoke-lab-tikv` + .PHONY entry. Invoked manually after `make up-lab-tikv && make wait-strata-lab`. CI gating lands in US-006 (Playwright job triggered by [multi-replica] PR-title token).
+- Files changed: scripts/multi-replica-smoke.sh (new, +x), Makefile, scripts/ralph/prd.json, scripts/ralph/progress.txt.
+- **Learnings for future iterations:**
+  - SigV4 path is independent of the admin session cookie — admin login is for the JSON API, S3 PUT/GET still require AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY env. The same first-entry of STRATA_STATIC_CREDENTIALS feeds both, so parse once / export.
+  - `aws s3api create-bucket --bucket X` with us-east-1 default region is the fastest cross-platform mb invocation; `aws s3 mb` adds a region-specific extra step on non-us-east-1 setups. Either works for the lab.
+  - md5 utility name differs Linux vs macOS: `md5sum file | awk '{print $1}'` vs `md5 -q file`. Script falls back automatically (md5sum first, md5 second).
+  - DEAD_GRACE=35 + REJOIN_GRACE=30 are env-overridable so a flaky CI runner can bump them without editing the script. Heartbeat TTL is 30s and lease renew is TTL/3 so a 5s buffer absorbs the next supervisor tick.
+  - `chip_holders <chip>` returns one ID per line — count via `wc -l | awk '{print $1}'` (awk strips the leading whitespace BSD wc emits on macOS). Pure `wc -l <(...)` works on Linux but not portably; the pipeline is.
+  - bucket cleanup uses a `CLEAN_BUCKET=1` flag set after `create-bucket` so the trap doesn't try to delete a non-existent bucket on early failures (which would mask the original FAIL line in CI logs).
 ---

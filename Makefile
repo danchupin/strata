@@ -1,7 +1,7 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-tikv up-lab-tikv down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana race-soak-tikv lint-nginx-lab clean
+.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-tikv up-lab-tikv down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv race-soak-tikv lint-nginx-lab clean
 
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
@@ -169,6 +169,15 @@ smoke-signed-tikv:
 
 smoke-grafana:
 	bash scripts/grafana-smoke.sh
+
+# Drive the multi-replica failure scenarios end-to-end against a stack
+# brought up by `make up-lab-tikv && make wait-strata-lab`. Requires
+# STRATA_STATIC_CREDENTIALS exported with the same value the gateway
+# booted with (the first comma-separated entry's access:secret pair is
+# used for the admin login + SigV4-signed cross-replica PUT/GET).
+# See scripts/multi-replica-smoke.sh for scenario coverage.
+smoke-lab-tikv:
+	bash scripts/multi-replica-smoke.sh
 
 # Race-soak the TiKV-backed gateway: brings up a PD + TiKV pair via
 # testcontainers (or uses STRATA_TIKV_TEST_PD_ENDPOINTS for an
