@@ -1,7 +1,7 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-tikv up-lab-tikv down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv race-soak-tikv lint-nginx-lab clean
+.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-tikv up-lab-tikv down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv race-soak-tikv lint-nginx-lab bench-gc bench-lifecycle clean
 
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
@@ -211,5 +211,45 @@ lint-nginx-lab:
 		-v $(CURDIR)/deploy/nginx/strata-lab.conf:/etc/nginx/conf.d/default.conf:ro \
 		nginx:1.27-alpine nginx -t
 
+# bench-gc / bench-lifecycle drive strata-admin against the lab-tikv stack
+# (TiKV meta + RADOS data) at five concurrency levels and tee one JSON line
+# per level into bench-gc-results.jsonl / bench-lifecycle-results.jsonl. The
+# gateway must already be up via `make up-lab-tikv && make wait-strata-lab`;
+# strata-admin connects to TiKV directly (PD endpoints from the docker-compose
+# default) so the bench bypasses the HTTP gateway and measures the worker's
+# per-replica throughput cap.
+#
+# Override BENCH_GC_ENTRIES / BENCH_LC_OBJECTS / BENCH_CONCURRENCY_LEVELS for
+# custom sweeps. STRATA_PROM_PUSHGATEWAY (optional) pushes a per-level gauge
+# to a configured push gateway so Grafana can compare runs over time.
+BENCH_GC_ENTRIES ?= 10000
+BENCH_LC_OBJECTS ?= 10000
+BENCH_CONCURRENCY_LEVELS ?= 1 4 16 64 256
+
+bench-gc: build
+	@rm -f bench-gc-results.jsonl
+	@for c in $(BENCH_CONCURRENCY_LEVELS); do \
+		echo "bench-gc concurrency=$$c entries=$(BENCH_GC_ENTRIES)" >&2; \
+		STRATA_META_BACKEND=tikv STRATA_DATA_BACKEND=rados \
+		STRATA_TIKV_PD_ENDPOINTS=$${STRATA_TIKV_PD_ENDPOINTS:-127.0.0.1:2379} \
+		STRATA_RADOS_CONFIG_FILE=$${STRATA_RADOS_CONFIG_FILE:-/etc/ceph/ceph.conf} \
+		STRATA_RADOS_POOL=$${STRATA_RADOS_POOL:-strata.rgw.buckets.data} \
+		./bin/strata-admin bench-gc --entries=$(BENCH_GC_ENTRIES) --concurrency=$$c \
+		  | tee -a bench-gc-results.jsonl; \
+	done
+
+bench-lifecycle: build
+	@rm -f bench-lifecycle-results.jsonl
+	@for c in $(BENCH_CONCURRENCY_LEVELS); do \
+		echo "bench-lifecycle concurrency=$$c objects=$(BENCH_LC_OBJECTS)" >&2; \
+		STRATA_META_BACKEND=tikv STRATA_DATA_BACKEND=rados \
+		STRATA_TIKV_PD_ENDPOINTS=$${STRATA_TIKV_PD_ENDPOINTS:-127.0.0.1:2379} \
+		STRATA_RADOS_CONFIG_FILE=$${STRATA_RADOS_CONFIG_FILE:-/etc/ceph/ceph.conf} \
+		STRATA_RADOS_POOL=$${STRATA_RADOS_POOL:-strata.rgw.buckets.data} \
+		./bin/strata-admin bench-lifecycle --objects=$(BENCH_LC_OBJECTS) --concurrency=$$c \
+		  | tee -a bench-lifecycle-results.jsonl; \
+	done
+
 clean:
 	rm -rf bin
+	rm -f bench-gc-results.jsonl bench-lifecycle-results.jsonl

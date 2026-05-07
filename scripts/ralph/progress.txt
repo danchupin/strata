@@ -9,6 +9,8 @@ Cycle: ralph/gc-lifecycle-scale
 - Counters under concurrent writes use `atomic.Int64` instead of plain `int`.
 - `golang.org/x/sync` lives in `go.mod`; it was indirect — bumping to direct via `go mod tidy` after first errgroup import.
 - Go 1.25 modernization: `for i := 0; i < n; i++` flagged as `rangeint`; use `for i := range n`. Loop var aliasing (`e := e`) is also flagged (`forvar`); not needed since Go 1.22.
+- New strata-admin subcommands wire into `cmd/strata-admin/main.go::run` via the same dispatch shape as `rewrap` (no-subcommand variant); the shared meta-store builder is `buildRewrapMetaStore` in `rewrap.go` — bench code reuses it directly. Add `buildBenchDataBackend` (bench-only) that mirrors `serverapp.buildDataBackend` for memory + rados; the rados stub keeps the bench buildable without the `ceph` build tag.
+- Bench JSONL contract: `benchResult` struct (cmd/strata-admin/bench_common.go) is the source of truth for stdout JSON + Prometheus push gauge labels. `STRATA_PROM_PUSHGATEWAY` is opt-in; failure to push logs WARN and never fails the bench run.
 
 ## 2026-05-07 - US-001
 - Implemented STRATA_GC_CONCURRENCY: bounded errgroup inside `gc.Worker.drainCount` with per-goroutine recover + log-and-continue.
@@ -35,4 +37,20 @@ Cycle: ralph/gc-lifecycle-scale
   - The `applyNoncurrentActions` prevMtime cursor walk must stay sequential — only the final `(v, age)` dispatch parallelises. Trying to parallelise the cursor walk would race on `prevKey`/`prevMtime`.
   - Phase 2 (sharded per-bucket leader-election) is what unlocks cross-bucket parallelism. Don't try to wrap the per-bucket outer loop here — single elected lifecycle leader is the bottleneck by design.
   - The slowDataBackend pattern (sleep + atomic max-in-flight CAS) is reusable for any concurrency benchmark — copy across to bench-lifecycle (US-003).
+---
+
+## 2026-05-07 - US-003
+- Added `strata-admin bench-gc` + `strata-admin bench-lifecycle` subcommands. Dispatched from `cmd/strata-admin/main.go::run` alongside the existing `rewrap` no-subcommand path. New files: `bench_common.go` (shared `buildBenchDataBackend` mirroring serverapp + `benchResult` JSON shape + `pushBenchGauge` for STRATA_PROM_PUSHGATEWAY), `bench_gc.go`, `bench_lifecycle.go`, `bench_gc_test.go`.
+- bench-gc: `--entries=N` (default 10000), `--concurrency=M` (1..256, default 1). Pre-seeds N synthetic ChunkRefs with a unique OID prefix in a unique `bench-<uuid>` region (no collision with real workers), times one `gc.Worker.RunOnce`, prints one JSON line {bench, entries, concurrency, elapsed_ms, throughput_per_sec, meta_backend, data_backend, started_at_unix}. Cleans residual queue rows at exit so the same lab can re-run.
+- bench-lifecycle: `--objects=N` (default 10000), `--concurrency=M`. Creates a unique `lcbench-<uuid>` bucket, seeds N objects with Mtime=-2h + a single-chunk Manifest, attaches a 1-day Expiration rule (AgeUnit=Hour so every object triggers in one tick), times `lifecycle.Worker.RunOnce`, prints same JSON shape. Cleanup: drops lifecycle, deletes survivor objects, deletes bucket, drains region GC queue for bench-prefixed entries.
+- Makefile bench-gc + bench-lifecycle targets sweep `BENCH_CONCURRENCY_LEVELS` (default `1 4 16 64 256`) and tee one JSON line per level into `bench-{gc,lifecycle}-results.jsonl`. Targets default to TiKV meta + RADOS data via lab-tikv defaults; override via env. `make clean` now also drops the JSONL artifacts.
+- Smoke test `TestApp_BenchGC_RunsAgainstMemory` exits 0 against in-memory backends with `--entries=10 --concurrency=1`, asserts JSONL shape (entries=10, concurrency=1, backends=memory). `TestApp_BenchGC_RejectsBadConcurrency` pins the [1,256] flag-boundary check.
+- Files changed: `cmd/strata-admin/{main.go,bench_common.go,bench_gc.go,bench_lifecycle.go,bench_gc_test.go}`, `Makefile`.
+- **Learnings for future iterations:**
+  - `gc.Worker.RunOnce(ctx)` ignores `Interval`; `Grace=0` + `Batch=N` is the right tuning for a one-shot drain measurement (no scheduler delay, single batch).
+  - For lifecycle expiration bench, set `AgeUnit=time.Hour` + Mtime=-2h + Days=1: every object meets the threshold deterministically. Versioning OFF means the expire path enqueues GC rows synchronously on the same call — no extra ticks needed.
+  - `buildBenchDataBackend` is intentionally a duplicate of serverapp's helper (importing serverapp from cmd/strata-admin would cycle). Keep them in sync when adding a new data backend (s3 next).
+  - `internal/data/rados/stub.go` (build tag `!ceph`) returns an error from `New` so importing the rados package without the build tag still compiles — this is what lets strata-admin bench code unconditionally reference `datarados.New` without a build-tag split of the bench files.
+  - The Prometheus push-gateway client is `github.com/prometheus/client_golang/prometheus/push`; pin a 5s HTTP timeout so a wedged push gateway never stalls the bench run.
+  - `--bucket=` flag default uses `strings.ReplaceAll(uuid.NewString()[:12], "-", "")` to fit the 3-DNS-safe bucket-name validator (`internal/s3api/validate.go`); raw uuids with dashes pass too but the trimmed form keeps the JSONL output greppable.
 ---

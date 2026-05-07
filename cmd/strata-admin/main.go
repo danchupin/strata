@@ -45,7 +45,7 @@ func (a *app) run(ctx context.Context) error {
 	principal := root.String("principal", os.Getenv("STRATA_ADMIN_PRINCIPAL"), "X-Test-Principal header value (test harness shortcut)")
 	jsonOut := root.Bool("json", false, "emit raw JSON instead of human-formatted output")
 	root.Usage = func() {
-		fmt.Fprintln(a.err, "usage: strata-admin [global flags] <iam|lifecycle|gc|sse|replicate|bucket|rewrap> <subcommand> [flags]\n  bucket subcommands: inspect | reshard\n  rewrap takes no subcommand: strata-admin rewrap [--target-key-id ID] [--dry-run] [--batch N]")
+		fmt.Fprintln(a.err, "usage: strata-admin [global flags] <iam|lifecycle|gc|sse|replicate|bucket|rewrap|bench-gc|bench-lifecycle> <subcommand> [flags]\n  bucket subcommands: inspect | reshard\n  rewrap takes no subcommand: strata-admin rewrap [--target-key-id ID] [--dry-run] [--batch N]\n  bench-gc / bench-lifecycle take no subcommand: strata-admin bench-gc [--entries N] [--concurrency M]")
 		root.PrintDefaults()
 	}
 
@@ -55,6 +55,12 @@ func (a *app) run(ctx context.Context) error {
 	rest := root.Args()
 	if len(rest) >= 1 && rest[0] == "rewrap" {
 		return a.cmdRewrap(ctx, *jsonOut, rest[1:])
+	}
+	if len(rest) >= 1 && rest[0] == "bench-gc" {
+		return a.cmdBenchGC(ctx, *jsonOut, rest[1:])
+	}
+	if len(rest) >= 1 && rest[0] == "bench-lifecycle" {
+		return a.cmdBenchLifecycle(ctx, *jsonOut, rest[1:])
 	}
 	if len(rest) < 2 {
 		root.Usage()
