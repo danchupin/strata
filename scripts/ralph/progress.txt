@@ -13,6 +13,8 @@ Cycle: ralph/multi-replica-cluster
 - Heartbeat row eviction asymmetry: cassandra applies `USING TTL 30` (row gone server-side); tikv stamps `ExpiresAt` in the JSON payload and ListNodes filters `now > ExpiresAt` at read time; memory backend GCs lazily on read AND write. All three converge on "row vanishes within 30s of the writer dying", so post-stop assertions like `count(status==healthy)==1` hold uniformly. Lease TTL in `internal/leader.Session` defaults to 30s, RenewPeriod TTL/3 — chip rotation lands within ~30-35s after holder kill.
 - `STRATA_STATIC_CREDENTIALS` is comma-separated `accesskey:secret[:owner]` entries. First entry is the conventional admin/login key in dev-stack scripts. Parse with `${VAL%%,*}` then `${ENTRY%%:*}` / `${ENTRY#*:%%:*}` — no awk/cut dependency.
 - Admin session cookie: `strata_session`, path=/admin, signed with the JWT secret. In a multi-replica deployment the secret is shared via the strata-jwt-shared volume (US-004), so a cookie issued by replica A is accepted by replica B / the LB.
+- Playwright multi-config split: default `playwright.config.ts` carries one inline webServer (memory-mode gateway) for `e2e-ui`. Specs that need an external (compose-managed) stack live behind a separate `playwright.<name>.config.ts` with NO webServer + a project-scoped testMatch; default config testIgnore-s the spec filename so the two never overlap. Run via `pnpm exec playwright test --config=playwright.<name>.config.ts`. Same pattern works for any future "needs real docker" spec.
+- CI gating with PR-title token: `if: contains(github.event.pull_request.title, '[multi-replica]') || github.event_name == 'workflow_dispatch'` — keep the default e2e fast budget intact while opt-in PRs (or manual workflow_dispatch from the Actions tab) exercise the heavier scenario. Always pair with `workflow_dispatch:` under top-level `on:` so the manual trigger is reachable.
 ---
 
 ## 2026-05-07 16:10 - US-001
@@ -94,4 +96,23 @@ Cycle: ralph/multi-replica-cluster
   - DEAD_GRACE=35 + REJOIN_GRACE=30 are env-overridable so a flaky CI runner can bump them without editing the script. Heartbeat TTL is 30s and lease renew is TTL/3 so a 5s buffer absorbs the next supervisor tick.
   - `chip_holders <chip>` returns one ID per line — count via `wc -l | awk '{print $1}'` (awk strips the leading whitespace BSD wc emits on macOS). Pure `wc -l <(...)` works on Linux but not portably; the pipeline is.
   - bucket cleanup uses a `CLEAN_BUCKET=1` flag set after `create-bucket` so the trap doesn't try to delete a non-existent bucket on early failures (which would mask the original FAIL line in CI logs).
+---
+
+## 2026-05-07 17:50 - US-006
+- New web/e2e/multi-replica.spec.ts: 3 tests (cluster-overview-shows-2-nodes, cross-replica-put-get, worker-rotation). Targets the LB at 127.0.0.1:9999 + replica-direct ports 9001/9002 brought up by `make up-lab-tikv && make wait-strata-lab`.
+  * cluster-overview-shows-2-nodes: login → /console → assert "2 of 2 nodes healthy" + both `strata-a` / `strata-b` cells present.
+  * cross-replica-put-get: login → CreateBucketDialog → BucketDetail → UploadDialog → setInputFiles(small payload) → "Upload 1 file" → Close → reload → object button visible.
+  * worker-rotation: read /admin/v1/cluster/nodes → identify lifecycle-leader holder → dockerStop the matching container → wait DEAD_GRACE (40s) → fetch nodes again, expect chip on OTHER → reload Cluster Overview, assert UI mirrors. dockerStart in finally + REJOIN_GRACE so subsequent runs start clean.
+- New web/e2e/fixtures/docker.ts: `dockerStop` / `dockerStart` / `dockerKill` thin wrappers around `child_process.execFile('docker', ...)` (promisified, 30s timeout). No mocking — assumes real docker.
+- New web/playwright.multi-replica.config.ts: standalone config (no webServer, baseURL=:9999, project name `multi-replica`, testMatch=multi-replica.spec.ts, timeout 90s). The base playwright.config.ts gains `testIgnore: ['multi-replica.spec.ts']` on the chromium project so the default `e2e-ui` job (memory-mode gateway) doesn't pick the spec up and 0 tests change shape.
+- New CI job `.github/workflows/ci.yml::e2e-ui-multi-replica`: gated by PR title `[multi-replica]` OR `workflow_dispatch`. 15 min timeout. Steps: build strata:ceph + strata-ceph:local images → make up-lab-tikv → make wait-strata-lab → pnpm install + playwright install → run via `--config=playwright.multi-replica.config.ts` → collect docker logs + playwright-report on failure → `make down`. Added `workflow_dispatch:` to top-level `on:` so the Actions tab "Run workflow" button is reachable.
+- Verified: pnpm run typecheck clean; `pnpm exec playwright test --list` returns 0 multi-replica matches (default config); `playwright test --config=playwright.multi-replica.config.ts --list` returns the 3 expected tests.
+- Files changed: web/e2e/multi-replica.spec.ts (new), web/e2e/fixtures/docker.ts (new), web/playwright.multi-replica.config.ts (new), web/playwright.config.ts, .github/workflows/ci.yml, scripts/ralph/prd.json, scripts/ralph/progress.txt.
+- **Learnings for future iterations:**
+  - `testIgnore` is per-project, not per-config global. Forgetting it means default `playwright test` picks up the multi-replica spec and times out booting against a stack that doesn't exist.
+  - The UploadDialog footer "primary" button label depends on file count: `Upload 1 file` / `Upload N files`. Selector via regex `/^Upload 1 file$/` is more stable than guessing at literal counts.
+  - UploadDialog success state flips the secondary button label from `Cancel` to `Close` — assert on the `Close` button visibility as the upload-complete signal (no toast hook in the spec context).
+  - Multi-replica scenarios need ≥40s wall-clock per test (heartbeat TTL 30s + lease renew + scheduler tick), so the per-test timeout in the standalone config is bumped to 90s. The default 30s is too tight even on a fast runner.
+  - For the worker-rotation rollback, `dockerStart(...).catch(() => undefined)` in the finally branch protects against test-already-failed paths — the docker daemon may have already cleaned up the container, and we don't want the cleanup error to mask the real assertion failure.
+  - Playwright's `page.request` shares cookies with the page navigation, so `await page.request.get('/admin/v1/cluster/nodes')` after `login(page)` carries the `strata_session` cookie automatically — no manual header plumbing.
 ---

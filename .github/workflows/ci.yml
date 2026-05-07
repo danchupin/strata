@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Manual trigger for the gated multi-replica e2e job (US-006). The default
+  # e2e-ui job runs on every PR; e2e-ui-multi-replica needs the lab-tikv
+  # docker stack and a 15 min budget, so it only fires on demand.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -328,3 +332,92 @@ jobs:
           path: web/playwright-report/
           if-no-files-found: warn
           retention-days: 14
+
+  e2e-ui-multi-replica:
+    name: End-to-end UI multi-replica (Playwright, gated)
+    runs-on: ubuntu-latest
+    # Gated: opt-in via PR title token [multi-replica] OR manual
+    # workflow_dispatch run. Default PRs do NOT pay the lab-tikv boot cost.
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.title, '[multi-replica]'))
+    timeout-minutes: 15
+    needs: docker-build
+    env:
+      STRATA_AUTH_MODE: required
+      STRATA_STATIC_CREDENTIALS: ciAK:ciSK:ci
+      STRATA_WORKERS: gc,lifecycle
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '9'
+          run_install: false
+      - name: Get pnpm store dir
+        id: pnpm-store
+        run: echo "dir=$(pnpm store path --silent)" >> $GITHUB_OUTPUT
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.dir }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('web/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+      - name: Build gateway image (lab uses strata:ceph)
+        run: |
+          docker build -f deploy/docker/Dockerfile -t strata:ceph .
+          docker build -f deploy/docker/ceph-bootstrap/Dockerfile -t strata-ceph:local deploy/docker/ceph-bootstrap
+      - name: Bring up lab-tikv stack
+        run: make up-lab-tikv
+      - name: Wait for replicas + LB readyz
+        run: make wait-strata-lab
+      - name: pnpm install
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('web/pnpm-lock.yaml') }}
+      - name: Install Playwright (chromium + deps)
+        working-directory: web
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Run Playwright e2e (multi-replica)
+        working-directory: web
+        env:
+          CI: 'true'
+        run: pnpm exec playwright test --config=playwright.multi-replica.config.ts
+      - name: Collect container logs
+        if: always()
+        run: |
+          mkdir -p ci-logs
+          for c in pd tikv strata-tikv-a strata-tikv-b strata-lb-nginx strata-ceph; do
+            docker logs $c > ci-logs/$c.log 2>&1 || true
+          done
+          docker compose -f deploy/docker/docker-compose.yml ps > ci-logs/compose-ps.txt 2>&1 || true
+      - name: Upload CI logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-ui-multi-replica-logs
+          path: ci-logs/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-ui-multi-replica-report
+          path: web/playwright-report/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Tear down stack
+        if: always()
+        run: make down

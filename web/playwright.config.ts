@@ -32,6 +32,12 @@ export default defineConfig({
     {
       name: 'chromium',
       use: { ...devices['Desktop Chrome'] },
+      // multi-replica.spec.ts targets the lab-tikv docker-compose stack
+      // (US-006) and is loaded by playwright.multi-replica.config.ts
+      // separately. Excluding it here keeps the default e2e-ui job —
+      // which boots a memory-mode gateway via the webServer block below —
+      // from picking up a spec that expects real docker containers.
+      testIgnore: ['multi-replica.spec.ts'],
     },
   ],
   webServer: {
