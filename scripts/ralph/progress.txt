@@ -1,422 +1,81 @@
 # Ralph Progress Log
-Started: Thu May  7 14:43:49 MSK 2026
-Cycle: ralph/web-ui-storage-status
+Started: Thu May  7 16:00:00 MSK 2026
+Cycle: ralph/multi-replica-cluster (HA lab profile — 2 TiKV replicas + nginx LB + shared JWT)
 ---
 
 ## Codebase Patterns
-- Test-only env knobs that short-circuit a handler (e.g.
-  STRATA_STORAGE_HEALTH_OVERRIDE) carry the same risk as any global env:
-  flipping them on the shared e2e webServer pollutes every other spec.
-  Prefer Playwright `page.route()` to fake the response per-test when the
-  same-shape override exists; keep the env path documented for manual
-  operator flows but don't route specs through it.
-- Sampler-style background workers should do an initial RunOnce inside Run()
-  before entering the ticker loop. Otherwise pages backed by snapshot data
-  show empty until the first tick (1h default) — bad for both freshly-booted
-  prod gateways and e2e timing. The corresponding interval should be
-  env-overridable (STRATA_BUCKETSTATS_INTERVAL) so e2e specs can drive at
-  sub-second cadence without changing production behavior.
 
+### Branch policy (REQUIRED)
+- Cycle starts from main (HEAD `9d839fc` at prep time, after web-ui-storage-status closed). The cycle MUST end with a fast-forward merge back to main: US-007 (last story) ff-merges `ralph/multi-replica-cluster` into `main`, pushes `origin/main`, lets `archive_cycle` (in `scripts/ralph/ralph.sh`) snapshot prd.json + progress.txt under `scripts/ralph/archive/2026-MM-DD-multi-replica-cluster-complete/` on `<promise>COMPLETE</promise>`. Mirror the web-ui-storage-status close shape (commit `9d839fc`).
+- The shell wrapper `scripts/ralph/ralph.sh` MUST invoke `avito ai claude --` (not bare `claude`) — regression-resistant per memory feedback rule.
+- Ff-only merge pattern: do NOT create a `merge:` commit (older web-ui-debug shape `6519036` is OBSOLETE — current pattern is ff-only + single follow-up archive commit on main).
 
-- Optional capability surfaces (RangeScanStore, meta.HealthProbe,
-  data.HealthProbe) hang off the base interface. Backends implement
-  them via type-assertion at the call site (e.g. internal/adminapi
-  handler) — keeps the base interface small while allowing per-backend
-  differentiation. Add a compile-time
-  `var _ <pkg>.<Iface> = (*Backend)(nil)` assertion in each backend.
-- Cassandra system-table queries use Consistency(gocql.LocalOne) for
-  cluster-introspection (not LOCAL_QUORUM), since system.* tables are
-  per-node and quorum reads make no sense.
-- Admin endpoints register in routes() under server.go and live in their
-  own file (storage.go, cluster.go, ...). Tests for those endpoints live
-  next to them as <name>_test.go and use newTestServer() to drive
-  s.routes().ServeHTTP(rr, req) directly without auth.
-- adminapi.Server holds dependencies (Meta, Data, Creds, ...) injected
-  via adminapi.Config from internal/serverapp. New deps go on both
-  Server + Config, propagate through New(), and the test harness
-  newTestServer() in server_test.go is wired with in-memory defaults.
-- Cluster-wide cross-bucket aggregates (per-class totals, etc.) hang off
-  bucketstats.Sampler via a typed `Snapshot` pointer shared with the
-  adminapi handler. Sampler.SetX writes; handler reads through copy-on-
-  read accessors. Avoid growing meta.Store with new aggregation methods
-  — piggyback on the existing ListObjects iteration instead. The same
-  `Snapshot` is constructed once in serverapp and threaded into both the
-  sampler config and the adminapi.Config.
-- Top-N-bound sinks on bucketstats.Sampler share the `prevTopN` exit-set
-  loop: when a bucket leaves the window, every Reset hook fires together
-  (ShardSink.ResetBucketShard + ClassSink.ResetBucketClass + ...). New
-  sinks should plug into the same loop instead of tracking their own
-  previous-set map.
-- Web pages that pull recharts must lazy-load via React.lazy in App.tsx
-  (Suspense + PageFallback wrapper). Recharts is split into a shared
-  `generateCategoricalChart-*.js` chunk; loading it lazily keeps the
-  home-page initial bundle under 500 KiB gzipped.
-- Web sidebar entries live in web/src/components/layout/nav.ts under
-  primaryNav. Top-level (between Buckets and Consumers) for first-class
-  pages; under the "Diagnostics" section for debug-only views. Icons
-  come from lucide-react.
-- Per-session dismissible alerts (banners, toasts that survive the tab
-  but reset on close) key on a stable signature of the alerting payload
-  so a fresh distinct condition re-alerts even if the previous one was
-  dismissed. Wrap sessionStorage reads/writes in try/catch — privacy-
-  mode browsers throw and uncaught exceptions in top-level shell
-  components blank the whole UI.
+### PRD lifecycle (REQUIRED — codified in root CLAUDE.md `b45d633`)
+- The markdown PRD `tasks/prd-multi-replica-cluster.md` is a disposable design draft. The canonical record of what got built is the auto-archived `scripts/ralph/archive/<date>-multi-replica-cluster-complete/{prd.json,progress.txt}` snapshot. US-007 close-flip MUST `git rm tasks/prd-multi-replica-cluster.md` in the same commit that flips the ROADMAP entry to Done. Do NOT copy the markdown to `tasks/archive/`.
 
-## 2026-05-07 - US-001
-- Added optional `meta.HealthProbe` interface + `MetaHealthReport` /
-  `NodeStatus` types to internal/meta/store.go.
-- Memory backend MetaHealth returns a single in-process row (RF=1).
-- Cassandra backend MetaHealth merges system.local + system.peers via two
-  LOCAL_ONE queries (CQL has no UNION ALL); RF read from
-  system_schema.keyspaces; schema-version drift folded into Warnings; 10s
-  in-process cache so adminapi pollers (30s storage page, 60s overview hero,
-  30s degraded banner) absorb bursts without re-querying. Added `keyspace`
-  field to cassandra.Store.
-- TiKV backend MetaHealth via new internal/meta/tikv/pdclient.go — thin
-  bootstrap-only HTTP client that tries each PD endpoint in order with 2s
-  timeout, GETs /pd/api/v1/stores. Raft-leader imbalance (live store with 0
-  leaders while peers carry traffic) folded into Warnings.
-- Added storetest caseMetaHealth contract case — verifies backend label,
-  per-node Address+State, and tolerates the openWithBackend test-only TiKV
-  shape (no PD endpoints → warning row, len(Nodes)=0).
-- New GET /admin/v1/storage/meta endpoint in adminapi (storage.go) wired
-  into server.go routes(). Type-asserts s.Meta against meta.HealthProbe;
-  returns 503 NotImplemented on missing surface, 502 MetaHealthFailed on
-  probe error.
-- Files changed:
-  - internal/meta/store.go (HealthProbe interface + types)
-  - internal/meta/memory/store.go (MetaHealth + compile-time assertion)
-  - internal/meta/cassandra/store.go (Store.keyspace field + cache)
-  - internal/meta/cassandra/meta_health.go (new)
-  - internal/meta/tikv/pdclient.go (new)
-  - internal/meta/tikv/meta_health.go (new)
-  - internal/meta/storetest/contract.go (caseMetaHealth)
-  - internal/adminapi/storage.go (new handler)
-  - internal/adminapi/storage_test.go (new test)
-  - internal/adminapi/server.go (route registration)
-- **Learnings for future iterations:**
-  - The TiKV `openWithBackend` (test-only) helper does NOT pass cfg through
-    — Store.cfg.PDEndpoints is empty there. MetaHealth had to degrade
-    gracefully (warning row, no nodes) so the storetest contract case
-    works against the unit-test rig too.
-  - cassandra.Store has no Keyspace field by default; needed to add one to
-    Open() for system_schema.keyspaces RF lookup.
-  - The PD `/pd/api/v1/stores` JSON shape has the per-store status (leader
-    count, region count, available/capacity) under a sibling `status` field
-    next to `store`, not nested inside it. Don't conflate.
-  - The storetest contract test is run by both memory unit tests and
-    cassandra/tikv integration tests — keep new cases compatible with
-    every backend (tolerate degraded paths via Warnings instead of
-    requiring node rows).
----
+### Prior cycle context (where things sit on current main, 9d839fc)
+- ralph/web-ui-storage-status closed 2026-05-07: storage page + meta+data health probes + per-class breakdown + Cluster Overview hero card + degraded banner. 6 stories shipped.
+- TiKV heartbeat backend shipped earlier in `c37487b` — `internal/meta/tikv/heartbeat.go` implements `heartbeat.Store` with payload-encoded ExpiresAt + lazy-skip + eager-GC pattern. **This is the foundation US-001/US-002 build on**: cluster_nodes-equivalent rows already exist on TiKV; this cycle adds the second replica writing into the same TiKV cluster.
+- **Phase 1/2/3 web UI is shipped** — Overview page, Cluster Overview, NodeDetailDrawer all exist. `web/src/pages/Overview.tsx:403` already renders `<ChipList items={n.leader_for} />`; the chip is wired through cluster.go adminapi handler. The ONLY gap is no source ever WRITES `Heartbeater.Node.LeaderFor` after construct — that's US-001's reason for being.
 
-## 2026-05-07 - US-002
-- Added optional `data.HealthProbe` interface + `DataHealthReport` /
-  `PoolStatus` types to internal/data/backend.go.
-- Memory backend DataHealth returns one PoolStatus row keyed Name="memory"
-  with BytesUsed = sum(chunks) and ObjectCount = len(chunks); class "*"
-  since the memory map serves every storage class.
-- RADOS impl (build tag ceph) in internal/data/rados/health.go: groups
-  configured classes by unique (cluster, pool, ns), opens IOContext via
-  the existing b.ioctx() helper, calls (*IOContext).GetPoolStats() and
-  reports BytesUsed = Num_kb*1024 + ObjectCount = Num_objects. Cluster-
-  wide health via (*Conn).MonCommand({"prefix":"status","format":"json"})
-  per unique cluster — HEALTH_OK suppresses warnings; otherwise the
-  status string + up to 5 sorted check summaries land in Warnings. Per-
-  pool / per-cluster errors degrade the row + emit a warning instead of
-  failing the whole report.
-- S3 backend DataHealth: HeadBucket on the configured backend bucket;
-  state reachable|error; bytes/objects 0 (the upstream S3 API does not
-  expose them in O(1) and US-003's bucketstats sampler covers the
-  Strata-side dimensions).
-- New GET /admin/v1/storage/data endpoint in adminapi (storage.go) wired
-  into routes(). Type-asserts s.Data against data.HealthProbe; 503 on
-  missing surface (or nil Data), 502 on probe error.
-- adminapi.Server + Config gained a Data field; serverapp passes the
-  dataBackend through; newTestServer() seeds a datamem.New() so the
-  storage/data path returns the expected memory-backend report.
-- Files changed:
-  - internal/data/backend.go (DataHealthReport / PoolStatus / HealthProbe)
-  - internal/data/memory/backend.go (DataHealth + assertion)
-  - internal/data/rados/health.go (new, build tag ceph)
-  - internal/data/s3/health.go (new)
-  - internal/adminapi/server.go (Data field + Config + route)
-  - internal/adminapi/storage.go (handleStorageData)
-  - internal/adminapi/storage_test.go (shape + 503-on-nil tests)
-  - internal/adminapi/server_test.go (newTestServer wires Data)
-  - internal/serverapp/serverapp.go (passes dataBackend to adminapi)
-- **Learnings for future iterations:**
-  - go-ceph's PoolStat fields use snake_case (Num_kb, Num_bytes,
-    Num_objects). Older Ceph builds report 0 for Num_bytes; the PRD-
-    documented Num_kb*1024 path is the stable contract.
-  - (*Conn).MonCommand returns ([]byte, string, error); marshal the
-    args as JSON with prefix=status format=json. Status JSON shape is
-    {health:{status, checks:{<code>:{summary:{message}}}}}.
-  - HeadBucket is the cheapest reachability check for the s3 backend —
-    no body, returns 200 / 403 / 404. The existing b.opCtx() short-
-    timeout wrapper bounds the call.
-  - Adding a new dependency to the adminapi Server takes 4 spots:
-    Server struct, Config struct, New() body, newTestServer() in
-    server_test.go. Forgetting any of them leaks compile / test errors.
----
+### US-001 — Supervisor lease state → Heartbeater wiring
+- `cmd/strata/workers/supervisor.go::Supervisor` runs one goroutine per worker via `superviseOne` -> `runOnce`. `runOnce` is where the lease is held (acquired before, released on return). Add a `LeaderEvents() <-chan LeaderEvent` accessor; emit `{Worker: w.Name, Acquired: true}` on `runOnce` enter and `{Acquired: false}` on `runOnce` exit. Channel buffered cap 8 — if consumer stalls, supervisor never blocks (drops oldest event via `select { case ch <- evt: default: }` is too lossy; cap-8 + drop-on-full is acceptable since chip-state is eventually consistent).
+- `internal/heartbeat.Heartbeater.Node` is set ONCE at construct time. Add `(*Heartbeater).SetLeaderFor(worker string, owned bool)` that mutates `h.Node.LeaderFor` under a sync.Mutex. The `write` method (line 75) already snapshots `h.Node` before sending — make it copy under the same mutex.
+- `internal/serverapp.runApp` (the main wire-up) launches the supervisor in one goroutine and the heartbeater in another. Add a third goroutine: `go consumeLeaderEvents(ctx, supervisor.LeaderEvents(), hb)`. Exits on channel close (supervisor shutdown).
+- Test pattern: drive a fake worker through one acquire+release; assert two events in order on the channel; assert `hb.Node.LeaderFor` snapshots at expected points.
+- ROADMAP gap: nothing exists today for `leader_for stays empty`. US-001 surfaces the gap AND closes it in the same commit per CLAUDE.md `## Discovering a new gap` + `## Closing a roadmap item` rules.
 
-## 2026-05-07 - US-003
-- Extended `bucketstats.Sampler` with optional `ClassSink` and `Snapshot`
-  fields. `sampleBucket` now returns `map[string]ClassStat{Bytes,Objects}`
-  per bucket; `RunOnce` aggregates a cluster-wide per-class total and pushes
-  it into `Snapshot.SetClasses` after every pass. Per-(bucket, class)
-  bytes/objects are emitted via `ClassSink` only for top-N buckets,
-  reusing the same `prevTopN` exit-set logic that drives `ShardSink` so a
-  bucket leaving the window resets BOTH sinks in lockstep.
-- New gauges `strata_storage_class_bytes{class,bucket}` and
-  `strata_storage_class_objects{class,bucket}` registered in
-  `internal/metrics`. `BucketStatsObserver` gains
-  `SetStorageClassBytes/Objects` + `ResetBucketClass` (delete-partial-match
-  by bucket label). Cardinality bound: top-N * |classes|.
-- New `bucketstats.Snapshot` (snapshot.go) with RWMutex-guarded copy-on-read
-  semantics — `NewSnapshot(poolsByClass)` seeds the static class -> pool
-  map; `SetClasses` replaces totals atomically; nil receiver no-ops on every
-  method so test rigs without a sampler still get a usable handler.
-- Adminapi: new `StorageClasses *bucketstats.Snapshot` field on
-  `Server`+`Config`; `handleStorageClasses` returns
-  `{classes:[{class,bytes,objects}], pools_by_class:{...}}` sorted
-  bytes-desc / class-asc tiebreak. Route registered at
-  `GET /admin/v1/storage/classes`.
-- Serverapp: `poolsByClass(cfg, logger)` parses `cfg.RADOS.Classes` into
-  `class -> pool name` (empty for memory/s3 backends or on parse error
-  with a logged warning). The same `*Snapshot` is passed to both the
-  bucketstats sampler and the adminapi config so writes/reads share state
-  in-process.
-- Files changed:
-  - internal/bucketstats/sampler.go (ClassStat, ClassSink, Snapshot wiring,
-    sampleBucket bytes+objects, RunOnce class sink + snapshot updates)
-  - internal/bucketstats/snapshot.go (new)
-  - internal/bucketstats/sampler_test.go (per-class sink + snapshot tests,
-    top-N respect for class sink)
-  - internal/metrics/metrics.go (StorageClassBytes / StorageClassObjects
-    gauges, BucketStatsObserver class methods, Register additions)
-  - internal/adminapi/server.go (StorageClasses on Server+Config, route)
-  - internal/adminapi/storage.go (handleStorageClasses + types)
-  - internal/adminapi/storage_test.go (empty + populated snapshot tests)
-  - internal/serverapp/serverapp.go (snapshot ctor, poolsByClass helper,
-    sampler ClassSink+Snapshot, adminapi StorageClasses wire)
-- **Learnings for future iterations:**
-  - The bucketstats sampler is the natural home for "walk every bucket
-    once per hour and aggregate something" cluster-wide views — adding a
-    Snapshot pointer is cheaper than adding a meta.Store method and works
-    lockstep across all backends because it piggybacks on the existing
-    ListObjects iteration. New per-class/per-anything cluster aggregates
-    should follow this Sampler.Snapshot pattern instead of growing the
-    meta.Store interface.
-  - `prevTopN` tracking in the sampler is a single source of truth for
-    "which buckets are currently in the top-N window" — both ShardSink and
-    ClassSink reset together when a bucket exits, so the sinks never
-    diverge. New top-N-bound sinks should plug into the same exit-set loop
-    instead of carrying their own previous-set map.
-  - The pools_by_class map is empty for non-RADOS backends (memory / s3)
-    by design — UI consumers must render "n/a" or hide the column when a
-    class has no pool entry. RADOS is the only backend with a meaningful
-    class -> pool mapping today.
----
+### US-002 — compose lab-tikv profile
+- Existing `strata-tikv` service in `deploy/docker/docker-compose.yml:218` is a single-replica TiKV-backed gateway under profile `tikv` at host port 9998. Don't modify it — add NEW services `strata-tikv-a` + `strata-tikv-b` under profile `lab-tikv` so the two lab profiles coexist.
+- `STRATA_NODE_ID` env required — defaults to hostname (which is the container name when set explicitly). Pin per-replica: `STRATA_NODE_ID=strata-a` / `strata-b`.
+- All shared env vars threaded through `${VAR_NAME:-}` so the host shell exports propagate (matches existing strata-tikv pattern at lines 232-243).
+- Compose YAML lint: `docker compose --profile lab-tikv config -q` returns exit 0 + an empty stdout when valid.
 
-## 2026-05-07 - US-004
-- New web/src/pages/Storage.tsx + /storage route, lazy-loaded via
-  React.lazy so the recharts bundle stays out of the home-page initial
-  download (Storage chunk = 3.69 KiB gz, recharts split = 102.9 KiB gz).
-- Sidebar entry "Storage" inserted between "Buckets" and "Consumers" with
-  the lucide HardDrive icon (in primaryNav under the first section, NOT
-  under Diagnostics, per the PRD).
-- Two shadcn Tabs (Meta default + Data). Meta tab: header card "Backend =
-  <kind>" + table of NodeStatus rows (Address / State / DC / Rack /
-  SchemaVersion); warnings render in a top banner when
-  report.warnings.length > 0. Memory backend renders an explainer card
-  rather than an empty table. Data tab: header card + PoolStatus table
-  (Name / Class / Bytes used / Objects / Replicas / State); below the
-  table a Storage classes subsection renders a horizontal stacked
-  recharts BarChart of bytes-per-class plus a chip strip with class color
-  swatch, bytes/objects/percent-of-total, and the configured pool name
-  (when RADOS).
-- TanStack Query polls every 30 s (queryKeys.storage.{meta,data,classes});
-  refresh button uses useIsFetching() filtered to ['storage', ...] keys to
-  reflect the spinning-icon state across all three queries; refresh
-  invalidates each storage queryKey through queryClient.invalidateQueries.
-- New web/src/api/storage.ts exporting fetchStorageMeta /
-  fetchStorageData / fetchStorageClasses + the wire-shape types; re-
-  exported through api/client.ts so pages can keep importing from one
-  module.
-- Files changed:
-  - web/src/api/storage.ts (new)
-  - web/src/api/client.ts (re-export storage wrappers + types)
-  - web/src/lib/query.ts (storage query keys)
-  - web/src/pages/Storage.tsx (new)
-  - web/src/App.tsx (lazy route + Suspense fallback)
-  - web/src/components/layout/nav.ts (HardDrive icon + Storage entry)
-  - web/dist/index.html (vite build output)
-- Browser verification: deferred to US-006 (no MCP browser tooling
-  available in this Ralph environment); typecheck + vite build both
-  pass cleanly. Manual verification once a dev server is running:
-  /storage renders, Meta tab shows the in-memory single-row report,
-  Data tab shows the in-memory pool, Storage classes section is empty
-  until the bucketstats sampler runs once.
-- **Learnings for future iterations:**
-  - useIsFetching({ predicate }) is the cleanest way to reflect "any of
-    these 3 queries currently fetching" on a single shared refresh button
-    without prop-drilling each query's isFetching back up. Filter on
-    queryKey[0] === '<namespace>'.
-  - The current vite build chunks recharts into one shared
-    `generateCategoricalChart-*.js` (102.94 KiB gz). Any new lazy-loaded
-    page that imports recharts pays the load only on first navigation;
-    the home-page initial bundle stays at index-*.js = 183 KiB gz, well
-    under the 500 KiB gz target the AC mentions.
-  - The shadcn Tabs primitive does not require a wrapping form element;
-    `defaultValue="meta"` makes the Meta tab the landing default per AC.
-  - When a backend is "memory" the storage page should render an
-    explainer card (not an empty table) so the operator understands why
-    the topology is single-row. Both Meta and Data tabs follow the same
-    pattern — keep them lockstep when adding a new backend variant.
----
+### US-003 — nginx LB
+- nginx 1.27-alpine ships `nginx -t` for config syntax check. CI-friendly: `docker run --rm -v <conf>:/etc/nginx/conf.d/default.conf nginx:1.27-alpine nginx -t`.
+- **Streaming-aware settings (CRITICAL)** — without these, multipart UploadPart on parts >100 MiB get buffered to nginx temp dir and either fill disk or time out at the default `proxy_read_timeout 60s`. Required:
+  - `proxy_request_buffering off` — pipe upload body chunked to upstream rather than buffering.
+  - `proxy_buffering off` — stream GET response back to client without buffering.
+  - `client_max_body_size 0` — disable upload cap (rely on gateway's own enforcement; AWS S3 spec allows 5 GiB single PUT, 5 GiB per multipart part).
+  - `proxy_read_timeout 300s` + `proxy_send_timeout 300s` — large uploads.
+  - `proxy_http_version 1.1` — persistent connections + chunked encoding.
+- least_conn upstream load balancing (not round-robin) — long uploads do not pin one replica.
+- Headers preserved: `Host` ($host), `X-Forwarded-For` ($proxy_add_x_forwarded_for), `X-Forwarded-Proto` ($scheme).
 
-## 2026-05-07 - US-005
-- New aggregate handler `handleStorageHealth` (GET
-  /admin/v1/storage/health) in internal/adminapi/storage.go combines
-  meta.HealthProbe + data.HealthProbe into {ok, warnings, source}. ok=false
-  when either probe reports Warnings.length > 0 or any node/pool state is
-  not in {UP, ok, reachable} (case-insensitive). source is "meta" if the
-  meta probe flips ok first, else "data"; empty when ok=true.
-- STRATA_STORAGE_HEALTH_OVERRIDE env: when set to a valid JSON object the
-  handler returns it verbatim — Playwright e2e drives this for the degraded
-  banner spec. Invalid JSON falls through to the live computation with a
-  WARN log so a misconfigured env-var doesn't blank the banner permanently.
-- internal/adminapi/storage_health_test.go covers the happy path
-  (memory + memory → ok=true), override echo, and invalid-override
-  fall-through. Live degraded path is exercised via override since the
-  in-memory backends never report degraded state.
-- New web/src/components/StorageDegradedBanner.tsx polls
-  /admin/v1/storage/health every 30s. Renders top-3 warnings + "+N more"
-  hint + "View Storage page" link when ok=false. Dismiss per session via
-  sessionStorage["strata.storage-degraded.dismissed"] keyed on a stable
-  signature `${source}|${sorted-warnings}` so the banner reappears when
-  the warning set changes (new condition surfaces) but stays dismissed
-  for the same payload across page navigations.
-- Banner is wired into web/src/App.tsx as a sibling above <AppShell />
-  inside the RequireAuth route element so it renders above the outermost
-  flex div on every authed page (per AC).
-- web/src/pages/Overview.tsx StorageHeroCard reads
-  /admin/v1/storage/classes via TanStack Query (60s staleTime + 60s
-  refetchInterval per AC). Cap top-5 classes by bytes; "+N more" link to
-  /storage covers the long tail. lucide HardDrive icon matches the
-  sidebar entry. formatBytes is duplicated from Storage.tsx so the home
-  page bundle stays free of recharts.
-- Files changed:
-  - internal/adminapi/storage.go (handleStorageHealth + helpers)
-  - internal/adminapi/server.go (route registration)
-  - internal/adminapi/storage_health_test.go (new)
-  - web/src/api/storage.ts (fetchStorageHealth + StorageHealthResponse)
-  - web/src/api/client.ts (re-export)
-  - web/src/lib/query.ts (queryKeys.storage.health)
-  - web/src/components/StorageDegradedBanner.tsx (new)
-  - web/src/App.tsx (banner above AppShell)
-  - web/src/pages/Overview.tsx (StorageHeroCard, HardDrive import)
-- Browser verification deferred to US-006 (Playwright spec lands there;
-  no MCP browser tooling in this Ralph environment). Manual verification
-  on a live dev server: load /, see Storage hero card with class chips
-  (or empty-state hint until bucketstats sampler runs); set
-  STRATA_STORAGE_HEALTH_OVERRIDE='{"ok":false,"warnings":["test"],
-  "source":"meta"}' on the gateway, refresh — degraded banner appears
-  above shell on every page, dismiss button hides it for the rest of the
-  session, page refresh re-shows.
-- **Learnings for future iterations:**
-  - The PRD-spec ok=false rule "any node/pool in non-OK state" needs a
-    concrete allow-list, not a rejection list — TiKV PD emits arbitrary
-    StateNames (Up/Disconnected/Down/Tombstone/Offline/...). Stick to a
-    case-insensitive allow set {up, ok, reachable} so future per-backend
-    state strings don't silently slip through as "healthy".
-  - Banner-dismissal MUST key on the warning payload, not a single
-    boolean. The AC says "re-shows on refresh if still degraded", but a
-    fresh distinct degraded condition (e.g., yesterday a Cassandra peer
-    was down, today it's rados HEALTH_WARN) should re-alert even if the
-    operator dismissed the previous notice. Stable signature = source +
-    sorted warnings.
-  - sessionStorage may throw under privacy modes; wrap reads/writes in
-    try/catch or the banner crashes the whole shell. Same for any future
-    top-level component that persists ephemeral state.
-  - The Overview hero card duplicates formatBytes from Storage.tsx
-    intentionally — importing Storage.tsx into Overview.tsx would pull
-    recharts into the home-page initial bundle. Tiny duplicate string is
-    cheaper than an extra ~100 KiB gz.
-  - Banner is rendered inside the same TanStack QueryClient as the
-    /storage page; the queryKey ['storage', 'health'] is shared so a
-    refresh-button on /storage will refetch the banner's data too. The
-    home-page hero card uses a separate ['storage', 'classes', 'hero']
-    key with a 60 s cache so it doesn't fight the /storage page's 30 s
-    poll.
----
+### US-004 — JWT shared file (atomic bootstrap)
+- `internal/serverapp.loadJWTSecret` (line 538) — current precedence: `STRATA_CONSOLE_JWT_SECRET` env > `STRATA_JWT_SECRET_FILE` (default `/etc/strata/jwt-secret`) > ephemeral. Insert NEW source `/etc/strata/jwt-shared/secret` AFTER STRATA_JWT_SECRET_FILE, BEFORE ephemeral.
+- **No `leader.Session`**: the locker is built in serverapp AFTER loadJWTSecret runs. Use POSIX file primitives instead.
+- Bootstrap shape: `os.OpenFile(path, O_WRONLY|O_CREATE|O_EXCL, 0600)` — exactly one writer wins; loser's `O_EXCL` returns `EEXIST`. On EEXIST, fall through to a read of the existing file. Add 3-retry read-back loop with 100 ms backoff to absorb the fsync race window (writer commits but readers see partial file).
+- 32 random bytes via `crypto/rand`. Hex-encode to wire format that matches existing `STRATA_CONSOLE_JWT_SECRET` decoding (see `adminapi.DecodeSecret`).
+- When env is set, the shared-file path is NOT touched (no surprising file write on first boot of an env-configured replica).
+- Test pattern: t.TempDir() + run loadJWTSecret with two parallel goroutines via sync.WaitGroup + assert both return identical bytes.
 
-## 2026-05-07 - US-006
-- New web/e2e/storage.spec.ts with three flows:
-  - storage-page-renders: login → /storage → Meta + Data tabs visible →
-    "Backend = Memory" surfaces on both → "Storage classes" subsection
-    mounts.
-  - cluster-hero-shows-storage-card: login → home → "Storage" hero card
-    with at least one class chip (a seed bucket + object PUT in
-    beforeAll feeds the bucketstats sampler).
-  - degraded-banner-on-warn: page.route() spoofs
-    /admin/v1/storage/health to ok=false → banner above shell visible →
-    dismiss button hides for the rest of context. (The
-    STRATA_STORAGE_HEALTH_OVERRIDE env path is also documented but not
-    used in the spec to avoid polluting other specs sharing the
-    webServer.)
-- Sampler now does an initial RunOnce in Run() before entering the
-  ticker loop, so a freshly booted gateway populates the per-class
-  snapshot without waiting Interval (default 1h). New
-  STRATA_BUCKETSTATS_INTERVAL env knob lets the e2e webServer drive the
-  sampler at 500ms cadence so the chip strip materialises within the
-  spec timeout. internal/bucketstats/sampler_test.go covers the initial-
-  pass behavior.
-- New CI step in .github/workflows/ci.yml e2e-ui job adds
-  `pnpm exec playwright test storage.spec.ts` after debug.spec.ts.
-- New docs/storage.md operator guide covers env vars per backend,
-  warning-row meanings (Cassandra schema drift / TiKV raft leader
-  imbalance / RADOS HEALTH_WARN with link to ceph docs), per-class pool
-  mapping, and the aggregate degraded-banner contract.
-- docs/ui.md gains a Capability Matrix StorageStatus row + an e2e-tests
-  bullet for storage.spec.ts that links to docs/storage.md.
-- ROADMAP gets ~~**P3 — Web UI — Storage status (meta + data backend
-  observability).**~~ — **Done.** under ## Web UI section. Closing SHA
-  is added in a follow-up commit per CLAUDE.md "commit-then-amend is
-  undesirable" rule.
-- tasks/prd-web-ui-storage-status.md removed in this close-flip per the
-  CLAUDE.md PRD lifecycle rule (canonical record is the ralph snapshot
-  archived under scripts/ralph/archive/<date>-web-ui-storage-status* by
-  archive_cycle on COMPLETE).
-- Files changed:
-  - internal/bucketstats/sampler.go (initial RunOnce inside Run)
-  - internal/bucketstats/sampler_test.go (TestSamplerRunInitialPass)
-  - internal/serverapp/serverapp.go (bucketStatsInterval env)
-  - web/e2e/storage.spec.ts (new)
-  - web/playwright.config.ts (STRATA_BUCKETSTATS_INTERVAL=500ms)
-  - .github/workflows/ci.yml (storage.spec.ts CI step)
-  - docs/storage.md (new)
-  - docs/ui.md (Capability Matrix + e2e bullet)
-  - ROADMAP.md (close-flip)
-  - tasks/prd-web-ui-storage-status.md (removed)
-- **Learnings for future iterations:**
-  - reuseExistingServer:!process.env.CI in playwright.config.ts will
-    reuse ANY listener on the dev port even if it's misconfigured (e.g.
-    a previously-launched gateway with STRATA_AUTH_MODE=required), so a
-    local `pnpm exec playwright test` may fail with 401/403 on bucket
-    seed even when the spec is correct. CI runs do not hit this — they
-    boot a fresh gateway. When debugging locally, kill any prior
-    gateway on :9999 first.
-  - The cluster hero card chip strip depends on the bucketstats sampler
-    having ticked at least once with a non-empty snapshot. Default
-    Interval=1h means a fresh boot shows "No per-class breakdown yet"
-    until the first tick — fixed in this story by adding initial
-    RunOnce in Sampler.Run plus the STRATA_BUCKETSTATS_INTERVAL env.
-  - page.route() pattern (intercept /admin/v1/storage/health and
-    fulfill a degraded JSON shape) is the cleanest way to exercise the
-    StorageDegradedBanner in e2e without polluting sibling specs. The
-    server-side STRATA_STORAGE_HEALTH_OVERRIDE env still exists for
-    operators reproducing the path manually, but specs should not rely
-    on it.
+### US-005 — smoke shell script
+- Login flow: POST `/admin/v1/auth/login` with `{"access_key":"<...>","secret_key":"<...>"}`; capture the `Set-Cookie: strata_session=...` header; subsequent curls use `-b <cookie>`.
+- Cluster nodes endpoint: `GET /admin/v1/cluster/nodes` returns `{nodes: [{id, address, version, started_at, workers, leader_for, last_heartbeat, healthy}]}`. Parse with `jq` (already in CI ubuntu-latest base image).
+- `docker stop` evicts heartbeat row after `heartbeat.DefaultTTL` = 30 s. Smoke sleeps 35 s for safety.
+- Worker rotation: lease `lifecycle-leader` releases on container stop; the surviving replica's leader.Session AwaitAcquire grabs it within `leader.DefaultTTL` (30 s default). Combined with heartbeat tick (10 s), total observation lag is ≤40 s. Smoke sleeps 35 s — boundary case. If flaky, bump to 45 s.
+
+### US-006 — Playwright gated CI job
+- Existing `e2e-ui` job (`.github/workflows/ci.yml:252`) runs critical-path/admin/debug/storage specs against an in-memory `go run ./cmd/strata server` driven by `web/playwright.config.ts:webServer`. **Do NOT modify this job.** Adding multi-replica.spec.ts to the default invocation would balloon CI to 10+ minutes per PR.
+- NEW job `e2e-ui-multi-replica`:
+  - Trigger: `if: contains(github.event.pull_request.title, '[multi-replica]') || github.event_name == 'workflow_dispatch'`.
+  - Runner: `ubuntu-latest` with the docker socket available by default (docker is preinstalled on GitHub-hosted ubuntu runners).
+  - Steps: checkout → setup-go → setup-node → pnpm install → playwright install → `make up-lab-tikv` → `make wait-strata-lab` → `pnpm exec playwright test multi-replica.spec.ts` (or via a dedicated `--project` if you split playwright.config.ts) → `make down`.
+  - `timeout-minutes: 15` covers 5 min stack boot + 5 min spec + slack.
+- testIgnore on the default project: `testIgnore: '**/multi-replica.spec.ts'` in `web/playwright.config.ts` so the spec doesn't run in the existing fast job.
+- Multi-replica project: a SECOND project entry in playwright.config.ts (`name: 'multi-replica'`) without an inline `webServer` block — instead it expects a docker-compose-managed nginx LB at http://127.0.0.1:9999. Run with `pnpm exec playwright test --project=multi-replica`.
+- `web/e2e/fixtures/docker.ts` — wrap `child_process.execFile('docker', [...])` in async helpers `dockerStop(name)` / `dockerStart(name)`. Tests import these directly.
+
+### US-007 — close-flip
+- Close-flip lands in the same commit as the work (CLAUDE.md `## Closing a roadmap item` rule). Run order: implement → typecheck → tests → ROADMAP edit → commit (close-flip + work atomic) → ff-merge to main → archive snapshot follow-up commit.
+- ROADMAP entry placement: under `## Web UI` if you treat multi-replica as console observability story; under `## Developer experience` if you treat it as ops tooling. Pick `## Web UI` since US-001 closes a UI gap and the smoke + Playwright are about observability.
+- New gaps surfaced during this cycle (e.g. nginx config edge cases) get fresh entries under `## Web UI` or `## Scalability & performance` per CLAUDE.md `## Discovering a new gap` rule. Add in the same commit that surfaces them.
+
+### CI gotchas
+- `go build ./...` — canonical typecheck for Go side. Run before commit. With ceph build tag too if you touched RADOS files: `go build -tags ceph ./...`.
+- `cd web && pnpm typecheck` — TS side. `pnpm test` if vitest specs added (none expected this cycle; e2e is the test surface).
+- Docker socket access on GitHub ubuntu-latest: `docker ps` works out of the box; no need for `services: docker` in the job spec.
+- Compose YAML check: `docker compose -f deploy/docker/docker-compose.yml --profile lab-tikv config -q`.
+
 ---
