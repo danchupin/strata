@@ -3,6 +3,7 @@ package adminapi
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
 	"strings"
@@ -174,6 +175,14 @@ func (s *Server) handleMetricsTimeseries(w http.ResponseWriter, r *http.Request)
 	out := MetricSeries{Name: spec.name, Points: make([]MetricPoint, 0)}
 	for _, srs := range series {
 		for _, p := range srs.Points {
+			// PromQL returns NaN for empty windows (e.g. histogram_quantile
+			// over a bucket with zero observations). Go's encoding/json
+			// rejects NaN — drop those points so the rest of the series
+			// still encodes. Same for ±Inf which appear at the edges of
+			// histogram_quantile when le bounds underflow / overflow.
+			if math.IsNaN(p.Value) || math.IsInf(p.Value, 0) {
+				continue
+			}
 			out.Points = append(out.Points, MetricPoint{float64(p.Timestamp.UnixMilli()), p.Value})
 		}
 	}

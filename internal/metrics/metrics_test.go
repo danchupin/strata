@@ -52,6 +52,71 @@ func TestObserveHTTPLabelsHistogram(t *testing.T) {
 	}
 }
 
+func TestBucketLabel(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"", "_root"},
+		{"/", "_root"},
+		{"/admin/v1/cluster/nodes", "_admin"},
+		{"/metrics", "_admin"},
+		{"/healthz", "_admin"},
+		{"/readyz", "_admin"},
+		{"/console/index.html", "_admin"},
+		{"/lab-test", "lab-test"},
+		{"/lab-test/", "lab-test"},
+		{"/lab-test/file.txt", "lab-test"},
+		{"/lab-test/path/with/slashes", "lab-test"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			if got := bucketLabel(tc.in); got != tc.want {
+				t.Fatalf("bucketLabel(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestObserveHTTPCounterLabels regression-tests the bucket / access_key
+// labels added to strata_http_requests_total. Without these, PromQL
+// `sum by (bucket)` (Hot Buckets, Top Buckets on Overview) and
+// `sum by (access_key)` (Consumers leaderboard) returned an empty matrix
+// even when Prometheus was scraping correctly.
+func TestObserveHTTPCounterLabels(t *testing.T) {
+	HTTPRequests.Reset()
+	t.Cleanup(func() { HTTPMetricsLabeler = nil })
+	HTTPMetricsLabeler = func(r *http.Request) string { return "alice" }
+
+	h := ObserveHTTP(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/lab-test/file.txt", nil)
+	h.ServeHTTP(rec, req)
+
+	if got := counterValue(t, HTTPRequests.WithLabelValues("PUT", "200", "lab-test", "alice")); got != 1 {
+		t.Fatalf("PUT /lab-test/file.txt expected counter=1 with bucket=lab-test, ak=alice, got %v", got)
+	}
+}
+
+// TestObserveHTTPCounterAnonymous covers the nil-labeler path (boot-time)
+// and the anonymous-request path (auth.FromContext returns IsAnonymous).
+func TestObserveHTTPCounterAnonymous(t *testing.T) {
+	HTTPRequests.Reset()
+	HTTPMetricsLabeler = nil // boot-time / never wired
+
+	h := ObserveHTTP(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin/v1/cluster/nodes", nil)
+	h.ServeHTTP(rec, req)
+
+	if got := counterValue(t, HTTPRequests.WithLabelValues("GET", "200", "_admin", "_anon")); got != 1 {
+		t.Fatalf("nil labeler should yield ak=_anon, got counter=%v", got)
+	}
+}
+
 func TestObserveHTTPDefaultStatusIs200(t *testing.T) {
 	HTTPDuration.Reset()
 	h := ObserveHTTP(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
