@@ -1,122 +1,118 @@
 {
   "project": "Strata",
-  "branchName": "ralph/s3-compat-95",
-  "description": "Close the remaining 16 real-failure clusters from ralph/s3-compat-90, lifting s3-tests pass-rate from 84.7% (150/177) to >=90% strict (target ~95%). Plus follow-up tests for the two P1 latent bugs surfaced by the prior cycle (koanf empty-env override + Cassandra null-version timeuuid sentinel) so the regression surface stays caught in CI. 7 stories.",
+  "branchName": "ralph/web-ui-storage-status",
+  "description": "Web UI — Storage status. Add a /storage page (Meta + Data tabs + per-class card) plus a Cluster Overview hero summary and a top-level degraded banner. New /admin/v1/storage/* endpoints back the UI via meta.HealthProbe + data.HealthProbe interfaces (Cassandra peers / TiKV PD stores / RADOS pool stats / S3-over-S3 reachability). Extends the bucketstats sampler with per-(bucket, class) aggregation. Closes ROADMAP P3 'Web UI — Storage status (meta + data backend observability)'. 6 stories.",
   "userStories": [
     {
       "id": "US-001",
-      "title": "Multipart copy edges (range parser + special chars + size handling)",
-      "description": "As an S3 client copying multipart parts, the gateway must handle copy-source-range edges, special-character source URLs, and size-aware copy variants the same way AWS does.",
+      "title": "Meta backend health probe (Cassandra peers / TiKV PD stores / memory)",
+      "description": "As a debug-tool author, I want a meta.Store-shaped probe that returns peer / store health so the storage page has data.",
       "acceptanceCriteria": [
-        "`internal/s3api/multipart_copy.go::uploadPartCopy` parses `x-amz-copy-source-range: bytes=start-end` rigorously: empty / malformed / `bytes=0-0` / out-of-bounds → `InvalidRange`. Range over the whole object (`bytes=` omitted) is OK and copies the entire source.",
-        "Source URL is `x-amz-copy-source: /<src-bucket>/<src-key>`. The src-key segment is URL-decoded BEFORE bucket-name validation. Special chars (`+`, ` ` (space), `?`, `#`, non-ASCII) round-trip cleanly. Test fixture covers all four.",
-        "Multipart copy of variable-size sources (small + medium + large in one upload) returns the correct per-part ETag in the UploadPartCopyResult XML — not the whole-source ETag.",
-        "s3-tests `test_multipart_copy_small`, `test_multipart_copy_improper_range`, `test_multipart_copy_special_names`, `test_multipart_copy_multiple_sizes` pass.",
+        "New optional interface internal/meta.HealthProbe: MetaHealth(ctx) (*meta.MetaHealthReport, error) with fields {Backend string, Nodes []NodeStatus, ReplicationFactor int, Warnings []string}; NodeStatus = {Address, State, SchemaVersion, DataCenter, Rack}",
+        "Cassandra impl: SELECT peer, data_center, rack, release_version, schema_version FROM system.peers UNION ALL SELECT broadcast_address ... FROM system.local; aggregate schema-version drift into Warnings; LOCAL_ONE consistency with 10s in-process cache",
+        "TiKV impl: dedicated thin client internal/meta/tikv/pdclient.go that takes []string PD endpoints, tries them in order with 2s timeout each, returns first non-error; HTTP GET /pd/api/v1/stores parsed into NodeStatus; raft-leader imbalance (any store has 0 leaders while peers have >0) folded into Warnings",
+        "Memory impl returns single-node report",
+        "storetest contract caseMetaHealth exercises all three backends",
+        "Endpoint GET /admin/v1/storage/meta in adminapi returns the report as JSON, JWT-auth + audit middleware (read-only, GET => skipped audit per existing rule)",
         "Typecheck passes",
         "Tests pass"
       ],
       "priority": 1,
-      "passes": true,
-      "notes": "parseCopySourceRangeStrict differentiates parse errors (InvalidArgument 400) from out-of-bounds (InvalidRange 416). parseCopySource splits on `?` BEFORE PathUnescape so literal `?` in keys (sent as `%3F` by boto3) does not get treated as query separator. Per-part ETag wire shape already correct in copyPartResult."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-002",
-      "title": "?partNumber=N GET quoted-ETag wire shape",
-      "description": "As an S3 client comparing a multipart object's per-part ETag from `?partNumber=N` against the part-upload's response ETag, the wire shape must match the upstream s3-tests' assertion (double-quoted hex, no inner stripping).",
+      "title": "Data backend health probe (RADOS pool stats / S3-over-S3 reachability / memory)",
+      "description": "As a debug-tool author, I want a data.Backend-shaped probe that returns per-pool stats so the storage page has data.",
       "acceptanceCriteria": [
-        "Audit `internal/s3api/server.go::getObject` partNumber path: response `ETag` header for the per-part response MUST be `\"<32hex>\"` (literal double quotes around hex), matching the part-upload's response format. Today the path may strip / re-quote inconsistently.",
-        "SSE-C variant of `?partNumber=N` GET returns the same quoted shape (the SSE wrapping must not double-quote or strip).",
-        "Single-part-object `?partNumber=1` GET returns the whole-object ETag's per-part-shape (still `\"<32hex>\"`).",
-        "s3-tests `test_multipart_get_part`, `test_multipart_sse_c_get_part`, `test_multipart_single_get_part` pass.",
+        "New optional interface internal/data.HealthProbe: DataHealth(ctx) (*data.DataHealthReport, error) with fields {Backend string, Pools []PoolStatus, Warnings []string}; PoolStatus = {Name, Class, BytesUsed uint64, ObjectCount uint64, NumReplicas int, State}",
+        "RADOS impl: iterate the configured [rados] classes map, call librados.GetPoolStat per pool (kb -> bytes), populate PoolStatus; pull cluster HEALTH_OK/HEALTH_WARN/HEALTH_ERR via librados.MonCommand(\"status\") with summarised JSON parse, cap warnings at 5",
+        "S3-over-S3 impl: HEAD on the configured backend bucket, returns one PoolStatus with Name=<backend bucket>, Class=<all classes mapped>, BytesUsed=0/ObjectCount=0 (document gap), State=reachable|error",
+        "Memory impl returns one PoolStatus with size=process-RSS proxy",
+        "Endpoint GET /admin/v1/storage/data in adminapi returns the report as JSON",
         "Typecheck passes",
         "Tests pass"
       ],
       "priority": 2,
-      "passes": true,
-      "notes": "Surprise: PRD AC #1 said per-part GET should return per-part `\"<32hex>\"` shape. AWS-parity is the OPPOSITE — `?partNumber=N` GET returns the WHOLE-OBJECT multipart ETag (`\"<32hex>-<count>\"`). The s3-tests assert `response['ETag'] == complete_multipart_upload['ETag']`. Removed the partRange.ETag override in `internal/s3api/server.go::getObject`. Also flipped out-of-range partNumber from 416 InvalidRange to 400 InvalidPart (AWS-parity). Non-multipart partNumber=1 now returns whole object (200 OK)."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-003",
-      "title": "Multipart composite checksum CRC32 / CRC32C / CRC64NVME",
-      "description": "As an S3 client using boto3 ≥1.35's auto-checksum (which ships `crc64nvme` as the default), `CompleteMultipartUpload` must return the correct composite checksum for CRC algos. SHA1/SHA256 closed in prior US-003; CRC family is still off.",
+      "title": "Per-storage-class breakdown via bucketstats sampler",
+      "description": "As an operator, I want bytes + object count per storage class so I can see which class is consuming the most space.",
       "acceptanceCriteria": [
-        "`internal/s3api/multipart.go::completeMultipartUpload` computes composite CRC32 / CRC32C / CRC64NVME over per-part raw checksum bytes. Algo dispatch via the existing `data.Manifest.PartChunks[N].ChecksumAlgorithm` field.",
-        "Helper `internal/auth` or `internal/data` (decide at story start) gets `FoldCRC32`, `FoldCRC32C`, `FoldCRC64NVME` reusable functions matching AWS's composite algorithm (may be concat-then-CRC; verify against AWS docs at story start).",
-        "Response XML includes the correct `<ChecksumCRC32>` / `<ChecksumCRC32C>` / `<ChecksumCRC64NVME>` element (whichever algo was set on Initiate).",
-        "HEAD object with `x-amz-checksum-mode: ENABLED` returns the composite CRC header.",
-        "s3-tests `test_multipart_use_cksum_helper_crc32`, `_crc32c`, `_crc64nvme` pass.",
+        "Extend the existing bucketstats.Sampler (already per-shard from Phase 3 US-012) to ALSO emit per-(bucket, class) aggregates",
+        "New gauges strata_storage_class_bytes + strata_storage_class_objects keyed {class, bucket}",
+        "Lockstep meta backends: cassandra reads objects rows aggregated per (bucket_id, storage_class); memory computes from in-process map; tikv scans existing range-scan and groups in-process by o.StorageClass",
+        "Cardinality bounded by existing STRATA_BUCKETSTATS_TOPN envvar",
+        "Endpoint GET /admin/v1/storage/classes returns {classes: [{class, bytes, objects}], pools_by_class: {class: pool_name}} (the latter from the configured [rados] classes map for UI rendering)",
         "Typecheck passes",
         "Tests pass"
       ],
       "priority": 3,
-      "passes": true,
-      "notes": "Surprise vs PRD wording (concat-then-CRC): the s3-tests pass `checksum_type=\"FULL_OBJECT\"` for CRC32/CRC32C/CRC64NVME. AWS's FULL_OBJECT shape is the CRC of the concatenated stream (no `-N` suffix), composed via standard zlib `crc32_combine` from per-part (CRC, size). SHA family stays COMPOSITE. `composeMultipartChecksums(parts, checksumType)` dispatches; `combineCRCParts` lives in `internal/s3api/checksum.go` along with reusable `crc32Combine` / `crc64Combine` helpers. `checksumPart` grew a `Size int64` field. Locked s3-tests vectors via `TestFullObjectCRCS3TestVectors` (per-part CRCs + 5 MiB sizes → published composite) plus a HTTP round-trip `TestMultipartFullObjectCRCCombine` for all 3 algos."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-004",
-      "title": "Multipart If-Match-on-missing-object: 404 NoSuchKey (revert RFC alignment for missing-object branch)",
-      "description": "As an S3 client doing `If-Match` precondition on `CompleteMultipartUpload` against a non-existent destination object, AWS S3 returns 404 NoSuchKey rather than RFC 7232's 412 PreconditionFailed. Strata's prior US-008 aligned with RFC; the s3-tests assert AWS shape.",
+      "title": "/storage page UI (Meta + Data tabs + classes card)",
+      "description": "As an operator, I want a single page where I can see meta + data backend health and per-class breakdown.",
       "acceptanceCriteria": [
-        "`internal/s3api/multipart.go::completeMultipartUpload` precondition path: when `If-Match` is set AND the destination object does NOT exist, return `404 NoSuchKey` (NOT 412). The match-but-mismatched ETag path stays 412.",
-        "putObject's If-Match-missing-object path stays 412 (per RFC 7232 §3.1) — the divergence is multipart-Complete-only, AWS's exact shape.",
-        "s3-tests `test_multipart_put_object_if_match` and `test_multipart_put_current_object_if_match` pass.",
+        "New web/src/pages/Storage.tsx + route /storage; lazy-loaded via React.lazy to keep initial bundle <=500 KiB gzipped",
+        "Sidebar entry under primary nav (NOT nested under Diagnostics) between Buckets and Consumers; icon lucide HardDrive or Database",
+        "Two shadcn Tabs: Meta (default) + Data",
+        "Meta tab: header card 'Backend = cassandra / tikv / memory' + table of NodeStatus rows (Address / State / DC / Rack / SchemaVersion); warning banner at top when report.Warnings.length > 0",
+        "Data tab: header card 'Backend = rados / s3 / memory' + table of PoolStatus rows (Name / Class / Bytes used / Objects / Replicas / State); below table a 'Storage classes' subsection with bytes-per-class horizontal stacked bar (recharts BarChart, already in bundle) + per-class chip list",
+        "TanStack Query 30s polling; refresh button mirrors Consumers/Buckets shape; empty / loading / error states; memory-backend rows render with explainer",
         "Typecheck passes",
-        "Tests pass"
+        "Tests pass",
+        "Verify in browser using dev-browser skill"
       ],
       "priority": 4,
-      "passes": true,
-      "notes": "completeMultipartUpload If-Match path now branches: errors.Is(gerr, meta.ErrObjectNotFound) → ErrNoSuchKey (404); any other gerr → mapMetaErr; existing-object ETag mismatch stays ErrPreconditionFailed (412). putObject (server.go:902) untouched — single-PUT If-Match-on-missing stays 412 per RFC 7232 §3.1. Tests flipped/added in multipart_preconditions_test.go: TestMultipartCompleteIfMatchNonExistingReturnsNoSuchKey + TestMultipartCompleteIfMatchMissingObjectDoesNotLeakCompletingState (404 + retry without If-Match → 200, no completing-state leak)."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-005",
-      "title": "Misc edge cases: suspended_copy / delete_key_bucket_gone / return_data_versioning / resend_finishes_last",
-      "description": "As an S3 client, the gateway must handle four small edge cases identified in the prior cycle's baseline.",
+      "title": "Cluster Overview hero summary + degraded warning banner",
+      "description": "As an operator, I want a glance-level storage summary on the home page AND a top-level banner when storage is degraded so I notice problems before navigating.",
       "acceptanceCriteria": [
-        "**`test_versioning_obj_suspended_copy`**: copy from a suspended-bucket null-row src to dst, response wire shape includes the SOURCE's `x-amz-version-id: null` header (or `<VersionId>null</VersionId>` in copy result XML).",
-        "**`test_object_delete_key_bucket_gone`**: DELETE on a non-existent bucket returns `404 NoSuchBucket` BEFORE the auth check rejects with 403. Need to swap the order in `internal/s3api/server.go` so the bucket-existence check runs ahead of the auth gate for DELETE.",
-        "**`test_bucket_list_return_data_versioning`**: V1 ListObjectVersions `<Owner>` field has `<DisplayName>` set to a non-empty value (today it's empty string). Wire `bucket.OwnerDisplayName` (or owner name from IAM) into the response.",
-        "**`test_multipart_resend_first_finishes_last`**: ROADMAP P2 entry — `meta.Store.CompleteMultipartUpload` flips upload status to `completing` BEFORE per-part ETag validation; a stale-ETag Complete leaks `completing` state and breaks idempotent retry. Fix: scan parts up front (status read-only) and only flip after every ETag matches. Lockstep across cassandra + memory + tikv impls.",
-        "All 4 s3-tests pass.",
+        "Cluster Overview hero (web/src/pages/ClusterOverview.tsx) gains a 'Storage' card: total bytes across all pools + per-class chip strip (e.g., STANDARD: 800 GiB | STANDARD_IA: 400 GiB | GLACIER_IR: 50 GiB); reads from /admin/v1/storage/classes (cached 60 s in TanStack Query)",
+        "Hero card cardinality: cap at top-5 classes by bytes; rest collapse into '+N more' link to /storage",
+        "New /admin/v1/storage/health aggregate endpoint returns {ok: bool, warnings: []string, source: meta|data}; combines Meta + Data probes; ok=false when either reports Warnings.length > 0 or any node/pool is in non-OK state",
+        "Test-only env STRATA_STORAGE_HEALTH_OVERRIDE: when set to a JSON string the handler returns it verbatim; documented in internal/adminapi/storage_health_test.go",
+        "New <StorageDegradedBanner> component (web/src/components/StorageDegradedBanner.tsx); polls /admin/v1/storage/health every 30s; visible when ok=false; lists worst 3 warnings + 'View Storage page' link; dismissible per session via sessionStorage flag (re-shows on refresh if still degraded)",
+        "Banner position: above AppShell header (sibling above the outermost flex div) so operator sees it on every page",
         "Typecheck passes",
-        "Tests pass"
+        "Tests pass",
+        "Verify in browser using dev-browser skill (use STRATA_STORAGE_HEALTH_OVERRIDE to simulate degraded state)"
       ],
       "priority": 5,
-      "passes": true,
-      "notes": "Four edges, all four backends touched. (a) suspended_copy: cassandra/tikv GetObject(versionID=\"\") was clustering-DESC LIMIT 1 only — null sentinel sorts LAST in DESC so a Suspended PUT after Enabled v1 was returning the stale v1 row. Fix: probe both highest-clustering AND null sentinel directly, return whichever has later mtime (cassandra: scanObjectLimit1 + scanObjectByVersion helpers; tikv: parallel txn.Get on null sentinel). Memory backend was already correct (slice prepend). (b) delete_key_bucket_gone: WriteAuthDenied is unaware of the metastore so unsigned DELETE on a missing bucket returned 403. Added s3api.NewAuthDenyHandler(metaStore) DenyHandler that special-cases path-style /<bucket>/<key> DELETE: GetBucket → ErrBucketNotFound → 404 NoSuchBucket; everything else falls through to WriteAuthDenied. Wired in serverapp/serverapp.go. (c) return_data_versioning: added Owner *owner pointer field on versionEntry/deleteMarkerEntry, listObjectVersions stamps {ID: b.Owner, DisplayName: b.Owner} on every entry. (d) resend_finishes_last: cassandra+memory CompleteMultipartUpload flipped status='completing' BEFORE per-part ETag validation, so a stale-ETag retry left the upload wedged. Fix: ListParts + ETag validation FIRST, then LWT/in-mem flip. TiKV already correct because the txn rolls back on error."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-006",
-      "title": "P1 follow-up: koanf empty-env regression test + Cassandra null-sentinel integration test",
-      "description": "As a maintainer, I want CI tests covering the two P1 latent bugs the prior cycle surfaced so they cannot regress silently.",
+      "title": "Playwright storage.spec.ts + docs + ROADMAP close + cycle merge",
+      "description": "As a maintainer, I want Playwright e2e + operator docs + ROADMAP closed in one commit at cycle end.",
       "acceptanceCriteria": [
-        "**koanf empty-env regression test** in `internal/config/config_test.go`: set TOML default `gc.interval=\"30s\"`, set env `STRATA_GC_INTERVAL=\"\"` (empty string), assert `cfg.GC.Interval == 30*time.Second`. Asserts the prior cycle's `env.ProviderWithValue` callback skips empty values correctly.",
-        "**Cassandra null-sentinel integration test** in `internal/meta/cassandra/store_integration_test.go` (build tag `integration`): PUT object into bucket with versioning=Suspended (so `o.IsNull=true && o.VersionID==NullVersionID`), GET it back, assert `gocql.ParseUUID` round-trip preserves `meta.NullVersionID` on read AND that the Cassandra row stores the v1 sentinel `00000000-0000-1000-8000-000000000000` (verify via raw SELECT).",
-        "Storetest contract `caseVersioningNullSentinel` extended to also exercise an INSERT with the null sentinel under a real backend (vs the existing in-memory shape).",
-        "CI workflow `.github/workflows/ci.yml`'s `cassandra-integration` job ensures the new test runs on every Ralph commit (verify the test is NOT skipped — print test name in CI output).",
-        "Typecheck passes",
-        "Tests pass — including `make test-integration` against a real Cassandra container"
-      ],
-      "priority": 6,
-      "passes": true,
-      "notes": "Three test additions, no production code change. (a) `internal/config/config_test.go::TestLoadEmptyEnvDoesNotOverrideTOMLValue` writes `[gc] interval = \"30s\"` to a TempDir TOML, sets `STRATA_CONFIG_FILE` to that path, sets `STRATA_GC_INTERVAL=\"\"` (empty), calls Load(), asserts `cfg.GC.Interval == 30*time.Second`. Locks the env.ProviderWithValue empty-skip callback. (b) `internal/meta/storetest/contract.go::caseVersioningNullSentinel` extended with a Suspended-mode INSERT step (`PutObject` with `IsNull=true`, `versioned=true`) — exercises the v1-sentinel-IF-EXISTS LWT path that the prior Disabled-overwrite branch bypassed. Round-trips through `meta.NullVersionID` on the wire. Runs against memory, cassandra, tikv (all 3 backends pick up the case via storetest.Run). (c) `internal/meta/cassandra/store_integration_test.go::TestCassandraNullSentinelOnDisk` — separate-container test that PUTs into a Suspended bucket, GETs back via both `meta.NullVersionID` and `meta.NullVersionLiteral`, then runs a raw `SELECT version_id FROM objects WHERE bucket_id=? AND key=? ALLOW FILTERING` via `store.Session()` to verify the on-disk timeuuid is the v1 sentinel `00000000-0000-1000-8000-000000000000` (NOT the canonical v0 wire form). Catches both INSERT-side regression (cassandra rejects v0) and read-side regression (versionFromCQL leaking v1 to clients). (d) `.github/workflows/ci.yml` integration step now uses `go test -v` so the new test names show up in CI logs (verifies they aren't skipped). Quality: `go vet`, `go build`, `go test ./...`, `pnpm run typecheck` all green."
-    },
-    {
-      "id": "US-007",
-      "title": "Refresh s3-tests baseline + ROADMAP close-flip + cycle-end merge to main",
-      "description": "As a maintainer, I want the latest s3-tests run captured in scripts/s3-tests/README.md, the ROADMAP P1 entry flipped to Done (this time we should hit >=90% strict), and the cycle merged back to main per branch policy.",
-      "acceptanceCriteria": [
-        "Run `scripts/s3-tests/run.sh` against a clean `make up-all` stack (cassandra + ceph + strata, auth=required).",
-        "Append new section to `scripts/s3-tests/README.md` baseline list: `### YYYY-MM-DD - <commit-sha> + ralph/s3-compat-95 (N%)` with the pass-rate line + remaining failure breakdown (deliberate-gaps split + any real bugs left).",
-        "Verify pass rate >= 90% strict (target >= 95%). With the 16 real failures closed, expected: 166/177 = 93.8% strict.",
-        "If >= 90%: flip ROADMAP P1 entry `**P1 - s3-tests 80% -> 90%+.**` to `~~**P1 - s3-tests 80% -> 90%+.**~~ - **Done.** <one-line summary>. (commit \\`<sha>\\`)`. Update headline in ROADMAP.md introduction: `**84.7% (150/177)** -> **<new>% (<n>/177)**`.",
-        "Close (or fold into Done state) the four ROADMAP P2 entries created by the prior cycle: `Multipart copy edges`, `?partNumber=N quoted-ETag wire shape`, `Multipart composite checksum CRC32 / CRC32C / CRC64NVME`, `Multipart If-Match-on-missing-object error code`. Same close-flip format. Plus the resend-finishes-last P2.",
-        "**Cycle-end merge**: fast-forward / squash-merge `ralph/s3-compat-95` into `main`, push origin/main, archive `scripts/ralph/prd.json` + `scripts/ralph/progress.txt` under `scripts/ralph/archive/2026-MM-DD-s3-compat-95/`. Mirror the s3-compat-90 close shape.",
+        "New web/e2e/storage.spec.ts: storage-page-renders (login -> /storage -> Meta+Data tabs visible, NodeStatus row count >= 1, PoolStatus row count >= 1)",
+        "Spec: cluster-hero-shows-storage-card (login -> home -> 'Storage' card visible with at least one class chip)",
+        "Spec: degraded-banner-on-warn (CI sets STRATA_STORAGE_HEALTH_OVERRIDE for the e2e job -> assert banner visible above shell + dismiss button works)",
+        "CI e2e-ui job adds pnpm exec playwright test storage.spec.ts after existing specs",
+        "New docs/storage.md covers env vars per backend, Warnings entry meanings, RADOS HEALTH_WARN interpretation (link to ceph docs), per-class pool mapping",
+        "docs/ui.md Capability Matrix gains a row referencing the Storage page",
+        "ROADMAP gets ~~**P3 — Web UI — Storage status (meta + data backend observability).**~~ — **Done.** <one-line summary>. (commit `<sha>`) under ## Web UI section",
+        "Cycle-end merge: fast-forward / squash-merge ralph/web-ui-storage-status into main, push, archive scripts/ralph/prd.json + scripts/ralph/progress.txt under scripts/ralph/archive/2026-MM-DD-web-ui-storage-status-complete/ via archive_cycle on <promise>COMPLETE</promise>",
+        "Markdown PRD tasks/prd-web-ui-storage-status.md is REMOVED in the close-flip commit per CLAUDE.md PRD lifecycle rule (canonical record is the ralph snapshot)",
         "Typecheck passes",
         "Tests pass"
       ],
-      "priority": 7,
-      "passes": true,
-      "notes": "s3-tests against rebuilt strata:ceph (494b62b) on cassandra+ceph stack: 162/177 = 91.5% strict, +12 over prior 84.7%. >=90% threshold hit. README.md baseline section appended with new shape. ROADMAP: headline 84.7%->91.5% (162/177); P1 s3-tests entry flipped Done; both P1 latent entries (cassandra null-sentinel + koanf empty-env) flipped Done with US-006 follow-up tests; 5 P2 entries flipped Done (multipart copy edges, ?partNumber=N quoted-ETag, CRC32-family composite, If-Match-on-missing-object, completing-state leak). 2 NEW P2 entries filed for the 4 remaining real failures (3 multipart_copy GET-side checksum echo + 1 resend-finishes-last duplicate PartNumber)."
+      "priority": 6,
+      "passes": false,
+      "notes": ""
     }
   ]
 }
