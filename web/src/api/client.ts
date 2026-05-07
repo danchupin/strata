@@ -1158,6 +1158,26 @@ export interface SinglePresignResponse {
   storage_class?: string;
 }
 
+export async function presignSingleGet(
+  bucket: string,
+  key: string,
+  versionId?: string,
+): Promise<SinglePresignResponse> {
+  const body: Record<string, string> = { key };
+  if (versionId) body.version_id = versionId;
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(bucket)}/single-get-presign`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'single-GET presign failed');
+  return (await resp.json()) as SinglePresignResponse;
+}
+
 export async function presignSinglePut(
   bucket: string,
   key: string,

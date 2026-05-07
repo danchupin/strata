@@ -15,12 +15,14 @@ import { Label } from '@/components/ui/label';
 import {
   abortUpload,
   completeUpload,
+  fetchStorageClasses,
   initiateUpload,
   presignSinglePut,
   presignUploadPart,
   type AdminApiError,
   type UploadCompletePart,
 } from '@/api/client';
+import { useQuery } from '@tanstack/react-query';
 import { queryClient, queryKeys } from '@/lib/query';
 import { showToast } from '@/lib/toast-store';
 import UploadWorker from '@/workers/upload?worker';
@@ -49,7 +51,12 @@ interface PerFileState {
   parts: UploadCompletePart[];
 }
 
-const STORAGE_CLASSES = ['STANDARD', 'STANDARD_IA', 'GLACIER', 'DEEP_ARCHIVE'];
+// STORAGE_CLASSES_FALLBACK is shown when the /admin/v1/storage/classes
+// endpoint hasn't loaded yet. Once the query resolves, we render the
+// actually-configured class set (`pools_by_class` keys) — gateway rejects
+// PUT with InvalidStorageClass for any class outside that map, so the UI
+// MUST mirror it instead of hardcoding aspirational AWS class names.
+const STORAGE_CLASSES_FALLBACK = ['STANDARD'];
 const ENCRYPTION_OPTIONS: { value: string; label: string }[] = [
   { value: '', label: 'None' },
   { value: 'AES256', label: 'AES256 (SSE-S3)' },
@@ -59,6 +66,24 @@ const ENCRYPTION_OPTIONS: { value: string; label: string }[] = [
 export function UploadDialog({ open, bucket, prefix, onOpenChange }: Props) {
   const [files, setFiles] = useState<PerFileState[]>([]);
   const [storageClass, setStorageClass] = useState('STANDARD');
+  const { data: storageClassesData } = useQuery({
+    queryKey: ['storage', 'classes'],
+    queryFn: fetchStorageClasses,
+    staleTime: 60_000,
+    enabled: open,
+  });
+  const storageClasses = useMemo(() => {
+    const keys = storageClassesData
+      ? Object.keys(storageClassesData.pools_by_class).sort()
+      : [];
+    return keys.length > 0 ? keys : STORAGE_CLASSES_FALLBACK;
+  }, [storageClassesData]);
+  // If the previously-selected class is no longer in the list (e.g. ops
+  // removed a pool mapping), fall back to STANDARD so the user doesn't
+  // submit an InvalidStorageClass payload.
+  useEffect(() => {
+    if (!storageClasses.includes(storageClass)) setStorageClass('STANDARD');
+  }, [storageClass, storageClasses]);
   const [encryption, setEncryption] = useState('');
   const [kmsKeyId, setKmsKeyId] = useState('');
   const [tagsRaw, setTagsRaw] = useState('');
@@ -294,7 +319,7 @@ export function UploadDialog({ open, bucket, prefix, onOpenChange }: Props) {
                 value={storageClass}
                 onChange={(e) => setStorageClass(e.target.value)}
               >
-                {STORAGE_CLASSES.map((c) => (
+                {storageClasses.map((c) => (
                   <option key={c} value={c}>
                     {c}
                   </option>

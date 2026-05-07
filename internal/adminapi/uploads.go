@@ -415,6 +415,67 @@ func (s *Server) handleSinglePutPresign(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// SingleGetPresignRequest is the JSON body for POST /admin/v1/buckets/
+// {bucket}/single-get-presign — same shape as the PUT side but mints a
+// presigned GET. Used by the console's Object Detail download button.
+type SingleGetPresignRequest struct {
+	Key       string `json:"key"`
+	VersionID string `json:"version_id,omitempty"`
+}
+
+// handleSingleGetPresign serves POST /admin/v1/buckets/{bucket}/single-get-presign.
+// Mints a 5-minute presigned GET URL pointing directly at /<bucket>/<key>
+// so the browser can download the object via a normal anchor / fetch
+// without the operator's secret leaving the gateway.
+func (s *Server) handleSingleGetPresign(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	bucket := r.PathValue("bucket")
+	if bucket == "" {
+		writeJSONError(w, http.StatusBadRequest, "BadRequest", "bucket is required")
+		return
+	}
+	body, berr := io.ReadAll(io.LimitReader(r.Body, 16<<10))
+	if berr != nil {
+		writeJSONError(w, http.StatusBadRequest, "BadRequest", "failed to read body")
+		return
+	}
+	var req SingleGetPresignRequest
+	if jerr := json.Unmarshal(body, &req); jerr != nil {
+		writeJSONError(w, http.StatusBadRequest, "MalformedRequest", "invalid JSON: "+jerr.Error())
+		return
+	}
+	key := strings.TrimSpace(req.Key)
+	if key == "" {
+		writeJSONError(w, http.StatusBadRequest, "BadRequest", "key is required")
+		return
+	}
+	if s.Meta == nil {
+		writeJSONError(w, http.StatusInternalServerError, "Internal", "meta store not configured")
+		return
+	}
+	if _, err := s.Meta.GetBucket(r.Context(), bucket); err != nil {
+		if errors.Is(err, meta.ErrBucketNotFound) {
+			writeJSONError(w, http.StatusNotFound, "NoSuchBucket", "bucket not found")
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, "Internal", err.Error())
+		return
+	}
+	var query url.Values
+	if v := strings.TrimSpace(req.VersionID); v != "" {
+		query = url.Values{"versionId": []string{v}}
+	}
+	urlStr, perr := s.mintPresignedURL(r, http.MethodGet, presignPath(bucket, key), query, nil)
+	if perr != nil {
+		writeJSONError(w, http.StatusInternalServerError, "Internal", perr.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, SinglePresignResponse{
+		URL:       urlStr,
+		ExpiresAt: time.Now().Add(uploadPresignTTL).Unix(),
+	})
+}
+
 // mintPresignedURL looks up the operator's credential (the session-cookie
 // AccessKey) and signs a SigV4 URL with the gateway's region. The browser
 // never sees the secret — it only gets the resulting URL string. Host is

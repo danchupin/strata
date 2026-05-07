@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { AlertTriangle, Plus, Trash2, X } from 'lucide-react';
+import { AlertTriangle, Download, Plus, Trash2, X } from 'lucide-react';
 
 import {
   deleteObject,
   fetchObjectDetail,
   fetchObjectVersions,
+  presignSingleGet,
   setObjectLegalHold,
   setObjectRetention,
   setObjectTags,
@@ -138,7 +139,8 @@ function ObjectDetailBody({
 
         <TabsContent value="overview" className="mt-4 space-y-4">
           <OverviewTab detail={detail} loading={detailQ.isPending} />
-          <div className="flex justify-end">
+          <div className="flex justify-end gap-2">
+            <DownloadObjectButton bucket={bucket} objectKey={objectKey} />
             <DeleteObjectButton
               bucket={bucket}
               objectKey={objectKey}
@@ -681,6 +683,50 @@ function VersionsTab({
         </div>
       ))}
     </div>
+  );
+}
+
+function DownloadObjectButton({
+  bucket,
+  objectKey,
+}: {
+  bucket: string;
+  objectKey: string;
+}) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      disabled={busy}
+      onClick={async () => {
+        setBusy(true);
+        try {
+          const { url } = await presignSingleGet(bucket, objectKey);
+          // Anchor with `download` attribute triggers a real download in
+          // the browser instead of navigating; the filename is the last
+          // path segment of the key (browsers fall back to it when the
+          // server doesn't send Content-Disposition).
+          const a = document.createElement('a');
+          a.href = url;
+          const segs = objectKey.split('/');
+          a.download = segs[segs.length - 1] || objectKey;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+        } catch (e) {
+          showToast({
+            title: 'Download failed',
+            description: (e as Error).message,
+            variant: 'destructive',
+          });
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      <Download className="mr-1 h-4 w-4" /> Download
+    </Button>
   );
 }
 

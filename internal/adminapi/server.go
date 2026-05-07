@@ -348,6 +348,7 @@ func (s *Server) routes() http.Handler {
 	// the key carried in the JSON body. Same trick used in US-013 / US-014
 	// for ARN routes.
 	mux.HandleFunc("POST /admin/v1/buckets/{bucket}/single-presign", s.handleSinglePutPresign)
+	mux.HandleFunc("POST /admin/v1/buckets/{bucket}/single-get-presign", s.handleSingleGetPresign)
 	mux.HandleFunc("GET /admin/v1/iam/users", s.handleIAMUsersList)
 	mux.HandleFunc("POST /admin/v1/iam/users", s.handleIAMUserCreate)
 	mux.HandleFunc("DELETE /admin/v1/iam/users/{userName}", s.handleIAMUserDelete)
