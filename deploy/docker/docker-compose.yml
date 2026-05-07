@@ -177,7 +177,10 @@ services:
     volumes:
       - strata-pd-data:/data
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- --tries=1 --timeout=2 http://127.0.0.1:2379/pd/api/v1/health 2>/dev/null | grep -q '\"health\":true' || exit 1"]
+      # /pd/api/v1/health returns 200 when the PD process is up and the API
+      # is serving — sufficient for single-PD lab readiness gating.
+      # `--spider` exits 0 only on 2xx, so we don't depend on JSON shape.
+      test: ["CMD-SHELL", "wget -q --spider --tries=1 --timeout=2 http://127.0.0.1:2379/pd/api/v1/health"]
       interval: 5s
       timeout: 5s
       retries: 30

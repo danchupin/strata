@@ -45,11 +45,15 @@ type pdStoreLabel struct {
 	Value string `json:"value"`
 }
 
+// pdStoreStatus mirrors the /pd/api/v1/stores `status` block. PD v8.5+ emits
+// disk sizes as human-readable strings ("1.5GiB"), and uptime / *_ts as
+// strings too — kept as string here since the storage health probe surfaces
+// them as labels, not numeric metrics.
 type pdStoreStatus struct {
-	LeaderCount int   `json:"leader_count"`
-	RegionCount int   `json:"region_count"`
-	Available   int64 `json:"available"`
-	Capacity    int64 `json:"capacity"`
+	LeaderCount int    `json:"leader_count"`
+	RegionCount int    `json:"region_count"`
+	Available   string `json:"available"`
+	Capacity    string `json:"capacity"`
 }
 
 type pdStoresResponse struct {
