@@ -233,7 +233,7 @@ func TestUniquePrefixesNoOverlap(t *testing.T) {
 		prefixIAMUser, prefixIAMAccessKey, prefixIAMUserKeyIndex,
 		prefixAccessPoint, prefixAccessPointAlias,
 		prefixNotifyQueue, prefixNotifyDLQ,
-		prefixReplicationQueue, prefixAccessLogQueue, prefixGCQueue,
+		prefixReplicationQueue, prefixAccessLogQueue, prefixGCQueue, prefixGCQueueV2,
 		prefixAuditLog, prefixLeaderLock, prefixReshardJob,
 	}
 	for i, p := range prefixes {

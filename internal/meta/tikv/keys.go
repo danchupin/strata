@@ -58,7 +58,8 @@ const (
 	prefixNotifyDLQ        = Namespace + "qd/"  // s/qd/<bucket16><ts8><eventID>
 	prefixReplicationQueue = Namespace + "qr/"  // s/qr/<bucket16><ts8><eventID>
 	prefixAccessLogQueue   = Namespace + "qa/"  // s/qa/<bucket16><ts8><eventID>
-	prefixGCQueue          = Namespace + "qg/"  // s/qg/<region>\x00\x00<ts8><oid>
+	prefixGCQueue          = Namespace + "qg/"  // s/qg/<region>\x00\x00<ts8><oid>           (legacy; dual-write fallback during US-003 cutover)
+	prefixGCQueueV2        = Namespace + "qG/"  // s/qG/<region>\x00\x00<shardID2BE><ts8><oid> (Phase 2 sharded; US-003)
 	prefixAuditLog         = Namespace + "A/"   // s/A/<bucket16><day4><eventID>
 	prefixLeaderLock       = Namespace + "L/"   // s/L/<lockName>
 	prefixReshardJob       = Namespace + "Rj/"  // s/Rj/<bucket16>
@@ -609,6 +610,43 @@ func GCQueueKey(region string, tsNano uint64, oid string) []byte {
 // GCQueuePrefix is the per-region GC scan origin.
 func GCQueuePrefix(region string) []byte {
 	out := []byte(prefixGCQueue)
+	return appendEscaped(out, region)
+}
+
+// GCQueueKeyV2 is the Phase 2 (US-003) sharded key shape: the 1024-wide
+// logical-shard id is encoded as a fixed 2-byte big-endian segment between
+// the region terminator and the timestamp. A `shardCount`-wide runtime
+// reader scans only the prefixes its modulo class owns, dodging the legacy
+// region-wide fan-out that single-leader gc saturated. shardID range
+// [0, meta.GCShardCount) — caller-enforced.
+func GCQueueKeyV2(region string, shardID uint16, tsNano uint64, oid string) []byte {
+	out := []byte(prefixGCQueueV2)
+	out = appendEscaped(out, region)
+	var sid [2]byte
+	binary.BigEndian.PutUint16(sid[:], shardID)
+	out = append(out, sid[:]...)
+	var ts [8]byte
+	binary.BigEndian.PutUint64(ts[:], tsNano)
+	out = append(out, ts[:]...)
+	return appendEscaped(out, oid)
+}
+
+// GCQueueShardPrefixV2 is the per-(region, shardID) v2 scan origin. A range
+// scan over [prefix, prefixEnd(prefix)) returns every entry of one logical
+// shard in ts-ascending order.
+func GCQueueShardPrefixV2(region string, shardID uint16) []byte {
+	out := []byte(prefixGCQueueV2)
+	out = appendEscaped(out, region)
+	var sid [2]byte
+	binary.BigEndian.PutUint16(sid[:], shardID)
+	return append(out, sid[:]...)
+}
+
+// GCQueueRegionPrefixV2 is the per-region v2 scan origin (covers every
+// logical shard). Intended for diagnostics / drains where the caller wants
+// the whole region irrespective of shard mapping.
+func GCQueueRegionPrefixV2(region string) []byte {
+	out := []byte(prefixGCQueueV2)
 	return appendEscaped(out, region)
 }
 

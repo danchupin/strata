@@ -44,3 +44,21 @@ Cycle: ralph/gc-lifecycle-scale-phase-2
   - Reading 1024 partitions sequentially is the worst-case at `STRATA_GC_SHARDS=1`. Acceptable today (small partitions, 30s tick). If perf becomes an issue, parallelise the per-logical-shard SELECTs with an errgroup keyed on region — single-partition scans are independent.
   - The legacy `gc_queue` over-fetch (post-filter cap 4096) is now strictly fallback-only and stops as soon as v2 is the source of truth; do not rely on it for new features. Phase 2 cutover is one-way.
 ---
+
+## 2026-05-08 - US-003
+- Added `prefixGCQueueV2 = "s/qG/"` plus `GCQueueKeyV2 / GCQueueShardPrefixV2 / GCQueueRegionPrefixV2` to `internal/meta/tikv/keys.go`. Layout: `s/qG/<escaped(region)>\x00\x00<shardID2BE><tsNano8-BE><escaped(oid)>` — fixed 2-byte BE shard segment between region terminator and timestamp preserves lex order across the 1024 logical shards.
+- New `internal/meta/tikv/gc.go`: `EnvGCDualWrite` + `GCDualWriteFromEnv()` (mirror of cassandra's same-named knob, default `on`) + `gcOwnedLogicalShards(shardID, shardCount)` helper duplicated from cassandra (small, no good cross-backend home yet).
+- `tikv.Config.GCDualWrite *bool` + `tikv.WithGCDualWrite(v bool) *bool` helper. `Open` resolves env → cfg-override → `Store.gcDualWrite`. `openWithBackend` (test-only) reads env directly so unit tests can pin via direct field write.
+- `EnqueueChunkDeletion` writes v2 always + legacy when dual-write is on (single optimistic txn keeps both in lockstep per call).
+- `ListGCEntriesShard` rewritten on the native v2 path: per-logical-shard prefix scan via `GCQueueShardPrefixV2`, dedup on oid; falls back to legacy region prefix (post-shard-filter, scan cap 4096) only while dual-write is on AND the v2 result is short. Drops cleanly once cutover flips off.
+- `AckGCEntry` deletes v2 row using `e.ShardID` (set by reader) — falls back to recomputing shard from oid if ShardID is missing/out of range. Legacy delete is conditional on dual-write.
+- `prefixGCQueueV2` added to `TestUniquePrefixesNoOverlap` so future top-level prefix additions still have to prove disjointness.
+- New `internal/meta/tikv/gc_test.go`: dual-write env parser, `gcOwnedLogicalShards` (range, modulo identity, disjoint-union over shardCount=4), v2 key/prefix layout pin (shard prefix extends region prefix by exactly 2 BE bytes, sibling-shard isolation, no overlap with legacy prefix), dual-write toggle (writes both / writes v2 only), v2 native shard fan-out (200 chunks, shardCount=4 union = full set, modulo invariant), legacy fallback (wipe v2 then list with dual-write on returns rows; flip off → empty).
+- Files changed: `internal/meta/tikv/keys.go`, `internal/meta/tikv/keys_test.go`, `internal/meta/tikv/queues.go`, `internal/meta/tikv/store.go`, new `internal/meta/tikv/gc.go`, new `internal/meta/tikv/gc_test.go`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- `go vet ./...` clean, `go vet -tags integration ./...` clean, `go test ./...` clean, `go test -race ./internal/meta/tikv/... ./internal/meta/memory/... ./internal/meta/cassandra/...` clean. PD+TiKV containerised contract suite (CI workflow `.github/workflows/ci-tikv.yml`) inherits via `storetest.Run`'s `caseGCQueueShardFanOut`.
+- **Learnings for future iterations:**
+  - When a sharded queue prefix gets a fixed-width segment (`shardID2BE`), the shape is: `prefix + escaped(region) + fixedSegment + ts8 + escaped(oid)`. The fixed segment lives BEFORE the timestamp because the per-shard scan range needs a contiguous prefix; if you put the shard after the timestamp, you cannot range-scan one shard.
+  - `prefixGCQueue` (`qg/`) and `prefixGCQueueV2` (`qG/`) are case-distinct. Capital-letter siblings are the cheapest way to add a v2 namespace without inventing a 3-character prefix.
+  - `openWithBackend` is the test-only constructor. Tests that need to flip `gcDualWrite` post-construction write the field directly — there is no `WithGCDualWrite` plumbing on the test path because the unexported field is in-package.
+  - The legacy region-prefix fallback in `ListGCEntriesShard` is on the same optimistic txn as the v2 scan — `defer txn.Rollback()` covers both paths.
+---

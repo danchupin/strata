@@ -24,14 +24,25 @@ import (
 // TLS, timeouts, retry knobs.
 type Config struct {
 	PDEndpoints []string
+	// GCDualWrite controls whether EnqueueChunkDeletion fan-outs to both
+	// the legacy `s/qg/...` prefix and the new `s/qG/...` shard-aware
+	// prefix during the US-003 cutover. nil → fall back to
+	// GCDualWriteFromEnv(); explicit *bool wins. Mirrors
+	// cassandra.Options.GCDualWrite.
+	GCDualWrite *bool
 }
+
+// WithGCDualWrite is a helper for tests / callers that want to set the
+// optional pointer cleanly: `tikv.Config{..., GCDualWrite: tikv.WithGCDualWrite(false)}`.
+func WithGCDualWrite(v bool) *bool { return &v }
 
 // Store is the TiKV-backed meta.Store. Concrete behaviour lives in
 // per-section files (buckets.go, ...); this file holds construction +
 // cross-cutting plumbing.
 type Store struct {
-	cfg Config
-	kv  kvBackend
+	cfg         Config
+	kv          kvBackend
+	gcDualWrite bool
 }
 
 // Open dials the cluster identified by cfg.PDEndpoints and returns a Store
@@ -42,13 +53,17 @@ func Open(cfg Config) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Store{cfg: cfg, kv: b}, nil
+	gcDualWrite := GCDualWriteFromEnv()
+	if cfg.GCDualWrite != nil {
+		gcDualWrite = *cfg.GCDualWrite
+	}
+	return &Store{cfg: cfg, kv: b, gcDualWrite: gcDualWrite}, nil
 }
 
 // openWithBackend builds a Store backed by the supplied kvBackend. Used by
 // unit tests to inject memBackend without dialing PD.
 func openWithBackend(b kvBackend) *Store {
-	return &Store{kv: b}
+	return &Store{kv: b, gcDualWrite: GCDualWriteFromEnv()}
 }
 
 // Close releases the underlying kv connection.

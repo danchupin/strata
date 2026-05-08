@@ -59,6 +59,7 @@ func (s *Store) EnqueueChunkDeletion(ctx context.Context, region string, chunks 
 		return nil
 	}
 	now := time.Now().UTC()
+	tsNano := uint64(now.UnixNano())
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return err
@@ -78,9 +79,16 @@ func (s *Store) EnqueueChunkDeletion(ctx context.Context, region string, chunks 
 			err = mErr
 			return err
 		}
-		key := GCQueueKey(region, uint64(now.UnixNano()), c.OID)
-		if err = txn.Set(key, raw); err != nil {
+		shardID := meta.GCShardID(c.OID)
+		v2Key := GCQueueKeyV2(region, uint16(shardID), tsNano, c.OID)
+		if err = txn.Set(v2Key, raw); err != nil {
 			return err
+		}
+		if s.gcDualWrite {
+			legacyKey := GCQueueKey(region, tsNano, c.OID)
+			if err = txn.Set(legacyKey, raw); err != nil {
+				return err
+			}
 		}
 	}
 	return txn.Commit(ctx)
@@ -90,11 +98,14 @@ func (s *Store) ListGCEntries(ctx context.Context, region string, before time.Ti
 	return s.ListGCEntriesShard(ctx, region, 0, 1, before, limit)
 }
 
-// ListGCEntriesShard is a transitional implementation that scans the entire
-// legacy `gc/<region>/` prefix and filters by `fnv32a(oid) % 1024 %
-// shardCount == shardID` post-fetch. US-003 replaces this with a per-prefix
-// scan over the new `gc/<region>/<shardID2BE>/` key shape so each shard
-// reads exactly its 1024/shardCount logical-shard prefixes.
+// ListGCEntriesShard reads the v2 (`s/qG/<region>/<shardID2BE>/...`)
+// prefix for every logical shard the runtime caller owns under
+// `gcOwnedLogicalShards(shardID, shardCount)` and returns up to `limit`
+// entries past `before`. During the dual-write window (s.gcDualWrite,
+// US-003 cutover), if v2 yields fewer than `limit` rows the remainder is
+// topped up from the legacy `s/qg/<region>/...` region prefix (post-shard
+// filter). The legacy fallback drops automatically once dual-write flips
+// off.
 func (s *Store) ListGCEntriesShard(ctx context.Context, region string, shardID, shardCount int, before time.Time, limit int) ([]meta.GCEntry, error) {
 	if shardCount <= 0 {
 		shardCount = 1
@@ -110,12 +121,69 @@ func (s *Store) ListGCEntriesShard(ctx context.Context, region string, shardID, 
 		return nil, err
 	}
 	defer txn.Rollback()
-	prefix := GCQueuePrefix(region)
-	pairs, err := txn.Scan(ctx, prefix, prefixEnd(prefix), 0)
+
+	out := make([]meta.GCEntry, 0, limit)
+	seen := make(map[string]struct{}, limit)
+	addEntry := func(r gcRow, sid int) bool {
+		if _, ok := seen[r.OID]; ok {
+			return len(out) < limit
+		}
+		seen[r.OID] = struct{}{}
+		out = append(out, meta.GCEntry{
+			Chunk: data.ChunkRef{
+				Cluster:   r.Cluster,
+				Pool:      r.Pool,
+				Namespace: r.Namespace,
+				OID:       r.OID,
+				Size:      r.Size,
+			},
+			EnqueuedAt: r.EnqueuedAt,
+			ShardID:    sid,
+		})
+		return len(out) < limit
+	}
+
+	for _, logicalShard := range gcOwnedLogicalShards(shardID, shardCount) {
+		if len(out) >= limit {
+			break
+		}
+		remaining := limit - len(out)
+		prefix := GCQueueShardPrefixV2(region, uint16(logicalShard))
+		pairs, sErr := txn.Scan(ctx, prefix, prefixEnd(prefix), remaining)
+		if sErr != nil {
+			return nil, sErr
+		}
+		for _, p := range pairs {
+			var r gcRow
+			if uErr := json.Unmarshal(p.Value, &r); uErr != nil {
+				return nil, uErr
+			}
+			if r.EnqueuedAt.After(before) {
+				continue
+			}
+			if !addEntry(r, logicalShard) {
+				break
+			}
+		}
+	}
+	if len(out) >= limit || !s.gcDualWrite {
+		return out, nil
+	}
+
+	// Legacy region-prefix fallback: post-filter by shard identity, top up
+	// to `limit`. The region prefix has no shard component so we over-fetch
+	// `(limit-len(out)) * shardCount` (cap 4096) — same shape as the
+	// cassandra fallback. Drops automatically once dual-write flips off.
+	remaining := limit - len(out)
+	scan := remaining * shardCount
+	if scan <= 0 || scan > 4096 {
+		scan = 4096
+	}
+	legacyPrefix := GCQueuePrefix(region)
+	pairs, err := txn.Scan(ctx, legacyPrefix, prefixEnd(legacyPrefix), scan)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]meta.GCEntry, 0, len(pairs))
 	for _, p := range pairs {
 		var r gcRow
 		if uErr := json.Unmarshal(p.Value, &r); uErr != nil {
@@ -128,18 +196,7 @@ func (s *Store) ListGCEntriesShard(ctx context.Context, region string, shardID, 
 		if sid%shardCount != shardID {
 			continue
 		}
-		out = append(out, meta.GCEntry{
-			Chunk: data.ChunkRef{
-				Cluster:   r.Cluster,
-				Pool:      r.Pool,
-				Namespace: r.Namespace,
-				OID:       r.OID,
-				Size:      r.Size,
-			},
-			EnqueuedAt: r.EnqueuedAt,
-			ShardID:    sid,
-		})
-		if len(out) >= limit {
+		if !addEntry(r, sid) {
 			break
 		}
 	}
@@ -147,14 +204,25 @@ func (s *Store) ListGCEntriesShard(ctx context.Context, region string, shardID, 
 }
 
 func (s *Store) AckGCEntry(ctx context.Context, region string, e meta.GCEntry) error {
-	key := GCQueueKey(region, uint64(e.EnqueuedAt.UnixNano()), e.Chunk.OID)
+	tsNano := uint64(e.EnqueuedAt.UnixNano())
+	shardID := e.ShardID
+	if shardID < 0 || shardID >= meta.GCShardCount {
+		shardID = meta.GCShardID(e.Chunk.OID)
+	}
+	v2Key := GCQueueKeyV2(region, uint16(shardID), tsNano, e.Chunk.OID)
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return err
 	}
 	defer rollbackOnError(txn, &err)
-	if err = txn.Delete(key); err != nil {
+	if err = txn.Delete(v2Key); err != nil {
 		return err
+	}
+	if s.gcDualWrite {
+		legacyKey := GCQueueKey(region, tsNano, e.Chunk.OID)
+		if err = txn.Delete(legacyKey); err != nil {
+			return err
+		}
 	}
 	return txn.Commit(ctx)
 }
