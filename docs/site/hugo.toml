@@ -1,0 +1,35 @@
+baseURL = 'https://danchupin.github.io/strata/'
+title = 'Strata Documentation'
+theme = 'hugo-book'
+
+disablePathToLower = true
+enableGitInfo = false
+
+[markup]
+[markup.goldmark.renderer]
+  unsafe = true
+
+[markup.tableOfContents]
+  startLevel = 1
+
+[markup.highlight]
+  style = 'base16-snazzy'
+  noClasses = false
+
+[params]
+  BookTheme = 'auto'
+  BookSection = '*'
+  BookRepo = 'https://github.com/danchupin/strata'
+  BookEditLink = '{{ .Site.Params.BookRepo }}/edit/main/docs/site/content/{{ .Path }}'
+  BookSearch = true
+  BookComments = false
+
+[[menu.after]]
+  name = 'GitHub'
+  url = 'https://github.com/danchupin/strata'
+  weight = 10
+
+[[menu.after]]
+  name = 'ROADMAP'
+  url = 'https://github.com/danchupin/strata/blob/main/ROADMAP.md'
+  weight = 20

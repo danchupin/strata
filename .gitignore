@@ -41,3 +41,8 @@ web/dist/*
 web/playwright-report/
 web/test-results/
 web/*.tsbuildinfo
+
+# Hugo docs site build output
+docs/site/public/
+docs/site/resources/
+docs/site/.hugo_build.lock

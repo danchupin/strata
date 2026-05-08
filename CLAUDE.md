@@ -35,6 +35,8 @@ in-memory backend is for tests and the smoke pass; no other backends are support
 | Smoke pass                                                             | `make smoke` (signed: `make smoke-signed`)                               |
 | Take stack down                                                        | `make down`                                                              |
 | S3 compatibility suite                                                 | `scripts/s3-tests/run.sh` (see `scripts/s3-tests/README.md`)             |
+| Hugo docs site — local preview on :1313                                | `make docs-serve` (Hugo extended required; theme is a git submodule)     |
+| Hugo docs site — produce static bundle under `docs/site/public/`       | `make docs-build`                                                        |
 
 macOS + lima Docker note: `make test-integration` needs `DOCKER_HOST=unix:///Users/.../.lima/.../sock/docker.sock` for
 testcontainers to find the engine.

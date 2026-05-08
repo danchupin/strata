@@ -1,7 +1,7 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-tikv up-lab-tikv up-lab-tikv-3 down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv race-soak-tikv lint-nginx-lab bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi clean
+.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-tikv up-lab-tikv up-lab-tikv-3 down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv race-soak-tikv lint-nginx-lab bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi docs-serve docs-build clean
 
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
@@ -292,7 +292,20 @@ bench-lifecycle-multi: build
 		  | tee -a bench-lifecycle-multi-results.jsonl; \
 	done
 
+# Hugo docs site (docs/site/). `docs-serve` runs the local dev preview on
+# :1313 with drafts enabled; `docs-build` produces the minified static bundle
+# under docs/site/public/ which the GitHub Actions workflow publishes to
+# gh-pages. Requires Hugo extended (>= 0.128) on PATH; the theme lives at
+# docs/site/themes/hugo-book/ as a Git submodule, so a fresh checkout needs
+# `git submodule update --init --recursive` first.
+docs-serve:
+	cd docs/site && hugo server -D
+
+docs-build:
+	cd docs/site && hugo --minify
+
 clean:
 	rm -rf bin
 	rm -f bench-gc-results.jsonl bench-lifecycle-results.jsonl
 	rm -f bench-gc-multi-results.jsonl bench-lifecycle-multi-results.jsonl
+	rm -rf docs/site/public docs/site/resources

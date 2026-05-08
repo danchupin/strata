@@ -1,21 +1,39 @@
 # Ralph Progress Log
-Started: Fri May  8 14:00:00 MSK 2026
+Started: Fri May  8 15:24:33 MSK 2026
 Cycle: ralph/docs-site-hugo
+---
 
 ## Codebase Patterns
-- `docs/` today is a flat collection of operator-facing markdown — no Hugo, no navigation. This cycle introduces `docs/site/` as a Hugo project with a sectioned `content/` tree. `docs/*.md` files are MOVED (`git mv`) into the new tree, not duplicated, so there is one canonical source.
-- Hugo theme installed as a Git submodule under `docs/site/themes/<theme>/` — `hugo-book` is the recommended default (mature, technical-docs first). Pin Hugo extended version in the GH Action so local + CI builds match.
-- Sidebar ordering uses `weight` field in page frontmatter (Hugo convention). Section index pages are `_index.md` per directory.
-- Cross-references between docs pages use Hugo's `{{< ref >}}` shortcode (or relative paths) — plain `[link](docs/foo.md)` does NOT work after the move.
-- `make docs-serve` (new target this cycle) → `cd docs/site && hugo server -D` on `:1313` for local preview. `make docs-build` → static `hugo --minify` for CI smoke.
-- GH Action `.github/workflows/docs.yml` publishes via `peaceiris/actions-gh-pages@v3` to the `gh-pages` branch. Triggers: push to main + `workflow_dispatch`. Never runs on PRs.
-- Site URL: `https://danchupin.github.io/strata/`. Repo Pages settings (gh-pages branch as source) flipped manually one time after the first action run — documented in `docs/site/content/developers/_index.md`.
-- README has a prominent link to the published site at the top.
-- OpenAPI viewer (Redoc/Swagger UI) is OUT OF SCOPE this cycle — queued as a separate P3 follow-up after this cycle ships. Do NOT add it. Same applies to Helm chart packaging (P3 follow-up) and Reference-section content (env vars / Admin API / S3 API tables — placeholder _index.md only this cycle).
-- Information architecture mirrors CockroachDB docs (https://www.cockroachlabs.com/docs/stable/): Home → Get Started → Deploy (single-node, Docker Compose, multi-replica, Kubernetes) → Architecture (auth, router, meta-store, data-backend, workers, sharding, observability — one page per layer) → Best Practices (sizing, monitoring, gc/lifecycle tuning, backup, capacity planning) → S3 Compatibility (Supported / Unsupported matrix) → Reference (placeholder) → Developers.
-- Landing page (content/_index.md) needs a marketing-quality hero + 6–8 killer-features card grid. If hugo-book theme's landing capabilities are too plain, override `docs/site/layouts/index.html` with a custom partial — keep the theme submodule for the rest of the chrome.
-- S3 Compatibility page MUST include an explicit "NOT SUPPORTED" subsection sourced from ROADMAP "Known latent bugs" + open ROADMAP items. Operator-actionable: every "not supported" row links to the ROADMAP entry tracking it.
-- Kubernetes deploy guide ships apply-tested example manifests under `deploy/k8s/` (Deployment + Service + ConfigMap + Secret + Ingress example). PD+TiKV stateful sets are out of scope (operators run TiKV-Operator); document the dependency only.
-- CLAUDE.md "Big-picture architecture" duplicates content with `content/architecture/_index.md`. CLAUDE.md is the *internal* canonical (auto-loaded by Claude Code); the site page is the *external* canonical (for human readers). Cross-link both ways but keep them in sync.
-- Existing commit shapes for cycle prep / close: see `0b0ef58` (Phase 1 prep) and `7e0f99d` (Phase 2 prep) for prep-commit shape; `cc5c7fb` (Phase 1 close-flip) and `3743931` (Phase 2 close-flip) for close-flip shape with `<pending>` SHA placeholder; SHA backfill follow-up commit on main mirrors `6561845` (Phase 1) / `275ea2e` (Phase 2). Archive snapshot commit on main mirrors `c7475ac` (Phase 1) / `1c7e447` (Phase 2).
+- Hugo site lives under `docs/site/`. Theme is `hugo-book` as a git submodule at `docs/site/themes/hugo-book/`. Fresh checkouts need `git submodule update --init --recursive`.
+- Hugo config: `docs/site/hugo.toml`. `BookSection = '*'` so every top-level content section appears in the sidebar (we don't nest under `content/docs/`).
+- Build artifacts (`docs/site/public/`, `docs/site/resources/`, `.hugo_build.lock`) are gitignored. Drop them via `make clean`.
+- Makefile targets: `make docs-serve` (dev preview on :1313), `make docs-build` (minified bundle). Both `cd` into `docs/site` first.
+- Hugo CLI on Homebrew is hugo-extended (>= 0.128 needed for hugo-book). The future GH Action workflow (US-011) must pin a hugo-extended version.
+
+## Sat May  9 12:00:00 MSK 2026 - US-001
+- Implemented Hugo scaffolding under `docs/site/`:
+  - `docs/site/hugo.toml` — site title 'Strata Documentation', baseURL `https://danchupin.github.io/strata/`, theme `hugo-book` with `BookSection = '*'` (renders all top-level sections in sidebar), search enabled, comments off.
+  - Added `hugo-book` theme as git submodule (`.gitmodules`, `docs/site/themes/hugo-book/`).
+  - Stub `content/_index.md` with elevator pitch + Get Started CTA (full landing copy in US-003).
+  - `static/.gitkeep`, `layouts/.gitkeep` so the dirs exist even though they're empty today.
+- `.gitignore` gains `docs/site/public/`, `docs/site/resources/`, `docs/site/.hugo_build.lock`.
+- `Makefile`: `docs-serve` and `docs-build` targets, plus `clean` removes Hugo build artifacts. Comment block points at the submodule + Hugo extended requirement.
+- `CLAUDE.md` `## Common commands` table gains two rows for `make docs-serve` / `make docs-build`.
+- Quality checks: `cd docs/site && hugo --minify` clean (8 pages, 71 static files); `go vet ./...` clean; `go test ./...` clean.
+- Files changed:
+  - `.gitmodules` (new)
+  - `.gitignore`
+  - `CLAUDE.md`
+  - `Makefile`
+  - `docs/site/hugo.toml` (new)
+  - `docs/site/content/_index.md` (new)
+  - `docs/site/static/.gitkeep` (new)
+  - `docs/site/layouts/.gitkeep` (new)
+  - `docs/site/themes/hugo-book` (submodule add)
+- **Learnings for future iterations:**
+  - Hugo extended (with SCSS) is required by hugo-book; the Homebrew formula `hugo` already ships extended. Pin a version (e.g. `0.130.0+`) in the GH Action.
+  - hugo-book defaults `BookSection = 'docs'` which only renders pages under `content/docs/`. Set `BookSection = '*'` to render all top-level sections (`get-started/`, `deploy/`, `architecture/`, etc.) in the sidebar — that's the layout this cycle uses.
+  - When adding a Bash command that needs to `cd docs/site`, use absolute paths from the repo root — earlier `cd docs/site` calls in the same shell drift the cwd and the next call fails. Or use `cd /repo/root && cd docs/site && hugo ...`.
+  - `go vet` / `go test` are not affected by Hugo content changes — but the AC asks for both per story, so run them anyway as a safety net.
+  - The hugo-book theme's exampleSite has `enableGitInfo = true` + `BookLastChangeLink`. We disabled `enableGitInfo` for now to keep the build deterministic; revisit when GH Action publish lands so per-page "last modified" dates are accurate.
 ---
