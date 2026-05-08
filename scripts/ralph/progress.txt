@@ -8,6 +8,8 @@ Cycle: ralph/gc-lifecycle-scale-phase-2
 - Logical-vs-runtime shard split: writers stamp `meta.GCShardID(oid) = fnv32a(oid) % meta.GCShardCount` (1024). Readers compute belonging via `entry.ShardID % shardCount == myShard`. Lets operators rescale runtime shards without re-keying.
 - Contract suite is registered in `internal/meta/storetest/contract.go` `cases` slice. Add new cases there + a `caseXxx` func — every backend with a `storetest.Run(t, factory)` wrapper picks them up.
 - `go vet ./...` is the typecheck gate; `go test ./...` runs unit tests; `go test -race` runs race detector. Integration tests need Docker / `-tags integration`.
+- Cassandra env-driven knobs follow the `EnvFooBar`/`FooBarFromEnv()` pair pattern (see `observer.go::SlowMSFromEnv`, `gc.go::GCDualWriteFromEnv`). `Open()` reads the env at construction when the matching `Options` field is nil, so the option pointer cleanly distinguishes "explicitly set" from "fall back to env".
+- Dual-write cutover pattern (US-002 cassandra `gc_entries_v2`): writers fan-out under env-gated dual-write flag, reads prefer the new table and top up from the legacy table when the result is short, ack deletes both sides only while dual-write is on. Reusable shape for any future additive schema migration that needs an in-place cutover.
 
 ## 2026-05-08 - US-001
 - Added `meta.GCShardID(oid)` helper + `meta.GCShardCount=1024` constant in `internal/meta/store.go`.
@@ -24,4 +26,21 @@ Cycle: ralph/gc-lifecycle-scale-phase-2
   - Cassandra schema change for `gc_entries_v2` (partitioned on `(region, shard_id)`) is deferred to US-002 — `tableDDL` and `alterStatements` are the canonical landing spots.
   - TiKV key shape `gc/<region>/<shardID2BE>/<oid>` is deferred to US-003. Current TiKV impl scans the whole region prefix and post-filters; will be replaced with per-shard prefix scan.
   - Contract suite cases run for every backend that wraps `storetest.Run`; integration backends (cassandra, tikv) inherit the GCQueueShardFanOut assertion via the same code path, so post-filter implementations on those backends already pass on the existing schema.
+---
+
+## 2026-05-08 - US-002
+- Added `gc_entries_v2` table to `internal/meta/cassandra/schema.go::tableDDL` with `PRIMARY KEY ((region, shard_id), enqueued_at, oid)`.
+- Added `STRATA_GC_DUAL_WRITE` env knob (default `on`) + helper `GCDualWriteFromEnv()` in new `internal/meta/cassandra/gc.go`. `cassandra.Options.GCDualWrite *bool` (nil → env default) lets tests pin the value explicitly via `cassandra.WithGCDualWrite(false)`.
+- `EnqueueChunkDeletion` writes to `gc_entries_v2` (always) and to legacy `gc_queue` when dual-write is on. Single LoggedBatch keeps the two writes atomic per call.
+- `ListGCEntriesShard` now reads partitions `(region, shard_id)` for every logical shard the runtime caller owns under `gcOwnedLogicalShards(shardID, shardCount)`, dedupes on oid, and tops up the result from `gc_queue` (over-fetched + post-filtered) when v2 returns less than `limit` AND dual-write is on. Once dual-write is flipped off (after operator-confirmed v1 drain), the v1 fallback no-ops.
+- `AckGCEntry` deletes the v2 row (always) and the v1 row (only while dual-write is on). The v2 DELETE uses the entry's `ShardID` clustering, which is set on read by the v2 scan and computed via `meta.GCShardID(oid)` for v1 fallback rows.
+- New unit test `gc_test.go` covers `GCDualWriteFromEnv` parsing and `gcOwnedLogicalShards` (range, modulo identity, disjoint-union over a shardCount=4 split).
+- Files changed: `internal/meta/cassandra/schema.go`, `internal/meta/cassandra/store.go`, new `internal/meta/cassandra/gc.go`, new `internal/meta/cassandra/gc_test.go`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- `go vet ./...` clean, `go vet -tags integration ./...` clean, `go test ./...` clean, `go test -race ./internal/meta/cassandra/... ./internal/meta/memory/...` clean. `make test-integration` cannot run on this macOS+lima docker context (testcontainers reaper rejects the lima socket mount). CI workflow `.github/workflows/ci.yml` validates the cassandra contract.
+- **Learnings for future iterations:**
+  - The contract test `caseGCQueueShardFanOut` in `internal/meta/storetest/contract.go` already exercises the cassandra impl end-to-end on the integration suite — no per-backend test plumbing required.
+  - `cassandra.Options` field types: use `*bool` (or any pointer) when the option needs to distinguish "unset, fall back to env" from "explicitly false". The struct's zero value is unambiguous that way.
+  - `gc_entries_v2` partitions on `(region, shard_id)` — when adding new gc-queue columns, the ALTER lands on `gc_entries_v2` (and `gc_queue` while dual-write is alive). Both must accept the new column or dual-write breaks.
+  - Reading 1024 partitions sequentially is the worst-case at `STRATA_GC_SHARDS=1`. Acceptable today (small partitions, 30s tick). If perf becomes an issue, parallelise the per-logical-shard SELECTs with an errgroup keyed on region — single-partition scans are independent.
+  - The legacy `gc_queue` over-fetch (post-filter cap 4096) is now strictly fallback-only and stops as soon as v2 is the source of truth; do not rely on it for new features. Phase 2 cutover is one-way.
 ---

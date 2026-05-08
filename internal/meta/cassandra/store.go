@@ -34,6 +34,13 @@ type Store struct {
 	defaultShard int
 	keyspace     string
 
+	// gcDualWrite gates fan-out writes to both gc_queue (legacy) and
+	// gc_entries_v2 during the Phase 2 cutover (US-002). Reads always
+	// drain v2 first and fall back to v1 while either side may carry
+	// rows. Flipped to false after STRATA_GC_DUAL_WRITE=off and the
+	// legacy table has drained.
+	gcDualWrite bool
+
 	// obs is the SlowQueryObserver attached to the gocql session. The Store
 	// reuses it as the LWT-conflict sink (US-009): on applied=false from a
 	// CAS the Store calls obs.RecordLWTConflict(ctx, table, bucket, shard).
@@ -59,7 +66,17 @@ type Store struct {
 
 type Options struct {
 	DefaultShardCount int
+	// GCDualWrite controls whether the GC queue is dual-written to the
+	// legacy `gc_queue` table alongside `gc_entries_v2` (US-002 Phase 2
+	// cutover). Defaults to GCDualWriteFromEnv() when zero-valued via
+	// the option struct (callers that want a hard override pass an
+	// explicit *bool via WithGCDualWrite).
+	GCDualWrite *bool
 }
+
+// WithGCDualWrite is a small helper for tests / callers that want to set the
+// optional pointer cleanly: `cassandra.Options{..., GCDualWrite: cassandra.WithGCDualWrite(false)}`.
+func WithGCDualWrite(v bool) *bool { return &v }
 
 func Open(cfg SessionConfig, opts Options) (*Store, error) {
 	if err := ensureKeyspace(cfg); err != nil {
@@ -76,11 +93,16 @@ func Open(cfg SessionConfig, opts Options) (*Store, error) {
 	if opts.DefaultShardCount <= 0 {
 		opts.DefaultShardCount = 64
 	}
+	gcDualWrite := GCDualWriteFromEnv()
+	if opts.GCDualWrite != nil {
+		gcDualWrite = *opts.GCDualWrite
+	}
 	store := &Store{
 		s:            s,
 		defaultShard: opts.DefaultShardCount,
 		keyspace:     cfg.Keyspace,
 		bucketNames:  make(map[uuid.UUID]string),
+		gcDualWrite:  gcDualWrite,
 	}
 	store.obs = NewQueryObserver(cfg.Logger, time.Duration(cfg.SlowMS)*time.Millisecond, cfg.Metrics, cfg.Tracer)
 	return store, nil
@@ -1225,11 +1247,19 @@ func (s *Store) EnqueueChunkDeletion(ctx context.Context, region string, chunks 
 	now := time.Now().UTC()
 	batch := s.s.NewBatch(gocql.LoggedBatch).WithContext(ctx)
 	for _, c := range chunks {
+		shardID := meta.GCShardID(c.OID)
 		batch.Query(
-			`INSERT INTO gc_queue (region, enqueued_at, oid, pool, cluster, namespace)
-			 VALUES (?, ?, ?, ?, ?, ?)`,
-			region, now, c.OID, c.Pool, c.Cluster, c.Namespace,
+			`INSERT INTO gc_entries_v2 (region, shard_id, enqueued_at, oid, pool, cluster, namespace)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			region, shardID, now, c.OID, c.Pool, c.Cluster, c.Namespace,
 		)
+		if s.gcDualWrite {
+			batch.Query(
+				`INSERT INTO gc_queue (region, enqueued_at, oid, pool, cluster, namespace)
+				 VALUES (?, ?, ?, ?, ?, ?)`,
+				region, now, c.OID, c.Pool, c.Cluster, c.Namespace,
+			)
+		}
 	}
 	return s.s.ExecuteBatch(batch)
 }
@@ -1238,10 +1268,14 @@ func (s *Store) ListGCEntries(ctx context.Context, region string, before time.Ti
 	return s.ListGCEntriesShard(ctx, region, 0, 1, before, limit)
 }
 
-// ListGCEntriesShard is a transitional implementation that scans the legacy
-// gc_queue partition and filters by `fnv32a(oid) % 1024 % shardCount` post-
-// fetch. US-002 will replace this with a partition-pruned scan over the
-// new gc_entries_v2 schema, eliminating the over-fetch.
+// ListGCEntriesShard reads the GC queue partitioned across 1024 logical
+// shards (`gc_entries_v2`). The runtime caller owns every logical shard
+// `s` where `s % shardCount == shardID`; the read iterates those partitions
+// and stops when `limit` rows have been collected. During the dual-write
+// window (s.gcDualWrite, US-002 cutover), if v2 yields fewer than `limit`
+// rows the remainder is topped up from the legacy `gc_queue` partition (a
+// post-fetch shard filter applies). The legacy fallback drops automatically
+// once `gc_queue` is empty.
 func (s *Store) ListGCEntriesShard(ctx context.Context, region string, shardID, shardCount int, before time.Time, limit int) ([]meta.GCEntry, error) {
 	if shardCount <= 0 {
 		shardCount = 1
@@ -1249,26 +1283,16 @@ func (s *Store) ListGCEntriesShard(ctx context.Context, region string, shardID, 
 	if shardID < 0 || shardID >= shardCount {
 		return nil, nil
 	}
-	q := s.s.Query(
-		`SELECT enqueued_at, oid, pool, cluster, namespace
-		 FROM gc_queue WHERE region=? AND enqueued_at <= ? LIMIT ?`,
-		region, before, gcShardScanLimit(limit, shardCount),
-	).WithContext(ctx)
-	iter := q.Iter()
-	defer iter.Close()
-
-	var (
-		out        []meta.GCEntry
-		enqueuedAt time.Time
-		oid, pool  string
-		cluster    string
-		namespace  string
-	)
-	for iter.Scan(&enqueuedAt, &oid, &pool, &cluster, &namespace) {
-		sid := meta.GCShardID(oid)
-		if sid%shardCount != shardID {
-			continue
+	if limit <= 0 {
+		limit = 1000
+	}
+	out := make([]meta.GCEntry, 0, limit)
+	seen := make(map[string]struct{}, limit)
+	addEntry := func(enqueuedAt time.Time, oid, pool, cluster, namespace string, sid int) bool {
+		if _, ok := seen[oid]; ok {
+			return len(out) < limit
 		}
+		seen[oid] = struct{}{}
 		out = append(out, meta.GCEntry{
 			EnqueuedAt: enqueuedAt,
 			ShardID:    sid,
@@ -1279,7 +1303,63 @@ func (s *Store) ListGCEntriesShard(ctx context.Context, region string, shardID, 
 				OID:       oid,
 			},
 		})
+		return len(out) < limit
+	}
+
+	for _, logicalShard := range gcOwnedLogicalShards(shardID, shardCount) {
 		if len(out) >= limit {
+			break
+		}
+		remaining := limit - len(out)
+		iter := s.s.Query(
+			`SELECT enqueued_at, oid, pool, cluster, namespace
+			 FROM gc_entries_v2 WHERE region=? AND shard_id=? AND enqueued_at <= ? LIMIT ?`,
+			region, logicalShard, before, remaining,
+		).WithContext(ctx).Iter()
+		var (
+			enqueuedAt time.Time
+			oid, pool  string
+			cluster    string
+			namespace  string
+		)
+		for iter.Scan(&enqueuedAt, &oid, &pool, &cluster, &namespace) {
+			if !addEntry(enqueuedAt, oid, pool, cluster, namespace, logicalShard) {
+				break
+			}
+		}
+		if err := iter.Close(); err != nil {
+			return nil, err
+		}
+	}
+	if len(out) >= limit || !s.gcDualWrite {
+		return out, nil
+	}
+
+	// Legacy `gc_queue` fallback: post-filter by shard identity, top up
+	// to `limit`. Over-fetches `(limit-len(out)) * shardCount` (cap 4096)
+	// because `gc_queue` is a single partition with no shard column.
+	remaining := limit - len(out)
+	scan := remaining * shardCount
+	if scan <= 0 || scan > 4096 {
+		scan = 4096
+	}
+	iter := s.s.Query(
+		`SELECT enqueued_at, oid, pool, cluster, namespace
+		 FROM gc_queue WHERE region=? AND enqueued_at <= ? LIMIT ?`,
+		region, before, scan,
+	).WithContext(ctx).Iter()
+	var (
+		enqueuedAt time.Time
+		oid, pool  string
+		cluster    string
+		namespace  string
+	)
+	for iter.Scan(&enqueuedAt, &oid, &pool, &cluster, &namespace) {
+		sid := meta.GCShardID(oid)
+		if sid%shardCount != shardID {
+			continue
+		}
+		if !addEntry(enqueuedAt, oid, pool, cluster, namespace, sid) {
 			break
 		}
 	}
@@ -1289,26 +1369,31 @@ func (s *Store) ListGCEntriesShard(ctx context.Context, region string, shardID, 
 	return out, nil
 }
 
-// gcShardScanLimit chooses the LIMIT to push to Cassandra. With shardCount=1
-// the per-shard read fetches `limit` rows directly. With shardCount>1 we
-// over-fetch (cap at 4096) so the post-filter gets enough material to fill
-// the shard's `limit`. US-002 replaces this approximation with a partition-
-// pruned read against gc_entries_v2.
-func gcShardScanLimit(limit, shardCount int) int {
-	if shardCount <= 1 {
-		if limit <= 0 {
-			return 1000
-		}
-		return limit
+// gcOwnedLogicalShards returns the subset of [0, meta.GCShardCount) that
+// the runtime shard `shardID` (of `shardCount`) owns under modulo mapping.
+// shardCount=1 returns every logical shard; shardCount=meta.GCShardCount
+// returns exactly one.
+func gcOwnedLogicalShards(shardID, shardCount int) []int {
+	out := make([]int, 0, meta.GCShardCount/shardCount+1)
+	for s := shardID; s < meta.GCShardCount; s += shardCount {
+		out = append(out, s)
 	}
-	c := limit * shardCount
-	if c <= 0 || c > 4096 {
-		c = 4096
-	}
-	return c
+	return out
 }
 
 func (s *Store) AckGCEntry(ctx context.Context, region string, e meta.GCEntry) error {
+	if err := s.s.Query(
+		`DELETE FROM gc_entries_v2 WHERE region=? AND shard_id=? AND enqueued_at=? AND oid=?`,
+		region, e.ShardID, e.EnqueuedAt, e.Chunk.OID,
+	).WithContext(ctx).Exec(); err != nil {
+		return err
+	}
+	if !s.gcDualWrite {
+		return nil
+	}
+	// Drop the legacy row too while dual-write is on so the two tables
+	// converge regardless of which side served the read. Idempotent —
+	// no-op when the row is absent.
 	return s.s.Query(
 		`DELETE FROM gc_queue WHERE region=? AND enqueued_at=? AND oid=?`,
 		region, e.EnqueuedAt, e.Chunk.OID,

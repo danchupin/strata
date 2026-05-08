@@ -105,6 +105,22 @@ var tableDDL = []string{
 		namespace    text,
 		PRIMARY KEY ((region), enqueued_at, oid)
 	)`,
+	// gc_entries_v2 partitions the GC queue across 1024 logical shards
+	// (US-002 / Phase 2 sharded leader-election). The on-disk shard fan-out
+	// is fixed at 1024; runtime readers (STRATA_GC_SHARDS) take a subset of
+	// these partitions via `shard_id % shardCount == myShard`. Dual-write
+	// window: writers stamp both gc_queue (legacy) and gc_entries_v2 until
+	// STRATA_GC_DUAL_WRITE=off is flipped at the operator's discretion.
+	`CREATE TABLE IF NOT EXISTS gc_entries_v2 (
+		region       text,
+		shard_id     int,
+		enqueued_at  timestamp,
+		oid          text,
+		pool         text,
+		cluster      text,
+		namespace    text,
+		PRIMARY KEY ((region, shard_id), enqueued_at, oid)
+	)`,
 	`CREATE TABLE IF NOT EXISTS worker_locks (
 		name   text PRIMARY KEY,
 		holder text
