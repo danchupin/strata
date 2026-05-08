@@ -221,3 +221,26 @@ Cycle: ralph/docs-site-hugo
   - **`STRATA_GC_DUAL_WRITE` defaults are time-dependent** — the env defaults to `on` *during the Phase 2 cycle* per the migration doc, but operators on a fresh deploy don't need to think about it (default behaviour reproduces Phase 1 byte-for-byte at `STRATA_GC_SHARDS=1`). The runbook needs to spell this out so operators don't conflate "the knob exists" with "I have to flip it".
   - **Dedup P2 has a crypto-independence trap** that operators must opt into knowingly — `dedup-friendly` mode derives the DEK from `hash(plaintext)` so identical plaintext encrypts identically. The capacity-planning page now flags this so future readers don't read the dedup section as a free win.
 ---
+
+## Fri May  8 16:40:00 MSK 2026 - US-009
+- Replaced the `s3-compatibility/_index.md` stub with the full Supported / Unsupported matrix:
+  - Headline pass rate (162/177, 91.5%) lifted verbatim from `scripts/s3-tests/README.md` + the 11 deliberate / 4 real-bug breakdown.
+  - Bucket-level table covering all 24 query-string handlers wired in `internal/s3api/server.go::handleBucket` + the 3 explicit ❌ rows (`?accelerate`, `?requestPayment`, `?analytics`/`?metrics`/`?intelligent-tiering`).
+  - Object-level table covering PUT / GET / HEAD / DELETE / Copy / Multipart (init / upload / copy / complete / abort / list parts) / `?partNumber=N` GET / `?tagging` / `?retention` / `?legal-hold` / `?acl` / `?attributes` / `?restore` + storage classes + SSE shapes + ❌ rows for `?select` and Object Lambda. Two ⚠️ rows (UploadPartCopy, CompleteMultipartUpload) cite the two real-bug ROADMAP P2 entries directly so operators can trace each gap.
+  - IAM `?Action=` table covering all 13 actions wired in `internal/s3api/iam.go` (CreateUser / GetUser / ListUsers / DeleteUser / CreateAccessKey / ListAccessKeys / DeleteAccessKey / RotateAccessKey / AssumeRole / CreateAccessPoint / GetAccessPoint / DeleteAccessPoint / ListAccessPoints).
+  - Auth surfaces table: SigV4 (path + vhost + presigned + streaming chunk), anonymous, STS — plus the SigV2 ❌ row that drives 8 of the 11 deliberate gaps.
+  - Explicitly-NOT-supported subsection: each row points at the named ROADMAP entry (cross-account ACLs, Requester Pays, Transfer Acceleration, Intelligent-Tiering, Select, Object Lambda, SigV2, Object Lock COMPLIANCE audit row, aws-chunked-trailer streaming variant, multipart-copy GET-side checksum echo, multipart Complete duplicate PartNumber).
+  - Posture caveats: the `STRATA_AUTH_MODE=required` anonymous-list trap, ingress-side `Host` header preservation requirement, executable-subset-vs-full filter distinction.
+  - "Where to look next" section cross-links to Get Started / Architecture (auth + router) / Best Practices (monitoring) + GH-pinned `scripts/s3-tests/README.md` and `ROADMAP.md` so the page is the single authoritative compat overview.
+- Quality checks: `cd docs/site && hugo --minify` clean (54 pages, 0 warnings, 124ms); `go vet ./...` clean; `go test ./...` clean (full unit suite).
+- Files changed:
+  - `docs/site/content/s3-compatibility/_index.md` (rewrite — was a 7-line stub)
+  - `scripts/ralph/prd.json` (US-009 → passes: true)
+- **Learnings for future iterations:**
+  - **Source-of-truth pyramid for compat tables**: the table rows must match the actual handlers in `internal/s3api/server.go::handleBucket` / `handleObject` / `iam.go` (line-level grep), the headline pass rate must match `scripts/s3-tests/README.md`'s newest run (lifted byte-for-byte), and every ❌ / ⚠️ row must cite a ROADMAP entry by name. Drift between any two surfaces breaks the page's "operator-actionable" guarantee.
+  - **GitHub-Pages absolute URLs are the right shape for `ROADMAP.md` + `scripts/s3-tests/README.md`**: those files are not Hugo content, so `{{< ref >}}` cannot resolve them. Use `https://github.com/danchupin/strata/blob/main/<path>` so links work in both rendered docs and raw-markdown previews.
+  - **Status emoji are AC-mandated** ("✅ supported, ⚠️ partial, ❌ not supported"). Hugo's goldmark renderer + `unsafe = true` already passes them through; no special escaping needed in tables.
+  - **Partial-status rows must cite the failing test count + the ROADMAP entry name**: `UploadPartCopy ⚠️ — 3 s3-tests fail on GET-side checksum echo divergence (P2 ROADMAP)` is operator-actionable; `UploadPartCopy ⚠️ — works mostly` is not. Future iterations updating compat numbers should preserve this shape.
+  - **`?accelerate`/`?requestPayment`/`?intelligent-tiering` are NOT in `handleBucket`** today — they are explicit ❌ rows. Verified by absence in `server.go` rather than assumed.
+  - **IAM `?Action=` ≠ admin API**: managed-policy attach/detach lives only on the admin API (`/admin/v1/iam/users/{name}/policies`), not in the SigV4 IAM action surface. Don't list it as an IAM `?Action=` row — call it out as admin-API-only with a cross-link to the Web UI guide.
+---
