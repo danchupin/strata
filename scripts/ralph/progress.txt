@@ -292,3 +292,22 @@ Cycle: ralph/docs-site-hugo
   - **Live URL verification is operator-side, not CI-side**: confirming `https://danchupin.github.io/strata/` returns 200 after first deploy is a manual checkbox the human runs once, not a workflow probe. The PRD AC explicitly leaves it out of the CI step.
   - **Submodule recursion is mandatory** for `actions/checkout@v4` (`submodules: recursive`) — the hugo-book theme lives under `docs/site/themes/hugo-book/` as a submodule; without recursive checkout `hugo --minify` fails with "module not found". Same gotcha applies to fresh local clones (CLAUDE.md already documents `git submodule update --init --recursive`).
 ---
+
+## Sun May 10 14:00:00 MSK 2026 - US-012
+- Flipped `ROADMAP.md` `P2 — Full project documentation site (GitHub Pages)` to Done with one-line summary citing the CockroachDB-shape sectioned tree, GH Action publish, and live URL. Closing-SHA backfill follow-up commit on main per established convention (commit field set to `<pending>`).
+- Added 3 new ROADMAP entries under the same Developer experience section:
+  - P3 — OpenAPI viewer (Redoc / Swagger UI) embedded in the API reference section. Pulls from `internal/adminapi/openapi.yaml` at build time.
+  - P3 — Helm chart packaging for Kubernetes deployment. Wraps the apply-tested manifests under `deploy/k8s/` as a templated chart at `deploy/helm/strata/`; cross-link from `docs/site/content/deploy/kubernetes.md`.
+  - P3 — Reference section expansion (env vars table, Admin API surface, S3 API operations table) so the placeholder under `content/reference/_index.md` has a closing story queued.
+- Removed `tasks/prd-docs-site-hugo.md` per CLAUDE.md PRD lifecycle rule (canonical record is the auto-archived `scripts/ralph/archive/<date>-<branch>/{prd.json,progress.txt}` snapshot Ralph writes on `<promise>COMPLETE</promise>`).
+- Quality checks: `go vet ./...` clean; `go test ./...` clean (full unit suite); `cd docs/site && hugo --minify` clean (54 pages, 0 warnings, 119 ms). `make smoke` skipped — it needs the docker stack up and this story is a documentation/roadmap edit only; no Go or shell code changed semantically.
+- Files changed:
+  - `ROADMAP.md` (P2 close-flip + 3 new P3 entries)
+  - `tasks/prd-docs-site-hugo.md` (deleted)
+  - `scripts/ralph/prd.json` (US-012 → passes: true)
+- **Learnings for future iterations:**
+  - **Closing-SHA convention is `<pending>` then a backfill commit on main** — CLAUDE.md "Roadmap maintenance" prefers a follow-up commit over `commit --amend` because amending on a Ralph branch breaks the auto-archive pairing. The closing commit's SHA is unknown at write time; the next commit on main backfills `<pending>` → real SHA.
+  - **Cycle archival is automatic** — `ralph.sh::archive_cycle` snapshots `prd.json` + `progress.txt` into `scripts/ralph/archive/<YYYY-MM-DD>-<branch>/` on the `<promise>COMPLETE</promise>` signal. Operators don't copy markdown PRDs into `tasks/archive/`; the canonical record is the Ralph snapshot pair.
+  - **Don't `make smoke` on doc-only stories** — it spins up the full docker stack (cassandra + ceph + strata) and takes minutes. The PRD AC encodes "no regressions"; for stories that touch ROADMAP.md + delete a tasks/*.md, `go vet` + `go test` + `hugo --minify` is the right gate. Reserve `make smoke` for stories that change Go code on the gateway hot path.
+  - **All 3 new P3 entries belong under the existing `## Developer experience` section** — they are documentation/DX follow-ups, not S3-correctness gaps. CLAUDE.md "Roadmap maintenance" placement rule says P3 = nice-to-haves and DX; this story slots all three correctly.
+---
