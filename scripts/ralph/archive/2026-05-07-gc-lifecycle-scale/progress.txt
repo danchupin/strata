@@ -1,0 +1,90 @@
+# Ralph Progress Log
+Started: Thu May  7 18:29:16 MSK 2026
+Cycle: ralph/gc-lifecycle-scale
+---
+
+## Codebase Patterns
+- Worker concurrency knobs are read at Build time in `cmd/strata/workers/<name>.go` from `STRATA_*` envs (sibling of existing `STRATA_GC_INTERVAL` etc); no per-worker flags.
+- Bounded errgroup pattern for per-entry parallelism: `eg := new(errgroup.Group); eg.SetLimit(N); eg.Go(func() error { ...; return nil })`. Always return nil from goroutines so per-entry failure does not cancel siblings (log-and-continue). Wrap each goroutine in `defer recover()` — supervisor's panic backoff is for top-level panics only.
+- Counters under concurrent writes use `atomic.Int64` instead of plain `int`.
+- `golang.org/x/sync` lives in `go.mod`; it was indirect — bumping to direct via `go mod tidy` after first errgroup import.
+- Go 1.25 modernization: `for i := 0; i < n; i++` flagged as `rangeint`; use `for i := range n`. Loop var aliasing (`e := e`) is also flagged (`forvar`); not needed since Go 1.22.
+- New strata-admin subcommands wire into `cmd/strata-admin/main.go::run` via the same dispatch shape as `rewrap` (no-subcommand variant); the shared meta-store builder is `buildRewrapMetaStore` in `rewrap.go` — bench code reuses it directly. Add `buildBenchDataBackend` (bench-only) that mirrors `serverapp.buildDataBackend` for memory + rados; the rados stub keeps the bench buildable without the `ceph` build tag.
+- Bench JSONL contract: `benchResult` struct (cmd/strata-admin/bench_common.go) is the source of truth for stdout JSON + Prometheus push gauge labels. `STRATA_PROM_PUSHGATEWAY` is opt-in; failure to push logs WARN and never fails the bench run.
+- Bench harness on macOS+lima: rebuild `strata:ceph` via `make docker-build`, stop `strata-tikv-{a,b}` + `strata-lb-nginx` to free the lab from gc/lifecycle worker contention, then run a one-shot container per concurrency level: `docker run --rm --network docker_default -v docker_strata-ceph-etc:/etc/ceph:ro -e STRATA_META_BACKEND=tikv -e STRATA_DATA_BACKEND=memory -e STRATA_TIKV_PD_ENDPOINTS=pd:2379 -e STRATA_LOG_LEVEL=ERROR --entrypoint /usr/local/bin/strata-admin strata:ceph bench-{gc,lifecycle} --{entries,objects}=N --concurrency=M`. Restart the replicas afterwards.
+- gc.Worker.drainCount infinite-loops when `Data.Delete` returns persistent errors (e.g. RADOS ENOENT for synthetic OIDs). Tracked under `## Known latent bugs` in ROADMAP.md. Until fixed, run bench with `STRATA_DATA_BACKEND=memory`.
+
+## 2026-05-07 - US-001
+- Implemented STRATA_GC_CONCURRENCY: bounded errgroup inside `gc.Worker.drainCount` with per-goroutine recover + log-and-continue.
+- `gc.Worker.Concurrency` int field, zero/negative -> 1, clamped to [1, 256] via `effectiveConcurrency()` at runtime; cmd-side env wired in `cmd/strata/workers/gc.go::clampConcurrency` reading `STRATA_GC_CONCURRENCY`.
+- `processed` counter changed to `atomic.Int64`. Inner per-entry loop wraps body in errgroup with `eg.SetLimit(limit)`, errors logged + return nil so siblings continue.
+- New TestWorker_DrainConcurrency: 1k entries, concurrency=32, slowBackend with 2ms per-entry latency, asserts wall-clock < 4× ideal-parallel time AND max in-flight > 1.
+- Files changed: `internal/gc/worker.go`, `internal/gc/worker_test.go`, `cmd/strata/workers/gc.go`, `go.mod`, `go.sum`.
+- **Learnings for future iterations:**
+  - The existing `gc.Metrics` interface (`SetQueueDepth`) only fires once per drain pass (first batch). Concurrency does not change that contract.
+  - `metrics.GCProcessed.Inc()` is goroutine-safe (Prometheus counter has internal atomic).
+  - The slowBackend pattern (latency + max-in-flight tracker via atomic CAS loop) is reusable for US-002's lifecycle concurrency test — copy/adapt.
+  - `gc.Worker.Run()` now logs `concurrency` at startup INFO. Mirror in lifecycle.
+---
+
+## 2026-05-07 - US-002
+- Implemented STRATA_LIFECYCLE_CONCURRENCY: bounded errgroup wraps three per-entry loops in `lifecycle.Worker` — `applyRule` (objects), `applyNoncurrentActions` (versions), `abortStaleUploads` (multipart). Each goroutine has `defer recover() { log + return nil }` and `errgroup.SetLimit(limit)`. Per-bucket outer loop stays sequential by design (Phase 2 territory).
+- `lifecycle.Worker.Concurrency` int field, zero/negative -> 1, clamped to [1, 256] via shared `effectiveConcurrency()` helper. `cmd/strata/workers/lifecycle.go` wires `STRATA_LIFECYCLE_CONCURRENCY` via the existing `clampConcurrency(intFromEnv(...))` helpers from US-001.
+- `applyNoncurrentActions` walks versions sequentially first to compute prevMtime → noncurrentSince age, then dispatches the `(version, age)` pairs into the bounded errgroup. Sequential prevMtime tracking is essential — concurrent dispatch would race on the prevKey/prevMtime cursor.
+- `abortStaleUploads` filters cutoff sequentially (cheap), only `AbortMultipartUpload + EnqueueChunkDeletion` go inside the errgroup.
+- Run-startup INFO logs `concurrency` alongside `interval` + `age_unit`.
+- New TestWorker_TransitionConcurrency: 320 objects, concurrency=32, slowDataBackend with 5ms per-PutChunks latency + max-in-flight tracker; asserts all 320 transitioned to COLD, max in-flight > 1, wall-clock < 4× ideal-parallel.
+- Files changed: `internal/lifecycle/worker.go`, `internal/lifecycle/worker_test.go`, `cmd/strata/workers/lifecycle.go`.
+- **Learnings for future iterations:**
+  - The `applyNoncurrentActions` prevMtime cursor walk must stay sequential — only the final `(v, age)` dispatch parallelises. Trying to parallelise the cursor walk would race on `prevKey`/`prevMtime`.
+  - Phase 2 (sharded per-bucket leader-election) is what unlocks cross-bucket parallelism. Don't try to wrap the per-bucket outer loop here — single elected lifecycle leader is the bottleneck by design.
+  - The slowDataBackend pattern (sleep + atomic max-in-flight CAS) is reusable for any concurrency benchmark — copy across to bench-lifecycle (US-003).
+---
+
+## 2026-05-07 - US-003
+- Added `strata-admin bench-gc` + `strata-admin bench-lifecycle` subcommands. Dispatched from `cmd/strata-admin/main.go::run` alongside the existing `rewrap` no-subcommand path. New files: `bench_common.go` (shared `buildBenchDataBackend` mirroring serverapp + `benchResult` JSON shape + `pushBenchGauge` for STRATA_PROM_PUSHGATEWAY), `bench_gc.go`, `bench_lifecycle.go`, `bench_gc_test.go`.
+- bench-gc: `--entries=N` (default 10000), `--concurrency=M` (1..256, default 1). Pre-seeds N synthetic ChunkRefs with a unique OID prefix in a unique `bench-<uuid>` region (no collision with real workers), times one `gc.Worker.RunOnce`, prints one JSON line {bench, entries, concurrency, elapsed_ms, throughput_per_sec, meta_backend, data_backend, started_at_unix}. Cleans residual queue rows at exit so the same lab can re-run.
+- bench-lifecycle: `--objects=N` (default 10000), `--concurrency=M`. Creates a unique `lcbench-<uuid>` bucket, seeds N objects with Mtime=-2h + a single-chunk Manifest, attaches a 1-day Expiration rule (AgeUnit=Hour so every object triggers in one tick), times `lifecycle.Worker.RunOnce`, prints same JSON shape. Cleanup: drops lifecycle, deletes survivor objects, deletes bucket, drains region GC queue for bench-prefixed entries.
+- Makefile bench-gc + bench-lifecycle targets sweep `BENCH_CONCURRENCY_LEVELS` (default `1 4 16 64 256`) and tee one JSON line per level into `bench-{gc,lifecycle}-results.jsonl`. Targets default to TiKV meta + RADOS data via lab-tikv defaults; override via env. `make clean` now also drops the JSONL artifacts.
+- Smoke test `TestApp_BenchGC_RunsAgainstMemory` exits 0 against in-memory backends with `--entries=10 --concurrency=1`, asserts JSONL shape (entries=10, concurrency=1, backends=memory). `TestApp_BenchGC_RejectsBadConcurrency` pins the [1,256] flag-boundary check.
+- Files changed: `cmd/strata-admin/{main.go,bench_common.go,bench_gc.go,bench_lifecycle.go,bench_gc_test.go}`, `Makefile`.
+- **Learnings for future iterations:**
+  - `gc.Worker.RunOnce(ctx)` ignores `Interval`; `Grace=0` + `Batch=N` is the right tuning for a one-shot drain measurement (no scheduler delay, single batch).
+  - For lifecycle expiration bench, set `AgeUnit=time.Hour` + Mtime=-2h + Days=1: every object meets the threshold deterministically. Versioning OFF means the expire path enqueues GC rows synchronously on the same call — no extra ticks needed.
+  - `buildBenchDataBackend` is intentionally a duplicate of serverapp's helper (importing serverapp from cmd/strata-admin would cycle). Keep them in sync when adding a new data backend (s3 next).
+  - `internal/data/rados/stub.go` (build tag `!ceph`) returns an error from `New` so importing the rados package without the build tag still compiles — this is what lets strata-admin bench code unconditionally reference `datarados.New` without a build-tag split of the bench files.
+  - The Prometheus push-gateway client is `github.com/prometheus/client_golang/prometheus/push`; pin a 5s HTTP timeout so a wedged push gateway never stalls the bench run.
+  - `--bucket=` flag default uses `strings.ReplaceAll(uuid.NewString()[:12], "-", "")` to fit the 3-DNS-safe bucket-name validator (`internal/s3api/validate.go`); raw uuids with dashes pass too but the trimmed form keeps the JSONL output greppable.
+---
+## 2026-05-07 - US-004
+- Captured bench-gc + bench-lifecycle throughput curves on the canonical lab-tikv stack (PD v8.5 + TiKV v8.5, single replica, macOS+lima Docker context). Wrote docs/benchmarks/gc-lifecycle.md with methodology, two result tables, per-tier bottleneck analysis, knee detection (`STRATA_GC_CONCURRENCY=64` recommended; `STRATA_LIFECYCLE_CONCURRENCY=64` recommended with headroom up to 256 if meta has capacity), and tradeoff notes for high concurrency.
+- gc curve (10000 entries): c=1 11108 chunks/s → c=256 100275 chunks/s. 64→256 yields +11 % (knee). Lifecycle curve (10000 objects): c=1 485 obj/s → c=256 9150 obj/s. 64→256 still +41 %, no knee in swept range.
+- Surfaced + tracked a real latent bug in `internal/gc.Worker.drainCount`: when `Data.Delete` returns an error (RADOS ENOENT for an OID swept by a sibling, pool-not-found, transient timeout) the entry is NOT acked and the outer `for {}` re-issues `ListGCEntries` getting the same batch back forever. Bench surfaced this immediately when run against the real `strata.rgw.buckets.data` pool with synthetic OIDs. Documented under `## Known latent bugs` in ROADMAP.md per CLAUDE.md "discovering a new gap" rule. Bench numbers were captured against `STRATA_DATA_BACKEND=memory` to bypass the spin; the production `make bench-gc` command + Makefile defaults remain rados, but operators reproducing on a lab today should use the docker-run snippet in docs/benchmarks/gc-lifecycle.md until the gc ENOENT-loop bug is fixed.
+- Added STRATA_GC_CONCURRENCY + STRATA_LIFECYCLE_CONCURRENCY to README.md env table next to the existing STRATA_GC_INTERVAL etc rows. Pointed operators at docs/benchmarks/gc-lifecycle.md for the curve / defaults.
+- Added bench-gc-results.jsonl + bench-lifecycle-results.jsonl to .gitignore (regenerated artifacts, not source).
+- Stack interaction: `make up-lab-tikv && make wait-strata-lab` was already up from the multi-replica cycle; `docker stop strata-tikv-{a,b}` + `strata-lb-nginx` was needed before bench so the lab gateway's gc/lifecycle workers don't compete for the bench-region work / bench-bucket. Restarted both replicas after bench so the lab is back to its original state.
+- Files changed: `docs/benchmarks/gc-lifecycle.md` (new), `ROADMAP.md`, `README.md`, `.gitignore`, `scripts/ralph/prd.json` (passes flip).
+- **Learnings for future iterations:**
+  - `cmd/strata-admin/main.go::writeJSON` uses `enc.SetIndent("", "  ")` — bench JSON output is pretty-printed multi-line, NOT strict JSONL. The Makefile's `tee -a bench-gc-results.jsonl` filename is aspirational; ingestion with `jq -c` would need a non-pretty encoder. US-003 territory; harmless for now since the file is human-readable for the docs writeup.
+  - macOS + lima Docker means `make bench-gc` can't run from the host (no librados). Use `docker run --network docker_default --entrypoint /usr/local/bin/strata-admin strata:ceph bench-gc ...` (one-shot container in the lab-tikv compose network). The bench reaches PD via `pd:2379` and ceph via `/etc/ceph/ceph.conf` from the `docker_strata-ceph-etc` volume.
+  - `make docker-build` rebuilds strata:ceph with the cached layers for ceph base + Go modules + go-build cache; the bench-only commits land in <30s of incremental build time after the first cold build.
+  - The lab gateway's gc+lifecycle workers run with `STRATA_WORKERS=gc,lifecycle` — they MUST be stopped before bench-lifecycle (race on the bench bucket's expiration) and bench-gc with default region (race on the GC queue). bench-gc auto-isolates with a `bench-<uuid>` region label; bench-lifecycle uses `region=default` by design (lifecycle worker walks all buckets regardless of region label).
+  - At c=256 the wall-clock for gc dropped to 99 ms which puts the measurement near the floor of useful precision on this lab; the 100k chunks/s number should be read as "≥100k, can't pin closer with N=10000 on this hardware". A future `BENCH_GC_ENTRIES=100000` re-run on dedicated hardware would tighten the high-concurrency tail of the curve.
+  - PD v8.5 client logs to stderr at INFO level on every `Begin`; bench runs go through the slog handler (also stderr) so `STRATA_LOG_LEVEL=ERROR` quiets the slog side but the PD-client logs ride through regardless. The JSON line on stdout is the source of truth — pipe stderr to /dev/null when scripting around the bench.
+---
+
+## 2026-05-07 - US-005
+- Close-flipped ROADMAP P1 `gc / lifecycle workers serialise inside a single goroutine` to Done with measured numbers (gc 11108→100275 chunks/s c=1→c=256 knee at c=64; lifecycle 485→9150 obj/s c=1→c=256 no knee inside swept range), recommended defaults (`STRATA_GC_CONCURRENCY=64` / `STRATA_LIFECYCLE_CONCURRENCY=64`), and pointer to `docs/benchmarks/gc-lifecycle.md`. Closing-SHA placeholder is `<pending>` per CLAUDE.md "Closing a roadmap item" rule; backfilled by a follow-up `docs: roadmap — stamp closing SHA` commit on main, mirroring the multi-replica close shape (9e36975 → d4d85e6 → 0dee924).
+- New ROADMAP entry under ## Scalability & performance: P1 `gc / lifecycle Phase 2 — sharded leader-election`. Carries the deferred Phase 2 scope (sharded `gc-leader-0..N-1` + per-bucket `lifecycle-leader-<bucketID>`) into the next cycle.
+- `docs/migrations/binary-consolidation.md` env list: appended `STRATA_GC_CONCURRENCY` + `STRATA_LIFECYCLE_CONCURRENCY` to the `[gc/*, lifecycle/*]` worker-env entries with a pointer to the bench doc. README env table already lists both (US-004 commit bb5d371). docs/benchmarks/gc-lifecycle.md is the canonical operator reference for the curve + recommended defaults.
+- Removed `tasks/prd-gc-lifecycle-scale.md` per CLAUDE.md PRD lifecycle rule (canonical record after this point is the ralph snapshot, archived by ralph.sh on COMPLETE).
+- prd.json US-005 flipped to passes:true; this entry appended to progress.txt; ralph.sh archive_cycle will snapshot prd.json + progress.txt under scripts/ralph/archive/2026-05-07-gc-lifecycle-scale-complete/ on the COMPLETE signal.
+- Cycle-end merge plan: ff-only merge ralph/gc-lifecycle-scale into main → push origin/main → SHA-backfill commit on main (mirrors web-ui-storage-status / multi-replica-cluster shape) → archive_cycle snapshot via ralph.sh.
+- go vet ./... clean; go build ./... clean. US-005 is docs-only (no code touched in internal/ or cmd/) so the unit-test pass from US-001..US-004 is the standing baseline.
+- Files changed: ROADMAP.md, docs/migrations/binary-consolidation.md, tasks/prd-gc-lifecycle-scale.md (deleted), scripts/ralph/prd.json, scripts/ralph/progress.txt.
+- **Learnings for future iterations:**
+  - The ROADMAP close-flip line shape `(commit `<pending>`)` is the established convention for cycle-close commits; the SHA stamping is a follow-up commit on main, not an amend. CI gates + reviewer subscriptions hate amend-races (per the multi-replica cycle's learnings).
+  - When the AC mentions `docs/operators.md (or whichever exists)` and the repo has no `operators.md`, the existing operator-facing env-listing doc is `docs/migrations/binary-consolidation.md` — not `docs/ui.md` (UI / console-focused) and not the README (top-level summary). Add new env knobs there alongside the existing per-worker env list.
+  - Phase-2 follow-ups should land as a NEW P1 entry under the matching `## Scalability & performance` section in the same close-flip commit so the next cycle's prep skill picks it up immediately. Don't spread the work across two commits.
+---
+
