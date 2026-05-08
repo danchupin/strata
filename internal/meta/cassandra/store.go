@@ -1235,11 +1235,26 @@ func (s *Store) EnqueueChunkDeletion(ctx context.Context, region string, chunks 
 }
 
 func (s *Store) ListGCEntries(ctx context.Context, region string, before time.Time, limit int) ([]meta.GCEntry, error) {
-	iter := s.s.Query(
+	return s.ListGCEntriesShard(ctx, region, 0, 1, before, limit)
+}
+
+// ListGCEntriesShard is a transitional implementation that scans the legacy
+// gc_queue partition and filters by `fnv32a(oid) % 1024 % shardCount` post-
+// fetch. US-002 will replace this with a partition-pruned scan over the
+// new gc_entries_v2 schema, eliminating the over-fetch.
+func (s *Store) ListGCEntriesShard(ctx context.Context, region string, shardID, shardCount int, before time.Time, limit int) ([]meta.GCEntry, error) {
+	if shardCount <= 0 {
+		shardCount = 1
+	}
+	if shardID < 0 || shardID >= shardCount {
+		return nil, nil
+	}
+	q := s.s.Query(
 		`SELECT enqueued_at, oid, pool, cluster, namespace
 		 FROM gc_queue WHERE region=? AND enqueued_at <= ? LIMIT ?`,
-		region, before, limit,
-	).WithContext(ctx).Iter()
+		region, before, gcShardScanLimit(limit, shardCount),
+	).WithContext(ctx)
+	iter := q.Iter()
 	defer iter.Close()
 
 	var (
@@ -1250,8 +1265,13 @@ func (s *Store) ListGCEntries(ctx context.Context, region string, before time.Ti
 		namespace  string
 	)
 	for iter.Scan(&enqueuedAt, &oid, &pool, &cluster, &namespace) {
+		sid := meta.GCShardID(oid)
+		if sid%shardCount != shardID {
+			continue
+		}
 		out = append(out, meta.GCEntry{
 			EnqueuedAt: enqueuedAt,
+			ShardID:    sid,
 			Chunk: data.ChunkRef{
 				Cluster:   cluster,
 				Pool:      pool,
@@ -1259,11 +1279,33 @@ func (s *Store) ListGCEntries(ctx context.Context, region string, before time.Ti
 				OID:       oid,
 			},
 		})
+		if len(out) >= limit {
+			break
+		}
 	}
 	if err := iter.Close(); err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// gcShardScanLimit chooses the LIMIT to push to Cassandra. With shardCount=1
+// the per-shard read fetches `limit` rows directly. With shardCount>1 we
+// over-fetch (cap at 4096) so the post-filter gets enough material to fill
+// the shard's `limit`. US-002 replaces this approximation with a partition-
+// pruned read against gc_entries_v2.
+func gcShardScanLimit(limit, shardCount int) int {
+	if shardCount <= 1 {
+		if limit <= 0 {
+			return 1000
+		}
+		return limit
+	}
+	c := limit * shardCount
+	if c <= 0 || c > 4096 {
+		c = 4096
+	}
+	return c
 }
 
 func (s *Store) AckGCEntry(ctx context.Context, region string, e meta.GCEntry) error {

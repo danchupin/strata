@@ -355,9 +355,47 @@ func BuildPartRange(partNumber int, offset int64, p *MultipartPart) data.PartRan
 	return pr
 }
 
+// GCShardCount is the fixed logical shard fan-out for the GC queue. Writers
+// stamp every entry with `shard_id = fnv32a(oid) % GCShardCount`; readers
+// pick a runtime shard count via `STRATA_GC_SHARDS` (US-004) and select rows
+// where `shard_id % shardCount == myShard`. Decoupling the on-disk shard
+// from the runtime shard count means operators can grow / shrink replicas
+// without re-keying the queue.
+const GCShardCount = 1024
+
+// GCShardID returns the logical (1024-wide) shard for an object id. Identical
+// hash is computed at write time on every backend and at read time when a
+// backend has to filter post-fetch (e.g. when a query lacks native shard
+// locality). Stable: do not change without a queue drain.
+func GCShardID(oid string) int {
+	h := fnv32aGC(oid)
+	return int(h % uint32(GCShardCount))
+}
+
+// fnv32aGC is the FNV-1a hash used by GCShardID. Inlined here so the GC
+// queue's logical-shard formula stays in this file (callers don't need to
+// import "hash/fnv" to derive a shard).
+func fnv32aGC(s string) uint32 {
+	const (
+		offset32 = uint32(2166136261)
+		prime32  = uint32(16777619)
+	)
+	h := offset32
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= prime32
+	}
+	return h
+}
+
 type GCEntry struct {
 	Chunk      data.ChunkRef
 	EnqueuedAt time.Time
+	// ShardID is the logical (0..GCShardCount-1) partition the entry lives
+	// on. Computed at write time as `fnv32a(Chunk.OID) % GCShardCount`.
+	// Backends that do not persist the column derive it from the oid on
+	// read (the value is deterministic).
+	ShardID int
 }
 
 // NotificationEvent is one buffered S3-event-message payload waiting for a
@@ -570,6 +608,14 @@ type Store interface {
 
 	EnqueueChunkDeletion(ctx context.Context, region string, chunks []data.ChunkRef) error
 	ListGCEntries(ctx context.Context, region string, before time.Time, limit int) ([]GCEntry, error)
+	// ListGCEntriesShard returns GC entries belonging to the runtime shard
+	// `shardID` of `shardCount` total. An entry belongs when its logical
+	// (1024-wide) ShardID satisfies `entry.ShardID % shardCount == shardID`.
+	// Callers pass shardCount = STRATA_GC_SHARDS (1..1024); shardID is the
+	// caller's slot in [0, shardCount). Same time/limit semantics as
+	// ListGCEntries. shardCount=1, shardID=0 is functionally identical to
+	// ListGCEntries.
+	ListGCEntriesShard(ctx context.Context, region string, shardID, shardCount int, before time.Time, limit int) ([]GCEntry, error)
 	AckGCEntry(ctx context.Context, region string, entry GCEntry) error
 
 	EnqueueNotification(ctx context.Context, evt *NotificationEvent) error

@@ -87,6 +87,21 @@ func (s *Store) EnqueueChunkDeletion(ctx context.Context, region string, chunks 
 }
 
 func (s *Store) ListGCEntries(ctx context.Context, region string, before time.Time, limit int) ([]meta.GCEntry, error) {
+	return s.ListGCEntriesShard(ctx, region, 0, 1, before, limit)
+}
+
+// ListGCEntriesShard is a transitional implementation that scans the entire
+// legacy `gc/<region>/` prefix and filters by `fnv32a(oid) % 1024 %
+// shardCount == shardID` post-fetch. US-003 replaces this with a per-prefix
+// scan over the new `gc/<region>/<shardID2BE>/` key shape so each shard
+// reads exactly its 1024/shardCount logical-shard prefixes.
+func (s *Store) ListGCEntriesShard(ctx context.Context, region string, shardID, shardCount int, before time.Time, limit int) ([]meta.GCEntry, error) {
+	if shardCount <= 0 {
+		shardCount = 1
+	}
+	if shardID < 0 || shardID >= shardCount {
+		return nil, nil
+	}
 	if limit <= 0 || limit > queueListLimitDefault {
 		limit = queueListLimitDefault
 	}
@@ -109,6 +124,10 @@ func (s *Store) ListGCEntries(ctx context.Context, region string, before time.Ti
 		if r.EnqueuedAt.After(before) {
 			continue
 		}
+		sid := meta.GCShardID(r.OID)
+		if sid%shardCount != shardID {
+			continue
+		}
 		out = append(out, meta.GCEntry{
 			Chunk: data.ChunkRef{
 				Cluster:   r.Cluster,
@@ -118,6 +137,7 @@ func (s *Store) ListGCEntries(ctx context.Context, region string, before time.Ti
 				Size:      r.Size,
 			},
 			EnqueuedAt: r.EnqueuedAt,
+			ShardID:    sid,
 		})
 		if len(out) >= limit {
 			break

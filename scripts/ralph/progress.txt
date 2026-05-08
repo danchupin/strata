@@ -1,18 +1,27 @@
 # Ralph Progress Log
-Started: Fri May  8 00:00:00 MSK 2026
+Started: Fri May  8 12:47:30 MSK 2026
 Cycle: ralph/gc-lifecycle-scale-phase-2
+---
 
 ## Codebase Patterns
-- `meta.Store` interface lives in `internal/meta/store.go`; both `internal/meta/memory` AND `internal/meta/cassandra` (and `internal/meta/tikv`) implement it in lockstep — adding a method means updating all three.
-- Contract tests in `internal/meta/storetest/contract.go::Run(t, factory)` are the shared suite — add a `case<Name>` here so memory + cassandra + tikv all run the same assertions.
-- Cassandra schema migrations are additive only. `internal/meta/cassandra/schema.go` has `tableDDL` (idempotent `CREATE TABLE IF NOT EXISTS`) and `alterStatements` (idempotent `ALTER TABLE ADD column`). Never write a destructive migration. New table = `gc_entries_v2`-style; never repartition `gc_entries` in place.
-- TiKV variable-length string segments use FoundationDB-style byte-stuffing (`0x00 → 0x00 0xFF`, terminator `0x00 0x00`). Fixed-width integer fields use big-endian (e.g. day-epoch, partNumber, shardID — for forward range scan ascending order). See `internal/meta/tikv/keys.md`.
-- Workers register via `workers.Register(workers.Worker{Name, Build})` in `cmd/strata/workers/<name>.go::init()`. Build receives `workers.Dependencies`, returns `workers.Runner`. Supervisor handles leader-election + panic restart.
-- `STRATA_GC_*` envs read at Build time (no per-worker flags); other workers follow same env-only convention.
-- Phase 1 baseline (commit 6561845): gc 11108→100275 chunks/s c=1→c=256 knee at c=64; lifecycle 485→9150 obj/s c=1→c=256. Recommended defaults `STRATA_GC_CONCURRENCY=64` / `STRATA_LIFECYCLE_CONCURRENCY=64`.
-- Phase 1 bench harness lives as `strata-admin bench-gc` / `strata-admin bench-lifecycle` subcommands. Phase 2 reuses the same harness; only the deployment shape changes (3-replica stack).
-- `bench-gc` auto-isolates with a `bench-<uuid>` region label so it can run alongside the lab gateway's gc worker; `bench-lifecycle` uses `region=default` by design (lifecycle walks all buckets regardless of region label) — STOP the lab `STRATA_WORKERS=gc,lifecycle` gateway before bench-lifecycle to avoid race on the bench bucket's expiration.
-- Membership coordination piggybacks on gc lease holdings: a replica's `myReplicaID` = smallest `gc-leader-<i>` lease index it currently holds; `replicaCount = STRATA_GC_SHARDS`. No separate `replica_set` lease pool needed.
-- 1024-wide logical shard fan-out at write time (`shard_id = fnv32a(oid) % 1024`) decouples on-disk partitioning from operator's runtime shard count. Operators can change `STRATA_GC_SHARDS` (1..1024) without re-keying the gc queue.
-- Dual-write window pattern (Cassandra + TiKV): write both legacy + new key/row when `STRATA_GC_DUAL_WRITE=on` (default during this cycle), readers prefer new with legacy fallback. Operator-driven cutover via `STRATA_GC_DUAL_WRITE=off`.
+- meta.Store interface in `internal/meta/store.go` is implemented by THREE backends (memory, cassandra, tikv) + embedded shells (e.g. `serverapp_test.go::fakeMeta` embeds `*memory.Store`). Adding a method requires implementations on all three real backends; embedded shells inherit automatically.
+- Logical-vs-runtime shard split: writers stamp `meta.GCShardID(oid) = fnv32a(oid) % meta.GCShardCount` (1024). Readers compute belonging via `entry.ShardID % shardCount == myShard`. Lets operators rescale runtime shards without re-keying.
+- Contract suite is registered in `internal/meta/storetest/contract.go` `cases` slice. Add new cases there + a `caseXxx` func — every backend with a `storetest.Run(t, factory)` wrapper picks them up.
+- `go vet ./...` is the typecheck gate; `go test ./...` runs unit tests; `go test -race` runs race detector. Integration tests need Docker / `-tags integration`.
+
+## 2026-05-08 - US-001
+- Added `meta.GCShardID(oid)` helper + `meta.GCShardCount=1024` constant in `internal/meta/store.go`.
+- Added `ShardID int` field to `meta.GCEntry`.
+- Added `Meta.ListGCEntriesShard(ctx, region, shardID, shardCount, before, limit)` method to the `meta.Store` interface.
+- Memory backend `EnqueueChunkDeletion` stamps `ShardID = GCShardID(c.OID)`. `ListGCEntries` rewires through `ListGCEntriesShard(..., 0, 1, ...)` so the legacy entry point is preserved as a thin alias.
+- Cassandra + TiKV backends ship transitional `ListGCEntriesShard` impls that scan the existing partition / prefix and filter by `fnv32a(oid) % 1024 % shardCount` post-fetch. Cassandra's `gcShardScanLimit` over-fetches `limit*shardCount` (cap 4096) when shardCount>1; US-002/US-003 will replace these with native partition / prefix pruning over `gc_entries_v2` + `gc/<region>/<shardID2BE>/`.
+- New contract test `caseGCQueueShardFanOut` in `internal/meta/storetest/contract.go`: 1000 entries, shardCount=4, asserts union=full set, disjoint subsets, each shard ~250±25%, and shardCount=1 reproduces the full ListGCEntries result.
+- Files changed: `internal/meta/store.go`, `internal/meta/memory/store.go`, `internal/meta/cassandra/store.go`, `internal/meta/tikv/queues.go`, `internal/meta/storetest/contract.go`.
+- `go vet ./...` clean. `go test ./...` clean. `go test -race ./internal/meta/memory/...` clean.
+- **Learnings for future iterations:**
+  - The hash function for shard derivation must be inlined in `internal/meta/store.go` as `fnv32aGC` (not imported from `hash/fnv`) so callers don't need to pull `hash/fnv` to compute a shard. Stable: do not change without queue drain.
+  - Memory `ListGCEntries` is a thin alias around `ListGCEntriesShard(..., 0, 1, ...)` — when adding shard logic to other queues use this same delegation pattern.
+  - Cassandra schema change for `gc_entries_v2` (partitioned on `(region, shard_id)`) is deferred to US-002 — `tableDDL` and `alterStatements` are the canonical landing spots.
+  - TiKV key shape `gc/<region>/<shardID2BE>/<oid>` is deferred to US-003. Current TiKV impl scans the whole region prefix and post-filters; will be replaced with per-shard prefix scan.
+  - Contract suite cases run for every backend that wraps `storetest.Run`; integration backends (cassandra, tikv) inherit the GCQueueShardFanOut assertion via the same code path, so post-filter implementations on those backends already pass on the existing schema.
 ---

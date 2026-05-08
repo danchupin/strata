@@ -149,22 +149,40 @@ func (s *Store) EnqueueChunkDeletion(ctx context.Context, region string, chunks 
 	defer s.mu.Unlock()
 	now := time.Now().UTC()
 	for _, c := range chunks {
-		s.gc[region] = append(s.gc[region], meta.GCEntry{Chunk: c, EnqueuedAt: now})
+		s.gc[region] = append(s.gc[region], meta.GCEntry{
+			Chunk:      c,
+			EnqueuedAt: now,
+			ShardID:    meta.GCShardID(c.OID),
+		})
 	}
 	return nil
 }
 
 func (s *Store) ListGCEntries(ctx context.Context, region string, before time.Time, limit int) ([]meta.GCEntry, error) {
+	return s.ListGCEntriesShard(ctx, region, 0, 1, before, limit)
+}
+
+func (s *Store) ListGCEntriesShard(ctx context.Context, region string, shardID, shardCount int, before time.Time, limit int) ([]meta.GCEntry, error) {
+	if shardCount <= 0 {
+		shardCount = 1
+	}
+	if shardID < 0 || shardID >= shardCount {
+		return nil, nil
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	entries := s.gc[region]
 	out := make([]meta.GCEntry, 0, len(entries))
 	for _, e := range entries {
-		if !e.EnqueuedAt.After(before) {
-			out = append(out, e)
-			if len(out) >= limit {
-				break
-			}
+		if e.EnqueuedAt.After(before) {
+			continue
+		}
+		if e.ShardID%shardCount != shardID {
+			continue
+		}
+		out = append(out, e)
+		if len(out) >= limit {
+			break
 		}
 	}
 	return out, nil

@@ -5,6 +5,7 @@ package storetest
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -30,6 +31,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"DeleteMarkerHidesObject", caseDeleteMarker},
 		{"SetObjectStorageCAS", caseSetObjectStorageCAS},
 		{"GCQueueRoundTrip", caseGCQueueRoundTrip},
+		{"GCQueueShardFanOut", caseGCQueueShardFanOut},
 		{"BucketLifecycleRulesBlob", caseLifecycleBlob},
 		{"ListObjectsHidesDeleteMarkers", caseListHidesDeleteMarkers},
 		{"MultipartCompletionRoundTrip", caseMultipartCompletion},
@@ -227,6 +229,64 @@ func caseGCQueueRoundTrip(t *testing.T, s meta.Store) {
 	remaining, _ := s.ListGCEntries(ctx, "default", time.Now().Add(time.Hour), 100)
 	if len(remaining) != 0 {
 		t.Errorf("after ack: %d remaining", len(remaining))
+	}
+}
+
+// caseGCQueueShardFanOut exercises ListGCEntriesShard: 1000 entries, 4-way
+// runtime shards, asserts the union equals the full set, subsets are
+// disjoint, and each subset is roughly 250 ± 25%.
+func caseGCQueueShardFanOut(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	const n = 1000
+	chunks := make([]data.ChunkRef, n)
+	for i := 0; i < n; i++ {
+		chunks[i] = data.ChunkRef{
+			Cluster: "default",
+			Pool:    "p",
+			OID:     fmt.Sprintf("oid-%05d", i),
+			Size:    1,
+		}
+	}
+	if err := s.EnqueueChunkDeletion(ctx, "default", chunks); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	const shardCount = 4
+	before := time.Now().Add(time.Hour)
+	seen := make(map[string]int, n)
+	subsetSizes := make([]int, shardCount)
+	for sid := 0; sid < shardCount; sid++ {
+		entries, err := s.ListGCEntriesShard(ctx, "default", sid, shardCount, before, 10_000)
+		if err != nil {
+			t.Fatalf("shard %d: %v", sid, err)
+		}
+		subsetSizes[sid] = len(entries)
+		for _, e := range entries {
+			if e.ShardID%shardCount != sid {
+				t.Errorf("shard %d entry oid=%s has ShardID=%d (mod=%d)", sid, e.Chunk.OID, e.ShardID, e.ShardID%shardCount)
+			}
+			if prev, ok := seen[e.Chunk.OID]; ok {
+				t.Errorf("oid=%s appears in shard %d and shard %d", e.Chunk.OID, prev, sid)
+			}
+			seen[e.Chunk.OID] = sid
+		}
+	}
+	if len(seen) != n {
+		t.Fatalf("union size=%d want %d", len(seen), n)
+	}
+	const expected = n / shardCount
+	const tolerance = expected / 4 // 25%
+	for sid, sz := range subsetSizes {
+		if sz < expected-tolerance || sz > expected+tolerance {
+			t.Errorf("shard %d size=%d outside [%d,%d]", sid, sz, expected-tolerance, expected+tolerance)
+		}
+	}
+	// shardCount=1 reproduces ListGCEntries (full set).
+	all, err := s.ListGCEntriesShard(ctx, "default", 0, 1, before, 10_000)
+	if err != nil {
+		t.Fatalf("shardCount=1: %v", err)
+	}
+	if len(all) != n {
+		t.Errorf("shardCount=1 size=%d want %d", len(all), n)
 	}
 }
 
