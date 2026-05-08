@@ -41,7 +41,17 @@ gc and one active lifecycle between them.
 
 - `STRATA_GC_INTERVAL`, `STRATA_GC_GRACE`, `STRATA_GC_BATCH_SIZE`,
   `STRATA_GC_CONCURRENCY` (Phase 1 fan-out, default `1`, max `256` —
-  see `docs/benchmarks/gc-lifecycle.md`)
+  see `docs/benchmarks/gc-lifecycle.md`),
+  `STRATA_GC_SHARDS` (Phase 2 multi-leader, default `1`, range `[1, 1024]` —
+  shards the gc-leader lease space across replicas; see
+  `docs/migrations/gc-lifecycle-phase-2.md` for the cutover runbook).
+  Lifecycle inherits the same value via the per-bucket distribution gate;
+  there is no separate `STRATA_LIFECYCLE_SHARDS`.
+- `STRATA_GC_DUAL_WRITE` (Phase 2 cutover, default `on`) — controls
+  dual-writes to the legacy gc queue (Cassandra `gc_queue` /
+  TiKV `gc/<region>/<oid>`) alongside the v2 partition / prefix. Operator
+  flips to `off` after the legacy data has drained. See
+  `docs/migrations/gc-lifecycle-phase-2.md`.
 - `STRATA_LIFECYCLE_INTERVAL`, `STRATA_LIFECYCLE_UNIT`,
   `STRATA_LIFECYCLE_CONCURRENCY` (same shape as
   `STRATA_GC_CONCURRENCY`)
