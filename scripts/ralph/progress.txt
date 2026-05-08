@@ -12,6 +12,8 @@ Cycle: ralph/docs-site-hugo
 - **Canonical doc paths** are now under `docs/site/content/<section>/<page>.md`. Content tree mirrors CockroachDB shape: `get-started/`, `deploy/`, `architecture/{backends,benchmarks,migrations}/`, `best-practices/`, `s3-compatibility/`, `reference/`, `developers/`. Tooling refs (CLAUDE.md / ROADMAP.md / code comments) point at the canonical-source path; user-facing copy in README/ROADMAP may use the published-URL form (US-010 finalises that).
 - **Cross-link inside Hugo content**: use `{{< ref "/section/page" >}}` shortcode. Hugo errors on missing refs at build time — that's the safety net.
 - **Inline-code escape gotcha**: backticked text containing `{{< ... >}}` is still parsed by Hugo. Escape with the comment form `{{</* ... */>}}` to render the literal token (e.g. when documenting the shortcode itself in `developers/_index.md`).
+- **Theme-agnostic styling**: the hugo-book theme exposes CSS custom properties `--body-background`, `--body-font-color`, `--color-link`, `--gray-100/200/500` (see `themes/hugo-book/assets/plugins/_themes.scss`). Custom landing/marketing markup should reference those vars so it adapts to every theme variant (light, dark, catppuccin, etc.) without duplicating palettes.
+- **Hero/CTA pattern for content pages**: `content/_index.md` uses `unsafe = true` markdown + inline `<style>` + raw `<div>` blocks for the hero + feature grid. Use `{{< relref "/section/" >}}` (NOT `{{< ref >}}`) inside `href="..."` so the rendered URL is properly prefixed by the site `baseURL` subpath (`/strata/...`). `relref` renders a relative link; `ref` renders absolute — the latter breaks under GitHub Pages subpath hosting.
 
 ## Sat May  9 12:00:00 MSK 2026 - US-001
 - Implemented Hugo scaffolding under `docs/site/`:
@@ -73,4 +75,22 @@ Cycle: ralph/docs-site-hugo
   - **PRD lifecycle**: we are pre-cycle-archive. The active PRD `tasks/prd-docs-site-hugo.md` mentions the OLD doc paths inside its move-table — leave it as-is until US-012 deletes the file. Do not edit active PRDs to reflect mid-cycle moves; the canonical record is `scripts/ralph/prd.json` + the eventual archive snapshot.
   - **Frontmatter `weight` ordering**: section-level weights are 10/20/30/40/50/60/70 (get-started → deploy → architecture → best-practices → s3-compatibility → reference → developers). Per-page weights inside a section start at 10 and step by 10 to leave room for inserts.
   - **Sub-section index pages** (`architecture/backends/_index.md`, `architecture/benchmarks/_index.md`, `architecture/migrations/_index.md`) keep `bookFlatSection: true` so hugo-book renders the children directly in the sidebar (vs nesting under a "docs" placeholder).
+---
+
+## Sat May  9 16:00:00 MSK 2026 - US-003
+- Rebuilt `docs/site/content/_index.md` as a marketing-quality landing page rendered inside the existing hugo-book chrome (no custom `layouts/index.html` override needed — book chrome + `unsafe = true` + theme CSS vars carried it).
+- Hero block: title + 1-paragraph elevator pitch + primary CTA "Get Started →" + secondary CTA "Architecture". Both CTAs use `{{< relref >}}` so GitHub-Pages subpath (`/strata/`) prefixes correctly.
+- Killer features grid: 8 cards (CSS grid, auto-fit minmax 260px) covering sharded objects table, TiKV ordered scan, multi-replica scaling via STRATA_GC_SHARDS, online bucket reshard, multi-cluster RADOS routing, embedded Web UI, OTel ring-buffer tracing, drop-in RGW replacement. Each card = title + 1-line value prop + section link.
+- "What Strata is (and isn't)" positioning blockquote covers RGW / MinIO / SeaweedFS framing + links to S3 Compatibility.
+- Footer row: GitHub, ROADMAP.md, CLAUDE.md (devs).
+- Inline `<style>` references theme CSS vars (`--body-background`, `--body-font-color`, `--color-link`, `--gray-100/200/500`) so light + dark + catppuccin variants all work without per-theme overrides.
+- Quality checks: `cd docs/site && hugo --minify` clean (39 pages, 0 warnings, 80ms); `go vet ./...` clean.
+- Files changed:
+  - `docs/site/content/_index.md` (rewritten — was an US-001 stub)
+- **Learnings for future iterations:**
+  - **`relref` vs `ref` matters under subpath hosting**: GitHub Pages serves the site under `/strata/`, so cross-links in raw `<a href="...">` blocks must use `{{</* relref */>}}` (NOT `{{</* ref */>}}`). `ref` renders as `https://danchupin.github.io/strata/get-started/` which works in production but breaks `make docs-serve` previews on `:1313`. `relref` always renders a relative path that the browser resolves against the current page — both modes work.
+  - **hugo-book CSS custom properties** (in `themes/hugo-book/assets/plugins/_themes.scss`) are the right hook for marketing markup that must look correct in every theme variant. Don't hardcode hex colours in landing styles.
+  - **No need to override `layouts/index.html`** for a marketing landing — `unsafe = true` markdown + inline HTML + a stylesheet that's scoped via class names (e.g. `.strata-hero`, `.strata-feature-card`) gets you a CockroachDB-shape landing without losing the book sidebar. Keep that escape hatch (`layouts/index.html` override) reserved for the case where the sidebar must disappear entirely.
+  - **`content/_index.md` is the home page**, but only when no `content/index.md` exists. The `_index` underscore form is required for section/home indexes; the non-underscore form is a regular page. Don't accidentally create both.
+  - **Inline `<style>` is fine for one-off pages** but pages that share the look should hoist into `assets/scss/_landing.scss` and pipe through Hugo's asset pipeline — revisit if a second marketing page lands.
 ---

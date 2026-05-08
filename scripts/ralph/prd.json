@@ -56,7 +56,7 @@
         "Typecheck passes (`go vet ./...`)"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
