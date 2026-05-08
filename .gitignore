@@ -3,6 +3,10 @@ dist/
 *.exe
 *.test
 *.out
+
+# Top-level binaries built by `go build ./cmd/strata{,-admin}` / bench harness
+/strata
+/strata-admin
 coverage.*
 .env
 .env.local
