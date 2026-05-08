@@ -1,7 +1,7 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-tikv up-lab-tikv down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv race-soak-tikv lint-nginx-lab bench-gc bench-lifecycle clean
+.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-tikv up-lab-tikv up-lab-tikv-3 down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv race-soak-tikv lint-nginx-lab bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi clean
 
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
@@ -78,6 +78,14 @@ up-tikv:
 # docs/multi-replica.md for the failure-scenario walkthrough.
 up-lab-tikv:
 	$(COMPOSE) --profile lab-tikv up -d pd tikv ceph strata-tikv-a strata-tikv-b strata-lb-nginx prometheus grafana
+
+# 3-replica lab: layers strata-tikv-c (lab-tikv-3 profile) on top of the
+# 2-replica lab. Operator points STRATA_GC_SHARDS=3 in the host env before
+# bringing up the stack so all three replicas race for shards 0..2. Used by
+# `make bench-gc-multi` / `make bench-lifecycle-multi` (US-006 Phase 2).
+up-lab-tikv-3:
+	STRATA_GC_SHARDS=$${STRATA_GC_SHARDS:-3} $(COMPOSE) --profile lab-tikv --profile lab-tikv-3 \
+		up -d pd tikv ceph strata-tikv-a strata-tikv-b strata-tikv-c strata-lb-nginx prometheus grafana
 
 down:
 	$(COMPOSE) --profile tikv --profile lab-tikv --profile features --profile tracing down
@@ -250,6 +258,41 @@ bench-lifecycle: build
 		  | tee -a bench-lifecycle-results.jsonl; \
 	done
 
+# Phase 2 multi-leader bench: drives the same TiKV+RADOS stack but layers
+# `--shards` / `--replicas` on top so the bench measures the multi-leader
+# fan-out curve. Default shards/replicas = 3 mirrors the recommended 3-replica
+# deploy. Output JSONL goes to bench-{gc,lifecycle}-multi-results.jsonl.
+BENCH_GC_SHARDS ?= 3
+BENCH_LC_REPLICAS ?= 3
+BENCH_LC_BUCKETS ?= 9
+
+bench-gc-multi: build
+	@rm -f bench-gc-multi-results.jsonl
+	@for c in $(BENCH_CONCURRENCY_LEVELS); do \
+		echo "bench-gc-multi shards=$(BENCH_GC_SHARDS) concurrency=$$c entries=$(BENCH_GC_ENTRIES)" >&2; \
+		STRATA_META_BACKEND=tikv STRATA_DATA_BACKEND=rados \
+		STRATA_TIKV_PD_ENDPOINTS=$${STRATA_TIKV_PD_ENDPOINTS:-127.0.0.1:2379} \
+		STRATA_RADOS_CONFIG_FILE=$${STRATA_RADOS_CONFIG_FILE:-/etc/ceph/ceph.conf} \
+		STRATA_RADOS_POOL=$${STRATA_RADOS_POOL:-strata.rgw.buckets.data} \
+		./bin/strata-admin bench-gc --entries=$(BENCH_GC_ENTRIES) --concurrency=$$c \
+		  --shards=$(BENCH_GC_SHARDS) \
+		  | tee -a bench-gc-multi-results.jsonl; \
+	done
+
+bench-lifecycle-multi: build
+	@rm -f bench-lifecycle-multi-results.jsonl
+	@for c in $(BENCH_CONCURRENCY_LEVELS); do \
+		echo "bench-lifecycle-multi replicas=$(BENCH_LC_REPLICAS) concurrency=$$c objects=$(BENCH_LC_OBJECTS)" >&2; \
+		STRATA_META_BACKEND=tikv STRATA_DATA_BACKEND=rados \
+		STRATA_TIKV_PD_ENDPOINTS=$${STRATA_TIKV_PD_ENDPOINTS:-127.0.0.1:2379} \
+		STRATA_RADOS_CONFIG_FILE=$${STRATA_RADOS_CONFIG_FILE:-/etc/ceph/ceph.conf} \
+		STRATA_RADOS_POOL=$${STRATA_RADOS_POOL:-strata.rgw.buckets.data} \
+		./bin/strata-admin bench-lifecycle --objects=$(BENCH_LC_OBJECTS) --concurrency=$$c \
+		  --replicas=$(BENCH_LC_REPLICAS) --buckets=$(BENCH_LC_BUCKETS) \
+		  | tee -a bench-lifecycle-multi-results.jsonl; \
+	done
+
 clean:
 	rm -rf bin
 	rm -f bench-gc-results.jsonl bench-lifecycle-results.jsonl
+	rm -f bench-gc-multi-results.jsonl bench-lifecycle-multi-results.jsonl

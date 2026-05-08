@@ -57,10 +57,15 @@ func buildBenchDataBackend(cfg *config.Config, logger *slog.Logger) (data.Backen
 // benchResult is the JSON-line shape both bench subcommands print on stdout.
 // Field names match the strata_*_bench_throughput Prometheus gauge labels so
 // downstream dashboards can correlate the JSONL artifacts with scraped data.
+//
+// `shards` (US-006 Phase 2) defaults to 1 — single-leader Phase 1 shape — and
+// is set to N>1 by the multi-leader bench mode where N parallel workers drain
+// disjoint shard slices in one process.
 type benchResult struct {
 	Bench         string  `json:"bench"`
 	Entries       int     `json:"entries"`
 	Concurrency   int     `json:"concurrency"`
+	Shards        int     `json:"shards,omitempty"`
 	ElapsedMs     int64   `json:"elapsed_ms"`
 	ThroughputPS  float64 `json:"throughput_per_sec"`
 	MetaBackend   string  `json:"meta_backend"`

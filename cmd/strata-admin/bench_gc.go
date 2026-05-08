@@ -5,6 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,6 +27,7 @@ func (a *app) cmdBenchGC(ctx context.Context, jsonOut bool, args []string) error
 	fs.SetOutput(a.err)
 	entries := fs.Int("entries", 10000, "number of synthetic GC entries to enqueue + drain")
 	concurrency := fs.Int("concurrency", 1, "gc.Worker concurrency level (1..256)")
+	shards := fs.Int("shards", 1, "STRATA_GC_SHARDS — Phase 2 multi-leader simulation; spawns N parallel workers each draining its own logical shard slice (1..1024)")
 	region := fs.String("region", "", "GC region label; defaults to a unique bench-<uuid> label so seeded rows don't collide with real workers")
 	pool := fs.String("pool", "bench", "ChunkRef.Pool stamped on every seeded entry")
 	cluster := fs.String("cluster", "default", "ChunkRef.Cluster stamped on every seeded entry")
@@ -36,6 +39,9 @@ func (a *app) cmdBenchGC(ctx context.Context, jsonOut bool, args []string) error
 	}
 	if *concurrency < 1 || *concurrency > 256 {
 		return fmt.Errorf("--concurrency must be in [1, 256]")
+	}
+	if *shards < 1 || *shards > 1024 {
+		return fmt.Errorf("--shards must be in [1, 1024]")
 	}
 	if *region == "" {
 		*region = "bench-" + uuid.NewString()
@@ -65,18 +71,22 @@ func (a *app) cmdBenchGC(ctx context.Context, jsonOut bool, args []string) error
 	}
 	defer cleanupBenchGC(ctx, store, *region, logger)
 
-	w := &gc.Worker{
-		Meta:        store,
-		Data:        backend,
-		Region:      *region,
-		Grace:       0,
-		Batch:       *entries,
-		Concurrency: *concurrency,
-		Logger:      logger,
-	}
-
 	started := time.Now()
-	processed := w.RunOnce(ctx)
+	var processed int
+	if *shards == 1 {
+		w := &gc.Worker{
+			Meta:        store,
+			Data:        backend,
+			Region:      *region,
+			Grace:       0,
+			Batch:       *entries,
+			Concurrency: *concurrency,
+			Logger:      logger,
+		}
+		processed = w.RunOnce(ctx)
+	} else {
+		processed = runShardedDrain(ctx, store, backend, *region, *entries, *concurrency, *shards, logger)
+	}
 	elapsed := time.Since(started)
 	if processed != *entries {
 		logger.WarnContext(ctx, "bench-gc: processed != seeded",
@@ -84,6 +94,7 @@ func (a *app) cmdBenchGC(ctx context.Context, jsonOut bool, args []string) error
 	}
 
 	res := newBenchResult("gc", *entries, *concurrency, elapsed, cfg, started)
+	res.Shards = *shards
 	if err := writeJSON(a.out, res); err != nil {
 		return fmt.Errorf("write json: %w", err)
 	}
@@ -107,6 +118,35 @@ func seedGCChunks(n int, cluster, pool string) []data.ChunkRef {
 		})
 	}
 	return chunks
+}
+
+// runShardedDrain spawns one gc.Worker per logical shard (Phase 2 multi-
+// leader simulation) sharing the same meta + data backend. Each worker drains
+// only entries with `entry.ShardID % shardCount == shardID`. Returns the sum
+// of per-shard `RunOnce` returns, mirroring the production FanOut shape minus
+// the leader-election lottery (the bench is single-process, so contention on
+// `gc-leader-<i>` is moot — every shard goroutine is its own implicit leader).
+func runShardedDrain(ctx context.Context, store meta.Store, backend data.Backend, region string, entries, concurrency, shards int, logger *slog.Logger) int {
+	var processed atomic.Int64
+	var wg sync.WaitGroup
+	for shardID := range shards {
+		wg.Go(func() {
+			w := &gc.Worker{
+				Meta:        store,
+				Data:        backend,
+				Region:      region,
+				Grace:       0,
+				Batch:       entries,
+				Concurrency: concurrency,
+				ShardID:     shardID,
+				ShardCount:  shards,
+				Logger:      logger.With("shard_id", shardID),
+			}
+			processed.Add(int64(w.RunOnce(ctx)))
+		})
+	}
+	wg.Wait()
+	return int(processed.Load())
 }
 
 // cleanupBenchGC drains any leftover GC entries in the bench region. Worst

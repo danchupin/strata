@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,6 +14,7 @@ import (
 	"github.com/danchupin/strata/internal/config"
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/lifecycle"
+	metamem "github.com/danchupin/strata/internal/meta/memory"
 	"github.com/danchupin/strata/internal/meta"
 )
 
@@ -26,7 +28,9 @@ func (a *app) cmdBenchLifecycle(ctx context.Context, jsonOut bool, args []string
 	fs.SetOutput(a.err)
 	objects := fs.Int("objects", 10000, "number of synthetic objects to seed + expire in one tick")
 	concurrency := fs.Int("concurrency", 1, "lifecycle.Worker concurrency level (1..256)")
-	bucket := fs.String("bucket", "", "bench bucket name; defaults to lcbench-<uuid> (auto-deleted at exit)")
+	replicas := fs.Int("replicas", 1, "Phase 2 multi-replica simulation; spawns N parallel workers each pinned to ReplicaInfo=(N, i) racing for per-bucket leases (1..16)")
+	buckets := fs.Int("buckets", 0, "number of bench buckets to seed; 0 means one bucket (legacy single-replica shape). Recommended >= replicas*3 so the distribution gate has work to spread")
+	bucket := fs.String("bucket", "", "bench bucket name; defaults to lcbench-<uuid> (auto-deleted at exit). Only honoured when --buckets<=1")
 	region := fs.String("region", "default", "lifecycle worker region label")
 	owner := fs.String("owner", "bench", "bucket owner label")
 	if err := fs.Parse(args); err != nil {
@@ -37,6 +41,12 @@ func (a *app) cmdBenchLifecycle(ctx context.Context, jsonOut bool, args []string
 	}
 	if *concurrency < 1 || *concurrency > 256 {
 		return fmt.Errorf("--concurrency must be in [1, 256]")
+	}
+	if *replicas < 1 || *replicas > 16 {
+		return fmt.Errorf("--replicas must be in [1, 16]")
+	}
+	if *buckets < 0 {
+		return fmt.Errorf("--buckets must be >= 0")
 	}
 	if *bucket == "" {
 		*bucket = "lcbench-" + strings.ReplaceAll(uuid.NewString()[:12], "-", "")
@@ -60,44 +70,109 @@ func (a *app) cmdBenchLifecycle(ctx context.Context, jsonOut bool, args []string
 	}
 	defer backend.Close()
 
-	b, err := store.CreateBucket(ctx, *bucket, *owner, "STANDARD")
-	if err != nil {
-		return fmt.Errorf("create bench bucket: %w", err)
+	bucketCount := *buckets
+	if bucketCount <= 0 {
+		bucketCount = 1
 	}
-	defer cleanupBenchLifecycle(ctx, store, b, *region, logger)
+	bs := make([]*meta.Bucket, 0, bucketCount)
+	for i := range bucketCount {
+		name := *bucket
+		if bucketCount > 1 || name == "" {
+			name = fmt.Sprintf("lcbench-%s-%d",
+				strings.ReplaceAll(uuid.NewString()[:8], "-", ""), i)
+		}
+		b, err := store.CreateBucket(ctx, name, *owner, "STANDARD")
+		if err != nil {
+			return fmt.Errorf("create bench bucket %d: %w", i, err)
+		}
+		bs = append(bs, b)
+	}
+	defer func() {
+		for _, b := range bs {
+			cleanupBenchLifecycle(ctx, store, b, *region, logger)
+		}
+	}()
 
-	if err := seedLifecycleObjects(ctx, store, b, *objects); err != nil {
-		return fmt.Errorf("seed objects: %w", err)
-	}
+	perBucket := max(*objects/bucketCount, 1)
+	totalSeeded := 0
 	rule := []byte(`<LifecycleConfiguration><Rule><ID>bench-expire</ID><Status>Enabled</Status>
 		<Filter><Prefix></Prefix></Filter>
 		<Expiration><Days>1</Days></Expiration>
 	</Rule></LifecycleConfiguration>`)
-	if err := store.SetBucketLifecycle(ctx, b.ID, rule); err != nil {
-		return fmt.Errorf("set lifecycle: %w", err)
-	}
-
-	w := &lifecycle.Worker{
-		Meta:        store,
-		Data:        backend,
-		Region:      *region,
-		AgeUnit:     time.Hour,
-		Concurrency: *concurrency,
-		Logger:      logger,
+	for _, b := range bs {
+		if err := seedLifecycleObjects(ctx, store, b, perBucket); err != nil {
+			return fmt.Errorf("seed objects: %w", err)
+		}
+		if err := store.SetBucketLifecycle(ctx, b.ID, rule); err != nil {
+			return fmt.Errorf("set lifecycle: %w", err)
+		}
+		totalSeeded += perBucket
 	}
 
 	started := time.Now()
-	if err := w.RunOnce(ctx); err != nil {
-		return fmt.Errorf("lifecycle run: %w", err)
+	if *replicas == 1 {
+		w := &lifecycle.Worker{
+			Meta:        store,
+			Data:        backend,
+			Region:      *region,
+			AgeUnit:     time.Hour,
+			Concurrency: *concurrency,
+			Logger:      logger,
+		}
+		if err := w.RunOnce(ctx); err != nil {
+			return fmt.Errorf("lifecycle run: %w", err)
+		}
+	} else {
+		if err := runMultiReplicaLifecycle(ctx, store, backend, *region, *concurrency, *replicas, logger); err != nil {
+			return fmt.Errorf("lifecycle multi-replica run: %w", err)
+		}
 	}
 	elapsed := time.Since(started)
 
-	res := newBenchResult("lifecycle", *objects, *concurrency, elapsed, cfg, started)
+	res := newBenchResult("lifecycle", totalSeeded, *concurrency, elapsed, cfg, started)
+	res.Shards = *replicas
 	if err := writeJSON(a.out, res); err != nil {
 		return fmt.Errorf("write json: %w", err)
 	}
 	if err := pushBenchGauge(ctx, logger, "strata_lifecycle_bench_throughput", "strata_bench_lifecycle", res); err != nil {
 		return err
+	}
+	return nil
+}
+
+// runMultiReplicaLifecycle simulates the Phase 2 multi-replica deploy in one
+// process: spawns N parallel lifecycle.Worker goroutines, each pinned to
+// ReplicaInfo=(N, i) racing for `lifecycle-leader-<bucketID>` leases on a
+// shared in-process locker. Returns once all replicas have completed one
+// pass over their bucket subset. Mirrors the production STRATA_GC_SHARDS=N
+// shape minus the cross-host lease lottery (in-process Acquire is FIFO).
+func runMultiReplicaLifecycle(ctx context.Context, store meta.Store, backend data.Backend, region string, concurrency, replicas int, logger *slog.Logger) error {
+	locker := metamem.NewLocker()
+	var wg sync.WaitGroup
+	errCh := make(chan error, replicas)
+	for i := range replicas {
+		wg.Go(func() {
+			w := &lifecycle.Worker{
+				Meta:        store,
+				Data:        backend,
+				Region:      region,
+				AgeUnit:     time.Hour,
+				Concurrency: concurrency,
+				Logger:      logger.With("replica_id", i),
+				Locker:      locker,
+				ReplicaInfo: func() (int, int) { return replicas, i },
+			}
+			if err := w.RunOnce(ctx); err != nil {
+				errCh <- err
+			}
+		})
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }

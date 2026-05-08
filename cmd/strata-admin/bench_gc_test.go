@@ -59,3 +59,40 @@ func TestApp_BenchGC_RejectsBadConcurrency(t *testing.T) {
 		t.Fatalf("expected error for concurrency=0")
 	}
 }
+
+// TestApp_BenchGC_MultiShard pins the US-006 multi-leader shape: --shards=N
+// spawns N workers in parallel against a shared in-memory backend, drains
+// the full seeded set, and stamps the shard count on the JSON output for
+// downstream artifact correlation.
+func TestApp_BenchGC_MultiShard(t *testing.T) {
+	t.Setenv("STRATA_META_BACKEND", "memory")
+	t.Setenv("STRATA_DATA_BACKEND", "memory")
+
+	var stdout, stderr bytes.Buffer
+	a := newApp(&stdout, &stderr, []string{"bench-gc", "--entries=200", "--concurrency=4", "--shards=3"})
+	if err := a.run(context.Background()); err != nil {
+		t.Fatalf("bench-gc: %v stderr=%s", err, stderr.String())
+	}
+	var res benchResult
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout.String())), &res); err != nil {
+		t.Fatalf("decode: %v (raw=%q)", err, stdout.String())
+	}
+	if res.Shards != 3 {
+		t.Errorf("shards=%d want 3", res.Shards)
+	}
+	if res.Entries != 200 {
+		t.Errorf("entries=%d want 200", res.Entries)
+	}
+}
+
+// TestApp_BenchGC_RejectsBadShards: same boundary contract as concurrency.
+func TestApp_BenchGC_RejectsBadShards(t *testing.T) {
+	t.Setenv("STRATA_META_BACKEND", "memory")
+	t.Setenv("STRATA_DATA_BACKEND", "memory")
+
+	var stdout, stderr bytes.Buffer
+	a := newApp(&stdout, &stderr, []string{"bench-gc", "--entries=10", "--shards=0"})
+	if err := a.run(context.Background()); err == nil {
+		t.Fatalf("expected error for shards=0")
+	}
+}
