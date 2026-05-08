@@ -14,6 +14,7 @@ Cycle: ralph/docs-site-hugo
 - **Inline-code escape gotcha**: backticked text containing `{{< ... >}}` is still parsed by Hugo. Escape with the comment form `{{</* ... */>}}` to render the literal token (e.g. when documenting the shortcode itself in `developers/_index.md`).
 - **Theme-agnostic styling**: the hugo-book theme exposes CSS custom properties `--body-background`, `--body-font-color`, `--color-link`, `--gray-100/200/500` (see `themes/hugo-book/assets/plugins/_themes.scss`). Custom landing/marketing markup should reference those vars so it adapts to every theme variant (light, dark, catppuccin, etc.) without duplicating palettes.
 - **Hero/CTA pattern for content pages**: `content/_index.md` uses `unsafe = true` markdown + inline `<style>` + raw `<div>` blocks for the hero + feature grid. Use `{{< relref "/section/" >}}` (NOT `{{< ref >}}`) inside `href="..."` so the rendered URL is properly prefixed by the site `baseURL` subpath (`/strata/...`). `relref` renders a relative link; `ref` renders absolute — the latter breaks under GitHub Pages subpath hosting.
+- **Apply-test k8s manifests with `kubectl apply --dry-run=client -f deploy/k8s/`** before committing. Catches typos / wrong API versions in seconds without a real cluster. ingress-nginx annotations are not validated (free-text), so cross-check those against the upstream docs directly.
 
 ## Sat May  9 12:00:00 MSK 2026 - US-001
 - Implemented Hugo scaffolding under `docs/site/`:
@@ -132,4 +133,36 @@ Cycle: ralph/docs-site-hugo
   - **Service map for the bundled compose file** is the primary content of `docker-compose.md`; sourcing from the compose YAML directly keeps it accurate. Future PRs that touch `deploy/docker/docker-compose.yml` should re-skim the service / profile / volume tables — they drift fastest.
   - **Multi-replica AC asked for "3 replicas" specifically**, but the existing `lab-tikv` shape ships with 2; the third lives behind the `lab-tikv-3` profile. Documented both the 2-replica default and the 3-replica fan-out story under the STRATA_GC_SHARDS heading rather than rewriting the existing 2-replica content. Future Phase-2 GC fan-out updates probably belong in `architecture/sharding.md` (lands US-007) — keep the deploy page focused on bring-up + sizing.
   - **`STRATA_GC_SHARDS` semantics** (range [1,1024], default 1, fnv32a-bucketed for lifecycle leases) are documented in CLAUDE.md's "Background workers" section. The deploy guide quotes the operator-facing knob; the architecture deep-dive (US-007) will own the implementation rationale.
+---
+
+## Fri May  8 15:59:00 MSK 2026 - US-006
+- Authored `docs/site/content/deploy/kubernetes.md` — full operator guide: architecture diagram, prerequisites, manifest map, configmap/secret knob tables, health probes, anti-affinity, securityContext, Ingress + the SigV4 Host gotcha, storage, JWT secret distribution (incl. emptyDir trap), scaling, Helm follow-up note, apply test, production checklist, cross-references.
+- Committed apply-tested example manifests under `deploy/k8s/`:
+  - `namespace.yaml` — `strata` namespace.
+  - `configmap.yaml` — non-secret env (TiKV PD endpoints, worker list, GC shards, OTel, vhost pattern).
+  - `secret.yaml` — root S3 creds, JWT secret (with placeholder), `ceph.conf` + RADOS keyring; placeholders documented as require-replace.
+  - `deployment.yaml` — 3 replicas, podAntiAffinity per node, `/readyz` (readiness) + `/healthz` (liveness), `runAsNonRoot` + `readOnlyRootFilesystem` + drop-all caps, ceph.conf via Secret-projected items, JWT-shared `emptyDir` (medium=Memory) — caveat documented in the doc.
+  - `service.yaml` — ClusterIP `strata` (Ingress target) + optional LoadBalancer `strata-lb` (NLB-annotated for AWS).
+  - `ingress.yaml` — TLS-terminated; `nginx.ingress.kubernetes.io/proxy-request-buffering: off`, `proxy-buffering: off`, `proxy-body-size: 0`, `upstream-vhost: $host` so SigV4 Host is preserved on the upstream connection. Two host rules: bare apex + wildcard.
+  - `deploy/k8s/README.md` — apply order + prereq pointers + Helm follow-up note + image-replacement guidance.
+- Apply-tested via `kubectl apply --dry-run=client -f deploy/k8s/` — all 7 objects validate (namespace, configmap, secret, deployment, 2 services, ingress).
+- Updated `docs/site/content/deploy/_index.md` so the Kubernetes row links into the new page (replacing the "lands in US-006" placeholder).
+- Quality checks: `cd docs/site && hugo --minify` clean (42 pages, 0 warnings, 87ms); `go vet ./...` clean; `go test ./...` clean (full unit suite, no integration).
+- Files changed:
+  - `deploy/k8s/namespace.yaml` (new)
+  - `deploy/k8s/configmap.yaml` (new)
+  - `deploy/k8s/secret.yaml` (new)
+  - `deploy/k8s/deployment.yaml` (new)
+  - `deploy/k8s/service.yaml` (new)
+  - `deploy/k8s/ingress.yaml` (new)
+  - `deploy/k8s/README.md` (new)
+  - `docs/site/content/deploy/kubernetes.md` (new)
+  - `docs/site/content/deploy/_index.md` (Kubernetes row → live link)
+  - `scripts/ralph/prd.json` (US-006 → passes: true)
+- **Learnings for future iterations:**
+  - **`kubectl apply --dry-run=client -f <dir>` is the cheapest sanity gate**. Validates every manifest's apiVersion + schema in <100ms without a cluster. Run it before commit on any PR that touches `deploy/k8s/`. ingress-nginx annotations remain free-text — cross-check those against upstream docs.
+  - **`emptyDir` for `/etc/strata/jwt-shared/` is a trap if `STRATA_CONSOLE_JWT_SECRET` is unset** — `emptyDir` is per-pod, so each replica generates its own JWT secret and console sessions break across LB-flips. The example sets the env in the Secret precisely to avoid this; the doc spells it out so operators who delete that field know to swap in a `ReadWriteMany` PVC.
+  - **`upstream-vhost: "$host"`** is the ingress-nginx knob that preserves the original Host header on the upstream connection. Without it nginx writes the upstream IP/name as Host and SigV4 verification fails on every signed request. Same gotcha at the LB tier (see `deploy/nginx/strata-lab.conf` — proxy_set_header Host $host).
+  - **PodSecurityStandards `restricted` compliance is achievable today**: Strata's pod runs as non-root (uid 65532), readOnlyRootFilesystem, no privilege escalation, drops all caps. The two writable paths (`/etc/ceph` Secret-projected, `/etc/strata/jwt-shared` emptyDir) are explicit volume mounts. Every future container-tier change should keep that compliance.
+  - **Image placeholder**: `ghcr.io/danchupin/strata:latest` is just a placeholder in `deployment.yaml` — there is no published image yet. Document the local `make docker-build` + `kind load docker-image strata:ceph` flow so kind / minikube smoke-tests work today. A published image needs a separate ROADMAP item (container-publishing GH Action).
 ---

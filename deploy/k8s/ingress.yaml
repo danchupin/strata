@@ -1,0 +1,56 @@
+# Example Ingress. The critical bits:
+#   - Preserve the original `Host` header end-to-end. SigV4 signs Host,
+#     so any LB / proxy that rewrites it breaks every signed request.
+#   - Disable request buffering. The default 1 MiB body cap and full
+#     buffering breaks SigV4 chunked-streaming uploads + large multipart
+#     parts. The annotations below set ingress-nginx to streaming mode.
+#   - vhost routing depends on the original Host. Configure
+#     STRATA_VHOST_PATTERN in the ConfigMap to match the FQDN below.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: strata
+  namespace: strata
+  labels:
+    app.kubernetes.io/name: strata
+  annotations:
+    # ingress-nginx — streaming + Host preservation.
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/upstream-vhost: "$host"
+    nginx.ingress.kubernetes.io/preserve-trailing-slash: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - s3.example.com
+        - "*.s3.example.com"
+      secretName: strata-tls
+  rules:
+    - host: s3.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: strata
+                port:
+                  name: http
+    # Wildcard host so virtual-hosted-style URLs
+    # (e.g. https://my-bucket.s3.example.com/key) reach Strata with the
+    # subdomain intact. STRATA_VHOST_PATTERN must include `*.s3.example.com`.
+    - host: "*.s3.example.com"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: strata
+                port:
+                  name: http

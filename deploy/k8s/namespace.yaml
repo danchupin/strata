@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: strata
+  labels:
+    app.kubernetes.io/name: strata
+    app.kubernetes.io/part-of: strata

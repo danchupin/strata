@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: strata-config
+  namespace: strata
+  labels:
+    app.kubernetes.io/name: strata
+data:
+  # Non-secret env. Secrets (root credentials, RADOS keyring,
+  # JWT secret) live in the Secret object — never here.
+  STRATA_LISTEN: ":9000"
+  STRATA_REGION: "strata-prod"
+  STRATA_META_BACKEND: "tikv"
+  STRATA_DATA_BACKEND: "rados"
+  STRATA_TIKV_PD_ENDPOINTS: "pd.tikv.svc.cluster.local:2379"
+  STRATA_WORKERS: "gc,lifecycle,notify,replicator,access-log,inventory,audit-export"
+  STRATA_GC_SHARDS: "3"
+  STRATA_GC_INTERVAL: "30s"
+  STRATA_GC_GRACE: "5m"
+  STRATA_LIFECYCLE_INTERVAL: "60s"
+  STRATA_LIFECYCLE_UNIT: "day"
+  STRATA_AUTH_MODE: "required"
+  STRATA_LOG_LEVEL: "INFO"
+  STRATA_VHOST_PATTERN: "*.s3.example.com"
+  STRATA_PROMETHEUS_URL: "http://prometheus.monitoring.svc.cluster.local:9090"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.monitoring.svc.cluster.local:4318"
+  STRATA_OTEL_SAMPLE_RATIO: "0.01"
+  STRATA_OTEL_RINGBUF: "on"
+  STRATA_OTEL_RINGBUF_BYTES: "4194304"
