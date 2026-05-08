@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Migrations on Strata Documentation</title><link>https://danchupin.github.io/strata/architecture/migrations/</link><description>Recent content in Migrations on Strata Documentation</description><generator>Hugo</generator><language>en</language><atom:link href="https://danchupin.github.io/strata/architecture/migrations/index.xml" rel="self" type="application/rss+xml"/><item><title>Binary consolidation</title><link>https://danchupin.github.io/strata/architecture/migrations/binary-consolidation/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/migrations/binary-consolidation/</guid><description>&lt;h1 id="migrating-to-the-unified-strata-binary"&gt;Migrating to the unified &lt;code&gt;strata&lt;/code&gt; binary&lt;a class="anchor" href="#migrating-to-the-unified-strata-binary"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata used to ship eleven &lt;code&gt;cmd/*&lt;/code&gt; binaries — one gateway plus a long tail of
+single-purpose worker daemons. The codebase now ships exactly two:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;strata&lt;/code&gt; — the gateway plus every long-running background worker, selected
+at startup via &lt;code&gt;STRATA_WORKERS=&lt;/code&gt; (or &lt;code&gt;--workers=&lt;/code&gt;).&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;strata-admin&lt;/code&gt; — the operator CLI for one-shot maintenance tasks.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;This guide is the operator-facing checklist for upgrading an existing deploy.
+There is no schema migration, no data migration, and no env-var rename — the
+move is purely a packaging change.&lt;/p&gt;</description></item><item><title>GC + lifecycle Phase 2</title><link>https://danchupin.github.io/strata/architecture/migrations/gc-lifecycle-phase-2/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/migrations/gc-lifecycle-phase-2/</guid><description>&lt;h1 id="migrating-to-gc--lifecycle-phase-2-sharded-leader-election"&gt;Migrating to gc / lifecycle Phase 2 (sharded leader-election)&lt;a class="anchor" href="#migrating-to-gc--lifecycle-phase-2-sharded-leader-election"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Phase 1 (cycle &lt;code&gt;ralph/gc-lifecycle-scale&lt;/code&gt;, commit &lt;code&gt;6561845&lt;/code&gt;) lifted the
+per-leader concurrency cap via bounded &lt;code&gt;errgroup&lt;/code&gt; fan-out
+(&lt;code&gt;STRATA_GC_CONCURRENCY&lt;/code&gt; / &lt;code&gt;STRATA_LIFECYCLE_CONCURRENCY&lt;/code&gt;). The leader was
+still single-replica.&lt;/p&gt;
+&lt;p&gt;Phase 2 (cycle &lt;code&gt;ralph/gc-lifecycle-scale-phase-2&lt;/code&gt;) shards the leader-election
+space so multiple replicas process disjoint slices of the queue in parallel:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;gc gets &lt;code&gt;gc-leader-0..N-1&lt;/code&gt; lease keys driven by &lt;code&gt;STRATA_GC_SHARDS&lt;/code&gt; (default
+&lt;code&gt;1&lt;/code&gt;, range &lt;code&gt;[1, 1024]&lt;/code&gt;). Each replica races for one or more of the
+per-shard leases and drains only the entries it owns via
+&lt;code&gt;Meta.ListGCEntriesShard&lt;/code&gt;. The legacy global &lt;code&gt;gc-leader&lt;/code&gt; lease is retired.&lt;/li&gt;
+&lt;li&gt;lifecycle gets per-bucket leases (&lt;code&gt;lifecycle-leader-&amp;lt;bucketID&amp;gt;&lt;/code&gt;) plus a
+distribution gate (&lt;code&gt;fnv32a(bucketID) % STRATA_GC_SHARDS == myReplicaID&lt;/code&gt;,
+where &lt;code&gt;myReplicaID = min(GCFanOut.HeldShards())&lt;/code&gt;). The legacy global
+&lt;code&gt;lifecycle-leader&lt;/code&gt; lease is retired.&lt;/li&gt;
+&lt;li&gt;Backwards-compat: &lt;code&gt;STRATA_GC_SHARDS=1&lt;/code&gt; (default) reproduces Phase 1
+behaviour byte-for-byte. Existing &lt;code&gt;make smoke&lt;/code&gt; / &lt;code&gt;make smoke-tikv&lt;/code&gt; /
+&lt;code&gt;make smoke-lab-tikv&lt;/code&gt; continue to pass without configuration changes.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;This guide is the operator-facing checklist for the schema cutover and the
+multi-replica rollout.&lt;/p&gt;</description></item></channel></rss>

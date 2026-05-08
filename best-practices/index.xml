@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Best Practices on Strata Documentation</title><link>https://danchupin.github.io/strata/best-practices/</link><description>Recent content in Best Practices on Strata Documentation</description><generator>Hugo</generator><language>en</language><atom:link href="https://danchupin.github.io/strata/best-practices/index.xml" rel="self" type="application/rss+xml"/><item><title>Web UI (Strata Console)</title><link>https://danchupin.github.io/strata/best-practices/web-ui/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/web-ui/</guid><description>&lt;h1 id="strata-console-web-ui--operator-guide"&gt;Strata Console (Web UI) — Operator Guide&lt;a class="anchor" href="#strata-console-web-ui--operator-guide"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;The Strata Console is an embedded read-only web UI for cluster operators.
+It ships in the same binary as the gateway (&lt;code&gt;go:embed&lt;/code&gt;) and is served at
+&lt;code&gt;/console/&lt;/code&gt; on the gateway HTTP port. No separate process, no separate
+deploy.&lt;/p&gt;
+&lt;p&gt;This document is the Phase 1 (foundation) operator guide. Phase 2 (admin
+write actions) and Phase 3 (debug tooling — heatmaps, slow queries, OTel
+trace browser) ship in their own cycles.&lt;/p&gt;</description></item><item><title>Sizing</title><link>https://danchupin.github.io/strata/best-practices/sizing/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/sizing/</guid><description>&lt;h1 id="sizing"&gt;Sizing&lt;a class="anchor" href="#sizing"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata replicas are stateless gateways — they own no on-disk state, so
+sizing is a function of three signals: peak request rate (RPS), the
+working-set bytes the gateway holds in flight (RAM), and the cores the
+SigV4 + crypto path consumes (CPU). The metadata + data tiers
+(Cassandra / TiKV / RADOS) follow their own upstream sizing guides; this
+page covers the gateway tier and points operators at the upstream
+references.&lt;/p&gt;</description></item><item><title>Monitoring</title><link>https://danchupin.github.io/strata/best-practices/monitoring/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/monitoring/</guid><description>&lt;h1 id="monitoring"&gt;Monitoring&lt;a class="anchor" href="#monitoring"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata exposes three observability surfaces and one operator console
+embedded in the gateway binary:&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;Prometheus metrics&lt;/strong&gt; at &lt;code&gt;/metrics&lt;/code&gt; (every replica).&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Structured slog logs&lt;/strong&gt; to stdout, JSON-shaped, correlated by
+&lt;code&gt;request_id&lt;/code&gt;.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;OpenTelemetry traces&lt;/strong&gt; exported via OTLP/HTTP, sampled tail-first
+with an in-process ring buffer for failed-trace replay.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Audit log&lt;/strong&gt; in the metadata backend (&lt;code&gt;audit_log&lt;/code&gt; table or TiKV
+prefix), one row per state-changing request.&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;This page covers the wire-up; the
+&lt;a href="https://danchupin.github.io/strata/architecture/observability/"&gt;Observability deep dive&lt;/a&gt;
+covers the implementation rationale.&lt;/p&gt;</description></item><item><title>GC + lifecycle tuning</title><link>https://danchupin.github.io/strata/best-practices/gc-lifecycle-tuning/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/gc-lifecycle-tuning/</guid><description>&lt;h1 id="gc--lifecycle-tuning"&gt;GC + lifecycle tuning&lt;a class="anchor" href="#gc--lifecycle-tuning"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;The gc and lifecycle workers run inside every gateway replica. The
+operator-facing knobs split into two layers:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Phase 1 — per-replica fan-out:&lt;/strong&gt; &lt;code&gt;STRATA_GC_CONCURRENCY&lt;/code&gt; /
+&lt;code&gt;STRATA_LIFECYCLE_CONCURRENCY&lt;/code&gt; cap the goroutine count inside one
+replica&amp;rsquo;s worker.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Phase 2 — multi-replica sharding:&lt;/strong&gt; &lt;code&gt;STRATA_GC_SHARDS&lt;/code&gt; shards the
+leader-election space so N replicas process disjoint slices of the
+queue in parallel.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;Both layers compose: a 3-replica deploy with &lt;code&gt;STRATA_GC_SHARDS=3&lt;/code&gt; and
+per-replica &lt;code&gt;STRATA_GC_CONCURRENCY=64&lt;/code&gt; runs three independent fan-outs
+against disjoint shards.&lt;/p&gt;</description></item><item><title>Backup + restore</title><link>https://danchupin.github.io/strata/best-practices/backup-restore/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/backup-restore/</guid><description>&lt;h1 id="backup--restore"&gt;Backup + restore&lt;a class="anchor" href="#backup--restore"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata splits backup responsibility along the same tiers the gateway
+splits state into:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Metadata tier (Cassandra / TiKV):&lt;/strong&gt; the source of truth for
+bucket / object / IAM rows. Backed up via the upstream tooling for
+each backend.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Data tier (RADOS / S3-over-S3):&lt;/strong&gt; chunk bytes. Backed up via Ceph
+pool snapshots or the upstream S3 service&amp;rsquo;s native versioning /
+replication.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Cross-region replication (replicator worker):&lt;/strong&gt; ships object PUT /
+DELETE events to a peer Strata cluster in near-real time.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Inventory worker:&lt;/strong&gt; writes manifest.json + CSV.gz pairs that
+document every object in a bucket — useful as an audit ledger for
+external backup tooling.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;This page is a backup-strategy overview. Implementation details live in
+&lt;a href="https://danchupin.github.io/strata/architecture/workers/"&gt;Architecture — Workers&lt;/a&gt; (the
+inventory + replicator workers) and the upstream docs for Ceph /
+Cassandra / TiKV.&lt;/p&gt;</description></item><item><title>Capacity planning</title><link>https://danchupin.github.io/strata/best-practices/capacity-planning/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/capacity-planning/</guid><description>&lt;h1 id="capacity-planning"&gt;Capacity planning&lt;a class="anchor" href="#capacity-planning"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Capacity on a Strata deploy splits across three independently-scaled
+tiers:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Gateway tier:&lt;/strong&gt; stateless replicas. Capacity = peak RPS / SigV4 +
+routing budget per replica. Scale horizontally; see
+&lt;a href="https://danchupin.github.io/strata/best-practices/sizing/"&gt;Sizing&lt;/a&gt;.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Metadata tier:&lt;/strong&gt; Cassandra / TiKV. Capacity = total object-row
+count × per-row overhead, plus the LWT / pessimistic-txn rate during
+writes.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Data tier:&lt;/strong&gt; RADOS / S3-over-S3. Capacity = total object bytes ×
+pool replication factor, plus chunk fan-out overhead.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;This page covers the math; pair with
+&lt;a href="https://danchupin.github.io/strata/best-practices/backup-restore/"&gt;Backup + restore&lt;/a&gt; for
+the backup overhead and
+&lt;a href="https://danchupin.github.io/strata/best-practices/gc-lifecycle-tuning/"&gt;GC + lifecycle tuning&lt;/a&gt;
+for the drain rate.&lt;/p&gt;</description></item></channel></rss>

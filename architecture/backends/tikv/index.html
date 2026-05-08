@@ -1,0 +1,169 @@
+<!doctype html><html lang=en dir=ltr><head><meta charset=UTF-8><meta name=viewport content="width=device-width,initial-scale=1"><meta name=description content="TiKV metadata backend — native ordered range scans, pessimistic transactions, multi-DC raft."><meta name=theme-color media="(prefers-color-scheme: light)" content="#ffffff"><meta name=theme-color media="(prefers-color-scheme: dark)" content="#2e3440"><meta name=color-scheme content="light dark"><meta property="og:url" content="https://danchupin.github.io/strata/architecture/backends/tikv/"><meta property="og:site_name" content="Strata Documentation"><meta property="og:title" content="TiKV"><meta property="og:description" content="TiKV metadata backend — native ordered range scans, pessimistic transactions, multi-DC raft."><meta property="og:locale" content="en"><meta property="og:type" content="article"><meta property="article:section" content="architecture"><meta itemprop=name content="TiKV"><meta itemprop=description content="TiKV metadata backend — native ordered range scans, pessimistic transactions, multi-DC raft."><meta itemprop=wordCount content="1959"><title>TiKV | Strata Documentation</title><link rel=icon href=/strata/favicon.png><link rel=manifest href=/strata/manifest.json><link rel=canonical href=https://danchupin.github.io/strata/architecture/backends/tikv/><link rel=stylesheet href=/strata/book.min.b267f830fdf65302ecc1702a1178d4f25aa783409b3a25098f3404dd24f37a4d.css integrity="sha256-smf4MP32UwLswXAqEXjU8lqng0CbOiUJjzQE3STzek0=" crossorigin=anonymous><script defer src=/strata/fuse.min.js></script><script defer src=/strata/en.search.min.32c9d0a3e349b3c49c9eba600e1064d806d4cd2487c7062e457f5683ec5bf875.js integrity="sha256-MsnQo+NJs8ScnrpgDhBk2AbUzSSHxwYuRX9Wg+xb+HU=" crossorigin=anonymous></script></head><body dir=ltr class="book-kind-page book-type-architecture"><input type=checkbox class="hidden toggle" id=menu-control>
+<input type=checkbox class="hidden toggle" id=toc-control><main class="container flex"><aside class=book-menu><div class=book-menu-content><nav><h2 class=book-brand><a class="flex align-center" href=/strata/><span>Strata Documentation</span></a></h2><div class="book-search hidden"><input id=book-search-input type=text placeholder=Search aria-label=Search maxlength=64 data-hotkeys=s/><div class="book-search-spinner hidden"></div><ul id=book-search-results></ul></div><script>document.querySelector(".book-search").classList.remove("hidden")</script><ul><li class=book-section-flat><a href=/strata/get-started/>Get Started</a><ul></ul></li><li class=book-section-flat><a href=/strata/deploy/>Deploy</a><ul><li><a href=/strata/deploy/single-node/>Single-node deployment</a></li><li><a href=/strata/deploy/docker-compose/>Docker Compose</a></li><li><a href=/strata/deploy/multi-replica/>Multi-replica cluster</a></li><li><a href=/strata/deploy/kubernetes/>Kubernetes</a></li></ul></li><li class=book-section-flat><a href=/strata/architecture/>Architecture</a><ul><li><a href=/strata/architecture/auth/>Auth</a></li><li><a href=/strata/architecture/router/>Router</a></li><li><a href=/strata/architecture/meta-store/>Meta store</a></li><li><a href=/strata/architecture/data-backend/>Data backend</a></li><li><a href=/strata/architecture/workers/>Workers</a></li><li><a href=/strata/architecture/storage/>Storage status</a></li><li><a href=/strata/architecture/sharding/>Sharding</a></li><li class=book-section-flat><a href=/strata/architecture/backends/>Backends</a><ul><li><a href=/strata/architecture/backends/scylla/>ScyllaDB</a></li><li><a href=/strata/architecture/backends/tikv/ class=active>TiKV</a></li><li><a href=/strata/architecture/backends/s3/>S3-over-S3 data backend</a></li></ul></li><li><a href=/strata/architecture/observability/>Observability</a></li><li class=book-section-flat><a href=/strata/architecture/benchmarks/>Benchmarks</a><ul><li><a href=/strata/architecture/benchmarks/gc-lifecycle/>GC + Lifecycle scaling</a></li><li><a href=/strata/architecture/benchmarks/meta-backend-comparison/>Meta-backend comparison</a></li><li><a href=/strata/architecture/benchmarks/data/gc-lifecycle-phase-2/README/>Readme</a></li></ul></li><li class=book-section-flat><a href=/strata/architecture/migrations/>Migrations</a><ul><li><a href=/strata/architecture/migrations/binary-consolidation/>Binary consolidation</a></li><li><a href=/strata/architecture/migrations/gc-lifecycle-phase-2/>GC + lifecycle Phase 2</a></li></ul></li></ul></li><li class=book-section-flat><a href=/strata/best-practices/>Best Practices</a><ul><li><a href=/strata/best-practices/web-ui/>Web UI (Strata Console)</a></li><li><a href=/strata/best-practices/sizing/>Sizing</a></li><li><a href=/strata/best-practices/monitoring/>Monitoring</a></li><li><a href=/strata/best-practices/gc-lifecycle-tuning/>GC + lifecycle tuning</a></li><li><a href=/strata/best-practices/backup-restore/>Backup + restore</a></li><li><a href=/strata/best-practices/capacity-planning/>Capacity planning</a></li></ul></li><li class=book-section-flat><a href=/strata/s3-compatibility/>S3 Compatibility</a><ul></ul></li><li class=book-section-flat><a href=/strata/reference/>Reference</a><ul></ul></li><li class=book-section-flat><a href=/strata/developers/>Developers</a><ul></ul></li></ul><ul><li><a href=https://github.com/danchupin/strata target=_blank rel=noopener>GitHub</a></li><li><a href=https://github.com/danchupin/strata/blob/main/ROADMAP.md target=_blank rel=noopener>ROADMAP</a></li></ul></nav><script>(function(){var e=document.querySelector("aside .book-menu-content");addEventListener("beforeunload",function(){localStorage.setItem("menu.scrollTop",e.scrollTop)}),e.scrollTop=localStorage.getItem("menu.scrollTop")})()</script></div></aside><div class=book-page><header class="book-header hidden"><div class="flex align-center justify-between"><label for=menu-control><img src=/strata/icons/menu.svg class=book-icon alt=Menu></label><h3>TiKV</h3><label for=toc-control><img src=/strata/icons/toc.svg class=book-icon alt="Table of Contents"></label></div><aside class=hidden><nav id=TableOfContents><ul><li><a href=#tikv-metadata-backend>TiKV metadata backend</a><ul><li><a href=#when-to-choose-tikv-over-cassandra>When to choose TiKV over Cassandra</a></li><li><a href=#compatibility-status>Compatibility status</a></li><li><a href=#required-environment-variables>Required environment variables</a></li><li><a href=#sample-compose--kubernetes-config>Sample compose / Kubernetes config</a><ul><li><a href=#laptop--ci--single-node-compose>Laptop / CI — single-node compose</a></li><li><a href=#production--tikv-operator-on-kubernetes>Production — TiKV operator on Kubernetes</a></li></ul></li><li><a href=#production-sizing>Production sizing</a></li><li><a href=#capability-matrix>Capability matrix</a></li><li><a href=#performance-characteristics>Performance characteristics</a></li><li><a href=#common-operational-pitfalls>Common operational pitfalls</a></li><li><a href=#operational-parity>Operational parity</a></li><li><a href=#ci>CI</a></li><li><a href=#open-work>Open work</a></li><li><a href=#switching-an-existing-deployment>Switching an existing deployment</a></li></ul></li></ul></nav></aside></header><article class="markdown book-article"><h1 id=tikv-metadata-backend>TiKV metadata backend<a class=anchor href=#tikv-metadata-backend>#</a></h1><p>TiKV is a first-class metadata backend for Strata, on equal footing with
+Cassandra (and ScyllaDB as the CQL drop-in). The full <code>meta.Store</code> contract
+in <code>internal/meta/storetest/contract.go</code> runs against a real PD+TiKV cluster
+on every PR via <code>.github/workflows/ci-tikv.yml</code>.</p><p>The fundamental shape difference vs Cassandra is the <code>objects</code> table: TiKV
+keys are a flat ordered byte space, so <code>ListObjects</code> is a single ordered
+range scan instead of Cassandra&rsquo;s 64-way fan-out + heap-merge. The gateway
+discovers this at runtime via the optional <code>meta.RangeScanStore</code> interface
+(<code>internal/meta/store.go</code>) and dispatches to the native scan path
+automatically — no operator action required.</p><h2 id=when-to-choose-tikv-over-cassandra>When to choose TiKV over Cassandra<a class=anchor href=#when-to-choose-tikv-over-cassandra>#</a></h2><p>Decision matrix. The two backends are wire-incompatible; pick at deployment
+time. Migration tooling between them is out of scope (new clusters only).</p><table><thead><tr><th>Signal</th><th>TiKV is the better fit</th><th>Cassandra/Scylla is the better fit</th></tr></thead><tbody><tr><td><code>ListObjects</code> p99 dominates the latency budget</td><td>Yes — native ordered range scan</td><td>Acceptable if 64-way fan-out fits the SLO</td></tr><tr><td>Already running TiKV / TiDB in the org</td><td>Yes — operator skill reuse</td><td>—</td></tr><tr><td>Already running Cassandra / Scylla in the org</td><td>—</td><td>Yes — operator skill reuse</td></tr><tr><td>Multi-DC active-active writes</td><td>Native via PD region placement</td><td>Native via <code>NetworkTopologyStrategy</code></td></tr><tr><td>Audit log retention sweep cost is sensitive</td><td>Slightly worse (no native TTL)</td><td>Slightly better (<code>USING TTL</code> is free)</td></tr><tr><td>Bucket index growth past tens of millions per bucket</td><td>Equal (both shard well)</td><td>Equal (both shard well)</td></tr><tr><td>LWT-on-LWT hot path (versioning flip, multipart Complete)</td><td>Pessimistic txn — ~1.5–2× faster vs Paxos</td><td>Slower on Paxos; closer with Scylla raft-LWT</td></tr><tr><td>Operational footprint (binaries, config knobs)</td><td>Heavier — PD + TiKV + Strata</td><td>Lighter — Cassandra + Strata</td></tr></tbody></table><p>Both backends pass the same contract suite, ship through the same gateway
+binary, and the Big-picture architecture diagram in <code>CLAUDE.md</code> swaps one
+for the other without touching the data plane (RADOS).</p><h2 id=compatibility-status>Compatibility status<a class=anchor href=#compatibility-status>#</a></h2><ul><li><strong>Code</strong>: zero gateway changes — <code>STRATA_META_BACKEND=tikv</code> flips
+<code>internal/serverapp.buildMetaStore</code> to <code>internal/meta/tikv.Open</code> and
+<code>buildLocker</code> to <code>tikv.NewLocker</code>. Same shape in
+<code>cmd/strata-admin/rewrap.go</code> so operator-side rewrap works against
+TiKV-backed metadata.</li><li><strong>Schema</strong>: there is no DDL. Schema lives in key prefixes — see
+<code>internal/meta/tikv/keys.md</code> for the full layout. Adding a new entity
+means defining a new prefix + encoder/decoder; no <code>ALTER</code>-equivalent
+ever.</li><li><strong>Consistency</strong>: pessimistic transactions for any RMW that needs
+read-after-write coherence (mirroring Cassandra&rsquo;s LWT-on-LWT lesson —
+see CLAUDE.md &ldquo;TiKV gotchas&rdquo;). Plain <code>Put</code> only on inserts that have no
+prior LWT history on the same key.</li><li><strong>LWT-equivalent</strong>: bucket creation, versioning toggle, multipart
+Complete, GC ack, storage-class transitions, lifecycle worker leases,
+IAM access-key index — all use TiKV pessimistic-txn <code>LockKeys</code> + <code>Get</code><ul><li>asserted <code>Set</code>. Concurrent racers get <code>ErrAlreadyExists</code> /
+<code>ErrMultipartInProgress</code> on the loser, same observable behaviour as
+the Cassandra path.</li></ul></li><li><strong>Listing</strong>: native ordered range scan over <code>s/B/&lt;bucket16>/o/...</code>
+prefixes. <code>meta.RangeScanStore</code> is implemented; gateway picks the
+native path automatically. Pagination uses <code>lastKey + 0x00</code> between
+batches. See <code>internal/meta/tikv/list.go</code>.</li><li><strong>Audit retention</strong>: TiKV has no native TTL. Each row is stamped with
+<code>ExpiresAt</code>; readers (<code>ListAudit</code>, <code>ListAuditFiltered</code>,
+<code>ReadAuditPartition</code>) lazy-skip expired rows so a delayed sweeper tick
+never surfaces stale data, and a leader-elected <code>AuditSweeper</code>
+goroutine eager-deletes them in the background. Both halves are
+required.</li></ul><h2 id=required-environment-variables>Required environment variables<a class=anchor href=#required-environment-variables>#</a></h2><table><thead><tr><th>Variable</th><th>Default</th><th>Notes</th></tr></thead><tbody><tr><td><code>STRATA_META_BACKEND</code></td><td>—</td><td>Set to <code>tikv</code> to select this backend.</td></tr><tr><td><code>STRATA_TIKV_PD_ENDPOINTS</code></td><td>—</td><td>Comma-separated PD client URLs (e.g. <code>pd-1:2379,pd-2:2379,pd-3:2379</code>). Mandatory; <code>config.Load()</code> rejects empty.</td></tr><tr><td><code>STRATA_AUDIT_RETENTION</code></td><td><code>720h</code></td><td>Shared with the Cassandra path. Drives both per-row <code>ExpiresAt</code> and the sweeper&rsquo;s keep predicate. Accepts Go duration (<code>720h</code>) or <code>&lt;N>d</code> (<code>30d</code>).</td></tr></tbody></table><p>The picker in <code>internal/config/config.go::validate</code> enforces these at
+startup — misconfig fails fast with a clear message before any backend
+dial.</p><h2 id=sample-compose--kubernetes-config>Sample compose / Kubernetes config<a class=anchor href=#sample-compose--kubernetes-config>#</a></h2><h3 id=laptop--ci--single-node-compose>Laptop / CI — single-node compose<a class=anchor href=#laptop--ci--single-node-compose>#</a></h3><p><code>deploy/docker/docker-compose.yml</code> ships PD + TiKV under <code>--profile tikv</code>
+(see <code>make up-tikv</code>). Single-PD + single-TiKV, host port <code>9998</code> for the
+gateway:</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-bash data-lang=bash><span class=line><span class=cl>make up-tikv <span class=o>&amp;&amp;</span> make wait-pd <span class=o>&amp;&amp;</span> make wait-tikv <span class=o>&amp;&amp;</span> make wait-strata-tikv
+</span></span><span class=line><span class=cl>make smoke-tikv
+</span></span><span class=line><span class=cl>make smoke-signed-tikv</span></span></code></pre></div><p>Single-node is the CI shape (<code>.github/workflows/ci-tikv.yml</code>&rsquo;s e2e job).
+It surfaces the structural gap (<code>ListObjects</code> native scan vs Cassandra
+fan-out) without paying for a 3-node ring.</p><h3 id=production--tikv-operator-on-kubernetes>Production — TiKV operator on Kubernetes<a class=anchor href=#production--tikv-operator-on-kubernetes>#</a></h3><p>Production-shape topology is operator concern; the recommended path on
+Kubernetes is the upstream <code>tidb-operator</code> chart, which manages PD + TiKV
+StatefulSets with the right region replica placement labels:</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-yaml data-lang=yaml><span class=line><span class=cl><span class=c># Example: tidb-operator TidbCluster CR. Real values per cluster.</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>apiVersion</span><span class=p>:</span><span class=w> </span><span class=l>pingcap.com/v1alpha1</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>kind</span><span class=p>:</span><span class=w> </span><span class=l>TidbCluster</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>metadata</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=l>strata-tikv</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=nt>spec</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>version</span><span class=p>:</span><span class=w> </span><span class=l>v8.5.0</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>pd</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>replicas</span><span class=p>:</span><span class=w> </span><span class=m>3</span><span class=w>        </span><span class=c># raft majority — no split-brain on partition</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>storageClassName</span><span class=p>:</span><span class=w> </span><span class=l>nvme-ssd</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>requests</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span><span class=nt>storage</span><span class=p>:</span><span class=w> </span><span class=l>10Gi</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=nt>tikv</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>replicas</span><span class=p>:</span><span class=w> </span><span class=m>3</span><span class=w>        </span><span class=c># default raft factor for region replication</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>storageClassName</span><span class=p>:</span><span class=w> </span><span class=l>nvme-ssd</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>requests</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>      </span><span class=nt>storage</span><span class=p>:</span><span class=w> </span><span class=l>500Gi</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>config</span><span class=p>:</span><span class=w> </span><span class=p>|</span><span class=sd>
+</span></span></span><span class=line><span class=cl><span class=sd>      [server]
+</span></span></span><span class=line><span class=cl><span class=sd>      grpc-concurrency = 8
+</span></span></span><span class=line><span class=cl><span class=sd>      [storage]
+</span></span></span><span class=line><span class=cl><span class=sd>      reserve-space = &#34;5GB&#34;</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span><span class=c># No tidb spec — Strata speaks raw KV via tikv/client-go, not SQL.</span></span></span></code></pre></div><p>Strata gateway pods are a separate Deployment that points at the PD
+service. Sample env on the strata pod:</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-yaml data-lang=yaml><span class=line><span class=cl><span class=nt>env</span><span class=p>:</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span>- <span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=l>STRATA_META_BACKEND</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>value</span><span class=p>:</span><span class=w> </span><span class=l>tikv</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>  </span>- <span class=nt>name</span><span class=p>:</span><span class=w> </span><span class=l>STRATA_TIKV_PD_ENDPOINTS</span><span class=w>
+</span></span></span><span class=line><span class=cl><span class=w>    </span><span class=nt>value</span><span class=p>:</span><span class=w> </span><span class=l>strata-tikv-pd.tikv.svc:2379</span></span></span></code></pre></div><h2 id=production-sizing>Production sizing<a class=anchor href=#production-sizing>#</a></h2><ul><li><strong>PD</strong>: ≥3 replicas. PD elects a leader via raft; majority quorum is
+required for region scheduling decisions. Two-node PD survives no
+failure (split-brain risk on partition). Sizing is light — PD is
+metadata-only.</li><li><strong>TiKV</strong>: ≥3 replicas (default region raft factor). TiKV stores three
+replicas per region by default; ≥3 nodes lets the cluster survive a
+single-node failure with no read/write impact. Sizing follows the
+bucket cardinality + object count; rule of thumb is ~1 TB raw per node
+before adding capacity, with NVMe-class storage for the random-read
+hot path.</li><li><strong>Strata gateway</strong>: separate fleet, stateless. Scale horizontally on
+HTTP traffic; one gateway pod can saturate a TiKV cluster well before
+a TiKV node saturates, so the gateway is the first thing to scale.</li><li><strong>Co-location</strong>: do not co-locate Strata gateway + TiKV on the same
+node. The gateway&rsquo;s CGO and goroutine pressure (RADOS bindings, SigV4
+hashing) competes with TiKV&rsquo;s raft loop; observed ~10–15 % p99
+regression on <code>PutObject</code> when shared.</li></ul><h2 id=capability-matrix>Capability matrix<a class=anchor href=#capability-matrix>#</a></h2><table><thead><tr><th>Feature</th><th>TiKV</th><th>Cassandra/Scylla</th></tr></thead><tbody><tr><td>Native ordered range scan</td><td>Yes — single RPC</td><td>No — 64-way fan-out + heap-merge</td></tr><tr><td>Native row TTL</td><td>No — sweeper goroutine + per-row <code>ExpiresAt</code></td><td>Yes — <code>USING TTL</code></td></tr><tr><td>Multi-DC active-active writes</td><td>Yes — PD region placement + replica labels</td><td>Yes — <code>NetworkTopologyStrategy</code> per-DC RF</td></tr><tr><td>Hot/cold tier (storage labels)</td><td>Yes — PD label rules + region-placement-policies</td><td>Yes — multiple keyspaces / tablespaces</td></tr><tr><td>LWT-equivalent</td><td>Yes — pessimistic txn with <code>LockKeys</code></td><td>Yes — Paxos (<code>IF EXISTS</code>/<code>IF NOT EXISTS</code>); raft-LWT on Scylla 5.4+</td></tr><tr><td>Schema migrations</td><td>Additive — new key prefix</td><td>Additive — <code>ALTER TABLE ADD COLUMN</code></td></tr><tr><td><code>Probe(ctx)</code> for <code>/readyz</code></td><td>Yes — small Get on a canary key</td><td>Yes — <code>SELECT now() FROM system.local</code></td></tr><tr><td>Slow-query / per-op observer</td><td>Not yet — see &ldquo;Open work&rdquo; below</td><td>Yes — gocql <code>QueryObserver</code> + tracer</td></tr></tbody></table><h2 id=performance-characteristics>Performance characteristics<a class=anchor href=#performance-characteristics>#</a></h2><p>See <a href=https://danchupin.github.io/strata/architecture/benchmarks/meta-backend-comparison/>Meta-backend comparison</a> for the headline table.
+The structural gaps:</p><ul><li><strong>Listing</strong> — TiKV: 30–50 ms for a 100k-object bucket page=1k (single
+ordered range scan). Cassandra: 150–300 ms for the same workload
+(64-way fan-out + heap-merge). <strong>5–6× faster on TiKV.</strong></li><li><strong>LWT-equivalent</strong> — TiKV: 3–5 ms for <code>CreateBucket</code> /
+<code>CompleteMultipartUpload</code> (pessimistic txn). Cassandra: 5–10 ms (Paxos
+4-round-trip). <strong>~1.5–2× faster on TiKV</strong> vs Paxos; <strong>roughly equal
+vs Scylla raft-LWT.</strong></li><li><strong>Small-object Gets</strong> — <code>GetObject</code> (latest version), <code>GetIAMAccessKey</code>
+on the SigV4 hot path: ~equal across both backends. Network RTT
+dominates.</li><li><strong>Audit sweep</strong> — Cassandra wins outright via <code>USING TTL</code>. TiKV runs
+an explicit sweeper that scan+deletes; the work is bounded
+(<code>STRATA_AUDIT_RETENTION</code> window) and runs in the background outside
+the request path, so the operator-visible impact is small.</li></ul><p>Throughput per node tracks raft commit latency on the LWT path and disk
+bandwidth on the bulk path. NVMe-class storage is recommended on both
+backends.</p><p>Cost model: TiKV is on-prem-friendly — no per-CPU licensing, no
+cloud-vendor lock-in. The PingCAP TiDB Cloud SaaS exists but is not
+required; Strata talks raw KV via <code>tikv/client-go</code> so the SQL layer is
+never on the path.</p><h2 id=common-operational-pitfalls>Common operational pitfalls<a class=anchor href=#common-operational-pitfalls>#</a></h2><ul><li><strong>PD leader split-brain on partition</strong> — running ≤2 PD replicas means
+a single network partition can leave the cluster unable to elect a
+leader. Always run ≥3 PD nodes in production. PD is small; the cost
+is negligible.</li><li><strong>TiKV region replica placement labels</strong> — multi-DC deployments must
+set the <code>--labels</code> flag on each TiKV instance (<code>zone=dc-1</code>,
+<code>host=node-a</code> etc.) and configure PD&rsquo;s
+<code>replication.location-labels</code> / <code>replication.isolation-level</code> so
+region replicas are spread across zones. Without labels, PD may
+schedule all three replicas of a region on the same DC and a DC loss
+takes data offline.</li><li><strong>Raft entry GC</strong> — TiKV trims raft logs on a schedule. If a region
+goes silent (no writes), the GC may lag behind the snapshot interval
+and increase recovery time. Tune <code>raftstore.region-compact-check-step</code>
+if you see unbounded raft log growth on idle regions; defaults are
+fine for write-heavy workloads.</li><li><strong>PD timezone drift</strong> — PD uses physical time for the timestamp
+oracle (PD-TSO). Clock skew across PD nodes ≥ a few seconds can
+cause TSO advance to stall. Run NTP / chrony on every PD node.</li><li><strong>TiKV bulk import</strong> — TiKV&rsquo;s <code>--import-mode</code> flag exists for SST
+bulk-load workflows. Strata never enables it; gateway writes go
+through the standard <code>txnkv</code> path. Do not flip this flag on a Strata
+cluster.</li><li><strong>Gateway dial timeouts on cold start</strong> — <code>txnkv.NewClient</code> blocks
+until PD answers. Misconfigured <code>STRATA_TIKV_PD_ENDPOINTS</code> produces
+a startup hang rather than a fast-fail. The picker&rsquo;s empty-string
+check catches the obvious case; unreachable endpoints are bounded by
+the client-go internal dial timeout.</li><li><strong>Audit sweeper requires leader-election locker</strong> — multiple gateway
+replicas all run the sweeper goroutine. Without a working
+<code>tikv.Locker</code> (typically wired via <code>serverapp.buildLocker</code>), every
+replica races on deletion. The locker uses a TiKV pessimistic-txn
+RMW over <code>LeaderLockKey("audit-sweeper-leader-tikv")</code>; lease loss
+triggers re-acquire on the next iteration.</li></ul><h2 id=operational-parity>Operational parity<a class=anchor href=#operational-parity>#</a></h2><ul><li><code>Probe(ctx)</code> is a small Get against a canary key; used by <code>/readyz</code>.</li><li>OTel tracing of TiKV ops is <strong>open work</strong> (see Open work below) — the
+Cassandra-side <code>meta.cassandra.&lt;table>.&lt;op></code> and RADOS-side
+<code>data.rados.&lt;op></code> spans land today; TiKV ops do not yet emit child
+spans.</li><li>Prometheus histograms tag by <code>op</code> only — no backend-vendor dimension.
+Same dashboards reusable.</li><li>Race harness (<code>internal/s3api/race_test.go + race_integration_test.go::TestRaceMixedOpsTiKV</code>, build tag
+<code>integration</code>) drives concurrent versioning flip + multipart Complete<ul><li>DeleteObjects against a TiKV-backed gateway. <code>make race-soak-tikv</code>
+runs it for <code>RACE_DURATION</code> (default 1h).</li></ul></li></ul><h2 id=ci>CI<a class=anchor href=#ci>#</a></h2><p><code>.github/workflows/ci-tikv.yml</code> runs on <code>pull_request</code> and <code>push:main</code>
+(timeout 30 min) with two jobs:</p><ul><li><strong>integration-tikv</strong> — pre-pulls <code>pingcap/pd:v8.5.0</code> +
+<code>pingcap/tikv:v8.5.0</code>, runs <code>go test -tags integration -timeout 15m ./internal/meta/tikv/...</code> against a testcontainers-managed cluster.
+This exercises the full <code>storetest.Run</code> contract suite plus
+TiKV-specific tests (key-encoding round-trip, audit sweeper,
+pessimistic-txn rollback discipline).</li><li><strong>e2e-tikv</strong> — builds the local <code>strata:ceph</code> image, brings up
+<code>docker compose --profile tikv up -d pd tikv ceph strata-tikv</code>,
+waits for healthy, runs <code>scripts/smoke.sh</code> then re-launches with
+<code>STRATA_AUTH_MODE=required</code> and runs <code>scripts/smoke-signed.sh</code>.
+Container logs collected always, uploaded on failure only.</li></ul><p><code>testcontainers-go</code>&rsquo;s <code>host.docker.internal:host-gateway</code> ExtraHosts
+pattern resolves natively on GitHub-hosted ubuntu-latest runners; the
+macOS+Lima docker context flake documented in this repo&rsquo;s history is
+sidestepped via <code>STRATA_TIKV_TEST_PD_ENDPOINTS</code> against an existing PD.</p><h2 id=open-work>Open work<a class=anchor href=#open-work>#</a></h2><p>These are not blockers for production but are listed in <code>ROADMAP.md</code>
+under &ldquo;Alternative metadata backends&rdquo; / &ldquo;Consolidation & validation&rdquo;:</p><ul><li><strong>AuditSweeper wiring under <code>strata server</code></strong> — the sweeper exists
+(<code>internal/meta/tikv/sweeper.go</code>) and is exercised by unit tests, but
+is not yet a registered worker under <code>STRATA_WORKERS=</code>. Operators
+running a TiKV-backed deployment should wire it explicitly until the
+worker registration lands.</li><li><strong>OTel spans for TiKV ops</strong> — the Cassandra path&rsquo;s
+<code>meta.cassandra.&lt;table>.&lt;op></code> shape needs a <code>tikv/client-go</code>
+observer counterpart. Tracer plumbing on <code>tikv.Open</code> is reserved
+but not yet emitting spans.</li><li><strong>Multi-cluster TiKV</strong> — Strata&rsquo;s RADOS-side multi-cluster path
+(US-044) has no metadata-side counterpart yet. A Strata fleet
+fronting multiple TiKV clusters (regional sharding) would need a
+dispatcher above <code>meta.Store</code>, same as the data plane.</li></ul><h2 id=switching-an-existing-deployment>Switching an existing deployment<a class=anchor href=#switching-an-existing-deployment>#</a></h2><p><strong>Out of scope.</strong> TiKV is positioned for new deployments. There is no
+Cassandra-to-TiKV migration tool — the keyspaces are wire-incompatible
+and the operational shape difference (CQL vs raw KV, TTL vs sweeper,
+fan-out vs range scan) means a live cutover would have to replay every
+row through the gateway. If a migration is required, the supported
+path is: run two Strata fleets side-by-side (one against each backend),
+replicate via Strata&rsquo;s existing replication queue
+(<code>STRATA_WORKERS=replicator</code>) at the S3 layer, cut DNS, decommission
+the old fleet.</p></article><footer class=book-footer><div class="flex flex-wrap justify-between"><div></div><div><a class="flex align-center" href=https://github.com/danchupin/strata/edit/main/docs/site/content/content/architecture/backends/tikv.md target=_blank rel="noopener edit"><img src=/strata/icons/edit.svg class=book-icon alt=Edit>
+<span>Edit this page</span></a></div></div><div class="flex flex-wrap justify-between"><span><a href=/strata/architecture/backends/scylla/ class="flex align-center"><img src=/strata/icons/backward.svg class=book-icon alt=Backward>
+<span>ScyllaDB</span>
+</a></span><span><a href=/strata/architecture/backends/s3/ class="flex align-center"><span>S3-over-S3 data backend</span>
+<img src=/strata/icons/forward.svg class=book-icon alt=Forward></a></span></div><script>(function(){document.querySelectorAll("pre:has(code)").forEach(e=>{e.addEventListener("click",e.focus),e.addEventListener("copy",function(t){if(t.preventDefault(),navigator.clipboard){const t=window.getSelection().toString()||e.textContent;navigator.clipboard.writeText(t)}})})})()</script></footer><label for=menu-control class="hidden book-menu-overlay"></label></div><aside class=book-toc><div class=book-toc-content><nav id=TableOfContents><ul><li><a href=#tikv-metadata-backend>TiKV metadata backend</a><ul><li><a href=#when-to-choose-tikv-over-cassandra>When to choose TiKV over Cassandra</a></li><li><a href=#compatibility-status>Compatibility status</a></li><li><a href=#required-environment-variables>Required environment variables</a></li><li><a href=#sample-compose--kubernetes-config>Sample compose / Kubernetes config</a><ul><li><a href=#laptop--ci--single-node-compose>Laptop / CI — single-node compose</a></li><li><a href=#production--tikv-operator-on-kubernetes>Production — TiKV operator on Kubernetes</a></li></ul></li><li><a href=#production-sizing>Production sizing</a></li><li><a href=#capability-matrix>Capability matrix</a></li><li><a href=#performance-characteristics>Performance characteristics</a></li><li><a href=#common-operational-pitfalls>Common operational pitfalls</a></li><li><a href=#operational-parity>Operational parity</a></li><li><a href=#ci>CI</a></li><li><a href=#open-work>Open work</a></li><li><a href=#switching-an-existing-deployment>Switching an existing deployment</a></li></ul></li></ul></nav></div></aside></main></body></html>

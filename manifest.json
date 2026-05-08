@@ -1,0 +1,15 @@
+{
+  "name": "Strata Documentation",
+  "short_name": "Strata Documentation",
+  "start_url": "/strata/",
+  "scope": "/strata/",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "icons": [
+    {
+      "src": "/strata/favicon.svg",
+      "sizes": "512x512"
+    }
+  ]
+}

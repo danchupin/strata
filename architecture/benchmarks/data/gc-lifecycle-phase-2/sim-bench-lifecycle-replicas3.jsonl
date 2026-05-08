@@ -1,0 +1,5 @@
+{"bench":"lifecycle","entries":9999,"concurrency":1,"shards":3,"elapsed_ms":31,"throughput_per_sec":322063.99246294884,"meta_backend":"memory","data_backend":"memory","started_at_unix":1778237327}
+{"bench":"lifecycle","entries":9999,"concurrency":4,"shards":3,"elapsed_ms":22,"throughput_per_sec":444195.1766685362,"meta_backend":"memory","data_backend":"memory","started_at_unix":1778237327}
+{"bench":"lifecycle","entries":9999,"concurrency":16,"shards":3,"elapsed_ms":22,"throughput_per_sec":452297.61898030614,"meta_backend":"memory","data_backend":"memory","started_at_unix":1778237328}
+{"bench":"lifecycle","entries":9999,"concurrency":64,"shards":3,"elapsed_ms":21,"throughput_per_sec":469757.33385675796,"meta_backend":"memory","data_backend":"memory","started_at_unix":1778237328}
+{"bench":"lifecycle","entries":9999,"concurrency":256,"shards":3,"elapsed_ms":21,"throughput_per_sec":457000.5198900804,"meta_backend":"memory","data_backend":"memory","started_at_unix":1778237328}

@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Deploy on Strata Documentation</title><link>https://danchupin.github.io/strata/deploy/</link><description>Recent content in Deploy on Strata Documentation</description><generator>Hugo</generator><language>en</language><atom:link href="https://danchupin.github.io/strata/deploy/index.xml" rel="self" type="application/rss+xml"/><item><title>Single-node deployment</title><link>https://danchupin.github.io/strata/deploy/single-node/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/deploy/single-node/</guid><description>&lt;h1 id="single-node-strata"&gt;Single-node Strata&lt;a class="anchor" href="#single-node-strata"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;A single-node deployment runs one &lt;code&gt;strata&lt;/code&gt; process. It is the simplest shape
+Strata ships and the recommended starting point for labs, evaluation, and
+single-tenant pilots. The gateway is HTTP-stateless — durability lives in
+the metadata + data backends — so a single replica is &lt;strong&gt;not&lt;/strong&gt; an HA shape:
+the box is the SPOF for HTTP traffic. For HA, see
+&lt;a href="https://danchupin.github.io/strata/deploy/multi-replica/"&gt;Multi-replica cluster&lt;/a&gt;.&lt;/p&gt;
+&lt;h2 id="when-to-pick-this-shape"&gt;When to pick this shape&lt;a class="anchor" href="#when-to-pick-this-shape"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;table&gt;
+ &lt;thead&gt;
+ &lt;tr&gt;
+ &lt;th&gt;Use case&lt;/th&gt;
+ &lt;th&gt;Notes&lt;/th&gt;
+ &lt;/tr&gt;
+ &lt;/thead&gt;
+ &lt;tbody&gt;
+ &lt;tr&gt;
+ &lt;td&gt;Local dev / smoke tests&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;make run-memory&lt;/code&gt; boots a fully in-memory gateway in &amp;lt;1 s. No Docker.&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;Single-tenant evaluation&lt;/td&gt;
+ &lt;td&gt;One replica + Cassandra + memory data is enough to run the s3-tests suite end-to-end.&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;Lab / classroom&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;make up-all&lt;/code&gt; boots cassandra + ceph + strata in one command.&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;Production single-tenant&lt;/td&gt;
+ &lt;td&gt;Acceptable when planned downtime windows allow gateway restarts; pair with external monitoring on &lt;code&gt;/readyz&lt;/code&gt;.&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;For multi-tenant production traffic, scale to ≥2 replicas and pick a real
+metadata cluster (Cassandra ≥3 nodes or TiKV with PD ≥3 + TiKV ≥3).&lt;/p&gt;</description></item><item><title>Docker Compose</title><link>https://danchupin.github.io/strata/deploy/docker-compose/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/deploy/docker-compose/</guid><description>&lt;h1 id="docker-compose-deployment"&gt;Docker Compose deployment&lt;a class="anchor" href="#docker-compose-deployment"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;The bundled &lt;code&gt;deploy/docker/docker-compose.yml&lt;/code&gt; is the canonical reference
+shape for a Strata stack on a single host. It ships every supported
+runtime profile so an operator can &lt;code&gt;docker compose --profile &amp;lt;name&amp;gt; up -d&lt;/code&gt;
+to switch between Cassandra-backed, TiKV-backed, multi-replica, and
+tracing variants without editing YAML.&lt;/p&gt;
+&lt;p&gt;This page distills the compose file for human readers. The compose file
+itself is the source of truth — when it changes, this page lags by one
+PR; cross-check container env / port assignments before depending on
+them.&lt;/p&gt;</description></item><item><title>Multi-replica cluster</title><link>https://danchupin.github.io/strata/deploy/multi-replica/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/deploy/multi-replica/</guid><description>&lt;h1 id="multi-replica-strata-cluster--operator-guide"&gt;Multi-replica Strata cluster — operator guide&lt;a class="anchor" href="#multi-replica-strata-cluster--operator-guide"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata&amp;rsquo;s gateway is &lt;strong&gt;stateless&lt;/strong&gt;. Replicas don&amp;rsquo;t form quorum among
+themselves; the storage layer (TiKV / RADOS) provides durability +
+consistency. A single replica is therefore a &lt;strong&gt;single point of failure for
+HTTP traffic&lt;/strong&gt; — not for data. Running &lt;strong&gt;≥2 replicas behind a load balancer&lt;/strong&gt;
+is the minimum HA shape.&lt;/p&gt;
+&lt;p&gt;This document covers the &lt;code&gt;lab-tikv&lt;/code&gt; compose profile (2 TiKV-backed replicas
+behind nginx at host port 9999) — the reference shape for multi-replica
+deployments.&lt;/p&gt;</description></item><item><title>Kubernetes</title><link>https://danchupin.github.io/strata/deploy/kubernetes/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/deploy/kubernetes/</guid><description>&lt;h1 id="kubernetes-deployment"&gt;Kubernetes deployment&lt;a class="anchor" href="#kubernetes-deployment"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata on Kubernetes is a stateless gateway tier in front of external
+metadata (TiKV / Cassandra) and object-data (RADOS / S3) clusters. Pods
+are interchangeable — no PVCs, no per-pod storage, no quorum among
+gateways. Scale horizontally with &lt;code&gt;kubectl scale&lt;/code&gt;; durability lives in
+the storage tier.&lt;/p&gt;
+&lt;p&gt;This page walks through the worked example committed under
+&lt;a href="https://github.com/danchupin/strata/tree/main/deploy/k8s"&gt;&lt;code&gt;deploy/k8s/&lt;/code&gt;&lt;/a&gt;
+— a 3-replica &lt;code&gt;Deployment&lt;/code&gt; + &lt;code&gt;Service&lt;/code&gt; + &lt;code&gt;ConfigMap&lt;/code&gt; + &lt;code&gt;Secret&lt;/code&gt; +
+&lt;code&gt;Ingress&lt;/code&gt; aimed at a production-shaped cluster.&lt;/p&gt;</description></item></channel></rss>

@@ -1,0 +1,201 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Architecture on Strata Documentation</title><link>https://danchupin.github.io/strata/architecture/</link><description>Recent content in Architecture on Strata Documentation</description><generator>Hugo</generator><language>en</language><atom:link href="https://danchupin.github.io/strata/architecture/index.xml" rel="self" type="application/rss+xml"/><item><title>Auth</title><link>https://danchupin.github.io/strata/architecture/auth/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/auth/</guid><description>&lt;h1 id="auth"&gt;Auth&lt;a class="anchor" href="#auth"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;The auth layer lives under &lt;code&gt;internal/auth/&lt;/code&gt;. Every request enters through
+&lt;code&gt;auth.Middleware&lt;/code&gt;, which verifies an AWS SigV4 signature, derives a stable
+identity, and stamps the result onto the request context. The router and
+handlers downstream never re-derive identity — they read it from
+&lt;code&gt;auth.FromContext(ctx).Owner&lt;/code&gt;.&lt;/p&gt;
+&lt;h2 id="sigv4-verification"&gt;SigV4 verification&lt;a class="anchor" href="#sigv4-verification"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;code&gt;internal/auth/sigv4.go&lt;/code&gt; implements the standard four-step canonicalisation:&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;Parse &lt;code&gt;Authorization&lt;/code&gt; (or &lt;code&gt;X-Amz-*&lt;/code&gt; query parameters for presigned URLs)
+to extract &lt;code&gt;AccessKey&lt;/code&gt;, &lt;code&gt;Scope&lt;/code&gt;, &lt;code&gt;SignedHeaders&lt;/code&gt;, and &lt;code&gt;Signature&lt;/code&gt;.&lt;/li&gt;
+&lt;li&gt;Look up the secret for the access key via the configured static
+credentials store (&lt;code&gt;internal/auth/static.go&lt;/code&gt;) — no IdP federation in
+this cycle.&lt;/li&gt;
+&lt;li&gt;Build the canonical request string from &lt;code&gt;Method&lt;/code&gt;, &lt;code&gt;URL.Path&lt;/code&gt;, the
+sorted &lt;code&gt;SignedHeaders&lt;/code&gt;, and the body hash (&lt;code&gt;x-amz-content-sha256&lt;/code&gt;,
+which may be the literal sentinel &lt;code&gt;STREAMING-AWS4-HMAC-SHA256-PAYLOAD&lt;/code&gt;
+for chunked uploads — see below).&lt;/li&gt;
+&lt;li&gt;Recompute the signature with the derived signing key and constant-time
+compare. Mismatch returns &lt;code&gt;ErrSignatureInvalid&lt;/code&gt; (HTTP 403, AWS code
+&lt;code&gt;SignatureDoesNotMatch&lt;/code&gt;).&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;The middleware MUST run before any URL rewriting. The signed canonical
+string includes the original &lt;code&gt;Host&lt;/code&gt; header and the original
+&lt;code&gt;URL.Path&lt;/code&gt; — if the router rewrites either before verification, the
+signature breaks. See the &lt;a href="https://danchupin.github.io/strata/architecture/router/"&gt;Router page&lt;/a&gt;
+for the order.&lt;/p&gt;</description></item><item><title>Router</title><link>https://danchupin.github.io/strata/architecture/router/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/router/</guid><description>&lt;h1 id="router"&gt;Router&lt;a class="anchor" href="#router"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;The router lives in &lt;code&gt;internal/s3api/server.go&lt;/code&gt;. It is a single
+&lt;code&gt;Server.ServeHTTP&lt;/code&gt; method that classifies every request along three axes:&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;Special prefix&lt;/strong&gt; — &lt;code&gt;/admin/...&lt;/code&gt; is the embedded operator console JSON
+API and bypasses the S3 dispatch entirely.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Bucket vs object scope&lt;/strong&gt; — the URL path is split at the first slash
+into &lt;code&gt;(bucket, key)&lt;/code&gt;. Empty bucket → service-level (ListBuckets, IAM
+actions). Empty key → bucket-scoped. Both populated → object-scoped.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Query-string sub-resource&lt;/strong&gt; — within bucket and object scope, the
+sub-operation is dispatched by query parameter (&lt;code&gt;?cors&lt;/code&gt;, &lt;code&gt;?policy&lt;/code&gt;,
+&lt;code&gt;?lifecycle&lt;/code&gt;, &lt;code&gt;?uploads&lt;/code&gt;, &lt;code&gt;?uploadId=&lt;/code&gt;, &lt;code&gt;?tagging&lt;/code&gt;, …) plus the HTTP
+method. This is the AWS S3 wire shape; we mirror it.&lt;/li&gt;
+&lt;/ol&gt;
+&lt;h2 id="dispatch-order"&gt;Dispatch order&lt;a class="anchor" href="#dispatch-order"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;pre tabindex="0"&gt;&lt;code&gt;ServeHTTP(w, r):
+ 1. extractAccessPointAlias(r.Host) # alias.&amp;lt;host&amp;gt; -&amp;gt; rewrite to /&amp;lt;bucket&amp;gt;/...
+ 2. extractVHostBucket(r.Host, ...) # *.s3.local -&amp;gt; rewrite to /&amp;lt;bucket&amp;gt;/...
+ 3. if path starts with /admin/ -&amp;gt; handleAdmin
+ 4. splitPath(r.URL.Path) -&amp;gt; (bucket, key)
+ 5. bucket == &amp;#34;&amp;#34; -&amp;gt; IAM action / ListBuckets / DLQ-audit listings
+ key == &amp;#34;&amp;#34; -&amp;gt; handleBucket(...)
+ default -&amp;gt; handleObject(...)&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;Auth middleware runs &lt;strong&gt;before&lt;/strong&gt; the access-point and vhost rewrites because
+those rewrites only mutate &lt;code&gt;r.URL.Path&lt;/code&gt; after SigV4 has already validated
+the original. See &lt;a href="https://danchupin.github.io/strata/architecture/auth/"&gt;Auth&lt;/a&gt; for the ordering
+rationale.&lt;/p&gt;</description></item><item><title>Meta store</title><link>https://danchupin.github.io/strata/architecture/meta-store/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/meta-store/</guid><description>&lt;h1 id="meta-store"&gt;Meta store&lt;a class="anchor" href="#meta-store"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;&lt;code&gt;internal/meta/store.go&lt;/code&gt; defines &lt;code&gt;meta.Store&lt;/code&gt;, the interface every metadata
+backend implements. The contract is intentionally narrow: only the
+operations the S3 surface needs, and only with the consistency primitives
+the backends can all support without bolting a coordinator in front.&lt;/p&gt;
+&lt;p&gt;Three production-eligible backends satisfy &lt;code&gt;meta.Store&lt;/code&gt;:&lt;/p&gt;
+&lt;table&gt;
+ &lt;thead&gt;
+ &lt;tr&gt;
+ &lt;th&gt;Backend&lt;/th&gt;
+ &lt;th&gt;When to pick&lt;/th&gt;
+ &lt;th&gt;Notes&lt;/th&gt;
+ &lt;/tr&gt;
+ &lt;/thead&gt;
+ &lt;tbody&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;memory&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Tests, smoke pass, single-process demos&lt;/td&gt;
+ &lt;td&gt;In-process tree-map. Naturally ordered. No durability.&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;cassandra&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Multi-replica, scale tested against the s3-tests suite&lt;/td&gt;
+ &lt;td&gt;ScyllaDB drops in unchanged (CQL-compatible). Sharded objects table, fan-out + heap-merge listing.&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;tikv&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Multi-replica, prefer ordered scans&lt;/td&gt;
+ &lt;td&gt;Native KV via &lt;code&gt;tikv/client-go&lt;/code&gt;. Implements &lt;code&gt;RangeScanStore&lt;/code&gt; so &lt;code&gt;ListObjects&lt;/code&gt; is a single scan.&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;A new backend MUST satisfy &lt;code&gt;meta.Store&lt;/code&gt; and pass the contract suite at
+&lt;code&gt;internal/meta/storetest/contract.go&lt;/code&gt;. The suite is shared across all
+backends and is the parity oracle.&lt;/p&gt;</description></item><item><title>Data backend</title><link>https://danchupin.github.io/strata/architecture/data-backend/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/data-backend/</guid><description>&lt;h1 id="data-backend"&gt;Data backend&lt;a class="anchor" href="#data-backend"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;&lt;code&gt;internal/data/backend.go&lt;/code&gt; defines the &lt;code&gt;data.Backend&lt;/code&gt; interface every chunk
+store implements. The metadata layer keeps the per-object manifest (chunk
+list, sizes, content hash); the data backend is responsible for opaque
+fixed-size chunks only. The split is what lets us drop in different
+backing stores (RADOS, S3, in-memory) without touching the gateway.&lt;/p&gt;
+&lt;h2 id="backends"&gt;Backends&lt;a class="anchor" href="#backends"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;table&gt;
+ &lt;thead&gt;
+ &lt;tr&gt;
+ &lt;th&gt;Backend&lt;/th&gt;
+ &lt;th&gt;Build tag&lt;/th&gt;
+ &lt;th&gt;Notes&lt;/th&gt;
+ &lt;/tr&gt;
+ &lt;/thead&gt;
+ &lt;tbody&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;memory&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;none&lt;/td&gt;
+ &lt;td&gt;In-process map. Used by tests and the smoke pass.&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;rados&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;ceph&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;RADOS pools via &lt;code&gt;goceph&lt;/code&gt; (cgo, librados). Requires &lt;code&gt;make build&lt;/code&gt; with &lt;code&gt;-tags ceph&lt;/code&gt; or the docker-built image. Multi-cluster routing supported.&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;s3&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;none&lt;/td&gt;
+ &lt;td&gt;S3-over-S3 — Strata as a transparent gateway in front of an upstream S3 endpoint. Useful for migrating from MinIO / SeaweedFS / AWS without lifting and shifting data.&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;Selection is via &lt;code&gt;STRATA_DATA_BACKEND&lt;/code&gt; (&lt;code&gt;memory&lt;/code&gt; / &lt;code&gt;rados&lt;/code&gt; / &lt;code&gt;s3&lt;/code&gt;). RADOS
+requires the configured pool (&lt;code&gt;[rados] classes&lt;/code&gt;) to exist; the
+&lt;a href="https://danchupin.github.io/strata/architecture/storage/"&gt;Storage status page&lt;/a&gt; covers the
+operator-facing health surface.&lt;/p&gt;</description></item><item><title>Workers</title><link>https://danchupin.github.io/strata/architecture/workers/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/workers/</guid><description>&lt;h1 id="workers"&gt;Workers&lt;a class="anchor" href="#workers"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Background loops run inside the same &lt;code&gt;cmd/strata server&lt;/code&gt; binary as the
+gateway. &lt;code&gt;STRATA_WORKERS=&lt;/code&gt; (or &lt;code&gt;--workers=&lt;/code&gt;) selects which to run; an
+empty list runs the gateway only. Each worker is leader-elected, panic-
+recovered, and supervised — one worker&amp;rsquo;s panic or lease loss never affects
+the gateway or sibling workers.&lt;/p&gt;
+&lt;h2 id="registry-shape"&gt;Registry shape&lt;a class="anchor" href="#registry-shape"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;Each worker has a per-worker file under &lt;code&gt;cmd/strata/workers/&amp;lt;name&amp;gt;.go&lt;/code&gt;
+that calls &lt;code&gt;workers.Register&lt;/code&gt; from &lt;code&gt;init()&lt;/code&gt;:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-go" data-lang="go"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="kd"&gt;func&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nf"&gt;init&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;workers&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;Register&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;workers&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Worker&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;Name&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;#34;gc&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;Build&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kd"&gt;func&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;deps&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;Dependencies&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;Runner&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kt"&gt;error&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;...&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;SkipLease&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// gc fan-out manages its own per-shard leases&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;})&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;&lt;code&gt;Build&lt;/code&gt; constructs the per-worker runner from the shared &lt;code&gt;workers.Dependencies&lt;/code&gt;
+struct (&lt;code&gt;Logger&lt;/code&gt;, &lt;code&gt;Meta&lt;/code&gt;, &lt;code&gt;Data&lt;/code&gt;, &lt;code&gt;Tracer&lt;/code&gt;, &lt;code&gt;Locker&lt;/code&gt;, &lt;code&gt;Region&lt;/code&gt;, &lt;code&gt;EmitLeader&lt;/code&gt;).
+Per-worker tunables (&lt;code&gt;STRATA_GC_INTERVAL&lt;/code&gt;, &lt;code&gt;STRATA_LIFECYCLE_*&lt;/code&gt;, …) are read
+inside &lt;code&gt;Build&lt;/code&gt; directly so the dependency surface stays small.&lt;/p&gt;</description></item><item><title>Storage status</title><link>https://danchupin.github.io/strata/architecture/storage/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/storage/</guid><description>&lt;h1 id="storage-status--operator-guide"&gt;Storage status — operator guide&lt;a class="anchor" href="#storage-status--operator-guide"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;The Storage page (&lt;code&gt;/console/storage&lt;/code&gt;) and the Cluster Overview Storage hero
+card surface the live health of the meta + data backends and the
+per-storage-class object distribution. This page covers the env vars the UI
+reads through, what each warning means, and how to interpret the
+RADOS / TiKV / Cassandra-specific signals.&lt;/p&gt;
+&lt;p&gt;The page is fed by three small admin endpoints:&lt;/p&gt;
+&lt;table&gt;
+ &lt;thead&gt;
+ &lt;tr&gt;
+ &lt;th&gt;Endpoint&lt;/th&gt;
+ &lt;th&gt;Returns&lt;/th&gt;
+ &lt;th&gt;Polled by&lt;/th&gt;
+ &lt;/tr&gt;
+ &lt;/thead&gt;
+ &lt;tbody&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;GET /admin/v1/storage/meta&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;MetaHealthReport&lt;/code&gt; (Cassandra peers / TiKV PD stores / memory)&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;/storage&lt;/code&gt; Meta tab @ 30 s&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;GET /admin/v1/storage/data&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;DataHealthReport&lt;/code&gt; (RADOS pool stats / S3 reachability / memory)&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;/storage&lt;/code&gt; Data tab @ 30 s&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;GET /admin/v1/storage/classes&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;{classes:[…], pools_by_class:{…}}&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;/storage&lt;/code&gt; Data tab @ 30 s, Cluster Overview hero @ 60 s&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;GET /admin/v1/storage/health&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;aggregate &lt;code&gt;{ok, warnings, source}&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;&amp;lt;StorageDegradedBanner&amp;gt;&lt;/code&gt; @ 30 s on every authed page&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;Schema details live in &lt;code&gt;internal/adminapi/openapi.yaml&lt;/code&gt;.&lt;/p&gt;</description></item><item><title>Sharding</title><link>https://danchupin.github.io/strata/architecture/sharding/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/sharding/</guid><description>&lt;h1 id="sharding"&gt;Sharding&lt;a class="anchor" href="#sharding"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Sharding is the single biggest divergence from Ceph RGW: every bucket&amp;rsquo;s
+metadata is split across &lt;code&gt;N&lt;/code&gt; partitions instead of living in a single
+bucket-index object. The split avoids RGW&amp;rsquo;s bucket-index ceiling at
+large object counts and lets ListObjects scale linearly with &lt;code&gt;N&lt;/code&gt;.&lt;/p&gt;
+&lt;h2 id="objects-table-partition-key"&gt;Objects table partition key&lt;a class="anchor" href="#objects-table-partition-key"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;The cassandra &lt;code&gt;objects&lt;/code&gt; table is partitioned by &lt;code&gt;(bucket_id, shard)&lt;/code&gt;:&lt;/p&gt;
+&lt;pre tabindex="0"&gt;&lt;code&gt;PRIMARY KEY ((bucket_id, shard), key, version_id)
+WITH CLUSTERING ORDER BY (key ASC, version_id DESC)&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;Where &lt;code&gt;shard = fnv32a(key) % N&lt;/code&gt; and &lt;code&gt;N&lt;/code&gt; is per-bucket
+(&lt;code&gt;STRATA_BUCKET_SHARDS&lt;/code&gt; at bucket creation, default 64). &lt;code&gt;N&lt;/code&gt; must be a
+power of two — &lt;code&gt;meta.IsValidShardCount(n)&lt;/code&gt; enforces it. Power-of-two
+constraint matters for the &lt;a href="#online-reshard"&gt;reshard worker&lt;/a&gt; below: when &lt;code&gt;N&lt;/code&gt; doubles, every old
+shard either stays under the new modulo or splits cleanly into two new
+ones, never three.&lt;/p&gt;</description></item><item><title>Observability</title><link>https://danchupin.github.io/strata/architecture/observability/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/observability/</guid><description>&lt;h1 id="observability"&gt;Observability&lt;a class="anchor" href="#observability"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata ships three correlated observability surfaces: structured logs,
+an audit log table for state-changing requests, and OTel tracing with a
+ring-buffer trace browser embedded in the operator console. All three
+key off the same &lt;code&gt;request_id&lt;/code&gt; so an operator can pivot from one to the
+next without rebuilding context.&lt;/p&gt;
+&lt;h2 id="structured-logs-slog"&gt;Structured logs (slog)&lt;a class="anchor" href="#structured-logs-slog"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;code&gt;internal/logging&lt;/code&gt; is the canonical setup. Both binaries (&lt;code&gt;cmd/strata&lt;/code&gt;,
+&lt;code&gt;cmd/strata-admin&lt;/code&gt;) call &lt;code&gt;logging.Setup()&lt;/code&gt; first thing to install a
+JSON-handler &lt;code&gt;*slog.Logger&lt;/code&gt; driven by &lt;code&gt;STRATA_LOG_LEVEL&lt;/code&gt;
+(&lt;code&gt;DEBUG&lt;/code&gt;/&lt;code&gt;INFO&lt;/code&gt;/&lt;code&gt;WARN&lt;/code&gt;/&lt;code&gt;ERROR&lt;/code&gt;; default &lt;code&gt;INFO&lt;/code&gt;).&lt;/p&gt;</description></item></channel></rss>

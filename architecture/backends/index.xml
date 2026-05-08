@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Backends on Strata Documentation</title><link>https://danchupin.github.io/strata/architecture/backends/</link><description>Recent content in Backends on Strata Documentation</description><generator>Hugo</generator><language>en</language><atom:link href="https://danchupin.github.io/strata/architecture/backends/index.xml" rel="self" type="application/rss+xml"/><item><title>ScyllaDB</title><link>https://danchupin.github.io/strata/architecture/backends/scylla/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/backends/scylla/</guid><description>&lt;h1 id="scylladb-metadata-backend"&gt;ScyllaDB metadata backend&lt;a class="anchor" href="#scylladb-metadata-backend"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;ScyllaDB is supported as a drop-in replacement for Apache Cassandra. Strata&amp;rsquo;s
+metadata access path is gocql + CQL — no Cassandra-specific extensions are
+used — so the same &lt;code&gt;internal/meta/cassandra&lt;/code&gt; backend talks to either cluster.
+The &lt;code&gt;storetest.Run&lt;/code&gt; contract suite (35+ scenarios covering bucket/object/multipart
+LWT semantics, sharded &lt;code&gt;objects&lt;/code&gt; listing, GC and notification queues, audit log,
+versioning null literal, access points, etc.) passes against both.&lt;/p&gt;
+&lt;h2 id="compatibility-status"&gt;Compatibility status&lt;a class="anchor" href="#compatibility-status"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Code&lt;/strong&gt;: zero gateway changes required to switch from Cassandra to ScyllaDB.
+Point &lt;code&gt;STRATA_CASSANDRA_HOSTS&lt;/code&gt; (and friends) at a Scylla cluster and bring up
+the gateway as usual.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Schema&lt;/strong&gt;: same DDL — &lt;code&gt;internal/meta/cassandra/schema.go::tableDDL&lt;/code&gt;
+applies as-is. No &lt;code&gt;ALTER&lt;/code&gt; differences.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Consistency&lt;/strong&gt;: gateway uses &lt;code&gt;LOCAL_QUORUM&lt;/code&gt; for reads/writes and
+&lt;code&gt;LOCAL_SERIAL&lt;/code&gt; for LWT (&lt;code&gt;internal/meta/cassandra/session.go&lt;/code&gt;). ScyllaDB
+honours both.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;LWT&lt;/strong&gt;: bucket creation, versioning toggle, multipart Complete, GC ack,
+storage-class transitions, lifecycle worker leases — all rely on
+&lt;code&gt;IF NOT EXISTS&lt;/code&gt; / &lt;code&gt;IF EXISTS&lt;/code&gt;. ScyllaDB 5.0 ships LWT on the Paxos protocol
+by default; ScyllaDB 5.4+ optionally enables Raft-backed LWT
+(&lt;code&gt;raft_lwt&lt;/code&gt;-enabled tables) which dramatically reduces tail latency. The
+storetest contract is agnostic to the underlying coordination protocol; it
+only asserts the linearizable observable behaviour, which both Paxos and
+Raft modes provide.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Sharded &lt;code&gt;objects&lt;/code&gt; listing&lt;/strong&gt;: Strata fans out &lt;code&gt;N=64&lt;/code&gt; shard partitions in
+parallel (&lt;code&gt;cassandra.Store.ListObjects&lt;/code&gt;). ScyllaDB&amp;rsquo;s per-shard CPU pinning is
+a natural fit for this access pattern — token-aware queries land on the
+right shard with a single hop.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2 id="deployment-notes"&gt;Deployment notes&lt;a class="anchor" href="#deployment-notes"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;h3 id="connection"&gt;Connection&lt;a class="anchor" href="#connection"&gt;#&lt;/a&gt;&lt;/h3&gt;
+&lt;pre tabindex="0"&gt;&lt;code&gt;STRATA_CASSANDRA_HOSTS=scylla-1.example,scylla-2.example,scylla-3.example
+STRATA_CASSANDRA_KEYSPACE=strata
+STRATA_CASSANDRA_LOCAL_DC=datacenter1
+STRATA_CASSANDRA_REPLICATION=&amp;#39;{&amp;#34;class&amp;#34;:&amp;#34;NetworkTopologyStrategy&amp;#34;,&amp;#34;datacenter1&amp;#34;:&amp;#34;3&amp;#34;}&amp;#39;&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;&lt;code&gt;STRATA_CASSANDRA_LOCAL_DC&lt;/code&gt; should match the Scylla &lt;code&gt;dc&lt;/code&gt; you want token-aware
+routing to prefer. Multi-DC deployments work identically to Cassandra:
+&lt;code&gt;NetworkTopologyStrategy&lt;/code&gt; keyspace + per-DC RF.&lt;/p&gt;</description></item><item><title>TiKV</title><link>https://danchupin.github.io/strata/architecture/backends/tikv/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/backends/tikv/</guid><description>&lt;h1 id="tikv-metadata-backend"&gt;TiKV metadata backend&lt;a class="anchor" href="#tikv-metadata-backend"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;TiKV is a first-class metadata backend for Strata, on equal footing with
+Cassandra (and ScyllaDB as the CQL drop-in). The full &lt;code&gt;meta.Store&lt;/code&gt; contract
+in &lt;code&gt;internal/meta/storetest/contract.go&lt;/code&gt; runs against a real PD+TiKV cluster
+on every PR via &lt;code&gt;.github/workflows/ci-tikv.yml&lt;/code&gt;.&lt;/p&gt;
+&lt;p&gt;The fundamental shape difference vs Cassandra is the &lt;code&gt;objects&lt;/code&gt; table: TiKV
+keys are a flat ordered byte space, so &lt;code&gt;ListObjects&lt;/code&gt; is a single ordered
+range scan instead of Cassandra&amp;rsquo;s 64-way fan-out + heap-merge. The gateway
+discovers this at runtime via the optional &lt;code&gt;meta.RangeScanStore&lt;/code&gt; interface
+(&lt;code&gt;internal/meta/store.go&lt;/code&gt;) and dispatches to the native scan path
+automatically — no operator action required.&lt;/p&gt;</description></item><item><title>S3-over-S3 data backend</title><link>https://danchupin.github.io/strata/architecture/backends/s3/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/backends/s3/</guid><description>&lt;h1 id="s3-data-backend"&gt;S3 Data Backend&lt;a class="anchor" href="#s3-data-backend"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;The S3-over-S3 data backend stores object bytes in any S3-compatible bucket
+(AWS S3, MinIO, Ceph RGW, Garage). One Strata object = one backend S3 object
+under the key &lt;code&gt;&amp;lt;bucket-uuid&amp;gt;/&amp;lt;object-uuid&amp;gt;&lt;/code&gt;. RADOS remains the default and
+recommended data backend; this page covers the S3 alternative.&lt;/p&gt;
+&lt;h2 id="when-to-choose-s3-over-rados"&gt;When to choose S3 over RADOS&lt;a class="anchor" href="#when-to-choose-s3-over-rados"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;table&gt;
+ &lt;thead&gt;
+ &lt;tr&gt;
+ &lt;th&gt;Question&lt;/th&gt;
+ &lt;th&gt;Pick &lt;strong&gt;RADOS&lt;/strong&gt; if&lt;/th&gt;
+ &lt;th&gt;Pick &lt;strong&gt;S3&lt;/strong&gt; if&lt;/th&gt;
+ &lt;/tr&gt;
+ &lt;/thead&gt;
+ &lt;tbody&gt;
+ &lt;tr&gt;
+ &lt;td&gt;Existing infra investment&lt;/td&gt;
+ &lt;td&gt;Operator already runs Ceph&lt;/td&gt;
+ &lt;td&gt;Operator already runs MinIO / has AWS account / wants Garage&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;Tail latency budget&lt;/td&gt;
+ &lt;td&gt;&amp;lt; 5 ms p99 GET on hot data is critical&lt;/td&gt;
+ &lt;td&gt;50–200 ms p99 GET is acceptable (HTTPS round-trip floor)&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;Bytes-stored cost model&lt;/td&gt;
+ &lt;td&gt;Self-hosted hardware, want bare-metal economics&lt;/td&gt;
+ &lt;td&gt;Cloud storage tiers (Standard-IA, Glacier) carry the lifecycle&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;Availability boundary&lt;/td&gt;
+ &lt;td&gt;Single-DC, hardware-controlled&lt;/td&gt;
+ &lt;td&gt;Multi-AZ via the cloud provider&amp;rsquo;s bucket SLA&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;Encryption-at-rest mandate&lt;/td&gt;
+ &lt;td&gt;Strata-side envelope encryption is enough&lt;/td&gt;
+ &lt;td&gt;Want backend SSE / KMS independent of Strata&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;Operational complexity&lt;/td&gt;
+ &lt;td&gt;Team owns Ceph operations&lt;/td&gt;
+ &lt;td&gt;Team owns S3 operations (or has zero ops via AWS)&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;The two backends are equal-tier alternatives — pick by what your operations
+team already runs. Mixing within a single Strata deployment is not supported
+(&lt;code&gt;STRATA_DATA_BACKEND&lt;/code&gt; is a single-value flag).&lt;/p&gt;</description></item></channel></rss>

@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Benchmarks on Strata Documentation</title><link>https://danchupin.github.io/strata/architecture/benchmarks/</link><description>Recent content in Benchmarks on Strata Documentation</description><generator>Hugo</generator><language>en</language><atom:link href="https://danchupin.github.io/strata/architecture/benchmarks/index.xml" rel="self" type="application/rss+xml"/><item><title>GC + Lifecycle scaling</title><link>https://danchupin.github.io/strata/architecture/benchmarks/gc-lifecycle/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/benchmarks/gc-lifecycle/</guid><description>&lt;h1 id="gc--lifecycle-worker-scaling-benchmark-phase-1--phase-2"&gt;GC + Lifecycle worker scaling benchmark (Phase 1 + Phase 2)&lt;a class="anchor" href="#gc--lifecycle-worker-scaling-benchmark-phase-1--phase-2"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;blockquote class='book-hint '&gt;
+&lt;p&gt;Phase 2 (US-006) lands &lt;strong&gt;multi-leader&lt;/strong&gt; numbers below Phase 1&amp;rsquo;s single-leader
+baseline. The two-section structure is intentional — Phase 1 measured the
+per-leader concurrency cap, Phase 2 measures the multiplier from running N
+replicas in parallel under &lt;code&gt;STRATA_GC_SHARDS=N&lt;/code&gt;.&lt;/p&gt;
+&lt;/blockquote&gt;&lt;h2 id="phase-1--single-leader-concurrency-cap"&gt;Phase 1 — single-leader concurrency cap&lt;a class="anchor" href="#phase-1--single-leader-concurrency-cap"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;Quantifies the throughput curve for &lt;code&gt;internal/gc.Worker&lt;/code&gt; and
+&lt;code&gt;internal/lifecycle.Worker&lt;/code&gt; across the per-worker bounded-errgroup
+fan-out introduced in cycle &lt;code&gt;ralph/gc-lifecycle-scale&lt;/code&gt; (US-001 / US-002).
+The harness lands as &lt;code&gt;strata-admin bench-gc&lt;/code&gt; + &lt;code&gt;strata-admin bench-lifecycle&lt;/code&gt;
+(US-003) and is wired into &lt;code&gt;make bench-gc&lt;/code&gt; / &lt;code&gt;make bench-lifecycle&lt;/code&gt; to drive
+the canonical lab-tikv stack.&lt;/p&gt;</description></item><item><title>Meta-backend comparison</title><link>https://danchupin.github.io/strata/architecture/benchmarks/meta-backend-comparison/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/benchmarks/meta-backend-comparison/</guid><description>&lt;h1 id="meta-backend-benchmarks-tikv-vs-cassandra"&gt;Meta-backend benchmarks: TiKV vs Cassandra&lt;a class="anchor" href="#meta-backend-benchmarks-tikv-vs-cassandra"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;This page captures hot-path latency / throughput numbers for Strata&amp;rsquo;s two
+production metadata backends (Cassandra and TiKV) and the in-tree memory
+reference. The numbers are operator-runnable on a single laptop docker
+stack via the harness in &lt;code&gt;internal/meta/storetest/bench.go&lt;/code&gt;.&lt;/p&gt;
+&lt;p&gt;The headline operations (US-018):&lt;/p&gt;
+&lt;table&gt;
+ &lt;thead&gt;
+ &lt;tr&gt;
+ &lt;th&gt;Op&lt;/th&gt;
+ &lt;th&gt;Why it matters&lt;/th&gt;
+ &lt;/tr&gt;
+ &lt;/thead&gt;
+ &lt;tbody&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;CreateBucket&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;LWT-equivalent create-if-not-exists&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;GetObject&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Single Get / latest-version range-scan&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;ListObjects&lt;/code&gt; 100k page=1k&lt;/td&gt;
+ &lt;td&gt;Listing throughput on a real-world bucket&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;CompleteMultipartUpload&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;LWT-equivalent status flip (&lt;code&gt;uploading→completing&lt;/code&gt;)&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;GetIAMAccessKey&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;SigV4 verifier — runs on every request&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;AuditAppend&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Audit log write amplification&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;AuditSweepPartition&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Periodic retention sweep (TiKV emulates Cassandra TTL)&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;RangeScanObjects&lt;/code&gt; 100k&lt;/td&gt;
+ &lt;td&gt;TiKV-only: native ordered scan vs Cassandra fan-out&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h2 id="rig"&gt;Rig&lt;a class="anchor" href="#rig"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;Single-laptop docker stack. Both backends run as 3-node clusters so LWT&lt;/p&gt;</description></item><item><title/><link>https://danchupin.github.io/strata/architecture/benchmarks/data/gc-lifecycle-phase-2/README/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/benchmarks/data/gc-lifecycle-phase-2/README/</guid><description>&lt;h1 id="phase-2--gc--lifecycle-multi-leader-bench-artifacts"&gt;Phase 2 — gc + lifecycle multi-leader bench artifacts&lt;a class="anchor" href="#phase-2--gc--lifecycle-multi-leader-bench-artifacts"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;JSONL captured by the bench harness in &lt;strong&gt;in-process simulation mode&lt;/strong&gt;:
+both meta and data backends are pure-memory; the multi-shard / multi-
+replica race happens inside one &lt;code&gt;strata-admin&lt;/code&gt; process via the &lt;code&gt;--shards&lt;/code&gt;
+(gc) / &lt;code&gt;--replicas&lt;/code&gt; (lifecycle) flags wired in US-006.&lt;/p&gt;
+&lt;h2 id="files"&gt;Files&lt;a class="anchor" href="#files"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;table&gt;
+ &lt;thead&gt;
+ &lt;tr&gt;
+ &lt;th&gt;File&lt;/th&gt;
+ &lt;th&gt;What&lt;/th&gt;
+ &lt;th&gt;How to regenerate&lt;/th&gt;
+ &lt;/tr&gt;
+ &lt;/thead&gt;
+ &lt;tbody&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sim-bench-gc-shards1.jsonl&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;gc bench, single-leader (Phase 1 shape), N=50000, c∈{1,4,16,64,256}&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;for c in 1 4 16 64 256; do STRATA_META_BACKEND=memory STRATA_DATA_BACKEND=memory ./bin/strata-admin bench-gc --entries=50000 --concurrency=$c --shards=1; done | jq -c .&lt;/code&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sim-bench-gc-shards3.jsonl&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;gc bench, 3-shard (Phase 2 shape), N=50000&lt;/td&gt;
+ &lt;td&gt;…&lt;code&gt;--shards=3&lt;/code&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sim-bench-lifecycle-replicas1.jsonl&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;lifecycle bench, single-replica (Phase 1), N=10000, 1 bucket&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;for c in …; do … bench-lifecycle --objects=10000 --concurrency=$c --replicas=1 --buckets=1; done&lt;/code&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sim-bench-lifecycle-replicas3.jsonl&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;lifecycle bench, 3-replica (Phase 2), N=10000, 9 buckets&lt;/td&gt;
+ &lt;td&gt;…&lt;code&gt;--replicas=3 --buckets=9&lt;/code&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h2 id="caveats"&gt;Caveats&lt;a class="anchor" href="#caveats"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;Memory meta + memory data put the worker on a fast path with effectively
+zero per-op latency. Concurrency speedup that the production lab observes
+on TiKV (real pessimistic-txn round-trips) does NOT manifest here — the
+in-process Go RWMutex is the bottleneck. Treat these numbers as a noise
+floor that pins the &lt;strong&gt;shape of multi-leader coordination overhead&lt;/strong&gt;, not
+as a forecast of production throughput.&lt;/li&gt;
+&lt;li&gt;For the canonical Phase 2 numbers operators should rerun
+&lt;code&gt;make bench-gc-multi&lt;/code&gt; / &lt;code&gt;make bench-lifecycle-multi&lt;/code&gt; against the
+3-replica lab brought up via &lt;code&gt;make up-lab-tikv-3&lt;/code&gt; (see
+&lt;code&gt;docs/site/content/architecture/benchmarks/gc-lifecycle.md&lt;/code&gt;&amp;rsquo;s &amp;ldquo;Phase 2 — multi-leader&amp;rdquo; section).&lt;/li&gt;
+&lt;li&gt;Every JSON object on a line is one bench level (one &lt;code&gt;(--concurrency, --shards|--replicas)&lt;/code&gt; combination). Schema matches &lt;code&gt;cmd/strata-admin/ bench_common.go::benchResult&lt;/code&gt;.&lt;/li&gt;
+&lt;/ul&gt;</description></item></channel></rss>

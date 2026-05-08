@@ -1,0 +1,577 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Strata Documentation</title><link>https://danchupin.github.io/strata/</link><description>Recent content on Strata Documentation</description><generator>Hugo</generator><language>en</language><atom:link href="https://danchupin.github.io/strata/index.xml" rel="self" type="application/rss+xml"/><item><title>Auth</title><link>https://danchupin.github.io/strata/architecture/auth/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/auth/</guid><description>&lt;h1 id="auth"&gt;Auth&lt;a class="anchor" href="#auth"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;The auth layer lives under &lt;code&gt;internal/auth/&lt;/code&gt;. Every request enters through
+&lt;code&gt;auth.Middleware&lt;/code&gt;, which verifies an AWS SigV4 signature, derives a stable
+identity, and stamps the result onto the request context. The router and
+handlers downstream never re-derive identity — they read it from
+&lt;code&gt;auth.FromContext(ctx).Owner&lt;/code&gt;.&lt;/p&gt;
+&lt;h2 id="sigv4-verification"&gt;SigV4 verification&lt;a class="anchor" href="#sigv4-verification"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;code&gt;internal/auth/sigv4.go&lt;/code&gt; implements the standard four-step canonicalisation:&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;Parse &lt;code&gt;Authorization&lt;/code&gt; (or &lt;code&gt;X-Amz-*&lt;/code&gt; query parameters for presigned URLs)
+to extract &lt;code&gt;AccessKey&lt;/code&gt;, &lt;code&gt;Scope&lt;/code&gt;, &lt;code&gt;SignedHeaders&lt;/code&gt;, and &lt;code&gt;Signature&lt;/code&gt;.&lt;/li&gt;
+&lt;li&gt;Look up the secret for the access key via the configured static
+credentials store (&lt;code&gt;internal/auth/static.go&lt;/code&gt;) — no IdP federation in
+this cycle.&lt;/li&gt;
+&lt;li&gt;Build the canonical request string from &lt;code&gt;Method&lt;/code&gt;, &lt;code&gt;URL.Path&lt;/code&gt;, the
+sorted &lt;code&gt;SignedHeaders&lt;/code&gt;, and the body hash (&lt;code&gt;x-amz-content-sha256&lt;/code&gt;,
+which may be the literal sentinel &lt;code&gt;STREAMING-AWS4-HMAC-SHA256-PAYLOAD&lt;/code&gt;
+for chunked uploads — see below).&lt;/li&gt;
+&lt;li&gt;Recompute the signature with the derived signing key and constant-time
+compare. Mismatch returns &lt;code&gt;ErrSignatureInvalid&lt;/code&gt; (HTTP 403, AWS code
+&lt;code&gt;SignatureDoesNotMatch&lt;/code&gt;).&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;The middleware MUST run before any URL rewriting. The signed canonical
+string includes the original &lt;code&gt;Host&lt;/code&gt; header and the original
+&lt;code&gt;URL.Path&lt;/code&gt; — if the router rewrites either before verification, the
+signature breaks. See the &lt;a href="https://danchupin.github.io/strata/architecture/router/"&gt;Router page&lt;/a&gt;
+for the order.&lt;/p&gt;</description></item><item><title>Binary consolidation</title><link>https://danchupin.github.io/strata/architecture/migrations/binary-consolidation/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/migrations/binary-consolidation/</guid><description>&lt;h1 id="migrating-to-the-unified-strata-binary"&gt;Migrating to the unified &lt;code&gt;strata&lt;/code&gt; binary&lt;a class="anchor" href="#migrating-to-the-unified-strata-binary"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata used to ship eleven &lt;code&gt;cmd/*&lt;/code&gt; binaries — one gateway plus a long tail of
+single-purpose worker daemons. The codebase now ships exactly two:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;strata&lt;/code&gt; — the gateway plus every long-running background worker, selected
+at startup via &lt;code&gt;STRATA_WORKERS=&lt;/code&gt; (or &lt;code&gt;--workers=&lt;/code&gt;).&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;strata-admin&lt;/code&gt; — the operator CLI for one-shot maintenance tasks.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;This guide is the operator-facing checklist for upgrading an existing deploy.
+There is no schema migration, no data migration, and no env-var rename — the
+move is purely a packaging change.&lt;/p&gt;</description></item><item><title>GC + Lifecycle scaling</title><link>https://danchupin.github.io/strata/architecture/benchmarks/gc-lifecycle/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/benchmarks/gc-lifecycle/</guid><description>&lt;h1 id="gc--lifecycle-worker-scaling-benchmark-phase-1--phase-2"&gt;GC + Lifecycle worker scaling benchmark (Phase 1 + Phase 2)&lt;a class="anchor" href="#gc--lifecycle-worker-scaling-benchmark-phase-1--phase-2"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;blockquote class='book-hint '&gt;
+&lt;p&gt;Phase 2 (US-006) lands &lt;strong&gt;multi-leader&lt;/strong&gt; numbers below Phase 1&amp;rsquo;s single-leader
+baseline. The two-section structure is intentional — Phase 1 measured the
+per-leader concurrency cap, Phase 2 measures the multiplier from running N
+replicas in parallel under &lt;code&gt;STRATA_GC_SHARDS=N&lt;/code&gt;.&lt;/p&gt;
+&lt;/blockquote&gt;&lt;h2 id="phase-1--single-leader-concurrency-cap"&gt;Phase 1 — single-leader concurrency cap&lt;a class="anchor" href="#phase-1--single-leader-concurrency-cap"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;Quantifies the throughput curve for &lt;code&gt;internal/gc.Worker&lt;/code&gt; and
+&lt;code&gt;internal/lifecycle.Worker&lt;/code&gt; across the per-worker bounded-errgroup
+fan-out introduced in cycle &lt;code&gt;ralph/gc-lifecycle-scale&lt;/code&gt; (US-001 / US-002).
+The harness lands as &lt;code&gt;strata-admin bench-gc&lt;/code&gt; + &lt;code&gt;strata-admin bench-lifecycle&lt;/code&gt;
+(US-003) and is wired into &lt;code&gt;make bench-gc&lt;/code&gt; / &lt;code&gt;make bench-lifecycle&lt;/code&gt; to drive
+the canonical lab-tikv stack.&lt;/p&gt;</description></item><item><title>Router</title><link>https://danchupin.github.io/strata/architecture/router/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/router/</guid><description>&lt;h1 id="router"&gt;Router&lt;a class="anchor" href="#router"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;The router lives in &lt;code&gt;internal/s3api/server.go&lt;/code&gt;. It is a single
+&lt;code&gt;Server.ServeHTTP&lt;/code&gt; method that classifies every request along three axes:&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;Special prefix&lt;/strong&gt; — &lt;code&gt;/admin/...&lt;/code&gt; is the embedded operator console JSON
+API and bypasses the S3 dispatch entirely.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Bucket vs object scope&lt;/strong&gt; — the URL path is split at the first slash
+into &lt;code&gt;(bucket, key)&lt;/code&gt;. Empty bucket → service-level (ListBuckets, IAM
+actions). Empty key → bucket-scoped. Both populated → object-scoped.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Query-string sub-resource&lt;/strong&gt; — within bucket and object scope, the
+sub-operation is dispatched by query parameter (&lt;code&gt;?cors&lt;/code&gt;, &lt;code&gt;?policy&lt;/code&gt;,
+&lt;code&gt;?lifecycle&lt;/code&gt;, &lt;code&gt;?uploads&lt;/code&gt;, &lt;code&gt;?uploadId=&lt;/code&gt;, &lt;code&gt;?tagging&lt;/code&gt;, …) plus the HTTP
+method. This is the AWS S3 wire shape; we mirror it.&lt;/li&gt;
+&lt;/ol&gt;
+&lt;h2 id="dispatch-order"&gt;Dispatch order&lt;a class="anchor" href="#dispatch-order"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;pre tabindex="0"&gt;&lt;code&gt;ServeHTTP(w, r):
+ 1. extractAccessPointAlias(r.Host) # alias.&amp;lt;host&amp;gt; -&amp;gt; rewrite to /&amp;lt;bucket&amp;gt;/...
+ 2. extractVHostBucket(r.Host, ...) # *.s3.local -&amp;gt; rewrite to /&amp;lt;bucket&amp;gt;/...
+ 3. if path starts with /admin/ -&amp;gt; handleAdmin
+ 4. splitPath(r.URL.Path) -&amp;gt; (bucket, key)
+ 5. bucket == &amp;#34;&amp;#34; -&amp;gt; IAM action / ListBuckets / DLQ-audit listings
+ key == &amp;#34;&amp;#34; -&amp;gt; handleBucket(...)
+ default -&amp;gt; handleObject(...)&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;Auth middleware runs &lt;strong&gt;before&lt;/strong&gt; the access-point and vhost rewrites because
+those rewrites only mutate &lt;code&gt;r.URL.Path&lt;/code&gt; after SigV4 has already validated
+the original. See &lt;a href="https://danchupin.github.io/strata/architecture/auth/"&gt;Auth&lt;/a&gt; for the ordering
+rationale.&lt;/p&gt;</description></item><item><title>ScyllaDB</title><link>https://danchupin.github.io/strata/architecture/backends/scylla/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/backends/scylla/</guid><description>&lt;h1 id="scylladb-metadata-backend"&gt;ScyllaDB metadata backend&lt;a class="anchor" href="#scylladb-metadata-backend"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;ScyllaDB is supported as a drop-in replacement for Apache Cassandra. Strata&amp;rsquo;s
+metadata access path is gocql + CQL — no Cassandra-specific extensions are
+used — so the same &lt;code&gt;internal/meta/cassandra&lt;/code&gt; backend talks to either cluster.
+The &lt;code&gt;storetest.Run&lt;/code&gt; contract suite (35+ scenarios covering bucket/object/multipart
+LWT semantics, sharded &lt;code&gt;objects&lt;/code&gt; listing, GC and notification queues, audit log,
+versioning null literal, access points, etc.) passes against both.&lt;/p&gt;
+&lt;h2 id="compatibility-status"&gt;Compatibility status&lt;a class="anchor" href="#compatibility-status"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Code&lt;/strong&gt;: zero gateway changes required to switch from Cassandra to ScyllaDB.
+Point &lt;code&gt;STRATA_CASSANDRA_HOSTS&lt;/code&gt; (and friends) at a Scylla cluster and bring up
+the gateway as usual.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Schema&lt;/strong&gt;: same DDL — &lt;code&gt;internal/meta/cassandra/schema.go::tableDDL&lt;/code&gt;
+applies as-is. No &lt;code&gt;ALTER&lt;/code&gt; differences.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Consistency&lt;/strong&gt;: gateway uses &lt;code&gt;LOCAL_QUORUM&lt;/code&gt; for reads/writes and
+&lt;code&gt;LOCAL_SERIAL&lt;/code&gt; for LWT (&lt;code&gt;internal/meta/cassandra/session.go&lt;/code&gt;). ScyllaDB
+honours both.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;LWT&lt;/strong&gt;: bucket creation, versioning toggle, multipart Complete, GC ack,
+storage-class transitions, lifecycle worker leases — all rely on
+&lt;code&gt;IF NOT EXISTS&lt;/code&gt; / &lt;code&gt;IF EXISTS&lt;/code&gt;. ScyllaDB 5.0 ships LWT on the Paxos protocol
+by default; ScyllaDB 5.4+ optionally enables Raft-backed LWT
+(&lt;code&gt;raft_lwt&lt;/code&gt;-enabled tables) which dramatically reduces tail latency. The
+storetest contract is agnostic to the underlying coordination protocol; it
+only asserts the linearizable observable behaviour, which both Paxos and
+Raft modes provide.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Sharded &lt;code&gt;objects&lt;/code&gt; listing&lt;/strong&gt;: Strata fans out &lt;code&gt;N=64&lt;/code&gt; shard partitions in
+parallel (&lt;code&gt;cassandra.Store.ListObjects&lt;/code&gt;). ScyllaDB&amp;rsquo;s per-shard CPU pinning is
+a natural fit for this access pattern — token-aware queries land on the
+right shard with a single hop.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2 id="deployment-notes"&gt;Deployment notes&lt;a class="anchor" href="#deployment-notes"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;h3 id="connection"&gt;Connection&lt;a class="anchor" href="#connection"&gt;#&lt;/a&gt;&lt;/h3&gt;
+&lt;pre tabindex="0"&gt;&lt;code&gt;STRATA_CASSANDRA_HOSTS=scylla-1.example,scylla-2.example,scylla-3.example
+STRATA_CASSANDRA_KEYSPACE=strata
+STRATA_CASSANDRA_LOCAL_DC=datacenter1
+STRATA_CASSANDRA_REPLICATION=&amp;#39;{&amp;#34;class&amp;#34;:&amp;#34;NetworkTopologyStrategy&amp;#34;,&amp;#34;datacenter1&amp;#34;:&amp;#34;3&amp;#34;}&amp;#39;&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;&lt;code&gt;STRATA_CASSANDRA_LOCAL_DC&lt;/code&gt; should match the Scylla &lt;code&gt;dc&lt;/code&gt; you want token-aware
+routing to prefer. Multi-DC deployments work identically to Cassandra:
+&lt;code&gt;NetworkTopologyStrategy&lt;/code&gt; keyspace + per-DC RF.&lt;/p&gt;</description></item><item><title>Single-node deployment</title><link>https://danchupin.github.io/strata/deploy/single-node/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/deploy/single-node/</guid><description>&lt;h1 id="single-node-strata"&gt;Single-node Strata&lt;a class="anchor" href="#single-node-strata"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;A single-node deployment runs one &lt;code&gt;strata&lt;/code&gt; process. It is the simplest shape
+Strata ships and the recommended starting point for labs, evaluation, and
+single-tenant pilots. The gateway is HTTP-stateless — durability lives in
+the metadata + data backends — so a single replica is &lt;strong&gt;not&lt;/strong&gt; an HA shape:
+the box is the SPOF for HTTP traffic. For HA, see
+&lt;a href="https://danchupin.github.io/strata/deploy/multi-replica/"&gt;Multi-replica cluster&lt;/a&gt;.&lt;/p&gt;
+&lt;h2 id="when-to-pick-this-shape"&gt;When to pick this shape&lt;a class="anchor" href="#when-to-pick-this-shape"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;table&gt;
+ &lt;thead&gt;
+ &lt;tr&gt;
+ &lt;th&gt;Use case&lt;/th&gt;
+ &lt;th&gt;Notes&lt;/th&gt;
+ &lt;/tr&gt;
+ &lt;/thead&gt;
+ &lt;tbody&gt;
+ &lt;tr&gt;
+ &lt;td&gt;Local dev / smoke tests&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;make run-memory&lt;/code&gt; boots a fully in-memory gateway in &amp;lt;1 s. No Docker.&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;Single-tenant evaluation&lt;/td&gt;
+ &lt;td&gt;One replica + Cassandra + memory data is enough to run the s3-tests suite end-to-end.&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;Lab / classroom&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;make up-all&lt;/code&gt; boots cassandra + ceph + strata in one command.&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;Production single-tenant&lt;/td&gt;
+ &lt;td&gt;Acceptable when planned downtime windows allow gateway restarts; pair with external monitoring on &lt;code&gt;/readyz&lt;/code&gt;.&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;For multi-tenant production traffic, scale to ≥2 replicas and pick a real
+metadata cluster (Cassandra ≥3 nodes or TiKV with PD ≥3 + TiKV ≥3).&lt;/p&gt;</description></item><item><title>Web UI (Strata Console)</title><link>https://danchupin.github.io/strata/best-practices/web-ui/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/web-ui/</guid><description>&lt;h1 id="strata-console-web-ui--operator-guide"&gt;Strata Console (Web UI) — Operator Guide&lt;a class="anchor" href="#strata-console-web-ui--operator-guide"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;The Strata Console is an embedded read-only web UI for cluster operators.
+It ships in the same binary as the gateway (&lt;code&gt;go:embed&lt;/code&gt;) and is served at
+&lt;code&gt;/console/&lt;/code&gt; on the gateway HTTP port. No separate process, no separate
+deploy.&lt;/p&gt;
+&lt;p&gt;This document is the Phase 1 (foundation) operator guide. Phase 2 (admin
+write actions) and Phase 3 (debug tooling — heatmaps, slow queries, OTel
+trace browser) ship in their own cycles.&lt;/p&gt;</description></item><item><title>Docker Compose</title><link>https://danchupin.github.io/strata/deploy/docker-compose/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/deploy/docker-compose/</guid><description>&lt;h1 id="docker-compose-deployment"&gt;Docker Compose deployment&lt;a class="anchor" href="#docker-compose-deployment"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;The bundled &lt;code&gt;deploy/docker/docker-compose.yml&lt;/code&gt; is the canonical reference
+shape for a Strata stack on a single host. It ships every supported
+runtime profile so an operator can &lt;code&gt;docker compose --profile &amp;lt;name&amp;gt; up -d&lt;/code&gt;
+to switch between Cassandra-backed, TiKV-backed, multi-replica, and
+tracing variants without editing YAML.&lt;/p&gt;
+&lt;p&gt;This page distills the compose file for human readers. The compose file
+itself is the source of truth — when it changes, this page lags by one
+PR; cross-check container env / port assignments before depending on
+them.&lt;/p&gt;</description></item><item><title>Meta store</title><link>https://danchupin.github.io/strata/architecture/meta-store/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/meta-store/</guid><description>&lt;h1 id="meta-store"&gt;Meta store&lt;a class="anchor" href="#meta-store"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;&lt;code&gt;internal/meta/store.go&lt;/code&gt; defines &lt;code&gt;meta.Store&lt;/code&gt;, the interface every metadata
+backend implements. The contract is intentionally narrow: only the
+operations the S3 surface needs, and only with the consistency primitives
+the backends can all support without bolting a coordinator in front.&lt;/p&gt;
+&lt;p&gt;Three production-eligible backends satisfy &lt;code&gt;meta.Store&lt;/code&gt;:&lt;/p&gt;
+&lt;table&gt;
+ &lt;thead&gt;
+ &lt;tr&gt;
+ &lt;th&gt;Backend&lt;/th&gt;
+ &lt;th&gt;When to pick&lt;/th&gt;
+ &lt;th&gt;Notes&lt;/th&gt;
+ &lt;/tr&gt;
+ &lt;/thead&gt;
+ &lt;tbody&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;memory&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Tests, smoke pass, single-process demos&lt;/td&gt;
+ &lt;td&gt;In-process tree-map. Naturally ordered. No durability.&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;cassandra&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Multi-replica, scale tested against the s3-tests suite&lt;/td&gt;
+ &lt;td&gt;ScyllaDB drops in unchanged (CQL-compatible). Sharded objects table, fan-out + heap-merge listing.&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;tikv&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Multi-replica, prefer ordered scans&lt;/td&gt;
+ &lt;td&gt;Native KV via &lt;code&gt;tikv/client-go&lt;/code&gt;. Implements &lt;code&gt;RangeScanStore&lt;/code&gt; so &lt;code&gt;ListObjects&lt;/code&gt; is a single scan.&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;A new backend MUST satisfy &lt;code&gt;meta.Store&lt;/code&gt; and pass the contract suite at
+&lt;code&gt;internal/meta/storetest/contract.go&lt;/code&gt;. The suite is shared across all
+backends and is the parity oracle.&lt;/p&gt;</description></item><item><title>Data backend</title><link>https://danchupin.github.io/strata/architecture/data-backend/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/data-backend/</guid><description>&lt;h1 id="data-backend"&gt;Data backend&lt;a class="anchor" href="#data-backend"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;&lt;code&gt;internal/data/backend.go&lt;/code&gt; defines the &lt;code&gt;data.Backend&lt;/code&gt; interface every chunk
+store implements. The metadata layer keeps the per-object manifest (chunk
+list, sizes, content hash); the data backend is responsible for opaque
+fixed-size chunks only. The split is what lets us drop in different
+backing stores (RADOS, S3, in-memory) without touching the gateway.&lt;/p&gt;
+&lt;h2 id="backends"&gt;Backends&lt;a class="anchor" href="#backends"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;table&gt;
+ &lt;thead&gt;
+ &lt;tr&gt;
+ &lt;th&gt;Backend&lt;/th&gt;
+ &lt;th&gt;Build tag&lt;/th&gt;
+ &lt;th&gt;Notes&lt;/th&gt;
+ &lt;/tr&gt;
+ &lt;/thead&gt;
+ &lt;tbody&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;memory&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;none&lt;/td&gt;
+ &lt;td&gt;In-process map. Used by tests and the smoke pass.&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;rados&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;ceph&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;RADOS pools via &lt;code&gt;goceph&lt;/code&gt; (cgo, librados). Requires &lt;code&gt;make build&lt;/code&gt; with &lt;code&gt;-tags ceph&lt;/code&gt; or the docker-built image. Multi-cluster routing supported.&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;s3&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;none&lt;/td&gt;
+ &lt;td&gt;S3-over-S3 — Strata as a transparent gateway in front of an upstream S3 endpoint. Useful for migrating from MinIO / SeaweedFS / AWS without lifting and shifting data.&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;Selection is via &lt;code&gt;STRATA_DATA_BACKEND&lt;/code&gt; (&lt;code&gt;memory&lt;/code&gt; / &lt;code&gt;rados&lt;/code&gt; / &lt;code&gt;s3&lt;/code&gt;). RADOS
+requires the configured pool (&lt;code&gt;[rados] classes&lt;/code&gt;) to exist; the
+&lt;a href="https://danchupin.github.io/strata/architecture/storage/"&gt;Storage status page&lt;/a&gt; covers the
+operator-facing health surface.&lt;/p&gt;</description></item><item><title>GC + lifecycle Phase 2</title><link>https://danchupin.github.io/strata/architecture/migrations/gc-lifecycle-phase-2/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/migrations/gc-lifecycle-phase-2/</guid><description>&lt;h1 id="migrating-to-gc--lifecycle-phase-2-sharded-leader-election"&gt;Migrating to gc / lifecycle Phase 2 (sharded leader-election)&lt;a class="anchor" href="#migrating-to-gc--lifecycle-phase-2-sharded-leader-election"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Phase 1 (cycle &lt;code&gt;ralph/gc-lifecycle-scale&lt;/code&gt;, commit &lt;code&gt;6561845&lt;/code&gt;) lifted the
+per-leader concurrency cap via bounded &lt;code&gt;errgroup&lt;/code&gt; fan-out
+(&lt;code&gt;STRATA_GC_CONCURRENCY&lt;/code&gt; / &lt;code&gt;STRATA_LIFECYCLE_CONCURRENCY&lt;/code&gt;). The leader was
+still single-replica.&lt;/p&gt;
+&lt;p&gt;Phase 2 (cycle &lt;code&gt;ralph/gc-lifecycle-scale-phase-2&lt;/code&gt;) shards the leader-election
+space so multiple replicas process disjoint slices of the queue in parallel:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;gc gets &lt;code&gt;gc-leader-0..N-1&lt;/code&gt; lease keys driven by &lt;code&gt;STRATA_GC_SHARDS&lt;/code&gt; (default
+&lt;code&gt;1&lt;/code&gt;, range &lt;code&gt;[1, 1024]&lt;/code&gt;). Each replica races for one or more of the
+per-shard leases and drains only the entries it owns via
+&lt;code&gt;Meta.ListGCEntriesShard&lt;/code&gt;. The legacy global &lt;code&gt;gc-leader&lt;/code&gt; lease is retired.&lt;/li&gt;
+&lt;li&gt;lifecycle gets per-bucket leases (&lt;code&gt;lifecycle-leader-&amp;lt;bucketID&amp;gt;&lt;/code&gt;) plus a
+distribution gate (&lt;code&gt;fnv32a(bucketID) % STRATA_GC_SHARDS == myReplicaID&lt;/code&gt;,
+where &lt;code&gt;myReplicaID = min(GCFanOut.HeldShards())&lt;/code&gt;). The legacy global
+&lt;code&gt;lifecycle-leader&lt;/code&gt; lease is retired.&lt;/li&gt;
+&lt;li&gt;Backwards-compat: &lt;code&gt;STRATA_GC_SHARDS=1&lt;/code&gt; (default) reproduces Phase 1
+behaviour byte-for-byte. Existing &lt;code&gt;make smoke&lt;/code&gt; / &lt;code&gt;make smoke-tikv&lt;/code&gt; /
+&lt;code&gt;make smoke-lab-tikv&lt;/code&gt; continue to pass without configuration changes.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;This guide is the operator-facing checklist for the schema cutover and the
+multi-replica rollout.&lt;/p&gt;</description></item><item><title>Meta-backend comparison</title><link>https://danchupin.github.io/strata/architecture/benchmarks/meta-backend-comparison/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/benchmarks/meta-backend-comparison/</guid><description>&lt;h1 id="meta-backend-benchmarks-tikv-vs-cassandra"&gt;Meta-backend benchmarks: TiKV vs Cassandra&lt;a class="anchor" href="#meta-backend-benchmarks-tikv-vs-cassandra"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;This page captures hot-path latency / throughput numbers for Strata&amp;rsquo;s two
+production metadata backends (Cassandra and TiKV) and the in-tree memory
+reference. The numbers are operator-runnable on a single laptop docker
+stack via the harness in &lt;code&gt;internal/meta/storetest/bench.go&lt;/code&gt;.&lt;/p&gt;
+&lt;p&gt;The headline operations (US-018):&lt;/p&gt;
+&lt;table&gt;
+ &lt;thead&gt;
+ &lt;tr&gt;
+ &lt;th&gt;Op&lt;/th&gt;
+ &lt;th&gt;Why it matters&lt;/th&gt;
+ &lt;/tr&gt;
+ &lt;/thead&gt;
+ &lt;tbody&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;CreateBucket&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;LWT-equivalent create-if-not-exists&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;GetObject&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Single Get / latest-version range-scan&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;ListObjects&lt;/code&gt; 100k page=1k&lt;/td&gt;
+ &lt;td&gt;Listing throughput on a real-world bucket&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;CompleteMultipartUpload&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;LWT-equivalent status flip (&lt;code&gt;uploading→completing&lt;/code&gt;)&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;GetIAMAccessKey&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;SigV4 verifier — runs on every request&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;AuditAppend&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Audit log write amplification&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;AuditSweepPartition&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Periodic retention sweep (TiKV emulates Cassandra TTL)&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;RangeScanObjects&lt;/code&gt; 100k&lt;/td&gt;
+ &lt;td&gt;TiKV-only: native ordered scan vs Cassandra fan-out&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h2 id="rig"&gt;Rig&lt;a class="anchor" href="#rig"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;Single-laptop docker stack. Both backends run as 3-node clusters so LWT&lt;/p&gt;</description></item><item><title>Multi-replica cluster</title><link>https://danchupin.github.io/strata/deploy/multi-replica/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/deploy/multi-replica/</guid><description>&lt;h1 id="multi-replica-strata-cluster--operator-guide"&gt;Multi-replica Strata cluster — operator guide&lt;a class="anchor" href="#multi-replica-strata-cluster--operator-guide"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata&amp;rsquo;s gateway is &lt;strong&gt;stateless&lt;/strong&gt;. Replicas don&amp;rsquo;t form quorum among
+themselves; the storage layer (TiKV / RADOS) provides durability +
+consistency. A single replica is therefore a &lt;strong&gt;single point of failure for
+HTTP traffic&lt;/strong&gt; — not for data. Running &lt;strong&gt;≥2 replicas behind a load balancer&lt;/strong&gt;
+is the minimum HA shape.&lt;/p&gt;
+&lt;p&gt;This document covers the &lt;code&gt;lab-tikv&lt;/code&gt; compose profile (2 TiKV-backed replicas
+behind nginx at host port 9999) — the reference shape for multi-replica
+deployments.&lt;/p&gt;</description></item><item><title>Sizing</title><link>https://danchupin.github.io/strata/best-practices/sizing/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/sizing/</guid><description>&lt;h1 id="sizing"&gt;Sizing&lt;a class="anchor" href="#sizing"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata replicas are stateless gateways — they own no on-disk state, so
+sizing is a function of three signals: peak request rate (RPS), the
+working-set bytes the gateway holds in flight (RAM), and the cores the
+SigV4 + crypto path consumes (CPU). The metadata + data tiers
+(Cassandra / TiKV / RADOS) follow their own upstream sizing guides; this
+page covers the gateway tier and points operators at the upstream
+references.&lt;/p&gt;</description></item><item><title>TiKV</title><link>https://danchupin.github.io/strata/architecture/backends/tikv/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/backends/tikv/</guid><description>&lt;h1 id="tikv-metadata-backend"&gt;TiKV metadata backend&lt;a class="anchor" href="#tikv-metadata-backend"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;TiKV is a first-class metadata backend for Strata, on equal footing with
+Cassandra (and ScyllaDB as the CQL drop-in). The full &lt;code&gt;meta.Store&lt;/code&gt; contract
+in &lt;code&gt;internal/meta/storetest/contract.go&lt;/code&gt; runs against a real PD+TiKV cluster
+on every PR via &lt;code&gt;.github/workflows/ci-tikv.yml&lt;/code&gt;.&lt;/p&gt;
+&lt;p&gt;The fundamental shape difference vs Cassandra is the &lt;code&gt;objects&lt;/code&gt; table: TiKV
+keys are a flat ordered byte space, so &lt;code&gt;ListObjects&lt;/code&gt; is a single ordered
+range scan instead of Cassandra&amp;rsquo;s 64-way fan-out + heap-merge. The gateway
+discovers this at runtime via the optional &lt;code&gt;meta.RangeScanStore&lt;/code&gt; interface
+(&lt;code&gt;internal/meta/store.go&lt;/code&gt;) and dispatches to the native scan path
+automatically — no operator action required.&lt;/p&gt;</description></item><item><title>Workers</title><link>https://danchupin.github.io/strata/architecture/workers/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/workers/</guid><description>&lt;h1 id="workers"&gt;Workers&lt;a class="anchor" href="#workers"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Background loops run inside the same &lt;code&gt;cmd/strata server&lt;/code&gt; binary as the
+gateway. &lt;code&gt;STRATA_WORKERS=&lt;/code&gt; (or &lt;code&gt;--workers=&lt;/code&gt;) selects which to run; an
+empty list runs the gateway only. Each worker is leader-elected, panic-
+recovered, and supervised — one worker&amp;rsquo;s panic or lease loss never affects
+the gateway or sibling workers.&lt;/p&gt;
+&lt;h2 id="registry-shape"&gt;Registry shape&lt;a class="anchor" href="#registry-shape"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;Each worker has a per-worker file under &lt;code&gt;cmd/strata/workers/&amp;lt;name&amp;gt;.go&lt;/code&gt;
+that calls &lt;code&gt;workers.Register&lt;/code&gt; from &lt;code&gt;init()&lt;/code&gt;:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-go" data-lang="go"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="kd"&gt;func&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nf"&gt;init&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;workers&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;Register&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;workers&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Worker&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;Name&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;#34;gc&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;Build&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kd"&gt;func&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;deps&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;Dependencies&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;Runner&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kt"&gt;error&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;...&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;SkipLease&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// gc fan-out manages its own per-shard leases&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;})&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;&lt;code&gt;Build&lt;/code&gt; constructs the per-worker runner from the shared &lt;code&gt;workers.Dependencies&lt;/code&gt;
+struct (&lt;code&gt;Logger&lt;/code&gt;, &lt;code&gt;Meta&lt;/code&gt;, &lt;code&gt;Data&lt;/code&gt;, &lt;code&gt;Tracer&lt;/code&gt;, &lt;code&gt;Locker&lt;/code&gt;, &lt;code&gt;Region&lt;/code&gt;, &lt;code&gt;EmitLeader&lt;/code&gt;).
+Per-worker tunables (&lt;code&gt;STRATA_GC_INTERVAL&lt;/code&gt;, &lt;code&gt;STRATA_LIFECYCLE_*&lt;/code&gt;, …) are read
+inside &lt;code&gt;Build&lt;/code&gt; directly so the dependency surface stays small.&lt;/p&gt;</description></item><item><title>Monitoring</title><link>https://danchupin.github.io/strata/best-practices/monitoring/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/monitoring/</guid><description>&lt;h1 id="monitoring"&gt;Monitoring&lt;a class="anchor" href="#monitoring"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata exposes three observability surfaces and one operator console
+embedded in the gateway binary:&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;Prometheus metrics&lt;/strong&gt; at &lt;code&gt;/metrics&lt;/code&gt; (every replica).&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Structured slog logs&lt;/strong&gt; to stdout, JSON-shaped, correlated by
+&lt;code&gt;request_id&lt;/code&gt;.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;OpenTelemetry traces&lt;/strong&gt; exported via OTLP/HTTP, sampled tail-first
+with an in-process ring buffer for failed-trace replay.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Audit log&lt;/strong&gt; in the metadata backend (&lt;code&gt;audit_log&lt;/code&gt; table or TiKV
+prefix), one row per state-changing request.&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;This page covers the wire-up; the
+&lt;a href="https://danchupin.github.io/strata/architecture/observability/"&gt;Observability deep dive&lt;/a&gt;
+covers the implementation rationale.&lt;/p&gt;</description></item><item><title>S3-over-S3 data backend</title><link>https://danchupin.github.io/strata/architecture/backends/s3/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/backends/s3/</guid><description>&lt;h1 id="s3-data-backend"&gt;S3 Data Backend&lt;a class="anchor" href="#s3-data-backend"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;The S3-over-S3 data backend stores object bytes in any S3-compatible bucket
+(AWS S3, MinIO, Ceph RGW, Garage). One Strata object = one backend S3 object
+under the key &lt;code&gt;&amp;lt;bucket-uuid&amp;gt;/&amp;lt;object-uuid&amp;gt;&lt;/code&gt;. RADOS remains the default and
+recommended data backend; this page covers the S3 alternative.&lt;/p&gt;
+&lt;h2 id="when-to-choose-s3-over-rados"&gt;When to choose S3 over RADOS&lt;a class="anchor" href="#when-to-choose-s3-over-rados"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;table&gt;
+ &lt;thead&gt;
+ &lt;tr&gt;
+ &lt;th&gt;Question&lt;/th&gt;
+ &lt;th&gt;Pick &lt;strong&gt;RADOS&lt;/strong&gt; if&lt;/th&gt;
+ &lt;th&gt;Pick &lt;strong&gt;S3&lt;/strong&gt; if&lt;/th&gt;
+ &lt;/tr&gt;
+ &lt;/thead&gt;
+ &lt;tbody&gt;
+ &lt;tr&gt;
+ &lt;td&gt;Existing infra investment&lt;/td&gt;
+ &lt;td&gt;Operator already runs Ceph&lt;/td&gt;
+ &lt;td&gt;Operator already runs MinIO / has AWS account / wants Garage&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;Tail latency budget&lt;/td&gt;
+ &lt;td&gt;&amp;lt; 5 ms p99 GET on hot data is critical&lt;/td&gt;
+ &lt;td&gt;50–200 ms p99 GET is acceptable (HTTPS round-trip floor)&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;Bytes-stored cost model&lt;/td&gt;
+ &lt;td&gt;Self-hosted hardware, want bare-metal economics&lt;/td&gt;
+ &lt;td&gt;Cloud storage tiers (Standard-IA, Glacier) carry the lifecycle&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;Availability boundary&lt;/td&gt;
+ &lt;td&gt;Single-DC, hardware-controlled&lt;/td&gt;
+ &lt;td&gt;Multi-AZ via the cloud provider&amp;rsquo;s bucket SLA&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;Encryption-at-rest mandate&lt;/td&gt;
+ &lt;td&gt;Strata-side envelope encryption is enough&lt;/td&gt;
+ &lt;td&gt;Want backend SSE / KMS independent of Strata&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;Operational complexity&lt;/td&gt;
+ &lt;td&gt;Team owns Ceph operations&lt;/td&gt;
+ &lt;td&gt;Team owns S3 operations (or has zero ops via AWS)&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;The two backends are equal-tier alternatives — pick by what your operations
+team already runs. Mixing within a single Strata deployment is not supported
+(&lt;code&gt;STRATA_DATA_BACKEND&lt;/code&gt; is a single-value flag).&lt;/p&gt;</description></item><item><title>Storage status</title><link>https://danchupin.github.io/strata/architecture/storage/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/storage/</guid><description>&lt;h1 id="storage-status--operator-guide"&gt;Storage status — operator guide&lt;a class="anchor" href="#storage-status--operator-guide"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;The Storage page (&lt;code&gt;/console/storage&lt;/code&gt;) and the Cluster Overview Storage hero
+card surface the live health of the meta + data backends and the
+per-storage-class object distribution. This page covers the env vars the UI
+reads through, what each warning means, and how to interpret the
+RADOS / TiKV / Cassandra-specific signals.&lt;/p&gt;
+&lt;p&gt;The page is fed by three small admin endpoints:&lt;/p&gt;
+&lt;table&gt;
+ &lt;thead&gt;
+ &lt;tr&gt;
+ &lt;th&gt;Endpoint&lt;/th&gt;
+ &lt;th&gt;Returns&lt;/th&gt;
+ &lt;th&gt;Polled by&lt;/th&gt;
+ &lt;/tr&gt;
+ &lt;/thead&gt;
+ &lt;tbody&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;GET /admin/v1/storage/meta&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;MetaHealthReport&lt;/code&gt; (Cassandra peers / TiKV PD stores / memory)&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;/storage&lt;/code&gt; Meta tab @ 30 s&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;GET /admin/v1/storage/data&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;DataHealthReport&lt;/code&gt; (RADOS pool stats / S3 reachability / memory)&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;/storage&lt;/code&gt; Data tab @ 30 s&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;GET /admin/v1/storage/classes&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;{classes:[…], pools_by_class:{…}}&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;/storage&lt;/code&gt; Data tab @ 30 s, Cluster Overview hero @ 60 s&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;GET /admin/v1/storage/health&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;aggregate &lt;code&gt;{ok, warnings, source}&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;&amp;lt;StorageDegradedBanner&amp;gt;&lt;/code&gt; @ 30 s on every authed page&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;Schema details live in &lt;code&gt;internal/adminapi/openapi.yaml&lt;/code&gt;.&lt;/p&gt;</description></item><item><title>Sharding</title><link>https://danchupin.github.io/strata/architecture/sharding/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/sharding/</guid><description>&lt;h1 id="sharding"&gt;Sharding&lt;a class="anchor" href="#sharding"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Sharding is the single biggest divergence from Ceph RGW: every bucket&amp;rsquo;s
+metadata is split across &lt;code&gt;N&lt;/code&gt; partitions instead of living in a single
+bucket-index object. The split avoids RGW&amp;rsquo;s bucket-index ceiling at
+large object counts and lets ListObjects scale linearly with &lt;code&gt;N&lt;/code&gt;.&lt;/p&gt;
+&lt;h2 id="objects-table-partition-key"&gt;Objects table partition key&lt;a class="anchor" href="#objects-table-partition-key"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;The cassandra &lt;code&gt;objects&lt;/code&gt; table is partitioned by &lt;code&gt;(bucket_id, shard)&lt;/code&gt;:&lt;/p&gt;
+&lt;pre tabindex="0"&gt;&lt;code&gt;PRIMARY KEY ((bucket_id, shard), key, version_id)
+WITH CLUSTERING ORDER BY (key ASC, version_id DESC)&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;Where &lt;code&gt;shard = fnv32a(key) % N&lt;/code&gt; and &lt;code&gt;N&lt;/code&gt; is per-bucket
+(&lt;code&gt;STRATA_BUCKET_SHARDS&lt;/code&gt; at bucket creation, default 64). &lt;code&gt;N&lt;/code&gt; must be a
+power of two — &lt;code&gt;meta.IsValidShardCount(n)&lt;/code&gt; enforces it. Power-of-two
+constraint matters for the &lt;a href="#online-reshard"&gt;reshard worker&lt;/a&gt; below: when &lt;code&gt;N&lt;/code&gt; doubles, every old
+shard either stays under the new modulo or splits cleanly into two new
+ones, never three.&lt;/p&gt;</description></item><item><title>GC + lifecycle tuning</title><link>https://danchupin.github.io/strata/best-practices/gc-lifecycle-tuning/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/gc-lifecycle-tuning/</guid><description>&lt;h1 id="gc--lifecycle-tuning"&gt;GC + lifecycle tuning&lt;a class="anchor" href="#gc--lifecycle-tuning"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;The gc and lifecycle workers run inside every gateway replica. The
+operator-facing knobs split into two layers:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Phase 1 — per-replica fan-out:&lt;/strong&gt; &lt;code&gt;STRATA_GC_CONCURRENCY&lt;/code&gt; /
+&lt;code&gt;STRATA_LIFECYCLE_CONCURRENCY&lt;/code&gt; cap the goroutine count inside one
+replica&amp;rsquo;s worker.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Phase 2 — multi-replica sharding:&lt;/strong&gt; &lt;code&gt;STRATA_GC_SHARDS&lt;/code&gt; shards the
+leader-election space so N replicas process disjoint slices of the
+queue in parallel.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;Both layers compose: a 3-replica deploy with &lt;code&gt;STRATA_GC_SHARDS=3&lt;/code&gt; and
+per-replica &lt;code&gt;STRATA_GC_CONCURRENCY=64&lt;/code&gt; runs three independent fan-outs
+against disjoint shards.&lt;/p&gt;</description></item><item><title>Kubernetes</title><link>https://danchupin.github.io/strata/deploy/kubernetes/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/deploy/kubernetes/</guid><description>&lt;h1 id="kubernetes-deployment"&gt;Kubernetes deployment&lt;a class="anchor" href="#kubernetes-deployment"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata on Kubernetes is a stateless gateway tier in front of external
+metadata (TiKV / Cassandra) and object-data (RADOS / S3) clusters. Pods
+are interchangeable — no PVCs, no per-pod storage, no quorum among
+gateways. Scale horizontally with &lt;code&gt;kubectl scale&lt;/code&gt;; durability lives in
+the storage tier.&lt;/p&gt;
+&lt;p&gt;This page walks through the worked example committed under
+&lt;a href="https://github.com/danchupin/strata/tree/main/deploy/k8s"&gt;&lt;code&gt;deploy/k8s/&lt;/code&gt;&lt;/a&gt;
+— a 3-replica &lt;code&gt;Deployment&lt;/code&gt; + &lt;code&gt;Service&lt;/code&gt; + &lt;code&gt;ConfigMap&lt;/code&gt; + &lt;code&gt;Secret&lt;/code&gt; +
+&lt;code&gt;Ingress&lt;/code&gt; aimed at a production-shaped cluster.&lt;/p&gt;</description></item><item><title>Observability</title><link>https://danchupin.github.io/strata/architecture/observability/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/observability/</guid><description>&lt;h1 id="observability"&gt;Observability&lt;a class="anchor" href="#observability"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata ships three correlated observability surfaces: structured logs,
+an audit log table for state-changing requests, and OTel tracing with a
+ring-buffer trace browser embedded in the operator console. All three
+key off the same &lt;code&gt;request_id&lt;/code&gt; so an operator can pivot from one to the
+next without rebuilding context.&lt;/p&gt;
+&lt;h2 id="structured-logs-slog"&gt;Structured logs (slog)&lt;a class="anchor" href="#structured-logs-slog"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;code&gt;internal/logging&lt;/code&gt; is the canonical setup. Both binaries (&lt;code&gt;cmd/strata&lt;/code&gt;,
+&lt;code&gt;cmd/strata-admin&lt;/code&gt;) call &lt;code&gt;logging.Setup()&lt;/code&gt; first thing to install a
+JSON-handler &lt;code&gt;*slog.Logger&lt;/code&gt; driven by &lt;code&gt;STRATA_LOG_LEVEL&lt;/code&gt;
+(&lt;code&gt;DEBUG&lt;/code&gt;/&lt;code&gt;INFO&lt;/code&gt;/&lt;code&gt;WARN&lt;/code&gt;/&lt;code&gt;ERROR&lt;/code&gt;; default &lt;code&gt;INFO&lt;/code&gt;).&lt;/p&gt;</description></item><item><title>Backup + restore</title><link>https://danchupin.github.io/strata/best-practices/backup-restore/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/backup-restore/</guid><description>&lt;h1 id="backup--restore"&gt;Backup + restore&lt;a class="anchor" href="#backup--restore"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata splits backup responsibility along the same tiers the gateway
+splits state into:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Metadata tier (Cassandra / TiKV):&lt;/strong&gt; the source of truth for
+bucket / object / IAM rows. Backed up via the upstream tooling for
+each backend.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Data tier (RADOS / S3-over-S3):&lt;/strong&gt; chunk bytes. Backed up via Ceph
+pool snapshots or the upstream S3 service&amp;rsquo;s native versioning /
+replication.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Cross-region replication (replicator worker):&lt;/strong&gt; ships object PUT /
+DELETE events to a peer Strata cluster in near-real time.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Inventory worker:&lt;/strong&gt; writes manifest.json + CSV.gz pairs that
+document every object in a bucket — useful as an audit ledger for
+external backup tooling.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;This page is a backup-strategy overview. Implementation details live in
+&lt;a href="https://danchupin.github.io/strata/architecture/workers/"&gt;Architecture — Workers&lt;/a&gt; (the
+inventory + replicator workers) and the upstream docs for Ceph /
+Cassandra / TiKV.&lt;/p&gt;</description></item><item><title>Capacity planning</title><link>https://danchupin.github.io/strata/best-practices/capacity-planning/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/capacity-planning/</guid><description>&lt;h1 id="capacity-planning"&gt;Capacity planning&lt;a class="anchor" href="#capacity-planning"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Capacity on a Strata deploy splits across three independently-scaled
+tiers:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Gateway tier:&lt;/strong&gt; stateless replicas. Capacity = peak RPS / SigV4 +
+routing budget per replica. Scale horizontally; see
+&lt;a href="https://danchupin.github.io/strata/best-practices/sizing/"&gt;Sizing&lt;/a&gt;.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Metadata tier:&lt;/strong&gt; Cassandra / TiKV. Capacity = total object-row
+count × per-row overhead, plus the LWT / pessimistic-txn rate during
+writes.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Data tier:&lt;/strong&gt; RADOS / S3-over-S3. Capacity = total object bytes ×
+pool replication factor, plus chunk fan-out overhead.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;This page covers the math; pair with
+&lt;a href="https://danchupin.github.io/strata/best-practices/backup-restore/"&gt;Backup + restore&lt;/a&gt; for
+the backup overhead and
+&lt;a href="https://danchupin.github.io/strata/best-practices/gc-lifecycle-tuning/"&gt;GC + lifecycle tuning&lt;/a&gt;
+for the drain rate.&lt;/p&gt;</description></item><item><title/><link>https://danchupin.github.io/strata/architecture/benchmarks/data/gc-lifecycle-phase-2/README/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/benchmarks/data/gc-lifecycle-phase-2/README/</guid><description>&lt;h1 id="phase-2--gc--lifecycle-multi-leader-bench-artifacts"&gt;Phase 2 — gc + lifecycle multi-leader bench artifacts&lt;a class="anchor" href="#phase-2--gc--lifecycle-multi-leader-bench-artifacts"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;JSONL captured by the bench harness in &lt;strong&gt;in-process simulation mode&lt;/strong&gt;:
+both meta and data backends are pure-memory; the multi-shard / multi-
+replica race happens inside one &lt;code&gt;strata-admin&lt;/code&gt; process via the &lt;code&gt;--shards&lt;/code&gt;
+(gc) / &lt;code&gt;--replicas&lt;/code&gt; (lifecycle) flags wired in US-006.&lt;/p&gt;
+&lt;h2 id="files"&gt;Files&lt;a class="anchor" href="#files"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;table&gt;
+ &lt;thead&gt;
+ &lt;tr&gt;
+ &lt;th&gt;File&lt;/th&gt;
+ &lt;th&gt;What&lt;/th&gt;
+ &lt;th&gt;How to regenerate&lt;/th&gt;
+ &lt;/tr&gt;
+ &lt;/thead&gt;
+ &lt;tbody&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sim-bench-gc-shards1.jsonl&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;gc bench, single-leader (Phase 1 shape), N=50000, c∈{1,4,16,64,256}&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;for c in 1 4 16 64 256; do STRATA_META_BACKEND=memory STRATA_DATA_BACKEND=memory ./bin/strata-admin bench-gc --entries=50000 --concurrency=$c --shards=1; done | jq -c .&lt;/code&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sim-bench-gc-shards3.jsonl&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;gc bench, 3-shard (Phase 2 shape), N=50000&lt;/td&gt;
+ &lt;td&gt;…&lt;code&gt;--shards=3&lt;/code&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sim-bench-lifecycle-replicas1.jsonl&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;lifecycle bench, single-replica (Phase 1), N=10000, 1 bucket&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;for c in …; do … bench-lifecycle --objects=10000 --concurrency=$c --replicas=1 --buckets=1; done&lt;/code&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;sim-bench-lifecycle-replicas3.jsonl&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;lifecycle bench, 3-replica (Phase 2), N=10000, 9 buckets&lt;/td&gt;
+ &lt;td&gt;…&lt;code&gt;--replicas=3 --buckets=9&lt;/code&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h2 id="caveats"&gt;Caveats&lt;a class="anchor" href="#caveats"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;Memory meta + memory data put the worker on a fast path with effectively
+zero per-op latency. Concurrency speedup that the production lab observes
+on TiKV (real pessimistic-txn round-trips) does NOT manifest here — the
+in-process Go RWMutex is the bottleneck. Treat these numbers as a noise
+floor that pins the &lt;strong&gt;shape of multi-leader coordination overhead&lt;/strong&gt;, not
+as a forecast of production throughput.&lt;/li&gt;
+&lt;li&gt;For the canonical Phase 2 numbers operators should rerun
+&lt;code&gt;make bench-gc-multi&lt;/code&gt; / &lt;code&gt;make bench-lifecycle-multi&lt;/code&gt; against the
+3-replica lab brought up via &lt;code&gt;make up-lab-tikv-3&lt;/code&gt; (see
+&lt;code&gt;docs/site/content/architecture/benchmarks/gc-lifecycle.md&lt;/code&gt;&amp;rsquo;s &amp;ldquo;Phase 2 — multi-leader&amp;rdquo; section).&lt;/li&gt;
+&lt;li&gt;Every JSON object on a line is one bench level (one &lt;code&gt;(--concurrency, --shards|--replicas)&lt;/code&gt; combination). Schema matches &lt;code&gt;cmd/strata-admin/ bench_common.go::benchResult&lt;/code&gt;.&lt;/li&gt;
+&lt;/ul&gt;</description></item></channel></rss>
