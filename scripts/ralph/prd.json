@@ -1,19 +1,21 @@
 {
   "project": "Strata",
   "branchName": "ralph/docs-site-hugo",
-  "description": "Documentation site (Hugo + GitHub Pages). docs/ today is a flat collection of operator-facing notes (ui.md, multi-replica.md, storage.md, backends/*.md, benchmarks/*.md, migrations/*.md) — no navigation, no cross-linking, no rendered home page. This cycle ships a Hugo-based static site under docs/site/ with a sectioned tree (Getting started → Architecture → Operators → Backends → Migrations → Benchmarks → Developers), builds it via a GitHub Action on every merge to main, and publishes to GitHub Pages at https://danchupin.github.io/strata/. Existing .md files are moved into the new tree (not duplicated) with proper Hugo frontmatter for sidebar ordering. `make docs-serve` brings up local Hugo dev server on :1313. README links to the published site. OpenAPI viewer (Redoc/Swagger UI) for internal/adminapi/openapi.yaml is deferred — queued as a separate P3 follow-up. 7 stories. Closes ROADMAP P2 'Full project documentation site (GitHub Pages)' on cycle close.",
+  "description": "Documentation site (Hugo + GitHub Pages, CockroachDB-shape). docs/ today is a flat collection of operator-facing notes — no navigation, no landing page. This cycle ships a Hugo-based static site under docs/site/ whose information architecture mirrors CockroachDB's docs (https://www.cockroachlabs.com/docs/stable/): a marketing-quality landing page surfacing killer features, a Get Started flow, deployment guides for every target environment (single-node, Docker Compose, multi-replica with TiKV, Kubernetes with apply-tested example manifests under deploy/k8s/), Best Practices (sizing, monitoring, GC/lifecycle tuning, backup, capacity planning), an explicit Supported / Unsupported S3 surface page, and a deep Architecture section with one page per layer (auth, router, meta-store, data-backend, workers, sharding, observability). Built + published via GitHub Action on every merge to main; live at https://danchupin.github.io/strata/. README links prominently to the published site. `make docs-serve` brings up local Hugo dev preview on :1313. OpenAPI viewer (Redoc/Swagger UI) + Helm chart packaging + Reference-section expansion are OUT OF SCOPE this cycle — queued as separate P3 follow-ups. 12 stories. Closes ROADMAP P2 'Full project documentation site (GitHub Pages)' on cycle close.",
   "userStories": [
     {
       "id": "US-001",
-      "title": "Hugo scaffolding + theme + first build",
-      "description": "As a maintainer, I need a Hugo site under `docs/site/` that builds to static HTML so the publishing pipeline has something to publish.",
+      "title": "Hugo scaffolding + theme + Makefile targets",
+      "description": "As a maintainer, I need a Hugo site under `docs/site/` plus `make docs-serve` / `make docs-build` so the publishing pipeline has something to publish and contributors have a one-command preview.",
       "acceptanceCriteria": [
-        "`docs/site/` contains a Hugo project (`config.toml` or `hugo.toml`, `content/`, `themes/`, `static/`, `layouts/` as needed).",
-        "Theme: `hugo-book` (or equivalent technical-docs theme — pick whichever is healthier as of cycle start by last-commit date + open-issue count) added as a Git submodule under `docs/site/themes/<theme>/`.",
+        "`docs/site/` contains a Hugo project (`hugo.toml`, `content/`, `themes/`, `static/`, `layouts/` as needed).",
+        "Theme: `hugo-book` added as a Git submodule under `docs/site/themes/hugo-book/`. (Or another technical-docs theme if hugo-book is unhealthy at cycle start — pick by last-commit date + open-issue count.)",
         "Site title: 'Strata Documentation'. Base URL: `https://danchupin.github.io/strata/`.",
-        "`cd docs/site && hugo` produces a `public/` directory with rendered HTML.",
+        "`cd docs/site && hugo --minify` produces a `public/` directory with rendered HTML.",
         "`docs/site/public/` is gitignored.",
-        "Stub `content/_index.md` with project tagline + link to 'Getting started'.",
+        "`Makefile` gains `docs-serve` (→ `cd docs/site && hugo server -D` on `:1313`) and `docs-build` (→ `cd docs/site && hugo --minify`).",
+        "`make docs-serve` documented in CLAUDE.md `## Common commands` table.",
+        "Stub `content/_index.md` with project tagline + link to 'Get Started' (full landing page content lands in US-003).",
         "No regressions: `go vet ./...` clean, `go test ./...` clean.",
         "Typecheck passes (`go vet ./...`)"
       ],
@@ -23,17 +25,15 @@
     },
     {
       "id": "US-002",
-      "title": "Reorganise existing `docs/*.md` into Hugo content tree",
+      "title": "Section skeleton + move existing `docs/*.md` into the tree",
       "description": "As a reader, I need the existing operator notes laid out in a sectioned tree so I can navigate them via the sidebar.",
       "acceptanceCriteria": [
-        "`docs/site/content/` gains the section structure: getting-started/, architecture/, operators/, backends/, migrations/, benchmarks/, developers/.",
-        "Existing files MOVED via `git mv` (not duplicated): docs/storage.md → operators/storage.md; docs/multi-replica.md → operators/multi-replica.md; docs/ui.md → operators/ui.md; docs/backends/{tikv,scylla,s3}.md → backends/; docs/benchmarks/{gc-lifecycle,meta-backend-comparison}.md → benchmarks/; docs/migrations/{binary-consolidation,gc-lifecycle-phase-2}.md → migrations/.",
-        "The old flat layout under `docs/*.md` is gone after move; paths under `docs/site/content/` are the single canonical source.",
-        "Each moved page gets Hugo frontmatter: `title`, `weight` (controls sidebar ordering inside its section), and (optional) `description`.",
-        "Section index pages (`_index.md`) per section with a one-paragraph summary + link list.",
-        "All inter-doc cross-links updated to use Hugo's `{{< ref >}}` shortcode (or relative paths under the new layout) so they resolve in the rendered site.",
+        "`docs/site/content/` gains the section structure mirroring CockroachDB: `_index.md` (home stub), `get-started/_index.md` (stub), `deploy/_index.md` (section index), `architecture/_index.md` (stub), `best-practices/_index.md` (stub), `s3-compatibility/_index.md` (stub), `reference/_index.md` (stub — full content deferred), `developers/_index.md` (stub — editing docs, frontmatter, contributing).",
+        "Existing files MOVED via `git mv` (no duplicates): docs/storage.md → architecture/storage.md; docs/multi-replica.md → deploy/multi-replica.md; docs/ui.md → best-practices/web-ui.md (or operating subsection if cleaner); docs/backends/{tikv,scylla,s3}.md → architecture/backends/; docs/benchmarks/{gc-lifecycle,meta-backend-comparison}.md → architecture/benchmarks/; docs/migrations/{binary-consolidation,gc-lifecycle-phase-2}.md → architecture/migrations/. Per-section data/ artifact dirs move alongside their parent doc.",
+        "Each moved page gets Hugo frontmatter (`title`, `weight`, `description`).",
+        "All inter-doc cross-links updated to use Hugo's `{{< ref >}}` shortcode (or relative paths) so they resolve in the rendered site.",
         "References to `docs/foo.md` in tooling files (CLAUDE.md, ROADMAP.md, code comments) updated to the new content paths under `docs/site/content/...` (canonical source). User-facing copy in README/ROADMAP may use the published-URL form.",
-        "`hugo` build is clean (no warnings about missing pages / broken refs).",
+        "`hugo --minify` build is clean (no warnings about missing pages or broken refs).",
         "Typecheck passes (`go vet ./...`)",
         "Tests pass (`go test ./...`)"
       ],
@@ -43,13 +43,16 @@
     },
     {
       "id": "US-003",
-      "title": "Landing page + Getting started + Architecture overview",
-      "description": "As a first-time visitor, I want a project home page that explains what Strata is and a Getting started flow that lets me bring up a local stack.",
+      "title": "Landing page — pitch + killer features + CTAs",
+      "description": "As a first-time visitor I want a home page that sells me on Strata and points me at where to start.",
       "acceptanceCriteria": [
-        "`content/_index.md` (the landing page) covers: one-paragraph elevator pitch ('S3-compatible object gateway, Cassandra/TiKV metadata, RADOS data, drop-in for Ceph RGW'), key features (sharded fan-out, TiKV ordered scan, multi-replica, online reshard, lifecycle, …), link to 'Getting started', link to 'Architecture', link to GitHub repo.",
-        "`content/getting-started/_index.md` covers: prerequisites (Go, Docker, RADOS for prod), `make up-all && make wait-cassandra` walkthrough, first bucket via `aws s3 mb`, smoke pass via `make smoke`.",
-        "`content/architecture/_index.md` distills the 'Big-picture architecture' block from CLAUDE.md into a reader-friendly page (auth/router/meta/data layers, worker model, leader-election). Reuse the existing ASCII diagram from CLAUDE.md.",
-        "All three pages render with no broken links (`hugo` build clean).",
+        "`content/_index.md` (home) has a Hero section: one-paragraph elevator pitch ('S3-compatible object gateway, Cassandra/TiKV metadata, RADOS data, drop-in for Ceph RGW') + primary CTA button (link to Get Started) + secondary CTA (link to Architecture).",
+        "Killer features grid: 6–8 cards. Each card = title + 1-line value prop + link to the relevant doc page. Coverage: (1) Sharded objects table dodges RGW bucket-index ceiling, (2) TiKV ordered scan short-circuits 64-way fan-out, (3) Multi-replica scaling via STRATA_GC_SHARDS (Phase 2), (4) Online bucket reshard, (5) Multi-cluster RADOS routing, (6) Embedded operator console (Web UI), (7) OTel tracing with ring-buffer trace browser, (8) Drop-in Ceph RGW replacement.",
+        "'What Strata is (and isn't)' section: one short paragraph on positioning vs RGW / MinIO / SeaweedFS. Link to 'S3 Compatibility — Supported / Unsupported'.",
+        "Footer: link to GitHub repo, ROADMAP.md, CLAUDE.md (for internal devs).",
+        "Landing page renders cleanly in both light and dark themes.",
+        "All links resolve (`hugo --minify` clean build).",
+        "If the chosen theme's landing capabilities are too plain, override `docs/site/layouts/index.html` with a custom partial — keep the theme submodule for the rest of the chrome.",
         "Typecheck passes (`go vet ./...`)"
       ],
       "priority": 3,
@@ -58,13 +61,18 @@
     },
     {
       "id": "US-004",
-      "title": "README → site link + cross-link audit",
-      "description": "As a GitHub visitor, I should be one click from the rendered docs.",
+      "title": "Get Started — 5-minute quick start",
+      "description": "As a developer evaluating Strata I want to bring up a local gateway and put my first object in under 5 minutes.",
       "acceptanceCriteria": [
-        "Top of `README.md` gains a prominent badge or link: '📖 Read the docs: https://danchupin.github.io/strata/' (or equivalent).",
-        "Any existing `[link](docs/foo.md)` references in `README.md` rewritten to point at the published site URLs.",
-        "Any references to `docs/foo.md` in code comments, CLAUDE.md, or ROADMAP.md updated to the new content paths under `docs/site/content/...` (canonical source) — published-URL form is fine for ROADMAP/README user-facing copy.",
-        "No regressions: `go vet ./...` clean, `go test ./...` clean.",
+        "`content/get-started/_index.md` covers: prerequisites (Go 1.22+, Docker, `aws` CLI or `mc`).",
+        "Option A — pure-memory (fastest): `make run-memory`, then `aws s3 mb s3://test --endpoint http://localhost:8080`, `aws s3 cp foo.txt s3://test/`. No Docker required.",
+        "Option B — Cassandra-backed: `make up && make wait-cassandra && make run-cassandra`. Same client commands.",
+        "Option C — full stack (RADOS data): `make up-all && make wait-cassandra && make wait-ceph`. Ports & service discovery noted.",
+        "Smoke pass: `make smoke` (signed: `make smoke-signed`).",
+        "Verify: `aws s3 ls`, expected output documented.",
+        "Pointer to next sections: Deploy → Multi-replica, Architecture.",
+        "All commands tested against the actual repo (run them end-to-end before commit).",
+        "Code blocks copy-paste cleanly (no smart-quote pitfalls).",
         "Typecheck passes (`go vet ./...`)"
       ],
       "priority": 4,
@@ -73,15 +81,15 @@
     },
     {
       "id": "US-005",
-      "title": "GitHub Action — build + publish to gh-pages",
-      "description": "As a maintainer, I want every merge to main to automatically publish the site so docs never go stale.",
+      "title": "Deploy — single-node + Docker Compose + multi-replica",
+      "description": "As an operator I want step-by-step guides for the three non-Kubernetes deployment shapes Strata officially supports.",
       "acceptanceCriteria": [
-        "New workflow `.github/workflows/docs.yml` triggers on push to `main` (paths filter `docs/**`, `.github/workflows/docs.yml`).",
-        "Job: checkout (with submodules), install Hugo extended (pinned version), run `hugo --minify` from `docs/site/`, deploy `docs/site/public/` to `gh-pages` branch via `peaceiris/actions-gh-pages@v3` (pinned release).",
-        "Workflow has a manual `workflow_dispatch` trigger so it can be re-run on demand.",
-        "Workflow does NOT run on PRs (only main + manual dispatch) to avoid leaking pre-merge drafts.",
-        "First successful run publishes the site at `https://danchupin.github.io/strata/`. Verification step happens after the cycle merges (operator confirms the URL responds 200).",
-        "If repo Pages settings flip (selecting `gh-pages` branch as source) is not scriptable, document the manual one-time step in `docs/site/content/developers/_index.md` so the operator can flip it after the first action publishes the branch.",
+        "`content/deploy/single-node.md`: standalone gateway against memory or Cassandra metadata + memory or RADOS data. Sizing rule of thumb. When to pick this shape (lab, single-tenant, dev).",
+        "`content/deploy/docker-compose.md`: distill `deploy/docker/docker-compose.yml` for human readers — service map, ports, env vars, volume mounts, the `tracing` / `tikv` / `lab-tikv-3` profiles. How to bring up each profile.",
+        "`content/deploy/multi-replica.md` (already moved in US-002; expand here): how to run 3 strata replicas behind a load balancer with TiKV metadata, STRATA_GC_SHARDS sizing guidance (Phase 2), shared S3-backend or RADOS data, leader-election behaviour.",
+        "Each guide has a 'Production checklist' callout: env vars to set, metrics to wire, log shipping.",
+        "All three pages cross-link to the relevant Architecture pages (sharding, multi-replica scaling, RADOS chunking).",
+        "`hugo --minify` clean build.",
         "Typecheck passes (`go vet ./...`)"
       ],
       "priority": 5,
@@ -90,14 +98,18 @@
     },
     {
       "id": "US-006",
-      "title": "`make docs-serve` + developer ergonomics",
-      "description": "As a contributor editing docs, I want a one-command local preview.",
+      "title": "Deploy — Kubernetes",
+      "description": "As an operator running Kubernetes I want a deployment guide and ready-to-apply manifest examples.",
       "acceptanceCriteria": [
-        "`Makefile` gains `docs-serve` target: `cd docs/site && hugo server -D`. Listens on `:1313`. (`-D` shows draft pages so authors can iterate before publishing.)",
-        "`Makefile` gains `docs-build` target: `cd docs/site && hugo --minify`. Useful for CI smoke-checking the build outside the GH Action.",
-        "`make docs-serve` documented in the `## Common commands` table of CLAUDE.md.",
-        "`docs/site/content/developers/_index.md` (or a 'Editing docs' subpage) explains: where to add new pages, frontmatter conventions, how to preview locally, how the GH Action publishes.",
-        "Hugo binary installation pointer (e.g. `brew install hugo` on macOS, `snap install hugo` on Linux) in the developers page.",
+        "`content/deploy/kubernetes.md`: Architecture — 3 strata replicas as a `Deployment`, `Service` (ClusterIP + optional LoadBalancer), `ConfigMap` for env, `Secret` for credentials (S3 root key + Cassandra/TiKV creds + RADOS keyring).",
+        "Worked example: full YAML for a 3-replica strata Deployment + Service + ConfigMap + Secret committed under `deploy/k8s/`. At minimum: namespace, Deployment with affinity rules + readiness probe `/readyz` + liveness probe `/healthz`, Service, ConfigMap, Secret. Manifests apply-tested (operator confirms `kubectl apply -f deploy/k8s/` works against a kind / minikube cluster, or document the test step in the doc).",
+        "PD+TiKV stateful sets are out of scope (operators run TiKV-Operator); document the dependency.",
+        "Helm chart: out of scope this cycle. Document the future story — 'Helm chart packaging is queued as a P3 ROADMAP follow-up; today, apply the example manifests under deploy/k8s/ directly'.",
+        "Storage: stateless gateway pods → no PVCs needed for strata; RADOS / Cassandra / TiKV are external dependencies. Pointer to Cassandra-Operator, TiKV-Operator, and Rook-Ceph for the storage tier.",
+        "Scaling: `kubectl scale deployment strata --replicas=N` with STRATA_GC_SHARDS=N env knob.",
+        "Ingress: example `Ingress` manifest with TLS termination + the SigV4 `Host` header gotcha (vhost routing depends on the original Host header).",
+        "`deploy/k8s/` committed with apply-tested example manifests referenced from the doc.",
+        "`hugo --minify` clean build.",
         "Typecheck passes (`go vet ./...`)"
       ],
       "priority": 6,
@@ -106,16 +118,104 @@
     },
     {
       "id": "US-007",
-      "title": "ROADMAP close-flip + cycle archive",
-      "description": "As a maintainer, I need the ROADMAP P2 entry flipped Done with a pointer to the published site, plus the deferred OpenAPI viewer queued as a fresh P3 entry.",
+      "title": "Architecture deep dive",
+      "description": "As a developer / advanced operator I want every implementation detail in one navigable section so I can reason about behaviour under failure modes.",
       "acceptanceCriteria": [
-        "`ROADMAP.md` line covering 'P2 — Full project documentation site (GitHub Pages)' flipped to `~~**P2 — Full project documentation site (GitHub Pages).**~~ — **Done.** <one-line summary citing Hugo + theme choice, sectioned tree, GH Action publish, link to live URL>. (commit `<pending>`)`. Closing-SHA backfill follow-up commit on main per established convention.",
-        "New ROADMAP entry under `## Documentation` (or wherever the existing site entry sits): P3 follow-up 'OpenAPI viewer embedded in the API reference section' so the deferred bonus from the original P2 entry isn't lost.",
+        "`content/architecture/_index.md`: high-level diagram (reuse the ASCII block from CLAUDE.md 'Big-picture architecture') + one-paragraph summary of every layer with links to the per-layer pages.",
+        "`content/architecture/auth.md`: SigV4 flow, presigned URLs, streaming chunk decoder + chain-HMAC validation, virtual-hosted-style routing, identity attribution via context.",
+        "`content/architecture/router.md`: `internal/s3api/server.go` — bucket-vs-object scoped query-string router pattern, vhost rewriting AFTER auth.",
+        "`content/architecture/meta-store.md`: `meta.Store` interface contract (LWT semantics, clustering order, range scans, sharded objects table), backend parity (memory / Cassandra / TiKV), `RangeScanStore` short-circuit on TiKV.",
+        "`content/architecture/data-backend.md`: RADOS 4 MiB chunking, manifest format (proto vs JSON sniff, schema-additive evolution rule), multi-cluster routing, S3-over-S3 backend.",
+        "`content/architecture/workers.md`: supervisor model, registration via `init()`, leader-election shape, panic restart with backoff, per-worker pages for gc / lifecycle / notify / replicator / access-log / inventory / audit-export / manifest-rewriter.",
+        "`content/architecture/sharding.md`: objects-table partitioning (`bucket_id, shard`), `cursorHeap` / `versionHeap` fan-out merge, gc fan-out (1024 logical shards × runtime shardCount), online reshard worker.",
+        "`content/architecture/observability.md`: structured logs (slog), audit log, request_id propagation, OTel tracing (tail-sampler + ring buffer), per-storage observers (Cassandra QueryObserver, RADOS ObserveOp).",
+        "Every page is at least 2 paragraphs of substance + links to source files (`internal/...` paths).",
+        "`hugo --minify` clean build.",
+        "Typecheck passes (`go vet ./...`)"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Best Practices — sizing, monitoring, tuning",
+      "description": "As an operator running Strata in production I want a one-stop reference for the operational knobs that matter.",
+      "acceptanceCriteria": [
+        "`content/best-practices/sizing.md`: CPU / RAM / disk recommendations per replica based on object PUTs/s. Anchor to bench numbers from `architecture/benchmarks/gc-lifecycle.md`. Cassandra / TiKV cluster sizing pointers.",
+        "`content/best-practices/monitoring.md`: Prometheus scrape config, key metrics (`strata_http_requests_total`, `strata_worker_panic_total`, `strata_replication_queue_age_seconds`, `strata_cassandra_lwt_conflicts_total`), example Grafana dashboards (link to `deploy/grafana/` if it ships any), OTel collector wire-up (`OTEL_EXPORTER_OTLP_ENDPOINT`, sample ratio), STRATA_OTEL_RINGBUF for in-process trace browser.",
+        "`content/best-practices/gc-lifecycle-tuning.md`: STRATA_GC_CONCURRENCY / STRATA_LIFECYCLE_CONCURRENCY (Phase 1) + STRATA_GC_SHARDS (Phase 2) tuning guide with the bench curve. STRATA_GC_DUAL_WRITE cutover playbook (point at `architecture/migrations/gc-lifecycle-phase-2.md`).",
+        "`content/best-practices/backup-restore.md`: bucket inventory worker as a manifest source, RADOS pool snapshots, Cassandra/TiKV snapshot strategy, cross-region replication (replicator worker).",
+        "`content/best-practices/capacity-planning.md`: chunk fan-out math, lifecycle cadence vs storage growth, when to scale shards / replicas, dedup roadmap (P2).",
+        "`hugo --minify` clean build.",
+        "Typecheck passes (`go vet ./...`)"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "S3 Compatibility — Supported / Unsupported",
+      "description": "As an operator considering Strata as an RGW replacement, I need to know up-front what works and what doesn't.",
+      "acceptanceCriteria": [
+        "`content/s3-compatibility/_index.md` covers: at-a-glance s3-tests pass-rate headline (read from `scripts/s3-tests/README.md` baseline).",
+        "Supported operations table: bucket-level (Create / Delete / List / Versioning / Lifecycle / CORS / Policy / Tagging / Logging / Inventory / Notification / Replication / Object Lock), object-level (PUT / GET / HEAD / DELETE / Copy / Multipart / Tagging / Retention / Legal Hold / ACL / Storage Class), IAM (basic users + access keys + policy attach/detach). Each row: status (✅ supported, ⚠️ partial, ❌ not supported) + link to relevant ROADMAP entry or PRD.",
+        "Explicitly NOT supported subsection so operators can fail fast. Source rows from ROADMAP 'Known latent bugs' + the open ROADMAP items that aren't shipped. Examples: Object Lock COMPLIANCE audit log (P3 open), region-replication subsets, OAuth / SAML SSO for IAM, lifecycle expiration on versioned buckets in some edge cases — pull the actual list from ROADMAP at cycle time.",
+        "AWS feature parity caveats: identity provider (Strata IAM is self-contained, no IdP federation), cross-account ACLs, Requester Pays, Transfer Acceleration, intelligent-tiering — all not supported.",
+        "Page is operator-actionable: every 'not supported' row links to the ROADMAP entry tracking it (so future support is discoverable).",
+        "`hugo --minify` clean build.",
+        "Typecheck passes (`go vet ./...`)"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "README site link + cross-link audit",
+      "description": "As a GitHub visitor I should be one click from the rendered docs.",
+      "acceptanceCriteria": [
+        "Top of `README.md` gains a prominent badge or link: '📖 Read the docs: https://danchupin.github.io/strata/' (or equivalent).",
+        "Any existing `[link](docs/foo.md)` references in `README.md` rewritten to point at the published site URLs.",
+        "References to `docs/foo.md` in code comments, CLAUDE.md, ROADMAP.md updated to the new content paths under `docs/site/content/...` (canonical source). Published-URL form is fine for ROADMAP/README user-facing copy.",
+        "No regressions: `go vet ./...` clean, `go test ./...` clean.",
+        "Typecheck passes (`go vet ./...`)"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "GitHub Action — build + publish to gh-pages",
+      "description": "As a maintainer I want every merge to main to automatically publish so docs never go stale.",
+      "acceptanceCriteria": [
+        "New workflow `.github/workflows/docs.yml` triggers on push to `main` (paths filter `docs/**`, `.github/workflows/docs.yml`) + `workflow_dispatch` (manual).",
+        "Job: `actions/checkout@v4` (with `submodules: recursive`), install Hugo extended (pinned version), run `hugo --minify` from `docs/site/`, deploy `docs/site/public/` to `gh-pages` branch via `peaceiris/actions-gh-pages@v3`.",
+        "Workflow does NOT run on PRs (only main + manual dispatch) to avoid leaking pre-merge drafts.",
+        "First successful run publishes the site at `https://danchupin.github.io/strata/`. Operator confirms the URL responds 200 after the cycle merges.",
+        "Repo Pages settings flip (selecting `gh-pages` branch as source) is documented as a one-time manual step in `docs/site/content/developers/_index.md`.",
+        "Typecheck passes (`go vet ./...`)"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "ROADMAP close-flip + cycle archive",
+      "description": "As a maintainer I need the ROADMAP P2 entry flipped Done and the deferred OpenAPI viewer / Helm / Reference expansion queued as fresh P3 entries.",
+      "acceptanceCriteria": [
+        "`ROADMAP.md` line covering 'P2 — Full project documentation site (GitHub Pages)' flipped to `~~**P2 — Full project documentation site (GitHub Pages).**~~ — **Done.** <one-line summary citing CockroachDB-shape sectioned tree, GH Action publish, link to live URL>. (commit `<pending>`)`. Closing-SHA backfill follow-up commit on main per established convention.",
+        "New ROADMAP entry under the same Documentation section: P3 follow-up 'OpenAPI viewer (Redoc/Swagger UI) embedded in the API reference section'.",
+        "New ROADMAP entry: P3 'Helm chart packaging for Kubernetes deployment' — referenced from `content/deploy/kubernetes.md` as a follow-up.",
+        "New ROADMAP entry: P3 'Reference section expansion (env vars table, Admin API surface, S3 API operations table)' so the placeholder section under `content/reference/_index.md` has a closing story queued.",
         "`tasks/prd-docs-site-hugo.md` REMOVED in this commit per CLAUDE.md PRD lifecycle rule.",
         "No regressions: `go vet ./...`, `go test ./...`, `make smoke` all clean.",
         "Typecheck passes"
       ],
-      "priority": 7,
+      "priority": 12,
       "passes": false,
       "notes": ""
     }
