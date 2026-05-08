@@ -3,6 +3,8 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"time"
 
@@ -10,9 +12,31 @@ import (
 
 	"github.com/danchupin/strata/internal/data"
 	datas3 "github.com/danchupin/strata/internal/data/s3"
+	"github.com/danchupin/strata/internal/leader"
 	"github.com/danchupin/strata/internal/meta"
 	"github.com/danchupin/strata/internal/metrics"
 )
+
+// DefaultBucketLeaseTTL is the per-bucket lease TTL when LeaderTTL is unset.
+// Short enough that a crashed replica's hold rolls over within a cycle,
+// long enough that the renewing lease covers a worst-case bucket scan.
+const DefaultBucketLeaseTTL = 60 * time.Second
+
+// LeaseName returns the per-bucket lifecycle lease key. Public so operator
+// dashboards / runbooks don't have to hard-code the format string.
+func LeaseName(bucketID string) string { return fmt.Sprintf("lifecycle-leader-%s", bucketID) }
+
+// bucketReplicaIndex maps a bucketID to the replica index that owns it under
+// the Phase 2 distribution gate. Stable: changing the hash function would
+// re-partition active leases mid-flight and double-process buckets.
+func bucketReplicaIndex(bucketID string, replicaCount int) int {
+	if replicaCount <= 0 {
+		return 0
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(bucketID))
+	return int(h.Sum32() % uint32(replicaCount))
+}
 
 type Worker struct {
 	Meta        meta.Store
@@ -22,6 +46,32 @@ type Worker struct {
 	AgeUnit     time.Duration
 	Concurrency int
 	Logger      *slog.Logger
+
+	// Locker + ReplicaInfo switch the worker into Phase 2 per-bucket lease
+	// mode (US-005). When both are set, every cycle walks buckets, applies
+	// the `fnv32a(bucketID) % count == id` distribution gate, then attempts
+	// a non-blocking `lifecycle-leader-<bucketID>` lease before processing
+	// the bucket. Buckets where the lease is already held elsewhere (or
+	// that fail the gate) are skipped — a sibling replica owns that bucket
+	// this cycle.
+	//
+	// Leaving Locker or ReplicaInfo nil falls back to the legacy single-
+	// replica path: every bucket processed sequentially, no per-bucket
+	// lease, no distribution gate. That path is what the admin/bench
+	// callers use when invoking RunOnce directly.
+	Locker leader.Locker
+	// ReplicaInfo returns (count, id) where count is the number of replica
+	// slots (typically STRATA_GC_SHARDS) and id is this replica's index
+	// within that ring. Returning count<=0 disables the distribution gate
+	// for this cycle (every bucket eligible). Returning id<0 with count>0
+	// skips lifecycle work entirely — the replica has no defensible stake
+	// in any bucket subset right now (e.g. no gc shard held).
+	ReplicaInfo func() (count int, id int)
+	// LeaderTTL is the per-bucket lease TTL. Zero falls back to
+	// DefaultBucketLeaseTTL. The bucket lease is held only for the duration
+	// of one bucket's processing then released, so no renew loop is needed
+	// — the TTL is a crash-recovery upper bound, not a steady-state hold.
+	LeaderTTL time.Duration
 }
 
 // effectiveConcurrency clamps Concurrency to [1, 256]; zero/negative -> 1.
@@ -65,36 +115,104 @@ func (w *Worker) Run(ctx context.Context) error {
 
 func (w *Worker) RunOnce(ctx context.Context) error { return w.runOnce(ctx) }
 
+// distributedMode reports whether the Phase-2 per-bucket lease layer is
+// wired. Locker AND ReplicaInfo must both be set; otherwise the worker runs
+// in the legacy single-replica path used by admin/bench callers.
+func (w *Worker) distributedMode() bool {
+	return w.Locker != nil && w.ReplicaInfo != nil
+}
+
 func (w *Worker) runOnce(ctx context.Context) error {
 	buckets, err := w.Meta.ListBuckets(ctx, "")
 	if err != nil {
 		return err
 	}
-	for _, b := range buckets {
-		blob, err := w.Meta.GetBucketLifecycle(ctx, b.ID)
-		if err != nil {
-			if errors.Is(err, meta.ErrNoSuchLifecycle) {
-				continue
-			}
-			w.Logger.WarnContext(ctx, "lifecycle get rules", "bucket", b.Name, "error", err.Error())
-			continue
-		}
-		cfg, err := Parse(blob)
-		if err != nil {
-			w.Logger.WarnContext(ctx, "lifecycle parse", "bucket", b.Name, "error", err.Error())
-			continue
-		}
-		for i := range cfg.Rules {
-			rule := &cfg.Rules[i]
-			if !rule.IsEnabled() {
-				continue
-			}
-			if err := w.applyRule(ctx, b, rule); err != nil {
-				w.Logger.WarnContext(ctx, "lifecycle apply rule", "bucket", b.Name, "rule", rule.ID, "error", err.Error())
-			}
+
+	distributed := w.distributedMode()
+	var (
+		replicaCount int
+		myReplicaID  int
+	)
+	if distributed {
+		replicaCount, myReplicaID = w.ReplicaInfo()
+		if replicaCount > 0 && myReplicaID < 0 {
+			w.Logger.DebugContext(ctx, "lifecycle skip cycle: no replica index (gc shards not held)")
+			return nil
 		}
 	}
+
+	for _, b := range buckets {
+		if distributed && replicaCount > 0 && bucketReplicaIndex(b.ID.String(), replicaCount) != myReplicaID {
+			continue
+		}
+
+		release, owned, err := w.acquireBucketLease(ctx, b)
+		if err != nil {
+			w.Logger.WarnContext(ctx, "lifecycle bucket lease", "bucket", b.Name, "error", err.Error())
+			continue
+		}
+		if !owned {
+			continue
+		}
+
+		w.processBucket(ctx, b)
+		release()
+	}
 	return nil
+}
+
+// acquireBucketLease grabs the per-bucket lease in distributed mode. Returns
+// owned=true with a release closure on success; owned=false (with a no-op
+// release) when another replica holds the lease this cycle or when the
+// worker is in the legacy single-replica path.
+func (w *Worker) acquireBucketLease(ctx context.Context, b *meta.Bucket) (release func(), owned bool, err error) {
+	if !w.distributedMode() {
+		return func() {}, true, nil
+	}
+	ttl := w.LeaderTTL
+	if ttl == 0 {
+		ttl = DefaultBucketLeaseTTL
+	}
+	holder := leader.DefaultHolder()
+	name := LeaseName(b.ID.String())
+	got, err := w.Locker.Acquire(ctx, name, holder, ttl)
+	if err != nil {
+		return nil, false, err
+	}
+	if !got {
+		return func() {}, false, nil
+	}
+	release = func() {
+		if relErr := w.Locker.Release(context.Background(), name, holder); relErr != nil {
+			w.Logger.WarnContext(ctx, "lifecycle bucket release", "bucket", b.Name, "error", relErr.Error())
+		}
+	}
+	return release, true, nil
+}
+
+func (w *Worker) processBucket(ctx context.Context, b *meta.Bucket) {
+	blob, err := w.Meta.GetBucketLifecycle(ctx, b.ID)
+	if err != nil {
+		if errors.Is(err, meta.ErrNoSuchLifecycle) {
+			return
+		}
+		w.Logger.WarnContext(ctx, "lifecycle get rules", "bucket", b.Name, "error", err.Error())
+		return
+	}
+	cfg, err := Parse(blob)
+	if err != nil {
+		w.Logger.WarnContext(ctx, "lifecycle parse", "bucket", b.Name, "error", err.Error())
+		return
+	}
+	for i := range cfg.Rules {
+		rule := &cfg.Rules[i]
+		if !rule.IsEnabled() {
+			continue
+		}
+		if err := w.applyRule(ctx, b, rule); err != nil {
+			w.Logger.WarnContext(ctx, "lifecycle apply rule", "bucket", b.Name, "rule", rule.ID, "error", err.Error())
+		}
+	}
 }
 
 func (w *Worker) applyRule(ctx context.Context, b *meta.Bucket, rule *Rule) error {

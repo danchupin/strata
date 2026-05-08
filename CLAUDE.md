@@ -69,8 +69,11 @@ testcontainers to find the engine.
                 +------------------+
 
   strata server --workers=lifecycle -> meta.Store + data.Backend
-                          (transitions / expirations / mp-abort).
-                          Leader-elected on `lifecycle-leader`.
+                          (transitions / expirations / mp-abort). Phase 2
+                          (US-005): per-bucket lease `lifecycle-leader-<bid>`
+                          gated by `fnv32a(bucketID) % STRATA_GC_SHARDS ==
+                          min(GCFanOut.HeldShards())`. The legacy global
+                          `lifecycle-leader` lease is retired.
   strata server --workers=gc -> meta.Store (GCEntry queue) + data.Backend
                           (chunk delete). Leader-elected on `gc-leader`.
   strata server --workers=notify -> meta.Store (notify_queue + DLQ) ->
