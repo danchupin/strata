@@ -38,5 +38,21 @@ formula already ships extended.
 
 ## Publishing
 
-A GitHub Action (US-011) publishes `docs/site/public/` to the `gh-pages`
-branch on every merge to `main`. Live URL: <https://danchupin.github.io/strata/>.
+`.github/workflows/docs.yml` publishes `docs/site/public/` to the
+`gh-pages` branch on every merge to `main` (path-filtered on `docs/**`
+and the workflow itself) and on manual `workflow_dispatch`. The workflow
+does NOT run on PRs to avoid leaking pre-merge drafts. Live URL:
+<https://danchupin.github.io/strata/>.
+
+### One-time repository settings
+
+After the first successful workflow run creates the `gh-pages` branch,
+flip the GitHub Pages source to publish from it:
+
+1. Repo → **Settings** → **Pages**.
+2. **Source** → **Deploy from a branch**.
+3. **Branch** → `gh-pages` / `/ (root)` → **Save**.
+4. Wait ~30 s, then confirm <https://danchupin.github.io/strata/>
+   responds 200.
+
+Subsequent merges republish automatically; no further manual action.

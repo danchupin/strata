@@ -199,7 +199,7 @@
         "Typecheck passes (`go vet ./...`)"
       ],
       "priority": 11,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

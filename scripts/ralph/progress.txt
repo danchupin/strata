@@ -272,3 +272,23 @@ Cycle: ralph/docs-site-hugo
   - **Forward-looking doc references (`docs/sse.md`)** that have no canonical destination today should be left in place. Rewriting them to a Hugo path that doesn't exist would silently break the next `make docs-build` (or be a dead link in the rendered site) when the page is finally authored. The right move is to leave the planning text and add the page when the feature lands.
   - **`pnpm --dir web typecheck`** is the cheapest gate for TSX edits to `.tsx` files. Run it alongside `go vet` whenever a story touches both Go and the React console — the CI pipeline runs both.
 ---
+
+## Sun May 10 12:00:00 MSK 2026 - US-011
+- New workflow `.github/workflows/docs.yml` builds + publishes the Hugo site to the `gh-pages` branch on every merge to `main`.
+- Triggers: `push` to `main` with paths filter `docs/**` + `.github/workflows/docs.yml`, plus manual `workflow_dispatch`. Pull-request runs intentionally absent — pre-merge drafts must not leak to the published site.
+- Concurrency group `docs-pages` with `cancel-in-progress: true` so back-to-back merges don't fight over the gh-pages push.
+- Job steps: `actions/checkout@v4` with `submodules: recursive` + `fetch-depth: 0` (theme submodule + git info), pinned `HUGO_VERSION=0.139.4` extended .deb install, `hugo --minify` from `docs/site/`, deploy via `peaceiris/actions-gh-pages@v3` with `${{ secrets.GITHUB_TOKEN }}` → `publish_dir: docs/site/public` → `publish_branch: gh-pages`. `permissions: contents: write` set at workflow level (peaceiris pushes a commit to gh-pages).
+- One-time GH Pages settings step (Settings → Pages → Source = `gh-pages` / `/ (root)`) documented in `docs/site/content/developers/_index.md` under a new "One-time repository settings" subsection.
+- Quality checks: `cd docs/site && hugo --minify` clean (54 pages, 0 warnings, 112 ms); `go vet ./...` clean; `go test ./...` clean (full unit suite, cached + ~12 s of fresh runs).
+- Files changed:
+  - `.github/workflows/docs.yml` (new)
+  - `docs/site/content/developers/_index.md` (Publishing section expanded with PR-skip note + one-time Pages settings checklist)
+  - `scripts/ralph/prd.json` (US-011 → passes: true)
+- **Learnings for future iterations:**
+  - **`peaceiris/actions-gh-pages@v3` requires `permissions: contents: write`** at workflow or job level under the default `GITHUB_TOKEN` permission model (repo-level setting "Read and write permissions" is now opt-in on new repos). Without it, the action fails with `403 Resource not accessible by integration` on the push step — don't lean on the action's docs alone, encode the perm in the workflow file.
+  - **Hugo `.deb` install is faster than `peaceiris/actions-hugo`** in CI (no Node/Go runtime overhead, ~5 s) and avoids a pinning indirection. Pin `HUGO_VERSION` env var at the job level so bumps are one-line. Extended build is bundled in the `hugo_extended_*.deb` artefact.
+  - **`fetch-depth: 0`** is needed when a future story enables `enableGitInfo = true` in `hugo.toml` (hugo-book renders per-page "last modified" from git history). Today `enableGitInfo = false` so depth 1 would also work, but the cost is negligible and forward-compat saves a follow-up edit.
+  - **`concurrency` group + `cancel-in-progress: true`** is the right shape for a publish workflow: only the latest queued run matters, intermediate runs are wasted CI time. Don't apply this to test/build workflows where every commit's signal is independent.
+  - **Live URL verification is operator-side, not CI-side**: confirming `https://danchupin.github.io/strata/` returns 200 after first deploy is a manual checkbox the human runs once, not a workflow probe. The PRD AC explicitly leaves it out of the CI step.
+  - **Submodule recursion is mandatory** for `actions/checkout@v4` (`submodules: recursive`) — the hugo-book theme lives under `docs/site/themes/hugo-book/` as a submodule; without recursive checkout `hugo --minify` fails with "module not found". Same gotcha applies to fresh local clones (CLAUDE.md already documents `git submodule update --init --recursive`).
+---
