@@ -130,14 +130,25 @@ original `Host` + `URL.Path`; `Server.ServeHTTP` then strips the prefix from `r.
 
 ## Background workers (cmd/strata/workers)
 
-Workers under `strata server` register via `workers.Register(workers.Worker{Name, Build})` from a per-worker
-`init()`. The `Build` constructor receives `workers.Dependencies` (Logger, Meta, Data, Tracer, Locker, Region) and
-returns a `workers.Runner`. `workers.Supervisor.Run(ctx, workers)` spins one goroutine per requested worker;
-each goroutine acquires a `leader.Session` keyed on `<name>-leader`, builds + runs the Runner under a supervised
-context, releases on exit, and recovers from panics. A panic increments `strata_worker_panic_total{worker=<name>}`,
-releases the lease, and restarts on an exponential backoff (1s → 5s → 30s → 2m, reset to 1s after 5 minutes
-healthy). Lease loss restarts immediately (no backoff). One worker's panic or lease loss never affects the
-gateway or sibling workers.
+Workers under `strata server` register via `workers.Register(workers.Worker{Name, Build, SkipLease})` from a
+per-worker `init()`. The `Build` constructor receives `workers.Dependencies` (Logger, Meta, Data, Tracer,
+Locker, Region, EmitLeader) and returns a `workers.Runner`. `workers.Supervisor.Run(ctx, workers)` spins one
+goroutine per requested worker; each goroutine acquires a `leader.Session` keyed on `<name>-leader`, builds +
+runs the Runner under a supervised context, releases on exit, and recovers from panics. A panic increments
+`strata_worker_panic_total{worker=<name>,shard="-"}`, releases the lease, and restarts on an exponential
+backoff (1s → 5s → 30s → 2m, reset to 1s after 5 minutes healthy). Lease loss restarts immediately (no
+backoff). One worker's panic or lease loss never affects the gateway or sibling workers.
+
+Workers that own their leader-election internally (US-004's gc fan-out is the canonical case: per-shard
+`gc-leader-<shardID>` leases — `STRATA_GC_SHARDS` controls the count, default 1) register with
+`SkipLease: true` so the supervisor skips the outer `<name>-leader` lease entirely. The runner manages its
+own leases and must call `deps.EmitLeader(name, acquired)` from each acquire/release transition so the
+heartbeat `leader_for=<name>` chip still flips on the supervisor's `LeaderEvents()` channel. The supervisor
+still owns panic recovery + backoff for SkipLease workers — the only thing skipped is the outer
+leader.Session. The gc fan-out additionally folds multi-shard ownership inside one replica into a single
+heartbeat-level acquired/released pair: the chip flips at most twice per cycle even though the underlying
+fan-out may hold N shards. Per-shard panics on the gc fan-out increment
+`strata_worker_panic_total{worker="gc",shard="<i>"}` (shard label is `"-"` for non-fan-out workers).
 
 `cmd/strata/server.go::runServer` validates `STRATA_WORKERS` (or `--workers=`) via `workers.Resolve` BEFORE any
 backend is built — unknown names exit 2 immediately. The resolved `[]workers.Worker` is then handed to
@@ -145,8 +156,9 @@ backend is built — unknown names exit 2 immediately. The resolved `[]workers.W
 process-local) and spawns `workers.Supervisor.Run` in a goroutine alongside the gateway. When adding a new
 worker, register from `cmd/strata/workers/<name>.go`'s `init()` and let the binary pick it up; do not spawn a
 goroutine ad-hoc inside `internal/serverapp` — the supervisor owns the lifecycle. `gc` reads
-`STRATA_GC_INTERVAL` / `STRATA_GC_GRACE` / `STRATA_GC_BATCH_SIZE` from env at Build time (no per-worker
-flags); other workers follow the same env-only convention.
+`STRATA_GC_INTERVAL` / `STRATA_GC_GRACE` / `STRATA_GC_BATCH_SIZE` / `STRATA_GC_CONCURRENCY` /
+`STRATA_GC_SHARDS` (default 1, range [1, 1024]) from env at Build time (no per-worker flags); other workers
+follow the same env-only convention.
 
 ## meta.Store interface — the contract
 

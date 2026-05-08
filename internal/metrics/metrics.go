@@ -177,9 +177,9 @@ var (
 	WorkerPanicTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "strata_worker_panic_total",
-			Help: "Number of panics caught and recovered by the worker supervisor, per worker name.",
+			Help: "Number of panics caught and recovered by the worker supervisor, per worker name. shard='-' for non-sharded workers; for the gc fan-out (US-004) shard carries the per-shard index 0..STRATA_GC_SHARDS-1.",
 		},
-		[]string{"worker"},
+		[]string{"worker", "shard"},
 	)
 
 	NotifyDeliveryTotal = prometheus.NewCounterVec(

@@ -124,6 +124,10 @@ func (s *Supervisor) Run(ctx context.Context, workers []Worker) error {
 		stable = stableAfter
 	}
 
+	if s.Deps.EmitLeader == nil {
+		s.Deps.EmitLeader = s.emitLeader
+	}
+
 	var wg sync.WaitGroup
 	for _, w := range workers {
 		wg.Go(func() {
@@ -171,13 +175,29 @@ func (s *Supervisor) superviseOne(parent context.Context, w Worker, backoff []ti
 func (s *Supervisor) runOnce(parent context.Context, w Worker, logger *slog.Logger) (failed bool) {
 	defer func() {
 		if r := recover(); r != nil {
-			metrics.WorkerPanicTotal.WithLabelValues(w.Name).Inc()
+			metrics.WorkerPanicTotal.WithLabelValues(w.Name, "-").Inc()
 			logger.ErrorContext(parent, "worker panic recovered",
 				"panic", fmt.Sprint(r),
 				"stack", string(debug.Stack()))
 			failed = true
 		}
 	}()
+
+	if w.SkipLease {
+		runner, err := w.Build(s.Deps)
+		if err != nil {
+			logger.ErrorContext(parent, "worker build failed", "error", err.Error())
+			return true
+		}
+		if err := runner.Run(parent); err != nil && !errors.Is(err, context.Canceled) {
+			if parent.Err() != nil {
+				return false
+			}
+			logger.WarnContext(parent, "worker run returned error", "error", err.Error())
+			return true
+		}
+		return false
+	}
 
 	ttl := s.LeaderTTL
 	if ttl == 0 {

@@ -39,6 +39,12 @@ type Dependencies struct {
 	Tracer *strataotel.Provider
 	Locker leader.Locker
 	Region string
+	// EmitLeader is wired by the supervisor at Run-time so workers that
+	// manage their own leader sessions (SkipLease=true) can publish lease
+	// transitions on the supervisor's LeaderEvents channel. Workers under
+	// the supervisor's lease never need to call this. May be nil when the
+	// supervisor was built without a Run() invocation (tests).
+	EmitLeader func(name string, acquired bool)
 }
 
 // Worker pairs a registered name with a constructor that builds the runner
@@ -47,6 +53,14 @@ type Dependencies struct {
 type Worker struct {
 	Name  string
 	Build func(deps Dependencies) (Runner, error)
+	// SkipLease=true tells the supervisor to skip the per-worker
+	// `<Name>-leader` lease. Used by workers that do their own
+	// leader-election internally — e.g. the gc fan-out (US-004) takes per-
+	// shard leases keyed `gc-leader-<shardID>` so a single replica can
+	// drain multiple shards in parallel and lose only one shard's lease on
+	// a panic. The supervisor still wraps Run with panic recovery and
+	// backoff for these workers.
+	SkipLease bool
 }
 
 var (

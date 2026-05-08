@@ -27,8 +27,16 @@ type Worker struct {
 	Grace       time.Duration
 	Batch       int
 	Concurrency int
-	Logger      *slog.Logger
-	Metrics     Metrics
+	// ShardID / ShardCount select the runtime shard slice this worker drains.
+	// ShardCount=1, ShardID=0 (the zero-value default) reproduces the
+	// single-leader Phase 1 shape: one worker drains the entire queue. With
+	// ShardCount=N>1 the worker only fetches entries belonging to its slot
+	// (entry.ShardID % ShardCount == ShardID); FanOut spawns one Worker per
+	// slot.
+	ShardID    int
+	ShardCount int
+	Logger     *slog.Logger
+	Metrics    Metrics
 }
 
 func (w *Worker) Run(ctx context.Context) error {
@@ -41,10 +49,22 @@ func (w *Worker) Run(ctx context.Context) error {
 	if w.Batch == 0 {
 		w.Batch = 500
 	}
+	if w.ShardCount < 1 {
+		w.ShardCount = 1
+	}
+	if w.ShardID < 0 || w.ShardID >= w.ShardCount {
+		w.ShardID = 0
+	}
 	if w.Logger == nil {
 		w.Logger = slog.Default()
 	}
-	w.Logger.InfoContext(ctx, "gc: starting", "region", w.Region, "interval", w.Interval.String(), "grace", w.Grace.String(), "concurrency", w.effectiveConcurrency())
+	w.Logger.InfoContext(ctx, "gc: starting",
+		"region", w.Region,
+		"interval", w.Interval.String(),
+		"grace", w.Grace.String(),
+		"concurrency", w.effectiveConcurrency(),
+		"shard_id", w.ShardID,
+		"shard_count", w.ShardCount)
 
 	ticker := time.NewTicker(w.Interval)
 	defer ticker.Stop()
@@ -68,6 +88,12 @@ func (w *Worker) RunOnce(ctx context.Context) int {
 	}
 	if w.Batch == 0 {
 		w.Batch = 500
+	}
+	if w.ShardCount < 1 {
+		w.ShardCount = 1
+	}
+	if w.ShardID < 0 || w.ShardID >= w.ShardCount {
+		w.ShardID = 0
 	}
 	if w.Logger == nil {
 		w.Logger = slog.Default()
@@ -96,10 +122,15 @@ func (w *Worker) drainCount(ctx context.Context) int {
 	first := true
 	var processed atomic.Int64
 	limit := w.effectiveConcurrency()
+	shardID := w.ShardID
+	shardCount := max(w.ShardCount, 1)
+	if shardID < 0 || shardID >= shardCount {
+		shardID = 0
+	}
 	for {
-		entries, err := w.Meta.ListGCEntries(ctx, w.Region, before, w.Batch)
+		entries, err := w.Meta.ListGCEntriesShard(ctx, w.Region, shardID, shardCount, before, w.Batch)
 		if err != nil {
-			w.Logger.WarnContext(ctx, "gc list", "error", err.Error())
+			w.Logger.WarnContext(ctx, "gc list", "error", err.Error(), "shard_id", shardID, "shard_count", shardCount)
 			return int(processed.Load())
 		}
 		if first && w.Metrics != nil {

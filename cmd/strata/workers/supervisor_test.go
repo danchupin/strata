@@ -50,7 +50,7 @@ func newSupervisor(t *testing.T, deps Dependencies) *Supervisor {
 func panicCounterValue(t *testing.T, name string) float64 {
 	t.Helper()
 	m := &dto.Metric{}
-	if err := metrics.WorkerPanicTotal.WithLabelValues(name).Write(m); err != nil {
+	if err := metrics.WorkerPanicTotal.WithLabelValues(name, "-").Write(m); err != nil {
 		t.Fatalf("write counter: %v", err)
 	}
 	return m.GetCounter().GetValue()
