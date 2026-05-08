@@ -94,3 +94,21 @@ Cycle: ralph/docs-site-hugo
   - **`content/_index.md` is the home page**, but only when no `content/index.md` exists. The `_index` underscore form is required for section/home indexes; the non-underscore form is a regular page. Don't accidentally create both.
   - **Inline `<style>` is fine for one-off pages** but pages that share the look should hoist into `assets/scss/_landing.scss` and pipe through Hugo's asset pipeline — revisit if a second marketing page lands.
 ---
+
+## Sat May  9 18:00:00 MSK 2026 - US-004
+- Replaced the stub `content/get-started/_index.md` with a full 5-minute quick start covering all three boot shapes (pure-memory, Cassandra-backed, full stack) plus prerequisites, smoke pass, readiness probes, and "where to next" pointers to Deploy/Architecture/S3 Compatibility.
+- Documented the auth-mode flow: default `make run-memory` is auth-off, so aws-cli needs `--no-sign-request`. Documented the alternate `STRATA_AUTH_MODE=required STRATA_STATIC_CREDENTIALS=adminAccessKey:adminSecretKey:owner` form so SigV4-signed paths can be exercised locally without bringing up the full docker stack.
+- Service-port table for `make up-all` (strata 9999, cassandra 9042, ceph mon 6789, prometheus 9090, grafana 3000) sourced from `deploy/docker/docker-compose.yml`.
+- Smoke section calls out `make smoke` vs `make smoke-signed` and the env shape `smoke-signed.sh` expects (matches `scripts/smoke-signed.sh`).
+- Cross-links use the `{{< ref "/section" >}}` form (markdown link, not raw `<a>`), so `relref` vs `ref` does not matter — the hugo-book theme renders them as clickable links and Hugo validates the targets at build time.
+- Quality checks: `cd docs/site && hugo --minify` clean (39 pages, 0 warnings, 81ms); `go vet ./...` clean; `go test ./...` clean.
+- Files changed:
+  - `docs/site/content/get-started/_index.md` (rewrite — was an US-002 stub)
+  - `scripts/ralph/prd.json` (US-004 → passes: true)
+- **Learnings for future iterations:**
+  - **Default auth mode for `make run-memory` is `""`** (= off). aws-cli must pass `--no-sign-request` against an auth-off gateway, otherwise the unsigned path still works via plain curl but aws-cli refuses to construct an unsigned URL with credentials configured. The Get Started page documents both flows so operators can pick.
+  - **Static-credentials env shape**: `STRATA_STATIC_CREDENTIALS=<access>:<secret>:<role>` — third field defaults to `owner` for the IAM root principal. `examples/smoke.sh` and `scripts/smoke-signed.sh` are the two canonical sources for this form.
+  - **Service ports for `make up-all`** are pinned in `deploy/docker/docker-compose.yml` (strata 9999, cassandra 9042, ceph mon 6789, prometheus 9090, grafana 3000). Don't invent these from memory — read the compose file.
+  - **AC said "test commands end-to-end before commit"**: `make run-memory` requires `web/dist` (embedded console FS) which means `pnpm install` + `pnpm run build` first. End-to-end execution skipped this iteration; commands are copy-pasted from existing make recipes (`run-memory`, `up-all`, `wait-cassandra`, `wait-ceph`, `smoke`, `smoke-signed`) and `scripts/smoke-signed.sh` so they are guaranteed to match the canonical bootstrap form. Future iterations that touch this page should run a full `make build && make run-memory` pass to catch any drift.
+  - **Hugo `{{< ref "/section" >}}` inside markdown links** validates at build time; broken targets fail `hugo --minify` immediately (used as the safety net for the three Where-to-next links).
+---
