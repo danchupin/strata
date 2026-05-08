@@ -136,12 +136,12 @@ export function BucketDistributionTab({ bucket }: Props) {
                 concentrate write load on a single Cassandra/TiKV partition.
               </p>
               <a
-                href="/docs/ui.md#bucket-resharding"
+                href="https://danchupin.github.io/strata/architecture/sharding/#online-reshard"
                 target="_blank"
                 rel="noreferrer"
                 className="inline-flex items-center gap-1 text-amber-900 underline-offset-2 hover:underline dark:text-amber-100"
               >
-                docs/ui.md#bucket-resharding
+                Sharding guide — online reshard
                 <ExternalLink className="h-3 w-3" aria-hidden />
               </a>
             </div>

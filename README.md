@@ -2,6 +2,8 @@
 
 ![CI](https://github.com/danchupin/strata/actions/workflows/ci.yml/badge.svg)
 
+📖 **Read the docs:** [danchupin.github.io/strata](https://danchupin.github.io/strata/) — Get Started, Deploy, Architecture deep dive, Best Practices, S3 Compatibility matrix.
+
 Scalable drop-in replacement for Ceph RGW written in Go. Metadata lives in Cassandra, data goes to RADOS via the `go-ceph` bindings.
 
 Solves the main bottleneck of stock RGW — the bucket index ceiling and costly resharding — by moving the index out of RADOS omap into a horizontally scalable Cassandra keyspace. Listing fans out across N partitions (`hash(key) % N`, configurable per bucket) and heap-merges at the gateway. Object data is chunked into 4 MiB RADOS objects; the manifest lives in Cassandra (column `objects.manifest`).
@@ -63,8 +65,8 @@ make smoke-tikv            # bash scripts/smoke.sh http://127.0.0.1:9998
 
 TiKV is a first-class equal-tier metadata backend (`STRATA_META_BACKEND=tikv`).
 Native ordered range scans short-circuit Cassandra's 64-way fan-out on
-`ListObjects`. See [`docs/backends/tikv.md`](docs/backends/tikv.md) for the
-operator guide and [`docs/benchmarks/meta-backend-comparison.md`](docs/benchmarks/meta-backend-comparison.md)
+`ListObjects`. See the [TiKV operator guide](https://danchupin.github.io/strata/architecture/backends/tikv/)
+and the [meta-backend comparison benchmarks](https://danchupin.github.io/strata/architecture/benchmarks/meta-backend-comparison/)
 for the comparison numbers.
 
 End-to-end with real Ceph runs natively on both arm64 and amd64. The cluster image (`deploy/docker/ceph-bootstrap/`) is a custom bootstrap on top of the multi-arch `quay.io/ceph/ceph:v19.2.3` (Squid). MON+MGR+OSD in a single container, OSD backed by `memstore` (4 GiB, held in process memory). Healthy in ~5 seconds.
@@ -85,8 +87,9 @@ After `make run-memory`, the embedded React+TS console is served at
 `STRATA_STATIC_CREDENTIALS=accesskey:secret:owner`; set a stable
 `STRATA_CONSOLE_JWT_SECRET=$(openssl rand -hex 32)` so sessions survive
 restarts. Wire `STRATA_PROMETHEUS_URL` to populate the metrics dashboard
-+ top-buckets / top-consumers widgets. Phase 1 is read-only — see
-[docs/ui.md](docs/ui.md) for the full operator guide.
++ top-buckets / top-consumers widgets. Phase 1 is read-only — see the
+[Web Console operator guide](https://danchupin.github.io/strata/best-practices/web-ui/)
+for the full walkthrough.
 
 ## Environment variables
 
@@ -114,7 +117,7 @@ restarts. Wire `STRATA_PROMETHEUS_URL` to populate the metrics dashboard
 | `STRATA_LIFECYCLE_UNIT` | `day` | interpretation of `Days` in lifecycle rules: `day`\|`hour`\|`minute`\|`second` (use `second` for fast tests) |
 | `STRATA_GC_INTERVAL` | `30s` | `gc` worker tick interval |
 | `STRATA_GC_GRACE` | `5m` | how long to keep queued chunks before deleting (protects in-flight GETs) |
-| `STRATA_GC_CONCURRENCY` | `1` | bounded errgroup limit inside the elected `gc` leader (1..256). See `docs/benchmarks/gc-lifecycle.md` for the throughput curve and recommended production defaults. |
+| `STRATA_GC_CONCURRENCY` | `1` | bounded errgroup limit inside the elected `gc` leader (1..256). See the [gc / lifecycle bench](https://danchupin.github.io/strata/architecture/benchmarks/gc-lifecycle/) for the throughput curve and recommended production defaults. |
 | `STRATA_LIFECYCLE_CONCURRENCY` | `1` | bounded errgroup limit per-bucket inner loop in the elected `lifecycle` leader (1..256). Same caveats / curve as `STRATA_GC_CONCURRENCY`. |
 
 ## Repository layout

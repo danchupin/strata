@@ -327,9 +327,14 @@ export function NodeDetailDrawer({
                   <div className="font-medium">Prometheus not configured</div>
                   <div className="mt-1 text-xs">
                     Set <code className="font-mono">STRATA_PROMETHEUS_URL</code>{' '}
-                    so the gateway can render per-node sparklines. See{' '}
-                    <a className="underline" href="/docs/ui.md#prometheus-setup">
-                      docs/ui.md#prometheus-setup
+                    so the gateway can render per-node sparklines. See the{' '}
+                    <a
+                      className="underline"
+                      href="https://danchupin.github.io/strata/best-practices/monitoring/#prometheus"
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Monitoring guide
                     </a>
                     .
                   </div>

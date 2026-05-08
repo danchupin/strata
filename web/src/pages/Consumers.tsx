@@ -225,10 +225,12 @@ function ConsumersMetricsUnavailable() {
         </code>
         on the gateway and re-deploy. See{' '}
         <a
-          href="/console/docs/ui#prometheus-setup"
+          href="https://danchupin.github.io/strata/best-practices/monitoring/#prometheus"
+          target="_blank"
+          rel="noreferrer"
           className="underline underline-offset-2"
         >
-          docs/ui.md
+          Monitoring guide
         </a>{' '}
         for the operator-side setup.
       </CardContent>

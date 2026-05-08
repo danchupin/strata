@@ -156,12 +156,12 @@ export function BucketReplicationLagTab({ bucket }: Props) {
               to populate this chart.
             </p>
             <a
-              href="/docs/ui.md#prometheus-setup"
+              href="https://danchupin.github.io/strata/best-practices/monitoring/#prometheus"
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center gap-1 text-amber-900 underline-offset-2 hover:underline dark:text-amber-100"
             >
-              docs/ui.md#prometheus-setup
+              Monitoring guide — Prometheus setup
               <ExternalLink className="h-3 w-3" aria-hidden />
             </a>
           </div>
