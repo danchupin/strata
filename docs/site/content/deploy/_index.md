@@ -7,11 +7,15 @@ description: 'Production deployment guides — single-node, Docker Compose, mult
 
 # Deploy
 
-Strata supports four deployment shapes:
+Strata supports four deployment shapes.
 
-- **Single-node** — one gateway against memory or Cassandra metadata + memory or RADOS data. Lab / dev / single-tenant.
-- **Docker Compose** — the bundled `deploy/docker/docker-compose.yml` ships every supported profile (default, `tikv`, `lab-tikv`, `tracing`, `s3-backend`).
-- **Multi-replica** — N gateways behind a load balancer with shared metadata + data. See [`multi-replica`]({{< ref "/deploy/multi-replica" >}}).
-- **Kubernetes** — apply-tested example manifests under `deploy/k8s/`.
+| Shape | When to pick it | Guide |
+|---|---|---|
+| **Single-node** | Lab, dev, single-tenant pilot. One gateway against memory/Cassandra metadata + memory/RADOS data. | [`single-node`]({{< ref "/deploy/single-node" >}}) |
+| **Docker Compose** | Anything driven by the bundled `deploy/docker/docker-compose.yml`. Service map, ports, env, volumes, profiles (`tikv`, `lab-tikv`, `tracing`, `features`). | [`docker-compose`]({{< ref "/deploy/docker-compose" >}}) |
+| **Multi-replica** | HA HTTP traffic (≥2 gateway replicas) behind an LB with shared TiKV / RADOS storage. STRATA_GC_SHARDS-aware. | [`multi-replica`]({{< ref "/deploy/multi-replica" >}}) |
+| **Kubernetes** | Apply-tested example manifests under `deploy/k8s/`. | `kubernetes` (lands in US-006) |
 
-Single-node, Docker Compose, and Kubernetes pages land in US-005 / US-006.
+For the 5-minute first run, see [Get Started]({{< ref "/get-started" >}}).
+For the runtime layers each shape sits on top of, see
+[Architecture]({{< ref "/architecture" >}}).

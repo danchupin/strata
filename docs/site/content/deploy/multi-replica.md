@@ -162,3 +162,110 @@ brought up by `make up-lab-tikv`. The default `e2e-ui` Playwright project
 - **TLS termination:** terminate at the LB; replicas talk plaintext on the
   internal network. SigV4 signs `Host`, so the LB must forward the original
   Host header (nginx config does).
+
+## STRATA_GC_SHARDS sizing (Phase 2)
+
+The Phase-2 GC fan-out (US-004 in the runtime cycle) splits the GC queue
+across `STRATA_GC_SHARDS` logical shards (range `[1, 1024]`, default `1`).
+Each shard is leader-elected independently on `gc-leader-<shardID>`, and
+the lifecycle worker uses the same shard count for its per-bucket lease
+(`lifecycle-leader-<bid>` gated by `fnv32a(bucketID) % STRATA_GC_SHARDS`).
+
+Sizing rule: **`STRATA_GC_SHARDS` should equal the steady-state replica
+count** so every replica owns one shard. Example for a 3-replica cluster:
+
+```bash
+STRATA_GC_SHARDS=3       # set on every replica
+```
+
+Behaviour under failure:
+
+| Replicas alive | Shards held |
+|---|---|
+| 3 / 3 | One shard per replica. |
+| 2 / 3 | The dead replica's shard moves to one of the survivors after lease TTL (~30 s); that survivor now holds 2. |
+| 1 / 3 | Sole survivor holds all 3 shards. |
+| 0 / 3 | No GC progress until ≥1 replica returns. |
+
+Setting `STRATA_GC_SHARDS` higher than the replica count is safe (replicas
+hold multiple shards each) but wastes per-shard heartbeat overhead. Setting
+it lower than the replica count starves some replicas of GC work — the
+`lifecycle-leader-<bid>` gate becomes the only per-bucket parallelism.
+
+The cutover from Phase 1 (single global `gc-leader`) to Phase 2 is gated
+by `STRATA_GC_DUAL_WRITE` — see the migration guide under
+[Architecture — Migrations]({{< ref "/architecture/migrations" >}}) for
+the playbook.
+
+## Shared S3 vs RADOS data backend
+
+The lab-tikv profile uses RADOS for object data. The same multi-replica
+shape works with the S3-over-S3 backend (`STRATA_DATA_BACKEND=s3` plus
+the upstream-S3 credentials) — only the data-backend env differs; LB,
+JWT bootstrap, and worker leader-election are identical.
+
+| Data backend | Per-replica disk | Cross-replica coherence | Notes |
+|---|---|---|---|
+| `rados` | none — RADOS pool is shared | RADOS replication factor (default `size=3`) | Reference shape; build tag `ceph` required. |
+| `s3` | none — upstream S3 is shared | Upstream durability (e.g. AWS S3 11×9s) | See [Architecture — Backends — S3]({{< ref "/architecture/backends/s3" >}}). |
+| `memory` | per-replica | none — never use across replicas | Tests / smoke pass only. |
+
+Multi-replica with `memory` data is not supported: each replica's writes
+are invisible to its peers.
+
+## Leader-election shape
+
+The supervisor pattern owns leader-election for every worker. Per replica:
+
+- One goroutine per worker (`gc`, `lifecycle`, `notify`, `replicator`,
+  `access-log`, `inventory`, `audit-export`, `manifest-rewriter`).
+- Each goroutine acquires a `leader.Session` keyed on `<name>-leader`
+  (cassandra LWT lease or in-process for memory backend).
+- On lease loss, the worker exits and the supervisor restarts immediately
+  (no backoff). On panic, the supervisor recovers, releases the lease, and
+  restarts on exponential backoff (1s → 5s → 30s → 2m, reset to 1s after
+  5 minutes healthy).
+- Workers that own leader-election internally (the gc fan-out is the
+  canonical case) register `SkipLease: true` and call `EmitLeader` from
+  every per-shard acquire/release transition so the heartbeat chip still
+  flips on `LeaderEvents()`.
+
+The heartbeat row in `cluster_nodes` carries `LeaderFor []string` so the
+embedded operator console can show which replica owns which worker. UI
+propagation budget is ≤35 s after a holder dies (TTL expiry + heartbeat
+write tick + UI poll).
+
+Workers run **at most one replica at a time** — there is no cluster-wide
+fan-out below the shard level. If you need more parallelism inside one
+worker, the knobs are `STRATA_GC_CONCURRENCY` (per-shard goroutines for
+GC), `STRATA_LIFECYCLE_CONCURRENCY` (per-bucket goroutines for lifecycle),
+and `STRATA_GC_SHARDS` (cluster-wide fan-out).
+
+## Production checklist
+
+When promoting the lab-tikv shape (or its 3-replica variant) to
+production:
+
+- [ ] Replica count ≥2 (≥3 recommended for headroom under load).
+- [ ] LB health-checks `/readyz` (not `/healthz`) so a replica with a sick metadata backend gets drained.
+- [ ] LB preserves Host + supports streaming bodies (no request buffering); SigV4 chunked uploads break otherwise.
+- [ ] TLS terminated at the LB; replicas talk plaintext on the internal network.
+- [ ] `STRATA_AUTH_MODE=required` (`optional` is for the lab profile only — it accepts unsigned requests).
+- [ ] `STRATA_GC_SHARDS` = steady-state replica count.
+- [ ] PD ≥3, TiKV ≥3 (raft majority for the metadata backend).
+- [ ] RADOS pool `size=3` (or upstream-S3 with multi-AZ + versioning if using S3-over-S3).
+- [ ] JWT secret distributed via shared volume (`/etc/strata/jwt-shared/secret` default) or via `STRATA_CONSOLE_JWT_SECRET` env from a secret store. Never fall through to the ephemeral generated secret in production.
+- [ ] Prometheus scraping every replica + every PD + every TiKV; alerts on `strata_worker_panic_total > 0`, `strata_replication_queue_age_seconds > <SLO>`, `strata_cassandra_lwt_conflicts_total` rate spike.
+- [ ] OTel collector reachable from every replica; ring buffer `STRATA_OTEL_RINGBUF_BYTES` sized for expected traffic.
+- [ ] Centralised log shipping draining JSON `stdout` (request_id + node_id are stamped on every line).
+- [ ] Disaster recovery runbook: TiKV PITR + RADOS pool snapshots tested end-to-end; cross-region replicator worker (if applicable) configured with a peer endpoint.
+- [ ] `make smoke-lab-tikv` passes against a fresh stand-up.
+
+## Cross-references
+
+- [Single-node deployment]({{< ref "/deploy/single-node" >}}) — when one box is enough.
+- [Docker Compose]({{< ref "/deploy/docker-compose" >}}) — full compose service map + profiles.
+- [Architecture — Storage]({{< ref "/architecture/storage" >}}) — sharded objects table, RADOS chunking, multi-replica scaling rationale.
+- [Architecture — Backends — TiKV]({{< ref "/architecture/backends/tikv" >}}) — why TiKV is the recommended metadata backend for multi-replica.
+- [Architecture — Backends — S3]({{< ref "/architecture/backends/s3" >}}) — S3-over-S3 data backend.
+- [Architecture — Migrations]({{< ref "/architecture/migrations" >}}) — Phase 1 → Phase 2 GC fan-out cutover.

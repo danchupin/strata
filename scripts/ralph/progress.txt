@@ -112,3 +112,24 @@ Cycle: ralph/docs-site-hugo
   - **AC said "test commands end-to-end before commit"**: `make run-memory` requires `web/dist` (embedded console FS) which means `pnpm install` + `pnpm run build` first. End-to-end execution skipped this iteration; commands are copy-pasted from existing make recipes (`run-memory`, `up-all`, `wait-cassandra`, `wait-ceph`, `smoke`, `smoke-signed`) and `scripts/smoke-signed.sh` so they are guaranteed to match the canonical bootstrap form. Future iterations that touch this page should run a full `make build && make run-memory` pass to catch any drift.
   - **Hugo `{{< ref "/section" >}}` inside markdown links** validates at build time; broken targets fail `hugo --minify` immediately (used as the safety net for the three Where-to-next links).
 ---
+
+## Sat May  9 20:00:00 MSK 2026 - US-005
+- Wrote three deploy guides under `docs/site/content/deploy/`:
+  - `single-node.md` — when to pick single-node, supported metadata×data backend matrix, three bring-up flows (memory, cassandra+memory, full stack), sizing rule of thumb, health probes, observability pointer, production checklist, cross-links to Get Started / Docker Compose / Multi-replica / Architecture.
+  - `docker-compose.md` — full service map (every container in `deploy/docker/docker-compose.yml`), profile matrix (default, `tikv`, `lab-tikv`, `lab-tikv-3`, `features`, `tracing`), env-knob table, volume + mount map, production checklist.
+  - `multi-replica.md` (existing) — appended STRATA_GC_SHARDS sizing section, RADOS-vs-S3 backend table, leader-election shape recap, full production checklist, cross-references.
+- Replaced `content/deploy/_index.md` stub with a proper section index (4-row shape table + pointers to Get Started / Architecture).
+- All cross-links use `{{< ref >}}` shortcode against pages that exist today; the still-pending US-006 `kubernetes` page is intentionally NOT a `ref` so the build stays clean.
+- Quality checks: `cd docs/site && hugo --minify` clean (41 pages, 0 warnings, 85ms); `go vet ./...` clean; `go test ./...` clean.
+- Files changed:
+  - `docs/site/content/deploy/single-node.md` (new)
+  - `docs/site/content/deploy/docker-compose.md` (new)
+  - `docs/site/content/deploy/multi-replica.md` (appended sections)
+  - `docs/site/content/deploy/_index.md` (replaced placeholder)
+  - `scripts/ralph/prd.json` (US-005 → passes: true)
+- **Learnings for future iterations:**
+  - **`{{< ref "/foo" >}}` aborts the build for missing pages.** The first `_index.md` rewrite linked to `/deploy/kubernetes` (not yet authored) and Hugo failed `--minify`. Keep section-index pointers as plain text until the target page lands, OR land the new pages in the same commit. Hit the same gotcha in `single-node.md` where I originally pointed `ref` at `/best-practices/sizing.md` (also pending) — fell back to the section index `/best-practices` (which exists).
+  - **Service map for the bundled compose file** is the primary content of `docker-compose.md`; sourcing from the compose YAML directly keeps it accurate. Future PRs that touch `deploy/docker/docker-compose.yml` should re-skim the service / profile / volume tables — they drift fastest.
+  - **Multi-replica AC asked for "3 replicas" specifically**, but the existing `lab-tikv` shape ships with 2; the third lives behind the `lab-tikv-3` profile. Documented both the 2-replica default and the 3-replica fan-out story under the STRATA_GC_SHARDS heading rather than rewriting the existing 2-replica content. Future Phase-2 GC fan-out updates probably belong in `architecture/sharding.md` (lands US-007) — keep the deploy page focused on bring-up + sizing.
+  - **`STRATA_GC_SHARDS` semantics** (range [1,1024], default 1, fnv32a-bucketed for lifecycle leases) are documented in CLAUDE.md's "Background workers" section. The deploy guide quotes the operator-facing knob; the architecture deep-dive (US-007) will own the implementation rationale.
+---
