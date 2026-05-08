@@ -75,7 +75,7 @@ up-tikv:
 # at host port 9999. PD + TiKV + ceph back the metadata + data tier; the
 # strata-tikv-{a,b} replicas hit them via the lab-tikv profile. Replica-direct
 # host ports are 9001 (strata-tikv-a) and 9002 (strata-tikv-b). See
-# docs/multi-replica.md for the failure-scenario walkthrough.
+# docs/site/content/deploy/multi-replica.md for the failure-scenario walkthrough.
 up-lab-tikv:
 	$(COMPOSE) --profile lab-tikv up -d pd tikv ceph strata-tikv-a strata-tikv-b strata-lb-nginx prometheus grafana
 

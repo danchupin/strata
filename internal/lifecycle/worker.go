@@ -429,7 +429,7 @@ func (w *Worker) evaluate(ctx context.Context, b *meta.Bucket, rule *Rule, o *me
 // translates a transition to the supplied storage class into a native
 // backend lifecycle rule (US-014). Today only the s3 backend implements
 // LifecycleBackend AND only for the AWS-native classes documented in
-// docs/backends/s3.md.
+// docs/site/content/architecture/backends/s3.md.
 func (w *Worker) backendOwnsTransition(class string) bool {
 	if _, ok := w.Data.(data.LifecycleBackend); !ok {
 		return false

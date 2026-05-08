@@ -24,7 +24,7 @@ import (
 //	go test -tags integration -bench=BenchmarkTiKVStore -benchtime=5m \
 //	    ./internal/meta/tikv/...
 //
-// See docs/benchmarks/meta-backend-comparison.md for the published rig and
+// See docs/site/content/architecture/benchmarks/meta-backend-comparison.md for the published rig and
 // how to interpret the numbers vs Cassandra.
 func BenchmarkTiKVStore(b *testing.B) {
 	ctx := context.Background()

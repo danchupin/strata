@@ -1,3 +1,9 @@
+---
+title: 'Meta-backend comparison'
+weight: 20
+description: 'Hot-path latency + throughput for Cassandra, TiKV, and the in-tree memory reference.'
+---
+
 # Meta-backend benchmarks: TiKV vs Cassandra
 
 This page captures hot-path latency / throughput numbers for Strata's two

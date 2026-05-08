@@ -160,7 +160,7 @@ func TestPutBackendLifecycleEmitsExpiration(t *testing.T) {
 }
 
 // TestPutBackendLifecycleEmitsAbortIncomplete pins a load-bearing safety
-// net documented in docs/backends/s3.md: AbortIncompleteMultipartUpload
+// net documented in docs/site/content/architecture/backends/s3.md: AbortIncompleteMultipartUpload
 // translates to backend lifecycle so the operator's recommended cleanup
 // rule actually applies.
 func TestPutBackendLifecycleEmitsAbortIncomplete(t *testing.T) {

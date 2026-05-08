@@ -20,7 +20,7 @@ import (
 
 // TestScyllaStoreContract runs the shared meta.Store contract against a
 // ScyllaDB container. ScyllaDB is wire-compatible with Cassandra and is
-// supported as a drop-in metadata backend (see docs/backends/scylla.md).
+// supported as a drop-in metadata backend (see docs/site/content/architecture/backends/scylla.md).
 //
 // Gated by STRATA_SCYLLA_TEST=1 so the default `go test -tags integration`
 // run keeps targeting Cassandra. CI workflow .github/workflows/ci-scylla.yml

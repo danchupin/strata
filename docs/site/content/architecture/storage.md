@@ -1,3 +1,9 @@
+---
+title: 'Storage status'
+weight: 30
+description: 'Operator guide to the meta + data backend health surfacing in the Strata Console.'
+---
+
 # Storage status — operator guide
 
 The Storage page (`/console/storage`) and the Cluster Overview Storage hero
@@ -50,7 +56,7 @@ adminapi pollers absorb bursts without re-querying.
 | `replication factor unknown` | `system_schema.keyspaces` returned no rows for the keyspace; same root cause. |
 
 Relevant env vars (full list in
-[`docs/backends/scylla.md`](backends/scylla.md)): `STRATA_CASSANDRA_HOSTS`,
+[ScyllaDB backend]({{< ref "/architecture/backends/scylla" >}})): `STRATA_CASSANDRA_HOSTS`,
 `STRATA_CASSANDRA_KEYSPACE`, `STRATA_CASSANDRA_LOCAL_DC`,
 `STRATA_CASSANDRA_SLOW_MS`.
 
@@ -69,7 +75,7 @@ A thin bootstrap-only HTTP client lives at
 | `pd endpoints unreachable: …` | Every configured PD endpoint timed out / returned non-200. The data path is likely down too. |
 
 Relevant env vars (full list in
-[`docs/backends/tikv.md`](backends/tikv.md)): `STRATA_TIKV_PD_ENDPOINTS`.
+[TiKV backend]({{< ref "/architecture/backends/tikv" >}})): `STRATA_TIKV_PD_ENDPOINTS`.
 
 ## RADOS (Data tab)
 

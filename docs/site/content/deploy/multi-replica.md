@@ -1,3 +1,9 @@
+---
+title: 'Multi-replica cluster'
+weight: 20
+description: 'Run N stateless gateway replicas behind a load balancer with shared TiKV / RADOS storage.'
+---
+
 # Multi-replica Strata cluster — operator guide
 
 Strata's gateway is **stateless**. Replicas don't form quorum among

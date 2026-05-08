@@ -1,3 +1,9 @@
+---
+title: 'GC + Lifecycle scaling'
+weight: 10
+description: 'Per-leader concurrency cap (Phase 1) and multi-leader scaling (Phase 2) for the GC + lifecycle workers.'
+---
+
 # GC + Lifecycle worker scaling benchmark (Phase 1 + Phase 2)
 
 > Phase 2 (US-006) lands **multi-leader** numbers below Phase 1's single-leader
@@ -228,7 +234,7 @@ sanity check on the worker code-path overhead.
 
 ### Results — bench-gc, in-process simulation
 
-JSONL artifacts: `docs/benchmarks/data/gc-lifecycle-phase-2/sim-bench-gc-{shards1,shards3}.jsonl`.
+JSONL artifacts: `docs/site/content/architecture/benchmarks/data/gc-lifecycle-phase-2/sim-bench-gc-{shards1,shards3}.jsonl`.
 
 | concurrency | shards=1 (Phase 1 shape) | shards=3 (Phase 2 shape) | shards=3 ÷ shards=1 |
 |------------:|-------------------------:|--------------------------:|---------------------:|
@@ -252,7 +258,7 @@ concurrency (subject to TiKV region-heat saturation — see "Cap shape" below).
 
 ### Results — bench-lifecycle, in-process simulation
 
-JSONL artifacts: `docs/benchmarks/data/gc-lifecycle-phase-2/sim-bench-lifecycle-{replicas1,replicas3}.jsonl`.
+JSONL artifacts: `docs/site/content/architecture/benchmarks/data/gc-lifecycle-phase-2/sim-bench-lifecycle-{replicas1,replicas3}.jsonl`.
 
 | concurrency | replicas=1 (Phase 1 shape) | replicas=3 (Phase 2 shape) | replicas=3 ÷ replicas=1 |
 |------------:|---------------------------:|---------------------------:|------------------------:|
@@ -344,7 +350,7 @@ ceiling.
   new TiKV `gc/<region>/<shardID2BE>/<oid>` key shape stays on by default
   (`STRATA_GC_DUAL_WRITE=on`). Flip off after the legacy partition /
   prefix is empty (operator-confirmed via inventory or queue depth
-  metrics). See `docs/migrations/gc-lifecycle-phase-2.md` (US-007).
+  metrics). See [GC + lifecycle Phase 2]({{< ref "/architecture/migrations/gc-lifecycle-phase-2" >}}) (US-007).
 
 ### Caveats
 

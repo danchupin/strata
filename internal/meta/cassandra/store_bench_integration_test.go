@@ -18,7 +18,7 @@ import (
 
 // BenchmarkCassandraStore runs the meta.Store hot-path harness from
 // internal/meta/storetest against a Cassandra testcontainer. Shape mirrors
-// TestCassandraStoreContract; see docs/benchmarks/meta-backend-comparison.md
+// TestCassandraStoreContract; see docs/site/content/architecture/benchmarks/meta-backend-comparison.md
 // for the rig + how to compare numbers against the TiKV variant.
 //
 // Run:

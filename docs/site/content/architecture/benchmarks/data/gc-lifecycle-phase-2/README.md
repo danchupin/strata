@@ -25,7 +25,7 @@ replica race happens inside one `strata-admin` process via the `--shards`
 - For the canonical Phase 2 numbers operators should rerun
   `make bench-gc-multi` / `make bench-lifecycle-multi` against the
   3-replica lab brought up via `make up-lab-tikv-3` (see
-  `docs/benchmarks/gc-lifecycle.md`'s "Phase 2 — multi-leader" section).
+  `docs/site/content/architecture/benchmarks/gc-lifecycle.md`'s "Phase 2 — multi-leader" section).
 - Every JSON object on a line is one bench level (one `(--concurrency,
   --shards|--replicas)` combination). Schema matches `cmd/strata-admin/
   bench_common.go::benchResult`.

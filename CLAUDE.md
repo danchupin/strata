@@ -13,7 +13,7 @@ The metadata interface (`internal/meta.Store`) is intentionally minimal (LWT sem
 Strata ships two first-class production backends: **Cassandra** (with **ScyllaDB** as a CQL-compatible drop-in — zero
 code changes, gocql works unchanged) and **TiKV** (raw KV via `tikv/client-go`; native ordered range scans short-circuit
 Cassandra's 64-way fan-out via the optional `meta.RangeScanStore` interface). Both are benchmarked, documented, and
-maintained by the core team — see `docs/backends/tikv.md` and `docs/benchmarks/meta-backend-comparison.md`. The
+maintained by the core team — see `docs/site/content/architecture/backends/tikv.md` and `docs/site/content/architecture/benchmarks/meta-backend-comparison.md`. The
 in-memory backend is for tests and the smoke pass; no other backends are supported.
 
 ## Common commands

@@ -1,3 +1,9 @@
+---
+title: 'Binary consolidation'
+weight: 10
+description: 'Migrating from the eleven `cmd/*` binaries to `strata` + `strata-admin`.'
+---
+
 # Migrating to the unified `strata` binary
 
 Strata used to ship eleven `cmd/*` binaries — one gateway plus a long tail of
@@ -41,17 +47,17 @@ gc and one active lifecycle between them.
 
 - `STRATA_GC_INTERVAL`, `STRATA_GC_GRACE`, `STRATA_GC_BATCH_SIZE`,
   `STRATA_GC_CONCURRENCY` (Phase 1 fan-out, default `1`, max `256` —
-  see `docs/benchmarks/gc-lifecycle.md`),
+  see [GC + Lifecycle scaling]({{< ref "/architecture/benchmarks/gc-lifecycle" >}})),
   `STRATA_GC_SHARDS` (Phase 2 multi-leader, default `1`, range `[1, 1024]` —
   shards the gc-leader lease space across replicas; see
-  `docs/migrations/gc-lifecycle-phase-2.md` for the cutover runbook).
+  [GC + lifecycle Phase 2]({{< ref "/architecture/migrations/gc-lifecycle-phase-2" >}}) for the cutover runbook).
   Lifecycle inherits the same value via the per-bucket distribution gate;
   there is no separate `STRATA_LIFECYCLE_SHARDS`.
 - `STRATA_GC_DUAL_WRITE` (Phase 2 cutover, default `on`) — controls
   dual-writes to the legacy gc queue (Cassandra `gc_queue` /
   TiKV `gc/<region>/<oid>`) alongside the v2 partition / prefix. Operator
   flips to `off` after the legacy data has drained. See
-  `docs/migrations/gc-lifecycle-phase-2.md`.
+  [GC + lifecycle Phase 2]({{< ref "/architecture/migrations/gc-lifecycle-phase-2" >}}).
 - `STRATA_LIFECYCLE_INTERVAL`, `STRATA_LIFECYCLE_UNIT`,
   `STRATA_LIFECYCLE_CONCURRENCY` (same shape as
   `STRATA_GC_CONCURRENCY`)

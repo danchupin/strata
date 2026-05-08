@@ -10,7 +10,7 @@ import (
 
 // BenchmarkMemoryStore is the in-tree baseline for the meta.Store hot-path
 // harness. Cassandra and TiKV ship their own bench files under the
-// integration build tag (see docs/benchmarks/meta-backend-comparison.md for
+// integration build tag (see docs/site/content/architecture/benchmarks/meta-backend-comparison.md for
 // the full rig). The memory backend is the reference: zero IO, lock-only
 // contention, so per-op numbers floor what a network-backed backend can
 // achieve.

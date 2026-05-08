@@ -1,3 +1,9 @@
+---
+title: 'TiKV'
+weight: 20
+description: 'TiKV metadata backend — native ordered range scans, pessimistic transactions, multi-DC raft.'
+---
+
 # TiKV metadata backend
 
 TiKV is a first-class metadata backend for Strata, on equal footing with
@@ -172,7 +178,7 @@ env:
 
 ## Performance characteristics
 
-See `docs/benchmarks/meta-backend-comparison.md` for the headline table.
+See [Meta-backend comparison]({{< ref "/architecture/benchmarks/meta-backend-comparison" >}}) for the headline table.
 The structural gaps:
 
 - **Listing** — TiKV: 30–50 ms for a 100k-object bucket page=1k (single

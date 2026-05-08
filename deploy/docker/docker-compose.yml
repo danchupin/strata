@@ -160,7 +160,7 @@ services:
   # one value is legal per process — the picker in internal/serverapp
   # validates exactly-one). For laptop / CI the shape is single-PD +
   # single-TiKV; production needs PD ≥3 (raft majority) + TiKV ≥3 — see
-  # docs/backends/tikv.md (US-019).
+  # docs/site/content/architecture/backends/tikv.md (US-019).
   pd:
     image: pingcap/pd:v8.5.0
     container_name: strata-pd
@@ -263,7 +263,7 @@ services:
   # ------------------------------------------------------------------
   # lab-tikv profile: 2 TiKV-backed strata replicas behind nginx LB on
   # host port 9999. Use for the multi-replica HA scenarios in
-  # docs/multi-replica.md (US-002..US-007). Bring up with:
+  # docs/site/content/deploy/multi-replica.md (US-002..US-007). Bring up with:
   #   docker compose --profile lab-tikv up -d \
   #     pd tikv ceph strata-tikv-a strata-tikv-b strata-lb-nginx \
   #     prometheus grafana

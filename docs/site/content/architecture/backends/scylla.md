@@ -1,3 +1,9 @@
+---
+title: 'ScyllaDB'
+weight: 10
+description: 'ScyllaDB as a drop-in CQL-compatible replacement for Apache Cassandra.'
+---
+
 # ScyllaDB metadata backend
 
 ScyllaDB is supported as a drop-in replacement for Apache Cassandra. Strata's
@@ -111,7 +117,7 @@ same Docker engine).
 ## Switching an existing deployment
 
 Cassandra → Scylla migration plan (single-DC, no downtime — see
-`docs/backends/scylla-migration.md` for the multi-DC + cutover variant):
+`docs/site/content/architecture/backends/scylla-migration.md` for the multi-DC + cutover variant — future doc):
 
 1. Stand up a Scylla cluster with the same keyspace name and replication
    factor (`NetworkTopologyStrategy` recommended even for single-DC so the

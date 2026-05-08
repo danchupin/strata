@@ -34,7 +34,7 @@ type BenchOptions struct {
 }
 
 // BenchDefaults captures the published harness defaults documented in
-// docs/benchmarks/meta-backend-comparison.md. Override per-field on a
+// docs/site/content/architecture/benchmarks/meta-backend-comparison.md. Override per-field on a
 // laptop-sized run; leave at default for the headline numbers.
 var BenchDefaults = BenchOptions{
 	Concurrency:  50,

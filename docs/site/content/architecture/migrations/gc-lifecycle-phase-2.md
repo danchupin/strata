@@ -1,3 +1,9 @@
+---
+title: 'GC + lifecycle Phase 2'
+weight: 20
+description: 'Sharded leader-election cutover — multi-replica gc / lifecycle workers.'
+---
+
 # Migrating to gc / lifecycle Phase 2 (sharded leader-election)
 
 Phase 1 (cycle `ralph/gc-lifecycle-scale`, commit `6561845`) lifted the
@@ -144,7 +150,7 @@ cardinality limit (1024). Concretely:
   some replicas idle.
 
 See the canonical bench numbers + cap-shape analysis in
-`docs/benchmarks/gc-lifecycle.md` (Phase 2 — multi-leader section).
+[GC + Lifecycle scaling]({{< ref "/architecture/benchmarks/gc-lifecycle" >}}) (Phase 2 — multi-leader section).
 
 ## Observability
 

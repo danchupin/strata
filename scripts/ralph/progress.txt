@@ -9,6 +9,9 @@ Cycle: ralph/docs-site-hugo
 - Build artifacts (`docs/site/public/`, `docs/site/resources/`, `.hugo_build.lock`) are gitignored. Drop them via `make clean`.
 - Makefile targets: `make docs-serve` (dev preview on :1313), `make docs-build` (minified bundle). Both `cd` into `docs/site` first.
 - Hugo CLI on Homebrew is hugo-extended (>= 0.128 needed for hugo-book). The future GH Action workflow (US-011) must pin a hugo-extended version.
+- **Canonical doc paths** are now under `docs/site/content/<section>/<page>.md`. Content tree mirrors CockroachDB shape: `get-started/`, `deploy/`, `architecture/{backends,benchmarks,migrations}/`, `best-practices/`, `s3-compatibility/`, `reference/`, `developers/`. Tooling refs (CLAUDE.md / ROADMAP.md / code comments) point at the canonical-source path; user-facing copy in README/ROADMAP may use the published-URL form (US-010 finalises that).
+- **Cross-link inside Hugo content**: use `{{< ref "/section/page" >}}` shortcode. Hugo errors on missing refs at build time — that's the safety net.
+- **Inline-code escape gotcha**: backticked text containing `{{< ... >}}` is still parsed by Hugo. Escape with the comment form `{{</* ... */>}}` to render the literal token (e.g. when documenting the shortcode itself in `developers/_index.md`).
 
 ## Sat May  9 12:00:00 MSK 2026 - US-001
 - Implemented Hugo scaffolding under `docs/site/`:
@@ -36,4 +39,38 @@ Cycle: ralph/docs-site-hugo
   - When adding a Bash command that needs to `cd docs/site`, use absolute paths from the repo root — earlier `cd docs/site` calls in the same shell drift the cwd and the next call fails. Or use `cd /repo/root && cd docs/site && hugo ...`.
   - `go vet` / `go test` are not affected by Hugo content changes — but the AC asks for both per story, so run them anyway as a safety net.
   - The hugo-book theme's exampleSite has `enableGitInfo = true` + `BookLastChangeLink`. We disabled `enableGitInfo` for now to keep the build deterministic; revisit when GH Action publish lands so per-page "last modified" dates are accurate.
+---
+
+## Sat May  9 14:00:00 MSK 2026 - US-002
+- Section skeleton lands under `docs/site/content/`: `get-started/`, `deploy/`, `architecture/{backends,benchmarks,migrations}/`, `best-practices/`, `s3-compatibility/`, `reference/`, `developers/`. Each gets an `_index.md` stub with frontmatter (`title`, `weight`, `description`, `bookFlatSection`).
+- Existing operator notes moved via `git mv` into the new tree (no duplicates):
+  - `docs/storage.md` → `docs/site/content/architecture/storage.md`
+  - `docs/multi-replica.md` → `docs/site/content/deploy/multi-replica.md`
+  - `docs/ui.md` → `docs/site/content/best-practices/web-ui.md`
+  - `docs/backends/{tikv,scylla,s3}.md` → `docs/site/content/architecture/backends/`
+  - `docs/benchmarks/{gc-lifecycle,meta-backend-comparison}.md` → `docs/site/content/architecture/benchmarks/`
+  - `docs/benchmarks/data/` (JSONL artifacts + README) → moved alongside.
+  - `docs/migrations/{binary-consolidation,gc-lifecycle-phase-2}.md` → `docs/site/content/architecture/migrations/`
+- Each moved page gained Hugo frontmatter: `title`, `weight`, `description`. Inter-doc cross-links rewritten to use `{{< ref >}}` shortcode (e.g. `{{< ref "/architecture/backends/tikv" >}}`).
+- `docs/site/content/developers/_index.md` documents how to author + cross-link new pages, including the `{{< ref >}}` escape gotcha.
+- Tooling refs updated to canonical-source paths under `docs/site/content/...`:
+  - `CLAUDE.md` — backends/tikv + benchmarks/meta-backend-comparison.
+  - `ROADMAP.md` — every closed-item callout that mentions a moved doc; pending items keep the old text as user-facing copy.
+  - `Makefile` (lab-tikv comment) + `deploy/docker/docker-compose.yml` (PD comment + lab-tikv profile comment).
+  - Go code comments: `internal/data/s3/lifecycle_test.go`, `internal/lifecycle/worker.go`, `internal/meta/cassandra/store_{bench_integration,scylla_integration}_test.go`, `internal/meta/storetest/{bench,bench_test}.go`, `internal/meta/tikv/store_bench_integration_test.go`.
+- `README.md` + React user-facing strings (`web/src/{pages,components}/*.tsx`) intentionally NOT touched — US-010 owns the cross-link audit + published-URL rewrite.
+- Quality checks: `cd docs/site && hugo --minify` clean (39 pages, 0 warnings); `go vet ./...` clean; `go test ./...` clean.
+- Files changed:
+  - 11 files moved via `git mv` (10 docs + 1 directory of bench artifacts).
+  - 10 new `_index.md` stubs (8 section indexes + reference + developers + s3-compatibility).
+  - 11 moved pages got frontmatter + cross-link refs.
+  - Tooling: `CLAUDE.md`, `ROADMAP.md`, `Makefile`, `deploy/docker/docker-compose.yml`, 6 Go files.
+- **Learnings for future iterations:**
+  - **Hugo escape syntax for shortcodes inside backticks**: `` `{{< ref >}}` `` is still parsed; use `` `{{</* ref */>}}` `` (Hugo comment form) to render the literal in docs that document the shortcode itself. Hit on `developers/_index.md` first build.
+  - **`git mv <dir> <existing-dir>` won't merge** — git refuses to move into an existing dir if the target is non-empty. Workaround: `git mv` to a temp sibling name, then `git mv` each file into the existing target dir, then `rmdir` the empty temp. Used three times in this story (backends/, benchmarks/, migrations/).
+  - **Bash cwd persists across `cd`** — running `hugo` after a previous `cd docs/site` works without re-cd'ing in the same shell, but call out absolute paths if calling from a fresh shell. Same gotcha as US-001's "shell drift".
+  - **Hugo `{{< ref >}}` validates at build time** — broken refs fail the build. Useful as a rename safety net: any future page rename surfaces every dangling ref instantly via `make docs-build`.
+  - **PRD lifecycle**: we are pre-cycle-archive. The active PRD `tasks/prd-docs-site-hugo.md` mentions the OLD doc paths inside its move-table — leave it as-is until US-012 deletes the file. Do not edit active PRDs to reflect mid-cycle moves; the canonical record is `scripts/ralph/prd.json` + the eventual archive snapshot.
+  - **Frontmatter `weight` ordering**: section-level weights are 10/20/30/40/50/60/70 (get-started → deploy → architecture → best-practices → s3-compatibility → reference → developers). Per-page weights inside a section start at 10 and step by 10 to leave room for inserts.
+  - **Sub-section index pages** (`architecture/backends/_index.md`, `architecture/benchmarks/_index.md`, `architecture/migrations/_index.md`) keep `bookFlatSection: true` so hugo-book renders the children directly in the sidebar (vs nesting under a "docs" placeholder).
 ---

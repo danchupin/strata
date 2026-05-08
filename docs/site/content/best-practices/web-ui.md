@@ -1,3 +1,9 @@
+---
+title: 'Web UI (Strata Console)'
+weight: 10
+description: 'The embedded operator console — pages, env vars, end-to-end tests.'
+---
+
 # Strata Console (Web UI) — Operator Guide
 
 The Strata Console is an embedded read-only web UI for cluster operators.
@@ -214,7 +220,7 @@ Three Playwright specs run in CI under the `e2e-ui` job:
   (`/admin/v1/storage/health` spoofed via `page.route` → banner appears
   above shell, dismiss button hides it for the rest of the context).
   Operator guide for the underlying endpoints + warning meanings is at
-  [`docs/storage.md`](storage.md).
+  [Storage status]({{< ref "/architecture/storage" >}}).
 
 Run locally with:
 
