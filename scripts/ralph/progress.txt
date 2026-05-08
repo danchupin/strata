@@ -166,3 +166,33 @@ Cycle: ralph/docs-site-hugo
   - **PodSecurityStandards `restricted` compliance is achievable today**: Strata's pod runs as non-root (uid 65532), readOnlyRootFilesystem, no privilege escalation, drops all caps. The two writable paths (`/etc/ceph` Secret-projected, `/etc/strata/jwt-shared` emptyDir) are explicit volume mounts. Every future container-tier change should keep that compliance.
   - **Image placeholder**: `ghcr.io/danchupin/strata:latest` is just a placeholder in `deployment.yaml` — there is no published image yet. Document the local `make docker-build` + `kind load docker-image strata:ceph` flow so kind / minikube smoke-tests work today. A published image needs a separate ROADMAP item (container-publishing GH Action).
 ---
+
+## Fri May  8 16:08:00 MSK 2026 - US-007
+- Authored the architecture deep dive: rewrote `architecture/_index.md` as a true layer hub + index (ASCII diagram from CLAUDE.md, layer summary, links to 7 new per-layer pages + the existing backends/benchmarks/migrations/storage subsections).
+- New per-layer pages under `docs/site/content/architecture/`:
+  - `auth.md` — SigV4 (canonicalisation, `STRATA_AUTH_MODE` modes), presigned URLs, streaming chunk decoder + chain-HMAC `prevSig` chaining (ErrSignatureInvalid contract), identity-in-context, vhost rewrite ordering.
+  - `router.md` — `internal/s3api/server.go` query-string dispatch shape, vhost+access-point rewrite AFTER auth, `/admin/v1/*` carve-out + audit override surface.
+  - `meta-store.md` — `meta.Store` contract (LWT semantics, ordered range scan, sharded objects), backend matrix (memory/cassandra/tikv), `RangeScanStore` short-circuit on TiKV (with the deliberate Cassandra non-impl rationale), manifest-blob schema-additive evolution.
+  - `data-backend.md` — backends matrix, RADOS 4 MiB chunking + multi-cluster routing rationale, manifest format (proto+JSON sniff, schema-additive evolution, field-rename gotcha), S3-over-S3 backend.
+  - `workers.md` — registry shape, supervisor lifecycle (panic recovery, exponential backoff, lease-loss restart), SkipLease pattern (gc fan-out canonical case), per-worker reference table covering all 8 workers + their lease keys + tunables.
+  - `sharding.md` — `(bucket_id, shard)` partition key, fnv32a + power-of-two constraint, `cursorHeap`/`versionHeap` fan-out merge, GC fan-out (1024 logical × runtime `STRATA_GC_SHARDS`), online reshard worker, per-shard observability gauges.
+  - `observability.md` — slog wiring (request_id middleware), audit log + admin override + audit-export retention, health probes (cassandraProber/radosProber type-asserted in serverapp), per-storage observers (Cassandra QueryObserver, RADOS ObserveOp), OTel tail-sampler + ring buffer + per-storage span emission, semconv-version trap, local tracing-stack profile.
+- Every new page links into source files (`internal/...` paths), cross-links to siblings via `{{< ref >}}`, and is at least 2 paragraphs of substance per AC.
+- Quality checks: `cd docs/site && hugo --minify` clean (49 pages, 0 warnings, 112ms); `go vet ./...` clean; `go test ./...` clean (full unit suite, no integration).
+- Files changed:
+  - `docs/site/content/architecture/_index.md` (rewrite — was an US-002 stub)
+  - `docs/site/content/architecture/auth.md` (new)
+  - `docs/site/content/architecture/router.md` (new)
+  - `docs/site/content/architecture/meta-store.md` (new)
+  - `docs/site/content/architecture/data-backend.md` (new)
+  - `docs/site/content/architecture/workers.md` (new)
+  - `docs/site/content/architecture/sharding.md` (new)
+  - `docs/site/content/architecture/observability.md` (new)
+  - `scripts/ralph/prd.json` (US-007 → passes: true)
+- **Learnings for future iterations:**
+  - **CLAUDE.md is the gold seam for arch deep dives**: the project root CLAUDE.md already has the multi-paragraph architectural truth (auth, sharding, workers, OTel, audit). The arch pages are largely a structured re-presentation of CLAUDE.md aimed at non-internal readers. Keep CLAUDE.md as the canonical source — when a layer changes, update CLAUDE.md first, then mirror into the arch page. Drift is otherwise inevitable.
+  - **`weight` ordering across the architecture section**: high-level layers go in dispatch order (auth=5, router=10, meta-store=15, data-backend=20, workers=25), then cross-cutting concerns (storage=30 already shipped, sharding=35, observability=40). Sub-sections (backends/, benchmarks/, migrations/) keep their existing weights. Future per-layer pages slot between with weight gaps of 5.
+  - **Don't link to pages that don't exist yet** — `{{< ref >}}` aborts the build. The arch pages link to `/architecture/backends/tikv`, `/architecture/backends/scylla`, `/architecture/storage`, all of which exist post-US-002. The S3 compatibility / best-practices targets are still stubs but their `_index.md` exists, so `{{< ref "/s3-compatibility" >}}` resolves.
+  - **The Workers page table is the densest content per pixel** — operators land here when they need to know which lease key to LIST or which env var tunes which worker. Keep that table near the top so the page is scannable; the per-worker prose paragraphs below it are reference material.
+  - **Field-rename JSON-sniff trick** (data-backend.md) is a non-obvious operational detail — `Manifest.UnmarshalJSON` sniffs `json.RawMessage` to disambiguate old-vs-new shape on a renamed field. Worth documenting because the alternative (a destructive migration) would be a multi-day operator event.
+---
