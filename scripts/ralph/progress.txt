@@ -196,3 +196,28 @@ Cycle: ralph/docs-site-hugo
   - **The Workers page table is the densest content per pixel** — operators land here when they need to know which lease key to LIST or which env var tunes which worker. Keep that table near the top so the page is scannable; the per-worker prose paragraphs below it are reference material.
   - **Field-rename JSON-sniff trick** (data-backend.md) is a non-obvious operational detail — `Manifest.UnmarshalJSON` sniffs `json.RawMessage` to disambiguate old-vs-new shape on a renamed field. Worth documenting because the alternative (a destructive migration) would be a multi-day operator event.
 ---
+
+## Fri May  8 16:17:00 MSK 2026 - US-008
+- Authored five operator-facing Best Practices pages under `docs/site/content/best-practices/` and rewired the section index:
+  - `sizing.md` — per-replica CPU/RAM/disk budget table by RPS tier (small/medium/large/very-large), CPU + RAM cost-shape breakdown, Cassandra (3-node RF=3) + TiKV (3 PD + 3 TiKV) floor sizing, RADOS pool sizing, headroom + scaling triggers.
+  - `monitoring.md` — Prometheus scrape config (lifted from `deploy/prometheus/prometheus.yml` shape), key-metrics shortlist (every metric registered in `internal/metrics/metrics.go` operator-relevant entries), Grafana dashboard pointer (`deploy/grafana/strata-dashboard.json` + `dashboard_test.go` regression guard), OTel env-var table, bundled tracing-stack profile (`tracing` profile), in-process ring-buffer trace browser, audit log retention, `/healthz` + `/readyz` shape, recommended alerts.
+  - `gc-lifecycle-tuning.md` — Phase 1 bench tables for `STRATA_GC_CONCURRENCY` (knee at c=64) + `STRATA_LIFECYCLE_CONCURRENCY` (no knee in swept range), Phase 2 sizing matrix for `STRATA_GC_SHARDS`, full `STRATA_GC_DUAL_WRITE` cutover runbook (5-step) + rollback shape, common pitfalls. Cross-links to `architecture/migrations/gc-lifecycle-phase-2` + `architecture/benchmarks/gc-lifecycle`.
+  - `backup-restore.md` — Cassandra (`nodetool snapshot`) + TiKV (`br backup`) snapshot strategy, RADOS pool snapshots + cross-cluster replication, S3-over-S3 deferral to upstream, replicator worker scope (live mirror, NOT backup), inventory worker as manifest source for external pipelines, audit-export worker on TiKV, coordinated full-cluster snapshot procedure, restore drill recipe (`make smoke` as the cheapest gate).
+  - `capacity-planning.md` — object-size × chunks fan-out table, RADOS / Cassandra / TiKV pool sizing math, lifecycle drain rate vs PUT rate (anchored to bench numbers), GC drain rate, when to scale shards (hot-shard contention, partition-size limit, list throughput) + replicas (CPU / latency / queue depth / fd cap triggers), dedup P2 roadmap with crypto-independence caveat, lifecycle cadence rules of thumb.
+- Replaced `best-practices/_index.md` stub with a section-overview table linking all six pages (5 new + the existing web-ui guide).
+- Quality checks: `cd docs/site && hugo --minify` clean (54 pages, 0 warnings, 118ms); `go vet ./...` clean; `go test ./...` clean (full unit suite, no integration).
+- Files changed:
+  - `docs/site/content/best-practices/sizing.md` (new)
+  - `docs/site/content/best-practices/monitoring.md` (new)
+  - `docs/site/content/best-practices/gc-lifecycle-tuning.md` (new)
+  - `docs/site/content/best-practices/backup-restore.md` (new)
+  - `docs/site/content/best-practices/capacity-planning.md` (new)
+  - `docs/site/content/best-practices/_index.md` (rewrite — was an US-002 stub)
+  - `scripts/ralph/prd.json` (US-008 → passes: true)
+- **Learnings for future iterations:**
+  - **`internal/metrics/metrics.go` is the canonical source for the metric shortlist** — every metric the gateway / workers register is there with a `Help` string. When writing operator-facing monitoring docs, lift names + meaning straight from this file rather than narrating from memory; the docs stay drift-proof if the metric registry is the source.
+  - **Bench numbers should anchor every sizing claim** — the `gc-lifecycle.md` Phase 1 + Phase 2 tables are the only end-to-end profile committed to the repo. Rather than invent throughput numbers, this story re-quoted the published tables and translated them into operator recommendations. Future sizing-style stories should follow the same pattern: cite, don't invent.
+  - **Cross-page references multiply quickly in a Best Practices section** — sizing → monitoring → gc-lifecycle-tuning → capacity-planning all reach into each other plus the architecture deep-dive pages. The `{{< ref >}}` shortcode validates them at build time, so a rename anywhere surfaces every dangling link instantly via `make docs-build`.
+  - **`STRATA_GC_DUAL_WRITE` defaults are time-dependent** — the env defaults to `on` *during the Phase 2 cycle* per the migration doc, but operators on a fresh deploy don't need to think about it (default behaviour reproduces Phase 1 byte-for-byte at `STRATA_GC_SHARDS=1`). The runbook needs to spell this out so operators don't conflate "the knob exists" with "I have to flip it".
+  - **Dedup P2 has a crypto-independence trap** that operators must opt into knowingly — `dedup-friendly` mode derives the DEK from `hash(plaintext)` so identical plaintext encrypts identically. The capacity-planning page now flags this so future readers don't read the dedup section as a free win.
+---
