@@ -20,7 +20,7 @@ jobs:
     name: Build Hugo site + publish to gh-pages
     runs-on: ubuntu-latest
     env:
-      HUGO_VERSION: '0.139.4'
+      HUGO_VERSION: '0.161.1'
     steps:
       - uses: actions/checkout@v4
         with:
