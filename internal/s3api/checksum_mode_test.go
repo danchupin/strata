@@ -45,7 +45,8 @@ func TestChecksumModeEnabledMultipartComposite(t *testing.T) {
 	h := newHarness(t)
 	h.mustStatus(h.doString("PUT", "/cmk", ""), 200)
 	resp := h.doString("POST", "/cmk/k?uploads", "",
-		"x-amz-checksum-algorithm", algo)
+		"x-amz-checksum-algorithm", algo,
+		"x-amz-checksum-type", "COMPOSITE")
 	h.mustStatus(resp, 200)
 	body := h.readBody(resp)
 	if !strings.Contains(body, "<ChecksumAlgorithm>"+algo+"</ChecksumAlgorithm>") {

@@ -23,3 +23,87 @@ Cycle: ralph/s3-compat-finish
 - `meta.Store.SavePart` overwrites on PartNumber resend (last-write-wins) on all 3 backends. Re-uploads of same PartNumber produce a single stored row at the LATEST ETag.
 - DO NOT use `STRATA_AUTH_MODE=optional` in e2e — sign with static creds against SigV4 path, matches s3-tests harness.
 
+## 2026-05-10 — US-001 ChecksumType defaults for CRC family on multipart Initiate
+- `internal/s3api/multipart.go::initiateMultipart` now folds Initiate-time
+  ChecksumType defaulting through a new `applyChecksumTypeDefault(mu, w, r)`
+  helper that runs immediately after `mu` is built. The helper is the single
+  source of truth for the AWS-parity rules the boto3 1.36+ FlexibleChecksum
+  default-on hot path leans on:
+    - `CRC64NVME` with empty type → `FULL_OBJECT` (CRC64NVME has no COMPOSITE
+      shape on AWS; GET-side body recompute would otherwise diverge from a
+      `BASE64(HASH(concat(raws)))-N` server echo and fire `FlexibleChecksumError`).
+    - `CRC64NVME` with explicit `COMPOSITE` → 400 `InvalidArgument` with the
+      AWS-parity message "The CRC64NVME checksum algorithm only supports the
+      FULL_OBJECT checksum type."
+    - `CRC32` / `CRC32C` with empty type → `FULL_OBJECT` (modern boto3 default;
+      AWS accepts both shapes, FULL_OBJECT lets the body-stream-recompute path
+      succeed transparently).
+    - `SHA1` / `SHA256` with empty type → unchanged (Complete-time fallback to
+      COMPOSITE; AWS rejects SHA + FULL_OBJECT explicitly so we keep it
+      unreachable here).
+- New test file `internal/s3api/multipart_checksum_default_test.go`:
+  - `TestMultipartCopyCRC64NVMEDefaultsToFullObject` — reproduces the
+    failing s3-test (`test_multipart_copy_*`) shape verbatim via the
+    in-process harness: Initiate w/ `x-amz-checksum-algorithm=CRC64NVME` and
+    NO `x-amz-checksum-type`, UploadPartCopy from a populated source, Complete,
+    GET destination w/ `x-amz-checksum-mode=ENABLED`. Asserts the emitted
+    `x-amz-checksum-crc64nvme` equals a fresh raw CRC64NVME over the
+    destination body bytes (FULL_OBJECT shape; NO `-N` suffix). RED before
+    the fix lands, GREEN after.
+  - `TestMultipartInitiateRejectsCRC64NVMEComposite` — locks the explicit
+    rejection axis.
+  - `TestMultipartCRC32DefaultsToFullObject` (subtests `CRC32`, `CRC32C`) —
+    locks the empty-type defaulting for the full CRC family; asserts GET
+    emits the FULL_OBJECT whole-stream CRC and never the `-N` composite.
+- Tests that explicitly leaned on the old empty-type-defaults-to-COMPOSITE
+  behaviour for CRC32 / CRC32C now send `x-amz-checksum-type: COMPOSITE`
+  explicitly to keep their original intent (composite shape coverage):
+  - `internal/s3api/multipart_complete_checksum_test.go::TestMultipartCompleteCompositeChecksumMatch`
+  - `internal/s3api/multipart_complete_checksum_test.go::TestMultipartCompleteCompositeChecksumMismatch`
+  - `internal/s3api/checksum_mode_test.go::TestChecksumModeEnabledMultipartComposite`
+  Per PRD AC: explicit-algorithm + explicit-type uploads are unchanged; only
+  the empty-type defaulting behaviour changes. SHA1 / SHA256 paths in those
+  tables stay untouched (default still empty / COMPOSITE).
+- Files changed: `internal/s3api/multipart.go`,
+  `internal/s3api/multipart_checksum_default_test.go` (new),
+  `internal/s3api/multipart_complete_checksum_test.go`,
+  `internal/s3api/checksum_mode_test.go`,
+  `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- Quality: `go vet ./...` clean. `go test ./...` green
+  (`internal/s3api` 9.4s, no regressions across the repo). The new
+  `TestMultipartCopyCRC64NVMEDefaultsToFullObject` flips RED → GREEN
+  with the fix.
+- s3-tests targeted run (`test_multipart_copy_small`, `_special_names`,
+  `_multiple_sizes`): **DEFERRED to US-003.** `docker info` reports the Lima
+  Docker daemon is not running on this Ralph host, so `make up-all` cannot
+  bring up the cassandra+ceph+strata stack the s3-tests harness needs. The
+  in-process harness test asserts the same wire shape the s3-test asserts
+  (raw CRC64NVME of body, FULL_OBJECT, no `-N`), so the fix is verified at
+  protocol-shape level. US-003 reruns the full `scripts/s3-tests/run.sh`
+  against a clean stack and updates `scripts/s3-tests/README.md` with the
+  authoritative pass count + per-test diff.
+- **Learnings for future iterations:**
+  - The empty-type default at Initiate is the single canonical hook for the
+    CRC family / boto3 FlexibleChecksum hot path. `composeMultipartChecksums`
+    branches on `mu.ChecksumType` for shape, so any deferred decision (e.g.
+    Complete-time fallback) would have to mirror this logic — keep it at
+    Initiate where `mu.ChecksumType` is persisted.
+  - `applyChecksumTypeDefault` is reused symmetrically: native multipart
+    upload AND UploadPartCopy share the same Initiate path, so the fix
+    automatically covers both (the bug surfaced via the copy tests because
+    boto3's high-level transfer manager triggers default-on; native multipart
+    s3-tests set algorithm/type explicitly and avoided the gap, but the fix
+    is at the cross-cutting layer).
+  - When tightening a default that affects test fixtures, prefer adding an
+    explicit `x-amz-checksum-type: COMPOSITE` header to existing tests rather
+    than weakening the default — preserves test intent and keeps the new
+    default the canonical wire shape.
+  - `internal/s3api/checksum.go::isCRCAlgo` already enumerates the three CRC
+    variants; reuse it in any future "which algos accept FULL_OBJECT" gate
+    instead of duplicating the switch.
+  - The diagnostic warnings surfaced during edits (`xml.go::backendPresignConfiguration`,
+    `multipart.go:717 unused parameter key`, `testutil_test.go::mustWriteFull`)
+    are pre-existing — not introduced here. Do NOT touch them in the same
+    commit; they predate this cycle.
+---
+

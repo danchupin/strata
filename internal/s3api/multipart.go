@@ -62,6 +62,9 @@ func (s *Server) initiateMultipart(w http.ResponseWriter, r *http.Request, b *me
 		ChecksumAlgorithm: strings.ToUpper(r.Header.Get("x-amz-checksum-algorithm")),
 		ChecksumType:      normalizeChecksumType(r.Header.Get("x-amz-checksum-type")),
 	}
+	if !applyChecksumTypeDefault(mu, w, r) {
+		return
+	}
 	switch sse {
 	case sseAlgorithmAES256:
 		if s.Master == nil {
@@ -136,6 +139,39 @@ func normalizeChecksumType(v string) string {
 		return "COMPOSITE"
 	}
 	return ""
+}
+
+// applyChecksumTypeDefault fills mu.ChecksumType when the client did not send
+// x-amz-checksum-type and rejects the AWS-illegal CRC64NVME+COMPOSITE pair.
+// Defaults match modern boto3 (FlexibleChecksum, default-on since 1.36):
+//   - CRC family (CRC32 / CRC32C / CRC64NVME) with empty type → FULL_OBJECT
+//     so GET-side body-recompute validation lines up with the stored shape.
+//     CRC64NVME has no COMPOSITE shape on AWS, so an explicit COMPOSITE is
+//     a 400 InvalidArgument.
+//   - SHA1 / SHA256 stay empty (Complete falls back to COMPOSITE; AWS rejects
+//     SHA + FULL_OBJECT).
+//
+// Returns false (and writes the error) when the request is rejected.
+func applyChecksumTypeDefault(mu *meta.MultipartUpload, w http.ResponseWriter, r *http.Request) bool {
+	switch mu.ChecksumAlgorithm {
+	case "CRC64NVME":
+		if mu.ChecksumType == "COMPOSITE" {
+			writeError(w, r, APIError{
+				Code:    "InvalidArgument",
+				Message: "The CRC64NVME checksum algorithm only supports the FULL_OBJECT checksum type.",
+				Status:  http.StatusBadRequest,
+			})
+			return false
+		}
+		if mu.ChecksumType == "" {
+			mu.ChecksumType = "FULL_OBJECT"
+		}
+	case "CRC32", "CRC32C":
+		if mu.ChecksumType == "" {
+			mu.ChecksumType = "FULL_OBJECT"
+		}
+	}
+	return true
 }
 
 func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Bucket, key, uploadID string) {

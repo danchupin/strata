@@ -22,8 +22,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Initiate-time defaulting in `internal/s3api/multipart.go::applyChecksumTypeDefault`: CRC64NVME / CRC32 / CRC32C empty-type → FULL_OBJECT; CRC64NVME + COMPOSITE → 400 InvalidArgument. New test file `multipart_checksum_default_test.go` (3 cases) is RED before the fix lands and GREEN after. Existing tests that leaned on empty-type=COMPOSITE for CRC32 / CRC32C updated to send explicit COMPOSITE header to preserve intent. Targeted s3-tests run deferred to US-003 — Lima Docker daemon not running on this host. `go vet ./...` clean. `go test ./...` green."
     },
     {
       "id": "US-002",
