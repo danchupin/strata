@@ -3036,6 +3036,159 @@ func (s *Store) BumpBucketStats(ctx context.Context, bucketID uuid.UUID, deltaBy
 	return meta.BucketStats{}, fmt.Errorf("cassandra: bucket_stats CAS exhausted retries for bucket %s", bucketID)
 }
 
+// WriteUsageAggregate persists one row in the (bucket, storageClass, day)
+// rollup feed (US-008). Day is normalised to UTC midnight before write so
+// gocql's `date` codec round-trips cleanly. A second row is also written to
+// usage_aggregates_classes so ListUserUsage can enumerate the storage
+// classes seen by a bucket without a cluster-wide scan.
+func (s *Store) WriteUsageAggregate(ctx context.Context, agg meta.UsageAggregate) error {
+	day := normalizeUsageDay(agg.Day)
+	computed := agg.ComputedAt
+	if computed.IsZero() {
+		computed = time.Now().UTC()
+	}
+	if err := s.s.Query(
+		`INSERT INTO usage_aggregates (
+			bucket_id, storage_class, day,
+			byte_seconds, object_count_avg, object_count_max, computed_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		gocqlUUID(agg.BucketID), agg.StorageClass, day,
+		agg.ByteSeconds, agg.ObjectCountAvg, agg.ObjectCountMax, computed,
+	).WithContext(ctx).Exec(); err != nil {
+		return err
+	}
+	return s.s.Query(
+		`INSERT INTO usage_aggregates_classes (bucket_id, storage_class) VALUES (?, ?)`,
+		gocqlUUID(agg.BucketID), agg.StorageClass,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) ListUsageAggregates(ctx context.Context, bucketID uuid.UUID, storageClass string, dayFrom, dayTo time.Time) ([]meta.UsageAggregate, error) {
+	from := normalizeUsageDay(dayFrom)
+	to := normalizeUsageDay(dayTo)
+	bucketName := s.bucketNameOrEmpty(bucketID)
+	iter := s.s.Query(
+		`SELECT day, byte_seconds, object_count_avg, object_count_max, computed_at
+		   FROM usage_aggregates
+		  WHERE bucket_id=? AND storage_class=? AND day >= ? AND day < ?`,
+		gocqlUUID(bucketID), storageClass, from, to,
+	).WithContext(ctx).Iter()
+	defer iter.Close()
+	var out []meta.UsageAggregate
+	var day time.Time
+	var byteSeconds, oavg, omax int64
+	var computed time.Time
+	for iter.Scan(&day, &byteSeconds, &oavg, &omax, &computed) {
+		out = append(out, meta.UsageAggregate{
+			BucketID:       bucketID,
+			Bucket:         bucketName,
+			StorageClass:   storageClass,
+			Day:            day.UTC(),
+			ByteSeconds:    byteSeconds,
+			ObjectCountAvg: oavg,
+			ObjectCountMax: omax,
+			ComputedAt:     computed,
+		})
+	}
+	if err := iter.Close(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *Store) ListUserUsage(ctx context.Context, userName string, dayFrom, dayTo time.Time) ([]meta.UsageAggregate, error) {
+	buckets, err := s.ListBuckets(ctx, userName)
+	if err != nil {
+		return nil, err
+	}
+	type sumKey struct {
+		StorageClass string
+		Day          int64
+	}
+	sums := make(map[sumKey]meta.UsageAggregate)
+	from := normalizeUsageDay(dayFrom)
+	to := normalizeUsageDay(dayTo)
+	for _, b := range buckets {
+		// The (bucket_id, storage_class) partition key forces a per-class
+		// fan-out. Read the usage_aggregates_classes index to discover which
+		// classes a bucket has ever rolled up, then issue one ListUsageAggregates
+		// per (bucket, class). v1 keeps the class set tiny (typically just
+		// STANDARD), so the fan-out is bounded.
+		classes, cerr := s.usageStorageClassesForBucket(ctx, b.ID)
+		if cerr != nil {
+			return nil, cerr
+		}
+		for _, cls := range classes {
+			rows, lerr := s.ListUsageAggregates(ctx, b.ID, cls, from, to)
+			if lerr != nil {
+				return nil, lerr
+			}
+			for _, r := range rows {
+				k := sumKey{StorageClass: r.StorageClass, Day: r.Day.Unix()}
+				acc := sums[k]
+				acc.StorageClass = r.StorageClass
+				acc.Day = r.Day
+				acc.ByteSeconds += r.ByteSeconds
+				acc.ObjectCountAvg += r.ObjectCountAvg
+				if r.ObjectCountMax > acc.ObjectCountMax {
+					acc.ObjectCountMax = r.ObjectCountMax
+				}
+				if r.ComputedAt.After(acc.ComputedAt) {
+					acc.ComputedAt = r.ComputedAt
+				}
+				sums[k] = acc
+			}
+		}
+	}
+	out := make([]meta.UsageAggregate, 0, len(sums))
+	for _, v := range sums {
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Day.Equal(out[j].Day) {
+			return out[i].Day.Before(out[j].Day)
+		}
+		return out[i].StorageClass < out[j].StorageClass
+	})
+	return out, nil
+}
+
+// usageStorageClassesForBucket returns the distinct storage classes that
+// have ever been rolled up for bucketID. Backed by the
+// usage_aggregates_classes index table that WriteUsageAggregate maintains
+// alongside the main rollup row.
+func (s *Store) usageStorageClassesForBucket(ctx context.Context, bucketID uuid.UUID) ([]string, error) {
+	iter := s.s.Query(
+		`SELECT storage_class FROM usage_aggregates_classes WHERE bucket_id=?`,
+		gocqlUUID(bucketID),
+	).WithContext(ctx).Iter()
+	defer iter.Close()
+	var out []string
+	var cls string
+	for iter.Scan(&cls) {
+		out = append(out, cls)
+	}
+	if err := iter.Close(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *Store) bucketNameOrEmpty(bucketID uuid.UUID) string {
+	s.bucketNamesMu.RLock()
+	name, ok := s.bucketNames[bucketID]
+	s.bucketNamesMu.RUnlock()
+	if ok {
+		return name
+	}
+	return ""
+}
+
+func normalizeUsageDay(t time.Time) time.Time {
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+}
+
 func (s *Store) SetBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string, blob []byte) error {
 	return s.s.Query(
 		`INSERT INTO bucket_inventory_configs (bucket_id, config_id, config) VALUES (?, ?, ?)`,

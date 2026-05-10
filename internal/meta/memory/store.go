@@ -36,6 +36,7 @@ type Store struct {
 	bucketQuotas   map[uuid.UUID][]byte
 	userQuotas     map[string][]byte
 	bucketStats    map[uuid.UUID]meta.BucketStats
+	usageAggs      map[usageKey]meta.UsageAggregate
 	inventoryConfigs map[uuid.UUID]map[string][]byte
 	accessPoints     map[string]*meta.AccessPoint
 	bucketGrants   map[uuid.UUID][]meta.Grant
@@ -70,6 +71,12 @@ type manifestKey struct {
 	BucketID  uuid.UUID
 	Key       string
 	VersionID string
+}
+
+type usageKey struct {
+	BucketID     uuid.UUID
+	StorageClass string
+	Day          int64 // unix-epoch UTC midnight
 }
 
 type completionKey struct {
@@ -123,6 +130,7 @@ func New() *Store {
 		bucketQuotas: make(map[uuid.UUID][]byte),
 		userQuotas:   make(map[string][]byte),
 		bucketStats:  make(map[uuid.UUID]meta.BucketStats),
+		usageAggs:    make(map[usageKey]meta.UsageAggregate),
 		inventoryConfigs: make(map[uuid.UUID]map[string][]byte),
 		accessPoints:     make(map[string]*meta.AccessPoint),
 		bucketGrants: make(map[uuid.UUID][]meta.Grant),
@@ -1592,6 +1600,94 @@ func (s *Store) BumpBucketStats(ctx context.Context, bucketID uuid.UUID, deltaBy
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.bumpBucketStatsLocked(bucketID, deltaBytes, deltaObjects), nil
+}
+
+func normalizeDay(t time.Time) time.Time {
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+func (s *Store) WriteUsageAggregate(ctx context.Context, agg meta.UsageAggregate) error {
+	day := normalizeDay(agg.Day)
+	agg.Day = day
+	if agg.ComputedAt.IsZero() {
+		agg.ComputedAt = time.Now().UTC()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.usageAggs[usageKey{BucketID: agg.BucketID, StorageClass: agg.StorageClass, Day: day.Unix()}] = agg
+	return nil
+}
+
+func (s *Store) ListUsageAggregates(ctx context.Context, bucketID uuid.UUID, storageClass string, dayFrom, dayTo time.Time) ([]meta.UsageAggregate, error) {
+	from := normalizeDay(dayFrom)
+	to := normalizeDay(dayTo)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]meta.UsageAggregate, 0)
+	for k, v := range s.usageAggs {
+		if k.BucketID != bucketID || k.StorageClass != storageClass {
+			continue
+		}
+		d := time.Unix(k.Day, 0).UTC()
+		if d.Before(from) || !d.Before(to) {
+			continue
+		}
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Day.Before(out[j].Day) })
+	return out, nil
+}
+
+func (s *Store) ListUserUsage(ctx context.Context, userName string, dayFrom, dayTo time.Time) ([]meta.UsageAggregate, error) {
+	from := normalizeDay(dayFrom)
+	to := normalizeDay(dayTo)
+	s.mu.RLock()
+	owned := make(map[uuid.UUID]string)
+	for _, b := range s.buckets {
+		if b.Owner == userName {
+			owned[b.ID] = b.Name
+		}
+	}
+	type sumKey struct {
+		StorageClass string
+		Day          int64
+	}
+	sums := make(map[sumKey]meta.UsageAggregate)
+	for k, v := range s.usageAggs {
+		if _, ok := owned[k.BucketID]; !ok {
+			continue
+		}
+		d := time.Unix(k.Day, 0).UTC()
+		if d.Before(from) || !d.Before(to) {
+			continue
+		}
+		sk := sumKey{StorageClass: k.StorageClass, Day: k.Day}
+		acc := sums[sk]
+		acc.StorageClass = v.StorageClass
+		acc.Day = d
+		acc.ByteSeconds += v.ByteSeconds
+		acc.ObjectCountAvg += v.ObjectCountAvg
+		if v.ObjectCountMax > acc.ObjectCountMax {
+			acc.ObjectCountMax = v.ObjectCountMax
+		}
+		if v.ComputedAt.After(acc.ComputedAt) {
+			acc.ComputedAt = v.ComputedAt
+		}
+		sums[sk] = acc
+	}
+	s.mu.RUnlock()
+	out := make([]meta.UsageAggregate, 0, len(sums))
+	for _, v := range sums {
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Day.Equal(out[j].Day) {
+			return out[i].Day.Before(out[j].Day)
+		}
+		return out[i].StorageClass < out[j].StorageClass
+	})
+	return out, nil
 }
 
 func (s *Store) SetBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string, blob []byte) error {

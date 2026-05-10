@@ -205,6 +205,23 @@ type BucketStats struct {
 	UpdatedAt   time.Time
 }
 
+// UsageAggregate is one row in the per-(bucket, storage_class, day) usage
+// rollup feed (US-008) consumed by external billing. Day is normalised to
+// UTC midnight; ByteSeconds is the integral of UsedBytes over the day
+// (v1 approximation: UsedBytes * 86400 from a single sample). ObjectCount*
+// summarise the live object count over the day; v1 sets both Avg and Max
+// to the same sample value.
+type UsageAggregate struct {
+	BucketID       uuid.UUID
+	Bucket         string
+	StorageClass   string
+	Day            time.Time
+	ByteSeconds    int64
+	ObjectCountAvg int64
+	ObjectCountMax int64
+	ComputedAt     time.Time
+}
+
 // Grant is a single ACL grant entry persisted alongside the canned ACL.
 // GranteeType is one of: CanonicalUser, Group, AmazonCustomerByEmail.
 // Permission is one of: FULL_CONTROL, READ, WRITE, READ_ACP, WRITE_ACP.
@@ -771,6 +788,18 @@ type Store interface {
 	// concurrent bumps serialise without lost updates.
 	GetBucketStats(ctx context.Context, bucketID uuid.UUID) (BucketStats, error)
 	BumpBucketStats(ctx context.Context, bucketID uuid.UUID, deltaBytes, deltaObjects int64) (BucketStats, error)
+
+	// Usage aggregates (US-008). The leader-elected usage-rollup worker
+	// writes one row per (bucketID, storageClass, day) per tick. Day must be
+	// normalised to UTC midnight; backends that key on a date column do this
+	// for the caller. Reads are inclusive on dayFrom, exclusive on dayTo
+	// (half-open) so successive day-aligned queries do not double-count.
+	// ListUserUsage walks every bucket owned by userName and returns
+	// per-(storageClass, day) sums across them (v1 fan-out — denormalised
+	// per-user index is a P3 follow-up).
+	WriteUsageAggregate(ctx context.Context, agg UsageAggregate) error
+	ListUsageAggregates(ctx context.Context, bucketID uuid.UUID, storageClass string, dayFrom, dayTo time.Time) ([]UsageAggregate, error)
+	ListUserUsage(ctx context.Context, userName string, dayFrom, dayTo time.Time) ([]UsageAggregate, error)
 
 	// Inventory configurations are addressed per-bucket by their config id; a
 	// bucket may carry multiple at once (AWS allows up to 1,000). The blob is

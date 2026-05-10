@@ -61,6 +61,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"UserQuotaRoundTrip", caseUserQuota},
 		{"BucketStatsRoundTrip", caseBucketStats},
 		{"BucketStatsHotPath", caseBucketStatsHotPath},
+		{"UsageAggregateRoundTrip", caseUsageAggregate},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2374,6 +2375,126 @@ func caseBucketStatsHotPath(t *testing.T, s meta.Store) {
 		t.Fatalf("complete mp: %v", err)
 	}
 	mustStats("mp-complete", mp.ID, 192, 1)
+}
+
+// caseUsageAggregate exercises the usage rollup CRUD surface (US-008):
+// per-(bucket, class) writes are isolated by partition key, ListUsageAggregates
+// applies a half-open [from, to) day filter, ListUserUsage sums across the
+// user's buckets per (storage_class, day).
+func caseUsageAggregate(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	utcMidnight := func(daysAgo int) time.Time {
+		t := time.Now().UTC()
+		base := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+		return base.AddDate(0, 0, -daysAgo)
+	}
+	day1 := utcMidnight(2)
+	day2 := utcMidnight(1)
+	day3 := utcMidnight(0)
+
+	b1, err := s.CreateBucket(ctx, "ua1", "alice", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket1: %v", err)
+	}
+	b2, err := s.CreateBucket(ctx, "ua2", "alice", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket2: %v", err)
+	}
+	if _, err := s.CreateBucket(ctx, "ua3", "bob", "STANDARD"); err != nil {
+		t.Fatalf("create bucket3: %v", err)
+	}
+
+	rows := []meta.UsageAggregate{
+		{BucketID: b1.ID, StorageClass: "STANDARD", Day: day1, ByteSeconds: 1000, ObjectCountAvg: 1, ObjectCountMax: 1},
+		{BucketID: b1.ID, StorageClass: "STANDARD", Day: day2, ByteSeconds: 2000, ObjectCountAvg: 2, ObjectCountMax: 3},
+		{BucketID: b1.ID, StorageClass: "STANDARD", Day: day3, ByteSeconds: 3000, ObjectCountAvg: 4, ObjectCountMax: 5},
+		{BucketID: b1.ID, StorageClass: "GLACIER", Day: day2, ByteSeconds: 500, ObjectCountAvg: 1, ObjectCountMax: 1},
+		{BucketID: b2.ID, StorageClass: "STANDARD", Day: day2, ByteSeconds: 700, ObjectCountAvg: 2, ObjectCountMax: 2},
+	}
+	for i := range rows {
+		if err := s.WriteUsageAggregate(ctx, rows[i]); err != nil {
+			t.Fatalf("write row %d: %v", i, err)
+		}
+	}
+
+	got, err := s.ListUsageAggregates(ctx, b1.ID, "STANDARD", day1, day3.AddDate(0, 0, 1))
+	if err != nil {
+		t.Fatalf("list b1 standard: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("list b1 standard: got %d rows want 3 (%+v)", len(got), got)
+	}
+	for i := 0; i < len(got)-1; i++ {
+		if got[i].Day.After(got[i+1].Day) {
+			t.Fatalf("list not sorted ascending by day: %+v", got)
+		}
+	}
+
+	// Half-open: [day1, day3) excludes day3.
+	got, err = s.ListUsageAggregates(ctx, b1.ID, "STANDARD", day1, day3)
+	if err != nil {
+		t.Fatalf("list b1 standard half-open: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("half-open: got %d rows want 2 (%+v)", len(got), got)
+	}
+
+	// Different class isolated.
+	got, err = s.ListUsageAggregates(ctx, b1.ID, "GLACIER", day1, day3.AddDate(0, 0, 1))
+	if err != nil || len(got) != 1 {
+		t.Fatalf("list b1 glacier: %d rows err=%v", len(got), err)
+	}
+
+	// User-scope sums across alice's two buckets per (class, day).
+	allRows, err := s.ListUserUsage(ctx, "alice", day1, day3.AddDate(0, 0, 1))
+	if err != nil {
+		t.Fatalf("list user usage: %v", err)
+	}
+	type sumKey struct {
+		StorageClass string
+		Day          int64
+	}
+	seen := map[sumKey]meta.UsageAggregate{}
+	for _, r := range allRows {
+		seen[sumKey{r.StorageClass, r.Day.UTC().Unix()}] = r
+	}
+	if r := seen[sumKey{"STANDARD", day2.Unix()}]; r.ByteSeconds != 2700 {
+		t.Fatalf("standard day2 sum: got %d want 2700 (rows=%+v)", r.ByteSeconds, allRows)
+	}
+	if r := seen[sumKey{"STANDARD", day1.Unix()}]; r.ByteSeconds != 1000 {
+		t.Fatalf("standard day1: got %d want 1000", r.ByteSeconds)
+	}
+	if r := seen[sumKey{"STANDARD", day3.Unix()}]; r.ByteSeconds != 3000 {
+		t.Fatalf("standard day3: got %d want 3000", r.ByteSeconds)
+	}
+	if r := seen[sumKey{"GLACIER", day2.Unix()}]; r.ByteSeconds != 500 {
+		t.Fatalf("glacier day2: got %d want 500", r.ByteSeconds)
+	}
+
+	// Bob's user usage does NOT include alice's rows.
+	bob, err := s.ListUserUsage(ctx, "bob", day1, day3.AddDate(0, 0, 1))
+	if err != nil {
+		t.Fatalf("list bob: %v", err)
+	}
+	for _, r := range bob {
+		if r.ByteSeconds != 0 {
+			t.Fatalf("bob has no rolled-up data; got %+v", r)
+		}
+	}
+
+	// Overwrite same (bucket, class, day): WriteUsageAggregate is idempotent —
+	// last writer wins.
+	overwrite := meta.UsageAggregate{BucketID: b1.ID, StorageClass: "STANDARD", Day: day2, ByteSeconds: 9999, ObjectCountAvg: 7, ObjectCountMax: 9}
+	if err := s.WriteUsageAggregate(ctx, overwrite); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	got, err = s.ListUsageAggregates(ctx, b1.ID, "STANDARD", day2, day2.AddDate(0, 0, 1))
+	if err != nil || len(got) != 1 {
+		t.Fatalf("post-overwrite: rows=%d err=%v", len(got), err)
+	}
+	if got[0].ByteSeconds != 9999 {
+		t.Fatalf("overwrite did not take effect: got %d", got[0].ByteSeconds)
+	}
 }
 
 // padInt formats i with a fixed width using leading zeros.

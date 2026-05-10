@@ -194,6 +194,21 @@ var tableDDL = []string{
 		used_objects bigint,
 		updated_at   timestamp
 	)`,
+	`CREATE TABLE IF NOT EXISTS usage_aggregates (
+		bucket_id        uuid,
+		storage_class    text,
+		day              date,
+		byte_seconds     bigint,
+		object_count_avg bigint,
+		object_count_max bigint,
+		computed_at      timestamp,
+		PRIMARY KEY ((bucket_id, storage_class), day)
+	) WITH CLUSTERING ORDER BY (day ASC)`,
+	`CREATE TABLE IF NOT EXISTS usage_aggregates_classes (
+		bucket_id     uuid,
+		storage_class text,
+		PRIMARY KEY (bucket_id, storage_class)
+	)`,
 	`CREATE TABLE IF NOT EXISTS multipart_completions (
 		bucket_id    uuid,
 		upload_id    timeuuid,

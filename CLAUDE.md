@@ -113,6 +113,13 @@ testcontainers to find the engine.
                           rows. Leader-elected on `manifest-rewriter-leader`.
                           Cadence via STRATA_MANIFEST_REWRITER_INTERVAL
                           (default 24h).
+  strata server --workers=usage-rollup -> internal/usagerollup: nightly
+                          (default 00:00 UTC, 24h interval) samples
+                          bucket_stats and writes one usage_aggregates row
+                          per (bucket, storage_class, yesterday-UTC). Feeds
+                          external billing. Cadence via
+                          STRATA_USAGE_ROLLUP_AT + STRATA_USAGE_ROLLUP_INTERVAL.
+                          Leader-elected on `usage-rollup-leader`.
   strata-admin rewrap   -> one-shot SSE master-key rotation. Walks every
                           object and rewraps DEKs to --target-key-id (or
                           the active key). Idempotent + resumable via
