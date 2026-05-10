@@ -22,6 +22,9 @@ Cycle: ralph/race-harness
 - PRD lifecycle: `tasks/prd-race-harness.md` REMOVED in close-flip commit per CLAUDE.md PRD lifecycle rule. Canonical record lives in Ralph snapshot under `scripts/ralph/archive/<YYYY-MM-DD>-race-harness/{prd.json,progress.txt}` after `archive_cycle` fires on `<promise>COMPLETE</promise>`.
 - racetest package layout (US-001): `internal/racetest/fixture.go` hosts in-process Fixture + RunScenario + VerifyInvariants + NewClient + DrainBody + CollectManifestOIDs. `runner.go` hosts Config + Report + Run for external HTTP endpoints. `Reporter` interface (Helper/Fatalf/Errorf/Logf) decouples in-process scenario from `testing` import — *testing.T satisfies it. `uploadIDRE` is package-private. Workers/Iters/Keys exported vars with RACE_WORKERS/RACE_ITERS/RACE_KEYS env overrides; per-backend test fixtures pass `racetest.Workers` to NewClient.
 - s3api race tests pattern (US-001): per-backend constructor builds *racetest.Fixture and TestRace* delegates to `racetest.RunScenario(t, f); racetest.VerifyInvariants(t, f)`. The shared `harnessMasterProvider` + `testPrincipalHeader` stay in s3api/testutil_test.go; race fixtures wire them on the http handler (auth context shimmed via the principal header).
+- strata-racecheck binary pattern (US-002): `cmd/strata-racecheck/main.go` is a thin shell over `racetest.Run`. Flags pre-populated from $AWS_ACCESS_KEY_ID / $AWS_SECRET_ACCESS_KEY / $AWS_DEFAULT_REGION env vars so CI can lean on shell exports. Exit code mapping is part of the binary's contract (0/1/2) — used by `make race-soak` (US-006) and the nightly workflow (US-007) to flip the badge red on inconsistencies vs setup-failure differently. Tests use `run(args, &stdout, &stderr) int` shape (no os.Exit in main flow).
+- racetest event sinks (US-002): `EventSink` interface + nopSink/writerSink/fileSink. ReportPath beats EventWriter when both are set. fileSink wraps writerSink with a buffered writer so the 64 KiB bufio buffer absorbs the per-op churn at ~500 ops/sec. Concurrency-safe via single mutex on the underlying io.Writer.
+- racetest SigV4 wiring (US-002): aws-sdk-go-v2 v4.NewSigner is the signer. Body is hashed with sha256 (matches the gateway's verifier). Empty AccessKey returns nil signer; anonymous flow stays unchanged so existing in-process tests keep working without auth setup.
 
 ## [2026-05-10 14:30 MSK] - US-001
 - Implemented: Carved out `internal/racetest` package and refactored s3api race tests as thin shims.
@@ -39,4 +42,27 @@ Cycle: ralph/race-harness
   - `harnessMasterProvider` + `testPrincipalHeader` stay in `internal/s3api/testutil_test.go` — racetest does NOT depend on them. The per-backend constructor in race_test.go does the auth wiring.
   - Run is intentionally minimal for US-001 (anonymous HTTP, PUT/DELETE/Multipart only). US-002 wires SigV4 + JSON-lines events, US-003 extends workload to versioning flips + conditional + DeleteObjects, US-004 adds verifier oracle (the Inconsistency event schema is already established).
   - `go vet` triggered on `internal/s3api/testutil_test.go` line 116 `mustWriteFull` — pre-existing diagnostic, not introduced by this story; left alone.
+---
+
+## [2026-05-10 16:00 MSK] - US-002
+- Implemented: cmd/strata-racecheck standalone binary + racetest events + SigV4 signing.
+- Files changed:
+  - new: `cmd/strata-racecheck/main.go` — flag parsing, exit-code mapping (0/1/2), human summary printer
+  - new: `cmd/strata-racecheck/main_test.go` — TestRunSmokeBinary (in-process gateway, asserts JSONL + stdout summary), TestBadConfigExitsTwo
+  - new: `internal/racetest/events.go` — Event struct + EventSink/nopSink/writerSink/fileSink
+  - new: `internal/racetest/signer.go` — aws-sdk-go-v2 v4 signer wrapper, anonymous flow when AccessKey == ""
+  - rewrote: `internal/racetest/runner.go` — Config gained AccessKey/SecretKey/Region/ReportPath/EventWriter; doSigned/doSignedRead/doSignedReadResp wrap signing + body materialisation; per-op runOp emits op_started/op_done; summary event emitted at end
+  - edit: `Makefile` — `make build` produces bin/strata-racecheck
+  - edit: `docs/site/content/architecture/migrations/binary-consolidation.md` — added Non-Goals section documenting strata-racecheck exception
+  - edit: `scripts/ralph/prd.json` — US-002 passes=true
+- Quality checks: `go vet ./...` clean, `go build ./...` clean, `go test ./cmd/strata-racecheck/...` passes (1.16s), `go test ./internal/racetest/...` passes (1.10s), `go test -race ./internal/racetest/... ./cmd/strata-racecheck/... ./internal/s3api/...` all green, full `go test ./...` green.
+- **Learnings for future iterations:**
+  - aws-sdk-go-v2 v4.SignHTTP API: takes (ctx, aws.Credentials, *http.Request, payloadHash hex string, service "s3", region, signingTime). Body is materialised on req.Body via io.NopCloser(bytes.NewReader(body)) BEFORE signing — the SDK does not read req.Body itself, but the http.Client does, and ContentLength must match for SigV4 streaming-vs-fixed-payload routing in the gateway.
+  - The aws-sdk-go-v2 signer is stateless after construction — safe to share across all worker goroutines via *signer pointer.
+  - Tests use a `run(args, stdout, stderr) int` wrapper (no os.Exit in main flow) so unit tests can drive the binary against an httptest gateway. main() is a 3-line shim that calls os.Exit(run(...)).
+  - Exit-code mapping is the binary's contract with US-006/US-007 — 1 means inconsistencies, 2 means infra/setup failure. Workflow author can branch on these distinctly (open issue on 1, retry on 2, etc.). Locked into a `const exitOK/exitInconsistency/exitSetupFailure` block.
+  - Event sink layering: writerSink wraps an io.Writer, fileSink embeds writerSink + adds buffered writer + Close-flushes. nopSink discards. ReportPath wins over EventWriter when both set — keeps the binary surface single-knob.
+  - The binary-consolidation PRD file no longer exists in tasks/ (deleted at cycle close per PRD-lifecycle rule). Acceptance criterion's "tasks/prd-binary-consolidation.md" reference was satisfied by adding a Non-Goals section to the migration doc at docs/site/content/architecture/migrations/binary-consolidation.md, which is the canonical post-cycle home for the consolidation rule.
+  - The per-op summary event mirrors the in-memory Report fields so downstream tools (US-008's summarize.sh) can read either the JSON-lines tail OR the strata-racecheck stdout; both report the same numbers.
+  - Signing is opt-in via empty AccessKey: existing TestRunSmoke in internal/racetest/runner_test.go still passes anonymous against an httptest gateway with default auth-mode (optional), no test changes needed.
 ---

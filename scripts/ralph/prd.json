@@ -36,8 +36,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added cmd/strata-racecheck/main.go with flags --endpoint, --duration, --concurrency, --buckets, --keys-per-bucket, --report, --access-key, --secret-key, --region. Exit codes 0 (clean) / 1 (inconsistencies) / 2 (setup-failure). JSON-lines events (op_started/op_done/inconsistency/summary) emitted by internal/racetest via new EventSink (file or io.Writer). SigV4 signing wired via aws-sdk-go-v2 v4.NewSigner — empty AccessKey falls through to anonymous mode for in-process tests. internal/racetest gained Config.AccessKey/SecretKey/Region/ReportPath/EventWriter, signer.go (cred wrapper), events.go (sink). Makefile build target now produces bin/strata-racecheck alongside strata + strata-admin. Binary-consolidation migration doc gained Non-Goals section documenting strata-racecheck exception (developer/CI tool, not a production binary). Workload extension to versioning/conditional/DeleteObjects + verifier oracle stays in US-003/US-004."
     },
     {
       "id": "US-003",
