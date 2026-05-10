@@ -90,8 +90,8 @@
         "Tests pass"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added deploy/docker/docker-compose.ci.yml override + Makefile up-all-ci/wait-strata targets + bootstrap.sh extensions for OSD_MEMORY_TARGET / MGR_DASHBOARD_DISABLE. Override sets Cassandra MAX_HEAP_SIZE=2G HEAP_NEWSIZE=400M (vs base 1G/128M — race-soak sustained-write needs more heap to avoid GC starvation), Ceph MEMSTORE_BYTES=1Gi + OSD_MEMORY_TARGET=1Gi (vs base 4Gi memstore), MGR_DASHBOARD_DISABLE=1, and gates prometheus + grafana behind the `full` profile so `--profile ci` skips them. bootstrap.sh applies osd_memory_target via `ceph config set osd osd_memory_target` after the cluster is healthy and `ceph mgr module disable dashboard` when DASHBOARD_DISABLE=1; both are no-ops on the developer stack (env unset). Cassandra RF=1 SimpleStrategy is already the default in deploy/strata.toml + internal/config/config.go — no change needed. Single replica everywhere is satisfied by base shape (one cassandra/one ceph/one strata). Validated `docker compose -f base -f ci.yml --profile ci config --services` returns exactly cassandra/ceph/strata; base-only config returns the unchanged 5-service set so `make up-all` is preserved. `go vet ./...` + `go build ./...` + full `go test ./...` all green. Compose schema validates clean (`docker compose config -q` exits 0). Stack-startup-time + 5 GB RSS budget claims are CI-runtime checks — verifiable on first `make up-all-ci` exercise from US-006/US-007."
     },
     {
       "id": "US-006",

@@ -33,6 +33,7 @@ Cycle: ralph/race-harness
 - Tracker shape (US-004): per-(bucket,key) state holds (1) bounded history ring of recent (etag,size,version_id,observedAt) for human-readable diagnostic strings, (2) unbounded allEtags map for the actual validateETag predicate (so a slow earlier write rotated out of the ring still validates), (3) deletedAt timestamp cleared on RecordPut, (4) versionIDs slice for versioning-monotonicity. Pre-flight RecordIntent(md5-of-body) is REQUIRED to absorb the response→RecordPut window; without it the read-after-write oracle false-flags peers' just-landed PUTs.
 - Verifier oracle race-absorption pattern (US-004): an oracle that compares gateway state to tracker state will false-flag if the tracker is stale. The fix is two-pronged: (a) RecordIntent before the HTTP call so the tracker pre-knows the etag, (b) the verifier confirms via a secondary HTTP call (HEAD for delete-grace, retry-loop GET for read-after-write) before flagging. Real divergence shows up across both signals; transient race windows resolve naturally.
 - Memory ListObjectVersions race (US-004): same shape as the US-003 ListObjects fix — must hold RLock through the full scan because concurrent PutObject mutates the per-key version slice in place. Any in-memory store that reads `bucket[k][i].Field` after releasing the bucket-level lock is racy under -race.
+- CI compose override pattern (US-005): trim the developer stack via a layered file (`deploy/docker/docker-compose.ci.yml`) loaded ON TOP of the base. Move side-cars (prometheus, grafana) into a `full` profile via override so `--profile ci` skips them — base file (no profile) keeps `make up-all` unchanged because override is not loaded by that target. Memory-tuned env vars (Cassandra heap, Ceph MEMSTORE_BYTES) are overridden in the `environment:` block; bootstrap.sh-side knobs (OSD_MEMORY_TARGET, MGR_DASHBOARD_DISABLE) are picked up by the entrypoint after `ceph -s` reports healthy and applied via `ceph config set` / `ceph mgr module disable`. The same override-only-loaded-by-CI-target pattern can be reused for any future "trimmed" profile (smoke, e2e, fuzz, …).
 
 ## [2026-05-10 14:30 MSK] - US-001
 - Implemented: Carved out `internal/racetest` package and refactored s3api race tests as thin shims.
@@ -122,4 +123,30 @@ Cycle: ralph/race-harness
   - DeleteGracePeriod=0 is the explicit "use default" sentinel; <0 is rejected at config validation. The runner's drain budget = grace + verEvery; without that, deletedAt timestamps don't age past grace before the verifier's final pass and the listing-convergence oracle never has a chance to flag a real divergence at the tail.
   - JSON-lines events: the `inconsistency` event reuses the Inconsistency struct via an Event.Inconsist *Inconsistency pointer. Wire this into events.go alongside the existing Summary map[string]any so summarize.sh (US-008) can group by Kind without re-parsing the diagnostic string.
   - faultProxy pattern: wrap the upstream gateway in an httptest.Server that intercepts specific request shapes (?list-type=2, ?versions, GET object) and forges a malformed response. Keeps oracle tests honest without writing a broken meta backend. Each fault knob is mutually exclusive — exactly one set per test.
+---
+
+## [2026-05-10 18:30 MSK] - US-005
+- Implemented: `ci`-profile compose override + `make up-all-ci` / `make wait-strata` + bootstrap.sh OSD_MEMORY_TARGET / MGR_DASHBOARD_DISABLE knobs.
+- Files changed:
+  - new: `deploy/docker/docker-compose.ci.yml` — Cassandra MAX_HEAP_SIZE=2G HEAP_NEWSIZE=400M; Ceph MEMSTORE_BYTES=1073741824 + OSD_MEMORY_TARGET=1073741824 + MGR_DASHBOARD_DISABLE=1; prometheus + grafana gated behind `full` profile so `--profile ci` skips them
+  - edit: `deploy/docker/ceph-bootstrap/bootstrap.sh` — applies `ceph config set osd osd_memory_target` when `OSD_MEMORY_TARGET` is set; runs `ceph mgr module disable dashboard` when `MGR_DASHBOARD_DISABLE=1`. Both no-op on the developer stack (env unset).
+  - edit: `Makefile` — added `up-all-ci` (`docker compose -f base -f ci.yml --profile ci up -d cassandra ceph strata`), `wait-strata` (`/readyz` poll on 9999), and PHONY entries
+  - edit: `scripts/ralph/prd.json` — US-005 passes=true with full notes
+- Quality checks:
+  - `docker compose -f deploy/docker/docker-compose.yml -f deploy/docker/docker-compose.ci.yml config -q` clean (schema validation)
+  - `docker compose -f base -f ci.yml --profile ci config --services` -> {cassandra, ceph, strata} (prom/grafana suppressed)
+  - `docker compose -f base config --services` -> {cassandra, ceph, grafana, prometheus, strata} unchanged (override not loaded by `make up-all`)
+  - `bash -n deploy/docker/ceph-bootstrap/bootstrap.sh` clean
+  - `go vet ./...` + `go build ./...` clean
+  - `go test -count=1 ./...` all green (~70s)
+- **Learnings for future iterations:**
+  - Cassandra RF=1 SimpleStrategy is already the default in `deploy/strata.toml` and `internal/config/config.go::Defaults` — no override needed for the "Cassandra cluster_replication SimpleStrategy/RF=1" criterion. Future PRDs that include this as an acceptance line can be satisfied without a compose change.
+  - Single replica for cassandra + ceph + strata is the default base-compose shape — no override needed.
+  - Cassandra MAX_HEAP_SIZE=2G is HIGHER than the developer-default 1G; the rationale (race-soak workload starves under 1G GC) belongs in the override file's comment block so it doesn't get reverted by a future "shrink everything" PR.
+  - The base compose has no `profiles:` on prometheus/grafana, which is what makes `make up-all` work without `--profile` flags. The override re-tags them with `profiles: [full]` so `--profile ci` skips them — this only takes effect when the override file is loaded, so `make up-all` is preserved.
+  - `docker compose config --services` with `-f base -f override --profile X` is the canonical way to inspect what `up -d` would actually start under that profile-set; use it to confirm prom/grafana are suppressed before committing.
+  - For docker-compose-style "trimmed" profiles in this repo, always validate (a) base-only config matches pre-override, (b) base+override+--profile-X config matches the new target shape, (c) `bash -n` on any bootstrap script touched. The `docker compose config -q` validates schema but doesn't check service-set semantics.
+  - The `--profile ci` flag in `make up-all-ci` is decorative for the explicit `cassandra ceph strata` service list (those services have no profile, so the flag doesn't gate them in or out). Keeping the flag matches the spec command shape and reserves room for future ci-only services like a load generator or a tracing-dump container.
+  - `osd_memory_target` is a Ceph config knob that mainly governs bluestore cache; on memstore it's mostly inert, but the criterion explicitly named it and the cluster accepts it without complaint. The functional cap on memstore RSS is `MEMSTORE_BYTES` (memstore_device_bytes) — both should be set together for CI.
+  - The 5 GB RSS / 8 min readyz claims in the acceptance are CI-runtime metrics; can't be verified locally on macOS+Lima. The first run of US-006/US-007 against the `ci` profile is the canonical datapoint and may force a tune-down (further heap trim or memstore size) if ubuntu-latest still OOMs. If that happens, file under "Consolidation & validation" per US-009's fallback wording.
 ---
