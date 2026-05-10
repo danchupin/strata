@@ -48,15 +48,49 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) (
 		return err
 	}
 
+	// Capture the prior latest row (if any) so we can compute the
+	// bucket_stats delta after the txn commits. Markers contribute 0 to
+	// either bytes or count via bucketStatsDelta.
+	var prior *meta.Object
 	if !versioned {
-		if err = deleteAllVersions(ctx, txn, o.BucketID, o.Key); err != nil {
+		prefix := append(ObjectPrefixWithKey(o.BucketID, o.Key), 0x00, 0x00)
+		end := prefixEnd(prefix)
+		pairs, perr := txn.Scan(ctx, prefix, end, 0)
+		if perr != nil {
+			err = perr
 			return err
+		}
+		if len(pairs) > 0 {
+			p, derr := decodeObject(pairs[0].Value)
+			if derr != nil {
+				err = derr
+				return err
+			}
+			prior = p
+		}
+		for _, p := range pairs {
+			if err = txn.Delete(p.Key); err != nil {
+				return err
+			}
 		}
 	} else if o.IsNull {
 		nullKey, kerr := ObjectKey(o.BucketID, o.Key, meta.NullVersionID)
 		if kerr != nil {
 			err = kerr
 			return err
+		}
+		raw, found, gerr := txn.Get(ctx, nullKey)
+		if gerr != nil {
+			err = gerr
+			return err
+		}
+		if found {
+			p, derr := decodeObject(raw)
+			if derr != nil {
+				err = derr
+				return err
+			}
+			prior = p
 		}
 		if err = txn.Delete(nullKey); err != nil {
 			return err
@@ -65,7 +99,16 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) (
 	if err = txn.Set(objKey, payload); err != nil {
 		return err
 	}
-	return txn.Commit(ctx)
+	if err = txn.Commit(ctx); err != nil {
+		return err
+	}
+	deltaBytes, deltaObjects := bucketStatsDelta(prior, o)
+	if deltaBytes != 0 || deltaObjects != 0 {
+		if _, berr := s.BumpBucketStats(ctx, o.BucketID, deltaBytes, deltaObjects); berr != nil {
+			return berr
+		}
+	}
+	return nil
 }
 
 // GetObject returns the object addressed by (bucketID, key, versionID). An
@@ -189,6 +232,12 @@ func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versi
 		if err = txn.Commit(ctx); err != nil {
 			return nil, err
 		}
+		db, dc := bucketStatsDelta(o, nil)
+		if db != 0 || dc != 0 {
+			if _, berr := s.BumpBucketStats(ctx, bucketID, db, dc); berr != nil {
+				return nil, berr
+			}
+		}
 		return o, nil
 	}
 
@@ -235,6 +284,12 @@ func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versi
 	}
 	if err = txn.Commit(ctx); err != nil {
 		return nil, err
+	}
+	db, dc := bucketStatsDelta(prior, nil)
+	if db != 0 || dc != 0 {
+		if _, berr := s.BumpBucketStats(ctx, bucketID, db, dc); berr != nil {
+			return nil, berr
+		}
 	}
 	return prior, nil
 }
@@ -338,23 +393,5 @@ func loadObjectForUpdate(ctx context.Context, txn kvTxn, bucketID uuid.UUID, key
 		return nil, nil, err
 	}
 	return pairs[0].Key, pairs[0].Value, nil
-}
-
-// deleteAllVersions removes every object row under (bucketID, key) inside
-// the supplied txn. Used by non-versioned PutObject and by the
-// non-versioned DeleteObject path.
-func deleteAllVersions(ctx context.Context, txn kvTxn, bucketID uuid.UUID, key string) error {
-	prefix := append(ObjectPrefixWithKey(bucketID, key), 0x00, 0x00)
-	end := prefixEnd(prefix)
-	pairs, err := txn.Scan(ctx, prefix, end, 0)
-	if err != nil {
-		return err
-	}
-	for _, p := range pairs {
-		if err := txn.Delete(p.Key); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 

@@ -60,6 +60,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"BucketQuotaRoundTrip", caseBucketQuota},
 		{"UserQuotaRoundTrip", caseUserQuota},
 		{"BucketStatsRoundTrip", caseBucketStats},
+		{"BucketStatsHotPath", caseBucketStatsHotPath},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2231,6 +2232,148 @@ func caseBucketStats(t *testing.T, s meta.Store) {
 	if next.UsedBytes != wantBytes-seqSize || next.UsedObjects != wantObjects-1 {
 		t.Fatalf("negative bump post-update: got %+v want bytes=%d objects=%d", next, wantBytes-seqSize, wantObjects-1)
 	}
+}
+
+// caseBucketStatsHotPath verifies the live counter is updated by the
+// PutObject / DeleteObject / CompleteMultipartUpload paths on every backend
+// (US-005). Markers contribute zero bytes and zero to object count.
+func caseBucketStatsHotPath(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+
+	mustStats := func(label string, bid uuid.UUID, wantBytes, wantObjects int64) {
+		t.Helper()
+		got, err := s.GetBucketStats(ctx, bid)
+		if err != nil {
+			t.Fatalf("%s: get stats: %v", label, err)
+		}
+		if got.UsedBytes != wantBytes || got.UsedObjects != wantObjects {
+			t.Fatalf("%s: got %+v want bytes=%d objects=%d", label, got, wantBytes, wantObjects)
+		}
+	}
+
+	// --- Unversioned bucket: PUT / overwrite / DELETE ---
+	uv, err := s.CreateBucket(ctx, "hpu", "owner-hp", "STANDARD")
+	if err != nil {
+		t.Fatalf("create unversioned: %v", err)
+	}
+	mustStats("uv-fresh", uv.ID, 0, 0)
+
+	put := func(b uuid.UUID, key string, size int64, versioned bool) *meta.Object {
+		o := &meta.Object{
+			BucketID:     b,
+			Key:          key,
+			Size:         size,
+			StorageClass: "STANDARD",
+			Mtime:        time.Now().UTC(),
+			Manifest:     &data.Manifest{Class: "STANDARD", Size: size},
+		}
+		if err := s.PutObject(ctx, o, versioned); err != nil {
+			t.Fatalf("put %s/%s: %v", b, key, err)
+		}
+		return o
+	}
+
+	put(uv.ID, "a", 100, false)
+	mustStats("uv-put-a", uv.ID, 100, 1)
+	put(uv.ID, "a", 250, false) // overwrite
+	mustStats("uv-overwrite-a", uv.ID, 250, 1)
+	put(uv.ID, "b", 50, false)
+	mustStats("uv-put-b", uv.ID, 300, 2)
+	if _, err := s.DeleteObject(ctx, uv.ID, "a", "", false); err != nil {
+		t.Fatalf("delete a: %v", err)
+	}
+	mustStats("uv-del-a", uv.ID, 50, 1)
+	if _, err := s.DeleteObject(ctx, uv.ID, "b", "", false); err != nil {
+		t.Fatalf("delete b: %v", err)
+	}
+	mustStats("uv-del-b", uv.ID, 0, 0)
+
+	// --- Versioned bucket: versioned PUT, marker, version-specific DELETE ---
+	if _, err := s.CreateBucket(ctx, "hpv", "owner-hp", "STANDARD"); err != nil {
+		t.Fatalf("create versioned: %v", err)
+	}
+	if err := s.SetBucketVersioning(ctx, "hpv", meta.VersioningEnabled); err != nil {
+		t.Fatalf("enable versioning: %v", err)
+	}
+	vb, err := s.GetBucket(ctx, "hpv")
+	if err != nil {
+		t.Fatalf("get versioned bucket: %v", err)
+	}
+	v1 := put(vb.ID, "k", 10, true)
+	mustStats("v-put-1", vb.ID, 10, 1)
+	v2 := put(vb.ID, "k", 20, true)
+	mustStats("v-put-2", vb.ID, 30, 2)
+
+	// DELETE without versionID on a versioned bucket creates a marker. The
+	// underlying versions stay; bytes/object count must NOT change.
+	dm, err := s.DeleteObject(ctx, vb.ID, "k", "", true)
+	if err != nil || dm == nil || !dm.IsDeleteMarker {
+		t.Fatalf("create marker: %v %+v", err, dm)
+	}
+	mustStats("v-marker", vb.ID, 30, 2)
+
+	// Delete a specific real version: -size, -1.
+	if _, err := s.DeleteObject(ctx, vb.ID, "k", v1.VersionID, true); err != nil {
+		t.Fatalf("delete v1: %v", err)
+	}
+	mustStats("v-del-v1", vb.ID, 20, 1)
+
+	// Delete the marker: marker contributes zero, so count/bytes unchanged.
+	if _, err := s.DeleteObject(ctx, vb.ID, "k", dm.VersionID, true); err != nil {
+		t.Fatalf("delete marker: %v", err)
+	}
+	mustStats("v-del-marker", vb.ID, 20, 1)
+
+	// Delete the remaining real version.
+	if _, err := s.DeleteObject(ctx, vb.ID, "k", v2.VersionID, true); err != nil {
+		t.Fatalf("delete v2: %v", err)
+	}
+	mustStats("v-del-v2", vb.ID, 0, 0)
+
+	// --- Multipart Complete: +totalSize, +1 ---
+	mp, err := s.CreateBucket(ctx, "hpm", "owner-hp", "STANDARD")
+	if err != nil {
+		t.Fatalf("create mp bucket: %v", err)
+	}
+	uploadID := newTimeUUID()
+	if err := s.CreateMultipartUpload(ctx, &meta.MultipartUpload{
+		BucketID:     mp.ID,
+		Key:          "big",
+		UploadID:     uploadID,
+		StorageClass: "STANDARD",
+		Status:       "uploading",
+		InitiatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("create mp: %v", err)
+	}
+	for i := 1; i <= 2; i++ {
+		size := int64(i * 64)
+		part := &meta.MultipartPart{
+			PartNumber: i,
+			ETag:       fmt.Sprintf("etag-%d", i),
+			Size:       size,
+			Mtime:      time.Now().UTC(),
+			Manifest:   &data.Manifest{Class: "STANDARD", Size: size},
+		}
+		if err := s.SavePart(ctx, mp.ID, uploadID, part); err != nil {
+			t.Fatalf("save part %d: %v", i, err)
+		}
+	}
+	completeParts := []meta.CompletePart{
+		{PartNumber: 1, ETag: "etag-1"},
+		{PartNumber: 2, ETag: "etag-2"},
+	}
+	obj := &meta.Object{
+		BucketID:     mp.ID,
+		Key:          "big",
+		StorageClass: "STANDARD",
+		ETag:         "final",
+		Mtime:        time.Now().UTC(),
+	}
+	if _, err := s.CompleteMultipartUpload(ctx, obj, uploadID, completeParts, false); err != nil {
+		t.Fatalf("complete mp: %v", err)
+	}
+	mustStats("mp-complete", mp.ID, 192, 1)
 }
 
 // padInt formats i with a fixed width using leading zeros.

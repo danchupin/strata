@@ -36,6 +36,28 @@ func decodeBucketStats(blob []byte) (meta.BucketStats, error) {
 	return out, nil
 }
 
+// bucketStatsDelta returns the (deltaBytes, deltaObjects) bump that should be
+// applied to bucket_stats when `next` replaces `prior` (nil = absent). Delete
+// markers contribute 0 bytes and 0 to object count — only non-marker rows
+// count toward the live tally.
+func bucketStatsDelta(prior, next *meta.Object) (int64, int64) {
+	var priorBytes, priorObjects int64
+	if prior != nil {
+		priorBytes = prior.Size
+		if !prior.IsDeleteMarker {
+			priorObjects = 1
+		}
+	}
+	var nextBytes, nextObjects int64
+	if next != nil {
+		nextBytes = next.Size
+		if !next.IsDeleteMarker {
+			nextObjects = 1
+		}
+	}
+	return nextBytes - priorBytes, nextObjects - priorObjects
+}
+
 // GetBucketStats reads the live counter row, returning zero stats when no
 // row exists yet.
 func (s *Store) GetBucketStats(ctx context.Context, bucketID uuid.UUID) (meta.BucketStats, error) {

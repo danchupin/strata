@@ -432,7 +432,18 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 		versionID = gocql.TimeUUID()
 		o.VersionID = versionID.String()
 	}
+
+	// Compute (deltaBytes, deltaObjects) for the bucket_stats bump that
+	// follows the object write. Read prior row BEFORE issuing the DELETE
+	// so the delta accounts for the replaced bytes. Delete markers
+	// contribute 0 bytes and 0 to object count — only non-marker rows count.
+	var prior *meta.Object
 	if !versioned {
+		p, err := s.scanObjectLimit1(ctx, o.BucketID, shard, o.Key)
+		if err != nil && !errors.Is(err, meta.ErrObjectNotFound) {
+			return err
+		}
+		prior = p
 		if err := s.s.Query(
 			`DELETE FROM objects WHERE bucket_id=? AND shard=? AND key=?`,
 			gocqlUUID(o.BucketID), shard, o.Key,
@@ -443,6 +454,11 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 		// Suspended-mode null PUT: atomically drop any prior null-versioned
 		// row (LWT IF EXISTS — applied=false is fine, no prior null row).
 		nullUUID, _ := versionToCQL(meta.NullVersionID)
+		p, err := s.scanObjectByVersion(ctx, o.BucketID, shard, o.Key, nullUUID)
+		if err != nil && !errors.Is(err, meta.ErrObjectNotFound) {
+			return err
+		}
+		prior = p
 		if err := s.s.Query(
 			`DELETE FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=? IF EXISTS`,
 			gocqlUUID(o.BucketID), shard, o.Key, nullUUID,
@@ -450,6 +466,7 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 			return err
 		}
 	}
+	deltaBytes, deltaObjects := bucketStatsDelta(prior, o)
 	var retainUntil *time.Time
 	if !o.RetainUntil.IsZero() {
 		t := o.RetainUntil
@@ -463,7 +480,7 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 	if len(o.PartSizes) > 0 {
 		partSizes = o.PartSizes
 	}
-	return s.s.Query(
+	if err := s.s.Query(
 		`INSERT INTO objects (bucket_id, shard, key, version_id, is_latest, is_delete_marker,
 		 size, etag, content_type, storage_class, mtime, manifest, user_meta, tags,
 		 retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
@@ -473,7 +490,36 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 		o.Size, o.ETag, o.ContentType, o.StorageClass, o.Mtime, manifestBlob, o.UserMeta, o.Tags,
 		retainUntil, nilIfEmpty(o.RetainMode), o.LegalHold, o.Checksums, nilIfEmpty(o.SSE), nilIfEmpty(o.SSECKeyMD5), nilIfEmpty(o.RestoreStatus),
 		nilIfEmpty(o.CacheControl), nilIfEmpty(o.Expires), partsCount, nilIfEmptyBytes(o.SSEKey), nilIfEmpty(o.SSEKeyID), nilIfEmpty(o.ReplicationStatus), partSizes, nilIfEmpty(o.ChecksumType), o.IsNull,
-	).WithContext(ctx).Exec()
+	).WithContext(ctx).Exec(); err != nil {
+		return err
+	}
+	if deltaBytes != 0 || deltaObjects != 0 {
+		if _, err := s.BumpBucketStats(ctx, o.BucketID, deltaBytes, deltaObjects); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// bucketStatsDelta returns the (deltaBytes, deltaObjects) bump that should be
+// applied to bucket_stats when `next` replaces `prior` (nil prior = fresh row).
+// Delete markers contribute 0 bytes and 0 to object count.
+func bucketStatsDelta(prior, next *meta.Object) (int64, int64) {
+	var priorBytes, priorObjects int64
+	if prior != nil {
+		priorBytes = prior.Size
+		if !prior.IsDeleteMarker {
+			priorObjects = 1
+		}
+	}
+	var nextBytes, nextObjects int64
+	if next != nil {
+		nextBytes = next.Size
+		if !next.IsDeleteMarker {
+			nextObjects = 1
+		}
+	}
+	return nextBytes - priorBytes, nextObjects - priorObjects
 }
 
 func nilIfEmptyBytes(b []byte) interface{} {
@@ -674,6 +720,12 @@ func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versi
 		).WithContext(ctx).Exec(); err != nil {
 			return nil, err
 		}
+		db, dc := bucketStatsDelta(o, nil)
+		if db != 0 || dc != 0 {
+			if _, err := s.BumpBucketStats(ctx, bucketID, db, dc); err != nil {
+				return nil, err
+			}
+		}
 		return o, nil
 	}
 
@@ -704,6 +756,12 @@ func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versi
 		gocqlUUID(bucketID), shard, key,
 	).WithContext(ctx).Exec(); err != nil {
 		return nil, err
+	}
+	db, dc := bucketStatsDelta(o, nil)
+	if db != 0 || dc != 0 {
+		if _, err := s.BumpBucketStats(ctx, bucketID, db, dc); err != nil {
+			return nil, err
+		}
 	}
 	return o, nil
 }
@@ -2953,7 +3011,7 @@ func (s *Store) BumpBucketStats(ctx context.Context, bucketID uuid.UUID, deltaBy
 				`INSERT INTO bucket_stats (bucket_id, used_bytes, used_objects, updated_at)
 				   VALUES (?, ?, ?, ?) IF NOT EXISTS`,
 				gocqlUUID(bucketID), next.UsedBytes, next.UsedObjects, next.UpdatedAt,
-			).WithContext(ctx).ScanCAS(nil, nil, nil, nil)
+			).WithContext(ctx).MapScanCAS(map[string]interface{}{})
 			if err != nil {
 				return meta.BucketStats{}, err
 			}
@@ -2967,7 +3025,7 @@ func (s *Store) BumpBucketStats(ctx context.Context, bucketID uuid.UUID, deltaBy
 			   WHERE bucket_id=? IF used_bytes=? AND used_objects=?`,
 			next.UsedBytes, next.UsedObjects, next.UpdatedAt,
 			gocqlUUID(bucketID), cur.UsedBytes, cur.UsedObjects,
-		).WithContext(ctx).ScanCAS(nil, nil, nil)
+		).WithContext(ctx).MapScanCAS(map[string]interface{}{})
 		if err != nil {
 			return meta.BucketStats{}, err
 		}

@@ -82,8 +82,8 @@
         "Tests pass (`go test ./...`)"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Cassandra+TiKV hot-path wiring landed: PutObject / DeleteObject / CompleteMultipartUpload all push (deltaBytes, deltaObjects) through BumpBucketStats. Cassandra path computes prior-row size via scanObjectLimit1/scanObjectByVersion BEFORE the DELETE so the delta accounts for replaced bytes; TiKV path captures prior pairs inside the same pessimistic txn before deleting. Shared `bucketStatsDelta(prior, next)` helper in each package centralises the formula: nextBytes-priorBytes, nextObjects-priorObjects with delete markers contributing 0/0. Cassandra BumpBucketStats LWT scan-args were broken (`have 4 want 3` on UPDATE conflict; INSERT had similar wide-row issue in concurrent retries) — switched both INSERT IF NOT EXISTS and UPDATE IF used_*=? to MapScanCAS so gocql doesn't enforce a fixed column count against the LWT-conflict response shape. New contract case BucketStatsHotPath exercises sequential PUT/overwrite/DELETE on an unversioned bucket, marker insertion + version-specific DELETE on a versioned bucket, and Multipart Complete with a 2-part upload; runs against all three backends. Integration verification: BucketStatsHotPath green on cassandra:5.0 testcontainer (DOCKER_HOST=lima + TESTCONTAINERS_RYUK_DISABLED=true on macOS+Lima per known reaper-mount issue) alongside BucketStatsRoundTrip / VersionedObjectOverwrite / MultipartCompletion / DeleteMarkerHidesObject. TiKV integration covered on CI Linux runners (`.github/workflows/ci-tikv.yml`) — local macOS+Lima cannot exercise the path (host.docker.internal unreachable, same fragility as US-003). Unrelated pre-existing cassandra integration failures (GCQueueShardFanOut Batch-too-large, VersioningNull*Sentinel, OnlineReshard) confirmed via git stash bisect to be pre-US-005 — not introduced by this story."
     },
     {
       "id": "US-006",
