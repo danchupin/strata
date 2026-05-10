@@ -17,6 +17,11 @@ import { ConsumersPage } from '@/pages/Consumers';
 import { IAMPage } from '@/pages/IAM';
 import { IAMUserDetailPage } from '@/pages/IAMUserDetail';
 import { MultipartPage } from '@/pages/Multipart';
+// UserBilling pulls recharts (LineChart for the 30-day chart). Lazy-load to
+// keep the home-page initial bundle small (mirrors Storage / Metrics).
+const UserBillingPage = lazy(() =>
+  import('@/pages/UserBilling').then((m) => ({ default: m.UserBillingPage })),
+);
 import { SettingsPage } from '@/pages/Settings';
 
 // Metrics page lazy-loads recharts (~110 KiB gzipped) only when the operator
@@ -74,6 +79,14 @@ export function App() {
         <Route path="/consumers" element={<ConsumersPage />} />
         <Route path="/iam" element={<IAMPage />} />
         <Route path="/iam/users/:userName" element={<IAMUserDetailPage />} />
+        <Route
+          path="/iam/users/:userName/billing"
+          element={
+            <Suspense fallback={<PageFallback />}>
+              <UserBillingPage />
+            </Suspense>
+          }
+        />
         <Route path="/multipart" element={<MultipartPage />} />
         <Route path="/audit" element={<AuditLogPage />} />
         <Route path="/diagnostics/audit-tail" element={<AuditTailPage />} />

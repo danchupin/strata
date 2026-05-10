@@ -267,6 +267,68 @@ components:
             set STRATA_PROMETHEUS_URL" inline message instead of empty
             charts.
 
+    BucketQuota:
+      type: object
+      required: [max_bytes, max_objects, max_bytes_per_object]
+      description: |
+        Per-bucket quota (US-009). Zero on any field means "unlimited" — matches
+        the AWS / RGW semantics of an unset field. Enforced at PUT-validate time
+        (US-006); a violation returns HTTP 403 with S3 code `QuotaExceeded`.
+      properties:
+        max_bytes: { type: integer, format: int64, minimum: 0 }
+        max_objects: { type: integer, format: int64, minimum: 0 }
+        max_bytes_per_object: { type: integer, format: int64, minimum: 0 }
+
+    UserQuota:
+      type: object
+      required: [max_buckets, total_max_bytes]
+      description: |
+        Per-IAM-user quota (US-009). Zero on any field means "unlimited".
+        `max_buckets` is enforced at CreateBucket; `total_max_bytes` is enforced
+        at PUT-validate by summing live `bucket_stats` across the user's buckets.
+      properties:
+        max_buckets: { type: integer, format: int32, minimum: 0 }
+        total_max_bytes: { type: integer, format: int64, minimum: 0 }
+
+    UsageRow:
+      type: object
+      required: [day, storage_class, byte_seconds, object_count_avg, object_count_max]
+      properties:
+        bucket:
+          type: string
+          description: |
+            Source bucket name. Present on the per-user usage feed; omitted on
+            the per-bucket feed where the bucket is implicit in the path.
+        day: { type: string, format: date, description: "UTC day (YYYY-MM-DD)" }
+        storage_class: { type: string }
+        byte_seconds: { type: integer, format: int64 }
+        object_count_avg: { type: integer, format: int64 }
+        object_count_max: { type: integer, format: int64 }
+
+    BucketUsageResponse:
+      type: object
+      required: [rows]
+      properties:
+        rows:
+          type: array
+          items: { $ref: '#/components/schemas/UsageRow' }
+
+    UserUsageTotals:
+      type: object
+      required: [byte_seconds, objects]
+      properties:
+        byte_seconds: { type: integer, format: int64 }
+        objects: { type: integer, format: int64 }
+
+    UserUsageResponse:
+      type: object
+      required: [rows, totals]
+      properties:
+        rows:
+          type: array
+          items: { $ref: '#/components/schemas/UsageRow' }
+        totals: { $ref: '#/components/schemas/UserUsageTotals' }
+
     LoginRequest:
       type: object
       required: [access_key, secret_key]
@@ -562,6 +624,202 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ObjectsList' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /buckets/{bucket}/quota:
+    get:
+      summary: Get bucket quota (US-009)
+      operationId: getBucketQuota
+      parameters:
+        - name: bucket
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Quota configured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BucketQuota' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    put:
+      summary: Set bucket quota (US-009)
+      operationId: putBucketQuota
+      description: |
+        Replaces the bucket quota configuration. Zero on any field means
+        "unlimited". Audit row `admin:PutBucketQuota`.
+      parameters:
+        - name: bucket
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BucketQuota' }
+      responses:
+        '204':
+          description: Quota saved.
+        '400':
+          description: Invalid body (negative field, malformed JSON).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    delete:
+      summary: Delete bucket quota (US-009)
+      operationId: deleteBucketQuota
+      description: |
+        Idempotent — returns 204 even when no quota was configured. Audit row
+        `admin:DeleteBucketQuota`.
+      parameters:
+        - name: bucket
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Quota removed.
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /buckets/{bucket}/usage:
+    get:
+      summary: Per-bucket daily usage history (US-009)
+      operationId: getBucketUsage
+      description: |
+        Returns one row per (day, storage_class) from `usage_aggregates`.
+        Day range is `[start, end]` inclusive (UTC); both default to a 30-day
+        window ending today.
+      parameters:
+        - name: bucket
+          in: path
+          required: true
+          schema: { type: string }
+        - name: start
+          in: query
+          schema: { type: string, format: date }
+        - name: end
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        '200':
+          description: Usage rows.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BucketUsageResponse' }
+        '400':
+          description: Invalid start / end query parameter.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /iam/users/{userName}/quota:
+    get:
+      summary: Get user quota (US-009)
+      operationId: getUserQuota
+      parameters:
+        - name: userName
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Quota configured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserQuota' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    put:
+      summary: Set user quota (US-009)
+      operationId: putUserQuota
+      parameters:
+        - name: userName
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserQuota' }
+      responses:
+        '204':
+          description: Quota saved.
+        '400':
+          description: Invalid body (negative field, malformed JSON).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    delete:
+      summary: Delete user quota (US-009)
+      operationId: deleteUserQuota
+      parameters:
+        - name: userName
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Quota removed.
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /iam/users/{userName}/usage:
+    get:
+      summary: Per-user daily usage history (US-009)
+      operationId: getUserUsage
+      description: |
+        Sums usage rows across every bucket the user owns and returns
+        per-(bucket, day, storage_class) rows alongside cross-row totals so
+        the billing summary can render without re-summing client-side.
+      parameters:
+        - name: userName
+          in: path
+          required: true
+          schema: { type: string }
+        - name: start
+          in: query
+          schema: { type: string, format: date }
+        - name: end
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        '200':
+          description: Usage rows + totals.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserUsageResponse' }
+        '400':
+          description: Invalid start / end query parameter.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '404':
           $ref: '#/components/responses/NotFound'
         '401':

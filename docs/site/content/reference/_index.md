@@ -13,3 +13,14 @@ is queued as a P3 follow-up after the cycle closes. Until then:
 - README has the canonical env-var table.
 - Admin API schema lives in `internal/adminapi/openapi.yaml`.
 - S3 surface coverage: see [S3 Compatibility]({{< ref "/s3-compatibility" >}}).
+
+## Worker env vars (selected)
+
+The full set lives in README; the entries that recently shipped and are
+not yet folded into the planned env-vars subpage:
+
+| Env | Default | Worker | Doc |
+|---|---|---|---|
+| `STRATA_QUOTA_RECONCILE_INTERVAL` | `6h` | `--workers=quota-reconcile` | [Quotas + billing]({{< ref "/best-practices/quotas-billing" >}}#drift-reconcile-workersquota-reconcile) |
+| `STRATA_USAGE_ROLLUP_AT` | `00:00` (UTC) | `--workers=usage-rollup` | [Quotas + billing]({{< ref "/best-practices/quotas-billing" >}}#usage-rollup-workersusage-rollup) |
+| `STRATA_USAGE_ROLLUP_INTERVAL` | `24h` | `--workers=usage-rollup` | [Quotas + billing]({{< ref "/best-practices/quotas-billing" >}}#usage-rollup-workersusage-rollup) |

@@ -87,6 +87,9 @@ export const queryKeys = {
     distribution: (name: string) => ['buckets', 'distribution', name] as const,
     replicationLag: (name: string, range: string) =>
       ['buckets', 'replication-lag', name, range] as const,
+    quota: (name: string) => ['buckets', 'quota', name] as const,
+    usage: (name: string, start: string, end: string) =>
+      ['buckets', 'usage', name, { start, end }] as const,
   },
   consumers: {
     top: (by: string, limit: number) => ['consumers', 'top', by, limit] as const,
@@ -100,6 +103,10 @@ export const queryKeys = {
     userPolicies: (userName: string) =>
       ['iam', 'user', userName, 'policies'] as const,
     policies: ['iam', 'policies'] as const,
+    userQuota: (userName: string) =>
+      ['iam', 'user', userName, 'quota'] as const,
+    userUsage: (userName: string, start: string, end: string) =>
+      ['iam', 'user', userName, 'usage', { start, end }] as const,
   },
   metrics: {
     timeseries: (metric: string, range: string, step: string) =>

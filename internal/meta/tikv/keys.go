@@ -47,6 +47,7 @@ const (
 	prefixBucketByName     = Namespace + "b/"   // s/b/<name>
 	prefixBucketScoped     = Namespace + "B/"   // s/B/<uuid16>/...
 	prefixIAMUser          = Namespace + "iu/"  // s/iu/<userName>
+	prefixUserQuota        = Namespace + "uq/"  // s/uq/<userName>
 	prefixIAMAccessKey     = Namespace + "ik/"  // s/ik/<accessKey>
 	prefixIAMUserKeyIndex  = Namespace + "iuk/" // s/iuk/<userName>\x00\x00<accessKey>
 	prefixManagedPolicy    = Namespace + "mp/"  // s/mp/<arn>
@@ -74,6 +75,9 @@ const (
 	subObject           = "o/"  // s/B/<uuid16>/o/<escKey>\x00\x00<verDesc24>
 	subObjectGrants     = "og/" // same shape as subObject
 	subBucketBlob       = "c/"  // s/B/<uuid16>/c/<kind>      (kind is a fixed identifier, no escape)
+	subBucketStats      = "bs"  // s/B/<uuid16>/bs            (single key, live counter)
+	subUsageAgg         = "ua/" // s/B/<uuid16>/ua/<escClass>\x00\x00<day4>
+	subUsageClassIndex  = "uc/" // s/B/<uuid16>/uc/<escClass>\x00\x00 (presence row)
 	subInventoryConfig  = "i/"  // s/B/<uuid16>/i/<configID>
 	subMultipart        = "u/"  // s/B/<uuid16>/u/<uploadID>
 	subMultipartPart    = "up/" // s/B/<uuid16>/up/<uploadID>\x00\x00<partNum4>
@@ -99,6 +103,7 @@ const (
 	BlobLogging            = "lg"
 	BlobTagging            = "tg"
 	BlobObjectLockConfig   = "ol"
+	BlobQuota              = "qu"
 )
 
 // versionDescLen is the length of the 24-byte version-DESC suffix
@@ -338,6 +343,45 @@ func BucketBlobKey(bucketID uuid.UUID, kind string) []byte {
 	return append(out, kind...)
 }
 
+// BucketStatsKey is the single-row live counter slot for a bucket
+// (US-004..US-005). Bumped via a pessimistic txn under
+// internal/meta/tikv/store.go::BumpBucketStats.
+func BucketStatsKey(bucketID uuid.UUID) []byte {
+	return append(PrefixForBucket(bucketID), subBucketStats...)
+}
+
+// UsageAggregateKey is the per-(bucket, storageClass, day) usage rollup row
+// (US-008). Day is encoded as a 4-byte big-endian Unix-epoch-day so range
+// scans by day return ascending.
+func UsageAggregateKey(bucketID uuid.UUID, storageClass string, dayEpoch uint32) []byte {
+	out := append(PrefixForBucket(bucketID), subUsageAgg...)
+	out = appendEscaped(out, storageClass)
+	var d [4]byte
+	binary.BigEndian.PutUint32(d[:], dayEpoch)
+	return append(out, d[:]...)
+}
+
+// UsageAggregateClassPrefix returns the start of usage rollup rows for a
+// single (bucket, storageClass). Range scans bracket [start, prefixEnd(start))
+// to read every day in that class.
+func UsageAggregateClassPrefix(bucketID uuid.UUID, storageClass string) []byte {
+	out := append(PrefixForBucket(bucketID), subUsageAgg...)
+	return appendEscaped(out, storageClass)
+}
+
+// UsageClassIndexKey is the presence row written next to every usage
+// aggregate so ListUserUsage can enumerate the storage classes a bucket
+// has rolled up without a global scan.
+func UsageClassIndexKey(bucketID uuid.UUID, storageClass string) []byte {
+	out := append(PrefixForBucket(bucketID), subUsageClassIndex...)
+	return appendEscaped(out, storageClass)
+}
+
+// UsageClassIndexPrefix is the per-bucket presence-row scan origin.
+func UsageClassIndexPrefix(bucketID uuid.UUID) []byte {
+	return append(PrefixForBucket(bucketID), subUsageClassIndex...)
+}
+
 // InventoryConfigKey is one row per (bucket, configID).
 func InventoryConfigKey(bucketID uuid.UUID, configID string) []byte {
 	out := append(PrefixForBucket(bucketID), subInventoryConfig...)
@@ -433,6 +477,11 @@ func RewrapProgressKey(bucketID uuid.UUID) []byte {
 // IAMUserKey is the per-user record key.
 func IAMUserKey(userName string) []byte {
 	return appendEscaped([]byte(prefixIAMUser), userName)
+}
+
+// UserQuotaKey is the per-user quota record key (US-003).
+func UserQuotaKey(userName string) []byte {
+	return appendEscaped([]byte(prefixUserQuota), userName)
 }
 
 // IAMUserPrefix is the start of all IAM user rows — origin for

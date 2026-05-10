@@ -80,6 +80,13 @@ var (
 	ErrNoRewrapProgress        = errors.New("no rewrap progress recorded for bucket")
 	ErrAdminJobNotFound        = errors.New("admin job not found")
 	ErrAdminJobAlreadyExists   = errors.New("admin job already exists")
+	// ErrQuotaExceeded signals that a write would exceed a configured
+	// per-bucket or per-user quota (US-006). Surfaced from the gateway as
+	// HTTP 403 / S3 code "QuotaExceeded" — non-AWS but matches the RGW shape
+	// so existing tooling that already understands the code keeps working.
+	// Returned today only by gateway-level enforcement helpers; backend
+	// stores never raise it directly.
+	ErrQuotaExceeded           = errors.New("quota exceeded")
 )
 
 // AdminJob tracks a long-running operator-facing background job kicked off by
@@ -167,6 +174,52 @@ type ManagedPolicy struct {
 	Document    []byte
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+}
+
+// BucketQuota is the per-bucket hard-cap configuration enforced at PUT time
+// (US-006). Zero on any field means "unlimited" — matches the AWS / RGW
+// shape so an unset quota imposes no limit. A bucket without a configured
+// quota row is not subject to any per-bucket cap; user-quota still applies.
+type BucketQuota struct {
+	MaxBytes          int64
+	MaxObjects        int64
+	MaxBytesPerObject int64
+}
+
+// UserQuota is the per-user hard-cap configuration enforced at CreateBucket
+// + PUT time (US-006). Keyed on the IAM user name. Zero on any field means
+// "unlimited".
+type UserQuota struct {
+	MaxBuckets    int32
+	TotalMaxBytes int64
+}
+
+// BucketStats is the live denormalised per-bucket counter row maintained
+// atomically by every PUT / DELETE / multipart Complete / lifecycle expire
+// path (US-004). UsedBytes / UsedObjects are signed because the bump path
+// accepts negative deltas (DELETE / lifecycle expire). Counter is best-effort
+// coherent — drift that a periodic reconcile worker (US-007) corrects.
+type BucketStats struct {
+	UsedBytes   int64
+	UsedObjects int64
+	UpdatedAt   time.Time
+}
+
+// UsageAggregate is one row in the per-(bucket, storage_class, day) usage
+// rollup feed (US-008) consumed by external billing. Day is normalised to
+// UTC midnight; ByteSeconds is the integral of UsedBytes over the day
+// (v1 approximation: UsedBytes * 86400 from a single sample). ObjectCount*
+// summarise the live object count over the day; v1 sets both Avg and Max
+// to the same sample value.
+type UsageAggregate struct {
+	BucketID       uuid.UUID
+	Bucket         string
+	StorageClass   string
+	Day            time.Time
+	ByteSeconds    int64
+	ObjectCountAvg int64
+	ObjectCountMax int64
+	ComputedAt     time.Time
 }
 
 // Grant is a single ACL grant entry persisted alongside the canned ACL.
@@ -715,6 +768,38 @@ type Store interface {
 	SetBucketTagging(ctx context.Context, bucketID uuid.UUID, xmlBlob []byte) error
 	GetBucketTagging(ctx context.Context, bucketID uuid.UUID) ([]byte, error)
 	DeleteBucketTagging(ctx context.Context, bucketID uuid.UUID) error
+
+	// Quota CRUD (US-001..US-003). Get returns (zero-value, false, nil)
+	// when no quota is configured — not a sentinel error — so the gateway's
+	// PUT-validate path stays branch-on-bool. Zero on any field of the
+	// returned BucketQuota / UserQuota means "unlimited".
+	GetBucketQuota(ctx context.Context, bucketID uuid.UUID) (BucketQuota, bool, error)
+	SetBucketQuota(ctx context.Context, bucketID uuid.UUID, q BucketQuota) error
+	DeleteBucketQuota(ctx context.Context, bucketID uuid.UUID) error
+	GetUserQuota(ctx context.Context, userName string) (UserQuota, bool, error)
+	SetUserQuota(ctx context.Context, userName string, q UserQuota) error
+	DeleteUserQuota(ctx context.Context, userName string) error
+
+	// BucketStats live counter (US-004..US-005). GetBucketStats returns the
+	// current row (zero-value when no row exists yet — never an error for the
+	// missing case). BumpBucketStats atomically increments the counter and
+	// returns the post-update value; negative deltas are allowed (DELETE /
+	// lifecycle expire). Cassandra uses LWT and TiKV a pessimistic txn so
+	// concurrent bumps serialise without lost updates.
+	GetBucketStats(ctx context.Context, bucketID uuid.UUID) (BucketStats, error)
+	BumpBucketStats(ctx context.Context, bucketID uuid.UUID, deltaBytes, deltaObjects int64) (BucketStats, error)
+
+	// Usage aggregates (US-008). The leader-elected usage-rollup worker
+	// writes one row per (bucketID, storageClass, day) per tick. Day must be
+	// normalised to UTC midnight; backends that key on a date column do this
+	// for the caller. Reads are inclusive on dayFrom, exclusive on dayTo
+	// (half-open) so successive day-aligned queries do not double-count.
+	// ListUserUsage walks every bucket owned by userName and returns
+	// per-(storageClass, day) sums across them (v1 fan-out — denormalised
+	// per-user index is a P3 follow-up).
+	WriteUsageAggregate(ctx context.Context, agg UsageAggregate) error
+	ListUsageAggregates(ctx context.Context, bucketID uuid.UUID, storageClass string, dayFrom, dayTo time.Time) ([]UsageAggregate, error)
+	ListUserUsage(ctx context.Context, userName string, dayFrom, dayTo time.Time) ([]UsageAggregate, error)
 
 	// Inventory configurations are addressed per-bucket by their config id; a
 	// bucket may carry multiple at once (AWS allows up to 1,000). The blob is

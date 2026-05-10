@@ -217,6 +217,14 @@ var (
 		},
 		[]string{"table", "bucket", "shard"},
 	)
+
+	QuotaReconcileDriftBytes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "strata_quota_reconcile_drift_bytes",
+			Help: "Last observed drift between bucket_stats.used_bytes and the actual sum of live (non-delete-marker) object sizes per bucket, sampled by the quota-reconcile worker (US-007). Positive = stats undercount (real data is larger); negative = stats overcount.",
+		},
+		[]string{"bucket"},
+	)
 )
 
 func Register() {
@@ -243,6 +251,7 @@ func Register() {
 		OTelRingbufTraces,
 		OTelRingbufEvicted,
 		CassandraLWTConflictsTotal,
+		QuotaReconcileDriftBytes,
 	)
 }
 

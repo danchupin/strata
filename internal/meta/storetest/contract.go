@@ -57,6 +57,11 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"UserPolicyAttach", caseUserPolicyAttach},
 		{"IAMAccessKeyDisabled", caseIAMAccessKeyDisabled},
 		{"MetaHealth", caseMetaHealth},
+		{"BucketQuotaRoundTrip", caseBucketQuota},
+		{"UserQuotaRoundTrip", caseUserQuota},
+		{"BucketStatsRoundTrip", caseBucketStats},
+		{"BucketStatsHotPath", caseBucketStatsHotPath},
+		{"UsageAggregateRoundTrip", caseUsageAggregate},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2032,6 +2037,463 @@ func caseMetaHealth(t *testing.T, s meta.Store) {
 		if n.State == "" {
 			t.Errorf("MetaHealth: node[%d] missing State", i)
 		}
+	}
+}
+
+// caseBucketQuota exercises the BucketQuota CRUD surface (US-001):
+// not-configured → set → get → delete → not-configured. Zero on any field
+// is preserved as "unlimited" sentinel.
+func caseBucketQuota(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "qb", "owner-q", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+
+	got, ok, err := s.GetBucketQuota(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("get unconfigured: %v", err)
+	}
+	if ok {
+		t.Fatalf("get unconfigured: ok=true want false (got %+v)", got)
+	}
+
+	want := meta.BucketQuota{MaxBytes: 1 << 30, MaxObjects: 100, MaxBytesPerObject: 5 << 20}
+	if err := s.SetBucketQuota(ctx, b.ID, want); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	got, ok, err = s.GetBucketQuota(ctx, b.ID)
+	if err != nil || !ok {
+		t.Fatalf("get after set: ok=%v err=%v", ok, err)
+	}
+	if got != want {
+		t.Fatalf("round-trip mismatch: got %+v want %+v", got, want)
+	}
+
+	overwrite := meta.BucketQuota{MaxBytes: 0, MaxObjects: 50, MaxBytesPerObject: 0}
+	if err := s.SetBucketQuota(ctx, b.ID, overwrite); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	got, ok, err = s.GetBucketQuota(ctx, b.ID)
+	if err != nil || !ok {
+		t.Fatalf("get after overwrite: ok=%v err=%v", ok, err)
+	}
+	if got != overwrite {
+		t.Fatalf("overwrite round-trip: got %+v want %+v", got, overwrite)
+	}
+
+	if err := s.DeleteBucketQuota(ctx, b.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	got, ok, err = s.GetBucketQuota(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("get after delete: %v", err)
+	}
+	if ok {
+		t.Fatalf("get after delete: ok=true want false (got %+v)", got)
+	}
+
+	if err := s.DeleteBucketQuota(ctx, b.ID); err != nil {
+		t.Errorf("delete idempotent: %v", err)
+	}
+}
+
+// caseUserQuota exercises the UserQuota CRUD surface (US-001):
+// not-configured → set → get → delete → not-configured.
+func caseUserQuota(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	const userName = "alice"
+
+	got, ok, err := s.GetUserQuota(ctx, userName)
+	if err != nil {
+		t.Fatalf("get unconfigured: %v", err)
+	}
+	if ok {
+		t.Fatalf("get unconfigured: ok=true want false (got %+v)", got)
+	}
+
+	want := meta.UserQuota{MaxBuckets: 5, TotalMaxBytes: 10 << 30}
+	if err := s.SetUserQuota(ctx, userName, want); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	got, ok, err = s.GetUserQuota(ctx, userName)
+	if err != nil || !ok {
+		t.Fatalf("get after set: ok=%v err=%v", ok, err)
+	}
+	if got != want {
+		t.Fatalf("round-trip mismatch: got %+v want %+v", got, want)
+	}
+
+	overwrite := meta.UserQuota{MaxBuckets: 0, TotalMaxBytes: 1 << 40}
+	if err := s.SetUserQuota(ctx, userName, overwrite); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	got, ok, err = s.GetUserQuota(ctx, userName)
+	if err != nil || !ok {
+		t.Fatalf("get after overwrite: ok=%v err=%v", ok, err)
+	}
+	if got != overwrite {
+		t.Fatalf("overwrite round-trip: got %+v want %+v", got, overwrite)
+	}
+
+	if err := s.DeleteUserQuota(ctx, userName); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	got, ok, err = s.GetUserQuota(ctx, userName)
+	if err != nil {
+		t.Fatalf("get after delete: %v", err)
+	}
+	if ok {
+		t.Fatalf("get after delete: ok=true want false (got %+v)", got)
+	}
+
+	if err := s.DeleteUserQuota(ctx, userName); err != nil {
+		t.Errorf("delete idempotent: %v", err)
+	}
+}
+
+// caseBucketStats exercises the live counter row (US-004..US-005):
+// fresh-bucket zero stats → 100 sequential bumps → counter matches expected
+// sum → 100 concurrent bumps → no lost updates → negative deltas honoured.
+func caseBucketStats(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "bs", "owner-bs", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+
+	got, err := s.GetBucketStats(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("get fresh: %v", err)
+	}
+	if got.UsedBytes != 0 || got.UsedObjects != 0 {
+		t.Fatalf("fresh stats nonzero: %+v", got)
+	}
+
+	const seqN = 100
+	const seqSize = int64(7)
+	for i := 0; i < seqN; i++ {
+		next, err := s.BumpBucketStats(ctx, b.ID, seqSize, 1)
+		if err != nil {
+			t.Fatalf("bump %d: %v", i, err)
+		}
+		wantBytes := seqSize * int64(i+1)
+		wantObjects := int64(i + 1)
+		if next.UsedBytes != wantBytes || next.UsedObjects != wantObjects {
+			t.Fatalf("bump %d post-update: got %+v want bytes=%d objects=%d", i, next, wantBytes, wantObjects)
+		}
+		if next.UpdatedAt.IsZero() {
+			t.Fatalf("bump %d returned zero UpdatedAt", i)
+		}
+	}
+
+	got, err = s.GetBucketStats(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("get after sequential: %v", err)
+	}
+	if got.UsedBytes != seqSize*seqN || got.UsedObjects != seqN {
+		t.Fatalf("after sequential: got %+v want bytes=%d objects=%d", got, seqSize*seqN, seqN)
+	}
+
+	// Concurrent bumps — every backend's mutex / LWT / pessimistic-txn shape
+	// must serialise these without lost updates.
+	const concN = 100
+	const concSize = int64(13)
+	type bumpResult struct {
+		err error
+	}
+	results := make(chan bumpResult, concN)
+	for i := 0; i < concN; i++ {
+		go func() {
+			_, err := s.BumpBucketStats(ctx, b.ID, concSize, 1)
+			results <- bumpResult{err: err}
+		}()
+	}
+	for i := 0; i < concN; i++ {
+		r := <-results
+		if r.err != nil {
+			t.Fatalf("concurrent bump: %v", r.err)
+		}
+	}
+	got, err = s.GetBucketStats(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("get after concurrent: %v", err)
+	}
+	wantBytes := seqSize*seqN + concSize*concN
+	wantObjects := int64(seqN + concN)
+	if got.UsedBytes != wantBytes || got.UsedObjects != wantObjects {
+		t.Fatalf("after concurrent: got %+v want bytes=%d objects=%d", got, wantBytes, wantObjects)
+	}
+
+	// Negative delta — DELETE / lifecycle expire path.
+	next, err := s.BumpBucketStats(ctx, b.ID, -seqSize, -1)
+	if err != nil {
+		t.Fatalf("negative bump: %v", err)
+	}
+	if next.UsedBytes != wantBytes-seqSize || next.UsedObjects != wantObjects-1 {
+		t.Fatalf("negative bump post-update: got %+v want bytes=%d objects=%d", next, wantBytes-seqSize, wantObjects-1)
+	}
+}
+
+// caseBucketStatsHotPath verifies the live counter is updated by the
+// PutObject / DeleteObject / CompleteMultipartUpload paths on every backend
+// (US-005). Markers contribute zero bytes and zero to object count.
+func caseBucketStatsHotPath(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+
+	mustStats := func(label string, bid uuid.UUID, wantBytes, wantObjects int64) {
+		t.Helper()
+		got, err := s.GetBucketStats(ctx, bid)
+		if err != nil {
+			t.Fatalf("%s: get stats: %v", label, err)
+		}
+		if got.UsedBytes != wantBytes || got.UsedObjects != wantObjects {
+			t.Fatalf("%s: got %+v want bytes=%d objects=%d", label, got, wantBytes, wantObjects)
+		}
+	}
+
+	// --- Unversioned bucket: PUT / overwrite / DELETE ---
+	uv, err := s.CreateBucket(ctx, "hpu", "owner-hp", "STANDARD")
+	if err != nil {
+		t.Fatalf("create unversioned: %v", err)
+	}
+	mustStats("uv-fresh", uv.ID, 0, 0)
+
+	put := func(b uuid.UUID, key string, size int64, versioned bool) *meta.Object {
+		o := &meta.Object{
+			BucketID:     b,
+			Key:          key,
+			Size:         size,
+			StorageClass: "STANDARD",
+			Mtime:        time.Now().UTC(),
+			Manifest:     &data.Manifest{Class: "STANDARD", Size: size},
+		}
+		if err := s.PutObject(ctx, o, versioned); err != nil {
+			t.Fatalf("put %s/%s: %v", b, key, err)
+		}
+		return o
+	}
+
+	put(uv.ID, "a", 100, false)
+	mustStats("uv-put-a", uv.ID, 100, 1)
+	put(uv.ID, "a", 250, false) // overwrite
+	mustStats("uv-overwrite-a", uv.ID, 250, 1)
+	put(uv.ID, "b", 50, false)
+	mustStats("uv-put-b", uv.ID, 300, 2)
+	if _, err := s.DeleteObject(ctx, uv.ID, "a", "", false); err != nil {
+		t.Fatalf("delete a: %v", err)
+	}
+	mustStats("uv-del-a", uv.ID, 50, 1)
+	if _, err := s.DeleteObject(ctx, uv.ID, "b", "", false); err != nil {
+		t.Fatalf("delete b: %v", err)
+	}
+	mustStats("uv-del-b", uv.ID, 0, 0)
+
+	// --- Versioned bucket: versioned PUT, marker, version-specific DELETE ---
+	if _, err := s.CreateBucket(ctx, "hpv", "owner-hp", "STANDARD"); err != nil {
+		t.Fatalf("create versioned: %v", err)
+	}
+	if err := s.SetBucketVersioning(ctx, "hpv", meta.VersioningEnabled); err != nil {
+		t.Fatalf("enable versioning: %v", err)
+	}
+	vb, err := s.GetBucket(ctx, "hpv")
+	if err != nil {
+		t.Fatalf("get versioned bucket: %v", err)
+	}
+	v1 := put(vb.ID, "k", 10, true)
+	mustStats("v-put-1", vb.ID, 10, 1)
+	v2 := put(vb.ID, "k", 20, true)
+	mustStats("v-put-2", vb.ID, 30, 2)
+
+	// DELETE without versionID on a versioned bucket creates a marker. The
+	// underlying versions stay; bytes/object count must NOT change.
+	dm, err := s.DeleteObject(ctx, vb.ID, "k", "", true)
+	if err != nil || dm == nil || !dm.IsDeleteMarker {
+		t.Fatalf("create marker: %v %+v", err, dm)
+	}
+	mustStats("v-marker", vb.ID, 30, 2)
+
+	// Delete a specific real version: -size, -1.
+	if _, err := s.DeleteObject(ctx, vb.ID, "k", v1.VersionID, true); err != nil {
+		t.Fatalf("delete v1: %v", err)
+	}
+	mustStats("v-del-v1", vb.ID, 20, 1)
+
+	// Delete the marker: marker contributes zero, so count/bytes unchanged.
+	if _, err := s.DeleteObject(ctx, vb.ID, "k", dm.VersionID, true); err != nil {
+		t.Fatalf("delete marker: %v", err)
+	}
+	mustStats("v-del-marker", vb.ID, 20, 1)
+
+	// Delete the remaining real version.
+	if _, err := s.DeleteObject(ctx, vb.ID, "k", v2.VersionID, true); err != nil {
+		t.Fatalf("delete v2: %v", err)
+	}
+	mustStats("v-del-v2", vb.ID, 0, 0)
+
+	// --- Multipart Complete: +totalSize, +1 ---
+	mp, err := s.CreateBucket(ctx, "hpm", "owner-hp", "STANDARD")
+	if err != nil {
+		t.Fatalf("create mp bucket: %v", err)
+	}
+	uploadID := newTimeUUID()
+	if err := s.CreateMultipartUpload(ctx, &meta.MultipartUpload{
+		BucketID:     mp.ID,
+		Key:          "big",
+		UploadID:     uploadID,
+		StorageClass: "STANDARD",
+		Status:       "uploading",
+		InitiatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("create mp: %v", err)
+	}
+	for i := 1; i <= 2; i++ {
+		size := int64(i * 64)
+		part := &meta.MultipartPart{
+			PartNumber: i,
+			ETag:       fmt.Sprintf("etag-%d", i),
+			Size:       size,
+			Mtime:      time.Now().UTC(),
+			Manifest:   &data.Manifest{Class: "STANDARD", Size: size},
+		}
+		if err := s.SavePart(ctx, mp.ID, uploadID, part); err != nil {
+			t.Fatalf("save part %d: %v", i, err)
+		}
+	}
+	completeParts := []meta.CompletePart{
+		{PartNumber: 1, ETag: "etag-1"},
+		{PartNumber: 2, ETag: "etag-2"},
+	}
+	obj := &meta.Object{
+		BucketID:     mp.ID,
+		Key:          "big",
+		StorageClass: "STANDARD",
+		ETag:         "final",
+		Mtime:        time.Now().UTC(),
+	}
+	if _, err := s.CompleteMultipartUpload(ctx, obj, uploadID, completeParts, false); err != nil {
+		t.Fatalf("complete mp: %v", err)
+	}
+	mustStats("mp-complete", mp.ID, 192, 1)
+}
+
+// caseUsageAggregate exercises the usage rollup CRUD surface (US-008):
+// per-(bucket, class) writes are isolated by partition key, ListUsageAggregates
+// applies a half-open [from, to) day filter, ListUserUsage sums across the
+// user's buckets per (storage_class, day).
+func caseUsageAggregate(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	utcMidnight := func(daysAgo int) time.Time {
+		t := time.Now().UTC()
+		base := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+		return base.AddDate(0, 0, -daysAgo)
+	}
+	day1 := utcMidnight(2)
+	day2 := utcMidnight(1)
+	day3 := utcMidnight(0)
+
+	b1, err := s.CreateBucket(ctx, "ua1", "alice", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket1: %v", err)
+	}
+	b2, err := s.CreateBucket(ctx, "ua2", "alice", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket2: %v", err)
+	}
+	if _, err := s.CreateBucket(ctx, "ua3", "bob", "STANDARD"); err != nil {
+		t.Fatalf("create bucket3: %v", err)
+	}
+
+	rows := []meta.UsageAggregate{
+		{BucketID: b1.ID, StorageClass: "STANDARD", Day: day1, ByteSeconds: 1000, ObjectCountAvg: 1, ObjectCountMax: 1},
+		{BucketID: b1.ID, StorageClass: "STANDARD", Day: day2, ByteSeconds: 2000, ObjectCountAvg: 2, ObjectCountMax: 3},
+		{BucketID: b1.ID, StorageClass: "STANDARD", Day: day3, ByteSeconds: 3000, ObjectCountAvg: 4, ObjectCountMax: 5},
+		{BucketID: b1.ID, StorageClass: "GLACIER", Day: day2, ByteSeconds: 500, ObjectCountAvg: 1, ObjectCountMax: 1},
+		{BucketID: b2.ID, StorageClass: "STANDARD", Day: day2, ByteSeconds: 700, ObjectCountAvg: 2, ObjectCountMax: 2},
+	}
+	for i := range rows {
+		if err := s.WriteUsageAggregate(ctx, rows[i]); err != nil {
+			t.Fatalf("write row %d: %v", i, err)
+		}
+	}
+
+	got, err := s.ListUsageAggregates(ctx, b1.ID, "STANDARD", day1, day3.AddDate(0, 0, 1))
+	if err != nil {
+		t.Fatalf("list b1 standard: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("list b1 standard: got %d rows want 3 (%+v)", len(got), got)
+	}
+	for i := 0; i < len(got)-1; i++ {
+		if got[i].Day.After(got[i+1].Day) {
+			t.Fatalf("list not sorted ascending by day: %+v", got)
+		}
+	}
+
+	// Half-open: [day1, day3) excludes day3.
+	got, err = s.ListUsageAggregates(ctx, b1.ID, "STANDARD", day1, day3)
+	if err != nil {
+		t.Fatalf("list b1 standard half-open: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("half-open: got %d rows want 2 (%+v)", len(got), got)
+	}
+
+	// Different class isolated.
+	got, err = s.ListUsageAggregates(ctx, b1.ID, "GLACIER", day1, day3.AddDate(0, 0, 1))
+	if err != nil || len(got) != 1 {
+		t.Fatalf("list b1 glacier: %d rows err=%v", len(got), err)
+	}
+
+	// User-scope sums across alice's two buckets per (class, day).
+	allRows, err := s.ListUserUsage(ctx, "alice", day1, day3.AddDate(0, 0, 1))
+	if err != nil {
+		t.Fatalf("list user usage: %v", err)
+	}
+	type sumKey struct {
+		StorageClass string
+		Day          int64
+	}
+	seen := map[sumKey]meta.UsageAggregate{}
+	for _, r := range allRows {
+		seen[sumKey{r.StorageClass, r.Day.UTC().Unix()}] = r
+	}
+	if r := seen[sumKey{"STANDARD", day2.Unix()}]; r.ByteSeconds != 2700 {
+		t.Fatalf("standard day2 sum: got %d want 2700 (rows=%+v)", r.ByteSeconds, allRows)
+	}
+	if r := seen[sumKey{"STANDARD", day1.Unix()}]; r.ByteSeconds != 1000 {
+		t.Fatalf("standard day1: got %d want 1000", r.ByteSeconds)
+	}
+	if r := seen[sumKey{"STANDARD", day3.Unix()}]; r.ByteSeconds != 3000 {
+		t.Fatalf("standard day3: got %d want 3000", r.ByteSeconds)
+	}
+	if r := seen[sumKey{"GLACIER", day2.Unix()}]; r.ByteSeconds != 500 {
+		t.Fatalf("glacier day2: got %d want 500", r.ByteSeconds)
+	}
+
+	// Bob's user usage does NOT include alice's rows.
+	bob, err := s.ListUserUsage(ctx, "bob", day1, day3.AddDate(0, 0, 1))
+	if err != nil {
+		t.Fatalf("list bob: %v", err)
+	}
+	for _, r := range bob {
+		if r.ByteSeconds != 0 {
+			t.Fatalf("bob has no rolled-up data; got %+v", r)
+		}
+	}
+
+	// Overwrite same (bucket, class, day): WriteUsageAggregate is idempotent —
+	// last writer wins.
+	overwrite := meta.UsageAggregate{BucketID: b1.ID, StorageClass: "STANDARD", Day: day2, ByteSeconds: 9999, ObjectCountAvg: 7, ObjectCountMax: 9}
+	if err := s.WriteUsageAggregate(ctx, overwrite); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	got, err = s.ListUsageAggregates(ctx, b1.ID, "STANDARD", day2, day2.AddDate(0, 0, 1))
+	if err != nil || len(got) != 1 {
+		t.Fatalf("post-overwrite: rows=%d err=%v", len(got), err)
+	}
+	if got[0].ByteSeconds != 9999 {
+		t.Fatalf("overwrite did not take effect: got %d", got[0].ByteSeconds)
 	}
 }
 

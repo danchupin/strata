@@ -33,6 +33,10 @@ type Store struct {
 	replication    map[uuid.UUID][]byte
 	logging        map[uuid.UUID][]byte
 	tagging        map[uuid.UUID][]byte
+	bucketQuotas   map[uuid.UUID][]byte
+	userQuotas     map[string][]byte
+	bucketStats    map[uuid.UUID]meta.BucketStats
+	usageAggs      map[usageKey]meta.UsageAggregate
 	inventoryConfigs map[uuid.UUID]map[string][]byte
 	accessPoints     map[string]*meta.AccessPoint
 	bucketGrants   map[uuid.UUID][]meta.Grant
@@ -67,6 +71,12 @@ type manifestKey struct {
 	BucketID  uuid.UUID
 	Key       string
 	VersionID string
+}
+
+type usageKey struct {
+	BucketID     uuid.UUID
+	StorageClass string
+	Day          int64 // unix-epoch UTC midnight
 }
 
 type completionKey struct {
@@ -117,6 +127,10 @@ func New() *Store {
 		replication:  make(map[uuid.UUID][]byte),
 		logging:      make(map[uuid.UUID][]byte),
 		tagging:      make(map[uuid.UUID][]byte),
+		bucketQuotas: make(map[uuid.UUID][]byte),
+		userQuotas:   make(map[string][]byte),
+		bucketStats:  make(map[uuid.UUID]meta.BucketStats),
+		usageAggs:    make(map[usageKey]meta.UsageAggregate),
 		inventoryConfigs: make(map[uuid.UUID]map[string][]byte),
 		accessPoints:     make(map[string]*meta.AccessPoint),
 		bucketGrants: make(map[uuid.UUID][]meta.Grant),
@@ -846,25 +860,40 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 		return err
 	}
 	cp := *o
+	deltaBytes := o.Size
+	deltaObjects := int64(1)
 	if !versioned {
+		// Unversioned overwrite: prior row (if any) is replaced — subtract its
+		// size and the +1 cancels with the existing row.
+		if prev := bucket[o.Key]; len(prev) > 0 {
+			deltaBytes -= prev[0].Size
+			deltaObjects = 0
+		}
 		bucket[o.Key] = []*meta.Object{&cp}
 		s.objectManifestRaw[manifestKey{o.BucketID, o.Key, cp.VersionID}] = raw
+		s.bumpBucketStatsLocked(o.BucketID, deltaBytes, deltaObjects)
 		return nil
 	}
 	if o.IsNull {
+		// Suspended-mode null replacement: subtract any prior null version's
+		// size (object count is +1 only when no prior null row existed).
 		filtered := bucket[o.Key][:0]
 		for _, v := range bucket[o.Key] {
 			if v.VersionID == meta.NullVersionID {
+				deltaBytes -= v.Size
+				deltaObjects = 0
 				continue
 			}
 			filtered = append(filtered, v)
 		}
 		bucket[o.Key] = append([]*meta.Object{&cp}, filtered...)
 		s.objectManifestRaw[manifestKey{o.BucketID, o.Key, cp.VersionID}] = raw
+		s.bumpBucketStatsLocked(o.BucketID, deltaBytes, deltaObjects)
 		return nil
 	}
 	bucket[o.Key] = append([]*meta.Object{&cp}, bucket[o.Key]...)
 	s.objectManifestRaw[manifestKey{o.BucketID, o.Key, cp.VersionID}] = raw
+	s.bumpBucketStatsLocked(o.BucketID, deltaBytes, deltaObjects)
 	return nil
 }
 
@@ -880,8 +909,14 @@ func (s *Store) DeleteObjectNullReplacement(ctx context.Context, bucketID uuid.U
 	}
 	versions := bucket[key]
 	filtered := versions[:0]
+	var freedBytes int64
+	var freedObjects int64
 	for _, v := range versions {
 		if v.VersionID == meta.NullVersionID {
+			if !v.IsDeleteMarker {
+				freedBytes += v.Size
+				freedObjects++
+			}
 			continue
 		}
 		filtered = append(filtered, v)
@@ -896,6 +931,9 @@ func (s *Store) DeleteObjectNullReplacement(ctx context.Context, bucketID uuid.U
 		Mtime:          time.Now().UTC(),
 	}
 	bucket[key] = append([]*meta.Object{marker}, filtered...)
+	if freedBytes != 0 || freedObjects != 0 {
+		s.bumpBucketStatsLocked(bucketID, -freedBytes, -freedObjects)
+	}
 	return marker, nil
 }
 
@@ -961,6 +999,9 @@ func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versi
 				if len(bucket[key]) == 0 {
 					delete(bucket, key)
 				}
+				if !cp.IsDeleteMarker {
+					s.bumpBucketStatsLocked(bucketID, -cp.Size, -1)
+				}
 				return &cp, nil
 			}
 		}
@@ -983,6 +1024,9 @@ func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versi
 	latest := versions[0]
 	delete(bucket, key)
 	cp := *latest
+	if !cp.IsDeleteMarker {
+		s.bumpBucketStatsLocked(bucketID, -cp.Size, -1)
+	}
 	return &cp, nil
 }
 
@@ -1472,6 +1516,188 @@ func (s *Store) DeleteBucketTagging(ctx context.Context, bucketID uuid.UUID) err
 	return s.deleteBucketBlob(s.tagging, bucketID)
 }
 
+func (s *Store) SetBucketQuota(ctx context.Context, bucketID uuid.UUID, q meta.BucketQuota) error {
+	blob, err := meta.EncodeBucketQuota(q)
+	if err != nil {
+		return err
+	}
+	return s.setBucketBlob(s.bucketQuotas, bucketID, blob)
+}
+
+func (s *Store) GetBucketQuota(ctx context.Context, bucketID uuid.UUID) (meta.BucketQuota, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	blob, ok := s.bucketQuotas[bucketID]
+	if !ok {
+		return meta.BucketQuota{}, false, nil
+	}
+	q, err := meta.DecodeBucketQuota(blob)
+	if err != nil {
+		return meta.BucketQuota{}, false, err
+	}
+	return q, true, nil
+}
+
+func (s *Store) DeleteBucketQuota(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(s.bucketQuotas, bucketID)
+}
+
+func (s *Store) SetUserQuota(ctx context.Context, userName string, q meta.UserQuota) error {
+	blob, err := meta.EncodeUserQuota(q)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.userQuotas[userName] = blob
+	return nil
+}
+
+func (s *Store) GetUserQuota(ctx context.Context, userName string) (meta.UserQuota, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	blob, ok := s.userQuotas[userName]
+	if !ok {
+		return meta.UserQuota{}, false, nil
+	}
+	q, err := meta.DecodeUserQuota(blob)
+	if err != nil {
+		return meta.UserQuota{}, false, err
+	}
+	return q, true, nil
+}
+
+func (s *Store) DeleteUserQuota(ctx context.Context, userName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.userQuotas, userName)
+	return nil
+}
+
+// GetBucketStats returns the current live counter row for the bucket. Missing
+// rows read back as zero stats — bucket creation does not seed a row, so the
+// first BumpBucketStats lazily upserts it.
+func (s *Store) GetBucketStats(ctx context.Context, bucketID uuid.UUID) (meta.BucketStats, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.bucketStats[bucketID], nil
+}
+
+// BumpBucketStats atomically applies (deltaBytes, deltaObjects) to the bucket's
+// counter row and returns the post-update value. Negative deltas are allowed
+// (DELETE / lifecycle expire). The single mutex serialises every bump under
+// concurrent PUTs — the contract-test concurrent-bump assertion hangs on this.
+func (s *Store) bumpBucketStatsLocked(bucketID uuid.UUID, deltaBytes, deltaObjects int64) meta.BucketStats {
+	cur := s.bucketStats[bucketID]
+	cur.UsedBytes += deltaBytes
+	cur.UsedObjects += deltaObjects
+	cur.UpdatedAt = time.Now().UTC()
+	s.bucketStats[bucketID] = cur
+	return cur
+}
+
+func (s *Store) BumpBucketStats(ctx context.Context, bucketID uuid.UUID, deltaBytes, deltaObjects int64) (meta.BucketStats, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.bumpBucketStatsLocked(bucketID, deltaBytes, deltaObjects), nil
+}
+
+func normalizeDay(t time.Time) time.Time {
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+func (s *Store) WriteUsageAggregate(ctx context.Context, agg meta.UsageAggregate) error {
+	day := normalizeDay(agg.Day)
+	agg.Day = day
+	if agg.ComputedAt.IsZero() {
+		agg.ComputedAt = time.Now().UTC()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.usageAggs[usageKey{BucketID: agg.BucketID, StorageClass: agg.StorageClass, Day: day.Unix()}] = agg
+	return nil
+}
+
+func (s *Store) ListUsageAggregates(ctx context.Context, bucketID uuid.UUID, storageClass string, dayFrom, dayTo time.Time) ([]meta.UsageAggregate, error) {
+	from := normalizeDay(dayFrom)
+	to := normalizeDay(dayTo)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]meta.UsageAggregate, 0)
+	for k, v := range s.usageAggs {
+		if k.BucketID != bucketID {
+			continue
+		}
+		if storageClass != "" && k.StorageClass != storageClass {
+			continue
+		}
+		d := time.Unix(k.Day, 0).UTC()
+		if d.Before(from) || !d.Before(to) {
+			continue
+		}
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Day.Equal(out[j].Day) {
+			return out[i].Day.Before(out[j].Day)
+		}
+		return out[i].StorageClass < out[j].StorageClass
+	})
+	return out, nil
+}
+
+func (s *Store) ListUserUsage(ctx context.Context, userName string, dayFrom, dayTo time.Time) ([]meta.UsageAggregate, error) {
+	from := normalizeDay(dayFrom)
+	to := normalizeDay(dayTo)
+	s.mu.RLock()
+	owned := make(map[uuid.UUID]string)
+	for _, b := range s.buckets {
+		if b.Owner == userName {
+			owned[b.ID] = b.Name
+		}
+	}
+	type sumKey struct {
+		StorageClass string
+		Day          int64
+	}
+	sums := make(map[sumKey]meta.UsageAggregate)
+	for k, v := range s.usageAggs {
+		if _, ok := owned[k.BucketID]; !ok {
+			continue
+		}
+		d := time.Unix(k.Day, 0).UTC()
+		if d.Before(from) || !d.Before(to) {
+			continue
+		}
+		sk := sumKey{StorageClass: k.StorageClass, Day: k.Day}
+		acc := sums[sk]
+		acc.StorageClass = v.StorageClass
+		acc.Day = d
+		acc.ByteSeconds += v.ByteSeconds
+		acc.ObjectCountAvg += v.ObjectCountAvg
+		if v.ObjectCountMax > acc.ObjectCountMax {
+			acc.ObjectCountMax = v.ObjectCountMax
+		}
+		if v.ComputedAt.After(acc.ComputedAt) {
+			acc.ComputedAt = v.ComputedAt
+		}
+		sums[sk] = acc
+	}
+	s.mu.RUnlock()
+	out := make([]meta.UsageAggregate, 0, len(sums))
+	for _, v := range sums {
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Day.Equal(out[j].Day) {
+			return out[i].Day.Before(out[j].Day)
+		}
+		return out[i].StorageClass < out[j].StorageClass
+	})
+	return out, nil
+}
+
 func (s *Store) SetBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string, blob []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1775,11 +2001,18 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 		return nil, meta.ErrBucketNotFound
 	}
 	cp := *obj
+	deltaBytes := obj.Size
+	deltaObjects := int64(1)
 	if versioned {
 		bucket[obj.Key] = append([]*meta.Object{&cp}, bucket[obj.Key]...)
 	} else {
+		if prev := bucket[obj.Key]; len(prev) > 0 {
+			deltaBytes -= prev[0].Size
+			deltaObjects = 0
+		}
 		bucket[obj.Key] = []*meta.Object{&cp}
 	}
+	s.bumpBucketStatsLocked(obj.BucketID, deltaBytes, deltaObjects)
 
 	var orphans []*data.Manifest
 	for num, p := range st.parts {

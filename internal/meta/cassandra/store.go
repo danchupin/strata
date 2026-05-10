@@ -432,7 +432,18 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 		versionID = gocql.TimeUUID()
 		o.VersionID = versionID.String()
 	}
+
+	// Compute (deltaBytes, deltaObjects) for the bucket_stats bump that
+	// follows the object write. Read prior row BEFORE issuing the DELETE
+	// so the delta accounts for the replaced bytes. Delete markers
+	// contribute 0 bytes and 0 to object count — only non-marker rows count.
+	var prior *meta.Object
 	if !versioned {
+		p, err := s.scanObjectLimit1(ctx, o.BucketID, shard, o.Key)
+		if err != nil && !errors.Is(err, meta.ErrObjectNotFound) {
+			return err
+		}
+		prior = p
 		if err := s.s.Query(
 			`DELETE FROM objects WHERE bucket_id=? AND shard=? AND key=?`,
 			gocqlUUID(o.BucketID), shard, o.Key,
@@ -443,6 +454,11 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 		// Suspended-mode null PUT: atomically drop any prior null-versioned
 		// row (LWT IF EXISTS — applied=false is fine, no prior null row).
 		nullUUID, _ := versionToCQL(meta.NullVersionID)
+		p, err := s.scanObjectByVersion(ctx, o.BucketID, shard, o.Key, nullUUID)
+		if err != nil && !errors.Is(err, meta.ErrObjectNotFound) {
+			return err
+		}
+		prior = p
 		if err := s.s.Query(
 			`DELETE FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=? IF EXISTS`,
 			gocqlUUID(o.BucketID), shard, o.Key, nullUUID,
@@ -450,6 +466,7 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 			return err
 		}
 	}
+	deltaBytes, deltaObjects := bucketStatsDelta(prior, o)
 	var retainUntil *time.Time
 	if !o.RetainUntil.IsZero() {
 		t := o.RetainUntil
@@ -463,7 +480,7 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 	if len(o.PartSizes) > 0 {
 		partSizes = o.PartSizes
 	}
-	return s.s.Query(
+	if err := s.s.Query(
 		`INSERT INTO objects (bucket_id, shard, key, version_id, is_latest, is_delete_marker,
 		 size, etag, content_type, storage_class, mtime, manifest, user_meta, tags,
 		 retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
@@ -473,7 +490,36 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 		o.Size, o.ETag, o.ContentType, o.StorageClass, o.Mtime, manifestBlob, o.UserMeta, o.Tags,
 		retainUntil, nilIfEmpty(o.RetainMode), o.LegalHold, o.Checksums, nilIfEmpty(o.SSE), nilIfEmpty(o.SSECKeyMD5), nilIfEmpty(o.RestoreStatus),
 		nilIfEmpty(o.CacheControl), nilIfEmpty(o.Expires), partsCount, nilIfEmptyBytes(o.SSEKey), nilIfEmpty(o.SSEKeyID), nilIfEmpty(o.ReplicationStatus), partSizes, nilIfEmpty(o.ChecksumType), o.IsNull,
-	).WithContext(ctx).Exec()
+	).WithContext(ctx).Exec(); err != nil {
+		return err
+	}
+	if deltaBytes != 0 || deltaObjects != 0 {
+		if _, err := s.BumpBucketStats(ctx, o.BucketID, deltaBytes, deltaObjects); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// bucketStatsDelta returns the (deltaBytes, deltaObjects) bump that should be
+// applied to bucket_stats when `next` replaces `prior` (nil prior = fresh row).
+// Delete markers contribute 0 bytes and 0 to object count.
+func bucketStatsDelta(prior, next *meta.Object) (int64, int64) {
+	var priorBytes, priorObjects int64
+	if prior != nil {
+		priorBytes = prior.Size
+		if !prior.IsDeleteMarker {
+			priorObjects = 1
+		}
+	}
+	var nextBytes, nextObjects int64
+	if next != nil {
+		nextBytes = next.Size
+		if !next.IsDeleteMarker {
+			nextObjects = 1
+		}
+	}
+	return nextBytes - priorBytes, nextObjects - priorObjects
 }
 
 func nilIfEmptyBytes(b []byte) interface{} {
@@ -674,6 +720,12 @@ func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versi
 		).WithContext(ctx).Exec(); err != nil {
 			return nil, err
 		}
+		db, dc := bucketStatsDelta(o, nil)
+		if db != 0 || dc != 0 {
+			if _, err := s.BumpBucketStats(ctx, bucketID, db, dc); err != nil {
+				return nil, err
+			}
+		}
 		return o, nil
 	}
 
@@ -704,6 +756,12 @@ func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versi
 		gocqlUUID(bucketID), shard, key,
 	).WithContext(ctx).Exec(); err != nil {
 		return nil, err
+	}
+	db, dc := bucketStatsDelta(o, nil)
+	if db != 0 || dc != 0 {
+		if _, err := s.BumpBucketStats(ctx, bucketID, db, dc); err != nil {
+			return nil, err
+		}
 	}
 	return o, nil
 }
@@ -2843,6 +2901,312 @@ func (s *Store) GetBucketTagging(ctx context.Context, bucketID uuid.UUID) ([]byt
 }
 func (s *Store) DeleteBucketTagging(ctx context.Context, bucketID uuid.UUID) error {
 	return s.deleteBucketBlob(ctx, "bucket_tagging", bucketID)
+}
+
+func (s *Store) SetBucketQuota(ctx context.Context, bucketID uuid.UUID, q meta.BucketQuota) error {
+	blob, err := meta.EncodeBucketQuota(q)
+	if err != nil {
+		return err
+	}
+	return s.setBucketBlob(ctx, "bucket_quota", "config", bucketID, blob)
+}
+
+func (s *Store) GetBucketQuota(ctx context.Context, bucketID uuid.UUID) (meta.BucketQuota, bool, error) {
+	var blob []byte
+	err := s.s.Query(
+		`SELECT config FROM bucket_quota WHERE bucket_id=?`,
+		gocqlUUID(bucketID),
+	).WithContext(ctx).Scan(&blob)
+	if errors.Is(err, gocql.ErrNotFound) || (err == nil && len(blob) == 0) {
+		return meta.BucketQuota{}, false, nil
+	}
+	if err != nil {
+		return meta.BucketQuota{}, false, err
+	}
+	q, err := meta.DecodeBucketQuota(blob)
+	if err != nil {
+		return meta.BucketQuota{}, false, err
+	}
+	return q, true, nil
+}
+
+func (s *Store) DeleteBucketQuota(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(ctx, "bucket_quota", bucketID)
+}
+
+func (s *Store) SetUserQuota(ctx context.Context, userName string, q meta.UserQuota) error {
+	blob, err := meta.EncodeUserQuota(q)
+	if err != nil {
+		return err
+	}
+	return s.s.Query(
+		`INSERT INTO user_quota (user_name, config) VALUES (?, ?)`,
+		userName, blob,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) GetUserQuota(ctx context.Context, userName string) (meta.UserQuota, bool, error) {
+	var blob []byte
+	err := s.s.Query(
+		`SELECT config FROM user_quota WHERE user_name=?`,
+		userName,
+	).WithContext(ctx).Scan(&blob)
+	if errors.Is(err, gocql.ErrNotFound) || (err == nil && len(blob) == 0) {
+		return meta.UserQuota{}, false, nil
+	}
+	if err != nil {
+		return meta.UserQuota{}, false, err
+	}
+	q, err := meta.DecodeUserQuota(blob)
+	if err != nil {
+		return meta.UserQuota{}, false, err
+	}
+	return q, true, nil
+}
+
+func (s *Store) DeleteUserQuota(ctx context.Context, userName string) error {
+	return s.s.Query(
+		`DELETE FROM user_quota WHERE user_name=?`,
+		userName,
+	).WithContext(ctx).Exec()
+}
+
+// GetBucketStats returns the live counter row for the bucket, or zero stats
+// when no row exists yet (the first bump lazily upserts).
+func (s *Store) GetBucketStats(ctx context.Context, bucketID uuid.UUID) (meta.BucketStats, error) {
+	var bytes, objects int64
+	var updated time.Time
+	err := s.s.Query(
+		`SELECT used_bytes, used_objects, updated_at FROM bucket_stats WHERE bucket_id=?`,
+		gocqlUUID(bucketID),
+	).WithContext(ctx).Scan(&bytes, &objects, &updated)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return meta.BucketStats{}, nil
+	}
+	if err != nil {
+		return meta.BucketStats{}, err
+	}
+	return meta.BucketStats{UsedBytes: bytes, UsedObjects: objects, UpdatedAt: updated}, nil
+}
+
+// BumpBucketStats atomically applies (deltaBytes, deltaObjects) to the row.
+// Read-modify-CAS loop with bounded retry: on first call upserts via INSERT
+// IF NOT EXISTS; subsequent bumps re-read + LWT-update IF the prior counter
+// values still match. The IF predicate enforces read-after-write coherence
+// per the LWT gotcha in CLAUDE.md.
+func (s *Store) BumpBucketStats(ctx context.Context, bucketID uuid.UUID, deltaBytes, deltaObjects int64) (meta.BucketStats, error) {
+	const maxAttempts = 32
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		cur, err := s.GetBucketStats(ctx, bucketID)
+		if err != nil {
+			return meta.BucketStats{}, err
+		}
+		next := meta.BucketStats{
+			UsedBytes:   cur.UsedBytes + deltaBytes,
+			UsedObjects: cur.UsedObjects + deltaObjects,
+			UpdatedAt:   time.Now().UTC(),
+		}
+		if cur.UpdatedAt.IsZero() {
+			applied, err := s.s.Query(
+				`INSERT INTO bucket_stats (bucket_id, used_bytes, used_objects, updated_at)
+				   VALUES (?, ?, ?, ?) IF NOT EXISTS`,
+				gocqlUUID(bucketID), next.UsedBytes, next.UsedObjects, next.UpdatedAt,
+			).WithContext(ctx).MapScanCAS(map[string]interface{}{})
+			if err != nil {
+				return meta.BucketStats{}, err
+			}
+			if applied {
+				return next, nil
+			}
+			continue
+		}
+		applied, err := s.s.Query(
+			`UPDATE bucket_stats SET used_bytes=?, used_objects=?, updated_at=?
+			   WHERE bucket_id=? IF used_bytes=? AND used_objects=?`,
+			next.UsedBytes, next.UsedObjects, next.UpdatedAt,
+			gocqlUUID(bucketID), cur.UsedBytes, cur.UsedObjects,
+		).WithContext(ctx).MapScanCAS(map[string]interface{}{})
+		if err != nil {
+			return meta.BucketStats{}, err
+		}
+		if applied {
+			return next, nil
+		}
+	}
+	return meta.BucketStats{}, fmt.Errorf("cassandra: bucket_stats CAS exhausted retries for bucket %s", bucketID)
+}
+
+// WriteUsageAggregate persists one row in the (bucket, storageClass, day)
+// rollup feed (US-008). Day is normalised to UTC midnight before write so
+// gocql's `date` codec round-trips cleanly. A second row is also written to
+// usage_aggregates_classes so ListUserUsage can enumerate the storage
+// classes seen by a bucket without a cluster-wide scan.
+func (s *Store) WriteUsageAggregate(ctx context.Context, agg meta.UsageAggregate) error {
+	day := normalizeUsageDay(agg.Day)
+	computed := agg.ComputedAt
+	if computed.IsZero() {
+		computed = time.Now().UTC()
+	}
+	if err := s.s.Query(
+		`INSERT INTO usage_aggregates (
+			bucket_id, storage_class, day,
+			byte_seconds, object_count_avg, object_count_max, computed_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		gocqlUUID(agg.BucketID), agg.StorageClass, day,
+		agg.ByteSeconds, agg.ObjectCountAvg, agg.ObjectCountMax, computed,
+	).WithContext(ctx).Exec(); err != nil {
+		return err
+	}
+	return s.s.Query(
+		`INSERT INTO usage_aggregates_classes (bucket_id, storage_class) VALUES (?, ?)`,
+		gocqlUUID(agg.BucketID), agg.StorageClass,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) ListUsageAggregates(ctx context.Context, bucketID uuid.UUID, storageClass string, dayFrom, dayTo time.Time) ([]meta.UsageAggregate, error) {
+	from := normalizeUsageDay(dayFrom)
+	to := normalizeUsageDay(dayTo)
+	bucketName := s.bucketNameOrEmpty(bucketID)
+	// Empty storageClass means "all classes recorded for this bucket" — fan
+	// out across the sibling presence index so the caller can render an
+	// operator-facing usage feed without picking a class up front.
+	classes := []string{storageClass}
+	if storageClass == "" {
+		discovered, derr := s.usageStorageClassesForBucket(ctx, bucketID)
+		if derr != nil {
+			return nil, derr
+		}
+		classes = discovered
+	}
+	var out []meta.UsageAggregate
+	for _, cls := range classes {
+		iter := s.s.Query(
+			`SELECT day, byte_seconds, object_count_avg, object_count_max, computed_at
+			   FROM usage_aggregates
+			  WHERE bucket_id=? AND storage_class=? AND day >= ? AND day < ?`,
+			gocqlUUID(bucketID), cls, from, to,
+		).WithContext(ctx).Iter()
+		var day time.Time
+		var byteSeconds, oavg, omax int64
+		var computed time.Time
+		for iter.Scan(&day, &byteSeconds, &oavg, &omax, &computed) {
+			out = append(out, meta.UsageAggregate{
+				BucketID:       bucketID,
+				Bucket:         bucketName,
+				StorageClass:   cls,
+				Day:            day.UTC(),
+				ByteSeconds:    byteSeconds,
+				ObjectCountAvg: oavg,
+				ObjectCountMax: omax,
+				ComputedAt:     computed,
+			})
+		}
+		if err := iter.Close(); err != nil {
+			return nil, err
+		}
+	}
+	if storageClass == "" {
+		sort.Slice(out, func(i, j int) bool {
+			if !out[i].Day.Equal(out[j].Day) {
+				return out[i].Day.Before(out[j].Day)
+			}
+			return out[i].StorageClass < out[j].StorageClass
+		})
+	}
+	return out, nil
+}
+
+func (s *Store) ListUserUsage(ctx context.Context, userName string, dayFrom, dayTo time.Time) ([]meta.UsageAggregate, error) {
+	buckets, err := s.ListBuckets(ctx, userName)
+	if err != nil {
+		return nil, err
+	}
+	type sumKey struct {
+		StorageClass string
+		Day          int64
+	}
+	sums := make(map[sumKey]meta.UsageAggregate)
+	from := normalizeUsageDay(dayFrom)
+	to := normalizeUsageDay(dayTo)
+	for _, b := range buckets {
+		// The (bucket_id, storage_class) partition key forces a per-class
+		// fan-out. Read the usage_aggregates_classes index to discover which
+		// classes a bucket has ever rolled up, then issue one ListUsageAggregates
+		// per (bucket, class). v1 keeps the class set tiny (typically just
+		// STANDARD), so the fan-out is bounded.
+		classes, cerr := s.usageStorageClassesForBucket(ctx, b.ID)
+		if cerr != nil {
+			return nil, cerr
+		}
+		for _, cls := range classes {
+			rows, lerr := s.ListUsageAggregates(ctx, b.ID, cls, from, to)
+			if lerr != nil {
+				return nil, lerr
+			}
+			for _, r := range rows {
+				k := sumKey{StorageClass: r.StorageClass, Day: r.Day.Unix()}
+				acc := sums[k]
+				acc.StorageClass = r.StorageClass
+				acc.Day = r.Day
+				acc.ByteSeconds += r.ByteSeconds
+				acc.ObjectCountAvg += r.ObjectCountAvg
+				if r.ObjectCountMax > acc.ObjectCountMax {
+					acc.ObjectCountMax = r.ObjectCountMax
+				}
+				if r.ComputedAt.After(acc.ComputedAt) {
+					acc.ComputedAt = r.ComputedAt
+				}
+				sums[k] = acc
+			}
+		}
+	}
+	out := make([]meta.UsageAggregate, 0, len(sums))
+	for _, v := range sums {
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Day.Equal(out[j].Day) {
+			return out[i].Day.Before(out[j].Day)
+		}
+		return out[i].StorageClass < out[j].StorageClass
+	})
+	return out, nil
+}
+
+// usageStorageClassesForBucket returns the distinct storage classes that
+// have ever been rolled up for bucketID. Backed by the
+// usage_aggregates_classes index table that WriteUsageAggregate maintains
+// alongside the main rollup row.
+func (s *Store) usageStorageClassesForBucket(ctx context.Context, bucketID uuid.UUID) ([]string, error) {
+	iter := s.s.Query(
+		`SELECT storage_class FROM usage_aggregates_classes WHERE bucket_id=?`,
+		gocqlUUID(bucketID),
+	).WithContext(ctx).Iter()
+	defer iter.Close()
+	var out []string
+	var cls string
+	for iter.Scan(&cls) {
+		out = append(out, cls)
+	}
+	if err := iter.Close(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *Store) bucketNameOrEmpty(bucketID uuid.UUID) string {
+	s.bucketNamesMu.RLock()
+	name, ok := s.bucketNames[bucketID]
+	s.bucketNamesMu.RUnlock()
+	if ok {
+		return name
+	}
+	return ""
+}
+
+func normalizeUsageDay(t time.Time) time.Time {
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
 }
 
 func (s *Store) SetBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string, blob []byte) error {

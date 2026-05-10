@@ -303,9 +303,30 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 	if err = txn.LockKeys(ctx, objKey); err != nil {
 		return nil, err
 	}
+	// Capture prior latest (if any) before deleting versions, so the
+	// bucket_stats bump can subtract the replaced bytes on unversioned
+	// completion.
+	var prior *meta.Object
 	if !versioned {
-		if err = deleteAllVersions(ctx, txn, obj.BucketID, obj.Key); err != nil {
+		prefix := append(ObjectPrefixWithKey(obj.BucketID, obj.Key), 0x00, 0x00)
+		end := prefixEnd(prefix)
+		objPairs, perr := txn.Scan(ctx, prefix, end, 0)
+		if perr != nil {
+			err = perr
 			return nil, err
+		}
+		if len(objPairs) > 0 {
+			p, derr := decodeObject(objPairs[0].Value)
+			if derr != nil {
+				err = derr
+				return nil, err
+			}
+			prior = p
+		}
+		for _, p := range objPairs {
+			if err = txn.Delete(p.Key); err != nil {
+				return nil, err
+			}
 		}
 	}
 	objPayload, err := encodeObject(obj)
@@ -327,6 +348,13 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 
 	if err = txn.Commit(ctx); err != nil {
 		return nil, err
+	}
+
+	deltaBytes, deltaObjects := bucketStatsDelta(prior, obj)
+	if deltaBytes != 0 || deltaObjects != 0 {
+		if _, berr := s.BumpBucketStats(ctx, obj.BucketID, deltaBytes, deltaObjects); berr != nil {
+			return orphans, berr
+		}
 	}
 
 	for num, p := range stored {
