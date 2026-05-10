@@ -254,3 +254,21 @@ target identity, so a single scrape job is sufficient.
    (none of them exposed traffic; they were daemons-only).
 6. Run `strata-admin rewrap` as a Job the next time you rotate the SSE
    master key — the legacy `strata-rewrap` Deployment is no longer needed.
+
+## Non-Goals
+
+The two-binary rule (`strata` + `strata-admin`) covers the production
+artifacts that ship in the runtime image. Developer / CI tools live
+under `cmd/` too but are explicitly out of scope for the consolidation
+goal:
+
+- **`cmd/strata-racecheck`** — the duration-bounded race-harness driver
+  used by `make race-soak` and the nightly CI workflow. It is built from
+  the standard `make build` target so operators can package it
+  alongside `strata` for soak runs, but it is not a daemon, has no
+  `/readyz`, and is never deployed as part of a production stack. It
+  does not count as a third production binary.
+
+When adding a similar developer/CI tool in the future, document the
+exception here so the rule stays explicit and reviewers don't have to
+re-derive intent from `cmd/` directory contents.

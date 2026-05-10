@@ -1,0 +1,90 @@
+name: Race nightly
+
+# Nightly race-soak run (US-007). Drives `make race-soak` against the
+# `ci`-profile compose stack on a free `ubuntu-latest` runner. NOT triggered
+# on pull_request: nightly schedule + manual workflow_dispatch only.
+
+on:
+  schedule:
+    # 03:00 UTC daily. Free runners + 90 min budget per run.
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Race-soak duration (Go duration string, e.g. 1h, 30m)'
+        required: false
+        default: '1h'
+      concurrency:
+        description: 'Concurrent workers (harness caps at 64)'
+        required: false
+        default: '32'
+
+permissions:
+  contents: read
+
+# Single in-flight run; a manual dispatch cancels the running scheduled job.
+concurrency:
+  group: race-nightly
+  cancel-in-progress: true
+
+jobs:
+  race-soak:
+    name: Race soak (ubuntu-latest, ci profile)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CI: 'true'
+      STRATA_AUTH_MODE: required
+      STRATA_STATIC_CREDENTIALS: strataAK:strataSK:strata
+      AWS_ACCESS_KEY_ID: strataAK
+      AWS_SECRET_ACCESS_KEY: strataSK
+      AWS_DEFAULT_REGION: us-east-1
+      RACE_DURATION: ${{ github.event.inputs.duration || '1h' }}
+      RACE_CONCURRENCY: ${{ github.event.inputs.concurrency || '32' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Build gateway image
+        run: |
+          make docker-build
+          docker build -f deploy/docker/ceph-bootstrap/Dockerfile -t strata-ceph:local deploy/docker/ceph-bootstrap
+
+      - name: Build strata-racecheck binary
+        # Pre-built so `make race-soak`'s `: build` dep (which pulls in
+        # web-build/pnpm) is bypassed — the script picks up the cached
+        # binary in bin/ via its `if [[ ! -x ]]` guard.
+        run: go build -o bin/strata-racecheck ./cmd/strata-racecheck
+
+      - name: Run race-soak
+        run: bash scripts/racecheck/run.sh
+
+      - name: Summarise report
+        if: always()
+        run: |
+          if [ -x scripts/racecheck/summarize.sh ]; then
+            bash scripts/racecheck/summarize.sh || true
+          fi
+          if [ -f report/SUMMARY.md ]; then
+            cat report/SUMMARY.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "# Race soak (no SUMMARY.md emitted)"
+              echo
+              echo "scripts/racecheck/summarize.sh did not produce report/SUMMARY.md."
+              echo "See the run.sh logs and the artefact for raw report/race.jsonl."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload report artefact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: race-nightly-${{ github.run_id }}
+          path: report/
+          if-no-files-found: warn
+          retention-days: 30

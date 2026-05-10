@@ -29,13 +29,15 @@ adding more, prove what is there.
   manifest-rewriter) selected via `STRATA_WORKERS=`. Each worker keeps its own
   `internal/leader` lease keyed on `<name>-leader`. SSE master-key rotation moved to
   `strata-admin rewrap`. One Docker image, one compose service. (commit `ae4e338`)
-- **P1 — Race harness as a real test, not a gate.** `internal/s3api/race_test.go`
-  exists as an integration scenario (drives mixed PUT/GET/DELETE/multipart concurrency),
-  but the dedicated `internal/racetest` package + `cmd/strata-racecheck` binary
-  outlined in `tasks/prd-race-harness.md` were never shipped. Land the duration-bounded
-  binary, run it ≥1 h against Cassandra+RADOS, record observed inconsistencies (or
-  zero, with the workload that proves it). Add the run to CI on a nightly schedule
-  so regressions surface.
+- ~~**P1 — Race harness as a real test, not a gate.**~~ — **Done.** Carved
+  out `internal/racetest`, shipped `cmd/strata-racecheck` standalone binary,
+  extended the workload to multipart + versioning + conditional + DeleteObjects
+  with read-after-write + listing-convergence + version-monotonicity oracles,
+  added the memory-tuned `ci`-profile compose stack (`make up-all-ci`),
+  wired `make race-soak` + `scripts/racecheck/{run,summarize}.sh`, and
+  scheduled `.github/workflows/race-nightly.yml` (03:00 UTC, ubuntu-latest,
+  90 min budget). Zero-inconsistency baseline recorded at
+  `docs/racecheck/baseline-2026-05.md`. (commit `3c04a05`)
 - ~~**P1 — s3-tests 80% → 90%+.**~~ — **Done.** Lifted to **91.5% (162/177)** by the
   `ralph/s3-compat-95` cycle (US-001..US-006 — multipart copy range-parser + special-char
   URL handling, ?partNumber=N GET wire shape flipped to whole-object multipart ETag,

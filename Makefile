@@ -1,7 +1,7 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-tikv up-lab-tikv up-lab-tikv-3 down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv race-soak-tikv lint-nginx-lab bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi docs-serve docs-build clean
+.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-all-ci up-tikv up-lab-tikv up-lab-tikv-3 down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv race-soak race-soak-tikv lint-nginx-lab bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi docs-serve docs-build clean
 
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
@@ -11,6 +11,7 @@ GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 build: web-build
 	go build -o bin/strata ./cmd/strata
 	go build -o bin/strata-admin ./cmd/strata-admin
+	go build -o bin/strata-racecheck ./cmd/strata-racecheck
 
 web-build:
 	cd web && pnpm install --frozen-lockfile && pnpm run build
@@ -63,6 +64,17 @@ up:
 up-all:
 	$(COMPOSE) up -d cassandra ceph strata prometheus grafana
 
+# CI-trimmed stack for the nightly race-soak workflow (US-005). Layers the
+# `docker-compose.ci.yml` override on top of the base file: caps Ceph's
+# memstore + osd_memory_target at 1 GiB, raises Cassandra heap to 2G/400M,
+# disables the Ceph mgr dashboard module, and skips Prometheus + Grafana
+# (gated behind the `full` profile in the override). The `--profile ci`
+# flag is decorative for the explicit service list — it preserves the spec
+# command shape and leaves room for future ci-only services.
+# Existing `make up-all` is unchanged (does not load the override).
+up-all-ci:
+	docker compose -f deploy/docker/docker-compose.yml -f deploy/docker/docker-compose.ci.yml --profile ci up -d cassandra ceph strata
+
 # Bring up the TiKV-backed gateway stack (PD + TiKV + ceph + strata-tikv +
 # observability). Mutually exclusive with `up-all` in practice — running both
 # at once works (different host ports) but the cassandra service goes idle.
@@ -94,6 +106,15 @@ wait-cassandra:
 	@echo "waiting for cassandra to report healthy..."
 	@until [ "$$($(COMPOSE) ps --format '{{.Health}}' cassandra)" = "healthy" ]; do sleep 3; done
 	@echo "cassandra ready"
+
+# Wait for the cassandra-backed strata gateway to report ready on /readyz.
+# Used by the CI race-soak driver script (scripts/racecheck/run.sh, US-006)
+# after `make up-all-ci`. Ceiling 8 min on cold ubuntu-latest pulls per
+# US-005 acceptance; the smoke step in the workflow times out at 10 min.
+wait-strata:
+	@echo "waiting for strata /readyz on 9999..."
+	@until [ "$$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:9999/readyz)" = "200" ]; do sleep 2; done
+	@echo "strata ready"
 
 wait-ceph:
 	@echo "waiting for ceph to report healthy..."
@@ -186,6 +207,24 @@ smoke-grafana:
 # See scripts/multi-replica-smoke.sh for scenario coverage.
 smoke-lab-tikv:
 	bash scripts/multi-replica-smoke.sh
+
+# Race-soak driver (US-006). Brings up the cassandra-backed stack
+# (`make up-all-ci` when CI=true, else `make up-all`), waits for /readyz on
+# 9999, then runs `bin/strata-racecheck` for RACE_DURATION (default 1h) at
+# RACE_CONCURRENCY (default 32). The harness caps --concurrency at 64 and
+# refuses to start above that.
+#
+# Captures pre/post `df -h /` + `free -m` into report/host.txt and per-
+# container docker logs (strata, strata-cassandra, strata-ceph) into
+# report/. Exits with the harness's exit code (0 clean / 1 inconsistencies
+# / 2 setup-failure) so the nightly workflow (US-007) can flip the badge
+# distinctly per outcome.
+#
+# Override RACE_DURATION / RACE_CONCURRENCY / RACE_BUCKETS /
+# RACE_KEYS_PER_BUCKET / RACE_ENDPOINT via env. STACK_UP=0 skips the stack
+# bring-up so an operator can re-drive an already-running gateway.
+race-soak: build
+	bash scripts/racecheck/run.sh
 
 # Race-soak the TiKV-backed gateway: brings up a PD + TiKV pair via
 # testcontainers (or uses STRATA_TIKV_TEST_PD_ENDPOINTS for an

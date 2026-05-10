@@ -149,6 +149,18 @@ done
 ceph config set mon auth_allow_insecure_global_id_reclaim false 2>/dev/null || true
 ceph mon enable-msgr2 2>/dev/null || true
 
+# CI memory tuning (deploy/docker/docker-compose.ci.yml). Both knobs default
+# to unset on the developer stack so behaviour matches the upstream image;
+# the CI override sets them explicitly to fit ubuntu-latest's 7 GB budget.
+if [ -n "${OSD_MEMORY_TARGET:-}" ]; then
+  echo "bootstrap: setting osd_memory_target=${OSD_MEMORY_TARGET}"
+  ceph config set osd osd_memory_target "${OSD_MEMORY_TARGET}" 2>/dev/null || true
+fi
+if [ "${MGR_DASHBOARD_DISABLE:-0}" = "1" ]; then
+  echo "bootstrap: disabling mgr dashboard module"
+  ceph mgr module disable dashboard 2>/dev/null || true
+fi
+
 echo "bootstrap: cluster ready"
 ceph -s
 

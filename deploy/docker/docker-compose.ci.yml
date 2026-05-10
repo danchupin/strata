@@ -1,0 +1,56 @@
+# CI override for the race-soak harness (US-005). Loaded ON TOP of the base
+# deploy/docker/docker-compose.yml — adjusts memory knobs so the full stack
+# (cassandra + ceph + strata) fits inside the ubuntu-latest budget (2 vCPU /
+# 7 GB RAM / 14 GB SSD) and disables the prometheus + grafana side-cars that
+# the nightly race-soak workflow does not consume.
+#
+# Bring up via `make up-all-ci`, which expands to:
+#   docker compose -f deploy/docker/docker-compose.yml \
+#                  -f deploy/docker/docker-compose.ci.yml \
+#                  --profile ci up -d cassandra ceph strata
+#
+# Validates with `docker compose -f docker-compose.yml -f docker-compose.ci.yml config -q`.
+# Existing `make up-all` does NOT load this override — full-fat developer
+# stack stays unchanged.
+#
+# Knob rationale:
+#   - Cassandra MAX_HEAP_SIZE=2G / HEAP_NEWSIZE=400M: bumped from the local-dev
+#     1G/128M because the ≥1h race-soak workload sustains 200-500 ops/sec
+#     against LWT hot paths; 1G heap GCs into starvation at that rate.
+#   - Ceph MEMSTORE_BYTES=1 GiB: caps the memstore-OSD's in-memory device size
+#     (vs the 4 GiB local-dev default). Race-soak writes ~1-3 GB total; 1 GiB
+#     is plenty since chunks are GC'd on object delete.
+#   - Ceph OSD_MEMORY_TARGET=1 GiB: applied via `ceph config set osd
+#     osd_memory_target` in the bootstrap; covers OSD cache budget on top of
+#     the memstore device cap.
+#   - Ceph MGR_DASHBOARD_DISABLE=1: disable the dashboard mgr module (idle ~80
+#     MB RSS); not consumed by the race harness.
+#   - prometheus + grafana moved to `full` profile so `--profile ci` skips
+#     them. Saves ~450 MB RSS combined.
+#
+# Idle stack RSS budget post-readyz pre-load (target ≤ 5 GB total):
+#   cassandra ~2.3 GB · ceph ~1.4 GB · strata ~0.2 GB · overhead ~0.5 GB ≈ 4.4 GB.
+
+services:
+  cassandra:
+    environment:
+      MAX_HEAP_SIZE: 2G
+      HEAP_NEWSIZE: 400M
+
+  ceph:
+    environment:
+      MON_NAME: ceph
+      MEMSTORE_BYTES: "1073741824"
+      OSD_MEMORY_TARGET: "1073741824"
+      MGR_DASHBOARD_DISABLE: "1"
+      STRATA_POOL: strata.rgw.buckets.data
+      STRATA_EXTRA_POOLS: "strata.rgw.buckets.ia strata.rgw.buckets.cold"
+
+  # Prometheus + Grafana are gated behind the `full` profile in this override
+  # so `--profile ci` skips them. The base compose leaves them profile-less,
+  # so `make up-all` (which does NOT load this override) keeps them on.
+  prometheus:
+    profiles: ["full"]
+
+  grafana:
+    profiles: ["full"]

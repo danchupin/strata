@@ -1081,17 +1081,21 @@ func (s *Store) ScanObjects(ctx context.Context, bucketID uuid.UUID, opts meta.L
 }
 
 func (s *Store) ListObjects(ctx context.Context, bucketID uuid.UUID, opts meta.ListOptions) (*meta.ListResult, error) {
+	// Hold RLock through the entire scan: PutObject mutates the head
+	// version in place (e.g. flipping IsLatest=false), so any read of
+	// versions[0] without the lock is racy. Memory backend is test-
+	// only — list throughput matters less than parity with the strict
+	// concurrency contract.
 	s.mu.RLock()
+	defer s.mu.RUnlock()
 	bucket, ok := s.objects[bucketID]
 	if !ok {
-		s.mu.RUnlock()
 		return nil, meta.ErrBucketNotFound
 	}
 	keys := make([]string, 0, len(bucket))
 	for k := range bucket {
 		keys = append(keys, k)
 	}
-	s.mu.RUnlock()
 	sort.Strings(keys)
 
 	limit := opts.Limit
@@ -1109,9 +1113,7 @@ func (s *Store) ListObjects(ctx context.Context, bucketID uuid.UUID, opts meta.L
 		if opts.Prefix != "" && !strings.HasPrefix(k, opts.Prefix) {
 			continue
 		}
-		s.mu.RLock()
 		versions := bucket[k]
-		s.mu.RUnlock()
 		if len(versions) == 0 || versions[0].IsDeleteMarker {
 			continue
 		}
@@ -1166,17 +1168,20 @@ func (s *Store) AllObjectVersions(bucketID uuid.UUID) []*meta.Object {
 }
 
 func (s *Store) ListObjectVersions(ctx context.Context, bucketID uuid.UUID, opts meta.ListOptions) (*meta.ListVersionsResult, error) {
+	// Hold the read lock across the full scan. Concurrent PutObject
+	// calls mutate per-key version slices in place (IsLatest flip on
+	// the previous head), so reading versions[i] after dropping the
+	// lock is racy under -race — same fix shape as ListObjects.
 	s.mu.RLock()
+	defer s.mu.RUnlock()
 	bucket, ok := s.objects[bucketID]
 	if !ok {
-		s.mu.RUnlock()
 		return nil, meta.ErrBucketNotFound
 	}
 	keys := make([]string, 0, len(bucket))
 	for k := range bucket {
 		keys = append(keys, k)
 	}
-	s.mu.RUnlock()
 	sort.Strings(keys)
 
 	limit := opts.Limit
@@ -1205,9 +1210,7 @@ func (s *Store) ListObjectVersions(ctx context.Context, bucketID uuid.UUID, opts
 				continue
 			}
 		}
-		s.mu.RLock()
 		versions := bucket[k]
-		s.mu.RUnlock()
 		for i, v := range versions {
 			cp := *v
 			cp.IsLatest = (i == 0)
