@@ -33,8 +33,8 @@
         "Tests pass (`go test ./...`)"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Cassandra impl + bucket_quota / user_quota tables landed together with US-001 (cross-backend lockstep). Integration verification: BucketQuotaRoundTrip + UserQuotaRoundTrip green against cassandra:5.0 testcontainer (DOCKER_HOST=lima + TESTCONTAINERS_RYUK_DISABLED=true on macOS+Lima per known reaper-mount issue). New tables follow the per-bucket-blob convention (separate table per kind) instead of a hypothetical single shared blob table — matches every other bucket-config table in the schema."
     },
     {
       "id": "US-003",

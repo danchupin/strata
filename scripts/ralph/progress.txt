@@ -38,3 +38,14 @@ Cycle: ralph/bucket-quotas-billing
   - For user-scoped configs there is no shared helper; each backend has 3 small inline methods (Set/Get/Delete) keyed by userName.
   - Cassandra integration tests + TiKV integration tests run under `-tags integration`; default `go test ./...` only exercises the memory contract suite. The cassandra/tikv quota impls are wired but their integration coverage is US-002 / US-003's job.
 ---
+
+## 2026-05-10 - US-002
+- Cassandra Quota CRUD already landed with US-001 (cross-backend lockstep). This story confirmed the integration suite is green on cassandra:5.0 and flipped passes:true.
+- Verification: `go vet ./...` clean; `go test ./...` clean; `go test -tags integration -run 'TestCassandraStoreContract/(BucketQuotaRoundTrip|UserQuotaRoundTrip)'` green.
+- macOS+Lima testcontainer gotcha: testcontainers reaper fails to mount the docker socket from `~/.lima/<vm>/sock/docker.sock`. Workaround: `DOCKER_HOST=unix:///Users/<u>/.lima/<vm>/sock/docker.sock TESTCONTAINERS_RYUK_DISABLED=true`. CI runs on Linux runners and is unaffected.
+- Files changed: `scripts/ralph/prd.json` (passes flip + notes), `scripts/ralph/progress.txt` (this entry).
+- **Learnings for future iterations:**
+  - Contract test additions to `storetest.Run()` automatically cover both cassandra + tikv integration suites when their tests register a factory through `storetest.Run` — no need for backend-specific test files unless the assertion is backend-shape-specific.
+  - macOS+Lima dev loop: any `make test-integration` run needs `TESTCONTAINERS_RYUK_DISABLED=true` (CLAUDE.md already names the lima `DOCKER_HOST` quirk; reaper-mount is the second half of the same hazard).
+  - Per-bucket / per-user blob configs in cassandra prefer "one dedicated table per kind" (matches every other bucket_* table) over a single shared `bucket_blob{kind}` shape. Schema simplicity wins over normalisation here; storage cost is trivial and the explicit table makes ops queries (DESCRIBE / size-by-table) clearer.
+---
