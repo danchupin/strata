@@ -1,7 +1,7 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-all-ci up-tikv up-lab-tikv up-lab-tikv-3 down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv race-soak-tikv lint-nginx-lab bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi docs-serve docs-build clean
+.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-all-ci up-tikv up-lab-tikv up-lab-tikv-3 down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv race-soak race-soak-tikv lint-nginx-lab bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi docs-serve docs-build clean
 
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
@@ -207,6 +207,24 @@ smoke-grafana:
 # See scripts/multi-replica-smoke.sh for scenario coverage.
 smoke-lab-tikv:
 	bash scripts/multi-replica-smoke.sh
+
+# Race-soak driver (US-006). Brings up the cassandra-backed stack
+# (`make up-all-ci` when CI=true, else `make up-all`), waits for /readyz on
+# 9999, then runs `bin/strata-racecheck` for RACE_DURATION (default 1h) at
+# RACE_CONCURRENCY (default 32). The harness caps --concurrency at 64 and
+# refuses to start above that.
+#
+# Captures pre/post `df -h /` + `free -m` into report/host.txt and per-
+# container docker logs (strata, strata-cassandra, strata-ceph) into
+# report/. Exits with the harness's exit code (0 clean / 1 inconsistencies
+# / 2 setup-failure) so the nightly workflow (US-007) can flip the badge
+# distinctly per outcome.
+#
+# Override RACE_DURATION / RACE_CONCURRENCY / RACE_BUCKETS /
+# RACE_KEYS_PER_BUCKET / RACE_ENDPOINT via env. STACK_UP=0 skips the stack
+# bring-up so an operator can re-drive an already-running gateway.
+race-soak: build
+	bash scripts/racecheck/run.sh
 
 # Race-soak the TiKV-backed gateway: brings up a PD + TiKV pair via
 # testcontainers (or uses STRATA_TIKV_TEST_PD_ENDPOINTS for an

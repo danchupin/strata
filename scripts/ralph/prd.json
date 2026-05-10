@@ -107,8 +107,8 @@
         "Tests pass"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added scripts/racecheck/run.sh + Makefile race-soak target. Script idempotently scrubs report/ (rm -rf + mkdir), builds bin/strata-racecheck if missing, conditionally brings up the stack (CI=true → make up-all-ci, else make up-all; STACK_UP=0 skips bring-up for operator iteration), polls /readyz on RACE_ENDPOINT (default http://localhost:9999) with READYZ_TIMEOUT_SEC ceiling (default 600s), invokes bin/strata-racecheck with --duration=${RACE_DURATION:-1h} --concurrency=${RACE_CONCURRENCY:-32} --buckets=${RACE_BUCKETS:-4} --keys-per-bucket=${RACE_KEYS_PER_BUCKET:-32} --report=report/race.jsonl. Pipes through tee report/race.stdout.log; PIPESTATUS[0] preserves the harness exit code so race-soak exits 0/1/2 per the harness contract. snapshot_host pre-readyz / pre-load / post-load writes df -h / + free -m sections into report/host.txt (free unavailable on macOS gracefully reported). dump_container_logs writes docker logs strata / strata-cassandra / strata-ceph into report/<name>.log; missing-container failures degrade to a warning, never fail the script. Concurrency >64 cap enforced by the harness itself (internal/racetest.MaxConcurrency=64; runner.go rejects with exit 2). Makefile race-soak target depends on `build` so a fresh checkout produces bin/strata-racecheck before invocation. SigV4 creds default to AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY env or strataAK/strataSK fallback so the script Just Works against the dev compose stack (which boots with the same defaults)."
     },
     {
       "id": "US-007",
