@@ -2,6 +2,9 @@ package racetest
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"math/rand"
@@ -82,6 +85,7 @@ type workerCtx struct {
 	objectKeys     int
 	streamingRatio float64
 	bump           func(string)
+	tracker        *Tracker
 }
 
 // runOnce dispatches a single op of the picked class. Counter bump is
@@ -89,6 +93,11 @@ type workerCtx struct {
 // attempted", since failures are also evidence the workload exercised
 // that class. Multipart bumps only on a fully-completed cycle to keep
 // parity with the pre-US-003 counter.
+//
+// Successful state-changing ops feed the Tracker (US-004): PUT /
+// conditional PUT / multipart Complete record (etag, version_id, size);
+// DELETE records a single-key tombstone; DeleteObjects parses the
+// response <Deleted> entries and records them as a batch.
 func (w *workerCtx) runOnce(workerID, iter int, rng *rand.Rand, class string) {
 	bucket := w.buckets[rng.Intn(len(w.buckets))]
 	key := fmt.Sprintf("k-%d", rng.Intn(w.objectKeys))
@@ -96,10 +105,16 @@ func (w *workerCtx) runOnce(workerID, iter int, rng *rand.Rand, class string) {
 	switch class {
 	case OpPut:
 		body := []byte(fmt.Sprintf("w%d-i%d", workerID, iter))
+		w.recordIntent(bucket, key, body)
 		streaming := w.shouldStream(rng)
+		var status int
+		var hdr http.Header
 		w.runOp(workerID, OpPut, bucket, key, func() (int, error) {
-			return w.doPUTBody(path, body, streaming, nil)
+			s, h, e := w.doPUTBody(path, body, streaming, nil)
+			status, hdr = s, h
+			return s, e
 		})
+		w.recordPutIfOK(bucket, key, status, hdr, int64(len(body)))
 		w.bump(OpPut)
 	case OpGet:
 		w.runOp(workerID, OpGet, bucket, key, func() (int, error) {
@@ -107,9 +122,15 @@ func (w *workerCtx) runOnce(workerID, iter int, rng *rand.Rand, class string) {
 		})
 		w.bump(OpGet)
 	case OpDelete:
+		var status int
 		w.runOp(workerID, OpDelete, bucket, key, func() (int, error) {
-			return doSigned(w.ctx, w.client, w.sgn, w.endpoint, "DELETE", path, nil)
+			s, e := doSigned(w.ctx, w.client, w.sgn, w.endpoint, "DELETE", path, nil)
+			status = s
+			return s, e
 		})
+		if w.tracker != nil && (status == http.StatusNoContent || status == http.StatusOK) {
+			w.tracker.RecordDelete(bucket, key, time.Now().UTC())
+		}
 		w.bump(OpDelete)
 	case OpList:
 		// ListObjectsV2 with a small max-keys to keep the response
@@ -121,7 +142,11 @@ func (w *workerCtx) runOnce(workerID, iter int, rng *rand.Rand, class string) {
 		})
 		w.bump(OpList)
 	case OpMultipart:
-		if doMultipartCycle(w.ctx, w.sink, w.client, w.sgn, w.endpoint, bucket, key, workerID, iter) {
+		ok, etag, vid, size := doMultipartCycle(w.ctx, w.sink, w.client, w.sgn, w.endpoint, bucket, key, workerID, iter)
+		if ok {
+			if w.tracker != nil {
+				w.tracker.RecordPut(bucket, key, etag, vid, size, time.Now().UTC())
+			}
 			w.bump(OpMultipart)
 		}
 	case OpVersioningFlip:
@@ -140,11 +165,17 @@ func (w *workerCtx) runOnce(workerID, iter int, rng *rand.Rand, class string) {
 		w.bump(OpVersioningFlip)
 	case OpConditionalPut:
 		body := []byte(fmt.Sprintf("cw%d-i%d", workerID, iter))
+		w.recordIntent(bucket, key, body)
 		streaming := w.shouldStream(rng)
 		headers := http.Header{"If-None-Match": []string{"*"}}
+		var status int
+		var hdr http.Header
 		w.runOp(workerID, OpConditionalPut, bucket, key, func() (int, error) {
-			return w.doPUTBody(path, body, streaming, headers)
+			s, h, e := w.doPUTBody(path, body, streaming, headers)
+			status, hdr = s, h
+			return s, e
 		})
+		w.recordPutIfOK(bucket, key, status, hdr, int64(len(body)))
 		w.bump(OpConditionalPut)
 	case OpDeleteObjects:
 		// Pick up to 4 keys from the per-bucket pool. Quiet=false so the
@@ -160,6 +191,7 @@ func (w *workerCtx) runOnce(workerID, iter int, rng *rand.Rand, class string) {
 			n = 1
 		}
 		seen := make(map[int]struct{}, n)
+		picked := make([]string, 0, n)
 		var sb strings.Builder
 		sb.WriteString("<Delete>")
 		for len(seen) < n {
@@ -168,16 +200,60 @@ func (w *workerCtx) runOnce(workerID, iter int, rng *rand.Rand, class string) {
 				continue
 			}
 			seen[idx] = struct{}{}
-			fmt.Fprintf(&sb, "<Object><Key>k-%d</Key></Object>", idx)
+			k := fmt.Sprintf("k-%d", idx)
+			picked = append(picked, k)
+			fmt.Fprintf(&sb, "<Object><Key>%s</Key></Object>", k)
 		}
 		sb.WriteString("</Delete>")
 		body := []byte(sb.String())
 		delPath := "/" + bucket + "?delete"
+		var status int
+		var respBody []byte
 		w.runOp(workerID, OpDeleteObjects, bucket, "", func() (int, error) {
-			return doSigned(w.ctx, w.client, w.sgn, w.endpoint, "POST", delPath, body)
+			b, s, e := doSignedRead(w.ctx, w.client, w.sgn, w.endpoint, "POST", delPath, body)
+			status, respBody = s, b
+			return s, e
 		})
+		if w.tracker != nil && status == http.StatusOK {
+			deleted := parseDeleteResultKeys(respBody)
+			if len(deleted) == 0 {
+				// Some servers (Quiet=false but no body) may not echo
+				// the deleted set; fall back to the requested set so
+				// the grace window still ticks for those keys.
+				deleted = picked
+			}
+			w.tracker.RecordBatchDelete(bucket, deleted, time.Now().UTC())
+		}
 		w.bump(OpDeleteObjects)
 	}
+}
+
+// recordPutIfOK feeds a successful PUT response (status 200 with an
+// Etag header) into the tracker. Body size is the wire-payload length
+// supplied by the caller; etag is normalised by stripping the AWS-spec
+// surrounding quotes.
+func (w *workerCtx) recordPutIfOK(bucket, key string, status int, hdr http.Header, size int64) {
+	if w.tracker == nil || status != http.StatusOK || hdr == nil {
+		return
+	}
+	etag := strings.Trim(hdr.Get("Etag"), `"`)
+	vid := hdr.Get("X-Amz-Version-Id")
+	if etag == "" {
+		return
+	}
+	w.tracker.RecordPut(bucket, key, etag, vid, size, time.Now().UTC())
+}
+
+// recordIntent pre-registers the md5-of-body etag the workload is
+// about to PUT, so the verifier's read-after-write oracle does not
+// false-flag a peer worker's just-landed response while that worker
+// is mid-flight between response delivery and tracker.RecordPut.
+func (w *workerCtx) recordIntent(bucket, key string, body []byte) {
+	if w.tracker == nil {
+		return
+	}
+	sum := md5.Sum(body)
+	w.tracker.RecordIntent(bucket, key, hex.EncodeToString(sum[:]), int64(len(body)))
 }
 
 // shouldStream returns true when this body-carrying op should take the
@@ -193,11 +269,13 @@ func (w *workerCtx) shouldStream(rng *rand.Rand) bool {
 // doPUTBody dispatches a PUT with body via either the streaming-SigV4
 // path or the pre-computed-SHA fixed-payload path, selected by
 // `streaming`. Extra headers (e.g. If-None-Match) are merged before
-// signing so they are covered by the signature.
-func (w *workerCtx) doPUTBody(path string, body []byte, streaming bool, extra http.Header) (int, error) {
+// signing so they are covered by the signature. The response headers
+// are cloned and returned so the caller can extract Etag and
+// X-Amz-Version-Id for the Tracker.
+func (w *workerCtx) doPUTBody(path string, body []byte, streaming bool, extra http.Header) (int, http.Header, error) {
 	req, err := http.NewRequestWithContext(w.ctx, "PUT", w.endpoint+path, nil)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	for k, vs := range extra {
 		for _, v := range vs {
@@ -207,11 +285,11 @@ func (w *workerCtx) doPUTBody(path string, body []byte, streaming bool, extra ht
 	if w.sgn != nil {
 		if streaming {
 			if err := w.sgn.signStreaming(w.ctx, req, body); err != nil {
-				return 0, err
+				return 0, nil, err
 			}
 		} else {
 			if err := w.sgn.sign(w.ctx, req, body); err != nil {
-				return 0, err
+				return 0, nil, err
 			}
 		}
 	} else if body != nil {
@@ -220,11 +298,12 @@ func (w *workerCtx) doPUTBody(path string, body []byte, streaming bool, extra ht
 	}
 	resp, err := w.client.Do(req)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
+	headers := resp.Header.Clone()
 	status := resp.StatusCode
 	DrainBody(resp)
-	return status, nil
+	return status, headers, nil
 }
 
 // runOp wraps a single HTTP op with op_started + op_done events. The
@@ -281,9 +360,12 @@ func doSigned(ctx context.Context, client *http.Client, sgn *signer, endpoint, m
 }
 
 // doMultipartCycle runs Create+UploadPart+Complete (or aborts on
-// failure). Returns true on a fully-completed cycle so the caller bumps
-// the multipart op counter only on the success path.
-func doMultipartCycle(ctx context.Context, sink EventSink, client *http.Client, sgn *signer, endpoint, bucket, key string, workerID, iter int) bool {
+// failure). On a fully-completed cycle it returns ok=true plus the
+// final-object ETag (from the CompleteMultipartUploadResult body), the
+// X-Amz-Version-Id header (empty if versioning is suspended), and the
+// total wire-payload size — all three needed by the Tracker to record
+// the resulting object for the read-after-write oracle.
+func doMultipartCycle(ctx context.Context, sink EventSink, client *http.Client, sgn *signer, endpoint, bucket, key string, workerID, iter int) (bool, string, string, int64) {
 	path := "/" + bucket + "/" + key
 	cycleStart := time.Now().UTC()
 	sink.Emit(Event{Event: "op_started", Timestamp: cycleStart, WorkerID: workerID, Class: OpMultipart, Bucket: bucket, Key: key})
@@ -309,12 +391,12 @@ func doMultipartCycle(ctx context.Context, sink EventSink, client *http.Client, 
 	initBody, status, err := doSignedRead(ctx, client, sgn, endpoint, "POST", path+"?uploads", nil)
 	if err != nil || status != http.StatusOK {
 		finishDone(status, err)
-		return false
+		return false, "", "", 0
 	}
 	mm := uploadIDRE.FindStringSubmatch(string(initBody))
 	if len(mm) != 2 {
 		finishDone(status, fmt.Errorf("multipart: missing UploadId"))
-		return false
+		return false, "", "", 0
 	}
 	uploadID := mm[1]
 	abort := func() {
@@ -325,28 +407,68 @@ func doMultipartCycle(ctx context.Context, sink EventSink, client *http.Client, 
 	partBody := []byte(fmt.Sprintf("part-w%d-i%d", workerID, iter))
 	partResp, partStatus, partErr := doSignedReadResp(ctx, client, sgn, endpoint, "PUT",
 		fmt.Sprintf("%s?uploadId=%s&partNumber=1", path, uploadID), partBody)
-	var etag string
+	var partETag string
 	if partResp != nil {
-		etag = strings.Trim(partResp.Header.Get("Etag"), `"`)
+		partETag = strings.Trim(partResp.Header.Get("Etag"), `"`)
 		DrainBody(partResp)
 	}
-	if partErr != nil || partStatus != http.StatusOK || etag == "" {
+	if partErr != nil || partStatus != http.StatusOK || partETag == "" {
 		abort()
 		finishDone(partStatus, partErr)
-		return false
+		return false, "", "", 0
 	}
 	completeBody := []byte(fmt.Sprintf(
 		`<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>"%s"</ETag></Part></CompleteMultipartUpload>`,
-		etag))
-	cStatus, cErr := doSigned(ctx, client, sgn, endpoint, "POST",
+		partETag))
+	cResp, cStatus, cErr := doSignedReadResp(ctx, client, sgn, endpoint, "POST",
 		fmt.Sprintf("%s?uploadId=%s", path, uploadID), completeBody)
-	if cErr != nil || cStatus != http.StatusOK {
+	if cErr != nil || cStatus != http.StatusOK || cResp == nil {
+		if cResp != nil {
+			DrainBody(cResp)
+		}
 		abort()
 		finishDone(cStatus, cErr)
-		return false
+		return false, "", "", 0
+	}
+	versionID := cResp.Header.Get("X-Amz-Version-Id")
+	finalETag := strings.Trim(cResp.Header.Get("Etag"), `"`)
+	cBody, _ := io.ReadAll(cResp.Body)
+	_ = cResp.Body.Close()
+	if finalETag == "" {
+		// CompleteMultipartUpload commonly returns the ETag in the XML
+		// body rather than the header — pull it out as a fallback.
+		var r struct {
+			XMLName xml.Name `xml:"CompleteMultipartUploadResult"`
+			ETag    string   `xml:"ETag"`
+		}
+		if err := xml.Unmarshal(cBody, &r); err == nil {
+			finalETag = strings.Trim(r.ETag, `"`)
+		}
 	}
 	finishDone(http.StatusOK, nil)
-	return true
+	return true, finalETag, versionID, int64(len(partBody))
+}
+
+// parseDeleteResultKeys extracts the Key list from a DeleteObjects
+// response body. Returns nil on parse error so the caller falls back to
+// the requested-key list rather than dropping the grace-tracking step.
+func parseDeleteResultKeys(body []byte) []string {
+	var r struct {
+		XMLName xml.Name `xml:"DeleteResult"`
+		Deleted []struct {
+			Key string `xml:"Key"`
+		} `xml:"Deleted"`
+	}
+	if err := xml.Unmarshal(body, &r); err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(r.Deleted))
+	for _, d := range r.Deleted {
+		if d.Key != "" {
+			out = append(out, d.Key)
+		}
+	}
+	return out
 }
 
 // doSignedRead signs + dispatches a request and returns the body bytes

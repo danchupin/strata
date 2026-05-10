@@ -39,10 +39,19 @@ type Config struct {
 	// races stay dense.
 	ObjectKeys int
 
-	// VerifyEvery is the interval between verifier passes. Zero disables
-	// the verifier (US-004 wires the verifier oracle for the
-	// external-endpoint path; US-002 only establishes the schema).
+	// VerifyEvery is the cadence at which the verifier oracle (US-004)
+	// runs read-after-write / versioning-presence / delete-grace
+	// checks against the gateway. Zero falls through to
+	// DefaultVerifyEvery; a negative value disables the verifier so
+	// tests that want a pure workload-counter run can opt out.
 	VerifyEvery time.Duration
+
+	// DeleteGracePeriod is the per-key delete-grace window the verifier
+	// enforces (US-004): keys deleted more than this ago without a
+	// subsequent PUT must not surface in ListObjectsV2. Zero falls
+	// through to DefaultDeleteGrace (5s). Set generously larger than
+	// the meta-store's eventual-consistency horizon.
+	DeleteGracePeriod time.Duration
 
 	// AccessKey + SecretKey + Region drive SigV4 signing. Empty
 	// AccessKey turns signing off (anonymous HTTP) — useful for in-process
@@ -77,13 +86,17 @@ type Config struct {
 }
 
 // Inconsistency is one row in Report.Inconsistencies. The verifier
-// oracle (US-004) populates the full diagnostic payload; for US-001/002
-// only the schema is established.
+// oracle (US-004) populates Expected / Observed / RequestID with full
+// diagnostic payload so downstream triage can reconstruct the exact
+// (bucket, key, etag, version_id) divergence the harness detected.
 type Inconsistency struct {
 	Kind      string    `json:"kind"`
 	Bucket    string    `json:"bucket,omitempty"`
 	Key       string    `json:"key,omitempty"`
 	Detail    string    `json:"detail,omitempty"`
+	Expected  string    `json:"expected,omitempty"`
+	Observed  string    `json:"observed,omitempty"`
+	RequestID string    `json:"request_id,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
 }
 
@@ -110,6 +123,12 @@ const MaxConcurrency = 64
 // exercise the chained-HMAC verifier, low enough that pre-computed-SHA
 // regressions still surface.
 const DefaultStreamingRatio = 0.5
+
+// DefaultVerifyEvery is the verifier-tick cadence used when
+// Config.VerifyEvery is zero. Picked at 1s — fast enough to surface
+// inconsistencies in a 1h soak run within ~3600 passes, slow enough
+// not to flood the gateway with verification GETs.
+const DefaultVerifyEvery = time.Second
 
 // DefaultMix is the per-op-class workload mix used when Config.Mix is
 // empty. Every class is exercised at ≥5%; versioning_flip is weighted
@@ -179,6 +198,9 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	if cfg.StreamingRatio == 0 {
 		cfg.StreamingRatio = DefaultStreamingRatio
 	}
+	if cfg.DeleteGracePeriod < 0 {
+		return nil, fmt.Errorf("racetest: DeleteGracePeriod must be >= 0")
+	}
 
 	picker, err := newOpPicker(cfg.Mix)
 	if err != nil {
@@ -195,6 +217,8 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	defer func() { _ = sink.Close() }()
 
+	tracker := NewTracker(sink, cfg.DeleteGracePeriod)
+
 	buckets := make([]string, cfg.BucketCount)
 	for i := 0; i < cfg.BucketCount; i++ {
 		buckets[i] = fmt.Sprintf("rc-bkt-%d", i)
@@ -204,6 +228,7 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		if err := enableVersioning(ctx, client, sgn, endpoint, buckets[i]); err != nil {
 			return nil, fmt.Errorf("racetest: enable versioning %s: %w", buckets[i], err)
 		}
+		tracker.EnableVersioning(buckets[i])
 	}
 
 	report := &Report{
@@ -239,6 +264,23 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		objectKeys:     cfg.ObjectKeys,
 		streamingRatio: cfg.StreamingRatio,
 		bump:           bump,
+		tracker:        tracker,
+	}
+
+	verEvery := cfg.VerifyEvery
+	if verEvery == 0 {
+		verEvery = DefaultVerifyEvery
+	}
+	verCtx, verCancel := context.WithCancel(context.Background())
+	verDone := make(chan struct{})
+	if verEvery > 0 {
+		v := startVerifier(verCtx, wctx, verEvery)
+		go func() {
+			v.run()
+			close(verDone)
+		}()
+	} else {
+		close(verDone)
 	}
 
 	var wg sync.WaitGroup
@@ -257,12 +299,32 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	wg.Wait()
 
+	// Quiet drain: workers have stopped writing, but the verifier
+	// needs a window during which deletedAt timestamps age past the
+	// grace threshold for the delete-grace oracle to assert against.
+	// Bounded by the original ctx so the caller can still kill Run
+	// promptly on a Ctrl-C.
+	if verEvery > 0 {
+		drainBudget := cfg.DeleteGracePeriod + verEvery
+		if drainBudget > 0 {
+			drainTimer := time.NewTimer(drainBudget)
+			select {
+			case <-ctx.Done():
+			case <-drainTimer.C:
+			}
+			drainTimer.Stop()
+		}
+	}
+	verCancel()
+	<-verDone
+
 	report.EndedAt = time.Now().UTC()
 	report.Duration = report.EndedAt.Sub(report.StartedAt)
 	counters.Range(func(k, v any) bool {
 		report.OpsByClass[k.(string)] = atomic.LoadInt64(v.(*int64))
 		return true
 	})
+	report.Inconsistencies = append(report.Inconsistencies, tracker.Snapshot()...)
 
 	sink.Emit(Event{
 		Event:     "summary",
