@@ -22,6 +22,7 @@ Cycle: ralph/s3-compat-finish
 - `data.Manifest.PartChecksums` carries per-part stored checksum maps. Updated atomically with manifest writes. Schema-additive — old rows decode with zero-values, no `ALTER`.
 - `meta.Store.SavePart` overwrites on PartNumber resend (last-write-wins) on all 3 backends. Re-uploads of same PartNumber produce a single stored row at the LATEST ETag.
 - DO NOT use `STRATA_AUTH_MODE=optional` in e2e — sign with static creds against SigV4 path, matches s3-tests harness.
+- AWS take-latest dedupe pattern in CompleteMultipartUpload Parts list: relax strict-ascending from `<= prev` to `< prev` AND overwrite `parts[len(parts)-1]` when `p.PartNumber == prev` (instead of appending). The two halves are intertwined — relaxed inequality alone permits duplicates but leaves them duplicated; in-loop overwrite alone breaks under strict-ascending. Storage-side `meta.Store.SavePart` last-write-wins on all 3 backends means the LAST submitted ETag resolves against the LATEST stored part naturally.
 
 ## 2026-05-10 — US-001 ChecksumType defaults for CRC family on multipart Initiate
 - `internal/s3api/multipart.go::initiateMultipart` now folds Initiate-time
@@ -104,6 +105,68 @@ Cycle: ralph/s3-compat-finish
   - The diagnostic warnings surfaced during edits (`xml.go::backendPresignConfiguration`,
     `multipart.go:717 unused parameter key`, `testutil_test.go::mustWriteFull`)
     are pre-existing — not introduced here. Do NOT touch them in the same
+    commit; they predate this cycle.
+---
+
+## 2026-05-10 — US-002 Multipart Complete dedupes duplicate PartNumber
+- `internal/s3api/multipart.go::completeMultipart` strict-ascending check
+  relaxed from `if p.PartNumber <= prev` to `if p.PartNumber < prev`; the
+  per-part dedupe is folded into the same parsing loop — when
+  `p.PartNumber == prev`, the previously appended `meta.CompletePart` is
+  OVERWRITTEN with the new entry's ETag (AWS take-latest semantics) rather
+  than appending a duplicate. The deduped list is what feeds the per-part
+  ETag walk against `byNumber[p.PartNumber]` (the LATEST stored part for
+  that PartNumber, by `meta.Store.SavePart` last-write-wins), so the LAST
+  submitted ETag resolves against the LAST stored part. Strict
+  out-of-order (e.g. `[1, 3, 2]`) still rejects with InvalidPartOrder
+  because `2 < 3` triggers the relaxed inequality.
+- New tests in `internal/s3api/multipart_partnumber_test.go`:
+  - `TestMultipartCompleteDedupesDuplicatePartNumber` — uploads
+    `PartNumber=1` twice (bodyA = 1 KiB of 'A', then bodyB = 1 KiB of 'B';
+    different bytes ⇒ different ETags); submits the Parts list with BOTH
+    ETags `[{1, etagA}, {1, etagB}]` to Complete; asserts 200 + GET
+    destination body equals bodyB (last write wins on storage; deduped
+    list resolves to etagB). Mirrors s3-tests
+    `test_multipart_resend_first_finishes_last`.
+  - `TestMultipartCompleteRejectsOutOfOrderParts` — uploads parts 1..3
+    (5 MiB each so the non-last min-size guard does not interfere);
+    submits `[1, 3, 2]` to Complete; asserts 400 InvalidPartOrder.
+- Files changed: `internal/s3api/multipart.go`,
+  `internal/s3api/multipart_partnumber_test.go`,
+  `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- Quality: `go vet ./...` clean. `go test ./... -short` green
+  (`internal/s3api` 8.8s, no regressions across the repo). Both new tests
+  PASS; the dedupe test is RED before the relaxed inequality + overwrite
+  lands and GREEN after.
+- s3-tests targeted run (`test_multipart_resend_first_finishes_last`):
+  **DEFERRED to US-003.** `docker info` reports the Lima Docker daemon
+  is down on this Ralph host (same constraint as US-001), so `make
+  up-all` cannot bring up the cassandra+ceph+strata stack. Protocol
+  shape verified at in-process harness level (the dedupe test asserts
+  the same wire-level contract the s3-test asserts: duplicate PartNumber
+  Parts list accepted + destination body equals the last UploadPart
+  write). `scripts/s3-tests/README.md` baseline +1 deferred to US-003,
+  which will reflip the headline number after a clean run.
+- **Learnings for future iterations:**
+  - The dedupe-overwrite-in-place pattern is the right shape for "AWS
+    take-latest on duplicate" semantics. A separate post-pass dedupe
+    walk over `parts` would be functionally equivalent but the
+    in-loop overwrite keeps the parser tight and avoids an extra
+    allocation.
+  - The relaxed inequality (`<` not `<=`) is critical for permitting
+    EQUAL adjacent PartNumbers without breaking strict-ascending for
+    out-of-order. The two are semantically intertwined: the dedupe
+    only fires when the equality check no longer rejects it.
+  - `meta.Store.SavePart` overwrites on PartNumber resend on all 3
+    backends (memory, cassandra, tikv) — the storetest contract
+    already exercises this; no new contract test is needed.
+  - The non-last min-part-size guard (`5 MiB`) sits AFTER the dedupe
+    in the validation flow: `requested = []` is built from the deduped
+    `parts` list, so the size check naturally walks deduped entries.
+    No interaction bug between the dedupe and the min-size guard.
+  - Pre-existing diagnostic warnings (`xml.go:145 backendPresignConfiguration`,
+    `multipart.go:728 unused parameter key`, `testutil_test.go::mustWriteFull`)
+    are unchanged — not introduced here, do NOT touch them in this
     commit; they predate this cycle.
 ---
 

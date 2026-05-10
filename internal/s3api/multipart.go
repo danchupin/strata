@@ -463,15 +463,26 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 	parts := make([]meta.CompletePart, 0, len(doc.Parts))
 	prev := 0
 	for _, p := range doc.Parts {
-		if p.PartNumber <= prev {
+		if p.PartNumber < prev {
 			writeError(w, r, ErrInvalidPartOrder)
 			return
 		}
-		prev = p.PartNumber
-		parts = append(parts, meta.CompletePart{
+		cp := meta.CompletePart{
 			PartNumber: p.PartNumber,
 			ETag:       strings.Trim(p.ETag, `"`),
-		})
+		}
+		// AWS take-latest semantics on duplicate PartNumber: a resend that
+		// names the same PartNumber twice in the Parts list dedupes to the
+		// LAST entry's ETag (matches RGW + s3-tests
+		// test_multipart_resend_first_finishes_last). The latest stored
+		// part for that PartNumber is the last UploadPart write, which is
+		// what the LAST submitted ETag must reference.
+		if p.PartNumber == prev && len(parts) > 0 {
+			parts[len(parts)-1] = cp
+		} else {
+			parts = append(parts, cp)
+		}
+		prev = p.PartNumber
 	}
 
 	mu, err := s.Meta.GetMultipartUpload(r.Context(), b.ID, uploadID)

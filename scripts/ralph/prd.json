@@ -40,8 +40,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "`internal/s3api/multipart.go::completeMultipart` strict-ascending check relaxed from `<= prev` to `< prev`; duplicate PartNumber in the Parts list now dedupes to LAST entry's ETag (overwrites the previously appended `meta.CompletePart` rather than appending). AWS take-latest semantics matches storage-side last-write-wins on `meta.Store.SavePart`, so the LAST submitted ETag for each PartNumber resolves against the LATEST stored part. New tests in `internal/s3api/multipart_partnumber_test.go`: `TestMultipartCompleteDedupesDuplicatePartNumber` (re-uploads PartNumber=1 with bodyA then bodyB; submits BOTH ETags in one Parts list; asserts Complete 200 + GET body == bodyB) and `TestMultipartCompleteRejectsOutOfOrderParts` (submits `[1,3,2]`; asserts 400 InvalidPartOrder). Targeted s3-test run + README baseline +1 deferred to US-003 — Lima Docker daemon down on this Ralph host, same constraint as US-001. Protocol-shape verified at in-process harness level. `go vet ./...` clean. `go test ./...` green."
     },
     {
       "id": "US-003",
