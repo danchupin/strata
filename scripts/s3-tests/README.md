@@ -59,7 +59,7 @@ History below — newest run on top. The default subset filter is the
 test_object_read or test_object_delete or test_multipart or
 test_versioning_obj or test_bucket_list_versions`.
 
-### 2026-05-10 — `<pending>` + ralph/s3-compat-finish cycle (92.7%)
+### 2026-05-10 — `d8aa9fa` + ralph/s3-compat-finish cycle (92.7%)
 
 After the US-001..US-003 cycle landed (CRC family `FULL_OBJECT` defaults at
 multipart Initiate for the boto3 1.36+ FlexibleChecksum default-on hot path,

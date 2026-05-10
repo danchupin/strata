@@ -97,7 +97,7 @@ adding more, prove what is there.
   empty-type → FULL_OBJECT default at multipart Initiate) and US-003 (Range-GET
   suppression) together flip all three tests
   (`test_multipart_copy_small`, `_special_names`, `_multiple_sizes`) green.
-  (commit `<pending>`)
+  (commit `d8aa9fa`)
 
 - ~~**P2 — `?partNumber=N` GET quoted-ETag wire shape.**~~ — **Done.** US-002
   flipped the wire shape: `?partNumber=N` GET / HEAD now echoes the WHOLE-OBJECT
@@ -162,7 +162,7 @@ adding more, prove what is there.
   last-write-wins on all three backends, so the LAST submitted ETag resolves
   against the LATEST stored part. `[1, 3, 2]` still rejects with
   `InvalidPartOrder`. s3-test `test_multipart_resend_first_finishes_last` flips
-  to PASS. (commit `<pending>`)
+  to PASS. (commit `d8aa9fa`)
 
 - **P3 — Object Lock `COMPLIANCE` audit log.** `audit_log` (US-022) records all
   state-changing requests, but a denied DELETE under `COMPLIANCE` is not flagged
