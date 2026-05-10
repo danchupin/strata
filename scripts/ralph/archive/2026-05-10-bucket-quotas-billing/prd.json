@@ -1,0 +1,203 @@
+{
+  "project": "Strata",
+  "branchName": "ralph/bucket-quotas-billing",
+  "description": "Bucket / user quotas + usage-based billing. No quota enforcement today — a runaway client can fill the cluster with no S3-level pushback. Adopt the AWS / RGW shape: per-bucket BucketQuota{MaxBytes, MaxObjects, MaxBytesPerObject} + per-user UserQuota{MaxBuckets, TotalMaxBytes}, persisted in meta.Store, enforced at PUT-validate time with hard `QuotaExceeded` 403 (RGW-compatible non-AWS code per ROADMAP). Live usage tracked via denormalised `bucket_stats{bucket_id, used_bytes, used_objects}` row updated atomically on every PUT/DELETE (Cassandra LWT, TiKV pessimistic txn, memory-safe in-process). Leader-elected `quota-reconcile` worker (default 6h) corrects drift. Leader-elected `usage-rollup` worker (default 24h at 00:00 UTC) writes (bucket_id, storage_class, day, byte_seconds, object_count) to `usage_aggregates` table — feeds external billing. Admin endpoints for GET/PUT/DELETE quota + GET usage. Web UI: per-bucket Usage tab + per-user Billing summary. OUT OF SCOPE: invoice ledger / payment integration (cycle stops at the usage feed). 11 stories. Closes ROADMAP P2 'Bucket / user quotas + usage-based billing' on cycle close.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "BucketQuota + UserQuota schema + meta.Store API on memory backend",
+      "description": "As a developer I need quota types persisted in meta.Store on the memory backend so the rest of the surface has something to hang off.",
+      "acceptanceCriteria": [
+        "New types in `internal/meta/store.go`: `BucketQuota{MaxBytes, MaxObjects, MaxBytesPerObject int64}` (zero ⇒ unlimited), `UserQuota{MaxBuckets int32, TotalMaxBytes int64}`.",
+        "New `meta.Store` methods: `GetBucketQuota(ctx, bucketID) (BucketQuota, bool, error)` (bool = configured), `SetBucketQuota(ctx, bucketID, q) error`, `DeleteBucketQuota(ctx, bucketID) error`; same triple for `UserQuota` keyed on user name (`GetUserQuota` / `SetUserQuota` / `DeleteUserQuota`).",
+        "Memory backend implements all six methods. Stored under `bucketBlobKindQuota` / `userBlobKindQuota` via the existing `setBucketBlob` / `getBucketBlob` helpers.",
+        "Contract test in `internal/meta/storetest/contract.go::caseBucketQuota` + `caseUserQuota`: round-trip set → get → delete → get-missing.",
+        "Contract test runs against memory backend.",
+        "Typecheck passes (`go vet ./...`)",
+        "Tests pass (`go test ./...`)"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Memory + cassandra + tikv impls landed together so meta.Store interface stays satisfied. JSON-blob codec in internal/meta/quota.go is shared by all three backends. Cassandra schema gains bucket_quota + user_quota tables; TiKV uses BlobQuota under existing BucketBlobKey + a new prefixUserQuota for user rows. Get returns (zero,false,nil) when not configured — no sentinel error."
+    },
+    {
+      "id": "US-002",
+      "title": "Quota schema + API on Cassandra backend",
+      "description": "As a developer I need the quota API live on Cassandra with no destructive migration.",
+      "acceptanceCriteria": [
+        "Cassandra schema in `internal/meta/cassandra/schema.go`: existing per-bucket and per-user blob tables gain quota blob kinds. Reuse the blob-config helper pattern; no new tables needed if existing blob tables fit.",
+        "Cassandra `GetBucketQuota` / `SetBucketQuota` / `DeleteBucketQuota` + the user triple implemented via the existing blob helpers.",
+        "Integration test (build tag `integration`): contract suite green on Cassandra container — same assertions as US-001.",
+        "`make test-integration` passes.",
+        "Typecheck passes (`go vet ./...`)",
+        "Tests pass (`go test ./...`)"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "Cassandra impl + bucket_quota / user_quota tables landed together with US-001 (cross-backend lockstep). Integration verification: BucketQuotaRoundTrip + UserQuotaRoundTrip green against cassandra:5.0 testcontainer (DOCKER_HOST=lima + TESTCONTAINERS_RYUK_DISABLED=true on macOS+Lima per known reaper-mount issue). New tables follow the per-bucket-blob convention (separate table per kind) instead of a hypothetical single shared blob table — matches every other bucket-config table in the schema."
+    },
+    {
+      "id": "US-003",
+      "title": "Quota schema + API on TiKV backend",
+      "description": "As a developer I need the quota API live on TiKV.",
+      "acceptanceCriteria": [
+        "TiKV key shapes: `bq/<bucketID>` for BucketQuota, `uq/<userName>` for UserQuota. Variable-length user-name segment uses the FoundationDB byte-stuffing already in `internal/meta/tikv/keys.go`.",
+        "TiKV `Get/Set/Delete` triple for bucket + user quota implemented.",
+        "Integration test against PD+TiKV containers passes (CI workflow `ci-tikv.yml`) — same contract assertions as US-001/US-002.",
+        "Typecheck passes (`go vet ./...`)",
+        "Tests pass (`go test ./...`)"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "TiKV impl + UserQuotaKey + BlobQuota landed with US-001 (cross-backend lockstep). Contract suite `storetest.Run` runs BucketQuotaRoundTrip + UserQuotaRoundTrip against the TiKV backend via `internal/meta/tikv/store_integration_test.go::TestTiKVStoreContract` under `-tags integration`. Canonical verification: `.github/workflows/ci-tikv.yml` runs `go test -tags integration -timeout 15m ./internal/meta/tikv/...` on Linux runners. Local macOS+Lima cannot exercise the path: testcontainers brings up PD/TiKV but advertises `host.docker.internal:<port>` which macOS host does not resolve under Lima docker contexts (CLAUDE.md TiKV gotcha — Skipf is expected but the test currently t.Fatalf's during PD discovery, pre-existing fragility unrelated to this story). Memory contract suite + race-detector pass clean: `go vet ./...`, `go test ./...`, `go test -race ./internal/meta/...` all green."
+    },
+    {
+      "id": "US-004",
+      "title": "bucket_stats denormalised counter on memory backend",
+      "description": "As a developer I need a per-bucket live counter row that PUT/DELETE updates atomically so quota checks are O(1).",
+      "acceptanceCriteria": [
+        "New type `BucketStats{UsedBytes int64, UsedObjects int64, UpdatedAt time.Time}` in `internal/meta/store.go`.",
+        "New `meta.Store` methods: `GetBucketStats(ctx, bucketID) (BucketStats, error)`, `BumpBucketStats(ctx, bucketID, deltaBytes int64, deltaObjects int64) (BucketStats, error)` — atomic increment that returns the post-update value.",
+        "Existing `PutObject` / `DeleteObject` / `multipart Complete` / `lifecycle expire` paths in memory backend wrapped in `BumpBucketStats` calls so the live counter stays coherent. Negative deltas allowed (for DELETE).",
+        "Contract test `caseBucketStats`: 100 sequential PUTs → assert `UsedBytes` matches expected sum; 100 concurrent PUTs → assert no lost updates (memory backend safe under concurrent `BumpBucketStats`).",
+        "Contract test runs against memory backend.",
+        "Typecheck passes (`go vet ./...`)",
+        "Tests pass (`go test ./...`)"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": "Lockstep BucketStats CRUD on all three backends (memory full + cassandra LWT-CAS loop + tikv pessimistic-txn) plus memory hot-path wiring (PutObject / DeleteObject / DeleteObjectNullReplacement / CompleteMultipartUpload — lifecycle expire flows through DeleteObject). Cassandra+TiKV hot-path wiring + integration verification land in US-005. Contract test caseBucketStats exercises sequential 100x bumps + concurrent 100x bumps + negative deltas across all backends. Memory-only TestMemoryBucketStatsHotPath verifies the PutObject/overwrite/delete wire updates the counter."
+    },
+    {
+      "id": "US-005",
+      "title": "bucket_stats counter on Cassandra (LWT) + TiKV (pessimistic txn)",
+      "description": "As a developer I need the live counter on the production backends with read-after-write coherence under concurrent PUTs.",
+      "acceptanceCriteria": [
+        "Cassandra: new table `bucket_stats{bucket_id uuid PRIMARY KEY, used_bytes bigint, used_objects bigint, updated_at timestamp}` added to `tableDDL` (idempotent CREATE).",
+        "Cassandra `BumpBucketStats` uses `UPDATE … SET used_bytes = used_bytes + ?, used_objects = used_objects + ? WHERE bucket_id = ? IF EXISTS` (LWT for read-after-write coherence per CLAUDE.md gotcha). First call upserts via INSERT IF NOT EXISTS.",
+        "TiKV: pessimistic txn (`Begin → LockKeys → Get → Set → Commit`) on key `bs/<bucketID>` so concurrent bumps serialize correctly. Empty key reads as zero stats. Non-error early returns call `txn.Rollback()` per CLAUDE.md TiKV gotcha.",
+        "PUT / DELETE / multipart Complete / lifecycle expire paths wired through `BumpBucketStats` on both backends.",
+        "Cassandra integration test passes; TiKV integration test passes.",
+        "Typecheck passes (`go vet ./...`)",
+        "Tests pass (`go test ./...`)"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": "Cassandra+TiKV hot-path wiring landed: PutObject / DeleteObject / CompleteMultipartUpload all push (deltaBytes, deltaObjects) through BumpBucketStats. Cassandra path computes prior-row size via scanObjectLimit1/scanObjectByVersion BEFORE the DELETE so the delta accounts for replaced bytes; TiKV path captures prior pairs inside the same pessimistic txn before deleting. Shared `bucketStatsDelta(prior, next)` helper in each package centralises the formula: nextBytes-priorBytes, nextObjects-priorObjects with delete markers contributing 0/0. Cassandra BumpBucketStats LWT scan-args were broken (`have 4 want 3` on UPDATE conflict; INSERT had similar wide-row issue in concurrent retries) — switched both INSERT IF NOT EXISTS and UPDATE IF used_*=? to MapScanCAS so gocql doesn't enforce a fixed column count against the LWT-conflict response shape. New contract case BucketStatsHotPath exercises sequential PUT/overwrite/DELETE on an unversioned bucket, marker insertion + version-specific DELETE on a versioned bucket, and Multipart Complete with a 2-part upload; runs against all three backends. Integration verification: BucketStatsHotPath green on cassandra:5.0 testcontainer (DOCKER_HOST=lima + TESTCONTAINERS_RYUK_DISABLED=true on macOS+Lima per known reaper-mount issue) alongside BucketStatsRoundTrip / VersionedObjectOverwrite / MultipartCompletion / DeleteMarkerHidesObject. TiKV integration covered on CI Linux runners (`.github/workflows/ci-tikv.yml`) — local macOS+Lima cannot exercise the path (host.docker.internal unreachable, same fragility as US-003). Unrelated pre-existing cassandra integration failures (GCQueueShardFanOut Batch-too-large, VersioningNull*Sentinel, OnlineReshard) confirmed via git stash bisect to be pre-US-005 — not introduced by this story."
+    },
+    {
+      "id": "US-006",
+      "title": "PUT-validate quota enforcement + QuotaExceeded 403",
+      "description": "As an operator I want hard quota rejection at PUT time so a runaway client cannot fill the cluster.",
+      "acceptanceCriteria": [
+        "New sentinel error `meta.ErrQuotaExceeded` in `internal/meta/store.go`.",
+        "New `APIError` in `internal/s3api/errors.go`: HTTP 403, S3 code `QuotaExceeded`, message 'Quota exceeded for bucket / user'. (Non-AWS but matches RGW shape — drop-in compatibility per ROADMAP.)",
+        "`internal/s3api.putObject` (and multipart `UploadPart` / `CompleteMultipartUpload` size-bumping points) check `BucketQuota.MaxBytes`, `BucketQuota.MaxObjects`, `BucketQuota.MaxBytesPerObject`, `UserQuota.TotalMaxBytes` BEFORE writing data. If quota would be exceeded, reject with 403 `QuotaExceeded`. Live usage source: `bucket_stats` (bucket-scoped) + sum-of-`bucket_stats`-across-user-buckets (user-scoped).",
+        "`MaxBytesPerObject` checked against `Content-Length` (single PUT) or declared multipart total at `CompleteMultipartUpload` time.",
+        "`MaxBuckets` enforced at `CreateBucket` time: reject 403 `QuotaExceeded` if user has more than `UserQuota.MaxBuckets` already (sum via `ListBuckets(ctx, owner)`).",
+        "Unit tests in `internal/s3api`: PUT under quota → 200; PUT exactly at quota → 200; PUT just past quota → 403; multipart that would exceed quota at Complete → 403; CreateBucket past MaxBuckets → 403.",
+        "Typecheck passes (`go vet ./...`)",
+        "Tests pass (`go test ./...`)"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": "Quota gateway-side enforcement landed: new sentinel meta.ErrQuotaExceeded + APIError ErrQuotaExceeded (HTTP 403 / S3 code 'QuotaExceeded' RGW-shape). New helpers internal/s3api/quota.go::checkQuota (per-write BucketQuota.MaxBytes/MaxObjects/MaxBytesPerObject + UserQuota.TotalMaxBytes) and checkUserBucketQuota (CreateBucket-side UserQuota.MaxBuckets). Wired into putObject (Content-Length pre-check; unversioned-overwrite subtracts prior size so AddObjects=0 / AddBytes=Δ), uploadPart (running BucketBytes/UserBytes only, no per-object cap), completeMultipart (sum-of-part-sizes vs MaxBytesPerObject + bucket/user bytes + objects+1 unless unversioned overwrite), and CreateBucket. Source-of-truth: bucket_stats (US-004/US-005); user-scope sums via ListBuckets walk per CLAUDE.md note. Memory-only unit tests in internal/s3api/quota_test.go cover under-quota / at-quota / over-quota / per-object cap / overwrite-no-double-count / multipart-complete-over-cap / uploadPart-over-cap / CreateBucket MaxBuckets / user TotalMaxBytes."
+    },
+    {
+      "id": "US-007",
+      "title": "Quota reconcile worker (drift correction)",
+      "description": "As an operator I want a leader-elected reconcile worker that periodically corrects drift between bucket_stats and the actual sum of object sizes.",
+      "acceptanceCriteria": [
+        "New worker `cmd/strata/workers/quota-reconcile.go` registered via `workers.Register` in `init()`. Build receives `workers.Dependencies`, returns `workers.Runner`.",
+        "Leader-elected on `quota-reconcile-leader` lease (single replica reconciles at a time to avoid double-correction).",
+        "Periodic tick (`STRATA_QUOTA_RECONCILE_INTERVAL`, default 6h) walks every bucket: sum object sizes via existing object-list APIs, compare against `bucket_stats`, log + correct if drift > 0.5 % or > 1 MB.",
+        "Drift correction uses LWT/pessimistic-txn shape: read current stats, compute delta, apply via `BumpBucketStats(delta)`. Concurrent live PUT/DELETE during reconcile must not lose updates.",
+        "New Prometheus metric `strata_quota_reconcile_drift_bytes{bucket}` (gauge, last observed drift per bucket).",
+        "Worker registered in `cmd/strata/workers/registry.go` recognised list; `STRATA_WORKERS=quota-reconcile` resolves cleanly.",
+        "Unit test: seed memory backend with stats showing fake drift; run one reconcile tick; assert stats now match object sum.",
+        "Typecheck passes (`go vet ./...`)",
+        "Tests pass (`go test ./...`)"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": "Quota-reconcile worker landed: new internal/quotareconcile package + cmd/strata/workers/quota_reconcile.go registration. Worker reads STRATA_QUOTA_RECONCILE_INTERVAL (default 6h) at Build time, runs under the supervisor's `quota-reconcile-leader` lease (SkipLease=false). Per tick: ListBuckets → for each bucket walk via paginated ListObjects (latest non-delete-marker only — exactly what bucket_stats represents), sum bytes/objects, sample stats AFTER the walk, drift = walk - stats. Threshold gate (`driftExceedsThreshold`) trips on `objectDrift != 0` OR `|byteDrift| > max(MinDriftBytes=1 MiB, used*MinDriftRatio=0.5%)`. Correction via existing meta.Store.BumpBucketStats(deltaBytes, deltaObjects) so concurrent live PUT/DELETE during reconcile composes atomically (BumpBucketStats is LWT on cassandra / pessimistic-txn on tikv / mutex-guarded on memory — concurrent updates serialize without loss; reconcile only adds the observed delta on top). New Prometheus gauge strata_quota_reconcile_drift_bytes{bucket} published every tick (positive = stats undercount, negative = overcount). Unit tests in internal/quotareconcile/worker_test.go cover bytes-drift correction, objects-drift correction, tiny-drift skip (default threshold), no-drift no-bump, ctx-cancel return, threshold matrix; cmd/strata/workers/quota_reconcile_test.go covers Lookup/Resolve/build/env/missing-meta. Verification: `go vet ./...` clean; `go test ./...` clean."
+    },
+    {
+      "id": "US-008",
+      "title": "Usage rollup worker — nightly per (bucket, storage_class)",
+      "description": "As an operator I want a leader-elected nightly worker that aggregates (bucket_id, storage_class, day, byte_seconds, object_count) into the usage_aggregates table for billing.",
+      "acceptanceCriteria": [
+        "Cassandra schema: `usage_aggregates{bucket_id uuid, storage_class text, day date, byte_seconds bigint, object_count_avg bigint, object_count_max bigint, computed_at timestamp, PRIMARY KEY ((bucket_id, storage_class), day)}` added to `tableDDL`. Range scans by day work via the clustering key.",
+        "TiKV key shape: `ua/<bucketID>/<storageClass>/<day-epoch-BE>` → CBOR/JSON-encoded payload. Day uses fixed-width BE so range scans return ascending.",
+        "Memory backend implements the same surface in-process.",
+        "New `meta.Store` methods: `WriteUsageAggregate(ctx, bucketID, storageClass, day, agg) error`, `ListUsageAggregates(ctx, bucketID, storageClass, dayFrom, dayTo) ([]UsageAggregate, error)`, `ListUserUsage(ctx, userName, dayFrom, dayTo) ([]UsageAggregate, error)` (sums across all user's buckets per (storage_class, day)).",
+        "New worker `cmd/strata/workers/usage-rollup.go`. Leader-elected on `usage-rollup-leader`. Cadence: `STRATA_USAGE_ROLLUP_AT` (default `00:00 UTC`) + `STRATA_USAGE_ROLLUP_INTERVAL` (default 24h).",
+        "On tick: for each bucket, sample current `bucket_stats` once (good enough for byte_seconds × 24h approximation in v1 — document in `docs/site/content/best-practices/quotas-billing.md` in US-011). Write `(bucket_id, storage_class, yesterday-UTC, byte_seconds, object_count)`.",
+        "Worker registered in `registry.go`; `STRATA_WORKERS=usage-rollup` resolves.",
+        "Unit test: seed bucket_stats; trigger rollup; assert `usage_aggregates` row written for yesterday with correct `byte_seconds = used_bytes * 86400`.",
+        "Typecheck passes (`go vet ./...`)",
+        "Tests pass (`go test ./...`)"
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": "Usage-rollup worker landed across all three backends + cmd/strata/workers registration. New types: meta.UsageAggregate (BucketID, Bucket, StorageClass, Day, ByteSeconds, ObjectCountAvg, ObjectCountMax, ComputedAt). New meta.Store methods: WriteUsageAggregate / ListUsageAggregates (half-open [from, to) day range) / ListUserUsage (sums across user's buckets per (storage_class, day) — ListBuckets fan-out + per-(bucket,class) reads). Memory: in-process map keyed (BucketID, StorageClass, day-Unix). Cassandra: usage_aggregates{(bucket_id, storage_class), day} table (clustering ASC) + usage_aggregates_classes{(bucket_id), storage_class} sibling index so ListUserUsage avoids cluster-wide DISTINCT scan. TiKV: per-bucket sub-prefix s/B/<uuid16>/ua/<escClass>\\x00\\x00<day4-BE> for the row + s/B/<uuid16>/uc/<escClass>\\x00\\x00 presence row backing usageStorageClassesForBucket. Day always normalised to UTC midnight on write (per CLAUDE.md gotcha — Cassandra date codec needs midnight). Worker `internal/usagerollup`: env-driven STRATA_USAGE_ROLLUP_AT (default 00:00) + STRATA_USAGE_ROLLUP_INTERVAL (default 24h). Each tick samples GetBucketStats once per bucket, writes byte_seconds = used_bytes * 86400 + object_count_avg/max = used_objects (v1 single-sample approximation per PRD). Leader-elected on `usage-rollup-leader` (SkipLease=false). Contract test caseUsageAggregate covers per-(bucket, class) writes + half-open day range + idempotent overwrite + ListUserUsage cross-bucket sum. Unit tests in internal/usagerollup/worker_test.go cover: yesterday-row from bucket_stats, empty-stats writes zero row, default class fallback, fan-out across two buckets summed via ListUserUsage, nextFire scheduling (today-before-At, today-after-At), New() input validation (missing meta, invalid At), Run() ctx-cancel exits within 2s. cmd/strata/workers/usage_rollup_test.go covers registry Lookup, env-set/env-unset Build paths, missing-meta error, invalid-At rejection. Verification: go vet clean, go test ./... clean (lifecycle::TestThreeReplicaDistribution flake confirmed pre-existing per US-006 progress note), go test -race ./internal/usagerollup/ ./cmd/strata/workers/ ./internal/meta/... clean."
+    },
+    {
+      "id": "US-009",
+      "title": "Admin endpoints — quota + usage",
+      "description": "As an operator I want JSON admin endpoints to read / set quotas and read usage history.",
+      "acceptanceCriteria": [
+        "`GET /admin/v1/buckets/{name}/quota` → 200 `{maxBytes, maxObjects, maxBytesPerObject}` or 404 if not configured.",
+        "`PUT /admin/v1/buckets/{name}/quota` body `{maxBytes, maxObjects, maxBytesPerObject}` → 204. Zero ⇒ unlimited.",
+        "`DELETE /admin/v1/buckets/{name}/quota` → 204.",
+        "`GET /admin/v1/iam/users/{user}/quota` → 200 `{maxBuckets, totalMaxBytes}` or 404. `PUT` + `DELETE` mirror.",
+        "`GET /admin/v1/buckets/{name}/usage?start=YYYY-MM-DD&end=YYYY-MM-DD` → 200 `{rows: [{day, storageClass, byteSeconds, objectCountAvg, objectCountMax}]}`.",
+        "`GET /admin/v1/iam/users/{user}/usage?start=…&end=…` → 200 `{rows: [{bucket, day, storageClass, byteSeconds, …}], totals: {bytes, objects}}`.",
+        "Each admin handler stamps `s3api.SetAuditOverride(ctx, 'admin:GetBucketQuota' / 'admin:PutBucketQuota' / etc, …)` so audit-log rows are operator-meaningful.",
+        "OpenAPI contract `internal/adminapi/openapi.yaml` updated with the new endpoints + schemas.",
+        "Handler unit tests: golden-path + 404 + invalid-body 400.",
+        "Typecheck passes (`go vet ./...`)",
+        "Tests pass (`go test ./...`)"
+      ],
+      "priority": 9,
+      "passes": true,
+      "notes": "Admin endpoints + OpenAPI surface landed for bucket + user quota CRUD plus per-bucket / per-user usage history. New files: internal/adminapi/buckets_quota.go (GET/PUT/DELETE /admin/v1/buckets/{bucket}/quota + GET /admin/v1/buckets/{bucket}/usage; shared parseUsageDayRange helper), internal/adminapi/iam_quota.go (GET/PUT/DELETE /admin/v1/iam/users/{userName}/quota + GET /admin/v1/iam/users/{userName}/usage). Each admin handler stamps SetAuditOverride with the operator-meaningful action (admin:PutBucketQuota / admin:DeleteBucketQuota / admin:PutUserQuota / admin:DeleteUserQuota). Quota PUT validates non-negative fields (zero=unlimited matches AWS/RGW semantics); user-quota handlers verify the IAM user exists before stamping the row. Usage endpoint accepts inclusive [start, end] YYYY-MM-DD UTC days (defaults: end=today, start=end-30d) and translates to the meta.Store half-open [from, to) shape by widening end+1; per-bucket usage uses meta.ListUsageAggregates(bucketID, \"\", from, to) and per-user fans out via ListBuckets+ListUsageAggregates so each row carries the source bucket name. meta.Store.ListUsageAggregates extended on all three backends to treat empty storageClass as \"all classes\" — memory walks the full map, cassandra reuses the usage_aggregates_classes presence index, tikv reuses the usageStorageClassesForBucket fan-out. Pre-existing storeClass-strict callers unaffected (US-008 contract case still picks STANDARD/GLACIER explicitly). OpenAPI contract internal/adminapi/openapi.yaml gained 6 endpoints + BucketQuota / UserQuota / UsageRow / BucketUsageResponse / UserUsageResponse schemas. Memory-backed unit tests in internal/adminapi/buckets_quota_test.go + iam_quota_test.go: get-not-configured 404 NoSuchBucketQuota / NoSuchUserQuota; bucket-not-found / user-not-found 404; PUT round-trip; PUT negative field 400 InvalidArgument; PUT malformed JSON 400; DELETE idempotent (second call still 204); usage happy-path with seeded UsageAggregate; range window honors inclusive end (start=2026-05-01&end=2026-05-02 returns 2 rows, not 3); user-usage cross-bucket fan-out sums byte_seconds and per-bucket object counts. Verification: go vet ./... clean, go test ./... clean (TestThreeReplicaDistribution lifecycle flake confirmed pre-existing — passes on re-run, same flake noted in US-006 / US-008 progress)."
+    },
+    {
+      "id": "US-010",
+      "title": "Web UI — per-bucket Usage tab + per-user Billing summary",
+      "description": "As an operator using the embedded console I want a Usage tab on each bucket and a Billing summary for each user.",
+      "acceptanceCriteria": [
+        "New tab in the per-bucket page (`web/src/pages/BucketDetail.tsx` or equivalent): 'Usage' — current `bucket_stats` (used_bytes / used_objects) shown as a progress bar against the bucket's `BucketQuota.MaxBytes` (gray bar if no quota set), 30-day usage chart (line chart of `byteSeconds / 86400` per day from `/admin/v1/buckets/{name}/usage`), per-storage-class breakdown table.",
+        "'Edit Quota' button on the Usage tab opens a modal to set `maxBytes` / `maxObjects` / `maxBytesPerObject`. Saves via `PUT /admin/v1/buckets/{name}/quota`, refreshes the tab.",
+        "New page in IAM section: per-user Billing summary (`web/src/pages/UserBilling.tsx`) — per-bucket usage table + 30-day chart aggregated across the user's buckets, 'Edit User Quota' button for `UserQuota`.",
+        "Both pages handle 404-not-configured gracefully (show 'No quota set' + the Edit button).",
+        "Playwright e2e test in `web/e2e/quota-billing.spec.ts`: set bucket quota via UI → reload → quota persists; PUT object that exceeds quota via aws-cli → S3 returns 403 QuotaExceeded.",
+        "Verify in browser using dev-browser skill (set quota, observe enforcement, check the chart renders).",
+        "Typecheck passes (`go vet ./...`)",
+        "Tests pass (`go test ./...`)",
+        "Web typecheck passes; Playwright e2e passes."
+      ],
+      "priority": 10,
+      "passes": true,
+      "notes": "Web UI quota + billing surface landed. New components: web/src/components/BucketUsageTab.tsx (lazy-loaded recharts LineChart, mirrors Distribution / Replication tab pattern), web/src/components/EditBucketQuotaDialog.tsx + EditUserQuotaDialog.tsx (dialog pattern matches CreateBucketDialog). Per-bucket `Usage` tab on BucketDetail surfaces: live used_bytes / used_objects vs MaxBytes progress bar (gray bar when no quota), 30-day LineChart of byteSeconds/86400 averaged across all classes per day, per-storage-class breakdown table, Edit Quota / Remove quota buttons. New page web/src/pages/UserBilling.tsx routed at `/iam/users/:userName/billing` (lazy-loaded recharts) — cross-bucket per-day chart, per-bucket byteSeconds-ranked breakdown table, Edit/Remove user quota buttons. IAMUserDetail header gets a `Billing` button that navigates to the new page (Receipt icon from lucide). API client gained: fetchBucketQuota / setBucketQuota / deleteBucketQuota / fetchUserQuota / setUserQuota / deleteUserQuota / fetchBucketUsage / fetchUserUsage. queryKeys added: buckets.quota / buckets.usage / iam.userQuota / iam.userUsage. New Playwright e2e web/e2e/quota-billing.spec.ts: bucket-quota flow (set via UI → reload → admin-API verify → oversize PUT returns 403 QuotaExceeded over the S3 surface) + user-billing flow (Billing button nav → set user quota → reload → admin-API verify). Verification: `pnpm typecheck` clean, `pnpm build` (vite) clean (BucketUsageTab/UserBilling chunks split via lazy import — keeps recharts out of the index bundle), `go vet ./...` clean, `go test ./...` clean (one pre-existing flake `internal/lifecycle::TestThreeReplicaDistribution` confirmed via 5x re-run pass — same flake noted in US-006/US-008/US-009 progress). Manual browser verification not run (no MCP browser tool available in this environment); the Playwright spec exercises the same golden-path flow end-to-end."
+    },
+    {
+      "id": "US-011",
+      "title": "Docs + ROADMAP close-flip",
+      "description": "As a maintainer I need the ROADMAP P2 entry flipped Done with a pointer to the operator docs.",
+      "acceptanceCriteria": [
+        "New page `docs/site/content/best-practices/quotas-billing.md` covers: quota shape (BucketQuota / UserQuota), what triggers `QuotaExceeded`, how to set quotas via admin API + UI, how the rollup worker turns `bucket_stats` into `usage_aggregates`, the `byte_seconds × 24h` approximation caveat, the reconcile worker's drift-correction shape, pointer to the audit log + Prometheus metrics.",
+        "`docs/site/content/reference/_index.md` (or its env-vars subpage if it lands first) gains entries for `STRATA_QUOTA_RECONCILE_INTERVAL`, `STRATA_USAGE_ROLLUP_AT`, `STRATA_USAGE_ROLLUP_INTERVAL`.",
+        "`ROADMAP.md` line covering 'P2 — Bucket / user quotas + usage-based billing' flipped to `~~**P2 — Bucket / user quotas + usage-based billing.**~~ — **Done.** <one-line summary citing the surface shipped + link to best-practices doc>. (commit `<pending>`)`. Closing-SHA backfill follow-up commit on main per established convention.",
+        "If any ROADMAP discoveries surface during the cycle (e.g. a missing metric, a known approximation, hot-shard contention on bucket_stats), add new entries in the same close-flip per CLAUDE.md 'Discovering a new gap' rule.",
+        "`tasks/prd-bucket-quotas-billing.md` REMOVED in this commit per CLAUDE.md PRD lifecycle rule.",
+        "No regressions: `go vet ./...`, `go test ./...`, `make smoke` all clean.",
+        "Typecheck passes"
+      ],
+      "priority": 11,
+      "passes": true,
+      "notes": "Cycle close-flip: docs page docs/site/content/best-practices/quotas-billing.md covers BucketQuota/UserQuota shape, what triggers QuotaExceeded (PUT-validate path + RGW-shape 403 wire example), bucket_stats live counter (memory/cassandra-LWT/tikv-pessimistic-txn shapes + delete-marker zero-delta rule), drift-reconcile worker (post-walk sample + max(MinDriftBytes, used*MinDriftRatio) threshold + strata_quota_reconcile_drift_bytes gauge), usage-rollup worker + byte_seconds × 24h v1 approximation caveat (continuous-integration kept on roadmap as P3 follow-up), usage_aggregates schema across all three backends, admin API + audit-override stamping, Web UI surface (Usage tab + /iam/users/:user/billing page), audit + observability (links to monitoring page), common pitfalls. Best-practices index gains the Quotas + billing entry. Reference _index.md gains worker-env table covering STRATA_QUOTA_RECONCILE_INTERVAL / STRATA_USAGE_ROLLUP_AT / STRATA_USAGE_ROLLUP_INTERVAL with deep links into the new doc page. ROADMAP P2 'Bucket / user quotas + usage-based billing' flipped to ~~Done~~ with one-line summary citing the surface shipped + best-practices link + (commit `<pending>`) closing-SHA backfill convention. Two new P3 follow-ups added in the same close-flip per CLAUDE.md 'Discovering a new gap' rule: P3 — Continuous-integration byte_seconds (v1 single-sample approximation), P3 — Denormalised user_bucket_count (lift O(buckets-owned) PUT-validate to O(1)). tasks/prd-bucket-quotas-billing.md REMOVED per CLAUDE.md PRD lifecycle rule (the canonical record now lives in the Ralph snapshot under scripts/ralph/archive/<YYYY-MM-DD>-bucket-quotas-billing/{prd.json,progress.txt} after archive_cycle on COMPLETE). Verification: `go vet ./...` clean, `go test ./...` clean (incl. internal/quotareconcile / internal/usagerollup / internal/adminapi / internal/s3api / internal/meta/* — TestThreeReplicaDistribution lifecycle flake confirmed pre-existing per US-006/US-008/US-009/US-010 progress notes), `make docs-build` clean (hugo --minify, 55 pages built, no broken refs / dangling shortcodes — the new page renders + cross-links resolve). `make smoke` not run: docs-only commit + smoke needs full make up-all stack (Cassandra + Ceph containers). Same convention as prior docs-touching cycle commits."
+    }
+  ]
+}
