@@ -507,7 +507,14 @@ external backup tooling.&lt;/li&gt;
 &lt;p&gt;This page is a backup-strategy overview. Implementation details live in
 &lt;a href="https://danchupin.github.io/strata/architecture/workers/"&gt;Architecture — Workers&lt;/a&gt; (the
 inventory + replicator workers) and the upstream docs for Ceph /
-Cassandra / TiKV.&lt;/p&gt;</description></item><item><title>Capacity planning</title><link>https://danchupin.github.io/strata/best-practices/capacity-planning/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/capacity-planning/</guid><description>&lt;h1 id="capacity-planning"&gt;Capacity planning&lt;a class="anchor" href="#capacity-planning"&gt;#&lt;/a&gt;&lt;/h1&gt;
+Cassandra / TiKV.&lt;/p&gt;</description></item><item><title>Quotas + billing</title><link>https://danchupin.github.io/strata/best-practices/quotas-billing/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/quotas-billing/</guid><description>&lt;h1 id="quotas--billing"&gt;Quotas + billing&lt;a class="anchor" href="#quotas--billing"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata enforces hard per-bucket and per-user storage quotas at PUT-validate
+time and emits a nightly per-(bucket, storage class) usage aggregate that an
+external invoice generator can consume. The shape mirrors AWS / RGW so a
+RADOS Gateway tenant migrating to Strata sees the same &lt;code&gt;QuotaExceeded&lt;/code&gt; 403
+on overage.&lt;/p&gt;
+&lt;p&gt;The cycle stops at the usage feed. Invoice ledger / payment integration
+lives in a separate ops-layer service that consumes &lt;code&gt;usage_aggregates&lt;/code&gt;.&lt;/p&gt;</description></item><item><title>Capacity planning</title><link>https://danchupin.github.io/strata/best-practices/capacity-planning/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/capacity-planning/</guid><description>&lt;h1 id="capacity-planning"&gt;Capacity planning&lt;a class="anchor" href="#capacity-planning"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;Capacity on a Strata deploy splits across three independently-scaled
 tiers:&lt;/p&gt;
 &lt;ul&gt;
