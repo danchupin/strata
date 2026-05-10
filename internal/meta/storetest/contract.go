@@ -59,6 +59,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"MetaHealth", caseMetaHealth},
 		{"BucketQuotaRoundTrip", caseBucketQuota},
 		{"UserQuotaRoundTrip", caseUserQuota},
+		{"BucketStatsRoundTrip", caseBucketStats},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2146,6 +2147,89 @@ func caseUserQuota(t *testing.T, s meta.Store) {
 
 	if err := s.DeleteUserQuota(ctx, userName); err != nil {
 		t.Errorf("delete idempotent: %v", err)
+	}
+}
+
+// caseBucketStats exercises the live counter row (US-004..US-005):
+// fresh-bucket zero stats → 100 sequential bumps → counter matches expected
+// sum → 100 concurrent bumps → no lost updates → negative deltas honoured.
+func caseBucketStats(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "bs", "owner-bs", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+
+	got, err := s.GetBucketStats(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("get fresh: %v", err)
+	}
+	if got.UsedBytes != 0 || got.UsedObjects != 0 {
+		t.Fatalf("fresh stats nonzero: %+v", got)
+	}
+
+	const seqN = 100
+	const seqSize = int64(7)
+	for i := 0; i < seqN; i++ {
+		next, err := s.BumpBucketStats(ctx, b.ID, seqSize, 1)
+		if err != nil {
+			t.Fatalf("bump %d: %v", i, err)
+		}
+		wantBytes := seqSize * int64(i+1)
+		wantObjects := int64(i + 1)
+		if next.UsedBytes != wantBytes || next.UsedObjects != wantObjects {
+			t.Fatalf("bump %d post-update: got %+v want bytes=%d objects=%d", i, next, wantBytes, wantObjects)
+		}
+		if next.UpdatedAt.IsZero() {
+			t.Fatalf("bump %d returned zero UpdatedAt", i)
+		}
+	}
+
+	got, err = s.GetBucketStats(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("get after sequential: %v", err)
+	}
+	if got.UsedBytes != seqSize*seqN || got.UsedObjects != seqN {
+		t.Fatalf("after sequential: got %+v want bytes=%d objects=%d", got, seqSize*seqN, seqN)
+	}
+
+	// Concurrent bumps — every backend's mutex / LWT / pessimistic-txn shape
+	// must serialise these without lost updates.
+	const concN = 100
+	const concSize = int64(13)
+	type bumpResult struct {
+		err error
+	}
+	results := make(chan bumpResult, concN)
+	for i := 0; i < concN; i++ {
+		go func() {
+			_, err := s.BumpBucketStats(ctx, b.ID, concSize, 1)
+			results <- bumpResult{err: err}
+		}()
+	}
+	for i := 0; i < concN; i++ {
+		r := <-results
+		if r.err != nil {
+			t.Fatalf("concurrent bump: %v", r.err)
+		}
+	}
+	got, err = s.GetBucketStats(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("get after concurrent: %v", err)
+	}
+	wantBytes := seqSize*seqN + concSize*concN
+	wantObjects := int64(seqN + concN)
+	if got.UsedBytes != wantBytes || got.UsedObjects != wantObjects {
+		t.Fatalf("after concurrent: got %+v want bytes=%d objects=%d", got, wantBytes, wantObjects)
+	}
+
+	// Negative delta — DELETE / lifecycle expire path.
+	next, err := s.BumpBucketStats(ctx, b.ID, -seqSize, -1)
+	if err != nil {
+		t.Fatalf("negative bump: %v", err)
+	}
+	if next.UsedBytes != wantBytes-seqSize || next.UsedObjects != wantObjects-1 {
+		t.Fatalf("negative bump post-update: got %+v want bytes=%d objects=%d", next, wantBytes-seqSize, wantObjects-1)
 	}
 }
 

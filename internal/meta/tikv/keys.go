@@ -75,6 +75,7 @@ const (
 	subObject           = "o/"  // s/B/<uuid16>/o/<escKey>\x00\x00<verDesc24>
 	subObjectGrants     = "og/" // same shape as subObject
 	subBucketBlob       = "c/"  // s/B/<uuid16>/c/<kind>      (kind is a fixed identifier, no escape)
+	subBucketStats      = "bs"  // s/B/<uuid16>/bs            (single key, live counter)
 	subInventoryConfig  = "i/"  // s/B/<uuid16>/i/<configID>
 	subMultipart        = "u/"  // s/B/<uuid16>/u/<uploadID>
 	subMultipartPart    = "up/" // s/B/<uuid16>/up/<uploadID>\x00\x00<partNum4>
@@ -338,6 +339,13 @@ func BucketGrantsKey(bucketID uuid.UUID) []byte {
 func BucketBlobKey(bucketID uuid.UUID, kind string) []byte {
 	out := append(PrefixForBucket(bucketID), subBucketBlob...)
 	return append(out, kind...)
+}
+
+// BucketStatsKey is the single-row live counter slot for a bucket
+// (US-004..US-005). Bumped via a pessimistic txn under
+// internal/meta/tikv/store.go::BumpBucketStats.
+func BucketStatsKey(bucketID uuid.UUID) []byte {
+	return append(PrefixForBucket(bucketID), subBucketStats...)
 }
 
 // InventoryConfigKey is one row per (bucket, configID).

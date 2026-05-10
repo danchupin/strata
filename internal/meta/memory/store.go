@@ -35,6 +35,7 @@ type Store struct {
 	tagging        map[uuid.UUID][]byte
 	bucketQuotas   map[uuid.UUID][]byte
 	userQuotas     map[string][]byte
+	bucketStats    map[uuid.UUID]meta.BucketStats
 	inventoryConfigs map[uuid.UUID]map[string][]byte
 	accessPoints     map[string]*meta.AccessPoint
 	bucketGrants   map[uuid.UUID][]meta.Grant
@@ -121,6 +122,7 @@ func New() *Store {
 		tagging:      make(map[uuid.UUID][]byte),
 		bucketQuotas: make(map[uuid.UUID][]byte),
 		userQuotas:   make(map[string][]byte),
+		bucketStats:  make(map[uuid.UUID]meta.BucketStats),
 		inventoryConfigs: make(map[uuid.UUID]map[string][]byte),
 		accessPoints:     make(map[string]*meta.AccessPoint),
 		bucketGrants: make(map[uuid.UUID][]meta.Grant),
@@ -850,25 +852,40 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 		return err
 	}
 	cp := *o
+	deltaBytes := o.Size
+	deltaObjects := int64(1)
 	if !versioned {
+		// Unversioned overwrite: prior row (if any) is replaced — subtract its
+		// size and the +1 cancels with the existing row.
+		if prev := bucket[o.Key]; len(prev) > 0 {
+			deltaBytes -= prev[0].Size
+			deltaObjects = 0
+		}
 		bucket[o.Key] = []*meta.Object{&cp}
 		s.objectManifestRaw[manifestKey{o.BucketID, o.Key, cp.VersionID}] = raw
+		s.bumpBucketStatsLocked(o.BucketID, deltaBytes, deltaObjects)
 		return nil
 	}
 	if o.IsNull {
+		// Suspended-mode null replacement: subtract any prior null version's
+		// size (object count is +1 only when no prior null row existed).
 		filtered := bucket[o.Key][:0]
 		for _, v := range bucket[o.Key] {
 			if v.VersionID == meta.NullVersionID {
+				deltaBytes -= v.Size
+				deltaObjects = 0
 				continue
 			}
 			filtered = append(filtered, v)
 		}
 		bucket[o.Key] = append([]*meta.Object{&cp}, filtered...)
 		s.objectManifestRaw[manifestKey{o.BucketID, o.Key, cp.VersionID}] = raw
+		s.bumpBucketStatsLocked(o.BucketID, deltaBytes, deltaObjects)
 		return nil
 	}
 	bucket[o.Key] = append([]*meta.Object{&cp}, bucket[o.Key]...)
 	s.objectManifestRaw[manifestKey{o.BucketID, o.Key, cp.VersionID}] = raw
+	s.bumpBucketStatsLocked(o.BucketID, deltaBytes, deltaObjects)
 	return nil
 }
 
@@ -884,8 +901,14 @@ func (s *Store) DeleteObjectNullReplacement(ctx context.Context, bucketID uuid.U
 	}
 	versions := bucket[key]
 	filtered := versions[:0]
+	var freedBytes int64
+	var freedObjects int64
 	for _, v := range versions {
 		if v.VersionID == meta.NullVersionID {
+			if !v.IsDeleteMarker {
+				freedBytes += v.Size
+				freedObjects++
+			}
 			continue
 		}
 		filtered = append(filtered, v)
@@ -900,6 +923,9 @@ func (s *Store) DeleteObjectNullReplacement(ctx context.Context, bucketID uuid.U
 		Mtime:          time.Now().UTC(),
 	}
 	bucket[key] = append([]*meta.Object{marker}, filtered...)
+	if freedBytes != 0 || freedObjects != 0 {
+		s.bumpBucketStatsLocked(bucketID, -freedBytes, -freedObjects)
+	}
 	return marker, nil
 }
 
@@ -965,6 +991,9 @@ func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versi
 				if len(bucket[key]) == 0 {
 					delete(bucket, key)
 				}
+				if !cp.IsDeleteMarker {
+					s.bumpBucketStatsLocked(bucketID, -cp.Size, -1)
+				}
 				return &cp, nil
 			}
 		}
@@ -987,6 +1016,9 @@ func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versi
 	latest := versions[0]
 	delete(bucket, key)
 	cp := *latest
+	if !cp.IsDeleteMarker {
+		s.bumpBucketStatsLocked(bucketID, -cp.Size, -1)
+	}
 	return &cp, nil
 }
 
@@ -1534,6 +1566,34 @@ func (s *Store) DeleteUserQuota(ctx context.Context, userName string) error {
 	return nil
 }
 
+// GetBucketStats returns the current live counter row for the bucket. Missing
+// rows read back as zero stats — bucket creation does not seed a row, so the
+// first BumpBucketStats lazily upserts it.
+func (s *Store) GetBucketStats(ctx context.Context, bucketID uuid.UUID) (meta.BucketStats, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.bucketStats[bucketID], nil
+}
+
+// BumpBucketStats atomically applies (deltaBytes, deltaObjects) to the bucket's
+// counter row and returns the post-update value. Negative deltas are allowed
+// (DELETE / lifecycle expire). The single mutex serialises every bump under
+// concurrent PUTs — the contract-test concurrent-bump assertion hangs on this.
+func (s *Store) bumpBucketStatsLocked(bucketID uuid.UUID, deltaBytes, deltaObjects int64) meta.BucketStats {
+	cur := s.bucketStats[bucketID]
+	cur.UsedBytes += deltaBytes
+	cur.UsedObjects += deltaObjects
+	cur.UpdatedAt = time.Now().UTC()
+	s.bucketStats[bucketID] = cur
+	return cur
+}
+
+func (s *Store) BumpBucketStats(ctx context.Context, bucketID uuid.UUID, deltaBytes, deltaObjects int64) (meta.BucketStats, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.bumpBucketStatsLocked(bucketID, deltaBytes, deltaObjects), nil
+}
+
 func (s *Store) SetBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string, blob []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1837,11 +1897,18 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 		return nil, meta.ErrBucketNotFound
 	}
 	cp := *obj
+	deltaBytes := obj.Size
+	deltaObjects := int64(1)
 	if versioned {
 		bucket[obj.Key] = append([]*meta.Object{&cp}, bucket[obj.Key]...)
 	} else {
+		if prev := bucket[obj.Key]; len(prev) > 0 {
+			deltaBytes -= prev[0].Size
+			deltaObjects = 0
+		}
 		bucket[obj.Key] = []*meta.Object{&cp}
 	}
+	s.bumpBucketStatsLocked(obj.BucketID, deltaBytes, deltaObjects)
 
 	var orphans []*data.Manifest
 	for num, p := range st.parts {

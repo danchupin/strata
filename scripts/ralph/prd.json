@@ -65,8 +65,8 @@
         "Tests pass (`go test ./...`)"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Lockstep BucketStats CRUD on all three backends (memory full + cassandra LWT-CAS loop + tikv pessimistic-txn) plus memory hot-path wiring (PutObject / DeleteObject / DeleteObjectNullReplacement / CompleteMultipartUpload — lifecycle expire flows through DeleteObject). Cassandra+TiKV hot-path wiring + integration verification land in US-005. Contract test caseBucketStats exercises sequential 100x bumps + concurrent 100x bumps + negative deltas across all backends. Memory-only TestMemoryBucketStatsHotPath verifies the PutObject/overwrite/delete wire updates the counter."
     },
     {
       "id": "US-005",

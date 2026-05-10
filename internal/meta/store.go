@@ -187,6 +187,17 @@ type UserQuota struct {
 	TotalMaxBytes int64
 }
 
+// BucketStats is the live denormalised per-bucket counter row maintained
+// atomically by every PUT / DELETE / multipart Complete / lifecycle expire
+// path (US-004). UsedBytes / UsedObjects are signed because the bump path
+// accepts negative deltas (DELETE / lifecycle expire). Counter is best-effort
+// coherent — drift that a periodic reconcile worker (US-007) corrects.
+type BucketStats struct {
+	UsedBytes   int64
+	UsedObjects int64
+	UpdatedAt   time.Time
+}
+
 // Grant is a single ACL grant entry persisted alongside the canned ACL.
 // GranteeType is one of: CanonicalUser, Group, AmazonCustomerByEmail.
 // Permission is one of: FULL_CONTROL, READ, WRITE, READ_ACP, WRITE_ACP.
@@ -744,6 +755,15 @@ type Store interface {
 	GetUserQuota(ctx context.Context, userName string) (UserQuota, bool, error)
 	SetUserQuota(ctx context.Context, userName string, q UserQuota) error
 	DeleteUserQuota(ctx context.Context, userName string) error
+
+	// BucketStats live counter (US-004..US-005). GetBucketStats returns the
+	// current row (zero-value when no row exists yet — never an error for the
+	// missing case). BumpBucketStats atomically increments the counter and
+	// returns the post-update value; negative deltas are allowed (DELETE /
+	// lifecycle expire). Cassandra uses LWT and TiKV a pessimistic txn so
+	// concurrent bumps serialise without lost updates.
+	GetBucketStats(ctx context.Context, bucketID uuid.UUID) (BucketStats, error)
+	BumpBucketStats(ctx context.Context, bucketID uuid.UUID, deltaBytes, deltaObjects int64) (BucketStats, error)
 
 	// Inventory configurations are addressed per-bucket by their config id; a
 	// bucket may carry multiple at once (AWS allows up to 1,000). The blob is

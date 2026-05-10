@@ -2913,6 +2913,71 @@ func (s *Store) DeleteUserQuota(ctx context.Context, userName string) error {
 	).WithContext(ctx).Exec()
 }
 
+// GetBucketStats returns the live counter row for the bucket, or zero stats
+// when no row exists yet (the first bump lazily upserts).
+func (s *Store) GetBucketStats(ctx context.Context, bucketID uuid.UUID) (meta.BucketStats, error) {
+	var bytes, objects int64
+	var updated time.Time
+	err := s.s.Query(
+		`SELECT used_bytes, used_objects, updated_at FROM bucket_stats WHERE bucket_id=?`,
+		gocqlUUID(bucketID),
+	).WithContext(ctx).Scan(&bytes, &objects, &updated)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return meta.BucketStats{}, nil
+	}
+	if err != nil {
+		return meta.BucketStats{}, err
+	}
+	return meta.BucketStats{UsedBytes: bytes, UsedObjects: objects, UpdatedAt: updated}, nil
+}
+
+// BumpBucketStats atomically applies (deltaBytes, deltaObjects) to the row.
+// Read-modify-CAS loop with bounded retry: on first call upserts via INSERT
+// IF NOT EXISTS; subsequent bumps re-read + LWT-update IF the prior counter
+// values still match. The IF predicate enforces read-after-write coherence
+// per the LWT gotcha in CLAUDE.md.
+func (s *Store) BumpBucketStats(ctx context.Context, bucketID uuid.UUID, deltaBytes, deltaObjects int64) (meta.BucketStats, error) {
+	const maxAttempts = 32
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		cur, err := s.GetBucketStats(ctx, bucketID)
+		if err != nil {
+			return meta.BucketStats{}, err
+		}
+		next := meta.BucketStats{
+			UsedBytes:   cur.UsedBytes + deltaBytes,
+			UsedObjects: cur.UsedObjects + deltaObjects,
+			UpdatedAt:   time.Now().UTC(),
+		}
+		if cur.UpdatedAt.IsZero() {
+			applied, err := s.s.Query(
+				`INSERT INTO bucket_stats (bucket_id, used_bytes, used_objects, updated_at)
+				   VALUES (?, ?, ?, ?) IF NOT EXISTS`,
+				gocqlUUID(bucketID), next.UsedBytes, next.UsedObjects, next.UpdatedAt,
+			).WithContext(ctx).ScanCAS(nil, nil, nil, nil)
+			if err != nil {
+				return meta.BucketStats{}, err
+			}
+			if applied {
+				return next, nil
+			}
+			continue
+		}
+		applied, err := s.s.Query(
+			`UPDATE bucket_stats SET used_bytes=?, used_objects=?, updated_at=?
+			   WHERE bucket_id=? IF used_bytes=? AND used_objects=?`,
+			next.UsedBytes, next.UsedObjects, next.UpdatedAt,
+			gocqlUUID(bucketID), cur.UsedBytes, cur.UsedObjects,
+		).WithContext(ctx).ScanCAS(nil, nil, nil)
+		if err != nil {
+			return meta.BucketStats{}, err
+		}
+		if applied {
+			return next, nil
+		}
+	}
+	return meta.BucketStats{}, fmt.Errorf("cassandra: bucket_stats CAS exhausted retries for bucket %s", bucketID)
+}
+
 func (s *Store) SetBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string, blob []byte) error {
 	return s.s.Query(
 		`INSERT INTO bucket_inventory_configs (bucket_id, config_id, config) VALUES (?, ?, ?)`,
