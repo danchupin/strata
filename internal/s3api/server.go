@@ -1280,7 +1280,14 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 			if len(sums) > 0 && o.ChecksumType != "" {
 				w.Header().Set("x-amz-checksum-type", o.ChecksumType)
 			}
-		} else {
+		} else if r.Header.Get("Range") == "" {
+			// AWS-parity: a Range GET serves a partial body, but the stored
+			// `o.Checksums` is the whole-object digest. boto3 1.36+ default-on
+			// FlexibleChecksum validation recomputes over the received body and
+			// rejects the partial-body / whole-object mismatch with
+			// `FlexibleChecksumError`. AWS suppresses x-amz-checksum-* on Range
+			// responses; mirror that here. s3-tests `test_multipart_copy_*`
+			// trip this on the source-side Range GET in `_check_key_content`.
 			writeChecksumHeaders(w.Header(), o.Checksums)
 			if o.ChecksumType != "" {
 				w.Header().Set("x-amz-checksum-type", o.ChecksumType)

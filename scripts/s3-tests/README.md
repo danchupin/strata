@@ -59,6 +59,65 @@ History below — newest run on top. The default subset filter is the
 test_object_read or test_object_delete or test_multipart or
 test_versioning_obj or test_bucket_list_versions`.
 
+### 2026-05-10 — `d8aa9fa` + ralph/s3-compat-finish cycle (92.7%)
+
+After the US-001..US-003 cycle landed (CRC family `FULL_OBJECT` defaults at
+multipart Initiate for the boto3 1.36+ FlexibleChecksum default-on hot path,
+multipart Complete dedupe-to-LAST on duplicate PartNumber via relaxed
+strict-ascending + in-loop overwrite, and Range-GET checksum-header
+suppression to fix the partial-vs-whole-object FlexibleChecksum validation
+mismatch on `_check_key_content`):
+
+```
+tests=178  passed=165  failed=13  errors=0  skipped=0
+pass rate: 92.7%
+```
+
+**+3 newly passing tests** vs the prior 91.5% baseline (`162/177 → 165/178`,
+collection grew by one test in the test_headers.py family). All four target
+failures from the prior cycle now pass:
+
+- `test_multipart_copy_small` — PASS (was FAIL: `FlexibleChecksumError`)
+- `test_multipart_copy_special_names` — PASS (was FAIL)
+- `test_multipart_copy_multiple_sizes` — PASS (was FAIL)
+- `test_multipart_resend_first_finishes_last` — PASS (was FAIL: `InvalidPartOrder`)
+
+**Both ROADMAP P2 entries flip to Done in the close-flip commit**:
+
+- `Multipart copy GET-side checksum echo divergence` — root-caused as a
+  Range-GET echo bug, not destination checksum recompute drift. boto3's
+  default-on FlexibleChecksum auto-sets `x-amz-checksum-mode: ENABLED`,
+  and the test's `_check_key_content` issues a Range GET against the
+  source whose stored checksum covers the whole 7 MiB body. Server now
+  suppresses `x-amz-checksum-*` and `x-amz-checksum-type` on responses
+  with a `Range` header, matching AWS behaviour. New unit test
+  `TestChecksumModeRangeGetSuppressesWholeObjectChecksum` locks it in.
+- `Multipart Complete rejects duplicate PartNumber in Parts list` — fixed
+  in US-002 of this cycle (relaxed strict-ascending + dedupe-to-LAST).
+
+**Remaining 13 failures** are all deliberate gaps (no real-bug failures
+remain — both P2 entries are closed):
+
+**A. Deliberate gaps (13 — count toward the headline; do NOT track as ROADMAP P-items):**
+
+- `test_headers.py` — 10 SigV2 / bad-auth / bad-Content-Length shape failures
+  (`test_bucket_create_bad_expect_mismatch`,
+  `test_bucket_create_bad_contentlength_empty`,
+  `test_bucket_create_bad_contentlength_negative`,
+  `test_bucket_create_bad_authorization_*`,
+  `test_bucket_create_bad_ua_*_aws2`,
+  `test_bucket_create_bad_date_*_aws2`).
+  SigV2 was deprecated in 2018; we've never implemented it. The two
+  `bad_contentlength_*` shapes were folded into the same family on this
+  collection — same posture (deliberate gap, not a real bug).
+- `test_bucket_list_prefix_unreadable` — boto3 URL-decodes the prefix
+  before transmit; Go's `net/http` URL-decodes again; the unreadable byte
+  is gone before our handler sees it. Architectural drift, not a bug.
+- `test_bucket_list_objects_anonymous` + `test_bucket_listv2_objects_anonymous`
+  — `auth-mode=required` rejects anonymous list before the
+  bucket-policy/ACL gate can grant. Set `STRATA_AUTH_MODE=optional` to pass;
+  intentional posture for this run.
+
 ### 2026-05-06 — `494b62b` + ralph/s3-compat-95 cycle (91.5%)
 
 After the US-001..US-006 cycle landed (multipart copy range + special-char

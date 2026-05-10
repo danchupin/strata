@@ -45,7 +45,8 @@ func TestChecksumModeEnabledMultipartComposite(t *testing.T) {
 	h := newHarness(t)
 	h.mustStatus(h.doString("PUT", "/cmk", ""), 200)
 	resp := h.doString("POST", "/cmk/k?uploads", "",
-		"x-amz-checksum-algorithm", algo)
+		"x-amz-checksum-algorithm", algo,
+		"x-amz-checksum-type", "COMPOSITE")
 	h.mustStatus(resp, 200)
 	body := h.readBody(resp)
 	if !strings.Contains(body, "<ChecksumAlgorithm>"+algo+"</ChecksumAlgorithm>") {
@@ -254,6 +255,44 @@ func TestMultipartUseCksumHelperShape(t *testing.T) {
 		}
 		if got := get.Header.Get("x-amz-checksum-type"); got != "COMPOSITE" {
 			t.Errorf("part %d ChecksumType: got %q want COMPOSITE", pn, got)
+		}
+	}
+}
+
+// TestChecksumModeRangeGetSuppressesWholeObjectChecksum locks the AWS-parity
+// Range-GET behaviour: when a client issues a `Range` request with
+// ChecksumMode=ENABLED, the server must NOT echo `x-amz-checksum-*` /
+// `x-amz-checksum-type` because the stored digest covers the whole object
+// while the response body is partial. boto3 1.36+ default-on FlexibleChecksum
+// validation recomputes the digest over the received bytes and rejects with
+// `FlexibleChecksumError` if the partial-vs-whole mismatch leaks through.
+// s3-tests `test_multipart_copy_*` trip this on the source-side ranged GET in
+// `_check_key_content`.
+func TestChecksumModeRangeGetSuppressesWholeObjectChecksum(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/cmk", ""), 200)
+	payload := strings.Repeat("z", 64)
+	digest := sha256.Sum256([]byte(payload))
+	want := base64.StdEncoding.EncodeToString(digest[:])
+	h.mustStatus(h.doString("PUT", "/cmk/k", payload, "x-amz-checksum-sha256", want), 200)
+
+	full := h.doString("GET", "/cmk/k", "", "x-amz-checksum-mode", "ENABLED")
+	h.mustStatus(full, 200)
+	_ = h.readBody(full)
+	if got := full.Header.Get("x-amz-checksum-sha256"); got != want {
+		t.Errorf("full GET checksum echo: got %q want %q", got, want)
+	}
+
+	for _, method := range []string{"HEAD", "GET"} {
+		resp := h.doString(method, "/cmk/k", "",
+			"Range", "bytes=0-9",
+			"x-amz-checksum-mode", "ENABLED")
+		_ = h.readBody(resp)
+		if got := resp.Header.Get("x-amz-checksum-sha256"); got != "" {
+			t.Errorf("%s with Range leaked x-amz-checksum-sha256=%q", method, got)
+		}
+		if got := resp.Header.Get("x-amz-checksum-type"); got != "" {
+			t.Errorf("%s with Range leaked x-amz-checksum-type=%q", method, got)
 		}
 	}
 }

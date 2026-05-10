@@ -36,7 +36,8 @@ func TestMultipartCompleteCompositeChecksumMatch(t *testing.T) {
 			h := newHarness(t)
 			h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
 			resp := h.doString("POST", "/bkt/k?uploads", "",
-				"x-amz-checksum-algorithm", algo)
+				"x-amz-checksum-algorithm", algo,
+				"x-amz-checksum-type", "COMPOSITE")
 			h.mustStatus(resp, 200)
 			uploadID := uploadIDRE.FindStringSubmatch(h.readBody(resp))[1]
 
@@ -67,7 +68,8 @@ func TestMultipartCompleteCompositeChecksumMismatch(t *testing.T) {
 			h := newHarness(t)
 			h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
 			resp := h.doString("POST", "/bkt/k?uploads", "",
-				"x-amz-checksum-algorithm", algo)
+				"x-amz-checksum-algorithm", algo,
+				"x-amz-checksum-type", "COMPOSITE")
 			h.mustStatus(resp, 200)
 			uploadID := uploadIDRE.FindStringSubmatch(h.readBody(resp))[1]
 

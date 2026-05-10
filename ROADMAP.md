@@ -13,7 +13,7 @@ as before:
 - **P2** — meaningful gaps; expected for serious deployments
 - **P3** — nice-to-have, visibility, DX
 
-S3-compatibility headline: **91.5% (162/177)** on the executable subset of `ceph/s3-tests`. See
+S3-compatibility headline: **92.7% (165/178)** on the executable subset of `ceph/s3-tests`. See
 `scripts/s3-tests/README.md` for the gap breakdown.
 
 ---
@@ -44,10 +44,11 @@ adding more, prove what is there.
   CRC32 / CRC32C / CRC64NVME `FULL_OBJECT` composite combine math, multipart Complete
   `If-Match`-on-missing-object → 404 NoSuchKey AWS-parity, suspended-bucket GET
   stale-row dual-probe, missing-bucket DELETE → 404 ahead of auth, ListObjectVersions
-  Owner DisplayName, validate-then-flip on Complete in cassandra+memory). 4 real failures
-  remain (3 multipart-copy GET-side checksum echo, 1 duplicate-PartNumber Complete) —
-  filed as separate P2 entries. See `scripts/s3-tests/README.md` for the per-test gap
-  breakdown. (commit `494b62b`)
+  Owner DisplayName, validate-then-flip on Complete in cassandra+memory). The 4
+  follow-up real failures filed as separate P2 entries below were closed by
+  `ralph/s3-compat-finish` (US-001..US-003), lifting the headline to 92.7%
+  (165/178). See `scripts/s3-tests/README.md` for the per-test gap breakdown.
+  (commit `494b62b`)
 - **P2 — Benchmarks vs RGW.** "Drop-in RGW replacement" is unproven without numbers. Run
   `warp` and `cosbench` against both gateways on the same RADOS cluster. Publish absolute
   latency / throughput per workload class (small-object PUT, large-object GET, listing,
@@ -83,15 +84,20 @@ adding more, prove what is there.
   separate axis (GET-side checksum echo on the destination — see new entry below).
   (commit `968a32a`)
 
-- **P2 — Multipart copy GET-side checksum echo divergence.** Three s3-tests still
-  fail (`test_multipart_copy_small`, `_special_names`, `_multiple_sizes`): GET on
-  the multipart-copied destination object emits an `x-amz-checksum-*` header that
-  does not match the actual stored bytes, so boto3's `FlexibleChecksumError` fires
-  on response read (`Expected checksum X did not match calculated checksum: Y`).
-  Source has random content; dest is built via `UploadPartCopy`. The data plane
-  needs to recompute the destination's per-part / whole-object checksum from the
-  actual stored bytes rather than echoing the source manifest's composite. Surfaced
-  by `ralph/s3-compat-95` rerun.
+- ~~**P2 — Multipart copy GET-side checksum echo divergence.**~~ — **Done.**
+  Root-caused via `ralph/s3-compat-finish` baseline rerun: the failure was NOT
+  destination-side checksum recompute drift but a Range-GET echo bug on the
+  source object. boto3 1.36+ default-on FlexibleChecksum auto-sets
+  `x-amz-checksum-mode: ENABLED` on every GET, the test's `_check_key_content`
+  issues a `bytes=0-N` Range GET on the source, server emitted the
+  whole-object `x-amz-checksum-*` (a stored digest covering every byte) and
+  boto3 validated it against the partial response body — guaranteed mismatch.
+  AWS suppresses checksum echo on Range responses; Strata now does the same
+  in `internal/s3api/server.go::getObject`. US-001 (CRC64NVME / CRC32 / CRC32C
+  empty-type → FULL_OBJECT default at multipart Initiate) and US-003 (Range-GET
+  suppression) together flip all three tests
+  (`test_multipart_copy_small`, `_special_names`, `_multiple_sizes`) green.
+  (commit `d8aa9fa`)
 
 - ~~**P2 — `?partNumber=N` GET quoted-ETag wire shape.**~~ — **Done.** US-002
   flipped the wire shape: `?partNumber=N` GET / HEAD now echoes the WHOLE-OBJECT
@@ -148,17 +154,15 @@ adding more, prove what is there.
   still fails on a separate axis (duplicate PartNumber in Complete XML — see new
   entry below). (commit `ba9368a`)
 
-- **P2 — Multipart Complete rejects duplicate PartNumber in Parts list.**
-  `internal/s3api/multipart.go::completeMultipartUpload` enforces strict-ascending
-  PartNumber via `if p.PartNumber <= prev` and returns `InvalidPartOrder`. The
-  upstream s3-test `test_multipart_resend_first_finishes_last` re-uploads
-  `PartNumber=1` while a prior `PartNumber=1` upload is mid-stream and then sends
-  Complete with a `Parts` list containing BOTH ETags under the same PartNumber.
-  AWS / RGW dedupe duplicates by taking the latest storage-side write; Strata
-  rejects. Fix: relax the strict-ascending check to `p.PartNumber < prev` (allow
-  equal) and dedupe in-handler before the per-part validation, OR validate the
-  LAST ETag for each unique PartNumber against the latest stored part. Surfaced
-  by `ralph/s3-compat-95` rerun.
+- ~~**P2 — Multipart Complete rejects duplicate PartNumber in Parts list.**~~ — **Done.**
+  `internal/s3api/multipart.go::completeMultipart` strict-ascending check
+  relaxed from `<= prev` to `< prev`; on equality the previously appended
+  `meta.CompletePart` is overwritten with the LAST entry's ETag (AWS take-latest
+  semantics) before the per-part walk. Storage-side `meta.Store.SavePart`
+  last-write-wins on all three backends, so the LAST submitted ETag resolves
+  against the LATEST stored part. `[1, 3, 2]` still rejects with
+  `InvalidPartOrder`. s3-test `test_multipart_resend_first_finishes_last` flips
+  to PASS. (commit `d8aa9fa`)
 
 - **P3 — Object Lock `COMPLIANCE` audit log.** `audit_log` (US-022) records all
   state-changing requests, but a denied DELETE under `COMPLIANCE` is not flagged
