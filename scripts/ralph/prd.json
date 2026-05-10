@@ -119,8 +119,8 @@
         "Tests pass (`go test ./...`)"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Quota-reconcile worker landed: new internal/quotareconcile package + cmd/strata/workers/quota_reconcile.go registration. Worker reads STRATA_QUOTA_RECONCILE_INTERVAL (default 6h) at Build time, runs under the supervisor's `quota-reconcile-leader` lease (SkipLease=false). Per tick: ListBuckets → for each bucket walk via paginated ListObjects (latest non-delete-marker only — exactly what bucket_stats represents), sum bytes/objects, sample stats AFTER the walk, drift = walk - stats. Threshold gate (`driftExceedsThreshold`) trips on `objectDrift != 0` OR `|byteDrift| > max(MinDriftBytes=1 MiB, used*MinDriftRatio=0.5%)`. Correction via existing meta.Store.BumpBucketStats(deltaBytes, deltaObjects) so concurrent live PUT/DELETE during reconcile composes atomically (BumpBucketStats is LWT on cassandra / pessimistic-txn on tikv / mutex-guarded on memory — concurrent updates serialize without loss; reconcile only adds the observed delta on top). New Prometheus gauge strata_quota_reconcile_drift_bytes{bucket} published every tick (positive = stats undercount, negative = overcount). Unit tests in internal/quotareconcile/worker_test.go cover bytes-drift correction, objects-drift correction, tiny-drift skip (default threshold), no-drift no-bump, ctx-cancel return, threshold matrix; cmd/strata/workers/quota_reconcile_test.go covers Lookup/Resolve/build/env/missing-meta. Verification: `go vet ./...` clean; `go test ./...` clean."
     },
     {
       "id": "US-008",
