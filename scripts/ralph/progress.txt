@@ -25,4 +25,24 @@ Cycle: ralph/parallel-chunks
 - ROADMAP close-flip: BOTH P2 entries close in the same US-003 commit. Use the `~~**P2 — ...**~~ — **Done.** ... (commit `<pending>`)` shape per CLAUDE.md Roadmap maintenance. Closing SHA backfill on follow-up commit.
 - `tasks/prd-*.md` NOT created for this cycle — narrow 3-story scope, prd.json description suffices.
 - Verification: `go vet ./...`, `go test ./... -race`, `make docs-build`, `scripts/s3-tests/run.sh` (no regression expected on the existing 165/178 baseline — pure data-layer parallelism).
+- US-001 split: parallel scheduler is in NON-build-tagged file `internal/data/rados/parallel.go` (`putChunksParallel` + `putChunksParallelWithChunkSize` + `clampPutConcurrency` + `putConcurrencyFromEnv`). The ceph-tagged `backend.go::PutChunks` is now a thin wrapper that builds a `chunkPutFn` closure (`writeChunk` + `ObserveOp`) and hands it to `putChunksParallel`. Putting the scheduler in a non-tagged file means tests in `parallel_test.go` can exercise it WITHOUT librados — cleanly testable on macOS / non-CI machines.
+- `chunkPutFn` signature: `func(ctx, idx int, body []byte) (data.ChunkRef, error)`. Workers get the gctx (errgroup-scoped); on first error errgroup cancels gctx and remaining workers see ctx.Err() before invoking `putOne`. Reader uses `select { work <-: case <-gctx.Done() }` for dispatch cancel.
+- `putChunksParallelWithChunkSize` accepts an explicit chunkSize so unit tests can use a tiny chunk (e.g. 64 B) — using `data.DefaultChunkSize` (4 MiB) in tests blew past wall-clock budgets due to allocator + memcpy overhead. Production keeps `data.DefaultChunkSize`.
+- Pre-existing flake: `internal/lifecycle/TestThreeReplicaDistribution` is FLAKY on `-count=1` with full suite (verified by stashing — flakes against pristine `f557bdc` too). Not introduced by this cycle. Re-run `go test ./internal/lifecycle/... -count=1` if it fails; ignore in this cycle's CI.
+
+## Sun May 10 23:25:00 MSK 2026 - US-001
+- What was implemented: parallel chunk write worker pool for the RADOS data backend. `internal/data/rados/parallel.go` defines `putChunksParallel(ctx, r, class, concurrency, putOne)` — bounded errgroup of N goroutines consume from an unbuffered work channel; reader goroutine reads chunks in source order, feeds the MD5 hasher in source order, dispatches `(idx, body)` jobs. Workers fill `landed[idx]` slot under a single mutex; final manifest's Chunks slice is in submission (= source byte) order regardless of completion order. ETag = MD5 of byte stream (single-hasher invariant preserved). On any worker / reader error the gctx cancels in-flight workers; partial Chunks slice is returned for `cleanupManifest`. Reader cancel honoured at chunk-read AND dispatch boundaries. `STRATA_RADOS_PUT_CONCURRENCY` env (clamped [1, 256], default 32) read once at Backend constructor (`putConcurrencyFromEnv` from `New`).
+- Files changed:
+  - NEW `internal/data/rados/parallel.go` — non-build-tagged scheduler + env helpers.
+  - NEW `internal/data/rados/parallel_test.go` — non-build-tagged unit tests (race-clean).
+  - MOD `internal/data/rados/backend.go` — `Backend.putConcurrency` field; `New` reads env; `PutChunks` rewritten to wrap `putChunksParallel` with a per-call `chunkPutFn` closure that does `writeChunk` + `ObserveOp`. Removed unused `crypto/md5` / `encoding/hex` imports (now in parallel.go).
+- **Learnings for future iterations:**
+  - Patterns:
+    - When a scheduler / coordination layer needs unit testing but lives behind a build tag (e.g. `//go:build ceph`), extract it into a tag-free file with a function callback for the storage-specific op. Caller in the tagged file binds the callback. Tests exercise the scheduler with a fake callback — no librados / no testcontainers required.
+    - For-range over int (`for range N`) is the modern Go 1.22+ idiom for fixed-count loops; lint flags `for i := 0; i < N; i++`. Use the modern form in fresh code.
+  - Gotchas:
+    - `time.Sleep`-based parallel-throughput tests with 4 MiB chunks blow past wall-clock budgets due to allocator + memcpy overhead in the reader goroutine. Parameterise `chunkSize` in the helper so tests can drop to 64 B chunks. Production callers keep `data.DefaultChunkSize`.
+    - `errgroup` workers consuming from a shared channel race against ctx-cancel: by the time a worker reads a job and starts to invoke `putOne`, gctx may have been cancelled by another worker's error. Workers must `select`/check `gctx.Err()` BEFORE invoking the storage op so they don't leak partial writes. Tests asserting "≥ 1 chunk landed" are racey — assert "all OIDs in m.Chunks correspond to actual landed writes" instead.
+    - `internal/lifecycle/TestThreeReplicaDistribution` is a pre-existing flake on `-count=1` with full suite; not related to data-layer changes. Verify with `git stash + go test` against the prior SHA before debugging.
+---
 

@@ -4,8 +4,6 @@ package rados
 
 import (
 	"context"
-	"crypto/md5"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -26,6 +24,11 @@ type Backend struct {
 	logger   *slog.Logger
 	metrics  Metrics
 	tracer   trace.Tracer
+
+	// putConcurrency caps the per-PutChunks worker pool that dispatches
+	// chunk writes to RADOS. Read once at New from
+	// STRATA_RADOS_PUT_CONCURRENCY (default 32, clamped to [1, 256]).
+	putConcurrency int
 
 	mu      sync.Mutex
 	conns   map[string]*goceph.Conn
@@ -54,13 +57,14 @@ func New(cfg Config) (data.Backend, error) {
 		return nil, err
 	}
 	return &Backend{
-		clusters: clusters,
-		classes:  classes,
-		logger:   cfg.Logger,
-		metrics:  cfg.Metrics,
-		tracer:   cfg.Tracer,
-		conns:    make(map[string]*goceph.Conn),
-		ioctxes:  make(map[string]*goceph.IOContext),
+		clusters:       clusters,
+		classes:        classes,
+		logger:         cfg.Logger,
+		metrics:        cfg.Metrics,
+		tracer:         cfg.Tracer,
+		putConcurrency: putConcurrencyFromEnv(),
+		conns:          make(map[string]*goceph.Conn),
+		ioctxes:        make(map[string]*goceph.IOContext),
 	}, nil
 }
 
@@ -168,53 +172,29 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 	if err != nil {
 		return nil, err
 	}
-	if class == "" {
-		class = "STANDARD"
-	}
-	m := &data.Manifest{
-		Class:     class,
-		ChunkSize: data.DefaultChunkSize,
-	}
-	hash := md5.New()
-	buf := make([]byte, data.DefaultChunkSize)
 	objID := uuid.NewString()
-	idx := 0
-	for {
-		if err := ctx.Err(); err != nil {
-			b.cleanupManifest(ctx, m.Chunks)
-			return nil, err
+	putOne := func(opCtx context.Context, idx int, body []byte) (data.ChunkRef, error) {
+		oid := fmt.Sprintf("%s.%05d", objID, idx)
+		start := time.Now()
+		werr := writeChunk(ioctx, oid, body)
+		ObserveOp(opCtx, b.logger, b.metrics, b.tracer, spec.Pool, "put", oid, start, werr)
+		if werr != nil {
+			return data.ChunkRef{}, werr
 		}
-		n, rerr := io.ReadFull(r, buf)
-		if n > 0 {
-			oid := fmt.Sprintf("%s.%05d", objID, idx)
-			chunk := buf[:n]
-			start := time.Now()
-			werr := writeChunk(ioctx, oid, chunk)
-			ObserveOp(ctx, b.logger, b.metrics, b.tracer, spec.Pool, "put", oid, start, werr)
-			if werr != nil {
-				b.cleanupManifest(ctx, m.Chunks)
-				return nil, werr
-			}
-			hash.Write(chunk)
-			m.Chunks = append(m.Chunks, data.ChunkRef{
-				Cluster:   spec.Cluster,
-				Pool:      spec.Pool,
-				Namespace: spec.Namespace,
-				OID:       oid,
-				Size:      int64(n),
-			})
-			m.Size += int64(n)
-			idx++
-		}
-		if errors.Is(rerr, io.EOF) || errors.Is(rerr, io.ErrUnexpectedEOF) {
-			break
-		}
-		if rerr != nil {
-			b.cleanupManifest(ctx, m.Chunks)
-			return nil, rerr
-		}
+		return data.ChunkRef{
+			Cluster:   spec.Cluster,
+			Pool:      spec.Pool,
+			Namespace: spec.Namespace,
+			OID:       oid,
+			Size:      int64(len(body)),
+		}, nil
 	}
-	m.ETag = hex.EncodeToString(hash.Sum(nil))
+
+	m, err := putChunksParallel(ctx, r, class, b.putConcurrency, putOne)
+	if err != nil {
+		b.cleanupManifest(ctx, m.Chunks)
+		return nil, err
+	}
 	return m, nil
 }
 

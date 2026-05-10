@@ -22,8 +22,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in internal/data/rados/parallel.go (putChunksParallel + putConcurrencyFromEnv) and wired into internal/data/rados/backend.go::PutChunks. Concurrency knob STRATA_RADOS_PUT_CONCURRENCY [1,256] default 32 read at Backend constructor time. Unit tests in internal/data/rados/parallel_test.go (no build tag, ceph-free) cover source-byte-order preservation, ETag-MD5 invariant, parallel wall-clock claim, error-cancel + cleanup, reader cancel, completion-out-of-order ordering, env clamping. Race-detector clean."
     },
     {
       "id": "US-002",
