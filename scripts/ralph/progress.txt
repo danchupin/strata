@@ -211,3 +211,25 @@ Cycle: ralph/race-harness
   - The shell-script test in internal/racetest fits next to the Go-side racetest tests because the JSONL schema is owned by racetest (events.go); summarize.sh consumes that schema, so co-locating the test keeps the schema/consumer pair under one CI gate. Future schema changes will surface as a summarize_test failure before any nightly run.
   - Bash-only features used: `[[ ]]`, mktemp -d, bash arrays in run.sh (separate file). The shebang is `#!/usr/bin/env bash` not `#!/bin/sh` for compatibility with `set -eu` + arithmetic comparisons + the `${VAR:-default}` shape; ubuntu-latest ships bash so this is fine. Pure-POSIX would be possible but more cumbersome.
 ---
+
+## [2026-05-10 20:40 MSK] - US-009
+- Implemented: ROADMAP P1 close-flip + zero-inconsistency baseline + legacy PRD removal.
+- Files changed:
+  - new: `docs/racecheck/baseline-2026-05.md` — human-readable baseline. Carries SUMMARY.md content from a 45 s in-process run via `go run ./scripts/racecheck/genbaseline -duration=45s -concurrency=12 -dir=/tmp/baseline`: 456 429 ops, 0 inconsistencies, ~9.9 k ops/sec, all 8 op classes ≥ 22 k, p99 ≤ 12 ms (multipart) / ≤ 8 ms (rest). Doc explicitly marks `commit SHA` + `workflow run` as `<pending>` — backfilled by the close-flip follow-up commit on `main` once the first scheduled `race-nightly` run completes.
+  - new: `scripts/racecheck/genbaseline/main.go` — opt-in developer helper (single binary, ~140 LoC). Spins up an in-process `httptest` gateway with `auth.ModeRequired` + static credential, runs `racetest.Run` for `-duration` with `racetest.DefaultMix`, writes `race.jsonl` + a stubbed `host.txt` shaped like `scripts/racecheck/run.sh`'s sections so `summarize.sh` parses cleanly. Not invoked by `make build` / CI / `make race-soak` — purely for refreshing the baseline doc.
+  - edit: `ROADMAP.md` — flipped P1 entry to `~~**P1 — Race harness as a real test, not a gate.**~~ — **Done.** ... (commit `<pending>`)`. Summary names every cycle deliverable (racetest carve-out, strata-racecheck binary, extended workload + oracles, ci-profile compose, race-soak script, race-nightly workflow, baseline doc).
+  - delete: `tasks/prd-race-harness.md` — removed per CLAUDE.md PRD-lifecycle rule. Canonical record stays in the Ralph snapshot at `scripts/ralph/archive/<YYYY-MM-DD>-race-harness/{prd.json,progress.txt}` after `archive_cycle` fires on `<promise>COMPLETE</promise>`.
+  - edit: `scripts/ralph/prd.json` — US-009 passes=true, full notes.
+- Quality checks:
+  - `go vet ./...` clean
+  - `go build ./...` clean
+  - `go test -count=1 -timeout=120s -run TestRunCleanRunNoInconsistencies ./internal/racetest/` green (12.7s)
+  - `go test -count=1 -timeout=120s -run TestRunSmokeBinary ./cmd/strata-racecheck/` green (2.9s)
+  - Full `go test -count=1 -timeout=600s ./...` — all racetest + s3api + storetest + cmd packages green; one pre-existing flake in `internal/lifecycle/distribute_test.go::TestThreeReplicaDistribution` (random-uuid hash-distribution test, fails ~1% under load — passed 3/3 in isolation; unrelated to this story).
+- **Learnings for future iterations:**
+  - `genbaseline` is a developer helper, not a CI artefact. It uses the in-process httptest gateway (no Docker), so the host snapshot in the SUMMARY.md is stubbed (1.0G/100M disk, 7000/2000 mem). The baseline doc explicitly calls this out and points operators to the nightly workflow for real host metrics.
+  - `auth.NewMultiStore(time.Minute, store)` + `auth.Middleware{Store: multi, Mode: auth.ModeRequired}` is the canonical wiring for spinning up an httptest gateway with static credentials. `s3api.NewAuthDenyHandler(api.Meta)` is the second arg to `mw.Wrap` — without it 4xx responses lose their AWS-shaped XML. Mirrored from `internal/racetest/runner_test.go::TestRunStreamingSigV4`.
+  - When ROADMAP-flipping under Ralph: leave commit SHA as `<pending>`. The same close-flip commit cannot embed its own SHA; CLAUDE.md "Commits and PRs" calls out commit-then-amend is undesirable, so the immediate follow-up commit on `main` carries the SHA edit. Same convention applies to baseline-doc workflow link / commit-SHA rows.
+  - The full-suite `go test ./...` has historical flakes in `internal/lifecycle` (random-uuid distribution sensitivity) and `internal/racetest` (concurrent test execution clashes when --count=1 hits multiple long-duration tests in parallel). Both pass in isolation and on focused re-runs. Don't conflate these with cycle-introduced regressions — verify via `-run <TestName>` before filing a P-entry.
+  - Stash gotcha: `git stash --keep-index --include-untracked` with no staged changes pulls every modification into the stash (tested vs `git stash --include-untracked` which behaves the same). Restore via `git stash pop` and verify with `git status --short` before continuing — system reminders surface conflicting in-context file states as a side effect.
+---

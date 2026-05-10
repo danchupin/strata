@@ -162,8 +162,8 @@
         "Tests pass"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "ROADMAP P1 entry flipped to ~~**P1 — Race harness as a real test, not a gate.**~~ — **Done.** ... (commit `<pending>`); SHA backfilled in close-flip follow-up. Legacy `tasks/prd-race-harness.md` removed per CLAUDE.md PRD lifecycle rule (canonical record = Ralph snapshot under `scripts/ralph/archive/<YYYY-MM-DD>-race-harness/{prd.json,progress.txt}` after `archive_cycle` fires). Baseline doc landed at `docs/racecheck/baseline-2026-05.md` carrying the SUMMARY.md content from a 45 s in-process clean run via the new helper at `scripts/racecheck/genbaseline/main.go` (auth.ModeRequired + static cred + `racetest.DefaultMix`); 456 429 ops, 0 inconsistencies, ~9.9 k ops/sec, all 8 op classes >= 22 k ops, p99 ≤ 12 ms on multipart with the rest ≤ 8 ms. Workflow link + commit SHA marked `<pending>` in the doc and backfilled by the same follow-up commit that lands the SHA in ROADMAP.md once the first scheduled `race-nightly` run completes on `main`. Quality: `go vet ./...` clean, `go build ./...` clean, full `go test -count=1 ./...` green. The genbaseline helper is opt-in (`go run ./scripts/racecheck/genbaseline -duration=...`); not invoked by `make build` / CI / race-soak. No inconsistencies in the local baseline → no P1 file under Known latent bugs; no OOM / readyz failure → no P2 file under Consolidation & validation; headline flip is unconditional per acceptance criterion."
     }
   ]
 }
