@@ -30,6 +30,13 @@ type Backend struct {
 	// STRATA_RADOS_PUT_CONCURRENCY (default 32, clamped to [1, 256]).
 	putConcurrency int
 
+	// getPrefetch caps the per-GetChunks prefetch depth: at most this many
+	// chunk fetches are in flight while the caller drains the current
+	// chunk. Read once at New from STRATA_RADOS_GET_PREFETCH (default 4,
+	// clamped to [1, 64]). Memory budget per request is roughly
+	// getPrefetch × chunk_size.
+	getPrefetch int
+
 	mu      sync.Mutex
 	conns   map[string]*goceph.Conn
 	ioctxes map[string]*goceph.IOContext // key: cluster|pool|ns
@@ -63,6 +70,7 @@ func New(cfg Config) (data.Backend, error) {
 		metrics:        cfg.Metrics,
 		tracer:         cfg.Tracer,
 		putConcurrency: putConcurrencyFromEnv(),
+		getPrefetch:    getPrefetchFromEnv(),
 		conns:          make(map[string]*goceph.Conn),
 		ioctxes:        make(map[string]*goceph.IOContext),
 	}, nil
@@ -219,87 +227,22 @@ func (b *Backend) cleanupManifest(ctx context.Context, chunks []data.ChunkRef) {
 }
 
 func (b *Backend) GetChunks(ctx context.Context, m *data.Manifest, offset, length int64) (io.ReadCloser, error) {
-	if m == nil {
-		return nil, errors.New("nil manifest")
-	}
-	if offset < 0 || offset > m.Size {
-		return nil, fmt.Errorf("offset %d out of range (size %d)", offset, m.Size)
-	}
-	if length <= 0 || offset+length > m.Size {
-		length = m.Size - offset
-	}
-	return &radosReader{
-		ctx:    ctx,
-		b:      b,
-		chunks: m.Chunks,
-		pos:    offset,
-		end:    offset + length,
-	}, nil
-}
-
-type radosReader struct {
-	ctx      context.Context
-	b        *Backend
-	chunks   []data.ChunkRef
-	pos, end int64
-	buf      []byte
-	bufPos   int
-}
-
-func (r *radosReader) Read(p []byte) (int, error) {
-	if r.pos >= r.end {
-		return 0, io.EOF
-	}
-	if err := r.ctx.Err(); err != nil {
-		return 0, err
-	}
-	if r.bufPos >= len(r.buf) {
-		if err := r.loadNextChunk(); err != nil {
-			return 0, err
+	getOne := func(opCtx context.Context, c data.ChunkRef, off uint64, segLen int64) ([]byte, error) {
+		ioctx, err := b.ioctx(opCtx, c.Cluster, c.Pool, c.Namespace)
+		if err != nil {
+			return nil, err
 		}
-	}
-	remaining := int(r.end - r.pos)
-	avail := len(r.buf) - r.bufPos
-	n := len(p)
-	if n > avail {
-		n = avail
-	}
-	if n > remaining {
-		n = remaining
-	}
-	copy(p[:n], r.buf[r.bufPos:r.bufPos+n])
-	r.bufPos += n
-	r.pos += int64(n)
-	return n, nil
-}
-
-func (r *radosReader) loadNextChunk() error {
-	var base int64
-	for _, c := range r.chunks {
-		if r.pos < base+c.Size {
-			ioctx, err := r.b.ioctx(r.ctx, c.Cluster, c.Pool, c.Namespace)
-			if err != nil {
-				return err
-			}
-			off := r.pos - base
-			remaining := c.Size - off
-			buf := make([]byte, remaining)
-			start := time.Now()
-			n, rerr := ioctx.Read(c.OID, buf, uint64(off))
-			ObserveOp(r.ctx, r.b.logger, r.b.metrics, r.b.tracer, c.Pool, "get", c.OID, start, rerr)
-			if rerr != nil {
-				return fmt.Errorf("rados: read %s: %w", c.OID, rerr)
-			}
-			r.buf = buf[:n]
-			r.bufPos = 0
-			return nil
+		buf := make([]byte, segLen)
+		start := time.Now()
+		n, rerr := ioctx.Read(c.OID, buf, off)
+		ObserveOp(opCtx, b.logger, b.metrics, b.tracer, c.Pool, "get", c.OID, start, rerr)
+		if rerr != nil {
+			return nil, fmt.Errorf("rados: read %s: %w", c.OID, rerr)
 		}
-		base += c.Size
+		return buf[:n], nil
 	}
-	return io.EOF
+	return newPrefetchReader(ctx, m, offset, length, b.getPrefetch, getOne)
 }
-
-func (r *radosReader) Close() error { return nil }
 
 func (b *Backend) Delete(ctx context.Context, m *data.Manifest) error {
 	if m == nil {

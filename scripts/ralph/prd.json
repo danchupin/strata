@@ -44,8 +44,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in internal/data/rados/prefetch.go (newPrefetchReader + chunkGetFn callback + getPrefetchFromEnv + clampGetPrefetch). backend.go::GetChunks now builds a chunkGetFn closure that owns ioctx.Read + ObserveOp and returns a prefetchReader. Knob STRATA_RADOS_GET_PREFETCH [1,64] default 4 read once at Backend constructor. Memory bounded by depth × chunk_size: dispatcher acquires sem token before launching fetcher; reader releases token after consuming. Range GET selects only the chunks that overlap [offset, offset+length) and reads partial bytes for the first/last chunks (off + segLen passed to chunkGetFn). Close cancels in-flight fetches via ctx + waits for goroutines to exit. Tests in internal/data/rados/prefetch_test.go (no build tag) cover full-read byte equality, range GET (6 cases), parallel wall-clock claim (depth=4, 32 chunks, ~5ms perOp finishes well under sequential ceiling), client-cancel goroutine leak (NumGoroutine returns to baseline within 500ms), parent-ctx cancel, fetch-error propagation, empty range, out-of-range offset, prefetch window stops at last needed chunk, env clamping. Race-detector clean. The legacy radosReader type is retired (replaced wholesale by prefetchReader); behaviour is preserved for sequential range-GET / EOF / multi-cluster ioctx fan-out."
     },
     {
       "id": "US-003",
