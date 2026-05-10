@@ -70,6 +70,11 @@ var (
 	ErrInvalidArgument     = APIError{Code: "InvalidArgument", Message: "Invalid argument", Status: http.StatusBadRequest}
 	ErrNotImplemented      = APIError{Code: "NotImplemented", Message: "A header you provided implies functionality that is not implemented", Status: http.StatusNotImplemented}
 	ErrInternal            = APIError{Code: "InternalError", Message: "We encountered an internal error", Status: http.StatusInternalServerError}
+	// ErrQuotaExceeded is the gateway-level response for any write that
+	// breaches a configured BucketQuota or UserQuota (US-006). HTTP 403 with
+	// the non-AWS S3 code "QuotaExceeded" — RGW-compatible per ROADMAP so
+	// drop-in clients that already understand the code keep working.
+	ErrQuotaExceeded       = APIError{Code: "QuotaExceeded", Message: "Quota exceeded for bucket / user", Status: http.StatusForbidden}
 )
 
 type errorXML struct {

@@ -154,6 +154,16 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Buck
 		s.uploadPartCopy(w, r, b, uploadID, mu, partNumber)
 		return
 	}
+	if r.ContentLength > 0 {
+		if qerr := s.checkQuota(r.Context(), b, quotaWriteIntent{AddBytes: r.ContentLength}); qerr != nil {
+			if errors.Is(qerr, meta.ErrQuotaExceeded) {
+				writeError(w, r, ErrQuotaExceeded)
+				return
+			}
+			writeError(w, r, ErrInternal)
+			return
+		}
+	}
 	checksumEntries, cerr := parseRequestChecksums(r)
 	if cerr != nil {
 		writeError(w, r, ErrInvalidArgument)
@@ -467,6 +477,7 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		byNumber[p.PartNumber] = p
 	}
 	requested := make([]*checksumPart, 0, len(parts))
+	var totalSize int64
 	for i, p := range parts {
 		sp, ok := byNumber[p.PartNumber]
 		if !ok {
@@ -477,7 +488,27 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 			writeError(w, r, ErrEntityTooSmall)
 			return
 		}
+		totalSize += sp.Size
 		requested = append(requested, &checksumPart{Checksums: sp.Checksums, Size: sp.Size})
+	}
+	completeIntent := quotaWriteIntent{
+		AddBytes:       totalSize,
+		AddObjects:     1,
+		PerObjectBytes: totalSize,
+	}
+	if !meta.IsVersioningActive(b.Versioning) {
+		if prior, gerr := s.Meta.GetObject(r.Context(), b.ID, key, ""); gerr == nil && prior != nil {
+			completeIntent.AddBytes = totalSize - prior.Size
+			completeIntent.AddObjects = 0
+		}
+	}
+	if qerr := s.checkQuota(r.Context(), b, completeIntent); qerr != nil {
+		if errors.Is(qerr, meta.ErrQuotaExceeded) {
+			writeError(w, r, ErrQuotaExceeded)
+			return
+		}
+		writeError(w, r, ErrInternal)
+		return
 	}
 	composite := composeMultipartChecksums(requested, mu.ChecksumType)
 

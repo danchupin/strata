@@ -421,6 +421,14 @@ func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request, bucket str
 			return
 		}
 		owner := auth.FromContext(r.Context()).Owner
+		if qerr := s.checkUserBucketQuota(r.Context(), owner); qerr != nil {
+			if errors.Is(qerr, meta.ErrQuotaExceeded) {
+				writeError(w, r, ErrQuotaExceeded)
+				return
+			}
+			writeError(w, r, ErrInternal)
+			return
+		}
 		_, err := s.Meta.CreateBucket(r.Context(), bucket, owner, "STANDARD")
 		if errors.Is(err, meta.ErrBucketAlreadyExists) {
 			if existing, gerr := s.Meta.GetBucket(r.Context(), bucket); gerr == nil {
@@ -916,6 +924,27 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	class := r.Header.Get("x-amz-storage-class")
 	if class == "" {
 		class = b.DefaultClass
+	}
+	if r.ContentLength >= 0 {
+		intent := quotaWriteIntent{
+			AddBytes:       r.ContentLength,
+			AddObjects:     1,
+			PerObjectBytes: r.ContentLength,
+		}
+		if !meta.IsVersioningActive(b.Versioning) {
+			if prior, gerr := s.Meta.GetObject(r.Context(), b.ID, key, ""); gerr == nil && prior != nil {
+				intent.AddBytes = r.ContentLength - prior.Size
+				intent.AddObjects = 0
+			}
+		}
+		if qerr := s.checkQuota(r.Context(), b, intent); qerr != nil {
+			if errors.Is(qerr, meta.ErrQuotaExceeded) {
+				writeError(w, r, ErrQuotaExceeded)
+				return
+			}
+			writeError(w, r, ErrInternal)
+			return
+		}
 	}
 	checksumEntries, cerr := parseRequestChecksums(r)
 	if cerr != nil {

@@ -80,6 +80,13 @@ var (
 	ErrNoRewrapProgress        = errors.New("no rewrap progress recorded for bucket")
 	ErrAdminJobNotFound        = errors.New("admin job not found")
 	ErrAdminJobAlreadyExists   = errors.New("admin job already exists")
+	// ErrQuotaExceeded signals that a write would exceed a configured
+	// per-bucket or per-user quota (US-006). Surfaced from the gateway as
+	// HTTP 403 / S3 code "QuotaExceeded" — non-AWS but matches the RGW shape
+	// so existing tooling that already understands the code keeps working.
+	// Returned today only by gateway-level enforcement helpers; backend
+	// stores never raise it directly.
+	ErrQuotaExceeded           = errors.New("quota exceeded")
 )
 
 // AdminJob tracks a long-running operator-facing background job kicked off by

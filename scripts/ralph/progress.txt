@@ -18,6 +18,8 @@ Cycle: ralph/bucket-quotas-billing
 - Quota check happens BEFORE writing data (PUT-validate time). Live source-of-truth is `bucket_stats` (bucket scope) + sum-across-user-buckets (user scope). v1 user-scope check uses `ListBuckets(ctx, owner)` walk; denormalised user_bucket_count is a P3 follow-up.
 - `byte_seconds × 24h` rollup is intentionally crude v1 approximation. Document the caveat in `docs/site/content/best-practices/quotas-billing.md`. Continuous integration is a P3 follow-up.
 - Out of scope this cycle: invoice ledger / payment integration. Stop at the `usage_aggregates` feed.
+- Quota enforcement (US-006) is gateway-side, not backend-side. Helper `internal/s3api/quota.go::checkQuota(ctx, bucket, quotaWriteIntent)` is the single entry point; new write paths (CopyObject, server-side copy, etc.) MUST call it BEFORE any `data.PutChunks`. CreateBucket uses `checkUserBucketQuota` for the MaxBuckets cap.
+- Tests that need an `r.ContentLength` populated MUST use `bytes.NewReader([]byte)` (or `*strings.Reader`/`*bytes.Buffer`). A custom `io.Reader` like `byteReader([]byte)` produces `Request.ContentLength == -1` because Go's HTTP client only fills it for length-knowing readers — the quota pre-check (and any other ContentLength-gated logic) silently no-ops.
 - Quota wire codec lives in `internal/meta/quota.go` — `EncodeBucketQuota` / `DecodeBucketQuota` + user variants. JSON-shaped so additive fields land without an ALTER. All three backends share it.
 - "Not configured" for quota Get is signalled by `(zero-value, false, nil)`, never a sentinel error — gateway PUT-validate stays branch-on-bool.
 - Per-user single-blob configs need a parallel triple keyed on `userName` (string). Cassandra: dedicated table (e.g. `user_quota`). TiKV: dedicated key prefix (e.g. `prefixUserQuota`) + helper like `UserQuotaKey`. Memory: `map[string][]byte` field.
@@ -95,3 +97,33 @@ Cycle: ralph/bucket-quotas-billing
   - TiKV `CompleteMultipartUpload` does NOT delegate to PutObject (unlike cassandra). It inlines the object write to keep the multipart cleanup atomic with the object materialise inside one pessimistic txn. Any new accounting (e.g. usage_aggregates emit) needs explicit wiring in BOTH PutObject AND CompleteMultipartUpload on the TiKV side, but only PutObject on cassandra side.
   - Local cassandra integration on macOS+Lima has multiple pre-existing failing cases (VersioningNullSentinel, OnlineReshard, GCQueueShardFanOut). Always git-stash before claiming a regression; many failures are environment-dependent (LOCAL_QUORUM behavior on a single-node testcontainer, lima docker timing, etc.) and not the cycle's responsibility.
 ---
+
+## 2026-05-10 - US-006
+- Added `meta.ErrQuotaExceeded` sentinel + `s3api.ErrQuotaExceeded` APIError (HTTP 403, S3 code `QuotaExceeded`, message "Quota exceeded for bucket / user"). Non-AWS but RGW-compatible per ROADMAP.
+- New `internal/s3api/quota.go`:
+  - `quotaWriteIntent{AddBytes, AddObjects, PerObjectBytes}` describes a single write's size impact.
+  - `checkQuota(ctx, bucket, intent)` enforces BucketQuota (MaxBytes / MaxObjects / MaxBytesPerObject) and UserQuota.TotalMaxBytes. Source-of-truth: `bucket_stats` (US-004 counter); user-scope sums via `ListBuckets(ctx, owner)` walk per the v1 plan (CLAUDE.md note — denormalised user_bucket_count is a P3 follow-up).
+  - `checkUserBucketQuota(ctx, owner)` enforces UserQuota.MaxBuckets at CreateBucket time. Reads `ListBuckets` for the count.
+  - "Zero ⇒ unlimited" matches AWS / RGW so an unset field never blocks.
+- Wired into hot paths:
+  - `putObject` (server.go): pre-check using `r.ContentLength` for AddBytes / PerObjectBytes; unversioned-overwrite subtracts prior `meta.Object.Size` so AddObjects=0 and AddBytes=Δ.
+  - `uploadPart` (multipart.go): running BucketBytes/UserBytes only — no per-object cap (Complete-time check covers it). AddBytes only is set so AddObjects=0.
+  - `completeMultipart` (multipart.go): sum-of-parts vs MaxBytesPerObject + MaxBytes + MaxObjects (+1 unless unversioned overwrite, which subtracts prior size like putObject does).
+  - `handleBucket` PUT (server.go): MaxBuckets check via `checkUserBucketQuota` BEFORE `Meta.CreateBucket`.
+- Tests in `internal/s3api/quota_test.go` (memory backend, harness-driven):
+  - PUT under quota / at quota / past bytes / past objects / past per-object — all green.
+  - Overwrite of same unversioned key past quota — verifies the prior-size subtraction.
+  - CreateBucket past UserQuota.MaxBuckets — 403.
+  - PUT past UserQuota.TotalMaxBytes (across two buckets) — 403.
+  - Multipart Complete past MaxBytesPerObject — 403.
+  - UploadPart past MaxBytes — 403.
+- Verification: `go vet ./...` clean; `go test ./...` clean (one pre-existing flaky failure in `internal/lifecycle::TestThreeReplicaDistribution` confirmed via git-stash bisect — fails without the cycle's changes too); `go test -race ./internal/s3api/ ./internal/meta/...` clean.
+- Files changed: `internal/meta/store.go` (sentinel), `internal/s3api/errors.go` (APIError), `internal/s3api/quota.go` (new), `internal/s3api/server.go` (putObject + CreateBucket wires), `internal/s3api/multipart.go` (uploadPart + completeMultipart wires), `internal/s3api/quota_test.go` (new), `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - `r.ContentLength` is `-1` when the client uses chunked transfer encoding (Go's net/http server populates it from the `Content-Length` header only). Pre-write quota check is best-effort — chunked PUTs bypass the gate today and would only be caught by the post-write `bucket_stats` decrement. v1 acceptable; document if a future story needs strict enforcement (would require buffering or post-write reject + delete).
+  - `byteReader([]byte)` (an arbitrary `io.Reader` over a slice) is NOT detected by Go's HTTP client as a length-bearing reader; resulting `Request.ContentLength == -1`. Tests that need ContentLength set MUST use `bytes.NewReader([]byte)` (or `*strings.Reader` / `*bytes.Buffer`). The first iteration of `TestUploadPartPastQuotaRejected` failed with 200 instead of 403 because byteReader got chunked-encoded.
+  - The "unversioned-overwrite subtracts prior size" pattern is the same shape `BumpBucketStats`'s hot-path wiring uses (US-005's `bucketStatsDelta`); both look at the latest-by-cluster's `Size`. Future quota-related hot paths (e.g. CopyObject, PUT via server-side copy) must apply the same Δ subtraction or quotas will spuriously block legitimate overwrites.
+  - User-scope quota check (`UserQuota.TotalMaxBytes`) does an O(N-buckets-per-user) fan-out with one `GetBucketStats` per bucket. Acceptable for v1; the P3 follow-up is to denormalise `user_bytes_used` into a single counter row and bump it from `BumpBucketStats`. Today the fan-out happens on every PUT to any bucket the user owns — if someone owns 1k buckets, that's 1k storage round-trips per PUT, so the denormalisation matters more than the prd's "P3 follow-up" tag suggests.
+  - `multipartMinPartSize` defaults to 5 MiB; `s3api.SetMultipartMinPartSizeForTest(1)` lowers it for tests that exercise multipart Complete with tiny bodies. Without it, the Complete handler rejects all-but-last parts < 5 MiB with `EntityTooSmall`.
+---
+

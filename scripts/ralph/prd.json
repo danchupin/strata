@@ -100,8 +100,8 @@
         "Tests pass (`go test ./...`)"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Quota gateway-side enforcement landed: new sentinel meta.ErrQuotaExceeded + APIError ErrQuotaExceeded (HTTP 403 / S3 code 'QuotaExceeded' RGW-shape). New helpers internal/s3api/quota.go::checkQuota (per-write BucketQuota.MaxBytes/MaxObjects/MaxBytesPerObject + UserQuota.TotalMaxBytes) and checkUserBucketQuota (CreateBucket-side UserQuota.MaxBuckets). Wired into putObject (Content-Length pre-check; unversioned-overwrite subtracts prior size so AddObjects=0 / AddBytes=Δ), uploadPart (running BucketBytes/UserBytes only, no per-object cap), completeMultipart (sum-of-part-sizes vs MaxBytesPerObject + bucket/user bytes + objects+1 unless unversioned overwrite), and CreateBucket. Source-of-truth: bucket_stats (US-004/US-005); user-scope sums via ListBuckets walk per CLAUDE.md note. Memory-only unit tests in internal/s3api/quota_test.go cover under-quota / at-quota / over-quota / per-object cap / overwrite-no-double-count / multipart-complete-over-cap / uploadPart-over-cap / CreateBucket MaxBuckets / user TotalMaxBytes."
     },
     {
       "id": "US-007",
