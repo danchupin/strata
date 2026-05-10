@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	tccassandra "github.com/testcontainers/testcontainers-go/modules/cassandra"
 	"github.com/google/uuid"
+	tccassandra "github.com/testcontainers/testcontainers-go/modules/cassandra"
 
 	"github.com/danchupin/strata/internal/auth"
 	datamem "github.com/danchupin/strata/internal/data/memory"
@@ -20,6 +20,7 @@ import (
 	"github.com/danchupin/strata/internal/meta/cassandra"
 	"github.com/danchupin/strata/internal/meta/tikv"
 	"github.com/danchupin/strata/internal/meta/tikv/tikvtest"
+	"github.com/danchupin/strata/internal/racetest"
 	"github.com/danchupin/strata/internal/s3api"
 )
 
@@ -72,12 +73,12 @@ func TestRaceMixedOpsCassandra(t *testing.T) {
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 
-	f := &raceFixture{
-		server:  api,
-		ts:      ts,
-		client:  newRaceClient(),
-		memData: d,
-		allVersions: func(bucketID uuid.UUID) []*meta.Object {
+	f := &racetest.Fixture{
+		Server:  api,
+		TS:      ts,
+		Client:  racetest.NewClient(racetest.Workers),
+		MemData: d,
+		AllVersions: func(bucketID uuid.UUID) []*meta.Object {
 			out, err := store.AllObjectVersions(context.Background(), bucketID)
 			if err != nil {
 				t.Errorf("all object versions: %v", err)
@@ -87,8 +88,8 @@ func TestRaceMixedOpsCassandra(t *testing.T) {
 		},
 	}
 
-	runRaceScenario(t, f)
-	verifyRaceInvariants(t, f)
+	racetest.RunScenario(t, f)
+	racetest.VerifyInvariants(t, f)
 }
 
 var raceKeyspaceSeq int64
@@ -100,13 +101,13 @@ var raceKeyspaceSeq int64
 // internal/meta/tikv/tikvtest).
 //
 // Workload size scales with RACE_WORKERS / RACE_ITERS / RACE_KEYS env vars
-// (see race_test.go envIntDefault). Defaults match the memory/Cassandra
+// (see racetest.envIntDefault). Defaults match the memory/Cassandra
 // variants so a vanilla `go test -tags integration` run is comparable across
 // backends. `make race-soak-tikv` dials RACE_ITERS up for sustained soaks.
 //
 // Concurrent versioning flips, multipart Completes, and DeleteObjects races
 // are expected to produce the same observable behaviour as the
-// Cassandra-backed run — verifyRaceInvariants asserts (a) exactly one
+// Cassandra-backed run — racetest.VerifyInvariants asserts (a) exactly one
 // IsLatest=true row per touched key, (b) the latest row carries an Mtime no
 // older than any other row in the chain (1s slack), and (c) every chunk in
 // the data backend is referenced by some object manifest OR sits in the GC
@@ -144,12 +145,12 @@ func TestRaceMixedOpsTiKV(t *testing.T) {
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 
-	f := &raceFixture{
-		server:  api,
-		ts:      ts,
-		client:  newRaceClient(),
-		memData: d,
-		allVersions: func(bucketID uuid.UUID) []*meta.Object {
+	f := &racetest.Fixture{
+		Server:  api,
+		TS:      ts,
+		Client:  racetest.NewClient(racetest.Workers),
+		MemData: d,
+		AllVersions: func(bucketID uuid.UUID) []*meta.Object {
 			out, err := store.AllObjectVersions(context.Background(), bucketID)
 			if err != nil {
 				t.Errorf("all object versions: %v", err)
@@ -159,6 +160,6 @@ func TestRaceMixedOpsTiKV(t *testing.T) {
 		},
 	}
 
-	runRaceScenario(t, f)
-	verifyRaceInvariants(t, f)
+	racetest.RunScenario(t, f)
+	racetest.VerifyInvariants(t, f)
 }

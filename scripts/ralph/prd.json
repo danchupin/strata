@@ -16,8 +16,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Carved out internal/racetest package: Fixture/RunScenario/VerifyInvariants for in-process tests + Config/Report/Run(ctx, cfg) for external endpoint. internal/s3api/race_test.go and race_integration_test.go are now thin wrappers wiring per-backend Fixture and delegating workload+invariants. Added racetest/runner_test.go smoke test asserting Run populates OpsByClass and rejects bad config (HTTPEndpoint empty / Duration 0 / Concurrency 0 / Concurrency > MaxConcurrency=64). Anonymous HTTP at this stage; SigV4 wiring is US-002. Workload mix unchanged from pre-cycle (PUT/DELETE/Multipart 3-way switch); extension to versioning/conditional/DeleteObjects is US-003."
     },
     {
       "id": "US-002",

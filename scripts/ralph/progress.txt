@@ -20,4 +20,23 @@ Cycle: ralph/race-harness
 - Baseline file (`docs/racecheck/baseline-2026-XX.md`) is a human-readable record, NOT a test fixture. Nightly runs do not assert against it. Regression-pinning is explicitly out of scope.
 - ROADMAP close-flip rule: same commit flips P1 entry to `~~**P1 — Race harness as a real test, not a gate.**~~ — **Done.** ... (commit `<pending>`)` per CLAUDE.md Roadmap maintenance. Closing-SHA backfill follow-up commit on main per established pattern.
 - PRD lifecycle: `tasks/prd-race-harness.md` REMOVED in close-flip commit per CLAUDE.md PRD lifecycle rule. Canonical record lives in Ralph snapshot under `scripts/ralph/archive/<YYYY-MM-DD>-race-harness/{prd.json,progress.txt}` after `archive_cycle` fires on `<promise>COMPLETE</promise>`.
+- racetest package layout (US-001): `internal/racetest/fixture.go` hosts in-process Fixture + RunScenario + VerifyInvariants + NewClient + DrainBody + CollectManifestOIDs. `runner.go` hosts Config + Report + Run for external HTTP endpoints. `Reporter` interface (Helper/Fatalf/Errorf/Logf) decouples in-process scenario from `testing` import — *testing.T satisfies it. `uploadIDRE` is package-private. Workers/Iters/Keys exported vars with RACE_WORKERS/RACE_ITERS/RACE_KEYS env overrides; per-backend test fixtures pass `racetest.Workers` to NewClient.
+- s3api race tests pattern (US-001): per-backend constructor builds *racetest.Fixture and TestRace* delegates to `racetest.RunScenario(t, f); racetest.VerifyInvariants(t, f)`. The shared `harnessMasterProvider` + `testPrincipalHeader` stay in s3api/testutil_test.go; race fixtures wire them on the http handler (auth context shimmed via the principal header).
 
+## [2026-05-10 14:30 MSK] - US-001
+- Implemented: Carved out `internal/racetest` package and refactored s3api race tests as thin shims.
+- Files changed:
+  - new: `internal/racetest/fixture.go` — Fixture + RunScenario + VerifyInvariants + NewClient + DrainBody + CollectManifestOIDs + Reporter interface + Workers/Iters/Keys env-driven defaults
+  - new: `internal/racetest/runner.go` — Config + Report + Inconsistency + Run(ctx, cfg) external-endpoint entrypoint with MaxConcurrency=64 cap and anonymous HTTP workload (PUT/DELETE/Multipart) for Duration window
+  - new: `internal/racetest/runner_test.go` — TestRunSmoke (in-process httptest gateway, asserts ops counted) + TestRunRejectsBadConfig
+  - rewrote: `internal/s3api/race_test.go` — now <50 lines: newMemoryRaceFixture(t) -> racetest.Fixture; TestRaceMixedOpsMemory delegates
+  - rewrote: `internal/s3api/race_integration_test.go` — Cassandra + TiKV variants delegate to racetest.RunScenario/VerifyInvariants; AllVersions closures match new Fixture signature
+- Quality checks: `go vet ./...` clean, `go build ./...` clean, `go test -race -run TestRaceMixedOpsMemory ./internal/s3api/` passes (9.17s), `go test -race ./internal/racetest/...` passes (2.07s), full `go test ./...` green.
+- **Learnings for future iterations:**
+  - Picked Reporter interface (Helper/Fatalf/Errorf/Logf) over importing `testing` so the future strata-racecheck binary (US-002) does not pull testing flags into its main package. *testing.T satisfies it implicitly via Go's structural typing.
+  - Workers/Iters/Keys live in racetest as exported vars with env overrides — moved out of s3api package scope, but the names + RACE_* env keys stay identical so existing CI / make targets are not invalidated.
+  - The package-level `mustStatus(t, resp, want)` helper used by race_test.go is shadowed by an identically-named helper in `internal/s3api/auth_mode_test.go` — that copy stays in s3api_test (auth tests still need it). The racetest copy is private (lowercase `mustStatus`) so there's no collision when racetest is imported.
+  - `harnessMasterProvider` + `testPrincipalHeader` stay in `internal/s3api/testutil_test.go` — racetest does NOT depend on them. The per-backend constructor in race_test.go does the auth wiring.
+  - Run is intentionally minimal for US-001 (anonymous HTTP, PUT/DELETE/Multipart only). US-002 wires SigV4 + JSON-lines events, US-003 extends workload to versioning flips + conditional + DeleteObjects, US-004 adds verifier oracle (the Inconsistency event schema is already established).
+  - `go vet` triggered on `internal/s3api/testutil_test.go` line 116 `mustWriteFull` — pre-existing diagnostic, not introduced by this story; left alone.
+---
