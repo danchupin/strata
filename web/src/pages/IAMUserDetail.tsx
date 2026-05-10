@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   KeyRound,
   Plus,
+  Receipt,
   RefreshCw,
   ShieldOff,
   Trash2,
@@ -94,7 +95,7 @@ export function IAMUserDetailPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="space-y-1">
           <Button
             type="button"
@@ -117,6 +118,19 @@ export function IAMUserDetailPage() {
             </p>
           )}
         </div>
+        {!userMissing && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() =>
+              navigate(`/iam/users/${encodeURIComponent(userName)}/billing`)
+            }
+          >
+            <Receipt className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+            Billing
+          </Button>
+        )}
       </div>
 
       {userMissing && (

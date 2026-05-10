@@ -179,8 +179,8 @@
         "Web typecheck passes; Playwright e2e passes."
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Web UI quota + billing surface landed. New components: web/src/components/BucketUsageTab.tsx (lazy-loaded recharts LineChart, mirrors Distribution / Replication tab pattern), web/src/components/EditBucketQuotaDialog.tsx + EditUserQuotaDialog.tsx (dialog pattern matches CreateBucketDialog). Per-bucket `Usage` tab on BucketDetail surfaces: live used_bytes / used_objects vs MaxBytes progress bar (gray bar when no quota), 30-day LineChart of byteSeconds/86400 averaged across all classes per day, per-storage-class breakdown table, Edit Quota / Remove quota buttons. New page web/src/pages/UserBilling.tsx routed at `/iam/users/:userName/billing` (lazy-loaded recharts) — cross-bucket per-day chart, per-bucket byteSeconds-ranked breakdown table, Edit/Remove user quota buttons. IAMUserDetail header gets a `Billing` button that navigates to the new page (Receipt icon from lucide). API client gained: fetchBucketQuota / setBucketQuota / deleteBucketQuota / fetchUserQuota / setUserQuota / deleteUserQuota / fetchBucketUsage / fetchUserUsage. queryKeys added: buckets.quota / buckets.usage / iam.userQuota / iam.userUsage. New Playwright e2e web/e2e/quota-billing.spec.ts: bucket-quota flow (set via UI → reload → admin-API verify → oversize PUT returns 403 QuotaExceeded over the S3 surface) + user-billing flow (Billing button nav → set user quota → reload → admin-API verify). Verification: `pnpm typecheck` clean, `pnpm build` (vite) clean (BucketUsageTab/UserBilling chunks split via lazy import — keeps recharts out of the index bundle), `go vet ./...` clean, `go test ./...` clean (one pre-existing flake `internal/lifecycle::TestThreeReplicaDistribution` confirmed via 5x re-run pass — same flake noted in US-006/US-008/US-009 progress). Manual browser verification not run (no MCP browser tool available in this environment); the Playwright spec exercises the same golden-path flow end-to-end."
     },
     {
       "id": "US-011",

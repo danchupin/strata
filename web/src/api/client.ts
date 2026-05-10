@@ -1860,3 +1860,154 @@ export async function fetchNodeDrilldown(
     gc_pause: body.gc_pause ?? [],
   };
 }
+
+// US-010: Bucket / user quota + usage history.
+//
+// All "Get" wrappers return null on 404 NoSuchBucketQuota / NoSuchUserQuota
+// so the UI can render the "no quota set" empty state without try/catch
+// glue at the call site. Other 4xx/5xx still throw AdminApiError.
+
+export interface BucketQuota {
+  max_bytes: number;
+  max_objects: number;
+  max_bytes_per_object: number;
+}
+
+export interface UserQuota {
+  max_buckets: number;
+  total_max_bytes: number;
+}
+
+export interface UsageRow {
+  bucket?: string;
+  day: string;
+  storage_class: string;
+  byte_seconds: number;
+  object_count_avg: number;
+  object_count_max: number;
+}
+
+export interface BucketUsageResponse {
+  rows: UsageRow[];
+}
+
+export interface UserUsageTotals {
+  byte_seconds: number;
+  objects: number;
+}
+
+export interface UserUsageResponse {
+  rows: UsageRow[];
+  totals: UserUsageTotals;
+}
+
+export async function fetchBucketQuota(name: string): Promise<BucketQuota | null> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(name)}/quota`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (resp.status === 404) {
+    const err = await buildAdminError(resp, 'fetch bucket quota failed');
+    if (err.code === 'NoSuchBucketQuota') return null;
+    throw err;
+  }
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch bucket quota failed');
+  return (await resp.json()) as BucketQuota;
+}
+
+export async function setBucketQuota(name: string, q: BucketQuota): Promise<void> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(name)}/quota`,
+    {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(q),
+    },
+  );
+  if (resp.status === 204) return;
+  throw await buildAdminError(resp, 'set bucket quota failed');
+}
+
+export async function deleteBucketQuota(name: string): Promise<void> {
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(name)}/quota`,
+    { method: 'DELETE', credentials: 'same-origin' },
+  );
+  if (resp.status === 204) return;
+  throw await buildAdminError(resp, 'delete bucket quota failed');
+}
+
+export async function fetchUserQuota(userName: string): Promise<UserQuota | null> {
+  const resp = await fetch(
+    `/admin/v1/iam/users/${encodeURIComponent(userName)}/quota`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (resp.status === 404) {
+    const err = await buildAdminError(resp, 'fetch user quota failed');
+    if (err.code === 'NoSuchUserQuota') return null;
+    throw err;
+  }
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch user quota failed');
+  return (await resp.json()) as UserQuota;
+}
+
+export async function setUserQuota(userName: string, q: UserQuota): Promise<void> {
+  const resp = await fetch(
+    `/admin/v1/iam/users/${encodeURIComponent(userName)}/quota`,
+    {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(q),
+    },
+  );
+  if (resp.status === 204) return;
+  throw await buildAdminError(resp, 'set user quota failed');
+}
+
+export async function deleteUserQuota(userName: string): Promise<void> {
+  const resp = await fetch(
+    `/admin/v1/iam/users/${encodeURIComponent(userName)}/quota`,
+    { method: 'DELETE', credentials: 'same-origin' },
+  );
+  if (resp.status === 204) return;
+  throw await buildAdminError(resp, 'delete user quota failed');
+}
+
+export async function fetchBucketUsage(
+  name: string,
+  start: string,
+  end: string,
+): Promise<BucketUsageResponse> {
+  const usp = new URLSearchParams();
+  usp.set('start', start);
+  usp.set('end', end);
+  const resp = await fetch(
+    `/admin/v1/buckets/${encodeURIComponent(name)}/usage?${usp.toString()}`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch bucket usage failed');
+  const body = (await resp.json()) as BucketUsageResponse;
+  return { rows: body.rows ?? [] };
+}
+
+export async function fetchUserUsage(
+  userName: string,
+  start: string,
+  end: string,
+): Promise<UserUsageResponse> {
+  const usp = new URLSearchParams();
+  usp.set('start', start);
+  usp.set('end', end);
+  const resp = await fetch(
+    `/admin/v1/iam/users/${encodeURIComponent(userName)}/usage?${usp.toString()}`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch user usage failed');
+  const body = (await resp.json()) as UserUsageResponse;
+  return {
+    rows: body.rows ?? [],
+    totals: body.totals ?? { byte_seconds: 0, objects: 0 },
+  };
+}

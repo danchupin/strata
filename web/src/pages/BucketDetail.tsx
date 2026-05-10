@@ -59,6 +59,13 @@ const BucketReplicationLagTab = lazy(() =>
     default: m.BucketReplicationLagTab,
   })),
 );
+// BucketUsageTab pulls recharts (LineChart for the 30-day usage history).
+// Lazy-load matches the Distribution / Replication treatment above.
+const BucketUsageTab = lazy(() =>
+  import('@/components/BucketUsageTab').then((m) => ({
+    default: m.BucketUsageTab,
+  })),
+);
 import { BucketInventoryTab } from '@/components/BucketInventoryTab';
 import { BucketLifecycleTab } from '@/components/BucketLifecycleTab';
 import { BucketOverviewTab } from '@/components/BucketOverviewTab';
@@ -300,6 +307,9 @@ export function BucketDetailPage() {
           <TabsTrigger value="distribution" disabled={!detail}>
             Distribution
           </TabsTrigger>
+          <TabsTrigger value="usage" disabled={!detail}>
+            Usage
+          </TabsTrigger>
           {detail?.replication_configured && (
             <TabsTrigger value="replication" disabled={!detail}>
               Replication
@@ -334,6 +344,13 @@ export function BucketDetailPage() {
           {detail && (
             <Suspense fallback={<Skeleton className="h-72 w-full" />}>
               <BucketDistributionTab bucket={detail} />
+            </Suspense>
+          )}
+        </TabsContent>
+        <TabsContent value="usage" className="space-y-4">
+          {detail && (
+            <Suspense fallback={<Skeleton className="h-72 w-full" />}>
+              <BucketUsageTab bucket={detail} />
             </Suspense>
           )}
         </TabsContent>
