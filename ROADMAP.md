@@ -37,7 +37,7 @@ adding more, prove what is there.
   wired `make race-soak` + `scripts/racecheck/{run,summarize}.sh`, and
   scheduled `.github/workflows/race-nightly.yml` (03:00 UTC, ubuntu-latest,
   90 min budget). Zero-inconsistency baseline recorded at
-  `docs/racecheck/baseline-2026-05.md`. (commit `<pending>`)
+  `docs/racecheck/baseline-2026-05.md`. (commit `3c04a05`)
 - ~~**P1 — s3-tests 80% → 90%+.**~~ — **Done.** Lifted to **91.5% (162/177)** by the
   `ralph/s3-compat-95` cycle (US-001..US-006 — multipart copy range-parser + special-char
   URL handling, ?partNumber=N GET wire shape flipped to whole-object multipart ETag,
