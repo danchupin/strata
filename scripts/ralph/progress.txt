@@ -49,3 +49,15 @@ Cycle: ralph/bucket-quotas-billing
   - macOS+Lima dev loop: any `make test-integration` run needs `TESTCONTAINERS_RYUK_DISABLED=true` (CLAUDE.md already names the lima `DOCKER_HOST` quirk; reaper-mount is the second half of the same hazard).
   - Per-bucket / per-user blob configs in cassandra prefer "one dedicated table per kind" (matches every other bucket_* table) over a single shared `bucket_blob{kind}` shape. Schema simplicity wins over normalisation here; storage cost is trivial and the explicit table makes ops queries (DESCRIBE / size-by-table) clearer.
 ---
+
+## 2026-05-10 - US-003
+- TiKV Quota CRUD already landed with US-001 (cross-backend lockstep). This story confirmed the integration shape and flipped passes:true.
+- Verification: `go vet ./...` clean, `go test ./...` clean, `go test -race ./internal/meta/...` clean. Storetest contract `BucketQuotaRoundTrip` + `UserQuotaRoundTrip` registered in `Run()` runs against the TiKV backend via `TestTiKVStoreContract` under `-tags integration`.
+- Canonical CI path: `.github/workflows/ci-tikv.yml` runs `go test -tags integration -timeout 15m ./internal/meta/tikv/...` on Linux runners — covers both quota cases.
+- Local macOS+Lima cannot run the TiKV integration suite: testcontainers brings up PD+TiKV but advertises `host.docker.internal:<port>`; macOS host does not resolve that name under Lima docker contexts. The test currently `t.Fatalf`'s during PD service discovery instead of Skipf'ing — pre-existing fragility unrelated to this story (CLAUDE.md TiKV gotchas already document the hazard).
+- Files changed: `scripts/ralph/prd.json` (passes flip + notes), `scripts/ralph/progress.txt` (this entry).
+- **Learnings for future iterations:**
+  - When a single contract case lands across all three backends in one commit (cross-backend lockstep), the per-backend stories collapse into "verify integration suite green + flip passes:true". This is the second time this pattern surfaced (US-002, US-003) — going forward, lockstep landings should be the default for `meta.Store` interface additions.
+  - Local TiKV integration on macOS+Lima is not viable today (host.docker.internal unreachable). CI runs Linux runners and covers this. If a future story needs local TiKV verification, plumb `STRATA_TIKV_TEST_PD_ENDPOINTS` against a cluster reachable from the macOS host (lima port-forward or operator-provided cluster) — or fix `tikvtest.AcquireCluster` to actually Skipf instead of fatal'ing during PD discovery.
+  - `internal/meta/tikv/store_integration_test.go::TestTiKVStoreContract` is the single hook for every TiKV contract case; new `meta.Store` methods only need a `case<Name>` in `storetest/contract.go` and the TiKV path is exercised automatically.
+---

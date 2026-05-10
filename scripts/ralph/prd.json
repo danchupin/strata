@@ -48,8 +48,8 @@
         "Tests pass (`go test ./...`)"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "TiKV impl + UserQuotaKey + BlobQuota landed with US-001 (cross-backend lockstep). Contract suite `storetest.Run` runs BucketQuotaRoundTrip + UserQuotaRoundTrip against the TiKV backend via `internal/meta/tikv/store_integration_test.go::TestTiKVStoreContract` under `-tags integration`. Canonical verification: `.github/workflows/ci-tikv.yml` runs `go test -tags integration -timeout 15m ./internal/meta/tikv/...` on Linux runners. Local macOS+Lima cannot exercise the path: testcontainers brings up PD/TiKV but advertises `host.docker.internal:<port>` which macOS host does not resolve under Lima docker contexts (CLAUDE.md TiKV gotcha — Skipf is expected but the test currently t.Fatalf's during PD discovery, pre-existing fragility unrelated to this story). Memory contract suite + race-detector pass clean: `go vet ./...`, `go test ./...`, `go test -race ./internal/meta/...` all green."
     },
     {
       "id": "US-004",
