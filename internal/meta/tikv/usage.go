@@ -71,45 +71,68 @@ func (s *Store) WriteUsageAggregate(ctx context.Context, agg meta.UsageAggregate
 func (s *Store) ListUsageAggregates(ctx context.Context, bucketID uuid.UUID, storageClass string, dayFrom, dayTo time.Time) ([]meta.UsageAggregate, error) {
 	from := dayEpoch(dayFrom)
 	to := dayEpoch(dayTo)
-	prefix := UsageAggregateClassPrefix(bucketID, storageClass)
-	start := make([]byte, 0, len(prefix)+usageDaySuffixLen)
-	start = append(start, prefix...)
-	var fb [4]byte
-	binary.BigEndian.PutUint32(fb[:], from)
-	start = append(start, fb[:]...)
-	end := make([]byte, 0, len(prefix)+usageDaySuffixLen)
-	end = append(end, prefix...)
-	var tb [4]byte
-	binary.BigEndian.PutUint32(tb[:], to)
-	end = append(end, tb[:]...)
-	txn, err := s.kv.Begin(ctx, false)
-	if err != nil {
-		return nil, err
-	}
-	defer txn.Rollback()
-	pairs, err := txn.Scan(ctx, start, end, 0)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]meta.UsageAggregate, 0, len(pairs))
-	for _, p := range pairs {
-		if len(p.Key) < len(prefix)+usageDaySuffixLen {
-			continue
+	// Empty storageClass means "all classes recorded for this bucket" — fan
+	// out across the presence index so admin endpoints can render an
+	// operator-facing usage feed without picking a class up front.
+	classes := []string{storageClass}
+	if storageClass == "" {
+		discovered, derr := s.usageStorageClassesForBucket(ctx, bucketID)
+		if derr != nil {
+			return nil, derr
 		}
-		dayBytes := p.Key[len(p.Key)-usageDaySuffixLen:]
-		epoch := binary.BigEndian.Uint32(dayBytes)
-		var pl usageAggregatePayload
-		if err := json.Unmarshal(p.Value, &pl); err != nil {
-			return nil, fmt.Errorf("tikv: decode usage aggregate: %w", err)
+		classes = discovered
+	}
+	out := make([]meta.UsageAggregate, 0)
+	for _, cls := range classes {
+		prefix := UsageAggregateClassPrefix(bucketID, cls)
+		start := make([]byte, 0, len(prefix)+usageDaySuffixLen)
+		start = append(start, prefix...)
+		var fb [4]byte
+		binary.BigEndian.PutUint32(fb[:], from)
+		start = append(start, fb[:]...)
+		end := make([]byte, 0, len(prefix)+usageDaySuffixLen)
+		end = append(end, prefix...)
+		var tb [4]byte
+		binary.BigEndian.PutUint32(tb[:], to)
+		end = append(end, tb[:]...)
+		txn, err := s.kv.Begin(ctx, false)
+		if err != nil {
+			return nil, err
 		}
-		out = append(out, meta.UsageAggregate{
-			BucketID:       bucketID,
-			StorageClass:   storageClass,
-			Day:            dayFromEpoch(epoch),
-			ByteSeconds:    pl.ByteSeconds,
-			ObjectCountAvg: pl.ObjectCountAvg,
-			ObjectCountMax: pl.ObjectCountMax,
-			ComputedAt:     pl.ComputedAt,
+		pairs, err := txn.Scan(ctx, start, end, 0)
+		if err != nil {
+			_ = txn.Rollback()
+			return nil, err
+		}
+		for _, p := range pairs {
+			if len(p.Key) < len(prefix)+usageDaySuffixLen {
+				continue
+			}
+			dayBytes := p.Key[len(p.Key)-usageDaySuffixLen:]
+			epoch := binary.BigEndian.Uint32(dayBytes)
+			var pl usageAggregatePayload
+			if err := json.Unmarshal(p.Value, &pl); err != nil {
+				_ = txn.Rollback()
+				return nil, fmt.Errorf("tikv: decode usage aggregate: %w", err)
+			}
+			out = append(out, meta.UsageAggregate{
+				BucketID:       bucketID,
+				StorageClass:   cls,
+				Day:            dayFromEpoch(epoch),
+				ByteSeconds:    pl.ByteSeconds,
+				ObjectCountAvg: pl.ObjectCountAvg,
+				ObjectCountMax: pl.ObjectCountMax,
+				ComputedAt:     pl.ComputedAt,
+			})
+		}
+		_ = txn.Rollback()
+	}
+	if storageClass == "" {
+		sort.Slice(out, func(i, j int) bool {
+			if !out[i].Day.Equal(out[j].Day) {
+				return out[i].Day.Before(out[j].Day)
+			}
+			return out[i].StorageClass < out[j].StorageClass
 		})
 	}
 	return out, nil

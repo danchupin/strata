@@ -166,3 +166,34 @@ Cycle: ralph/bucket-quotas-billing
   - `bucketNameOrEmpty` was stamped onto `cassandra.Store` so the per-row `UsageAggregate.Bucket` field surfaces a human-readable name on List paths without an extra round-trip. Reuses the existing `bucketNames` cache populated by `GetBucket`/`CreateBucket`. Future per-row enrichments can reuse the same helper.
 ---
 
+
+## 2026-05-10 - US-009
+- New admin handlers landed for the quota + usage surface:
+  - `internal/adminapi/buckets_quota.go`: `handleBucketGetQuota` / `handleBucketSetQuota` / `handleBucketDeleteQuota` for `/admin/v1/buckets/{bucket}/quota`, plus `handleBucketGetUsage` for `/admin/v1/buckets/{bucket}/usage`. Shared `parseUsageDayRange` helper (inclusive `[start, end]` YYYY-MM-DD UTC days, defaults end=today / start=end-30d, widens end+1 to bridge the meta.Store half-open shape).
+  - `internal/adminapi/iam_quota.go`: same triple keyed on `userName` + `handleIAMUserGetUsage` (per-user usage with cross-bucket fan-out).
+- Each handler stamps `s3api.SetAuditOverride` with the operator-meaningful action (`admin:PutBucketQuota` / `admin:DeleteBucketQuota` / `admin:PutUserQuota` / `admin:DeleteUserQuota`). Read-only handlers stay unstamped — the audit middleware skips GET/HEAD by `auditableMethod`.
+- Routes registered in `internal/adminapi/server.go::routes()`. OpenAPI contract `internal/adminapi/openapi.yaml` gained: `BucketQuota` / `UserQuota` / `UsageRow` / `BucketUsageResponse` / `UserUsageTotals` / `UserUsageResponse` schemas + 6 path entries (`/buckets/{bucket}/quota` GET/PUT/DELETE, `/buckets/{bucket}/usage` GET, `/iam/users/{userName}/quota` GET/PUT/DELETE, `/iam/users/{userName}/usage` GET).
+- `meta.Store.ListUsageAggregates` extended on all three backends to treat empty `storageClass` as "all classes recorded for this bucket": memory walks the full map; cassandra reuses the existing `usage_aggregates_classes` presence index for fan-out; tikv reuses `usageStorageClassesForBucket`. Result is sorted (Day ASC, StorageClass ASC) when storageClass=="" so the admin response is deterministic. Existing storeClass-strict callers (US-008 contract case, usage-rollup worker, `ListUserUsage` internal fan-out) keep passing the explicit class string and remain unaffected.
+- Per-user usage endpoint deliberately fans out via `ListBuckets` + per-bucket `ListUsageAggregates(empty class)` rather than calling `ListUserUsage` directly, so each row carries the source bucket name (PRD AC mandates `{bucket, day, storageClass, byteSeconds, …}`). Cross-bucket totals (`byte_seconds` summed, `objects` summed of `ObjectCountMax` per row) accumulate in the same loop.
+- Memory-backed unit tests in `internal/adminapi/buckets_quota_test.go` + `iam_quota_test.go`:
+  - `Get_NotConfigured` → 404 NoSuchBucketQuota / NoSuchUserQuota.
+  - `Get_BucketNotFound` / `Get_UserNotFound` → 404 NoSuchBucket / NoSuchEntity.
+  - `PutAndGetRoundTrip` → 204 then GET returns the stored quota.
+  - `PutNegativeFieldRejected` → 400 InvalidArgument.
+  - `PutMalformedJSON` → 400 (uses new `putAdminRaw` helper that takes `io.Reader`).
+  - `DeleteIdempotent` → 204 on first + second call.
+  - `BucketUsage_HappyPath` → 200 with one row per seeded UsageAggregate.
+  - `BucketUsage_RangeWindow` → start=2026-05-01&end=2026-05-02 returns exactly 2 rows (inclusive end).
+  - `BucketUsage_BadStart` → 400 InvalidArgument.
+  - `UserUsage_HappyPath` → cross-bucket fan-out, totals.byte_seconds = sum, totals.objects = sum of per-bucket ObjectCountMax.
+  - `UserQuota_PutMissingUserBlocks` → 404 NoSuchEntity (handler validates user exists before SetUserQuota).
+- `parseUsageDayRange` accepts `start == end` as a single-day window (widens end+1 internally) — previously rejected with "end must be after start", now "end must be on or after start".
+- Verification: `go vet ./...` clean, `go test ./...` clean (`TestThreeReplicaDistribution` in `internal/lifecycle` flaked once and passed on a 3x re-run — same pre-existing flake noted in US-006 / US-008 progress).
+- Files changed: `internal/adminapi/buckets_quota.go` (new), `internal/adminapi/iam_quota.go` (new), `internal/adminapi/buckets_quota_test.go` (new), `internal/adminapi/iam_quota_test.go` (new), `internal/adminapi/server.go` (route registration), `internal/adminapi/openapi.yaml` (schemas + paths), `internal/meta/memory/store.go` (empty-class branch + sort), `internal/meta/cassandra/store.go` (empty-class branch via existing presence index + sort), `internal/meta/tikv/usage.go` (empty-class branch via existing presence index + sort), `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - The "empty filter ⇒ walk-all" extension to `ListUsageAggregates` is additive and safe across all three backends because every existing caller passes an explicit class. Future per-axis filters that need this should follow the same shape: `if axis == "" { discover via presence index; loop }` so the strict-axis contract test stays green while the operator-facing surface gains the convenient enumeration. The presence-index pattern (cassandra `usage_aggregates_classes` + tikv `UsageClassIndex*`) is the canonical place to register new variable axes.
+  - Admin usage endpoints accept inclusive `[start, end]` because that's how operators talk about "May 1 through May 5"; meta.Store APIs are half-open `[from, to)` so the boundary translation lives at the admin handler. `parseUsageDayRange` is the single helper — reuse instead of re-parsing per route. It permits `start == end` as a one-day window, since that's a legitimate operator query.
+  - `ListUserUsage` (US-008) collapses per-bucket detail into per-(class, day) sums and is the right tool for billing roll-ups but the WRONG tool for per-bucket UI rendering. The admin user-usage endpoint deliberately fans out via `ListBuckets` + per-bucket `ListUsageAggregates` to preserve the source-bucket column. Keep both call shapes available — billing wants the collapsed view; UI wants the per-bucket view.
+  - The admin tests reuse `seedIAMUser` from `iam_users_test.go` (defined in the same package) — don't redeclare it. New test files that need an IAM user fixture should import-by-package, not redefine. Same lesson applied to `seedQuotaBucket` (kept package-local since it only takes `(t, s, name, owner)`).
+  - `putAdmin` is JSON-only; for malformed-body tests use the sibling `putAdminRaw(t, s, owner, method, path, io.Reader)` helper (added in this story). Adding a single `Reader`-shape helper next to the JSON-shape one is preferable to adding a flag-soup `Body any` parameter.
+---

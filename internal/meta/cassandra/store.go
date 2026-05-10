@@ -3067,31 +3067,51 @@ func (s *Store) ListUsageAggregates(ctx context.Context, bucketID uuid.UUID, sto
 	from := normalizeUsageDay(dayFrom)
 	to := normalizeUsageDay(dayTo)
 	bucketName := s.bucketNameOrEmpty(bucketID)
-	iter := s.s.Query(
-		`SELECT day, byte_seconds, object_count_avg, object_count_max, computed_at
-		   FROM usage_aggregates
-		  WHERE bucket_id=? AND storage_class=? AND day >= ? AND day < ?`,
-		gocqlUUID(bucketID), storageClass, from, to,
-	).WithContext(ctx).Iter()
-	defer iter.Close()
-	var out []meta.UsageAggregate
-	var day time.Time
-	var byteSeconds, oavg, omax int64
-	var computed time.Time
-	for iter.Scan(&day, &byteSeconds, &oavg, &omax, &computed) {
-		out = append(out, meta.UsageAggregate{
-			BucketID:       bucketID,
-			Bucket:         bucketName,
-			StorageClass:   storageClass,
-			Day:            day.UTC(),
-			ByteSeconds:    byteSeconds,
-			ObjectCountAvg: oavg,
-			ObjectCountMax: omax,
-			ComputedAt:     computed,
-		})
+	// Empty storageClass means "all classes recorded for this bucket" — fan
+	// out across the sibling presence index so the caller can render an
+	// operator-facing usage feed without picking a class up front.
+	classes := []string{storageClass}
+	if storageClass == "" {
+		discovered, derr := s.usageStorageClassesForBucket(ctx, bucketID)
+		if derr != nil {
+			return nil, derr
+		}
+		classes = discovered
 	}
-	if err := iter.Close(); err != nil {
-		return nil, err
+	var out []meta.UsageAggregate
+	for _, cls := range classes {
+		iter := s.s.Query(
+			`SELECT day, byte_seconds, object_count_avg, object_count_max, computed_at
+			   FROM usage_aggregates
+			  WHERE bucket_id=? AND storage_class=? AND day >= ? AND day < ?`,
+			gocqlUUID(bucketID), cls, from, to,
+		).WithContext(ctx).Iter()
+		var day time.Time
+		var byteSeconds, oavg, omax int64
+		var computed time.Time
+		for iter.Scan(&day, &byteSeconds, &oavg, &omax, &computed) {
+			out = append(out, meta.UsageAggregate{
+				BucketID:       bucketID,
+				Bucket:         bucketName,
+				StorageClass:   cls,
+				Day:            day.UTC(),
+				ByteSeconds:    byteSeconds,
+				ObjectCountAvg: oavg,
+				ObjectCountMax: omax,
+				ComputedAt:     computed,
+			})
+		}
+		if err := iter.Close(); err != nil {
+			return nil, err
+		}
+	}
+	if storageClass == "" {
+		sort.Slice(out, func(i, j int) bool {
+			if !out[i].Day.Equal(out[j].Day) {
+				return out[i].Day.Before(out[j].Day)
+			}
+			return out[i].StorageClass < out[j].StorageClass
+		})
 	}
 	return out, nil
 }

@@ -1626,7 +1626,10 @@ func (s *Store) ListUsageAggregates(ctx context.Context, bucketID uuid.UUID, sto
 	defer s.mu.RUnlock()
 	out := make([]meta.UsageAggregate, 0)
 	for k, v := range s.usageAggs {
-		if k.BucketID != bucketID || k.StorageClass != storageClass {
+		if k.BucketID != bucketID {
+			continue
+		}
+		if storageClass != "" && k.StorageClass != storageClass {
 			continue
 		}
 		d := time.Unix(k.Day, 0).UTC()
@@ -1635,7 +1638,12 @@ func (s *Store) ListUsageAggregates(ctx context.Context, bucketID uuid.UUID, sto
 		}
 		out = append(out, v)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Day.Before(out[j].Day) })
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Day.Equal(out[j].Day) {
+			return out[i].Day.Before(out[j].Day)
+		}
+		return out[i].StorageClass < out[j].StorageClass
+	})
 	return out, nil
 }
 
