@@ -61,6 +61,19 @@ type Config struct {
 	// already hold an io.Writer (in-process tests, stdout, etc.). When
 	// both are set, ReportPath wins and EventWriter is ignored.
 	EventWriter io.Writer
+
+	// Mix is the per-op-class selection weight. Keys are op classes
+	// (see DefaultMix); values are non-negative floats — the weighted
+	// random picker normalises them. nil/empty falls through to
+	// DefaultMix. Unknown keys are ignored.
+	Mix map[string]float64
+
+	// StreamingRatio is the fraction of body-carrying ops (put,
+	// conditional_put) that use streaming SigV4 instead of the
+	// pre-computed-SHA fixed-payload signing flavor. 0..1; defaulted
+	// to DefaultStreamingRatio when zero. Anonymous mode (no signer)
+	// always uses fixed payload regardless of this value.
+	StreamingRatio float64
 }
 
 // Inconsistency is one row in Report.Inconsistencies. The verifier
@@ -91,11 +104,55 @@ type Report struct {
 // OOM.
 const MaxConcurrency = 64
 
-// Run drives a time-bounded mixed PUT/DELETE/Multipart workload against
-// cfg.HTTPEndpoint and returns a structured Report. The workload mix is
-// kept identical to the in-process RunScenario for US-001/002 (only
-// SigV4 + JSON-lines events added); US-003 extends it with versioning
-// flips, conditional PUTs, and DeleteObjects batches.
+// DefaultStreamingRatio is the share of body-carrying ops (put,
+// conditional_put) that take the streaming-SigV4 path when a signer
+// is configured. Picked at ~50% per the cycle PRD: high enough to
+// exercise the chained-HMAC verifier, low enough that pre-computed-SHA
+// regressions still surface.
+const DefaultStreamingRatio = 0.5
+
+// DefaultMix is the per-op-class workload mix used when Config.Mix is
+// empty. Every class is exercised at ≥5%; versioning_flip is weighted
+// at ≥10% per the PRD's Cassandra-LWT hot-path note. Sums to 1.0; the
+// weighted picker normalises so any rebalanced custom mix works.
+var DefaultMix = map[string]float64{
+	OpPut:            0.20,
+	OpGet:            0.10,
+	OpDelete:         0.10,
+	OpList:           0.05,
+	OpMultipart:      0.10,
+	OpVersioningFlip: 0.10,
+	OpConditionalPut: 0.20,
+	OpDeleteObjects:  0.15,
+}
+
+// Op-class identifiers. Used as keys in Config.Mix, OpsByClass, and the
+// JSON-lines event Class field — keep these in sync with consumers
+// (scripts/racecheck/summarize.sh, US-008).
+const (
+	OpPut            = "put"
+	OpGet            = "get"
+	OpDelete         = "delete"
+	OpList           = "list"
+	OpMultipart      = "multipart"
+	OpVersioningFlip = "versioning_flip"
+	OpConditionalPut = "conditional_put"
+	OpDeleteObjects  = "delete_objects"
+)
+
+// allOpClasses is the canonical iteration order for OpsByClass /
+// counters. Anything in Config.Mix not in this list is silently
+// dropped — keeps unknown keys from skewing the picker.
+var allOpClasses = []string{
+	OpPut, OpGet, OpDelete, OpList,
+	OpMultipart, OpVersioningFlip, OpConditionalPut, OpDeleteObjects,
+}
+
+// Run drives a time-bounded mixed workload (PUT/GET/DELETE/list/Multipart/
+// versioning-flip/conditional-PUT/DeleteObjects) against cfg.HTTPEndpoint
+// and returns a structured Report. Per-class weight is configurable via
+// Config.Mix; body-carrying ops randomly route through streaming-SigV4
+// at Config.StreamingRatio when a signer is configured.
 func Run(ctx context.Context, cfg Config) (*Report, error) {
 	if cfg.HTTPEndpoint == "" {
 		return nil, fmt.Errorf("racetest: HTTPEndpoint required")
@@ -115,6 +172,17 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	if cfg.ObjectKeys <= 0 {
 		cfg.ObjectKeys = 4
+	}
+	if cfg.StreamingRatio < 0 || cfg.StreamingRatio > 1 {
+		return nil, fmt.Errorf("racetest: StreamingRatio %.3f out of [0,1]", cfg.StreamingRatio)
+	}
+	if cfg.StreamingRatio == 0 {
+		cfg.StreamingRatio = DefaultStreamingRatio
+	}
+
+	picker, err := newOpPicker(cfg.Mix)
+	if err != nil {
+		return nil, err
 	}
 
 	endpoint := strings.TrimRight(cfg.HTTPEndpoint, "/")
@@ -140,11 +208,14 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 
 	report := &Report{
 		StartedAt:  time.Now().UTC(),
-		OpsByClass: map[string]int64{"put": 0, "delete": 0, "multipart": 0},
+		OpsByClass: make(map[string]int64, len(allOpClasses)),
+	}
+	for _, k := range allOpClasses {
+		report.OpsByClass[k] = 0
 	}
 
 	var counters sync.Map // op class -> *int64
-	for _, k := range []string{"put", "delete", "multipart"} {
+	for _, k := range allOpClasses {
 		v := int64(0)
 		counters.Store(k, &v)
 	}
@@ -158,6 +229,18 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	runCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 
+	wctx := &workerCtx{
+		ctx:            runCtx,
+		client:         client,
+		sgn:            sgn,
+		endpoint:       endpoint,
+		sink:           sink,
+		buckets:        buckets,
+		objectKeys:     cfg.ObjectKeys,
+		streamingRatio: cfg.StreamingRatio,
+		bump:           bump,
+	}
+
 	var wg sync.WaitGroup
 	for w := 0; w < cfg.Concurrency; w++ {
 		wg.Add(1)
@@ -166,26 +249,8 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			rng := rand.New(rand.NewSource(int64(workerID)*1_000_003 + 1))
 			i := 0
 			for runCtx.Err() == nil {
-				bucket := buckets[rng.Intn(len(buckets))]
-				key := fmt.Sprintf("k-%d", rng.Intn(cfg.ObjectKeys))
-				path := "/" + bucket + "/" + key
-				switch rng.Intn(3) {
-				case 0:
-					body := []byte(fmt.Sprintf("w%d-i%d", workerID, i))
-					runOp(runCtx, sink, workerID, "put", bucket, key, func() (int, error) {
-						return doSigned(runCtx, client, sgn, endpoint, "PUT", path, body)
-					})
-					bump("put")
-				case 1:
-					runOp(runCtx, sink, workerID, "delete", bucket, key, func() (int, error) {
-						return doSigned(runCtx, client, sgn, endpoint, "DELETE", path, nil)
-					})
-					bump("delete")
-				case 2:
-					if doMultipartCycle(runCtx, sink, client, sgn, endpoint, bucket, key, workerID, i) {
-						bump("multipart")
-					}
-				}
+				class := picker.pick(rng)
+				wctx.runOnce(workerID, i, rng, class)
 				i++
 			}
 		}(w)
@@ -226,59 +291,6 @@ func buildSink(cfg Config) (EventSink, error) {
 	return nopSink{}, nil
 }
 
-// runOp wraps a single HTTP op with op_started + op_done events. The
-// closure returns (status, err). A non-nil err is recorded on the
-// op_done event; status==0 indicates a transport-level failure where
-// the body was never read.
-func runOp(ctx context.Context, sink EventSink, workerID int, class, bucket, key string, do func() (int, error)) {
-	if ctx.Err() != nil {
-		return
-	}
-	start := time.Now().UTC()
-	sink.Emit(Event{Event: "op_started", Timestamp: start, WorkerID: workerID, Class: class, Bucket: bucket, Key: key})
-	status, err := do()
-	end := time.Now().UTC()
-	ev := Event{
-		Event:      "op_done",
-		Timestamp:  end,
-		WorkerID:   workerID,
-		Class:      class,
-		Bucket:     bucket,
-		Key:        key,
-		Status:     status,
-		DurationMs: end.Sub(start).Milliseconds(),
-	}
-	if err != nil {
-		ev.Error = err.Error()
-	}
-	sink.Emit(ev)
-}
-
-// doSigned signs (if a signer is configured) and dispatches one HTTP
-// request, returning (status, err). nil err + status==0 means a
-// transport error after which the response body is already drained.
-func doSigned(ctx context.Context, client *http.Client, sgn *signer, endpoint, method, path string, body []byte) (int, error) {
-	req, err := http.NewRequestWithContext(ctx, method, endpoint+path, nil)
-	if err != nil {
-		return 0, err
-	}
-	if sgn != nil {
-		if err := sgn.sign(ctx, req, body); err != nil {
-			return 0, err
-		}
-	} else if body != nil {
-		req.Body = io.NopCloser(strings.NewReader(string(body)))
-		req.ContentLength = int64(len(body))
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	status := resp.StatusCode
-	DrainBody(resp)
-	return status, nil
-}
-
 func ensureBucket(ctx context.Context, client *http.Client, sgn *signer, endpoint, bucket string) error {
 	status, err := doSigned(ctx, client, sgn, endpoint, "PUT", "/"+bucket, nil)
 	if err != nil {
@@ -303,108 +315,4 @@ func enableVersioning(ctx context.Context, client *http.Client, sgn *signer, end
 		return fmt.Errorf("status %d", status)
 	}
 	return nil
-}
-
-// doMultipartCycle runs Create+UploadPart+Complete (or aborts on
-// failure). Returns true on a fully-completed cycle so the caller bumps
-// the multipart op counter only on the success path.
-func doMultipartCycle(ctx context.Context, sink EventSink, client *http.Client, sgn *signer, endpoint, bucket, key string, workerID, iter int) bool {
-	path := "/" + bucket + "/" + key
-	cycleStart := time.Now().UTC()
-	sink.Emit(Event{Event: "op_started", Timestamp: cycleStart, WorkerID: workerID, Class: "multipart", Bucket: bucket, Key: key})
-
-	finishDone := func(status int, err error) {
-		end := time.Now().UTC()
-		ev := Event{
-			Event:      "op_done",
-			Timestamp:  end,
-			WorkerID:   workerID,
-			Class:      "multipart",
-			Bucket:     bucket,
-			Key:        key,
-			Status:     status,
-			DurationMs: end.Sub(cycleStart).Milliseconds(),
-		}
-		if err != nil {
-			ev.Error = err.Error()
-		}
-		sink.Emit(ev)
-	}
-
-	initBody, status, err := doSignedRead(ctx, client, sgn, endpoint, "POST", path+"?uploads", nil)
-	if err != nil || status != http.StatusOK {
-		finishDone(status, err)
-		return false
-	}
-	mm := uploadIDRE.FindStringSubmatch(string(initBody))
-	if len(mm) != 2 {
-		finishDone(status, fmt.Errorf("multipart: missing UploadId"))
-		return false
-	}
-	uploadID := mm[1]
-	abort := func() {
-		_, _ = doSigned(ctx, client, sgn, endpoint, "DELETE",
-			fmt.Sprintf("%s?uploadId=%s", path, uploadID), nil)
-	}
-
-	partBody := []byte(fmt.Sprintf("part-w%d-i%d", workerID, iter))
-	partResp, partStatus, partErr := doSignedReadResp(ctx, client, sgn, endpoint, "PUT",
-		fmt.Sprintf("%s?uploadId=%s&partNumber=1", path, uploadID), partBody)
-	var etag string
-	if partResp != nil {
-		etag = strings.Trim(partResp.Header.Get("Etag"), `"`)
-		DrainBody(partResp)
-	}
-	if partErr != nil || partStatus != http.StatusOK || etag == "" {
-		abort()
-		finishDone(partStatus, partErr)
-		return false
-	}
-	completeBody := []byte(fmt.Sprintf(
-		`<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>"%s"</ETag></Part></CompleteMultipartUpload>`,
-		etag))
-	cStatus, cErr := doSigned(ctx, client, sgn, endpoint, "POST",
-		fmt.Sprintf("%s?uploadId=%s", path, uploadID), completeBody)
-	if cErr != nil || cStatus != http.StatusOK {
-		abort()
-		finishDone(cStatus, cErr)
-		return false
-	}
-	finishDone(http.StatusOK, nil)
-	return true
-}
-
-// doSignedRead signs + dispatches a request and returns the body bytes
-// alongside the status code. Used by multipart Create which needs to
-// extract the UploadId from the response XML.
-func doSignedRead(ctx context.Context, client *http.Client, sgn *signer, endpoint, method, path string, body []byte) ([]byte, int, error) {
-	resp, status, err := doSignedReadResp(ctx, client, sgn, endpoint, method, path, body)
-	if resp == nil {
-		return nil, status, err
-	}
-	defer DrainBody(resp)
-	out, _ := io.ReadAll(resp.Body)
-	return out, status, err
-}
-
-// doSignedReadResp returns the *http.Response so the caller can read
-// headers (e.g. Etag on UploadPart) before draining the body.
-func doSignedReadResp(ctx context.Context, client *http.Client, sgn *signer, endpoint, method, path string, body []byte) (*http.Response, int, error) {
-	req, err := http.NewRequestWithContext(ctx, method, endpoint+path, nil)
-	if err != nil {
-		return nil, 0, err
-	}
-	if sgn != nil {
-		if err := sgn.sign(ctx, req, body); err != nil {
-			return nil, 0, err
-		}
-	} else if body != nil {
-		req.Body = io.NopCloser(strings.NewReader(string(body)))
-		req.ContentLength = int64(len(body))
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, 0, err
-	}
-	return resp, resp.StatusCode, nil
 }

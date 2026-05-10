@@ -100,8 +100,14 @@ func printSummary(w io.Writer, rep *racetest.Report) {
 		total += n
 	}
 	fmt.Fprintf(w, "ops total:      %d\n", total)
-	for _, class := range []string{"put", "delete", "multipart"} {
-		fmt.Fprintf(w, "  %-10s    %d\n", class, rep.OpsByClass[class])
+	// Iteration order matches racetest's canonical list so the summary
+	// is stable across runs and easy to diff in CI artefacts.
+	for _, class := range []string{
+		racetest.OpPut, racetest.OpGet, racetest.OpDelete, racetest.OpList,
+		racetest.OpMultipart, racetest.OpVersioningFlip,
+		racetest.OpConditionalPut, racetest.OpDeleteObjects,
+	} {
+		fmt.Fprintf(w, "  %-16s %d\n", class, rep.OpsByClass[class])
 	}
 	fmt.Fprintf(w, "inconsistencies: %d\n", len(rep.Inconsistencies))
 	for i, inc := range rep.Inconsistencies {

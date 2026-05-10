@@ -1081,17 +1081,21 @@ func (s *Store) ScanObjects(ctx context.Context, bucketID uuid.UUID, opts meta.L
 }
 
 func (s *Store) ListObjects(ctx context.Context, bucketID uuid.UUID, opts meta.ListOptions) (*meta.ListResult, error) {
+	// Hold RLock through the entire scan: PutObject mutates the head
+	// version in place (e.g. flipping IsLatest=false), so any read of
+	// versions[0] without the lock is racy. Memory backend is test-
+	// only — list throughput matters less than parity with the strict
+	// concurrency contract.
 	s.mu.RLock()
+	defer s.mu.RUnlock()
 	bucket, ok := s.objects[bucketID]
 	if !ok {
-		s.mu.RUnlock()
 		return nil, meta.ErrBucketNotFound
 	}
 	keys := make([]string, 0, len(bucket))
 	for k := range bucket {
 		keys = append(keys, k)
 	}
-	s.mu.RUnlock()
 	sort.Strings(keys)
 
 	limit := opts.Limit
@@ -1109,9 +1113,7 @@ func (s *Store) ListObjects(ctx context.Context, bucketID uuid.UUID, opts meta.L
 		if opts.Prefix != "" && !strings.HasPrefix(k, opts.Prefix) {
 			continue
 		}
-		s.mu.RLock()
 		versions := bucket[k]
-		s.mu.RUnlock()
 		if len(versions) == 0 || versions[0].IsDeleteMarker {
 			continue
 		}

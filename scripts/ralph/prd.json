@@ -55,8 +55,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Workload extension: Config gained Mix map[string]float64 + StreamingRatio float64; Run dispatches via weighted opPicker over 8 op classes (put/get/delete/list/multipart/versioning_flip/conditional_put/delete_objects). DefaultMix sums to 1.0 with every class >=5% and versioning_flip = 10%. Streaming SigV4 path implemented in signer.signStreaming: aws-sdk-go-v2 v4.SignHTTP with payloadHash=STREAMING-AWS4-HMAC-SHA256-PAYLOAD, then chained-HMAC chunk encoding (encodeStreamingBody/computeChunkSignature) using deriveSigningKey duplicated locally to avoid internal/auth dep cycle. Body-carrying ops (put + conditional_put) route through doPUTBody which picks streaming vs fixed-payload at StreamingRatio (default 0.5). Streaming auto-disabled when signer is nil (anonymous in-process tests). Exposed const Op* identifiers and DefaultMix as public surface. Pre-existing race in internal/meta/memory.ListObjects (read of versions[0] outside RLock) surfaced once OpList joined the harness; fixed by holding RLock through scan. New tests: TestRunStreamingSigV4 (auth.ModeRequired gateway, StreamingRatio=1.0, asserts streaming PUT + conditional PUT succeed end-to-end); TestRunRejectsBadConfig extended with StreamingRatio>1 and negative-mix-weight cases; TestRunSmoke now asserts every default-mix class > 0; TestRunSmokeBinary stdout assertion extended to all 8 classes. cmd/strata-racecheck printSummary lists all 8 classes in canonical order."
     },
     {
       "id": "US-004",

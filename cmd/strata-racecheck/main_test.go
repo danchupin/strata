@@ -56,10 +56,10 @@ func TestRunSmokeBinary(t *testing.T) {
 
 	args := []string{
 		"--endpoint=" + ts.URL,
-		"--duration=400ms",
+		"--duration=1500ms",
 		"--concurrency=4",
 		"--buckets=2",
-		"--keys-per-bucket=3",
+		"--keys-per-bucket=4",
 		"--report=" + report,
 	}
 	rc := run(args, &stdout, &stderr)
@@ -67,7 +67,14 @@ func TestRunSmokeBinary(t *testing.T) {
 		t.Fatalf("exit code: got %d want %d; stderr=%s", rc, exitOK, stderr.String())
 	}
 
-	for _, want := range []string{"strata-racecheck summary", "ops total:", "put", "delete", "multipart"} {
+	// Stdout should name the full workload mix per the US-003 op
+	// classes — both the original PUT/DELETE/multipart trio and the
+	// new GET/list/versioning_flip/conditional_put/delete_objects ops.
+	for _, want := range []string{
+		"strata-racecheck summary", "ops total:",
+		"put", "get", "delete", "list",
+		"multipart", "versioning_flip", "conditional_put", "delete_objects",
+	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("stdout missing %q; got %s", want, stdout.String())
 		}

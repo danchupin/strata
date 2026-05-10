@@ -25,6 +25,11 @@ Cycle: ralph/race-harness
 - strata-racecheck binary pattern (US-002): `cmd/strata-racecheck/main.go` is a thin shell over `racetest.Run`. Flags pre-populated from $AWS_ACCESS_KEY_ID / $AWS_SECRET_ACCESS_KEY / $AWS_DEFAULT_REGION env vars so CI can lean on shell exports. Exit code mapping is part of the binary's contract (0/1/2) — used by `make race-soak` (US-006) and the nightly workflow (US-007) to flip the badge red on inconsistencies vs setup-failure differently. Tests use `run(args, &stdout, &stderr) int` shape (no os.Exit in main flow).
 - racetest event sinks (US-002): `EventSink` interface + nopSink/writerSink/fileSink. ReportPath beats EventWriter when both are set. fileSink wraps writerSink with a buffered writer so the 64 KiB bufio buffer absorbs the per-op churn at ~500 ops/sec. Concurrency-safe via single mutex on the underlying io.Writer.
 - racetest SigV4 wiring (US-002): aws-sdk-go-v2 v4.NewSigner is the signer. Body is hashed with sha256 (matches the gateway's verifier). Empty AccessKey returns nil signer; anonymous flow stays unchanged so existing in-process tests keep working without auth setup.
+- racetest weighted op picker (US-003): Config.Mix map[string]float64 normalised in newOpPicker → cumulative-weight slice → O(log N) per pick. Op-class identifiers exported as const Op* (OpPut/OpGet/OpDelete/OpList/OpMultipart/OpVersioningFlip/OpConditionalPut/OpDeleteObjects). DefaultMix sums to 1.0; unknown keys silently dropped so future class additions don't reject existing configs.
+- racetest streaming SigV4 (US-003): signStreaming pre-computes encoded length deterministically (chunk-signature is always 64 hex chars), sets Content-Length + X-Amz-Decoded-Content-Length + X-Amz-Content-Sha256=STREAMING-... BEFORE signing so they're covered by the signature. Parses seed sig out of Authorization header via parseAuthSignature, derives signing key locally (deriveSigningKey duplicated from internal/auth — avoids cyclic dep), encodes one data chunk + zero-length terminator with chained HMAC. signer is nil in anonymous mode → streaming auto-disabled, fixed-payload only.
+- DeleteObjects op gotcha (US-003): the dedup-key picker (`for len(seen) < n; idx := rng.Intn(objectKeys); ...`) infinite-loops if n > objectKeys. Always clamp n to min(n, objectKeys) and ≥ 1. Any future "pick N distinct from M" loop should follow the same clamp pattern.
+- internal/meta/memory.ListObjects pre-existing race (fixed in US-003): the original code released RLock between sort + per-key versions[0] reads; PutObject mutates head versions in place, so concurrent reads were racy. Fix: hold RLock through the full scan via defer s.mu.RUnlock(). Lesson: any in-memory store reading `slice[0].Field` after releasing the lock is racy if writers can mutate the head.
+- Memory backend integration tests (US-003): wiring auth.Middleware{Mode: ModeRequired} + auth.NewStaticStore + s3api.New + httptest.NewServer is the canonical shape for testing the gateway under real signed requests. NewAuthDenyHandler(api.Meta) is required so 4xx responses carry the right shape.
 
 ## [2026-05-10 14:30 MSK] - US-001
 - Implemented: Carved out `internal/racetest` package and refactored s3api race tests as thin shims.
@@ -65,4 +70,31 @@ Cycle: ralph/race-harness
   - The binary-consolidation PRD file no longer exists in tasks/ (deleted at cycle close per PRD-lifecycle rule). Acceptance criterion's "tasks/prd-binary-consolidation.md" reference was satisfied by adding a Non-Goals section to the migration doc at docs/site/content/architecture/migrations/binary-consolidation.md, which is the canonical post-cycle home for the consolidation rule.
   - The per-op summary event mirrors the in-memory Report fields so downstream tools (US-008's summarize.sh) can read either the JSON-lines tail OR the strata-racecheck stdout; both report the same numbers.
   - Signing is opt-in via empty AccessKey: existing TestRunSmoke in internal/racetest/runner_test.go still passes anonymous against an httptest gateway with default auth-mode (optional), no test changes needed.
+---
+
+## [2026-05-10 17:30 MSK] - US-003
+- Implemented: Workload extension to 8 op classes, weighted Mix picker, streaming SigV4 PUT path.
+- Files changed:
+  - new: `internal/racetest/workload.go` — opPicker (weighted random over classes), workerCtx + runOnce dispatch, doSigned/doSignedRead/doSignedReadResp transport helpers, doMultipartCycle (moved from runner.go), doPUTBody (streaming/fixed routing for body-carrying ops)
+  - rewrote: `internal/racetest/runner.go` — Config gained Mix map[string]float64 + StreamingRatio float64; DefaultMix exported (8 classes, every ≥5%, versioning_flip = 10%, sums to 1.0); op-class consts exported; Run wires the picker + workerCtx; per-class counters use the canonical allOpClasses list
+  - rewrote: `internal/racetest/signer.go` — added signStreaming with manual aws-chunked encoding (chunk-signature is always 64 hex chars → encodedLen pre-computable); parseAuthSignature pulls seed sig from Authorization header; deriveSigningKey + computeChunkSignature duplicated from internal/auth to avoid dep cycle
+  - rewrote: `internal/racetest/runner_test.go` — TestRunSmoke now asserts all 8 classes > 0; TestRunRejectsBadConfig extended with StreamingRatio>1 and negative-mix-weight cases; new TestRunStreamingSigV4 wires auth.ModeRequired + StreamingRatio=1.0 and asserts streaming PUT + conditional-PUT both reach 200
+  - edit: `cmd/strata-racecheck/main.go` — printSummary lists all 8 classes in canonical order with stable formatting
+  - edit: `cmd/strata-racecheck/main_test.go` — TestRunSmokeBinary stdout assertion extended to all 8 classes; --duration bumped to 1500ms so even 5%-weighted classes hit at p~1
+  - fix: `internal/meta/memory/store.go` — ListObjects now holds RLock through the entire scan (defer s.mu.RUnlock()); pre-existing race between versions[0] reads after RUnlock and concurrent PutObject head-mutations was caught by the new -race coverage
+  - edit: `scripts/ralph/prd.json` — US-003 passes=true with full notes
+- Quality checks:
+  - `go vet ./...` clean
+  - `go build ./...` clean
+  - `go test -race -count=1 ./internal/racetest/... ./cmd/strata-racecheck/... ./internal/s3api/` all green (~20s)
+  - `go test -count=1 ./...` all green (~110s)
+- **Learnings for future iterations:**
+  - Streaming SigV4 over aws-sdk-go-v2 v4.SignHTTP works by passing payloadHash=STREAMING-AWS4-HMAC-SHA256-PAYLOAD; the SDK signs whatever headers are on the request at sign-time, so set X-Amz-Content-Sha256, X-Amz-Decoded-Content-Length, Content-Length BEFORE calling SignHTTP. Seed signature lives in the Authorization header's "Signature=" field — parse it back out and chain chunks manually.
+  - The chunk-signature is always exactly 64 hex chars, so the encoded body length is deterministic from len(body). Pre-compute it via streamingEncodedLen() and set Content-Length to that value before signing. After encoding, sanity-check that len(encoded) == encodedLen — catches off-by-one in the formula.
+  - Avoid an internal/auth dep on internal/racetest (or vice versa) by duplicating the small SigV4 primitives (deriveSigningKey, computeChunkSignature, sigTerminator, emptyBodyHash) into racetest/signer.go. They are stable AWS-spec values — no drift risk.
+  - Weighted op picker must drop unknown class names (typos in user-supplied Mix) silently rather than rejecting — keeps user-config forward-compat across new op-class additions in future PRD iterations. Negative weights still reject loudly (config error, not silent skew).
+  - "Pick N distinct from M" loop pattern: ALWAYS clamp N to min(N, M) before entering the dedup loop. Otherwise a single shrunken bucket pool turns the workload into a hang. The bug was caught instantly in the smoke test (60s timeout) but easy to miss under longer durations.
+  - Pre-existing memory-store ListObjects race surfaced once the harness gained OpList. Pattern: any code that reads `bucket[k][0].Field` after releasing the bucket-level lock is racy if concurrent writers mutate the head version in place. Hold the RLock through the entire scan in test-only stores; production stores use real CQL/TiKV transactions and don't have this issue.
+  - The `auth.Middleware{Mode: ModeRequired} + auth.NewStaticStore({ak: cred}) + s3api.New` shape is the canonical wiring for racetest-style external-endpoint tests against signed gateways. Wraps with mw.Wrap(api, s3api.NewAuthDenyHandler(api.Meta)) so 4xx errors render correctly.
+  - aws-sdk-go-v2 v4 SignHTTP is stateless after construction — share one *signer across all worker goroutines via pointer; signing is concurrent-safe.
 ---
