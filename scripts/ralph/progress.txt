@@ -23,6 +23,11 @@ Cycle: ralph/s3-compat-finish
 - `meta.Store.SavePart` overwrites on PartNumber resend (last-write-wins) on all 3 backends. Re-uploads of same PartNumber produce a single stored row at the LATEST ETag.
 - DO NOT use `STRATA_AUTH_MODE=optional` in e2e — sign with static creds against SigV4 path, matches s3-tests harness.
 - AWS take-latest dedupe pattern in CompleteMultipartUpload Parts list: relax strict-ascending from `<= prev` to `< prev` AND overwrite `parts[len(parts)-1]` when `p.PartNumber == prev` (instead of appending). The two halves are intertwined — relaxed inequality alone permits duplicates but leaves them duplicated; in-loop overwrite alone breaks under strict-ascending. Storage-side `meta.Store.SavePart` last-write-wins on all 3 backends means the LAST submitted ETag resolves against the LATEST stored part naturally.
+- AWS-parity Range-GET checksum echo rule: ANY x-amz-checksum-* header that escapes on a Range response triggers boto3 1.36+ default-on FlexibleChecksum validation against the partial body — a guaranteed mismatch when the stored checksum covers the whole object. Gate `writeChecksumHeaders(w.Header(), o.Checksums)` and `x-amz-checksum-type` on `r.Header.Get("Range") == ""`. The per-part GET branch (`partNumber > 0`) is unaffected because its emitted digest matches exactly the bytes that branch serves. Suppress on Range; do not try to compute a partial-range checksum on the fly.
+- boto3 1.36+ default-on FlexibleChecksum auto-sets `x-amz-checksum-mode: ENABLED` on every GET — `checksumModeEnabled()` will fire even when the test code does not pass `ChecksumMode`. Any AWS-parity behaviour gated only on `ChecksumMode=ENABLED` will surface implicitly through default-on validation.
+- s3-tests local stack iteration loop: edits → `docker compose build strata` → `up -d --force-recreate strata` → `until curl -sf /readyz; do sleep 1; done` → `S3TESTS_DIR=<reuse> S3_TESTS_FILTER=<targeted> scripts/s3-tests/run.sh`. `make up-all` does NOT rebuild the cached image; without an explicit `compose build strata`, source-level fixes never reach the running gateway.
+- Lima Docker daemon: `limactl start avito` if the daemon is down (`docker info` reports "Cannot connect"). `make up-all` against a stale ceph monmap (different docker network from prior run) fails with `strata-ceph is unhealthy`; `docker compose -f deploy/docker/docker-compose.yml down -v` drops the volumes and a fresh `up-all` succeeds.
+- s3-tests failing-test triage pattern: when pytest fails but a one-off Python probe of the public API cannot reproduce, mirror the test's helper flow line-by-line (don't just call the high-level API). `_check_key_content` issues THREE GETs (full-source, full-dest, ranged-source); the failure may be on a non-obvious one. The traceback's `:<line>` points to the exact GET.
 
 ## 2026-05-10 — US-001 ChecksumType defaults for CRC family on multipart Initiate
 - `internal/s3api/multipart.go::initiateMultipart` now folds Initiate-time
@@ -168,5 +173,103 @@ Cycle: ralph/s3-compat-finish
     `multipart.go:728 unused parameter key`, `testutil_test.go::mustWriteFull`)
     are unchanged — not introduced here, do NOT touch them in this
     commit; they predate this cycle.
+---
+
+## 2026-05-10 — US-003 S3-tests baseline rerun + ROADMAP close-flip
+- Brought up the full local stack (`make up-all` against the Lima Docker
+  daemon; daemon was stopped at the start of this iteration so
+  `limactl start avito` was needed first), rebuilt the `strata:ceph`
+  image to embed US-001 + US-002 fixes (the prior cached image was
+  2026-05-07, before this cycle's commits), and ran
+  `scripts/s3-tests/run.sh` against the full default subset.
+- **Initial targeted run (US-001/US-002 only) flipped 1 of 4 expected
+  tests:** `test_multipart_resend_first_finishes_last` (US-002) PASSED;
+  the 3 multipart_copy failures still raised `FlexibleChecksumError`
+  but with a different value shape than before (server now emitted
+  raw FULL_OBJECT digests per US-001's CRC defaulting; boto3 still
+  rejected). Root-caused via a Python probe that mirrored
+  `test_multipart_copy_small` flow exactly: failure happens inside
+  `_check_key_content` at line 6088 — `client.get_object(... Range='bytes=0-N')`
+  on the SOURCE bucket. boto3 1.36+ default-on FlexibleChecksum
+  auto-sets `x-amz-checksum-mode: ENABLED`; server emitted the
+  whole-object `x-amz-checksum-*` (CRC32 of the 7 MiB random source);
+  boto3 streamed the partial 1-byte body, recomputed CRC32 of just
+  that byte, and rejected the partial-vs-whole mismatch. AWS suppresses
+  checksum echo on Range responses; Strata didn't.
+- **Fix:** `internal/s3api/server.go::getObject` — gated the
+  `writeChecksumHeaders(w.Header(), o.Checksums)` + `x-amz-checksum-type`
+  echo on `r.Header.Get("Range") == ""`. The `partNumber > 0` branch is
+  unaffected (per-part GET emits the per-part digest, which DOES match
+  the partial body that branch returns). HEAD with Range is also covered
+  by the same gate.
+- New test `TestChecksumModeRangeGetSuppressesWholeObjectChecksum` in
+  `internal/s3api/checksum_mode_test.go` locks the AWS-parity:
+  full GET with `x-amz-checksum-mode: ENABLED` echoes the stored
+  digest (and ChecksumType); Range GET / HEAD with the same mode
+  emits NEITHER `x-amz-checksum-*` NOR `x-amz-checksum-type`.
+- **Targeted s3-tests rerun (post-fix, post-image-rebuild):** all 4
+  PASS (`test_multipart_copy_small`, `_special_names`, `_multiple_sizes`,
+  `test_multipart_resend_first_finishes_last`).
+- **Full default-subset baseline:** `tests=178 passed=165 failed=13
+  errors=0 skipped=0  pass rate: 92.7%`. +3 newly passing vs prior
+  91.5% (162/177). Collection grew by 1 (test_headers.py picked up
+  one extra contentlength shape). All 13 remaining failures are
+  deliberate gaps already documented in
+  `scripts/s3-tests/README.md` (10 SigV2 / bad-auth /
+  bad-Content-Length, 1 prefix_unreadable architectural drift,
+  2 anonymous-list under `STRATA_AUTH_MODE=required`).
+- **ROADMAP close-flip in same commit (per CLAUDE.md Roadmap rule):**
+  - Headline `91.5% (162/177)` → `92.7% (165/178)`.
+  - `P2 — Multipart copy GET-side checksum echo divergence` → Done
+    (Range-GET echo bug; not destination checksum recompute drift).
+  - `P2 — Multipart Complete rejects duplicate PartNumber in Parts
+    list` → Done (US-002).
+  - Trailing sentence on the historical `P1 — s3-tests 80% → 90%+`
+    Done line updated to point to this cycle's close-out, replacing
+    "4 real failures remain".
+- `scripts/s3-tests/README.md` baseline section updated: new headline
+  92.7%, per-test diff, deliberate-gap breakdown.
+- Files changed: `internal/s3api/server.go`,
+  `internal/s3api/checksum_mode_test.go`, `ROADMAP.md`,
+  `scripts/s3-tests/README.md`, `scripts/ralph/prd.json`,
+  `scripts/ralph/progress.txt`.
+- Quality: `go vet ./...` clean. `go test ./...` green
+  (`internal/s3api` 6.2s; full repo green incl. 44.9s racetest).
+  Targeted s3-tests 4/4 PASS. Full default subset 165/178 (92.7%).
+- **Learnings for future iterations:**
+  - When boto3 1.36+ default-on FlexibleChecksum auto-validates a
+    response, ANY x-amz-checksum-* header on the wire triggers a
+    streaming validation against the response body. A checksum that
+    covers a different byte range than the response body is a
+    correctness bug — Range responses, partial-content responses,
+    and per-part responses must each emit a checksum that covers
+    EXACTLY the bytes the client receives, or no checksum at all.
+  - The per-part-GET branch (`partNumber > 0`) was already correct
+    here: `partChecksumsAt(o, partNumber-1)` returns the digest for
+    the specific part bytes that branch serves. It's the "full GET
+    + Range" branch that needed the gate.
+  - Diagnosis pattern that worked: when a pytest-only failure won't
+    reproduce in a one-off Python probe, mirror the test's flow
+    line-by-line (don't just call the public API). The failing
+    helper here was `_check_key_content`, not `_multipart_copy`.
+    Three GETs, the THIRD (Range) was the culprit.
+  - When a partial fix lands and the symptom shape changes (e.g.
+    server stopped emitting `-N`-suffixed COMPOSITE, started
+    emitting raw FULL_OBJECT, but the value still mismatches), do
+    NOT chase the per-byte arithmetic — investigate the request
+    shape boto3 is sending. The mismatch shape often reveals the
+    real bug (here: stored-CRC vs partial-body-CRC, both raw
+    FULL_OBJECT).
+  - `make up-all` requires the lima Docker daemon to be running.
+    The first `up-all` may fail with "container strata-ceph is
+    unhealthy" if there's a stale ceph monmap from a prior
+    different-network run; `docker compose down -v` (drops
+    volumes) and a fresh `up-all` clears it.
+  - When iterating on s3-tests fixes, ALWAYS rebuild the
+    `strata:ceph` image after edits — `make up-all` reuses the
+    cached image without rebuilding, so source changes won't
+    surface. `docker compose -f deploy/docker/docker-compose.yml
+    build strata` then `up -d --force-recreate strata` is the
+    fast loop.
 ---
 

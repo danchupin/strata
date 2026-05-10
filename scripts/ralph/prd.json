@@ -57,8 +57,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Targeted s3-tests on full local stack flipped all 4 from FAIL → PASS: `test_multipart_copy_small`, `_special_names`, `_multiple_sizes`, `test_multipart_resend_first_finishes_last`. Full default subset 165/178 (92.7%) — +3 newly passing vs prior 162/177 (91.5%) baseline; collection grew by 1 (`test_headers.py` family). Initial baseline rerun after US-001/US-002 build-and-deploy flipped only 1 of 4 (the resend dedupe). The 3 remaining multipart_copy failures still raised `FlexibleChecksumError` but with a different shape: server now emitted raw FULL_OBJECT digests (no `-N` suffix per US-001) yet boto3 still rejected. Root-cause via local probe: failure was on the SOURCE-side Range GET inside `_check_key_content` (line 6088), not the destination. boto3 1.36+ default-on FlexibleChecksum auto-sets `x-amz-checksum-mode: ENABLED` on every GET, and the server emitted the whole-object `x-amz-checksum-*` even on Range responses — boto3 streams the partial body and recomputes the digest, the partial-vs-whole mismatch fires `FlexibleChecksumError`. Fix landed in `internal/s3api/server.go::getObject`: suppress checksum echo when `r.Header.Get(\"Range\") != \"\"` (AWS behaviour). New unit test `TestChecksumModeRangeGetSuppressesWholeObjectChecksum`. Both P2 entries flipped to Done in `ROADMAP.md` (`Multipart copy GET-side checksum echo divergence` + `Multipart Complete rejects duplicate PartNumber in Parts list`); s3-tests README updated with the 92.7% baseline + per-test diff. `go vet ./...` clean. `go test ./...` green."
     }
   ]
 }
