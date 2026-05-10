@@ -145,8 +145,8 @@
         "Tests pass"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added scripts/racecheck/summarize.sh (POSIX bash + jq + awk + sort) consuming $REPORT_DIR/race.jsonl into $REPORT_DIR/SUMMARY.md. Single jq pass tags relevant events D/I/S; awk over the tab-separated stream computes per-class counts + p50/p95/p99 (sort by class+duration_ms then per-class index lookup), totals, throughput (from summary.duration_ns), inconsistency count + first 3 examples, and host pre/post disk + mem from $REPORT_DIR/host.txt. Empty-file path emits a placeholder SUMMARY.md and exits 0 so the race-nightly workflow's `cat report/SUMMARY.md >> $GITHUB_STEP_SUMMARY` step always has content. Partial-run path (no summary event) shows Duration/Throughput as `n/a` rather than guessing from RFC3339 timestamps. Perf: 0.92s on a 20 MB synthetic JSONL (169196 op_done lines + 8 classes) on macOS — well under the 5s budget. Host extraction uses a section-and-subheader gating (`-- df -h /` / `-- free -m` markers) to avoid the subheader-line-itself ending in `/` and being parsed as a df row. New internal/racetest/summarize_test.go drives the script end-to-end via `bash <root>/scripts/racecheck/summarize.sh` with REPORT_DIR overridden to t.TempDir(); skips when jq is absent; covers populated/empty/partial/many-inconsistency cases. PRD updated; close-flip + baseline run land in US-009."
     },
     {
       "id": "US-009",
