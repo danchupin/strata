@@ -1,21 +1,25 @@
 # Ralph Progress Log
-Started: Sun May 10 12:00:00 MSK 2026
+Started: Sun May 10 09:16:49 MSK 2026
 Cycle: ralph/bucket-quotas-billing
 
 ## Codebase Patterns
 - `meta.Store` interface in `internal/meta/store.go` is implemented by THREE backends (memory, cassandra, tikv). Adding a method requires implementations on all three + a contract test in `internal/meta/storetest/contract.go::cases`.
-- Cassandra schema migrations are additive only: `tableDDL` (idempotent CREATE) and `alterStatements` (idempotent ALTER ADD column). Never destructive.
-- Cassandra LWT (`IF EXISTS`/`IF NOT EXISTS`) is REQUIRED for read-after-write coherence on any row that may be queried with quorum after a previous LWT write. Plain UPDATE after LWT INSERT leaves Paxos state stale and `LOCAL_QUORUM` reads can observe pre-update value. Counter increment on `bucket_stats` MUST use `UPDATE … IF EXISTS`.
-- TiKV pessimistic txn with EARLY-RETURN paths must call `txn.Rollback()` explicitly. `defer rollbackOnError(txn, &err)` only fires when err != nil. Any non-error early return (e.g. CAS-reject `applied=false, nil`) MUST `txn.Rollback()` first or the LockKeys lease leaks for txn lifetime — deadlocks the in-process memBackend forever.
-- Per-bucket / per-user single-blob configs (lifecycle, CORS, policy, public-access-block, ownership-controls, quota) reuse `setBucketBlob` / `getBucketBlob` / `deleteBucketBlob` helpers in both backends instead of fresh CRUD per endpoint.
-- Workers register via `workers.Register(workers.Worker{Name, Build})` in `cmd/strata/workers/<name>.go::init()`. Build receives `workers.Dependencies`, returns `workers.Runner`. Supervisor handles leader-election (`<name>-leader` lease) + panic restart with backoff.
-- Worker envs read at Build time (no per-worker flags). New worker env knobs follow the `STRATA_<NAME>_*` convention.
-- AuditMiddleware in `internal/s3api/access_log.go` stamps audit rows from request context. Admin handlers stamp operator-meaningful audit row via `s3api.SetAuditOverride(ctx, action, resource, bucket, principal)` — Action shape is `admin:<Verb>` (e.g. `admin:PutBucketQuota`).
-- OpenAPI contract `internal/adminapi/openapi.yaml` is the canonical Admin-API source. New admin endpoints must update it + handler.
-- Existing Prometheus metric: `strata_http_requests_total{bucket,access_key}`. New metrics for quota cycle: `strata_quota_reconcile_drift_bytes{bucket}` (gauge).
-- Web UI: React+TS under `web/`. Per-bucket page is `web/src/pages/BucketDetail.tsx`. IAM users page exists; new per-user Billing page lands as `web/src/pages/UserBilling.tsx`. Playwright e2e in `web/e2e/`.
-- `BumpBucketStats` is the canonical write path for the live counter — every PUT / DELETE / multipart Complete / lifecycle expire MUST go through it. Negative deltas allowed.
-- Quota check happens BEFORE writing data (PUT-validate time). Live source-of-truth is `bucket_stats` (bucket scope) + sum-across-user-buckets (user scope). v1 user-scope check uses `ListBuckets(ctx, owner)` walk; denormalised user_bucket_count is a P3 follow-up.
-- `byte_seconds × 24h` rollup is intentionally crude v1 approximation. Document the caveat in `docs/site/content/best-practices/quotas-billing.md`. Continuous integration is a P3 follow-up.
-- Out of scope this cycle: invoice ledger / payment integration. Stop at the `usage_aggregates` feed.
+- Quota wire codec lives in `internal/meta/quota.go` (`EncodeBucketQuota` / `DecodeBucketQuota` + user variants). All three backends share it — JSON keeps additive fields forward-compatible.
+- Per-bucket single-blob configs go through `setBucketBlob` / `getBucketBlob` / `deleteBucketBlob` helpers on each backend. Memory adds a `map[uuid.UUID][]byte` field; Cassandra adds a `bucket_<kind>` table to `tableDDL`; TiKV adds a `BlobX` constant in `keys.go` + a single shared key prefix.
+- Per-user single-blob configs need a parallel triple keyed on `userName` (string). Cassandra: dedicated table (e.g. `user_quota`); TiKV: dedicated key prefix (e.g. `prefixUserQuota`) + helper like `UserQuotaKey`.
+- "Not configured" is signalled by `(zero-value, false, nil)`, never a sentinel error — the gateway PUT-validate path stays branch-on-bool.
+- Contract tests register in `Run()`'s `cases` slice. Memory runs unconditionally; Cassandra/TiKV run under `-tags integration`.
+
+## 2026-05-10 - US-001
+- Implemented BucketQuota + UserQuota types and the six-method CRUD surface on `meta.Store`.
+- Memory backend: full impl using `setBucketBlob`/`getBucketBlob` for bucket scope; inline triple for user scope (string key).
+- Cassandra: `bucket_quota` and `user_quota` tables added to `tableDDL` (idempotent CREATE); methods reuse `setBucketBlob`/`getBucketBlob` for bucket scope, inline INSERT/SELECT/DELETE for user scope.
+- TiKV: `BlobQuota` kind added for bucket scope (reuses BucketBlobKey); new `prefixUserQuota` + `UserQuotaKey` helper for user scope; methods follow the existing pessimistic-txn shape with `rollbackOnError` on writes.
+- Contract test: `caseBucketQuota` + `caseUserQuota` exercise unconfigured → set → overwrite → delete → idempotent-delete; registered in `Run()`'s case list.
+- Files changed: `internal/meta/store.go`, `internal/meta/quota.go` (new), `internal/meta/memory/store.go`, `internal/meta/cassandra/store.go`, `internal/meta/cassandra/schema.go`, `internal/meta/tikv/blobs.go`, `internal/meta/tikv/keys.go`, `internal/meta/storetest/contract.go`.
+- **Learnings for future iterations:**
+  - Three backends in lockstep — interface change touches all of memory/cassandra/tikv plus the contract test.
+  - JSON-encoded payloads via `meta.EncodeXQuota` / `DecodeXQuota` give every backend the same wire shape, so additive fields land without an ALTER.
+  - `setBucketBlob` helper expects bucket existence on memory (returns `ErrBucketNotFound`) — Cassandra path is INSERT-no-existence-check; integration suite tolerates that asymmetry because the contract case always creates the bucket first.
+  - For user-scoped configs there is no shared helper across backends — each backend writes 3 small inline methods.
 ---

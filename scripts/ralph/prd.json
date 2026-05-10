@@ -17,8 +17,8 @@
         "Tests pass (`go test ./...`)"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Memory + cassandra + tikv impls landed together so meta.Store interface stays satisfied. JSON-blob codec in internal/meta/quota.go is shared by all three backends. Cassandra schema gains bucket_quota + user_quota tables; TiKV uses BlobQuota under existing BucketBlobKey + a new prefixUserQuota for user rows. Get returns (zero,false,nil) when not configured — no sentinel error."
     },
     {
       "id": "US-002",

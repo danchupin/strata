@@ -2845,6 +2845,74 @@ func (s *Store) DeleteBucketTagging(ctx context.Context, bucketID uuid.UUID) err
 	return s.deleteBucketBlob(ctx, "bucket_tagging", bucketID)
 }
 
+func (s *Store) SetBucketQuota(ctx context.Context, bucketID uuid.UUID, q meta.BucketQuota) error {
+	blob, err := meta.EncodeBucketQuota(q)
+	if err != nil {
+		return err
+	}
+	return s.setBucketBlob(ctx, "bucket_quota", "config", bucketID, blob)
+}
+
+func (s *Store) GetBucketQuota(ctx context.Context, bucketID uuid.UUID) (meta.BucketQuota, bool, error) {
+	var blob []byte
+	err := s.s.Query(
+		`SELECT config FROM bucket_quota WHERE bucket_id=?`,
+		gocqlUUID(bucketID),
+	).WithContext(ctx).Scan(&blob)
+	if errors.Is(err, gocql.ErrNotFound) || (err == nil && len(blob) == 0) {
+		return meta.BucketQuota{}, false, nil
+	}
+	if err != nil {
+		return meta.BucketQuota{}, false, err
+	}
+	q, err := meta.DecodeBucketQuota(blob)
+	if err != nil {
+		return meta.BucketQuota{}, false, err
+	}
+	return q, true, nil
+}
+
+func (s *Store) DeleteBucketQuota(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(ctx, "bucket_quota", bucketID)
+}
+
+func (s *Store) SetUserQuota(ctx context.Context, userName string, q meta.UserQuota) error {
+	blob, err := meta.EncodeUserQuota(q)
+	if err != nil {
+		return err
+	}
+	return s.s.Query(
+		`INSERT INTO user_quota (user_name, config) VALUES (?, ?)`,
+		userName, blob,
+	).WithContext(ctx).Exec()
+}
+
+func (s *Store) GetUserQuota(ctx context.Context, userName string) (meta.UserQuota, bool, error) {
+	var blob []byte
+	err := s.s.Query(
+		`SELECT config FROM user_quota WHERE user_name=?`,
+		userName,
+	).WithContext(ctx).Scan(&blob)
+	if errors.Is(err, gocql.ErrNotFound) || (err == nil && len(blob) == 0) {
+		return meta.UserQuota{}, false, nil
+	}
+	if err != nil {
+		return meta.UserQuota{}, false, err
+	}
+	q, err := meta.DecodeUserQuota(blob)
+	if err != nil {
+		return meta.UserQuota{}, false, err
+	}
+	return q, true, nil
+}
+
+func (s *Store) DeleteUserQuota(ctx context.Context, userName string) error {
+	return s.s.Query(
+		`DELETE FROM user_quota WHERE user_name=?`,
+		userName,
+	).WithContext(ctx).Exec()
+}
+
 func (s *Store) SetBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string, blob []byte) error {
 	return s.s.Query(
 		`INSERT INTO bucket_inventory_configs (bucket_id, config_id, config) VALUES (?, ?, ?)`,

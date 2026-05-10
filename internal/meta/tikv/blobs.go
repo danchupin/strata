@@ -192,6 +192,88 @@ func (s *Store) DeleteBucketTagging(ctx context.Context, bucketID uuid.UUID) err
 	return s.deleteBucketBlob(ctx, bucketID, BlobTagging)
 }
 
+// ----- Quotas (US-001..US-003) -----
+
+func (s *Store) SetBucketQuota(ctx context.Context, bucketID uuid.UUID, q meta.BucketQuota) error {
+	blob, err := meta.EncodeBucketQuota(q)
+	if err != nil {
+		return err
+	}
+	return s.setBucketBlob(ctx, bucketID, BlobQuota, blob)
+}
+
+func (s *Store) GetBucketQuota(ctx context.Context, bucketID uuid.UUID) (meta.BucketQuota, bool, error) {
+	txn, err := s.kv.Begin(ctx, false)
+	if err != nil {
+		return meta.BucketQuota{}, false, err
+	}
+	defer txn.Rollback()
+	raw, found, err := txn.Get(ctx, BucketBlobKey(bucketID, BlobQuota))
+	if err != nil {
+		return meta.BucketQuota{}, false, err
+	}
+	if !found || len(raw) == 0 {
+		return meta.BucketQuota{}, false, nil
+	}
+	q, err := meta.DecodeBucketQuota(raw)
+	if err != nil {
+		return meta.BucketQuota{}, false, err
+	}
+	return q, true, nil
+}
+
+func (s *Store) DeleteBucketQuota(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(ctx, bucketID, BlobQuota)
+}
+
+func (s *Store) SetUserQuota(ctx context.Context, userName string, q meta.UserQuota) (err error) {
+	blob, err := meta.EncodeUserQuota(q)
+	if err != nil {
+		return err
+	}
+	txn, err := s.kv.Begin(ctx, false)
+	if err != nil {
+		return err
+	}
+	defer rollbackOnError(txn, &err)
+	if err = txn.Set(UserQuotaKey(userName), append([]byte(nil), blob...)); err != nil {
+		return err
+	}
+	return txn.Commit(ctx)
+}
+
+func (s *Store) GetUserQuota(ctx context.Context, userName string) (meta.UserQuota, bool, error) {
+	txn, err := s.kv.Begin(ctx, false)
+	if err != nil {
+		return meta.UserQuota{}, false, err
+	}
+	defer txn.Rollback()
+	raw, found, err := txn.Get(ctx, UserQuotaKey(userName))
+	if err != nil {
+		return meta.UserQuota{}, false, err
+	}
+	if !found || len(raw) == 0 {
+		return meta.UserQuota{}, false, nil
+	}
+	q, err := meta.DecodeUserQuota(raw)
+	if err != nil {
+		return meta.UserQuota{}, false, err
+	}
+	return q, true, nil
+}
+
+func (s *Store) DeleteUserQuota(ctx context.Context, userName string) (err error) {
+	txn, err := s.kv.Begin(ctx, false)
+	if err != nil {
+		return err
+	}
+	defer rollbackOnError(txn, &err)
+	if err = txn.Delete(UserQuotaKey(userName)); err != nil {
+		return err
+	}
+	return txn.Commit(ctx)
+}
+
 // ----- Per-(bucket, configID) inventory configs -----
 //
 // Inventory configs do not fit the single-document blob shape — there can

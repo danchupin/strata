@@ -180,6 +180,14 @@ var tableDDL = []string{
 		bucket_id uuid PRIMARY KEY,
 		config    blob
 	)`,
+	`CREATE TABLE IF NOT EXISTS bucket_quota (
+		bucket_id uuid PRIMARY KEY,
+		config    blob
+	)`,
+	`CREATE TABLE IF NOT EXISTS user_quota (
+		user_name text PRIMARY KEY,
+		config    blob
+	)`,
 	`CREATE TABLE IF NOT EXISTS multipart_completions (
 		bucket_id    uuid,
 		upload_id    timeuuid,

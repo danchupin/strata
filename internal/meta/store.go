@@ -169,6 +169,24 @@ type ManagedPolicy struct {
 	UpdatedAt   time.Time
 }
 
+// BucketQuota is the per-bucket hard-cap configuration enforced at PUT time
+// (US-006). Zero on any field means "unlimited" — matches the AWS / RGW
+// shape so an unset quota imposes no limit. A bucket without a configured
+// quota row is not subject to any per-bucket cap; user-quota still applies.
+type BucketQuota struct {
+	MaxBytes          int64
+	MaxObjects        int64
+	MaxBytesPerObject int64
+}
+
+// UserQuota is the per-user hard-cap configuration enforced at CreateBucket
+// + PUT time (US-006). Keyed on the IAM user name. Zero on any field means
+// "unlimited".
+type UserQuota struct {
+	MaxBuckets    int32
+	TotalMaxBytes int64
+}
+
 // Grant is a single ACL grant entry persisted alongside the canned ACL.
 // GranteeType is one of: CanonicalUser, Group, AmazonCustomerByEmail.
 // Permission is one of: FULL_CONTROL, READ, WRITE, READ_ACP, WRITE_ACP.
@@ -715,6 +733,17 @@ type Store interface {
 	SetBucketTagging(ctx context.Context, bucketID uuid.UUID, xmlBlob []byte) error
 	GetBucketTagging(ctx context.Context, bucketID uuid.UUID) ([]byte, error)
 	DeleteBucketTagging(ctx context.Context, bucketID uuid.UUID) error
+
+	// Quota CRUD (US-001..US-003). Get returns (zero-value, false, nil)
+	// when no quota is configured — not a sentinel error — so the gateway's
+	// PUT-validate path stays branch-on-bool. Zero on any field of the
+	// returned BucketQuota / UserQuota means "unlimited".
+	GetBucketQuota(ctx context.Context, bucketID uuid.UUID) (BucketQuota, bool, error)
+	SetBucketQuota(ctx context.Context, bucketID uuid.UUID, q BucketQuota) error
+	DeleteBucketQuota(ctx context.Context, bucketID uuid.UUID) error
+	GetUserQuota(ctx context.Context, userName string) (UserQuota, bool, error)
+	SetUserQuota(ctx context.Context, userName string, q UserQuota) error
+	DeleteUserQuota(ctx context.Context, userName string) error
 
 	// Inventory configurations are addressed per-bucket by their config id; a
 	// bucket may carry multiple at once (AWS allows up to 1,000). The blob is

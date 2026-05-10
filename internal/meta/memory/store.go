@@ -33,6 +33,8 @@ type Store struct {
 	replication    map[uuid.UUID][]byte
 	logging        map[uuid.UUID][]byte
 	tagging        map[uuid.UUID][]byte
+	bucketQuotas   map[uuid.UUID][]byte
+	userQuotas     map[string][]byte
 	inventoryConfigs map[uuid.UUID]map[string][]byte
 	accessPoints     map[string]*meta.AccessPoint
 	bucketGrants   map[uuid.UUID][]meta.Grant
@@ -117,6 +119,8 @@ func New() *Store {
 		replication:  make(map[uuid.UUID][]byte),
 		logging:      make(map[uuid.UUID][]byte),
 		tagging:      make(map[uuid.UUID][]byte),
+		bucketQuotas: make(map[uuid.UUID][]byte),
+		userQuotas:   make(map[string][]byte),
 		inventoryConfigs: make(map[uuid.UUID]map[string][]byte),
 		accessPoints:     make(map[string]*meta.AccessPoint),
 		bucketGrants: make(map[uuid.UUID][]meta.Grant),
@@ -1470,6 +1474,64 @@ func (s *Store) GetBucketTagging(ctx context.Context, bucketID uuid.UUID) ([]byt
 }
 func (s *Store) DeleteBucketTagging(ctx context.Context, bucketID uuid.UUID) error {
 	return s.deleteBucketBlob(s.tagging, bucketID)
+}
+
+func (s *Store) SetBucketQuota(ctx context.Context, bucketID uuid.UUID, q meta.BucketQuota) error {
+	blob, err := meta.EncodeBucketQuota(q)
+	if err != nil {
+		return err
+	}
+	return s.setBucketBlob(s.bucketQuotas, bucketID, blob)
+}
+
+func (s *Store) GetBucketQuota(ctx context.Context, bucketID uuid.UUID) (meta.BucketQuota, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	blob, ok := s.bucketQuotas[bucketID]
+	if !ok {
+		return meta.BucketQuota{}, false, nil
+	}
+	q, err := meta.DecodeBucketQuota(blob)
+	if err != nil {
+		return meta.BucketQuota{}, false, err
+	}
+	return q, true, nil
+}
+
+func (s *Store) DeleteBucketQuota(ctx context.Context, bucketID uuid.UUID) error {
+	return s.deleteBucketBlob(s.bucketQuotas, bucketID)
+}
+
+func (s *Store) SetUserQuota(ctx context.Context, userName string, q meta.UserQuota) error {
+	blob, err := meta.EncodeUserQuota(q)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.userQuotas[userName] = blob
+	return nil
+}
+
+func (s *Store) GetUserQuota(ctx context.Context, userName string) (meta.UserQuota, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	blob, ok := s.userQuotas[userName]
+	if !ok {
+		return meta.UserQuota{}, false, nil
+	}
+	q, err := meta.DecodeUserQuota(blob)
+	if err != nil {
+		return meta.UserQuota{}, false, err
+	}
+	return q, true, nil
+}
+
+func (s *Store) DeleteUserQuota(ctx context.Context, userName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.userQuotas, userName)
+	return nil
 }
 
 func (s *Store) SetBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string, blob []byte) error {

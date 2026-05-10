@@ -57,6 +57,8 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"UserPolicyAttach", caseUserPolicyAttach},
 		{"IAMAccessKeyDisabled", caseIAMAccessKeyDisabled},
 		{"MetaHealth", caseMetaHealth},
+		{"BucketQuotaRoundTrip", caseBucketQuota},
+		{"UserQuotaRoundTrip", caseUserQuota},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2032,6 +2034,118 @@ func caseMetaHealth(t *testing.T, s meta.Store) {
 		if n.State == "" {
 			t.Errorf("MetaHealth: node[%d] missing State", i)
 		}
+	}
+}
+
+// caseBucketQuota exercises the BucketQuota CRUD surface (US-001):
+// not-configured → set → get → delete → not-configured. Zero on any field
+// is preserved as "unlimited" sentinel.
+func caseBucketQuota(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "qb", "owner-q", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+
+	got, ok, err := s.GetBucketQuota(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("get unconfigured: %v", err)
+	}
+	if ok {
+		t.Fatalf("get unconfigured: ok=true want false (got %+v)", got)
+	}
+
+	want := meta.BucketQuota{MaxBytes: 1 << 30, MaxObjects: 100, MaxBytesPerObject: 5 << 20}
+	if err := s.SetBucketQuota(ctx, b.ID, want); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	got, ok, err = s.GetBucketQuota(ctx, b.ID)
+	if err != nil || !ok {
+		t.Fatalf("get after set: ok=%v err=%v", ok, err)
+	}
+	if got != want {
+		t.Fatalf("round-trip mismatch: got %+v want %+v", got, want)
+	}
+
+	overwrite := meta.BucketQuota{MaxBytes: 0, MaxObjects: 50, MaxBytesPerObject: 0}
+	if err := s.SetBucketQuota(ctx, b.ID, overwrite); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	got, ok, err = s.GetBucketQuota(ctx, b.ID)
+	if err != nil || !ok {
+		t.Fatalf("get after overwrite: ok=%v err=%v", ok, err)
+	}
+	if got != overwrite {
+		t.Fatalf("overwrite round-trip: got %+v want %+v", got, overwrite)
+	}
+
+	if err := s.DeleteBucketQuota(ctx, b.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	got, ok, err = s.GetBucketQuota(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("get after delete: %v", err)
+	}
+	if ok {
+		t.Fatalf("get after delete: ok=true want false (got %+v)", got)
+	}
+
+	if err := s.DeleteBucketQuota(ctx, b.ID); err != nil {
+		t.Errorf("delete idempotent: %v", err)
+	}
+}
+
+// caseUserQuota exercises the UserQuota CRUD surface (US-001):
+// not-configured → set → get → delete → not-configured.
+func caseUserQuota(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	const userName = "alice"
+
+	got, ok, err := s.GetUserQuota(ctx, userName)
+	if err != nil {
+		t.Fatalf("get unconfigured: %v", err)
+	}
+	if ok {
+		t.Fatalf("get unconfigured: ok=true want false (got %+v)", got)
+	}
+
+	want := meta.UserQuota{MaxBuckets: 5, TotalMaxBytes: 10 << 30}
+	if err := s.SetUserQuota(ctx, userName, want); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	got, ok, err = s.GetUserQuota(ctx, userName)
+	if err != nil || !ok {
+		t.Fatalf("get after set: ok=%v err=%v", ok, err)
+	}
+	if got != want {
+		t.Fatalf("round-trip mismatch: got %+v want %+v", got, want)
+	}
+
+	overwrite := meta.UserQuota{MaxBuckets: 0, TotalMaxBytes: 1 << 40}
+	if err := s.SetUserQuota(ctx, userName, overwrite); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	got, ok, err = s.GetUserQuota(ctx, userName)
+	if err != nil || !ok {
+		t.Fatalf("get after overwrite: ok=%v err=%v", ok, err)
+	}
+	if got != overwrite {
+		t.Fatalf("overwrite round-trip: got %+v want %+v", got, overwrite)
+	}
+
+	if err := s.DeleteUserQuota(ctx, userName); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	got, ok, err = s.GetUserQuota(ctx, userName)
+	if err != nil {
+		t.Fatalf("get after delete: %v", err)
+	}
+	if ok {
+		t.Fatalf("get after delete: ok=true want false (got %+v)", got)
+	}
+
+	if err := s.DeleteUserQuota(ctx, userName); err != nil {
+		t.Errorf("delete idempotent: %v", err)
 	}
 }
 

@@ -47,6 +47,7 @@ const (
 	prefixBucketByName     = Namespace + "b/"   // s/b/<name>
 	prefixBucketScoped     = Namespace + "B/"   // s/B/<uuid16>/...
 	prefixIAMUser          = Namespace + "iu/"  // s/iu/<userName>
+	prefixUserQuota        = Namespace + "uq/"  // s/uq/<userName>
 	prefixIAMAccessKey     = Namespace + "ik/"  // s/ik/<accessKey>
 	prefixIAMUserKeyIndex  = Namespace + "iuk/" // s/iuk/<userName>\x00\x00<accessKey>
 	prefixManagedPolicy    = Namespace + "mp/"  // s/mp/<arn>
@@ -99,6 +100,7 @@ const (
 	BlobLogging            = "lg"
 	BlobTagging            = "tg"
 	BlobObjectLockConfig   = "ol"
+	BlobQuota              = "qu"
 )
 
 // versionDescLen is the length of the 24-byte version-DESC suffix
@@ -433,6 +435,11 @@ func RewrapProgressKey(bucketID uuid.UUID) []byte {
 // IAMUserKey is the per-user record key.
 func IAMUserKey(userName string) []byte {
 	return appendEscaped([]byte(prefixIAMUser), userName)
+}
+
+// UserQuotaKey is the per-user quota record key (US-003).
+func UserQuotaKey(userName string) []byte {
+	return appendEscaped([]byte(prefixUserQuota), userName)
 }
 
 // IAMUserPrefix is the start of all IAM user rows — origin for
