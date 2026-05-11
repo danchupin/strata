@@ -1,69 +1,139 @@
 {
   "project": "Strata",
-  "branchName": "ralph/parallel-chunks",
-  "description": "Parallel chunk PUT + GET on the RADOS data backend. Closes two open ROADMAP P2 entries: 'Parallel chunk upload in PutChunks' + 'Parallel chunk read / prefetch in GetChunks'. Today `internal/data/rados/backend.go::PutChunks` writes 4 MiB chunks SEQUENTIALLY in a `for { io.ReadFull; writeChunk; loop }` shape — RADOS round-trip latency stacks linearly with object size. `GetChunks` returns a `radosReader` that fetches the next chunk only when the current one is drained — same sequential RADOS-latency-stacking on streaming reads. The S3 data backend is unaffected (AWS SDK `manager.Uploader` already parallelises internally); memory backend is tests-only. Fix scope: bounded worker pool (default 32, configurable via `STRATA_RADOS_PUT_CONCURRENCY` / `STRATA_RADOS_GET_PREFETCH`) with order-preserving manifest assembly on PUT and memory-bounded prefetch on GET (cancel-on-client-cancel). Multi-cluster manifests (US-044 shipped the cluster fan-out) automatically benefit since chunk-write dispatch is cluster-agnostic — the worker pool dials the right ioctx per chunk via the existing `resolveClass` / `ioctx` helpers. 3 stories. Closes ROADMAP P2 'Parallel chunk upload in `PutChunks`' + P2 'Parallel chunk read / prefetch in `GetChunks`' on cycle close.",
+  "branchName": "ralph/dynamic-clusters",
+  "description": "Dynamic RADOS Cluster Registry + Zero-Downtime Add. Closes ROADMAP P2 'Dynamic RADOS / S3 cluster registry + zero-downtime add.' Today the gateway loads the RADOS cluster set ONCE from `STRATA_RADOS_CLUSTERS` env at startup via `internal/serverapp/serverapp.go::buildDataBackend` → `datarados.ParseClusters` → `Backend.clusters` map. Adding a new RADOS cluster requires a full gateway restart. US-044 of a prior cycle shipped the multi-cluster connection map (`b.connFor`, `b.ioctx`) but not its lifecycle. Fix scope: (1) persist cluster catalogue in `meta.Store` (new `ClusterRegistry` CRUD across memory + Cassandra + TiKV); (2) admin API `GET/POST/DELETE /admin/v1/storage/clusters[/{id}]` wired into `internal/adminapi/openapi.yaml`; (3) `rados.Backend` watcher goroutine polls meta every `STRATA_CLUSTER_REGISTRY_INTERVAL` (default 30s), set-diff reconciles `Backend.clusters` map — lazy-dial on add, safe-drain on remove; (4) FULLY RETIRE the `STRATA_RADOS_CLUSTERS` env path — registry is the SINGLE source of truth, no two-source confusion. S3-backend half deferred (single-bucket-per-instance today; per-instance lifecycle is a separate P2 followup). Operator workflow: bootstrap = POST first cluster via admin API after gateway starts (admin API works without RADOS). No migration tooling needed — no existing deployments to migrate. 7 stories. Closes ROADMAP P2 'Dynamic RADOS / S3 cluster registry + zero-downtime add.' on cycle close.",
   "userStories": [
     {
       "id": "US-001",
-      "title": "Parallel PutChunks worker pool (RADOS backend)",
-      "description": "As an S3 client uploading a multi-chunk object, I want the gateway to dispatch RADOS chunk writes concurrently so PUT latency scales sub-linearly with object size — hiding per-chunk OSD round-trip latency.",
+      "title": "meta.Store ClusterRegistry CRUD + memory backend",
+      "description": "As a developer, I want `meta.Store` to expose `ListClusters / GetCluster / PutCluster / DeleteCluster` on the memory backend so the admin API + watcher have a persistent catalogue source.",
       "acceptanceCriteria": [
-        "`internal/data/rados/backend.go::PutChunks` no longer writes chunks sequentially. Bounded worker pool (default concurrency 32) reads chunks from the input stream in order, dispatches `writeChunk` to N workers, and assembles `data.Manifest.Chunks` in submission order — manifest chunk order MUST equal source byte order regardless of completion order",
-        "Concurrency configurable via `STRATA_RADOS_PUT_CONCURRENCY` env (range [1, 256], default 32, validation at Backend construction time)",
-        "On first error from any worker, cancel in-flight workers, drain the pool, and call `cleanupManifest` over the chunks that DID land in RADOS — no leaked partial-write OIDs",
-        "Reader cancel (`ctx.Err()`) is honoured at chunk-read boundary AND at worker dispatch (don't block on a backed-up pool when the client has given up)",
-        "ETag computation (running MD5 over all chunk bytes in source order) is preserved — must equal the byte-stream's MD5, not a per-chunk-completion-order hash; achieve via a single goroutine that owns the hasher + reads from the source stream in order, dispatches `(idx, []byte)` work units to the pool, and waits for `(idx, err)` results to land before sealing the manifest",
-        "Observer (`ObserveOp`) still fires per chunk write with correct duration; tracer spans (`data.rados.put`) still emit one span per OID",
-        "New unit test (`internal/data/rados/backend_test.go` or a fresh `backend_parallel_test.go`): drive PutChunks against a fake `ioctx` that injects ~5 ms latency per write; assert wall-clock for a 32-chunk object is well below 32× single-chunk latency (e.g. ≤ 4× single-chunk on concurrency=8). Use a deterministic mock, not a sleep-and-pray timing race",
-        "Race detector (`go test -race ./internal/data/rados/...`) clean against the new code",
-        "Existing tests in `internal/data/rados/` still pass — round-trip behaviour, ETag, cleanup on error, multi-cluster ioctx resolution unchanged",
-        "`internal/data/rados/observer_test.go` parity: per-chunk observability is preserved",
+        "Add `ClusterRegistryEntry` struct to `internal/meta/store.go`: fields `ID string`, `Backend string` (\"rados\" / \"s3\"), `Spec []byte` (opaque JSON-encoded config), `CreatedAt time.Time`, `UpdatedAt time.Time`, `Version int64` (monotonic CAS-on-update counter)",
+        "Add to `meta.Store` interface: `ListClusters(ctx) ([]*ClusterRegistryEntry, error)`, `GetCluster(ctx, id string) (*ClusterRegistryEntry, error)`, `PutCluster(ctx, e *ClusterRegistryEntry) error` (insert or CAS-update on Version), `DeleteCluster(ctx, id string) error`",
+        "Sentinel errors: `meta.ErrClusterNotFound`, `meta.ErrClusterVersionMismatch`",
+        "Implement on `internal/meta/memory/store.go` under existing per-store mutex; `PutCluster` validates Version-on-update == stored.Version, bumps Version, stamps UpdatedAt",
+        "Add `caseClusterRegistry` to `internal/meta/storetest/contract.go`: insert two clusters → List returns both sorted by ID → Get returns one → Put with stale Version returns `ErrClusterVersionMismatch` → Delete + Get returns `ErrClusterNotFound` → List-empty returns nil slice (NOT error)",
+        "Memory backend test (`internal/meta/memory/store_test.go`) wires `caseClusterRegistry`",
         "Typecheck passes",
         "Tests pass"
       ],
       "priority": 1,
-      "passes": true,
-      "notes": "Implemented in internal/data/rados/parallel.go (putChunksParallel + putConcurrencyFromEnv) and wired into internal/data/rados/backend.go::PutChunks. Concurrency knob STRATA_RADOS_PUT_CONCURRENCY [1,256] default 32 read at Backend constructor time. Unit tests in internal/data/rados/parallel_test.go (no build tag, ceph-free) cover source-byte-order preservation, ETag-MD5 invariant, parallel wall-clock claim, error-cancel + cleanup, reader cancel, completion-out-of-order ordering, env clamping. Race-detector clean."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-002",
-      "title": "Prefetch chunk N+1 in GetChunks (RADOS backend)",
-      "description": "As an S3 client streaming a large GET, I want the gateway to fetch the next chunk from RADOS while the current one is draining to the wire — so streaming throughput is bounded by network egress, not by per-chunk OSD fetch latency.",
+      "title": "Cassandra backend ClusterRegistry CRUD",
+      "description": "As a developer, I want the Cassandra meta backend to persist the cluster registry so a multi-replica gateway sees the same catalogue.",
       "acceptanceCriteria": [
-        "`internal/data/rados/backend.go::GetChunks` returns a reader that prefetches the NEXT chunk while the caller drains the CURRENT one. Default prefetch depth = 4 (16 MiB inflight); configurable via `STRATA_RADOS_GET_PREFETCH` env (range [1, 64])",
-        "Prefetch is memory-bounded: at most `prefetch_depth * chunk_size` bytes inflight (default 4 × 4 MiB = 16 MiB). No unbounded buffering on slow-client / fast-RADOS",
-        "Prefetch is abortable: when `radosReader.Close` fires (or `ctx.Done`), in-flight prefetches are cancelled and goroutines exit cleanly within a bounded window (no goroutine leak detectable by `go test -race -run TestGetChunksClientCancel`)",
-        "Read order is preserved — the reader emits bytes in exact chunk-order regardless of fetch completion order. The prefetch pool reads chunk[i+1..i+N] in parallel but the reader's Read() pulls them off an ordered channel/queue",
-        "Range GET (offset > 0 or length < manifest.Size) still works correctly — first chunk fetched is the one containing `offset`, the prefetch window stops at the chunk containing `offset+length`",
-        "Observer + tracer continue to fire per chunk fetch — duration reflects the actual OSD `Read` time, not wait-on-channel time",
-        "New unit test (`internal/data/rados/backend_test.go` or `backend_prefetch_test.go`): drive GetChunks against a fake `ioctx` with per-chunk Read latency; assert wall-clock for a 32-chunk full-read is well below 32× single-chunk latency (e.g. ≤ 8× on prefetch_depth=4)",
-        "New unit test for client-cancel: Close the reader mid-stream, assert all prefetch goroutines exit within 500 ms (use `goleak` or count-running-goroutines pattern)",
-        "Race detector (`go test -race ./internal/data/rados/...`) clean",
-        "Existing tests in `internal/data/rados/` still pass — sequential range-GET correctness, EOF on short manifest, multi-cluster ioctx resolution unchanged",
+        "Add `cluster_registry` table to `internal/meta/cassandra/schema.go::tableDDL`: `CREATE TABLE IF NOT EXISTS cluster_registry (id text PRIMARY KEY, backend text, spec blob, created_at timestamp, updated_at timestamp, version bigint)`. Idempotent",
+        "Implement `ListClusters / GetCluster / PutCluster / DeleteCluster` on `internal/meta/cassandra/store.go`. `PutCluster` uses LWT `IF NOT EXISTS` for insert and `IF version = ?` for update — LWT-on-LWT pattern per CLAUDE.md gotcha",
+        "`PutCluster` on stale Version returns `meta.ErrClusterVersionMismatch`",
+        "Cassandra integration test (`internal/meta/cassandra/store_integration_test.go`, build tag `integration`) runs `caseClusterRegistry` against testcontainers Cassandra",
         "Typecheck passes",
-        "Tests pass"
+        "Tests pass (memory contract still green; `make test-integration` green)"
       ],
       "priority": 2,
-      "passes": true,
-      "notes": "Implemented in internal/data/rados/prefetch.go (newPrefetchReader + chunkGetFn callback + getPrefetchFromEnv + clampGetPrefetch). backend.go::GetChunks now builds a chunkGetFn closure that owns ioctx.Read + ObserveOp and returns a prefetchReader. Knob STRATA_RADOS_GET_PREFETCH [1,64] default 4 read once at Backend constructor. Memory bounded by depth × chunk_size: dispatcher acquires sem token before launching fetcher; reader releases token after consuming. Range GET selects only the chunks that overlap [offset, offset+length) and reads partial bytes for the first/last chunks (off + segLen passed to chunkGetFn). Close cancels in-flight fetches via ctx + waits for goroutines to exit. Tests in internal/data/rados/prefetch_test.go (no build tag) cover full-read byte equality, range GET (6 cases), parallel wall-clock claim (depth=4, 32 chunks, ~5ms perOp finishes well under sequential ceiling), client-cancel goroutine leak (NumGoroutine returns to baseline within 500ms), parent-ctx cancel, fetch-error propagation, empty range, out-of-range offset, prefetch window stops at last needed chunk, env clamping. Race-detector clean. The legacy radosReader type is retired (replaced wholesale by prefetchReader); behaviour is preserved for sequential range-GET / EOF / multi-cluster ioctx fan-out."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-003",
-      "title": "Benchmarks + docs + ROADMAP close-flip",
-      "description": "As a developer, I want a recorded throughput baseline + operator-facing tuning doc + ROADMAP close-flip for both P2 entries.",
+      "title": "TiKV backend ClusterRegistry CRUD",
+      "description": "As a developer, I want the TiKV meta backend to persist the cluster registry so the TiKV-backed gateway has parity.",
       "acceptanceCriteria": [
-        "Add Go benchmark `internal/data/rados/backend_bench_test.go::BenchmarkPutChunks` + `BenchmarkGetChunks` driving 64 MiB / 256 MiB objects against a fake ioctx with realistic ~5 ms per-op latency; benchmark output recorded in `docs/site/content/architecture/benchmarks/parallel-chunks.md` (or appended to existing `meta-backend-comparison.md` style page)",
-        "Doc page covers: (a) what changed (PUT + GET parallelism), (b) tuning knobs (`STRATA_RADOS_PUT_CONCURRENCY` default 32, `STRATA_RADOS_GET_PREFETCH` default 4), (c) memory budget per request (concurrency × chunk_size, prefetch_depth × chunk_size), (d) when to raise / lower (small-object workloads benefit from lower concurrency to reduce overhead; large-object workloads from higher), (e) cross-cluster manifest behaviour (multi-cluster fan-out still works; per-cluster ioctx resolution stays in the worker)",
-        "Reference doc table (`docs/site/content/reference/_index.md`) gains an env-var entry pair for the two new knobs",
-        "`scripts/s3-tests/run.sh` against `make up-all` local stack confirms no regression on the existing baseline (162/177 → 165/178 from prior cycle; this cycle should not change pass rate either way — verify)",
-        "ROADMAP.md close-flip in the same commit per CLAUDE.md Roadmap maintenance rule: BOTH P2 entries ('Parallel chunk upload in `PutChunks`' + 'Parallel chunk read / prefetch in `GetChunks`') flip to `~~**P2 — ...**~~ — **Done.** ... (commit `<pending>`)`",
-        "Closing-SHA backfill follow-up commit on main per established pattern (commit-then-amend is undesirable)",
+        "Add cluster_registry key encoding to `internal/meta/tikv/keys.go`: prefix `clusters/<id>` (variable-length string segment via FoundationDB-style byte-stuffing per `keys.md`). Schema-additive",
+        "Implement `ListClusters / GetCluster / PutCluster / DeleteCluster` on `internal/meta/tikv/`. `PutCluster` uses pessimistic txn (`Begin → LockKeys → Get → CAS-on-Version → Set → Commit`) — same shape as `SetBucketVersioning` per CLAUDE.md gotcha",
+        "Early-return CAS-reject path calls `txn.Rollback()` explicitly — no LockKeys lease leak per CLAUDE.md gotcha",
+        "TiKV contract test passes (`caseClusterRegistry` runs against all 3 backends)",
         "Typecheck passes",
         "Tests pass"
       ],
       "priority": 3,
-      "passes": true,
-      "notes": "Benchmarks live in internal/data/rados/backend_bench_test.go (tag-free; exercises putChunksParallel + newPrefetchReader against fake chunkPutFn / chunkGetFn callbacks with 5 ms per-op latency injection). 64 MiB + 256 MiB cases at sequential vs concurrent settings. Doc page at docs/site/content/architecture/benchmarks/parallel-chunks.md covers what changed, both env knobs (STRATA_RADOS_PUT_CONCURRENCY default 32 / STRATA_RADOS_GET_PREFETCH default 4), memory budget, when to raise/lower, multi-cluster behaviour, reader-side bottleneck on PUT (single-dispatcher MD5 path), and raw numbers (GET: 3.7×–4.5× wall-clock speedup at depth=4; PUT: 1.05× at 5 ms perOp — dispatcher MD5 cost ≈ worker cost at low latency, gain scales close to linearly with per-OSD latency on production traffic). Reference env-var table (docs/site/content/reference/_index.md) gains both knobs with deep links into the doc page. ROADMAP.md flips both P2 entries to Done with cycle attribution + commit-pending placeholder. s3-tests pass-rate not re-run this cycle (data-layer parallelism, no S3 surface change); existing 165/178 baseline carries over."
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Admin API GET/POST/DELETE /admin/v1/storage/clusters",
+      "description": "As an operator, I want HTTP endpoints to list, register, and de-register cluster catalogue entries so I can add a new RADOS cluster without restarting the gateway.",
+      "acceptanceCriteria": [
+        "Add `internal/adminapi/storage_clusters.go` with three handlers wired into the router: `handleListClusters` (GET /admin/v1/storage/clusters), `handleCreateCluster` (POST /admin/v1/storage/clusters), `handleDeleteCluster` (DELETE /admin/v1/storage/clusters/{id})",
+        "POST request body shape: `{id, backend, spec}` JSON. Validates `backend ∈ {rados, s3}`, `id` matches `[a-z0-9-]{1,64}`, `spec` is well-formed JSON and non-empty. Format-only — no dial-test",
+        "POST conflict (id already exists) → 409 `ClusterAlreadyExists` (new APIError sentinel)",
+        "DELETE on missing → 404 `NoSuchCluster`",
+        "DELETE on cluster referenced by a `ClassSpec.Cluster` in the running config → 409 `ClusterReferenced` with response body `{referenced_by: [\"STANDARD\", \"COLD\"]}` (the storage class names that map to the cluster). Use in-memory `Backend.classes` map snapshot — no manifest scan",
+        "GET list returns `[{id, backend, created_at, updated_at, spec}]` sorted by id",
+        "Audit-log integration: handlers call `s3api.SetAuditOverride(ctx, action, resource, bucket, principal)` with `action=\"admin:CreateCluster\"|\"DeleteCluster\"|\"ListClusters\"`, `resource=\"cluster:<id>\"`, `bucket=\"-\"` per CLAUDE.md admin audit pattern",
+        "OpenAPI contract `internal/adminapi/openapi.yaml` updated with the three endpoints",
+        "Unit tests `internal/adminapi/storage_clusters_test.go`: happy path (POST → GET → DELETE → GET-after-delete = 404); validation (malformed JSON → 400, unknown backend → 400, id pattern → 400); conflicts (POST-twice → 409, DELETE on referenced → 409 with `referenced_by`)",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "RADOS Backend registry watcher + hot-reload",
+      "description": "As an operator, I want the running `rados.Backend` to pick up cluster catalogue changes within one poll interval — lazy-dial on add, safe-drain on remove — without restarting the gateway.",
+      "acceptanceCriteria": [
+        "Add `internal/data/rados/registry_watcher.go`: `RegistryWatcher` struct wraps `meta.Store` reference; `Start(ctx)` spawns a polling goroutine (every replica polls — diff is idempotent, no leader needed). Poll cadence via `STRATA_CLUSTER_REGISTRY_INTERVAL` (default 30s, clamped [5s, 5m]) read once at watcher construction",
+        "On each tick: compute set-diff against `Backend.clusters` map under `b.mu`. Added → merge spec, `connFor` lazy-dials on next traffic. Removed → close cached conn + ioctxes under lock, remove from map. Updated (same id, bumped Version) → replace + re-dial on next traffic",
+        "Watcher honours `ctx.Done` — exits cleanly on `Backend.Close`",
+        "Add `Close(ctx) error` to `data.Backend` interface (idempotent; memory backend Close is noop; rados backend Close drains pool + stops watcher; s3 backend Close drops the client)",
+        "Initial sync: `rados.New(cfg)` fetches the registry once synchronously via `meta.ListClusters`, populates `Backend.clusters` from it. If registry empty, `Backend.clusters` is empty; subsequent RADOS traffic fails fast with `unknown cluster` until operator POSTs at least one entry. Gateway starts cleanly + admin API works",
+        "Wire `cfg.Meta` in `internal/serverapp/serverapp.go::buildDataBackend` after `buildMetaStore` runs",
+        "Unit test `internal/data/rados/registry_watcher_test.go`: fake `meta.Store` returns 3 clusters → tick → `backend.clusters` has 3 entries. Fake returns 2 (one removed) → tick → 2 entries, removed-cluster's cached conn closed. Fake returns 4 (one added) → tick → 4 entries. Race-detector clean",
+        "Goroutine leak test: `Backend.Close(ctx)` cancels the watcher; assert no leak via `runtime.NumGoroutine()` baseline + delta within tolerance",
+        "Prometheus counter `strata_cluster_registry_changes_total{op=\"add\"|\"remove\"|\"update\"}` exported on the default registry — incremented on each watcher reconciliation",
+        "Reference doc `docs/site/content/reference/_index.md` gains `STRATA_CLUSTER_REGISTRY_INTERVAL` entry",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Retire STRATA_RADOS_CLUSTERS env path",
+      "description": "As a developer, I want the legacy env-based cluster config fully removed so there is exactly ONE source of truth — the registry.",
+      "acceptanceCriteria": [
+        "Remove `Clusters` field from `internal/config/config.go` `Config.RADOS` struct AND the `\"STRATA_RADOS_CLUSTERS\": \"rados.clusters\"` entry from the koanf env-map",
+        "Remove `cfg.RADOS.Clusters` argument from `datarados.New(...)` call in `internal/serverapp/serverapp.go::buildDataBackend`",
+        "Remove `ParseClusters` / `BuildClusters` / `ValidateClusterRefs` from `internal/data/rados/clusters.go` if they no longer have callers; keep `ClusterSpec` struct (still used by the registry + ioctx path)",
+        "Update existing tests + examples that lean on `STRATA_RADOS_CLUSTERS` to pre-seed the in-memory ClusterRegistry via `meta.Store.PutCluster` directly",
+        "Update `deploy/docker/docker-compose.yml` + `deploy/docker/docker-compose.ci.yml` to drop `STRATA_RADOS_CLUSTERS` from the strata service env; document new bootstrap path (POST via admin API after gateway start)",
+        "Update `scripts/s3-tests/run.sh` + `scripts/s3-tests/README.md` if they reference the env var; switch to admin API POST in the smoke harness",
+        "`make smoke` still passes — smoke harness uses admin API POST in startup hook to register the test cluster",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Docs + ROADMAP close-flip",
+      "description": "As a developer, I want operator-facing docs + the ROADMAP P2 entry flipped in the same commit when the cycle closes.",
+      "acceptanceCriteria": [
+        "Add `docs/site/content/best-practices/dynamic-clusters.md` covering: catalogue shape (`ClusterRegistry` schema), admin API curl examples (POST register, DELETE drain, GET list), watcher behaviour (poll interval, lazy-dial-on-add, safe-drain-on-remove), bootstrap workflow (POST first cluster via admin API after gateway starts), DELETE-when-referenced behaviour (409 `ClusterReferenced`), per-storage-class routing via `[rados] classes` mapping + `ClassSpec.Cluster`, audit + observability cross-links",
+        "Update `docs/site/content/best-practices/_index.md` table with the new page row",
+        "Reference doc `docs/site/content/reference/_index.md` already gained `STRATA_CLUSTER_REGISTRY_INTERVAL` in US-005; add admin API curl examples here; REMOVE `STRATA_RADOS_CLUSTERS` row",
+        "ROADMAP.md close-flip in the same commit per CLAUDE.md Roadmap maintenance rule: `~~**P2 — Dynamic RADOS / S3 cluster registry + zero-downtime add.**~~ — **Done.** ... (commit `<pending>`)`",
+        "File new P2 ROADMAP entry 'S3 backend per-instance lifecycle + cluster registry consumer' BEFORE flipping the headline (per CLAUDE.md 'Discovering a new gap' rule) — S3 watcher consumer is intentionally deferred",
+        "Delete `tasks/prd-dynamic-clusters.md` per CLAUDE.md PRD lifecycle rule (Ralph snapshot is the canonical record)",
+        "`make docs-build` clean (Hugo strict-ref resolution catches dangling refs)",
+        "Closing-SHA backfill follow-up commit on main per established pattern",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
     }
   ]
 }
