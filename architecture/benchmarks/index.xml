@@ -59,7 +59,21 @@ stack via the harness in &lt;code&gt;internal/meta/storetest/bench.go&lt;/code&g
  &lt;/tbody&gt;
 &lt;/table&gt;
 &lt;h2 id="rig"&gt;Rig&lt;a class="anchor" href="#rig"&gt;#&lt;/a&gt;&lt;/h2&gt;
-&lt;p&gt;Single-laptop docker stack. Both backends run as 3-node clusters so LWT&lt;/p&gt;</description></item><item><title/><link>https://danchupin.github.io/strata/architecture/benchmarks/data/gc-lifecycle-phase-2/README/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/benchmarks/data/gc-lifecycle-phase-2/README/</guid><description>&lt;h1 id="phase-2--gc--lifecycle-multi-leader-bench-artifacts"&gt;Phase 2 — gc + lifecycle multi-leader bench artifacts&lt;a class="anchor" href="#phase-2--gc--lifecycle-multi-leader-bench-artifacts"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Single-laptop docker stack. Both backends run as 3-node clusters so LWT&lt;/p&gt;</description></item><item><title>Parallel chunk PUT + GET (RADOS)</title><link>https://danchupin.github.io/strata/architecture/benchmarks/parallel-chunks/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/benchmarks/parallel-chunks/</guid><description>&lt;h1 id="parallel-chunk-put--get-rados"&gt;Parallel chunk PUT + GET (RADOS)&lt;a class="anchor" href="#parallel-chunk-put--get-rados"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Closes the two open &lt;code&gt;ROADMAP.md&lt;/code&gt; P2 entries:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Parallel chunk upload in &lt;code&gt;PutChunks&lt;/code&gt;&lt;/strong&gt; — sequential &lt;code&gt;for { ReadFull; writeChunk }&lt;/code&gt;
+loop replaced with a bounded worker pool that dispatches chunk writes
+concurrently. Manifest order + ETag (MD5 of the byte stream) are preserved.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Parallel chunk read / prefetch in &lt;code&gt;GetChunks&lt;/code&gt;&lt;/strong&gt; — sequential per-chunk fetch
+replaced with a bounded prefetch reader. The next chunk is fetched while the
+current one drains to the wire. Memory-bounded; aborts on client cancel.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;The S3 data backend (&lt;code&gt;internal/data/s3/backend.go&lt;/code&gt;) is unaffected: the AWS SDK
+&lt;code&gt;manager.Uploader&lt;/code&gt; already parallelises multipart uploads. Memory backend is
+tests-only. Multi-cluster manifests (US-044) automatically benefit since
+chunk-write dispatch is cluster-agnostic — the worker pool dials the right
+ioctx per chunk via the existing &lt;code&gt;resolveClass&lt;/code&gt; / &lt;code&gt;ioctx&lt;/code&gt; helpers.&lt;/p&gt;</description></item><item><title/><link>https://danchupin.github.io/strata/architecture/benchmarks/data/gc-lifecycle-phase-2/README/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/benchmarks/data/gc-lifecycle-phase-2/README/</guid><description>&lt;h1 id="phase-2--gc--lifecycle-multi-leader-bench-artifacts"&gt;Phase 2 — gc + lifecycle multi-leader bench artifacts&lt;a class="anchor" href="#phase-2--gc--lifecycle-multi-leader-bench-artifacts"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;JSONL captured by the bench harness in &lt;strong&gt;in-process simulation mode&lt;/strong&gt;:
 both meta and data backends are pure-memory; the multi-shard / multi-
 replica race happens inside one &lt;code&gt;strata-admin&lt;/code&gt; process via the &lt;code&gt;--shards&lt;/code&gt;
