@@ -35,19 +35,11 @@ func buildBenchDataBackend(cfg *config.Config, logger *slog.Logger) (data.Backen
 		if err != nil {
 			return nil, err
 		}
-		clusters, err := datarados.ParseClusters(cfg.RADOS.Clusters)
-		if err != nil {
-			return nil, err
-		}
 		return datarados.New(datarados.Config{
-			ConfigFile: cfg.RADOS.ConfigFile,
-			User:       cfg.RADOS.User,
-			Keyring:    cfg.RADOS.Keyring,
-			Pool:       cfg.RADOS.Pool,
-			Namespace:  cfg.RADOS.Namespace,
-			Classes:    classes,
-			Clusters:   clusters,
-			Logger:     logger,
+			Pool:      cfg.RADOS.Pool,
+			Namespace: cfg.RADOS.Namespace,
+			Classes:   classes,
+			Logger:    logger,
 		})
 	default:
 		return nil, fmt.Errorf("bench: unsupported data backend %q (memory or rados)", cfg.DataBackend)

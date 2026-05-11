@@ -53,24 +53,17 @@ var ErrUnknownStorageClass = errors.New("unknown storage class")
 func New(cfg Config) (data.Backend, error) {
 	classes := cfg.Classes
 	if len(classes) == 0 {
-		if cfg.Pool == "" && len(cfg.Clusters) == 0 {
+		if cfg.Pool == "" {
 			return nil, errors.New("rados: either Classes or Pool must be set")
 		}
-		if cfg.Pool != "" {
-			classes = map[string]ClassSpec{
-				"STANDARD": {Cluster: DefaultCluster, Pool: cfg.Pool, Namespace: cfg.Namespace},
-			}
+		classes = map[string]ClassSpec{
+			"STANDARD": {Cluster: DefaultCluster, Pool: cfg.Pool, Namespace: cfg.Namespace},
 		}
 	}
-	clusters, err := BuildClusters(cfg)
-	if err != nil && cfg.Catalog == nil {
-		return nil, err
-	}
-	if clusters == nil {
-		clusters = map[string]ClusterSpec{}
-	}
-	if err := ValidateClusterRefs(classes, clusters); err != nil && cfg.Catalog == nil {
-		return nil, err
+	clusters := make(map[string]ClusterSpec, len(cfg.Clusters))
+	for id, spec := range cfg.Clusters {
+		spec.ID = id
+		clusters[id] = spec
 	}
 	b := &Backend{
 		clusters:       clusters,

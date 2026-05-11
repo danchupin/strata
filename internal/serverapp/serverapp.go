@@ -354,21 +354,13 @@ func buildDataBackend(cfg *config.Config, logger *slog.Logger, tp *strataotel.Pr
 		if err != nil {
 			return nil, err
 		}
-		clusters, err := datarados.ParseClusters(cfg.RADOS.Clusters)
-		if err != nil {
-			return nil, err
-		}
 		return datarados.New(datarados.Config{
-			ConfigFile: cfg.RADOS.ConfigFile,
-			User:       cfg.RADOS.User,
-			Keyring:    cfg.RADOS.Keyring,
-			Pool:       cfg.RADOS.Pool,
-			Namespace:  cfg.RADOS.Namespace,
-			Classes:    classes,
-			Clusters:   clusters,
-			Logger:     logger,
-			Metrics:    metrics.RADOSObserver{},
-			Tracer:     tp.Tracer("strata.data.rados"),
+			Pool:            cfg.RADOS.Pool,
+			Namespace:       cfg.RADOS.Namespace,
+			Classes:         classes,
+			Logger:          logger,
+			Metrics:         metrics.RADOSObserver{},
+			Tracer:          tp.Tracer("strata.data.rados"),
 			Catalog:         &metaCatalogAdapter{store: metaStore},
 			RegistryMetrics: metrics.RADOSRegistryObserver{},
 		})
@@ -745,7 +737,6 @@ func radosSettings(cfg *config.Config) adminapi.RADOSSettings {
 		Pool:       cfg.RADOS.Pool,
 		Namespace:  cfg.RADOS.Namespace,
 		Classes:    cfg.RADOS.Classes,
-		Clusters:   cfg.RADOS.Clusters,
 	}
 }
 

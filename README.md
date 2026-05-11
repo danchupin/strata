@@ -109,7 +109,7 @@ for the full walkthrough.
 | `STRATA_RADOS_POOL` | `strata.rgw.buckets.data` | |
 | `STRATA_RADOS_NAMESPACE` | `` | optional per-tenant namespace |
 | `STRATA_RADOS_CLASSES` | `` | class routing map: `CLASS=pool[@cluster[/ns]],...`. If empty, STANDARD points at `STRATA_RADOS_POOL`. |
-| `STRATA_RADOS_CLUSTERS` | `` | multi-cluster RADOS map: `<id>:<conf>[:<keyring>],...`. Referenced by `@cluster` in `STRATA_RADOS_CLASSES`. Empty falls back to the legacy single-cluster fields under id `default`. |
+| `STRATA_CLUSTER_REGISTRY_INTERVAL` | `30s` | poll cadence for the RADOS cluster-registry watcher (clamped to `[5s, 5m]`). Catalogue is the sole source of cluster connection specs; bootstrap by POSTing `/admin/v1/storage/clusters` after the gateway is up. |
 | `STRATA_AUTH_MODE` | `off` | `off` accepts anything, `required` enforces SigV4 |
 | `STRATA_STATIC_CREDENTIALS` | `` | comma-separated `accesskey:secret[:owner]` entries for dev credentials |
 | `STRATA_WORKERS` | `` | comma-separated worker list selected on `strata server` (e.g. `gc,lifecycle,notify,replicator,access-log,inventory,audit-export,manifest-rewriter`) |
