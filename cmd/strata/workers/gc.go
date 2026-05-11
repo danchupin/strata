@@ -28,6 +28,7 @@ func buildGC(deps Dependencies) (Runner, error) {
 	batch := intFromEnv("STRATA_GC_BATCH_SIZE", 0)
 	concurrency := clampConcurrency(intFromEnv("STRATA_GC_CONCURRENCY", 1))
 	shards := clampShards(intFromEnv("STRATA_GC_SHARDS", 1))
+	tracer := deps.Tracer.Tracer("strata.worker.gc")
 
 	fan := &gc.FanOut{
 		Locker:     deps.Locker,
@@ -46,6 +47,7 @@ func buildGC(deps Dependencies) (Runner, error) {
 				ShardCount:  shards,
 				Logger:      deps.Logger,
 				Metrics:     metrics.GCObserver{},
+				Tracer:      tracer,
 			}
 		},
 	}

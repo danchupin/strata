@@ -6,8 +6,12 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/danchupin/strata/internal/data"
@@ -15,6 +19,7 @@ import (
 	"github.com/danchupin/strata/internal/leader"
 	"github.com/danchupin/strata/internal/meta"
 	"github.com/danchupin/strata/internal/metrics"
+	strataotel "github.com/danchupin/strata/internal/otel"
 )
 
 // DefaultBucketLeaseTTL is the per-bucket lease TTL when LeaderTTL is unset.
@@ -72,6 +77,43 @@ type Worker struct {
 	// of one bucket's processing then released, so no renew loop is needed
 	// — the TTL is a crash-recovery upper bound, not a steady-state hold.
 	LeaderTTL time.Duration
+	// Tracer emits per-iteration parent spans (`worker.lifecycle.tick`)
+	// plus the `lifecycle.scan_bucket` / `lifecycle.expire_object` /
+	// `lifecycle.transition_object` sub-op children. Nil falls back to a
+	// process-shared no-op tracer.
+	Tracer trace.Tracer
+
+	// iterErrMu / iterErr accumulates per-cycle sticky errors so the
+	// iteration parent span can be marked Error when any sub-op fails. Set
+	// per runOnce call; never read outside the same cycle.
+	iterErrMu sync.Mutex
+	iterErr   error
+}
+
+func (w *Worker) tracerOrNoop() trace.Tracer {
+	if w.Tracer == nil {
+		return strataotel.NoopTracer()
+	}
+	return w.Tracer
+}
+
+func (w *Worker) recordIterErr(err error) {
+	if err == nil {
+		return
+	}
+	w.iterErrMu.Lock()
+	if w.iterErr == nil {
+		w.iterErr = err
+	}
+	w.iterErrMu.Unlock()
+}
+
+func (w *Worker) takeIterErr() error {
+	w.iterErrMu.Lock()
+	defer w.iterErrMu.Unlock()
+	err := w.iterErr
+	w.iterErr = nil
+	return err
 }
 
 // effectiveConcurrency clamps Concurrency to [1, 256]; zero/negative -> 1.
@@ -106,14 +148,24 @@ func (w *Worker) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if err := w.runOnce(ctx); err != nil {
+			if err := w.RunOnce(ctx); err != nil {
 				w.Logger.WarnContext(ctx, "lifecycle tick failed", "error", err.Error())
 			}
 		}
 	}
 }
 
-func (w *Worker) RunOnce(ctx context.Context) error { return w.runOnce(ctx) }
+func (w *Worker) RunOnce(ctx context.Context) error {
+	iterCtx, span := strataotel.StartIteration(ctx, w.tracerOrNoop(), "lifecycle")
+	err := w.runOnce(iterCtx)
+	if err == nil {
+		err = w.takeIterErr()
+	} else {
+		_ = w.takeIterErr()
+	}
+	strataotel.EndIteration(span, err)
+	return err
+}
 
 // distributedMode reports whether the Phase-2 per-bucket lease layer is
 // wired. Locker AND ReplicaInfo must both be set; otherwise the worker runs
@@ -155,7 +207,17 @@ func (w *Worker) runOnce(ctx context.Context) error {
 			continue
 		}
 
-		w.processBucket(ctx, b)
+		bucketCtx, bucketSpan := w.tracerOrNoop().Start(ctx, "lifecycle.scan_bucket",
+			trace.WithSpanKind(trace.SpanKindInternal),
+			trace.WithAttributes(
+				strataotel.AttrComponentWorker,
+				attribute.String(strataotel.WorkerKey, "lifecycle"),
+				attribute.String("strata.lifecycle.bucket", b.Name),
+				attribute.String("strata.lifecycle.bucket_id", b.ID.String()),
+			),
+		)
+		w.processBucket(bucketCtx, b)
+		bucketSpan.End()
 		release()
 	}
 	return nil
@@ -441,10 +503,32 @@ func (w *Worker) transition(ctx context.Context, b *meta.Bucket, o *meta.Object,
 	if o.Manifest == nil {
 		return
 	}
+	ctx, span := w.tracerOrNoop().Start(ctx, "lifecycle.transition_object",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			strataotel.AttrComponentWorker,
+			attribute.String(strataotel.WorkerKey, "lifecycle"),
+			attribute.String("strata.lifecycle.bucket", b.Name),
+			attribute.String("strata.lifecycle.key", o.Key),
+			attribute.String("strata.lifecycle.rule", ruleID),
+			attribute.String("strata.lifecycle.from_class", o.StorageClass),
+			attribute.String("strata.lifecycle.to_class", newClass),
+		),
+	)
+	var spanErr error
+	defer func() {
+		if spanErr != nil {
+			span.RecordError(spanErr)
+			span.SetStatus(codes.Error, spanErr.Error())
+			w.recordIterErr(spanErr)
+		}
+		span.End()
+	}()
 	reader, err := w.Data.GetChunks(ctx, o.Manifest, 0, o.Size)
 	if err != nil {
 		metrics.LifecycleTickTotal.WithLabelValues("transition", "error").Inc()
 		w.Logger.WarnContext(ctx, "lifecycle transition read", "bucket", b.Name, "key", o.Key, "error", err.Error())
+		spanErr = err
 		return
 	}
 	newManifest, err := w.Data.PutChunks(ctx, reader, newClass)
@@ -452,6 +536,7 @@ func (w *Worker) transition(ctx context.Context, b *meta.Bucket, o *meta.Object,
 	if err != nil {
 		metrics.LifecycleTickTotal.WithLabelValues("transition", "error").Inc()
 		w.Logger.WarnContext(ctx, "lifecycle transition write", "bucket", b.Name, "key", o.Key, "class", newClass, "error", err.Error())
+		spanErr = err
 		return
 	}
 	applied, err := w.Meta.SetObjectStorage(ctx, b.ID, o.Key, o.VersionID, o.StorageClass, newClass, newManifest)
@@ -463,6 +548,7 @@ func (w *Worker) transition(ctx context.Context, b *meta.Bucket, o *meta.Object,
 		metrics.LifecycleTickTotal.WithLabelValues("transition", "error").Inc()
 		w.Logger.WarnContext(ctx, "lifecycle flip manifest", "bucket", b.Name, "key", o.Key, "error", err.Error())
 		_ = w.Meta.EnqueueChunkDeletion(ctx, region, newManifest.Chunks)
+		spanErr = err
 		return
 	}
 	if !applied {
@@ -484,11 +570,31 @@ func (w *Worker) transition(ctx context.Context, b *meta.Bucket, o *meta.Object,
 }
 
 func (w *Worker) expire(ctx context.Context, b *meta.Bucket, o *meta.Object, ruleID string) {
+	ctx, span := w.tracerOrNoop().Start(ctx, "lifecycle.expire_object",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			strataotel.AttrComponentWorker,
+			attribute.String(strataotel.WorkerKey, "lifecycle"),
+			attribute.String("strata.lifecycle.bucket", b.Name),
+			attribute.String("strata.lifecycle.key", o.Key),
+			attribute.String("strata.lifecycle.rule", ruleID),
+		),
+	)
+	var spanErr error
+	defer func() {
+		if spanErr != nil {
+			span.RecordError(spanErr)
+			span.SetStatus(codes.Error, spanErr.Error())
+			w.recordIterErr(spanErr)
+		}
+		span.End()
+	}()
 	versioned := meta.IsVersioningActive(b.Versioning)
 	removed, err := w.Meta.DeleteObject(ctx, b.ID, o.Key, "", versioned)
 	if err != nil {
 		metrics.LifecycleTickTotal.WithLabelValues("expire", "error").Inc()
 		w.Logger.WarnContext(ctx, "lifecycle expire", "bucket", b.Name, "key", o.Key, "error", err.Error())
+		spanErr = err
 		return
 	}
 	if !versioned && removed != nil && removed.Manifest != nil {

@@ -27,6 +27,7 @@ func buildLifecycle(deps Dependencies) (Runner, error) {
 		Logger:      deps.Logger,
 		Locker:      deps.Locker,
 		ReplicaInfo: lifecycleReplicaInfo(replicaCount),
+		Tracer:      deps.Tracer.Tracer("strata.worker.lifecycle"),
 	}, nil
 }
 

@@ -77,8 +77,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped: internal/otel/iteration_span.go exports StartIteration(ctx, tracer, workerName) + EndIteration(span, err) + shared NoopTracer() + IterationIDKey/WorkerKey constants. Helper emits worker.<name>.tick span with strata.component=worker + strata.worker=<name> + strata.iteration_id=<atomic.Uint64-per-worker>. cmd/strata/workers/iteration_span.go is a thin re-export so cmd-layer calls match the PRD convention while internal/gc + internal/lifecycle can import the real implementation without a cycle (cmd→internal allowed, internal→cmd forbidden). internal/gc.Worker grows Tracer trace.Tracer; drain() + RunOnce() wrap the inner drainCount in StartIteration/EndIteration. drainCount returns (int, error) (sticky-err via sync.Mutex+errMu) so list/delete/ack failures bubble up to the iteration span. Per-batch gc.scan_partition span + per-chunk gc.delete_chunk child span with strata.component=worker + strata.worker=gc + strata.gc.cluster/pool/oid attrs. Internal/lifecycle.Worker grows Tracer trace.Tracer + sync.Mutex-guarded iterErr; RunOnce wraps runOnce in StartIteration/EndIteration. lifecycle.scan_bucket span per bucket + lifecycle.expire_object + lifecycle.transition_object per evaluated object. cmd/strata/workers/{gc,lifecycle}.go threads deps.Tracer.Tracer(\"strata.worker.<name>\") onto the inner Worker. Tests: internal/otel/iteration_span_test.go covers parent span attrs, monotonic counter, error marking, nil tracer no-panic. internal/gc/worker_trace_test.go drives 3-chunk iteration with flakyBackend (third Delete fails); asserts iteration span Error + 3 gc.delete_chunk children with one Error. internal/lifecycle/worker_trace_test.go drives single-bucket transition with flakyTransitionBackend (PutChunks fails); asserts iteration span Error + lifecycle.scan_bucket emitted + lifecycle.transition_object with Error. Quality: go vet ./..., go build ./..., go test ./... -race all PASS."
     },
     {
       "id": "US-005",
