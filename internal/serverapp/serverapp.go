@@ -31,6 +31,7 @@ import (
 	"github.com/danchupin/strata/internal/data"
 	datamem "github.com/danchupin/strata/internal/data/memory"
 	datarados "github.com/danchupin/strata/internal/data/rados"
+	datas3 "github.com/danchupin/strata/internal/data/s3"
 	"github.com/danchupin/strata/internal/health"
 	"github.com/danchupin/strata/internal/heartbeat"
 	"github.com/danchupin/strata/internal/leader"
@@ -365,6 +366,19 @@ func buildDataBackend(cfg *config.Config, logger *slog.Logger, tp *strataotel.Pr
 			Logger:     logger,
 			Metrics:    metrics.RADOSObserver{},
 			Tracer:     tp.Tracer("strata.data.rados"),
+		})
+	case "s3":
+		s3Clusters, err := datas3.ParseClusters(cfg.S3.Clusters)
+		if err != nil {
+			return nil, fmt.Errorf("STRATA_S3_CLUSTERS: %w", err)
+		}
+		s3Classes, err := datas3.ParseClasses(cfg.S3.Classes)
+		if err != nil {
+			return nil, fmt.Errorf("STRATA_S3_CLASSES: %w", err)
+		}
+		return datas3.New(datas3.Config{
+			Clusters: s3Clusters,
+			Classes:  s3Classes,
 		})
 	default:
 		return nil, errors.New("unknown data backend")
@@ -730,19 +744,9 @@ func s3BackendSettings(cfg *config.Config) adminapi.S3BackendSettings {
 		return adminapi.S3BackendSettings{}
 	}
 	return adminapi.S3BackendSettings{
-		Kind:              "s3",
-		Endpoint:          cfg.S3Backend.Endpoint,
-		Region:            cfg.S3Backend.Region,
-		Bucket:            cfg.S3Backend.Bucket,
-		ForcePathStyle:    cfg.S3Backend.ForcePathStyle,
-		PartSize:          cfg.S3Backend.PartSize,
-		UploadConcurrency: cfg.S3Backend.UploadConcurrency,
-		MaxRetries:        cfg.S3Backend.MaxRetries,
-		OpTimeoutSecs:     cfg.S3Backend.OpTimeoutSecs,
-		SSEMode:           cfg.S3Backend.SSEMode,
-		SSEKMSKeyID:       cfg.S3Backend.SSEKMSKeyID,
-		AccessKeySet:      cfg.S3Backend.AccessKey != "",
-		SecretKeySet:      cfg.S3Backend.SecretKey != "",
+		Kind:     "s3",
+		Clusters: cfg.S3.Clusters,
+		Classes:  cfg.S3.Classes,
 	}
 }
 

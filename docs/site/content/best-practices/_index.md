@@ -19,6 +19,7 @@ and runbook shape an on-call operator needs.
 | [Backup + restore]({{< ref "/best-practices/backup-restore" >}}) | Snapshot strategy across the metadata, data, and replication tiers. |
 | [Capacity planning]({{< ref "/best-practices/capacity-planning" >}}) | Chunk fan-out math, when to scale shards / replicas, dedup roadmap. |
 | [Quotas + billing]({{< ref "/best-practices/quotas-billing" >}}) | `BucketQuota` / `UserQuota` shape, `QuotaExceeded` 403, the `bucket_stats` counter, the reconcile + usage-rollup workers. |
+| [S3 multi-cluster routing]({{< ref "/best-practices/s3-multi-cluster" >}}) | `STRATA_S3_CLUSTERS` / `STRATA_S3_CLASSES` env shape, `credentials_ref` discriminator, per-class `(cluster, bucket)` routing, rolling-restart workflow. |
 | [Web UI (Strata Console)]({{< ref "/best-practices/web-ui" >}}) | Embedded operator console: pages, env vars, end-to-end tests. |
 
 ## See also

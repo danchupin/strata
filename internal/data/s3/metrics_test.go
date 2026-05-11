@@ -32,20 +32,7 @@ func TestObserveOpTotalAndRetryTotal(t *testing.T) {
 			noSuchKeyResponse,
 		},
 	}
-	cfg := Config{
-		Bucket:         "strata-test",
-		Region:         "us-east-1",
-		Endpoint:       "http://example.invalid",
-		AccessKey:      "ak",
-		SecretKey:      "sk",
-		ForcePathStyle: true,
-		SkipProbe:      true,
-		HTTPClient:     &http.Client{Transport: seq},
-	}
-	b, err := Open(ctx, cfg)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	b := openTestBackend(t, seq)
 
 	putOK := snapCounter(t, opTotal.WithLabelValues("put", "ok"))
 	putRetried := snapCounter(t, opTotal.WithLabelValues("put", "retried"))
@@ -58,7 +45,7 @@ func TestObserveOpTotalAndRetryTotal(t *testing.T) {
 	if _, err := b.Put(ctx, "k2", strings.NewReader("payload"), 7); err != nil {
 		t.Fatalf("Put #2 (retry): %v", err)
 	}
-	_, err = b.Get(ctx, "missing")
+	_, err := b.Get(ctx, "missing")
 	if err == nil {
 		t.Fatal("Get: expected error for NoSuchKey")
 	}

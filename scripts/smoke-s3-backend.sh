@@ -14,7 +14,10 @@
 #      strata-minio-data docker volume.
 #
 # Env knobs:
-#   STRATA_S3_BACKEND_BUCKET (default strata-backend) — backend bucket name
+#   STRATA_S3_SMOKE_BUCKET   (default strata-backend) — backend bucket name
+#                            checked by the harness. Must match the bucket
+#                            referenced by the STANDARD class in
+#                            STRATA_S3_CLASSES when launching strata.
 #   MINIO_ROOT_USER          (default stratauser)
 #   MINIO_ROOT_PASSWORD      (default stratapass)
 #   COMPOSE_NETWORK          (default docker_default) — docker network mc joins
@@ -24,7 +27,7 @@
 set -euo pipefail
 
 BASE="${1:-http://127.0.0.1:9999}"
-BUCKET="${STRATA_S3_BACKEND_BUCKET:-strata-backend}"
+BUCKET="${STRATA_S3_SMOKE_BUCKET:-strata-backend}"
 MINIO_USER="${MINIO_ROOT_USER:-stratauser}"
 MINIO_PASS="${MINIO_ROOT_PASSWORD:-stratapass}"
 NETWORK="${COMPOSE_NETWORK:-docker_default}"

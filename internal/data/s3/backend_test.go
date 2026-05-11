@@ -10,17 +10,16 @@ import (
 	"sync"
 	"testing"
 
-	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/google/uuid"
 
 	"github.com/danchupin/strata/internal/data"
 )
 
-// TestStubReturnsErrUnsupported pins the US-001 acceptance: a New() stub
-// must satisfy data.Backend and surface errors.ErrUnsupported on every
-// mutating method until the real implementation lands.
+// TestStubReturnsErrUnsupported pins the US-001 acceptance: a
+// zero-value Backend (no clusters wired) must satisfy data.Backend and
+// surface errors.ErrUnsupported on every mutating method.
 func TestStubReturnsErrUnsupported(t *testing.T) {
-	b := New()
+	b := &Backend{}
 
 	var _ data.Backend = b
 
@@ -44,7 +43,7 @@ func TestStubReturnsErrUnsupported(t *testing.T) {
 // stub Backend (no Open) must not silently succeed — callers without a
 // live S3 client get errors.ErrUnsupported.
 func TestStubPutReturnsErrUnsupported(t *testing.T) {
-	b := New()
+	b := &Backend{}
 
 	_, err := b.Put(context.Background(), "k", bytes.NewReader(nil), 0)
 	if !errors.Is(err, errors.ErrUnsupported) {
@@ -56,7 +55,7 @@ func TestStubPutReturnsErrUnsupported(t *testing.T) {
 // Open) must surface errors.ErrUnsupported on Get / GetRange — never
 // silently succeed.
 func TestStubGetReturnsErrUnsupported(t *testing.T) {
-	b := New()
+	b := &Backend{}
 	ctx := context.Background()
 
 	if _, err := b.Get(ctx, "k"); !errors.Is(err, errors.ErrUnsupported) {
@@ -69,9 +68,10 @@ func TestStubGetReturnsErrUnsupported(t *testing.T) {
 
 // TestGetRangeValidatesArguments pins US-003 input validation: negative
 // offset or non-positive length is a programmer error and must fail
-// before any network call.
+// before any network call. Argument validation runs ahead of cluster
+// resolution, so a zero-value Backend exercises the early-return paths.
 func TestGetRangeValidatesArguments(t *testing.T) {
-	b := &Backend{bucket: "b", client: &awss3.Client{}}
+	b := &Backend{}
 	ctx := context.Background()
 
 	if _, err := b.GetRange(ctx, "k", -1, 1); err == nil {
@@ -89,7 +89,7 @@ func TestGetRangeValidatesArguments(t *testing.T) {
 // Backend (no Open) must surface errors.ErrUnsupported on DeleteObject /
 // DeleteBatch — never silently succeed against an absent client.
 func TestStubDeleteObjectReturnsErrUnsupported(t *testing.T) {
-	b := New()
+	b := &Backend{}
 	ctx := context.Background()
 
 	if err := b.DeleteObject(ctx, "k", ""); !errors.Is(err, errors.ErrUnsupported) {
@@ -104,9 +104,11 @@ func TestStubDeleteObjectReturnsErrUnsupported(t *testing.T) {
 }
 
 // TestDeleteBatchEmpty is a no-op: empty refs returns (nil, nil) without
-// touching the network — works on stub and live Backend alike.
+// touching the network — works on stub and live Backend alike. The
+// empty-refs branch runs before cluster resolution so the zero-value
+// Backend exercises it without needing a wired client.
 func TestDeleteBatchEmpty(t *testing.T) {
-	b := &Backend{bucket: "b", client: &awss3.Client{}}
+	b := &Backend{}
 	failures, err := b.DeleteBatch(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("DeleteBatch(nil): want nil error, got %v", err)
@@ -134,36 +136,22 @@ func TestOpenValidatesRequiredConfig(t *testing.T) {
 // can flip it off and Open returns a live Backend without any HTTP
 // round-trip to the configured endpoint.
 func TestOpenSkipProbeAvoidsNetwork(t *testing.T) {
-	ctx := context.Background()
-	// Endpoint points at a port no one is listening on. With SkipProbe=true
-	// Open must not connect; with SkipProbe=false (covered by integration
-	// tests against MinIO) it would fail.
-	cfg := Config{
-		Bucket:         "strata-test",
-		Region:         "us-east-1",
-		Endpoint:       "http://127.0.0.1:1",
-		AccessKey:      "ak",
-		SecretKey:      "sk",
-		ForcePathStyle: true,
-		SkipProbe:      true,
-	}
-	b, err := Open(ctx, cfg)
-	if err != nil {
-		t.Fatalf("Open with SkipProbe=true: want nil error, got %v", err)
-	}
-	if b == nil {
-		t.Fatal("Open returned nil backend with no error")
-	}
-	if b.client == nil {
-		t.Fatal("Open returned backend with nil client")
+	b := openTestBackend(t, nil, func(c *Config) {
+		// Override the example.invalid default with a closed port to
+		// prove SkipProbe really skips the probe — a connection attempt
+		// would fail loudly.
+		c.Endpoint = "http://127.0.0.1:1"
+		c.HTTPClient = nil
+	})
+	if len(b.clusters) == 0 {
+		t.Fatal("Open returned backend with empty clusters map")
 	}
 }
 
-// TestProbeStubReturnsErrUnsupported guards Probe on a New() stub: with
-// no live client, Probe must surface errors.ErrUnsupported — never
-// silently no-op.
+// TestProbeStubReturnsErrUnsupported guards Probe on a zero-value
+// Backend (no clusters): Probe must surface errors.ErrUnsupported.
 func TestProbeStubReturnsErrUnsupported(t *testing.T) {
-	b := New()
+	b := &Backend{}
 	if err := b.Probe(context.Background()); !errors.Is(err, errors.ErrUnsupported) {
 		t.Fatalf("Probe on stub: want errors.ErrUnsupported, got %v", err)
 	}
@@ -184,22 +172,7 @@ func TestPutRetriesOn503ThenSucceeds(t *testing.T) {
 			putObjectSuccessResponse,
 		},
 	}
-	cfg := Config{
-		Bucket:         "strata-test",
-		Region:         "us-east-1",
-		Endpoint:       "http://example.invalid",
-		AccessKey:      "ak",
-		SecretKey:      "sk",
-		ForcePathStyle: true,
-		SkipProbe:      true,
-		HTTPClient:     &http.Client{Transport: seq},
-		// MaxRetries left at default (5) — 3 attempts fits.
-	}
-
-	b, err := Open(ctx, cfg)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	b := openTestBackend(t, seq)
 
 	res, err := b.Put(ctx, "k", strings.NewReader("payload"), 7)
 	if err != nil {
@@ -288,20 +261,7 @@ func TestPutChunksBuildsBackendRefManifest(t *testing.T) {
 	seq := &sequenceTransport{
 		responses: []responseFn{putObjectSuccessResponse},
 	}
-	cfg := Config{
-		Bucket:         "strata-test",
-		Region:         "us-east-1",
-		Endpoint:       "http://example.invalid",
-		AccessKey:      "ak",
-		SecretKey:      "sk",
-		ForcePathStyle: true,
-		SkipProbe:      true,
-		HTTPClient:     &http.Client{Transport: seq},
-	}
-	b, err := Open(ctx, cfg)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	b := openTestBackend(t, seq)
 
 	bucketID := uuid.New()
 	m, err := b.PutChunks(data.WithBucketID(ctx, bucketID), strings.NewReader(payload), "STANDARD")
@@ -346,20 +306,7 @@ func TestPutChunksObjectKeyFallback(t *testing.T) {
 	seq := &sequenceTransport{
 		responses: []responseFn{putObjectSuccessResponse},
 	}
-	cfg := Config{
-		Bucket:         "strata-test",
-		Region:         "us-east-1",
-		Endpoint:       "http://example.invalid",
-		AccessKey:      "ak",
-		SecretKey:      "sk",
-		ForcePathStyle: true,
-		SkipProbe:      true,
-		HTTPClient:     &http.Client{Transport: seq},
-	}
-	b, err := Open(ctx, cfg)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	b := openTestBackend(t, seq)
 
 	m, err := b.PutChunks(ctx, strings.NewReader("x"), "")
 	if err != nil {
@@ -389,20 +336,7 @@ func TestPutChunksObjectKeyFallback(t *testing.T) {
 // open or panic.
 func TestGetChunksRejectsChunksShapeManifest(t *testing.T) {
 	ctx := context.Background()
-	cfg := Config{
-		Bucket:         "strata-test",
-		Region:         "us-east-1",
-		Endpoint:       "http://example.invalid",
-		AccessKey:      "ak",
-		SecretKey:      "sk",
-		ForcePathStyle: true,
-		SkipProbe:      true,
-		HTTPClient:     &http.Client{Transport: &sequenceTransport{}},
-	}
-	b, err := Open(ctx, cfg)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	b := openTestBackend(t, &sequenceTransport{})
 	m := &data.Manifest{Chunks: []data.ChunkRef{{Pool: "p", OID: "k", Size: 1}}, Size: 1}
 	if _, err := b.GetChunks(ctx, m, 0, 1); !errors.Is(err, errors.ErrUnsupported) {
 		t.Fatalf("GetChunks(chunks-shape): want errors.ErrUnsupported, got %v", err)
@@ -411,7 +345,7 @@ func TestGetChunksRejectsChunksShapeManifest(t *testing.T) {
 
 // TestOpenRejectsUnknownSSEMode pins US-013 fail-fast: an unknown SSE mode
 // must error at Open, never silently fall back to a default. Operators
-// catch typos in STRATA_S3_BACKEND_SSE_MODE at startup, not at first PUT.
+// catch typos in the per-cluster sse_mode JSON field at startup, not at first PUT.
 func TestOpenRejectsUnknownSSEMode(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{
@@ -434,21 +368,8 @@ func TestPutChunksPassthroughSendsSSEHeader(t *testing.T) {
 	ctx := context.Background()
 
 	captured := &headerCapturingTransport{}
-	cfg := Config{
-		Bucket:         "strata-test",
-		Region:         "us-east-1",
-		Endpoint:       "http://example.invalid",
-		AccessKey:      "ak",
-		SecretKey:      "sk",
-		ForcePathStyle: true,
-		SkipProbe:      true,
-		HTTPClient:     &http.Client{Transport: captured},
-		// SSEMode left empty — defaults to passthrough.
-	}
-	b, err := Open(ctx, cfg)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	// SSEMode left empty — defaults to passthrough.
+	b := openTestBackend(t, captured)
 
 	m, err := b.PutChunks(ctx, strings.NewReader("hello"), "STANDARD")
 	if err != nil {
@@ -479,21 +400,7 @@ func TestPutChunksStrataModeOmitsSSEHeader(t *testing.T) {
 	ctx := context.Background()
 
 	captured := &headerCapturingTransport{}
-	cfg := Config{
-		Bucket:         "strata-test",
-		Region:         "us-east-1",
-		Endpoint:       "http://example.invalid",
-		AccessKey:      "ak",
-		SecretKey:      "sk",
-		ForcePathStyle: true,
-		SkipProbe:      true,
-		HTTPClient:     &http.Client{Transport: captured},
-		SSEMode:        data.SSEModeStrata,
-	}
-	b, err := Open(ctx, cfg)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	b := openTestBackend(t, captured, withSSE(data.SSEModeStrata, ""))
 
 	m, err := b.PutChunks(ctx, strings.NewReader("hello"), "STANDARD")
 	if err != nil {
@@ -520,22 +427,7 @@ func TestPutChunksKMSModeSendsKMSHeaders(t *testing.T) {
 
 	captured := &headerCapturingTransport{}
 	const keyID = "arn:aws:kms:us-east-1:111122223333:key/abc-def"
-	cfg := Config{
-		Bucket:         "strata-test",
-		Region:         "us-east-1",
-		Endpoint:       "http://example.invalid",
-		AccessKey:      "ak",
-		SecretKey:      "sk",
-		ForcePathStyle: true,
-		SkipProbe:      true,
-		HTTPClient:     &http.Client{Transport: captured},
-		SSEMode:        data.SSEModeBoth,
-		SSEKMSKeyID:    keyID,
-	}
-	b, err := Open(ctx, cfg)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	b := openTestBackend(t, captured, withSSE(data.SSEModeBoth, keyID))
 
 	m, err := b.PutChunks(ctx, strings.NewReader("hello"), "STANDARD")
 	if err != nil {
@@ -588,20 +480,7 @@ func (t *headerCapturingTransport) lastHeader(name string) string {
 // responsibility — Delete returns nil without touching the network.
 func TestDeleteWithoutBackendRefIsNoOp(t *testing.T) {
 	ctx := context.Background()
-	cfg := Config{
-		Bucket:         "strata-test",
-		Region:         "us-east-1",
-		Endpoint:       "http://example.invalid",
-		AccessKey:      "ak",
-		SecretKey:      "sk",
-		ForcePathStyle: true,
-		SkipProbe:      true,
-		HTTPClient:     &http.Client{Transport: &sequenceTransport{}},
-	}
-	b, err := Open(ctx, cfg)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	b := openTestBackend(t, &sequenceTransport{})
 	if err := b.Delete(ctx, nil); err != nil {
 		t.Fatalf("Delete(nil): want nil, got %v", err)
 	}

@@ -2,7 +2,6 @@ package s3
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -12,22 +11,16 @@ import (
 	"github.com/danchupin/strata/internal/data"
 )
 
-// PutBackendCORS pushes the supplied CORS rules onto the backend bucket via
-// the SDK PutBucketCors call (US-015). Empty rules clear the backend
-// configuration via DeleteBackendCORS instead of pushing an empty rule list
-// (S3 rejects an empty CORSConfiguration).
-//
-// CORS in S3 is bucket-scoped — there's no per-prefix CORS protocol — so
-// this surface does not take a bucketPrefix argument. Deployments that share
-// one backend bucket across many Strata buckets will see last-writer-wins on
-// the backend mirror; the Strata-stored config remains per-Strata-bucket and
-// authoritative for the gateway response.
+// PutBackendCORS pushes the supplied CORS rules onto the backend bucket
+// via the SDK PutBucketCors call (US-015). Empty rules clear the backend
+// configuration via DeleteBackendCORS.
 func (b *Backend) PutBackendCORS(ctx context.Context, rules []data.CORSRule) error {
-	if b.client == nil {
-		return errors.ErrUnsupported
-	}
 	if len(rules) == 0 {
 		return b.DeleteBackendCORS(ctx)
+	}
+	c, bucket, err := b.singleCluster(ctx)
+	if err != nil {
+		return err
 	}
 
 	sdkRules := make([]s3types.CORSRule, len(rules))
@@ -49,10 +42,9 @@ func (b *Backend) PutBackendCORS(ctx context.Context, rules []data.CORSRule) err
 		sdkRules[i] = sdkRule
 	}
 
-	bucket := b.bucket
-	opCtx, cancel := b.opCtx(ctx)
+	opCtx, cancel := opCtxFor(ctx, c.opTimeout)
 	defer cancel()
-	_, err := b.client.PutBucketCors(opCtx, &awss3.PutBucketCorsInput{
+	_, err = c.client.PutBucketCors(opCtx, &awss3.PutBucketCorsInput{
 		Bucket:            &bucket,
 		CORSConfiguration: &s3types.CORSConfiguration{CORSRules: sdkRules},
 	})
@@ -62,18 +54,17 @@ func (b *Backend) PutBackendCORS(ctx context.Context, rules []data.CORSRule) err
 	return nil
 }
 
-// GetBackendCORS reads the backend bucket's CORS configuration and converts
-// it to the data.CORSRule shape. NoSuchCORSConfiguration is treated as
-// "no rules configured" and returns (nil, nil) so callers can branch on
-// emptiness without needing error inspection.
+// GetBackendCORS reads the backend bucket's CORS configuration.
+// NoSuchCORSConfiguration is treated as "no rules configured" — returns
+// (nil, nil).
 func (b *Backend) GetBackendCORS(ctx context.Context) ([]data.CORSRule, error) {
-	if b.client == nil {
-		return nil, errors.ErrUnsupported
+	c, bucket, err := b.singleCluster(ctx)
+	if err != nil {
+		return nil, err
 	}
-	bucket := b.bucket
-	opCtx, cancel := b.opCtx(ctx)
+	opCtx, cancel := opCtxFor(ctx, c.opTimeout)
 	defer cancel()
-	out, err := b.client.GetBucketCors(opCtx, &awss3.GetBucketCorsInput{Bucket: &bucket})
+	out, err := c.client.GetBucketCors(opCtx, &awss3.GetBucketCorsInput{Bucket: &bucket})
 	if err != nil {
 		if isNoSuchCORS(err) {
 			return nil, nil
@@ -100,15 +91,15 @@ func (b *Backend) GetBackendCORS(ctx context.Context) ([]data.CORSRule, error) {
 }
 
 // DeleteBackendCORS clears the backend bucket's CORS configuration.
-// Idempotent: NoSuchCORSConfiguration responses are treated as success.
+// Idempotent: NoSuchCORSConfiguration is treated as success.
 func (b *Backend) DeleteBackendCORS(ctx context.Context) error {
-	if b.client == nil {
-		return errors.ErrUnsupported
+	c, bucket, err := b.singleCluster(ctx)
+	if err != nil {
+		return err
 	}
-	bucket := b.bucket
-	opCtx, cancel := b.opCtx(ctx)
+	opCtx, cancel := opCtxFor(ctx, c.opTimeout)
 	defer cancel()
-	_, err := b.client.DeleteBucketCors(opCtx, &awss3.DeleteBucketCorsInput{Bucket: &bucket})
+	_, err = c.client.DeleteBucketCors(opCtx, &awss3.DeleteBucketCorsInput{Bucket: &bucket})
 	if err != nil {
 		if isNoSuchCORS(err) {
 			return nil
@@ -118,10 +109,6 @@ func (b *Backend) DeleteBackendCORS(ctx context.Context) error {
 	return nil
 }
 
-// isNoSuchCORS recognises the backend's "no CORS configured" response.
-// The SDK does not surface a typed error for NoSuchCORSConfiguration —
-// match on the error string emitted by the smithy generic API error path,
-// same convention as the lifecycle backend's NoSuchLifecycleConfiguration.
 func isNoSuchCORS(err error) bool {
 	return strings.Contains(err.Error(), "NoSuchCORSConfiguration")
 }

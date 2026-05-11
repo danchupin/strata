@@ -146,75 +146,29 @@ func TestS3BackendSettingsNonS3DataBackendIsZero(t *testing.T) {
 	}
 }
 
-// TestS3BackendSettingsMasksKeys is the US-021 wire-shape lockdown: when
-// data_backend=s3, every config field surfaces verbatim EXCEPT AccessKey /
-// SecretKey, which collapse into AccessKeySet / SecretKeySet booleans. The
-// raw secrets must never reach the admin layer.
-func TestS3BackendSettingsMasksKeys(t *testing.T) {
+// TestS3BackendSettingsPassesEnvBlobsThrough pins the US-004 wire shape:
+// when data_backend=s3, s3BackendSettings echoes the two JSON env blobs
+// verbatim so the admin console can render them. Credentials are by
+// reference inside the spec (chain / env: / file:) and never include
+// plaintext keys, so the helper does no masking of its own.
+func TestS3BackendSettingsPassesEnvBlobsThrough(t *testing.T) {
+	clusters := `[{"id":"primary","endpoint":"https://s3","region":"us-east-1","credentials":{"type":"chain"}}]`
+	classes := `{"STANDARD":{"cluster":"primary","bucket":"hot"}}`
 	cfg := &config.Config{
 		DataBackend: "s3",
-		S3Backend: config.S3BackendConfig{
-			Endpoint:          "https://minio:9000",
-			Region:            "us-east-1",
-			Bucket:            "primary",
-			AccessKey:         "AKIAEXAMPLE",
-			SecretKey:         "supersecret",
-			ForcePathStyle:    true,
-			PartSize:          16 * 1024 * 1024,
-			UploadConcurrency: 8,
-			MaxRetries:        5,
-			OpTimeoutSecs:     30,
-			SSEMode:           "passthrough",
-			SSEKMSKeyID:       "arn:aws:kms:us-east-1:111122223333:key/abc",
+		S3: config.S3Config{
+			Clusters: clusters,
+			Classes:  classes,
 		},
 	}
 	got := s3BackendSettings(cfg)
 	want := adminapi.S3BackendSettings{
-		Kind:              "s3",
-		Endpoint:          "https://minio:9000",
-		Region:            "us-east-1",
-		Bucket:            "primary",
-		ForcePathStyle:    true,
-		PartSize:          16 * 1024 * 1024,
-		UploadConcurrency: 8,
-		MaxRetries:        5,
-		OpTimeoutSecs:     30,
-		SSEMode:           "passthrough",
-		SSEKMSKeyID:       "arn:aws:kms:us-east-1:111122223333:key/abc",
-		AccessKeySet:      true,
-		SecretKeySet:      true,
+		Kind:     "s3",
+		Clusters: clusters,
+		Classes:  classes,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("s3BackendSettings:\n got=%+v\nwant=%+v", got, want)
-	}
-}
-
-// TestS3BackendSettingsKeyPresenceFlags asserts AccessKeySet / SecretKeySet
-// flip independently with key presence — covers the SDK-default-chain shape
-// (both empty, both flags false) plus partial-set rows for completeness.
-func TestS3BackendSettingsKeyPresenceFlags(t *testing.T) {
-	cases := []struct {
-		ak, sk           string
-		wantAK, wantSK   bool
-	}{
-		{"", "", false, false},
-		{"AKIA", "", true, false},
-		{"", "secret", false, true},
-		{"AKIA", "secret", true, true},
-	}
-	for _, tc := range cases {
-		cfg := &config.Config{
-			DataBackend: "s3",
-			S3Backend: config.S3BackendConfig{
-				Bucket: "b", Region: "r",
-				AccessKey: tc.ak, SecretKey: tc.sk,
-			},
-		}
-		got := s3BackendSettings(cfg)
-		if got.AccessKeySet != tc.wantAK || got.SecretKeySet != tc.wantSK {
-			t.Errorf("ak=%q sk=%q: AccessKeySet=%v SecretKeySet=%v want %v / %v",
-				tc.ak, tc.sk, got.AccessKeySet, got.SecretKeySet, tc.wantAK, tc.wantSK)
-		}
 	}
 }
 

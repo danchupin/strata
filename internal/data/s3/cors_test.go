@@ -11,11 +11,11 @@ import (
 	"github.com/danchupin/strata/internal/data"
 )
 
-// TestStubCORSReturnsErrUnsupported pins the contract: a New() stub must
-// surface errors.ErrUnsupported on every CORSBackend method before Open
-// wires a live client (US-015).
+// TestStubCORSReturnsErrUnsupported pins the contract: a zero-value
+// Backend (no clusters) must surface errors.ErrUnsupported on every
+// CORSBackend method before Open wires a live client (US-015).
 func TestStubCORSReturnsErrUnsupported(t *testing.T) {
-	b := New()
+	b := &Backend{}
 	ctx := context.Background()
 
 	if err := b.PutBackendCORS(ctx, nil); !errors.Is(err, errors.ErrUnsupported) {
@@ -35,10 +35,7 @@ func TestStubCORSReturnsErrUnsupported(t *testing.T) {
 func TestPutBackendCORSSendsRules(t *testing.T) {
 	ctx := context.Background()
 	captured := newCORSRoundTripper()
-	b, err := Open(ctx, openConfig(captured))
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	b := openTestBackend(t, captured)
 
 	rules := []data.CORSRule{
 		{
@@ -80,10 +77,7 @@ func TestPutBackendCORSSendsRules(t *testing.T) {
 func TestPutBackendCORSEmptyRulesClearsBackend(t *testing.T) {
 	ctx := context.Background()
 	captured := newCORSRoundTripper()
-	b, err := Open(ctx, openConfig(captured))
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	b := openTestBackend(t, captured)
 
 	if err := b.PutBackendCORS(ctx, nil); err != nil {
 		t.Fatalf("PutBackendCORS(nil): %v", err)
@@ -110,10 +104,7 @@ func TestGetBackendCORSParsesResponse(t *testing.T) {
     <MaxAgeSeconds>600</MaxAgeSeconds>
   </CORSRule>
 </CORSConfiguration>`
-	b, err := Open(ctx, openConfig(rt))
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	b := openTestBackend(t, rt)
 
 	rules, err := b.GetBackendCORS(ctx)
 	if err != nil {
@@ -143,10 +134,7 @@ func TestGetBackendCORSNoSuchCORSReturnsEmpty(t *testing.T) {
 	rt.getStatus = http.StatusNotFound
 	rt.getBody = `<?xml version="1.0" encoding="UTF-8"?>
 <Error><Code>NoSuchCORSConfiguration</Code><Message>The CORS configuration does not exist</Message></Error>`
-	b, err := Open(ctx, openConfig(rt))
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	b := openTestBackend(t, rt)
 
 	rules, err := b.GetBackendCORS(ctx)
 	if err != nil {
@@ -161,10 +149,7 @@ func TestGetBackendCORSNoSuchCORSReturnsEmpty(t *testing.T) {
 func TestDeleteBackendCORSIssuesDelete(t *testing.T) {
 	ctx := context.Background()
 	rt := newCORSRoundTripper()
-	b, err := Open(ctx, openConfig(rt))
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	b := openTestBackend(t, rt)
 
 	if err := b.DeleteBackendCORS(ctx); err != nil {
 		t.Fatalf("DeleteBackendCORS: %v", err)
@@ -185,10 +170,7 @@ func TestDeleteBackendCORSNoSuchCORSIdempotent(t *testing.T) {
 	rt.deleteStatus = http.StatusNotFound
 	rt.deleteBody = `<?xml version="1.0" encoding="UTF-8"?>
 <Error><Code>NoSuchCORSConfiguration</Code><Message>nope</Message></Error>`
-	b, err := Open(ctx, openConfig(rt))
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	b := openTestBackend(t, rt)
 
 	if err := b.DeleteBackendCORS(ctx); err != nil {
 		t.Fatalf("DeleteBackendCORS: want nil on NoSuchCORS, got %v", err)
