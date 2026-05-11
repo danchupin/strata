@@ -39,16 +39,7 @@ queue in parallel.&lt;/li&gt;
 &lt;/ul&gt;
 &lt;p&gt;Both layers compose: a 3-replica deploy with &lt;code&gt;STRATA_GC_SHARDS=3&lt;/code&gt; and
 per-replica &lt;code&gt;STRATA_GC_CONCURRENCY=64&lt;/code&gt; runs three independent fan-outs
-against disjoint shards.&lt;/p&gt;</description></item><item><title>Dynamic clusters</title><link>https://danchupin.github.io/strata/best-practices/dynamic-clusters/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/dynamic-clusters/</guid><description>&lt;h1 id="dynamic-clusters"&gt;Dynamic clusters&lt;a class="anchor" href="#dynamic-clusters"&gt;#&lt;/a&gt;&lt;/h1&gt;
-&lt;p&gt;The RADOS cluster set is persisted in &lt;code&gt;meta.Store&lt;/code&gt; (the &lt;code&gt;cluster_registry&lt;/code&gt;
-table) and reconciled in-process by every gateway replica every
-&lt;code&gt;STRATA_CLUSTER_REGISTRY_INTERVAL&lt;/code&gt; (default 30 s, range &lt;code&gt;[5 s, 5 m]&lt;/code&gt;).
-Adding a new RADOS cluster is a single &lt;code&gt;POST /admin/v1/storage/clusters&lt;/code&gt;
-call — no gateway restart, no env-file edit, no rolling deploy.&lt;/p&gt;
-&lt;p&gt;The legacy &lt;code&gt;STRATA_RADOS_CLUSTERS&lt;/code&gt; env path is fully retired. The
-registry is the single source of truth.&lt;/p&gt;
-&lt;h2 id="catalogue-shape"&gt;Catalogue shape&lt;a class="anchor" href="#catalogue-shape"&gt;#&lt;/a&gt;&lt;/h2&gt;
-&lt;p&gt;&lt;code&gt;ClusterRegistryEntry&lt;/code&gt; lives in &lt;code&gt;internal/meta/store.go&lt;/code&gt;:&lt;/p&gt;</description></item><item><title>Backup + restore</title><link>https://danchupin.github.io/strata/best-practices/backup-restore/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/backup-restore/</guid><description>&lt;h1 id="backup--restore"&gt;Backup + restore&lt;a class="anchor" href="#backup--restore"&gt;#&lt;/a&gt;&lt;/h1&gt;
+against disjoint shards.&lt;/p&gt;</description></item><item><title>Backup + restore</title><link>https://danchupin.github.io/strata/best-practices/backup-restore/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/backup-restore/</guid><description>&lt;h1 id="backup--restore"&gt;Backup + restore&lt;a class="anchor" href="#backup--restore"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;Strata splits backup responsibility along the same tiers the gateway
 splits state into:&lt;/p&gt;
 &lt;ul&gt;
