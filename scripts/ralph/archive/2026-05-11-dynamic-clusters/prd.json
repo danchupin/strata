@@ -1,0 +1,139 @@
+{
+  "project": "Strata",
+  "branchName": "ralph/dynamic-clusters",
+  "description": "Dynamic RADOS Cluster Registry + Zero-Downtime Add. Closes ROADMAP P2 'Dynamic RADOS / S3 cluster registry + zero-downtime add.' Today the gateway loads the RADOS cluster set ONCE from `STRATA_RADOS_CLUSTERS` env at startup via `internal/serverapp/serverapp.go::buildDataBackend` → `datarados.ParseClusters` → `Backend.clusters` map. Adding a new RADOS cluster requires a full gateway restart. US-044 of a prior cycle shipped the multi-cluster connection map (`b.connFor`, `b.ioctx`) but not its lifecycle. Fix scope: (1) persist cluster catalogue in `meta.Store` (new `ClusterRegistry` CRUD across memory + Cassandra + TiKV); (2) admin API `GET/POST/DELETE /admin/v1/storage/clusters[/{id}]` wired into `internal/adminapi/openapi.yaml`; (3) `rados.Backend` watcher goroutine polls meta every `STRATA_CLUSTER_REGISTRY_INTERVAL` (default 30s), set-diff reconciles `Backend.clusters` map — lazy-dial on add, safe-drain on remove; (4) FULLY RETIRE the `STRATA_RADOS_CLUSTERS` env path — registry is the SINGLE source of truth, no two-source confusion. S3-backend half deferred (single-bucket-per-instance today; per-instance lifecycle is a separate P2 followup). Operator workflow: bootstrap = POST first cluster via admin API after gateway starts (admin API works without RADOS). No migration tooling needed — no existing deployments to migrate. 7 stories. Closes ROADMAP P2 'Dynamic RADOS / S3 cluster registry + zero-downtime add.' on cycle close.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "meta.Store ClusterRegistry CRUD + memory backend",
+      "description": "As a developer, I want `meta.Store` to expose `ListClusters / GetCluster / PutCluster / DeleteCluster` on the memory backend so the admin API + watcher have a persistent catalogue source.",
+      "acceptanceCriteria": [
+        "Add `ClusterRegistryEntry` struct to `internal/meta/store.go`: fields `ID string`, `Backend string` (\"rados\" / \"s3\"), `Spec []byte` (opaque JSON-encoded config), `CreatedAt time.Time`, `UpdatedAt time.Time`, `Version int64` (monotonic CAS-on-update counter)",
+        "Add to `meta.Store` interface: `ListClusters(ctx) ([]*ClusterRegistryEntry, error)`, `GetCluster(ctx, id string) (*ClusterRegistryEntry, error)`, `PutCluster(ctx, e *ClusterRegistryEntry) error` (insert or CAS-update on Version), `DeleteCluster(ctx, id string) error`",
+        "Sentinel errors: `meta.ErrClusterNotFound`, `meta.ErrClusterVersionMismatch`",
+        "Implement on `internal/meta/memory/store.go` under existing per-store mutex; `PutCluster` validates Version-on-update == stored.Version, bumps Version, stamps UpdatedAt",
+        "Add `caseClusterRegistry` to `internal/meta/storetest/contract.go`: insert two clusters → List returns both sorted by ID → Get returns one → Put with stale Version returns `ErrClusterVersionMismatch` → Delete + Get returns `ErrClusterNotFound` → List-empty returns nil slice (NOT error)",
+        "Memory backend test (`internal/meta/memory/store_test.go`) wires `caseClusterRegistry`",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Cassandra backend ClusterRegistry CRUD",
+      "description": "As a developer, I want the Cassandra meta backend to persist the cluster registry so a multi-replica gateway sees the same catalogue.",
+      "acceptanceCriteria": [
+        "Add `cluster_registry` table to `internal/meta/cassandra/schema.go::tableDDL`: `CREATE TABLE IF NOT EXISTS cluster_registry (id text PRIMARY KEY, backend text, spec blob, created_at timestamp, updated_at timestamp, version bigint)`. Idempotent",
+        "Implement `ListClusters / GetCluster / PutCluster / DeleteCluster` on `internal/meta/cassandra/store.go`. `PutCluster` uses LWT `IF NOT EXISTS` for insert and `IF version = ?` for update — LWT-on-LWT pattern per CLAUDE.md gotcha",
+        "`PutCluster` on stale Version returns `meta.ErrClusterVersionMismatch`",
+        "Cassandra integration test (`internal/meta/cassandra/store_integration_test.go`, build tag `integration`) runs `caseClusterRegistry` against testcontainers Cassandra",
+        "Typecheck passes",
+        "Tests pass (memory contract still green; `make test-integration` green)"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "TiKV backend ClusterRegistry CRUD",
+      "description": "As a developer, I want the TiKV meta backend to persist the cluster registry so the TiKV-backed gateway has parity.",
+      "acceptanceCriteria": [
+        "Add cluster_registry key encoding to `internal/meta/tikv/keys.go`: prefix `clusters/<id>` (variable-length string segment via FoundationDB-style byte-stuffing per `keys.md`). Schema-additive",
+        "Implement `ListClusters / GetCluster / PutCluster / DeleteCluster` on `internal/meta/tikv/`. `PutCluster` uses pessimistic txn (`Begin → LockKeys → Get → CAS-on-Version → Set → Commit`) — same shape as `SetBucketVersioning` per CLAUDE.md gotcha",
+        "Early-return CAS-reject path calls `txn.Rollback()` explicitly — no LockKeys lease leak per CLAUDE.md gotcha",
+        "TiKV contract test passes (`caseClusterRegistry` runs against all 3 backends)",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Admin API GET/POST/DELETE /admin/v1/storage/clusters",
+      "description": "As an operator, I want HTTP endpoints to list, register, and de-register cluster catalogue entries so I can add a new RADOS cluster without restarting the gateway.",
+      "acceptanceCriteria": [
+        "Add `internal/adminapi/storage_clusters.go` with three handlers wired into the router: `handleListClusters` (GET /admin/v1/storage/clusters), `handleCreateCluster` (POST /admin/v1/storage/clusters), `handleDeleteCluster` (DELETE /admin/v1/storage/clusters/{id})",
+        "POST request body shape: `{id, backend, spec}` JSON. Validates `backend ∈ {rados, s3}`, `id` matches `[a-z0-9-]{1,64}`, `spec` is well-formed JSON and non-empty. Format-only — no dial-test",
+        "POST conflict (id already exists) → 409 `ClusterAlreadyExists` (new APIError sentinel)",
+        "DELETE on missing → 404 `NoSuchCluster`",
+        "DELETE on cluster referenced by a `ClassSpec.Cluster` in the running config → 409 `ClusterReferenced` with response body `{referenced_by: [\"STANDARD\", \"COLD\"]}` (the storage class names that map to the cluster). Use in-memory `Backend.classes` map snapshot — no manifest scan",
+        "GET list returns `[{id, backend, created_at, updated_at, spec}]` sorted by id",
+        "Audit-log integration: handlers call `s3api.SetAuditOverride(ctx, action, resource, bucket, principal)` with `action=\"admin:CreateCluster\"|\"DeleteCluster\"|\"ListClusters\"`, `resource=\"cluster:<id>\"`, `bucket=\"-\"` per CLAUDE.md admin audit pattern",
+        "OpenAPI contract `internal/adminapi/openapi.yaml` updated with the three endpoints",
+        "Unit tests `internal/adminapi/storage_clusters_test.go`: happy path (POST → GET → DELETE → GET-after-delete = 404); validation (malformed JSON → 400, unknown backend → 400, id pattern → 400); conflicts (POST-twice → 409, DELETE on referenced → 409 with `referenced_by`)",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "RADOS Backend registry watcher + hot-reload",
+      "description": "As an operator, I want the running `rados.Backend` to pick up cluster catalogue changes within one poll interval — lazy-dial on add, safe-drain on remove — without restarting the gateway.",
+      "acceptanceCriteria": [
+        "Add `internal/data/rados/registry_watcher.go`: `RegistryWatcher` struct wraps `meta.Store` reference; `Start(ctx)` spawns a polling goroutine (every replica polls — diff is idempotent, no leader needed). Poll cadence via `STRATA_CLUSTER_REGISTRY_INTERVAL` (default 30s, clamped [5s, 5m]) read once at watcher construction",
+        "On each tick: compute set-diff against `Backend.clusters` map under `b.mu`. Added → merge spec, `connFor` lazy-dials on next traffic. Removed → close cached conn + ioctxes under lock, remove from map. Updated (same id, bumped Version) → replace + re-dial on next traffic",
+        "Watcher honours `ctx.Done` — exits cleanly on `Backend.Close`",
+        "Add `Close(ctx) error` to `data.Backend` interface (idempotent; memory backend Close is noop; rados backend Close drains pool + stops watcher; s3 backend Close drops the client)",
+        "Initial sync: `rados.New(cfg)` fetches the registry once synchronously via `meta.ListClusters`, populates `Backend.clusters` from it. If registry empty, `Backend.clusters` is empty; subsequent RADOS traffic fails fast with `unknown cluster` until operator POSTs at least one entry. Gateway starts cleanly + admin API works",
+        "Wire `cfg.Meta` in `internal/serverapp/serverapp.go::buildDataBackend` after `buildMetaStore` runs",
+        "Unit test `internal/data/rados/registry_watcher_test.go`: fake `meta.Store` returns 3 clusters → tick → `backend.clusters` has 3 entries. Fake returns 2 (one removed) → tick → 2 entries, removed-cluster's cached conn closed. Fake returns 4 (one added) → tick → 4 entries. Race-detector clean",
+        "Goroutine leak test: `Backend.Close(ctx)` cancels the watcher; assert no leak via `runtime.NumGoroutine()` baseline + delta within tolerance",
+        "Prometheus counter `strata_cluster_registry_changes_total{op=\"add\"|\"remove\"|\"update\"}` exported on the default registry — incremented on each watcher reconciliation",
+        "Reference doc `docs/site/content/reference/_index.md` gains `STRATA_CLUSTER_REGISTRY_INTERVAL` entry",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Retire STRATA_RADOS_CLUSTERS env path",
+      "description": "As a developer, I want the legacy env-based cluster config fully removed so there is exactly ONE source of truth — the registry.",
+      "acceptanceCriteria": [
+        "Remove `Clusters` field from `internal/config/config.go` `Config.RADOS` struct AND the `\"STRATA_RADOS_CLUSTERS\": \"rados.clusters\"` entry from the koanf env-map",
+        "Remove `cfg.RADOS.Clusters` argument from `datarados.New(...)` call in `internal/serverapp/serverapp.go::buildDataBackend`",
+        "Remove `ParseClusters` / `BuildClusters` / `ValidateClusterRefs` from `internal/data/rados/clusters.go` if they no longer have callers; keep `ClusterSpec` struct (still used by the registry + ioctx path)",
+        "Update existing tests + examples that lean on `STRATA_RADOS_CLUSTERS` to pre-seed the in-memory ClusterRegistry via `meta.Store.PutCluster` directly",
+        "Update `deploy/docker/docker-compose.yml` + `deploy/docker/docker-compose.ci.yml` to drop `STRATA_RADOS_CLUSTERS` from the strata service env; document new bootstrap path (POST via admin API after gateway start)",
+        "Update `scripts/s3-tests/run.sh` + `scripts/s3-tests/README.md` if they reference the env var; switch to admin API POST in the smoke harness",
+        "`make smoke` still passes — smoke harness uses admin API POST in startup hook to register the test cluster",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Docs + ROADMAP close-flip",
+      "description": "As a developer, I want operator-facing docs + the ROADMAP P2 entry flipped in the same commit when the cycle closes.",
+      "acceptanceCriteria": [
+        "Add `docs/site/content/best-practices/dynamic-clusters.md` covering: catalogue shape (`ClusterRegistry` schema), admin API curl examples (POST register, DELETE drain, GET list), watcher behaviour (poll interval, lazy-dial-on-add, safe-drain-on-remove), bootstrap workflow (POST first cluster via admin API after gateway starts), DELETE-when-referenced behaviour (409 `ClusterReferenced`), per-storage-class routing via `[rados] classes` mapping + `ClassSpec.Cluster`, audit + observability cross-links",
+        "Update `docs/site/content/best-practices/_index.md` table with the new page row",
+        "Reference doc `docs/site/content/reference/_index.md` already gained `STRATA_CLUSTER_REGISTRY_INTERVAL` in US-005; add admin API curl examples here; REMOVE `STRATA_RADOS_CLUSTERS` row",
+        "ROADMAP.md close-flip in the same commit per CLAUDE.md Roadmap maintenance rule: `~~**P2 — Dynamic RADOS / S3 cluster registry + zero-downtime add.**~~ — **Done.** ... (commit `<pending>`)`",
+        "File new P2 ROADMAP entry 'S3 backend per-instance lifecycle + cluster registry consumer' BEFORE flipping the headline (per CLAUDE.md 'Discovering a new gap' rule) — S3 watcher consumer is intentionally deferred",
+        "Delete `tasks/prd-dynamic-clusters.md` per CLAUDE.md PRD lifecycle rule (Ralph snapshot is the canonical record)",
+        "`make docs-build` clean (Hugo strict-ref resolution catches dangling refs)",
+        "Closing-SHA backfill follow-up commit on main per established pattern",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": ""
+    }
+  ]
+}
