@@ -12,7 +12,6 @@ import (
 
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
-	"github.com/danchupin/strata/internal/meta/storetest"
 )
 
 // newTestStore returns a Store backed by an in-process memBackend so the
@@ -3067,16 +3066,5 @@ func TestLockerNilStore(t *testing.T) {
 	if l := NewLocker(nil); l != nil {
 		t.Fatalf("nil store: got non-nil locker")
 	}
-}
-
-// TestTiKVClusterRegistry runs the shared cluster-registry contract case
-// (US-003) against the in-process memBackend. The integration suite
-// (TestTiKVStoreContract) covers the real PD+TiKV path indirectly via
-// storetest.Run once that suite picks the case up; this unit-level call
-// is the parity oracle.
-func TestTiKVClusterRegistry(t *testing.T) {
-	s := newTestStore(t)
-	t.Cleanup(func() { _ = s.Close() })
-	storetest.CaseClusterRegistry(t, s)
 }
 

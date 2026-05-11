@@ -72,21 +72,17 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		}
 	}()
 
+	dataBackend, err := buildDataBackend(cfg, logger, tracerProvider)
+	if err != nil {
+		return fmt.Errorf("data backend: %w", err)
+	}
+	defer dataBackend.Close()
+
 	metaStore, err := buildMetaStore(cfg, logger, tracerProvider)
 	if err != nil {
 		return fmt.Errorf("meta store: %w", err)
 	}
 	defer metaStore.Close()
-
-	dataBackend, err := buildDataBackend(cfg, logger, tracerProvider, metaStore)
-	if err != nil {
-		return fmt.Errorf("data backend: %w", err)
-	}
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = dataBackend.Close(shutdownCtx)
-	}()
 
 	mode, err := auth.ParseMode(cfg.Auth.Mode)
 	if err != nil {
@@ -345,7 +341,7 @@ func workerNames(ws []workers.Worker) string {
 	return strings.Join(names, ",")
 }
 
-func buildDataBackend(cfg *config.Config, logger *slog.Logger, tp *strataotel.Provider, metaStore meta.Store) (data.Backend, error) {
+func buildDataBackend(cfg *config.Config, logger *slog.Logger, tp *strataotel.Provider) (data.Backend, error) {
 	switch cfg.DataBackend {
 	case "memory":
 		return datamem.New(), nil
@@ -354,15 +350,21 @@ func buildDataBackend(cfg *config.Config, logger *slog.Logger, tp *strataotel.Pr
 		if err != nil {
 			return nil, err
 		}
+		clusters, err := datarados.ParseClusters(cfg.RADOS.Clusters)
+		if err != nil {
+			return nil, err
+		}
 		return datarados.New(datarados.Config{
-			Pool:            cfg.RADOS.Pool,
-			Namespace:       cfg.RADOS.Namespace,
-			Classes:         classes,
-			Logger:          logger,
-			Metrics:         metrics.RADOSObserver{},
-			Tracer:          tp.Tracer("strata.data.rados"),
-			Catalog:         &metaCatalogAdapter{store: metaStore},
-			RegistryMetrics: metrics.RADOSRegistryObserver{},
+			ConfigFile: cfg.RADOS.ConfigFile,
+			User:       cfg.RADOS.User,
+			Keyring:    cfg.RADOS.Keyring,
+			Pool:       cfg.RADOS.Pool,
+			Namespace:  cfg.RADOS.Namespace,
+			Classes:    classes,
+			Clusters:   clusters,
+			Logger:     logger,
+			Metrics:    metrics.RADOSObserver{},
+			Tracer:     tp.Tracer("strata.data.rados"),
 		})
 	default:
 		return nil, errors.New("unknown data backend")
@@ -541,31 +543,6 @@ func buildMetaStore(cfg *config.Config, logger *slog.Logger, tp *strataotel.Prov
 	}
 }
 
-// metaCatalogAdapter bridges meta.Store onto datarados.CatalogReader so the
-// rados package stays free of an internal/meta import (cycle: internal/meta
-// imports internal/data). The adapter is constructed here once and handed to
-// datarados.New via Config.Catalog.
-type metaCatalogAdapter struct {
-	store meta.Store
-}
-
-func (m *metaCatalogAdapter) ListClusters(ctx context.Context) ([]datarados.CatalogEntry, error) {
-	rows, err := m.store.ListClusters(ctx)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]datarados.CatalogEntry, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, datarados.CatalogEntry{
-			ID:      r.ID,
-			Backend: r.Backend,
-			Spec:    append([]byte(nil), r.Spec...),
-			Version: r.Version,
-		})
-	}
-	return out, nil
-}
-
 // parseTiKVEndpoints splits a comma-separated PD endpoint list, trims
 // whitespace, and drops empty entries. The koanf env provider does not
 // auto-split slice values (it stores the raw string), so we do the split
@@ -737,6 +714,7 @@ func radosSettings(cfg *config.Config) adminapi.RADOSSettings {
 		Pool:       cfg.RADOS.Pool,
 		Namespace:  cfg.RADOS.Namespace,
 		Classes:    cfg.RADOS.Classes,
+		Clusters:   cfg.RADOS.Clusters,
 	}
 }
 

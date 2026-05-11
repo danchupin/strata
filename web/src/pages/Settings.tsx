@@ -337,6 +337,10 @@ function BackendsTab({ s }: { s: SettingsResponse }) {
               label="Storage classes"
               value={s.backends.rados.classes || <span className="text-muted-foreground">—</span>}
             />
+            <KV
+              label="Clusters"
+              value={s.backends.rados.clusters || <span className="text-muted-foreground">single</span>}
+            />
           </CardContent>
         </Card>
       )}

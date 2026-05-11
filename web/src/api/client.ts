@@ -1515,6 +1515,7 @@ export interface RADOSSettings {
   pool: string;
   namespace?: string;
   classes?: string;
+  clusters?: string;
 }
 
 export interface TiKVSettings {

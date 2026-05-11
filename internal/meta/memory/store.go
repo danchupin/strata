@@ -64,7 +64,6 @@ type Store struct {
 	// rewriter (US-049) to detect and convert pre-existing JSON rows.
 	objectManifestRaw map[manifestKey][]byte
 	adminJobs      map[string]*meta.AdminJob
-	clusters       map[string]*meta.ClusterRegistryEntry
 	locker         *Locker
 }
 
@@ -152,7 +151,6 @@ func New() *Store {
 		reshardJobs:    make(map[uuid.UUID]*meta.ReshardJob),
 		objectManifestRaw: make(map[manifestKey][]byte),
 		adminJobs:      make(map[string]*meta.AdminJob),
-		clusters:       make(map[string]*meta.ClusterRegistryEntry),
 		locker:         NewLocker(),
 	}
 }
@@ -2622,85 +2620,6 @@ func (s *Store) UpdateAdminJob(ctx context.Context, job *meta.AdminJob) error {
 }
 
 func (s *Store) Close() error { return nil }
-
-func cloneClusterEntry(e *meta.ClusterRegistryEntry) *meta.ClusterRegistryEntry {
-	cp := *e
-	if e.Spec != nil {
-		cp.Spec = append([]byte(nil), e.Spec...)
-	}
-	return &cp
-}
-
-func (s *Store) ListClusters(ctx context.Context) ([]*meta.ClusterRegistryEntry, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if len(s.clusters) == 0 {
-		return nil, nil
-	}
-	out := make([]*meta.ClusterRegistryEntry, 0, len(s.clusters))
-	for _, e := range s.clusters {
-		out = append(out, cloneClusterEntry(e))
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out, nil
-}
-
-func (s *Store) GetCluster(ctx context.Context, id string) (*meta.ClusterRegistryEntry, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	e, ok := s.clusters[id]
-	if !ok {
-		return nil, meta.ErrClusterNotFound
-	}
-	return cloneClusterEntry(e), nil
-}
-
-func (s *Store) PutCluster(ctx context.Context, e *meta.ClusterRegistryEntry) error {
-	if e == nil || e.ID == "" {
-		return meta.ErrClusterNotFound
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := time.Now().UTC()
-	cur, ok := s.clusters[e.ID]
-	row := *e
-	if row.Spec != nil {
-		row.Spec = append([]byte(nil), row.Spec...)
-	}
-	if !ok {
-		if row.CreatedAt.IsZero() {
-			row.CreatedAt = now
-		}
-		row.UpdatedAt = now
-		row.Version = 1
-		s.clusters[e.ID] = &row
-		e.CreatedAt = row.CreatedAt
-		e.UpdatedAt = row.UpdatedAt
-		e.Version = row.Version
-		return nil
-	}
-	if e.Version != cur.Version {
-		return meta.ErrClusterVersionMismatch
-	}
-	row.CreatedAt = cur.CreatedAt
-	row.UpdatedAt = now
-	row.Version = cur.Version + 1
-	s.clusters[e.ID] = &row
-	e.CreatedAt = row.CreatedAt
-	e.UpdatedAt = row.UpdatedAt
-	e.Version = row.Version
-	return nil
-}
-
-func (s *Store) DeleteCluster(ctx context.Context, id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.clusters[id]; !ok {
-		return meta.ErrClusterNotFound
-	}
-	delete(s.clusters, id)
-	return nil
-}
 
 // MetaHealth returns a single-node report describing the in-process memory
 // backend. Used for /admin/v1/storage/meta in dev / smoke deployments.

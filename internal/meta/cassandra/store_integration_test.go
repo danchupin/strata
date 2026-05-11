@@ -66,14 +66,6 @@ func TestCassandraStoreContract(t *testing.T) {
 	}
 
 	storetest.Run(t, newStore)
-
-	// Cluster-registry CRUD lives outside the default Run cases because
-	// US-001 stubbed the cassandra/tikv impls; US-002 wires the real CAS
-	// path here so the CassandraIntegration job exercises it without
-	// flipping it on for every backend simultaneously.
-	t.Run("ClusterRegistry", func(t *testing.T) {
-		storetest.CaseClusterRegistry(t, newStore(t))
-	})
 }
 
 // TestCassandraNullSentinelOnDisk regression-locks the cassandra timeuuid

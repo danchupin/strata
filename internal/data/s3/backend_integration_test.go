@@ -88,7 +88,7 @@ func TestPutStreams100MiBBoundedMemory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open backend: %v", err)
 	}
-	t.Cleanup(func() { _ = b.Close(context.Background()) })
+	t.Cleanup(func() { _ = b.Close() })
 
 	const size = int64(100 * 1024 * 1024)
 	r := io.LimitReader(rand.Reader, size)
@@ -203,7 +203,7 @@ func TestPutAbortsOnContextCancel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open backend: %v", err)
 	}
-	t.Cleanup(func() { _ = b.Close(context.Background()) })
+	t.Cleanup(func() { _ = b.Close() })
 
 	uploadCtx, cancel := context.WithCancel(ctx)
 	cancel() // cancel before upload starts
@@ -280,7 +280,7 @@ func TestGetRangeReads1KiBFrom100MiB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open backend: %v", err)
 	}
-	t.Cleanup(func() { _ = b.Close(context.Background()) })
+	t.Cleanup(func() { _ = b.Close() })
 
 	// Build a deterministic body so we can verify the range bytes
 	// exactly. mathrand seeded by zero produces a reproducible stream.
@@ -374,7 +374,7 @@ func TestGetReturnsErrNotFoundForMissingKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open backend: %v", err)
 	}
-	t.Cleanup(func() { _ = b.Close(context.Background()) })
+	t.Cleanup(func() { _ = b.Close() })
 
 	if _, err := b.Get(ctx, "nope"); !errors.Is(err, data.ErrNotFound) {
 		t.Fatalf("Get missing: want data.ErrNotFound, got %v", err)
@@ -434,7 +434,7 @@ func TestDeleteBatchUnversionedSingleHTTPCall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open backend: %v", err)
 	}
-	t.Cleanup(func() { _ = b.Close(context.Background()) })
+	t.Cleanup(func() { _ = b.Close() })
 
 	admin := newAdminClient(endpoint, username, password)
 	refs := make([]s3backend.ObjectRef, count)
@@ -522,7 +522,7 @@ func TestDeleteBatchVersionedNoDeleteMarkers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open backend: %v", err)
 	}
-	t.Cleanup(func() { _ = b.Close(context.Background()) })
+	t.Cleanup(func() { _ = b.Close() })
 
 	admin := newAdminClient(endpoint, username, password)
 	refs := make([]s3backend.ObjectRef, count)
@@ -612,7 +612,7 @@ func TestDeleteBatchMixedVersionIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open backend: %v", err)
 	}
-	t.Cleanup(func() { _ = b.Close(context.Background()) })
+	t.Cleanup(func() { _ = b.Close() })
 
 	admin := newAdminClient(endpoint, username, password)
 	refs := make([]s3backend.ObjectRef, count)
@@ -770,7 +770,7 @@ func TestOpenProbeLeavesBucketCleanOnVersioned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open backend: %v", err)
 	}
-	t.Cleanup(func() { _ = b.Close(context.Background()) })
+	t.Cleanup(func() { _ = b.Close() })
 
 	admin := newAdminClient(endpoint, username, password)
 	versions, err := admin.ListObjectVersions(ctx, &awss3.ListObjectVersionsInput{Bucket: ptr(bucket)})
@@ -827,7 +827,7 @@ func TestDeleteObjectIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open backend: %v", err)
 	}
-	t.Cleanup(func() { _ = b.Close(context.Background()) })
+	t.Cleanup(func() { _ = b.Close() })
 
 	if err := b.DeleteObject(ctx, "never-existed", ""); err != nil {
 		t.Fatalf("DeleteObject on missing key: want nil, got %v", err)
@@ -879,7 +879,7 @@ func TestPutChunksGetChunksDeleteRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open backend: %v", err)
 	}
-	t.Cleanup(func() { _ = b.Close(context.Background()) })
+	t.Cleanup(func() { _ = b.Close() })
 
 	// Deterministic body so range-read assertion can verify byte-exact match.
 	body := make([]byte, 1024)
@@ -1005,7 +1005,7 @@ func TestPutChunksGetChunksRoundTripAllSSEModes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("open backend: %v", err)
 			}
-			t.Cleanup(func() { _ = b.Close(context.Background()) })
+			t.Cleanup(func() { _ = b.Close() })
 
 			payload := []byte("US-013 round-trip payload " + tc.mode)
 			m, err := b.PutChunks(ctx, bytes.NewReader(payload), "STANDARD")

@@ -15,10 +15,6 @@ func TestMemoryStoreContract(t *testing.T) {
 	storetest.Run(t, func(t *testing.T) meta.Store { return memory.New() })
 }
 
-func TestMemoryClusterRegistry(t *testing.T) {
-	storetest.CaseClusterRegistry(t, memory.New())
-}
-
 // TestMemoryBucketStatsHotPath verifies the PutObject / DeleteObject /
 // CompleteMultipartUpload paths bump the live counter on the memory backend
 // (US-004). Cassandra + TiKV hot-path wiring lands in US-005.

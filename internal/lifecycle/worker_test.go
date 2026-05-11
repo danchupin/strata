@@ -121,7 +121,7 @@ func (b *multiClusterBackend) Delete(ctx context.Context, m *data.Manifest) erro
 	return nil
 }
 
-func (b *multiClusterBackend) Close(context.Context) error { return nil }
+func (b *multiClusterBackend) Close() error { return nil }
 
 func (b *multiClusterBackend) clusterChunkCount(cluster string) int {
 	b.mu.Lock()
@@ -293,7 +293,7 @@ func (b *slowDataBackend) Delete(ctx context.Context, m *data.Manifest) error {
 	return nil
 }
 
-func (b *slowDataBackend) Close(context.Context) error { return nil }
+func (b *slowDataBackend) Close() error { return nil }
 
 // TestWorker_TransitionConcurrency seeds a bucket with N objects matching a
 // transition rule, runs the worker with Concurrency=32, and asserts wall-clock

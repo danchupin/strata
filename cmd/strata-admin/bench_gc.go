@@ -63,7 +63,7 @@ func (a *app) cmdBenchGC(ctx context.Context, jsonOut bool, args []string) error
 	if err != nil {
 		return fmt.Errorf("data backend: %w", err)
 	}
-	defer backend.Close(context.Background())
+	defer backend.Close()
 
 	chunks := seedGCChunks(*entries, *cluster, *pool)
 	if err := store.EnqueueChunkDeletion(ctx, *region, chunks); err != nil {

@@ -90,7 +90,7 @@ func (b *Backend) Delete(ctx context.Context, m *data.Manifest) error {
 	return nil
 }
 
-func (b *Backend) Close(context.Context) error { return nil }
+func (b *Backend) Close() error { return nil }
 
 // DataHealth implements data.HealthProbe — returns a single in-process pool
 // row whose BytesUsed is the sum of currently-held chunk bytes (process-RSS

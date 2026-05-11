@@ -218,14 +218,6 @@ var (
 		[]string{"table", "bucket", "shard"},
 	)
 
-	ClusterRegistryChangesTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "strata_cluster_registry_changes_total",
-			Help: "RADOS cluster registry reconciliations applied by the in-process watcher, partitioned by op (add|remove|update). One increment per cluster touched per tick.",
-		},
-		[]string{"op"},
-	)
-
 	QuotaReconcileDriftBytes = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "strata_quota_reconcile_drift_bytes",
@@ -259,7 +251,6 @@ func Register() {
 		OTelRingbufTraces,
 		OTelRingbufEvicted,
 		CassandraLWTConflictsTotal,
-		ClusterRegistryChangesTotal,
 		QuotaReconcileDriftBytes,
 	)
 }
@@ -387,18 +378,6 @@ func (RADOSObserver) ObserveOp(pool, op string, duration time.Duration, err erro
 		op = "unknown"
 	}
 	RADOSOpDuration.WithLabelValues(pool, op).Observe(duration.Seconds())
-}
-
-// RADOSRegistryObserver implements the rados.RegistryMetrics interface;
-// increments strata_cluster_registry_changes_total per watcher
-// reconciliation. op ∈ {add, remove, update}.
-type RADOSRegistryObserver struct{}
-
-func (RADOSRegistryObserver) IncRegistryChange(op string, n int) {
-	if op == "" || n <= 0 {
-		return
-	}
-	ClusterRegistryChangesTotal.WithLabelValues(op).Add(float64(n))
 }
 
 // GCObserver implements the gc.Metrics interface. SetQueueDepth updates the

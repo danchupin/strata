@@ -190,7 +190,7 @@ func (f *fakeLifecycleBackend) Delete(ctx context.Context, m *data.Manifest) err
 	return f.inner.Delete(ctx, m)
 }
 
-func (f *fakeLifecycleBackend) Close(ctx context.Context) error { return f.inner.Close(ctx) }
+func (f *fakeLifecycleBackend) Close() error { return f.inner.Close() }
 
 func (f *fakeLifecycleBackend) PutBackendLifecycle(ctx context.Context, bucketPrefix string, rules []data.LifecycleRule) ([]string, error) {
 	f.mu.Lock()
