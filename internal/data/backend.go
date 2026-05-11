@@ -10,7 +10,12 @@ type Backend interface {
 	PutChunks(ctx context.Context, r io.Reader, class string) (*Manifest, error)
 	GetChunks(ctx context.Context, m *Manifest, offset, length int64) (io.ReadCloser, error)
 	Delete(ctx context.Context, m *Manifest) error
-	Close() error
+	// Close releases backend resources. Implementations MUST be idempotent —
+	// the gateway invokes Close() during shutdown and benches call it from
+	// test cleanup; double-close must remain a no-op. Long-running
+	// backend-owned goroutines (e.g. the RADOS cluster registry watcher)
+	// stop here and honour ctx as a deadline.
+	Close(ctx context.Context) error
 }
 
 // MultipartBackend is the optional capability surface for data backends that

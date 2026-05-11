@@ -44,7 +44,7 @@ func (b *recordingBackend) Delete(_ context.Context, m *data.Manifest) error {
 	return nil
 }
 
-func (b *recordingBackend) Close() error { return nil }
+func (b *recordingBackend) Close(context.Context) error { return nil }
 
 func (b *recordingBackend) deleteCount(cluster string) int {
 	b.mu.Lock()
@@ -121,7 +121,7 @@ func (b *slowBackend) Delete(_ context.Context, _ *data.Manifest) error {
 	return nil
 }
 
-func (b *slowBackend) Close() error { return nil }
+func (b *slowBackend) Close(context.Context) error { return nil }
 
 // TestWorker_DrainConcurrency drives 1k entries with Concurrency=32 against
 // in-memory data + meta and asserts wall-clock < 4× the ideal-parallel time.

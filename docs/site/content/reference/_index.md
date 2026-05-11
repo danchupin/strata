@@ -26,3 +26,4 @@ not yet folded into the planned env-vars subpage:
 | `STRATA_USAGE_ROLLUP_INTERVAL` | `24h` | `--workers=usage-rollup` | [Quotas + billing]({{< ref "/best-practices/quotas-billing" >}}#usage-rollup-workersusage-rollup) |
 | `STRATA_RADOS_PUT_CONCURRENCY` | `32` (range `[1, 256]`) | gateway PUT path | [Parallel chunk PUT + GET]({{< ref "/architecture/benchmarks/parallel-chunks" >}}#tuning-knobs) |
 | `STRATA_RADOS_GET_PREFETCH` | `4` (range `[1, 64]`) | gateway GET path | [Parallel chunk PUT + GET]({{< ref "/architecture/benchmarks/parallel-chunks" >}}#tuning-knobs) |
+| `STRATA_CLUSTER_REGISTRY_INTERVAL` | `30s` (range `[5s, 5m]`) | rados backend in-process watcher | Cluster registry watcher poll cadence. Every gateway replica polls `meta.ListClusters` at this interval; added clusters lazy-dial on next traffic, removed clusters safely drain cached conn + ioctxes. Increments `strata_cluster_registry_changes_total{op=add|remove|update}` per reconciliation. |

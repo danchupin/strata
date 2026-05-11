@@ -688,7 +688,13 @@ func (b *Backend) Delete(ctx context.Context, m *data.Manifest) error {
 	return b.DeleteObject(ctx, m.BackendRef.Key, m.BackendRef.VersionID)
 }
 
-func (b *Backend) Close() error { return nil }
+// Close releases the SDK client handle. Idempotent; safe to call repeatedly.
+// The s3 SDK uses pooled net/http transports that GC cleanly when the client
+// reference drops, so dropping b.client is sufficient.
+func (b *Backend) Close(context.Context) error {
+	b.client = nil
+	return nil
+}
 
 // objectKey builds the backend object key. Format <bucket-uuid>/<object-
 // uuid> per US-009 — UUID-shaped prefix gives random distribution for

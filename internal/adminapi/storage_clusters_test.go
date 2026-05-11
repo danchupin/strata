@@ -29,7 +29,7 @@ func (b *refStubBackend) GetChunks(context.Context, *data.Manifest, int64, int64
 	return nil, nil
 }
 func (b *refStubBackend) Delete(context.Context, *data.Manifest) error { return nil }
-func (b *refStubBackend) Close() error                                 { return nil }
+func (b *refStubBackend) Close(context.Context) error                  { return nil }
 func (b *refStubBackend) ClassesUsingCluster(string) []string {
 	out := append([]string(nil), b.refs...)
 	sort.Strings(out)

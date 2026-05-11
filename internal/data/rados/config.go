@@ -26,6 +26,15 @@ type Config struct {
 	// Tracer, when set, emits one OTel child span per RADOS op. Cmd-layer
 	// plugs tracerProvider.Tracer("strata.data.rados"); nil disables.
 	Tracer trace.Tracer
+	// Catalog supplies the cluster_registry rows the RegistryWatcher
+	// polls for. Set by internal/serverapp from the live meta.Store via a
+	// thin adapter (the rados package cannot import internal/meta — cycle).
+	// Nil disables the watcher and falls back to the legacy Clusters map.
+	Catalog CatalogReader
+	// RegistryMetrics receives one IncRegistryChange call per watcher
+	// reconciliation. Cmd-layer plugs metrics.RADOSRegistryObserver{}; nil
+	// disables.
+	RegistryMetrics RegistryMetrics
 }
 
 // Metrics is the narrow interface RADOS observers implement. The cmd binary

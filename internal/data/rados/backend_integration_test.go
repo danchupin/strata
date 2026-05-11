@@ -51,7 +51,7 @@ func TestRADOSBackend(t *testing.T) {
 	if err != nil {
 		t.Skipf("cannot connect to ceph (probably no cluster running): %v", err)
 	}
-	t.Cleanup(func() { _ = be.Close() })
+	t.Cleanup(func() { _ = be.Close(context.Background()) })
 
 	t.Run("PutGetDelete", func(t *testing.T) {
 		ctx := context.Background()
