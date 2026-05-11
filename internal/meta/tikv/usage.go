@@ -40,6 +40,8 @@ type usageAggregatePayload struct {
 }
 
 func (s *Store) WriteUsageAggregate(ctx context.Context, agg meta.UsageAggregate) (err error) {
+	ctx, finish := s.observer.Start(ctx, "WriteUsageAggregate", "usage_aggregates")
+	defer func() { finish(err) }()
 	day := dayEpoch(agg.Day)
 	computed := agg.ComputedAt
 	if computed.IsZero() {
@@ -68,7 +70,9 @@ func (s *Store) WriteUsageAggregate(ctx context.Context, agg meta.UsageAggregate
 	return txn.Commit(ctx)
 }
 
-func (s *Store) ListUsageAggregates(ctx context.Context, bucketID uuid.UUID, storageClass string, dayFrom, dayTo time.Time) ([]meta.UsageAggregate, error) {
+func (s *Store) ListUsageAggregates(ctx context.Context, bucketID uuid.UUID, storageClass string, dayFrom, dayTo time.Time) (out []meta.UsageAggregate, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListUsageAggregates", "usage_aggregates")
+	defer func() { finish(err) }()
 	from := dayEpoch(dayFrom)
 	to := dayEpoch(dayTo)
 	// Empty storageClass means "all classes recorded for this bucket" — fan
@@ -82,7 +86,7 @@ func (s *Store) ListUsageAggregates(ctx context.Context, bucketID uuid.UUID, sto
 		}
 		classes = discovered
 	}
-	out := make([]meta.UsageAggregate, 0)
+	out = make([]meta.UsageAggregate, 0)
 	for _, cls := range classes {
 		prefix := UsageAggregateClassPrefix(bucketID, cls)
 		start := make([]byte, 0, len(prefix)+usageDaySuffixLen)
@@ -138,7 +142,9 @@ func (s *Store) ListUsageAggregates(ctx context.Context, bucketID uuid.UUID, sto
 	return out, nil
 }
 
-func (s *Store) ListUserUsage(ctx context.Context, userName string, dayFrom, dayTo time.Time) ([]meta.UsageAggregate, error) {
+func (s *Store) ListUserUsage(ctx context.Context, userName string, dayFrom, dayTo time.Time) (out []meta.UsageAggregate, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListUserUsage", "usage_aggregates")
+	defer func() { finish(err) }()
 	buckets, err := s.ListBuckets(ctx, userName)
 	if err != nil {
 		return nil, err
@@ -175,7 +181,7 @@ func (s *Store) ListUserUsage(ctx context.Context, userName string, dayFrom, day
 			}
 		}
 	}
-	out := make([]meta.UsageAggregate, 0, len(sums))
+	out = make([]meta.UsageAggregate, 0, len(sums))
 	for _, v := range sums {
 		out = append(out, v)
 	}

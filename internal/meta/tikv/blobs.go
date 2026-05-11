@@ -24,6 +24,8 @@ import (
 // handler string. Mirrors Cassandra's idempotent INSERT shape: last
 // writer wins, no LWT needed because the key is its own row.
 func (s *Store) setBucketBlob(ctx context.Context, bucketID uuid.UUID, kind string, blob []byte) (err error) {
+	ctx, finish := s.observer.Start(ctx, "SetBucketBlob:"+kind, "bucket_blobs")
+	defer func() { finish(err) }()
 	key := BucketBlobKey(bucketID, kind)
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
@@ -40,7 +42,9 @@ func (s *Store) setBucketBlob(ctx context.Context, bucketID uuid.UUID, kind stri
 // row exists (or the persisted blob is empty — mirrors Cassandra's
 // len(blob)==0 → ErrNoSuchX guard, which protects against the rare case
 // of a tombstoned row whose value column came back zero-length).
-func (s *Store) getBucketBlob(ctx context.Context, bucketID uuid.UUID, kind string, missing error) ([]byte, error) {
+func (s *Store) getBucketBlob(ctx context.Context, bucketID uuid.UUID, kind string, missing error) (out []byte, err error) {
+	ctx, finish := s.observer.Start(ctx, "GetBucketBlob:"+kind, "bucket_blobs")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return nil, err
@@ -59,6 +63,8 @@ func (s *Store) getBucketBlob(ctx context.Context, bucketID uuid.UUID, kind stri
 // deleteBucketBlob is idempotent — a delete against a missing key
 // returns nil.
 func (s *Store) deleteBucketBlob(ctx context.Context, bucketID uuid.UUID, kind string) (err error) {
+	ctx, finish := s.observer.Start(ctx, "DeleteBucketBlob:"+kind, "bucket_blobs")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return err
@@ -202,7 +208,9 @@ func (s *Store) SetBucketQuota(ctx context.Context, bucketID uuid.UUID, q meta.B
 	return s.setBucketBlob(ctx, bucketID, BlobQuota, blob)
 }
 
-func (s *Store) GetBucketQuota(ctx context.Context, bucketID uuid.UUID) (meta.BucketQuota, bool, error) {
+func (s *Store) GetBucketQuota(ctx context.Context, bucketID uuid.UUID) (q meta.BucketQuota, ok bool, err error) {
+	ctx, finish := s.observer.Start(ctx, "GetBucketQuota", "bucket_blobs")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return meta.BucketQuota{}, false, err
@@ -215,7 +223,7 @@ func (s *Store) GetBucketQuota(ctx context.Context, bucketID uuid.UUID) (meta.Bu
 	if !found || len(raw) == 0 {
 		return meta.BucketQuota{}, false, nil
 	}
-	q, err := meta.DecodeBucketQuota(raw)
+	q, err = meta.DecodeBucketQuota(raw)
 	if err != nil {
 		return meta.BucketQuota{}, false, err
 	}
@@ -227,6 +235,8 @@ func (s *Store) DeleteBucketQuota(ctx context.Context, bucketID uuid.UUID) error
 }
 
 func (s *Store) SetUserQuota(ctx context.Context, userName string, q meta.UserQuota) (err error) {
+	ctx, finish := s.observer.Start(ctx, "SetUserQuota", "user_quota")
+	defer func() { finish(err) }()
 	blob, err := meta.EncodeUserQuota(q)
 	if err != nil {
 		return err
@@ -242,7 +252,9 @@ func (s *Store) SetUserQuota(ctx context.Context, userName string, q meta.UserQu
 	return txn.Commit(ctx)
 }
 
-func (s *Store) GetUserQuota(ctx context.Context, userName string) (meta.UserQuota, bool, error) {
+func (s *Store) GetUserQuota(ctx context.Context, userName string) (q meta.UserQuota, ok bool, err error) {
+	ctx, finish := s.observer.Start(ctx, "GetUserQuota", "user_quota")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return meta.UserQuota{}, false, err
@@ -255,7 +267,7 @@ func (s *Store) GetUserQuota(ctx context.Context, userName string) (meta.UserQuo
 	if !found || len(raw) == 0 {
 		return meta.UserQuota{}, false, nil
 	}
-	q, err := meta.DecodeUserQuota(raw)
+	q, err = meta.DecodeUserQuota(raw)
 	if err != nil {
 		return meta.UserQuota{}, false, err
 	}
@@ -263,6 +275,8 @@ func (s *Store) GetUserQuota(ctx context.Context, userName string) (meta.UserQuo
 }
 
 func (s *Store) DeleteUserQuota(ctx context.Context, userName string) (err error) {
+	ctx, finish := s.observer.Start(ctx, "DeleteUserQuota", "user_quota")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return err
@@ -282,6 +296,8 @@ func (s *Store) DeleteUserQuota(ctx context.Context, userName string) (err error
 // the inventory namespace stays bounded.
 
 func (s *Store) SetBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string, blob []byte) (err error) {
+	ctx, finish := s.observer.Start(ctx, "SetBucketInventoryConfig", "inventory_configs")
+	defer func() { finish(err) }()
 	key := InventoryConfigKey(bucketID, configID)
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
@@ -294,7 +310,9 @@ func (s *Store) SetBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID
 	return txn.Commit(ctx)
 }
 
-func (s *Store) GetBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string) ([]byte, error) {
+func (s *Store) GetBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string) (out []byte, err error) {
+	ctx, finish := s.observer.Start(ctx, "GetBucketInventoryConfig", "inventory_configs")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return nil, err
@@ -311,6 +329,8 @@ func (s *Store) GetBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID
 }
 
 func (s *Store) DeleteBucketInventoryConfig(ctx context.Context, bucketID uuid.UUID, configID string) (err error) {
+	ctx, finish := s.observer.Start(ctx, "DeleteBucketInventoryConfig", "inventory_configs")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return err
@@ -322,7 +342,9 @@ func (s *Store) DeleteBucketInventoryConfig(ctx context.Context, bucketID uuid.U
 	return txn.Commit(ctx)
 }
 
-func (s *Store) ListBucketInventoryConfigs(ctx context.Context, bucketID uuid.UUID) (map[string][]byte, error) {
+func (s *Store) ListBucketInventoryConfigs(ctx context.Context, bucketID uuid.UUID) (out map[string][]byte, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListBucketInventoryConfigs", "inventory_configs")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return nil, err
@@ -333,15 +355,15 @@ func (s *Store) ListBucketInventoryConfigs(ctx context.Context, bucketID uuid.UU
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[string][]byte)
+	out = make(map[string][]byte)
 	for _, p := range pairs {
 		if len(p.Key) <= len(prefix) {
 			continue
 		}
 		body := p.Key[len(prefix):]
-		configID, _, err := readEscaped(body)
-		if err != nil {
-			return nil, fmt.Errorf("tikv: decode inventory key: %w", err)
+		configID, _, derr := readEscaped(body)
+		if derr != nil {
+			return nil, fmt.Errorf("tikv: decode inventory key: %w", derr)
 		}
 		if len(p.Value) == 0 {
 			continue

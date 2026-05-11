@@ -27,6 +27,32 @@ Cycle: ralph/complete-tracing
 - Verification: `go vet ./...`, `go test ./... -race`, `make docs-build`, `make smoke`. End-to-end Jaeger waterfall sanity check (manual against `make up-all` if available).
 
 
+## 2026-05-11 - US-002
+- Wired Tracer at internal/serverapp/serverapp.go::buildMetaStore tikv case via tp.Tracer("strata.meta.tikv").
+- Wrapped every public Store method that hits TiKV with s.observer.Start("<Op>", "<table>") + deferred finish(err) returning a meta.tikv.<table>.<op> client-kind span. Files touched:
+  - buckets.go (Create/Get/Delete/List + updateBucket)
+  - objects.go (Put/Get/Delete/DeleteNullReplacement/SetObjectStorage — pre-existing in working tree before this iteration)
+  - multipart.go (Create/Get/List + Save/ListParts pre-existing; added Complete/Abort/Record/GetCompletion/UpdateSSEWrap)
+  - blobs.go (setBucketBlob/getBucketBlob/deleteBucketBlob + Quota helpers + Inventory configs)
+  - bucket_stats.go (Get/Bump)
+  - iam.go (8 methods)
+  - managed_policies.go (8 methods)
+  - audit.go (8 methods)
+  - queues.go (Enq/List/Ack across GC, Notify, NotifyDLQ, Replication, AccessLog)
+  - usage.go (Write/List/ListUser)
+  - reshard.go (Start/Get/Update/Complete/List)
+  - admin_jobs.go (Create/Get/Update)
+  - meta_health.go (MetaHealth)
+- Added internal/meta/tikv/observer_test.go covering: WrapOp emits meta.tikv.<table>.<op> client-kind child span with db.system=tikv + db.tikv.table + db.operation + strata.component=gateway, error path flips status Error + records the description, nil tracer is no-op, and end-to-end Store wiring via openWithBackendAndObserver emits meta.tikv.buckets.CreateBucket.
+- Quality checks: `go vet ./...` clean, `go build ./...` clean, `go test ./internal/meta/tikv/... -race` PASS, full `go test ./... -race` PASS.
+- **Learnings for future iterations:**
+  - Named-return + observer-Start pattern: signatures like `(out *T, err error)` plus `ctx, finish := s.observer.Start(ctx, op, table); defer func() { finish(err) }()` is the canonical TiKV wrapper. When converting an existing `(*T, error)` signature to named returns, downstream `out := make(...)` lines become `out = make(...)` — the compiler flags every such site with "no new variables on left side of :=". Same for `res := &meta.ListResult{}` → `res = &meta.ListResult{}`.
+  - For functions whose inner-scope `err :=` is needed for shadowing inside loops/branches, prefer renaming the inner var (`derr`, `serr`, `gerr`) over removing the named-return — keeps the defer recovery consistent.
+  - The `openWithBackendAndObserver` test helper unlocks contract-level observer wiring tests against the in-process memBackend without touching real PD.
+  - When a wrapper sits on top of `txn.Get` / `txn.Set` / `txn.Scan` that don't carry their own spans, the Store-level wrap is the only place spans surface for TiKV — there's no gocql-equivalent per-query hook.
+  - `s.observer.Start` chooses table names that map cleanly to Cassandra table parity where it exists (`buckets`, `objects`, `multipart`, `audit_log`, `iam_users`, `iam_access_keys`, `managed_policies`, `user_policies`, `gc_queue`, `notify_queue`, `notify_dlq`, `replication_queue`, `access_log_buffer`, `bucket_stats`, `bucket_blobs`, `user_quota`, `inventory_configs`, `usage_aggregates`, `reshard_jobs`, `admin_jobs`, `meta_health`, `multipart_completions`, `multipart_parts`).
+---
+
 ## 2026-05-11 - US-001
 - Added `internal/otel/component.go` exporting `AttrComponentKey="strata.component"` + `AttrComponentGateway` (gateway) + `AttrComponentWorker` (worker) attribute.KeyValue constants.
 - `internal/otel/middleware.go`: HTTP server span now stamps `strata.component=gateway` via the shared constant inline with the existing http.* attributes block.

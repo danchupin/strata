@@ -54,7 +54,9 @@ type gcRow struct {
 	EnqueuedAt time.Time `json:"e"`
 }
 
-func (s *Store) EnqueueChunkDeletion(ctx context.Context, region string, chunks []data.ChunkRef) error {
+func (s *Store) EnqueueChunkDeletion(ctx context.Context, region string, chunks []data.ChunkRef) (err error) {
+	ctx, finish := s.observer.Start(ctx, "EnqueueChunkDeletion", "gc_queue")
+	defer func() { finish(err) }()
 	if len(chunks) == 0 {
 		return nil
 	}
@@ -98,6 +100,8 @@ func (s *Store) ListGCEntries(ctx context.Context, region string, before time.Ti
 	return s.ListGCEntriesShard(ctx, region, 0, 1, before, limit)
 }
 
+// ListGCEntriesShard is the observer-instrumented variant.
+
 // ListGCEntriesShard reads the v2 (`s/qG/<region>/<shardID2BE>/...`)
 // prefix for every logical shard the runtime caller owns under
 // `gcOwnedLogicalShards(shardID, shardCount)` and returns up to `limit`
@@ -106,7 +110,9 @@ func (s *Store) ListGCEntries(ctx context.Context, region string, before time.Ti
 // topped up from the legacy `s/qg/<region>/...` region prefix (post-shard
 // filter). The legacy fallback drops automatically once dual-write flips
 // off.
-func (s *Store) ListGCEntriesShard(ctx context.Context, region string, shardID, shardCount int, before time.Time, limit int) ([]meta.GCEntry, error) {
+func (s *Store) ListGCEntriesShard(ctx context.Context, region string, shardID, shardCount int, before time.Time, limit int) (out []meta.GCEntry, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListGCEntriesShard", "gc_queue")
+	defer func() { finish(err) }()
 	if shardCount <= 0 {
 		shardCount = 1
 	}
@@ -122,7 +128,7 @@ func (s *Store) ListGCEntriesShard(ctx context.Context, region string, shardID, 
 	}
 	defer txn.Rollback()
 
-	out := make([]meta.GCEntry, 0, limit)
+	out = make([]meta.GCEntry, 0, limit)
 	seen := make(map[string]struct{}, limit)
 	addEntry := func(r gcRow, sid int) bool {
 		if _, ok := seen[r.OID]; ok {
@@ -203,7 +209,9 @@ func (s *Store) ListGCEntriesShard(ctx context.Context, region string, shardID, 
 	return out, nil
 }
 
-func (s *Store) AckGCEntry(ctx context.Context, region string, e meta.GCEntry) error {
+func (s *Store) AckGCEntry(ctx context.Context, region string, e meta.GCEntry) (err error) {
+	ctx, finish := s.observer.Start(ctx, "AckGCEntry", "gc_queue")
+	defer func() { finish(err) }()
 	tsNano := uint64(e.EnqueuedAt.UnixNano())
 	shardID := e.ShardID
 	if shardID < 0 || shardID >= meta.GCShardCount {
@@ -283,7 +291,9 @@ func decodeNotify(raw []byte) (meta.NotificationEvent, error) {
 	}, nil
 }
 
-func (s *Store) EnqueueNotification(ctx context.Context, evt *meta.NotificationEvent) error {
+func (s *Store) EnqueueNotification(ctx context.Context, evt *meta.NotificationEvent) (err error) {
+	ctx, finish := s.observer.Start(ctx, "EnqueueNotification", "notify_queue")
+	defer func() { finish(err) }()
 	if evt == nil {
 		return nil
 	}
@@ -293,8 +303,9 @@ func (s *Store) EnqueueNotification(ctx context.Context, evt *meta.NotificationE
 	if evt.EventTime.IsZero() {
 		evt.EventTime = time.Now().UTC()
 	}
-	raw, err := encodeNotify(evt)
-	if err != nil {
+	raw, encErr := encodeNotify(evt)
+	if encErr != nil {
+		err = encErr
 		return err
 	}
 	key := NotifyQueueKey(evt.BucketID, uint64(evt.EventTime.UnixNano()), evt.EventID)
@@ -309,7 +320,9 @@ func (s *Store) EnqueueNotification(ctx context.Context, evt *meta.NotificationE
 	return txn.Commit(ctx)
 }
 
-func (s *Store) ListPendingNotifications(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.NotificationEvent, error) {
+func (s *Store) ListPendingNotifications(ctx context.Context, bucketID uuid.UUID, limit int) (out []meta.NotificationEvent, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListPendingNotifications", "notify_queue")
+	defer func() { finish(err) }()
 	if limit <= 0 || limit > queueListLimitDefault {
 		limit = queueListLimitDefault
 	}
@@ -318,7 +331,7 @@ func (s *Store) ListPendingNotifications(ctx context.Context, bucketID uuid.UUID
 	if err != nil {
 		return nil, err
 	}
-	out := make([]meta.NotificationEvent, 0, len(pairs))
+	out = make([]meta.NotificationEvent, 0, len(pairs))
 	for _, p := range pairs {
 		evt, dErr := decodeNotify(p.Value)
 		if dErr != nil {
@@ -329,7 +342,9 @@ func (s *Store) ListPendingNotifications(ctx context.Context, bucketID uuid.UUID
 	return out, nil
 }
 
-func (s *Store) AckNotification(ctx context.Context, evt meta.NotificationEvent) error {
+func (s *Store) AckNotification(ctx context.Context, evt meta.NotificationEvent) (err error) {
+	ctx, finish := s.observer.Start(ctx, "AckNotification", "notify_queue")
+	defer func() { finish(err) }()
 	if evt.EventID == "" {
 		return nil
 	}
@@ -348,7 +363,9 @@ type notifyDLQRow struct {
 	EnqueuedAt time.Time `json:"eq"`
 }
 
-func (s *Store) EnqueueNotificationDLQ(ctx context.Context, entry *meta.NotificationDLQEntry) error {
+func (s *Store) EnqueueNotificationDLQ(ctx context.Context, entry *meta.NotificationDLQEntry) (err error) {
+	ctx, finish := s.observer.Start(ctx, "EnqueueNotificationDLQ", "notify_dlq")
+	defer func() { finish(err) }()
 	if entry == nil {
 		return nil
 	}
@@ -391,7 +408,9 @@ func (s *Store) EnqueueNotificationDLQ(ctx context.Context, entry *meta.Notifica
 	return txn.Commit(ctx)
 }
 
-func (s *Store) ListNotificationDLQ(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.NotificationDLQEntry, error) {
+func (s *Store) ListNotificationDLQ(ctx context.Context, bucketID uuid.UUID, limit int) (out []meta.NotificationDLQEntry, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListNotificationDLQ", "notify_dlq")
+	defer func() { finish(err) }()
 	if limit <= 0 || limit > queueListLimitDefault {
 		limit = queueListLimitDefault
 	}
@@ -400,7 +419,7 @@ func (s *Store) ListNotificationDLQ(ctx context.Context, bucketID uuid.UUID, lim
 	if err != nil {
 		return nil, err
 	}
-	out := make([]meta.NotificationDLQEntry, 0, len(pairs))
+	out = make([]meta.NotificationDLQEntry, 0, len(pairs))
 	for _, p := range pairs {
 		var row notifyDLQRow
 		if uErr := json.Unmarshal(p.Value, &row); uErr != nil {
@@ -449,7 +468,9 @@ type replicationRow struct {
 	StorageClass        string    `json:"sc,omitempty"`
 }
 
-func (s *Store) EnqueueReplication(ctx context.Context, evt *meta.ReplicationEvent) error {
+func (s *Store) EnqueueReplication(ctx context.Context, evt *meta.ReplicationEvent) (err error) {
+	ctx, finish := s.observer.Start(ctx, "EnqueueReplication", "replication_queue")
+	defer func() { finish(err) }()
 	if evt == nil {
 		return nil
 	}
@@ -488,7 +509,9 @@ func (s *Store) EnqueueReplication(ctx context.Context, evt *meta.ReplicationEve
 	return txn.Commit(ctx)
 }
 
-func (s *Store) ListPendingReplications(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.ReplicationEvent, error) {
+func (s *Store) ListPendingReplications(ctx context.Context, bucketID uuid.UUID, limit int) (out []meta.ReplicationEvent, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListPendingReplications", "replication_queue")
+	defer func() { finish(err) }()
 	if limit <= 0 || limit > queueListLimitDefault {
 		limit = queueListLimitDefault
 	}
@@ -497,7 +520,7 @@ func (s *Store) ListPendingReplications(ctx context.Context, bucketID uuid.UUID,
 	if err != nil {
 		return nil, err
 	}
-	out := make([]meta.ReplicationEvent, 0, len(pairs))
+	out = make([]meta.ReplicationEvent, 0, len(pairs))
 	for _, p := range pairs {
 		var row replicationRow
 		if uErr := json.Unmarshal(p.Value, &row); uErr != nil {
@@ -524,7 +547,9 @@ func (s *Store) ListPendingReplications(ctx context.Context, bucketID uuid.UUID,
 	return out, nil
 }
 
-func (s *Store) AckReplication(ctx context.Context, evt meta.ReplicationEvent) error {
+func (s *Store) AckReplication(ctx context.Context, evt meta.ReplicationEvent) (err error) {
+	ctx, finish := s.observer.Start(ctx, "AckReplication", "replication_queue")
+	defer func() { finish(err) }()
 	if evt.EventID == "" {
 		return nil
 	}
@@ -556,7 +581,9 @@ type accessLogRow struct {
 	VersionID    string    `json:"v,omitempty"`
 }
 
-func (s *Store) EnqueueAccessLog(ctx context.Context, entry *meta.AccessLogEntry) error {
+func (s *Store) EnqueueAccessLog(ctx context.Context, entry *meta.AccessLogEntry) (err error) {
+	ctx, finish := s.observer.Start(ctx, "EnqueueAccessLog", "access_log_buffer")
+	defer func() { finish(err) }()
 	if entry == nil {
 		return nil
 	}
@@ -601,7 +628,9 @@ func (s *Store) EnqueueAccessLog(ctx context.Context, entry *meta.AccessLogEntry
 	return txn.Commit(ctx)
 }
 
-func (s *Store) ListPendingAccessLog(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.AccessLogEntry, error) {
+func (s *Store) ListPendingAccessLog(ctx context.Context, bucketID uuid.UUID, limit int) (out []meta.AccessLogEntry, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListPendingAccessLog", "access_log_buffer")
+	defer func() { finish(err) }()
 	if limit <= 0 || limit > queueListLimitDefault {
 		limit = queueListLimitDefault
 	}
@@ -610,7 +639,7 @@ func (s *Store) ListPendingAccessLog(ctx context.Context, bucketID uuid.UUID, li
 	if err != nil {
 		return nil, err
 	}
-	out := make([]meta.AccessLogEntry, 0, len(pairs))
+	out = make([]meta.AccessLogEntry, 0, len(pairs))
 	for _, p := range pairs {
 		var row accessLogRow
 		if uErr := json.Unmarshal(p.Value, &row); uErr != nil {
@@ -643,7 +672,9 @@ func (s *Store) ListPendingAccessLog(ctx context.Context, bucketID uuid.UUID, li
 	return out, nil
 }
 
-func (s *Store) AckAccessLog(ctx context.Context, entry meta.AccessLogEntry) error {
+func (s *Store) AckAccessLog(ctx context.Context, entry meta.AccessLogEntry) (err error) {
+	ctx, finish := s.observer.Start(ctx, "AckAccessLog", "access_log_buffer")
+	defer func() { finish(err) }()
 	if entry.EventID == "" {
 		return nil
 	}

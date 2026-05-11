@@ -62,6 +62,8 @@ func decodeManagedPolicy(raw []byte) (*meta.ManagedPolicy, error) {
 // (LockKeys + Get + Set) so a duplicate Arn surfaces
 // ErrManagedPolicyAlreadyExists deterministically.
 func (s *Store) CreateManagedPolicy(ctx context.Context, p *meta.ManagedPolicy) (err error) {
+	ctx, finish := s.observer.Start(ctx, "CreateManagedPolicy", "managed_policies")
+	defer func() { finish(err) }()
 	if p == nil || p.Arn == "" {
 		return meta.ErrManagedPolicyNotFound
 	}
@@ -99,7 +101,9 @@ func (s *Store) CreateManagedPolicy(ctx context.Context, p *meta.ManagedPolicy) 
 }
 
 // GetManagedPolicy is a single optimistic Get against ManagedPolicyKey.
-func (s *Store) GetManagedPolicy(ctx context.Context, arn string) (*meta.ManagedPolicy, error) {
+func (s *Store) GetManagedPolicy(ctx context.Context, arn string) (out *meta.ManagedPolicy, err error) {
+	ctx, finish := s.observer.Start(ctx, "GetManagedPolicy", "managed_policies")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return nil, err
@@ -117,7 +121,9 @@ func (s *Store) GetManagedPolicy(ctx context.Context, arn string) (*meta.Managed
 
 // ListManagedPolicies range-scans the global ManagedPolicy prefix; pathPrefix
 // filter applied in-process — operator-scope cardinality is small.
-func (s *Store) ListManagedPolicies(ctx context.Context, pathPrefix string) ([]*meta.ManagedPolicy, error) {
+func (s *Store) ListManagedPolicies(ctx context.Context, pathPrefix string) (out []*meta.ManagedPolicy, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListManagedPolicies", "managed_policies")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return nil, err
@@ -127,11 +133,11 @@ func (s *Store) ListManagedPolicies(ctx context.Context, pathPrefix string) ([]*
 	if err != nil {
 		return nil, err
 	}
-	out := make([]*meta.ManagedPolicy, 0, len(pairs))
+	out = make([]*meta.ManagedPolicy, 0, len(pairs))
 	for _, kv := range pairs {
-		p, err := decodeManagedPolicy(kv.Value)
-		if err != nil {
-			return nil, err
+		p, derr := decodeManagedPolicy(kv.Value)
+		if derr != nil {
+			return nil, derr
 		}
 		if pathPrefix != "" && !strings.HasPrefix(p.Path, pathPrefix) {
 			continue
@@ -145,6 +151,8 @@ func (s *Store) ListManagedPolicies(ctx context.Context, pathPrefix string) ([]*
 // UpdateManagedPolicyDocument overwrites the Document blob and bumps
 // UpdatedAt under a pessimistic txn so concurrent rotates serialise.
 func (s *Store) UpdateManagedPolicyDocument(ctx context.Context, arn string, document []byte, updatedAt time.Time) (err error) {
+	ctx, finish := s.observer.Start(ctx, "UpdateManagedPolicyDocument", "managed_policies")
+	defer func() { finish(err) }()
 	if updatedAt.IsZero() {
 		updatedAt = time.Now().UTC()
 	}
@@ -184,6 +192,8 @@ func (s *Store) UpdateManagedPolicyDocument(ctx context.Context, arn string, doc
 // PolicyUser index. The inverse-index probe is a single-row scan (limit 1)
 // instead of a global ALLOW FILTERING-equivalent.
 func (s *Store) DeleteManagedPolicy(ctx context.Context, arn string) (err error) {
+	ctx, finish := s.observer.Start(ctx, "DeleteManagedPolicy", "managed_policies")
+	defer func() { finish(err) }()
 	key := ManagedPolicyKey(arn)
 	txn, err := s.kv.Begin(ctx, true)
 	if err != nil {
@@ -220,6 +230,8 @@ func (s *Store) DeleteManagedPolicy(ctx context.Context, arn string) (err error)
 // ErrManagedPolicyNotFound on missing referents,
 // ErrUserPolicyAlreadyAttached on duplicate.
 func (s *Store) AttachUserPolicy(ctx context.Context, userName, policyArn string) (err error) {
+	ctx, finish := s.observer.Start(ctx, "AttachUserPolicy", "user_policies")
+	defer func() { finish(err) }()
 	userKey := IAMUserKey(userName)
 	policyKey := ManagedPolicyKey(policyArn)
 	upKey := UserPolicyKey(userName, policyArn)
@@ -268,6 +280,8 @@ func (s *Store) AttachUserPolicy(ctx context.Context, userName, policyArn string
 
 // DetachUserPolicy removes both rows in one pessimistic txn.
 func (s *Store) DetachUserPolicy(ctx context.Context, userName, policyArn string) (err error) {
+	ctx, finish := s.observer.Start(ctx, "DetachUserPolicy", "user_policies")
+	defer func() { finish(err) }()
 	upKey := UserPolicyKey(userName, policyArn)
 	puKey := PolicyUserKey(policyArn, userName)
 	txn, err := s.kv.Begin(ctx, true)
@@ -298,14 +312,16 @@ func (s *Store) DetachUserPolicy(ctx context.Context, userName, policyArn string
 // ListPolicyUsers range-scans the inverse-index prefix (s/pus/<arn>\x00\x00)
 // in lex order (= userName ascending). ErrManagedPolicyNotFound when the
 // policy itself does not exist.
-func (s *Store) ListPolicyUsers(ctx context.Context, policyArn string) ([]string, error) {
+func (s *Store) ListPolicyUsers(ctx context.Context, policyArn string) (out []string, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListPolicyUsers", "user_policies")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return nil, err
 	}
 	defer txn.Rollback()
-	if _, found, err := txn.Get(ctx, ManagedPolicyKey(policyArn)); err != nil {
-		return nil, err
+	if _, found, gerr := txn.Get(ctx, ManagedPolicyKey(policyArn)); gerr != nil {
+		return nil, gerr
 	} else if !found {
 		return nil, meta.ErrManagedPolicyNotFound
 	}
@@ -314,12 +330,12 @@ func (s *Store) ListPolicyUsers(ctx context.Context, policyArn string) ([]string
 	if err != nil {
 		return nil, err
 	}
-	out := make([]string, 0, len(pairs))
+	out = make([]string, 0, len(pairs))
 	for _, p := range pairs {
 		body := p.Key[len(idxPrefix):]
-		userName, _, err := readEscaped(body)
-		if err != nil {
-			return nil, err
+		userName, _, derr := readEscaped(body)
+		if derr != nil {
+			return nil, derr
 		}
 		out = append(out, userName)
 	}
@@ -329,14 +345,16 @@ func (s *Store) ListPolicyUsers(ctx context.Context, policyArn string) ([]string
 
 // ListUserPolicies range-scans the per-user attachment prefix in lex order
 // (= policyArn ascending). ErrIAMUserNotFound when the user does not exist.
-func (s *Store) ListUserPolicies(ctx context.Context, userName string) ([]string, error) {
+func (s *Store) ListUserPolicies(ctx context.Context, userName string) (out []string, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListUserPolicies", "user_policies")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return nil, err
 	}
 	defer txn.Rollback()
-	if _, found, err := txn.Get(ctx, IAMUserKey(userName)); err != nil {
-		return nil, err
+	if _, found, gerr := txn.Get(ctx, IAMUserKey(userName)); gerr != nil {
+		return nil, gerr
 	} else if !found {
 		return nil, meta.ErrIAMUserNotFound
 	}
@@ -345,12 +363,12 @@ func (s *Store) ListUserPolicies(ctx context.Context, userName string) ([]string
 	if err != nil {
 		return nil, err
 	}
-	out := make([]string, 0, len(pairs))
+	out = make([]string, 0, len(pairs))
 	for _, p := range pairs {
 		body := p.Key[len(idxPrefix):]
-		policyArn, _, err := readEscaped(body)
-		if err != nil {
-			return nil, err
+		policyArn, _, derr := readEscaped(body)
+		if derr != nil {
+			return nil, derr
 		}
 		out = append(out, policyArn)
 	}

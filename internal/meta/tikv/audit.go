@@ -37,7 +37,9 @@ func auditDayFromEpoch(e uint32) time.Time {
 // EnqueueAudit appends one audit row. ttl > 0 stamps an ExpiresAt that
 // the sweeper / readers honour; ttl == 0 means "no expiry" (operator-
 // driven retention via DeleteAuditPartition).
-func (s *Store) EnqueueAudit(ctx context.Context, entry *meta.AuditEvent, ttl time.Duration) error {
+func (s *Store) EnqueueAudit(ctx context.Context, entry *meta.AuditEvent, ttl time.Duration) (err error) {
+	ctx, finish := s.observer.Start(ctx, "EnqueueAudit", "audit_log")
+	defer func() { finish(err) }()
 	if entry == nil {
 		return nil
 	}
@@ -104,7 +106,9 @@ func (s *Store) scanAuditRange(ctx context.Context, start, end []byte) ([]meta.A
 // further filters. The default 30-day window matches the default
 // retention so a fresh inspection still catches everything not yet
 // swept.
-func (s *Store) ListAudit(ctx context.Context, bucketID uuid.UUID, limit int) ([]meta.AuditEvent, error) {
+func (s *Store) ListAudit(ctx context.Context, bucketID uuid.UUID, limit int) (out []meta.AuditEvent, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListAudit", "audit_log")
+	defer func() { finish(err) }()
 	if limit <= 0 || limit > 1000 {
 		limit = 1000
 	}
@@ -133,7 +137,9 @@ func (s *Store) ListAudit(ctx context.Context, bucketID uuid.UUID, limit int) ([
 // either bound is zero; Continuation is the EventID of the last row on
 // the previous page; the next page's pagination token is the EventID of
 // the last row of the page when len(out) >= limit.
-func (s *Store) ListAuditFiltered(ctx context.Context, f meta.AuditFilter) ([]meta.AuditEvent, string, error) {
+func (s *Store) ListAuditFiltered(ctx context.Context, f meta.AuditFilter) (out []meta.AuditEvent, nextToken string, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListAuditFiltered", "audit_log")
+	defer func() { finish(err) }()
 	limit := f.Limit
 	if limit <= 0 || limit > 1000 {
 		limit = 1000
@@ -168,7 +174,7 @@ func (s *Store) ListAuditFiltered(ctx context.Context, f meta.AuditFilter) ([]me
 		}
 		return rows[i].EventID > rows[j].EventID
 	})
-	out := make([]meta.AuditEvent, 0, limit)
+	out = make([]meta.AuditEvent, 0, limit)
 	started := f.Continuation == ""
 	for _, e := range rows {
 		if !f.Start.IsZero() && e.Time.Before(f.Start) {
@@ -197,11 +203,11 @@ func (s *Store) ListAuditFiltered(ctx context.Context, f meta.AuditFilter) ([]me
 			break
 		}
 	}
-	next := ""
+	nextToken = ""
 	if len(out) >= limit {
-		next = out[len(out)-1].EventID
+		nextToken = out[len(out)-1].EventID
 	}
-	return out, next, nil
+	return out, nextToken, nil
 }
 
 // ListSlowQueries serves the US-003 slow-queries debug endpoint. The
@@ -210,7 +216,9 @@ func (s *Store) ListAuditFiltered(ctx context.Context, f meta.AuditFilter) ([]me
 // >= minMs and whose Time falls within the trailing `since` window.
 // Rows are sorted by TotalTimeMS desc; pagination uses EventID of the
 // last row as the next-page token.
-func (s *Store) ListSlowQueries(ctx context.Context, since time.Duration, minMs int, pageToken string) ([]meta.AuditEvent, string, error) {
+func (s *Store) ListSlowQueries(ctx context.Context, since time.Duration, minMs int, pageToken string) (out []meta.AuditEvent, nextToken string, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListSlowQueries", "audit_log")
+	defer func() { finish(err) }()
 	const limit = 100
 	if since <= 0 {
 		since = 15 * time.Minute
@@ -243,7 +251,7 @@ func (s *Store) ListSlowQueries(ctx context.Context, since time.Duration, minMs 
 		}
 		return filtered[i].EventID > filtered[j].EventID
 	})
-	out := make([]meta.AuditEvent, 0, limit)
+	out = make([]meta.AuditEvent, 0, limit)
 	started := pageToken == ""
 	for _, e := range filtered {
 		if !started {
@@ -257,11 +265,11 @@ func (s *Store) ListSlowQueries(ctx context.Context, since time.Duration, minMs 
 			break
 		}
 	}
-	next := ""
+	nextToken = ""
 	if len(out) >= limit {
-		next = out[len(out)-1].EventID
+		nextToken = out[len(out)-1].EventID
 	}
-	return out, next, nil
+	return out, nextToken, nil
 }
 
 // ListAuditPartitionsBefore returns every (bucket, day) partition whose
@@ -269,7 +277,9 @@ func (s *Store) ListSlowQueries(ctx context.Context, since time.Duration, minMs 
 // audit-export worker uses this to enumerate fully-aged partitions
 // ready for export+delete; it is independent of the retention sweeper
 // (which deletes by per-row ExpiresAt, not by partition age).
-func (s *Store) ListAuditPartitionsBefore(ctx context.Context, before time.Time) ([]meta.AuditPartition, error) {
+func (s *Store) ListAuditPartitionsBefore(ctx context.Context, before time.Time) (out []meta.AuditPartition, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListAuditPartitionsBefore", "audit_log")
+	defer func() { finish(err) }()
 	cutoffEpoch := auditDayEpoch(before)
 	rows, err := s.scanAuditRange(ctx, []byte(prefixAuditLog), prefixEnd([]byte(prefixAuditLog)))
 	if err != nil {
@@ -290,7 +300,7 @@ func (s *Store) ListAuditPartitionsBefore(ctx context.Context, before time.Time)
 			seen[k] = e.Bucket
 		}
 	}
-	out := make([]meta.AuditPartition, 0, len(seen))
+	out = make([]meta.AuditPartition, 0, len(seen))
 	for k, name := range seen {
 		if name == "" {
 			name = "-"
@@ -312,10 +322,12 @@ func (s *Store) ListAuditPartitionsBefore(ctx context.Context, before time.Time)
 
 // ReadAuditPartition returns every row in a single (bucket, day)
 // partition, sorted ascending by EventID for deterministic export.
-func (s *Store) ReadAuditPartition(ctx context.Context, bucketID uuid.UUID, day time.Time) ([]meta.AuditEvent, error) {
+func (s *Store) ReadAuditPartition(ctx context.Context, bucketID uuid.UUID, day time.Time) (rows []meta.AuditEvent, err error) {
+	ctx, finish := s.observer.Start(ctx, "ReadAuditPartition", "audit_log")
+	defer func() { finish(err) }()
 	dayEpoch := auditDayEpoch(day)
 	prefix := AuditLogDayPrefix(bucketID, dayEpoch)
-	rows, err := s.scanAuditRange(ctx, prefix, prefixEnd(prefix))
+	rows, err = s.scanAuditRange(ctx, prefix, prefixEnd(prefix))
 	if err != nil {
 		return nil, err
 	}
@@ -326,10 +338,12 @@ func (s *Store) ReadAuditPartition(ctx context.Context, bucketID uuid.UUID, day 
 // DeleteAuditPartition drops every row in the given (bucket, day)
 // partition. Issued by the audit-export worker after a successful
 // upload of the partition's contents.
-func (s *Store) DeleteAuditPartition(ctx context.Context, bucketID uuid.UUID, day time.Time) error {
+func (s *Store) DeleteAuditPartition(ctx context.Context, bucketID uuid.UUID, day time.Time) (err error) {
+	ctx, finish := s.observer.Start(ctx, "DeleteAuditPartition", "audit_log")
+	defer func() { finish(err) }()
 	dayEpoch := auditDayEpoch(day)
 	prefix := AuditLogDayPrefix(bucketID, dayEpoch)
-	_, err := s.deleteAuditRange(ctx, prefix, prefixEnd(prefix), nil)
+	_, err = s.deleteAuditRange(ctx, prefix, prefixEnd(prefix), nil)
 	return err
 }
 

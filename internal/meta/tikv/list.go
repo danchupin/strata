@@ -25,6 +25,8 @@ func (s *Store) ScanObjects(ctx context.Context, bucketID uuid.UUID, opts meta.L
 	return s.ListObjects(ctx, bucketID, opts)
 }
 
+// observer-wrapped variants below.
+
 // ListObjects emits one row per user-space key (the latest non-delete-marker
 // version) by issuing a single ordered range scan over the bucket's object
 // prefix. The version-DESC suffix encoding (US-002) means lex-first row per
@@ -32,7 +34,9 @@ func (s *Store) ScanObjects(ctx context.Context, bucketID uuid.UUID, opts meta.L
 //
 // Where the Cassandra path fans out across N shard partitions and merges, the
 // TiKV path is one continuous scan — that is the whole point of US-005.
-func (s *Store) ListObjects(ctx context.Context, bucketID uuid.UUID, opts meta.ListOptions) (*meta.ListResult, error) {
+func (s *Store) ListObjects(ctx context.Context, bucketID uuid.UUID, opts meta.ListOptions) (res *meta.ListResult, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListObjects", "objects")
+	defer func() { finish(err) }()
 	limit := opts.Limit
 	if limit <= 0 || limit > 1000 {
 		limit = 1000
@@ -57,7 +61,7 @@ func (s *Store) ListObjects(ctx context.Context, bucketID uuid.UUID, opts meta.L
 		}
 	}
 
-	res := &meta.ListResult{}
+	res = &meta.ListResult{}
 	seenPrefix := make(map[string]struct{})
 	var lastKey string
 	firstKey := true
@@ -138,7 +142,9 @@ func (s *Store) ListObjects(ctx context.Context, bucketID uuid.UUID, opts meta.L
 // shard computed via fnv-1a(key) % shardCount — same hash the cassandra layout
 // uses so the per-shard distribution is comparable across backends. Native
 // ordered range scan; no fan-out required (US-012).
-func (s *Store) SampleBucketShardStats(ctx context.Context, bucketID uuid.UUID, shardCount int) (map[int]meta.ShardStat, error) {
+func (s *Store) SampleBucketShardStats(ctx context.Context, bucketID uuid.UUID, shardCount int) (out map[int]meta.ShardStat, err error) {
+	ctx, finish := s.observer.Start(ctx, "SampleBucketShardStats", "objects")
+	defer func() { finish(err) }()
 	if shardCount <= 0 {
 		return nil, nil
 	}
@@ -151,7 +157,7 @@ func (s *Store) SampleBucketShardStats(ctx context.Context, bucketID uuid.UUID, 
 	start := ObjectPrefix(bucketID)
 	end := prefixEnd(start)
 
-	out := make(map[int]meta.ShardStat, shardCount)
+	out = make(map[int]meta.ShardStat, shardCount)
 	var lastKey string
 	firstKey := true
 
@@ -212,7 +218,9 @@ func shardFromKey(key string, n int) int {
 // The version-DESC suffix encoding (US-002) plus the bucket-prefix range
 // scan delivers rows already ordered as (key ASC, version DESC) — no extra
 // sort required.
-func (s *Store) AllObjectVersions(ctx context.Context, bucketID uuid.UUID) ([]*meta.Object, error) {
+func (s *Store) AllObjectVersions(ctx context.Context, bucketID uuid.UUID) (out []*meta.Object, err error) {
+	ctx, finish := s.observer.Start(ctx, "AllObjectVersions", "objects")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return nil, err
@@ -222,7 +230,7 @@ func (s *Store) AllObjectVersions(ctx context.Context, bucketID uuid.UUID) ([]*m
 	start := ObjectPrefix(bucketID)
 	end := prefixEnd(start)
 
-	out := make([]*meta.Object, 0)
+	out = make([]*meta.Object, 0)
 	var lastKey string
 	first := true
 	firstVersionForKey := true
@@ -263,7 +271,9 @@ func (s *Store) AllObjectVersions(ctx context.Context, bucketID uuid.UUID) ([]*m
 // (key ASC, version-DESC). The first row encountered for each key carries
 // IsLatest=true; subsequent versions carry IsLatest=false. CommonPrefixes
 // collapse keys that share a delimiter-bounded prefix.
-func (s *Store) ListObjectVersions(ctx context.Context, bucketID uuid.UUID, opts meta.ListOptions) (*meta.ListVersionsResult, error) {
+func (s *Store) ListObjectVersions(ctx context.Context, bucketID uuid.UUID, opts meta.ListOptions) (res *meta.ListVersionsResult, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListObjectVersions", "objects")
+	defer func() { finish(err) }()
 	limit := opts.Limit
 	if limit <= 0 || limit > 1000 {
 		limit = 1000
@@ -287,7 +297,7 @@ func (s *Store) ListObjectVersions(ctx context.Context, bucketID uuid.UUID, opts
 		}
 	}
 
-	res := &meta.ListVersionsResult{}
+	res = &meta.ListVersionsResult{}
 	seenPrefix := make(map[string]struct{})
 	var lastKey string
 	firstKey := true

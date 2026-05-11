@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/danchupin/strata/internal/meta"
 )
@@ -30,6 +31,11 @@ type Config struct {
 	// GCDualWriteFromEnv(); explicit *bool wins. Mirrors
 	// cassandra.Options.GCDualWrite.
 	GCDualWrite *bool
+	// Tracer drives the per-op meta.tikv.<table>.<op> span emission. Nil
+	// disables span emission (production paths set it via
+	// serverapp.buildMetaStore; tests leave it nil). Mirrors
+	// cassandra.SessionConfig.Tracer.
+	Tracer trace.Tracer
 }
 
 // WithGCDualWrite is a helper for tests / callers that want to set the
@@ -43,6 +49,7 @@ type Store struct {
 	cfg         Config
 	kv          kvBackend
 	gcDualWrite bool
+	observer    *Observer
 }
 
 // Open dials the cluster identified by cfg.PDEndpoints and returns a Store
@@ -57,13 +64,20 @@ func Open(cfg Config) (*Store, error) {
 	if cfg.GCDualWrite != nil {
 		gcDualWrite = *cfg.GCDualWrite
 	}
-	return &Store{cfg: cfg, kv: b, gcDualWrite: gcDualWrite}, nil
+	return &Store{cfg: cfg, kv: b, gcDualWrite: gcDualWrite, observer: NewObserver(cfg.Tracer)}, nil
 }
 
 // openWithBackend builds a Store backed by the supplied kvBackend. Used by
 // unit tests to inject memBackend without dialing PD.
 func openWithBackend(b kvBackend) *Store {
 	return &Store{kv: b, gcDualWrite: GCDualWriteFromEnv()}
+}
+
+// openWithBackendAndObserver mirrors openWithBackend but also wires a
+// per-op Observer. Used by observer_test.go to verify span emission against
+// the in-process memBackend.
+func openWithBackendAndObserver(b kvBackend, o *Observer) *Store {
+	return &Store{kv: b, gcDualWrite: GCDualWriteFromEnv(), observer: o}
 }
 
 // Close releases the underlying kv connection.

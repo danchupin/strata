@@ -11,7 +11,9 @@ import (
 // /pd/api/v1/stores endpoint via the bootstrap-only pdClient. Raft-leader
 // imbalance — any non-tombstone store reporting 0 leaders while peers have
 // >0 — is folded into Warnings.
-func (s *Store) MetaHealth(ctx context.Context) (*meta.MetaHealthReport, error) {
+func (s *Store) MetaHealth(ctx context.Context) (report *meta.MetaHealthReport, err error) {
+	ctx, finish := s.observer.Start(ctx, "MetaHealth", "meta_health")
+	defer func() { finish(err) }()
 	if len(s.cfg.PDEndpoints) == 0 {
 		return &meta.MetaHealthReport{
 			Backend:  "tikv",
@@ -20,7 +22,8 @@ func (s *Store) MetaHealth(ctx context.Context) (*meta.MetaHealthReport, error) 
 	}
 
 	client := newPDClient(s.cfg.PDEndpoints)
-	resp, err := client.listStores(ctx)
+	var resp *pdStoresResponse
+	resp, err = client.listStores(ctx)
 	if err != nil {
 		return nil, err
 	}

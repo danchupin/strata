@@ -60,7 +60,9 @@ func bucketStatsDelta(prior, next *meta.Object) (int64, int64) {
 
 // GetBucketStats reads the live counter row, returning zero stats when no
 // row exists yet.
-func (s *Store) GetBucketStats(ctx context.Context, bucketID uuid.UUID) (meta.BucketStats, error) {
+func (s *Store) GetBucketStats(ctx context.Context, bucketID uuid.UUID) (out meta.BucketStats, err error) {
+	ctx, finish := s.observer.Start(ctx, "GetBucketStats", "bucket_stats")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return meta.BucketStats{}, err
@@ -80,6 +82,8 @@ func (s *Store) GetBucketStats(ctx context.Context, bucketID uuid.UUID) (meta.Bu
 // pessimistic txn. LockKeys + Get + Set + Commit serialises concurrent
 // bumps. Returns the post-update row.
 func (s *Store) BumpBucketStats(ctx context.Context, bucketID uuid.UUID, deltaBytes, deltaObjects int64) (out meta.BucketStats, err error) {
+	ctx, finish := s.observer.Start(ctx, "BumpBucketStats", "bucket_stats")
+	defer func() { finish(err) }()
 	key := BucketStatsKey(bucketID)
 	txn, err := s.kv.Begin(ctx, true)
 	if err != nil {
