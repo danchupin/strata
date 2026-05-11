@@ -35,7 +35,7 @@ func TestStubReturnsErrUnsupported(t *testing.T) {
 	if err := b.Delete(ctx, &data.Manifest{}); !errors.Is(err, errors.ErrUnsupported) {
 		t.Fatalf("Delete: want errors.ErrUnsupported, got %v", err)
 	}
-	if err := b.Close(); err != nil {
+	if err := b.Close(ctx); err != nil {
 		t.Fatalf("Close: want nil, got %v", err)
 	}
 }

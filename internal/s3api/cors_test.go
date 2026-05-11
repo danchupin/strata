@@ -304,7 +304,7 @@ func (f *fakeCORSBackend) Delete(ctx context.Context, m *data.Manifest) error {
 	return f.inner.Delete(ctx, m)
 }
 
-func (f *fakeCORSBackend) Close() error { return f.inner.Close() }
+func (f *fakeCORSBackend) Close(ctx context.Context) error { return f.inner.Close(ctx) }
 
 func (f *fakeCORSBackend) PutBackendCORS(ctx context.Context, rules []data.CORSRule) error {
 	f.mu.Lock()

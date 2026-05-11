@@ -43,15 +43,20 @@ func TestRADOSBackend(t *testing.T) {
 	}
 
 	be, err := rados.New(rados.Config{
-		ConfigFile: confPath,
-		User:       envOr("STRATA_TEST_CEPH_USER", "admin"),
-		Pool:       pool,
-		Classes:    classes,
+		Pool:    pool,
+		Classes: classes,
+		Clusters: map[string]rados.ClusterSpec{
+			rados.DefaultCluster: {
+				ID:         rados.DefaultCluster,
+				ConfigFile: confPath,
+				User:       envOr("STRATA_TEST_CEPH_USER", "admin"),
+			},
+		},
 	})
 	if err != nil {
 		t.Skipf("cannot connect to ceph (probably no cluster running): %v", err)
 	}
-	t.Cleanup(func() { _ = be.Close() })
+	t.Cleanup(func() { _ = be.Close(context.Background()) })
 
 	t.Run("PutGetDelete", func(t *testing.T) {
 		ctx := context.Background()

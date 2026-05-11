@@ -68,7 +68,7 @@ func (a *app) cmdBenchLifecycle(ctx context.Context, jsonOut bool, args []string
 	if err != nil {
 		return fmt.Errorf("data backend: %w", err)
 	}
-	defer backend.Close()
+	defer backend.Close(context.Background())
 
 	bucketCount := *buckets
 	if bucketCount <= 0 {

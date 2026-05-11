@@ -10,7 +10,12 @@ type Backend interface {
 	PutChunks(ctx context.Context, r io.Reader, class string) (*Manifest, error)
 	GetChunks(ctx context.Context, m *Manifest, offset, length int64) (io.ReadCloser, error)
 	Delete(ctx context.Context, m *Manifest) error
-	Close() error
+	// Close releases backend resources. Implementations MUST be idempotent —
+	// the gateway invokes Close() during shutdown and benches call it from
+	// test cleanup; double-close must remain a no-op. Long-running
+	// backend-owned goroutines (e.g. the RADOS cluster registry watcher)
+	// stop here and honour ctx as a deadline.
+	Close(ctx context.Context) error
 }
 
 // MultipartBackend is the optional capability surface for data backends that
@@ -144,6 +149,21 @@ type PoolStatus struct {
 // GET /admin/v1/storage/data.
 type HealthProbe interface {
 	DataHealth(ctx context.Context) (*DataHealthReport, error)
+}
+
+// ClusterReferenceChecker is the optional capability surface for data
+// backends that own a per-class -> cluster routing table (rados today).
+// The admin DELETE /admin/v1/storage/clusters/{id} handler type-asserts
+// the live Backend; when satisfied, the handler refuses to delete a
+// cluster that still has classes routing to it (409 ClusterReferenced)
+// and surfaces the offending class names in the response body. Memory /
+// s3 backends do not implement this surface — the check is skipped and
+// the registry row is deleted unconditionally.
+type ClusterReferenceChecker interface {
+	// ClassesUsingCluster returns the sorted, deduped list of storage
+	// class names whose ClassSpec.Cluster resolves to the given cluster
+	// id. Empty id is treated as the backend's default cluster.
+	ClassesUsingCluster(clusterID string) []string
 }
 
 // CORSRule is the backend-translation input for one bucket CORS rule. The

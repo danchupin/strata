@@ -343,6 +343,50 @@ components:
         access_key: { type: string }
         expires_at: { type: integer, format: int64, description: "Unix epoch (seconds) when the session JWT expires" }
 
+    ClusterEntry:
+      type: object
+      required: [id, backend, spec, created_at, updated_at, version]
+      properties:
+        id: { type: string, description: "Operator label matching [a-z0-9-]{1,64}" }
+        backend: { type: string, enum: [rados, s3] }
+        spec:
+          description: |
+            Opaque backend-specific configuration; the registry layer does
+            not interpret it. For backend=rados the consumer decodes the
+            rados.ClusterSpec JSON shape; for backend=s3 a future s3-backend
+            watcher will consume it.
+          type: object
+        created_at: { type: integer, format: int64 }
+        updated_at: { type: integer, format: int64 }
+        version: { type: integer, format: int64, description: "Monotonic CAS counter; bumped on PutCluster update" }
+
+    ClustersList:
+      type: object
+      required: [clusters]
+      properties:
+        clusters:
+          type: array
+          items: { $ref: '#/components/schemas/ClusterEntry' }
+
+    CreateClusterRequest:
+      type: object
+      required: [id, backend, spec]
+      properties:
+        id: { type: string, description: "Pattern: [a-z0-9-]{1,64}" }
+        backend: { type: string, enum: [rados, s3] }
+        spec: { type: object, description: "Non-empty JSON document; consumed by the data-backend watcher" }
+
+    ClusterReferenced:
+      type: object
+      required: [code, message, referenced_by]
+      properties:
+        code: { type: string, enum: [ClusterReferenced] }
+        message: { type: string }
+        referenced_by:
+          type: array
+          items: { type: string }
+          description: "Storage class names that route to the cluster"
+
   responses:
     Unauthorized:
       description: Authentication missing or invalid.
@@ -869,5 +913,83 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/MetricsTimeseries' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /storage/clusters:
+    get:
+      summary: List RADOS / S3 cluster catalogue entries
+      operationId: listStorageClusters
+      description: |
+        Returns every row in the cluster registry sorted by id ascending.
+        The registry is the single source of truth for cluster connection
+        config — the rados / s3 backend watcher reconciles its in-process
+        map every STRATA_CLUSTER_REGISTRY_INTERVAL.
+      responses:
+        '200':
+          description: Cluster catalogue list.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClustersList' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      summary: Register a new RADOS / S3 cluster
+      operationId: createStorageCluster
+      description: |
+        Inserts a new row in the cluster registry. Format-only validation —
+        the handler does not dial-test the backend. The data-backend watcher
+        picks up the new entry on its next poll.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateClusterRequest' }
+      responses:
+        '201':
+          description: Cluster registered.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClusterEntry' }
+        '400':
+          description: Validation failure (malformed body, unknown backend, bad id, non-JSON spec).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: Cluster id already exists.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /storage/clusters/{id}:
+    delete:
+      summary: De-register a cluster
+      operationId: deleteStorageCluster
+      description: |
+        Removes the cluster from the registry. Refuses with 409
+        ClusterReferenced when the running data backend still has one or
+        more storage classes routing at this cluster; the response body
+        names the offending classes so the operator can re-map them first.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Cluster removed.
+        '404':
+          description: No cluster with that id.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: Cluster still referenced by one or more storage classes.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClusterReferenced' }
         '401':
           $ref: '#/components/responses/Unauthorized'

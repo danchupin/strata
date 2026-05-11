@@ -50,7 +50,6 @@ type RADOSSettings struct {
 	Pool       string `json:"pool"`
 	Namespace  string `json:"namespace,omitempty"`
 	Classes    string `json:"classes,omitempty"`
-	Clusters   string `json:"clusters,omitempty"`
 }
 
 // TiKVSettings carries the TiKV PD endpoint list. Empty when

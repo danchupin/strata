@@ -408,7 +408,7 @@ func (b *countingBackend) Delete(ctx context.Context, m *data.Manifest) error {
 	return nil
 }
 
-func (b *countingBackend) Close() error { return nil }
+func (b *countingBackend) Close(context.Context) error { return nil }
 
 // countingMeta wraps *memory.Store and counts DeleteObject calls so each
 // replica in the multi-replica tests has a private accounting view of the

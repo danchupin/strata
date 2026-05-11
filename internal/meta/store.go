@@ -80,6 +80,14 @@ var (
 	ErrNoRewrapProgress        = errors.New("no rewrap progress recorded for bucket")
 	ErrAdminJobNotFound        = errors.New("admin job not found")
 	ErrAdminJobAlreadyExists   = errors.New("admin job already exists")
+	// ErrClusterNotFound is returned by Get/DeleteCluster when no
+	// registry row exists for the given id.
+	ErrClusterNotFound         = errors.New("cluster not found")
+	// ErrClusterVersionMismatch is returned by PutCluster when the
+	// supplied Version does not match the stored Version on an update.
+	// CAS-on-Version protects the caller from lost updates across a
+	// multi-replica registry.
+	ErrClusterVersionMismatch  = errors.New("cluster registry version mismatch")
 	// ErrQuotaExceeded signals that a write would exceed a configured
 	// per-bucket or per-user quota (US-006). Surfaced from the gateway as
 	// HTTP 403 / S3 code "QuotaExceeded" — non-AWS but matches the RGW shape
@@ -624,6 +632,21 @@ type ReplicationEvent struct {
 	StorageClass        string
 }
 
+// ClusterRegistryEntry is one row in the cluster catalogue (US-001). Spec is
+// the opaque JSON-encoded backend-specific configuration the consumer
+// (`rados.Backend` / `s3.Backend`) decodes — the registry layer does not
+// validate spec internals. Version is a monotonic counter bumped on every
+// PutCluster update; callers pass back the previously observed Version to
+// CAS-protect updates.
+type ClusterRegistryEntry struct {
+	ID        string
+	Backend   string
+	Spec      []byte
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	Version   int64
+}
+
 type Store interface {
 	CreateBucket(ctx context.Context, name, owner, defaultClass string) (*Bucket, error)
 	GetBucket(ctx context.Context, name string) (*Bucket, error)
@@ -928,6 +951,20 @@ type Store interface {
 	// UpdateAdminJob overwrites the State/Message/Deleted/UpdatedAt/
 	// FinishedAt columns. Returns ErrAdminJobNotFound when no row exists.
 	UpdateAdminJob(ctx context.Context, job *AdminJob) error
+
+	// Cluster registry CRUD (US-001). Backs the dynamic-cluster admin API +
+	// the rados.Backend watcher. ListClusters returns rows sorted by ID
+	// ascending; an empty registry returns a nil slice (NOT an error).
+	// PutCluster inserts when no row exists for the given ID; on update it
+	// CAS-checks the supplied Version against the stored Version and
+	// returns ErrClusterVersionMismatch on stale writes. On successful
+	// write the implementation bumps Version and stamps UpdatedAt. The
+	// Spec blob is opaque to the registry — the consuming data backend
+	// decodes it.
+	ListClusters(ctx context.Context) ([]*ClusterRegistryEntry, error)
+	GetCluster(ctx context.Context, id string) (*ClusterRegistryEntry, error)
+	PutCluster(ctx context.Context, e *ClusterRegistryEntry) error
+	DeleteCluster(ctx context.Context, id string) error
 
 	Close() error
 }

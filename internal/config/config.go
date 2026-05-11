@@ -55,11 +55,6 @@ type RADOSConfig struct {
 	Pool       string `koanf:"pool"`
 	Namespace  string `koanf:"namespace"`
 	Classes    string `koanf:"classes"`
-	// Clusters lists per-cluster connection specs as a comma-separated
-	// "<id>:<conf-path>:<keyring-path>" list. See rados.ParseClusters for
-	// format details. Existing single-cluster fields above coexist as the
-	// implicit "default" cluster.
-	Clusters string `koanf:"clusters"`
 }
 
 // S3BackendConfig wires the STRATA_S3_BACKEND_* env vars used by the
@@ -169,7 +164,6 @@ var envMap = map[string]string{
 	"STRATA_RADOS_POOL":               "rados.pool",
 	"STRATA_RADOS_NAMESPACE":          "rados.namespace",
 	"STRATA_RADOS_CLASSES":            "rados.classes",
-	"STRATA_RADOS_CLUSTERS":                "rados.clusters",
 	"STRATA_S3_BACKEND_ENDPOINT":           "s3_backend.endpoint",
 	"STRATA_S3_BACKEND_REGION":             "s3_backend.region",
 	"STRATA_S3_BACKEND_BUCKET":             "s3_backend.bucket",
