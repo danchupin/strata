@@ -24,5 +24,6 @@ func buildUsageRollup(deps Dependencies) (Runner, error) {
 		Logger:   deps.Logger,
 		Interval: durationFromEnv("STRATA_USAGE_ROLLUP_INTERVAL", 24*time.Hour),
 		At:       at,
+		Tracer:   deps.Tracer.Tracer("strata.worker.usage-rollup"),
 	})
 }

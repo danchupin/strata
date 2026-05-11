@@ -9,9 +9,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
+	strataotel "github.com/danchupin/strata/internal/otel"
 )
 
 // ReplicationStatusCompleted / ReplicationStatusFailed are the literal AWS
@@ -63,6 +67,10 @@ type Config struct {
 	Backoff     func(attempt int) time.Duration
 	PollLimit   int
 	Now         func() time.Time
+	// Tracer emits per-iteration parent spans (`worker.replicator.tick`) plus
+	// `replicator.copy_object` sub-op children. Nil falls back to a process-
+	// shared no-op tracer.
+	Tracer trace.Tracer
 }
 
 // Worker drains replication_queue rows, reads each source object via Meta+Data,
@@ -75,6 +83,35 @@ type Worker struct {
 	attempts    map[string]int
 	lastError   map[string]string
 	nextAttempt map[string]time.Time
+
+	iterErrMu sync.Mutex
+	iterErr   error
+}
+
+func (w *Worker) tracerOrNoop() trace.Tracer {
+	if w.cfg.Tracer == nil {
+		return strataotel.NoopTracer()
+	}
+	return w.cfg.Tracer
+}
+
+func (w *Worker) recordIterErr(err error) {
+	if err == nil {
+		return
+	}
+	w.iterErrMu.Lock()
+	if w.iterErr == nil {
+		w.iterErr = err
+	}
+	w.iterErrMu.Unlock()
+}
+
+func (w *Worker) takeIterErr() error {
+	w.iterErrMu.Lock()
+	defer w.iterErrMu.Unlock()
+	err := w.iterErr
+	w.iterErr = nil
+	return err
 }
 
 func New(cfg Config) (*Worker, error) {
@@ -147,8 +184,22 @@ func (w *Worker) Run(ctx context.Context) error {
 }
 
 // RunOnce performs a single poll-and-dispatch pass over every bucket. Exposed
-// for tests + the cmd binary's --once flag.
+// for tests + the cmd binary's --once flag. Per-event failures route through
+// the internal retry / FAILED path and never bubble to the caller; the
+// iteration span still flips to Error when sub-op spans recorded one so the
+// tail-sampler exports the trace.
 func (w *Worker) RunOnce(ctx context.Context) error {
+	iterCtx, span := strataotel.StartIteration(ctx, w.tracerOrNoop(), "replicator")
+	err := w.runOnce(iterCtx)
+	spanErr := err
+	if sticky := w.takeIterErr(); spanErr == nil {
+		spanErr = sticky
+	}
+	strataotel.EndIteration(span, spanErr)
+	return err
+}
+
+func (w *Worker) runOnce(ctx context.Context) error {
 	buckets, err := w.cfg.Meta.ListBuckets(ctx, "")
 	if err != nil {
 		return fmt.Errorf("list buckets: %w", err)
@@ -216,13 +267,38 @@ func (w *Worker) dueNow(eventID string, now time.Time) bool {
 }
 
 func (w *Worker) dispatch(ctx context.Context, evt meta.ReplicationEvent) {
+	ctx, span := w.tracerOrNoop().Start(ctx, "replicator.copy_object",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			strataotel.AttrComponentWorker,
+			attribute.String(strataotel.WorkerKey, "replicator"),
+			attribute.String("strata.replicator.event_id", evt.EventID),
+			attribute.String("strata.replicator.rule", evt.RuleID),
+			attribute.String("strata.replicator.bucket", evt.Bucket),
+			attribute.String("strata.replicator.key", evt.Key),
+			attribute.String("strata.replicator.destination", evt.DestinationBucket),
+		),
+	)
+	var spanErr error
+	defer func() {
+		if spanErr != nil {
+			span.RecordError(spanErr)
+			span.SetStatus(codes.Error, spanErr.Error())
+			w.recordIterErr(spanErr)
+		}
+		span.End()
+	}()
+
 	src, err := w.loadSource(ctx, evt)
 	if err != nil {
-		w.failure(ctx, evt, fmt.Errorf("load source: %w", err))
+		wrapped := fmt.Errorf("load source: %w", err)
+		w.failure(ctx, evt, wrapped)
+		spanErr = wrapped
 		return
 	}
 	if err := w.cfg.Dispatcher.Send(ctx, evt, src); err != nil {
 		w.failure(ctx, evt, err)
+		spanErr = err
 		return
 	}
 	w.success(ctx, evt)

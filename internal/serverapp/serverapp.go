@@ -377,8 +377,10 @@ func buildDataBackend(cfg *config.Config, logger *slog.Logger, tp *strataotel.Pr
 			return nil, fmt.Errorf("STRATA_S3_CLASSES: %w", err)
 		}
 		return datas3.New(datas3.Config{
-			Clusters: s3Clusters,
-			Classes:  s3Classes,
+			Clusters:       s3Clusters,
+			Classes:        s3Classes,
+			Tracer:         tp.Tracer("strata.data.s3"),
+			TracerProvider: tp.TracerProvider(),
 		})
 	default:
 		return nil, errors.New("unknown data backend")
@@ -551,7 +553,10 @@ func buildMetaStore(cfg *config.Config, logger *slog.Logger, tp *strataotel.Prov
 		if len(eps) == 0 {
 			return nil, errors.New("tikv: STRATA_TIKV_PD_ENDPOINTS is empty")
 		}
-		return metatikv.Open(metatikv.Config{PDEndpoints: eps})
+		return metatikv.Open(metatikv.Config{
+			PDEndpoints: eps,
+			Tracer:      tp.Tracer("strata.meta.tikv"),
+		})
 	default:
 		return nil, errors.New("unknown meta backend")
 	}

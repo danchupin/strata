@@ -18,6 +18,8 @@ import (
 // For Suspended-mode null PUT the prior null-versioned row is replaced —
 // other TimeUUID versions are left untouched.
 func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) (err error) {
+	ctx, finish := s.observer.Start(ctx, "PutObject", "objects")
+	defer func() { finish(err) }()
 	switch {
 	case !versioned:
 		o.VersionID = meta.NullVersionID
@@ -115,7 +117,9 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) (
 // empty versionID resolves to the latest non-delete-marker version via a
 // range scan with limit 1 (the version-DESC suffix encoding makes lex-first
 // = latest). The wire literal "null" maps to NullVersionID.
-func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionID string) (*meta.Object, error) {
+func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionID string) (out *meta.Object, err error) {
+	ctx, finish := s.observer.Start(ctx, "GetObject", "objects")
+	defer func() { finish(err) }()
 	versionID = meta.ResolveVersionID(versionID)
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
@@ -200,6 +204,8 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 //   - versionID empty + !versioned: delete every version row for the key,
 //     return the prior latest.
 func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versionID string, versioned bool) (_ *meta.Object, err error) {
+	ctx, finish := s.observer.Start(ctx, "DeleteObject", "objects")
+	defer func() { finish(err) }()
 	versionID = meta.ResolveVersionID(versionID)
 
 	if versionID != "" {
@@ -297,7 +303,9 @@ func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versi
 // DeleteObjectNullReplacement implements the Suspended-mode unversioned
 // DELETE: drop the prior null-versioned row (if any) and write a fresh
 // null-versioned delete marker. TimeUUID-versioned siblings stay.
-func (s *Store) DeleteObjectNullReplacement(ctx context.Context, bucketID uuid.UUID, key string) (*meta.Object, error) {
+func (s *Store) DeleteObjectNullReplacement(ctx context.Context, bucketID uuid.UUID, key string) (out *meta.Object, err error) {
+	ctx, finish := s.observer.Start(ctx, "DeleteObjectNullReplacement", "objects")
+	defer func() { finish(err) }()
 	marker := &meta.Object{
 		BucketID:       bucketID,
 		Key:            key,
@@ -319,6 +327,8 @@ func (s *Store) DeleteObjectNullReplacement(ctx context.Context, bucketID uuid.U
 // concurrent lifecycle transitions either serialise or one observes the
 // other's commit and returns applied=false.
 func (s *Store) SetObjectStorage(ctx context.Context, bucketID uuid.UUID, key, versionID, expectedClass, newClass string, manifest *data.Manifest) (applied bool, err error) {
+	ctx, finish := s.observer.Start(ctx, "SetObjectStorage", "objects")
+	defer func() { finish(err) }()
 	versionID = meta.ResolveVersionID(versionID)
 
 	txn, err := s.kv.Begin(ctx, true)

@@ -12,10 +12,16 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
+	strataotel "github.com/danchupin/strata/internal/otel"
 )
 
 // Config wires the access-log Worker. Defaults applied in New: Interval=5min,
@@ -28,6 +34,10 @@ type Config struct {
 	MaxFlushBytes int64
 	PollLimit     int
 	Now           func() time.Time
+	// Tracer emits per-iteration parent spans (`worker.access-log.tick`) plus
+	// `access_log.flush_bucket` sub-op children. Nil falls back to a process-
+	// shared no-op tracer.
+	Tracer trace.Tracer
 }
 
 // Worker drains buffered access-log rows per source-bucket, formats them into
@@ -35,6 +45,35 @@ type Config struct {
 // bucket's configured target bucket, then acks the drained rows.
 type Worker struct {
 	cfg Config
+
+	iterErrMu sync.Mutex
+	iterErr   error
+}
+
+func (w *Worker) tracerOrNoop() trace.Tracer {
+	if w.cfg.Tracer == nil {
+		return strataotel.NoopTracer()
+	}
+	return w.cfg.Tracer
+}
+
+func (w *Worker) recordIterErr(err error) {
+	if err == nil {
+		return
+	}
+	w.iterErrMu.Lock()
+	if w.iterErr == nil {
+		w.iterErr = err
+	}
+	w.iterErrMu.Unlock()
+}
+
+func (w *Worker) takeIterErr() error {
+	w.iterErrMu.Lock()
+	defer w.iterErrMu.Unlock()
+	err := w.iterErr
+	w.iterErr = nil
+	return err
 }
 
 func New(cfg Config) (*Worker, error) {
@@ -83,6 +122,18 @@ func (w *Worker) Run(ctx context.Context) error {
 // RunOnce performs a single drain-and-flush pass over every bucket. Exposed
 // for tests + the cmd binary's --once flag.
 func (w *Worker) RunOnce(ctx context.Context) error {
+	iterCtx, span := strataotel.StartIteration(ctx, w.tracerOrNoop(), "access-log")
+	err := w.runOnce(iterCtx)
+	if err == nil {
+		err = w.takeIterErr()
+	} else {
+		_ = w.takeIterErr()
+	}
+	strataotel.EndIteration(span, err)
+	return err
+}
+
+func (w *Worker) runOnce(ctx context.Context) error {
 	buckets, err := w.cfg.Meta.ListBuckets(ctx, "")
 	if err != nil {
 		return fmt.Errorf("list buckets: %w", err)
@@ -91,9 +142,22 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err := w.flushBucket(ctx, b); err != nil {
+		bucketCtx, bucketSpan := w.tracerOrNoop().Start(ctx, "access_log.flush_bucket",
+			trace.WithSpanKind(trace.SpanKindInternal),
+			trace.WithAttributes(
+				strataotel.AttrComponentWorker,
+				attribute.String(strataotel.WorkerKey, "access-log"),
+				attribute.String("strata.access_log.bucket", b.Name),
+				attribute.String("strata.access_log.bucket_id", b.ID.String()),
+			),
+		)
+		if err := w.flushBucket(bucketCtx, b); err != nil {
+			bucketSpan.RecordError(err)
+			bucketSpan.SetStatus(codes.Error, err.Error())
+			w.recordIterErr(err)
 			w.cfg.Logger.Warn("accesslog: flush bucket failed", "bucket", b.Name, "error", err.Error())
 		}
+		bucketSpan.End()
 	}
 	return nil
 }

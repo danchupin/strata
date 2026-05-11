@@ -24,7 +24,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.39.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
 	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
@@ -104,6 +104,17 @@ func (p *Provider) Tracer(name string) trace.Tracer {
 		return otel.Tracer(name)
 	}
 	return p.tp.Tracer(name)
+}
+
+// TracerProvider returns the underlying TracerProvider. Falls back to the
+// global TracerProvider when the SDK provider is absent (no-op mode). Used
+// by instrumentation hooks that take a TracerProvider directly (e.g.
+// `otelaws.WithTracerProvider`).
+func (p *Provider) TracerProvider() trace.TracerProvider {
+	if p == nil || p.tp == nil {
+		return otel.GetTracerProvider()
+	}
+	return p.tp
 }
 
 // ForceFlush drains the BatchSpanProcessor — used by tests. No-op when

@@ -36,6 +36,8 @@ import (
 // the same bucket waits at lock-acquire and observes the persisted job
 // on the second Get (returning ErrReshardInProgress).
 func (s *Store) StartReshard(ctx context.Context, bucketID uuid.UUID, target int) (_ *meta.ReshardJob, err error) {
+	ctx, finish := s.observer.Start(ctx, "StartReshard", "reshard_jobs")
+	defer func() { finish(err) }()
 	if !meta.IsValidShardCount(target) {
 		return nil, meta.ErrReshardInvalidTarget
 	}
@@ -106,7 +108,9 @@ func (s *Store) StartReshard(ctx context.Context, bucketID uuid.UUID, target int
 
 // GetReshardJob is an optimistic Get on the job key. ErrReshardNotFound
 // when no row exists.
-func (s *Store) GetReshardJob(ctx context.Context, bucketID uuid.UUID) (*meta.ReshardJob, error) {
+func (s *Store) GetReshardJob(ctx context.Context, bucketID uuid.UUID) (job *meta.ReshardJob, err error) {
+	ctx, finish := s.observer.Start(ctx, "GetReshardJob", "reshard_jobs")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return nil, err
@@ -128,6 +132,8 @@ func (s *Store) GetReshardJob(ctx context.Context, bucketID uuid.UUID) (*meta.Re
 // The caller's BucketID is the keying field; LastKey/Done are the
 // fields that move forward.
 func (s *Store) UpdateReshardJob(ctx context.Context, job *meta.ReshardJob) (err error) {
+	ctx, finish := s.observer.Start(ctx, "UpdateReshardJob", "reshard_jobs")
+	defer func() { finish(err) }()
 	if job == nil {
 		return nil
 	}
@@ -168,6 +174,8 @@ func (s *Store) UpdateReshardJob(ctx context.Context, job *meta.ReshardJob) (err
 // target, clears bucket.TargetShardCount, and deletes the job row.
 // Returns ErrReshardNotFound when no job is in flight for bucketID.
 func (s *Store) CompleteReshard(ctx context.Context, bucketID uuid.UUID) (err error) {
+	ctx, finish := s.observer.Start(ctx, "CompleteReshard", "reshard_jobs")
+	defer func() { finish(err) }()
 	jobKey := ReshardJobKey(bucketID)
 	txn, err := s.kv.Begin(ctx, true)
 	if err != nil {
@@ -222,7 +230,9 @@ func (s *Store) CompleteReshard(ctx context.Context, bucketID uuid.UUID) (err er
 // reshard prefix. Sorted by BucketID byte order; callers that want
 // alphabetical-by-bucket-name sort in-process (Cassandra does the
 // same).
-func (s *Store) ListReshardJobs(ctx context.Context) ([]*meta.ReshardJob, error) {
+func (s *Store) ListReshardJobs(ctx context.Context) (out []*meta.ReshardJob, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListReshardJobs", "reshard_jobs")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return nil, err
@@ -233,16 +243,16 @@ func (s *Store) ListReshardJobs(ctx context.Context) ([]*meta.ReshardJob, error)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]*meta.ReshardJob, 0, len(pairs))
+	out = make([]*meta.ReshardJob, 0, len(pairs))
 	for _, p := range pairs {
 		if len(p.Key) != len(prefix)+16 {
 			return nil, fmt.Errorf("tikv: reshard key wrong length %d", len(p.Key))
 		}
 		var id uuid.UUID
 		copy(id[:], p.Key[len(prefix):])
-		job, err := decodeReshardJob(id, p.Value)
-		if err != nil {
-			return nil, fmt.Errorf("tikv: decode reshard job %s: %w", id, err)
+		job, derr := decodeReshardJob(id, p.Value)
+		if derr != nil {
+			return nil, fmt.Errorf("tikv: decode reshard job %s: %w", id, derr)
 		}
 		out = append(out, job)
 	}

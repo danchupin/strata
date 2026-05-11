@@ -37,6 +37,7 @@ func (m *middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, span := m.tracer.Start(ctx, r.Method+" "+r.URL.Path,
 		trace.WithSpanKind(trace.SpanKindServer),
 		trace.WithAttributes(
+			AttrComponentGateway,
 			attribute.String("http.method", r.Method),
 			attribute.String("http.target", r.URL.Path),
 			attribute.String("http.host", r.Host),

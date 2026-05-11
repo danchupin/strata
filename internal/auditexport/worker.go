@@ -16,12 +16,17 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
+	strataotel "github.com/danchupin/strata/internal/otel"
 )
 
 // Config wires the audit-export Worker. New() applies defaults: After=30d,
@@ -35,11 +40,44 @@ type Config struct {
 	Interval time.Duration
 	Logger   *slog.Logger
 	Now      func() time.Time
+	// Tracer emits per-iteration parent spans (`worker.audit-export.tick`)
+	// plus `audit_export.export_partition` sub-op children. Nil falls back
+	// to a process-shared no-op tracer.
+	Tracer trace.Tracer
 }
 
 // Worker exports aged audit_log partitions on a daily tick.
 type Worker struct {
 	cfg Config
+
+	iterErrMu sync.Mutex
+	iterErr   error
+}
+
+func (w *Worker) tracerOrNoop() trace.Tracer {
+	if w.cfg.Tracer == nil {
+		return strataotel.NoopTracer()
+	}
+	return w.cfg.Tracer
+}
+
+func (w *Worker) recordIterErr(err error) {
+	if err == nil {
+		return
+	}
+	w.iterErrMu.Lock()
+	if w.iterErr == nil {
+		w.iterErr = err
+	}
+	w.iterErrMu.Unlock()
+}
+
+func (w *Worker) takeIterErr() error {
+	w.iterErrMu.Lock()
+	defer w.iterErrMu.Unlock()
+	err := w.iterErr
+	w.iterErr = nil
+	return err
 }
 
 func New(cfg Config) (*Worker, error) {
@@ -96,6 +134,18 @@ func (w *Worker) Run(ctx context.Context) error {
 // missing — the worker logs and skips so a misconfigured operator can
 // repair without restart.
 func (w *Worker) RunOnce(ctx context.Context) error {
+	iterCtx, span := strataotel.StartIteration(ctx, w.tracerOrNoop(), "audit-export")
+	err := w.runOnce(iterCtx)
+	if err == nil {
+		err = w.takeIterErr()
+	} else {
+		_ = w.takeIterErr()
+	}
+	strataotel.EndIteration(span, err)
+	return err
+}
+
+func (w *Worker) runOnce(ctx context.Context) error {
 	tgt, err := w.cfg.Meta.GetBucket(ctx, w.cfg.Bucket)
 	if err != nil {
 		if errors.Is(err, meta.ErrBucketNotFound) {
@@ -113,11 +163,24 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err := w.exportPartition(ctx, tgt, p); err != nil {
+		partCtx, partSpan := w.tracerOrNoop().Start(ctx, "audit_export.export_partition",
+			trace.WithSpanKind(trace.SpanKindInternal),
+			trace.WithAttributes(
+				strataotel.AttrComponentWorker,
+				attribute.String(strataotel.WorkerKey, "audit-export"),
+				attribute.String("strata.audit_export.bucket_id", p.BucketID.String()),
+				attribute.String("strata.audit_export.day", p.Day.Format("2006-01-02")),
+			),
+		)
+		if perr := w.exportPartition(partCtx, tgt, p); perr != nil {
+			partSpan.RecordError(perr)
+			partSpan.SetStatus(codes.Error, perr.Error())
+			w.recordIterErr(perr)
 			w.cfg.Logger.Warn("auditexport: partition export failed",
 				"bucket_id", p.BucketID, "day", p.Day.Format("2006-01-02"),
-				"error", err.Error())
+				"error", perr.Error())
 		}
+		partSpan.End()
 	}
 	return nil
 }

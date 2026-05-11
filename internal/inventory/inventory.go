@@ -23,9 +23,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
+	strataotel "github.com/danchupin/strata/internal/otel"
 )
 
 // Frequencies the AWS InventoryConfiguration spec accepts. A worker tick fires
@@ -47,6 +51,10 @@ type Config struct {
 	Interval time.Duration
 	Now      func() time.Time
 	Region   string
+	// Tracer emits per-iteration parent spans (`worker.inventory.tick`) plus
+	// `inventory.scan_bucket` sub-op children. Nil falls back to a process-
+	// shared no-op tracer.
+	Tracer trace.Tracer
 }
 
 // Worker drains every bucket's inventory configurations on each tick and
@@ -58,6 +66,35 @@ type Worker struct {
 
 	mu      sync.Mutex
 	lastRun map[runKey]time.Time
+
+	iterErrMu sync.Mutex
+	iterErr   error
+}
+
+func (w *Worker) tracerOrNoop() trace.Tracer {
+	if w.cfg.Tracer == nil {
+		return strataotel.NoopTracer()
+	}
+	return w.cfg.Tracer
+}
+
+func (w *Worker) recordIterErr(err error) {
+	if err == nil {
+		return
+	}
+	w.iterErrMu.Lock()
+	if w.iterErr == nil {
+		w.iterErr = err
+	}
+	w.iterErrMu.Unlock()
+}
+
+func (w *Worker) takeIterErr() error {
+	w.iterErrMu.Lock()
+	defer w.iterErrMu.Unlock()
+	err := w.iterErr
+	w.iterErr = nil
+	return err
 }
 
 type runKey struct {
@@ -148,6 +185,18 @@ func (w *Worker) Run(ctx context.Context) error {
 
 // RunOnce performs a single inventory pass over every bucket.
 func (w *Worker) RunOnce(ctx context.Context) error {
+	iterCtx, span := strataotel.StartIteration(ctx, w.tracerOrNoop(), "inventory")
+	err := w.runOnce(iterCtx)
+	if err == nil {
+		err = w.takeIterErr()
+	} else {
+		_ = w.takeIterErr()
+	}
+	strataotel.EndIteration(span, err)
+	return err
+}
+
+func (w *Worker) runOnce(ctx context.Context) error {
 	buckets, err := w.cfg.Meta.ListBuckets(ctx, "")
 	if err != nil {
 		return fmt.Errorf("list buckets: %w", err)
@@ -156,33 +205,53 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		configs, err := w.cfg.Meta.ListBucketInventoryConfigs(ctx, b.ID)
-		if err != nil {
-			w.cfg.Logger.Warn("inventory: list configs", "bucket", b.Name, "error", err.Error())
-			continue
-		}
-		for id, blob := range configs {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			cfg, err := parseInventoryXML(blob)
-			if err != nil {
-				w.cfg.Logger.Warn("inventory: parse config", "bucket", b.Name, "id", id, "error", err.Error())
-				continue
-			}
-			if !cfg.IsEnabled {
-				continue
-			}
-			if !w.due(b.ID, id, cfg) {
-				continue
-			}
-			if err := w.runConfig(ctx, b, id, cfg); err != nil {
-				w.cfg.Logger.Warn("inventory: run config", "bucket", b.Name, "id", id, "error", err.Error())
-				continue
-			}
-		}
+		bucketCtx, bucketSpan := w.tracerOrNoop().Start(ctx, "inventory.scan_bucket",
+			trace.WithSpanKind(trace.SpanKindInternal),
+			trace.WithAttributes(
+				strataotel.AttrComponentWorker,
+				attribute.String(strataotel.WorkerKey, "inventory"),
+				attribute.String("strata.inventory.bucket", b.Name),
+				attribute.String("strata.inventory.bucket_id", b.ID.String()),
+			),
+		)
+		w.scanBucket(bucketCtx, b, bucketSpan)
+		bucketSpan.End()
 	}
 	return nil
+}
+
+func (w *Worker) scanBucket(ctx context.Context, b *meta.Bucket, span trace.Span) {
+	configs, err := w.cfg.Meta.ListBucketInventoryConfigs(ctx, b.ID)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		w.recordIterErr(err)
+		w.cfg.Logger.Warn("inventory: list configs", "bucket", b.Name, "error", err.Error())
+		return
+	}
+	for id, blob := range configs {
+		if ctx.Err() != nil {
+			return
+		}
+		cfg, perr := parseInventoryXML(blob)
+		if perr != nil {
+			w.cfg.Logger.Warn("inventory: parse config", "bucket", b.Name, "id", id, "error", perr.Error())
+			continue
+		}
+		if !cfg.IsEnabled {
+			continue
+		}
+		if !w.due(b.ID, id, cfg) {
+			continue
+		}
+		if rerr := w.runConfig(ctx, b, id, cfg); rerr != nil {
+			span.RecordError(rerr)
+			span.SetStatus(codes.Error, rerr.Error())
+			w.recordIterErr(rerr)
+			w.cfg.Logger.Warn("inventory: run config", "bucket", b.Name, "id", id, "error", rerr.Error())
+			continue
+		}
+	}
 }
 
 func parseInventoryXML(blob []byte) (*inventoryXML, error) {

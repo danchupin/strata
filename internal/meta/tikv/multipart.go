@@ -26,6 +26,8 @@ const (
 // "uploading" regardless of what the caller passed so the CompleteMultipartUpload
 // CAS-flip has a single source of truth.
 func (s *Store) CreateMultipartUpload(ctx context.Context, mu *meta.MultipartUpload) (err error) {
+	ctx, finish := s.observer.Start(ctx, "CreateMultipartUpload", "multipart")
+	defer func() { finish(err) }()
 	row := *mu
 	row.Status = multipartStatusUploading
 	if row.InitiatedAt.IsZero() {
@@ -51,7 +53,9 @@ func (s *Store) CreateMultipartUpload(ctx context.Context, mu *meta.MultipartUpl
 }
 
 // GetMultipartUpload is a single Get against the upload status row.
-func (s *Store) GetMultipartUpload(ctx context.Context, bucketID uuid.UUID, uploadID string) (*meta.MultipartUpload, error) {
+func (s *Store) GetMultipartUpload(ctx context.Context, bucketID uuid.UUID, uploadID string) (out *meta.MultipartUpload, err error) {
+	ctx, finish := s.observer.Start(ctx, "GetMultipartUpload", "multipart")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return nil, err
@@ -71,7 +75,9 @@ func (s *Store) GetMultipartUpload(ctx context.Context, bucketID uuid.UUID, uplo
 // The optional key prefix is applied in-process — concurrent multipart counts
 // are bounded by the gateway's part-storage budget so the in-process filter is
 // fine.
-func (s *Store) ListMultipartUploads(ctx context.Context, bucketID uuid.UUID, prefix string, limit int) ([]*meta.MultipartUpload, error) {
+func (s *Store) ListMultipartUploads(ctx context.Context, bucketID uuid.UUID, prefix string, limit int) (out []*meta.MultipartUpload, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListMultipartUploads", "multipart")
+	defer func() { finish(err) }()
 	if limit <= 0 || limit > 1000 {
 		limit = 1000
 	}
@@ -86,11 +92,11 @@ func (s *Store) ListMultipartUploads(ctx context.Context, bucketID uuid.UUID, pr
 	if err != nil {
 		return nil, err
 	}
-	out := make([]*meta.MultipartUpload, 0, len(pairs))
+	out = make([]*meta.MultipartUpload, 0, len(pairs))
 	for _, p := range pairs {
-		mu, err := decodeMultipart(p.Value)
-		if err != nil {
-			return nil, err
+		mu, derr := decodeMultipart(p.Value)
+		if derr != nil {
+			return nil, derr
 		}
 		if prefix != "" && !strings.HasPrefix(mu.Key, prefix) {
 			continue
@@ -109,6 +115,8 @@ func (s *Store) ListMultipartUploads(ctx context.Context, bucketID uuid.UUID, pr
 // ErrMultipartInProgress. The part-row write itself is unconditional within
 // the txn (last writer wins on partNumber re-upload, matching S3 semantics).
 func (s *Store) SavePart(ctx context.Context, bucketID uuid.UUID, uploadID string, part *meta.MultipartPart) (err error) {
+	ctx, finish := s.observer.Start(ctx, "SavePart", "multipart_parts")
+	defer func() { finish(err) }()
 	uploadKey := MultipartKey(bucketID, uploadID)
 	partKey := MultipartPartKey(bucketID, uploadID, part.PartNumber)
 
@@ -153,7 +161,9 @@ func (s *Store) SavePart(ctx context.Context, bucketID uuid.UUID, uploadID strin
 // ListParts is a per-upload range scan over MultipartPartPrefix. Parts are
 // returned in ascending PartNumber order — the 4-byte big-endian partNumber
 // suffix encoding (see keys.go) makes this free.
-func (s *Store) ListParts(ctx context.Context, bucketID uuid.UUID, uploadID string) ([]*meta.MultipartPart, error) {
+func (s *Store) ListParts(ctx context.Context, bucketID uuid.UUID, uploadID string) (out []*meta.MultipartPart, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListParts", "multipart_parts")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return nil, err
@@ -171,11 +181,11 @@ func (s *Store) ListParts(ctx context.Context, bucketID uuid.UUID, uploadID stri
 	if err != nil {
 		return nil, err
 	}
-	out := make([]*meta.MultipartPart, 0, len(pairs))
+	out = make([]*meta.MultipartPart, 0, len(pairs))
 	for _, p := range pairs {
-		part, err := decodePart(p.Value)
-		if err != nil {
-			return nil, err
+		part, derr := decodePart(p.Value)
+		if derr != nil {
+			return nil, derr
 		}
 		out = append(out, part)
 	}
@@ -190,6 +200,8 @@ func (s *Store) ListParts(ctx context.Context, bucketID uuid.UUID, uploadID stri
 // manifests (parts saved but not listed in CompleteMultipartUpload) are
 // returned for the caller to GC.
 func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, uploadID string, parts []meta.CompletePart, versioned bool) (orphans []*data.Manifest, err error) {
+	ctx, finish := s.observer.Start(ctx, "CompleteMultipartUpload", "multipart")
+	defer func() { finish(err) }()
 	uploadKey := MultipartKey(obj.BucketID, uploadID)
 
 	txn, err := s.kv.Begin(ctx, true)
@@ -370,6 +382,8 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 // matching memory/Cassandra. Returns the manifests of every part so the
 // caller can GC the storage chunks.
 func (s *Store) AbortMultipartUpload(ctx context.Context, bucketID uuid.UUID, uploadID string) (manifests []*data.Manifest, err error) {
+	ctx, finish := s.observer.Start(ctx, "AbortMultipartUpload", "multipart")
+	defer func() { finish(err) }()
 	uploadKey := MultipartKey(bucketID, uploadID)
 
 	txn, err := s.kv.Begin(ctx, true)
@@ -420,6 +434,8 @@ func (s *Store) AbortMultipartUpload(ctx context.Context, bucketID uuid.UUID, up
 // CompleteMultipartUpload. TiKV has no native TTL; the row payload carries
 // ExpiresAt and GetMultipartCompletion lazily expires on read.
 func (s *Store) RecordMultipartCompletion(ctx context.Context, rec *meta.MultipartCompletion, ttl time.Duration) (err error) {
+	ctx, finish := s.observer.Start(ctx, "RecordMultipartCompletion", "multipart_completions")
+	defer func() { finish(err) }()
 	if rec == nil {
 		return nil
 	}
@@ -447,7 +463,9 @@ func (s *Store) RecordMultipartCompletion(ctx context.Context, rec *meta.Multipa
 // GetMultipartCompletion returns the persisted CompleteMultipartUpload reply
 // body for the given uploadID, or ErrMultipartCompletionNotFound when the row
 // is missing or has aged past its ExpiresAt.
-func (s *Store) GetMultipartCompletion(ctx context.Context, bucketID uuid.UUID, uploadID string) (*meta.MultipartCompletion, error) {
+func (s *Store) GetMultipartCompletion(ctx context.Context, bucketID uuid.UUID, uploadID string) (out *meta.MultipartCompletion, err error) {
+	ctx, finish := s.observer.Start(ctx, "GetMultipartCompletion", "multipart_completions")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return nil, err
@@ -474,6 +492,8 @@ func (s *Store) GetMultipartCompletion(ctx context.Context, bucketID uuid.UUID, 
 // strata-admin rewrap to rotate the master key. Returns
 // ErrMultipartNotFound when the upload row is gone (matches memory).
 func (s *Store) UpdateMultipartUploadSSEWrap(ctx context.Context, bucketID uuid.UUID, uploadID string, wrapped []byte, keyID string) (err error) {
+	ctx, finish := s.observer.Start(ctx, "UpdateMultipartUploadSSEWrap", "multipart")
+	defer func() { finish(err) }()
 	key := MultipartKey(bucketID, uploadID)
 	txn, err := s.kv.Begin(ctx, true)
 	if err != nil {

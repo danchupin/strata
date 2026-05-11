@@ -20,7 +20,9 @@ const defaultShardCount = 64
 // creates with the same name conflict at lock-acquire (pessimistic txn) so
 // only one returns success; the other gets ErrBucketAlreadyExists. Mirrors
 // the Cassandra LWT shape.
-func (s *Store) CreateBucket(ctx context.Context, name, owner, defaultClass string) (*meta.Bucket, error) {
+func (s *Store) CreateBucket(ctx context.Context, name, owner, defaultClass string) (out *meta.Bucket, err error) {
+	ctx, finish := s.observer.Start(ctx, "CreateBucket", "buckets")
+	defer func() { finish(err) }()
 	id, err := uuid.NewRandom()
 	if err != nil {
 		return nil, err
@@ -64,7 +66,9 @@ func (s *Store) CreateBucket(ctx context.Context, name, owner, defaultClass stri
 }
 
 // GetBucket is a single Get against the bucket-by-name row.
-func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error) {
+func (s *Store) GetBucket(ctx context.Context, name string) (out *meta.Bucket, err error) {
+	ctx, finish := s.observer.Start(ctx, "GetBucket", "buckets")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return nil, err
@@ -84,7 +88,9 @@ func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error
 // (objects, configs, multipart uploads, ...) and only then drops the
 // bucket-by-name row. The pessimistic txn locks the bucket-by-name key so
 // concurrent CreateBucket-after-DeleteBucket is serialised.
-func (s *Store) DeleteBucket(ctx context.Context, name string) error {
+func (s *Store) DeleteBucket(ctx context.Context, name string) (err error) {
+	ctx, finish := s.observer.Start(ctx, "DeleteBucket", "buckets")
+	defer func() { finish(err) }()
 	bucketKey := BucketKey(name)
 	txn, err := s.kv.Begin(ctx, true)
 	if err != nil {
@@ -122,7 +128,9 @@ func (s *Store) DeleteBucket(ctx context.Context, name string) error {
 // ListBuckets is a range scan over the bucket-by-name prefix. The
 // optional owner filter is applied in-process — bucket cardinality is low
 // (gateway-wide single-digit thousands) so an in-process filter is fine.
-func (s *Store) ListBuckets(ctx context.Context, owner string) ([]*meta.Bucket, error) {
+func (s *Store) ListBuckets(ctx context.Context, owner string) (out []*meta.Bucket, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListBuckets", "buckets")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return nil, err
@@ -133,11 +141,11 @@ func (s *Store) ListBuckets(ctx context.Context, owner string) ([]*meta.Bucket, 
 	if err != nil {
 		return nil, err
 	}
-	out := make([]*meta.Bucket, 0, len(pairs))
+	out = make([]*meta.Bucket, 0, len(pairs))
 	for _, p := range pairs {
-		b, err := decodeBucket(p.Value)
-		if err != nil {
-			return nil, fmt.Errorf("tikv: decode bucket %q: %w", string(p.Key), err)
+		b, derr := decodeBucket(p.Value)
+		if derr != nil {
+			return nil, fmt.Errorf("tikv: decode bucket %q: %w", string(p.Key), derr)
 		}
 		if owner != "" && b.Owner != owner {
 			continue
@@ -192,7 +200,9 @@ func (s *Store) SetBucketMfaDelete(ctx context.Context, name, state string) erro
 // would risk read-after-write incoherence; pessimistic locking on the row
 // key participates in the same conflict-detection lineage as
 // CreateBucket/DeleteBucket.
-func (s *Store) updateBucket(ctx context.Context, name string, mutate func(*meta.Bucket) error) error {
+func (s *Store) updateBucket(ctx context.Context, name string, mutate func(*meta.Bucket) error) (err error) {
+	ctx, finish := s.observer.Start(ctx, "UpdateBucket", "buckets")
+	defer func() { finish(err) }()
 	key := BucketKey(name)
 	txn, err := s.kv.Begin(ctx, true)
 	if err != nil {

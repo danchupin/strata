@@ -20,6 +20,7 @@ func buildInventory(deps Dependencies) (Runner, error) {
 		Logger:   deps.Logger,
 		Interval: durationFromEnv("STRATA_INVENTORY_INTERVAL", 5*time.Minute),
 		Region:   inventoryRegion(deps.Region),
+		Tracer:   deps.Tracer.Tracer("strata.worker.inventory"),
 	})
 }
 

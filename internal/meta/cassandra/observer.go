@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/danchupin/strata/internal/logging"
+	strataotel "github.com/danchupin/strata/internal/otel"
 )
 
 // EnvSlowQueryMS controls the WARN threshold for SlowQueryObserver. Default 100ms.
@@ -150,6 +151,7 @@ func (o *SlowQueryObserver) emitSpan(ctx context.Context, q gocql.ObservedQuery,
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithTimestamp(q.Start),
 		trace.WithAttributes(
+			strataotel.AttrComponentGateway,
 			attribute.String("db.system", "cassandra"),
 			attribute.String("db.cassandra.table", tableLabel),
 			attribute.String("db.operation", opLabel),

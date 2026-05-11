@@ -15,9 +15,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/danchupin/strata/internal/meta"
+	strataotel "github.com/danchupin/strata/internal/otel"
 )
 
 const secondsPerDay int64 = 86400
@@ -33,6 +39,10 @@ type Config struct {
 	Logger *slog.Logger
 	// Now overrides the wall clock for tests. Returns UTC.
 	Now func() time.Time
+	// Tracer emits per-iteration parent spans (`worker.usage-rollup.tick`)
+	// plus `usage_rollup.sample_bucket` sub-op children. Nil falls back to a
+	// process-shared no-op tracer.
+	Tracer trace.Tracer
 }
 
 // Worker runs the rollup loop.
@@ -42,6 +52,35 @@ type Worker struct {
 	atMin   int
 	logger  *slog.Logger
 	nowFunc func() time.Time
+
+	iterErrMu sync.Mutex
+	iterErr   error
+}
+
+func (w *Worker) tracerOrNoop() trace.Tracer {
+	if w.cfg.Tracer == nil {
+		return strataotel.NoopTracer()
+	}
+	return w.cfg.Tracer
+}
+
+func (w *Worker) recordIterErr(err error) {
+	if err == nil {
+		return
+	}
+	w.iterErrMu.Lock()
+	if w.iterErr == nil {
+		w.iterErr = err
+	}
+	w.iterErrMu.Unlock()
+}
+
+func (w *Worker) takeIterErr() error {
+	w.iterErrMu.Lock()
+	defer w.iterErrMu.Unlock()
+	err := w.iterErr
+	w.iterErr = nil
+	return err
 }
 
 // New validates cfg and returns a Worker.
@@ -140,6 +179,18 @@ func (w *Worker) nextFire(now time.Time) time.Time {
 // RunOnce performs a single rollup pass: every bucket gets one usage_aggregates
 // row for the UTC day strictly before `now`. Returns aggregate stats.
 func (w *Worker) RunOnce(ctx context.Context, now time.Time) (Stats, error) {
+	iterCtx, span := strataotel.StartIteration(ctx, w.tracerOrNoop(), "usage-rollup")
+	stats, err := w.runOnce(iterCtx, now)
+	if err == nil {
+		err = w.takeIterErr()
+	} else {
+		_ = w.takeIterErr()
+	}
+	strataotel.EndIteration(span, err)
+	return stats, err
+}
+
+func (w *Worker) runOnce(ctx context.Context, now time.Time) (Stats, error) {
 	day := previousUTCDay(now)
 	var stats Stats
 	buckets, err := w.cfg.Meta.ListBuckets(ctx, "")
@@ -151,13 +202,28 @@ func (w *Worker) RunOnce(ctx context.Context, now time.Time) (Stats, error) {
 			return stats, ctx.Err()
 		}
 		stats.BucketsScanned++
-		if err := w.rollupBucket(ctx, b, day); err != nil {
+		bucketCtx, bucketSpan := w.tracerOrNoop().Start(ctx, "usage_rollup.sample_bucket",
+			trace.WithSpanKind(trace.SpanKindInternal),
+			trace.WithAttributes(
+				strataotel.AttrComponentWorker,
+				attribute.String(strataotel.WorkerKey, "usage-rollup"),
+				attribute.String("strata.usage_rollup.bucket", b.Name),
+				attribute.String("strata.usage_rollup.bucket_id", b.ID.String()),
+				attribute.String("strata.usage_rollup.day", day.Format("2006-01-02")),
+			),
+		)
+		if rerr := w.rollupBucket(bucketCtx, b, day); rerr != nil {
 			stats.BucketsErrored++
+			bucketSpan.RecordError(rerr)
+			bucketSpan.SetStatus(codes.Error, rerr.Error())
+			w.recordIterErr(rerr)
 			w.logger.WarnContext(ctx, "usagerollup: bucket failed",
-				"bucket", b.Name, "error", err.Error())
+				"bucket", b.Name, "error", rerr.Error())
+			bucketSpan.End()
 			continue
 		}
 		stats.RowsWritten++
+		bucketSpan.End()
 	}
 	w.logger.InfoContext(ctx, "usagerollup: tick complete",
 		"day", day.Format("2006-01-02"),

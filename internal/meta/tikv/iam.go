@@ -89,6 +89,8 @@ func decodeIAMAccessKey(raw []byte) (*meta.IAMAccessKey, error) {
 // duplicate user name yields ErrIAMUserAlreadyExists. Pessimistic txn
 // (LockKeys + Get + Set) mirrors CreateBucket's LWT-equivalent shape.
 func (s *Store) CreateIAMUser(ctx context.Context, u *meta.IAMUser) (err error) {
+	ctx, finish := s.observer.Start(ctx, "CreateIAMUser", "iam_users")
+	defer func() { finish(err) }()
 	row := *u
 	if row.CreatedAt.IsZero() {
 		row.CreatedAt = time.Now().UTC()
@@ -120,7 +122,9 @@ func (s *Store) CreateIAMUser(ctx context.Context, u *meta.IAMUser) (err error) 
 }
 
 // GetIAMUser is a single optimistic Get against IAMUserKey.
-func (s *Store) GetIAMUser(ctx context.Context, userName string) (*meta.IAMUser, error) {
+func (s *Store) GetIAMUser(ctx context.Context, userName string) (out *meta.IAMUser, err error) {
+	ctx, finish := s.observer.Start(ctx, "GetIAMUser", "iam_users")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return nil, err
@@ -139,7 +143,9 @@ func (s *Store) GetIAMUser(ctx context.Context, userName string) (*meta.IAMUser,
 // ListIAMUsers range-scans the IAMUser prefix in lex (= userName ascending)
 // order. Path-prefix filter applied in-process — IAM user cardinality is
 // small enough that scan + filter is fine.
-func (s *Store) ListIAMUsers(ctx context.Context, pathPrefix string) ([]*meta.IAMUser, error) {
+func (s *Store) ListIAMUsers(ctx context.Context, pathPrefix string) (out []*meta.IAMUser, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListIAMUsers", "iam_users")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return nil, err
@@ -150,11 +156,11 @@ func (s *Store) ListIAMUsers(ctx context.Context, pathPrefix string) ([]*meta.IA
 	if err != nil {
 		return nil, err
 	}
-	out := make([]*meta.IAMUser, 0, len(pairs))
+	out = make([]*meta.IAMUser, 0, len(pairs))
 	for _, p := range pairs {
-		u, err := decodeIAMUser(p.Value)
-		if err != nil {
-			return nil, err
+		u, derr := decodeIAMUser(p.Value)
+		if derr != nil {
+			return nil, derr
 		}
 		if pathPrefix != "" && !strings.HasPrefix(u.Path, pathPrefix) {
 			continue
@@ -168,6 +174,8 @@ func (s *Store) ListIAMUsers(ctx context.Context, pathPrefix string) ([]*meta.IA
 // when the user does not exist. Pessimistic txn read-then-delete mirrors
 // Cassandra's IF EXISTS shape.
 func (s *Store) DeleteIAMUser(ctx context.Context, userName string) (err error) {
+	ctx, finish := s.observer.Start(ctx, "DeleteIAMUser", "iam_users")
+	defer func() { finish(err) }()
 	key := IAMUserKey(userName)
 	txn, err := s.kv.Begin(ctx, true)
 	if err != nil {
@@ -196,6 +204,8 @@ func (s *Store) DeleteIAMUser(ctx context.Context, userName string) (err error) 
 // is not a realistic concern), so we do not raise an "already exists"
 // error: the call is last-writer-wins, matching Cassandra's plain INSERT.
 func (s *Store) CreateIAMAccessKey(ctx context.Context, ak *meta.IAMAccessKey) (err error) {
+	ctx, finish := s.observer.Start(ctx, "CreateIAMAccessKey", "iam_access_keys")
+	defer func() { finish(err) }()
 	row := *ak
 	if row.CreatedAt.IsZero() {
 		row.CreatedAt = time.Now().UTC()
@@ -225,7 +235,9 @@ func (s *Store) CreateIAMAccessKey(ctx context.Context, ak *meta.IAMAccessKey) (
 
 // GetIAMAccessKey is the SigV4 hot path: a single optimistic Get against
 // IAMAccessKeyKey, no scan.
-func (s *Store) GetIAMAccessKey(ctx context.Context, accessKeyID string) (*meta.IAMAccessKey, error) {
+func (s *Store) GetIAMAccessKey(ctx context.Context, accessKeyID string) (out *meta.IAMAccessKey, err error) {
+	ctx, finish := s.observer.Start(ctx, "GetIAMAccessKey", "iam_access_keys")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return nil, err
@@ -244,7 +256,9 @@ func (s *Store) GetIAMAccessKey(ctx context.Context, accessKeyID string) (*meta.
 // ListIAMAccessKeys range-scans the per-user secondary index, then Gets
 // each row by access-key ID. Empty userName means "no user filter" —
 // mirrors the memory backend by scanning the per-key prefix directly.
-func (s *Store) ListIAMAccessKeys(ctx context.Context, userName string) ([]*meta.IAMAccessKey, error) {
+func (s *Store) ListIAMAccessKeys(ctx context.Context, userName string) (out []*meta.IAMAccessKey, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListIAMAccessKeys", "iam_access_keys")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return nil, err
@@ -253,15 +267,15 @@ func (s *Store) ListIAMAccessKeys(ctx context.Context, userName string) ([]*meta
 
 	if userName == "" {
 		start := []byte(prefixIAMAccessKey)
-		pairs, err := txn.Scan(ctx, start, prefixEnd(start), 0)
-		if err != nil {
-			return nil, err
+		pairs, serr := txn.Scan(ctx, start, prefixEnd(start), 0)
+		if serr != nil {
+			return nil, serr
 		}
-		out := make([]*meta.IAMAccessKey, 0, len(pairs))
+		out = make([]*meta.IAMAccessKey, 0, len(pairs))
 		for _, p := range pairs {
-			ak, err := decodeIAMAccessKey(p.Value)
-			if err != nil {
-				return nil, err
+			ak, derr := decodeIAMAccessKey(p.Value)
+			if derr != nil {
+				return nil, derr
 			}
 			out = append(out, ak)
 		}
@@ -274,26 +288,23 @@ func (s *Store) ListIAMAccessKeys(ctx context.Context, userName string) ([]*meta
 	if err != nil {
 		return nil, err
 	}
-	out := make([]*meta.IAMAccessKey, 0, len(pairs))
+	out = make([]*meta.IAMAccessKey, 0, len(pairs))
 	for _, p := range pairs {
-		// Index key is prefixIAMUserKeyIndex + escaped(userName) +
-		// escaped(accessKeyID); strip the per-user prefix and decode the
-		// remaining segment.
 		body := p.Key[len(idxPrefix):]
-		accessKeyID, _, err := readEscaped(body)
-		if err != nil {
-			return nil, err
+		accessKeyID, _, derr := readEscaped(body)
+		if derr != nil {
+			return nil, derr
 		}
-		raw, found, err := txn.Get(ctx, IAMAccessKeyKey(accessKeyID))
-		if err != nil {
-			return nil, err
+		raw, found, gerr := txn.Get(ctx, IAMAccessKeyKey(accessKeyID))
+		if gerr != nil {
+			return nil, gerr
 		}
 		if !found {
 			continue
 		}
-		ak, err := decodeIAMAccessKey(raw)
-		if err != nil {
-			return nil, err
+		ak, derr := decodeIAMAccessKey(raw)
+		if derr != nil {
+			return nil, derr
 		}
 		out = append(out, ak)
 	}
@@ -306,6 +317,8 @@ func (s *Store) ListIAMAccessKeys(ctx context.Context, userName string) ([]*meta
 // calls txn.Rollback() explicitly so the in-process memBackend used in unit
 // tests does not leak the LockKeys lease.
 func (s *Store) UpdateIAMAccessKeyDisabled(ctx context.Context, accessKeyID string, disabled bool) (ak *meta.IAMAccessKey, err error) {
+	ctx, finish := s.observer.Start(ctx, "UpdateIAMAccessKeyDisabled", "iam_access_keys")
+	defer func() { finish(err) }()
 	akKey := IAMAccessKeyKey(accessKeyID)
 	txn, err := s.kv.Begin(ctx, true)
 	if err != nil {
@@ -346,6 +359,8 @@ func (s *Store) UpdateIAMAccessKeyDisabled(ctx context.Context, accessKeyID stri
 // Returns the deleted record so callers can audit-log the removed
 // identity (mirrors Cassandra shape).
 func (s *Store) DeleteIAMAccessKey(ctx context.Context, accessKeyID string) (ak *meta.IAMAccessKey, err error) {
+	ctx, finish := s.observer.Start(ctx, "DeleteIAMAccessKey", "iam_access_keys")
+	defer func() { finish(err) }()
 	akKey := IAMAccessKeyKey(accessKeyID)
 	txn, err := s.kv.Begin(ctx, true)
 	if err != nil {

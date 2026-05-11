@@ -12,6 +12,8 @@ import (
 // for the same ID surfaces ErrAdminJobAlreadyExists deterministically rather
 // than racing with a plain Put.
 func (s *Store) CreateAdminJob(ctx context.Context, job *meta.AdminJob) (err error) {
+	ctx, finish := s.observer.Start(ctx, "CreateAdminJob", "admin_jobs")
+	defer func() { finish(err) }()
 	if job == nil || job.ID == "" {
 		return meta.ErrAdminJobNotFound
 	}
@@ -46,7 +48,9 @@ func (s *Store) CreateAdminJob(ctx context.Context, job *meta.AdminJob) (err err
 
 // GetAdminJob is an optimistic Get on the per-id key. ErrAdminJobNotFound
 // when no row exists.
-func (s *Store) GetAdminJob(ctx context.Context, id string) (*meta.AdminJob, error) {
+func (s *Store) GetAdminJob(ctx context.Context, id string) (job *meta.AdminJob, err error) {
+	ctx, finish := s.observer.Start(ctx, "GetAdminJob", "admin_jobs")
+	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return nil, err
@@ -60,7 +64,7 @@ func (s *Store) GetAdminJob(ctx context.Context, id string) (*meta.AdminJob, err
 		return nil, meta.ErrAdminJobNotFound
 	}
 	var out meta.AdminJob
-	if err := json.Unmarshal(raw, &out); err != nil {
+	if err = json.Unmarshal(raw, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -69,6 +73,8 @@ func (s *Store) GetAdminJob(ctx context.Context, id string) (*meta.AdminJob, err
 // UpdateAdminJob overwrites the mutable columns under a pessimistic txn so
 // concurrent updates serialise on the row.
 func (s *Store) UpdateAdminJob(ctx context.Context, job *meta.AdminJob) (err error) {
+	ctx, finish := s.observer.Start(ctx, "UpdateAdminJob", "admin_jobs")
+	defer func() { finish(err) }()
 	if job == nil || job.ID == "" {
 		return meta.ErrAdminJobNotFound
 	}
