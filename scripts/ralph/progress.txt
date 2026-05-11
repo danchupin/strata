@@ -24,3 +24,14 @@ Cycle: ralph/s3-multi-cluster
 - `tasks/prd-s3-multi-cluster.md` REMOVED in US-006 close-flip per CLAUDE.md PRD lifecycle rule. Canonical record lives in Ralph snapshot.
 - Verification: `go vet ./...`, `go test ./... -race`, `make docs-build`, `make smoke`. `scripts/s3-tests/run.sh` unaffected (this cycle does not touch the s3api surface).
 
+
+## 2026-05-11 - US-001
+- Added `internal/data/s3/cluster.go`: `S3ClusterSpec` (bucket-less, full JSON tags) + `CredentialsRef{Type,Ref}` discriminator + `ParseClusters` JSON-array parser with `validateCredentialsRef` helper.
+- Added `internal/data/s3/class.go`: `ClassSpec{Cluster,Bucket}` (both REQUIRED) + `ParseClasses` JSON-object parser.
+- Added `cluster_test.go` + `class_test.go` covering happy-path, JSON round-trip per credentials type, and all required malformed-input rejections (duplicate id, empty fields, missing creds type, unknown type, malformed env-ref, chain-with-ref, file-empty-ref, malformed JSON).
+- **Learnings for future iterations:**
+  - `validateCredentialsRef` is per-cluster + plaintext-free. Adding a new creds type (e.g. KMS) requires adding the constant + case here and a resolver branch in `connFor` (US-002).
+  - `file:` ref shape parses `<path>[:<profile>]` by `LastIndex(":")` so absolute paths with colons elsewhere (rare on Unix) still work; profile defaults to `default` at resolve-time (US-002 concern, not parser).
+  - `ParseClasses` does NOT cross-validate `Cluster` against the cluster map — that's `s3.New` boot-time validation (US-002). Keeps parser backend-independent + testable without env state.
+  - Project root `go vet ./...` and `go test ./internal/data/s3/...` both clean. macOS ld LC_DYSYMTAB warning is harmless / present everywhere on this host.
+---
