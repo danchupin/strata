@@ -349,6 +349,14 @@ var tableDDL = []string{
 		attached_at timestamp,
 		PRIMARY KEY (policy_arn, user_name)
 	)`,
+	`CREATE TABLE IF NOT EXISTS cluster_registry (
+		id         text PRIMARY KEY,
+		backend    text,
+		spec       blob,
+		created_at timestamp,
+		updated_at timestamp,
+		version    bigint
+	)`,
 	`CREATE TABLE IF NOT EXISTS notify_dlq (
 		bucket_id    uuid,
 		day          timestamp,

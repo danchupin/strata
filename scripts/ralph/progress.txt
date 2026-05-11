@@ -43,3 +43,15 @@ Cycle: ralph/dynamic-clusters
   - `PutCluster` mutates the supplied `*ClusterRegistryEntry` in place (writes back CreatedAt / UpdatedAt / Version) so admin handlers can return the post-write row to the client without a second Get round-trip.
   - The contract case relies on the `time.Sleep(time.Millisecond)` pattern between the original Put and the update so the `UpdatedAt.After(prevUpdated)` assertion is robust on backends that stamp UpdatedAt with the wall clock.
 ---
+
+## 2026-05-11 - US-002
+- Replaced cassandra stub in `internal/meta/cassandra/clusters.go` with real LWT-on-LWT CRUD against the new `cluster_registry` table: INSERT IF NOT EXISTS for create, on not-applied read curVersion via `MapScanCAS(existing)`, follow with `UPDATE ... IF version=?` CAS; DELETE uses `DELETE ... IF EXISTS` → `ErrClusterNotFound` on idempotent retry.
+- Added `cluster_registry` table to `internal/meta/cassandra/schema.go::tableDDL` (id PK, backend text, spec blob, created_at/updated_at timestamp, version bigint). Additive — no `alterStatements` entry needed.
+- Wired `storetest.CaseClusterRegistry` into `internal/meta/cassandra/store_integration_test.go` as a subtest `ClusterRegistry` so the existing CassandraIntegration job exercises it without flipping it on for memory + tikv (US-003 still pending).
+- `go build ./...`, `go vet ./...`, `go vet -tags integration ./internal/meta/cassandra/...`, `go test ./internal/meta/...` all green. Integration suite needs Docker — run via `make test-integration` in CI.
+- **Learnings for future iterations:**
+  - `MapScanCAS(existing)` is the right gocql call when an INSERT-IF-NOT-EXISTS may need to read back the existing row's columns (Version, CreatedAt) for the CAS-update follow-through. `ScanCAS` requires positional args matching the column count and is brittle when the LWT result map carries `[applied]` plus the row's columns; the column-count gotcha bit `CreateBucket` previously.
+  - `q.SerialConsistency(gocql.LocalSerial)` matches the LOCAL_QUORUM read pattern from CLAUDE.md so reads after the LWT write see the committed Paxos state under the same DC.
+  - When a stub is replaced, the contract case is wired per-backend rather than added to `storetest.Run` — that pattern preserves a clean US-003 (tikv) handoff where the tikv test file picks up the same `CaseClusterRegistry` later.
+  - `time.Time` round-trip from the `existing` LWT map sometimes lands as the gocql binding type; using `existing["version"].(int64)` and `existing["created_at"].(time.Time)` is the established cassandra-side coercion (see `setBucketBlob` family for prior art).
+---
