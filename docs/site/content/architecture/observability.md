@@ -168,8 +168,29 @@ though `ObserveQuery` runs after the query returns. `rados.Config.Tracer`
 threads a tracer onto `Backend`; `ObserveOp(ctx, logger, metrics,
 tracer, pool, op, oid, start, err)` emits `data.rados.<op>` spans
 (`put` / `get` / `del`) with the same retroactive-timestamp trick.
+TiKV has no upstream observer hook, so `internal/meta/tikv/observer.go`
+wraps every public `Store` method with `Observer.Start(ctx, op, table)`
+that returns a `finish(err)` closure — the wrapper emits
+`meta.tikv.<table>.<op>` spans with `db.system=tikv`. The S3-over-S3
+data backend installs the upstream
+`go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws`
+middleware (v0.68, semconv v1.40) at `connFor` BEFORE the metrics
+instrumentation, so otelaws Initialize-after brackets the full retry
+loop and emits one client-kind `S3.<Operation>` span per SDK call with
+`rpc.system.name=aws-api`, `rpc.method=S3/<op>`, `aws.region`, and
+`http.response.status_code` attributes; a custom `AttributeBuilder`
+stamps `strata.s3_cluster=<id>` so multi-cluster traces are filterable.
 Failing queries / ops set span status to Error so the tail-sampler
 exports the full trace regardless of ratio.
+
+Every gateway-side span — HTTP middleware, Cassandra observer, TiKV
+observer, RADOS observer, S3 otelaws middleware — also stamps
+`strata.component=gateway` via the shared
+`internal/otel.AttrComponentGateway` constant. Worker iteration spans
+stamp `strata.component=worker` via `AttrComponentWorker`. Operator
+filter recipes for `strata.component`, `strata.worker`, and
+`strata.s3_cluster` live on the
+[Tracing best-practices]({{< ref "/best-practices/tracing" >}}) page.
 
 ### SemConv version
 
@@ -193,11 +214,44 @@ OTLP traces to Jaeger at `jaeger:4317`. Jaeger UI on
 
 ### Worker tracing
 
-Workers under `strata server` (gc / lifecycle / replicator / access-log /
-notify / inventory / audit-export / manifest-rewriter) currently pass a
-nil tracer — add `Tracer: tp.Tracer("strata.<worker>")` to their config
-when their own /readyz / metrics story matures. `strata-admin rewrap`
-is a one-shot operator command and stays untraced.
+Every worker registered under `strata server` (gc, lifecycle,
+replicator, notify, access-log, inventory, audit-export,
+manifest-rewriter, quota-reconcile, usage-rollup) wraps its periodic
+iteration entrypoint (`RunOnce`, or `Run` for the one-shot
+manifest-rewriter) in `StartIteration` / `EndIteration` from
+`internal/otel/iteration_span.go` (re-exported as
+`cmd/strata/workers.StartIteration` so the cmd-layer interface stays
+`workers.StartIteration(ctx, tracer, name)`). The supervisor passes a
+`*strataotel.Provider` to every worker via
+`workers.Dependencies.Tracer` (already wired at
+`internal/serverapp/serverapp.go:254`), and each worker resolves its
+named tracer via `deps.Tracer.Tracer("strata.worker.<name>")`. No
+struct change is required when adding a new worker — the dependency
+is already there.
+
+Each iteration produces:
+
+- A parent client-kind span named `worker.<name>.tick` with
+  `strata.component=worker`, `strata.worker=<name>`, and
+  `strata.iteration_id=<atomic.uint64>` (per-worker counter,
+  process-local).
+- Per-tick sub-op child spans under that parent: `gc.scan_partition` /
+  `gc.delete_chunk`; `lifecycle.scan_bucket` / `lifecycle.expire_object` /
+  `lifecycle.transition_object`; `replicator.copy_object`;
+  `notify.deliver_event`; `access_log.flush_bucket`;
+  `inventory.scan_bucket`; `audit_export.export_partition`;
+  `manifest_rewriter.rewrite_bucket`; `quota_reconcile.scan_bucket`;
+  `usage_rollup.sample_bucket`.
+
+Sub-op failures `RecordError` + `SetStatus(Error)` and flow into a
+sync.Mutex-guarded sticky-err accumulator so the iteration parent
+flips to Error and the tail-sampler exports the full iteration
+regardless of `STRATA_OTEL_SAMPLE_RATIO`. `tracer == nil` falls back
+to `strataotel.NoopTracer()` (a real but discarding tracer) so unit
+tests without OTel wiring keep working.
+
+`strata-admin rewrap` is a one-shot operator command and stays
+untraced.
 
 ## Source
 

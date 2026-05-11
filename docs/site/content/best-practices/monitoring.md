@@ -103,8 +103,21 @@ logs cross-link. Per-storage observers emit child spans:
 
 - `meta.cassandra.<table>.<op>` from the gocql QueryObserver
   (Cassandra path).
+- `meta.tikv.<table>.<op>` from the Store-method decorator in
+  `internal/meta/tikv/observer.go` (TiKV path).
 - `data.rados.<op>` (`put` / `get` / `del`) from
   `internal/data/rados.ObserveOp` (RADOS path).
+- `S3.<Operation>` from the AWS SDK otelaws middleware installed at
+  `internal/data/s3/observer.go::installOTelMiddleware` (S3-over-S3
+  data path), stamped with `strata.s3_cluster=<id>`.
+
+Every gateway-side span carries `strata.component=gateway`. Background
+workers emit per-iteration parent spans named `worker.<name>.tick`
+plus per-tick sub-ops; every worker span carries
+`strata.component=worker` + `strata.worker=<name>` + a per-worker
+`strata.iteration_id=<atomic.uint64>` counter. The full coverage
+matrix, span name conventions, and Jaeger filter recipes live on the
+[Tracing]({{< ref "/best-practices/tracing" >}}) page.
 
 ### Bundled tracing stack
 

@@ -15,6 +15,7 @@ and runbook shape an on-call operator needs.
 |---|---|
 | [Sizing]({{< ref "/best-practices/sizing" >}}) | Picking CPU / RAM / disk per replica, plus Cassandra / TiKV cluster sizing pointers. |
 | [Monitoring]({{< ref "/best-practices/monitoring" >}}) | Wiring Prometheus, Grafana, OTel collector, and the in-process trace browser. |
+| [Tracing]({{< ref "/best-practices/tracing" >}}) | OpenTelemetry coverage matrix, span name conventions, `strata.component=gateway\|worker` filters, sampling. |
 | [GC + lifecycle tuning]({{< ref "/best-practices/gc-lifecycle-tuning" >}}) | Tuning `STRATA_GC_CONCURRENCY` / `STRATA_LIFECYCLE_CONCURRENCY` (Phase 1) and `STRATA_GC_SHARDS` (Phase 2), plus the dual-write cutover playbook. |
 | [Backup + restore]({{< ref "/best-practices/backup-restore" >}}) | Snapshot strategy across the metadata, data, and replication tiers. |
 | [Capacity planning]({{< ref "/best-practices/capacity-planning" >}}) | Chunk fan-out math, when to scale shards / replicas, dedup roadmap. |

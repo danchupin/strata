@@ -280,13 +280,46 @@ emits `data.rados.<op>` spans (`put`/`get`/`del`) with the same retroactive-time
 queries / ops set span status to Error so the tail-sampler exports the full trace regardless of ratio.
 Tracer wiring happens in `internal/serverapp/serverapp.go::buildMetaStore` + `buildDataBackend` after
 `strataotel.Init` runs (move OTel init ahead of meta/data construction; its lifetime spans the whole
-process). For tracing-only deploy, `deploy/docker/docker-compose.yml` ships an OTLP collector + Jaeger
-all-in-one behind the `tracing` profile (`docker compose --profile tracing up otel-collector jaeger`);
-collector config in `deploy/otel/collector-config.yaml` fans incoming OTLP traces to Jaeger at
-`jaeger:4317`. Workers under `strata server` (gc/lifecycle/replicator/access-log/notify/inventory/
-audit-export/manifest-rewriter) currently pass nil tracer — add `Tracer: tp.Tracer("strata.<worker>")`
-to their config when their own /readyz / metrics story matures. `strata-admin rewrap` is a one-shot
-operator command and stays untraced.
+process). The TiKV meta backend gets `cfg.Tracer = tp.Tracer("strata.meta.tikv")` on the tikv branch of
+`buildMetaStore`; `internal/meta/tikv/observer.go::Observer.Start(ctx, op, table)` wraps every public
+Store method and emits `meta.tikv.<table>.<op>` client-kind spans with `db.system=tikv` /
+`db.tikv.table` / `db.operation` attrs. The S3-over-S3 data backend installs the upstream
+`go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws` middleware (v0.68,
+semconv v1.40) via `internal/data/s3/observer.go::installOTelMiddleware` BEFORE the metrics
+instrumentation in `connFor` — `cfg.Tracer = tp.Tracer("strata.data.s3")` on the `case "s3":` branch of
+`buildDataBackend`. The middleware auto-emits `S3.<Operation>` spans with `rpc.system.name=aws-api` /
+`rpc.method=S3/<op>` / `aws.region` / `http.response.status_code`; a custom `AttributeBuilder` stamps
+`strata.component=gateway` + `strata.s3_cluster=<id>` per-call. For tracing-only deploy,
+`deploy/docker/docker-compose.yml` ships an OTLP collector + Jaeger all-in-one behind the `tracing`
+profile (`docker compose --profile tracing up otel-collector jaeger`); collector config in
+`deploy/otel/collector-config.yaml` fans incoming OTLP traces to Jaeger at `jaeger:4317`.
+
+Every gateway-side observer also stamps `strata.component=gateway` via the shared constants
+`internal/otel.AttrComponentGateway` / `AttrComponentWorker` (file `internal/otel/component.go`) so
+operators can filter the full gateway path in one Jaeger query (`strata.component=gateway`) or the
+full worker path (`strata.component=worker`) without naming every span. The
+[Tracing best-practices](docs/site/content/best-practices/tracing.md) page lists the full coverage
+matrix + per-worker filter recipes.
+
+Workers under `strata server` (gc, lifecycle, replicator, notify, access-log, inventory, audit-export,
+manifest-rewriter, quota-reconcile, usage-rollup) emit per-iteration spans via the
+`workers.StartIteration` / `workers.EndIteration` helper (re-export of
+`internal/otel/iteration_span.go`). The supervisor already wires `*strataotel.Provider` onto
+`workers.Dependencies.Tracer` at `serverapp.go:254`, so each worker just calls
+`deps.Tracer.Tracer("strata.worker.<name>")` from its `Build` constructor and threads the resulting
+`trace.Tracer` onto its inner runner. Per iteration: parent span `worker.<name>.tick` with
+`strata.component=worker` + `strata.worker=<name>` + `strata.iteration_id=<atomic.uint64>`
+(per-worker counter, process-local); sub-op child spans like `gc.delete_chunk` /
+`lifecycle.transition_object` / `replicator.copy_object` / `notify.deliver_event` /
+`access_log.flush_bucket` / `inventory.scan_bucket` / `audit_export.export_partition` /
+`manifest_rewriter.rewrite_bucket` / `quota_reconcile.scan_bucket` / `usage_rollup.sample_bucket`
+emit under the parent via `tracer.Start(ctx, …)`. Sub-op errors `RecordError` + `SetStatus(Error)` and
+flow into a sync.Mutex-guarded sticky-err accumulator so the iteration parent flips to Error and the
+tail-sampler exports the full iteration regardless of `STRATA_OTEL_SAMPLE_RATIO`. `tracer == nil`
+falls back to `strataotel.NoopTracer()` (a real but discarding tracer) so unit tests without OTel
+wiring keep working. **Adding a new worker: just call `deps.Tracer.Tracer("strata.worker.<name>")`
+and wrap your tick body in `StartIteration` / `EndIteration` — no struct change.** `strata-admin
+rewrap` is a one-shot operator command and stays untraced.
 
 ## Cassandra gotchas (real ones, hit during this codebase's lifetime)
 

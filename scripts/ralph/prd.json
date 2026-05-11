@@ -112,8 +112,8 @@
         "Tests pass"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped: new docs/site/content/best-practices/tracing.md (full coverage matrix: HTTP / cassandra meta / tikv meta / rados data / s3 data / worker iteration + sub-op spans; tracer names; Jaeger filter recipes by strata.component / strata.worker / strata.s3_cluster; sampling + iteration-id semantics). docs/site/content/best-practices/_index.md links new page. docs/site/content/best-practices/monitoring.md per-storage child-span list extended with meta.tikv.*, data.s3 (S3.<Operation>), worker.<name>.tick + cross-link to tracing page. docs/site/content/architecture/observability.md: replaced obsolete 'workers currently pass nil tracer' subsection with the new convention (StartIteration / EndIteration helper + deps.Tracer.Tracer pattern + sub-op span list + sticky-err Error propagation + NoopTracer fallback); extended Per-storage span emission section with TiKV observer + S3 otelaws shape + strata.component constants. ROADMAP.md close-flip on both lines 205 + 206 (P2 TiKV meta + P3 S3-over-S3 data) per CLAUDE.md format with `<pending>` SHA placeholder for follow-up backfill commit. Project CLAUDE.md tracing block extended: TiKV observer Start(op, table) pattern, S3 otelaws install BEFORE metrics in connFor, strata.component=gateway constants from internal/otel/component.go, worker convention (workers.StartIteration / EndIteration + deps.Tracer.Tracer + sub-op span list + sticky-err + Noop fallback). tasks/prd-complete-tracing.md deleted per CLAUDE.md PRD lifecycle rule. Quality: go vet ./... + go build ./... + make docs-build all clean."
     }
   ]
 }
