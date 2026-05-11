@@ -1,118 +1,118 @@
 {
   "project": "Strata",
-  "branchName": "ralph/s3-multi-cluster",
-  "description": "Env-Driven Multi-Cluster S3 Data Backend. Closes ROADMAP P2 'Env-driven multi-cluster S3 data backend' (filed 2026-05-11 after the dynamic-clusters revert). `internal/data/s3/backend.go` is single-bucket-per-instance today: `Backend{bucket, client, uploader, opTimeout, sseMode, sseKMSKeyID}`. RADOS went multi-cluster in US-044 (`STRATA_RADOS_CLUSTERS` + per-class `ClassSpec.Cluster`); S3 has no equivalent. Mirror the RADOS env-driven shape: (1) `S3ClusterSpec` (bucket-less) + `ClassSpec{Cluster, Bucket}` types + JSON parsers; (2) lift `data.s3.Backend` to `clusters map[string]*s3Cluster` with per-cluster `*awss3.Client` + `*manager.Uploader` lazy-built via `connFor`; (3) bucket arg routing through `resolveClass` on every data-plane method (Put/Get/Delete/Head/Copy/List/PutChunks/GetChunks/Presign/Multipart); (4) retire all 13 `STRATA_S3_BACKEND_*` envs entirely \u2014 replaced by `STRATA_S3_CLUSTERS` (JSON array) + `STRATA_S3_CLASSES` (JSON object); (5) `s3test.NewFixture(t)` test helper collapses inline test setup; (6) docs + ROADMAP close-flip. Credentials never plaintext \u2014 `credentials_ref` discriminator (`chain` / `env:VAR1:VAR2` / `file:/path[:profile]`); missing creds at boot \u2192 fail-fast (gateway refuses to start). `Cluster` REQUIRED per class \u2014 no DefaultCluster fallback. Adding/removing cluster requires gateway restart; rolling restart of N replicas hides per-instance downtime. NOT in scope: dynamic registry (won't-do); chunk-side data migration (rebalance worker P2); KMS-fetched creds (P3 follow-up). 6 stories. Closes ROADMAP P2 'Env-driven multi-cluster S3 data backend.' on cycle close.",
+  "branchName": "ralph/complete-tracing",
+  "description": "Complete OpenTelemetry tracing coverage across all backends + workers. Closes ROADMAP P2 'TiKV meta backend emits no trace spans' + P3 'S3-over-S3 data backend emits no trace spans' AND fills the worker tracing gap noted in project CLAUDE.md (all 10 workers — gc / lifecycle / replicator / notify / access-log / inventory / audit-export / manifest-rewriter / quota-reconcile / usage-rollup — pass nil tracer today). Current coverage: HTTP middleware + Cassandra meta (`meta.cassandra.<table>.<op>` via gocql.QueryObserver) + RADOS data (`data.rados.<op>` via ObserveOp). Gaps: (1) TiKV meta — no observer; (2) S3-over-S3 data — no observer, AWS SDK calls untraced; (3) Workers — every worker emits nothing. Fix: stamp `strata.component=\"gateway\"` on existing gateway-side observers first (clean baseline), then TiKV observer mirroring cassandra shape, S3 backend via otelaws AWS SDK middleware (auto-spans per SDK call with semconv rpc.* attrs), workers use existing `deps.Tracer.Tracer(\"strata.worker.<name>\")` pattern + new `StartIteration / EndIteration` helper emitting `worker.<name>.tick` spans per iteration with attributes `strata.component=\"worker\"` + `strata.worker=<name>` + atomic uint64 `strata.iteration_id`. Per-iteration only (no long-running parent). Worker sampling via same `STRATA_OTEL_SAMPLE_RATIO` tail-sampler; failing iterations always export (status=Error). NOTE: `workers.Dependencies.Tracer` is already `*strataotel.Provider` wired at `serverapp.go:254` — workers just need to USE it (no struct change). 6 stories. Closes ROADMAP P2 'TiKV meta backend emits no trace spans' + P3 'S3-over-S3 data backend emits no trace spans' on cycle close.",
   "userStories": [
     {
       "id": "US-001",
-      "title": "S3ClusterSpec + ClassSpec types + JSON parser",
-      "description": "As a developer, I want the S3 multi-cluster type shape defined and parseable from env JSON so subsequent stories build on a stable surface.",
+      "title": "Gateway-side observers stamp strata.component=gateway",
+      "description": "As an operator, I want every existing gateway-side span (HTTP middleware, Cassandra meta observer, RADOS data observer) tagged with `strata.component=gateway` so the Jaeger filter scheme rolled out in later stories works on day-one.",
       "acceptanceCriteria": [
-        "Add `internal/data/s3/cluster.go` with `type S3ClusterSpec struct { ID, Endpoint, Region, SSEMode, SSEKMSKeyID string; ForcePathStyle bool; PartSize, UploadConcurrency, MaxRetries int64; OpTimeoutSecs int; Credentials CredentialsRef }` with full JSON tags",
-        "`type CredentialsRef struct { Type string; Ref string }`. `Type \u2208 {\"chain\", \"env\", \"file\"}`. `Ref` empty for `chain`; for `env` it is `\"<ACCESS_KEY_VAR>:<SECRET_KEY_VAR>\"`; for `file` it is the credentials file path (with optional `:profile` suffix)",
-        "JSON marshal / unmarshal round-trip for `S3ClusterSpec`",
-        "Add `internal/data/s3/class.go` with `type ClassSpec struct { Cluster, Bucket string }`. Both REQUIRED (validation in parser)",
-        "`ParseClusters(jsonStr string) (map[string]S3ClusterSpec, error)` parses a JSON array; duplicate id \u2192 error; empty id / endpoint / region \u2192 error; unknown CredentialsRef.Type \u2192 error",
-        "`ParseClasses(jsonStr string) (map[string]ClassSpec, error)` parses a JSON object; empty Cluster / Bucket per class \u2192 error; reference to non-existing cluster validated separately at Backend construction",
-        "Unit test `internal/data/s3/cluster_test.go`: round-trip JSON for each CredentialsRef.Type; reject malformed env-ref (missing colon), reject unknown type; reject duplicate cluster id; reject empty fields",
-        "Unit test `internal/data/s3/class_test.go`: parse two classes; empty Cluster \u2192 error; empty Bucket \u2192 error; class object missing required field \u2192 error",
-        "Typecheck passes",
-        "Tests pass"
-      ],
-      "priority": 1,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-002",
-      "title": "Lift data.s3.Backend to multi-cluster shape",
-      "description": "As a developer, I want `data.s3.Backend` to hold a map of per-cluster S3 SDK clients so the gateway can serve traffic across multiple S3 endpoints concurrently.",
-      "acceptanceCriteria": [
-        "Refactor `internal/data/s3/backend.go::Backend` to hold `clusters map[string]*s3Cluster, classes map[string]ClassSpec, mu sync.Mutex` (no top-level `bucket`, `client`, `uploader`, `sseMode`, `sseKMSKeyID` fields \u2014 those move into per-cluster `s3Cluster`)",
-        "`type s3Cluster struct { spec S3ClusterSpec; client *awss3.Client; uploader *manager.Uploader }` (private struct). Built lazily by `connFor(ctx, id) (*s3Cluster, error)` under `b.mu` on first use; mirrors `rados.Backend.connFor` semantics",
-        "`connFor` resolves `s3Cluster.spec.Credentials` via the SDK loader: `chain` \u2192 `awsconfig.LoadDefaultConfig`; `env` \u2192 read named env vars + `credentials.NewStaticCredentialsProvider`; `file` \u2192 `awsconfig.LoadSharedConfigProfile` with parsed `path:profile`. Caches the built `*awss3.Client` + `*manager.Uploader`",
-        "`resolveClass(class string) (ClassSpec, error)` mirrors rados shape: looks up `b.classes[class]`; missing class \u2192 `ErrUnknownStorageClass`; empty `Cluster` \u2192 `ErrClassMissingCluster`",
-        "`New(cfg Config) (*Backend, error)` validates: every `cfg.Classes[*].Cluster` must reference a known `cfg.Clusters[id]`; every `cfg.Clusters[*].Credentials` resolves successfully at boot (fail-fast \u2014 missing env var / missing file \u2192 error from `New`); returns `*Backend` ready for traffic",
-        "Cluster spec validation at boot: a sample `LoadDefaultConfig` call per `chain` cluster verifies creds resolve; a `getenv` check per `env:` ref verifies vars are set; a `os.Stat` per `file:` path verifies the file exists. Failures bubble up from `New` with a descriptive error",
-        "Existing single-cluster test suite (`internal/data/s3/backend_test.go`, `multipart_test.go`, `presign_test.go`, `cors_test.go`, `lifecycle_test.go`, `metrics_test.go`) compiles green; semantic rewrite of those tests lands in US-005 via the new `s3test` fixture",
-        "Race detector (`go test -race ./internal/data/s3/...`) clean",
-        "Typecheck passes",
-        "Tests pass"
-      ],
-      "priority": 2,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-003",
-      "title": "Bucket arg routing on every S3 data-plane method",
-      "description": "As a developer, I want every S3 data-plane method to read the target bucket from the resolved `ClassSpec.Bucket` instead of the old top-level `Backend.bucket` field so per-class routing works.",
-      "acceptanceCriteria": [
-        "`Put` / `Get` / `Delete` / `Head` / `Copy` / `List` / `PutChunks` / `GetChunks` resolve `(cluster, bucket) := b.resolveClass(class)` first; bucket flows into every SDK call (`PutObjectInput.Bucket`, `GetObjectInput.Bucket`, etc.) \u2014 no `b.bucket` reference remains",
-        "Multipart methods (`CreateBackendMultipart` / `UploadBackendPart` / `CompleteBackendMultipart` / `AbortBackendMultipart`) thread the upload's resolved bucket into every SDK call \u2014 verify `meta.MultipartUpload.BackendUploadID` carries enough to re-resolve on subsequent calls OR persist the cluster id alongside if needed",
-        "`Presign*` methods route through the same resolution; SSE-related per-cluster knobs (`SSEMode`, `SSEKMSKeyID`) come from `s3Cluster.spec`, not from a top-level field",
-        "`objectKey(ctx context.Context)` preserved as-is \u2014 keys are bucket-relative",
-        "New unit test `internal/data/s3/multi_cluster_test.go`: configure two clusters + three classes (class A \u2192 cluster-eu/bucket-a, class B \u2192 cluster-eu/bucket-b, class C \u2192 cluster-us/bucket-c) against in-process httptest S3 fakes; PutChunks for each class lands on the correct (cluster, bucket); cross-class read isolation; `resolveClass` for unknown class \u2192 `ErrUnknownStorageClass`",
-        "Typecheck passes",
-        "Tests pass"
-      ],
-      "priority": 3,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-004",
-      "title": "Retire STRATA_S3_BACKEND_* env path",
-      "description": "As a developer, I want the legacy env-based single-cluster config fully removed so there is exactly ONE source of truth for the S3 backend \u2014 the new `STRATA_S3_CLUSTERS` + `STRATA_S3_CLASSES` envs.",
-      "acceptanceCriteria": [
-        "Remove `S3Backend` field from `internal/config/config.go::Config` AND all 13 `STRATA_S3_BACKEND_*` entries from the koanf env-map (`_ENDPOINT`, `_REGION`, `_BUCKET`, `_ACCESS_KEY`, `_SECRET_KEY`, `_FORCE_PATH_STYLE`, `_PART_SIZE`, `_UPLOAD_CONCURRENCY`, `_MAX_RETRIES`, `_OP_TIMEOUT_SECS`, `_MULTIPART_TIMEOUT_SECS`, `_SSE_MODE`, `_SSE_KMS_KEY_ID`)",
-        "Remove the corresponding `S3BackendConfig` struct + `Validate*` body in `config.go`",
-        "Add `S3 struct { Clusters string `koanf:\"clusters\"`; Classes string `koanf:\"classes\"` }` (top-level holds raw JSON strings) to `Config`. Wire `STRATA_S3_CLUSTERS` \u2192 `s3.clusters`, `STRATA_S3_CLASSES` \u2192 `s3.classes` in the koanf env-map",
-        "`internal/serverapp/serverapp.go::buildDataBackend` `case \"s3\":` parses `cfg.S3.Clusters` via `s3.ParseClusters`, `cfg.S3.Classes` via `s3.ParseClasses`, then calls `s3.New(s3.Config{Clusters, Classes})`. Validation errors from `s3.New` bubble up \u2014 gateway refuses to start",
-        "Update `deploy/docker/docker-compose.yml` if it sets `STRATA_S3_BACKEND_*`; document the new bootstrap path (set `STRATA_S3_CLUSTERS` + `STRATA_S3_CLASSES`)",
-        "Update `scripts/s3-tests/run.sh` + smoke harness if they reference the legacy envs; switch to the new env shape",
-        "`make smoke` still passes against an S3 backend path (if smoke profile uses S3; otherwise smoke remains rados-only)",
-        "Typecheck passes",
-        "Tests pass"
-      ],
-      "priority": 4,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-005",
-      "title": "s3test fixture package for unit tests",
-      "description": "As a developer, I want a one-call test fixture that wires up a `data.s3.Backend` + cluster + class so existing per-file test setup collapses to a single `s3test.NewFixture(t)` call.",
-      "acceptanceCriteria": [
-        "Add `internal/data/s3/s3test/fixture.go` with `Fixture{Backend *s3.Backend, ClusterID, ClassName, Bucket string}` and `NewFixture(t testing.TB) *Fixture` constructor: builds ONE cluster spec pointing at an httptest server, registers ONE class mapped to that cluster + a random bucket name, returns a wired `*s3.Backend`",
-        "Variants: `WithClusters(specs ...S3ClusterSpec) Option`, `WithClass(name, clusterID, bucket string) Option` for tests that need multiple clusters / classes",
-        "Existing single-cluster test suite (`backend_test.go`, `multipart_test.go`, `presign_test.go`, `cors_test.go`, `lifecycle_test.go`, `metrics_test.go`) refactored to use `s3test.NewFixture` instead of building Backend + env config inline \u2014 net LOC reduction; semantics unchanged",
-        "Document the fixture in a one-paragraph header on `s3test/fixture.go`",
+        "`internal/otel/middleware.go` HTTP middleware: after `tracer.Start(ctx, ...)`, call `span.SetAttributes(attribute.String(\"strata.component\", \"gateway\"))`",
+        "`internal/meta/cassandra/observer.go::SlowQueryObserver.ObserveQuery`: inside the span emission branch, stamp `strata.component=gateway`",
+        "`internal/data/rados/observer.go::ObserveOp`: inside the span emission branch, stamp `strata.component=gateway`",
+        "Add an exported constant `internal/otel.AttrComponentGateway = attribute.String(\"strata.component\", \"gateway\")` AND `AttrComponentWorker = attribute.String(\"strata.component\", \"worker\")` to avoid magic-string duplication across files",
+        "Unit tests in each of the three observers (`middleware_test.go`, `observer_test.go` for cassandra + rados) extended with one assertion: emitted span carries `strata.component=gateway`",
         "Race detector clean",
         "Typecheck passes",
         "Tests pass"
       ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "TiKV meta backend observer + tracer wiring",
+      "description": "As an operator inspecting a Jaeger waterfall on the lab-tikv stack, I want every TiKV transactional op to appear as a child span of its request so the meta-write step is visible.",
+      "acceptanceCriteria": [
+        "Add `internal/meta/tikv/observer.go` with `type Observer struct { logger *slog.Logger; tracer trace.Tracer }` and `WrapOp(ctx, op, table string, fn func(ctx) error) error` helper that starts a child span `meta.tikv.<table>.<op>`, runs `fn`, marks status from `err`, ends span. Attributes: `db.system=\"tikv\"`, `db.operation=<op>`, `db.table=<table>`, `strata.component=\"gateway\"` (via `internal/otel.AttrComponentGateway` from US-001)",
+        "Add `Tracer trace.Tracer` field to `internal/meta/tikv/config.go::Config` (matches `cassandra.SessionConfig.Tracer` shape)",
+        "`internal/meta/tikv/store.go` constructor stores tracer; every public Store method that hits TiKV (CreateBucket, GetBucket, PutObject, GetObject, DeleteObject, ListObjects, SavePart, CompleteMultipart, abort/complete/get*Multipart, SetBucketBlob/GetBucketBlob/DeleteBucketBlob, PutBucketStats/GetBucketStats — full enumeration via grep) wraps its inner txn body in `observer.WrapOp(ctx, \"<op>\", \"<table>\", func(ctx) error { ... })`",
+        "Wire `cfg.Tracer = tp.Tracer(\"strata.meta.tikv\")` in `internal/serverapp/serverapp.go::buildMetaStore` after `strataotel.Init` runs, mirror cassandra wiring at line ~545",
+        "Failing op (`err != nil`) sets span status to Error so tail-sampler exports",
+        "Race detector `go test -race ./internal/meta/tikv/...` clean",
+        "Unit test `internal/meta/tikv/observer_test.go`: fake tracer captures span name / attributes / status for synthetic op; success vs error paths verified",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "S3 backend AWS SDK otelaws middleware",
+      "description": "As an operator running an S3-over-S3 deployment, I want every AWS SDK call from `data.s3.Backend` to land as a span in the trace so PutChunk / GetChunk paths are visible.",
+      "acceptanceCriteria": [
+        "Add `go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws` as project dependency",
+        "`internal/data/s3/backend.go::connFor` installs `otelaws.AppendMiddlewares(&awsCfg.APIOptions)` BEFORE client construction. Spans emit per SDK call with auto-attributes `rpc.service=S3`, `rpc.method=<op>`, `aws.region=<region>`, `http.status_code=<code>`",
+        "Custom span-attribute hook stamps `strata.component=\"gateway\"` (via `internal/otel.AttrComponentGateway` from US-001) + `strata.s3_cluster=<cluster-id>` on every span so traces are filterable per cluster",
+        "Add `Tracer trace.Tracer` field to `internal/data/s3/config.go::Config`; wire `cfg.Tracer = tp.Tracer(\"strata.data.s3\")` in `internal/serverapp/serverapp.go::buildDataBackend` for `case \"s3\":` (mirror rados wiring at line ~368)",
+        "If `cfg.Tracer == nil` (tests), skip middleware registration — preserves zero-config test fixture from `s3test.NewFixture`",
+        "Failing SDK call (`http.status_code >= 400`) marks span status Error so tail-sampler exports",
+        "Race detector `go test -race ./internal/data/s3/...` clean",
+        "Unit test `internal/data/s3/observer_test.go`: drive Backend.Put against httptest fake; assert otelaws-emitted span carries `rpc.method=PutObject`, `strata.component=gateway`, `strata.s3_cluster=<id>`",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Worker tracing — iteration helper + gc/lifecycle wiring",
+      "description": "As an operator, I want each gc / lifecycle worker iteration to appear as a discrete trace so I can correlate scheduling decisions with their meta + data ops.",
+      "acceptanceCriteria": [
+        "`workers.Dependencies.Tracer` is ALREADY `*strataotel.Provider` (wired at `serverapp.go:254`). No struct change needed — workers just need to USE it via `deps.Tracer.Tracer(\"strata.worker.<name>\")`",
+        "Add `cmd/strata/workers/iteration_span.go` helper: `StartIteration(ctx context.Context, tracer trace.Tracer, workerName string) (context.Context, trace.Span)` returns child span named `worker.<name>.tick` with attributes `strata.component=\"worker\"` (via `internal/otel.AttrComponentWorker`), `strata.worker=<name>`, `strata.iteration_id=<atomic-uint64-counter>` (per-worker, atomic.AddUint64 — safe for fan-out workers). `EndIteration(span trace.Span, err error)` marks Error on `err != nil` and ends span",
+        "If `tracer == nil` (unit tests without tracer wiring), iteration spans use `tracenoop.NewTracerProvider().Tracer(...)` — no-panic, no behavior change",
+        "`cmd/strata/workers/gc.go::Build` extracts `tracer := deps.Tracer.Tracer(\"strata.worker.gc\")` and propagates into gc Runner; gc's main loop wraps each scan-batch tick in `StartIteration` / `EndIteration`. Child spans for `gc.scan_partition`, `gc.delete_chunk` emit under the parent iteration span via `tracer.Start`",
+        "`cmd/strata/workers/lifecycle.go::Build` same pattern: per-iteration parent span + child spans for `lifecycle.scan_bucket`, `lifecycle.expire_object`, `lifecycle.transition_object`",
+        "Sampling: worker spans flow through existing `internal/otel/sampler.go` tail-sampler; failing iterations always export (status=Error)",
+        "Unit test (gc + lifecycle): drive one iteration with fake meta backend that errors on third op; assert per-iteration span has Error status AND a `gc.delete_chunk` child span with Error status",
+        "Race detector clean",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Worker tracing — feature batch (replicator + 7 others)",
+      "description": "As an operator, I want every remaining worker wired to the same per-iteration span helper so trace coverage is uniform across all 10 workers.",
+      "acceptanceCriteria": [
+        "Each of 8 workers in `cmd/strata/workers/` (replicator.go, notify.go, access_log.go, inventory.go, audit_export.go, manifest_rewriter.go, quota_reconcile.go, usage_rollup.go) follows gc/lifecycle pattern from US-004: extract `tracer := deps.Tracer.Tracer(\"strata.worker.<name>\")`, per-iteration parent span via `StartIteration` / `EndIteration`, child spans for per-tick sub-ops where meaningful (`notify.deliver_event`, `replicator.copy_object`, `access_log.flush_bucket`, `inventory.scan_bucket`, `audit_export.export_partition`, `manifest_rewriter.rewrite_bucket`, `quota_reconcile.scan_bucket`, `usage_rollup.sample_bucket`)",
+        "Each worker's test file (`*_test.go`) gains one trace assertion: drive single iteration, assert per-iteration span name + `strata.worker=<name>` + `strata.component=worker` attributes",
+        "No semantic behavior change — just span emission",
+        "Race detector `go test -race ./cmd/strata/workers/...` clean",
+        "Typecheck passes",
+        "Tests pass"
+      ],
       "priority": 5,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-006",
       "title": "Docs + ROADMAP close-flip",
-      "description": "As a developer, I want operator-facing docs + the ROADMAP P2 entry flipped in the same commit when the cycle closes.",
+      "description": "As a developer, I want operator-facing docs that document the new component-discriminator scheme + ROADMAP entries flipped in the same commit when the cycle closes.",
       "acceptanceCriteria": [
-        "Add `docs/site/content/best-practices/s3-multi-cluster.md` covering: `S3ClusterSpec` shape (endpoint, region, force-path-style, etc.) + `credentials_ref` discriminator (`chain` / `env:VAR:VAR` / `file:/path:profile`), per-class routing via `ClassSpec{Cluster, Bucket}`, full env JSON examples (`STRATA_S3_CLUSTERS` + `STRATA_S3_CLASSES`), rolling-restart workflow for cluster add / remove, fail-fast credential validation at boot",
-        "Update `docs/site/content/best-practices/_index.md` table with the new page row",
-        "Reference doc `docs/site/content/reference/_index.md` \u2014 REMOVE the 13 `STRATA_S3_BACKEND_*` rows; ADD `STRATA_S3_CLUSTERS` + `STRATA_S3_CLASSES` rows + deep-links to the new doc page",
-        "ROADMAP.md close-flip in the same commit per CLAUDE.md Roadmap maintenance rule: `~~**P2 \u2014 Env-driven multi-cluster S3 data backend.**~~ \u2014 **Done.** ... (commit `<pending>`)`",
-        "Delete `tasks/prd-s3-multi-cluster.md` per CLAUDE.md PRD lifecycle rule (Ralph snapshot is the canonical record)",
+        "Update `docs/site/content/best-practices/web-ui.md` (or add `docs/site/content/best-practices/tracing.md` if it does not yet exist as separate page — verify) with: full coverage matrix (HTTP middleware / TiKV meta / Cassandra meta / RADOS data / S3 data / Workers), span name conventions (`meta.<backend>.<op>`, `data.<backend>.<op>`, `worker.<name>.tick`), `strata.component=gateway|worker` filter examples for Jaeger, `strata.worker=<name>` per-worker filter examples, sampling behaviour (tail-sampler, failing spans always export)",
+        "ROADMAP.md close-flip in same commit per CLAUDE.md Roadmap maintenance rule: flip BOTH P2 entry 'TiKV meta backend emits no trace spans' AND P3 entry 'S3-over-S3 data backend emits no trace spans' to `~~**Px — ...**~~ — **Done.** ... (commit `<pending>`)`",
+        "Update project CLAUDE.md note about \"Workers under `strata server` currently pass nil tracer\" — replace with new convention: each worker emits per-iteration spans via `workers.StartIteration` helper; supervisor already wires `deps.Tracer` so workers just call `deps.Tracer.Tracer(\"strata.worker.<name>\")`",
+        "Reference doc `docs/site/content/reference/_index.md` already mentions OTel envs — verify `STRATA_OTEL_SAMPLE_RATIO` description reflects worker spans are sampled the same way; update if needed",
+        "Delete `tasks/prd-complete-tracing.md` per CLAUDE.md PRD lifecycle rule (Ralph snapshot is the canonical record)",
         "`make docs-build` clean (Hugo strict-ref resolution catches dangling refs)",
         "Closing-SHA backfill follow-up commit on main per established pattern",
         "Typecheck passes",
         "Tests pass"
       ],
       "priority": 6,
-      "passes": true,
+      "passes": false,
       "notes": ""
     }
   ]
