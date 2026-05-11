@@ -29,3 +29,17 @@ Cycle: ralph/dynamic-clusters
 - `tasks/prd-dynamic-clusters.md` REMOVED in US-007 close-flip per CLAUDE.md PRD lifecycle rule. Canonical record lives in Ralph snapshot `scripts/ralph/archive/<YYYY-MM-DD>-dynamic-clusters/` after `archive_cycle` fires.
 - Verification: `go vet ./...`, `go test ./... -race`, `make test-integration` (cassandra contract case), `make docs-build`, `make smoke`. `scripts/s3-tests/run.sh` should still pass — pure registry layer.
 
+
+## 2026-05-11 - US-001
+- Added `ClusterRegistryEntry` struct + `ErrClusterNotFound` / `ErrClusterVersionMismatch` sentinels to `internal/meta/store.go`.
+- Extended `meta.Store` interface with `ListClusters / GetCluster / PutCluster / DeleteCluster`.
+- Implemented full CRUD on memory backend (`internal/meta/memory/store.go`): map under existing RWMutex, monotonic Version bump on insert + CAS-on-Version on update, UpdatedAt stamped server-side.
+- Added stub impls on cassandra (`internal/meta/cassandra/clusters.go`) + tikv (`internal/meta/tikv/clusters.go`) returning `errClusterRegistryNotImplemented` — US-002 / US-003 replace.
+- Added exported `storetest.CaseClusterRegistry(t, s)` covering: empty-list returns nil, missing-Get returns ErrClusterNotFound, insert two + list sorted by ID, get returns row, stale-Version update returns ErrClusterVersionMismatch, matching-Version update bumps Version + advances UpdatedAt, delete + delete-again returns ErrClusterNotFound, surviving row visible.
+- Memory backend test (`internal/meta/memory/store_test.go`) wires it directly via new `TestMemoryClusterRegistry`.
+- `go test ./...` green incl. `-race` on the new case. `go vet ./...` green.
+- **Learnings for future iterations:**
+  - Stub-pattern on the other two backends: returning a single `errClusterRegistryNotImplemented` per backend lets `meta.Store` compile across the whole tree without spreading typecheck failures into US-002 / US-003's work. The contract case isn't added to `storetest.Run`'s cases list (would trip cassandra/tikv integration), only wired directly in the memory test; US-002 / US-003 will wire on their backends as their impls land.
+  - `PutCluster` mutates the supplied `*ClusterRegistryEntry` in place (writes back CreatedAt / UpdatedAt / Version) so admin handlers can return the post-write row to the client without a second Get round-trip.
+  - The contract case relies on the `time.Sleep(time.Millisecond)` pattern between the original Put and the update so the `UpdatedAt.After(prevUpdated)` assertion is robust on backends that stamp UpdatedAt with the wall clock.
+---
