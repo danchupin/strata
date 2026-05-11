@@ -93,8 +93,8 @@
         "Tests pass"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped: every remaining worker (replicator / notify / access-log / inventory / audit-export / manifest-rewriter / quota-reconcile / usage-rollup) wraps its periodic entrypoint (RunOnce, or Run for the one-shot manifest-rewriter) in StartIteration / EndIteration via the strataotel helper from US-004. Tracer threaded through each worker's Config (Tracer trace.Tracer field) and wired in cmd/strata/workers/<name>.go::build<X> via deps.Tracer.Tracer(\"strata.worker.<name>\"). Per-worker sub-op child spans: replicator.copy_object (per event), notify.deliver_event (per event), access_log.flush_bucket (per bucket), inventory.scan_bucket (per bucket), audit_export.export_partition (per partition), manifest_rewriter.rewrite_bucket (per bucket), quota_reconcile.scan_bucket (per bucket), usage_rollup.sample_bucket (per bucket). Each emits with strata.component=worker + strata.worker=<name> + worker-specific attrs (bucket name/id, event id, rule id, target arn, etc). Sub-op errors RecordError + SetStatus(Error) + flow into a sync.Mutex-guarded sticky iterErr accumulator so the iteration parent span flips to Error and the tail-sampler always exports failing iterations regardless of sample ratio. RunOnce semantics preserved for replicator + notify (per-event failures route to internal retry/DLQ, never bubble — only the span flips Error); accesslog / inventory / auditexport / manifestrewriter / quotareconcile / usagerollup propagate sticky-err to the caller so the supervisor's Warn log surfaces failed iterations. Tests: one new *_test.go file per worker (worker_trace_test.go) asserts iteration parent span name + strata.component=worker + strata.worker=<name> attrs + at least one expected child span. All tests pass under -race; go vet ./... + go build ./... clean."
     },
     {
       "id": "US-006",

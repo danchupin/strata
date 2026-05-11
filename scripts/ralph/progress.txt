@@ -112,3 +112,33 @@ Cycle: ralph/complete-tracing
   - Provider.TracerProvider() falls back to otel.GetTracerProvider() when the SDK provider is absent (no-op mode). This keeps caller code free of nil checks AND allows tests that don't call strataotel.Init to still drive instrumentation by setting the global provider directly.
   - Test pattern: use `tracetest.InMemoryExporter` + `sdktrace.WithSyncer(exp)` — Syncer flushes synchronously on span End, so no `tp.ForceFlush(ctx)` needed in test bodies. Asserting via `exp.GetSpans()` after the operation completes is enough.
 ---
+
+## 2026-05-11 - US-005
+- Wired tracer + per-iteration spans into the remaining 8 background workers (gc + lifecycle landed in US-004):
+  - internal/replication/worker.go: Config.Tracer + sync.Mutex-guarded iterErr + tracerOrNoop(). RunOnce wraps an internal runOnce() in StartIteration/EndIteration. dispatch() now opens a replicator.copy_object child span with strata.component=worker + strata.worker=replicator + event_id/rule/bucket/key/destination attrs; per-event failures still route through internal retry/markFailed (RunOnce returns nil to preserve existing contract), only the iteration span flips to Error.
+  - internal/notify/worker.go: same shape. notify.deliver_event child span per dispatch with event_id/event_name/target_type/target_arn/sink attrs. DLQ "no sink registered" path now records an Error on the child span so unsubscribed targets are visible in traces.
+  - internal/accesslog/worker.go: RunOnce → runOnce wraps the bucket loop. access_log.flush_bucket child span per source bucket; bucketCtx threads into flushBucket so any future per-bucket sub-ops can be attached.
+  - internal/inventory/inventory.go: RunOnce → runOnce + scanBucket helper. inventory.scan_bucket span per bucket; per-config errors RecordError + flip the span to Error and feed sticky iterErr.
+  - internal/auditexport/worker.go: RunOnce → runOnce. audit_export.export_partition span per (BucketID, Day) partition with strata.audit_export.bucket_id + day attrs.
+  - internal/manifestrewriter/worker.go: Run() (one-shot) wraps an internal runOnce in StartIteration/EndIteration. manifest_rewriter.rewrite_bucket span per bucket with scanned/rewritten/already_proto post-attrs. Fatal-per-bucket errors return early but the iteration span still End()s with Error.
+  - internal/quotareconcile/worker.go: RunOnce → runOnce. quota_reconcile.scan_bucket span per bucket; corrected=true stamped on the span when drift exceeded threshold.
+  - internal/usagerollup/worker.go: RunOnce(ctx, now) → runOnce(ctx, now). usage_rollup.sample_bucket span per bucket with day=YYYY-MM-DD attr.
+- cmd/strata/workers/{replicator,notify,access_log,inventory,audit_export,manifest_rewriter,quota_reconcile,usage_rollup}.go: each Build constructor stamps Tracer=deps.Tracer.Tracer("strata.worker.<name>") on the inner Config. Worker names match the registered Worker.Name (`access-log`, `audit-export`, etc — hyphenated).
+- Tests (one new file per worker, all assert iteration parent span + strata.component=worker + strata.worker=<name> attrs + a representative child span):
+  - internal/replication/worker_trace_test.go: TestReplicatorWorkerEmitsIterationAndCopySpan.
+  - internal/notify/worker_trace_test.go: TestNotifyWorkerEmitsIterationAndDeliverSpan.
+  - internal/accesslog/worker_trace_test.go: TestAccessLogWorkerEmitsIterationAndFlushSpan.
+  - internal/inventory/worker_trace_test.go: TestInventoryWorkerEmitsIterationAndScanSpan.
+  - internal/auditexport/worker_trace_test.go: TestAuditExportWorkerEmitsIterationAndPartitionSpan.
+  - internal/manifestrewriter/worker_trace_test.go: TestManifestRewriterEmitsIterationAndRewriteSpan.
+  - internal/quotareconcile/worker_trace_test.go: TestQuotaReconcileEmitsIterationAndScanSpan.
+  - internal/usagerollup/worker_trace_test.go: TestUsageRollupEmitsIterationAndSampleSpan.
+- Quality checks: `go vet ./...` clean, `go build ./...` clean, `go test ./... -race` PASS (every package, including the new trace tests).
+- **Learnings for future iterations:**
+  - RunOnce contract per worker varies: replicator + notify intentionally return nil even when per-event dispatch fails (failures route to internal retry/DLQ); accesslog / inventory / auditexport / manifestrewriter / quotareconcile / usagerollup propagate per-bucket sticky-err to the caller. The iteration span ALWAYS flips Error when sub-ops record an error, but the function return value depends on the worker's existing contract. Be explicit about which shape applies when adding a new worker — the supervisor logs the returned error at WARN level, but a non-nil return does not trigger restart.
+  - Shared sticky-err pattern: every worker struct now embeds (iterErrMu sync.Mutex, iterErr error) plus recordIterErr/takeIterErr helpers. recordIterErr is called from sub-op error branches; takeIterErr is called once per RunOnce to drain + reset. Keeps the iteration span Error-status driven by sub-op outcomes without rewriting each worker's existing per-bucket loop.
+  - Worker registered names use hyphens (`access-log`, `audit-export`, `manifest-rewriter`, `quota-reconcile`, `usage-rollup`). The tracer scope and the `strata.worker` attribute follow the same hyphenated form so Jaeger filters can match the supervisor's worker name verbatim. Span sub-op names use snake_case (`access_log.flush_bucket`, `audit_export.export_partition`) by convention because OTel span names typically use dot-separated dotted-path snake_case.
+  - manifestrewriter.Worker.Run is one-shot (returns Stats) — wrapping Run (not RunOnce, which doesn't exist) is the right injection point. The supervisor's manifestRewriterRunner loop in cmd/strata/workers/manifest_rewriter.go calls Run periodically — each call gets its own iteration span.
+  - inventory test file is in external `inventory_test` package; the trace test goes alongside in that same `inventory_test` package, not `package inventory`. Same applies to any future per-worker trace test where the existing _test.go uses `package <name>_test`.
+  - tracetest.InMemoryExporter + sdktrace.WithSyncer pattern reused across all 8 worker trace tests — single shared shape, no fancy mock tracer required. Helper `hasAttr(attrs, key, val)` is duplicated per package because exporting it from a common test util would force a new test package; copy-paste 6 lines per file is the lightest option.
+---

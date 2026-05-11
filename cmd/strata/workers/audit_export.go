@@ -28,5 +28,6 @@ func buildAuditExport(deps Dependencies) (Runner, error) {
 		Prefix:   stringFromEnv("STRATA_AUDIT_EXPORT_PREFIX", ""),
 		After:    durationFromEnv("STRATA_AUDIT_EXPORT_AFTER", 30*24*time.Hour),
 		Interval: durationFromEnv("STRATA_AUDIT_EXPORT_INTERVAL", 24*time.Hour),
+		Tracer:   deps.Tracer.Tracer("strata.worker.audit-export"),
 	})
 }

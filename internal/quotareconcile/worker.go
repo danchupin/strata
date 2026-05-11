@@ -14,12 +14,17 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/danchupin/strata/internal/meta"
 	"github.com/danchupin/strata/internal/metrics"
+	strataotel "github.com/danchupin/strata/internal/otel"
 )
 
 // Config wires a Worker. New() applies defaults.
@@ -36,11 +41,44 @@ type Config struct {
 	// PageLimit is the ListObjects page size. Default 1000.
 	PageLimit int
 	Logger    *slog.Logger
+	// Tracer emits per-iteration parent spans (`worker.quota-reconcile.tick`)
+	// plus `quota_reconcile.scan_bucket` sub-op children. Nil falls back to a
+	// process-shared no-op tracer.
+	Tracer trace.Tracer
 }
 
 // Worker runs the reconcile loop.
 type Worker struct {
 	cfg Config
+
+	iterErrMu sync.Mutex
+	iterErr   error
+}
+
+func (w *Worker) tracerOrNoop() trace.Tracer {
+	if w.cfg.Tracer == nil {
+		return strataotel.NoopTracer()
+	}
+	return w.cfg.Tracer
+}
+
+func (w *Worker) recordIterErr(err error) {
+	if err == nil {
+		return
+	}
+	w.iterErrMu.Lock()
+	if w.iterErr == nil {
+		w.iterErr = err
+	}
+	w.iterErrMu.Unlock()
+}
+
+func (w *Worker) takeIterErr() error {
+	w.iterErrMu.Lock()
+	defer w.iterErrMu.Unlock()
+	err := w.iterErr
+	w.iterErr = nil
+	return err
 }
 
 // New validates cfg and returns a Worker.
@@ -102,6 +140,18 @@ func (w *Worker) Run(ctx context.Context) error {
 // aggregate stats; per-bucket drift is also published via the
 // strata_quota_reconcile_drift_bytes gauge.
 func (w *Worker) RunOnce(ctx context.Context) (Stats, error) {
+	iterCtx, span := strataotel.StartIteration(ctx, w.tracerOrNoop(), "quota-reconcile")
+	stats, err := w.runOnce(iterCtx)
+	if err == nil {
+		err = w.takeIterErr()
+	} else {
+		_ = w.takeIterErr()
+	}
+	strataotel.EndIteration(span, err)
+	return stats, err
+}
+
+func (w *Worker) runOnce(ctx context.Context) (Stats, error) {
 	var stats Stats
 	buckets, err := w.cfg.Meta.ListBuckets(ctx, "")
 	if err != nil {
@@ -112,16 +162,31 @@ func (w *Worker) RunOnce(ctx context.Context) (Stats, error) {
 			return stats, ctx.Err()
 		}
 		stats.BucketsScanned++
-		corrected, scanned, rerr := w.reconcileBucket(ctx, b)
+		bucketCtx, bucketSpan := w.tracerOrNoop().Start(ctx, "quota_reconcile.scan_bucket",
+			trace.WithSpanKind(trace.SpanKindInternal),
+			trace.WithAttributes(
+				strataotel.AttrComponentWorker,
+				attribute.String(strataotel.WorkerKey, "quota-reconcile"),
+				attribute.String("strata.quota_reconcile.bucket", b.Name),
+				attribute.String("strata.quota_reconcile.bucket_id", b.ID.String()),
+			),
+		)
+		corrected, scanned, rerr := w.reconcileBucket(bucketCtx, b)
 		stats.ObjectsScanned += scanned
 		if rerr != nil {
+			bucketSpan.RecordError(rerr)
+			bucketSpan.SetStatus(codes.Error, rerr.Error())
+			w.recordIterErr(rerr)
 			w.cfg.Logger.WarnContext(ctx, "quotareconcile: bucket failed",
 				"bucket", b.Name, "error", rerr.Error())
+			bucketSpan.End()
 			continue
 		}
 		if corrected {
 			stats.BucketsCorrected++
+			bucketSpan.SetAttributes(attribute.Bool("strata.quota_reconcile.corrected", true))
 		}
+		bucketSpan.End()
 	}
 	return stats, nil
 }

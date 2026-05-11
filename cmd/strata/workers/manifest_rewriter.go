@@ -25,6 +25,7 @@ func buildManifestRewriter(deps Dependencies) (Runner, error) {
 		Logger:     deps.Logger,
 		BatchLimit: intFromEnv("STRATA_MANIFEST_REWRITER_BATCH_LIMIT", 500),
 		DryRun:     dryRun,
+		Tracer:     deps.Tracer.Tracer("strata.worker.manifest-rewriter"),
 	})
 	if err != nil {
 		return nil, err

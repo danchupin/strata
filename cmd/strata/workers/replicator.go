@@ -31,6 +31,7 @@ func buildReplicator(deps Dependencies) (Runner, error) {
 		MaxRetries:  intFromEnv("STRATA_REPLICATOR_MAX_RETRIES", 6),
 		BackoffBase: durationFromEnv("STRATA_REPLICATOR_BACKOFF_BASE", 1*time.Second),
 		PollLimit:   intFromEnv("STRATA_REPLICATOR_POLL_LIMIT", 100),
+		Tracer:      deps.Tracer.Tracer("strata.worker.replicator"),
 	})
 }
 

@@ -23,6 +23,7 @@ func buildAccessLog(deps Dependencies) (Runner, error) {
 		Interval:      durationFromEnv("STRATA_ACCESS_LOG_INTERVAL", 5*time.Minute),
 		MaxFlushBytes: int64FromEnv("STRATA_ACCESS_LOG_MAX_FLUSH_BYTES", 5*1024*1024),
 		PollLimit:     intFromEnv("STRATA_ACCESS_LOG_POLL_LIMIT", 10000),
+		Tracer:        deps.Tracer.Tracer("strata.worker.access-log"),
 	})
 }
 

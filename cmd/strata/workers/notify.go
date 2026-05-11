@@ -32,6 +32,7 @@ func buildNotify(deps Dependencies) (Runner, error) {
 		MaxRetries:  intFromEnv("STRATA_NOTIFY_MAX_RETRIES", 6),
 		BackoffBase: durationFromEnv("STRATA_NOTIFY_BACKOFF_BASE", 1*time.Second),
 		PollLimit:   intFromEnv("STRATA_NOTIFY_POLL_LIMIT", 100),
+		Tracer:      deps.Tracer.Tracer("strata.worker.notify"),
 	})
 }
 
