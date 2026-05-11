@@ -82,4 +82,12 @@ pool replication factor, plus chunk fan-out overhead.&lt;/li&gt;
 &lt;a href="https://danchupin.github.io/strata/best-practices/backup-restore/"&gt;Backup + restore&lt;/a&gt; for
 the backup overhead and
 &lt;a href="https://danchupin.github.io/strata/best-practices/gc-lifecycle-tuning/"&gt;GC + lifecycle tuning&lt;/a&gt;
-for the drain rate.&lt;/p&gt;</description></item></channel></rss>
+for the drain rate.&lt;/p&gt;</description></item><item><title>S3 multi-cluster routing</title><link>https://danchupin.github.io/strata/best-practices/s3-multi-cluster/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/s3-multi-cluster/</guid><description>&lt;h1 id="s3-multi-cluster-routing"&gt;S3 multi-cluster routing&lt;a class="anchor" href="#s3-multi-cluster-routing"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;The S3 data backend supports routing per storage class to a distinct
+&lt;code&gt;(cluster, bucket)&lt;/code&gt; pair. Two envs hold the full config — &lt;code&gt;STRATA_S3_CLUSTERS&lt;/code&gt;
+(JSON array of bucket-less cluster specs) and &lt;code&gt;STRATA_S3_CLASSES&lt;/code&gt; (JSON object
+mapping storage class names to &lt;code&gt;{cluster, bucket}&lt;/code&gt; tuples). Adding or removing
+a cluster requires a gateway restart; multi-replica deployments hide
+per-instance downtime via rolling restart.&lt;/p&gt;
+&lt;p&gt;This page is the operator guide. For the conceptual S3 backend overview see
+&lt;a href="https://danchupin.github.io/strata/architecture/backends/s3/"&gt;S3 data backend&lt;/a&gt;.&lt;/p&gt;</description></item></channel></rss>
