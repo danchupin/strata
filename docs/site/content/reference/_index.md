@@ -26,3 +26,13 @@ not yet folded into the planned env-vars subpage:
 | `STRATA_USAGE_ROLLUP_INTERVAL` | `24h` | `--workers=usage-rollup` | [Quotas + billing]({{< ref "/best-practices/quotas-billing" >}}#usage-rollup-workersusage-rollup) |
 | `STRATA_RADOS_PUT_CONCURRENCY` | `32` (range `[1, 256]`) | gateway PUT path | [Parallel chunk PUT + GET]({{< ref "/architecture/benchmarks/parallel-chunks" >}}#tuning-knobs) |
 | `STRATA_RADOS_GET_PREFETCH` | `4` (range `[1, 64]`) | gateway GET path | [Parallel chunk PUT + GET]({{< ref "/architecture/benchmarks/parallel-chunks" >}}#tuning-knobs) |
+| `STRATA_S3_CLUSTERS` | (no default — required when `STRATA_DATA_BACKEND=s3`) | gateway S3 data path | [S3 multi-cluster routing]({{< ref "/best-practices/s3-multi-cluster" >}}#strata_s3_clusters--json-array) |
+| `STRATA_S3_CLASSES`  | (no default — required when `STRATA_DATA_BACKEND=s3`) | gateway S3 data path | [S3 multi-cluster routing]({{< ref "/best-practices/s3-multi-cluster" >}}#strata_s3_classes--json-object) |
+
+The 13 legacy `STRATA_S3_BACKEND_*` envs (`_ENDPOINT`, `_REGION`,
+`_BUCKET`, `_ACCESS_KEY`, `_SECRET_KEY`, `_FORCE_PATH_STYLE`, `_PART_SIZE`,
+`_UPLOAD_CONCURRENCY`, `_MAX_RETRIES`, `_OP_TIMEOUT_SECS`,
+`_MULTIPART_TIMEOUT_SECS`, `_SSE_MODE`, `_SSE_KMS_KEY_ID`) were retired
+in the `ralph/s3-multi-cluster` cycle. Replace with the two JSON envs
+above; deployments fail loudly at boot if the legacy envs are still set
+without the new ones.
