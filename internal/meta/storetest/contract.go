@@ -62,6 +62,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"BucketStatsRoundTrip", caseBucketStats},
 		{"BucketStatsHotPath", caseBucketStatsHotPath},
 		{"UsageAggregateRoundTrip", caseUsageAggregate},
+		{"BucketPlacementRoundTrip", caseBucketPlacement},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2494,6 +2495,89 @@ func caseUsageAggregate(t *testing.T, s meta.Store) {
 	}
 	if got[0].ByteSeconds != 9999 {
 		t.Fatalf("overwrite did not take effect: got %d", got[0].ByteSeconds)
+	}
+}
+
+// caseBucketPlacement exercises the per-bucket Placement policy CRUD
+// (US-001 placement-rebalance): missing → set → get → overwrite → delete →
+// missing. Nil-policy on Get returns (nil, nil) — NOT a sentinel error —
+// so the routing path can fall back to $defaultCluster. Validation
+// rejects weights outside [0, 100], a sum of zero, and empty cluster ids.
+func caseBucketPlacement(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "pp", "owner-pp", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	_ = b
+
+	policy, err := s.GetBucketPlacement(ctx, "pp")
+	if err != nil {
+		t.Fatalf("get unconfigured: %v", err)
+	}
+	if policy != nil {
+		t.Fatalf("get unconfigured: want nil, got %v", policy)
+	}
+
+	want := map[string]int{"c1": 1, "c2": 3}
+	if err := s.SetBucketPlacement(ctx, "pp", want); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	got, err := s.GetBucketPlacement(ctx, "pp")
+	if err != nil || len(got) != len(want) {
+		t.Fatalf("get after set: got=%v err=%v", got, err)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Fatalf("round-trip mismatch on %q: got %d want %d", k, got[k], v)
+		}
+	}
+
+	overwrite := map[string]int{"c1": 5}
+	if err := s.SetBucketPlacement(ctx, "pp", overwrite); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	got, err = s.GetBucketPlacement(ctx, "pp")
+	if err != nil || len(got) != 1 || got["c1"] != 5 {
+		t.Fatalf("overwrite round-trip: got=%v err=%v", got, err)
+	}
+
+	if err := s.DeleteBucketPlacement(ctx, "pp"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	got, err = s.GetBucketPlacement(ctx, "pp")
+	if err != nil || got != nil {
+		t.Fatalf("get after delete: got=%v err=%v", got, err)
+	}
+	if err := s.DeleteBucketPlacement(ctx, "pp"); err != nil {
+		t.Errorf("delete idempotent: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		in   map[string]int
+	}{
+		{"nil", nil},
+		{"empty", map[string]int{}},
+		{"sum-zero", map[string]int{"c1": 0, "c2": 0}},
+		{"weight-negative", map[string]int{"c1": -1}},
+		{"weight-overflow", map[string]int{"c1": 101}},
+		{"empty-cluster-id", map[string]int{"": 1}},
+	}
+	for _, tc := range cases {
+		if err := s.SetBucketPlacement(ctx, "pp", tc.in); err != meta.ErrInvalidPlacement {
+			t.Errorf("validation %s: got %v want ErrInvalidPlacement", tc.name, err)
+		}
+	}
+
+	if _, err := s.GetBucketPlacement(ctx, "no-such-bucket"); err != meta.ErrBucketNotFound {
+		t.Errorf("get missing bucket: got %v want ErrBucketNotFound", err)
+	}
+	if err := s.SetBucketPlacement(ctx, "no-such-bucket", map[string]int{"c1": 1}); err != meta.ErrBucketNotFound {
+		t.Errorf("set missing bucket: got %v want ErrBucketNotFound", err)
+	}
+	if err := s.DeleteBucketPlacement(ctx, "no-such-bucket"); err != meta.ErrBucketNotFound {
+		t.Errorf("delete missing bucket: got %v want ErrBucketNotFound", err)
 	}
 }
 

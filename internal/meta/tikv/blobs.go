@@ -12,6 +12,7 @@ package tikv
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -197,6 +198,58 @@ func (s *Store) GetBucketTagging(ctx context.Context, bucketID uuid.UUID) ([]byt
 func (s *Store) DeleteBucketTagging(ctx context.Context, bucketID uuid.UUID) error {
 	return s.deleteBucketBlob(ctx, bucketID, BlobTagging)
 }
+
+// ----- Bucket Placement (US-001 placement-rebalance) -----
+
+// SetBucketPlacement persists policy as a JSON blob under the bucket
+// addressed by name. Validates via meta.ValidatePlacement before writing;
+// cluster-name resolution against the data backend env is the caller's
+// responsibility.
+func (s *Store) SetBucketPlacement(ctx context.Context, name string, policy map[string]int) error {
+	if err := meta.ValidatePlacement(policy); err != nil {
+		return err
+	}
+	b, err := s.GetBucket(ctx, name)
+	if err != nil {
+		return err
+	}
+	blob, err := meta.EncodeBucketPlacement(policy)
+	if err != nil {
+		return err
+	}
+	return s.setBucketBlob(ctx, b.ID, BlobPlacement, blob)
+}
+
+// GetBucketPlacement returns the configured policy, or (nil, nil) when no
+// row exists — NOT an error — so the routing path can fall back to
+// $defaultCluster.
+func (s *Store) GetBucketPlacement(ctx context.Context, name string) (map[string]int, error) {
+	b, err := s.GetBucket(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	blob, err := s.getBucketBlob(ctx, b.ID, BlobPlacement, errPlacementMissing)
+	if err != nil {
+		if errors.Is(err, errPlacementMissing) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return meta.DecodeBucketPlacement(blob)
+}
+
+// DeleteBucketPlacement drops the row. Idempotent.
+func (s *Store) DeleteBucketPlacement(ctx context.Context, name string) error {
+	b, err := s.GetBucket(ctx, name)
+	if err != nil {
+		return err
+	}
+	return s.deleteBucketBlob(ctx, b.ID, BlobPlacement)
+}
+
+// errPlacementMissing is the internal "no row" sentinel passed to
+// getBucketBlob; surfaced to callers as (nil, nil).
+var errPlacementMissing = errors.New("placement: not configured")
 
 // ----- Quotas (US-001..US-003) -----
 

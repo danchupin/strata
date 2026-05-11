@@ -2801,6 +2801,53 @@ func (s *Store) DeleteBucketEncryption(ctx context.Context, bucketID uuid.UUID) 
 	return s.deleteBucketBlob(ctx, "bucket_encryption", bucketID)
 }
 
+// SetBucketPlacement persists policy under bucket addressed by name. Looks
+// up the bucket id, validates the policy, and writes the JSON blob via the
+// shared setBucketBlob helper into the bucket_placement table (US-001).
+func (s *Store) SetBucketPlacement(ctx context.Context, name string, policy map[string]int) error {
+	if err := meta.ValidatePlacement(policy); err != nil {
+		return err
+	}
+	b, err := s.GetBucket(ctx, name)
+	if err != nil {
+		return err
+	}
+	blob, err := meta.EncodeBucketPlacement(policy)
+	if err != nil {
+		return err
+	}
+	return s.setBucketBlob(ctx, "bucket_placement", "policy", b.ID, blob)
+}
+
+// GetBucketPlacement returns the configured policy, or (nil, nil) when no
+// row exists — NOT an error — so the routing path can fall back to
+// $defaultCluster without inspecting the error chain.
+func (s *Store) GetBucketPlacement(ctx context.Context, name string) (map[string]int, error) {
+	b, err := s.GetBucket(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	var blob []byte
+	q := `SELECT policy FROM bucket_placement WHERE bucket_id=?`
+	err = s.s.Query(q, gocqlUUID(b.ID)).WithContext(ctx).Scan(&blob)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return meta.DecodeBucketPlacement(blob)
+}
+
+// DeleteBucketPlacement drops the row. Idempotent.
+func (s *Store) DeleteBucketPlacement(ctx context.Context, name string) error {
+	b, err := s.GetBucket(ctx, name)
+	if err != nil {
+		return err
+	}
+	return s.deleteBucketBlob(ctx, "bucket_placement", b.ID)
+}
+
 func (s *Store) SetBucketObjectLockEnabled(ctx context.Context, name string, enabled bool) error {
 	applied, err := s.s.Query(
 		`UPDATE buckets SET object_lock_enabled=? WHERE name=? IF EXISTS`,

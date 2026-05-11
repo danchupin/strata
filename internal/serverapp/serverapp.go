@@ -190,6 +190,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		AuditStream:          auditBroadcaster,
 		TraceRingbuf:         tracerProvider.Ringbuf(),
 		StorageClasses:       storageClassSnapshot,
+		KnownClusters:        knownDataClusters(cfg),
 	})
 
 	mux := http.NewServeMux()
@@ -742,6 +743,38 @@ func tikvSettings(cfg *config.Config) adminapi.TiKVSettings {
 		return adminapi.TiKVSettings{}
 	}
 	return adminapi.TiKVSettings{Endpoints: parseTiKVEndpoints(cfg.TiKV.Endpoints)}
+}
+
+// knownDataClusters returns the set of cluster ids the data backend was
+// configured with (STRATA_RADOS_CLUSTERS / STRATA_S3_CLUSTERS). Used by the
+// admin placement handler to reject policies that reference unconfigured
+// cluster ids (US-001 placement-rebalance). Returns nil when the backend
+// has no enumerable cluster set (memory backend) so the handler skips the
+// check.
+func knownDataClusters(cfg *config.Config) map[string]struct{} {
+	switch cfg.DataBackend {
+	case "rados":
+		clusters, err := datarados.ParseClusters(cfg.RADOS.Clusters)
+		if err != nil || len(clusters) == 0 {
+			return nil
+		}
+		out := make(map[string]struct{}, len(clusters))
+		for id := range clusters {
+			out[id] = struct{}{}
+		}
+		return out
+	case "s3":
+		clusters, err := datas3.ParseClusters(cfg.S3.Clusters)
+		if err != nil || len(clusters) == 0 {
+			return nil
+		}
+		out := make(map[string]struct{}, len(clusters))
+		for id := range clusters {
+			out[id] = struct{}{}
+		}
+		return out
+	}
+	return nil
 }
 
 func s3BackendSettings(cfg *config.Config) adminapi.S3BackendSettings {

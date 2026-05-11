@@ -33,6 +33,7 @@ type Store struct {
 	replication    map[uuid.UUID][]byte
 	logging        map[uuid.UUID][]byte
 	tagging        map[uuid.UUID][]byte
+	placements     map[uuid.UUID]map[string]int
 	bucketQuotas   map[uuid.UUID][]byte
 	userQuotas     map[string][]byte
 	bucketStats    map[uuid.UUID]meta.BucketStats
@@ -127,6 +128,7 @@ func New() *Store {
 		replication:  make(map[uuid.UUID][]byte),
 		logging:      make(map[uuid.UUID][]byte),
 		tagging:      make(map[uuid.UUID][]byte),
+		placements:   make(map[uuid.UUID]map[string]int),
 		bucketQuotas: make(map[uuid.UUID][]byte),
 		userQuotas:   make(map[string][]byte),
 		bucketStats:  make(map[uuid.UUID]meta.BucketStats),
@@ -1435,6 +1437,61 @@ func (s *Store) GetBucketEncryption(ctx context.Context, bucketID uuid.UUID) ([]
 }
 func (s *Store) DeleteBucketEncryption(ctx context.Context, bucketID uuid.UUID) error {
 	return s.deleteBucketBlob(s.encryption, bucketID)
+}
+
+// SetBucketPlacement persists policy under the bucket addressed by name.
+// Validates structure via meta.ValidatePlacement; nil/empty maps return
+// ErrInvalidPlacement (use DeleteBucketPlacement to clear). Cluster-name
+// resolution against the data backend env is the caller's responsibility.
+func (s *Store) SetBucketPlacement(ctx context.Context, name string, policy map[string]int) error {
+	if err := meta.ValidatePlacement(policy); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.buckets[name]
+	if !ok {
+		return meta.ErrBucketNotFound
+	}
+	cp := make(map[string]int, len(policy))
+	for k, v := range policy {
+		cp[k] = v
+	}
+	s.placements[b.ID] = cp
+	return nil
+}
+
+// GetBucketPlacement returns the configured policy, or (nil, nil) when no
+// policy is set — NOT an error — so callers can fall back to $defaultCluster.
+func (s *Store) GetBucketPlacement(ctx context.Context, name string) (map[string]int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	b, ok := s.buckets[name]
+	if !ok {
+		return nil, meta.ErrBucketNotFound
+	}
+	p, ok := s.placements[b.ID]
+	if !ok || len(p) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]int, len(p))
+	for k, v := range p {
+		out[k] = v
+	}
+	return out, nil
+}
+
+// DeleteBucketPlacement drops the policy. Idempotent — deletion of an
+// unconfigured bucket returns nil.
+func (s *Store) DeleteBucketPlacement(ctx context.Context, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.buckets[name]
+	if !ok {
+		return meta.ErrBucketNotFound
+	}
+	delete(s.placements, b.ID)
+	return nil
 }
 
 func (s *Store) SetBucketObjectLockEnabled(ctx context.Context, name string, enabled bool) error {

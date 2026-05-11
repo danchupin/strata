@@ -115,6 +115,13 @@ type Server struct {
 	// can still mount the page.
 	StorageClasses *bucketstats.Snapshot
 
+	// KnownClusters is the live data-backend cluster set used by
+	// PUT /admin/v1/buckets/{bucket}/placement to reject policies that
+	// reference unconfigured cluster ids (US-001 placement-rebalance). nil
+	// disables the check — set by serverapp from
+	// STRATA_RADOS_CLUSTERS / STRATA_S3_CLUSTERS at startup.
+	KnownClusters map[string]struct{}
+
 	// hotBucketsMu guards lazy initialisation of hotBucketsCacheVal — the
 	// 30s TTL cache that absorbs burst polls of /admin/v1/diagnostics/
 	// hot-buckets (US-007).
@@ -201,6 +208,11 @@ type Config struct {
 	// StorageClasses is the per-storage-class aggregate snapshot updated by
 	// the bucketstats sampler. Backs GET /admin/v1/storage/classes.
 	StorageClasses *bucketstats.Snapshot
+	// KnownClusters is the live data-backend cluster set used to validate
+	// placement policies (US-001 placement-rebalance). Pass the union of
+	// STRATA_RADOS_CLUSTERS + STRATA_S3_CLUSTERS ids; nil disables the
+	// check entirely (memory backend, dev rigs).
+	KnownClusters map[string]struct{}
 }
 
 // New constructs a Server. Started defaults to now. JWTSecret empty means
@@ -241,6 +253,7 @@ func New(c Config) *Server {
 		AuditStream:          c.AuditStream,
 		TraceRingbuf:         c.TraceRingbuf,
 		StorageClasses:       c.StorageClasses,
+		KnownClusters:        c.KnownClusters,
 		Logger:               log.Default(),
 	}
 }
@@ -322,6 +335,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/quota", s.handleBucketGetQuota)
 	mux.HandleFunc("PUT /admin/v1/buckets/{bucket}/quota", s.handleBucketSetQuota)
 	mux.HandleFunc("DELETE /admin/v1/buckets/{bucket}/quota", s.handleBucketDeleteQuota)
+	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/placement", s.handleBucketGetPlacement)
+	mux.HandleFunc("PUT /admin/v1/buckets/{bucket}/placement", s.handleBucketSetPlacement)
+	mux.HandleFunc("DELETE /admin/v1/buckets/{bucket}/placement", s.handleBucketDeletePlacement)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/usage", s.handleBucketGetUsage)
 	mux.HandleFunc("GET /admin/v1/buckets/top", s.handleBucketsTop)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}", s.handleBucketGet)

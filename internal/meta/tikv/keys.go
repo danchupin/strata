@@ -104,6 +104,7 @@ const (
 	BlobTagging            = "tg"
 	BlobObjectLockConfig   = "ol"
 	BlobQuota              = "qu"
+	BlobPlacement          = "pl"
 )
 
 // versionDescLen is the length of the 24-byte version-DESC suffix

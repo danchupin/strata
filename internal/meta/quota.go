@@ -40,3 +40,26 @@ func DecodeUserQuota(blob []byte) (UserQuota, error) {
 	}
 	return q, nil
 }
+
+// EncodeBucketPlacement serialises a placement map to the on-disk blob
+// shape used by every backend (US-001 placement-rebalance).
+func EncodeBucketPlacement(p map[string]int) ([]byte, error) {
+	return json.Marshal(p)
+}
+
+// DecodeBucketPlacement reverses EncodeBucketPlacement. An empty / missing
+// blob yields a nil map so callers can branch on `policy == nil` for the
+// "no policy configured" case.
+func DecodeBucketPlacement(blob []byte) (map[string]int, error) {
+	if len(blob) == 0 {
+		return nil, nil
+	}
+	var p map[string]int
+	if err := json.Unmarshal(blob, &p); err != nil {
+		return nil, fmt.Errorf("decode bucket placement: %w", err)
+	}
+	if len(p) == 0 {
+		return nil, nil
+	}
+	return p, nil
+}

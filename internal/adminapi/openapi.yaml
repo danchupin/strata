@@ -279,6 +279,24 @@ components:
         max_objects: { type: integer, format: int64, minimum: 0 }
         max_bytes_per_object: { type: integer, format: int64, minimum: 0 }
 
+    BucketPlacement:
+      type: object
+      required: [placement]
+      description: |
+        Per-bucket cluster placement policy (US-001 placement-rebalance).
+        Maps cluster id → weight; weights are in `[0, 100]` with at least
+        one positive entry. A weight of zero excludes the cluster without
+        rejecting the policy. Cluster ids must resolve against the live
+        `STRATA_RADOS_CLUSTERS` / `STRATA_S3_CLUSTERS` set. Unset (404)
+        means "no policy" — chunks route to `$defaultCluster`.
+      properties:
+        placement:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+            maximum: 100
+
     UserQuota:
       type: object
       required: [max_buckets, total_max_bytes]
@@ -690,6 +708,77 @@ paths:
       responses:
         '204':
           description: Quota removed.
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /buckets/{bucket}/placement:
+    get:
+      summary: Get bucket placement policy (US-001 placement-rebalance)
+      operationId: getBucketPlacement
+      parameters:
+        - name: bucket
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Placement policy configured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BucketPlacement' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    put:
+      summary: Set bucket placement policy (US-001 placement-rebalance)
+      operationId: putBucketPlacement
+      description: |
+        Replaces the per-bucket cluster placement policy. Weights are
+        bounded `[0, 100]`; sum must be > 0. Cluster ids must resolve
+        against `STRATA_RADOS_CLUSTERS` / `STRATA_S3_CLUSTERS`. Audit row
+        `admin:PutBucketPlacement`.
+      parameters:
+        - name: bucket
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BucketPlacement' }
+      responses:
+        '204':
+          description: Placement saved.
+        '400':
+          description: |
+            Invalid body — `InvalidPlacement` (weight out of range, sum=0,
+            empty cluster id) or `UnknownCluster` (cluster id not in the
+            configured set).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    delete:
+      summary: Delete bucket placement policy (US-001 placement-rebalance)
+      operationId: deleteBucketPlacement
+      description: |
+        Idempotent — returns 204 even when no policy was configured. Audit
+        row `admin:DeleteBucketPlacement`.
+      parameters:
+        - name: bucket
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Placement removed.
         '404':
           $ref: '#/components/responses/NotFound'
         '401':
