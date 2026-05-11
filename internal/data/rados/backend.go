@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -133,6 +134,30 @@ func (b *Backend) connFor(ctx context.Context, id string) (*goceph.Conn, error) 
 	}
 	b.conns[id] = c
 	return c, nil
+}
+
+// ClassesUsingCluster implements data.ClusterReferenceChecker. Returns
+// the sorted list of class names whose ClassSpec.Cluster resolves to
+// clusterID. Empty id is normalised to DefaultCluster — matches the
+// connFor / ioctx routing rule.
+func (b *Backend) ClassesUsingCluster(clusterID string) []string {
+	if clusterID == "" {
+		clusterID = DefaultCluster
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var refs []string
+	for name, spec := range b.classes {
+		id := spec.Cluster
+		if id == "" {
+			id = DefaultCluster
+		}
+		if id == clusterID {
+			refs = append(refs, name)
+		}
+	}
+	sort.Strings(refs)
+	return refs
 }
 
 func (b *Backend) resolveClass(class string) (ClassSpec, error) {

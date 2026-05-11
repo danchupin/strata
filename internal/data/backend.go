@@ -146,6 +146,21 @@ type HealthProbe interface {
 	DataHealth(ctx context.Context) (*DataHealthReport, error)
 }
 
+// ClusterReferenceChecker is the optional capability surface for data
+// backends that own a per-class -> cluster routing table (rados today).
+// The admin DELETE /admin/v1/storage/clusters/{id} handler type-asserts
+// the live Backend; when satisfied, the handler refuses to delete a
+// cluster that still has classes routing to it (409 ClusterReferenced)
+// and surfaces the offending class names in the response body. Memory /
+// s3 backends do not implement this surface — the check is skipped and
+// the registry row is deleted unconditionally.
+type ClusterReferenceChecker interface {
+	// ClassesUsingCluster returns the sorted, deduped list of storage
+	// class names whose ClassSpec.Cluster resolves to the given cluster
+	// id. Empty id is treated as the backend's default cluster.
+	ClassesUsingCluster(clusterID string) []string
+}
+
 // CORSRule is the backend-translation input for one bucket CORS rule. The
 // shape mirrors S3's CORSRule directly so translation is field-for-field;
 // the empty string ID is allowed (S3 accepts unnamed rules).
