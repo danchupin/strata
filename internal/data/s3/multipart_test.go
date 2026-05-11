@@ -24,44 +24,55 @@ func TestStubMultipartReturnsErrUnsupported(t *testing.T) {
 	if _, err := b.CreateBackendMultipart(ctx, "STANDARD"); !errors.Is(err, errors.ErrUnsupported) {
 		t.Fatalf("CreateBackendMultipart: want ErrUnsupported, got %v", err)
 	}
-	if _, err := b.UploadBackendPart(ctx, "k\x00u", 1, strings.NewReader(""), 0); !errors.Is(err, errors.ErrUnsupported) {
+	stubHandle := "c\x00b\x00k\x00u"
+	if _, err := b.UploadBackendPart(ctx, stubHandle, 1, strings.NewReader(""), 0); !errors.Is(err, errors.ErrUnsupported) {
 		t.Fatalf("UploadBackendPart: want ErrUnsupported, got %v", err)
 	}
-	if _, err := b.CompleteBackendMultipart(ctx, "k\x00u", []data.BackendCompletedPart{{PartNumber: 1, ETag: "e"}}, "STANDARD"); !errors.Is(err, errors.ErrUnsupported) {
+	if _, err := b.CompleteBackendMultipart(ctx, stubHandle, []data.BackendCompletedPart{{PartNumber: 1, ETag: "e"}}, "STANDARD"); !errors.Is(err, errors.ErrUnsupported) {
 		t.Fatalf("CompleteBackendMultipart: want ErrUnsupported, got %v", err)
 	}
-	if err := b.AbortBackendMultipart(ctx, "k\x00u"); !errors.Is(err, errors.ErrUnsupported) {
+	if err := b.AbortBackendMultipart(ctx, stubHandle); !errors.Is(err, errors.ErrUnsupported) {
 		t.Fatalf("AbortBackendMultipart: want ErrUnsupported, got %v", err)
 	}
 }
 
 // TestHandleEncodeDecodeRoundTrip pins the opaque-handle invariant:
-// encode/decode is a stable round-trip and split on the NUL separator
-// returns the original two components.
+// encode/decode is a stable round-trip across all four routing
+// components (cluster + bucket + key + upload-id).
 func TestHandleEncodeDecodeRoundTrip(t *testing.T) {
 	for _, tc := range []struct {
-		key, uploadID string
+		cluster, bucket, key, uploadID string
 	}{
-		{"buck/obj", "abc"},
-		{"prefix/with-slash/obj-uuid", "QWERTY=="},
+		{"primary", "hot-tier", "buck/obj", "abc"},
+		{"cold-eu", "glacier", "prefix/with-slash/obj-uuid", "QWERTY=="},
 	} {
-		h := encodeHandle(tc.key, tc.uploadID)
-		k, u, err := decodeHandle(h)
+		h := encodeHandle(tc.cluster, tc.bucket, tc.key, tc.uploadID)
+		cluster, bucket, key, uploadID, err := decodeHandle(h)
 		if err != nil {
 			t.Fatalf("decode %q: %v", h, err)
 		}
-		if k != tc.key || u != tc.uploadID {
-			t.Fatalf("round-trip mismatch: got (%q,%q), want (%q,%q)", k, u, tc.key, tc.uploadID)
+		if cluster != tc.cluster || bucket != tc.bucket || key != tc.key || uploadID != tc.uploadID {
+			t.Fatalf("round-trip mismatch: got (%q,%q,%q,%q), want (%q,%q,%q,%q)",
+				cluster, bucket, key, uploadID, tc.cluster, tc.bucket, tc.key, tc.uploadID)
 		}
 	}
 }
 
 // TestDecodeHandleRejectsMalformed pins the defensive guard: hand-crafted
-// values without the NUL separator must fail rather than treating the
-// whole string as the key with an empty upload-id.
+// values that don't carry all four NUL-separated components must fail
+// rather than silently routing to the wrong cluster / bucket.
 func TestDecodeHandleRejectsMalformed(t *testing.T) {
-	for _, h := range []string{"", "no-separator", "\x00uploadid", "key\x00"} {
-		if _, _, err := decodeHandle(h); err == nil {
+	for _, h := range []string{
+		"",
+		"no-separator",
+		"\x00b\x00k\x00u",
+		"c\x00\x00k\x00u",
+		"c\x00b\x00\x00u",
+		"c\x00b\x00k\x00",
+		"only\x00two",
+		"three\x00parts\x00here",
+	} {
+		if _, _, _, _, err := decodeHandle(h); err == nil {
 			t.Fatalf("decodeHandle(%q): want error, got nil", h)
 		}
 	}
@@ -100,9 +111,15 @@ func TestMultipartLifecycleAgainstSyntheticBackend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBackendMultipart: %v", err)
 	}
-	key, uploadID, err := decodeHandle(handle)
+	cluster, bucket, key, uploadID, err := decodeHandle(handle)
 	if err != nil {
 		t.Fatalf("decode handle: %v", err)
+	}
+	if cluster != "default" {
+		t.Fatalf("handle cluster %q, want default (legacy Open shape)", cluster)
+	}
+	if bucket != "strata-test" {
+		t.Fatalf("handle bucket %q, want strata-test", bucket)
 	}
 	if uploadID != server.uploadID {
 		t.Fatalf("handle upload-id %q, want %q", uploadID, server.uploadID)

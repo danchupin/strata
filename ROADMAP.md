@@ -287,6 +287,14 @@ Non-goals:
   `x-amz-content-sha256: <hex>` for `s3api put-object` and STREAMING for `s3 cp`, both
   tested working.
 - Lifecycle worker has no retry on transient failures — next tick re-tries.
+- **`TestThreeReplicaDistribution` is flaky.** `internal/lifecycle/distribute_test.go:111`
+  seeds 9 buckets with random UUIDs and asserts each of 3 replicas processes 1..5 buckets
+  via `bucketReplicaIndex(bucket.ID, 3)`. With 9 random UUIDs the FNV-32a distribution can
+  legitimately produce 6/3/0 or 6/2/1 splits — observed flake rate ~30 % under `-count=20`.
+  The flake reproduces on `main` independent of US-003 changes. Fix: either seed UUIDs from
+  a fixed PRNG so the split is deterministic, or relax the guard to `0..6` (the test still
+  pins the `totalDeletes == buckets` invariant a few lines above, which is the real
+  correctness signal).
 - **`gc.Worker.drainCount` infinite-loops when `Data.Delete` fails persistently.**
   `internal/gc/worker.go:123-126` logs the warn + returns `nil` from the goroutine
   *without* ack'ing the entry; the outer `for {}` loop re-issues `ListGCEntries`

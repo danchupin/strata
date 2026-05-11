@@ -17,8 +17,10 @@ import (
 const DefaultPresignExpires = 15 * time.Minute
 
 // PresignGetObject mints a presigned GET URL pointing at the backend
-// object referenced by m.BackendRef.Key. US-003 will route per storage
-// class; today singleCluster picks the only configured cluster.
+// object referenced by m.BackendRef.Key, routed via the (cluster,
+// bucket) pair resolved from m.Class. The minted URL targets the
+// cluster's endpoint directly so the client bypasses Strata on the
+// download path.
 func (b *Backend) PresignGetObject(ctx context.Context, m *data.Manifest, expires time.Duration) (string, error) {
 	if m == nil || m.BackendRef == nil {
 		if len(b.clusters) == 0 {
@@ -29,7 +31,7 @@ func (b *Backend) PresignGetObject(ctx context.Context, m *data.Manifest, expire
 	if expires <= 0 {
 		expires = DefaultPresignExpires
 	}
-	c, bucket, err := b.singleCluster(ctx)
+	c, bucket, err := b.clusterForClass(ctx, m.Class)
 	if err != nil {
 		return "", err
 	}

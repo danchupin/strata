@@ -366,15 +366,34 @@ func (b *Backend) connFor(ctx context.Context, id string) (*s3Cluster, error) {
 	return c, nil
 }
 
-// singleCluster picks the only cluster registered on this Backend. Used
-// by data-plane methods that don't take a storage-class argument today
-// — US-003 will switch them to per-class routing via resolveClass.
+// clusterForClass is the class-routed entry-point used by every data-
+// plane method that knows the storage class on the request (PutChunks)
+// or the manifest (GetChunks / Delete / Presign). Returns ErrUnsupported
+// when the Backend is a stub (zero clusters) so the existing test
+// surface keeps the no-op semantics it had under singleCluster.
+func (b *Backend) clusterForClass(ctx context.Context, class string) (*s3Cluster, string, error) {
+	if len(b.clusters) == 0 {
+		return nil, "", errors.ErrUnsupported
+	}
+	clusterID, bucket, err := b.resolveClass(class)
+	if err != nil {
+		return nil, "", err
+	}
+	c, err := b.connFor(ctx, clusterID)
+	if err != nil {
+		return nil, "", err
+	}
+	return c, bucket, nil
+}
+
+// singleCluster picks one cluster registered on this Backend. Used by
+// helper / test-surface methods (Put / Get / GetRange / DeleteObject /
+// DeleteBatch / Probe) that don't know the request's storage class.
 //
 // In the legacy single-cluster Open() path there is always exactly one
 // cluster + one class, so this picks deterministically. With multiple
 // clusters the implementation picks the lexicographically lowest class
-// — callers that have multiple clusters MUST migrate to class-routed
-// methods (US-003).
+// — production data-plane code MUST use clusterForClass instead.
 func (b *Backend) singleCluster(ctx context.Context) (*s3Cluster, string, error) {
 	if len(b.clusters) == 0 {
 		return nil, "", errors.ErrUnsupported
@@ -765,32 +784,17 @@ type DeleteFailure struct {
 // request.
 const DeleteBatchLimit = 1000
 
-// DeleteObject removes a single backend object. Idempotent — NoSuchKey
-// is treated as success.
+// DeleteObject removes a single backend object on the singular cluster
+// configured via the legacy Open() shape. Idempotent — NoSuchKey is
+// treated as success. Used by integration tests + admin tools that
+// don't carry a storage class; production data-plane code goes through
+// Delete(m) which routes via m.Class.
 func (b *Backend) DeleteObject(ctx context.Context, oid, versionID string) error {
 	c, bucket, err := b.singleCluster(ctx)
 	if err != nil {
 		return err
 	}
-	key := oid
-	in := &awss3.DeleteObjectInput{
-		Bucket: &bucket,
-		Key:    &key,
-	}
-	if versionID != "" {
-		v := versionID
-		in.VersionId = &v
-	}
-	opCtx, cancel := opCtxFor(ctx, c.opTimeout)
-	defer cancel()
-	if _, err := c.client.DeleteObject(opCtx, in); err != nil {
-		var noSuchKey *s3types.NoSuchKey
-		if errors.As(err, &noSuchKey) {
-			return nil
-		}
-		return fmt.Errorf("s3: delete %s: %w", oid, err)
-	}
-	return nil
+	return deleteFromCluster(ctx, c, bucket, oid, versionID)
 }
 
 // DeleteBatch removes up to len(refs) backend objects via DeleteObjects.
@@ -854,14 +858,16 @@ func (b *Backend) DeleteBatch(ctx context.Context, refs []ObjectRef) ([]DeleteFa
 	return failures, nil
 }
 
-// PutChunks streams r straight into the backend bucket as ONE object.
-// US-003 will route per storage class via resolveClass; today
-// singleCluster picks the only configured cluster.
+// PutChunks streams r straight into the resolved (cluster, bucket) pair
+// as ONE object. Routing is per storage class via clusterForClass —
+// each class maps to a (cluster, bucket) pair in the multi-cluster
+// config, so two classes can share a cluster but live in different
+// buckets.
 func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*data.Manifest, error) {
 	if class == "" {
 		class = "STANDARD"
 	}
-	c, bucket, err := b.singleCluster(ctx)
+	c, bucket, err := b.clusterForClass(ctx, class)
 	if err != nil {
 		return nil, err
 	}
@@ -924,9 +930,9 @@ func (b *Backend) GetChunks(ctx context.Context, m *data.Manifest, offset, lengt
 	return b.GetRange(ctx, m.BackendRef.Key, offset, length)
 }
 
-// Delete removes the manifest's backend object via DeleteObject.
-// Idempotent — NoSuchKey is success. Manifests without BackendRef
-// (legacy/rados-shape) are no-ops.
+// Delete removes the manifest's backend object via DeleteObject on the
+// cluster + bucket resolved from m.Class. Idempotent — NoSuchKey is
+// success. Manifests without BackendRef (legacy/rados-shape) are no-ops.
 func (b *Backend) Delete(ctx context.Context, m *data.Manifest) error {
 	if m == nil || m.BackendRef == nil {
 		if len(b.clusters) == 0 {
@@ -934,7 +940,37 @@ func (b *Backend) Delete(ctx context.Context, m *data.Manifest) error {
 		}
 		return nil
 	}
-	return b.DeleteObject(ctx, m.BackendRef.Key, m.BackendRef.VersionID)
+	c, bucket, err := b.clusterForClass(ctx, m.Class)
+	if err != nil {
+		return err
+	}
+	return deleteFromCluster(ctx, c, bucket, m.BackendRef.Key, m.BackendRef.VersionID)
+}
+
+// deleteFromCluster issues a single DeleteObject against the supplied
+// (cluster, bucket) pair. Idempotent — NoSuchKey is success. Used by
+// both class-routed Delete(m) and the legacy single-cluster
+// DeleteObject helper.
+func deleteFromCluster(ctx context.Context, c *s3Cluster, bucket, oid, versionID string) error {
+	key := oid
+	in := &awss3.DeleteObjectInput{
+		Bucket: &bucket,
+		Key:    &key,
+	}
+	if versionID != "" {
+		v := versionID
+		in.VersionId = &v
+	}
+	opCtx, cancel := opCtxFor(ctx, c.opTimeout)
+	defer cancel()
+	if _, err := c.client.DeleteObject(opCtx, in); err != nil {
+		var noSuchKey *s3types.NoSuchKey
+		if errors.As(err, &noSuchKey) {
+			return nil
+		}
+		return fmt.Errorf("s3: delete %s: %w", oid, err)
+	}
+	return nil
 }
 
 func (b *Backend) Close() error { return nil }
