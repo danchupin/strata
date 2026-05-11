@@ -96,6 +96,7 @@ Helpers: `EncodeVersionDesc`, `DecodeVersionDesc`.
 | GC queue                    | `s/qg/<escRegion><ts8-BE><escOID>` |
 | Audit log                   | `s/A/<bucket16><day4-BE><escEventID>` |
 | Leader lock                 | `s/L/<escLockName>` |
+| Cluster registry            | `s/cr/<escID>` |
 
 `bucketUUID16` is the raw 16-byte UUID — fixed-width, no escape needed.
 `partNum4-BE` is `uint32` big-endian so a forward scan returns parts in

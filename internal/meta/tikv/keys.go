@@ -66,6 +66,7 @@ const (
 	prefixReshardJob       = Namespace + "Rj/"  // s/Rj/<bucket16>
 	prefixAdminJob         = Namespace + "Aj/"  // s/Aj/<id>
 	prefixHeartbeat        = Namespace + "hb/"  // s/hb/<nodeID>
+	prefixClusterRegistry  = Namespace + "cr/"  // s/cr/<escID>
 )
 
 // Bucket-scoped sub-prefixes. All are appended to a "s/B/<uuid16>/"
@@ -741,4 +742,20 @@ func AuditLogBucketPrefix(bucketID uuid.UUID) []byte {
 // "audit-sweeper-leader-tikv".
 func LeaderLockKey(name string) []byte {
 	return appendEscaped([]byte(prefixLeaderLock), name)
+}
+
+// ----------------------------------------------------------------------------
+// Cluster registry (dynamic-clusters cycle, US-003).
+// ----------------------------------------------------------------------------
+
+// ClusterRegistryKey is the per-id row in the dynamic cluster catalogue.
+// The id segment is escaped + terminated so range scans across the
+// registry prefix are clean even if a future id grows colons or slashes.
+func ClusterRegistryKey(id string) []byte {
+	return appendEscaped([]byte(prefixClusterRegistry), id)
+}
+
+// ClusterRegistryPrefix is the scan origin for ListClusters.
+func ClusterRegistryPrefix() []byte {
+	return []byte(prefixClusterRegistry)
 }

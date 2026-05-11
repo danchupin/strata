@@ -69,4 +69,11 @@ func TestTiKVStoreContract(t *testing.T) {
 		// state leakage is bounded.
 		return openWithBackend(&tikvBackend{cli: cli})
 	})
+
+	// Cluster-registry CRUD lives outside the default Run cases because
+	// US-001 stubbed the tikv impl; US-003 wires the real pessimistic-txn
+	// CAS path here so the TiKVIntegration job exercises it.
+	t.Run("ClusterRegistry", func(t *testing.T) {
+		storetest.CaseClusterRegistry(t, openWithBackend(&tikvBackend{cli: cli}))
+	})
 }

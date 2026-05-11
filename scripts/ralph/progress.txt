@@ -55,3 +55,16 @@ Cycle: ralph/dynamic-clusters
   - When a stub is replaced, the contract case is wired per-backend rather than added to `storetest.Run` — that pattern preserves a clean US-003 (tikv) handoff where the tikv test file picks up the same `CaseClusterRegistry` later.
   - `time.Time` round-trip from the `existing` LWT map sometimes lands as the gocql binding type; using `existing["version"].(int64)` and `existing["created_at"].(time.Time)` is the established cassandra-side coercion (see `setBucketBlob` family for prior art).
 ---
+
+## 2026-05-11 - US-003
+- Replaced tikv stub in `internal/meta/tikv/clusters.go` with real pessimistic-txn CAS-on-Version CRUD: ListClusters = ordered range scan over `ClusterRegistryPrefix()` + in-process sort; GetCluster = single Get; PutCluster = Begin(pessimistic) → LockKeys → Get → Version-CAS → Set → Commit; DeleteCluster = pessimistic txn with explicit Rollback on missing-row early return.
+- Added `prefixClusterRegistry = "s/cr/"` + `ClusterRegistryKey(id)` + `ClusterRegistryPrefix()` to `internal/meta/tikv/keys.go`; documented row in `internal/meta/tikv/keys.md` layout table.
+- Wired `storetest.CaseClusterRegistry` directly on memBackend via `TestTiKVClusterRegistry` in `internal/meta/tikv/store_test.go`, and as a `ClusterRegistry` subtest on the real PD+TiKV path in `internal/meta/tikv/store_integration_test.go` mirroring the cassandra wire-up.
+- `go vet ./...`, `go vet -tags integration ./internal/meta/...`, `go test -race ./internal/meta/...` all green (memory + cassandra + tikv contract case, parity matches).
+- **Learnings for future iterations:**
+  - PutCluster CAS-reject path returns `meta.ErrClusterVersionMismatch` (non-nil error) so `defer rollbackOnError(txn, &err)` already fires — the explicit `_ = txn.Rollback()` before return is defensive + self-documenting (matches admin_jobs.go + managed_policies.go shape). Belt-and-suspenders for the memBackend gotcha.
+  - DeleteCluster missing-row early return returns `meta.ErrClusterNotFound` (non-nil) so the defer covers it; explicit Rollback is again defensive.
+  - The integration test holds the same `&tikvBackend{cli: cli}` handle across the `storetest.Run` fan-out and the new `ClusterRegistry` subtest. `t.Cleanup(cleanup)` runs in LIFO order on the parent `t`, so the subtest sees the live cluster.
+  - keys.go convention: variable-length id segment uses `appendEscaped` so future ids carrying `/`, `:`, or `\x00` (operator-supplied) stay safe. Even though US-004 validates id pattern `[a-z0-9-]{1,64}` at the admin API boundary, the key layer doesn't trust the validator.
+  - Adding a new prefix constant to `keys.go::prefixXxx` block also requires a row in `keys.md::Layout summary` — code + doc kept in lockstep by convention.
+---
