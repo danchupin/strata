@@ -412,7 +412,7 @@ func TestGetChunksRejectsChunksShapeManifest(t *testing.T) {
 
 // TestOpenRejectsUnknownSSEMode pins US-013 fail-fast: an unknown SSE mode
 // must error at Open, never silently fall back to a default. Operators
-// catch typos in STRATA_S3_BACKEND_SSE_MODE at startup, not at first PUT.
+// catch typos in the per-cluster sse_mode JSON field at startup, not at first PUT.
 func TestOpenRejectsUnknownSSEMode(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{

@@ -257,23 +257,21 @@ func TestSettingsDataBackendMemory(t *testing.T) {
 	}
 }
 
-func TestSettingsDataBackendS3MaskedKeys(t *testing.T) {
+// TestSettingsDataBackendS3MultiCluster pins the US-004 wire shape:
+// /admin/v1/settings/data-backend echoes the STRATA_S3_CLUSTERS /
+// STRATA_S3_CLASSES JSON blobs verbatim so the admin console can render
+// the multi-cluster routing table. The blobs reference credentials by
+// envelope (chain / env: / file:) so no plaintext keys leak.
+func TestSettingsDataBackendS3MultiCluster(t *testing.T) {
 	dir := t.TempDir()
 	s := newSettingsServer(t, dir)
 	s.DataBackend = "s3"
+	clusters := `[{"id":"primary","endpoint":"https://s3.example.com","region":"us-east-1","force_path_style":true,"credentials":{"type":"chain"}}]`
+	classes := `{"STANDARD":{"cluster":"primary","bucket":"hot"}}`
 	s.S3Backend = S3BackendSettings{
-		Kind:              "s3",
-		Endpoint:          "https://s3.example.com",
-		Region:            "us-east-1",
-		Bucket:            "primary",
-		ForcePathStyle:    true,
-		PartSize:          16 * 1024 * 1024,
-		UploadConcurrency: 8,
-		MaxRetries:        5,
-		OpTimeoutSecs:     30,
-		SSEMode:           "passthrough",
-		AccessKeySet:      true,
-		SecretKeySet:      true,
+		Kind:     "s3",
+		Clusters: clusters,
+		Classes:  classes,
 	}
 
 	rr := httptest.NewRecorder()
@@ -283,16 +281,21 @@ func TestSettingsDataBackendS3MaskedKeys(t *testing.T) {
 		t.Fatalf("status: %d", rr.Code)
 	}
 	body := rr.Body.String()
-	if strings.Contains(body, "access_key\":\"") || strings.Contains(body, "secret_key\":\"") {
-		t.Errorf("response leaks raw key fields: %s", body)
+	if strings.Contains(body, "access_key") || strings.Contains(body, "secret_key") {
+		t.Errorf("response leaks key fields: %s", body)
 	}
 	var got S3BackendSettings
-	_ = json.Unmarshal([]byte(body), &got)
-	if !got.AccessKeySet || !got.SecretKeySet {
-		t.Errorf("masked flags: access=%v secret=%v", got.AccessKeySet, got.SecretKeySet)
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("decode: %v", err)
 	}
-	if got.Kind != "s3" || got.Bucket != "primary" {
-		t.Errorf("payload: %+v", got)
+	if got.Kind != "s3" {
+		t.Errorf("kind: %q want s3", got.Kind)
+	}
+	if got.Clusters != clusters {
+		t.Errorf("clusters mismatch:\n got=%s\nwant=%s", got.Clusters, clusters)
+	}
+	if got.Classes != classes {
+		t.Errorf("classes mismatch:\n got=%s\nwant=%s", got.Classes, classes)
 	}
 }
 

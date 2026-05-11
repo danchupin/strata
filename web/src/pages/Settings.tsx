@@ -235,30 +235,32 @@ function ConsoleTab({ s }: { s: SettingsResponse }) {
 }
 
 function S3BackendCard({ s3 }: { s3: S3BackendSettings }) {
+  const pretty = (s: string) => {
+    if (!s) return '—';
+    try {
+      return JSON.stringify(JSON.parse(s), null, 2);
+    } catch {
+      return s;
+    }
+  };
   return (
     <Card>
       <CardHeader>
         <CardTitle>S3 Backend</CardTitle>
         <CardDescription>
-          STRATA_S3_BACKEND_* config. Access keys masked — never echoed.
+          STRATA_S3_CLUSTERS + STRATA_S3_CLASSES. Credentials referenced by
+          envelope (chain / env: / file:) — never plaintext.
         </CardDescription>
       </CardHeader>
-      <CardContent className="px-6 py-2">
-        <KV label="Endpoint" value={s3.endpoint || <em>SDK default</em>} />
-        <KV label="Region" value={s3.region} />
-        <KV label="Bucket" value={s3.bucket} />
-        <KV label="Force path style" value={String(s3.force_path_style)} />
-        <KV label="Part size" value={s3.part_size ? `${s3.part_size} bytes` : '—'} />
-        <KV label="Upload concurrency" value={String(s3.upload_concurrency)} />
-        <KV label="Max retries" value={String(s3.max_retries)} />
-        <KV label="Op timeout" value={s3.op_timeout_secs ? `${s3.op_timeout_secs}s` : '—'} />
-        <KV label="SSE mode" value={s3.sse_mode || 'passthrough'} />
-        <KV
-          label="SSE KMS key"
-          value={s3.sse_kms_key_id || <span className="text-muted-foreground">—</span>}
-        />
-        <KV label="Access key" value={s3.access_key_set ? '<set>' : <span className="text-muted-foreground">unset</span>} />
-        <KV label="Secret key" value={s3.secret_key_set ? '<set>' : <span className="text-muted-foreground">unset</span>} />
+      <CardContent className="px-6 py-2 space-y-3">
+        <div>
+          <div className="text-sm font-medium">Clusters</div>
+          <pre className="mt-1 rounded bg-muted px-2 py-1 text-xs whitespace-pre-wrap break-all">{pretty(s3.clusters)}</pre>
+        </div>
+        <div>
+          <div className="text-sm font-medium">Classes</div>
+          <pre className="mt-1 rounded bg-muted px-2 py-1 text-xs whitespace-pre-wrap break-all">{pretty(s3.classes)}</pre>
+        </div>
       </CardContent>
     </Card>
   );

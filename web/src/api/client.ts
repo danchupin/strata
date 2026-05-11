@@ -1544,18 +1544,8 @@ export async function fetchSettings(): Promise<SettingsResponse> {
 
 export interface S3BackendSettings {
   kind: string;
-  endpoint: string;
-  region: string;
-  bucket: string;
-  force_path_style: boolean;
-  part_size: number;
-  upload_concurrency: number;
-  max_retries: number;
-  op_timeout_secs: number;
-  sse_mode: string;
-  sse_kms_key_id: string;
-  access_key_set: boolean;
-  secret_key_set: boolean;
+  clusters: string;
+  classes: string;
 }
 
 export async function fetchSettingsDataBackend(): Promise<S3BackendSettings> {

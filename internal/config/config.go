@@ -22,7 +22,7 @@ type Config struct {
 	Cassandra CassandraConfig `koanf:"cassandra"`
 	TiKV      TiKVConfig      `koanf:"tikv"`
 	RADOS     RADOSConfig     `koanf:"rados"`
-	S3Backend S3BackendConfig `koanf:"s3_backend"`
+	S3        S3Config        `koanf:"s3"`
 	Auth      AuthConfig      `koanf:"auth"`
 	Lifecycle LifecycleConfig `koanf:"lifecycle"`
 	GC        GCConfig        `koanf:"gc"`
@@ -62,37 +62,15 @@ type RADOSConfig struct {
 	Clusters string `koanf:"clusters"`
 }
 
-// S3BackendConfig wires the STRATA_S3_BACKEND_* env vars used by the
-// internal/data/s3 backend (US-005). Endpoint empty falls back to AWS
-// region-based resolution; AccessKey/SecretKey both empty falls through
-// to the SDK default credential chain (env / ~/.aws / IRSA / IMDS).
-type S3BackendConfig struct {
-	Endpoint          string `koanf:"endpoint"`
-	Region            string `koanf:"region"`
-	Bucket            string `koanf:"bucket"`
-	AccessKey         string `koanf:"access_key"`
-	SecretKey         string `koanf:"secret_key"`
-	ForcePathStyle    bool   `koanf:"force_path_style"`
-	PartSize          int64  `koanf:"part_size"`
-	UploadConcurrency int    `koanf:"upload_concurrency"`
-	// MaxRetries caps total SDK attempts per request (US-006). Zero
-	// applies the s3 package default (5).
-	MaxRetries int `koanf:"max_retries"`
-	// OpTimeoutSecs is the small-op deadline in whole seconds (US-006).
-	// Zero applies the s3 package default (30 s). Multipart Put gets a
-	// separate 10-min ceiling that is not operator-tunable today —
-	// bump OpTimeoutSecs only when small-op latency runs hot.
-	OpTimeoutSecs int `koanf:"op_timeout_secs"`
-	// SSEMode (US-013) selects the encryption disposition for backend
-	// writes. One of {passthrough, strata, both}; empty resolves to
-	// passthrough at s3.Open. Recorded per-object on Manifest.SSE so
-	// the GET path branches per-object regardless of current backend
-	// config. See internal/data/s3.Config.SSEMode for semantics.
-	SSEMode string `koanf:"sse_mode"`
-	// SSEKMSKeyID, when set, selects aws:kms over AES256 for the backend
-	// SSE header in passthrough/both. Empty falls back to AES256
-	// (SSE-S3). Ignored in strata mode.
-	SSEKMSKeyID string `koanf:"sse_kms_key_id"`
+// S3Config carries the multi-cluster S3 data-backend wiring (US-004).
+// Both fields are raw JSON blobs sourced from STRATA_S3_CLUSTERS (a JSON
+// array of S3ClusterSpec) and STRATA_S3_CLASSES (a JSON object of
+// ClassSpec). Parsed + validated by `internal/data/s3.ParseClusters` /
+// `ParseClasses`; cross-validated (every class.Cluster references a known
+// cluster) by `s3.New`. Both required when DataBackend=s3.
+type S3Config struct {
+	Clusters string `koanf:"clusters"`
+	Classes  string `koanf:"classes"`
 }
 
 type AuthConfig struct {
@@ -169,19 +147,9 @@ var envMap = map[string]string{
 	"STRATA_RADOS_POOL":               "rados.pool",
 	"STRATA_RADOS_NAMESPACE":          "rados.namespace",
 	"STRATA_RADOS_CLASSES":            "rados.classes",
-	"STRATA_RADOS_CLUSTERS":                "rados.clusters",
-	"STRATA_S3_BACKEND_ENDPOINT":           "s3_backend.endpoint",
-	"STRATA_S3_BACKEND_REGION":             "s3_backend.region",
-	"STRATA_S3_BACKEND_BUCKET":             "s3_backend.bucket",
-	"STRATA_S3_BACKEND_ACCESS_KEY":         "s3_backend.access_key",
-	"STRATA_S3_BACKEND_SECRET_KEY":         "s3_backend.secret_key",
-	"STRATA_S3_BACKEND_FORCE_PATH_STYLE":   "s3_backend.force_path_style",
-	"STRATA_S3_BACKEND_PART_SIZE":          "s3_backend.part_size",
-	"STRATA_S3_BACKEND_UPLOAD_CONCURRENCY": "s3_backend.upload_concurrency",
-	"STRATA_S3_BACKEND_MAX_RETRIES":        "s3_backend.max_retries",
-	"STRATA_S3_BACKEND_OP_TIMEOUT_SECS":    "s3_backend.op_timeout_secs",
-	"STRATA_S3_BACKEND_SSE_MODE":           "s3_backend.sse_mode",
-	"STRATA_S3_BACKEND_SSE_KMS_KEY_ID":     "s3_backend.sse_kms_key_id",
+	"STRATA_RADOS_CLUSTERS":           "rados.clusters",
+	"STRATA_S3_CLUSTERS":              "s3.clusters",
+	"STRATA_S3_CLASSES":               "s3.classes",
 	"STRATA_AUTH_MODE":                "auth.mode",
 	"STRATA_STATIC_CREDENTIALS":       "auth.static_credentials",
 	"STRATA_LIFECYCLE_INTERVAL":       "lifecycle.interval",
@@ -230,8 +198,11 @@ func (c *Config) validate() error {
 	switch c.DataBackend {
 	case "memory", "rados":
 	case "s3":
-		if err := c.S3Backend.validate(); err != nil {
-			return err
+		if c.S3.Clusters == "" {
+			return fmt.Errorf("STRATA_S3_CLUSTERS is required when data_backend=s3")
+		}
+		if c.S3.Classes == "" {
+			return fmt.Errorf("STRATA_S3_CLASSES is required when data_backend=s3")
 		}
 	default:
 		return fmt.Errorf("data_backend %q is not one of {memory, rados, s3}", c.DataBackend)
@@ -252,40 +223,6 @@ func (c *Config) validate() error {
 	}
 	if c.DefaultBucketShards <= 0 {
 		return fmt.Errorf("default_bucket_shards must be positive (got %d)", c.DefaultBucketShards)
-	}
-	return nil
-}
-
-// validate enforces fail-fast on misconfiguration of the S3 data backend.
-// Only invoked when DataBackend == "s3" — leaves the struct unvalidated
-// otherwise so operators using rados/memory don't need to set
-// STRATA_S3_BACKEND_*.
-func (c *S3BackendConfig) validate() error {
-	if c.Bucket == "" {
-		return fmt.Errorf("STRATA_S3_BACKEND_BUCKET is required when data_backend=s3")
-	}
-	if c.Region == "" {
-		return fmt.Errorf("STRATA_S3_BACKEND_REGION is required when data_backend=s3")
-	}
-	if (c.AccessKey == "") != (c.SecretKey == "") {
-		return fmt.Errorf("STRATA_S3_BACKEND_ACCESS_KEY and STRATA_S3_BACKEND_SECRET_KEY must be set together (or both empty for SDK default chain)")
-	}
-	if c.PartSize < 0 {
-		return fmt.Errorf("STRATA_S3_BACKEND_PART_SIZE must be non-negative (got %d)", c.PartSize)
-	}
-	if c.UploadConcurrency < 0 {
-		return fmt.Errorf("STRATA_S3_BACKEND_UPLOAD_CONCURRENCY must be non-negative (got %d)", c.UploadConcurrency)
-	}
-	if c.MaxRetries < 0 {
-		return fmt.Errorf("STRATA_S3_BACKEND_MAX_RETRIES must be non-negative (got %d)", c.MaxRetries)
-	}
-	if c.OpTimeoutSecs < 0 {
-		return fmt.Errorf("STRATA_S3_BACKEND_OP_TIMEOUT_SECS must be non-negative (got %d)", c.OpTimeoutSecs)
-	}
-	switch c.SSEMode {
-	case "", "passthrough", "strata", "both":
-	default:
-		return fmt.Errorf("STRATA_S3_BACKEND_SSE_MODE %q is not one of {passthrough, strata, both}", c.SSEMode)
 	}
 	return nil
 }

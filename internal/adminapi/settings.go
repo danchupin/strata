@@ -77,23 +77,16 @@ type SettingsResponse struct {
 }
 
 // S3BackendSettings is the JSON shape served by GET /admin/v1/settings/
-// data-backend (US-021) for the s3-over-s3 data backend. Returns access
-// keys masked: AccessKeySet + SecretKeySet are booleans, never the raw
-// values. Empty kind ("") when the gateway runs on a non-s3 data backend.
+// data-backend (US-021 / US-004) for the s3-over-s3 data backend.
+// Clusters and Classes mirror STRATA_S3_CLUSTERS / STRATA_S3_CLASSES
+// verbatim — the operator console renders the raw JSON. Credentials
+// inside the cluster spec are referenced (chain / env: / file:) but
+// never include plaintext access keys, so no masking is needed at this
+// layer. Empty kind ("") when the gateway runs on a non-s3 data backend.
 type S3BackendSettings struct {
-	Kind              string `json:"kind"`
-	Endpoint          string `json:"endpoint"`
-	Region            string `json:"region"`
-	Bucket            string `json:"bucket"`
-	ForcePathStyle    bool   `json:"force_path_style"`
-	PartSize          int64  `json:"part_size"`
-	UploadConcurrency int    `json:"upload_concurrency"`
-	MaxRetries        int    `json:"max_retries"`
-	OpTimeoutSecs     int    `json:"op_timeout_secs"`
-	SSEMode           string `json:"sse_mode"`
-	SSEKMSKeyID       string `json:"sse_kms_key_id"`
-	AccessKeySet      bool   `json:"access_key_set"`
-	SecretKeySet      bool   `json:"secret_key_set"`
+	Kind     string `json:"kind"`
+	Clusters string `json:"clusters"`
+	Classes  string `json:"classes"`
 }
 
 // DefaultJWTSecretFile is the on-disk path used when STRATA_JWT_SECRET_FILE

@@ -7,9 +7,11 @@
 // carries its own SSE / part-size / op-timeout config from S3ClusterSpec.
 //
 // The legacy single-cluster Open(ctx, Config{Bucket,Region,...}) entry-
-// point is retained as a compatibility shim — it synthesises a one-entry
-// clusters map + one-entry classes map so existing tests and the legacy
-// STRATA_S3_BACKEND_* env path keep working until US-004 retires them.
+// point is retained as a code-only compatibility shim — it synthesises a
+// one-entry clusters map + one-entry classes map so existing in-package
+// tests keep compiling until US-005 migrates them to the s3test fixture.
+// US-004 retired the STRATA_S3_BACKEND_* env path; the gateway boots
+// only from STRATA_S3_CLUSTERS + STRATA_S3_CLASSES via s3.New.
 package s3
 
 import (
@@ -228,7 +230,7 @@ func Open(ctx context.Context, cfg Config) (*Backend, error) {
 	switch sseMode {
 	case data.SSEModePassthrough, data.SSEModeStrata, data.SSEModeBoth:
 	default:
-		return nil, fmt.Errorf("s3: STRATA_S3_BACKEND_SSE_MODE must be one of {passthrough, strata, both}, got %q", sseMode)
+		return nil, fmt.Errorf("s3: sse_mode must be one of {passthrough, strata, both}, got %q", sseMode)
 	}
 
 	clusterID := "default"
