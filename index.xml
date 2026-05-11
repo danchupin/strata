@@ -502,7 +502,16 @@ next without rebuilding context.&lt;/p&gt;
 &lt;p&gt;&lt;code&gt;internal/logging&lt;/code&gt; is the canonical setup. Both binaries (&lt;code&gt;cmd/strata&lt;/code&gt;,
 &lt;code&gt;cmd/strata-admin&lt;/code&gt;) call &lt;code&gt;logging.Setup()&lt;/code&gt; first thing to install a
 JSON-handler &lt;code&gt;*slog.Logger&lt;/code&gt; driven by &lt;code&gt;STRATA_LOG_LEVEL&lt;/code&gt;
-(&lt;code&gt;DEBUG&lt;/code&gt;/&lt;code&gt;INFO&lt;/code&gt;/&lt;code&gt;WARN&lt;/code&gt;/&lt;code&gt;ERROR&lt;/code&gt;; default &lt;code&gt;INFO&lt;/code&gt;).&lt;/p&gt;</description></item><item><title>Backup + restore</title><link>https://danchupin.github.io/strata/best-practices/backup-restore/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/backup-restore/</guid><description>&lt;h1 id="backup--restore"&gt;Backup + restore&lt;a class="anchor" href="#backup--restore"&gt;#&lt;/a&gt;&lt;/h1&gt;
+(&lt;code&gt;DEBUG&lt;/code&gt;/&lt;code&gt;INFO&lt;/code&gt;/&lt;code&gt;WARN&lt;/code&gt;/&lt;code&gt;ERROR&lt;/code&gt;; default &lt;code&gt;INFO&lt;/code&gt;).&lt;/p&gt;</description></item><item><title>Dynamic clusters</title><link>https://danchupin.github.io/strata/best-practices/dynamic-clusters/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/dynamic-clusters/</guid><description>&lt;h1 id="dynamic-clusters"&gt;Dynamic clusters&lt;a class="anchor" href="#dynamic-clusters"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;The RADOS cluster set is persisted in &lt;code&gt;meta.Store&lt;/code&gt; (the &lt;code&gt;cluster_registry&lt;/code&gt;
+table) and reconciled in-process by every gateway replica every
+&lt;code&gt;STRATA_CLUSTER_REGISTRY_INTERVAL&lt;/code&gt; (default 30 s, range &lt;code&gt;[5 s, 5 m]&lt;/code&gt;).
+Adding a new RADOS cluster is a single &lt;code&gt;POST /admin/v1/storage/clusters&lt;/code&gt;
+call — no gateway restart, no env-file edit, no rolling deploy.&lt;/p&gt;
+&lt;p&gt;The legacy &lt;code&gt;STRATA_RADOS_CLUSTERS&lt;/code&gt; env path is fully retired. The
+registry is the single source of truth.&lt;/p&gt;
+&lt;h2 id="catalogue-shape"&gt;Catalogue shape&lt;a class="anchor" href="#catalogue-shape"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;code&gt;ClusterRegistryEntry&lt;/code&gt; lives in &lt;code&gt;internal/meta/store.go&lt;/code&gt;:&lt;/p&gt;</description></item><item><title>Backup + restore</title><link>https://danchupin.github.io/strata/best-practices/backup-restore/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/backup-restore/</guid><description>&lt;h1 id="backup--restore"&gt;Backup + restore&lt;a class="anchor" href="#backup--restore"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;Strata splits backup responsibility along the same tiers the gateway
 splits state into:&lt;/p&gt;
 &lt;ul&gt;
