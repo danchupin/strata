@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/danchupin/strata/internal/logging"
+	strataotel "github.com/danchupin/strata/internal/otel"
 )
 
 // LogOp emits a DEBUG log line for one RADOS operation. Cheap when logger is
@@ -51,6 +52,7 @@ func ObserveOp(ctx context.Context, logger *slog.Logger, m Metrics, tracer trace
 			trace.WithSpanKind(trace.SpanKindClient),
 			trace.WithTimestamp(start),
 			trace.WithAttributes(
+				strataotel.AttrComponentGateway,
 				attribute.String("data.rados.pool", pool),
 				attribute.String("data.rados.op", op),
 				attribute.String("data.rados.oid", oid),

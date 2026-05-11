@@ -18,8 +18,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped: internal/otel/component.go exports AttrComponentKey + AttrComponentGateway + AttrComponentWorker. Middleware + cassandra emitSpan + rados ObserveOp all stamp strata.component=gateway. Tests extended: internal/otel/middleware_test.go (new), cassandra/observer_test.go (gateway assertion in wantAttrs), rados/observer_test.go (gateway pair in attr table)."
     },
     {
       "id": "US-002",

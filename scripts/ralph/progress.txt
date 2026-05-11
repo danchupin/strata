@@ -26,3 +26,20 @@ Cycle: ralph/complete-tracing
 - `tasks/prd-complete-tracing.md` REMOVED in US-006 per CLAUDE.md PRD lifecycle rule. Canonical record lives in Ralph snapshot.
 - Verification: `go vet ./...`, `go test ./... -race`, `make docs-build`, `make smoke`. End-to-end Jaeger waterfall sanity check (manual against `make up-all` if available).
 
+
+## 2026-05-11 - US-001
+- Added `internal/otel/component.go` exporting `AttrComponentKey="strata.component"` + `AttrComponentGateway` (gateway) + `AttrComponentWorker` (worker) attribute.KeyValue constants.
+- `internal/otel/middleware.go`: HTTP server span now stamps `strata.component=gateway` via the shared constant inline with the existing http.* attributes block.
+- `internal/meta/cassandra/observer.go::emitSpan`: imports `strataotel`, stamps gateway attr first in the trace.WithAttributes block.
+- `internal/data/rados/observer.go::ObserveOp`: imports `strataotel`, stamps gateway attr in the rados-child span attrs block.
+- Tests:
+  - `internal/otel/middleware_test.go` (new file): `TestMiddlewareStampsGatewayComponent` drives a 200 OK through `NewMiddleware`, asserts span has `strata.component=gateway`.
+  - `internal/meta/cassandra/observer_test.go::TestQueryObserverEmitsSpan`: extended `wantAttrs` map with `strata.component=gateway`.
+  - `internal/data/rados/observer_test.go::TestObserveOpEmitsSpan`: extended attr-pair table with `strata.component=gateway`.
+- Quality checks: `go vet ./...` clean, `go build ./...` clean, `go test ./internal/otel/... ./internal/meta/cassandra/... ./internal/data/rados/... -race` PASS, full `go test ./...` PASS.
+- **Learnings for future iterations:**
+  - `internal/otel` package has no import dependency on `internal/data/*` or `internal/meta/*` outside test files, so cassandra/rados can safely import `internal/otel` for shared attribute constants (no cycle).
+  - `internal/otel/spans_test.go` is in external `otel_test` package, so it can import cassandra+rados+strataotel together without forming a build cycle.
+  - The shared component-discriminator constants will be reused by US-002 (TiKV observer) for `strata.component=gateway` and US-004/US-005 (worker iteration helper) for `strata.component=worker` — import path is `github.com/danchupin/strata/internal/otel`.
+  - Pattern: stamp the component attribute FIRST in the trace.WithAttributes block so observers reading raw attrs find it predictably; keep using shared constants instead of `attribute.String("strata.component", "gateway")` to avoid magic-string duplication.
+---

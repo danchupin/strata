@@ -100,6 +100,7 @@ func TestObserveOpEmitsSpan(t *testing.T) {
 		{"data.rados.pool", "rgw.data"},
 		{"data.rados.op", "put"},
 		{"data.rados.oid", "obj.00000"},
+		{"strata.component", "gateway"},
 	} {
 		found := false
 		for _, kv := range child.Attributes {

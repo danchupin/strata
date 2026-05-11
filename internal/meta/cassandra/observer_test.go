@@ -314,6 +314,7 @@ func TestQueryObserverEmitsSpan(t *testing.T) {
 		"db.system":          "cassandra",
 		"db.cassandra.table": "objects",
 		"db.operation":       "INSERT",
+		"strata.component":   "gateway",
 	}
 	for k, v := range wantAttrs {
 		found := false
