@@ -1,69 +1,119 @@
 {
   "project": "Strata",
-  "branchName": "ralph/parallel-chunks",
-  "description": "Parallel chunk PUT + GET on the RADOS data backend. Closes two open ROADMAP P2 entries: 'Parallel chunk upload in PutChunks' + 'Parallel chunk read / prefetch in GetChunks'. Today `internal/data/rados/backend.go::PutChunks` writes 4 MiB chunks SEQUENTIALLY in a `for { io.ReadFull; writeChunk; loop }` shape — RADOS round-trip latency stacks linearly with object size. `GetChunks` returns a `radosReader` that fetches the next chunk only when the current one is drained — same sequential RADOS-latency-stacking on streaming reads. The S3 data backend is unaffected (AWS SDK `manager.Uploader` already parallelises internally); memory backend is tests-only. Fix scope: bounded worker pool (default 32, configurable via `STRATA_RADOS_PUT_CONCURRENCY` / `STRATA_RADOS_GET_PREFETCH`) with order-preserving manifest assembly on PUT and memory-bounded prefetch on GET (cancel-on-client-cancel). Multi-cluster manifests (US-044 shipped the cluster fan-out) automatically benefit since chunk-write dispatch is cluster-agnostic — the worker pool dials the right ioctx per chunk via the existing `resolveClass` / `ioctx` helpers. 3 stories. Closes ROADMAP P2 'Parallel chunk upload in `PutChunks`' + P2 'Parallel chunk read / prefetch in `GetChunks`' on cycle close.",
+  "branchName": "ralph/s3-multi-cluster",
+  "description": "Env-Driven Multi-Cluster S3 Data Backend. Closes ROADMAP P2 'Env-driven multi-cluster S3 data backend' (filed 2026-05-11 after the dynamic-clusters revert). `internal/data/s3/backend.go` is single-bucket-per-instance today: `Backend{bucket, client, uploader, opTimeout, sseMode, sseKMSKeyID}`. RADOS went multi-cluster in US-044 (`STRATA_RADOS_CLUSTERS` + per-class `ClassSpec.Cluster`); S3 has no equivalent. Mirror the RADOS env-driven shape: (1) `S3ClusterSpec` (bucket-less) + `ClassSpec{Cluster, Bucket}` types + JSON parsers; (2) lift `data.s3.Backend` to `clusters map[string]*s3Cluster` with per-cluster `*awss3.Client` + `*manager.Uploader` lazy-built via `connFor`; (3) bucket arg routing through `resolveClass` on every data-plane method (Put/Get/Delete/Head/Copy/List/PutChunks/GetChunks/Presign/Multipart); (4) retire all 13 `STRATA_S3_BACKEND_*` envs entirely — replaced by `STRATA_S3_CLUSTERS` (JSON array) + `STRATA_S3_CLASSES` (JSON object); (5) `s3test.NewFixture(t)` test helper collapses inline test setup; (6) docs + ROADMAP close-flip. Credentials never plaintext — `credentials_ref` discriminator (`chain` / `env:VAR1:VAR2` / `file:/path[:profile]`); missing creds at boot → fail-fast (gateway refuses to start). `Cluster` REQUIRED per class — no DefaultCluster fallback. Adding/removing cluster requires gateway restart; rolling restart of N replicas hides per-instance downtime. NOT in scope: dynamic registry (won't-do); chunk-side data migration (rebalance worker P2); KMS-fetched creds (P3 follow-up). 6 stories. Closes ROADMAP P2 'Env-driven multi-cluster S3 data backend.' on cycle close.",
   "userStories": [
     {
       "id": "US-001",
-      "title": "Parallel PutChunks worker pool (RADOS backend)",
-      "description": "As an S3 client uploading a multi-chunk object, I want the gateway to dispatch RADOS chunk writes concurrently so PUT latency scales sub-linearly with object size — hiding per-chunk OSD round-trip latency.",
+      "title": "S3ClusterSpec + ClassSpec types + JSON parser",
+      "description": "As a developer, I want the S3 multi-cluster type shape defined and parseable from env JSON so subsequent stories build on a stable surface.",
       "acceptanceCriteria": [
-        "`internal/data/rados/backend.go::PutChunks` no longer writes chunks sequentially. Bounded worker pool (default concurrency 32) reads chunks from the input stream in order, dispatches `writeChunk` to N workers, and assembles `data.Manifest.Chunks` in submission order — manifest chunk order MUST equal source byte order regardless of completion order",
-        "Concurrency configurable via `STRATA_RADOS_PUT_CONCURRENCY` env (range [1, 256], default 32, validation at Backend construction time)",
-        "On first error from any worker, cancel in-flight workers, drain the pool, and call `cleanupManifest` over the chunks that DID land in RADOS — no leaked partial-write OIDs",
-        "Reader cancel (`ctx.Err()`) is honoured at chunk-read boundary AND at worker dispatch (don't block on a backed-up pool when the client has given up)",
-        "ETag computation (running MD5 over all chunk bytes in source order) is preserved — must equal the byte-stream's MD5, not a per-chunk-completion-order hash; achieve via a single goroutine that owns the hasher + reads from the source stream in order, dispatches `(idx, []byte)` work units to the pool, and waits for `(idx, err)` results to land before sealing the manifest",
-        "Observer (`ObserveOp`) still fires per chunk write with correct duration; tracer spans (`data.rados.put`) still emit one span per OID",
-        "New unit test (`internal/data/rados/backend_test.go` or a fresh `backend_parallel_test.go`): drive PutChunks against a fake `ioctx` that injects ~5 ms latency per write; assert wall-clock for a 32-chunk object is well below 32× single-chunk latency (e.g. ≤ 4× single-chunk on concurrency=8). Use a deterministic mock, not a sleep-and-pray timing race",
-        "Race detector (`go test -race ./internal/data/rados/...`) clean against the new code",
-        "Existing tests in `internal/data/rados/` still pass — round-trip behaviour, ETag, cleanup on error, multi-cluster ioctx resolution unchanged",
-        "`internal/data/rados/observer_test.go` parity: per-chunk observability is preserved",
+        "Add `internal/data/s3/cluster.go` with `type S3ClusterSpec struct { ID, Endpoint, Region, SSEMode, SSEKMSKeyID string; ForcePathStyle bool; PartSize, UploadConcurrency, MaxRetries int64; OpTimeoutSecs int; Credentials CredentialsRef }` with full JSON tags",
+        "`type CredentialsRef struct { Type string; Ref string }`. `Type ∈ {\"chain\", \"env\", \"file\"}`. `Ref` empty for `chain`; for `env` it is `\"<ACCESS_KEY_VAR>:<SECRET_KEY_VAR>\"`; for `file` it is the credentials file path (with optional `:profile` suffix)",
+        "JSON marshal / unmarshal round-trip for `S3ClusterSpec`",
+        "Add `internal/data/s3/class.go` with `type ClassSpec struct { Cluster, Bucket string }`. Both REQUIRED (validation in parser)",
+        "`ParseClusters(jsonStr string) (map[string]S3ClusterSpec, error)` parses a JSON array; duplicate id → error; empty id / endpoint / region → error; unknown CredentialsRef.Type → error",
+        "`ParseClasses(jsonStr string) (map[string]ClassSpec, error)` parses a JSON object; empty Cluster / Bucket per class → error; reference to non-existing cluster validated separately at Backend construction",
+        "Unit test `internal/data/s3/cluster_test.go`: round-trip JSON for each CredentialsRef.Type; reject malformed env-ref (missing colon), reject unknown type; reject duplicate cluster id; reject empty fields",
+        "Unit test `internal/data/s3/class_test.go`: parse two classes; empty Cluster → error; empty Bucket → error; class object missing required field → error",
         "Typecheck passes",
         "Tests pass"
       ],
       "priority": 1,
-      "passes": true,
-      "notes": "Implemented in internal/data/rados/parallel.go (putChunksParallel + putConcurrencyFromEnv) and wired into internal/data/rados/backend.go::PutChunks. Concurrency knob STRATA_RADOS_PUT_CONCURRENCY [1,256] default 32 read at Backend constructor time. Unit tests in internal/data/rados/parallel_test.go (no build tag, ceph-free) cover source-byte-order preservation, ETag-MD5 invariant, parallel wall-clock claim, error-cancel + cleanup, reader cancel, completion-out-of-order ordering, env clamping. Race-detector clean."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-002",
-      "title": "Prefetch chunk N+1 in GetChunks (RADOS backend)",
-      "description": "As an S3 client streaming a large GET, I want the gateway to fetch the next chunk from RADOS while the current one is draining to the wire — so streaming throughput is bounded by network egress, not by per-chunk OSD fetch latency.",
+      "title": "Lift data.s3.Backend to multi-cluster shape",
+      "description": "As a developer, I want `data.s3.Backend` to hold a map of per-cluster S3 SDK clients so the gateway can serve traffic across multiple S3 endpoints concurrently.",
       "acceptanceCriteria": [
-        "`internal/data/rados/backend.go::GetChunks` returns a reader that prefetches the NEXT chunk while the caller drains the CURRENT one. Default prefetch depth = 4 (16 MiB inflight); configurable via `STRATA_RADOS_GET_PREFETCH` env (range [1, 64])",
-        "Prefetch is memory-bounded: at most `prefetch_depth * chunk_size` bytes inflight (default 4 × 4 MiB = 16 MiB). No unbounded buffering on slow-client / fast-RADOS",
-        "Prefetch is abortable: when `radosReader.Close` fires (or `ctx.Done`), in-flight prefetches are cancelled and goroutines exit cleanly within a bounded window (no goroutine leak detectable by `go test -race -run TestGetChunksClientCancel`)",
-        "Read order is preserved — the reader emits bytes in exact chunk-order regardless of fetch completion order. The prefetch pool reads chunk[i+1..i+N] in parallel but the reader's Read() pulls them off an ordered channel/queue",
-        "Range GET (offset > 0 or length < manifest.Size) still works correctly — first chunk fetched is the one containing `offset`, the prefetch window stops at the chunk containing `offset+length`",
-        "Observer + tracer continue to fire per chunk fetch — duration reflects the actual OSD `Read` time, not wait-on-channel time",
-        "New unit test (`internal/data/rados/backend_test.go` or `backend_prefetch_test.go`): drive GetChunks against a fake `ioctx` with per-chunk Read latency; assert wall-clock for a 32-chunk full-read is well below 32× single-chunk latency (e.g. ≤ 8× on prefetch_depth=4)",
-        "New unit test for client-cancel: Close the reader mid-stream, assert all prefetch goroutines exit within 500 ms (use `goleak` or count-running-goroutines pattern)",
-        "Race detector (`go test -race ./internal/data/rados/...`) clean",
-        "Existing tests in `internal/data/rados/` still pass — sequential range-GET correctness, EOF on short manifest, multi-cluster ioctx resolution unchanged",
+        "Refactor `internal/data/s3/backend.go::Backend` to hold `clusters map[string]*s3Cluster, classes map[string]ClassSpec, mu sync.Mutex` (no top-level `bucket`, `client`, `uploader`, `sseMode`, `sseKMSKeyID` fields — those move into per-cluster `s3Cluster`)",
+        "`type s3Cluster struct { spec S3ClusterSpec; client *awss3.Client; uploader *manager.Uploader }` (private struct). Built lazily by `connFor(ctx, id) (*s3Cluster, error)` under `b.mu` on first use; mirrors `rados.Backend.connFor` semantics",
+        "`connFor` resolves `s3Cluster.spec.Credentials` via the SDK loader: `chain` → `awsconfig.LoadDefaultConfig`; `env` → read named env vars + `credentials.NewStaticCredentialsProvider`; `file` → `awsconfig.LoadSharedConfigProfile` with parsed `path:profile`. Caches the built `*awss3.Client` + `*manager.Uploader`",
+        "`resolveClass(class string) (ClassSpec, error)` mirrors rados shape: looks up `b.classes[class]`; missing class → `ErrUnknownStorageClass`; empty `Cluster` → `ErrClassMissingCluster`",
+        "`New(cfg Config) (*Backend, error)` validates: every `cfg.Classes[*].Cluster` must reference a known `cfg.Clusters[id]`; every `cfg.Clusters[*].Credentials` resolves successfully at boot (fail-fast — missing env var / missing file → error from `New`); returns `*Backend` ready for traffic",
+        "Cluster spec validation at boot: a sample `LoadDefaultConfig` call per `chain` cluster verifies creds resolve; a `getenv` check per `env:` ref verifies vars are set; a `os.Stat` per `file:` path verifies the file exists. Failures bubble up from `New` with a descriptive error",
+        "Existing single-cluster test suite (`internal/data/s3/backend_test.go`, `multipart_test.go`, `presign_test.go`, `cors_test.go`, `lifecycle_test.go`, `metrics_test.go`) compiles green; semantic rewrite of those tests lands in US-005 via the new `s3test` fixture",
+        "Race detector (`go test -race ./internal/data/s3/...`) clean",
         "Typecheck passes",
         "Tests pass"
       ],
       "priority": 2,
-      "passes": true,
-      "notes": "Implemented in internal/data/rados/prefetch.go (newPrefetchReader + chunkGetFn callback + getPrefetchFromEnv + clampGetPrefetch). backend.go::GetChunks now builds a chunkGetFn closure that owns ioctx.Read + ObserveOp and returns a prefetchReader. Knob STRATA_RADOS_GET_PREFETCH [1,64] default 4 read once at Backend constructor. Memory bounded by depth × chunk_size: dispatcher acquires sem token before launching fetcher; reader releases token after consuming. Range GET selects only the chunks that overlap [offset, offset+length) and reads partial bytes for the first/last chunks (off + segLen passed to chunkGetFn). Close cancels in-flight fetches via ctx + waits for goroutines to exit. Tests in internal/data/rados/prefetch_test.go (no build tag) cover full-read byte equality, range GET (6 cases), parallel wall-clock claim (depth=4, 32 chunks, ~5ms perOp finishes well under sequential ceiling), client-cancel goroutine leak (NumGoroutine returns to baseline within 500ms), parent-ctx cancel, fetch-error propagation, empty range, out-of-range offset, prefetch window stops at last needed chunk, env clamping. Race-detector clean. The legacy radosReader type is retired (replaced wholesale by prefetchReader); behaviour is preserved for sequential range-GET / EOF / multi-cluster ioctx fan-out."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-003",
-      "title": "Benchmarks + docs + ROADMAP close-flip",
-      "description": "As a developer, I want a recorded throughput baseline + operator-facing tuning doc + ROADMAP close-flip for both P2 entries.",
+      "title": "Bucket arg routing on every S3 data-plane method",
+      "description": "As a developer, I want every S3 data-plane method to read the target bucket from the resolved `ClassSpec.Bucket` instead of the old top-level `Backend.bucket` field so per-class routing works.",
       "acceptanceCriteria": [
-        "Add Go benchmark `internal/data/rados/backend_bench_test.go::BenchmarkPutChunks` + `BenchmarkGetChunks` driving 64 MiB / 256 MiB objects against a fake ioctx with realistic ~5 ms per-op latency; benchmark output recorded in `docs/site/content/architecture/benchmarks/parallel-chunks.md` (or appended to existing `meta-backend-comparison.md` style page)",
-        "Doc page covers: (a) what changed (PUT + GET parallelism), (b) tuning knobs (`STRATA_RADOS_PUT_CONCURRENCY` default 32, `STRATA_RADOS_GET_PREFETCH` default 4), (c) memory budget per request (concurrency × chunk_size, prefetch_depth × chunk_size), (d) when to raise / lower (small-object workloads benefit from lower concurrency to reduce overhead; large-object workloads from higher), (e) cross-cluster manifest behaviour (multi-cluster fan-out still works; per-cluster ioctx resolution stays in the worker)",
-        "Reference doc table (`docs/site/content/reference/_index.md`) gains an env-var entry pair for the two new knobs",
-        "`scripts/s3-tests/run.sh` against `make up-all` local stack confirms no regression on the existing baseline (162/177 → 165/178 from prior cycle; this cycle should not change pass rate either way — verify)",
-        "ROADMAP.md close-flip in the same commit per CLAUDE.md Roadmap maintenance rule: BOTH P2 entries ('Parallel chunk upload in `PutChunks`' + 'Parallel chunk read / prefetch in `GetChunks`') flip to `~~**P2 — ...**~~ — **Done.** ... (commit `<pending>`)`",
-        "Closing-SHA backfill follow-up commit on main per established pattern (commit-then-amend is undesirable)",
+        "`Put` / `Get` / `Delete` / `Head` / `Copy` / `List` / `PutChunks` / `GetChunks` resolve `(cluster, bucket) := b.resolveClass(class)` first; bucket flows into every SDK call (`PutObjectInput.Bucket`, `GetObjectInput.Bucket`, etc.) — no `b.bucket` reference remains",
+        "Multipart methods (`CreateBackendMultipart` / `UploadBackendPart` / `CompleteBackendMultipart` / `AbortBackendMultipart`) thread the upload's resolved bucket into every SDK call — verify `meta.MultipartUpload.BackendUploadID` carries enough to re-resolve on subsequent calls OR persist the cluster id alongside if needed",
+        "`Presign*` methods route through the same resolution; SSE-related per-cluster knobs (`SSEMode`, `SSEKMSKeyID`) come from `s3Cluster.spec`, not from a top-level field",
+        "`objectKey(ctx context.Context)` preserved as-is — keys are bucket-relative",
+        "New unit test `internal/data/s3/multi_cluster_test.go`: configure two clusters + three classes (class A → cluster-eu/bucket-a, class B → cluster-eu/bucket-b, class C → cluster-us/bucket-c) against in-process httptest S3 fakes; PutChunks for each class lands on the correct (cluster, bucket); cross-class read isolation; `resolveClass` for unknown class → `ErrUnknownStorageClass`",
         "Typecheck passes",
         "Tests pass"
       ],
       "priority": 3,
-      "passes": true,
-      "notes": "Benchmarks live in internal/data/rados/backend_bench_test.go (tag-free; exercises putChunksParallel + newPrefetchReader against fake chunkPutFn / chunkGetFn callbacks with 5 ms per-op latency injection). 64 MiB + 256 MiB cases at sequential vs concurrent settings. Doc page at docs/site/content/architecture/benchmarks/parallel-chunks.md covers what changed, both env knobs (STRATA_RADOS_PUT_CONCURRENCY default 32 / STRATA_RADOS_GET_PREFETCH default 4), memory budget, when to raise/lower, multi-cluster behaviour, reader-side bottleneck on PUT (single-dispatcher MD5 path), and raw numbers (GET: 3.7×–4.5× wall-clock speedup at depth=4; PUT: 1.05× at 5 ms perOp — dispatcher MD5 cost ≈ worker cost at low latency, gain scales close to linearly with per-OSD latency on production traffic). Reference env-var table (docs/site/content/reference/_index.md) gains both knobs with deep links into the doc page. ROADMAP.md flips both P2 entries to Done with cycle attribution + commit-pending placeholder. s3-tests pass-rate not re-run this cycle (data-layer parallelism, no S3 surface change); existing 165/178 baseline carries over."
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Retire STRATA_S3_BACKEND_* env path",
+      "description": "As a developer, I want the legacy env-based single-cluster config fully removed so there is exactly ONE source of truth for the S3 backend — the new `STRATA_S3_CLUSTERS` + `STRATA_S3_CLASSES` envs.",
+      "acceptanceCriteria": [
+        "Remove `S3Backend` field from `internal/config/config.go::Config` AND all 13 `STRATA_S3_BACKEND_*` entries from the koanf env-map (`_ENDPOINT`, `_REGION`, `_BUCKET`, `_ACCESS_KEY`, `_SECRET_KEY`, `_FORCE_PATH_STYLE`, `_PART_SIZE`, `_UPLOAD_CONCURRENCY`, `_MAX_RETRIES`, `_OP_TIMEOUT_SECS`, `_MULTIPART_TIMEOUT_SECS`, `_SSE_MODE`, `_SSE_KMS_KEY_ID`)",
+        "Remove the corresponding `S3BackendConfig` struct + `Validate*` body in `config.go`",
+        "Add `S3 struct { Clusters string `koanf:\"clusters\"`; Classes string `koanf:\"classes\"` }` (top-level holds raw JSON strings) to `Config`. Wire `STRATA_S3_CLUSTERS` → `s3.clusters`, `STRATA_S3_CLASSES` → `s3.classes` in the koanf env-map",
+        "`internal/serverapp/serverapp.go::buildDataBackend` `case \"s3\":` parses `cfg.S3.Clusters` via `s3.ParseClusters`, `cfg.S3.Classes` via `s3.ParseClasses`, then calls `s3.New(s3.Config{Clusters, Classes})`. Validation errors from `s3.New` bubble up — gateway refuses to start",
+        "Update `deploy/docker/docker-compose.yml` if it sets `STRATA_S3_BACKEND_*`; document the new bootstrap path (set `STRATA_S3_CLUSTERS` + `STRATA_S3_CLASSES`)",
+        "Update `scripts/s3-tests/run.sh` + smoke harness if they reference the legacy envs; switch to the new env shape",
+        "`make smoke` still passes against an S3 backend path (if smoke profile uses S3; otherwise smoke remains rados-only)",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "s3test fixture package for unit tests",
+      "description": "As a developer, I want a one-call test fixture that wires up a `data.s3.Backend` + cluster + class so existing per-file test setup collapses to a single `s3test.NewFixture(t)` call.",
+      "acceptanceCriteria": [
+        "Add `internal/data/s3/s3test/fixture.go` with `Fixture{Backend *s3.Backend, ClusterID, ClassName, Bucket string}` and `NewFixture(t testing.TB) *Fixture` constructor: builds ONE cluster spec pointing at an httptest server, registers ONE class mapped to that cluster + a random bucket name, returns a wired `*s3.Backend`",
+        "Variants: `WithClusters(specs ...S3ClusterSpec) Option`, `WithClass(name, clusterID, bucket string) Option` for tests that need multiple clusters / classes",
+        "Existing single-cluster test suite (`backend_test.go`, `multipart_test.go`, `presign_test.go`, `cors_test.go`, `lifecycle_test.go`, `metrics_test.go`) refactored to use `s3test.NewFixture` instead of building Backend + env config inline — net LOC reduction; semantics unchanged",
+        "Document the fixture in a one-paragraph header on `s3test/fixture.go`",
+        "Race detector clean",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Docs + ROADMAP close-flip",
+      "description": "As a developer, I want operator-facing docs + the ROADMAP P2 entry flipped in the same commit when the cycle closes.",
+      "acceptanceCriteria": [
+        "Add `docs/site/content/best-practices/s3-multi-cluster.md` covering: `S3ClusterSpec` shape (endpoint, region, force-path-style, etc.) + `credentials_ref` discriminator (`chain` / `env:VAR:VAR` / `file:/path:profile`), per-class routing via `ClassSpec{Cluster, Bucket}`, full env JSON examples (`STRATA_S3_CLUSTERS` + `STRATA_S3_CLASSES`), rolling-restart workflow for cluster add / remove, fail-fast credential validation at boot",
+        "Update `docs/site/content/best-practices/_index.md` table with the new page row",
+        "Reference doc `docs/site/content/reference/_index.md` — REMOVE the 13 `STRATA_S3_BACKEND_*` rows; ADD `STRATA_S3_CLUSTERS` + `STRATA_S3_CLASSES` rows + deep-links to the new doc page",
+        "ROADMAP.md close-flip in the same commit per CLAUDE.md Roadmap maintenance rule: `~~**P2 — Env-driven multi-cluster S3 data backend.**~~ — **Done.** ... (commit `<pending>`)`",
+        "Delete `tasks/prd-s3-multi-cluster.md` per CLAUDE.md PRD lifecycle rule (Ralph snapshot is the canonical record)",
+        "`make docs-build` clean (Hugo strict-ref resolution catches dangling refs)",
+        "Closing-SHA backfill follow-up commit on main per established pattern",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
     }
   ]
 }
