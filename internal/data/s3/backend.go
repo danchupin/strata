@@ -35,6 +35,8 @@ import (
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go/logging"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/danchupin/strata/internal/data"
 )
@@ -66,6 +68,13 @@ type Backend struct {
 	// synthetic transports). Applied to every cluster's SDK config on
 	// first connFor.
 	httpClient *http.Client
+
+	// tracerProvider, when non-nil, gates otelaws middleware installation
+	// on every per-cluster SDK client built by connFor. Each SDK call
+	// emits a client-kind span via otelaws stamped with
+	// `strata.component=gateway` + `strata.s3_cluster=<id>` so operators
+	// can filter Jaeger waterfalls per cluster.
+	tracerProvider trace.TracerProvider
 }
 
 // s3Cluster carries the per-cluster SDK wiring + resolved config knobs.
@@ -131,6 +140,20 @@ type Config struct {
 	// validation done by New. Tests that don't want a real creds chain
 	// flip this on.
 	SkipCredsCheck bool
+
+	// Tracer, when non-nil, signals that OTel tracing is wired and that
+	// every per-cluster SDK client should install the otelaws middleware
+	// stack. The actual TracerProvider is sourced from TracerProvider
+	// (preferred) or, when that is nil, the global otel.GetTracerProvider.
+	// Per US-003 PRD AC the field name is `Tracer` so the Config shape
+	// matches cassandra/rados Config.Tracer.
+	Tracer trace.Tracer
+
+	// TracerProvider is the underlying TracerProvider passed to
+	// `otelaws.WithTracerProvider`. When nil the global TracerProvider
+	// (otel.GetTracerProvider) is used. Tests inject an in-memory
+	// exporter-backed provider here.
+	TracerProvider trace.TracerProvider
 }
 
 // Validate performs cross-field checks on the multi-cluster Config:
@@ -178,9 +201,10 @@ func New(cfg Config) (*Backend, error) {
 	}
 	RegisterMetrics()
 	b := &Backend{
-		clusters:   make(map[string]*s3Cluster, len(cfg.Clusters)),
-		classes:    copyClasses(cfg.Classes),
-		httpClient: cfg.HTTPClient,
+		clusters:       make(map[string]*s3Cluster, len(cfg.Clusters)),
+		classes:        copyClasses(cfg.Classes),
+		httpClient:     cfg.HTTPClient,
+		tracerProvider: resolveTracerProvider(cfg),
 	}
 	for id, spec := range cfg.Clusters {
 		spec.ID = id
@@ -257,6 +281,8 @@ func Open(ctx context.Context, cfg Config) (*Backend, error) {
 		HTTPClient:     cfg.HTTPClient,
 		SkipProbe:      true, // probed below per legacy semantics
 		SkipCredsCheck: true,
+		Tracer:         cfg.Tracer,
+		TracerProvider: cfg.TracerProvider,
 	}
 	b, err := New(newCfg)
 	if err != nil {
@@ -349,6 +375,10 @@ func (b *Backend) connFor(ctx context.Context, id string) (*s3Cluster, error) {
 		o.UsePathStyle = c.spec.ForcePathStyle
 		o.ClientLogMode |= aws.LogRetries
 		o.Logger = retryWarnLogger{inner: o.Logger}
+		// otelaws middlewares MUST register BEFORE the metrics observer
+		// so the otelaws Initialize-after hook brackets every retry
+		// attempt (matches the metrics observer position).
+		installOTelMiddleware(&o.APIOptions, b.tracerProvider, id)
 		o.APIOptions = append(o.APIOptions, instrumentStack)
 	})
 	partSize := c.spec.PartSize
@@ -530,6 +560,21 @@ func copyClasses(src map[string]ClassSpec) map[string]ClassSpec {
 		out[k] = v
 	}
 	return out
+}
+
+// resolveTracerProvider picks the TracerProvider used to drive otelaws.
+// Cfg.TracerProvider wins when set; otherwise cfg.Tracer gates middleware
+// install (a non-nil tracer with a nil provider means "use the global
+// TracerProvider"). Returns nil when neither is wired so connFor skips
+// middleware install — preserving the zero-config test fixture.
+func resolveTracerProvider(cfg Config) trace.TracerProvider {
+	if cfg.TracerProvider != nil {
+		return cfg.TracerProvider
+	}
+	if cfg.Tracer != nil {
+		return otel.GetTracerProvider()
+	}
+	return nil
 }
 
 // probeCluster runs the boot-time writability check against one

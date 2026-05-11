@@ -174,8 +174,9 @@ exports the full trace regardless of ratio.
 ### SemConv version
 
 `semconv` import version must match the SDK's `resource.Default()`
-schema URL — SDK 1.41 → `semconv/v1.39.0`. Mismatch fails at runtime
-with `conflicting Schema URL`. Bump together when bumping the SDK.
+schema URL — SDK 1.41 → `semconv/v1.39.0`, SDK 1.43 → `semconv/v1.40.0`.
+Mismatch fails at runtime with `conflicting Schema URL`. Bump together
+when bumping the SDK.
 
 ### Local tracing stack
 

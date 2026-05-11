@@ -268,8 +268,8 @@ span Error on >= 500, and stamps `request_id` on the span (read from `r.Header["
 inner logging middleware has set it) so the ring buffer can index by request id. Wired in
 `internal/serverapp/serverapp.go` ahead of the logging middleware so the span covers the full request
 including auth/access-log/audit. **semconv import version must match the SDK's `resource.Default()`
-schema URL** — SDK 1.41 → `semconv/v1.39.0`; mismatch fails at runtime with "conflicting Schema URL".
-Bump together when bumping the SDK.
+schema URL** — SDK 1.41 → `semconv/v1.39.0`, SDK 1.43 → `semconv/v1.40.0`. Mismatch fails at runtime
+with "conflicting Schema URL". Bump together when bumping the SDK.
 
 Per-storage span emission piggybacks on the existing observer hooks. `cassandra.SessionConfig.Tracer`
 plugs a `trace.Tracer` into `SlowQueryObserver`; the observer emits one client-kind child span per

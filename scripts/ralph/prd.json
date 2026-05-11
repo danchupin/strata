@@ -57,8 +57,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped: go.mod adds go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws v0.68.0 — pulls otel sdk to v1.43.0 + smithy-go v1.24.3. internal/data/s3/observer.go exposes installOTelMiddleware + stampStrataAttrs(clusterID) which feeds an otelaws.AttributeBuilder stamping strata.component=gateway + strata.s3_cluster=<id>. internal/data/s3/backend.go Config grows Tracer trace.Tracer + TracerProvider trace.TracerProvider; resolveTracerProvider picks Config.TracerProvider > otel.GetTracerProvider() (when Tracer non-nil) > nil. Backend.tracerProvider plumbs through to connFor which calls installOTelMiddleware BEFORE the metrics instrumentStack so otelaws Initialize-after brackets every retry. legacy single-cluster Open() forwards cfg.Tracer + cfg.TracerProvider onto the synthesised newCfg so test fixtures using the legacy shape inherit tracing. internal/serverapp/serverapp.go::buildDataBackend case \"s3\" wires Tracer=tp.Tracer(\"strata.data.s3\") + TracerProvider=tp.TracerProvider(). internal/otel/otel.go: bumped semconv v1.39.0 → v1.40.0 (matches sdk 1.43 resource.Default schema URL — gotcha pinned in CLAUDE.md + observability.md); new Provider.TracerProvider() accessor for instrumentation hooks that need the provider directly. internal/data/s3/observer_test.go: drives synthetic PutObject through the SDK + asserts the emitted client-kind span carries strata.component=gateway, strata.s3_cluster=default, rpc.method contains PutObject, rpc.system.name=aws-api; drives a NoSuchKey GetObject + asserts status=Error; zero-config (nil tracer + nil provider) asserts no spans emitted (existing fixtures stay hermetic). go vet + go build + targeted race tests across internal/data/s3, internal/data/s3/s3test, internal/serverapp, internal/otel, internal/meta/cassandra, internal/data/rados all PASS. Pre-existing flake in internal/lifecycle/TestThreeReplicaDistribution exists on baseline (verified via git stash -u) and is unrelated to this change."
     },
     {
       "id": "US-004",

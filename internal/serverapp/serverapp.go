@@ -377,8 +377,10 @@ func buildDataBackend(cfg *config.Config, logger *slog.Logger, tp *strataotel.Pr
 			return nil, fmt.Errorf("STRATA_S3_CLASSES: %w", err)
 		}
 		return datas3.New(datas3.Config{
-			Clusters: s3Clusters,
-			Classes:  s3Classes,
+			Clusters:       s3Clusters,
+			Classes:        s3Classes,
+			Tracer:         tp.Tracer("strata.data.s3"),
+			TracerProvider: tp.TracerProvider(),
 		})
 	default:
 		return nil, errors.New("unknown data backend")
