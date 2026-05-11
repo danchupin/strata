@@ -27,3 +27,27 @@ not yet folded into the planned env-vars subpage:
 | `STRATA_RADOS_PUT_CONCURRENCY` | `32` (range `[1, 256]`) | gateway PUT path | [Parallel chunk PUT + GET]({{< ref "/architecture/benchmarks/parallel-chunks" >}}#tuning-knobs) |
 | `STRATA_RADOS_GET_PREFETCH` | `4` (range `[1, 64]`) | gateway GET path | [Parallel chunk PUT + GET]({{< ref "/architecture/benchmarks/parallel-chunks" >}}#tuning-knobs) |
 | `STRATA_CLUSTER_REGISTRY_INTERVAL` | `30s` (range `[5s, 5m]`) | rados backend in-process watcher | Cluster registry watcher poll cadence. Every gateway replica polls `meta.ListClusters` at this interval; added clusters lazy-dial on next traffic, removed clusters safely drain cached conn + ioctxes. Increments `strata_cluster_registry_changes_total{op=add|remove|update}` per reconciliation. |
+
+## Admin API — cluster registry (selected curls)
+
+Full schemas in `internal/adminapi/openapi.yaml`. The
+`STRATA_RADOS_CLUSTERS` env path is fully retired — the registry is the
+single source of truth. See
+[Dynamic clusters]({{< ref "/best-practices/dynamic-clusters" >}}) for
+the operator workflow.
+
+```bash
+# List
+curl -sS http://localhost:8080/admin/v1/storage/clusters \
+  -b "$(cat strata-session.cookie)" | jq
+
+# Register
+curl -sS -X POST http://localhost:8080/admin/v1/storage/clusters \
+  -H 'Content-Type: application/json' \
+  -b "$(cat strata-session.cookie)" \
+  -d '{"id":"default","backend":"rados","spec":{"config_file":"/etc/ceph/ceph.conf","user":"client.admin","keyring":"/etc/ceph/ceph.client.admin.keyring","pool":"strata.rgw.buckets.data"}}'
+
+# De-register (409 ClusterReferenced if any storage class still routes here)
+curl -sS -X DELETE http://localhost:8080/admin/v1/storage/clusters/cold \
+  -b "$(cat strata-session.cookie)"
+```
