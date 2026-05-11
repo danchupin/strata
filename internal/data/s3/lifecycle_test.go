@@ -13,11 +13,12 @@ import (
 	"github.com/danchupin/strata/internal/data"
 )
 
-// TestStubLifecycleReturnsErrUnsupported pins the contract: a New() stub
-// must surface errors.ErrUnsupported on every LifecycleBackend method
-// before Open wires a live client (US-014).
+// TestStubLifecycleReturnsErrUnsupported pins the contract: a
+// zero-value Backend (no clusters) must surface errors.ErrUnsupported
+// on every LifecycleBackend method before Open wires a live client
+// (US-014).
 func TestStubLifecycleReturnsErrUnsupported(t *testing.T) {
-	b := New()
+	b := &Backend{}
 	ctx := context.Background()
 
 	if _, err := b.PutBackendLifecycle(ctx, "p/", nil); !errors.Is(err, errors.ErrUnsupported) {

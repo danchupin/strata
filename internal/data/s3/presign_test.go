@@ -112,7 +112,7 @@ func TestPresignGetObjectRequiresBackendRef(t *testing.T) {
 }
 
 func TestStubPresignReturnsErrUnsupported(t *testing.T) {
-	b := New()
+	b := &Backend{}
 	m := &data.Manifest{BackendRef: &data.BackendRef{Backend: BackendName, Key: "k"}}
 	if _, err := b.PresignGetObject(context.Background(), m, time.Minute); !errors.Is(err, errors.ErrUnsupported) {
 		t.Errorf("stub presign: got %v want ErrUnsupported", err)

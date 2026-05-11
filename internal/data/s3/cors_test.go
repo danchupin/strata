@@ -11,11 +11,11 @@ import (
 	"github.com/danchupin/strata/internal/data"
 )
 
-// TestStubCORSReturnsErrUnsupported pins the contract: a New() stub must
-// surface errors.ErrUnsupported on every CORSBackend method before Open
-// wires a live client (US-015).
+// TestStubCORSReturnsErrUnsupported pins the contract: a zero-value
+// Backend (no clusters) must surface errors.ErrUnsupported on every
+// CORSBackend method before Open wires a live client (US-015).
 func TestStubCORSReturnsErrUnsupported(t *testing.T) {
-	b := New()
+	b := &Backend{}
 	ctx := context.Background()
 
 	if err := b.PutBackendCORS(ctx, nil); !errors.Is(err, errors.ErrUnsupported) {

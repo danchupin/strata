@@ -13,11 +13,12 @@ import (
 	"github.com/danchupin/strata/internal/data"
 )
 
-// TestStubMultipartReturnsErrUnsupported guards US-010 against a New()
-// stub (no Open): every MultipartBackend method must surface
-// errors.ErrUnsupported instead of silently no-op'ing or panicking.
+// TestStubMultipartReturnsErrUnsupported guards US-010 against a
+// zero-value Backend (no clusters wired): every MultipartBackend method
+// must surface errors.ErrUnsupported instead of silently no-op'ing or
+// panicking.
 func TestStubMultipartReturnsErrUnsupported(t *testing.T) {
-	b := New()
+	b := &Backend{}
 	ctx := context.Background()
 
 	if _, err := b.CreateBackendMultipart(ctx, "STANDARD"); !errors.Is(err, errors.ErrUnsupported) {

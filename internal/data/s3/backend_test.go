@@ -10,17 +10,16 @@ import (
 	"sync"
 	"testing"
 
-	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/google/uuid"
 
 	"github.com/danchupin/strata/internal/data"
 )
 
-// TestStubReturnsErrUnsupported pins the US-001 acceptance: a New() stub
-// must satisfy data.Backend and surface errors.ErrUnsupported on every
-// mutating method until the real implementation lands.
+// TestStubReturnsErrUnsupported pins the US-001 acceptance: a
+// zero-value Backend (no clusters wired) must satisfy data.Backend and
+// surface errors.ErrUnsupported on every mutating method.
 func TestStubReturnsErrUnsupported(t *testing.T) {
-	b := New()
+	b := &Backend{}
 
 	var _ data.Backend = b
 
@@ -44,7 +43,7 @@ func TestStubReturnsErrUnsupported(t *testing.T) {
 // stub Backend (no Open) must not silently succeed — callers without a
 // live S3 client get errors.ErrUnsupported.
 func TestStubPutReturnsErrUnsupported(t *testing.T) {
-	b := New()
+	b := &Backend{}
 
 	_, err := b.Put(context.Background(), "k", bytes.NewReader(nil), 0)
 	if !errors.Is(err, errors.ErrUnsupported) {
@@ -56,7 +55,7 @@ func TestStubPutReturnsErrUnsupported(t *testing.T) {
 // Open) must surface errors.ErrUnsupported on Get / GetRange — never
 // silently succeed.
 func TestStubGetReturnsErrUnsupported(t *testing.T) {
-	b := New()
+	b := &Backend{}
 	ctx := context.Background()
 
 	if _, err := b.Get(ctx, "k"); !errors.Is(err, errors.ErrUnsupported) {
@@ -69,9 +68,10 @@ func TestStubGetReturnsErrUnsupported(t *testing.T) {
 
 // TestGetRangeValidatesArguments pins US-003 input validation: negative
 // offset or non-positive length is a programmer error and must fail
-// before any network call.
+// before any network call. Argument validation runs ahead of cluster
+// resolution, so a zero-value Backend exercises the early-return paths.
 func TestGetRangeValidatesArguments(t *testing.T) {
-	b := &Backend{bucket: "b", client: &awss3.Client{}}
+	b := &Backend{}
 	ctx := context.Background()
 
 	if _, err := b.GetRange(ctx, "k", -1, 1); err == nil {
@@ -89,7 +89,7 @@ func TestGetRangeValidatesArguments(t *testing.T) {
 // Backend (no Open) must surface errors.ErrUnsupported on DeleteObject /
 // DeleteBatch — never silently succeed against an absent client.
 func TestStubDeleteObjectReturnsErrUnsupported(t *testing.T) {
-	b := New()
+	b := &Backend{}
 	ctx := context.Background()
 
 	if err := b.DeleteObject(ctx, "k", ""); !errors.Is(err, errors.ErrUnsupported) {
@@ -104,9 +104,11 @@ func TestStubDeleteObjectReturnsErrUnsupported(t *testing.T) {
 }
 
 // TestDeleteBatchEmpty is a no-op: empty refs returns (nil, nil) without
-// touching the network — works on stub and live Backend alike.
+// touching the network — works on stub and live Backend alike. The
+// empty-refs branch runs before cluster resolution so the zero-value
+// Backend exercises it without needing a wired client.
 func TestDeleteBatchEmpty(t *testing.T) {
-	b := &Backend{bucket: "b", client: &awss3.Client{}}
+	b := &Backend{}
 	failures, err := b.DeleteBatch(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("DeleteBatch(nil): want nil error, got %v", err)
@@ -154,16 +156,15 @@ func TestOpenSkipProbeAvoidsNetwork(t *testing.T) {
 	if b == nil {
 		t.Fatal("Open returned nil backend with no error")
 	}
-	if b.client == nil {
-		t.Fatal("Open returned backend with nil client")
+	if len(b.clusters) == 0 {
+		t.Fatal("Open returned backend with empty clusters map")
 	}
 }
 
-// TestProbeStubReturnsErrUnsupported guards Probe on a New() stub: with
-// no live client, Probe must surface errors.ErrUnsupported — never
-// silently no-op.
+// TestProbeStubReturnsErrUnsupported guards Probe on a zero-value
+// Backend (no clusters): Probe must surface errors.ErrUnsupported.
 func TestProbeStubReturnsErrUnsupported(t *testing.T) {
-	b := New()
+	b := &Backend{}
 	if err := b.Probe(context.Background()); !errors.Is(err, errors.ErrUnsupported) {
 		t.Fatalf("Probe on stub: want errors.ErrUnsupported, got %v", err)
 	}

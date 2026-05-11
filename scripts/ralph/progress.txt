@@ -35,3 +35,25 @@ Cycle: ralph/s3-multi-cluster
   - `ParseClasses` does NOT cross-validate `Cluster` against the cluster map — that's `s3.New` boot-time validation (US-002). Keeps parser backend-independent + testable without env state.
   - Project root `go vet ./...` and `go test ./internal/data/s3/...` both clean. macOS ld LC_DYSYMTAB warning is harmless / present everywhere on this host.
 ---
+
+## 2026-05-11 - US-002
+- Refactored `internal/data/s3/backend.go` from single-bucket `Backend{bucket, client, uploader, opTimeout, sseMode, sseKMSKeyID}` to multi-cluster `Backend{clusters map[string]*s3Cluster, classes map[string]ClassSpec, mu sync.Mutex, httpClient *http.Client}`. Per-cluster fields moved into private `s3Cluster{spec, client, uploader, opTimeout, multipartTimeout, sseMode, sseKMSKeyID, legacyAccessKey, legacySecretKey}`.
+- Added `New(cfg Config) (*Backend, error)` multi-cluster constructor. Validates `cfg.Validate()` (every class's Cluster references a known cluster id; non-empty Clusters + Classes); resolves credentials per-cluster at boot via `validateClusterCredentials` (env vars must be set; file path must Stat; chain defers to SDK first-connect because IMDS calls at boot are too costly).
+- Added `connFor(ctx, id)` lazy client+uploader builder under `b.mu`, mirroring rados.Backend.connFor semantics. Cached `*awss3.Client` + `*manager.Uploader` per cluster.
+- Added `resolveClass(class)` returning `(cluster, bucket, err)`. Sentinels `ErrUnknownStorageClass` + `ErrClassMissingCluster` mirror the rados shape.
+- Added `singleCluster(ctx)` transitional helper picking the lex-lowest configured class for methods that don't yet take a class arg (Put / Get / GetRange / DeleteObject / DeleteBatch / Probe / CORS / Lifecycle / Multipart / Presign / Health). US-003 will swap singleCluster→resolveClass per method.
+- Retained `Open(ctx, cfg)` as the legacy single-cluster shim: synthesises one cluster under "default" + one class under "STANDARD" from `cfg.{Endpoint,Region,Bucket,AccessKey,SecretKey,...}` and delegates to New. Existing `STRATA_S3_BACKEND_*`-driven tests + integration paths keep working until US-004 retires them.
+- Refactored every existing data-plane file (multipart.go, presign.go, cors.go, lifecycle.go, health.go) to route through `singleCluster` / `connFor` instead of top-level fields. Per-cluster SSE helpers (`s3Cluster.applyPutSSE`, `applyMultipartSSE`, `backendSSEActive`, `manifestSSE`) replaced the old `Backend.*` versions.
+- Removed `func New() *Backend` stub constructor — its name now belongs to the multi-cluster builder. Test stubs use `&Backend{}` literal instead; methods on a zero-clusters Backend continue to return `errors.ErrUnsupported` (semantic equivalent).
+- New tests in `backend_multicluster_test.go` cover New validation (unknown cluster ref, empty maps), credential resolution (env: rejects unset vars, file: rejects missing path, chain: defers), `resolveClass` happy/unknown paths, `connFor` caching idempotence.
+- `go vet ./...` clean. `go test ./...` clean. `go test -race ./internal/data/s3/...` clean.
+- **Learnings for future iterations:**
+  - `singleCluster` is a transitional helper — US-003 should grep for it and replace every call site with a per-class `resolveClass + connFor` pair. The helper picks the lex-lowest class name so single-config behaviour is deterministic, but it is WRONG semantics for multi-class deployments (always returns the same bucket).
+  - `Open(ctx, Config{Bucket,Region,...})` legacy shape coexists with `New(cfg{Clusters,Classes})`. The dispatch keys off `len(cfg.Clusters) > 0 || len(cfg.Classes) > 0`. Tests + integration tests + `internal/serverapp/buildDataBackend` still use Open; US-004 will switch serverapp to call New directly and retire Open + the legacy Config fields in the same change.
+  - The legacy Open path synthesises `clusterID="default"` + `className="STANDARD"`. Multi-cluster tests must use New (or pass Clusters+Classes via Config to Open).
+  - Plaintext `AccessKey` / `SecretKey` from the legacy path ride on private `s3Cluster.legacyAccessKey` / `legacySecretKey` fields (not exposed via JSON in `S3ClusterSpec.Credentials`). New env-driven path never populates these — only `Open` does. US-004 removes them.
+  - `validateClusterCredentials` for `chain` is intentionally a no-op (does NOT call `LoadDefaultConfig.Retrieve()`): IMDS/IRSA web-identity round-trips at boot break in environments where the chain is resolved lazily by the SDK. Trust the SDK to error at first connect. If you want stricter boot-time validation per cluster, add a `Probe` per cluster via `Open(..., SkipProbe: false)` — that's what `probeEachCluster` does.
+  - `DataHealth` reports one pool row per (class, bucket) pair instead of one per cluster — multi-class deployments need this granularity so the storage page shows whether every routing target is reachable.
+  - `manager.Uploader` is deprecated by `feature/s3/transfermanager` (SDK >=v2 modules), but the deprecation is a soft warning; out of scope for this cycle.
+  - macOS `ld LC_DYSYMTAB` warning persists on the host; harmless.
+---

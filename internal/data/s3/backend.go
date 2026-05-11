@@ -1,13 +1,15 @@
 // Package s3 implements an S3-compatible data backend for Strata.
 //
-// US-001 laid down the package skeleton. US-002 adds the streaming Put
-// path: a fully constructed Backend (built via Open) talks to any
-// S3-compatible endpoint via aws-sdk-go-v2 and uploads bytes through
-// feature/s3/manager.NewUploader — single-shot or multipart transparently.
+// US-002 (ralph/s3-multi-cluster) lifted Backend from single-bucket-per-
+// instance into a multi-cluster shape: a map of per-cluster S3 SDK clients
+// (built lazily by connFor) plus a per-storage-class routing table that
+// maps each class to a (cluster, bucket) pair. Each per-cluster s3Cluster
+// carries its own SSE / part-size / op-timeout config from S3ClusterSpec.
 //
-// The data.Backend interface methods (PutChunks / GetChunks / Delete) stay
-// stubs until US-009 wires the gateway dispatch and the manifest schema
-// gains BackendRef (US-008).
+// The legacy single-cluster Open(ctx, Config{Bucket,Region,...}) entry-
+// point is retained as a compatibility shim — it synthesises a one-entry
+// clusters map + one-entry classes map so existing tests and the legacy
+// STRATA_S3_BACKEND_* env path keep working until US-004 retires them.
 package s3
 
 import (
@@ -17,7 +19,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -33,66 +38,188 @@ import (
 )
 
 // BackendName is the canonical Manifest.BackendRef.Backend value emitted by
-// the s3-over-s3 data backend. Stored on every manifest produced by
-// PutChunks so future code paths can branch on backend identity (the
-// rados/memory paths leave BackendRef nil; chunks-shape manifests carry
-// no Backend label).
+// the s3-over-s3 data backend.
 const BackendName = "s3"
 
-// Backend is the S3-over-S3 data backend. A zero-value / New() Backend is
-// stub-only (every method returns errors.ErrUnsupported); a Backend built
-// via Open carries a live S3 client + multipart Uploader.
+// ErrUnknownStorageClass is returned by resolveClass when the supplied
+// storage-class label is not present in Backend.classes.
+var ErrUnknownStorageClass = errors.New("s3: unknown storage class")
+
+// ErrClassMissingCluster is returned by resolveClass when the matched
+// ClassSpec.Cluster is empty.
+var ErrClassMissingCluster = errors.New("s3: class missing cluster")
+
+// Backend is the S3-over-S3 data backend. Holds a map of per-cluster
+// connections + a per-class routing table.
+//
+// A zero-value Backend is a "stub" — clusters/classes are nil and every
+// data-plane method returns errors.ErrUnsupported. Tests use this shape
+// to exercise the not-wired path without paying for a synthetic backend.
 type Backend struct {
-	bucket           string
+	clusters map[string]*s3Cluster
+	classes  map[string]ClassSpec
+	mu       sync.Mutex
+
+	// httpClient is the per-Backend HTTP client override (tests inject
+	// synthetic transports). Applied to every cluster's SDK config on
+	// first connFor.
+	httpClient *http.Client
+}
+
+// s3Cluster carries the per-cluster SDK wiring + resolved config knobs.
+// Built lazily by connFor on first use, cached in Backend.clusters under
+// b.mu so concurrent first-use is race-free.
+type s3Cluster struct {
+	spec             S3ClusterSpec
 	client           *awss3.Client
 	uploader         *manager.Uploader
 	opTimeout        time.Duration
 	multipartTimeout time.Duration
-	// sseMode is one of data.SSEMode{Passthrough,Strata,Both}; never the
-	// empty string after Open (defaults to passthrough). Used by
-	// Put/PutChunks/CreateBackendMultipart to decide whether to set the
-	// backend ServerSideEncryption header and what to record on the
-	// Manifest.SSE.
-	sseMode string
-	// sseKMSKeyID resolves aws:kms over AES256 in passthrough/both. Empty
-	// (default) keeps AES256 / SSE-S3.
-	sseKMSKeyID string
+	sseMode          string
+	sseKMSKeyID      string
+
+	// legacyAccessKey / legacySecretKey are the plaintext static creds
+	// supplied by the deprecated single-cluster Open() shape. New() and
+	// the env-driven multi-cluster path leave these empty — credentials
+	// flow through spec.Credentials instead.
+	legacyAccessKey string
+	legacySecretKey string
 }
 
-// New constructs a stub Backend with no live S3 client. Every method
-// returns errors.ErrUnsupported. Kept for the US-001 contract; US-002+
-// callers should use Open.
-func New() *Backend {
-	return &Backend{}
+// Config carries the wiring needed to build a Backend. Two coexisting
+// shapes during the US-002 → US-004 migration:
+//
+//   - Multi-cluster (preferred, target shape for US-004): set
+//     Clusters + Classes. Every class's Cluster must reference a known
+//     cluster id; every cluster's Credentials must resolve at New time.
+//
+//   - Legacy single-cluster: set Endpoint/Region/Bucket/AccessKey/...
+//     The Open(ctx, cfg) entry-point synthesises a single-entry Clusters
+//     map under "default" and a single-entry Classes map under "STANDARD".
+//     Retired by US-004.
+type Config struct {
+	// Multi-cluster shape.
+	Clusters map[string]S3ClusterSpec
+	Classes  map[string]ClassSpec
+
+	// Legacy single-cluster fields. Deprecated — retired by US-004.
+	Endpoint          string
+	Region            string
+	Bucket            string
+	AccessKey         string
+	SecretKey         string
+	ForcePathStyle    bool
+	PartSize          int64
+	UploadConcurrency int
+	MaxRetries        int
+	OpTimeout         time.Duration
+	MultipartTimeout  time.Duration
+	SSEMode           string
+	SSEKMSKeyID       string
+
+	// HTTPClient overrides the SDK's default HTTP client. Tests inject
+	// counting/synthetic transports here. Applies to every cluster
+	// built by New / Open.
+	HTTPClient *http.Client
+
+	// SkipProbe disables the boot-time writability probe.
+	SkipProbe bool
+
+	// SkipCredsCheck disables the boot-time credentials resolution
+	// validation done by New. Tests that don't want a real creds chain
+	// flip this on.
+	SkipCredsCheck bool
 }
 
-// Open builds a live Backend wired to the supplied S3 endpoint. Validates
-// required config (Bucket, Region) and resolves credentials via the SDK
-// default chain when AccessKey/SecretKey are empty.
+// Validate performs cross-field checks on the multi-cluster Config:
+// every class's Cluster references a known cluster id; both maps are
+// populated.
+func (c Config) Validate() error {
+	if len(c.Clusters) == 0 {
+		return fmt.Errorf("s3: at least one cluster required")
+	}
+	if len(c.Classes) == 0 {
+		return fmt.Errorf("s3: at least one storage class required")
+	}
+	for name, class := range c.Classes {
+		if class.Cluster == "" {
+			return fmt.Errorf("s3: class %q has empty cluster", name)
+		}
+		if class.Bucket == "" {
+			return fmt.Errorf("s3: class %q has empty bucket", name)
+		}
+		if _, ok := c.Clusters[class.Cluster]; !ok {
+			return fmt.Errorf("s3: class %q references unknown cluster %q", name, class.Cluster)
+		}
+	}
+	return nil
+}
+
+// New builds a multi-cluster Backend from cfg.Clusters + cfg.Classes.
+// Validates that every class's cluster ref resolves and every cluster's
+// credentials resolve (fail-fast at boot — missing env var, missing
+// file, or no SDK default chain → error from New, gateway refuses to
+// start).
+//
+// SDK clients + Uploaders are NOT built here; that's lazy via connFor on
+// first data-plane use, mirroring the rados backend.
+func New(cfg Config) (*Backend, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	if !cfg.SkipCredsCheck {
+		for id, spec := range cfg.Clusters {
+			if err := validateClusterCredentials(spec); err != nil {
+				return nil, fmt.Errorf("s3: cluster %q credentials: %w", id, err)
+			}
+		}
+	}
+	RegisterMetrics()
+	b := &Backend{
+		clusters:   make(map[string]*s3Cluster, len(cfg.Clusters)),
+		classes:    copyClasses(cfg.Classes),
+		httpClient: cfg.HTTPClient,
+	}
+	for id, spec := range cfg.Clusters {
+		spec.ID = id
+		b.clusters[id] = &s3Cluster{
+			spec:             spec,
+			opTimeout:        opTimeoutFromSpec(spec),
+			multipartTimeout: DefaultMultipartTimeout,
+			sseMode:          sseModeFromSpec(spec),
+			sseKMSKeyID:      spec.SSEKMSKeyID,
+		}
+	}
+	return b, nil
+}
+
+// Open is the legacy single-cluster entry-point: builds a Backend wired
+// to one S3 endpoint + one bucket from cfg's legacy fields. Internally
+// synthesises a Clusters map under "default" and a Classes map under
+// "STANDARD", then delegates to New.
+//
+// Retired by US-004 — production wiring moves to STRATA_S3_CLUSTERS +
+// STRATA_S3_CLASSES + s3.New(cfg).
 func Open(ctx context.Context, cfg Config) (*Backend, error) {
+	if len(cfg.Clusters) > 0 || len(cfg.Classes) > 0 {
+		b, err := New(cfg)
+		if err != nil {
+			return nil, err
+		}
+		if !cfg.SkipProbe {
+			if err := b.probeEachCluster(ctx); err != nil {
+				return nil, err
+			}
+		}
+		return b, nil
+	}
+
+	// Legacy single-cluster shape — synthesise one cluster + one class.
 	if cfg.Bucket == "" {
 		return nil, fmt.Errorf("s3: bucket required")
 	}
 	if cfg.Region == "" {
 		return nil, fmt.Errorf("s3: region required")
-	}
-
-	// US-007: register metrics on the default Prometheus registry the
-	// first time a live backend is constructed. Idempotent via sync.Once
-	// so the rados-only path never pays for s3-specific collectors.
-	RegisterMetrics()
-
-	maxRetries := cfg.MaxRetries
-	if maxRetries <= 0 {
-		maxRetries = DefaultMaxRetries
-	}
-	opTimeout := cfg.OpTimeout
-	if opTimeout <= 0 {
-		opTimeout = DefaultOpTimeout
-	}
-	multipartTimeout := cfg.MultipartTimeout
-	if multipartTimeout <= 0 {
-		multipartTimeout = DefaultMultipartTimeout
 	}
 	sseMode := cfg.SSEMode
 	if sseMode == "" {
@@ -104,102 +231,295 @@ func Open(ctx context.Context, cfg Config) (*Backend, error) {
 		return nil, fmt.Errorf("s3: STRATA_S3_BACKEND_SSE_MODE must be one of {passthrough, strata, both}, got %q", sseMode)
 	}
 
-	loadOpts := []func(*awsconfig.LoadOptions) error{
-		awsconfig.WithRegion(cfg.Region),
-		// Adaptive retry mode rate-limits client-side under sustained
-		// 503 SlowDown / 429 TooManyRequests pressure (US-006). The
-		// SDK's standard retryable-status set covers 5xx + 429 + network
-		// errors and excludes 4xx auth/not-found — matches AC.
-		awsconfig.WithRetryMode(aws.RetryModeAdaptive),
-		awsconfig.WithRetryMaxAttempts(maxRetries),
+	clusterID := "default"
+	className := "STANDARD"
+	spec := S3ClusterSpec{
+		ID:                clusterID,
+		Endpoint:          cfg.Endpoint,
+		Region:            cfg.Region,
+		ForcePathStyle:    cfg.ForcePathStyle,
+		PartSize:          cfg.PartSize,
+		UploadConcurrency: int64(cfg.UploadConcurrency),
+		MaxRetries:        int64(cfg.MaxRetries),
+		OpTimeoutSecs:     int(cfg.OpTimeout / time.Second),
+		SSEMode:           sseMode,
+		SSEKMSKeyID:       cfg.SSEKMSKeyID,
+		Credentials:       CredentialsRef{Type: CredentialsChain},
+	}
+	newCfg := Config{
+		Clusters: map[string]S3ClusterSpec{clusterID: spec},
+		Classes: map[string]ClassSpec{className: {
+			Cluster: clusterID,
+			Bucket:  cfg.Bucket,
+		}},
+		HTTPClient:     cfg.HTTPClient,
+		SkipProbe:      true, // probed below per legacy semantics
+		SkipCredsCheck: true,
+	}
+	b, err := New(newCfg)
+	if err != nil {
+		return nil, err
+	}
+	// Carry the legacy multipart timeout + static creds onto the
+	// synthesised cluster — these don't fit S3ClusterSpec's JSON shape.
+	c := b.clusters[clusterID]
+	if cfg.MultipartTimeout > 0 {
+		c.multipartTimeout = cfg.MultipartTimeout
 	}
 	if cfg.AccessKey != "" && cfg.SecretKey != "" {
-		loadOpts = append(loadOpts, awsconfig.WithCredentialsProvider(
-			credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, ""),
-		))
-	}
-	if cfg.HTTPClient != nil {
-		loadOpts = append(loadOpts, awsconfig.WithHTTPClient(cfg.HTTPClient))
-	}
-
-	awscfg, err := awsconfig.LoadDefaultConfig(ctx, loadOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("s3: load aws config: %w", err)
-	}
-
-	client := awss3.NewFromConfig(awscfg, func(o *awss3.Options) {
-		if cfg.Endpoint != "" {
-			endpoint := cfg.Endpoint
-			o.BaseEndpoint = &endpoint
-		}
-		o.UsePathStyle = cfg.ForcePathStyle
-		// LogRetries makes the SDK emit a per-retry log line carrying
-		// service + operation + attempt number (US-006). Wrap the
-		// SDK's logger to promote those lines to slog Warn level so
-		// they reach the operator's standard log pipeline rather than
-		// hiding at SDK Debug.
-		o.ClientLogMode |= aws.LogRetries
-		o.Logger = retryWarnLogger{inner: o.Logger}
-		// US-007: per-op latency + status + retry-pressure metrics via
-		// a single Initialize-step observer that brackets the full op
-		// lifecycle (serialize → retry → send → deserialize).
-		o.APIOptions = append(o.APIOptions, instrumentStack)
-	})
-
-	partSize := cfg.PartSize
-	if partSize <= 0 {
-		partSize = DefaultPartSize
-	}
-	concurrency := cfg.UploadConcurrency
-	if concurrency <= 0 {
-		concurrency = DefaultUploadConcurrency
-	}
-
-	uploader := manager.NewUploader(client, func(u *manager.Uploader) {
-		u.PartSize = partSize
-		u.Concurrency = concurrency
-		// LeavePartsOnError defaults to false — manager calls
-		// AbortMultipartUpload on context cancel / error so no orphan
-		// multipart sessions leak in the backend bucket.
-	})
-
-	b := &Backend{
-		bucket:           cfg.Bucket,
-		client:           client,
-		uploader:         uploader,
-		opTimeout:        opTimeout,
-		multipartTimeout: multipartTimeout,
-		sseMode:          sseMode,
-		sseKMSKeyID:      cfg.SSEKMSKeyID,
+		c.legacyAccessKey = cfg.AccessKey
+		c.legacySecretKey = cfg.SecretKey
 	}
 
 	if !cfg.SkipProbe {
-		if err := b.Probe(ctx); err != nil {
+		if err := b.probeEachCluster(ctx); err != nil {
 			return nil, err
 		}
 	}
-
 	return b, nil
 }
 
-// Probe is the boot-time writability check (US-005). It does PutObject
-// followed by DeleteObject on ProbeKey against the configured bucket —
-// catches read-only mounts, missing IAM permissions, expired creds, and
-// bucket-existence regressions before the gateway accepts traffic. The
-// probe is invoked once during Open; tests that don't want network
-// traffic set Config.SkipProbe = true.
+// probeEachCluster runs the per-cluster boot-time writability probe
+// against every cluster's first associated bucket.
+func (b *Backend) probeEachCluster(ctx context.Context) error {
+	for clusterID := range b.clusters {
+		bucket := ""
+		for _, class := range b.classes {
+			if class.Cluster == clusterID {
+				bucket = class.Bucket
+				break
+			}
+		}
+		if bucket == "" {
+			continue
+		}
+		c, err := b.connFor(ctx, clusterID)
+		if err != nil {
+			return err
+		}
+		if err := probeCluster(ctx, c, bucket); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// resolveClass routes a Strata storage-class label to its target
+// (cluster, bucket) pair. Returns ErrUnknownStorageClass when the class
+// is missing and ErrClassMissingCluster when the matched class has an
+// empty Cluster field.
+func (b *Backend) resolveClass(class string) (clusterID, bucket string, err error) {
+	if class == "" {
+		class = "STANDARD"
+	}
+	spec, ok := b.classes[class]
+	if !ok {
+		return "", "", fmt.Errorf("%w: %s", ErrUnknownStorageClass, class)
+	}
+	if spec.Cluster == "" {
+		return "", "", fmt.Errorf("%w: %s", ErrClassMissingCluster, class)
+	}
+	return spec.Cluster, spec.Bucket, nil
+}
+
+// connFor lazy-builds the SDK client + Uploader for the named cluster
+// on first use under b.mu, then caches the result. Mirrors
+// rados.Backend.connFor semantics.
+func (b *Backend) connFor(ctx context.Context, id string) (*s3Cluster, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	c, ok := b.clusters[id]
+	if !ok {
+		return nil, fmt.Errorf("s3: unknown cluster %q", id)
+	}
+	if c.client != nil {
+		return c, nil
+	}
+	awscfg, err := loadAWSConfig(ctx, c.spec, c.legacyAccessKey, c.legacySecretKey, b.httpClient)
+	if err != nil {
+		return nil, fmt.Errorf("s3: cluster %q: %w", id, err)
+	}
+	client := awss3.NewFromConfig(awscfg, func(o *awss3.Options) {
+		if c.spec.Endpoint != "" {
+			endpoint := c.spec.Endpoint
+			o.BaseEndpoint = &endpoint
+		}
+		o.UsePathStyle = c.spec.ForcePathStyle
+		o.ClientLogMode |= aws.LogRetries
+		o.Logger = retryWarnLogger{inner: o.Logger}
+		o.APIOptions = append(o.APIOptions, instrumentStack)
+	})
+	partSize := c.spec.PartSize
+	if partSize <= 0 {
+		partSize = DefaultPartSize
+	}
+	concurrency := int(c.spec.UploadConcurrency)
+	if concurrency <= 0 {
+		concurrency = DefaultUploadConcurrency
+	}
+	uploader := manager.NewUploader(client, func(u *manager.Uploader) {
+		u.PartSize = partSize
+		u.Concurrency = concurrency
+	})
+	c.client = client
+	c.uploader = uploader
+	return c, nil
+}
+
+// singleCluster picks the only cluster registered on this Backend. Used
+// by data-plane methods that don't take a storage-class argument today
+// — US-003 will switch them to per-class routing via resolveClass.
 //
-// Failure-mode error messages name the failing op (probe-put / probe-
-// delete) and include the bucket name + underlying SDK error so the
-// operator gets a clear actionable signal at the gateway log.
-func (b *Backend) Probe(ctx context.Context) error {
-	if b.client == nil {
+// In the legacy single-cluster Open() path there is always exactly one
+// cluster + one class, so this picks deterministically. With multiple
+// clusters the implementation picks the lexicographically lowest class
+// — callers that have multiple clusters MUST migrate to class-routed
+// methods (US-003).
+func (b *Backend) singleCluster(ctx context.Context) (*s3Cluster, string, error) {
+	if len(b.clusters) == 0 {
+		return nil, "", errors.ErrUnsupported
+	}
+	var className string
+	for name := range b.classes {
+		if className == "" || name < className {
+			className = name
+		}
+	}
+	if className == "" {
+		return nil, "", errors.ErrUnsupported
+	}
+	clusterID, bucket, err := b.resolveClass(className)
+	if err != nil {
+		return nil, "", err
+	}
+	c, err := b.connFor(ctx, clusterID)
+	if err != nil {
+		return nil, "", err
+	}
+	return c, bucket, nil
+}
+
+// loadAWSConfig resolves the AWS SDK config for one cluster.
+func loadAWSConfig(ctx context.Context, spec S3ClusterSpec, legacyAK, legacySK string, httpClient *http.Client) (aws.Config, error) {
+	maxRetries := int(spec.MaxRetries)
+	if maxRetries <= 0 {
+		maxRetries = DefaultMaxRetries
+	}
+	loadOpts := []func(*awsconfig.LoadOptions) error{
+		awsconfig.WithRegion(spec.Region),
+		awsconfig.WithRetryMode(aws.RetryModeAdaptive),
+		awsconfig.WithRetryMaxAttempts(maxRetries),
+	}
+	if httpClient != nil {
+		loadOpts = append(loadOpts, awsconfig.WithHTTPClient(httpClient))
+	}
+	switch spec.Credentials.Type {
+	case CredentialsChain, "":
+		if legacyAK != "" && legacySK != "" {
+			loadOpts = append(loadOpts, awsconfig.WithCredentialsProvider(
+				credentials.NewStaticCredentialsProvider(legacyAK, legacySK, ""),
+			))
+		}
+	case CredentialsEnv:
+		parts := strings.SplitN(spec.Credentials.Ref, ":", 2)
+		if len(parts) != 2 {
+			return aws.Config{}, fmt.Errorf("malformed env ref %q", spec.Credentials.Ref)
+		}
+		ak := os.Getenv(parts[0])
+		sk := os.Getenv(parts[1])
+		if ak == "" || sk == "" {
+			return aws.Config{}, fmt.Errorf("env vars %q/%q empty", parts[0], parts[1])
+		}
+		loadOpts = append(loadOpts, awsconfig.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(ak, sk, ""),
+		))
+	case CredentialsFile:
+		path := spec.Credentials.Ref
+		profile := "default"
+		if idx := strings.LastIndex(path, ":"); idx > 0 {
+			profile = path[idx+1:]
+			path = path[:idx]
+		}
+		loadOpts = append(loadOpts,
+			awsconfig.WithSharedCredentialsFiles([]string{path}),
+			awsconfig.WithSharedConfigProfile(profile),
+		)
+	default:
+		return aws.Config{}, fmt.Errorf("unknown credentials.type %q", spec.Credentials.Type)
+	}
+	awscfg, err := awsconfig.LoadDefaultConfig(ctx, loadOpts...)
+	if err != nil {
+		return aws.Config{}, fmt.Errorf("load aws config: %w", err)
+	}
+	return awscfg, nil
+}
+
+// validateClusterCredentials runs at New time (fail-fast): verifies that
+// the cluster's CredentialsRef can resolve. For env refs we check the
+// variables are set; for file refs we Stat the file; for chain we defer
+// to the SDK (which errors at first connect — IMDS calls are too costly
+// at boot).
+func validateClusterCredentials(spec S3ClusterSpec) error {
+	switch spec.Credentials.Type {
+	case CredentialsChain, "":
+		return nil
+	case CredentialsEnv:
+		parts := strings.SplitN(spec.Credentials.Ref, ":", 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("malformed env ref %q", spec.Credentials.Ref)
+		}
+		if os.Getenv(parts[0]) == "" {
+			return fmt.Errorf("env var %q not set", parts[0])
+		}
+		if os.Getenv(parts[1]) == "" {
+			return fmt.Errorf("env var %q not set", parts[1])
+		}
+		return nil
+	case CredentialsFile:
+		path := spec.Credentials.Ref
+		if idx := strings.LastIndex(path, ":"); idx > 0 {
+			path = path[:idx]
+		}
+		if _, err := os.Stat(path); err != nil {
+			return fmt.Errorf("credentials file %q: %w", path, err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown credentials.type %q", spec.Credentials.Type)
+	}
+}
+
+func opTimeoutFromSpec(spec S3ClusterSpec) time.Duration {
+	if spec.OpTimeoutSecs > 0 {
+		return time.Duration(spec.OpTimeoutSecs) * time.Second
+	}
+	return DefaultOpTimeout
+}
+
+func sseModeFromSpec(spec S3ClusterSpec) string {
+	if spec.SSEMode == "" {
+		return data.SSEModePassthrough
+	}
+	return spec.SSEMode
+}
+
+func copyClasses(src map[string]ClassSpec) map[string]ClassSpec {
+	out := make(map[string]ClassSpec, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+// probeCluster runs the boot-time writability check against one
+// (cluster, bucket) pair.
+func probeCluster(ctx context.Context, c *s3Cluster, bucket string) error {
+	if c.client == nil {
 		return errors.ErrUnsupported
 	}
-	bucket := b.bucket
 	key := ProbeKey
-	putCtx, putCancel := b.opCtx(ctx)
-	out, err := b.client.PutObject(putCtx, &awss3.PutObjectInput{
+	putCtx, putCancel := opCtxFor(ctx, c.opTimeout)
+	out, err := c.client.PutObject(putCtx, &awss3.PutObjectInput{
 		Bucket: &bucket,
 		Key:    &key,
 		Body:   bytes.NewReader(nil),
@@ -209,40 +529,43 @@ func (b *Backend) Probe(ctx context.Context) error {
 		return fmt.Errorf("s3: probe-put bucket=%s key=%s: %w", bucket, key, err)
 	}
 	del := &awss3.DeleteObjectInput{Bucket: &bucket, Key: &key}
-	// On versioning-enabled buckets, plain DeleteObject would leave a
-	// delete-marker behind for the canary key. Pass the captured
-	// VersionId so the probe leaves the bucket exactly as it found it.
 	if out.VersionId != nil && *out.VersionId != "" {
 		v := *out.VersionId
 		del.VersionId = &v
 	}
-	delCtx, delCancel := b.opCtx(ctx)
+	delCtx, delCancel := opCtxFor(ctx, c.opTimeout)
 	defer delCancel()
-	if _, err := b.client.DeleteObject(delCtx, del); err != nil {
+	if _, err := c.client.DeleteObject(delCtx, del); err != nil {
 		return fmt.Errorf("s3: probe-delete bucket=%s key=%s: %w", bucket, key, err)
 	}
 	return nil
 }
 
-// opCtx returns ctx wrapped with the per-op short timeout (US-006). Used
-// by Get / GetRange / DeleteObject / DeleteBatch / Probe sub-ops. When
-// b.opTimeout is zero (only possible on a stub Backend that never went
-// through Open) the parent context is returned unchanged.
-func (b *Backend) opCtx(parent context.Context) (context.Context, context.CancelFunc) {
-	if b.opTimeout <= 0 {
-		return context.WithCancel(parent)
+// Probe is the boot-time writability check on the singular cluster
+// configured via the legacy Open() shape. Multi-cluster deployments use
+// probeEachCluster internally; this surface is retained for external
+// callers and integration tests that reach for it directly.
+func (b *Backend) Probe(ctx context.Context) error {
+	c, bucket, err := b.singleCluster(ctx)
+	if err != nil {
+		return err
 	}
-	return context.WithTimeout(parent, b.opTimeout)
+	return probeCluster(ctx, c, bucket)
 }
 
-// uploadCtx returns ctx wrapped with the multipart-upload deadline
-// (US-006). Used by Put which routes through manager.Uploader and may
-// span init + parts + complete on large objects.
-func (b *Backend) uploadCtx(parent context.Context) (context.Context, context.CancelFunc) {
-	if b.multipartTimeout <= 0 {
+// opCtxFor wraps the parent ctx with the cluster's op timeout.
+func opCtxFor(parent context.Context, opTimeout time.Duration) (context.Context, context.CancelFunc) {
+	if opTimeout <= 0 {
 		return context.WithCancel(parent)
 	}
-	return context.WithTimeout(parent, b.multipartTimeout)
+	return context.WithTimeout(parent, opTimeout)
+}
+
+func uploadCtxFor(parent context.Context, multipartTimeout time.Duration) (context.Context, context.CancelFunc) {
+	if multipartTimeout <= 0 {
+		return context.WithCancel(parent)
+	}
+	return context.WithTimeout(parent, multipartTimeout)
 }
 
 // Compile-time assertion that *Backend satisfies data.Backend.
@@ -261,33 +584,25 @@ type PutResult struct {
 	Size      int64
 }
 
-// Put streams r into the backend bucket under key oid via the manager
-// Uploader — single-shot PutObject for small objects, multipart for large
-// ones (transparently). size is informational; the upload is bounded by
-// the reader's EOF, not the size hint.
-//
-// Memory bound: PartSize * UploadConcurrency (default 64 MiB peak). On
-// context cancel, manager.Uploader aborts the multipart so no orphan
-// sessions are left in the backend bucket.
-//
-// US-013: when the Backend's sseMode is passthrough or both, the SDK adds
-// the configured ServerSideEncryption header (AES256 by default; aws:kms
-// with sseKMSKeyID when set). In strata mode no SSE header is sent.
+// Put streams r into the resolved cluster's bucket under key oid via
+// the manager.Uploader — single-shot PutObject for small objects,
+// multipart for large ones (transparently). US-003 will route Put per
+// storage class; today it uses the single configured cluster.
 func (b *Backend) Put(ctx context.Context, oid string, r io.Reader, size int64) (*PutResult, error) {
-	if b.uploader == nil {
-		return nil, errors.ErrUnsupported
+	c, bucket, err := b.singleCluster(ctx)
+	if err != nil {
+		return nil, err
 	}
-	bucket := b.bucket
 	key := oid
 	in := &awss3.PutObjectInput{
 		Bucket: &bucket,
 		Key:    &key,
 		Body:   r,
 	}
-	b.applyPutSSE(in)
-	upCtx, cancel := b.uploadCtx(ctx)
+	c.applyPutSSE(in)
+	upCtx, cancel := uploadCtxFor(ctx, c.multipartTimeout)
 	defer cancel()
-	out, err := b.uploader.Upload(upCtx, in)
+	out, err := c.uploader.Upload(upCtx, in)
 	if err != nil {
 		return nil, fmt.Errorf("s3: upload %s: %w", oid, err)
 	}
@@ -301,64 +616,48 @@ func (b *Backend) Put(ctx context.Context, oid string, r io.Reader, size int64) 
 	return res, nil
 }
 
-// applyPutSSE attaches the configured backend-SSE header fields onto a
-// PutObjectInput when Backend.sseMode is passthrough or both. No-op in
-// strata mode and when the mode resolves to empty (defensive — should not
-// happen post-Open).
-func (b *Backend) applyPutSSE(in *awss3.PutObjectInput) {
-	if !b.backendSSEActive() {
+// applyPutSSE / applyMultipartSSE / backendSSEActive / manifestSSE are
+// per-cluster helpers — the SSE mode + KMS key id live on s3Cluster,
+// not on Backend.
+func (c *s3Cluster) applyPutSSE(in *awss3.PutObjectInput) {
+	if !c.backendSSEActive() {
 		return
 	}
-	if b.sseKMSKeyID != "" {
+	if c.sseKMSKeyID != "" {
 		in.ServerSideEncryption = s3types.ServerSideEncryptionAwsKms
-		k := b.sseKMSKeyID
+		k := c.sseKMSKeyID
 		in.SSEKMSKeyId = &k
 		return
 	}
 	in.ServerSideEncryption = s3types.ServerSideEncryptionAes256
 }
 
-// applyMultipartSSE is the CreateMultipartUploadInput sibling of
-// applyPutSSE. UploadPart cannot carry SSE-S3/SSE-KMS headers — the
-// backend inherits them from the multipart init, so the per-part path
-// stays SSE-free.
-func (b *Backend) applyMultipartSSE(in *awss3.CreateMultipartUploadInput) {
-	if !b.backendSSEActive() {
+func (c *s3Cluster) applyMultipartSSE(in *awss3.CreateMultipartUploadInput) {
+	if !c.backendSSEActive() {
 		return
 	}
-	if b.sseKMSKeyID != "" {
+	if c.sseKMSKeyID != "" {
 		in.ServerSideEncryption = s3types.ServerSideEncryptionAwsKms
-		k := b.sseKMSKeyID
+		k := c.sseKMSKeyID
 		in.SSEKMSKeyId = &k
 		return
 	}
 	in.ServerSideEncryption = s3types.ServerSideEncryptionAes256
 }
 
-// backendSSEActive returns true when the configured mode means the s3
-// backend must send a ServerSideEncryption header to the backing bucket.
-// Passthrough + both both send the header; strata does not.
-func (b *Backend) backendSSEActive() bool {
-	return b.sseMode == data.SSEModePassthrough || b.sseMode == data.SSEModeBoth
+func (c *s3Cluster) backendSSEActive() bool {
+	return c.sseMode == data.SSEModePassthrough || c.sseMode == data.SSEModeBoth
 }
 
-// manifestSSE builds the SSEInfo snapshot persisted on Manifest.SSE at
-// write time (US-013). Mirrors the algorithm/key-id chosen by
-// applyPutSSE so the GET path can branch per-object on the recorded mode
-// rather than the live backend config (which may have been re-toggled).
-//
-// Returns nil when no SSE state is meaningful — currently only when the
-// backend is unconfigured (zero-value, never reached after Open). All
-// three modes record at least Mode so future migrations can read it back.
-func (b *Backend) manifestSSE() *data.SSEInfo {
-	if b.sseMode == "" {
+func (c *s3Cluster) manifestSSE() *data.SSEInfo {
+	if c.sseMode == "" {
 		return nil
 	}
-	info := &data.SSEInfo{Mode: b.sseMode}
-	if b.backendSSEActive() {
-		if b.sseKMSKeyID != "" {
+	info := &data.SSEInfo{Mode: c.sseMode}
+	if c.backendSSEActive() {
+		if c.sseKMSKeyID != "" {
 			info.Algorithm = data.SSEAlgorithmKMS
-			info.KMSKeyID = b.sseKMSKeyID
+			info.KMSKeyID = c.sseKMSKeyID
 		} else {
 			info.Algorithm = data.SSEAlgorithmAES256
 		}
@@ -366,18 +665,16 @@ func (b *Backend) manifestSSE() *data.SSEInfo {
 	return info
 }
 
-// Get streams the full backend object body for oid back to the caller.
-// Returned ReadCloser wraps the SDK's HTTP response body — caller MUST
-// Close. Backend NoSuchKey is mapped to data.ErrNotFound so the gateway
-// surfaces a 404 NoSuchKey instead of a 500.
+// Get streams the full backend object body for oid. US-003 adds
+// per-class routing; today singleCluster picks the only configured one.
 func (b *Backend) Get(ctx context.Context, oid string) (io.ReadCloser, error) {
-	if b.client == nil {
-		return nil, errors.ErrUnsupported
+	c, bucket, err := b.singleCluster(ctx)
+	if err != nil {
+		return nil, err
 	}
-	bucket := b.bucket
 	key := oid
-	opCtx, cancel := b.opCtx(ctx)
-	out, err := b.client.GetObject(opCtx, &awss3.GetObjectInput{
+	opCtx, cancel := opCtxFor(ctx, c.opTimeout)
+	out, err := c.client.GetObject(opCtx, &awss3.GetObjectInput{
 		Bucket: &bucket,
 		Key:    &key,
 	})
@@ -389,24 +686,21 @@ func (b *Backend) Get(ctx context.Context, oid string) (io.ReadCloser, error) {
 }
 
 // GetRange streams [off, off+length) of the backend object body for oid.
-// Issues GetObject with Range: bytes=<off>-<off+length-1>. Returned
-// ReadCloser wraps the SDK's HTTP response body — caller MUST Close.
-// Backend NoSuchKey is mapped to data.ErrNotFound.
 func (b *Backend) GetRange(ctx context.Context, oid string, off, length int64) (io.ReadCloser, error) {
-	if b.client == nil {
-		return nil, errors.ErrUnsupported
-	}
 	if length <= 0 {
 		return nil, fmt.Errorf("s3: range length must be positive, got %d", length)
 	}
 	if off < 0 {
 		return nil, fmt.Errorf("s3: range offset must be non-negative, got %d", off)
 	}
-	bucket := b.bucket
+	c, bucket, err := b.singleCluster(ctx)
+	if err != nil {
+		return nil, err
+	}
 	key := oid
 	rangeHeader := fmt.Sprintf("bytes=%d-%d", off, off+length-1)
-	opCtx, cancel := b.opCtx(ctx)
-	out, err := b.client.GetObject(opCtx, &awss3.GetObjectInput{
+	opCtx, cancel := opCtxFor(ctx, c.opTimeout)
+	out, err := c.client.GetObject(opCtx, &awss3.GetObjectInput{
 		Bucket: &bucket,
 		Key:    &key,
 		Range:  &rangeHeader,
@@ -419,11 +713,7 @@ func (b *Backend) GetRange(ctx context.Context, oid string, off, length int64) (
 }
 
 // retryWarnLogger wraps the SDK's aws.Logger so retry attempt lines
-// (emitted by the SDK's retry middleware at Debug) surface in our
-// slog pipeline at Warn — matching US-006 AC. Non-retry SDK log
-// lines pass through unchanged. The retry message format is
-// `retrying request <service>/<operation>, attempt N` per
-// aws/retry/middleware.go; we filter on that prefix and re-emit.
+// surface in our slog pipeline at Warn — matches US-006 AC.
 type retryWarnLogger struct {
 	inner logging.Logger
 }
@@ -439,10 +729,7 @@ func (l retryWarnLogger) Logf(c logging.Classification, format string, args ...a
 }
 
 // cancelOnCloseReader pairs an SDK response Body with the per-op
-// context.CancelFunc so the caller's Close() releases the context. The
-// per-op timeout (US-006) is still ticking until the body is closed —
-// production callers should size STRATA_S3_BACKEND_OP_TIMEOUT_SECS for
-// the worst-case body-read deadline, not just the SDK round-trip.
+// context.CancelFunc so the caller's Close() releases the context.
 type cancelOnCloseReader struct {
 	io.ReadCloser
 	cancel context.CancelFunc
@@ -454,9 +741,6 @@ func (c *cancelOnCloseReader) Close() error {
 	return err
 }
 
-// mapGetError translates SDK errors that callers want to branch on into
-// the data package's sentinels. Today only NoSuchKey is mapped; other
-// errors are wrapped verbatim.
 func mapGetError(oid string, err error) error {
 	var noSuchKey *s3types.NoSuchKey
 	if errors.As(err, &noSuchKey) {
@@ -465,41 +749,29 @@ func mapGetError(oid string, err error) error {
 	return fmt.Errorf("s3: get %s: %w", oid, err)
 }
 
-// ObjectRef identifies a single backend object for DeleteBatch. VersionID
-// carries the same three-state semantics as PutResult.VersionID
-// (US-002/US-008): "" = backend without versioning OR versioning off (plain
-// delete); "null" = versioning Suspended; <uuid> = versioning enabled.
+// ObjectRef identifies a single backend object for DeleteBatch.
 type ObjectRef struct {
 	Key       string
 	VersionID string
 }
 
 // DeleteFailure records a per-ref failure inside a DeleteBatch response.
-// The transport-level error from DeleteBatch is the second return value;
-// per-ref soft failures are returned in this slice (empty on full success).
 type DeleteFailure struct {
 	Ref ObjectRef
 	Err error
 }
 
 // DeleteBatchLimit is the S3 protocol cap on objects per DeleteObjects
-// request. DeleteBatch chunks the input slice at this boundary.
+// request.
 const DeleteBatchLimit = 1000
 
-// DeleteObject removes a single backend object. When versionID == "" the
-// SDK issues a plain DeleteObject (frees bytes immediately on
-// non-versioned and suspended buckets, creates a delete-marker on
-// versioning-enabled buckets — see US-008 defensive design notes). When
-// versionID != "" the SDK issues a versioned DeleteObject (deletes the
-// specific version, skips delete-marker creation on versioning-enabled
-// backends; "null" cleans the suspended-bucket version slot).
-//
-// Idempotent: NoSuchKey from the backend is treated as success.
+// DeleteObject removes a single backend object. Idempotent — NoSuchKey
+// is treated as success.
 func (b *Backend) DeleteObject(ctx context.Context, oid, versionID string) error {
-	if b.client == nil {
-		return errors.ErrUnsupported
+	c, bucket, err := b.singleCluster(ctx)
+	if err != nil {
+		return err
 	}
-	bucket := b.bucket
 	key := oid
 	in := &awss3.DeleteObjectInput{
 		Bucket: &bucket,
@@ -509,9 +781,9 @@ func (b *Backend) DeleteObject(ctx context.Context, oid, versionID string) error
 		v := versionID
 		in.VersionId = &v
 	}
-	opCtx, cancel := b.opCtx(ctx)
+	opCtx, cancel := opCtxFor(ctx, c.opTimeout)
 	defer cancel()
-	if _, err := b.client.DeleteObject(opCtx, in); err != nil {
+	if _, err := c.client.DeleteObject(opCtx, in); err != nil {
 		var noSuchKey *s3types.NoSuchKey
 		if errors.As(err, &noSuchKey) {
 			return nil
@@ -521,25 +793,16 @@ func (b *Backend) DeleteObject(ctx context.Context, oid, versionID string) error
 	return nil
 }
 
-// DeleteBatch removes up to len(refs) backend objects via the s3
-// DeleteObjects API. Refs are chunked into DeleteBatchLimit-sized slices
-// (S3 caps a single request at 1000 entries); each chunk is one HTTP
-// request.
-//
-// Per-ref soft failures (e.g. AccessDenied on one key) come back in the
-// failures slice without aborting subsequent batches. A transport-level
-// error (network failure, signature mismatch, 5xx after retries) returns
-// the failures collected so far + the error.
-//
+// DeleteBatch removes up to len(refs) backend objects via DeleteObjects.
 // Empty refs is a no-op (nil, nil).
 func (b *Backend) DeleteBatch(ctx context.Context, refs []ObjectRef) ([]DeleteFailure, error) {
-	if b.client == nil {
-		return nil, errors.ErrUnsupported
-	}
 	if len(refs) == 0 {
 		return nil, nil
 	}
-	bucket := b.bucket
+	c, bucket, err := b.singleCluster(ctx)
+	if err != nil {
+		return nil, err
+	}
 	quiet := true
 	var failures []DeleteFailure
 	for start := 0; start < len(refs); start += DeleteBatchLimit {
@@ -554,8 +817,8 @@ func (b *Backend) DeleteBatch(ctx context.Context, refs []ObjectRef) ([]DeleteFa
 				ids[i].VersionId = &v
 			}
 		}
-		opCtx, cancel := b.opCtx(ctx)
-		out, err := b.client.DeleteObjects(opCtx, &awss3.DeleteObjectsInput{
+		opCtx, cancel := opCtxFor(ctx, c.opTimeout)
+		out, err := c.client.DeleteObjects(opCtx, &awss3.DeleteObjectsInput{
 			Bucket: &bucket,
 			Delete: &s3types.Delete{Objects: ids, Quiet: &quiet},
 		})
@@ -579,7 +842,6 @@ func (b *Backend) DeleteBatch(ctx context.Context, refs []ObjectRef) ([]DeleteFa
 			if e.Message != nil {
 				msg = *e.Message
 			}
-			// NoSuchKey on a per-ref entry is idempotent success — drop it.
 			if code == "NoSuchKey" {
 				continue
 			}
@@ -592,68 +854,61 @@ func (b *Backend) DeleteBatch(ctx context.Context, refs []ObjectRef) ([]DeleteFa
 	return failures, nil
 }
 
-// PutChunks streams r straight into the backend bucket as ONE object
-// (US-009 native shape — Strata object = backend S3 object) and returns a
-// Manifest with BackendRef populated and Chunks left empty per the
-// 1:1 invariant documented on data.Manifest.
-//
-// Object key format: <bucket-uuid>/<object-uuid>. The bucket-uuid is read
-// from data.WithBucketID(ctx, b.ID); when absent the prefix falls back to a
-// random UUID — both shapes give random-prefix distribution that
-// AWS S3's automatic prefix partitioning needs to avoid hot-prefix
-// throttling. Per-bucket grouping (`aws s3 ls s3://<bb>/<bucket-uuid>/`)
-// is forensic bonus when the bucket id is threaded through.
-//
-// Manifest.ETag carries the backend object's ETag verbatim (single-shot
-// PutObject ETag = MD5; multipart ETag = composite hash-of-hashes-suffix —
-// gateway clients understand both shapes). VersionID carries the SDK
-// response VersionId verbatim with the three-state semantics from
-// data.BackendRef ("" / "null" / <uuid>).
+// PutChunks streams r straight into the backend bucket as ONE object.
+// US-003 will route per storage class via resolveClass; today
+// singleCluster picks the only configured cluster.
 func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*data.Manifest, error) {
-	if b.uploader == nil {
-		return nil, errors.ErrUnsupported
-	}
 	if class == "" {
 		class = "STANDARD"
 	}
-	key := b.objectKey(ctx)
-
-	// manager.UploadOutput does not surface the streamed byte count, so
-	// wrap the reader to count. Used as the manifest Size — reading the
-	// SDK response's Content-Length header is not enough because the
-	// uploader can split the request into multiple part uploads on large
-	// objects.
-	cr := &countingReader{r: r}
-	res, err := b.Put(ctx, key, cr, 0)
+	c, bucket, err := b.singleCluster(ctx)
 	if err != nil {
 		return nil, err
+	}
+	key := b.objectKey(ctx)
+
+	cr := &countingReader{r: r}
+	in := &awss3.PutObjectInput{
+		Bucket: &bucket,
+		Key:    &key,
+		Body:   cr,
+	}
+	c.applyPutSSE(in)
+	upCtx, cancel := uploadCtxFor(ctx, c.multipartTimeout)
+	defer cancel()
+	out, err := c.uploader.Upload(upCtx, in)
+	if err != nil {
+		return nil, fmt.Errorf("s3: upload %s: %w", key, err)
+	}
+	etag := ""
+	if out.ETag != nil {
+		etag = strings.Trim(*out.ETag, `"`)
+	}
+	versionID := ""
+	if out.VersionID != nil {
+		versionID = *out.VersionID
 	}
 
 	m := &data.Manifest{
 		Class:     class,
 		Size:      cr.n,
 		ChunkSize: data.DefaultChunkSize,
-		ETag:      res.ETag,
+		ETag:      etag,
 		BackendRef: &data.BackendRef{
 			Backend:   BackendName,
 			Key:       key,
-			ETag:      res.ETag,
+			ETag:      etag,
 			Size:      cr.n,
-			VersionID: res.VersionID,
+			VersionID: versionID,
 		},
-		SSE: b.manifestSSE(),
+		SSE: c.manifestSSE(),
 	}
 	return m, nil
 }
 
 // GetChunks streams [offset, offset+length) of the manifest's backend
-// object back to the caller. The s3 backend serves only BackendRef-shape
-// manifests — feeding it a chunks-shape manifest (rados-shape) returns
-// errors.ErrUnsupported, which surfaces as a 500 at the gateway.
+// object. The s3 backend serves only BackendRef-shape manifests.
 func (b *Backend) GetChunks(ctx context.Context, m *data.Manifest, offset, length int64) (io.ReadCloser, error) {
-	if b.client == nil {
-		return nil, errors.ErrUnsupported
-	}
 	if m == nil || m.BackendRef == nil {
 		return nil, errors.ErrUnsupported
 	}
@@ -669,20 +924,14 @@ func (b *Backend) GetChunks(ctx context.Context, m *data.Manifest, offset, lengt
 	return b.GetRange(ctx, m.BackendRef.Key, offset, length)
 }
 
-// Delete removes the manifest's backend object via DeleteObject. When
-// BackendRef.VersionID is set, the SDK issues a versioned delete so
-// versioning-enabled backends do not accumulate delete-markers (US-008
-// defensive design). Idempotent — NoSuchKey is success.
-//
-// Manifests without BackendRef (legacy/rados-shape) are no-ops here:
-// chunks-shape manifests are deleted via the rados backend's Delete on
-// its own client. The s3 backend never sees rados chunks, but defensive
-// nil-check keeps the contract clean.
+// Delete removes the manifest's backend object via DeleteObject.
+// Idempotent — NoSuchKey is success. Manifests without BackendRef
+// (legacy/rados-shape) are no-ops.
 func (b *Backend) Delete(ctx context.Context, m *data.Manifest) error {
-	if b.client == nil {
-		return errors.ErrUnsupported
-	}
 	if m == nil || m.BackendRef == nil {
+		if len(b.clusters) == 0 {
+			return errors.ErrUnsupported
+		}
 		return nil
 	}
 	return b.DeleteObject(ctx, m.BackendRef.Key, m.BackendRef.VersionID)
@@ -691,9 +940,8 @@ func (b *Backend) Delete(ctx context.Context, m *data.Manifest) error {
 func (b *Backend) Close() error { return nil }
 
 // objectKey builds the backend object key. Format <bucket-uuid>/<object-
-// uuid> per US-009 — UUID-shaped prefix gives random distribution for
-// AWS-side automatic prefix partitioning; per-bucket grouping is
-// forensic bonus when callers thread bucket id via data.WithBucketID.
+// uuid> — UUID-shaped prefix gives random distribution for AWS-side
+// automatic prefix partitioning.
 func (b *Backend) objectKey(ctx context.Context) string {
 	objectID := uuid.NewString()
 	if bucketID, ok := data.BucketIDFromContext(ctx); ok {
@@ -702,9 +950,7 @@ func (b *Backend) objectKey(ctx context.Context) string {
 	return uuid.NewString() + "/" + objectID
 }
 
-// countingReader wraps io.Reader to tally bytes seen by PutChunks. The
-// manager.Uploader streams the bytes through this wrapper on every Read,
-// so n reflects the full uploaded length when Put returns.
+// countingReader wraps io.Reader to tally bytes seen by PutChunks.
 type countingReader struct {
 	r io.Reader
 	n int64

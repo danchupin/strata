@@ -2,7 +2,6 @@ package s3
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -15,10 +14,7 @@ import (
 // nativeTransitionClasses maps Strata's storage-class string vocabulary to
 // the SDK's TransitionStorageClass enum for classes the backend handles
 // natively (US-014). Classes outside this map fall back to Strata's own
-// lifecycle worker — translation is best-effort by design.
-//
-// REDUCED_REDUNDANCY is intentionally omitted: AWS deprecated it for new
-// rules and several S3-compatible backends reject it on lifecycle PUT.
+// lifecycle worker.
 var nativeTransitionClasses = map[string]s3types.TransitionStorageClass{
 	"STANDARD_IA":         s3types.TransitionStorageClassStandardIa,
 	"ONEZONE_IA":          s3types.TransitionStorageClassOnezoneIa,
@@ -28,40 +24,23 @@ var nativeTransitionClasses = map[string]s3types.TransitionStorageClass{
 	"INTELLIGENT_TIERING": s3types.TransitionStorageClassIntelligentTiering,
 }
 
-// IsNativeTransitionClass reports whether the supplied Strata storage class
-// is one the s3 backend can translate into a native backend lifecycle
-// transition. The lifecycle worker uses this to skip transitions the backend
-// already owns (US-014: avoid double-work).
+// IsNativeTransitionClass reports whether the supplied Strata storage
+// class is one the s3 backend can translate into a native backend
+// lifecycle transition.
 func IsNativeTransitionClass(class string) bool {
 	_, ok := nativeTransitionClasses[strings.ToUpper(class)]
 	return ok
 }
 
 // PutBackendLifecycle translates the supplied Strata-shape rules into a
-// backend BucketLifecycleConfiguration and applies it via the SDK
-// PutBucketLifecycleConfiguration call.
-//
-// Each emitted backend rule has its Filter.Prefix scoped to bucketPrefix +
-// rule.Prefix so multiple Strata buckets sharing the single backend bucket
-// don't collide. bucketPrefix is the Strata bucket UUID followed by "/"
-// (matches the BackendRef key prefix produced by PutChunks).
-//
-// Rules whose only action is a non-native transition are reported in
-// skippedRuleIDs and dropped from the backend config — the lifecycle worker
-// keeps owning those. A rule with a native-transition action AND extra
-// strata-only actions emits the native parts; the worker still handles the
-// rest. Expirations + AbortIncompleteMultipartUpload always translate.
-//
-// On full-skip (no rule produced any backend action) the backend's lifecycle
-// is deleted instead of pushing an empty config — DeleteBucketLifecycle is
-// the SDK-correct way to express "no rules". Returns the list of skipped
-// rule IDs so the caller can WARN-log them.
+// backend BucketLifecycleConfiguration and applies it.
 func (b *Backend) PutBackendLifecycle(ctx context.Context, bucketPrefix string, rules []data.LifecycleRule) ([]string, error) {
-	if b.client == nil {
-		return nil, errors.ErrUnsupported
-	}
 	if bucketPrefix == "" {
 		return nil, fmt.Errorf("s3: PutBackendLifecycle: bucketPrefix required")
+	}
+	c, bucket, err := b.singleCluster(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	var skipped []string
@@ -76,7 +55,6 @@ func (b *Backend) PutBackendLifecycle(ctx context.Context, bucketPrefix string, 
 			skipped = append(skipped, r.ID)
 		}
 
-		// Drop rules that have nothing to translate after native filtering.
 		if !hasExpiration && !hasAbort && !(hasTransition && native) {
 			continue
 		}
@@ -109,20 +87,19 @@ func (b *Backend) PutBackendLifecycle(ctx context.Context, bucketPrefix string, 
 		sdkRules = append(sdkRules, sdkRule)
 	}
 
-	bucket := b.bucket
 	if len(sdkRules) == 0 {
-		opCtx, cancel := b.opCtx(ctx)
+		opCtx, cancel := opCtxFor(ctx, c.opTimeout)
 		defer cancel()
-		_, err := b.client.DeleteBucketLifecycle(opCtx, &awss3.DeleteBucketLifecycleInput{Bucket: &bucket})
+		_, err := c.client.DeleteBucketLifecycle(opCtx, &awss3.DeleteBucketLifecycleInput{Bucket: &bucket})
 		if err != nil {
 			return skipped, fmt.Errorf("s3: clear backend lifecycle %s: %w", bucket, err)
 		}
 		return skipped, nil
 	}
 
-	opCtx, cancel := b.opCtx(ctx)
+	opCtx, cancel := opCtxFor(ctx, c.opTimeout)
 	defer cancel()
-	_, err := b.client.PutBucketLifecycleConfiguration(opCtx, &awss3.PutBucketLifecycleConfigurationInput{
+	_, err = c.client.PutBucketLifecycleConfiguration(opCtx, &awss3.PutBucketLifecycleConfigurationInput{
 		Bucket:                 &bucket,
 		LifecycleConfiguration: &s3types.BucketLifecycleConfiguration{Rules: sdkRules},
 	})
@@ -132,25 +109,18 @@ func (b *Backend) PutBackendLifecycle(ctx context.Context, bucketPrefix string, 
 	return skipped, nil
 }
 
-// DeleteBackendLifecycle clears the backend bucket's lifecycle configuration
-// for the given Strata bucket. Today the s3 backend stores one bucket-level
-// lifecycle (one Strata bucket per backend bucket is the typical deployment
-// shape); the bucketPrefix arg is recorded for forward-compat when a single
-// backend bucket hosts multiple Strata buckets and per-prefix rule scoping
-// becomes load-bearing.
-//
-// Idempotent: a NoSuchLifecycleConfiguration response is treated as success.
+// DeleteBackendLifecycle clears the backend bucket's lifecycle
+// configuration. Idempotent: NoSuchLifecycleConfiguration is treated as
+// success.
 func (b *Backend) DeleteBackendLifecycle(ctx context.Context, bucketPrefix string) error {
-	if b.client == nil {
-		return errors.ErrUnsupported
-	}
-	bucket := b.bucket
-	opCtx, cancel := b.opCtx(ctx)
-	defer cancel()
-	_, err := b.client.DeleteBucketLifecycle(opCtx, &awss3.DeleteBucketLifecycleInput{Bucket: &bucket})
+	c, bucket, err := b.singleCluster(ctx)
 	if err != nil {
-		// Backends differ in how they signal "nothing to delete"; swallow
-		// the most common shapes so the call is idempotent.
+		return err
+	}
+	opCtx, cancel := opCtxFor(ctx, c.opTimeout)
+	defer cancel()
+	_, err = c.client.DeleteBucketLifecycle(opCtx, &awss3.DeleteBucketLifecycleInput{Bucket: &bucket})
+	if err != nil {
 		s := err.Error()
 		if strings.Contains(s, "NoSuchLifecycleConfiguration") {
 			return nil
