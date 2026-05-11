@@ -91,21 +91,8 @@ func TestMultipartLifecycleAgainstSyntheticBackend(t *testing.T) {
 	server := newSyntheticMultipartServer()
 	transport := &httpHandlerTransport{handler: server}
 
-	cfg := Config{
-		Bucket:         "strata-test",
-		Region:         "us-east-1",
-		Endpoint:       "http://example.invalid",
-		AccessKey:      "ak",
-		SecretKey:      "sk",
-		ForcePathStyle: true,
-		SkipProbe:      true,
-		HTTPClient:     &http.Client{Transport: transport},
-	}
 	ctx := context.Background()
-	b, err := Open(ctx, cfg)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	b := openTestBackend(t, transport)
 
 	handle, err := b.CreateBackendMultipart(ctx, "STANDARD")
 	if err != nil {

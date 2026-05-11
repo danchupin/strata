@@ -63,20 +63,7 @@ func TestPutBackendLifecycleTranslatesNativeTransition(t *testing.T) {
 	ctx := context.Background()
 
 	captured := newLifecycleCaptureTransport()
-	cfg := Config{
-		Bucket:         "strata-test",
-		Region:         "us-east-1",
-		Endpoint:       "http://example.invalid",
-		AccessKey:      "ak",
-		SecretKey:      "sk",
-		ForcePathStyle: true,
-		SkipProbe:      true,
-		HTTPClient:     &http.Client{Transport: captured},
-	}
-	b, err := Open(ctx, cfg)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	b := openTestBackend(t, captured)
 
 	rules := []data.LifecycleRule{
 		{ID: "r1", Prefix: "logs/", TransitionDays: 30, TransitionStorageClass: "STANDARD_IA"},
@@ -114,10 +101,7 @@ func TestPutBackendLifecycleSkipsNonNativeTransition(t *testing.T) {
 	ctx := context.Background()
 
 	captured := newLifecycleCaptureTransport()
-	b, err := Open(ctx, openConfig(captured))
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	b := openTestBackend(t, captured)
 
 	rules := []data.LifecycleRule{
 		{ID: "cold", Prefix: "x/", TransitionDays: 7, TransitionStorageClass: "STRATA_COLD"},
@@ -143,10 +127,7 @@ func TestPutBackendLifecycleEmitsExpiration(t *testing.T) {
 	ctx := context.Background()
 
 	captured := newLifecycleCaptureTransport()
-	b, err := Open(ctx, openConfig(captured))
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	b := openTestBackend(t, captured)
 
 	rules := []data.LifecycleRule{
 		{ID: "expire-old", Prefix: "", ExpirationDays: 365},
@@ -168,10 +149,7 @@ func TestPutBackendLifecycleEmitsAbortIncomplete(t *testing.T) {
 	ctx := context.Background()
 
 	captured := newLifecycleCaptureTransport()
-	b, err := Open(ctx, openConfig(captured))
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	b := openTestBackend(t, captured)
 
 	rules := []data.LifecycleRule{
 		{ID: "kill-mp", AbortIncompleteUploadDays: 7},
@@ -192,10 +170,7 @@ func TestPutBackendLifecycleEmptyRulesClearsBackend(t *testing.T) {
 	ctx := context.Background()
 
 	captured := newLifecycleCaptureTransport()
-	b, err := Open(ctx, openConfig(captured))
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	b := openTestBackend(t, captured)
 
 	if _, err := b.PutBackendLifecycle(ctx, "bkt/", nil); err != nil {
 		t.Fatalf("PutBackendLifecycle(nil): %v", err)
@@ -210,10 +185,7 @@ func TestDeleteBackendLifecycleIssuesDelete(t *testing.T) {
 	ctx := context.Background()
 
 	captured := newLifecycleCaptureTransport()
-	b, err := Open(ctx, openConfig(captured))
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	b := openTestBackend(t, captured)
 
 	if err := b.DeleteBackendLifecycle(ctx, "bkt/"); err != nil {
 		t.Fatalf("DeleteBackendLifecycle: %v", err)
@@ -223,19 +195,6 @@ func TestDeleteBackendLifecycleIssuesDelete(t *testing.T) {
 	}
 	if got := captured.lastQuery(); !strings.Contains(got, "lifecycle") {
 		t.Errorf("expected ?lifecycle, got %q", got)
-	}
-}
-
-func openConfig(rt http.RoundTripper) Config {
-	return Config{
-		Bucket:         "strata-test",
-		Region:         "us-east-1",
-		Endpoint:       "http://example.invalid",
-		AccessKey:      "ak",
-		SecretKey:      "sk",
-		ForcePathStyle: true,
-		SkipProbe:      true,
-		HTTPClient:     &http.Client{Transport: rt},
 	}
 }
 

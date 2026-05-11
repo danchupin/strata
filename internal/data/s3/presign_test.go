@@ -28,23 +28,14 @@ func (stubRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
 
 func newPresignTestBackend(t *testing.T) *Backend {
 	t.Helper()
-	endpoint := "http://minio.test:9000"
 	t.Setenv("AWS_ACCESS_KEY_ID", "presign-key")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "presign-secret")
-	b, err := Open(context.Background(), Config{
-		Bucket:         "test-bucket",
-		Region:         "us-east-1",
-		Endpoint:       endpoint,
-		AccessKey:      "presign-key",
-		SecretKey:      "presign-secret",
-		ForcePathStyle: true,
-		HTTPClient:     &http.Client{Transport: stubRoundTripper{}},
-		SkipProbe:      true,
+	return openTestBackend(t, stubRoundTripper{}, func(c *Config) {
+		c.Bucket = "test-bucket"
+		c.Endpoint = "http://minio.test:9000"
+		c.AccessKey = "presign-key"
+		c.SecretKey = "presign-secret"
 	})
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	return b
 }
 
 func TestPresignGetObjectReturnsBackendURL(t *testing.T) {
