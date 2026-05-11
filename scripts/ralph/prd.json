@@ -62,8 +62,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Benchmarks live in internal/data/rados/backend_bench_test.go (tag-free; exercises putChunksParallel + newPrefetchReader against fake chunkPutFn / chunkGetFn callbacks with 5 ms per-op latency injection). 64 MiB + 256 MiB cases at sequential vs concurrent settings. Doc page at docs/site/content/architecture/benchmarks/parallel-chunks.md covers what changed, both env knobs (STRATA_RADOS_PUT_CONCURRENCY default 32 / STRATA_RADOS_GET_PREFETCH default 4), memory budget, when to raise/lower, multi-cluster behaviour, reader-side bottleneck on PUT (single-dispatcher MD5 path), and raw numbers (GET: 3.7×–4.5× wall-clock speedup at depth=4; PUT: 1.05× at 5 ms perOp — dispatcher MD5 cost ≈ worker cost at low latency, gain scales close to linearly with per-OSD latency on production traffic). Reference env-var table (docs/site/content/reference/_index.md) gains both knobs with deep links into the doc page. ROADMAP.md flips both P2 entries to Done with cycle attribution + commit-pending placeholder. s3-tests pass-rate not re-run this cycle (data-layer parallelism, no S3 surface change); existing 165/178 baseline carries over."
     }
   ]
 }

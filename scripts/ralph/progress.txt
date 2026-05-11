@@ -67,3 +67,21 @@ Cycle: ralph/parallel-chunks
     - The `intFromEnv` helper in `parallel.go` is shared package-wide — `prefetch.go` reuses it instead of duplicating. New env helpers should keep using `intFromEnv` to avoid drift.
 ---
 
+## Mon May 11 09:36:00 MSK 2026 - US-003
+- What was implemented: benchmarks + docs + ROADMAP close-flip. `internal/data/rados/backend_bench_test.go` exercises both schedulers (`putChunksParallelWithChunkSize` + `newPrefetchReader`) against fake chunkPutFn / chunkGetFn callbacks with 5 ms per-op latency. 64 MiB + 256 MiB at sequential (`concurrency=1` / `depth=1`) vs concurrent (`concurrency=32` / `depth=4`). Tag-free file — no librados needed. `docs/site/content/architecture/benchmarks/parallel-chunks.md` is a fresh page covering what changed, both env knobs (`STRATA_RADOS_PUT_CONCURRENCY` default 32, `STRATA_RADOS_GET_PREFETCH` default 4), memory budget per request, when to raise / lower, multi-cluster behaviour, the reader-side bottleneck on PUT (single-dispatcher MD5 path means concurrency gain is modest at low per-OSD latency), and raw bench numbers from the harness. `docs/site/content/reference/_index.md` gains two rows for the new knobs with deep links. `ROADMAP.md` flips both P2 entries (Parallel chunk upload in PutChunks + Parallel chunk read / prefetch in GetChunks) to Done with cycle attribution + `(commit <pending>)` placeholder — closing-SHA backfill follow-up commit on main per established pattern.
+- Files changed:
+  - NEW `internal/data/rados/backend_bench_test.go` — tag-free Go benchmarks (`BenchmarkPutChunks_64MiB_Sequential` + `_Concurrent`, `BenchmarkPutChunks_256MiB_*`, `BenchmarkGetChunks_*_Sequential` + `_Prefetch`).
+  - NEW `docs/site/content/architecture/benchmarks/parallel-chunks.md` — operator-facing tuning page (weight 30) with bench table + invariants section.
+  - MOD `docs/site/content/reference/_index.md` — Worker env vars table gains rows for `STRATA_RADOS_PUT_CONCURRENCY` + `STRATA_RADOS_GET_PREFETCH`.
+  - MOD `ROADMAP.md` — close-flip of both P2 entries.
+  - MOD `scripts/ralph/prd.json` — US-003 `passes: true` + notes.
+- **Learnings for future iterations:**
+  - Patterns:
+    - Go 1.25 `b.Loop()` is the modern idiom for bench loops; pairs with `b.SetBytes(n)` to get the headline `MB/s` column in `go test -bench` output. Use `-benchtime=Nx` to lock to a fixed iteration count for reproducible numbers; `-benchtime=5s` ramps up `b.N` to fill the wall-clock budget.
+    - Tag-free benchmarks for ceph-tagged backends: exercise the scheduler (which lives in non-tagged files) with a fake callback that injects latency via `time.Sleep`. Avoids librados dep on macOS / non-CI machines.
+  - Gotchas:
+    - PUT-side wall-clock benchmark at 5 ms per-op shows minimal concurrency gain (~1.05×) because the single-dispatcher MD5 + alloc cost on 4 MiB chunks is comparable to the worker cost. This is honest about the synthetic floor, not a regression. Production wins scale with real per-OSD latency. Document both upfront so operators don't expect linear-to-concurrency speedup on small/fast clusters.
+    - Hugo strict-ref doesn't error on the `parallel-chunks.md` slug because the file lives under `docs/site/content/architecture/benchmarks/` which auto-routes to `/architecture/benchmarks/parallel-chunks/`. The `{{< ref "/architecture/benchmarks/parallel-chunks" >}}` form works without an explicit `.md` extension.
+    - `min(a, b)` is a Go 1.21+ builtin and lint flags `if a > b { a = b }` patterns. Use the builtin in fresh code.
+---
+
