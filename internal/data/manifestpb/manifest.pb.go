@@ -354,12 +354,18 @@ func (x *PartChecksum) GetValues() map[string]string {
 }
 
 type BackendRef struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Backend       string                 `protobuf:"bytes,1,opt,name=backend,proto3" json:"backend,omitempty"`
-	Key           string                 `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
-	Etag          string                 `protobuf:"bytes,3,opt,name=etag,proto3" json:"etag,omitempty"`
-	Size          int64                  `protobuf:"varint,4,opt,name=size,proto3" json:"size,omitempty"`
-	VersionId     string                 `protobuf:"bytes,5,opt,name=version_id,json=versionId,proto3" json:"version_id,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Backend   string                 `protobuf:"bytes,1,opt,name=backend,proto3" json:"backend,omitempty"`
+	Key       string                 `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
+	Etag      string                 `protobuf:"bytes,3,opt,name=etag,proto3" json:"etag,omitempty"`
+	Size      int64                  `protobuf:"varint,4,opt,name=size,proto3" json:"size,omitempty"`
+	VersionId string                 `protobuf:"bytes,5,opt,name=version_id,json=versionId,proto3" json:"version_id,omitempty"`
+	// cluster is the operator-labelled S3 cluster id that hosts this
+	// backend object. Populated by s3.Backend.PutChunks (US-005 placement-
+	// rebalance) so the rebalance worker can scan BackendRef-shape
+	// manifests and decide whether a move is needed. Pre-US-005 rows have
+	// an empty value; the worker skips them (rewriter cycle can backfill).
+	Cluster       string `protobuf:"bytes,6,opt,name=cluster,proto3" json:"cluster,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -425,6 +431,13 @@ func (x *BackendRef) GetSize() int64 {
 func (x *BackendRef) GetVersionId() string {
 	if x != nil {
 		return x.VersionId
+	}
+	return ""
+}
+
+func (x *BackendRef) GetCluster() string {
+	if x != nil {
+		return x.Cluster
 	}
 	return ""
 }
@@ -526,7 +539,7 @@ const file_manifest_proto_rawDesc = "" +
 	"\x06values\x18\x01 \x03(\v2(.strata.data.v1.PartChecksum.ValuesEntryR\x06values\x1a9\n" +
 	"\vValuesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x7f\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x99\x01\n" +
 	"\n" +
 	"BackendRef\x12\x18\n" +
 	"\abackend\x18\x01 \x01(\tR\abackend\x12\x10\n" +
@@ -534,7 +547,8 @@ const file_manifest_proto_rawDesc = "" +
 	"\x04etag\x18\x03 \x01(\tR\x04etag\x12\x12\n" +
 	"\x04size\x18\x04 \x01(\x03R\x04size\x12\x1d\n" +
 	"\n" +
-	"version_id\x18\x05 \x01(\tR\tversionId\"Y\n" +
+	"version_id\x18\x05 \x01(\tR\tversionId\x12\x18\n" +
+	"\acluster\x18\x06 \x01(\tR\acluster\"Y\n" +
 	"\aSSEInfo\x12\x12\n" +
 	"\x04mode\x18\x01 \x01(\tR\x04mode\x12\x1c\n" +
 	"\talgorithm\x18\x02 \x01(\tR\talgorithm\x12\x1c\n" +

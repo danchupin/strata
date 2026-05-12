@@ -279,6 +279,46 @@ components:
         max_objects: { type: integer, format: int64, minimum: 0 }
         max_bytes_per_object: { type: integer, format: int64, minimum: 0 }
 
+    ClusterStateEntry:
+      type: object
+      required: [id, state]
+      description: |
+        One row in the GET /clusters response (US-006 placement-rebalance).
+        `state` is one of "live" / "draining" / "removed"; `backend` is
+        "rados" or "s3" (when known).
+      properties:
+        id: { type: string }
+        state:
+          type: string
+          enum: [live, draining, removed]
+        backend: { type: string }
+
+    ClustersList:
+      type: object
+      required: [clusters]
+      properties:
+        clusters:
+          type: array
+          items: { $ref: '#/components/schemas/ClusterStateEntry' }
+
+    BucketPlacement:
+      type: object
+      required: [placement]
+      description: |
+        Per-bucket cluster placement policy (US-001 placement-rebalance).
+        Maps cluster id → weight; weights are in `[0, 100]` with at least
+        one positive entry. A weight of zero excludes the cluster without
+        rejecting the policy. Cluster ids must resolve against the live
+        `STRATA_RADOS_CLUSTERS` / `STRATA_S3_CLUSTERS` set. Unset (404)
+        means "no policy" — chunks route to `$defaultCluster`.
+      properties:
+        placement:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+            maximum: 100
+
     UserQuota:
       type: object
       required: [max_buckets, total_max_bytes]
@@ -445,6 +485,59 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ClusterNodes' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /clusters:
+    get:
+      summary: List data-backend clusters with drain state (US-006 placement-rebalance)
+      operationId: listClusters
+      description: |
+        Returns every configured data-backend cluster id (union of
+        STRATA_RADOS_CLUSTERS / STRATA_S3_CLUSTERS) joined against the
+        persisted cluster_state rows. Clusters without a row default to
+        state="live".
+      responses:
+        '200':
+          description: Cluster list.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClustersList' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /clusters/{id}/drain:
+    post:
+      summary: Mark a cluster as draining (US-006 placement-rebalance)
+      operationId: drainCluster
+      description: |
+        Flips cluster_state to "draining" so the PUT hot path stops
+        routing chunks to this cluster (after the drain-cache TTL
+        elapses) and the rebalance worker starts migrating existing
+        chunks off it. Idempotent.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '204':
+          description: Drain flipped.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /clusters/{id}/undrain:
+    post:
+      summary: Clear draining state (US-006 placement-rebalance)
+      operationId: undrainCluster
+      description: |
+        Drops the cluster_state row (absence == live). Idempotent.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '204':
+          description: Undrain flipped.
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
 
@@ -690,6 +783,77 @@ paths:
       responses:
         '204':
           description: Quota removed.
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /buckets/{bucket}/placement:
+    get:
+      summary: Get bucket placement policy (US-001 placement-rebalance)
+      operationId: getBucketPlacement
+      parameters:
+        - name: bucket
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Placement policy configured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BucketPlacement' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    put:
+      summary: Set bucket placement policy (US-001 placement-rebalance)
+      operationId: putBucketPlacement
+      description: |
+        Replaces the per-bucket cluster placement policy. Weights are
+        bounded `[0, 100]`; sum must be > 0. Cluster ids must resolve
+        against `STRATA_RADOS_CLUSTERS` / `STRATA_S3_CLUSTERS`. Audit row
+        `admin:PutBucketPlacement`.
+      parameters:
+        - name: bucket
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BucketPlacement' }
+      responses:
+        '204':
+          description: Placement saved.
+        '400':
+          description: |
+            Invalid body — `InvalidPlacement` (weight out of range, sum=0,
+            empty cluster id) or `UnknownCluster` (cluster id not in the
+            configured set).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    delete:
+      summary: Delete bucket placement policy (US-001 placement-rebalance)
+      operationId: deleteBucketPlacement
+      description: |
+        Idempotent — returns 204 even when no policy was configured. Audit
+        row `admin:DeleteBucketPlacement`.
+      parameters:
+        - name: bucket
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Placement removed.
         '404':
           $ref: '#/components/responses/NotFound'
         '401':

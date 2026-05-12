@@ -87,7 +87,74 @@ var (
 	// Returned today only by gateway-level enforcement helpers; backend
 	// stores never raise it directly.
 	ErrQuotaExceeded           = errors.New("quota exceeded")
+	// ErrInvalidPlacement signals a bucket Placement policy that fails
+	// structural validation: weight outside [0, 100], sum(weights) == 0, or
+	// an empty cluster name (US-001 placement-rebalance cycle).
+	ErrInvalidPlacement        = errors.New("invalid placement policy")
+	// ErrUnknownCluster signals a Placement entry references a cluster id
+	// that is not in the configured STRATA_RADOS_CLUSTERS / STRATA_S3_CLUSTERS
+	// set. The meta.Store itself never raises this — cluster name resolution
+	// happens in the admin handler. Defined here so all placement-related
+	// sentinels live in one place (US-001).
+	ErrUnknownCluster          = errors.New("unknown cluster id")
+	// ErrInvalidClusterState signals a SetClusterState call with a value
+	// outside the allowed set ({"live", "draining", "removed"}) (US-006
+	// placement-rebalance).
+	ErrInvalidClusterState     = errors.New("invalid cluster state")
 )
+
+const (
+	// ClusterStateLive is the default state for any configured cluster —
+	// chunk PUTs route to it and the rebalance worker may move bytes both
+	// into and out of it. Absence of a cluster_state row is equivalent to
+	// "live", so live clusters do not need to materialise a row.
+	ClusterStateLive = "live"
+	// ClusterStateDraining tells the routing path to skip the cluster on
+	// chunk PUTs and the rebalance worker to move bytes out of it. Moves
+	// INTO a draining cluster are refused with reason="target_draining".
+	ClusterStateDraining = "draining"
+	// ClusterStateRemoved is the terminal state once a cluster is fully
+	// drained and the operator has deregistered it. Reserved for future
+	// use (US-006 ships drain + undrain; "removed" comes via the
+	// deregister path in a follow-up cycle).
+	ClusterStateRemoved = "removed"
+)
+
+// ValidateClusterState enforces the {live, draining, removed} enum on a
+// SetClusterState call. Empty string is rejected — callers that want to
+// clear the row must call DeleteClusterState.
+func ValidateClusterState(state string) error {
+	switch state {
+	case ClusterStateLive, ClusterStateDraining, ClusterStateRemoved:
+		return nil
+	default:
+		return ErrInvalidClusterState
+	}
+}
+
+// ValidatePlacement enforces the structural rules on a bucket Placement
+// policy: weights in [0, 100], at least one positive weight, no empty
+// cluster ids. Cluster-name resolution against the data backend env lives
+// in the admin handler (US-001 placement-rebalance cycle).
+func ValidatePlacement(p map[string]int) error {
+	if len(p) == 0 {
+		return ErrInvalidPlacement
+	}
+	total := 0
+	for cluster, w := range p {
+		if cluster == "" {
+			return ErrInvalidPlacement
+		}
+		if w < 0 || w > 100 {
+			return ErrInvalidPlacement
+		}
+		total += w
+	}
+	if total == 0 {
+		return ErrInvalidPlacement
+	}
+	return nil
+}
 
 // AdminJob tracks a long-running operator-facing background job kicked off by
 // the embedded console (US-002). Today only kind="force-empty" is used: the
@@ -253,6 +320,12 @@ type Bucket struct {
 	ShardCount        int
 	TargetShardCount  int
 	BackendPresign    bool
+	// Placement is the per-bucket cluster routing policy keyed
+	// `clusterID → weight`. Nil/empty means "no policy" — chunks route to
+	// `$defaultCluster` (zero behavior change for existing buckets). Loaded
+	// out-of-band via GetBucketPlacement, not by GetBucket — the GetBucket
+	// hot path stays a single buckets-table read. US-001 placement-rebalance.
+	Placement map[string]int `json:"placement,omitempty"`
 }
 
 const (
@@ -768,6 +841,29 @@ type Store interface {
 	SetBucketTagging(ctx context.Context, bucketID uuid.UUID, xmlBlob []byte) error
 	GetBucketTagging(ctx context.Context, bucketID uuid.UUID) ([]byte, error)
 	DeleteBucketTagging(ctx context.Context, bucketID uuid.UUID) error
+
+	// Bucket Placement policy CRUD (US-001 placement-rebalance). Stored
+	// per-bucket as a JSON blob. Get returns (nil, nil) when no policy is
+	// configured — NOT a sentinel error — so the routing path can fall
+	// back to $defaultCluster without branching on errors. SetBucketPlacement
+	// applies meta.ValidatePlacement before persisting; cluster-name
+	// resolution against the data backend env lives in the admin handler.
+	SetBucketPlacement(ctx context.Context, name string, policy map[string]int) error
+	GetBucketPlacement(ctx context.Context, name string) (map[string]int, error)
+	DeleteBucketPlacement(ctx context.Context, name string) error
+
+	// Cluster state CRUD (US-006 placement-rebalance). Stored as a
+	// top-level row keyed on the operator-supplied cluster id (NOT
+	// bucket-scoped). Absence of a row means ClusterStateLive — there is
+	// no need to materialise a row for the common case. GetClusterState
+	// returns (state, ok=false, nil) when no row exists. SetClusterState
+	// applies meta.ValidateClusterState before persisting. ListClusterStates
+	// returns every configured row keyed on cluster id (used by the
+	// drain-state cache and the admin GET /admin/v1/clusters handler).
+	SetClusterState(ctx context.Context, clusterID, state string) error
+	GetClusterState(ctx context.Context, clusterID string) (state string, ok bool, err error)
+	ListClusterStates(ctx context.Context) (map[string]string, error)
+	DeleteClusterState(ctx context.Context, clusterID string) error
 
 	// Quota CRUD (US-001..US-003). Get returns (zero-value, false, nil)
 	// when no quota is configured — not a sentinel error — so the gateway's

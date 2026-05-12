@@ -89,6 +89,7 @@ Per-shard panics increment
 | `inventory` | `inventory-leader` | `cmd/strata/workers/inventory.go` + `internal/inventory/` |
 | `audit-export` | `audit-export-leader` | `cmd/strata/workers/audit_export.go` + `internal/auditexport/` |
 | `manifest-rewriter` | `manifest-rewriter-leader` | `cmd/strata/workers/manifest_rewriter.go` + `internal/manifestrewriter/` |
+| `rebalance` | `rebalance-leader` | `cmd/strata/workers/rebalance.go` + `internal/rebalance/` |
 
 ### gc
 
@@ -146,6 +147,22 @@ Walks every bucket and converts any JSON-encoded `objects.manifest`
 blob to protobuf in place (US-049). Idempotent — re-runs skip
 already-proto rows. Cadence via `STRATA_MANIFEST_REWRITER_INTERVAL`
 (default 24h). See [Data backend]({{< ref "/architecture/data-backend" >}}).
+
+### rebalance
+
+Walks every bucket with a non-nil `meta.Bucket.Placement` policy,
+plans per-chunk moves whose current cluster does not match
+`placement.PickCluster`'s verdict, and dispatches the plan through a
+backend-specific mover (RADOS `Read`/`Write` or S3 `CopyObject` /
+streaming `Get`/`Put`) with a per-object manifest CAS that
+enqueues the losing chunk side into the GC queue. Safety rails refuse
+moves into `draining` clusters (drain sentinel in `cluster_state`)
+and (RADOS) into clusters above 90 % fill via `data.ClusterStatsProbe`.
+Tunables: `STRATA_REBALANCE_INTERVAL` (default `1h`, range
+`[1m, 24h]`), `STRATA_REBALANCE_RATE_MB_S` (default `100`, range
+`[1, 10000]`), `STRATA_REBALANCE_INFLIGHT` (default `4`, range
+`[1, 64]`). Full operator workflow in
+[Placement + rebalance]({{< ref "/best-practices/placement-rebalance" >}}).
 
 ## Source
 

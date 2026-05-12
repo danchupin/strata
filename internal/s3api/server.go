@@ -18,6 +18,7 @@ import (
 	"github.com/danchupin/strata/internal/crypto/master"
 	ssecrypto "github.com/danchupin/strata/internal/crypto/sse"
 	"github.com/danchupin/strata/internal/data"
+	"github.com/danchupin/strata/internal/data/placement"
 	"github.com/danchupin/strata/internal/meta"
 	"github.com/danchupin/strata/internal/metrics"
 )
@@ -61,6 +62,14 @@ type Server struct {
 	// rewritten to "/<bucket>/<original-path>" before path-style routing.
 	// Empty disables vhost extraction (path-style only).
 	VHostPatterns []string
+	// DrainCache is the in-process drain-sentinel cache consulted on the
+	// PUT hot path (US-006 placement-rebalance). When non-nil, PutChunks
+	// callsites stamp the draining-cluster set onto ctx via
+	// data.WithDrainingClusters so the data backend skips draining
+	// clusters even when their weight in Placement is non-zero. nil
+	// disables the check — set by serverapp when the gateway is wired
+	// against a meta backend.
+	DrainCache *placement.DrainCache
 }
 
 func New(d data.Backend, m meta.Store) *Server {
@@ -1024,7 +1033,7 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		encReader = newSSEEncryptingReader(body, dek, key)
 		body = encReader
 	}
-	m, err := s.Data.PutChunks(ctx, body, class)
+	m, err := s.Data.PutChunks(s.dataCtxForPut(ctx, b, key), body, class)
 	if err != nil {
 		if errors.Is(err, auth.ErrSignatureInvalid) {
 			writeError(w, r, ErrSignatureDoesNotMatch)

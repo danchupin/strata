@@ -167,3 +167,68 @@ type cephCheck struct {
 }
 
 var _ data.HealthProbe = (*Backend)(nil)
+var _ data.ClusterStatsProbe = (*Backend)(nil)
+
+// ClusterStats implements data.ClusterStatsProbe (US-006 placement-rebalance).
+// Runs `ceph df --format json` via MonCommand on the per-cluster Conn and
+// returns total_used_bytes / total_bytes from the `stats` block. The
+// rebalance worker uses this to refuse moves into clusters above the
+// configured fill ceiling.
+func (b *Backend) ClusterStats(ctx context.Context, clusterID string) (int64, int64, error) {
+	if b == nil {
+		return 0, 0, errors.New("rados backend closed")
+	}
+	if clusterID == "" {
+		clusterID = DefaultCluster
+	}
+	if _, ok := b.clusters[clusterID]; !ok {
+		return 0, 0, fmt.Errorf("rados: unknown cluster %q", clusterID)
+	}
+	// Force a Conn dial via a per-cluster ioctx against any pool we know
+	// about — MonCommand needs an open Conn but does not care which pool.
+	// Fall back to df-against-the-first-class on this cluster.
+	var seedPool, seedNS string
+	for _, spec := range b.classes {
+		c := spec.Cluster
+		if c == "" {
+			c = DefaultCluster
+		}
+		if c == clusterID {
+			seedPool = spec.Pool
+			seedNS = spec.Namespace
+			break
+		}
+	}
+	if seedPool == "" {
+		return 0, 0, fmt.Errorf("rados: cluster %q has no configured class", clusterID)
+	}
+	if _, err := b.ioctx(ctx, clusterID, seedPool, seedNS); err != nil {
+		return 0, 0, fmt.Errorf("rados: open ioctx on %s/%s: %w", clusterID, seedPool, err)
+	}
+	b.mu.Lock()
+	conn, ok := b.conns[clusterID]
+	b.mu.Unlock()
+	if !ok {
+		return 0, 0, fmt.Errorf("rados: no conn cached for cluster %q", clusterID)
+	}
+	args, err := json.Marshal(map[string]string{"prefix": "df", "format": "json"})
+	if err != nil {
+		return 0, 0, fmt.Errorf("rados: marshal df args: %w", err)
+	}
+	out, _, err := conn.MonCommand(args)
+	if err != nil {
+		return 0, 0, fmt.Errorf("rados: df mon command: %w", err)
+	}
+	var df cephDF
+	if err := json.Unmarshal(out, &df); err != nil {
+		return 0, 0, fmt.Errorf("rados: df parse: %w", err)
+	}
+	return df.Stats.TotalUsedBytes, df.Stats.TotalBytes, nil
+}
+
+type cephDF struct {
+	Stats struct {
+		TotalBytes     int64 `json:"total_bytes"`
+		TotalUsedBytes int64 `json:"total_used_bytes"`
+	} `json:"stats"`
+}

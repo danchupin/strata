@@ -187,7 +187,7 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Buck
 		return
 	}
 	if r.Header.Get("x-amz-copy-source") != "" {
-		s.uploadPartCopy(w, r, b, uploadID, mu, partNumber)
+		s.uploadPartCopy(w, r, b, key, uploadID, mu, partNumber)
 		return
 	}
 	if r.ContentLength > 0 {
@@ -247,7 +247,7 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Buck
 		encReader = newSSEEncryptingReader(body, dek, multipartPartOID(key, partNumber))
 		body = encReader
 	}
-	manifest, err := s.Data.PutChunks(ctx, body, mu.StorageClass)
+	manifest, err := s.Data.PutChunks(s.dataCtxForPut(ctx, b, key), body, mu.StorageClass)
 	if err != nil {
 		if errors.Is(err, auth.ErrSignatureInvalid) {
 			writeError(w, r, ErrSignatureDoesNotMatch)
@@ -303,7 +303,7 @@ type copyPartResult struct {
 	ChecksumCRC64NVME string   `xml:"ChecksumCRC64NVME,omitempty"`
 }
 
-func (s *Server) uploadPartCopy(w http.ResponseWriter, r *http.Request, b *meta.Bucket, uploadID string, mu *meta.MultipartUpload, partNumber int) {
+func (s *Server) uploadPartCopy(w http.ResponseWriter, r *http.Request, b *meta.Bucket, key, uploadID string, mu *meta.MultipartUpload, partNumber int) {
 	srcBucket, srcKey, srcVersion, ok := parseCopySource(r.Header.Get("x-amz-copy-source"))
 	if !ok {
 		writeError(w, r, ErrInvalidArgument)
@@ -360,7 +360,7 @@ func (s *Server) uploadPartCopy(w http.ResponseWriter, r *http.Request, b *meta.
 	if hasher != nil {
 		body = io.TeeReader(rc, hasher)
 	}
-	manifest, err := s.Data.PutChunks(ctx, body, mu.StorageClass)
+	manifest, err := s.Data.PutChunks(s.dataCtxForPut(ctx, b, key), body, mu.StorageClass)
 	if err != nil {
 		writeError(w, r, ErrInternal)
 		return

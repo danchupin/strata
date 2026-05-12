@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
 )
 
@@ -125,7 +124,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, dstBucket *m
 	}
 	defer rc.Close()
 
-	m, err := s.Data.PutChunks(data.WithBucketID(r.Context(), dstBucket.ID), rc, class)
+	m, err := s.Data.PutChunks(s.dataCtxForPut(r.Context(), dstBucket, dstKey), rc, class)
 	if err != nil {
 		if strings.Contains(err.Error(), "unknown storage class") {
 			writeError(w, r, ErrInvalidStorageClass)

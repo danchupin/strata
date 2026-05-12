@@ -21,6 +21,7 @@ import (
 	"github.com/danchupin/strata/internal/auth"
 	"github.com/danchupin/strata/internal/bucketstats"
 	"github.com/danchupin/strata/internal/data"
+	"github.com/danchupin/strata/internal/data/placement"
 	"github.com/danchupin/strata/internal/heartbeat"
 	"github.com/danchupin/strata/internal/leader"
 	"github.com/danchupin/strata/internal/meta"
@@ -115,6 +116,25 @@ type Server struct {
 	// can still mount the page.
 	StorageClasses *bucketstats.Snapshot
 
+	// KnownClusters is the live data-backend cluster set used by
+	// PUT /admin/v1/buckets/{bucket}/placement to reject policies that
+	// reference unconfigured cluster ids (US-001 placement-rebalance). nil
+	// disables the check — set by serverapp from
+	// STRATA_RADOS_CLUSTERS / STRATA_S3_CLUSTERS at startup.
+	KnownClusters map[string]struct{}
+
+	// ClusterBackends maps cluster id → backend kind ("rados" or "s3").
+	// Used by GET /admin/v1/clusters to surface the per-cluster backend
+	// origin (US-006 placement-rebalance). nil → "" on every row.
+	ClusterBackends map[string]string
+
+	// DrainCache is the in-process drain-sentinel cache shared with the
+	// gateway s3api.Server (US-006). Drain / undrain admin handlers call
+	// Invalidate so a freshly-flipped state takes effect on the next PUT
+	// without waiting out the TTL. nil disables invalidation — the
+	// cache (if any) updates on its own TTL.
+	DrainCache *placement.DrainCache
+
 	// hotBucketsMu guards lazy initialisation of hotBucketsCacheVal — the
 	// 30s TTL cache that absorbs burst polls of /admin/v1/diagnostics/
 	// hot-buckets (US-007).
@@ -201,6 +221,18 @@ type Config struct {
 	// StorageClasses is the per-storage-class aggregate snapshot updated by
 	// the bucketstats sampler. Backs GET /admin/v1/storage/classes.
 	StorageClasses *bucketstats.Snapshot
+	// KnownClusters is the live data-backend cluster set used to validate
+	// placement policies (US-001 placement-rebalance). Pass the union of
+	// STRATA_RADOS_CLUSTERS + STRATA_S3_CLUSTERS ids; nil disables the
+	// check entirely (memory backend, dev rigs).
+	KnownClusters map[string]struct{}
+	// ClusterBackends maps cluster id → backend kind for the
+	// GET /admin/v1/clusters response (US-006).
+	ClusterBackends map[string]string
+	// DrainCache is the in-process drain-sentinel cache shared with the
+	// gateway. Drain / undrain admin handlers invalidate it so flips
+	// take effect on the next PUT.
+	DrainCache *placement.DrainCache
 }
 
 // New constructs a Server. Started defaults to now. JWTSecret empty means
@@ -241,6 +273,9 @@ func New(c Config) *Server {
 		AuditStream:          c.AuditStream,
 		TraceRingbuf:         c.TraceRingbuf,
 		StorageClasses:       c.StorageClasses,
+		KnownClusters:        c.KnownClusters,
+		ClusterBackends:      c.ClusterBackends,
+		DrainCache:           c.DrainCache,
 		Logger:               log.Default(),
 	}
 }
@@ -293,6 +328,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/v1/auth/whoami", s.handleWhoami)
 	mux.HandleFunc("GET /admin/v1/cluster/status", s.handleClusterStatus)
 	mux.HandleFunc("GET /admin/v1/cluster/nodes", s.handleClusterNodes)
+	mux.HandleFunc("GET /admin/v1/clusters", s.handleClustersList)
+	mux.HandleFunc("POST /admin/v1/clusters/{id}/drain", s.handleClusterDrain)
+	mux.HandleFunc("POST /admin/v1/clusters/{id}/undrain", s.handleClusterUndrain)
 	mux.HandleFunc("GET /admin/v1/buckets", s.handleBucketsList)
 	mux.HandleFunc("POST /admin/v1/buckets", s.handleBucketCreate)
 	mux.HandleFunc("DELETE /admin/v1/buckets/{bucket}", s.handleBucketDelete)
@@ -322,6 +360,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/quota", s.handleBucketGetQuota)
 	mux.HandleFunc("PUT /admin/v1/buckets/{bucket}/quota", s.handleBucketSetQuota)
 	mux.HandleFunc("DELETE /admin/v1/buckets/{bucket}/quota", s.handleBucketDeleteQuota)
+	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/placement", s.handleBucketGetPlacement)
+	mux.HandleFunc("PUT /admin/v1/buckets/{bucket}/placement", s.handleBucketSetPlacement)
+	mux.HandleFunc("DELETE /admin/v1/buckets/{bucket}/placement", s.handleBucketDeletePlacement)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/usage", s.handleBucketGetUsage)
 	mux.HandleFunc("GET /admin/v1/buckets/top", s.handleBucketsTop)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}", s.handleBucketGet)

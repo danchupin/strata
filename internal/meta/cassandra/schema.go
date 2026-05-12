@@ -184,6 +184,14 @@ var tableDDL = []string{
 		bucket_id uuid PRIMARY KEY,
 		config    blob
 	)`,
+	`CREATE TABLE IF NOT EXISTS bucket_placement (
+		bucket_id uuid PRIMARY KEY,
+		policy    blob
+	)`,
+	`CREATE TABLE IF NOT EXISTS cluster_state (
+		cluster_id text PRIMARY KEY,
+		state      text
+	)`,
 	`CREATE TABLE IF NOT EXISTS user_quota (
 		user_name text PRIMARY KEY,
 		config    blob

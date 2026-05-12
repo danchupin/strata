@@ -97,6 +97,57 @@ testcontainers to find the engine.
                           bucket and writes manifest.json + CSV.gz pairs
                           into the configured target bucket. Leader-elected
                           on `inventory-leader`.
+  strata server --workers=rebalance -> internal/rebalance: leader-elected on
+                          `rebalance-leader`. Walks every bucket with a
+                          non-nil Placement, plans per-chunk moves whose
+                          current cluster does not match placement.PickCluster,
+                          and dispatches the plan via a MoverChain emitter.
+                          Build-tag `ceph` plugs a RadosMover that reads from
+                          the source cluster, writes a fresh OID on the
+                          target, then issues per-object manifest CAS via
+                          meta.Store.SetObjectStorage; CAS losers (old chunks
+                          on success, new chunks on reject) go to the GC
+                          queue via EnqueueChunkDeletion. Build-tag-free
+                          S3Mover (US-005) plugs into the same MoverChain
+                          when deps.Data is *s3.Backend: same-endpoint+region
+                          short-circuits to awss3.CopyObject, mismatched
+                          endpoints fall back to Get→Put streaming via
+                          manager.Uploader. BackendRef-shape manifests carry
+                          BackendRef.Cluster (populated at PutChunks time);
+                          the scan emits a single virtual move per S3 object
+                          and the S3Mover updates manifest.BackendRef in
+                          place. GC enqueue uses chunk-shape entries where
+                          chunk.Cluster matches an S3 cluster id — the s3
+                          backend's Delete dispatches such entries via
+                          (cluster, bucket=chunk.Pool, key=chunk.OID).
+                          Knobs: STRATA_REBALANCE_INTERVAL (default 1h,
+                          range [1m, 24h]), STRATA_REBALANCE_RATE_MB_S
+                          (default 100, range [1, 10000]; both read + write
+                          consume from the same token-bucket so a chunk
+                          move costs chunkSize × 2 tokens),
+                          STRATA_REBALANCE_INFLIGHT (default 4, range
+                          [1, 64]; per-Move(plan) errgroup bound shared
+                          between copy and CAS phases). Safety rails
+                          (US-006): refuses moves into `draining`
+                          clusters and (RADOS only) clusters above
+                          90% utilisation via data.ClusterStatsProbe
+                          (MonCommand `df`); both bump
+                          `strata_rebalance_refused_total{reason,target}`.
+                          The PUT hot path consults the same drain
+                          sentinel via an in-process 30s-TTL cache
+                          (`internal/data/placement/draincache.go`)
+                          that the admin drain/undrain handlers
+                          invalidate so flips take effect without
+                          waiting out the TTL. `placement.PickCluster`
+                          and `PickClusterExcluding` skip draining
+                          clusters; cluster_state ∈ {live, draining,
+                          removed} is meta-backed via the new
+                          `cluster_state` CRUD on meta.Store, with
+                          rows defaulting to "live" (absence == live).
+                          Admin: POST `/admin/v1/clusters/{id}/drain`
+                          and `.../undrain`, GET `/admin/v1/clusters`
+                          (audit `admin:DrainCluster` /
+                          `admin:UndrainCluster`).
   internal/reshard      -> per-bucket online shard-resize worker (US-045);
                           driven synchronously via /admin/bucket/reshard or
                           as a daemon.

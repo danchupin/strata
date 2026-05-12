@@ -183,6 +183,7 @@ func manifestToProto(m *Manifest) *pb.Manifest {
 			Etag:      m.BackendRef.ETag,
 			Size:      m.BackendRef.Size,
 			VersionId: m.BackendRef.VersionID,
+			Cluster:   m.BackendRef.Cluster,
 		}
 	}
 	if m.SSE != nil {
@@ -252,6 +253,7 @@ func manifestFromProto(p *pb.Manifest) *Manifest {
 			ETag:      br.GetEtag(),
 			Size:      br.GetSize(),
 			VersionID: br.GetVersionId(),
+			Cluster:   br.GetCluster(),
 		}
 	}
 	if s := p.GetSse(); s != nil {

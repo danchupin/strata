@@ -241,7 +241,8 @@ Each iteration produces:
   `notify.deliver_event`; `access_log.flush_bucket`;
   `inventory.scan_bucket`; `audit_export.export_partition`;
   `manifest_rewriter.rewrite_bucket`; `quota_reconcile.scan_bucket`;
-  `usage_rollup.sample_bucket`.
+  `usage_rollup.sample_bucket`; `rebalance.scan_bucket` /
+  `rebalance.move_chunk`.
 
 Sub-op failures `RecordError` + `SetStatus(Error)` and flow into a
 sync.Mutex-guarded sticky-err accumulator so the iteration parent
@@ -252,6 +253,30 @@ tests without OTel wiring keep working.
 
 `strata-admin rewrap` is a one-shot operator command and stays
 untraced.
+
+### Rebalance worker (US-003..US-006)
+
+Iteration parent `worker.rebalance.tick` with sub-ops
+`rebalance.scan_bucket` (one per bucket scanned per tick — attrs
+`strata.rebalance.bucket`, `bucket_id`, planned-moves count) and
+`rebalance.move_chunk` (one per chunk move — attrs
+`strata.rebalance.{bucket,key,from,to,chunk_idx}`). Move-side
+failures `RecordError` + `SetStatus(Error)` and flow into the same
+sticky-err accumulator so the iteration parent flips to Error and
+the tail-sampler exports the full iteration.
+
+Metric family:
+
+| Metric                                   | Labels                  | Meaning                                                                 |
+| ---------------------------------------- | ----------------------- | ----------------------------------------------------------------------- |
+| `strata_rebalance_planned_moves_total`   | `bucket`                | Chunks whose current cluster ≠ `PickCluster` verdict at scan time.     |
+| `strata_rebalance_bytes_moved_total`     | `from`, `to`            | Bytes copied on the target write — retried reads do not double-count. |
+| `strata_rebalance_chunks_moved_total`    | `from`, `to`, `bucket`  | Chunks successfully copied post-target-write.                           |
+| `strata_rebalance_cas_conflicts_total`   | `bucket`                | Manifest LWT lost — target chunks routed to GC, live manifest intact. |
+| `strata_rebalance_refused_total`         | `reason`, `target`      | `reason ∈ {target_full, target_draining}` — safety rail refusals.     |
+
+Full operator runbook in
+[Placement + rebalance]({{< ref "/best-practices/placement-rebalance" >}}).
 
 ## Source
 

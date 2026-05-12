@@ -44,6 +44,7 @@ how they are named, and how to filter them**.
 | `manifest-rewriter` | `manifest_rewriter.rewrite_bucket` |
 | `quota-reconcile` | `quota_reconcile.scan_bucket` |
 | `usage-rollup` | `usage_rollup.sample_bucket` |
+| `rebalance` | `rebalance.scan_bucket`, `rebalance.move_chunk` |
 
 ## Tracer names
 
@@ -56,7 +57,7 @@ Every tier installs a named tracer via `tp.Tracer("strata.<area>")`:
 | `strata.meta.tikv` | TiKV Store decorator |
 | `strata.data.rados` | RADOS ObserveOp |
 | `strata.data.s3` | S3 backend (otelaws middleware) |
-| `strata.worker.<name>` | each worker (gc, lifecycle, replicator, notify, access-log, inventory, audit-export, manifest-rewriter, quota-reconcile, usage-rollup) |
+| `strata.worker.<name>` | each worker (gc, lifecycle, replicator, notify, access-log, inventory, audit-export, manifest-rewriter, quota-reconcile, usage-rollup, rebalance) |
 
 `internal/serverapp/serverapp.go` wires the meta + data tracers after
 `strataotel.Init` runs (so the provider exists before backends are
