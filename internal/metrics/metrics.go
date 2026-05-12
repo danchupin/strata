@@ -265,6 +265,14 @@ var (
 		},
 		[]string{"reason", "target"},
 	)
+
+	PutChunksRefusedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_putchunks_refused_total",
+			Help: "PutChunks refusals on the gateway PUT hot path. reason=\"drain_strict\" when STRATA_DRAIN_STRICT=on and the placement picker fell back to a draining cluster (US-002 drain-lifecycle). cluster label is the refused target.",
+		},
+		[]string{"reason", "cluster"},
+	)
 )
 
 func Register() {
@@ -297,6 +305,7 @@ func Register() {
 		RebalanceChunksMovedTotal,
 		RebalanceCASConflictsTotal,
 		RebalanceRefusedTotal,
+		PutChunksRefusedTotal,
 	)
 }
 

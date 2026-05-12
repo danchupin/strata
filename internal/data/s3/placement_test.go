@@ -2,6 +2,7 @@ package s3
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -203,6 +204,168 @@ func TestPutChunksPlacementAllZeroFallsBack(t *testing.T) {
 	}
 	if a.requestCount() != 1 || bsrv.requestCount() != 0 {
 		t.Fatalf("all-zero policy: must fall back to STANDARD/a, got (a=%d, b=%d)", a.requestCount(), bsrv.requestCount())
+	}
+}
+
+// TestPutChunksDrainStrictRefusesFallback pins the US-002 strict-mode
+// AC: when DrainStrict is on and the placement picker falls back to a
+// draining cluster (empty policy or all-excluded policy), PutChunks
+// returns data.ErrDrainRefused with the resolved cluster id; nothing
+// is written to either backend.
+func TestPutChunksDrainStrictRefusesFallback(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "ak")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "sk")
+
+	a := newCapturingS3Server(t)
+	bsrv := newCapturingS3Server(t)
+	t.Cleanup(a.Close)
+	t.Cleanup(bsrv.Close)
+
+	cfg := Config{
+		Clusters: map[string]S3ClusterSpec{
+			"a": {Endpoint: a.URL(), Region: "us-east-1", ForcePathStyle: true, Credentials: CredentialsRef{Type: CredentialsChain}},
+			"b": {Endpoint: bsrv.URL(), Region: "us-west-1", ForcePathStyle: true, Credentials: CredentialsRef{Type: CredentialsChain}},
+		},
+		Classes: map[string]ClassSpec{
+			"STANDARD":   {Cluster: "a", Bucket: "bucket-a"},
+			"STANDARD-B": {Cluster: "b", Bucket: "bucket-b"},
+		},
+		SkipCredsCheck: true,
+		DrainStrict:    true,
+	}
+	be, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// No placement on ctx — fallback to STANDARD/a. Cluster "a" drained.
+	bucketID := uuid.New()
+	ctx := data.WithDrainingClusters(
+		data.WithObjectKey(data.WithBucketID(context.Background(), bucketID), "key"),
+		map[string]bool{"a": true},
+	)
+	a.reset()
+	bsrv.reset()
+	_, err = be.PutChunks(ctx, strings.NewReader("payload"), "STANDARD")
+	if err == nil {
+		t.Fatal("PutChunks: want ErrDrainRefused, got nil")
+	}
+	if !errors.Is(err, data.ErrDrainRefused) {
+		t.Fatalf("PutChunks err: want ErrDrainRefused, got %v", err)
+	}
+	var dre *data.DrainRefusedError
+	if !errors.As(err, &dre) {
+		t.Fatalf("errors.As DrainRefusedError: false; err=%v", err)
+	}
+	if dre.Cluster != "a" {
+		t.Fatalf("DrainRefusedError.Cluster: want %q, got %q", "a", dre.Cluster)
+	}
+	if a.requestCount() != 0 || bsrv.requestCount() != 0 {
+		t.Fatalf("strict refusal must not write: got (a=%d, b=%d)", a.requestCount(), bsrv.requestCount())
+	}
+
+	// All-excluded policy {a:1} + a drained — also refuses.
+	ctx2 := data.WithPlacement(ctx, map[string]int{"a": 1})
+	a.reset()
+	bsrv.reset()
+	_, err = be.PutChunks(ctx2, strings.NewReader("payload"), "STANDARD")
+	if !errors.Is(err, data.ErrDrainRefused) {
+		t.Fatalf("all-excluded policy: want ErrDrainRefused, got %v", err)
+	}
+	if a.requestCount() != 0 || bsrv.requestCount() != 0 {
+		t.Fatalf("strict refusal (all-excluded) must not write: got (a=%d, b=%d)", a.requestCount(), bsrv.requestCount())
+	}
+}
+
+// TestPutChunksDrainStrictOffPreservesFailOpen pins the default-mode
+// regression rail: DrainStrict=false + drained fallback continues to
+// route to the draining cluster (existing behavior).
+func TestPutChunksDrainStrictOffPreservesFailOpen(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "ak")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "sk")
+
+	a := newCapturingS3Server(t)
+	bsrv := newCapturingS3Server(t)
+	t.Cleanup(a.Close)
+	t.Cleanup(bsrv.Close)
+
+	cfg := Config{
+		Clusters: map[string]S3ClusterSpec{
+			"a": {Endpoint: a.URL(), Region: "us-east-1", ForcePathStyle: true, Credentials: CredentialsRef{Type: CredentialsChain}},
+			"b": {Endpoint: bsrv.URL(), Region: "us-west-1", ForcePathStyle: true, Credentials: CredentialsRef{Type: CredentialsChain}},
+		},
+		Classes: map[string]ClassSpec{
+			"STANDARD":   {Cluster: "a", Bucket: "bucket-a"},
+			"STANDARD-B": {Cluster: "b", Bucket: "bucket-b"},
+		},
+		SkipCredsCheck: true,
+		// DrainStrict: false (default).
+	}
+	be, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	bucketID := uuid.New()
+	ctx := data.WithDrainingClusters(
+		data.WithObjectKey(data.WithBucketID(context.Background(), bucketID), "key"),
+		map[string]bool{"a": true},
+	)
+	a.reset()
+	bsrv.reset()
+	if _, err := be.PutChunks(ctx, strings.NewReader("payload"), "STANDARD"); err != nil {
+		t.Fatalf("PutChunks (default mode): want nil, got %v", err)
+	}
+	if a.requestCount() != 1 || bsrv.requestCount() != 0 {
+		t.Fatalf("default mode: want write to a despite drain, got (a=%d, b=%d)", a.requestCount(), bsrv.requestCount())
+	}
+}
+
+// TestPutChunksDrainStrictDoesNotRefuseAlternateCluster pins the AC
+// that strict mode refuses ONLY when fallback hits a draining cluster
+// — if the policy picks a non-draining peer the PUT succeeds.
+func TestPutChunksDrainStrictDoesNotRefuseAlternateCluster(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "ak")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "sk")
+
+	a := newCapturingS3Server(t)
+	bsrv := newCapturingS3Server(t)
+	t.Cleanup(a.Close)
+	t.Cleanup(bsrv.Close)
+
+	cfg := Config{
+		Clusters: map[string]S3ClusterSpec{
+			"a": {Endpoint: a.URL(), Region: "us-east-1", ForcePathStyle: true, Credentials: CredentialsRef{Type: CredentialsChain}},
+			"b": {Endpoint: bsrv.URL(), Region: "us-west-1", ForcePathStyle: true, Credentials: CredentialsRef{Type: CredentialsChain}},
+		},
+		Classes: map[string]ClassSpec{
+			"STANDARD":   {Cluster: "a", Bucket: "bucket-a"},
+			"STANDARD-B": {Cluster: "b", Bucket: "bucket-b"},
+		},
+		SkipCredsCheck: true,
+		DrainStrict:    true,
+	}
+	be, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Policy {a:1, b:1} with a drained — picker excludes a and routes to b.
+	bucketID := uuid.New()
+	ctx := data.WithPlacement(
+		data.WithDrainingClusters(
+			data.WithObjectKey(data.WithBucketID(context.Background(), bucketID), "key"),
+			map[string]bool{"a": true},
+		),
+		map[string]int{"a": 1, "b": 1},
+	)
+	a.reset()
+	bsrv.reset()
+	if _, err := be.PutChunks(ctx, strings.NewReader("payload"), "STANDARD"); err != nil {
+		t.Fatalf("PutChunks: want nil, got %v", err)
+	}
+	if a.requestCount() != 0 || bsrv.requestCount() != 1 {
+		t.Fatalf("policy with drain exclusion: want write to b, got (a=%d, b=%d)", a.requestCount(), bsrv.requestCount())
 	}
 }
 

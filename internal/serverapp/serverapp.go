@@ -349,6 +349,10 @@ func workerNames(ws []workers.Worker) string {
 }
 
 func buildDataBackend(cfg *config.Config, logger *slog.Logger, tp *strataotel.Provider) (data.Backend, error) {
+	drainStrict, err := data.ParseDrainStrict(cfg.DrainStrict)
+	if err != nil {
+		return nil, err
+	}
 	switch cfg.DataBackend {
 	case "memory":
 		return datamem.New(), nil
@@ -362,16 +366,17 @@ func buildDataBackend(cfg *config.Config, logger *slog.Logger, tp *strataotel.Pr
 			return nil, err
 		}
 		return datarados.New(datarados.Config{
-			ConfigFile: cfg.RADOS.ConfigFile,
-			User:       cfg.RADOS.User,
-			Keyring:    cfg.RADOS.Keyring,
-			Pool:       cfg.RADOS.Pool,
-			Namespace:  cfg.RADOS.Namespace,
-			Classes:    classes,
-			Clusters:   clusters,
-			Logger:     logger,
-			Metrics:    metrics.RADOSObserver{},
-			Tracer:     tp.Tracer("strata.data.rados"),
+			ConfigFile:  cfg.RADOS.ConfigFile,
+			User:        cfg.RADOS.User,
+			Keyring:     cfg.RADOS.Keyring,
+			Pool:        cfg.RADOS.Pool,
+			Namespace:   cfg.RADOS.Namespace,
+			Classes:     classes,
+			Clusters:    clusters,
+			DrainStrict: drainStrict,
+			Logger:      logger,
+			Metrics:     metrics.RADOSObserver{},
+			Tracer:      tp.Tracer("strata.data.rados"),
 		})
 	case "s3":
 		s3Clusters, err := datas3.ParseClusters(cfg.S3.Clusters)
@@ -385,6 +390,7 @@ func buildDataBackend(cfg *config.Config, logger *slog.Logger, tp *strataotel.Pr
 		return datas3.New(datas3.Config{
 			Clusters:       s3Clusters,
 			Classes:        s3Classes,
+			DrainStrict:    drainStrict,
 			Tracer:         tp.Tracer("strata.data.s3"),
 			TracerProvider: tp.TracerProvider(),
 		})

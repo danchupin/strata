@@ -2,11 +2,13 @@ package s3api
 
 import (
 	"encoding/xml"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
 )
 
@@ -126,6 +128,11 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, dstBucket *m
 
 	m, err := s.Data.PutChunks(s.dataCtxForPut(r.Context(), dstBucket, dstKey), rc, class)
 	if err != nil {
+		var drainRefused *data.DrainRefusedError
+		if errors.As(err, &drainRefused) {
+			writeDrainRefused(w, r, drainRefused)
+			return
+		}
 		if strings.Contains(err.Error(), "unknown storage class") {
 			writeError(w, r, ErrInvalidStorageClass)
 			return
