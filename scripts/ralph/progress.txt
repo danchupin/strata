@@ -22,3 +22,19 @@ Cycle: ralph/drain-lifecycle
 - **Pre-drain bucket impact preview (US-006)**: server endpoint reads `meta.Store.ListBuckets` and filters `Placement[<cluster>] > 0`, joining with `bucket_stats` for chunk_count + bytes_used. No manifest walk (the rebalance worker progress scan in US-003 already does that work). UI drawer reuses the existing TanStack `clusters` shared query key for state lookups; new query key `clusterBucketRefs(<id>)` for the per-cluster list. `<PolicyDrainWarning>` chip on Bucket Placement tab derives from cross-referencing the bucket's `Placement` keys with `state=draining` clusters from the shared query — no new API call.
 - **Smoke script convention**: precedent is `scripts/multi-replica-smoke.sh` (from the multi-replica lab cycle). New `scripts/smoke-drain-lifecycle.sh` follows the same shell-script-with-curl-and-jq pattern; assertions via shell `[[`; exit non-zero on any failure. Makefile target `smoke-drain-lifecycle` wraps it.
 
+
+## 2026-05-12 - US-001
+- Refactored `internal/data/rados/health_helper.go::buildPendingPoolStatuses` to take both `classes` and `clusters` and emit the cross-product (every cluster × every distinct (pool, ns)). One row per (cluster, pool, ns) cell; Class field = sorted comma-joined classes mapped to that (pool, ns). Sort key (Cluster, Name) ascending with empty cluster last.
+- Wired `internal/data/rados/health.go::DataHealth` to pass `b.clusters` into the helper so the rados Pools table now lists `#clusters × #distinct-pools` rows. ioctx+GetPoolStats fold per row was already correct — the new matrix just feeds it more (cluster, pool) pairs to probe.
+- Rewrote `internal/data/s3/health.go::DataHealth` to the same shape: iterate sorted cluster ids × sorted distinct buckets; HeadBucket per (cluster, bucket) cell; cluster-connect failure stamps state="error" on every bucket row for that cluster + adds one cluster-level warning.
+- Memory backend untouched — still the single `Cluster=""` synthetic row.
+- Updated `internal/data/rados/health_test.go`: new `TestBuildPendingPoolStatusesCrossProduct` asserts the 2×3 lab shape (6 rows, per-cluster count 3/3); existing two-cluster + group-by-pool + sort + empty-cluster-fallback tests adapted to the new signature.
+- Updated `internal/data/s3/health_test.go`: new `TestDataHealthCrossProductBuckets` asserts 2 clusters × 2 buckets = 4 rows in ascending (Cluster, Name) order; new `TestDataHealthGroupsClassesPerBucket` covers the comma-joined Class label.
+- Files changed: `internal/data/rados/health_helper.go`, `internal/data/rados/health.go`, `internal/data/rados/health_test.go`, `internal/data/s3/health.go`, `internal/data/s3/health_test.go`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- `go vet ./...` passes; `go test ./internal/data/...` passes.
+- **Learnings for future iterations:**
+  - `buildPendingPoolStatuses` now takes `(classes, clusters)` — any future story that touches DataHealth must pass both.
+  - The cross-product means a (cluster, pool) cell where the pool doesn't actually exist on that cluster will fail at ioctx open and stamp state=error. Lab assumption: pool layout identical on every cluster. If a future deploy diverges, the matrix surfaces the divergence as error rows — operator-visible signal, not a bug.
+  - Pre-existing flake: `internal/racetest::TestRunCleanRunNoInconsistencies` is broken on `ralph/drain-lifecycle` HEAD (predates this commit). Don't chase it from a DataHealth change.
+  - `t.Setenv("AWS_ACCESS_KEY_ID", ...)` + `SkipCredsCheck: true` is the standard s3 backend test setup for offline tests that hit a `newCapturingS3Server` httptest fake.
+---

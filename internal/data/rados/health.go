@@ -32,7 +32,7 @@ func (b *Backend) DataHealth(ctx context.Context) (*data.DataHealthReport, error
 		return nil, errors.New("rados backend closed")
 	}
 
-	pending := buildPendingPoolStatuses(b.classes)
+	pending := buildPendingPoolStatuses(b.classes, b.clusters)
 	pools := make([]data.PoolStatus, 0, len(pending))
 	var warnings []string
 	clusters := make(map[string]struct{})

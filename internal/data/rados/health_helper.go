@@ -22,48 +22,73 @@ type pendingPoolStatus struct {
 	status data.PoolStatus
 }
 
-// buildPendingPoolStatuses groups the configured classes map by
-// (cluster, pool, namespace) and emits one pendingPoolStatus per group,
-// pre-populating Name, Class (comma-joined sorted class list), and
-// Cluster (cluster id with DefaultCluster substituted for empty).
-// Output is sorted by (cluster, pool, ns) for stable wire output.
+// buildPendingPoolStatuses emits one pendingPoolStatus per (cluster, pool,
+// namespace) cell of the cross-product between every registered cluster
+// and every distinct (pool, namespace) tuple referenced by the configured
+// classes. The Class field is the sorted comma-joined list of classes
+// mapped to that (pool, namespace). Lab shape: 2 clusters × 3 distinct
+// pools → 6 rows, so the Pools table reflects actual per-cluster
+// distribution instead of class env routing config.
+//
+// Output is sorted ascending by (Cluster, Name) with empty Cluster sorted
+// last; the helper substitutes DefaultCluster for any "" cluster id in
+// the input clusters map.
+//
 // Lives in a build-tag-free file so the grouping logic is testable
 // without a librados linkage.
-func buildPendingPoolStatuses(classes map[string]ClassSpec) []pendingPoolStatus {
-	classByPool := make(map[poolGroup][]string)
+func buildPendingPoolStatuses(classes map[string]ClassSpec, clusters map[string]ClusterSpec) []pendingPoolStatus {
+	type poolKey struct {
+		pool, ns string
+	}
+	classByPool := make(map[poolKey][]string)
 	for class, spec := range classes {
-		cluster := spec.Cluster
+		k := poolKey{pool: spec.Pool, ns: spec.Namespace}
+		classByPool[k] = append(classByPool[k], class)
+	}
+	poolKeys := make([]poolKey, 0, len(classByPool))
+	for k := range classByPool {
+		poolKeys = append(poolKeys, k)
+	}
+	sort.Slice(poolKeys, func(i, j int) bool {
+		if poolKeys[i].pool != poolKeys[j].pool {
+			return poolKeys[i].pool < poolKeys[j].pool
+		}
+		return poolKeys[i].ns < poolKeys[j].ns
+	})
+
+	clusterIDs := make([]string, 0, len(clusters))
+	for id := range clusters {
+		clusterIDs = append(clusterIDs, id)
+	}
+	sort.Slice(clusterIDs, func(i, j int) bool {
+		ci, cj := clusterIDs[i], clusterIDs[j]
+		if ci == "" {
+			return false
+		}
+		if cj == "" {
+			return true
+		}
+		return ci < cj
+	})
+
+	out := make([]pendingPoolStatus, 0, len(clusterIDs)*len(poolKeys))
+	for _, cid := range clusterIDs {
+		cluster := cid
 		if cluster == "" {
 			cluster = DefaultCluster
 		}
-		k := poolGroup{cluster: cluster, pool: spec.Pool, ns: spec.Namespace}
-		classByPool[k] = append(classByPool[k], class)
-	}
-	keys := make([]poolGroup, 0, len(classByPool))
-	for k := range classByPool {
-		keys = append(keys, k)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].cluster != keys[j].cluster {
-			return keys[i].cluster < keys[j].cluster
+		for _, pk := range poolKeys {
+			cls := append([]string(nil), classByPool[pk]...)
+			sort.Strings(cls)
+			out = append(out, pendingPoolStatus{
+				group: poolGroup{cluster: cluster, pool: pk.pool, ns: pk.ns},
+				status: data.PoolStatus{
+					Name:    pk.pool,
+					Class:   strings.Join(cls, ","),
+					Cluster: cluster,
+				},
+			})
 		}
-		if keys[i].pool != keys[j].pool {
-			return keys[i].pool < keys[j].pool
-		}
-		return keys[i].ns < keys[j].ns
-	})
-	out := make([]pendingPoolStatus, 0, len(keys))
-	for _, k := range keys {
-		cls := append([]string(nil), classByPool[k]...)
-		sort.Strings(cls)
-		out = append(out, pendingPoolStatus{
-			group: k,
-			status: data.PoolStatus{
-				Name:    k.pool,
-				Class:   strings.Join(cls, ","),
-				Cluster: k.cluster,
-			},
-		})
 	}
 	return out
 }

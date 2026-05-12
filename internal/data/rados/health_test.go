@@ -5,20 +5,53 @@ import (
 	"testing"
 )
 
-// TestBuildPendingPoolStatusesTwoClusters asserts that DataHealth's
-// cluster-grouping helper emits at least two distinct Cluster values
-// when the classes map spans two clusters. Guards US-001 (placement-ui)
-// — the UI splits the Pools table per cluster, so a regression that
-// drops the Cluster field at the per-row level would crash the new
-// surface.
+// TestBuildPendingPoolStatusesCrossProduct asserts that the helper emits
+// one row per (cluster, distinct-pool) cell across the cross-product —
+// the Pools table reflects actual per-cluster distribution, not just
+// the class env routing config. Lab shape: 2 clusters × 3 distinct
+// pools → 6 rows. Guards US-001 of drain-lifecycle.
+func TestBuildPendingPoolStatusesCrossProduct(t *testing.T) {
+	classes := map[string]ClassSpec{
+		"STANDARD": {Cluster: "default", Pool: "hot"},
+		"IA":       {Cluster: "default", Pool: "warm"},
+		"GLACIER":  {Cluster: "default", Pool: "cold"},
+	}
+	clusters := map[string]ClusterSpec{
+		"default": {ID: "default"},
+		"cephb":   {ID: "cephb"},
+	}
+	got := buildPendingPoolStatuses(classes, clusters)
+	if len(got) != 6 {
+		t.Fatalf("want 6 rows (2 clusters × 3 pools), got %d (%+v)", len(got), got)
+	}
+	byCluster := map[string]int{}
+	for _, p := range got {
+		byCluster[p.status.Cluster]++
+		if p.status.Cluster == "" {
+			t.Errorf("row %s has empty Cluster", p.status.Name)
+		}
+	}
+	if byCluster["default"] != 3 || byCluster["cephb"] != 3 {
+		t.Errorf("per-cluster count mismatch: %v want default=3 cephb=3", byCluster)
+	}
+}
+
+// TestBuildPendingPoolStatusesTwoClusters keeps the older two-cluster-
+// shape guard from placement-ui US-001: distinct clusters surface
+// distinct Cluster values on the rows.
 func TestBuildPendingPoolStatusesTwoClusters(t *testing.T) {
 	classes := map[string]ClassSpec{
-		"STANDARD": {Cluster: "eu", Pool: "hot.eu", Namespace: ""},
-		"COLD":     {Cluster: "us", Pool: "cold.us", Namespace: ""},
+		"STANDARD": {Cluster: "eu", Pool: "hot.eu"},
+		"COLD":     {Cluster: "us", Pool: "cold.us"},
 	}
-	got := buildPendingPoolStatuses(classes)
-	if len(got) != 2 {
-		t.Fatalf("want 2 pool rows, got %d (%+v)", len(got), got)
+	clusters := map[string]ClusterSpec{
+		"eu": {ID: "eu"},
+		"us": {ID: "us"},
+	}
+	got := buildPendingPoolStatuses(classes, clusters)
+	// 2 clusters × 2 distinct pools = 4 rows.
+	if len(got) != 4 {
+		t.Fatalf("want 4 rows, got %d (%+v)", len(got), got)
 	}
 	seen := map[string]struct{}{}
 	for _, p := range got {
@@ -33,14 +66,17 @@ func TestBuildPendingPoolStatusesTwoClusters(t *testing.T) {
 }
 
 // TestBuildPendingPoolStatusesEmptyClusterFallsBackToDefault pins the
-// substitution from "" to DefaultCluster — config that leaves Cluster
-// blank must still produce a populated Cluster field so the UI never
-// renders "no cluster" for a RADOS pool.
+// substitution from "" to DefaultCluster when the clusters map carries
+// an "" id — config without an explicit cluster still produces a
+// populated Cluster field so the UI never renders "no cluster".
 func TestBuildPendingPoolStatusesEmptyClusterFallsBackToDefault(t *testing.T) {
 	classes := map[string]ClassSpec{
 		"STANDARD": {Cluster: "", Pool: "hot.pool"},
 	}
-	got := buildPendingPoolStatuses(classes)
+	clusters := map[string]ClusterSpec{
+		"": {},
+	}
+	got := buildPendingPoolStatuses(classes, clusters)
 	if len(got) != 1 {
 		t.Fatalf("want 1 row, got %d", len(got))
 	}
@@ -50,39 +86,54 @@ func TestBuildPendingPoolStatusesEmptyClusterFallsBackToDefault(t *testing.T) {
 }
 
 // TestBuildPendingPoolStatusesGroupsByPool asserts that two classes
-// pointing at the same (cluster, pool, ns) collapse into one row whose
-// Class field is the sorted-comma-joined list of classes.
+// pointing at the same (pool, ns) collapse the Class field on every
+// (cluster, pool) row into the sorted-comma-joined list of classes —
+// regardless of how many clusters share the matrix.
 func TestBuildPendingPoolStatusesGroupsByPool(t *testing.T) {
 	classes := map[string]ClassSpec{
 		"STANDARD":    {Cluster: "default", Pool: "hot.pool"},
 		"STANDARD_IA": {Cluster: "default", Pool: "hot.pool"},
 	}
-	got := buildPendingPoolStatuses(classes)
-	if len(got) != 1 {
-		t.Fatalf("want 1 row, got %d (%+v)", len(got), got)
+	clusters := map[string]ClusterSpec{
+		"default": {ID: "default"},
+		"cephb":   {ID: "cephb"},
 	}
-	classesStr := got[0].status.Class
-	if classesStr != "STANDARD,STANDARD_IA" {
-		t.Errorf("Class=%q want STANDARD,STANDARD_IA", classesStr)
+	got := buildPendingPoolStatuses(classes, clusters)
+	// 2 clusters × 1 distinct pool = 2 rows, both labelled with the
+	// joined class list.
+	if len(got) != 2 {
+		t.Fatalf("want 2 rows, got %d (%+v)", len(got), got)
+	}
+	for _, p := range got {
+		if p.status.Class != "STANDARD,STANDARD_IA" {
+			t.Errorf("cluster=%s Class=%q want STANDARD,STANDARD_IA", p.status.Cluster, p.status.Class)
+		}
 	}
 }
 
-// TestBuildPendingPoolStatusesSortOrder pins (cluster, pool, ns)
-// ascending sort so the wire output is deterministic across renders.
+// TestBuildPendingPoolStatusesSortOrder pins (Cluster, Name) ascending
+// sort so the wire output is deterministic across renders.
 func TestBuildPendingPoolStatusesSortOrder(t *testing.T) {
 	classes := map[string]ClassSpec{
-		"A": {Cluster: "us", Pool: "z"},
-		"B": {Cluster: "eu", Pool: "b"},
-		"C": {Cluster: "eu", Pool: "a"},
+		"A": {Cluster: "default", Pool: "z"},
+		"B": {Cluster: "default", Pool: "b"},
+		"C": {Cluster: "default", Pool: "a"},
 	}
-	got := buildPendingPoolStatuses(classes)
+	clusters := map[string]ClusterSpec{
+		"us": {ID: "us"},
+		"eu": {ID: "eu"},
+	}
+	got := buildPendingPoolStatuses(classes, clusters)
 	pairs := make([]string, 0, len(got))
 	for _, p := range got {
 		pairs = append(pairs, p.status.Cluster+"/"+p.status.Name)
 	}
-	want := []string{"eu/a", "eu/b", "us/z"}
+	want := []string{
+		"eu/a", "eu/b", "eu/z",
+		"us/a", "us/b", "us/z",
+	}
 	if !sort.StringsAreSorted(pairs) || len(pairs) != len(want) {
-		t.Fatalf("not sorted: %v", pairs)
+		t.Fatalf("not sorted or wrong length: %v", pairs)
 	}
 	for i := range want {
 		if pairs[i] != want[i] {
