@@ -174,6 +174,10 @@ Phase 3 layers debug tooling on top without removing Phase 2 surface.
 | ReplicationLag | — | — | ✓ |
 | StorageStatus | — | — | ✓ |
 | MultiReplicaCluster | — | — | ✓ |
+| ClustersSubsection (Storage page) | — | — | ✓ |
+| PlacementTab (BucketDetail) | — | — | ✓ |
+| DrainBanner (AppShell) | — | — | ✓ |
+| RebalanceProgressChip (cluster card) | — | — | ✓ |
 
 ## Operational notes
 
@@ -221,6 +225,20 @@ Three Playwright specs run in CI under the `e2e-ui` job:
   above shell, dismiss button hides it for the rest of the context).
   Operator guide for the underlying endpoints + warning meanings is at
   [Storage status]({{< ref "/architecture/storage" >}}).
+- `web/e2e/placement.spec.ts` — Placement + cluster surfacing cycle
+  (US-006 placement-ui): login → /storage → cluster cards rendered →
+  create bucket → Placement tab → drag slider for `cephb` to 100 →
+  Save → assert toast → re-navigate to /storage → Drain primary
+  cluster via typed-confirmation modal (mistyped id keeps the Drain
+  button disabled) → assert state=draining + AppShell banner →
+  Undrain → banner gone after refetch → Reset to default on the
+  Placement tab → confirmation dialog → DELETE → sliders zeroed.
+  `/admin/v1/clusters`, `.../drain|undrain`, `.../rebalance-progress`,
+  `/admin/v1/buckets/{name}/placement`, and `/admin/v1/storage/data`
+  are spoofed via `page.route()` so the spec runs against the same
+  memory-mode gateway as the other e2e jobs. Operator runbook for
+  the underlying endpoints is at
+  [Placement + rebalance]({{< ref "/best-practices/placement-rebalance" >}}).
 
 Run locally with:
 
