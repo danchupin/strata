@@ -37,6 +37,23 @@ export {
 } from './storage';
 
 export {
+  fetchClusters,
+  drainCluster,
+  undrainCluster,
+  fetchClusterRebalanceProgress,
+  type ClusterStateEntry,
+  type ClustersListResponse,
+  type ClusterRebalanceProgress,
+} from './clusters';
+
+export {
+  fetchBucketPlacement,
+  setBucketPlacement,
+  deleteBucketPlacement,
+  type BucketPlacementJSON,
+} from './placement';
+
+export {
   login,
   logout,
   whoami,

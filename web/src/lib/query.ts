@@ -88,6 +88,7 @@ export const queryKeys = {
     replicationLag: (name: string, range: string) =>
       ['buckets', 'replication-lag', name, range] as const,
     quota: (name: string) => ['buckets', 'quota', name] as const,
+    placement: (name: string) => ['buckets', 'placement', name] as const,
     usage: (name: string, start: string, end: string) =>
       ['buckets', 'usage', name, { start, end }] as const,
   },
@@ -166,4 +167,6 @@ export const queryKeys = {
     classes: ['storage', 'classes'] as const,
     health: ['storage', 'health'] as const,
   },
+  clusters: ['clusters'] as const,
+  clusterRebalance: (id: string) => ['clusters', 'rebalance', id] as const,
 };

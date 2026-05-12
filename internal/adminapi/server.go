@@ -331,6 +331,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/v1/clusters", s.handleClustersList)
 	mux.HandleFunc("POST /admin/v1/clusters/{id}/drain", s.handleClusterDrain)
 	mux.HandleFunc("POST /admin/v1/clusters/{id}/undrain", s.handleClusterUndrain)
+	mux.HandleFunc("GET /admin/v1/clusters/{id}/rebalance-progress", s.handleClusterRebalanceProgress)
 	mux.HandleFunc("GET /admin/v1/buckets", s.handleBucketsList)
 	mux.HandleFunc("POST /admin/v1/buckets", s.handleBucketCreate)
 	mux.HandleFunc("DELETE /admin/v1/buckets/{bucket}", s.handleBucketDelete)

@@ -285,6 +285,29 @@ list) on the replica you expect to lead.
   need a per-cluster pool override, register a second class on the
   target cluster (same pattern as the S3 backend's `bucketOnCluster`).
 
+## Web UI
+
+The operator console ships UI surfaces for every endpoint described above
+so day-to-day placement / drain operations no longer need `curl`. All
+four surfaces share the `clusters` TanStack Query key (10 s poll from
+`<ClustersSubsection>`, 15 s from `<PlacementDrainBanner>`) so the
+gateway is hit once per cache window regardless of how many components
+read the topology.
+
+| Surface | Where | What it does |
+| ------- | ----- | ------------ |
+| Clusters subsection | `/storage` → Data tab | One `<Card>` per registered cluster — id, state badge (live/draining), backend chip (rados/s3), aggregated used bytes (RADOS only). Per-card `Drain` opens a typed-confirmation modal (mistype keeps submit disabled); `Undrain` is one-click. Skipped when `backend=memory`. |
+| Placement tab | `/buckets/<name>` → Placement | One row per registered cluster — `<input type="range">` 0–100 paired with a numeric `<Input>` two-way bound to the same row state. Save calls `PUT /admin/v1/buckets/<name>/placement`; Reset to default opens a confirmation Dialog and calls `DELETE …`. Draining clusters carry a `(draining)` chip but remain editable. |
+| Drain banner | AppShell (every authed page) | Orange palette mirroring `<StorageDegradedBanner>`. Renders only when ≥1 cluster sits in `state=draining`. Dismiss writes `drain_banner_dismissed=<JSON.stringify(sortedDrainingIds)>` to `localStorage`; the banner returns when the draining set changes (new cluster entering draining → stamp differs). |
+| Rebalance progress chip | Inside each cluster card | "`<N>` chunks moved · `<M>` refused" plus an inline 1h/1m sparkline of `rate(strata_rebalance_chunks_moved_total{to="<id>"}[5m])`. Served by `GET /admin/v1/clusters/<id>/rebalance-progress`, which `fmt.Sprintf`s the per-cluster PromQL and degrades to `metrics_available=false` when `STRATA_PROMETHEUS_URL` is unset or Prom is unreachable — the chip renders `(metrics unavailable)` instead of erroring. Skipped when `backend=memory`. |
+
+Bundle delta of the four surfaces combined: ≤ ~10 KiB gzipped on the
+Storage / BucketDetail chunks. No new chart libraries — the sparkline
+reuses the same Recharts wrapper as the Metrics page + Cluster Overview.
+
+E2E coverage lives in `web/e2e/placement.spec.ts`; see
+[Web UI — End-to-end tests]({{< ref "/best-practices/web-ui#end-to-end-tests" >}}).
+
 ## See also
 
 - [S3 multi-cluster routing]({{< ref "/best-practices/s3-multi-cluster" >}}) —

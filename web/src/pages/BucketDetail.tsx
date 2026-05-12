@@ -69,6 +69,7 @@ const BucketUsageTab = lazy(() =>
 import { BucketInventoryTab } from '@/components/BucketInventoryTab';
 import { BucketLifecycleTab } from '@/components/BucketLifecycleTab';
 import { BucketOverviewTab } from '@/components/BucketOverviewTab';
+import { BucketPlacementTab } from '@/components/BucketPlacementTab';
 import { BucketPolicyTab } from '@/components/BucketPolicyTab';
 import { DeleteBucketDialog } from '@/components/DeleteBucketDialog';
 import { ObjectDetailSheet } from '@/components/ObjectDetailSheet';
@@ -301,6 +302,9 @@ export function BucketDetailPage() {
           <TabsTrigger value="access-log" disabled={!detail}>
             Access Log
           </TabsTrigger>
+          <TabsTrigger value="placement" disabled={!detail}>
+            Placement
+          </TabsTrigger>
           <TabsTrigger value="hot-shards" disabled={!detail}>
             Hot Shards
           </TabsTrigger>
@@ -336,6 +340,9 @@ export function BucketDetailPage() {
         </TabsContent>
         <TabsContent value="access-log" className="space-y-4">
           {detail && <BucketAccessLogTab bucket={detail} />}
+        </TabsContent>
+        <TabsContent value="placement" className="space-y-4">
+          {detail && <BucketPlacementTab bucket={detail} />}
         </TabsContent>
         <TabsContent value="hot-shards" className="space-y-4">
           {detail && <BucketHotShardsTab bucket={detail} />}

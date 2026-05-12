@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/danchupin/strata/internal/data"
 )
@@ -33,42 +32,14 @@ func (b *Backend) DataHealth(ctx context.Context) (*data.DataHealthReport, error
 		return nil, errors.New("rados backend closed")
 	}
 
-	type poolKey struct{ cluster, pool, ns string }
-	classByPool := make(map[poolKey][]string)
-	for class, spec := range b.classes {
-		cluster := spec.Cluster
-		if cluster == "" {
-			cluster = DefaultCluster
-		}
-		k := poolKey{cluster: cluster, pool: spec.Pool, ns: spec.Namespace}
-		classByPool[k] = append(classByPool[k], class)
-	}
-
-	pools := make([]data.PoolStatus, 0, len(classByPool))
-	keys := make([]poolKey, 0, len(classByPool))
-	for k := range classByPool {
-		keys = append(keys, k)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].cluster != keys[j].cluster {
-			return keys[i].cluster < keys[j].cluster
-		}
-		if keys[i].pool != keys[j].pool {
-			return keys[i].pool < keys[j].pool
-		}
-		return keys[i].ns < keys[j].ns
-	})
-
+	pending := buildPendingPoolStatuses(b.classes)
+	pools := make([]data.PoolStatus, 0, len(pending))
 	var warnings []string
 	clusters := make(map[string]struct{})
-	for _, k := range keys {
+	for _, p := range pending {
+		k := p.group
+		ps := p.status
 		clusters[k.cluster] = struct{}{}
-		classes := append([]string(nil), classByPool[k]...)
-		sort.Strings(classes)
-		ps := data.PoolStatus{
-			Name:  k.pool,
-			Class: strings.Join(classes, ","),
-		}
 		ioctx, err := b.ioctx(ctx, k.cluster, k.pool, k.ns)
 		if err != nil {
 			ps.State = "error"

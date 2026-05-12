@@ -22,6 +22,7 @@ export interface MetaHealthReport {
 export interface PoolStatus {
   name: string;
   class: string;
+  cluster?: string;
   bytes_used: number;
   object_count: number;
   num_replicas: number;

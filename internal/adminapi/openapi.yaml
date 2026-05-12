@@ -301,6 +301,82 @@ components:
           type: array
           items: { $ref: '#/components/schemas/ClusterStateEntry' }
 
+    ClusterRebalanceProgress:
+      type: object
+      required: [metrics_available, moved_total, refused_total, series]
+      description: |
+        Per-cluster rebalance counters + 1h / 1m-step sparkline returned by
+        GET /clusters/{id}/rebalance-progress (US-005 placement-ui). When
+        `metrics_available=false` the totals are zero and `series` is
+        empty — the UI chip renders "(metrics unavailable)" instead of
+        zeros so the cluster card surface still mounts.
+      properties:
+        metrics_available: { type: boolean }
+        moved_total:
+          type: number
+          description: |
+            sum(strata_rebalance_chunks_moved_total{to="<id>"}) at sample
+            time.
+        refused_total:
+          type: number
+          description: |
+            sum(strata_rebalance_refused_total{target="<id>"}) at sample
+            time.
+        series:
+          type: array
+          description: |
+            One-hour rate sparkline at 1m resolution. Each tuple is
+            [epoch_ms, rate].
+          items:
+            type: array
+            minItems: 2
+            maxItems: 2
+            items: { type: number }
+
+    PoolStatus:
+      type: object
+      required: [name, class, bytes_used, object_count, num_replicas, state]
+      description: |
+        One backing pool / bucket row in DataHealthReport (GET /storage/data).
+        `cluster` carries the cluster id the pool/bucket lives on so the UI
+        can split rows per cluster (US-001 placement-ui); rendered empty
+        ("") for the in-memory backend, which models a single virtual
+        cluster.
+      properties:
+        name: { type: string }
+        class:
+          type: string
+          description: |
+            Storage-class label. For backends that map every class to one
+            pool/bucket (s3, memory) this is the comma-joined sorted list
+            of classes pointing at the row.
+        cluster:
+          type: string
+          description: |
+            Cluster id the pool/bucket lives on. Empty for backends that do
+            not model multi-cluster topology (memory).
+        bytes_used: { type: integer, format: int64 }
+        object_count: { type: integer, format: int64 }
+        num_replicas: { type: integer }
+        state: { type: string, description: "Backend-specific liveness label (ok, reachable, error, …)." }
+
+    DataHealthReport:
+      type: object
+      required: [backend, pools]
+      description: |
+        Response body of GET /storage/data — one row per backing pool /
+        backend-bucket plus cluster-wide warnings that don't fit on a
+        per-pool row (RADOS HEALTH_WARN check summaries, S3 reachability
+        errors).
+      properties:
+        backend: { type: string }
+        pools:
+          type: array
+          items: { $ref: '#/components/schemas/PoolStatus' }
+        warnings:
+          type: array
+          items: { type: string }
+
     BucketPlacement:
       type: object
       required: [placement]
@@ -536,6 +612,31 @@ paths:
       responses:
         '204':
           description: Undrain flipped.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /clusters/{id}/rebalance-progress:
+    get:
+      summary: Per-cluster rebalance counters + sparkline (US-005 placement-ui)
+      operationId: getClusterRebalanceProgress
+      description: |
+        Returns the cumulative chunks-moved + chunks-refused counters
+        scoped to the destination cluster, plus a 1h / 1m-step
+        sparkline of `rate(strata_rebalance_chunks_moved_total{to="<id>"}[5m])`.
+        Degrades to `metrics_available=false` with an empty series when
+        STRATA_PROMETHEUS_URL is unset or the upstream returns an
+        error — the UI chip renders "(metrics unavailable)" so the
+        cluster card stays mounted.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Rebalance progress.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClusterRebalanceProgress' }
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
