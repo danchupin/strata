@@ -225,6 +225,14 @@ var (
 		},
 		[]string{"bucket"},
 	)
+
+	RebalancePlannedMovesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_rebalance_planned_moves_total",
+			Help: "Chunk moves planned by the rebalance worker per bucket (US-003). One increment per chunk whose current cluster does not match placement.PickCluster's verdict at scan time. Mover side counters land in US-004/US-005.",
+		},
+		[]string{"bucket"},
+	)
 )
 
 func Register() {
@@ -252,6 +260,7 @@ func Register() {
 		OTelRingbufEvicted,
 		CassandraLWTConflictsTotal,
 		QuotaReconcileDriftBytes,
+		RebalancePlannedMovesTotal,
 	)
 }
 
@@ -495,6 +504,19 @@ func (BucketStatsObserver) ResetBucketClass(bucket string) {
 	}
 	StorageClassBytes.DeletePartialMatch(prometheus.Labels{"bucket": bucket})
 	StorageClassObjects.DeletePartialMatch(prometheus.Labels{"bucket": bucket})
+}
+
+// RebalanceObserver implements the rebalance.Metrics interface. The
+// rebalance worker bumps the planned_moves_total counter per chunk-
+// move emitted by the plan-scan loop (US-003); mover side counters
+// land in US-004/US-005.
+type RebalanceObserver struct{}
+
+func (RebalanceObserver) IncPlannedMove(bucket string) {
+	if bucket == "" {
+		bucket = "unknown"
+	}
+	RebalancePlannedMovesTotal.WithLabelValues(bucket).Inc()
 }
 
 // AuditStreamObserver implements the auditstream.MetricsSink interface. The
