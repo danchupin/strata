@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +40,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/danchupin/strata/internal/data"
+	"github.com/danchupin/strata/internal/data/placement"
 )
 
 // BackendName is the canonical Manifest.BackendRef.Backend value emitted by
@@ -416,6 +418,61 @@ func (b *Backend) clusterForClass(ctx context.Context, class string) (*s3Cluster
 		return nil, "", err
 	}
 	return c, bucket, nil
+}
+
+// clusterForPlacement is the placement-aware variant of clusterForClass
+// (US-002 placement-rebalance). When ctx carries a non-empty placement
+// policy, it picks a target cluster via stable hash-mod over
+// (bucketID, objectKey, chunkIdx=0) and resolves the bucket on that
+// cluster — first the requested class if its Cluster matches the
+// picked id, otherwise the lex-first ClassSpec routed to the picked
+// cluster. Falls back to clusterForClass when no policy is set, the
+// picker returns "" (all-zero policy), the picked cluster is not in
+// b.clusters, or no class registers a bucket on the picked cluster.
+func (b *Backend) clusterForPlacement(ctx context.Context, class string) (*s3Cluster, string, error) {
+	policy, ok := data.PlacementFromContext(ctx)
+	if !ok {
+		return b.clusterForClass(ctx, class)
+	}
+	bucketID, _ := data.BucketIDFromContext(ctx)
+	objKey, _ := data.ObjectKeyFromContext(ctx)
+	picked := placement.PickCluster(bucketID, objKey, 0, policy)
+	if picked == "" {
+		return b.clusterForClass(ctx, class)
+	}
+	if _, ok := b.clusters[picked]; !ok {
+		return b.clusterForClass(ctx, class)
+	}
+	bucket := b.bucketOnCluster(class, picked)
+	if bucket == "" {
+		return b.clusterForClass(ctx, class)
+	}
+	c, err := b.connFor(ctx, picked)
+	if err != nil {
+		return nil, "", err
+	}
+	return c, bucket, nil
+}
+
+// bucketOnCluster returns the bucket name routed to clusterID — first
+// preference is the requested class's bucket if its Cluster matches,
+// otherwise the lex-first class whose Cluster matches. Empty string
+// means no class is registered on this cluster.
+func (b *Backend) bucketOnCluster(requestedClass, clusterID string) string {
+	if cs, ok := b.classes[requestedClass]; ok && cs.Cluster == clusterID {
+		return cs.Bucket
+	}
+	names := make([]string, 0, len(b.classes))
+	for n := range b.classes {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		if cs := b.classes[n]; cs.Cluster == clusterID {
+			return cs.Bucket
+		}
+	}
+	return ""
 }
 
 // singleCluster picks one cluster registered on this Backend. Used by
@@ -910,11 +967,17 @@ func (b *Backend) DeleteBatch(ctx context.Context, refs []ObjectRef) ([]DeleteFa
 // each class maps to a (cluster, bucket) pair in the multi-cluster
 // config, so two classes can share a cluster but live in different
 // buckets.
+//
+// US-002 placement-rebalance: when ctx carries a non-empty placement
+// policy (data.WithPlacement), the picker selects the target cluster
+// via stable hash-mod over (bucketID, objectKey, chunkIdx=0); bucket
+// is resolved via clusterForPlacement on the picked cluster. Empty /
+// nil policy retains the per-class default routing.
 func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*data.Manifest, error) {
 	if class == "" {
 		class = "STANDARD"
 	}
-	c, bucket, err := b.clusterForClass(ctx, class)
+	c, bucket, err := b.clusterForPlacement(ctx, class)
 	if err != nil {
 		return nil, err
 	}

@@ -1024,7 +1024,7 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		encReader = newSSEEncryptingReader(body, dek, key)
 		body = encReader
 	}
-	m, err := s.Data.PutChunks(ctx, body, class)
+	m, err := s.Data.PutChunks(dataCtxForPut(ctx, s.Meta, b, key), body, class)
 	if err != nil {
 		if errors.Is(err, auth.ErrSignatureInvalid) {
 			writeError(w, r, ErrSignatureDoesNotMatch)

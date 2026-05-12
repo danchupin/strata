@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/danchupin/strata/internal/data"
+	"github.com/danchupin/strata/internal/data/placement"
 )
 
 type Backend struct {
@@ -176,12 +177,34 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 	if err != nil {
 		return nil, err
 	}
-	ioctx, err := b.ioctx(ctx, spec.Cluster, spec.Pool, spec.Namespace)
-	if err != nil {
-		return nil, err
+	// Placement routing (US-002): per-chunk hash-mod stable picker over
+	// data.WithPlacement(ctx). Empty/nil policy falls back to spec.Cluster.
+	// Pool + namespace inherit from the class spec — operators are expected
+	// to use the same pool layout across clusters within one class.
+	policy, _ := data.PlacementFromContext(ctx)
+	bucketID, _ := data.BucketIDFromContext(ctx)
+	objKey, _ := data.ObjectKeyFromContext(ctx)
+	pickCluster := func(idx int) string {
+		picked := placement.PickCluster(bucketID, objKey, idx, policy)
+		if picked == "" {
+			return spec.Cluster
+		}
+		if _, ok := b.clusters[picked]; !ok {
+			if b.logger != nil {
+				b.logger.WarnContext(ctx, "rados placement: picked cluster not configured; falling back",
+					"picked", picked, "fallback", spec.Cluster)
+			}
+			return spec.Cluster
+		}
+		return picked
 	}
 	objID := uuid.NewString()
 	putOne := func(opCtx context.Context, idx int, body []byte) (data.ChunkRef, error) {
+		cluster := pickCluster(idx)
+		ioctx, err := b.ioctx(opCtx, cluster, spec.Pool, spec.Namespace)
+		if err != nil {
+			return data.ChunkRef{}, err
+		}
 		oid := fmt.Sprintf("%s.%05d", objID, idx)
 		start := time.Now()
 		werr := writeChunk(ioctx, oid, body)
@@ -190,7 +213,7 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 			return data.ChunkRef{}, werr
 		}
 		return data.ChunkRef{
-			Cluster:   spec.Cluster,
+			Cluster:   cluster,
 			Pool:      spec.Pool,
 			Namespace: spec.Namespace,
 			OID:       oid,
