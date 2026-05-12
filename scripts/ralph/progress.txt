@@ -1,139 +1,21 @@
 # Ralph Progress Log
-Started: Tue May 12 11:00:00 MSK 2026
-Cycle: ralph/placement-ui
+Started: Tue May 12 19:00:00 MSK 2026
+Cycle: ralph/drain-lifecycle
 
 ## Codebase Patterns
-- Server-side primitives already shipped via `ralph/placement-rebalance` cycle (merged at 972194f): `GET /admin/v1/clusters` returns `{clusters: [{id, state, backend}]}` (handler in `internal/adminapi/clusters.go`), `POST /admin/v1/clusters/{id}/drain|undrain` flip the `cluster_state` meta row, `PUT/GET/DELETE /admin/v1/buckets/{name}/placement` round-trip `BucketPlacementJSON{Placement: map[string]int}` (handler `internal/adminapi/buckets_placement.go`). DO NOT add new admin endpoints in this cycle — consume what is already there.
-- Existing Web UI conventions: `web/src/components/ui/` ships shared `<Card>`, `<Badge>`, `<Modal>`, `<Button>`, `<Slider>`, `<Input>`, `<Tooltip>`, `<Toast>`. Reuse — do NOT introduce Material-UI / Chakra / Radix new deps. Bundle budget per US-002/US-003/US-004/US-005 caps documented in acceptance criteria.
-- TanStack Query v5: shared query keys dedup polling. `clusters` key consumed by both `<ClustersSubsection>` (10s) and `<PlacementDrainBanner>` (15s) → only one fetch per cache window. Don't define two separate queries.
-- Pools table sort convention: existing Storage page sorts ascending on the active column with empty/null sorting last. Mirror this for the new Cluster column.
-- Typed-confirmation modal precedent: `<ConfirmDeleteBucket>` already uses the type-the-name pattern for irreversible bucket destroys. Mirror its shape — large warning copy, text input field, Submit button disabled until typed value === expected, case-sensitive match.
-- Drain banner palette: mirror existing `<StorageDegradedBanner>` from the storage-status cycle (orange/yellow, exclamation icon). Don't invent new colors.
-- BucketDetail tab order: Overview → Objects → Versioning → Lifecycle → CORS → Policy → ACL → Inventory → Access Log → **Placement (new)** → Quota → Replication → Multipart. Place the new tab between Access Log and Quota.
-- Per-session dismissal stamp: key on the SET of draining ids (sorted, JSON.stringify'd), not just count. Operator drains c1 → dismisses → drains c2 later → banner reappears because stamp changed.
-- Prometheus query convention: existing Metrics page uses `STRATA_PROMETHEUS_URL`-backed admin endpoint (check `web/src/pages/Metrics.tsx` for the exact hook name) — reuse, don't invent new HTTP client.
-- Sparkline component: existing Recharts wrapper used by Metrics + Cluster Overview. No @nivo / Chart.js — use the existing wrapper.
-- Playwright in-memory rig: existing specs (`web/e2e/storage.spec.ts`, `web/e2e/admin.spec.ts`, etc.) spin up the gateway on `:9000` with `STRATA_META_BACKEND=memory`. For two-cluster fixture, follow the precedent of how other multi-cluster-aware specs configure env (check `web/e2e/multi-replica.spec.ts` for shape hints).
-- ROADMAP close-flip rule (US-006): the new P3 entry was added under `## Web UI` section in the prep commit (text `**P3 — Web UI — Placement + cluster surfacing.**`). Flip to `~~**P3 — Web UI — Placement + cluster surfacing.**~~ — **Done.** <summary>. (commit \`<pending>\`)`. SHA backfilled in a follow-up commit on main.
-- `tasks/prd-placement-ui.md` REMOVED in the same commit as US-006 per CLAUDE.md PRD lifecycle rule (Ralph snapshot is canonical).
-- Verification per UI story: `pnpm run typecheck` + `pnpm run build`; verify in browser via dev-browser skill (Playwright runs in CI but local visual check should happen per-story before commit).
-- Build-tag refactor for ceph-only code: when a `//go:build ceph` file needs a piece of logic unit-tested without librados, extract that piece into a sibling file with no build tag (e.g. `health_helper.go` next to ceph-tagged `health.go`). The helper compiles + tests fine in regular `go test ./...`; the ceph-tagged file consumes it.
-- `internal/racetest/TestRunCleanRunNoInconsistencies` is a pre-existing flake — produces sporadic `read_after_write` GET/ETag-pair mismatches that have nothing to do with code under test. Re-run before assuming a real regression.
-- `internal/lifecycle/TestThreeReplicaDistribution` is ALSO a pre-existing flake — seeded bucket UUIDs are random, the hash distribution across 3 replicas exceeds the [1, 5] guard in 2-3 of 10 runs on the unmodified parent commit. Re-run before assuming a real regression.
-- **Per-cluster Prometheus chip pattern**: when a UI chip needs a Prom value parameterised by an admin-routed id (cluster id, bucket name), do NOT extend the named-metric registry in `internal/adminapi/metrics.go::metricSpecs` (that map's expr is fixed at registration time). Add a dedicated handler (e.g. `clusters_rebalance.go::handleClusterRebalanceProgress`) that `fmt.Sprintf`s the PromQL with the path-route id, mirrors the `s.Prom.Available() == false → 200 with metrics_available=false` graceful-degrade shape, and stamps an `admin:Get<...>` audit override. UI side: `silent: true` on the TanStack useQuery so a transient Prom blip doesn't toast across the polling cadence.
-
-## 2026-05-12 - US-001
-- Implemented: PoolStatus carries cluster id end-to-end (RADOS, S3, memory backends). OpenAPI documents PoolStatus + DataHealthReport. Unit tests pin per-row Cluster propagation per backend.
-- Files changed:
-  - internal/data/backend.go — added `Cluster string `json:"cluster,omitempty"`` to PoolStatus
-  - internal/data/rados/health.go — switched to buildPendingPoolStatuses helper; dropped inline poolKey/sort.Slice
-  - internal/data/rados/health_helper.go (new, no build tag) — pure-Go grouping helper buildPendingPoolStatuses(classes) returns []pendingPoolStatus sorted by (cluster, pool, ns)
-  - internal/data/rados/health_test.go (new) — two-cluster fixture, empty-cluster->DefaultCluster, class grouping, sort order
-  - internal/data/s3/health.go — populated Cluster on both error and reachable rows from class.Cluster
-  - internal/data/s3/health_test.go (new) — two-cluster capturingS3Server fixture, asserts Cluster value per class via DataHealth
-  - internal/data/memory/backend.go — explicit `Cluster: ""` in synthetic pool row
-  - internal/data/memory/backend_test.go (new) — pins Cluster=="" regression guard
-  - internal/adminapi/openapi.yaml — added PoolStatus + DataHealthReport schemas under components/schemas (no path entry; storage/data endpoint wasn't previously documented)
-- **Learnings for future iterations:**
-  - **`omitempty` + empty-string is the right shape for "this field optional per-backend".** A Go field of type `string` with `omitempty` serialises to absent for the memory backend (Cluster="") but populated for rados/s3. UI must handle both — "absent" key and "" value should both render as "—". Don't drift to a `*string` pointer; it forces every consumer through a nil check for no gain.
-  - **OpenAPI updates do NOT need a path entry.** When the storage/data path predates the schema-driven workflow, adding just the schema is correct — the AC says "schema definition", not "endpoint". Future stories that touch the storage endpoint should land the `/storage/data` path on the spec.
-  - **CI ceph build will exercise the refactored helper too.** Because `health_helper.go` has no build tag, both default and `-tags ceph` builds compile the same code; ceph tag only adds health.go on top. No risk of divergent semantics between unit-test and prod.
-  - **For US-002 next iteration**: the helper now returns sorted (cluster, pool, ns) tuples — the UI's "Cluster column on Pools table, sort ascending with empty last" can rely on that ordering. Storage page in React shouldn't re-sort the wire response.
----
-
-## 2026-05-12 - US-002
-- Implemented: Storage page Data tab now renders Clusters subsection (one Card per registered cluster) above the Pools table, plus a new Cluster column on the Pools table. Drain flow uses typed-confirmation modal; Undrain is one-click. The ClustersSubsection + ConfirmDrainModal + web/src/api/clusters.ts wrappers were already staged on the branch (untracked + working-tree mods to client.ts/query.ts); this iteration wired the consumer in Storage.tsx and added `cluster?: string` to the typed PoolStatus.
-- Files changed:
-  - web/src/api/storage.ts — added optional `cluster?: string` to PoolStatus
-  - web/src/pages/Storage.tsx — DataTab imports ClustersSubsection; renders it above Pools table for non-memory backends; pools sorted ascending by cluster with empty last (memo'd); new Cluster column rendered between Name and Class with muted "—" fallback
-  - web/src/api/client.ts (was already mod) — re-exports fetchClusters/drainCluster/undrainCluster + ClusterStateEntry/ClustersListResponse
-  - web/src/lib/query.ts (was already mod) — `queryKeys.clusters = ['clusters']` shared key
-  - web/src/api/clusters.ts (new) — typed wrappers for GET /admin/v1/clusters + POST .../{id}/drain|undrain
-  - web/src/components/storage/ClustersSubsection.tsx (new) — TanStack Query polls clusters every 10s; one Card per cluster shows id+state+backend+aggregated used bytes; Drain/Undrain buttons per state
-  - web/src/components/storage/ConfirmDrainModal.tsx (new) — typed-confirmation dialog mirrors DeleteBucketDialog pattern; case-sensitive match, disabled submit until typed === cluster.id
-- Bundle delta: Storage chunk went from ~15 kB to 18.27 kB (~5.49 kB gzipped) — within the 5 KiB-gzipped budget specified in AC.
-- **Learnings for future iterations:**
-  - **PoolStatus.cluster field flows JSON.omitempty → TS `cluster?: string`.** When the Go side uses `omitempty`, the matching TypeScript optional `?` is the right shape — not `string | null`. Memory-backend rows omit the key entirely; rados/s3 rows include it. The Storage table cell handles both via `p.cluster ? render : '—'`.
-  - **The DataTab sort contract is explicit even when the server pre-sorts.** rados/health_helper.go::buildPendingPoolStatuses already returns rows sorted by (cluster, pool, ns), but the UI re-sorts ascending with empty-last anyway. This is intentional — it makes the table's order self-evident at the call site and tolerates a future backend that doesn't pre-sort. Cost: one memoised slice() + sort() per render of a tab the operator only opens occasionally.
-  - **`ClustersSubsection` only mounts when backend !== 'memory'.** Memory backend has no registered clusters and `/admin/v1/clusters` returns `[]` — rendering the subsection would just show an empty-state. The branch hides it instead, matching the existing `MemoryExplainer` flow that already replaces the pools table for memory backends.
-  - **TanStack Query v5 `meta.label` is consumed by the global QueryCache error toast.** When adding a new useQuery, pass `meta: { label: 'short label' }` so failures show "Failed to load short label" instead of generic copy. The throttle in `web/src/lib/query.ts` dedups by query key so the toast doesn't storm during polling outages.
-  - **`queryKeys.clusters` is a bare tuple, not a function.** This is intentional — there are no query params, and a stable identity means `useQuery({ queryKey: queryKeys.clusters })` from two components (ClustersSubsection + future PlacementDrainBanner in US-004) shares one fetch per refetch window.
-  - **For US-004 next iteration**: the shared `queryKeys.clusters` key is in place; PlacementDrainBanner should reuse it with `refetchInterval: 15_000` (US-002 picked 10s, US-004 picked 15s — TanStack will use the smaller cadence when both are mounted, which is fine).
-  - **Browser verification**: no local dev-browser tool available — manual `pnpm dev` + visual check is recommended before the cycle closes; US-006 Playwright spec will exercise the full flow in CI.
----
-
-## 2026-05-12 - US-003
-- Implemented: BucketDetail Placement tab between Access Log and Hot Shards. Slider + numeric input per registered cluster; Save (PUT) and Reset to default (DELETE w/ confirmation Dialog). Reuses the shared `clusters` query key from US-002.
-- Files changed:
-  - web/src/api/placement.ts (new) — fetchBucketPlacement (returns null on 404), setBucketPlacement, deleteBucketPlacement
-  - web/src/api/client.ts — re-exports placement wrappers + BucketPlacementJSON type
-  - web/src/lib/query.ts — `queryKeys.buckets.placement(name)` added
-  - web/src/components/BucketPlacementTab.tsx (new) — slider editor, save/reset, confirmation Dialog, draining-cluster chip
-  - web/src/pages/BucketDetail.tsx — imports BucketPlacementTab; new TabsTrigger value="placement" between Access Log and Hot Shards; new TabsContent
-- **Learnings for future iterations:**
-  - **No `<Slider>` or `<Tooltip>` primitives in `web/src/components/ui/`.** PRD AC mentioned them but they don't exist. Use native `<input type="range">` with Tailwind classes (`h-2 w-full appearance-none rounded-full bg-muted accent-primary`) and the native `title` attribute for tooltip-like hints. Don't add Radix Slider / Tooltip deps just to satisfy the AC text — the slider element + accent color is sufficient and stays within the bundle budget.
-  - **No `<Popover>` primitive either.** Confirmation popovers in this codebase use the Dialog primitive (see DeleteBucketDialog, ConfirmDrainModal). Mirror that shape — small DialogContent with description + DialogFooter Cancel/Confirm buttons — instead of inventing a new popover.
-  - **404 on a single-resource admin endpoint maps to `null` at the API client boundary.** `fetchBucketPlacement` and `fetchBucketLogging` both return `Promise<T | null>` on 404 so consumers can branch on data presence with `data == null` instead of catching errors. Pair with `meta: { silent: true }` on the useQuery so the global error toast doesn't fire for "nothing configured yet" states.
-  - **`rowsToPlacement` filters out zero-weight rows before PUT.** The server's `meta.ValidatePlacement` requires every weight in [0,100] with sum > 0; sending explicit zeros is technically valid but redundant. Filter clientside so the wire shape mirrors what a curl operator would write by hand.
-  - **`queryKeys.clusters` is the shared dedup key for cluster topology.** Now consumed by ClustersSubsection (10s poll), BucketPlacementTab (one-shot fetch), and future US-004 PlacementDrainBanner (15s poll). All three reads short-circuit through the same TanStack cache entry — don't define per-component cluster query keys.
-  - **Two-way slider + number input binding is pure state.** Bind both inputs to the same `rows[id].weight` field; the slider's `onChange` updates state, the number input's `onChange` updates state, both re-render from the same source. No `useEffect` sync needed.
----
-
-## 2026-05-12 - US-004
-- Implemented: PlacementDrainBanner mounted inside AppShell above <main>. Polls shared `clusters` query key at 15s; renders only when ≥1 draining cluster; per-session dismissal stamp on localStorage key `drain_banner_dismissed`. Pure stamp helpers extracted into a sibling module so node:test can exercise the comparison logic without React.
-- Files changed:
-  - web/src/components/layout/PlacementDrainBanner.tsx (new) — banner component; useLocation guard for /login; shared queryKeys.clusters with refetchInterval 15_000 + placeholderData keepPreviousData; orange palette mirroring StorageDegradedBanner exactly; "View details →" Link to /storage#clusters
-  - web/src/components/layout/placement-drain-banner-dismissal.ts (new) — pure helpers stampForDrainingIds (dedup + sort + JSON.stringify), shouldHideBanner, readDismissedStamp, writeDismissedStamp; DISMISS_KEY = 'drain_banner_dismissed' per AC literal
-  - web/src/components/layout/__tests__/placement-drain-banner-dismissal.test.mjs (new) — 9 node:test cases pinning the set-comparison contract (same/superset/subset/disjoint/null/empty)
-  - web/src/components/layout/AppShell.tsx — imports PlacementDrainBanner, mounts it above <main> in the right column
-  - web/package.json — added `"test:unit": "node --test src/components/layout/__tests__/placement-drain-banner-dismissal.test.mjs"`
-  - web/dist/index.html — regenerated by `pnpm run build` (tracked single index.html in dist, asset chunks are gitignored and re-generated on every binary build)
-- **Learnings for future iterations:**
-  - **Repo has no jest/vitest.** Frontend has Playwright e2e only. For pure-logic unit tests, use Node's built-in `node --test` runner with `.mjs` extension so tsc's src/**/*.ts(x) glob ignores it. Engine floor is Node>=20 (per `engines.node`), node:test is available without deps. Hook it via a `test:unit` script in `web/package.json`.
-  - **AppShell never renders on /login.** RequireAuth gates every route that wraps AppShell, so any global UI mounted inside AppShell is automatically /login-free. The explicit `useLocation` /login guard in PlacementDrainBanner is belt-and-suspenders only — future routing refactors that move the banner out of AppShell would lose that route exclusion.
-  - **TanStack Query refetchInterval is per-observer, not per-key.** When two observers (ClustersSubsection 10s + PlacementDrainBanner 15s) share the same query key, both observers schedule their own polls but the cache de-dups the actual fetch by `staleTime` — net effect is closer to 10s cadence (the shorter one wins). Don't assume the 15s number from the AC means the network actually polls at 15s when the same key is mounted elsewhere with a shorter interval — operator-visible behavior is fine either way.
-  - **localStorage dismissal stamp survives across refreshes; sessionStorage would not.** AC said `localStorage` literally — the operator's dismiss persists until they (or another tab) overwrite it. The set-of-ids stamp shape means a new draining cluster always re-surfaces the banner regardless of how stale the previous dismiss is.
-  - **`dist/index.html` is the only tracked dist file.** Asset chunks (`dist/assets/*`) are gitignored and rebuilt by the consumer (go:embed in `console.go` picks them up at binary-build time). Commit only the regenerated `dist/index.html` after `pnpm run build` so the embedded SPA points at fresh asset paths.
-  - **For US-005 next iteration**: the cluster card layout in ClustersSubsection has the existing "Cluster id + state Badge / backend + used bytes / Drain button" rows. The Rebalance progress chip goes "below the size/state row inside each ClusterCard" — that means between the backend+used-bytes flex row and the isDraining warning box. ClusterCard is internal to ClustersSubsection.tsx; reach for a prop wiring rather than re-introducing a separate file.
----
-
-## 2026-05-12 - US-005
-- Implemented: per-cluster Rebalance progress chip rendered inside each ClusterCard. Backend handler `GET /admin/v1/clusters/{id}/rebalance-progress` returns `{metrics_available, moved_total, refused_total, series[]}` from three Prom queries (two instant counters + one 1h/1m rate range). Graceful 200-with-metrics_available=false on Prom unset OR upstream error — chip renders "(metrics unavailable)" instead of erroring. Chip mounted between the size/state row and the isDraining warning; skipped when backend=memory per AC.
-- Files changed:
-  - internal/adminapi/clusters_rebalance.go (new) — handler + testable `buildClusterRebalanceProgress(ctx, prom, id, now)` helper
-  - internal/adminapi/clusters_rebalance_test.go (new) — totals+series happy path, prom-unset/prom-error 200-degradation, unknown-cluster 400
-  - internal/adminapi/server.go — registered `GET /admin/v1/clusters/{id}/rebalance-progress`
-  - internal/adminapi/openapi.yaml — `/clusters/{id}/rebalance-progress` path + `ClusterRebalanceProgress` schema
-  - web/src/api/clusters.ts — `fetchClusterRebalanceProgress(id)` + `ClusterRebalanceProgress` type
-  - web/src/api/client.ts — re-exports
-  - web/src/lib/query.ts — `queryKeys.clusterRebalance(id)`
-  - web/src/components/storage/RebalanceProgressChip.tsx (new) — counters + recharts inline sparkline (h-6, no new chart libs)
-  - web/src/components/storage/ClustersSubsection.tsx — mounts chip below the size/state row inside ClusterCard, skips backend=memory
-  - web/dist/index.html — rebuilt
-- Bundle delta: Storage chunk 18.27 KiB → 19.13 KiB (gz 5.49 → 5.68 KiB, +0.19 KiB) — well within 3 KiB gz cap.
-- **Learnings for future iterations:**
-  - **Don't extend `metricSpecs` for parameterised PromQL.** `internal/adminapi/metrics.go::metricSpecs` is a fixed-expr registry — the `__WINDOW__` placeholder is fine for "rate over step" but it can't carry a per-request label value like `{to="<id>"}`. For per-cluster / per-bucket Prom values, write a dedicated handler (mirroring `buckets_replication_lag.go`) that `fmt.Sprintf`s the PromQL with the path-route id. Cleanest pattern: one handler per UI chip, graceful-degrade on `!Prom.Available()`, audit override stamped via `s3api.SetAuditOverride`.
-  - **`silent: true` on chip useQuery.** A chip that polls every 30s against a Prom that may be transiently unreachable should not toast on every blip — set `meta: { silent: true }` so the global QueryCache.onError handler skips the toast. The chip itself reads `q.data?.metrics_available` and renders the "(metrics unavailable)" inline copy.
-  - **Recharts sparkline shape**: NodeDetailDrawer's Sparkline pattern (h-6 div + ResponsiveContainer + LineChart + Line) is the canonical inline-sparkline shape. No new chart libs needed — recharts is already in the bundle (lazy-loaded chunk `generateCategoricalChart`).
-  - **`isPending && !q.data` is the right loading guard for `placeholderData: keepPreviousData`** queries — `isPending` flips back to true on every refetch with `keepPreviousData` set, but `data` is populated. Only show the "Loading…" copy on the very first fetch.
-  - **For US-006 next iteration**: the chip is consumed in `ClusterCard` inside `ClustersSubsection.tsx`. Playwright spec for US-005 can assert "chunks moved" text appears OR "(metrics unavailable)" appears — both shapes are valid depending on Prom wiring in the test rig.
----
-
-## 2026-05-12 - US-006
-- Implemented: Playwright e2e for the full placement / drain / rebalance UI flow + docs + ROADMAP close-flip + PRD markdown removal. Spec spoofs all admin endpoints via page.route() so it runs against the existing memory-mode webServer (no env / fixture changes needed). Capability matrix + operator runbook updated.
-- Files changed:
-  - web/e2e/placement.spec.ts (new) — full operator flow: cluster cards → slider save → typed-confirmation Drain → AppShell banner → Undrain → Reset to default
-  - docs/site/content/best-practices/web-ui.md — capability matrix gained four new rows (ClustersSubsection / PlacementTab / DrainBanner / RebalanceProgressChip) + E2E entry pointing at placement.spec.ts
-  - docs/site/content/best-practices/placement-rebalance.md — new "Web UI" section linking the four surfaces back to the runbook
-  - ROADMAP.md — close-flipped `**P3 — Web UI — Placement + cluster surfacing.**` to ~~**Done.**~~ with `(commit <pending>)` (SHA backfilled in follow-up commit per CLAUDE.md convention)
-  - tasks/prd-placement-ui.md (deleted) — Ralph snapshot under scripts/ralph/archive/ becomes canonical at merge
-- **Learnings for future iterations:**
-  - **Spoof per-endpoint with page.route() rather than wiring fake clusters into the gateway.** Memory backend has no registered clusters (`KnownClusters = nil` in `internal/serverapp/serverapp.go::knownDataClusters`), so `/admin/v1/clusters` returns `[]` and the gateway rejects placement writes referencing unknown ids. Bolting "two fake clusters" into memory mode would require either env-only seeding (invasive) or a test-only config knob (more invasive). Spoofing via `page.route()` keeps the gateway prod-shaped, matches the precedent in `storage.spec.ts`, and lets the spec own the cluster-state state machine (closure mutation on drain/undrain) instead of trying to drive real meta rows.
-  - **`/admin/v1/storage/data` must be spoofed to a non-memory backend or `<ClustersSubsection>` short-circuits.** `web/src/pages/Storage.tsx::DataTab` only mounts the subsection when `report?.backend !== 'memory'`. The spec spoofs the report as `backend: 'rados'` with two pools carrying the synthetic cluster ids so the cluster cards render. Without this override the subsection silently hides.
-  - **Cluster card selectors must not rely on heading semantics.** `<CardTitle>` from `web/src/components/ui/card.tsx` renders as a `<div>`, not an `<h1..6>`, so `page.getByRole('heading', ...)` won't match. Use `page.getByText('Clusters', { exact: true })` for the subsection heading and `page.locator('span[title="<id>"]')` for the per-card cluster id label (`<span title={cluster.id}>`). Same trick works for any other CardTitle-based card discovery.
-  - **`<input type="range">` accepts `.fill('100')`.** Playwright treats range inputs as fillable; the slider's `onChange` handler fires and the paired numeric `<Input>` flips to `'100'` via shared `rows[id].weight` state. No `dispatchEvent` or low-level keyboard typing needed.
-  - **`page.route()` mutation closures share state across multiple requests in one test.** The placement spec mutates `clusters[i].state = 'draining'` inside the drain route handler before fulfilling; the next refetch surfaces the new state. Same trick for the placement closure. No `await reload()` needed because TanStack invalidates the shared key on a successful mutation.
-  - **Local Playwright runs can collide with a docker-compose strata.** `playwright.config.ts` sets `reuseExistingServer: !process.env.CI`, so locally the spec reuses whatever is on :9999 — including the `docker-compose up strata` container, which has empty `STRATA_STATIC_CREDENTIALS` and rejects the `test:test` login. CI runs with `CI=true` so the webServer boots a fresh memory-mode gateway and the spec passes. Document this gotcha in progress.txt rather than chasing the local env; the CI `e2e-ui` job is the authoritative validator.
-  - **PRD markdown stays deleted after close-flip per CLAUDE.md PRD lifecycle rule.** The Ralph snapshot under `scripts/ralph/archive/<YYYY-MM-DD>-<branch>/` is canonical post-merge; copying `tasks/prd-placement-ui.md` to `tasks/archive/` would violate the rule. `tasks/archive/` is reserved for design intent without a Ralph snapshot. Same commit removes the markdown and flips the ROADMAP bullet.
----
+- Server-side drain primitives shipped by `ralph/placement-rebalance` (merged at 972194f): `cluster_state` row + `POST /admin/v1/clusters/{id}/drain|undrain` + `placement.PickClusterExcluding(policy, draining)` skips draining clusters in the weight wheel. Fail-open fallback to `spec.Cluster` (class default from STRATA_RADOS_CLASSES) is the gap closed by US-002 strict mode.
+- UI clusters surface shipped by `ralph/placement-ui` (merged at 79e2583): `<ClustersSubsection>` on Storage page + `<ConfirmDrainModal>` typed-confirmation + `<RebalanceProgressChip>` per cluster + AppShell `<PlacementDrainBanner>`. This cycle extends the cluster card with `<DrainProgressBar>` + deregister-ready chip + strict-mode chip — reuse the same `Card` / `Badge` / `Tooltip` primitives from `web/src/components/ui/`.
+- Existing rebalance worker (`internal/rebalance/Worker`) ticks every `STRATA_REBALANCE_INTERVAL`, scans every bucket with a `Placement` policy via `meta.Store.ListBuckets` → `ListObjects`, plans + executes per-chunk moves. US-003 extends the same scan loop: for every draining cluster, also count `BackendRef.Cluster == draining-id` matches; cache in `progressCache map[clusterID]ProgressSnapshot{Chunks, Bytes, LastScanAt, BaseChunksAtStart, CompletionFiredAt}`. The endpoint reads from cache — never scans synchronously.
+- `data.PoolStatus.Cluster` field (from placement-ui US-001) currently reflects class-env routing config, NOT actual byte distribution. US-001 of this cycle fixes that: DataHealth iterates `(cluster, distinct-pool)` matrix instead of `class → spec.Cluster`. After fix the Pools table shows actual per-cluster bytes; multi-cluster lab will surface 6 rows (2 clusters × 3 pools) instead of 3.
+- `data.ClusterStatsProbe` already exists (from placement-rebalance US-006) — RADOS impl runs `MonCommand({"prefix":"df"})`, S3 returns `ErrNotSupported`. US-001 extends usage: also need `GetPoolStats(pool)` per cluster — RADOS has `(*IOContext).GetPoolStats()` from the storage-status cycle, just need to call it per-cluster ioctx.
+- Class label aggregation precedent: existing memory + S3 backend convention is comma-joined sorted list when multiple classes map to one pool (`internal/data/memory/backend.go` already does this). Mirror in the new RADOS DataHealth matrix.
+- HTTP error convention: 503 with `<Code>DrainRefused</Code>` mirrors existing AWS-style error shapes in `internal/s3api/errors.go`. New sentinel `data.ErrDrainRefused` (with attached cluster ID) maps via `apiErrorFromBackendErr` (or whatever the existing converter is — check `internal/s3api/server.go`). Retry-After header is set on the response writer per S3 SDK retry convention.
+- Strict mode env: `STRATA_DRAIN_STRICT` parsed at Config boot, NOT per-request — change requires restart. Default `off` for backwards compat. Validation: `on` / `off` / `true` / `false`; unknown → fail-fast at gateway start.
+- Strict refusal ONLY on PUT chunks. Critical: do NOT touch GET / HEAD / DELETE / multipart Complete-Abort / List paths — drain semantic is stop-write, not stop-read. Existing chunks on the drained cluster must remain readable until rebalance moves them or operator deregisters.
+- Drain completion idempotency: `progressCache.CompletionFiredAt` timestamp gate. Transition `>0 → 0` fires the event ONCE; if cluster fills + drains again → new transition → fires again. Test both shapes.
+- Notify event `s3:Drain:Complete`: new event type, mirrors existing `s3:Replication:Complete` / `s3:LifecycleExpiration:Delete` patterns. Best-effort: notify worker failure must NOT block the rebalance worker (log warn, continue).
+- ROADMAP close-flip in US-006: TWO entries (Pools matrix P3 + Drain strict P3). Both flip in the same commit with `(commit \`<pending>\`)`. Closing SHA backfilled in follow-up commit on main per CLAUDE.md convention.
+- `tasks/prd-drain-lifecycle.md` REMOVED in US-006 per CLAUDE.md PRD lifecycle rule (Ralph snapshot under `scripts/ralph/archive/` is canonical).
+- Verification per story: `go vet ./...`, `go test ./... -race`, `make docs-build` (US-006 only); `pnpm run build` + dev-browser verify on US-004 (UI changes).
+- Lab stand context (uncommitted host-side, see `deploy/docker/docker-compose.yml` mods on the prep branch): two RADOS clusters `default` + `cephb` already running; pool layout identical on both. `--profile multi-cluster` brings up `strata-multi:9998` with `STRATA_RADOS_CLUSTERS=default:...,cephb:...` set. Three demo buckets exist (`demo-split` with policy `{default:1,cephb:1}`, `demo-cephb` with `{cephb:1}`, `demo-default` without policy). Integration tests in this cycle should target the same `multi-cluster` profile or simulate via the in-memory test rig.
 
