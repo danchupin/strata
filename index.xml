@@ -563,7 +563,24 @@ mapping storage class names to &lt;code&gt;{cluster, bucket}&lt;/code&gt; tuples
 a cluster requires a gateway restart; multi-replica deployments hide
 per-instance downtime via rolling restart.&lt;/p&gt;
 &lt;p&gt;This page is the operator guide. For the conceptual S3 backend overview see
-&lt;a href="https://danchupin.github.io/strata/architecture/backends/s3/"&gt;S3 data backend&lt;/a&gt;.&lt;/p&gt;</description></item><item><title/><link>https://danchupin.github.io/strata/architecture/benchmarks/data/gc-lifecycle-phase-2/README/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/benchmarks/data/gc-lifecycle-phase-2/README/</guid><description>&lt;h1 id="phase-2--gc--lifecycle-multi-leader-bench-artifacts"&gt;Phase 2 — gc + lifecycle multi-leader bench artifacts&lt;a class="anchor" href="#phase-2--gc--lifecycle-multi-leader-bench-artifacts"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;a href="https://danchupin.github.io/strata/architecture/backends/s3/"&gt;S3 data backend&lt;/a&gt;.&lt;/p&gt;</description></item><item><title>Placement + rebalance</title><link>https://danchupin.github.io/strata/best-practices/placement-rebalance/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/placement-rebalance/</guid><description>&lt;h1 id="placement--rebalance"&gt;Placement + rebalance&lt;a class="anchor" href="#placement--rebalance"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Once you run more than one RADOS / S3 cluster behind a single Strata
+deployment, you also need to control &lt;strong&gt;which&lt;/strong&gt; cluster a bucket&amp;rsquo;s chunks
+land on and how to migrate old chunks when a new cluster joins or an
+old cluster is being retired. Strata ships both pieces:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;A per-bucket &lt;strong&gt;placement policy&lt;/strong&gt; (&lt;code&gt;meta.Bucket.Placement&lt;/code&gt; — a
+&lt;code&gt;{cluster: weight}&lt;/code&gt; map) that the chunk PUT path consults via a
+stable hash-mod router.&lt;/li&gt;
+&lt;li&gt;A leader-elected &lt;strong&gt;rebalance worker&lt;/strong&gt; (&lt;code&gt;strata server --workers=rebalance&lt;/code&gt;)
+that walks every bucket with a non-nil policy, compares the actual
+per-cluster chunk distribution to the policy&amp;rsquo;s target, and copies
+chunks A → B until the two match.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;A bucket without a policy (&lt;code&gt;Placement == nil&lt;/code&gt;) behaves exactly as
+before — chunks land on the storage class&amp;rsquo;s default cluster. No
+migration, no schema bump, no behavior change. The policy + worker are
+both opt-in.&lt;/p&gt;</description></item><item><title/><link>https://danchupin.github.io/strata/architecture/benchmarks/data/gc-lifecycle-phase-2/README/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/benchmarks/data/gc-lifecycle-phase-2/README/</guid><description>&lt;h1 id="phase-2--gc--lifecycle-multi-leader-bench-artifacts"&gt;Phase 2 — gc + lifecycle multi-leader bench artifacts&lt;a class="anchor" href="#phase-2--gc--lifecycle-multi-leader-bench-artifacts"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;JSONL captured by the bench harness in &lt;strong&gt;in-process simulation mode&lt;/strong&gt;:
 both meta and data backends are pure-memory; the multi-shard / multi-
 replica race happens inside one &lt;code&gt;strata-admin&lt;/code&gt; process via the &lt;code&gt;--shards&lt;/code&gt;
