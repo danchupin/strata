@@ -1,7 +1,7 @@
 {
   "project": "Strata",
   "branchName": "ralph/drain-lifecycle",
-  "description": "Drain lifecycle UX gaps. Closes two ROADMAP P3 entries: (a) Pools table shows class routing config, not actual cluster distribution; (b) Drain strict mode for PUT routing fallback. Plus adds drain-progress admin endpoint, UI progress bar per draining cluster, completion detection (log + audit + metric + optional notify event), and an operator runbook explicitly documenting when drain is useful (multi-cluster placement deployments) vs not (single-cluster-per-class config). 6 stories: (1) PoolStatus matrix iterates (cluster, pool) pairs; (2) STRATA_DRAIN_STRICT env + PUT-only refuse + 503 DrainRefused wire; (3) GET /admin/v1/clusters/{id}/drain-progress endpoint backed by rebalance-worker scan cache; (4) UI progress bar + deregister-ready chip + strict-mode chip; (5) completion detection + log/audit/metric; (6) docs + ROADMAP close-flip + PRD removal.",
+  "description": "Drain lifecycle UX gaps. Closes two ROADMAP P3 entries: (a) Pools table shows class routing config, not actual cluster distribution; (b) Drain strict mode for PUT routing fallback. Adds drain-progress admin endpoint, UI progress bar per draining cluster, completion detection (log + audit + metric + optional notify event), pre-drain bucket impact preview, end-to-end smoke validation, and an operator runbook explicitly documenting when drain is useful (multi-cluster placement deployments) vs not (single-cluster-per-class config). Pre-cycle walkthrough exercise (per feedback_cycle_end_to_end.md): 15 operator end-to-end steps + 4 negative paths drive scope, NOT story enumeration. Each step has a concrete UI/API/log surface; gaps go in scope, not P3 follow-ups. 7 stories.",
   "userStories": [
     {
       "id": "US-001",
@@ -33,7 +33,7 @@
         "New env `STRATA_DRAIN_STRICT` parsed in `internal/data/rados/Config` (and shared helper used by S3 if applicable); default `off`; values `on` / `off` / `true` / `false` accepted; unknown → fail-fast at boot with clear error",
         "When `STRATA_DRAIN_STRICT=on`, `RADOS Backend.PutChunks` (and S3 symmetric path) consults the drain map after `placement.PickClusterExcluding` returns \"\"; if `spec.Cluster` ∈ `draining` → return new sentinel error `data.ErrDrainRefused` carrying the resolved cluster ID",
         "Strict refusal triggers ONLY on PUT chunks (writes) — `GetChunks`, `Delete`, `Head`, multipart `Complete` / `Abort`, `List` ALL continue to work against draining clusters (drain semantic is stop-write, not stop-read)",
-        "s3api handler maps `data.ErrDrainRefused` to HTTP `503 ServiceUnavailable`, response body `<Error><Code>DrainRefused</Code><Message>cluster <id> is draining and STRATA_DRAIN_STRICT=on refuses fallback</Message><Resource>/bucket/key</Resource></Error>`, response header `Retry-After: 300` (fixed at 5 minutes; env-tunable is a future P3 follow-up)",
+        "s3api handler maps `data.ErrDrainRefused` to HTTP `503 ServiceUnavailable`, response body `<Error><Code>DrainRefused</Code><Message>cluster <id> is draining and STRATA_DRAIN_STRICT=on refuses fallback</Message><Resource>/bucket/key</Resource></Error>`, response header `Retry-After: 300`",
         "Metric `strata_putchunks_refused_total{reason=\"drain_strict\",cluster}` counter increments per refusal",
         "When `STRATA_DRAIN_STRICT=off` (default), existing fail-open behavior is preserved byte-for-byte — no regression on single-cluster smoke tests",
         "Unit test: simulated `STRATA_DRAIN_STRICT=on` + drained cluster + empty policy → `Backend.PutChunks` returns `ErrDrainRefused`; same scenario with `=off` → falls back to draining cluster as today",
@@ -53,7 +53,7 @@
       "acceptanceCriteria": [
         "New admin endpoint `GET /admin/v1/clusters/{id}/drain-progress` returns JSON `{state: \"live\"|\"draining\"|\"removed\", chunks_on_cluster: int|null, bytes_on_cluster: int|null, last_scan_at: RFC3339|null, eta_seconds: int|null, deregister_ready: bool|null}`",
         "When state=live → `chunks_on_cluster=null`, `bytes_on_cluster=null`, `eta_seconds=null`, `deregister_ready=null` (only meaningful while draining)",
-        "Rebalance worker (`internal/rebalance`) extends its per-tick scan: for every draining cluster, walk all manifests via `meta.Store.ListBuckets` + `ListObjects` and count chunks where `BackendRef.Cluster == draining-id`; cache results under `progressCache map[clusterID]ProgressSnapshot{Chunks, Bytes, LastScanAt, BaseChunksAtStart}`",
+        "Rebalance worker (`internal/rebalance`) extends its per-tick scan: for every draining cluster, walk all manifests via `meta.Store.ListBuckets` + `ListObjects` and count chunks where `BackendRef.Cluster == draining-id`; cache results under `progressCache map[clusterID]ProgressSnapshot{Chunks, Bytes, LastScanAt, BaseChunksAtStart, CompletionFiredAt}`",
         "`BaseChunksAtStart` captured on the first scan after a `live → draining` transition (or directly on transition if cheap), so the UI can render percentage filled",
         "ETA computed from chunks_remaining / move_rate, where `move_rate` is derived from the existing `strata_rebalance_chunks_moved_total{from=<id>}` Prometheus counter rate over the last 5 minutes; if move_rate is 0 → ETA = null",
         "`deregister_ready = state == \"draining\" && chunks_on_cluster == 0`",
@@ -116,21 +116,54 @@
     },
     {
       "id": "US-006",
-      "title": "Docs + ROADMAP close-flip + PRD removal + operator runbook update",
-      "description": "As an operator, I need the drain workflow documented end-to-end — including when drain is NOT useful (single-cluster-per-class config) — so I know whether to even try draining a given cluster.",
+      "title": "Pre-drain bucket impact preview + policy-all-drained warning",
+      "description": "As an operator, I want to see which buckets reference a cluster in their Placement policy BEFORE I drain it so I'm not surprised when PUTs start landing on the wrong cluster or get refused.",
       "acceptanceCriteria": [
-        "`docs/site/content/best-practices/placement-rebalance.md` gains a new \"Drain lifecycle\" section covering: (a) when drain is useful (multi-cluster placement deployments with bucket Placement policies naming ≥2 clusters), (b) when drain is NOT useful (single-cluster-per-class config — chunks have nowhere to migrate; drain becomes pure stop-write), (c) pre-drain operator checklist (verify Placement policies on critical buckets, verify pool names exist on target clusters, optionally flip `STRATA_DRAIN_STRICT=on`), (d) drain procedure (POST /drain → wait for chunks_on_cluster=0 → green chip → env edit + rolling restart), (e) abort/recovery (POST /undrain at any point)",
-        "`docs/site/content/best-practices/web-ui.md` capability matrix gains rows for: Pools matrix (per-cluster × per-pool), Drain progress bar, Deregister-ready chip, Strict-mode chip",
+        "New admin endpoint `GET /admin/v1/clusters/{id}/bucket-references` returns `{buckets: [{name, weight, chunk_count, bytes_used}], total_buckets: int, next_offset: int|null}` — backed by `meta.Store.ListBuckets` filtering on `Placement[<cluster>] > 0`, chunk_count + bytes_used pulled from the existing `bucket_stats` row",
+        "Pagination via `?limit=N&offset=M` (default limit=100); response includes `next_offset` when truncated",
+        "Sort: descending by `chunk_count`, then alphabetic on `name`",
+        "Endpoint reads from meta + bucket_stats — no manifest scan (the rebalance worker progress scan covers the actual-distribution side)",
+        "OpenAPI spec updated for the new endpoint + JSON schema",
+        "Audit row via `s3api.SetAuditOverride(ctx, \"admin:GetClusterBucketReferences\", \"cluster:<id>\", ...)`",
+        "UI: new `<BucketReferencesDrawer>` component opened from a \"Show affected buckets\" link on each cluster card (visible always, not only when draining); drawer lists buckets with chunk_count column + \"View Placement\" link to BucketDetail Placement tab",
+        "UI: Bucket Placement tab gains a `<PolicyDrainWarning>` chip rendered when EVERY cluster with non-zero weight in the current policy is `state=draining` — text \"All clusters in this policy are draining. New PUTs will be refused (strict mode) or fall back to the class default (default mode). Update the policy before traffic resumes.\"",
+        "UI: `<ConfirmDrainModal>` (from placement-ui US-002) gets a new info row: \"<N> buckets reference this cluster — view list\" linking to the new drawer; clicking the link opens the drawer without closing the modal",
+        "Bundle size delta ≤ 4 KiB gzipped",
+        "Unit test for the meta filter (bucket with `Placement={c1:1,c2:1}` → matches when querying both c1 and c2; bucket without policy → matches neither)",
+        "Integration test: 3 buckets with mixed policies, query `/bucket-references` for each cluster, assert per-cluster lists match",
+        "`go vet ./...` passes",
+        "Typecheck passes",
+        "Tests pass",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "End-to-end smoke validation + docs + ROADMAP close-flip + PRD removal + operator runbook update",
+      "description": "As an operator, I need every step of the drain workflow validated end-to-end against the multi-cluster lab AND documented — so I never hit a \"wire field exists but nothing renders it\" gap after a cycle merges.",
+      "acceptanceCriteria": [
+        "**Smoke walkthrough script** at `scripts/smoke-drain-lifecycle.sh` drives every step from the User Journey Walkthrough table (15 happy-path steps + 4 negative paths) against the running `multi-cluster` compose profile; script EXITS NON-ZERO if any step fails the assertion",
+        "Smoke asserts via curl + `docker exec rados ls | wc -l` + `jq`: Pools table returns 6 rows (2 clusters × 3 pools), `/bucket-references` endpoint returns expected buckets per cluster, `/drain-progress` endpoint flips `deregister_ready=true`, strict-mode PUT returns `503 DrainRefused` with `Retry-After: 300`, default fail-open mode preserves existing behavior",
+        "Negative paths covered: (a) bucket policy `{cephb:1}` only + drain cephb + strict on → 503 DrainRefused; (b) bucket policy `{cephb:1}` only + drain cephb + strict off → fail-open to class default with WARN log; (c) Undrain mid-drain → state=live, banner gone, progress cache cleared; (d) drain on single-cluster-per-class config → docs warn that drain is stop-write only with no migration",
+        "`make smoke-drain-lifecycle` Makefile target runs the script",
+        "Playwright spec `web/e2e/drain-lifecycle.spec.ts` covers the UI half of the same 15 steps: every UI surface (drawer, progress bar, deregister chip, strict chip, policy-drain-warning) gets clicked + asserted against the in-memory test rig (no Docker for CI fast path)",
+        "`docs/site/content/best-practices/placement-rebalance.md` gains new \"Drain lifecycle\" section covering: (a) when drain is useful (multi-cluster placement deployments with bucket Placement policies naming ≥2 clusters), (b) when drain is NOT useful (single-cluster-per-class config — chunks have nowhere to migrate; drain becomes pure stop-write), (c) pre-drain operator checklist (open bucket-references drawer, verify hot buckets have alternate-cluster policy, verify pool names exist on target clusters, optionally flip `STRATA_DRAIN_STRICT=on`), (d) drain procedure (Show affected buckets → Drain → typed confirm → wait for progress bar → green chip → env edit + rolling restart), (e) abort/recovery (Undrain at any point), (f) walkthrough table copied verbatim from this PRD into the operator runbook",
+        "`docs/site/content/best-practices/web-ui.md` capability matrix gains rows for: Pools matrix, Bucket references drawer, Drain progress bar, Deregister-ready chip, Strict-mode chip, Policy-all-drained warning chip",
         "Project root `CLAUDE.md` 'Background workers' section gets an updated rebalance bullet describing the new progress scan + completion semantics + `STRATA_DRAIN_STRICT` env",
         "`ROADMAP.md` TWO entries close-flipped in the same commit: (a) `**P3 — Pools table shows class routing config, not actual cluster distribution.**` → `~~**P3 — ...**~~ — **Done.** <summary>. (commit \\`<pending>\\`)`; (b) `**P3 — Drain strict mode for PUT routing fallback.**` → `~~**P3 — ...**~~ — **Done.** <summary>. (commit \\`<pending>\\`)`; closing SHA backfilled in follow-up commit on main per CLAUDE.md convention",
         "`tasks/prd-drain-lifecycle.md` REMOVED in the same commit (PRD lifecycle rule — Ralph snapshot is canonical)",
+        "Manual screenshot of Storage page after smoke run captured + referenced in the operator runbook (visual proof matrix renders)",
         "`make docs-build` succeeds",
         "`make vet` succeeds",
         "`make test` succeeds",
         "`pnpm run build` succeeds",
+        "`make smoke-drain-lifecycle` succeeds against the running `multi-cluster` lab",
         "Typecheck passes"
       ],
-      "priority": 6,
+      "priority": 7,
       "passes": false,
       "notes": ""
     }
