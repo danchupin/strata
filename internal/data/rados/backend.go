@@ -184,8 +184,9 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 	policy, _ := data.PlacementFromContext(ctx)
 	bucketID, _ := data.BucketIDFromContext(ctx)
 	objKey, _ := data.ObjectKeyFromContext(ctx)
+	draining, _ := data.DrainingClustersFromContext(ctx)
 	pickCluster := func(idx int) string {
-		picked := placement.PickCluster(bucketID, objKey, idx, policy)
+		picked := placement.PickClusterExcluding(bucketID, objKey, idx, policy, draining)
 		if picked == "" {
 			return spec.Cluster
 		}

@@ -146,6 +146,17 @@ type HealthProbe interface {
 	DataHealth(ctx context.Context) (*DataHealthReport, error)
 }
 
+// ClusterStatsProbe is the optional capability surface for data backends
+// that can return per-cluster fill telemetry (US-006 placement-rebalance).
+// RADOS implements it via `MonCommand({"prefix":"df","format":"json"})`;
+// memory + s3 backends do not implement it (RADOS-only safety rail). The
+// rebalance worker type-asserts the live Backend and skips the
+// target-full check when the assertion fails — equivalent to receiving
+// ErrClusterStatsNotSupported.
+type ClusterStatsProbe interface {
+	ClusterStats(ctx context.Context, clusterID string) (usedBytes, totalBytes int64, err error)
+}
+
 // CORSRule is the backend-translation input for one bucket CORS rule. The
 // shape mirrors S3's CORSRule directly so translation is field-for-field;
 // the empty string ID is allowed (S3 accepts unnamed rules).

@@ -3,6 +3,7 @@ package workers
 import (
 	"time"
 
+	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/metrics"
 	"github.com/danchupin/strata/internal/rebalance"
 )
@@ -33,6 +34,10 @@ func buildRebalance(deps Dependencies) (Runner, error) {
 		Movers: rebalanceMovers(deps, throttle, inflight),
 		Logger: deps.Logger,
 	}
+	var probe data.ClusterStatsProbe
+	if p, ok := deps.Data.(data.ClusterStatsProbe); ok {
+		probe = p
+	}
 	return rebalance.New(rebalance.Config{
 		Meta:         deps.Meta,
 		Data:         deps.Data,
@@ -43,6 +48,7 @@ func buildRebalance(deps Dependencies) (Runner, error) {
 		RateMBPerSec: rateMBPerSec,
 		Inflight:     inflight,
 		Tracer:       deps.Tracer.Tracer("strata.worker.rebalance"),
+		StatsProbe:   probe,
 	})
 }
 

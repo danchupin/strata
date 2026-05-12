@@ -247,7 +247,7 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Buck
 		encReader = newSSEEncryptingReader(body, dek, multipartPartOID(key, partNumber))
 		body = encReader
 	}
-	manifest, err := s.Data.PutChunks(dataCtxForPut(ctx, s.Meta, b, key), body, mu.StorageClass)
+	manifest, err := s.Data.PutChunks(s.dataCtxForPut(ctx, b, key), body, mu.StorageClass)
 	if err != nil {
 		if errors.Is(err, auth.ErrSignatureInvalid) {
 			writeError(w, r, ErrSignatureDoesNotMatch)
@@ -360,7 +360,7 @@ func (s *Server) uploadPartCopy(w http.ResponseWriter, r *http.Request, b *meta.
 	if hasher != nil {
 		body = io.TeeReader(rc, hasher)
 	}
-	manifest, err := s.Data.PutChunks(dataCtxForPut(ctx, s.Meta, b, key), body, mu.StorageClass)
+	manifest, err := s.Data.PutChunks(s.dataCtxForPut(ctx, b, key), body, mu.StorageClass)
 	if err != nil {
 		writeError(w, r, ErrInternal)
 		return

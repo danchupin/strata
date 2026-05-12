@@ -66,6 +66,7 @@ const (
 	prefixReshardJob       = Namespace + "Rj/"  // s/Rj/<bucket16>
 	prefixAdminJob         = Namespace + "Aj/"  // s/Aj/<id>
 	prefixHeartbeat        = Namespace + "hb/"  // s/hb/<nodeID>
+	prefixClusterState     = Namespace + "cs/"  // s/cs/<clusterID>            (US-006 placement-rebalance drain sentinel)
 )
 
 // Bucket-scoped sub-prefixes. All are appended to a "s/B/<uuid16>/"
@@ -742,4 +743,15 @@ func AuditLogBucketPrefix(bucketID uuid.UUID) []byte {
 // "audit-sweeper-leader-tikv".
 func LeaderLockKey(name string) []byte {
 	return appendEscaped([]byte(prefixLeaderLock), name)
+}
+
+// ClusterStateKey is the per-cluster drain-state row (US-006). NOT
+// bucket-scoped — clusterIDs live in a global namespace.
+func ClusterStateKey(clusterID string) []byte {
+	return appendEscaped([]byte(prefixClusterState), clusterID)
+}
+
+// ClusterStatePrefix is the global scan origin for ListClusterStates.
+func ClusterStatePrefix() []byte {
+	return []byte(prefixClusterState)
 }

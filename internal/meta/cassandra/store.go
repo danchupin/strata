@@ -2848,6 +2848,64 @@ func (s *Store) DeleteBucketPlacement(ctx context.Context, name string) error {
 	return s.deleteBucketBlob(ctx, "bucket_placement", b.ID)
 }
 
+// SetClusterState persists state under clusterID. Absence of a row is
+// equivalent to meta.ClusterStateLive — operators only need to write
+// rows when they want to drain or remove a cluster (US-006).
+func (s *Store) SetClusterState(ctx context.Context, clusterID, state string) error {
+	if clusterID == "" {
+		return meta.ErrUnknownCluster
+	}
+	if err := meta.ValidateClusterState(state); err != nil {
+		return err
+	}
+	return s.s.Query(
+		`INSERT INTO cluster_state (cluster_id, state) VALUES (?, ?)`,
+		clusterID, state,
+	).WithContext(ctx).Exec()
+}
+
+// GetClusterState returns the persisted state. ok=false signals "no row
+// exists" — callers should treat that as ClusterStateLive.
+func (s *Store) GetClusterState(ctx context.Context, clusterID string) (string, bool, error) {
+	var state string
+	err := s.s.Query(
+		`SELECT state FROM cluster_state WHERE cluster_id=?`,
+		clusterID,
+	).WithContext(ctx).Scan(&state)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return state, true, nil
+}
+
+// ListClusterStates returns every persisted cluster_state row. Backs
+// both the drain-state cache and the admin GET /admin/v1/clusters
+// handler.
+func (s *Store) ListClusterStates(ctx context.Context) (map[string]string, error) {
+	iter := s.s.Query(`SELECT cluster_id, state FROM cluster_state`).WithContext(ctx).Iter()
+	out := map[string]string{}
+	var clusterID, state string
+	for iter.Scan(&clusterID, &state) {
+		out[clusterID] = state
+	}
+	if err := iter.Close(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// DeleteClusterState drops the row. Idempotent — operators undrain a
+// cluster by dropping the row (absence == live).
+func (s *Store) DeleteClusterState(ctx context.Context, clusterID string) error {
+	return s.s.Query(
+		`DELETE FROM cluster_state WHERE cluster_id=?`,
+		clusterID,
+	).WithContext(ctx).Exec()
+}
+
 func (s *Store) SetBucketObjectLockEnabled(ctx context.Context, name string, enabled bool) error {
 	applied, err := s.s.Query(
 		`UPDATE buckets SET object_lock_enabled=? WHERE name=? IF EXISTS`,

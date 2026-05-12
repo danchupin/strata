@@ -63,6 +63,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"BucketStatsHotPath", caseBucketStatsHotPath},
 		{"UsageAggregateRoundTrip", caseUsageAggregate},
 		{"BucketPlacementRoundTrip", caseBucketPlacement},
+		{"ClusterStateRoundTrip", caseClusterState},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2578,6 +2579,72 @@ func caseBucketPlacement(t *testing.T, s meta.Store) {
 	}
 	if err := s.DeleteBucketPlacement(ctx, "no-such-bucket"); err != meta.ErrBucketNotFound {
 		t.Errorf("delete missing bucket: got %v want ErrBucketNotFound", err)
+	}
+}
+
+// caseClusterState exercises the global cluster_state CRUD (US-006
+// placement-rebalance): absent → set → get → list → delete → absent.
+// Absence of a row maps to ok=false (NOT a sentinel error) — callers
+// treat that as ClusterStateLive. State values outside the
+// {live, draining, removed} enum are rejected with
+// ErrInvalidClusterState.
+func caseClusterState(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+
+	state, ok, err := s.GetClusterState(ctx, "c1")
+	if err != nil || ok || state != "" {
+		t.Fatalf("get unconfigured: got=(%q,%v,%v) want=(\"\", false, nil)", state, ok, err)
+	}
+	all, err := s.ListClusterStates(ctx)
+	if err != nil || len(all) != 0 {
+		t.Fatalf("list empty: got=%v err=%v", all, err)
+	}
+
+	if err := s.SetClusterState(ctx, "c1", meta.ClusterStateDraining); err != nil {
+		t.Fatalf("set draining: %v", err)
+	}
+	state, ok, err = s.GetClusterState(ctx, "c1")
+	if err != nil || !ok || state != meta.ClusterStateDraining {
+		t.Fatalf("get after set: got=(%q,%v,%v)", state, ok, err)
+	}
+	if err := s.SetClusterState(ctx, "c2", meta.ClusterStateRemoved); err != nil {
+		t.Fatalf("set removed: %v", err)
+	}
+	all, err = s.ListClusterStates(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if all["c1"] != meta.ClusterStateDraining || all["c2"] != meta.ClusterStateRemoved {
+		t.Fatalf("list: got=%v", all)
+	}
+
+	if err := s.SetClusterState(ctx, "c1", meta.ClusterStateLive); err != nil {
+		t.Fatalf("set live: %v", err)
+	}
+	state, ok, err = s.GetClusterState(ctx, "c1")
+	if err != nil || !ok || state != meta.ClusterStateLive {
+		t.Fatalf("get after live: got=(%q,%v,%v)", state, ok, err)
+	}
+
+	if err := s.DeleteClusterState(ctx, "c1"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	state, ok, err = s.GetClusterState(ctx, "c1")
+	if err != nil || ok || state != "" {
+		t.Fatalf("get after delete: got=(%q,%v,%v)", state, ok, err)
+	}
+	if err := s.DeleteClusterState(ctx, "c1"); err != nil {
+		t.Errorf("delete idempotent: %v", err)
+	}
+
+	bad := []string{"", "frozen", "DRAINING", "alive"}
+	for _, v := range bad {
+		if err := s.SetClusterState(ctx, "c1", v); err != meta.ErrInvalidClusterState {
+			t.Errorf("validate %q: got %v want ErrInvalidClusterState", v, err)
+		}
+	}
+	if err := s.SetClusterState(ctx, "", meta.ClusterStateDraining); err != meta.ErrUnknownCluster {
+		t.Errorf("empty cluster id: got %v want ErrUnknownCluster", err)
 	}
 }
 

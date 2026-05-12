@@ -53,6 +53,7 @@ func cloneMap(m map[string]int) map[string]int {
 // metric was incremented once per planned move.
 type countingMetrics struct {
 	planned map[string]int
+	refused map[string]int // key = "<reason>:<target>"
 }
 
 func (c *countingMetrics) IncPlannedMove(bucket string) {
@@ -60,6 +61,13 @@ func (c *countingMetrics) IncPlannedMove(bucket string) {
 		c.planned = map[string]int{}
 	}
 	c.planned[bucket]++
+}
+
+func (c *countingMetrics) IncRefused(reason, target string) {
+	if c.refused == nil {
+		c.refused = map[string]int{}
+	}
+	c.refused[reason+":"+target]++
 }
 
 // seedObject installs one Object on the memory store with `n` chunks at
@@ -385,4 +393,185 @@ func TestPlanLoggerEmitterDefaults(t *testing.T) {
 	if cm.planned[b.Name] != 2 {
 		t.Fatalf("default planLogger should have bumped counter twice; got %d", cm.planned[b.Name])
 	}
+}
+
+// fakeStatsProbe surfaces a configurable used/total per cluster id so the
+// US-006 target_full safety rail can be exercised without spinning up a
+// real RADOS cluster.
+type fakeStatsProbe struct {
+	stats map[string]struct{ used, total int64 }
+	err   map[string]error
+	calls map[string]int
+}
+
+func (p *fakeStatsProbe) ClusterStats(_ context.Context, id string) (int64, int64, error) {
+	if p.calls == nil {
+		p.calls = map[string]int{}
+	}
+	p.calls[id]++
+	if e, ok := p.err[id]; ok {
+		return 0, 0, e
+	}
+	s := p.stats[id]
+	return s.used, s.total, nil
+}
+
+// TestWorkerRefusesMovesIntoFullTarget — placement says move c1→c2 but
+// c2.used/c2.total > 0.90 → the safety rail bumps the
+// target_full counter and the move is dropped before emit.
+func TestWorkerRefusesMovesIntoFullTarget(t *testing.T) {
+	m := metamem.New()
+	em := &recordingEmitter{}
+	cm := &countingMetrics{}
+	probe := &fakeStatsProbe{stats: map[string]struct{ used, total int64 }{
+		"c1": {used: 10, total: 100},
+		"c2": {used: 95, total: 100}, // 95% — above default 0.90 ceiling
+	}}
+	w, err := New(Config{
+		Meta: m, Data: datamem.New(), Logger: slog.Default(),
+		Metrics: cm, Emitter: em, Interval: time.Hour, StatsProbe: probe,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	b, err := m.CreateBucket(context.Background(), "fill", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	// Policy targets c2 exclusively so every move planned goes c1→c2.
+	if err := m.SetBucketPlacement(context.Background(), b.Name, map[string]int{"c2": 1}); err != nil {
+		t.Fatalf("SetBucketPlacement: %v", err)
+	}
+	seedObject(t, m, b.ID, "x", []string{"c1", "c1", "c1"})
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(em.calls) != 1 {
+		t.Fatalf("emit count: got %d want 1", len(em.calls))
+	}
+	if got := em.calls[0].Moves; len(got) != 0 {
+		t.Fatalf("expected zero moves after target_full refusal, got %d", len(got))
+	}
+	if cm.refused["target_full:c2"] != 3 {
+		t.Fatalf("target_full counter: got %d want 3", cm.refused["target_full:c2"])
+	}
+	if cm.planned[b.Name] != 0 {
+		t.Fatalf("planned counter should remain zero after refusal: %d", cm.planned[b.Name])
+	}
+	// Probe should only have been called once for c2 (per-iteration cache).
+	if probe.calls["c2"] != 1 {
+		t.Fatalf("fill probe should be cached per iteration, got %d calls", probe.calls["c2"])
+	}
+}
+
+// TestWorkerSkipsRefusedTargetWhenProbeUnsupported — backend returns
+// ErrClusterStatsNotSupported → safety rail no-ops and moves proceed.
+func TestWorkerSkipsRefusedTargetWhenProbeUnsupported(t *testing.T) {
+	m := metamem.New()
+	em := &recordingEmitter{}
+	cm := &countingMetrics{}
+	probe := &fakeStatsProbe{err: map[string]error{
+		"c2": data.ErrClusterStatsNotSupported,
+	}}
+	w, err := New(Config{
+		Meta: m, Data: datamem.New(), Logger: slog.Default(),
+		Metrics: cm, Emitter: em, Interval: time.Hour, StatsProbe: probe,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	b, err := m.CreateBucket(context.Background(), "noprobe", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	if err := m.SetBucketPlacement(context.Background(), b.Name, map[string]int{"c2": 1}); err != nil {
+		t.Fatalf("SetBucketPlacement: %v", err)
+	}
+	seedObject(t, m, b.ID, "y", []string{"c1", "c1"})
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if got := em.calls[0].Moves; len(got) != 2 {
+		t.Fatalf("expected 2 moves when probe unsupported, got %d", len(got))
+	}
+	if cm.refused["target_full:c2"] != 0 {
+		t.Fatalf("unsupported probe should not bump target_full: got %d", cm.refused["target_full:c2"])
+	}
+}
+
+// TestWorkerSkipsDrainingTargetsAtPlanTime — c2 is draining, picker
+// excludes it, so moves into c2 are never even computed. With policy
+// {c1:1, c2:1}, the worker still finds c1 chunks "in equilibrium"
+// (PickClusterExcluding picks c1 for every chunk) so no moves emitted.
+func TestWorkerSkipsDrainingTargetsAtPlanTime(t *testing.T) {
+	m, em, cm, w := newRebalanceFixture(t)
+	b, err := m.CreateBucket(context.Background(), "drain1", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	if err := m.SetBucketPlacement(context.Background(), b.Name, map[string]int{"c1": 1, "c2": 1}); err != nil {
+		t.Fatalf("SetBucketPlacement: %v", err)
+	}
+	if err := m.SetClusterState(context.Background(), "c2", meta.ClusterStateDraining); err != nil {
+		t.Fatalf("SetClusterState: %v", err)
+	}
+	// All chunks on c1 — with draining c2, picker keeps them on c1.
+	seedObject(t, m, b.ID, "z", []string{"c1", "c1", "c1"})
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if got := em.calls[0].Moves; len(got) != 0 {
+		t.Fatalf("expected zero moves when c2 draining and all chunks on c1, got %d", len(got))
+	}
+	_ = cm
+}
+
+// TestWorkerMovesOutOfDrainingCluster — c1 is draining, chunks on c1
+// should migrate to c2.
+func TestWorkerMovesOutOfDrainingCluster(t *testing.T) {
+	m, em, cm, w := newRebalanceFixture(t)
+	b, err := m.CreateBucket(context.Background(), "drain2", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	if err := m.SetBucketPlacement(context.Background(), b.Name, map[string]int{"c1": 1, "c2": 1}); err != nil {
+		t.Fatalf("SetBucketPlacement: %v", err)
+	}
+	if err := m.SetClusterState(context.Background(), "c1", meta.ClusterStateDraining); err != nil {
+		t.Fatalf("SetClusterState: %v", err)
+	}
+	seedObject(t, m, b.ID, "w", []string{"c1", "c1", "c1"})
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	moves := em.calls[0].Moves
+	if len(moves) != 3 {
+		t.Fatalf("expected 3 moves out of draining c1, got %d", len(moves))
+	}
+	for _, mv := range moves {
+		if mv.FromCluster != "c1" || mv.ToCluster != "c2" {
+			t.Errorf("move %+v: want c1 → c2", mv)
+		}
+	}
+	if cm.refused["target_draining:c2"] != 0 {
+		t.Fatalf("target_draining must not fire for c2 (only c1 draining): %d", cm.refused["target_draining:c2"])
+	}
+}
+
+// TestWorkerRefusesIntoDrainingDefenseInDepth — manually post-plant a
+// move whose target is draining (race between scan + drain flip) and
+// assert the post-filter catches it. Drives applySafetyRails directly.
+func TestWorkerRefusesIntoDrainingDefenseInDepth(t *testing.T) {
+	m, _, cm, w := newRebalanceFixture(t)
+	b := &meta.Bucket{Name: "race", ID: uuid.New()}
+	moves := []Move{{Bucket: b.Name, BucketID: b.ID, ToCluster: "c2"}}
+	out := w.applySafetyRails(context.Background(), b, moves,
+		map[string]bool{"c2": true}, w.newFillCache(context.Background()))
+	if len(out) != 0 {
+		t.Fatalf("expected refusal: got %d moves", len(out))
+	}
+	if cm.refused["target_draining:c2"] != 1 {
+		t.Fatalf("counter: got %v", cm.refused)
+	}
+	_ = m
 }

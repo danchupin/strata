@@ -279,6 +279,28 @@ components:
         max_objects: { type: integer, format: int64, minimum: 0 }
         max_bytes_per_object: { type: integer, format: int64, minimum: 0 }
 
+    ClusterStateEntry:
+      type: object
+      required: [id, state]
+      description: |
+        One row in the GET /clusters response (US-006 placement-rebalance).
+        `state` is one of "live" / "draining" / "removed"; `backend` is
+        "rados" or "s3" (when known).
+      properties:
+        id: { type: string }
+        state:
+          type: string
+          enum: [live, draining, removed]
+        backend: { type: string }
+
+    ClustersList:
+      type: object
+      required: [clusters]
+      properties:
+        clusters:
+          type: array
+          items: { $ref: '#/components/schemas/ClusterStateEntry' }
+
     BucketPlacement:
       type: object
       required: [placement]
@@ -463,6 +485,59 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ClusterNodes' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /clusters:
+    get:
+      summary: List data-backend clusters with drain state (US-006 placement-rebalance)
+      operationId: listClusters
+      description: |
+        Returns every configured data-backend cluster id (union of
+        STRATA_RADOS_CLUSTERS / STRATA_S3_CLUSTERS) joined against the
+        persisted cluster_state rows. Clusters without a row default to
+        state="live".
+      responses:
+        '200':
+          description: Cluster list.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClustersList' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /clusters/{id}/drain:
+    post:
+      summary: Mark a cluster as draining (US-006 placement-rebalance)
+      operationId: drainCluster
+      description: |
+        Flips cluster_state to "draining" so the PUT hot path stops
+        routing chunks to this cluster (after the drain-cache TTL
+        elapses) and the rebalance worker starts migrating existing
+        chunks off it. Idempotent.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '204':
+          description: Drain flipped.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /clusters/{id}/undrain:
+    post:
+      summary: Clear draining state (US-006 placement-rebalance)
+      operationId: undrainCluster
+      description: |
+        Drops the cluster_state row (absence == live). Idempotent.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '204':
+          description: Undrain flipped.
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
 

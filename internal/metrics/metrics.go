@@ -257,6 +257,14 @@ var (
 		},
 		[]string{"bucket"},
 	)
+
+	RebalanceRefusedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_rebalance_refused_total",
+			Help: "Rebalance moves refused by the worker's safety rails (US-006). Reason is one of target_full (target cluster.used/total > 0.90 RADOS-only) or target_draining (target cluster is in meta.ClusterStateDraining). Per-target visibility lets operators spot a stuck drain.",
+		},
+		[]string{"reason", "target"},
+	)
 )
 
 func Register() {
@@ -288,6 +296,7 @@ func Register() {
 		RebalanceBytesMovedTotal,
 		RebalanceChunksMovedTotal,
 		RebalanceCASConflictsTotal,
+		RebalanceRefusedTotal,
 	)
 }
 
@@ -577,6 +586,16 @@ func (RebalanceObserver) IncCASConflict(bucket string) {
 		bucket = "unknown"
 	}
 	RebalanceCASConflictsTotal.WithLabelValues(bucket).Inc()
+}
+
+func (RebalanceObserver) IncRefused(reason, target string) {
+	if reason == "" {
+		reason = "unknown"
+	}
+	if target == "" {
+		target = "unknown"
+	}
+	RebalanceRefusedTotal.WithLabelValues(reason, target).Inc()
 }
 
 // AuditStreamObserver implements the auditstream.MetricsSink interface. The

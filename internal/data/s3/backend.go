@@ -436,7 +436,8 @@ func (b *Backend) clusterForPlacement(ctx context.Context, class string) (*s3Clu
 	}
 	bucketID, _ := data.BucketIDFromContext(ctx)
 	objKey, _ := data.ObjectKeyFromContext(ctx)
-	picked := placement.PickCluster(bucketID, objKey, 0, policy)
+	draining, _ := data.DrainingClustersFromContext(ctx)
+	picked := placement.PickClusterExcluding(bucketID, objKey, 0, policy, draining)
 	if picked == "" {
 		return b.clusterForClass(ctx, class)
 	}

@@ -127,7 +127,27 @@ testcontainers to find the engine.
                           move costs chunkSize × 2 tokens),
                           STRATA_REBALANCE_INFLIGHT (default 4, range
                           [1, 64]; per-Move(plan) errgroup bound shared
-                          between copy and CAS phases).
+                          between copy and CAS phases). Safety rails
+                          (US-006): refuses moves into `draining`
+                          clusters and (RADOS only) clusters above
+                          90% utilisation via data.ClusterStatsProbe
+                          (MonCommand `df`); both bump
+                          `strata_rebalance_refused_total{reason,target}`.
+                          The PUT hot path consults the same drain
+                          sentinel via an in-process 30s-TTL cache
+                          (`internal/data/placement/draincache.go`)
+                          that the admin drain/undrain handlers
+                          invalidate so flips take effect without
+                          waiting out the TTL. `placement.PickCluster`
+                          and `PickClusterExcluding` skip draining
+                          clusters; cluster_state ∈ {live, draining,
+                          removed} is meta-backed via the new
+                          `cluster_state` CRUD on meta.Store, with
+                          rows defaulting to "live" (absence == live).
+                          Admin: POST `/admin/v1/clusters/{id}/drain`
+                          and `.../undrain`, GET `/admin/v1/clusters`
+                          (audit `admin:DrainCluster` /
+                          `admin:UndrainCluster`).
   internal/reshard      -> per-bucket online shard-resize worker (US-045);
                           driven synchronously via /admin/bucket/reshard or
                           as a daemon.

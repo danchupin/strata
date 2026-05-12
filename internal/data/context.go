@@ -97,3 +97,33 @@ func ObjectKeyFromContext(ctx context.Context) (string, bool) {
 	}
 	return v, true
 }
+
+// drainingKey carries the set of cluster ids currently in
+// meta.ClusterStateDraining onto the data-plane ctx. Backends consult
+// it in PutChunks so chunks never route to a draining cluster even
+// when its weight in the bucket's Placement policy is non-zero (US-006
+// placement-rebalance).
+type drainingKey struct{}
+
+// WithDrainingClusters stores the draining-cluster set on ctx. Empty/
+// nil map returns ctx unchanged.
+func WithDrainingClusters(ctx context.Context, draining map[string]bool) context.Context {
+	if len(draining) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, drainingKey{}, draining)
+}
+
+// DrainingClustersFromContext returns the draining-cluster set stored
+// via WithDrainingClusters. The second return is false when none are
+// recorded.
+func DrainingClustersFromContext(ctx context.Context) (map[string]bool, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	v, ok := ctx.Value(drainingKey{}).(map[string]bool)
+	if !ok || len(v) == 0 {
+		return nil, false
+	}
+	return v, true
+}

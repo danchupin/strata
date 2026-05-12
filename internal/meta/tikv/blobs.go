@@ -251,6 +251,93 @@ func (s *Store) DeleteBucketPlacement(ctx context.Context, name string) error {
 // getBucketBlob; surfaced to callers as (nil, nil).
 var errPlacementMissing = errors.New("placement: not configured")
 
+// ----- Cluster state (US-006 placement-rebalance) -----
+//
+// cluster_state rows live under a global (NOT bucket-scoped) prefix
+// `s/cs/<clusterID>` because cluster ids are operator-controlled
+// global namespaces. Absence of a row means meta.ClusterStateLive — no
+// row needs to materialise for the common case.
+
+func (s *Store) SetClusterState(ctx context.Context, clusterID, state string) (err error) {
+	ctx, finish := s.observer.Start(ctx, "SetClusterState", "cluster_state")
+	defer func() { finish(err) }()
+	if clusterID == "" {
+		return meta.ErrUnknownCluster
+	}
+	if err = meta.ValidateClusterState(state); err != nil {
+		return err
+	}
+	txn, err := s.kv.Begin(ctx, false)
+	if err != nil {
+		return err
+	}
+	defer rollbackOnError(txn, &err)
+	if err = txn.Set(ClusterStateKey(clusterID), []byte(state)); err != nil {
+		return err
+	}
+	return txn.Commit(ctx)
+}
+
+func (s *Store) GetClusterState(ctx context.Context, clusterID string) (state string, ok bool, err error) {
+	ctx, finish := s.observer.Start(ctx, "GetClusterState", "cluster_state")
+	defer func() { finish(err) }()
+	txn, err := s.kv.Begin(ctx, false)
+	if err != nil {
+		return "", false, err
+	}
+	defer txn.Rollback()
+	raw, found, err := txn.Get(ctx, ClusterStateKey(clusterID))
+	if err != nil {
+		return "", false, err
+	}
+	if !found || len(raw) == 0 {
+		return "", false, nil
+	}
+	return string(raw), true, nil
+}
+
+func (s *Store) ListClusterStates(ctx context.Context) (out map[string]string, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListClusterStates", "cluster_state")
+	defer func() { finish(err) }()
+	txn, err := s.kv.Begin(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	defer txn.Rollback()
+	prefix := ClusterStatePrefix()
+	pairs, err := txn.Scan(ctx, prefix, prefixEnd(prefix), 0)
+	if err != nil {
+		return nil, err
+	}
+	out = make(map[string]string, len(pairs))
+	for _, p := range pairs {
+		if len(p.Key) <= len(prefix) {
+			continue
+		}
+		body := p.Key[len(prefix):]
+		clusterID, _, derr := readEscaped(body)
+		if derr != nil {
+			return nil, fmt.Errorf("tikv: decode cluster_state key: %w", derr)
+		}
+		out[clusterID] = string(p.Value)
+	}
+	return out, nil
+}
+
+func (s *Store) DeleteClusterState(ctx context.Context, clusterID string) (err error) {
+	ctx, finish := s.observer.Start(ctx, "DeleteClusterState", "cluster_state")
+	defer func() { finish(err) }()
+	txn, err := s.kv.Begin(ctx, false)
+	if err != nil {
+		return err
+	}
+	defer rollbackOnError(txn, &err)
+	if err = txn.Delete(ClusterStateKey(clusterID)); err != nil {
+		return err
+	}
+	return txn.Commit(ctx)
+}
+
 // ----- Quotas (US-001..US-003) -----
 
 func (s *Store) SetBucketQuota(ctx context.Context, bucketID uuid.UUID, q meta.BucketQuota) error {

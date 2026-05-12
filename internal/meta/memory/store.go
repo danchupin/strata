@@ -34,6 +34,7 @@ type Store struct {
 	logging        map[uuid.UUID][]byte
 	tagging        map[uuid.UUID][]byte
 	placements     map[uuid.UUID]map[string]int
+	clusterStates  map[string]string
 	bucketQuotas   map[uuid.UUID][]byte
 	userQuotas     map[string][]byte
 	bucketStats    map[uuid.UUID]meta.BucketStats
@@ -129,6 +130,7 @@ func New() *Store {
 		logging:      make(map[uuid.UUID][]byte),
 		tagging:      make(map[uuid.UUID][]byte),
 		placements:   make(map[uuid.UUID]map[string]int),
+		clusterStates: make(map[string]string),
 		bucketQuotas: make(map[uuid.UUID][]byte),
 		userQuotas:   make(map[string][]byte),
 		bucketStats:  make(map[uuid.UUID]meta.BucketStats),
@@ -1491,6 +1493,52 @@ func (s *Store) DeleteBucketPlacement(ctx context.Context, name string) error {
 		return meta.ErrBucketNotFound
 	}
 	delete(s.placements, b.ID)
+	return nil
+}
+
+// SetClusterState persists state under the cluster id. Validates state
+// against the {live, draining, removed} enum (US-006).
+func (s *Store) SetClusterState(_ context.Context, clusterID, state string) error {
+	if clusterID == "" {
+		return meta.ErrUnknownCluster
+	}
+	if err := meta.ValidateClusterState(state); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clusterStates[clusterID] = state
+	return nil
+}
+
+// GetClusterState returns the persisted state for clusterID. ok=false
+// signals "no row" — the caller should treat that as ClusterStateLive.
+func (s *Store) GetClusterState(_ context.Context, clusterID string) (string, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	state, ok := s.clusterStates[clusterID]
+	if !ok {
+		return "", false, nil
+	}
+	return state, true, nil
+}
+
+// ListClusterStates returns every persisted cluster_state row.
+func (s *Store) ListClusterStates(_ context.Context) (map[string]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]string, len(s.clusterStates))
+	for k, v := range s.clusterStates {
+		out[k] = v
+	}
+	return out, nil
+}
+
+// DeleteClusterState drops the row. Idempotent.
+func (s *Store) DeleteClusterState(_ context.Context, clusterID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.clusterStates, clusterID)
 	return nil
 }
 

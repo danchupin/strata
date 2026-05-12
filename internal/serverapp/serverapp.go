@@ -30,6 +30,7 @@ import (
 	"github.com/danchupin/strata/internal/crypto/master"
 	"github.com/danchupin/strata/internal/data"
 	datamem "github.com/danchupin/strata/internal/data/memory"
+	"github.com/danchupin/strata/internal/data/placement"
 	datarados "github.com/danchupin/strata/internal/data/rados"
 	datas3 "github.com/danchupin/strata/internal/data/s3"
 	"github.com/danchupin/strata/internal/health"
@@ -144,6 +145,8 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		apiHandler.KMS = kmsProvider
 	}
 	apiHandler.VHostPatterns = vhostPatterns()
+	drainCache := placement.NewDrainCache(metaStore.ListClusterStates, 0)
+	apiHandler.DrainCache = drainCache
 
 	healthHandler := buildHealthHandler(metaStore, dataBackend)
 
@@ -191,6 +194,8 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		TraceRingbuf:         tracerProvider.Ringbuf(),
 		StorageClasses:       storageClassSnapshot,
 		KnownClusters:        knownDataClusters(cfg),
+		ClusterBackends:      clusterBackends(cfg),
+		DrainCache:           drainCache,
 	})
 
 	mux := http.NewServeMux()
@@ -775,6 +780,37 @@ func knownDataClusters(cfg *config.Config) map[string]struct{} {
 		return out
 	}
 	return nil
+}
+
+// clusterBackends returns clusterID → backend label ("rados" / "s3")
+// for the GET /admin/v1/clusters response (US-006). Memory backend
+// returns nil.
+func clusterBackends(cfg *config.Config) map[string]string {
+	out := map[string]string{}
+	switch cfg.DataBackend {
+	case "rados":
+		clusters, err := datarados.ParseClusters(cfg.RADOS.Clusters)
+		if err != nil {
+			return nil
+		}
+		for id := range clusters {
+			out[id] = "rados"
+		}
+	case "s3":
+		clusters, err := datas3.ParseClusters(cfg.S3.Clusters)
+		if err != nil {
+			return nil
+		}
+		for id := range clusters {
+			out[id] = "s3"
+		}
+	default:
+		return nil
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func s3BackendSettings(cfg *config.Config) adminapi.S3BackendSettings {

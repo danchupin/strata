@@ -80,11 +80,16 @@ type PlanEmitter interface {
 // package import set.
 type Metrics interface {
 	IncPlannedMove(bucket string)
+	// IncRefused bumps the per-iteration safety-rail counter (US-006).
+	// reason is one of "target_full" / "target_draining"; target is the
+	// cluster id the move would have written to.
+	IncRefused(reason, target string)
 }
 
 type nopMetrics struct{}
 
-func (nopMetrics) IncPlannedMove(string) {}
+func (nopMetrics) IncPlannedMove(string)       {}
+func (nopMetrics) IncRefused(string, string)   {}
 
 // Config wires a Worker. Defaults applied in New: Interval=1h,
 // PollLimit=1000, Now=time.Now, Logger=slog.Default. Metrics defaults
@@ -105,7 +110,22 @@ type Config struct {
 	Inflight     int
 	Now          func() time.Time
 	Tracer       trace.Tracer
+	// StatsProbe is the optional cluster-fill probe consulted before
+	// dispatching a move (US-006). nil disables the target_full safety
+	// rail — moves are allowed without a fill check. RADOS-backed
+	// gateways inject *rados.Backend (which implements
+	// data.ClusterStatsProbe); S3-only deployments leave nil.
+	StatsProbe data.ClusterStatsProbe
+	// FillCeiling is the target-cluster used/total ratio above which the
+	// rebalance worker refuses to dispatch a move (US-006). Zero / <0
+	// falls back to DefaultFillCeiling (0.90).
+	FillCeiling float64
 }
+
+// DefaultFillCeiling is the conservative target_full threshold from the
+// US-006 PRD: 90% utilisation. Operators may override via
+// Config.FillCeiling; out-of-range values are clamped to (0, 1].
+const DefaultFillCeiling = 0.90
 
 // Worker runs one rebalance pass per Interval.
 type Worker struct {
@@ -182,6 +202,8 @@ func (w *Worker) runOnce(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list buckets: %w", err)
 	}
+	draining := w.loadDrainingClusters(ctx)
+	fillCache := w.newFillCache(ctx)
 	for _, b := range buckets {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -195,12 +217,35 @@ func (w *Worker) runOnce(ctx context.Context) error {
 		if len(policy) == 0 {
 			continue
 		}
-		w.scanAndEmit(ctx, b, policy)
+		w.scanAndEmit(ctx, b, policy, draining, fillCache)
 	}
 	return nil
 }
 
-func (w *Worker) scanAndEmit(ctx context.Context, b *meta.Bucket, policy map[string]int) {
+// loadDrainingClusters reads cluster_state once per tick and returns
+// the set of cluster ids whose state is meta.ClusterStateDraining.
+// Errors are logged + treated as empty so a meta hiccup never breaks
+// the rebalance tick.
+func (w *Worker) loadDrainingClusters(ctx context.Context) map[string]bool {
+	rows, err := w.cfg.Meta.ListClusterStates(ctx)
+	if err != nil {
+		w.cfg.Logger.Warn("rebalance: load cluster states", "error", err.Error())
+		w.recordIterErr(err)
+		return nil
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(rows))
+	for id, state := range rows {
+		if state == meta.ClusterStateDraining {
+			out[id] = true
+		}
+	}
+	return out
+}
+
+func (w *Worker) scanAndEmit(ctx context.Context, b *meta.Bucket, policy map[string]int, draining map[string]bool, fills *fillCache) {
 	ctx, span := w.tracerOrNoop().Start(ctx, "rebalance.scan_bucket",
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(
@@ -212,7 +257,7 @@ func (w *Worker) scanAndEmit(ctx context.Context, b *meta.Bucket, policy map[str
 	)
 	defer span.End()
 
-	actual, moves, err := w.scanDistribution(ctx, b, policy)
+	actual, moves, err := w.scanDistribution(ctx, b, policy, draining)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -220,6 +265,7 @@ func (w *Worker) scanAndEmit(ctx context.Context, b *meta.Bucket, policy map[str
 		w.cfg.Logger.Warn("rebalance: scan bucket", "bucket", b.Name, "error", err.Error())
 		return
 	}
+	moves = w.applySafetyRails(ctx, b, moves, draining, fills)
 	for range moves {
 		w.cfg.Metrics.IncPlannedMove(b.Name)
 	}
@@ -234,6 +280,40 @@ func (w *Worker) scanAndEmit(ctx context.Context, b *meta.Bucket, policy map[str
 	)
 }
 
+// applySafetyRails post-filters the move plan against the two operator
+// safety rails (US-006):
+//
+//   - target_draining: refuses any move whose ToCluster is in `draining`.
+//     The picker already skips draining clusters via
+//     placement.PickClusterExcluding, so this branch only fires in a race
+//     between scan emission and a drain flip — defense-in-depth.
+//   - target_full: when the optional ClusterStatsProbe is wired and the
+//     target's used/total exceeds FillCeiling, refuses the move and bumps
+//     the metric. S3-backed deployments (no probe) skip the check —
+//     equivalent to ErrClusterStatsNotSupported per PRD.
+func (w *Worker) applySafetyRails(ctx context.Context, b *meta.Bucket, moves []Move, draining map[string]bool, fills *fillCache) []Move {
+	if len(moves) == 0 {
+		return moves
+	}
+	out := moves[:0]
+	for _, mv := range moves {
+		if draining[mv.ToCluster] {
+			w.cfg.Logger.Warn("rebalance refused: target draining",
+				"bucket", b.Name, "target", mv.ToCluster, "object_key", mv.ObjectKey)
+			w.cfg.Metrics.IncRefused("target_draining", mv.ToCluster)
+			continue
+		}
+		if full, ok := fills.isFull(ctx, mv.ToCluster, w.cfg.Logger); ok && full {
+			w.cfg.Logger.Warn("rebalance refused: target full",
+				"bucket", b.Name, "target", mv.ToCluster, "object_key", mv.ObjectKey)
+			w.cfg.Metrics.IncRefused("target_full", mv.ToCluster)
+			continue
+		}
+		out = append(out, mv)
+	}
+	return out
+}
+
 // scanDistribution walks every (latest) object in the bucket, computes
 // the per-cluster chunk count (actual), compares each chunk's home
 // against PickCluster's verdict, and emits a Move when they differ.
@@ -241,7 +321,7 @@ func (w *Worker) scanAndEmit(ctx context.Context, b *meta.Bucket, policy map[str
 // rows) are treated as living on the default cluster (resolved as ""
 // here — the mover knows how to fall back). The picker uses the same
 // stable hash the PUT path uses (US-002) so retries are convergent.
-func (w *Worker) scanDistribution(ctx context.Context, b *meta.Bucket, policy map[string]int) (map[string]int, []Move, error) {
+func (w *Worker) scanDistribution(ctx context.Context, b *meta.Bucket, policy map[string]int, draining map[string]bool) (map[string]int, []Move, error) {
 	actual := map[string]int{}
 	var moves []Move
 	opts := meta.ListOptions{Limit: w.cfg.PollLimit}
@@ -259,7 +339,7 @@ func (w *Worker) scanDistribution(ctx context.Context, b *meta.Bucket, policy ma
 			}
 			for idx, c := range o.Manifest.Chunks {
 				actual[c.Cluster]++
-				want := placement.PickCluster(b.ID, o.Key, idx, policy)
+				want := placement.PickClusterExcluding(b.ID, o.Key, idx, policy, draining)
 				if want == "" {
 					continue
 				}
@@ -280,7 +360,7 @@ func (w *Worker) scanDistribution(ctx context.Context, b *meta.Bucket, policy ma
 			}
 			if br := o.Manifest.BackendRef; br != nil && br.Cluster != "" {
 				actual[br.Cluster]++
-				want := placement.PickCluster(b.ID, o.Key, 0, policy)
+				want := placement.PickClusterExcluding(b.ID, o.Key, 0, policy, draining)
 				if want == "" || br.Cluster == want {
 					continue
 				}
@@ -352,4 +432,70 @@ func (p *planLogger) EmitPlan(_ context.Context, bucket *meta.Bucket, actual map
 		"target", target,
 	)
 	return nil
+}
+
+// fillCache memoises per-iteration ClusterStats probes so a fan-out of
+// N moves into K target clusters costs at most K probes per tick. The
+// per-probe result is cached as full / not-full; transient probe errors
+// are logged once per cluster and treated as "ok to proceed" so a
+// flaky probe never freezes the rebalance.
+type fillCache struct {
+	probe   data.ClusterStatsProbe
+	ceiling float64
+	results map[string]fillResult
+}
+
+type fillResult struct {
+	known bool
+	full  bool
+}
+
+func (w *Worker) newFillCache(ctx context.Context) *fillCache {
+	ceiling := w.cfg.FillCeiling
+	if ceiling <= 0 || ceiling > 1 {
+		ceiling = DefaultFillCeiling
+	}
+	return &fillCache{
+		probe:   w.cfg.StatsProbe,
+		ceiling: ceiling,
+		results: map[string]fillResult{},
+	}
+}
+
+// isFull reports whether the target cluster is above the configured
+// fill ceiling. ok=false signals "no probe wired or probe unsupported";
+// the worker treats that as "OK to proceed".
+func (c *fillCache) isFull(ctx context.Context, target string, logger *slog.Logger) (full bool, ok bool) {
+	if c == nil || c.probe == nil || target == "" {
+		return false, false
+	}
+	if r, cached := c.results[target]; cached {
+		return r.full, r.known
+	}
+	used, total, err := c.probe.ClusterStats(ctx, target)
+	if err != nil {
+		if errors.Is(err, data.ErrClusterStatsNotSupported) {
+			// One WARN per iteration per cluster, then short-circuit.
+			if logger != nil {
+				logger.Warn("rebalance: cluster stats not supported; skipping target_full check",
+					"target", target)
+			}
+			c.results[target] = fillResult{known: false}
+			return false, false
+		}
+		if logger != nil {
+			logger.Warn("rebalance: cluster stats probe failed; treating as not full",
+				"target", target, "error", err.Error())
+		}
+		c.results[target] = fillResult{known: false}
+		return false, false
+	}
+	if total <= 0 {
+		c.results[target] = fillResult{known: true, full: false}
+		return false, true
+	}
+	ratio := float64(used) / float64(total)
+	full = ratio > c.ceiling
+	c.results[target] = fillResult{known: true, full: full}
+	return full, true
 }
