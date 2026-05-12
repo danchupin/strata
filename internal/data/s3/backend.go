@@ -1016,6 +1016,7 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 			ETag:      etag,
 			Size:      cr.n,
 			VersionID: versionID,
+			Cluster:   c.spec.ID,
 		},
 		SSE: c.manifestSSE(),
 	}
@@ -1042,11 +1043,40 @@ func (b *Backend) GetChunks(ctx context.Context, m *data.Manifest, offset, lengt
 
 // Delete removes the manifest's backend object via DeleteObject on the
 // cluster + bucket resolved from m.Class. Idempotent — NoSuchKey is
-// success. Manifests without BackendRef (legacy/rados-shape) are no-ops.
+// success.
+//
+// US-005 placement-rebalance: chunk-shape manifests with a non-empty
+// chunk.Cluster matching one of this Backend's registered clusters are
+// dispatched as (cluster, bucket=chunk.Pool, key=chunk.OID). This is
+// the GC-queue shape the rebalance worker enqueues so the gc worker
+// can purge backend objects on CAS-loss without widening the meta GC
+// queue surface. Chunk-shape manifests with empty Cluster (legacy
+// rados-shape) remain no-ops on the s3 backend.
 func (b *Backend) Delete(ctx context.Context, m *data.Manifest) error {
-	if m == nil || m.BackendRef == nil {
+	if m == nil {
 		if len(b.clusters) == 0 {
 			return errors.ErrUnsupported
+		}
+		return nil
+	}
+	if m.BackendRef == nil {
+		if len(b.clusters) == 0 {
+			return errors.ErrUnsupported
+		}
+		for _, chunk := range m.Chunks {
+			if chunk.Cluster == "" {
+				continue
+			}
+			c, ok := b.clusters[chunk.Cluster]
+			if !ok {
+				continue
+			}
+			if _, err := b.connFor(ctx, chunk.Cluster); err != nil {
+				return err
+			}
+			if err := deleteFromCluster(ctx, c, chunk.Pool, chunk.OID, ""); err != nil {
+				return err
+			}
 		}
 		return nil
 	}

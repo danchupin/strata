@@ -57,6 +57,12 @@ message BackendRef {
   string etag = 3;
   int64 size = 4;
   string version_id = 5;
+  // cluster is the operator-labelled S3 cluster id that hosts this
+  // backend object. Populated by s3.Backend.PutChunks (US-005 placement-
+  // rebalance) so the rebalance worker can scan BackendRef-shape
+  // manifests and decide whether a move is needed. Pre-US-005 rows have
+  // an empty value; the worker skips them (rewriter cycle can backfill).
+  string cluster = 6;
 }
 
 message SSEInfo {

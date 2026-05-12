@@ -108,6 +108,13 @@ type BackendRef struct {
 	ETag      string `json:",omitempty"`
 	Size      int64  `json:",omitempty"`
 	VersionID string `json:",omitempty"`
+	// Cluster is the operator-labelled S3 cluster id hosting this
+	// backend object. Populated by s3.Backend.PutChunks (US-005
+	// placement-rebalance) so the rebalance worker can compare against
+	// placement.PickCluster's verdict. Pre-US-005 rows decode with an
+	// empty value; rebalance skips those rows so a backfill cycle can
+	// repopulate without crashing the worker.
+	Cluster string `json:",omitempty"`
 }
 
 // SSE encryption modes (US-013).

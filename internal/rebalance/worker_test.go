@@ -222,6 +222,106 @@ func TestWorkerIncrementsMetricPerMove(t *testing.T) {
 	}
 }
 
+// seedBackendRefObject installs one Object on the memory store with a
+// single BackendRef-shape manifest (S3 backend layout).
+func seedBackendRefObject(t *testing.T, m meta.Store, bucketID uuid.UUID, key, backendKey, cluster string) {
+	t.Helper()
+	if err := m.PutObject(context.Background(), &meta.Object{
+		BucketID:     bucketID,
+		Key:          key,
+		Size:         8,
+		ETag:         "deadbeef",
+		StorageClass: "STANDARD",
+		Mtime:        time.Now().UTC(),
+		IsLatest:     true,
+		Manifest: &data.Manifest{
+			Class: "STANDARD",
+			Size:  8,
+			BackendRef: &data.BackendRef{
+				Backend: "s3",
+				Key:     backendKey,
+				Size:    8,
+				Cluster: cluster,
+			},
+		},
+	}, false); err != nil {
+		t.Fatalf("PutObject: %v", err)
+	}
+}
+
+func TestWorkerEmitsMoveForBackendRefManifest(t *testing.T) {
+	m, em, _, w := newRebalanceFixture(t)
+	b, err := m.CreateBucket(context.Background(), "s3bkt", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	// Single-cluster policy on c2 → every BackendRef-shape object on c1
+	// becomes a planned move.
+	if err := m.SetBucketPlacement(context.Background(), b.Name, map[string]int{"c2": 1}); err != nil {
+		t.Fatalf("SetBucketPlacement: %v", err)
+	}
+	seedBackendRefObject(t, m, b.ID, "obj-1", "uuid-key-1", "c1")
+	seedBackendRefObject(t, m, b.ID, "obj-2", "uuid-key-2", "c1")
+	// One already on c2 — should not generate a move.
+	seedBackendRefObject(t, m, b.ID, "obj-3", "uuid-key-3", "c2")
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(em.calls) != 1 {
+		t.Fatalf("emit count: got %d want 1", len(em.calls))
+	}
+	c := em.calls[0]
+	if got := c.Actual["c1"]; got != 2 {
+		t.Errorf("actual[c1]: got %d want 2", got)
+	}
+	if got := c.Actual["c2"]; got != 1 {
+		t.Errorf("actual[c2]: got %d want 1", got)
+	}
+	if len(c.Moves) != 2 {
+		t.Fatalf("moves: got %d want 2", len(c.Moves))
+	}
+	for _, mv := range c.Moves {
+		if mv.FromCluster != "c1" || mv.ToCluster != "c2" {
+			t.Errorf("move shape: got from=%q to=%q", mv.FromCluster, mv.ToCluster)
+		}
+		if mv.ChunkIdx != 0 {
+			t.Errorf("BackendRef move ChunkIdx: got %d want 0", mv.ChunkIdx)
+		}
+		if mv.SrcRef.Cluster != "c1" {
+			t.Errorf("SrcRef.Cluster: got %q want c1", mv.SrcRef.Cluster)
+		}
+		if mv.SrcRef.OID == "" {
+			t.Errorf("SrcRef.OID empty; expected BackendRef.Key")
+		}
+	}
+}
+
+func TestWorkerSkipsBackendRefWithoutCluster(t *testing.T) {
+	// Pre-US-005 rows have BackendRef.Cluster == "" — the worker must
+	// skip them rather than crash; a backfill cycle would later
+	// populate Cluster.
+	m, em, _, w := newRebalanceFixture(t)
+	b, err := m.CreateBucket(context.Background(), "legacy", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	if err := m.SetBucketPlacement(context.Background(), b.Name, map[string]int{"c2": 1}); err != nil {
+		t.Fatalf("SetBucketPlacement: %v", err)
+	}
+	seedBackendRefObject(t, m, b.ID, "legacy-obj", "uuid-key", "")
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(em.calls) != 1 {
+		t.Fatalf("emit count: got %d want 1", len(em.calls))
+	}
+	if len(em.calls[0].Moves) != 0 {
+		t.Fatalf("moves on legacy BackendRef: got %d want 0", len(em.calls[0].Moves))
+	}
+}
+
 func TestWorkerSurvivesObjectsWithoutManifest(t *testing.T) {
 	m, em, _, w := newRebalanceFixture(t)
 	b, err := m.CreateBucket(context.Background(), "noman", "owner", "STANDARD")

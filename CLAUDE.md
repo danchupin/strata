@@ -107,14 +107,27 @@ testcontainers to find the engine.
                           target, then issues per-object manifest CAS via
                           meta.Store.SetObjectStorage; CAS losers (old chunks
                           on success, new chunks on reject) go to the GC
-                          queue via EnqueueChunkDeletion. Knobs:
-                          STRATA_REBALANCE_INTERVAL (default 1h, range
-                          [1m, 24h]), STRATA_REBALANCE_RATE_MB_S (default 100,
-                          range [1, 10000]; both read + write consume from
-                          the same token-bucket so a chunk move costs
-                          chunkSize × 2 tokens), STRATA_REBALANCE_INFLIGHT
-                          (default 4, range [1, 64]; per-Move(plan) errgroup
-                          bound shared between copy and CAS phases).
+                          queue via EnqueueChunkDeletion. Build-tag-free
+                          S3Mover (US-005) plugs into the same MoverChain
+                          when deps.Data is *s3.Backend: same-endpoint+region
+                          short-circuits to awss3.CopyObject, mismatched
+                          endpoints fall back to Get→Put streaming via
+                          manager.Uploader. BackendRef-shape manifests carry
+                          BackendRef.Cluster (populated at PutChunks time);
+                          the scan emits a single virtual move per S3 object
+                          and the S3Mover updates manifest.BackendRef in
+                          place. GC enqueue uses chunk-shape entries where
+                          chunk.Cluster matches an S3 cluster id — the s3
+                          backend's Delete dispatches such entries via
+                          (cluster, bucket=chunk.Pool, key=chunk.OID).
+                          Knobs: STRATA_REBALANCE_INTERVAL (default 1h,
+                          range [1m, 24h]), STRATA_REBALANCE_RATE_MB_S
+                          (default 100, range [1, 10000]; both read + write
+                          consume from the same token-bucket so a chunk
+                          move costs chunkSize × 2 tokens),
+                          STRATA_REBALANCE_INFLIGHT (default 4, range
+                          [1, 64]; per-Move(plan) errgroup bound shared
+                          between copy and CAS phases).
   internal/reshard      -> per-bucket online shard-resize worker (US-045);
                           driven synchronously via /admin/bucket/reshard or
                           as a daemon.

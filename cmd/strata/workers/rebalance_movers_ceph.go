@@ -8,31 +8,28 @@ import (
 	"github.com/danchupin/strata/internal/rebalance"
 )
 
-// rebalanceMovers wires the RADOS-side mover (US-004) into the
-// MoverChain emitter when the binary is built with `-tags ceph`. The
-// deps.Data backend is type-asserted to *rados.Backend; mismatched
-// backends (memory, s3) skip the mover so the chain falls back to
-// plan-logging behaviour. The S3-side mover lands in US-005.
+// rebalanceMovers wires the per-build-tag movers into the MoverChain
+// emitter. The ceph build pulls in the RADOS-side mover (US-004) when
+// deps.Data is *rados.Backend; the S3-side mover (US-005) plugs in for
+// *s3.Backend regardless of build tag. Chains with no movers fall back
+// to plan-logging behaviour shipped in US-003.
 func rebalanceMovers(deps Dependencies, throttle *rebalance.Throttle, inflight int) []rebalance.Mover {
-	rb, ok := deps.Data.(*rados.Backend)
-	if !ok {
-		return nil
+	movers := s3RebalanceMovers(deps, throttle, inflight)
+	if rb, ok := deps.Data.(*rados.Backend); ok {
+		clusters := rados.RebalanceClusters(rb)
+		if len(clusters) > 0 {
+			tracer := deps.Tracer.Tracer("strata.worker.rebalance")
+			movers = append(movers, &rebalance.RadosMover{
+				Clusters: clusters,
+				Meta:     deps.Meta,
+				Region:   deps.Region,
+				Logger:   deps.Logger,
+				Metrics:  metrics.RebalanceObserver{},
+				Tracer:   tracer,
+				Throttle: throttle,
+				Inflight: inflight,
+			})
+		}
 	}
-	clusters := rados.RebalanceClusters(rb)
-	if len(clusters) == 0 {
-		return nil
-	}
-	tracer := deps.Tracer.Tracer("strata.worker.rebalance")
-	return []rebalance.Mover{
-		&rebalance.RadosMover{
-			Clusters: clusters,
-			Meta:     deps.Meta,
-			Region:   deps.Region,
-			Logger:   deps.Logger,
-			Metrics:  metrics.RebalanceObserver{},
-			Tracer:   tracer,
-			Throttle: throttle,
-			Inflight: inflight,
-		},
-	}
+	return movers
 }

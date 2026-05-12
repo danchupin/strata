@@ -278,6 +278,28 @@ func (w *Worker) scanDistribution(ctx context.Context, b *meta.Bucket, policy ma
 					Class:       o.StorageClass,
 				})
 			}
+			if br := o.Manifest.BackendRef; br != nil && br.Cluster != "" {
+				actual[br.Cluster]++
+				want := placement.PickCluster(b.ID, o.Key, 0, policy)
+				if want == "" || br.Cluster == want {
+					continue
+				}
+				moves = append(moves, Move{
+					Bucket:      b.Name,
+					BucketID:    b.ID,
+					ObjectKey:   o.Key,
+					VersionID:   o.VersionID,
+					ChunkIdx:    0,
+					FromCluster: br.Cluster,
+					ToCluster:   want,
+					SrcRef: data.ChunkRef{
+						Cluster: br.Cluster,
+						OID:     br.Key,
+						Size:    br.Size,
+					},
+					Class: o.StorageClass,
+				})
+			}
 		}
 		if !res.Truncated {
 			break
