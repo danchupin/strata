@@ -39,3 +39,24 @@ Cycle: ralph/placement-ui
   - **For US-002 next iteration**: the helper now returns sorted (cluster, pool, ns) tuples — the UI's "Cluster column on Pools table, sort ascending with empty last" can rely on that ordering. Storage page in React shouldn't re-sort the wire response.
 ---
 
+## 2026-05-12 - US-002
+- Implemented: Storage page Data tab now renders Clusters subsection (one Card per registered cluster) above the Pools table, plus a new Cluster column on the Pools table. Drain flow uses typed-confirmation modal; Undrain is one-click. The ClustersSubsection + ConfirmDrainModal + web/src/api/clusters.ts wrappers were already staged on the branch (untracked + working-tree mods to client.ts/query.ts); this iteration wired the consumer in Storage.tsx and added `cluster?: string` to the typed PoolStatus.
+- Files changed:
+  - web/src/api/storage.ts — added optional `cluster?: string` to PoolStatus
+  - web/src/pages/Storage.tsx — DataTab imports ClustersSubsection; renders it above Pools table for non-memory backends; pools sorted ascending by cluster with empty last (memo'd); new Cluster column rendered between Name and Class with muted "—" fallback
+  - web/src/api/client.ts (was already mod) — re-exports fetchClusters/drainCluster/undrainCluster + ClusterStateEntry/ClustersListResponse
+  - web/src/lib/query.ts (was already mod) — `queryKeys.clusters = ['clusters']` shared key
+  - web/src/api/clusters.ts (new) — typed wrappers for GET /admin/v1/clusters + POST .../{id}/drain|undrain
+  - web/src/components/storage/ClustersSubsection.tsx (new) — TanStack Query polls clusters every 10s; one Card per cluster shows id+state+backend+aggregated used bytes; Drain/Undrain buttons per state
+  - web/src/components/storage/ConfirmDrainModal.tsx (new) — typed-confirmation dialog mirrors DeleteBucketDialog pattern; case-sensitive match, disabled submit until typed === cluster.id
+- Bundle delta: Storage chunk went from ~15 kB to 18.27 kB (~5.49 kB gzipped) — within the 5 KiB-gzipped budget specified in AC.
+- **Learnings for future iterations:**
+  - **PoolStatus.cluster field flows JSON.omitempty → TS `cluster?: string`.** When the Go side uses `omitempty`, the matching TypeScript optional `?` is the right shape — not `string | null`. Memory-backend rows omit the key entirely; rados/s3 rows include it. The Storage table cell handles both via `p.cluster ? render : '—'`.
+  - **The DataTab sort contract is explicit even when the server pre-sorts.** rados/health_helper.go::buildPendingPoolStatuses already returns rows sorted by (cluster, pool, ns), but the UI re-sorts ascending with empty-last anyway. This is intentional — it makes the table's order self-evident at the call site and tolerates a future backend that doesn't pre-sort. Cost: one memoised slice() + sort() per render of a tab the operator only opens occasionally.
+  - **`ClustersSubsection` only mounts when backend !== 'memory'.** Memory backend has no registered clusters and `/admin/v1/clusters` returns `[]` — rendering the subsection would just show an empty-state. The branch hides it instead, matching the existing `MemoryExplainer` flow that already replaces the pools table for memory backends.
+  - **TanStack Query v5 `meta.label` is consumed by the global QueryCache error toast.** When adding a new useQuery, pass `meta: { label: 'short label' }` so failures show "Failed to load short label" instead of generic copy. The throttle in `web/src/lib/query.ts` dedups by query key so the toast doesn't storm during polling outages.
+  - **`queryKeys.clusters` is a bare tuple, not a function.** This is intentional — there are no query params, and a stable identity means `useQuery({ queryKey: queryKeys.clusters })` from two components (ClustersSubsection + future PlacementDrainBanner in US-004) shares one fetch per refetch window.
+  - **For US-004 next iteration**: the shared `queryKeys.clusters` key is in place; PlacementDrainBanner should reuse it with `refetchInterval: 15_000` (US-002 picked 10s, US-004 picked 15s — TanStack will use the smaller cadence when both are mounted, which is fine).
+  - **Browser verification**: no local dev-browser tool available — manual `pnpm dev` + visual check is recommended before the cycle closes; US-006 Playwright spec will exercise the full flow in CI.
+---
+

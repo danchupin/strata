@@ -41,6 +41,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { ClustersSubsection } from '@/components/storage/ClustersSubsection';
 import { queryClient, queryKeys } from '@/lib/query';
 import { cn } from '@/lib/utils';
 
@@ -418,10 +419,31 @@ function DataTab() {
       : null;
   const pools: PoolStatus[] = report?.pools ?? [];
 
+  // Stable sort on Cluster column with empty/undefined sorting last.
+  // The wire response from rados/health.go is already grouped by
+  // (cluster, pool, ns), but a generic ascending sort here makes the
+  // contract self-evident at the call site and tolerates a future
+  // backend that doesn't pre-sort.
+  const sortedPools = useMemo(() => {
+    const arr = pools.slice();
+    arr.sort((a, b) => {
+      const ac = a.cluster ?? '';
+      const bc = b.cluster ?? '';
+      if (ac === bc) return 0;
+      if (ac === '') return 1;
+      if (bc === '') return -1;
+      return ac.localeCompare(bc);
+    });
+    return arr;
+  }, [pools]);
+  const isMemory = report?.backend === 'memory';
+
   return (
     <div className="space-y-4">
       {errMsg && <ErrorCard message={errMsg} />}
       {report && <WarningBanner warnings={report.warnings ?? []} />}
+
+      {!isMemory && <ClustersSubsection pools={sortedPools} />}
 
       <Card>
         <CardHeader>
@@ -444,11 +466,11 @@ function DataTab() {
                 <Skeleton key={i} className="h-9 w-full" />
               ))}
             </div>
-          ) : report?.backend === 'memory' ? (
+          ) : isMemory ? (
             <div className="px-4 sm:px-6">
               <MemoryExplainer kind="data" />
             </div>
-          ) : pools.length === 0 ? (
+          ) : sortedPools.length === 0 ? (
             <div className="px-4 text-sm text-muted-foreground sm:px-6">
               No pools reported.
             </div>
@@ -458,6 +480,7 @@ function DataTab() {
                 <TableHeader>
                   <TableRow>
                     <TableHead className="pl-4 sm:pl-6">Name</TableHead>
+                    <TableHead>Cluster</TableHead>
                     <TableHead>Class</TableHead>
                     <TableHead className="text-right">Bytes used</TableHead>
                     <TableHead className="text-right">Objects</TableHead>
@@ -466,10 +489,17 @@ function DataTab() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {pools.map((p) => (
-                    <TableRow key={`${p.name}-${p.class}`}>
+                  {sortedPools.map((p, idx) => (
+                    <TableRow key={`${p.cluster ?? ''}-${p.name}-${p.class}-${idx}`}>
                       <TableCell className="pl-4 font-mono text-xs sm:pl-6">
                         {p.name || '—'}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">
+                        {p.cluster ? (
+                          p.cluster
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
                       </TableCell>
                       <TableCell className="font-mono text-xs">
                         {p.class || '—'}

@@ -166,4 +166,5 @@ export const queryKeys = {
     classes: ['storage', 'classes'] as const,
     health: ['storage', 'health'] as const,
   },
+  clusters: ['clusters'] as const,
 };

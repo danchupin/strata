@@ -43,8 +43,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "PoolStatus gained optional `cluster?: string` in web/src/api/storage.ts. Storage.tsx Data tab mounts <ClustersSubsection pools={sortedPools}/> above the Pools table when backend !== memory; memory branch still falls through to the existing MemoryExplainer. The Pools table grew a new \"Cluster\" column (mono-font, between Name and Class) with empty values rendered as a muted \"—\". DataTab now sorts pools ascending by cluster (empty last) before render so the sort contract is explicit at the call site even though rados/health.go already returns grouped order. ClustersSubsection + ConfirmDrainModal + api/clusters.ts were already on the branch from earlier work; they read the new cluster field via the existing PoolStatus prop. Typecheck + pnpm build pass. Browser verification deferred to US-006 Playwright spec (no local dev-browser tool available in this run — manual visual check noted)."
     },
     {
       "id": "US-003",

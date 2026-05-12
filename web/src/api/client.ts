@@ -37,6 +37,14 @@ export {
 } from './storage';
 
 export {
+  fetchClusters,
+  drainCluster,
+  undrainCluster,
+  type ClusterStateEntry,
+  type ClustersListResponse,
+} from './clusters';
+
+export {
   login,
   logout,
   whoami,
