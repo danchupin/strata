@@ -60,3 +60,20 @@ Cycle: ralph/placement-ui
   - **Browser verification**: no local dev-browser tool available — manual `pnpm dev` + visual check is recommended before the cycle closes; US-006 Playwright spec will exercise the full flow in CI.
 ---
 
+## 2026-05-12 - US-003
+- Implemented: BucketDetail Placement tab between Access Log and Hot Shards. Slider + numeric input per registered cluster; Save (PUT) and Reset to default (DELETE w/ confirmation Dialog). Reuses the shared `clusters` query key from US-002.
+- Files changed:
+  - web/src/api/placement.ts (new) — fetchBucketPlacement (returns null on 404), setBucketPlacement, deleteBucketPlacement
+  - web/src/api/client.ts — re-exports placement wrappers + BucketPlacementJSON type
+  - web/src/lib/query.ts — `queryKeys.buckets.placement(name)` added
+  - web/src/components/BucketPlacementTab.tsx (new) — slider editor, save/reset, confirmation Dialog, draining-cluster chip
+  - web/src/pages/BucketDetail.tsx — imports BucketPlacementTab; new TabsTrigger value="placement" between Access Log and Hot Shards; new TabsContent
+- **Learnings for future iterations:**
+  - **No `<Slider>` or `<Tooltip>` primitives in `web/src/components/ui/`.** PRD AC mentioned them but they don't exist. Use native `<input type="range">` with Tailwind classes (`h-2 w-full appearance-none rounded-full bg-muted accent-primary`) and the native `title` attribute for tooltip-like hints. Don't add Radix Slider / Tooltip deps just to satisfy the AC text — the slider element + accent color is sufficient and stays within the bundle budget.
+  - **No `<Popover>` primitive either.** Confirmation popovers in this codebase use the Dialog primitive (see DeleteBucketDialog, ConfirmDrainModal). Mirror that shape — small DialogContent with description + DialogFooter Cancel/Confirm buttons — instead of inventing a new popover.
+  - **404 on a single-resource admin endpoint maps to `null` at the API client boundary.** `fetchBucketPlacement` and `fetchBucketLogging` both return `Promise<T | null>` on 404 so consumers can branch on data presence with `data == null` instead of catching errors. Pair with `meta: { silent: true }` on the useQuery so the global error toast doesn't fire for "nothing configured yet" states.
+  - **`rowsToPlacement` filters out zero-weight rows before PUT.** The server's `meta.ValidatePlacement` requires every weight in [0,100] with sum > 0; sending explicit zeros is technically valid but redundant. Filter clientside so the wire shape mirrors what a curl operator would write by hand.
+  - **`queryKeys.clusters` is the shared dedup key for cluster topology.** Now consumed by ClustersSubsection (10s poll), BucketPlacementTab (one-shot fetch), and future US-004 PlacementDrainBanner (15s poll). All three reads short-circuit through the same TanStack cache entry — don't define per-component cluster query keys.
+  - **Two-way slider + number input binding is pure state.** Bind both inputs to the same `rows[id].weight` field; the slider's `onChange` updates state, the number input's `onChange` updates state, both re-render from the same source. No `useEffect` sync needed.
+---
+

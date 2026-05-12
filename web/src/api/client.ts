@@ -45,6 +45,13 @@ export {
 } from './clusters';
 
 export {
+  fetchBucketPlacement,
+  setBucketPlacement,
+  deleteBucketPlacement,
+  type BucketPlacementJSON,
+} from './placement';
+
+export {
   login,
   logout,
   whoami,

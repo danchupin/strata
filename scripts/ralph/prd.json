@@ -66,8 +66,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Placement tab added between Access Log and Hot Shards on BucketDetail. New web/src/api/placement.ts wraps GET/PUT/DELETE /admin/v1/buckets/{name}/placement (GET returns null on 404 NoSuchPlacement so the empty-state renders without a try/catch). queryKeys.buckets.placement(name) added. BucketPlacementTab.tsx reads clusters via shared queryKeys.clusters (dedups with ClustersSubsection + future drain banner), filters out state='removed' but keeps 'draining' clusters editable (with a (draining) badge). One row per cluster: mono-font id Label + native <input type='range' min=0 max=100 accent-primary> + paired Input type='number' (both bound to same RowState[id].weight, so slider moves update input and typing updates slider). clampWeight rounds + clamps to [0,100]; non-numeric Input entries are dropped (Number.isFinite guard); empty string maps to 0. Save validates: dirty && some weight > 0 && every weight in [0,100]; disabled tooltip explains the blocking rule via native title attribute (no Tooltip primitive in the repo). Save filters out zero-weight rows before POSTing {placement: {id: weight, ...}}. Reset to default opens a confirmation Dialog (no Popover primitive in the repo — Dialog is the existing confirmation analogue used by DeleteBucketDialog and ConfirmDrainModal); on confirm it DELETEs the placement, invalidates queryKeys.buckets.placement(name), toasts, closes. Errors surface via inline destructive banner + toast. Bundle: index chunk 677.91 KiB / 187.28 KiB gz (no per-story budget on US-003 beyond `pnpm run build` succeeding). Typecheck + build pass. Browser verification deferred to US-006 Playwright spec — no local dev-browser tool in this run."
     },
     {
       "id": "US-004",
