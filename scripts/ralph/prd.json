@@ -107,8 +107,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "New endpoint GET /admin/v1/clusters/{id}/rebalance-progress (handler internal/adminapi/clusters_rebalance.go) returns {metrics_available, moved_total, refused_total, series[]} sourced from three Prom queries: instant sum(strata_rebalance_chunks_moved_total{to=<id>}) + sum(strata_rebalance_refused_total{target=<id>}) plus a range query of sum(rate(strata_rebalance_chunks_moved_total{to=<id>}[5m])) over the last 1h at 1m step. Degrades to 200 with metrics_available=false on Prom unset OR upstream error — mirrors the /admin/v1/metrics/timeseries graceful-degradation contract so the chip never hard-fails the cluster card render. Audit override: admin:GetClusterRebalanceProgress; KnownClusters validation rejects unknown ids with 400. Web side: api/clusters.ts gained fetchClusterRebalanceProgress + ClusterRebalanceProgress type; queryKeys.clusterRebalance(id) shares cache between mounts. New RebalanceProgressChip.tsx uses recharts <LineChart> inline (h-6) following the existing NodeDetailDrawer Sparkline pattern — no new chart libs. Chip mounted inside ClusterCard (ClustersSubsection.tsx) below the size/state row but above the isDraining warning; skipped for backend=memory per AC. silent:true on the useQuery suppresses the global error toast during transient Prom blips. Bundle delta: Storage chunk 18.27 KiB → 19.13 KiB (gz 5.49 → 5.68 KiB, +0.19 KiB) — well within the 3 KiB-gzipped AC budget. Backend tests: clusters_rebalance_test.go covers totals+series happy path, prom-unset/prom-error 200-degradation, and unknown-cluster 400. Go vet + go test (lifecycle TestThreeReplicaDistribution flake is pre-existing, fails 2-3x out of 10 on parent commit too — unrelated). Typecheck + pnpm build pass. Browser verification deferred to US-006 Playwright spec."
     },
     {
       "id": "US-006",

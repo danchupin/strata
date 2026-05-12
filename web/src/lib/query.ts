@@ -168,4 +168,5 @@ export const queryKeys = {
     health: ['storage', 'health'] as const,
   },
   clusters: ['clusters'] as const,
+  clusterRebalance: (id: string) => ['clusters', 'rebalance', id] as const,
 };

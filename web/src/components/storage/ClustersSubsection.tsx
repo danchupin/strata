@@ -23,6 +23,7 @@ import { showToast } from '@/lib/toast-store';
 import { cn } from '@/lib/utils';
 
 import { ConfirmDrainModal } from './ConfirmDrainModal';
+import { RebalanceProgressChip } from './RebalanceProgressChip';
 
 const CLUSTERS_POLL_MS = 10_000;
 
@@ -221,6 +222,9 @@ function ClusterCard({ cluster, usage }: ClusterCardProps) {
             </span>
           )}
         </div>
+        {cluster.backend.toLowerCase() !== 'memory' && (
+          <RebalanceProgressChip clusterID={cluster.id} />
+        )}
         {isDraining && (
           <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/5 p-2 text-xs text-amber-800 dark:text-amber-300">
             <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />

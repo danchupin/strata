@@ -19,6 +19,8 @@ Cycle: ralph/placement-ui
 - Verification per UI story: `pnpm run typecheck` + `pnpm run build`; verify in browser via dev-browser skill (Playwright runs in CI but local visual check should happen per-story before commit).
 - Build-tag refactor for ceph-only code: when a `//go:build ceph` file needs a piece of logic unit-tested without librados, extract that piece into a sibling file with no build tag (e.g. `health_helper.go` next to ceph-tagged `health.go`). The helper compiles + tests fine in regular `go test ./...`; the ceph-tagged file consumes it.
 - `internal/racetest/TestRunCleanRunNoInconsistencies` is a pre-existing flake — produces sporadic `read_after_write` GET/ETag-pair mismatches that have nothing to do with code under test. Re-run before assuming a real regression.
+- `internal/lifecycle/TestThreeReplicaDistribution` is ALSO a pre-existing flake — seeded bucket UUIDs are random, the hash distribution across 3 replicas exceeds the [1, 5] guard in 2-3 of 10 runs on the unmodified parent commit. Re-run before assuming a real regression.
+- **Per-cluster Prometheus chip pattern**: when a UI chip needs a Prom value parameterised by an admin-routed id (cluster id, bucket name), do NOT extend the named-metric registry in `internal/adminapi/metrics.go::metricSpecs` (that map's expr is fixed at registration time). Add a dedicated handler (e.g. `clusters_rebalance.go::handleClusterRebalanceProgress`) that `fmt.Sprintf`s the PromQL with the path-route id, mirrors the `s.Prom.Available() == false → 200 with metrics_available=false` graceful-degrade shape, and stamps an `admin:Get<...>` audit override. UI side: `silent: true` on the TanStack useQuery so a transient Prom blip doesn't toast across the polling cadence.
 
 ## 2026-05-12 - US-001
 - Implemented: PoolStatus carries cluster id end-to-end (RADOS, S3, memory backends). OpenAPI documents PoolStatus + DataHealthReport. Unit tests pin per-row Cluster propagation per backend.
@@ -93,5 +95,27 @@ Cycle: ralph/placement-ui
   - **localStorage dismissal stamp survives across refreshes; sessionStorage would not.** AC said `localStorage` literally — the operator's dismiss persists until they (or another tab) overwrite it. The set-of-ids stamp shape means a new draining cluster always re-surfaces the banner regardless of how stale the previous dismiss is.
   - **`dist/index.html` is the only tracked dist file.** Asset chunks (`dist/assets/*`) are gitignored and rebuilt by the consumer (go:embed in `console.go` picks them up at binary-build time). Commit only the regenerated `dist/index.html` after `pnpm run build` so the embedded SPA points at fresh asset paths.
   - **For US-005 next iteration**: the cluster card layout in ClustersSubsection has the existing "Cluster id + state Badge / backend + used bytes / Drain button" rows. The Rebalance progress chip goes "below the size/state row inside each ClusterCard" — that means between the backend+used-bytes flex row and the isDraining warning box. ClusterCard is internal to ClustersSubsection.tsx; reach for a prop wiring rather than re-introducing a separate file.
+---
+
+## 2026-05-12 - US-005
+- Implemented: per-cluster Rebalance progress chip rendered inside each ClusterCard. Backend handler `GET /admin/v1/clusters/{id}/rebalance-progress` returns `{metrics_available, moved_total, refused_total, series[]}` from three Prom queries (two instant counters + one 1h/1m rate range). Graceful 200-with-metrics_available=false on Prom unset OR upstream error — chip renders "(metrics unavailable)" instead of erroring. Chip mounted between the size/state row and the isDraining warning; skipped when backend=memory per AC.
+- Files changed:
+  - internal/adminapi/clusters_rebalance.go (new) — handler + testable `buildClusterRebalanceProgress(ctx, prom, id, now)` helper
+  - internal/adminapi/clusters_rebalance_test.go (new) — totals+series happy path, prom-unset/prom-error 200-degradation, unknown-cluster 400
+  - internal/adminapi/server.go — registered `GET /admin/v1/clusters/{id}/rebalance-progress`
+  - internal/adminapi/openapi.yaml — `/clusters/{id}/rebalance-progress` path + `ClusterRebalanceProgress` schema
+  - web/src/api/clusters.ts — `fetchClusterRebalanceProgress(id)` + `ClusterRebalanceProgress` type
+  - web/src/api/client.ts — re-exports
+  - web/src/lib/query.ts — `queryKeys.clusterRebalance(id)`
+  - web/src/components/storage/RebalanceProgressChip.tsx (new) — counters + recharts inline sparkline (h-6, no new chart libs)
+  - web/src/components/storage/ClustersSubsection.tsx — mounts chip below the size/state row inside ClusterCard, skips backend=memory
+  - web/dist/index.html — rebuilt
+- Bundle delta: Storage chunk 18.27 KiB → 19.13 KiB (gz 5.49 → 5.68 KiB, +0.19 KiB) — well within 3 KiB gz cap.
+- **Learnings for future iterations:**
+  - **Don't extend `metricSpecs` for parameterised PromQL.** `internal/adminapi/metrics.go::metricSpecs` is a fixed-expr registry — the `__WINDOW__` placeholder is fine for "rate over step" but it can't carry a per-request label value like `{to="<id>"}`. For per-cluster / per-bucket Prom values, write a dedicated handler (mirroring `buckets_replication_lag.go`) that `fmt.Sprintf`s the PromQL with the path-route id. Cleanest pattern: one handler per UI chip, graceful-degrade on `!Prom.Available()`, audit override stamped via `s3api.SetAuditOverride`.
+  - **`silent: true` on chip useQuery.** A chip that polls every 30s against a Prom that may be transiently unreachable should not toast on every blip — set `meta: { silent: true }` so the global QueryCache.onError handler skips the toast. The chip itself reads `q.data?.metrics_available` and renders the "(metrics unavailable)" inline copy.
+  - **Recharts sparkline shape**: NodeDetailDrawer's Sparkline pattern (h-6 div + ResponsiveContainer + LineChart + Line) is the canonical inline-sparkline shape. No new chart libs needed — recharts is already in the bundle (lazy-loaded chunk `generateCategoricalChart`).
+  - **`isPending && !q.data` is the right loading guard for `placeholderData: keepPreviousData`** queries — `isPending` flips back to true on every refetch with `keepPreviousData` set, but `data` is populated. Only show the "Loading…" copy on the very first fetch.
+  - **For US-006 next iteration**: the chip is consumed in `ClusterCard` inside `ClustersSubsection.tsx`. Playwright spec for US-005 can assert "chunks moved" text appears OR "(metrics unavailable)" appears — both shapes are valid depending on Prom wiring in the test rig.
 ---
 

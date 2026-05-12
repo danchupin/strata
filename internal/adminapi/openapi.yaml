@@ -301,6 +301,38 @@ components:
           type: array
           items: { $ref: '#/components/schemas/ClusterStateEntry' }
 
+    ClusterRebalanceProgress:
+      type: object
+      required: [metrics_available, moved_total, refused_total, series]
+      description: |
+        Per-cluster rebalance counters + 1h / 1m-step sparkline returned by
+        GET /clusters/{id}/rebalance-progress (US-005 placement-ui). When
+        `metrics_available=false` the totals are zero and `series` is
+        empty — the UI chip renders "(metrics unavailable)" instead of
+        zeros so the cluster card surface still mounts.
+      properties:
+        metrics_available: { type: boolean }
+        moved_total:
+          type: number
+          description: |
+            sum(strata_rebalance_chunks_moved_total{to="<id>"}) at sample
+            time.
+        refused_total:
+          type: number
+          description: |
+            sum(strata_rebalance_refused_total{target="<id>"}) at sample
+            time.
+        series:
+          type: array
+          description: |
+            One-hour rate sparkline at 1m resolution. Each tuple is
+            [epoch_ms, rate].
+          items:
+            type: array
+            minItems: 2
+            maxItems: 2
+            items: { type: number }
+
     PoolStatus:
       type: object
       required: [name, class, bytes_used, object_count, num_replicas, state]
@@ -580,6 +612,31 @@ paths:
       responses:
         '204':
           description: Undrain flipped.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /clusters/{id}/rebalance-progress:
+    get:
+      summary: Per-cluster rebalance counters + sparkline (US-005 placement-ui)
+      operationId: getClusterRebalanceProgress
+      description: |
+        Returns the cumulative chunks-moved + chunks-refused counters
+        scoped to the destination cluster, plus a 1h / 1m-step
+        sparkline of `rate(strata_rebalance_chunks_moved_total{to="<id>"}[5m])`.
+        Degrades to `metrics_available=false` with an empty series when
+        STRATA_PROMETHEUS_URL is unset or the upstream returns an
+        error — the UI chip renders "(metrics unavailable)" so the
+        cluster card stays mounted.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Rebalance progress.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClusterRebalanceProgress' }
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
