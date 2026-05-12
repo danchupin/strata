@@ -27,6 +27,22 @@ import (
 	strataotel "github.com/danchupin/strata/internal/otel"
 )
 
+// MoverMetrics is the sink for the mover-side counters
+// (strata_rebalance_bytes_moved_total, _chunks_moved_total,
+// _cas_conflicts_total). The cmd binary supplies
+// metrics.RebalanceObserver{}; tests can plug a counting fake.
+type MoverMetrics interface {
+	IncBytesMoved(from, to string, bytes int64)
+	IncChunksMoved(from, to, bucket string)
+	IncCASConflict(bucket string)
+}
+
+type nopMoverMetrics struct{}
+
+func (nopMoverMetrics) IncBytesMoved(string, string, int64)   {}
+func (nopMoverMetrics) IncChunksMoved(string, string, string) {}
+func (nopMoverMetrics) IncCASConflict(string)                 {}
+
 // Move records one chunk that needs to migrate from FromCluster to
 // ToCluster under the bucket's current placement policy. Emitted by
 // scanDistribution per (object, chunkIdx). Mover implementations
@@ -41,6 +57,15 @@ type Move struct {
 	ChunkIdx    int
 	FromCluster string
 	ToCluster   string
+	// SrcRef is the source ChunkRef (cluster/pool/namespace/oid/size).
+	// Movers Read from SrcRef + Write to ToCluster + the same
+	// pool/namespace under a freshly-minted OID. Populated at scan time
+	// so movers do not re-decode the manifest.
+	SrcRef data.ChunkRef
+	// Class is the object's storage class at scan time. Movers pass it
+	// as both expectedClass and newClass when issuing the manifest CAS
+	// — rebalance never changes class.
+	Class string
 }
 
 // PlanEmitter receives the per-bucket move plan + actual/target chunk
@@ -249,6 +274,8 @@ func (w *Worker) scanDistribution(ctx context.Context, b *meta.Bucket, policy ma
 					ChunkIdx:    idx,
 					FromCluster: c.Cluster,
 					ToCluster:   want,
+					SrcRef:      c,
+					Class:       o.StorageClass,
 				})
 			}
 		}

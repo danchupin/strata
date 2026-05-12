@@ -97,6 +97,24 @@ testcontainers to find the engine.
                           bucket and writes manifest.json + CSV.gz pairs
                           into the configured target bucket. Leader-elected
                           on `inventory-leader`.
+  strata server --workers=rebalance -> internal/rebalance: leader-elected on
+                          `rebalance-leader`. Walks every bucket with a
+                          non-nil Placement, plans per-chunk moves whose
+                          current cluster does not match placement.PickCluster,
+                          and dispatches the plan via a MoverChain emitter.
+                          Build-tag `ceph` plugs a RadosMover that reads from
+                          the source cluster, writes a fresh OID on the
+                          target, then issues per-object manifest CAS via
+                          meta.Store.SetObjectStorage; CAS losers (old chunks
+                          on success, new chunks on reject) go to the GC
+                          queue via EnqueueChunkDeletion. Knobs:
+                          STRATA_REBALANCE_INTERVAL (default 1h, range
+                          [1m, 24h]), STRATA_REBALANCE_RATE_MB_S (default 100,
+                          range [1, 10000]; both read + write consume from
+                          the same token-bucket so a chunk move costs
+                          chunkSize × 2 tokens), STRATA_REBALANCE_INFLIGHT
+                          (default 4, range [1, 64]; per-Move(plan) errgroup
+                          bound shared between copy and CAS phases).
   internal/reshard      -> per-bucket online shard-resize worker (US-045);
                           driven synchronously via /admin/bucket/reshard or
                           as a daemon.

@@ -233,6 +233,30 @@ var (
 		},
 		[]string{"bucket"},
 	)
+
+	RebalanceBytesMovedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_rebalance_bytes_moved_total",
+			Help: "Bytes copied between data clusters by the rebalance worker (US-004 RADOS / US-005 S3). Counted on the target write so retried reads do not double-count.",
+		},
+		[]string{"from", "to"},
+	)
+
+	RebalanceChunksMovedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_rebalance_chunks_moved_total",
+			Help: "Chunks successfully copied between clusters by the rebalance worker (US-004/US-005). Incremented once per chunk after the target write returns.",
+		},
+		[]string{"from", "to", "bucket"},
+	)
+
+	RebalanceCASConflictsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_rebalance_cas_conflicts_total",
+			Help: "Manifest SetObjectStorage CAS conflicts during a rebalance move (US-004/US-005). Incremented when a concurrent client write wins the LWT and the freshly-copied target chunks get enqueued into the GC queue.",
+		},
+		[]string{"bucket"},
+	)
 )
 
 func Register() {
@@ -261,6 +285,9 @@ func Register() {
 		CassandraLWTConflictsTotal,
 		QuotaReconcileDriftBytes,
 		RebalancePlannedMovesTotal,
+		RebalanceBytesMovedTotal,
+		RebalanceChunksMovedTotal,
+		RebalanceCASConflictsTotal,
 	)
 }
 
@@ -517,6 +544,39 @@ func (RebalanceObserver) IncPlannedMove(bucket string) {
 		bucket = "unknown"
 	}
 	RebalancePlannedMovesTotal.WithLabelValues(bucket).Inc()
+}
+
+func (RebalanceObserver) IncBytesMoved(from, to string, bytes int64) {
+	if bytes <= 0 {
+		return
+	}
+	if from == "" {
+		from = "unknown"
+	}
+	if to == "" {
+		to = "unknown"
+	}
+	RebalanceBytesMovedTotal.WithLabelValues(from, to).Add(float64(bytes))
+}
+
+func (RebalanceObserver) IncChunksMoved(from, to, bucket string) {
+	if from == "" {
+		from = "unknown"
+	}
+	if to == "" {
+		to = "unknown"
+	}
+	if bucket == "" {
+		bucket = "unknown"
+	}
+	RebalanceChunksMovedTotal.WithLabelValues(from, to, bucket).Inc()
+}
+
+func (RebalanceObserver) IncCASConflict(bucket string) {
+	if bucket == "" {
+		bucket = "unknown"
+	}
+	RebalanceCASConflictsTotal.WithLabelValues(bucket).Inc()
 }
 
 // AuditStreamObserver implements the auditstream.MetricsSink interface. The

@@ -17,21 +17,30 @@ func init() {
 // buildRebalance reads STRATA_REBALANCE_INTERVAL / _RATE_MB_S / _INFLIGHT
 // at constructor time, clamps out-of-range values with a WARN, and wires
 // the prometheus observer. Single leader cluster-wide via the outer
-// `rebalance-leader` lease (SkipLease=false).
+// `rebalance-leader` lease (SkipLease=false). The PlanEmitter is a
+// MoverChain seeded with whichever movers the build tag enables (RADOS
+// under `ceph`, S3 under US-005); chains with no movers fall back to
+// the plan-logging only behaviour shipped in US-003.
 func buildRebalance(deps Dependencies) (Runner, error) {
 	interval := clampDuration(deps,
 		"STRATA_REBALANCE_INTERVAL", time.Hour,
 		1*time.Minute, 24*time.Hour,
 	)
-	rate := clampInt(deps, "STRATA_REBALANCE_RATE_MB_S", 100, 1, 10000)
+	rateMBPerSec := clampInt(deps, "STRATA_REBALANCE_RATE_MB_S", 100, 1, 10000)
 	inflight := clampInt(deps, "STRATA_REBALANCE_INFLIGHT", 4, 1, 64)
+	throttle := rebalance.NewThrottle(int64(rateMBPerSec)*1024*1024, int64(rateMBPerSec)*1024*1024)
+	chain := &rebalance.MoverChain{
+		Movers: rebalanceMovers(deps, throttle, inflight),
+		Logger: deps.Logger,
+	}
 	return rebalance.New(rebalance.Config{
 		Meta:         deps.Meta,
 		Data:         deps.Data,
 		Logger:       deps.Logger,
 		Metrics:      metrics.RebalanceObserver{},
+		Emitter:      chain,
 		Interval:     interval,
-		RateMBPerSec: rate,
+		RateMBPerSec: rateMBPerSec,
 		Inflight:     inflight,
 		Tracer:       deps.Tracer.Tracer("strata.worker.rebalance"),
 	})
