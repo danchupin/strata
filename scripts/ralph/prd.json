@@ -87,8 +87,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "PlacementDrainBanner mounted inside <AppShell> above <main> (AppShell only renders under RequireAuth so /login is excluded by route; banner also guards explicitly via useLocation().pathname.startsWith('/login')). Polls /admin/v1/clusters every 15s via shared queryKeys.clusters key (dedups with ClustersSubsection 10s poll — TanStack picks the shorter cadence). Renders only when ≥1 cluster has state=draining. Orange palette mirrors StorageDegradedBanner exactly (border-amber-500/40 bg-amber-500/10), AlertTriangle icon, text 'Draining cluster(s): <id1>, <id2>. Rebalance worker is moving chunks off them.' with 'View details →' Link to /storage#clusters. Dismiss writes JSON.stringify(sortedIds) to localStorage key 'drain_banner_dismissed' (literal key name per AC). Comparison logic extracted into pure module web/src/components/layout/placement-drain-banner-dismissal.ts so node:test can exercise stampForDrainingIds + shouldHideBanner without React: same set hidden, superset shown, subset shown, disjoint shown, null/empty stamp never hides — all green via `pnpm run test:unit`. Repo has no jest/vitest so the test runner is node --test (Node>=20 per engines floor); file extension `.mjs` keeps tsc from picking it up. Bundle delta: index chunk gz 187.28 → 187.58 KiB (+0.30 KiB, within 2 KiB cap). Typecheck + build pass. Browser verification deferred to US-006 Playwright spec."
     },
     {
       "id": "US-005",

@@ -9,7 +9,8 @@
     "typecheck": "tsc -b --noEmit",
     "preview": "vite preview",
     "e2e": "playwright test",
-    "e2e:install": "playwright install --with-deps chromium"
+    "e2e:install": "playwright install --with-deps chromium",
+    "test:unit": "node --test src/components/layout/__tests__/placement-drain-banner-dismissal.test.mjs"
   },
   "dependencies": {
     "@monaco-editor/react": "4.6.0",

@@ -13,6 +13,7 @@ import { Input } from '@/components/ui/input';
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from '@/components/ui/sheet';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { UserMenu } from '@/components/user-menu';
+import { PlacementDrainBanner } from '@/components/layout/PlacementDrainBanner';
 import { SidebarNav } from '@/components/layout/SidebarNav';
 import { cn } from '@/lib/utils';
 import { fetchClusterStatus } from '@/api/client';
@@ -163,6 +164,7 @@ export function AppShell() {
           </div>
         </header>
 
+        <PlacementDrainBanner />
         <main className="flex-1 px-4 py-6 sm:px-6 lg:px-8">
           <Outlet />
         </main>
