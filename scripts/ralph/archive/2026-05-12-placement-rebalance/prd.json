@@ -1,0 +1,162 @@
+{
+  "project": "Strata",
+  "branchName": "ralph/placement-rebalance",
+  "description": "Per-bucket placement policy + cross-cluster rebalance worker. Closes ROADMAP P2 line 185. Adds meta.Bucket.Placement={cluster:weight} policy, chunk PUT routes via stable fnv32a hash-mod, new `strata server --workers=rebalance` leader-elected mover (RADOS + S3 sides) copies chunks A->B until actual distribution matches the policy, plus safety rails (refuse >90% target fill, drain sentinel via cluster_state row). Operator workflow: register new cluster -> set Placement -> drain old -> rebalance worker converges -> deregister via env. Zero behavior change for existing buckets without a policy (Placement=nil short-circuits to $defaultCluster).",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "meta.Bucket.Placement field + admin API + contract test",
+      "description": "As an operator, I want to set and inspect a placement policy on a bucket so I can control how its chunks spread across clusters.",
+      "acceptanceCriteria": [
+        "Add `Placement map[string]int` field to `meta.Bucket` with `json:\"placement,omitempty\"` tag",
+        "Add `meta.Store` triple `SetBucketPlacement(ctx, name, map[string]int) error`, `GetBucketPlacement(ctx, name) (map[string]int, error)`, `DeleteBucketPlacement(ctx, name) error` and implement on memory + cassandra (via blob-config helper `setBucketBlob`/`getBucketBlob`/`deleteBucketBlob`) + tikv backends",
+        "Validation: weight `[0, 100]`, `sum(weights) > 0` else `ErrInvalidPlacement`, cluster name must resolve to a live entry in `STRATA_RADOS_CLUSTERS` / `STRATA_S3_CLUSTERS` else `ErrUnknownCluster` (both new sentinel errors in `meta/store.go`)",
+        "Get on a bucket without policy returns `(nil, nil)` — NOT an error — so the routing path can fall back to `$defaultCluster`",
+        "Admin API endpoints `PUT/GET/DELETE /admin/v1/buckets/{name}/placement` wired in `internal/adminapi/`; GET returns 404 when unset",
+        "OpenAPI spec at `internal/adminapi/openapi.yaml` updated to describe the new placement endpoints + request/response schemas",
+        "Audit row stamped via `s3api.SetAuditOverride(ctx, \"admin:PutBucketPlacement\", ...)` on PUT/DELETE",
+        "Contract test `caseBucketPlacement` added to `internal/meta/storetest/contract.go` exercising all three backends (round-trip + nil-policy fallback + validation failures)",
+        "Unit tests on the validation path (weight out-of-range, sum=0, unknown cluster)",
+        "`go vet ./...` passes",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "PutChunks consults policy with hash-mod stable routing",
+      "description": "As a developer, I need the chunk PUT path to route via the placement policy so chunks spread per the operator's weights and the same chunk always lands on the same cluster across retries.",
+      "acceptanceCriteria": [
+        "New helper `internal/data/placement/router.go::PickCluster(bucketID uuid.UUID, key string, chunkIdx int, policy map[string]int) string` using `fnv32a(\"<bucketID>/<key>/<chunkIdx>\") % sum(weights)` walking the weight wheel over a sorted-cluster-id slice",
+        "Empty/nil policy → returns `\"\"` so caller falls back to existing `$defaultCluster` behavior (no breaking change for unconfigured buckets)",
+        "Zero-weight clusters in the policy are never picked",
+        "Deterministic: 1000 random `(key, idx)` pairs produce identical output across repeat calls (unit test)",
+        "Distribution: 10000 chunks with weights `{a:1, b:1}` split ~50/50 (within 5%); weights `{a:1, b:3}` split ~25/75 (within 5%) (unit tests)",
+        "`internal/data/rados/Backend.PutChunks` reads `Bucket.Placement` (passed via the existing call path that already has the bucket struct) and routes each chunk via `placement.PickCluster`; falls back to `$defaultCluster` when picker returns `\"\"`",
+        "`internal/data/s3/Backend.PutChunks` same pattern — calls `placement.PickCluster` and uses the returned cluster to resolve the per-cluster `*awss3.Client` + bucket via existing `resolveClass` plumbing",
+        "Backwards-compat unit test: buckets with `Placement == nil` route exactly as today (regression-test against existing single-cluster RADOS / S3 fixtures)",
+        "`go vet ./...` passes",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Rebalance worker scaffold + leader election + plan emission",
+      "description": "As an operator, I want a background worker that periodically scans buckets and reports actual-vs-target chunk distribution so I can see migration progress without code-diving.",
+      "acceptanceCriteria": [
+        "New file `cmd/strata/workers/rebalance.go` registers a worker named `rebalance` via `init()` calling `workers.Register(workers.Worker{Name: \"rebalance\", Build: ..., SkipLease: false})`",
+        "New package `internal/rebalance/` with `Worker` implementing `workers.Runner`",
+        "Leader-elected on outer `rebalance-leader` lease (`SkipLease: false` — single leader cluster-wide)",
+        "Envs read at constructor time via `os.Getenv`: `STRATA_REBALANCE_INTERVAL` (Go duration, default `1h`, range `[1m, 24h]`), `STRATA_REBALANCE_RATE_MB_S` (int, default `100`, range `[1, 10000]`), `STRATA_REBALANCE_INFLIGHT` (int, default `4`, range `[1, 64]`); out-of-range values clamped + WARN-logged",
+        "Per-iteration: walk `meta.Store.ListAllBuckets`; for each bucket with non-nil `Placement` call `scanDistribution(bucket)` that returns `map[cluster]chunkCount` (actual) + `[]Move{ObjectKey, ChunkIdx, FromCluster, ToCluster}`",
+        "`executeMoves(plan)` is a stub returning `nil` in this story (mover wired in US-004/US-005); worker logs INFO `\"rebalance plan\"` with `bucket=<name>`, `moves=<n>`, `actual=<map>`, `target=<map>` per bucket",
+        "Iteration span: `tracer.Start(ctx, \"worker.rebalance.tick\")` via the shared iteration_span helper from `internal/otel`; sub-op span `rebalance.scan_bucket` per bucket scan",
+        "Per-iteration counter metric `strata_rebalance_planned_moves_total{bucket}` incremented per planned move",
+        "Worker registered in supervisor list; `STRATA_WORKERS=rebalance` accepted by `workers.Resolve`",
+        "Unit tests cover the scan loop against an in-memory `meta.Store` with seeded `Bucket{Placement}` + a fake manifest reader; no real data backend required",
+        "`go vet ./...` passes",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "RADOS-side mover — Read + Write + manifest CAS + GC enqueue",
+      "description": "As an operator, I want the rebalance worker to actually move chunks between RADOS clusters so the distribution converges on the policy without manual `rados cp` ceremony.",
+      "acceptanceCriteria": [
+        "New file `internal/rebalance/rados_mover.go` exposing `Move(ctx, src, tgt RadosCluster, plan []Move) error` (interface-typed `RadosCluster` so unit tests can fake without librados)",
+        "Per move: `Read(srcIoctx, oid)` → `Write(tgtIoctx, newOID)` (new random OID to avoid cross-pool name collisions); collect into per-object batches keyed `(bucketID, objectKey)`",
+        "Per-object batched manifest CAS via existing `meta.Store.SetObjectStorage(ctx, bucket, key, versionID, expectedClass, newClass, updatedManifest)` — single LWT per object even when multiple chunks moved (pass `expectedClass == currentClass` because rebalance doesn't change class)",
+        "On manifest CAS success: enqueue OLD `{Pool, OID}` into the GC queue via existing `meta.Store.EnqueueGCEntry`",
+        "On manifest CAS reject (`applied=false`): enqueue the NEW (target) `{Pool, OID}` into GC instead so the unused copy gets cleaned, increment `strata_rebalance_cas_conflicts_total{bucket}` counter, and continue with the next object",
+        "Token-bucket bandwidth throttle from `golang.org/x/time/rate` at `STRATA_REBALANCE_RATE_MB_S` (bytes/sec); both read + write consume from the same bucket so `chunkSize × 2` tokens per move",
+        "Bounded `errgroup` worker pool at `STRATA_REBALANCE_INFLIGHT`",
+        "Metrics: `strata_rebalance_bytes_moved_total{from,to}` (counter), `strata_rebalance_chunks_moved_total{from,to,bucket}` (counter)",
+        "Per-move span `rebalance.move_chunk` with attrs `bucket`, `object_key`, `from`, `to`, `chunk_idx`",
+        "Two-cluster integration test (gated by the `integration` build tag; gracefully `t.Skip` when only one RADOS cluster is available in the test env): plant 100 chunks via PUT against cluster `c1`, flip Placement to `{c1:0, c2:1}`, run one rebalance tick, assert (a) 100 chunks now visible on `c2`, (b) old OIDs enqueued in GC queue, (c) manifests reference the new pool",
+        "`go vet ./...` passes",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "S3-side mover — CopyObject + Get/Put fallback",
+      "description": "As an operator running multi-cluster S3-over-S3, I want the rebalance worker to move chunks between S3 clusters using the cheapest available SDK path.",
+      "acceptanceCriteria": [
+        "New file `internal/rebalance/s3_mover.go` exposing `Move(ctx, src, tgt S3Cluster, plan []Move) error` (interface-typed `S3Cluster` so unit tests can fake without minio)",
+        "If `src.Endpoint == tgt.Endpoint && src.Region == tgt.Region` → `awss3.CopyObject` (server-side copy — no bytes through gateway)",
+        "Else → `GetObject` from src streaming into `PutObject` on tgt via `manager.Uploader` (chunk-size buffered, no full-object materialisation)",
+        "Per-object batched manifest CAS via `meta.Store.SetObjectStorage` — same shape as RADOS mover",
+        "On CAS success: enqueue OLD `{Pool, OID}` into GC queue; on CAS reject: enqueue NEW (target) `{Pool, OID}` into GC and increment `strata_rebalance_cas_conflicts_total{bucket}`",
+        "Throttle + concurrency primitives shared with RADOS mover via `internal/rebalance/throttle.go` (token bucket + bounded errgroup helpers)",
+        "Metrics: same `_bytes_moved_total` + `_chunks_moved_total` counters (labels `from`/`to` carry S3 cluster ID)",
+        "Per-move span `rebalance.move_chunk` (same shape as RADOS mover)",
+        "Integration test with two minio testcontainers (tagged `integration`): plant 100 chunks on `c1`, set Placement `{c1:0, c2:1}`, run rebalance, assert chunks on `c2` and GC queue contains the old keys",
+        "`go vet ./...` passes",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Safety rails — cluster fill probe + drain sentinel + admin API",
+      "description": "As an operator, I want the rebalance worker to refuse moves when the target is nearly full or when the source is mid-drain so I don't trigger a cascade or fight an in-flight deregistration.",
+      "acceptanceCriteria": [
+        "Add `data.Backend.ClusterStats(ctx, clusterID string) (usedBytes, totalBytes int64, err error)` interface method; RADOS implementation calls `(*Conn).MonCommand({\"prefix\":\"df\"})` parsed JSON; S3 implementation returns `ErrNotSupported`",
+        "Rebalance worker refuses to dispatch a move when `target.used/target.total > 0.90` (RADOS-only — S3 `ErrNotSupported` is treated as 'OK to proceed' with a one-line WARN per iteration); refusal logs WARN `\"rebalance refused: target full\"` with `bucket`, `target` labels; increments `strata_rebalance_refused_total{reason=\"target_full\",target}`",
+        "New `cluster_state` row keyed on `clusterID` storing `state ∈ {\"live\", \"draining\", \"removed\"}` via blob-config helpers in `meta.Store` (memory + cassandra + tikv); default is `\"live\"` (absence of row == live, no row required for the common case)",
+        "Admin API `POST /admin/v1/clusters/{id}/drain` flips state to `\"draining\"`, `POST /admin/v1/clusters/{id}/undrain` flips back to `\"live\"`, `GET /admin/v1/clusters` lists every cluster from env with state + last-scan chunk-count snapshot",
+        "OpenAPI spec at `internal/adminapi/openapi.yaml` updated to describe the cluster-state endpoints",
+        "Rebalance worker refuses moves INTO a `draining` cluster — same metric with label `reason=\"target_draining\"`",
+        "Rebalance worker ALLOWS moves OUT of a `draining` cluster — that's the whole point of the operator workflow",
+        "`placement.PickCluster` extended with a `drainingClusters map[string]bool` arg; entries in this set are skipped (treated as weight=0); if all clusters in the policy are draining → returns `\"\"` so caller falls back to `$defaultCluster`",
+        "In-process cache for the drain-state lookup with 30s TTL so the PUT hot path isn't burdened (`internal/rebalance/draincache.go` or similar)",
+        "Audit row stamped on drain/undrain admin API calls",
+        "Integration test: register 2 clusters, drain `c1`, verify (a) `GET /admin/v1/clusters` shows `c1.state=draining`, (b) new PUTs route to `c2` even when Placement is `{c1:1, c2:0}`, (c) rebalance worker moves chunks `c1 → c2`, (d) attempting to rebalance INTO a `c2` simulated as 95% full is refused",
+        "`go vet ./...` passes",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Docs + ROADMAP close-flip + PRD removal",
+      "description": "As a future operator, I need the operator workflow + tuning knobs documented so I can run a real cluster drain without code-diving.",
+      "acceptanceCriteria": [
+        "New page `docs/site/content/best-practices/placement-rebalance.md` covering the operator workflow (register → set Placement → drain → rebalance → deregister), `STRATA_REBALANCE_*` env tuning table, troubleshooting (CAS conflict storms, target-full refusals, drain-cache TTL)",
+        "`docs/site/content/best-practices/_index.md` gets a link entry for the new page",
+        "`docs/site/content/architecture/observability.md` adds the `strata_rebalance_*` metric family + `worker.rebalance.tick` / `rebalance.scan_bucket` / `rebalance.move_chunk` span shapes",
+        "Project root `CLAUDE.md` 'Background workers' section gets a new bullet describing `strata server --workers=rebalance` (env names, leader lease `rebalance-leader`, what meta + data surfaces it touches, note that `placement.PickCluster` consults the `cluster_state` drain map)",
+        "`ROADMAP.md` line 185 (the P2 entry) close-flip to `~~**P2 — Per-bucket placement policy + cross-cluster rebalance worker.**~~ — **Done.** <one-line summary referencing meta.Bucket.Placement, PickCluster routing, rebalance worker with RADOS+S3 movers, drain sentinel, and safety rails>. (commit `<pending>`)` — closing SHA backfilled in a follow-up commit on main per CLAUDE.md convention",
+        "`tasks/prd-placement-rebalance.md` REMOVED in the same commit (PRD lifecycle rule — Ralph snapshot under `scripts/ralph/archive/` is canonical)",
+        "`make docs-build` succeeds",
+        "`make vet` succeeds",
+        "`make test` succeeds",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": ""
+    }
+  ]
+}
