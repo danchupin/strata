@@ -127,10 +127,13 @@ type DataHealthReport struct {
 // PoolStatus is a single pool / backend-bucket row in DataHealthReport.
 // Class is the storage-class label from the configured classes map; for
 // backends that map every class to one bucket / pool (s3, memory) it is
-// the comma-joined list of classes.
+// the comma-joined list of classes. Cluster is the cluster id the pool /
+// bucket lives on; rendered empty for the memory backend (single virtual
+// cluster).
 type PoolStatus struct {
 	Name        string `json:"name"`
 	Class       string `json:"class"`
+	Cluster     string `json:"cluster,omitempty"`
 	BytesUsed   uint64 `json:"bytes_used"`
 	ObjectCount uint64 `json:"object_count"`
 	NumReplicas int    `json:"num_replicas"`

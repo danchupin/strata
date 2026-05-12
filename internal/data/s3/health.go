@@ -28,9 +28,10 @@ func (b *Backend) DataHealth(ctx context.Context) (*data.DataHealthReport, error
 		c, err := b.connFor(ctx, class.Cluster)
 		if err != nil {
 			report.Pools = append(report.Pools, data.PoolStatus{
-				Name:  class.Bucket,
-				Class: className,
-				State: "error",
+				Name:    class.Bucket,
+				Class:   className,
+				Cluster: class.Cluster,
+				State:   "error",
 			})
 			report.Warnings = append(report.Warnings, fmt.Sprintf("cluster %s: connect: %v", class.Cluster, err))
 			continue
@@ -44,9 +45,10 @@ func (b *Backend) DataHealth(ctx context.Context) (*data.DataHealthReport, error
 		}
 		cancel()
 		report.Pools = append(report.Pools, data.PoolStatus{
-			Name:  bucket,
-			Class: className,
-			State: state,
+			Name:    bucket,
+			Class:   className,
+			Cluster: class.Cluster,
+			State:   state,
 		})
 	}
 	return report, nil

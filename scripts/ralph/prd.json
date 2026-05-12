@@ -21,8 +21,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Cluster field added to data.PoolStatus (json:\"cluster,omitempty\"). RADOS health.go refactored: cluster-grouping extracted into build-tag-free internal/data/rados/health_helper.go::buildPendingPoolStatuses so the per-row Cluster field is unit-testable without librados. S3 health.go propagates class.Cluster into both error and reachable rows. Memory backend explicitly sets Cluster=\"\". OpenAPI: added PoolStatus + DataHealthReport schemas under components/schemas. Tests: rados/health_test.go covers two-cluster fixture + empty-cluster fallback + class grouping + sort order; s3/health_test.go uses capturingS3Server two-cluster fixture and asserts Cluster per class via real DataHealth call; memory/backend_test.go pins empty-cluster regression guard."
     },
     {
       "id": "US-002",

@@ -17,4 +17,25 @@ Cycle: ralph/placement-ui
 - ROADMAP close-flip rule (US-006): the new P3 entry was added under `## Web UI` section in the prep commit (text `**P3 — Web UI — Placement + cluster surfacing.**`). Flip to `~~**P3 — Web UI — Placement + cluster surfacing.**~~ — **Done.** <summary>. (commit \`<pending>\`)`. SHA backfilled in a follow-up commit on main.
 - `tasks/prd-placement-ui.md` REMOVED in the same commit as US-006 per CLAUDE.md PRD lifecycle rule (Ralph snapshot is canonical).
 - Verification per UI story: `pnpm run typecheck` + `pnpm run build`; verify in browser via dev-browser skill (Playwright runs in CI but local visual check should happen per-story before commit).
+- Build-tag refactor for ceph-only code: when a `//go:build ceph` file needs a piece of logic unit-tested without librados, extract that piece into a sibling file with no build tag (e.g. `health_helper.go` next to ceph-tagged `health.go`). The helper compiles + tests fine in regular `go test ./...`; the ceph-tagged file consumes it.
+- `internal/racetest/TestRunCleanRunNoInconsistencies` is a pre-existing flake — produces sporadic `read_after_write` GET/ETag-pair mismatches that have nothing to do with code under test. Re-run before assuming a real regression.
+
+## 2026-05-12 - US-001
+- Implemented: PoolStatus carries cluster id end-to-end (RADOS, S3, memory backends). OpenAPI documents PoolStatus + DataHealthReport. Unit tests pin per-row Cluster propagation per backend.
+- Files changed:
+  - internal/data/backend.go — added `Cluster string `json:"cluster,omitempty"`` to PoolStatus
+  - internal/data/rados/health.go — switched to buildPendingPoolStatuses helper; dropped inline poolKey/sort.Slice
+  - internal/data/rados/health_helper.go (new, no build tag) — pure-Go grouping helper buildPendingPoolStatuses(classes) returns []pendingPoolStatus sorted by (cluster, pool, ns)
+  - internal/data/rados/health_test.go (new) — two-cluster fixture, empty-cluster->DefaultCluster, class grouping, sort order
+  - internal/data/s3/health.go — populated Cluster on both error and reachable rows from class.Cluster
+  - internal/data/s3/health_test.go (new) — two-cluster capturingS3Server fixture, asserts Cluster value per class via DataHealth
+  - internal/data/memory/backend.go — explicit `Cluster: ""` in synthetic pool row
+  - internal/data/memory/backend_test.go (new) — pins Cluster=="" regression guard
+  - internal/adminapi/openapi.yaml — added PoolStatus + DataHealthReport schemas under components/schemas (no path entry; storage/data endpoint wasn't previously documented)
+- **Learnings for future iterations:**
+  - **`omitempty` + empty-string is the right shape for "this field optional per-backend".** A Go field of type `string` with `omitempty` serialises to absent for the memory backend (Cluster="") but populated for rados/s3. UI must handle both — "absent" key and "" value should both render as "—". Don't drift to a `*string` pointer; it forces every consumer through a nil check for no gain.
+  - **OpenAPI updates do NOT need a path entry.** When the storage/data path predates the schema-driven workflow, adding just the schema is correct — the AC says "schema definition", not "endpoint". Future stories that touch the storage endpoint should land the `/storage/data` path on the spec.
+  - **CI ceph build will exercise the refactored helper too.** Because `health_helper.go` has no build tag, both default and `-tags ceph` builds compile the same code; ceph tag only adds health.go on top. No risk of divergent semantics between unit-test and prod.
+  - **For US-002 next iteration**: the helper now returns sorted (cluster, pool, ns) tuples — the UI's "Cluster column on Pools table, sort ascending with empty last" can rely on that ordering. Storage page in React shouldn't re-sort the wire response.
+---
 

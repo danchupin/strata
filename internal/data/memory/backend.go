@@ -108,6 +108,7 @@ func (b *Backend) DataHealth(ctx context.Context) (*data.DataHealthReport, error
 		Pools: []data.PoolStatus{{
 			Name:        "memory",
 			Class:       "*",
+			Cluster:     "",
 			BytesUsed:   bytes,
 			ObjectCount: uint64(len(b.chunks)),
 			NumReplicas: 1,
