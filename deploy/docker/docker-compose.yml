@@ -156,6 +156,9 @@ services:
       STRATA_RADOS_CLUSTERS: "default:/etc/ceph-a/ceph.conf:/etc/ceph-a/ceph.client.admin.keyring,cephb:/etc/ceph-b/ceph.conf:/etc/ceph-b/ceph.client.admin.keyring"
       STRATA_RADOS_CONF: "/etc/ceph-a/ceph.conf"
       STRATA_RADOS_KEYRING: "/etc/ceph-a/ceph.client.admin.keyring"
+      STRATA_RADOS_CLASSES: ${STRATA_RADOS_CLASSES:-}
+      STRATA_REBALANCE_INTERVAL: ${STRATA_REBALANCE_INTERVAL:-30s}
+      STRATA_REBALANCE_RATE_MB_S: ${STRATA_REBALANCE_RATE_MB_S:-100}
       STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-off}
       STRATA_STATIC_CREDENTIALS: ${STRATA_STATIC_CREDENTIALS:-}
       STRATA_PROMETHEUS_URL: ${STRATA_PROMETHEUS_URL:-http://prometheus:9090}

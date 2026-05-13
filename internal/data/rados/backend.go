@@ -20,11 +20,12 @@ import (
 )
 
 type Backend struct {
-	clusters map[string]ClusterSpec
-	classes  map[string]ClassSpec
-	logger   *slog.Logger
-	metrics  Metrics
-	tracer   trace.Tracer
+	clusters    map[string]ClusterSpec
+	classes     map[string]ClassSpec
+	logger      *slog.Logger
+	metrics     Metrics
+	tracer      trace.Tracer
+	drainStrict bool
 
 	// putConcurrency caps the per-PutChunks worker pool that dispatches
 	// chunk writes to RADOS. Read once at New from
@@ -70,6 +71,7 @@ func New(cfg Config) (data.Backend, error) {
 		logger:         cfg.Logger,
 		metrics:        cfg.Metrics,
 		tracer:         cfg.Tracer,
+		drainStrict:    cfg.DrainStrict,
 		putConcurrency: putConcurrencyFromEnv(),
 		getPrefetch:    getPrefetchFromEnv(),
 		conns:          make(map[string]*goceph.Conn),
@@ -185,23 +187,32 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 	bucketID, _ := data.BucketIDFromContext(ctx)
 	objKey, _ := data.ObjectKeyFromContext(ctx)
 	draining, _ := data.DrainingClustersFromContext(ctx)
-	pickCluster := func(idx int) string {
+	pickCluster := func(idx int) (string, error) {
 		picked := placement.PickClusterExcluding(bucketID, objKey, idx, policy, draining)
 		if picked == "" {
-			return spec.Cluster
+			if b.drainStrict && draining[spec.Cluster] {
+				return "", data.NewDrainRefusedError(spec.Cluster)
+			}
+			return spec.Cluster, nil
 		}
 		if _, ok := b.clusters[picked]; !ok {
 			if b.logger != nil {
 				b.logger.WarnContext(ctx, "rados placement: picked cluster not configured; falling back",
 					"picked", picked, "fallback", spec.Cluster)
 			}
-			return spec.Cluster
+			if b.drainStrict && draining[spec.Cluster] {
+				return "", data.NewDrainRefusedError(spec.Cluster)
+			}
+			return spec.Cluster, nil
 		}
-		return picked
+		return picked, nil
 	}
 	objID := uuid.NewString()
 	putOne := func(opCtx context.Context, idx int, body []byte) (data.ChunkRef, error) {
-		cluster := pickCluster(idx)
+		cluster, pickErr := pickCluster(idx)
+		if pickErr != nil {
+			return data.ChunkRef{}, pickErr
+		}
 		ioctx, err := b.ioctx(opCtx, cluster, spec.Pool, spec.Namespace)
 		if err != nil {
 			return data.ChunkRef{}, err

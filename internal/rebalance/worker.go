@@ -84,12 +84,44 @@ type Metrics interface {
 	// reason is one of "target_full" / "target_draining"; target is the
 	// cluster id the move would have written to.
 	IncRefused(reason, target string)
+	// IncDrainComplete fires once per `>0 → 0` chunks_on_cluster
+	// transition observed by the rebalance worker (US-005 drain-
+	// lifecycle). Idempotent at the tracker layer — the counter mirrors
+	// the observed transitions, not the underlying audit log.
+	IncDrainComplete(cluster string)
 }
 
 type nopMetrics struct{}
 
 func (nopMetrics) IncPlannedMove(string)       {}
 func (nopMetrics) IncRefused(string, string)   {}
+func (nopMetrics) IncDrainComplete(string)     {}
+
+// DrainCompleteEvent is the wire payload handed to a DrainNotifier when
+// the rebalance worker detects a cluster's drain has reached zero
+// chunks (US-005). CompletedAt is UTC. BytesMoved is BaseBytes − Bytes
+// captured at scan-finish time (i.e. the total bytes that left the
+// cluster between the live → draining transition and completion).
+type DrainCompleteEvent struct {
+	Cluster     string
+	BytesMoved  int64
+	CompletedAt time.Time
+}
+
+// DrainNotifier is the optional best-effort sink for drain-complete
+// events (US-005). The notify-worker pipeline wires an adapter when
+// STRATA_NOTIFY_TARGETS is set; nil disables the fan-out. The worker
+// swallows every error returned from NotifyDrainComplete — notify
+// failure must never block the rebalance tick.
+type DrainNotifier interface {
+	NotifyDrainComplete(ctx context.Context, evt DrainCompleteEvent)
+}
+
+// DefaultDrainAuditRetention mirrors s3api.DefaultAuditRetention (30 days)
+// and is the row TTL applied to drain.complete audit_log entries when
+// Config.AuditTTL is zero. Hardcoded to keep the rebalance package free
+// of the s3api import.
+const DefaultDrainAuditRetention = 30 * 24 * time.Hour
 
 // Config wires a Worker. Defaults applied in New: Interval=1h,
 // PollLimit=1000, Now=time.Now, Logger=slog.Default. Metrics defaults
@@ -120,6 +152,20 @@ type Config struct {
 	// rebalance worker refuses to dispatch a move (US-006). Zero / <0
 	// falls back to DefaultFillCeiling (0.90).
 	FillCeiling float64
+	// Progress is the in-process draining-progress cache shared with the
+	// adminapi GET /admin/v1/clusters/{id}/drain-progress handler
+	// (US-003 drain-lifecycle). nil disables the per-tick scan
+	// accumulator — the move-planning side of the loop is unaffected.
+	Progress *ProgressTracker
+	// Notifier is the optional sink for drain-complete events (US-005).
+	// nil disables the fan-out — log + audit + metric still fire on
+	// every transition.
+	Notifier DrainNotifier
+	// AuditTTL is the row TTL applied to drain.complete audit_log
+	// entries. Zero falls back to DefaultDrainAuditRetention so the
+	// gateway and the worker keep the same retention shape without
+	// crossing an import boundary into s3api.
+	AuditTTL time.Duration
 }
 
 // DefaultFillCeiling is the conservative target_full threshold from the
@@ -198,12 +244,14 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 }
 
 func (w *Worker) runOnce(ctx context.Context) error {
+	tickStart := w.cfg.Now()
 	buckets, err := w.cfg.Meta.ListBuckets(ctx, "")
 	if err != nil {
 		return fmt.Errorf("list buckets: %w", err)
 	}
 	draining := w.loadDrainingClusters(ctx)
 	fillCache := w.newFillCache(ctx)
+	prog := newProgressAcc(w.cfg.Progress, draining)
 	for _, b := range buckets {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -215,11 +263,157 @@ func (w *Worker) runOnce(ctx context.Context) error {
 			continue
 		}
 		if len(policy) == 0 {
+			// Empty-policy buckets still need a progress scan so chunks
+			// on a draining cluster are counted toward the deregister-
+			// ready signal. The move plan is a no-op (no policy → no
+			// PickCluster verdicts).
+			w.scanBucketForProgress(ctx, b, draining, prog)
 			continue
 		}
-		w.scanAndEmit(ctx, b, policy, draining, fillCache)
+		w.scanAndEmit(ctx, b, policy, draining, fillCache, prog)
+	}
+	tickEnd := w.cfg.Now()
+	completions := prog.commit(w.cfg.Progress, draining, tickEnd)
+	for _, ev := range completions {
+		w.handleDrainComplete(ctx, ev, tickEnd.Sub(tickStart))
 	}
 	return nil
+}
+
+// handleDrainComplete fans the per-cluster `>0 → 0` transition out to
+// log + counter + audit + (optional) notify (US-005 drain-lifecycle).
+// Every sink is best-effort: a failed audit write logs WARN and falls
+// through; a notify failure is swallowed by the adapter. The metric is
+// bumped before the side-effects so the operator dashboards reflect
+// completion even when audit/notify wiring degrades.
+func (w *Worker) handleDrainComplete(ctx context.Context, ev CompletionEvent, scanDuration time.Duration) {
+	w.cfg.Logger.Info("drain complete",
+		"cluster", ev.Cluster,
+		"scan_seconds", scanDuration.Seconds(),
+		"final_bytes_moved", ev.BytesMoved,
+	)
+	w.cfg.Metrics.IncDrainComplete(ev.Cluster)
+	w.recordDrainCompleteAudit(ctx, ev)
+	if w.cfg.Notifier != nil {
+		w.cfg.Notifier.NotifyDrainComplete(ctx, DrainCompleteEvent{
+			Cluster:     ev.Cluster,
+			BytesMoved:  ev.BytesMoved,
+			CompletedAt: ev.ScanFinish,
+		})
+	}
+}
+
+// recordDrainCompleteAudit appends one audit_log row for the drain
+// completion. Failure is logged WARN — never propagated.
+func (w *Worker) recordDrainCompleteAudit(ctx context.Context, ev CompletionEvent) {
+	if w.cfg.Meta == nil {
+		return
+	}
+	ttl := w.cfg.AuditTTL
+	if ttl == 0 {
+		ttl = DefaultDrainAuditRetention
+	}
+	row := &meta.AuditEvent{
+		Bucket:    "-",
+		Time:      ev.ScanFinish.UTC(),
+		Principal: "system:rebalance-worker",
+		Action:    "drain.complete",
+		Resource:  "cluster:" + ev.Cluster,
+		Result:    "200",
+	}
+	if err := w.cfg.Meta.EnqueueAudit(ctx, row, ttl); err != nil {
+		w.cfg.Logger.Warn("drain complete: audit enqueue failed",
+			"cluster", ev.Cluster, "error", err.Error())
+	}
+}
+
+// progressAcc accumulates per-draining-cluster {chunks, bytes} for one
+// rebalance tick. The worker increments it from scanDistribution +
+// scanBucketForProgress and CommitScan-flushes at iteration end. nil
+// receiver short-circuits every method so callers do not need a
+// nil-check on the hot path.
+type progressAcc struct {
+	enabled bool
+	chunks  map[string]int64
+	bytes   map[string]int64
+}
+
+func newProgressAcc(p *ProgressTracker, draining map[string]bool) *progressAcc {
+	if p == nil || len(draining) == 0 {
+		return &progressAcc{}
+	}
+	chunks := make(map[string]int64, len(draining))
+	bytes := make(map[string]int64, len(draining))
+	for id := range draining {
+		chunks[id] = 0
+		bytes[id] = 0
+	}
+	return &progressAcc{enabled: true, chunks: chunks, bytes: bytes}
+}
+
+func (a *progressAcc) observe(clusterID string, draining map[string]bool, size int64) {
+	if a == nil || !a.enabled || clusterID == "" {
+		return
+	}
+	if !draining[clusterID] {
+		return
+	}
+	a.chunks[clusterID]++
+	a.bytes[clusterID] += size
+}
+
+func (a *progressAcc) commit(p *ProgressTracker, draining map[string]bool, now time.Time) []CompletionEvent {
+	if a == nil || p == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(draining))
+	for id := range draining {
+		ids = append(ids, id)
+	}
+	if !a.enabled {
+		// No draining clusters this tick (or tracker disabled). Still
+		// flush so previously-cached entries for clusters that
+		// transitioned out of draining are reaped.
+		return p.CommitScan(ids, nil, nil, now)
+	}
+	return p.CommitScan(ids, a.chunks, a.bytes, now)
+}
+
+// scanBucketForProgress walks every (latest) object in the bucket and
+// accumulates per-draining-cluster chunk / byte counts. This runs even
+// for buckets without a Placement policy so cluster decommissioning is
+// observable on legacy buckets (the move plan stays a no-op for those
+// because policy is empty; the count is independent).
+func (w *Worker) scanBucketForProgress(ctx context.Context, b *meta.Bucket, draining map[string]bool, prog *progressAcc) {
+	if prog == nil || !prog.enabled {
+		return
+	}
+	opts := meta.ListOptions{Limit: w.cfg.PollLimit}
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		res, err := w.cfg.Meta.ListObjects(ctx, b.ID, opts)
+		if err != nil {
+			w.cfg.Logger.Warn("rebalance: progress scan", "bucket", b.Name, "error", err.Error())
+			return
+		}
+		for _, o := range res.Objects {
+			if o.Manifest == nil {
+				continue
+			}
+			for _, c := range o.Manifest.Chunks {
+				prog.observe(c.Cluster, draining, c.Size)
+			}
+			if br := o.Manifest.BackendRef; br != nil && br.Cluster != "" {
+				prog.observe(br.Cluster, draining, br.Size)
+			}
+		}
+		if !res.Truncated {
+			return
+		}
+		opts.Marker = res.NextMarker
+	}
 }
 
 // loadDrainingClusters reads cluster_state once per tick and returns
@@ -245,7 +439,7 @@ func (w *Worker) loadDrainingClusters(ctx context.Context) map[string]bool {
 	return out
 }
 
-func (w *Worker) scanAndEmit(ctx context.Context, b *meta.Bucket, policy map[string]int, draining map[string]bool, fills *fillCache) {
+func (w *Worker) scanAndEmit(ctx context.Context, b *meta.Bucket, policy map[string]int, draining map[string]bool, fills *fillCache, prog *progressAcc) {
 	ctx, span := w.tracerOrNoop().Start(ctx, "rebalance.scan_bucket",
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(
@@ -257,7 +451,7 @@ func (w *Worker) scanAndEmit(ctx context.Context, b *meta.Bucket, policy map[str
 	)
 	defer span.End()
 
-	actual, moves, err := w.scanDistribution(ctx, b, policy, draining)
+	actual, moves, err := w.scanDistribution(ctx, b, policy, draining, prog)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -321,7 +515,7 @@ func (w *Worker) applySafetyRails(ctx context.Context, b *meta.Bucket, moves []M
 // rows) are treated as living on the default cluster (resolved as ""
 // here — the mover knows how to fall back). The picker uses the same
 // stable hash the PUT path uses (US-002) so retries are convergent.
-func (w *Worker) scanDistribution(ctx context.Context, b *meta.Bucket, policy map[string]int, draining map[string]bool) (map[string]int, []Move, error) {
+func (w *Worker) scanDistribution(ctx context.Context, b *meta.Bucket, policy map[string]int, draining map[string]bool, prog *progressAcc) (map[string]int, []Move, error) {
 	actual := map[string]int{}
 	var moves []Move
 	opts := meta.ListOptions{Limit: w.cfg.PollLimit}
@@ -339,6 +533,7 @@ func (w *Worker) scanDistribution(ctx context.Context, b *meta.Bucket, policy ma
 			}
 			for idx, c := range o.Manifest.Chunks {
 				actual[c.Cluster]++
+				prog.observe(c.Cluster, draining, c.Size)
 				want := placement.PickClusterExcluding(b.ID, o.Key, idx, policy, draining)
 				if want == "" {
 					continue
@@ -360,6 +555,7 @@ func (w *Worker) scanDistribution(ctx context.Context, b *meta.Bucket, policy ma
 			}
 			if br := o.Manifest.BackendRef; br != nil && br.Cluster != "" {
 				actual[br.Cluster]++
+				prog.observe(br.Cluster, draining, br.Size)
 				want := placement.PickClusterExcluding(b.ID, o.Key, 0, policy, draining)
 				if want == "" || br.Cluster == want {
 					continue

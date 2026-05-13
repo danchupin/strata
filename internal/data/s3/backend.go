@@ -62,9 +62,10 @@ var ErrClassMissingCluster = errors.New("s3: class missing cluster")
 // data-plane method returns errors.ErrUnsupported. Tests use this shape
 // to exercise the not-wired path without paying for a synthetic backend.
 type Backend struct {
-	clusters map[string]*s3Cluster
-	classes  map[string]ClassSpec
-	mu       sync.Mutex
+	clusters    map[string]*s3Cluster
+	classes     map[string]ClassSpec
+	drainStrict bool
+	mu          sync.Mutex
 
 	// httpClient is the per-Backend HTTP client override (tests inject
 	// synthetic transports). Applied to every cluster's SDK config on
@@ -114,6 +115,12 @@ type Config struct {
 	// Multi-cluster shape.
 	Clusters map[string]S3ClusterSpec
 	Classes  map[string]ClassSpec
+
+	// DrainStrict, when true, makes PutChunks refuse to fall back to a
+	// draining cluster with data.ErrDrainRefused instead of writing.
+	// Sourced from STRATA_DRAIN_STRICT at gateway boot (US-002
+	// drain-lifecycle). Default false preserves fail-open routing.
+	DrainStrict bool
 
 	// Legacy single-cluster fields. Deprecated — retired by US-004.
 	Endpoint          string
@@ -205,6 +212,7 @@ func New(cfg Config) (*Backend, error) {
 	b := &Backend{
 		clusters:       make(map[string]*s3Cluster, len(cfg.Clusters)),
 		classes:        copyClasses(cfg.Classes),
+		drainStrict:    cfg.DrainStrict,
 		httpClient:     cfg.HTTPClient,
 		tracerProvider: resolveTracerProvider(cfg),
 	}
@@ -431,28 +439,42 @@ func (b *Backend) clusterForClass(ctx context.Context, class string) (*s3Cluster
 // b.clusters, or no class registers a bucket on the picked cluster.
 func (b *Backend) clusterForPlacement(ctx context.Context, class string) (*s3Cluster, string, error) {
 	policy, ok := data.PlacementFromContext(ctx)
+	draining, _ := data.DrainingClustersFromContext(ctx)
 	if !ok {
-		return b.clusterForClass(ctx, class)
+		return b.clusterForClassStrict(ctx, class, draining)
 	}
 	bucketID, _ := data.BucketIDFromContext(ctx)
 	objKey, _ := data.ObjectKeyFromContext(ctx)
-	draining, _ := data.DrainingClustersFromContext(ctx)
 	picked := placement.PickClusterExcluding(bucketID, objKey, 0, policy, draining)
 	if picked == "" {
-		return b.clusterForClass(ctx, class)
+		return b.clusterForClassStrict(ctx, class, draining)
 	}
 	if _, ok := b.clusters[picked]; !ok {
-		return b.clusterForClass(ctx, class)
+		return b.clusterForClassStrict(ctx, class, draining)
 	}
 	bucket := b.bucketOnCluster(class, picked)
 	if bucket == "" {
-		return b.clusterForClass(ctx, class)
+		return b.clusterForClassStrict(ctx, class, draining)
 	}
 	c, err := b.connFor(ctx, picked)
 	if err != nil {
 		return nil, "", err
 	}
 	return c, bucket, nil
+}
+
+// clusterForClassStrict is clusterForClass with the drain-strict
+// pre-flight: when b.drainStrict is set and the class fallback cluster
+// is in the draining set, refuse with data.ErrDrainRefused instead of
+// landing chunks on the drained cluster (US-002 drain-lifecycle).
+func (b *Backend) clusterForClassStrict(ctx context.Context, class string, draining map[string]bool) (*s3Cluster, string, error) {
+	if b.drainStrict && len(draining) > 0 {
+		clusterID, _, err := b.resolveClass(class)
+		if err == nil && draining[clusterID] {
+			return nil, "", data.NewDrainRefusedError(clusterID)
+		}
+	}
+	return b.clusterForClass(ctx, class)
 }
 
 // bucketOnCluster returns the bucket name routed to clusterID — first

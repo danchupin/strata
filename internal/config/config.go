@@ -10,6 +10,8 @@ import (
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/providers/structs"
 	"github.com/knadh/koanf/v2"
+
+	"github.com/danchupin/strata/internal/data"
 )
 
 type Config struct {
@@ -28,6 +30,11 @@ type Config struct {
 	GC        GCConfig        `koanf:"gc"`
 
 	DefaultBucketShards int `koanf:"default_bucket_shards"`
+
+	// DrainStrict mirrors STRATA_DRAIN_STRICT (US-002 drain-lifecycle).
+	// Raw string ("on"/"off"/"true"/"false"/""); parsed at boot via
+	// data.ParseDrainStrict so unknown values fail-fast.
+	DrainStrict string `koanf:"drain_strict"`
 }
 
 type CassandraConfig struct {
@@ -158,6 +165,7 @@ var envMap = map[string]string{
 	"STRATA_GC_INTERVAL":              "gc.interval",
 	"STRATA_GC_GRACE":                 "gc.grace",
 	"STRATA_GC_METRICS_LISTEN":        "gc.metrics_listen",
+	"STRATA_DRAIN_STRICT":             "drain_strict",
 }
 
 func Load() (*Config, error) {
@@ -223,6 +231,9 @@ func (c *Config) validate() error {
 	}
 	if c.DefaultBucketShards <= 0 {
 		return fmt.Errorf("default_bucket_shards must be positive (got %d)", c.DefaultBucketShards)
+	}
+	if _, err := data.ParseDrainStrict(c.DrainStrict); err != nil {
+		return err
 	}
 	return nil
 }

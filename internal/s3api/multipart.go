@@ -253,6 +253,11 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, b *meta.Buck
 			writeError(w, r, ErrSignatureDoesNotMatch)
 			return
 		}
+		var drainRefused *data.DrainRefusedError
+		if errors.As(err, &drainRefused) {
+			writeDrainRefused(w, r, drainRefused)
+			return
+		}
 		if strings.Contains(err.Error(), "unknown storage class") {
 			writeError(w, r, ErrInvalidStorageClass)
 			return

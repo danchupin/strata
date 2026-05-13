@@ -278,7 +278,15 @@ export function BucketDetailPage() {
 
       <StatsBar detail={detail} loading={detailQ.isPending && !detail} />
 
-      <Tabs defaultValue="objects">
+      <Tabs
+        value={searchParams.get('tab') ?? 'objects'}
+        onValueChange={(v) => {
+          const next = new URLSearchParams(searchParams);
+          if (v === 'objects') next.delete('tab');
+          else next.set('tab', v);
+          setSearchParams(next, { replace: true });
+        }}
+      >
         <TabsList>
           <TabsTrigger value="overview" disabled={!detail}>
             Overview

@@ -3,11 +3,21 @@ package s3api
 import (
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/danchupin/strata/internal/auth"
+	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
+	"github.com/danchupin/strata/internal/metrics"
 )
+
+// DrainRefusedRetryAfterSeconds is the Retry-After header value (seconds)
+// emitted on 503 DrainRefused responses (US-002 drain-lifecycle). A
+// drained cluster is a slow operator action; a 5-minute backoff lets
+// clients re-resolve their bucket policy / rebalance window before the
+// next attempt.
+const DrainRefusedRetryAfterSeconds = 300
 
 type APIError struct {
 	Code    string
@@ -91,6 +101,23 @@ func writeError(w http.ResponseWriter, r *http.Request, err APIError) {
 	_ = xml.NewEncoder(w).Encode(errorXML{
 		Code:     err.Code,
 		Message:  err.Message,
+		Resource: r.URL.Path,
+	})
+}
+
+// writeDrainRefused emits a 503 ServiceUnavailable + Retry-After: 300
+// for a PutChunks refusal caused by STRATA_DRAIN_STRICT=on landing on a
+// draining cluster (US-002 drain-lifecycle). Carries the cluster id in
+// the Message so the operator-side curl sees the refused target.
+// Bumps strata_putchunks_refused_total{reason="drain_strict",cluster}.
+func writeDrainRefused(w http.ResponseWriter, r *http.Request, err *data.DrainRefusedError) {
+	metrics.PutChunksRefusedTotal.WithLabelValues("drain_strict", err.Cluster).Inc()
+	w.Header().Set("Content-Type", "application/xml")
+	w.Header().Set("Retry-After", fmt.Sprintf("%d", DrainRefusedRetryAfterSeconds))
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = xml.NewEncoder(w).Encode(errorXML{
+		Code:     "DrainRefused",
+		Message:  fmt.Sprintf("cluster %s is draining and STRATA_DRAIN_STRICT=on refuses fallback", err.Cluster),
 		Resource: r.URL.Path,
 	})
 }

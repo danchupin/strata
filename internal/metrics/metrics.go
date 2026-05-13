@@ -265,6 +265,22 @@ var (
 		},
 		[]string{"reason", "target"},
 	)
+
+	PutChunksRefusedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_putchunks_refused_total",
+			Help: "PutChunks refusals on the gateway PUT hot path. reason=\"drain_strict\" when STRATA_DRAIN_STRICT=on and the placement picker fell back to a draining cluster (US-002 drain-lifecycle). cluster label is the refused target.",
+		},
+		[]string{"reason", "cluster"},
+	)
+
+	DrainCompleteTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_drain_complete_total",
+			Help: "Rebalance worker drain-completion events per cluster (US-005 drain-lifecycle). One increment per >0 → 0 chunks_on_cluster transition; refills + redrains re-fire on the next 0 transition.",
+		},
+		[]string{"cluster"},
+	)
 )
 
 func Register() {
@@ -297,6 +313,8 @@ func Register() {
 		RebalanceChunksMovedTotal,
 		RebalanceCASConflictsTotal,
 		RebalanceRefusedTotal,
+		PutChunksRefusedTotal,
+		DrainCompleteTotal,
 	)
 }
 
@@ -596,6 +614,13 @@ func (RebalanceObserver) IncRefused(reason, target string) {
 		target = "unknown"
 	}
 	RebalanceRefusedTotal.WithLabelValues(reason, target).Inc()
+}
+
+func (RebalanceObserver) IncDrainComplete(cluster string) {
+	if cluster == "" {
+		cluster = "unknown"
+	}
+	DrainCompleteTotal.WithLabelValues(cluster).Inc()
 }
 
 // AuditStreamObserver implements the auditstream.MetricsSink interface. The

@@ -114,7 +114,7 @@ export function BucketPlacementTab({ bucket }: Props) {
   });
 
   const clusters = useMemo(
-    () => editableClusters(clustersQ.data ?? []),
+    () => editableClusters(clustersQ.data?.clusters ?? []),
     [clustersQ.data],
   );
   const initial = useMemo(
@@ -135,6 +135,28 @@ export function BucketPlacementTab({ bucket }: Props) {
 
   const dirty = !rowsEqual(rows, initial);
   const hasPolicy = placementQ.data != null && Object.keys(placementQ.data).length > 0;
+
+  // policyAllDraining: every cluster id with non-zero weight in the saved
+  // policy maps to a cluster whose state=draining. The warning is read from
+  // the same shared `clusters` query so no extra fetch — and the saved
+  // (placementQ.data) shape feeds the check rather than the dirty `rows`
+  // editor state, so editing toward a healthy cluster doesn't briefly clear
+  // the warning until the operator hits Save.
+  const drainingByID = useMemo<Set<string>>(() => {
+    const out = new Set<string>();
+    for (const c of clustersQ.data?.clusters ?? []) {
+      if (c.state === 'draining') out.add(c.id);
+    }
+    return out;
+  }, [clustersQ.data]);
+  const policyAllDraining = useMemo<boolean>(() => {
+    if (!hasPolicy) return false;
+    const ids = Object.entries(placementQ.data ?? {})
+      .filter(([, w]) => (w ?? 0) > 0)
+      .map(([id]) => id);
+    if (ids.length === 0) return false;
+    return ids.every((id) => drainingByID.has(id));
+  }, [hasPolicy, placementQ.data, drainingByID]);
 
   // Validation: at least one weight > 0 AND every weight in [0, 100]
   const allWeights = Object.values(rows).map((r) => r.weight);
@@ -258,6 +280,23 @@ export function BucketPlacementTab({ bucket }: Props) {
           <div className="flex items-start gap-2 rounded-md border bg-muted/30 p-2 text-sm text-muted-foreground">
             <Info className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
             <div>Default routing (no per-bucket policy).</div>
+          </div>
+        )}
+
+        {!loading && policyAllDraining && (
+          <div
+            role="alert"
+            data-testid="policy-drain-warning"
+            className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-sm text-amber-800 dark:text-amber-300"
+          >
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+            <div className="text-xs">
+              <div className="font-medium">
+                All clusters in this policy are draining
+              </div>
+              New PUTs will be refused (strict mode) or fall back to the class
+              default (default mode). Update the policy before traffic resumes.
+            </div>
           </div>
         )}
 

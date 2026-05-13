@@ -285,6 +285,189 @@ list) on the replica you expect to lead.
   need a per-cluster pool override, register a second class on the
   target cluster (same pattern as the S3 backend's `bucketOnCluster`).
 
+## Drain lifecycle
+
+Drain is the operator hook that retires a cluster gracefully. The
+`ralph/drain-lifecycle` cycle ships the strict mode, the progress
+endpoint, the UI bar, the completion signal, and the bucket-impact
+preview drawer described below. Use this section as the runbook before
+running `POST /admin/v1/clusters/<id>/drain` in production.
+
+### When drain is useful (and when it is not)
+
+Drain is built around the assumption that the cluster being drained
+has **somewhere to migrate chunks to**:
+
+- **Multi-cluster placement deployments** — buckets carry a
+  `Placement` policy that names ≥2 clusters with non-zero weight. The
+  rebalance worker reads `PickClusterExcluding` over the policy with
+  `draining` excluded and moves every chunk from the drained cluster
+  to a peer named in the policy. Drain is genuinely retiring storage
+  here.
+- **Single-cluster-per-class config** — every storage class points at
+  exactly one cluster via `STRATA_RADOS_CLASSES` /
+  `STRATA_S3_CLASSES`, and buckets either do not carry a policy or
+  their policy names only the one cluster. Drain still flips the
+  cluster to `state=draining` and `PickClusterExcluding` still skips
+  it, but chunks have nowhere to go — the rebalance worker emits no
+  moves, `chunks_on_cluster` never reaches zero, and
+  `deregister_ready` never flips true. Drain in this shape is a pure
+  **stop-write** flag; the operator needs to (a) add new buckets with
+  alternate-cluster policies before the drained cluster fills up, or
+  (b) accept that the cluster stays in `draining` until traffic
+  naturally ages out via lifecycle expiration.
+
+If the goal is "stop writes immediately" without migration, drain is
+the right primitive — strict mode (`STRATA_DRAIN_STRICT=on`) closes
+the fail-open fallback so PUTs targeting a single-cluster policy on
+the drained cluster get a clean 503 DrainRefused. If the goal is
+"actually move bytes off this hardware", drain is the right primitive
+**only when** the bucket Placement policies name a peer cluster — the
+pre-drain checklist below catches the gap before it surprises you.
+
+### Pre-drain operator checklist
+
+Walk this list before clicking Drain on the cluster card. Each item
+has a single console surface to drive it.
+
+1. **Open the Pools matrix.** `/console/storage` → Data tab → Pools
+   table. The matrix renders `#clusters × #distinct-pools` rows (see
+   "Pools matrix" in the [Web UI capability
+   matrix]({{< ref "/best-practices/web-ui" >}})). Confirm the cluster
+   you intend to drain actually holds bytes — a `0 B` row means the
+   class is routed elsewhere and drain is a no-op.
+2. **Open the bucket-references drawer.** Click "Show affected
+   buckets" on the cluster card. The drawer lists every bucket whose
+   `Placement` policy carries a non-zero weight on the cluster, sorted
+   desc by chunk_count. Hot buckets at the top need a policy update
+   FIRST — either widen them to name a peer cluster (so rebalance can
+   migrate) or accept the chunks will be unreachable for new PUTs once
+   drain starts.
+3. **Verify pool names exist on target clusters.** The rebalance
+   worker copies chunks from the source pool to the *same-named* pool
+   on the target cluster. If a class maps `STANDARD → strata-hot` and
+   the target cluster doesn't have a `strata-hot` pool, every move
+   fails. The Pools matrix surfaces target pools — confirm visually
+   before draining.
+4. **Decide on strict mode.** Set `STRATA_DRAIN_STRICT=on` if you want
+   PUTs that *would have fallen back to the drained cluster* (empty
+   policy / all-policy-clusters-draining) to refuse with 503
+   DrainRefused instead. The "strict" badge on every cluster card
+   confirms the global flag is on. The flag is a process-boot env —
+   flipping it requires a rolling restart. Without strict mode, PUTs
+   silently fall back to the class default's `spec.Cluster` even when
+   it's draining.
+5. **Skim the BucketDetail Placement tab for policy-drain warnings.**
+   When every cluster with non-zero weight in a saved bucket policy is
+   `state=draining`, the Placement tab renders an amber
+   "All clusters in this policy are draining" chip. Update those
+   policies before traffic resumes; otherwise new PUTs land in the
+   fail-open / refuse trap depending on strict mode.
+
+### Drain procedure
+
+The console flow per cluster:
+
+1. **Show affected buckets** → review the drawer; close it.
+2. **Drain** → `<ConfirmDrainModal>` opens. The modal's info row
+   surfaces `<N> buckets reference this cluster in their Placement
+   policy` — click "view list" if you want to re-check the drawer
+   without closing the modal.
+3. **Typed-confirm.** Type the cluster id verbatim to arm the
+   destructive submit. Mistypes keep Drain disabled.
+4. **Wait for the progress bar to drain.** The cluster card flips to
+   `draining` state and renders `<DrainProgressBar>` — the amber bar
+   advances as the rebalance worker moves chunks. Text shows
+   `<N> chunks remaining · <M> at start · ~<ETA>`; ETA is derived from
+   `rate(strata_rebalance_chunks_moved_total{from=<id>}[5m])`.
+5. **Green chip = deregister-ready.** When `chunks_on_cluster`
+   transitions `>0 → 0` the bar is replaced with an emerald
+   `✓ Ready to deregister (env edit + restart)` chip — and the
+   rebalance worker logs INFO `drain complete`, writes a
+   `drain.complete` audit row, bumps `strata_drain_complete_total`,
+   and best-effort fans an `s3:Drain:Complete` event through every
+   sink in `STRATA_NOTIFY_TARGETS`.
+6. **Env edit + rolling restart.** Drop the cluster id from
+   `STRATA_RADOS_CLUSTERS` / `STRATA_S3_CLUSTERS` and rolling-restart
+   the gateway replicas. There is no admin endpoint that performs the
+   deregister — the env shape is the source of truth.
+
+### Abort / recovery
+
+`POST /admin/v1/clusters/<id>/undrain` clears the `cluster_state` row
+(absence == live) and invalidates the in-process drain cache. The
+rebalance worker's per-tick scan reaps the cached progress snapshot on
+the next iteration so a future re-drain re-fires the completion event
+when chunks reach zero again. Undrain is idempotent and safe to issue
+at any point in the drain — chunks moved before the undrain stay
+moved, the rest stop migrating.
+
+### Drain progress + completion endpoints
+
+| Path | What it does | Caller |
+| ---- | ----------- | ------ |
+| `GET /admin/v1/clusters` | Lists every configured cluster + its state + the global `drain_strict` flag. | `<ClustersSubsection>` (10 s poll) |
+| `GET /admin/v1/clusters/{id}/drain-progress` | Per-cluster `{state, chunks_on_cluster, bytes_on_cluster, base_chunks_at_start, last_scan_at, eta_seconds, deregister_ready, warnings}`. Reads from the rebalance worker's in-process `ProgressTracker` — never scans manifests synchronously. | `<DrainProgressBar>` (30 s poll) |
+| `GET /admin/v1/clusters/{id}/bucket-references` | Pre-drain bucket-impact preview. Lists buckets whose `Placement[<id>] > 0` joined with `bucket_stats` for chunk_count + bytes_used. Paginated via `?limit=N&offset=M` (default 100). | `<BucketReferencesDrawer>` |
+| `POST /admin/v1/clusters/{id}/drain` / `.../undrain` | Flip `cluster_state` row to `draining` / `live`. Audit-stamped `admin:DrainCluster` / `admin:UndrainCluster`. | `<ConfirmDrainModal>` / Undrain button |
+
+`drain-progress` numeric fields are nullable: when state=live every
+numeric field is `null` (only meaningful while draining). When
+state=draining but no scan has committed yet, the response carries
+`warnings: ["progress scan pending; rebalance worker has not yet
+committed a tick"]` and the UI renders "scan pending" instead of
+zero counts.
+
+### `STRATA_DRAIN_STRICT` env
+
+| Variable                  | Default | Range          | Purpose |
+| ------------------------- | ------- | -------------- | ------- |
+| `STRATA_DRAIN_STRICT`     | `off`   | `on` / `off` / boolean strings | When `on`, RADOS + S3 `PutChunks` refuse to fall back to a `draining` cluster — returns `data.ErrDrainRefused`, the gateway maps it to `503 ServiceUnavailable` with `<Code>DrainRefused</Code>` and `Retry-After: 300`. **Only PUT chunks** are affected — GET / HEAD / DELETE / multipart Complete / Abort / List on the drained cluster all keep working (drain semantic is stop-write, not stop-read). |
+
+Parsed at gateway boot; unknown values fail-fast with a clear error.
+Counter `strata_putchunks_refused_total{reason="drain_strict",cluster}`
+increments per refusal — wire to alerting if you expect zero refusals
+in steady state.
+
+### User journey walkthrough
+
+The smoke harness `scripts/smoke-drain-lifecycle.sh` drives every
+step below against the running `multi-cluster` compose profile;
+exit-non-zero on any assertion miss. Run via
+`make smoke-drain-lifecycle` once the lab is up
+(`docker compose --profile multi-cluster up -d`).
+
+| # | Operator action | Surface | Backing story |
+|---|-----------------|---------|---------------|
+| 1 | Open `/console/storage`, see both cluster cards live | `<ClustersSubsection>` | (placement-ui, existing) |
+| 2 | See per-cluster per-pool bytes/chunks in Pools table | Pools matrix (`#clusters × #distinct-pools` rows) | US-001 |
+| 3 | Click "Show affected buckets" link on draining-candidate card | `<BucketReferencesDrawer>` | US-006 |
+| 4 | Identify hot buckets that need policy update before drain | drawer lists buckets desc by `chunk_count` | US-006 |
+| 5 | Optionally flip `STRATA_DRAIN_STRICT=on` in env + restart | docs + cluster-card "strict" chip | US-002 + US-004 |
+| 6 | Click "Drain" on the cluster card | `<ConfirmDrainModal>` | (placement-ui, existing) |
+| 7 | Modal surfaces "<N> buckets reference this cluster" + typed-confirm | enhanced modal | US-006 |
+| 8 | Type cluster id → submit enabled → click Drain | typed confirm | (placement-ui, existing) |
+| 9 | Banner appears in AppShell, card flips to `draining` state | `<PlacementDrainBanner>` | (placement-ui, existing) |
+| 10 | Card now shows `<DrainProgressBar>` "<N> chunks · <M> at start · ~<ETA>" | progress bar | US-003 + US-004 |
+| 11 | Watch progress bar shrink as rebalance worker ticks every `STRATA_REBALANCE_INTERVAL` | TanStack 30 s poll | US-004 |
+| 12 | Receive operator notification (notify worker) when drain reaches 0 chunks | `s3:Drain:Complete` event | US-005 |
+| 13 | Card shows green chip "✓ Ready to deregister" | `deregister_ready=true` | US-004 |
+| 14 | Edit `STRATA_RADOS_CLUSTERS` env, remove cluster entry, rolling restart | docs (out-of-band) | docs |
+| 15 | Verify cluster gone from console + every former chunk readable on peers | Storage page rerender | US-007 smoke |
+
+Negative paths covered by the smoke (`scripts/smoke-drain-lifecycle.sh`):
+
+- **(a)** Strict mode on + bucket policy `{drained:1}` only + PUT →
+  503 DrainRefused with `Retry-After: 300`.
+- **(b)** Strict mode off (default) + same bucket policy → fail-open
+  to the class default with WARN log; no client-visible refusal.
+- **(c)** Operator clicks Undrain mid-drain → state flips back to
+  `live`, AppShell banner disappears, drain-progress cache reaped on
+  the next tick.
+- **(d)** Single-cluster-per-class config + drain → no chunks
+  migrate; `deregister_ready` never flips true. Documented above (see
+  "When drain is useful (and when it is not)").
+
 ## Web UI
 
 The operator console ships UI surfaces for every endpoint described above

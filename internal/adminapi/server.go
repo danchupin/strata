@@ -27,6 +27,7 @@ import (
 	"github.com/danchupin/strata/internal/meta"
 	"github.com/danchupin/strata/internal/otel/ringbuf"
 	"github.com/danchupin/strata/internal/promclient"
+	"github.com/danchupin/strata/internal/rebalance"
 )
 
 // Server holds dependencies the /admin/v1/* handlers need.
@@ -135,6 +136,18 @@ type Server struct {
 	// cache (if any) updates on its own TTL.
 	DrainCache *placement.DrainCache
 
+	// RebalanceProgress is the in-process draining-progress cache populated
+	// by the rebalance worker. Backs GET /admin/v1/clusters/{id}/drain-
+	// progress (US-003 drain-lifecycle). nil disables the endpoint with 503
+	// ProgressUnavailable so dev rigs without the rebalance worker still
+	// fail loud rather than serving a permanently-empty response.
+	RebalanceProgress *rebalance.ProgressTracker
+
+	// DrainStrict mirrors STRATA_DRAIN_STRICT — surfaced on the
+	// GET /admin/v1/clusters response so the UI can render a "strict"
+	// chip next to every cluster card (US-004 drain-lifecycle).
+	DrainStrict bool
+
 	// hotBucketsMu guards lazy initialisation of hotBucketsCacheVal — the
 	// 30s TTL cache that absorbs burst polls of /admin/v1/diagnostics/
 	// hot-buckets (US-007).
@@ -233,6 +246,15 @@ type Config struct {
 	// gateway. Drain / undrain admin handlers invalidate it so flips
 	// take effect on the next PUT.
 	DrainCache *placement.DrainCache
+	// RebalanceProgress is the in-process draining-progress cache populated
+	// by the rebalance worker. Backs GET /admin/v1/clusters/{id}/drain-
+	// progress (US-003 drain-lifecycle). nil disables the endpoint with 503
+	// ProgressUnavailable.
+	RebalanceProgress *rebalance.ProgressTracker
+	// DrainStrict mirrors STRATA_DRAIN_STRICT — surfaced on the
+	// GET /admin/v1/clusters response so the UI can render a "strict" chip
+	// next to every cluster card (US-004 drain-lifecycle).
+	DrainStrict bool
 }
 
 // New constructs a Server. Started defaults to now. JWTSecret empty means
@@ -276,6 +298,8 @@ func New(c Config) *Server {
 		KnownClusters:        c.KnownClusters,
 		ClusterBackends:      c.ClusterBackends,
 		DrainCache:           c.DrainCache,
+		RebalanceProgress:    c.RebalanceProgress,
+		DrainStrict:          c.DrainStrict,
 		Logger:               log.Default(),
 	}
 }
@@ -332,6 +356,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /admin/v1/clusters/{id}/drain", s.handleClusterDrain)
 	mux.HandleFunc("POST /admin/v1/clusters/{id}/undrain", s.handleClusterUndrain)
 	mux.HandleFunc("GET /admin/v1/clusters/{id}/rebalance-progress", s.handleClusterRebalanceProgress)
+	mux.HandleFunc("GET /admin/v1/clusters/{id}/drain-progress", s.handleClusterDrainProgress)
+	mux.HandleFunc("GET /admin/v1/clusters/{id}/bucket-references", s.handleClusterBucketReferences)
 	mux.HandleFunc("GET /admin/v1/buckets", s.handleBucketsList)
 	mux.HandleFunc("POST /admin/v1/buckets", s.handleBucketCreate)
 	mux.HandleFunc("DELETE /admin/v1/buckets/{bucket}", s.handleBucketDelete)

@@ -301,6 +301,94 @@ components:
           type: array
           items: { $ref: '#/components/schemas/ClusterStateEntry' }
 
+    ClusterDrainProgress:
+      type: object
+      required: [state]
+      description: |
+        Per-draining-cluster progress snapshot returned by
+        GET /clusters/{id}/drain-progress (US-003 drain-lifecycle).
+        Numeric fields are null whenever the rebalance worker has not
+        committed a scan yet, or when state != "draining" (the
+        deregister + ETA semantics only make sense while draining).
+      properties:
+        state:
+          type: string
+          enum: [live, draining, removed]
+        chunks_on_cluster:
+          type: integer
+          format: int64
+          nullable: true
+        bytes_on_cluster:
+          type: integer
+          format: int64
+          nullable: true
+        base_chunks_at_start:
+          type: integer
+          format: int64
+          nullable: true
+          description: |
+            Chunk count captured on the first committed scan after the
+            live → draining transition. UI percent-filled = 1 -
+            chunks_on_cluster / base_chunks_at_start when set.
+        last_scan_at:
+          type: string
+          format: date-time
+          nullable: true
+        eta_seconds:
+          type: integer
+          format: int64
+          nullable: true
+          description: |
+            chunks_remaining / rate(strata_rebalance_chunks_moved_total
+            {from="<id>"}[5m]). Null when Prom is unset/unavailable,
+            chunks_on_cluster is 0, or the move rate is zero.
+        deregister_ready:
+          type: boolean
+          nullable: true
+          description: |
+            True when state="draining" and chunks_on_cluster=0 — the
+            cluster row can now be removed from STRATA_RADOS_CLUSTERS
+            / STRATA_S3_CLUSTERS and the gateways rolling-restarted.
+        warnings:
+          type: array
+          items: { type: string }
+          description: |
+            Free-form operator-facing notes (e.g. "progress data
+            stale" when last_scan_at older than 2× rebalance interval).
+
+    BucketReferenceEntry:
+      type: object
+      required: [name, weight, chunk_count, bytes_used]
+      description: |
+        One row in the cluster-bucket-references list (US-006 drain-lifecycle).
+        `weight` echoes the bucket's Placement[clusterID]; `chunk_count` and
+        `bytes_used` come from the live bucket_stats counter row (no manifest
+        walk per request — the rebalance worker covers the actual-distribution
+        side).
+      properties:
+        name: { type: string }
+        weight: { type: integer, minimum: 1, maximum: 100 }
+        chunk_count: { type: integer, format: int64 }
+        bytes_used: { type: integer, format: int64 }
+
+    BucketReferences:
+      type: object
+      required: [buckets, total_buckets]
+      description: |
+        Wire shape returned by GET /clusters/{id}/bucket-references
+        (US-006 drain-lifecycle). The page slice is sorted desc by chunk_count
+        then asc by name; `total_buckets` is the row count BEFORE pagination
+        so the UI can render "showing N of M". `next_offset` is non-null
+        when more rows are available.
+      properties:
+        buckets:
+          type: array
+          items: { $ref: '#/components/schemas/BucketReferenceEntry' }
+        total_buckets: { type: integer }
+        next_offset:
+          type: integer
+          nullable: true
+
     ClusterRebalanceProgress:
       type: object
       required: [metrics_available, moved_total, refused_total, series]
@@ -637,6 +725,71 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ClusterRebalanceProgress' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /clusters/{id}/drain-progress:
+    get:
+      summary: Per-cluster drain-progress snapshot (US-003 drain-lifecycle)
+      operationId: getClusterDrainProgress
+      description: |
+        Returns the in-process draining-progress cache populated by the
+        rebalance worker. Always reads from cache — never scans the
+        manifest store synchronously per request. When the cluster
+        state is not "draining" the numeric fields go null. ETA is
+        derived from `rate(strata_rebalance_chunks_moved_total
+        {from="<id>"}[5m])`; Prom unavailable or rate=0 surfaces
+        eta_seconds=null. `deregister_ready` flips true when
+        state="draining" and chunks_on_cluster=0 — the operator's
+        signal that the cluster row can be edited out of
+        STRATA_RADOS_CLUSTERS / STRATA_S3_CLUSTERS and the gateways
+        restarted. Responds 503 ProgressUnavailable when no rebalance
+        worker is running on this replica.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Drain progress snapshot.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClusterDrainProgress' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          description: |
+            Rebalance worker not running on this replica — the in-process
+            progress cache is empty and the endpoint refuses to serve a
+            permanently-zero response.
+
+  /clusters/{id}/bucket-references:
+    get:
+      summary: Buckets referencing this cluster in their Placement policy (US-006 drain-lifecycle)
+      operationId: getClusterBucketReferences
+      description: |
+        Pre-drain impact preview. Returns every bucket whose Placement policy
+        carries a non-zero weight on this cluster id, joined with the
+        bucket_stats counter row for chunk_count + bytes_used. Sorted desc
+        by chunk_count then asc by name. Pagination via ?limit=N&offset=M;
+        `next_offset` is non-null when more rows are available. Default limit
+        is 100, max 1000.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 100, minimum: 1, maximum: 1000 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0, minimum: 0 }
+      responses:
+        '200':
+          description: Bucket references page.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BucketReferences' }
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':

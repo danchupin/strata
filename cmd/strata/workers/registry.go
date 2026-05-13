@@ -15,6 +15,7 @@ import (
 	"github.com/danchupin/strata/internal/leader"
 	"github.com/danchupin/strata/internal/meta"
 	strataotel "github.com/danchupin/strata/internal/otel"
+	"github.com/danchupin/strata/internal/rebalance"
 )
 
 // Runner is the long-running loop a worker exposes. Run must honour ctx
@@ -45,6 +46,12 @@ type Dependencies struct {
 	// the supervisor's lease never need to call this. May be nil when the
 	// supervisor was built without a Run() invocation (tests).
 	EmitLeader func(name string, acquired bool)
+	// RebalanceProgress is the in-process draining-progress cache shared
+	// between the rebalance worker (writer) and the adminapi
+	// GET /admin/v1/clusters/{id}/drain-progress handler (reader). nil
+	// disables the per-tick scan accumulator — the move-planning side of
+	// the loop is unaffected. Wired by serverapp ahead of supervisor.Run.
+	RebalanceProgress *rebalance.ProgressTracker
 }
 
 // Worker pairs a registered name with a constructor that builds the runner

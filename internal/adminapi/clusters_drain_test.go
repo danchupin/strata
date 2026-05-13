@@ -39,6 +39,27 @@ func TestClustersList_DefaultsToLive(t *testing.T) {
 	if by["c2"].State != meta.ClusterStateDraining {
 		t.Fatalf("c2 state: got %q want %q", by["c2"].State, meta.ClusterStateDraining)
 	}
+	if got.DrainStrict {
+		t.Fatalf("drain_strict: default server has DrainStrict=false; got %v", got.DrainStrict)
+	}
+}
+
+func TestClustersList_SurfacesDrainStrict(t *testing.T) {
+	s := newTestServer()
+	s.KnownClusters = map[string]struct{}{"c1": {}}
+	s.ClusterBackends = map[string]string{"c1": "rados"}
+	s.DrainStrict = true
+	rr := putAdmin(t, s, "alice", http.MethodGet, "/admin/v1/clusters", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var got ClustersListResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.DrainStrict {
+		t.Fatalf("drain_strict: got %v want true", got.DrainStrict)
+	}
 }
 
 func TestClusterDrain_FlipsState(t *testing.T) {

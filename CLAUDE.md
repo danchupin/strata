@@ -147,7 +147,59 @@ testcontainers to find the engine.
                           Admin: POST `/admin/v1/clusters/{id}/drain`
                           and `.../undrain`, GET `/admin/v1/clusters`
                           (audit `admin:DrainCluster` /
-                          `admin:UndrainCluster`).
+                          `admin:UndrainCluster`). Per-tick progress
+                          scan (US-003 drain-lifecycle) populates
+                          `rebalance.ProgressTracker` (chunks/bytes/
+                          BaseChunks/BaseBytes/LastScanAt/
+                          CompletionFiredAt per draining cluster); the
+                          adminapi handler reads it without scanning
+                          synchronously. Completion detection (US-005):
+                          a `>0 → 0` chunks_on_cluster transition fires
+                          one event per cluster (idempotent on
+                          CompletionFiredAt; refills reset the slot so
+                          drain→fill→drain re-fires). Each event logs
+                          INFO `drain complete`, writes a
+                          `drain.complete` audit row
+                          (`system:rebalance-worker`,
+                          `cluster:<id>`), bumps
+                          `strata_drain_complete_total{cluster}`, and
+                          best-effort fans the payload
+                          `{cluster, bytes_moved, completed_at}`
+                          through `notify.Sink.Send` for every target
+                          configured in `STRATA_NOTIFY_TARGETS`.
+                          Strict-mode env (US-002 drain-lifecycle):
+                          `STRATA_DRAIN_STRICT` (default `off`, accepts
+                          `on`/`off`/boolean strings; unknown → fail-
+                          fast at boot) closes the PUT fail-open
+                          fallback. When `on`, RADOS + S3
+                          `Backend.PutChunks` consult the drain map
+                          after `placement.PickClusterExcluding`
+                          returns "" (empty / all-excluded policy)
+                          and return `data.ErrDrainRefused` if the
+                          resolved class default cluster is draining.
+                          The gateway maps the sentinel to HTTP 503
+                          `<Code>DrainRefused</Code>` +
+                          `Retry-After: 300`; counter
+                          `strata_putchunks_refused_total{reason="drain_strict",cluster}`
+                          bumps per refusal. **PUT only** — reads,
+                          deletes, HEAD, multipart Complete/Abort,
+                          List against draining clusters keep working
+                          (drain semantic is stop-write, not stop-
+                          read). `GET /admin/v1/clusters` surfaces
+                          the boot-time value as a top-level
+                          `drain_strict: bool` field; the UI renders
+                          a "strict" chip per cluster card so
+                          operators see the global flag without an
+                          extra fetch. Pre-drain bucket impact
+                          preview (US-006 drain-lifecycle):
+                          `GET /admin/v1/clusters/{id}/bucket-references`
+                          lists buckets whose `Placement[<id>] > 0`
+                          joined with `bucket_stats` (chunk_count =
+                          UsedObjects, bytes_used = UsedBytes); reads
+                          via Meta only, no manifest walk. Paginated
+                          via `?limit=N&offset=M` (default 100, max
+                          1000). Audit-stamped
+                          `admin:GetClusterBucketReferences`.
   internal/reshard      -> per-bucket online shard-resize worker (US-045);
                           driven synchronously via /admin/bucket/reshard or
                           as a daemon.
