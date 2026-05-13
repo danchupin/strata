@@ -103,7 +103,6 @@ export function ClustersSubsection({ pools }: Props) {
   });
 
   const clusters = q.data?.clusters ?? [];
-  const drainStrict = Boolean(q.data?.drainStrict);
   const showSkeleton = q.isPending && !q.data;
   const errMsg = !q.data && q.error instanceof Error ? q.error.message : null;
 
@@ -171,7 +170,6 @@ export function ClustersSubsection({ pools }: Props) {
                 key={c.id}
                 cluster={c}
                 usage={usageByCluster.get(c.id)}
-                drainStrict={drainStrict}
               />
             ))}
           </div>
@@ -184,10 +182,9 @@ export function ClustersSubsection({ pools }: Props) {
 interface ClusterCardProps {
   cluster: ClusterStateEntry;
   usage: AggregatedUsage | undefined;
-  drainStrict: boolean;
 }
 
-function ClusterCard({ cluster, usage, drainStrict }: ClusterCardProps) {
+function ClusterCard({ cluster, usage }: ClusterCardProps) {
   const [drainOpen, setDrainOpen] = useState(false);
   const [refsOpen, setRefsOpen] = useState(false);
   const [undraining, setUndraining] = useState(false);
@@ -233,15 +230,6 @@ function ClusterCard({ cluster, usage, drainStrict }: ClusterCardProps) {
             >
               {clusterStateLabel(cluster.state)}
             </Badge>
-            {drainStrict && (
-              <Badge
-                variant="outline"
-                className="border-amber-500/40 bg-amber-500/10 text-[10px] font-medium uppercase text-amber-800 dark:text-amber-300"
-                title="STRATA_DRAIN_STRICT=on: PUTs that fall back to a draining cluster are refused with 503 DrainRefused"
-              >
-                strict
-              </Badge>
-            )}
           </span>
         </CardTitle>
       </CardHeader>

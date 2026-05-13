@@ -37,12 +37,10 @@ export function isDrainingState(state: string | undefined): boolean {
 
 export interface ClustersListResponse {
   clusters: ClusterStateEntry[];
-  drain_strict: boolean;
 }
 
 export interface ClustersList {
   clusters: ClusterStateEntry[];
-  drainStrict: boolean;
 }
 
 export async function fetchClusters(): Promise<ClustersList> {
@@ -56,7 +54,6 @@ export async function fetchClusters(): Promise<ClustersList> {
   const body = (await resp.json()) as ClustersListResponse;
   return {
     clusters: body.clusters ?? [],
-    drainStrict: Boolean(body.drain_strict),
   };
 }
 

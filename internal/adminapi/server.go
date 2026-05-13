@@ -143,11 +143,6 @@ type Server struct {
 	// fail loud rather than serving a permanently-empty response.
 	RebalanceProgress *rebalance.ProgressTracker
 
-	// DrainStrict mirrors STRATA_DRAIN_STRICT — surfaced on the
-	// GET /admin/v1/clusters response so the UI can render a "strict"
-	// chip next to every cluster card (US-004 drain-lifecycle).
-	DrainStrict bool
-
 	// hotBucketsMu guards lazy initialisation of hotBucketsCacheVal — the
 	// 30s TTL cache that absorbs burst polls of /admin/v1/diagnostics/
 	// hot-buckets (US-007).
@@ -257,10 +252,6 @@ type Config struct {
 	// progress (US-003 drain-lifecycle). nil disables the endpoint with 503
 	// ProgressUnavailable.
 	RebalanceProgress *rebalance.ProgressTracker
-	// DrainStrict mirrors STRATA_DRAIN_STRICT — surfaced on the
-	// GET /admin/v1/clusters response so the UI can render a "strict" chip
-	// next to every cluster card (US-004 drain-lifecycle).
-	DrainStrict bool
 }
 
 // New constructs a Server. Started defaults to now. JWTSecret empty means
@@ -305,7 +296,6 @@ func New(c Config) *Server {
 		ClusterBackends:      c.ClusterBackends,
 		DrainCache:           c.DrainCache,
 		RebalanceProgress:    c.RebalanceProgress,
-		DrainStrict:          c.DrainStrict,
 		Logger:               log.Default(),
 	}
 }

@@ -20,12 +20,11 @@ import (
 )
 
 type Backend struct {
-	clusters    map[string]ClusterSpec
-	classes     map[string]ClassSpec
-	logger      *slog.Logger
-	metrics     Metrics
-	tracer      trace.Tracer
-	drainStrict bool
+	clusters map[string]ClusterSpec
+	classes  map[string]ClassSpec
+	logger   *slog.Logger
+	metrics  Metrics
+	tracer   trace.Tracer
 
 	// putConcurrency caps the per-PutChunks worker pool that dispatches
 	// chunk writes to RADOS. Read once at New from
@@ -71,7 +70,6 @@ func New(cfg Config) (data.Backend, error) {
 		logger:         cfg.Logger,
 		metrics:        cfg.Metrics,
 		tracer:         cfg.Tracer,
-		drainStrict:    cfg.DrainStrict,
 		putConcurrency: putConcurrencyFromEnv(),
 		getPrefetch:    getPrefetchFromEnv(),
 		conns:          make(map[string]*goceph.Conn),
@@ -190,7 +188,7 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 	pickCluster := func(idx int) (string, error) {
 		picked := placement.PickClusterExcluding(bucketID, objKey, idx, policy, draining)
 		if picked == "" {
-			if b.drainStrict && draining[spec.Cluster] {
+			if draining[spec.Cluster] {
 				return "", data.NewDrainRefusedError(spec.Cluster)
 			}
 			return spec.Cluster, nil
@@ -200,7 +198,7 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 				b.logger.WarnContext(ctx, "rados placement: picked cluster not configured; falling back",
 					"picked", picked, "fallback", spec.Cluster)
 			}
-			if b.drainStrict && draining[spec.Cluster] {
+			if draining[spec.Cluster] {
 				return "", data.NewDrainRefusedError(spec.Cluster)
 			}
 			return spec.Cluster, nil

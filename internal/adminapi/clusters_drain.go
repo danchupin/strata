@@ -28,13 +28,10 @@ type ClusterStateEntry struct {
 }
 
 // ClustersListResponse is the wire shape for GET /admin/v1/clusters.
-// DrainStrict mirrors the process-level STRATA_DRAIN_STRICT flag (US-004
-// drain-lifecycle) so the UI can render a "strict" badge per card without
-// a separate diagnostics call. The flag is a process-boot value — every
-// row in a single response shares the same value.
+// drain_strict was removed in US-007 drain-transparency — drain is now
+// unconditionally strict so the flag is no longer surfaced.
 type ClustersListResponse struct {
-	Clusters    []ClusterStateEntry `json:"clusters"`
-	DrainStrict bool                `json:"drain_strict"`
+	Clusters []ClusterStateEntry `json:"clusters"`
 }
 
 // drainRequestBody is the JSON shape accepted by POST
@@ -68,7 +65,7 @@ func (s *Server) handleClustersList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	seen := map[string]struct{}{}
-	out := ClustersListResponse{Clusters: []ClusterStateEntry{}, DrainStrict: s.DrainStrict}
+	out := ClustersListResponse{Clusters: []ClusterStateEntry{}}
 	add := func(id string) {
 		if id == "" {
 			return

@@ -167,30 +167,38 @@ testcontainers to find the engine.
                           `{cluster, bytes_moved, completed_at}`
                           through `notify.Sink.Send` for every target
                           configured in `STRATA_NOTIFY_TARGETS`.
-                          Strict-mode env (US-002 drain-lifecycle):
-                          `STRATA_DRAIN_STRICT` (default `off`, accepts
-                          `on`/`off`/boolean strings; unknown → fail-
-                          fast at boot) closes the PUT fail-open
-                          fallback. When `on`, RADOS + S3
-                          `Backend.PutChunks` consult the drain map
-                          after `placement.PickClusterExcluding`
-                          returns "" (empty / all-excluded policy)
-                          and return `data.ErrDrainRefused` if the
-                          resolved class default cluster is draining.
+                          Always-strict drain (US-007 drain-
+                          transparency): RADOS + S3
+                          `Backend.PutChunks` unconditionally consult
+                          the drain map after
+                          `placement.PickClusterExcluding` returns ""
+                          (empty / all-excluded policy) and return
+                          `data.ErrDrainRefused` if the resolved class
+                          default cluster is draining. No env gate —
+                          the former opt-in `STRATA_DRAIN_STRICT` env
+                          was retired (legacy values in the environ
+                          log a single WARN at boot and are ignored).
                           The gateway maps the sentinel to HTTP 503
                           `<Code>DrainRefused</Code>` +
                           `Retry-After: 300`; counter
-                          `strata_putchunks_refused_total{reason="drain_strict",cluster}`
-                          bumps per refusal. **PUT only** — reads,
-                          deletes, HEAD, multipart Complete/Abort,
-                          List against draining clusters keep working
-                          (drain semantic is stop-write, not stop-
-                          read). `GET /admin/v1/clusters` surfaces
-                          the boot-time value as a top-level
-                          `drain_strict: bool` field; the UI renders
-                          a "strict" chip per cluster card so
-                          operators see the global flag without an
-                          extra fetch. Pre-drain bucket impact
+                          `strata_putchunks_refused_total{reason="drain_refused",cluster}`
+                          bumps per refusal (label flipped from
+                          `drain_strict` — breaking change for
+                          dashboards). **PUT only** — reads, deletes,
+                          HEAD, multipart UploadPart / Complete /
+                          Abort, List against draining clusters keep
+                          working (drain semantic is stop-write, not
+                          stop-read). In-flight multipart sessions
+                          persist the initial cluster id in the
+                          opaque BackendUploadID handle
+                          (`cluster\x00bucket\x00key\x00uploadID`) so
+                          UploadPart / Complete / Abort recover
+                          routing directly from the handle and never
+                          re-consult the placement picker — drained
+                          uploads finish gracefully on the original
+                          cluster. The `drain_strict: bool` field on
+                          `GET /admin/v1/clusters` and the "strict"
+                          UI chip were removed. Pre-drain bucket impact
                           preview (US-006 drain-lifecycle):
                           `GET /admin/v1/clusters/{id}/bucket-references`
                           lists buckets whose `Placement[<id>] > 0`

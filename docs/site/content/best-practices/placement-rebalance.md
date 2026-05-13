@@ -318,9 +318,9 @@ has **somewhere to migrate chunks to**:
   naturally ages out via lifecycle expiration.
 
 If the goal is "stop writes immediately" without migration, drain is
-the right primitive — strict mode (`STRATA_DRAIN_STRICT=on`) closes
-the fail-open fallback so PUTs targeting a single-cluster policy on
-the drained cluster get a clean 503 DrainRefused. If the goal is
+the right primitive — drain is **unconditionally strict** (US-007
+drain-transparency), so PUTs whose placement picker falls back to a
+draining cluster get a clean 503 DrainRefused. If the goal is
 "actually move bytes off this hardware", drain is the right primitive
 **only when** the bucket Placement policies name a peer cluster — the
 pre-drain checklist below catches the gap before it surprises you.
@@ -349,20 +349,13 @@ has a single console surface to drive it.
    the target cluster doesn't have a `strata-hot` pool, every move
    fails. The Pools matrix surfaces target pools — confirm visually
    before draining.
-4. **Decide on strict mode.** Set `STRATA_DRAIN_STRICT=on` if you want
-   PUTs that *would have fallen back to the drained cluster* (empty
-   policy / all-policy-clusters-draining) to refuse with 503
-   DrainRefused instead. The "strict" badge on every cluster card
-   confirms the global flag is on. The flag is a process-boot env —
-   flipping it requires a rolling restart. Without strict mode, PUTs
-   silently fall back to the class default's `spec.Cluster` even when
-   it's draining.
-5. **Skim the BucketDetail Placement tab for policy-drain warnings.**
+4. **Skim the BucketDetail Placement tab for policy-drain warnings.**
    When every cluster with non-zero weight in a saved bucket policy is
-   `state=draining`, the Placement tab renders an amber
-   "All clusters in this policy are draining" chip. Update those
-   policies before traffic resumes; otherwise new PUTs land in the
-   fail-open / refuse trap depending on strict mode.
+   draining (`draining_readonly` or `evacuating`), the Placement tab
+   renders an amber "All clusters in this policy are draining" chip.
+   Update those policies before draining — otherwise new PUTs whose
+   picker falls back to the drained cluster get a hard 503
+   DrainRefused (drain is unconditionally strict in US-007).
 
 ### Drain procedure
 
@@ -406,7 +399,7 @@ moved, the rest stop migrating.
 
 | Path | What it does | Caller |
 | ---- | ----------- | ------ |
-| `GET /admin/v1/clusters` | Lists every configured cluster + its state + the global `drain_strict` flag. | `<ClustersSubsection>` (10 s poll) |
+| `GET /admin/v1/clusters` | Lists every configured cluster + its state + mode. Drain is unconditionally strict — the legacy `drain_strict` field is gone (US-007). | `<ClustersSubsection>` (10 s poll) |
 | `GET /admin/v1/clusters/{id}/drain-progress` | Per-cluster `{state, chunks_on_cluster, bytes_on_cluster, base_chunks_at_start, last_scan_at, eta_seconds, deregister_ready, warnings}`. Reads from the rebalance worker's in-process `ProgressTracker` — never scans manifests synchronously. | `<DrainProgressBar>` (30 s poll) |
 | `GET /admin/v1/clusters/{id}/bucket-references` | Pre-drain bucket-impact preview. Lists buckets whose `Placement[<id>] > 0` joined with `bucket_stats` for chunk_count + bytes_used. Paginated via `?limit=N&offset=M` (default 100). | `<BucketReferencesDrawer>` |
 | `POST /admin/v1/clusters/{id}/drain` / `.../undrain` | Flip `cluster_state` row to `draining` / `live`. Audit-stamped `admin:DrainCluster` / `admin:UndrainCluster`. | `<ConfirmDrainModal>` / Undrain button |
@@ -418,16 +411,28 @@ state=draining but no scan has committed yet, the response carries
 committed a tick"]` and the UI renders "scan pending" instead of
 zero counts.
 
-### `STRATA_DRAIN_STRICT` env
+### Drain refusal semantics (always strict)
 
-| Variable                  | Default | Range          | Purpose |
-| ------------------------- | ------- | -------------- | ------- |
-| `STRATA_DRAIN_STRICT`     | `off`   | `on` / `off` / boolean strings | When `on`, RADOS + S3 `PutChunks` refuse to fall back to a `draining` cluster — returns `data.ErrDrainRefused`, the gateway maps it to `503 ServiceUnavailable` with `<Code>DrainRefused</Code>` and `Retry-After: 300`. **Only PUT chunks** are affected — GET / HEAD / DELETE / multipart Complete / Abort / List on the drained cluster all keep working (drain semantic is stop-write, not stop-read). |
+Drain is **unconditionally strict** (US-007 drain-transparency — the
+former opt-in `STRATA_DRAIN_STRICT` env was retired). RADOS + S3
+`PutChunks` always refuse to fall back to a draining cluster — they
+return `data.ErrDrainRefused`, the gateway maps it to `503
+ServiceUnavailable` with `<Code>DrainRefused</Code>` body and
+`Retry-After: 300` header. **PUT chunks only** — GET / HEAD / DELETE /
+multipart UploadPart / Complete / Abort / List against draining
+clusters keep working (drain semantic is stop-write, not stop-read).
+In-flight multipart sessions persist their initial cluster id in the
+upload handle and never re-consult the picker, so UploadPart /
+Complete / Abort on an already-open multipart finish gracefully on the
+drained cluster.
 
-Parsed at gateway boot; unknown values fail-fast with a clear error.
-Counter `strata_putchunks_refused_total{reason="drain_strict",cluster}`
-increments per refusal — wire to alerting if you expect zero refusals
-in steady state.
+**Breaking change for Prometheus dashboards.** Counter label flipped
+from `reason="drain_strict"` to `reason="drain_refused"` —
+`strata_putchunks_refused_total{reason="drain_refused",cluster}`
+increments per refusal. Wire to alerting if you expect zero refusals
+in steady state. Legacy `STRATA_DRAIN_STRICT` env in the environment
+is ignored at boot with a single WARN log line (remove from your
+deploy descriptors).
 
 ### User journey walkthrough
 
@@ -443,7 +448,7 @@ exit-non-zero on any assertion miss. Run via
 | 2 | See per-cluster per-pool bytes/chunks in Pools table | Pools matrix (`#clusters × #distinct-pools` rows) | US-001 |
 | 3 | Click "Show affected buckets" link on draining-candidate card | `<BucketReferencesDrawer>` | US-006 |
 | 4 | Identify hot buckets that need policy update before drain | drawer lists buckets desc by `chunk_count` | US-006 |
-| 5 | Optionally flip `STRATA_DRAIN_STRICT=on` in env + restart | docs + cluster-card "strict" chip | US-002 + US-004 |
+| 5 | (n/a — drain is unconditionally strict in US-007; no env flip needed) | — | US-007 drain-transparency |
 | 6 | Click "Drain" on the cluster card | `<ConfirmDrainModal>` | (placement-ui, existing) |
 | 7 | Modal surfaces "<N> buckets reference this cluster" + typed-confirm | enhanced modal | US-006 |
 | 8 | Type cluster id → submit enabled → click Drain | typed confirm | (placement-ui, existing) |

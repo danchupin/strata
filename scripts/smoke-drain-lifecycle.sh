@@ -21,9 +21,8 @@
 #   - STRATA_RADOS_CLASSES exposes ≥3 storage classes, each pinned to a
 #     distinct pool on `default` (the matrix expects #clusters × #distinct
 #     pools = 6 rows once US-001 ships).
-#   - STRATA_DRAIN_STRICT=on (negative path (a) — strict-mode 503) when
-#     SMOKE_DRAIN_STRICT_LAB=1; otherwise the (a)+(b) checks fall back to
-#     "log-only" assertions against a single restart cycle.
+#   - Drain is unconditionally strict (US-007 drain-transparency) — the
+#     former opt-in STRATA_DRAIN_STRICT env has been retired.
 #
 # Skip behavior: when the multi-cluster profile is NOT up (probe on /readyz
 # fails after WAIT_GRACE seconds), the script EXITs 77 (skipped) with a
@@ -39,8 +38,6 @@ CLUSTER="${SMOKE_DRAIN_CLUSTER:-cephb}"
 OTHER_CLUSTER="${SMOKE_DRAIN_OTHER:-default}"
 EXPECTED_POOL_ROWS="${SMOKE_DRAIN_POOL_ROWS:-6}"
 REQUIRE_LAB="${REQUIRE_LAB:-0}"
-SMOKE_DRAIN_STRICT_LAB="${SMOKE_DRAIN_STRICT_LAB:-0}"
-
 CRED="${STRATA_STATIC_CREDENTIALS:-}"
 if [[ -z "$CRED" ]]; then
   echo "FAIL: STRATA_STATIC_CREDENTIALS unset (need access:secret[:owner])" >&2
@@ -230,12 +227,11 @@ DEFAULT_NAMES=$(echo "$REFS_DEFAULT" | jq -r '.buckets[].name' | sort | tr '\n' 
 [[ "$CEPHB_NAMES" != *"$DEFAULT_BUCKET"* ]] || fail "step3 default-routing $DEFAULT_BUCKET must not appear in any cluster ref list"
 pass "step3+4 bucket-references match policy filter"
 
-# ---------------------------------------------------------------- Step 5
-echo "== Step 5: drain_strict flag visible on /clusters"
-STRICT=$(admin_get "/admin/v1/clusters" | jq -r '.drain_strict')
-note "drain_strict=$STRICT (STRATA_DRAIN_STRICT in env decides)"
-case "$STRICT" in true|false) ;; *) fail "step5 drain_strict not bool ($STRICT)";; esac
-pass "step5 drain_strict surfaced ($STRICT)"
+# ---------------------------------------------------------------- Step 5 (retired)
+# Step 5 used to assert the top-level drain_strict bool on /clusters; the
+# field was removed in US-007 drain-transparency (drain is now
+# unconditionally strict). The new smoke-drain-transparency.sh (US-008)
+# replaces this with the per-mode drain walkthrough.
 
 # ---------------------------------------------------------------- Step 6+7+8
 echo "== Step 6+7+8: drain $CLUSTER"
@@ -256,29 +252,12 @@ WARNS=$(echo "$PROG" | jq -r '.warnings // [] | join(",")')
 note "initial drain-progress: $PROG (warnings: ${WARNS:-none})"
 pass "step9+10+11 drain-progress draining shape ok"
 
-# ---------------------------------------------------------------- Negative path (a)
-if [[ "$SMOKE_DRAIN_STRICT_LAB" == "1" ]]; then
-  echo "== Negative (a): strict-mode PUT to all-drained-policy bucket → 503 DrainRefused"
-  CODE=$(aws --endpoint-url "$BASE" s3api put-object \
-    --bucket "$CEPHB_BUCKET" --key strict-probe \
-    --body "$PAYLOAD" 2>"$TMP/strict.err" || true)
-  if ! grep -q "DrainRefused" "$TMP/strict.err"; then
-    fail "neg-a expected DrainRefused error from strict-mode PUT, got: $(cat "$TMP/strict.err")"
-  fi
-  pass "neg-a strict-mode refused PUT with DrainRefused"
-else
-  note "neg-a skipped (SMOKE_DRAIN_STRICT_LAB!=1 — set to 1 after restarting lab with STRATA_DRAIN_STRICT=on)"
-fi
-
-# ---------------------------------------------------------------- Negative path (b)
-echo "== Negative (b): drain_strict=off → PUT to drained-only bucket still succeeds (fail-open)"
-if [[ "$STRICT" == "false" ]]; then
-  aws --endpoint-url "$BASE" s3 cp "$PAYLOAD" "s3://$CEPHB_BUCKET/failopen-probe" >/dev/null \
-    || fail "neg-b fail-open PUT unexpectedly errored"
-  pass "neg-b fail-open PUT succeeded"
-else
-  note "neg-b skipped — lab is in strict mode"
-fi
+# ---------------------------------------------------------------- Negative paths (retired)
+# Negative (a) / (b) used to gate on SMOKE_DRAIN_STRICT_LAB and the
+# drain_strict bool to exercise both the strict and fail-open refusal
+# shapes. Drain is now unconditionally strict (US-007); both probes are
+# covered end-to-end by smoke-drain-transparency.sh's Scenario A and the
+# /drain-impact assertions in Scenario B (US-008).
 
 # ---------------------------------------------------------------- Step 12+13
 echo "== Step 12+13: wait for drain to converge (deregister_ready=true)"

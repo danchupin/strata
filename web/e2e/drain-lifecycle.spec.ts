@@ -56,7 +56,6 @@ test.describe('Strata console — drain lifecycle (US-007)', () => {
       { id: 'cepha', state: 'live', backend: 'rados' },
       { id: 'cephb', state: 'live', backend: 'rados' },
     ];
-    const drainStrict = true;
     let placement: Record<string, number> | null = null;
     // Progress shape per cluster. Start "draining" with 5 chunks; after the
     // operator clicks Drain we'll flip to draining + populate a non-zero
@@ -96,7 +95,7 @@ test.describe('Strata console — drain lifecycle (US-007)', () => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ clusters, drain_strict: drainStrict }),
+        body: JSON.stringify({ clusters }),
       });
     });
 

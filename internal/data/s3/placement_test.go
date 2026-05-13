@@ -207,12 +207,13 @@ func TestPutChunksPlacementAllZeroFallsBack(t *testing.T) {
 	}
 }
 
-// TestPutChunksDrainStrictRefusesFallback pins the US-002 strict-mode
-// AC: when DrainStrict is on and the placement picker falls back to a
-// draining cluster (empty policy or all-excluded policy), PutChunks
-// returns data.ErrDrainRefused with the resolved cluster id; nothing
-// is written to either backend.
-func TestPutChunksDrainStrictRefusesFallback(t *testing.T) {
+// TestPutChunksRefusesDrainFallback pins the US-007 always-strict
+// contract: when the placement picker falls back to a draining cluster
+// (empty policy or all-excluded policy), PutChunks returns
+// data.ErrDrainRefused with the resolved cluster id; nothing is written
+// to either backend. No env / Config gate — drain is unconditionally
+// strict.
+func TestPutChunksRefusesDrainFallback(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "ak")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "sk")
 
@@ -231,7 +232,6 @@ func TestPutChunksDrainStrictRefusesFallback(t *testing.T) {
 			"STANDARD-B": {Cluster: "b", Bucket: "bucket-b"},
 		},
 		SkipCredsCheck: true,
-		DrainStrict:    true,
 	}
 	be, err := New(cfg)
 	if err != nil {
@@ -277,10 +277,10 @@ func TestPutChunksDrainStrictRefusesFallback(t *testing.T) {
 	}
 }
 
-// TestPutChunksDrainStrictOffPreservesFailOpen pins the default-mode
-// regression rail: DrainStrict=false + drained fallback continues to
-// route to the draining cluster (existing behavior).
-func TestPutChunksDrainStrictOffPreservesFailOpen(t *testing.T) {
+// TestPutChunksDoesNotRefuseAlternateCluster pins the AC that the
+// always-strict refusal fires ONLY when fallback hits a draining
+// cluster — if the policy picks a non-draining peer the PUT succeeds.
+func TestPutChunksDoesNotRefuseAlternateCluster(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "ak")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "sk")
 
@@ -299,51 +299,6 @@ func TestPutChunksDrainStrictOffPreservesFailOpen(t *testing.T) {
 			"STANDARD-B": {Cluster: "b", Bucket: "bucket-b"},
 		},
 		SkipCredsCheck: true,
-		// DrainStrict: false (default).
-	}
-	be, err := New(cfg)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	bucketID := uuid.New()
-	ctx := data.WithDrainingClusters(
-		data.WithObjectKey(data.WithBucketID(context.Background(), bucketID), "key"),
-		map[string]bool{"a": true},
-	)
-	a.reset()
-	bsrv.reset()
-	if _, err := be.PutChunks(ctx, strings.NewReader("payload"), "STANDARD"); err != nil {
-		t.Fatalf("PutChunks (default mode): want nil, got %v", err)
-	}
-	if a.requestCount() != 1 || bsrv.requestCount() != 0 {
-		t.Fatalf("default mode: want write to a despite drain, got (a=%d, b=%d)", a.requestCount(), bsrv.requestCount())
-	}
-}
-
-// TestPutChunksDrainStrictDoesNotRefuseAlternateCluster pins the AC
-// that strict mode refuses ONLY when fallback hits a draining cluster
-// — if the policy picks a non-draining peer the PUT succeeds.
-func TestPutChunksDrainStrictDoesNotRefuseAlternateCluster(t *testing.T) {
-	t.Setenv("AWS_ACCESS_KEY_ID", "ak")
-	t.Setenv("AWS_SECRET_ACCESS_KEY", "sk")
-
-	a := newCapturingS3Server(t)
-	bsrv := newCapturingS3Server(t)
-	t.Cleanup(a.Close)
-	t.Cleanup(bsrv.Close)
-
-	cfg := Config{
-		Clusters: map[string]S3ClusterSpec{
-			"a": {Endpoint: a.URL(), Region: "us-east-1", ForcePathStyle: true, Credentials: CredentialsRef{Type: CredentialsChain}},
-			"b": {Endpoint: bsrv.URL(), Region: "us-west-1", ForcePathStyle: true, Credentials: CredentialsRef{Type: CredentialsChain}},
-		},
-		Classes: map[string]ClassSpec{
-			"STANDARD":   {Cluster: "a", Bucket: "bucket-a"},
-			"STANDARD-B": {Cluster: "b", Bucket: "bucket-b"},
-		},
-		SkipCredsCheck: true,
-		DrainStrict:    true,
 	}
 	be, err := New(cfg)
 	if err != nil {

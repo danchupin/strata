@@ -43,26 +43,25 @@ func TestClustersList_DefaultsToLive(t *testing.T) {
 	if by["c2"].State != meta.ClusterStateEvacuating || by["c2"].Mode != meta.ClusterModeEvacuate {
 		t.Fatalf("c2: got=%+v want=(evacuating,evacuate)", by["c2"])
 	}
-	if got.DrainStrict {
-		t.Fatalf("drain_strict: default server has DrainStrict=false; got %v", got.DrainStrict)
-	}
 }
 
-func TestClustersList_SurfacesDrainStrict(t *testing.T) {
+// TestClustersList_NoDrainStrictField pins the US-007 removal: the
+// drain_strict bool was retired from the GET /admin/v1/clusters wire
+// shape (drain is now unconditionally strict).
+func TestClustersList_NoDrainStrictField(t *testing.T) {
 	s := newTestServer()
 	s.KnownClusters = map[string]struct{}{"c1": {}}
 	s.ClusterBackends = map[string]string{"c1": "rados"}
-	s.DrainStrict = true
 	rr := putAdmin(t, s, "alice", http.MethodGet, "/admin/v1/clusters", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	var got ClustersListResponse
-	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+	var raw map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if !got.DrainStrict {
-		t.Fatalf("drain_strict: got %v want true", got.DrainStrict)
+	if _, ok := raw["drain_strict"]; ok {
+		t.Fatalf("drain_strict must be absent from clusters response: %s", rr.Body.String())
 	}
 }
 
