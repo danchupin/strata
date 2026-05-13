@@ -345,10 +345,15 @@ components:
       description: |
         Per-draining-cluster progress snapshot returned by
         GET /clusters/{id}/drain-progress (US-003 drain-lifecycle;
-        `mode` added US-001 drain-transparency). Numeric fields are
-        null whenever the rebalance worker has not committed a scan
-        yet, or when the cluster is not in a write-blocking state (the
-        deregister + ETA semantics only make sense while draining).
+        `mode` added US-001 drain-transparency; categorized counters
+        added US-002 drain-transparency). The three category counters
+        replace the flat chunks_on_cluster as the source of truth —
+        chunks_on_cluster is kept as their sum for dashboard
+        compatibility. ETA is computed against migratable_chunks
+        only (stuck chunks need an operator policy edit, not
+        migration throughput). State=draining_readonly returns
+        state/mode + a "stop-writes mode" warning with all numeric
+        fields null — there is no migration scan in stop-writes mode.
       properties:
         state:
           type: string
@@ -360,6 +365,31 @@ components:
           type: integer
           format: int64
           nullable: true
+          description: Sum of the three category counters.
+        migratable_chunks:
+          type: integer
+          format: int64
+          nullable: true
+          description: |
+            Chunks the rebalance worker can move under the bucket's
+            current Placement policy (at least one live cluster left).
+        stuck_single_policy_chunks:
+          type: integer
+          format: int64
+          nullable: true
+          description: |
+            Chunks whose bucket has a Placement policy but every cluster
+            referenced by that policy is draining → the picker has
+            nothing to pick. Resolved by editing the bucket's
+            Placement to include a live cluster.
+        stuck_no_policy_chunks:
+          type: integer
+          format: int64
+          nullable: true
+          description: |
+            Chunks routed to the cluster via class-env routing on a
+            bucket without a Placement policy. Resolved by setting an
+            initial Placement that excludes the draining cluster.
         bytes_on_cluster:
           type: integer
           format: int64
@@ -369,9 +399,9 @@ components:
           format: int64
           nullable: true
           description: |
-            Chunk count captured on the first committed scan after the
-            live → draining transition. UI percent-filled = 1 -
-            chunks_on_cluster / base_chunks_at_start when set.
+            Total chunk count captured on the first committed scan after
+            the live → evacuating transition. UI percent-filled =
+            1 - chunks_on_cluster / base_chunks_at_start when set.
         last_scan_at:
           type: string
           format: date-time
@@ -381,22 +411,27 @@ components:
           format: int64
           nullable: true
           description: |
-            chunks_remaining / rate(strata_rebalance_chunks_moved_total
+            migratable_chunks / rate(strata_rebalance_chunks_moved_total
             {from="<id>"}[5m]). Null when Prom is unset/unavailable,
-            chunks_on_cluster is 0, or the move rate is zero.
+            migratable_chunks is 0, or the move rate is zero. Stuck
+            categories are excluded from the ETA — they never converge
+            without operator action.
         deregister_ready:
           type: boolean
           nullable: true
           description: |
-            True when state is a draining state and chunks_on_cluster=0
-            — the cluster row can now be removed from STRATA_RADOS_CLUSTERS
-            / STRATA_S3_CLUSTERS and the gateways rolling-restarted.
+            True when state=evacuating and the total chunks_on_cluster
+            (sum of all three categories) is 0 — the cluster row can be
+            removed from STRATA_RADOS_CLUSTERS / STRATA_S3_CLUSTERS and
+            the gateways rolling-restarted.
         warnings:
           type: array
           items: { type: string }
           description: |
             Free-form operator-facing notes (e.g. "progress data
-            stale" when last_scan_at older than 2× rebalance interval).
+            stale" when last_scan_at older than 2× rebalance interval;
+            "stop-writes mode — migration scan skipped" for
+            state=draining_readonly).
 
     BucketReferenceEntry:
       type: object

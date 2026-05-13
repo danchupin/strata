@@ -47,8 +47,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped: ProgressSnapshot now carries MigratableChunks / StuckSinglePolicyChunks / StuckNoPolicyChunks (replacing flat Chunks via a derived Chunks() method) + Bytes + per-(cluster, bucket) ByBucket breakdown. CommitScan signature widened to map[string]ScanResult — ScanResult exposes the same three counters + Bytes + optional ByBucket. The rebalance worker now tracks two cluster sets: excludeForTargets (readonly + evacuating + legacy draining; picker exclusion + safety rail) and scanFor (evacuating only — readonly skips migration scan per AC). Per-bucket category is computed once via classifyBucket(policy, excludeForTargets) — constant across chunks because the verdict depends on (policy, excluded) only. /drain-progress handler surfaces the three new int64 fields alongside chunks_on_cluster (total); ETA computed against migratable_chunks only; deregister_ready = total == 0; readonly state returns 'stop-writes mode — migration scan skipped' warning + null counts. OpenAPI spec updated. New unit tests: classifyBucket branch coverage, worker mixed-bucket categorization end-to-end (migratable=2 / stuck_single=3 / stuck_no_policy=1), readonly skip, handler categorized response, handler readonly skip. US-003 consumes snap.ByBucket directly. Learnings: ProgressSnapshot.Chunks is no longer a field — it's a Chunks() method (and same on ScanResult). The picker exclusion set + scan focus set diverged; mixing them silently re-enables move-into-readonly or scans the wrong clusters — use loadClusterDrainSets to obtain both."
     },
     {
       "id": "US-003",

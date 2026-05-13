@@ -249,9 +249,9 @@ func (w *Worker) runOnce(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list buckets: %w", err)
 	}
-	draining := w.loadDrainingClusters(ctx)
+	excludeForTargets, scanFor := w.loadClusterDrainSets(ctx)
 	fillCache := w.newFillCache(ctx)
-	prog := newProgressAcc(w.cfg.Progress, draining)
+	prog := newProgressAcc(w.cfg.Progress, scanFor)
 	for _, b := range buckets {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -265,15 +265,15 @@ func (w *Worker) runOnce(ctx context.Context) error {
 		if len(policy) == 0 {
 			// Empty-policy buckets still need a progress scan so chunks
 			// on a draining cluster are counted toward the deregister-
-			// ready signal. The move plan is a no-op (no policy → no
-			// PickCluster verdicts).
-			w.scanBucketForProgress(ctx, b, draining, prog)
+			// ready signal (stuck_no_policy category). The move plan is
+			// a no-op (no policy → no PickCluster verdicts).
+			w.scanBucketForProgress(ctx, b, scanFor, prog)
 			continue
 		}
-		w.scanAndEmit(ctx, b, policy, draining, fillCache, prog)
+		w.scanAndEmit(ctx, b, policy, excludeForTargets, scanFor, fillCache, prog)
 	}
 	tickEnd := w.cfg.Now()
-	completions := prog.commit(w.cfg.Progress, draining, tickEnd)
+	completions := prog.commit(w.cfg.Progress, scanFor, tickEnd)
 	for _, ev := range completions {
 		w.handleDrainComplete(ctx, ev, tickEnd.Sub(tickStart))
 	}
@@ -327,67 +327,147 @@ func (w *Worker) recordDrainCompleteAudit(ctx context.Context, ev CompletionEven
 	}
 }
 
-// progressAcc accumulates per-draining-cluster {chunks, bytes} for one
-// rebalance tick. The worker increments it from scanDistribution +
-// scanBucketForProgress and CommitScan-flushes at iteration end. nil
-// receiver short-circuits every method so callers do not need a
-// nil-check on the hot path.
+// progressAcc accumulates per-(cluster, bucket) categorized chunk +
+// byte counts for one rebalance tick (US-002 drain-transparency). The
+// worker increments it from scanDistribution + scanBucketForProgress
+// and CommitScan-flushes at iteration end. Only `state=evacuating`
+// clusters are tracked — draining_readonly clusters get a stop-write
+// semantic but no migration scan. nil receiver short-circuits every
+// method.
 type progressAcc struct {
 	enabled bool
-	chunks  map[string]int64
-	bytes   map[string]int64
+	// per-cluster category totals
+	migratable        map[string]int64
+	stuckSinglePolicy map[string]int64
+	stuckNoPolicy     map[string]int64
+	bytes             map[string]int64
+	// per (cluster, bucket) breakdown — populated lazily.
+	byBucket map[string]map[string]*BucketScanCategory
 }
 
-func newProgressAcc(p *ProgressTracker, draining map[string]bool) *progressAcc {
-	if p == nil || len(draining) == 0 {
+func newProgressAcc(p *ProgressTracker, scanFor map[string]bool) *progressAcc {
+	if p == nil || len(scanFor) == 0 {
 		return &progressAcc{}
 	}
-	chunks := make(map[string]int64, len(draining))
-	bytes := make(map[string]int64, len(draining))
-	for id := range draining {
-		chunks[id] = 0
-		bytes[id] = 0
+	a := &progressAcc{
+		enabled:           true,
+		migratable:        make(map[string]int64, len(scanFor)),
+		stuckSinglePolicy: make(map[string]int64, len(scanFor)),
+		stuckNoPolicy:     make(map[string]int64, len(scanFor)),
+		bytes:             make(map[string]int64, len(scanFor)),
+		byBucket:          make(map[string]map[string]*BucketScanCategory, len(scanFor)),
 	}
-	return &progressAcc{enabled: true, chunks: chunks, bytes: bytes}
+	for id := range scanFor {
+		a.migratable[id] = 0
+		a.stuckSinglePolicy[id] = 0
+		a.stuckNoPolicy[id] = 0
+		a.bytes[id] = 0
+	}
+	return a
 }
 
-func (a *progressAcc) observe(clusterID string, draining map[string]bool, size int64) {
-	if a == nil || !a.enabled || clusterID == "" {
+// observe counts one chunk that sits on `clusterID` against the bucket's
+// `category` ("migratable" / "stuck_single_policy" / "stuck_no_policy")
+// — see classifyBucket. Only fires when the cluster is in the scanFor
+// set (evacuating). Other call shapes (readonly cluster, non-draining
+// cluster, empty cluster id) short-circuit.
+func (a *progressAcc) observe(clusterID, bucket, category string, scanFor map[string]bool, size int64) {
+	if a == nil || !a.enabled || clusterID == "" || !scanFor[clusterID] {
 		return
 	}
-	if !draining[clusterID] {
+	switch category {
+	case "migratable":
+		a.migratable[clusterID]++
+	case "stuck_single_policy":
+		a.stuckSinglePolicy[clusterID]++
+	case "stuck_no_policy":
+		a.stuckNoPolicy[clusterID]++
+	default:
 		return
 	}
-	a.chunks[clusterID]++
 	a.bytes[clusterID] += size
+	perCluster, ok := a.byBucket[clusterID]
+	if !ok {
+		perCluster = map[string]*BucketScanCategory{}
+		a.byBucket[clusterID] = perCluster
+	}
+	entry, ok := perCluster[bucket]
+	if !ok {
+		entry = &BucketScanCategory{Category: category}
+		perCluster[bucket] = entry
+	}
+	entry.ChunkCount++
+	entry.BytesUsed += size
 }
 
-func (a *progressAcc) commit(p *ProgressTracker, draining map[string]bool, now time.Time) []CompletionEvent {
+func (a *progressAcc) commit(p *ProgressTracker, scanFor map[string]bool, now time.Time) []CompletionEvent {
 	if a == nil || p == nil {
 		return nil
 	}
-	ids := make([]string, 0, len(draining))
-	for id := range draining {
+	ids := make([]string, 0, len(scanFor))
+	for id := range scanFor {
 		ids = append(ids, id)
 	}
 	if !a.enabled {
-		// No draining clusters this tick (or tracker disabled). Still
+		// No evacuating clusters this tick (or tracker disabled). Still
 		// flush so previously-cached entries for clusters that
-		// transitioned out of draining are reaped.
-		return p.CommitScan(ids, nil, nil, now)
+		// transitioned out of evacuating are reaped.
+		return p.CommitScan(ids, nil, now)
 	}
-	return p.CommitScan(ids, a.chunks, a.bytes, now)
+	scans := make(map[string]ScanResult, len(ids))
+	for _, id := range ids {
+		res := ScanResult{
+			MigratableChunks:        a.migratable[id],
+			StuckSinglePolicyChunks: a.stuckSinglePolicy[id],
+			StuckNoPolicyChunks:     a.stuckNoPolicy[id],
+			Bytes:                   a.bytes[id],
+		}
+		if perBucket := a.byBucket[id]; len(perBucket) > 0 {
+			res.ByBucket = make(map[string]BucketScanCategory, len(perBucket))
+			for name, cat := range perBucket {
+				res.ByBucket[name] = *cat
+			}
+		}
+		scans[id] = res
+	}
+	return p.CommitScan(ids, scans, now)
+}
+
+// classifyBucket returns the per-bucket category contribution to the
+// draining-cluster progress snapshot. The category is constant across
+// every chunk of the bucket because the verdict only depends on
+// (policy, excludeForTargets), not on the chunk identity. Returns "" if
+// the bucket has no chunks routed to any draining cluster (no scan
+// contribution).
+func classifyBucket(policy map[string]int, excludeForTargets map[string]bool) string {
+	if len(policy) == 0 {
+		return "stuck_no_policy"
+	}
+	for id, w := range policy {
+		if w <= 0 {
+			continue
+		}
+		if !excludeForTargets[id] {
+			return "migratable"
+		}
+	}
+	return "stuck_single_policy"
 }
 
 // scanBucketForProgress walks every (latest) object in the bucket and
-// accumulates per-draining-cluster chunk / byte counts. This runs even
-// for buckets without a Placement policy so cluster decommissioning is
-// observable on legacy buckets (the move plan stays a no-op for those
-// because policy is empty; the count is independent).
-func (w *Worker) scanBucketForProgress(ctx context.Context, b *meta.Bucket, draining map[string]bool, prog *progressAcc) {
+// accumulates per-(cluster, bucket) categorized chunk / byte counts.
+// Runs even for buckets without a Placement policy so cluster
+// decommissioning is observable on legacy buckets — those chunks land
+// in the stuck_no_policy bucket because the picker has nothing to do.
+// Only fires for clusters in `scanFor` (state=evacuating).
+func (w *Worker) scanBucketForProgress(ctx context.Context, b *meta.Bucket, scanFor map[string]bool, prog *progressAcc) {
 	if prog == nil || !prog.enabled {
 		return
 	}
+	// Empty-policy callers feed this path → category is always
+	// stuck_no_policy. Per-chunk classification short-circuits the
+	// classifyBucket call.
+	const category = "stuck_no_policy"
 	opts := meta.ListOptions{Limit: w.cfg.PollLimit}
 	for {
 		if ctx.Err() != nil {
@@ -403,10 +483,10 @@ func (w *Worker) scanBucketForProgress(ctx context.Context, b *meta.Bucket, drai
 				continue
 			}
 			for _, c := range o.Manifest.Chunks {
-				prog.observe(c.Cluster, draining, c.Size)
+				prog.observe(c.Cluster, b.Name, category, scanFor, c.Size)
 			}
 			if br := o.Manifest.BackendRef; br != nil && br.Cluster != "" {
-				prog.observe(br.Cluster, draining, br.Size)
+				prog.observe(br.Cluster, b.Name, category, scanFor, br.Size)
 			}
 		}
 		if !res.Truncated {
@@ -416,30 +496,45 @@ func (w *Worker) scanBucketForProgress(ctx context.Context, b *meta.Bucket, drai
 	}
 }
 
-// loadDrainingClusters reads cluster_state once per tick and returns
-// the set of cluster ids whose state blocks writes (draining_readonly
-// or evacuating). Errors are logged + treated as empty so a meta hiccup
-// never breaks the rebalance tick.
-func (w *Worker) loadDrainingClusters(ctx context.Context) map[string]bool {
+// loadClusterDrainSets reads cluster_state once per tick and returns
+// two sets (US-002 drain-transparency):
+//   - excludeForTargets: clusters that must NOT receive new chunks
+//     (draining_readonly, evacuating, legacy draining). The picker
+//     excludes these; the safety rail refuses moves into these.
+//   - scanFor: clusters whose existing chunks are tracked + categorized
+//     for the drain-progress endpoint (state=evacuating only). Readonly
+//     clusters get stop-write semantic but no migration scan.
+//
+// Errors are logged + treated as empty so a meta hiccup never breaks the
+// rebalance tick.
+func (w *Worker) loadClusterDrainSets(ctx context.Context) (excludeForTargets, scanFor map[string]bool) {
 	rows, err := w.cfg.Meta.ListClusterStates(ctx)
 	if err != nil {
 		w.cfg.Logger.Warn("rebalance: load cluster states", "error", err.Error())
 		w.recordIterErr(err)
-		return nil
+		return nil, nil
 	}
 	if len(rows) == 0 {
-		return nil
+		return nil, nil
 	}
-	out := make(map[string]bool, len(rows))
+	excludeForTargets = make(map[string]bool, len(rows))
+	scanFor = make(map[string]bool, len(rows))
 	for id, row := range rows {
 		if meta.IsDrainingForWrite(row.State) {
-			out[id] = true
+			excludeForTargets[id] = true
+		}
+		switch row.State {
+		case meta.ClusterStateEvacuating, meta.ClusterStateDraining:
+			// Legacy `draining` rows are normalized to `evacuating` on
+			// read; include both as scanFor in case a non-normalizing
+			// backend slips through.
+			scanFor[id] = true
 		}
 	}
-	return out
+	return excludeForTargets, scanFor
 }
 
-func (w *Worker) scanAndEmit(ctx context.Context, b *meta.Bucket, policy map[string]int, draining map[string]bool, fills *fillCache, prog *progressAcc) {
+func (w *Worker) scanAndEmit(ctx context.Context, b *meta.Bucket, policy map[string]int, excludeForTargets, scanFor map[string]bool, fills *fillCache, prog *progressAcc) {
 	ctx, span := w.tracerOrNoop().Start(ctx, "rebalance.scan_bucket",
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(
@@ -451,7 +546,7 @@ func (w *Worker) scanAndEmit(ctx context.Context, b *meta.Bucket, policy map[str
 	)
 	defer span.End()
 
-	actual, moves, err := w.scanDistribution(ctx, b, policy, draining, prog)
+	actual, moves, err := w.scanDistribution(ctx, b, policy, excludeForTargets, scanFor, prog)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -459,7 +554,7 @@ func (w *Worker) scanAndEmit(ctx context.Context, b *meta.Bucket, policy map[str
 		w.cfg.Logger.Warn("rebalance: scan bucket", "bucket", b.Name, "error", err.Error())
 		return
 	}
-	moves = w.applySafetyRails(ctx, b, moves, draining, fills)
+	moves = w.applySafetyRails(ctx, b, moves, excludeForTargets, fills)
 	for range moves {
 		w.cfg.Metrics.IncPlannedMove(b.Name)
 	}
@@ -515,9 +610,16 @@ func (w *Worker) applySafetyRails(ctx context.Context, b *meta.Bucket, moves []M
 // rows) are treated as living on the default cluster (resolved as ""
 // here — the mover knows how to fall back). The picker uses the same
 // stable hash the PUT path uses (US-002) so retries are convergent.
-func (w *Worker) scanDistribution(ctx context.Context, b *meta.Bucket, policy map[string]int, draining map[string]bool, prog *progressAcc) (map[string]int, []Move, error) {
+//
+// excludeForTargets is the picker exclusion set (readonly + evacuating
+// + legacy draining). scanFor is the categorization set (evacuating
+// only — readonly clusters get stop-write but no migration scan per
+// US-002). Per-bucket category is constant across chunks because the
+// classifyBucket verdict depends on (policy, excludeForTargets) only.
+func (w *Worker) scanDistribution(ctx context.Context, b *meta.Bucket, policy map[string]int, excludeForTargets, scanFor map[string]bool, prog *progressAcc) (map[string]int, []Move, error) {
 	actual := map[string]int{}
 	var moves []Move
+	bucketCategory := classifyBucket(policy, excludeForTargets)
 	opts := meta.ListOptions{Limit: w.cfg.PollLimit}
 	for {
 		if ctx.Err() != nil {
@@ -533,8 +635,8 @@ func (w *Worker) scanDistribution(ctx context.Context, b *meta.Bucket, policy ma
 			}
 			for idx, c := range o.Manifest.Chunks {
 				actual[c.Cluster]++
-				prog.observe(c.Cluster, draining, c.Size)
-				want := placement.PickClusterExcluding(b.ID, o.Key, idx, policy, draining)
+				prog.observe(c.Cluster, b.Name, bucketCategory, scanFor, c.Size)
+				want := placement.PickClusterExcluding(b.ID, o.Key, idx, policy, excludeForTargets)
 				if want == "" {
 					continue
 				}
@@ -555,8 +657,8 @@ func (w *Worker) scanDistribution(ctx context.Context, b *meta.Bucket, policy ma
 			}
 			if br := o.Manifest.BackendRef; br != nil && br.Cluster != "" {
 				actual[br.Cluster]++
-				prog.observe(br.Cluster, draining, br.Size)
-				want := placement.PickClusterExcluding(b.ID, o.Key, 0, policy, draining)
+				prog.observe(br.Cluster, b.Name, bucketCategory, scanFor, br.Size)
+				want := placement.PickClusterExcluding(b.ID, o.Key, 0, policy, excludeForTargets)
 				if want == "" || br.Cluster == want {
 					continue
 				}
