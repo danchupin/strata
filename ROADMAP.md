@@ -75,6 +75,8 @@ adding more, prove what is there.
 
 ## Correctness & consistency
 
+- **P2 — `POST /admin/v1/buckets/{name}/force-empty` leaks chunks in storage backend.** `internal/adminapi/buckets_delete.go::forceEmptyDrainPage` calls `s.Meta.DeleteObject(...)` per row but does NOT enqueue the returned `*meta.Object.Manifest.Chunks` into the GC queue. Meta rows + bucket_stats counters get cleaned, but the underlying RADOS / S3 chunks remain in the pool / bucket forever — no GC worker picks them up. Compare to the S3 DeleteObject path (`internal/s3api/server.go::deleteObject`) which explicitly calls `s.enqueueChunks(ctx, o.Manifest.Chunks)` after a successful `Meta.DeleteObject`. The admin path is missing that call. Severity: operator running "Force delete" on a 10 TiB bucket leaks 10 TiB of orphan RADOS objects. Fix scope: extract the enqueue helper into a place reachable from both admin + s3api packages (or inject the s3api enqueue function into `adminapi.Config`); add unit test that asserts chunks get enqueued after force-empty; integration test on the multi-cluster lab verifies `rados ls` count drops to 0 after force-empty completes.
+
 - ~~**P2 — Multipart copy edges (UploadPartCopy).**~~ — **Done.** US-001 closed the
   copy-source-range parser (`internal/s3api/multipart.go::parseCopySourceRangeStrict`
   splits 400 InvalidArgument syntax errors from 416 InvalidRange out-of-bounds) and
