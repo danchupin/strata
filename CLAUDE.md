@@ -147,7 +147,26 @@ testcontainers to find the engine.
                           Admin: POST `/admin/v1/clusters/{id}/drain`
                           and `.../undrain`, GET `/admin/v1/clusters`
                           (audit `admin:DrainCluster` /
-                          `admin:UndrainCluster`).
+                          `admin:UndrainCluster`). Per-tick progress
+                          scan (US-003 drain-lifecycle) populates
+                          `rebalance.ProgressTracker` (chunks/bytes/
+                          BaseChunks/BaseBytes/LastScanAt/
+                          CompletionFiredAt per draining cluster); the
+                          adminapi handler reads it without scanning
+                          synchronously. Completion detection (US-005):
+                          a `>0 → 0` chunks_on_cluster transition fires
+                          one event per cluster (idempotent on
+                          CompletionFiredAt; refills reset the slot so
+                          drain→fill→drain re-fires). Each event logs
+                          INFO `drain complete`, writes a
+                          `drain.complete` audit row
+                          (`system:rebalance-worker`,
+                          `cluster:<id>`), bumps
+                          `strata_drain_complete_total{cluster}`, and
+                          best-effort fans the payload
+                          `{cluster, bytes_moved, completed_at}`
+                          through `notify.Sink.Send` for every target
+                          configured in `STRATA_NOTIFY_TARGETS`.
   internal/reshard      -> per-bucket online shard-resize worker (US-045);
                           driven synchronously via /admin/bucket/reshard or
                           as a daemon.

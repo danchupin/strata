@@ -11,21 +11,41 @@ import (
 // drain-lifecycle). Zero-valued LastScanAt means the worker has not
 // committed a scan for this cluster yet.
 //
-// BaseChunks is the chunk count captured the first time the worker
-// finalised a scan after the cluster transitioned to draining. The UI
-// uses it to render percentage filled (1 - chunks/BaseChunks). Once set
-// it sticks until the cluster leaves the draining set (undrain or row
-// deletion), at which point the tracker drops the snapshot entirely.
+// BaseChunks / BaseBytes are the chunk count + bytes captured the first
+// time the worker finalised a scan after the cluster transitioned to
+// draining. The UI uses BaseChunks to render percentage filled
+// (1 - chunks/BaseChunks). BaseBytes feeds the US-005 completion event's
+// final_bytes_moved = BaseBytes - Bytes. Once set both stick until the
+// cluster leaves the draining set (undrain or row deletion), at which
+// point the tracker drops the snapshot entirely.
 //
-// CompletionFiredAt is reserved for US-005 (completion-detection). The
-// US-003 scaffold leaves it zero — the tracker holds the slot so US-005
-// can flip it without revisiting the wire shape.
+// CompletionFiredAt records the timestamp the rebalance worker emitted
+// the most recent drain-complete event for this cluster (US-005). Zero
+// means no event has fired since this snapshot row was created. The
+// tracker clears the field on a `0 → >0` transition so refill-then-
+// redrain shapes (`5 → 0 → 2 → 0`) re-fire on the second `→ 0`.
 type ProgressSnapshot struct {
 	Chunks            int64
 	Bytes             int64
 	LastScanAt        time.Time
 	BaseChunks        int64
+	BaseBytes         int64
 	CompletionFiredAt time.Time
+}
+
+// CompletionEvent is the per-cluster transition signal returned by
+// ProgressTracker.CommitScan when the latest scan observed
+// `chunks_on_cluster: >0 → 0` while the cluster is still draining
+// (US-005 drain-lifecycle). The rebalance worker consumes the slice and
+// fans the event out to log + audit + metric + optional notify sinks.
+// BytesMoved = BaseBytes - Bytes captured at scan-finish time. ScanFinish
+// is the same UTC timestamp the tracker stamped onto LastScanAt.
+type CompletionEvent struct {
+	Cluster     string
+	BaseChunks  int64
+	BaseBytes   int64
+	BytesMoved  int64
+	ScanFinish  time.Time
 }
 
 // ProgressTracker is the in-process draining-progress cache shared
@@ -76,18 +96,26 @@ func (p *ProgressTracker) Snapshot(clusterID string) (ProgressSnapshot, bool) {
 //
 // Behaviour:
 //   - For each cluster in draining, the snapshot is upserted with the
-//     fresh counts + LastScanAt=now. BaseChunks is set on the first
-//     commit for that cluster (i.e. the live → draining transition; if
-//     the tracker already held a snapshot from a prior session it is
-//     preserved).
+//     fresh counts + LastScanAt=now. BaseChunks / BaseBytes are set on
+//     the first commit for that cluster (i.e. the live → draining
+//     transition; if the tracker already held a snapshot from a prior
+//     session it is preserved).
 //   - For each cluster present in the cache but NOT in draining (likely
 //     undrained between ticks), the entry is dropped.
 //   - Clusters in draining that did not appear in chunkCounts (no chunks
 //     observed) get a snapshot with Chunks=0 / Bytes=0 so the
 //     deregister_ready signal flips immediately on the next read.
-func (p *ProgressTracker) CommitScan(draining []string, chunkCounts map[string]int64, byteCounts map[string]int64, now time.Time) {
+//
+// Returns the per-cluster completion events (US-005) detected during the
+// commit: a cluster appears in the slice iff prior_chunks > 0 AND
+// new_chunks == 0 AND CompletionFiredAt is zero. CompletionFiredAt is
+// stamped at the same time so the event is idempotent — re-firing
+// requires a subsequent 0 → >0 transition (the tracker resets the
+// CompletionFiredAt slot on refill so a drain → fill → drain cycle fires
+// again).
+func (p *ProgressTracker) CommitScan(draining []string, chunkCounts map[string]int64, byteCounts map[string]int64, now time.Time) []CompletionEvent {
 	if p == nil {
-		return
+		return nil
 	}
 	want := make(map[string]struct{}, len(draining))
 	for _, id := range draining {
@@ -100,6 +128,7 @@ func (p *ProgressTracker) CommitScan(draining []string, chunkCounts map[string]i
 			delete(p.snapshots, id)
 		}
 	}
+	var completions []CompletionEvent
 	for id := range want {
 		chunks := chunkCounts[id]
 		bytes := byteCounts[id]
@@ -108,13 +137,37 @@ func (p *ProgressTracker) CommitScan(draining []string, chunkCounts map[string]i
 			existing = &ProgressSnapshot{}
 			p.snapshots[id] = existing
 		}
+		prevChunks := existing.Chunks
 		if existing.BaseChunks == 0 && chunks > 0 {
 			existing.BaseChunks = chunks
+		}
+		if existing.BaseBytes == 0 && bytes > 0 {
+			existing.BaseBytes = bytes
+		}
+		// Re-arm completion firing when the cluster refills after a prior
+		// completion. Without this reset a drain → fill → drain cycle
+		// would silently skip the second event.
+		if chunks > 0 && !existing.CompletionFiredAt.IsZero() {
+			existing.CompletionFiredAt = time.Time{}
 		}
 		existing.Chunks = chunks
 		existing.Bytes = bytes
 		existing.LastScanAt = now
+		// Fire only on >0 → 0 transitions we actually observed. A
+		// first-ever commit with chunks=0 (legacy bucket with no chunks
+		// on the cluster) must NOT fire — there was nothing to drain.
+		if hadSnap && prevChunks > 0 && chunks == 0 && existing.CompletionFiredAt.IsZero() {
+			existing.CompletionFiredAt = now
+			completions = append(completions, CompletionEvent{
+				Cluster:    id,
+				BaseChunks: existing.BaseChunks,
+				BaseBytes:  existing.BaseBytes,
+				BytesMoved: existing.BaseBytes,
+				ScanFinish: now,
+			})
+		}
 	}
+	return completions
 }
 
 // Reset drops the snapshot for clusterID. Reserved for explicit

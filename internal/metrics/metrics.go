@@ -273,6 +273,14 @@ var (
 		},
 		[]string{"reason", "cluster"},
 	)
+
+	DrainCompleteTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_drain_complete_total",
+			Help: "Rebalance worker drain-completion events per cluster (US-005 drain-lifecycle). One increment per >0 → 0 chunks_on_cluster transition; refills + redrains re-fire on the next 0 transition.",
+		},
+		[]string{"cluster"},
+	)
 )
 
 func Register() {
@@ -306,6 +314,7 @@ func Register() {
 		RebalanceCASConflictsTotal,
 		RebalanceRefusedTotal,
 		PutChunksRefusedTotal,
+		DrainCompleteTotal,
 	)
 }
 
@@ -605,6 +614,13 @@ func (RebalanceObserver) IncRefused(reason, target string) {
 		target = "unknown"
 	}
 	RebalanceRefusedTotal.WithLabelValues(reason, target).Inc()
+}
+
+func (RebalanceObserver) IncDrainComplete(cluster string) {
+	if cluster == "" {
+		cluster = "unknown"
+	}
+	DrainCompleteTotal.WithLabelValues(cluster).Inc()
 }
 
 // AuditStreamObserver implements the auditstream.MetricsSink interface. The

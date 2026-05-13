@@ -52,8 +52,9 @@ func cloneMap(m map[string]int) map[string]int {
 // countingMetrics records counter bumps so the test can assert the
 // metric was incremented once per planned move.
 type countingMetrics struct {
-	planned map[string]int
-	refused map[string]int // key = "<reason>:<target>"
+	planned      map[string]int
+	refused      map[string]int // key = "<reason>:<target>"
+	drainsDone   map[string]int
 }
 
 func (c *countingMetrics) IncPlannedMove(bucket string) {
@@ -68,6 +69,13 @@ func (c *countingMetrics) IncRefused(reason, target string) {
 		c.refused = map[string]int{}
 	}
 	c.refused[reason+":"+target]++
+}
+
+func (c *countingMetrics) IncDrainComplete(cluster string) {
+	if c.drainsDone == nil {
+		c.drainsDone = map[string]int{}
+	}
+	c.drainsDone[cluster]++
 }
 
 // seedObject installs one Object on the memory store with `n` chunks at

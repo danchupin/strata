@@ -84,12 +84,44 @@ type Metrics interface {
 	// reason is one of "target_full" / "target_draining"; target is the
 	// cluster id the move would have written to.
 	IncRefused(reason, target string)
+	// IncDrainComplete fires once per `>0 → 0` chunks_on_cluster
+	// transition observed by the rebalance worker (US-005 drain-
+	// lifecycle). Idempotent at the tracker layer — the counter mirrors
+	// the observed transitions, not the underlying audit log.
+	IncDrainComplete(cluster string)
 }
 
 type nopMetrics struct{}
 
 func (nopMetrics) IncPlannedMove(string)       {}
 func (nopMetrics) IncRefused(string, string)   {}
+func (nopMetrics) IncDrainComplete(string)     {}
+
+// DrainCompleteEvent is the wire payload handed to a DrainNotifier when
+// the rebalance worker detects a cluster's drain has reached zero
+// chunks (US-005). CompletedAt is UTC. BytesMoved is BaseBytes − Bytes
+// captured at scan-finish time (i.e. the total bytes that left the
+// cluster between the live → draining transition and completion).
+type DrainCompleteEvent struct {
+	Cluster     string
+	BytesMoved  int64
+	CompletedAt time.Time
+}
+
+// DrainNotifier is the optional best-effort sink for drain-complete
+// events (US-005). The notify-worker pipeline wires an adapter when
+// STRATA_NOTIFY_TARGETS is set; nil disables the fan-out. The worker
+// swallows every error returned from NotifyDrainComplete — notify
+// failure must never block the rebalance tick.
+type DrainNotifier interface {
+	NotifyDrainComplete(ctx context.Context, evt DrainCompleteEvent)
+}
+
+// DefaultDrainAuditRetention mirrors s3api.DefaultAuditRetention (30 days)
+// and is the row TTL applied to drain.complete audit_log entries when
+// Config.AuditTTL is zero. Hardcoded to keep the rebalance package free
+// of the s3api import.
+const DefaultDrainAuditRetention = 30 * 24 * time.Hour
 
 // Config wires a Worker. Defaults applied in New: Interval=1h,
 // PollLimit=1000, Now=time.Now, Logger=slog.Default. Metrics defaults
@@ -125,6 +157,15 @@ type Config struct {
 	// (US-003 drain-lifecycle). nil disables the per-tick scan
 	// accumulator — the move-planning side of the loop is unaffected.
 	Progress *ProgressTracker
+	// Notifier is the optional sink for drain-complete events (US-005).
+	// nil disables the fan-out — log + audit + metric still fire on
+	// every transition.
+	Notifier DrainNotifier
+	// AuditTTL is the row TTL applied to drain.complete audit_log
+	// entries. Zero falls back to DefaultDrainAuditRetention so the
+	// gateway and the worker keep the same retention shape without
+	// crossing an import boundary into s3api.
+	AuditTTL time.Duration
 }
 
 // DefaultFillCeiling is the conservative target_full threshold from the
@@ -203,6 +244,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 }
 
 func (w *Worker) runOnce(ctx context.Context) error {
+	tickStart := w.cfg.Now()
 	buckets, err := w.cfg.Meta.ListBuckets(ctx, "")
 	if err != nil {
 		return fmt.Errorf("list buckets: %w", err)
@@ -230,8 +272,59 @@ func (w *Worker) runOnce(ctx context.Context) error {
 		}
 		w.scanAndEmit(ctx, b, policy, draining, fillCache, prog)
 	}
-	prog.commit(w.cfg.Progress, draining, w.cfg.Now())
+	tickEnd := w.cfg.Now()
+	completions := prog.commit(w.cfg.Progress, draining, tickEnd)
+	for _, ev := range completions {
+		w.handleDrainComplete(ctx, ev, tickEnd.Sub(tickStart))
+	}
 	return nil
+}
+
+// handleDrainComplete fans the per-cluster `>0 → 0` transition out to
+// log + counter + audit + (optional) notify (US-005 drain-lifecycle).
+// Every sink is best-effort: a failed audit write logs WARN and falls
+// through; a notify failure is swallowed by the adapter. The metric is
+// bumped before the side-effects so the operator dashboards reflect
+// completion even when audit/notify wiring degrades.
+func (w *Worker) handleDrainComplete(ctx context.Context, ev CompletionEvent, scanDuration time.Duration) {
+	w.cfg.Logger.Info("drain complete",
+		"cluster", ev.Cluster,
+		"scan_seconds", scanDuration.Seconds(),
+		"final_bytes_moved", ev.BytesMoved,
+	)
+	w.cfg.Metrics.IncDrainComplete(ev.Cluster)
+	w.recordDrainCompleteAudit(ctx, ev)
+	if w.cfg.Notifier != nil {
+		w.cfg.Notifier.NotifyDrainComplete(ctx, DrainCompleteEvent{
+			Cluster:     ev.Cluster,
+			BytesMoved:  ev.BytesMoved,
+			CompletedAt: ev.ScanFinish,
+		})
+	}
+}
+
+// recordDrainCompleteAudit appends one audit_log row for the drain
+// completion. Failure is logged WARN — never propagated.
+func (w *Worker) recordDrainCompleteAudit(ctx context.Context, ev CompletionEvent) {
+	if w.cfg.Meta == nil {
+		return
+	}
+	ttl := w.cfg.AuditTTL
+	if ttl == 0 {
+		ttl = DefaultDrainAuditRetention
+	}
+	row := &meta.AuditEvent{
+		Bucket:    "-",
+		Time:      ev.ScanFinish.UTC(),
+		Principal: "system:rebalance-worker",
+		Action:    "drain.complete",
+		Resource:  "cluster:" + ev.Cluster,
+		Result:    "200",
+	}
+	if err := w.cfg.Meta.EnqueueAudit(ctx, row, ttl); err != nil {
+		w.cfg.Logger.Warn("drain complete: audit enqueue failed",
+			"cluster", ev.Cluster, "error", err.Error())
+	}
 }
 
 // progressAcc accumulates per-draining-cluster {chunks, bytes} for one
@@ -269,9 +362,9 @@ func (a *progressAcc) observe(clusterID string, draining map[string]bool, size i
 	a.bytes[clusterID] += size
 }
 
-func (a *progressAcc) commit(p *ProgressTracker, draining map[string]bool, now time.Time) {
+func (a *progressAcc) commit(p *ProgressTracker, draining map[string]bool, now time.Time) []CompletionEvent {
 	if a == nil || p == nil {
-		return
+		return nil
 	}
 	ids := make([]string, 0, len(draining))
 	for id := range draining {
@@ -281,10 +374,9 @@ func (a *progressAcc) commit(p *ProgressTracker, draining map[string]bool, now t
 		// No draining clusters this tick (or tracker disabled). Still
 		// flush so previously-cached entries for clusters that
 		// transitioned out of draining are reaped.
-		p.CommitScan(ids, nil, nil, now)
-		return
+		return p.CommitScan(ids, nil, nil, now)
 	}
-	p.CommitScan(ids, a.chunks, a.bytes, now)
+	return p.CommitScan(ids, a.chunks, a.bytes, now)
 }
 
 // scanBucketForProgress walks every (latest) object in the bucket and
