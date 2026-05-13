@@ -39,6 +39,24 @@ Cycle: ralph/drain-transparency
   - Racetest is flaky (`internal/racetest::TestRunCleanRunNoInconsistencies`) — produces ~20 read_after_write inconsistencies on `rc-bkt-0/k-1` on some runs but not others. Re-run before assuming a regression. Unrelated to drain-transparency.
 ---
 
+## 2026-05-13 22:30 MSK - US-003
+- New admin endpoint GET /admin/v1/clusters/{id}/drain-impact (handler in internal/adminapi/clusters_drain_impact.go). Returns categorized chunk counters (migratable / stuck_single_policy / stuck_no_policy / total) + per-bucket breakdown with suggested remediation policies + pagination cursor + last_scan_at.
+- State gating: live + draining_readonly → 200; evacuating + removed → 409 InvalidTransition pointing the operator at /drain-progress.
+- Synchronous scan path: ListBuckets → per-bucket GetBucketPlacement + ListObjects, counting only chunks (manifest.Chunks + manifest.BackendRef) whose Cluster equals the path id. Buckets with zero chunks on the target are excluded from the by_bucket roll-up. classifyBucket reused via rebalance.ClassifyBucket (exported in this commit) so the verdict matches the live worker tick. excludeForTargets folds every draining-for-write cluster plus the target id, so a policy spread across two draining clusters surfaces correctly as stuck_single_policy.
+- Per-cluster 5-min TTL cache (drainImpactCache, drainImpactCacheTTL) lazy-init on Server identical to hotBuckets pattern. Cache hit returns the stored drainImpactScan and the response shaper paginates without re-scanning.
+- suggestedPoliciesForBucket: one uniform-live entry ({each-live:1, plus draining keys from current policy forced to 0 when current!=nil}) + one per-live-cluster single-target entry. stuck_no_policy buckets get 'Set initial policy:' labels; everything else gets 'Add all live clusters (uniform)' / 'Replace draining with <id>'. No-live-clusters edge case returns nil so UI hides the Fix CTA.
+- OpenAPI spec adds ClusterDrainImpact + BucketImpactEntry + SuggestedPolicy schemas + the /clusters/{id}/drain-impact path with the 409 / 400 / 401 responses.
+- Tests (internal/adminapi/clusters_drain_impact_test.go): mixed-category sort (stuck_single_policy → stuck_no_policy → migratable, b-unaffected excluded), evacuating→409, draining_readonly→200, pagination + next_offset over 5 stuck buckets, cache stability (post-first-request bucket invisible until TTL), unknown cluster→400, suggestedPoliciesForBucket no-live + draining-key neutralization.
+- Files changed: internal/rebalance/{worker,progress_test}.go (Export ClassifyBucket), internal/adminapi/{server,clusters_drain_impact,clusters_drain_impact_test,openapi}.go|.yaml, scripts/ralph/prd.json.
+- **Learnings for future iterations:**
+  - `rebalance.ClassifyBucket(policy, excludeForTargets)` is the canonical bucket-category classifier — reuse it from any caller that needs the same verdict. Don't reimplement; the rules diverge silently otherwise.
+  - `parseRange(s, def, lo, hi)` lives in buckets.go and is the standard limit/offset helper across adminapi handlers — reuse it instead of writing fresh strconv parsing.
+  - Lazy-init TTL caches on Server follow the hotBuckets pattern: per-cache `Mu sync.Mutex` + `*CacheVal` pointer on Server, accessor method `s.cacheName()` does the lock+lazy-init. Tests can override `now` on the cache struct directly via `s.drainImpact().now = func() time.Time { ... }`.
+  - meta backend doesn't enforce that PutObject's BucketID matches a registered bucket, but `ListObjects` does — always CreateBucket first then PutObject for tests that walk the listing.
+  - Per-bucket scan uses `ListObjects` (latest-version page) — versioned-object history is intentionally not walked by the impact preview (matches the rebalance worker's scan shape; latest is the only chunk set the drain cares about).
+  - 409 InvalidTransition response shape (`invalidTransitionResponse`) was added in US-001 for POST /drain; reuse for any endpoint that wants to surface the 4-state machine refusal with current_state + requested_mode fields.
+---
+
 ## 2026-05-13 20:25 MSK - US-002
 - ProgressSnapshot widened: `MigratableChunks`, `StuckSinglePolicyChunks`, `StuckNoPolicyChunks`, `Bytes`, `ByBucket map[string]BucketScanCategory` (per-bucket {Category, ChunkCount, BytesUsed}). Flat `Chunks` field removed → derived `Chunks()` method on both ProgressSnapshot and the new ScanResult type. CompletionEvent BytesMoved unchanged (BaseBytes captured).
 - CommitScan signature changed: `(draining []string, scans map[string]ScanResult, now time.Time)`. Snapshot/Reset/nil-receiver semantics unchanged.

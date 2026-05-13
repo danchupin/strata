@@ -433,13 +433,18 @@ func (a *progressAcc) commit(p *ProgressTracker, scanFor map[string]bool, now ti
 	return p.CommitScan(ids, scans, now)
 }
 
-// classifyBucket returns the per-bucket category contribution to the
+// ClassifyBucket returns the per-bucket category contribution to the
 // draining-cluster progress snapshot. The category is constant across
 // every chunk of the bucket because the verdict only depends on
-// (policy, excludeForTargets), not on the chunk identity. Returns "" if
-// the bucket has no chunks routed to any draining cluster (no scan
-// contribution).
-func classifyBucket(policy map[string]int, excludeForTargets map[string]bool) string {
+// (policy, excludeForTargets), not on the chunk identity. Returns
+// "stuck_no_policy" for empty policies, "migratable" when at least one
+// non-excluded cluster carries weight, "stuck_single_policy" otherwise.
+//
+// Exported so the adminapi /drain-impact handler (US-003 drain-
+// transparency) reuses the same verdict as the rebalance worker without
+// re-implementing the logic — the categorized counts on the impact
+// preview and the live drain-progress endpoint stay in lockstep.
+func ClassifyBucket(policy map[string]int, excludeForTargets map[string]bool) string {
 	if len(policy) == 0 {
 		return "stuck_no_policy"
 	}
@@ -619,7 +624,7 @@ func (w *Worker) applySafetyRails(ctx context.Context, b *meta.Bucket, moves []M
 func (w *Worker) scanDistribution(ctx context.Context, b *meta.Bucket, policy map[string]int, excludeForTargets, scanFor map[string]bool, prog *progressAcc) (map[string]int, []Move, error) {
 	actual := map[string]int{}
 	var moves []Move
-	bucketCategory := classifyBucket(policy, excludeForTargets)
+	bucketCategory := ClassifyBucket(policy, excludeForTargets)
 	opts := meta.ListOptions{Limit: w.cfg.PollLimit}
 	for {
 		if ctx.Err() != nil {

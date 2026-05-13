@@ -448,6 +448,95 @@ components:
         chunk_count: { type: integer, format: int64 }
         bytes_used: { type: integer, format: int64 }
 
+    SuggestedPolicy:
+      type: object
+      required: [label, policy]
+      description: |
+        One operator-facing remediation offered per bucket in the
+        /drain-impact response (US-003 drain-transparency). `label` is the
+        human-readable description the BulkPlacementFixDialog (US-005)
+        renders in its per-bucket dropdown; `policy` is the
+        {clusterID: weight} body the operator would PUT to
+        /admin/v1/buckets/{name}/placement.
+      properties:
+        label: { type: string }
+        policy:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+            maximum: 100
+
+    BucketImpactEntry:
+      type: object
+      required: [name, category, chunk_count, bytes_used, suggested_policies]
+      description: |
+        One row in the by_bucket section of the /drain-impact response
+        (US-003 drain-transparency). `current_policy` is null when the
+        bucket has no Placement; the suggested_policies switch to "Set
+        initial policy" labels in that case. `category` is one of
+        migratable / stuck_single_policy / stuck_no_policy and matches
+        the per-bucket verdict the rebalance worker emits via the same
+        rebalance.ClassifyBucket helper.
+      properties:
+        name: { type: string }
+        current_policy:
+          type: object
+          nullable: true
+          additionalProperties:
+            type: integer
+            minimum: 0
+            maximum: 100
+        category:
+          type: string
+          enum: [migratable, stuck_single_policy, stuck_no_policy]
+        chunk_count: { type: integer, format: int64 }
+        bytes_used: { type: integer, format: int64 }
+        suggested_policies:
+          type: array
+          items: { $ref: '#/components/schemas/SuggestedPolicy' }
+
+    ClusterDrainImpact:
+      type: object
+      required:
+        - cluster_id
+        - current_state
+        - migratable_chunks
+        - stuck_single_policy_chunks
+        - stuck_no_policy_chunks
+        - total_chunks
+        - by_bucket
+        - total_buckets
+        - last_scan_at
+      description: |
+        Wire shape returned by GET /clusters/{id}/drain-impact (US-003
+        drain-transparency). Categorized chunk counters mirror the
+        /drain-progress endpoint so the UI uses the same heuristics on
+        both surfaces. `by_bucket` is the paged slice ordered as
+        stuck_single_policy → stuck_no_policy → migratable, chunk_count
+        desc then name asc within category. `total_buckets` is the row
+        count BEFORE pagination so the modal can render "showing N of M";
+        `next_offset` is non-null when more rows are available.
+      properties:
+        cluster_id: { type: string }
+        current_state:
+          type: string
+          enum: [live, draining_readonly]
+        migratable_chunks: { type: integer, format: int64 }
+        stuck_single_policy_chunks: { type: integer, format: int64 }
+        stuck_no_policy_chunks: { type: integer, format: int64 }
+        total_chunks: { type: integer, format: int64 }
+        by_bucket:
+          type: array
+          items: { $ref: '#/components/schemas/BucketImpactEntry' }
+        total_buckets: { type: integer }
+        next_offset:
+          type: integer
+          nullable: true
+        last_scan_at:
+          type: string
+          format: date-time
+
     BucketReferences:
       type: object
       required: [buckets, total_buckets]
@@ -861,6 +950,56 @@ paths:
             Rebalance worker not running on this replica — the in-process
             progress cache is empty and the endpoint refuses to serve a
             permanently-zero response.
+
+  /clusters/{id}/drain-impact:
+    get:
+      summary: Pre-evacuate impact preview (US-003 drain-transparency)
+      operationId: getClusterDrainImpact
+      description: |
+        Synchronous scan that walks every bucket and categorizes chunks on
+        the target cluster into migratable / stuck_single_policy /
+        stuck_no_policy. Backs the BulkPlacementFixDialog (US-005) and
+        the redesigned ConfirmDrainModal (US-004) preflight.
+
+        Callable only when state ∈ {live, draining_readonly}. Returns 409
+        Conflict for state ∈ {evacuating, removed} — those states must use
+        GET /clusters/{id}/drain-progress for live counters.
+
+        Each by_bucket entry carries suggested_policies that the
+        BulkPlacementFixDialog renders in a dropdown: one uniform-live
+        option (every live cluster at weight 1; draining keys in the
+        existing policy forced to 0) and one single-target option per live
+        cluster. stuck_no_policy buckets get "Set initial policy" labels;
+        every other category gets "Add all live clusters (uniform)" /
+        "Replace draining with <id>" labels.
+
+        Results are cached per cluster for 5 minutes so concurrent admin
+        viewers and the modal's mode-flip refetch do not stampede the
+        store. Sort within by_bucket: stuck_single_policy first, then
+        stuck_no_policy, then migratable; within each category descending
+        by chunk_count then ascending by name.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 100, minimum: 1, maximum: 1000 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0, minimum: 0 }
+      responses:
+        '200':
+          description: Drain impact preview.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClusterDrainImpact' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: |
+            Cluster is in state evacuating or removed; the preview endpoint
+            refuses to serve and points the operator at /drain-progress.
 
   /clusters/{id}/bucket-references:
     get:

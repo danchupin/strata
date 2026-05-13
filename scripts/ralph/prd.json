@@ -72,8 +72,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped: GET /admin/v1/clusters/{id}/drain-impact returns ClusterDrainImpactResponse {cluster_id, current_state, migratable_chunks, stuck_single_policy_chunks, stuck_no_policy_chunks, total_chunks, by_bucket[], total_buckets, next_offset, last_scan_at}. Synchronous bucket walk (ListBuckets → per-bucket GetBucketPlacement + ListObjects, counting chunks whose Cluster matches the path id). rebalance.classifyBucket exported as rebalance.ClassifyBucket so the categorization matches the live-worker verdict exactly. Per-cluster 5-minute TTL cache (drainImpactCache, drainImpactCacheTTL) keyed by clusterID; lazy-init on Server like hotBuckets. Same cache + scan path for state=live and state=draining_readonly per codebase patterns. 409 InvalidTransition for state ∈ {evacuating, removed}. Pagination via ?limit=N&offset=M (default 100, max 1000) using parseRange — same shape as bucket-references. Sort: stuck_single_policy (0) → stuck_no_policy (1) → migratable (2); within category by chunk_count desc then name asc. suggestedPoliciesForBucket builds one uniform-live + one per-live-cluster single-target entry; uniform forces existing-policy draining keys to 0 (when current!=nil), uses 'Set initial policy:' labels for stuck_no_policy. Audit override stamped admin:GetClusterDrainImpact. OpenAPI spec adds ClusterDrainImpact + BucketImpactEntry + SuggestedPolicy schemas plus the new path under #/paths. Tests cover: mixed-category sort, evacuating→409, draining_readonly→200, pagination + next_offset, cache stability across requests, unknown cluster→400, suggestedPoliciesForBucket no-live edge case + draining-key neutralization. go vet + full go test ./... green."
     },
     {
       "id": "US-004",

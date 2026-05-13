@@ -159,6 +159,12 @@ type Server struct {
 	hotShardsMu       sync.Mutex
 	hotShardsCacheVal *hotShardsCache
 
+	// drainImpactMu guards lazy initialisation of drainImpactCacheVal — the
+	// per-cluster 5-minute TTL cache backing
+	// GET /admin/v1/clusters/{id}/drain-impact (US-003 drain-transparency).
+	drainImpactMu       sync.Mutex
+	drainImpactCacheVal *drainImpactCache
+
 	// jobsMu guards background-job goroutines. Currently only the
 	// force-empty drain (US-002) registers here; we cancel the goroutine
 	// on Server shutdown so a graceful drain doesn't outlive the gateway.
@@ -357,6 +363,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /admin/v1/clusters/{id}/undrain", s.handleClusterUndrain)
 	mux.HandleFunc("GET /admin/v1/clusters/{id}/rebalance-progress", s.handleClusterRebalanceProgress)
 	mux.HandleFunc("GET /admin/v1/clusters/{id}/drain-progress", s.handleClusterDrainProgress)
+	mux.HandleFunc("GET /admin/v1/clusters/{id}/drain-impact", s.handleClusterDrainImpact)
 	mux.HandleFunc("GET /admin/v1/clusters/{id}/bucket-references", s.handleClusterBucketReferences)
 	mux.HandleFunc("GET /admin/v1/buckets", s.handleBucketsList)
 	mux.HandleFunc("POST /admin/v1/buckets", s.handleBucketCreate)

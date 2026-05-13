@@ -421,7 +421,7 @@ func TestClassifyBucketCovers(t *testing.T) {
 		{"empty exclude → migratable (degenerate)", map[string]int{"a": 1}, nil, "migratable"},
 	}
 	for _, tc := range cases {
-		if got := classifyBucket(tc.policy, tc.exclude); got != tc.want {
+		if got := ClassifyBucket(tc.policy, tc.exclude); got != tc.want {
 			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
 		}
 	}
