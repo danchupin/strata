@@ -113,21 +113,43 @@ export interface ClusterRebalanceProgress {
   series: Array<[number, number]>;
 }
 
+// BucketDrainCategory tags one row of the per-bucket drain breakdown on
+// /drain-progress (US-006 drain-transparency). Matches the rebalance
+// worker classifier — stuck rows surface first in the wire ordering.
+export type BucketDrainCategory =
+  | 'migratable'
+  | 'stuck_single_policy'
+  | 'stuck_no_policy';
+
+export interface BucketDrainProgressEntry {
+  name: string;
+  category: BucketDrainCategory | string;
+  chunk_count: number;
+  bytes_used: number;
+}
+
 // ClusterDrainProgress is the wire shape returned by
-// GET /admin/v1/clusters/{id}/drain-progress (US-003 drain-lifecycle).
-// Numeric fields go null when no value applies (live state, or before
-// the rebalance worker commits its first scan). The UI uses
-// base_chunks_at_start as the denominator for the progress bar — when
-// null the card falls back to a plain text "<N> remaining" readout.
+// GET /admin/v1/clusters/{id}/drain-progress (US-003 drain-lifecycle,
+// extended US-002/US-006 drain-transparency with categorized counters
+// + per-bucket breakdown). Numeric fields go null when no value applies
+// (live state, or before the rebalance worker commits its first scan).
+// The UI uses base_chunks_at_start as the denominator for the progress
+// bar — when null the card falls back to a plain text "<N> remaining"
+// readout. by_bucket is empty/omitted when the scan committed no
+// draining-cluster chunks.
 export interface ClusterDrainProgress {
   state: ClusterState | string;
   mode: ClusterMode | string;
   chunks_on_cluster: number | null;
+  migratable_chunks: number | null;
+  stuck_single_policy_chunks: number | null;
+  stuck_no_policy_chunks: number | null;
   bytes_on_cluster: number | null;
   base_chunks_at_start: number | null;
   last_scan_at: string | null;
   eta_seconds: number | null;
   deregister_ready: boolean | null;
+  by_bucket?: BucketDrainProgressEntry[];
   warnings?: string[];
 }
 

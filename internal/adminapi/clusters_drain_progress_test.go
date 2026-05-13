@@ -187,6 +187,51 @@ func TestClusterDrainProgress_CategorizedCountersSurfaced(t *testing.T) {
 	}
 }
 
+func TestClusterDrainProgress_ByBucketSorted(t *testing.T) {
+	s := newTestServer()
+	s.KnownClusters = map[string]struct{}{"c1": {}}
+	tracker := rebalance.NewProgressTracker(time.Minute)
+	s.RebalanceProgress = tracker
+	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tracker.CommitScan([]string{"c1"}, map[string]rebalance.ScanResult{"c1": {
+		MigratableChunks:        5,
+		StuckSinglePolicyChunks: 3,
+		StuckNoPolicyChunks:     2,
+		Bytes:                   10 * 1024,
+		ByBucket: map[string]rebalance.BucketScanCategory{
+			"a-migratable": {Category: "migratable", ChunkCount: 5, BytesUsed: 5 * 1024},
+			"b-stuck":      {Category: "stuck_single_policy", ChunkCount: 3, BytesUsed: 3 * 1024},
+			"c-residual":   {Category: "stuck_no_policy", ChunkCount: 2, BytesUsed: 2 * 1024},
+		},
+	}}, time.Now().UTC())
+
+	rr := putAdmin(t, s, "alice", http.MethodGet, "/admin/v1/clusters/c1/drain-progress", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status: got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var got ClusterDrainProgressResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.ByBucket) != 3 {
+		t.Fatalf("ByBucket: got %d entries want 3 (%+v)", len(got.ByBucket), got.ByBucket)
+	}
+	want := []string{"b-stuck", "c-residual", "a-migratable"}
+	for i, name := range want {
+		if got.ByBucket[i].Name != name {
+			t.Errorf("ByBucket[%d].Name: got %q want %q", i, got.ByBucket[i].Name, name)
+		}
+	}
+	if got.ByBucket[0].Category != "stuck_single_policy" {
+		t.Errorf("first bucket category: got %q want stuck_single_policy", got.ByBucket[0].Category)
+	}
+	if got.ByBucket[2].Category != "migratable" {
+		t.Errorf("last bucket category: got %q want migratable", got.ByBucket[2].Category)
+	}
+}
+
 func TestClusterDrainProgress_ReadonlyStateSkipsScan(t *testing.T) {
 	s := newTestServer()
 	s.KnownClusters = map[string]struct{}{"c1": {}}

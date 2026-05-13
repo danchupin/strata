@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/danchupin/strata/internal/auth"
@@ -13,6 +14,49 @@ import (
 	"github.com/danchupin/strata/internal/rebalance"
 	"github.com/danchupin/strata/internal/s3api"
 )
+
+// categoryRank assigns the on-wire sort priority for ByBucket entries.
+// Stuck rows surface first so the UI's stuck-buckets drawer can paginate
+// them without re-sorting; migratable rows trail because they need no
+// operator action.
+func categoryRank(c string) int {
+	switch c {
+	case "stuck_single_policy":
+		return 0
+	case "stuck_no_policy":
+		return 1
+	case "migratable":
+		return 2
+	default:
+		return 3
+	}
+}
+
+func sortedByBucket(in map[string]rebalance.BucketScanCategory) []BucketDrainProgressEntry {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]BucketDrainProgressEntry, 0, len(in))
+	for name, b := range in {
+		out = append(out, BucketDrainProgressEntry{
+			Name:       name,
+			Category:   b.Category,
+			ChunkCount: b.ChunkCount,
+			BytesUsed:  b.BytesUsed,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ri, rj := categoryRank(out[i].Category), categoryRank(out[j].Category)
+		if ri != rj {
+			return ri < rj
+		}
+		if out[i].ChunkCount != out[j].ChunkCount {
+			return out[i].ChunkCount > out[j].ChunkCount
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
 
 // PromQL backing the ETA half of GET /admin/v1/clusters/{id}/drain-progress.
 // `from=<id>` is the source-cluster label stamped by the rebalance worker
@@ -23,28 +67,45 @@ const drainMoveRateExprFmt = `sum(rate(strata_rebalance_chunks_moved_total{from=
 
 // ClusterDrainProgressResponse is the wire shape returned by
 // GET /admin/v1/clusters/{id}/drain-progress (US-003 drain-lifecycle,
-// extended in US-002 drain-transparency with categorized counters).
+// extended in US-002 drain-transparency with categorized counters and
+// US-006 with per-bucket breakdown).
 //
 // MigratableChunks / StuckSinglePolicyChunks / StuckNoPolicyChunks are
 // the three category counters; ChunksOnCluster is their sum (kept for
 // dashboard compatibility). ETASeconds is computed against migratable
 // chunks only — stuck chunks never converge to zero through migration
 // alone. DeregisterReady fires when the total (all categories) is zero.
+// ByBucket is the per-bucket breakdown straight off the tracker's last
+// committed scan — surfaces the stuck rows the UI drawer drills into.
 //
 // Pointer fields go *null* in the JSON output when no value applies.
 type ClusterDrainProgressResponse struct {
-	State                   string   `json:"state"`
-	Mode                    string   `json:"mode"`
-	ChunksOnCluster         *int64   `json:"chunks_on_cluster"`
-	MigratableChunks        *int64   `json:"migratable_chunks"`
-	StuckSinglePolicyChunks *int64   `json:"stuck_single_policy_chunks"`
-	StuckNoPolicyChunks     *int64   `json:"stuck_no_policy_chunks"`
-	BytesOnCluster          *int64   `json:"bytes_on_cluster"`
-	BaseChunks              *int64   `json:"base_chunks_at_start"`
-	LastScanAt              *string  `json:"last_scan_at"`
-	ETASeconds              *int64   `json:"eta_seconds"`
-	DeregisterReady         *bool    `json:"deregister_ready"`
-	Warnings                []string `json:"warnings,omitempty"`
+	State                   string                     `json:"state"`
+	Mode                    string                     `json:"mode"`
+	ChunksOnCluster         *int64                     `json:"chunks_on_cluster"`
+	MigratableChunks        *int64                     `json:"migratable_chunks"`
+	StuckSinglePolicyChunks *int64                     `json:"stuck_single_policy_chunks"`
+	StuckNoPolicyChunks     *int64                     `json:"stuck_no_policy_chunks"`
+	BytesOnCluster          *int64                     `json:"bytes_on_cluster"`
+	BaseChunks              *int64                     `json:"base_chunks_at_start"`
+	LastScanAt              *string                    `json:"last_scan_at"`
+	ETASeconds              *int64                     `json:"eta_seconds"`
+	DeregisterReady         *bool                      `json:"deregister_ready"`
+	ByBucket                []BucketDrainProgressEntry `json:"by_bucket,omitempty"`
+	Warnings                []string                   `json:"warnings,omitempty"`
+}
+
+// BucketDrainProgressEntry is one bucket's contribution to the per-
+// cluster drain-progress snapshot (US-006 drain-transparency). Category
+// matches the rebalance worker's classifier — "migratable",
+// "stuck_single_policy", or "stuck_no_policy". Sorted on the wire:
+// stuck_single_policy first, then stuck_no_policy, then migratable;
+// within each category descending by chunk_count then ascending by name.
+type BucketDrainProgressEntry struct {
+	Name       string `json:"name"`
+	Category   string `json:"category"`
+	ChunkCount int64  `json:"chunk_count"`
+	BytesUsed  int64  `json:"bytes_used"`
 }
 
 // handleClusterDrainProgress serves GET /admin/v1/clusters/{id}/drain-
@@ -134,6 +195,7 @@ func buildDrainProgressResponse(ctx context.Context, prom *promclient.Client, id
 	out.LastScanAt = &scan
 	deregReady := total == 0
 	out.DeregisterReady = &deregReady
+	out.ByBucket = sortedByBucket(snap.ByBucket)
 
 	// ETA is meaningful only for migratable chunks — stuck chunks need an
 	// operator policy edit, not migration throughput.

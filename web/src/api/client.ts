@@ -52,6 +52,8 @@ export {
   type ClustersListResponse,
   type ClusterRebalanceProgress,
   type ClusterDrainProgress,
+  type BucketDrainCategory,
+  type BucketDrainProgressEntry,
   type BucketReferenceEntry,
   type BucketReferencesResponse,
   type SuggestedPolicy,

@@ -424,6 +424,16 @@ components:
             (sum of all three categories) is 0 — the cluster row can be
             removed from STRATA_RADOS_CLUSTERS / STRATA_S3_CLUSTERS and
             the gateways rolling-restarted.
+        by_bucket:
+          type: array
+          description: |
+            Per-bucket breakdown of the chunks-on-cluster total straight
+            off the last committed scan (US-006 drain-transparency).
+            Sorted stuck_single_policy → stuck_no_policy → migratable,
+            then descending by chunk_count, then ascending by name.
+            Empty/omitted when the scan committed no draining-cluster
+            chunks for any bucket.
+          items: { $ref: '#/components/schemas/BucketDrainProgressEntry' }
         warnings:
           type: array
           items: { type: string }
@@ -432,6 +442,21 @@ components:
             stale" when last_scan_at older than 2× rebalance interval;
             "stop-writes mode — migration scan skipped" for
             state=draining_readonly).
+
+    BucketDrainProgressEntry:
+      type: object
+      required: [name, category, chunk_count, bytes_used]
+      description: |
+        One bucket's contribution to a draining cluster's progress
+        snapshot (US-006 drain-transparency). Category matches the
+        rebalance worker's classifier.
+      properties:
+        name: { type: string }
+        category:
+          type: string
+          enum: [migratable, stuck_single_policy, stuck_no_policy]
+        chunk_count: { type: integer, format: int64 }
+        bytes_used: { type: integer, format: int64 }
 
     BucketReferenceEntry:
       type: object
