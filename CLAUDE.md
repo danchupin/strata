@@ -167,6 +167,39 @@ testcontainers to find the engine.
                           `{cluster, bytes_moved, completed_at}`
                           through `notify.Sink.Send` for every target
                           configured in `STRATA_NOTIFY_TARGETS`.
+                          Strict-mode env (US-002 drain-lifecycle):
+                          `STRATA_DRAIN_STRICT` (default `off`, accepts
+                          `on`/`off`/boolean strings; unknown → fail-
+                          fast at boot) closes the PUT fail-open
+                          fallback. When `on`, RADOS + S3
+                          `Backend.PutChunks` consult the drain map
+                          after `placement.PickClusterExcluding`
+                          returns "" (empty / all-excluded policy)
+                          and return `data.ErrDrainRefused` if the
+                          resolved class default cluster is draining.
+                          The gateway maps the sentinel to HTTP 503
+                          `<Code>DrainRefused</Code>` +
+                          `Retry-After: 300`; counter
+                          `strata_putchunks_refused_total{reason="drain_strict",cluster}`
+                          bumps per refusal. **PUT only** — reads,
+                          deletes, HEAD, multipart Complete/Abort,
+                          List against draining clusters keep working
+                          (drain semantic is stop-write, not stop-
+                          read). `GET /admin/v1/clusters` surfaces
+                          the boot-time value as a top-level
+                          `drain_strict: bool` field; the UI renders
+                          a "strict" chip per cluster card so
+                          operators see the global flag without an
+                          extra fetch. Pre-drain bucket impact
+                          preview (US-006 drain-lifecycle):
+                          `GET /admin/v1/clusters/{id}/bucket-references`
+                          lists buckets whose `Placement[<id>] > 0`
+                          joined with `bucket_stats` (chunk_count =
+                          UsedObjects, bytes_used = UsedBytes); reads
+                          via Meta only, no manifest walk. Paginated
+                          via `?limit=N&offset=M` (default 100, max
+                          1000). Audit-stamped
+                          `admin:GetClusterBucketReferences`.
   internal/reshard      -> per-bucket online shard-resize worker (US-045);
                           driven synchronously via /admin/bucket/reshard or
                           as a daemon.

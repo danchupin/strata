@@ -178,6 +178,12 @@ Phase 3 layers debug tooling on top without removing Phase 2 surface.
 | PlacementTab (BucketDetail) | — | — | ✓ |
 | DrainBanner (AppShell) | — | — | ✓ |
 | RebalanceProgressChip (cluster card) | — | — | ✓ |
+| Pools matrix (per-cluster × per-pool) | — | — | ✓ |
+| BucketReferencesDrawer (cluster card) | — | — | ✓ |
+| DrainProgressBar (cluster card) | — | — | ✓ |
+| DeregisterReadyChip (cluster card) | — | — | ✓ |
+| StrictModeChip (cluster card, global env) | — | — | ✓ |
+| PolicyDrainWarningChip (BucketDetail Placement tab) | — | — | ✓ |
 
 ## Operational notes
 
@@ -225,6 +231,22 @@ Three Playwright specs run in CI under the `e2e-ui` job:
   above shell, dismiss button hides it for the rest of the context).
   Operator guide for the underlying endpoints + warning meanings is at
   [Storage status]({{< ref "/architecture/storage" >}}).
+- `web/e2e/drain-lifecycle.spec.ts` — Drain lifecycle cycle (US-007
+  drain-lifecycle): login → /storage → strict-mode chip visible → click
+  "Show affected buckets" on a cluster card → assert drawer enumerates
+  the bucket-references list → close drawer → Drain via the typed-
+  confirmation modal whose info row now reads "<N> buckets reference
+  this cluster" → assert card flips to draining + `<DrainProgressBar>`
+  renders "chunks remaining" → spoof `chunks_on_cluster=0` on the next
+  poll → assert green "Ready to deregister" chip → create a bucket, set
+  policy to `{cephb: 100}`, save → assert `policy-drain-warning`
+  testid renders on the Placement tab. All admin endpoints
+  (`/admin/v1/clusters`, `.../drain|undrain|drain-progress|
+  bucket-references|rebalance-progress`, `/admin/v1/storage/data`,
+  `/admin/v1/buckets/{name}/placement`) are spoofed via
+  `page.route()` so the spec runs against the same memory-mode gateway
+  as the other e2e jobs. Operator runbook for the underlying endpoints
+  is at [Placement + rebalance — Drain lifecycle]({{< ref "/best-practices/placement-rebalance#drain-lifecycle" >}}).
 - `web/e2e/placement.spec.ts` — Placement + cluster surfacing cycle
   (US-006 placement-ui): login → /storage → cluster cards rendered →
   create bucket → Placement tab → drag slider for `cephb` to 100 →
