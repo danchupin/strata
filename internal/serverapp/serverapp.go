@@ -44,6 +44,7 @@ import (
 	"github.com/danchupin/strata/internal/metrics"
 	strataotel "github.com/danchupin/strata/internal/otel"
 	"github.com/danchupin/strata/internal/promclient"
+	"github.com/danchupin/strata/internal/rebalance"
 	"github.com/danchupin/strata/internal/s3api"
 )
 
@@ -164,6 +165,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	auditTTL := auditRetention(logger)
 	auditBroadcaster := auditstream.New(logger, metrics.AuditStreamObserver{})
 	storageClassSnapshot := bucketstats.NewSnapshot(poolsByClass(cfg, logger))
+	rebalanceProgress := rebalance.NewProgressTracker(rebalanceInterval(logger))
 	adminServer := adminapi.New(adminapi.Config{
 		Meta:                 metaStore,
 		Data:                 dataBackend,
@@ -196,6 +198,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		KnownClusters:        knownDataClusters(cfg),
 		ClusterBackends:      clusterBackends(cfg),
 		DrainCache:           drainCache,
+		RebalanceProgress:    rebalanceProgress,
 	})
 
 	mux := http.NewServeMux()
@@ -254,12 +257,13 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		}
 		supervisor = &workers.Supervisor{
 			Deps: workers.Dependencies{
-				Logger: logger,
-				Meta:   metaStore,
-				Data:   dataBackend,
-				Tracer: tracerProvider,
-				Locker: adminLocker,
-				Region: cfg.RegionName,
+				Logger:            logger,
+				Meta:              metaStore,
+				Data:              dataBackend,
+				Tracer:            tracerProvider,
+				Locker:            adminLocker,
+				Region:            cfg.RegionName,
+				RebalanceProgress: rebalanceProgress,
 			},
 		}
 	}
@@ -445,6 +449,36 @@ func poolsByClass(cfg *config.Config, logger *slog.Logger) map[string]string {
 		out[class] = spec.Pool
 	}
 	return out
+}
+
+// rebalanceInterval reads STRATA_REBALANCE_INTERVAL (Go duration). Out-of-
+// range values are clamped to [1m, 24h]; unparseable falls back to 1h. Used
+// by serverapp to size the drain-progress stale-cache threshold (US-003
+// drain-lifecycle) — the rebalance worker re-reads the env independently
+// in its own Build constructor so the two values stay in lock-step.
+func rebalanceInterval(logger *slog.Logger) time.Duration {
+	const (
+		fallback = time.Hour
+		lo       = time.Minute
+		hi       = 24 * time.Hour
+	)
+	v := strings.TrimSpace(os.Getenv("STRATA_REBALANCE_INTERVAL"))
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		logger.Warn("rebalance interval parse failed; using default",
+			"value", v, "default", fallback.String(), "error", err.Error())
+		return fallback
+	}
+	if d < lo {
+		return lo
+	}
+	if d > hi {
+		return hi
+	}
+	return d
 }
 
 // bucketStatsInterval reads STRATA_BUCKETSTATS_INTERVAL (Go duration). Empty

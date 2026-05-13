@@ -49,6 +49,7 @@ func buildRebalance(deps Dependencies) (Runner, error) {
 		Inflight:     inflight,
 		Tracer:       deps.Tracer.Tracer("strata.worker.rebalance"),
 		StatsProbe:   probe,
+		Progress:     deps.RebalanceProgress,
 	})
 }
 

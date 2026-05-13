@@ -301,6 +301,61 @@ components:
           type: array
           items: { $ref: '#/components/schemas/ClusterStateEntry' }
 
+    ClusterDrainProgress:
+      type: object
+      required: [state]
+      description: |
+        Per-draining-cluster progress snapshot returned by
+        GET /clusters/{id}/drain-progress (US-003 drain-lifecycle).
+        Numeric fields are null whenever the rebalance worker has not
+        committed a scan yet, or when state != "draining" (the
+        deregister + ETA semantics only make sense while draining).
+      properties:
+        state:
+          type: string
+          enum: [live, draining, removed]
+        chunks_on_cluster:
+          type: integer
+          format: int64
+          nullable: true
+        bytes_on_cluster:
+          type: integer
+          format: int64
+          nullable: true
+        base_chunks_at_start:
+          type: integer
+          format: int64
+          nullable: true
+          description: |
+            Chunk count captured on the first committed scan after the
+            live → draining transition. UI percent-filled = 1 -
+            chunks_on_cluster / base_chunks_at_start when set.
+        last_scan_at:
+          type: string
+          format: date-time
+          nullable: true
+        eta_seconds:
+          type: integer
+          format: int64
+          nullable: true
+          description: |
+            chunks_remaining / rate(strata_rebalance_chunks_moved_total
+            {from="<id>"}[5m]). Null when Prom is unset/unavailable,
+            chunks_on_cluster is 0, or the move rate is zero.
+        deregister_ready:
+          type: boolean
+          nullable: true
+          description: |
+            True when state="draining" and chunks_on_cluster=0 — the
+            cluster row can now be removed from STRATA_RADOS_CLUSTERS
+            / STRATA_S3_CLUSTERS and the gateways rolling-restarted.
+        warnings:
+          type: array
+          items: { type: string }
+          description: |
+            Free-form operator-facing notes (e.g. "progress data
+            stale" when last_scan_at older than 2× rebalance interval).
+
     ClusterRebalanceProgress:
       type: object
       required: [metrics_available, moved_total, refused_total, series]
@@ -641,6 +696,41 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+
+  /clusters/{id}/drain-progress:
+    get:
+      summary: Per-cluster drain-progress snapshot (US-003 drain-lifecycle)
+      operationId: getClusterDrainProgress
+      description: |
+        Returns the in-process draining-progress cache populated by the
+        rebalance worker. Always reads from cache — never scans the
+        manifest store synchronously per request. When the cluster
+        state is not "draining" the numeric fields go null. ETA is
+        derived from `rate(strata_rebalance_chunks_moved_total
+        {from="<id>"}[5m])`; Prom unavailable or rate=0 surfaces
+        eta_seconds=null. `deregister_ready` flips true when
+        state="draining" and chunks_on_cluster=0 — the operator's
+        signal that the cluster row can be edited out of
+        STRATA_RADOS_CLUSTERS / STRATA_S3_CLUSTERS and the gateways
+        restarted. Responds 503 ProgressUnavailable when no rebalance
+        worker is running on this replica.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Drain progress snapshot.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClusterDrainProgress' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          description: |
+            Rebalance worker not running on this replica — the in-process
+            progress cache is empty and the endpoint refuses to serve a
+            permanently-zero response.
 
   /buckets:
     get:

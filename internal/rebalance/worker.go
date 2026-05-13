@@ -120,6 +120,11 @@ type Config struct {
 	// rebalance worker refuses to dispatch a move (US-006). Zero / <0
 	// falls back to DefaultFillCeiling (0.90).
 	FillCeiling float64
+	// Progress is the in-process draining-progress cache shared with the
+	// adminapi GET /admin/v1/clusters/{id}/drain-progress handler
+	// (US-003 drain-lifecycle). nil disables the per-tick scan
+	// accumulator — the move-planning side of the loop is unaffected.
+	Progress *ProgressTracker
 }
 
 // DefaultFillCeiling is the conservative target_full threshold from the
@@ -204,6 +209,7 @@ func (w *Worker) runOnce(ctx context.Context) error {
 	}
 	draining := w.loadDrainingClusters(ctx)
 	fillCache := w.newFillCache(ctx)
+	prog := newProgressAcc(w.cfg.Progress, draining)
 	for _, b := range buckets {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -215,11 +221,107 @@ func (w *Worker) runOnce(ctx context.Context) error {
 			continue
 		}
 		if len(policy) == 0 {
+			// Empty-policy buckets still need a progress scan so chunks
+			// on a draining cluster are counted toward the deregister-
+			// ready signal. The move plan is a no-op (no policy → no
+			// PickCluster verdicts).
+			w.scanBucketForProgress(ctx, b, draining, prog)
 			continue
 		}
-		w.scanAndEmit(ctx, b, policy, draining, fillCache)
+		w.scanAndEmit(ctx, b, policy, draining, fillCache, prog)
 	}
+	prog.commit(w.cfg.Progress, draining, w.cfg.Now())
 	return nil
+}
+
+// progressAcc accumulates per-draining-cluster {chunks, bytes} for one
+// rebalance tick. The worker increments it from scanDistribution +
+// scanBucketForProgress and CommitScan-flushes at iteration end. nil
+// receiver short-circuits every method so callers do not need a
+// nil-check on the hot path.
+type progressAcc struct {
+	enabled bool
+	chunks  map[string]int64
+	bytes   map[string]int64
+}
+
+func newProgressAcc(p *ProgressTracker, draining map[string]bool) *progressAcc {
+	if p == nil || len(draining) == 0 {
+		return &progressAcc{}
+	}
+	chunks := make(map[string]int64, len(draining))
+	bytes := make(map[string]int64, len(draining))
+	for id := range draining {
+		chunks[id] = 0
+		bytes[id] = 0
+	}
+	return &progressAcc{enabled: true, chunks: chunks, bytes: bytes}
+}
+
+func (a *progressAcc) observe(clusterID string, draining map[string]bool, size int64) {
+	if a == nil || !a.enabled || clusterID == "" {
+		return
+	}
+	if !draining[clusterID] {
+		return
+	}
+	a.chunks[clusterID]++
+	a.bytes[clusterID] += size
+}
+
+func (a *progressAcc) commit(p *ProgressTracker, draining map[string]bool, now time.Time) {
+	if a == nil || p == nil {
+		return
+	}
+	ids := make([]string, 0, len(draining))
+	for id := range draining {
+		ids = append(ids, id)
+	}
+	if !a.enabled {
+		// No draining clusters this tick (or tracker disabled). Still
+		// flush so previously-cached entries for clusters that
+		// transitioned out of draining are reaped.
+		p.CommitScan(ids, nil, nil, now)
+		return
+	}
+	p.CommitScan(ids, a.chunks, a.bytes, now)
+}
+
+// scanBucketForProgress walks every (latest) object in the bucket and
+// accumulates per-draining-cluster chunk / byte counts. This runs even
+// for buckets without a Placement policy so cluster decommissioning is
+// observable on legacy buckets (the move plan stays a no-op for those
+// because policy is empty; the count is independent).
+func (w *Worker) scanBucketForProgress(ctx context.Context, b *meta.Bucket, draining map[string]bool, prog *progressAcc) {
+	if prog == nil || !prog.enabled {
+		return
+	}
+	opts := meta.ListOptions{Limit: w.cfg.PollLimit}
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		res, err := w.cfg.Meta.ListObjects(ctx, b.ID, opts)
+		if err != nil {
+			w.cfg.Logger.Warn("rebalance: progress scan", "bucket", b.Name, "error", err.Error())
+			return
+		}
+		for _, o := range res.Objects {
+			if o.Manifest == nil {
+				continue
+			}
+			for _, c := range o.Manifest.Chunks {
+				prog.observe(c.Cluster, draining, c.Size)
+			}
+			if br := o.Manifest.BackendRef; br != nil && br.Cluster != "" {
+				prog.observe(br.Cluster, draining, br.Size)
+			}
+		}
+		if !res.Truncated {
+			return
+		}
+		opts.Marker = res.NextMarker
+	}
 }
 
 // loadDrainingClusters reads cluster_state once per tick and returns
@@ -245,7 +347,7 @@ func (w *Worker) loadDrainingClusters(ctx context.Context) map[string]bool {
 	return out
 }
 
-func (w *Worker) scanAndEmit(ctx context.Context, b *meta.Bucket, policy map[string]int, draining map[string]bool, fills *fillCache) {
+func (w *Worker) scanAndEmit(ctx context.Context, b *meta.Bucket, policy map[string]int, draining map[string]bool, fills *fillCache, prog *progressAcc) {
 	ctx, span := w.tracerOrNoop().Start(ctx, "rebalance.scan_bucket",
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(
@@ -257,7 +359,7 @@ func (w *Worker) scanAndEmit(ctx context.Context, b *meta.Bucket, policy map[str
 	)
 	defer span.End()
 
-	actual, moves, err := w.scanDistribution(ctx, b, policy, draining)
+	actual, moves, err := w.scanDistribution(ctx, b, policy, draining, prog)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -321,7 +423,7 @@ func (w *Worker) applySafetyRails(ctx context.Context, b *meta.Bucket, moves []M
 // rows) are treated as living on the default cluster (resolved as ""
 // here — the mover knows how to fall back). The picker uses the same
 // stable hash the PUT path uses (US-002) so retries are convergent.
-func (w *Worker) scanDistribution(ctx context.Context, b *meta.Bucket, policy map[string]int, draining map[string]bool) (map[string]int, []Move, error) {
+func (w *Worker) scanDistribution(ctx context.Context, b *meta.Bucket, policy map[string]int, draining map[string]bool, prog *progressAcc) (map[string]int, []Move, error) {
 	actual := map[string]int{}
 	var moves []Move
 	opts := meta.ListOptions{Limit: w.cfg.PollLimit}
@@ -339,6 +441,7 @@ func (w *Worker) scanDistribution(ctx context.Context, b *meta.Bucket, policy ma
 			}
 			for idx, c := range o.Manifest.Chunks {
 				actual[c.Cluster]++
+				prog.observe(c.Cluster, draining, c.Size)
 				want := placement.PickClusterExcluding(b.ID, o.Key, idx, policy, draining)
 				if want == "" {
 					continue
@@ -360,6 +463,7 @@ func (w *Worker) scanDistribution(ctx context.Context, b *meta.Bucket, policy ma
 			}
 			if br := o.Manifest.BackendRef; br != nil && br.Cluster != "" {
 				actual[br.Cluster]++
+				prog.observe(br.Cluster, draining, br.Size)
 				want := placement.PickClusterExcluding(b.ID, o.Key, 0, policy, draining)
 				if want == "" || br.Cluster == want {
 					continue
