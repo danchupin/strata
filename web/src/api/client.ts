@@ -42,11 +42,14 @@ export {
   undrainCluster,
   fetchClusterRebalanceProgress,
   fetchClusterDrainProgress,
+  fetchClusterBucketReferences,
   type ClusterStateEntry,
   type ClustersList,
   type ClustersListResponse,
   type ClusterRebalanceProgress,
   type ClusterDrainProgress,
+  type BucketReferenceEntry,
+  type BucketReferencesResponse,
 } from './clusters';
 
 export {

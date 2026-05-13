@@ -22,6 +22,7 @@ import { queryClient, queryKeys } from '@/lib/query';
 import { showToast } from '@/lib/toast-store';
 import { cn } from '@/lib/utils';
 
+import { BucketReferencesDrawer } from './BucketReferencesDrawer';
 import { ConfirmDrainModal } from './ConfirmDrainModal';
 import { DrainProgressBar } from './DrainProgressBar';
 import { RebalanceProgressChip } from './RebalanceProgressChip';
@@ -163,6 +164,7 @@ interface ClusterCardProps {
 
 function ClusterCard({ cluster, usage, drainStrict }: ClusterCardProps) {
   const [drainOpen, setDrainOpen] = useState(false);
+  const [refsOpen, setRefsOpen] = useState(false);
   const [undraining, setUndraining] = useState(false);
 
   const isDraining = cluster.state.toLowerCase() === 'draining';
@@ -249,7 +251,14 @@ function ClusterCard({ cluster, usage, drainStrict }: ClusterCardProps) {
             </div>
           </>
         )}
-        <div className="flex justify-end">
+        <div className="flex items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={() => setRefsOpen(true)}
+            className="text-xs text-primary hover:underline"
+          >
+            Show affected buckets
+          </button>
           {isDraining ? (
             <Button
               type="button"
@@ -279,6 +288,12 @@ function ClusterCard({ cluster, usage, drainStrict }: ClusterCardProps) {
       <ConfirmDrainModal
         open={drainOpen}
         onOpenChange={setDrainOpen}
+        clusterID={cluster.id}
+        onShowReferences={() => setRefsOpen(true)}
+      />
+      <BucketReferencesDrawer
+        open={refsOpen}
+        onOpenChange={setRefsOpen}
         clusterID={cluster.id}
       />
     </Card>

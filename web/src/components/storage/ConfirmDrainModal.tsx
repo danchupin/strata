@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { AlertCircle, AlertTriangle, Loader2 } from 'lucide-react';
 
-import { drainCluster } from '@/api/client';
+import { drainCluster, fetchClusterBucketReferences } from '@/api/client';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -20,6 +21,10 @@ interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   clusterID: string;
+  // onShowReferences opens the affected-buckets drawer WITHOUT closing the
+  // modal so the operator can review impact, dismiss the drawer, and still
+  // complete the typed-confirmation flow.
+  onShowReferences?: () => void;
 }
 
 // ConfirmDrainModal mirrors DeleteBucketDialog's typed-confirmation
@@ -27,10 +32,22 @@ interface Props {
 // types the cluster id verbatim (case-sensitive). Drain is reversible
 // via Undrain — copy makes that explicit so the friction reads as
 // "double-check the right cluster" rather than "irreversible".
-export function ConfirmDrainModal({ open, onOpenChange, clusterID }: Props) {
+export function ConfirmDrainModal({ open, onOpenChange, clusterID, onShowReferences }: Props) {
   const [typed, setTyped] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
+
+  // Cheap impact preview: fetch the first page of bucket-references when the
+  // modal opens so we can surface the total count inline. The drawer reuses
+  // the same query key on first render.
+  const refsQ = useQuery({
+    queryKey: queryKeys.clusterBucketRefs(clusterID, 100, 0),
+    queryFn: () => fetchClusterBucketReferences(clusterID, 100, 0),
+    enabled: open,
+    staleTime: 30_000,
+    meta: { silent: true },
+  });
+  const refsTotal = refsQ.data?.total_buckets;
 
   useEffect(() => {
     if (open) {
@@ -91,6 +108,26 @@ export function ConfirmDrainModal({ open, onOpenChange, clusterID }: Props) {
               </div>
             </div>
           </div>
+
+          {refsTotal != null && (
+            <div className="rounded-md border bg-muted/30 p-2 text-xs text-muted-foreground">
+              <span className="font-medium text-foreground">{refsTotal}</span>{' '}
+              {refsTotal === 1 ? 'bucket references' : 'buckets reference'}{' '}
+              this cluster in their Placement policy
+              {onShowReferences && refsTotal > 0 && (
+                <>
+                  {' — '}
+                  <button
+                    type="button"
+                    onClick={onShowReferences}
+                    className="text-primary hover:underline"
+                  >
+                    view list
+                  </button>
+                </>
+              )}
+            </div>
+          )}
 
           <div className="space-y-1.5">
             <Label htmlFor="cd-confirm">
