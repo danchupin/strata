@@ -41,9 +41,12 @@ export {
   drainCluster,
   undrainCluster,
   fetchClusterRebalanceProgress,
+  fetchClusterDrainProgress,
   type ClusterStateEntry,
+  type ClustersList,
   type ClustersListResponse,
   type ClusterRebalanceProgress,
+  type ClusterDrainProgress,
 } from './clusters';
 
 export {

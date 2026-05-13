@@ -23,6 +23,7 @@ import { showToast } from '@/lib/toast-store';
 import { cn } from '@/lib/utils';
 
 import { ConfirmDrainModal } from './ConfirmDrainModal';
+import { DrainProgressBar } from './DrainProgressBar';
 import { RebalanceProgressChip } from './RebalanceProgressChip';
 
 const CLUSTERS_POLL_MS = 10_000;
@@ -75,7 +76,8 @@ export function ClustersSubsection({ pools }: Props) {
     meta: { label: 'clusters' },
   });
 
-  const clusters = q.data ?? [];
+  const clusters = q.data?.clusters ?? [];
+  const drainStrict = Boolean(q.data?.drainStrict);
   const showSkeleton = q.isPending && !q.data;
   const errMsg = !q.data && q.error instanceof Error ? q.error.message : null;
 
@@ -143,6 +145,7 @@ export function ClustersSubsection({ pools }: Props) {
                 key={c.id}
                 cluster={c}
                 usage={usageByCluster.get(c.id)}
+                drainStrict={drainStrict}
               />
             ))}
           </div>
@@ -155,9 +158,10 @@ export function ClustersSubsection({ pools }: Props) {
 interface ClusterCardProps {
   cluster: ClusterStateEntry;
   usage: AggregatedUsage | undefined;
+  drainStrict: boolean;
 }
 
-function ClusterCard({ cluster, usage }: ClusterCardProps) {
+function ClusterCard({ cluster, usage, drainStrict }: ClusterCardProps) {
   const [drainOpen, setDrainOpen] = useState(false);
   const [undraining, setUndraining] = useState(false);
 
@@ -192,12 +196,23 @@ function ClusterCard({ cluster, usage }: ClusterCardProps) {
           <span className="truncate" title={cluster.id}>
             {cluster.id}
           </span>
-          <Badge
-            variant="outline"
-            className={cn('font-medium', clusterStateClass(cluster.state))}
-          >
-            {cluster.state || '—'}
-          </Badge>
+          <span className="flex shrink-0 items-center gap-1">
+            <Badge
+              variant="outline"
+              className={cn('font-medium', clusterStateClass(cluster.state))}
+            >
+              {cluster.state || '—'}
+            </Badge>
+            {drainStrict && (
+              <Badge
+                variant="outline"
+                className="border-amber-500/40 bg-amber-500/10 text-[10px] font-medium uppercase text-amber-800 dark:text-amber-300"
+                title="STRATA_DRAIN_STRICT=on: PUTs that fall back to a draining cluster are refused with 503 DrainRefused"
+              >
+                strict
+              </Badge>
+            )}
+          </span>
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3 text-sm">
@@ -226,10 +241,13 @@ function ClusterCard({ cluster, usage }: ClusterCardProps) {
           <RebalanceProgressChip clusterID={cluster.id} />
         )}
         {isDraining && (
-          <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/5 p-2 text-xs text-amber-800 dark:text-amber-300">
-            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
-            <span>Rebalance worker is migrating chunks off this cluster.</span>
-          </div>
+          <>
+            <DrainProgressBar clusterID={cluster.id} />
+            <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/5 p-2 text-xs text-amber-800 dark:text-amber-300">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+              <span>Rebalance worker is migrating chunks off this cluster.</span>
+            </div>
+          </>
         )}
         <div className="flex justify-end">
           {isDraining ? (

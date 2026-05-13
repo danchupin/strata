@@ -39,7 +39,7 @@ export function PlacementDrainBanner() {
   );
 
   const drainingIds = useMemo(() => {
-    const ids = (q.data ?? [])
+    const ids = (q.data?.clusters ?? [])
       .filter((c) => c.state?.toLowerCase() === 'draining')
       .map((c) => c.id);
     ids.sort();

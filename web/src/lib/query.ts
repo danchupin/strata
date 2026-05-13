@@ -169,4 +169,6 @@ export const queryKeys = {
   },
   clusters: ['clusters'] as const,
   clusterRebalance: (id: string) => ['clusters', 'rebalance', id] as const,
+  clusterDrainProgress: (id: string) =>
+    ['clusters', 'drain-progress', id] as const,
 };

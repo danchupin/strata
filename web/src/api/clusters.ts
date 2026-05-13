@@ -12,9 +12,15 @@ export interface ClusterStateEntry {
 
 export interface ClustersListResponse {
   clusters: ClusterStateEntry[];
+  drain_strict: boolean;
 }
 
-export async function fetchClusters(): Promise<ClusterStateEntry[]> {
+export interface ClustersList {
+  clusters: ClusterStateEntry[];
+  drainStrict: boolean;
+}
+
+export async function fetchClusters(): Promise<ClustersList> {
   const resp = await fetch('/admin/v1/clusters', {
     method: 'GET',
     credentials: 'same-origin',
@@ -23,7 +29,10 @@ export async function fetchClusters(): Promise<ClusterStateEntry[]> {
     throw new Error(`clusters: ${resp.status} ${resp.statusText}`);
   }
   const body = (await resp.json()) as ClustersListResponse;
-  return body.clusters ?? [];
+  return {
+    clusters: body.clusters ?? [],
+    drainStrict: Boolean(body.drain_strict),
+  };
 }
 
 async function postFlip(id: string, action: 'drain' | 'undrain'): Promise<void> {
@@ -61,6 +70,39 @@ export interface ClusterRebalanceProgress {
   moved_total: number;
   refused_total: number;
   series: Array<[number, number]>;
+}
+
+// ClusterDrainProgress is the wire shape returned by
+// GET /admin/v1/clusters/{id}/drain-progress (US-003 drain-lifecycle).
+// Numeric fields go null when no value applies (live state, or before
+// the rebalance worker commits its first scan). The UI uses
+// base_chunks_at_start as the denominator for the progress bar — when
+// null the card falls back to a plain text "<N> remaining" readout.
+export interface ClusterDrainProgress {
+  state: 'live' | 'draining' | 'removed' | string;
+  chunks_on_cluster: number | null;
+  bytes_on_cluster: number | null;
+  base_chunks_at_start: number | null;
+  last_scan_at: string | null;
+  eta_seconds: number | null;
+  deregister_ready: boolean | null;
+  warnings?: string[];
+}
+
+export async function fetchClusterDrainProgress(
+  id: string,
+): Promise<ClusterDrainProgress> {
+  const resp = await fetch(
+    `/admin/v1/clusters/${encodeURIComponent(id)}/drain-progress`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (!resp.ok) {
+    throw new Error(
+      `cluster ${id} drain-progress: ${resp.status} ${resp.statusText}`,
+    );
+  }
+  const body = (await resp.json()) as ClusterDrainProgress;
+  return body;
 }
 
 export async function fetchClusterRebalanceProgress(

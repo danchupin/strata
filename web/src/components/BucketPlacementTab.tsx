@@ -114,7 +114,7 @@ export function BucketPlacementTab({ bucket }: Props) {
   });
 
   const clusters = useMemo(
-    () => editableClusters(clustersQ.data ?? []),
+    () => editableClusters(clustersQ.data?.clusters ?? []),
     [clustersQ.data],
   );
   const initial = useMemo(

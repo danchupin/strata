@@ -148,6 +148,10 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	apiHandler.VHostPatterns = vhostPatterns()
 	drainCache := placement.NewDrainCache(metaStore.ListClusterStates, 0)
 	apiHandler.DrainCache = drainCache
+	drainStrict, err := data.ParseDrainStrict(cfg.DrainStrict)
+	if err != nil {
+		return fmt.Errorf("STRATA_DRAIN_STRICT: %w", err)
+	}
 
 	healthHandler := buildHealthHandler(metaStore, dataBackend)
 
@@ -199,6 +203,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		ClusterBackends:      clusterBackends(cfg),
 		DrainCache:           drainCache,
 		RebalanceProgress:    rebalanceProgress,
+		DrainStrict:          drainStrict,
 	})
 
 	mux := http.NewServeMux()
