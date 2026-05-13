@@ -5,6 +5,7 @@ import { AlertCircle, AlertTriangle, Loader2 } from 'lucide-react';
 import {
   fetchClusters,
   undrainCluster,
+  type BucketImpactEntry,
   type ClusterStateEntry,
   type PoolStatus,
 } from '@/api/client';
@@ -23,6 +24,7 @@ import { showToast } from '@/lib/toast-store';
 import { cn } from '@/lib/utils';
 
 import { BucketReferencesDrawer } from './BucketReferencesDrawer';
+import { BulkPlacementFixDialog } from './BulkPlacementFixDialog';
 import { ConfirmDrainModal } from './ConfirmDrainModal';
 import { DrainProgressBar } from './DrainProgressBar';
 import { RebalanceProgressChip } from './RebalanceProgressChip';
@@ -166,6 +168,8 @@ function ClusterCard({ cluster, usage, drainStrict }: ClusterCardProps) {
   const [drainOpen, setDrainOpen] = useState(false);
   const [refsOpen, setRefsOpen] = useState(false);
   const [undraining, setUndraining] = useState(false);
+  const [bulkFixOpen, setBulkFixOpen] = useState(false);
+  const [bulkFixStuck, setBulkFixStuck] = useState<BucketImpactEntry[]>([]);
 
   const isDraining = cluster.state.toLowerCase() === 'draining';
   const supportsFill = cluster.backend.toLowerCase() === 'rados';
@@ -290,6 +294,16 @@ function ClusterCard({ cluster, usage, drainStrict }: ClusterCardProps) {
         onOpenChange={setDrainOpen}
         clusterID={cluster.id}
         currentState={cluster.state}
+        onOpenBulkFix={(stuck) => {
+          setBulkFixStuck(stuck);
+          setBulkFixOpen(true);
+        }}
+      />
+      <BulkPlacementFixDialog
+        open={bulkFixOpen}
+        onOpenChange={setBulkFixOpen}
+        clusterID={cluster.id}
+        stuck={bulkFixStuck}
       />
       <BucketReferencesDrawer
         open={refsOpen}
