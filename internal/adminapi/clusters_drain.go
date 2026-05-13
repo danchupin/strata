@@ -1,6 +1,9 @@
 package adminapi
 
 import (
+	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"sort"
 
@@ -11,12 +14,16 @@ import (
 )
 
 // ClusterStateEntry is one row in the operator-facing
-// GET /admin/v1/clusters response (US-006 placement-rebalance).
-// State is one of "live" / "draining" / "removed"; backend is
-// "rados" or "s3" depending on which env produced the cluster id.
+// GET /admin/v1/clusters response (US-006 placement-rebalance; mode
+// added in US-001 drain-transparency). State is one of "live" /
+// "draining_readonly" / "evacuating" / "removed"; Mode is "readonly"
+// for draining_readonly, "evacuate" for evacuating, "" otherwise.
+// Backend is "rados" or "s3" depending on which env produced the
+// cluster id.
 type ClusterStateEntry struct {
 	ID      string `json:"id"`
 	State   string `json:"state"`
+	Mode    string `json:"mode"`
 	Backend string `json:"backend"`
 }
 
@@ -28,6 +35,22 @@ type ClusterStateEntry struct {
 type ClustersListResponse struct {
 	Clusters    []ClusterStateEntry `json:"clusters"`
 	DrainStrict bool                `json:"drain_strict"`
+}
+
+// drainRequestBody is the JSON shape accepted by POST
+// /admin/v1/clusters/{id}/drain. Mode is required (no default) and
+// must be one of {"readonly", "evacuate"} (US-001 drain-transparency).
+type drainRequestBody struct {
+	Mode string `json:"mode"`
+}
+
+// invalidTransitionResponse is the 409 Conflict payload returned when a
+// drain request asks for a transition the 4-state machine refuses.
+type invalidTransitionResponse struct {
+	Code           string `json:"code"`
+	Message        string `json:"message"`
+	CurrentState   string `json:"current_state"`
+	RequestedMode  string `json:"requested_mode"`
 }
 
 // handleClustersList serves GET /admin/v1/clusters. Returns every
@@ -54,13 +77,14 @@ func (s *Server) handleClustersList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		seen[id] = struct{}{}
-		state := rows[id]
-		if state == "" {
-			state = meta.ClusterStateLive
+		row, ok := rows[id]
+		if !ok || row.State == "" {
+			row = meta.ClusterStateRow{State: meta.ClusterStateLive}
 		}
 		out.Clusters = append(out.Clusters, ClusterStateEntry{
 			ID:      id,
-			State:   state,
+			State:   row.State,
+			Mode:    row.Mode,
 			Backend: s.ClusterBackends[id],
 		})
 	}
@@ -78,25 +102,96 @@ func (s *Server) handleClustersList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// handleClusterDrain serves POST /admin/v1/clusters/{id}/drain.
-// Flips state to meta.ClusterStateDraining; subsequent PUTs route
-// around the cluster (after the drain cache TTL elapses) and the
-// rebalance worker migrates existing chunks off it.
+// handleClusterDrain serves POST /admin/v1/clusters/{id}/drain. The
+// request body MUST carry {"mode":"readonly"} or {"mode":"evacuate"} —
+// there is no default. Transitions are enforced per the 4-state machine
+// (US-001 drain-transparency):
+//
+//	live → draining_readonly                 (mode=readonly)
+//	live → evacuating                        (mode=evacuate)
+//	draining_readonly → evacuating           (mode=evacuate, upgrade)
+//	any other (state, mode) combination → 409 Conflict.
 func (s *Server) handleClusterDrain(w http.ResponseWriter, r *http.Request) {
-	s.flipClusterState(w, r, meta.ClusterStateDraining, "admin:DrainCluster", true)
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSONError(w, http.StatusBadRequest, "BadRequest", "cluster id is required")
+		return
+	}
+	if s.Meta == nil {
+		writeJSONError(w, http.StatusInternalServerError, "Internal", "meta store not configured")
+		return
+	}
+	if len(s.KnownClusters) > 0 {
+		if _, ok := s.KnownClusters[id]; !ok {
+			writeJSONError(w, http.StatusBadRequest, "UnknownCluster",
+				"cluster id is not configured (check STRATA_RADOS_CLUSTERS / STRATA_S3_CLUSTERS)")
+			return
+		}
+	}
+
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4096))
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "BadRequest", "read body: "+err.Error())
+		return
+	}
+	if len(body) == 0 {
+		writeJSONError(w, http.StatusBadRequest, "BadRequest",
+			"request body required: {\"mode\":\"readonly\"|\"evacuate\"}")
+		return
+	}
+	var req drainRequestBody
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "BadRequest", "decode body: "+err.Error())
+		return
+	}
+	if req.Mode != meta.ClusterModeReadonly && req.Mode != meta.ClusterModeEvacuate {
+		writeJSONError(w, http.StatusBadRequest, "BadRequest",
+			"mode must be one of: readonly, evacuate")
+		return
+	}
+
+	ctx := r.Context()
+	owner := auth.FromContext(ctx).Owner
+	s3api.SetAuditOverride(ctx, "admin:DrainCluster", "cluster:"+id, "-", owner)
+
+	currentRow, _, err := s.Meta.GetClusterState(ctx, id)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "Internal", err.Error())
+		return
+	}
+	currentState := currentRow.State
+	if currentState == "" {
+		currentState = meta.ClusterStateLive
+	}
+
+	targetState := stateForMode(req.Mode)
+	if !isLegalDrainTransition(currentState, req.Mode) {
+		writeJSON(w, http.StatusConflict, invalidTransitionResponse{
+			Code: "InvalidTransition",
+			Message: "transition from " + currentState + " via mode=" + req.Mode +
+				" is not permitted",
+			CurrentState:  currentState,
+			RequestedMode: req.Mode,
+		})
+		return
+	}
+
+	if err := s.Meta.SetClusterState(ctx, id, targetState, req.Mode); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "Internal", err.Error())
+		return
+	}
+	if s.DrainCache != nil {
+		s.DrainCache.Invalidate()
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleClusterUndrain serves POST /admin/v1/clusters/{id}/undrain.
-// Drops the cluster_state row entirely (absence == live).
+// Drops the cluster_state row entirely (absence == live). Works from
+// both draining_readonly and evacuating; refused from live or removed
+// states (409). Moved chunks stay on the target cluster — undrain does
+// NOT reverse a migration in flight (US-001 drain-transparency).
 func (s *Server) handleClusterUndrain(w http.ResponseWriter, r *http.Request) {
-	s.flipClusterState(w, r, "", "admin:UndrainCluster", false)
-}
-
-// flipClusterState is the shared body of drain + undrain. desiredState
-// == "" calls DeleteClusterState; non-empty calls SetClusterState.
-// invalidateOnly invalidates the in-process drain cache so the change
-// is visible to the PUT hot path without waiting out the TTL.
-func (s *Server) flipClusterState(w http.ResponseWriter, r *http.Request, desiredState, action string, isDrain bool) {
 	id := r.PathValue("id")
 	if id == "" {
 		writeJSONError(w, http.StatusBadRequest, "BadRequest", "cluster id is required")
@@ -116,24 +211,71 @@ func (s *Server) flipClusterState(w http.ResponseWriter, r *http.Request, desire
 
 	ctx := r.Context()
 	owner := auth.FromContext(ctx).Owner
-	s3api.SetAuditOverride(ctx, action, "cluster:"+id, "-", owner)
+	s3api.SetAuditOverride(ctx, "admin:UndrainCluster", "cluster:"+id, "-", owner)
 
-	var err error
-	if desiredState == "" {
-		err = s.Meta.DeleteClusterState(ctx, id)
-	} else {
-		err = s.Meta.SetClusterState(ctx, id, desiredState)
-	}
+	currentRow, _, err := s.Meta.GetClusterState(ctx, id)
 	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "Internal", err.Error())
+		return
+	}
+	currentState := currentRow.State
+	if currentState == "" {
+		currentState = meta.ClusterStateLive
+	}
+	if currentState != meta.ClusterStateDrainingReadonly && currentState != meta.ClusterStateEvacuating {
+		writeJSON(w, http.StatusConflict, invalidTransitionResponse{
+			Code:          "InvalidTransition",
+			Message:       "undrain only permitted from draining_readonly or evacuating",
+			CurrentState:  currentState,
+			RequestedMode: "",
+		})
+		return
+	}
+
+	if err := s.Meta.DeleteClusterState(ctx, id); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "Internal", err.Error())
 		return
 	}
 	if s.DrainCache != nil {
 		s.DrainCache.Invalidate()
 	}
-	_ = isDrain
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// ensure placement import is used (kept for type reference in Server).
-var _ = placement.DefaultDrainCacheTTL
+// stateForMode maps the operator-supplied mode onto the target state.
+// The (state, mode) pair is the canonical wire shape for cluster_state.
+func stateForMode(mode string) string {
+	switch mode {
+	case meta.ClusterModeReadonly:
+		return meta.ClusterStateDrainingReadonly
+	case meta.ClusterModeEvacuate:
+		return meta.ClusterStateEvacuating
+	default:
+		return ""
+	}
+}
+
+// isLegalDrainTransition enforces the 4-state machine:
+//
+//	live              + readonly  → draining_readonly  ✓
+//	live              + evacuate  → evacuating          ✓
+//	draining_readonly + evacuate  → evacuating (upgrade) ✓
+//	draining_readonly + readonly  → (no-op refused)
+//	evacuating        + *         → (no transition; undrain is the way back)
+//	removed           + *         → (terminal)
+func isLegalDrainTransition(currentState, mode string) bool {
+	switch currentState {
+	case meta.ClusterStateLive:
+		return mode == meta.ClusterModeReadonly || mode == meta.ClusterModeEvacuate
+	case meta.ClusterStateDrainingReadonly:
+		return mode == meta.ClusterModeEvacuate
+	default:
+		return false
+	}
+}
+
+// ensure imports are used.
+var (
+	_ = placement.DefaultDrainCacheTTL
+	_ = errors.New
+)

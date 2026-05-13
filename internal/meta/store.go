@@ -98,9 +98,13 @@ var (
 	// sentinels live in one place (US-001).
 	ErrUnknownCluster          = errors.New("unknown cluster id")
 	// ErrInvalidClusterState signals a SetClusterState call with a value
-	// outside the allowed set ({"live", "draining", "removed"}) (US-006
-	// placement-rebalance).
+	// outside the allowed set ({"live", "draining_readonly", "evacuating",
+	// "removed"}) or with an (state, mode) combination that violates the
+	// 4-state machine (US-001 drain-transparency).
 	ErrInvalidClusterState     = errors.New("invalid cluster state")
+	// ErrInvalidClusterMode signals a SetClusterState call with a mode
+	// value outside {"", "readonly", "evacuate"}.
+	ErrInvalidClusterMode      = errors.New("invalid cluster mode")
 )
 
 const (
@@ -109,26 +113,110 @@ const (
 	// into and out of it. Absence of a cluster_state row is equivalent to
 	// "live", so live clusters do not need to materialise a row.
 	ClusterStateLive = "live"
-	// ClusterStateDraining tells the routing path to skip the cluster on
-	// chunk PUTs and the rebalance worker to move bytes out of it. Moves
-	// INTO a draining cluster are refused with reason="target_draining".
+	// ClusterStateDrainingReadonly stops new write traffic to the cluster
+	// (PUT chunk + new Multipart Init) while leaving reads, deletes and
+	// in-flight multipart sessions alone. The rebalance worker does NOT
+	// scan or move chunks off readonly clusters — this is the maintenance
+	// mode for a planned restart / config change (US-001 drain-transparency).
+	ClusterStateDrainingReadonly = "draining_readonly"
+	// ClusterStateEvacuating is the full-decommission mode: PUT routing
+	// excludes the cluster AND the rebalance worker migrates existing
+	// chunks off it. Replaces the legacy "draining" state — operators that
+	// want to permanently remove a cluster pick this mode.
+	ClusterStateEvacuating = "evacuating"
+	// ClusterStateDraining is the legacy single-state name still emitted
+	// by pre-US-001 rows. GetClusterState/ListClusterStates transparently
+	// rewrite legacy rows to (state=evacuating, mode=evacuate) on read so
+	// the legacy shape disappears from the wire. Operators / handlers
+	// MUST NOT emit this value when calling SetClusterState — the
+	// validation helper accepts it ONLY for read-migration parity.
 	ClusterStateDraining = "draining"
 	// ClusterStateRemoved is the terminal state once a cluster is fully
-	// drained and the operator has deregistered it. Reserved for future
-	// use (US-006 ships drain + undrain; "removed" comes via the
-	// deregister path in a follow-up cycle).
+	// drained and the operator has deregistered it.
 	ClusterStateRemoved = "removed"
+
+	// ClusterModeReadonly is the mode label that pairs with
+	// ClusterStateDrainingReadonly. Operator-supplied via POST /drain.
+	ClusterModeReadonly = "readonly"
+	// ClusterModeEvacuate pairs with ClusterStateEvacuating. Live → evacuating
+	// or draining_readonly → evacuating both carry this mode.
+	ClusterModeEvacuate = "evacuate"
 )
 
-// ValidateClusterState enforces the {live, draining, removed} enum on a
-// SetClusterState call. Empty string is rejected — callers that want to
-// clear the row must call DeleteClusterState.
-func ValidateClusterState(state string) error {
+// ClusterStateRow is the cluster_state wire shape returned by
+// GetClusterState / ListClusterStates. Mode is "" for {live, removed},
+// "readonly" for draining_readonly, "evacuate" for evacuating.
+type ClusterStateRow struct {
+	State string
+	Mode  string
+}
+
+// ValidateClusterStateMode enforces the legal (state, mode) combinations
+// on a SetClusterState call (US-001 drain-transparency):
+//
+//   - ("live",              "")
+//   - ("draining_readonly", "readonly")
+//   - ("evacuating",        "evacuate")
+//   - ("removed",           "")
+//   - ("draining",          "")          — legacy, accepted ONLY so the
+//     contract test can plant a pre-US-001 row to exercise the read-side
+//     migration. Operators / handlers MUST NOT emit this combo; the
+//     adminapi handler validates the operator-supplied mode separately
+//     before deriving the target state.
+//
+// Empty string state is rejected — callers that want to clear the row
+// must call DeleteClusterState.
+func ValidateClusterStateMode(state, mode string) error {
 	switch state {
-	case ClusterStateLive, ClusterStateDraining, ClusterStateRemoved:
+	case ClusterStateLive, ClusterStateRemoved:
+		if mode != "" {
+			return ErrInvalidClusterMode
+		}
+		return nil
+	case ClusterStateDrainingReadonly:
+		if mode != ClusterModeReadonly {
+			return ErrInvalidClusterMode
+		}
+		return nil
+	case ClusterStateEvacuating:
+		if mode != ClusterModeEvacuate {
+			return ErrInvalidClusterMode
+		}
+		return nil
+	case ClusterStateDraining:
+		// Legacy shape — empty mode only, kept for migration parity.
+		if mode != "" {
+			return ErrInvalidClusterMode
+		}
 		return nil
 	default:
 		return ErrInvalidClusterState
+	}
+}
+
+// NormalizeClusterStateRow converts a legacy (state="draining", mode="")
+// row into the new (state="evacuating", mode="evacuate") shape. Returns
+// the normalized row and a migrated bool signaling whether a transparent
+// rewrite happened (used by backends to trigger best-effort write-back).
+// All other rows pass through unchanged.
+func NormalizeClusterStateRow(row ClusterStateRow) (ClusterStateRow, bool) {
+	if row.State == ClusterStateDraining && row.Mode == "" {
+		return ClusterStateRow{State: ClusterStateEvacuating, Mode: ClusterModeEvacuate}, true
+	}
+	return row, false
+}
+
+// IsDrainingForWrite reports whether the cluster state should be
+// excluded from PUT routing (the drain sentinel). Both draining_readonly
+// and evacuating block new writes; live / removed do not. The legacy
+// "draining" row also counts so an unmigrated row keeps working until
+// the read-migration kicks in.
+func IsDrainingForWrite(state string) bool {
+	switch state {
+	case ClusterStateDrainingReadonly, ClusterStateEvacuating, ClusterStateDraining:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -852,17 +940,23 @@ type Store interface {
 	GetBucketPlacement(ctx context.Context, name string) (map[string]int, error)
 	DeleteBucketPlacement(ctx context.Context, name string) error
 
-	// Cluster state CRUD (US-006 placement-rebalance). Stored as a
-	// top-level row keyed on the operator-supplied cluster id (NOT
-	// bucket-scoped). Absence of a row means ClusterStateLive — there is
-	// no need to materialise a row for the common case. GetClusterState
-	// returns (state, ok=false, nil) when no row exists. SetClusterState
-	// applies meta.ValidateClusterState before persisting. ListClusterStates
-	// returns every configured row keyed on cluster id (used by the
-	// drain-state cache and the admin GET /admin/v1/clusters handler).
-	SetClusterState(ctx context.Context, clusterID, state string) error
-	GetClusterState(ctx context.Context, clusterID string) (state string, ok bool, err error)
-	ListClusterStates(ctx context.Context) (map[string]string, error)
+	// Cluster state CRUD (US-006 placement-rebalance, mode added in US-001
+	// drain-transparency). Stored as a top-level row keyed on the
+	// operator-supplied cluster id (NOT bucket-scoped). Absence of a row
+	// means ClusterStateLive — there is no need to materialise a row for
+	// the common case. GetClusterState returns (row, ok=false, nil) when
+	// no row exists. SetClusterState applies meta.ValidateClusterStateMode
+	// before persisting. ListClusterStates returns every configured row
+	// keyed on cluster id (used by the drain-state cache and the admin
+	// GET /admin/v1/clusters handler).
+	//
+	// Reads transparently migrate legacy (state="draining", mode="") rows
+	// to (state="evacuating", mode="evacuate") and write the new shape
+	// back best-effort so the legacy form disappears from the wire on the
+	// first read.
+	SetClusterState(ctx context.Context, clusterID, state, mode string) error
+	GetClusterState(ctx context.Context, clusterID string) (row ClusterStateRow, ok bool, err error)
+	ListClusterStates(ctx context.Context) (map[string]ClusterStateRow, error)
 	DeleteClusterState(ctx context.Context, clusterID string) error
 
 	// Quota CRUD (US-001..US-003). Get returns (zero-value, false, nil)

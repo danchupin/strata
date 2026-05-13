@@ -26,8 +26,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped: meta.Store.SetClusterState now takes (state, mode); GetClusterState/ListClusterStates return ClusterStateRow{State, Mode}; legacy `draining` rows migrate to (evacuating, evacuate) on read in all three backends via meta.NormalizeClusterStateRow + best-effort write-back. New contract test caseClusterStateModes covers every legal+illegal combo and the legacy migration path. POST /drain rejects body-less calls (400), unknown modes (400) and refuses (current_state, mode) pairs the 4-state machine doesn't permit (409 InvalidTransition with current_state+requested_mode). POST /undrain refuses from live (409). meta.IsDrainingForWrite collapses both draining states for PUT/drain-cache routing. UI TS client widened: ClusterState/ClusterMode types + isDrainingState helper + drainCluster(id, mode) requires mode (defaults to 'evacuate' so legacy call sites keep migrating; US-004 modal will surface the picker)."
     },
     {
       "id": "US-002",

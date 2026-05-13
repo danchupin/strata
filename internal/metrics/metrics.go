@@ -261,7 +261,7 @@ var (
 	RebalanceRefusedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "strata_rebalance_refused_total",
-			Help: "Rebalance moves refused by the worker's safety rails (US-006). Reason is one of target_full (target cluster.used/total > 0.90 RADOS-only) or target_draining (target cluster is in meta.ClusterStateDraining). Per-target visibility lets operators spot a stuck drain.",
+			Help: "Rebalance moves refused by the worker's safety rails (US-006). Reason is one of target_full (target cluster.used/total > 0.90 RADOS-only) or target_draining (target cluster is in a draining state — draining_readonly or evacuating). Per-target visibility lets operators spot a stuck drain.",
 		},
 		[]string{"reason", "target"},
 	)

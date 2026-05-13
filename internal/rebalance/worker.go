@@ -417,9 +417,9 @@ func (w *Worker) scanBucketForProgress(ctx context.Context, b *meta.Bucket, drai
 }
 
 // loadDrainingClusters reads cluster_state once per tick and returns
-// the set of cluster ids whose state is meta.ClusterStateDraining.
-// Errors are logged + treated as empty so a meta hiccup never breaks
-// the rebalance tick.
+// the set of cluster ids whose state blocks writes (draining_readonly
+// or evacuating). Errors are logged + treated as empty so a meta hiccup
+// never breaks the rebalance tick.
 func (w *Worker) loadDrainingClusters(ctx context.Context) map[string]bool {
 	rows, err := w.cfg.Meta.ListClusterStates(ctx)
 	if err != nil {
@@ -431,8 +431,8 @@ func (w *Worker) loadDrainingClusters(ctx context.Context) map[string]bool {
 		return nil
 	}
 	out := make(map[string]bool, len(rows))
-	for id, state := range rows {
-		if state == meta.ClusterStateDraining {
+	for id, row := range rows {
+		if meta.IsDrainingForWrite(row.State) {
 			out[id] = true
 		}
 	}

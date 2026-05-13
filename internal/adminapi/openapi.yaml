@@ -281,17 +281,55 @@ components:
 
     ClusterStateEntry:
       type: object
-      required: [id, state]
+      required: [id, state, mode]
       description: |
-        One row in the GET /clusters response (US-006 placement-rebalance).
-        `state` is one of "live" / "draining" / "removed"; `backend` is
-        "rados" or "s3" (when known).
+        One row in the GET /clusters response (US-006 placement-rebalance;
+        `mode` added US-001 drain-transparency). `state` is one of
+        "live" / "draining_readonly" / "evacuating" / "removed";
+        `mode` is "readonly" for draining_readonly, "evacuate" for
+        evacuating, "" otherwise. `backend` is "rados" or "s3" (when
+        known).
       properties:
         id: { type: string }
         state:
           type: string
-          enum: [live, draining, removed]
+          enum: [live, draining_readonly, evacuating, removed]
+        mode:
+          type: string
+          enum: ["", readonly, evacuate]
         backend: { type: string }
+
+    DrainRequest:
+      type: object
+      required: [mode]
+      description: |
+        Request body for POST /clusters/{id}/drain (US-001 drain-transparency).
+        `mode` is required (no default): "readonly" stops writes only —
+        reads, deletes, in-flight multipart continue, no migration;
+        "evacuate" stops writes AND starts the rebalance worker migrating
+        chunks off the cluster.
+      properties:
+        mode:
+          type: string
+          enum: [readonly, evacuate]
+
+    InvalidTransitionError:
+      type: object
+      required: [code, message, current_state, requested_mode]
+      description: |
+        409 Conflict body when a drain request asks for a transition the
+        4-state machine refuses (US-001 drain-transparency).
+      properties:
+        code:
+          type: string
+          enum: [InvalidTransition]
+        message: { type: string }
+        current_state:
+          type: string
+          enum: [live, draining_readonly, evacuating, removed]
+        requested_mode:
+          type: string
+          enum: ["", readonly, evacuate]
 
     ClustersList:
       type: object
@@ -303,17 +341,21 @@ components:
 
     ClusterDrainProgress:
       type: object
-      required: [state]
+      required: [state, mode]
       description: |
         Per-draining-cluster progress snapshot returned by
-        GET /clusters/{id}/drain-progress (US-003 drain-lifecycle).
-        Numeric fields are null whenever the rebalance worker has not
-        committed a scan yet, or when state != "draining" (the
+        GET /clusters/{id}/drain-progress (US-003 drain-lifecycle;
+        `mode` added US-001 drain-transparency). Numeric fields are
+        null whenever the rebalance worker has not committed a scan
+        yet, or when the cluster is not in a write-blocking state (the
         deregister + ETA semantics only make sense while draining).
       properties:
         state:
           type: string
-          enum: [live, draining, removed]
+          enum: [live, draining_readonly, evacuating, removed]
+        mode:
+          type: string
+          enum: ["", readonly, evacuate]
         chunks_on_cluster:
           type: integer
           format: int64
@@ -346,8 +388,8 @@ components:
           type: boolean
           nullable: true
           description: |
-            True when state="draining" and chunks_on_cluster=0 — the
-            cluster row can now be removed from STRATA_RADOS_CLUSTERS
+            True when state is a draining state and chunks_on_cluster=0
+            — the cluster row can now be removed from STRATA_RADOS_CLUSTERS
             / STRATA_S3_CLUSTERS and the gateways rolling-restarted.
         warnings:
           type: array
@@ -672,15 +714,21 @@ paths:
 
   /clusters/{id}/drain:
     post:
-      summary: Mark a cluster as draining (US-006 placement-rebalance)
+      summary: Drain a cluster (US-006 placement-rebalance; mode added US-001 drain-transparency)
       operationId: drainCluster
       description: |
-        Flips cluster_state to "draining" so the PUT hot path stops
-        routing chunks to this cluster (after the drain-cache TTL
-        elapses) and the rebalance worker starts migrating existing
-        chunks off it. Idempotent.
+        Flips cluster_state to draining_readonly (mode="readonly") or
+        evacuating (mode="evacuate"). Body is required — no default
+        mode. Legal transitions: live → draining_readonly, live →
+        evacuating, draining_readonly → evacuating (upgrade). Any
+        other (current_state, mode) pair returns 409 Conflict.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DrainRequest' }
       responses:
         '204':
           description: Drain flipped.
@@ -688,13 +736,22 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Invalid (state, mode) transition.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InvalidTransitionError' }
 
   /clusters/{id}/undrain:
     post:
-      summary: Clear draining state (US-006 placement-rebalance)
+      summary: Clear draining state (US-006 placement-rebalance; works from both readonly + evacuating since US-001)
       operationId: undrainCluster
       description: |
-        Drops the cluster_state row (absence == live). Idempotent.
+        Drops the cluster_state row (absence == live). Works only from
+        draining_readonly or evacuating; called against a live cluster
+        the endpoint returns 409 Conflict. Moved chunks stay on the
+        target cluster — undrain does not reverse a migration in
+        flight.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
       responses:
@@ -704,6 +761,11 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Cluster is not currently draining.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InvalidTransitionError' }
 
   /clusters/{id}/rebalance-progress:
     get:

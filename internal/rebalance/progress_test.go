@@ -201,7 +201,7 @@ func TestWorkerProgressScanPopulatesTracker(t *testing.T) {
 	}
 	// Mark cluster "old" as draining so the worker's progress accumulator
 	// counts chunks living on it.
-	if err := m.SetClusterState(context.Background(), "old", meta.ClusterStateDraining); err != nil {
+	if err := m.SetClusterState(context.Background(), "old", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate); err != nil {
 		t.Fatalf("SetClusterState: %v", err)
 	}
 	if err := m.SetBucketPlacement(context.Background(), b.Name, map[string]int{"new": 1}); err != nil {
@@ -260,7 +260,7 @@ func TestWorkerFiresDrainCompleteEnd2End(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBucket: %v", err)
 	}
-	if err := m.SetClusterState(ctx, "old", meta.ClusterStateDraining); err != nil {
+	if err := m.SetClusterState(ctx, "old", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate); err != nil {
 		t.Fatalf("SetClusterState: %v", err)
 	}
 	if err := m.SetBucketPlacement(ctx, b.Name, map[string]int{"new": 1}); err != nil {
@@ -360,7 +360,7 @@ func TestWorkerProgressScanCountsEmptyPolicyBuckets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBucket: %v", err)
 	}
-	if err := m.SetClusterState(context.Background(), "old", meta.ClusterStateDraining); err != nil {
+	if err := m.SetClusterState(context.Background(), "old", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate); err != nil {
 		t.Fatalf("SetClusterState: %v", err)
 	}
 	seedObject(t, m, b.ID, "obj-a", []string{"old", "old"})

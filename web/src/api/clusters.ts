@@ -4,10 +4,35 @@
 // drain banner (US-004). The wire shape mirrors
 // adminapi.ClusterStateEntry in internal/adminapi/clusters_drain.go.
 
+// ClusterState is the 4-state machine introduced in US-001 drain-transparency.
+// The legacy "draining" value is still accepted from the wire for
+// compatibility with backends mid-migration; the server normalizes it on
+// read so this branch should be exercised only by very stale UI fetches.
+export type ClusterState =
+  | 'live'
+  | 'draining_readonly'
+  | 'evacuating'
+  | 'removed'
+  | 'draining';
+
+export type ClusterMode = '' | 'readonly' | 'evacuate';
+
 export interface ClusterStateEntry {
   id: string;
-  state: 'live' | 'draining' | 'removed' | string;
+  state: ClusterState | string;
+  mode: ClusterMode | string;
   backend: 'rados' | 's3' | string;
+}
+
+// isDrainingState collapses the 4-state machine into a boolean "stop-
+// writes" predicate so existing call sites that asked `state==='draining'`
+// keep working through US-006 redesign of the UI.
+export function isDrainingState(state: string | undefined): boolean {
+  return (
+    state === 'draining_readonly' ||
+    state === 'evacuating' ||
+    state === 'draining'
+  );
 }
 
 export interface ClustersListResponse {
@@ -35,16 +60,25 @@ export async function fetchClusters(): Promise<ClustersList> {
   };
 }
 
-async function postFlip(id: string, action: 'drain' | 'undrain'): Promise<void> {
+async function postFlip(
+  id: string,
+  action: 'drain' | 'undrain',
+  body: unknown,
+): Promise<void> {
+  const init: RequestInit = { method: 'POST', credentials: 'same-origin' };
+  if (body !== undefined) {
+    init.body = JSON.stringify(body);
+    init.headers = { 'Content-Type': 'application/json' };
+  }
   const resp = await fetch(
     `/admin/v1/clusters/${encodeURIComponent(id)}/${action}`,
-    { method: 'POST', credentials: 'same-origin' },
+    init,
   );
   if (!resp.ok) {
     let detail = '';
     try {
-      const body = (await resp.json()) as { message?: string; code?: string };
-      detail = body.message ? `: ${body.message}` : '';
+      const j = (await resp.json()) as { message?: string; code?: string };
+      detail = j.message ? `: ${j.message}` : '';
     } catch {
       // ignore JSON parse failure — fall back to status text below
     }
@@ -52,12 +86,19 @@ async function postFlip(id: string, action: 'drain' | 'undrain'): Promise<void> 
   }
 }
 
-export function drainCluster(id: string): Promise<void> {
-  return postFlip(id, 'drain');
+// drainCluster posts {mode} to /clusters/{id}/drain. Mode is required
+// (no default) per US-001 drain-transparency. Pass 'readonly' for the
+// stop-writes-only maintenance mode or 'evacuate' for the full
+// decommission mode that also migrates chunks.
+export function drainCluster(
+  id: string,
+  mode: 'readonly' | 'evacuate' = 'evacuate',
+): Promise<void> {
+  return postFlip(id, 'drain', { mode });
 }
 
 export function undrainCluster(id: string): Promise<void> {
-  return postFlip(id, 'undrain');
+  return postFlip(id, 'undrain', undefined);
 }
 
 // ClusterRebalanceProgress is the wire shape returned by
@@ -79,7 +120,8 @@ export interface ClusterRebalanceProgress {
 // base_chunks_at_start as the denominator for the progress bar — when
 // null the card falls back to a plain text "<N> remaining" readout.
 export interface ClusterDrainProgress {
-  state: 'live' | 'draining' | 'removed' | string;
+  state: ClusterState | string;
+  mode: ClusterMode | string;
   chunks_on_cluster: number | null;
   bytes_on_cluster: number | null;
   base_chunks_at_start: number | null;

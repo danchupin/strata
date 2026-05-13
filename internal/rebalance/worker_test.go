@@ -520,7 +520,7 @@ func TestWorkerSkipsDrainingTargetsAtPlanTime(t *testing.T) {
 	if err := m.SetBucketPlacement(context.Background(), b.Name, map[string]int{"c1": 1, "c2": 1}); err != nil {
 		t.Fatalf("SetBucketPlacement: %v", err)
 	}
-	if err := m.SetClusterState(context.Background(), "c2", meta.ClusterStateDraining); err != nil {
+	if err := m.SetClusterState(context.Background(), "c2", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate); err != nil {
 		t.Fatalf("SetClusterState: %v", err)
 	}
 	// All chunks on c1 — with draining c2, picker keeps them on c1.
@@ -545,7 +545,7 @@ func TestWorkerMovesOutOfDrainingCluster(t *testing.T) {
 	if err := m.SetBucketPlacement(context.Background(), b.Name, map[string]int{"c1": 1, "c2": 1}); err != nil {
 		t.Fatalf("SetBucketPlacement: %v", err)
 	}
-	if err := m.SetClusterState(context.Background(), "c1", meta.ClusterStateDraining); err != nil {
+	if err := m.SetClusterState(context.Background(), "c1", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate); err != nil {
 		t.Fatalf("SetClusterState: %v", err)
 	}
 	seedObject(t, m, b.ID, "w", []string{"c1", "c1", "c1"})

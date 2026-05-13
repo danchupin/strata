@@ -2848,51 +2848,75 @@ func (s *Store) DeleteBucketPlacement(ctx context.Context, name string) error {
 	return s.deleteBucketBlob(ctx, "bucket_placement", b.ID)
 }
 
-// SetClusterState persists state under clusterID. Absence of a row is
-// equivalent to meta.ClusterStateLive — operators only need to write
-// rows when they want to drain or remove a cluster (US-006).
-func (s *Store) SetClusterState(ctx context.Context, clusterID, state string) error {
+// SetClusterState persists (state, mode) under clusterID. Absence of a
+// row is equivalent to meta.ClusterStateLive — operators only need to
+// write rows when they want to drain, evacuate, or remove a cluster
+// (US-001 drain-transparency).
+func (s *Store) SetClusterState(ctx context.Context, clusterID, state, mode string) error {
 	if clusterID == "" {
 		return meta.ErrUnknownCluster
 	}
-	if err := meta.ValidateClusterState(state); err != nil {
+	if err := meta.ValidateClusterStateMode(state, mode); err != nil {
 		return err
 	}
 	return s.s.Query(
-		`INSERT INTO cluster_state (cluster_id, state) VALUES (?, ?)`,
-		clusterID, state,
+		`INSERT INTO cluster_state (cluster_id, state, mode) VALUES (?, ?, ?)`,
+		clusterID, state, mode,
 	).WithContext(ctx).Exec()
 }
 
-// GetClusterState returns the persisted state. ok=false signals "no row
-// exists" — callers should treat that as ClusterStateLive.
-func (s *Store) GetClusterState(ctx context.Context, clusterID string) (string, bool, error) {
-	var state string
+// GetClusterState returns the persisted row. ok=false signals "no row
+// exists" — callers should treat that as ClusterStateLive. Legacy rows
+// with state="draining" + empty mode are transparently migrated to
+// (evacuating, evacuate) and written back best-effort.
+func (s *Store) GetClusterState(ctx context.Context, clusterID string) (meta.ClusterStateRow, bool, error) {
+	var state, mode string
 	err := s.s.Query(
-		`SELECT state FROM cluster_state WHERE cluster_id=?`,
+		`SELECT state, mode FROM cluster_state WHERE cluster_id=?`,
 		clusterID,
-	).WithContext(ctx).Scan(&state)
+	).WithContext(ctx).Scan(&state, &mode)
 	if errors.Is(err, gocql.ErrNotFound) {
-		return "", false, nil
+		return meta.ClusterStateRow{}, false, nil
 	}
 	if err != nil {
-		return "", false, err
+		return meta.ClusterStateRow{}, false, err
 	}
-	return state, true, nil
+	row := meta.ClusterStateRow{State: state, Mode: mode}
+	if normalized, migrated := meta.NormalizeClusterStateRow(row); migrated {
+		_ = s.s.Query(
+			`INSERT INTO cluster_state (cluster_id, state, mode) VALUES (?, ?, ?)`,
+			clusterID, normalized.State, normalized.Mode,
+		).WithContext(ctx).Exec()
+		row = normalized
+	}
+	return row, true, nil
 }
 
 // ListClusterStates returns every persisted cluster_state row. Backs
 // both the drain-state cache and the admin GET /admin/v1/clusters
-// handler.
-func (s *Store) ListClusterStates(ctx context.Context) (map[string]string, error) {
-	iter := s.s.Query(`SELECT cluster_id, state FROM cluster_state`).WithContext(ctx).Iter()
-	out := map[string]string{}
-	var clusterID, state string
-	for iter.Scan(&clusterID, &state) {
-		out[clusterID] = state
+// handler. Legacy rows are migrated transparently as in GetClusterState.
+func (s *Store) ListClusterStates(ctx context.Context) (map[string]meta.ClusterStateRow, error) {
+	iter := s.s.Query(`SELECT cluster_id, state, mode FROM cluster_state`).WithContext(ctx).Iter()
+	out := map[string]meta.ClusterStateRow{}
+	type migration struct{ id, state, mode string }
+	var migrations []migration
+	var clusterID, state, mode string
+	for iter.Scan(&clusterID, &state, &mode) {
+		row := meta.ClusterStateRow{State: state, Mode: mode}
+		if normalized, migrated := meta.NormalizeClusterStateRow(row); migrated {
+			migrations = append(migrations, migration{clusterID, normalized.State, normalized.Mode})
+			row = normalized
+		}
+		out[clusterID] = row
 	}
 	if err := iter.Close(); err != nil {
 		return nil, err
+	}
+	for _, m := range migrations {
+		_ = s.s.Query(
+			`INSERT INTO cluster_state (cluster_id, state, mode) VALUES (?, ?, ?)`,
+			m.id, m.state, m.mode,
+		).WithContext(ctx).Exec()
 	}
 	return out, nil
 }

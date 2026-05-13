@@ -29,6 +29,7 @@ const drainMoveRateExprFmt = `sum(rate(strata_rebalance_chunks_moved_total{from=
 // cluster and the operator console reads the same JSON straight via curl.
 type ClusterDrainProgressResponse struct {
 	State            string   `json:"state"`
+	Mode             string   `json:"mode"`
 	ChunksOnCluster  *int64   `json:"chunks_on_cluster"`
 	BytesOnCluster   *int64   `json:"bytes_on_cluster"`
 	BaseChunks       *int64   `json:"base_chunks_at_start"`
@@ -76,25 +77,25 @@ func (s *Server) handleClusterDrainProgress(w http.ResponseWriter, r *http.Reque
 		writeJSONError(w, http.StatusInternalServerError, "Internal", err.Error())
 		return
 	}
-	state := rows[id]
-	if state == "" {
-		state = meta.ClusterStateLive
+	row, ok := rows[id]
+	if !ok || row.State == "" {
+		row = meta.ClusterStateRow{State: meta.ClusterStateLive}
 	}
-	resp := ClusterDrainProgressResponse{State: state}
-	if state != meta.ClusterStateDraining {
+	resp := ClusterDrainProgressResponse{State: row.State, Mode: row.Mode}
+	if !meta.IsDrainingForWrite(row.State) {
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
-	snap, ok := s.RebalanceProgress.Snapshot(id)
-	resp = buildDrainProgressResponse(ctx, s.Prom, id, state, snap, ok, s.RebalanceProgress.Interval, time.Now())
+	snap, scanOK := s.RebalanceProgress.Snapshot(id)
+	resp = buildDrainProgressResponse(ctx, s.Prom, id, row, snap, scanOK, s.RebalanceProgress.Interval, time.Now())
 	writeJSON(w, http.StatusOK, resp)
 }
 
 // buildDrainProgressResponse is the testable core of the handler. Pure
 // over its inputs — no IO besides the optional Prom query.
-func buildDrainProgressResponse(ctx context.Context, prom *promclient.Client, id, state string, snap rebalance.ProgressSnapshot, ok bool, interval time.Duration, now time.Time) ClusterDrainProgressResponse {
-	out := ClusterDrainProgressResponse{State: state}
+func buildDrainProgressResponse(ctx context.Context, prom *promclient.Client, id string, row meta.ClusterStateRow, snap rebalance.ProgressSnapshot, ok bool, interval time.Duration, now time.Time) ClusterDrainProgressResponse {
+	out := ClusterDrainProgressResponse{State: row.State, Mode: row.Mode}
 	if !ok || snap.LastScanAt.IsZero() {
 		out.Warnings = append(out.Warnings, "progress scan pending; rebalance worker has not yet committed a tick")
 		return out

@@ -98,11 +98,12 @@ func ObjectKeyFromContext(ctx context.Context) (string, bool) {
 	return v, true
 }
 
-// drainingKey carries the set of cluster ids currently in
-// meta.ClusterStateDraining onto the data-plane ctx. Backends consult
-// it in PutChunks so chunks never route to a draining cluster even
-// when its weight in the bucket's Placement policy is non-zero (US-006
-// placement-rebalance).
+// drainingKey carries the set of cluster ids currently in a draining
+// state (draining_readonly or evacuating) onto the data-plane ctx.
+// Backends consult it in PutChunks so chunks never route to a
+// draining cluster even when its weight in the bucket's Placement
+// policy is non-zero (US-006 placement-rebalance; 4-state machine
+// added US-001 drain-transparency).
 type drainingKey struct{}
 
 // WithDrainingClusters stores the draining-cluster set on ctx. Empty/
