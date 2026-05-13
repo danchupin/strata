@@ -289,7 +289,7 @@ function ClusterCard({ cluster, usage, drainStrict }: ClusterCardProps) {
         open={drainOpen}
         onOpenChange={setDrainOpen}
         clusterID={cluster.id}
-        onShowReferences={() => setRefsOpen(true)}
+        currentState={cluster.state}
       />
       <BucketReferencesDrawer
         open={refsOpen}

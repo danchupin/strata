@@ -196,6 +196,94 @@ export async function fetchClusterBucketReferences(
   };
 }
 
+// SuggestedPolicy is one operator-facing remediation option returned per
+// affected bucket by GET /admin/v1/clusters/{id}/drain-impact (US-003
+// drain-transparency). Label is the human-readable text rendered in the
+// BulkPlacementFixDialog dropdown; Policy is the {clusterID: weight}
+// body the operator would PUT to /admin/v1/buckets/{name}/placement.
+export interface SuggestedPolicy {
+  label: string;
+  policy: Record<string, number>;
+}
+
+// BucketImpactEntry mirrors adminapi.BucketImpactEntry from
+// internal/adminapi/clusters_drain_impact.go. current_policy is null when
+// the bucket has no Placement (stuck_no_policy category).
+export interface BucketImpactEntry {
+  name: string;
+  current_policy: Record<string, number> | null;
+  category: 'migratable' | 'stuck_single_policy' | 'stuck_no_policy' | string;
+  chunk_count: number;
+  bytes_used: number;
+  suggested_policies: SuggestedPolicy[] | null;
+}
+
+// ClusterDrainImpactResponse mirrors adminapi.ClusterDrainImpactResponse.
+// next_offset is null when the by_bucket slice is the final page.
+export interface ClusterDrainImpactResponse {
+  cluster_id: string;
+  current_state: string;
+  migratable_chunks: number;
+  stuck_single_policy_chunks: number;
+  stuck_no_policy_chunks: number;
+  total_chunks: number;
+  by_bucket: BucketImpactEntry[];
+  total_buckets: number;
+  next_offset: number | null;
+  last_scan_at: string | null;
+}
+
+export async function fetchClusterDrainImpact(
+  id: string,
+  limit = 100,
+  offset = 0,
+): Promise<ClusterDrainImpactResponse> {
+  const params = new URLSearchParams();
+  if (limit !== 100) params.set('limit', String(limit));
+  if (offset > 0) params.set('offset', String(offset));
+  const qs = params.toString();
+  const resp = await fetch(
+    `/admin/v1/clusters/${encodeURIComponent(id)}/drain-impact${qs ? `?${qs}` : ''}`,
+    { method: 'GET', credentials: 'same-origin' },
+  );
+  if (!resp.ok) {
+    let detail = '';
+    try {
+      const j = (await resp.json()) as { message?: string };
+      detail = j.message ? `: ${j.message}` : '';
+    } catch {
+      // ignore
+    }
+    throw new Error(
+      `cluster ${id} drain-impact: ${resp.status} ${resp.statusText}${detail}`,
+    );
+  }
+  const body = (await resp.json()) as ClusterDrainImpactResponse;
+  return {
+    cluster_id: body.cluster_id ?? id,
+    current_state: body.current_state ?? '',
+    migratable_chunks: Number.isFinite(body.migratable_chunks)
+      ? body.migratable_chunks
+      : 0,
+    stuck_single_policy_chunks: Number.isFinite(body.stuck_single_policy_chunks)
+      ? body.stuck_single_policy_chunks
+      : 0,
+    stuck_no_policy_chunks: Number.isFinite(body.stuck_no_policy_chunks)
+      ? body.stuck_no_policy_chunks
+      : 0,
+    total_chunks: Number.isFinite(body.total_chunks) ? body.total_chunks : 0,
+    by_bucket: Array.isArray(body.by_bucket) ? body.by_bucket : [],
+    total_buckets: Number.isFinite(body.total_buckets) ? body.total_buckets : 0,
+    next_offset:
+      body.next_offset == null
+        ? null
+        : Number.isFinite(body.next_offset)
+          ? body.next_offset
+          : null,
+    last_scan_at: body.last_scan_at ?? null,
+  };
+}
+
 export async function fetchClusterRebalanceProgress(
   id: string,
 ): Promise<ClusterRebalanceProgress> {

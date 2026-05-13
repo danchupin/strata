@@ -43,6 +43,10 @@ export {
   fetchClusterRebalanceProgress,
   fetchClusterDrainProgress,
   fetchClusterBucketReferences,
+  fetchClusterDrainImpact,
+  isDrainingState,
+  type ClusterState,
+  type ClusterMode,
   type ClusterStateEntry,
   type ClustersList,
   type ClustersListResponse,
@@ -50,6 +54,9 @@ export {
   type ClusterDrainProgress,
   type BucketReferenceEntry,
   type BucketReferencesResponse,
+  type SuggestedPolicy,
+  type BucketImpactEntry,
+  type ClusterDrainImpactResponse,
 } from './clusters';
 
 export {

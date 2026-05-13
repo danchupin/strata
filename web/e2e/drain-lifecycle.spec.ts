@@ -301,18 +301,19 @@ test.describe('Strata console — drain lifecycle (US-007)', () => {
     await drawer.press('Escape');
     await expect(drawer).toBeHidden({ timeout: 10_000 });
 
-    // (3) Drain cephb via ConfirmDrainModal — the modal's info row should
-    // surface "<N> buckets reference this cluster".
+    // (3) Drain cephb via ConfirmDrainModal — US-004 drain-transparency
+    // rewrote the modal as a mode picker. Picking readonly (the default)
+    // skips /drain-impact analysis; the existing mock still flips the
+    // cluster to a draining state on POST.
     await cephbCard.getByRole('button', { name: 'Drain' }).click();
     const drainDialog = page.getByRole('dialog').filter({
       hasText: /Drain cluster/,
     });
     await expect(drainDialog).toBeVisible();
-    await expect(
-      drainDialog.getByText(/buckets reference/i),
-    ).toBeVisible({ timeout: 10_000 });
+    // Mode picker renders both options; readonly is selected by default.
+    await expect(drainDialog.getByTestId('cd-mode-readonly')).toBeChecked();
     // Typed-confirmation flow.
-    const drainSubmit = drainDialog.getByRole('button', { name: 'Drain' });
+    const drainSubmit = drainDialog.getByTestId('cd-submit');
     await expect(drainSubmit).toBeDisabled();
     await drainDialog.getByLabel('Cluster id').fill('cephb');
     await expect(drainSubmit).toBeEnabled();

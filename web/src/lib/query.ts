@@ -173,4 +173,6 @@ export const queryKeys = {
     ['clusters', 'drain-progress', id] as const,
   clusterBucketRefs: (id: string, limit: number, offset: number) =>
     ['clusters', 'bucket-refs', id, { limit, offset }] as const,
+  clusterDrainImpact: (id: string) =>
+    ['clusters', 'drain-impact', id] as const,
 };
