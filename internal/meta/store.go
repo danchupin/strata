@@ -105,6 +105,9 @@ var (
 	// ErrInvalidClusterMode signals a SetClusterState call with a mode
 	// value outside {"", "readonly", "evacuate"}.
 	ErrInvalidClusterMode      = errors.New("invalid cluster mode")
+	// ErrInvalidClusterWeight signals a SetClusterState call with a
+	// weight outside [0, 100] (US-001 cluster-weights).
+	ErrInvalidClusterWeight    = errors.New("invalid cluster weight")
 )
 
 const (
@@ -113,6 +116,13 @@ const (
 	// into and out of it. Absence of a cluster_state row is equivalent to
 	// "live", so live clusters do not need to materialise a row.
 	ClusterStateLive = "live"
+	// ClusterStatePending is the boot-init state for a cluster that
+	// appears in the data backend env but has no `cluster_state` row and
+	// no detected `bucket_stats` reference (US-001 cluster-weights).
+	// Pending clusters are excluded from default routing entirely; the
+	// operator promotes them to live via POST /admin/v1/clusters/{id}/
+	// activate {weight}.
+	ClusterStatePending = "pending"
 	// ClusterStateDrainingReadonly stops new write traffic to the cluster
 	// (PUT chunk + new Multipart Init) while leaving reads, deletes and
 	// in-flight multipart sessions alone. The rebalance worker does NOT
@@ -144,11 +154,15 @@ const (
 )
 
 // ClusterStateRow is the cluster_state wire shape returned by
-// GetClusterState / ListClusterStates. Mode is "" for {live, removed},
-// "readonly" for draining_readonly, "evacuate" for evacuating.
+// GetClusterState / ListClusterStates. Mode is "" for {live, pending,
+// removed}, "readonly" for draining_readonly, "evacuate" for
+// evacuating. Weight (US-001 cluster-weights) is the share for
+// default routing of nil-policy bucket PUTs; only consulted when
+// state == live, ignored for every other state.
 type ClusterStateRow struct {
-	State string
-	Mode  string
+	State  string
+	Mode   string
+	Weight int
 }
 
 // ValidateClusterStateMode enforces the legal (state, mode) combinations
@@ -168,7 +182,7 @@ type ClusterStateRow struct {
 // must call DeleteClusterState.
 func ValidateClusterStateMode(state, mode string) error {
 	switch state {
-	case ClusterStateLive, ClusterStateRemoved:
+	case ClusterStateLive, ClusterStateRemoved, ClusterStatePending:
 		if mode != "" {
 			return ErrInvalidClusterMode
 		}
@@ -198,12 +212,21 @@ func ValidateClusterStateMode(state, mode string) error {
 // row into the new (state="evacuating", mode="evacuate") shape. Returns
 // the normalized row and a migrated bool signaling whether a transparent
 // rewrite happened (used by backends to trigger best-effort write-back).
-// All other rows pass through unchanged.
+// All other rows pass through unchanged. Weight is preserved verbatim.
 func NormalizeClusterStateRow(row ClusterStateRow) (ClusterStateRow, bool) {
 	if row.State == ClusterStateDraining && row.Mode == "" {
-		return ClusterStateRow{State: ClusterStateEvacuating, Mode: ClusterModeEvacuate}, true
+		return ClusterStateRow{State: ClusterStateEvacuating, Mode: ClusterModeEvacuate, Weight: row.Weight}, true
 	}
 	return row, false
+}
+
+// ValidateClusterWeight enforces the 0..100 inclusive range on the
+// per-cluster weight field (US-001 cluster-weights).
+func ValidateClusterWeight(weight int) error {
+	if weight < 0 || weight > 100 {
+		return ErrInvalidClusterWeight
+	}
+	return nil
 }
 
 // IsDrainingForWrite reports whether the cluster state should be
@@ -941,20 +964,22 @@ type Store interface {
 	DeleteBucketPlacement(ctx context.Context, name string) error
 
 	// Cluster state CRUD (US-006 placement-rebalance, mode added in US-001
-	// drain-transparency). Stored as a top-level row keyed on the
-	// operator-supplied cluster id (NOT bucket-scoped). Absence of a row
-	// means ClusterStateLive — there is no need to materialise a row for
-	// the common case. GetClusterState returns (row, ok=false, nil) when
-	// no row exists. SetClusterState applies meta.ValidateClusterStateMode
-	// before persisting. ListClusterStates returns every configured row
-	// keyed on cluster id (used by the drain-state cache and the admin
+	// drain-transparency, weight added in US-001 cluster-weights). Stored
+	// as a top-level row keyed on the operator-supplied cluster id (NOT
+	// bucket-scoped). Absence of a row means ClusterStateLive (with
+	// weight=0) — boot reconcile in serverapp materialises a row for
+	// every configured cluster on first launch. GetClusterState returns
+	// (row, ok=false, nil) when no row exists. SetClusterState applies
+	// meta.ValidateClusterStateMode + meta.ValidateClusterWeight before
+	// persisting. ListClusterStates returns every configured row keyed
+	// on cluster id (used by the drain-state cache and the admin
 	// GET /admin/v1/clusters handler).
 	//
 	// Reads transparently migrate legacy (state="draining", mode="") rows
 	// to (state="evacuating", mode="evacuate") and write the new shape
 	// back best-effort so the legacy form disappears from the wire on the
 	// first read.
-	SetClusterState(ctx context.Context, clusterID, state, mode string) error
+	SetClusterState(ctx context.Context, clusterID, state, mode string, weight int) error
 	GetClusterState(ctx context.Context, clusterID string) (row ClusterStateRow, ok bool, err error)
 	ListClusterStates(ctx context.Context) (map[string]ClusterStateRow, error)
 	DeleteClusterState(ctx context.Context, clusterID string) error

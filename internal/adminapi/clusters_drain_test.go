@@ -19,7 +19,7 @@ func TestClustersList_DefaultsToLive(t *testing.T) {
 	s.KnownClusters = map[string]struct{}{"c1": {}, "c2": {}}
 	s.ClusterBackends = map[string]string{"c1": "rados", "c2": "rados"}
 	// Evacuate c2 only.
-	if err := s.Meta.SetClusterState(context.Background(), "c2", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate); err != nil {
+	if err := s.Meta.SetClusterState(context.Background(), "c2", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate, 0); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	rr := putAdmin(t, s, "alice", http.MethodGet, "/admin/v1/clusters", nil)
@@ -116,7 +116,7 @@ func TestClusterDrain_UpgradeReadonlyToEvacuate(t *testing.T) {
 	s := newTestServer()
 	s.KnownClusters = map[string]struct{}{"c1": {}}
 	// Start in draining_readonly.
-	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateDrainingReadonly, meta.ClusterModeReadonly); err != nil {
+	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateDrainingReadonly, meta.ClusterModeReadonly, 0); err != nil {
 		t.Fatalf("seed readonly: %v", err)
 	}
 	rr := putAdmin(t, s, "alice", http.MethodPost, "/admin/v1/clusters/c1/drain", drainBody(meta.ClusterModeEvacuate))
@@ -152,7 +152,7 @@ func TestClusterDrain_InvalidTransitionReturns409(t *testing.T) {
 	s.KnownClusters = map[string]struct{}{"c1": {}}
 	// Start in evacuating, attempt readonly (refused — undrain is the
 	// only way back to live).
-	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate); err != nil {
+	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate, 0); err != nil {
 		t.Fatalf("seed evacuating: %v", err)
 	}
 	rr := putAdmin(t, s, "alice", http.MethodPost, "/admin/v1/clusters/c1/drain", drainBody(meta.ClusterModeReadonly))
@@ -171,7 +171,7 @@ func TestClusterDrain_InvalidTransitionReturns409(t *testing.T) {
 func TestClusterUndrain_FromReadonly(t *testing.T) {
 	s := newTestServer()
 	s.KnownClusters = map[string]struct{}{"c1": {}}
-	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateDrainingReadonly, meta.ClusterModeReadonly); err != nil {
+	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateDrainingReadonly, meta.ClusterModeReadonly, 0); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	rr := putAdmin(t, s, "alice", http.MethodPost, "/admin/v1/clusters/c1/undrain", nil)

@@ -11,9 +11,11 @@
 package tikv
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/google/uuid"
 
@@ -258,30 +260,43 @@ var errPlacementMissing = errors.New("placement: not configured")
 // global namespaces. Absence of a row means meta.ClusterStateLive — no
 // row needs to materialise for the common case.
 
-// encodeClusterStateValue packs the (state, mode) pair as
-// "state\x00mode". \x00 is illegal inside both fields (they come from a
-// closed enum), so the split is unambiguous. Legacy single-field rows
-// (no \x00) decode as (state, "") and migrate through
-// meta.NormalizeClusterStateRow on read.
-func encodeClusterStateValue(state, mode string) []byte {
-	out := make([]byte, 0, len(state)+1+len(mode))
+// encodeClusterStateValue packs the (state, mode, weight) triple as
+// "state\x00mode\x00<decimal-weight>". \x00 is illegal inside the
+// state + mode fields (closed enums) and decimal digits never carry a
+// \x00, so split-on-\x00 is unambiguous. Legacy two-field rows
+// ("state\x00mode") decode as weight=0; legacy single-field rows
+// (bare state) decode as (state, "", 0) and migrate through
+// meta.NormalizeClusterStateRow on read (US-001 cluster-weights).
+func encodeClusterStateValue(state, mode string, weight int) []byte {
+	w := strconv.Itoa(weight)
+	out := make([]byte, 0, len(state)+1+len(mode)+1+len(w))
 	out = append(out, state...)
 	out = append(out, 0x00)
 	out = append(out, mode...)
+	out = append(out, 0x00)
+	out = append(out, w...)
 	return out
 }
 
 func decodeClusterStateValue(raw []byte) meta.ClusterStateRow {
-	for i, b := range raw {
-		if b == 0x00 {
-			return meta.ClusterStateRow{State: string(raw[:i]), Mode: string(raw[i+1:])}
+	parts := bytes.Split(raw, []byte{0x00})
+	switch len(parts) {
+	case 0:
+		return meta.ClusterStateRow{}
+	case 1:
+		return meta.ClusterStateRow{State: string(parts[0])}
+	case 2:
+		return meta.ClusterStateRow{State: string(parts[0]), Mode: string(parts[1])}
+	default:
+		row := meta.ClusterStateRow{State: string(parts[0]), Mode: string(parts[1])}
+		if w, err := strconv.Atoi(string(parts[2])); err == nil {
+			row.Weight = w
 		}
+		return row
 	}
-	// Legacy shape: bare state, no mode.
-	return meta.ClusterStateRow{State: string(raw)}
 }
 
-func (s *Store) SetClusterState(ctx context.Context, clusterID, state, mode string) (err error) {
+func (s *Store) SetClusterState(ctx context.Context, clusterID, state, mode string, weight int) (err error) {
 	ctx, finish := s.observer.Start(ctx, "SetClusterState", "cluster_state")
 	defer func() { finish(err) }()
 	if clusterID == "" {
@@ -290,12 +305,15 @@ func (s *Store) SetClusterState(ctx context.Context, clusterID, state, mode stri
 	if err = meta.ValidateClusterStateMode(state, mode); err != nil {
 		return err
 	}
+	if err = meta.ValidateClusterWeight(weight); err != nil {
+		return err
+	}
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
 		return err
 	}
 	defer rollbackOnError(txn, &err)
-	if err = txn.Set(ClusterStateKey(clusterID), encodeClusterStateValue(state, mode)); err != nil {
+	if err = txn.Set(ClusterStateKey(clusterID), encodeClusterStateValue(state, mode, weight)); err != nil {
 		return err
 	}
 	return txn.Commit(ctx)
@@ -320,7 +338,7 @@ func (s *Store) GetClusterState(ctx context.Context, clusterID string) (row meta
 	if normalized, migrated := meta.NormalizeClusterStateRow(row); migrated {
 		writeTxn, werr := s.kv.Begin(ctx, false)
 		if werr == nil {
-			if werr = writeTxn.Set(ClusterStateKey(clusterID), encodeClusterStateValue(normalized.State, normalized.Mode)); werr == nil {
+			if werr = writeTxn.Set(ClusterStateKey(clusterID), encodeClusterStateValue(normalized.State, normalized.Mode, normalized.Weight)); werr == nil {
 				_ = writeTxn.Commit(ctx)
 			} else {
 				writeTxn.Rollback()
@@ -371,7 +389,7 @@ func (s *Store) ListClusterStates(ctx context.Context) (out map[string]meta.Clus
 		if werr == nil {
 			ok := true
 			for _, m := range migrations {
-				if werr = writeTxn.Set(ClusterStateKey(m.id), encodeClusterStateValue(m.row.State, m.row.Mode)); werr != nil {
+				if werr = writeTxn.Set(ClusterStateKey(m.id), encodeClusterStateValue(m.row.State, m.row.Mode, m.row.Weight)); werr != nil {
 					ok = false
 					break
 				}

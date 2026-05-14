@@ -82,6 +82,7 @@ const drainMoveRateExprFmt = `sum(rate(strata_rebalance_chunks_moved_total{from=
 type ClusterDrainProgressResponse struct {
 	State                   string                     `json:"state"`
 	Mode                    string                     `json:"mode"`
+	Weight                  int                        `json:"weight"`
 	ChunksOnCluster         *int64                     `json:"chunks_on_cluster"`
 	MigratableChunks        *int64                     `json:"migratable_chunks"`
 	StuckSinglePolicyChunks *int64                     `json:"stuck_single_policy_chunks"`
@@ -150,7 +151,7 @@ func (s *Server) handleClusterDrainProgress(w http.ResponseWriter, r *http.Reque
 	if !ok || row.State == "" {
 		row = meta.ClusterStateRow{State: meta.ClusterStateLive}
 	}
-	resp := ClusterDrainProgressResponse{State: row.State, Mode: row.Mode}
+	resp := ClusterDrainProgressResponse{State: row.State, Mode: row.Mode, Weight: row.Weight}
 	if !meta.IsDrainingForWrite(row.State) {
 		writeJSON(w, http.StatusOK, resp)
 		return
@@ -172,7 +173,7 @@ func (s *Server) handleClusterDrainProgress(w http.ResponseWriter, r *http.Reque
 // buildDrainProgressResponse is the testable core of the handler. Pure
 // over its inputs — no IO besides the optional Prom query.
 func buildDrainProgressResponse(ctx context.Context, prom *promclient.Client, id string, row meta.ClusterStateRow, snap rebalance.ProgressSnapshot, ok bool, interval time.Duration, now time.Time) ClusterDrainProgressResponse {
-	out := ClusterDrainProgressResponse{State: row.State, Mode: row.Mode}
+	out := ClusterDrainProgressResponse{State: row.State, Mode: row.Mode, Weight: row.Weight}
 	if !ok || snap.LastScanAt.IsZero() {
 		out.Warnings = append(out.Warnings, "progress scan pending; rebalance worker has not yet committed a tick")
 		return out

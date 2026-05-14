@@ -1496,19 +1496,24 @@ func (s *Store) DeleteBucketPlacement(ctx context.Context, name string) error {
 	return nil
 }
 
-// SetClusterState persists the (state, mode) row under the cluster id.
-// Validates the (state, mode) combo via meta.ValidateClusterStateMode
-// (US-001 drain-transparency).
-func (s *Store) SetClusterState(_ context.Context, clusterID, state, mode string) error {
+// SetClusterState persists the (state, mode, weight) row under the
+// cluster id. Validates the (state, mode) combo via
+// meta.ValidateClusterStateMode and the weight via
+// meta.ValidateClusterWeight (US-001 drain-transparency + US-001
+// cluster-weights).
+func (s *Store) SetClusterState(_ context.Context, clusterID, state, mode string, weight int) error {
 	if clusterID == "" {
 		return meta.ErrUnknownCluster
 	}
 	if err := meta.ValidateClusterStateMode(state, mode); err != nil {
 		return err
 	}
+	if err := meta.ValidateClusterWeight(weight); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.clusterStates[clusterID] = meta.ClusterStateRow{State: state, Mode: mode}
+	s.clusterStates[clusterID] = meta.ClusterStateRow{State: state, Mode: mode, Weight: weight}
 	return nil
 }
 

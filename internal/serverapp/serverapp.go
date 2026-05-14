@@ -149,6 +149,23 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	drainCache := placement.NewDrainCache(metaStore.ListClusterStates, 0)
 	apiHandler.DrainCache = drainCache
 
+	// Boot reconcile: materialise cluster_state for every configured
+	// cluster id without a row. Existing-live (referenced by class env
+	// or any bucket Placement, with at least one bucket carrying data)
+	// → live + weight=100; otherwise → pending + weight=0. Idempotent
+	// re-runs leave existing rows alone (US-001 cluster-weights).
+	envClusters := make([]string, 0, len(knownDataClusters(cfg)))
+	for id := range knownDataClusters(cfg) {
+		envClusters = append(envClusters, id)
+	}
+	if _, _, rerr := ReconcileClusters(ctx, metaStore, ReconcileInput{
+		EnvClusters:   envClusters,
+		ClassDefaults: classDefaultClusters(cfg),
+		HasData:       reconcileHasData(ctx, metaStore),
+	}, logger); rerr != nil {
+		logger.Warn("cluster reconcile", "error", rerr.Error())
+	}
+
 	healthHandler := buildHealthHandler(metaStore, dataBackend)
 
 	jwtSecret, jwtSource, jwtFile := loadJWTSecret(logger)

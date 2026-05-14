@@ -30,3 +30,21 @@ Cycle: ralph/cluster-weights
 - **Verification per UI story**: `pnpm run typecheck` + `pnpm run build`; verify in browser via dev-browser skill on the lab. Final US-005 gated on `make smoke-cluster-weights` passing AGAINST the running lab.
 - **End-to-end discipline** (per `feedback_cycle_end_to_end.md`): every story serves at least one walkthrough step; US-005 smoke covers all 4 scenarios + 4 negative paths from the PRD; failed smoke blocks ROADMAP close-flip.
 
+
+## 2026-05-14 - US-001
+- Added `pending` cluster state + per-cluster `weight int (0..100)` to meta layer.
+- meta.Store interface: SetClusterState now takes (id, state, mode, weight); GetClusterState/ListClusterStates return ClusterStateRow{State, Mode, Weight}. ValidateClusterWeight added; ErrInvalidClusterWeight sentinel; ClusterStatePending constant.
+- Memory + Cassandra (ALTER TABLE cluster_state ADD weight int) + TiKV (3-segment value `state\x00mode\x00<decimal>` with 1- and 2-segment legacy decode → weight=0) implement in lockstep.
+- New contract test caseClusterStateWeights exercises legal weights, out-of-range rejection, pending+mode rejection, drain preserves weight, list carries weight.
+- Boot reconcile in serverapp: new file internal/serverapp/cluster_reconcile.go. ReconcileClusters walks env clusters; existing row → skip; HasData && (id ∈ ClassDefaults || id ∈ Placement refs) → live + weight=100; otherwise → pending + weight=0. Logs INFO per cluster + summary line. Idempotent (covered by TestReconcileClusters_Idempotent).
+- Admin API: extended GET /admin/v1/clusters response with `weight int` (live state forwards stored value, every other state masks to 0). New POST /admin/v1/clusters/{id}/activate {weight} (pending → live). New PUT /admin/v1/clusters/{id}/weight {weight} (live weight adjust). Both invalidate s.DrainCache synchronously and stamp audit overrides admin:ActivateCluster / admin:UpdateClusterWeight. GET /admin/v1/clusters/{id}/drain-progress carries weight too.
+- OpenAPI: ClusterStateEntry + ClusterDrainProgress add weight; pending added to state enum; new /clusters/{id}/activate + /clusters/{id}/weight paths.
+- Drain handler now preserves currentRow.Weight when flipping state — operator's chosen weight survives drain → undrain trips (until row deletion via undrain falls back to default).
+- Files changed: internal/meta/store.go, internal/meta/memory/store.go, internal/meta/cassandra/{store,schema}.go, internal/meta/tikv/blobs.go, internal/meta/storetest/contract.go, internal/serverapp/{serverapp.go,cluster_reconcile.go,cluster_reconcile_test.go}, internal/adminapi/{server.go,clusters_drain.go,clusters_drain_progress.go,clusters_weight.go,clusters_weight_test.go,openapi.yaml}, plus 3-arg→4-arg call-site fixes in adminapi + rebalance test files.
+- **Learnings for future iterations:**
+  - TiKV cluster_state value encoding now 3-segment (`state\x00mode\x00<decimal>`); decode must `bytes.Split` and tolerate 1, 2, OR 3 segments for backward compat. Adding a 4th field repeats the pattern.
+  - Cassandra `int` columns scan NULL → 0 cleanly into Go `int`; no need for sql.NullInt32 when the absent column means "default to zero".
+  - Boot reconcile lives in `internal/serverapp/cluster_reconcile.go` and is invoked from `serverapp.Run` AFTER drain cache + apiHandler wiring but BEFORE listener start. Fail-soft (logs warn on err) so a transient meta hiccup doesn't block the gateway.
+  - Admin handler weight masking: `Weight` on the wire is stored value when state == live, else 0. Stored value still preserves operator intent across drain (drain handler reads currentRow.Weight and passes it through to SetClusterState).
+  - `meta.ValidateClusterStateMode` now accepts (pending, "") as a legal pair — pending+mode is rejected via ErrInvalidClusterMode just like (live, "readonly").
+---

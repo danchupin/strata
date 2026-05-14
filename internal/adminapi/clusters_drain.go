@@ -24,6 +24,10 @@ type ClusterStateEntry struct {
 	ID      string `json:"id"`
 	State   string `json:"state"`
 	Mode    string `json:"mode"`
+	// Weight is the per-cluster default-routing share (0..100). Only
+	// consulted when state == live; reported as 0 for every other
+	// state regardless of stored value (US-001 cluster-weights).
+	Weight  int    `json:"weight"`
 	Backend string `json:"backend"`
 }
 
@@ -78,10 +82,15 @@ func (s *Server) handleClustersList(w http.ResponseWriter, r *http.Request) {
 		if !ok || row.State == "" {
 			row = meta.ClusterStateRow{State: meta.ClusterStateLive}
 		}
+		weight := 0
+		if row.State == meta.ClusterStateLive {
+			weight = row.Weight
+		}
 		out.Clusters = append(out.Clusters, ClusterStateEntry{
 			ID:      id,
 			State:   row.State,
 			Mode:    row.Mode,
+			Weight:  weight,
 			Backend: s.ClusterBackends[id],
 		})
 	}
@@ -173,7 +182,7 @@ func (s *Server) handleClusterDrain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.Meta.SetClusterState(ctx, id, targetState, req.Mode); err != nil {
+	if err := s.Meta.SetClusterState(ctx, id, targetState, req.Mode, currentRow.Weight); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "Internal", err.Error())
 		return
 	}

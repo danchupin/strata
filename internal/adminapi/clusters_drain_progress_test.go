@@ -46,7 +46,7 @@ func TestClusterDrainProgress_DrainingFlipsDeregisterReady(t *testing.T) {
 	s.KnownClusters = map[string]struct{}{"c1": {}}
 	tracker := rebalance.NewProgressTracker(time.Minute)
 	s.RebalanceProgress = tracker
-	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate); err != nil {
+	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate, 0); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	now := time.Now().UTC()
@@ -94,7 +94,7 @@ func TestClusterDrainProgress_StaleCacheWarning(t *testing.T) {
 	s.KnownClusters = map[string]struct{}{"c1": {}}
 	tracker := rebalance.NewProgressTracker(time.Minute)
 	s.RebalanceProgress = tracker
-	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate); err != nil {
+	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate, 0); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	// Commit a scan that is older than 2 × interval.
@@ -126,7 +126,7 @@ func TestClusterDrainProgress_PendingScanCarriesWarning(t *testing.T) {
 	s := newTestServer()
 	s.KnownClusters = map[string]struct{}{"c1": {}}
 	s.RebalanceProgress = rebalance.NewProgressTracker(time.Minute)
-	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate); err != nil {
+	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate, 0); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	rr := putAdmin(t, s, "alice", http.MethodGet, "/admin/v1/clusters/c1/drain-progress", nil)
@@ -150,7 +150,7 @@ func TestClusterDrainProgress_CategorizedCountersSurfaced(t *testing.T) {
 	s.KnownClusters = map[string]struct{}{"c1": {}}
 	tracker := rebalance.NewProgressTracker(time.Minute)
 	s.RebalanceProgress = tracker
-	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate); err != nil {
+	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate, 0); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	// Mixed-category snapshot: 4 migratable, 2 stuck-single, 1 stuck-no-policy.
@@ -192,7 +192,7 @@ func TestClusterDrainProgress_ByBucketSorted(t *testing.T) {
 	s.KnownClusters = map[string]struct{}{"c1": {}}
 	tracker := rebalance.NewProgressTracker(time.Minute)
 	s.RebalanceProgress = tracker
-	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate); err != nil {
+	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate, 0); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	tracker.CommitScan([]string{"c1"}, map[string]rebalance.ScanResult{"c1": {
@@ -236,7 +236,7 @@ func TestClusterDrainProgress_ReadonlyStateSkipsScan(t *testing.T) {
 	s := newTestServer()
 	s.KnownClusters = map[string]struct{}{"c1": {}}
 	s.RebalanceProgress = rebalance.NewProgressTracker(time.Minute)
-	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateDrainingReadonly, meta.ClusterModeReadonly); err != nil {
+	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateDrainingReadonly, meta.ClusterModeReadonly, 0); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	rr := putAdmin(t, s, "alice", http.MethodGet, "/admin/v1/clusters/c1/drain-progress", nil)
