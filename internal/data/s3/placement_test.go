@@ -324,6 +324,110 @@ func TestPutChunksDoesNotRefuseAlternateCluster(t *testing.T) {
 	}
 }
 
+// TestPutChunksDefaultPolicyRoutesWhenBucketPolicyNil pins the US-002
+// cluster-weights contract: when ctx carries data.WithDefaultPlacement
+// (synthesised from cluster.weight) AND bucket Placement is nil, the
+// picker routes via the default policy. Distribution ~50/50 over 1000
+// keys on {a:1, b:1}.
+func TestPutChunksDefaultPolicyRoutesWhenBucketPolicyNil(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "ak")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "sk")
+
+	a := newCapturingS3Server(t)
+	bsrv := newCapturingS3Server(t)
+	t.Cleanup(a.Close)
+	t.Cleanup(bsrv.Close)
+
+	cfg := Config{
+		Clusters: map[string]S3ClusterSpec{
+			"a": {Endpoint: a.URL(), Region: "us-east-1", ForcePathStyle: true, Credentials: CredentialsRef{Type: CredentialsChain}},
+			"b": {Endpoint: bsrv.URL(), Region: "us-west-1", ForcePathStyle: true, Credentials: CredentialsRef{Type: CredentialsChain}},
+		},
+		Classes: map[string]ClassSpec{
+			"STANDARD":   {Cluster: "a", Bucket: "bucket-a"},
+			"STANDARD-B": {Cluster: "b", Bucket: "bucket-b"},
+		},
+		SkipCredsCheck: true,
+	}
+	be, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	bucketID := uuid.New()
+	defaultPolicy := map[string]int{"a": 1, "b": 1}
+	for i := range 1000 {
+		key := keyN(i)
+		ctx := data.WithDefaultPlacement(
+			data.WithObjectKey(data.WithBucketID(context.Background(), bucketID), key),
+			defaultPolicy,
+		)
+		if _, err := be.PutChunks(ctx, strings.NewReader("payload"), "STANDARD"); err != nil {
+			t.Fatalf("PutChunks iter %d: %v", i, err)
+		}
+	}
+	for cluster, n := range map[string]int{"a": a.requestCount(), "b": bsrv.requestCount()} {
+		if n < 400 || n > 600 {
+			t.Fatalf("default policy skew: cluster %s got %d/1000 not in [400,600]", cluster, n)
+		}
+	}
+}
+
+// TestPutChunksBucketPolicyWinsOverDefault pins the third AC: when both
+// data.WithPlacement (bucket Placement) AND data.WithDefaultPlacement
+// (cluster.weight synthesis) are on ctx, the bucket policy wins —
+// cluster.weight is IGNORED for that bucket.
+//
+// bucket={a:1, b:1} (50/50) + default={a:100, b:0} (would be all on a)
+// → 1000 keys split ~500/500, NOT 1000/0.
+func TestPutChunksBucketPolicyWinsOverDefault(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "ak")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "sk")
+
+	a := newCapturingS3Server(t)
+	bsrv := newCapturingS3Server(t)
+	t.Cleanup(a.Close)
+	t.Cleanup(bsrv.Close)
+
+	cfg := Config{
+		Clusters: map[string]S3ClusterSpec{
+			"a": {Endpoint: a.URL(), Region: "us-east-1", ForcePathStyle: true, Credentials: CredentialsRef{Type: CredentialsChain}},
+			"b": {Endpoint: bsrv.URL(), Region: "us-west-1", ForcePathStyle: true, Credentials: CredentialsRef{Type: CredentialsChain}},
+		},
+		Classes: map[string]ClassSpec{
+			"STANDARD":   {Cluster: "a", Bucket: "bucket-a"},
+			"STANDARD-B": {Cluster: "b", Bucket: "bucket-b"},
+		},
+		SkipCredsCheck: true,
+	}
+	be, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	bucketID := uuid.New()
+	bucketPolicy := map[string]int{"a": 1, "b": 1}
+	defaultPolicy := map[string]int{"a": 100, "b": 0}
+	for i := range 1000 {
+		key := keyN(i)
+		ctx := data.WithDefaultPlacement(
+			data.WithPlacement(
+				data.WithObjectKey(data.WithBucketID(context.Background(), bucketID), key),
+				bucketPolicy,
+			),
+			defaultPolicy,
+		)
+		if _, err := be.PutChunks(ctx, strings.NewReader("payload"), "STANDARD"); err != nil {
+			t.Fatalf("PutChunks iter %d: %v", i, err)
+		}
+	}
+	for cluster, n := range map[string]int{"a": a.requestCount(), "b": bsrv.requestCount()} {
+		if n < 400 || n > 600 {
+			t.Fatalf("bucket policy must win over default: cluster %s got %d/1000 not in [400,600]", cluster, n)
+		}
+	}
+}
+
 func keyN(i int) string {
 	return "object-key-" + uuid.NewString() + "-" + itoa(i)
 }

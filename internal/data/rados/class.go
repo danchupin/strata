@@ -11,6 +11,14 @@ type ClassSpec struct {
 	Cluster   string
 	Pool      string
 	Namespace string
+	// ClusterPinned is true when the operator wrote an explicit `@cluster`
+	// suffix in STRATA_RADOS_CLASSES. ParseClasses sets it; the auto-
+	// assigned DefaultCluster fallback leaves it false. PutChunks consults
+	// this flag when bucket.Placement is nil: pinned classes route to
+	// spec.Cluster regardless of per-cluster weights; unpinned classes
+	// fall back to the synthesised default-routing policy
+	// (US-002 cluster-weights).
+	ClusterPinned bool
 }
 
 // ParseClasses parses a STRATA_RADOS_CLASSES string.
@@ -39,6 +47,7 @@ func ParseClasses(s string) (map[string]ClassSpec, error) {
 		if hasLoc {
 			clusterPart, ns, hasNS := strings.Cut(loc, "/")
 			cls.Cluster = strings.TrimSpace(clusterPart)
+			cls.ClusterPinned = true
 			if hasNS {
 				cls.Namespace = strings.TrimSpace(ns)
 			}

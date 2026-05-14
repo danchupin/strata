@@ -93,6 +93,25 @@ func TestParseClassesNamespaceWithoutCluster(t *testing.T) {
 	}
 }
 
+// ClusterPinned tracks whether the operator wrote an explicit `@cluster`
+// suffix in STRATA_RADOS_CLASSES. PutChunks consults it under US-002
+// cluster-weights: pinned classes bypass default-routing synthesis.
+func TestParseClassesClusterPinnedFlag(t *testing.T) {
+	got, err := ParseClasses("STANDARD=hot.pool,COLD=cold.pool@cold-eu,WARM=warm.pool@default/ns")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got["STANDARD"].ClusterPinned {
+		t.Errorf("STANDARD without @ suffix: ClusterPinned must be false")
+	}
+	if !got["COLD"].ClusterPinned {
+		t.Errorf("COLD with @cold-eu: ClusterPinned must be true")
+	}
+	if !got["WARM"].ClusterPinned {
+		t.Errorf("WARM with @default/ns: ClusterPinned must be true (explicit pin to default)")
+	}
+}
+
 func TestParseClassesErrors(t *testing.T) {
 	cases := []struct {
 		in   string

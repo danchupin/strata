@@ -98,6 +98,41 @@ func ObjectKeyFromContext(ctx context.Context) (string, bool) {
 	return v, true
 }
 
+// defaultPlacementKey carries the synthesised default-routing policy
+// (map[clusterID]weight, sourced from cluster.weight via
+// placement.DefaultPolicy) onto the data-plane ctx. Consulted by
+// backends when bucket.Placement is nil AND the resolved class is not
+// pinned to a specific cluster — see PRD US-002 cluster-weights
+// "two-weight-layer rule": bucket Placement wins over the synthesised
+// default, and class env `@cluster` suffix bypasses synthesis entirely.
+type defaultPlacementKey struct{}
+
+// WithDefaultPlacement stores the synthesised default-routing policy on
+// ctx. Empty / nil policy returns ctx unchanged — backends fall back to
+// their per-class spec.Cluster pin.
+func WithDefaultPlacement(ctx context.Context, policy map[string]int) context.Context {
+	if len(policy) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, defaultPlacementKey{}, policy)
+}
+
+// DefaultPlacementFromContext returns the synthesised default-routing
+// policy stored via WithDefaultPlacement. The second return is false
+// when the request carries no default policy — the bucket has no
+// Placement and the cluster.weight cache is either empty or still
+// loading.
+func DefaultPlacementFromContext(ctx context.Context) (map[string]int, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	v, ok := ctx.Value(defaultPlacementKey{}).(map[string]int)
+	if !ok || len(v) == 0 {
+		return nil, false
+	}
+	return v, true
+}
+
 // drainingKey carries the set of cluster ids currently in a draining
 // state (draining_readonly or evacuating) onto the data-plane ctx.
 // Backends consult it in PutChunks so chunks never route to a
