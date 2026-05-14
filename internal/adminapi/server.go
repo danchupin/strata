@@ -143,11 +143,6 @@ type Server struct {
 	// fail loud rather than serving a permanently-empty response.
 	RebalanceProgress *rebalance.ProgressTracker
 
-	// DrainStrict mirrors STRATA_DRAIN_STRICT — surfaced on the
-	// GET /admin/v1/clusters response so the UI can render a "strict"
-	// chip next to every cluster card (US-004 drain-lifecycle).
-	DrainStrict bool
-
 	// hotBucketsMu guards lazy initialisation of hotBucketsCacheVal — the
 	// 30s TTL cache that absorbs burst polls of /admin/v1/diagnostics/
 	// hot-buckets (US-007).
@@ -158,6 +153,12 @@ type Server struct {
 	// 30s TTL cache for /admin/v1/diagnostics/hot-shards/{bucket} (US-009).
 	hotShardsMu       sync.Mutex
 	hotShardsCacheVal *hotShardsCache
+
+	// drainImpactMu guards lazy initialisation of drainImpactCacheVal — the
+	// per-cluster 5-minute TTL cache backing
+	// GET /admin/v1/clusters/{id}/drain-impact (US-003 drain-transparency).
+	drainImpactMu       sync.Mutex
+	drainImpactCacheVal *drainImpactCache
 
 	// jobsMu guards background-job goroutines. Currently only the
 	// force-empty drain (US-002) registers here; we cancel the goroutine
@@ -251,10 +252,6 @@ type Config struct {
 	// progress (US-003 drain-lifecycle). nil disables the endpoint with 503
 	// ProgressUnavailable.
 	RebalanceProgress *rebalance.ProgressTracker
-	// DrainStrict mirrors STRATA_DRAIN_STRICT — surfaced on the
-	// GET /admin/v1/clusters response so the UI can render a "strict" chip
-	// next to every cluster card (US-004 drain-lifecycle).
-	DrainStrict bool
 }
 
 // New constructs a Server. Started defaults to now. JWTSecret empty means
@@ -299,7 +296,6 @@ func New(c Config) *Server {
 		ClusterBackends:      c.ClusterBackends,
 		DrainCache:           c.DrainCache,
 		RebalanceProgress:    c.RebalanceProgress,
-		DrainStrict:          c.DrainStrict,
 		Logger:               log.Default(),
 	}
 }
@@ -357,6 +353,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /admin/v1/clusters/{id}/undrain", s.handleClusterUndrain)
 	mux.HandleFunc("GET /admin/v1/clusters/{id}/rebalance-progress", s.handleClusterRebalanceProgress)
 	mux.HandleFunc("GET /admin/v1/clusters/{id}/drain-progress", s.handleClusterDrainProgress)
+	mux.HandleFunc("GET /admin/v1/clusters/{id}/drain-impact", s.handleClusterDrainImpact)
 	mux.HandleFunc("GET /admin/v1/clusters/{id}/bucket-references", s.handleClusterBucketReferences)
 	mux.HandleFunc("GET /admin/v1/buckets", s.handleBucketsList)
 	mux.HandleFunc("POST /admin/v1/buckets", s.handleBucketCreate)

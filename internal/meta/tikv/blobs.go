@@ -258,13 +258,36 @@ var errPlacementMissing = errors.New("placement: not configured")
 // global namespaces. Absence of a row means meta.ClusterStateLive — no
 // row needs to materialise for the common case.
 
-func (s *Store) SetClusterState(ctx context.Context, clusterID, state string) (err error) {
+// encodeClusterStateValue packs the (state, mode) pair as
+// "state\x00mode". \x00 is illegal inside both fields (they come from a
+// closed enum), so the split is unambiguous. Legacy single-field rows
+// (no \x00) decode as (state, "") and migrate through
+// meta.NormalizeClusterStateRow on read.
+func encodeClusterStateValue(state, mode string) []byte {
+	out := make([]byte, 0, len(state)+1+len(mode))
+	out = append(out, state...)
+	out = append(out, 0x00)
+	out = append(out, mode...)
+	return out
+}
+
+func decodeClusterStateValue(raw []byte) meta.ClusterStateRow {
+	for i, b := range raw {
+		if b == 0x00 {
+			return meta.ClusterStateRow{State: string(raw[:i]), Mode: string(raw[i+1:])}
+		}
+	}
+	// Legacy shape: bare state, no mode.
+	return meta.ClusterStateRow{State: string(raw)}
+}
+
+func (s *Store) SetClusterState(ctx context.Context, clusterID, state, mode string) (err error) {
 	ctx, finish := s.observer.Start(ctx, "SetClusterState", "cluster_state")
 	defer func() { finish(err) }()
 	if clusterID == "" {
 		return meta.ErrUnknownCluster
 	}
-	if err = meta.ValidateClusterState(state); err != nil {
+	if err = meta.ValidateClusterStateMode(state, mode); err != nil {
 		return err
 	}
 	txn, err := s.kv.Begin(ctx, false)
@@ -272,31 +295,43 @@ func (s *Store) SetClusterState(ctx context.Context, clusterID, state string) (e
 		return err
 	}
 	defer rollbackOnError(txn, &err)
-	if err = txn.Set(ClusterStateKey(clusterID), []byte(state)); err != nil {
+	if err = txn.Set(ClusterStateKey(clusterID), encodeClusterStateValue(state, mode)); err != nil {
 		return err
 	}
 	return txn.Commit(ctx)
 }
 
-func (s *Store) GetClusterState(ctx context.Context, clusterID string) (state string, ok bool, err error) {
+func (s *Store) GetClusterState(ctx context.Context, clusterID string) (row meta.ClusterStateRow, ok bool, err error) {
 	ctx, finish := s.observer.Start(ctx, "GetClusterState", "cluster_state")
 	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
 	if err != nil {
-		return "", false, err
+		return meta.ClusterStateRow{}, false, err
 	}
 	defer txn.Rollback()
 	raw, found, err := txn.Get(ctx, ClusterStateKey(clusterID))
 	if err != nil {
-		return "", false, err
+		return meta.ClusterStateRow{}, false, err
 	}
 	if !found || len(raw) == 0 {
-		return "", false, nil
+		return meta.ClusterStateRow{}, false, nil
 	}
-	return string(raw), true, nil
+	row = decodeClusterStateValue(raw)
+	if normalized, migrated := meta.NormalizeClusterStateRow(row); migrated {
+		writeTxn, werr := s.kv.Begin(ctx, false)
+		if werr == nil {
+			if werr = writeTxn.Set(ClusterStateKey(clusterID), encodeClusterStateValue(normalized.State, normalized.Mode)); werr == nil {
+				_ = writeTxn.Commit(ctx)
+			} else {
+				writeTxn.Rollback()
+			}
+		}
+		row = normalized
+	}
+	return row, true, nil
 }
 
-func (s *Store) ListClusterStates(ctx context.Context) (out map[string]string, err error) {
+func (s *Store) ListClusterStates(ctx context.Context) (out map[string]meta.ClusterStateRow, err error) {
 	ctx, finish := s.observer.Start(ctx, "ListClusterStates", "cluster_state")
 	defer func() { finish(err) }()
 	txn, err := s.kv.Begin(ctx, false)
@@ -309,7 +344,12 @@ func (s *Store) ListClusterStates(ctx context.Context) (out map[string]string, e
 	if err != nil {
 		return nil, err
 	}
-	out = make(map[string]string, len(pairs))
+	out = make(map[string]meta.ClusterStateRow, len(pairs))
+	type migration struct {
+		id  string
+		row meta.ClusterStateRow
+	}
+	var migrations []migration
 	for _, p := range pairs {
 		if len(p.Key) <= len(prefix) {
 			continue
@@ -319,7 +359,29 @@ func (s *Store) ListClusterStates(ctx context.Context) (out map[string]string, e
 		if derr != nil {
 			return nil, fmt.Errorf("tikv: decode cluster_state key: %w", derr)
 		}
-		out[clusterID] = string(p.Value)
+		row := decodeClusterStateValue(p.Value)
+		if normalized, migrated := meta.NormalizeClusterStateRow(row); migrated {
+			migrations = append(migrations, migration{clusterID, normalized})
+			row = normalized
+		}
+		out[clusterID] = row
+	}
+	if len(migrations) > 0 {
+		writeTxn, werr := s.kv.Begin(ctx, false)
+		if werr == nil {
+			ok := true
+			for _, m := range migrations {
+				if werr = writeTxn.Set(ClusterStateKey(m.id), encodeClusterStateValue(m.row.State, m.row.Mode)); werr != nil {
+					ok = false
+					break
+				}
+			}
+			if ok {
+				_ = writeTxn.Commit(ctx)
+			} else {
+				writeTxn.Rollback()
+			}
+		}
 	}
 	return out, nil
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/danchupin/strata/internal/auth"
@@ -14,6 +15,49 @@ import (
 	"github.com/danchupin/strata/internal/s3api"
 )
 
+// categoryRank assigns the on-wire sort priority for ByBucket entries.
+// Stuck rows surface first so the UI's stuck-buckets drawer can paginate
+// them without re-sorting; migratable rows trail because they need no
+// operator action.
+func categoryRank(c string) int {
+	switch c {
+	case "stuck_single_policy":
+		return 0
+	case "stuck_no_policy":
+		return 1
+	case "migratable":
+		return 2
+	default:
+		return 3
+	}
+}
+
+func sortedByBucket(in map[string]rebalance.BucketScanCategory) []BucketDrainProgressEntry {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]BucketDrainProgressEntry, 0, len(in))
+	for name, b := range in {
+		out = append(out, BucketDrainProgressEntry{
+			Name:       name,
+			Category:   b.Category,
+			ChunkCount: b.ChunkCount,
+			BytesUsed:  b.BytesUsed,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ri, rj := categoryRank(out[i].Category), categoryRank(out[j].Category)
+		if ri != rj {
+			return ri < rj
+		}
+		if out[i].ChunkCount != out[j].ChunkCount {
+			return out[i].ChunkCount > out[j].ChunkCount
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
 // PromQL backing the ETA half of GET /admin/v1/clusters/{id}/drain-progress.
 // `from=<id>` is the source-cluster label stamped by the rebalance worker
 // on every successful chunk copy (US-005 placement-rebalance), so the
@@ -22,20 +66,46 @@ import (
 const drainMoveRateExprFmt = `sum(rate(strata_rebalance_chunks_moved_total{from="%s"}[5m]))`
 
 // ClusterDrainProgressResponse is the wire shape returned by
-// GET /admin/v1/clusters/{id}/drain-progress (US-003 drain-lifecycle).
+// GET /admin/v1/clusters/{id}/drain-progress (US-003 drain-lifecycle,
+// extended in US-002 drain-transparency with categorized counters and
+// US-006 with per-bucket breakdown).
 //
-// Pointer fields go *null* in the JSON output when no value applies. The
-// shape is deliberately narrow: the UI consumes one record per draining
-// cluster and the operator console reads the same JSON straight via curl.
+// MigratableChunks / StuckSinglePolicyChunks / StuckNoPolicyChunks are
+// the three category counters; ChunksOnCluster is their sum (kept for
+// dashboard compatibility). ETASeconds is computed against migratable
+// chunks only — stuck chunks never converge to zero through migration
+// alone. DeregisterReady fires when the total (all categories) is zero.
+// ByBucket is the per-bucket breakdown straight off the tracker's last
+// committed scan — surfaces the stuck rows the UI drawer drills into.
+//
+// Pointer fields go *null* in the JSON output when no value applies.
 type ClusterDrainProgressResponse struct {
-	State            string   `json:"state"`
-	ChunksOnCluster  *int64   `json:"chunks_on_cluster"`
-	BytesOnCluster   *int64   `json:"bytes_on_cluster"`
-	BaseChunks       *int64   `json:"base_chunks_at_start"`
-	LastScanAt       *string  `json:"last_scan_at"`
-	ETASeconds       *int64   `json:"eta_seconds"`
-	DeregisterReady  *bool    `json:"deregister_ready"`
-	Warnings         []string `json:"warnings,omitempty"`
+	State                   string                     `json:"state"`
+	Mode                    string                     `json:"mode"`
+	ChunksOnCluster         *int64                     `json:"chunks_on_cluster"`
+	MigratableChunks        *int64                     `json:"migratable_chunks"`
+	StuckSinglePolicyChunks *int64                     `json:"stuck_single_policy_chunks"`
+	StuckNoPolicyChunks     *int64                     `json:"stuck_no_policy_chunks"`
+	BytesOnCluster          *int64                     `json:"bytes_on_cluster"`
+	BaseChunks              *int64                     `json:"base_chunks_at_start"`
+	LastScanAt              *string                    `json:"last_scan_at"`
+	ETASeconds              *int64                     `json:"eta_seconds"`
+	DeregisterReady         *bool                      `json:"deregister_ready"`
+	ByBucket                []BucketDrainProgressEntry `json:"by_bucket,omitempty"`
+	Warnings                []string                   `json:"warnings,omitempty"`
+}
+
+// BucketDrainProgressEntry is one bucket's contribution to the per-
+// cluster drain-progress snapshot (US-006 drain-transparency). Category
+// matches the rebalance worker's classifier — "migratable",
+// "stuck_single_policy", or "stuck_no_policy". Sorted on the wire:
+// stuck_single_policy first, then stuck_no_policy, then migratable;
+// within each category descending by chunk_count then ascending by name.
+type BucketDrainProgressEntry struct {
+	Name       string `json:"name"`
+	Category   string `json:"category"`
+	ChunkCount int64  `json:"chunk_count"`
+	BytesUsed  int64  `json:"bytes_used"`
 }
 
 // handleClusterDrainProgress serves GET /admin/v1/clusters/{id}/drain-
@@ -76,32 +146,46 @@ func (s *Server) handleClusterDrainProgress(w http.ResponseWriter, r *http.Reque
 		writeJSONError(w, http.StatusInternalServerError, "Internal", err.Error())
 		return
 	}
-	state := rows[id]
-	if state == "" {
-		state = meta.ClusterStateLive
+	row, ok := rows[id]
+	if !ok || row.State == "" {
+		row = meta.ClusterStateRow{State: meta.ClusterStateLive}
 	}
-	resp := ClusterDrainProgressResponse{State: state}
-	if state != meta.ClusterStateDraining {
+	resp := ClusterDrainProgressResponse{State: row.State, Mode: row.Mode}
+	if !meta.IsDrainingForWrite(row.State) {
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	// US-002: stop-writes mode runs no migration scan — surface the
+	// state/mode + an explanatory warning so the UI does not render
+	// the "pending" placeholder forever.
+	if row.State == meta.ClusterStateDrainingReadonly {
+		resp.Warnings = append(resp.Warnings, "stop-writes mode — migration scan skipped; undrain or upgrade to evacuate")
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
-	snap, ok := s.RebalanceProgress.Snapshot(id)
-	resp = buildDrainProgressResponse(ctx, s.Prom, id, state, snap, ok, s.RebalanceProgress.Interval, time.Now())
+	snap, scanOK := s.RebalanceProgress.Snapshot(id)
+	resp = buildDrainProgressResponse(ctx, s.Prom, id, row, snap, scanOK, s.RebalanceProgress.Interval, time.Now())
 	writeJSON(w, http.StatusOK, resp)
 }
 
 // buildDrainProgressResponse is the testable core of the handler. Pure
 // over its inputs — no IO besides the optional Prom query.
-func buildDrainProgressResponse(ctx context.Context, prom *promclient.Client, id, state string, snap rebalance.ProgressSnapshot, ok bool, interval time.Duration, now time.Time) ClusterDrainProgressResponse {
-	out := ClusterDrainProgressResponse{State: state}
+func buildDrainProgressResponse(ctx context.Context, prom *promclient.Client, id string, row meta.ClusterStateRow, snap rebalance.ProgressSnapshot, ok bool, interval time.Duration, now time.Time) ClusterDrainProgressResponse {
+	out := ClusterDrainProgressResponse{State: row.State, Mode: row.Mode}
 	if !ok || snap.LastScanAt.IsZero() {
 		out.Warnings = append(out.Warnings, "progress scan pending; rebalance worker has not yet committed a tick")
 		return out
 	}
-	chunks := snap.Chunks
+	total := snap.Chunks()
 	bytes := snap.Bytes
-	out.ChunksOnCluster = &chunks
+	out.ChunksOnCluster = &total
+	migratable := snap.MigratableChunks
+	out.MigratableChunks = &migratable
+	stuckSingle := snap.StuckSinglePolicyChunks
+	out.StuckSinglePolicyChunks = &stuckSingle
+	stuckNo := snap.StuckNoPolicyChunks
+	out.StuckNoPolicyChunks = &stuckNo
 	out.BytesOnCluster = &bytes
 	if snap.BaseChunks > 0 {
 		base := snap.BaseChunks
@@ -109,10 +193,13 @@ func buildDrainProgressResponse(ctx context.Context, prom *promclient.Client, id
 	}
 	scan := snap.LastScanAt.UTC().Format(time.RFC3339)
 	out.LastScanAt = &scan
-	deregReady := snap.Chunks == 0
+	deregReady := total == 0
 	out.DeregisterReady = &deregReady
+	out.ByBucket = sortedByBucket(snap.ByBucket)
 
-	if eta, ok := drainETASeconds(ctx, prom, id, snap.Chunks); ok {
+	// ETA is meaningful only for migratable chunks — stuck chunks need an
+	// operator policy edit, not migration throughput.
+	if eta, ok := drainETASeconds(ctx, prom, id, snap.MigratableChunks); ok {
 		out.ETASeconds = &eta
 	}
 

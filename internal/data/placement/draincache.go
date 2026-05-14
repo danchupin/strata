@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/danchupin/strata/internal/meta"
 )
 
 // DefaultDrainCacheTTL is the in-process freshness window for the drain
@@ -14,10 +16,10 @@ const DefaultDrainCacheTTL = 30 * time.Second
 
 // DrainLoader is the upstream meta.Store fetch the cache wraps. Returns
 // every persisted cluster_state row keyed on cluster id. The cache
-// transforms the result into a set of cluster ids whose state is
-// meta.ClusterStateDraining (other states — live, removed — are not
-// excluded from routing here).
-type DrainLoader func(ctx context.Context) (map[string]string, error)
+// transforms the result into a set of cluster ids whose state blocks
+// new writes — both draining_readonly and evacuating qualify
+// (US-001 drain-transparency). live / removed pass through.
+type DrainLoader func(ctx context.Context) (map[string]meta.ClusterStateRow, error)
 
 // DrainCache caches a draining-cluster set with a fixed TTL. Refresh is
 // best-effort: an error on reload preserves the prior snapshot so the
@@ -105,10 +107,9 @@ func (c *DrainCache) refresh(ctx context.Context) map[string]bool {
 		c.fetched = c.now()
 		return c.snap
 	}
-	const drainingState = "draining"
 	out := make(map[string]bool, len(rows))
-	for clusterID, state := range rows {
-		if state == drainingState {
+	for clusterID, row := range rows {
+		if meta.IsDrainingForWrite(row.State) {
 			out[clusterID] = true
 		}
 	}

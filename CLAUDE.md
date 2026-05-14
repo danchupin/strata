@@ -148,12 +148,26 @@ testcontainers to find the engine.
                           and `.../undrain`, GET `/admin/v1/clusters`
                           (audit `admin:DrainCluster` /
                           `admin:UndrainCluster`). Per-tick progress
-                          scan (US-003 drain-lifecycle) populates
-                          `rebalance.ProgressTracker` (chunks/bytes/
-                          BaseChunks/BaseBytes/LastScanAt/
-                          CompletionFiredAt per draining cluster); the
-                          adminapi handler reads it without scanning
-                          synchronously. Completion detection (US-005):
+                          scan (US-003 drain-lifecycle, refined in
+                          US-002 drain-transparency) populates
+                          `rebalance.ProgressTracker` (categorized
+                          MigratableChunks / StuckSinglePolicyChunks /
+                          StuckNoPolicyChunks plus Bytes / BaseChunks /
+                          BaseBytes / LastScanAt / CompletionFiredAt +
+                          per-(cluster, bucket) ByBucket breakdown per
+                          draining cluster); the adminapi handler reads
+                          it without scanning synchronously. **Scan
+                          only fires when `state=evacuating`** —
+                          `draining_readonly` clusters keep stop-write
+                          semantics but skip the per-tick scan to save
+                          IO (the picker-exclusion set folds both
+                          draining states; the scan-focus set is
+                          evacuating-only). Use
+                          `loadClusterDrainSets` to obtain both sets in
+                          lockstep — mixing them silently re-enables
+                          move-into-readonly or scans clusters that
+                          shouldn't be scanned. Completion detection
+                          (US-005):
                           a `>0 → 0` chunks_on_cluster transition fires
                           one event per cluster (idempotent on
                           CompletionFiredAt; refills reset the slot so
@@ -167,30 +181,38 @@ testcontainers to find the engine.
                           `{cluster, bytes_moved, completed_at}`
                           through `notify.Sink.Send` for every target
                           configured in `STRATA_NOTIFY_TARGETS`.
-                          Strict-mode env (US-002 drain-lifecycle):
-                          `STRATA_DRAIN_STRICT` (default `off`, accepts
-                          `on`/`off`/boolean strings; unknown → fail-
-                          fast at boot) closes the PUT fail-open
-                          fallback. When `on`, RADOS + S3
-                          `Backend.PutChunks` consult the drain map
-                          after `placement.PickClusterExcluding`
-                          returns "" (empty / all-excluded policy)
-                          and return `data.ErrDrainRefused` if the
-                          resolved class default cluster is draining.
+                          Always-strict drain (US-007 drain-
+                          transparency): RADOS + S3
+                          `Backend.PutChunks` unconditionally consult
+                          the drain map after
+                          `placement.PickClusterExcluding` returns ""
+                          (empty / all-excluded policy) and return
+                          `data.ErrDrainRefused` if the resolved class
+                          default cluster is draining. No env gate —
+                          the former opt-in `STRATA_DRAIN_STRICT` env
+                          was retired (legacy values in the environ
+                          log a single WARN at boot and are ignored).
                           The gateway maps the sentinel to HTTP 503
                           `<Code>DrainRefused</Code>` +
                           `Retry-After: 300`; counter
-                          `strata_putchunks_refused_total{reason="drain_strict",cluster}`
-                          bumps per refusal. **PUT only** — reads,
-                          deletes, HEAD, multipart Complete/Abort,
-                          List against draining clusters keep working
-                          (drain semantic is stop-write, not stop-
-                          read). `GET /admin/v1/clusters` surfaces
-                          the boot-time value as a top-level
-                          `drain_strict: bool` field; the UI renders
-                          a "strict" chip per cluster card so
-                          operators see the global flag without an
-                          extra fetch. Pre-drain bucket impact
+                          `strata_putchunks_refused_total{reason="drain_refused",cluster}`
+                          bumps per refusal (label flipped from
+                          `drain_strict` — breaking change for
+                          dashboards). **PUT only** — reads, deletes,
+                          HEAD, multipart UploadPart / Complete /
+                          Abort, List against draining clusters keep
+                          working (drain semantic is stop-write, not
+                          stop-read). In-flight multipart sessions
+                          persist the initial cluster id in the
+                          opaque BackendUploadID handle
+                          (`cluster\x00bucket\x00key\x00uploadID`) so
+                          UploadPart / Complete / Abort recover
+                          routing directly from the handle and never
+                          re-consult the placement picker — drained
+                          uploads finish gracefully on the original
+                          cluster. The `drain_strict: bool` field on
+                          `GET /admin/v1/clusters` and the "strict"
+                          UI chip were removed. Pre-drain bucket impact
                           preview (US-006 drain-lifecycle):
                           `GET /admin/v1/clusters/{id}/bucket-references`
                           lists buckets whose `Placement[<id>] > 0`

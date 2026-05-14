@@ -281,17 +281,55 @@ components:
 
     ClusterStateEntry:
       type: object
-      required: [id, state]
+      required: [id, state, mode]
       description: |
-        One row in the GET /clusters response (US-006 placement-rebalance).
-        `state` is one of "live" / "draining" / "removed"; `backend` is
-        "rados" or "s3" (when known).
+        One row in the GET /clusters response (US-006 placement-rebalance;
+        `mode` added US-001 drain-transparency). `state` is one of
+        "live" / "draining_readonly" / "evacuating" / "removed";
+        `mode` is "readonly" for draining_readonly, "evacuate" for
+        evacuating, "" otherwise. `backend` is "rados" or "s3" (when
+        known).
       properties:
         id: { type: string }
         state:
           type: string
-          enum: [live, draining, removed]
+          enum: [live, draining_readonly, evacuating, removed]
+        mode:
+          type: string
+          enum: ["", readonly, evacuate]
         backend: { type: string }
+
+    DrainRequest:
+      type: object
+      required: [mode]
+      description: |
+        Request body for POST /clusters/{id}/drain (US-001 drain-transparency).
+        `mode` is required (no default): "readonly" stops writes only —
+        reads, deletes, in-flight multipart continue, no migration;
+        "evacuate" stops writes AND starts the rebalance worker migrating
+        chunks off the cluster.
+      properties:
+        mode:
+          type: string
+          enum: [readonly, evacuate]
+
+    InvalidTransitionError:
+      type: object
+      required: [code, message, current_state, requested_mode]
+      description: |
+        409 Conflict body when a drain request asks for a transition the
+        4-state machine refuses (US-001 drain-transparency).
+      properties:
+        code:
+          type: string
+          enum: [InvalidTransition]
+        message: { type: string }
+        current_state:
+          type: string
+          enum: [live, draining_readonly, evacuating, removed]
+        requested_mode:
+          type: string
+          enum: ["", readonly, evacuate]
 
     ClustersList:
       type: object
@@ -303,21 +341,55 @@ components:
 
     ClusterDrainProgress:
       type: object
-      required: [state]
+      required: [state, mode]
       description: |
         Per-draining-cluster progress snapshot returned by
-        GET /clusters/{id}/drain-progress (US-003 drain-lifecycle).
-        Numeric fields are null whenever the rebalance worker has not
-        committed a scan yet, or when state != "draining" (the
-        deregister + ETA semantics only make sense while draining).
+        GET /clusters/{id}/drain-progress (US-003 drain-lifecycle;
+        `mode` added US-001 drain-transparency; categorized counters
+        added US-002 drain-transparency). The three category counters
+        replace the flat chunks_on_cluster as the source of truth —
+        chunks_on_cluster is kept as their sum for dashboard
+        compatibility. ETA is computed against migratable_chunks
+        only (stuck chunks need an operator policy edit, not
+        migration throughput). State=draining_readonly returns
+        state/mode + a "stop-writes mode" warning with all numeric
+        fields null — there is no migration scan in stop-writes mode.
       properties:
         state:
           type: string
-          enum: [live, draining, removed]
+          enum: [live, draining_readonly, evacuating, removed]
+        mode:
+          type: string
+          enum: ["", readonly, evacuate]
         chunks_on_cluster:
           type: integer
           format: int64
           nullable: true
+          description: Sum of the three category counters.
+        migratable_chunks:
+          type: integer
+          format: int64
+          nullable: true
+          description: |
+            Chunks the rebalance worker can move under the bucket's
+            current Placement policy (at least one live cluster left).
+        stuck_single_policy_chunks:
+          type: integer
+          format: int64
+          nullable: true
+          description: |
+            Chunks whose bucket has a Placement policy but every cluster
+            referenced by that policy is draining → the picker has
+            nothing to pick. Resolved by editing the bucket's
+            Placement to include a live cluster.
+        stuck_no_policy_chunks:
+          type: integer
+          format: int64
+          nullable: true
+          description: |
+            Chunks routed to the cluster via class-env routing on a
+            bucket without a Placement policy. Resolved by setting an
+            initial Placement that excludes the draining cluster.
         bytes_on_cluster:
           type: integer
           format: int64
@@ -327,9 +399,9 @@ components:
           format: int64
           nullable: true
           description: |
-            Chunk count captured on the first committed scan after the
-            live → draining transition. UI percent-filled = 1 -
-            chunks_on_cluster / base_chunks_at_start when set.
+            Total chunk count captured on the first committed scan after
+            the live → evacuating transition. UI percent-filled =
+            1 - chunks_on_cluster / base_chunks_at_start when set.
         last_scan_at:
           type: string
           format: date-time
@@ -339,22 +411,52 @@ components:
           format: int64
           nullable: true
           description: |
-            chunks_remaining / rate(strata_rebalance_chunks_moved_total
+            migratable_chunks / rate(strata_rebalance_chunks_moved_total
             {from="<id>"}[5m]). Null when Prom is unset/unavailable,
-            chunks_on_cluster is 0, or the move rate is zero.
+            migratable_chunks is 0, or the move rate is zero. Stuck
+            categories are excluded from the ETA — they never converge
+            without operator action.
         deregister_ready:
           type: boolean
           nullable: true
           description: |
-            True when state="draining" and chunks_on_cluster=0 — the
-            cluster row can now be removed from STRATA_RADOS_CLUSTERS
-            / STRATA_S3_CLUSTERS and the gateways rolling-restarted.
+            True when state=evacuating and the total chunks_on_cluster
+            (sum of all three categories) is 0 — the cluster row can be
+            removed from STRATA_RADOS_CLUSTERS / STRATA_S3_CLUSTERS and
+            the gateways rolling-restarted.
+        by_bucket:
+          type: array
+          description: |
+            Per-bucket breakdown of the chunks-on-cluster total straight
+            off the last committed scan (US-006 drain-transparency).
+            Sorted stuck_single_policy → stuck_no_policy → migratable,
+            then descending by chunk_count, then ascending by name.
+            Empty/omitted when the scan committed no draining-cluster
+            chunks for any bucket.
+          items: { $ref: '#/components/schemas/BucketDrainProgressEntry' }
         warnings:
           type: array
           items: { type: string }
           description: |
             Free-form operator-facing notes (e.g. "progress data
-            stale" when last_scan_at older than 2× rebalance interval).
+            stale" when last_scan_at older than 2× rebalance interval;
+            "stop-writes mode — migration scan skipped" for
+            state=draining_readonly).
+
+    BucketDrainProgressEntry:
+      type: object
+      required: [name, category, chunk_count, bytes_used]
+      description: |
+        One bucket's contribution to a draining cluster's progress
+        snapshot (US-006 drain-transparency). Category matches the
+        rebalance worker's classifier.
+      properties:
+        name: { type: string }
+        category:
+          type: string
+          enum: [migratable, stuck_single_policy, stuck_no_policy]
+        chunk_count: { type: integer, format: int64 }
+        bytes_used: { type: integer, format: int64 }
 
     BucketReferenceEntry:
       type: object
@@ -370,6 +472,95 @@ components:
         weight: { type: integer, minimum: 1, maximum: 100 }
         chunk_count: { type: integer, format: int64 }
         bytes_used: { type: integer, format: int64 }
+
+    SuggestedPolicy:
+      type: object
+      required: [label, policy]
+      description: |
+        One operator-facing remediation offered per bucket in the
+        /drain-impact response (US-003 drain-transparency). `label` is the
+        human-readable description the BulkPlacementFixDialog (US-005)
+        renders in its per-bucket dropdown; `policy` is the
+        {clusterID: weight} body the operator would PUT to
+        /admin/v1/buckets/{name}/placement.
+      properties:
+        label: { type: string }
+        policy:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+            maximum: 100
+
+    BucketImpactEntry:
+      type: object
+      required: [name, category, chunk_count, bytes_used, suggested_policies]
+      description: |
+        One row in the by_bucket section of the /drain-impact response
+        (US-003 drain-transparency). `current_policy` is null when the
+        bucket has no Placement; the suggested_policies switch to "Set
+        initial policy" labels in that case. `category` is one of
+        migratable / stuck_single_policy / stuck_no_policy and matches
+        the per-bucket verdict the rebalance worker emits via the same
+        rebalance.ClassifyBucket helper.
+      properties:
+        name: { type: string }
+        current_policy:
+          type: object
+          nullable: true
+          additionalProperties:
+            type: integer
+            minimum: 0
+            maximum: 100
+        category:
+          type: string
+          enum: [migratable, stuck_single_policy, stuck_no_policy]
+        chunk_count: { type: integer, format: int64 }
+        bytes_used: { type: integer, format: int64 }
+        suggested_policies:
+          type: array
+          items: { $ref: '#/components/schemas/SuggestedPolicy' }
+
+    ClusterDrainImpact:
+      type: object
+      required:
+        - cluster_id
+        - current_state
+        - migratable_chunks
+        - stuck_single_policy_chunks
+        - stuck_no_policy_chunks
+        - total_chunks
+        - by_bucket
+        - total_buckets
+        - last_scan_at
+      description: |
+        Wire shape returned by GET /clusters/{id}/drain-impact (US-003
+        drain-transparency). Categorized chunk counters mirror the
+        /drain-progress endpoint so the UI uses the same heuristics on
+        both surfaces. `by_bucket` is the paged slice ordered as
+        stuck_single_policy → stuck_no_policy → migratable, chunk_count
+        desc then name asc within category. `total_buckets` is the row
+        count BEFORE pagination so the modal can render "showing N of M";
+        `next_offset` is non-null when more rows are available.
+      properties:
+        cluster_id: { type: string }
+        current_state:
+          type: string
+          enum: [live, draining_readonly]
+        migratable_chunks: { type: integer, format: int64 }
+        stuck_single_policy_chunks: { type: integer, format: int64 }
+        stuck_no_policy_chunks: { type: integer, format: int64 }
+        total_chunks: { type: integer, format: int64 }
+        by_bucket:
+          type: array
+          items: { $ref: '#/components/schemas/BucketImpactEntry' }
+        total_buckets: { type: integer }
+        next_offset:
+          type: integer
+          nullable: true
+        last_scan_at:
+          type: string
+          format: date-time
 
     BucketReferences:
       type: object
@@ -672,15 +863,21 @@ paths:
 
   /clusters/{id}/drain:
     post:
-      summary: Mark a cluster as draining (US-006 placement-rebalance)
+      summary: Drain a cluster (US-006 placement-rebalance; mode added US-001 drain-transparency)
       operationId: drainCluster
       description: |
-        Flips cluster_state to "draining" so the PUT hot path stops
-        routing chunks to this cluster (after the drain-cache TTL
-        elapses) and the rebalance worker starts migrating existing
-        chunks off it. Idempotent.
+        Flips cluster_state to draining_readonly (mode="readonly") or
+        evacuating (mode="evacuate"). Body is required — no default
+        mode. Legal transitions: live → draining_readonly, live →
+        evacuating, draining_readonly → evacuating (upgrade). Any
+        other (current_state, mode) pair returns 409 Conflict.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DrainRequest' }
       responses:
         '204':
           description: Drain flipped.
@@ -688,13 +885,22 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Invalid (state, mode) transition.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InvalidTransitionError' }
 
   /clusters/{id}/undrain:
     post:
-      summary: Clear draining state (US-006 placement-rebalance)
+      summary: Clear draining state (US-006 placement-rebalance; works from both readonly + evacuating since US-001)
       operationId: undrainCluster
       description: |
-        Drops the cluster_state row (absence == live). Idempotent.
+        Drops the cluster_state row (absence == live). Works only from
+        draining_readonly or evacuating; called against a live cluster
+        the endpoint returns 409 Conflict. Moved chunks stay on the
+        target cluster — undrain does not reverse a migration in
+        flight.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
       responses:
@@ -704,6 +910,11 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Cluster is not currently draining.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InvalidTransitionError' }
 
   /clusters/{id}/rebalance-progress:
     get:
@@ -764,6 +975,56 @@ paths:
             Rebalance worker not running on this replica — the in-process
             progress cache is empty and the endpoint refuses to serve a
             permanently-zero response.
+
+  /clusters/{id}/drain-impact:
+    get:
+      summary: Pre-evacuate impact preview (US-003 drain-transparency)
+      operationId: getClusterDrainImpact
+      description: |
+        Synchronous scan that walks every bucket and categorizes chunks on
+        the target cluster into migratable / stuck_single_policy /
+        stuck_no_policy. Backs the BulkPlacementFixDialog (US-005) and
+        the redesigned ConfirmDrainModal (US-004) preflight.
+
+        Callable only when state ∈ {live, draining_readonly}. Returns 409
+        Conflict for state ∈ {evacuating, removed} — those states must use
+        GET /clusters/{id}/drain-progress for live counters.
+
+        Each by_bucket entry carries suggested_policies that the
+        BulkPlacementFixDialog renders in a dropdown: one uniform-live
+        option (every live cluster at weight 1; draining keys in the
+        existing policy forced to 0) and one single-target option per live
+        cluster. stuck_no_policy buckets get "Set initial policy" labels;
+        every other category gets "Add all live clusters (uniform)" /
+        "Replace draining with <id>" labels.
+
+        Results are cached per cluster for 5 minutes so concurrent admin
+        viewers and the modal's mode-flip refetch do not stampede the
+        store. Sort within by_bucket: stuck_single_policy first, then
+        stuck_no_policy, then migratable; within each category descending
+        by chunk_count then ascending by name.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 100, minimum: 1, maximum: 1000 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0, minimum: 0 }
+      responses:
+        '200':
+          description: Drain impact preview.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClusterDrainImpact' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: |
+            Cluster is in state evacuating or removed; the preview endpoint
+            refuses to serve and points the operator at /drain-progress.
 
   /clusters/{id}/bucket-references:
     get:

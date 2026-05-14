@@ -34,7 +34,7 @@ type Store struct {
 	logging        map[uuid.UUID][]byte
 	tagging        map[uuid.UUID][]byte
 	placements     map[uuid.UUID]map[string]int
-	clusterStates  map[string]string
+	clusterStates  map[string]meta.ClusterStateRow
 	bucketQuotas   map[uuid.UUID][]byte
 	userQuotas     map[string][]byte
 	bucketStats    map[uuid.UUID]meta.BucketStats
@@ -130,7 +130,7 @@ func New() *Store {
 		logging:      make(map[uuid.UUID][]byte),
 		tagging:      make(map[uuid.UUID][]byte),
 		placements:   make(map[uuid.UUID]map[string]int),
-		clusterStates: make(map[string]string),
+		clusterStates: make(map[string]meta.ClusterStateRow),
 		bucketQuotas: make(map[uuid.UUID][]byte),
 		userQuotas:   make(map[string][]byte),
 		bucketStats:  make(map[uuid.UUID]meta.BucketStats),
@@ -1496,39 +1496,52 @@ func (s *Store) DeleteBucketPlacement(ctx context.Context, name string) error {
 	return nil
 }
 
-// SetClusterState persists state under the cluster id. Validates state
-// against the {live, draining, removed} enum (US-006).
-func (s *Store) SetClusterState(_ context.Context, clusterID, state string) error {
+// SetClusterState persists the (state, mode) row under the cluster id.
+// Validates the (state, mode) combo via meta.ValidateClusterStateMode
+// (US-001 drain-transparency).
+func (s *Store) SetClusterState(_ context.Context, clusterID, state, mode string) error {
 	if clusterID == "" {
 		return meta.ErrUnknownCluster
 	}
-	if err := meta.ValidateClusterState(state); err != nil {
+	if err := meta.ValidateClusterStateMode(state, mode); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.clusterStates[clusterID] = state
+	s.clusterStates[clusterID] = meta.ClusterStateRow{State: state, Mode: mode}
 	return nil
 }
 
-// GetClusterState returns the persisted state for clusterID. ok=false
+// GetClusterState returns the persisted row for clusterID. ok=false
 // signals "no row" — the caller should treat that as ClusterStateLive.
-func (s *Store) GetClusterState(_ context.Context, clusterID string) (string, bool, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	state, ok := s.clusterStates[clusterID]
+// Legacy (state="draining", mode="") rows are transparently migrated to
+// (state="evacuating", mode="evacuate") and written back so the legacy
+// shape disappears from the wire (US-001 drain-transparency).
+func (s *Store) GetClusterState(_ context.Context, clusterID string) (meta.ClusterStateRow, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row, ok := s.clusterStates[clusterID]
 	if !ok {
-		return "", false, nil
+		return meta.ClusterStateRow{}, false, nil
 	}
-	return state, true, nil
+	if normalized, migrated := meta.NormalizeClusterStateRow(row); migrated {
+		s.clusterStates[clusterID] = normalized
+		row = normalized
+	}
+	return row, true, nil
 }
 
-// ListClusterStates returns every persisted cluster_state row.
-func (s *Store) ListClusterStates(_ context.Context) (map[string]string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make(map[string]string, len(s.clusterStates))
+// ListClusterStates returns every persisted cluster_state row. Legacy
+// rows are migrated transparently as in GetClusterState.
+func (s *Store) ListClusterStates(_ context.Context) (map[string]meta.ClusterStateRow, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]meta.ClusterStateRow, len(s.clusterStates))
 	for k, v := range s.clusterStates {
+		if normalized, migrated := meta.NormalizeClusterStateRow(v); migrated {
+			s.clusterStates[k] = normalized
+			v = normalized
+		}
 		out[k] = v
 	}
 	return out, nil

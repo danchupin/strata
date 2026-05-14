@@ -18,12 +18,6 @@ type Config struct {
 	// Empty map means "use the legacy single-cluster fields above as the
 	// 'default' cluster"; see BuildClusters for the resolution rules.
 	Clusters map[string]ClusterSpec
-	// DrainStrict, when true, makes PutChunks refuse to fall back to a
-	// draining cluster with data.ErrDrainRefused instead of writing.
-	// Sourced from STRATA_DRAIN_STRICT at gateway boot (US-002
-	// drain-lifecycle). Default false preserves existing fail-open
-	// behaviour byte-for-byte.
-	DrainStrict bool
 	// Logger receives DEBUG lines per RADOS op (read/write/delete) when set.
 	Logger *slog.Logger
 	// Metrics receives one ObserveOp call per RADOS op. Cmd-layer plugs

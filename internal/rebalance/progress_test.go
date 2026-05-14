@@ -18,9 +18,16 @@ func newDiscardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// migratableScan builds a ScanResult with `n` migratable chunks at
+// `1024` bytes each — the canonical "all-on-one-cluster, fan out to
+// live" shape used by most tracker tests.
+func migratableScan(n int64) ScanResult {
+	return ScanResult{MigratableChunks: n, Bytes: n * 1024}
+}
+
 func TestProgressTrackerNilReceiverNoopsAndReadsEmpty(t *testing.T) {
 	var p *ProgressTracker
-	p.CommitScan([]string{"c1"}, map[string]int64{"c1": 1}, map[string]int64{"c1": 1024}, time.Now())
+	p.CommitScan([]string{"c1"}, map[string]ScanResult{"c1": migratableScan(1)}, time.Now())
 	if _, ok := p.Snapshot("c1"); ok {
 		t.Fatal("nil tracker must report no snapshot")
 	}
@@ -31,13 +38,16 @@ func TestProgressTrackerCommitSetsBaseAndUpserts(t *testing.T) {
 	p := NewProgressTracker(10 * time.Minute)
 	now := time.Unix(1_700_000_000, 0).UTC()
 
-	p.CommitScan([]string{"c1"}, map[string]int64{"c1": 5}, map[string]int64{"c1": 5 * 1024}, now)
+	p.CommitScan([]string{"c1"}, map[string]ScanResult{"c1": migratableScan(5)}, now)
 	snap, ok := p.Snapshot("c1")
 	if !ok {
 		t.Fatal("expected snapshot after first commit")
 	}
-	if snap.Chunks != 5 || snap.Bytes != 5*1024 {
-		t.Fatalf("counts: got chunks=%d bytes=%d want 5/5120", snap.Chunks, snap.Bytes)
+	if snap.Chunks() != 5 || snap.Bytes != 5*1024 {
+		t.Fatalf("counts: got chunks=%d bytes=%d want 5/5120", snap.Chunks(), snap.Bytes)
+	}
+	if snap.MigratableChunks != 5 {
+		t.Fatalf("MigratableChunks: got %d want 5", snap.MigratableChunks)
 	}
 	if snap.BaseChunks != 5 {
 		t.Fatalf("BaseChunks: got %d want 5 (first commit captures base)", snap.BaseChunks)
@@ -48,10 +58,10 @@ func TestProgressTrackerCommitSetsBaseAndUpserts(t *testing.T) {
 
 	// Second commit shrinks chunks → BaseChunks must NOT change.
 	later := now.Add(time.Minute)
-	p.CommitScan([]string{"c1"}, map[string]int64{"c1": 2}, map[string]int64{"c1": 2 * 1024}, later)
+	p.CommitScan([]string{"c1"}, map[string]ScanResult{"c1": migratableScan(2)}, later)
 	snap, _ = p.Snapshot("c1")
-	if snap.Chunks != 2 {
-		t.Fatalf("Chunks after shrink: got %d want 2", snap.Chunks)
+	if snap.Chunks() != 2 {
+		t.Fatalf("Chunks after shrink: got %d want 2", snap.Chunks())
 	}
 	if snap.BaseChunks != 5 {
 		t.Fatalf("BaseChunks must stick at first-seen value; got %d want 5", snap.BaseChunks)
@@ -61,12 +71,12 @@ func TestProgressTrackerCommitSetsBaseAndUpserts(t *testing.T) {
 func TestProgressTrackerReapsUndrainedClusters(t *testing.T) {
 	p := NewProgressTracker(time.Minute)
 	now := time.Now().UTC()
-	p.CommitScan([]string{"c1", "c2"}, map[string]int64{"c1": 3, "c2": 0}, map[string]int64{"c1": 3, "c2": 0}, now)
+	p.CommitScan([]string{"c1", "c2"}, map[string]ScanResult{"c1": migratableScan(3), "c2": {}}, now)
 	if _, ok := p.Snapshot("c1"); !ok {
 		t.Fatal("expected c1 snapshot after commit")
 	}
 	// Next tick only sees c2 as draining → c1 entry must be dropped.
-	p.CommitScan([]string{"c2"}, map[string]int64{"c2": 0}, map[string]int64{"c2": 0}, now.Add(time.Second))
+	p.CommitScan([]string{"c2"}, map[string]ScanResult{"c2": {}}, now.Add(time.Second))
 	if _, ok := p.Snapshot("c1"); ok {
 		t.Fatal("c1 snapshot must be reaped after it leaves draining set")
 	}
@@ -81,13 +91,13 @@ func TestProgressTrackerZeroChunksOnFirstCommit(t *testing.T) {
 	// zero in that case (no chunks were ever observed).
 	p := NewProgressTracker(time.Minute)
 	now := time.Now().UTC()
-	completions := p.CommitScan([]string{"c1"}, map[string]int64{}, map[string]int64{}, now)
+	completions := p.CommitScan([]string{"c1"}, map[string]ScanResult{}, now)
 	snap, ok := p.Snapshot("c1")
 	if !ok {
 		t.Fatal("expected zero-chunk snapshot")
 	}
-	if snap.Chunks != 0 || snap.BaseChunks != 0 {
-		t.Fatalf("zero-chunk first commit: got chunks=%d base=%d want 0/0", snap.Chunks, snap.BaseChunks)
+	if snap.Chunks() != 0 || snap.BaseChunks != 0 {
+		t.Fatalf("zero-chunk first commit: got chunks=%d base=%d want 0/0", snap.Chunks(), snap.BaseChunks)
 	}
 	if len(completions) != 0 {
 		t.Fatalf("zero-chunk first commit must NOT fire completion: got %d events", len(completions))
@@ -101,14 +111,14 @@ func TestProgressTrackerCompletionFiresOnceOnDrainToZero(t *testing.T) {
 	p := NewProgressTracker(time.Minute)
 	t0 := time.Unix(1_700_000_000, 0).UTC()
 
-	if got := p.CommitScan([]string{"c1"}, map[string]int64{"c1": 5}, map[string]int64{"c1": 5 * 1024}, t0); len(got) != 0 {
+	if got := p.CommitScan([]string{"c1"}, map[string]ScanResult{"c1": migratableScan(5)}, t0); len(got) != 0 {
 		t.Fatalf("first commit at chunks=5 must not fire: got %d events", len(got))
 	}
-	if got := p.CommitScan([]string{"c1"}, map[string]int64{"c1": 3}, map[string]int64{"c1": 3 * 1024}, t0.Add(time.Minute)); len(got) != 0 {
+	if got := p.CommitScan([]string{"c1"}, map[string]ScanResult{"c1": migratableScan(3)}, t0.Add(time.Minute)); len(got) != 0 {
 		t.Fatalf("intermediate chunks=3 must not fire: got %d events", len(got))
 	}
 	t3 := t0.Add(2 * time.Minute)
-	events := p.CommitScan([]string{"c1"}, map[string]int64{"c1": 0}, map[string]int64{"c1": 0}, t3)
+	events := p.CommitScan([]string{"c1"}, map[string]ScanResult{"c1": {}}, t3)
 	if len(events) != 1 {
 		t.Fatalf("transition 3 → 0 must fire one event: got %d", len(events))
 	}
@@ -129,7 +139,7 @@ func TestProgressTrackerCompletionFiresOnceOnDrainToZero(t *testing.T) {
 		t.Errorf("ScanFinish: got %v want %v", ev.ScanFinish, t3)
 	}
 	// A second commit at chunks=0 must NOT re-fire (idempotency).
-	if again := p.CommitScan([]string{"c1"}, map[string]int64{"c1": 0}, map[string]int64{"c1": 0}, t3.Add(time.Minute)); len(again) != 0 {
+	if again := p.CommitScan([]string{"c1"}, map[string]ScanResult{"c1": {}}, t3.Add(time.Minute)); len(again) != 0 {
 		t.Fatalf("0 → 0 must not re-fire: got %d events", len(again))
 	}
 	snap, _ := p.Snapshot("c1")
@@ -158,8 +168,7 @@ func TestProgressTrackerCompletionRefiresAfterRefill(t *testing.T) {
 	}
 	for i, s := range steps {
 		events := p.CommitScan([]string{"c1"},
-			map[string]int64{"c1": s.chunks},
-			map[string]int64{"c1": s.bytes},
+			map[string]ScanResult{"c1": {MigratableChunks: s.chunks, Bytes: s.bytes}},
 			t0.Add(time.Duration(i)*time.Minute))
 		if s.wantFire && len(events) != 1 {
 			t.Fatalf("step %d (chunks=%d) expected 1 completion event, got %d", i, s.chunks, len(events))
@@ -175,19 +184,19 @@ func TestProgressTrackerCompletionRefiresAfterRefill(t *testing.T) {
 func TestProgressTrackerCompletionResetsOnReap(t *testing.T) {
 	p := NewProgressTracker(time.Minute)
 	t0 := time.Unix(1_700_000_000, 0).UTC()
-	p.CommitScan([]string{"c1"}, map[string]int64{"c1": 4}, map[string]int64{"c1": 4 * 1024}, t0)
-	p.CommitScan([]string{"c1"}, map[string]int64{"c1": 0}, map[string]int64{"c1": 0}, t0.Add(time.Minute))
+	p.CommitScan([]string{"c1"}, map[string]ScanResult{"c1": migratableScan(4)}, t0)
+	p.CommitScan([]string{"c1"}, map[string]ScanResult{"c1": {}}, t0.Add(time.Minute))
 	if _, ok := p.Snapshot("c1"); !ok {
 		t.Fatal("snapshot must persist while c1 still draining")
 	}
 	// Undrain — c1 leaves the draining set, tracker reaps it.
-	p.CommitScan(nil, nil, nil, t0.Add(2*time.Minute))
+	p.CommitScan(nil, nil, t0.Add(2*time.Minute))
 	if _, ok := p.Snapshot("c1"); ok {
 		t.Fatal("snapshot must be reaped after undrain")
 	}
 	// Re-drain: 7 → 0 fresh. Must fire because the prior FiredAt died with the row.
-	p.CommitScan([]string{"c1"}, map[string]int64{"c1": 7}, map[string]int64{"c1": 7 * 1024}, t0.Add(3*time.Minute))
-	events := p.CommitScan([]string{"c1"}, map[string]int64{"c1": 0}, map[string]int64{"c1": 0}, t0.Add(4*time.Minute))
+	p.CommitScan([]string{"c1"}, map[string]ScanResult{"c1": migratableScan(7)}, t0.Add(3*time.Minute))
+	events := p.CommitScan([]string{"c1"}, map[string]ScanResult{"c1": {}}, t0.Add(4*time.Minute))
 	if len(events) != 1 {
 		t.Fatalf("fresh-drain → 0 after reap must fire: got %d events", len(events))
 	}
@@ -201,7 +210,7 @@ func TestWorkerProgressScanPopulatesTracker(t *testing.T) {
 	}
 	// Mark cluster "old" as draining so the worker's progress accumulator
 	// counts chunks living on it.
-	if err := m.SetClusterState(context.Background(), "old", meta.ClusterStateDraining); err != nil {
+	if err := m.SetClusterState(context.Background(), "old", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate); err != nil {
 		t.Fatalf("SetClusterState: %v", err)
 	}
 	if err := m.SetBucketPlacement(context.Background(), b.Name, map[string]int{"new": 1}); err != nil {
@@ -229,8 +238,11 @@ func TestWorkerProgressScanPopulatesTracker(t *testing.T) {
 	if !ok {
 		t.Fatal("expected snapshot for draining cluster")
 	}
-	if snap.Chunks != 3 {
-		t.Fatalf("Chunks: got %d want 3", snap.Chunks)
+	if snap.Chunks() != 3 {
+		t.Fatalf("Chunks: got %d want 3", snap.Chunks())
+	}
+	if snap.MigratableChunks != 3 {
+		t.Fatalf("MigratableChunks: got %d want 3 (policy={new:1}, old draining → migratable)", snap.MigratableChunks)
 	}
 	if snap.BaseChunks != 3 {
 		t.Fatalf("BaseChunks: got %d want 3", snap.BaseChunks)
@@ -260,7 +272,7 @@ func TestWorkerFiresDrainCompleteEnd2End(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBucket: %v", err)
 	}
-	if err := m.SetClusterState(ctx, "old", meta.ClusterStateDraining); err != nil {
+	if err := m.SetClusterState(ctx, "old", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate); err != nil {
 		t.Fatalf("SetClusterState: %v", err)
 	}
 	if err := m.SetBucketPlacement(ctx, b.Name, map[string]int{"new": 1}); err != nil {
@@ -360,7 +372,7 @@ func TestWorkerProgressScanCountsEmptyPolicyBuckets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBucket: %v", err)
 	}
-	if err := m.SetClusterState(context.Background(), "old", meta.ClusterStateDraining); err != nil {
+	if err := m.SetClusterState(context.Background(), "old", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate); err != nil {
 		t.Fatalf("SetClusterState: %v", err)
 	}
 	seedObject(t, m, b.ID, "obj-a", []string{"old", "old"})
@@ -384,7 +396,154 @@ func TestWorkerProgressScanCountsEmptyPolicyBuckets(t *testing.T) {
 	if !ok {
 		t.Fatal("expected snapshot from empty-policy bucket scan")
 	}
-	if snap.Chunks != 2 {
-		t.Fatalf("Chunks: got %d want 2", snap.Chunks)
+	if snap.Chunks() != 2 {
+		t.Fatalf("Chunks: got %d want 2", snap.Chunks())
+	}
+	if snap.StuckNoPolicyChunks != 2 {
+		t.Fatalf("empty-policy chunks must land in stuck_no_policy: got %d want 2", snap.StuckNoPolicyChunks)
+	}
+}
+
+// TestClassifyBucketCovers — exercises every branch of the per-bucket
+// classifier the worker uses to split chunks into the three drain-
+// transparency categories.
+func TestClassifyBucketCovers(t *testing.T) {
+	cases := []struct {
+		name     string
+		policy   map[string]int
+		exclude  map[string]bool
+		want     string
+	}{
+		{"empty policy → stuck_no_policy", nil, map[string]bool{"old": true}, "stuck_no_policy"},
+		{"policy with live cluster → migratable", map[string]int{"old": 1, "new": 1}, map[string]bool{"old": true}, "migratable"},
+		{"policy all-draining → stuck_single_policy", map[string]int{"old": 1, "older": 1}, map[string]bool{"old": true, "older": true}, "stuck_single_policy"},
+		{"zero-weight clusters ignored", map[string]int{"old": 1, "zero": 0}, map[string]bool{"old": true}, "stuck_single_policy"},
+		{"empty exclude → migratable (degenerate)", map[string]int{"a": 1}, nil, "migratable"},
+	}
+	for _, tc := range cases {
+		if got := ClassifyBucket(tc.policy, tc.exclude); got != tc.want {
+			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestWorkerCategorizesChunksAcrossBuckets — the rebalance worker
+// tick must split chunks on an evacuating cluster into the three
+// categories based on each bucket's policy. Per-bucket breakdown
+// (ByBucket) must mirror the per-cluster aggregates.
+func TestWorkerCategorizesChunksAcrossBuckets(t *testing.T) {
+	m, _, _, _ := newRebalanceFixture(t)
+	ctx := context.Background()
+	if err := m.SetClusterState(ctx, "old", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate); err != nil {
+		t.Fatalf("SetClusterState: %v", err)
+	}
+
+	// Bucket A: policy {old:1, new:1} → migratable (live cluster left).
+	bA, err := m.CreateBucket(ctx, "bkt-mig", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("CreateBucket A: %v", err)
+	}
+	if err := m.SetBucketPlacement(ctx, bA.Name, map[string]int{"old": 1, "new": 1}); err != nil {
+		t.Fatalf("SetBucketPlacement A: %v", err)
+	}
+	seedObject(t, m, bA.ID, "a1", []string{"old", "old"})
+
+	// Bucket B: policy {old:1} → stuck_single_policy (only target draining).
+	bB, err := m.CreateBucket(ctx, "bkt-single", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("CreateBucket B: %v", err)
+	}
+	if err := m.SetBucketPlacement(ctx, bB.Name, map[string]int{"old": 1}); err != nil {
+		t.Fatalf("SetBucketPlacement B: %v", err)
+	}
+	seedObject(t, m, bB.ID, "b1", []string{"old", "old", "old"})
+
+	// Bucket C: no policy → stuck_no_policy.
+	bC, err := m.CreateBucket(ctx, "bkt-nopol", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("CreateBucket C: %v", err)
+	}
+	seedObject(t, m, bC.ID, "c1", []string{"old"})
+
+	tracker := NewProgressTracker(time.Minute)
+	w, err := New(Config{
+		Meta:     m,
+		Data:     newDataMemBackend(t),
+		Logger:   newDiscardLogger(),
+		Emitter:  &recordingEmitter{},
+		Interval: time.Hour,
+		Progress: tracker,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := w.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	snap, ok := tracker.Snapshot("old")
+	if !ok {
+		t.Fatal("expected snapshot for evacuating cluster")
+	}
+	if snap.MigratableChunks != 2 {
+		t.Errorf("MigratableChunks: got %d want 2", snap.MigratableChunks)
+	}
+	if snap.StuckSinglePolicyChunks != 3 {
+		t.Errorf("StuckSinglePolicyChunks: got %d want 3", snap.StuckSinglePolicyChunks)
+	}
+	if snap.StuckNoPolicyChunks != 1 {
+		t.Errorf("StuckNoPolicyChunks: got %d want 1", snap.StuckNoPolicyChunks)
+	}
+	if got := snap.Chunks(); got != 6 {
+		t.Errorf("Chunks() total: got %d want 6", got)
+	}
+	if got := snap.ByBucket; len(got) != 3 {
+		t.Fatalf("ByBucket: got %d buckets want 3 (%v)", len(got), got)
+	}
+	if cat := snap.ByBucket["bkt-mig"]; cat.Category != "migratable" || cat.ChunkCount != 2 {
+		t.Errorf("bkt-mig: got %+v want migratable/2", cat)
+	}
+	if cat := snap.ByBucket["bkt-single"]; cat.Category != "stuck_single_policy" || cat.ChunkCount != 3 {
+		t.Errorf("bkt-single: got %+v want stuck_single_policy/3", cat)
+	}
+	if cat := snap.ByBucket["bkt-nopol"]; cat.Category != "stuck_no_policy" || cat.ChunkCount != 1 {
+		t.Errorf("bkt-nopol: got %+v want stuck_no_policy/1", cat)
+	}
+}
+
+// TestWorkerSkipsReadonlyClusters — clusters in state=draining_readonly
+// must NOT appear in the progress tracker because no migration runs;
+// they're stop-write only.
+func TestWorkerSkipsReadonlyClusters(t *testing.T) {
+	m, _, _, _ := newRebalanceFixture(t)
+	ctx := context.Background()
+	if err := m.SetClusterState(ctx, "old", meta.ClusterStateDrainingReadonly, meta.ClusterModeReadonly); err != nil {
+		t.Fatalf("SetClusterState: %v", err)
+	}
+	b, err := m.CreateBucket(ctx, "ro", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	if err := m.SetBucketPlacement(ctx, b.Name, map[string]int{"old": 1, "new": 1}); err != nil {
+		t.Fatalf("SetBucketPlacement: %v", err)
+	}
+	seedObject(t, m, b.ID, "k", []string{"old", "old"})
+
+	tracker := NewProgressTracker(time.Minute)
+	w, err := New(Config{
+		Meta:     m,
+		Data:     newDataMemBackend(t),
+		Logger:   newDiscardLogger(),
+		Emitter:  &recordingEmitter{},
+		Interval: time.Hour,
+		Progress: tracker,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := w.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if _, ok := tracker.Snapshot("old"); ok {
+		t.Fatal("readonly cluster must not produce a progress snapshot")
 	}
 }

@@ -261,7 +261,7 @@ var (
 	RebalanceRefusedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "strata_rebalance_refused_total",
-			Help: "Rebalance moves refused by the worker's safety rails (US-006). Reason is one of target_full (target cluster.used/total > 0.90 RADOS-only) or target_draining (target cluster is in meta.ClusterStateDraining). Per-target visibility lets operators spot a stuck drain.",
+			Help: "Rebalance moves refused by the worker's safety rails (US-006). Reason is one of target_full (target cluster.used/total > 0.90 RADOS-only) or target_draining (target cluster is in a draining state — draining_readonly or evacuating). Per-target visibility lets operators spot a stuck drain.",
 		},
 		[]string{"reason", "target"},
 	)
@@ -269,7 +269,7 @@ var (
 	PutChunksRefusedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "strata_putchunks_refused_total",
-			Help: "PutChunks refusals on the gateway PUT hot path. reason=\"drain_strict\" when STRATA_DRAIN_STRICT=on and the placement picker fell back to a draining cluster (US-002 drain-lifecycle). cluster label is the refused target.",
+			Help: "PutChunks refusals on the gateway PUT hot path. reason=\"drain_refused\" when the placement picker fell back to a draining cluster — drain is unconditionally strict (US-007 drain-transparency). cluster label is the refused target.",
 		},
 		[]string{"reason", "cluster"},
 	)

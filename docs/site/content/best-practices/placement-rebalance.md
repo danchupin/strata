@@ -287,102 +287,98 @@ list) on the replica you expect to lead.
 
 ## Drain lifecycle
 
-Drain is the operator hook that retires a cluster gracefully. The
-`ralph/drain-lifecycle` cycle ships the strict mode, the progress
-endpoint, the UI bar, the completion signal, and the bucket-impact
-preview drawer described below. Use this section as the runbook before
-running `POST /admin/v1/clusters/<id>/drain` in production.
+Drain is the operator hook that takes a cluster out of the write hot path —
+either temporarily for maintenance, or permanently to deregister. The
+4-state machine + mode picker shipped in `ralph/drain-transparency`
+(US-001..US-008) separates the two intents; the old single-mode drain
+from `ralph/drain-lifecycle` is now a special case (`mode=evacuate`).
 
-### When drain is useful (and when it is not)
+### Stop-writes vs. evacuate — pick the right mode
 
-Drain is built around the assumption that the cluster being drained
-has **somewhere to migrate chunks to**:
+`POST /admin/v1/clusters/<id>/drain` requires a body `{"mode":"…"}`.
+There is no default — the operator must pick:
 
-- **Multi-cluster placement deployments** — buckets carry a
-  `Placement` policy that names ≥2 clusters with non-zero weight. The
-  rebalance worker reads `PickClusterExcluding` over the policy with
-  `draining` excluded and moves every chunk from the drained cluster
-  to a peer named in the policy. Drain is genuinely retiring storage
-  here.
-- **Single-cluster-per-class config** — every storage class points at
-  exactly one cluster via `STRATA_RADOS_CLASSES` /
-  `STRATA_S3_CLASSES`, and buckets either do not carry a policy or
-  their policy names only the one cluster. Drain still flips the
-  cluster to `state=draining` and `PickClusterExcluding` still skips
-  it, but chunks have nowhere to go — the rebalance worker emits no
-  moves, `chunks_on_cluster` never reaches zero, and
-  `deregister_ready` never flips true. Drain in this shape is a pure
-  **stop-write** flag; the operator needs to (a) add new buckets with
-  alternate-cluster policies before the drained cluster fills up, or
-  (b) accept that the cluster stays in `draining` until traffic
-  naturally ages out via lifecycle expiration.
+| Mode | State | Scan + migration | Reversible | When to use |
+| ---- | ----- | ---------------- | ---------- | ----------- |
+| `readonly` | `draining_readonly` | No (worker skips the per-cluster scan to save cost) | Yes — `POST /undrain` returns to `live` with no side effects | Maintenance window: short-lived pause where you want new writes refused but the cluster stays in service for reads, deletes, list, and in-flight multipart. No bytes move. |
+| `evacuate` | `evacuating` | Yes — rebalance worker categorizes chunks (migratable / stuck single-policy / stuck no-policy) and migrates the migratable subset to peers | Yes — `POST /undrain` returns to `live` BUT migrated chunks stay on their new target (no reverse migration) | Decommission: you want the cluster's bytes off the hardware so it can be deregistered. Reads / deletes / in-flight multipart continue throughout. |
 
-If the goal is "stop writes immediately" without migration, drain is
-the right primitive — strict mode (`STRATA_DRAIN_STRICT=on`) closes
-the fail-open fallback so PUTs targeting a single-cluster policy on
-the drained cluster get a clean 503 DrainRefused. If the goal is
-"actually move bytes off this hardware", drain is the right primitive
-**only when** the bucket Placement policies name a peer cluster — the
-pre-drain checklist below catches the gap before it surprises you.
+Upgrade path: `draining_readonly → evacuating` via a second
+`POST /drain {"mode":"evacuate"}` — the modal renders the readonly
+radio hidden and the title flips to "Upgrade to evacuate". There is no
+downgrade (evacuate → readonly); use undrain → re-drain readonly if
+you really need it.
+
+Drain is **unconditionally strict in both modes** (US-007). RADOS + S3
+`PutChunks` refuse to fall back to a `draining_readonly` or
+`evacuating` cluster — `data.ErrDrainRefused` → HTTP 503
+`<Code>DrainRefused</Code>` with `Retry-After: 300`.
 
 ### Pre-drain operator checklist
 
-Walk this list before clicking Drain on the cluster card. Each item
-has a single console surface to drive it.
+Walk this list before submitting the ConfirmDrainModal. Each item has a
+console surface to drive it.
 
 1. **Open the Pools matrix.** `/console/storage` → Data tab → Pools
-   table. The matrix renders `#clusters × #distinct-pools` rows (see
-   "Pools matrix" in the [Web UI capability
-   matrix]({{< ref "/best-practices/web-ui" >}})). Confirm the cluster
-   you intend to drain actually holds bytes — a `0 B` row means the
-   class is routed elsewhere and drain is a no-op.
-2. **Open the bucket-references drawer.** Click "Show affected
-   buckets" on the cluster card. The drawer lists every bucket whose
-   `Placement` policy carries a non-zero weight on the cluster, sorted
-   desc by chunk_count. Hot buckets at the top need a policy update
-   FIRST — either widen them to name a peer cluster (so rebalance can
-   migrate) or accept the chunks will be unreachable for new PUTs once
-   drain starts.
-3. **Verify pool names exist on target clusters.** The rebalance
-   worker copies chunks from the source pool to the *same-named* pool
-   on the target cluster. If a class maps `STANDARD → strata-hot` and
-   the target cluster doesn't have a `strata-hot` pool, every move
-   fails. The Pools matrix surfaces target pools — confirm visually
-   before draining.
-4. **Decide on strict mode.** Set `STRATA_DRAIN_STRICT=on` if you want
-   PUTs that *would have fallen back to the drained cluster* (empty
-   policy / all-policy-clusters-draining) to refuse with 503
-   DrainRefused instead. The "strict" badge on every cluster card
-   confirms the global flag is on. The flag is a process-boot env —
-   flipping it requires a rolling restart. Without strict mode, PUTs
-   silently fall back to the class default's `spec.Cluster` even when
-   it's draining.
-5. **Skim the BucketDetail Placement tab for policy-drain warnings.**
-   When every cluster with non-zero weight in a saved bucket policy is
-   `state=draining`, the Placement tab renders an amber
-   "All clusters in this policy are draining" chip. Update those
-   policies before traffic resumes; otherwise new PUTs land in the
-   fail-open / refuse trap depending on strict mode.
+   table. The matrix renders `#clusters × #distinct-pools` rows. A
+   `0 B` row means the class is routed elsewhere and drain is a no-op.
+2. **Click "Show affected buckets" on the cluster card.** The
+   `<BucketReferencesDrawer>` lists every bucket whose `Placement`
+   policy carries a non-zero weight on the cluster, sorted desc by
+   chunk_count.
+3. **Run the impact analysis.** Inside `<ConfirmDrainModal>` pick the
+   `Full evacuate (decommission)` radio — the modal fetches
+   `GET /admin/v1/clusters/<id>/drain-impact` and renders three
+   categorized counters:
+   - **Migratable** — bucket has a `Placement` policy AND
+     `PickClusterExcluding` finds a peer. Will move on the next
+     rebalance tick.
+   - **Stuck (single policy)** — bucket has a `Placement` policy but
+     every cluster named in it is draining. Will NOT migrate; new PUTs
+     get 503 DrainRefused.
+   - **Stuck (no policy)** — bucket has no `Placement` (relies on
+     class-env routing) and has chunks routed to the draining cluster.
+     Same outcome: won't migrate.
+4. **Fix the stuck buckets.** If `stuck>0` the modal renders
+   `<BulkPlacementFixDialog>` behind a "Fix N buckets" CTA. Multi-
+   select rows, pick a suggested policy per bucket (or one uniform
+   policy across all selected via the dialog-level toggle), Apply →
+   the dialog issues `PUT /admin/v1/buckets/<name>/placement` per
+   bucket and refetches `/drain-impact` on close.
+5. **Submit.** When stuck=0 the typed-confirm input arms the
+   destructive submit; click Drain. Stuck>0 keeps the submit disabled
+   with the explainer "Drain blocked — fix N stuck buckets".
+
+For `readonly` drain the modal skips the impact analysis (no migration
+will happen, so the categorization is moot). Submit is armed by the
+typed-confirm input alone.
 
 ### Drain procedure
 
-The console flow per cluster:
+The console flow per cluster, mode-specific:
 
-1. **Show affected buckets** → review the drawer; close it.
-2. **Drain** → `<ConfirmDrainModal>` opens. The modal's info row
-   surfaces `<N> buckets reference this cluster in their Placement
-   policy` — click "view list" if you want to re-check the drawer
-   without closing the modal.
-3. **Typed-confirm.** Type the cluster id verbatim to arm the
-   destructive submit. Mistypes keep Drain disabled.
-4. **Wait for the progress bar to drain.** The cluster card flips to
-   `draining` state and renders `<DrainProgressBar>` — the amber bar
-   advances as the rebalance worker moves chunks. Text shows
-   `<N> chunks remaining · <M> at start · ~<ETA>`; ETA is derived from
-   `rate(strata_rebalance_chunks_moved_total{from=<id>}[5m])`.
-5. **Green chip = deregister-ready.** When `chunks_on_cluster`
-   transitions `>0 → 0` the bar is replaced with an emerald
-   `✓ Ready to deregister (env edit + restart)` chip — and the
+**Stop-writes (readonly):**
+1. Click `Drain` → ConfirmDrainModal opens, readonly radio selected.
+2. Type the cluster id to arm submit; click `Drain (stop-writes)`.
+3. Cluster card flips to `draining_readonly` state. `<DrainProgressBar>`
+   renders a single orange stop-writes chip plus an "Upgrade to
+   evacuate" button and a small "Undrain" button.
+4. Run your maintenance; click `Undrain` when done. State flips back
+   to `live` with no migration cost.
+
+**Full evacuate:**
+1. Click `Drain` → ConfirmDrainModal opens; flip to the evacuate radio.
+2. Run the impact analysis + fix stuck buckets via the
+   BulkPlacementFixDialog (above).
+3. Type the cluster id to arm submit; click `Drain (X chunks will
+   migrate)`.
+4. Cluster card flips to `evacuating` state. `<DrainProgressBar>`
+   renders a red "Evacuating" label + progress bar + three categorized
+   counters. ETA is derived from
+   `rate(strata_rebalance_chunks_moved_total{from=<id>}[5m])` and
+   appears only when migratable>0.
+5. When `chunks_on_cluster` transitions `>0 → 0` the bar surfaces an
+   emerald `✓ Ready to deregister (env edit + restart)` chip; the
    rebalance worker logs INFO `drain complete`, writes a
    `drain.complete` audit row, bumps `strata_drain_complete_total`,
    and best-effort fans an `s3:Drain:Complete` event through every
@@ -394,79 +390,118 @@ The console flow per cluster:
 
 ### Abort / recovery
 
-`POST /admin/v1/clusters/<id>/undrain` clears the `cluster_state` row
-(absence == live) and invalidates the in-process drain cache. The
-rebalance worker's per-tick scan reaps the cached progress snapshot on
-the next iteration so a future re-drain re-fires the completion event
-when chunks reach zero again. Undrain is idempotent and safe to issue
-at any point in the drain — chunks moved before the undrain stay
-moved, the rest stop migrating.
+`POST /admin/v1/clusters/<id>/undrain` works from both
+`draining_readonly` and `evacuating`. It deletes the `cluster_state`
+row (absence == live) and invalidates the in-process drain cache.
+Migrated chunks stay on their new target; only future moves halt.
+Undrain is idempotent and refused (409 InvalidTransition) from `live`
+or `removed`.
 
-### Drain progress + completion endpoints
+### Drain endpoints
 
 | Path | What it does | Caller |
 | ---- | ----------- | ------ |
-| `GET /admin/v1/clusters` | Lists every configured cluster + its state + the global `drain_strict` flag. | `<ClustersSubsection>` (10 s poll) |
-| `GET /admin/v1/clusters/{id}/drain-progress` | Per-cluster `{state, chunks_on_cluster, bytes_on_cluster, base_chunks_at_start, last_scan_at, eta_seconds, deregister_ready, warnings}`. Reads from the rebalance worker's in-process `ProgressTracker` — never scans manifests synchronously. | `<DrainProgressBar>` (30 s poll) |
-| `GET /admin/v1/clusters/{id}/bucket-references` | Pre-drain bucket-impact preview. Lists buckets whose `Placement[<id>] > 0` joined with `bucket_stats` for chunk_count + bytes_used. Paginated via `?limit=N&offset=M` (default 100). | `<BucketReferencesDrawer>` |
-| `POST /admin/v1/clusters/{id}/drain` / `.../undrain` | Flip `cluster_state` row to `draining` / `live`. Audit-stamped `admin:DrainCluster` / `admin:UndrainCluster`. | `<ConfirmDrainModal>` / Undrain button |
+| `GET /admin/v1/clusters` | Lists every configured cluster id, its `state` ∈ {live, draining_readonly, evacuating, removed} + `mode` ∈ {"", readonly, evacuate}. Drain is unconditionally strict — the legacy `drain_strict` field is gone (US-007). | `<ClustersSubsection>` (10 s poll) |
+| `POST /admin/v1/clusters/{id}/drain` | Body `{"mode":"readonly"\|"evacuate"}` required. 4-state machine enforced server-side: invalid transitions → 409 `InvalidTransition` with `current_state` + `requested_mode`. Audit-stamped `admin:DrainCluster`. | `<ConfirmDrainModal>` |
+| `POST /admin/v1/clusters/{id}/undrain` | Drops cluster_state row. Refuses from live/removed (409 InvalidTransition). Audit-stamped `admin:UndrainCluster`. | Undrain buttons |
+| `GET /admin/v1/clusters/{id}/drain-progress` | Per-cluster `{state, mode, chunks_on_cluster, bytes_on_cluster, base_chunks_at_start, migratable_chunks, stuck_single_policy_chunks, stuck_no_policy_chunks, by_bucket, last_scan_at, eta_seconds, deregister_ready, warnings}`. Reads from the rebalance worker's in-process `ProgressTracker` — never scans manifests synchronously. Readonly state returns null counts + a `"stop-writes mode — migration scan skipped"` warning. | `<DrainProgressBar>` (30 s poll) |
+| `GET /admin/v1/clusters/{id}/drain-impact` | Pre-evacuate analysis: `{cluster_id, current_state, migratable_chunks, stuck_single_policy_chunks, stuck_no_policy_chunks, total_chunks, by_bucket[], total_buckets, next_offset, last_scan_at}`. Each `by_bucket` entry carries category + chunk_count + `suggested_policies[]`. State ∈ {live, draining_readonly} → 200 (synchronous one-off scan, 5-min in-process cache); state ∈ {evacuating, removed} → 409 InvalidTransition (use /drain-progress instead). Paginated via `?limit=N&offset=M` (default 100, max 1000). Audit-stamped `admin:GetClusterDrainImpact`. | `<ConfirmDrainModal>` evacuate mode + `<BulkPlacementFixDialog>` |
+| `GET /admin/v1/clusters/{id}/bucket-references` | Coarser pre-drain preview: buckets whose `Placement[<id>] > 0` joined with `bucket_stats` for chunk_count + bytes_used. Drawer-shape — no suggested policies. | `<BucketReferencesDrawer>` |
 
 `drain-progress` numeric fields are nullable: when state=live every
-numeric field is `null` (only meaningful while draining). When
-state=draining but no scan has committed yet, the response carries
+numeric field is `null`. When state=evacuating but no scan has
+committed yet, the response carries
 `warnings: ["progress scan pending; rebalance worker has not yet
 committed a tick"]` and the UI renders "scan pending" instead of
 zero counts.
 
-### `STRATA_DRAIN_STRICT` env
+### Drain refusal semantics (always strict)
 
-| Variable                  | Default | Range          | Purpose |
-| ------------------------- | ------- | -------------- | ------- |
-| `STRATA_DRAIN_STRICT`     | `off`   | `on` / `off` / boolean strings | When `on`, RADOS + S3 `PutChunks` refuse to fall back to a `draining` cluster — returns `data.ErrDrainRefused`, the gateway maps it to `503 ServiceUnavailable` with `<Code>DrainRefused</Code>` and `Retry-After: 300`. **Only PUT chunks** are affected — GET / HEAD / DELETE / multipart Complete / Abort / List on the drained cluster all keep working (drain semantic is stop-write, not stop-read). |
+Drain is **unconditionally strict** in both modes (US-007
+drain-transparency — the former opt-in `STRATA_DRAIN_STRICT` env was
+retired). RADOS + S3 `PutChunks` always refuse to fall back to a
+draining cluster — they return `data.ErrDrainRefused`, the gateway
+maps it to `503 ServiceUnavailable` with `<Code>DrainRefused</Code>`
+body and `Retry-After: 300` header. **PUT chunks only** — GET / HEAD /
+DELETE / multipart UploadPart / Complete / Abort / List against
+draining clusters keep working (drain semantic is stop-write, not
+stop-read). In-flight multipart sessions persist their initial cluster
+id in the upload handle (`cluster\x00bucket\x00key\x00uploadID`) and
+never re-consult the picker, so UploadPart / Complete / Abort on an
+already-open multipart finish gracefully on the drained cluster.
 
-Parsed at gateway boot; unknown values fail-fast with a clear error.
-Counter `strata_putchunks_refused_total{reason="drain_strict",cluster}`
-increments per refusal — wire to alerting if you expect zero refusals
-in steady state.
+**Breaking change for Prometheus dashboards.** Counter label flipped
+from `reason="drain_strict"` to `reason="drain_refused"` —
+`strata_putchunks_refused_total{reason="drain_refused",cluster}`
+increments per refusal. Wire to alerting if you expect zero refusals
+in steady state. Legacy `STRATA_DRAIN_STRICT` env in the environment
+is ignored at boot with a single WARN log line (remove from your
+deploy descriptors).
 
-### User journey walkthrough
+### Three-scenario walkthrough
 
-The smoke harness `scripts/smoke-drain-lifecycle.sh` drives every
+The smoke harness `scripts/smoke-drain-transparency.sh` drives every
 step below against the running `multi-cluster` compose profile;
 exit-non-zero on any assertion miss. Run via
-`make smoke-drain-lifecycle` once the lab is up
-(`docker compose --profile multi-cluster up -d`).
+`make smoke-drain-transparency` once the lab is up
+(`docker compose --profile multi-cluster up -d`). The legacy
+`scripts/smoke-drain-lifecycle.sh` still validates the basic flip-to-
+draining contract; the new harness covers mode-picker + impact
+analysis + multipart graceful contract end-to-end.
+
+**Scenario A — Stop-writes drain (maintenance):**
 
 | # | Operator action | Surface | Backing story |
 |---|-----------------|---------|---------------|
-| 1 | Open `/console/storage`, see both cluster cards live | `<ClustersSubsection>` | (placement-ui, existing) |
-| 2 | See per-cluster per-pool bytes/chunks in Pools table | Pools matrix (`#clusters × #distinct-pools` rows) | US-001 |
-| 3 | Click "Show affected buckets" link on draining-candidate card | `<BucketReferencesDrawer>` | US-006 |
-| 4 | Identify hot buckets that need policy update before drain | drawer lists buckets desc by `chunk_count` | US-006 |
-| 5 | Optionally flip `STRATA_DRAIN_STRICT=on` in env + restart | docs + cluster-card "strict" chip | US-002 + US-004 |
-| 6 | Click "Drain" on the cluster card | `<ConfirmDrainModal>` | (placement-ui, existing) |
-| 7 | Modal surfaces "<N> buckets reference this cluster" + typed-confirm | enhanced modal | US-006 |
-| 8 | Type cluster id → submit enabled → click Drain | typed confirm | (placement-ui, existing) |
-| 9 | Banner appears in AppShell, card flips to `draining` state | `<PlacementDrainBanner>` | (placement-ui, existing) |
-| 10 | Card now shows `<DrainProgressBar>` "<N> chunks · <M> at start · ~<ETA>" | progress bar | US-003 + US-004 |
-| 11 | Watch progress bar shrink as rebalance worker ticks every `STRATA_REBALANCE_INTERVAL` | TanStack 30 s poll | US-004 |
-| 12 | Receive operator notification (notify worker) when drain reaches 0 chunks | `s3:Drain:Complete` event | US-005 |
-| 13 | Card shows green chip "✓ Ready to deregister" | `deregister_ready=true` | US-004 |
-| 14 | Edit `STRATA_RADOS_CLUSTERS` env, remove cluster entry, rolling restart | docs (out-of-band) | docs |
-| 15 | Verify cluster gone from console + every former chunk readable on peers | Storage page rerender | US-007 smoke |
+| 1 | Open `/console/storage` → Data tab; pick cluster card | `<ClustersSubsection>` | existing |
+| 2 | Click `Drain` → modal opens, readonly radio default | `<ConfirmDrainModal>` | US-004 |
+| 3 | Type cluster id → submit armed → click `Drain (stop-writes)` | typed confirm | US-004 |
+| 4 | Card flips to `draining_readonly`; `<DrainProgressBar>` shows orange stop-writes chip + Upgrade / Undrain buttons | progress bar | US-006 |
+| 5 | New PUT to a cephb-only bucket → 503 DrainRefused | gateway | US-007 |
+| 6 | GET on existing object → 200; in-flight multipart Init+UploadPart+Complete on cephb mid-drain → 200 | gateway | US-007 |
+| 7 | Click `Undrain` → state=live → new PUT succeeds | progress bar | US-001 |
 
-Negative paths covered by the smoke (`scripts/smoke-drain-lifecycle.sh`):
+**Scenario B — Full evacuate (decommission):**
 
-- **(a)** Strict mode on + bucket policy `{drained:1}` only + PUT →
-  503 DrainRefused with `Retry-After: 300`.
-- **(b)** Strict mode off (default) + same bucket policy → fail-open
-  to the class default with WARN log; no client-visible refusal.
-- **(c)** Operator clicks Undrain mid-drain → state flips back to
-  `live`, AppShell banner disappears, drain-progress cache reaped on
-  the next tick.
-- **(d)** Single-cluster-per-class config + drain → no chunks
-  migrate; `deregister_ready` never flips true. Documented above (see
-  "When drain is useful (and when it is not)").
+| # | Operator action | Surface | Backing story |
+|---|-----------------|---------|---------------|
+| 1 | Pre-seed 3 buckets: `tx-split {cephb:1,default:1}`, `tx-stuck {cephb:1}`, `tx-residual` (no policy) | aws-cli | walkthrough |
+| 2 | Click `Drain` → flip mode picker to `Full evacuate (decommission)` | `<ConfirmDrainModal>` | US-004 |
+| 3 | Impact analysis fires → counters render: migratable>0, stuck_single_policy>0 | `/drain-impact` | US-003 + US-004 |
+| 4 | "Fix N buckets" amber CTA → opens `<BulkPlacementFixDialog>` | bulk fix | US-005 |
+| 5 | Pick suggested policy per bucket (or "Apply uniform to all") → Apply → PUTs issued | bulk fix | US-005 |
+| 6 | Bulk dialog closes; modal refetches /drain-impact; stuck=0; submit enables | invalidation | US-005 |
+| 7 | Type cluster id → click `Drain (X chunks will migrate)` | typed confirm | US-004 |
+| 8 | Card flips to `evacuating`; `<DrainProgressBar>` renders red label + three categorized counters + ETA | progress bar | US-006 |
+| 9 | Wait for rebalance worker → `chunks_on_cluster` reaches 0 → emerald deregister-ready chip | completion | US-002 / US-005 / US-006 |
+| 10 | Env edit + rolling restart removes cluster id | docs | out-of-band |
+
+**Scenario C — Upgrade readonly → evacuate:**
+
+| # | Operator action | Surface | Backing story |
+|---|-----------------|---------|---------------|
+| 1 | Start from Scenario A's state=draining_readonly | precondition | US-001 |
+| 2 | `<DrainProgressBar>` renders "Upgrade to evacuate" button | bar | US-006 |
+| 3 | Click upgrade → `<ConfirmDrainModal>` opens with title "Upgrade to evacuate" + readonly radio HIDDEN | modal | US-004 |
+| 4 | Impact analysis fires → counters render | `/drain-impact` | US-003 |
+| 5 | If stuck>0 → bulk fix flow; else type cluster id → submit | shared with Scenario B | US-004 / US-005 |
+| 6 | Card flips draining_readonly → evacuating; migration begins | server | US-001 / US-002 |
+| 7 | Wait → deregister-ready chip | completion | US-005 |
+
+Negative paths covered:
+
+- **Modal blocks submit when stuck>0** — clicking Drain on the
+  evacuate radio with stuck>0 keeps the submit disabled even when the
+  typed-confirm matches; the explainer text reads "Drain blocked — fix
+  N stuck buckets". Validated in `web/e2e/drain-transparency.spec.ts`
+  Scenario B.
+- **In-flight multipart finishes gracefully** — Init+UploadPart+
+  Complete on a draining cluster all return 200; bytes land on the
+  drained cluster's pool and are immediately readable. Validated in
+  `scripts/smoke-drain-transparency.sh` Scenario A step 6.
+- **Undrain from live or removed → 409 InvalidTransition** — the 4-
+  state machine refuses no-op transitions. Validated in
+  `internal/adminapi/clusters_drain_test.go`.
 
 ## Web UI
 

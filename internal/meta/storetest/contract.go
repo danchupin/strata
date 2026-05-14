@@ -64,6 +64,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"UsageAggregateRoundTrip", caseUsageAggregate},
 		{"BucketPlacementRoundTrip", caseBucketPlacement},
 		{"ClusterStateRoundTrip", caseClusterState},
+		{"ClusterStateModes", caseClusterStateModes},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2583,68 +2584,170 @@ func caseBucketPlacement(t *testing.T, s meta.Store) {
 }
 
 // caseClusterState exercises the global cluster_state CRUD (US-006
-// placement-rebalance): absent → set → get → list → delete → absent.
-// Absence of a row maps to ok=false (NOT a sentinel error) — callers
-// treat that as ClusterStateLive. State values outside the
-// {live, draining, removed} enum are rejected with
-// ErrInvalidClusterState.
+// placement-rebalance, mode added in US-001 drain-transparency):
+// absent → set → get → list → delete → absent. Absence of a row maps
+// to ok=false (NOT a sentinel error) — callers treat that as
+// ClusterStateLive.
 func caseClusterState(t *testing.T, s meta.Store) {
 	ctx := context.Background()
 
-	state, ok, err := s.GetClusterState(ctx, "c1")
-	if err != nil || ok || state != "" {
-		t.Fatalf("get unconfigured: got=(%q,%v,%v) want=(\"\", false, nil)", state, ok, err)
+	row, ok, err := s.GetClusterState(ctx, "c1")
+	if err != nil || ok || row != (meta.ClusterStateRow{}) {
+		t.Fatalf("get unconfigured: got=(%+v,%v,%v) want=(zero, false, nil)", row, ok, err)
 	}
 	all, err := s.ListClusterStates(ctx)
 	if err != nil || len(all) != 0 {
 		t.Fatalf("list empty: got=%v err=%v", all, err)
 	}
 
-	if err := s.SetClusterState(ctx, "c1", meta.ClusterStateDraining); err != nil {
-		t.Fatalf("set draining: %v", err)
+	if err := s.SetClusterState(ctx, "c1", meta.ClusterStateDrainingReadonly, meta.ClusterModeReadonly); err != nil {
+		t.Fatalf("set draining_readonly: %v", err)
 	}
-	state, ok, err = s.GetClusterState(ctx, "c1")
-	if err != nil || !ok || state != meta.ClusterStateDraining {
-		t.Fatalf("get after set: got=(%q,%v,%v)", state, ok, err)
+	row, ok, err = s.GetClusterState(ctx, "c1")
+	if err != nil || !ok || row.State != meta.ClusterStateDrainingReadonly || row.Mode != meta.ClusterModeReadonly {
+		t.Fatalf("get after set: got=(%+v,%v,%v)", row, ok, err)
 	}
-	if err := s.SetClusterState(ctx, "c2", meta.ClusterStateRemoved); err != nil {
+	if err := s.SetClusterState(ctx, "c2", meta.ClusterStateRemoved, ""); err != nil {
 		t.Fatalf("set removed: %v", err)
 	}
 	all, err = s.ListClusterStates(ctx)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if all["c1"] != meta.ClusterStateDraining || all["c2"] != meta.ClusterStateRemoved {
-		t.Fatalf("list: got=%v", all)
+	if all["c1"].State != meta.ClusterStateDrainingReadonly || all["c1"].Mode != meta.ClusterModeReadonly {
+		t.Fatalf("list c1: got=%+v", all["c1"])
+	}
+	if all["c2"].State != meta.ClusterStateRemoved || all["c2"].Mode != "" {
+		t.Fatalf("list c2: got=%+v", all["c2"])
 	}
 
-	if err := s.SetClusterState(ctx, "c1", meta.ClusterStateLive); err != nil {
+	if err := s.SetClusterState(ctx, "c1", meta.ClusterStateLive, ""); err != nil {
 		t.Fatalf("set live: %v", err)
 	}
-	state, ok, err = s.GetClusterState(ctx, "c1")
-	if err != nil || !ok || state != meta.ClusterStateLive {
-		t.Fatalf("get after live: got=(%q,%v,%v)", state, ok, err)
+	row, ok, err = s.GetClusterState(ctx, "c1")
+	if err != nil || !ok || row.State != meta.ClusterStateLive || row.Mode != "" {
+		t.Fatalf("get after live: got=(%+v,%v,%v)", row, ok, err)
 	}
 
 	if err := s.DeleteClusterState(ctx, "c1"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	state, ok, err = s.GetClusterState(ctx, "c1")
-	if err != nil || ok || state != "" {
-		t.Fatalf("get after delete: got=(%q,%v,%v)", state, ok, err)
+	row, ok, err = s.GetClusterState(ctx, "c1")
+	if err != nil || ok || row != (meta.ClusterStateRow{}) {
+		t.Fatalf("get after delete: got=(%+v,%v,%v)", row, ok, err)
 	}
 	if err := s.DeleteClusterState(ctx, "c1"); err != nil {
 		t.Errorf("delete idempotent: %v", err)
 	}
 
-	bad := []string{"", "frozen", "DRAINING", "alive"}
+	bad := []struct{ state, mode string }{
+		{"", ""},
+		{"frozen", ""},
+		{"DRAINING", ""},
+		{"alive", ""},
+	}
 	for _, v := range bad {
-		if err := s.SetClusterState(ctx, "c1", v); err != meta.ErrInvalidClusterState {
-			t.Errorf("validate %q: got %v want ErrInvalidClusterState", v, err)
+		if err := s.SetClusterState(ctx, "c1", v.state, v.mode); err != meta.ErrInvalidClusterState {
+			t.Errorf("validate state %q: got %v want ErrInvalidClusterState", v.state, err)
 		}
 	}
-	if err := s.SetClusterState(ctx, "", meta.ClusterStateDraining); err != meta.ErrUnknownCluster {
+	if err := s.SetClusterState(ctx, "", meta.ClusterStateDrainingReadonly, meta.ClusterModeReadonly); err != meta.ErrUnknownCluster {
 		t.Errorf("empty cluster id: got %v want ErrUnknownCluster", err)
+	}
+}
+
+// caseClusterStateModes exercises the 4-state machine + mode pairing
+// added in US-001 drain-transparency: every legal (state, mode) combo
+// is accepted, every illegal one rejected, and the legacy
+// (state="draining", mode="") row is transparently migrated to
+// (evacuating, evacuate) on the first read AND written back so the
+// legacy shape doesn't reappear on the second read.
+func caseClusterStateModes(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+
+	legal := []struct{ state, mode string }{
+		{meta.ClusterStateLive, ""},
+		{meta.ClusterStateDrainingReadonly, meta.ClusterModeReadonly},
+		{meta.ClusterStateEvacuating, meta.ClusterModeEvacuate},
+		{meta.ClusterStateRemoved, ""},
+	}
+	for _, c := range legal {
+		if err := s.SetClusterState(ctx, "c-"+c.state, c.state, c.mode); err != nil {
+			t.Fatalf("set legal (%q,%q): %v", c.state, c.mode, err)
+		}
+		row, ok, err := s.GetClusterState(ctx, "c-"+c.state)
+		if err != nil || !ok {
+			t.Fatalf("get legal (%q,%q): ok=%v err=%v", c.state, c.mode, ok, err)
+		}
+		if row.State != c.state || row.Mode != c.mode {
+			t.Errorf("get legal (%q,%q): got=%+v", c.state, c.mode, row)
+		}
+	}
+
+	illegal := []struct {
+		state, mode string
+		wantErr     error
+	}{
+		{meta.ClusterStateLive, meta.ClusterModeReadonly, meta.ErrInvalidClusterMode},
+		{meta.ClusterStateLive, meta.ClusterModeEvacuate, meta.ErrInvalidClusterMode},
+		{meta.ClusterStateRemoved, meta.ClusterModeReadonly, meta.ErrInvalidClusterMode},
+		{meta.ClusterStateDrainingReadonly, "", meta.ErrInvalidClusterMode},
+		{meta.ClusterStateDrainingReadonly, meta.ClusterModeEvacuate, meta.ErrInvalidClusterMode},
+		{meta.ClusterStateEvacuating, "", meta.ErrInvalidClusterMode},
+		{meta.ClusterStateEvacuating, meta.ClusterModeReadonly, meta.ErrInvalidClusterMode},
+		{"frozen", "", meta.ErrInvalidClusterState},
+		{"", meta.ClusterModeReadonly, meta.ErrInvalidClusterState},
+	}
+	for _, c := range illegal {
+		if err := s.SetClusterState(ctx, "c-illegal", c.state, c.mode); err != c.wantErr {
+			t.Errorf("illegal (%q,%q): got=%v want=%v", c.state, c.mode, err, c.wantErr)
+		}
+	}
+
+	// Plant a legacy (state="draining", mode="") row — accepted only via
+	// the legacy parity branch of ValidateClusterStateMode — and verify
+	// the first read migrates it to (evacuating, evacuate) and writes
+	// the new shape back so the second read sees the new shape directly.
+	if err := s.SetClusterState(ctx, "legacy", meta.ClusterStateDraining, ""); err != nil {
+		t.Fatalf("plant legacy: %v", err)
+	}
+	row, ok, err := s.GetClusterState(ctx, "legacy")
+	if err != nil || !ok {
+		t.Fatalf("read migrated: ok=%v err=%v", ok, err)
+	}
+	if row.State != meta.ClusterStateEvacuating || row.Mode != meta.ClusterModeEvacuate {
+		t.Fatalf("read migrated row: got=%+v want=(evacuating,evacuate)", row)
+	}
+	row2, ok, err := s.GetClusterState(ctx, "legacy")
+	if err != nil || !ok {
+		t.Fatalf("re-read migrated: ok=%v err=%v", ok, err)
+	}
+	if row2 != row {
+		t.Errorf("re-read after migration: got=%+v want=%+v (legacy shape leaked back)", row2, row)
+	}
+	all, err := s.ListClusterStates(ctx)
+	if err != nil {
+		t.Fatalf("list after migration: %v", err)
+	}
+	if all["legacy"].State != meta.ClusterStateEvacuating {
+		t.Errorf("list legacy: got=%+v", all["legacy"])
+	}
+
+	// Plant another legacy row and exercise the List-side migration path.
+	if err := s.SetClusterState(ctx, "legacy2", meta.ClusterStateDraining, ""); err != nil {
+		t.Fatalf("plant legacy2: %v", err)
+	}
+	listed, err := s.ListClusterStates(ctx)
+	if err != nil {
+		t.Fatalf("list with legacy2: %v", err)
+	}
+	if listed["legacy2"].State != meta.ClusterStateEvacuating || listed["legacy2"].Mode != meta.ClusterModeEvacuate {
+		t.Errorf("list legacy2: got=%+v", listed["legacy2"])
+	}
+	// Confirm the legacy row is gone from storage by reading again.
+	row, ok, err = s.GetClusterState(ctx, "legacy2")
+	if err != nil || !ok || row.State != meta.ClusterStateEvacuating {
+		t.Fatalf("re-read legacy2: got=(%+v,%v,%v)", row, ok, err)
 	}
 }
 

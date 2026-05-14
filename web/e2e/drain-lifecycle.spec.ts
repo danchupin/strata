@@ -56,7 +56,6 @@ test.describe('Strata console — drain lifecycle (US-007)', () => {
       { id: 'cepha', state: 'live', backend: 'rados' },
       { id: 'cephb', state: 'live', backend: 'rados' },
     ];
-    const drainStrict = true;
     let placement: Record<string, number> | null = null;
     // Progress shape per cluster. Start "draining" with 5 chunks; after the
     // operator clicks Drain we'll flip to draining + populate a non-zero
@@ -96,7 +95,7 @@ test.describe('Strata console — drain lifecycle (US-007)', () => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ clusters, drain_strict: drainStrict }),
+        body: JSON.stringify({ clusters }),
       });
     });
 
@@ -301,18 +300,19 @@ test.describe('Strata console — drain lifecycle (US-007)', () => {
     await drawer.press('Escape');
     await expect(drawer).toBeHidden({ timeout: 10_000 });
 
-    // (3) Drain cephb via ConfirmDrainModal — the modal's info row should
-    // surface "<N> buckets reference this cluster".
+    // (3) Drain cephb via ConfirmDrainModal — US-004 drain-transparency
+    // rewrote the modal as a mode picker. Picking readonly (the default)
+    // skips /drain-impact analysis; the existing mock still flips the
+    // cluster to a draining state on POST.
     await cephbCard.getByRole('button', { name: 'Drain' }).click();
     const drainDialog = page.getByRole('dialog').filter({
       hasText: /Drain cluster/,
     });
     await expect(drainDialog).toBeVisible();
-    await expect(
-      drainDialog.getByText(/buckets reference/i),
-    ).toBeVisible({ timeout: 10_000 });
+    // Mode picker renders both options; readonly is selected by default.
+    await expect(drainDialog.getByTestId('cd-mode-readonly')).toBeChecked();
     // Typed-confirmation flow.
-    const drainSubmit = drainDialog.getByRole('button', { name: 'Drain' });
+    const drainSubmit = drainDialog.getByTestId('cd-submit');
     await expect(drainSubmit).toBeDisabled();
     await drainDialog.getByLabel('Cluster id').fill('cephb');
     await expect(drainSubmit).toBeEnabled();

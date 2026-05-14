@@ -4,7 +4,9 @@ import { AlertCircle, AlertTriangle, Loader2 } from 'lucide-react';
 
 import {
   fetchClusters,
+  isDrainingState,
   undrainCluster,
+  type BucketImpactEntry,
   type ClusterStateEntry,
   type PoolStatus,
 } from '@/api/client';
@@ -23,6 +25,7 @@ import { showToast } from '@/lib/toast-store';
 import { cn } from '@/lib/utils';
 
 import { BucketReferencesDrawer } from './BucketReferencesDrawer';
+import { BulkPlacementFixDialog } from './BulkPlacementFixDialog';
 import { ConfirmDrainModal } from './ConfirmDrainModal';
 import { DrainProgressBar } from './DrainProgressBar';
 import { RebalanceProgressChip } from './RebalanceProgressChip';
@@ -41,16 +44,38 @@ function formatBytes(bytes: number): string {
   return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
+// clusterStateClass + clusterStateLabel mirror the 4-state machine
+// (US-001/US-006 drain-transparency). The card's state badge colors track
+// mode: readonly → orange (reversible stop-write), evacuating → red
+// (decommission in progress), live → emerald, removed → muted. Legacy
+// `draining` rows fall back to amber until the meta layer normalises.
 function clusterStateClass(state: string): string {
   switch (state.toLowerCase()) {
     case 'live':
       return 'bg-emerald-500/15 text-emerald-700 border-emerald-500/30 dark:text-emerald-300';
+    case 'draining_readonly':
+      return 'bg-orange-500/15 text-orange-800 border-orange-500/30 dark:text-orange-300';
+    case 'evacuating':
+      return 'bg-red-500/15 text-red-800 border-red-500/30 dark:text-red-300';
     case 'draining':
       return 'bg-amber-500/15 text-amber-800 border-amber-500/30 dark:text-amber-300';
     case 'removed':
       return 'bg-muted text-muted-foreground border-border';
     default:
       return 'bg-muted text-muted-foreground border-border';
+  }
+}
+
+function clusterStateLabel(state: string): string {
+  switch (state.toLowerCase()) {
+    case 'draining_readonly':
+      return 'stop-writes';
+    case 'evacuating':
+      return 'evacuating';
+    case '':
+      return '—';
+    default:
+      return state.toLowerCase();
   }
 }
 
@@ -78,7 +103,6 @@ export function ClustersSubsection({ pools }: Props) {
   });
 
   const clusters = q.data?.clusters ?? [];
-  const drainStrict = Boolean(q.data?.drainStrict);
   const showSkeleton = q.isPending && !q.data;
   const errMsg = !q.data && q.error instanceof Error ? q.error.message : null;
 
@@ -146,7 +170,6 @@ export function ClustersSubsection({ pools }: Props) {
                 key={c.id}
                 cluster={c}
                 usage={usageByCluster.get(c.id)}
-                drainStrict={drainStrict}
               />
             ))}
           </div>
@@ -159,15 +182,17 @@ export function ClustersSubsection({ pools }: Props) {
 interface ClusterCardProps {
   cluster: ClusterStateEntry;
   usage: AggregatedUsage | undefined;
-  drainStrict: boolean;
 }
 
-function ClusterCard({ cluster, usage, drainStrict }: ClusterCardProps) {
+function ClusterCard({ cluster, usage }: ClusterCardProps) {
   const [drainOpen, setDrainOpen] = useState(false);
   const [refsOpen, setRefsOpen] = useState(false);
   const [undraining, setUndraining] = useState(false);
+  const [bulkFixOpen, setBulkFixOpen] = useState(false);
+  const [bulkFixStuck, setBulkFixStuck] = useState<BucketImpactEntry[]>([]);
 
-  const isDraining = cluster.state.toLowerCase() === 'draining';
+  const isDraining = isDrainingState(cluster.state);
+  const isReadonlyDrain = cluster.state.toLowerCase() === 'draining_readonly';
   const supportsFill = cluster.backend.toLowerCase() === 'rados';
   const hasFill = supportsFill && usage?.hasUsage;
 
@@ -203,17 +228,8 @@ function ClusterCard({ cluster, usage, drainStrict }: ClusterCardProps) {
               variant="outline"
               className={cn('font-medium', clusterStateClass(cluster.state))}
             >
-              {cluster.state || '—'}
+              {clusterStateLabel(cluster.state)}
             </Badge>
-            {drainStrict && (
-              <Badge
-                variant="outline"
-                className="border-amber-500/40 bg-amber-500/10 text-[10px] font-medium uppercase text-amber-800 dark:text-amber-300"
-                title="STRATA_DRAIN_STRICT=on: PUTs that fall back to a draining cluster are refused with 503 DrainRefused"
-              >
-                strict
-              </Badge>
-            )}
           </span>
         </CardTitle>
       </CardHeader>
@@ -244,11 +260,20 @@ function ClusterCard({ cluster, usage, drainStrict }: ClusterCardProps) {
         )}
         {isDraining && (
           <>
-            <DrainProgressBar clusterID={cluster.id} />
-            <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/5 p-2 text-xs text-amber-800 dark:text-amber-300">
-              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
-              <span>Rebalance worker is migrating chunks off this cluster.</span>
-            </div>
+            <DrainProgressBar
+              clusterID={cluster.id}
+              onUpgradeToEvacuate={
+                isReadonlyDrain ? () => setDrainOpen(true) : undefined
+              }
+              onUndrain={isReadonlyDrain ? handleUndrain : undefined}
+              undraining={undraining}
+            />
+            {!isReadonlyDrain && (
+              <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/5 p-2 text-xs text-amber-800 dark:text-amber-300">
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+                <span>Rebalance worker is migrating chunks off this cluster.</span>
+              </div>
+            )}
           </>
         )}
         <div className="flex items-center justify-between gap-2">
@@ -260,18 +285,20 @@ function ClusterCard({ cluster, usage, drainStrict }: ClusterCardProps) {
             Show affected buckets
           </button>
           {isDraining ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={handleUndrain}
-              disabled={undraining}
-            >
-              {undraining && (
-                <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" aria-hidden />
-              )}
-              Undrain
-            </Button>
+            !isReadonlyDrain && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleUndrain}
+                disabled={undraining}
+              >
+                {undraining && (
+                  <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" aria-hidden />
+                )}
+                Undrain
+              </Button>
+            )
           ) : (
             <Button
               type="button"
@@ -289,7 +316,17 @@ function ClusterCard({ cluster, usage, drainStrict }: ClusterCardProps) {
         open={drainOpen}
         onOpenChange={setDrainOpen}
         clusterID={cluster.id}
-        onShowReferences={() => setRefsOpen(true)}
+        currentState={cluster.state}
+        onOpenBulkFix={(stuck) => {
+          setBulkFixStuck(stuck);
+          setBulkFixOpen(true);
+        }}
+      />
+      <BulkPlacementFixDialog
+        open={bulkFixOpen}
+        onOpenChange={setBulkFixOpen}
+        clusterID={cluster.id}
+        stuck={bulkFixStuck}
       />
       <BucketReferencesDrawer
         open={refsOpen}

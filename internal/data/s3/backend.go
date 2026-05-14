@@ -62,10 +62,9 @@ var ErrClassMissingCluster = errors.New("s3: class missing cluster")
 // data-plane method returns errors.ErrUnsupported. Tests use this shape
 // to exercise the not-wired path without paying for a synthetic backend.
 type Backend struct {
-	clusters    map[string]*s3Cluster
-	classes     map[string]ClassSpec
-	drainStrict bool
-	mu          sync.Mutex
+	clusters map[string]*s3Cluster
+	classes  map[string]ClassSpec
+	mu       sync.Mutex
 
 	// httpClient is the per-Backend HTTP client override (tests inject
 	// synthetic transports). Applied to every cluster's SDK config on
@@ -115,12 +114,6 @@ type Config struct {
 	// Multi-cluster shape.
 	Clusters map[string]S3ClusterSpec
 	Classes  map[string]ClassSpec
-
-	// DrainStrict, when true, makes PutChunks refuse to fall back to a
-	// draining cluster with data.ErrDrainRefused instead of writing.
-	// Sourced from STRATA_DRAIN_STRICT at gateway boot (US-002
-	// drain-lifecycle). Default false preserves fail-open routing.
-	DrainStrict bool
 
 	// Legacy single-cluster fields. Deprecated — retired by US-004.
 	Endpoint          string
@@ -212,7 +205,6 @@ func New(cfg Config) (*Backend, error) {
 	b := &Backend{
 		clusters:       make(map[string]*s3Cluster, len(cfg.Clusters)),
 		classes:        copyClasses(cfg.Classes),
-		drainStrict:    cfg.DrainStrict,
 		httpClient:     cfg.HTTPClient,
 		tracerProvider: resolveTracerProvider(cfg),
 	}
@@ -463,12 +455,15 @@ func (b *Backend) clusterForPlacement(ctx context.Context, class string) (*s3Clu
 	return c, bucket, nil
 }
 
-// clusterForClassStrict is clusterForClass with the drain-strict
-// pre-flight: when b.drainStrict is set and the class fallback cluster
-// is in the draining set, refuse with data.ErrDrainRefused instead of
-// landing chunks on the drained cluster (US-002 drain-lifecycle).
+// clusterForClassStrict is clusterForClass with the unconditional
+// drain-refusal pre-flight: when the class fallback cluster is in the
+// draining set, refuse with data.ErrDrainRefused instead of landing
+// chunks on the drained cluster (US-007 drain-transparency — drain is
+// now always strict; no env gate). The picker has already returned ""
+// or an unconfigured target; this guards the class-default fallback
+// path.
 func (b *Backend) clusterForClassStrict(ctx context.Context, class string, draining map[string]bool) (*s3Cluster, string, error) {
-	if b.drainStrict && len(draining) > 0 {
+	if len(draining) > 0 {
 		clusterID, _, err := b.resolveClass(class)
 		if err == nil && draining[clusterID] {
 			return nil, "", data.NewDrainRefusedError(clusterID)

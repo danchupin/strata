@@ -106,18 +106,19 @@ func writeError(w http.ResponseWriter, r *http.Request, err APIError) {
 }
 
 // writeDrainRefused emits a 503 ServiceUnavailable + Retry-After: 300
-// for a PutChunks refusal caused by STRATA_DRAIN_STRICT=on landing on a
-// draining cluster (US-002 drain-lifecycle). Carries the cluster id in
-// the Message so the operator-side curl sees the refused target.
-// Bumps strata_putchunks_refused_total{reason="drain_strict",cluster}.
+// for a PutChunks refusal caused by the placement picker falling back
+// to a draining cluster (US-007 drain-transparency — drain is now
+// unconditionally strict). Carries the cluster id in the Message so the
+// operator-side curl sees the refused target.
+// Bumps strata_putchunks_refused_total{reason="drain_refused",cluster}.
 func writeDrainRefused(w http.ResponseWriter, r *http.Request, err *data.DrainRefusedError) {
-	metrics.PutChunksRefusedTotal.WithLabelValues("drain_strict", err.Cluster).Inc()
+	metrics.PutChunksRefusedTotal.WithLabelValues("drain_refused", err.Cluster).Inc()
 	w.Header().Set("Content-Type", "application/xml")
 	w.Header().Set("Retry-After", fmt.Sprintf("%d", DrainRefusedRetryAfterSeconds))
 	w.WriteHeader(http.StatusServiceUnavailable)
 	_ = xml.NewEncoder(w).Encode(errorXML{
 		Code:     "DrainRefused",
-		Message:  fmt.Sprintf("cluster %s is draining and STRATA_DRAIN_STRICT=on refuses fallback", err.Cluster),
+		Message:  fmt.Sprintf("cluster %s is draining; PUT refused", err.Cluster),
 		Resource: r.URL.Path,
 	})
 }
