@@ -4,12 +4,15 @@
 // drain banner (US-004). The wire shape mirrors
 // adminapi.ClusterStateEntry in internal/adminapi/clusters_drain.go.
 
-// ClusterState is the 4-state machine introduced in US-001 drain-transparency.
-// The legacy "draining" value is still accepted from the wire for
-// compatibility with backends mid-migration; the server normalizes it on
-// read so this branch should be exercised only by very stale UI fetches.
+// ClusterState is the 5-state machine — `pending` added in the
+// cluster-weights cycle (US-001) alongside the 4 states introduced by
+// drain-transparency. The legacy "draining" value is still accepted from
+// the wire for compatibility with backends mid-migration; the server
+// normalizes it on read so this branch should be exercised only by very
+// stale UI fetches.
 export type ClusterState =
   | 'live'
+  | 'pending'
   | 'draining_readonly'
   | 'evacuating'
   | 'removed'
@@ -22,6 +25,10 @@ export interface ClusterStateEntry {
   state: ClusterState | string;
   mode: ClusterMode | string;
   backend: 'rados' | 's3' | string;
+  // weight is 0..100; the admin response masks to 0 for non-live states
+  // (see clusters_drain.go::buildClusterStateEntry). Pending cards display
+  // weight=0 by definition until the operator activates with a chosen value.
+  weight: number;
 }
 
 // isDrainingState collapses the 4-state machine into a boolean "stop-
@@ -52,9 +59,63 @@ export async function fetchClusters(): Promise<ClustersList> {
     throw new Error(`clusters: ${resp.status} ${resp.statusText}`);
   }
   const body = (await resp.json()) as ClustersListResponse;
-  return {
-    clusters: body.clusters ?? [],
-  };
+  const clusters = (body.clusters ?? []).map((c) => ({
+    ...c,
+    weight: Number.isFinite(c.weight) ? c.weight : 0,
+  }));
+  return { clusters };
+}
+
+// activateCluster posts {weight} to /clusters/{id}/activate (pending -> live).
+// Returns the parsed error message on non-2xx for the modal to surface.
+export async function activateCluster(id: string, weight: number): Promise<void> {
+  const resp = await fetch(
+    `/admin/v1/clusters/${encodeURIComponent(id)}/activate`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ weight }),
+    },
+  );
+  if (!resp.ok) {
+    let detail = '';
+    try {
+      const j = (await resp.json()) as { message?: string };
+      detail = j.message ? `: ${j.message}` : '';
+    } catch {
+      // ignore JSON parse failure
+    }
+    const err = new Error(`activate ${id}: ${resp.status} ${resp.statusText}${detail}`);
+    (err as Error & { status?: number }).status = resp.status;
+    throw err;
+  }
+}
+
+// updateClusterWeight puts {weight} to /clusters/{id}/weight (live state).
+// Used by the inline slider on live cards (US-004).
+export async function updateClusterWeight(id: string, weight: number): Promise<void> {
+  const resp = await fetch(
+    `/admin/v1/clusters/${encodeURIComponent(id)}/weight`,
+    {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ weight }),
+    },
+  );
+  if (!resp.ok) {
+    let detail = '';
+    try {
+      const j = (await resp.json()) as { message?: string };
+      detail = j.message ? `: ${j.message}` : '';
+    } catch {
+      // ignore JSON parse failure
+    }
+    const err = new Error(`weight ${id}: ${resp.status} ${resp.statusText}${detail}`);
+    (err as Error & { status?: number }).status = resp.status;
+    throw err;
+  }
 }
 
 async function postFlip(

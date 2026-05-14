@@ -24,6 +24,7 @@ import { queryClient, queryKeys } from '@/lib/query';
 import { showToast } from '@/lib/toast-store';
 import { cn } from '@/lib/utils';
 
+import { ActivateClusterModal } from './ActivateClusterModal';
 import { BucketReferencesDrawer } from './BucketReferencesDrawer';
 import { BulkPlacementFixDialog } from './BulkPlacementFixDialog';
 import { ConfirmDrainModal } from './ConfirmDrainModal';
@@ -44,15 +45,19 @@ function formatBytes(bytes: number): string {
   return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
-// clusterStateClass + clusterStateLabel mirror the 4-state machine
-// (US-001/US-006 drain-transparency). The card's state badge colors track
-// mode: readonly → orange (reversible stop-write), evacuating → red
-// (decommission in progress), live → emerald, removed → muted. Legacy
-// `draining` rows fall back to amber until the meta layer normalises.
+// clusterStateClass + clusterStateLabel mirror the 5-state machine
+// (drain-transparency 4-state + cluster-weights US-001 `pending`). The
+// card's state badge colors track mode: readonly → orange (reversible
+// stop-write), evacuating → red (decommission in progress), live →
+// emerald, pending → muted gray (not receiving writes yet), removed →
+// muted. Legacy `draining` rows fall back to amber until the meta layer
+// normalises.
 function clusterStateClass(state: string): string {
   switch (state.toLowerCase()) {
     case 'live':
       return 'bg-emerald-500/15 text-emerald-700 border-emerald-500/30 dark:text-emerald-300';
+    case 'pending':
+      return 'bg-muted text-muted-foreground border-border';
     case 'draining_readonly':
       return 'bg-orange-500/15 text-orange-800 border-orange-500/30 dark:text-orange-300';
     case 'evacuating':
@@ -68,6 +73,8 @@ function clusterStateClass(state: string): string {
 
 function clusterStateLabel(state: string): string {
   switch (state.toLowerCase()) {
+    case 'pending':
+      return 'Pending — not receiving writes';
     case 'draining_readonly':
       return 'stop-writes';
     case 'evacuating':
@@ -186,13 +193,16 @@ interface ClusterCardProps {
 
 function ClusterCard({ cluster, usage }: ClusterCardProps) {
   const [drainOpen, setDrainOpen] = useState(false);
+  const [activateOpen, setActivateOpen] = useState(false);
   const [refsOpen, setRefsOpen] = useState(false);
   const [undraining, setUndraining] = useState(false);
   const [bulkFixOpen, setBulkFixOpen] = useState(false);
   const [bulkFixStuck, setBulkFixStuck] = useState<BucketImpactEntry[]>([]);
 
+  const stateLower = cluster.state.toLowerCase();
+  const isPending = stateLower === 'pending';
   const isDraining = isDrainingState(cluster.state);
-  const isReadonlyDrain = cluster.state.toLowerCase() === 'draining_readonly';
+  const isReadonlyDrain = stateLower === 'draining_readonly';
   const supportsFill = cluster.backend.toLowerCase() === 'rados';
   const hasFill = supportsFill && usage?.hasUsage;
 
@@ -255,7 +265,7 @@ function ClusterCard({ cluster, usage }: ClusterCardProps) {
             </span>
           )}
         </div>
-        {cluster.backend.toLowerCase() !== 'memory' && (
+        {cluster.backend.toLowerCase() !== 'memory' && !isPending && (
           <RebalanceProgressChip clusterID={cluster.id} />
         )}
         {isDraining && (
@@ -284,7 +294,17 @@ function ClusterCard({ cluster, usage }: ClusterCardProps) {
           >
             Show affected buckets
           </button>
-          {isDraining ? (
+          {isPending ? (
+            <Button
+              type="button"
+              variant="default"
+              size="sm"
+              onClick={() => setActivateOpen(true)}
+              data-testid="cluster-card-activate"
+            >
+              Activate
+            </Button>
+          ) : isDraining ? (
             !isReadonlyDrain && (
               <Button
                 type="button"
@@ -305,13 +325,18 @@ function ClusterCard({ cluster, usage }: ClusterCardProps) {
               variant="destructive"
               size="sm"
               onClick={() => setDrainOpen(true)}
-              disabled={cluster.state.toLowerCase() === 'removed'}
+              disabled={stateLower === 'removed'}
             >
               Drain
             </Button>
           )}
         </div>
       </CardContent>
+      <ActivateClusterModal
+        open={activateOpen}
+        onOpenChange={setActivateOpen}
+        clusterID={cluster.id}
+      />
       <ConfirmDrainModal
         open={drainOpen}
         onOpenChange={setDrainOpen}

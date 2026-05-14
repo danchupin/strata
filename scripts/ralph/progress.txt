@@ -67,3 +67,21 @@ Cycle: ralph/cluster-weights
   - When invalidating cache after activate / weight admin handlers, both views (Get + States) refresh on the next read — no separate InvalidateStates surface needed because they share `c.fetched`.
   - The picker call site in rados.Backend.PutChunks falls back to spec.Cluster on `picked == ""`. If default policy is empty and bucket policy is nil, the picker returns "" and we land on spec.Cluster. This preserves backwards-compat for in-memory unit tests / fixtures that never populate cluster_state.
 ---
+
+## 2026-05-14 - US-003
+- UI pending-cluster card variant + Activate modal with typed-confirm + initial-weight slider wired against POST /admin/v1/clusters/{id}/activate.
+- API client: `weight: number` on ClusterStateEntry; `pending` added to ClusterState union; fetchClusters coerces missing/NaN weight to 0. New `activateCluster(id, weight)` and `updateClusterWeight(id, weight)` wrappers (the latter pre-wired for US-004). Both attach numeric `status` on the thrown error so handlers can detect 409 race.
+- New Slider primitive in web/src/components/ui/slider.tsx — native `<input type="range">` with tailwind appearance + `accent-primary` thumb. No third-party dep; bundle footprint stays small.
+- New `<ActivateClusterModal>` mirrors `<ConfirmDrainModal>` typed-confirm precedent: slider+numeric input two-way bound, default 10, clamps to [0,100], non-numeric blocked, typed value must equal cluster.id to arm Submit. Submit POSTs to /activate, invalidates `queryKeys.clusters`, toasts on success, keeps modal open on error.
+- ClustersSubsection: clusterStateClass/Label gain `pending` case (gray palette + "Pending — not receiving writes" badge label). Pending cards hide RebalanceProgressChip (no chunks landed yet) + drop the Drain button + render a primary "Activate" CTA that opens the new modal. "Show affected buckets" link stays on every variant.
+- Files changed: web/src/api/clusters.ts, web/src/api/client.ts, web/src/components/ui/slider.tsx (new), web/src/components/storage/ActivateClusterModal.tsx (new), web/src/components/storage/ClustersSubsection.tsx.
+- `pnpm run typecheck` clean. `pnpm run build` clean — Storage chunk 13.21 kB gzipped (delta well under the 4 KiB AC budget; activate path adds ~modal+slider <1.5 KiB pre-shared-vendor).
+- `pnpm run test:unit` passes (existing 18 BulkPlacementFixDialog suite). No new unit test for the modal — typed-confirm + clamp logic is identical to the established ConfirmDrainModal precedent and exercised by US-005 Playwright spec.
+- Browser verification: dev-browser skill not present in this env; manual operator verification deferred to US-005 (Playwright spec `web/e2e/cluster-weights.spec.ts` will drive the actual UI half against the multi-cluster lab).
+- **Learnings for future iterations:**
+  - No `@radix-ui/react-slider` dep. The native `<input type="range">` + tailwind's `accent-primary` ships a credible-looking slider with zero JS overhead. Reuse `web/src/components/ui/slider.tsx` for the live-card inline slider in US-004 — same Slider primitive, different debounce wiring.
+  - The thrown Error from `activateCluster` / `updateClusterWeight` carries a `(err as Error & { status?: number }).status` numeric field. US-004 inline slider can read that to special-case 409 (operator drained mid-edit) without parsing the message.
+  - ClustersSubsection's action-row ladder is now `pending → Activate; draining → (Undrain|nothing); else → Drain`. The order matters because `isDraining` is true for `draining_readonly`/`evacuating`/legacy `draining` — keep pending checked first so a pending row never falls into the drain branch.
+  - `RebalanceProgressChip` is suppressed for pending clusters because no chunks land there yet — chip would render "(0 moved)" noise. Keep this suppression pattern (`!isPending`) for any future per-cluster telemetry chip.
+  - Modal Submit copy is `Activate (weight N)` — bakes the chosen value into the button label, removes "wait, what weight did I pick" friction. Reuse pattern in any future numeric-armed confirm dialog.
+---
