@@ -29,6 +29,7 @@ import { BucketReferencesDrawer } from './BucketReferencesDrawer';
 import { BulkPlacementFixDialog } from './BulkPlacementFixDialog';
 import { ConfirmDrainModal } from './ConfirmDrainModal';
 import { DrainProgressBar } from './DrainProgressBar';
+import { LiveClusterWeightSlider } from './LiveClusterWeightSlider';
 import { RebalanceProgressChip } from './RebalanceProgressChip';
 
 const CLUSTERS_POLL_MS = 10_000;
@@ -201,6 +202,7 @@ function ClusterCard({ cluster, usage }: ClusterCardProps) {
 
   const stateLower = cluster.state.toLowerCase();
   const isPending = stateLower === 'pending';
+  const isLive = stateLower === 'live';
   const isDraining = isDrainingState(cluster.state);
   const isReadonlyDrain = stateLower === 'draining_readonly';
   const supportsFill = cluster.backend.toLowerCase() === 'rados';
@@ -267,6 +269,9 @@ function ClusterCard({ cluster, usage }: ClusterCardProps) {
         </div>
         {cluster.backend.toLowerCase() !== 'memory' && !isPending && (
           <RebalanceProgressChip clusterID={cluster.id} />
+        )}
+        {isLive && (
+          <LiveClusterWeightSlider clusterID={cluster.id} weight={cluster.weight} />
         )}
         {isDraining && (
           <>
