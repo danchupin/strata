@@ -148,12 +148,26 @@ testcontainers to find the engine.
                           and `.../undrain`, GET `/admin/v1/clusters`
                           (audit `admin:DrainCluster` /
                           `admin:UndrainCluster`). Per-tick progress
-                          scan (US-003 drain-lifecycle) populates
-                          `rebalance.ProgressTracker` (chunks/bytes/
-                          BaseChunks/BaseBytes/LastScanAt/
-                          CompletionFiredAt per draining cluster); the
-                          adminapi handler reads it without scanning
-                          synchronously. Completion detection (US-005):
+                          scan (US-003 drain-lifecycle, refined in
+                          US-002 drain-transparency) populates
+                          `rebalance.ProgressTracker` (categorized
+                          MigratableChunks / StuckSinglePolicyChunks /
+                          StuckNoPolicyChunks plus Bytes / BaseChunks /
+                          BaseBytes / LastScanAt / CompletionFiredAt +
+                          per-(cluster, bucket) ByBucket breakdown per
+                          draining cluster); the adminapi handler reads
+                          it without scanning synchronously. **Scan
+                          only fires when `state=evacuating`** —
+                          `draining_readonly` clusters keep stop-write
+                          semantics but skip the per-tick scan to save
+                          IO (the picker-exclusion set folds both
+                          draining states; the scan-focus set is
+                          evacuating-only). Use
+                          `loadClusterDrainSets` to obtain both sets in
+                          lockstep — mixing them silently re-enables
+                          move-into-readonly or scans clusters that
+                          shouldn't be scanned. Completion detection
+                          (US-005):
                           a `>0 → 0` chunks_on_cluster transition fires
                           one event per cluster (idempotent on
                           CompletionFiredAt; refills reset the slot so

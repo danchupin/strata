@@ -1,7 +1,7 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-all-ci up-tikv up-lab-tikv up-lab-tikv-3 down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv smoke-drain-lifecycle race-soak race-soak-tikv lint-nginx-lab bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi docs-serve docs-build clean
+.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-all-ci up-tikv up-lab-tikv up-lab-tikv-3 down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv smoke-drain-lifecycle smoke-drain-transparency race-soak race-soak-tikv lint-nginx-lab bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi docs-serve docs-build clean
 
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
@@ -216,6 +216,16 @@ smoke-lab-tikv:
 # scripts/smoke-drain-lifecycle.sh for env knobs (BASE, SMOKE_DRAIN_*).
 smoke-drain-lifecycle:
 	bash scripts/smoke-drain-lifecycle.sh
+
+# Drain-transparency walkthrough smoke (US-008 of ralph/drain-transparency).
+# Drives the three operator scenarios (A: stop-writes drain, B: full evacuate
+# with /drain-impact + bulk-fix, C: upgrade readonly → evacuate) against a
+# running `multi-cluster` compose profile (`docker compose --profile
+# multi-cluster up -d`). Skips with exit 77 when the lab is not reachable;
+# set REQUIRE_LAB=1 to convert the skip into a hard fail. See
+# scripts/smoke-drain-transparency.sh for env knobs (BASE, SMOKE_DRAIN_*).
+smoke-drain-transparency:
+	bash scripts/smoke-drain-transparency.sh
 
 # Race-soak driver (US-006). Brings up the cassandra-backed stack
 # (`make up-all-ci` when CI=true, else `make up-all`), waits for /readyz on

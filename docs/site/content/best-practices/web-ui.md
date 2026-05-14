@@ -182,7 +182,8 @@ Phase 3 layers debug tooling on top without removing Phase 2 surface.
 | BucketReferencesDrawer (cluster card) | — | — | ✓ |
 | DrainProgressBar (cluster card) | — | — | ✓ |
 | DeregisterReadyChip (cluster card) | — | — | ✓ |
-| StrictModeChip (cluster card, global env) | — | — | ✓ |
+| StuckBucketsDrawer (cluster card, drain transparency) | — | — | ✓ |
+| BulkPlacementFixDialog (drain transparency) | — | — | ✓ |
 | PolicyDrainWarningChip (BucketDetail Placement tab) | — | — | ✓ |
 
 ## Operational notes
@@ -232,21 +233,43 @@ Three Playwright specs run in CI under the `e2e-ui` job:
   Operator guide for the underlying endpoints + warning meanings is at
   [Storage status]({{< ref "/architecture/storage" >}}).
 - `web/e2e/drain-lifecycle.spec.ts` — Drain lifecycle cycle (US-007
-  drain-lifecycle): login → /storage → strict-mode chip visible → click
-  "Show affected buckets" on a cluster card → assert drawer enumerates
-  the bucket-references list → close drawer → Drain via the typed-
-  confirmation modal whose info row now reads "<N> buckets reference
-  this cluster" → assert card flips to draining + `<DrainProgressBar>`
-  renders "chunks remaining" → spoof `chunks_on_cluster=0` on the next
-  poll → assert green "Ready to deregister" chip → create a bucket, set
-  policy to `{cephb: 100}`, save → assert `policy-drain-warning`
-  testid renders on the Placement tab. All admin endpoints
-  (`/admin/v1/clusters`, `.../drain|undrain|drain-progress|
-  bucket-references|rebalance-progress`, `/admin/v1/storage/data`,
+  drain-lifecycle): login → /storage → click "Show affected buckets"
+  on a cluster card → assert drawer enumerates the bucket-references
+  list → close drawer → Drain via the typed-confirmation modal's
+  readonly mode picker (US-004 rewrote the modal in
+  drain-transparency) → assert card flips to draining +
+  `<DrainProgressBar>` renders "chunks remaining" → spoof
+  `chunks_on_cluster=0` on the next poll → assert green "Ready to
+  deregister" chip → create a bucket, set policy to `{cephb: 100}`,
+  save → assert `policy-drain-warning` testid renders on the Placement
+  tab. Operator runbook for the underlying endpoints is at
+  [Placement + rebalance — Drain lifecycle]({{< ref "/best-practices/placement-rebalance#drain-lifecycle" >}}).
+- `web/e2e/drain-transparency.spec.ts` — Drain transparency cycle
+  (US-008): three Playwright scenarios spoofing the new 4-state
+  machine + impact analysis + bulk-fix flow.
+  **Scenario A** drives the readonly mode picker — operator picks
+  `Stop new writes (maintenance)`, types the cluster id, submits, and
+  asserts the cluster card flips to `draining_readonly` with the
+  `<DrainProgressBar>` orange stop-writes chip.
+  **Scenario B** drives the evacuate path — flip the radio to
+  `Full evacuate (decommission)`, assert categorized counters render
+  via `cd-impact`, assert the amber `cd-stuck-warning` blocks submit
+  even with typed-confirm matching, click `cd-bulk-fix` → assert the
+  `<BulkPlacementFixDialog>` mounts, click `bpf-apply` → assert the
+  modal refetches /drain-impact (stuck=0, submit enables) → submit →
+  state flips to `evacuating` with the green deregister-ready chip on
+  the next poll once spoofed chunks reach zero.
+  **Scenario C** drives the upgrade path — start from
+  `draining_readonly`, click the `dp-upgrade` button on the progress
+  bar → modal opens with title `Upgrade to evacuate` and the readonly
+  radio hidden → submit → state flips to evacuating.
+  All admin endpoints (`/admin/v1/clusters`,
+  `.../drain|undrain|drain-progress|drain-impact|bucket-references|
+  rebalance-progress`, `/admin/v1/storage/data`,
   `/admin/v1/buckets/{name}/placement`) are spoofed via
   `page.route()` so the spec runs against the same memory-mode gateway
-  as the other e2e jobs. Operator runbook for the underlying endpoints
-  is at [Placement + rebalance — Drain lifecycle]({{< ref "/best-practices/placement-rebalance#drain-lifecycle" >}}).
+  as the other e2e jobs. Operator runbook is at [Placement + rebalance
+  — Drain lifecycle]({{< ref "/best-practices/placement-rebalance#drain-lifecycle" >}}).
 - `web/e2e/placement.spec.ts` — Placement + cluster surfacing cycle
   (US-006 placement-ui): login → /storage → cluster cards rendered →
   create bucket → Placement tab → drag slider for `cephb` to 100 →
