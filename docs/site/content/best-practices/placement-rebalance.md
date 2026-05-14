@@ -285,6 +285,83 @@ list) on the replica you expect to lead.
   need a per-cluster pool override, register a second class on the
   target cluster (same pattern as the S3 backend's `bucketOnCluster`).
 
+## Cluster lifecycle (register → activate → ramp)
+
+`ralph/cluster-weights` (US-001..US-005) folded a 5th state — `pending` —
+into the cluster machine and added a per-cluster `weight int (0..100)`
+field. Together they enable a safe gradual-activation flow for new
+clusters: register the new cluster via env, validate it without taking
+client traffic, ramp the routing share 10% → 25% → 50% → 100% under
+observation.
+
+### Two weight layers — never combined
+
+Strata has **two** weight knobs that look alike. They serve different
+scopes and are **never multiplied together**:
+
+| Layer | Source | Scope | When consulted |
+| ----- | ------ | ----- | -------------- |
+| Bucket `Placement` policy | `meta.Bucket.Placement` (PUT `/admin/v1/buckets/<name>/placement`) | Per-bucket override | Always wins. Picker consults it first; if non-nil, cluster weights are ignored for this bucket. |
+| Cluster `weight` | `cluster_state.weight` (POST `/clusters/<id>/activate` or PUT `/clusters/<id>/weight`) | Cross-bucket default | Only when `bucket.Placement == nil` AND the class env carries no `@cluster` pin. Picker synthesises `{<live-cluster>: <its-weight>}` for that PUT. |
+
+The picker order inside `placement.PickCluster` is:
+
+1. `bucket.Placement != nil` → use bucket policy (short-circuit before
+   weights).
+2. Class env spec carries `@cluster` pin (e.g. `STANDARD=hot@cephb`) →
+   use that cluster.
+3. Synthesise default policy from live cluster weights (skipping
+   pending / draining_readonly / evacuating / removed). All-zero-live →
+   policy is empty → caller falls back to class spec.Cluster.
+
+### Walkthrough table — adding `cephc` to a live deploy
+
+| # | Operator action | Surface | What changes |
+|---|-----------------|---------|--------------|
+| 1 | Edit `STRATA_RADOS_CLUSTERS`: add `cephc:/etc/ceph-c/ceph.conf` | env file edit | New cluster id appears at next restart. |
+| 2 | Rolling-restart strata replicas | `docker compose restart` | Out-of-band — orchestrator picks the cadence. |
+| 3 | Gateway boot reconcile (`internal/serverapp/cluster_reconcile.go`) | log INFO `"cluster auto-init"` | Compares env vs `cluster_state` rows. New id with no chunks → state=`pending` weight=0. Existing id whose `bucket_stats` already reference it → state=`live` weight=100 (backwards-compat). Idempotent on re-run. |
+| 4 | Open `/console/storage` | Storage page | `<ClustersSubsection>` renders the new card. |
+| 5 | See cephc card with gray badge "Pending — not receiving writes" | `<ClusterCard>` (pending variant) | No Drain button. "Activate" CTA replaces it. |
+| 6 | Click Activate | `<ActivateClusterModal>` opens | Modal mirrors the typed-confirm precedent from `<ConfirmDrainModal>` — Submit stays disabled until you type the exact cluster id. |
+| 7 | Drag slider / fill numeric input to 10 (default), type `cephc`, Submit | `POST /admin/v1/clusters/cephc/activate {weight:10}` | Cluster flips to `state=live weight=10`. Drain cache invalidated synchronously so the next PUT sees the new state without waiting out the 30 s TTL. Audit row stamped `admin:ActivateCluster`. |
+| 8 | New PUTs on nil-policy buckets start landing on cephc ~10% of the time | rebalance worker is **not** involved on the PUT path — `placement.PickCluster` consults the synthesised policy directly | Monitor on Grafana over a tier (hour → day) to confirm the cluster behaves under real load. |
+| 9 | Drag the inline slider on the cephc card to 25 | `<LiveClusterWeightSlider>` | Debounces 500 ms then `PUT /admin/v1/clusters/cephc/weight {weight:25}`. Rapid drags coalesce to one PUT. Optimistic UI — slider position updates immediately; revert on 4xx. Audit row stamped `admin:UpdateClusterWeight`. |
+| 10 | Repeat ramp 25 → 50 → 100 | (each step a slider drag) | Cluster fully integrated. Default routing among live clusters is proportional to `weight`. |
+
+### Choosing the initial weight
+
+| Scenario | Suggested initial weight | Why |
+| -------- | ----------------------- | --- |
+| Brand-new production cluster (untrusted hardware, fresh OSDs) | `10` | One-tenth of new traffic flows there. Diagnose under low load before ramping. |
+| Trusted clone of an existing cluster (drop-in identical hardware) | `100` | No reason to throttle — symmetric capacity, well-known config. |
+| Reactivating a recently-drained cluster | `0`, then ramp manually | Lets the operator validate state=live separately from routing share. `weight=0 + state=live` is legal — reads + explicit policies still route there. |
+
+### Negative paths
+
+- **Activate on a `live` cluster** → `409 InvalidTransition`. Use
+  `PUT /weight` for in-place adjustments.
+- **PUT `/weight` on a `pending` cluster** → `409 InvalidTransition`.
+  Must POST `/activate` first.
+- **All live clusters have `weight=0`** → synthesised default policy is
+  empty → `PickCluster` returns `""` → caller falls back to class
+  `spec.Cluster` (or 503 `<Code>DrainRefused</Code>` if the fallback
+  cluster is draining).
+- **Boot reconcile sees an existing-live cluster (chunks via
+  `bucket_stats`)** → auto-creates `state=live weight=100`, not
+  `pending`. Zero operator action required during upgrade from older
+  strata versions.
+
+### `cluster_state` schema reminder
+
+`cluster_state` rows carry `state` + `mode` + `weight` (added in
+ralph/cluster-weights US-001). Absence still means "live" — the boot
+reconcile materialises the row when needed. Memory + Cassandra + TiKV
+backends carry the same three fields; the TiKV value is a 3-segment
+byte string `state\x00mode\x00<decimal-weight>` so older 1- and
+2-segment values decode as `weight=0` on read (forward-compat with
+mid-upgrade clusters).
+
 ## Drain lifecycle
 
 Drain is the operator hook that takes a cluster out of the write hot path —
