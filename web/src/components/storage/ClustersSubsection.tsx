@@ -362,6 +362,10 @@ function ClusterCard({ cluster, usage }: ClusterCardProps) {
         open={refsOpen}
         onOpenChange={setRefsOpen}
         clusterID={cluster.id}
+        onOpenBulkFix={(stuck) => {
+          setBulkFixStuck(stuck);
+          setBulkFixOpen(true);
+        }}
       />
     </Card>
   );

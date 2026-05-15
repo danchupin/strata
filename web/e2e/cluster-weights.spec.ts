@@ -188,19 +188,6 @@ function installRoutes(page: Page, state: SpoofState) {
     });
   });
 
-  // /admin/v1/clusters/{id}/bucket-references — quiet
-  page.route('**/admin/v1/clusters/*/bucket-references**', async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({
-        buckets: [],
-        total_buckets: 0,
-        next_offset: null,
-      }),
-    });
-  });
-
   // /admin/v1/storage/data — minimal pool shape so ClustersSubsection mounts
   page.route('**/admin/v1/storage/data', async (route) => {
     await route.fulfill({

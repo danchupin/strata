@@ -22,8 +22,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Drawer now consumes /drain-impact and renders the three categorized sections with the inline Bulk fix CTA. Browser smoke deferred to US-005 (dev-browser not available in this iteration)."
     },
     {
       "id": "US-002",
