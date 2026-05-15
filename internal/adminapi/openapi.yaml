@@ -1714,13 +1714,65 @@ paths:
         - name: offset
           in: query
           schema: { type: integer, minimum: 0, default: 0 }
-          description: "Skip the first N entries from the LRU front"
+          description: "Skip the first N entries from the filtered LRU set"
+        - name: method
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [PUT, GET, DELETE, POST, HEAD, OPTIONS, PATCH]
+          description: |
+            Case-insensitive HTTP method filter; matched against the
+            `<METHOD> <path>` prefix on the root span name.
+        - name: status
+          in: query
+          required: false
+          schema: { type: string, enum: [OK, Error] }
+          description: "Case-insensitive aggregated trace status filter."
+        - name: path_substr
+          in: query
+          required: false
+          schema: { type: string, maxLength: 256 }
+          description: |
+            Case-insensitive substring filter applied to the root span name.
+            Aliased by `path` for URL brevity (both accepted; `path_substr`
+            wins when both are set).
+        - name: path
+          in: query
+          required: false
+          schema: { type: string, maxLength: 256 }
+          description: "Alias for `path_substr`."
+        - name: min_duration_ms
+          in: query
+          required: false
+          schema: { type: integer, format: int64, minimum: 0 }
+          description: "Lower bound on trace duration in milliseconds (inclusive)."
+        - name: max_duration_ms
+          in: query
+          required: false
+          schema: { type: integer, format: int64, minimum: 0 }
+          description: |
+            Upper bound on trace duration in milliseconds (inclusive). When
+            both `min_duration_ms` and `max_duration_ms` are supplied, the
+            server rejects `min > max` with `400 InvalidFilter`.
       responses:
         '200':
-          description: Recent trace summaries.
+          description: |
+            Recent trace summaries filtered by query params. `total` reflects
+            the count after filtering so the cursor walks the filtered set
+            rather than the full ring buffer.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/DiagnosticsTracesResponse' }
+        '400':
+          description: |
+            One of the filter query params is malformed (unknown method,
+            unknown status, non-integer duration bound, `min > max`, or path
+            substring above the 256-character limit). The response body is a
+            standard `Error` object with `code="InvalidFilter"`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '401':
           $ref: '#/components/responses/Unauthorized'
         '503':

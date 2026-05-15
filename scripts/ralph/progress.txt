@@ -20,3 +20,15 @@ Cycle: ralph/drain-followup
 - **Verification per UI story** (US-002, US-003): `pnpm run typecheck` + `pnpm run build` + dev-browser verify on lab. Final US-006 gated on `make smoke-drain-followup` against the running lab.
 - **End-to-end discipline** (per `feedback_cycle_end_to_end.md` items 1-12): every story serves at least one walkthrough step from PRD; US-006 smoke covers all 16 walkthrough steps; failed smoke blocks ROADMAP close-flip; State Truth Tables + Cache Invalidation Ledger + Safety Claims Preconditions in PRD demonstrate the discipline retroactively.
 
+## 2026-05-15 — US-001 Server-side trace filter
+- Added `ringbuf.FilterOpts` + `RingBuffer.Filter(opts)` that walks the LRU in front-to-back order applying method-prefix / status / case-insensitive path-substring / min-max duration_ms; pointer bounds let `0` be a valid explicit value while nil = unbounded.
+- Rewrote `handleDiagnosticsTraces` to parse `method`/`status`/`path`/`path_substr`/`min_duration_ms`/`max_duration_ms` from the query string, return `400 InvalidFilter` on bad enums / non-integer durations / negative durations / min>max / path>256, then filter→paginate. `total` now reports the filtered count so the cursor walks the filtered subset.
+- OpenAPI `GET /diagnostics/traces` documents the new query params (enum on method+status, maxLength=256 on path*, int64≥0 on duration bounds) plus the new `400` response with `code=InvalidFilter`.
+- Tests: per-axis (method/status/path/duration) + combination + filter-before-pagination + invalid-value table-test for all eight rejection paths. RingBuffer-level filter tests use the existing `tracetest.SpanStub` shape with explicit StartTime/EndTime/Status so duration+status assertions are deterministic.
+- Files: `internal/otel/ringbuf/ringbuf.go`, `internal/otel/ringbuf/ringbuf_test.go`, `internal/adminapi/diagnostics_traces.go`, `internal/adminapi/diagnostics_traces_test.go`, `internal/adminapi/openapi.yaml`.
+- **Learnings:**
+  - The handler uses `url.Values` (which is `map[string][]string`); `firstQuery` works for both — pass `r.URL.Query()` directly without conversion.
+  - `tracetest.SpanStub` lets you set `StartTime`/`EndTime`/`Status` explicitly — needed for duration+status assertions because `makeStub` defaults to zero times → duration 0.
+  - Pointer-based optional ints (`*int64`) keep `0` distinguishable from "unset" without an extra HasMin/HasMax pair.
+  - OpenAPI updates live in `internal/adminapi/openapi.yaml`; the description in the 200 response should call out that `total = filtered count` so UI consumers don't get surprised when pagination jumps after a filter change.
+---
