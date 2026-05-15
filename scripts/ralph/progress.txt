@@ -120,3 +120,38 @@ Cycle: ralph/effective-placement
   - The drain-impact preview-states synthesis (overwrite excludeForTargets ids with draining_readonly) keeps the rebalance worker + admin preview using ONE classifier — no second source of truth for "what happens if I drain this?".
   - Pre-existing tests that assumed `stuck_single_policy` for weighted buckets with all-draining Placement must either flip those buckets to mode=strict (preserves the old categorisation intent) or accept the new stuck_no_policy verdict (matches the new operator semantic). The PRD AC explicitly requires this change; updating tests is the correct move, not bug-fixing the classifier.
 ---
+
+## 2026-05-15 23:55 - US-004
+- BucketDetail Placement tab gains Strict placement Switch + per-bucket strict header badge.
+- New `PlacementMode` wire type + helpers in `web/src/api/placement.ts`:
+  - `BucketPlacement = {placement: Record<string, number>; mode: PlacementMode}` is the shape returned by `fetchBucketPlacement` (null on 404 NoSuchPlacement).
+  - `BucketPlacementJSON.mode?: PlacementMode` matches the server's optional-on-write/always-on-read contract.
+  - `setBucketPlacement(name, placement, mode?)` — when mode is supplied it lands in the JSON body so the server stamps `admin:UpdateBucketPlacementMode` (PUT body extended in US-001).
+  - `normalizeMode` coerces empty / legacy values to "weighted" so the UI never sees `""`.
+- New `web/src/components/ui/switch.tsx`: lightweight button[role=switch] with aria-checked + tailwind track/thumb. ~150B gz vs ~2.5 KiB gz for @radix-ui/react-switch — keeps the bundle delta well under the 2 KiB cap.
+- `BucketPlacementTab.tsx` rewrites the data path to the new shape:
+  - `initial` rows derive from `placementQ.data?.placement`.
+  - New `mode` state seeded from `placementQ.data?.mode ?? 'weighted'`; `dirty` now includes mode delta.
+  - Renders a Switch row above the per-cluster weight sliders. `title` carries the AC tooltip (when strict means what; default off).
+  - Flip ON opens `strictConfirmOpen` Dialog with the AC copy + amber rationale block; flip OFF is one-click (relaxing direction).
+  - Save sends `{placement, mode}` so the audit row always carries the operator's mode intent.
+- `BucketDetail.tsx` adds a placement useQuery against the same `queryKeys.buckets.placement(name)` key the tab already uses → no extra request (cache shared). `BucketBadges` receives the placement and renders a `<Badge variant="warning">strict</Badge>` chip only when policy is non-empty + mode === 'strict'. Nil-policy + strict is semantically weighted per EffectivePolicy, so the chip stays off.
+- `web/src/api/client.ts` re-exports `PlacementMode`, `BucketPlacement`, `normalizePlacementMode` so other components (US-005 BulkPlacementFixDialog filter) can import via the central barrel.
+- Files changed:
+  - web/src/api/placement.ts (PlacementMode type, BucketPlacement shape, mode-aware fetch/set, normalizeMode helper)
+  - web/src/api/client.ts (re-export new types + helper)
+  - web/src/components/ui/switch.tsx (NEW — lightweight Switch primitive)
+  - web/src/components/BucketPlacementTab.tsx (Switch row, mode state, confirm dialog, mode-aware Save, refactor to new fetch shape)
+  - web/src/pages/BucketDetail.tsx (placement useQuery, strict badge in BucketBadges)
+- Quality:
+  - pnpm typecheck passes
+  - pnpm build passes (bundle delta ~0.9 KiB gz on index chunk)
+  - pnpm test:unit (54 tests) passes
+  - Browser verification deferred — no dev-browser MCP wired in this environment; US-006 Playwright spec is the canonical UI smoke gate.
+- **Learnings for future iterations:**
+  - `web/src/components/ui/` follows the shadcn shape (cva + tailwind classes + forwardRef). Adding new primitives needs no extra dep — the codebase already has `@radix-ui/react-{dialog,select,tabs,...}` so reach for those when stateful interaction is required, but simple button-shaped controls (Switch, Toggle) are cheaper to inline than to import.
+  - When extending an API wrapper shape (e.g. `fetchBucketPlacement` from `Record<string, number>` to `{placement, mode}`), update every downstream `.data?` access — TS catches most but accesses like `Object.entries(placementQ.data ?? {})` silently work on the empty literal and only break at runtime.
+  - `queryKeys.buckets.placement(name)` is shared between BucketDetailPage (badge) and BucketPlacementTab (editor) — `@tanstack/react-query` dedupes both calls into a single request via the cache. Reuse the existing key over a parallel query.
+  - `<Badge>` accepts `title` natively because its props extend `React.HTMLAttributes<HTMLDivElement>` — no need to wrap in `<span title=...>`.
+  - Per-bucket compliance / data-sovereignty flips are operator-destructive in the ON direction (may block drain) and benign in the OFF direction (relaxing). Mirror the asymmetric confirm pattern (confirm-on-enable, no-confirm-on-disable) used by the rest of the placement UI rather than wrapping both transitions in a Dialog.
+---

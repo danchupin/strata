@@ -90,8 +90,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Landed: BucketDetail Placement tab Strict toggle + strict header badge. Added PlacementMode wire type to api/placement.ts (BucketPlacement now {placement, mode}; setBucketPlacement gained optional mode arg; normalizeMode coerces empty/legacy to weighted). Added lightweight web/src/components/ui/switch.tsx (button[role=switch], aria-checked, ~150B gz — avoids @radix-ui/react-switch). BucketPlacementTab tracks mode in state, marks dirty on change, renders Switch row with title=tooltip explaining strict vs weighted, opens new strictConfirmOpen Dialog on flip ON (no confirm on flip OFF per AC), Save sends mode along with weights (always, so audit stamps admin:UpdateBucketPlacementMode). BucketDetailPage shares the placement query (same queryKey, no extra request) and passes placement to BucketBadges; badge renders only when bucket has policy AND mode==strict (nil-policy+strict is semantically weighted per EffectivePolicy). pnpm typecheck + build pass; bundle delta ~0.9 KiB gz (well under 2 KiB cap); pnpm test:unit (54 tests) pass. Manual browser verification deferred to US-006 e2e (no dev-browser MCP available in this environment)."
     },
     {
       "id": "US-005",

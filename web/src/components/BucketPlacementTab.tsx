@@ -9,9 +9,11 @@ import {
   setBucketPlacement,
   type BucketDetail,
   type ClusterStateEntry,
+  type PlacementMode,
 } from '@/api/client';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Switch } from '@/components/ui/switch';
 import {
   Card,
   CardContent,
@@ -118,14 +120,17 @@ export function BucketPlacementTab({ bucket }: Props) {
     [clustersQ.data],
   );
   const initial = useMemo(
-    () => buildInitialRows(clusters, placementQ.data ?? null),
+    () => buildInitialRows(clusters, placementQ.data?.placement ?? null),
     [clusters, placementQ.data],
   );
+  const initialMode: PlacementMode = placementQ.data?.mode ?? 'weighted';
 
   const [rows, setRows] = useState<Record<string, RowState>>(initial);
+  const [mode, setMode] = useState<PlacementMode>(initialMode);
   const [saving, setSaving] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [strictConfirmOpen, setStrictConfirmOpen] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -133,8 +138,13 @@ export function BucketPlacementTab({ bucket }: Props) {
     setServerError(null);
   }, [initial]);
 
-  const dirty = !rowsEqual(rows, initial);
-  const hasPolicy = placementQ.data != null && Object.keys(placementQ.data).length > 0;
+  useEffect(() => {
+    setMode(initialMode);
+  }, [initialMode]);
+
+  const dirty = !rowsEqual(rows, initial) || mode !== initialMode;
+  const hasPolicy =
+    placementQ.data != null && Object.keys(placementQ.data.placement).length > 0;
 
   // policyAllDraining: every cluster id with non-zero weight in the saved
   // policy maps to a cluster whose state=draining. The warning is read from
@@ -151,7 +161,7 @@ export function BucketPlacementTab({ bucket }: Props) {
   }, [clustersQ.data]);
   const policyAllDraining = useMemo<boolean>(() => {
     if (!hasPolicy) return false;
-    const ids = Object.entries(placementQ.data ?? {})
+    const ids = Object.entries(placementQ.data?.placement ?? {})
       .filter(([, w]) => (w ?? 0) > 0)
       .map(([id]) => id);
     if (ids.length === 0) return false;
@@ -182,7 +192,7 @@ export function BucketPlacementTab({ bucket }: Props) {
     setServerError(null);
     try {
       const placement = rowsToPlacement(rows);
-      await setBucketPlacement(bucket.name, placement);
+      await setBucketPlacement(bucket.name, placement, mode);
       await queryClient.invalidateQueries({
         queryKey: queryKeys.buckets.placement(bucket.name),
       });
@@ -297,6 +307,41 @@ export function BucketPlacementTab({ bucket }: Props) {
               New PUTs will be refused (strict mode) or fall back to the class
               default (default mode). Update the policy before traffic resumes.
             </div>
+          </div>
+        )}
+
+        {!loading && clusters.length > 0 && (
+          <div
+            className="flex items-start justify-between gap-3 rounded-md border p-3"
+            title="When ON, this bucket will refuse PUTs and block drain if all clusters in its Placement policy are draining. When OFF (default), it falls back to cluster default routing weights. Turn ON for compliance-sensitive buckets (data-sovereignty, replication design)."
+          >
+            <div className="flex-1">
+              <Label htmlFor="placement-mode-switch" className="text-sm font-medium">
+                Strict placement
+              </Label>
+              <div className="mt-1 text-xs text-muted-foreground">
+                Refuse PUTs and block drain when every cluster in this
+                policy is draining (compliance / data-sovereignty pin).
+                Default: off — falls back to cluster default routing
+                weights.
+              </div>
+            </div>
+            <Switch
+              id="placement-mode-switch"
+              checked={mode === 'strict'}
+              onCheckedChange={(next) => {
+                if (next) {
+                  // Opt-in is the destructive direction (may block drain) —
+                  // require explicit confirmation. Relaxing back to
+                  // weighted is one-click per AC.
+                  setStrictConfirmOpen(true);
+                } else {
+                  setMode('weighted');
+                }
+              }}
+              disabled={saving || resetting}
+              aria-label="Strict placement mode"
+            />
           </div>
         )}
 
@@ -429,6 +474,46 @@ export function BucketPlacementTab({ bucket }: Props) {
                 <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" aria-hidden />
               )}
               Reset
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={strictConfirmOpen} onOpenChange={setStrictConfirmOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Enable strict placement?</DialogTitle>
+            <DialogDescription>
+              Strict placement may block drain workflows if this bucket&apos;s
+              clusters become unavailable. Continue?
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-sm text-amber-700 dark:text-amber-300">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+            <div className="text-xs">
+              PUTs will return 503 when every cluster in this policy is
+              draining; drain workflows refuse to fire until the policy is
+              edited. Choose strict only for compliance / data-sovereignty
+              buckets where falling back to cluster default routing is
+              unacceptable.
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setStrictConfirmOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={() => {
+                setMode('strict');
+                setStrictConfirmOpen(false);
+              }}
+            >
+              Enable strict
             </Button>
           </DialogFooter>
         </DialogContent>

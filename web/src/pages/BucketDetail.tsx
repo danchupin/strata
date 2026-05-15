@@ -14,8 +14,10 @@ import {
 
 import {
   fetchBucket,
+  fetchBucketPlacement,
   fetchObjects,
   type BucketDetail,
+  type BucketPlacement,
   type ObjectsResponse,
 } from '@/api/client';
 import { queryClient, queryKeys } from '@/lib/query';
@@ -178,6 +180,17 @@ export function BucketDetailPage() {
     meta: { label: `bucket ${name}` },
   });
 
+  // Placement query feeds the strict-mode header badge (US-004
+  // effective-placement). The Placement tab shares the same queryKey
+  // so no duplicate request — the cache is reused when the operator
+  // opens the tab.
+  const placementQ = useQuery<BucketPlacement | null>({
+    queryKey: queryKeys.buckets.placement(name),
+    queryFn: () => fetchBucketPlacement(name),
+    enabled: Boolean(name),
+    meta: { silent: true },
+  });
+
   const currentMarker = markerStack[markerStack.length - 1] ?? '';
   const objectsQ = useQuery<ObjectsResponse>({
     queryKey: queryKeys.buckets.objects(name, effectivePrefix, currentMarker),
@@ -260,7 +273,12 @@ export function BucketDetailPage() {
         </Link>
         <div className="flex flex-wrap items-center gap-3">
           <h1 className="text-2xl font-semibold tracking-tight">{name}</h1>
-          {detail && <BucketBadges detail={detail} />}
+          {detail && (
+            <BucketBadges
+              detail={detail}
+              placement={placementQ.data ?? null}
+            />
+          )}
           <div className="ml-auto">
             <Button
               type="button"
@@ -598,7 +616,13 @@ function trimPrefix(s: string, prefix: string): string {
   return prefix && s.startsWith(prefix) ? s.slice(prefix.length) : s;
 }
 
-function BucketBadges({ detail }: { detail: BucketDetail }) {
+function BucketBadges({
+  detail,
+  placement,
+}: {
+  detail: BucketDetail;
+  placement: BucketPlacement | null;
+}) {
   const versioning = detail.versioning ?? 'Off';
   const versioningVariant: 'success' | 'warning' | 'secondary' =
     versioning === 'Enabled'
@@ -606,12 +630,28 @@ function BucketBadges({ detail }: { detail: BucketDetail }) {
       : versioning === 'Suspended'
         ? 'warning'
         : 'secondary';
+  // Strict badge appears only when the bucket has a placement policy AND
+  // mode==="strict" — a bucket without policy has no compliance semantic
+  // attached to the mode flag (per EffectivePolicy: nil policy + strict
+  // is treated as weighted).
+  const isStrict =
+    placement != null &&
+    placement.mode === 'strict' &&
+    Object.keys(placement.placement).length > 0;
   return (
     <div className="flex items-center gap-2">
       <Badge variant={versioningVariant}>Versioning · {versioning}</Badge>
       <Badge variant={detail.object_lock ? 'success' : 'secondary'}>
         Object lock · {detail.object_lock ? 'On' : 'Off'}
       </Badge>
+      {isStrict && (
+        <Badge
+          variant="warning"
+          title="Strict placement: PUTs refuse fallback and drain is blocked when this bucket's policy clusters are draining."
+        >
+          strict
+        </Badge>
+      )}
     </div>
   );
 }
