@@ -179,8 +179,8 @@
         "Typecheck passes"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "scripts/smoke-drain-cleanup.sh + make smoke-drain-cleanup target shipped (13-step walkthrough closing the seven ROADMAP entries: drawer 3-category, /drain-impact cache invalidation, Pools chunk_count, force-empty GC enqueue, deregister_ready hard-safety, state-aware buttons, trace browser list view). web/e2e/drain-cleanup.spec.ts covers the UI half via spoofed admin endpoints (drawer → bulk fix Apply → ConfirmDrainModal evacuate → Cancel deregister prep typed-confirm → TraceBrowser RecentTracesPanel). docs/site/content/best-practices/placement-rebalance.md Drain lifecycle section updated with 3-category drawer behavior, deregister-ready 3-condition preconditions, state-aware action buttons truth table, cache invalidation contract, and a smoke-drain-cleanup pointer. docs/site/content/best-practices/web-ui.md capability matrix gained entries for the 3-category drawer / `Chunks` Pools column / State-aware action buttons / CancelDeregisterPrepModal / RecentTracesPanel. ROADMAP.md SEVEN entries close-flipped in one commit (P2 BucketReferencesDrawer, P2 /drain-impact cache, P2 force-empty leak, P2 deregister_ready safety, P2 state-aware buttons, P2 trace browser list view, P3 Pools Objects→Chunks rename) — closing SHA carried as <pending> per CLAUDE.md rule, backfilled in the immediate follow-up commit. tasks/prd-drain-cleanup.md REMOVED per PRD lifecycle. Quality gates green: go vet ✓; go test ./... -count=1 -short ✓ (full repo); pnpm typecheck ✓; pnpm build ✓ (Storage 15.72 KB gzipped — within budget); make docs-build ✓ (59 pages). make smoke-drain-cleanup is lab-gated — runs against `docker compose --profile multi-cluster up -d` with STRATA_STATIC_CREDENTIALS exported (same skip-77 contract as smoke-drain-transparency.sh + smoke-cluster-weights.sh); structural syntax + cred-validation paths verified locally."
     }
   ]
 }

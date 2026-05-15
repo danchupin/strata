@@ -178,10 +178,10 @@ Phase 3 layers debug tooling on top without removing Phase 2 surface.
 | PlacementTab (BucketDetail) | — | — | ✓ |
 | DrainBanner (AppShell) | — | — | ✓ |
 | RebalanceProgressChip (cluster card) | — | — | ✓ |
-| Pools matrix (per-cluster × per-pool) | — | — | ✓ |
-| BucketReferencesDrawer (cluster card) | — | — | ✓ |
+| Pools matrix (per-cluster × per-pool, `Chunks` column — RADOS chunk count, hover-tooltip disambiguates from S3 object count) | — | — | ✓ |
+| BucketReferencesDrawer (3-category render: Migrating / Stuck — single-policy / Stuck — no policy, inline `Bulk fix N stuck buckets` CTA, drain-cleanup US-001) | — | — | ✓ |
 | DrainProgressBar (cluster card) | — | — | ✓ |
-| DeregisterReadyChip (cluster card) | — | — | ✓ |
+| DeregisterReadyChip (cluster card — gated on 3-condition hard-safety: manifest=0 AND gc_queue=0 AND multipart=0, drain-cleanup US-006) | — | — | ✓ |
 | StuckBucketsDrawer (cluster card, drain transparency) | — | — | ✓ |
 | BulkPlacementFixDialog (drain transparency) | — | — | ✓ |
 | PolicyDrainWarningChip (BucketDetail Placement tab) | — | — | ✓ |
@@ -189,6 +189,9 @@ Phase 3 layers debug tooling on top without removing Phase 2 surface.
 | ActivateClusterModal — typed-confirm + initial-weight slider | — | — | ✓ |
 | LiveClusterWeightSlider — inline debounced PUT | — | — | ✓ |
 | weight=0 chip on live cluster card | — | — | ✓ |
+| State-aware ClusterCard action buttons (Activate / Drain / Undrain (cancel evacuation) / Cancel deregister prep typed-confirm, drain-cleanup US-007) | — | — | ✓ |
+| CancelDeregisterPrepModal (typed-confirm — mirrors ConfirmDrainModal, drain-cleanup US-007) | — | — | ✓ |
+| RecentTracesPanel on Trace Browser (live ringbuf list, 10 s poll, sortable by Started / Duration, drain-cleanup US-008) | — | — | ✓ |
 
 ## Operational notes
 
