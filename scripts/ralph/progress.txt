@@ -57,3 +57,34 @@ Cycle: ralph/effective-placement
   - The bucket-row LWT lesson from `SetBucketVersioning` (CLAUDE.md cassandra gotchas) applies to every new buckets-column writer: `UPDATE ... IF EXISTS` keeps the write in the Paxos lineage that `CreateBucket` (`INSERT ... IF NOT EXISTS`) started, so LOCAL_QUORUM reads see the new value immediately. Skipping LWT would leak the read-after-write incoherence noted in the SetBucketVersioning comment.
   - The racetest oracle (`internal/racetest/TestRunCleanRunNoInconsistencies`) is timing-sensitive when the full test suite runs in parallel — failed once during `go test ./...`, passed on isolated re-run. Treat as a flake unless reproducible with `-count=N`.
 ---
+
+## 2026-05-15 23:00 - US-002
+- Added `placement.EffectivePolicy(bucketPolicy, mode, clusterWeights, clusterStates) map[string]int` in `internal/data/placement/policy.go` alongside the existing `DefaultPolicy` helper.
+- Shared internal helper `liveSubset(policy, states)` filters entries to (cluster live OR absent from states per absence==live semantic) AND weight>0. Used for both the bucket-policy live filter and the synthesised cluster-weights fallback.
+- Decision logic per PRD truth table:
+  1. liveSubset(bucketPolicy) non-empty → return it
+  2. bucketPolicy non-empty but live subset empty AND mode==strict → return nil (compliance stickiness; caller falls through to 503 / stuck_single_policy)
+  3. otherwise (mode != strict, or bucketPolicy nil entirely) → return liveSubset(clusterWeights)
+- `mode == ""` coerced to weighted via `meta.NormalizePlacementMode` (backwards-compat with legacy buckets).
+- Added 14 unit tests in `internal/data/placement/effective_test.go`:
+  - nil bucketPolicy + weighted / strict / "" → cluster weights returned
+  - bucketPolicy all-live × {"", weighted, strict} → returned as-is
+  - bucketPolicy mixed live/draining × all modes → live subset only
+  - bucketPolicy all-draining + weighted → fallback to weights
+  - bucketPolicy all-draining + strict → nil (compliance refuse)
+  - all clusters drained both ways × all modes → nil
+  - pending / removed clusters excluded from bucket-policy live subset
+  - absent cluster_state row treated as live (per `absence == live` semantic in CLAUDE.md)
+  - both bucketPolicy + clusterWeights empty under weighted → nil
+  - zero-weight bucket-policy entry filtered out
+  - PRD distribution test 1: bucketPolicy={x:1}, x draining, mode=weighted, weights={y:50,z:50} → 1000 PUTs ~50/50 on y/z (5% tol), x never picked
+  - PRD distribution test 2: same setup, mode=strict → policy nil → 1000 PickCluster calls all return ""
+- Files changed:
+  - internal/data/placement/policy.go (EffectivePolicy + liveSubset helper)
+  - internal/data/placement/effective_test.go (NEW — 14 unit tests including 2 PRD distribution tests)
+- **Learnings for future iterations:**
+  - `placement.EffectivePolicy` is the canonical entry point that future PutChunks + rebalance classifier (US-003) must route through. Direct `PickClusterExcluding` calls outside of the EffectivePolicy result map are the regression smell to grep for.
+  - `liveSubset` is reusable: same logic (live-state filter + weight>0) applies to both bucket-policy and cluster-weights inputs because cluster-state semantic ("absence == live") is identical for both.
+  - The `len(bucketPolicy) > 0 && norm == strict → nil` early return is what makes the helper return DIFFERENT results for nil-bucket+strict (treated as weighted, fallback to weights) vs configured-bucket+strict-all-draining (strict refuse, return nil). The distinction is "was a policy ever configured" — nil means no, the strict tag is meaningless without it.
+  - When adding a new placement decision branch, mirror it in the contract-test-like row enumeration (all-live, mixed, all-draining × weighted/strict) to keep the truth-table-driven semantic visible.
+---

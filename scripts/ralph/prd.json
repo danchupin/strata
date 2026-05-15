@@ -48,8 +48,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Landed: placement.EffectivePolicy(bucketPolicy, mode, clusterWeights, clusterStates) in internal/data/placement/policy.go alongside DefaultPolicy. Shared liveSubset helper filters policy entries to (cluster live OR absent from clusterStates per absence==live semantic) AND weight>0. Logic per PRD truth table: bucketPolicy non-empty after live filter → return as-is; empty+strict (with non-empty original) → nil (compliance refuse); otherwise → fallback to liveSubset(clusterWeights). mode==\"\" coerced to weighted via meta.NormalizePlacementMode. nil bucketPolicy + strict treated as weighted (strict needs explicit policy to be meaningful). 14 unit tests in effective_test.go: nil+weighted, nil+strict, empty-mode, all-live (all three modes), mixed live/draining, all-draining+weighted, all-draining+strict, all-clusters-drained, pending/removed excluded, absent-row-is-live, both-empty, zero-weight filtered, plus the two PRD distribution tests (1000 PUTs ~50/50 on Y/Z weighted-fallback; 1000 strict returns empty). go vet + go test ./internal/data/placement/ pass; racetest oracle TestRunCleanRunNoInconsistencies is the known flake from US-001 (passes in isolation)."
     },
     {
       "id": "US-003",
