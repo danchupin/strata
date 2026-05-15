@@ -533,7 +533,7 @@ components:
 
     BucketImpactEntry:
       type: object
-      required: [name, category, chunk_count, bytes_used, suggested_policies]
+      required: [name, category, placement_mode, chunk_count, bytes_used, suggested_policies]
       description: |
         One row in the by_bucket section of the /drain-impact response
         (US-003 drain-transparency). `current_policy` is null when the
@@ -541,7 +541,12 @@ components:
         initial policy" labels in that case. `category` is one of
         migratable / stuck_single_policy / stuck_no_policy and matches
         the per-bucket verdict the rebalance worker emits via the same
-        rebalance.ClassifyBucket helper.
+        rebalance.ClassifyBucket helper. `placement_mode` (US-005
+        effective-placement) is the bucket's normalized mode value —
+        "weighted" (default + legacy) or "strict". The UI filters the
+        BulkPlacementFixDialog to strict-flagged buckets because weighted
+        stuck buckets auto-resolve via cluster.weights post US-003 and
+        never appear as stuck_single_policy.
       properties:
         name: { type: string }
         current_policy:
@@ -554,6 +559,9 @@ components:
         category:
           type: string
           enum: [migratable, stuck_single_policy, stuck_no_policy]
+        placement_mode:
+          type: string
+          enum: [weighted, strict]
         chunk_count: { type: integer, format: int64 }
         bytes_used: { type: integer, format: int64 }
         suggested_policies:

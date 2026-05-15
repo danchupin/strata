@@ -51,10 +51,17 @@ type SuggestedPolicy struct {
 // /drain-impact response. CurrentPolicy is nil (JSON null) when the
 // bucket has no Placement — the suggested policies switch into "set
 // initial policy" mode in that case.
+//
+// PlacementMode (US-005 effective-placement) is the bucket's normalized
+// mode value — "weighted" (default + legacy) or "strict". The UI uses
+// it to filter the BulkPlacementFixDialog to strict-flagged buckets
+// (weighted stuck buckets auto-resolve via cluster.weights post US-003
+// EffectivePolicy and never appear as stuck_single_policy).
 type BucketImpactEntry struct {
 	Name              string            `json:"name"`
 	CurrentPolicy     map[string]int    `json:"current_policy"`
 	Category          string            `json:"category"`
+	PlacementMode     string            `json:"placement_mode"`
 	ChunkCount        int64             `json:"chunk_count"`
 	BytesUsed         int64             `json:"bytes_used"`
 	SuggestedPolicies []SuggestedPolicy `json:"suggested_policies"`
@@ -254,8 +261,9 @@ func computeDrainImpact(ctx context.Context, m meta.Store, clusterID string, row
 		effective := placement.EffectivePolicy(policy, b.PlacementMode, previewWeights, previewStates)
 		category := rebalance.ClassifyBucket(policy, effective, b.PlacementMode)
 		entry := BucketImpactEntry{
-			Name:     b.Name,
-			Category: category,
+			Name:          b.Name,
+			Category:      category,
+			PlacementMode: meta.NormalizePlacementMode(b.PlacementMode),
 		}
 		if len(policy) > 0 {
 			entry.CurrentPolicy = cloneIntMap(policy)

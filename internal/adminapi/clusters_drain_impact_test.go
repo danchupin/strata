@@ -172,6 +172,17 @@ func TestClusterDrainImpact_CategorizesAndSorts(t *testing.T) {
 	if stuck.SuggestedPolicies[1].Policy["c1"] != 0 {
 		t.Errorf("uniform suggestion must neutralize draining c1, got %+v", stuck.SuggestedPolicies[1].Policy)
 	}
+	// US-005 effective-placement: placement_mode is populated per bucket so
+	// the UI can filter BulkPlacementFixDialog to strict-flagged buckets.
+	if stuck.PlacementMode != meta.PlacementModeStrict {
+		t.Errorf("b-stuck-single placement_mode: got %q want %q", stuck.PlacementMode, meta.PlacementModeStrict)
+	}
+	if got.ByBucket[1].PlacementMode != meta.PlacementModeWeighted {
+		t.Errorf("b-no-policy placement_mode: got %q want %q (default coercion)", got.ByBucket[1].PlacementMode, meta.PlacementModeWeighted)
+	}
+	if got.ByBucket[2].PlacementMode != meta.PlacementModeWeighted {
+		t.Errorf("b-migratable placement_mode: got %q want %q (default coercion)", got.ByBucket[2].PlacementMode, meta.PlacementModeWeighted)
+	}
 }
 
 func TestClusterDrainImpact_RefusesEvacuatingState(t *testing.T) {

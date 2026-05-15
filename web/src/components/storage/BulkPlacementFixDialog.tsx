@@ -7,8 +7,10 @@ import {
 } from 'lucide-react';
 
 import {
+  normalizePlacementMode,
   setBucketPlacement,
   type BucketImpactEntry,
+  type PlacementMode,
   type SuggestedPolicy,
 } from '@/api/client';
 import { Badge } from '@/components/ui/badge';
@@ -39,8 +41,17 @@ interface Props {
   // stuck is the slice of /drain-impact `by_bucket` rows where category
   // != 'migratable' — the parent (ConfirmDrainModal) computes this from
   // its cached impact response and hands it down so the dialog can avoid
-  // a second fetch.
+  // a second fetch. The dialog internally filters to placement_mode ===
+  // 'strict' (US-005 effective-placement) because weighted stuck buckets
+  // auto-resolve via cluster.weights and never reach this surface.
   stuck: BucketImpactEntry[];
+}
+
+// strictOnly filters the stuck list to compliance-locked buckets (mode =
+// strict). Weighted stuck buckets auto-resolve via cluster.weights post
+// US-003 EffectivePolicy, so they never appear in BulkPlacementFixDialog.
+export function strictOnly(buckets: BucketImpactEntry[]): BucketImpactEntry[] {
+  return buckets.filter((b) => normalizePlacementMode(b.placement_mode) === 'strict');
 }
 
 interface ApplyOutcome {
@@ -69,6 +80,19 @@ export function uniformOptions(
     if (labelSets.every((s) => s.has(label))) intersection.push(label);
   }
   return intersection;
+}
+
+// resolveModeOverride decides which `mode` value to send to
+// /admin/v1/buckets/{name}/placement alongside the chosen policy. The
+// server stamps placement_mode_override on strict-stuck suggestions —
+// "weighted" for the Flip shortcut, "strict" for per-cluster
+// replacements. Empty/absent values default to "strict" because the
+// dialog is filtered to compliance-locked buckets and "leave mode
+// unchanged" would silently preserve the current strict flag — which
+// matches the operator's intent for replacement suggestions, but
+// explicit is clearer and audit-friendly.
+export function resolveModeOverride(choice: SuggestedPolicy): PlacementMode {
+  return choice.placement_mode_override === 'weighted' ? 'weighted' : 'strict';
 }
 
 // resolvePolicy returns the {clusterID: weight} body to PUT for `bucket`
@@ -141,6 +165,10 @@ export function BulkPlacementFixDialog({
   clusterID,
   stuck,
 }: Props) {
+  // strictStuck is the filtered slice — only compliance-locked rows reach
+  // the dialog. Weighted stuck buckets auto-resolve via cluster.weights
+  // and are silently dropped here (operator has nothing to do with them).
+  const strictStuck = useMemo(() => strictOnly(stuck), [stuck]);
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [perBucketIdx, setPerBucketIdx] = useState<Record<string, number>>({});
   const [applyUniform, setApplyUniform] = useState(false);
@@ -152,7 +180,7 @@ export function BulkPlacementFixDialog({
     if (!open) return;
     const sel: Record<string, boolean> = {};
     const picks: Record<string, number> = {};
-    for (const b of stuck) {
+    for (const b of strictStuck) {
       sel[b.name] = true;
       picks[b.name] = 0;
     }
@@ -162,16 +190,16 @@ export function BulkPlacementFixDialog({
     setUniformLabel('');
     setApplying(false);
     setDoneCount(0);
-  }, [open, stuck]);
+  }, [open, strictStuck]);
 
   const selectedCount = useMemo(
-    () => stuck.filter((b) => selected[b.name] !== false).length,
-    [stuck, selected],
+    () => strictStuck.filter((b) => selected[b.name] !== false).length,
+    [strictStuck, selected],
   );
 
   const uniformLabels = useMemo(
-    () => uniformOptions(stuck, selected),
-    [stuck, selected],
+    () => uniformOptions(strictStuck, selected),
+    [strictStuck, selected],
   );
 
   // Clear an out-of-range uniform pick when the selection shrinks below
@@ -193,12 +221,12 @@ export function BulkPlacementFixDialog({
 
   function toggleAll(nextChecked: boolean) {
     const next: Record<string, boolean> = {};
-    for (const b of stuck) next[b.name] = nextChecked;
+    for (const b of strictStuck) next[b.name] = nextChecked;
     setSelected(next);
   }
 
   async function handleApply() {
-    const targets = stuck.filter((b) => selected[b.name] !== false);
+    const targets = strictStuck.filter((b) => selected[b.name] !== false);
     if (targets.length === 0) return;
     setApplying(true);
     setDoneCount(0);
@@ -213,8 +241,14 @@ export function BulkPlacementFixDialog({
         setDoneCount((n) => n + 1);
         continue;
       }
+      // mode override: the server stamps placement_mode_override on
+      // strict-stuck suggestions — "weighted" for the Flip shortcut,
+      // "strict" for per-cluster replacements that preserve the
+      // compliance pin. When absent (defensive), default to "strict"
+      // because the bucket is currently compliance-locked.
+      const overrideMode = resolveModeOverride(choice);
       try {
-        await setBucketPlacement(b.name, choice.policy);
+        await setBucketPlacement(b.name, choice.policy, overrideMode);
         outcome.ok += 1;
       } catch (err) {
         outcome.failures.push({
@@ -272,12 +306,13 @@ export function BulkPlacementFixDialog({
     <Dialog open={open} onOpenChange={handleClose}>
       <DialogContent className="max-w-3xl">
         <DialogHeader>
-          <DialogTitle>Fix bucket placement policies</DialogTitle>
+          <DialogTitle>Fix compliance-locked buckets</DialogTitle>
           <DialogDescription>
-            Update each affected bucket's Placement policy so at least one
-            live cluster can accept its chunks. Each bucket gets the
-            suggested policy you pick below; cancel to leave policies
-            untouched.
+            These buckets are pinned to strict placement and reference only
+            draining clusters. Pick a remediation per bucket: flip to
+            weighted (auto-fallback to cluster weights), replace the cluster
+            (keeps strict), or keep stuck (leave for later). Weighted stuck
+            buckets are not shown — they auto-resolve via cluster weights.
           </DialogDescription>
         </DialogHeader>
 
@@ -304,8 +339,8 @@ export function BulkPlacementFixDialog({
               Deselect all
             </Button>
             <span className="text-muted-foreground">
-              {selectedCount.toLocaleString()} of {stuck.length.toLocaleString()}{' '}
-              selected
+              {selectedCount.toLocaleString()} of{' '}
+              {strictStuck.length.toLocaleString()} selected
             </span>
           </div>
           <label className="flex items-center gap-2">
@@ -371,7 +406,18 @@ export function BulkPlacementFixDialog({
               </tr>
             </thead>
             <tbody>
-              {stuck.map((b) => {
+              {strictStuck.length === 0 && (
+                <tr data-testid="bpf-empty">
+                  <td
+                    colSpan={5}
+                    className="px-3 py-6 text-center text-xs text-muted-foreground"
+                  >
+                    No compliance-locked buckets to fix. Weighted stuck
+                    buckets auto-resolve via cluster weights.
+                  </td>
+                </tr>
+              )}
+              {strictStuck.map((b) => {
                 const isChecked = selected[b.name] !== false;
                 const suggestions = b.suggested_policies ?? [];
                 const idx = perBucketIdx[b.name] ?? 0;
@@ -539,7 +585,7 @@ export function BulkPlacementFixDialog({
             ) : (
               <>
                 <CheckCircle2 className="mr-2 h-3.5 w-3.5" aria-hidden />
-                Apply to {selectedCount}{' '}
+                Fix {selectedCount} compliance-locked{' '}
                 {selectedCount === 1 ? 'bucket' : 'buckets'}
               </>
             )}

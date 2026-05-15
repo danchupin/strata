@@ -121,6 +121,44 @@ Cycle: ralph/effective-placement
   - Pre-existing tests that assumed `stuck_single_policy` for weighted buckets with all-draining Placement must either flip those buckets to mode=strict (preserves the old categorisation intent) or accept the new stuck_no_policy verdict (matches the new operator semantic). The PRD AC explicitly requires this change; updating tests is the correct move, not bug-fixing the classifier.
 ---
 
+## 2026-05-16 00:30 - US-005
+- BulkPlacementFixDialog now filters its input `stuck` array to placement_mode=='strict' via new `strictOnly` helper. Weighted stuck buckets auto-resolve via cluster.weights post US-003 EffectivePolicy and never reach the dialog. Empty-state row renders when zero strict-stuck remain.
+- Dialog header rewritten around compliance-fix narrative: title "Fix compliance-locked buckets" + description explaining the three actions (flip / replace / keep). Apply CTA label: "Fix N compliance-locked bucket(s)" (was "Apply to N buckets"). Selection counter denominator switched from `stuck.length` to `strictStuck.length`.
+- Apply path threads new `resolveModeOverride(choice)` helper into `setBucketPlacement`: server stamps placement_mode_override on every strict-stuck suggestion (weighted for Flip, strict for per-cluster replacements) so the operator's mode intent lands in the PUT body and the server stamps `admin:UpdateBucketPlacementMode` audit. Defensive default is "strict" (dialog is filtered to compliance-locked → "leave mode unchanged" would silently preserve strict, but explicit is audit-friendly).
+- Server-side BucketImpactEntry gains `PlacementMode string` field populated via `meta.NormalizePlacementMode(b.PlacementMode)` in computeDrainImpact. OpenAPI schema updated: new required enum [weighted, strict] on BucketImpactEntry. TS interface in web/src/api/clusters.ts mirrors. TS SuggestedPolicy also documented `placement_mode_override` field that was already wire-present from US-003.
+- ConfirmDrainModal amber stuck-row text updated: "N compliance-locked buckets need fix" (was "N chunks across M buckets would be stranded"). Submit blocks on complianceLockedCount instead of stuckTotal — when zero strict-stuck remain the amber row hides and Submit unlocks per PRD. Wrench CTA label: "Fix N compliance-locked bucket(s)". onOpenBulkFix passes the compliance-locked subset (not all stuck) so the dialog never sees weighted stuck rows.
+- BucketReferencesDrawer mirrors the same shape: stuck button computes a local `complianceLocked` array, button reads "Fix N compliance-locked bucket(s)", click hands down only the strict subset.
+- "Apply uniform to all selected" toggle works unchanged — the server emits identical "Flip to weighted (auto-fallback to cluster weights)" labels on every strict-stuck bucket, so it lives naturally in the uniformOptions intersection alongside any common replacement labels.
+- Tests: 3 new mjs unit tests (strictOnly, strictOnly legacy "" coercion, resolveModeOverride 4-case truth table) — 57 total pass. Existing Go test `TestClusterDrainImpact_CategorizesAndSorts` extended with placement_mode field assertions (strict on b-stuck-single, weighted-coercion on the other two). All adminapi tests green.
+- Bundle size delta: index.js gz 191.71 KiB (≈+0.2 KiB) — well under the 3 KiB cap.
+- Files changed:
+  - internal/adminapi/clusters_drain_impact.go (BucketImpactEntry.PlacementMode field + populate in computeDrainImpact)
+  - internal/adminapi/clusters_drain_impact_test.go (assertions for placement_mode)
+  - internal/adminapi/openapi.yaml (BucketImpactEntry schema)
+  - web/src/api/clusters.ts (SuggestedPolicy.placement_mode_override + BucketImpactEntry.placement_mode)
+  - web/src/components/storage/BulkPlacementFixDialog.tsx (strictOnly filter + resolveModeOverride + Fix N CTA + Apply mode thread-through + empty-state row + title/description)
+  - web/src/components/storage/ConfirmDrainModal.tsx (complianceLocked computed + Submit blocks on count + amber row text + wrench CTA + ImpactSection signature)
+  - web/src/components/storage/BucketReferencesDrawer.tsx (complianceLocked computed + bulk-fix button text + click handler)
+  - web/src/components/storage/__tests__/bulk-placement-fix-dialog.test.mjs (fixture placement_mode field + strictOnly + resolveModeOverride tests + helper)
+- Quality:
+  - pnpm typecheck passes
+  - pnpm build passes (Storage chunk 63.62KB → 15.84KB gz)
+  - pnpm test:unit (57 tests) passes
+  - go vet ./... passes
+  - go build ./... passes
+  - go test ./internal/adminapi/ passes
+  - go test ./... has 2 pre-existing flakes (TestRunSmokeBinary, TestThreeReplicaDistribution) under parallel load — both pass in isolation; neither touches this story's code paths.
+  - Browser verification deferred to US-006 (no dev-browser MCP wired); Playwright spec in US-006 will exercise the dialog.
+- **Learnings for future iterations:**
+  - When a JSON wire shape needs a new field for UI branching, prefer server-side `Normalize()` coercion before serialisation so the client never sees "" or unknown values. Same pattern as US-001 GET /placement coercing "" → "weighted".
+  - The OpenAPI `required:` list must include any field the client treats as guaranteed-present — adding `placement_mode` to BucketImpactEntry.required pins the contract so a future server regression (omitting the field) is caught at schema-validation time, not at silent UI fallback time.
+  - `setBucketPlacement(name, policy, mode?)` from US-001 was designed for this story's call site: mode is optional on the wire so the legacy call sites (no-mode-change PUT) don't burn an audit row flip. The new bulk-fix call site always passes a mode so every fix carries the operator's intent through the audit log.
+  - UI filter pattern for compliance-vs-weighted UX: keep the SAME stuck-row shape on the wire but branch at the consumer based on the bucket's mode. Two consumers (ConfirmDrainModal + BucketReferencesDrawer) each compute their compliance-locked subset locally before handing the dialog the pre-filtered slice — the dialog itself defends in depth with its own `strictOnly` filter so it can't get a wrong-shape input from a future consumer.
+  - When changing a function's prop signature in React (e.g. `ImpactSection` from `{stuckBuckets, stuckTotal}` to `{complianceLocked}`), prefer renaming the props at the boundary even if the rename adds churn: it makes the intent visible at every call site instead of leaving a stale "stuck" name carrying a more specific meaning.
+  - For a dialog like BulkPlacementFixDialog where every row should be actionable, the empty state matters — adding a `colSpan` row when the filter yields zero results is a small UX win that makes the dialog's "no-op" state obvious to operators (e.g. open BulkFix on a weighted-only impact and see "No compliance-locked buckets to fix" rather than an empty table).
+  - The two existing flaky tests (TestRunSmokeBinary, TestThreeReplicaDistribution) are known timing-sensitive parallel-suite flakes — both pass in isolation, both reproduce intermittently under `-count=2`. Treat as flakes unless they reproduce with `-count=N` deterministically and trace back to this story's code paths.
+---
+
 ## 2026-05-15 23:55 - US-004
 - BucketDetail Placement tab gains Strict placement Switch + per-bucket strict header badge.
 - New `PlacementMode` wire type + helpers in `web/src/api/placement.ts`:

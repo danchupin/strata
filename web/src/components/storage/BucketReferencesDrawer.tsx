@@ -11,6 +11,7 @@ import { Link } from 'react-router-dom';
 
 import {
   fetchClusterDrainImpact,
+  normalizePlacementMode,
   type BucketImpactEntry,
 } from '@/api/client';
 import { Badge } from '@/components/ui/badge';
@@ -90,12 +91,16 @@ export function BucketReferencesDrawer({
     return { migrating, stuckSingle, stuckNoPolicy };
   }, [buckets]);
 
-  const stuckChunks =
-    (data?.stuck_single_policy_chunks ?? 0) +
-    (data?.stuck_no_policy_chunks ?? 0);
-  const stuckBuckets = useMemo<BucketImpactEntry[]>(
-    () => [...grouped.stuckSingle, ...grouped.stuckNoPolicy],
-    [grouped.stuckSingle, grouped.stuckNoPolicy],
+  // complianceLocked is the compliance-fix surface (US-005 effective-
+  // placement): only strict-flagged stuck_single_policy buckets reach
+  // BulkPlacementFixDialog because weighted buckets auto-resolve via
+  // cluster.weights.
+  const complianceLocked = useMemo<BucketImpactEntry[]>(
+    () =>
+      grouped.stuckSingle.filter(
+        (b) => normalizePlacementMode(b.placement_mode) === 'strict',
+      ),
+    [grouped.stuckSingle],
   );
   const totalChunks = data?.total_chunks ?? 0;
   const totalBuckets = data?.total_buckets ?? buckets.length;
@@ -159,18 +164,18 @@ export function BucketReferencesDrawer({
               of <span className="font-medium text-foreground">{totalBuckets}</span>
             </div>
 
-            {stuckChunks > 0 && onOpenBulkFix && stuckBuckets.length > 0 && (
+            {onOpenBulkFix && complianceLocked.length > 0 && (
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
                 className="w-full border-amber-500/60 text-amber-800 hover:bg-amber-500/15 dark:text-amber-200"
-                onClick={() => onOpenBulkFix(stuckBuckets)}
+                onClick={() => onOpenBulkFix(complianceLocked)}
                 data-testid="bucket-references-bulk-fix"
               >
                 <Wrench className="mr-1 h-3.5 w-3.5" aria-hidden />
-                Bulk fix {stuckBuckets.length}{' '}
-                {stuckBuckets.length === 1 ? 'stuck bucket' : 'stuck buckets'}
+                Fix {complianceLocked.length} compliance-locked{' '}
+                {complianceLocked.length === 1 ? 'bucket' : 'buckets'}
               </Button>
             )}
 
