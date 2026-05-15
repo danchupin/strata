@@ -1453,10 +1453,10 @@ func (s *Store) ListChunkDeletionsByCluster(ctx context.Context, region, cluster
 	}
 	count := 0
 	iter := s.s.Query(
-		`SELECT 1 FROM gc_entries_v2 WHERE region=? AND cluster=? LIMIT ? ALLOW FILTERING`,
+		`SELECT cluster FROM gc_entries_v2 WHERE region=? AND cluster=? LIMIT ? ALLOW FILTERING`,
 		region, clusterID, limit,
 	).WithContext(ctx).Iter()
-	var dummy int
+	var dummy string
 	for iter.Scan(&dummy) {
 		count++
 		if count >= limit {
@@ -1475,7 +1475,7 @@ func (s *Store) ListChunkDeletionsByCluster(ctx context.Context, region, cluster
 		return count, nil
 	}
 	iter = s.s.Query(
-		`SELECT 1 FROM gc_queue WHERE region=? AND cluster=? LIMIT ? ALLOW FILTERING`,
+		`SELECT cluster FROM gc_queue WHERE region=? AND cluster=? LIMIT ? ALLOW FILTERING`,
 		region, clusterID, remaining,
 	).WithContext(ctx).Iter()
 	for iter.Scan(&dummy) {
