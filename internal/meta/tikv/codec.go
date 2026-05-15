@@ -133,6 +133,7 @@ type multipartUploadRow struct {
 	Expires           string            `json:"x,omitempty"`
 	ChecksumAlgorithm string            `json:"ca,omitempty"`
 	ChecksumType      string            `json:"cty,omitempty"`
+	BackendUploadID   string            `json:"bu,omitempty"`
 }
 
 func encodeMultipart(mu *meta.MultipartUpload) ([]byte, error) {
@@ -152,6 +153,7 @@ func encodeMultipart(mu *meta.MultipartUpload) ([]byte, error) {
 		Expires:           mu.Expires,
 		ChecksumAlgorithm: mu.ChecksumAlgorithm,
 		ChecksumType:      mu.ChecksumType,
+		BackendUploadID:   mu.BackendUploadID,
 	}
 	return json.Marshal(&row)
 }
@@ -181,6 +183,7 @@ func decodeMultipart(raw []byte) (*meta.MultipartUpload, error) {
 		Expires:           row.Expires,
 		ChecksumAlgorithm: row.ChecksumAlgorithm,
 		ChecksumType:      row.ChecksumType,
+		BackendUploadID:   row.BackendUploadID,
 	}, nil
 }
 

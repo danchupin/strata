@@ -504,8 +504,25 @@ full evacuation. The truth table:
 | `draining_readonly` | — | — | — | (no button — `<DrainProgressBar>` renders Upgrade + Undrain) |
 | `evacuating` | `>0` | false | — | `Undrain (cancel evacuation)` with confirm modal: "Moved chunks remain on target clusters; no rollback" |
 | `evacuating` | `0` | false | non-empty | `Undrain` **disabled** with tooltip "Cannot undrain while safety probes are pending: <reasons>" |
-| `evacuating` | `0` | true | empty | `Cancel deregister prep` (typed-confirm modal — no Undrain) |
+| `evacuating` | `0` | true | empty | `Restore to live (cancel evacuation)` (outline variant, typed-confirm modal — no Undrain) |
 | `removed` | — | — | — | disabled `Drain` (operator already deregistered) |
+
+The dereg-ready cell button was renamed from `Cancel deregister prep`
+→ `Restore to live (cancel evacuation)` in the `ralph/drain-followup`
+cycle (US-003) — the prior label contradicted the green
+"Ready to deregister" chip rendered immediately above it (chip said
+"act now via env edit", button said "cancel the preparation"). The
+new label clarifies that the button is an escape hatch, not the
+primary action. The button switched from the `destructive` to the
+`outline` variant so the chip dominates as the status indicator;
+the typed-confirm modal body now reads "Moved chunks remain on
+target clusters; no rollback. Cluster will accept writes again." so
+the operator knows undrain is not a migration reversal. The chip
+itself gained a `title=` tooltip with the deregister recipe ("Edit
+STRATA_RADOS_CLUSTERS env to remove this cluster, then rolling
+restart. See operator runbook for deregister procedure.") so the
+operator who finds the chip on a card has the primary action one
+hover away.
 
 `Cancel deregister prep` is the safe-default for the dereg-ready
 state — the operator types the cluster id to arm the modal (mirroring
@@ -533,6 +550,61 @@ Invalidate-all is intentional: placement keys may add or remove
 clusters, so tracking the affected cluster set adds complexity for a
 minor speedup. The next `/drain-impact` call rebuilds the categorized
 scan from scratch and reflects the new policy immediately.
+
+### Multipart-blocks-deregister probe (US-004 + US-005 drain-followup)
+
+The `no_open_multipart_on_cluster` precondition (gate #3 of the
+`deregister_ready` AND) reads `meta.Store.ListMultipartUploadsByCluster`.
+Each backend wires it differently:
+
+| Backend | Wire | Pre-cycle |
+| ------- | ---- | --------- |
+| memory | scans the in-process upload map by `BackendUploadID` prefix | already correct |
+| TiKV | walks `s/B/<uuid16>/u/...` per bucket and filters by handle prefix | already correct via codec field added in US-004 |
+| Cassandra | `SELECT cluster FROM multipart_uploads_by_cluster WHERE cluster=? LIMIT ?` — single-partition scan, no `ALLOW FILTERING` | US-005 denormalized lookup table; US-004 added the `cluster text` column on the primary `multipart_uploads` table and persisted it on Init |
+
+Init handlers extract the leading cluster id from the
+`BackendUploadID` shape `cluster\x00bucket\x00key\x00uploadID` and
+persist it; chunk-based RADOS uploads with empty `BackendUploadID`
+persist `NULL` and never match the probe (consistent with the
+chunk-based router having no init-time cluster binding).
+
+Probe-only fix — runtime routing is unchanged. Open multipart sessions
+on an evacuating cluster keep finishing gracefully (the handle is the
+source of truth for UploadPart / Complete / Abort routing); the new
+column is read by the deregister-readiness gate so the green chip
+does not flip while the cluster still holds in-flight uploads.
+
+### Denormalized lookup tables (US-005 drain-followup)
+
+GC + multipart per-cluster probes used to issue
+`WHERE cluster=? ALLOW FILTERING` against `gc_entries_v2` +
+`multipart_uploads` — antipattern at scale per the Cassandra gotchas
+in `CLAUDE.md`. The `ralph/drain-followup` cycle (US-005) added two
+denormalized lookup tables partitioned on `(cluster)`:
+
+| Table | PK | Wire |
+| ----- | -- | ---- |
+| `gc_entries_by_cluster` | `((cluster), region, enqueued_at, oid)` | `SELECT region FROM gc_entries_by_cluster WHERE cluster=? LIMIT ?` |
+| `multipart_uploads_by_cluster` | `((cluster), bucket_id, upload_id)` | `SELECT bucket_id FROM multipart_uploads_by_cluster WHERE cluster=? LIMIT ?` |
+
+Dual-write maintenance: every `EnqueueChunkDeletion` / `AckGCEntry` /
+`CreateMultipartUpload` / `CompleteMultipartUpload` /
+`AbortMultipartUpload` keeps the primary table and the lookup row in
+lockstep. Chunk-based RADOS uploads (empty `BackendUploadID`) + legacy
+GC entries (empty `chunk.Cluster`) skip the lookup write so the
+intermediate state is tolerated.
+
+**Upgrade note for operators.** Existing deploys carry pre-cycle rows
+in `gc_entries_v2` + `multipart_uploads` that have no corresponding
+lookup row. The gateway runs a one-shot
+`Store.ReconcileLookupTables(ctx, logger)` at boot (idempotent on
+re-runs — skips already-present lookup rows; logs per-1000-row
+progress + a final `cluster reconcile: gc_entries=<N>,
+multipart_uploads=<M>, written_missing=<K>` summary). Large tables
+(>1M rows) may take minutes; the gateway accepts traffic during the
+reconcile (probe correctness converges as rows backfill). No operator
+action required — boot once and the lookup tables are populated.
 
 ### Abort / recovery
 

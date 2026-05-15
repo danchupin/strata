@@ -15,6 +15,7 @@ import (
 	"container/list"
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -328,6 +329,64 @@ func (r *RingBuffer) List(limit, offset int) []TraceSummary {
 		out = append(out, summariseEntry(e))
 	}
 	return out
+}
+
+// FilterOpts narrows the trace browser list view (US-001 drain-followup).
+// Zero-valued fields disable that axis; Min/MaxDurationMs use pointers so
+// the explicit value 0 is distinguishable from "no bound". Method/Status
+// are matched case-insensitively against the per-trace summary; PathSubstr
+// is a case-insensitive substring match on RootName.
+type FilterOpts struct {
+	Method        string
+	Status        string
+	PathSubstr    string
+	MinDurationMs *int64
+	MaxDurationMs *int64
+}
+
+// Filter returns every retained trace summary that matches opts, in LRU
+// order (most-recent first). Filter walks the full retained set; the admin
+// handler applies pagination on the returned slice so `total` reflects the
+// filtered count rather than the full ring size.
+func (r *RingBuffer) Filter(opts FilterOpts) []TraceSummary {
+	method := strings.ToUpper(strings.TrimSpace(opts.Method))
+	status := strings.TrimSpace(opts.Status)
+	pathSubstr := strings.ToLower(strings.TrimSpace(opts.PathSubstr))
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	out := make([]TraceSummary, 0, len(r.traces))
+	for el := r.lru.Front(); el != nil; el = el.Next() {
+		summary := summariseEntry(el.Value.(*entry))
+		if !matchesFilter(summary, method, status, pathSubstr, opts.MinDurationMs, opts.MaxDurationMs) {
+			continue
+		}
+		out = append(out, summary)
+	}
+	return out
+}
+
+func matchesFilter(s TraceSummary, method, status, pathSubstr string, minMs, maxMs *int64) bool {
+	if method != "" {
+		prefix := method + " "
+		if !strings.HasPrefix(strings.ToUpper(s.RootName), prefix) {
+			return false
+		}
+	}
+	if status != "" && !strings.EqualFold(s.Status, status) {
+		return false
+	}
+	if pathSubstr != "" && !strings.Contains(strings.ToLower(s.RootName), pathSubstr) {
+		return false
+	}
+	if minMs != nil && s.DurationMs < *minMs {
+		return false
+	}
+	if maxMs != nil && s.DurationMs > *maxMs {
+		return false
+	}
+	return true
 }
 
 func summariseEntry(e *entry) TraceSummary {

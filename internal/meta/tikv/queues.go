@@ -24,6 +24,7 @@ package tikv
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/gocql/gocql"
@@ -277,14 +278,13 @@ func (s *Store) ListChunkDeletionsByCluster(ctx context.Context, region, cluster
 	return count, nil
 }
 
-// ListMultipartUploadsByCluster scans every multipart upload row (all
-// buckets) and counts uploads whose persisted BackendUploadID handle has
-// `clusterID` as its leading component. Capped at limit. The decoded
-// multipartUploadRow does not currently carry BackendUploadID (the field
-// is never populated by any production code path on this backend), so
-// the scan returns 0 in practice today — the method exists for meta.Store
-// interface parity and to keep drain-progress's three-condition safety
-// contract uniform across backends.
+// ListMultipartUploadsByCluster walks every multipart upload row across
+// every bucket and counts uploads whose persisted BackendUploadID handle
+// has `clusterID` as its leading component (handle layout:
+// `<cluster>\x00<bucket>\x00<key>\x00<uploadID>`). Capped at limit; the
+// scan short-circuits once the cap is reached. Chunk-based RADOS uploads
+// leave BackendUploadID empty and do not contribute. limit=1 is the
+// canonical fast existence probe used by drain-progress.
 func (s *Store) ListMultipartUploadsByCluster(ctx context.Context, clusterID string, limit int) (count int, err error) {
 	ctx, finish := s.observer.Start(ctx, "ListMultipartUploadsByCluster", "multipart")
 	defer func() { finish(err) }()
@@ -294,8 +294,37 @@ func (s *Store) ListMultipartUploadsByCluster(ctx context.Context, clusterID str
 	if clusterID == "" {
 		return 0, nil
 	}
-	// BackendUploadID is not persisted on this backend; nothing matches.
-	return 0, nil
+	buckets, err := s.ListBuckets(ctx, "")
+	if err != nil {
+		return 0, err
+	}
+	prefix := clusterID + "\x00"
+	for _, b := range buckets {
+		txn, terr := s.kv.Begin(ctx, false)
+		if terr != nil {
+			return count, terr
+		}
+		start := MultipartPrefix(b.ID)
+		pairs, scanErr := txn.Scan(ctx, start, prefixEnd(start), 0)
+		txn.Rollback()
+		if scanErr != nil {
+			return count, scanErr
+		}
+		for _, p := range pairs {
+			mu, derr := decodeMultipart(p.Value)
+			if derr != nil {
+				return count, derr
+			}
+			if !strings.HasPrefix(mu.BackendUploadID, prefix) {
+				continue
+			}
+			count++
+			if count >= limit {
+				return count, nil
+			}
+		}
+	}
+	return count, nil
 }
 
 func (s *Store) AckGCEntry(ctx context.Context, region string, e meta.GCEntry) (err error) {

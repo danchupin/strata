@@ -88,9 +88,8 @@ export function ConfirmUndrainEvacuationModal({
           <div className="space-y-1">
             <div className="font-medium">No rollback</div>
             <div className="text-xs leading-snug">
-              Moved chunks remain on target clusters. The rebalance worker
-              will not pull them back. Future PUTs may land here again
-              based on the configured placement weight.
+              Moved chunks remain on target clusters; no rollback. Cluster
+              will accept writes again.
             </div>
           </div>
         </div>

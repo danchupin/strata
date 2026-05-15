@@ -33,6 +33,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"GCQueueRoundTrip", caseGCQueueRoundTrip},
 		{"GCQueueShardFanOut", caseGCQueueShardFanOut},
 		{"ChunkDeletionsByCluster", caseChunkDeletionsByCluster},
+		{"ListMultipartUploadsByCluster", caseListMultipartUploadsByCluster},
 		{"BucketLifecycleRulesBlob", caseLifecycleBlob},
 		{"ListObjectsHidesDeleteMarkers", caseListHidesDeleteMarkers},
 		{"MultipartCompletionRoundTrip", caseMultipartCompletion},
@@ -287,6 +288,99 @@ func caseChunkDeletionsByCluster(t *testing.T, s meta.Store) {
 	}
 	if got != 0 {
 		t.Errorf("cl-nope: got %d want 0", got)
+	}
+}
+
+// caseListMultipartUploadsByCluster exercises the per-cluster multipart
+// probe used by the drain-progress safety gate (US-004). Seeds three
+// in-flight multipart uploads — two on cluster "cl-a", one on "cl-b",
+// plus one chunk-based upload with empty BackendUploadID — and asserts
+// the probe reports the per-cluster count (capped at limit), returns 0
+// for an unknown cluster, returns 0 for empty clusterID, and never
+// matches the chunk-based upload.
+func caseListMultipartUploadsByCluster(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "bkt-mp", "alice", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	mus := []*meta.MultipartUpload{
+		{
+			BucketID:        b.ID,
+			UploadID:        newTimeUUID(),
+			Key:             "a1",
+			StorageClass:    "STANDARD",
+			InitiatedAt:     time.Now().UTC(),
+			BackendUploadID: "cl-a\x00bkt-backend\x00obj-a1\x00sdk-1",
+		},
+		{
+			BucketID:        b.ID,
+			UploadID:        newTimeUUID(),
+			Key:             "a2",
+			StorageClass:    "STANDARD",
+			InitiatedAt:     time.Now().UTC(),
+			BackendUploadID: "cl-a\x00bkt-backend\x00obj-a2\x00sdk-2",
+		},
+		{
+			BucketID:        b.ID,
+			UploadID:        newTimeUUID(),
+			Key:             "b1",
+			StorageClass:    "STANDARD",
+			InitiatedAt:     time.Now().UTC(),
+			BackendUploadID: "cl-b\x00bkt-backend\x00obj-b1\x00sdk-3",
+		},
+		{
+			BucketID:     b.ID,
+			UploadID:     newTimeUUID(),
+			Key:          "chunk",
+			StorageClass: "STANDARD",
+			InitiatedAt:  time.Now().UTC(),
+			// Empty BackendUploadID — chunk-based RADOS upload, must not match.
+		},
+	}
+	for _, mu := range mus {
+		if err := s.CreateMultipartUpload(ctx, mu); err != nil {
+			t.Fatalf("create multipart upload %s: %v", mu.Key, err)
+		}
+	}
+	// limit=1 fast existence probe caps at 1.
+	got, err := s.ListMultipartUploadsByCluster(ctx, "cl-a", 1)
+	if err != nil {
+		t.Fatalf("count cl-a limit=1: %v", err)
+	}
+	if got != 1 {
+		t.Errorf("cl-a limit=1: got %d want 1", got)
+	}
+	// Generous limit returns the full per-cluster count.
+	got, err = s.ListMultipartUploadsByCluster(ctx, "cl-a", 100)
+	if err != nil {
+		t.Fatalf("count cl-a limit=100: %v", err)
+	}
+	if got != 2 {
+		t.Errorf("cl-a limit=100: got %d want 2", got)
+	}
+	got, err = s.ListMultipartUploadsByCluster(ctx, "cl-b", 100)
+	if err != nil {
+		t.Fatalf("count cl-b: %v", err)
+	}
+	if got != 1 {
+		t.Errorf("cl-b: got %d want 1", got)
+	}
+	// Unknown cluster returns 0 (chunk-based upload must not bleed into it).
+	got, err = s.ListMultipartUploadsByCluster(ctx, "cl-nope", 100)
+	if err != nil {
+		t.Fatalf("count cl-nope: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("cl-nope: got %d want 0", got)
+	}
+	// Empty clusterID returns 0 — never matches.
+	got, err = s.ListMultipartUploadsByCluster(ctx, "", 100)
+	if err != nil {
+		t.Fatalf("count empty: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("empty clusterID: got %d want 0", got)
 	}
 }
 

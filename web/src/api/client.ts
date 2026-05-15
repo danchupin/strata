@@ -1658,6 +1658,20 @@ export interface RecentTracesResponse {
   total: number;
 }
 
+// RecentTracesQuery models the optional filter axes shipped in
+// drain-followup US-001 server-side. Empty values are omitted from the
+// request URL so the gateway treats them as no-filter (backwards-compat).
+export interface RecentTracesQuery {
+  method?: string;
+  status?: string;
+  // path is the short-form alias the UI prefers in the address bar; the
+  // server accepts both `?path=` and `?path_substr=`.
+  path?: string;
+  pathSubstr?: string;
+  minDurationMs?: number;
+  maxDurationMs?: number;
+}
+
 // fetchRecentTraces returns the most-recent N retained trace summaries
 // from the in-process ring buffer (US-008). limit caps at 200 server-side;
 // callers can still pass a larger value, the gateway clamps. Throws
@@ -1666,10 +1680,21 @@ export interface RecentTracesResponse {
 export async function fetchRecentTraces(
   limit: number,
   offset: number,
+  query?: RecentTracesQuery,
 ): Promise<RecentTracesResponse> {
   const usp = new URLSearchParams();
   usp.set('limit', String(limit));
   if (offset > 0) usp.set('offset', String(offset));
+  if (query?.method) usp.set('method', query.method);
+  if (query?.status) usp.set('status', query.status);
+  if (query?.path) usp.set('path', query.path);
+  else if (query?.pathSubstr) usp.set('path_substr', query.pathSubstr);
+  if (query?.minDurationMs != null) {
+    usp.set('min_duration_ms', String(query.minDurationMs));
+  }
+  if (query?.maxDurationMs != null) {
+    usp.set('max_duration_ms', String(query.maxDurationMs));
+  }
   const resp = await fetch(`/admin/v1/diagnostics/traces?${usp.toString()}`, {
     method: 'GET',
     credentials: 'same-origin',

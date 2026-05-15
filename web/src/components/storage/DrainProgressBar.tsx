@@ -169,7 +169,7 @@ export function DrainProgressBar({
         </div>
         <div
           className="flex items-center gap-2 rounded-md border border-emerald-500/40 bg-emerald-500/5 px-2 py-1 text-xs text-emerald-800 dark:text-emerald-300"
-          title="Drain complete. Edit STRATA_RADOS_CLUSTERS / STRATA_S3_CLUSTERS to remove this id, then rolling-restart the gateway to deregister."
+          title="Edit STRATA_RADOS_CLUSTERS env to remove this cluster, then rolling restart. See operator runbook for deregister procedure."
           data-testid="dp-dereg-ready"
         >
           <CheckCircle2 className="h-3.5 w-3.5 shrink-0" aria-hidden />

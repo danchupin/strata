@@ -338,6 +338,52 @@ func TestListEmpty(t *testing.T) {
 	}
 }
 
+func richStub(traceB, spanB byte, name, requestID string, dur time.Duration, status codes.Code) tracetest.SpanStub {
+	stub := fakeSpan(tid(traceB), sid(spanB), trace.SpanID{}, name, requestID)
+	start := time.Unix(0, int64(traceB)*int64(time.Second))
+	stub.StartTime = start
+	stub.EndTime = start.Add(dur)
+	stub.Status.Code = status
+	return stub
+}
+
+func TestFilterByMethodPrefix(t *testing.T) {
+	rb := New()
+	ingest(t, rb, richStub(1, 0xa, "PUT /bkt/a", "p-a", 5*time.Millisecond, codes.Ok))
+	ingest(t, rb, richStub(2, 0xb, "GET /bkt/b", "g-b", 5*time.Millisecond, codes.Ok))
+	ingest(t, rb, richStub(3, 0xc, "PUT /bkt/c", "p-c", 5*time.Millisecond, codes.Ok))
+
+	got := rb.Filter(FilterOpts{Method: "PUT"})
+	if len(got) != 2 {
+		t.Fatalf("len=%d want 2", len(got))
+	}
+	for _, s := range got {
+		if !strings.HasPrefix(s.RootName, "PUT ") {
+			t.Errorf("unexpected match: %s", s.RootName)
+		}
+	}
+}
+
+func TestFilterByStatusDurationPath(t *testing.T) {
+	rb := New()
+	ingest(t, rb, richStub(1, 0xa, "PUT /demo-cephb/a", "fast-err", 5*time.Millisecond, codes.Error))
+	ingest(t, rb, richStub(2, 0xb, "PUT /demo-cephb/b", "slow-err", 500*time.Millisecond, codes.Error))
+	ingest(t, rb, richStub(3, 0xc, "PUT /demo-cepha/c", "fast-ok", 5*time.Millisecond, codes.Ok))
+
+	low := int64(100)
+	got := rb.Filter(FilterOpts{
+		Status:        "Error",
+		PathSubstr:    "cephb",
+		MinDurationMs: &low,
+	})
+	if len(got) != 1 {
+		t.Fatalf("len=%d want 1", len(got))
+	}
+	if got[0].RequestID != "slow-err" {
+		t.Errorf("rid=%s want slow-err", got[0].RequestID)
+	}
+}
+
 // Sanity-check that the JSON-friendly Trace shape carries everything the
 // admin handler advertises.
 func TestTraceShapeContainsExpectedFields(t *testing.T) {

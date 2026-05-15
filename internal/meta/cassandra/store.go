@@ -1311,6 +1311,13 @@ func (s *Store) EnqueueChunkDeletion(ctx context.Context, region string, chunks 
 			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			region, shardID, now, c.OID, c.Pool, c.Cluster, c.Namespace,
 		)
+		if c.Cluster != "" {
+			batch.Query(
+				`INSERT INTO gc_entries_by_cluster (cluster, region, enqueued_at, oid, pool, namespace)
+				 VALUES (?, ?, ?, ?, ?, ?)`,
+				c.Cluster, region, now, c.OID, c.Pool, c.Namespace,
+			)
+		}
 		if s.gcDualWrite {
 			batch.Query(
 				`INSERT INTO gc_queue (region, enqueued_at, oid, pool, cluster, namespace)
@@ -1440,45 +1447,32 @@ func gcOwnedLogicalShards(shardID, shardCount int) []int {
 }
 
 // ListChunkDeletionsByCluster counts pending GC queue entries in `region`
-// whose Chunk.Cluster matches clusterID, capped at `limit`. The scan covers
-// both gc_entries_v2 and (while dual-write is on) the legacy gc_queue
-// partition; the result is the cluster count across both shapes.
+// whose Chunk.Cluster matches clusterID, capped at `limit`. Reads from the
+// denormalised gc_entries_by_cluster lookup table — partition key is
+// (cluster) so the scan is a single-partition row count, no ALLOW FILTERING.
+// region is enforced by clustering filter. limit=1 is the fast existence
+// probe used by drain-progress.
 //
-// Cluster is not part of the partition key on either table — the scan uses
-// ALLOW FILTERING with LIMIT to push the bounded existence check to the
-// server. limit=1 is the fast existence probe used by drain-progress.
+// Pre-US-005 rows that pre-date the lookup table are backfilled by the boot
+// reconcile (serverapp.ReconcileLookupTables); operators upgrading without a
+// restart will see the probe under-count until the next gateway boot.
 func (s *Store) ListChunkDeletionsByCluster(ctx context.Context, region, clusterID string, limit int) (int, error) {
 	if limit <= 0 {
 		limit = 1
 	}
+	if clusterID == "" {
+		return 0, nil
+	}
 	count := 0
 	iter := s.s.Query(
-		`SELECT cluster FROM gc_entries_v2 WHERE region=? AND cluster=? LIMIT ? ALLOW FILTERING`,
-		region, clusterID, limit,
+		`SELECT region FROM gc_entries_by_cluster WHERE cluster=? LIMIT ?`,
+		clusterID, limit,
 	).WithContext(ctx).Iter()
-	var dummy string
-	for iter.Scan(&dummy) {
-		count++
-		if count >= limit {
-			_ = iter.Close()
-			return count, nil
+	var rowRegion string
+	for iter.Scan(&rowRegion) {
+		if region != "" && rowRegion != region {
+			continue
 		}
-	}
-	if err := iter.Close(); err != nil {
-		return count, err
-	}
-	if !s.gcDualWrite {
-		return count, nil
-	}
-	remaining := limit - count
-	if remaining <= 0 {
-		return count, nil
-	}
-	iter = s.s.Query(
-		`SELECT cluster FROM gc_queue WHERE region=? AND cluster=? LIMIT ? ALLOW FILTERING`,
-		region, clusterID, remaining,
-	).WithContext(ctx).Iter()
-	for iter.Scan(&dummy) {
 		count++
 		if count >= limit {
 			break
@@ -1491,13 +1485,17 @@ func (s *Store) ListChunkDeletionsByCluster(ctx context.Context, region, cluster
 }
 
 // ListMultipartUploadsByCluster counts in-flight multipart uploads whose
-// opaque BackendUploadID handle has `clusterID` as its leading component.
-// Cassandra does not currently persist BackendUploadID on multipart_uploads
-// (the column would be additive but is never populated by any code path
-// today), so the scan is effectively a no-op on this backend until the
-// column is wired through. The method is defined for meta.Store interface
-// parity; drain-progress treats a 0 return as "no open multipart blocking
-// dereg" — same as the contract.
+// persisted cluster column matches `clusterID`, capped at `limit`. Reads
+// from the denormalised multipart_uploads_by_cluster lookup table —
+// partition key is (cluster) so the probe is a single-partition row count,
+// no ALLOW FILTERING. limit=1 is the canonical fast existence probe used
+// by drain-progress.
+//
+// Pre-US-005 rows that pre-date the lookup table are backfilled by the
+// boot reconcile (serverapp.ReconcileLookupTables); operators upgrading
+// without a restart see the probe under-count until the next gateway boot.
+// Chunk-based RADOS uploads have empty BackendUploadID → empty cluster →
+// never appear in the lookup table.
 func (s *Store) ListMultipartUploadsByCluster(ctx context.Context, clusterID string, limit int) (int, error) {
 	if limit <= 0 {
 		limit = 1
@@ -1505,8 +1503,22 @@ func (s *Store) ListMultipartUploadsByCluster(ctx context.Context, clusterID str
 	if clusterID == "" {
 		return 0, nil
 	}
-	// BackendUploadID is not persisted on this backend; nothing matches.
-	return 0, nil
+	count := 0
+	iter := s.s.Query(
+		`SELECT bucket_id FROM multipart_uploads_by_cluster WHERE cluster=? LIMIT ?`,
+		clusterID, limit,
+	).WithContext(ctx).Iter()
+	var dummy gocql.UUID
+	for iter.Scan(&dummy) {
+		count++
+		if count >= limit {
+			break
+		}
+	}
+	if err := iter.Close(); err != nil {
+		return count, err
+	}
+	return count, nil
 }
 
 func (s *Store) AckGCEntry(ctx context.Context, region string, e meta.GCEntry) error {
@@ -1516,12 +1528,22 @@ func (s *Store) AckGCEntry(ctx context.Context, region string, e meta.GCEntry) e
 	).WithContext(ctx).Exec(); err != nil {
 		return err
 	}
+	if e.Chunk.Cluster != "" {
+		// Drop the denormalised lookup row too so the drain probe converges
+		// to zero once every GC entry on a cluster has been acked. Idempotent
+		// — no-op when the row is absent.
+		if err := s.s.Query(
+			`DELETE FROM gc_entries_by_cluster WHERE cluster=? AND region=? AND enqueued_at=? AND oid=?`,
+			e.Chunk.Cluster, region, e.EnqueuedAt, e.Chunk.OID,
+		).WithContext(ctx).Exec(); err != nil {
+			return err
+		}
+	}
 	if !s.gcDualWrite {
 		return nil
 	}
-	// Drop the legacy row too while dual-write is on so the two tables
-	// converge regardless of which side served the read. Idempotent —
-	// no-op when the row is absent.
+	// Drop the legacy gc_queue row too while dual-write is on so the two
+	// tables converge regardless of which side served the read.
 	return s.s.Query(
 		`DELETE FROM gc_queue WHERE region=? AND enqueued_at=? AND oid=?`,
 		region, e.EnqueuedAt, e.Chunk.OID,
@@ -2451,13 +2473,46 @@ func (s *Store) CreateMultipartUpload(ctx context.Context, mu *meta.MultipartUpl
 	if err != nil {
 		return fmt.Errorf("upload_id: %w", err)
 	}
-	return s.s.Query(
-		`INSERT INTO multipart_uploads (bucket_id, upload_id, key, status, storage_class, content_type, initiated_at, sse, user_meta, cache_control, expires, checksum_algorithm, sse_key, sse_key_id, checksum_type)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	cluster := clusterFromBackendUploadID(mu.BackendUploadID)
+	if err := s.s.Query(
+		`INSERT INTO multipart_uploads (bucket_id, upload_id, key, status, storage_class, content_type, initiated_at, sse, user_meta, cache_control, expires, checksum_algorithm, sse_key, sse_key_id, checksum_type, cluster)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		gocqlUUID(mu.BucketID), uploadUUID, mu.Key, "uploading", mu.StorageClass, mu.ContentType, mu.InitiatedAt, nilIfEmpty(mu.SSE),
 		mu.UserMeta, nilIfEmpty(mu.CacheControl), nilIfEmpty(mu.Expires), nilIfEmpty(mu.ChecksumAlgorithm),
-		nilIfEmptyBytes(mu.SSEKey), nilIfEmpty(mu.SSEKeyID), nilIfEmpty(mu.ChecksumType),
+		nilIfEmptyBytes(mu.SSEKey), nilIfEmpty(mu.SSEKeyID), nilIfEmpty(mu.ChecksumType), nilIfEmpty(cluster),
+	).WithContext(ctx).Exec(); err != nil {
+		return err
+	}
+	if cluster == "" {
+		return nil
+	}
+	// Dual-write the denormalised lookup row keyed on (cluster) so the
+	// drain-progress safety gate can probe in-flight multipart uploads
+	// without ALLOW FILTERING. Chunk-based RADOS uploads have empty
+	// BackendUploadID → empty cluster → no lookup row.
+	return s.s.Query(
+		`INSERT INTO multipart_uploads_by_cluster (cluster, bucket_id, upload_id, key)
+		 VALUES (?, ?, ?, ?)`,
+		cluster, gocqlUUID(mu.BucketID), uploadUUID, mu.Key,
 	).WithContext(ctx).Exec()
+}
+
+// clusterFromBackendUploadID returns the leading cluster id component of
+// an opaque BackendUploadID handle (layout
+// `<cluster>\x00<bucket>\x00<key>\x00<uploadID>`, see
+// internal/data/s3/multipart.go). Returns "" when the handle is empty or
+// malformed — chunk-based RADOS multipart uploads leave BackendUploadID
+// empty and thus persist NULL in the cluster column, which never matches
+// any specific cluster in the drain probe.
+func clusterFromBackendUploadID(h string) string {
+	if h == "" {
+		return ""
+	}
+	idx := strings.IndexByte(h, 0x00)
+	if idx <= 0 {
+		return ""
+	}
+	return h[:idx]
 }
 
 func (s *Store) GetMultipartUpload(ctx context.Context, bucketID uuid.UUID, uploadID string) (*meta.MultipartUpload, error) {
@@ -2607,6 +2662,7 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 	if err != nil {
 		return nil, meta.ErrMultipartNotFound
 	}
+	cluster, _ := s.multipartCluster(ctx, obj.BucketID, uploadUUID)
 
 	// Read parts and validate every requested ETag BEFORE flipping the upload
 	// to 'completing'. A stale-ETag Complete must leave the upload re-completable
@@ -2708,7 +2764,34 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 	).WithContext(ctx).Exec(); err != nil {
 		return orphans, err
 	}
+	if cluster != "" {
+		if err := s.s.Query(
+			`DELETE FROM multipart_uploads_by_cluster WHERE cluster=? AND bucket_id=? AND upload_id=?`,
+			cluster, gocqlUUID(obj.BucketID), uploadUUID,
+		).WithContext(ctx).Exec(); err != nil {
+			return orphans, err
+		}
+	}
 	return orphans, nil
+}
+
+// multipartCluster reads the persisted cluster column for a multipart upload
+// row. Returns "" + nil when the row is missing or carries NULL — both are
+// expected (chunk-based uploads + pre-US-004 rows). Used by Complete + Abort
+// to drop the denormalised multipart_uploads_by_cluster row in lockstep.
+func (s *Store) multipartCluster(ctx context.Context, bucketID uuid.UUID, uploadUUID gocql.UUID) (string, error) {
+	var cluster string
+	err := s.s.Query(
+		`SELECT cluster FROM multipart_uploads WHERE bucket_id=? AND upload_id=?`,
+		gocqlUUID(bucketID), uploadUUID,
+	).WithContext(ctx).Scan(&cluster)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return cluster, nil
 }
 
 func (s *Store) RecordMultipartCompletion(ctx context.Context, rec *meta.MultipartCompletion, ttl time.Duration) error {
@@ -2770,6 +2853,7 @@ func (s *Store) AbortMultipartUpload(ctx context.Context, bucketID uuid.UUID, up
 	if err != nil {
 		return nil, meta.ErrMultipartNotFound
 	}
+	cluster, _ := s.multipartCluster(ctx, bucketID, uploadUUID)
 	parts, err := s.ListParts(ctx, bucketID, uploadID)
 	if err != nil {
 		return nil, err
@@ -2791,6 +2875,14 @@ func (s *Store) AbortMultipartUpload(ctx context.Context, bucketID uuid.UUID, up
 		gocqlUUID(bucketID), uploadUUID,
 	).WithContext(ctx).Exec(); err != nil {
 		return manifests, err
+	}
+	if cluster != "" {
+		if err := s.s.Query(
+			`DELETE FROM multipart_uploads_by_cluster WHERE cluster=? AND bucket_id=? AND upload_id=?`,
+			cluster, gocqlUUID(bucketID), uploadUUID,
+		).WithContext(ctx).Exec(); err != nil {
+			return manifests, err
+		}
 	}
 	return manifests, nil
 }

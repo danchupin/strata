@@ -121,6 +121,33 @@ var tableDDL = []string{
 		namespace    text,
 		PRIMARY KEY ((region, shard_id), enqueued_at, oid)
 	)`,
+	// gc_entries_by_cluster mirrors gc_entries_v2 partitioned on (cluster)
+	// so the drain-progress safety gate can probe `chunks_on_cluster` via
+	// a partition scan instead of `ALLOW FILTERING` on gc_entries_v2 (US-005).
+	// Writers dual-write on every EnqueueChunkDeletion + AckGCEntry; the
+	// boot reconcile in serverapp backfills missing rows from gc_entries_v2.
+	`CREATE TABLE IF NOT EXISTS gc_entries_by_cluster (
+		cluster      text,
+		region       text,
+		enqueued_at  timestamp,
+		oid          text,
+		pool         text,
+		namespace    text,
+		PRIMARY KEY ((cluster), region, enqueued_at, oid)
+	)`,
+	// multipart_uploads_by_cluster mirrors multipart_uploads partitioned on
+	// (cluster) so the drain-progress safety gate probes in-flight multipart
+	// uploads via a partition scan instead of `ALLOW FILTERING` on the
+	// primary table (US-005). cluster is extracted from BackendUploadID's
+	// leading component; chunk-based RADOS uploads (empty BackendUploadID)
+	// skip the dual-write entirely and never appear here.
+	`CREATE TABLE IF NOT EXISTS multipart_uploads_by_cluster (
+		cluster   text,
+		bucket_id uuid,
+		upload_id timeuuid,
+		key       text,
+		PRIMARY KEY ((cluster), bucket_id, upload_id)
+	)`,
 	`CREATE TABLE IF NOT EXISTS worker_locks (
 		name   text PRIMARY KEY,
 		holder text
@@ -415,6 +442,7 @@ var alterStatements = []string{
 	`ALTER TABLE audit_log ADD total_time_ms int`,
 	`ALTER TABLE cluster_state ADD mode text`,
 	`ALTER TABLE cluster_state ADD weight int`,
+	`ALTER TABLE multipart_uploads ADD cluster text`,
 }
 
 func isColumnAlreadyExists(err error) bool {

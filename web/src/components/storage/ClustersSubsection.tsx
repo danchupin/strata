@@ -481,12 +481,12 @@ function ActionButton({
       return (
         <Button
           type="button"
-          variant="destructive"
+          variant="outline"
           size="sm"
           onClick={onCancelDeregisterPrep}
           data-testid="cluster-card-cancel-deregister-prep"
         >
-          Cancel deregister prep
+          Restore to live (cancel evacuation)
         </Button>
       );
     case 'none':

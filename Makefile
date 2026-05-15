@@ -1,7 +1,7 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-all-ci up-tikv up-lab-tikv up-lab-tikv-3 down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv smoke-drain-lifecycle smoke-drain-transparency smoke-cluster-weights smoke-drain-cleanup race-soak race-soak-tikv lint-nginx-lab bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi docs-serve docs-build clean
+.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-all-ci up-tikv up-lab-tikv up-lab-tikv-3 down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv smoke-drain-lifecycle smoke-drain-transparency smoke-cluster-weights smoke-drain-cleanup smoke-drain-followup race-soak race-soak-tikv lint-nginx-lab bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi docs-serve docs-build clean
 
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
@@ -252,6 +252,18 @@ smoke-cluster-weights:
 # SMOKE_DC_*).
 smoke-drain-cleanup:
 	bash scripts/smoke-drain-cleanup.sh
+
+# Drain follow-up walkthrough smoke (US-006 of ralph/drain-followup).
+# Drives the 16-step operator journey closing the four ROADMAP entries
+# bundled in this cycle (P3 trace browser filter/search, P2 UI confusion
+# chip+button, P2 Cassandra multipart probe no-op, P3 ALLOW FILTERING
+# denormalize) against a running `multi-cluster` compose profile
+# (`docker compose --profile multi-cluster up -d`). Skips with exit 77
+# when the lab is not reachable; set REQUIRE_LAB=1 to convert the skip
+# into a hard fail. See scripts/smoke-drain-followup.sh for env knobs
+# (BASE, SMOKE_DF_*).
+smoke-drain-followup:
+	bash scripts/smoke-drain-followup.sh
 
 # Race-soak driver (US-006). Brings up the cassandra-backed stack
 # (`make up-all-ci` when CI=true, else `make up-all`), waits for /readyz on
