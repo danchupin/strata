@@ -136,8 +136,8 @@
         "Typecheck passes"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped scripts/smoke-drain-followup.sh (16-step walkthrough, exits 77 on missing lab) + make smoke-drain-followup target. Extended web/e2e/drain-followup.spec.ts with a second test case asserting amber `Not ready — Open multipart upload` chip + green chip absence + Restore-to-live button absence when not_ready_reasons carries open_multipart; trace-filter URL persistence already covered by web/e2e/trace-filter.spec.ts (US-002). docs/site/content/best-practices/placement-rebalance.md gained: (a) `Restore to live (cancel evacuation)` rename rationale + chip tooltip semantics under State-aware action buttons; (b) new `Multipart-blocks-deregister probe` section enumerating the per-backend wire (memory/TiKV/Cassandra) for the no_open_multipart_on_cluster gate; (c) new `Denormalized lookup tables` section documenting gc_entries_by_cluster + multipart_uploads_by_cluster dual-write rule + one-shot reconcile lifecycle for upgrades. docs/site/content/best-practices/web-ui.md capability matrix gained three rows: Trace browser filter row (US-001+002), Chip-above-button vertical layout (US-003), Multipart-blocks-deregister surfacing (US-004+005). ROADMAP.md four entries close-flipped in this commit (P2 chip+button, P2 Cassandra multipart probe, P3 ALLOW FILTERING denormalize, P3 trace browser filter); closing SHA backfilled on main. tasks/prd-drain-followup.md removed per PRD lifecycle rule. Quality gates ✓: make vet, go test ./... (full repo green incl. racetest), pnpm run typecheck, pnpm run build, pnpm run test:unit (54 cases), make docs-build (59 pages). make smoke-drain-followup is invocation-tested (skip-77 path verified; full lab run requires multi-cluster compose profile + matching STRATA_STATIC_CREDENTIALS)."
     }
   ]
 }

@@ -19,6 +19,8 @@ interface ClusterRow {
   backend: 'rados';
 }
 
+type DrainProgressShape = 'ready' | 'multipart_blocked';
+
 async function login(page: Page) {
   await page.goto('/console/');
   await expect(page).toHaveURL(CONSOLE_LOGIN);
@@ -28,7 +30,11 @@ async function login(page: Page) {
   await expect(page).toHaveURL(CONSOLE_HOME);
 }
 
-function installRoutes(page: Page, clusters: ClusterRow[]) {
+function installRoutes(
+  page: Page,
+  clusters: ClusterRow[],
+  shape: DrainProgressShape = 'ready',
+) {
   page.route('**/admin/v1/clusters', async (route) => {
     if (route.request().method() !== 'GET') return route.fallback();
     await route.fulfill({
@@ -57,7 +63,9 @@ function installRoutes(page: Page, clusters: ClusterRow[]) {
       });
       return;
     }
-    // Fully evacuated, deregister_ready=true.
+    // Fully evacuated, deregister_ready=true OR multipart-blocked
+    // depending on the shape requested by the test.
+    const multipartBlocked = shape === 'multipart_blocked';
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -69,13 +77,13 @@ function installRoutes(page: Page, clusters: ClusterRow[]) {
         base_chunks_at_start: 100,
         last_scan_at: new Date().toISOString(),
         eta_seconds: 0,
-        deregister_ready: true,
+        deregister_ready: !multipartBlocked,
         warnings: [],
         migratable_chunks: 0,
         stuck_single_policy_chunks: 0,
         stuck_no_policy_chunks: 0,
         by_bucket: [],
-        not_ready_reasons: [],
+        not_ready_reasons: multipartBlocked ? ['open_multipart'] : [],
       }),
     });
   });
@@ -137,14 +145,14 @@ function installRoutes(page: Page, clusters: ClusterRow[]) {
   });
 }
 
-test.describe('Strata console — drain followup (US-003)', () => {
+test.describe('Strata console — drain followup (US-003, US-004 + US-005)', () => {
   test('evacuating + chunks=0 + deregister_ready cell: renamed button + chip tooltip + chip-above-button layout', async ({
     page,
   }) => {
     const clusters: ClusterRow[] = [
       { id: 'cephb', state: 'evacuating', mode: 'evacuate', backend: 'rados' },
     ];
-    installRoutes(page, clusters);
+    installRoutes(page, clusters, 'ready');
 
     await login(page);
 
@@ -184,5 +192,46 @@ test.describe('Strata console — drain followup (US-003)', () => {
     if (chipBox && buttonBox) {
       expect(chipBox.y).toBeLessThan(buttonBox.y);
     }
+  });
+
+  test('evacuating + chunks=0 + open_multipart not_ready_reason: amber chip surfaces, dereg-ready chip absent (US-004 + US-005)', async ({
+    page,
+  }) => {
+    const clusters: ClusterRow[] = [
+      { id: 'cephb', state: 'evacuating', mode: 'evacuate', backend: 'rados' },
+    ];
+    installRoutes(page, clusters, 'multipart_blocked');
+
+    await login(page);
+
+    await page.getByRole('link', { name: 'Storage', exact: true }).click();
+    await expect(page).toHaveURL(/\/console\/storage\/?$/);
+    await page.getByRole('tab', { name: 'Data' }).click();
+
+    const cephbCard = page
+      .locator('[class*="relative"]')
+      .filter({ has: page.locator('span[title="cephb"]') })
+      .first();
+    await expect(cephbCard).toBeVisible({ timeout: 10_000 });
+
+    // Amber "Not ready — Open multipart upload" chip renders; green chip
+    // is suppressed; deregister-ready action button does NOT show because
+    // the truth-table action for chunks=0 + deregister_ready=false +
+    // non-empty not_ready_reasons is the disabled Undrain (no
+    // typed-confirm "Restore to live" yet).
+    const notReady = cephbCard.getByTestId('dp-not-ready');
+    await expect(notReady).toBeVisible({ timeout: 10_000 });
+    const text = (await notReady.textContent()) ?? '';
+    expect(text).toMatch(/Not ready/);
+    expect(text.toLowerCase()).toContain('multipart');
+
+    // Green dereg-ready chip must NOT render in this cell.
+    await expect(cephbCard.getByTestId('dp-dereg-ready')).toHaveCount(0);
+    // Restore-to-live action button must NOT render — the multipart probe
+    // gates deregister_ready, and the truth table only flips the typed-
+    // confirm button on once every reason clears.
+    await expect(
+      cephbCard.getByTestId('cluster-card-cancel-deregister-prep'),
+    ).toHaveCount(0);
   });
 });

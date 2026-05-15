@@ -192,6 +192,9 @@ Phase 3 layers debug tooling on top without removing Phase 2 surface.
 | State-aware ClusterCard action buttons (Activate / Drain / Undrain (cancel evacuation) / Cancel deregister prep typed-confirm, drain-cleanup US-007) | — | — | ✓ |
 | CancelDeregisterPrepModal (typed-confirm — mirrors ConfirmDrainModal, drain-cleanup US-007) | — | — | ✓ |
 | RecentTracesPanel on Trace Browser (live ringbuf list, 10 s poll, sortable by Started / Duration, drain-cleanup US-008) | — | — | ✓ |
+| Trace browser filter row (Method / Status / Path-substring / Min duration ms inputs above `<RecentTracesPanel>` — debounced 250ms, URL-persistent via `useSearchParams`; server-side filter applied before pagination, drain-followup US-001 + US-002) | — | — | ✓ |
+| Cluster card chip-above-button vertical layout (`<DrainProgressBar>` renders above the action row, button reduced to `outline size="sm"`, label `Cancel deregister prep` → `Restore to live (cancel evacuation)`, chip gains deregister-recipe tooltip — drain-followup US-003) | — | — | ✓ |
+| Multipart-blocks-deregister surfacing (`<DrainProgressBar>` renders amber `Not ready — Open multipart upload` chip when `not_ready_reasons` carries `open_multipart`; backed by Cassandra `multipart_uploads_by_cluster` + `multipart_uploads.cluster` column — drain-followup US-004 + US-005) | — | — | ✓ |
 
 ## Operational notes
 
