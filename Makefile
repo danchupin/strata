@@ -1,7 +1,7 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-all-ci up-tikv up-lab-tikv up-lab-tikv-3 down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv smoke-drain-lifecycle smoke-drain-transparency smoke-cluster-weights smoke-drain-cleanup smoke-drain-followup race-soak race-soak-tikv lint-nginx-lab bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi docs-serve docs-build clean
+.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-all-ci up-tikv up-lab-tikv up-lab-tikv-3 down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv smoke-drain-lifecycle smoke-drain-transparency smoke-cluster-weights smoke-drain-cleanup smoke-drain-followup smoke-effective-placement race-soak race-soak-tikv lint-nginx-lab bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi docs-serve docs-build clean
 
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
@@ -264,6 +264,19 @@ smoke-drain-cleanup:
 # (BASE, SMOKE_DF_*).
 smoke-drain-followup:
 	bash scripts/smoke-drain-followup.sh
+
+# Effective-placement walkthrough smoke (US-006 of ralph/effective-placement).
+# Drives the four operator scenarios (A: weighted bucket auto-fallback via
+# cluster.weights on drain, B: strict bucket blocks drain + 503 DrainRefused,
+# C: flip strict→weighted clears stuck_single_policy via cache invalidation,
+# D: all clusters drained → 503 with no fallback) against a running
+# `multi-cluster` compose profile (`docker compose --profile multi-cluster
+# up -d`). Closes ROADMAP P2 "Effective-policy fallback to cluster weights".
+# Skips with exit 77 when the lab is not reachable; set REQUIRE_LAB=1 to
+# convert the skip into a hard fail. See scripts/smoke-effective-placement.sh
+# for env knobs (BASE, SMOKE_EP_*).
+smoke-effective-placement:
+	bash scripts/smoke-effective-placement.sh
 
 # Race-soak driver (US-006). Brings up the cassandra-backed stack
 # (`make up-all-ci` when CI=true, else `make up-all`), waits for /readyz on

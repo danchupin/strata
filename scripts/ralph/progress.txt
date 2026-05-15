@@ -193,3 +193,50 @@ Cycle: ralph/effective-placement
   - `<Badge>` accepts `title` natively because its props extend `React.HTMLAttributes<HTMLDivElement>` — no need to wrap in `<span title=...>`.
   - Per-bucket compliance / data-sovereignty flips are operator-destructive in the ON direction (may block drain) and benign in the OFF direction (relaxing). Mirror the asymmetric confirm pattern (confirm-on-enable, no-confirm-on-disable) used by the rest of the placement UI rather than wrapping both transitions in a Dialog.
 ---
+
+## 2026-05-16 01:30 - US-006
+- E2E smoke + Playwright + docs + ROADMAP close-flip + PRD removal for the effective-placement cycle.
+- scripts/smoke-effective-placement.sh: 4 scenarios end-to-end against `docker compose --profile multi-cluster`:
+  - A (weighted auto-fallback): Placement={cephb:1} mode=weighted → drain cephb evacuate → /drain-impact migratable>0 + stuck_single_policy=0 + by_bucket entry classified migratable; mid-drain PUT 200 (auto-routes to default via EffectivePolicy weighted-fallback); deregister_ready=true after worker converges; undrain to reset.
+  - B (strict blocks): Placement={cephb:1} mode=strict → drain → stuck_single_policy>=1 + by_bucket entry placement_mode=strict + category=stuck_single_policy; mid-drain PUT 503 DrainRefused; deregister_ready stays false; undrain.
+  - C (flip strict→weighted): re-drain → baseline stuck_single_policy>=1 → PUT placement mode=weighted (same policy) → /drain-impact stuck_single_policy=0 immediately (cache invalidated by placement PUT); worker converges; post-flip PUT 200 via weighted-fallback; undrain.
+  - D (all clusters drained → 503): drain both default + cephb readonly → seed nil-policy bucket → PUT 503 DrainRefused; cleanup undrains.
+  - Per-scenario `==> Scenario X:` banner; PASS/FAIL log lines; cleanup trap deletes spawned buckets + best-effort-undrains both clusters; exits 77 when lab unreachable (REQUIRE_LAB=1 converts to hard fail).
+- Makefile: new `smoke-effective-placement` target; .PHONY list extended.
+- web/e2e/effective-placement.spec.ts: 4 Playwright scenarios spoofing /admin/v1/clusters, .../drain|undrain|drain-impact|drain-progress|rebalance-progress, /admin/v1/storage/data, /admin/v1/buckets/{name}, /admin/v1/buckets/{name}/placement, /admin/v1/buckets/{name}/objects via page.route() (same pattern as drain-transparency.spec.ts):
+  - A: BucketDetail Placement tab — Strict switch off→on opens confirm Dialog ("Enable strict placement?") → click "Enable strict" → switch flips aria-checked=true → Save → PUT body asserts mode=strict + placement preserved → header `strict` badge mounts → flip off → switch flips to false with NO confirm dialog appearing (relaxing direction).
+  - B: BulkPlacementFixDialog strictOnly filter — feed stuck array mixing strict + weighted rows → assert only `bpf-row-bkt-compliance` visible (the strict row), `bpf-row-bkt-weighted-stuck` has count 0 (filtered out). Amber row reads "1 compliance-locked bucket"; CTA reads "Fix 1 compliance-locked bucket".
+  - C: Per-row Flip-to-weighted Apply — server emits index-0 suggestion with placement_mode_override=weighted; bpf-apply submits → PUT body assertions: name=bkt-flip-target, mode=weighted; parent ConfirmDrainModal refetches /drain-impact → cd-stuck-warning hidden, cd-submit enabled with typed-confirm matching.
+  - D: ConfirmDrainModal amber row copy — contains "compliance-locked"; cd-submit stays disabled even when cluster id typed-confirm matches (complianceLockedCount > 0 gates Submit per US-005 ConfirmDrainModal contract).
+- docs/site/content/best-practices/placement-rebalance.md: new "Strict vs Weighted placement (per-bucket mode)" section with the 6-row EffectivePolicy truth table (nil/non-empty × weighted/strict × live/all-draining), when-to-use bullets (strict: data sovereignty / replication design / hot-cold; weighted: typical operator deploys + buckets without compliance constraints), migration note (existing buckets default to weighted; pre-cycle behaviour was equivalent to strict, hence the opt-in toggle), console-surface summary (Strict switch + header badge + BulkPlacementFixDialog filter + ConfirmDrainModal compliance-locked copy), pointer to `scripts/smoke-effective-placement.sh` + `make smoke-effective-placement`.
+- docs/site/content/best-practices/web-ui.md: capability matrix gains 5 rows (Strict placement toggle, compliance-locked bucket header badge, BulkPlacementFixDialog filter, Flip-to-weighted bulk action, ConfirmDrainModal Submit gating). End-to-end tests catalogue gains a full effective-placement.spec.ts entry walking all four scenarios + pointer to the new docs section.
+- CLAUDE.md (project root) "Cluster state machine" section: appended a `PlacementMode` block documenting EffectivePolicy resolution order (live-bucket-subset > strict-refuse > weighted-fallback to cluster.weights), `mode==""` legacy coercion via NormalizePlacementMode, nil-policy+strict treated as weighted at helper boundary, persistence across all three meta backends (memory in-struct, Cassandra ALTER + LWT, TiKV JSON blob), admin audit action `admin:UpdateBucketPlacementMode` when PUT body carries `mode`, /drain-impact `stuck_single_policy` firing exclusively for strict-flagged buckets, BulkPlacementFixDialog filter + Flip-to-weighted shortcut.
+- ROADMAP.md: P2 entry "Effective-policy fallback to cluster weights — eliminate forced Placement edit on drain" close-flipped with one-line summary covering all 6 stories + commit `<pending>` slot (closing SHA backfilled in follow-up commit on main per the CLAUDE.md PRD lifecycle rule).
+- tasks/prd-effective-placement.md REMOVED (CLAUDE.md PRD lifecycle rule — once Ralph's archive snapshot exists, the markdown PRD becomes disposable).
+- Files changed:
+  - scripts/smoke-effective-placement.sh (NEW — 4 scenarios, ~310 lines, chmod +x)
+  - Makefile (.PHONY list + smoke-effective-placement target)
+  - web/e2e/effective-placement.spec.ts (NEW — 4 Playwright scenarios, ~500 lines)
+  - docs/site/content/best-practices/placement-rebalance.md (Strict vs Weighted section)
+  - docs/site/content/best-practices/web-ui.md (capability matrix + e2e catalogue)
+  - CLAUDE.md (Cluster state machine PlacementMode block)
+  - ROADMAP.md (P2 entry close-flip)
+  - tasks/prd-effective-placement.md (REMOVED)
+- Quality:
+  - make vet passes
+  - go build ./... passes
+  - go test ./... passes (all packages cached/green, no flakes triggered this run)
+  - pnpm typecheck passes (tsc -b --noEmit clean)
+  - pnpm build passes (Storage chunk 63.62KB → 15.84KB gz; index 695.61KB → 191.71KB gz — unchanged from US-005 since this story added no new app code beyond the spec file, which is e2e-only)
+  - pnpm test:unit (57 tests) passes
+  - make docs-build passes (Hugo 59 pages built in 148ms)
+  - make smoke-effective-placement is gated on the running multi-cluster lab (operator runs it manually via `docker compose --profile multi-cluster up -d && make smoke-effective-placement`; the script auto-skips with exit 77 if the lab isn't reachable).
+- **Learnings for future iterations:**
+  - The smoke script's "drain succeeds at admin level even when stuck_single_policy>0" property is server-side semantic — the gateway never gates the drain POST on impact analysis; only the UI gates Submit via `<ConfirmDrainModal>`'s complianceLockedCount > 0 check. The PRD AC line "drain Submit returns 409 stuck buckets exist" describes the UI gate, not the server. Smoke validates the server side (stuck_single_policy classification, 503 DrainRefused on mid-drain PUT, deregister_ready=false until fixed); Playwright validates the UI side (Submit disabled).
+  - Per-row `placement_mode_override` is set by the server in `suggestedPoliciesForBucket` (US-003 effective-placement) — the strict-stuck bucket's index-0 suggestion is ALWAYS the Flip-to-weighted shortcut with `placement_mode_override: "weighted"`. The client (BulkPlacementFixDialog) just threads that field into the PUT body via `resolveModeOverride(choice)`. No client-side mode-decision logic — the truth lives on the server.
+  - When spoofing PUT /placement in a Playwright e2e, mirror the server's drain-impact cache invalidation by dropping the matching stuck-bucket entry from the closure-state array (and decrementing stuckSingleChunks accordingly) so the parent modal's TanStack refetch sees stuck=0 and unlocks Submit. The drain-transparency.spec.ts already established this pattern; we reused it.
+  - Two-route patterns coexist in the spoofed admin API: `/admin/v1/buckets/*` (the bucket detail GET) and `/admin/v1/buckets/*/placement` (the placement triple). Playwright route matching is glob+regex; place the more-specific route LAST so the placement route handler doesn't get masked by the bucket detail catch-all. The spec defines placement first then BucketDetail second to ensure correct precedence.
+  - `pnpm typecheck` uses `tsc -b --noEmit` which respects project references. When a spec file (`web/e2e/*.spec.ts`) references types from `web/src/api/*`, TS picks them up via the spec's tsconfig — but Playwright's `import type` of `Route` from `@playwright/test` must be value-import-compatible because it's also used at runtime in route handler signatures. Keep `import { type Route }` in the named import list rather than a separate `import type { Route }`.
+  - CLAUDE.md cluster-state-machine section is the single source of truth for picker semantics; adding a new dimension (per-bucket mode) belongs INSIDE that section as a sub-block, not as a new top-level heading. Future PUT-routing changes should land their semantic notes there too — the section is already the operator's mental model anchor.
+  - The Hugo theme is a git submodule (`docs/site/themes/`) — running `make docs-build` without submodule init fails silently with `theme not found`. Existing developer/CI environments already have it initialized; new contributors need `git submodule update --init`. Not a regression risk in this cycle but worth flagging if a fresh clone hits the wall.
+---

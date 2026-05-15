@@ -195,6 +195,11 @@ Phase 3 layers debug tooling on top without removing Phase 2 surface.
 | Trace browser filter row (Method / Status / Path-substring / Min duration ms inputs above `<RecentTracesPanel>` — debounced 250ms, URL-persistent via `useSearchParams`; server-side filter applied before pagination, drain-followup US-001 + US-002) | — | — | ✓ |
 | Cluster card chip-above-button vertical layout (`<DrainProgressBar>` renders above the action row, button reduced to `outline size="sm"`, label `Cancel deregister prep` → `Restore to live (cancel evacuation)`, chip gains deregister-recipe tooltip — drain-followup US-003) | — | — | ✓ |
 | Multipart-blocks-deregister surfacing (`<DrainProgressBar>` renders amber `Not ready — Open multipart upload` chip when `not_ready_reasons` carries `open_multipart`; backed by Cassandra `multipart_uploads_by_cluster` + `multipart_uploads.cluster` column — drain-followup US-004 + US-005) | — | — | ✓ |
+| Strict placement toggle (BucketDetail Placement tab — `Switch` with tooltip explainer, confirm-on-enable / one-click-on-disable, sends `mode: "weighted"\|"strict"` in PUT body, effective-placement US-004) | — | — | ✓ |
+| Compliance-locked bucket header badge (BucketDetail header — small `<Badge variant="warning">strict</Badge>` rendered when bucket has non-empty Placement AND `mode === "strict"`, effective-placement US-004) | — | — | ✓ |
+| BulkPlacementFixDialog compliance-locked filter (renders only buckets with `placement_mode === "strict"` — weighted stuck buckets auto-resolve via cluster.weights post EffectivePolicy and never reach the dialog, effective-placement US-005) | — | — | ✓ |
+| `Flip to weighted` per-bucket bulk-fix action (per-row default suggestion stamps `placement_mode_override = "weighted"` so the server stamps `admin:UpdateBucketPlacementMode` audit, effective-placement US-005) | — | — | ✓ |
+| ConfirmDrainModal compliance-locked Submit gating (amber row reads `<N> compliance-locked buckets need fix`; Submit blocks while compliance-locked > 0 even with typed-confirm matching, effective-placement US-005) | — | — | ✓ |
 
 ## Operational notes
 
@@ -297,6 +302,30 @@ Three Playwright specs run in CI under the `e2e-ui` job:
   runs against the same memory-mode gateway as the other e2e jobs.
   Operator runbook is at [Placement + rebalance — Cluster
   lifecycle]({{< ref "/best-practices/placement-rebalance#cluster-lifecycle-register--activate--ramp" >}}).
+- `web/e2e/effective-placement.spec.ts` — Effective-placement cycle
+  (US-006): four Playwright scenarios spoofing the `placement_mode`
+  wire shape across BucketDetail + `<ConfirmDrainModal>` +
+  `<BulkPlacementFixDialog>`. **Scenario A** drives the Placement-tab
+  Strict switch — off→on opens the confirm dialog, Save sends
+  `mode: "strict"` in the PUT body, header badge mounts; on→off is
+  one-click (relaxing). **Scenario B** asserts the bulk-fix dialog
+  filters to compliance-locked rows only — passing a stuck array
+  mixing strict + weighted yields a dialog with only the strict row
+  visible, the weighted stuck row is hidden by `strictOnly`.
+  **Scenario C** drives the per-row default "Flip to weighted"
+  suggestion — Apply fires a PUT body carrying
+  `mode: "weighted"`, the parent modal refetches /drain-impact,
+  stuck=0, Submit unlocks. **Scenario D** asserts the
+  `<ConfirmDrainModal>` amber row reads "compliance-locked" + Submit
+  blocks while compliance-locked > 0 even with typed-confirm matching.
+  All admin endpoints (`/admin/v1/clusters`,
+  `.../drain|undrain|drain-progress|drain-impact|rebalance-progress`,
+  `/admin/v1/storage/data`, `/admin/v1/buckets/{name}`,
+  `/admin/v1/buckets/{name}/placement`,
+  `/admin/v1/buckets/{name}/objects`) are spoofed via `page.route()`
+  so the spec runs against the same memory-mode gateway as the other
+  e2e jobs. Operator runbook is at
+  [Placement + rebalance — Strict vs Weighted placement]({{< ref "/best-practices/placement-rebalance#strict-vs-weighted-placement-per-bucket-mode" >}}).
 - `web/e2e/placement.spec.ts` — Placement + cluster surfacing cycle
   (US-006 placement-ui): login → /storage → cluster cards rendered →
   create bucket → Placement tab → drag slider for `cephb` to 100 →
