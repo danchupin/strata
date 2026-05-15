@@ -249,28 +249,36 @@ func (w *Worker) runOnce(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list buckets: %w", err)
 	}
-	excludeForTargets, scanFor := w.loadClusterDrainSets(ctx)
+	excludeForTargets, scanFor, states, weights := w.loadClusterDrainSets(ctx)
 	fillCache := w.newFillCache(ctx)
 	prog := newProgressAcc(w.cfg.Progress, scanFor)
 	for _, b := range buckets {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		policy, perr := w.cfg.Meta.GetBucketPlacement(ctx, b.Name)
+		raw, perr := w.cfg.Meta.GetBucketPlacement(ctx, b.Name)
 		if perr != nil {
 			w.cfg.Logger.Warn("rebalance: load placement", "bucket", b.Name, "error", perr.Error())
 			w.recordIterErr(perr)
 			continue
 		}
-		if len(policy) == 0 {
+		// US-003 effective-placement: the per-bucket classifier and the
+		// per-chunk picker share one effective policy, computed once per
+		// bucket from (raw bucket Placement, b.PlacementMode, default
+		// weights, cluster states). Weighted buckets whose Placement is
+		// all-draining auto-fall to cluster weights; strict buckets stay
+		// pinned to the (empty) live subset so they surface as
+		// stuck_single_policy instead of migrating elsewhere.
+		effective := placement.EffectivePolicy(raw, b.PlacementMode, weights, states)
+		if len(raw) == 0 && len(effective) == 0 {
 			// Empty-policy buckets still need a progress scan so chunks
 			// on a draining cluster are counted toward the deregister-
 			// ready signal (stuck_no_policy category). The move plan is
-			// a no-op (no policy → no PickCluster verdicts).
+			// a no-op (no effective verdict → no PickCluster targets).
 			w.scanBucketForProgress(ctx, b, scanFor, prog)
 			continue
 		}
-		w.scanAndEmit(ctx, b, policy, excludeForTargets, scanFor, fillCache, prog)
+		w.scanAndEmit(ctx, b, raw, effective, excludeForTargets, scanFor, fillCache, prog)
 	}
 	tickEnd := w.cfg.Now()
 	completions := prog.commit(w.cfg.Progress, scanFor, tickEnd)
@@ -433,30 +441,34 @@ func (a *progressAcc) commit(p *ProgressTracker, scanFor map[string]bool, now ti
 	return p.CommitScan(ids, scans, now)
 }
 
-// ClassifyBucket returns the per-bucket category contribution to the
-// draining-cluster progress snapshot. The category is constant across
-// every chunk of the bucket because the verdict only depends on
-// (policy, excludeForTargets), not on the chunk identity. Returns
-// "stuck_no_policy" for empty policies, "migratable" when at least one
-// non-excluded cluster carries weight, "stuck_single_policy" otherwise.
+// ClassifyBucket returns the per-bucket drain-progress category derived
+// from the EffectivePolicy verdict (US-003 effective-placement). The
+// classifier mirrors the PUT-routing decision so categorisation matches
+// actual routing behavior:
 //
-// Exported so the adminapi /drain-impact handler (US-003 drain-
-// transparency) reuses the same verdict as the rebalance worker without
-// re-implementing the logic — the categorized counts on the impact
-// preview and the live drain-progress endpoint stay in lockstep.
-func ClassifyBucket(policy map[string]int, excludeForTargets map[string]bool) string {
-	if len(policy) == 0 {
-		return "stuck_no_policy"
+//   - "migratable"          — effective policy has at least one live
+//     target. Chunks on excluded clusters can move to one of those.
+//   - "stuck_single_policy" — effective empty AND mode == "strict" AND
+//     the operator configured an explicit bucket Placement. The strict
+//     flag opts the bucket out of auto-fallback to cluster weights, so
+//     drain remains blocked until the operator edits the policy.
+//   - "stuck_no_policy"     — effective empty AND (mode != "strict" OR
+//     no explicit bucket Placement). Genuine "no live target" case:
+//     either the weighted-fallback also yielded nothing, or the bucket
+//     never had a Placement and cluster weights are unavailable.
+//
+// Exported so the adminapi /drain-impact handler reuses the same verdict
+// as the rebalance worker without re-implementing the logic — the
+// categorised counts on the impact preview and the live drain-progress
+// endpoint stay in lockstep.
+func ClassifyBucket(rawPolicy, effective map[string]int, mode string) string {
+	if len(effective) > 0 {
+		return "migratable"
 	}
-	for id, w := range policy {
-		if w <= 0 {
-			continue
-		}
-		if !excludeForTargets[id] {
-			return "migratable"
-		}
+	if meta.NormalizePlacementMode(mode) == meta.PlacementModeStrict && len(rawPolicy) > 0 {
+		return "stuck_single_policy"
 	}
-	return "stuck_single_policy"
+	return "stuck_no_policy"
 }
 
 // scanBucketForProgress walks every (latest) object in the bucket and
@@ -502,25 +514,31 @@ func (w *Worker) scanBucketForProgress(ctx context.Context, b *meta.Bucket, scan
 }
 
 // loadClusterDrainSets reads cluster_state once per tick and returns
-// two sets (US-002 drain-transparency):
+// four views (US-002 drain-transparency + US-003 effective-placement):
 //   - excludeForTargets: clusters that must NOT receive new chunks
 //     (draining_readonly, evacuating, legacy draining). The picker
 //     excludes these; the safety rail refuses moves into these.
 //   - scanFor: clusters whose existing chunks are tracked + categorized
 //     for the drain-progress endpoint (state=evacuating only). Readonly
 //     clusters get stop-write semantic but no migration scan.
+//   - states: the raw cluster_state row map. Threaded into
+//     placement.EffectivePolicy so the worker classifier shares the
+//     PUT-routing live-state filter.
+//   - weights: synthesised default-routing policy
+//     (placement.DefaultPolicy(states)). Threaded into EffectivePolicy
+//     as the weighted-fallback layer.
 //
 // Errors are logged + treated as empty so a meta hiccup never breaks the
 // rebalance tick.
-func (w *Worker) loadClusterDrainSets(ctx context.Context) (excludeForTargets, scanFor map[string]bool) {
+func (w *Worker) loadClusterDrainSets(ctx context.Context) (excludeForTargets, scanFor map[string]bool, states map[string]meta.ClusterStateRow, weights map[string]int) {
 	rows, err := w.cfg.Meta.ListClusterStates(ctx)
 	if err != nil {
 		w.cfg.Logger.Warn("rebalance: load cluster states", "error", err.Error())
 		w.recordIterErr(err)
-		return nil, nil
+		return nil, nil, nil, nil
 	}
 	if len(rows) == 0 {
-		return nil, nil
+		return nil, nil, nil, nil
 	}
 	excludeForTargets = make(map[string]bool, len(rows))
 	scanFor = make(map[string]bool, len(rows))
@@ -536,10 +554,10 @@ func (w *Worker) loadClusterDrainSets(ctx context.Context) (excludeForTargets, s
 			scanFor[id] = true
 		}
 	}
-	return excludeForTargets, scanFor
+	return excludeForTargets, scanFor, rows, placement.DefaultPolicy(rows)
 }
 
-func (w *Worker) scanAndEmit(ctx context.Context, b *meta.Bucket, policy map[string]int, excludeForTargets, scanFor map[string]bool, fills *fillCache, prog *progressAcc) {
+func (w *Worker) scanAndEmit(ctx context.Context, b *meta.Bucket, rawPolicy, effective map[string]int, excludeForTargets, scanFor map[string]bool, fills *fillCache, prog *progressAcc) {
 	ctx, span := w.tracerOrNoop().Start(ctx, "rebalance.scan_bucket",
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(
@@ -551,7 +569,7 @@ func (w *Worker) scanAndEmit(ctx context.Context, b *meta.Bucket, policy map[str
 	)
 	defer span.End()
 
-	actual, moves, err := w.scanDistribution(ctx, b, policy, excludeForTargets, scanFor, prog)
+	actual, moves, err := w.scanDistribution(ctx, b, rawPolicy, effective, excludeForTargets, scanFor, prog)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -563,7 +581,7 @@ func (w *Worker) scanAndEmit(ctx context.Context, b *meta.Bucket, policy map[str
 	for range moves {
 		w.cfg.Metrics.IncPlannedMove(b.Name)
 	}
-	if err := w.cfg.Emitter.EmitPlan(ctx, b, actual, policy, moves); err != nil {
+	if err := w.cfg.Emitter.EmitPlan(ctx, b, actual, effective, moves); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		w.recordIterErr(err)
@@ -621,10 +639,10 @@ func (w *Worker) applySafetyRails(ctx context.Context, b *meta.Bucket, moves []M
 // only — readonly clusters get stop-write but no migration scan per
 // US-002). Per-bucket category is constant across chunks because the
 // classifyBucket verdict depends on (policy, excludeForTargets) only.
-func (w *Worker) scanDistribution(ctx context.Context, b *meta.Bucket, policy map[string]int, excludeForTargets, scanFor map[string]bool, prog *progressAcc) (map[string]int, []Move, error) {
+func (w *Worker) scanDistribution(ctx context.Context, b *meta.Bucket, rawPolicy, effective map[string]int, excludeForTargets, scanFor map[string]bool, prog *progressAcc) (map[string]int, []Move, error) {
 	actual := map[string]int{}
 	var moves []Move
-	bucketCategory := ClassifyBucket(policy, excludeForTargets)
+	bucketCategory := ClassifyBucket(rawPolicy, effective, b.PlacementMode)
 	opts := meta.ListOptions{Limit: w.cfg.PollLimit}
 	for {
 		if ctx.Err() != nil {
@@ -641,7 +659,7 @@ func (w *Worker) scanDistribution(ctx context.Context, b *meta.Bucket, policy ma
 			for idx, c := range o.Manifest.Chunks {
 				actual[c.Cluster]++
 				prog.observe(c.Cluster, b.Name, bucketCategory, scanFor, c.Size)
-				want := placement.PickClusterExcluding(b.ID, o.Key, idx, policy, excludeForTargets)
+				want := placement.PickClusterExcluding(b.ID, o.Key, idx, effective, excludeForTargets)
 				if want == "" {
 					continue
 				}
@@ -663,7 +681,7 @@ func (w *Worker) scanDistribution(ctx context.Context, b *meta.Bucket, policy ma
 			if br := o.Manifest.BackendRef; br != nil && br.Cluster != "" {
 				actual[br.Cluster]++
 				prog.observe(br.Cluster, b.Name, bucketCategory, scanFor, br.Size)
-				want := placement.PickClusterExcluding(b.ID, o.Key, 0, policy, excludeForTargets)
+				want := placement.PickClusterExcluding(b.ID, o.Key, 0, effective, excludeForTargets)
 				if want == "" || br.Cluster == want {
 					continue
 				}

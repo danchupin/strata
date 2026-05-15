@@ -25,7 +25,7 @@ import (
 // The draining-cluster set is read from s.DrainCache (in-process,
 // 30s TTL) so the meta backend is not burdened per request.
 func (s *Server) dataCtxForPut(ctx context.Context, b *meta.Bucket, key string) context.Context {
-	return dataCtxForPutWith(ctx, s.Meta, b, key, s.drainingClusters(ctx), s.defaultPlacement(ctx))
+	return dataCtxForPutWith(ctx, s.Meta, b, key, s.drainingClusters(ctx), s.defaultPlacement(ctx), s.clusterStates(ctx))
 }
 
 func (s *Server) drainingClusters(ctx context.Context) map[string]bool {
@@ -47,7 +47,19 @@ func (s *Server) defaultPlacement(ctx context.Context) map[string]int {
 	return placement.DefaultPolicy(s.DrainCache.States(ctx))
 }
 
-func dataCtxForPutWith(ctx context.Context, m meta.Store, b *meta.Bucket, key string, draining map[string]bool, defaultPolicy map[string]int) context.Context {
+// clusterStates returns the raw cluster_state snapshot from the shared
+// DrainCache. Backends thread it through ctx so PutChunks resolves the
+// effective routing policy with the full live/draining/pending/removed
+// filter (US-003 effective-placement) rather than just the draining
+// boolean set.
+func (s *Server) clusterStates(ctx context.Context) map[string]meta.ClusterStateRow {
+	if s.DrainCache == nil {
+		return nil
+	}
+	return s.DrainCache.States(ctx)
+}
+
+func dataCtxForPutWith(ctx context.Context, m meta.Store, b *meta.Bucket, key string, draining map[string]bool, defaultPolicy map[string]int, states map[string]meta.ClusterStateRow) context.Context {
 	ctx = data.WithBucketID(ctx, b.ID)
 	ctx = data.WithObjectKey(ctx, key)
 	policy, err := m.GetBucketPlacement(ctx, b.Name)
@@ -62,11 +74,17 @@ func dataCtxForPutWith(ctx context.Context, m meta.Store, b *meta.Bucket, key st
 	} else if policy != nil {
 		ctx = data.WithPlacement(ctx, policy)
 	}
+	if b.PlacementMode != "" {
+		ctx = data.WithPlacementMode(ctx, b.PlacementMode)
+	}
 	if len(draining) > 0 {
 		ctx = data.WithDrainingClusters(ctx, draining)
 	}
 	if len(defaultPolicy) > 0 {
 		ctx = data.WithDefaultPlacement(ctx, defaultPolicy)
+	}
+	if len(states) > 0 {
+		ctx = placement.WithClusterStates(ctx, states)
 	}
 	return ctx
 }

@@ -177,15 +177,21 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 	if err != nil {
 		return nil, err
 	}
-	// Placement routing (US-002): per-chunk hash-mod stable picker over
-	// data.WithPlacement(ctx). Two-layer policy (US-002 cluster-weights):
-	//   1. bucket.Placement (data.PlacementFromContext) wins outright.
+	// Placement routing (US-003 effective-placement): per-chunk hash-mod
+	// stable picker over the EffectivePolicy verdict, which folds three
+	// layers:
+	//   1. bucket.Placement (data.PlacementFromContext) filtered to live
+	//      clusters — wins outright when at least one entry survives.
 	//   2. Else if the class has an explicit `@cluster` pin
 	//      (spec.ClusterPinned), route to spec.Cluster — class env wins
 	//      over default-routing synthesis.
-	//   3. Else use the synthesised default-routing policy from
-	//      cluster.weight (data.DefaultPlacementFromContext).
-	//   4. Else fall back to spec.Cluster.
+	//   3. Else the synthesised cluster-weight policy
+	//      (data.DefaultPlacementFromContext) filtered to live clusters.
+	//   4. Else fall back to spec.Cluster (existing strict-refuse
+	//      semantic still applies when spec.Cluster is itself draining).
+	// PlacementMode toggles the auto-fallback to step 3: mode=strict
+	// keeps the bucket pinned to its (now-empty) Placement instead of
+	// silently routing via cluster.weights.
 	// Pool + namespace inherit from the class spec — operators are expected
 	// to use the same pool layout across clusters within one class.
 	bucketPolicy, _ := data.PlacementFromContext(ctx)
@@ -193,9 +199,25 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 	bucketID, _ := data.BucketIDFromContext(ctx)
 	objKey, _ := data.ObjectKeyFromContext(ctx)
 	draining, _ := data.DrainingClustersFromContext(ctx)
-	activePolicy := bucketPolicy
-	if activePolicy == nil && !spec.ClusterPinned {
-		activePolicy = defaultPolicy
+	mode, _ := data.PlacementModeFromContext(ctx)
+	states, _ := placement.ClusterStatesFromContext(ctx)
+	// Effective resolution per US-003: bucket Placement's live subset
+	// wins; if empty under mode=strict (and bucket had a policy) → no
+	// auto-fallback so we surface the "compliance refuse" path through
+	// spec.Cluster; if empty under weighted → fall to the class-pin
+	// shortcut OR the synthesised cluster-weights policy (live subset).
+	activePolicy := placement.LiveSubset(bucketPolicy, states)
+	if activePolicy == nil {
+		strictRefuse := mode == "strict" && len(bucketPolicy) > 0
+		switch {
+		case strictRefuse:
+			// Leave activePolicy nil — strict + all-drained bucket
+			// falls to spec.Cluster (which may strict-refuse if drained).
+		case spec.ClusterPinned:
+			// Class env wins over default-routing synthesis.
+		default:
+			activePolicy = placement.LiveSubset(defaultPolicy, states)
+		}
 	}
 	pickCluster := func(idx int) (string, error) {
 		picked := placement.PickClusterExcluding(bucketID, objKey, idx, activePolicy, draining)

@@ -88,3 +88,35 @@ Cycle: ralph/effective-placement
   - The `len(bucketPolicy) > 0 && norm == strict → nil` early return is what makes the helper return DIFFERENT results for nil-bucket+strict (treated as weighted, fallback to weights) vs configured-bucket+strict-all-draining (strict refuse, return nil). The distinction is "was a policy ever configured" — nil means no, the strict tag is meaningless without it.
   - When adding a new placement decision branch, mirror it in the contract-test-like row enumeration (all-live, mixed, all-draining × weighted/strict) to keep the truth-table-driven semantic visible.
 ---
+
+## 2026-05-15 23:30 - US-003
+- PutChunks routing + rebalance worker classifier now share placement.EffectivePolicy.
+- New ctx helpers: data.WithPlacementMode/PlacementModeFromContext (string) and placement.WithClusterStates/ClusterStatesFromContext (meta-typed; lives in placement pkg to avoid the internal/data → meta cycle).
+- placement.LiveSubset exported so backends can apply the same live-state filter to bucket Placement and cluster.weights.
+- internal/data/rados/backend.go::PutChunks: bucket live subset wins; strict+all-drained leaves activePolicy nil (falls to spec.Cluster which strict-refuses if drained); spec.ClusterPinned short-circuits weighted fallback; else liveSubset(defaultPolicy) — the existing layered shape with the strict guard inserted.
+- internal/data/s3/backend.go::clusterForPlacement: same structure minus ClusterPinned (s3 has none). When mode=strict + bucket policy all-drained → policy stays nil → clusterForClassStrict returns ErrDrainRefused for the class default cluster, never falls through to weighted clusters.
+- ClassifyBucket signature flipped to (raw, effective, mode) string per US-003 truth table: effective non-empty → migratable; effective empty + mode==strict + raw non-empty → stuck_single_policy; else stuck_no_policy.
+- rebalance.scanDistribution computes EffectivePolicy ONCE per bucket from (raw, b.PlacementMode, weights, states) and feeds the result as picker input + classifier input. loadClusterDrainSets now also returns the raw cluster_state row map + synthesised cluster-weights so runOnce threads both into the per-bucket loop.
+- adminapi.computeDrainImpact builds a "preview" cluster_state map (excludeForTargets clusters stamped draining_readonly) and calls EffectivePolicy + ClassifyBucket per bucket. SuggestedPolicy gains PlacementModeOverride string; strict-stuck buckets get an index-0 Flip to weighted suggestion (mode=weighted, preserves current policy) + per-live-cluster replacement entries stamped mode=strict so the UI keeps the compliance pin.
+- OpenAPI: SuggestedPolicy schema gains placement_mode_override enum [\"\", weighted, strict] + description block.
+- Files changed:
+  - internal/data/context.go (WithPlacementMode + PlacementModeFromContext)
+  - internal/data/placement/context.go (NEW — WithClusterStates + ClusterStatesFromContext)
+  - internal/data/placement/policy.go (export LiveSubset)
+  - internal/data/rados/backend.go (PutChunks layered resolution)
+  - internal/data/s3/backend.go (clusterForPlacement layered resolution)
+  - internal/data/s3/placement_test.go (NEW tests for weighted-auto-fallback + strict-refuse)
+  - internal/s3api/placement_ctx.go (dataCtxForPutWith threads mode + states)
+  - internal/rebalance/worker.go (loadClusterDrainSets returns states+weights; scanAndEmit/scanDistribution take raw+effective+mode; ClassifyBucket signature flipped)
+  - internal/rebalance/progress_test.go (updated TestClassifyBucketCovers truth table; tagged bucket B mode=strict in TestWorkerCategorizesChunksAcrossBuckets)
+  - internal/adminapi/clusters_drain_impact.go (preview-states + EffectivePolicy + suggestedPoliciesForBucket mode signature; SuggestedPolicy.PlacementModeOverride)
+  - internal/adminapi/clusters_drain_impact_test.go (b-stuck-single tagged strict; new TestSuggestedPoliciesForBucket_StrictStuckOffersFlipAndStrictReplacements; updated suggestedPoliciesForBucket signature in old tests)
+  - internal/adminapi/openapi.yaml (SuggestedPolicy.placement_mode_override)
+- **Learnings for future iterations:**
+  - internal/data must NOT import internal/meta (cycle: meta/tikv → data → meta). So meta-typed ctx helpers (the cluster_state row map) live in internal/data/placement instead of internal/data. The string-typed PlacementMode ctx helper lives in internal/data because string has no meta dep.
+  - When restructuring loadClusterDrainSets to return additional values (states, weights), update both the runOnce call site AND any test fixture that calls it directly (none here, but pattern would burn if a test exercises the helper).
+  - placement.EffectivePolicy returns "" for `len(raw)>0 + strict + all-drained` — that nil sentinel drives the rados/s3 backends through their existing spec.Cluster fallback, which then strict-refuses if spec.Cluster is itself draining. So strict mode + all-drained bucket Placement does NOT silently route to cluster.weights and does NOT trivially succeed via spec.Cluster either — it 503s when spec.Cluster is in the draining set, otherwise it lands on spec.Cluster (a "the operator intentionally picked this class default" semantic).
+  - rados spec.ClusterPinned MUST short-circuit weighted fallback even after the strict-refuse branch is taken — pinned classes should bypass cluster.weights regardless of mode. The switch ordering in PutChunks (strictRefuse → ClusterPinned → default weighted-fallback) keeps both invariants.
+  - The drain-impact preview-states synthesis (overwrite excludeForTargets ids with draining_readonly) keeps the rebalance worker + admin preview using ONE classifier — no second source of truth for "what happens if I drain this?".
+  - Pre-existing tests that assumed `stuck_single_policy` for weighted buckets with all-draining Placement must either flip those buckets to mode=strict (preserves the old categorisation intent) or accept the new stuck_no_policy verdict (matches the new operator semantic). The PRD AC explicitly requires this change; updating tests is the correct move, not bug-fixing the classifier.
+---

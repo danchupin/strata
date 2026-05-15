@@ -18,6 +18,15 @@ import (
 // /drain-impact scanner sees a non-zero chunk_count on that cluster.
 func seedImpactBucket(t *testing.T, s *Server, name, owner string, policy map[string]int, chunkCluster string, n int) {
 	t.Helper()
+	seedImpactBucketWithMode(t, s, name, owner, policy, "", chunkCluster, n)
+}
+
+// seedImpactBucketWithMode is the mode-aware variant. mode=="" leaves
+// the bucket default (weighted); explicit "strict" / "weighted" stamps
+// b.PlacementMode so the EffectivePolicy classifier branches as
+// expected.
+func seedImpactBucketWithMode(t *testing.T, s *Server, name, owner string, policy map[string]int, mode, chunkCluster string, n int) {
+	t.Helper()
 	ctx := context.Background()
 	b, err := s.Meta.CreateBucket(ctx, name, owner, "STANDARD")
 	if err != nil {
@@ -26,6 +35,11 @@ func seedImpactBucket(t *testing.T, s *Server, name, owner string, policy map[st
 	if policy != nil {
 		if err := s.Meta.SetBucketPlacement(ctx, name, policy); err != nil {
 			t.Fatalf("seed placement %q: %v", name, err)
+		}
+	}
+	if mode != "" {
+		if err := s.Meta.SetBucketPlacementMode(ctx, name, mode); err != nil {
+			t.Fatalf("seed mode %q: %v", name, err)
 		}
 	}
 	for i := 0; i < n; i++ {
@@ -56,9 +70,10 @@ func TestClusterDrainImpact_CategorizesAndSorts(t *testing.T) {
 	// b-migratable → {c1:1, c2:1}; chunks live on c1. Draining c1 leaves
 	// c2 as a valid target → migratable.
 	seedImpactBucket(t, s, "b-migratable", "alice", map[string]int{"c1": 1, "c2": 1}, "c1", 4)
-	// b-stuck-single → {c1:1}; chunks live on c1. Draining c1 leaves no
-	// non-excluded target → stuck_single_policy.
-	seedImpactBucket(t, s, "b-stuck-single", "alice", map[string]int{"c1": 1}, "c1", 3)
+	// b-stuck-single → {c1:1} mode=strict; chunks live on c1. Draining
+	// c1 leaves no non-excluded target AND strict opts out of cluster-
+	// weights fallback → stuck_single_policy.
+	seedImpactBucketWithMode(t, s, "b-stuck-single", "alice", map[string]int{"c1": 1}, meta.PlacementModeStrict, "c1", 3)
 	// b-no-policy → no Placement; chunks live on c1 via class-env routing.
 	// Empty policy → stuck_no_policy regardless of cluster set.
 	seedImpactBucket(t, s, "b-no-policy", "alice", nil, "c1", 2)
@@ -137,8 +152,9 @@ func TestClusterDrainImpact_CategorizesAndSorts(t *testing.T) {
 		t.Errorf("single-target suggestions: got %d want 2 (one per live)", perCluster)
 	}
 
-	// stuck_single bucket keeps its current policy + offers a uniform
-	// suggestion that forces the draining key to 0.
+	// stuck_single (strict-flagged) bucket keeps its current policy +
+	// offers a flip-to-weighted shortcut as the first suggestion AND a
+	// uniform suggestion that forces the draining key to 0.
 	stuck := got.ByBucket[0]
 	if stuck.Category != "stuck_single_policy" {
 		t.Errorf("b-stuck-single category: %q", stuck.Category)
@@ -146,8 +162,15 @@ func TestClusterDrainImpact_CategorizesAndSorts(t *testing.T) {
 	if stuck.CurrentPolicy["c1"] != 1 {
 		t.Errorf("b-stuck-single current_policy[c1]: %d", stuck.CurrentPolicy["c1"])
 	}
-	if stuck.SuggestedPolicies[0].Policy["c1"] != 0 {
-		t.Errorf("uniform suggestion must neutralize draining c1, got %+v", stuck.SuggestedPolicies[0].Policy)
+	flip := stuck.SuggestedPolicies[0]
+	if flip.PlacementModeOverride != meta.PlacementModeWeighted {
+		t.Errorf("first suggestion must be Flip to weighted, got mode=%q label=%q", flip.PlacementModeOverride, flip.Label)
+	}
+	if flip.Policy["c1"] != 1 {
+		t.Errorf("flip-to-weighted must preserve current policy, got %+v", flip.Policy)
+	}
+	if stuck.SuggestedPolicies[1].Policy["c1"] != 0 {
+		t.Errorf("uniform suggestion must neutralize draining c1, got %+v", stuck.SuggestedPolicies[1].Policy)
 	}
 }
 
@@ -288,9 +311,40 @@ func TestClusterDrainImpact_UnknownClusterRejected(t *testing.T) {
 }
 
 func TestSuggestedPoliciesForBucket_NoLiveClustersReturnsNil(t *testing.T) {
-	got := suggestedPoliciesForBucket(map[string]int{"c1": 1}, map[string]bool{"c1": true}, nil)
+	got := suggestedPoliciesForBucket(map[string]int{"c1": 1}, "", "stuck_no_policy", map[string]bool{"c1": true}, nil)
 	if got != nil {
 		t.Fatalf("no-live → nil suggestions; got %+v", got)
+	}
+}
+
+// TestSuggestedPoliciesForBucket_StrictStuckOffersFlipAndStrictReplacements
+// pins the US-003 effective-placement contract: strict-stuck buckets
+// get a "Flip to weighted" suggestion at the top + replacement-cluster
+// suggestions that keep mode=strict.
+func TestSuggestedPoliciesForBucket_StrictStuckOffersFlipAndStrictReplacements(t *testing.T) {
+	current := map[string]int{"c1": 1}
+	exclude := map[string]bool{"c1": true}
+	live := []string{"c2", "c3"}
+	got := suggestedPoliciesForBucket(current, meta.PlacementModeStrict, "stuck_single_policy", exclude, live)
+	if len(got) == 0 {
+		t.Fatal("strict-stuck must emit suggestions")
+	}
+	if got[0].PlacementModeOverride != meta.PlacementModeWeighted {
+		t.Fatalf("first suggestion must be Flip to weighted, got %+v", got[0])
+	}
+	if got[0].Policy["c1"] != 1 {
+		t.Errorf("flip suggestion must preserve current policy, got %+v", got[0].Policy)
+	}
+	// Remaining: uniform + per-live replacements; per-live carry mode=strict.
+	foundStrictReplacement := false
+	for _, sp := range got[1:] {
+		if sp.PlacementModeOverride == meta.PlacementModeStrict {
+			foundStrictReplacement = true
+			break
+		}
+	}
+	if !foundStrictReplacement {
+		t.Errorf("expected at least one strict replacement suggestion, got %+v", got)
 	}
 }
 
@@ -298,7 +352,7 @@ func TestSuggestedPoliciesForBucket_NeutralizesDrainingKeysInUniform(t *testing.
 	current := map[string]int{"c1": 1, "c2": 1}
 	exclude := map[string]bool{"c1": true}
 	live := []string{"c3"}
-	got := suggestedPoliciesForBucket(current, exclude, live)
+	got := suggestedPoliciesForBucket(current, "", "stuck_single_policy", exclude, live)
 	if len(got) != 2 {
 		t.Fatalf("len: got %d want 2 (uniform + 1 single-target)", len(got))
 	}

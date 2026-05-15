@@ -78,6 +78,16 @@ func EffectivePolicy(
 	return liveSubset(clusterWeights, clusterStates)
 }
 
+// LiveSubset returns the entries of policy whose cluster is live (per
+// clusterStates; absence == live) AND weight > 0. Returns nil for empty
+// inputs or when no entry survives the filter. Exported so call sites
+// outside this package can apply the same live-state filter to either
+// bucket.Placement or the synthesised cluster-weights map without
+// re-implementing the predicate.
+func LiveSubset(policy map[string]int, states map[string]meta.ClusterStateRow) map[string]int {
+	return liveSubset(policy, states)
+}
+
 // liveSubset returns the entries of policy whose cluster is live (per
 // clusterStates; absence == live) AND weight > 0. Returns nil for empty
 // inputs or when no entry survives the filter.

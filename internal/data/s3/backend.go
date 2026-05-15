@@ -439,11 +439,20 @@ func (b *Backend) clusterForClass(ctx context.Context, class string) (*s3Cluster
 // b.clusters, or no class registers a bucket on the picked cluster.
 func (b *Backend) clusterForPlacement(ctx context.Context, class string) (*s3Cluster, string, error) {
 	draining, _ := data.DrainingClustersFromContext(ctx)
-	policy, ok := data.PlacementFromContext(ctx)
-	if !ok {
-		policy, ok = data.DefaultPlacementFromContext(ctx)
+	bucketPolicy, _ := data.PlacementFromContext(ctx)
+	defaultPolicy, _ := data.DefaultPlacementFromContext(ctx)
+	mode, _ := data.PlacementModeFromContext(ctx)
+	states, _ := placement.ClusterStatesFromContext(ctx)
+	// US-003 effective-placement: bucket live subset wins; strict mode
+	// with all-draining bucket policy skips weight fallback (compliance);
+	// otherwise weighted falls to the synthesised cluster-weights map.
+	policy := placement.LiveSubset(bucketPolicy, states)
+	if policy == nil {
+		if mode != "strict" || len(bucketPolicy) == 0 {
+			policy = placement.LiveSubset(defaultPolicy, states)
+		}
 	}
-	if !ok {
+	if len(policy) == 0 {
 		return b.clusterForClassStrict(ctx, class, draining)
 	}
 	bucketID, _ := data.BucketIDFromContext(ctx)

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/danchupin/strata/internal/auth"
+	"github.com/danchupin/strata/internal/data/placement"
 	"github.com/danchupin/strata/internal/meta"
 	"github.com/danchupin/strata/internal/rebalance"
 	"github.com/danchupin/strata/internal/s3api"
@@ -32,9 +33,18 @@ const (
 // description the UI renders in the BulkPlacementFixDialog (US-005)
 // dropdown; Policy is the {clusterID: weight} body the operator would
 // PUT to /admin/v1/buckets/{name}/placement.
+//
+// PlacementModeOverride (US-003 effective-placement) carries an optional
+// PUT-body `mode` value the UI sends alongside Policy. Empty string
+// means the suggestion is mode-agnostic (leave bucket mode unchanged).
+// Non-empty values are one of "weighted" | "strict"; "weighted" is the
+// "Flip to weighted" shortcut that lets a strict-stuck bucket auto-
+// resolve via cluster weights without policy edit, "strict" pairs with
+// a replacement Placement that keeps the compliance pin.
 type SuggestedPolicy struct {
-	Label  string         `json:"label"`
-	Policy map[string]int `json:"policy"`
+	Label                 string         `json:"label"`
+	Policy                map[string]int `json:"policy"`
+	PlacementModeOverride string         `json:"placement_mode_override,omitempty"`
 }
 
 // BucketImpactEntry is one row in the by_bucket section of the
@@ -204,6 +214,27 @@ func computeDrainImpact(ctx context.Context, m meta.Store, clusterID string, row
 	}
 	liveClusters := liveClusterIDs(knownIDs, excludeForTargets)
 
+	// US-003 effective-placement: synthesise a "preview" state map that
+	// mirrors the rebalance worker's view if the operator triggered the
+	// drain now. excludeForTargets clusters (the previewed cluster plus
+	// any already-draining peers) get a non-live placeholder row so
+	// placement.EffectivePolicy filters bucketPolicy against the same
+	// live-state predicate the PUT path uses. Clusters that are not in
+	// excludeForTargets keep their actual row (or stay absent →
+	// absence==live).
+	previewStates := make(map[string]meta.ClusterStateRow, len(rows)+len(excludeForTargets))
+	for id, row := range rows {
+		previewStates[id] = row
+	}
+	for id := range excludeForTargets {
+		row, ok := previewStates[id]
+		if !ok || row.State == meta.ClusterStateLive || row.State == "" {
+			row.State = meta.ClusterStateDrainingReadonly
+			previewStates[id] = row
+		}
+	}
+	previewWeights := placement.DefaultPolicy(previewStates)
+
 	buckets, err := m.ListBuckets(ctx, "")
 	if err != nil {
 		return drainImpactScan{}, err
@@ -220,12 +251,8 @@ func computeDrainImpact(ctx context.Context, m meta.Store, clusterID string, row
 			// (race with concurrent DeleteBucket) — skip.
 			continue
 		}
-		var category string
-		if len(policy) == 0 {
-			category = "stuck_no_policy"
-		} else {
-			category = rebalance.ClassifyBucket(policy, excludeForTargets)
-		}
+		effective := placement.EffectivePolicy(policy, b.PlacementMode, previewWeights, previewStates)
+		category := rebalance.ClassifyBucket(policy, effective, b.PlacementMode)
 		entry := BucketImpactEntry{
 			Name:     b.Name,
 			Category: category,
@@ -246,7 +273,7 @@ func computeDrainImpact(ctx context.Context, m meta.Store, clusterID string, row
 		}
 		entry.ChunkCount = chunks
 		entry.BytesUsed = bytes
-		entry.SuggestedPolicies = suggestedPoliciesForBucket(entry.CurrentPolicy, excludeForTargets, liveClusters)
+		entry.SuggestedPolicies = suggestedPoliciesForBucket(entry.CurrentPolicy, b.PlacementMode, category, excludeForTargets, liveClusters)
 		out.ByBucket = append(out.ByBucket, entry)
 		switch category {
 		case "migratable":
@@ -330,43 +357,76 @@ func (s *Server) knownClusterIDs() []string {
 }
 
 // suggestedPoliciesForBucket builds the list of remediation policies
-// offered for one bucket. Two flavours: (a) one "uniform live" entry
-// that spreads weight 1 across every live cluster (draining keys
-// forced to 0 when the bucket already has a policy), (b) one
-// single-target entry per live cluster. With no live clusters left, the
-// list is empty so the UI hides the "Fix" CTA — there is no remediation
-// the operator can apply from here.
-func suggestedPoliciesForBucket(current map[string]int, exclude map[string]bool, live []string) []SuggestedPolicy {
-	if len(live) == 0 {
+// offered for one bucket. Flavours:
+//
+//   - "Flip to weighted" — strict-stuck only (US-003 effective-
+//     placement). Re-PUT placement carrying the bucket's existing
+//     policy + mode="weighted" so cluster.weights auto-fallback
+//     resolves the stuck state without policy edits.
+//   - "Uniform live" — one entry that spreads weight 1 across every
+//     live cluster (draining keys forced to 0 when the bucket already
+//     has a policy).
+//   - "Single-target replacement" — one entry per live cluster.
+//
+// PlacementModeOverride is stamped onto the strict-flip suggestion so
+// the UI knows to PUT mode=weighted alongside the policy. The other
+// suggestions leave it empty (mode unchanged on save).
+//
+// With no live clusters left, the list is empty so the UI hides the
+// "Fix" CTA — there is no remediation the operator can apply from
+// here.
+func suggestedPoliciesForBucket(current map[string]int, mode, category string, exclude map[string]bool, live []string) []SuggestedPolicy {
+	if len(live) == 0 && (category != "stuck_single_policy" || meta.NormalizePlacementMode(mode) != meta.PlacementModeStrict) {
 		return nil
 	}
-	out := make([]SuggestedPolicy, 0, len(live)+1)
+	out := make([]SuggestedPolicy, 0, len(live)+2)
 
-	uniform := map[string]int{}
-	for _, id := range live {
-		uniform[id] = 1
+	if category == "stuck_single_policy" && meta.NormalizePlacementMode(mode) == meta.PlacementModeStrict && len(current) > 0 {
+		// Flip-to-weighted shortcut: keep the bucket's policy but flip
+		// mode so cluster.weights auto-fallback unsticks the bucket.
+		out = append(out, SuggestedPolicy{
+			Label:                 "Flip to weighted (auto-fallback to cluster weights)",
+			Policy:                cloneIntMap(current),
+			PlacementModeOverride: meta.PlacementModeWeighted,
+		})
 	}
-	uniformLabel := "Add all live clusters (uniform)"
-	if current == nil {
-		uniformLabel = "Set initial policy: live clusters uniform"
-	} else {
-		for id, w := range current {
-			if exclude[id] && w > 0 {
-				uniform[id] = 0
+
+	if len(live) > 0 {
+		uniform := map[string]int{}
+		for _, id := range live {
+			uniform[id] = 1
+		}
+		uniformLabel := "Add all live clusters (uniform)"
+		if current == nil {
+			uniformLabel = "Set initial policy: live clusters uniform"
+		} else {
+			for id, w := range current {
+				if exclude[id] && w > 0 {
+					uniform[id] = 0
+				}
 			}
 		}
-	}
-	out = append(out, SuggestedPolicy{Label: uniformLabel, Policy: uniform})
+		out = append(out, SuggestedPolicy{Label: uniformLabel, Policy: uniform})
 
-	for _, id := range live {
-		label := "Replace draining with " + id
-		if current == nil {
-			label = "Set initial policy: " + id
+		strictStuck := category == "stuck_single_policy" && meta.NormalizePlacementMode(mode) == meta.PlacementModeStrict
+		for _, id := range live {
+			label := "Replace draining with " + id
+			if current == nil {
+				label = "Set initial policy: " + id
+			}
+			sp := SuggestedPolicy{
+				Label:  label,
+				Policy: map[string]int{id: 1},
+			}
+			if strictStuck {
+				// Preserve the compliance pin: replacement Placement +
+				// mode=strict keeps the bucket strict-flagged so the
+				// operator's data-sovereignty intent is preserved.
+				sp.PlacementModeOverride = meta.PlacementModeStrict
+				sp.Label = "Replace with " + id + " (keep strict)"
+			}
+			out = append(out, sp)
 		}
-		out = append(out, SuggestedPolicy{
-			Label:  label,
-			Policy: map[string]int{id: 1},
-		})
 	}
 	return out
 }

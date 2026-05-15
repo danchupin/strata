@@ -512,7 +512,12 @@ components:
         human-readable description the BulkPlacementFixDialog (US-005)
         renders in its per-bucket dropdown; `policy` is the
         {clusterID: weight} body the operator would PUT to
-        /admin/v1/buckets/{name}/placement.
+        /admin/v1/buckets/{name}/placement. `placement_mode_override`
+        (US-003 effective-placement) is the optional `mode` value the UI
+        sends alongside `policy`; non-empty values are "weighted" |
+        "strict". A "Flip to weighted" suggestion on a strict-stuck
+        bucket carries `placement_mode_override: "weighted"` so the bucket
+        auto-resolves via cluster.weights without a policy edit.
       properties:
         label: { type: string }
         policy:
@@ -521,6 +526,10 @@ components:
             type: integer
             minimum: 0
             maximum: 100
+        placement_mode_override:
+          type: string
+          enum: ["", "weighted", "strict"]
+          default: ""
 
     BucketImpactEntry:
       type: object

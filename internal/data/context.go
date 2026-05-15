@@ -163,3 +163,34 @@ func DrainingClustersFromContext(ctx context.Context) (map[string]bool, bool) {
 	}
 	return v, true
 }
+
+// placementModeKey carries the bucket's PlacementMode ("" / "weighted" /
+// "strict") onto the data-plane ctx so PutChunks can branch the
+// EffectivePolicy resolution between weighted auto-fallback (default) and
+// strict no-fallback (compliance) per US-003 effective-placement.
+// Empty string is the legacy backwards-compat default — treated as
+// "weighted" by placement.EffectivePolicy.
+type placementModeKey struct{}
+
+// WithPlacementMode stores the bucket's placement mode on ctx. Empty
+// mode returns ctx unchanged — readers treat absence as "weighted".
+func WithPlacementMode(ctx context.Context, mode string) context.Context {
+	if mode == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, placementModeKey{}, mode)
+}
+
+// PlacementModeFromContext returns the mode stored via WithPlacementMode.
+// The second return is false when no mode is present — callers fall
+// back to weighted-default semantic.
+func PlacementModeFromContext(ctx context.Context) (string, bool) {
+	if ctx == nil {
+		return "", false
+	}
+	v, ok := ctx.Value(placementModeKey{}).(string)
+	if !ok || v == "" {
+		return "", false
+	}
+	return v, true
+}
