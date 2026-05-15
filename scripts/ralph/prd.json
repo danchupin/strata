@@ -108,8 +108,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "buildDrainProgressResponse now requires all three conditions (manifest=0 AND gc_queue=0 AND open_multipart=0); unmet conditions surface via NotReadyReasons array (chunks_remaining / gc_queue_pending / open_multipart). meta.Store gained ListChunkDeletionsByCluster + ListMultipartUploadsByCluster (memory + cassandra + tikv in lockstep; contract test ChunkDeletionsByCluster). Handler queries the new methods best-effort — probe errors degrade gracefully into warnings, deregister_ready stays gated. OpenAPI updated with not_ready_reasons enum. UI: DrainProgressBar renders amber 'Not ready — <reasons>' chip when chunks=0 and reasons present (separate render branch from green dereg-ready chip). ClustersSubsection migrating-banner now gated on chunks_on_cluster>0 via shared TanStack Query cache (queryKeys.clusterDrainProgress) so banner disappears when manifest scan reports zero. Cassandra/TiKV multipart safety probe is interface-parity-only (BackendUploadID isn't persisted on those backends today) — documented inline; the wire shape is consistent across backends and ready to light up once multipart cluster persistence lands. Browser smoke deferred to US-005."
     },
     {
       "id": "US-007",

@@ -3,6 +3,7 @@ import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { AlertCircle, AlertTriangle, Loader2 } from 'lucide-react';
 
 import {
+  fetchClusterDrainProgress,
   fetchClusters,
   isDrainingState,
   undrainCluster,
@@ -208,6 +209,20 @@ function ClusterCard({ cluster, usage }: ClusterCardProps) {
   const supportsFill = cluster.backend.toLowerCase() === 'rados';
   const hasFill = supportsFill && usage?.hasUsage;
 
+  // Share the drain-progress query with DrainProgressBar (same key) so
+  // the migrating-banner can drop when chunks_on_cluster=0 without an
+  // extra round-trip (US-006 drain-cleanup).
+  const drainProgressQ = useQuery({
+    queryKey: queryKeys.clusterDrainProgress(cluster.id),
+    queryFn: () => fetchClusterDrainProgress(cluster.id),
+    enabled: isDraining && !isReadonlyDrain,
+    refetchInterval: CLUSTERS_POLL_MS,
+    placeholderData: keepPreviousData,
+    meta: { label: `drain progress ${cluster.id}`, silent: true },
+  });
+  const drainChunks = drainProgressQ.data?.chunks_on_cluster ?? null;
+  const hasChunksToMigrate = drainChunks != null && drainChunks > 0;
+
   async function handleUndrain() {
     setUndraining(true);
     try {
@@ -283,8 +298,11 @@ function ClusterCard({ cluster, usage }: ClusterCardProps) {
               onUndrain={isReadonlyDrain ? handleUndrain : undefined}
               undraining={undraining}
             />
-            {!isReadonlyDrain && (
-              <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/5 p-2 text-xs text-amber-800 dark:text-amber-300">
+            {!isReadonlyDrain && hasChunksToMigrate && (
+              <div
+                className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/5 p-2 text-xs text-amber-800 dark:text-amber-300"
+                data-testid="cluster-card-migrating-banner"
+              >
                 <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
                 <span>Rebalance worker is migrating chunks off this cluster.</span>
               </div>

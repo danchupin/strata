@@ -46,6 +46,7 @@ export {
   fetchClusterDrainProgress,
   fetchClusterDrainImpact,
   isDrainingState,
+  DRAIN_NOT_READY_REASON_LABELS,
   type ClusterState,
   type ClusterMode,
   type ClusterStateEntry,

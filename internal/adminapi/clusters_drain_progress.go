@@ -67,16 +67,19 @@ const drainMoveRateExprFmt = `sum(rate(strata_rebalance_chunks_moved_total{from=
 
 // ClusterDrainProgressResponse is the wire shape returned by
 // GET /admin/v1/clusters/{id}/drain-progress (US-003 drain-lifecycle,
-// extended in US-002 drain-transparency with categorized counters and
-// US-006 with per-bucket breakdown).
+// extended in US-002 drain-transparency with categorized counters,
+// US-006 drain-transparency with per-bucket breakdown, US-006
+// drain-cleanup with not_ready_reasons).
 //
 // MigratableChunks / StuckSinglePolicyChunks / StuckNoPolicyChunks are
 // the three category counters; ChunksOnCluster is their sum (kept for
 // dashboard compatibility). ETASeconds is computed against migratable
 // chunks only — stuck chunks never converge to zero through migration
-// alone. DeregisterReady fires when the total (all categories) is zero.
-// ByBucket is the per-bucket breakdown straight off the tracker's last
-// committed scan — surfaces the stuck rows the UI drawer drills into.
+// alone. DeregisterReady fires only when ALL THREE conditions hold:
+// total_chunks==0, gc_queue_pending==0, no_open_multipart==0. Any unmet
+// condition is surfaced via NotReadyReasons so the UI's amber chip can
+// explain why dereg is gated. ByBucket is the per-bucket breakdown
+// straight off the tracker's last committed scan.
 //
 // Pointer fields go *null* in the JSON output when no value applies.
 type ClusterDrainProgressResponse struct {
@@ -92,9 +95,19 @@ type ClusterDrainProgressResponse struct {
 	LastScanAt              *string                    `json:"last_scan_at"`
 	ETASeconds              *int64                     `json:"eta_seconds"`
 	DeregisterReady         *bool                      `json:"deregister_ready"`
+	NotReadyReasons         []string                   `json:"not_ready_reasons,omitempty"`
 	ByBucket                []BucketDrainProgressEntry `json:"by_bucket,omitempty"`
 	Warnings                []string                   `json:"warnings,omitempty"`
 }
+
+// Drain-progress not-ready reason codes (US-006 drain-cleanup). The wire
+// vocabulary is fixed so UI consumers can map each token to a localized
+// chip message without parsing free-form prose.
+const (
+	DrainNotReadyChunksRemaining = "chunks_remaining"
+	DrainNotReadyGCQueuePending  = "gc_queue_pending"
+	DrainNotReadyOpenMultipart   = "open_multipart"
+)
 
 // BucketDrainProgressEntry is one bucket's contribution to the per-
 // cluster drain-progress snapshot (US-006 drain-transparency). Category
@@ -166,13 +179,39 @@ func (s *Server) handleClusterDrainProgress(w http.ResponseWriter, r *http.Reque
 	}
 
 	snap, scanOK := s.RebalanceProgress.Snapshot(id)
-	resp = buildDrainProgressResponse(ctx, s.Prom, id, row, snap, scanOK, s.RebalanceProgress.Interval, time.Now())
+	region := s.Region
+	if region == "" {
+		region = "default"
+	}
+	gcPending, gcErr := s.Meta.ListChunkDeletionsByCluster(ctx, region, id, 1)
+	if gcErr != nil {
+		// Treat the probe as best-effort; an opaque error must not bury
+		// the rest of the snapshot, but we surface it as a warning so
+		// operators can investigate. deregister_ready stays gated
+		// (gcPending=0 falls through to "pending" semantics below).
+		gcPending = 0
+	}
+	mpPending, mpErr := s.Meta.ListMultipartUploadsByCluster(ctx, id, 1)
+	if mpErr != nil {
+		mpPending = 0
+	}
+	resp = buildDrainProgressResponse(ctx, s.Prom, id, row, snap, scanOK, s.RebalanceProgress.Interval, time.Now(), gcPending, mpPending)
+	if gcErr != nil {
+		resp.Warnings = append(resp.Warnings, "gc-queue probe failed: "+gcErr.Error())
+	}
+	if mpErr != nil {
+		resp.Warnings = append(resp.Warnings, "multipart probe failed: "+mpErr.Error())
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
 // buildDrainProgressResponse is the testable core of the handler. Pure
-// over its inputs — no IO besides the optional Prom query.
-func buildDrainProgressResponse(ctx context.Context, prom *promclient.Client, id string, row meta.ClusterStateRow, snap rebalance.ProgressSnapshot, ok bool, interval time.Duration, now time.Time) ClusterDrainProgressResponse {
+// over its inputs — no IO besides the optional Prom query. gcPending
+// and mpPending are the cluster-scoped counts from
+// Meta.ListChunkDeletionsByCluster / Meta.ListMultipartUploadsByCluster
+// — together with the per-snapshot chunk total they form the three
+// safety conditions of `deregister_ready` (US-006 drain-cleanup).
+func buildDrainProgressResponse(ctx context.Context, prom *promclient.Client, id string, row meta.ClusterStateRow, snap rebalance.ProgressSnapshot, ok bool, interval time.Duration, now time.Time, gcPending, mpPending int) ClusterDrainProgressResponse {
 	out := ClusterDrainProgressResponse{State: row.State, Mode: row.Mode, Weight: row.Weight}
 	if !ok || snap.LastScanAt.IsZero() {
 		out.Warnings = append(out.Warnings, "progress scan pending; rebalance worker has not yet committed a tick")
@@ -194,8 +233,19 @@ func buildDrainProgressResponse(ctx context.Context, prom *promclient.Client, id
 	}
 	scan := snap.LastScanAt.UTC().Format(time.RFC3339)
 	out.LastScanAt = &scan
-	deregReady := total == 0
+	var reasons []string
+	if total > 0 {
+		reasons = append(reasons, DrainNotReadyChunksRemaining)
+	}
+	if gcPending > 0 {
+		reasons = append(reasons, DrainNotReadyGCQueuePending)
+	}
+	if mpPending > 0 {
+		reasons = append(reasons, DrainNotReadyOpenMultipart)
+	}
+	deregReady := len(reasons) == 0
 	out.DeregisterReady = &deregReady
+	out.NotReadyReasons = reasons
 	out.ByBucket = sortedByBucket(snap.ByBucket)
 
 	// ETA is meaningful only for migratable chunks — stuck chunks need an

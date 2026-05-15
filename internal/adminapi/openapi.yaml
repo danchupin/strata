@@ -436,10 +436,24 @@ components:
           type: boolean
           nullable: true
           description: |
-            True when state=evacuating and the total chunks_on_cluster
-            (sum of all three categories) is 0 — the cluster row can be
-            removed from STRATA_RADOS_CLUSTERS / STRATA_S3_CLUSTERS and
-            the gateways rolling-restarted.
+            True when state=evacuating AND ALL three safety conditions
+            hold: chunks_on_cluster=0, gc_queue_pending_for_cluster=0,
+            no_open_multipart_on_cluster=true. Any unmet condition is
+            surfaced via not_ready_reasons. When true, the cluster row
+            can be removed from STRATA_RADOS_CLUSTERS / STRATA_S3_CLUSTERS
+            and the gateways rolling-restarted.
+        not_ready_reasons:
+          type: array
+          description: |
+            Tokens describing each unmet condition keeping
+            deregister_ready=false (US-006 drain-cleanup). Empty / omitted
+            when deregister_ready is true. Tokens:
+              - chunks_remaining: manifest scan still reports chunks on the cluster.
+              - gc_queue_pending: GC worker has pending chunk-deletion rows for the cluster.
+              - open_multipart: at least one in-flight multipart upload is bound to the cluster.
+          items:
+            type: string
+            enum: [chunks_remaining, gc_queue_pending, open_multipart]
         by_bucket:
           type: array
           description: |

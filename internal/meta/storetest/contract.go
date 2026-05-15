@@ -32,6 +32,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"SetObjectStorageCAS", caseSetObjectStorageCAS},
 		{"GCQueueRoundTrip", caseGCQueueRoundTrip},
 		{"GCQueueShardFanOut", caseGCQueueShardFanOut},
+		{"ChunkDeletionsByCluster", caseChunkDeletionsByCluster},
 		{"BucketLifecycleRulesBlob", caseLifecycleBlob},
 		{"ListObjectsHidesDeleteMarkers", caseListHidesDeleteMarkers},
 		{"MultipartCompletionRoundTrip", caseMultipartCompletion},
@@ -238,6 +239,54 @@ func caseGCQueueRoundTrip(t *testing.T, s meta.Store) {
 	remaining, _ := s.ListGCEntries(ctx, "default", time.Now().Add(time.Hour), 100)
 	if len(remaining) != 0 {
 		t.Errorf("after ack: %d remaining", len(remaining))
+	}
+}
+
+// caseChunkDeletionsByCluster exercises the per-cluster GC counter used by
+// the drain-progress safety gate (US-006 drain-cleanup). Seeds GC entries
+// across two clusters; asserts the counter reports the per-cluster count
+// (capped at limit) and returns 0 for a cluster with no entries.
+func caseChunkDeletionsByCluster(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	chunks := []data.ChunkRef{
+		{Cluster: "cl-a", Pool: "p", OID: "a-1", Size: 1},
+		{Cluster: "cl-a", Pool: "p", OID: "a-2", Size: 1},
+		{Cluster: "cl-a", Pool: "p", OID: "a-3", Size: 1},
+		{Cluster: "cl-b", Pool: "p", OID: "b-1", Size: 1},
+	}
+	if err := s.EnqueueChunkDeletion(ctx, "default", chunks); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	// fast existence probe (limit=1) — caps at 1 and stops scanning.
+	got, err := s.ListChunkDeletionsByCluster(ctx, "default", "cl-a", 1)
+	if err != nil {
+		t.Fatalf("count cl-a limit=1: %v", err)
+	}
+	if got != 1 {
+		t.Errorf("cl-a limit=1: got %d want 1", got)
+	}
+	// generous limit returns the full per-cluster count.
+	got, err = s.ListChunkDeletionsByCluster(ctx, "default", "cl-a", 100)
+	if err != nil {
+		t.Fatalf("count cl-a limit=100: %v", err)
+	}
+	if got != 3 {
+		t.Errorf("cl-a limit=100: got %d want 3", got)
+	}
+	got, err = s.ListChunkDeletionsByCluster(ctx, "default", "cl-b", 100)
+	if err != nil {
+		t.Fatalf("count cl-b: %v", err)
+	}
+	if got != 1 {
+		t.Errorf("cl-b: got %d want 1", got)
+	}
+	// cluster with no entries → 0.
+	got, err = s.ListChunkDeletionsByCluster(ctx, "default", "cl-nope", 100)
+	if err != nil {
+		t.Fatalf("count cl-nope: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("cl-nope: got %d want 0", got)
 	}
 }
 

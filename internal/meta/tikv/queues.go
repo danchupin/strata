@@ -209,6 +209,95 @@ func (s *Store) ListGCEntriesShard(ctx context.Context, region string, shardID, 
 	return out, nil
 }
 
+// ListChunkDeletionsByCluster scans both the v2 sharded region prefix and
+// (during dual-write) the legacy region prefix, counting entries whose
+// Chunk.Cluster matches clusterID. Capped at limit; once the cap is
+// reached the scan short-circuits. limit=1 is the canonical fast existence
+// probe consumed by drain-progress.
+func (s *Store) ListChunkDeletionsByCluster(ctx context.Context, region, clusterID string, limit int) (count int, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListChunkDeletionsByCluster", "gc_queue")
+	defer func() { finish(err) }()
+	if limit <= 0 {
+		limit = 1
+	}
+	txn, err := s.kv.Begin(ctx, false)
+	if err != nil {
+		return 0, err
+	}
+	defer txn.Rollback()
+
+	scanBatch := limit * 64
+	if scanBatch < 256 {
+		scanBatch = 256
+	}
+	if scanBatch > queueListLimitDefault {
+		scanBatch = queueListLimitDefault
+	}
+
+	// v2 sharded prefix covers every logical shard for the region.
+	v2 := GCQueueRegionPrefixV2(region)
+	pairs, err := txn.Scan(ctx, v2, prefixEnd(v2), scanBatch)
+	if err != nil {
+		return 0, err
+	}
+	for _, p := range pairs {
+		var r gcRow
+		if uErr := json.Unmarshal(p.Value, &r); uErr != nil {
+			return count, uErr
+		}
+		if r.Cluster != clusterID {
+			continue
+		}
+		count++
+		if count >= limit {
+			return count, nil
+		}
+	}
+	if !s.gcDualWrite {
+		return count, nil
+	}
+	legacy := GCQueuePrefix(region)
+	pairs, err = txn.Scan(ctx, legacy, prefixEnd(legacy), scanBatch)
+	if err != nil {
+		return count, err
+	}
+	for _, p := range pairs {
+		var r gcRow
+		if uErr := json.Unmarshal(p.Value, &r); uErr != nil {
+			return count, uErr
+		}
+		if r.Cluster != clusterID {
+			continue
+		}
+		count++
+		if count >= limit {
+			return count, nil
+		}
+	}
+	return count, nil
+}
+
+// ListMultipartUploadsByCluster scans every multipart upload row (all
+// buckets) and counts uploads whose persisted BackendUploadID handle has
+// `clusterID` as its leading component. Capped at limit. The decoded
+// multipartUploadRow does not currently carry BackendUploadID (the field
+// is never populated by any production code path on this backend), so
+// the scan returns 0 in practice today — the method exists for meta.Store
+// interface parity and to keep drain-progress's three-condition safety
+// contract uniform across backends.
+func (s *Store) ListMultipartUploadsByCluster(ctx context.Context, clusterID string, limit int) (count int, err error) {
+	ctx, finish := s.observer.Start(ctx, "ListMultipartUploadsByCluster", "multipart")
+	defer func() { finish(err) }()
+	if limit <= 0 {
+		limit = 1
+	}
+	if clusterID == "" {
+		return 0, nil
+	}
+	// BackendUploadID is not persisted on this backend; nothing matches.
+	return 0, nil
+}
+
 func (s *Store) AckGCEntry(ctx context.Context, region string, e meta.GCEntry) (err error) {
 	ctx, finish := s.observer.Start(ctx, "AckGCEntry", "gc_queue")
 	defer func() { finish(err) }()

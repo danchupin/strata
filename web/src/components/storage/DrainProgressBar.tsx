@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
-import { CheckCircle2, Loader2 } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Loader2 } from 'lucide-react';
 
 import {
   fetchClusterDrainProgress,
   type BucketDrainProgressEntry,
+  DRAIN_NOT_READY_REASON_LABELS,
 } from '@/api/client';
 import { Button } from '@/components/ui/button';
 import { queryKeys } from '@/lib/query';
@@ -99,6 +100,7 @@ export function DrainProgressBar({
   const stuckNo = data.stuck_no_policy_chunks ?? 0;
   const base = data.base_chunks_at_start ?? null;
   const deregReady = data.deregister_ready === true;
+  const notReadyReasons = data.not_ready_reasons ?? [];
 
   if (isReadonly) {
     return (
@@ -175,6 +177,31 @@ export function DrainProgressBar({
           <span className="text-emerald-700/70 dark:text-emerald-300/70">
             (env edit + restart)
           </span>
+        </div>
+      </div>
+    );
+  }
+
+  // chunks=0 but deregister_ready=false → at least one of the auxiliary
+  // safety probes (gc_queue_pending / open_multipart) reports a blocker.
+  // Surface the unmet reasons as an amber chip so the operator knows why
+  // the green dereg chip hasn't flipped (US-006 drain-cleanup).
+  if (chunks === 0 && notReadyReasons.length > 0) {
+    const reasonsLabel = notReadyReasons
+      .map((r) => DRAIN_NOT_READY_REASON_LABELS[r] ?? r)
+      .join(', ');
+    return (
+      <div className="space-y-1" data-testid="dp-evacuate">
+        <div className="text-[10px] font-semibold uppercase tracking-wide text-red-700 dark:text-red-300">
+          Evacuating
+        </div>
+        <div
+          className="flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-xs text-amber-800 dark:text-amber-300"
+          title="Manifest scan reports 0 chunks, but one or more safety probes still report pending work. Deregister is blocked until every probe clears."
+          data-testid="dp-not-ready"
+        >
+          <AlertCircle className="h-3.5 w-3.5 shrink-0" aria-hidden />
+          <span className="font-medium">Not ready — {reasonsLabel}</span>
         </div>
       </div>
     );

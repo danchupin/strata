@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
 	"github.com/danchupin/strata/internal/rebalance"
 )
@@ -271,5 +273,175 @@ func TestClusterDrainProgress_UnknownClusterReturns400(t *testing.T) {
 	rr := putAdmin(t, s, "alice", http.MethodGet, "/admin/v1/clusters/zzz/drain-progress", nil)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d want 400", rr.Code)
+	}
+}
+
+// seedEvacuatingZeroChunks plants a fully-drained progress snapshot for
+// cluster `id` so deregister_ready hinges entirely on the GC-queue + open-
+// multipart safety probes — used by the not_ready_reasons tests below.
+func seedEvacuatingZeroChunks(t *testing.T, s *Server, id string) {
+	t.Helper()
+	if err := s.Meta.SetClusterState(context.Background(), id, meta.ClusterStateEvacuating, meta.ClusterModeEvacuate, 0); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	s.RebalanceProgress.CommitScan([]string{id}, map[string]rebalance.ScanResult{id: {}}, time.Now().UTC())
+}
+
+func decodeDrainProgress(t *testing.T, body []byte) ClusterDrainProgressResponse {
+	t.Helper()
+	var got ClusterDrainProgressResponse
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return got
+}
+
+func containsReason(reasons []string, want string) bool {
+	for _, r := range reasons {
+		if r == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestClusterDrainProgress_NotReadyReasons_GCQueueOnly seeds a fully-drained
+// scan but leaves one chunk in the GC queue for the cluster — the
+// deregister-ready chip must stay false and surface "gc_queue_pending".
+func TestClusterDrainProgress_NotReadyReasons_GCQueueOnly(t *testing.T) {
+	s := newTestServer()
+	s.KnownClusters = map[string]struct{}{"c1": {}}
+	s.RebalanceProgress = rebalance.NewProgressTracker(time.Minute)
+	seedEvacuatingZeroChunks(t, s, "c1")
+	if err := s.Meta.EnqueueChunkDeletion(context.Background(), "test-region", []data.ChunkRef{
+		{Cluster: "c1", Pool: "p", OID: "oid-1", Size: 1},
+	}); err != nil {
+		t.Fatalf("enqueue gc: %v", err)
+	}
+	rr := putAdmin(t, s, "alice", http.MethodGet, "/admin/v1/clusters/c1/drain-progress", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status: got %d body=%s", rr.Code, rr.Body.String())
+	}
+	got := decodeDrainProgress(t, rr.Body.Bytes())
+	if got.DeregisterReady == nil || *got.DeregisterReady {
+		t.Fatalf("DeregisterReady: got %v want false", got.DeregisterReady)
+	}
+	if !containsReason(got.NotReadyReasons, DrainNotReadyGCQueuePending) {
+		t.Errorf("NotReadyReasons: missing gc_queue_pending in %v", got.NotReadyReasons)
+	}
+	if containsReason(got.NotReadyReasons, DrainNotReadyChunksRemaining) {
+		t.Errorf("NotReadyReasons: chunks_remaining must NOT be present when chunks=0: %v", got.NotReadyReasons)
+	}
+	if containsReason(got.NotReadyReasons, DrainNotReadyOpenMultipart) {
+		t.Errorf("NotReadyReasons: open_multipart must NOT be present: %v", got.NotReadyReasons)
+	}
+}
+
+// TestClusterDrainProgress_NotReadyReasons_OpenMultipartOnly seeds a
+// fully-drained scan + empty GC queue + one in-flight multipart upload
+// whose BackendUploadID points at the cluster. deregister_ready stays
+// false with reason "open_multipart".
+func TestClusterDrainProgress_NotReadyReasons_OpenMultipartOnly(t *testing.T) {
+	s := newTestServer()
+	s.KnownClusters = map[string]struct{}{"c1": {}}
+	s.RebalanceProgress = rebalance.NewProgressTracker(time.Minute)
+	seedEvacuatingZeroChunks(t, s, "c1")
+	b, err := s.Meta.CreateBucket(context.Background(), "bkt", "alice", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	if err := s.Meta.CreateMultipartUpload(context.Background(), &meta.MultipartUpload{
+		BucketID:        b.ID,
+		UploadID:        "11111111-1111-1111-1111-111111111111",
+		Key:             "k",
+		StorageClass:    "STANDARD",
+		ContentType:     "application/octet-stream",
+		BackendUploadID: "c1\x00bkt-backend\x00<obj-uuid>\x00sdk-upload-id",
+		InitiatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("create mu: %v", err)
+	}
+	rr := putAdmin(t, s, "alice", http.MethodGet, "/admin/v1/clusters/c1/drain-progress", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status: got %d body=%s", rr.Code, rr.Body.String())
+	}
+	got := decodeDrainProgress(t, rr.Body.Bytes())
+	if got.DeregisterReady == nil || *got.DeregisterReady {
+		t.Fatalf("DeregisterReady: got %v want false", got.DeregisterReady)
+	}
+	if !containsReason(got.NotReadyReasons, DrainNotReadyOpenMultipart) {
+		t.Errorf("NotReadyReasons: missing open_multipart in %v", got.NotReadyReasons)
+	}
+}
+
+// TestClusterDrainProgress_NotReadyReasons_AllThree seeds every blocker —
+// chunks on cluster, GC queue, open multipart — and asserts every reason
+// token surfaces. Order in the slice is fixed: chunks_remaining first,
+// then gc_queue_pending, then open_multipart.
+func TestClusterDrainProgress_NotReadyReasons_AllThree(t *testing.T) {
+	s := newTestServer()
+	s.KnownClusters = map[string]struct{}{"c1": {}}
+	s.RebalanceProgress = rebalance.NewProgressTracker(time.Minute)
+	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate, 0); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	s.RebalanceProgress.CommitScan([]string{"c1"}, map[string]rebalance.ScanResult{"c1": {MigratableChunks: 2, Bytes: 2 * 1024}}, time.Now().UTC())
+	if err := s.Meta.EnqueueChunkDeletion(context.Background(), "test-region", []data.ChunkRef{
+		{Cluster: "c1", Pool: "p", OID: "oid-1", Size: 1},
+	}); err != nil {
+		t.Fatalf("enqueue gc: %v", err)
+	}
+	b, err := s.Meta.CreateBucket(context.Background(), "bkt", "alice", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	if err := s.Meta.CreateMultipartUpload(context.Background(), &meta.MultipartUpload{
+		BucketID:        b.ID,
+		UploadID:        "22222222-2222-2222-2222-222222222222",
+		Key:             "k",
+		StorageClass:    "STANDARD",
+		BackendUploadID: "c1\x00bkt-backend\x00<obj-uuid>\x00sdk-id",
+		InitiatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("create mu: %v", err)
+	}
+	rr := putAdmin(t, s, "alice", http.MethodGet, "/admin/v1/clusters/c1/drain-progress", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status: got %d body=%s", rr.Code, rr.Body.String())
+	}
+	got := decodeDrainProgress(t, rr.Body.Bytes())
+	if got.DeregisterReady == nil || *got.DeregisterReady {
+		t.Fatalf("DeregisterReady: got %v want false", got.DeregisterReady)
+	}
+	wantSet := []string{DrainNotReadyChunksRemaining, DrainNotReadyGCQueuePending, DrainNotReadyOpenMultipart}
+	for _, want := range wantSet {
+		if !containsReason(got.NotReadyReasons, want) {
+			t.Errorf("NotReadyReasons missing %s in %v", want, got.NotReadyReasons)
+		}
+	}
+	// Stable order: chunks_remaining → gc_queue_pending → open_multipart.
+	if joined := strings.Join(got.NotReadyReasons, ","); joined != strings.Join(wantSet, ",") {
+		t.Errorf("NotReadyReasons order: got %q want %q", joined, strings.Join(wantSet, ","))
+	}
+}
+
+// TestClusterDrainProgress_NotReadyReasons_AllClearFlipsReady covers the
+// happy path: empty chunks + empty GC queue + no open multipart →
+// deregister_ready=true with no reasons.
+func TestClusterDrainProgress_NotReadyReasons_AllClearFlipsReady(t *testing.T) {
+	s := newTestServer()
+	s.KnownClusters = map[string]struct{}{"c1": {}}
+	s.RebalanceProgress = rebalance.NewProgressTracker(time.Minute)
+	seedEvacuatingZeroChunks(t, s, "c1")
+	rr := putAdmin(t, s, "alice", http.MethodGet, "/admin/v1/clusters/c1/drain-progress", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status: got %d body=%s", rr.Code, rr.Body.String())
+	}
+	got := decodeDrainProgress(t, rr.Body.Bytes())
+	if got.DeregisterReady == nil || !*got.DeregisterReady {
+		t.Fatalf("DeregisterReady: got %v want true", got.DeregisterReady)
+	}
+	if len(got.NotReadyReasons) != 0 {
+		t.Errorf("NotReadyReasons: got %v want empty", got.NotReadyReasons)
 	}
 }

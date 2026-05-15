@@ -207,9 +207,19 @@ export interface ClusterDrainProgress {
   last_scan_at: string | null;
   eta_seconds: number | null;
   deregister_ready: boolean | null;
+  // not_ready_reasons surfaces the unmet conditions keeping deregister_ready
+  // false (US-006 drain-cleanup). Tokens: chunks_remaining / gc_queue_pending
+  // / open_multipart. Empty / omitted when deregister_ready is true.
+  not_ready_reasons?: string[];
   by_bucket?: BucketDrainProgressEntry[];
   warnings?: string[];
 }
+
+export const DRAIN_NOT_READY_REASON_LABELS: Record<string, string> = {
+  chunks_remaining: 'chunks remaining',
+  gc_queue_pending: 'GC queue pending',
+  open_multipart: 'open multipart',
+};
 
 export async function fetchClusterDrainProgress(
   id: string,

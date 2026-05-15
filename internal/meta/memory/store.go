@@ -206,6 +206,60 @@ func (s *Store) ListGCEntriesShard(ctx context.Context, region string, shardID, 
 	return out, nil
 }
 
+// ListChunkDeletionsByCluster scans the in-memory GC queue for `region` and
+// counts entries whose Chunk.Cluster matches clusterID. limit caps the
+// returned count and short-circuits the scan once reached.
+func (s *Store) ListChunkDeletionsByCluster(ctx context.Context, region, clusterID string, limit int) (int, error) {
+	if limit <= 0 {
+		limit = 1
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	count := 0
+	for _, e := range s.gc[region] {
+		if e.Chunk.Cluster != clusterID {
+			continue
+		}
+		count++
+		if count >= limit {
+			break
+		}
+	}
+	return count, nil
+}
+
+// ListMultipartUploadsByCluster walks every per-bucket multipart map and
+// counts uploads whose BackendUploadID handle has clusterID as its leading
+// component (handle layout: `<cluster>\x00<bucket>\x00<key>\x00<uploadID>`).
+// limit caps the returned count and short-circuits the scan once reached.
+func (s *Store) ListMultipartUploadsByCluster(ctx context.Context, clusterID string, limit int) (int, error) {
+	if limit <= 0 {
+		limit = 1
+	}
+	if clusterID == "" {
+		return 0, nil
+	}
+	prefix := clusterID + "\x00"
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	count := 0
+	for _, ups := range s.multiparts {
+		for _, st := range ups {
+			if st == nil || st.upload == nil {
+				continue
+			}
+			if !strings.HasPrefix(st.upload.BackendUploadID, prefix) {
+				continue
+			}
+			count++
+			if count >= limit {
+				return count, nil
+			}
+		}
+	}
+	return count, nil
+}
+
 func (s *Store) EnqueueNotification(ctx context.Context, evt *meta.NotificationEvent) error {
 	if evt == nil {
 		return nil
