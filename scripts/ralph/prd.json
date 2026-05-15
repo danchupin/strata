@@ -126,8 +126,8 @@
         "Verify in browser using dev-browser skill — walk through all 7 state combinations on the multi-cluster lab"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Pure helper clusterCardAction({state, chunks, deregisterReady, notReadyReasons}) → 'activate'|'drain'|'drain-disabled'|'undrain-confirm-evacuation'|'undrain-disabled-gc'|'cancel-deregister-prep'|'none' encodes the 7-row State Truth Table; lives in clusterCardAction.ts so it is testable without rendering JSX. ClustersSubsection ClusterCard's bottom-right slot now renders a single <ActionButton/> per the helper output; drain-progress query (already shared with DrainProgressBar) feeds chunks_on_cluster + deregister_ready + not_ready_reasons. Two new modals: CancelDeregisterPrepModal (typed-confirm mirroring ConfirmDrainModal — types cluster id verbatim → POST /undrain → toast 'Cluster restored to live. No chunks restored.'); ConfirmUndrainEvacuationModal (single-click confirm for mid-flight evacuating, message stresses 'Moved chunks remain on target clusters; no rollback'). undrain-disabled-gc cell renders Undrain with title= tooltip 'Cannot undrain while safety probes are pending: <not_ready_reasons>.' Unit test (node --test cluster-card-action.test.mjs) walks every row of the truth table plus case-insensitivity + tooltip helper. Quality gates: pnpm run test:unit ✓ (37/37); pnpm run typecheck ✓; pnpm run build ✓ (Storage 15.72 KB gzipped, delta ~+1 KB — within +2 KiB budget). Browser smoke deferred to US-005."
     },
     {
       "id": "US-008",
