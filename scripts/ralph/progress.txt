@@ -36,3 +36,16 @@ Cycle: ralph/drain-cleanup
   - SheetTitle text is the e2e drawer locator (`page.getByRole('dialog').filter({ hasText: /…/ })`); changing the title breaks `drain-lifecycle.spec.ts`. Update the regex in the same edit as the title.
   - Acceptance criteria for "verify in browser" remains pending — no dev-browser MCP available in this iteration. Pushed the manual browser walkthrough to US-005 smoke.
 ---
+
+## 2026-05-15 — US-002 /drain-impact cache invalidation on bucket placement mutation
+- Added `drainImpactCache.InvalidateAll()` in `internal/adminapi/clusters_drain_impact.go` — clears every cached scan under the existing mutex. Doc comment cites "invalidate-all over per-cluster diff: placement keys may add/remove clusters; tracking the affected set adds complexity for a minor speedup."
+- Wired the call into three handlers synchronously BEFORE the success WriteHeader: `handleBucketSetPlacement` (PUT placement), `handleBucketDeletePlacement` (DELETE placement), `handleBucketDelete` (DELETE bucket — only on the err==nil branch of the switch).
+- Tests: `TestBucketPlacement_PutInvalidatesDrainImpactCache`, `TestBucketPlacement_DeleteInvalidatesDrainImpactCache`, `TestDrainImpactCache_InvalidateAllDropsEveryEntry` (in `buckets_placement_test.go`); `TestBucketDelete_InvalidatesDrainImpactCache` (in `buckets_delete_test.go`). Each seeds the cache via `s.drainImpact().set(...)`, calls the handler, then asserts `get(...)` returns ok=false.
+- Files changed: clusters_drain_impact.go, buckets_placement.go, buckets_delete.go, buckets_placement_test.go, buckets_delete_test.go, scripts/ralph/prd.json, scripts/ralph/progress.txt.
+- Quality gates: `go vet ./...` ✓; `go test ./internal/adminapi/ -count=1` ✓; `go build ./...` ✓.
+- **Learnings for future iterations:**
+  - The cache lookup helper `s.drainImpact()` (not `s.drainImpactCacheVal` directly) handles lazy init under `drainImpactMu`. Always go through the helper — test code seeding the cache must `s.drainImpact().set(...)` so the same instance is shared with the handler call.
+  - `handleBucketDelete` uses a `switch` over err; the success branch is the `case err == nil` — invalidate there, not before the switch (otherwise NotFound paths flush the cache unnecessarily). Same shape rule applies to any future drain-impact-affecting handler.
+  - Multi-line success path: invalidate goes *after* the meta write but *before* `WriteHeader` — ordering matters because a follow-up concurrent /drain-impact GET that races the response would otherwise observe pre-invalidation cache. Synchronous before WriteHeader is the contract.
+  - The integration "no 5-minute wait" assertion is most cleanly verified at smoke time against the multi-cluster lab (US-005), not in Go unit tests — Go unit covers the invalidate-call wiring; smoke covers the wire-shape and the time budget.
+---

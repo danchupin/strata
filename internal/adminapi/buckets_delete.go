@@ -57,6 +57,10 @@ func (s *Server) handleBucketDelete(w http.ResponseWriter, r *http.Request) {
 	err := s.Meta.DeleteBucket(ctx, name)
 	switch {
 	case err == nil:
+		// Bucket vanishing flips its chunks off every /drain-impact
+		// preview — drop the cache synchronously so the next GET
+		// reflects reality (US-002 drain-cleanup).
+		s.drainImpact().InvalidateAll()
 		w.WriteHeader(http.StatusNoContent)
 	case errors.Is(err, meta.ErrBucketNotFound):
 		writeJSONError(w, http.StatusNotFound, "NoSuchBucket", "bucket not found")

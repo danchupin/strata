@@ -42,8 +42,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "drainImpactCache.InvalidateAll() added; PUT + DELETE bucket placement + DELETE bucket call it synchronously before WriteHeader. Unit tests cover all three handlers + the cache method directly. Integration assertion folded into US-005 smoke."
     },
     {
       "id": "US-003",

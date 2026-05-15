@@ -86,6 +86,28 @@ func TestBucketDelete_Empty(t *testing.T) {
 	}
 }
 
+// TestBucketDelete_InvalidatesDrainImpactCache asserts that successful
+// bucket deletion synchronously drops every cached drain-impact scan
+// before returning 204 (US-002 drain-cleanup). A vanished bucket flips
+// its chunks off every preview — failing to invalidate leaves the next
+// /drain-impact GET serving a stale count.
+func TestBucketDelete_InvalidatesDrainImpactCache(t *testing.T) {
+	s := newTestServerWithLocker(t)
+	if _, err := s.Meta.CreateBucket(context.Background(), "todelete", "alice", "STANDARD"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	s.drainImpact().set("c1", drainImpactScan{TotalChunks: 5})
+	req := httptest.NewRequest(http.MethodDelete, "/admin/v1/buckets/todelete", nil)
+	rr := httptest.NewRecorder()
+	s.routes().ServeHTTP(rr, withOwner(req, "alice"))
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if _, ok := s.drainImpact().get("c1"); ok {
+		t.Fatal("cache entry survived DELETE bucket — invalidation missing")
+	}
+}
+
 func TestBucketDelete_NotFound(t *testing.T) {
 	s := newTestServerWithLocker(t)
 	req := httptest.NewRequest(http.MethodDelete, "/admin/v1/buckets/missing", nil)

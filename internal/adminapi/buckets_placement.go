@@ -103,6 +103,11 @@ func (s *Server) handleBucketSetPlacement(w http.ResponseWriter, r *http.Request
 		writeJSONError(w, http.StatusInternalServerError, "Internal", err.Error())
 		return
 	}
+	// Placement change invalidates any /drain-impact preview the operator
+	// may have just generated — flush synchronously so the next bulk-fix
+	// roundtrip reflects the new policy without waiting drainImpactCacheTTL
+	// (US-002 drain-cleanup).
+	s.drainImpact().InvalidateAll()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -130,6 +135,10 @@ func (s *Server) handleBucketDeletePlacement(w http.ResponseWriter, r *http.Requ
 		writeJSONError(w, http.StatusInternalServerError, "Internal", err.Error())
 		return
 	}
+	// Same rationale as the PUT path — dropping the policy reverts the
+	// bucket to default routing and the /drain-impact categorization
+	// changes (US-002 drain-cleanup).
+	s.drainImpact().InvalidateAll()
 	w.WriteHeader(http.StatusNoContent)
 }
 
