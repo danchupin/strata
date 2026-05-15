@@ -108,7 +108,48 @@ var (
 	// ErrInvalidClusterWeight signals a SetClusterState call with a
 	// weight outside [0, 100] (US-001 cluster-weights).
 	ErrInvalidClusterWeight    = errors.New("invalid cluster weight")
+	// ErrInvalidPlacementMode signals a SetBucketPlacementMode call with
+	// a value outside {"", "weighted", "strict"} (US-001 effective-
+	// placement). Empty string is legal and means "default weighted".
+	ErrInvalidPlacementMode    = errors.New("invalid placement mode")
 )
+
+const (
+	// PlacementModeWeighted is the default per-bucket placement mode
+	// (US-001 effective-placement). With mode=weighted, a PUT whose
+	// bucket Placement points only at draining clusters falls back to
+	// the synthesised cluster-weights default policy instead of
+	// strict-refusing with 503. Existing buckets without a stored mode
+	// behave as PlacementModeWeighted (absence == weighted).
+	PlacementModeWeighted = "weighted"
+	// PlacementModeStrict opts a bucket into compliance/data-sovereignty
+	// semantics: when its Placement policy references only draining
+	// clusters, PUTs return 503 DrainRefused (no fallback) and drain
+	// workflows refuse to fire until the operator edits the policy.
+	PlacementModeStrict   = "strict"
+)
+
+// ValidatePlacementMode enforces the legal set of placement-mode
+// values. Empty string is accepted as the backwards-compatible default
+// (treated as PlacementModeWeighted downstream).
+func ValidatePlacementMode(mode string) error {
+	switch mode {
+	case "", PlacementModeWeighted, PlacementModeStrict:
+		return nil
+	default:
+		return ErrInvalidPlacementMode
+	}
+}
+
+// NormalizePlacementMode collapses the empty-string default to
+// PlacementModeWeighted so downstream consumers (EffectivePolicy, UI
+// renderers, audit emitters) can branch on a single canonical value.
+func NormalizePlacementMode(mode string) string {
+	if mode == "" {
+		return PlacementModeWeighted
+	}
+	return mode
+}
 
 const (
 	// ClusterStateLive is the default state for any configured cluster —
@@ -437,6 +478,14 @@ type Bucket struct {
 	// out-of-band via GetBucketPlacement, not by GetBucket — the GetBucket
 	// hot path stays a single buckets-table read. US-001 placement-rebalance.
 	Placement map[string]int `json:"placement,omitempty"`
+	// PlacementMode controls how EffectivePolicy resolves the bucket's
+	// routing target when its Placement entries are all draining
+	// (US-001 effective-placement). Legal values: "" (default, treated
+	// as "weighted"), "weighted" (fall back to synthesised cluster-
+	// weights default policy), "strict" (no fallback — PUT returns 503
+	// DrainRefused; drain workflows refuse to fire). Loaded inline via
+	// GetBucket so the routing path does not need a second round-trip.
+	PlacementMode string `json:"placement_mode,omitempty"`
 }
 
 const (
@@ -981,6 +1030,14 @@ type Store interface {
 	SetBucketPlacement(ctx context.Context, name string, policy map[string]int) error
 	GetBucketPlacement(ctx context.Context, name string) (map[string]int, error)
 	DeleteBucketPlacement(ctx context.Context, name string) error
+
+	// SetBucketPlacementMode persists the per-bucket placement mode
+	// ("weighted" | "strict"; empty string clears back to the default
+	// weighted behavior). Validated via meta.ValidatePlacementMode;
+	// returns ErrInvalidPlacementMode for any other value. The mode is
+	// loaded inline by GetBucket — no separate Get/Delete needed
+	// (US-001 effective-placement).
+	SetBucketPlacementMode(ctx context.Context, name, mode string) error
 
 	// Cluster state CRUD (US-006 placement-rebalance, mode added in US-001
 	// drain-transparency, weight added in US-001 cluster-weights). Stored

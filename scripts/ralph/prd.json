@@ -25,8 +25,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Landed: meta.Bucket.PlacementMode + ValidatePlacementMode + ErrInvalidPlacementMode + NormalizePlacementMode; SetBucketPlacementMode on all 3 backends (cassandra LWT + ALTER TABLE buckets ADD placement_mode text, tikv updateBucket, memory in-struct); GetBucket/ListBuckets SELECT extended on cassandra; admin API PUT/GET extended (Mode field, audit action admin:UpdateBucketPlacementMode when present); OpenAPI updated; contract test casePlacementMode + ValidatePlacementMode unit tests."
     },
     {
       "id": "US-002",

@@ -702,6 +702,17 @@ components:
         rejecting the policy. Cluster ids must resolve against the live
         `STRATA_RADOS_CLUSTERS` / `STRATA_S3_CLUSTERS` set. Unset (404)
         means "no policy" — chunks route to `$defaultCluster`.
+
+        `mode` (US-001 effective-placement) is the per-bucket placement
+        mode override. "weighted" (default) lets the routing helper fall
+        back to the synthesised cluster-weights default policy when the
+        bucket's Placement points only at draining clusters. "strict"
+        opts the bucket into compliance/data-sovereignty semantics: a
+        PUT returns 503 DrainRefused and drain workflows refuse to fire
+        when the policy targets are all draining. GET responses always
+        carry a value — empty storage is coerced to "weighted". On PUT
+        the field is optional; absence leaves the persisted mode
+        untouched (legacy rows behave as "weighted").
       properties:
         placement:
           type: object
@@ -709,6 +720,13 @@ components:
             type: integer
             minimum: 0
             maximum: 100
+        mode:
+          type: string
+          enum: [weighted, strict]
+          description: |
+            Per-bucket placement mode. Optional on PUT (absence leaves
+            the persisted value untouched). GET always returns one of
+            "weighted" or "strict".
 
     UserQuota:
       type: object
@@ -1467,12 +1485,17 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
     put:
-      summary: Set bucket placement policy (US-001 placement-rebalance)
+      summary: Set bucket placement policy (US-001 placement-rebalance; mode added US-001 effective-placement)
       operationId: putBucketPlacement
       description: |
         Replaces the per-bucket cluster placement policy. Weights are
         bounded `[0, 100]`; sum must be > 0. Cluster ids must resolve
-        against `STRATA_RADOS_CLUSTERS` / `STRATA_S3_CLUSTERS`. Audit row
+        against `STRATA_RADOS_CLUSTERS` / `STRATA_S3_CLUSTERS`.
+
+        Optional `mode` field flips the bucket's placement mode
+        (`weighted` | `strict`). Absence leaves the persisted mode
+        untouched. When `mode` is present, audit row
+        `admin:UpdateBucketPlacementMode`; otherwise
         `admin:PutBucketPlacement`.
       parameters:
         - name: bucket
@@ -1490,8 +1513,9 @@ paths:
         '400':
           description: |
             Invalid body — `InvalidPlacement` (weight out of range, sum=0,
-            empty cluster id) or `UnknownCluster` (cluster id not in the
-            configured set).
+            empty cluster id), `UnknownCluster` (cluster id not in the
+            configured set), or `InvalidPlacementMode` (mode not in
+            {"weighted", "strict"}).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

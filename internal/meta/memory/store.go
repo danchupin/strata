@@ -1550,6 +1550,24 @@ func (s *Store) DeleteBucketPlacement(ctx context.Context, name string) error {
 	return nil
 }
 
+// SetBucketPlacementMode persists the per-bucket placement mode on the
+// bucket row (US-001 effective-placement). Empty string clears the
+// override (read back as the default weighted behavior). Validates via
+// meta.ValidatePlacementMode.
+func (s *Store) SetBucketPlacementMode(ctx context.Context, name, mode string) error {
+	if err := meta.ValidatePlacementMode(mode); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.buckets[name]
+	if !ok {
+		return meta.ErrBucketNotFound
+	}
+	b.PlacementMode = mode
+	return nil
+}
+
 // SetClusterState persists the (state, mode, weight) row under the
 // cluster id. Validates the (state, mode) combo via
 // meta.ValidateClusterStateMode and the weight via

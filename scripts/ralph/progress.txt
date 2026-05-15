@@ -26,3 +26,34 @@ Cycle: ralph/effective-placement
 - **Verification per UI story** (US-004, US-005): `pnpm run typecheck` + `pnpm run build` + dev-browser verify on lab. Final US-006 gated on `make smoke-effective-placement` against the running lab.
 - **End-to-end discipline** (per `feedback_cycle_end_to_end.md` items 1-12): every story serves at least one walkthrough step; US-006 smoke covers all 12 walkthrough steps + 4 scenarios; failed smoke blocks ROADMAP close-flip; State Truth Tables documented; Safety Claims Preconditions explicit; downstream consumer grep mandatory pre-merge for US-003.
 
+
+## 2026-05-15 22:30 - US-001
+- Added `meta.Bucket.PlacementMode` field with `json:"placement_mode,omitempty"` tag (legal "" | "weighted" | "strict")
+- Added `meta.ValidatePlacementMode`, `meta.NormalizePlacementMode`, `meta.ErrInvalidPlacementMode`, constants `PlacementModeWeighted` / `PlacementModeStrict`
+- New `Store.SetBucketPlacementMode(ctx, name, mode)` method on all three backends:
+  - memory: writes to bucket struct
+  - cassandra: LWT `UPDATE buckets SET placement_mode=? WHERE name=? IF EXISTS` + `ALTER TABLE buckets ADD placement_mode text` in alterStatements + GetBucket/ListBuckets SELECT extended
+  - tikv: routed through existing pessimistic-txn `updateBucket` helper (auto-JSON-marshal via meta.Bucket struct, schema-additive)
+- Admin API: `BucketPlacementJSON` extended with `Mode string` (response); new internal `bucketPlacementPutRequest` with `Mode *string` (pointer to detect absence). PUT validates mode + calls SetBucketPlacementMode only when field present. GET reads via GetBucket and coerces "" → "weighted" via NormalizePlacementMode.
+- Audit override action `admin:UpdateBucketPlacementMode` when mode field present in PUT body; otherwise existing `admin:PutBucketPlacement`.
+- OpenAPI `openapi.yaml`: `BucketPlacement` schema gains `mode` enum [weighted, strict] + updated description; PUT operation description notes audit action depending on mode presence + new `InvalidPlacementMode` 400 branch.
+- Contract test `casePlacementMode` added to `Run` dispatch — covers fresh-bucket default, round-trip across all three legal values, idempotent re-set, invalid-value rejection (without row mutation), and ErrBucketNotFound on unknown bucket.
+- Unit tests `TestValidatePlacementMode` + `TestNormalizePlacementMode` in `internal/meta/store_test.go` cover the four-way truth table for validation and the empty-string coercion.
+- Files changed:
+  - internal/meta/store.go (sentinel, constants, validators, Bucket field, Store method)
+  - internal/meta/store_test.go (NEW — validator unit tests)
+  - internal/meta/memory/store.go (SetBucketPlacementMode impl)
+  - internal/meta/cassandra/schema.go (ALTER TABLE buckets ADD placement_mode text)
+  - internal/meta/cassandra/store.go (GetBucket + ListBuckets SELECT extended; SetBucketPlacementMode LWT impl)
+  - internal/meta/tikv/buckets.go (SetBucketPlacementMode via updateBucket)
+  - internal/meta/storetest/contract.go (new casePlacementMode + dispatch entry)
+  - internal/adminapi/buckets_placement.go (Mode field on response shape; new request shape with *string for presence detection; PUT path branches on req.Mode; GET reads bucket.PlacementMode)
+  - internal/adminapi/openapi.yaml (schema + put op description updates)
+- **Learnings for future iterations:**
+  - meta.Bucket extension auto-flows through TiKV: bucket rows are persisted via `json.Marshal(b)` in `internal/meta/tikv/codec.go::encodeBucket`, so adding a json-tagged field gives schema-additive TiKV persistence for free. Memory backend stores the in-process bucket struct, so it propagates as well — only cassandra needs an explicit SELECT column update.
+  - Cassandra `GetBucket` AND `ListBuckets` both have their own column lists — when adding a buckets column, edit BOTH or ListBuckets returns zero-values for the new field. Look in `internal/meta/cassandra/store.go` for `SELECT ... FROM buckets`.
+  - `alterStatements` runs at boot via `ensureTables` and is idempotent (`isColumnAlreadyExists` swallows the AlreadyExists error). Just append.
+  - Pattern for "field absent vs zero-value" on PUT bodies: use a `*string` (or `*T`) on a separate internal request struct rather than a shared response/request struct. Lets the handler distinguish "operator did not include mode in body" from "operator explicitly set mode to empty string".
+  - The bucket-row LWT lesson from `SetBucketVersioning` (CLAUDE.md cassandra gotchas) applies to every new buckets-column writer: `UPDATE ... IF EXISTS` keeps the write in the Paxos lineage that `CreateBucket` (`INSERT ... IF NOT EXISTS`) started, so LOCAL_QUORUM reads see the new value immediately. Skipping LWT would leak the read-after-write incoherence noted in the SetBucketVersioning comment.
+  - The racetest oracle (`internal/racetest/TestRunCleanRunNoInconsistencies`) is timing-sensitive when the full test suite runs in parallel — failed once during `go test ./...`, passed on isolated re-run. Treat as a flake unless reproducible with `-count=N`.
+---

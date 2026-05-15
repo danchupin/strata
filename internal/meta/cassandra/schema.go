@@ -443,6 +443,7 @@ var alterStatements = []string{
 	`ALTER TABLE cluster_state ADD mode text`,
 	`ALTER TABLE cluster_state ADD weight int`,
 	`ALTER TABLE multipart_uploads ADD cluster text`,
+	`ALTER TABLE buckets ADD placement_mode text`,
 }
 
 func isColumnAlreadyExists(err error) bool {
