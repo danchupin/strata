@@ -1,0 +1,129 @@
+{
+  "project": "Strata",
+  "branchName": "ralph/cluster-weights",
+  "description": "Default-routing weights + pending cluster state. Closes ROADMAP P2. Follow-up to drain-transparency. Adds 5th state `pending` + per-cluster `weight int (0..100)` field for default routing. Operator workflow: register cluster (env edit + restart) → boot auto-inits state=pending weight=0 → operator validates → POST /activate {weight: 10} → state=live weight=10 → ramp up via PUT /weight (10→25→50→100) → cluster fully integrated. Two weight layers (bucket.Placement vs cluster.weight) never combine: bucket policy wins; cluster.weight only drives default routing for nil-policy buckets. Existing live clusters with chunks auto-detected at boot via bucket_stats reference → state=live weight=100 (zero operator action). 5 stories: meta+admin API; PickCluster default-routing synthesis; UI pending card + Activate modal with typed-confirm; UI live card weight slider; 4-scenario smoke + Playwright + docs + close.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "5-state machine + cluster_weight field + admin API endpoints",
+      "description": "As a developer, I need the meta layer + admin API to support the new `pending` state and per-cluster weight so the UI + routing can rely on them.",
+      "acceptanceCriteria": [
+        "`cluster_state` row schema gains `weight int (0..100)` field alongside existing `state` + `mode`",
+        "`meta.Store` interface: `SetClusterState(ctx, id, state, mode, weight) error`; `GetClusterState` returns `ClusterStateRow{State, Mode, Weight}`; `ListClusterStates` returns the same map shape",
+        "Memory + Cassandra + TiKV backends implement the new shape in lockstep; new contract test `caseClusterStateWeights` in `internal/meta/storetest/contract.go` exercises legal combos + weight range validation + state-mode-weight transitions",
+        "Boot-time reconcile in `internal/serverapp/serverapp.go::Run`: gateway compares `STRATA_RADOS_CLUSTERS` env vs `cluster_state` rows; for each cluster in env without a row, if `bucket_stats` sum references this cluster (any bucket has chunks here) → auto-create state=live weight=100 (existing-live detection); otherwise → auto-create state=pending weight=0",
+        "Boot reconcile logs INFO `\"cluster auto-init\"` per affected cluster with `cluster_id`, `state`, `weight`, `reason` (\"existing-live\" or \"new-pending\"); plus a summary line `\"cluster reconcile: <N> auto-pending, <M> existing-live\"`",
+        "Reconcile is idempotent: re-running it (e.g. second-replica boot of same cluster) does not duplicate or overwrite existing rows",
+        "New admin endpoint `POST /admin/v1/clusters/{id}/activate {weight: int}` — pending → live; returns 409 Conflict if state != pending; returns 400 if weight not in [0, 100]",
+        "New admin endpoint `PUT /admin/v1/clusters/{id}/weight {weight: int}` — adjust weight while state=live; returns 409 Conflict if state != live; returns 400 if weight not in [0, 100]",
+        "`GET /admin/v1/clusters` response carries `weight int` per cluster (0 for non-live states)",
+        "`GET /admin/v1/clusters/{id}/drain-progress` includes `weight` for symmetry",
+        "OpenAPI spec at `internal/adminapi/openapi.yaml` documents the new endpoints + the weight field",
+        "Audit row stamped with `admin:ActivateCluster` / `admin:UpdateClusterWeight` actions + `cluster:<id>` resource + body `{weight}` for traceability",
+        "Unit tests: boot-time reconcile fixture covers (a) existing-live detection via bucket_stats, (b) new-pending init, (c) idempotent re-run",
+        "Integration test (multi-cluster lab against compose): wipe one `cluster_state` row → restart gateway → assert auto-init to expected state",
+        "`go vet ./...` passes",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Default-routing synthesised policy in placement.PickCluster",
+      "description": "As a developer, I need the placement picker to consult cluster weights when the bucket has no explicit Placement policy so default routing actually spreads across all live clusters.",
+      "acceptanceCriteria": [
+        "New helper `placement.DefaultPolicy(clusterStates map[string]meta.ClusterStateRow) map[string]int` returns `{<each-live-cluster-with-weight>0>: <weight>}` excluding pending/draining_readonly/evacuating/removed states",
+        "`placement.PickCluster` extended (or new sibling): when `policy == nil` AND `spec.Cluster` from class env is empty (no `@cluster` pin) → use synthesised default policy from cluster weights",
+        "Class env `@cluster` suffix still wins: when `spec.Cluster != \"\"` (explicit pin in class env) → that cluster is used regardless of weights, bypassing default-routing synthesis",
+        "Bucket `Placement` policy still wins over cluster weights: when `bucket.Placement != nil` → policy = bucket.Placement, cluster.weight ignored for this bucket — order in PickCluster must short-circuit BEFORE consulting weights",
+        "All live clusters with weight=0 → DefaultPolicy returns empty map → PickCluster returns \"\" → caller falls back to class env spec.Cluster (or 503 if strict-refuse path)",
+        "`internal/data/rados/Backend.PutChunks` (and S3 symmetric) calls extended picker with cluster-state map injected via `data.WithClusterStates(ctx, ...)` context-threading mechanism",
+        "Cluster-state map sourced from in-process cache (refreshed every 30s — same DrainCache pattern OR merged ClusterStateCache); cache invalidates immediately on activate/weight admin endpoint calls so operator changes propagate within seconds",
+        "Unit test: 3 simulated clusters with weights {c1:10, c2:30, c3:60} + nil bucket policy → 1000 PUT keys distribute ~100/300/600 (5% tolerance on each)",
+        "Unit test: cluster c2 pending → PickCluster never returns c2 even if policy lists it",
+        "Unit test: bucket policy `{c1:1, c2:1}` + cluster.weight `{c1:100, c2:50}` → 50/50 split (bucket policy wins, cluster.weight ignored for this bucket)",
+        "Integration test (multi-cluster lab): set weights {default:50, cephb:50} + nil-policy bucket → PUT 100 chunks → assert ~50/50 distribution via `rados ls | wc -l` on each cluster",
+        "`go vet ./...` passes",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "UI — Pending cluster card variant + Activate modal with typed-confirm + initial-weight slider",
+      "description": "As an operator, I want a pending cluster card with an Activate button that opens a typed-confirm modal with an initial-weight slider so I can safely bring a new cluster into the routing rotation.",
+      "acceptanceCriteria": [
+        "`web/src/components/storage/ClustersSubsection.tsx` renders pending-state cards distinct from live: badge \"Pending — not receiving writes\" (gray palette), no Drain button, only an \"Activate\" button + \"Show affected buckets\" link",
+        "New component `web/src/components/storage/ActivateClusterModal.tsx` opens on Activate click",
+        "Modal body contains: cluster id label, weight slider 0..100 (default 10), paired numeric `<Input type=\"number\">` two-way bound, warning explainer (\"Activating this cluster will start routing a share of new bucket PUTs without explicit Placement policy. Initial share = weight × 100% / total-live-weights. Adjust later via the cluster card slider.\"), typed-confirm input matching the existing `<ConfirmDrainModal>` pattern",
+        "Submit DISABLED until typed value === cluster.id (case-sensitive, same convention as ConfirmDrainModal)",
+        "Submit calls `POST /admin/v1/clusters/{id}/activate {weight: <slider>}`; on 200 → success toast + refetch shared `clusters` TanStack query; card transitions to live state with the chosen weight",
+        "On 409 Conflict (already-live race) → error toast; modal stays open so operator can dismiss",
+        "Slider + numeric input clamp to [0, 100]; non-numeric blocked",
+        "Reuse existing `<Card>`, `<Badge>`, `<Modal>`, `<Slider>`, `<Input>`, `<Button>`, `<Toast>` primitives",
+        "Bundle size delta ≤ 4 KiB gzipped",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "UI — Live cluster card weight slider + debounced PUT + weight=0 chip",
+      "description": "As an operator, I want a slider on each live cluster card so I can adjust its routing weight without re-opening modals — and a visual cue when weight=0 so I know that cluster is silent.",
+      "acceptanceCriteria": [
+        "`<ClustersSubsection>` live cluster cards expose an inline weight slider 0..100 + paired `<Input type=\"number\">` two-way bound (numeric input on the right of slider)",
+        "Drag/edit debounces 500ms then issues `PUT /admin/v1/clusters/{id}/weight {weight: <value>}`; rapid drags coalesce to the final value",
+        "Optimistic UI: slider position + numeric input update immediately on drag; on 4xx response → revert + error toast with API message",
+        "Tooltip on slider: \"Share in default uniform routing for buckets without explicit Placement policy. weight=0 means no default-routed writes; reads + explicit policies still work.\"",
+        "When `weight === 0` (still state=live) → render small muted chip next to slider: \"weight=0 — no default-routed writes\"",
+        "On 409 Conflict (state changed mid-edit, e.g. operator drained) → revert slider + warning toast \"Cannot update weight: cluster is no longer in live state\"",
+        "Unit test (jest/vitest as used in repo): mock fetch + simulate slider drag → assert one PUT after 500ms with final value; rapid drags collapse to single PUT",
+        "Bundle size delta ≤ 3 KiB gzipped",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "End-to-end smoke + docs + ROADMAP close-flip + PRD removal",
+      "description": "As an operator and as a future-maintainer, I need the new cluster lifecycle validated end-to-end against the multi-cluster lab + documented so I trust the cycle is actually done.",
+      "acceptanceCriteria": [
+        "`scripts/smoke-cluster-weights.sh` covers four walkthrough scenarios end-to-end against `docker compose --profile multi-cluster`",
+        "Scenario A (new cluster activation): wipe `cluster_state` row for `cephb` via direct cassandra/tikv query → restart strata-multi → assert /clusters reports cephb state=pending weight=0; POST /clusters/cephb/activate {weight:10}; assert state=live weight=10; PUT 1000 chunks via a nil-policy bucket; assert ~100 chunks landed on cephb via `docker exec strata-cephb rados ls | wc -l` (5% tolerance); PUT /clusters/cephb/weight {weight:50}; PUT 1000 more chunks; assert next batch distribution ~50/50",
+        "Scenario B (existing-live auto-detect at boot): plant N chunks on default cluster via PUT pre-restart; wipe `cluster_state` for default; restart strata-multi; assert auto-init sets default to state=live weight=100 (because bucket_stats reference) rather than pending",
+        "Scenario C (explicit policy overrides weights): create bucket with `Placement={default:1, cephb:1}`; set cluster.weights `{default:100, cephb:10}`; PUT 200 chunks; assert ~100/100 distribution (bucket policy wins — 50/50 ratio from policy, NOT 100/10 from weights)",
+        "Scenario D (pending excluded from default routing): wipe cluster_state for cephb → pending; PUT 100 chunks via nil-policy bucket; assert 0 chunks on cephb; activate cephb weight=10; PUT 100 more; assert ~10 land on cephb",
+        "Script EXITS NON-ZERO on any assertion failure; per-scenario log lines via `echo \"==> Scenario X: ...\"` so failing scenario is obvious",
+        "`make smoke-cluster-weights` Makefile target wraps the script",
+        "Playwright spec `web/e2e/cluster-weights.spec.ts` covers UI half: navigate to /storage → assert pending card with Activate button → open modal → drag slider to 25 → typed-confirm \"cephb\" → Submit → assert card flips to live + weight chip shows 25 → drag inline slider on live card → 500ms debounce → PUT verified via page.route assertion → weight=0 case renders muted chip",
+        "`docs/site/content/best-practices/placement-rebalance.md` gains new \"Cluster lifecycle (register → activate → ramp)\" section: full walkthrough table + the two-weight-layer explanation (bucket Placement vs cluster.weight) + tips on choosing initial weight (10% for production new-cluster, 100% for trusted clone)",
+        "`docs/site/content/best-practices/web-ui.md` capability matrix gains rows for: Pending card variant, Activate modal, cluster weight slider, weight=0 chip",
+        "Project root `CLAUDE.md` \"Cluster state machine\" section (add if absent) describes the 5-state machine + per-cluster weight semantics + the two-weight-layer rule",
+        "`ROADMAP.md` close-flip the P2 entry → `~~**P2 — Default-routing weights + ...**~~ — **Done.** <one-line summary>. (commit \\`<pending>\\`)`; SHA backfilled in follow-up commit on main",
+        "`tasks/prd-cluster-weights.md` REMOVED in the same commit (PRD lifecycle rule — Ralph snapshot is canonical)",
+        "Manual screenshots: pending card + Activate modal + live card with weight=25 + weight=0 chip — referenced in operator runbook",
+        "`make docs-build` succeeds",
+        "`make vet` succeeds",
+        "`make test` succeeds",
+        "`pnpm run build` succeeds",
+        "`make smoke-cluster-weights` succeeds against the running multi-cluster lab",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": ""
+    }
+  ]
+}
