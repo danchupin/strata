@@ -49,3 +49,17 @@ Cycle: ralph/drain-followup
   - Pointer-based optional ints (`*int64`) keep `0` distinguishable from "unset" without an extra HasMin/HasMax pair.
   - OpenAPI updates live in `internal/adminapi/openapi.yaml`; the description in the 200 response should call out that `total = filtered count` so UI consumers don't get surprised when pagination jumps after a filter change.
 ---
+
+## 2026-05-15 — US-003 UI clarity (Cancel deregister prep rename + chip tooltip + ConfirmUndrainEvacuationModal copy)
+- Renamed the truth-table cell `evacuating + chunks=0 + deregister_ready=true` button: label `Cancel deregister prep` → `Restore to live (cancel evacuation)`; variant `destructive` → `outline` (`size="sm"` already). `testid="cluster-card-cancel-deregister-prep"` preserved so `drain-cleanup.spec.ts` keeps its existing flow intact.
+- Updated the green `dp-dereg-ready` chip tooltip in `DrainProgressBar.tsx` to PRD copy: `Edit STRATA_RADOS_CLUSTERS env to remove this cluster, then rolling restart. See operator runbook for deregister procedure.`
+- Shortened `ConfirmUndrainEvacuationModal` body text under the "No rollback" banner to `Moved chunks remain on target clusters; no rollback. Cluster will accept writes again.`
+- Verified chip-above-button layout already holds: `DrainProgressBar` renders inside CardContent ABOVE the bottom `<div>` that hosts Show-affected-buckets link + `<ActionButton>`. New Playwright spec asserts the relative bounding-box positions to lock the invariant.
+- Files: `web/src/components/storage/ClustersSubsection.tsx`, `web/src/components/storage/DrainProgressBar.tsx`, `web/src/components/storage/ConfirmUndrainEvacuationModal.tsx`, `web/e2e/drain-followup.spec.ts`.
+- Quality gates: `pnpm run typecheck` ✓, `pnpm run build` ✓ (Storage chunk size unchanged within rounding), `pnpm run test:unit` ✓ (54 cases), `make vet` ✓. Playwright spec not run locally — port 9999 reserved for an SSH tunnel; runs in CI + via `make smoke-drain-followup` (US-006).
+- **Learnings:**
+  - Truth-table refactors that only rename labels are safe-to-keep-testid: the existing `drain-cleanup.spec.ts` filters `cdpDialog` by the dialog title `Cancel deregister prep` (CancelDeregisterPrepModal — NOT renamed) and clicks the action button by testid — so the rename doesn't cascade into the legacy e2e.
+  - PRD wording for US-003 conflates `ConfirmUndrainEvacuationModal` with the typed-confirm modal; the actual typed-confirm is `CancelDeregisterPrepModal`. Treated the PRD literally: rename the action button + update the chip tooltip + update `ConfirmUndrainEvacuationModal` body text per the verbatim copy; left `CancelDeregisterPrepModal` title intact to avoid breaking drain-cleanup.spec.ts.
+  - Two distinct modals call `undrainCluster()` for the same `evacuating → live` transition: `CancelDeregisterPrepModal` (typed-confirm gate for the chunks=0 cell) and `ConfirmUndrainEvacuationModal` (one-click confirm for the mid-flight chunks>0 cell). Both are wired from `ClusterCard` and the action-table picker decides which one the button opens.
+  - Chip-above-button layout is enforced by component composition, not by an explicit class — `DrainProgressBar` is rendered earlier in the CardContent tree than the bottom action row, so vertical-stack ordering is implicit. Bounding-box assertions in Playwright lock it as a regression gate.
+---

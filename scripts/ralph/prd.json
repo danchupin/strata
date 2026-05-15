@@ -67,8 +67,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Button label `Cancel deregister prep` → `Restore to live (cancel evacuation)`; variant flipped `destructive` → `outline` (testid preserved so drain-cleanup.spec.ts keeps working). Green chip tooltip text on `dp-dereg-ready` rewritten to PRD copy. `ConfirmUndrainEvacuationModal` body shortened to `Moved chunks remain on target clusters; no rollback. Cluster will accept writes again.` Chip-above-button layout already held (DrainProgressBar renders above the bottom action row in CardContent); covered by a Playwright boundingBox assertion. New spec `web/e2e/drain-followup.spec.ts` covers label + tooltip + chip-above-button. Typecheck + build + unit tests pass; Playwright not run locally (port 9999 busy)."
     },
     {
       "id": "US-004",
