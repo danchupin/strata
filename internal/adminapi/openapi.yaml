@@ -630,7 +630,7 @@ components:
 
     PoolStatus:
       type: object
-      required: [name, class, bytes_used, object_count, num_replicas, state]
+      required: [name, class, bytes_used, chunk_count, num_replicas, state]
       description: |
         One backing pool / bucket row in DataHealthReport (GET /storage/data).
         `cluster` carries the cluster id the pool/bucket lives on so the UI
@@ -651,7 +651,13 @@ components:
             Cluster id the pool/bucket lives on. Empty for backends that do
             not model multi-cluster topology (memory).
         bytes_used: { type: integer, format: int64 }
-        object_count: { type: integer, format: int64 }
+        chunk_count:
+          type: integer
+          format: int64
+          description: |
+            Count of RADOS chunks (each chunk is up to 4 MiB), NOT the count
+            of S3 objects. A 5 MiB S3 object spans two chunks. For S3 object
+            count see BucketSummary.object_count.
         num_replicas: { type: integer }
         state: { type: string, description: "Backend-specific liveness label (ok, reachable, error, …)." }
 

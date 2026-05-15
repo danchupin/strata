@@ -57,7 +57,7 @@ func (b *Backend) DataHealth(ctx context.Context) (*data.DataHealthReport, error
 		// PRD: BytesUsed = Num_kb * 1024 (Num_bytes is unreliable on some
 		// older Ceph builds; Num_kb is the documented stable contract).
 		ps.BytesUsed = stat.Num_kb * 1024
-		ps.ObjectCount = stat.Num_objects
+		ps.ChunkCount = stat.Num_objects
 		ps.State = "ok"
 		pools = append(pools, ps)
 	}

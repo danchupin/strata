@@ -200,7 +200,7 @@ function installRoutes(page: Page, state: SpoofState) {
           class: 'STANDARD',
           cluster: c.id,
           bytes_used: 1024,
-          object_count: 1,
+          chunk_count: 1,
           num_replicas: 3,
           state: 'active+clean',
         })),

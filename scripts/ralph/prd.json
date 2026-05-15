@@ -65,8 +65,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Hard-renamed PoolStatus.ObjectCount → ChunkCount + JSON tag object_count → chunk_count across data backends (rados + s3 + memory), OpenAPI spec, TS wire type, Storage.tsx column header (with native title= tooltip explaining RADOS-chunk vs S3-object semantic), four e2e mock specs, and architecture/storage.md doc. Bucket-stats S3 object_count fields left untouched per PRD. Browser smoke deferred to US-005."
     },
     {
       "id": "US-004",

@@ -135,7 +135,11 @@ type PoolStatus struct {
 	Class       string `json:"class"`
 	Cluster     string `json:"cluster,omitempty"`
 	BytesUsed   uint64 `json:"bytes_used"`
-	ObjectCount uint64 `json:"object_count"`
+	// ChunkCount is the count of RADOS chunks (each chunk is up to 4 MiB);
+	// it is NOT the count of S3 objects. A single 5 MiB S3 object spans
+	// two chunks; the UI column header carries a tooltip explaining the
+	// distinction.
+	ChunkCount  uint64 `json:"chunk_count"`
 	NumReplicas int    `json:"num_replicas"`
 	State       string `json:"state"`
 }

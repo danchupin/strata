@@ -94,7 +94,7 @@ func (b *Backend) Close() error { return nil }
 
 // DataHealth implements data.HealthProbe — returns a single in-process pool
 // row whose BytesUsed is the sum of currently-held chunk bytes (process-RSS
-// proxy) and ObjectCount is the chunk count. Class is "*" since the memory
+// proxy) and ChunkCount is the chunk count. Class is "*" since the memory
 // backend serves every storage class out of the same map.
 func (b *Backend) DataHealth(ctx context.Context) (*data.DataHealthReport, error) {
 	b.mu.RLock()
@@ -110,7 +110,7 @@ func (b *Backend) DataHealth(ctx context.Context) (*data.DataHealthReport, error
 			Class:       "*",
 			Cluster:     "",
 			BytesUsed:   bytes,
-			ObjectCount: uint64(len(b.chunks)),
+			ChunkCount:  uint64(len(b.chunks)),
 			NumReplicas: 1,
 			State:       "reachable",
 		}},

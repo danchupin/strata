@@ -84,7 +84,7 @@ The RADOS probe iterates the configured `[rados] classes` map (from
 same `*goceph.IOContext` the gateway data path opens via
 `internal/data/rados/backend.go::ioctx`. Per-pool stats come from
 `(*IOContext).GetPoolStats()` (`Num_kb*1024` → `BytesUsed`, `Num_objects` →
-`ObjectCount`). Cluster-wide health uses
+`ChunkCount` — RADOS chunk count, not S3 object count). Cluster-wide health uses
 `(*Conn).MonCommand({"prefix":"status","format":"json"})` per unique cluster.
 
 `HEALTH_OK` from `ceph status` suppresses warnings entirely. Anything else
@@ -102,7 +102,7 @@ deliberate future P3 — the current cycle ships headline-only.
 ## S3-over-S3 (Data tab)
 
 The S3 backend probe runs `HeadBucket` on the configured backend bucket and
-reports `state=reachable` or `state=error`. `BytesUsed` and `ObjectCount` are
+reports `state=reachable` or `state=error`. `BytesUsed` and `ChunkCount` are
 left at `0` because the upstream S3 API does not expose them in O(1); the
 per-class breakdown (`/admin/v1/storage/classes`) covers the Strata-side
 dimensions.
