@@ -166,6 +166,18 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		logger.Warn("cluster reconcile", "error", rerr.Error())
 	}
 
+	// One-shot lookup-table reconcile (US-005 ALLOW FILTERING denormalize):
+	// backfill the `_by_cluster` denormalised lookup tables for every row in
+	// `gc_entries_v2` and `multipart_uploads` that carries a cluster id.
+	// Cassandra-only — memory + TiKV backends do not suffer ALLOW FILTERING.
+	// Runs once per process before the listener accepts requests; idempotent
+	// re-runs are cheap (every write is an upsert with the same payload).
+	if cs, ok := metaStore.(*metacassandra.Store); ok {
+		if _, rerr := cs.ReconcileLookupTables(ctx, logger); rerr != nil {
+			logger.Warn("cluster reconcile lookup tables", "error", rerr.Error())
+		}
+	}
+
 	healthHandler := buildHealthHandler(metaStore, dataBackend)
 
 	jwtSecret, jwtSource, jwtFile := loadJWTSecret(logger)

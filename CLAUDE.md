@@ -586,10 +586,17 @@ heap-merges by clustering order (key ASC, version_id DESC). See `cassandra/store
   drain-progress safety gate probes it via `ListMultipartUploadsByCluster` so the `deregister_ready=true` flip
   refuses to fire while any S3-pass-through multipart session is still bound to the cluster about to be removed.
   Chunk-based RADOS uploads leave `BackendUploadID` empty and thus persist `NULL` — these never match a
-  per-cluster probe (the chunk-based router has no init-time cluster binding). Cassandra impl uses
-  `WHERE cluster=? ALLOW FILTERING` (intermediate state — US-005 replaces this with the denormalised
-  `multipart_uploads_by_cluster` lookup table). Pre-US-004 rows have `NULL` in the column and are tolerated on
-  read (NULL never matches any clusterID) — no one-shot migration is required.
+  per-cluster probe (the chunk-based router has no init-time cluster binding). Pre-US-004 rows have `NULL` in
+  the column and are tolerated on read (NULL never matches any clusterID) — no one-shot migration is required.
+- **Denormalised `_by_cluster` lookup tables** (US-005 drain-followup): `gc_entries_by_cluster` mirrors
+  `gc_entries_v2` and `multipart_uploads_by_cluster` mirrors `multipart_uploads`, both partitioned on
+  `(cluster)` so `ListChunkDeletionsByCluster` / `ListMultipartUploadsByCluster` are single-partition scans —
+  no `ALLOW FILTERING` on the drain hot path. **Dual-write rule**: every `EnqueueChunkDeletion` /
+  `AckGCEntry` / `CreateMultipartUpload` / `CompleteMultipartUpload` / `AbortMultipartUpload` MUST keep the
+  primary table and the lookup row in lockstep (skip the dual-write when cluster id is empty — chunk-based
+  uploads + legacy rows). Boot reconcile in `internal/serverapp` (`metacassandra.Store.ReconcileLookupTables`)
+  backfills missing lookup rows once per process from the legacy tables; idempotent re-runs are upserts with
+  the same payload.
 
 ## Where to look when adding S3 surface
 

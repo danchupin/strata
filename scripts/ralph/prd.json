@@ -110,8 +110,8 @@
         "Tests pass"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Two new tables `gc_entries_by_cluster` + `multipart_uploads_by_cluster` added via tableDDL (idempotent CREATE TABLE IF NOT EXISTS). Dual-write threaded through EnqueueChunkDeletion, AckGCEntry, CreateMultipartUpload, CompleteMultipartUpload, AbortMultipartUpload — empty cluster id (chunk-based uploads + non-cluster GC) skips the lookup write so legacy rows + chunk-based uploads pass through unchanged. ListChunkDeletionsByCluster + ListMultipartUploadsByCluster rewritten to read from the lookup tables — no more ALLOW FILTERING on the drain hot path. New cassandra.Store.ReconcileLookupTables(ctx, logger) walks gc_entries_v2 + multipart_uploads once at process boot, upserting missing rows into the lookup tables; idempotent re-runs are no-op upserts; per-1000-row progress + final summary logged. Wired via type-assertion on metaStore in `internal/serverapp.Run` after ReconcileClusters. Memory + TiKV backends unchanged. Existing contract tests caseChunkDeletionsByCluster + caseListMultipartUploadsByCluster cover the surface and pass against all three backends. CLAUDE.md gotcha updated. `go vet ./...` ✓, `go test ./internal/meta/... ./internal/serverapp/... ./internal/adminapi/...` ✓."
     },
     {
       "id": "US-006",
