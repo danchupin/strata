@@ -210,7 +210,7 @@ func TestWorkerProgressScanPopulatesTracker(t *testing.T) {
 	}
 	// Mark cluster "old" as draining so the worker's progress accumulator
 	// counts chunks living on it.
-	if err := m.SetClusterState(context.Background(), "old", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate); err != nil {
+	if err := m.SetClusterState(context.Background(), "old", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate, 0); err != nil {
 		t.Fatalf("SetClusterState: %v", err)
 	}
 	if err := m.SetBucketPlacement(context.Background(), b.Name, map[string]int{"new": 1}); err != nil {
@@ -272,7 +272,7 @@ func TestWorkerFiresDrainCompleteEnd2End(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBucket: %v", err)
 	}
-	if err := m.SetClusterState(ctx, "old", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate); err != nil {
+	if err := m.SetClusterState(ctx, "old", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate, 0); err != nil {
 		t.Fatalf("SetClusterState: %v", err)
 	}
 	if err := m.SetBucketPlacement(ctx, b.Name, map[string]int{"new": 1}); err != nil {
@@ -372,7 +372,7 @@ func TestWorkerProgressScanCountsEmptyPolicyBuckets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBucket: %v", err)
 	}
-	if err := m.SetClusterState(context.Background(), "old", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate); err != nil {
+	if err := m.SetClusterState(context.Background(), "old", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate, 0); err != nil {
 		t.Fatalf("SetClusterState: %v", err)
 	}
 	seedObject(t, m, b.ID, "obj-a", []string{"old", "old"})
@@ -434,7 +434,7 @@ func TestClassifyBucketCovers(t *testing.T) {
 func TestWorkerCategorizesChunksAcrossBuckets(t *testing.T) {
 	m, _, _, _ := newRebalanceFixture(t)
 	ctx := context.Background()
-	if err := m.SetClusterState(ctx, "old", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate); err != nil {
+	if err := m.SetClusterState(ctx, "old", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate, 0); err != nil {
 		t.Fatalf("SetClusterState: %v", err)
 	}
 
@@ -516,7 +516,7 @@ func TestWorkerCategorizesChunksAcrossBuckets(t *testing.T) {
 func TestWorkerSkipsReadonlyClusters(t *testing.T) {
 	m, _, _, _ := newRebalanceFixture(t)
 	ctx := context.Background()
-	if err := m.SetClusterState(ctx, "old", meta.ClusterStateDrainingReadonly, meta.ClusterModeReadonly); err != nil {
+	if err := m.SetClusterState(ctx, "old", meta.ClusterStateDrainingReadonly, meta.ClusterModeReadonly, 0); err != nil {
 		t.Fatalf("SetClusterState: %v", err)
 	}
 	b, err := m.CreateBucket(ctx, "ro", "owner", "STANDARD")

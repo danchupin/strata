@@ -421,17 +421,28 @@ func (b *Backend) clusterForClass(ctx context.Context, class string) (*s3Cluster
 }
 
 // clusterForPlacement is the placement-aware variant of clusterForClass
-// (US-002 placement-rebalance). When ctx carries a non-empty placement
-// policy, it picks a target cluster via stable hash-mod over
-// (bucketID, objectKey, chunkIdx=0) and resolves the bucket on that
-// cluster — first the requested class if its Cluster matches the
-// picked id, otherwise the lex-first ClassSpec routed to the picked
-// cluster. Falls back to clusterForClass when no policy is set, the
-// picker returns "" (all-zero policy), the picked cluster is not in
+// (US-002 placement-rebalance). Two-layer policy (US-002
+// cluster-weights):
+//
+//  1. bucket.Placement (data.PlacementFromContext) wins outright.
+//  2. Else use the synthesised default-routing policy from cluster.
+//     weight (data.DefaultPlacementFromContext). The s3 backend has no
+//     ClusterPinned flag on ClassSpec — every s3 class is explicitly
+//     pinned by definition (Cluster is REQUIRED in the JSON parse) —
+//     so when the bucket has no Placement we still consult default
+//     routing first; if it can't pick the class's bucket on a live
+//     cluster, we fall back to clusterForClassStrict (the explicit pin).
+//  3. Else fall back to clusterForClassStrict (the per-class pin).
+//
+// Falls back to clusterForClass when no policy is set, the picker
+// returns "" (all-zero policy), the picked cluster is not in
 // b.clusters, or no class registers a bucket on the picked cluster.
 func (b *Backend) clusterForPlacement(ctx context.Context, class string) (*s3Cluster, string, error) {
-	policy, ok := data.PlacementFromContext(ctx)
 	draining, _ := data.DrainingClustersFromContext(ctx)
+	policy, ok := data.PlacementFromContext(ctx)
+	if !ok {
+		policy, ok = data.DefaultPlacementFromContext(ctx)
+	}
 	if !ok {
 		return b.clusterForClassStrict(ctx, class, draining)
 	}

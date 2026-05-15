@@ -185,6 +185,10 @@ Phase 3 layers debug tooling on top without removing Phase 2 surface.
 | StuckBucketsDrawer (cluster card, drain transparency) | — | — | ✓ |
 | BulkPlacementFixDialog (drain transparency) | — | — | ✓ |
 | PolicyDrainWarningChip (BucketDetail Placement tab) | — | — | ✓ |
+| PendingClusterCard variant (cluster-weights US-003) | — | — | ✓ |
+| ActivateClusterModal — typed-confirm + initial-weight slider | — | — | ✓ |
+| LiveClusterWeightSlider — inline debounced PUT | — | — | ✓ |
+| weight=0 chip on live cluster card | — | — | ✓ |
 
 ## Operational notes
 
@@ -270,6 +274,23 @@ Three Playwright specs run in CI under the `e2e-ui` job:
   `page.route()` so the spec runs against the same memory-mode gateway
   as the other e2e jobs. Operator runbook is at [Placement + rebalance
   — Drain lifecycle]({{< ref "/best-practices/placement-rebalance#drain-lifecycle" >}}).
+- `web/e2e/cluster-weights.spec.ts` — Cluster-weights cycle (US-005):
+  three Playwright scenarios spoofing the 5-state machine + weight
+  field. **Scenario A** drives the pending → live flow: pending badge
+  visible, Activate CTA opens `<ActivateClusterModal>`, slider/numeric
+  pair set to 25, typed-confirm arms Submit, card flips to live with
+  `<LiveClusterWeightSlider>` mounted at value=25 + Drain CTA back.
+  **Scenario B** drives the live-card inline slider: rapid drags
+  coalesce to a single 500 ms debounced PUT, weight=0 path renders the
+  muted "no default-routed writes" chip. **Scenario C** drives the 4xx
+  revert path: armed-409 PUT reverts the slider to the last
+  server-accepted value. All admin endpoints (`/admin/v1/clusters`,
+  `.../activate`, `.../weight`, `.../drain-progress`,
+  `.../rebalance-progress`, `.../bucket-references`,
+  `/admin/v1/storage/data`) are spoofed via `page.route()` so the spec
+  runs against the same memory-mode gateway as the other e2e jobs.
+  Operator runbook is at [Placement + rebalance — Cluster
+  lifecycle]({{< ref "/best-practices/placement-rebalance#cluster-lifecycle-register--activate--ramp" >}}).
 - `web/e2e/placement.spec.ts` — Placement + cluster surfacing cycle
   (US-006 placement-ui): login → /storage → cluster cards rendered →
   create bucket → Placement tab → drag slider for `cephb` to 100 →

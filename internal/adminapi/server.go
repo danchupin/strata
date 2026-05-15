@@ -351,6 +351,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/v1/clusters", s.handleClustersList)
 	mux.HandleFunc("POST /admin/v1/clusters/{id}/drain", s.handleClusterDrain)
 	mux.HandleFunc("POST /admin/v1/clusters/{id}/undrain", s.handleClusterUndrain)
+	mux.HandleFunc("POST /admin/v1/clusters/{id}/activate", s.handleClusterActivate)
+	mux.HandleFunc("PUT /admin/v1/clusters/{id}/weight", s.handleClusterUpdateWeight)
 	mux.HandleFunc("GET /admin/v1/clusters/{id}/rebalance-progress", s.handleClusterRebalanceProgress)
 	mux.HandleFunc("GET /admin/v1/clusters/{id}/drain-progress", s.handleClusterDrainProgress)
 	mux.HandleFunc("GET /admin/v1/clusters/{id}/drain-impact", s.handleClusterDrainImpact)

@@ -40,6 +40,8 @@ export {
   fetchClusters,
   drainCluster,
   undrainCluster,
+  activateCluster,
+  updateClusterWeight,
   fetchClusterRebalanceProgress,
   fetchClusterDrainProgress,
   fetchClusterBucketReferences,

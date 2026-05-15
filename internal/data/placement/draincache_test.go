@@ -119,6 +119,54 @@ func TestDrainCacheFirstLoadErrorReturnsEmpty(t *testing.T) {
 	}
 }
 
+// States exposes the full cluster_state snapshot so callers can
+// synthesise the default-routing policy via DefaultPolicy. One loader
+// call backs both Get and States — repeated reads within the TTL stay
+// cached.
+func TestDrainCacheStatesSharesLoadWithGet(t *testing.T) {
+	loads := atomic.Int32{}
+	loader := func(_ context.Context) (map[string]meta.ClusterStateRow, error) {
+		loads.Add(1)
+		return map[string]meta.ClusterStateRow{
+			"live":    {State: meta.ClusterStateLive, Weight: 100},
+			"pending": {State: meta.ClusterStatePending, Weight: 0},
+			"drain":   {State: meta.ClusterStateEvacuating, Mode: meta.ClusterModeEvacuate, Weight: 50},
+		}, nil
+	}
+	now := time.Unix(0, 0)
+	c := NewDrainCache(loader, 30*time.Second)
+	c.SetClockForTest(func() time.Time { return now })
+
+	states := c.States(context.Background())
+	if len(states) != 3 {
+		t.Fatalf("States len: want 3, got %d (%v)", len(states), states)
+	}
+	if states["live"].State != meta.ClusterStateLive || states["live"].Weight != 100 {
+		t.Fatalf("live row: %+v", states["live"])
+	}
+	if states["pending"].State != meta.ClusterStatePending {
+		t.Fatalf("pending row: %+v", states["pending"])
+	}
+	// Second Get within TTL must hit the cache — no extra load.
+	_ = c.Get(context.Background())
+	if loads.Load() != 1 {
+		t.Fatalf("Get after States within TTL reloaded: %d", loads.Load())
+	}
+	_ = c.States(context.Background())
+	if loads.Load() != 1 {
+		t.Fatalf("States re-read within TTL reloaded: %d", loads.Load())
+	}
+}
+
+// States on nil cache returns nil — safe for the unwired test fixture
+// path so the gateway boots even without a cache.
+func TestDrainCacheStatesNilSafe(t *testing.T) {
+	var c *DrainCache
+	if got := c.States(context.Background()); got != nil {
+		t.Fatalf("nil cache States: got %v want nil", got)
+	}
+}
+
 func TestDrainCacheLegacyDrainingStateNormalizedByLoader(t *testing.T) {
 	// The loader is expected to normalize legacy rows on read; this
 	// test guards the IsDrainingForWrite semantics for any backend

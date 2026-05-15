@@ -507,6 +507,46 @@ rewrap` is a one-shot operator command and stays untraced.
   PD endpoints) keeps `Config.TiKV.Endpoints` as `string` and splits with `strings.Split` + `TrimSpace` + drop-empty
   at use-site. Cleaner than wiring a custom mapstructure decode hook.
 
+## Cluster state machine — 5 states + per-cluster weight
+
+`cluster_state` rows model the cross-cluster lifecycle. Shipped across two cycles: the 4 drain-aware states landed in
+`ralph/drain-transparency`; `pending` + `weight int (0..100)` landed in `ralph/cluster-weights` (US-001..US-005).
+
+States (`meta.ClusterState*` constants):
+
+| State | When | Picker behavior | Operator entry |
+|-------|------|-----------------|----------------|
+| `pending` | New cluster id in `STRATA_RADOS_CLUSTERS` env that has no chunks yet (boot reconcile creates the row) | Excluded from default-routing weight wheel. Bucket policy that names a pending cluster still routes there. | `POST /admin/v1/clusters/{id}/activate {weight:N}` flips → live. |
+| `live` | Normal operating state. `weight ∈ [0, 100]` drives default routing share. | Included in synthesised default policy proportionally to `weight`. `weight=0 + state=live` is legal — reads + explicit policies work, no new default-routed writes. | `PUT /admin/v1/clusters/{id}/weight {weight:N}` adjusts in place. |
+| `draining_readonly` | Maintenance stop-write drain (mode=readonly). | Excluded from picker. PUTs that would land here → 503 `DrainRefused`. Reads + deletes + in-flight multipart continue. | `POST /admin/v1/clusters/{id}/drain {mode:"readonly"}`. |
+| `evacuating` | Decommission drain (mode=evacuate). Rebalance worker scans + migrates chunks off. | Same picker exclusion as readonly. `deregister_ready=true` when chunks_on_cluster reaches 0. | `POST /admin/v1/clusters/{id}/drain {mode:"evacuate"}` or upgrade from readonly. |
+| `removed` | Permanent tombstone after deregister. | Excluded from every code path. | Set by operator deregister flow (drop from env + cleanup). |
+
+Transitions (rejected with `409 InvalidTransition` otherwise):
+
+- `(no row) → pending` (auto-init at boot for new env clusters with no `bucket_stats` reference)
+- `(no row) → live weight=100` (auto-init at boot when `bucket_stats` already references the cluster — existing-live backwards-compat path)
+- `pending → live` via `/activate`
+- `live → live` via `/weight` (in-place weight adjustment)
+- `live → draining_readonly | evacuating` via `/drain`
+- `draining_readonly → evacuating` (upgrade — modal hides the readonly radio)
+- `draining_* → live` via `/undrain` (deletes the row → absence == live; weight resets to default reconcile path)
+
+**Two weight layers — NEVER COMBINE:**
+
+- `bucket.Placement != nil` → policy = bucket.Placement, cluster.weight IGNORED for this bucket.
+- `bucket.Placement == nil` AND class env spec.Cluster == "" → synthesise `{<each-live>: <its-weight>}` via `placement.DefaultPolicy`.
+- Class env `@cluster` suffix sets `spec.Cluster` → bypass synthesis (explicit per-class pin).
+
+The picker call sites (`rados.Backend.PutChunks`, `s3.Backend.clusterForPlacement`) must short-circuit on
+`bucket.Placement != nil` BEFORE consulting weights, otherwise the bucket-policy-wins invariant breaks. The
+states snapshot is sourced from `placement.DrainCache.States(ctx)` (30 s TTL, invalidated synchronously by
+`/activate` + `/weight` + `/drain` + `/undrain` admin handlers).
+
+Boot reconcile (`internal/serverapp/cluster_reconcile.go`) is idempotent — re-running it creates no duplicates and
+overwrites nothing. Lives between drain-cache wiring and listener start; fail-soft on transient meta errors so a
+gocql hiccup doesn't block gateway startup.
+
 ## Sharded objects table — listing fans out
 
 The `objects` table is partitioned by `(bucket_id, shard)` where `shard = hash(key) % N` (default `N=64`, configurable

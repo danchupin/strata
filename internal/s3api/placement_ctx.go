@@ -5,6 +5,7 @@ import (
 	"log/slog"
 
 	"github.com/danchupin/strata/internal/data"
+	"github.com/danchupin/strata/internal/data/placement"
 	"github.com/danchupin/strata/internal/logging"
 	"github.com/danchupin/strata/internal/meta"
 )
@@ -24,7 +25,7 @@ import (
 // The draining-cluster set is read from s.DrainCache (in-process,
 // 30s TTL) so the meta backend is not burdened per request.
 func (s *Server) dataCtxForPut(ctx context.Context, b *meta.Bucket, key string) context.Context {
-	return dataCtxForPutWith(ctx, s.Meta, b, key, s.drainingClusters(ctx))
+	return dataCtxForPutWith(ctx, s.Meta, b, key, s.drainingClusters(ctx), s.defaultPlacement(ctx))
 }
 
 func (s *Server) drainingClusters(ctx context.Context) map[string]bool {
@@ -34,7 +35,19 @@ func (s *Server) drainingClusters(ctx context.Context) map[string]bool {
 	return s.DrainCache.Get(ctx)
 }
 
-func dataCtxForPutWith(ctx context.Context, m meta.Store, b *meta.Bucket, key string, draining map[string]bool) context.Context {
+// defaultPlacement reads the cluster_state snapshot from the shared
+// DrainCache and synthesises the default-routing policy from per-
+// cluster weights (US-002 cluster-weights). Returns nil when the cache
+// is unwired or no live cluster has positive weight — backends fall
+// back to per-class spec.Cluster.
+func (s *Server) defaultPlacement(ctx context.Context) map[string]int {
+	if s.DrainCache == nil {
+		return nil
+	}
+	return placement.DefaultPolicy(s.DrainCache.States(ctx))
+}
+
+func dataCtxForPutWith(ctx context.Context, m meta.Store, b *meta.Bucket, key string, draining map[string]bool, defaultPolicy map[string]int) context.Context {
 	ctx = data.WithBucketID(ctx, b.ID)
 	ctx = data.WithObjectKey(ctx, key)
 	policy, err := m.GetBucketPlacement(ctx, b.Name)
@@ -51,6 +64,9 @@ func dataCtxForPutWith(ctx context.Context, m meta.Store, b *meta.Bucket, key st
 	}
 	if len(draining) > 0 {
 		ctx = data.WithDrainingClusters(ctx, draining)
+	}
+	if len(defaultPolicy) > 0 {
+		ctx = data.WithDefaultPlacement(ctx, defaultPolicy)
 	}
 	return ctx
 }

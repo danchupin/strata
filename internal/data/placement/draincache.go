@@ -21,21 +21,27 @@ const DefaultDrainCacheTTL = 30 * time.Second
 // (US-001 drain-transparency). live / removed pass through.
 type DrainLoader func(ctx context.Context) (map[string]meta.ClusterStateRow, error)
 
-// DrainCache caches a draining-cluster set with a fixed TTL. Refresh is
-// best-effort: an error on reload preserves the prior snapshot so the
-// PUT hot path keeps routing even when the meta backend hiccups.
+// DrainCache caches the cluster_state snapshot with a fixed TTL.
+// Two derived views are exposed: Get returns the draining-cluster set
+// (PUT-routing exclusion) and States returns the full per-cluster row
+// snapshot (default-routing weight synthesis, US-002 cluster-weights).
+// Both share one underlying fetch so the PUT hot path consults at most
+// one loader call per TTL window. Refresh is best-effort: an error on
+// reload preserves the prior snapshot so routing keeps working even
+// when the meta backend hiccups.
 //
 // Safe for concurrent use. Refresh is single-flighted by the mutex —
-// concurrent Get calls during a refresh wait, but at most one fetch is
-// in-flight at any time.
+// concurrent Get / States calls during a refresh wait, but at most one
+// fetch is in-flight at any time.
 type DrainCache struct {
 	loader DrainLoader
 	ttl    time.Duration
 	now    func() time.Time
 
-	mu       sync.RWMutex
-	snap     map[string]bool
-	fetched  time.Time
+	mu      sync.RWMutex
+	snap    map[string]bool
+	states  map[string]meta.ClusterStateRow
+	fetched time.Time
 }
 
 // NewDrainCache builds a cache with the supplied loader + TTL. ttl == 0
@@ -74,7 +80,32 @@ func (c *DrainCache) Get(ctx context.Context) map[string]bool {
 	if snap != nil && c.now().Sub(fetched) < c.ttl {
 		return snap
 	}
-	return c.refresh(ctx)
+	c.refresh(ctx)
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.snap
+}
+
+// States returns the full cluster_state row snapshot keyed on cluster id.
+// Used by placement.DefaultPolicy to synthesise the default-routing
+// weight policy (US-002 cluster-weights). Same TTL / refresh semantics
+// as Get — the underlying loader is single-flighted across both views.
+// nil cache returns nil.
+func (c *DrainCache) States(ctx context.Context) map[string]meta.ClusterStateRow {
+	if c == nil {
+		return nil
+	}
+	c.mu.RLock()
+	states := c.states
+	fetched := c.fetched
+	c.mu.RUnlock()
+	if states != nil && c.now().Sub(fetched) < c.ttl {
+		return states
+	}
+	c.refresh(ctx)
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.states
 }
 
 // Invalidate forces the next Get to reload. Wired into the drain/
@@ -89,13 +120,13 @@ func (c *DrainCache) Invalidate() {
 	c.mu.Unlock()
 }
 
-func (c *DrainCache) refresh(ctx context.Context) map[string]bool {
+func (c *DrainCache) refresh(ctx context.Context) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	// Re-check under the write lock — a concurrent refresh may have
 	// won the race.
 	if c.snap != nil && c.now().Sub(c.fetched) < c.ttl {
-		return c.snap
+		return
 	}
 	rows, err := c.loader(ctx)
 	if err != nil {
@@ -104,16 +135,21 @@ func (c *DrainCache) refresh(ctx context.Context) map[string]bool {
 		if c.snap == nil {
 			c.snap = map[string]bool{}
 		}
+		if c.states == nil {
+			c.states = map[string]meta.ClusterStateRow{}
+		}
 		c.fetched = c.now()
-		return c.snap
+		return
 	}
 	out := make(map[string]bool, len(rows))
+	states := make(map[string]meta.ClusterStateRow, len(rows))
 	for clusterID, row := range rows {
+		states[clusterID] = row
 		if meta.IsDrainingForWrite(row.State) {
 			out[clusterID] = true
 		}
 	}
 	c.snap = out
+	c.states = states
 	c.fetched = c.now()
-	return out
 }

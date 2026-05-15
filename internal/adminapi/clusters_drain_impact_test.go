@@ -154,7 +154,7 @@ func TestClusterDrainImpact_CategorizesAndSorts(t *testing.T) {
 func TestClusterDrainImpact_RefusesEvacuatingState(t *testing.T) {
 	s := newTestServer()
 	s.KnownClusters = map[string]struct{}{"c1": {}}
-	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate); err != nil {
+	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate, 0); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	rr := putAdmin(t, s, "alice", http.MethodGet, "/admin/v1/clusters/c1/drain-impact", nil)
@@ -173,7 +173,7 @@ func TestClusterDrainImpact_RefusesEvacuatingState(t *testing.T) {
 func TestClusterDrainImpact_AllowsDrainingReadonlyState(t *testing.T) {
 	s := newTestServer()
 	s.KnownClusters = map[string]struct{}{"c1": {}, "c2": {}}
-	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateDrainingReadonly, meta.ClusterModeReadonly); err != nil {
+	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateDrainingReadonly, meta.ClusterModeReadonly, 0); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	seedImpactBucket(t, s, "b1", "alice", map[string]int{"c1": 1, "c2": 1}, "c1", 2)

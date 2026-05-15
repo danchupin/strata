@@ -281,22 +281,29 @@ components:
 
     ClusterStateEntry:
       type: object
-      required: [id, state, mode]
+      required: [id, state, mode, weight]
       description: |
         One row in the GET /clusters response (US-006 placement-rebalance;
-        `mode` added US-001 drain-transparency). `state` is one of
-        "live" / "draining_readonly" / "evacuating" / "removed";
-        `mode` is "readonly" for draining_readonly, "evacuate" for
-        evacuating, "" otherwise. `backend` is "rados" or "s3" (when
+        `mode` added US-001 drain-transparency; `weight` + `pending`
+        state added US-001 cluster-weights). `state` is one of
+        "pending" / "live" / "draining_readonly" / "evacuating" /
+        "removed"; `mode` is "readonly" for draining_readonly,
+        "evacuate" for evacuating, "" otherwise. `weight` is the
+        per-cluster default-routing share (0..100); reported as 0 for
+        every state except live. `backend` is "rados" or "s3" (when
         known).
       properties:
         id: { type: string }
         state:
           type: string
-          enum: [live, draining_readonly, evacuating, removed]
+          enum: [pending, live, draining_readonly, evacuating, removed]
         mode:
           type: string
           enum: ["", readonly, evacuate]
+        weight:
+          type: integer
+          minimum: 0
+          maximum: 100
         backend: { type: string }
 
     DrainRequest:
@@ -341,7 +348,7 @@ components:
 
     ClusterDrainProgress:
       type: object
-      required: [state, mode]
+      required: [state, mode, weight]
       description: |
         Per-draining-cluster progress snapshot returned by
         GET /clusters/{id}/drain-progress (US-003 drain-lifecycle;
@@ -357,10 +364,19 @@ components:
       properties:
         state:
           type: string
-          enum: [live, draining_readonly, evacuating, removed]
+          enum: [pending, live, draining_readonly, evacuating, removed]
         mode:
           type: string
           enum: ["", readonly, evacuate]
+        weight:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: |
+            Per-cluster default-routing weight (0..100). Mirrors the
+            stored value verbatim (no live-state masking, unlike the
+            /clusters list endpoint) so operators can see what was set
+            even on a draining cluster (US-001 cluster-weights).
         chunks_on_cluster:
           type: integer
           format: int64
@@ -915,6 +931,81 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/InvalidTransitionError' }
+
+  /clusters/{id}/activate:
+    post:
+      summary: Promote pending cluster to live with initial weight (US-001 cluster-weights)
+      operationId: activateCluster
+      description: |
+        Flips the cluster_state row from `pending` to `live` with the
+        operator-supplied default-routing weight (0..100). Returns 409
+        Conflict when state != pending; 400 BadRequest when weight is
+        outside [0, 100]. The shared in-process drain/state cache
+        invalidates synchronously so the freshly-live cluster picks up
+        nil-policy bucket PUTs on the next request.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [weight]
+              properties:
+                weight:
+                  type: integer
+                  minimum: 0
+                  maximum: 100
+      responses:
+        '204':
+          description: Cluster activated.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Cluster is not in pending state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /clusters/{id}/weight:
+    put:
+      summary: Adjust default-routing weight on a live cluster (US-001 cluster-weights)
+      operationId: updateClusterWeight
+      description: |
+        Updates the per-cluster default-routing weight while the
+        cluster is live. Returns 409 Conflict when state != live; 400
+        BadRequest when weight is outside [0, 100]. Cache invalidates
+        synchronously so operator drags propagate to routing within
+        seconds.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [weight]
+              properties:
+                weight:
+                  type: integer
+                  minimum: 0
+                  maximum: 100
+      responses:
+        '204':
+          description: Weight updated.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Cluster is not in live state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /clusters/{id}/rebalance-progress:
     get:

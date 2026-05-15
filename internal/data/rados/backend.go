@@ -178,15 +178,27 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 		return nil, err
 	}
 	// Placement routing (US-002): per-chunk hash-mod stable picker over
-	// data.WithPlacement(ctx). Empty/nil policy falls back to spec.Cluster.
+	// data.WithPlacement(ctx). Two-layer policy (US-002 cluster-weights):
+	//   1. bucket.Placement (data.PlacementFromContext) wins outright.
+	//   2. Else if the class has an explicit `@cluster` pin
+	//      (spec.ClusterPinned), route to spec.Cluster — class env wins
+	//      over default-routing synthesis.
+	//   3. Else use the synthesised default-routing policy from
+	//      cluster.weight (data.DefaultPlacementFromContext).
+	//   4. Else fall back to spec.Cluster.
 	// Pool + namespace inherit from the class spec — operators are expected
 	// to use the same pool layout across clusters within one class.
-	policy, _ := data.PlacementFromContext(ctx)
+	bucketPolicy, _ := data.PlacementFromContext(ctx)
+	defaultPolicy, _ := data.DefaultPlacementFromContext(ctx)
 	bucketID, _ := data.BucketIDFromContext(ctx)
 	objKey, _ := data.ObjectKeyFromContext(ctx)
 	draining, _ := data.DrainingClustersFromContext(ctx)
+	activePolicy := bucketPolicy
+	if activePolicy == nil && !spec.ClusterPinned {
+		activePolicy = defaultPolicy
+	}
 	pickCluster := func(idx int) (string, error) {
-		picked := placement.PickClusterExcluding(bucketID, objKey, idx, policy, draining)
+		picked := placement.PickClusterExcluding(bucketID, objKey, idx, activePolicy, draining)
 		if picked == "" {
 			if draining[spec.Cluster] {
 				return "", data.NewDrainRefusedError(spec.Cluster)

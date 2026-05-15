@@ -65,6 +65,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"BucketPlacementRoundTrip", caseBucketPlacement},
 		{"ClusterStateRoundTrip", caseClusterState},
 		{"ClusterStateModes", caseClusterStateModes},
+		{"ClusterStateWeights", caseClusterStateWeights},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2600,14 +2601,14 @@ func caseClusterState(t *testing.T, s meta.Store) {
 		t.Fatalf("list empty: got=%v err=%v", all, err)
 	}
 
-	if err := s.SetClusterState(ctx, "c1", meta.ClusterStateDrainingReadonly, meta.ClusterModeReadonly); err != nil {
+	if err := s.SetClusterState(ctx, "c1", meta.ClusterStateDrainingReadonly, meta.ClusterModeReadonly, 0); err != nil {
 		t.Fatalf("set draining_readonly: %v", err)
 	}
 	row, ok, err = s.GetClusterState(ctx, "c1")
 	if err != nil || !ok || row.State != meta.ClusterStateDrainingReadonly || row.Mode != meta.ClusterModeReadonly {
 		t.Fatalf("get after set: got=(%+v,%v,%v)", row, ok, err)
 	}
-	if err := s.SetClusterState(ctx, "c2", meta.ClusterStateRemoved, ""); err != nil {
+	if err := s.SetClusterState(ctx, "c2", meta.ClusterStateRemoved, "", 0); err != nil {
 		t.Fatalf("set removed: %v", err)
 	}
 	all, err = s.ListClusterStates(ctx)
@@ -2621,7 +2622,7 @@ func caseClusterState(t *testing.T, s meta.Store) {
 		t.Fatalf("list c2: got=%+v", all["c2"])
 	}
 
-	if err := s.SetClusterState(ctx, "c1", meta.ClusterStateLive, ""); err != nil {
+	if err := s.SetClusterState(ctx, "c1", meta.ClusterStateLive, "", 0); err != nil {
 		t.Fatalf("set live: %v", err)
 	}
 	row, ok, err = s.GetClusterState(ctx, "c1")
@@ -2647,11 +2648,11 @@ func caseClusterState(t *testing.T, s meta.Store) {
 		{"alive", ""},
 	}
 	for _, v := range bad {
-		if err := s.SetClusterState(ctx, "c1", v.state, v.mode); err != meta.ErrInvalidClusterState {
+		if err := s.SetClusterState(ctx, "c1", v.state, v.mode, 0); err != meta.ErrInvalidClusterState {
 			t.Errorf("validate state %q: got %v want ErrInvalidClusterState", v.state, err)
 		}
 	}
-	if err := s.SetClusterState(ctx, "", meta.ClusterStateDrainingReadonly, meta.ClusterModeReadonly); err != meta.ErrUnknownCluster {
+	if err := s.SetClusterState(ctx, "", meta.ClusterStateDrainingReadonly, meta.ClusterModeReadonly, 0); err != meta.ErrUnknownCluster {
 		t.Errorf("empty cluster id: got %v want ErrUnknownCluster", err)
 	}
 }
@@ -2672,7 +2673,7 @@ func caseClusterStateModes(t *testing.T, s meta.Store) {
 		{meta.ClusterStateRemoved, ""},
 	}
 	for _, c := range legal {
-		if err := s.SetClusterState(ctx, "c-"+c.state, c.state, c.mode); err != nil {
+		if err := s.SetClusterState(ctx, "c-"+c.state, c.state, c.mode, 0); err != nil {
 			t.Fatalf("set legal (%q,%q): %v", c.state, c.mode, err)
 		}
 		row, ok, err := s.GetClusterState(ctx, "c-"+c.state)
@@ -2699,7 +2700,7 @@ func caseClusterStateModes(t *testing.T, s meta.Store) {
 		{"", meta.ClusterModeReadonly, meta.ErrInvalidClusterState},
 	}
 	for _, c := range illegal {
-		if err := s.SetClusterState(ctx, "c-illegal", c.state, c.mode); err != c.wantErr {
+		if err := s.SetClusterState(ctx, "c-illegal", c.state, c.mode, 0); err != c.wantErr {
 			t.Errorf("illegal (%q,%q): got=%v want=%v", c.state, c.mode, err, c.wantErr)
 		}
 	}
@@ -2708,7 +2709,7 @@ func caseClusterStateModes(t *testing.T, s meta.Store) {
 	// the legacy parity branch of ValidateClusterStateMode — and verify
 	// the first read migrates it to (evacuating, evacuate) and writes
 	// the new shape back so the second read sees the new shape directly.
-	if err := s.SetClusterState(ctx, "legacy", meta.ClusterStateDraining, ""); err != nil {
+	if err := s.SetClusterState(ctx, "legacy", meta.ClusterStateDraining, "", 0); err != nil {
 		t.Fatalf("plant legacy: %v", err)
 	}
 	row, ok, err := s.GetClusterState(ctx, "legacy")
@@ -2734,7 +2735,7 @@ func caseClusterStateModes(t *testing.T, s meta.Store) {
 	}
 
 	// Plant another legacy row and exercise the List-side migration path.
-	if err := s.SetClusterState(ctx, "legacy2", meta.ClusterStateDraining, ""); err != nil {
+	if err := s.SetClusterState(ctx, "legacy2", meta.ClusterStateDraining, "", 0); err != nil {
 		t.Fatalf("plant legacy2: %v", err)
 	}
 	listed, err := s.ListClusterStates(ctx)
@@ -2748,6 +2749,84 @@ func caseClusterStateModes(t *testing.T, s meta.Store) {
 	row, ok, err = s.GetClusterState(ctx, "legacy2")
 	if err != nil || !ok || row.State != meta.ClusterStateEvacuating {
 		t.Fatalf("re-read legacy2: got=(%+v,%v,%v)", row, ok, err)
+	}
+}
+
+// caseClusterStateWeights exercises the per-cluster weight field +
+// pending-state machinery added in US-001 cluster-weights: legal weight
+// values round-trip; out-of-range weights reject; pending state pairs
+// only with empty mode; legal-state-with-weight transitions persist;
+// activate (pending → live + weight) round-trips; legacy two-segment
+// rows decode with weight=0.
+func caseClusterStateWeights(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+
+	// Legal pending state (weight defaults to 0).
+	if err := s.SetClusterState(ctx, "p1", meta.ClusterStatePending, "", 0); err != nil {
+		t.Fatalf("set pending: %v", err)
+	}
+	row, ok, err := s.GetClusterState(ctx, "p1")
+	if err != nil || !ok || row.State != meta.ClusterStatePending || row.Weight != 0 {
+		t.Fatalf("pending round-trip: got=(%+v,%v,%v)", row, ok, err)
+	}
+
+	// Pending + non-empty mode rejected.
+	if err := s.SetClusterState(ctx, "p2", meta.ClusterStatePending, meta.ClusterModeReadonly, 0); err != meta.ErrInvalidClusterMode {
+		t.Errorf("pending + readonly: got %v want ErrInvalidClusterMode", err)
+	}
+
+	// Activate flow: pending → live with weight.
+	if err := s.SetClusterState(ctx, "p1", meta.ClusterStateLive, "", 25); err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	row, _, _ = s.GetClusterState(ctx, "p1")
+	if row.State != meta.ClusterStateLive || row.Weight != 25 {
+		t.Errorf("post-activate: got=%+v want=(live,25)", row)
+	}
+
+	// Weight round-trips across legal endpoints.
+	for _, w := range []int{0, 1, 50, 99, 100} {
+		if err := s.SetClusterState(ctx, "wtest", meta.ClusterStateLive, "", w); err != nil {
+			t.Fatalf("set weight=%d: %v", w, err)
+		}
+		row, _, _ = s.GetClusterState(ctx, "wtest")
+		if row.Weight != w {
+			t.Errorf("weight=%d round-trip: got=%d", w, row.Weight)
+		}
+	}
+
+	// Out-of-range weights rejected.
+	for _, w := range []int{-1, 101, 1000, -100} {
+		if err := s.SetClusterState(ctx, "wbad", meta.ClusterStateLive, "", w); err != meta.ErrInvalidClusterWeight {
+			t.Errorf("weight=%d: got %v want ErrInvalidClusterWeight", w, err)
+		}
+	}
+
+	// Weight survives drain transitions.
+	if err := s.SetClusterState(ctx, "drainme", meta.ClusterStateLive, "", 60); err != nil {
+		t.Fatalf("seed live: %v", err)
+	}
+	if err := s.SetClusterState(ctx, "drainme", meta.ClusterStateDrainingReadonly, meta.ClusterModeReadonly, 60); err != nil {
+		t.Fatalf("drain preserves weight: %v", err)
+	}
+	row, _, _ = s.GetClusterState(ctx, "drainme")
+	if row.State != meta.ClusterStateDrainingReadonly || row.Weight != 60 {
+		t.Errorf("drained row: got=%+v want=(draining_readonly,60)", row)
+	}
+
+	// ListClusterStates returns weight per row.
+	all, err := s.ListClusterStates(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if all["p1"].Weight != 25 || all["p1"].State != meta.ClusterStateLive {
+		t.Errorf("list p1: %+v", all["p1"])
+	}
+	if all["wtest"].Weight != 100 {
+		t.Errorf("list wtest: %+v", all["wtest"])
+	}
+	if all["drainme"].Weight != 60 {
+		t.Errorf("list drainme: %+v", all["drainme"])
 	}
 }
 

@@ -414,6 +414,7 @@ var alterStatements = []string{
 	`ALTER TABLE audit_log ADD user_agent text`,
 	`ALTER TABLE audit_log ADD total_time_ms int`,
 	`ALTER TABLE cluster_state ADD mode text`,
+	`ALTER TABLE cluster_state ADD weight int`,
 }
 
 func isColumnAlreadyExists(err error) bool {
