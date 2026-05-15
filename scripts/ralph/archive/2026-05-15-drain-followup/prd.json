@@ -1,0 +1,143 @@
+{
+  "project": "Strata",
+  "branchName": "ralph/drain-followup",
+  "description": "Drain follow-up cleanup. Closes 4 ROADMAP entries surfaced post drain-cleanup merge: P3 Trace browser filter/search; P2 UI confusion chip+button; P2 Cassandra multipart probe no-op; P3 ALLOW FILTERING denormalize. Folds the stale ralph/trace-filter cycle prep into this larger cycle. Pre-cycle State Truth Tables + Cache Invalidation Ledger + Safety Claims Preconditions sections in PRD per feedback_cycle_end_to_end.md items 8-12 discipline.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Server-side filter query params on /admin/v1/diagnostics/traces",
+      "description": "As a developer, I need the admin diagnostics endpoint to accept filter query params and apply them in-memory before pagination so the UI can narrow the list without fetching everything.",
+      "acceptanceCriteria": [
+        "Query params on `GET /admin/v1/diagnostics/traces`: `?method=` (one of PUT, GET, DELETE, POST, HEAD, OPTIONS, PATCH; case-insensitive), `?status=` (Error|OK), `?path_substr=` (free-form substring, max 256 chars), `?path=` (alias for path_substr for URL brevity), `?min_duration_ms=int`, `?max_duration_ms=int`",
+        "Empty/missing params = no filter on that axis (backwards compat preserved)",
+        "Invalid values return `400 BadRequest` with `code=\"InvalidFilter\"` + descriptive message (e.g. `\"method must be one of PUT, GET, DELETE, POST, HEAD, OPTIONS, PATCH\"`)",
+        "When both `min_duration_ms` and `max_duration_ms` provided, `min > max` → 400 InvalidFilter",
+        "`internal/otel/ringbuf.RingBuffer.Filter(opts FilterOpts) []TraceSummary` applies filter in-memory before pagination",
+        "Filter logic: method matches root_name HTTP-method prefix (e.g. root_name `\"PUT /bucket/key\"` matches `method=PUT`); status matches `summary.Status` exact; path_substr matches `strings.Contains(strings.ToLower(root_name), strings.ToLower(query))`; min/max duration apply to `summary.DurationMs`",
+        "Total in response = filtered count (so pagination cursor walks filtered set, not full ringbuf)",
+        "OpenAPI spec updated with new query params (each with description + enum/range) + 400 response shape",
+        "Audit row preserved: `admin:GetDiagnosticsTraces`",
+        "Unit tests: each filter param independently + combinations + invalid values + min>max",
+        "Unit test: filter applied BEFORE pagination (total in response = filtered count, not full ringbuf size)",
+        "Integration test: 20 mixed traces (5 GET success, 5 PUT success, 5 PUT error, 5 DELETE error) → query with various combos → assert correct subset",
+        "`go vet ./...` passes",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "RingBuffer.Filter(opts) added; handler parses method/status/path[_substr]/min/max with 400 InvalidFilter on bad values + min>max; total reflects filtered count. OpenAPI updated. Unit + handler tests cover each axis, combinations, invalid values, and filter-before-pagination."
+    },
+    {
+      "id": "US-002",
+      "title": "UI filter row in <RecentTracesPanel> + URL persistence",
+      "description": "As an operator, I want a filter row above recent traces with method/status/path/duration controls and URL-persistent state so I can find a specific request fast and share the view.",
+      "acceptanceCriteria": [
+        "New filter row above the trace table in `web/src/components/diagnostics/RecentTracesPanel.tsx`: Method `<Select>` (All/PUT/GET/DELETE/POST/HEAD/OPTIONS/PATCH; default All); Status `<Select>` (All/Error/OK; default All); Path substring `<Input type=\"search\">` placeholder \"Filter by path (e.g. demo-cephb)\" debounced 250ms; Min duration ms `<Input type=\"number\">`; \"Clear filters\" button resetting all defaults + clearing URL",
+        "Filter state synced to URL search params via react-router `useSearchParams`: `?method=PUT&status=Error&path=demo-cephb&min_duration_ms=100`; bookmark / share / browser back-forward work",
+        "Initial mount reads URL params → applies as initial filter state",
+        "Each filter change updates URL via `setSearchParams` AND triggers refetch via TanStack Query key including filter params",
+        "Empty-result state: `No traces match the current filters. Widen filters or click Clear.`",
+        "Existing Sort by Started/Duration dropdown preserved",
+        "Existing sessionStorage / localStorage history panel below live list unaffected",
+        "Reuse existing `<Select>`, `<Input>`, `<Button>` primitives",
+        "Bundle size delta ≤ 3 KiB gzipped",
+        "Playwright spec `web/e2e/trace-filter.spec.ts` covers: navigate `/diagnostics/traces?method=PUT` → only PUT traces shown; type path filter → debounced 250ms; Clear → URL clean + defaults; URL persistence via browser back/forward",
+        "Unit test: empty-filter state → no URL params written; setting filter → URL updated; reading URL on mount → state initialised",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "Filter row with Method/Status Selects + path Input (debounced 250ms) + min-duration number Input + Clear button shipped above the trace table. URL persistence via react-router useSearchParams; pushState (not replace) so browser back/forward steps through filter history. Split state: filter (committed) + pathInput (typed) + debouncedPathInput effect-commit, so URL→state external nav (back/forward, paste) is immediate while typing stays debounced. Empty-filter URL writes no params (backwards compat). API client + queryKeys extended with optional RecentTracesQuery. Filtered-empty state surfaces helper text. node:test unit tests cover URL <-> filter round-trip + every axis + 18 cases. Playwright spec web/e2e/trace-filter.spec.ts covers initial URL nav, debounce, Clear, back/forward; not run locally (SSH tunnel holds :9999) — runs in CI + US-006 smoke."
+    },
+    {
+      "id": "US-003",
+      "title": "UI clarity — rename 'Cancel deregister prep' + chip tooltip + visual hierarchy",
+      "description": "As an operator, I want the cluster card after full evacuation to make clear what the primary action is (env edit + restart) and what the escape hatch is (restore to live) so the chip and button do not contradict each other.",
+      "acceptanceCriteria": [
+        "`web/src/components/storage/ClustersSubsection.tsx` button when `state=evacuating + chunks=0 + deregister_ready=true`: label `Cancel deregister prep` → `Restore to live (cancel evacuation)`",
+        "Button styling: `variant=\"outline\" size=\"sm\"` (reduces visual weight vs primary actions)",
+        "`<DrainProgressBar>` green chip `✓ Ready to deregister` gains hover tooltip: `Edit STRATA_RADOS_CLUSTERS env to remove this cluster, then rolling restart. See operator runbook for deregister procedure.`",
+        "Card layout: chip rendered ABOVE the action button (vertical stack), not adjacent",
+        "`<ConfirmUndrainEvacuationModal>` (existing typed-confirm modal for the Restore action) body text clarified: `Moved chunks remain on target clusters; no rollback. Cluster will accept writes again.`",
+        "Playwright UI test asserts new label + tooltip text + chip-above-button layout",
+        "Bundle size delta ≤ 1 KiB gzipped",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "Button label `Cancel deregister prep` → `Restore to live (cancel evacuation)`; variant flipped `destructive` → `outline` (testid preserved so drain-cleanup.spec.ts keeps working). Green chip tooltip text on `dp-dereg-ready` rewritten to PRD copy. `ConfirmUndrainEvacuationModal` body shortened to `Moved chunks remain on target clusters; no rollback. Cluster will accept writes again.` Chip-above-button layout already held (DrainProgressBar renders above the bottom action row in CardContent); covered by a Playwright boundingBox assertion. New spec `web/e2e/drain-followup.spec.ts` covers label + tooltip + chip-above-button. Typecheck + build + unit tests pass; Playwright not run locally (port 9999 busy)."
+    },
+    {
+      "id": "US-004",
+      "title": "Persist BackendUploadID.Cluster on Cassandra multipart_uploads + probe via WHERE cluster=?",
+      "description": "As a developer, I need Cassandra `ListMultipartUploadsByCluster` to return the real count of in-flight multipart uploads on a cluster so the deregister_ready safety AND is fully enforced on Cassandra deploys.",
+      "acceptanceCriteria": [
+        "`ALTER TABLE multipart_uploads ADD cluster text` (schema-additive — idempotent via `alterStatements` helper that swallows `column already exists`)",
+        "Multipart Init handler in `internal/meta/cassandra/store.go` captures resolved cluster id from placement picker context + persists via INSERT into the new column",
+        "Existing rows without cluster column: handler tolerates NULL value on read; backfill on first scan via `WHERE cluster IS NULL` → set to `default` (assume legacy single-cluster). Documented as one-time migration note in CLAUDE.md",
+        "`ListMultipartUploadsByCluster` Cassandra impl: `SELECT cluster FROM multipart_uploads WHERE cluster=? LIMIT ? ALLOW FILTERING` (will be replaced by denormalized lookup in US-005 — intermediate state OK for this story)",
+        "TiKV impl: verify multipart handle includes cluster in key prefix (already shipped via placement-rebalance cycle); probe scans by prefix",
+        "Memory impl: already tracks cluster in handle — verify probe returns correct count",
+        "Contract test `caseListMultipartUploadsByCluster` extension in `internal/meta/storetest/contract.go` covers all three backends with same fixture",
+        "Integration test (multi-cluster lab): open multipart Init on cephb → drain cephb evacuate → `ListMultipartUploadsByCluster(cephb, 1)` returns 1 → /drain-progress reports `not_ready_reasons=[open_multipart]` → Complete multipart → probe returns 0 → deregister_ready becomes true (assuming other conditions met)",
+        "`go vet ./...` passes",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": "ALTER TABLE multipart_uploads ADD cluster text wired via alterStatements (idempotent). Cassandra CreateMultipartUpload extracts the leading cluster id off mu.BackendUploadID via clusterFromBackendUploadID() and persists into the new column; empty handle → NULL. ListMultipartUploadsByCluster Cassandra impl uses SELECT cluster FROM multipart_uploads WHERE cluster=? LIMIT ? ALLOW FILTERING (US-005 will denormalize). TiKV multipartUploadRow gained BackendUploadID JSON field; ListMultipartUploadsByCluster walks every bucket's multipart prefix and filters by handle prefix. Memory backend was already correct. Contract test caseListMultipartUploadsByCluster exercises 2/1/0 split across cl-a/cl-b/empty + chunk-based no-match + empty clusterID. Pre-US-004 Cassandra rows have NULL cluster and are tolerated on read (no backfill required). NULL never matches the WHERE clause."
+    },
+    {
+      "id": "US-005",
+      "title": "ALLOW FILTERING denormalize for GC + multipart probes",
+      "description": "As a developer, I need the GC queue + multipart probes to use partitioned lookup tables instead of ALLOW FILTERING so the drain hot path does not trigger Cassandra antipattern.",
+      "acceptanceCriteria": [
+        "New Cassandra tables (idempotent CREATE TABLE IF NOT EXISTS via `tableDDL`): `gc_entries_by_cluster (cluster text, region text, enqueued_at timeuuid, oid text, PRIMARY KEY ((cluster), region, enqueued_at, oid))`; `multipart_uploads_by_cluster (cluster text, bucket_id uuid, key text, upload_id text, PRIMARY KEY ((cluster), bucket_id, key, upload_id))`",
+        "Dual-write maintenance: `EnqueueChunkDeletion` writes BOTH `gc_entries_v2` AND `gc_entries_by_cluster`; `AckGCEntry` deletes from BOTH (idempotent); Multipart Init writes BOTH `multipart_uploads` AND `multipart_uploads_by_cluster`; Multipart Complete + Abort delete from BOTH",
+        "`ListChunkDeletionsByCluster` Cassandra impl: `SELECT cluster FROM gc_entries_by_cluster WHERE cluster=? LIMIT ?` — no ALLOW FILTERING",
+        "`ListMultipartUploadsByCluster` Cassandra impl: `SELECT cluster FROM multipart_uploads_by_cluster WHERE cluster=? LIMIT ?` — replaces the US-004 ALLOW FILTERING query",
+        "Lazy migration on read of legacy `gc_entries_v2` + `multipart_uploads`: dual-write to lookup table if missing (best-effort, log on failure but don't fail the read)",
+        "One-shot reconcile worker at boot: scans full legacy tables once via Cassandra paging, writes missing lookup rows; logs per-1000-rows progress for large tables + final `cluster reconcile: gc_entries=<N>, multipart_uploads=<M>, written_missing=<K>` summary; idempotent (skips already-present lookup rows). Wired in `internal/serverapp` boot path; runs once per process.",
+        "Unit + integration tests: probes hit `_by_cluster` table (asserted via query log or instrumented mock); dual-write keeps both tables consistent through random churn (insert + delete + re-insert sequences)",
+        "Memory + TiKV backends unchanged (they don't suffer ALLOW FILTERING) — verify their probes still pass after the change",
+        "Docs note in operator runbook: upgrading operators need the one-shot reconcile to populate lookup tables; reconcile runs automatically at next gateway boot; large tables (>1M rows) may take minutes",
+        "`go vet ./...` passes",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": "Two new tables `gc_entries_by_cluster` + `multipart_uploads_by_cluster` added via tableDDL (idempotent CREATE TABLE IF NOT EXISTS). Dual-write threaded through EnqueueChunkDeletion, AckGCEntry, CreateMultipartUpload, CompleteMultipartUpload, AbortMultipartUpload — empty cluster id (chunk-based uploads + non-cluster GC) skips the lookup write so legacy rows + chunk-based uploads pass through unchanged. ListChunkDeletionsByCluster + ListMultipartUploadsByCluster rewritten to read from the lookup tables — no more ALLOW FILTERING on the drain hot path. New cassandra.Store.ReconcileLookupTables(ctx, logger) walks gc_entries_v2 + multipart_uploads once at process boot, upserting missing rows into the lookup tables; idempotent re-runs are no-op upserts; per-1000-row progress + final summary logged. Wired via type-assertion on metaStore in `internal/serverapp.Run` after ReconcileClusters. Memory + TiKV backends unchanged. Existing contract tests caseChunkDeletionsByCluster + caseListMultipartUploadsByCluster cover the surface and pass against all three backends. CLAUDE.md gotcha updated. `go vet ./...` ✓, `go test ./internal/meta/... ./internal/serverapp/... ./internal/adminapi/...` ✓."
+    },
+    {
+      "id": "US-006",
+      "title": "E2E smoke + Playwright + docs + ROADMAP close-flip (4 entries) + PRD removal",
+      "description": "As an operator and as a future-maintainer, I need every fix validated end-to-end against the multi-cluster lab + documented so I trust the cycle is actually done.",
+      "acceptanceCriteria": [
+        "`scripts/smoke-drain-followup.sh` covers the 16-step walkthrough end-to-end against `docker compose --profile multi-cluster`",
+        "Smoke assertions: trace filter URL persistence (curl with query params returns subset); chip+button layout state-machine via API status; multipart-blocks-deregister flow (open multipart → drain → /drain-progress shows `open_multipart` in `not_ready_reasons` → Abort multipart → deregister_ready flips true); denormalized probes verified via query log absence of `ALLOW FILTERING`",
+        "Script EXITS NON-ZERO on any assertion failure; per-step `echo \"==> Step N: ...\"` lines",
+        "`make smoke-drain-followup` Makefile target wraps the script",
+        "Playwright spec `web/e2e/drain-followup.spec.ts` covers UI half: trace browser filter + URL persistence; cluster card after evacuation with new button label + chip tooltip + chip-above-button layout; multipart-blocks-deregister UI flow",
+        "`docs/site/content/best-practices/placement-rebalance.md` `Drain lifecycle` section updated: chip tooltip semantics + `Restore to live` rename rationale + multipart-blocks-deregister documented + one-shot reconcile note for upgrades",
+        "`docs/site/content/best-practices/web-ui.md` capability matrix gains rows for: Trace browser filter row, Chip-above-button layout, Multipart-blocks-deregister surfacing",
+        "`ROADMAP.md` FOUR entries close-flipped in same commit (P3 trace browser filter, P2 UI confusion chip+button, P2 Cassandra multipart probe no-op, P3 ALLOW FILTERING denormalize) — all to `~~**Px — ...**~~ — **Done.** <one-line summary>. (commit \\`<pending>\\`)`; closing SHA backfilled in follow-up commit on main",
+        "`tasks/prd-drain-followup.md` REMOVED in the same commit (PRD lifecycle rule)",
+        "Manual screenshots: filter row narrowing 200 traces; cluster card with new button label + chip tooltip; drain-progress JSON showing multipart-blocked deregister_ready=false",
+        "`make docs-build` succeeds",
+        "`make vet` succeeds",
+        "`make test` succeeds",
+        "`pnpm run build` succeeds",
+        "`make smoke-drain-followup` succeeds against the running multi-cluster lab",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": "Shipped scripts/smoke-drain-followup.sh (16-step walkthrough, exits 77 on missing lab) + make smoke-drain-followup target. Extended web/e2e/drain-followup.spec.ts with a second test case asserting amber `Not ready — Open multipart upload` chip + green chip absence + Restore-to-live button absence when not_ready_reasons carries open_multipart; trace-filter URL persistence already covered by web/e2e/trace-filter.spec.ts (US-002). docs/site/content/best-practices/placement-rebalance.md gained: (a) `Restore to live (cancel evacuation)` rename rationale + chip tooltip semantics under State-aware action buttons; (b) new `Multipart-blocks-deregister probe` section enumerating the per-backend wire (memory/TiKV/Cassandra) for the no_open_multipart_on_cluster gate; (c) new `Denormalized lookup tables` section documenting gc_entries_by_cluster + multipart_uploads_by_cluster dual-write rule + one-shot reconcile lifecycle for upgrades. docs/site/content/best-practices/web-ui.md capability matrix gained three rows: Trace browser filter row (US-001+002), Chip-above-button vertical layout (US-003), Multipart-blocks-deregister surfacing (US-004+005). ROADMAP.md four entries close-flipped in this commit (P2 chip+button, P2 Cassandra multipart probe, P3 ALLOW FILTERING denormalize, P3 trace browser filter); closing SHA backfilled on main. tasks/prd-drain-followup.md removed per PRD lifecycle rule. Quality gates ✓: make vet, go test ./... (full repo green incl. racetest), pnpm run typecheck, pnpm run build, pnpm run test:unit (54 cases), make docs-build (59 pages). make smoke-drain-followup is invocation-tested (skip-77 path verified; full lab run requires multi-cluster compose profile + matching STRATA_STATIC_CREDENTIALS)."
+    }
+  ]
+}
