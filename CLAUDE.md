@@ -265,6 +265,18 @@ Virtual-hosted-style routing (`internal/s3api/vhost.go`): `STRATA_VHOST_PATTERN`
 original `Host` + `URL.Path`; `Server.ServeHTTP` then strips the prefix from `r.Host` and prepends `/<bucket>` to
 `r.URL.Path` before path-style routing — never rewrite before SigV4 verification or signatures break.
 
+## Single-binary invariant
+
+**ALL functionality lives in one `strata` binary.** No separate `strata-admin` binary going forward — admin commands (rewrap, future one-shot tools) become subcommands of `strata`:
+
+- `strata server` — gateway + workers (existing)
+- `strata admin rewrap` — SSE master-key rotation (currently `strata-admin rewrap`; planned consolidation)
+- `strata admin <future>` — operator one-shots
+
+When adding a new operator-facing CLI feature, do NOT create a new top-level binary. Add it under `cmd/strata/admin/<name>.go` or extend the existing subcommand router. The single-binary shape is intentional — one Docker image, one entrypoint, one set of `--help` outputs, consistent flags + env handling.
+
+Migration of the existing `cmd/strata-admin` into `cmd/strata admin` is tracked as a P2 ROADMAP entry; do not regress by adding a second binary in the meantime.
+
 ## Background workers (cmd/strata/workers)
 
 Workers under `strata server` register via `workers.Register(workers.Worker{Name, Build, SkipLease})` from a

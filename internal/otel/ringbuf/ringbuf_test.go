@@ -5,8 +5,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -225,6 +227,114 @@ func TestRootSpanIDPicksParentless(t *testing.T) {
 	got, _ := rb.GetByRequestID("req-r")
 	if got.Root != sid(0xa).String() {
 		t.Errorf("root = %q want %q", got.Root, sid(0xa).String())
+	}
+}
+
+func makeStubAt(traceB byte, spanB byte, parent trace.SpanID, name, requestID string, start time.Time, dur time.Duration, status codes.Code) tracetest.SpanStub {
+	stub := fakeSpan(tid(traceB), sid(spanB), parent, name, requestID)
+	stub.StartTime = start
+	stub.EndTime = start.Add(dur)
+	if status != codes.Unset {
+		stub.Status.Code = status
+	}
+	return stub
+}
+
+func TestListLRUOrderingAndPagination(t *testing.T) {
+	rb := New()
+	base := time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC)
+
+	// Ingest 5 distinct traces, each one root span. The latest insertion
+	// (trace 5) should land at the LRU front.
+	for i := range 5 {
+		stub := makeStubAt(byte(i+1), 0xa, trace.SpanID{}, "PUT /bkt/key", "req-"+string('a'+rune(i)), base.Add(time.Duration(i)*time.Second), 25*time.Millisecond, codes.Ok)
+		ingest(t, rb, stub)
+	}
+
+	// First page: limit=3, offset=0 — newest 3 first.
+	page := rb.List(3, 0)
+	if len(page) != 3 {
+		t.Fatalf("page len=%d want 3", len(page))
+	}
+	want := []string{tid(5).String(), tid(4).String(), tid(3).String()}
+	for i, p := range page {
+		if p.TraceID != want[i] {
+			t.Errorf("page[%d].trace_id=%q want %q", i, p.TraceID, want[i])
+		}
+	}
+	// Second page: limit=3, offset=3 — older 2 entries (5 traces total).
+	page2 := rb.List(3, 3)
+	if len(page2) != 2 {
+		t.Fatalf("page2 len=%d want 2", len(page2))
+	}
+	want2 := []string{tid(2).String(), tid(1).String()}
+	for i, p := range page2 {
+		if p.TraceID != want2[i] {
+			t.Errorf("page2[%d].trace_id=%q want %q", i, p.TraceID, want2[i])
+		}
+	}
+}
+
+func TestListBoundsAndDefaults(t *testing.T) {
+	rb := New()
+	if got := rb.List(0, 0); got != nil {
+		t.Errorf("limit=0 expected nil, got %v", got)
+	}
+	if got := rb.List(-1, 0); got != nil {
+		t.Errorf("limit<0 expected nil, got %v", got)
+	}
+	stub := fakeSpan(tid(1), sid(0xa), trace.SpanID{}, "PUT /bkt/key", "req-1")
+	ingest(t, rb, stub)
+	// negative offset normalised to 0.
+	if got := rb.List(10, -5); len(got) != 1 {
+		t.Errorf("len=%d want 1", len(got))
+	}
+	// offset beyond total → empty slice (still non-nil; capacity preserved).
+	if got := rb.List(10, 50); len(got) != 0 {
+		t.Errorf("offset>=count expected empty, got %d", len(got))
+	}
+}
+
+func TestListSummaryAggregatesStatusAndDuration(t *testing.T) {
+	rb := New()
+	base := time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC)
+
+	// Trace with two spans: root OK + child Error → summary status=Error.
+	root := makeStubAt(7, 0xa, trace.SpanID{}, "PUT /bkt/key", "req-err", base, 100*time.Millisecond, codes.Ok)
+	child := makeStubAt(7, 0xb, sid(0xa), "data.rados.put", "", base.Add(10*time.Millisecond), 50*time.Millisecond, codes.Error)
+	ingest(t, rb, root)
+	ingest(t, rb, child)
+
+	page := rb.List(10, 0)
+	if len(page) != 1 {
+		t.Fatalf("len=%d want 1", len(page))
+	}
+	got := page[0]
+	if got.Status != "Error" {
+		t.Errorf("status=%q want Error", got.Status)
+	}
+	if got.RootName != "PUT /bkt/key" {
+		t.Errorf("root_name=%q want PUT /bkt/key", got.RootName)
+	}
+	if got.RequestID != "req-err" {
+		t.Errorf("request_id=%q want req-err", got.RequestID)
+	}
+	if got.SpanCount != 2 {
+		t.Errorf("span_count=%d want 2", got.SpanCount)
+	}
+	// duration_ms = (max(end) - min(start)) / 1e6 = 100ms.
+	if got.DurationMs != 100 {
+		t.Errorf("duration_ms=%d want 100", got.DurationMs)
+	}
+	if got.StartedAtNS != base.UnixNano() {
+		t.Errorf("started_at_ns=%d want %d", got.StartedAtNS, base.UnixNano())
+	}
+}
+
+func TestListEmpty(t *testing.T) {
+	rb := New()
+	if got := rb.List(50, 0); len(got) != 0 {
+		t.Errorf("expected empty list, got %d entries", len(got))
 	}
 }
 

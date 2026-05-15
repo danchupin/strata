@@ -24,7 +24,9 @@ export interface PoolStatus {
   class: string;
   cluster?: string;
   bytes_used: number;
-  object_count: number;
+  // chunk_count is the count of RADOS chunks (up to 4 MiB each), NOT the
+  // count of S3 objects. A 5 MiB S3 object spans two chunks.
+  chunk_count: number;
   num_replicas: number;
   state: string;
 }

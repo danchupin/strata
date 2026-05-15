@@ -19,11 +19,13 @@ interface ClusterRow {
   backend: 'rados' | 's3' | 'memory';
 }
 
-interface BucketRef {
+interface ImpactBucket {
   name: string;
-  weight: number;
+  current_policy: Record<string, number> | null;
+  category: 'migratable' | 'stuck_single_policy' | 'stuck_no_policy';
   chunk_count: number;
   bytes_used: number;
+  suggested_policies: Array<{ label: string; policy: Record<string, number> }> | null;
 }
 
 async function login(page: Page) {
@@ -64,27 +66,33 @@ test.describe('Strata console — drain lifecycle (US-007)', () => {
     let progressChunks = 5;
     let progressBase = 5;
 
-    const refsByCluster: Record<string, BucketRef[]> = {
+    const impactByCluster: Record<string, ImpactBucket[]> = {
       cepha: [
         {
           name: 'demo-split',
-          weight: 1,
+          current_policy: { cepha: 1, cephb: 1 },
+          category: 'migratable',
           chunk_count: 12,
           bytes_used: 256 * 1024,
+          suggested_policies: null,
         },
       ],
       cephb: [
         {
           name: 'demo-split',
-          weight: 1,
+          current_policy: { cepha: 1, cephb: 1 },
+          category: 'migratable',
           chunk_count: 12,
           bytes_used: 256 * 1024,
+          suggested_policies: null,
         },
         {
           name: 'demo-cephb-only',
-          weight: 1,
+          current_policy: { cephb: 1 },
+          category: 'stuck_single_policy',
           chunk_count: 4,
           bytes_used: 64 * 1024,
+          suggested_policies: [{ label: 'Replace draining with cepha', policy: { cepha: 1 } }],
         },
       ],
     };
@@ -175,21 +183,39 @@ test.describe('Strata console — drain lifecycle (US-007)', () => {
       },
     );
 
-    // ── /admin/v1/clusters/{id}/bucket-references ───────────────────
+    // ── /admin/v1/clusters/{id}/drain-impact ────────────────────────
     await page.route(
-      '**/admin/v1/clusters/*/bucket-references**',
+      '**/admin/v1/clusters/*/drain-impact**',
       async (route) => {
+        if (route.request().method() !== 'GET') return route.fallback();
         const url = new URL(route.request().url());
-        const m = url.pathname.match(/\/clusters\/([^/]+)\/bucket-references/);
+        const m = url.pathname.match(/\/clusters\/([^/]+)\/drain-impact/);
         const id = m?.[1] ?? '';
-        const list = refsByCluster[id] ?? [];
+        const list = impactByCluster[id] ?? [];
+        const migratable = list
+          .filter((b) => b.category === 'migratable')
+          .reduce((s, b) => s + b.chunk_count, 0);
+        const stuckSingle = list
+          .filter((b) => b.category === 'stuck_single_policy')
+          .reduce((s, b) => s + b.chunk_count, 0);
+        const stuckNoPolicy = list
+          .filter((b) => b.category === 'stuck_no_policy')
+          .reduce((s, b) => s + b.chunk_count, 0);
         await route.fulfill({
           status: 200,
           contentType: 'application/json',
           body: JSON.stringify({
-            buckets: list,
+            cluster_id: id,
+            current_state:
+              clusters.find((c) => c.id === id)?.state ?? 'live',
+            migratable_chunks: migratable,
+            stuck_single_policy_chunks: stuckSingle,
+            stuck_no_policy_chunks: stuckNoPolicy,
+            total_chunks: migratable + stuckSingle + stuckNoPolicy,
+            by_bucket: list,
             total_buckets: list.length,
             next_offset: null,
+            last_scan_at: new Date().toISOString(),
           }),
         });
       },
@@ -208,7 +234,7 @@ test.describe('Strata console — drain lifecycle (US-007)', () => {
               class: 'STANDARD',
               cluster: 'cepha',
               bytes_used: 1024 * 1024,
-              object_count: 4,
+              chunk_count: 4,
               num_replicas: 3,
               state: 'active+clean',
             },
@@ -217,7 +243,7 @@ test.describe('Strata console — drain lifecycle (US-007)', () => {
               class: 'STANDARD',
               cluster: 'cephb',
               bytes_used: 2 * 1024 * 1024,
-              object_count: 7,
+              chunk_count: 7,
               num_replicas: 3,
               state: 'active+clean',
             },
@@ -292,11 +318,18 @@ test.describe('Strata console — drain lifecycle (US-007)', () => {
       .first();
     await cephbCard.getByRole('button', { name: 'Show affected buckets' }).click();
     const drawer = page.getByRole('dialog').filter({
-      hasText: /Buckets referencing/i,
+      hasText: /Drain impact/i,
     });
     await expect(drawer).toBeVisible({ timeout: 10_000 });
     await expect(drawer.getByText('demo-split')).toBeVisible();
     await expect(drawer.getByText('demo-cephb-only')).toBeVisible();
+    // Categorized sections are present.
+    await expect(drawer.getByTestId('cat-migrating')).toBeVisible();
+    await expect(drawer.getByTestId('cat-stuck-single')).toBeVisible();
+    // Inline bulk-fix CTA renders for the single stuck bucket.
+    await expect(
+      drawer.getByTestId('bucket-references-bulk-fix'),
+    ).toBeVisible();
     await drawer.press('Escape');
     await expect(drawer).toBeHidden({ timeout: 10_000 });
 

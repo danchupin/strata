@@ -147,6 +147,8 @@ export const queryKeys = {
       ['diagnostics', 'slow-queries', { since, minMs, pageToken }] as const,
     trace: (idOrRequestID: string) =>
       ['diagnostics', 'trace', idOrRequestID] as const,
+    recentTraces: (limit: number, offset: number) =>
+      ['diagnostics', 'recent-traces', { limit, offset }] as const,
     hotBuckets: (range: string, step: string) =>
       ['diagnostics', 'hot-buckets', { range, step }] as const,
     hotShards: (bucket: string, range: string, step: string) =>
@@ -171,8 +173,8 @@ export const queryKeys = {
   clusterRebalance: (id: string) => ['clusters', 'rebalance', id] as const,
   clusterDrainProgress: (id: string) =>
     ['clusters', 'drain-progress', id] as const,
-  clusterBucketRefs: (id: string, limit: number, offset: number) =>
-    ['clusters', 'bucket-refs', id, { limit, offset }] as const,
   clusterDrainImpact: (id: string) =>
     ['clusters', 'drain-impact', id] as const,
+  clusterDrainImpactPage: (id: string, limit: number, offset: number) =>
+    ['clusters', 'drain-impact', id, { limit, offset }] as const,
 };

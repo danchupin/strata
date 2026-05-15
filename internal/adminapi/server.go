@@ -445,6 +445,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/v1/audit/stream", s.handleAuditStream)
 	mux.HandleFunc("GET /admin/v1/diagnostics/slow-queries", s.handleDiagnosticsSlowQueries)
 	mux.HandleFunc("GET /admin/v1/diagnostics/trace/{requestID}", s.handleDiagnosticsTrace)
+	mux.HandleFunc("GET /admin/v1/diagnostics/traces", s.handleDiagnosticsTraces)
 	mux.HandleFunc("GET /admin/v1/diagnostics/hot-buckets", s.handleDiagnosticsHotBuckets)
 	mux.HandleFunc("GET /admin/v1/diagnostics/hot-shards/{bucket}", s.handleDiagnosticsHotShards)
 	mux.HandleFunc("GET /admin/v1/diagnostics/node/{nodeID}", s.handleDiagnosticsNode)

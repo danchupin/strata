@@ -242,19 +242,6 @@ function installRoutes(page: Page, state: SpoofState) {
     });
   });
 
-  // ── /admin/v1/clusters/{id}/bucket-references ────────────────────
-  page.route('**/admin/v1/clusters/*/bucket-references**', async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({
-        buckets: [],
-        total_buckets: 0,
-        next_offset: null,
-      }),
-    });
-  });
-
   // ── /admin/v1/storage/data (rados shape so ClustersSubsection mounts) ─
   page.route('**/admin/v1/storage/data', async (route) => {
     await route.fulfill({
@@ -268,7 +255,7 @@ function installRoutes(page: Page, state: SpoofState) {
             class: 'STANDARD',
             cluster: 'cepha',
             bytes_used: 1024 * 1024,
-            object_count: 4,
+            chunk_count: 4,
             num_replicas: 3,
             state: 'active+clean',
           },
@@ -277,7 +264,7 @@ function installRoutes(page: Page, state: SpoofState) {
             class: 'STANDARD',
             cluster: 'cephb',
             bytes_used: 2 * 1024 * 1024,
-            object_count: 7,
+            chunk_count: 7,
             num_replicas: 3,
             state: 'active+clean',
           },

@@ -15,7 +15,7 @@ type poolGroup struct {
 
 // pendingPoolStatus pairs the source group key with the pre-populated
 // row (Name/Class/Cluster filled). The ceph-tagged DataHealth folds in
-// runtime stats (BytesUsed/ObjectCount/State) before pushing the inner
+// runtime stats (BytesUsed/ChunkCount/State) before pushing the inner
 // status into the wire report.
 type pendingPoolStatus struct {
 	group  poolGroup

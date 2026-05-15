@@ -1439,6 +1439,76 @@ func gcOwnedLogicalShards(shardID, shardCount int) []int {
 	return out
 }
 
+// ListChunkDeletionsByCluster counts pending GC queue entries in `region`
+// whose Chunk.Cluster matches clusterID, capped at `limit`. The scan covers
+// both gc_entries_v2 and (while dual-write is on) the legacy gc_queue
+// partition; the result is the cluster count across both shapes.
+//
+// Cluster is not part of the partition key on either table — the scan uses
+// ALLOW FILTERING with LIMIT to push the bounded existence check to the
+// server. limit=1 is the fast existence probe used by drain-progress.
+func (s *Store) ListChunkDeletionsByCluster(ctx context.Context, region, clusterID string, limit int) (int, error) {
+	if limit <= 0 {
+		limit = 1
+	}
+	count := 0
+	iter := s.s.Query(
+		`SELECT 1 FROM gc_entries_v2 WHERE region=? AND cluster=? LIMIT ? ALLOW FILTERING`,
+		region, clusterID, limit,
+	).WithContext(ctx).Iter()
+	var dummy int
+	for iter.Scan(&dummy) {
+		count++
+		if count >= limit {
+			_ = iter.Close()
+			return count, nil
+		}
+	}
+	if err := iter.Close(); err != nil {
+		return count, err
+	}
+	if !s.gcDualWrite {
+		return count, nil
+	}
+	remaining := limit - count
+	if remaining <= 0 {
+		return count, nil
+	}
+	iter = s.s.Query(
+		`SELECT 1 FROM gc_queue WHERE region=? AND cluster=? LIMIT ? ALLOW FILTERING`,
+		region, clusterID, remaining,
+	).WithContext(ctx).Iter()
+	for iter.Scan(&dummy) {
+		count++
+		if count >= limit {
+			break
+		}
+	}
+	if err := iter.Close(); err != nil {
+		return count, err
+	}
+	return count, nil
+}
+
+// ListMultipartUploadsByCluster counts in-flight multipart uploads whose
+// opaque BackendUploadID handle has `clusterID` as its leading component.
+// Cassandra does not currently persist BackendUploadID on multipart_uploads
+// (the column would be additive but is never populated by any code path
+// today), so the scan is effectively a no-op on this backend until the
+// column is wired through. The method is defined for meta.Store interface
+// parity; drain-progress treats a 0 return as "no open multipart blocking
+// dereg" — same as the contract.
+func (s *Store) ListMultipartUploadsByCluster(ctx context.Context, clusterID string, limit int) (int, error) {
+	if limit <= 0 {
+		limit = 1
+	}
+	if clusterID == "" {
+		return 0, nil
+	}
+	// BackendUploadID is not persisted on this backend; nothing matches.
+	return 0, nil
+}
+
 func (s *Store) AckGCEntry(ctx context.Context, region string, e meta.GCEntry) error {
 	if err := s.s.Query(
 		`DELETE FROM gc_entries_v2 WHERE region=? AND shard_id=? AND enqueued_at=? AND oid=?`,

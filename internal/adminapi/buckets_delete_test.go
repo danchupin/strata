@@ -86,6 +86,28 @@ func TestBucketDelete_Empty(t *testing.T) {
 	}
 }
 
+// TestBucketDelete_InvalidatesDrainImpactCache asserts that successful
+// bucket deletion synchronously drops every cached drain-impact scan
+// before returning 204 (US-002 drain-cleanup). A vanished bucket flips
+// its chunks off every preview — failing to invalidate leaves the next
+// /drain-impact GET serving a stale count.
+func TestBucketDelete_InvalidatesDrainImpactCache(t *testing.T) {
+	s := newTestServerWithLocker(t)
+	if _, err := s.Meta.CreateBucket(context.Background(), "todelete", "alice", "STANDARD"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	s.drainImpact().set("c1", drainImpactScan{TotalChunks: 5})
+	req := httptest.NewRequest(http.MethodDelete, "/admin/v1/buckets/todelete", nil)
+	rr := httptest.NewRecorder()
+	s.routes().ServeHTTP(rr, withOwner(req, "alice"))
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if _, ok := s.drainImpact().get("c1"); ok {
+		t.Fatal("cache entry survived DELETE bucket — invalidation missing")
+	}
+}
+
 func TestBucketDelete_NotFound(t *testing.T) {
 	s := newTestServerWithLocker(t)
 	req := httptest.NewRequest(http.MethodDelete, "/admin/v1/buckets/missing", nil)
@@ -176,6 +198,119 @@ func TestBucketForceEmpty_Drains(t *testing.T) {
 	s.routes().ServeHTTP(delRR, withOwner(delReq, "alice"))
 	if delRR.Code != http.StatusNoContent {
 		t.Fatalf("post-drain delete status=%d body=%s", delRR.Code, delRR.Body.String())
+	}
+}
+
+// TestBucketForceEmpty_EnqueuesChunksToGC asserts the force-empty drain
+// goroutine pushes each deleted object's Manifest.Chunks onto the GC queue
+// so the gc worker reclaims the RADOS / S3 footprint (US-004 drain-cleanup).
+// Without enqueue, force-empty leaves orphan chunks on disk.
+func TestBucketForceEmpty_EnqueuesChunksToGC(t *testing.T) {
+	s := newTestServerWithLocker(t)
+	ctx := context.Background()
+	b, err := s.Meta.CreateBucket(ctx, "gcdrain", "alice", "STANDARD")
+	if err != nil {
+		t.Fatalf("seed bucket: %v", err)
+	}
+	wantChunks := map[string][]data.ChunkRef{}
+	for i := 0; i < 3; i++ {
+		key := "obj" + string(rune('a'+i))
+		chunks := []data.ChunkRef{
+			{Cluster: "default", Pool: "p", OID: key + "-c1", Size: 4 << 20},
+			{Cluster: "default", Pool: "p", OID: key + "-c2", Size: 2 << 20},
+		}
+		wantChunks[key] = chunks
+		if err := s.Meta.PutObject(ctx, &meta.Object{
+			BucketID: b.ID,
+			Key:      key,
+			Size:     6 << 20,
+			ETag:     "e",
+			Mtime:    time.Now().UTC(),
+			Manifest: &data.Manifest{Class: "STANDARD", Chunks: chunks},
+		}, false); err != nil {
+			t.Fatalf("put %s: %v", key, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/v1/buckets/gcdrain/force-empty", nil)
+	rr := httptest.NewRecorder()
+	s.routes().ServeHTTP(rr, withOwner(req, "alice"))
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var resp ForceEmptyJobResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	waitForJobState(t, s, resp.JobID, meta.AdminJobStateDone, 5*time.Second)
+
+	entries, err := s.Meta.ListGCEntries(ctx, "test-region", time.Now().Add(time.Hour), 100)
+	if err != nil {
+		t.Fatalf("listgc: %v", err)
+	}
+	totalWant := 0
+	for _, c := range wantChunks {
+		totalWant += len(c)
+	}
+	if len(entries) != totalWant {
+		t.Fatalf("gc entries=%d want %d", len(entries), totalWant)
+	}
+	gotOIDs := map[string]bool{}
+	for _, e := range entries {
+		gotOIDs[e.Chunk.OID] = true
+	}
+	for _, c := range wantChunks {
+		for _, want := range c {
+			if !gotOIDs[want.OID] {
+				t.Errorf("missing oid %q on gc queue", want.OID)
+			}
+		}
+	}
+}
+
+// TestBucketForceEmpty_SkipsEnqueueForZeroChunks asserts that objects
+// carrying a nil/empty Manifest.Chunks slice (delete markers, multipart-
+// abort residue) do not enqueue any GC rows. Otherwise the queue fills
+// with vacuous entries that the gc worker must filter at delete time.
+func TestBucketForceEmpty_SkipsEnqueueForZeroChunks(t *testing.T) {
+	s := newTestServerWithLocker(t)
+	ctx := context.Background()
+	b, err := s.Meta.CreateBucket(ctx, "emptychunks", "alice", "STANDARD")
+	if err != nil {
+		t.Fatalf("seed bucket: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		key := "k" + string(rune('a'+i))
+		if err := s.Meta.PutObject(ctx, &meta.Object{
+			BucketID: b.ID,
+			Key:      key,
+			Size:     0,
+			ETag:     "e",
+			Mtime:    time.Now().UTC(),
+			Manifest: &data.Manifest{Class: "STANDARD"},
+		}, false); err != nil {
+			t.Fatalf("put %s: %v", key, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/v1/buckets/emptychunks/force-empty", nil)
+	rr := httptest.NewRecorder()
+	s.routes().ServeHTTP(rr, withOwner(req, "alice"))
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var resp ForceEmptyJobResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	waitForJobState(t, s, resp.JobID, meta.AdminJobStateDone, 5*time.Second)
+
+	entries, err := s.Meta.ListGCEntries(ctx, "test-region", time.Now().Add(time.Hour), 100)
+	if err != nil {
+		t.Fatalf("listgc: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("gc entries=%d want 0 (zero-chunk objects must not enqueue)", len(entries))
 	}
 }
 

@@ -400,9 +400,17 @@ console surface to drive it.
    table. The matrix renders `#clusters × #distinct-pools` rows. A
    `0 B` row means the class is routed elsewhere and drain is a no-op.
 2. **Click "Show affected buckets" on the cluster card.** The
-   `<BucketReferencesDrawer>` lists every bucket whose `Placement`
-   policy carries a non-zero weight on the cluster, sorted desc by
-   chunk_count.
+   `<BucketReferencesDrawer>` now consumes `/drain-impact` (US-001
+   drain-cleanup) and renders the **same three categorized sections**
+   the modal shows — Migrating (green), Stuck — single-policy
+   (amber), Stuck — no policy (amber) — so nil-policy buckets routed
+   via class-env or default-routing are visible. Each per-bucket row
+   carries chunk_count + bytes_used + the top 2 `suggested_policies`
+   labels. If `stuck>0` an inline `Bulk fix N stuck buckets` CTA
+   above the stuck sections opens the same `<BulkPlacementFixDialog>`
+   the modal uses; the drawer refetches on close so post-Apply
+   counts reflect the bulk-fix immediately (US-002 cache
+   invalidation — see Cache invalidation contract below).
 3. **Run the impact analysis.** Inside `<ConfirmDrainModal>` pick the
    `Full evacuate (decommission)` radio — the modal fetches
    `GET /admin/v1/clusters/<id>/drain-impact` and renders three
@@ -454,9 +462,26 @@ The console flow per cluster, mode-specific:
    counters. ETA is derived from
    `rate(strata_rebalance_chunks_moved_total{from=<id>}[5m])` and
    appears only when migratable>0.
-5. When `chunks_on_cluster` transitions `>0 → 0` the bar surfaces an
-   emerald `✓ Ready to deregister (env edit + restart)` chip; the
-   rebalance worker logs INFO `drain complete`, writes a
+5. When `chunks_on_cluster` transitions `>0 → 0` the bar evaluates
+   the **deregister-ready preconditions** (US-006 drain-cleanup) —
+   `deregister_ready` flips true ONLY when ALL THREE clear:
+   1. `total_chunks == 0` (manifest scan reports no chunks tagged to
+      the cluster),
+   2. `gc_queue_pending_for_cluster == 0` (no rows in
+      `gc_entries_v2` whose `chunk.Cluster` matches the drained id),
+   3. `no_open_multipart_on_cluster == true` (no in-flight
+      multipart uploads whose `BackendUploadID` carries the
+      drained cluster id as the leading segment).
+   Any unmet condition surfaces in the response's
+   `not_ready_reasons` array using the fixed token vocabulary
+   `chunks_remaining` → `gc_queue_pending` → `open_multipart`. The
+   `<DrainProgressBar>` reads the array and renders an amber
+   `Not ready — <reasons>` chip instead of the emerald
+   `✓ Ready to deregister` chip until every reason clears. The
+   gating prevents the "manifest=0 but GC still has rows / open
+   multipart still on cluster" leak hazard that a naive
+   `total_chunks==0` check missed pre-cycle. Once the chip is
+   emerald the rebalance worker logs INFO `drain complete`, writes a
    `drain.complete` audit row, bumps `strata_drain_complete_total`,
    and best-effort fans an `s3:Drain:Complete` event through every
    sink in `STRATA_NOTIFY_TARGETS`.
@@ -464,6 +489,50 @@ The console flow per cluster, mode-specific:
    `STRATA_RADOS_CLUSTERS` / `STRATA_S3_CLUSTERS` and rolling-restart
    the gateway replicas. There is no admin endpoint that performs the
    deregister — the env shape is the source of truth.
+
+### State-aware action buttons (US-007 drain-cleanup)
+
+The cluster card's bottom-right action slot renders the right button
+for the current (state, chunks_on_cluster, deregister_ready,
+not_ready_reasons) combination — no more accidental Undrain after a
+full evacuation. The truth table:
+
+| state | chunks | deregister_ready | not_ready_reasons | Button |
+| ----- | ------ | ---------------- | ------------------ | ------ |
+| `pending` | — | — | — | `Activate` |
+| `live` | — | — | — | `Drain` |
+| `draining_readonly` | — | — | — | (no button — `<DrainProgressBar>` renders Upgrade + Undrain) |
+| `evacuating` | `>0` | false | — | `Undrain (cancel evacuation)` with confirm modal: "Moved chunks remain on target clusters; no rollback" |
+| `evacuating` | `0` | false | non-empty | `Undrain` **disabled** with tooltip "Cannot undrain while safety probes are pending: <reasons>" |
+| `evacuating` | `0` | true | empty | `Cancel deregister prep` (typed-confirm modal — no Undrain) |
+| `removed` | — | — | — | disabled `Drain` (operator already deregistered) |
+
+`Cancel deregister prep` is the safe-default for the dereg-ready
+state — the operator types the cluster id to arm the modal (mirroring
+`ConfirmDrainModal`), submit issues a plain `POST /undrain`, and the
+toast reads "Cluster restored to live. No chunks restored — migrated
+chunks stay on their target clusters." `Undrain` is intentionally
+hidden in this state so an operator who hovered the cluster after the
+manifest scan zeroed cannot click through to revert hours of
+migration.
+
+### Cache invalidation contract (US-002 drain-cleanup)
+
+`drainImpactCache` holds the categorized scan for 5 minutes by
+default. Bucket placement mutations invalidate the cache
+**synchronously** before returning 200, so the bulk-fix workflow
+completes end-to-end within one HTTP round-trip. Triggers:
+
+| Trigger | Handler | Effect |
+| ------- | ------- | ------ |
+| `PUT /admin/v1/buckets/<name>/placement` | `handleBucketSetPlacement` | `drainImpact().InvalidateAll()` before `WriteHeader(200)` |
+| `DELETE /admin/v1/buckets/<name>/placement` | `handleBucketDeletePlacement` | same |
+| `DELETE /admin/v1/buckets/<name>` (bucket delete) | `handleBucketDelete` | same on success branch only |
+
+Invalidate-all is intentional: placement keys may add or remove
+clusters, so tracking the affected cluster set adds complexity for a
+minor speedup. The next `/drain-impact` call rebuilds the categorized
+scan from scratch and reflects the new policy immediately.
 
 ### Abort / recovery
 
@@ -524,7 +593,14 @@ exit-non-zero on any assertion miss. Run via
 (`docker compose --profile multi-cluster up -d`). The legacy
 `scripts/smoke-drain-lifecycle.sh` still validates the basic flip-to-
 draining contract; the new harness covers mode-picker + impact
-analysis + multipart graceful contract end-to-end.
+analysis + multipart graceful contract end-to-end. A third harness
+`scripts/smoke-drain-cleanup.sh` (`make smoke-drain-cleanup`,
+shipped with US-005 drain-cleanup) walks the 13-step bundle that
+closes the seven ROADMAP follow-ups: drawer 3-category render,
+/drain-impact cache invalidation on placement PUT, Pools `chunk_count`
+rename, admin force-empty GC enqueue, `deregister_ready` 3-condition
+hard-safety, state-aware action buttons, and the Trace Browser
+recent-traces panel.
 
 **Scenario A — Stop-writes drain (maintenance):**
 

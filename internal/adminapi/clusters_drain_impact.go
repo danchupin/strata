@@ -458,3 +458,18 @@ func (c *drainImpactCache) set(clusterID string, payload drainImpactScan) {
 	}
 }
 
+// InvalidateAll drops every cached drainImpactScan entry. Called
+// synchronously by bucket-mutation handlers (PUT/DELETE
+// /admin/v1/buckets/{name}/placement, DELETE
+// /admin/v1/buckets/{name}) before returning 2xx so the next
+// /drain-impact GET reflects the new policy immediately — without
+// waiting out drainImpactCacheTTL. Invalidate-all over per-cluster
+// diff: placement keys may add/remove clusters; tracking the
+// affected set adds complexity for a minor speedup (cache miss only
+// rescans clusters the operator is actively previewing).
+func (c *drainImpactCache) InvalidateAll() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = nil
+}
+

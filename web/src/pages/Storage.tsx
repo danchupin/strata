@@ -483,7 +483,12 @@ function DataTab() {
                     <TableHead>Cluster</TableHead>
                     <TableHead>Class</TableHead>
                     <TableHead className="text-right">Bytes used</TableHead>
-                    <TableHead className="text-right">Objects</TableHead>
+                    <TableHead
+                      className="text-right"
+                      title="RADOS chunk count — large S3 objects span multiple 4 MiB chunks. For S3 object count see BucketDetail."
+                    >
+                      Chunks
+                    </TableHead>
                     <TableHead className="text-right">Replicas</TableHead>
                     <TableHead className="pr-4 sm:pr-6">State</TableHead>
                   </TableRow>
@@ -508,7 +513,7 @@ function DataTab() {
                         {formatBytes(p.bytes_used)}
                       </TableCell>
                       <TableCell className="text-right tabular-nums">
-                        {formatCount(p.object_count)}
+                        {formatCount(p.chunk_count)}
                       </TableCell>
                       <TableCell className="text-right tabular-nums">
                         {p.num_replicas || '—'}

@@ -207,9 +207,19 @@ export interface ClusterDrainProgress {
   last_scan_at: string | null;
   eta_seconds: number | null;
   deregister_ready: boolean | null;
+  // not_ready_reasons surfaces the unmet conditions keeping deregister_ready
+  // false (US-006 drain-cleanup). Tokens: chunks_remaining / gc_queue_pending
+  // / open_multipart. Empty / omitted when deregister_ready is true.
+  not_ready_reasons?: string[];
   by_bucket?: BucketDrainProgressEntry[];
   warnings?: string[];
 }
+
+export const DRAIN_NOT_READY_REASON_LABELS: Record<string, string> = {
+  chunks_remaining: 'chunks remaining',
+  gc_queue_pending: 'GC queue pending',
+  open_multipart: 'open multipart',
+};
 
 export async function fetchClusterDrainProgress(
   id: string,
@@ -225,55 +235,6 @@ export async function fetchClusterDrainProgress(
   }
   const body = (await resp.json()) as ClusterDrainProgress;
   return body;
-}
-
-// BucketReferenceEntry is one row in the bucket-references list returned by
-// GET /admin/v1/clusters/{id}/bucket-references (US-006 drain-lifecycle).
-// chunk_count + bytes_used come from the live bucket_stats counter (not a
-// manifest walk), so they reflect logical objects rather than chunk-on-disk
-// distribution — the drain progress endpoint surfaces the latter.
-export interface BucketReferenceEntry {
-  name: string;
-  weight: number;
-  chunk_count: number;
-  bytes_used: number;
-}
-
-export interface BucketReferencesResponse {
-  buckets: BucketReferenceEntry[];
-  total_buckets: number;
-  next_offset: number | null;
-}
-
-export async function fetchClusterBucketReferences(
-  id: string,
-  limit = 100,
-  offset = 0,
-): Promise<BucketReferencesResponse> {
-  const params = new URLSearchParams();
-  if (limit !== 100) params.set('limit', String(limit));
-  if (offset > 0) params.set('offset', String(offset));
-  const qs = params.toString();
-  const resp = await fetch(
-    `/admin/v1/clusters/${encodeURIComponent(id)}/bucket-references${qs ? `?${qs}` : ''}`,
-    { method: 'GET', credentials: 'same-origin' },
-  );
-  if (!resp.ok) {
-    throw new Error(
-      `cluster ${id} bucket-references: ${resp.status} ${resp.statusText}`,
-    );
-  }
-  const body = (await resp.json()) as BucketReferencesResponse;
-  return {
-    buckets: Array.isArray(body.buckets) ? body.buckets : [],
-    total_buckets: Number.isFinite(body.total_buckets) ? body.total_buckets : 0,
-    next_offset:
-      body.next_offset == null
-        ? null
-        : Number.isFinite(body.next_offset)
-          ? body.next_offset
-          : null,
-  };
 }
 
 // SuggestedPolicy is one operator-facing remediation option returned per

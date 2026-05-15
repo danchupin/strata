@@ -845,6 +845,25 @@ type Store interface {
 
 	EnqueueChunkDeletion(ctx context.Context, region string, chunks []data.ChunkRef) error
 	ListGCEntries(ctx context.Context, region string, before time.Time, limit int) ([]GCEntry, error)
+	// ListChunkDeletionsByCluster returns the count of pending GC queue
+	// entries in `region` whose Chunk.Cluster matches `clusterID`, capped
+	// at `limit`. Used by the drain-progress safety gate (US-006
+	// drain-cleanup) to refuse `deregister_ready=true` while the GC worker
+	// still has chunks to delete on the cluster about to be removed.
+	// limit=1 is the canonical fast existence probe. Backends short-
+	// circuit once the cap is reached.
+	ListChunkDeletionsByCluster(ctx context.Context, region, clusterID string, limit int) (int, error)
+	// ListMultipartUploadsByCluster returns the count of in-flight
+	// multipart uploads whose opaque BackendUploadID handle has the given
+	// cluster id as its leading component
+	// (`<clusterID>\x00<bucket>\x00<key>\x00<uploadID>`). Used by the
+	// drain-progress safety gate (US-006 drain-cleanup) so we never flip
+	// `deregister_ready=true` while an S3-pass-through multipart session
+	// is still bound to the cluster. RADOS / memory chunk-based uploads
+	// leave BackendUploadID empty and do not contribute. limit=1 is the
+	// canonical fast existence probe; backends stop scanning once the
+	// cap is reached.
+	ListMultipartUploadsByCluster(ctx context.Context, clusterID string, limit int) (int, error)
 	// ListGCEntriesShard returns GC entries belonging to the runtime shard
 	// `shardID` of `shardCount` total. An entry belongs when its logical
 	// (1024-wide) ShardID satisfies `entry.ShardID % shardCount == shardID`.

@@ -3,6 +3,7 @@ import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { AlertCircle, AlertTriangle, Loader2 } from 'lucide-react';
 
 import {
+  fetchClusterDrainProgress,
   fetchClusters,
   isDrainingState,
   undrainCluster,
@@ -27,10 +28,16 @@ import { cn } from '@/lib/utils';
 import { ActivateClusterModal } from './ActivateClusterModal';
 import { BucketReferencesDrawer } from './BucketReferencesDrawer';
 import { BulkPlacementFixDialog } from './BulkPlacementFixDialog';
+import { CancelDeregisterPrepModal } from './CancelDeregisterPrepModal';
 import { ConfirmDrainModal } from './ConfirmDrainModal';
+import { ConfirmUndrainEvacuationModal } from './ConfirmUndrainEvacuationModal';
 import { DrainProgressBar } from './DrainProgressBar';
 import { LiveClusterWeightSlider } from './LiveClusterWeightSlider';
 import { RebalanceProgressChip } from './RebalanceProgressChip';
+import {
+  clusterCardAction,
+  undrainDisabledTooltip,
+} from './clusterCardAction';
 
 const CLUSTERS_POLL_MS = 10_000;
 
@@ -199,14 +206,38 @@ function ClusterCard({ cluster, usage }: ClusterCardProps) {
   const [undraining, setUndraining] = useState(false);
   const [bulkFixOpen, setBulkFixOpen] = useState(false);
   const [bulkFixStuck, setBulkFixStuck] = useState<BucketImpactEntry[]>([]);
+  const [cancelPrepOpen, setCancelPrepOpen] = useState(false);
+  const [undrainEvacOpen, setUndrainEvacOpen] = useState(false);
 
   const stateLower = cluster.state.toLowerCase();
-  const isPending = stateLower === 'pending';
   const isLive = stateLower === 'live';
   const isDraining = isDrainingState(cluster.state);
   const isReadonlyDrain = stateLower === 'draining_readonly';
   const supportsFill = cluster.backend.toLowerCase() === 'rados';
   const hasFill = supportsFill && usage?.hasUsage;
+
+  // Share the drain-progress query with DrainProgressBar (same key) so
+  // the migrating-banner can drop when chunks_on_cluster=0 without an
+  // extra round-trip (US-006 drain-cleanup). The same query feeds the
+  // state-aware action button selector (US-007 drain-cleanup).
+  const drainProgressQ = useQuery({
+    queryKey: queryKeys.clusterDrainProgress(cluster.id),
+    queryFn: () => fetchClusterDrainProgress(cluster.id),
+    enabled: isDraining && !isReadonlyDrain,
+    refetchInterval: CLUSTERS_POLL_MS,
+    placeholderData: keepPreviousData,
+    meta: { label: `drain progress ${cluster.id}`, silent: true },
+  });
+  const drainChunks = drainProgressQ.data?.chunks_on_cluster ?? null;
+  const hasChunksToMigrate = drainChunks != null && drainChunks > 0;
+  const deregisterReady = drainProgressQ.data?.deregister_ready === true;
+  const notReadyReasons = drainProgressQ.data?.not_ready_reasons ?? [];
+  const action = clusterCardAction({
+    state: cluster.state,
+    chunks: drainChunks,
+    deregisterReady,
+    notReadyReasons,
+  });
 
   async function handleUndrain() {
     setUndraining(true);
@@ -267,7 +298,7 @@ function ClusterCard({ cluster, usage }: ClusterCardProps) {
             </span>
           )}
         </div>
-        {cluster.backend.toLowerCase() !== 'memory' && !isPending && (
+        {cluster.backend.toLowerCase() !== 'memory' && stateLower !== 'pending' && (
           <RebalanceProgressChip clusterID={cluster.id} />
         )}
         {isLive && (
@@ -283,8 +314,11 @@ function ClusterCard({ cluster, usage }: ClusterCardProps) {
               onUndrain={isReadonlyDrain ? handleUndrain : undefined}
               undraining={undraining}
             />
-            {!isReadonlyDrain && (
-              <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/5 p-2 text-xs text-amber-800 dark:text-amber-300">
+            {!isReadonlyDrain && hasChunksToMigrate && (
+              <div
+                className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/5 p-2 text-xs text-amber-800 dark:text-amber-300"
+                data-testid="cluster-card-migrating-banner"
+              >
                 <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
                 <span>Rebalance worker is migrating chunks off this cluster.</span>
               </div>
@@ -299,42 +333,15 @@ function ClusterCard({ cluster, usage }: ClusterCardProps) {
           >
             Show affected buckets
           </button>
-          {isPending ? (
-            <Button
-              type="button"
-              variant="default"
-              size="sm"
-              onClick={() => setActivateOpen(true)}
-              data-testid="cluster-card-activate"
-            >
-              Activate
-            </Button>
-          ) : isDraining ? (
-            !isReadonlyDrain && (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={handleUndrain}
-                disabled={undraining}
-              >
-                {undraining && (
-                  <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" aria-hidden />
-                )}
-                Undrain
-              </Button>
-            )
-          ) : (
-            <Button
-              type="button"
-              variant="destructive"
-              size="sm"
-              onClick={() => setDrainOpen(true)}
-              disabled={stateLower === 'removed'}
-            >
-              Drain
-            </Button>
-          )}
+          <ActionButton
+            action={action}
+            undraining={undraining}
+            notReadyReasons={notReadyReasons}
+            onActivate={() => setActivateOpen(true)}
+            onDrain={() => setDrainOpen(true)}
+            onUndrainEvacuation={() => setUndrainEvacOpen(true)}
+            onCancelDeregisterPrep={() => setCancelPrepOpen(true)}
+          />
         </div>
       </CardContent>
       <ActivateClusterModal
@@ -362,7 +369,129 @@ function ClusterCard({ cluster, usage }: ClusterCardProps) {
         open={refsOpen}
         onOpenChange={setRefsOpen}
         clusterID={cluster.id}
+        onOpenBulkFix={(stuck) => {
+          setBulkFixStuck(stuck);
+          setBulkFixOpen(true);
+        }}
+      />
+      <CancelDeregisterPrepModal
+        open={cancelPrepOpen}
+        onOpenChange={setCancelPrepOpen}
+        clusterID={cluster.id}
+      />
+      <ConfirmUndrainEvacuationModal
+        open={undrainEvacOpen}
+        onOpenChange={setUndrainEvacOpen}
+        clusterID={cluster.id}
       />
     </Card>
   );
+}
+
+interface ActionButtonProps {
+  action: ReturnType<typeof clusterCardAction>;
+  undraining: boolean;
+  notReadyReasons: string[];
+  onActivate: () => void;
+  onDrain: () => void;
+  onUndrainEvacuation: () => void;
+  onCancelDeregisterPrep: () => void;
+}
+
+// ActionButton renders the bottom-right action button on the cluster
+// card per the State Truth Table (US-007 drain-cleanup). Returns null
+// for the `none` cell — the draining_readonly path delegates Upgrade +
+// Undrain to DrainProgressBar so we don't double-render the controls.
+function ActionButton({
+  action,
+  undraining,
+  notReadyReasons,
+  onActivate,
+  onDrain,
+  onUndrainEvacuation,
+  onCancelDeregisterPrep,
+}: ActionButtonProps) {
+  switch (action) {
+    case 'activate':
+      return (
+        <Button
+          type="button"
+          variant="default"
+          size="sm"
+          onClick={onActivate}
+          data-testid="cluster-card-activate"
+        >
+          Activate
+        </Button>
+      );
+    case 'drain':
+      return (
+        <Button
+          type="button"
+          variant="destructive"
+          size="sm"
+          onClick={onDrain}
+          data-testid="cluster-card-drain"
+        >
+          Drain
+        </Button>
+      );
+    case 'drain-disabled':
+      return (
+        <Button
+          type="button"
+          variant="destructive"
+          size="sm"
+          disabled
+          data-testid="cluster-card-drain-disabled"
+        >
+          Drain
+        </Button>
+      );
+    case 'undrain-confirm-evacuation':
+      return (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={onUndrainEvacuation}
+          disabled={undraining}
+          data-testid="cluster-card-undrain-evacuation"
+        >
+          {undraining && (
+            <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" aria-hidden />
+          )}
+          Undrain (cancel evacuation)
+        </Button>
+      );
+    case 'undrain-disabled-gc':
+      return (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled
+          title={undrainDisabledTooltip(notReadyReasons)}
+          data-testid="cluster-card-undrain-disabled"
+        >
+          Undrain
+        </Button>
+      );
+    case 'cancel-deregister-prep':
+      return (
+        <Button
+          type="button"
+          variant="destructive"
+          size="sm"
+          onClick={onCancelDeregisterPrep}
+          data-testid="cluster-card-cancel-deregister-prep"
+        >
+          Cancel deregister prep
+        </Button>
+      );
+    case 'none':
+      return null;
+    default:
+      return null;
+  }
 }
