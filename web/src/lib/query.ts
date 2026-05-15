@@ -147,8 +147,11 @@ export const queryKeys = {
       ['diagnostics', 'slow-queries', { since, minMs, pageToken }] as const,
     trace: (idOrRequestID: string) =>
       ['diagnostics', 'trace', idOrRequestID] as const,
-    recentTraces: (limit: number, offset: number) =>
-      ['diagnostics', 'recent-traces', { limit, offset }] as const,
+    recentTraces: (
+      limit: number,
+      offset: number,
+      query: Record<string, unknown> = {},
+    ) => ['diagnostics', 'recent-traces', { limit, offset, ...query }] as const,
     hotBuckets: (range: string, step: string) =>
       ['diagnostics', 'hot-buckets', { range, step }] as const,
     hotShards: (bucket: string, range: string, step: string) =>

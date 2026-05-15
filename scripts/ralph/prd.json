@@ -48,8 +48,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Filter row with Method/Status Selects + path Input (debounced 250ms) + min-duration number Input + Clear button shipped above the trace table. URL persistence via react-router useSearchParams; pushState (not replace) so browser back/forward steps through filter history. Split state: filter (committed) + pathInput (typed) + debouncedPathInput effect-commit, so URL→state external nav (back/forward, paste) is immediate while typing stays debounced. Empty-filter URL writes no params (backwards compat). API client + queryKeys extended with optional RecentTracesQuery. Filtered-empty state surfaces helper text. node:test unit tests cover URL <-> filter round-trip + every axis + 18 cases. Playwright spec web/e2e/trace-filter.spec.ts covers initial URL nav, debounce, Clear, back/forward; not run locally (SSH tunnel holds :9999) — runs in CI + US-006 smoke."
     },
     {
       "id": "US-003",

@@ -20,6 +20,23 @@ Cycle: ralph/drain-followup
 - **Verification per UI story** (US-002, US-003): `pnpm run typecheck` + `pnpm run build` + dev-browser verify on lab. Final US-006 gated on `make smoke-drain-followup` against the running lab.
 - **End-to-end discipline** (per `feedback_cycle_end_to_end.md` items 1-12): every story serves at least one walkthrough step from PRD; US-006 smoke covers all 16 walkthrough steps; failed smoke blocks ROADMAP close-flip; State Truth Tables + Cache Invalidation Ledger + Safety Claims Preconditions in PRD demonstrate the discipline retroactively.
 
+## 2026-05-15 — US-002 UI filter row + URL persistence
+- Added filter row above the trace table in `RecentTracesPanel`: Method `<Select>` (All + 7 verbs), Status `<Select>` (All/Error/OK), Path `<Input type=search>` debounced 250ms, Min duration ms `<Input type=number>`, Clear `<Button>`.
+- URL persistence via react-router `useSearchParams` — short-form params (`method`, `status`, `path`, `min_duration_ms`). Initial mount reads URL → filter state; setSearchParams pushes (not replaces) so browser back/forward navigate through filter history; the 250ms path debounce keeps history noise low.
+- Split state — `filter` (committed values, drives query) vs `pathInput` (raw typed value). A useEffect commits the debounced input into filter.path. URL→filter external sync (back/forward, paste) updates BOTH filter and pathInput immediately so the input field never lags the URL.
+- API client `fetchRecentTraces` gains optional `RecentTracesQuery`; `queryKeys.diagnostics.recentTraces` accepts the query so each filter combo gets its own TanStack cache entry. Empty-filter URL writes zero params (backwards compat preserved).
+- Filtered-empty state surfaces `No traces match the current filters. Widen filters or click Clear.` Existing sort dropdown + sessionStorage history (TraceBrowser) untouched.
+- Tests: `web/src/components/diagnostics/__tests__/recent-traces-filter.test.mjs` — 18 node:test cases covering readFilterFromURL / writeFilterToParams / isEmptyFilter / toRecentTracesQuery + round-trip. Playwright spec `web/e2e/trace-filter.spec.ts` — initial URL nav narrows list; debounce keeps server requests low; Clear cleans URL + restores list; back/forward steps through filter history. Wired into `pnpm run test:unit`.
+- Files: `web/src/components/diagnostics/RecentTracesPanel.tsx`, `web/src/api/client.ts`, `web/src/lib/query.ts`, `web/src/components/diagnostics/__tests__/recent-traces-filter.test.mjs`, `web/e2e/trace-filter.spec.ts`, `web/package.json`.
+- Manual browser verification: not run locally — port 9999 held by an SSH tunnel and no dev-browser skill is loaded in this Ralph session. The Playwright spec serves as the e2e gate; runs in CI + US-006 smoke.
+- **Learnings:**
+  - The drain-cleanup spec mocks `/admin/v1/diagnostics/traces**` ignoring query params — backward-compatible filter additions don't break it as long as the panel still mounts with empty filter when URL has no params.
+  - `useSearchParams` `setSearchParams(next)` defaults to push; explicit `{ replace: true }` only when you don't want history navigation. Filter changes here intentionally push so back/forward restores prior filter state.
+  - When syncing URL→state, update both the committed state AND the user-facing input field in lockstep so the operator never sees a 250ms gap between the address bar and the input.
+  - Radix `<Select>` requires non-empty SelectItem values — use a sentinel like `__all__` to model the "no filter" option, then strip it at the boundary.
+  - Pattern lifted from `BucketDetail.tsx` for useSearchParams + useDebounced; reused locally rather than DRY-ing into a shared hook (every page has its own debounce helper today).
+---
+
 ## 2026-05-15 — US-001 Server-side trace filter
 - Added `ringbuf.FilterOpts` + `RingBuffer.Filter(opts)` that walks the LRU in front-to-back order applying method-prefix / status / case-insensitive path-substring / min-max duration_ms; pointer bounds let `0` be a valid explicit value while nil = unbounded.
 - Rewrote `handleDiagnosticsTraces` to parse `method`/`status`/`path`/`path_substr`/`min_duration_ms`/`max_duration_ms` from the query string, return `400 InvalidFilter` on bad enums / non-integer durations / negative durations / min>max / path>256, then filter→paginate. `total` now reports the filtered count so the cursor walks the filtered subset.
