@@ -35,6 +35,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet';
+import { RecentTracesPanel } from '@/components/diagnostics/RecentTracesPanel';
 import { showToast } from '@/lib/toast-store';
 import { cn } from '@/lib/utils';
 
@@ -492,6 +493,10 @@ export function TraceBrowserPage() {
           on a response, or a raw trace id.
         </p>
       </div>
+
+      <RecentTracesPanel
+        onSelect={(id) => navigate(`/diagnostics/trace/${encodeURIComponent(id)}`)}
+      />
 
       <Card>
         <CardHeader>

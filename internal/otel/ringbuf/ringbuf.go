@@ -72,6 +72,21 @@ type Trace struct {
 	Spans     []Span `json:"spans"`
 }
 
+// TraceSummary is the per-trace row returned by RingBuffer.List — enough for
+// the trace browser's recent-list panel to render without paging in every
+// span. Operators click a row to fetch the full Trace via GetByRequestID /
+// GetByTraceID. Field names match the JSON contract used by the admin
+// /diagnostics/traces endpoint.
+type TraceSummary struct {
+	RequestID   string `json:"request_id,omitempty"`
+	TraceID     string `json:"trace_id"`
+	RootName    string `json:"root_name,omitempty"`
+	StartedAtNS int64  `json:"started_at_ns"`
+	DurationMs  int64  `json:"duration_ms"`
+	Status      string `json:"status"`
+	SpanCount   int    `json:"span_count"`
+}
+
 // RingBuffer retains traces in process. Implements sdktrace.SpanProcessor.
 type RingBuffer struct {
 	capBytes int
@@ -283,6 +298,88 @@ func (r *RingBuffer) TraceCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.traces)
+}
+
+// List returns up to `limit` retained traces in LRU order (most-recent
+// first), skipping the first `offset`. Each entry is summarised so the
+// trace browser can render a list view without forcing the operator to
+// fetch every full trace. Thread-safe; bounded by limit + the live trace
+// count, never materialises more than `limit` summaries per call.
+//
+// `limit <= 0` returns nil. `offset < 0` is treated as 0. Callers pick the
+// page size; the admin handler caps it at 200 to bound response cost.
+func (r *RingBuffer) List(limit, offset int) []TraceSummary {
+	if limit <= 0 {
+		return nil
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]TraceSummary, 0, limit)
+	skipped := 0
+	for el := r.lru.Front(); el != nil && len(out) < limit; el = el.Next() {
+		if skipped < offset {
+			skipped++
+			continue
+		}
+		e := el.Value.(*entry)
+		out = append(out, summariseEntry(e))
+	}
+	return out
+}
+
+func summariseEntry(e *entry) TraceSummary {
+	if len(e.spans) == 0 {
+		return TraceSummary{
+			TraceID:   e.traceID.String(),
+			RequestID: e.requestID,
+			Status:    "Unset",
+		}
+	}
+	var (
+		minStart   int64 = e.spans[0].StartNS
+		maxEnd     int64 = e.spans[0].EndNS
+		hasError         = false
+		rootName   string
+		rootStatus string
+	)
+	for _, sp := range e.spans {
+		if sp.StartNS < minStart {
+			minStart = sp.StartNS
+		}
+		if sp.EndNS > maxEnd {
+			maxEnd = sp.EndNS
+		}
+		if sp.Status == "Error" {
+			hasError = true
+		}
+		if sp.Parent == "" && rootName == "" {
+			rootName = sp.Name
+			rootStatus = sp.Status
+		}
+	}
+	status := rootStatus
+	if hasError {
+		status = "Error"
+	}
+	if status == "" {
+		status = "Unset"
+	}
+	durationMs := int64(0)
+	if maxEnd > minStart {
+		durationMs = (maxEnd - minStart) / 1_000_000
+	}
+	return TraceSummary{
+		TraceID:     e.traceID.String(),
+		RequestID:   e.requestID,
+		RootName:    rootName,
+		StartedAtNS: minStart,
+		DurationMs:  durationMs,
+		Status:      status,
+		SpanCount:   len(e.spans),
+	}
 }
 
 // Bytes returns the current bytes-used count. Test-only.

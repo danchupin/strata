@@ -1639,6 +1639,46 @@ export async function fetchTrace(idOrRequestID: string): Promise<TraceDoc | null
   return { ...body, spans: body.spans ?? [] };
 }
 
+// US-008 — Trace browser list view. Wire shape mirrors
+// diagnosticsTracesResponse + ringbuf.TraceSummary
+// (internal/adminapi/diagnostics_traces.go +
+// internal/otel/ringbuf/ringbuf.go). Returned in LRU order — newest first.
+export interface TraceSummary {
+  trace_id: string;
+  request_id?: string;
+  root_name?: string;
+  started_at_ns: number;
+  duration_ms: number;
+  status: 'OK' | 'Error' | 'Unset' | string;
+  span_count: number;
+}
+
+export interface RecentTracesResponse {
+  traces: TraceSummary[];
+  total: number;
+}
+
+// fetchRecentTraces returns the most-recent N retained trace summaries
+// from the in-process ring buffer (US-008). limit caps at 200 server-side;
+// callers can still pass a larger value, the gateway clamps. Throws
+// AdminApiError on RingbufUnavailable so the panel can surface the
+// {code, message} pair (e.g. STRATA_OTEL_RINGBUF=off in dev).
+export async function fetchRecentTraces(
+  limit: number,
+  offset: number,
+): Promise<RecentTracesResponse> {
+  const usp = new URLSearchParams();
+  usp.set('limit', String(limit));
+  if (offset > 0) usp.set('offset', String(offset));
+  const resp = await fetch(`/admin/v1/diagnostics/traces?${usp.toString()}`, {
+    method: 'GET',
+    credentials: 'same-origin',
+  });
+  if (!resp.ok) throw await buildAdminError(resp, 'fetch recent traces failed');
+  const body = (await resp.json()) as RecentTracesResponse;
+  return { traces: body.traces ?? [], total: body.total ?? 0 };
+}
+
 // US-003 — slow-queries diagnostics. The wire shape mirrors slowQueriesResponse
 // in internal/adminapi/diagnostics_slow_queries.go. The handler returns rows
 // sorted by latency_ms DESC and a base64 page-token continuation cursor.

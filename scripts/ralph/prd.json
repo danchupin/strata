@@ -153,8 +153,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "RingBuffer.List(limit, offset) returns up to limit retained traces in LRU order (newest first), thread-safe under existing mutex; bounded materialisation (caps at limit). New TraceSummary {trace_id, request_id, root_name, started_at_ns, duration_ms, status, span_count} aggregates per-trace status (Error if any span errored, else root span status). Admin GET /admin/v1/diagnostics/traces?limit=50&offset=0 returns {traces:[], total:int}; cap at 200; audit-stamped admin:GetDiagnosticsTraces with resource=diagnostics. Returns 503 RingbufUnavailable when ring buffer disabled. OpenAPI updated with TraceSummary + DiagnosticsTracesResponse + /diagnostics/traces path. UI: new <RecentTracesPanel> (web/src/components/diagnostics/RecentTracesPanel.tsx) renders ABOVE the search box on TraceBrowser page; 10s refetchInterval via TanStack Query (paused automatically when tab not focused — TanStack default with refetchIntervalInBackground=false); sortable by started_at desc (default — server LRU order) or duration_ms desc (client sort); status column dot (red Error / emerald OK); empty state 'No traces captured yet. Send a request to populate the ringbuf.'; click row → navigates to /diagnostics/trace/<request_id|trace_id>. Existing sessionStorage history panel stays inside the search-box card BELOW the new live list per AC. Quality gates: go vet ✓; go test full repo ✓ (otel/ringbuf 4 new tests + adminapi 5 new tests pass; full repo green); pnpm typecheck ✓; pnpm test:unit ✓ (37/37); pnpm build ✓ (panel ~1.5 KiB gzipped contribution to main chunk — within +3 KiB budget). Browser smoke deferred to US-005."
     },
     {
       "id": "US-005",

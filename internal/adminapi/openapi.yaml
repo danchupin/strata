@@ -774,6 +774,39 @@ components:
         access_key: { type: string }
         expires_at: { type: integer, format: int64, description: "Unix epoch (seconds) when the session JWT expires" }
 
+    TraceSummary:
+      type: object
+      required: [trace_id, started_at_ns, duration_ms, status, span_count]
+      description: |
+        One-row summary of a retained trace. Returned by
+        GET /diagnostics/traces so the trace browser can render a list view
+        without paging in every span. The full waterfall is fetched via
+        GET /diagnostics/trace/{requestID}.
+      properties:
+        trace_id: { type: string, description: "32-hex OTel trace id" }
+        request_id:
+          type: string
+          description: "X-Request-Id correlation value, if the SDK stamped one on a span"
+        root_name: { type: string, description: "Name of the parentless span (typically `<METHOD> <path>`)" }
+        started_at_ns: { type: integer, format: int64, description: "min(span.start_ns) — trace start in unix nanoseconds" }
+        duration_ms: { type: integer, format: int64, description: "(max(end_ns) - min(start_ns)) / 1e6" }
+        status:
+          type: string
+          enum: [OK, Error, Unset]
+          description: "Aggregated trace status — Error if any span errored, otherwise the root span status"
+        span_count: { type: integer, description: "Retained span count for the trace" }
+
+    DiagnosticsTracesResponse:
+      type: object
+      required: [traces, total]
+      properties:
+        traces:
+          type: array
+          items: { $ref: '#/components/schemas/TraceSummary' }
+        total:
+          type: integer
+          description: "Total retained traces in the in-process ring buffer (independent of limit/offset)"
+
   responses:
     Unauthorized:
       description: Authentication missing or invalid.
@@ -1661,3 +1694,37 @@ paths:
               schema: { $ref: '#/components/schemas/MetricsTimeseries' }
         '401':
           $ref: '#/components/responses/Unauthorized'
+
+  /diagnostics/traces:
+    get:
+      summary: List recently captured traces (in-process OTel ring buffer)
+      operationId: getDiagnosticsTraces
+      description: |
+        Returns the most-recent N retained trace summaries in LRU order
+        (newest first) so the trace browser UI can render a list view
+        without forcing the operator to know a request_id upfront. The
+        ring buffer retains roughly the last 10 minutes of traffic
+        (bytes-budgeted, default 4 MiB). Operators click a row to fetch
+        the full waterfall via /diagnostics/trace/{requestID}.
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+          description: "Page size; capped at 200 to bound response cost"
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+          description: "Skip the first N entries from the LRU front"
+      responses:
+        '200':
+          description: Recent trace summaries.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DiagnosticsTracesResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          description: Ring buffer disabled (`STRATA_OTEL_RINGBUF=off`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
