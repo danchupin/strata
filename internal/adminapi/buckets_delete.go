@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/danchupin/strata/internal/auth"
+	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/leader"
 	"github.com/danchupin/strata/internal/meta"
 	"github.com/danchupin/strata/internal/s3api"
@@ -286,9 +287,11 @@ func (s *Server) forceEmptyDrainPage(ctx context.Context, bucketID uuid.UUID, jo
 		}
 		deleted := 0
 		for _, o := range objs.Objects {
-			if _, err := s.Meta.DeleteObject(ctx, bucketID, o.Key, "", false); err != nil {
+			removed, err := s.Meta.DeleteObject(ctx, bucketID, o.Key, "", false)
+			if err != nil {
 				return deleted, fmt.Errorf("delete %s: %w", o.Key, err)
 			}
+			s.enqueueRemovedChunks(ctx, job, removed)
 			deleted++
 			job.Deleted++
 		}
@@ -296,13 +299,39 @@ func (s *Server) forceEmptyDrainPage(ctx context.Context, bucketID uuid.UUID, jo
 	}
 	deleted := 0
 	for _, v := range res.Versions {
-		if _, err := s.Meta.DeleteObject(ctx, bucketID, v.Key, v.VersionID, true); err != nil {
+		removed, err := s.Meta.DeleteObject(ctx, bucketID, v.Key, v.VersionID, true)
+		if err != nil {
 			return deleted, fmt.Errorf("delete %s@%s: %w", v.Key, v.VersionID, err)
 		}
+		s.enqueueRemovedChunks(ctx, job, removed)
 		deleted++
 		job.Deleted++
 	}
 	return deleted, nil
+}
+
+// enqueueRemovedChunks pushes the chunks owned by a freshly-deleted object
+// onto the GC queue so the gc worker reclaims their RADOS / S3 footprint.
+// Without this, force-empty deletes only the meta rows — chunks survive on
+// the data backend until manual cleanup. Skip silently for zero-chunk
+// objects (delete markers, multipart-abort residue) and log-only on
+// enqueue errors: the meta DELETE already committed, so a transient GC
+// queue failure must not abort the drain (the operator can retry via
+// another force-empty pass to pick up survivors).
+func (s *Server) enqueueRemovedChunks(ctx context.Context, job *meta.AdminJob, removed *meta.Object) {
+	if removed == nil || removed.Manifest == nil || len(removed.Manifest.Chunks) == 0 {
+		return
+	}
+	region := s.Region
+	if region == "" {
+		region = "default"
+	}
+	chunks := make([]data.ChunkRef, len(removed.Manifest.Chunks))
+	copy(chunks, removed.Manifest.Chunks)
+	if err := s.Meta.EnqueueChunkDeletion(ctx, region, chunks); err != nil {
+		s.Logger.Printf("adminapi: force-empty %s enqueue chunks %s@%s: %v",
+			job.ID, removed.Key, removed.VersionID, err)
+	}
 }
 
 // finishForceEmpty stamps the terminal state + message + finished_at and

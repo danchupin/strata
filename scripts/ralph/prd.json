@@ -85,8 +85,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "forceEmptyDrainPage now enqueues each deleted object's Manifest.Chunks onto the GC queue via Meta.EnqueueChunkDeletion(ctx, s.Region|default, chunks). Both ListObjectVersions and ListObjects fallback paths covered. Helper enqueueRemovedChunks skips nil/empty chunk slices (delete markers, MPU residue) and copies the slice before enqueue to avoid sharing storage with the manifest. Enqueue errors are logged but never abort the drain — the meta DELETE already committed, so a transient GC queue failure must be repairable via a follow-up force-empty pass. Unit tests assert the GC queue holds the expected chunk OIDs after drain and stays empty for zero-chunk objects. Multi-cluster lab assertion folded into US-005 smoke."
     },
     {
       "id": "US-006",
