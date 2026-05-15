@@ -1491,13 +1491,18 @@ func (s *Store) ListChunkDeletionsByCluster(ctx context.Context, region, cluster
 }
 
 // ListMultipartUploadsByCluster counts in-flight multipart uploads whose
-// opaque BackendUploadID handle has `clusterID` as its leading component.
-// Cassandra does not currently persist BackendUploadID on multipart_uploads
-// (the column would be additive but is never populated by any code path
-// today), so the scan is effectively a no-op on this backend until the
-// column is wired through. The method is defined for meta.Store interface
-// parity; drain-progress treats a 0 return as "no open multipart blocking
-// dereg" — same as the contract.
+// persisted cluster column matches `clusterID`, capped at `limit`. The
+// cluster column carries the leading component of BackendUploadID (the
+// S3-over-S3 pass-through handle); chunk-based RADOS uploads leave both
+// fields empty and never match. Cluster is not part of the partition key,
+// so the scan uses ALLOW FILTERING with LIMIT to bound the work. limit=1
+// is the canonical fast existence probe used by drain-progress.
+//
+// Pre-US-004 rows have NULL in the cluster column — they are tolerated on
+// read (NULL never matches any clusterID).
+//
+// US-005 will replace this query with a denormalised
+// multipart_uploads_by_cluster lookup table.
 func (s *Store) ListMultipartUploadsByCluster(ctx context.Context, clusterID string, limit int) (int, error) {
 	if limit <= 0 {
 		limit = 1
@@ -1505,8 +1510,22 @@ func (s *Store) ListMultipartUploadsByCluster(ctx context.Context, clusterID str
 	if clusterID == "" {
 		return 0, nil
 	}
-	// BackendUploadID is not persisted on this backend; nothing matches.
-	return 0, nil
+	count := 0
+	iter := s.s.Query(
+		`SELECT cluster FROM multipart_uploads WHERE cluster=? LIMIT ? ALLOW FILTERING`,
+		clusterID, limit,
+	).WithContext(ctx).Iter()
+	var dummy string
+	for iter.Scan(&dummy) {
+		count++
+		if count >= limit {
+			break
+		}
+	}
+	if err := iter.Close(); err != nil {
+		return count, err
+	}
+	return count, nil
 }
 
 func (s *Store) AckGCEntry(ctx context.Context, region string, e meta.GCEntry) error {
@@ -2451,13 +2470,32 @@ func (s *Store) CreateMultipartUpload(ctx context.Context, mu *meta.MultipartUpl
 	if err != nil {
 		return fmt.Errorf("upload_id: %w", err)
 	}
+	cluster := clusterFromBackendUploadID(mu.BackendUploadID)
 	return s.s.Query(
-		`INSERT INTO multipart_uploads (bucket_id, upload_id, key, status, storage_class, content_type, initiated_at, sse, user_meta, cache_control, expires, checksum_algorithm, sse_key, sse_key_id, checksum_type)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO multipart_uploads (bucket_id, upload_id, key, status, storage_class, content_type, initiated_at, sse, user_meta, cache_control, expires, checksum_algorithm, sse_key, sse_key_id, checksum_type, cluster)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		gocqlUUID(mu.BucketID), uploadUUID, mu.Key, "uploading", mu.StorageClass, mu.ContentType, mu.InitiatedAt, nilIfEmpty(mu.SSE),
 		mu.UserMeta, nilIfEmpty(mu.CacheControl), nilIfEmpty(mu.Expires), nilIfEmpty(mu.ChecksumAlgorithm),
-		nilIfEmptyBytes(mu.SSEKey), nilIfEmpty(mu.SSEKeyID), nilIfEmpty(mu.ChecksumType),
+		nilIfEmptyBytes(mu.SSEKey), nilIfEmpty(mu.SSEKeyID), nilIfEmpty(mu.ChecksumType), nilIfEmpty(cluster),
 	).WithContext(ctx).Exec()
+}
+
+// clusterFromBackendUploadID returns the leading cluster id component of
+// an opaque BackendUploadID handle (layout
+// `<cluster>\x00<bucket>\x00<key>\x00<uploadID>`, see
+// internal/data/s3/multipart.go). Returns "" when the handle is empty or
+// malformed — chunk-based RADOS multipart uploads leave BackendUploadID
+// empty and thus persist NULL in the cluster column, which never matches
+// any specific cluster in the drain probe.
+func clusterFromBackendUploadID(h string) string {
+	if h == "" {
+		return ""
+	}
+	idx := strings.IndexByte(h, 0x00)
+	if idx <= 0 {
+		return ""
+	}
+	return h[:idx]
 }
 
 func (s *Store) GetMultipartUpload(ctx context.Context, bucketID uuid.UUID, uploadID string) (*meta.MultipartUpload, error) {

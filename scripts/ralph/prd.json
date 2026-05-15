@@ -88,8 +88,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "ALTER TABLE multipart_uploads ADD cluster text wired via alterStatements (idempotent). Cassandra CreateMultipartUpload extracts the leading cluster id off mu.BackendUploadID via clusterFromBackendUploadID() and persists into the new column; empty handle → NULL. ListMultipartUploadsByCluster Cassandra impl uses SELECT cluster FROM multipart_uploads WHERE cluster=? LIMIT ? ALLOW FILTERING (US-005 will denormalize). TiKV multipartUploadRow gained BackendUploadID JSON field; ListMultipartUploadsByCluster walks every bucket's multipart prefix and filters by handle prefix. Memory backend was already correct. Contract test caseListMultipartUploadsByCluster exercises 2/1/0 split across cl-a/cl-b/empty + chunk-based no-match + empty clusterID. Pre-US-004 Cassandra rows have NULL cluster and are tolerated on read (no backfill required). NULL never matches the WHERE clause."
     },
     {
       "id": "US-005",

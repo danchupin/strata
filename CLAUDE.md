@@ -581,6 +581,15 @@ heap-merges by clustering order (key ASC, version_id DESC). See `cassandra/store
   wins.
 - **Multipart Complete uses LWT** — `IF status='uploading'` flips to `completing` so concurrent retries get
   `ErrMultipartInProgress` rather than racing to write the object row twice.
+- **`multipart_uploads.cluster` column** (US-004 drain-followup) carries the leading cluster id component of
+  `BackendUploadID` (`<cluster>\x00<bucket>\x00<key>\x00<uploadID>` — see `internal/data/s3/multipart.go`). The
+  drain-progress safety gate probes it via `ListMultipartUploadsByCluster` so the `deregister_ready=true` flip
+  refuses to fire while any S3-pass-through multipart session is still bound to the cluster about to be removed.
+  Chunk-based RADOS uploads leave `BackendUploadID` empty and thus persist `NULL` — these never match a
+  per-cluster probe (the chunk-based router has no init-time cluster binding). Cassandra impl uses
+  `WHERE cluster=? ALLOW FILTERING` (intermediate state — US-005 replaces this with the denormalised
+  `multipart_uploads_by_cluster` lookup table). Pre-US-004 rows have `NULL` in the column and are tolerated on
+  read (NULL never matches any clusterID) — no one-shot migration is required.
 
 ## Where to look when adding S3 surface
 
