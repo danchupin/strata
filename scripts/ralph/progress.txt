@@ -20,3 +20,20 @@ Cycle: ralph/single-binary
 - **Test surfaces**: existing `cmd/strata-admin/*_test.go` moves with source files; `cmd/strata/main_test.go` covers top-level dispatch shape (server/admin/unknown/empty); `cmd/strata/admin/run_test.go` covers admin-side dispatch (subcommand routing).
 - **End-to-end discipline** (per `feedback_cycle_end_to_end.md`): walkthrough exercise in PRD enumerates 12 steps (1-9 happy path + 10-12 docs/smoke verification); negative paths covered (legacy binary not found, unknown subcommand, no args). State Truth Tables documented; no Safety Claims (refactor only). Final US-002 gated on `make smoke-single-binary` passing.
 
+
+## 2026-05-16 - US-001
+- Moved cmd/strata-admin → cmd/strata/admin subcommand package (10 .go files).
+- run.go: `package admin`, exports `Run(args)error` + writer-injected `RunWith(stdout, stderr, args)error`; ErrUsage replaces internal errUsage sentinel.
+- rewrap.go / bench_gc.go / bench_lifecycle.go: errUsage → ErrUsage. Tests unchanged in surface.
+- cmd/strata/main.go: dispatcher gains "admin" case calling `admin.RunWith(a.out, a.err, args[1:])`; help banner lists admin alongside server + version.
+- cmd/strata/main_test.go: 4 new tests (TestAdmin_HelpDispatchesToAdminPackage, TestAdmin_NoArgsExitsTwo, TestAdmin_UnknownSubcommandExitsTwo, TestAdmin_RewrapDryRun) verify dispatcher routes admin correctly.
+- Makefile: dropped `go build -o bin/strata-admin ./cmd/strata-admin` line from `build:` target. `make build` now produces bin/strata + bin/strata-racecheck only.
+- deploy/docker/Dockerfile: dropped second `go build` line for strata-admin and the COPY of /usr/local/bin/strata-admin into the final stage; image label updated to reflect single-binary shape.
+- cmd/strata-admin/ directory removed (hard cut per CLAUDE.md single-binary invariant — no symlink, no migration shim).
+- Validation: `go vet ./...`, `go test ./...`, `make build` all clean. `./bin/strata --help` lists admin; `./bin/strata admin --help` mirrors legacy strata-admin help banner; `./bin/strata admin rewrap --help` prints rewrap usage.
+- **Learnings for future iterations:**
+  - admin.Run vs admin.RunWith — split entrypoint into writer-injected variant (RunWith) so the top-level dispatcher tests in `cmd/strata` package can capture stdout/stderr via bytes.Buffer. The bare `Run(args)` wraps RunWith with os.Stdout/Stderr for production use. Cleaner than os.Pipe acrobatics in tests.
+  - Package rename via `git mv` keeps history attribution intact; the rename catches up across Go's `internal/` lookup because both old and new paths sit under the same module (`github.com/danchupin/strata`) and admin/ is a regular subdirectory (no `internal` boundary moved).
+  - When converting `package main` → library package: the legacy `os.Exit(2)` shape inside `main()` cannot survive the move because tests can't catch `os.Exit`. Replace with `return ErrUsage` / `return err`; the caller in cmd/strata maps any non-nil to exit 2. Preserves CLI exit-code contract without locking tests out of the entrypoint.
+  - The Makefile bench-gc / bench-lifecycle targets still reference `./bin/strata-admin bench-gc` — US-002 will sweep those to `./bin/strata admin bench-gc` along with all docs/scripts/CI references.
+---

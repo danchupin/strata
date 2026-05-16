@@ -1,4 +1,4 @@
-package main
+package admin
 
 import (
 	"context"
@@ -34,7 +34,7 @@ func (a *app) cmdBenchLifecycle(ctx context.Context, jsonOut bool, args []string
 	region := fs.String("region", "default", "lifecycle worker region label")
 	owner := fs.String("owner", "bench", "bucket owner label")
 	if err := fs.Parse(args); err != nil {
-		return errUsage
+		return ErrUsage
 	}
 	if *objects <= 0 {
 		return fmt.Errorf("--objects must be > 0")

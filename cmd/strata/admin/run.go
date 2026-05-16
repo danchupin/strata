@@ -1,8 +1,8 @@
-// strata-admin is the operator CLI for the strata gateway. Subcommands map
-// onto IAM admin endpoints + the /admin/* HTTP surface (US-034). Output is
+// Package admin is the operator CLI dispatched as `strata admin`. Subcommands
+// map onto IAM admin endpoints + the /admin/* HTTP surface (US-034). Output is
 // human-readable by default; --json prints the raw response payload for
 // scripting.
-package main
+package admin
 
 import (
 	"context"
@@ -14,17 +14,33 @@ import (
 	"os"
 )
 
-func main() {
-	app := newApp(os.Stdout, os.Stderr, os.Args[1:])
-	if err := app.run(context.Background()); err != nil {
-		if !errors.Is(err, errUsage) {
-			fmt.Fprintln(os.Stderr, "strata-admin:", err)
-		}
-		os.Exit(2)
-	}
+// Run is the entrypoint dispatched by `strata admin`. It parses `args`
+// (subcommand + flags, not the bare `os.Args`), executes the requested
+// operation against the gateway, and returns nil on success. On usage
+// errors it returns ErrUsage after printing the help banner to stderr; on
+// any other error it prints "strata admin: <err>" to stderr and returns
+// the underlying error so the top-level dispatcher can map it to exit 2.
+func Run(args []string) error {
+	return RunWith(os.Stdout, os.Stderr, args)
 }
 
-var errUsage = errors.New("usage")
+// RunWith is the writer-injected variant of Run; the top-level dispatcher
+// passes its own writers so tests can capture admin output without piping
+// real stdout/stderr.
+func RunWith(stdout, stderr io.Writer, args []string) error {
+	a := newApp(stdout, stderr, args)
+	if err := a.run(context.Background()); err != nil {
+		if !errors.Is(err, ErrUsage) {
+			fmt.Fprintln(stderr, "strata admin:", err)
+		}
+		return err
+	}
+	return nil
+}
+
+// ErrUsage is returned when the caller supplied an invalid subcommand or
+// flag set; the help banner has already been printed.
+var ErrUsage = errors.New("usage")
 
 // app encapsulates the CLI so it stays testable: tests construct an app, point
 // it at an httptest URL and assert on stdout/stderr.
@@ -39,18 +55,18 @@ func newApp(out, errOut io.Writer, args []string) *app {
 }
 
 func (a *app) run(ctx context.Context) error {
-	root := flag.NewFlagSet("strata-admin", flag.ContinueOnError)
+	root := flag.NewFlagSet("strata admin", flag.ContinueOnError)
 	root.SetOutput(a.err)
 	endpoint := root.String("endpoint", envOrDefault("STRATA_ADMIN_ENDPOINT", "http://localhost:9000"), "gateway endpoint URL")
 	principal := root.String("principal", os.Getenv("STRATA_ADMIN_PRINCIPAL"), "X-Test-Principal header value (test harness shortcut)")
 	jsonOut := root.Bool("json", false, "emit raw JSON instead of human-formatted output")
 	root.Usage = func() {
-		fmt.Fprintln(a.err, "usage: strata-admin [global flags] <iam|lifecycle|gc|sse|replicate|bucket|rewrap|bench-gc|bench-lifecycle> <subcommand> [flags]\n  bucket subcommands: inspect | reshard\n  rewrap takes no subcommand: strata-admin rewrap [--target-key-id ID] [--dry-run] [--batch N]\n  bench-gc / bench-lifecycle take no subcommand: strata-admin bench-gc [--entries N] [--concurrency M]")
+		fmt.Fprintln(a.err, "usage: strata admin [global flags] <iam|lifecycle|gc|sse|replicate|bucket|rewrap|bench-gc|bench-lifecycle> <subcommand> [flags]\n  bucket subcommands: inspect | reshard\n  rewrap takes no subcommand: strata admin rewrap [--target-key-id ID] [--dry-run] [--batch N]\n  bench-gc / bench-lifecycle take no subcommand: strata admin bench-gc [--entries N] [--concurrency M]")
 		root.PrintDefaults()
 	}
 
 	if err := root.Parse(a.args); err != nil {
-		return errUsage
+		return ErrUsage
 	}
 	rest := root.Args()
 	if len(rest) >= 1 && rest[0] == "rewrap" {
@@ -64,7 +80,7 @@ func (a *app) run(ctx context.Context) error {
 	}
 	if len(rest) < 2 {
 		root.Usage()
-		return errUsage
+		return ErrUsage
 	}
 
 	client := &Client{Endpoint: *endpoint, Principal: *principal, UserAgent: "strata-admin/1"}
@@ -91,7 +107,7 @@ func (a *app) run(ctx context.Context) error {
 	default:
 		fmt.Fprintf(a.err, "unknown command: %s %s\n", group, sub)
 		root.Usage()
-		return errUsage
+		return ErrUsage
 	}
 }
 
@@ -100,7 +116,7 @@ func (a *app) cmdIAMCreateAccessKey(ctx context.Context, c *Client, jsonOut bool
 	fs.SetOutput(a.err)
 	user := fs.String("user", "", "IAM user name")
 	if err := fs.Parse(args); err != nil {
-		return errUsage
+		return ErrUsage
 	}
 	if *user == "" {
 		return errors.New("--user is required")
@@ -117,7 +133,7 @@ func (a *app) cmdIAMRotateAccessKey(ctx context.Context, c *Client, jsonOut bool
 	fs.SetOutput(a.err)
 	id := fs.String("access-key-id", "", "the access key id to rotate")
 	if err := fs.Parse(args); err != nil {
-		return errUsage
+		return ErrUsage
 	}
 	if *id == "" {
 		return errors.New("--access-key-id is required")
@@ -147,7 +163,7 @@ func (a *app) cmdLifecycleTick(ctx context.Context, c *Client, jsonOut bool, arg
 	fs := flag.NewFlagSet("lifecycle tick", flag.ContinueOnError)
 	fs.SetOutput(a.err)
 	if err := fs.Parse(args); err != nil {
-		return errUsage
+		return ErrUsage
 	}
 	res, err := c.LifecycleTick(ctx)
 	if err != nil {
@@ -167,7 +183,7 @@ func (a *app) cmdGCDrain(ctx context.Context, c *Client, jsonOut bool, args []st
 	fs := flag.NewFlagSet("gc drain", flag.ContinueOnError)
 	fs.SetOutput(a.err)
 	if err := fs.Parse(args); err != nil {
-		return errUsage
+		return ErrUsage
 	}
 	res, err := c.GCDrain(ctx)
 	if err != nil {
@@ -184,7 +200,7 @@ func (a *app) cmdSSERotate(ctx context.Context, c *Client, jsonOut bool, args []
 	fs := flag.NewFlagSet("sse rotate", flag.ContinueOnError)
 	fs.SetOutput(a.err)
 	if err := fs.Parse(args); err != nil {
-		return errUsage
+		return ErrUsage
 	}
 	res, err := c.SSERotate(ctx)
 	if err != nil {
@@ -208,7 +224,7 @@ func (a *app) cmdReplicateRetry(ctx context.Context, c *Client, jsonOut bool, ar
 	fs.SetOutput(a.err)
 	bucket := fs.String("bucket", "", "bucket whose FAILED replication rows should be re-emitted")
 	if err := fs.Parse(args); err != nil {
-		return errUsage
+		return ErrUsage
 	}
 	if *bucket == "" {
 		return errors.New("--bucket is required")
@@ -232,7 +248,7 @@ func (a *app) cmdBucketInspect(ctx context.Context, c *Client, jsonOut bool, arg
 	fs.SetOutput(a.err)
 	bucket := fs.String("bucket", "", "bucket name")
 	if err := fs.Parse(args); err != nil {
-		return errUsage
+		return ErrUsage
 	}
 	if *bucket == "" {
 		return errors.New("--bucket is required")
@@ -274,7 +290,7 @@ func (a *app) cmdBucketReshard(ctx context.Context, c *Client, jsonOut bool, arg
 	bucket := fs.String("bucket", "", "bucket name")
 	target := fs.Int("target", 0, "target shard count (positive power of two, larger than current)")
 	if err := fs.Parse(args); err != nil {
-		return errUsage
+		return ErrUsage
 	}
 	if *bucket == "" {
 		return errors.New("--bucket is required")

@@ -30,8 +30,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Moved cmd/strata-admin/*.go → cmd/strata/admin/ (main.go→run.go, main_test.go→run_test.go); package main → package admin; func main() → Run(args[]string)error with peer RunWith(stdout,stderr,args) for writer injection; ErrUsage exported; cmd/strata/main.go dispatcher routes admin via admin.RunWith(a.out, a.err, ...); 4 new dispatcher tests in main_test.go cover help/no-args/unknown-subcommand/rewrap-dry-run paths; Makefile + Dockerfile drop strata-admin build line."
     },
     {
       "id": "US-002",

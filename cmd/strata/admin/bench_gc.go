@@ -1,4 +1,4 @@
-package main
+package admin
 
 import (
 	"context"
@@ -32,7 +32,7 @@ func (a *app) cmdBenchGC(ctx context.Context, jsonOut bool, args []string) error
 	pool := fs.String("pool", "bench", "ChunkRef.Pool stamped on every seeded entry")
 	cluster := fs.String("cluster", "default", "ChunkRef.Cluster stamped on every seeded entry")
 	if err := fs.Parse(args); err != nil {
-		return errUsage
+		return ErrUsage
 	}
 	if *entries <= 0 {
 		return fmt.Errorf("--entries must be > 0")

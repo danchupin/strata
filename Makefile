@@ -10,7 +10,6 @@ GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 # will fail with: pattern web/dist: no matching files found
 build: web-build
 	go build -o bin/strata ./cmd/strata
-	go build -o bin/strata-admin ./cmd/strata-admin
 	go build -o bin/strata-racecheck ./cmd/strata-racecheck
 
 web-build:

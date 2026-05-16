@@ -1,4 +1,4 @@
-package main
+package admin
 
 import (
 	"context"
@@ -31,7 +31,7 @@ func (a *app) cmdRewrap(ctx context.Context, jsonOut bool, args []string) error 
 	dryRun := fs.Bool("dry-run", false, "scan only; do not rewrap")
 	batch := fs.Int("batch", 500, "page size for ListObjectVersions / ListMultipartUploads")
 	if err := fs.Parse(args); err != nil {
-		return errUsage
+		return ErrUsage
 	}
 
 	logger := slog.New(slog.NewJSONHandler(a.err, &slog.HandlerOptions{Level: slog.LevelInfo}))
