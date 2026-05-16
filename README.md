@@ -71,7 +71,7 @@ for the comparison numbers.
 
 End-to-end with real Ceph runs natively on both arm64 and amd64. The cluster image (`deploy/docker/ceph-bootstrap/`) is a custom bootstrap on top of the multi-arch `quay.io/ceph/ceph:v19.2.3` (Squid). MON+MGR+OSD in a single container, OSD backed by `memstore` (4 GiB, held in process memory). Healthy in ~5 seconds.
 
-The runtime image (`deploy/docker/Dockerfile`) is built on the same `quay.io/ceph/ceph:v19.2.3` base so the linked librados version exactly matches the cluster. `librados-devel-19.2.3` for the build stage is pulled from `download.ceph.com/rpm-squid/el9/$arch/`. Image entrypoint is `/usr/local/bin/strata`, default `CMD ["server"]`; `strata-admin` is also installed for operator verbs.
+The runtime image (`deploy/docker/Dockerfile`) is built on the same `quay.io/ceph/ceph:v19.2.3` base so the linked librados version exactly matches the cluster. `librados-devel-19.2.3` for the build stage is pulled from `download.ceph.com/rpm-squid/el9/$arch/`. Image entrypoint is `/usr/local/bin/strata`, default `CMD ["server"]`; operator verbs run via `strata admin <subcommand>` against the same binary.
 
 A successful `make smoke` validates bucket CRUD, object PUT/GET/HEAD/DELETE (including a 10 MiB blob that ends up as three RADOS objects in pool `strata.rgw.buckets.data`), and ListObjectsV2 with prefix/delimiter.
 
@@ -127,8 +127,9 @@ cmd/
   strata/             unified S3 gateway binary; `strata server` runs the
                       gateway plus the workers selected via STRATA_WORKERS
                       (gc, lifecycle, notify, replicator, access-log,
-                      inventory, audit-export, manifest-rewriter)
-  strata-admin/       operator CLI (rewrap, IAM, lifecycle ticks, ...)
+                      inventory, audit-export, manifest-rewriter); the
+                      `admin` subcommand (`strata admin ...`) holds the
+                      operator CLI (rewrap, IAM, lifecycle ticks, ...)
 internal/
   s3api/              HTTP handlers, XML, errors, routing
   meta/

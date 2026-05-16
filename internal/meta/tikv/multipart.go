@@ -489,7 +489,7 @@ func (s *Store) GetMultipartCompletion(ctx context.Context, bucketID uuid.UUID, 
 }
 
 // UpdateMultipartUploadSSEWrap rewraps the per-upload SSE DEK. Used by
-// strata-admin rewrap to rotate the master key. Returns
+// `strata admin rewrap` to rotate the master key. Returns
 // ErrMultipartNotFound when the upload row is gone (matches memory).
 func (s *Store) UpdateMultipartUploadSSEWrap(ctx context.Context, bucketID uuid.UUID, uploadID string, wrapped []byte, keyID string) (err error) {
 	ctx, finish := s.observer.Start(ctx, "UpdateMultipartUploadSSEWrap", "multipart")

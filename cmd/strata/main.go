@@ -52,7 +52,7 @@ func (a *app) run(ctx context.Context) int {
 
 // runAdmin dispatches to the admin subcommand package. admin.Run owns its
 // own stdout/stderr writers + error formatting; any non-nil return maps to
-// exit 2 (legacy strata-admin contract).
+// exit 2 (legacy strata admin contract).
 func (a *app) runAdmin(args []string) int {
 	if err := admin.RunWith(a.out, a.err, args); err != nil {
 		return 2

@@ -24,7 +24,7 @@ import (
 // strictly about chunk-delete / per-object-action throughput in the worker.
 //
 // Without the `ceph` build tag rados.New returns an error from the stub, so
-// running bench against a rados-configured strata-admin requires the same
+// running bench against a rados-configured `strata admin` requires the same
 // ceph-tagged binary the gateway uses.
 func buildBenchDataBackend(cfg *config.Config, logger *slog.Logger) (data.Backend, error) {
 	switch cfg.DataBackend {
@@ -101,7 +101,7 @@ func pushBenchGauge(ctx context.Context, logger *slog.Logger, metricName, job st
 	}
 	g := prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: metricName,
-		Help: "Throughput (entries/sec) measured by the strata-admin bench harness.",
+		Help: "Throughput (entries/sec) measured by the `strata admin` bench harness.",
 		ConstLabels: prometheus.Labels{
 			"concurrency":  fmt.Sprintf("%d", res.Concurrency),
 			"meta_backend": res.MetaBackend,

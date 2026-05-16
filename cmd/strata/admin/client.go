@@ -108,7 +108,7 @@ type HTTPError struct {
 }
 
 func (e *HTTPError) Error() string {
-	return fmt.Sprintf("strata-admin: http %d: %s", e.Status, strings.TrimSpace(e.Body))
+	return fmt.Sprintf("strata admin: http %d: %s", e.Status, strings.TrimSpace(e.Body))
 }
 
 func (c *Client) httpClient() *http.Client {

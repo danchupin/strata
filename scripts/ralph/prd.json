@@ -58,8 +58,8 @@
         "Typecheck passes"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Swept every strata-admin reference outside scripts/ralph/archive/** + scripts/ralph/{progress.txt,prd.json}: docs/ (binary-consolidation.md, observability.md, gc-lifecycle-phase-2.md + 6 other pages), Makefile (bench-gc/lifecycle commands), .gitignore (dropped /strata-admin), .github/workflows/ci.yml (single build line), CLAUDE.md (Single-binary invariant section + tracing line + logging line + example diff), ROADMAP.md (close-flip P2 + P1 narrative refresh + GC bench line + latent-bug line), README.md (cmd tree + Dockerfile description), Dockerfile (label), internal/meta/store.go + internal/meta/tikv/multipart.go + internal/crypto/master/{rotation.go,CLAUDE.md} (comment refs). Removed tasks/prd-single-binary.md per CLAUDE.md PRD lifecycle rule. New scripts/smoke-single-binary.sh + make smoke-single-binary target verifies dispatcher shape (root help lists server+admin, admin help lists 9 subcommands, admin rewrap --help renders, no bin/strata-admin post-build, unknown→exit2, zero scoped-tree residue). make vet / make test / make docs-build / make smoke-single-binary all clean."
     }
   ]
 }

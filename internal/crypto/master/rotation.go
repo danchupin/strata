@@ -13,7 +13,7 @@ import (
 //	STRATA_SSE_MASTER_KEYS=<keyID>:<hex64>[,<keyID>:<hex64>...]
 //
 // The first entry is the active wrap key; subsequent entries are unwrap-only.
-// Used by the gateway during rotation windows and by `strata-admin rewrap`.
+// Used by the gateway during rotation windows and by `strata admin rewrap`.
 const EnvMasterKeys = "STRATA_SSE_MASTER_KEYS"
 
 // ErrUnknownKeyID is returned by Resolver.ResolveByID when the requested keyID
@@ -144,7 +144,7 @@ func (r *RotationProvider) IDs() []string {
 }
 
 // Entries returns a defensive copy of the rotation list (id + raw key) in
-// declared order. Used by strata-admin rewrap's --target-key-id reordering.
+// declared order. Used by `strata admin rewrap`'s --target-key-id reordering.
 func (r *RotationProvider) Entries() []KeyEntry {
 	out := make([]KeyEntry, len(r.entries))
 	for i, e := range r.entries {

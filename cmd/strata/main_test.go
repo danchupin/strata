@@ -47,7 +47,7 @@ func TestAdmin_HelpDispatchesToAdminPackage(t *testing.T) {
 }
 
 // TestAdmin_NoArgsExitsTwo: `strata admin` with no further args prints the
-// usage banner and exits 2 (legacy strata-admin contract).
+// usage banner and exits 2 (legacy strata admin contract).
 func TestAdmin_NoArgsExitsTwo(t *testing.T) {
 	_, errOut, code := runApp(t, "admin")
 	if code != 2 {

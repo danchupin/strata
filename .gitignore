@@ -4,9 +4,8 @@ dist/
 *.test
 *.out
 
-# Top-level binaries built by `go build ./cmd/strata{,-admin}` / bench harness
+# Top-level binary built by `go build ./cmd/strata` / bench harness
 /strata
-/strata-admin
 coverage.*
 .env
 .env.local

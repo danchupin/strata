@@ -71,11 +71,9 @@ jobs:
           path: web/dist
       - run: go version
       - run: go mod download
-      # We ship two binaries: `strata` (gateway + workers) and `strata-admin`
-      # (one-shot operator CLI). Build only those; `go vet ./...` still covers
-      # every package transitively imported.
+      # Single `strata` binary holds the gateway + workers + admin subcommands.
+      # `go vet ./...` still covers every package transitively imported.
       - run: go build -o bin/strata ./cmd/strata
-      - run: go build -o bin/strata-admin ./cmd/strata-admin
       - run: go vet ./...
 
   unit:

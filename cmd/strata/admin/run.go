@@ -83,7 +83,7 @@ func (a *app) run(ctx context.Context) error {
 		return ErrUsage
 	}
 
-	client := &Client{Endpoint: *endpoint, Principal: *principal, UserAgent: "strata-admin/1"}
+	client := &Client{Endpoint: *endpoint, Principal: *principal, UserAgent: "strata/1 (admin)"}
 	group, sub := rest[0], rest[1]
 	args := rest[2:]
 

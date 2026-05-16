@@ -47,7 +47,7 @@ RUN --mount=type=cache,target=/root/go/pkg/mod \
 FROM quay.io/ceph/ceph:v19.2.3
 ARG GIT_SHA=unknown
 LABEL org.opencontainers.image.title="strata" \
-      org.opencontainers.image.description="S3-compatible object gateway (single strata binary; admin subcommand consolidates the legacy strata-admin)" \
+      org.opencontainers.image.description="S3-compatible object gateway (single strata binary; admin operations via the `admin` subcommand)" \
       org.opencontainers.image.source="https://github.com/danchupin/strata" \
       org.opencontainers.image.revision="${GIT_SHA}"
 COPY --from=build /out/strata /usr/local/bin/strata
