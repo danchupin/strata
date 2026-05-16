@@ -11,6 +11,7 @@ import {
 import {
   drainCluster,
   fetchClusterDrainImpact,
+  normalizePlacementMode,
   type BucketImpactEntry,
   type ClusterDrainImpactResponse,
   type ClusterState,
@@ -86,19 +87,33 @@ export function ConfirmDrainModal({
     meta: { silent: true },
   });
   const impact = impactQ.data;
-  const stuckTotal = impact
-    ? impact.stuck_single_policy_chunks + impact.stuck_no_policy_chunks
-    : 0;
   const stuckBuckets = useMemo<BucketImpactEntry[]>(() => {
     if (!impact) return [];
     return impact.by_bucket.filter((b) => b.category !== 'migratable');
   }, [impact]);
+  // complianceLocked counts strict-flagged buckets in the
+  // stuck_single_policy category — these are the only buckets the
+  // BulkPlacementFixDialog (US-005 effective-placement) can fix and the
+  // only ones whose existence blocks Submit. Weighted stuck buckets auto-
+  // resolve via cluster.weights and don't reach stuck_single_policy
+  // post US-003; stuck_no_policy is a catastrophic-state warning that
+  // doesn't block the drain itself.
+  const complianceLocked = useMemo(
+    () =>
+      stuckBuckets.filter(
+        (b) =>
+          b.category === 'stuck_single_policy' &&
+          normalizePlacementMode(b.placement_mode) === 'strict',
+      ),
+    [stuckBuckets],
+  );
+  const complianceLockedCount = complianceLocked.length;
 
   const matches = typed === clusterID;
   const submitDisabled =
     submitting ||
     !matches ||
-    (mode === 'evacuate' && (impactQ.isPending || stuckTotal > 0));
+    (mode === 'evacuate' && (impactQ.isPending || complianceLockedCount > 0));
 
   function handleClose(next: boolean) {
     if (submitting) return;
@@ -180,8 +195,7 @@ export function ConfirmDrainModal({
               error={
                 impactQ.error instanceof Error ? impactQ.error.message : null
               }
-              stuckBuckets={stuckBuckets}
-              stuckTotal={stuckTotal}
+              complianceLocked={complianceLocked}
               onOpenBulkFix={onOpenBulkFix}
             />
           )}
@@ -237,7 +251,12 @@ export function ConfirmDrainModal({
               {submitting && (
                 <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" aria-hidden />
               )}
-              {submitLabel(mode, impact, impactQ.isPending, stuckTotal)}
+              {submitLabel(
+                mode,
+                impact,
+                impactQ.isPending,
+                complianceLockedCount,
+              )}
             </Button>
           </DialogFooter>
         </form>
@@ -250,17 +269,14 @@ function submitLabel(
   mode: Mode,
   impact: ClusterDrainImpactResponse | undefined,
   loading: boolean,
-  stuckTotal: number,
+  complianceLockedCount: number,
 ): string {
   if (mode === 'readonly') return 'Drain (stop-writes)';
   if (loading) return 'Loading impact…';
   if (!impact) return 'Evacuate';
-  if (stuckTotal > 0) {
-    const stuckBuckets = impact.by_bucket.filter(
-      (b) => b.category !== 'migratable',
-    ).length;
-    return `Drain blocked — fix ${stuckBuckets} stuck ${
-      stuckBuckets === 1 ? 'bucket' : 'buckets'
+  if (complianceLockedCount > 0) {
+    return `Drain blocked — fix ${complianceLockedCount} compliance-locked ${
+      complianceLockedCount === 1 ? 'bucket' : 'buckets'
     }`;
   }
   return `Drain (${impact.migratable_chunks.toLocaleString()} chunks will migrate)`;
@@ -317,8 +333,7 @@ interface ImpactSectionProps {
   data: ClusterDrainImpactResponse | undefined;
   loading: boolean;
   error: string | null;
-  stuckBuckets: BucketImpactEntry[];
-  stuckTotal: number;
+  complianceLocked: BucketImpactEntry[];
   onOpenBulkFix?: (stuck: BucketImpactEntry[]) => void;
 }
 
@@ -326,8 +341,7 @@ function ImpactSection({
   data,
   loading,
   error,
-  stuckBuckets,
-  stuckTotal,
+  complianceLocked,
   onOpenBulkFix,
 }: ImpactSectionProps) {
   if (loading) {
@@ -353,7 +367,7 @@ function ImpactSection({
     );
   }
   if (!data) return null;
-  const stuckBucketCount = stuckBuckets.length;
+  const complianceLockedCount = complianceLocked.length;
   return (
     <div className="space-y-2" data-testid="cd-impact">
       <div className="grid grid-cols-3 gap-2 text-center text-xs">
@@ -373,7 +387,7 @@ function ImpactSection({
           value={data.stuck_no_policy_chunks}
         />
       </div>
-      {stuckTotal > 0 ? (
+      {complianceLockedCount > 0 ? (
         <div
           className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-800 dark:text-amber-300"
           data-testid="cd-stuck-warning"
@@ -381,27 +395,26 @@ function ImpactSection({
           <Ban className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
           <div className="space-y-1">
             <div className="font-medium">
-              {stuckTotal.toLocaleString()} chunks across{' '}
-              {stuckBucketCount.toLocaleString()}{' '}
-              {stuckBucketCount === 1 ? 'bucket' : 'buckets'} would be
-              stranded.
+              {complianceLockedCount.toLocaleString()} compliance-locked{' '}
+              {complianceLockedCount === 1 ? 'bucket' : 'buckets'} need fix.
             </div>
             <div className="leading-snug">
-              Update placement policy on each stuck bucket so at least one
-              live cluster can accept its chunks, then retry.
+              Strict-mode buckets refuse the cluster.weights fallback. Flip
+              them to weighted or replace the draining cluster in their
+              Placement policy, then retry.
             </div>
-            {onOpenBulkFix && stuckBucketCount > 0 && (
+            {onOpenBulkFix && (
               <Button
                 type="button"
                 size="sm"
                 variant="outline"
                 className="border-amber-500/60 text-amber-800 hover:bg-amber-500/15 dark:text-amber-200"
-                onClick={() => onOpenBulkFix(stuckBuckets)}
+                onClick={() => onOpenBulkFix(complianceLocked)}
                 data-testid="cd-bulk-fix"
               >
                 <Wrench className="mr-1 h-3.5 w-3.5" aria-hidden />
-                Fix {stuckBucketCount}{' '}
-                {stuckBucketCount === 1 ? 'bucket' : 'buckets'}
+                Fix {complianceLockedCount} compliance-locked{' '}
+                {complianceLockedCount === 1 ? 'bucket' : 'buckets'}
               </Button>
             )}
           </div>

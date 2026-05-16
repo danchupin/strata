@@ -194,6 +194,20 @@ func (s *Store) SetBucketMfaDelete(ctx context.Context, name, state string) erro
 	})
 }
 
+// SetBucketPlacementMode persists the per-bucket placement mode on the
+// JSON-encoded bucket row (US-001 effective-placement). Empty string
+// clears the override (decodes as "" → coerced to "weighted"
+// downstream). Validates via meta.ValidatePlacementMode.
+func (s *Store) SetBucketPlacementMode(ctx context.Context, name, mode string) error {
+	if err := meta.ValidatePlacementMode(mode); err != nil {
+		return err
+	}
+	return s.updateBucket(ctx, name, func(b *meta.Bucket) error {
+		b.PlacementMode = mode
+		return nil
+	})
+}
+
 // updateBucket is the pessimistic read-modify-write helper every bucket-row
 // mutator routes through. The lesson is the TiKV mirror of CLAUDE.md's
 // Cassandra LWT note: a plain Put after a previous LWT-equivalent INSERT

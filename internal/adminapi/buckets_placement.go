@@ -16,13 +16,35 @@ import (
 // BucketPlacementJSON is the operator-console wire shape for the per-bucket
 // placement policy (US-001 placement-rebalance). Weights are keyed by
 // cluster id and bounded `[0, 100]`; at least one must be positive.
+//
+// Mode (US-001 effective-placement) is the bucket's placement-mode
+// override: "weighted" (default) lets EffectivePolicy fall back to the
+// cluster-weights default policy when the bucket's Placement points
+// only at draining clusters; "strict" disables the fallback and makes
+// PUTs return 503 DrainRefused / drain workflows refuse to fire. GET
+// always returns one of {"weighted", "strict"} (empty string in storage
+// is coerced to "weighted" — the backwards-compat default for legacy
+// buckets).
 type BucketPlacementJSON struct {
 	Placement map[string]int `json:"placement"`
+	Mode      string         `json:"mode,omitempty"`
+}
+
+// bucketPlacementPutRequest is the wire shape PUT
+// /admin/v1/buckets/{name}/placement accepts. Mode is a pointer so the
+// handler can tell "field absent" from "field set to empty" — only when
+// the field is present do we route through SetBucketPlacementMode +
+// stamp the admin:UpdateBucketPlacementMode audit action.
+type bucketPlacementPutRequest struct {
+	Placement map[string]int `json:"placement"`
+	Mode      *string        `json:"mode,omitempty"`
 }
 
 // handleBucketGetPlacement serves GET /admin/v1/buckets/{bucket}/placement.
 // Returns 200 + BucketPlacementJSON when configured, 404 NoSuchPlacement
 // when no policy row exists, 404 NoSuchBucket when the bucket is missing.
+// The response always carries `mode` (empty/NULL storage is coerced to
+// "weighted" — US-001 effective-placement).
 func (s *Server) handleBucketGetPlacement(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("bucket")
 	if name == "" {
@@ -47,7 +69,15 @@ func (s *Server) handleBucketGetPlacement(w http.ResponseWriter, r *http.Request
 			"no placement policy configured on bucket")
 		return
 	}
-	writeJSON(w, http.StatusOK, BucketPlacementJSON{Placement: policy})
+	b, err := s.Meta.GetBucket(r.Context(), name)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "Internal", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, BucketPlacementJSON{
+		Placement: policy,
+		Mode:      meta.NormalizePlacementMode(b.PlacementMode),
+	})
 }
 
 // handleBucketSetPlacement serves PUT /admin/v1/buckets/{bucket}/placement.
@@ -70,7 +100,7 @@ func (s *Server) handleBucketSetPlacement(w http.ResponseWriter, r *http.Request
 		writeJSONError(w, http.StatusBadRequest, "BadRequest", "failed to read body")
 		return
 	}
-	var req BucketPlacementJSON
+	var req bucketPlacementPutRequest
 	if jerr := json.Unmarshal(body, &req); jerr != nil {
 		writeJSONError(w, http.StatusBadRequest, "MalformedRequest", "invalid JSON: "+jerr.Error())
 		return
@@ -85,10 +115,24 @@ func (s *Server) handleBucketSetPlacement(w http.ResponseWriter, r *http.Request
 			"placement references unconfigured cluster id(s): "+joinSorted(unknown))
 		return
 	}
+	if req.Mode != nil {
+		if err := meta.ValidatePlacementMode(*req.Mode); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "InvalidPlacementMode",
+				"placement mode must be \"weighted\" or \"strict\"")
+			return
+		}
+	}
 
 	ctx := r.Context()
 	owner := auth.FromContext(ctx).Owner
-	s3api.SetAuditOverride(ctx, "admin:PutBucketPlacement", "bucket:"+name, name, owner)
+	action := "admin:PutBucketPlacement"
+	if req.Mode != nil {
+		// The operator explicitly opted into the mode-aware write —
+		// stamp the audit so an external reviewer can spot strict-
+		// flag flips on the audit log (US-001 effective-placement).
+		action = "admin:UpdateBucketPlacementMode"
+	}
+	s3api.SetAuditOverride(ctx, action, "bucket:"+name, name, owner)
 
 	if err := s.Meta.SetBucketPlacement(ctx, name, req.Placement); err != nil {
 		if errors.Is(err, meta.ErrBucketNotFound) {
@@ -102,6 +146,21 @@ func (s *Server) handleBucketSetPlacement(w http.ResponseWriter, r *http.Request
 		}
 		writeJSONError(w, http.StatusInternalServerError, "Internal", err.Error())
 		return
+	}
+	if req.Mode != nil {
+		if err := s.Meta.SetBucketPlacementMode(ctx, name, *req.Mode); err != nil {
+			if errors.Is(err, meta.ErrBucketNotFound) {
+				writeJSONError(w, http.StatusNotFound, "NoSuchBucket", "bucket not found")
+				return
+			}
+			if errors.Is(err, meta.ErrInvalidPlacementMode) {
+				writeJSONError(w, http.StatusBadRequest, "InvalidPlacementMode",
+					"placement mode must be \"weighted\" or \"strict\"")
+				return
+			}
+			writeJSONError(w, http.StatusInternalServerError, "Internal", err.Error())
+			return
+		}
 	}
 	// Placement change invalidates any /drain-impact preview the operator
 	// may have just generated — flush synchronously so the next bulk-fix

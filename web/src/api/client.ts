@@ -65,7 +65,10 @@ export {
   fetchBucketPlacement,
   setBucketPlacement,
   deleteBucketPlacement,
+  normalizeMode as normalizePlacementMode,
+  type BucketPlacement,
   type BucketPlacementJSON,
+  type PlacementMode,
 } from './placement';
 
 export {

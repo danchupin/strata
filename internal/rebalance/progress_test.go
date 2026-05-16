@@ -406,22 +406,25 @@ func TestWorkerProgressScanCountsEmptyPolicyBuckets(t *testing.T) {
 
 // TestClassifyBucketCovers — exercises every branch of the per-bucket
 // classifier the worker uses to split chunks into the three drain-
-// transparency categories.
+// transparency categories (US-003 effective-placement: classifier now
+// takes the resolved effective policy + raw policy + mode).
 func TestClassifyBucketCovers(t *testing.T) {
 	cases := []struct {
-		name     string
-		policy   map[string]int
-		exclude  map[string]bool
-		want     string
+		name      string
+		raw       map[string]int
+		effective map[string]int
+		mode      string
+		want      string
 	}{
-		{"empty policy → stuck_no_policy", nil, map[string]bool{"old": true}, "stuck_no_policy"},
-		{"policy with live cluster → migratable", map[string]int{"old": 1, "new": 1}, map[string]bool{"old": true}, "migratable"},
-		{"policy all-draining → stuck_single_policy", map[string]int{"old": 1, "older": 1}, map[string]bool{"old": true, "older": true}, "stuck_single_policy"},
-		{"zero-weight clusters ignored", map[string]int{"old": 1, "zero": 0}, map[string]bool{"old": true}, "stuck_single_policy"},
-		{"empty exclude → migratable (degenerate)", map[string]int{"a": 1}, nil, "migratable"},
+		{"effective non-empty → migratable", map[string]int{"old": 1, "new": 1}, map[string]int{"new": 1}, "", "migratable"},
+		{"effective empty + strict + raw set → stuck_single_policy", map[string]int{"old": 1}, nil, meta.PlacementModeStrict, "stuck_single_policy"},
+		{"effective empty + weighted + raw set → stuck_no_policy (fallback exhausted)", map[string]int{"old": 1}, nil, meta.PlacementModeWeighted, "stuck_no_policy"},
+		{"effective empty + default mode → stuck_no_policy", map[string]int{"old": 1}, nil, "", "stuck_no_policy"},
+		{"effective empty + strict + no raw policy → stuck_no_policy (strict needs explicit policy)", nil, nil, meta.PlacementModeStrict, "stuck_no_policy"},
+		{"empty raw + empty effective → stuck_no_policy", nil, nil, "", "stuck_no_policy"},
 	}
 	for _, tc := range cases {
-		if got := ClassifyBucket(tc.policy, tc.exclude); got != tc.want {
+		if got := ClassifyBucket(tc.raw, tc.effective, tc.mode); got != tc.want {
 			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
 		}
 	}
@@ -448,13 +451,17 @@ func TestWorkerCategorizesChunksAcrossBuckets(t *testing.T) {
 	}
 	seedObject(t, m, bA.ID, "a1", []string{"old", "old"})
 
-	// Bucket B: policy {old:1} → stuck_single_policy (only target draining).
+	// Bucket B: policy {old:1} mode=strict → stuck_single_policy (only
+	// target draining, strict opts out of cluster-weights fallback).
 	bB, err := m.CreateBucket(ctx, "bkt-single", "owner", "STANDARD")
 	if err != nil {
 		t.Fatalf("CreateBucket B: %v", err)
 	}
 	if err := m.SetBucketPlacement(ctx, bB.Name, map[string]int{"old": 1}); err != nil {
 		t.Fatalf("SetBucketPlacement B: %v", err)
+	}
+	if err := m.SetBucketPlacementMode(ctx, bB.Name, meta.PlacementModeStrict); err != nil {
+		t.Fatalf("SetBucketPlacementMode B: %v", err)
 	}
 	seedObject(t, m, bB.ID, "b1", []string{"old", "old", "old"})
 

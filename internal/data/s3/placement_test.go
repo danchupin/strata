@@ -9,6 +9,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/danchupin/strata/internal/data"
+	"github.com/danchupin/strata/internal/data/placement"
+	"github.com/danchupin/strata/internal/meta"
 )
 
 // TestPutChunksPlacementRoutesPerPolicy pins the US-002 placement-rebalance
@@ -425,6 +427,106 @@ func TestPutChunksBucketPolicyWinsOverDefault(t *testing.T) {
 		if n < 400 || n > 600 {
 			t.Fatalf("bucket policy must win over default: cluster %s got %d/1000 not in [400,600]", cluster, n)
 		}
+	}
+}
+
+// TestPutChunksWeightedAutoFallback (US-003 effective-placement):
+// bucket Placement {a:1} with `a` draining + mode=weighted +
+// cluster.weights {b:1} → PutChunks must route to `b` via the
+// EffectivePolicy weighted-fallback path (NOT 503).
+func TestPutChunksWeightedAutoFallback(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "ak")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "sk")
+
+	a := newCapturingS3Server(t)
+	bsrv := newCapturingS3Server(t)
+	t.Cleanup(a.Close)
+	t.Cleanup(bsrv.Close)
+
+	be, err := New(Config{
+		Clusters: map[string]S3ClusterSpec{
+			"a": {Endpoint: a.URL(), Region: "us-east-1", ForcePathStyle: true, Credentials: CredentialsRef{Type: CredentialsChain}},
+			"b": {Endpoint: bsrv.URL(), Region: "us-west-1", ForcePathStyle: true, Credentials: CredentialsRef{Type: CredentialsChain}},
+		},
+		Classes: map[string]ClassSpec{
+			"STANDARD":   {Cluster: "a", Bucket: "bucket-a"},
+			"STANDARD-B": {Cluster: "b", Bucket: "bucket-b"},
+		},
+		SkipCredsCheck: true,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	bucketID := uuid.New()
+	states := map[string]meta.ClusterStateRow{
+		"a": {State: meta.ClusterStateEvacuating, Weight: 0},
+		"b": {State: meta.ClusterStateLive, Weight: 1},
+	}
+	ctx := data.WithBucketID(context.Background(), bucketID)
+	ctx = data.WithObjectKey(ctx, "k")
+	ctx = data.WithPlacement(ctx, map[string]int{"a": 1})
+	ctx = data.WithDefaultPlacement(ctx, placement.DefaultPolicy(states))
+	ctx = data.WithDrainingClusters(ctx, map[string]bool{"a": true})
+	ctx = data.WithPlacementMode(ctx, meta.PlacementModeWeighted)
+	ctx = placement.WithClusterStates(ctx, states)
+	if _, err := be.PutChunks(ctx, strings.NewReader("payload"), "STANDARD"); err != nil {
+		t.Fatalf("PutChunks: %v", err)
+	}
+	if a.requestCount() != 0 || bsrv.requestCount() != 1 {
+		t.Fatalf("weighted auto-fallback: want a=0 b=1, got a=%d b=%d", a.requestCount(), bsrv.requestCount())
+	}
+}
+
+// TestPutChunksStrictRefusesWeightedFallback (US-003 effective-
+// placement): bucket Placement {a:1} with `a` draining + mode=strict +
+// cluster.weights {b:1} → EffectivePolicy returns nil so the picker
+// falls back to spec.Cluster ("a"); since "a" is draining, the s3
+// backend's strict-refuse path returns ErrDrainRefused. Cluster `b`
+// must NOT receive the write (strict opts out of weighted fallback).
+func TestPutChunksStrictRefusesWeightedFallback(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "ak")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "sk")
+
+	a := newCapturingS3Server(t)
+	bsrv := newCapturingS3Server(t)
+	t.Cleanup(a.Close)
+	t.Cleanup(bsrv.Close)
+
+	be, err := New(Config{
+		Clusters: map[string]S3ClusterSpec{
+			"a": {Endpoint: a.URL(), Region: "us-east-1", ForcePathStyle: true, Credentials: CredentialsRef{Type: CredentialsChain}},
+			"b": {Endpoint: bsrv.URL(), Region: "us-west-1", ForcePathStyle: true, Credentials: CredentialsRef{Type: CredentialsChain}},
+		},
+		Classes: map[string]ClassSpec{
+			"STANDARD":   {Cluster: "a", Bucket: "bucket-a"},
+			"STANDARD-B": {Cluster: "b", Bucket: "bucket-b"},
+		},
+		SkipCredsCheck: true,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	bucketID := uuid.New()
+	states := map[string]meta.ClusterStateRow{
+		"a": {State: meta.ClusterStateEvacuating, Weight: 0},
+		"b": {State: meta.ClusterStateLive, Weight: 1},
+	}
+	ctx := data.WithBucketID(context.Background(), bucketID)
+	ctx = data.WithObjectKey(ctx, "k")
+	ctx = data.WithPlacement(ctx, map[string]int{"a": 1})
+	ctx = data.WithDefaultPlacement(ctx, placement.DefaultPolicy(states))
+	ctx = data.WithDrainingClusters(ctx, map[string]bool{"a": true})
+	ctx = data.WithPlacementMode(ctx, meta.PlacementModeStrict)
+	ctx = placement.WithClusterStates(ctx, states)
+	_, err = be.PutChunks(ctx, strings.NewReader("payload"), "STANDARD")
+	if err == nil {
+		t.Fatalf("PutChunks: want DrainRefused, got nil")
+	}
+	if !errors.Is(err, data.ErrDrainRefused) {
+		t.Fatalf("PutChunks err: want ErrDrainRefused, got %v", err)
+	}
+	if bsrv.requestCount() != 0 {
+		t.Fatalf("strict bucket must NOT fall back to weighted cluster b; got b=%d", bsrv.requestCount())
 	}
 }
 

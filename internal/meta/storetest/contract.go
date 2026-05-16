@@ -65,6 +65,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"BucketStatsHotPath", caseBucketStatsHotPath},
 		{"UsageAggregateRoundTrip", caseUsageAggregate},
 		{"BucketPlacementRoundTrip", caseBucketPlacement},
+		{"BucketPlacementMode", casePlacementMode},
 		{"ClusterStateRoundTrip", caseClusterState},
 		{"ClusterStateModes", caseClusterStateModes},
 		{"ClusterStateWeights", caseClusterStateWeights},
@@ -2724,6 +2725,68 @@ func caseBucketPlacement(t *testing.T, s meta.Store) {
 	}
 	if err := s.DeleteBucketPlacement(ctx, "no-such-bucket"); err != meta.ErrBucketNotFound {
 		t.Errorf("delete missing bucket: got %v want ErrBucketNotFound", err)
+	}
+}
+
+// casePlacementMode exercises the per-bucket PlacementMode field on the
+// buckets row (US-001 effective-placement). Empty/legacy rows read back
+// as "" (downstream coerces to "weighted"); legal explicit values are
+// "weighted" and "strict". Invalid values are rejected with
+// ErrInvalidPlacementMode and never mutate the row. Round-trip is
+// observable via GetBucket — no separate getter needed.
+func casePlacementMode(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "pm", "owner-pm", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	_ = b
+
+	// Backwards-compat: fresh row reads back with empty PlacementMode.
+	got, err := s.GetBucket(ctx, "pm")
+	if err != nil {
+		t.Fatalf("get fresh: %v", err)
+	}
+	if got.PlacementMode != "" {
+		t.Fatalf("fresh placement_mode: got %q want \"\"", got.PlacementMode)
+	}
+
+	for _, mode := range []string{
+		meta.PlacementModeWeighted,
+		meta.PlacementModeStrict,
+		"", // clear back to default
+		meta.PlacementModeStrict,
+	} {
+		if err := s.SetBucketPlacementMode(ctx, "pm", mode); err != nil {
+			t.Fatalf("set %q: %v", mode, err)
+		}
+		got, err := s.GetBucket(ctx, "pm")
+		if err != nil {
+			t.Fatalf("get after set %q: %v", mode, err)
+		}
+		if got.PlacementMode != mode {
+			t.Errorf("round-trip %q: got %q", mode, got.PlacementMode)
+		}
+	}
+
+	// Invalid mode does not mutate the persisted row.
+	for _, bad := range []string{"WEIGHTED", "STRICT", "loose", "weighted-default", " "} {
+		if err := s.SetBucketPlacementMode(ctx, "pm", bad); err != meta.ErrInvalidPlacementMode {
+			t.Errorf("validation %q: got %v want ErrInvalidPlacementMode", bad, err)
+		}
+	}
+	got, err = s.GetBucket(ctx, "pm")
+	if err != nil {
+		t.Fatalf("get after rejected mutations: %v", err)
+	}
+	if got.PlacementMode != meta.PlacementModeStrict {
+		t.Errorf("placement_mode after rejected mutations: got %q want %q",
+			got.PlacementMode, meta.PlacementModeStrict)
+	}
+
+	// Missing bucket: should surface ErrBucketNotFound, not ErrInvalidPlacementMode.
+	if err := s.SetBucketPlacementMode(ctx, "no-such-bucket", meta.PlacementModeStrict); err != meta.ErrBucketNotFound {
+		t.Errorf("set missing bucket: got %v want ErrBucketNotFound", err)
 	}
 }
 

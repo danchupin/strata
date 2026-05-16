@@ -170,15 +170,16 @@ func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error
 		versioning, acl   string
 		region            string
 		mfaDelete         string
+		placementMode     string
 		createdAt         time.Time
 		shardCount        int
 		shardCountTarget  int
 		objectLockEnabled bool
 	)
 	err := s.s.Query(
-		`SELECT id, owner_id, created_at, default_class, versioning, shard_count, shard_count_target, acl, object_lock_enabled, region, mfa_delete FROM buckets WHERE name=?`,
+		`SELECT id, owner_id, created_at, default_class, versioning, shard_count, shard_count_target, acl, object_lock_enabled, region, mfa_delete, placement_mode FROM buckets WHERE name=?`,
 		name,
-	).WithContext(ctx).Scan(&idG, &owner, &createdAt, &class, &versioning, &shardCount, &shardCountTarget, &acl, &objectLockEnabled, &region, &mfaDelete)
+	).WithContext(ctx).Scan(&idG, &owner, &createdAt, &class, &versioning, &shardCount, &shardCountTarget, &acl, &objectLockEnabled, &region, &mfaDelete, &placementMode)
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrBucketNotFound
 	}
@@ -203,6 +204,7 @@ func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error
 		MfaDelete:         mfaDelete,
 		ShardCount:        shardCount,
 		TargetShardCount:  shardCountTarget,
+		PlacementMode:     placementMode,
 	}, nil
 }
 
@@ -369,18 +371,18 @@ func (s *Store) bucketIsEmpty(ctx context.Context, bucketID uuid.UUID, shardCoun
 }
 
 func (s *Store) ListBuckets(ctx context.Context, owner string) ([]*meta.Bucket, error) {
-	iter := s.s.Query(`SELECT name, id, owner_id, created_at, default_class, versioning, shard_count, shard_count_target, acl, region, mfa_delete FROM buckets`).
+	iter := s.s.Query(`SELECT name, id, owner_id, created_at, default_class, versioning, shard_count, shard_count_target, acl, region, mfa_delete, placement_mode FROM buckets`).
 		WithContext(ctx).Iter()
 	defer iter.Close()
 
 	var (
-		out                                                      []*meta.Bucket
-		name, ownerID, class, versioning, acl, region, mfaDelete string
-		idG                                                      gocql.UUID
-		createdAt                                                time.Time
-		shardCount, shardCountTarget                             int
+		out                                                                     []*meta.Bucket
+		name, ownerID, class, versioning, acl, region, mfaDelete, placementMode string
+		idG                                                                     gocql.UUID
+		createdAt                                                               time.Time
+		shardCount, shardCountTarget                                            int
 	)
-	for iter.Scan(&name, &idG, &ownerID, &createdAt, &class, &versioning, &shardCount, &shardCountTarget, &acl, &region, &mfaDelete) {
+	for iter.Scan(&name, &idG, &ownerID, &createdAt, &class, &versioning, &shardCount, &shardCountTarget, &acl, &region, &mfaDelete, &placementMode) {
 		if owner != "" && ownerID != owner {
 			continue
 		}
@@ -401,6 +403,7 @@ func (s *Store) ListBuckets(ctx context.Context, owner string) ([]*meta.Bucket, 
 			MfaDelete:        mfaDelete,
 			ShardCount:       shardCount,
 			TargetShardCount: shardCountTarget,
+			PlacementMode:    placementMode,
 		})
 	}
 	if err := iter.Close(); err != nil {
@@ -3008,6 +3011,31 @@ func (s *Store) DeleteBucketPlacement(ctx context.Context, name string) error {
 		return err
 	}
 	return s.deleteBucketBlob(ctx, "bucket_placement", b.ID)
+}
+
+// SetBucketPlacementMode persists the per-bucket placement mode on the
+// buckets row (US-001 effective-placement). Uses LWT (`IF EXISTS`) so
+// the write participates in the same Paxos lineage as CreateBucket /
+// SetBucketVersioning — without it a non-LWT UPDATE can leave Paxos
+// state stale, causing subsequent LOCAL_QUORUM reads to observe the
+// pre-update value until Paxos resynchronises (the same lesson the
+// SetBucketVersioning comment captures). Empty string clears the
+// override; validation via meta.ValidatePlacementMode.
+func (s *Store) SetBucketPlacementMode(ctx context.Context, name, mode string) error {
+	if err := meta.ValidatePlacementMode(mode); err != nil {
+		return err
+	}
+	applied, err := s.s.Query(
+		`UPDATE buckets SET placement_mode=? WHERE name=? IF EXISTS`,
+		mode, name,
+	).WithContext(ctx).SerialConsistency(gocql.LocalSerial).ScanCAS(nil)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return meta.ErrBucketNotFound
+	}
+	return nil
 }
 
 // SetClusterState persists (state, mode, weight) under clusterID.

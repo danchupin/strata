@@ -555,6 +555,37 @@ The picker call sites (`rados.Backend.PutChunks`, `s3.Backend.clusterForPlacemen
 states snapshot is sourced from `placement.DrainCache.States(ctx)` (30 s TTL, invalidated synchronously by
 `/activate` + `/weight` + `/drain` + `/undrain` admin handlers).
 
+**Per-bucket `PlacementMode` ∈ {`weighted` (default), `strict`}** (US-001..US-006 of
+`ralph/effective-placement`). Adds an opt-in compliance pin on top of the bucket-policy-wins invariant.
+Resolution lives in `placement.EffectivePolicy(bucketPolicy, mode, clusterWeights, clusterStates) map[string]int`
+in `internal/data/placement/policy.go`:
+
+1. `liveSubset(bucketPolicy)` filters policy entries to (cluster live OR absent from states per
+   absence==live semantic) AND weight>0. Non-empty → return as-is.
+2. If `liveSubset(bucketPolicy)` is empty AND `len(bucketPolicy) > 0` AND `mode == "strict"` → return nil
+   (compliance refuse — caller falls through to spec.Cluster which strict-refuses if drained → 503
+   `DrainRefused`). This preserves the explicit-pin semantic for data-sovereignty / replication-design
+   buckets even when every cluster in the bucket's policy is draining.
+3. Otherwise (mode != strict, OR bucketPolicy nil entirely) → return `liveSubset(clusterWeights)` so the
+   cluster-weights wheel covers the gap.
+
+`mode == ""` (legacy rows) is coerced to `weighted` via `meta.NormalizePlacementMode`. Nil-policy + strict
+is treated as weighted at the helper boundary — strict is meaningless without an explicit policy to pin.
+Both `rados.Backend.PutChunks` and `s3.Backend.clusterForPlacement` route through `EffectivePolicy`; the
+rebalance worker classifier `internal/rebalance.ClassifyBucket(raw, effective, mode)` derives
+`migratable | stuck_single_policy | stuck_no_policy` from the same triple so /drain-impact categorisation
+matches actual PUT routing behavior. `stuck_single_policy` fires ONLY for strict-flagged buckets that
+have a non-empty Placement with every entry draining — the operator-facing
+`<BulkPlacementFixDialog>` filters its row list to that subset and offers a per-row "Flip to weighted"
+shortcut so the cluster.weights fallback can absorb the drain without forcing a manual policy edit.
+
+Per-bucket mode is persisted across all three meta backends (memory in-struct, Cassandra
+`ALTER TABLE buckets ADD placement_mode text` + LWT `UPDATE ... IF EXISTS`, TiKV via `updateBucket`
+helper). Admin `PUT /admin/v1/buckets/{name}/placement` body extended with optional `mode: "weighted"|"strict"`;
+audit row stamped `admin:UpdateBucketPlacementMode` when the field is present (vs the existing
+`admin:PutBucketPlacement` when only the policy changes). GET response always carries `mode` field
+(coerced via NormalizePlacementMode so legacy NULL → `"weighted"`).
+
 Boot reconcile (`internal/serverapp/cluster_reconcile.go`) is idempotent — re-running it creates no duplicates and
 overwrites nothing. Lives between drain-cache wiring and listener start; fail-soft on transient meta errors so a
 gocql hiccup doesn't block gateway startup.

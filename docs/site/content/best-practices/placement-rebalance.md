@@ -95,6 +95,78 @@ A zero-weight entry is legal — it pins the cluster in the policy
 without letting new chunks land there. Useful for "decommissioning
 soon, drained but not yet deregistered".
 
+## Strict vs Weighted placement (per-bucket mode)
+
+Each bucket carries a `PlacementMode` ∈ {`weighted` (default), `strict`}
+alongside its `Placement` policy. The mode controls what
+`placement.EffectivePolicy` returns when every cluster named in the
+bucket's policy is draining — the resolution order is identical to the
+PUT hot path and the rebalance worker classifier (US-001..US-005 of
+ralph/effective-placement, closes the P2 ROADMAP entry):
+
+| `bucket.Placement` | `mode` | Live clusters in policy? | Effective policy returned | Rebalance classifier |
+| ------------------ | ------ | ------------------------ | ------------------------- | -------------------- |
+| nil / empty        | (any)  | n/a                      | synthesised `cluster.weights` | `migratable` (when chunk on draining) / `stuck_no_policy` (when weights also empty) |
+| non-empty          | weighted | yes (≥1 live)          | bucket policy, draining filtered out | `migratable` |
+| non-empty          | weighted | no (all draining)      | synthesised `cluster.weights` fallback | `migratable` (the fallback supplies a live target) |
+| non-empty          | weighted | no, AND `cluster.weights` empty | nil (genuine no-target) | `stuck_no_policy` |
+| non-empty          | strict | yes (≥1 live)            | bucket policy, draining filtered out | `migratable` |
+| non-empty          | strict | no (all draining)      | nil (compliance refuse — no fallback) | `stuck_single_policy` |
+
+`mode == ""` (legacy buckets) is coerced to `weighted` everywhere via
+`meta.NormalizePlacementMode`. Setting `mode = strict` on a nil/empty
+policy is a no-op — strict only has meaning when the bucket has an
+explicit Placement to pin.
+
+**When to use `strict`:**
+
+- **Data sovereignty.** Bucket data must NOT silently fall back to a
+  cluster in a different region / jurisdiction. Strict refuses the PUT
+  with `503 DrainRefused` rather than land bytes on the
+  cluster-weights default target.
+- **Replication design.** A bucket whose Placement is part of a
+  multi-cluster replication scheme — falling back to weights would
+  break the replication invariant.
+- **Hot/cold separation.** A bucket pinned to `hot=1` should not
+  silently route to `cold` clusters during a hot-cluster drain.
+
+**When to use `weighted` (default):**
+
+- **Typical operator deploys.** A drain should be a paperwork-free
+  operation: pick a cluster, click Drain, let auto-fallback to
+  cluster.weights cover the bucket policy gap, deregister.
+- **Buckets without compliance constraints.** Most user-facing
+  workloads — the cluster weights wheel was designed to be the routing
+  fallback for exactly this case.
+
+**Migration note.** Existing buckets get `mode = weighted` by default —
+no operator action required. Pre-cycle behaviour matched
+`mode = strict` (no fallback), which is why the cycle ships a console
+toggle + bulk-fix flow so operators can opt into strict explicitly on
+the buckets that need it. The smoke harness
+`scripts/smoke-effective-placement.sh` walks all four scenarios
+(weighted auto-fallback, strict blocks drain, flip strict→weighted
+resolves stuck, all-clusters-drained → 503) end-to-end against the
+running `multi-cluster` compose profile; run via
+`make smoke-effective-placement`.
+
+**Console surfaces** (UI half of US-006):
+
+- BucketDetail Placement tab gains a `Strict placement` switch — flip
+  ON opens a confirmation dialog ("may block drain workflows if this
+  bucket's clusters become unavailable"); flip OFF is one-click.
+  Header renders a small `strict` badge when the bucket has a non-
+  empty Placement AND `mode = strict`.
+- `<BulkPlacementFixDialog>` filters its row list to compliance-locked
+  buckets (`placement_mode = strict`) only — weighted stuck buckets
+  auto-resolve post-EffectivePolicy and never reach the dialog. Per-
+  row default suggestion is "Flip to weighted (auto-fallback to
+  cluster weights)" so the operator can resolve a strict-stuck row
+  without manually editing the policy cluster list.
+- `<ConfirmDrainModal>` amber stuck-row reads `<N> compliance-locked
+  buckets need fix`; Submit blocks while the count is > 0 even when
+  the typed-confirm matches.
+
 ## Routing — stable hash-mod
 
 `internal/data/placement.PickCluster` is the chunk PUT router:

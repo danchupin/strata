@@ -242,18 +242,31 @@ export async function fetchClusterDrainProgress(
 // drain-transparency). Label is the human-readable text rendered in the
 // BulkPlacementFixDialog dropdown; Policy is the {clusterID: weight}
 // body the operator would PUT to /admin/v1/buckets/{name}/placement.
+//
+// placement_mode_override (US-005 effective-placement) carries an optional
+// `mode` value the UI must PUT alongside `policy`. Empty/absent leaves the
+// bucket's mode unchanged. "weighted" — emitted on the strict-stuck
+// "Flip to weighted" shortcut so cluster.weights auto-fallback unsticks
+// the bucket without a policy edit. "strict" — emitted on per-cluster
+// replacement suggestions for strict-stuck buckets so the compliance pin
+// is preserved when the operator picks a replacement target.
 export interface SuggestedPolicy {
   label: string;
   policy: Record<string, number>;
+  placement_mode_override?: '' | 'weighted' | 'strict';
 }
 
 // BucketImpactEntry mirrors adminapi.BucketImpactEntry from
 // internal/adminapi/clusters_drain_impact.go. current_policy is null when
-// the bucket has no Placement (stuck_no_policy category).
+// the bucket has no Placement (stuck_no_policy category). placement_mode
+// (US-005 effective-placement) is the bucket's normalized mode value —
+// "weighted" (default + legacy) or "strict" — used by the
+// BulkPlacementFixDialog to filter to compliance-locked buckets only.
 export interface BucketImpactEntry {
   name: string;
   current_policy: Record<string, number> | null;
   category: 'migratable' | 'stuck_single_policy' | 'stuck_no_policy' | string;
+  placement_mode: 'weighted' | 'strict' | string;
   chunk_count: number;
   bytes_used: number;
   suggested_policies: SuggestedPolicy[] | null;
