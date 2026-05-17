@@ -54,7 +54,7 @@ func TestClusterDrainProgress_DrainingFlipsDeregisterReady(t *testing.T) {
 	now := time.Now().UTC()
 
 	// First scan: 5 chunks remaining (all migratable).
-	tracker.CommitScan([]string{"c1"}, map[string]rebalance.ScanResult{"c1": {MigratableChunks: 5, Bytes: 5 * 1024}}, now)
+	tracker.CommitScan(0, []string{"c1"}, map[string]rebalance.ScanResult{"c1": {MigratableChunks: 5, Bytes: 5 * 1024}}, now)
 
 	rr := putAdmin(t, s, "alice", http.MethodGet, "/admin/v1/clusters/c1/drain-progress", nil)
 	if rr.Code != http.StatusOK {
@@ -75,7 +75,7 @@ func TestClusterDrainProgress_DrainingFlipsDeregisterReady(t *testing.T) {
 	}
 
 	// Next scan: chunks drained to zero.
-	tracker.CommitScan([]string{"c1"}, map[string]rebalance.ScanResult{"c1": {}}, now.Add(time.Second))
+	tracker.CommitScan(0, []string{"c1"}, map[string]rebalance.ScanResult{"c1": {}}, now.Add(time.Second))
 	rr = putAdmin(t, s, "alice", http.MethodGet, "/admin/v1/clusters/c1/drain-progress", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status: got %d body=%s", rr.Code, rr.Body.String())
@@ -100,7 +100,7 @@ func TestClusterDrainProgress_StaleCacheWarning(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	// Commit a scan that is older than 2 × interval.
-	tracker.CommitScan([]string{"c1"}, map[string]rebalance.ScanResult{"c1": {MigratableChunks: 7, Bytes: 7}}, time.Now().Add(-10*time.Minute))
+	tracker.CommitScan(0, []string{"c1"}, map[string]rebalance.ScanResult{"c1": {MigratableChunks: 7, Bytes: 7}}, time.Now().Add(-10*time.Minute))
 
 	rr := putAdmin(t, s, "alice", http.MethodGet, "/admin/v1/clusters/c1/drain-progress", nil)
 	if rr.Code != http.StatusOK {
@@ -156,7 +156,7 @@ func TestClusterDrainProgress_CategorizedCountersSurfaced(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	// Mixed-category snapshot: 4 migratable, 2 stuck-single, 1 stuck-no-policy.
-	tracker.CommitScan([]string{"c1"}, map[string]rebalance.ScanResult{"c1": {
+	tracker.CommitScan(0, []string{"c1"}, map[string]rebalance.ScanResult{"c1": {
 		MigratableChunks:        4,
 		StuckSinglePolicyChunks: 2,
 		StuckNoPolicyChunks:     1,
@@ -197,7 +197,7 @@ func TestClusterDrainProgress_ByBucketSorted(t *testing.T) {
 	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate, 0); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	tracker.CommitScan([]string{"c1"}, map[string]rebalance.ScanResult{"c1": {
+	tracker.CommitScan(0, []string{"c1"}, map[string]rebalance.ScanResult{"c1": {
 		MigratableChunks:        5,
 		StuckSinglePolicyChunks: 3,
 		StuckNoPolicyChunks:     2,
@@ -284,7 +284,7 @@ func seedEvacuatingZeroChunks(t *testing.T, s *Server, id string) {
 	if err := s.Meta.SetClusterState(context.Background(), id, meta.ClusterStateEvacuating, meta.ClusterModeEvacuate, 0); err != nil {
 		t.Fatalf("seed state: %v", err)
 	}
-	s.RebalanceProgress.CommitScan([]string{id}, map[string]rebalance.ScanResult{id: {}}, time.Now().UTC())
+	s.RebalanceProgress.CommitScan(0, []string{id}, map[string]rebalance.ScanResult{id: {}}, time.Now().UTC())
 }
 
 func decodeDrainProgress(t *testing.T, body []byte) ClusterDrainProgressResponse {
@@ -385,7 +385,7 @@ func TestClusterDrainProgress_NotReadyReasons_AllThree(t *testing.T) {
 	if err := s.Meta.SetClusterState(context.Background(), "c1", meta.ClusterStateEvacuating, meta.ClusterModeEvacuate, 0); err != nil {
 		t.Fatalf("seed state: %v", err)
 	}
-	s.RebalanceProgress.CommitScan([]string{"c1"}, map[string]rebalance.ScanResult{"c1": {MigratableChunks: 2, Bytes: 2 * 1024}}, time.Now().UTC())
+	s.RebalanceProgress.CommitScan(0, []string{"c1"}, map[string]rebalance.ScanResult{"c1": {MigratableChunks: 2, Bytes: 2 * 1024}}, time.Now().UTC())
 	if err := s.Meta.EnqueueChunkDeletion(context.Background(), "test-region", []data.ChunkRef{
 		{Cluster: "c1", Pool: "p", OID: "oid-1", Size: 1},
 	}); err != nil {

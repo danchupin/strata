@@ -242,6 +242,13 @@ func computeDrainImpact(ctx context.Context, m meta.Store, clusterID string, row
 	}
 	previewWeights := placement.DefaultPolicy(previewStates)
 
+	// US-003 rebalance-scale-phase-2: this synchronous-scan path
+	// intentionally walks the FULL bucket list (not ListBucketsShard).
+	// /drain-impact is a one-shot operator preview gated by the 5-minute
+	// cache, NOT a per-tick worker iteration, so sharding it would only
+	// add coordination cost without changing the wire shape — the
+	// handler runs in a single goroutine on whichever replica receives
+	// the admin request.
 	buckets, err := m.ListBuckets(ctx, "")
 	if err != nil {
 		return drainImpactScan{}, err

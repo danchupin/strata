@@ -467,3 +467,13 @@ func (p *panicOnListMeta) ListBuckets(_ context.Context, _ string) ([]*meta.Buck
 	}
 	panic("rigged panic for shard isolation test")
 }
+
+// ListBucketsShard overrides the bucket-scan entry point used by the
+// US-003 rebalance-scale-phase-2 worker so the panic-isolation contract
+// still trips even though Phase 2 routes through the sharded API.
+func (p *panicOnListMeta) ListBucketsShard(_ context.Context, _, _ int) ([]*meta.Bucket, error) {
+	if p.counter != nil {
+		p.counter.Add(1)
+	}
+	panic("rigged panic for shard isolation test")
+}

@@ -27,7 +27,7 @@ func migratableScan(n int64) ScanResult {
 
 func TestProgressTrackerNilReceiverNoopsAndReadsEmpty(t *testing.T) {
 	var p *ProgressTracker
-	p.CommitScan([]string{"c1"}, map[string]ScanResult{"c1": migratableScan(1)}, time.Now())
+	p.CommitScan(0, []string{"c1"}, map[string]ScanResult{"c1": migratableScan(1)}, time.Now())
 	if _, ok := p.Snapshot("c1"); ok {
 		t.Fatal("nil tracker must report no snapshot")
 	}
@@ -38,7 +38,7 @@ func TestProgressTrackerCommitSetsBaseAndUpserts(t *testing.T) {
 	p := NewProgressTracker(10 * time.Minute)
 	now := time.Unix(1_700_000_000, 0).UTC()
 
-	p.CommitScan([]string{"c1"}, map[string]ScanResult{"c1": migratableScan(5)}, now)
+	p.CommitScan(0, []string{"c1"}, map[string]ScanResult{"c1": migratableScan(5)}, now)
 	snap, ok := p.Snapshot("c1")
 	if !ok {
 		t.Fatal("expected snapshot after first commit")
@@ -58,7 +58,7 @@ func TestProgressTrackerCommitSetsBaseAndUpserts(t *testing.T) {
 
 	// Second commit shrinks chunks → BaseChunks must NOT change.
 	later := now.Add(time.Minute)
-	p.CommitScan([]string{"c1"}, map[string]ScanResult{"c1": migratableScan(2)}, later)
+	p.CommitScan(0, []string{"c1"}, map[string]ScanResult{"c1": migratableScan(2)}, later)
 	snap, _ = p.Snapshot("c1")
 	if snap.Chunks() != 2 {
 		t.Fatalf("Chunks after shrink: got %d want 2", snap.Chunks())
@@ -71,12 +71,12 @@ func TestProgressTrackerCommitSetsBaseAndUpserts(t *testing.T) {
 func TestProgressTrackerReapsUndrainedClusters(t *testing.T) {
 	p := NewProgressTracker(time.Minute)
 	now := time.Now().UTC()
-	p.CommitScan([]string{"c1", "c2"}, map[string]ScanResult{"c1": migratableScan(3), "c2": {}}, now)
+	p.CommitScan(0, []string{"c1", "c2"}, map[string]ScanResult{"c1": migratableScan(3), "c2": {}}, now)
 	if _, ok := p.Snapshot("c1"); !ok {
 		t.Fatal("expected c1 snapshot after commit")
 	}
 	// Next tick only sees c2 as draining → c1 entry must be dropped.
-	p.CommitScan([]string{"c2"}, map[string]ScanResult{"c2": {}}, now.Add(time.Second))
+	p.CommitScan(0, []string{"c2"}, map[string]ScanResult{"c2": {}}, now.Add(time.Second))
 	if _, ok := p.Snapshot("c1"); ok {
 		t.Fatal("c1 snapshot must be reaped after it leaves draining set")
 	}
@@ -91,7 +91,7 @@ func TestProgressTrackerZeroChunksOnFirstCommit(t *testing.T) {
 	// zero in that case (no chunks were ever observed).
 	p := NewProgressTracker(time.Minute)
 	now := time.Now().UTC()
-	completions := p.CommitScan([]string{"c1"}, map[string]ScanResult{}, now)
+	completions := p.CommitScan(0, []string{"c1"}, map[string]ScanResult{}, now)
 	snap, ok := p.Snapshot("c1")
 	if !ok {
 		t.Fatal("expected zero-chunk snapshot")
@@ -111,14 +111,14 @@ func TestProgressTrackerCompletionFiresOnceOnDrainToZero(t *testing.T) {
 	p := NewProgressTracker(time.Minute)
 	t0 := time.Unix(1_700_000_000, 0).UTC()
 
-	if got := p.CommitScan([]string{"c1"}, map[string]ScanResult{"c1": migratableScan(5)}, t0); len(got) != 0 {
+	if got := p.CommitScan(0, []string{"c1"}, map[string]ScanResult{"c1": migratableScan(5)}, t0); len(got) != 0 {
 		t.Fatalf("first commit at chunks=5 must not fire: got %d events", len(got))
 	}
-	if got := p.CommitScan([]string{"c1"}, map[string]ScanResult{"c1": migratableScan(3)}, t0.Add(time.Minute)); len(got) != 0 {
+	if got := p.CommitScan(0, []string{"c1"}, map[string]ScanResult{"c1": migratableScan(3)}, t0.Add(time.Minute)); len(got) != 0 {
 		t.Fatalf("intermediate chunks=3 must not fire: got %d events", len(got))
 	}
 	t3 := t0.Add(2 * time.Minute)
-	events := p.CommitScan([]string{"c1"}, map[string]ScanResult{"c1": {}}, t3)
+	events := p.CommitScan(0, []string{"c1"}, map[string]ScanResult{"c1": {}}, t3)
 	if len(events) != 1 {
 		t.Fatalf("transition 3 → 0 must fire one event: got %d", len(events))
 	}
@@ -139,7 +139,7 @@ func TestProgressTrackerCompletionFiresOnceOnDrainToZero(t *testing.T) {
 		t.Errorf("ScanFinish: got %v want %v", ev.ScanFinish, t3)
 	}
 	// A second commit at chunks=0 must NOT re-fire (idempotency).
-	if again := p.CommitScan([]string{"c1"}, map[string]ScanResult{"c1": {}}, t3.Add(time.Minute)); len(again) != 0 {
+	if again := p.CommitScan(0, []string{"c1"}, map[string]ScanResult{"c1": {}}, t3.Add(time.Minute)); len(again) != 0 {
 		t.Fatalf("0 → 0 must not re-fire: got %d events", len(again))
 	}
 	snap, _ := p.Snapshot("c1")
@@ -167,7 +167,7 @@ func TestProgressTrackerCompletionRefiresAfterRefill(t *testing.T) {
 		{0, 0, true}, // re-fire after refill
 	}
 	for i, s := range steps {
-		events := p.CommitScan([]string{"c1"},
+		events := p.CommitScan(0, []string{"c1"},
 			map[string]ScanResult{"c1": {MigratableChunks: s.chunks, Bytes: s.bytes}},
 			t0.Add(time.Duration(i)*time.Minute))
 		if s.wantFire && len(events) != 1 {
@@ -184,19 +184,19 @@ func TestProgressTrackerCompletionRefiresAfterRefill(t *testing.T) {
 func TestProgressTrackerCompletionResetsOnReap(t *testing.T) {
 	p := NewProgressTracker(time.Minute)
 	t0 := time.Unix(1_700_000_000, 0).UTC()
-	p.CommitScan([]string{"c1"}, map[string]ScanResult{"c1": migratableScan(4)}, t0)
-	p.CommitScan([]string{"c1"}, map[string]ScanResult{"c1": {}}, t0.Add(time.Minute))
+	p.CommitScan(0, []string{"c1"}, map[string]ScanResult{"c1": migratableScan(4)}, t0)
+	p.CommitScan(0, []string{"c1"}, map[string]ScanResult{"c1": {}}, t0.Add(time.Minute))
 	if _, ok := p.Snapshot("c1"); !ok {
 		t.Fatal("snapshot must persist while c1 still draining")
 	}
 	// Undrain — c1 leaves the draining set, tracker reaps it.
-	p.CommitScan(nil, nil, t0.Add(2*time.Minute))
+	p.CommitScan(0, nil, nil, t0.Add(2*time.Minute))
 	if _, ok := p.Snapshot("c1"); ok {
 		t.Fatal("snapshot must be reaped after undrain")
 	}
 	// Re-drain: 7 → 0 fresh. Must fire because the prior FiredAt died with the row.
-	p.CommitScan([]string{"c1"}, map[string]ScanResult{"c1": migratableScan(7)}, t0.Add(3*time.Minute))
-	events := p.CommitScan([]string{"c1"}, map[string]ScanResult{"c1": {}}, t0.Add(4*time.Minute))
+	p.CommitScan(0, []string{"c1"}, map[string]ScanResult{"c1": migratableScan(7)}, t0.Add(3*time.Minute))
+	events := p.CommitScan(0, []string{"c1"}, map[string]ScanResult{"c1": {}}, t0.Add(4*time.Minute))
 	if len(events) != 1 {
 		t.Fatalf("fresh-drain → 0 after reap must fire: got %d events", len(events))
 	}
@@ -514,6 +514,169 @@ func TestWorkerCategorizesChunksAcrossBuckets(t *testing.T) {
 	}
 	if cat := snap.ByBucket["bkt-nopol"]; cat.Category != "stuck_no_policy" || cat.ChunkCount != 1 {
 		t.Errorf("bkt-nopol: got %+v want stuck_no_policy/1", cat)
+	}
+}
+
+// TestProgressTrackerShardedSnapshotMergesCounters covers the US-003
+// rebalance-scale-phase-2 merge contract: three shards each commit a
+// per-shard slice of one cluster's chunks → Snapshot returns sums.
+func TestProgressTrackerShardedSnapshotMergesCounters(t *testing.T) {
+	p := NewProgressTracker(time.Minute)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	p.CommitScan(0, []string{"c1"}, map[string]ScanResult{"c1": {MigratableChunks: 10, Bytes: 10 * 1024}}, now)
+	p.CommitScan(1, []string{"c1"}, map[string]ScanResult{"c1": {MigratableChunks: 20, Bytes: 20 * 1024}}, now)
+	p.CommitScan(2, []string{"c1"}, map[string]ScanResult{"c1": {MigratableChunks: 30, Bytes: 30 * 1024}}, now)
+
+	snap, ok := p.Snapshot("c1")
+	if !ok {
+		t.Fatal("expected merged snapshot")
+	}
+	if snap.MigratableChunks != 60 {
+		t.Errorf("MigratableChunks: got %d want 60 (10+20+30)", snap.MigratableChunks)
+	}
+	if snap.Bytes != 60*1024 {
+		t.Errorf("Bytes: got %d want %d", snap.Bytes, 60*1024)
+	}
+	if snap.BaseChunks != 60 {
+		t.Errorf("merged BaseChunks: got %d want 60 (sum of per-shard bases)", snap.BaseChunks)
+	}
+	if !snap.LastScanAt.Equal(now) {
+		t.Errorf("LastScanAt: got %v want %v", snap.LastScanAt, now)
+	}
+}
+
+// TestProgressTrackerShardedSnapshotMergesByBucket — each shard owns its
+// own bucket subset (disjoint per fnv32a(bucketID)). The merged ByBucket
+// is the union of every shard's per-bucket entries.
+func TestProgressTrackerShardedSnapshotMergesByBucket(t *testing.T) {
+	p := NewProgressTracker(time.Minute)
+	now := time.Now().UTC()
+	p.CommitScan(0, []string{"c1"}, map[string]ScanResult{"c1": {
+		MigratableChunks: 4,
+		Bytes:            4 * 1024,
+		ByBucket: map[string]BucketScanCategory{
+			"bkt-shard0-a": {Category: "migratable", ChunkCount: 2, BytesUsed: 2 * 1024},
+			"bkt-shard0-b": {Category: "migratable", ChunkCount: 2, BytesUsed: 2 * 1024},
+		},
+	}}, now)
+	p.CommitScan(1, []string{"c1"}, map[string]ScanResult{"c1": {
+		StuckSinglePolicyChunks: 3,
+		Bytes:                   3 * 1024,
+		ByBucket: map[string]BucketScanCategory{
+			"bkt-shard1-x": {Category: "stuck_single_policy", ChunkCount: 3, BytesUsed: 3 * 1024},
+		},
+	}}, now)
+
+	snap, ok := p.Snapshot("c1")
+	if !ok {
+		t.Fatal("expected merged snapshot")
+	}
+	if got := len(snap.ByBucket); got != 3 {
+		t.Fatalf("ByBucket entries: got %d want 3 (%v)", got, snap.ByBucket)
+	}
+	if cat := snap.ByBucket["bkt-shard0-a"]; cat.Category != "migratable" || cat.ChunkCount != 2 {
+		t.Errorf("bkt-shard0-a: got %+v", cat)
+	}
+	if cat := snap.ByBucket["bkt-shard1-x"]; cat.Category != "stuck_single_policy" || cat.ChunkCount != 3 {
+		t.Errorf("bkt-shard1-x: got %+v", cat)
+	}
+}
+
+// TestProgressTrackerShardedCompletionFiresOnceWhenAllShardsReachZero —
+// 3 shards each ramp from non-zero → 0 across multiple ticks. Completion
+// fires EXACTLY ONCE on the boundary that takes the merged total to 0,
+// even though every shard individually transitioned through its own zero
+// during the run.
+func TestProgressTrackerShardedCompletionFiresOnceWhenAllShardsReachZero(t *testing.T) {
+	p := NewProgressTracker(time.Minute)
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+
+	// Seed each shard with non-zero chunks. None of these commits should
+	// fire because prev_merged before each upsert is the prior partial sum.
+	if got := p.CommitScan(0, []string{"c1"}, map[string]ScanResult{"c1": migratableScan(5)}, t0); len(got) != 0 {
+		t.Fatalf("seed shard 0: unexpected fire (%d)", len(got))
+	}
+	if got := p.CommitScan(1, []string{"c1"}, map[string]ScanResult{"c1": migratableScan(7)}, t0.Add(time.Second)); len(got) != 0 {
+		t.Fatalf("seed shard 1: unexpected fire (%d)", len(got))
+	}
+	if got := p.CommitScan(2, []string{"c1"}, map[string]ScanResult{"c1": migratableScan(3)}, t0.Add(2*time.Second)); len(got) != 0 {
+		t.Fatalf("seed shard 2: unexpected fire (%d)", len(got))
+	}
+
+	// Shards 0 + 1 drain to zero. Merged total is still 3 → no fire.
+	if got := p.CommitScan(0, []string{"c1"}, map[string]ScanResult{"c1": {}}, t0.Add(3*time.Second)); len(got) != 0 {
+		t.Fatalf("shard 0 → 0 with merged>0: unexpected fire (%d)", len(got))
+	}
+	if got := p.CommitScan(1, []string{"c1"}, map[string]ScanResult{"c1": {}}, t0.Add(4*time.Second)); len(got) != 0 {
+		t.Fatalf("shard 1 → 0 with merged>0: unexpected fire (%d)", len(got))
+	}
+
+	// Shard 2 finally drains → merged hits 0 → exactly one fire.
+	events := p.CommitScan(2, []string{"c1"}, map[string]ScanResult{"c1": {}}, t0.Add(5*time.Second))
+	if len(events) != 1 {
+		t.Fatalf("merged → 0 must fire once: got %d events", len(events))
+	}
+	if ev := events[0]; ev.Cluster != "c1" || ev.BaseChunks != 15 {
+		t.Errorf("event payload: got %+v want cluster=c1 baseChunks=15 (5+7+3)", ev)
+	}
+
+	// Idle ticks at zero per-shard must NOT re-fire.
+	if got := p.CommitScan(0, []string{"c1"}, map[string]ScanResult{"c1": {}}, t0.Add(6*time.Second)); len(got) != 0 {
+		t.Fatalf("idle 0 from shard 0 must not re-fire: got %d", len(got))
+	}
+	if got := p.CommitScan(1, []string{"c1"}, map[string]ScanResult{"c1": {}}, t0.Add(7*time.Second)); len(got) != 0 {
+		t.Fatalf("idle 0 from shard 1 must not re-fire: got %d", len(got))
+	}
+}
+
+// TestProgressTrackerShardedCompletionRefiresAfterRefill — once the
+// merged total is 0 (FiredAt stamped), a refill on any single shard
+// re-arms the gate so the next merged 0 fires a second event.
+func TestProgressTrackerShardedCompletionRefiresAfterRefill(t *testing.T) {
+	p := NewProgressTracker(time.Minute)
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+
+	p.CommitScan(0, []string{"c1"}, map[string]ScanResult{"c1": migratableScan(5)}, t0)
+	p.CommitScan(1, []string{"c1"}, map[string]ScanResult{"c1": migratableScan(5)}, t0.Add(time.Second))
+	p.CommitScan(0, []string{"c1"}, map[string]ScanResult{"c1": {}}, t0.Add(2*time.Second))
+	events := p.CommitScan(1, []string{"c1"}, map[string]ScanResult{"c1": {}}, t0.Add(3*time.Second))
+	if len(events) != 1 {
+		t.Fatalf("first merged → 0 must fire once: got %d", len(events))
+	}
+
+	// Refill arrives on shard 0 only — merged > 0 again → FiredAt clears.
+	if got := p.CommitScan(0, []string{"c1"}, map[string]ScanResult{"c1": migratableScan(2)}, t0.Add(4*time.Second)); len(got) != 0 {
+		t.Fatalf("refill must not fire: got %d", len(got))
+	}
+	events = p.CommitScan(0, []string{"c1"}, map[string]ScanResult{"c1": {}}, t0.Add(5*time.Second))
+	if len(events) != 1 {
+		t.Fatalf("second merged → 0 after refill must re-fire: got %d", len(events))
+	}
+}
+
+// TestProgressTrackerShardedReapDropsClusterWhenAllShardsUndrain — the
+// per-shard reap rule must drop the cluster entry only once every shard
+// has observed the undrain.
+func TestProgressTrackerShardedReapDropsClusterWhenAllShardsUndrain(t *testing.T) {
+	p := NewProgressTracker(time.Minute)
+	now := time.Now().UTC()
+	p.CommitScan(0, []string{"c1"}, map[string]ScanResult{"c1": migratableScan(4)}, now)
+	p.CommitScan(1, []string{"c1"}, map[string]ScanResult{"c1": migratableScan(6)}, now)
+
+	// Shard 0 sees undrain → shard 0 slot dropped, shard 1 still holds.
+	p.CommitScan(0, nil, nil, now.Add(time.Second))
+	snap, ok := p.Snapshot("c1")
+	if !ok {
+		t.Fatal("cluster entry must survive while shard 1 still has data")
+	}
+	if snap.MigratableChunks != 6 {
+		t.Errorf("post-shard-0-reap: got %d want 6 (shard 1 still holds)", snap.MigratableChunks)
+	}
+
+	// Shard 1 also observes undrain → cluster entry gone.
+	p.CommitScan(1, nil, nil, now.Add(2*time.Second))
+	if _, ok := p.Snapshot("c1"); ok {
+		t.Fatal("cluster entry must be reaped after every shard undrains")
 	}
 }
 
