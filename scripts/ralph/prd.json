@@ -91,7 +91,7 @@
         "`go vet ./...` passes (bench script is bash; seeding harness uses existing aws-cli flow, no new Go binary)"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
