@@ -10,7 +10,6 @@ GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 # will fail with: pattern web/dist: no matching files found
 build: web-build
 	go build -o bin/strata ./cmd/strata
-	go build -o bin/strata-admin ./cmd/strata-admin
 	go build -o bin/strata-racecheck ./cmd/strata-racecheck
 
 web-build:
@@ -278,6 +277,14 @@ smoke-drain-followup:
 smoke-effective-placement:
 	bash scripts/smoke-effective-placement.sh
 
+# Single-binary dispatcher smoke (US-002 of ralph/single-binary).
+# Builds bin/strata and verifies post-consolidation shape: --help lists
+# server+admin, admin --help lists 9 subcommands, admin rewrap --help
+# prints rewrap usage, legacy bin/strata-admin gone, unknown subcommand
+# exits 2, no `strata-admin` residue in scoped trees.
+smoke-single-binary:
+	bash scripts/smoke-single-binary.sh
+
 # Race-soak driver (US-006). Brings up the cassandra-backed stack
 # (`make up-all-ci` when CI=true, else `make up-all`), waits for /readyz on
 # 9999, then runs `bin/strata-racecheck` for RACE_DURATION (default 1h) at
@@ -328,11 +335,11 @@ lint-nginx-lab:
 		-v $(CURDIR)/deploy/nginx/strata-lab.conf:/etc/nginx/conf.d/default.conf:ro \
 		nginx:1.27-alpine nginx -t
 
-# bench-gc / bench-lifecycle drive strata-admin against the lab-tikv stack
+# bench-gc / bench-lifecycle drive `strata admin` against the lab-tikv stack
 # (TiKV meta + RADOS data) at five concurrency levels and tee one JSON line
 # per level into bench-gc-results.jsonl / bench-lifecycle-results.jsonl. The
 # gateway must already be up via `make up-lab-tikv && make wait-strata-lab`;
-# strata-admin connects to TiKV directly (PD endpoints from the docker-compose
+# `strata admin` connects to TiKV directly (PD endpoints from the docker-compose
 # default) so the bench bypasses the HTTP gateway and measures the worker's
 # per-replica throughput cap.
 #
@@ -351,7 +358,7 @@ bench-gc: build
 		STRATA_TIKV_PD_ENDPOINTS=$${STRATA_TIKV_PD_ENDPOINTS:-127.0.0.1:2379} \
 		STRATA_RADOS_CONFIG_FILE=$${STRATA_RADOS_CONFIG_FILE:-/etc/ceph/ceph.conf} \
 		STRATA_RADOS_POOL=$${STRATA_RADOS_POOL:-strata.rgw.buckets.data} \
-		./bin/strata-admin bench-gc --entries=$(BENCH_GC_ENTRIES) --concurrency=$$c \
+		./bin/strata admin bench-gc --entries=$(BENCH_GC_ENTRIES) --concurrency=$$c \
 		  | tee -a bench-gc-results.jsonl; \
 	done
 
@@ -363,7 +370,7 @@ bench-lifecycle: build
 		STRATA_TIKV_PD_ENDPOINTS=$${STRATA_TIKV_PD_ENDPOINTS:-127.0.0.1:2379} \
 		STRATA_RADOS_CONFIG_FILE=$${STRATA_RADOS_CONFIG_FILE:-/etc/ceph/ceph.conf} \
 		STRATA_RADOS_POOL=$${STRATA_RADOS_POOL:-strata.rgw.buckets.data} \
-		./bin/strata-admin bench-lifecycle --objects=$(BENCH_LC_OBJECTS) --concurrency=$$c \
+		./bin/strata admin bench-lifecycle --objects=$(BENCH_LC_OBJECTS) --concurrency=$$c \
 		  | tee -a bench-lifecycle-results.jsonl; \
 	done
 
@@ -383,7 +390,7 @@ bench-gc-multi: build
 		STRATA_TIKV_PD_ENDPOINTS=$${STRATA_TIKV_PD_ENDPOINTS:-127.0.0.1:2379} \
 		STRATA_RADOS_CONFIG_FILE=$${STRATA_RADOS_CONFIG_FILE:-/etc/ceph/ceph.conf} \
 		STRATA_RADOS_POOL=$${STRATA_RADOS_POOL:-strata.rgw.buckets.data} \
-		./bin/strata-admin bench-gc --entries=$(BENCH_GC_ENTRIES) --concurrency=$$c \
+		./bin/strata admin bench-gc --entries=$(BENCH_GC_ENTRIES) --concurrency=$$c \
 		  --shards=$(BENCH_GC_SHARDS) \
 		  | tee -a bench-gc-multi-results.jsonl; \
 	done
@@ -396,7 +403,7 @@ bench-lifecycle-multi: build
 		STRATA_TIKV_PD_ENDPOINTS=$${STRATA_TIKV_PD_ENDPOINTS:-127.0.0.1:2379} \
 		STRATA_RADOS_CONFIG_FILE=$${STRATA_RADOS_CONFIG_FILE:-/etc/ceph/ceph.conf} \
 		STRATA_RADOS_POOL=$${STRATA_RADOS_POOL:-strata.rgw.buckets.data} \
-		./bin/strata-admin bench-lifecycle --objects=$(BENCH_LC_OBJECTS) --concurrency=$$c \
+		./bin/strata admin bench-lifecycle --objects=$(BENCH_LC_OBJECTS) --concurrency=$$c \
 		  --replicas=$(BENCH_LC_REPLICAS) --buckets=$(BENCH_LC_BUCKETS) \
 		  | tee -a bench-lifecycle-multi-results.jsonl; \
 	done

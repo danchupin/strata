@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/danchupin/strata/cmd/strata/admin"
 )
 
 func main() {
@@ -39,11 +41,23 @@ func (a *app) run(ctx context.Context) int {
 		return a.runVersion(a.args[1:])
 	case "server":
 		return a.runServer(ctx, a.args[1:])
+	case "admin":
+		return a.runAdmin(a.args[1:])
 	default:
 		fmt.Fprintf(a.err, "strata: unknown subcommand %q\n\n", a.args[0])
 		a.printRootHelp()
 		return 2
 	}
+}
+
+// runAdmin dispatches to the admin subcommand package. admin.Run owns its
+// own stdout/stderr writers + error formatting; any non-nil return maps to
+// exit 2 (legacy strata admin contract).
+func (a *app) runAdmin(args []string) int {
+	if err := admin.RunWith(a.out, a.err, args); err != nil {
+		return 2
+	}
+	return 0
 }
 
 func (a *app) printRootHelp() {
@@ -53,6 +67,7 @@ func (a *app) printRootHelp() {
 	fmt.Fprintln(a.out)
 	fmt.Fprintln(a.out, "subcommands:")
 	fmt.Fprintln(a.out, "  server     run the S3 gateway (and optional background workers)")
+	fmt.Fprintln(a.out, "  admin      operator CLI: iam, lifecycle, gc, sse, replicate, bucket, rewrap, bench-gc, bench-lifecycle")
 	fmt.Fprintln(a.out, "  version    print build version (git SHA) and Go runtime")
 	fmt.Fprintln(a.out, "  help       print this help")
 	fmt.Fprintln(a.out)

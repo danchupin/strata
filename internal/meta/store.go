@@ -339,7 +339,7 @@ const (
 )
 
 // RewrapProgress tracks a master-key rewrap pass for a single bucket. Used by
-// `strata-admin rewrap` for resumability across runs.
+// `strata admin rewrap` for resumability across runs.
 type RewrapProgress struct {
 	BucketID  uuid.UUID
 	TargetID  string

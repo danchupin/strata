@@ -162,7 +162,7 @@ the writer half of the schema cutover:
    - Cassandra: `SELECT COUNT(*) FROM gc_queue WHERE region = '<r>'`
      across all regions.
    - TiKV: scan the legacy `s/qg/` prefix; an admin diagnostic endpoint
-     or one-shot `strata-admin` probe walks the prefix and returns the
+     or one-shot `strata admin` probe walks the prefix and returns the
      count.
    Conservative target: legacy queue depth zero for ≥ one full
    `STRATA_GC_INTERVAL`.

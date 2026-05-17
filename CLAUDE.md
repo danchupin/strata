@@ -245,7 +245,7 @@ testcontainers to find the engine.
                           external billing. Cadence via
                           STRATA_USAGE_ROLLUP_AT + STRATA_USAGE_ROLLUP_INTERVAL.
                           Leader-elected on `usage-rollup-leader`.
-  strata-admin rewrap   -> one-shot SSE master-key rotation. Walks every
+  strata admin rewrap   -> one-shot SSE master-key rotation. Walks every
                           object and rewraps DEKs to --target-key-id (or
                           the active key). Idempotent + resumable via
                           rewrap_progress.
@@ -267,15 +267,15 @@ original `Host` + `URL.Path`; `Server.ServeHTTP` then strips the prefix from `r.
 
 ## Single-binary invariant
 
-**ALL functionality lives in one `strata` binary.** No separate `strata-admin` binary going forward — admin commands (rewrap, future one-shot tools) become subcommands of `strata`:
+**ALL functionality lives in one `strata` binary.** Admin commands (rewrap, future one-shot tools) are subcommands of `strata`:
 
 - `strata server` — gateway + workers (existing)
-- `strata admin rewrap` — SSE master-key rotation (currently `strata-admin rewrap`; planned consolidation)
+- `strata admin rewrap` — SSE master-key rotation
 - `strata admin <future>` — operator one-shots
 
 When adding a new operator-facing CLI feature, do NOT create a new top-level binary. Add it under `cmd/strata/admin/<name>.go` or extend the existing subcommand router. The single-binary shape is intentional — one Docker image, one entrypoint, one set of `--help` outputs, consistent flags + env handling.
 
-Migration of the existing `cmd/strata-admin` into `cmd/strata admin` is tracked as a P2 ROADMAP entry; do not regress by adding a second binary in the meantime.
+Consolidation complete: the legacy `cmd/strata-admin` binary has been folded into `cmd/strata/admin` as a subcommand package. Do not regress by reintroducing a second binary.
 
 ## Background workers (cmd/strata/workers)
 
@@ -340,7 +340,7 @@ field number and only rename the label. To convert pre-existing JSON rows to pro
 
 ## Logging (slog)
 
-`internal/logging` is the canonical setup. Both binaries (`cmd/strata`, `cmd/strata-admin`) call
+`internal/logging` is the canonical setup. The `cmd/strata` binary (both `strata server` and `strata admin`) calls
 `logging.Setup()` first thing to install a JSON-handler `*slog.Logger` driven by `STRATA_LOG_LEVEL`
 (DEBUG/INFO/WARN/ERROR; default INFO) and use the returned logger for binary-level errors. Workers (`leader.Session`, `gc.Worker`, `lifecycle.Worker`,
 `notify.Config`, etc.) take `*slog.Logger`, never `*log.Logger`. The HTTP gateway wraps its mux handler with
@@ -455,7 +455,7 @@ flow into a sync.Mutex-guarded sticky-err accumulator so the iteration parent fl
 tail-sampler exports the full iteration regardless of `STRATA_OTEL_SAMPLE_RATIO`. `tracer == nil`
 falls back to `strataotel.NoopTracer()` (a real but discarding tracer) so unit tests without OTel
 wiring keep working. **Adding a new worker: just call `deps.Tracer.Tracer("strata.worker.<name>")`
-and wrap your tick body in `StartIteration` / `EndIteration` — no struct change.** `strata-admin
+and wrap your tick body in `StartIteration` / `EndIteration` — no struct change.** `strata admin
 rewrap` is a one-shot operator command and stays untraced.
 
 ## Cassandra gotchas (real ones, hit during this codebase's lifetime)
@@ -688,8 +688,8 @@ Example diff shape (close-flip):
 -- **P1 — Single-binary `strata` (CockroachDB-shape).** Today there are 10 `cmd/` binaries,
 --  most of them background workers. Collapse `cmd/strata-{gateway,gc,...}` into a single
 --  `cmd/strata` ...
-++ ~~**P1 — Single-binary `strata` (CockroachDB-shape).**~~ — **Done.** Two binaries
-++  (`strata`, `strata-admin`); workers selected via `STRATA_WORKERS=`. (commit `abc1234`)
+++ ~~**P1 — Single-binary `strata` (CockroachDB-shape).**~~ — **Done.** Single `strata`
+++  binary; `server` + `admin` subcommands; workers selected via `STRATA_WORKERS=`. (commit `abc1234`)
 ```
 
 **Discovering a new gap, latent bug, or regression.** Every commit that surfaces something not yet on the roadmap MUST

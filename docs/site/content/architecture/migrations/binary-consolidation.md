@@ -1,17 +1,17 @@
 ---
 title: 'Binary consolidation'
 weight: 10
-description: 'Migrating from the eleven `cmd/*` binaries to `strata` + `strata-admin`.'
+description: 'Consolidation complete: single `strata` binary with `server` + `admin` subcommands.'
 ---
 
 # Migrating to the unified `strata` binary
 
 Strata used to ship eleven `cmd/*` binaries — one gateway plus a long tail of
-single-purpose worker daemons. The codebase now ships exactly two:
+single-purpose worker daemons. The codebase now ships exactly one:
 
-- `strata` — the gateway plus every long-running background worker, selected
-  at startup via `STRATA_WORKERS=` (or `--workers=`).
-- `strata-admin` — the operator CLI for one-shot maintenance tasks.
+- `strata` — the gateway plus every long-running background worker (selected
+  at startup via `STRATA_WORKERS=` / `--workers=`), with one-shot operator
+  commands available as `strata admin <subcommand>` against the same binary.
 
 This guide is the operator-facing checklist for upgrading an existing deploy.
 There is no schema migration, no data migration, and no env-var rename — the
@@ -30,7 +30,7 @@ move is purely a packaging change.
 | `cmd/strata-inventory`            | `strata server --workers=inventory`               |
 | `cmd/strata-audit-export`         | `strata server --workers=audit-export`            |
 | `cmd/strata-manifest-rewriter`    | `strata server --workers=manifest-rewriter`       |
-| `cmd/strata-rewrap`               | `strata-admin rewrap`                             |
+| `cmd/strata-rewrap`               | `strata admin rewrap`                             |
 
 `STRATA_WORKERS` accepts a comma-separated list, deduplicated and validated at
 startup. Unknown names exit with code 2 before any backend is built. `--workers=`
@@ -172,7 +172,7 @@ Notes:
   `strata-rewrap` Deployment in particular should not survive — rewrap is
   now a one-shot Job.
 
-The `strata-admin rewrap` workflow becomes a Kubernetes `Job`:
+The `strata admin rewrap` workflow becomes a Kubernetes `Job`:
 
 ```yaml
 kind: Job
@@ -182,16 +182,16 @@ spec:
     spec:
       restartPolicy: OnFailure
       containers:
-        - name: strata-admin
+        - name: strata-rewrap
           image: strata:<sha>
-          command: ["/usr/local/bin/strata-admin", "rewrap"]
+          command: ["/usr/local/bin/strata", "admin", "rewrap"]
           args: ["--target-key-id", "alias/strata-2026"]
           env:
             - name: STRATA_CONFIG_FILE
               value: /etc/strata/strata.toml
 ```
 
-Resumption is automatic — `strata-admin rewrap` reads `rewrap_progress` rows
+Resumption is automatic — `strata admin rewrap` reads `rewrap_progress` rows
 from the metadata store and skips already-rewrapped objects. Re-running the
 Job is safe.
 
@@ -252,13 +252,13 @@ target identity, so a single scrape job is sufficient.
    sibling Deployment.
 5. Delete the legacy per-binary Deployments and their associated Services
    (none of them exposed traffic; they were daemons-only).
-6. Run `strata-admin rewrap` as a Job the next time you rotate the SSE
+6. Run `strata admin rewrap` as a Job the next time you rotate the SSE
    master key — the legacy `strata-rewrap` Deployment is no longer needed.
 
 ## Non-Goals
 
-The two-binary rule (`strata` + `strata-admin`) covers the production
-artifacts that ship in the runtime image. Developer / CI tools live
+The single-binary rule (`strata` with `server` + `admin` subcommands) covers
+the production artifacts that ship in the runtime image. Developer / CI tools live
 under `cmd/` too but are explicitly out of scope for the consolidation
 goal:
 

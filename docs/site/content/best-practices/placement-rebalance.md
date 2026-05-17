@@ -38,7 +38,7 @@ four steps:
 2. **Set placement** on the buckets that should start using the new
    cluster:
    ```bash
-   curl -X PUT http://strata-admin/admin/v1/buckets/<name>/placement \
+   curl -X PUT http://strata/admin/v1/buckets/<name>/placement \
         -H 'content-type: application/json' \
         -d '{"placement":{"oldc":1,"newc":3}}'
    ```
@@ -47,7 +47,7 @@ four steps:
 3. **Drain the cluster you want to retire** (when you also want the
    leftover chunks moved off):
    ```bash
-   curl -X POST http://strata-admin/admin/v1/clusters/oldc/drain
+   curl -X POST http://strata/admin/v1/clusters/oldc/drain
    ```
    This marks `oldc` as `draining` in the `cluster_state` table.
    `placement.PickClusterExcluding` will skip `oldc` on the PUT hot
@@ -68,7 +68,7 @@ four steps:
 Undrain (if you change your mind mid-workflow):
 
 ```bash
-curl -X POST http://strata-admin/admin/v1/clusters/oldc/undrain
+curl -X POST http://strata/admin/v1/clusters/oldc/undrain
 ```
 
 This deletes the `cluster_state` row (absence == live) and invalidates

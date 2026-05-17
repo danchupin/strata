@@ -88,7 +88,7 @@ migration — TiKV scans both prefixes during the dual-write window.
    - Cassandra: `SELECT COUNT(*) FROM gc_queue WHERE region = '<r>'`
      (zero across all regions under load).
    - TiKV: scan the legacy `s/qg/` prefix; admin diagnostic endpoint or a
-     one-shot `strata-admin` probe walks the prefix and returns the count.
+     one-shot `strata admin` probe walks the prefix and returns the count.
    The legacy queue depth is bounded above by Phase 1's drain rate (~90k
    chunks/s on TiKV), so a saturated drain converges within minutes; a
    conservative target is "legacy queue depth is zero for ≥ one full
@@ -129,7 +129,7 @@ If a rollback is needed during Phase 2:
    continue against the legacy queue (Phase 2 binary writes both sides via
    dual-write; older Phase 1 binary writes only the legacy side).
 3. Drain v2 manually if disk pressure is a concern: a one-shot
-   `strata-admin` probe can iterate the v2 partition / prefix and re-enqueue
+   `strata admin` probe can iterate the v2 partition / prefix and re-enqueue
    each row into the legacy queue. Not provided as a packaged tool — the
    shape mirrors a 30-line scan loop.
 

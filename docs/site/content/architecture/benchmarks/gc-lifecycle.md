@@ -16,7 +16,7 @@ description: 'Per-leader concurrency cap (Phase 1) and multi-leader scaling (Pha
 Quantifies the throughput curve for `internal/gc.Worker` and
 `internal/lifecycle.Worker` across the per-worker bounded-errgroup
 fan-out introduced in cycle `ralph/gc-lifecycle-scale` (US-001 / US-002).
-The harness lands as `strata-admin bench-gc` + `strata-admin bench-lifecycle`
+The harness lands as `strata admin bench-gc` + `strata admin bench-lifecycle`
 (US-003) and is wired into `make bench-gc` / `make bench-lifecycle` to drive
 the canonical lab-tikv stack.
 
@@ -189,8 +189,8 @@ for c in 1 4 16 64 256; do
     -e STRATA_DATA_BACKEND=memory \
     -e STRATA_TIKV_PD_ENDPOINTS=pd:2379 \
     -e STRATA_LOG_LEVEL=ERROR \
-    --entrypoint /usr/local/bin/strata-admin strata:ceph \
-    bench-gc --entries=10000 --concurrency=$c
+    --entrypoint /usr/local/bin/strata strata:ceph \
+    admin bench-gc --entries=10000 --concurrency=$c
 done
 ```
 
@@ -217,7 +217,7 @@ sanity check on the worker code-path overhead.
 - **Stack (canonical):** `make up-lab-tikv-3` — PD + TiKV + 3 strata-tikv
   replicas (`strata-tikv-{a,b,c}`, container ports 9001/9002/9003,
   `STRATA_GC_SHARDS=3`) behind nginx LB on host port 9999.
-- **Stack (this commit):** in-process simulation — one `strata-admin`
+- **Stack (this commit):** in-process simulation — one `strata admin`
   process spawns N workers with `Worker{ShardID:i, ShardCount:N}` (gc) or
   `lifecycle.Worker{ReplicaInfo: () => (N, i)}` (lifecycle) racing for an
   in-process `memory.NewLocker()` lease. Real-world contention shapes

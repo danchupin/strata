@@ -43,7 +43,7 @@ for the other without touching the data plane (RADOS).
 - **Code**: zero gateway changes — `STRATA_META_BACKEND=tikv` flips
   `internal/serverapp.buildMetaStore` to `internal/meta/tikv.Open` and
   `buildLocker` to `tikv.NewLocker`. Same shape in
-  `cmd/strata-admin/rewrap.go` so operator-side rewrap works against
+  `cmd/strata/admin/rewrap.go` so operator-side rewrap works against
   TiKV-backed metadata.
 - **Schema**: there is no DDL. Schema lives in key prefixes — see
   `internal/meta/tikv/keys.md` for the full layout. Adding a new entity

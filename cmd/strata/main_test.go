@@ -22,10 +22,67 @@ func TestRoot_NoArgsPrintsHelp(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
-	for _, want := range []string{"usage: strata", "subcommands:", "server", "version"} {
+	for _, want := range []string{"usage: strata", "subcommands:", "server", "admin", "version"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("help missing %q\n--- output ---\n%s", want, out)
 		}
+	}
+}
+
+// TestAdmin_HelpDispatchesToAdminPackage exercises the top-level dispatcher
+// route to the admin subcommand. The admin help banner is printed to stderr
+// by the flag package; we assert on the headline subcommand list so the
+// dispatcher wiring (admin.RunWith honouring writers) stays correct.
+func TestAdmin_HelpDispatchesToAdminPackage(t *testing.T) {
+	_, errOut, code := runApp(t, "admin", "--help")
+	// flag.ContinueOnError on --help returns flag.ErrHelp, which admin.Run
+	// maps to ErrUsage → exit 2. The check that matters is that the help
+	// banner reaches stderr.
+	_ = code
+	for _, want := range []string{"usage: strata admin", "iam", "lifecycle", "gc", "sse", "replicate", "bucket", "rewrap", "bench-gc", "bench-lifecycle"} {
+		if !strings.Contains(errOut, want) {
+			t.Errorf("admin help missing %q\n--- stderr ---\n%s", want, errOut)
+		}
+	}
+}
+
+// TestAdmin_NoArgsExitsTwo: `strata admin` with no further args prints the
+// usage banner and exits 2 (legacy strata admin contract).
+func TestAdmin_NoArgsExitsTwo(t *testing.T) {
+	_, errOut, code := runApp(t, "admin")
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2", code)
+	}
+	if !strings.Contains(errOut, "usage: strata admin") {
+		t.Errorf("admin no-args missing usage banner: %s", errOut)
+	}
+}
+
+// TestAdmin_UnknownSubcommandExitsTwo: pre-flag-parse routing falls into
+// the group/sub switch which prints "unknown command:" then the banner.
+func TestAdmin_UnknownSubcommandExitsTwo(t *testing.T) {
+	_, errOut, code := runApp(t, "admin", "frobnicate", "subcmd")
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2", code)
+	}
+	if !strings.Contains(errOut, "unknown command") {
+		t.Errorf("admin unknown subcommand missing 'unknown command': %s", errOut)
+	}
+}
+
+// TestAdmin_RewrapDryRun verifies the dispatcher routes `admin rewrap` to
+// the rewrap subcommand. The dry-run path runs against an in-memory meta
+// backend so the test has no external dependency.
+func TestAdmin_RewrapDryRun(t *testing.T) {
+	t.Setenv("STRATA_SSE_MASTER_KEYS", "active:"+strings.Repeat("11", 32))
+	t.Setenv("STRATA_META_BACKEND", "memory")
+
+	_, errOut, code := runApp(t, "admin", "rewrap", "--dry-run")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr:\n%s", code, errOut)
+	}
+	if !strings.Contains(errOut, "dry-run requested") {
+		t.Errorf("missing dry-run log in stderr: %s", errOut)
 	}
 }
 

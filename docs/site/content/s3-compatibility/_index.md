@@ -100,7 +100,7 @@ Status legend: ✅ supported · ⚠️ partial · ❌ not supported.
 | `?attributes` GET                    |   ✅   |                                                                                                             |
 | `?restore` POST                      |   ✅   | Lifecycle-aware restore from cold storage class.                                                            |
 | Storage classes                      |   ⚠️   | `STANDARD`, `STANDARD_IA`, `GLACIER_IR` round-trip + lifecycle transitions. `GLACIER` / `DEEP_ARCHIVE` accepted as labels but no async-tier semantics. `INTELLIGENT_TIERING` not implemented. |
-| Server-side encryption (SSE-S3)      |   ✅   | AES256 with master-key wrap. Master key rotation via `strata-admin rewrap`.                                 |
+| Server-side encryption (SSE-S3)      |   ✅   | AES256 with master-key wrap. Master key rotation via `strata admin rewrap`.                                 |
 | Server-side encryption (SSE-KMS)     |   ✅   | `aws:kms` with KMS provider. `x-amz-server-side-encryption-aws-kms-key-id` honoured.                        |
 | Server-side encryption (SSE-C)       |   ✅   | Customer-provided key + MD5 verification on every request.                                                  |
 | `?select` (Select Object Content)    |   ❌   | P3 ROADMAP `Select / Select Object Content`.                                                                |

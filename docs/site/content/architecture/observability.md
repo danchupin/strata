@@ -14,8 +14,8 @@ next without rebuilding context.
 
 ## Structured logs (slog)
 
-`internal/logging` is the canonical setup. Both binaries (`cmd/strata`,
-`cmd/strata-admin`) call `logging.Setup()` first thing to install a
+`internal/logging` is the canonical setup. The `cmd/strata` binary (both
+`strata server` and `strata admin`) calls `logging.Setup()` first thing to install a
 JSON-handler `*slog.Logger` driven by `STRATA_LOG_LEVEL`
 (`DEBUG`/`INFO`/`WARN`/`ERROR`; default `INFO`).
 
@@ -251,7 +251,7 @@ regardless of `STRATA_OTEL_SAMPLE_RATIO`. `tracer == nil` falls back
 to `strataotel.NoopTracer()` (a real but discarding tracer) so unit
 tests without OTel wiring keep working.
 
-`strata-admin rewrap` is a one-shot operator command and stays
+`strata admin rewrap` is a one-shot operator command and stays
 untraced.
 
 ### Rebalance worker (US-003..US-006)
