@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Migrations on Strata Documentation</title><link>https://danchupin.github.io/strata/architecture/migrations/</link><description>Recent content in Migrations on Strata Documentation</description><generator>Hugo</generator><language>en</language><atom:link href="https://danchupin.github.io/strata/architecture/migrations/index.xml" rel="self" type="application/rss+xml"/><item><title>Binary consolidation</title><link>https://danchupin.github.io/strata/architecture/migrations/binary-consolidation/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/migrations/binary-consolidation/</guid><description>&lt;h1 id="migrating-to-the-unified-strata-binary"&gt;Migrating to the unified &lt;code&gt;strata&lt;/code&gt; binary&lt;a class="anchor" href="#migrating-to-the-unified-strata-binary"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;Strata used to ship eleven &lt;code&gt;cmd/*&lt;/code&gt; binaries — one gateway plus a long tail of
-single-purpose worker daemons. The codebase now ships exactly two:&lt;/p&gt;
+single-purpose worker daemons. The codebase now ships exactly one:&lt;/p&gt;
 &lt;ul&gt;
-&lt;li&gt;&lt;code&gt;strata&lt;/code&gt; — the gateway plus every long-running background worker, selected
-at startup via &lt;code&gt;STRATA_WORKERS=&lt;/code&gt; (or &lt;code&gt;--workers=&lt;/code&gt;).&lt;/li&gt;
-&lt;li&gt;&lt;code&gt;strata-admin&lt;/code&gt; — the operator CLI for one-shot maintenance tasks.&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;strata&lt;/code&gt; — the gateway plus every long-running background worker (selected
+at startup via &lt;code&gt;STRATA_WORKERS=&lt;/code&gt; / &lt;code&gt;--workers=&lt;/code&gt;), with one-shot operator
+commands available as &lt;code&gt;strata admin &amp;lt;subcommand&amp;gt;&lt;/code&gt; against the same binary.&lt;/li&gt;
 &lt;/ul&gt;
 &lt;p&gt;This guide is the operator-facing checklist for upgrading an existing deploy.
 There is no schema migration, no data migration, and no env-var rename — the

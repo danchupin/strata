@@ -195,7 +195,7 @@ ring-buffer trace browser embedded in the operator console. All three
 key off the same &lt;code&gt;request_id&lt;/code&gt; so an operator can pivot from one to the
 next without rebuilding context.&lt;/p&gt;
 &lt;h2 id="structured-logs-slog"&gt;Structured logs (slog)&lt;a class="anchor" href="#structured-logs-slog"&gt;#&lt;/a&gt;&lt;/h2&gt;
-&lt;p&gt;&lt;code&gt;internal/logging&lt;/code&gt; is the canonical setup. Both binaries (&lt;code&gt;cmd/strata&lt;/code&gt;,
-&lt;code&gt;cmd/strata-admin&lt;/code&gt;) call &lt;code&gt;logging.Setup()&lt;/code&gt; first thing to install a
+&lt;p&gt;&lt;code&gt;internal/logging&lt;/code&gt; is the canonical setup. The &lt;code&gt;cmd/strata&lt;/code&gt; binary (both
+&lt;code&gt;strata server&lt;/code&gt; and &lt;code&gt;strata admin&lt;/code&gt;) calls &lt;code&gt;logging.Setup()&lt;/code&gt; first thing to install a
 JSON-handler &lt;code&gt;*slog.Logger&lt;/code&gt; driven by &lt;code&gt;STRATA_LOG_LEVEL&lt;/code&gt;
 (&lt;code&gt;DEBUG&lt;/code&gt;/&lt;code&gt;INFO&lt;/code&gt;/&lt;code&gt;WARN&lt;/code&gt;/&lt;code&gt;ERROR&lt;/code&gt;; default &lt;code&gt;INFO&lt;/code&gt;).&lt;/p&gt;</description></item></channel></rss>

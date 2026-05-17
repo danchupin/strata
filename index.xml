@@ -26,11 +26,11 @@ string includes the original &lt;code&gt;Host&lt;/code&gt; header and the origin
 signature breaks. See the &lt;a href="https://danchupin.github.io/strata/architecture/router/"&gt;Router page&lt;/a&gt;
 for the order.&lt;/p&gt;</description></item><item><title>Binary consolidation</title><link>https://danchupin.github.io/strata/architecture/migrations/binary-consolidation/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/migrations/binary-consolidation/</guid><description>&lt;h1 id="migrating-to-the-unified-strata-binary"&gt;Migrating to the unified &lt;code&gt;strata&lt;/code&gt; binary&lt;a class="anchor" href="#migrating-to-the-unified-strata-binary"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;Strata used to ship eleven &lt;code&gt;cmd/*&lt;/code&gt; binaries — one gateway plus a long tail of
-single-purpose worker daemons. The codebase now ships exactly two:&lt;/p&gt;
+single-purpose worker daemons. The codebase now ships exactly one:&lt;/p&gt;
 &lt;ul&gt;
-&lt;li&gt;&lt;code&gt;strata&lt;/code&gt; — the gateway plus every long-running background worker, selected
-at startup via &lt;code&gt;STRATA_WORKERS=&lt;/code&gt; (or &lt;code&gt;--workers=&lt;/code&gt;).&lt;/li&gt;
-&lt;li&gt;&lt;code&gt;strata-admin&lt;/code&gt; — the operator CLI for one-shot maintenance tasks.&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;strata&lt;/code&gt; — the gateway plus every long-running background worker (selected
+at startup via &lt;code&gt;STRATA_WORKERS=&lt;/code&gt; / &lt;code&gt;--workers=&lt;/code&gt;), with one-shot operator
+commands available as &lt;code&gt;strata admin &amp;lt;subcommand&amp;gt;&lt;/code&gt; against the same binary.&lt;/li&gt;
 &lt;/ul&gt;
 &lt;p&gt;This guide is the operator-facing checklist for upgrading an existing deploy.
 There is no schema migration, no data migration, and no env-var rename — the
@@ -44,7 +44,7 @@ replicas in parallel under &lt;code&gt;STRATA_GC_SHARDS=N&lt;/code&gt;.&lt;/p&gt
 &lt;p&gt;Quantifies the throughput curve for &lt;code&gt;internal/gc.Worker&lt;/code&gt; and
 &lt;code&gt;internal/lifecycle.Worker&lt;/code&gt; across the per-worker bounded-errgroup
 fan-out introduced in cycle &lt;code&gt;ralph/gc-lifecycle-scale&lt;/code&gt; (US-001 / US-002).
-The harness lands as &lt;code&gt;strata-admin bench-gc&lt;/code&gt; + &lt;code&gt;strata-admin bench-lifecycle&lt;/code&gt;
+The harness lands as &lt;code&gt;strata admin bench-gc&lt;/code&gt; + &lt;code&gt;strata admin bench-lifecycle&lt;/code&gt;
 (US-003) and is wired into &lt;code&gt;make bench-gc&lt;/code&gt; / &lt;code&gt;make bench-lifecycle&lt;/code&gt; to drive
 the canonical lab-tikv stack.&lt;/p&gt;</description></item><item><title>Router</title><link>https://danchupin.github.io/strata/architecture/router/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/router/</guid><description>&lt;h1 id="router"&gt;Router&lt;a class="anchor" href="#router"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;The router lives in &lt;code&gt;internal/s3api/server.go&lt;/code&gt;. It is a single
@@ -509,8 +509,8 @@ ring-buffer trace browser embedded in the operator console. All three
 key off the same &lt;code&gt;request_id&lt;/code&gt; so an operator can pivot from one to the
 next without rebuilding context.&lt;/p&gt;
 &lt;h2 id="structured-logs-slog"&gt;Structured logs (slog)&lt;a class="anchor" href="#structured-logs-slog"&gt;#&lt;/a&gt;&lt;/h2&gt;
-&lt;p&gt;&lt;code&gt;internal/logging&lt;/code&gt; is the canonical setup. Both binaries (&lt;code&gt;cmd/strata&lt;/code&gt;,
-&lt;code&gt;cmd/strata-admin&lt;/code&gt;) call &lt;code&gt;logging.Setup()&lt;/code&gt; first thing to install a
+&lt;p&gt;&lt;code&gt;internal/logging&lt;/code&gt; is the canonical setup. The &lt;code&gt;cmd/strata&lt;/code&gt; binary (both
+&lt;code&gt;strata server&lt;/code&gt; and &lt;code&gt;strata admin&lt;/code&gt;) calls &lt;code&gt;logging.Setup()&lt;/code&gt; first thing to install a
 JSON-handler &lt;code&gt;*slog.Logger&lt;/code&gt; driven by &lt;code&gt;STRATA_LOG_LEVEL&lt;/code&gt;
 (&lt;code&gt;DEBUG&lt;/code&gt;/&lt;code&gt;INFO&lt;/code&gt;/&lt;code&gt;WARN&lt;/code&gt;/&lt;code&gt;ERROR&lt;/code&gt;; default &lt;code&gt;INFO&lt;/code&gt;).&lt;/p&gt;</description></item><item><title>Backup + restore</title><link>https://danchupin.github.io/strata/best-practices/backup-restore/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/backup-restore/</guid><description>&lt;h1 id="backup--restore"&gt;Backup + restore&lt;a class="anchor" href="#backup--restore"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;Strata splits backup responsibility along the same tiers the gateway
@@ -583,7 +583,7 @@ migration, no schema bump, no behavior change. The policy + worker are
 both opt-in.&lt;/p&gt;</description></item><item><title/><link>https://danchupin.github.io/strata/architecture/benchmarks/data/gc-lifecycle-phase-2/README/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/benchmarks/data/gc-lifecycle-phase-2/README/</guid><description>&lt;h1 id="phase-2--gc--lifecycle-multi-leader-bench-artifacts"&gt;Phase 2 — gc + lifecycle multi-leader bench artifacts&lt;a class="anchor" href="#phase-2--gc--lifecycle-multi-leader-bench-artifacts"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;JSONL captured by the bench harness in &lt;strong&gt;in-process simulation mode&lt;/strong&gt;:
 both meta and data backends are pure-memory; the multi-shard / multi-
-replica race happens inside one &lt;code&gt;strata-admin&lt;/code&gt; process via the &lt;code&gt;--shards&lt;/code&gt;
+replica race happens inside one &lt;code&gt;strata admin&lt;/code&gt; process via the &lt;code&gt;--shards&lt;/code&gt;
 (gc) / &lt;code&gt;--replicas&lt;/code&gt; (lifecycle) flags wired in US-006.&lt;/p&gt;
 &lt;h2 id="files"&gt;Files&lt;a class="anchor" href="#files"&gt;#&lt;/a&gt;&lt;/h2&gt;
 &lt;table&gt;
@@ -598,7 +598,7 @@ replica race happens inside one &lt;code&gt;strata-admin&lt;/code&gt; process vi
  &lt;tr&gt;
  &lt;td&gt;&lt;code&gt;sim-bench-gc-shards1.jsonl&lt;/code&gt;&lt;/td&gt;
  &lt;td&gt;gc bench, single-leader (Phase 1 shape), N=50000, c∈{1,4,16,64,256}&lt;/td&gt;
- &lt;td&gt;&lt;code&gt;for c in 1 4 16 64 256; do STRATA_META_BACKEND=memory STRATA_DATA_BACKEND=memory ./bin/strata-admin bench-gc --entries=50000 --concurrency=$c --shards=1; done | jq -c .&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;for c in 1 4 16 64 256; do STRATA_META_BACKEND=memory STRATA_DATA_BACKEND=memory ./bin/strata admin bench-gc --entries=50000 --concurrency=$c --shards=1; done | jq -c .&lt;/code&gt;&lt;/td&gt;
  &lt;/tr&gt;
  &lt;tr&gt;
  &lt;td&gt;&lt;code&gt;sim-bench-gc-shards3.jsonl&lt;/code&gt;&lt;/td&gt;
@@ -629,5 +629,5 @@ as a forecast of production throughput.&lt;/li&gt;
 &lt;code&gt;make bench-gc-multi&lt;/code&gt; / &lt;code&gt;make bench-lifecycle-multi&lt;/code&gt; against the
 3-replica lab brought up via &lt;code&gt;make up-lab-tikv-3&lt;/code&gt; (see
 &lt;code&gt;docs/site/content/architecture/benchmarks/gc-lifecycle.md&lt;/code&gt;&amp;rsquo;s &amp;ldquo;Phase 2 — multi-leader&amp;rdquo; section).&lt;/li&gt;
-&lt;li&gt;Every JSON object on a line is one bench level (one &lt;code&gt;(--concurrency, --shards|--replicas)&lt;/code&gt; combination). Schema matches &lt;code&gt;cmd/strata-admin/ bench_common.go::benchResult&lt;/code&gt;.&lt;/li&gt;
+&lt;li&gt;Every JSON object on a line is one bench level (one &lt;code&gt;(--concurrency, --shards|--replicas)&lt;/code&gt; combination). Schema matches &lt;code&gt;cmd/strata/admin/ bench_common.go::benchResult&lt;/code&gt;.&lt;/li&gt;
 &lt;/ul&gt;</description></item></channel></rss>

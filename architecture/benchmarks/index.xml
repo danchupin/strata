@@ -8,7 +8,7 @@ replicas in parallel under &lt;code&gt;STRATA_GC_SHARDS=N&lt;/code&gt;.&lt;/p&gt
 &lt;p&gt;Quantifies the throughput curve for &lt;code&gt;internal/gc.Worker&lt;/code&gt; and
 &lt;code&gt;internal/lifecycle.Worker&lt;/code&gt; across the per-worker bounded-errgroup
 fan-out introduced in cycle &lt;code&gt;ralph/gc-lifecycle-scale&lt;/code&gt; (US-001 / US-002).
-The harness lands as &lt;code&gt;strata-admin bench-gc&lt;/code&gt; + &lt;code&gt;strata-admin bench-lifecycle&lt;/code&gt;
+The harness lands as &lt;code&gt;strata admin bench-gc&lt;/code&gt; + &lt;code&gt;strata admin bench-lifecycle&lt;/code&gt;
 (US-003) and is wired into &lt;code&gt;make bench-gc&lt;/code&gt; / &lt;code&gt;make bench-lifecycle&lt;/code&gt; to drive
 the canonical lab-tikv stack.&lt;/p&gt;</description></item><item><title>Meta-backend comparison</title><link>https://danchupin.github.io/strata/architecture/benchmarks/meta-backend-comparison/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/benchmarks/meta-backend-comparison/</guid><description>&lt;h1 id="meta-backend-benchmarks-tikv-vs-cassandra"&gt;Meta-backend benchmarks: TiKV vs Cassandra&lt;a class="anchor" href="#meta-backend-benchmarks-tikv-vs-cassandra"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;This page captures hot-path latency / throughput numbers for Strata&amp;rsquo;s two
@@ -76,7 +76,7 @@ chunk-write dispatch is cluster-agnostic — the worker pool dials the right
 ioctx per chunk via the existing &lt;code&gt;resolveClass&lt;/code&gt; / &lt;code&gt;ioctx&lt;/code&gt; helpers.&lt;/p&gt;</description></item><item><title/><link>https://danchupin.github.io/strata/architecture/benchmarks/data/gc-lifecycle-phase-2/README/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/benchmarks/data/gc-lifecycle-phase-2/README/</guid><description>&lt;h1 id="phase-2--gc--lifecycle-multi-leader-bench-artifacts"&gt;Phase 2 — gc + lifecycle multi-leader bench artifacts&lt;a class="anchor" href="#phase-2--gc--lifecycle-multi-leader-bench-artifacts"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;JSONL captured by the bench harness in &lt;strong&gt;in-process simulation mode&lt;/strong&gt;:
 both meta and data backends are pure-memory; the multi-shard / multi-
-replica race happens inside one &lt;code&gt;strata-admin&lt;/code&gt; process via the &lt;code&gt;--shards&lt;/code&gt;
+replica race happens inside one &lt;code&gt;strata admin&lt;/code&gt; process via the &lt;code&gt;--shards&lt;/code&gt;
 (gc) / &lt;code&gt;--replicas&lt;/code&gt; (lifecycle) flags wired in US-006.&lt;/p&gt;
 &lt;h2 id="files"&gt;Files&lt;a class="anchor" href="#files"&gt;#&lt;/a&gt;&lt;/h2&gt;
 &lt;table&gt;
@@ -91,7 +91,7 @@ replica race happens inside one &lt;code&gt;strata-admin&lt;/code&gt; process vi
  &lt;tr&gt;
  &lt;td&gt;&lt;code&gt;sim-bench-gc-shards1.jsonl&lt;/code&gt;&lt;/td&gt;
  &lt;td&gt;gc bench, single-leader (Phase 1 shape), N=50000, c∈{1,4,16,64,256}&lt;/td&gt;
- &lt;td&gt;&lt;code&gt;for c in 1 4 16 64 256; do STRATA_META_BACKEND=memory STRATA_DATA_BACKEND=memory ./bin/strata-admin bench-gc --entries=50000 --concurrency=$c --shards=1; done | jq -c .&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;for c in 1 4 16 64 256; do STRATA_META_BACKEND=memory STRATA_DATA_BACKEND=memory ./bin/strata admin bench-gc --entries=50000 --concurrency=$c --shards=1; done | jq -c .&lt;/code&gt;&lt;/td&gt;
  &lt;/tr&gt;
  &lt;tr&gt;
  &lt;td&gt;&lt;code&gt;sim-bench-gc-shards3.jsonl&lt;/code&gt;&lt;/td&gt;
@@ -122,5 +122,5 @@ as a forecast of production throughput.&lt;/li&gt;
 &lt;code&gt;make bench-gc-multi&lt;/code&gt; / &lt;code&gt;make bench-lifecycle-multi&lt;/code&gt; against the
 3-replica lab brought up via &lt;code&gt;make up-lab-tikv-3&lt;/code&gt; (see
 &lt;code&gt;docs/site/content/architecture/benchmarks/gc-lifecycle.md&lt;/code&gt;&amp;rsquo;s &amp;ldquo;Phase 2 — multi-leader&amp;rdquo; section).&lt;/li&gt;
-&lt;li&gt;Every JSON object on a line is one bench level (one &lt;code&gt;(--concurrency, --shards|--replicas)&lt;/code&gt; combination). Schema matches &lt;code&gt;cmd/strata-admin/ bench_common.go::benchResult&lt;/code&gt;.&lt;/li&gt;
+&lt;li&gt;Every JSON object on a line is one bench level (one &lt;code&gt;(--concurrency, --shards|--replicas)&lt;/code&gt; combination). Schema matches &lt;code&gt;cmd/strata/admin/ bench_common.go::benchResult&lt;/code&gt;.&lt;/li&gt;
 &lt;/ul&gt;</description></item></channel></rss>
