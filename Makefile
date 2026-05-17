@@ -1,7 +1,7 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-all-ci up-tikv up-lab-tikv up-lab-tikv-3 down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv smoke-drain-lifecycle smoke-drain-transparency smoke-cluster-weights smoke-drain-cleanup smoke-drain-followup smoke-effective-placement race-soak race-soak-tikv lint-nginx-lab bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi docs-serve docs-build clean
+.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-all-ci up-tikv up-lab-tikv up-lab-tikv-3 down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv smoke-drain-lifecycle smoke-drain-transparency smoke-cluster-weights smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale race-soak race-soak-tikv lint-nginx-lab bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi docs-serve docs-build clean
 
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
@@ -276,6 +276,21 @@ smoke-drain-followup:
 # for env knobs (BASE, SMOKE_EP_*).
 smoke-effective-placement:
 	bash scripts/smoke-effective-placement.sh
+
+# Rebalance-scale Phase 2 walkthrough smoke (US-005 of
+# ralph/rebalance-scale-phase-2). Drives the four scenarios (A: single-
+# replica fan-out at SHARDS=3 with folded chip; B: lab-tikv-3 multi-
+# leader at SHARDS=3 with one chip per replica; C: back-compat SHARDS=1
+# with exactly one chip holder; D: replica failover) against a running
+# `lab-tikv-3 + multi-cluster` compose profile (`docker compose -f
+# deploy/docker/docker-compose.yml --profile lab-tikv --profile
+# lab-tikv-3 --profile multi-cluster up -d`). Closes ROADMAP P2
+# "Rebalance worker not sharded". Skips with exit 77 when the lab is
+# not reachable; set REQUIRE_LAB=1 to convert the skip into a hard
+# fail. Scenario B + D auto-skip on single-replica labs. See
+# scripts/smoke-rebalance-scale.sh for env knobs (BASE, SMOKE_*).
+smoke-rebalance-scale:
+	bash scripts/smoke-rebalance-scale.sh
 
 # Single-binary dispatcher smoke (US-002 of ralph/single-binary).
 # Builds bin/strata and verifies post-consolidation shape: --help lists

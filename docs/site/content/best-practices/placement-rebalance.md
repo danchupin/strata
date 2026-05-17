@@ -823,8 +823,114 @@ reuses the same Recharts wrapper as the Metrics page + Cluster Overview.
 E2E coverage lives in `web/e2e/placement.spec.ts`; see
 [Web UI — End-to-end tests]({{< ref "/best-practices/web-ui#end-to-end-tests" >}}).
 
+## Multi-leader scaling
+
+`ralph/rebalance-scale-phase-2` (US-001..US-005) closes the P2 ROADMAP
+entry "Rebalance worker not sharded — single goroutine bottleneck on
+large deploys" by mirroring the gc + lifecycle Phase 2 pattern: the
+rebalance worker is now a **sharded fan-out** rather than a single
+goroutine per process.
+
+### `STRATA_REBALANCE_SHARDS` env
+
+| Variable | Default | Range | Purpose |
+| -------- | ------- | ----- | ------- |
+| `STRATA_REBALANCE_SHARDS` | `1` | `[1, 1024]` | Number of shard leases the rebalance worker fans out across. Each shard owns a disjoint subset of buckets (selected via `fnv32a(bucketID) % SHARDS == shardID`) and acquires its own lease `rebalance-leader-<shardID>`. `SHARDS=1` reproduces Phase 1 byte-for-byte (single lease, scan-everything). Out-of-range values clamped + WARN-logged at worker build time. |
+
+The supervisor registers the worker with `SkipLease: true`; the
+worker owns its own leader election via the
+`internal/rebalance.ShardedFanOut` struct, which mirrors the
+`internal/gc/fanout.go` shape exactly. Each shard goroutine acquires
+`rebalance-leader-<i>` independently; the leader chip
+(`leader_for=rebalance` in `/admin/v1/cluster/nodes`) is **folded** —
+a replica holding N shards still flips the chip ON exactly once
+(when it acquires its first shard) and OFF exactly once (when it
+releases its last). Operators tracking lease distribution should use
+`/admin/v1/cluster/nodes` for chip presence + the meta backend's
+worker-lock table (`worker_locks` on Cassandra, `s/wl/` keys on
+TiKV) for individual shard ownership.
+
+### Ownership distribution
+
+Lease distribution across replicas is opportunistic: each replica
+races to acquire `rebalance-leader-0..N-1`, the meta-backend LWT
+(Cassandra) or pessimistic txn (TiKV) decides the winner per shard.
+On a steady-state lab with R replicas and N shards:
+
+| Replicas (R) | Shards (N) | Typical distribution |
+| ------------ | ---------- | -------------------- |
+| 1 | 1 | One replica owns 1 shard. (Phase 1 single-leader shape.) |
+| 1 | 3 | One replica owns 3 shards (folded — chip emits once). |
+| 3 | 3 | One shard per replica (each replica holds ~1 lease). |
+| 3 | 1 | One replica holds the single shard; the other two stand by. |
+| R | N (N > R) | Some replicas own multiple shards (folded — chip emits once each). |
+
+Set `SHARDS == replica count` for the cleanest 1-shard-per-replica
+distribution; the chip-folding contract means going larger
+(`SHARDS = 2×replicas` or more) is correct but each replica then
+holds multiple shards and the bench multiplier flattens.
+
+### Benchmark + speedup expectations
+
+The `lab-tikv-3` bench harness lives under
+`scripts/bench-rebalance-multi.sh` and is wrapped by
+`make bench-rebalance-multi`. It seeds N buckets × M chunks each
+with a `{default:1, cephb:1}` placement policy, drains `default`
+evacuate, and times wall-clock-until-`chunks_on_cluster=0` for
+`SHARDS=1` baseline and `SHARDS=3` multi-leader.
+
+Expected at `SHARDS=3` against the 3-replica lab-tikv-3 stack:
+ratio ≤ 40 % of baseline (≥ 2.5× speedup). The bench prints one of
+three verdicts:
+
+- `SPEEDUP_OK` — ratio ≤ 40 % of baseline. Multi-leader works.
+- `SPEEDUP_PARTIAL` — ratio 40-70 % of baseline. Investigate
+  per-target token-bucket starvation or shared RADOS write bandwidth.
+- `SPEEDUP_FAILED` — ratio > 70 % of baseline. Regression — the
+  fan-out is not delivering. Script EXITs 1.
+
+The speedup is bounded below 3× because the
+`STRATA_REBALANCE_RATE_MB_S` token bucket sits per-replica and
+both read + write debit it; three replicas concurrently writing the
+same target RADOS pool also stack on shared OSD bandwidth. See the
+[rebalance bench]({{< ref "/architecture/benchmarks/rebalance" >}})
+page for the full cap-shape discussion + comparison with gc /
+lifecycle Phase 2.
+
+### Single-replica fallback
+
+`SHARDS=1` on a single replica reproduces Phase 1 behaviour
+byte-for-byte: one `rebalance-leader-0` lease, one goroutine scanning
+every bucket, one ProgressTracker contribution per cluster. Operators
+who do not want the fan-out simply leave `STRATA_REBALANCE_SHARDS`
+unset (default 1). The new env is opt-in for scaling, not a breaking
+change.
+
+### Smoke
+
+The four-scenario smoke harness `scripts/smoke-rebalance-scale.sh`
+(`make smoke-rebalance-scale`) drives:
+
+- **A** — single-replica fan-out at `SHARDS=3`, asserts the folded
+  chip emits exactly once and drain converges.
+- **B** — `lab-tikv-3` multi-leader at `SHARDS=3`, asserts all three
+  replicas carry the chip (one shard each) and drain converges.
+- **C** — back-compat `SHARDS=1` on the same lab, asserts EXACTLY one
+  replica holds the chip and the iteration log matches the
+  legacy single-leader shape.
+- **D** — replica failover (kill one of three at `SHARDS=3`), asserts
+  surviving replicas reacquire the freed shard within
+  `STRATA_GC_LEASE_TTL`.
+
+Scenarios B + D auto-skip on single-replica labs. Skip-77 when
+`$BASE/readyz` is unreachable; `REQUIRE_LAB=1` converts the skip
+into a hard fail for CI gating.
+
 ## See also
 
+- [Rebalance bench]({{< ref "/architecture/benchmarks/rebalance" >}}) —
+  lab-tikv-3 bench harness, expected speedup, cap shape, comparison
+  with gc / lifecycle Phase 2.
 - [S3 multi-cluster routing]({{< ref "/best-practices/s3-multi-cluster" >}}) —
   env shape for `STRATA_S3_CLUSTERS` / `STRATA_S3_CLASSES`, credentials
   envelope, rolling-restart workflow.

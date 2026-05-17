@@ -98,7 +98,41 @@ testcontainers to find the engine.
                           into the configured target bucket. Leader-elected
                           on `inventory-leader`.
   strata server --workers=rebalance -> internal/rebalance: leader-elected on
-                          `rebalance-leader`. Walks every bucket with a
+                          per-shard leases `rebalance-leader-0..N-1`
+                          via the `internal/rebalance.ShardedFanOut`
+                          (registered SkipLease=true; fan-out shape
+                          mirrors `internal/gc/fanout.go`). Shard count
+                          via `STRATA_REBALANCE_SHARDS` (default 1,
+                          range [1, 1024]; out-of-range clamped +
+                          WARN-logged at worker build time). Each
+                          shard owns a disjoint bucket subset via
+                          `meta.Store.ListBucketsShard(ctx, shardID,
+                          totalShards)` — `fnv32a(bucketID) % shards
+                          == shardID`. `SHARDS=1` reproduces Phase 1
+                          byte-for-byte (single lease, single
+                          goroutine). Leader chip
+                          (`leader_for=rebalance`) folded — a replica
+                          holding N shards emits one acquired event
+                          and one released event regardless of N.
+                          Per-shard panics increment
+                          `strata_worker_panic_total{worker="rebalance",shard="<i>"}`
+                          and restart on exponential backoff (1s→5s→30s
+                          →2m, reset after 5 min healthy). The
+                          `ProgressTracker` widens to
+                          `progressCache map[clusterID]map[shardID]ProgressSnapshot`;
+                          `Snapshot(clusterID)` returns merged snapshot
+                          (Migratable/StuckSinglePolicy/StuckNoPolicy/
+                          Bytes summed across shards, latest LastScanAt,
+                          per-bucket maps merged). Completion
+                          fire-once tracked at cluster level so
+                          multi-shard 0-transitions fire one event;
+                          refill on any shard re-arms the gate.
+                          `/drain-progress` reads the merged
+                          snapshot — operator wire shape unchanged.
+                          `/drain-impact` synchronous-scan path keeps
+                          full `ListBuckets` (one-shot operator
+                          preview behind 5-min cache, NOT per-tick).
+                          Walks every bucket with a
                           non-nil Placement, plans per-chunk moves whose
                           current cluster does not match placement.PickCluster,
                           and dispatches the plan via a MoverChain emitter.
