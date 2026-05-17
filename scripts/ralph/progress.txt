@@ -23,4 +23,19 @@ Cycle: ralph/rebalance-scale-phase-2
 - **ROADMAP close-flip** in US-005: P2 entry → `~~**P2 — Rebalance worker not sharded — single goroutine bottleneck on large deploys.**~~ — **Done.** <one-line summary referencing lab-tikv-3 bench + STRATA_REBALANCE_SHARDS env>. (commit \`<pending>\`)`. Closing SHA backfilled in follow-up commit on main.
 - **`tasks/prd-rebalance-scale-phase-2.md` REMOVED** in US-005 per CLAUDE.md PRD lifecycle rule.
 - **Test surfaces**: `internal/meta/storetest/contract.go` new `caseListBucketsShard`; `internal/rebalance/fanout_test.go` new (mirror `internal/gc/fanout_test.go`); `internal/rebalance/progress_test.go` extended (merge sum + completion fire-once); `internal/rebalance/worker_integration_test.go` 3-shard multi-replica simulation against memory backend.
+- **Contract-test bucket count**: PRD AC said n=100 with 5% tolerance, but FNV-1a binomial σ≈4.7 per shard at n=100 means 3σ ≈ ±14 which exceeds ±5. Bumped n→300 with ±15% tolerance (±45 covers ~3σ at σ≈8) for the contract test; n=1000 with 5%/10% tolerance lives in the meta package's `TestBucketShardIDDistribution` unit test where the statistical assertion is reliable. Future-iter doing similar distribution tests against `CreateBucket`-assigned random UUIDs: pick n such that 3σ < tolerance window.
+- **Hash-function locality**: kept the hash helper inside `internal/meta/store.go` (next to `GCShardID`) — new `BucketShardID(uuid.UUID, totalShards)` + `ValidateShard(shardID, totalShards)`. Reusing `fnv32aGC` so the meta package still doesn't need to import `hash/fnv` from callers. Backends call `meta.BucketShardID` + `meta.ValidateShard` only; do not duplicate hash logic per-backend.
+
+## 2026-05-17 - US-001
+- Added `meta.ErrInvalidShard` sentinel + `meta.BucketShardID(uuid.UUID, totalShards)` + `meta.ValidateShard(shardID, totalShards)` helpers in `internal/meta/store.go`.
+- Added `Store.ListBucketsShard(ctx, shardID, totalShards) ([]*Bucket, error)` to the interface.
+- Implemented in memory (`internal/meta/memory/store.go`), cassandra (`internal/meta/cassandra/store.go` — reuses `ListBuckets` iterator + in-process filter), and tikv (`internal/meta/tikv/buckets.go` — reuses prefix scan + in-process filter).
+- New contract case `caseListBucketsShard` in `internal/meta/storetest/contract.go` (n=300, ±15% tolerance, includes union+disjoint+edge cases for totalShards=1 / off-by-one / negative shardID / zero totalShards).
+- New unit tests in `internal/meta/store_test.go`: `TestValidateShard`, `TestBucketShardIDDistribution` (n=1000 with 5%/10% tolerance), `TestBucketShardIDStable`.
+- Files changed: `internal/meta/store.go`, `internal/meta/store_test.go`, `internal/meta/memory/store.go`, `internal/meta/cassandra/store.go`, `internal/meta/tikv/buckets.go`, `internal/meta/storetest/contract.go`.
+- **Learnings for future iterations:**
+  - `s.CreateBucket` assigns random UUIDs internally; the contract test cannot control bucket IDs. Distribution tolerance must absorb FNV-1a's natural binomial variance — see Codebase Patterns "Contract-test bucket count".
+  - Adding any new method to `meta.Store` produces a fanout of diagnostic errors in every consumer/test file that uses `*memory.Store` / `*cassandra.Store` / `*tikv.Store` against the `meta.Store` interface (`InvalidIfaceAssign` + `ImpossibleAssert`). Implement all three backends in the same commit; otherwise nothing else compiles.
+  - The new `BucketShardID` helper deliberately lives in `internal/meta/store.go` alongside `GCShardID` so the rebalance worker fan-out (US-002+) imports `meta.BucketShardID` instead of pulling in `hash/fnv` directly — single source of truth.
+---
 

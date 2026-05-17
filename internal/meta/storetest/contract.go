@@ -27,6 +27,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		fn   func(t *testing.T, s meta.Store)
 	}{
 		{"BucketLifecycle", caseBucketLifecycle},
+		{"ListBucketsShard", caseListBucketsShard},
 		{"VersionedObjectOverwrite", caseVersionedOverwrite},
 		{"DeleteMarkerHidesObject", caseDeleteMarker},
 		{"SetObjectStorageCAS", caseSetObjectStorageCAS},
@@ -105,6 +106,82 @@ func caseBucketLifecycle(t *testing.T, s meta.Store) {
 	}
 	if _, err := s.GetBucket(ctx, "foo"); err != meta.ErrBucketNotFound {
 		t.Errorf("after delete: %v", err)
+	}
+}
+
+// caseListBucketsShard exercises ListBucketsShard: seed 300 buckets with
+// random UUIDs, 3-way shard fan-out, assert union covers every bucket
+// exactly once and per-shard distribution stays within ±15% (FNV-1a on
+// 300 random UUIDs has σ≈8 per shard; ±15% absorbs 3σ deviations) —
+// plus edge cases (totalShards=1 returns all, off-by-one shardID
+// returns ErrInvalidShard). The hash's tighter statistical property
+// (5% / 10% tolerance at n=1000) is verified separately in the meta
+// package's TestBucketShardIDDistribution. US-001 rebalance-scale-
+// phase-2.
+func caseListBucketsShard(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	const n = 300
+	want := make(map[uuid.UUID]string, n)
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("shard-bkt-%03d", i)
+		b, err := s.CreateBucket(ctx, name, "o", "STANDARD")
+		if err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+		want[b.ID] = name
+	}
+
+	// 3-way fan-out: union covers all, no duplicates, balanced spread.
+	const shardCount = 3
+	seen := make(map[uuid.UUID]int, n)
+	sizes := make([]int, shardCount)
+	for sid := 0; sid < shardCount; sid++ {
+		got, err := s.ListBucketsShard(ctx, sid, shardCount)
+		if err != nil {
+			t.Fatalf("shard %d: %v", sid, err)
+		}
+		sizes[sid] = len(got)
+		for _, b := range got {
+			if meta.BucketShardID(b.ID, shardCount) != sid {
+				t.Errorf("shard %d returned bucket %s whose BucketShardID=%d", sid, b.Name, meta.BucketShardID(b.ID, shardCount))
+			}
+			if prev, ok := seen[b.ID]; ok {
+				t.Errorf("bucket %s appears in shard %d and %d", b.Name, prev, sid)
+			}
+			seen[b.ID] = sid
+		}
+	}
+	if len(seen) != n {
+		t.Fatalf("union size=%d want %d", len(seen), n)
+	}
+	const expect3 = n / shardCount // 100
+	const tol3 = n * 15 / 100      // ±45 absorbs ~3σ of FNV-1a at n=300.
+	for sid, sz := range sizes {
+		if sz < expect3-tol3 || sz > expect3+tol3 {
+			t.Errorf("shard %d size=%d outside [%d, %d]", sid, sz, expect3-tol3, expect3+tol3)
+		}
+	}
+
+	// totalShards=1 returns every bucket.
+	all, err := s.ListBucketsShard(ctx, 0, 1)
+	if err != nil {
+		t.Fatalf("totalShards=1: %v", err)
+	}
+	if len(all) != n {
+		t.Errorf("totalShards=1 size=%d want %d", len(all), n)
+	}
+
+	// shardID == totalShards (off-by-one) rejects.
+	if _, err := s.ListBucketsShard(ctx, shardCount, shardCount); err != meta.ErrInvalidShard {
+		t.Errorf("off-by-one: got %v want ErrInvalidShard", err)
+	}
+	// shardID < 0 rejects.
+	if _, err := s.ListBucketsShard(ctx, -1, shardCount); err != meta.ErrInvalidShard {
+		t.Errorf("negative shard: got %v want ErrInvalidShard", err)
+	}
+	// totalShards < 1 rejects.
+	if _, err := s.ListBucketsShard(ctx, 0, 0); err != meta.ErrInvalidShard {
+		t.Errorf("zero totalShards: got %v want ErrInvalidShard", err)
 	}
 }
 
