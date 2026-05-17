@@ -1,0 +1,62 @@
+# Ralph Progress Log
+Started: Fri May 16 10:00:00 MSK 2026
+Cycle: ralph/single-binary
+
+## Codebase Patterns
+- 2-story cycle closing 1 P2 ROADMAP entry. Pure refactor — consolidates `cmd/strata-admin` (1909 LOC, 10 .go files) into `cmd/strata/admin/` subcommand package. No semantic CLI change; operator-visible surface (flags, subcommand names, output) preserved verbatim.
+- **Existing files** (`ls cmd/strata-admin/*.go`): main.go (dispatcher with iam|lifecycle|gc|sse|replicate|bucket|rewrap|bench-gc|bench-lifecycle subcommand routing), client.go (HTTP admin API client), rewrap.go (+ test), bench_common.go, bench_gc.go (+ test), bench_lifecycle.go (+ test), main_test.go.
+- **Single export `Run(args []string) error`** in `cmd/strata/admin/run.go` (renamed from main.go to avoid `package admin` with `func main()`). All flag parsing receives `args` slice, not `os.Args`. No `os.Exit` inside Run — return error to parent main.
+- **Top-level dispatcher** in `cmd/strata/main.go`: argv[1] in {"server", "admin"}. `cmd/strata/main.go` server-side body also needs extraction to `server.Run(args)` for symmetry. Existing `cmd/strata/server.go` (or wherever server bootstrap lives — verify) refactored similarly.
+- **No symlink / migration shim** per user explicit + CLAUDE.md single-binary invariant. `bin/strata-admin` simply ceases to exist post-`make build`. Operators must update scripts; documented in CLAUDE.md migration note.
+- **Makefile**: drop the `strata-admin` build line. Only `bin/strata` target remains. `make test` covers `./cmd/strata/...` which includes the new `./cmd/strata/admin` package automatically.
+- **Dockerfile** (`deploy/docker/Dockerfile`): drops the second `go build -tags ceph -trimpath -o /out/strata-admin ./cmd/strata-admin` line. Saves ~30s on cold Docker build cache. Final stage copies only `/usr/local/bin/strata`.
+- **`scripts/ralph/archive/**` snapshots are frozen** — DO NOT rewrite references to strata-admin there. Smoke grep step excludes archived snapshots.
+- **Find/replace scope** (US-002): docs/ (binary-consolidation.md, observability.md, gc-lifecycle-phase-2.md), scripts/ (smoke + race scripts), deploy/docker/ (compose), .github/workflows/ (CI), Makefile, CLAUDE.md. Pattern: `strata-admin <subcommand>` → `strata admin <subcommand>`. Preserve flag syntax exactly.
+- **CLAUDE.md "Single-binary invariant" section** (added in drain-cleanup cycle): flip the migration-pending bullet to "Consolidation complete in commit `<SHA>`". Preserve the forward-looking discipline (any future CLI feature must be a subcommand).
+- **Smoke script** `scripts/smoke-single-binary.sh` verifies: `bin/strata --help` lists server + admin; `bin/strata admin --help` lists 9 subcommands; `bin/strata admin rewrap --help` matches legacy output; `bin/strata-admin` doesn't exist post-build; `strata unknown` exits 2 with helpful error. Excluded from grep scan: scripts/ralph/archive/**.
+- **ROADMAP close-flip** in US-002: P2 entry "Consolidate strata-admin binary into strata as admin subcommand" → `~~**P2 — ...**~~ — **Done.** <summary>. (commit \`<pending>\`)`. Closing SHA backfilled in follow-up commit on main.
+- **`tasks/prd-single-binary.md` REMOVED** in US-002 per CLAUDE.md PRD lifecycle rule.
+- **No new caches, no state machine changes, no UI changes** — purely a build/CLI refactor + docs sweep. State Truth Tables in PRD cover the dispatcher branching only.
+- **Test surfaces**: existing `cmd/strata-admin/*_test.go` moves with source files; `cmd/strata/main_test.go` covers top-level dispatch shape (server/admin/unknown/empty); `cmd/strata/admin/run_test.go` covers admin-side dispatch (subcommand routing).
+- **End-to-end discipline** (per `feedback_cycle_end_to_end.md`): walkthrough exercise in PRD enumerates 12 steps (1-9 happy path + 10-12 docs/smoke verification); negative paths covered (legacy binary not found, unknown subcommand, no args). State Truth Tables documented; no Safety Claims (refactor only). Final US-002 gated on `make smoke-single-binary` passing.
+
+
+## 2026-05-16 - US-001
+- Moved cmd/strata-admin → cmd/strata/admin subcommand package (10 .go files).
+- run.go: `package admin`, exports `Run(args)error` + writer-injected `RunWith(stdout, stderr, args)error`; ErrUsage replaces internal errUsage sentinel.
+- rewrap.go / bench_gc.go / bench_lifecycle.go: errUsage → ErrUsage. Tests unchanged in surface.
+- cmd/strata/main.go: dispatcher gains "admin" case calling `admin.RunWith(a.out, a.err, args[1:])`; help banner lists admin alongside server + version.
+- cmd/strata/main_test.go: 4 new tests (TestAdmin_HelpDispatchesToAdminPackage, TestAdmin_NoArgsExitsTwo, TestAdmin_UnknownSubcommandExitsTwo, TestAdmin_RewrapDryRun) verify dispatcher routes admin correctly.
+- Makefile: dropped `go build -o bin/strata-admin ./cmd/strata-admin` line from `build:` target. `make build` now produces bin/strata + bin/strata-racecheck only.
+- deploy/docker/Dockerfile: dropped second `go build` line for strata-admin and the COPY of /usr/local/bin/strata-admin into the final stage; image label updated to reflect single-binary shape.
+- cmd/strata-admin/ directory removed (hard cut per CLAUDE.md single-binary invariant — no symlink, no migration shim).
+- Validation: `go vet ./...`, `go test ./...`, `make build` all clean. `./bin/strata --help` lists admin; `./bin/strata admin --help` mirrors legacy strata-admin help banner; `./bin/strata admin rewrap --help` prints rewrap usage.
+- **Learnings for future iterations:**
+  - admin.Run vs admin.RunWith — split entrypoint into writer-injected variant (RunWith) so the top-level dispatcher tests in `cmd/strata` package can capture stdout/stderr via bytes.Buffer. The bare `Run(args)` wraps RunWith with os.Stdout/Stderr for production use. Cleaner than os.Pipe acrobatics in tests.
+  - Package rename via `git mv` keeps history attribution intact; the rename catches up across Go's `internal/` lookup because both old and new paths sit under the same module (`github.com/danchupin/strata`) and admin/ is a regular subdirectory (no `internal` boundary moved).
+  - When converting `package main` → library package: the legacy `os.Exit(2)` shape inside `main()` cannot survive the move because tests can't catch `os.Exit`. Replace with `return ErrUsage` / `return err`; the caller in cmd/strata maps any non-nil to exit 2. Preserves CLI exit-code contract without locking tests out of the entrypoint.
+  - The Makefile bench-gc / bench-lifecycle targets still reference `./bin/strata-admin bench-gc` — US-002 will sweep those to `./bin/strata admin bench-gc` along with all docs/scripts/CI references.
+---
+
+## 2026-05-16 - US-002
+- Swept every `strata-admin` reference outside `scripts/ralph/archive/**` + `scripts/ralph/{progress.txt,prd.json}`.
+- Docs (9 pages): `docs/site/content/architecture/migrations/binary-consolidation.md` (rewrote header + K8s Job example to use single binary + `command: ["/usr/local/bin/strata", "admin", "rewrap"]`), `migrations/_index.md`, `migrations/gc-lifecycle-phase-2.md`, `architecture/backends/tikv.md` (`cmd/strata-admin/rewrap.go` → `cmd/strata/admin/rewrap.go`), `architecture/benchmarks/gc-lifecycle.md` (docker entrypoint `--entrypoint /usr/local/bin/strata strata:ceph admin bench-gc`), `architecture/benchmarks/data/gc-lifecycle-phase-2/README.md`, `architecture/observability.md` (logging + tracing sections), `s3-compatibility/_index.md` (SSE rewrap line), `best-practices/{gc-lifecycle-tuning.md,placement-rebalance.md}` (placement-rebalance.md also flipped `http://strata-admin/admin/v1/...` URLs to `http://strata/admin/v1/...`).
+- Makefile bench-gc / bench-gc-multi / bench-lifecycle / bench-lifecycle-multi: `./bin/strata-admin bench-{gc,lifecycle}` → `./bin/strata admin bench-{gc,lifecycle}` (replace_all across 4 lines).
+- `.gitignore`: dropped `/strata-admin` entry + reworded the comment to reference the single-binary build.
+- `.github/workflows/ci.yml`: dropped the second `go build -o bin/strata-admin ./cmd/strata-admin` line + reworded the surrounding comment.
+- `deploy/docker/Dockerfile`: image label reworded to drop "consolidates the legacy strata-admin" framing.
+- `CLAUDE.md`: rewrote the "Single-binary invariant" section to declare consolidation complete (legacy `cmd/strata-admin` folded into `cmd/strata/admin`); refreshed the Logging section + tracing snippet + example close-flip diff to reflect the single-binary shape.
+- `ROADMAP.md`: close-flipped the P2 entry to `~~**P2 — Consolidate strata-admin binary into strata as admin subcommand.**~~ — **Done.** ...` with full one-line summary (`commit <pending>`, backfilled in follow-up); refreshed the P1 close-flip narrative + the GC bench Phase 1 entry + the gc.Worker latent-bug entry to reference the new `strata admin bench-gc` command path.
+- `README.md`: rewrote the `cmd/` tree to fold the admin CLI into the `cmd/strata/` description; Dockerfile-section line reworded to describe operator verbs via `strata admin <subcommand>`.
+- Internal Go comments: `internal/meta/store.go`, `internal/meta/tikv/multipart.go`, `internal/crypto/master/rotation.go` (2 spots) + `internal/crypto/master/CLAUDE.md` swept to `strata admin rewrap`.
+- `cmd/strata/admin/client.go` HTTPError prefix `strata-admin:` → `strata admin:`; `cmd/strata/admin/run.go` UserAgent `strata-admin/1` → `strata/1 (admin)`; `cmd/strata/admin/bench_common.go` two doc-comments updated; `cmd/strata/main.go` + `cmd/strata/main_test.go` comments updated.
+- Removed `tasks/prd-single-binary.md` via `git rm` per CLAUDE.md PRD lifecycle rule (Ralph cycle snapshot in `scripts/ralph/prd.json` is the canonical record going forward; close-flip in ROADMAP.md captures the operator-facing summary).
+- New `scripts/smoke-single-binary.sh` (and `make smoke-single-binary` target) verifies the post-build dispatcher: `bin/strata --help` lists `server` + `admin`; `bin/strata admin --help` lists all 9 subcommands; `bin/strata admin rewrap --help` prints rewrap usage; `bin/strata-admin` does NOT exist after `make build`; `bin/strata unknown` exits 2 with a helpful error; final residue grep over `docs/ scripts/ deploy/ .github/ Makefile` excludes `scripts/ralph/archive/**`, the ralph cycle bookkeeping (`progress.txt` / `prd.json`), the smoke script itself, Hugo build artifacts under `docs/site/{public,resources}/`, and the Makefile target's own comment.
+- Validation: `make vet`, `go test ./cmd/strata/...`, `make test`, `make docs-build`, `make smoke-single-binary` — all clean.
+- **Learnings for future iterations:**
+  - Hugo bakes the entire site (including search index JSON) into `docs/site/public/`. The directory is gitignored but lives under the same `docs/` tree the smoke grep walks, so the smoke harness has to filter `^docs/site/public/` and `^docs/site/resources/` to avoid hitting stale search-index hits from previous renames. Same applies to any future "no residue X in docs/" grep gate.
+  - `http://strata-admin/admin/v1/...` URLs in `placement-rebalance.md` were hostname placeholders, not binary names. Renamed them to `http://strata/admin/v1/...` (the admin API is served by `strata server` on the gateway port) — keeps the smoke grep clean and is also a more accurate operator example.
+  - Internal HTTP UserAgent string can't contain a space if you want to keep grep-strictness intact (substrings still match). `strata-admin/1` → `strata/1 (admin)` avoids the `strata-admin` substring while preserving readable provenance in audit logs.
+  - The smoke grep needs to be self-aware: the smoke script itself + the Makefile target description both naturally mention `strata-admin` (they're the thing checking for residue). Exclude `^scripts/smoke-single-binary.sh:` and `^Makefile:.*# ` (any commented Makefile line) from the residue scan.
+  - ROADMAP close-flip narratives + the Single-binary invariant section in CLAUDE.md intentionally retain `strata-admin` mentions (they NARRATE the migration). Those live outside the smoke-grep scope (CLAUDE.md / ROADMAP.md not in `docs/ scripts/ deploy/ .github/ Makefile`) so the smoke check + the PRD acceptance line ("every match outside archive replaced") reconcile naturally.
+---

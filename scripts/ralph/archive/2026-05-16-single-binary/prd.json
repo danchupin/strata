@@ -1,0 +1,65 @@
+{
+  "project": "Strata",
+  "branchName": "ralph/single-binary",
+  "description": "Consolidate `strata-admin` binary into `strata admin` subcommand. Closes ROADMAP P2 (Correctness & consistency). Per CLAUDE.md single-binary invariant — all functionality lives in one `strata` binary. Moves cmd/strata-admin/ → cmd/strata/admin/ package; extends cmd/strata/main.go to dispatch first arg (server | admin); removes cmd/strata-admin/ entirely; updates Makefile + Dockerfile + docs + scripts + CI. Hard cut — no symlink, no migration shim. 2 stories.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Move cmd/strata-admin/ to cmd/strata/admin/ subcommand package + top-level dispatcher",
+      "description": "As a developer, I need the strata-admin source moved into a subcommand package under cmd/strata so the single binary can dispatch both server and admin subcommands without changing the operator-visible CLI surface.",
+      "acceptanceCriteria": [
+        "New package `cmd/strata/admin/` containing the migrated code; exports single `Run(args []string) error` entry point",
+        "Move all 8 .go source files from `cmd/strata-admin/` → `cmd/strata/admin/`: `main.go` → `run.go` (renamed to avoid `package admin` having a `func main()`); convert `func main()` body to `func Run(args []string) error`; flag parsing receives `args` instead of reading `os.Args` directly; `client.go` / `rewrap.go` / `rewrap_test.go` / `bench_common.go` / `bench_gc.go` / `bench_gc_test.go` / `bench_lifecycle.go` / `bench_lifecycle_test.go` relocated unchanged",
+        "`main_test.go` → `run_test.go` (renamed; tests against `Run()` instead of `main()`)",
+        "Package declaration in all moved files updated from `package main` to `package admin`",
+        "All `os.Exit` calls inside `Run` removed — instead return error so parent main can decide exit code",
+        "`cmd/strata/main.go` extended with top-level dispatcher: `func main()` reads `os.Args[1:]`, checks first arg, routes to `server.Run` / `admin.Run`; existing server entry point refactored similarly (exports `Run(args []string) error`)",
+        "Top-level help when args empty or `--help` lists `server` + `admin` subcommands with one-line descriptions; exit 0",
+        "Unknown subcommand prints error + usage to stderr; exit 2",
+        "`strata admin` with no further args prints admin sub-help listing all 9 subcommands (iam, lifecycle, gc, sse, replicate, bucket, rewrap, bench-gc, bench-lifecycle)",
+        "Remove `cmd/strata-admin/` directory entirely (no symlink, no migration shim — hard cut per CLAUDE.md single-binary invariant)",
+        "Makefile `build` target produces only `bin/strata` (drop the `strata-admin` build line and any `BIN_ADMIN` variable)",
+        "`deploy/docker/Dockerfile` drops `go build -tags ceph -trimpath -o /out/strata-admin ./cmd/strata-admin`; final stage copies single binary `/usr/local/bin/strata`; ENTRYPOINT / CMD unchanged",
+        "`cmd/strata/main_test.go` (or new test file) covers dispatcher shapes: `strata server --help` succeeds; `strata admin --help` succeeds; `strata admin rewrap --dry-run` succeeds; `strata unknown` exits 2; `strata` (no args) prints help",
+        "Existing tests in `cmd/strata/admin/*_test.go` continue to pass after move + package rename",
+        "Verify: build a binary, run `bin/strata admin rewrap --help` — output equivalent to legacy `bin/strata-admin rewrap --help` (US-002 smoke gates this)",
+        "`go vet ./...` passes",
+        "`go test ./cmd/strata/...` passes",
+        "`make build` succeeds and produces exactly one binary",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Moved cmd/strata-admin/*.go → cmd/strata/admin/ (main.go→run.go, main_test.go→run_test.go); package main → package admin; func main() → Run(args[]string)error with peer RunWith(stdout,stderr,args) for writer injection; ErrUsage exported; cmd/strata/main.go dispatcher routes admin via admin.RunWith(a.out, a.err, ...); 4 new dispatcher tests in main_test.go cover help/no-args/unknown-subcommand/rewrap-dry-run paths; Makefile + Dockerfile drop strata-admin build line."
+    },
+    {
+      "id": "US-002",
+      "title": "Find/replace docs + scripts + compose + CI + smoke + ROADMAP close-flip + PRD removal",
+      "description": "As a maintainer, I need every reference to `strata-admin` in docs, scripts, compose, and CI updated to the new `strata admin` subcommand syntax so operators following the runbooks land on the right command.",
+      "acceptanceCriteria": [
+        "`grep -rn \"strata-admin\" docs/ scripts/ deploy/ .github/ Makefile CLAUDE.md` enumerated; every match (outside `scripts/ralph/archive/` snapshots) replaced with `strata admin`",
+        "`docs/site/content/architecture/migrations/binary-consolidation.md` flipped: K8s Job example uses `command: [\"/usr/local/bin/strata\", \"admin\", \"rewrap\"]`; intro paragraph updated to \"Consolidation complete: single `strata` binary with `server` + `admin` subcommands\"",
+        "`docs/site/content/architecture/observability.md` line referencing `cmd/strata-admin` updated to `cmd/strata/admin`",
+        "`docs/site/content/architecture/migrations/gc-lifecycle-phase-2.md` lines mentioning `strata-admin` probe → `strata admin` probe",
+        "CLAUDE.md \"Single-binary invariant\" section: bullet about pending migration of `cmd/strata-admin` updated to \"Consolidation complete in commit `<SHA>` — single `strata` binary holds both `server` + `admin` subcommands\"; rest of section preserved",
+        "CLAUDE.md \"Common commands\" table: any reference to `strata-admin <cmd>` → `strata admin <cmd>`",
+        "`deploy/docker/docker-compose.yml`: no compose service references `strata-admin` binary (verified by grep)",
+        "`.github/workflows/*.yml`: any CI job invoking `strata-admin` → `strata admin`",
+        "Smoke + race + integration test scripts (`scripts/*.sh`) updated",
+        "New `scripts/smoke-single-binary.sh` verifies: `bin/strata --help` output contains both `server` and `admin` subcommand listings; `bin/strata admin --help` lists all 9 expected subcommands; `bin/strata admin rewrap --help` prints rewrap usage; `bin/strata-admin` does NOT exist after `make build`; `strata unknown` exits 2 with helpful error",
+        "`make smoke-single-binary` Makefile target wraps the script",
+        "`ROADMAP.md` close-flip the P2 entry → `~~**P2 — Consolidate strata-admin binary into strata as admin subcommand.**~~ — **Done.** <one-line summary>. (commit \\`<pending>\\`)`; closing SHA backfilled in follow-up commit on main",
+        "`tasks/prd-single-binary.md` REMOVED in the same commit (PRD lifecycle rule)",
+        "`make docs-build` succeeds (no broken cross-references after the rename)",
+        "`make vet` succeeds",
+        "`make test` succeeds",
+        "`make smoke-single-binary` succeeds",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "Swept every strata-admin reference outside scripts/ralph/archive/** + scripts/ralph/{progress.txt,prd.json}: docs/ (binary-consolidation.md, observability.md, gc-lifecycle-phase-2.md + 6 other pages), Makefile (bench-gc/lifecycle commands), .gitignore (dropped /strata-admin), .github/workflows/ci.yml (single build line), CLAUDE.md (Single-binary invariant section + tracing line + logging line + example diff), ROADMAP.md (close-flip P2 + P1 narrative refresh + GC bench line + latent-bug line), README.md (cmd tree + Dockerfile description), Dockerfile (label), internal/meta/store.go + internal/meta/tikv/multipart.go + internal/crypto/master/{rotation.go,CLAUDE.md} (comment refs). Removed tasks/prd-single-binary.md per CLAUDE.md PRD lifecycle rule. New scripts/smoke-single-binary.sh + make smoke-single-binary target verifies dispatcher shape (root help lists server+admin, admin help lists 9 subcommands, admin rewrap --help renders, no bin/strata-admin post-build, unknown→exit2, zero scoped-tree residue). make vet / make test / make docs-build / make smoke-single-binary all clean."
+    }
+  ]
+}
