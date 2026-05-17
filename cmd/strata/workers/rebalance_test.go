@@ -15,8 +15,8 @@ func TestRebalanceWorkerRegistered(t *testing.T) {
 	if !ok {
 		t.Fatal("rebalance worker not registered (init() did not fire)")
 	}
-	if w.SkipLease {
-		t.Fatal("rebalance should run under the outer rebalance-leader lease (SkipLease=false)")
+	if !w.SkipLease {
+		t.Fatal("rebalance Phase 2 must own its own leader election (SkipLease=true)")
 	}
 }
 
@@ -29,13 +29,36 @@ func TestBuildRebalanceReadsEnv(t *testing.T) {
 		Logger: slog.Default(),
 		Meta:   metamem.New(),
 		Data:   datamem.New(),
+		Locker: metamem.NewLocker(),
 	}
 	r, err := buildRebalance(deps)
 	if err != nil {
 		t.Fatalf("buildRebalance: %v", err)
 	}
-	if _, ok := r.(*rebalance.Worker); !ok {
-		t.Fatalf("buildRebalance returned %T, want *rebalance.Worker", r)
+	fan, ok := r.(*rebalance.ShardedFanOut)
+	if !ok {
+		t.Fatalf("buildRebalance returned %T, want *rebalance.ShardedFanOut", r)
+	}
+	if fan.ShardCount != 1 {
+		t.Fatalf("default ShardCount: got %d want 1", fan.ShardCount)
+	}
+}
+
+func TestBuildRebalanceShardsEnv(t *testing.T) {
+	t.Setenv("STRATA_REBALANCE_SHARDS", "4")
+	deps := Dependencies{
+		Logger: slog.Default(),
+		Meta:   metamem.New(),
+		Data:   datamem.New(),
+		Locker: metamem.NewLocker(),
+	}
+	r, err := buildRebalance(deps)
+	if err != nil {
+		t.Fatalf("buildRebalance: %v", err)
+	}
+	fan := r.(*rebalance.ShardedFanOut)
+	if fan.ShardCount != 4 {
+		t.Fatalf("ShardCount: got %d want 4", fan.ShardCount)
 	}
 }
 
@@ -45,18 +68,24 @@ func TestBuildRebalanceClampsOutOfRange(t *testing.T) {
 	// Above max — should clamp down.
 	t.Setenv("STRATA_REBALANCE_RATE_MB_S", "999999")
 	t.Setenv("STRATA_REBALANCE_INFLIGHT", "0")
+	t.Setenv("STRATA_REBALANCE_SHARDS", "99999")
 
 	deps := Dependencies{
 		Logger: slog.Default(),
 		Meta:   metamem.New(),
 		Data:   datamem.New(),
+		Locker: metamem.NewLocker(),
 	}
 	r, err := buildRebalance(deps)
 	if err != nil {
 		t.Fatalf("buildRebalance: %v", err)
 	}
-	if _, ok := r.(*rebalance.Worker); !ok {
-		t.Fatalf("buildRebalance returned %T, want *rebalance.Worker", r)
+	fan, ok := r.(*rebalance.ShardedFanOut)
+	if !ok {
+		t.Fatalf("buildRebalance returned %T, want *rebalance.ShardedFanOut", r)
+	}
+	if fan.ShardCount != 1024 {
+		t.Fatalf("ShardCount clamp: got %d want 1024", fan.ShardCount)
 	}
 }
 

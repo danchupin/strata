@@ -19,20 +19,28 @@ import (
 	"github.com/danchupin/strata/internal/rebalance"
 )
 
+// RebalanceFanOut captures the *rebalance.ShardedFanOut built by the most
+// recent buildRebalance call so the supervisor + diagnostics can observe
+// the held-shard set without a fresh build. nil until buildRebalance has
+// run.
+var RebalanceFanOut *rebalance.ShardedFanOut
+
 func init() {
 	Register(Worker{
-		Name:  "rebalance",
-		Build: buildRebalance,
+		Name:      "rebalance",
+		Build:     buildRebalance,
+		SkipLease: true,
 	})
 }
 
 // buildRebalance reads STRATA_REBALANCE_INTERVAL / _RATE_MB_S / _INFLIGHT
-// at constructor time, clamps out-of-range values with a WARN, and wires
-// the prometheus observer. Single leader cluster-wide via the outer
-// `rebalance-leader` lease (SkipLease=false). The PlanEmitter is a
-// MoverChain seeded with whichever movers the build tag enables (RADOS
-// under `ceph`, S3 under US-005); chains with no movers fall back to
-// the plan-logging only behaviour shipped in US-003.
+// / _SHARDS at constructor time, clamps out-of-range values with a WARN,
+// and wires the prometheus observer. Phase 2 (US-002 rebalance-scale):
+// SkipLease=true — the per-shard leases `rebalance-leader-<i>` are owned
+// by *rebalance.ShardedFanOut, not the outer supervisor. The PlanEmitter
+// is a MoverChain seeded with whichever movers the build tag enables
+// (RADOS under `ceph`, S3 under US-005); chains with no movers fall back
+// to the plan-logging behaviour shipped in US-003.
 func buildRebalance(deps Dependencies) (Runner, error) {
 	interval := clampDuration(deps,
 		"STRATA_REBALANCE_INTERVAL", time.Hour,
@@ -40,6 +48,12 @@ func buildRebalance(deps Dependencies) (Runner, error) {
 	)
 	rateMBPerSec := clampInt(deps, "STRATA_REBALANCE_RATE_MB_S", 100, 1, 10000)
 	inflight := clampInt(deps, "STRATA_REBALANCE_INFLIGHT", 4, 1, 64)
+	rawShards := intFromEnv("STRATA_REBALANCE_SHARDS", 1)
+	shards := clampShards(rawShards)
+	if shards != rawShards {
+		deps.Logger.Warn("rebalance: clamping env",
+			"env", "STRATA_REBALANCE_SHARDS", "value", rawShards, "clamped", shards)
+	}
 	throttle := rebalance.NewThrottle(int64(rateMBPerSec)*1024*1024, int64(rateMBPerSec)*1024*1024)
 	chain := &rebalance.MoverChain{
 		Movers: rebalanceMovers(deps, throttle, inflight),
@@ -50,21 +64,44 @@ func buildRebalance(deps Dependencies) (Runner, error) {
 		probe = p
 	}
 	notifier := buildDrainCompleteNotifier(deps.Logger)
-	return rebalance.New(rebalance.Config{
-		Meta:         deps.Meta,
-		Data:         deps.Data,
-		Logger:       deps.Logger,
-		Metrics:      metrics.RebalanceObserver{},
-		Emitter:      chain,
-		Interval:     interval,
-		RateMBPerSec: rateMBPerSec,
-		Inflight:     inflight,
-		Tracer:       deps.Tracer.Tracer("strata.worker.rebalance"),
-		StatsProbe:   probe,
-		Progress:     deps.RebalanceProgress,
-		Notifier:     notifier,
-		AuditTTL:     auditRetentionFromEnv(deps.Logger),
-	})
+	tracer := deps.Tracer.Tracer("strata.worker.rebalance")
+	auditTTL := auditRetentionFromEnv(deps.Logger)
+	build := func(shardID int) *rebalance.Worker {
+		w, err := rebalance.New(rebalance.Config{
+			Meta:         deps.Meta,
+			Data:         deps.Data,
+			Logger:       deps.Logger,
+			Metrics:      metrics.RebalanceObserver{},
+			Emitter:      chain,
+			Interval:     interval,
+			RateMBPerSec: rateMBPerSec,
+			Inflight:     inflight,
+			Tracer:       tracer,
+			StatsProbe:   probe,
+			Progress:     deps.RebalanceProgress,
+			Notifier:     notifier,
+			AuditTTL:     auditTTL,
+			ShardID:      shardID,
+			ShardCount:   shards,
+		})
+		if err != nil {
+			deps.Logger.Error("rebalance: shard worker build failed",
+				"shard", shardID, "error", err.Error())
+			return nil
+		}
+		return w
+	}
+	fan := &rebalance.ShardedFanOut{
+		Locker:     deps.Locker,
+		ShardCount: shards,
+		Logger:     deps.Logger,
+		Build:      build,
+	}
+	if deps.EmitLeader != nil {
+		fan.OnLeader = func(acquired bool) { deps.EmitLeader("rebalance", acquired) }
+	}
+	RebalanceFanOut = fan
+	return fan, nil
 }
 
 // buildDrainCompleteNotifier resolves STRATA_NOTIFY_TARGETS into a
