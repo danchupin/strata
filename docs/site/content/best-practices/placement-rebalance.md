@@ -912,11 +912,17 @@ large deploys" by mirroring the gc + lifecycle Phase 2 pattern: the
 rebalance worker is now a **sharded fan-out** rather than a single
 goroutine per process.
 
-The cassandra-backed companion to `lab-tikv-3` is the
-[`lab-cassandra-3`]({{< ref "/architecture/migrations/compose-collapse" >}})
-profile — 3 named strata replicas sharing one Cassandra fronted by an
-nginx LB on host port `10000`. Use it to exercise multi-leader
-worker-lease distribution on the Cassandra metadata backend.
+The bare-default compose lab is now the **TiKV-default 2-replica
+shape** (`strata-a` / `strata-b` behind nginx LB on `:9999`) — bare
+`docker compose up -d` brings it up directly, no profile flag needed.
+Use it to exercise multi-leader worker-lease distribution on the TiKV
+metadata backend. The retired 3-replica labs (`lab-tikv-3`,
+`lab-cassandra-3`) are tracked as a parked P3 follow-up in
+[`ROADMAP.md`](https://github.com/danchupin/strata/blob/main/ROADMAP.md);
+see the [migration note]({{< ref "/architecture/migrations/tikv-default-lab" >}})
+for the full reasoning. The Cassandra-backed equivalent is available
+via `make up-cassandra` for a single Cassandra-backed replica
+(`strata-cassandra` :9998) side-by-side with the bare default.
 
 ### `STRATA_REBALANCE_SHARDS` env
 
@@ -959,15 +965,17 @@ holds multiple shards and the bench multiplier flattens.
 
 ### Benchmark + speedup expectations
 
-The `lab-tikv-3` bench harness lives under
-`scripts/bench-rebalance-multi.sh` and is wrapped by
-`make bench-rebalance-multi`. It seeds N buckets × M chunks each
-with a `{default:1, cephb:1}` placement policy, drains `default`
+The bench harness lives under `scripts/bench-rebalance-multi.sh` and is
+wrapped by `make bench-rebalance-multi`. It seeds N buckets × M chunks
+each with a `{default:1, cephb:1}` placement policy, drains `default`
 evacuate, and times wall-clock-until-`chunks_on_cluster=0` for
-`SHARDS=1` baseline and `SHARDS=3` multi-leader.
+`SHARDS=1` baseline and `SHARDS=2` multi-leader on the bare-default
+2-replica lab. The historical `SHARDS=3` scenario is SKIP'd with an
+explicit stdout message — the 3-replica lab is retired (see ROADMAP
+P3 entry "Restore 3-replica TiKV bench (SHARDS=3 rebalance-multi)").
 
-Expected at `SHARDS=3` against the 3-replica lab-tikv-3 stack:
-ratio ≤ 40 % of baseline (≥ 2.5× speedup). The bench prints one of
+Expected at `SHARDS=2` against the bare-default 2-replica lab:
+ratio ≤ 60 % of baseline (≥ 1.6× speedup). The bench prints one of
 three verdicts:
 
 - `SPEEDUP_OK` — ratio ≤ 40 % of baseline. Multi-leader works.
@@ -1000,8 +1008,9 @@ The four-scenario smoke harness `scripts/smoke-rebalance-scale.sh`
 
 - **A** — single-replica fan-out at `SHARDS=3`, asserts the folded
   chip emits exactly once and drain converges.
-- **B** — `lab-tikv-3` multi-leader at `SHARDS=3`, asserts all three
-  replicas carry the chip (one shard each) and drain converges.
+- **B** — `SHARDS=3` multi-leader against a 3-replica lab (SKIP'd in
+  the current bare-default 2-replica shape; tracked as P3 ROADMAP
+  follow-up "Restore 3-replica TiKV bench").
 - **C** — back-compat `SHARDS=1` on the same lab, asserts EXACTLY one
   replica holds the chip and the iteration log matches the
   legacy single-leader shape.
@@ -1016,8 +1025,8 @@ into a hard fail for CI gating.
 ## See also
 
 - [Rebalance bench]({{< ref "/architecture/benchmarks/rebalance" >}}) —
-  lab-tikv-3 bench harness, expected speedup, cap shape, comparison
-  with gc / lifecycle Phase 2.
+  bench harness, expected speedup, cap shape, comparison with gc /
+  lifecycle Phase 2.
 - [S3 multi-cluster routing]({{< ref "/best-practices/s3-multi-cluster" >}}) —
   env shape for `STRATA_S3_CLUSTERS` / `STRATA_S3_CLASSES`, credentials
   envelope, rolling-restart workflow.

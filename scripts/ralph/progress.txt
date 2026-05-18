@@ -124,3 +124,27 @@ Cycle: ralph/tikv-default-lab
   - **smoke-rebalance-scale.sh Scenario B + D already had `REPLICAS < 3` skip-paths** that we leveraged for the 2-replica bare default. When parking a 3-replica feature, look for existing replica-count gates first — often the SKIP message just needs a refreshed reason string, not new control flow. Saved ~30 lines of conditional logic.
   - **Bench script's SKIP message belongs at the END of the script**, not at the top, so the SHARDS=1 + SHARDS=2 baseline data still gets collected and printed BEFORE the SKIP narrative. Operators reading the output see real numbers first, then the explanation of why SHARDS=3 isn't there.
 ---
+
+## 2026-05-18 - US-004
+- Docs + README + CLAUDE.md sweep + new migration note
+- Files changed:
+  - README.md (Option 3 = bare-default TiKV 2-replica lab; new Option 4 = Cassandra-backed regression lab via `make up-cassandra`; web-console Option renumbered to Option 5)
+  - CLAUDE.md (Common commands table refreshed; Compose-shape paragraph rewritten for TiKV-default; arch diagram flipped — TiKV lab default, Cassandra under `--profile cassandra`)
+  - docs/site/content/architecture/backends/tikv.md (`Laptop / CI — single-node compose` → `Laptop / CI — bare-default 2-replica lab`; CI section refreshed)
+  - docs/site/content/architecture/backends/_index.md (TiKV lab default, Cassandra labeled first-class in code; new `Lab compose shape` subsection; first-class-in-code reassurance + migration note link)
+  - docs/site/content/best-practices/placement-rebalance.md (`Multi-leader scaling` subsection: lab-cassandra-3 + lab-tikv-3 narrative replaced by bare-default 2-replica TiKV shape; bench harness SHARDS=2 baseline / SHARDS=3 SKIP'd; Scenario B refreshed)
+  - docs/site/content/architecture/migrations/_index.md (link to new tikv-default-lab migration note)
+  - docs/site/content/architecture/migrations/tikv-default-lab.md (NEW — full migration note: what was removed table, bare-default + Cassandra-profile recipes, port-change warning, Makefile target breaking changes, compose-default rebalance cadence change, Cassandra first-class-in-code reassurance, 3-replica bench P3 follow-up)
+- Validation:
+  - go vet ./... green
+  - make build green (web build + go build clean)
+  - make test green (~12s data/s3 longest; all packages cached or pass)
+  - make docs-build green (63 pages, 129 ms; no dangling links)
+- **Learnings for future iterations:**
+  - **Cassandra backend has no dedicated `cassandra.md` doc** — Cassandra-specific content lives in `docs/site/content/architecture/backends/_index.md` (overview table) + `scylla.md` (CQL drop-in narrative). The `internal/meta/cassandra/**` code path is the authoritative reference; doc updates that reassure "Cassandra first-class in code" belong in `_index.md`'s overview, not a new `cassandra.md` (would fragment the backend index).
+  - **Migration note belongs in `docs/site/content/architecture/migrations/`** and MUST be linked from `_index.md` in the same commit — otherwise Hugo builds it as an orphan page (no nav entry, no breadcrumb). Pattern: add a bullet to `_index.md` matching the existing entries' shape (one-line hook with `{{< ref >}}` link).
+  - **CLAUDE.md ASCII arch diagram is right-padded by hand** — when editing the meta.Store / data.Backend legend or the backend boxes, count characters so the right-side borders line up. Misaligned borders trigger PR-review noise. Use the existing `+---...+` line as the column ruler.
+  - **Hugo `{{< ref "/architecture/migrations/<name>" >}}` shortcode** resolves against the Hugo content root; trailing slash optional. Always omit `.md`. Cross-page links inside the migrations folder use the same absolute-from-content-root path — never relative.
+  - **`make docs-build` is the 1-second dangling-link gate** for any docs change. It builds via `cd docs/site && hugo --minify` and emits page counts to stdout; non-zero exit on broken `{{< ref >}}` or missing front-matter. Run before commit on any docs touch.
+  - **Port-change warnings need an explicit before/after table** in migration notes — operators scanning for `:9999` semantic changes need the dual mapping ("Cassandra-backed was here, now there; TiKV-LB was nothing, now here") in one place, not prose. Saves a round of clarifying questions in operator chat.
+---
