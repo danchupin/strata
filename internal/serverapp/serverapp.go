@@ -196,6 +196,8 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	storageClassSnapshot := bucketstats.NewSnapshot(poolsByClass(cfg, logger))
 	rebalanceProgress := rebalance.NewProgressTracker(rebalanceInterval(logger))
 	clusterStatsCache := placement.NewClusterStatsCache(0)
+	gcResolved := workers.ResolveGCConfig()
+	rebalanceResolved := workers.ResolveRebalanceConfig()
 	adminServer := adminapi.New(adminapi.Config{
 		Meta:                 metaStore,
 		Data:                 dataBackend,
@@ -230,6 +232,19 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		DrainCache:           drainCache,
 		RebalanceProgress:    rebalanceProgress,
 		ClusterStatsCache:    clusterStatsCache,
+		GCConfig: adminapi.GCConfig{
+			GraceSeconds:    gcResolved.GraceSeconds,
+			IntervalSeconds: gcResolved.IntervalSeconds,
+			BatchSize:       gcResolved.BatchSize,
+			Concurrency:     gcResolved.Concurrency,
+			Shards:          gcResolved.Shards,
+		},
+		RebalanceConfig: adminapi.RebalanceConfig{
+			IntervalSeconds: rebalanceResolved.IntervalSeconds,
+			RateMBPerSec:    rebalanceResolved.RateMBPerSec,
+			Inflight:        rebalanceResolved.Inflight,
+			Shards:          rebalanceResolved.Shards,
+		},
 	})
 
 	mux := http.NewServeMux()

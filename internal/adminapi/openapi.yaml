@@ -879,6 +879,41 @@ components:
           type: integer
           description: "Total retained traces in the in-process ring buffer (independent of limit/offset)"
 
+    GCConfig:
+      type: object
+      required: [grace_seconds, interval_seconds, batch_size, concurrency, shards]
+      description: |
+        Env-resolved GC worker tunable snapshot (US-001 drain-rebalance-
+        transparency). Captured at boot from STRATA_GC_* env vars; gateway
+        restart picks up changes. UI computes `Awaiting GC` ETA from these
+        values + the live gc_queue_pending sample.
+      properties:
+        grace_seconds: { type: integer, description: "STRATA_GC_GRACE in seconds" }
+        interval_seconds: { type: integer, description: "STRATA_GC_INTERVAL in seconds" }
+        batch_size: { type: integer, description: "STRATA_GC_BATCH_SIZE (0 = backend default)" }
+        concurrency: { type: integer, description: "STRATA_GC_CONCURRENCY (clamped 1..256)" }
+        shards: { type: integer, description: "STRATA_GC_SHARDS (clamped 1..1024)" }
+
+    RebalanceConfig:
+      type: object
+      required: [interval_seconds, rate_mb_s, inflight, shards, replicas_count]
+      description: |
+        Env-resolved rebalance worker tunable snapshot (US-001 drain-
+        rebalance-transparency). Knob fields captured at boot; replicas_count
+        derived per request from the heartbeat table filtered to live nodes
+        within `2 × HeartbeatInterval` of now.
+      properties:
+        interval_seconds: { type: integer, description: "STRATA_REBALANCE_INTERVAL in seconds (clamped 60..86400)" }
+        rate_mb_s: { type: integer, description: "STRATA_REBALANCE_RATE_MB_S per replica (clamped 1..10000)" }
+        inflight: { type: integer, description: "STRATA_REBALANCE_INFLIGHT (clamped 1..64)" }
+        shards: { type: integer, description: "STRATA_REBALANCE_SHARDS (clamped 1..1024)" }
+        replicas_count:
+          type: integer
+          description: |
+            Live replicas counted off the heartbeat store. 0 when the
+            store is unavailable or every row is stale (the UI then
+            treats migration bandwidth as a `~24h+ ETA` fallback).
+
   responses:
     Unauthorized:
       description: Authentication missing or invalid.
@@ -1770,6 +1805,50 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/MetricsTimeseries' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /gc-config:
+    get:
+      summary: Resolved GC worker tunables (read-only, env-static at boot)
+      operationId: getGCConfig
+      description: |
+        Returns the gateway's boot-time snapshot of STRATA_GC_* env vars
+        (grace, interval, batch_size, concurrency, shards). Read-only —
+        env stays the source of truth; gateway restart updates the
+        snapshot. Consumed by the `<DrainProgressBar>` Awaiting GC chip
+        for the live ETA formula (US-002).
+      responses:
+        '200':
+          description: GC tunable snapshot.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GCConfig' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /rebalance-config:
+    get:
+      summary: Resolved rebalance worker tunables + live replica count
+      operationId: getRebalanceConfig
+      description: |
+        Returns the gateway's boot-time snapshot of STRATA_REBALANCE_*
+        env vars (interval, rate_mb_s, inflight, shards) plus the live
+        replica count derived from the heartbeat table filtered to
+        nodes within `2 × HeartbeatInterval` of now. Read-only — env
+        stays the source of truth; gateway restart updates the env
+        snapshot. Consumed by the `<DrainProgressBar>` Migrating chip
+        (US-002) and the Cluster Overview rebalance card (US-003).
+        Failures of the heartbeat probe degrade gracefully:
+        replicas_count=0 + the
+        `strata_admin_config_endpoint_errors_total{endpoint="rebalance-config"}`
+        counter increments.
+      responses:
+        '200':
+          description: Rebalance tunable snapshot + live replicas count.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RebalanceConfig' }
         '401':
           $ref: '#/components/responses/Unauthorized'
 

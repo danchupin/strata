@@ -208,6 +208,51 @@ func parseAuditRetention(s string) (time.Duration, error) {
 	return time.ParseDuration(s)
 }
 
+// ResolvedRebalanceConfig is the env-resolved rebalance worker tunable
+// snapshot surfaced on GET /admin/v1/rebalance-config (US-001 drain-
+// rebalance-transparency). replicas_count is filled in by the admin
+// handler from the heartbeat store at request time — not part of this
+// struct.
+type ResolvedRebalanceConfig struct {
+	IntervalSeconds int
+	RateMBPerSec    int
+	Inflight        int
+	Shards          int
+}
+
+// ResolveRebalanceConfig re-reads STRATA_REBALANCE_* env vars with the
+// same clamps as buildRebalance. Read-only; no side effects. Kept here
+// (rather than the adminapi layer) so the snapshot stays lock-step with
+// the worker constructor.
+func ResolveRebalanceConfig() ResolvedRebalanceConfig {
+	interval := durationFromEnv("STRATA_REBALANCE_INTERVAL", 5*time.Minute)
+	switch {
+	case interval < time.Minute:
+		interval = time.Minute
+	case interval > 24*time.Hour:
+		interval = 24 * time.Hour
+	}
+	rateMBPerSec := clampRange(intFromEnv("STRATA_REBALANCE_RATE_MB_S", 100), 1, 10000)
+	inflight := clampRange(intFromEnv("STRATA_REBALANCE_INFLIGHT", 4), 1, 64)
+	shards := clampShards(intFromEnv("STRATA_REBALANCE_SHARDS", 1))
+	return ResolvedRebalanceConfig{
+		IntervalSeconds: int(interval.Seconds()),
+		RateMBPerSec:    rateMBPerSec,
+		Inflight:        inflight,
+		Shards:          shards,
+	}
+}
+
+func clampRange(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
 func clampDuration(deps Dependencies, key string, fallback, lo, hi time.Duration) time.Duration {
 	v := durationFromEnv(key, fallback)
 	if v < lo {

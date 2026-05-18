@@ -24,8 +24,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped 2026-05-18. Added handlers in internal/adminapi/config_endpoints.go with GCConfig + RebalanceConfig types. ResolveGCConfig / ResolveRebalanceConfig helpers in cmd/strata/workers/ mirror buildGC/buildRebalance env reads. serverapp wires both at boot. Counter strata_admin_config_endpoint_errors_total{endpoint} added in internal/metrics. ReplicasCount derived per request from Heartbeat.ListNodes filtered to 2 × HeartbeatInterval window; ListNodes failure bumps the counter and returns replicas_count=0. OpenAPI updated. Unit tests cover injected snapshots, zero values, stale heartbeat filtering, and error-path counter."
     },
     {
       "id": "US-002",

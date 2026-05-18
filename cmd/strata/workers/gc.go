@@ -83,6 +83,37 @@ func clampShards(n int) int {
 	return n
 }
 
+// ResolvedGCConfig is the env-resolved GC worker tunable snapshot surfaced
+// on GET /admin/v1/gc-config (US-001 drain-rebalance-transparency). Values
+// match what buildGC reads at boot — the read-only endpoint is the env-
+// authoritative snapshot, so a gateway restart picks up env changes.
+type ResolvedGCConfig struct {
+	GraceSeconds    int
+	IntervalSeconds int
+	BatchSize       int
+	Concurrency     int
+	Shards          int
+}
+
+// ResolveGCConfig re-reads STRATA_GC_* env vars with the same defaults +
+// clamping as buildGC. Read-only; no side effects. Kept in this file
+// (rather than the adminapi layer) so the snapshot stays lock-step with
+// the worker constructor.
+func ResolveGCConfig() ResolvedGCConfig {
+	interval := durationFromEnv("STRATA_GC_INTERVAL", 30*time.Second)
+	grace := durationFromEnv("STRATA_GC_GRACE", 5*time.Minute)
+	batch := intFromEnv("STRATA_GC_BATCH_SIZE", 0)
+	concurrency := clampConcurrency(intFromEnv("STRATA_GC_CONCURRENCY", 1))
+	shards := clampShards(intFromEnv("STRATA_GC_SHARDS", 1))
+	return ResolvedGCConfig{
+		GraceSeconds:    int(grace.Seconds()),
+		IntervalSeconds: int(interval.Seconds()),
+		BatchSize:       batch,
+		Concurrency:     concurrency,
+		Shards:          shards,
+	}
+}
+
 func durationFromEnv(key string, fallback time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {

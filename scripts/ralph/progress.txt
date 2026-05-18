@@ -30,3 +30,30 @@ Cycle: ralph/drain-rebalance-transparency
   - `061424a` strata compose admin auth defaults restored (`optional` + admin:adminpass:owner) post-collapse cycle regression
 - **End-to-end discipline** (per `feedback_cycle_end_to_end.md`): walkthrough covers happy path (drain with both ETAs visible + bandwidth indicator) + operator network-share concern walkthrough (1 GbE operator picks safe rate via runbook table) + edge cases (either endpoint errors, PromQL unavailable, mid-drain env change via gateway restart, GC_GRACE=0, GC_GRACE=999h, RATE_MB_S=0, multi-replica >2, sub-60s migrations before Prom window settles). State Truth Tables: chip rendering matrix + endpoint response shapes. Cache Invalidation Ledger: 2 new TanStack keys (staleTime: Infinity), no new server caches. Safety Claims Preconditions: ETA + bandwidth non-safety (deregister_ready unchanged); endpoints GET-only; degenerate inputs clamped; card hides on 404 (back-compat).
 
+## 2026-05-18 - US-001
+- Implemented `GET /admin/v1/gc-config` + `/admin/v1/rebalance-config` read-only endpoints
+- Added `GCConfig` + `RebalanceConfig` JSON types in `internal/adminapi/config_endpoints.go`; both audit-stamped (`admin:GetGCConfig` / `admin:GetRebalanceConfig`)
+- Added `ResolveGCConfig` / `ResolveRebalanceConfig` exported helpers in `cmd/strata/workers/{gc,rebalance}.go` that mirror buildGC/buildRebalance env reads + clamping; serverapp wires both at boot
+- Added counter `strata_admin_config_endpoint_errors_total{endpoint}` with `endpoint ∈ {gc-config, rebalance-config}` in `internal/metrics/metrics.go`
+- `replicas_count` derived per request from `Heartbeat.ListNodes` filtered to `2 × HeartbeatInterval` window (default 20 s); ListNodes failure bumps the counter and returns 0 (UI fallback path)
+- OpenAPI spec gains schemas + paths for both endpoints
+- Files changed:
+  - internal/metrics/metrics.go (new counter + register)
+  - internal/adminapi/server.go (new fields on Server/Config + routes)
+  - internal/adminapi/config_endpoints.go (new file — handlers + types)
+  - internal/adminapi/config_endpoints_test.go (new — unit tests)
+  - internal/adminapi/openapi.yaml (new schemas + paths)
+  - cmd/strata/workers/gc.go (ResolveGCConfig + ResolvedGCConfig)
+  - cmd/strata/workers/gc_test.go (env + defaults tests)
+  - cmd/strata/workers/rebalance.go (ResolveRebalanceConfig + ResolvedRebalanceConfig + clampRange)
+  - cmd/strata/workers/rebalance_test.go (env / defaults / clamp tests)
+  - internal/serverapp/serverapp.go (call ResolveGCConfig / ResolveRebalanceConfig at boot and pass through adminapi.Config)
+- **Learnings for future iterations:**
+  - Audit stamping pattern: every admin handler grabs `owner := auth.FromContext(ctx).Owner` and calls `s3api.SetAuditOverride(ctx, "admin:<Verb>", "<resource>", "-", owner)` BEFORE writing the response. Verb is the Capitalized HTTP action, resource is the operator-facing label (here `gc-config` / `rebalance-config`); bucket field carries `-` for non-bucket resources.
+  - Per-package metric counters live in `internal/metrics/metrics.go` and are registered in the single `Register()` call — adding one without appending to the `MustRegister(...)` list silently drops it. The labelset must be deterministic at startup; even labels that "today" are never populated (the gc-config side) should still be reachable so future expansion doesn't change the metric shape.
+  - The Heartbeat store interface only exposes `ListNodes(ctx)` — there's no pre-filtered "live nodes" helper. Inline the freshness check (`now.Sub(lastHeartbeat) <= ttl`) with `IsZero()` guard. Default TTL = `2 × HeartbeatInterval` (20 s on default 10 s cadence); fall back to `2 × heartbeat.DefaultInterval` if the server has no HeartbeatInterval configured.
+  - `dto.Metric` from `prometheus/client_model/go` is the in-test counter reader: call `counter.Write(&m)` then check `m.Counter.GetValue()`. The existing `readCounter` helper in `clusters_drain_progress_physical_test.go` follows this pattern — name new helpers distinctly (here `readConfigErrorCounter`) to avoid same-package collision.
+  - `cmd/strata/workers` and `internal/adminapi` cannot import each other (cmd is the binding layer), but the binding via `serverapp` can mediate by reading from one package and shaping into the other's struct. Keeps the snapshot lock-step with worker constructors without leaking adminapi types into the worker init code.
+  - When a handler degrades gracefully (here: ListNodes failure → 200 with replicas_count=0 + counter increment), bake that into a unit test that mocks an `errHeartbeatStore` and asserts both the response shape AND the counter delta — the AC explicitly calls out "endpoint errors counter" so the assertion is load-bearing.
+---
+
