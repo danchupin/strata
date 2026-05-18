@@ -47,8 +47,8 @@
         "Typecheck passes"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Landed. ClusterDrainProgress extended with physical_chunks_on_cluster / physical_bytes_on_cluster / gc_queue_pending fields. <DrainProgressBar> renders 3 explicit states: Migrating (existing render now uses primary=physical?? manifest in headline 'Migrating: X chunks remaining'), Awaiting GC cleanup (new amber chip with STRATA_GC_GRACE tooltip when manifest==0 && physical>0), Ready to deregister (existing flow). Collapsible <details data-testid=dp-detail> with Manifest / GC queue / Physical bytes rows. Null-physical fallback renders italic '(physical count unavailable on this backend)' tooltip; Detail bytes row reads 'unavailable'. New web/e2e/drain-progress.spec.ts with 4 scenarios (Migrating / AwaitingGC / Ready / null-physical). pnpm run build + typecheck + test:unit (57 tests) + go vet + adminapi tests all green. Browser verification needs a live lab drain (no rebalance worker in memory mode)."
     },
     {
       "id": "US-003",

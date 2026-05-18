@@ -39,3 +39,17 @@ Cycle: ralph/drain-progress-physical
   - Builder signature growth: when adding fields to ClusterDrainProgressResponse, expand buildDrainProgressResponse signature (don't pack into a struct) — keeps test seam straightforward (existing 13 tests called it with new param list trivially).
   - The placement import in serverapp.go was already present (used by DrainCache), so adding ClusterStatsCache there cost nothing.
 ---
+
+## 2026-05-18 - US-002
+- Wired <DrainProgressBar> 3-state machine + collapsible detail + back-compat null fallback.
+- Files changed:
+  - web/src/api/clusters.ts: ClusterDrainProgress interface gains optional physical_chunks_on_cluster / physical_bytes_on_cluster / gc_queue_pending fields with doc comment referencing US-001 cache + probe semantics.
+  - web/src/components/storage/DrainProgressBar.tsx: derive primary=physical??manifest; new Awaiting GC chip (testid dp-awaiting-gc) fires when manifest==0 && physical>0 with STRATA_GC_GRACE tooltip; Migrating headline reads 'Migrating: X chunks remaining' where X=primary (testid dp-primary-count); null-physical renders italic '(physical count unavailable on this backend)' tooltip (testid dp-physical-unavailable); local formatBytes helper (duplicated from Storage.tsx — no shared lib); new <DrainDetail> component renders collapsed-by-default <details data-testid=dp-detail> with Manifest chunks / GC queue / Physical bytes rows; same DrainDetail also mounts on the Awaiting GC branch.
+  - web/e2e/drain-progress.spec.ts: NEW Playwright spec with 4 scenarios covering Migrating / Awaiting GC / Ready / null-physical. Spoofs /admin/v1/clusters + /admin/v1/clusters/*/drain-progress directly (no flip flow — each scenario seeds a fixed state).
+- **Learnings for future iterations:**
+  - The Awaiting GC chip MUST be inserted in the render flow BEFORE the existing `chunks === 0 && notReadyReasons.length > 0` branch — the gc_queue_pending not-ready token is almost always present when physical>0 && manifest==0, so without ordering the operator sees the bland 'Not ready' chip instead of the explanatory amber 'Awaiting GC' chip.
+  - The existing `dp-summary` block was repurposed for the Migrating-state headline (primary count + 'Migrating: X chunks remaining' wording). Kept the surrounding base/eta/stale suffix logic intact — only the leading count + label changed. The 'Migrating:' prefix becomes the chip label per the PRD's chip-state contract.
+  - formatBytes is duplicated 4× across the web codebase (Storage.tsx, Overview.tsx, Metrics.tsx, BucketDetail.tsx); I added a 5th in DrainProgressBar.tsx rather than introducing web/src/lib/format.ts in this cycle. Future cycle: consolidate.
+  - Playwright pattern: scenarios that DON'T need flip-state mutations (e.g. drain-progress phases) can use a simple seeded SpoofState with a single /drain-progress route. No need to mirror the full drain-transparency installRoutes shape — saved ~200 lines of route setup.
+  - Browser verification noted as TODO: memory backend has no rebalance worker so I couldn't observe the 3 states transitioning live. Lab drain needs RADOS + a live PUT-and-drain cycle to walk through Migrating → Awaiting GC → Ready.
+---
