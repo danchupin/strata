@@ -103,8 +103,16 @@ services:
       STRATA_REBALANCE_INTERVAL: ${STRATA_REBALANCE_INTERVAL:-30s}
       STRATA_REBALANCE_RATE_MB_S: ${STRATA_REBALANCE_RATE_MB_S:-100}
       # overrides for local experimentation (auth on/off, alt classes, ...)
-      STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-}
-      STRATA_STATIC_CREDENTIALS: ${STRATA_STATIC_CREDENTIALS:-}
+      # Default `optional` + preset admin creds so the embedded operator
+      # console at /console/ + the /admin/v1/* API work out-of-the-box with
+      # `docker compose up -d`. Operator can override via env. Parity with
+      # the lab-tikv / lab-tikv-3 / lab-cassandra-3 profile shapes. This
+      # restores the pre-`ralph/compose-profile-isolation` behaviour where
+      # the strata-multi service shipped with mode=off; the cycle's rename
+      # accidentally inherited the legacy single-cluster service's blank
+      # defaults instead of strata-multi's. Documented in CLAUDE.md.
+      STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-optional}
+      STRATA_STATIC_CREDENTIALS: ${STRATA_STATIC_CREDENTIALS:-admin:adminpass:owner}
       STRATA_GC_INTERVAL: ${STRATA_GC_INTERVAL:-}
       STRATA_GC_GRACE: ${STRATA_GC_GRACE:-}
       STRATA_LIFECYCLE_INTERVAL: ${STRATA_LIFECYCLE_INTERVAL:-}
