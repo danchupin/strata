@@ -159,28 +159,44 @@ func (b *Backend) ClusterObjectCount(ctx context.Context, clusterID string) (int
 		return 0, fmt.Errorf("rados: unknown cluster %q", clusterID)
 	}
 	type poolKey struct{ pool, ns string }
-	seen := make(map[poolKey]struct{})
-	var total int64
+	// First pass: collect pools from classes that explicitly target this
+	// cluster. This is the canonical path when the operator's
+	// STRATA_RADOS_CLASSES env names per-cluster classes (e.g.
+	// STANDARD@cephb=cephb:strata.rgw.buckets.data).
+	targeted := make(map[poolKey]struct{})
+	allPools := make(map[poolKey]struct{})
 	for _, spec := range b.classes {
 		c := spec.Cluster
 		if c == "" {
 			c = DefaultCluster
 		}
-		if c != clusterID {
-			continue
-		}
 		k := poolKey{pool: spec.Pool, ns: spec.Namespace}
-		if _, dup := seen[k]; dup {
-			continue
+		allPools[k] = struct{}{}
+		if c == clusterID {
+			targeted[k] = struct{}{}
 		}
-		seen[k] = struct{}{}
-		ioctx, err := b.ioctx(ctx, clusterID, spec.Pool, spec.Namespace)
+	}
+	// Fallback: lab + most prod setups use uniform pool layout across
+	// clusters (ceph-bootstrap creates the same pool names on every
+	// cluster). When no class targets clusterID, query all known pool
+	// names against this cluster directly — ioctx() will surface a
+	// clear error if a pool genuinely doesn't exist on the target.
+	pools := targeted
+	if len(pools) == 0 {
+		pools = allPools
+	}
+	if len(pools) == 0 {
+		return 0, nil // no class config at all → nothing to count
+	}
+	var total int64
+	for k := range pools {
+		ioctx, err := b.ioctx(ctx, clusterID, k.pool, k.ns)
 		if err != nil {
-			return 0, fmt.Errorf("rados: open ioctx %s/%s: %w", clusterID, spec.Pool, err)
+			return 0, fmt.Errorf("rados: open ioctx %s/%s: %w", clusterID, k.pool, err)
 		}
 		stat, err := ioctx.GetPoolStats()
 		if err != nil {
-			return 0, fmt.Errorf("rados: pool stats %s/%s: %w", clusterID, spec.Pool, err)
+			return 0, fmt.Errorf("rados: pool stats %s/%s: %w", clusterID, k.pool, err)
 		}
 		total += int64(stat.Num_objects)
 	}
@@ -204,7 +220,10 @@ func (b *Backend) ClusterStats(ctx context.Context, clusterID string) (int64, in
 	}
 	// Force a Conn dial via a per-cluster ioctx against any pool we know
 	// about — MonCommand needs an open Conn but does not care which pool.
-	// Fall back to df-against-the-first-class on this cluster.
+	// First pass: class targeted at this cluster. Fallback: any class's
+	// pool name (lab + most prod setups have uniform pool layout across
+	// clusters via ceph-bootstrap). ioctx() surfaces a clear error if a
+	// pool genuinely doesn't exist on the target cluster.
 	var seedPool, seedNS string
 	for _, spec := range b.classes {
 		c := spec.Cluster
@@ -218,7 +237,19 @@ func (b *Backend) ClusterStats(ctx context.Context, clusterID string) (int64, in
 		}
 	}
 	if seedPool == "" {
-		return 0, 0, fmt.Errorf("rados: cluster %q has no configured class", clusterID)
+		// No class targets this cluster. Pick any class's pool name as
+		// the seed — MonCommand still works once Conn is dialed (open
+		// ioctx against a pool that exists on the target cluster).
+		for _, spec := range b.classes {
+			if spec.Pool != "" {
+				seedPool = spec.Pool
+				seedNS = spec.Namespace
+				break
+			}
+		}
+	}
+	if seedPool == "" {
+		return 0, 0, fmt.Errorf("rados: cluster %q has no configured class and no fallback pool", clusterID)
 	}
 	if _, err := b.ioctx(ctx, clusterID, seedPool, seedNS); err != nil {
 		return 0, 0, fmt.Errorf("rados: open ioctx on %s/%s: %w", clusterID, seedPool, err)
@@ -241,12 +272,46 @@ func (b *Backend) ClusterStats(ctx context.Context, clusterID string) (int64, in
 	if err := json.Unmarshal(out, &df); err != nil {
 		return 0, 0, fmt.Errorf("rados: df parse: %w", err)
 	}
-	return df.Stats.TotalUsedBytes, df.Stats.TotalBytes, nil
+	// Sum bytes-used over strata-managed pools only (those registered in
+	// `b.classes`). The cluster-wide `stats.total_used_bytes` includes
+	// ceph internal pools like `.mgr` (always >0 even on empty clusters)
+	// which is misleading to the drain-progress operator UX: physical
+	// bytes should reflect *strata's* footprint on the cluster, not
+	// ceph internals. totalBytes stays cluster-wide capacity (rebalance
+	// worker fill-check semantic: "how full is the cluster overall").
+	strataPools := make(map[string]struct{})
+	for _, spec := range b.classes {
+		if spec.Pool != "" {
+			strataPools[spec.Pool] = struct{}{}
+		}
+	}
+	var strataUsedBytes int64
+	if len(strataPools) > 0 {
+		for _, p := range df.Pools {
+			if _, ok := strataPools[p.Name]; ok {
+				strataUsedBytes += p.Stats.BytesUsed
+			}
+		}
+	} else {
+		// No classes registered → fall back to cluster-wide
+		// total_used_bytes so the fill-check semantic still works on
+		// degenerate setups.
+		strataUsedBytes = df.Stats.TotalUsedBytes
+	}
+	return strataUsedBytes, df.Stats.TotalBytes, nil
 }
 
 type cephDF struct {
 	Stats struct {
 		TotalBytes     int64 `json:"total_bytes"`
 		TotalUsedBytes int64 `json:"total_used_bytes"`
+	} `json:"stats"`
+	Pools []cephDFPool `json:"pools"`
+}
+
+type cephDFPool struct {
+	Name  string `json:"name"`
+	Stats struct {
+		BytesUsed int64 `json:"bytes_used"`
 	} `json:"stats"`
 }
