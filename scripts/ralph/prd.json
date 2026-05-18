@@ -57,8 +57,8 @@
         "Typecheck passes"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Makefile rewritten: `up`/`up-all` = bare `docker compose up -d` (TiKV-default lab); new `up-cassandra` = `--profile cassandra up -d` (adds Cassandra-backed strata on :9998). Dropped: up-tikv, up-lab-tikv, up-lab-tikv-3, up-lab-cassandra-3, smoke-tikv, smoke-signed-tikv, wait-strata-tikv, wait-strata-lab-cassandra, lint-nginx-lab-cassandra. New: wait-tikv (HTTP /pd/api/v1/health on :2379), wait-strata-{a,b,lb-nginx}, wait-strata-lab (combined). wait-cassandra adds `--profile cassandra` so `ps` sees the gated container. build-ceph + run-strata point at strata-a / strata-a+b+lb. up-all-ci uses --profile cassandra strata-cassandra for race-soak. lint-nginx-lab --add-host stubs flipped strata-tikv-{a,b} → strata-{a,b}. Orphan deploy/nginx/strata-lab-cassandra.conf deleted. go vet + make build + make test green."
     },
     {
       "id": "US-003",

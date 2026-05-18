@@ -52,3 +52,42 @@ Cycle: ralph/tikv-default-lab
   - **Validate compose changes early**: `docker compose -f <file> config --services` is a 100ms lint that catches container_name collisions, missing volumes, profile misconfig before any container starts. Run it before any go vet / make build.
   - **Per-replica `STRATA_NODE_ID` + shared `strata-jwt-shared` volume is the round-robin LB contract**: without distinct node IDs the heartbeat rows collide; without the shared volume cross-replica session JWT validation fails (login → next request lands on other replica → 401). Both are required; don't simplify one away.
 ---
+
+## 2026-05-18 - US-002
+- Makefile sweep: TiKV-default lab targets as bare default, Cassandra profile entry, drop dead targets
+- Files changed:
+  - Makefile (rewritten)
+  - deploy/nginx/strata-lab-cassandra.conf (deleted — orphan after lint-nginx-lab-cassandra target dropped)
+- Makefile changes:
+  - `up` and `up-all`: bare `$(COMPOSE) up -d` (no profile, no service list). Brings up TiKV-default 2-replica stack
+  - New `up-cassandra`: `$(COMPOSE) --profile cassandra up -d` — layers cassandra + strata-cassandra (:9998) on top
+  - Dropped targets: up-tikv, up-lab-tikv, up-lab-tikv-3, up-lab-cassandra-3, smoke-tikv, smoke-signed-tikv, wait-strata-tikv, wait-strata-lab-cassandra, lint-nginx-lab-cassandra
+  - `wait-tikv` rewritten: HTTP probe on `http://127.0.0.1:2379/pd/api/v1/health` (was TCP probe on port 20160). PRD-spec'd
+  - `wait-cassandra` adds `--profile cassandra` to `$(COMPOSE) ps` call — without it, docker compose silently filters profile-gated containers and the until-loop hangs forever
+  - New granular `wait-strata-a` (:10001), `wait-strata-b` (:10002), `wait-strata-lb-nginx` (:9999); combined `wait-strata-lab` chains all three
+  - `wait-strata` retained — LB :9999 readyz probe
+  - `down`: dropped retired profile flags (`tikv`, `lab-tikv*`, `lab-cassandra-3`), added `--profile cassandra --profile webhook-trap --profile ci` for full teardown
+  - `up-all-ci` rewritten: `--profile ci --profile cassandra up -d cassandra ceph strata-cassandra` (was `--profile ci up -d cassandra ceph strata` — `strata` service no longer exists; race-soak is Cassandra-backed so the cassandra profile is correct)
+  - `build-ceph` flipped from `strata` (gone) to `strata-a`
+  - `run-strata` flipped from `strata` (gone) to `strata-a strata-b strata-lb-nginx`
+  - `run-cassandra` preserved verbatim with comment refresh (dev-only host-Cassandra run, independent of lab compose flip)
+  - `make smoke` + `make smoke-signed` preserved verbatim — already targeted :9999 (now LB front)
+  - `smoke-lab-tikv` retained but help text refreshed to `make up && make wait-strata-lab` invocation shape
+  - `lint-nginx-lab` --add-host stubs: strata-tikv-{a,b} → strata-{a,b}
+- Validation:
+  - `make -n up` → `docker compose -f deploy/docker/docker-compose.yml up -d` ✓
+  - `make -n up-cassandra` → `docker compose -f deploy/docker/docker-compose.yml --profile cassandra up -d` ✓
+  - `make -n wait-tikv` → curl loop on http://127.0.0.1:2379/pd/api/v1/health ✓
+  - `make -n smoke smoke-signed` → :9999 ✓
+  - `make -n up-tikv` (retired) → "No rule to make target" ✓
+  - `make -n up-lab-tikv` (retired) → "No rule to make target" ✓
+  - `make -n smoke-tikv` (retired) → "No rule to make target" ✓
+- Grep gate locally: zero matches for `strata-tikv-[abc]|strata-cass-|strata-lb-nginx-cass|--profile lab-tikv|--profile lab-cassandra-3|--profile tikv` in Makefile (US-003 grep gate compliance start)
+- `go vet ./...` green; `make build` green (web-build + go build both clean); `make test` green
+- **Learnings for future iterations:**
+  - **`docker compose ps <service>` silently filters profile-gated services**: without the matching `--profile X` flag, the output is empty even if the container is running. The `until [ "$(...)" = "healthy" ]` loop in wait-cassandra hangs forever without the flag. Always add `--profile cassandra` to wait-cassandra (and any future wait targets for profile-gated services). Pattern: `$(COMPOSE) --profile <name> ps --format '{{.Health}}' <service>`.
+  - **PD's `/pd/api/v1/health` is the portable HTTP readiness probe** for the TiKV stack. The pingcap/tikv image has no stable HTTP healthcheck contract (status server returns plain text on a non-stable contract; the alpine-glibc base ships no curl). PD's API is stable + curl-friendly from the host, so probe pd:2379 (host-published port) instead of tikv:20160. The earlier `wait-tikv` TCP probe on 20160 worked but couldn't distinguish "port open, region not assigned yet" from "fully ready" — HTTP probe on PD covers both since PD blocks until raft majority elects.
+  - **`make -n <target>` is the contract-level lint** for Makefile changes: dry-runs the target without executing, surfaces unknown targets ("No rule to make target") and substitution errors. Run before any go vet / make build to catch typos in PHONY rewrites.
+  - **Orphan files trigger US-005 grep gate failures**: when dropping a Makefile target that references a config file (like lint-nginx-lab-cassandra → strata-lab-cassandra.conf), delete the config file in the same commit. Otherwise the file lingers with `strata-cass-` / `strata-lb-nginx-cass` strings and fails the US-005 final grep gate. Same principle applies to retired scripts/CI workflows in US-003.
+  - **build-ceph + run-strata still reference the retired `strata` service name** in the existing Makefile — these compose-bound targets MUST be swept whenever a service is renamed. Patterns to grep for when renaming compose services: `$(COMPOSE) up -d <name>`, `$(COMPOSE) build <name>`, `$(COMPOSE) ps <name>`. Easy to miss because make doesn't validate compose service names statically.
+---
