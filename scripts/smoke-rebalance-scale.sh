@@ -30,20 +30,20 @@
 #        every survivor; total chip-count >= 1 across cluster)
 #
 # The lab shape is operator-managed; the script does NOT bring it up.
-# Lab pre-reqs to run all 4 scenarios:
+# Lab pre-reqs:
 #
-#   docker compose -f deploy/docker/docker-compose.yml \
-#     --profile lab-tikv --profile lab-tikv-3 up -d
+#   docker compose -f deploy/docker/docker-compose.yml up -d
 #
-# The bare `strata` service (multi-cluster default at :9999) stays
-# running alongside via the bare `docker compose up -d` invocation.
-# Single-replica labs (only the bare `strata` service on :9999) skip
-# Scenarios B + D with a SKIP message; Scenarios A + C still run.
+# Bare-default (post-cycle ralph/tikv-default-lab) is a 2-replica TiKV
+# stack (strata-a + strata-b behind nginx LB on :9999). 3-replica
+# Scenarios B + D skip with a SKIP message (lab-tikv-3 retired; restore
+# via P3 ROADMAP follow-up `Restore 3-replica TiKV bench`). Scenarios
+# A + C run on the bare default.
 #
 # Per-pass orchestration uses SMOKE_RESTART_HOOK (mirror of
 # bench-rebalance-multi.sh's BENCH_RESTART_HOOK). Default recipe
-# force-recreates the strata-tikv-{a,b,c} replicas with
-# STRATA_REBALANCE_SHARDS in env; operators on k8s / systemd override.
+# force-recreates the strata-a/b replicas with STRATA_REBALANCE_SHARDS
+# in env; operators on k8s / systemd override.
 #
 # Skip behaviour: when $BASE/readyz is unreachable after WAIT_GRACE
 # seconds the script EXITs 77 (skipped). REQUIRE_LAB=1 converts the
@@ -67,17 +67,17 @@ SMOKE_LEASE_TTL_S="${SMOKE_LEASE_TTL_S:-${STRATA_GC_LEASE_TTL:-30}}"
 SMOKE_FAILOVER_GRACE_S="${SMOKE_FAILOVER_GRACE_S:-$(( SMOKE_LEASE_TTL_S + 15 ))}"
 
 COMPOSE_FILE="${COMPOSE_FILE:-deploy/docker/docker-compose.yml}"
-COMPOSE_CMD="${COMPOSE_CMD:-docker compose -f $COMPOSE_FILE --profile lab-tikv --profile lab-tikv-3}"
-RESTART_CONTAINERS="${RESTART_CONTAINERS:-strata-tikv-a strata-tikv-b strata-tikv-c strata}"
+COMPOSE_CMD="${COMPOSE_CMD:-docker compose -f $COMPOSE_FILE}"
+RESTART_CONTAINERS="${RESTART_CONTAINERS:-strata-a strata-b}"
 
 # Restart recipe re-exports STRATA_REBALANCE_SHARDS so the per-replica
 # env passthrough picks it up.
 SMOKE_RESTART_HOOK="${SMOKE_RESTART_HOOK:-STRATA_REBALANCE_SHARDS=\$SHARDS STRATA_WORKERS=gc,lifecycle,rebalance $COMPOSE_CMD up -d --force-recreate $RESTART_CONTAINERS}"
 
 # Container name of the replica killed in Scenario D. Default targets
-# the lab-tikv-3 third replica (`strata-tikv-c`); override for other
-# lab shapes.
-SMOKE_FAILOVER_TARGET="${SMOKE_FAILOVER_TARGET:-strata-tikv-c}"
+# strata-b (the second replica of the bare-default 2-replica TiKV lab);
+# override for other lab shapes.
+SMOKE_FAILOVER_TARGET="${SMOKE_FAILOVER_TARGET:-strata-b}"
 
 CRED="${STRATA_STATIC_CREDENTIALS:-}"
 if [[ -z "$CRED" ]]; then
@@ -139,7 +139,7 @@ if ! probe_ready; then
     fail "$msg (REQUIRE_LAB=1)"
   fi
   echo "SKIP: $msg" >&2
-  echo "SKIP: bring up lab-tikv-3 + multi-cluster (see header for compose recipe) and re-run." >&2
+  echo "SKIP: bring up bare-default TiKV lab via 'docker compose up -d' (see header for recipe) and re-run." >&2
   exit 77
 fi
 
@@ -311,11 +311,11 @@ unseed_buckets
 pass "A: SHARDS=3 single-replica fan-out drained ($HC chip holder(s))"
 
 # ----------------------------------------------------------------- Scenario B
-banner "B: lab-tikv-3 multi-leader (3 replicas, SHARDS=3)"
+banner "B: 3-replica multi-leader (3 replicas, SHARDS=3) — parked P3 follow-up"
 if (( REPLICAS < 3 )); then
-  skipped "B: lab has $REPLICAS healthy replicas (<3), need lab-tikv-3 profile up"
+  skipped "B: lab has $REPLICAS healthy replicas (<3); 3-replica lab retired in ralph/tikv-default-lab — see P3 ROADMAP 'Restore 3-replica TiKV bench'"
 else
-  # Re-enter SHARDS=3 in case Scenario A's restart hook missed strata-tikv-{a,b,c}.
+  # Re-enter SHARDS=3 in case Scenario A's restart hook missed any replica.
   HC=$(chip_holder_count rebalance)
   note "scenario B: rebalance chip holders = $HC (expect 3 — one shard per replica)"
   (( HC >= 2 )) \
@@ -348,7 +348,7 @@ pass "C: SHARDS=1 back-compat — single-leader behaviour preserved byte-for-byt
 # ----------------------------------------------------------------- Scenario D
 banner "D: replica failover (kill 1 of 3 → survivors reacquire freed shard)"
 if (( REPLICAS < 3 )); then
-  skipped "D: lab has $REPLICAS healthy replicas (<3), need lab-tikv-3 profile up"
+  skipped "D: lab has $REPLICAS healthy replicas (<3); 3-replica lab retired in ralph/tikv-default-lab — see P3 ROADMAP 'Restore 3-replica TiKV bench'"
 elif ! command -v docker >/dev/null 2>&1; then
   skipped "D: docker CLI not available — cannot kill replica '$SMOKE_FAILOVER_TARGET'"
 else

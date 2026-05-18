@@ -20,20 +20,12 @@ subset. `STRATA_REBALANCE_SHARDS=1` reproduces Phase 1 byte-for-byte.
 ## Harness
 
 ```bash
-# Operator brings up the lab (3-replica TiKV + multi-cluster ceph for
-# drain). The bare `strata` service (multi-cluster default) starts via
-# `docker compose up -d`; the lab-tikv-3 profile layers the three
-# strata-tikv-{a,b,c} replicas alongside. The overlay below wires the
-# ceph-a / ceph-b mounts into all three replicas (operator-maintained —
-# bench-specific).
-STRATA_REBALANCE_SHARDS=1 \
-STRATA_WORKERS=gc,lifecycle,rebalance \
-  docker compose --profile lab-tikv --profile lab-tikv-3 \
-    -f deploy/docker/docker-compose.yml \
-    -f deploy/docker/docker-compose.lab-tikv-3-multi.yml \
-    up -d
-
-make wait-strata-lab
+# Bare-default TiKV lab (post-ralph/tikv-default-lab): PD + TiKV +
+# ceph + ceph-b + strata-a + strata-b + strata-lb-nginx + prometheus +
+# grafana via `docker compose up -d`. Both replicas attach to both
+# RADOS clusters via STRATA_RADOS_CLUSTERS so `Placement={default:1, cephb:1}`
+# policies have a second target for the rebalance worker to migrate to.
+make up && make wait-strata-lab
 
 # Default sweep: 1000 buckets × 10 chunks (10k chunks), 32 KiB each.
 # Override BENCH_BUCKETS / BENCH_CHUNKS_PER_BUCKET / BENCH_OBJECT_SIZE_KB
@@ -42,30 +34,35 @@ make bench-rebalance-multi
 ```
 
 The make target wraps `scripts/bench-rebalance-multi.sh`. The script
-orchestrates two passes (`SHARDS=1` baseline + `SHARDS=3` fan-out), seeds
+orchestrates two passes (`SHARDS=1` baseline + `SHARDS=2` fan-out), seeds
 buckets via aws-cli, drains `default` evacuate mode, polls
 `/admin/v1/clusters/default/drain-progress` until `chunks_on_cluster=0`,
 and prints a per-pass JSON line plus an aggregate ratio + verdict. The
-restart between passes runs through `BENCH_RESTART_HOOK` (default: docker
-compose force-recreate of the three strata-tikv replicas with
-`STRATA_REBALANCE_SHARDS=$SHARDS` exported); override the hook to drive a
-k8s rollout or systemd restart on bare-metal labs.
+`SHARDS=3` leg explicitly SKIPs after the SHARDS=2 baseline — the
+3-replica lab was retired in `ralph/tikv-default-lab`; the SHARDS=3
+bench is parked under the ROADMAP P3 follow-up _Restore 3-replica TiKV
+bench (SHARDS=3 rebalance-multi)_. The restart between passes runs
+through `BENCH_RESTART_HOOK` (default: docker compose force-recreate of
+strata-a + strata-b with `STRATA_REBALANCE_SHARDS=$SHARDS` exported);
+override the hook to drive a k8s rollout or systemd restart on
+bare-metal labs.
 
 Results land in `bench-rebalance-multi-results.jsonl` (one line per pass):
 
 ```json
 {"shards":1,"buckets":1000,"chunks_per_bucket":10,"object_kb":32,"elapsed_s":612}
-{"shards":3,"buckets":1000,"chunks_per_bucket":10,"object_kb":32,"elapsed_s":214}
+{"shards":2,"buckets":1000,"chunks_per_bucket":10,"object_kb":32,"elapsed_s":312}
 ```
 
 ## Methodology
 
-- **Stack:** `lab-tikv-3` (PD + TiKV + 3 strata-tikv-{a,b,c} behind nginx
-  LB on host port 9999) layered with `multi-cluster` (ceph + ceph-b so
-  `Placement={default:1, cephb:1}` policies have a second target for the
-  rebalance worker to migrate to). PD + TiKV are single-instance for the
-  laptop / CI shape; production needs PD ≥3 + TiKV ≥3 for raft majority
-  (see [TiKV backend]({{< ref "/architecture/backends/tikv" >}})).
+- **Stack:** bare-default TiKV-default 2-replica lab (PD + TiKV + ceph +
+  ceph-b + strata-a + strata-b behind nginx LB on host port 9999). Both
+  replicas attach to both RADOS clusters so `Placement={default:1, cephb:1}`
+  policies have a second target for the rebalance worker to migrate to.
+  PD + TiKV are single-instance for the laptop / CI shape; production
+  needs PD ≥3 + TiKV ≥3 for raft majority (see [TiKV
+  backend]({{< ref "/architecture/backends/tikv" >}})).
 - **Hardware:** macOS host, lima Docker context. Numbers are
   **directional** — absolute throughput depends on RADOS pool sizing,
   network topology, and per-replica gateway concurrency. The shape of
@@ -169,9 +166,10 @@ read+write round-trip on the per-chunk copy phase.
   proportional to the bucket-size distribution variance.
 - Single-PD + single-TiKV lab — production multi-node TiKV will shift
   the region-heat knee right.
-- Cross-host lease lottery — in the lab-tikv-3 stack all three
-  replicas race for `rebalance-leader-{0,1,2}` through the same
+- Cross-host lease lottery — in the bare-default 2-replica stack both
+  replicas race for `rebalance-leader-{0,1}` through the same
   TiKV-backed locker. Steady-state ownership rotation under churn
   (one replica restarted, leases redistributed) is exercised by
   scenario D of `scripts/smoke-rebalance-scale.sh` (US-005), not by
-  this bench.
+  this bench. The 3-replica `rebalance-leader-{0,1,2}` race is parked
+  under the ROADMAP P3 follow-up _Restore 3-replica TiKV bench_.

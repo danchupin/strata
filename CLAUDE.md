@@ -28,8 +28,8 @@ in-memory backend is for tests and the smoke pass; no other backends are support
 | Cassandra integration tests (testcontainers, needs Docker)             | `make test-integration` (`go test -tags integration -timeout 10m ./...`) |
 | RADOS integration tests (in-container, requires `make up-all` running) | `make test-rados`                                                        |
 | Run a single test                                                      | `go test -run TestBucketCRUD ./internal/s3api`                           |
-| Bring up Cassandra only                                                | `make up && make wait-cassandra`                                         |
-| Bring up full stack (Cassandra + Ceph + ceph-b + multi-cluster strata) | `make up-all && make wait-cassandra && make wait-ceph`                   |
+| Bring up bare-default TiKV stack (pd + tikv + ceph + ceph-b + strata-a/b + LB) | `make up-all && make wait-tikv && make wait-ceph && make wait-strata-lab` |
+| Bring up Cassandra-backed regression lab (adds cassandra + strata-cassandra) | `make up-cassandra && make wait-cassandra && make wait-ceph`        |
 | Run `strata server` against in-memory backends                         | `make run-memory`                                                        |
 | Run `strata server` against Cassandra metadata + memory data           | `make run-cassandra`                                                     |
 | Smoke pass                                                             | `make smoke` (signed: `make smoke-signed`)                               |
@@ -41,12 +41,19 @@ in-memory backend is for tests and the smoke pass; no other backends are support
 macOS + lima Docker note: `make test-integration` needs `DOCKER_HOST=unix:///Users/.../.lima/.../sock/docker.sock` for
 testcontainers to find the engine.
 
-**Compose shape**: multi-cluster is the canonical default. Bare `docker compose up -d` brings up
-`cassandra + ceph + ceph-b + strata` with `STRATA_RADOS_CLUSTERS=default:...,cephb:...` so per-bucket
-placement policy, rebalance, and drain lifecycle are exercisable out of the box. For a single-cluster
-smoke, override `STRATA_RADOS_CLUSTERS` at runtime — there is no separate single-cluster service or
-profile. Feature workers (notify / replicator / access-log / inventory / audit-export) opt-in via
-`STRATA_WORKERS` on the same `strata` container — no separate feature-worker sidecar.
+**Compose shape**: TiKV-default 2-replica multi-cluster lab is the canonical default. Bare
+`docker compose up -d` brings up `pd + tikv + ceph + ceph-b + strata-a + strata-b + strata-lb-nginx
++ prometheus + grafana`. Both strata replicas have `STRATA_META_BACKEND=tikv`,
+`STRATA_RADOS_CLUSTERS=default:...,cephb:...`, distinct `STRATA_NODE_ID`, and share the
+`strata-jwt-shared` volume so session JWT issued by either replica validates on the other. The nginx
+LB at `:9999` round-robins; direct-replica ports `:10001` / `:10002` poke `strata-a` / `strata-b`.
+`make up-cassandra` (= `docker compose --profile cassandra up -d`) layers `cassandra` +
+`strata-cassandra` (:9998) on top — the Cassandra meta backend remains first-class in code (only the
+lab compose default flipped). For a single-cluster smoke, override `STRATA_RADOS_CLUSTERS` at
+runtime — there is no separate single-cluster service or profile. Feature workers (notify /
+replicator / access-log / inventory / audit-export) opt-in via `STRATA_WORKERS` on the same strata
+container — no separate feature-worker sidecar. See
+`docs/site/content/architecture/migrations/tikv-default-lab.md` for the full migration note.
 
 ## Big-picture architecture
 
@@ -66,15 +73,18 @@ profile. Feature workers (notify / replicator / access-log / inventory / audit-e
                         v              v
               +--------------------------+   +---------------------+
               | meta.Store               |   | data.Backend        |
-              |  memory | cassandra|tikv |   |  memory | rados    |
+              |  memory | tikv |cassandra|   |  memory | rados    |
               +---------+----------------+   +---------+----------+
                         |                              |
                 +-------v---------+            +-------v-------+
-                | Cassandra/Scylla|            | RADOS         |
-                | (sharded fan-out)            | (4 MiB chunks)|
-                |   OR             |           +---------------+
-                | TiKV (PD+TiKV,   |
-                |  ordered scan)   |
+                | TiKV (PD+TiKV,  |            | RADOS         |
+                |  ordered scan)  |            | (4 MiB chunks)|
+                |  -- lab default  |           +---------------+
+                |   OR             |
+                | Cassandra/Scylla |
+                | (sharded fan-out;|
+                |  --profile       |
+                |   cassandra)     |
                 +------------------+
 
   strata server --workers=lifecycle -> meta.Store + data.Backend

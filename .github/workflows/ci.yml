@@ -5,8 +5,8 @@ on:
     branches: [main]
   pull_request:
   # Manual trigger for the gated multi-replica e2e job (US-006). The default
-  # e2e-ui job runs on every PR; e2e-ui-multi-replica needs the lab-tikv
-  # docker stack and a 15 min budget, so it only fires on demand.
+  # e2e-ui job runs on every PR; e2e-ui-multi-replica needs the bare-default
+  # TiKV 2-replica docker stack and a 15 min budget, so it only fires on demand.
   workflow_dispatch:
 
 permissions:
@@ -48,7 +48,7 @@ jobs:
           retention-days: 7
 
   lint-nginx-lab:
-    name: Lint lab-tikv nginx config
+    name: Lint lab nginx config
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -138,24 +138,21 @@ jobs:
           docker build -f deploy/docker/Dockerfile -t strata:ceph .
           docker build -f deploy/docker/ceph-bootstrap/Dockerfile -t strata-ceph:local deploy/docker/ceph-bootstrap
 
-      - name: Start stack
+      - name: "Start stack (bare-default TiKV: pd + tikv + ceph + ceph-b + strata-a/b + LB)"
         run: |
-          docker compose -f deploy/docker/docker-compose.yml up -d cassandra ceph
+          docker compose -f deploy/docker/docker-compose.yml up -d
           echo "waiting for healthy..."
           for i in $(seq 1 60); do
-            cass=$(docker inspect -f '{{.State.Health.Status}}' strata-cassandra 2>/dev/null || echo none)
+            pd=$(docker inspect -f '{{.State.Health.Status}}' strata-pd 2>/dev/null || echo none)
             ceph=$(docker inspect -f '{{.State.Health.Status}}' strata-ceph 2>/dev/null || echo none)
-            echo "  cass=$cass ceph=$ceph"
-            if [ "$cass" = "healthy" ] && [ "$ceph" = "healthy" ]; then
+            cephb=$(docker inspect -f '{{.State.Health.Status}}' strata-cephb 2>/dev/null || echo none)
+            echo "  pd=$pd ceph=$ceph cephb=$cephb"
+            if [ "$pd" = "healthy" ] && [ "$ceph" = "healthy" ] && [ "$cephb" = "healthy" ]; then
               break
             fi
             sleep 5
           done
-
-      - name: Launch strata (gateway + gc + lifecycle workers)
-        run: |
-          docker compose -f deploy/docker/docker-compose.yml up -d strata
-          until curl -sf -o /dev/null http://127.0.0.1:9999/; do sleep 1; done
+          until curl -sf -o /dev/null http://127.0.0.1:9999/readyz; do sleep 1; done
 
       - name: Smoke (curl)
         run: bash scripts/smoke.sh http://127.0.0.1:9999
@@ -168,8 +165,8 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ciSK
           AWS_DEFAULT_REGION: us-east-1
         run: |
-          docker compose -f deploy/docker/docker-compose.yml up -d --force-recreate strata
-          until curl -s -o /dev/null http://127.0.0.1:9999/; do sleep 1; done
+          docker compose -f deploy/docker/docker-compose.yml up -d --force-recreate strata-a strata-b
+          until curl -s -o /dev/null http://127.0.0.1:9999/readyz; do sleep 1; done
           bash scripts/smoke-signed.sh http://127.0.0.1:9999
 
       - name: RADOS integration tests (go test -tags "ceph integration")
@@ -179,7 +176,7 @@ jobs:
         if: always()
         run: |
           mkdir -p ci-logs
-          for c in strata-cassandra strata-ceph strata; do
+          for c in strata-pd strata-tikv-storage strata-ceph strata-cephb strata-a strata-b strata-lb-nginx; do
             docker logs $c > ci-logs/$c.log 2>&1 || true
           done
           docker compose -f deploy/docker/docker-compose.yml ps > ci-logs/compose-ps.txt 2>&1 || true
@@ -214,23 +211,20 @@ jobs:
           docker build -f deploy/docker/Dockerfile -t strata:ceph .
           docker build -f deploy/docker/ceph-bootstrap/Dockerfile -t strata-ceph:local deploy/docker/ceph-bootstrap
 
-      - name: Start backends + webhook trap
+      - name: Start bare-default TiKV stack + webhook trap
         run: |
-          docker compose -f deploy/docker/docker-compose.yml --profile webhook-trap up -d cassandra ceph webhook-trap
+          docker compose -f deploy/docker/docker-compose.yml --profile webhook-trap up -d
           echo "waiting for healthy..."
           for i in $(seq 1 60); do
-            cass=$(docker inspect -f '{{.State.Health.Status}}' strata-cassandra 2>/dev/null || echo none)
+            pd=$(docker inspect -f '{{.State.Health.Status}}' strata-pd 2>/dev/null || echo none)
             ceph=$(docker inspect -f '{{.State.Health.Status}}' strata-ceph 2>/dev/null || echo none)
-            echo "  cass=$cass ceph=$ceph"
-            if [ "$cass" = "healthy" ] && [ "$ceph" = "healthy" ]; then
+            cephb=$(docker inspect -f '{{.State.Health.Status}}' strata-cephb 2>/dev/null || echo none)
+            echo "  pd=$pd ceph=$ceph cephb=$cephb"
+            if [ "$pd" = "healthy" ] && [ "$ceph" = "healthy" ] && [ "$cephb" = "healthy" ]; then
               break
             fi
             sleep 5
           done
-
-      - name: Launch strata (all workers)
-        run: |
-          docker compose -f deploy/docker/docker-compose.yml up -d strata
           until curl -sf -o /dev/null http://127.0.0.1:9999/readyz; do sleep 1; done
 
       - name: Verify /readyz
@@ -245,7 +239,7 @@ jobs:
         if: always()
         run: |
           mkdir -p ci-logs
-          for c in strata-cassandra strata-ceph strata strata-webhook-trap; do
+          for c in strata-pd strata-tikv-storage strata-ceph strata-cephb strata-a strata-b strata-lb-nginx strata-webhook-trap; do
             docker logs $c > ci-logs/$c.log 2>&1 || true
           done
           docker compose -f deploy/docker/docker-compose.yml ps > ci-logs/compose-ps.txt 2>&1 || true
@@ -335,7 +329,7 @@ jobs:
     name: End-to-end UI multi-replica (Playwright, gated)
     runs-on: ubuntu-latest
     # Gated: opt-in via PR title token [multi-replica] OR manual
-    # workflow_dispatch run. Default PRs do NOT pay the lab-tikv boot cost.
+    # workflow_dispatch run. Default PRs do NOT pay the 2-replica lab boot cost.
     if: |
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' && contains(github.event.pull_request.title, '[multi-replica]'))
@@ -372,8 +366,8 @@ jobs:
         run: |
           docker build -f deploy/docker/Dockerfile -t strata:ceph .
           docker build -f deploy/docker/ceph-bootstrap/Dockerfile -t strata-ceph:local deploy/docker/ceph-bootstrap
-      - name: Bring up lab-tikv stack
-        run: make up-lab-tikv
+      - name: Bring up bare-default TiKV 2-replica stack
+        run: make up
       - name: Wait for replicas + LB readyz
         run: make wait-strata-lab
       - name: pnpm install
@@ -396,7 +390,7 @@ jobs:
         if: always()
         run: |
           mkdir -p ci-logs
-          for c in pd tikv strata-tikv-a strata-tikv-b strata-lb-nginx strata-ceph; do
+          for c in strata-pd strata-tikv-storage strata-a strata-b strata-lb-nginx strata-ceph strata-cephb; do
             docker logs $c > ci-logs/$c.log 2>&1 || true
           done
           docker compose -f deploy/docker/docker-compose.yml ps > ci-logs/compose-ps.txt 2>&1 || true

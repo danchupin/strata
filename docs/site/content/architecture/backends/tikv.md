@@ -84,21 +84,31 @@ dial.
 
 ## Sample compose / Kubernetes config
 
-### Laptop / CI — single-node compose
+### Laptop / CI — bare-default 2-replica lab
 
-`deploy/docker/docker-compose.yml` ships PD + TiKV under `--profile tikv`
-(see `make up-tikv`). Single-PD + single-TiKV, host port `9998` for the
-gateway:
+`deploy/docker/docker-compose.yml` now ships PD + TiKV as **always-on
+no-profile services**, fronted by a 2-replica strata pair
+(`strata-a` :10001 / `strata-b` :10002) behind an nginx LB on `:9999`.
+Bare `docker compose up -d` brings up the full TiKV-default lab:
 
 ```bash
-make up-tikv && make wait-pd && make wait-tikv && make wait-strata-tikv
-make smoke-tikv
-make smoke-signed-tikv
+make up-all                # pd + tikv + ceph + ceph-b + strata-a + strata-b + nginx LB
+make wait-tikv             # HTTP probe on http://127.0.0.1:2379/pd/api/v1/health
+make wait-ceph
+make wait-strata-lab       # strata-a :10001 + strata-b :10002 + LB :9999 readyz
+make smoke                 # round-trip against the nginx LB at :9999
+make smoke-signed
 ```
 
-Single-node is the CI shape (`.github/workflows/ci-tikv.yml`'s e2e job).
+This shape is also the CI default (`.github/workflows/ci.yml`'s e2e job).
 It surfaces the structural gap (`ListObjects` native scan vs Cassandra
-fan-out) without paying for a 3-node ring.
+fan-out) while exercising the multi-leader worker-lease distribution
+(`gc-leader-<shard>`, `rebalance-leader-<shard>`) across the two
+replicas. Direct-replica ports `:10001` / `:10002` poke individual
+strata containers; `:9999` is the canonical operator-facing entry. The
+Cassandra-backed regression lab is available side-by-side via
+`make up-cassandra` (= `--profile cassandra up -d`), which layers
+`cassandra` + `strata-cassandra` (:9998) on top of the bare default.
 
 ### Production — TiKV operator on Kubernetes
 
@@ -268,11 +278,14 @@ never on the path.
   This exercises the full `storetest.Run` contract suite plus
   TiKV-specific tests (key-encoding round-trip, audit sweeper,
   pessimistic-txn rollback discipline).
-- **e2e-tikv** — builds the local `strata:ceph` image, brings up
-  `docker compose --profile tikv up -d pd tikv ceph strata-tikv`,
-  waits for healthy, runs `scripts/smoke.sh` then re-launches with
-  `STRATA_AUTH_MODE=required` and runs `scripts/smoke-signed.sh`.
-  Container logs collected always, uploaded on failure only.
+- **e2e** (in `.github/workflows/ci.yml`, not a TiKV-specific job
+  anymore) — builds the local `strata:ceph` image, brings up the bare
+  default (`docker compose up -d`), waits for healthy, runs
+  `scripts/smoke.sh http://127.0.0.1:9999` (LB-fronted) then re-launches
+  with `STRATA_AUTH_MODE=required` and runs `scripts/smoke-signed.sh`.
+  Container logs collected always, uploaded on failure only. The
+  previous `e2e-tikv` job in `ci-tikv.yml` is retired — bare default
+  IS TiKV, so the dedicated TiKV e2e was redundant.
 
 `testcontainers-go`'s `host.docker.internal:host-gateway` ExtraHosts
 pattern resolves natively on GitHub-hosted ubuntu-latest runners; the

@@ -44,35 +44,49 @@ make run-cassandra         # data=memory, meta=cassandra@localhost:9042
 make smoke
 ```
 
-### Option 3: full stack in Docker (Cassandra + Ceph + strata)
+### Option 3: full stack in Docker (TiKV-default 2-replica lab)
 
 ```bash
-make up-all                # cassandra + ceph + ceph-b + multi-cluster strata
-make wait-cassandra
+make up-all                # pd + tikv + ceph + ceph-b + strata-a + strata-b + nginx LB
+make wait-tikv
 make wait-ceph
-make smoke
+make wait-strata-lab       # waits for strata-a (:10001), strata-b (:10002), LB (:9999)
+make smoke                 # round-trips a PUT/GET against the nginx LB at :9999
+open http://localhost:9999/console/
 ```
 
-The bare `docker compose up -d` brings up the multi-cluster shape: the
-gateway attaches to both `default` (ceph) and `cephb` (ceph-b) RADOS
-clusters via `STRATA_RADOS_CLUSTERS` so per-bucket placement policy,
-rebalance, and drain lifecycle work out of the box. For a single-cluster
+Bare `docker compose up -d` is now the **TiKV-default 2-replica lab**:
+PD + TiKV for metadata, ceph + ceph-b as the multi-cluster RADOS pair,
+two strata replicas (`strata-a` :10001 / `strata-b` :10002) sharing the
+`strata-jwt-shared` volume so cross-replica session JWT validation works
+under the nginx LB at `:9999`. The replicas attach to both `default`
+(ceph) and `cephb` (ceph-b) so per-bucket placement policy, rebalance,
+and drain lifecycle are exercisable out of the box. For a single-cluster
 smoke, override `STRATA_RADOS_CLUSTERS` at runtime:
 
 ```bash
 STRATA_RADOS_CLUSTERS=default:/etc/ceph-a/ceph.conf:/etc/ceph-a/ceph.client.admin.keyring \
-  docker compose up -d strata
+  docker compose up -d strata-a strata-b strata-lb-nginx
 ```
 
-### Option 4: TiKV-backed metadata (PD + TiKV + Ceph + strata)
+### Option 4: Cassandra-backed regression lab (--profile cassandra)
 
 ```bash
-make up-tikv               # pd + tikv + ceph + strata-tikv (host port 9998)
-make wait-pd
-make wait-tikv
-make wait-strata-tikv
-make smoke-tikv            # bash scripts/smoke.sh http://127.0.0.1:9998
+make up-cassandra          # bare default + cassandra + strata-cassandra (:9998)
+make wait-cassandra
+make wait-ceph
+bash scripts/smoke.sh http://127.0.0.1:9998
 ```
+
+`--profile cassandra` layers a single Cassandra-backed strata replica on
+top of the bare-default TiKV stack so both backends can be exercised
+side-by-side. The Cassandra meta backend remains first-class in code —
+`internal/meta/cassandra/**` is unchanged, `make test-integration`
+(testcontainers Cassandra) is preserved, and the storetest contract
+suite + benchmarks still cover both backends at parity. This is a
+**lab compose shape flip, not a backend deprecation**. See the
+[migration note](docs/site/content/architecture/migrations/tikv-default-lab.md)
+for the full operator-facing checklist.
 
 TiKV is a first-class equal-tier metadata backend (`STRATA_META_BACKEND=tikv`).
 Native ordered range scans short-circuit Cassandra's 64-way fan-out on
@@ -86,7 +100,7 @@ The runtime image (`deploy/docker/Dockerfile`) is built on the same `quay.io/cep
 
 A successful `make smoke` validates bucket CRUD, object PUT/GET/HEAD/DELETE (including a 10 MiB blob that ends up as three RADOS objects in pool `strata.rgw.buckets.data`), and ListObjectsV2 with prefix/delimiter.
 
-### Option 4: web console (read-only operator UI)
+### Option 5: web console (read-only operator UI)
 
 ```bash
 make run-memory
