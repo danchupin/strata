@@ -3,14 +3,15 @@
 # ralph/cluster-weights cycle).
 #
 # Drives the four walkthrough scenarios from
-# scripts/ralph/prd.json against a running `multi-cluster` compose
-# profile (`docker compose --profile multi-cluster up -d`). Exits
-# non-zero with `FAIL: <scenario:step>` on any assertion miss; exits 0
-# when every scenario is green.
+# scripts/ralph/prd.json against a running compose stack
+# (`docker compose up -d` — multi-cluster is the default shape after
+# the compose-collapse cycle). Exits non-zero with
+# `FAIL: <scenario:step>` on any assertion miss; exits 0 when every
+# scenario is green.
 #
 # Scenarios:
 #   A. New cluster activation:
-#      - Wipe cluster_state row for cephb via cqlsh → restart strata-multi
+#      - Wipe cluster_state row for cephb via cqlsh → restart the strata container
 #      - Assert /clusters reports cephb state=pending weight=0
 #      - POST /clusters/cephb/activate {weight:10} → assert live + weight=10
 #      - PUT 1000 chunks via nil-policy bucket → assert ~100 land on cephb
@@ -21,7 +22,7 @@
 #   B. Existing-live auto-detect at boot:
 #      - PUT N chunks via nil-policy bucket on the freshly-live cephb
 #      - Wipe cluster_state row for `default` cluster
-#      - Restart strata-multi
+#      - Restart the strata container
 #      - Assert /clusters reports `default` state=live weight=100 (bucket_stats
 #        reference path) NOT pending.
 #
@@ -47,24 +48,24 @@
 #   used for admin login + SigV4-signed bucket setup).
 #
 # Lab assumptions:
-#   - strata-multi gateway listens on http://127.0.0.1:9998
+#   - strata gateway listens on http://127.0.0.1:9999
 #   - STRATA_RADOS_CLUSTERS=default:...,cephb:...
 #   - STRATA_RADOS_CLASSES leaves the STANDARD class WITHOUT an
 #     `@cluster` pin so default routing actually consults weights.
 #     (The lab default `STRATA_RADOS_CLASSES=""` is fine.)
 #
-# Skip behavior: when the multi-cluster profile is NOT up (probe on
+# Skip behavior: when the compose stack is NOT up (probe on
 # /readyz fails after WAIT_GRACE seconds), the script EXITs 77
 # (skipped) unless REQUIRE_LAB=1.
 
 set -euo pipefail
 
-BASE="${BASE:-http://127.0.0.1:9998}"
+BASE="${BASE:-http://127.0.0.1:9999}"
 WAIT_GRACE="${WAIT_GRACE:-15}"
 RESTART_GRACE="${RESTART_GRACE:-60}"
 CLUSTER="${SMOKE_CW_CLUSTER:-cephb}"
 OTHER_CLUSTER="${SMOKE_CW_OTHER:-default}"
-GATEWAY_CONTAINER="${SMOKE_CW_GATEWAY:-strata-multi}"
+GATEWAY_CONTAINER="${SMOKE_CW_GATEWAY:-strata}"
 CASSANDRA_CONTAINER="${SMOKE_CW_CASSANDRA:-strata-cassandra}"
 KEYSPACE="${SMOKE_CW_KEYSPACE:-strata}"
 RADOS_CONTAINER="${SMOKE_CW_RADOS:-strata-ceph}"
@@ -139,12 +140,12 @@ wait_ready() {
 }
 
 if ! probe_ready; then
-  msg="multi-cluster lab not reachable on $BASE/readyz after ${WAIT_GRACE}s"
+  msg="compose stack not reachable on $BASE/readyz after ${WAIT_GRACE}s"
   if [[ "$REQUIRE_LAB" == "1" ]]; then
     fail "$msg (REQUIRE_LAB=1)"
   fi
   echo "SKIP: $msg" >&2
-  echo "SKIP: bring it up with 'docker compose --profile multi-cluster up -d' then re-run." >&2
+  echo "SKIP: bring it up with 'docker compose up -d' then re-run." >&2
   exit 77
 fi
 

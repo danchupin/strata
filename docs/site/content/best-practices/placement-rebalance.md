@@ -731,10 +731,10 @@ deploy descriptors).
 ### Three-scenario walkthrough
 
 The smoke harness `scripts/smoke-drain-transparency.sh` drives every
-step below against the running `multi-cluster` compose profile;
-exit-non-zero on any assertion miss. Run via
-`make smoke-drain-transparency` once the lab is up
-(`docker compose --profile multi-cluster up -d`). The legacy
+step below against the running compose stack (multi-cluster is the
+default shape after the compose-collapse cycle); exit-non-zero on any
+assertion miss. Run via `make smoke-drain-transparency` once the lab
+is up (`docker compose up -d`). The legacy
 `scripts/smoke-drain-lifecycle.sh` still validates the basic flip-to-
 draining contract; the new harness covers mode-picker + impact
 analysis + multipart graceful contract end-to-end. A third harness

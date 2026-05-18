@@ -129,14 +129,14 @@ services:
     restart: unless-stopped
 
   # Webhook receiver used by the e2e-full CI job to verify the notify worker
-  # round-trip. Lives behind the `features` profile so the default stack does
-  # not pull it. Strata reaches it on the compose default network at
+  # round-trip. Lives behind the `webhook-trap` profile so the default stack
+  # does not pull it. Strata reaches it on the compose default network at
   # http://webhook-trap:8080/. Logs are JSON to stdout so CI can grep
   # `docker logs strata-webhook-trap` for the delivered event.
   webhook-trap:
     image: mendhak/http-https-echo:34
     container_name: strata-webhook-trap
-    profiles: ["features"]
+    profiles: ["webhook-trap"]
     restart: unless-stopped
 
   prometheus:

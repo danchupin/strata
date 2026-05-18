@@ -146,11 +146,12 @@ Notes:
   over the lease on shutdown or pod eviction.
 - Splitting a "feature" replica with the wider worker set (notify, replicator,
   access-log, inventory, audit-export) onto a second Deployment is supported
-  and is the shape used by the default `docker compose` stack:
+  (k8s-shaped pattern; the `docker compose` stack now folds feature workers
+  into the single `strata` service via `STRATA_WORKERS`):
 
   ```yaml
   kind: Deployment
-  metadata: { name: strata-features }
+  metadata: { name: strata-feature-workers }
   spec:
     replicas: 1
     template:

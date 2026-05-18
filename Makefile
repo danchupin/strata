@@ -99,7 +99,7 @@ up-lab-tikv-3:
 		up -d pd tikv ceph strata-tikv-a strata-tikv-b strata-tikv-c strata-lb-nginx prometheus grafana
 
 down:
-	$(COMPOSE) --profile tikv --profile lab-tikv --profile features --profile tracing down
+	$(COMPOSE) --profile tikv --profile lab-tikv --profile lab-tikv-3 --profile tracing down
 
 wait-cassandra:
 	@echo "waiting for cassandra to report healthy..."
@@ -209,18 +209,19 @@ smoke-lab-tikv:
 
 # Drain-lifecycle walkthrough smoke (US-007 of ralph/drain-lifecycle).
 # Drives the full 15-step operator journey + 4 negative paths against a
-# running `multi-cluster` compose profile (`docker compose --profile
-# multi-cluster up -d`). Skips with exit 77 when the lab is not reachable;
-# set REQUIRE_LAB=1 to convert the skip into a hard fail. See
-# scripts/smoke-drain-lifecycle.sh for env knobs (BASE, SMOKE_DRAIN_*).
+# running compose stack (`docker compose up -d` — multi-cluster is the
+# default shape after the compose-collapse cycle). Skips with exit 77
+# when the lab is not reachable; set REQUIRE_LAB=1 to convert the skip
+# into a hard fail. See scripts/smoke-drain-lifecycle.sh for env knobs
+# (BASE, SMOKE_DRAIN_*).
 smoke-drain-lifecycle:
 	bash scripts/smoke-drain-lifecycle.sh
 
 # Drain-transparency walkthrough smoke (US-008 of ralph/drain-transparency).
 # Drives the three operator scenarios (A: stop-writes drain, B: full evacuate
 # with /drain-impact + bulk-fix, C: upgrade readonly → evacuate) against a
-# running `multi-cluster` compose profile (`docker compose --profile
-# multi-cluster up -d`). Skips with exit 77 when the lab is not reachable;
+# running compose stack (`docker compose up -d` — multi-cluster is the
+# default shape). Skips with exit 77 when the lab is not reachable;
 # set REQUIRE_LAB=1 to convert the skip into a hard fail. See
 # scripts/smoke-drain-transparency.sh for env knobs (BASE, SMOKE_DRAIN_*).
 smoke-drain-transparency:
@@ -230,9 +231,9 @@ smoke-drain-transparency:
 # Drives the four operator scenarios (A: new-cluster activation pending →
 # live + ramp, B: existing-live auto-detect at boot, C: bucket policy wins
 # over cluster weights, D: pending excluded from default routing) against
-# a running `multi-cluster` compose profile (`docker compose --profile
-# multi-cluster up -d`). Wipes `cluster_state` rows via cqlsh and restarts
-# strata-multi between scenarios to exercise the boot-time reconcile.
+# a running compose stack (`docker compose up -d` — multi-cluster is the
+# default shape). Wipes `cluster_state` rows via cqlsh and restarts the
+# strata container between scenarios to exercise the boot-time reconcile.
 # Skips with exit 77 when the lab is not reachable; set REQUIRE_LAB=1 to
 # convert the skip into a hard fail. See scripts/smoke-cluster-weights.sh
 # for env knobs (BASE, SMOKE_CW_*).
@@ -244,11 +245,10 @@ smoke-cluster-weights:
 # bundled in this cycle (drawer 3-category render, /drain-impact cache
 # invalidation, Pools chunk_count rename, force-empty GC enqueue,
 # deregister_ready hard-safety, state-aware buttons, trace browser list)
-# against a running `multi-cluster` compose profile (`docker compose
-# --profile multi-cluster up -d`). Skips with exit 77 when the lab is
-# not reachable; set REQUIRE_LAB=1 to convert the skip into a hard
-# fail. See scripts/smoke-drain-cleanup.sh for env knobs (BASE,
-# SMOKE_DC_*).
+# against a running compose stack (`docker compose up -d` — multi-cluster
+# is the default shape). Skips with exit 77 when the lab is not reachable;
+# set REQUIRE_LAB=1 to convert the skip into a hard fail. See
+# scripts/smoke-drain-cleanup.sh for env knobs (BASE, SMOKE_DC_*).
 smoke-drain-cleanup:
 	bash scripts/smoke-drain-cleanup.sh
 
@@ -256,11 +256,11 @@ smoke-drain-cleanup:
 # Drives the 16-step operator journey closing the four ROADMAP entries
 # bundled in this cycle (P3 trace browser filter/search, P2 UI confusion
 # chip+button, P2 Cassandra multipart probe no-op, P3 ALLOW FILTERING
-# denormalize) against a running `multi-cluster` compose profile
-# (`docker compose --profile multi-cluster up -d`). Skips with exit 77
-# when the lab is not reachable; set REQUIRE_LAB=1 to convert the skip
-# into a hard fail. See scripts/smoke-drain-followup.sh for env knobs
-# (BASE, SMOKE_DF_*).
+# denormalize) against a running compose stack (`docker compose up -d` —
+# multi-cluster is the default shape). Skips with exit 77 when the lab
+# is not reachable; set REQUIRE_LAB=1 to convert the skip into a hard
+# fail. See scripts/smoke-drain-followup.sh for env knobs (BASE,
+# SMOKE_DF_*).
 smoke-drain-followup:
 	bash scripts/smoke-drain-followup.sh
 
@@ -268,9 +268,9 @@ smoke-drain-followup:
 # Drives the four operator scenarios (A: weighted bucket auto-fallback via
 # cluster.weights on drain, B: strict bucket blocks drain + 503 DrainRefused,
 # C: flip strict→weighted clears stuck_single_policy via cache invalidation,
-# D: all clusters drained → 503 with no fallback) against a running
-# `multi-cluster` compose profile (`docker compose --profile multi-cluster
-# up -d`). Closes ROADMAP P2 "Effective-policy fallback to cluster weights".
+# D: all clusters drained → 503 with no fallback) against a running compose
+# stack (`docker compose up -d` — multi-cluster is the default shape).
+# Closes ROADMAP P2 "Effective-policy fallback to cluster weights".
 # Skips with exit 77 when the lab is not reachable; set REQUIRE_LAB=1 to
 # convert the skip into a hard fail. See scripts/smoke-effective-placement.sh
 # for env knobs (BASE, SMOKE_EP_*).
@@ -282,13 +282,14 @@ smoke-effective-placement:
 # replica fan-out at SHARDS=3 with folded chip; B: lab-tikv-3 multi-
 # leader at SHARDS=3 with one chip per replica; C: back-compat SHARDS=1
 # with exactly one chip holder; D: replica failover) against a running
-# `lab-tikv-3 + multi-cluster` compose profile (`docker compose -f
+# `lab-tikv-3` compose profile (`docker compose -f
 # deploy/docker/docker-compose.yml --profile lab-tikv --profile
-# lab-tikv-3 --profile multi-cluster up -d`). Closes ROADMAP P2
-# "Rebalance worker not sharded". Skips with exit 77 when the lab is
-# not reachable; set REQUIRE_LAB=1 to convert the skip into a hard
-# fail. Scenario B + D auto-skip on single-replica labs. See
-# scripts/smoke-rebalance-scale.sh for env knobs (BASE, SMOKE_*).
+# lab-tikv-3 up -d`). The bare `strata` service (multi-cluster default)
+# stays running alongside the lab via `docker compose up -d`. Closes
+# ROADMAP P2 "Rebalance worker not sharded". Skips with exit 77 when
+# the lab is not reachable; set REQUIRE_LAB=1 to convert the skip
+# into a hard fail. Scenario B + D auto-skip on single-replica labs.
+# See scripts/smoke-rebalance-scale.sh for env knobs (BASE, SMOKE_*).
 smoke-rebalance-scale:
 	bash scripts/smoke-rebalance-scale.sh
 

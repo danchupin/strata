@@ -43,8 +43,7 @@ scrape_configs:
 ```
 
 The bundled `deploy/prometheus/prometheus.yml` covers the docker-compose
-shapes (`strata`, `strata-features`, `strata-tikv-{a,b}`); use it as a
-template.
+shapes (`strata`, `strata-tikv-{a,b}`); use it as a template.
 
 ### Key metrics
 

@@ -216,7 +216,7 @@ jobs:
 
       - name: Start backends + webhook trap
         run: |
-          docker compose -f deploy/docker/docker-compose.yml --profile features up -d cassandra ceph webhook-trap
+          docker compose -f deploy/docker/docker-compose.yml --profile webhook-trap up -d cassandra ceph webhook-trap
           echo "waiting for healthy..."
           for i in $(seq 1 60); do
             cass=$(docker inspect -f '{{.State.Health.Status}}' strata-cassandra 2>/dev/null || echo none)

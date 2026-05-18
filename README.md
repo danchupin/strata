@@ -47,10 +47,21 @@ make smoke
 ### Option 3: full stack in Docker (Cassandra + Ceph + strata)
 
 ```bash
-make up-all                # cassandra + ceph + strata (image built with -tags ceph)
+make up-all                # cassandra + ceph + ceph-b + multi-cluster strata
 make wait-cassandra
 make wait-ceph
 make smoke
+```
+
+The bare `docker compose up -d` brings up the multi-cluster shape: the
+gateway attaches to both `default` (ceph) and `cephb` (ceph-b) RADOS
+clusters via `STRATA_RADOS_CLUSTERS` so per-bucket placement policy,
+rebalance, and drain lifecycle work out of the box. For a single-cluster
+smoke, override `STRATA_RADOS_CLUSTERS` at runtime:
+
+```bash
+STRATA_RADOS_CLUSTERS=default:/etc/ceph-a/ceph.conf:/etc/ceph-a/ceph.client.admin.keyring \
+  docker compose up -d strata
 ```
 
 ### Option 4: TiKV-backed metadata (PD + TiKV + Ceph + strata)

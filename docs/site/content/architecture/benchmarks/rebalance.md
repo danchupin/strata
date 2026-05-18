@@ -21,12 +21,14 @@ subset. `STRATA_REBALANCE_SHARDS=1` reproduces Phase 1 byte-for-byte.
 
 ```bash
 # Operator brings up the lab (3-replica TiKV + multi-cluster ceph for
-# drain). The lab-tikv-3 + multi-cluster profiles are composable; the
-# overlay below wires the ceph-a / ceph-b mounts into all three
-# strata-tikv-{a,b,c} replicas (operator-maintained — bench-specific).
+# drain). The bare `strata` service (multi-cluster default) starts via
+# `docker compose up -d`; the lab-tikv-3 profile layers the three
+# strata-tikv-{a,b,c} replicas alongside. The overlay below wires the
+# ceph-a / ceph-b mounts into all three replicas (operator-maintained —
+# bench-specific).
 STRATA_REBALANCE_SHARDS=1 \
 STRATA_WORKERS=gc,lifecycle,rebalance \
-  docker compose --profile lab-tikv --profile lab-tikv-3 --profile multi-cluster \
+  docker compose --profile lab-tikv --profile lab-tikv-3 \
     -f deploy/docker/docker-compose.yml \
     -f deploy/docker/docker-compose.lab-tikv-3-multi.yml \
     up -d

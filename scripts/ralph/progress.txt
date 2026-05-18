@@ -39,3 +39,31 @@ Cycle: ralph/compose-profile-isolation
   - PRD acceptance "make up-all (which runs docker compose up -d)" is misleading — the existing Makefile target runs `up -d cassandra ceph strata prometheus grafana`. compose `depends_on: ceph-b` resolves ceph-b automatically, so `up-all` does bring up the multi-cluster stack. US-002 may want to simplify `up-all` to bare `up -d`.
   - Comment-block + env-default rewrite is the cheap structural fix — no new gotchas to remember.
 ---
+
+## 2026-05-18 - US-002
+- Swept all repo references to old dual-service compose shape.
+- Files:
+  - `Makefile`: dropped `--profile features` from `down` target; added `--profile lab-tikv-3`; rewrote 7 smoke-target docstrings to point at bare `docker compose up -d` (multi-cluster is the default shape).
+  - `scripts/smoke-*.sh` (drain-lifecycle, drain-transparency, cluster-weights, drain-cleanup, drain-followup, effective-placement, rebalance-scale): replaced `strata-multi` -> `strata`, `:9998` -> `:9999`, `--profile multi-cluster` -> bare `up -d`. `SMOKE_CW_GATEWAY` default flipped `strata-multi` -> `strata`.
+  - `scripts/bench-rebalance-multi.sh`: dropped `--profile multi-cluster` from operator recipe (bare strata service starts via bare `up -d`).
+  - `scripts/smoke-rebalance-scale.sh`: `COMPOSE_CMD` no longer carries `--profile multi-cluster`; `RESTART_CONTAINERS` flipped `strata-multi` -> `strata`.
+  - `scripts/notify-roundtrip.sh`: docstring `features` profile -> `webhook-trap` profile.
+  - `docs/site/content/best-practices/placement-rebalance.md`: drain-transparency walkthrough now points at bare `docker compose up -d`.
+  - `docs/site/content/architecture/benchmarks/rebalance.md`: harness recipe drops `--profile multi-cluster`.
+  - `docs/site/content/architecture/migrations/binary-consolidation.md`: reframed k8s `strata-features` example as `strata-feature-workers` with a note that the docker-compose stack folds feature workers into the single `strata` service via `STRATA_WORKERS`.
+  - `docs/site/content/best-practices/monitoring.md`: dropped `strata-features` from the prometheus scrape-shapes line.
+  - `docs/site/content/deploy/docker-compose.md`: rewrote Service map + Profiles table — added ceph-b row, expanded strata row to describe multi-cluster default + STRATA_WORKERS opt-in features, dropped `strata-features` row + the `features` profile row. Webhook-trap profile renamed to `webhook-trap` so the table reads cleanly.
+  - `.github/workflows/ci.yml`: e2e-full job now starts cassandra + ceph + webhook-trap via the renamed `webhook-trap` profile (no more `--profile features`).
+  - `deploy/docker/docker-compose.yml`: renamed webhook-trap compose profile literal `features` -> `webhook-trap` so the grep gate is clean without losing the CI artifact.
+  - `deploy/prometheus/prometheus.yml`: dropped dead `strata-features` + `strata-multi` scrape jobs.
+  - `README.md`: Option 3 expanded with multi-cluster default narrative + the `STRATA_RADOS_CLUSTERS` env-override path for single-cluster smoke.
+  - `CLAUDE.md`: `make up-all` row labels the full stack `Cassandra + Ceph + ceph-b + multi-cluster strata`; added a 5-line **Compose shape** callout above the architecture diagram naming multi-cluster as canonical default + env-override path + feature-worker opt-in via `STRATA_WORKERS`.
+- Quality: `go vet ./...`, `make build`, `make test`, `make docs-build`, `pnpm run build` all green. `docker compose -f deploy/docker/docker-compose.yml config -q` validates.
+- Grep gate (full repo, residue only outside the documented exception set): zero hits for `strata-multi` / `--profile multi-cluster` / `--profile features` / `strata-features`. The `:9998` hits that remain are all legitimate `strata-tikv` references (Makefile wait-strata-tikv / smoke-tikv targets, ci-tikv.yml workflow, README Option 4) — per the earlier progress.txt learning the gate intent is "no strata-multi residue", not "no 9998 anywhere"; US-004's gate must filter strata-tikv context.
+- **Learnings for future iterations:**
+  - The grep gate for `:9998` cannot be a plain `grep`. Two legit consumers of 9998 remain (strata-tikv host port; coexists with cassandra-strata on 9999 by design). US-004's smoke harness implementation should pipe through `grep -v strata-tikv` or use a `grep -E ':9998' | grep -vE 'strata-tikv|ci-tikv|smoke-tikv|wait-strata-tikv'` shape to express the intent cleanly.
+  - Renaming the `features` compose profile to `webhook-trap` is the cleanest way to eliminate `--profile features` invocations without losing the CI artifact gate. `features` was already a misnomer (the strata-features sidecar shipped under it died last cycle); the profile now matches its remaining purpose exactly. Search for residual `--profile features` callers before doing the rename — only ci.yml + the docker-compose.md profile row needed updates.
+  - The `features` profile rename was a structural fix, not a sweep target. The PRD listed it as a sweep but the structural rename is the only way to keep `webhook-trap` profile-gated AND satisfy the grep gate. Leaving `profiles: ["features"]` would have either required keeping a `--profile features` invocation (gate fails) or rendering webhook-trap unstartable. Don't fight the grep gate with hyphen tricks (`--profile=features`); rename the profile.
+  - `make smoke-cluster-weights` carried a `SMOKE_CW_GATEWAY` env knob defaulting to `strata-multi`. Flipping it to `strata` is a behavior change for any operator with a pinned override; document in the close-flip narrative if anyone notices.
+  - `internal/serverapp/cluster_reconcile.go` reads `STRATA_RADOS_CLUSTERS` at boot. Single-cluster env override (Scenario B in US-004) will boot the gateway with `cluster_state` already carrying a `cephb` row from a prior multi-cluster run; the reconcile path treats absence-from-env as "leave the row alone" (no auto-removed state). Operator interpreting a stale `cephb` row in a single-cluster boot needs the smoke harness "verify gateway log contains exactly one cluster connection entry" assertion to surface that the gateway only loaded `default`. Don't conflate single-cluster env with single-cluster cluster_state.
+---

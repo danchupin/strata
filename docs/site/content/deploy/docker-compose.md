@@ -23,9 +23,9 @@ them.
 |---|---|---|---|---|---|
 | `cassandra` | `cassandra:5.0` | default | 9042 | 9042 | Metadata backend (default). |
 | `ceph` | `strata-ceph:local` (built locally) | default | — | — | RADOS data backend. Exposes mon / osd internally. |
-| `strata` | `strata:ceph` (built locally) | default | 9999 | 9000 | Cassandra-backed gateway. `STRATA_WORKERS=gc,lifecycle` by default. |
-| `strata-features` | `strata:ceph` | `features` | — | — | Second replica running `notify,replicator,access-log,inventory,audit-export`. |
-| `webhook-trap` | `mendhak/http-https-echo:34` | `features` | — | 8080 | JSON-echo target for notify worker e2e. |
+| `ceph-b` | `strata-ceph:local` (built locally) | default | — | — | Second RADOS cluster — always-on so multi-cluster behaviour (per-bucket placement, rebalance, drain) is exercisable out of the box. |
+| `strata` | `strata:ceph` (built locally) | default | 9999 | 9000 | Cassandra-backed gateway. Multi-cluster default (`STRATA_RADOS_CLUSTERS=default:...,cephb:...`). `STRATA_WORKERS=gc,lifecycle,rebalance` by default. Override `STRATA_RADOS_CLUSTERS` at runtime for a single-cluster smoke. Feature workers (notify / replicator / access-log / inventory / audit-export) opt-in via `STRATA_WORKERS`. |
+| `webhook-trap` | `mendhak/http-https-echo:34` | `webhook-trap` | — | 8080 | JSON-echo target for notify worker e2e. |
 | `prometheus` | `prom/prometheus:v2.54.1` | default | 9090 | 9090 | Scrapes gateway + worker metrics. |
 | `grafana` | `grafana/grafana:11.2.0` | default | 3000 | 3000 | Dashboard provisioned from `deploy/grafana/`. |
 | `pd` | `pingcap/pd:v8.5.0` | `tikv`, `lab-tikv` | 2379 | 2379 | TiKV placement driver (single-node, lab only). |
@@ -38,9 +38,10 @@ them.
 | `otel-collector` | `otel/opentelemetry-collector-contrib:0.110.0` | `tracing` | 4317, 4318 | 4317, 4318 | OTLP collector — fans incoming spans to Jaeger. |
 | `jaeger` | `jaegertracing/all-in-one:1.62` | `tracing` | 16686 (UI), 14250 | 16686, 14250 | All-in-one Jaeger backend + UI. |
 
-The default `docker compose up` brings `cassandra + ceph + strata +
-prometheus + grafana`. Every other service is profile-gated and stays
-silent until requested.
+The default `docker compose up` brings `cassandra + ceph + ceph-b +
+strata + prometheus + grafana`. Multi-cluster is the canonical shape;
+override `STRATA_RADOS_CLUSTERS` for a single-cluster smoke. Every
+other service is profile-gated and stays silent until requested.
 
 ## Profiles
 
@@ -49,11 +50,10 @@ keeps the smallest reference stack.
 
 | Profile | What it adds | Bring-up |
 |---|---|---|
-| (default) | cassandra + ceph + cassandra-backed strata + prometheus + grafana | `make up-all` (≡ `docker compose up -d` for the default services + `wait-cassandra` + `wait-ceph`). |
+| (default) | cassandra + ceph + ceph-b + cassandra-backed strata (multi-cluster) + prometheus + grafana | `make up-all` (≡ `docker compose up -d` for the default services + `wait-cassandra` + `wait-ceph`). |
 | `tikv` | pd + tikv + tikv-backed strata replica (host port 9998) | `make up-tikv` (≡ `docker compose --profile tikv up -d pd tikv ceph strata-tikv prometheus grafana`). |
 | `lab-tikv` | pd + tikv + 2 TiKV-backed replicas (a, b) + nginx LB on 9999 | `make up-lab-tikv` (≡ `docker compose --profile lab-tikv up -d ...`). |
 | `lab-tikv-3` | adds the third replica (`strata-tikv-c`) atop `lab-tikv` | `docker compose --profile lab-tikv --profile lab-tikv-3 up -d`. Pair with `STRATA_GC_SHARDS=3` host env. |
-| `features` | `strata-features` (notify/replicator/access-log/inventory/audit-export) + `webhook-trap` | `docker compose --profile features up -d strata-features webhook-trap`. |
 | `tracing` | OTel collector + Jaeger | `docker compose --profile tracing up -d otel-collector jaeger`. Set `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318` on the gateway. |
 
 Profiles compose: `docker compose --profile lab-tikv --profile tracing
