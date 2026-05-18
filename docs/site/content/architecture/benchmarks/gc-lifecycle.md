@@ -23,11 +23,11 @@ the canonical lab-tikv stack.
 ## Harness
 
 ```bash
-# Bring up the lab-tikv stack (PD + TiKV + ceph) but stop the bundled
-# strata-tikv-{a,b} replicas first so their gc/lifecycle workers don't
-# compete for the bench region.
-make up-lab-tikv && make wait-strata-lab
-docker stop strata-tikv-a strata-tikv-b strata-lb-nginx
+# Bring up the bare-default TiKV stack (PD + TiKV + ceph + ceph-b) but
+# stop the bundled strata-{a,b} replicas first so their gc/lifecycle
+# workers don't compete for the bench region.
+make up && make wait-strata-lab
+docker stop strata-a strata-b strata-lb-nginx
 
 # Sweep concurrency=1,4,16,64,256 (default).
 make bench-gc          # -> bench-gc-results.jsonl
@@ -179,8 +179,8 @@ above; for a clean reproduction of these numbers use the memory data
 backend instead:
 
 ```bash
-make up-lab-tikv && make wait-strata-lab
-docker stop strata-tikv-a strata-tikv-b strata-lb-nginx
+make up && make wait-strata-lab
+docker stop strata-a strata-b strata-lb-nginx
 
 for c in 1 4 16 64 256; do
   docker run --rm --network docker_default \

@@ -148,3 +148,41 @@ Cycle: ralph/tikv-default-lab
   - **`make docs-build` is the 1-second dangling-link gate** for any docs change. It builds via `cd docs/site && hugo --minify` and emits page counts to stdout; non-zero exit on broken `{{< ref >}}` or missing front-matter. Run before commit on any docs touch.
   - **Port-change warnings need an explicit before/after table** in migration notes — operators scanning for `:9999` semantic changes need the dual mapping ("Cassandra-backed was here, now there; TiKV-LB was nothing, now here") in one place, not prose. Saves a round of clarifying questions in operator chat.
 ---
+
+## 2026-05-18 - US-005
+- Smoke + ROADMAP add+close + PRD removal — closes the ralph/tikv-default-lab cycle
+- Files changed:
+  - scripts/smoke-tikv-default-lab.sh (NEW — four-scenario walkthrough harness)
+  - Makefile (new `smoke-tikv-default-lab` target + .PHONY entry)
+  - ROADMAP.md (add+close P3 "TiKV-default 2-replica lab" entry next to compose-collapse close-flip; existing `Restore 3-replica TiKV bench` parked follow-up was shipped via US-003)
+  - tasks/prd-tikv-default-lab.md (DELETED per CLAUDE.md PRD lifecycle rule)
+  - deploy/prometheus/prometheus.yml (scrape config flipped strata-tikv-{a,b} → strata-{a,b}; new strata-cassandra scrape job under profile label)
+  - docs/site/content/architecture/benchmarks/gc-lifecycle.md (`make up-lab-tikv` + `strata-tikv-{a,b}` container stops → `make up` + `strata-{a,b}`)
+  - docs/site/content/architecture/benchmarks/rebalance.md (Harness + Methodology + Caveats narratives flipped to bare-default 2-replica TiKV with SHARDS=2 fan-out; SHARDS=3 parked under P3 follow-up)
+  - docs/site/content/deploy/multi-replica.md (LB upstream + bring-up + failure-scenario rewritten for strata-{a,b}; `make up-lab-tikv` → `make up`)
+  - docs/site/content/deploy/docker-compose.md (Service map / Profiles / Env / Volumes / Production checklist full rewrite for TiKV-default + Cassandra-profile shape)
+  - web/e2e/multi-replica.spec.ts (NODE_ID_TO_CONTAINER identity-mapped strata-a/b → strata-a/b)
+- Smoke design — four scenarios with `==> Scenario X: ...` headers:
+  - A bare bring-up: docker ps service-set check (9 expected) + retired-absent check (7 disallowed names) + 20-req authenticated burst via :9999 → `docker logs strata-{a,b} --since` ≥5 each (LB round-robin proof) + 10-object PUT/GET md5 round-trip + drain cephb evacuate + wait deregister_ready (SMOKE_TDL_DRAIN_TIMEOUT_S default 300) + undrain restore
+  - B Cassandra-profile side-by-side: probe :9998/readyz → SKIP if absent; assert cassandra + strata-cassandra running; PUT 10 distinct buckets on each backend; assert metadata isolation (TiKV bucket NOT listed on Cassandra LB and vice versa)
+  - C single-cluster env-override: opt-in via SMOKE_TDL_SCENARIO_C=1; PUT/GET round-trip + strata-a logs lack `cluster=cephb` boot lines
+  - D residue grep gate: `git grep -E` over the cycle's retired-name patterns, exception set = scripts/ralph/archive + docs/site/public/resources + docs/site/content/architecture/migrations (narrative) + scripts/ralph/progress.txt + scripts/ralph/prd.json + scripts/smoke-tikv-default-lab.sh + ROADMAP.md
+- Quality gates:
+  - go vet ./... green
+  - make build green (web build + go build clean)
+  - make test green (all packages cached or pass)
+  - make docs-build green (63 pages, 143 ms)
+  - cd web && pnpm run build green
+  - make smoke-tikv-default-lab → exit 77 SKIP when lab not up (expected default behaviour; operator-driven smoke)
+  - grep gate locally: zero matches outside documented exception set
+- **Learnings for future iterations:**
+  - **The residue grep gate is the final cycle-closure check, and it catches misses upstream sweeps couldn't anticipate**: US-002/003/004 each swept their own surfaces (Makefile / scripts+CI / docs) but the grep gate found three more silent regressions (`deploy/prometheus/prometheus.yml` had stale `strata-tikv-{a,b}` scrape targets + `--profile lab-tikv` comment; `docs/site/content/architecture/benchmarks/{gc-lifecycle,rebalance}.md` referenced retired container/profile names; `docs/site/content/deploy/{docker-compose,multi-replica}.md` was unmaintained for 2 cycles; `web/e2e/multi-replica.spec.ts` had a NODE_ID_TO_CONTAINER mapping table that re-translated current names back to retired ones). Run a manual `git grep` for the patterns BEFORE the final story to fold the fixes into the right cycle.
+  - **Migration notes are legitimate residue exception** — `docs/site/content/architecture/migrations/<name>.md` is operator-facing narrative documenting what was retired. It names retired containers and profiles by design. Adding that path to the smoke's git-pathspec exclusion list (`':!docs/site/content/architecture/migrations'`) is correct; without it the grep gate fails on a doc that's supposed to mention `strata-tikv-c` etc.
+  - **`git grep` exit code is 1 on zero matches** (per grep convention), not 0. Capturing matches via `HITS="$(git grep ... || true)"` then checking `-n "$HITS"` is the safe shape — naïve `git grep ... && fail` triggers fail on zero matches (the success state we want). The smoke script's residue gate uses the capture-then-check pattern.
+  - **`docker logs --since` accepts a relative duration string like `30s`** — not a Unix timestamp. The smoke captures `BURST_START="$(date +%s)"` before the 20-req burst, then computes `SINCE="$(( NOW - BURST_START + 5 ))s"` (note trailing `s`) so the duration is always slightly larger than the burst window. Without the `+ 5` buffer, fast bursts (<2s) round down to `0s` which means "everything ever" — defeats the bounded-window filter.
+  - **Round-robin LB proof via authenticated GETs against `/admin/v1/clusters` rather than `/readyz`**: `/readyz` bypasses the auth middleware AND the access-log middleware in the strata stack. To prove the LB is round-robining + to make per-replica log lines countable, hit an authenticated path. The cookie jar from `login` carries through 20 sequential curl calls; nginx least_conn routes each request to whichever replica has the lower connection count — over 20 requests, expect ~10/10 with worst-case 5/15. Assert `>= 5` per replica.
+  - **CLAUDE.md PRD lifecycle rule means deleting `tasks/prd-<name>.md` in the closing commit** — NOT moving to `tasks/archive/`. The Ralph snapshot at `scripts/ralph/archive/<date>-<branch>/` (auto-created by `archive_cycle` in ralph.sh) is the canonical record. `tasks/archive/` is reserved for design intent without a Ralph snapshot (pre-`archive_cycle` legacy or work folded into another cycle).
+  - **`docker ps --format '{{.Names}}' | grep -qx '<name>'` is the precise container-presence check** — `-qx` requires whole-line match so `strata-a` doesn't fuzzy-match `strata-a-foo`. Counterintuitively `grep -F` does NOT anchor; use `-x` for line-anchored exact match. Hits this pattern in two places: assert expected containers running + assert retired containers absent.
+  - **Scenario opt-in via env (SMOKE_TDL_SCENARIO_C=1)** for scenarios that need a lab-shape mutation: the smoke shouldn't reshape the lab itself (per existing harness convention — operator brings up, smoke probes). Document the env in the script header AND the SKIP message body so an operator running the smoke and seeing "SKIP: C" immediately knows how to opt-in.
+  - **Cycle-end discipline pattern**: in the final story, run `git grep` for the cycle's retired-name patterns BEFORE writing the smoke script. The hits inform which files still need updating; they reveal upstream-cycle misses. Treating the grep gate as a write-time gate (run it, fix the matches, then write the smoke that automates the same check) consolidates the sweep with zero loop-back.
+---

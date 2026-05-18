@@ -33,8 +33,8 @@ const CONSOLE_HOME = /\/console\/?$/;
 const CONSOLE_LOGIN = /\/console\/login\/?$/;
 
 const NODE_ID_TO_CONTAINER: Record<string, string> = {
-  'strata-a': 'strata-tikv-a',
-  'strata-b': 'strata-tikv-b',
+  'strata-a': 'strata-a',
+  'strata-b': 'strata-b',
 };
 
 // Heartbeat TTL is 30 s and the lease renew runs at TTL/3 — chip rotation

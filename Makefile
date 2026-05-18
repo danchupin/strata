@@ -8,7 +8,7 @@ COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 	smoke smoke-signed smoke-grafana smoke-lab-tikv \
 	smoke-drain-lifecycle smoke-drain-transparency smoke-drain-progress-ui smoke-cluster-weights \
 	smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale \
-	smoke-single-binary \
+	smoke-single-binary smoke-tikv-default-lab \
 	race-soak race-soak-tikv lint-nginx-lab \
 	bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi \
 	docs-serve docs-build clean
@@ -310,6 +310,22 @@ smoke-effective-placement:
 # (BASE, SMOKE_*).
 smoke-rebalance-scale:
 	bash scripts/smoke-rebalance-scale.sh
+
+# TiKV-default 2-replica lab walkthrough smoke (US-005 of
+# ralph/tikv-default-lab). Drives the four operator scenarios end-to-end
+# against a running compose stack (`make up && make wait-strata-lab` —
+# bare default is the TiKV-default lab). Scenario A asserts the bare
+# service set + LB round-robin + PUT/GET round-trip + drain cephb
+# evacuate convergence; Scenario B probes the Cassandra-profile lab on
+# :9998 (skips if absent — bring up via `make up-cassandra`); Scenario C
+# is opt-in via SMOKE_TDL_SCENARIO_C=1; Scenario D is the repo-wide
+# residue grep gate (zero retired-profile / service-name matches outside
+# the documented exception set). Skips with exit 77 when the lab is not
+# reachable; set REQUIRE_LAB=1 to convert the skip into a hard fail. See
+# scripts/smoke-tikv-default-lab.sh for env knobs (BASE, CASS_BASE,
+# SMOKE_TDL_*).
+smoke-tikv-default-lab:
+	bash scripts/smoke-tikv-default-lab.sh
 
 # Single-binary dispatcher smoke (US-002 of ralph/single-binary).
 # Builds bin/strata and verifies post-consolidation shape: --help lists

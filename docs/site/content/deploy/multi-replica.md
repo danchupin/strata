@@ -64,14 +64,15 @@ When `STRATA_CONSOLE_JWT_SECRET` is set, the shared file is **never touched**
 (env-managed deployments aren't surprised by a file write on first boot).
 
 The shared file path is fixed (`/etc/strata/jwt-shared/secret`); the directory
-must be a shared writable mount across replicas. The `lab-tikv` profile mounts
-the named volume `strata-jwt-shared` at that path on both replicas.
+must be a shared writable mount across replicas. The bare-default lab
+mounts the named volume `strata-jwt-shared` at that path on both replicas
+(`strata-a` + `strata-b`).
 
 ## LB wiring (nginx)
 
 `deploy/nginx/strata-lab.conf`:
 
-- `upstream strata { least_conn; server strata-tikv-a:9000; server strata-tikv-b:9000 max_fails=2 fail_timeout=10s; }`
+- `upstream strata { least_conn; server strata-a:9000; server strata-b:9000 max_fails=2 fail_timeout=10s; }`
 - Streaming-friendly: `proxy_request_buffering off`, `proxy_buffering off`,
   `client_max_body_size 0`, `proxy_read_timeout 300s`, `proxy_send_timeout 300s`,
   `proxy_http_version 1.1`. Required for SigV4 chunked-streaming uploads + multipart.
@@ -81,17 +82,17 @@ Host port `9999` → nginx → upstream replicas. `aws --endpoint-url
 http://127.0.0.1:9999 …` reaches one of the two replicas; the LB picks per
 connection.
 
-`nginx -t` syntax check (CI job `lint-nginx-lab`) requires `--add-host=strata-tikv-{a,b}:127.0.0.1`
+`nginx -t` syntax check (CI job `lint-nginx-lab`) requires `--add-host=strata-{a,b}:127.0.0.1`
 because nginx resolves upstream hostnames at parse time, not at request time.
 
 ## Bring-up
 
 ```bash
-make up-lab-tikv      # pd + tikv + ceph + strata-tikv-a + strata-tikv-b + strata-lb-nginx + prometheus + grafana
-make wait-strata-lab  # polls 9001 + 9002 + 9999/readyz until all ready
+make up               # pd + tikv + ceph + ceph-b + strata-a + strata-b + strata-lb-nginx + prometheus + grafana
+make wait-strata-lab  # polls 10001 + 10002 + 9999/readyz until all ready
 ```
 
-Direct replica ports: `127.0.0.1:9001` (replica a), `127.0.0.1:9002` (replica b).
+Direct replica ports: `127.0.0.1:10001` (replica a), `127.0.0.1:10002` (replica b).
 LB: `127.0.0.1:9999`.
 
 Tear down: `make down` (covers all profiles).
@@ -104,7 +105,7 @@ Heartbeat row TTL: 30 s, write cadence 10 s.
 | Scenario | Expected behaviour |
 |---|---|
 | Both replicas healthy | LB round-robins (least-conn). Cluster Overview shows 2 healthy nodes. Exactly one replica carries `lifecycle-leader`; exactly one carries `gc-leader` (may be the same or different replicas). |
-| Stop one replica (`docker stop strata-tikv-a`) | LB marks the upstream down within `fail_timeout`; client sees no errors. After ~30 s the killed replica's heartbeat row vanishes (TTL eviction in cassandra; `ExpiresAt` lazy-skip in tikv). Within ~30–35 s the surviving replica acquires both worker leases. |
+| Stop one replica (`docker stop strata-a`) | LB marks the upstream down within `fail_timeout`; client sees no errors. After ~30 s the killed replica's heartbeat row vanishes (TTL eviction in cassandra; `ExpiresAt` lazy-skip in tikv). Within ~30–35 s the surviving replica acquires both worker leases. |
 | Restart the replica | After ~30 s `make wait-strata-lab` passes; the new replica writes its heartbeat row again. Worker leases stay where they are (no preemption); they only rotate if the current holder dies. |
 | Cross-replica PUT then GET | Object written via replica A is readable via replica B byte-for-byte. Storage layer (TiKV+RADOS) is shared; gateways are interchangeable. |
 | Login on replica A, refresh hits replica B | Session cookie verifies because both replicas share the JWT secret via `strata-jwt-shared` volume. Without the shared secret, refresh redirects to login. |

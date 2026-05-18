@@ -3,25 +3,25 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
-  # Unified strata service: gateway + selected workers all expose /metrics
-  # on the gateway port (cfg.Listen, default 9000). Worker-specific
-  # counters carry a `worker` label; no separate scrape job per worker.
-  # Multi-cluster is the canonical default — the gateway attaches to both
-  # `default` and `cephb` RADOS clusters via STRATA_RADOS_CLUSTERS.
+  # TiKV-default 2-replica lab (bare `docker compose up -d`): strata-a +
+  # strata-b expose /metrics on the gateway port (cfg.Listen, default
+  # 9000); nginx LB at host :9999 fronts them. Worker-specific counters
+  # carry a `worker` label; no separate scrape job per worker. Both
+  # replicas attach to the `default` + `cephb` RADOS clusters via
+  # STRATA_RADOS_CLUSTERS.
   - job_name: strata
     static_configs:
-      - targets: ["strata:9000"]
+      - targets:
+          - "strata-a:9000"
+          - "strata-b:9000"
         labels:
           binary: strata
 
-  # TiKV-backed lab profile: 2 replicas behind nginx LB at 9999 (host).
-  # `--profile lab-tikv` activates these; until then the scrape just
-  # logs "no host" — harmless.
-  - job_name: strata-tikv-lab
+  # Cassandra-backed regression lab (--profile cassandra). When the
+  # profile is not active the scrape logs "no host" — harmless.
+  - job_name: strata-cassandra
     static_configs:
-      - targets:
-          - "strata-tikv-a:9000"
-          - "strata-tikv-b:9000"
+      - targets: ["strata-cassandra:9000"]
         labels:
           binary: strata
-          profile: lab-tikv
+          profile: cassandra
