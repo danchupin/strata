@@ -29,4 +29,13 @@ behaviour byte-for-byte. Existing &lt;code&gt;make smoke&lt;/code&gt; / &lt;code
 &lt;code&gt;make smoke-lab-tikv&lt;/code&gt; continue to pass without configuration changes.&lt;/li&gt;
 &lt;/ul&gt;
 &lt;p&gt;This guide is the operator-facing checklist for the schema cutover and the
-multi-replica rollout.&lt;/p&gt;</description></item></channel></rss>
+multi-replica rollout.&lt;/p&gt;</description></item><item><title>Compose collapse</title><link>https://danchupin.github.io/strata/architecture/migrations/compose-collapse/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/migrations/compose-collapse/</guid><description>&lt;h1 id="migrating-to-the-single-strata-compose-shape"&gt;Migrating to the single-strata compose shape&lt;a class="anchor" href="#migrating-to-the-single-strata-compose-shape"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;&lt;code&gt;docker compose up -d&lt;/code&gt; used to bring up two strata services in parallel on
+the same Cassandra metadata: a single-cluster &lt;code&gt;strata&lt;/code&gt; (port 9999, knew
+only the &lt;code&gt;default&lt;/code&gt; RADOS cluster) and a profile-gated &lt;code&gt;strata-multi&lt;/code&gt;
+(port 9998, knew &lt;code&gt;default&lt;/code&gt; + &lt;code&gt;cephb&lt;/code&gt;). Both raced for the &lt;strong&gt;same&lt;/strong&gt;
+global worker leases (&lt;code&gt;gc-leader-N&lt;/code&gt;, &lt;code&gt;rebalance-leader-N&lt;/code&gt;,
+&lt;code&gt;lifecycle-leader-&amp;lt;bucketID&amp;gt;&lt;/code&gt;, etc.) on Cassandra. Whichever container
+started first won — and when the single-cluster winner popped a GC
+entry for &lt;code&gt;cephb&lt;/code&gt;, deletion failed forever (no cephb connection), the
+queue piled up, &lt;code&gt;deregister_ready&lt;/code&gt; stuck &lt;code&gt;false&lt;/code&gt;, and drain wedged.&lt;/p&gt;</description></item></channel></rss>
