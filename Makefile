@@ -1,7 +1,7 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-all-ci up-tikv up-lab-tikv up-lab-tikv-3 down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv smoke-drain-lifecycle smoke-drain-transparency smoke-cluster-weights smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale race-soak race-soak-tikv lint-nginx-lab bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi docs-serve docs-build clean
+.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-all-ci up-tikv up-lab-tikv up-lab-tikv-3 up-lab-cassandra-3 down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata wait-strata-tikv wait-strata-lab wait-strata-lab-cassandra ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv smoke-drain-lifecycle smoke-drain-transparency smoke-cluster-weights smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale race-soak race-soak-tikv lint-nginx-lab lint-nginx-lab-cassandra bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi docs-serve docs-build clean
 
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
@@ -98,8 +98,20 @@ up-lab-tikv-3:
 	STRATA_GC_SHARDS=$${STRATA_GC_SHARDS:-3} $(COMPOSE) --profile lab-tikv --profile lab-tikv-3 \
 		up -d pd tikv ceph strata-tikv-a strata-tikv-b strata-tikv-c strata-lb-nginx prometheus grafana
 
+# 3-replica Cassandra-backed lab: mirror of `up-lab-tikv-3` for
+# cassandra metadata. Brings up 3 strata replicas (strata-cass-{a,b,c})
+# behind nginx LB on host port 10000. Operator should stop the default
+# `strata` service first (`docker compose stop strata`) so all four
+# strata containers do NOT race for the same cassandra leases.
+up-lab-cassandra-3:
+	STRATA_GC_SHARDS=$${STRATA_GC_SHARDS:-3} \
+	STRATA_LIFECYCLE_SHARDS=$${STRATA_LIFECYCLE_SHARDS:-3} \
+	STRATA_REBALANCE_SHARDS=$${STRATA_REBALANCE_SHARDS:-3} \
+		$(COMPOSE) --profile lab-cassandra-3 up -d \
+		cassandra ceph ceph-b strata-cass-a strata-cass-b strata-cass-c strata-lb-nginx-cass prometheus grafana
+
 down:
-	$(COMPOSE) --profile tikv --profile lab-tikv --profile lab-tikv-3 --profile tracing down
+	$(COMPOSE) --profile tikv --profile lab-tikv --profile lab-tikv-3 --profile lab-cassandra-3 --profile tracing down
 
 wait-cassandra:
 	@echo "waiting for cassandra to report healthy..."
@@ -158,6 +170,22 @@ wait-strata-lab:
 	@echo "waiting for nginx LB /readyz on 9999..."
 	@until [ "$$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:9999/readyz)" = "200" ]; do sleep 2; done
 	@echo "strata-lb-nginx ready"
+
+# Poll readyz on the lab-cassandra-3 profile: the LB at 10000 + three
+# replica-direct ports (10001, 10002, 10003). Mirror of wait-strata-lab.
+wait-strata-lab-cassandra:
+	@echo "waiting for strata-cass-a /readyz on 10001..."
+	@until [ "$$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:10001/readyz)" = "200" ]; do sleep 2; done
+	@echo "strata-cass-a ready"
+	@echo "waiting for strata-cass-b /readyz on 10002..."
+	@until [ "$$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:10002/readyz)" = "200" ]; do sleep 2; done
+	@echo "strata-cass-b ready"
+	@echo "waiting for strata-cass-c /readyz on 10003..."
+	@until [ "$$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:10003/readyz)" = "200" ]; do sleep 2; done
+	@echo "strata-cass-c ready"
+	@echo "waiting for nginx LB /readyz on 10000..."
+	@until [ "$$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:10000/readyz)" = "200" ]; do sleep 2; done
+	@echo "strata-lb-nginx-cass ready"
 
 ceph-pool:
 	docker exec strata-ceph ceph osd pool create strata.rgw.buckets.data 8 8 replicated || true
@@ -349,6 +377,17 @@ lint-nginx-lab:
 		--add-host=strata-tikv-a:127.0.0.1 \
 		--add-host=strata-tikv-b:127.0.0.1 \
 		-v $(CURDIR)/deploy/nginx/strata-lab.conf:/etc/nginx/conf.d/default.conf:ro \
+		nginx:1.27-alpine nginx -t
+
+# Validate the nginx LB config used by the lab-cassandra-3 profile.
+# Mirror of lint-nginx-lab; the real names resolve via Docker's embedded
+# DNS at runtime when the lab-cassandra-3 profile is up.
+lint-nginx-lab-cassandra:
+	docker run --rm \
+		--add-host=strata-cass-a:127.0.0.1 \
+		--add-host=strata-cass-b:127.0.0.1 \
+		--add-host=strata-cass-c:127.0.0.1 \
+		-v $(CURDIR)/deploy/nginx/strata-lab-cassandra.conf:/etc/nginx/conf.d/default.conf:ro \
 		nginx:1.27-alpine nginx -t
 
 # bench-gc / bench-lifecycle drive `strata admin` against the lab-tikv stack
