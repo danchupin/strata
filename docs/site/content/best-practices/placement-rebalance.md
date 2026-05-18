@@ -605,6 +605,87 @@ hidden in this state so an operator who hovered the cluster after the
 manifest scan zeroed cannot click through to revert hours of
 migration.
 
+### Drain progress states — physical vs manifest (US-001..US-003 drain-progress-physical)
+
+`<DrainProgressBar>` resolves three explicit operator-facing states
+during `evacuating`. Pre-cycle the bar surfaced only the manifest
+chunk count (`chunks_on_cluster`) as primary — which drops to `0`
+the instant the rebalance worker CASes the manifest, even though
+the physical RADOS chunks linger until `STRATA_GC_GRACE` elapses +
+the next gc tick deletes them. Operators read "0 Migrating" and
+assumed drain stalled.
+
+The post-cycle response shape adds three **additive** fields on
+`GET /admin/v1/clusters/<id>/drain-progress`:
+
+| Field | Type | Source | Null when |
+| ----- | ---- | ------ | --------- |
+| `physical_chunks_on_cluster` | `*int64` | `data.ClusterObjectCountProbe.ClusterObjectCount` — RADOS sums `GetPoolStats().Num_objects` across `(pool, ns)` tuples filtered by cluster id. Cached 10 s in the gateway-side `ClusterStatsCache`. | Backend does not implement `ClusterObjectCountProbe` (memory, S3) OR the probe errored and the cache is cold. |
+| `physical_bytes_on_cluster` | `*int64` | Same probe path → `usedBytes` from existing `ClusterStatsProbe.ClusterStats`. Same 10 s cache. | Same as above. |
+| `gc_queue_pending` | `int` | `meta.Store.ListChunkDeletionsByCluster(cluster)` length. Already wired by US-006 drain-cleanup as the `gc_queue_pending` token in `not_ready_reasons`; now surfaced as an explicit integer counter on the response so the UI can read the magnitude (`Awaiting GC cleanup: N chunks`) without parsing the token vocabulary. | Never null — explicit 0 means queue clear. |
+
+Existing fields (`chunks_on_cluster`, `bytes_on_cluster`,
+`not_ready_reasons`, `deregister_ready`) are preserved verbatim.
+
+The `<DrainProgressBar>` state machine reads
+`primary = physical_chunks_on_cluster ?? chunks_on_cluster` and
+renders one of three chips:
+
+| State | Predicate | Chip | Detail |
+| ----- | --------- | ---- | ------ |
+| **Migrating** | `primary > 0 && chunks_on_cluster > 0` | red/amber `Migrating: N chunks remaining` | Rebalance worker actively rewriting manifests + dispatching chunk copies. ETA derives from `rate(strata_rebalance_chunks_moved_total{from=<id>}[5m])` when migratable>0. |
+| **Awaiting GC cleanup** | `primary > 0 && chunks_on_cluster == 0` | amber `Awaiting GC cleanup: N chunks awaiting physical delete` | Manifest CAS done — every chunk on the drained cluster is now an orphan in the gc queue. Tooltip: "Physical delete completes after STRATA_GC_GRACE elapses (~5m default) plus the next gc worker tick." |
+| **Ready to deregister** | `physical_chunks_on_cluster == 0 && chunks_on_cluster == 0 && gc_queue_pending == 0 && deregister_ready == true` | green `✓ Ready to deregister` | Manifest + physical + gc queue + open-multipart all zero. The chip's `title=` tooltip carries the deregister recipe (env edit + rolling restart). |
+
+A collapsible detail row (`<details data-testid=dp-detail>`) sits
+below the headline and unfolds to `Manifest chunks: X`, `GC queue:
+Y`, `Physical bytes: Z B`. Hidden by default.
+
+**Back-compat on backends without `ClusterObjectCountProbe`** (memory,
+S3 pass-through): `physical_chunks_on_cluster` and
+`physical_bytes_on_cluster` are JSON-null. The bar falls back to
+`chunks_on_cluster` as primary, prints a small italic
+`(physical count unavailable on this backend)` tooltip next to the
+headline, and the detail row's `Physical bytes` reads
+`unavailable`. The 3-state machine collapses to the pre-cycle
+behaviour on these backends — Migrating until manifest hits 0, then
+the existing `not_ready_reasons` / `deregister_ready` flow.
+
+**ETA precision is intentionally deferred.** The Awaiting GC chip
+ships with a static-copy tooltip describing the wait reason (grace
++ next tick), not a per-deploy ETA. Precise ETA requires exposing
+the gateway's GC tunables (`STRATA_GC_GRACE`, `STRATA_GC_INTERVAL`,
+`STRATA_GC_BATCH_SIZE`, `STRATA_GC_CONCURRENCY`, `STRATA_GC_SHARDS`)
+via a new `/admin/v1/gc-config` endpoint plus an ETA formula
+`eta_min = grace_min + ceil(gc_queue / (batch_size × shards) ×
+interval_min)`. Parked as a P3 follow-up (see ROADMAP "Precise
+drain-progress ETA from gateway GC tunables").
+
+**Per-poll cost** is bounded by the 10 s `ClusterStatsCache` TTL in
+the gateway process. Every drain-progress request goes through
+`Get` → cache hit → no RADOS call. A miss issues one `GetPoolStats`
+per `(cluster, pool, ns)` tuple plus one `ClusterStats` call,
+caches the merged result, returns. Per-replica cache (no shared
+cache between gateways) — UI polling at 5 s amortises to ~1 RADOS
+probe per cluster per 10 s regardless of operator-count. Probe
+errors increment
+`strata_drain_progress_probe_errors_total{cluster, probe}` with
+`probe ∈ {stats, object_count}` and surface as null fields on the
+response — the UI degrades to the back-compat fallback.
+
+The smoke harness `scripts/smoke-drain-progress-ui.sh`
+(`make smoke-drain-progress-ui`) drives the 3-state machine
+end-to-end against a real RADOS lab. It recreates the strata
+container with smoke-only env overrides
+(`STRATA_REBALANCE_RATE_MB_S=1` to widen the Migrating phase
+beyond the 3 s poll cadence; `STRATA_GC_GRACE=60s` to shorten the
+GC wait into the 5-min script budget), plants 300 ~1 MB objects on
+a `{default:1, cephb:1}` bucket, drains cephb evacuate, and asserts
+each state observed at least once. Both env values are smoke-only;
+prod defaults are `100 MB/s` and `5m` — operating clusters at
+`1 MB/s + 60s` would stall migration and risk premature
+deletion of in-flight references.
+
 ### Cache invalidation contract (US-002 drain-cleanup)
 
 `drainImpactCache` holds the categorized scan for 5 minutes by

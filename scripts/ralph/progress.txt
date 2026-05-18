@@ -53,3 +53,22 @@ Cycle: ralph/drain-progress-physical
   - Playwright pattern: scenarios that DON'T need flip-state mutations (e.g. drain-progress phases) can use a simple seeded SpoofState with a single /drain-progress route. No need to mirror the full drain-transparency installRoutes shape — saved ~200 lines of route setup.
   - Browser verification noted as TODO: memory backend has no rebalance worker so I couldn't observe the 3 states transitioning live. Lab drain needs RADOS + a live PUT-and-drain cycle to walk through Migrating → Awaiting GC → Ready.
 ---
+
+## 2026-05-18 - US-003
+- Throttled smoke harness + docs + ROADMAP close-flip + PRD removal.
+- Files changed:
+  - scripts/smoke-drain-progress-ui.sh: NEW. Recreates strata container with STRATA_REBALANCE_RATE_MB_S=1 + STRATA_GC_GRACE=60s via `docker compose up -d --force-recreate --no-deps strata`, plants 300 ~1 MB objects on a {default:1, cephb:1} bucket, drains cephb evacuate, polls /drain-progress every 3 s with 5 min timeout, asserts Migrating + AwaitingGC + Ready states each observed. Restores prod-default env on exit (unset overrides + recreate). SKIP exit 77 when /readyz unreachable.
+  - Makefile: new `smoke-drain-progress-ui` PHONY target + recipe + multi-line comment block documenting the throttled env rationale.
+  - docs/site/content/best-practices/placement-rebalance.md: new subsection "Drain progress states — physical vs manifest (US-001..US-003 drain-progress-physical)" between state-aware action buttons and cache invalidation contract. Tables for response fields + chip predicates + ASCII art of the 3-state bar + back-compat fallback narrative + per-poll cost analysis + smoke harness reference.
+  - docs/site/content/architecture/migrations/drain-progress-physical.md: NEW operator migration note documenting the additive response shape, manifest-vs-physical phase split, backend capability matrix, cache contract, observability counter, smoke harness, and references back to placement-rebalance.md.
+  - docs/site/content/architecture/migrations/_index.md: linked the new migration note.
+  - ROADMAP.md: close-flipped P3 "Drain progress UI shows manifest counts instead of physical chunks" → ~~Done.~~ with full summary referencing US-001..US-003 + commit `<pending>` (closing SHA backfilled post-merge). Added new P3 "Precise drain-progress ETA from gateway GC tunables" parked follow-up entry below the close-flip.
+  - tasks/prd-drain-progress-physical.md: REMOVED per CLAUDE.md PRD lifecycle rule (Ralph snapshot is the canonical record post-cycle).
+- **Learnings for future iterations:**
+  - Throttled smoke env pattern: `STRATA_REBALANCE_RATE_MB_S=1 STRATA_GC_GRACE=60s docker compose up -d --force-recreate --no-deps strata` lets a script swap in smoke-only env on a running stack without touching the compose file. Trap cleanup unsets the overrides + recreates the container with prod defaults so a failed smoke doesn't leave the lab throttled.
+  - Hugo cross-page anchor format: `[Drain progress states]({{< ref "/best-practices/placement-rebalance#drain-progress-states--physical-vs-manifest-us-001us-003-drain-progress-physical" >}})` — the anchor slug strips '#', collapses whitespace to '-', and **drops parens entirely** while keeping the rest of the heading text. The trailing `(US-001..US-003 drain-progress-physical)` becomes `us-001us-003-drain-progress-physical` in the slug.
+  - Migration note placement: new operator-facing migration runbooks go in docs/site/content/architecture/migrations/ with weight: 40 (next available — binary-consolidation 20, gc-lifecycle-phase-2 was, compose-collapse 30). Always link from _index.md or it stays orphaned.
+  - close-flip semantic: ROADMAP closing entries use `<pending>` for the SHA placeholder when the commit hasn't been amended yet. The post-cycle archive process backfills the SHA. Don't try to `git rev-parse HEAD` inside the implementation commit — chicken-and-egg.
+  - The PRD removal step (tasks/prd-*.md) belongs in the same commit as the close-flip + final-story implementation, NOT a separate "archive" commit. Per CLAUDE.md PRD lifecycle: the Ralph snapshot in scripts/ralph/archive is canonical; the markdown PRD is a disposable draft.
+  - Smoke harness skip behaviour (exit 77) is intentional: scripts/ci consumers treat 77 as "skipped, not failed" so CI doesn't go red on docker-less runners. REQUIRE_LAB=1 promotes skip→hard fail for the nightly soak tier.
+---

@@ -1,7 +1,7 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-all-ci up-tikv up-lab-tikv up-lab-tikv-3 up-lab-cassandra-3 down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata wait-strata-tikv wait-strata-lab wait-strata-lab-cassandra ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv smoke-drain-lifecycle smoke-drain-transparency smoke-cluster-weights smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale smoke-compose-collapse smoke-single-binary race-soak race-soak-tikv lint-nginx-lab lint-nginx-lab-cassandra bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi docs-serve docs-build clean
+.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-all-ci up-tikv up-lab-tikv up-lab-tikv-3 up-lab-cassandra-3 down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata wait-strata-tikv wait-strata-lab wait-strata-lab-cassandra ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv smoke-drain-lifecycle smoke-drain-transparency smoke-drain-progress-ui smoke-cluster-weights smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale smoke-compose-collapse smoke-single-binary race-soak race-soak-tikv lint-nginx-lab lint-nginx-lab-cassandra bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi docs-serve docs-build clean
 
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
@@ -254,6 +254,23 @@ smoke-drain-lifecycle:
 # scripts/smoke-drain-transparency.sh for env knobs (BASE, SMOKE_DRAIN_*).
 smoke-drain-transparency:
 	bash scripts/smoke-drain-transparency.sh
+
+# Drain-progress 3-state smoke (US-003 of ralph/drain-progress-physical).
+# Recreates the bare `docker compose up -d` strata container with
+# throttled env (STRATA_REBALANCE_RATE_MB_S=1 + STRATA_GC_GRACE=60s
+# — smoke-only, NOT prod defaults) so all three drain-progress phases
+# (Migrating / Awaiting GC / Ready to deregister) are observable
+# within the 5-minute timeout. Seeds 300 ~1 MB objects on a split
+# bucket {default:1,cephb:1}, drains cephb evacuate, polls
+# /admin/v1/clusters/cephb/drain-progress every 3 s, asserts each
+# state observed at least once. Restores prod-default env on the
+# strata container on exit. Skips with exit 77 when the lab is not
+# reachable; set REQUIRE_LAB=1 to convert the skip into a hard fail.
+# Closes ROADMAP P3 "Drain progress UI shows manifest counts instead
+# of physical chunks". See scripts/smoke-drain-progress-ui.sh for
+# env knobs (BASE, SMOKE_DPU_*).
+smoke-drain-progress-ui:
+	bash scripts/smoke-drain-progress-ui.sh
 
 # Cluster-weights walkthrough smoke (US-005 of ralph/cluster-weights).
 # Drives the four operator scenarios (A: new-cluster activation pending →

@@ -71,8 +71,8 @@
         "Typecheck passes"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Landed. scripts/smoke-drain-progress-ui.sh recreates strata with STRATA_REBALANCE_RATE_MB_S=1 + STRATA_GC_GRACE=60s, seeds 300 ~1 MB objects on split bucket, drains cephb evacuate, polls /drain-progress every 3 s for 5 min, asserts Migrating + AwaitingGC + Ready all observed; restores prod env on exit; SKIP exit 77 when lab unreachable. make smoke-drain-progress-ui wraps it. docs/site/content/best-practices/placement-rebalance.md gained 'Drain progress states — physical vs manifest' subsection between state-aware action buttons and cache invalidation contract. New docs/site/content/architecture/migrations/drain-progress-physical.md migration note linked from _index.md. ROADMAP close-flipped the P3 'Drain progress UI shows manifest counts' entry (commit pending) + added new P3 'Precise drain-progress ETA from gateway GC tunables' parked follow-up. tasks/prd-drain-progress-physical.md removed per CLAUDE.md PRD lifecycle. make docs-build + make vet + make test + make build + make web-typecheck all green; smoke skips cleanly without lab."
     }
   ]
 }
