@@ -811,6 +811,27 @@ func (s *Store) ListBuckets(ctx context.Context, owner string) ([]*meta.Bucket, 
 	return out, nil
 }
 
+// ListBucketsShard filters the in-mem bucket map by
+// meta.BucketShardID(bucket.ID, totalShards) == shardID. Used by the
+// sharded rebalance-worker fan-out (US-001 rebalance-scale-phase-2).
+func (s *Store) ListBucketsShard(ctx context.Context, shardID, totalShards int) ([]*meta.Bucket, error) {
+	if err := meta.ValidateShard(shardID, totalShards); err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*meta.Bucket, 0, len(s.buckets)/totalShards+1)
+	for _, b := range s.buckets {
+		if meta.BucketShardID(b.ID, totalShards) != shardID {
+			continue
+		}
+		cp := *b
+		out = append(out, &cp)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
 func (s *Store) SetBucketVersioning(ctx context.Context, name, state string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

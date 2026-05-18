@@ -370,6 +370,30 @@ func (s *Store) bucketIsEmpty(ctx context.Context, bucketID uuid.UUID, shardCoun
 	return true, nil
 }
 
+// ListBucketsShard returns the subset of buckets whose
+// meta.BucketShardID(bucket.ID, totalShards) == shardID. Streams via the
+// same SELECT iterator ListBuckets uses and filters in-process — the
+// buckets table is partitioned by `name`, not `id`, so a server-side
+// shard filter would need a secondary index that is not worth the
+// operator-driven scan rate. US-001 rebalance-scale-phase-2.
+func (s *Store) ListBucketsShard(ctx context.Context, shardID, totalShards int) ([]*meta.Bucket, error) {
+	if err := meta.ValidateShard(shardID, totalShards); err != nil {
+		return nil, err
+	}
+	all, err := s.ListBuckets(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*meta.Bucket, 0, len(all)/totalShards+1)
+	for _, b := range all {
+		if meta.BucketShardID(b.ID, totalShards) != shardID {
+			continue
+		}
+		out = append(out, b)
+	}
+	return out, nil
+}
+
 func (s *Store) ListBuckets(ctx context.Context, owner string) ([]*meta.Bucket, error) {
 	iter := s.s.Query(`SELECT name, id, owner_id, created_at, default_class, versioning, shard_count, shard_count_target, acl, region, mfa_delete, placement_mode FROM buckets`).
 		WithContext(ctx).Iter()

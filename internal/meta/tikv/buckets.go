@@ -125,6 +125,40 @@ func (s *Store) DeleteBucket(ctx context.Context, name string) (err error) {
 	return txn.Commit(ctx)
 }
 
+// ListBucketsShard scans the same bucket-by-name prefix as ListBuckets
+// and filters in-process by meta.BucketShardID(bucket.ID, totalShards)
+// == shardID. Used by the sharded rebalance-worker fan-out (US-001
+// rebalance-scale-phase-2).
+func (s *Store) ListBucketsShard(ctx context.Context, shardID, totalShards int) (out []*meta.Bucket, err error) {
+	if err = meta.ValidateShard(shardID, totalShards); err != nil {
+		return nil, err
+	}
+	ctx, finish := s.observer.Start(ctx, "ListBucketsShard", "buckets")
+	defer func() { finish(err) }()
+	txn, err := s.kv.Begin(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	defer txn.Rollback()
+	start := []byte(prefixBucketByName)
+	pairs, err := txn.Scan(ctx, start, prefixEnd(start), 0)
+	if err != nil {
+		return nil, err
+	}
+	out = make([]*meta.Bucket, 0, len(pairs)/totalShards+1)
+	for _, p := range pairs {
+		b, derr := decodeBucket(p.Value)
+		if derr != nil {
+			return nil, fmt.Errorf("tikv: decode bucket %q: %w", string(p.Key), derr)
+		}
+		if meta.BucketShardID(b.ID, totalShards) != shardID {
+			continue
+		}
+		out = append(out, b)
+	}
+	return out, nil
+}
+
 // ListBuckets is a range scan over the bucket-by-name prefix. The
 // optional owner filter is applied in-process — bucket cardinality is low
 // (gateway-wide single-digit thousands) so an in-process filter is fine.

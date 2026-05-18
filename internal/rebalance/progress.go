@@ -39,27 +39,30 @@ func (r ScanResult) Chunks() int64 {
 
 // ProgressSnapshot is one cluster's draining-progress sample, refreshed
 // by the rebalance worker at most once per tick (US-003 drain-lifecycle,
-// extended in US-002 drain-transparency with categorized counters).
+// extended in US-002 drain-transparency with categorized counters,
+// US-003 rebalance-scale-phase-2 with per-shard aggregation).
 //
-// MigratableChunks / StuckSinglePolicyChunks / StuckNoPolicyChunks
-// replace the pre-US-002 flat Chunks field; Chunks() derives the total.
+// On the read side this struct is the MERGED view across every shard
+// that committed a scan for this cluster: counters / Bytes / BaseChunks
+// / BaseBytes sum across shards, LastScanAt is the latest, ByBucket
+// merges per-bucket maps (each bucket lives in exactly one shard so
+// keys do not collide). Operator-facing wire shape is unchanged.
+//
 // Stuck counters never converge to zero through migration alone — only
 // an operator policy edit (US-005 BulkPlacementFixDialog) can move them.
 //
-// ByBucket holds per-bucket breakdown used by the /drain-impact endpoint
-// (US-003) and the categorized drain UI (US-006). nil/empty when the
-// scan observed no draining-cluster chunks yet.
-//
-// BaseChunks / BaseBytes are captured on the first scan after the
-// cluster transitioned to draining. BaseChunks feeds the UI's percent-
-// filled rendering; BaseBytes feeds the US-005 completion event's
-// final_bytes_moved.
+// BaseChunks / BaseBytes are captured per-shard on the first scan after
+// the cluster transitioned to draining; the merged BaseChunks feeds the
+// UI's percent-filled rendering, the merged BaseBytes feeds the US-005
+// completion event's final_bytes_moved.
 //
 // CompletionFiredAt records the timestamp the rebalance worker emitted
 // the most recent drain-complete event for this cluster (US-005). Zero
 // means no event has fired since this snapshot row was created. The
-// tracker clears the field on a `0 → >0` transition so refill-then-
-// redrain shapes (`5 → 0 → 2 → 0`) re-fire on the second `→ 0`.
+// tracker clears the field on a `merged-total: 0 → >0` transition so
+// refill-then-redrain shapes (`5 → 0 → 2 → 0`) re-fire on the second
+// `→ 0`. Tracked at the per-cluster level (not per-shard) so multiple
+// shards hitting zero simultaneously fire exactly once.
 type ProgressSnapshot struct {
 	MigratableChunks        int64
 	StuckSinglePolicyChunks int64
@@ -90,17 +93,51 @@ type CompletionEvent struct {
 	ScanFinish time.Time
 }
 
+// shardContribution is one shard's per-tick aggregate for a single
+// draining cluster (US-003 rebalance-scale-phase-2). The tracker keeps
+// one of these per (cluster, shardID) so the per-shard BaseChunks
+// capture-on-first-non-zero semantic survives the fan-out — multiple
+// goroutines on the same replica each independently observe their
+// shard's first non-zero scan and stamp the per-shard base.
+type shardContribution struct {
+	MigratableChunks        int64
+	StuckSinglePolicyChunks int64
+	StuckNoPolicyChunks     int64
+	Bytes                   int64
+	ByBucket                map[string]BucketScanCategory
+	LastScanAt              time.Time
+	BaseChunks              int64
+	BaseBytes               int64
+}
+
+func (s *shardContribution) chunks() int64 {
+	return s.MigratableChunks + s.StuckSinglePolicyChunks + s.StuckNoPolicyChunks
+}
+
+// clusterEntry holds every shard's contribution for one cluster plus the
+// cluster-level CompletionFiredAt (US-003 rebalance-scale-phase-2). The
+// fire-once gate lives at the cluster level so a `merged-total: >0 → 0`
+// transition that spans multiple shards still fires exactly one event.
+type clusterEntry struct {
+	shards            map[int]*shardContribution
+	completionFiredAt time.Time
+}
+
 // ProgressTracker is the in-process draining-progress cache shared
 // between the rebalance worker (writer) and the adminapi handler
 // (reader). Goroutine-safe. nil is a valid receiver — every method
 // short-circuits so callers do not need to nil-check.
+//
+// Per-shard storage (US-003 rebalance-scale-phase-2): CommitScan takes
+// a shardID and writes to that shard's slot under the cluster entry;
+// Snapshot returns the merged view across every shard.
 type ProgressTracker struct {
 	// Interval is the worker's tick cadence (clamped). The drain-progress
 	// admin handler uses 2*Interval as the stale-cache threshold.
 	Interval time.Duration
 
 	mu        sync.RWMutex
-	snapshots map[string]*ProgressSnapshot
+	snapshots map[string]*clusterEntry
 }
 
 // NewProgressTracker builds a tracker. interval defaults to one hour when
@@ -111,47 +148,54 @@ func NewProgressTracker(interval time.Duration) *ProgressTracker {
 	}
 	return &ProgressTracker{
 		Interval:  interval,
-		snapshots: map[string]*ProgressSnapshot{},
+		snapshots: map[string]*clusterEntry{},
 	}
 }
 
 // Snapshot returns the most recent committed snapshot for clusterID plus
 // an ok flag. ok=false means the tracker has no row — either the worker
 // has never observed a draining cluster with that id, or the cluster
-// just transitioned out of draining and the row was reaped.
+// just transitioned out of draining and the row was reaped. Counters /
+// Bytes / BaseChunks / BaseBytes sum across every shard that has
+// committed for this cluster; LastScanAt is the latest across shards;
+// ByBucket merges per-bucket maps (each bucket lives in exactly one
+// shard so keys never collide — duplicates sum defensively).
 func (p *ProgressTracker) Snapshot(clusterID string) (ProgressSnapshot, bool) {
 	if p == nil {
 		return ProgressSnapshot{}, false
 	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	if s, ok := p.snapshots[clusterID]; ok {
-		return cloneSnapshot(s), true
+	entry, ok := p.snapshots[clusterID]
+	if !ok || len(entry.shards) == 0 {
+		return ProgressSnapshot{}, false
 	}
-	return ProgressSnapshot{}, false
+	return mergeShardSnapshots(entry), true
 }
 
-// CommitScan finalises one worker tick. draining is the set of cluster
-// ids the worker selected for migration scan (state=evacuating in
-// US-002). scans is keyed by cluster id with per-cluster aggregates.
-// Clusters listed in draining but absent from scans get a zero-count
-// snapshot — they may have been seeded without any draining-cluster
-// chunks observed, in which case the deregister-ready signal should
-// flip immediately.
+// CommitScan finalises one worker tick for `shardID`. draining is the
+// set of cluster ids the worker selected for migration scan
+// (state=evacuating in US-002). scans is keyed by cluster id with this
+// shard's per-cluster aggregates. Clusters listed in draining but absent
+// from scans get a zero-count slot — they may have been seeded without
+// any draining-cluster chunks observed on this shard's bucket subset.
 //
 // Behaviour:
-//   - For each cluster in draining, the snapshot is upserted with the
-//     fresh counters + LastScanAt=now. BaseChunks / BaseBytes are set on
-//     the first commit for that cluster.
-//   - For each cluster present in the cache but NOT in draining (likely
-//     undrained between ticks), the entry is dropped.
+//   - For each cluster in draining, this shard's slot is upserted with
+//     the fresh counters + LastScanAt=now. BaseChunks / BaseBytes are
+//     stamped on the slot's first non-zero observation (per-shard).
+//   - For each cluster present in the cache but NOT in draining
+//     (operator undrain or shard-set change), this shard's slot is
+//     dropped; the cluster entry is reaped only after every shard slot
+//     is gone.
 //
 // Returns the per-cluster completion events detected during the commit:
-// a cluster appears in the slice iff prior_total > 0 AND new_total == 0
-// AND CompletionFiredAt is zero. CompletionFiredAt is stamped at the
-// same time so the event is idempotent — re-firing requires a
-// subsequent 0 → >0 transition.
-func (p *ProgressTracker) CommitScan(draining []string, scans map[string]ScanResult, now time.Time) []CompletionEvent {
+// a cluster appears in the slice iff the cluster's merged total
+// transitioned `>0 → 0` AND CompletionFiredAt was previously zero. The
+// FiredAt stamp lives at the cluster level (not per-shard) so multiple
+// shards reaching zero in the same tick produce exactly one event.
+// Re-firing requires a subsequent merged 0 → >0 transition.
+func (p *ProgressTracker) CommitScan(shardID int, draining []string, scans map[string]ScanResult, now time.Time) []CompletionEvent {
 	if p == nil {
 		return nil
 	}
@@ -161,8 +205,12 @@ func (p *ProgressTracker) CommitScan(draining []string, scans map[string]ScanRes
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for id := range p.snapshots {
-		if _, keep := want[id]; !keep {
+	for id, entry := range p.snapshots {
+		if _, keep := want[id]; keep {
+			continue
+		}
+		delete(entry.shards, shardID)
+		if len(entry.shards) == 0 {
 			delete(p.snapshots, id)
 		}
 	}
@@ -176,41 +224,59 @@ func (p *ProgressTracker) CommitScan(draining []string, scans map[string]ScanRes
 	var completions []CompletionEvent
 	for _, id := range ids {
 		res := scans[id]
+		entry, ok := p.snapshots[id]
+		if !ok {
+			entry = &clusterEntry{shards: map[int]*shardContribution{}}
+			p.snapshots[id] = entry
+		}
+		// Snapshot prev merged total BEFORE mutating the shard slot so
+		// the >0 → 0 transition guard sees the true previous-tick state.
+		prevMerged := int64(0)
+		for _, s := range entry.shards {
+			prevMerged += s.chunks()
+		}
+		slot, hadSlot := entry.shards[shardID]
+		if !hadSlot {
+			slot = &shardContribution{}
+			entry.shards[shardID] = slot
+		}
+		prevSlot := slot.chunks()
 		total := res.Chunks()
-		existing, hadSnap := p.snapshots[id]
-		if !hadSnap {
-			existing = &ProgressSnapshot{}
-			p.snapshots[id] = existing
+		if slot.BaseChunks == 0 && total > 0 {
+			slot.BaseChunks = total
 		}
-		prevTotal := existing.Chunks()
-		if existing.BaseChunks == 0 && total > 0 {
-			existing.BaseChunks = total
+		if slot.BaseBytes == 0 && res.Bytes > 0 {
+			slot.BaseBytes = res.Bytes
 		}
-		if existing.BaseBytes == 0 && res.Bytes > 0 {
-			existing.BaseBytes = res.Bytes
-		}
+		slot.MigratableChunks = res.MigratableChunks
+		slot.StuckSinglePolicyChunks = res.StuckSinglePolicyChunks
+		slot.StuckNoPolicyChunks = res.StuckNoPolicyChunks
+		slot.Bytes = res.Bytes
+		slot.ByBucket = cloneByBucket(res.ByBucket)
+		slot.LastScanAt = now
+
+		newMerged := prevMerged - prevSlot + total
 		// Re-arm completion firing when the cluster refills after a prior
 		// completion. Without this reset a drain → fill → drain cycle
 		// would silently skip the second event.
-		if total > 0 && !existing.CompletionFiredAt.IsZero() {
-			existing.CompletionFiredAt = time.Time{}
+		if newMerged > 0 && !entry.completionFiredAt.IsZero() {
+			entry.completionFiredAt = time.Time{}
 		}
-		existing.MigratableChunks = res.MigratableChunks
-		existing.StuckSinglePolicyChunks = res.StuckSinglePolicyChunks
-		existing.StuckNoPolicyChunks = res.StuckNoPolicyChunks
-		existing.Bytes = res.Bytes
-		existing.ByBucket = cloneByBucket(res.ByBucket)
-		existing.LastScanAt = now
-		// Fire only on >0 → 0 transitions we actually observed. A
+		// Fire only on `>0 → 0` transitions of the merged total. A
 		// first-ever commit with chunks=0 (legacy bucket with no chunks
 		// on the cluster) must NOT fire — there was nothing to drain.
-		if hadSnap && prevTotal > 0 && total == 0 && existing.CompletionFiredAt.IsZero() {
-			existing.CompletionFiredAt = now
+		if prevMerged > 0 && newMerged == 0 && entry.completionFiredAt.IsZero() {
+			entry.completionFiredAt = now
+			var baseChunks, baseBytes int64
+			for _, s := range entry.shards {
+				baseChunks += s.BaseChunks
+				baseBytes += s.BaseBytes
+			}
 			completions = append(completions, CompletionEvent{
 				Cluster:    id,
-				BaseChunks: existing.BaseChunks,
-				BaseBytes:  existing.BaseBytes,
-				BytesMoved: existing.BaseBytes,
+				BaseChunks: baseChunks,
+				BaseBytes:  baseBytes,
+				BytesMoved: baseBytes,
 				ScanFinish: now,
 			})
 		}
@@ -231,9 +297,33 @@ func (p *ProgressTracker) Reset(clusterID string) {
 	delete(p.snapshots, clusterID)
 }
 
-func cloneSnapshot(s *ProgressSnapshot) ProgressSnapshot {
-	out := *s
-	out.ByBucket = cloneByBucket(s.ByBucket)
+// mergeShardSnapshots projects a clusterEntry's per-shard slots into the
+// caller-facing ProgressSnapshot. Caller holds the lock.
+func mergeShardSnapshots(entry *clusterEntry) ProgressSnapshot {
+	out := ProgressSnapshot{CompletionFiredAt: entry.completionFiredAt}
+	for _, s := range entry.shards {
+		out.MigratableChunks += s.MigratableChunks
+		out.StuckSinglePolicyChunks += s.StuckSinglePolicyChunks
+		out.StuckNoPolicyChunks += s.StuckNoPolicyChunks
+		out.Bytes += s.Bytes
+		out.BaseChunks += s.BaseChunks
+		out.BaseBytes += s.BaseBytes
+		if s.LastScanAt.After(out.LastScanAt) {
+			out.LastScanAt = s.LastScanAt
+		}
+		for name, cat := range s.ByBucket {
+			if out.ByBucket == nil {
+				out.ByBucket = map[string]BucketScanCategory{}
+			}
+			if existing, ok := out.ByBucket[name]; ok {
+				existing.ChunkCount += cat.ChunkCount
+				existing.BytesUsed += cat.BytesUsed
+				out.ByBucket[name] = existing
+			} else {
+				out.ByBucket[name] = cat
+			}
+		}
+	}
 	return out
 }
 

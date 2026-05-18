@@ -166,6 +166,14 @@ type Config struct {
 	// gateway and the worker keep the same retention shape without
 	// crossing an import boundary into s3api.
 	AuditTTL time.Duration
+	// ShardID / ShardCount select the runtime shard slice this worker
+	// scans (US-002 rebalance-scale-phase-2). ShardCount=1, ShardID=0
+	// (the zero-value default) reproduces the single-leader Phase 1
+	// shape: one worker scans every bucket. ShardCount=N>1 + a
+	// ShardedFanOut spawns one Worker per slot, each scoping its bucket
+	// iteration via meta.Store.ListBucketsShard (wired in US-003).
+	ShardID    int
+	ShardCount int
 }
 
 // DefaultFillCeiling is the conservative target_full threshold from the
@@ -210,12 +218,37 @@ func New(cfg Config) (*Worker, error) {
 	return &Worker{cfg: cfg}, nil
 }
 
+// RunShard stamps the (shardID, shardCount) pair on the worker config and
+// runs the standard Run loop (US-002 rebalance-scale-phase-2). The
+// ShardedFanOut spawns one goroutine per shard and routes through this
+// entrypoint so the per-shard iteration in US-003 can pick up the slot
+// off the worker's config without changing the fan-out contract.
+func (w *Worker) RunShard(ctx context.Context, shardID, shardCount int) error {
+	if shardCount < 1 {
+		shardCount = 1
+	}
+	if shardID < 0 || shardID >= shardCount {
+		shardID = 0
+	}
+	w.cfg.ShardID = shardID
+	w.cfg.ShardCount = shardCount
+	return w.Run(ctx)
+}
+
 // Run loops until ctx is cancelled.
 func (w *Worker) Run(ctx context.Context) error {
+	if w.cfg.ShardCount < 1 {
+		w.cfg.ShardCount = 1
+	}
+	if w.cfg.ShardID < 0 || w.cfg.ShardID >= w.cfg.ShardCount {
+		w.cfg.ShardID = 0
+	}
 	w.cfg.Logger.Info("rebalance: starting",
 		"interval", w.cfg.Interval.String(),
 		"rate_mb_s", w.cfg.RateMBPerSec,
 		"inflight", w.cfg.Inflight,
+		"shard_id", w.cfg.ShardID,
+		"shard_count", w.cfg.ShardCount,
 	)
 	t := time.NewTicker(w.cfg.Interval)
 	defer t.Stop()
@@ -234,7 +267,17 @@ func (w *Worker) Run(ctx context.Context) error {
 // RunOnce performs a single rebalance pass over every bucket with a
 // non-nil Placement. Exposed for tests + the cmd binary's --once flag.
 func (w *Worker) RunOnce(ctx context.Context) error {
+	if w.cfg.ShardCount < 1 {
+		w.cfg.ShardCount = 1
+	}
+	if w.cfg.ShardID < 0 || w.cfg.ShardID >= w.cfg.ShardCount {
+		w.cfg.ShardID = 0
+	}
 	iterCtx, span := strataotel.StartIteration(ctx, w.tracerOrNoop(), "rebalance")
+	span.SetAttributes(
+		attribute.Int("strata.rebalance.shard", w.cfg.ShardID),
+		attribute.Int("strata.rebalance.shard_count", w.cfg.ShardCount),
+	)
 	err := w.runOnce(iterCtx)
 	if sticky := w.takeIterErr(); err == nil {
 		err = sticky
@@ -245,9 +288,9 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 
 func (w *Worker) runOnce(ctx context.Context) error {
 	tickStart := w.cfg.Now()
-	buckets, err := w.cfg.Meta.ListBuckets(ctx, "")
+	buckets, err := w.cfg.Meta.ListBucketsShard(ctx, w.cfg.ShardID, w.cfg.ShardCount)
 	if err != nil {
-		return fmt.Errorf("list buckets: %w", err)
+		return fmt.Errorf("list buckets shard %d/%d: %w", w.cfg.ShardID, w.cfg.ShardCount, err)
 	}
 	excludeForTargets, scanFor, states, weights := w.loadClusterDrainSets(ctx)
 	fillCache := w.newFillCache(ctx)
@@ -281,7 +324,7 @@ func (w *Worker) runOnce(ctx context.Context) error {
 		w.scanAndEmit(ctx, b, raw, effective, excludeForTargets, scanFor, fillCache, prog)
 	}
 	tickEnd := w.cfg.Now()
-	completions := prog.commit(w.cfg.Progress, scanFor, tickEnd)
+	completions := prog.commit(w.cfg.Progress, scanFor, tickEnd, w.cfg.ShardID)
 	for _, ev := range completions {
 		w.handleDrainComplete(ctx, ev, tickEnd.Sub(tickStart))
 	}
@@ -408,7 +451,7 @@ func (a *progressAcc) observe(clusterID, bucket, category string, scanFor map[st
 	entry.BytesUsed += size
 }
 
-func (a *progressAcc) commit(p *ProgressTracker, scanFor map[string]bool, now time.Time) []CompletionEvent {
+func (a *progressAcc) commit(p *ProgressTracker, scanFor map[string]bool, now time.Time, shardID int) []CompletionEvent {
 	if a == nil || p == nil {
 		return nil
 	}
@@ -419,8 +462,8 @@ func (a *progressAcc) commit(p *ProgressTracker, scanFor map[string]bool, now ti
 	if !a.enabled {
 		// No evacuating clusters this tick (or tracker disabled). Still
 		// flush so previously-cached entries for clusters that
-		// transitioned out of evacuating are reaped.
-		return p.CommitScan(ids, nil, now)
+		// transitioned out of evacuating are reaped for this shard.
+		return p.CommitScan(shardID, ids, nil, now)
 	}
 	scans := make(map[string]ScanResult, len(ids))
 	for _, id := range ids {
@@ -438,7 +481,7 @@ func (a *progressAcc) commit(p *ProgressTracker, scanFor map[string]bool, now ti
 		}
 		scans[id] = res
 	}
-	return p.CommitScan(ids, scans, now)
+	return p.CommitScan(shardID, ids, scans, now)
 }
 
 // ClassifyBucket returns the per-bucket drain-progress category derived

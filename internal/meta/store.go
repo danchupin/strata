@@ -112,6 +112,10 @@ var (
 	// a value outside {"", "weighted", "strict"} (US-001 effective-
 	// placement). Empty string is legal and means "default weighted".
 	ErrInvalidPlacementMode    = errors.New("invalid placement mode")
+	// ErrInvalidShard signals a ListBucketsShard call with shardID
+	// outside [0, totalShards) or totalShards < 1 (US-001 rebalance-
+	// scale-phase-2).
+	ErrInvalidShard            = errors.New("invalid shard id or count")
 )
 
 const (
@@ -658,6 +662,29 @@ func GCShardID(oid string) int {
 	return int(h % uint32(GCShardCount))
 }
 
+// BucketShardID returns the runtime-shard slot for a bucket id under a
+// total shard count. Used by ListBucketsShard implementations across all
+// three backends so the rebalance worker fan-out (US-001 rebalance-
+// scale-phase-2) sees a deterministic, backend-agnostic partition.
+// Hash is fnv32a over the canonical bucket UUID string.
+func BucketShardID(bucketID uuid.UUID, totalShards int) int {
+	if totalShards <= 0 {
+		return 0
+	}
+	h := fnv32aGC(bucketID.String())
+	return int(h % uint32(totalShards))
+}
+
+// ValidateShard enforces shardID ∈ [0, totalShards) and totalShards >= 1.
+// Returns ErrInvalidShard otherwise. Shared by every backend's
+// ListBucketsShard so the off-by-one guard is checked once.
+func ValidateShard(shardID, totalShards int) error {
+	if totalShards < 1 || shardID < 0 || shardID >= totalShards {
+		return ErrInvalidShard
+	}
+	return nil
+}
+
 // fnv32aGC is the FNV-1a hash used by GCShardID. Inlined here so the GC
 // queue's logical-shard formula stays in this file (callers don't need to
 // import "hash/fnv" to derive a shard).
@@ -862,6 +889,15 @@ type Store interface {
 	GetBucket(ctx context.Context, name string) (*Bucket, error)
 	DeleteBucket(ctx context.Context, name string) error
 	ListBuckets(ctx context.Context, owner string) ([]*Bucket, error)
+	// ListBucketsShard returns the subset of buckets whose
+	// BucketShardID(bucket.ID, totalShards) == shardID. Used by the
+	// sharded rebalance-worker fan-out (US-001 rebalance-scale-phase-2)
+	// so each replica scans a disjoint slice of buckets. shardID must be
+	// in [0, totalShards); totalShards must be >= 1; otherwise returns
+	// ErrInvalidShard. totalShards=1 returns every bucket and is
+	// functionally identical to ListBuckets with owner="". No owner
+	// filter — the fan-out is replica-scoped, not user-scoped.
+	ListBucketsShard(ctx context.Context, shardID, totalShards int) ([]*Bucket, error)
 	SetBucketVersioning(ctx context.Context, name, state string) error
 	SetBucketACL(ctx context.Context, name, canned string) error
 	SetBucketBackendPresign(ctx context.Context, name string, enabled bool) error

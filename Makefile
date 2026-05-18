@@ -1,7 +1,7 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-all-ci up-tikv up-lab-tikv up-lab-tikv-3 down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv smoke-drain-lifecycle smoke-drain-transparency smoke-cluster-weights smoke-drain-cleanup smoke-drain-followup smoke-effective-placement race-soak race-soak-tikv lint-nginx-lab bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi docs-serve docs-build clean
+.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-all-ci up-tikv up-lab-tikv up-lab-tikv-3 down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv smoke-drain-lifecycle smoke-drain-transparency smoke-cluster-weights smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale race-soak race-soak-tikv lint-nginx-lab bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi docs-serve docs-build clean
 
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
@@ -277,6 +277,21 @@ smoke-drain-followup:
 smoke-effective-placement:
 	bash scripts/smoke-effective-placement.sh
 
+# Rebalance-scale Phase 2 walkthrough smoke (US-005 of
+# ralph/rebalance-scale-phase-2). Drives the four scenarios (A: single-
+# replica fan-out at SHARDS=3 with folded chip; B: lab-tikv-3 multi-
+# leader at SHARDS=3 with one chip per replica; C: back-compat SHARDS=1
+# with exactly one chip holder; D: replica failover) against a running
+# `lab-tikv-3 + multi-cluster` compose profile (`docker compose -f
+# deploy/docker/docker-compose.yml --profile lab-tikv --profile
+# lab-tikv-3 --profile multi-cluster up -d`). Closes ROADMAP P2
+# "Rebalance worker not sharded". Skips with exit 77 when the lab is
+# not reachable; set REQUIRE_LAB=1 to convert the skip into a hard
+# fail. Scenario B + D auto-skip on single-replica labs. See
+# scripts/smoke-rebalance-scale.sh for env knobs (BASE, SMOKE_*).
+smoke-rebalance-scale:
+	bash scripts/smoke-rebalance-scale.sh
+
 # Single-binary dispatcher smoke (US-002 of ralph/single-binary).
 # Builds bin/strata and verifies post-consolidation shape: --help lists
 # server+admin, admin --help lists 9 subcommands, admin rewrap --help
@@ -408,6 +423,24 @@ bench-lifecycle-multi: build
 		  | tee -a bench-lifecycle-multi-results.jsonl; \
 	done
 
+# Rebalance worker multi-leader bench (US-004 of ralph/rebalance-scale-phase-2).
+# Unlike bench-gc-multi / bench-lifecycle-multi (which drive `strata admin
+# bench-*` against a single in-process simulation), this target drives the
+# rebalance worker end-to-end through the HTTP admin API: seeds buckets,
+# triggers /drain, polls /drain-progress until chunks_on_cluster=0, repeats
+# at SHARDS=1 baseline and SHARDS=3 fan-out, and prints a ratio + verdict.
+#
+# Requires a running multi-cluster TiKV-backed lab with the rebalance worker
+# (operator-managed — see scripts/bench-rebalance-multi.sh header for the
+# compose recipe and BENCH_RESTART_HOOK contract). Skip behaviour: exits 77
+# if $BASE/readyz is not reachable; REQUIRE_LAB=1 turns the skip into a fail.
+#
+# Override BENCH_BUCKETS / BENCH_CHUNKS_PER_BUCKET / BENCH_OBJECT_SIZE_KB
+# / BENCH_DRAIN_TIMEOUT_S / BENCH_SHARDS_BASELINE / BENCH_SHARDS_FANOUT via
+# env. Results JSONL lands in bench-rebalance-multi-results.jsonl.
+bench-rebalance-multi:
+	bash scripts/bench-rebalance-multi.sh
+
 # Hugo docs site (docs/site/). `docs-serve` runs the local dev preview on
 # :1313 with drafts enabled; `docs-build` produces the minified static bundle
 # under docs/site/public/ which the GitHub Actions workflow publishes to
@@ -424,4 +457,5 @@ clean:
 	rm -rf bin
 	rm -f bench-gc-results.jsonl bench-lifecycle-results.jsonl
 	rm -f bench-gc-multi-results.jsonl bench-lifecycle-multi-results.jsonl
+	rm -f bench-rebalance-multi-results.jsonl
 	rm -rf docs/site/public docs/site/resources
