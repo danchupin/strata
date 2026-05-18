@@ -171,7 +171,7 @@ container — no separate feature-worker sidecar. See
                           chunk.Cluster matches an S3 cluster id — the s3
                           backend's Delete dispatches such entries via
                           (cluster, bucket=chunk.Pool, key=chunk.OID).
-                          Knobs: STRATA_REBALANCE_INTERVAL (default 1h,
+                          Knobs: STRATA_REBALANCE_INTERVAL (default 5m,
                           range [1m, 24h]), STRATA_REBALANCE_RATE_MB_S
                           (default 100, range [1, 10000]; both read + write
                           consume from the same token-bucket so a chunk

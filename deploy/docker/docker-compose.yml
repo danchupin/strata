@@ -136,8 +136,15 @@ services:
   # the box. Distinct STRATA_NODE_ID per replica + shared strata-jwt-shared
   # volume so a session JWT minted by replica A validates on replica B
   # (round-robin LB requires cross-replica session validation).
-  # No compose-level STRATA_REBALANCE_INTERVAL / STRATA_REBALANCE_RATE_MB_S:
-  # gateway built-in defaults apply (1h interval, 100 MB/s rate).
+  # Lab-friendly rebalance cadence: STRATA_REBALANCE_INTERVAL defaults to
+  # 30s (gateway built-in is 5m, fine for prod but too slow for dev
+  # iteration — operator spends minutes wondering why drain progress is
+  # "scan pending"). Prod k8s manifests set their own value via env.
+  # STRATA_REBALANCE_RATE_MB_S keeps the gateway default (100 MB/s) per-
+  # replica — rate-limit knob (chunk move costs chunkSize × 2 tokens; with
+  # 2 replicas the aggregate ceiling is ~2 × 100 = 200 MB/s read+write
+  # split, ~100 MB/s effective forward migration on a chunk-by-chunk
+  # basis). Operator overrides via STRATA_REBALANCE_RATE_MB_S env.
   strata-a:
     image: strata:ceph
     build:
@@ -163,6 +170,9 @@ services:
       STRATA_RADOS_CONF: "/etc/ceph-a/ceph.conf"
       STRATA_RADOS_KEYRING: "/etc/ceph-a/ceph.client.admin.keyring"
       STRATA_RADOS_CLASSES: ${STRATA_RADOS_CLASSES:-}
+      STRATA_REBALANCE_INTERVAL: ${STRATA_REBALANCE_INTERVAL:-30s}
+      STRATA_REBALANCE_RATE_MB_S: ${STRATA_REBALANCE_RATE_MB_S:-}
+      STRATA_REBALANCE_INFLIGHT: ${STRATA_REBALANCE_INFLIGHT:-}
       # `optional` (not `off`) so presigned URLs minted by the console
       # carry through to a real identity check at PUT time. With `off`
       # the gateway treats every request as anonymous and an admin-
@@ -218,6 +228,9 @@ services:
       STRATA_RADOS_CONF: "/etc/ceph-a/ceph.conf"
       STRATA_RADOS_KEYRING: "/etc/ceph-a/ceph.client.admin.keyring"
       STRATA_RADOS_CLASSES: ${STRATA_RADOS_CLASSES:-}
+      STRATA_REBALANCE_INTERVAL: ${STRATA_REBALANCE_INTERVAL:-30s}
+      STRATA_REBALANCE_RATE_MB_S: ${STRATA_REBALANCE_RATE_MB_S:-}
+      STRATA_REBALANCE_INFLIGHT: ${STRATA_REBALANCE_INFLIGHT:-}
       # See strata-a above for rationale on the `optional` default.
       STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-optional}
       STRATA_STATIC_CREDENTIALS: ${STRATA_STATIC_CREDENTIALS:-admin:adminpass:owner}
@@ -288,6 +301,9 @@ services:
       STRATA_RADOS_CONF: "/etc/ceph-a/ceph.conf"
       STRATA_RADOS_KEYRING: "/etc/ceph-a/ceph.client.admin.keyring"
       STRATA_RADOS_CLASSES: ${STRATA_RADOS_CLASSES:-}
+      STRATA_REBALANCE_INTERVAL: ${STRATA_REBALANCE_INTERVAL:-30s}
+      STRATA_REBALANCE_RATE_MB_S: ${STRATA_REBALANCE_RATE_MB_S:-}
+      STRATA_REBALANCE_INFLIGHT: ${STRATA_REBALANCE_INFLIGHT:-}
       STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-optional}
       STRATA_STATIC_CREDENTIALS: ${STRATA_STATIC_CREDENTIALS:-admin:adminpass:owner}
       STRATA_GC_INTERVAL: ${STRATA_GC_INTERVAL:-}

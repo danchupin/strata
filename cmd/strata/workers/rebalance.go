@@ -43,7 +43,7 @@ func init() {
 // to the plan-logging behaviour shipped in US-003.
 func buildRebalance(deps Dependencies) (Runner, error) {
 	interval := clampDuration(deps,
-		"STRATA_REBALANCE_INTERVAL", time.Hour,
+		"STRATA_REBALANCE_INTERVAL", 5*time.Minute,
 		1*time.Minute, 24*time.Hour,
 	)
 	rateMBPerSec := clampInt(deps, "STRATA_REBALANCE_RATE_MB_S", 100, 1, 10000)
