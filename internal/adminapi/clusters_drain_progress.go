@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/danchupin/strata/internal/auth"
+	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
+	"github.com/danchupin/strata/internal/metrics"
 	"github.com/danchupin/strata/internal/promclient"
 	"github.com/danchupin/strata/internal/rebalance"
 	"github.com/danchupin/strata/internal/s3api"
@@ -82,6 +84,16 @@ const drainMoveRateExprFmt = `sum(rate(strata_rebalance_chunks_moved_total{from=
 // straight off the tracker's last committed scan.
 //
 // Pointer fields go *null* in the JSON output when no value applies.
+//
+// PhysicalChunksOnCluster / PhysicalBytesOnCluster are the physical RADOS
+// pool snapshot (US-001 drain-progress-physical). null when the data
+// backend does not implement the corresponding probe (memory + s3) OR
+// the probe failed on this poll (the per-probe counter
+// `strata_drain_progress_probe_errors_total` bumps in that case).
+// GCQueuePending is the explicit length of the cluster-scoped GC queue,
+// surfaced so the UI's `Awaiting GC` state can render the
+// physical-but-not-yet-deleted backlog independent of
+// `not_ready_reasons`.
 type ClusterDrainProgressResponse struct {
 	State                   string                     `json:"state"`
 	Mode                    string                     `json:"mode"`
@@ -91,6 +103,9 @@ type ClusterDrainProgressResponse struct {
 	StuckSinglePolicyChunks *int64                     `json:"stuck_single_policy_chunks"`
 	StuckNoPolicyChunks     *int64                     `json:"stuck_no_policy_chunks"`
 	BytesOnCluster          *int64                     `json:"bytes_on_cluster"`
+	PhysicalChunksOnCluster *int64                     `json:"physical_chunks_on_cluster"`
+	PhysicalBytesOnCluster  *int64                     `json:"physical_bytes_on_cluster"`
+	GCQueuePending          int                        `json:"gc_queue_pending"`
 	BaseChunks              *int64                     `json:"base_chunks_at_start"`
 	LastScanAt              *string                    `json:"last_scan_at"`
 	ETASeconds              *int64                     `json:"eta_seconds"`
@@ -191,19 +206,96 @@ func (s *Server) handleClusterDrainProgress(w http.ResponseWriter, r *http.Reque
 		// (gcPending=0 falls through to "pending" semantics below).
 		gcPending = 0
 	}
+	// gcQueuePending mirrors the existing safety-gate count but stays
+	// surfaced even when the gc probe errors so the UI can render
+	// `Awaiting GC` independently of `not_ready_reasons` shape.
+	gcQueuePending := gcPending
 	mpPending, mpErr := s.Meta.ListMultipartUploadsByCluster(ctx, id, 1)
 	if mpErr != nil {
 		mpPending = 0
 	}
-	resp = buildDrainProgressResponse(ctx, s.Prom, id, row, snap, scanOK, s.RebalanceProgress.Interval, time.Now(), gcPending, mpPending)
+	physicalBytes, physicalObjects, physWarnings := s.probeClusterPhysical(ctx, id)
+	resp = buildDrainProgressResponse(ctx, s.Prom, id, row, snap, scanOK, s.RebalanceProgress.Interval, time.Now(), gcPending, mpPending, gcQueuePending, physicalBytes, physicalObjects)
 	if gcErr != nil {
 		resp.Warnings = append(resp.Warnings, "gc-queue probe failed: "+gcErr.Error())
 	}
 	if mpErr != nil {
 		resp.Warnings = append(resp.Warnings, "multipart probe failed: "+mpErr.Error())
 	}
+	resp.Warnings = append(resp.Warnings, physWarnings...)
 	writeJSON(w, http.StatusOK, resp)
 }
+
+// probeClusterPhysical resolves the (physicalBytes, physicalObjects) pair
+// for the cluster id, going through the 10 s ClusterStatsCache first
+// (US-001 drain-progress-physical). Cache miss / expired triggers one
+// ClusterStats + ClusterObjectCount probe round; per-probe errors bump
+// `strata_drain_progress_probe_errors_total{cluster,probe}` and surface
+// nil pointers (UI fallback to manifest count). Backends that don't
+// implement either probe interface return nil/nil — no error path.
+//
+// Returns the two pointer fields plus any operator-facing warnings.
+func (s *Server) probeClusterPhysical(ctx context.Context, id string) (*int64, *int64, []string) {
+	statsProbe, hasStats := s.Data.(data.ClusterStatsProbe)
+	countProbe, hasCount := s.Data.(data.ClusterObjectCountProbe)
+	if !hasStats && !hasCount {
+		return nil, nil, nil
+	}
+	if bytes, objects, ok := s.ClusterStatsCache.Get(id); ok {
+		var bp, op *int64
+		if hasStats {
+			b := bytes
+			bp = &b
+		}
+		if hasCount {
+			o := objects
+			op = &o
+		}
+		return bp, op, nil
+	}
+	var (
+		warnings        []string
+		bytesPtr        *int64
+		objectsPtr      *int64
+		gotBytes        int64
+		gotObjects      int64
+		bytesOK         bool
+		objectsOK       bool
+	)
+	if hasStats {
+		used, _, err := statsProbe.ClusterStats(ctx, id)
+		if err != nil {
+			metrics.DrainProgressProbeErrorsTotal.WithLabelValues(id, "stats").Inc()
+			warnings = append(warnings, "cluster-stats probe failed: "+err.Error())
+		} else {
+			gotBytes = used
+			bytesOK = true
+			b := used
+			bytesPtr = &b
+		}
+	}
+	if hasCount {
+		objects, err := countProbe.ClusterObjectCount(ctx, id)
+		if err != nil {
+			metrics.DrainProgressProbeErrorsTotal.WithLabelValues(id, "object_count").Inc()
+			warnings = append(warnings, "cluster-object-count probe failed: "+err.Error())
+		} else {
+			gotObjects = objects
+			objectsOK = true
+			o := objects
+			objectsPtr = &o
+		}
+	}
+	// Cache only when both probes (those that exist) succeeded — partial
+	// success would poison the cache with stale zero on the failed leg
+	// for the next 10 s.
+	cacheable := (!hasStats || bytesOK) && (!hasCount || objectsOK)
+	if cacheable {
+		s.ClusterStatsCache.Set(id, gotBytes, gotObjects)
+	}
+	return bytesPtr, objectsPtr, warnings
+}
+
 
 // buildDrainProgressResponse is the testable core of the handler. Pure
 // over its inputs — no IO besides the optional Prom query. gcPending
@@ -211,8 +303,19 @@ func (s *Server) handleClusterDrainProgress(w http.ResponseWriter, r *http.Reque
 // Meta.ListChunkDeletionsByCluster / Meta.ListMultipartUploadsByCluster
 // — together with the per-snapshot chunk total they form the three
 // safety conditions of `deregister_ready` (US-006 drain-cleanup).
-func buildDrainProgressResponse(ctx context.Context, prom *promclient.Client, id string, row meta.ClusterStateRow, snap rebalance.ProgressSnapshot, ok bool, interval time.Duration, now time.Time, gcPending, mpPending int) ClusterDrainProgressResponse {
+//
+// gcQueuePending is surfaced verbatim on the wire as the explicit
+// `gc_queue_pending` counter (US-001 drain-progress-physical). Callers
+// pass the same value as gcPending; the parameter is split to make the
+// observability vs safety roles independent at the type level.
+// physicalBytes / physicalObjects are the resolved pointer pair from
+// probeClusterPhysical — nil on backends without the corresponding
+// probe interface, nil on per-probe failure.
+func buildDrainProgressResponse(ctx context.Context, prom *promclient.Client, id string, row meta.ClusterStateRow, snap rebalance.ProgressSnapshot, ok bool, interval time.Duration, now time.Time, gcPending, mpPending, gcQueuePending int, physicalBytes, physicalObjects *int64) ClusterDrainProgressResponse {
 	out := ClusterDrainProgressResponse{State: row.State, Mode: row.Mode, Weight: row.Weight}
+	out.GCQueuePending = gcQueuePending
+	out.PhysicalBytesOnCluster = physicalBytes
+	out.PhysicalChunksOnCluster = physicalObjects
 	if !ok || snap.LastScanAt.IsZero() {
 		out.Warnings = append(out.Warnings, "progress scan pending; rebalance worker has not yet committed a tick")
 		return out

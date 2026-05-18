@@ -19,3 +19,23 @@ Cycle: ralph/drain-progress-physical
 - **Smoke env**: throttle + shortened grace are smoke-only — document in script comment + the migration note that these don't apply to prod defaults. Prod default rebalance rate (100 MB/s) + GC grace (5 min) would either pass migration too fast or stretch the smoke past CI timeout.
 - **End-to-end discipline** (per `feedback_cycle_end_to_end.md`): walkthrough covers happy path (drain cephb evacuate → 3 states observed → green chip) + edge cases (null physical / S3-memory backends, count divergence from direct-PUT on cephb, MonCommand transient fail, gateway restart mid-drain, multi-replica HA, hundreds-of-millions-of-objects pool). State Truth Tables document UI state derivation table + probe capability matrix + ClusterStatsCache lifecycle. Cache Invalidation Ledger: ONE new cache (ClusterStatsCache 10s TTL per-replica, TTL-only invalidation). Safety Claims Preconditions: existing US-006 deregister-ready gate unchanged; back-compat tested via Playwright null-physical mock; per-poll cost bounded by 10s cache hit ratio.
 
+## 2026-05-18 - US-001
+- Implemented ClusterObjectCountProbe interface + RADOS impl + 10s cache + drain-progress 3 new fields + per-probe error counter.
+- Files changed:
+  - internal/data/backend.go: new ClusterObjectCountProbe interface next to ClusterStatsProbe.
+  - internal/data/rados/health.go: Backend.ClusterObjectCount sums Num_objects across (pool, ns) per clusterID. Build-tagged ceph.
+  - internal/data/placement/clusterstats_cache.go: NEW ClusterStatsCache (10s TTL, sync.RWMutex, Get/Set, nil-safe).
+  - internal/data/placement/clusterstats_cache_test.go: NEW 6 unit tests covering TTL, nil-safety, per-cluster isolation.
+  - internal/metrics/metrics.go: new strata_drain_progress_probe_errors_total{cluster,probe} counter + Register entry.
+  - internal/adminapi/server.go: new ClusterStatsCache field on Server + Config; wired into New.
+  - internal/adminapi/clusters_drain_progress.go: extended response with physical_chunks_on_cluster + physical_bytes_on_cluster + gc_queue_pending. New probeClusterPhysical helper (cache-first, type-assert, per-probe counter bump). Builder signature widened.
+  - internal/adminapi/clusters_drain_progress_physical_test.go: NEW 4 tests (physical fields populated, null on memory, probe error → counter bump + null, cache hit short-circuits second probe).
+  - internal/adminapi/openapi.yaml: documented 3 new schema fields with cache/probe semantics.
+  - internal/serverapp/serverapp.go: wire placement.NewClusterStatsCache(0) into adminapi.Config.
+- **Learnings for future iterations:**
+  - Probe pattern: optional capability interfaces in internal/data/backend.go are type-asserted at call sites — gateway handler checks `s.Data.(data.ClusterObjectCountProbe)` then short-circuits if unsupported. Matches existing ClusterStatsProbe / HealthProbe / MultipartBackend shape. Reuse this pattern when adding a new backend capability that not every backend can satisfy.
+  - Cache shape: per-cluster ClusterStatsCache mirrors DrainCache style (sync.RWMutex, SetClockForTest, nil-safe Get/Set). Keep new caches in internal/data/placement/ to colocate with the drain semantics — both serve the gateway + admin handler.
+  - Test pattern: read the prometheus counter directly via `metrics.X.WithLabelValues(...).Write(&dto.Metric{})` rather than scraping the registry. See readCounter helper in clusters_drain_progress_physical_test.go.
+  - Builder signature growth: when adding fields to ClusterDrainProgressResponse, expand buildDrainProgressResponse signature (don't pack into a struct) — keeps test seam straightforward (existing 13 tests called it with new param list trivially).
+  - The placement import in serverapp.go was already present (used by DrainCache), so adding ClusterStatsCache there cost nothing.
+---

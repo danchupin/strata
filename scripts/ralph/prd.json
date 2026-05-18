@@ -26,8 +26,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Landed. Probe interface + RADOS impl + 10s cache + 3 additive response fields + counter all wired. 10 unit tests passing (6 cache TTL behavior + 4 drain-progress builder)."
     },
     {
       "id": "US-002",

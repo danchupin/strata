@@ -139,6 +139,53 @@ type cephCheck struct {
 
 var _ data.HealthProbe = (*Backend)(nil)
 var _ data.ClusterStatsProbe = (*Backend)(nil)
+var _ data.ClusterObjectCountProbe = (*Backend)(nil)
+
+// ClusterObjectCount implements data.ClusterObjectCountProbe (US-001
+// drain-progress-physical). Walks the configured classes map, filters by
+// clusterID, opens an ioctx per unique (cluster, pool, namespace), and
+// sums Num_objects across pools via the existing GetPoolStats path
+// (mirrors DataHealth so we reuse the same code path proven against
+// pool-stat field-name churn). Returns (0, err) on any per-pool failure
+// — the caller surfaces null, not a partial sum.
+func (b *Backend) ClusterObjectCount(ctx context.Context, clusterID string) (int64, error) {
+	if b == nil {
+		return 0, errors.New("rados backend closed")
+	}
+	if clusterID == "" {
+		clusterID = DefaultCluster
+	}
+	if _, ok := b.clusters[clusterID]; !ok {
+		return 0, fmt.Errorf("rados: unknown cluster %q", clusterID)
+	}
+	type poolKey struct{ pool, ns string }
+	seen := make(map[poolKey]struct{})
+	var total int64
+	for _, spec := range b.classes {
+		c := spec.Cluster
+		if c == "" {
+			c = DefaultCluster
+		}
+		if c != clusterID {
+			continue
+		}
+		k := poolKey{pool: spec.Pool, ns: spec.Namespace}
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		ioctx, err := b.ioctx(ctx, clusterID, spec.Pool, spec.Namespace)
+		if err != nil {
+			return 0, fmt.Errorf("rados: open ioctx %s/%s: %w", clusterID, spec.Pool, err)
+		}
+		stat, err := ioctx.GetPoolStats()
+		if err != nil {
+			return 0, fmt.Errorf("rados: pool stats %s/%s: %w", clusterID, spec.Pool, err)
+		}
+		total += int64(stat.Num_objects)
+	}
+	return total, nil
+}
 
 // ClusterStats implements data.ClusterStatsProbe (US-006 placement-rebalance).
 // Runs `ceph df --format json` via MonCommand on the per-cluster Conn and
