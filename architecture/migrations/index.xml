@@ -38,4 +38,14 @@ global worker leases (&lt;code&gt;gc-leader-N&lt;/code&gt;, &lt;code&gt;rebalanc
 &lt;code&gt;lifecycle-leader-&amp;lt;bucketID&amp;gt;&lt;/code&gt;, etc.) on Cassandra. Whichever container
 started first won — and when the single-cluster winner popped a GC
 entry for &lt;code&gt;cephb&lt;/code&gt;, deletion failed forever (no cephb connection), the
-queue piled up, &lt;code&gt;deregister_ready&lt;/code&gt; stuck &lt;code&gt;false&lt;/code&gt;, and drain wedged.&lt;/p&gt;</description></item></channel></rss>
+queue piled up, &lt;code&gt;deregister_ready&lt;/code&gt; stuck &lt;code&gt;false&lt;/code&gt;, and drain wedged.&lt;/p&gt;</description></item><item><title>Drain progress physical chunks</title><link>https://danchupin.github.io/strata/architecture/migrations/drain-progress-physical/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/migrations/drain-progress-physical/</guid><description>&lt;h1 id="migrating-to-the-physical-chunk-drain-progress"&gt;Migrating to the physical-chunk drain progress&lt;a class="anchor" href="#migrating-to-the-physical-chunk-drain-progress"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;&lt;code&gt;GET /admin/v1/clusters/&amp;lt;id&amp;gt;/drain-progress&lt;/code&gt; and the operator console
+&lt;code&gt;&amp;lt;DrainProgressBar&amp;gt;&lt;/code&gt; used to surface &lt;code&gt;chunks_on_cluster&lt;/code&gt; — the
+manifest-derived chunk count — as the sole headline metric. After the
+&lt;code&gt;ralph/drain-progress-physical&lt;/code&gt; cycle (US-001..US-003) the response
+gains three additive fields and the UI renders a 3-state machine that
+distinguishes manifest progress from physical pool state.&lt;/p&gt;
+&lt;p&gt;This page documents the wire shape change, the back-compat fallback for
+backends without the new probe, and the operator-visible state machine.
+There is no schema migration; no data migration; the change is purely
+additive on the &lt;code&gt;/drain-progress&lt;/code&gt; JSON shape.&lt;/p&gt;</description></item></channel></rss>
