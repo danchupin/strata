@@ -35,14 +35,12 @@ the box is the SPOF for HTTP traffic. For HA, see
 &lt;p&gt;For multi-tenant production traffic, scale to ≥2 replicas and pick a real
 metadata cluster (Cassandra ≥3 nodes or TiKV with PD ≥3 + TiKV ≥3).&lt;/p&gt;</description></item><item><title>Docker Compose</title><link>https://danchupin.github.io/strata/deploy/docker-compose/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/deploy/docker-compose/</guid><description>&lt;h1 id="docker-compose-deployment"&gt;Docker Compose deployment&lt;a class="anchor" href="#docker-compose-deployment"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;The bundled &lt;code&gt;deploy/docker/docker-compose.yml&lt;/code&gt; is the canonical reference
-shape for a Strata stack on a single host. It ships every supported
-runtime profile so an operator can &lt;code&gt;docker compose --profile &amp;lt;name&amp;gt; up -d&lt;/code&gt;
-to switch between Cassandra-backed, TiKV-backed, multi-replica, and
-tracing variants without editing YAML.&lt;/p&gt;
-&lt;p&gt;This page distills the compose file for human readers. The compose file
-itself is the source of truth — when it changes, this page lags by one
-PR; cross-check container env / port assignments before depending on
-them.&lt;/p&gt;</description></item><item><title>Multi-replica cluster</title><link>https://danchupin.github.io/strata/deploy/multi-replica/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/deploy/multi-replica/</guid><description>&lt;h1 id="multi-replica-strata-cluster--operator-guide"&gt;Multi-replica Strata cluster — operator guide&lt;a class="anchor" href="#multi-replica-strata-cluster--operator-guide"&gt;#&lt;/a&gt;&lt;/h1&gt;
+shape for a Strata stack on a single host. Post-&lt;code&gt;ralph/tikv-default-lab&lt;/code&gt;,
+bare &lt;code&gt;docker compose up -d&lt;/code&gt; brings up the &lt;strong&gt;TiKV-default 2-replica lab&lt;/strong&gt;
+(PD + TiKV + ceph + ceph-b + strata-a + strata-b + nginx LB +
+prometheus + grafana). The Cassandra-backed regression lab lives under
+&lt;code&gt;--profile cassandra&lt;/code&gt; so an operator can &lt;code&gt;make up-cassandra&lt;/code&gt; to validate
+the Cassandra meta backend side-by-side.&lt;/p&gt;</description></item><item><title>Multi-replica cluster</title><link>https://danchupin.github.io/strata/deploy/multi-replica/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/deploy/multi-replica/</guid><description>&lt;h1 id="multi-replica-strata-cluster--operator-guide"&gt;Multi-replica Strata cluster — operator guide&lt;a class="anchor" href="#multi-replica-strata-cluster--operator-guide"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;Strata&amp;rsquo;s gateway is &lt;strong&gt;stateless&lt;/strong&gt;. Replicas don&amp;rsquo;t form quorum among
 themselves; the storage layer (TiKV / RADOS) provides durability +
 consistency. A single replica is therefore a &lt;strong&gt;single point of failure for

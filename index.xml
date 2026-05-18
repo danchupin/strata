@@ -152,14 +152,12 @@ deploy.&lt;/p&gt;
 write actions) and Phase 3 (debug tooling — heatmaps, slow queries, OTel
 trace browser) ship in their own cycles.&lt;/p&gt;</description></item><item><title>Docker Compose</title><link>https://danchupin.github.io/strata/deploy/docker-compose/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/deploy/docker-compose/</guid><description>&lt;h1 id="docker-compose-deployment"&gt;Docker Compose deployment&lt;a class="anchor" href="#docker-compose-deployment"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;The bundled &lt;code&gt;deploy/docker/docker-compose.yml&lt;/code&gt; is the canonical reference
-shape for a Strata stack on a single host. It ships every supported
-runtime profile so an operator can &lt;code&gt;docker compose --profile &amp;lt;name&amp;gt; up -d&lt;/code&gt;
-to switch between Cassandra-backed, TiKV-backed, multi-replica, and
-tracing variants without editing YAML.&lt;/p&gt;
-&lt;p&gt;This page distills the compose file for human readers. The compose file
-itself is the source of truth — when it changes, this page lags by one
-PR; cross-check container env / port assignments before depending on
-them.&lt;/p&gt;</description></item><item><title>Meta store</title><link>https://danchupin.github.io/strata/architecture/meta-store/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/meta-store/</guid><description>&lt;h1 id="meta-store"&gt;Meta store&lt;a class="anchor" href="#meta-store"&gt;#&lt;/a&gt;&lt;/h1&gt;
+shape for a Strata stack on a single host. Post-&lt;code&gt;ralph/tikv-default-lab&lt;/code&gt;,
+bare &lt;code&gt;docker compose up -d&lt;/code&gt; brings up the &lt;strong&gt;TiKV-default 2-replica lab&lt;/strong&gt;
+(PD + TiKV + ceph + ceph-b + strata-a + strata-b + nginx LB +
+prometheus + grafana). The Cassandra-backed regression lab lives under
+&lt;code&gt;--profile cassandra&lt;/code&gt; so an operator can &lt;code&gt;make up-cassandra&lt;/code&gt; to validate
+the Cassandra meta backend side-by-side.&lt;/p&gt;</description></item><item><title>Meta store</title><link>https://danchupin.github.io/strata/architecture/meta-store/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/meta-store/</guid><description>&lt;h1 id="meta-store"&gt;Meta store&lt;a class="anchor" href="#meta-store"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;&lt;code&gt;internal/meta/store.go&lt;/code&gt; defines &lt;code&gt;meta.Store&lt;/code&gt;, the interface every metadata
 backend implements. The contract is intentionally narrow: only the
 operations the S3 surface needs, and only with the consistency primitives
@@ -566,7 +564,15 @@ external invoice generator can consume. The shape mirrors AWS / RGW so a
 RADOS Gateway tenant migrating to Strata sees the same &lt;code&gt;QuotaExceeded&lt;/code&gt; 403
 on overage.&lt;/p&gt;
 &lt;p&gt;The cycle stops at the usage feed. Invoice ledger / payment integration
-lives in a separate ops-layer service that consumes &lt;code&gt;usage_aggregates&lt;/code&gt;.&lt;/p&gt;</description></item><item><title>Capacity planning</title><link>https://danchupin.github.io/strata/best-practices/capacity-planning/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/capacity-planning/</guid><description>&lt;h1 id="capacity-planning"&gt;Capacity planning&lt;a class="anchor" href="#capacity-planning"&gt;#&lt;/a&gt;&lt;/h1&gt;
+lives in a separate ops-layer service that consumes &lt;code&gt;usage_aggregates&lt;/code&gt;.&lt;/p&gt;</description></item><item><title>TiKV-default lab</title><link>https://danchupin.github.io/strata/architecture/migrations/tikv-default-lab/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/migrations/tikv-default-lab/</guid><description>&lt;h1 id="migrating-to-the-tikv-default-2-replica-lab"&gt;Migrating to the TiKV-default 2-replica lab&lt;a class="anchor" href="#migrating-to-the-tikv-default-2-replica-lab"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;&lt;code&gt;docker compose up -d&lt;/code&gt; used to bring up a single Cassandra-backed
+&lt;code&gt;strata&lt;/code&gt; service on &lt;code&gt;:9999&lt;/code&gt; plus a &lt;code&gt;ceph&lt;/code&gt; + &lt;code&gt;ceph-b&lt;/code&gt; multi-cluster
+RADOS pair. TiKV was opt-in via &lt;code&gt;--profile tikv&lt;/code&gt; (&lt;code&gt;strata-tikv&lt;/code&gt;) or
+&lt;code&gt;--profile lab-tikv&lt;/code&gt; / &lt;code&gt;--profile lab-tikv-3&lt;/code&gt; for 2- and 3-replica
+labs, and a parallel 3-replica Cassandra lab lived under
+&lt;code&gt;--profile lab-cassandra-3&lt;/code&gt;. Four distinct profile shapes plus the
+always-on bare default — each rarely-used, each one a maintenance
+surface to keep green across CI + smoke + bench scripts.&lt;/p&gt;</description></item><item><title>Capacity planning</title><link>https://danchupin.github.io/strata/best-practices/capacity-planning/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/capacity-planning/</guid><description>&lt;h1 id="capacity-planning"&gt;Capacity planning&lt;a class="anchor" href="#capacity-planning"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;Capacity on a Strata deploy splits across three independently-scaled
 tiers:&lt;/p&gt;
 &lt;ul&gt;

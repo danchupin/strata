@@ -48,4 +48,12 @@ distinguishes manifest progress from physical pool state.&lt;/p&gt;
 &lt;p&gt;This page documents the wire shape change, the back-compat fallback for
 backends without the new probe, and the operator-visible state machine.
 There is no schema migration; no data migration; the change is purely
-additive on the &lt;code&gt;/drain-progress&lt;/code&gt; JSON shape.&lt;/p&gt;</description></item></channel></rss>
+additive on the &lt;code&gt;/drain-progress&lt;/code&gt; JSON shape.&lt;/p&gt;</description></item><item><title>TiKV-default lab</title><link>https://danchupin.github.io/strata/architecture/migrations/tikv-default-lab/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/migrations/tikv-default-lab/</guid><description>&lt;h1 id="migrating-to-the-tikv-default-2-replica-lab"&gt;Migrating to the TiKV-default 2-replica lab&lt;a class="anchor" href="#migrating-to-the-tikv-default-2-replica-lab"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;&lt;code&gt;docker compose up -d&lt;/code&gt; used to bring up a single Cassandra-backed
+&lt;code&gt;strata&lt;/code&gt; service on &lt;code&gt;:9999&lt;/code&gt; plus a &lt;code&gt;ceph&lt;/code&gt; + &lt;code&gt;ceph-b&lt;/code&gt; multi-cluster
+RADOS pair. TiKV was opt-in via &lt;code&gt;--profile tikv&lt;/code&gt; (&lt;code&gt;strata-tikv&lt;/code&gt;) or
+&lt;code&gt;--profile lab-tikv&lt;/code&gt; / &lt;code&gt;--profile lab-tikv-3&lt;/code&gt; for 2- and 3-replica
+labs, and a parallel 3-replica Cassandra lab lived under
+&lt;code&gt;--profile lab-cassandra-3&lt;/code&gt;. Four distinct profile shapes plus the
+always-on bare default — each rarely-used, each one a maintenance
+surface to keep green across CI + smoke + bench scripts.&lt;/p&gt;</description></item></channel></rss>
