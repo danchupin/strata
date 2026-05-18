@@ -1,188 +1,32 @@
 # Ralph Progress Log
-Started: Mon May 18 18:00:00 MSK 2026
-Cycle: ralph/tikv-default-lab
+Started: Mon May 18 18:10:00 MSK 2026
+Cycle: ralph/drain-rebalance-transparency
 
 ## Codebase Patterns
-- 5-story cycle. Flip lab compose default from Cassandra-backed single canonical strata → TiKV-backed 2-replica + nginx LB :9999. Cassandra meta backend remains first-class in code (tests + CI testcontainers preserved); only lab compose shape changes.
-- **Retire redundant profiles**: `tikv` (single TiKV replica), `lab-tikv` (already 2-replica; now bare default), `lab-tikv-3` (3-replica TiKV), `lab-cassandra-3` (3-replica Cassandra). Keep orthogonal: `webhook-trap`, `tracing`, `ci`.
-- **Rename strata-tikv-a/b → strata-a/b** with multi-cluster mounts (existing strata-tikv-a was single-cluster — `strata-ceph-etc:/etc/ceph:ro` only). New shape mounts BOTH `strata-ceph-etc:/etc/ceph-a:ro` + `strata-cephb-etc:/etc/ceph-b:ro` like the retired Cassandra-backed canonical strata.
-- **Critical: PRESERVE `strata-jwt-shared:/etc/strata/jwt-shared` volume mount + distinct `STRATA_NODE_ID` per replica**. Round-robin LB requires session JWT issued by replica A to validate on replica B. Without these, login → next request lands on other replica → 401. Existing lab-tikv shape already has both; rename must preserve.
-- **DEPENDS_ON expanded for strata-a/b**: include `pd healthy + tikv started + ceph healthy + ceph-b healthy`. Without ceph-b dep, compose may start strata-a before ceph-b ready → multi-cluster boot fail.
-- **NO compose-level rebalance defaults on strata-a/b**: gateway built-in defaults apply (1h interval, 100 MB/s rate). Retired Cassandra-backed `strata` had explicit `STRATA_REBALANCE_INTERVAL=30s` + `STRATA_REBALANCE_RATE_MB_S=100` compose defaults — cadence changes. Document in migration note.
-- **Port allocation**: nginx LB :9999 (canonical operator-facing entry), strata-a :10001 (direct smoke), strata-b :10002 (direct smoke), strata-cassandra :9998 (profile cassandra; was :9999 pre-cycle — breaking change for curl scripts targeting Cassandra at :9999).
-- **`cassandra` service moves under `profiles: ["cassandra"]`**: explicit service-name invocation (e.g. `docker compose up -d cassandra`) still works (compose honors explicit names even for profile-gated services). Implicit always-on dies.
-- **Promote `pd` + `tikv` services to no-profile**: currently `profiles: ["tikv", "lab-tikv"]`; remove gate so bare `up -d` starts them.
-- **`strata-cassandra` (new service under profile cassandra)**: single Cassandra-backed replica, port 9998, multi-cluster mounts, admin creds preset.
-- **CI breaking changes** (US-003): `make wait-cassandra` invocations in `.github/workflows/*.yml` and `scripts/**/*.sh` break since cassandra is profile-gated. Sweep + replace with `make wait-tikv` for TiKV-default jobs OR move job to `--profile cassandra up -d && make wait-cassandra` if Cassandra genuinely needed.
-- **bench-rebalance-multi rework** (US-003): preferred path = SHARDS=3 scenario explicitly SKIP'd with stdout message; exit 0 after SHARDS=1+2 baselines. Alternative = ad-hoc 3rd replica via `docker compose run --rm -p 10003:9000 strata-a` (higher complexity). Pick one; add P3 ROADMAP entry `Restore 3-replica TiKV bench` either way.
-- **Smoke Scenario A round-robin assertion**: check via container access logs (`docker logs strata-a --since 30s | grep GET | wc -l` ≥5 AND same for strata-b) after 20-request burst. Avoids needing new response header / endpoint.
-- **`make smoke` preserved verbatim** — already targets bare default, which is now TiKV. NO rename of `smoke-tikv → smoke` (would collide). Just retire `smoke-tikv` as redundant. Similarly retire `smoke-multi-cluster` (multi-cluster IS the default now).
-- **Cassandra meta-backend remains first-class in code**: `internal/meta/cassandra/**` untouched. `make test-integration` (testcontainers Cassandra) preserved. Cassandra parity in contract tests + benchmarks remains. The cycle is a deployment shape flip, NOT a backend deprecation. Migration note explicitly reassures this.
-- **Reference for nginx LB**: existing `deploy/nginx/strata-lab.conf` (used by retired `strata-lb-nginx` under `lab-tikv` profile). US-001 updates upstream block: `strata-tikv-a/b:9000` → `strata-a/b:9000`.
-- **Reference for new strata-cassandra service shape**: mirror env of new strata-a (multi-cluster, admin creds preset) but with `STRATA_META_BACKEND=cassandra` + `STRATA_CASSANDRA_HOSTS=cassandra:9042`. Single replica, port 9998.
-- **End-to-end discipline** (per `feedback_cycle_end_to_end.md`): walkthrough covers happy path (bare bring-up + drain cephb evacuate) + edge cases (Cassandra side-by-side via profile, single-cluster env override, retired profile silent no-op, 3-replica bench skip-or-execute) + worst-case (operator muscle memory of `--profile lab-tikv`, curl scripts on :9999 expecting Cassandra, CI workflow `wait-cassandra` regression, gateway restart mid-test, 3-replica HA need, bench-rebalance-multi compatibility). State Truth Tables: compose service start matrix + port allocation. Cache Invalidation Ledger: no new caches. Safety Claims Preconditions: Cassandra meta first-class preserved, lab compose flip doesn't break prod, multi-cluster behavior parity preserved, round-robin LB exercises stateless gateway invariants.
-- **CI workflow YAML strings with colons need quotes**: `name: Start stack (X: Y)` parses the inner `:` as a mapping value separator and fails GH Actions parse. Wrap with double quotes. Run `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/*.yml'))"` as a 1-second pre-commit check.
-- **Bare `docker compose up -d` is enough for full default stack** (post-US-001) — explicit service lists are anti-patterns when you want every no-profile service. `--profile X up -d` adds profile-gated services to that default; still no need to list services unless you want a subset.
-- **Replica-count gates already exist in smoke/bench scripts**: `if (( REPLICAS < 3 )); then skipped` patterns let parking a 3-replica scenario refresh the SKIP reason string instead of writing new control flow. Always check for existing skip-paths before adding parallel scaffolding.
+- 5-story cycle. Two parked + freshly-surfaced operator-transparency gaps merged into one cycle: (1) parked from `ralph/drain-progress-physical` — Awaiting GC chip ships with static-copy tooltip; operators with non-default GC envs get prose that doesn't match their cadence. (2) Newly surfaced 2026-05-18 — rebalance bandwidth invisible to operators (`STRATA_REBALANCE_RATE_MB_S` configurable but no UI/endpoint exposure → operator has no way to confirm migration won't saturate network).
+- **Unified fix**: two parallel read-only admin endpoints (`GET /admin/v1/gc-config` + `/admin/v1/rebalance-config`) expose resolved tunables; `<DrainProgressBar>` consumes both for live ETA on Awaiting GC chip + live bandwidth on Migrating chip; Cluster Overview gains rebalance config card; operator runbook gets `Bandwidth tuning` section with network-share calculator table.
+- **Shared infrastructure** (US-001): both endpoints share handler infra in `internal/adminapi/config_endpoints.go` (or fold into existing file — verify convention). Both audit-stamped, read-only, env-static. `GCConfig` + `RebalanceConfig` structs on `adminapi.Server`, wired through `adminapi.Config` for unit-test injection.
+- **GC values source** (US-001): `cmd/strata/workers/gc.go::clampShards` neighbors. Boot-time resolved env captured.
+- **Rebalance values source** (US-001): `cmd/strata/workers/rebalance.go::buildRebalance` env reads. Same pattern. Plus `replicas_count` derived from `meta.Store.ListClusterNodes(ctx)` filtered to live heartbeats (within `2 × STRATA_HEARTBEAT_INTERVAL` of now) — NOT static.
+- **Response shape** (US-001): int seconds, not Go duration strings. Both endpoints return flat JSON; UI does `seconds / 60` for minutes.
+- **Counter** (US-001): `strata_admin_config_endpoint_errors_total{endpoint}` with label `endpoint ∈ {gc-config, rebalance-config}`. Increments on internal error (e.g. cluster_nodes scan fails).
+- **UI 2-query pattern** (US-002): `<DrainProgressBar>` fetches BOTH `/admin/v1/gc-config` + `/admin/v1/rebalance-config` via TanStack Query, both `staleTime: Infinity` (env static at boot).
+- **Awaiting GC ETA formula** (US-002): `eta_min = ceil(grace_seconds / 60) + ceil(gc_queue_pending / (batch_size × shards × 1) × (interval_seconds / 60))`. Denominator clamped to 1 if zero. Cap at `~24h+` if > 24h.
+- **Migrating bandwidth row** (US-002): Y = `rate(strata_rebalance_bytes_moved_total{to=<cluster_id>}[1m])` via existing `STRATA_PROMETHEUS_URL` plumbing. Z (ETA) = `(remaining × chunk_size) / observed_rate` if observed > 0; else fallback `(remaining × chunk_size) / (rebalance_config.rate_mb_s × replicas_count / 2)` (effective forward estimate).
+- **Chip label formats** (US-002): Awaiting GC → `Awaiting GC cleanup: X chunks awaiting physical delete (~N m ETA)` (or `~Nh Mm` if ≥ 60). Migrating → `Migrating: X chunks remaining · ~Y MB/s observed · ~Zm ETA`.
+- **Graceful fallback** (US-002): when either query loading/errors → pre-cycle static behavior. PromQL null/0 (cold) → formula fallback ETA + observed row reads `~0 MB/s observed (cold start)`.
+- **Cluster Overview card** (US-003): `<RebalanceConfigCard>` renders four config rows (`Per-replica rate / Aggregate (×N replicas) / Effective forward / Cadence + Inflight + Shards`) + live bandwidth row below. Tooltip explains chunkSize × 2 tokens math. Tune button → `docs/site/content/best-practices/placement-rebalance.md#bandwidth-tuning` (US-004 anchor).
+- **TanStack key SHARED** (US-002 + US-003): `rebalance-config` query used by both `<DrainProgressBar>` AND `<RebalanceConfigCard>`. Single fetch per app session.
+- **Card hides on 404** (US-003): legacy gateway compatibility — no error toast, card just not rendered.
+- **Runbook section** (US-004): `## Bandwidth tuning` anchored `#bandwidth-tuning`. Token-bucket model explanation + network-share calculator table (1 GbE / 10 GbE / 25 GbE / 100 GbE → safe per-replica rates + aggregate + effective forward + % of pipe). Two concrete tuning workflows (lab + prod). References to live observability + admin endpoint health-check.
+- **Smoke** (US-005): extend existing `scripts/smoke-drain-progress-ui.sh` (already configures `STRATA_REBALANCE_RATE_MB_S=1` + `STRATA_GC_GRACE=60s`). New steps: call `GET /admin/v1/gc-config` after Awaiting GC, assert response contains grace_seconds:60; compute eta_min from formula + polled gc_queue_pending, assert within sane band; call `GET /admin/v1/rebalance-config`, assert rate_mb_s:1 + replicas_count:2; during Migrating sample Prom rate query, assert > 0 MB/s.
+- **ROADMAP close-flip × 2** (US-005): existing parked P3 `Precise drain-progress ETA from gateway GC tunables` → Done; NEW P3 entry added + closed `Rebalance bandwidth visibility on Cluster Overview + drain progress` (operator-requested live; not pre-roadmapped per CLAUDE.md `Discovering a new gap` rule).
+- **Existing surface preserved**: `strata_rebalance_bytes_moved_total` counter already exists (per CLAUDE.md placement-rebalance cycle). `STRATA_PROMETHEUS_URL` plumbing already wired in `/admin/v1/clusters/{id}/rebalance-progress`. Reuse both.
+- **Cassandra meta backend unchanged**: cycle touches only adminapi handlers + web UI + docs. `internal/meta/cassandra/**` untouched. `make test-integration` (testcontainers) preserved.
+- **Pre-cycle hotfixes already on main** (do NOT redo):
+  - `470e8de` adminapi multipart Complete/Abort panic on object keys with spaces (`httptest.NewRequest` → `http.NewRequestWithContext` + url.URL escaping)
+  - `516b9bc` RADOS ClusterStats / ClusterObjectCount probe fallback + strata-pool filter (operator-visible `physical_chunks_on_cluster=0 + physical_bytes_on_cluster=515264` regression; .mgr ceph internal masked as strata data)
+  - `3067214` rebalance default 1h → 5m + lab compose 30s override + env passthrough for STRATA_REBALANCE_RATE_MB_S / INFLIGHT
+  - `061424a` strata compose admin auth defaults restored (`optional` + admin:adminpass:owner) post-collapse cycle regression
+- **End-to-end discipline** (per `feedback_cycle_end_to_end.md`): walkthrough covers happy path (drain with both ETAs visible + bandwidth indicator) + operator network-share concern walkthrough (1 GbE operator picks safe rate via runbook table) + edge cases (either endpoint errors, PromQL unavailable, mid-drain env change via gateway restart, GC_GRACE=0, GC_GRACE=999h, RATE_MB_S=0, multi-replica >2, sub-60s migrations before Prom window settles). State Truth Tables: chip rendering matrix + endpoint response shapes. Cache Invalidation Ledger: 2 new TanStack keys (staleTime: Infinity), no new server caches. Safety Claims Preconditions: ETA + bandwidth non-safety (deregister_ready unchanged); endpoints GET-only; degenerate inputs clamped; card hides on 404 (back-compat).
 
-
-## 2026-05-18 - US-001
-- Compose rewrite: TiKV-default 2-replica lab as bare default; Cassandra under --profile cassandra
-- Files changed:
-  - deploy/docker/docker-compose.yml (full rewrite — see below)
-  - deploy/nginx/strata-lab.conf (upstream strata-tikv-a/b:9000 → strata-a/b:9000)
-- Compose changes:
-  - Dropped: strata (Cassandra-backed canonical), strata-tikv (single TiKV replica), strata-tikv-c (lab-tikv-3), strata-cass-a/b/c (lab-cassandra-3), strata-lb-nginx-cass (lab-cassandra-3)
-  - Renamed: strata-tikv-a → strata-a; strata-tikv-b → strata-b (no profile; bare-default)
-  - Moved cassandra under `profiles: ["cassandra"]` (was always-on); container_name flipped to strata-cassandra-db so it doesn't collide with new strata-cassandra service container_name
-  - Promoted pd, tikv, strata-lb-nginx to no-profile (always-on)
-  - New strata-cassandra service under profile cassandra (port 9998, multi-cluster mounts)
-  - strata-a/b multi-cluster mounts: strata-ceph-etc:/etc/ceph-a:ro + strata-cephb-etc:/etc/ceph-b:ro (renamed primary mount path to match canonical /etc/ceph-a)
-  - strata-a/b distinct host ports: 10001 + 10002; LB at 9999:80
-  - strata-a/b preserve strata-jwt-shared:/etc/strata/jwt-shared + distinct STRATA_NODE_ID
-  - strata-a/b depends_on: pd healthy + tikv started + ceph healthy + ceph-b healthy
-  - No STRATA_REBALANCE_INTERVAL / STRATA_REBALANCE_RATE_MB_S compose defaults on strata-a/b (gateway built-in defaults — 1h interval, 100 MB/s rate; cadence change vs retired Cassandra strata's 30s)
-  - All retained services keep STRATA_AUTH_MODE=optional + STRATA_STATIC_CREDENTIALS=admin:adminpass:owner defaults
-- Compose config gate verified:
-  - `docker compose config --services` → ceph, ceph-b, grafana, pd, prometheus, strata-a, strata-b, strata-lb-nginx, tikv (9 services; matches PRD bare-default list)
-  - `docker compose --profile cassandra config --services` → adds cassandra + strata-cassandra
-  - Retired profiles (`--profile tikv --profile lab-tikv --profile lab-tikv-3 --profile lab-cassandra-3`) silently no-op (same 9 services as bare-default; no warning)
-- `go vet ./...` green; `make build` green
-- **Learnings for future iterations:**
-  - **container_name collision gotcha**: the new `strata-cassandra` service can't reuse `container_name: strata-cassandra` (which the OLD cassandra-image service had) — docker would silently accept the YAML but fail at runtime when both services start under `--profile cassandra`. Flipped cassandra container_name to `strata-cassandra-db` to make room.
-  - **Multi-cluster mount path convention**: when adding both clusters, mount each at `/etc/ceph-<id>` (NOT `/etc/ceph`). Gateway reads `STRATA_RADOS_CLUSTERS=default:/etc/ceph-a/...,cephb:/etc/ceph-b/...` so the paths must match exactly. Retired canonical `strata` service had a triple-mount including the legacy `:/etc/ceph:ro` bind for backwards-compat; the new strata-a/b drop it — gateway never reads `/etc/ceph` when STRATA_RADOS_CLUSTERS is set.
-  - **`docker compose config` accepts unknown profile flags silently**: passing `--profile retired-name` against a compose file that doesn't reference it produces no warning and no error — the resolved service list is identical to bare-default. This is the contractual silent no-op behavior the PRD requires.
-  - **Validate compose changes early**: `docker compose -f <file> config --services` is a 100ms lint that catches container_name collisions, missing volumes, profile misconfig before any container starts. Run it before any go vet / make build.
-  - **Per-replica `STRATA_NODE_ID` + shared `strata-jwt-shared` volume is the round-robin LB contract**: without distinct node IDs the heartbeat rows collide; without the shared volume cross-replica session JWT validation fails (login → next request lands on other replica → 401). Both are required; don't simplify one away.
----
-
-## 2026-05-18 - US-002
-- Makefile sweep: TiKV-default lab targets as bare default, Cassandra profile entry, drop dead targets
-- Files changed:
-  - Makefile (rewritten)
-  - deploy/nginx/strata-lab-cassandra.conf (deleted — orphan after lint-nginx-lab-cassandra target dropped)
-- Makefile changes:
-  - `up` and `up-all`: bare `$(COMPOSE) up -d` (no profile, no service list). Brings up TiKV-default 2-replica stack
-  - New `up-cassandra`: `$(COMPOSE) --profile cassandra up -d` — layers cassandra + strata-cassandra (:9998) on top
-  - Dropped targets: up-tikv, up-lab-tikv, up-lab-tikv-3, up-lab-cassandra-3, smoke-tikv, smoke-signed-tikv, wait-strata-tikv, wait-strata-lab-cassandra, lint-nginx-lab-cassandra
-  - `wait-tikv` rewritten: HTTP probe on `http://127.0.0.1:2379/pd/api/v1/health` (was TCP probe on port 20160). PRD-spec'd
-  - `wait-cassandra` adds `--profile cassandra` to `$(COMPOSE) ps` call — without it, docker compose silently filters profile-gated containers and the until-loop hangs forever
-  - New granular `wait-strata-a` (:10001), `wait-strata-b` (:10002), `wait-strata-lb-nginx` (:9999); combined `wait-strata-lab` chains all three
-  - `wait-strata` retained — LB :9999 readyz probe
-  - `down`: dropped retired profile flags (`tikv`, `lab-tikv*`, `lab-cassandra-3`), added `--profile cassandra --profile webhook-trap --profile ci` for full teardown
-  - `up-all-ci` rewritten: `--profile ci --profile cassandra up -d cassandra ceph strata-cassandra` (was `--profile ci up -d cassandra ceph strata` — `strata` service no longer exists; race-soak is Cassandra-backed so the cassandra profile is correct)
-  - `build-ceph` flipped from `strata` (gone) to `strata-a`
-  - `run-strata` flipped from `strata` (gone) to `strata-a strata-b strata-lb-nginx`
-  - `run-cassandra` preserved verbatim with comment refresh (dev-only host-Cassandra run, independent of lab compose flip)
-  - `make smoke` + `make smoke-signed` preserved verbatim — already targeted :9999 (now LB front)
-  - `smoke-lab-tikv` retained but help text refreshed to `make up && make wait-strata-lab` invocation shape
-  - `lint-nginx-lab` --add-host stubs: strata-tikv-{a,b} → strata-{a,b}
-- Validation:
-  - `make -n up` → `docker compose -f deploy/docker/docker-compose.yml up -d` ✓
-  - `make -n up-cassandra` → `docker compose -f deploy/docker/docker-compose.yml --profile cassandra up -d` ✓
-  - `make -n wait-tikv` → curl loop on http://127.0.0.1:2379/pd/api/v1/health ✓
-  - `make -n smoke smoke-signed` → :9999 ✓
-  - `make -n up-tikv` (retired) → "No rule to make target" ✓
-  - `make -n up-lab-tikv` (retired) → "No rule to make target" ✓
-  - `make -n smoke-tikv` (retired) → "No rule to make target" ✓
-- Grep gate locally: zero matches for `strata-tikv-[abc]|strata-cass-|strata-lb-nginx-cass|--profile lab-tikv|--profile lab-cassandra-3|--profile tikv` in Makefile (US-003 grep gate compliance start)
-- `go vet ./...` green; `make build` green (web-build + go build both clean); `make test` green
-- **Learnings for future iterations:**
-  - **`docker compose ps <service>` silently filters profile-gated services**: without the matching `--profile X` flag, the output is empty even if the container is running. The `until [ "$(...)" = "healthy" ]` loop in wait-cassandra hangs forever without the flag. Always add `--profile cassandra` to wait-cassandra (and any future wait targets for profile-gated services). Pattern: `$(COMPOSE) --profile <name> ps --format '{{.Health}}' <service>`.
-  - **PD's `/pd/api/v1/health` is the portable HTTP readiness probe** for the TiKV stack. The pingcap/tikv image has no stable HTTP healthcheck contract (status server returns plain text on a non-stable contract; the alpine-glibc base ships no curl). PD's API is stable + curl-friendly from the host, so probe pd:2379 (host-published port) instead of tikv:20160. The earlier `wait-tikv` TCP probe on 20160 worked but couldn't distinguish "port open, region not assigned yet" from "fully ready" — HTTP probe on PD covers both since PD blocks until raft majority elects.
-  - **`make -n <target>` is the contract-level lint** for Makefile changes: dry-runs the target without executing, surfaces unknown targets ("No rule to make target") and substitution errors. Run before any go vet / make build to catch typos in PHONY rewrites.
-  - **Orphan files trigger US-005 grep gate failures**: when dropping a Makefile target that references a config file (like lint-nginx-lab-cassandra → strata-lab-cassandra.conf), delete the config file in the same commit. Otherwise the file lingers with `strata-cass-` / `strata-lb-nginx-cass` strings and fails the US-005 final grep gate. Same principle applies to retired scripts/CI workflows in US-003.
-  - **build-ceph + run-strata still reference the retired `strata` service name** in the existing Makefile — these compose-bound targets MUST be swept whenever a service is renamed. Patterns to grep for when renaming compose services: `$(COMPOSE) up -d <name>`, `$(COMPOSE) build <name>`, `$(COMPOSE) ps <name>`. Easy to miss because make doesn't validate compose service names statically.
----
-
-## 2026-05-18 - US-003
-- Scripts + CI sweep — TiKV-default port shape + bench-rebalance-multi SHARDS=3 rework
-- Files changed:
-  - scripts/bench-rebalance-multi.sh (SHARDS=3 SKIP'd; SHARDS=2 baseline; default COMPOSE_CMD bare, RESTART_CONTAINERS strata-a/b)
-  - scripts/smoke-rebalance-scale.sh (defaults flipped; Scenarios B + D skip messages note retired 3-replica lab + P3 follow-up; SMOKE_FAILOVER_TARGET = strata-b)
-  - scripts/multi-replica-smoke.sh (header `make up`; ports 10001/10002; CT_A/B = strata-a/b)
-  - scripts/smoke-compose-collapse.sh (DELETED — superseded by US-005's smoke-tikv-default-lab.sh; the script's Scenario C tested the retired lab-cassandra-3 profile)
-  - Makefile (drop `smoke-compose-collapse` target + .PHONY entry)
-  - .github/workflows/ci-tikv.yml (drop e2e-tikv job — redundant since bare default IS TiKV; integration-tikv testcontainers job preserved)
-  - .github/workflows/ci.yml (e2e flipped to bare-default TiKV + LB :9999; e2e-full uses bare-default + --profile webhook-trap; e2e-ui-multi-replica uses `make up` not `make up-lab-tikv`; lint job renamed `Lint lab nginx config`; log-collection container names refreshed)
-  - ROADMAP.md (new P3 entry `Restore 3-replica TiKV bench (SHARDS=3 rebalance-multi)` under Developer experience)
-- Validation:
-  - go vet ./... green
-  - make build green (web-build + go build)
-  - make test green
-  - cd web && pnpm run build green
-  - make docs-build green (62 pages, 143 ms)
-  - YAML parse: python3 yaml.safe_load both workflows green
-  - bash -n on rewritten scripts green
-  - make -n smoke-compose-collapse → "No rule" (target retired)
-  - Grep gate on scripts + .github/workflows (excluding archive/progress/prd): zero matches for strata-tikv-[abc]|strata-cass-|strata-lb-nginx-cass|--profile lab-tikv|--profile lab-cassandra-3|--profile tikv
-- **Learnings for future iterations:**
-  - **YAML `name:` values with colons need quotes**: `name: Start stack (bare-default TiKV: pd + tikv + ceph)` → YAML parses the inner `:` as a mapping value separator and fails with "mapping values are not allowed here". Wrap with double quotes: `name: "Start stack (...: ...)"`. GH Actions strict-parses workflow YAML so even action.yml lint catches this; local validation via `python3 -c "import yaml; yaml.safe_load(open(...))"` is the 1-second sanity check.
-  - **`docker compose -f compose.yml up -d` (bare) brings up every no-profile service**: per US-001 the bare default is now pd, tikv, ceph, ceph-b, strata-a, strata-b, strata-lb-nginx, prometheus, grafana. Cassandra service moved under `--profile cassandra`, so any CI step previously running `up -d cassandra ceph strata` MUST flip strategy: either (a) target bare default + curl :9999 (LB) for TiKV path, or (b) use `--profile cassandra up -d` + curl :9998 (strata-cassandra) for Cassandra path. Mixing — `up -d cassandra ceph strata-a` — works but mixes backends and is confusing.
-  - **CI job names are documentation**: a stale name like `Lint lab-tikv nginx config` after the underlying file moved to `strata-lab.conf` (no `lab-tikv` reference anymore) trips operators on PR review. Sweep name fields whenever the underlying target shape changes; the grep gate catches stale `lab-tikv` substrings but doesn't differentiate intentional from stale.
-  - **`docker compose --profile X up -d` honors profile-gated services AS WELL AS profile-less services** — that's why `--profile webhook-trap up -d` in e2e-full brings up the whole bare default plus webhook-trap. No need to list services explicitly when you want full default plus the profile add-on.
-  - **smoke-rebalance-scale.sh Scenario B + D already had `REPLICAS < 3` skip-paths** that we leveraged for the 2-replica bare default. When parking a 3-replica feature, look for existing replica-count gates first — often the SKIP message just needs a refreshed reason string, not new control flow. Saved ~30 lines of conditional logic.
-  - **Bench script's SKIP message belongs at the END of the script**, not at the top, so the SHARDS=1 + SHARDS=2 baseline data still gets collected and printed BEFORE the SKIP narrative. Operators reading the output see real numbers first, then the explanation of why SHARDS=3 isn't there.
----
-
-## 2026-05-18 - US-004
-- Docs + README + CLAUDE.md sweep + new migration note
-- Files changed:
-  - README.md (Option 3 = bare-default TiKV 2-replica lab; new Option 4 = Cassandra-backed regression lab via `make up-cassandra`; web-console Option renumbered to Option 5)
-  - CLAUDE.md (Common commands table refreshed; Compose-shape paragraph rewritten for TiKV-default; arch diagram flipped — TiKV lab default, Cassandra under `--profile cassandra`)
-  - docs/site/content/architecture/backends/tikv.md (`Laptop / CI — single-node compose` → `Laptop / CI — bare-default 2-replica lab`; CI section refreshed)
-  - docs/site/content/architecture/backends/_index.md (TiKV lab default, Cassandra labeled first-class in code; new `Lab compose shape` subsection; first-class-in-code reassurance + migration note link)
-  - docs/site/content/best-practices/placement-rebalance.md (`Multi-leader scaling` subsection: lab-cassandra-3 + lab-tikv-3 narrative replaced by bare-default 2-replica TiKV shape; bench harness SHARDS=2 baseline / SHARDS=3 SKIP'd; Scenario B refreshed)
-  - docs/site/content/architecture/migrations/_index.md (link to new tikv-default-lab migration note)
-  - docs/site/content/architecture/migrations/tikv-default-lab.md (NEW — full migration note: what was removed table, bare-default + Cassandra-profile recipes, port-change warning, Makefile target breaking changes, compose-default rebalance cadence change, Cassandra first-class-in-code reassurance, 3-replica bench P3 follow-up)
-- Validation:
-  - go vet ./... green
-  - make build green (web build + go build clean)
-  - make test green (~12s data/s3 longest; all packages cached or pass)
-  - make docs-build green (63 pages, 129 ms; no dangling links)
-- **Learnings for future iterations:**
-  - **Cassandra backend has no dedicated `cassandra.md` doc** — Cassandra-specific content lives in `docs/site/content/architecture/backends/_index.md` (overview table) + `scylla.md` (CQL drop-in narrative). The `internal/meta/cassandra/**` code path is the authoritative reference; doc updates that reassure "Cassandra first-class in code" belong in `_index.md`'s overview, not a new `cassandra.md` (would fragment the backend index).
-  - **Migration note belongs in `docs/site/content/architecture/migrations/`** and MUST be linked from `_index.md` in the same commit — otherwise Hugo builds it as an orphan page (no nav entry, no breadcrumb). Pattern: add a bullet to `_index.md` matching the existing entries' shape (one-line hook with `{{< ref >}}` link).
-  - **CLAUDE.md ASCII arch diagram is right-padded by hand** — when editing the meta.Store / data.Backend legend or the backend boxes, count characters so the right-side borders line up. Misaligned borders trigger PR-review noise. Use the existing `+---...+` line as the column ruler.
-  - **Hugo `{{< ref "/architecture/migrations/<name>" >}}` shortcode** resolves against the Hugo content root; trailing slash optional. Always omit `.md`. Cross-page links inside the migrations folder use the same absolute-from-content-root path — never relative.
-  - **`make docs-build` is the 1-second dangling-link gate** for any docs change. It builds via `cd docs/site && hugo --minify` and emits page counts to stdout; non-zero exit on broken `{{< ref >}}` or missing front-matter. Run before commit on any docs touch.
-  - **Port-change warnings need an explicit before/after table** in migration notes — operators scanning for `:9999` semantic changes need the dual mapping ("Cassandra-backed was here, now there; TiKV-LB was nothing, now here") in one place, not prose. Saves a round of clarifying questions in operator chat.
----
-
-## 2026-05-18 - US-005
-- Smoke + ROADMAP add+close + PRD removal — closes the ralph/tikv-default-lab cycle
-- Files changed:
-  - scripts/smoke-tikv-default-lab.sh (NEW — four-scenario walkthrough harness)
-  - Makefile (new `smoke-tikv-default-lab` target + .PHONY entry)
-  - ROADMAP.md (add+close P3 "TiKV-default 2-replica lab" entry next to compose-collapse close-flip; existing `Restore 3-replica TiKV bench` parked follow-up was shipped via US-003)
-  - tasks/prd-tikv-default-lab.md (DELETED per CLAUDE.md PRD lifecycle rule)
-  - deploy/prometheus/prometheus.yml (scrape config flipped strata-tikv-{a,b} → strata-{a,b}; new strata-cassandra scrape job under profile label)
-  - docs/site/content/architecture/benchmarks/gc-lifecycle.md (`make up-lab-tikv` + `strata-tikv-{a,b}` container stops → `make up` + `strata-{a,b}`)
-  - docs/site/content/architecture/benchmarks/rebalance.md (Harness + Methodology + Caveats narratives flipped to bare-default 2-replica TiKV with SHARDS=2 fan-out; SHARDS=3 parked under P3 follow-up)
-  - docs/site/content/deploy/multi-replica.md (LB upstream + bring-up + failure-scenario rewritten for strata-{a,b}; `make up-lab-tikv` → `make up`)
-  - docs/site/content/deploy/docker-compose.md (Service map / Profiles / Env / Volumes / Production checklist full rewrite for TiKV-default + Cassandra-profile shape)
-  - web/e2e/multi-replica.spec.ts (NODE_ID_TO_CONTAINER identity-mapped strata-a/b → strata-a/b)
-- Smoke design — four scenarios with `==> Scenario X: ...` headers:
-  - A bare bring-up: docker ps service-set check (9 expected) + retired-absent check (7 disallowed names) + 20-req authenticated burst via :9999 → `docker logs strata-{a,b} --since` ≥5 each (LB round-robin proof) + 10-object PUT/GET md5 round-trip + drain cephb evacuate + wait deregister_ready (SMOKE_TDL_DRAIN_TIMEOUT_S default 300) + undrain restore
-  - B Cassandra-profile side-by-side: probe :9998/readyz → SKIP if absent; assert cassandra + strata-cassandra running; PUT 10 distinct buckets on each backend; assert metadata isolation (TiKV bucket NOT listed on Cassandra LB and vice versa)
-  - C single-cluster env-override: opt-in via SMOKE_TDL_SCENARIO_C=1; PUT/GET round-trip + strata-a logs lack `cluster=cephb` boot lines
-  - D residue grep gate: `git grep -E` over the cycle's retired-name patterns, exception set = scripts/ralph/archive + docs/site/public/resources + docs/site/content/architecture/migrations (narrative) + scripts/ralph/progress.txt + scripts/ralph/prd.json + scripts/smoke-tikv-default-lab.sh + ROADMAP.md
-- Quality gates:
-  - go vet ./... green
-  - make build green (web build + go build clean)
-  - make test green (all packages cached or pass)
-  - make docs-build green (63 pages, 143 ms)
-  - cd web && pnpm run build green
-  - make smoke-tikv-default-lab → exit 77 SKIP when lab not up (expected default behaviour; operator-driven smoke)
-  - grep gate locally: zero matches outside documented exception set
-- **Learnings for future iterations:**
-  - **The residue grep gate is the final cycle-closure check, and it catches misses upstream sweeps couldn't anticipate**: US-002/003/004 each swept their own surfaces (Makefile / scripts+CI / docs) but the grep gate found three more silent regressions (`deploy/prometheus/prometheus.yml` had stale `strata-tikv-{a,b}` scrape targets + `--profile lab-tikv` comment; `docs/site/content/architecture/benchmarks/{gc-lifecycle,rebalance}.md` referenced retired container/profile names; `docs/site/content/deploy/{docker-compose,multi-replica}.md` was unmaintained for 2 cycles; `web/e2e/multi-replica.spec.ts` had a NODE_ID_TO_CONTAINER mapping table that re-translated current names back to retired ones). Run a manual `git grep` for the patterns BEFORE the final story to fold the fixes into the right cycle.
-  - **Migration notes are legitimate residue exception** — `docs/site/content/architecture/migrations/<name>.md` is operator-facing narrative documenting what was retired. It names retired containers and profiles by design. Adding that path to the smoke's git-pathspec exclusion list (`':!docs/site/content/architecture/migrations'`) is correct; without it the grep gate fails on a doc that's supposed to mention `strata-tikv-c` etc.
-  - **`git grep` exit code is 1 on zero matches** (per grep convention), not 0. Capturing matches via `HITS="$(git grep ... || true)"` then checking `-n "$HITS"` is the safe shape — naïve `git grep ... && fail` triggers fail on zero matches (the success state we want). The smoke script's residue gate uses the capture-then-check pattern.
-  - **`docker logs --since` accepts a relative duration string like `30s`** — not a Unix timestamp. The smoke captures `BURST_START="$(date +%s)"` before the 20-req burst, then computes `SINCE="$(( NOW - BURST_START + 5 ))s"` (note trailing `s`) so the duration is always slightly larger than the burst window. Without the `+ 5` buffer, fast bursts (<2s) round down to `0s` which means "everything ever" — defeats the bounded-window filter.
-  - **Round-robin LB proof via authenticated GETs against `/admin/v1/clusters` rather than `/readyz`**: `/readyz` bypasses the auth middleware AND the access-log middleware in the strata stack. To prove the LB is round-robining + to make per-replica log lines countable, hit an authenticated path. The cookie jar from `login` carries through 20 sequential curl calls; nginx least_conn routes each request to whichever replica has the lower connection count — over 20 requests, expect ~10/10 with worst-case 5/15. Assert `>= 5` per replica.
-  - **CLAUDE.md PRD lifecycle rule means deleting `tasks/prd-<name>.md` in the closing commit** — NOT moving to `tasks/archive/`. The Ralph snapshot at `scripts/ralph/archive/<date>-<branch>/` (auto-created by `archive_cycle` in ralph.sh) is the canonical record. `tasks/archive/` is reserved for design intent without a Ralph snapshot (pre-`archive_cycle` legacy or work folded into another cycle).
-  - **`docker ps --format '{{.Names}}' | grep -qx '<name>'` is the precise container-presence check** — `-qx` requires whole-line match so `strata-a` doesn't fuzzy-match `strata-a-foo`. Counterintuitively `grep -F` does NOT anchor; use `-x` for line-anchored exact match. Hits this pattern in two places: assert expected containers running + assert retired containers absent.
-  - **Scenario opt-in via env (SMOKE_TDL_SCENARIO_C=1)** for scenarios that need a lab-shape mutation: the smoke shouldn't reshape the lab itself (per existing harness convention — operator brings up, smoke probes). Document the env in the script header AND the SKIP message body so an operator running the smoke and seeing "SKIP: C" immediately knows how to opt-in.
-  - **Cycle-end discipline pattern**: in the final story, run `git grep` for the cycle's retired-name patterns BEFORE writing the smoke script. The hits inform which files still need updating; they reveal upstream-cycle misses. Treating the grep gate as a write-time gate (run it, fix the matches, then write the smoke that automates the same check) consolidates the sweep with zero loop-back.
----
