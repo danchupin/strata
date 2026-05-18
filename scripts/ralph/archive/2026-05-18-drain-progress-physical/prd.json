@@ -1,0 +1,78 @@
+{
+  "project": "Strata",
+  "branchName": "ralph/drain-progress-physical",
+  "description": "Drain progress UI surfaces physical chunks (not manifest count). Closes ROADMAP P3 'Drain progress UI shows manifest counts instead of physical chunks'. Adds a new optional `ClusterObjectCountProbe` interface (separate from existing `ClusterStatsProbe`; signature unchanged); RADOS sums per-pool `GetPoolStats().Num_objects` via ioctx loop (reuses existing DataHealth path). New 10s TTL in-process cache `ClusterStatsCache` absorbs per-poll probe cost. `/admin/v1/clusters/{id}/drain-progress` gains 3 additive fields: `physical_chunks_on_cluster *int64`, `physical_bytes_on_cluster *int64`, `gc_queue_pending int`. UI `<DrainProgressBar>` 3-state machine: Migrating / Awaiting GC cleanup / Ready to deregister. Null physical → fallback to manifest count + tooltip. ETA is static tooltip; precise per-deploy ETA parked as P3 follow-up. Smoke harness uses `STRATA_REBALANCE_RATE_MB_S=1` + `STRATA_GC_GRACE=60s` + 300 chunks to reliably observe all 3 states. 3 stories.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "ClusterObjectCount probe + 10s cache + /drain-progress response extension",
+      "description": "As a developer, I need a new probe method that returns per-cluster object count, cached briefly to absorb poll cost, plus three new additive fields on the drain-progress endpoint.",
+      "acceptanceCriteria": [
+        "New interface in `internal/data/backend.go`: `type ClusterObjectCountProbe interface { ClusterObjectCount(ctx context.Context, clusterID string) (int64, error) }`. Defined next to existing `ClusterStatsProbe`. Document that implementation is optional; admin handlers type-assert.",
+        "`internal/data/rados/health.go::Backend.ClusterObjectCount` implementation iterates the existing `b.classes` map, filters by `clusterID`, opens an ioctx per (cluster, pool, ns) tuple, calls `ioctx.GetPoolStats()`, and sums `stat.Num_objects` across pools. Reuses the same path already used by `DataHealth`. Returns `(0, err)` on any per-pool error (does NOT silently zero-fill on failure)",
+        "`ClusterStats` signature UNCHANGED — keeps `(usedBytes, totalBytes int64, err error)`. Existing rebalance worker target-full check call site untouched",
+        "New cache `internal/data/placement/clusterstats_cache.go` (or similar location next to `draincache.go`): `ClusterStatsCache` with `TTL: 10 * time.Second` (constant; not configurable in this cycle), `Get(clusterID) (bytes, objects int64, ok bool)`, `Set(clusterID, bytes, objects int64)`. Concurrency-safe (sync.RWMutex). Lazy refresh: `/drain-progress` builder calls `Get` first; on miss or expired entry, calls `ClusterStats` + `ClusterObjectCount` once, calls `Set`, returns fresh values",
+        "Cache invalidation: ONLY by TTL expiration. No admin endpoint or event invalidates it (no need — drain/undrain doesn't change the underlying `ceph df` payload)",
+        "`internal/s3api/admin_clusters.go::buildDrainProgressResponse` (or wherever `/drain-progress` is assembled) gains three new fields in the response payload: `physical_chunks_on_cluster *int64` (null when backend doesn't implement `ClusterObjectCountProbe`), `physical_bytes_on_cluster *int64` (null when backend doesn't implement `ClusterStatsProbe`), `gc_queue_pending int` (explicit counter; length of `ListChunkDeletionsByCluster(cluster)`)",
+        "Existing fields (`chunks_on_cluster`, `bytes_on_cluster`, `not_ready_reasons`, `deregister_ready`) preserved verbatim — wire shape strictly additive",
+        "New counter `strata_drain_progress_probe_errors_total{cluster, probe}` (label `probe` ∈ `{stats, object_count}`) increments on probe error. The response still succeeds with `null` physical fields for that poll (cache fallback if available, otherwise null)",
+        "Unit test: cache TTL behavior — Set + Get within TTL returns ok=true; after TTL returns ok=false",
+        "Unit test: drain-progress builder with mock probe returning known objectCount → asserts physical fields populated",
+        "Unit test: drain-progress builder when type assertion fails (memory backend) → asserts physical fields are JSON null",
+        "Unit test: probe error → counter incremented + null returned (no panic)",
+        "Integration test against memory backend: `/drain-progress` returns physical fields as null with valid JSON shape",
+        "`go vet ./...` passes",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Landed. Probe interface + RADOS impl + 10s cache + 3 additive response fields + counter all wired. 10 unit tests passing (6 cache TTL behavior + 4 drain-progress builder)."
+    },
+    {
+      "id": "US-002",
+      "title": "<DrainProgressBar> 3-state machine + collapsible detail + back-compat null fallback",
+      "description": "As an operator, I want the drain-progress UI to reflect physical pool state primary so I'm not confused by the manifest/physical split during the GC-grace window.",
+      "acceptanceCriteria": [
+        "`<DrainProgressBar>` reads `physical_chunks_on_cluster` from the `/drain-progress` response. The headline primary metric is `physical_chunks_on_cluster` when non-null, else `chunks_on_cluster` (existing manifest count) when null",
+        "When physical is null, a small `(physical count unavailable on this backend)` tooltip renders next to the headline. No special transient state, no probe-error-retrying — null is null regardless of cause",
+        "Three explicit primary states rendered: **Migrating** (red/amber chip): `primary > 0 && chunks_on_cluster > 0` → `Migrating: X chunks remaining` where X = primary. **Awaiting GC cleanup** (amber chip): `primary > 0 && chunks_on_cluster == 0` → `Awaiting GC cleanup: X chunks awaiting physical delete`; static tooltip below the count: `Physical delete completes after STRATA_GC_GRACE elapses (~5m default) plus the next gc worker tick.`. **Ready to deregister** (green chip): existing `deregister_ready` flow",
+        "Collapsible detail below the primary metric (`<details>` element OR shadcn `<Accordion>` if already used in the codebase): shows `Manifest chunks: X`, `GC queue: Y`, `Physical bytes: Z B` (formatted humanely via existing byte-formatter helper). Hidden by default. On backends with null physical, `Physical bytes` row reads `unavailable`",
+        "No precise ETA computation in this cycle — tooltip text only describes the wait reason",
+        "When `physical_chunks_on_cluster` is null AND backend was expected to support it: NO special UI handling — same fallback as for unsupported backends",
+        "Playwright spec extends `web/e2e/drain-transparency.spec.ts` (or new `web/e2e/drain-progress.spec.ts`): mocks three `/drain-progress` responses corresponding to the three states; asserts correct copy + collapsible detail content + chip color + tooltip text",
+        "Playwright spec ALSO covers the null-physical case: mock response with `physical_chunks_on_cluster: null` → asserts manifest count as primary + `(physical count unavailable on this backend)` tooltip",
+        "Verify in browser via the dev workflow: drain cephb in lab, observe transition through all three states",
+        "`pnpm run build` succeeds",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "Landed. ClusterDrainProgress extended with physical_chunks_on_cluster / physical_bytes_on_cluster / gc_queue_pending fields. <DrainProgressBar> renders 3 explicit states: Migrating (existing render now uses primary=physical?? manifest in headline 'Migrating: X chunks remaining'), Awaiting GC cleanup (new amber chip with STRATA_GC_GRACE tooltip when manifest==0 && physical>0), Ready to deregister (existing flow). Collapsible <details data-testid=dp-detail> with Manifest / GC queue / Physical bytes rows. Null-physical fallback renders italic '(physical count unavailable on this backend)' tooltip; Detail bytes row reads 'unavailable'. New web/e2e/drain-progress.spec.ts with 4 scenarios (Migrating / AwaitingGC / Ready / null-physical). pnpm run build + typecheck + test:unit (57 tests) + go vet + adminapi tests all green. Browser verification needs a live lab drain (no rebalance worker in memory mode)."
+    },
+    {
+      "id": "US-003",
+      "title": "Throttled smoke harness + docs + ROADMAP close-flip + PRD removal",
+      "description": "As an operator and as a future-maintainer, I need a smoke harness that reliably observes all three drain states, plus documented migration and the ROADMAP entry flipped.",
+      "acceptanceCriteria": [
+        "New `scripts/smoke-drain-progress-ui.sh` script: configure the strata container with `STRATA_REBALANCE_RATE_MB_S=1` (slow rebalance so migration phase is wide enough to sample) and `STRATA_GC_GRACE=60s` (shorten the grace so the test runs in under 5 min). Document why these env values are smoke-only",
+        "Smoke steps: plant 300 objects on cephb via PUT with `Placement={default:1, cephb:1}` mode=weighted, ~1 MB each → 300 chunks. Drain cephb evacuate. Poll `/drain-progress` every 3 s (faster than the UI 5 s)",
+        "Assert at least one poll observes state Migrating: `physical_chunks_on_cluster > 0 && chunks_on_cluster > 0`",
+        "Assert at least one poll observes state Awaiting GC: `physical_chunks_on_cluster > 0 && chunks_on_cluster == 0 && gc_queue_pending > 0`",
+        "Assert eventual final poll observes Ready: `physical_chunks_on_cluster == 0 && chunks_on_cluster == 0 && gc_queue_pending == 0 && deregister_ready == true`",
+        "Total timeout: 5 min; script EXITS non-zero on timeout or if a state is never observed",
+        "`make smoke-drain-progress-ui` Makefile target wraps the script; exits non-zero on any failure",
+        "`docs/site/content/best-practices/placement-rebalance.md` `Drain lifecycle` subsection updated: documents the three drain-progress states (Migrating / Awaiting GC / Ready), the static ETA tooltip, the physical-vs-manifest distinction, and the back-compat fallback for backends without `ClusterObjectCountProbe`",
+        "Migration note `docs/site/content/architecture/migrations/drain-progress-physical.md` (new) documents: the new `physical_*` fields on `/drain-progress`, the wire-shape additivity, the `chunks_on_cluster` semantic shift (still primary on backends without physical probe), and references to the new probe interface. Linked from `docs/site/content/architecture/migrations/_index.md`",
+        "`ROADMAP.md` close-flip the P3 entry → `~~**P3 — Drain progress UI shows manifest counts instead of physical chunks.**~~ — **Done.** <one-line summary referencing the new ClusterObjectCountProbe + cache + 3-state UI + smoke harness>. (commit \\`<pending>\\`)`; closing SHA backfilled on main",
+        "Add new P3 ROADMAP entry **`Precise drain-progress ETA from gateway GC tunables`** as a parked follow-up — operator-tunable ETA computation requires a new `/admin/v1/gc-config` endpoint + an ETA formula `eta_min = grace_min + ceil(gc_queue / (batch_size × shards) × interval_min)`; deferred until operator demand justifies the work",
+        "`tasks/prd-drain-progress-physical.md` REMOVED in the same commit (CLAUDE.md PRD lifecycle rule)",
+        "`make docs-build`, `make vet`, `make test`, `pnpm run build`, `make smoke-drain-progress-ui` all green",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "Landed. scripts/smoke-drain-progress-ui.sh recreates strata with STRATA_REBALANCE_RATE_MB_S=1 + STRATA_GC_GRACE=60s, seeds 300 ~1 MB objects on split bucket, drains cephb evacuate, polls /drain-progress every 3 s for 5 min, asserts Migrating + AwaitingGC + Ready all observed; restores prod env on exit; SKIP exit 77 when lab unreachable. make smoke-drain-progress-ui wraps it. docs/site/content/best-practices/placement-rebalance.md gained 'Drain progress states — physical vs manifest' subsection between state-aware action buttons and cache invalidation contract. New docs/site/content/architecture/migrations/drain-progress-physical.md migration note linked from _index.md. ROADMAP close-flipped the P3 'Drain progress UI shows manifest counts' entry (commit pending) + added new P3 'Precise drain-progress ETA from gateway GC tunables' parked follow-up. tasks/prd-drain-progress-physical.md removed per CLAUDE.md PRD lifecycle. make docs-build + make vet + make test + make build + make web-typecheck all green; smoke skips cleanly without lab."
+    }
+  ]
+}
