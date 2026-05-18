@@ -2,14 +2,15 @@
 # Multi-replica lab smoke harness (US-005).
 #
 # Drives the three failure scenarios end-to-end against a stack brought up
-# by `make up-lab-tikv`:
+# by bare `docker compose up -d` (TiKV-default 2-replica lab, strata-a +
+# strata-b behind nginx LB on :9999):
 #   (a) baseline: 2 healthy nodes, exactly one lifecycle-leader + one gc-leader chip
-#   (b) docker stop strata-tikv-a -> sleep 35 -> single survivor carries BOTH chips
-#   (c) docker start strata-tikv-a -> sleep 30 -> 2 healthy again
-#   (d) PUT via replica-a (9001), GET via replica-b (9002), byte-equal payload
+#   (b) docker stop strata-a -> sleep 35 -> single survivor carries BOTH chips
+#   (c) docker start strata-a -> sleep 30 -> 2 healthy again
+#   (d) PUT via replica-a (10001), GET via replica-b (10002), byte-equal payload
 #   (e) kill the lifecycle-leader holder -> wait 35s -> chip rotates to the OTHER replica
 #
-# Prereqs on the host: docker, curl, jq, aws (>= 2). Compose lab-tikv profile up.
+# Prereqs on the host: docker, curl, jq, aws (>= 2). Bare-default compose up.
 # STRATA_STATIC_CREDENTIALS exported with the same value the gateway booted with
 # (script parses its first comma-separated entry as access:secret[:owner]).
 #
@@ -18,10 +19,10 @@
 set -euo pipefail
 
 LB="${LB:-http://127.0.0.1:9999}"
-A="${A:-http://127.0.0.1:9001}"
-B="${B:-http://127.0.0.1:9002}"
-CT_A="${CT_A:-strata-tikv-a}"
-CT_B="${CT_B:-strata-tikv-b}"
+A="${A:-http://127.0.0.1:10001}"
+B="${B:-http://127.0.0.1:10002}"
+CT_A="${CT_A:-strata-a}"
+CT_B="${CT_B:-strata-b}"
 
 # Heartbeat TTL is 30s; the chip-rotation grace is +5s to absorb the next
 # lease renew tick on the surviving replica.

@@ -250,6 +250,18 @@ adding more, prove what is there.
   by wrapping the import in a default-on tag file, or pinning it as an explicit `require`.
 - **P3 — `make dev` for one-command developer cluster.** Single command that bootstraps
   Cassandra + Ceph + the consolidated `strata` binary and streams logs.
+- **P3 — Restore 3-replica TiKV bench (SHARDS=3 rebalance-multi).** Cycle
+  `ralph/tikv-default-lab` retired the `lab-tikv-3` profile (3rd replica
+  `strata-tikv-c`) and parked `scripts/bench-rebalance-multi.sh` at the
+  SHARDS=1 + SHARDS=2 baseline pair with an explicit `SKIP` for SHARDS=3.
+  `scripts/smoke-rebalance-scale.sh` Scenarios B + D likewise skip in the
+  2-replica bare default. Either spin a third replica via `docker compose
+  run --rm -p 10003:9000 -e STRATA_NODE_ID=strata-c
+  -e STRATA_WORKERS=gc,lifecycle,rebalance strata-a` from the bench harness
+  itself (auto-teardown after), or restore a dedicated overlay
+  `deploy/docker/docker-compose.lab-tikv-3.yml` gated by an opt-in flag, and
+  re-enable the SHARDS=3 leg in `scripts/bench-rebalance-multi.sh` +
+  Scenarios B + D in `scripts/smoke-rebalance-scale.sh`.
 - **P3 — Architecture decision records.** Move the design notes captured below into
   `docs/adr/` once external contributions start.
 - ~~**P2 — Full project documentation site (GitHub Pages).**~~ — **Done.** Hugo site under `docs/site/` (CockroachDB-shape sectioned tree: landing, Get Started, Deploy, Architecture, Best Practices, S3 Compatibility, Reference, Developers), `make docs-serve` / `make docs-build`, GitHub Action `.github/workflows/docs.yml` publishes to `gh-pages` on every merge to main, README banner links to `https://danchupin.github.io/strata/`. (commit `c497a66`)

@@ -8,7 +8,7 @@ COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 	smoke smoke-signed smoke-grafana smoke-lab-tikv \
 	smoke-drain-lifecycle smoke-drain-transparency smoke-drain-progress-ui smoke-cluster-weights \
 	smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale \
-	smoke-compose-collapse smoke-single-binary \
+	smoke-single-binary \
 	race-soak race-soak-tikv lint-nginx-lab \
 	bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi \
 	docs-serve docs-build clean
@@ -318,21 +318,6 @@ smoke-rebalance-scale:
 # exits 2, no `strata-admin` residue in scoped trees.
 smoke-single-binary:
 	bash scripts/smoke-single-binary.sh
-
-# Compose-collapse end-to-end smoke (US-004 of
-# ralph/compose-profile-isolation). Walks four scenarios — bare bring-up
-# (A), single-cluster env-override visibility (B), Cassandra-profile
-# side-by-side (C), residue grep gate (D) — against the docker-compose
-# stack. Closes ROADMAP P2 "Compose default + multi-cluster profiles race
-# for worker leases on shared Cassandra". Scenarios A + B require the bare
-# `docker compose up -d` stack reachable on :9999; Scenario C additionally
-# requires `make up-cassandra`; Scenario D (grep) always runs. Skips
-# with exit 77 when the lab is not reachable; set REQUIRE_LAB=1 to convert
-# the skip into a hard fail. See scripts/smoke-compose-collapse.sh for env
-# knobs (BASE, LB_BASE, CASSANDRA_CONTAINER, KEYSPACE, GATEWAY_CONTAINER,
-# CLUSTER_DRAIN, CLUSTER_OTHER, DRAIN_TIMEOUT_S, WAIT_GRACE).
-smoke-compose-collapse:
-	bash scripts/smoke-compose-collapse.sh
 
 # Race-soak driver (US-006). Brings up the Cassandra-backed stack
 # (`make up-all-ci` when CI=true, else `make up-cassandra`), waits for

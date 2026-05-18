@@ -3,31 +3,33 @@
 #
 # Measures wall-clock-to-drain for a TiKV-backed lab with the rebalance worker
 # fan-out (STRATA_REBALANCE_SHARDS) flipped between 1 (baseline = Phase 1
-# behaviour) and 3 (3-replica multi-leader). Prints both timings, the ratio,
-# and a verdict — `SPEEDUP_OK` if SHARDS=3 ≤ 40 % of SHARDS=1 (>=2.5x), or
-# `SPEEDUP_FAILED` if SHARDS=3 > 70 % of SHARDS=1 (regression guard => exit 1).
+# behaviour) and 2 (2-replica multi-leader, the new bare-default lab shape).
+# Prints both timings, the ratio, and a verdict — `SPEEDUP_OK` if SHARDS=2
+# ≤ 40 % of SHARDS=1 (>=2.5x), or `SPEEDUP_FAILED` if SHARDS=2 > 70 % of
+# SHARDS=1 (regression guard => exit 1).
+#
+# SHARDS=3 explicitly SKIP'd: cycle `ralph/tikv-default-lab` flipped the
+# bare default to 2 replicas (strata-a/b); the 3-replica bench is parked as a
+# P3 ROADMAP follow-up `Restore 3-replica TiKV bench (SHARDS=3 rebalance-
+# multi)`. Operators needing SHARDS=3 numbers spin a one-off third replica
+# via `docker compose run --rm -p 10003:9000 -e STRATA_NODE_ID=strata-c
+# -e STRATA_WORKERS=gc,lifecycle,rebalance strata-a` for the bench duration.
 #
 # The script does NOT bring up the lab. Operator stands the stack up with:
 #
 #   STRATA_REBALANCE_SHARDS=1 STRATA_WORKERS=gc,lifecycle,rebalance \
-#     docker compose --profile lab-tikv --profile lab-tikv-3 \
-#       -f deploy/docker/docker-compose.yml \
-#       -f deploy/docker/docker-compose.lab-tikv-3-multi.yml \
-#       up -d
+#     docker compose -f deploy/docker/docker-compose.yml up -d
 #
-# (the lab-tikv-3-multi overlay carries the per-replica STRATA_RADOS_CLUSTERS
-# + ceph-a/ceph-b volume mounts; operator-maintained because the overlay is
-# bench-specific. The bare `strata` service — multi-cluster default at
-# :9999 — stays running alongside via `docker compose up -d`.) The
-# script then orchestrates two passes via
-# `BENCH_RESTART_HOOK` (default: docker compose force-recreate of the three
-# strata-tikv-{a,b,c} replicas) with STRATA_REBALANCE_SHARDS exported between
-# runs. Override BENCH_RESTART_HOOK if your lab uses a different restart
-# recipe (k8s rollout, bare-metal systemctl, etc.).
+# (bare-default = TiKV multi-cluster strata-a + strata-b behind nginx LB on
+# :9999.) The script then orchestrates two passes via `BENCH_RESTART_HOOK`
+# (default: docker compose force-recreate of the strata-a/b replicas) with
+# STRATA_REBALANCE_SHARDS exported between runs. Override BENCH_RESTART_HOOK
+# if your lab uses a different restart recipe (k8s rollout, bare-metal
+# systemctl, etc.).
 #
 # Pre-reqs on the host: docker, curl, jq, aws (>=2). The lab gateway must be
 # reachable on $BASE (default http://127.0.0.1:9999 — nginx LB port for the
-# lab-tikv profile). STRATA_STATIC_CREDENTIALS exported with the same value
+# bare-default lab). STRATA_STATIC_CREDENTIALS exported with the same value
 # the gateway booted with (first comma-separated entry is used for admin
 # login + SigV4 puts).
 #
@@ -50,14 +52,14 @@ BENCH_OBJECT_SIZE_KB="${BENCH_OBJECT_SIZE_KB:-32}"
 BENCH_DRAIN_TIMEOUT_S="${BENCH_DRAIN_TIMEOUT_S:-1800}"
 BENCH_POLL_INTERVAL_S="${BENCH_POLL_INTERVAL_S:-5}"
 BENCH_SHARDS_BASELINE="${BENCH_SHARDS_BASELINE:-1}"
-BENCH_SHARDS_FANOUT="${BENCH_SHARDS_FANOUT:-3}"
+BENCH_SHARDS_FANOUT="${BENCH_SHARDS_FANOUT:-2}"
 BENCH_SPEEDUP_TARGET_PCT="${BENCH_SPEEDUP_TARGET_PCT:-40}"
 BENCH_REGRESSION_PCT="${BENCH_REGRESSION_PCT:-70}"
 BENCH_RESULTS_FILE="${BENCH_RESULTS_FILE:-bench-rebalance-multi-results.jsonl}"
 
 COMPOSE_FILE="${COMPOSE_FILE:-deploy/docker/docker-compose.yml}"
-COMPOSE_CMD="${COMPOSE_CMD:-docker compose -f $COMPOSE_FILE --profile lab-tikv --profile lab-tikv-3}"
-RESTART_CONTAINERS="${RESTART_CONTAINERS:-strata-tikv-a strata-tikv-b strata-tikv-c}"
+COMPOSE_CMD="${COMPOSE_CMD:-docker compose -f $COMPOSE_FILE}"
+RESTART_CONTAINERS="${RESTART_CONTAINERS:-strata-a strata-b}"
 
 # BENCH_RESTART_HOOK is the bash command that restarts the strata replicas
 # with the SHARDS env baked into the container env. Default is a force-
@@ -122,7 +124,7 @@ if ! probe_ready; then
     fail "$msg (REQUIRE_LAB=1)"
   fi
   echo "SKIP: $msg" >&2
-  echo "SKIP: bring up lab-tikv-3 + multi-cluster (see header for compose recipe) and re-run." >&2
+  echo "SKIP: bring up bare-default TiKV lab via 'docker compose up -d' (see header for recipe) and re-run." >&2
   exit 77
 fi
 
@@ -302,20 +304,22 @@ note "results JSONL: $BENCH_RESULTS_FILE"
 
 # Capture each pass's wall-clock from the printed JSONL line.
 T1=$(run_drain_pass "$BENCH_SHARDS_BASELINE" | tail -n 1)
-T3=$(run_drain_pass "$BENCH_SHARDS_FANOUT"   | tail -n 1)
+T2=$(run_drain_pass "$BENCH_SHARDS_FANOUT"   | tail -n 1)
 
 if ! [[ "$T1" =~ ^[0-9]+$ ]]; then fail "could not parse baseline elapsed: '$T1'"; fi
-if ! [[ "$T3" =~ ^[0-9]+$ ]]; then fail "could not parse fanout   elapsed: '$T3'"; fi
+if ! [[ "$T2" =~ ^[0-9]+$ ]]; then fail "could not parse fanout   elapsed: '$T2'"; fi
 
-# Ratio = T3 / T1, expressed as integer percent (rounded).
-RATIO_PCT=$(( T3 * 100 / (T1 == 0 ? 1 : T1) ))
+# Ratio = T2 / T1, expressed as integer percent (rounded).
+RATIO_PCT=$(( T2 * 100 / (T1 == 0 ? 1 : T1) ))
 
 echo
 echo "== Summary"
 printf "  shards=%d  elapsed=%ds\n" "$BENCH_SHARDS_BASELINE" "$T1"
-printf "  shards=%d  elapsed=%ds\n" "$BENCH_SHARDS_FANOUT"   "$T3"
+printf "  shards=%d  elapsed=%ds\n" "$BENCH_SHARDS_FANOUT"   "$T2"
 printf "  ratio    = %d %% (target ≤%d %%, regression >%d %%)\n" \
   "$RATIO_PCT" "$BENCH_SPEEDUP_TARGET_PCT" "$BENCH_REGRESSION_PCT"
+
+echo "SKIP: lab-tikv-3 retired in ralph/tikv-default-lab cycle; SHARDS=3 bench parked as P3 follow-up"
 
 if (( RATIO_PCT <= BENCH_SPEEDUP_TARGET_PCT )); then
   echo "VERDICT: SPEEDUP_OK"

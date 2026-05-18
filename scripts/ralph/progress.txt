@@ -21,6 +21,9 @@ Cycle: ralph/tikv-default-lab
 - **Reference for nginx LB**: existing `deploy/nginx/strata-lab.conf` (used by retired `strata-lb-nginx` under `lab-tikv` profile). US-001 updates upstream block: `strata-tikv-a/b:9000` → `strata-a/b:9000`.
 - **Reference for new strata-cassandra service shape**: mirror env of new strata-a (multi-cluster, admin creds preset) but with `STRATA_META_BACKEND=cassandra` + `STRATA_CASSANDRA_HOSTS=cassandra:9042`. Single replica, port 9998.
 - **End-to-end discipline** (per `feedback_cycle_end_to_end.md`): walkthrough covers happy path (bare bring-up + drain cephb evacuate) + edge cases (Cassandra side-by-side via profile, single-cluster env override, retired profile silent no-op, 3-replica bench skip-or-execute) + worst-case (operator muscle memory of `--profile lab-tikv`, curl scripts on :9999 expecting Cassandra, CI workflow `wait-cassandra` regression, gateway restart mid-test, 3-replica HA need, bench-rebalance-multi compatibility). State Truth Tables: compose service start matrix + port allocation. Cache Invalidation Ledger: no new caches. Safety Claims Preconditions: Cassandra meta first-class preserved, lab compose flip doesn't break prod, multi-cluster behavior parity preserved, round-robin LB exercises stateless gateway invariants.
+- **CI workflow YAML strings with colons need quotes**: `name: Start stack (X: Y)` parses the inner `:` as a mapping value separator and fails GH Actions parse. Wrap with double quotes. Run `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/*.yml'))"` as a 1-second pre-commit check.
+- **Bare `docker compose up -d` is enough for full default stack** (post-US-001) — explicit service lists are anti-patterns when you want every no-profile service. `--profile X up -d` adds profile-gated services to that default; still no need to list services unless you want a subset.
+- **Replica-count gates already exist in smoke/bench scripts**: `if (( REPLICAS < 3 )); then skipped` patterns let parking a 3-replica scenario refresh the SKIP reason string instead of writing new control flow. Always check for existing skip-paths before adding parallel scaffolding.
 
 
 ## 2026-05-18 - US-001
@@ -90,4 +93,34 @@ Cycle: ralph/tikv-default-lab
   - **`make -n <target>` is the contract-level lint** for Makefile changes: dry-runs the target without executing, surfaces unknown targets ("No rule to make target") and substitution errors. Run before any go vet / make build to catch typos in PHONY rewrites.
   - **Orphan files trigger US-005 grep gate failures**: when dropping a Makefile target that references a config file (like lint-nginx-lab-cassandra → strata-lab-cassandra.conf), delete the config file in the same commit. Otherwise the file lingers with `strata-cass-` / `strata-lb-nginx-cass` strings and fails the US-005 final grep gate. Same principle applies to retired scripts/CI workflows in US-003.
   - **build-ceph + run-strata still reference the retired `strata` service name** in the existing Makefile — these compose-bound targets MUST be swept whenever a service is renamed. Patterns to grep for when renaming compose services: `$(COMPOSE) up -d <name>`, `$(COMPOSE) build <name>`, `$(COMPOSE) ps <name>`. Easy to miss because make doesn't validate compose service names statically.
+---
+
+## 2026-05-18 - US-003
+- Scripts + CI sweep — TiKV-default port shape + bench-rebalance-multi SHARDS=3 rework
+- Files changed:
+  - scripts/bench-rebalance-multi.sh (SHARDS=3 SKIP'd; SHARDS=2 baseline; default COMPOSE_CMD bare, RESTART_CONTAINERS strata-a/b)
+  - scripts/smoke-rebalance-scale.sh (defaults flipped; Scenarios B + D skip messages note retired 3-replica lab + P3 follow-up; SMOKE_FAILOVER_TARGET = strata-b)
+  - scripts/multi-replica-smoke.sh (header `make up`; ports 10001/10002; CT_A/B = strata-a/b)
+  - scripts/smoke-compose-collapse.sh (DELETED — superseded by US-005's smoke-tikv-default-lab.sh; the script's Scenario C tested the retired lab-cassandra-3 profile)
+  - Makefile (drop `smoke-compose-collapse` target + .PHONY entry)
+  - .github/workflows/ci-tikv.yml (drop e2e-tikv job — redundant since bare default IS TiKV; integration-tikv testcontainers job preserved)
+  - .github/workflows/ci.yml (e2e flipped to bare-default TiKV + LB :9999; e2e-full uses bare-default + --profile webhook-trap; e2e-ui-multi-replica uses `make up` not `make up-lab-tikv`; lint job renamed `Lint lab nginx config`; log-collection container names refreshed)
+  - ROADMAP.md (new P3 entry `Restore 3-replica TiKV bench (SHARDS=3 rebalance-multi)` under Developer experience)
+- Validation:
+  - go vet ./... green
+  - make build green (web-build + go build)
+  - make test green
+  - cd web && pnpm run build green
+  - make docs-build green (62 pages, 143 ms)
+  - YAML parse: python3 yaml.safe_load both workflows green
+  - bash -n on rewritten scripts green
+  - make -n smoke-compose-collapse → "No rule" (target retired)
+  - Grep gate on scripts + .github/workflows (excluding archive/progress/prd): zero matches for strata-tikv-[abc]|strata-cass-|strata-lb-nginx-cass|--profile lab-tikv|--profile lab-cassandra-3|--profile tikv
+- **Learnings for future iterations:**
+  - **YAML `name:` values with colons need quotes**: `name: Start stack (bare-default TiKV: pd + tikv + ceph)` → YAML parses the inner `:` as a mapping value separator and fails with "mapping values are not allowed here". Wrap with double quotes: `name: "Start stack (...: ...)"`. GH Actions strict-parses workflow YAML so even action.yml lint catches this; local validation via `python3 -c "import yaml; yaml.safe_load(open(...))"` is the 1-second sanity check.
+  - **`docker compose -f compose.yml up -d` (bare) brings up every no-profile service**: per US-001 the bare default is now pd, tikv, ceph, ceph-b, strata-a, strata-b, strata-lb-nginx, prometheus, grafana. Cassandra service moved under `--profile cassandra`, so any CI step previously running `up -d cassandra ceph strata` MUST flip strategy: either (a) target bare default + curl :9999 (LB) for TiKV path, or (b) use `--profile cassandra up -d` + curl :9998 (strata-cassandra) for Cassandra path. Mixing — `up -d cassandra ceph strata-a` — works but mixes backends and is confusing.
+  - **CI job names are documentation**: a stale name like `Lint lab-tikv nginx config` after the underlying file moved to `strata-lab.conf` (no `lab-tikv` reference anymore) trips operators on PR review. Sweep name fields whenever the underlying target shape changes; the grep gate catches stale `lab-tikv` substrings but doesn't differentiate intentional from stale.
+  - **`docker compose --profile X up -d` honors profile-gated services AS WELL AS profile-less services** — that's why `--profile webhook-trap up -d` in e2e-full brings up the whole bare default plus webhook-trap. No need to list services explicitly when you want full default plus the profile add-on.
+  - **smoke-rebalance-scale.sh Scenario B + D already had `REPLICAS < 3` skip-paths** that we leveraged for the 2-replica bare default. When parking a 3-replica feature, look for existing replica-count gates first — often the SKIP message just needs a refreshed reason string, not new control flow. Saved ~30 lines of conditional logic.
+  - **Bench script's SKIP message belongs at the END of the script**, not at the top, so the SHARDS=1 + SHARDS=2 baseline data still gets collected and printed BEFORE the SKIP narrative. Operators reading the output see real numbers first, then the explanation of why SHARDS=3 isn't there.
 ---

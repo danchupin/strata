@@ -78,8 +78,8 @@
         "Typecheck passes"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Scripts swept: bench-rebalance-multi (SHARDS=3 SKIP'd; SHARDS=2 baseline; default COMPOSE_CMD bare, RESTART_CONTAINERS strata-a/b), smoke-rebalance-scale (defaults flipped; Scenario B+D skip messages note retired 3-replica lab), multi-replica-smoke (ports 10001/10002, CT_A/B = strata-a/b, header `make up`). smoke-compose-collapse.sh DELETED (superseded by US-005's smoke; Makefile entry dropped). CI workflows: ci-tikv.yml e2e-tikv job dropped (redundant; bare default IS TiKV); integration-tikv preserved. ci.yml e2e job flipped to bare-default TiKV + LB :9999; e2e-full uses bare-default + webhook-trap profile; e2e-ui-multi-replica uses `make up` not `make up-lab-tikv`; log-collection container names refreshed to strata-pd/strata-tikv-storage/strata-a/b/strata-lb-nginx/strata-cephb. Lint job renamed `Lint lab nginx config`. New P3 ROADMAP entry `Restore 3-replica TiKV bench (SHARDS=3 rebalance-multi)` added under Developer experience. go vet + make build + make test + web build + make docs-build green."
     },
     {
       "id": "US-004",
