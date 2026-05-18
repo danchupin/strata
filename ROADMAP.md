@@ -317,6 +317,7 @@ Non-goals:
 
 ## Known latent bugs
 
+- ~~**P1 — Multipart Complete/Abort panic on object keys with spaces.**~~ — **Fixed.** `internal/adminapi/uploads.go` `handleUploadComplete` + `handleUploadAbort` built the inner S3 sub-request via `httptest.NewRequest`, which constructs the request by parsing `"METHOD target HTTP/1.0\r\n\r\n"` through `http.ReadRequest`. Literal spaces in `target` (object keys like `My File.pdf`) made the parser treat the next token as the HTTP version → panic → LB 502. Switched both sites to `http.NewRequestWithContext` with `&url.URL{Path, RawQuery}.String()` for proper percent-escaping. Found by operator via the `/console` upload UI on a `.pptx` with spaces. (commit `470e8de`)
 - GET with `Range: bytes=start-` where `start >= size` returns `416` — same as AWS.
   `Range: bytes=-N` with `N > size` returns full body — matches AWS. Edge cases around
   zero-length objects: not tested.
