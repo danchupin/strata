@@ -307,7 +307,16 @@ HTTP traffic&lt;/strong&gt; — not for data. Running &lt;strong&gt;≥2 replica
 is the minimum HA shape.&lt;/p&gt;
 &lt;p&gt;This document covers the &lt;code&gt;lab-tikv&lt;/code&gt; compose profile (2 TiKV-backed replicas
 behind nginx at host port 9999) — the reference shape for multi-replica
-deployments.&lt;/p&gt;</description></item><item><title>Sizing</title><link>https://danchupin.github.io/strata/best-practices/sizing/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/sizing/</guid><description>&lt;h1 id="sizing"&gt;Sizing&lt;a class="anchor" href="#sizing"&gt;#&lt;/a&gt;&lt;/h1&gt;
+deployments.&lt;/p&gt;</description></item><item><title>Rebalance scaling</title><link>https://danchupin.github.io/strata/architecture/benchmarks/rebalance/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/benchmarks/rebalance/</guid><description>&lt;h1 id="rebalance-worker-scaling-benchmark-phase-2"&gt;Rebalance worker scaling benchmark (Phase 2)&lt;a class="anchor" href="#rebalance-worker-scaling-benchmark-phase-2"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Closes ROADMAP P2 &lt;em&gt;&amp;ldquo;Rebalance worker not sharded — single goroutine
+bottleneck on large deploys&amp;rdquo;&lt;/em&gt;. Mirrors the gc + lifecycle Phase 2 shape
+(see &lt;a href="https://danchupin.github.io/strata/architecture/benchmarks/gc-lifecycle/#phase-2--multi-leader-us-006"&gt;GC + Lifecycle scaling&lt;/a&gt;
+for the same fan-out pattern measured against gc and lifecycle workers).&lt;/p&gt;
+&lt;p&gt;The single-leader rebalance worker scans every draining bucket per tick on
+one goroutine. Phase 2 (&lt;code&gt;STRATA_REBALANCE_SHARDS=N&lt;/code&gt;) shards that scan by
+&lt;code&gt;fnv32a(bucketID) % N&lt;/code&gt;; each replica races for one of the
+&lt;code&gt;rebalance-leader-0..N-1&lt;/code&gt; leases and processes only its own shard&amp;rsquo;s bucket
+subset. &lt;code&gt;STRATA_REBALANCE_SHARDS=1&lt;/code&gt; reproduces Phase 1 byte-for-byte.&lt;/p&gt;</description></item><item><title>Sizing</title><link>https://danchupin.github.io/strata/best-practices/sizing/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/sizing/</guid><description>&lt;h1 id="sizing"&gt;Sizing&lt;a class="anchor" href="#sizing"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;Strata replicas are stateless gateways — they own no on-disk state, so
 sizing is a function of three signals: peak request rate (RPS), the
 working-set bytes the gateway holds in flight (RAM), and the cores the
