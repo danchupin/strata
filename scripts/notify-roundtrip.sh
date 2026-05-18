@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Drives a single PutObject through a strata gateway whose notify worker is
 # wired to a webhook receiver, then asserts the receiver saw the event.
-# Used by CI's e2e-full job (compose `features` profile + STRATA_NOTIFY_TARGETS
+# Used by CI's e2e-full job (compose `webhook-trap` profile + STRATA_NOTIFY_TARGETS
 # pointing at the `webhook-trap` service).
 set -euo pipefail
 

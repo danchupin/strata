@@ -731,10 +731,10 @@ deploy descriptors).
 ### Three-scenario walkthrough
 
 The smoke harness `scripts/smoke-drain-transparency.sh` drives every
-step below against the running `multi-cluster` compose profile;
-exit-non-zero on any assertion miss. Run via
-`make smoke-drain-transparency` once the lab is up
-(`docker compose --profile multi-cluster up -d`). The legacy
+step below against the running compose stack (multi-cluster is the
+default shape after the compose-collapse cycle); exit-non-zero on any
+assertion miss. Run via `make smoke-drain-transparency` once the lab
+is up (`docker compose up -d`). The legacy
 `scripts/smoke-drain-lifecycle.sh` still validates the basic flip-to-
 draining contract; the new harness covers mode-picker + impact
 analysis + multipart graceful contract end-to-end. A third harness
@@ -830,6 +830,12 @@ entry "Rebalance worker not sharded — single goroutine bottleneck on
 large deploys" by mirroring the gc + lifecycle Phase 2 pattern: the
 rebalance worker is now a **sharded fan-out** rather than a single
 goroutine per process.
+
+The cassandra-backed companion to `lab-tikv-3` is the
+[`lab-cassandra-3`]({{< ref "/architecture/migrations/compose-collapse" >}})
+profile — 3 named strata replicas sharing one Cassandra fronted by an
+nginx LB on host port `10000`. Use it to exercise multi-leader
+worker-lease distribution on the Cassandra metadata backend.
 
 ### `STRATA_REBALANCE_SHARDS` env
 

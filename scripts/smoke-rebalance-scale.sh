@@ -33,11 +33,12 @@
 # Lab pre-reqs to run all 4 scenarios:
 #
 #   docker compose -f deploy/docker/docker-compose.yml \
-#     --profile lab-tikv --profile lab-tikv-3 --profile multi-cluster \
-#     up -d
+#     --profile lab-tikv --profile lab-tikv-3 up -d
 #
-# Single-replica labs (multi-cluster only on :9998) skip Scenarios
-# B + D with a SKIP message; Scenarios A + C still run.
+# The bare `strata` service (multi-cluster default at :9999) stays
+# running alongside via the bare `docker compose up -d` invocation.
+# Single-replica labs (only the bare `strata` service on :9999) skip
+# Scenarios B + D with a SKIP message; Scenarios A + C still run.
 #
 # Per-pass orchestration uses SMOKE_RESTART_HOOK (mirror of
 # bench-rebalance-multi.sh's BENCH_RESTART_HOOK). Default recipe
@@ -66,8 +67,8 @@ SMOKE_LEASE_TTL_S="${SMOKE_LEASE_TTL_S:-${STRATA_GC_LEASE_TTL:-30}}"
 SMOKE_FAILOVER_GRACE_S="${SMOKE_FAILOVER_GRACE_S:-$(( SMOKE_LEASE_TTL_S + 15 ))}"
 
 COMPOSE_FILE="${COMPOSE_FILE:-deploy/docker/docker-compose.yml}"
-COMPOSE_CMD="${COMPOSE_CMD:-docker compose -f $COMPOSE_FILE --profile lab-tikv --profile lab-tikv-3 --profile multi-cluster}"
-RESTART_CONTAINERS="${RESTART_CONTAINERS:-strata-tikv-a strata-tikv-b strata-tikv-c strata-multi}"
+COMPOSE_CMD="${COMPOSE_CMD:-docker compose -f $COMPOSE_FILE --profile lab-tikv --profile lab-tikv-3}"
+RESTART_CONTAINERS="${RESTART_CONTAINERS:-strata-tikv-a strata-tikv-b strata-tikv-c strata}"
 
 # Restart recipe re-exports STRATA_REBALANCE_SHARDS so the per-replica
 # env passthrough picks it up.

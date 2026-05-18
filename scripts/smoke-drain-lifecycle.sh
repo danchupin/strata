@@ -3,10 +3,10 @@
 # cycle).
 #
 # Walks the full 15-step operator journey + 4 negative paths from
-# tasks/prd-drain-lifecycle.md against a running `multi-cluster` compose
-# profile (`docker compose --profile multi-cluster up -d`). Exits non-zero
-# with `FAIL: <step>` on any assertion miss; exits 0 when every step + every
-# negative path is green.
+# tasks/prd-drain-lifecycle.md against a running compose stack
+# (`docker compose up -d` — multi-cluster is the default shape after the
+# compose-collapse cycle). Exits non-zero with `FAIL: <step>` on any
+# assertion miss; exits 0 when every step + every negative path is green.
 #
 # Pre-requisites on the host:
 #   docker, curl, jq, aws (>= 2), md5sum or md5
@@ -14,9 +14,9 @@
 #   same value the gateway booted with (first comma-separated entry is used
 #   for the admin login + SigV4-signed bucket setup).
 #
-# Lab assumptions (per tasks/prd-drain-lifecycle.md and the docker-compose
-# `multi-cluster` profile):
-#   - strata-multi gateway listens on http://127.0.0.1:9998
+# Lab assumptions (per tasks/prd-drain-lifecycle.md and the bare compose
+# stack — multi-cluster is the default shape):
+#   - strata gateway listens on http://127.0.0.1:9999
 #   - STRATA_RADOS_CLUSTERS=default:...,cephb:...
 #   - STRATA_RADOS_CLASSES exposes ≥3 storage classes, each pinned to a
 #     distinct pool on `default` (the matrix expects #clusters × #distinct
@@ -24,14 +24,14 @@
 #   - Drain is unconditionally strict (US-007 drain-transparency) — the
 #     former opt-in STRATA_DRAIN_STRICT env has been retired.
 #
-# Skip behavior: when the multi-cluster profile is NOT up (probe on /readyz
+# Skip behavior: when the compose stack is NOT up (probe on /readyz
 # fails after WAIT_GRACE seconds), the script EXITs 77 (skipped) with a
 # clear message so CI fast-paths can `|| true` it. Set REQUIRE_LAB=1 to
 # convert the skip into a hard fail (nightly CI gating).
 
 set -euo pipefail
 
-BASE="${BASE:-http://127.0.0.1:9998}"
+BASE="${BASE:-http://127.0.0.1:9999}"
 WAIT_GRACE="${WAIT_GRACE:-15}"
 DRAIN_TIMEOUT_S="${DRAIN_TIMEOUT_S:-180}"
 CLUSTER="${SMOKE_DRAIN_CLUSTER:-cephb}"
@@ -97,12 +97,12 @@ probe_ready() {
 }
 
 if ! probe_ready; then
-  msg="multi-cluster lab not reachable on $BASE/readyz after ${WAIT_GRACE}s"
+  msg="compose stack not reachable on $BASE/readyz after ${WAIT_GRACE}s"
   if [[ "$REQUIRE_LAB" == "1" ]]; then
     fail "$msg (REQUIRE_LAB=1)"
   fi
   echo "SKIP: $msg" >&2
-  echo "SKIP: bring it up with 'docker compose --profile multi-cluster up -d' then re-run." >&2
+  echo "SKIP: bring it up with 'docker compose up -d' then re-run." >&2
   exit 77
 fi
 

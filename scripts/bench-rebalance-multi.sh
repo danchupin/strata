@@ -10,14 +10,16 @@
 # The script does NOT bring up the lab. Operator stands the stack up with:
 #
 #   STRATA_REBALANCE_SHARDS=1 STRATA_WORKERS=gc,lifecycle,rebalance \
-#     docker compose --profile lab-tikv --profile lab-tikv-3 --profile multi-cluster \
+#     docker compose --profile lab-tikv --profile lab-tikv-3 \
 #       -f deploy/docker/docker-compose.yml \
 #       -f deploy/docker/docker-compose.lab-tikv-3-multi.yml \
 #       up -d
 #
 # (the lab-tikv-3-multi overlay carries the per-replica STRATA_RADOS_CLUSTERS
 # + ceph-a/ceph-b volume mounts; operator-maintained because the overlay is
-# bench-specific). The script then orchestrates two passes via
+# bench-specific. The bare `strata` service — multi-cluster default at
+# :9999 — stays running alongside via `docker compose up -d`.) The
+# script then orchestrates two passes via
 # `BENCH_RESTART_HOOK` (default: docker compose force-recreate of the three
 # strata-tikv-{a,b,c} replicas) with STRATA_REBALANCE_SHARDS exported between
 # runs. Override BENCH_RESTART_HOOK if your lab uses a different restart

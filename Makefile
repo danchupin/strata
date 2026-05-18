@@ -1,7 +1,7 @@
 SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-all-ci up-tikv up-lab-tikv up-lab-tikv-3 down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata wait-strata-tikv wait-strata-lab ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv smoke-drain-lifecycle smoke-drain-transparency smoke-cluster-weights smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale race-soak race-soak-tikv lint-nginx-lab bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi docs-serve docs-build clean
+.PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test up up-all up-all-ci up-tikv up-lab-tikv up-lab-tikv-3 up-lab-cassandra-3 down wait-cassandra wait-ceph wait-pd wait-tikv wait-strata wait-strata-tikv wait-strata-lab wait-strata-lab-cassandra ceph-pool run-memory run-cassandra run-strata run-gateway smoke smoke-tikv smoke-signed smoke-signed-tikv smoke-grafana smoke-lab-tikv smoke-drain-lifecycle smoke-drain-transparency smoke-cluster-weights smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale smoke-compose-collapse smoke-single-binary race-soak race-soak-tikv lint-nginx-lab lint-nginx-lab-cassandra bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi docs-serve docs-build clean
 
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
@@ -98,8 +98,20 @@ up-lab-tikv-3:
 	STRATA_GC_SHARDS=$${STRATA_GC_SHARDS:-3} $(COMPOSE) --profile lab-tikv --profile lab-tikv-3 \
 		up -d pd tikv ceph strata-tikv-a strata-tikv-b strata-tikv-c strata-lb-nginx prometheus grafana
 
+# 3-replica Cassandra-backed lab: mirror of `up-lab-tikv-3` for
+# cassandra metadata. Brings up 3 strata replicas (strata-cass-{a,b,c})
+# behind nginx LB on host port 10000. Operator should stop the default
+# `strata` service first (`docker compose stop strata`) so all four
+# strata containers do NOT race for the same cassandra leases.
+up-lab-cassandra-3:
+	STRATA_GC_SHARDS=$${STRATA_GC_SHARDS:-3} \
+	STRATA_LIFECYCLE_SHARDS=$${STRATA_LIFECYCLE_SHARDS:-3} \
+	STRATA_REBALANCE_SHARDS=$${STRATA_REBALANCE_SHARDS:-3} \
+		$(COMPOSE) --profile lab-cassandra-3 up -d \
+		cassandra ceph ceph-b strata-cass-a strata-cass-b strata-cass-c strata-lb-nginx-cass prometheus grafana
+
 down:
-	$(COMPOSE) --profile tikv --profile lab-tikv --profile features --profile tracing down
+	$(COMPOSE) --profile tikv --profile lab-tikv --profile lab-tikv-3 --profile lab-cassandra-3 --profile tracing down
 
 wait-cassandra:
 	@echo "waiting for cassandra to report healthy..."
@@ -159,6 +171,22 @@ wait-strata-lab:
 	@until [ "$$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:9999/readyz)" = "200" ]; do sleep 2; done
 	@echo "strata-lb-nginx ready"
 
+# Poll readyz on the lab-cassandra-3 profile: the LB at 10000 + three
+# replica-direct ports (10001, 10002, 10003). Mirror of wait-strata-lab.
+wait-strata-lab-cassandra:
+	@echo "waiting for strata-cass-a /readyz on 10001..."
+	@until [ "$$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:10001/readyz)" = "200" ]; do sleep 2; done
+	@echo "strata-cass-a ready"
+	@echo "waiting for strata-cass-b /readyz on 10002..."
+	@until [ "$$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:10002/readyz)" = "200" ]; do sleep 2; done
+	@echo "strata-cass-b ready"
+	@echo "waiting for strata-cass-c /readyz on 10003..."
+	@until [ "$$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:10003/readyz)" = "200" ]; do sleep 2; done
+	@echo "strata-cass-c ready"
+	@echo "waiting for nginx LB /readyz on 10000..."
+	@until [ "$$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:10000/readyz)" = "200" ]; do sleep 2; done
+	@echo "strata-lb-nginx-cass ready"
+
 ceph-pool:
 	docker exec strata-ceph ceph osd pool create strata.rgw.buckets.data 8 8 replicated || true
 	docker exec strata-ceph ceph osd pool application enable strata.rgw.buckets.data rgw || true
@@ -209,18 +237,19 @@ smoke-lab-tikv:
 
 # Drain-lifecycle walkthrough smoke (US-007 of ralph/drain-lifecycle).
 # Drives the full 15-step operator journey + 4 negative paths against a
-# running `multi-cluster` compose profile (`docker compose --profile
-# multi-cluster up -d`). Skips with exit 77 when the lab is not reachable;
-# set REQUIRE_LAB=1 to convert the skip into a hard fail. See
-# scripts/smoke-drain-lifecycle.sh for env knobs (BASE, SMOKE_DRAIN_*).
+# running compose stack (`docker compose up -d` — multi-cluster is the
+# default shape after the compose-collapse cycle). Skips with exit 77
+# when the lab is not reachable; set REQUIRE_LAB=1 to convert the skip
+# into a hard fail. See scripts/smoke-drain-lifecycle.sh for env knobs
+# (BASE, SMOKE_DRAIN_*).
 smoke-drain-lifecycle:
 	bash scripts/smoke-drain-lifecycle.sh
 
 # Drain-transparency walkthrough smoke (US-008 of ralph/drain-transparency).
 # Drives the three operator scenarios (A: stop-writes drain, B: full evacuate
 # with /drain-impact + bulk-fix, C: upgrade readonly → evacuate) against a
-# running `multi-cluster` compose profile (`docker compose --profile
-# multi-cluster up -d`). Skips with exit 77 when the lab is not reachable;
+# running compose stack (`docker compose up -d` — multi-cluster is the
+# default shape). Skips with exit 77 when the lab is not reachable;
 # set REQUIRE_LAB=1 to convert the skip into a hard fail. See
 # scripts/smoke-drain-transparency.sh for env knobs (BASE, SMOKE_DRAIN_*).
 smoke-drain-transparency:
@@ -230,9 +259,9 @@ smoke-drain-transparency:
 # Drives the four operator scenarios (A: new-cluster activation pending →
 # live + ramp, B: existing-live auto-detect at boot, C: bucket policy wins
 # over cluster weights, D: pending excluded from default routing) against
-# a running `multi-cluster` compose profile (`docker compose --profile
-# multi-cluster up -d`). Wipes `cluster_state` rows via cqlsh and restarts
-# strata-multi between scenarios to exercise the boot-time reconcile.
+# a running compose stack (`docker compose up -d` — multi-cluster is the
+# default shape). Wipes `cluster_state` rows via cqlsh and restarts the
+# strata container between scenarios to exercise the boot-time reconcile.
 # Skips with exit 77 when the lab is not reachable; set REQUIRE_LAB=1 to
 # convert the skip into a hard fail. See scripts/smoke-cluster-weights.sh
 # for env knobs (BASE, SMOKE_CW_*).
@@ -244,11 +273,10 @@ smoke-cluster-weights:
 # bundled in this cycle (drawer 3-category render, /drain-impact cache
 # invalidation, Pools chunk_count rename, force-empty GC enqueue,
 # deregister_ready hard-safety, state-aware buttons, trace browser list)
-# against a running `multi-cluster` compose profile (`docker compose
-# --profile multi-cluster up -d`). Skips with exit 77 when the lab is
-# not reachable; set REQUIRE_LAB=1 to convert the skip into a hard
-# fail. See scripts/smoke-drain-cleanup.sh for env knobs (BASE,
-# SMOKE_DC_*).
+# against a running compose stack (`docker compose up -d` — multi-cluster
+# is the default shape). Skips with exit 77 when the lab is not reachable;
+# set REQUIRE_LAB=1 to convert the skip into a hard fail. See
+# scripts/smoke-drain-cleanup.sh for env knobs (BASE, SMOKE_DC_*).
 smoke-drain-cleanup:
 	bash scripts/smoke-drain-cleanup.sh
 
@@ -256,11 +284,11 @@ smoke-drain-cleanup:
 # Drives the 16-step operator journey closing the four ROADMAP entries
 # bundled in this cycle (P3 trace browser filter/search, P2 UI confusion
 # chip+button, P2 Cassandra multipart probe no-op, P3 ALLOW FILTERING
-# denormalize) against a running `multi-cluster` compose profile
-# (`docker compose --profile multi-cluster up -d`). Skips with exit 77
-# when the lab is not reachable; set REQUIRE_LAB=1 to convert the skip
-# into a hard fail. See scripts/smoke-drain-followup.sh for env knobs
-# (BASE, SMOKE_DF_*).
+# denormalize) against a running compose stack (`docker compose up -d` —
+# multi-cluster is the default shape). Skips with exit 77 when the lab
+# is not reachable; set REQUIRE_LAB=1 to convert the skip into a hard
+# fail. See scripts/smoke-drain-followup.sh for env knobs (BASE,
+# SMOKE_DF_*).
 smoke-drain-followup:
 	bash scripts/smoke-drain-followup.sh
 
@@ -268,9 +296,9 @@ smoke-drain-followup:
 # Drives the four operator scenarios (A: weighted bucket auto-fallback via
 # cluster.weights on drain, B: strict bucket blocks drain + 503 DrainRefused,
 # C: flip strict→weighted clears stuck_single_policy via cache invalidation,
-# D: all clusters drained → 503 with no fallback) against a running
-# `multi-cluster` compose profile (`docker compose --profile multi-cluster
-# up -d`). Closes ROADMAP P2 "Effective-policy fallback to cluster weights".
+# D: all clusters drained → 503 with no fallback) against a running compose
+# stack (`docker compose up -d` — multi-cluster is the default shape).
+# Closes ROADMAP P2 "Effective-policy fallback to cluster weights".
 # Skips with exit 77 when the lab is not reachable; set REQUIRE_LAB=1 to
 # convert the skip into a hard fail. See scripts/smoke-effective-placement.sh
 # for env knobs (BASE, SMOKE_EP_*).
@@ -282,13 +310,14 @@ smoke-effective-placement:
 # replica fan-out at SHARDS=3 with folded chip; B: lab-tikv-3 multi-
 # leader at SHARDS=3 with one chip per replica; C: back-compat SHARDS=1
 # with exactly one chip holder; D: replica failover) against a running
-# `lab-tikv-3 + multi-cluster` compose profile (`docker compose -f
+# `lab-tikv-3` compose profile (`docker compose -f
 # deploy/docker/docker-compose.yml --profile lab-tikv --profile
-# lab-tikv-3 --profile multi-cluster up -d`). Closes ROADMAP P2
-# "Rebalance worker not sharded". Skips with exit 77 when the lab is
-# not reachable; set REQUIRE_LAB=1 to convert the skip into a hard
-# fail. Scenario B + D auto-skip on single-replica labs. See
-# scripts/smoke-rebalance-scale.sh for env knobs (BASE, SMOKE_*).
+# lab-tikv-3 up -d`). The bare `strata` service (multi-cluster default)
+# stays running alongside the lab via `docker compose up -d`. Closes
+# ROADMAP P2 "Rebalance worker not sharded". Skips with exit 77 when
+# the lab is not reachable; set REQUIRE_LAB=1 to convert the skip
+# into a hard fail. Scenario B + D auto-skip on single-replica labs.
+# See scripts/smoke-rebalance-scale.sh for env knobs (BASE, SMOKE_*).
 smoke-rebalance-scale:
 	bash scripts/smoke-rebalance-scale.sh
 
@@ -299,6 +328,22 @@ smoke-rebalance-scale:
 # exits 2, no `strata-admin` residue in scoped trees.
 smoke-single-binary:
 	bash scripts/smoke-single-binary.sh
+
+# Compose-collapse end-to-end smoke (US-004 of
+# ralph/compose-profile-isolation). Walks four scenarios — bare bring-up
+# (A), single-cluster env-override visibility (B), lab-cassandra-3
+# multi-replica (C), residue grep gate (D) — against the docker-compose
+# stack. Closes ROADMAP P2 "Compose default + multi-cluster profiles race
+# for worker leases on shared Cassandra". Scenarios A + B require the bare
+# `docker compose up -d` stack reachable on :9999; Scenario C additionally
+# requires `make up-lab-cassandra-3` with bare strata stopped; Scenario D
+# (grep) always runs. Skips with exit 77 when the lab is not reachable;
+# set REQUIRE_LAB=1 to convert the skip into a hard fail. See
+# scripts/smoke-compose-collapse.sh for env knobs (BASE, LB_BASE,
+# CASSANDRA_CONTAINER, KEYSPACE, GATEWAY_CONTAINER, CLUSTER_DRAIN,
+# CLUSTER_OTHER, DRAIN_TIMEOUT_S, WAIT_GRACE).
+smoke-compose-collapse:
+	bash scripts/smoke-compose-collapse.sh
 
 # Race-soak driver (US-006). Brings up the cassandra-backed stack
 # (`make up-all-ci` when CI=true, else `make up-all`), waits for /readyz on
@@ -348,6 +393,17 @@ lint-nginx-lab:
 		--add-host=strata-tikv-a:127.0.0.1 \
 		--add-host=strata-tikv-b:127.0.0.1 \
 		-v $(CURDIR)/deploy/nginx/strata-lab.conf:/etc/nginx/conf.d/default.conf:ro \
+		nginx:1.27-alpine nginx -t
+
+# Validate the nginx LB config used by the lab-cassandra-3 profile.
+# Mirror of lint-nginx-lab; the real names resolve via Docker's embedded
+# DNS at runtime when the lab-cassandra-3 profile is up.
+lint-nginx-lab-cassandra:
+	docker run --rm \
+		--add-host=strata-cass-a:127.0.0.1 \
+		--add-host=strata-cass-b:127.0.0.1 \
+		--add-host=strata-cass-c:127.0.0.1 \
+		-v $(CURDIR)/deploy/nginx/strata-lab-cassandra.conf:/etc/nginx/conf.d/default.conf:ro \
 		nginx:1.27-alpine nginx -t
 
 # bench-gc / bench-lifecycle drive `strata admin` against the lab-tikv stack
