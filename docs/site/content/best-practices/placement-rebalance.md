@@ -831,6 +831,12 @@ large deploys" by mirroring the gc + lifecycle Phase 2 pattern: the
 rebalance worker is now a **sharded fan-out** rather than a single
 goroutine per process.
 
+The cassandra-backed companion to `lab-tikv-3` is the
+[`lab-cassandra-3`]({{< ref "/architecture/migrations/compose-collapse" >}})
+profile — 3 named strata replicas sharing one Cassandra fronted by an
+nginx LB on host port `10000`. Use it to exercise multi-leader
+worker-lease distribution on the Cassandra metadata backend.
+
 ### `STRATA_REBALANCE_SHARDS` env
 
 | Variable | Default | Range | Purpose |
