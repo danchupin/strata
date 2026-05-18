@@ -32,8 +32,8 @@
         "Typecheck passes"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Compose rewritten: bare-default lists pd, tikv, ceph, ceph-b, strata-a, strata-b, strata-lb-nginx, prometheus, grafana. `--profile cassandra` adds cassandra + strata-cassandra. Retired services dropped (strata, strata-tikv, strata-tikv-c, strata-cass-a/b/c, strata-lb-nginx-cass). nginx upstream flipped to strata-a/b:9000. Distinct STRATA_NODE_ID + strata-jwt-shared volume preserved on strata-a/b. depends_on includes pd healthy + tikv started + ceph healthy + ceph-b healthy. No compose-level rebalance defaults. go vet + make build green."
     },
     {
       "id": "US-002",

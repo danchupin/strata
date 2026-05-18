@@ -1,7 +1,12 @@
 services:
+  # Cassandra meta backend lives under `--profile cassandra`. Cassandra
+  # remains first-class in code (internal/meta/cassandra/** + test-integration
+  # testcontainers preserved); this profile only gates the lab compose shape.
+  # Bring up with `make up-cassandra` or `docker compose --profile cassandra up -d`.
   cassandra:
     image: cassandra:5.0
-    container_name: strata-cassandra
+    container_name: strata-cassandra-db
+    profiles: ["cassandra"]
     ports:
       - "9042:9042"
     environment:
@@ -68,24 +73,204 @@ services:
       retries: 60
       start_period: 30s
 
-  # Single canonical strata service. Multi-cluster is the default: the
-  # gateway attaches to BOTH `default` (ceph) and `cephb` (ceph-b) RADOS
-  # clusters via STRATA_RADOS_CLUSTERS so per-bucket placement policy,
-  # rebalance, and drain lifecycle are exercisable out of the box.
-  # Workers selected via STRATA_WORKERS (default gc,lifecycle,rebalance —
-  # rebalance is meaningful with two clusters). Operators run a single-
-  # cluster smoke by overriding STRATA_RADOS_CLUSTERS at runtime, e.g.
-  #   STRATA_RADOS_CLUSTERS=default:/etc/ceph-a/ceph.conf:/etc/ceph-a/ceph.client.admin.keyring \
-  #     docker compose up -d strata
-  # — there is no longer a separate single-cluster service or profile.
-  # Feature workers (notify / replicator / access-log / inventory /
-  # audit-export) are opt-in via STRATA_WORKERS — no separate container.
-  strata:
+  # PD + TiKV always-on. Bare `docker compose up -d` runs the TiKV-default
+  # 2-replica lab; production needs PD ≥3 (raft majority) + TiKV ≥3 — see
+  # docs/site/content/architecture/backends/tikv.md.
+  pd:
+    image: pingcap/pd:v8.5.0
+    container_name: strata-pd
+    command:
+      - --name=pd
+      - --client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://pd:2379
+      - --peer-urls=http://0.0.0.0:2380
+      - --advertise-peer-urls=http://pd:2380
+      - --initial-cluster=pd=http://pd:2380
+      - --data-dir=/data/pd
+    ports:
+      - "2379:2379"
+    volumes:
+      - strata-pd-data:/data
+    healthcheck:
+      # /pd/api/v1/health returns 200 when the PD process is up and the API
+      # is serving — sufficient for single-PD lab readiness gating.
+      # NB: `wget --spider` sends HEAD which PD doesn't accept (exit 8);
+      # GET + discard exits 0 on 2xx and is the portable shape.
+      test: ["CMD-SHELL", "wget -qO /dev/null --tries=1 --timeout=2 http://127.0.0.1:2379/pd/api/v1/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  tikv:
+    image: pingcap/tikv:v8.5.0
+    container_name: strata-tikv-storage
+    depends_on:
+      pd:
+        condition: service_healthy
+    command:
+      - --pd-endpoints=pd:2379
+      - --addr=0.0.0.0:20160
+      - --advertise-addr=tikv:20160
+      - --status-addr=0.0.0.0:20180
+      - --advertise-status-addr=tikv:20180
+      - --data-dir=/data/tikv
+    ports:
+      - "20160:20160"
+    volumes:
+      - strata-tikv-data:/data
+    # No HTTP healthcheck: pingcap/tikv's status server returns plain text
+    # and the alpine-glibc base ships no curl. wget against /status mostly
+    # works but the response body is not a stable contract. depends_on
+    # `service_started` is enough for downstream consumers — the strata
+    # gateway's TiKV client retries until PD assigns regions, so transient
+    # boot races are absorbed there.
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # TiKV-default 2-replica lab: strata-a + strata-b behind nginx LB on
+  # host port 9999. Bare `docker compose up -d` brings up the full stack.
+  # Both replicas mount BOTH RADOS clusters (ceph + ceph-b) so per-bucket
+  # placement policy + rebalance + drain lifecycle are exercisable out of
+  # the box. Distinct STRATA_NODE_ID per replica + shared strata-jwt-shared
+  # volume so a session JWT minted by replica A validates on replica B
+  # (round-robin LB requires cross-replica session validation).
+  # No compose-level STRATA_REBALANCE_INTERVAL / STRATA_REBALANCE_RATE_MB_S:
+  # gateway built-in defaults apply (1h interval, 100 MB/s rate).
+  strata-a:
+    image: strata:ceph
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
+    container_name: strata-a
+    depends_on:
+      pd:
+        condition: service_healthy
+      tikv:
+        condition: service_started
+      ceph:
+        condition: service_healthy
+      ceph-b:
+        condition: service_healthy
+    environment:
+      STRATA_CONFIG_FILE: /etc/strata/strata.toml
+      STRATA_META_BACKEND: tikv
+      STRATA_TIKV_PD_ENDPOINTS: ${STRATA_TIKV_PD_ENDPOINTS:-pd:2379}
+      STRATA_NODE_ID: strata-a
+      STRATA_WORKERS: ${STRATA_WORKERS:-gc,lifecycle,rebalance}
+      STRATA_RADOS_CLUSTERS: ${STRATA_RADOS_CLUSTERS:-default:/etc/ceph-a/ceph.conf:/etc/ceph-a/ceph.client.admin.keyring,cephb:/etc/ceph-b/ceph.conf:/etc/ceph-b/ceph.client.admin.keyring}
+      STRATA_RADOS_CONF: "/etc/ceph-a/ceph.conf"
+      STRATA_RADOS_KEYRING: "/etc/ceph-a/ceph.client.admin.keyring"
+      STRATA_RADOS_CLASSES: ${STRATA_RADOS_CLASSES:-}
+      # `optional` (not `off`) so presigned URLs minted by the console
+      # carry through to a real identity check at PUT time. With `off`
+      # the gateway treats every request as anonymous and an admin-
+      # owned bucket then ACL-denies the upload.
+      STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-optional}
+      STRATA_STATIC_CREDENTIALS: ${STRATA_STATIC_CREDENTIALS:-admin:adminpass:owner}
+      STRATA_GC_INTERVAL: ${STRATA_GC_INTERVAL:-}
+      STRATA_GC_GRACE: ${STRATA_GC_GRACE:-}
+      STRATA_GC_SHARDS: ${STRATA_GC_SHARDS:-}
+      STRATA_GC_CONCURRENCY: ${STRATA_GC_CONCURRENCY:-}
+      STRATA_GC_DUAL_WRITE: ${STRATA_GC_DUAL_WRITE:-}
+      STRATA_LIFECYCLE_INTERVAL: ${STRATA_LIFECYCLE_INTERVAL:-}
+      STRATA_LIFECYCLE_UNIT: ${STRATA_LIFECYCLE_UNIT:-}
+      STRATA_NOTIFY_TARGETS: ${STRATA_NOTIFY_TARGETS:-}
+      STRATA_PROMETHEUS_URL: ${STRATA_PROMETHEUS_URL:-http://prometheus:9090}
+    ports:
+      - "10001:9000"
+    volumes:
+      - strata-ceph-etc:/etc/ceph-a:ro
+      - strata-cephb-etc:/etc/ceph-b:ro
+      - ../strata.toml:/etc/strata/strata.toml:ro
+      - strata-jwt-shared:/etc/strata/jwt-shared
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/readyz >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 30s
+    restart: unless-stopped
+
+  strata-b:
     image: strata:ceph
-    container_name: strata
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    container_name: strata-b
+    depends_on:
+      pd:
+        condition: service_healthy
+      tikv:
+        condition: service_started
+      ceph:
+        condition: service_healthy
+      ceph-b:
+        condition: service_healthy
+    environment:
+      STRATA_CONFIG_FILE: /etc/strata/strata.toml
+      STRATA_META_BACKEND: tikv
+      STRATA_TIKV_PD_ENDPOINTS: ${STRATA_TIKV_PD_ENDPOINTS:-pd:2379}
+      STRATA_NODE_ID: strata-b
+      STRATA_WORKERS: ${STRATA_WORKERS:-gc,lifecycle,rebalance}
+      STRATA_RADOS_CLUSTERS: ${STRATA_RADOS_CLUSTERS:-default:/etc/ceph-a/ceph.conf:/etc/ceph-a/ceph.client.admin.keyring,cephb:/etc/ceph-b/ceph.conf:/etc/ceph-b/ceph.client.admin.keyring}
+      STRATA_RADOS_CONF: "/etc/ceph-a/ceph.conf"
+      STRATA_RADOS_KEYRING: "/etc/ceph-a/ceph.client.admin.keyring"
+      STRATA_RADOS_CLASSES: ${STRATA_RADOS_CLASSES:-}
+      # See strata-a above for rationale on the `optional` default.
+      STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-optional}
+      STRATA_STATIC_CREDENTIALS: ${STRATA_STATIC_CREDENTIALS:-admin:adminpass:owner}
+      STRATA_GC_INTERVAL: ${STRATA_GC_INTERVAL:-}
+      STRATA_GC_GRACE: ${STRATA_GC_GRACE:-}
+      STRATA_GC_SHARDS: ${STRATA_GC_SHARDS:-}
+      STRATA_GC_CONCURRENCY: ${STRATA_GC_CONCURRENCY:-}
+      STRATA_GC_DUAL_WRITE: ${STRATA_GC_DUAL_WRITE:-}
+      STRATA_LIFECYCLE_INTERVAL: ${STRATA_LIFECYCLE_INTERVAL:-}
+      STRATA_LIFECYCLE_UNIT: ${STRATA_LIFECYCLE_UNIT:-}
+      STRATA_NOTIFY_TARGETS: ${STRATA_NOTIFY_TARGETS:-}
+      STRATA_PROMETHEUS_URL: ${STRATA_PROMETHEUS_URL:-http://prometheus:9090}
+    ports:
+      - "10002:9000"
+    volumes:
+      - strata-ceph-etc:/etc/ceph-a:ro
+      - strata-cephb-etc:/etc/ceph-b:ro
+      - ../strata.toml:/etc/strata/strata.toml:ro
+      - strata-jwt-shared:/etc/strata/jwt-shared
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/readyz >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 30s
+    restart: unless-stopped
+
+  # nginx LB fronting strata-a + strata-b at host port 9999. Config lives
+  # in deploy/nginx/strata-lab.conf.
+  strata-lb-nginx:
+    image: nginx:1.27-alpine
+    container_name: strata-lb-nginx
+    depends_on:
+      - strata-a
+      - strata-b
+    volumes:
+      - ../nginx/strata-lab.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "9999:80"
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # Cassandra-backed regression lab under `--profile cassandra`. Single
+  # replica on host port 9998; multi-cluster mounts mirror strata-a/b.
+  # Cassandra meta backend remains first-class in code — this profile is
+  # for the lab compose shape, not a backend deprecation.
+  strata-cassandra:
+    image: strata:ceph
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    container_name: strata-cassandra
+    profiles: ["cassandra"]
     depends_on:
       cassandra:
         condition: service_healthy
@@ -95,22 +280,14 @@ services:
         condition: service_healthy
     environment:
       STRATA_CONFIG_FILE: /etc/strata/strata.toml
+      STRATA_META_BACKEND: cassandra
+      STRATA_CASSANDRA_HOSTS: ${STRATA_CASSANDRA_HOSTS:-cassandra:9042}
+      STRATA_NODE_ID: strata-cassandra
       STRATA_WORKERS: ${STRATA_WORKERS:-gc,lifecycle,rebalance}
       STRATA_RADOS_CLUSTERS: ${STRATA_RADOS_CLUSTERS:-default:/etc/ceph-a/ceph.conf:/etc/ceph-a/ceph.client.admin.keyring,cephb:/etc/ceph-b/ceph.conf:/etc/ceph-b/ceph.client.admin.keyring}
       STRATA_RADOS_CONF: "/etc/ceph-a/ceph.conf"
       STRATA_RADOS_KEYRING: "/etc/ceph-a/ceph.client.admin.keyring"
       STRATA_RADOS_CLASSES: ${STRATA_RADOS_CLASSES:-}
-      STRATA_REBALANCE_INTERVAL: ${STRATA_REBALANCE_INTERVAL:-30s}
-      STRATA_REBALANCE_RATE_MB_S: ${STRATA_REBALANCE_RATE_MB_S:-100}
-      # overrides for local experimentation (auth on/off, alt classes, ...)
-      # Default `optional` + preset admin creds so the embedded operator
-      # console at /console/ + the /admin/v1/* API work out-of-the-box with
-      # `docker compose up -d`. Operator can override via env. Parity with
-      # the lab-tikv / lab-tikv-3 / lab-cassandra-3 profile shapes. This
-      # restores the pre-`ralph/compose-profile-isolation` behaviour where
-      # the strata-multi service shipped with mode=off; the cycle's rename
-      # accidentally inherited the legacy single-cluster service's blank
-      # defaults instead of strata-multi's. Documented in CLAUDE.md.
       STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-optional}
       STRATA_STATIC_CREDENTIALS: ${STRATA_STATIC_CREDENTIALS:-admin:adminpass:owner}
       STRATA_GC_INTERVAL: ${STRATA_GC_INTERVAL:-}
@@ -118,13 +295,10 @@ services:
       STRATA_LIFECYCLE_INTERVAL: ${STRATA_LIFECYCLE_INTERVAL:-}
       STRATA_LIFECYCLE_UNIT: ${STRATA_LIFECYCLE_UNIT:-}
       STRATA_NOTIFY_TARGETS: ${STRATA_NOTIFY_TARGETS:-}
-      STRATA_AUDIT_EXPORT_BUCKET: ${STRATA_AUDIT_EXPORT_BUCKET:-}
-      STRATA_INVENTORY_REGION: ${STRATA_INVENTORY_REGION:-}
       STRATA_PROMETHEUS_URL: ${STRATA_PROMETHEUS_URL:-http://prometheus:9090}
     ports:
-      - "9999:9000"
+      - "9998:9000"
     volumes:
-      - strata-ceph-etc:/etc/ceph:ro
       - strata-ceph-etc:/etc/ceph-a:ro
       - strata-cephb-etc:/etc/ceph-b:ro
       - ../strata.toml:/etc/strata/strata.toml:ro
@@ -178,484 +352,6 @@ services:
       - strata-grafana-data:/var/lib/grafana
     ports:
       - "3000:3000"
-    restart: unless-stopped
-
-  # PD + TiKV + a TiKV-backed strata replica live behind the "tikv" profile
-  # so the default `docker compose up` keeps the cassandra-backed shape.
-  # Enable with:
-  #   docker compose --profile tikv up -d pd tikv ceph strata-tikv prometheus grafana
-  # or `make up-tikv`. The tikv-backed strata replica is mutually exclusive
-  # with the cassandra-backed one (both want STRATA_META_BACKEND, but only
-  # one value is legal per process — the picker in internal/serverapp
-  # validates exactly-one). For laptop / CI the shape is single-PD +
-  # single-TiKV; production needs PD ≥3 (raft majority) + TiKV ≥3 — see
-  # docs/site/content/architecture/backends/tikv.md (US-019).
-  pd:
-    image: pingcap/pd:v8.5.0
-    container_name: strata-pd
-    profiles: ["tikv", "lab-tikv"]
-    command:
-      - --name=pd
-      - --client-urls=http://0.0.0.0:2379
-      - --advertise-client-urls=http://pd:2379
-      - --peer-urls=http://0.0.0.0:2380
-      - --advertise-peer-urls=http://pd:2380
-      - --initial-cluster=pd=http://pd:2380
-      - --data-dir=/data/pd
-    ports:
-      - "2379:2379"
-    volumes:
-      - strata-pd-data:/data
-    healthcheck:
-      # /pd/api/v1/health returns 200 when the PD process is up and the API
-      # is serving — sufficient for single-PD lab readiness gating.
-      # NB: `wget --spider` sends HEAD which PD doesn't accept (exit 8);
-      # GET + discard exits 0 on 2xx and is the portable shape.
-      test: ["CMD-SHELL", "wget -qO /dev/null --tries=1 --timeout=2 http://127.0.0.1:2379/pd/api/v1/health"]
-      interval: 5s
-      timeout: 5s
-      retries: 30
-      start_period: 30s
-    restart: unless-stopped
-
-  tikv:
-    image: pingcap/tikv:v8.5.0
-    container_name: strata-tikv-storage
-    profiles: ["tikv", "lab-tikv"]
-    depends_on:
-      pd:
-        condition: service_healthy
-    command:
-      - --pd-endpoints=pd:2379
-      - --addr=0.0.0.0:20160
-      - --advertise-addr=tikv:20160
-      - --status-addr=0.0.0.0:20180
-      - --advertise-status-addr=tikv:20180
-      - --data-dir=/data/tikv
-    ports:
-      - "20160:20160"
-    volumes:
-      - strata-tikv-data:/data
-    # No HTTP healthcheck: pingcap/tikv's status server returns plain text
-    # and the alpine-glibc base ships no curl. wget against /status mostly
-    # works but the response body is not a stable contract. depends_on
-    # `service_started` is enough for downstream consumers — the strata
-    # gateway's TiKV client retries until PD assigns regions, so transient
-    # boot races are absorbed there.
-    restart: unless-stopped
-
-  # strata-tikv is the TiKV-backed gateway replica. Mutually exclusive with
-  # the cassandra-backed `strata` service: both bind the same listen port
-  # internally, but the host port differs (9998 vs 9999) so a curious
-  # operator can run both side-by-side under `--profile tikv` if they
-  # really want to compare shapes.
-  strata-tikv:
-    image: strata:ceph
-    build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile
-    container_name: strata-tikv
-    profiles: ["tikv"]
-    depends_on:
-      pd:
-        condition: service_healthy
-      tikv:
-        condition: service_started
-      ceph:
-        condition: service_healthy
-    environment:
-      STRATA_CONFIG_FILE: /etc/strata/strata.toml
-      STRATA_META_BACKEND: tikv
-      STRATA_TIKV_PD_ENDPOINTS: pd:2379
-      STRATA_WORKERS: ${STRATA_WORKERS:-gc,lifecycle}
-      STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-}
-      STRATA_STATIC_CREDENTIALS: ${STRATA_STATIC_CREDENTIALS:-}
-      STRATA_GC_INTERVAL: ${STRATA_GC_INTERVAL:-}
-      STRATA_GC_GRACE: ${STRATA_GC_GRACE:-}
-      STRATA_LIFECYCLE_INTERVAL: ${STRATA_LIFECYCLE_INTERVAL:-}
-      STRATA_LIFECYCLE_UNIT: ${STRATA_LIFECYCLE_UNIT:-}
-      STRATA_NOTIFY_TARGETS: ${STRATA_NOTIFY_TARGETS:-}
-      STRATA_PROMETHEUS_URL: ${STRATA_PROMETHEUS_URL:-http://prometheus:9090}
-    ports:
-      - "9998:9000"
-    volumes:
-      - strata-ceph-etc:/etc/ceph:ro
-      - ../strata.toml:/etc/strata/strata.toml:ro
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/readyz >/dev/null || exit 1"]
-      interval: 10s
-      timeout: 3s
-      retries: 6
-      start_period: 30s
-    restart: unless-stopped
-
-  # ------------------------------------------------------------------
-  # lab-tikv profile: 2 TiKV-backed strata replicas behind nginx LB on
-  # host port 9999. Use for the multi-replica HA scenarios in
-  # docs/site/content/deploy/multi-replica.md (US-002..US-007). Bring up with:
-  #   docker compose --profile lab-tikv up -d \
-  #     pd tikv ceph strata-tikv-a strata-tikv-b strata-lb-nginx \
-  #     prometheus grafana
-  # or `make up-lab-tikv`. Both replicas share STRATA_STATIC_CREDENTIALS
-  # / STRATA_AUTH_MODE / STRATA_TIKV_PD_ENDPOINTS / STRATA_WORKERS via
-  # host env so cross-replica SigV4 verifies. Distinct STRATA_NODE_ID
-  # keeps the heartbeat rows readable; distinct host ports (9001, 9002)
-  # let smoke tests poke each replica directly.
-  strata-tikv-a:
-    image: strata:ceph
-    build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile
-    container_name: strata-tikv-a
-    profiles: ["lab-tikv"]
-    depends_on:
-      pd:
-        condition: service_healthy
-      tikv:
-        condition: service_started
-      ceph:
-        condition: service_healthy
-    environment:
-      STRATA_CONFIG_FILE: /etc/strata/strata.toml
-      STRATA_META_BACKEND: tikv
-      STRATA_TIKV_PD_ENDPOINTS: ${STRATA_TIKV_PD_ENDPOINTS:-pd:2379}
-      STRATA_NODE_ID: strata-a
-      STRATA_WORKERS: ${STRATA_WORKERS:-gc,lifecycle}
-      # `optional` (not `off`) so presigned URLs minted by the console
-      # carry through to a real identity check at PUT time. With `off`
-      # the gateway treats every request as anonymous and an admin-
-      # owned bucket then ACL-denies the upload.
-      STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-optional}
-      STRATA_STATIC_CREDENTIALS: ${STRATA_STATIC_CREDENTIALS:-admin:adminpass:owner}
-      STRATA_GC_INTERVAL: ${STRATA_GC_INTERVAL:-}
-      STRATA_GC_GRACE: ${STRATA_GC_GRACE:-}
-      STRATA_GC_SHARDS: ${STRATA_GC_SHARDS:-}
-      STRATA_GC_CONCURRENCY: ${STRATA_GC_CONCURRENCY:-}
-      STRATA_GC_DUAL_WRITE: ${STRATA_GC_DUAL_WRITE:-}
-      STRATA_LIFECYCLE_INTERVAL: ${STRATA_LIFECYCLE_INTERVAL:-}
-      STRATA_LIFECYCLE_UNIT: ${STRATA_LIFECYCLE_UNIT:-}
-      STRATA_NOTIFY_TARGETS: ${STRATA_NOTIFY_TARGETS:-}
-      STRATA_PROMETHEUS_URL: ${STRATA_PROMETHEUS_URL:-http://prometheus:9090}
-    ports:
-      - "9001:9000"
-    volumes:
-      - strata-ceph-etc:/etc/ceph:ro
-      - ../strata.toml:/etc/strata/strata.toml:ro
-      - strata-jwt-shared:/etc/strata/jwt-shared
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/readyz >/dev/null || exit 1"]
-      interval: 10s
-      timeout: 3s
-      retries: 6
-      start_period: 30s
-    restart: unless-stopped
-
-  strata-tikv-b:
-    image: strata:ceph
-    build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile
-    container_name: strata-tikv-b
-    profiles: ["lab-tikv"]
-    depends_on:
-      pd:
-        condition: service_healthy
-      tikv:
-        condition: service_started
-      ceph:
-        condition: service_healthy
-    environment:
-      STRATA_CONFIG_FILE: /etc/strata/strata.toml
-      STRATA_META_BACKEND: tikv
-      STRATA_TIKV_PD_ENDPOINTS: ${STRATA_TIKV_PD_ENDPOINTS:-pd:2379}
-      STRATA_NODE_ID: strata-b
-      STRATA_WORKERS: ${STRATA_WORKERS:-gc,lifecycle}
-      # See strata-tikv-a above for rationale on the `optional` default.
-      STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-optional}
-      STRATA_STATIC_CREDENTIALS: ${STRATA_STATIC_CREDENTIALS:-admin:adminpass:owner}
-      STRATA_GC_INTERVAL: ${STRATA_GC_INTERVAL:-}
-      STRATA_GC_GRACE: ${STRATA_GC_GRACE:-}
-      STRATA_GC_SHARDS: ${STRATA_GC_SHARDS:-}
-      STRATA_GC_CONCURRENCY: ${STRATA_GC_CONCURRENCY:-}
-      STRATA_GC_DUAL_WRITE: ${STRATA_GC_DUAL_WRITE:-}
-      STRATA_LIFECYCLE_INTERVAL: ${STRATA_LIFECYCLE_INTERVAL:-}
-      STRATA_LIFECYCLE_UNIT: ${STRATA_LIFECYCLE_UNIT:-}
-      STRATA_NOTIFY_TARGETS: ${STRATA_NOTIFY_TARGETS:-}
-      STRATA_PROMETHEUS_URL: ${STRATA_PROMETHEUS_URL:-http://prometheus:9090}
-    ports:
-      - "9002:9000"
-    volumes:
-      - strata-ceph-etc:/etc/ceph:ro
-      - ../strata.toml:/etc/strata/strata.toml:ro
-      - strata-jwt-shared:/etc/strata/jwt-shared
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/readyz >/dev/null || exit 1"]
-      interval: 10s
-      timeout: 3s
-      retries: 6
-      start_period: 30s
-    restart: unless-stopped
-
-  # 3rd lab-tikv replica behind the `lab-tikv-3` profile (US-006 Phase 2 bench
-  # rerun). Operators stand up the 3-replica stack with
-  # `make up-lab-tikv-3` (which expands to a docker compose call layering both
-  # lab-tikv profiles), set `STRATA_GC_SHARDS=3` in the host env, then drive
-  # `make bench-gc-multi` / `make bench-lifecycle-multi`.
-  strata-tikv-c:
-    image: strata:ceph
-    build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile
-    container_name: strata-tikv-c
-    profiles: ["lab-tikv-3"]
-    depends_on:
-      pd:
-        condition: service_healthy
-      tikv:
-        condition: service_started
-      ceph:
-        condition: service_healthy
-    environment:
-      STRATA_CONFIG_FILE: /etc/strata/strata.toml
-      STRATA_META_BACKEND: tikv
-      STRATA_TIKV_PD_ENDPOINTS: ${STRATA_TIKV_PD_ENDPOINTS:-pd:2379}
-      STRATA_NODE_ID: strata-c
-      STRATA_WORKERS: ${STRATA_WORKERS:-gc,lifecycle}
-      STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-optional}
-      STRATA_STATIC_CREDENTIALS: ${STRATA_STATIC_CREDENTIALS:-admin:adminpass:owner}
-      STRATA_GC_INTERVAL: ${STRATA_GC_INTERVAL:-}
-      STRATA_GC_GRACE: ${STRATA_GC_GRACE:-}
-      STRATA_GC_SHARDS: ${STRATA_GC_SHARDS:-}
-      STRATA_GC_CONCURRENCY: ${STRATA_GC_CONCURRENCY:-}
-      STRATA_GC_DUAL_WRITE: ${STRATA_GC_DUAL_WRITE:-}
-      STRATA_LIFECYCLE_INTERVAL: ${STRATA_LIFECYCLE_INTERVAL:-}
-      STRATA_LIFECYCLE_UNIT: ${STRATA_LIFECYCLE_UNIT:-}
-      STRATA_NOTIFY_TARGETS: ${STRATA_NOTIFY_TARGETS:-}
-      STRATA_PROMETHEUS_URL: ${STRATA_PROMETHEUS_URL:-http://prometheus:9090}
-    ports:
-      - "9003:9000"
-    volumes:
-      - strata-ceph-etc:/etc/ceph:ro
-      - ../strata.toml:/etc/strata/strata.toml:ro
-      - strata-jwt-shared:/etc/strata/jwt-shared
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/readyz >/dev/null || exit 1"]
-      interval: 10s
-      timeout: 3s
-      retries: 6
-      start_period: 30s
-    restart: unless-stopped
-
-  # ------------------------------------------------------------------
-  # lab-cassandra-3 profile: 3 Cassandra-backed strata replicas behind
-  # nginx LB on host port 10000. Mirror of `lab-tikv-3` for multi-replica
-  # HA validation on the cassandra metadata backend. Use for exercising
-  # worker-lease fan-out (`gc-leader-N`, `rebalance-leader-N`,
-  # `lifecycle-leader-N`) across N replicas sharing one Cassandra. Bring
-  # up with:
-  #   docker compose stop strata
-  #   docker compose --profile lab-cassandra-3 up -d \
-  #     cassandra ceph ceph-b strata-cass-a strata-cass-b strata-cass-c \
-  #     strata-lb-nginx-cass prometheus grafana
-  # or `make up-lab-cassandra-3`. Stop the default `strata` service first
-  # so the 3 lab replicas + the bare strata do NOT race for the same
-  # cassandra leases — the lab shape is "3 replicas + LB on :10000"; the
-  # default strata at :9999 stays online unless explicitly stopped, but
-  # leaving both up at once is the race condition US-001 removed.
-  # Distinct STRATA_NODE_ID keeps heartbeat rows readable; distinct host
-  # ports (10001, 10002, 10003) let smoke tests poke each replica
-  # directly. Default fan-out envs (STRATA_GC_SHARDS=3 etc.) distribute
-  # all three worker fan-outs across the 3 replicas; operator overrides
-  # via host env.
-  strata-cass-a:
-    build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile
-    image: strata:ceph
-    container_name: strata-cass-a
-    profiles: ["lab-cassandra-3"]
-    depends_on:
-      cassandra:
-        condition: service_healthy
-      ceph:
-        condition: service_healthy
-      ceph-b:
-        condition: service_healthy
-    environment:
-      STRATA_CONFIG_FILE: /etc/strata/strata.toml
-      STRATA_META_BACKEND: cassandra
-      STRATA_CASSANDRA_HOSTS: ${STRATA_CASSANDRA_HOSTS:-cassandra:9042}
-      STRATA_NODE_ID: strata-cass-a
-      STRATA_WORKERS: ${STRATA_WORKERS:-gc,lifecycle,rebalance}
-      STRATA_GC_SHARDS: ${STRATA_GC_SHARDS:-3}
-      STRATA_LIFECYCLE_SHARDS: ${STRATA_LIFECYCLE_SHARDS:-3}
-      STRATA_REBALANCE_SHARDS: ${STRATA_REBALANCE_SHARDS:-3}
-      STRATA_RADOS_CLUSTERS: ${STRATA_RADOS_CLUSTERS:-default:/etc/ceph-a/ceph.conf:/etc/ceph-a/ceph.client.admin.keyring,cephb:/etc/ceph-b/ceph.conf:/etc/ceph-b/ceph.client.admin.keyring}
-      STRATA_RADOS_CONF: "/etc/ceph-a/ceph.conf"
-      STRATA_RADOS_KEYRING: "/etc/ceph-a/ceph.client.admin.keyring"
-      STRATA_RADOS_CLASSES: ${STRATA_RADOS_CLASSES:-}
-      STRATA_REBALANCE_INTERVAL: ${STRATA_REBALANCE_INTERVAL:-30s}
-      STRATA_REBALANCE_RATE_MB_S: ${STRATA_REBALANCE_RATE_MB_S:-100}
-      STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-optional}
-      STRATA_STATIC_CREDENTIALS: ${STRATA_STATIC_CREDENTIALS:-admin:adminpass:owner}
-      STRATA_GC_INTERVAL: ${STRATA_GC_INTERVAL:-}
-      STRATA_GC_GRACE: ${STRATA_GC_GRACE:-}
-      STRATA_LIFECYCLE_INTERVAL: ${STRATA_LIFECYCLE_INTERVAL:-}
-      STRATA_LIFECYCLE_UNIT: ${STRATA_LIFECYCLE_UNIT:-}
-      STRATA_NOTIFY_TARGETS: ${STRATA_NOTIFY_TARGETS:-}
-      STRATA_PROMETHEUS_URL: ${STRATA_PROMETHEUS_URL:-http://prometheus:9090}
-    ports:
-      - "10001:9000"
-    volumes:
-      - strata-ceph-etc:/etc/ceph:ro
-      - strata-ceph-etc:/etc/ceph-a:ro
-      - strata-cephb-etc:/etc/ceph-b:ro
-      - ../strata.toml:/etc/strata/strata.toml:ro
-      - strata-jwt-shared:/etc/strata/jwt-shared
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/readyz >/dev/null || exit 1"]
-      interval: 10s
-      timeout: 3s
-      retries: 6
-      start_period: 30s
-    restart: unless-stopped
-
-  strata-cass-b:
-    build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile
-    image: strata:ceph
-    container_name: strata-cass-b
-    profiles: ["lab-cassandra-3"]
-    depends_on:
-      cassandra:
-        condition: service_healthy
-      ceph:
-        condition: service_healthy
-      ceph-b:
-        condition: service_healthy
-    environment:
-      STRATA_CONFIG_FILE: /etc/strata/strata.toml
-      STRATA_META_BACKEND: cassandra
-      STRATA_CASSANDRA_HOSTS: ${STRATA_CASSANDRA_HOSTS:-cassandra:9042}
-      STRATA_NODE_ID: strata-cass-b
-      STRATA_WORKERS: ${STRATA_WORKERS:-gc,lifecycle,rebalance}
-      STRATA_GC_SHARDS: ${STRATA_GC_SHARDS:-3}
-      STRATA_LIFECYCLE_SHARDS: ${STRATA_LIFECYCLE_SHARDS:-3}
-      STRATA_REBALANCE_SHARDS: ${STRATA_REBALANCE_SHARDS:-3}
-      STRATA_RADOS_CLUSTERS: ${STRATA_RADOS_CLUSTERS:-default:/etc/ceph-a/ceph.conf:/etc/ceph-a/ceph.client.admin.keyring,cephb:/etc/ceph-b/ceph.conf:/etc/ceph-b/ceph.client.admin.keyring}
-      STRATA_RADOS_CONF: "/etc/ceph-a/ceph.conf"
-      STRATA_RADOS_KEYRING: "/etc/ceph-a/ceph.client.admin.keyring"
-      STRATA_RADOS_CLASSES: ${STRATA_RADOS_CLASSES:-}
-      STRATA_REBALANCE_INTERVAL: ${STRATA_REBALANCE_INTERVAL:-30s}
-      STRATA_REBALANCE_RATE_MB_S: ${STRATA_REBALANCE_RATE_MB_S:-100}
-      STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-optional}
-      STRATA_STATIC_CREDENTIALS: ${STRATA_STATIC_CREDENTIALS:-admin:adminpass:owner}
-      STRATA_GC_INTERVAL: ${STRATA_GC_INTERVAL:-}
-      STRATA_GC_GRACE: ${STRATA_GC_GRACE:-}
-      STRATA_LIFECYCLE_INTERVAL: ${STRATA_LIFECYCLE_INTERVAL:-}
-      STRATA_LIFECYCLE_UNIT: ${STRATA_LIFECYCLE_UNIT:-}
-      STRATA_NOTIFY_TARGETS: ${STRATA_NOTIFY_TARGETS:-}
-      STRATA_PROMETHEUS_URL: ${STRATA_PROMETHEUS_URL:-http://prometheus:9090}
-    ports:
-      - "10002:9000"
-    volumes:
-      - strata-ceph-etc:/etc/ceph:ro
-      - strata-ceph-etc:/etc/ceph-a:ro
-      - strata-cephb-etc:/etc/ceph-b:ro
-      - ../strata.toml:/etc/strata/strata.toml:ro
-      - strata-jwt-shared:/etc/strata/jwt-shared
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/readyz >/dev/null || exit 1"]
-      interval: 10s
-      timeout: 3s
-      retries: 6
-      start_period: 30s
-    restart: unless-stopped
-
-  strata-cass-c:
-    build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile
-    image: strata:ceph
-    container_name: strata-cass-c
-    profiles: ["lab-cassandra-3"]
-    depends_on:
-      cassandra:
-        condition: service_healthy
-      ceph:
-        condition: service_healthy
-      ceph-b:
-        condition: service_healthy
-    environment:
-      STRATA_CONFIG_FILE: /etc/strata/strata.toml
-      STRATA_META_BACKEND: cassandra
-      STRATA_CASSANDRA_HOSTS: ${STRATA_CASSANDRA_HOSTS:-cassandra:9042}
-      STRATA_NODE_ID: strata-cass-c
-      STRATA_WORKERS: ${STRATA_WORKERS:-gc,lifecycle,rebalance}
-      STRATA_GC_SHARDS: ${STRATA_GC_SHARDS:-3}
-      STRATA_LIFECYCLE_SHARDS: ${STRATA_LIFECYCLE_SHARDS:-3}
-      STRATA_REBALANCE_SHARDS: ${STRATA_REBALANCE_SHARDS:-3}
-      STRATA_RADOS_CLUSTERS: ${STRATA_RADOS_CLUSTERS:-default:/etc/ceph-a/ceph.conf:/etc/ceph-a/ceph.client.admin.keyring,cephb:/etc/ceph-b/ceph.conf:/etc/ceph-b/ceph.client.admin.keyring}
-      STRATA_RADOS_CONF: "/etc/ceph-a/ceph.conf"
-      STRATA_RADOS_KEYRING: "/etc/ceph-a/ceph.client.admin.keyring"
-      STRATA_RADOS_CLASSES: ${STRATA_RADOS_CLASSES:-}
-      STRATA_REBALANCE_INTERVAL: ${STRATA_REBALANCE_INTERVAL:-30s}
-      STRATA_REBALANCE_RATE_MB_S: ${STRATA_REBALANCE_RATE_MB_S:-100}
-      STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-optional}
-      STRATA_STATIC_CREDENTIALS: ${STRATA_STATIC_CREDENTIALS:-admin:adminpass:owner}
-      STRATA_GC_INTERVAL: ${STRATA_GC_INTERVAL:-}
-      STRATA_GC_GRACE: ${STRATA_GC_GRACE:-}
-      STRATA_LIFECYCLE_INTERVAL: ${STRATA_LIFECYCLE_INTERVAL:-}
-      STRATA_LIFECYCLE_UNIT: ${STRATA_LIFECYCLE_UNIT:-}
-      STRATA_NOTIFY_TARGETS: ${STRATA_NOTIFY_TARGETS:-}
-      STRATA_PROMETHEUS_URL: ${STRATA_PROMETHEUS_URL:-http://prometheus:9090}
-    ports:
-      - "10003:9000"
-    volumes:
-      - strata-ceph-etc:/etc/ceph:ro
-      - strata-ceph-etc:/etc/ceph-a:ro
-      - strata-cephb-etc:/etc/ceph-b:ro
-      - ../strata.toml:/etc/strata/strata.toml:ro
-      - strata-jwt-shared:/etc/strata/jwt-shared
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/readyz >/dev/null || exit 1"]
-      interval: 10s
-      timeout: 3s
-      retries: 6
-      start_period: 30s
-    restart: unless-stopped
-
-  # nginx LB fronting the 3 lab-cassandra-3 replicas at host port 10000.
-  # Config lives in deploy/nginx/strata-lab-cassandra.conf — round-robin
-  # upstream (mirror of strata-lab.conf shape).
-  strata-lb-nginx-cass:
-    image: nginx:1.27-alpine
-    container_name: strata-lb-nginx-cass
-    profiles: ["lab-cassandra-3"]
-    depends_on:
-      - strata-cass-a
-      - strata-cass-b
-      - strata-cass-c
-    volumes:
-      - ../nginx/strata-lab-cassandra.conf:/etc/nginx/conf.d/default.conf:ro
-    ports:
-      - "10000:80"
-    restart: unless-stopped
-
-  # nginx LB fronting both lab-tikv replicas at host port 9999. Wired in
-  # US-003. Config lives in deploy/nginx/strata-lab.conf.
-  strata-lb-nginx:
-    image: nginx:1.27-alpine
-    container_name: strata-lb-nginx
-    profiles: ["lab-tikv"]
-    depends_on:
-      - strata-tikv-a
-      - strata-tikv-b
-    volumes:
-      - ../nginx/strata-lab.conf:/etc/nginx/conf.d/default.conf:ro
-    ports:
-      - "9999:80"
     restart: unless-stopped
 
   # OTLP collector + Jaeger live behind the "tracing" profile so the default
