@@ -410,6 +410,43 @@ components:
           type: integer
           format: int64
           nullable: true
+        physical_chunks_on_cluster:
+          type: integer
+          format: int64
+          nullable: true
+          description: |
+            Physical object count on the underlying pool(s) for this
+            cluster, sampled via data.ClusterObjectCountProbe (US-001
+            drain-progress-physical). RADOS sums ioctx.GetPoolStats()
+            .Num_objects across each (cluster, pool, namespace) tuple.
+            Null when the data backend does not implement the probe
+            (memory + s3) OR when the per-poll probe failed (the per-
+            probe counter strata_drain_progress_probe_errors_total
+            {probe="object_count"} bumps in that case). Cached in-process
+            for 10 s to absorb poll cost. Operators consume this as the
+            primary "are physical chunks still on the cluster" signal —
+            chunks_on_cluster (manifest count) drops to zero immediately
+            on rebalance CAS success while physical chunks linger
+            through STRATA_GC_GRACE.
+        physical_bytes_on_cluster:
+          type: integer
+          format: int64
+          nullable: true
+          description: |
+            Physical bytes-used on the underlying pool(s), sampled via
+            data.ClusterStatsProbe. Same probe semantics as
+            physical_chunks_on_cluster (cache shared, fail-isolated;
+            counter label probe="stats").
+        gc_queue_pending:
+          type: integer
+          description: |
+            Explicit length of the cluster-scoped GC deletion queue.
+            Mirrors the safety-gate count surfaced in
+            not_ready_reasons (gc_queue_pending token), but stays
+            available as a first-class field so the UI's `Awaiting GC`
+            state can render the physical-but-not-yet-deleted backlog
+            without parsing not_ready_reasons (US-001
+            drain-progress-physical).
         base_chunks_at_start:
           type: integer
           format: int64

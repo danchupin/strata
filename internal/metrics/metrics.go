@@ -281,6 +281,14 @@ var (
 		},
 		[]string{"cluster"},
 	)
+
+	DrainProgressProbeErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_drain_progress_probe_errors_total",
+			Help: "Per-probe failures during /admin/v1/clusters/{id}/drain-progress assembly (US-001 drain-progress-physical). probe ∈ {stats, object_count}. The response still succeeds with null physical fields when the probe fails — this counter is the operator's signal that the underlying RADOS path needs investigation.",
+		},
+		[]string{"cluster", "probe"},
+	)
 )
 
 func Register() {
@@ -315,6 +323,7 @@ func Register() {
 		RebalanceRefusedTotal,
 		PutChunksRefusedTotal,
 		DrainCompleteTotal,
+		DrainProgressProbeErrorsTotal,
 	)
 }
 

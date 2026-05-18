@@ -211,6 +211,16 @@ export interface ClusterDrainProgress {
   // false (US-006 drain-cleanup). Tokens: chunks_remaining / gc_queue_pending
   // / open_multipart. Empty / omitted when deregister_ready is true.
   not_ready_reasons?: string[];
+  // physical_chunks_on_cluster / physical_bytes_on_cluster — physical pool
+  // state sampled via ClusterObjectCountProbe / ClusterStatsProbe behind a
+  // 10s in-process cache (US-001 drain-progress-physical). Null when the
+  // backend doesn't implement the probe (S3, memory) or the probe errored
+  // with no cached value. gc_queue_pending — explicit GC-queue depth for
+  // the cluster (len ListChunkDeletionsByCluster); the same value that
+  // drives the gc_queue_pending not-ready token.
+  physical_chunks_on_cluster?: number | null;
+  physical_bytes_on_cluster?: number | null;
+  gc_queue_pending?: number;
   by_bucket?: BucketDrainProgressEntry[];
   warnings?: string[];
 }

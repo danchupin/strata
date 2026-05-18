@@ -164,6 +164,19 @@ type ClusterStatsProbe interface {
 	ClusterStats(ctx context.Context, clusterID string) (usedBytes, totalBytes int64, err error)
 }
 
+// ClusterObjectCountProbe is the optional capability surface for data
+// backends that can report the per-cluster physical object count
+// (US-001 drain-progress-physical). RADOS implements it by walking the
+// configured (cluster, pool, namespace) tuples and summing
+// `ioctx.GetPoolStats().Num_objects`. memory + s3 backends do not
+// implement it — the drain-progress builder type-asserts and surfaces
+// JSON null in the physical_chunks_on_cluster field when the assertion
+// fails. Returns (0, err) on any per-pool probe error; the caller MUST
+// NOT silently zero-fill.
+type ClusterObjectCountProbe interface {
+	ClusterObjectCount(ctx context.Context, clusterID string) (int64, error)
+}
+
 // CORSRule is the backend-translation input for one bucket CORS rule. The
 // shape mirrors S3's CORSRule directly so translation is field-for-field;
 // the empty string ID is allowed (S3 accepts unnamed rules).

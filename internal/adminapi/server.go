@@ -143,6 +143,12 @@ type Server struct {
 	// fail loud rather than serving a permanently-empty response.
 	RebalanceProgress *rebalance.ProgressTracker
 
+	// ClusterStatsCache absorbs per-poll probe cost for the physical-fill +
+	// object-count fields on GET /admin/v1/clusters/{id}/drain-progress
+	// (US-001 drain-progress-physical). 10 s TTL; TTL-only invalidation.
+	// nil disables caching — probes fire on every poll.
+	ClusterStatsCache *placement.ClusterStatsCache
+
 	// hotBucketsMu guards lazy initialisation of hotBucketsCacheVal — the
 	// 30s TTL cache that absorbs burst polls of /admin/v1/diagnostics/
 	// hot-buckets (US-007).
@@ -252,6 +258,9 @@ type Config struct {
 	// progress (US-003 drain-lifecycle). nil disables the endpoint with 503
 	// ProgressUnavailable.
 	RebalanceProgress *rebalance.ProgressTracker
+	// ClusterStatsCache is the 10s-TTL per-cluster fill + object-count cache
+	// (US-001 drain-progress-physical). nil disables caching.
+	ClusterStatsCache *placement.ClusterStatsCache
 }
 
 // New constructs a Server. Started defaults to now. JWTSecret empty means
@@ -296,6 +305,7 @@ func New(c Config) *Server {
 		ClusterBackends:      c.ClusterBackends,
 		DrainCache:           c.DrainCache,
 		RebalanceProgress:    c.RebalanceProgress,
+		ClusterStatsCache:    c.ClusterStatsCache,
 		Logger:               log.Default(),
 	}
 }

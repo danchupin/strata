@@ -195,6 +195,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	auditBroadcaster := auditstream.New(logger, metrics.AuditStreamObserver{})
 	storageClassSnapshot := bucketstats.NewSnapshot(poolsByClass(cfg, logger))
 	rebalanceProgress := rebalance.NewProgressTracker(rebalanceInterval(logger))
+	clusterStatsCache := placement.NewClusterStatsCache(0)
 	adminServer := adminapi.New(adminapi.Config{
 		Meta:                 metaStore,
 		Data:                 dataBackend,
@@ -228,6 +229,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		ClusterBackends:      clusterBackends(cfg),
 		DrainCache:           drainCache,
 		RebalanceProgress:    rebalanceProgress,
+		ClusterStatsCache:    clusterStatsCache,
 	})
 
 	mux := http.NewServeMux()

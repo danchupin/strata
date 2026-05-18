@@ -31,6 +31,23 @@ function formatCount(n: number): string {
   return n.toFixed(0);
 }
 
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
+  let i = 0;
+  let v = bytes;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+const PHYSICAL_UNAVAILABLE_TOOLTIP =
+  'physical count unavailable on this backend';
+const AWAITING_GC_TOOLTIP =
+  'Physical delete completes after STRATA_GC_GRACE elapses (~5m default) plus the next gc worker tick.';
+
 function formatEta(seconds: number | null | undefined): string {
   if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) {
     return '?';
@@ -101,6 +118,24 @@ export function DrainProgressBar({
   const base = data.base_chunks_at_start ?? null;
   const deregReady = data.deregister_ready === true;
   const notReadyReasons = data.not_ready_reasons ?? [];
+  // Physical pool view (US-002 drain-progress-physical). When the backend
+  // supports ClusterObjectCountProbe (RADOS), `physical_chunks_on_cluster`
+  // is the operator's primary chunk count — the manifest count
+  // (`chunks_on_cluster`) drops to 0 as soon as the rebalance worker
+  // rewrites BackendRef, but physical chunks linger until STRATA_GC_GRACE
+  // elapses + the next gc tick. On backends without the probe the field
+  // is null and the manifest count remains primary.
+  const physicalChunks =
+    data.physical_chunks_on_cluster == null
+      ? null
+      : (data.physical_chunks_on_cluster as number);
+  const physicalBytes =
+    data.physical_bytes_on_cluster == null
+      ? null
+      : (data.physical_bytes_on_cluster as number);
+  const gcPending = data.gc_queue_pending ?? 0;
+  const primary: number | null = physicalChunks ?? chunks;
+  const physicalUnavailable = physicalChunks == null;
 
   if (isReadonly) {
     return (
@@ -178,6 +213,39 @@ export function DrainProgressBar({
             (env edit + restart)
           </span>
         </div>
+      </div>
+    );
+  }
+
+  // Awaiting GC cleanup (US-002 drain-progress-physical): manifest scan
+  // sees 0 chunks but the physical pool still holds chunks pending the
+  // STRATA_GC_GRACE window. Render an amber chip with static tooltip
+  // describing the wait. Only fires when physical-probe is available
+  // (physicalChunks != null) — null-physical backends fall through to
+  // the existing not-ready / dereg-ready branches.
+  if (chunks === 0 && physicalChunks != null && physicalChunks > 0) {
+    return (
+      <div className="space-y-1" data-testid="dp-evacuate">
+        <div className="text-[10px] font-semibold uppercase tracking-wide text-red-700 dark:text-red-300">
+          Evacuating
+        </div>
+        <div
+          className="flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-xs text-amber-800 dark:text-amber-300"
+          title={AWAITING_GC_TOOLTIP}
+          data-testid="dp-awaiting-gc"
+        >
+          <AlertCircle className="h-3.5 w-3.5 shrink-0" aria-hidden />
+          <span className="font-medium">
+            Awaiting GC cleanup: {formatCount(physicalChunks)} chunks awaiting
+            physical delete
+          </span>
+        </div>
+        <DrainDetail
+          manifestChunks={chunks}
+          gcPending={gcPending}
+          physicalBytes={physicalBytes}
+          physicalUnavailable={physicalUnavailable}
+        />
       </div>
     );
   }
@@ -309,10 +377,23 @@ export function DrainProgressBar({
         )}
         data-testid="dp-summary"
       >
-        <span className="font-medium text-foreground">
-          {formatCount(chunks)}
+        <span className="text-foreground">Migrating: </span>
+        <span
+          className="font-medium text-foreground"
+          data-testid="dp-primary-count"
+        >
+          {formatCount(primary ?? 0)}
         </span>{' '}
-        total
+        chunks remaining
+        {physicalUnavailable && (
+          <span
+            className="ml-1 italic"
+            title={PHYSICAL_UNAVAILABLE_TOOLTIP}
+            data-testid="dp-physical-unavailable"
+          >
+            (physical count unavailable on this backend)
+          </span>
+        )}
         {base != null && base > 0 && ` · ${formatCount(base)} at start`}
         {migratable > 0 && data.eta_seconds != null && (
           <> · ~{formatEta(data.eta_seconds)}</>
@@ -326,6 +407,12 @@ export function DrainProgressBar({
           </span>
         )}
       </div>
+      <DrainDetail
+        manifestChunks={chunks}
+        gcPending={gcPending}
+        physicalBytes={physicalBytes}
+        physicalUnavailable={physicalUnavailable}
+      />
       <StuckBucketsDrawer
         open={drawerOpen}
         onOpenChange={setDrawerOpen}
@@ -335,6 +422,61 @@ export function DrainProgressBar({
         rows={drawerRows}
       />
     </div>
+  );
+}
+
+interface DrainDetailProps {
+  manifestChunks: number | null;
+  gcPending: number;
+  physicalBytes: number | null;
+  physicalUnavailable: boolean;
+}
+
+// DrainDetail renders the collapsed-by-default detail block that splits
+// the primary chunk count into manifest vs physical (US-002
+// drain-progress-physical). Operators reach for it when the headline
+// reads "Awaiting GC cleanup" — the breakdown shows that manifest=0
+// but GC queue is non-empty, so deregister-ready is held only by the
+// grace window.
+function DrainDetail({
+  manifestChunks,
+  gcPending,
+  physicalBytes,
+  physicalUnavailable,
+}: DrainDetailProps) {
+  return (
+    <details
+      className="mt-1 rounded-md border border-border/60 bg-muted/30 text-[11px]"
+      data-testid="dp-detail"
+    >
+      <summary className="cursor-pointer select-none px-2 py-1 text-muted-foreground hover:text-foreground">
+        Detail
+      </summary>
+      <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 px-2 pb-2 pt-1 tabular-nums">
+        <dt className="text-muted-foreground">Manifest chunks</dt>
+        <dd
+          className="text-foreground"
+          data-testid="dp-detail-manifest"
+        >
+          {manifestChunks == null ? '?' : formatCount(manifestChunks)}
+        </dd>
+        <dt className="text-muted-foreground">GC queue</dt>
+        <dd className="text-foreground" data-testid="dp-detail-gc">
+          {formatCount(gcPending)}
+        </dd>
+        <dt className="text-muted-foreground">Physical bytes</dt>
+        <dd
+          className={cn(
+            physicalUnavailable ? 'italic text-muted-foreground' : 'text-foreground',
+          )}
+          data-testid="dp-detail-bytes"
+        >
+          {physicalUnavailable || physicalBytes == null
+            ? 'unavailable'
+            : formatBytes(physicalBytes)}
+        </dd>
+      </dl>
+    </details>
   );
 }
 
