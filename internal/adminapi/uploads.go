@@ -273,10 +273,17 @@ func (s *Server) handleUploadComplete(w http.ResponseWriter, r *http.Request) {
 	owner := auth.FromContext(ctx).Owner
 	s3api.SetAuditOverride(ctx, "admin:UploadObject", "object:"+bucket+"/"+mu.Key, bucket, owner)
 
-	innerPath := "/" + bucket + "/" + mu.Key
-	innerURL := innerPath + "?uploadId=" + url.QueryEscape(uploadID)
-	inner := httptest.NewRequest(http.MethodPost, innerURL, bytes.NewReader(xmlBody))
-	inner = inner.WithContext(ctx)
+	// Construct the inner request via the prod http.NewRequestWithContext.
+	// httptest.NewRequest parses "METHOD target HTTP/1.0\r\n\r\n" via
+	// http.ReadRequest under the hood, which panics on literal spaces in
+	// `target` — object keys may legitimately contain spaces (`My File.pdf`).
+	// url.URL.String() properly percent-escapes the Path.
+	innerU := &url.URL{Path: "/" + bucket + "/" + mu.Key, RawQuery: "uploadId=" + url.QueryEscape(uploadID)}
+	inner, err := http.NewRequestWithContext(ctx, http.MethodPost, innerU.String(), bytes.NewReader(xmlBody))
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "Internal", err.Error())
+		return
+	}
 	inner.Header.Set("Content-Type", "application/xml")
 	rec := httptest.NewRecorder()
 	s.S3Handler.ServeHTTP(rec, inner)
@@ -335,10 +342,14 @@ func (s *Server) handleUploadAbort(w http.ResponseWriter, r *http.Request) {
 	owner := auth.FromContext(ctx).Owner
 	s3api.SetAuditOverride(ctx, "admin:AbortMultipartUpload", "object:"+bucket+"/"+mu.Key, bucket, owner)
 
-	innerPath := "/" + bucket + "/" + mu.Key
-	innerURL := innerPath + "?uploadId=" + url.QueryEscape(uploadID)
-	inner := httptest.NewRequest(http.MethodDelete, innerURL, nil)
-	inner = inner.WithContext(ctx)
+	// See handleUploadComplete for the rationale on http.NewRequestWithContext
+	// (httptest.NewRequest panics on literal spaces in target).
+	innerU := &url.URL{Path: "/" + bucket + "/" + mu.Key, RawQuery: "uploadId=" + url.QueryEscape(uploadID)}
+	inner, err := http.NewRequestWithContext(ctx, http.MethodDelete, innerU.String(), nil)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "Internal", err.Error())
+		return
+	}
 	rec := httptest.NewRecorder()
 	s.S3Handler.ServeHTTP(rec, inner)
 
