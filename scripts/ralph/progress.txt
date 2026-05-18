@@ -22,3 +22,20 @@ Cycle: ralph/compose-profile-isolation
 - **Resource footprint**: ceph-b always-on adds ~1 GB RAM + a few hundred MB disk to the bare `up -d` baseline. Accepted (documented in migration note).
 - **End-to-end discipline** (per `feedback_cycle_end_to_end.md`): walkthrough in PRD covers happy path (multi-cluster bare bring-up + drain cephb evacuate completes) + edge cases (single-cluster env override, lab-cassandra-3 with stopped default strata, residue grep) + worst-case thought exercise (prod compatibility, features worker subset, multi-replica scaling, stale cluster_state rows). State Truth Tables document compose service start matrix + cluster_state seed shape. Cache Invalidation Ledger: no new caches. Safety Claims Preconditions: lease race impossible (Test: scenario A asserts strata-multi container absent); drain not wedging (Test: scenario A asserts deregister_ready within 5 min); single-cluster smoke still possible (Test: scenario B asserts single cluster connection log).
 
+
+## 2026-05-18 - US-001
+- Collapsed compose to single canonical strata service.
+- `deploy/docker/docker-compose.yml`:
+  - Dropped `profiles: ["multi-cluster"]` from ceph-b — now always-on dep.
+  - Removed standalone `strata-features` service entirely (feature workers opt-in via STRATA_WORKERS on the canonical strata).
+  - Removed legacy single-cluster `strata` service block + `strata-multi` service block; merged into one `strata` service: container_name=strata, port 9999:9000, mounts both `strata-ceph-etc` + `strata-cephb-etc` volumes, STRATA_RADOS_CLUSTERS defaults to `default:/etc/ceph-a/...,cephb:/etc/ceph-b/...`, STRATA_WORKERS defaults to `gc,lifecycle,rebalance`, depends_on cassandra+ceph+ceph-b healthy.
+  - Comment block above the surviving strata: documents canonical multi-cluster default + env-override path for single-cluster smoke.
+- `make build` + `make vet` green.
+- `docker compose -f deploy/docker/docker-compose.yml config -q` validates.
+- Default profile services (`docker compose config --services` with no flag) now: cassandra, ceph, ceph-b, strata, prometheus, grafana. The PRD "lists exactly: cassandra, ceph, ceph-b, strata" is interpreted as the strata-stack subset — prometheus/grafana are observability infra outside US-001 scope; leaving them unprofiled keeps `make up-all` operator-visible. Future cycles may profile-gate observability separately.
+- **Learnings for future iterations:**
+  - strata-tikv legitimately binds host port `9998` (cassandra-strata at 9999, tikv-strata at 9998 — coexist by design). US-002 grep gate for `:9998` should NOT flip strata-tikv refs; only the dead strata-multi 9998 references should die. The grep gate's intent is "no strata-multi residue", not "no 9998 anywhere".
+  - The `features` profile string survives in compose only because `webhook-trap` (CI artifact) still uses it. US-002 grep gate is for `--profile features` flag invocations in scripts/CI, not for yaml-level `profiles: ["features"]` declarations.
+  - PRD acceptance "make up-all (which runs docker compose up -d)" is misleading — the existing Makefile target runs `up -d cassandra ceph strata prometheus grafana`. compose `depends_on: ceph-b` resolves ceph-b automatically, so `up-all` does bring up the multi-cluster stack. US-002 may want to simplify `up-all` to bare `up -d`.
+  - Comment-block + env-default rewrite is the cheap structural fix — no new gotchas to remember.
+---
