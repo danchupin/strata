@@ -390,7 +390,12 @@ func (w *Worker) evaluateNoncurrent(ctx context.Context, b *meta.Bucket, rule *R
 }
 
 func (w *Worker) expireNoncurrent(ctx context.Context, b *meta.Bucket, v *meta.Object, ruleID string) {
-	removed, err := w.Meta.DeleteObject(ctx, b.ID, v.Key, v.VersionID, true)
+	var removed *meta.Object
+	err := retryAction(ctx, func() error {
+		var rerr error
+		removed, rerr = w.Meta.DeleteObject(ctx, b.ID, v.Key, v.VersionID, true)
+		return rerr
+	})
 	if err != nil {
 		metrics.LifecycleTickTotal.WithLabelValues("expire_noncurrent", "error").Inc()
 		w.Logger.WarnContext(ctx, "lifecycle expire noncurrent", "bucket", b.Name, "key", v.Key, "version", v.VersionID, "error", err.Error())
@@ -590,7 +595,12 @@ func (w *Worker) expire(ctx context.Context, b *meta.Bucket, o *meta.Object, rul
 		span.End()
 	}()
 	versioned := meta.IsVersioningActive(b.Versioning)
-	removed, err := w.Meta.DeleteObject(ctx, b.ID, o.Key, "", versioned)
+	var removed *meta.Object
+	err := retryAction(ctx, func() error {
+		var rerr error
+		removed, rerr = w.Meta.DeleteObject(ctx, b.ID, o.Key, "", versioned)
+		return rerr
+	})
 	if err != nil {
 		metrics.LifecycleTickTotal.WithLabelValues("expire", "error").Inc()
 		w.Logger.WarnContext(ctx, "lifecycle expire", "bucket", b.Name, "key", o.Key, "error", err.Error())

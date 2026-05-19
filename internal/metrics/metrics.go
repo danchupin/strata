@@ -47,6 +47,14 @@ var (
 		Help: "RADOS chunks successfully deleted by the GC worker.",
 	})
 
+	GCTerminalAck = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_gc_terminal_ack_total",
+			Help: "GC queue entries ack'd as terminal without a successful Delete (e.g. chunk already swept by a sibling leader). reason=\"enoent\" today; future reasons may be added as the worker grows new terminal classifiers.",
+		},
+		[]string{"reason"},
+	)
+
 	LifecycleTransitions = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "strata_lifecycle_transitions_total",
@@ -172,6 +180,14 @@ var (
 			Help: "Lifecycle worker per-action outcomes; action=transition|expire|expire_noncurrent|abort_multipart, status=success|error|skipped.",
 		},
 		[]string{"action", "status"},
+	)
+
+	LifecycleRetryTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_lifecycle_retry_total",
+			Help: "Lifecycle worker per-action retry outcomes (US-003 polish-dx). outcome=ok (succeeded on a retry attempt), terminal (first non-retryable error), exhausted (3 transient failures in a row). No bump when the first attempt succeeds.",
+		},
+		[]string{"outcome"},
 	)
 
 	WorkerPanicTotal = prometheus.NewCounterVec(
@@ -303,7 +319,7 @@ func Register() {
 	prometheus.MustRegister(
 		HTTPRequests, HTTPDuration,
 		CassandraQueryDuration,
-		GCEnqueued, GCProcessed,
+		GCEnqueued, GCProcessed, GCTerminalAck,
 		LifecycleTransitions, LifecycleExpirations,
 		ReplicationLagSeconds, ReplicationCompleted, ReplicationFailed,
 		ReplicationQueueDepth, ReplicationQueueAge,
@@ -316,6 +332,7 @@ func Register() {
 		StorageClassBytes,
 		StorageClassObjects,
 		LifecycleTickTotal,
+		LifecycleRetryTotal,
 		NotifyDeliveryTotal,
 		WorkerPanicTotal,
 		MetaTikvAuditSweepDeleted,

@@ -34,6 +34,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	smithy "github.com/aws/smithy-go"
 	"github.com/aws/smithy-go/logging"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
@@ -936,7 +937,13 @@ func (b *Backend) DeleteObject(ctx context.Context, oid, versionID string) error
 	if err != nil {
 		return err
 	}
-	return deleteFromCluster(ctx, c, bucket, oid, versionID)
+	if err := deleteFromCluster(ctx, c, bucket, oid, versionID); err != nil {
+		if errors.Is(err, data.ErrChunkNotFound) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // DeleteBatch removes up to len(refs) backend objects via DeleteObjects.
@@ -1126,9 +1133,11 @@ func (b *Backend) Delete(ctx context.Context, m *data.Manifest) error {
 }
 
 // deleteFromCluster issues a single DeleteObject against the supplied
-// (cluster, bucket) pair. Idempotent — NoSuchKey is success. Used by
-// both class-routed Delete(m) and the legacy single-cluster
-// DeleteObject helper.
+// (cluster, bucket) pair. NoSuchKey is lifted to data.ErrChunkNotFound
+// so the gc worker can treat sibling-leader-swept chunks as terminal
+// and ack the queue entry; callers that want the legacy "idempotent —
+// NoSuchKey is success" shape (e.g. DeleteObject) swallow the sentinel
+// at the boundary.
 func deleteFromCluster(ctx context.Context, c *s3Cluster, bucket, oid, versionID string) error {
 	key := oid
 	in := &awss3.DeleteObjectInput{
@@ -1144,7 +1153,11 @@ func deleteFromCluster(ctx context.Context, c *s3Cluster, bucket, oid, versionID
 	if _, err := c.client.DeleteObject(opCtx, in); err != nil {
 		var noSuchKey *s3types.NoSuchKey
 		if errors.As(err, &noSuchKey) {
-			return nil
+			return fmt.Errorf("s3: delete %s: %w", oid, data.ErrChunkNotFound)
+		}
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchKey" {
+			return fmt.Errorf("s3: delete %s: %w", oid, data.ErrChunkNotFound)
 		}
 		return fmt.Errorf("s3: delete %s: %w", oid, err)
 	}

@@ -2,6 +2,7 @@ package gc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -10,8 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta/memory"
+	"github.com/danchupin/strata/internal/metrics"
 )
 
 // recordingBackend records per-cluster Delete invocations so the GC worker can
@@ -176,5 +180,124 @@ func TestWorker_DrainConcurrency(t *testing.T) {
 	if elapsed > cap {
 		t.Fatalf("drain elapsed=%s, expected < %s (4× ideal-parallel %s)",
 			elapsed, cap, idealParallel)
+	}
+}
+
+// programmableBackend returns a caller-supplied error per chunk OID on
+// Delete. Used by TestWorker_TerminalAckOnChunkNotFound to drive the
+// US-001 gc.Worker ENOENT classifier without standing up a real RADOS
+// or S3 backend.
+type programmableBackend struct {
+	mu      sync.Mutex
+	errs    map[string]error
+	deletes map[string]int
+}
+
+func (b *programmableBackend) PutChunks(context.Context, io.Reader, string) (*data.Manifest, error) {
+	return nil, nil
+}
+
+func (b *programmableBackend) GetChunks(context.Context, *data.Manifest, int64, int64) (io.ReadCloser, error) {
+	return nil, nil
+}
+
+func (b *programmableBackend) Delete(_ context.Context, m *data.Manifest) error {
+	if m == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.deletes == nil {
+		b.deletes = map[string]int{}
+	}
+	for _, c := range m.Chunks {
+		b.deletes[c.OID]++
+		if err, ok := b.errs[c.OID]; ok {
+			return err
+		}
+	}
+	return nil
+}
+
+func (b *programmableBackend) Close() error { return nil }
+
+func (b *programmableBackend) deleteCount(oid string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.deletes[oid]
+}
+
+// TestWorker_TerminalAckOnChunkNotFound pins the US-001 acceptance: a
+// Delete returning data.ErrChunkNotFound is treated as terminal — the
+// gc worker ack's the queue entry (so it never re-appears), bumps the
+// strata_gc_terminal_ack_total{reason="enoent"} counter, and does NOT
+// stickyErr the iteration. Non-ENOENT errors keep the legacy loop-fail
+// behaviour: no ack, stickyErr surfaces, entry re-appears next tick.
+func TestWorker_TerminalAckOnChunkNotFound(t *testing.T) {
+	ctx := context.Background()
+	store := memory.New()
+	chunks := []data.ChunkRef{
+		{Cluster: "default", Pool: "hot", OID: "X", Size: 10},
+		{Cluster: "default", Pool: "hot", OID: "Y", Size: 20},
+		{Cluster: "default", Pool: "hot", OID: "Z", Size: 30},
+	}
+	if err := store.EnqueueChunkDeletion(ctx, "default", chunks); err != nil {
+		t.Fatalf("EnqueueChunkDeletion: %v", err)
+	}
+
+	transportErr := errors.New("transport fail")
+	be := &programmableBackend{
+		errs: map[string]error{
+			"X": fmt.Errorf("chunk X: %w", data.ErrChunkNotFound),
+			"Y": transportErr,
+		},
+	}
+
+	terminalBefore := testutil.ToFloat64(metrics.GCTerminalAck.WithLabelValues("enoent"))
+
+	w := &Worker{
+		Meta:   store,
+		Data:   be,
+		Region: "default",
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	processed := w.RunOnce(ctx)
+	if processed != 2 {
+		t.Fatalf("processed=%d want 2 (X + Z; Y not ack'd)", processed)
+	}
+
+	if got := testutil.ToFloat64(metrics.GCTerminalAck.WithLabelValues("enoent")) - terminalBefore; got != 1 {
+		t.Errorf("strata_gc_terminal_ack_total{reason=\"enoent\"} delta=%v want 1", got)
+	}
+
+	remaining, err := store.ListGCEntries(ctx, "default", time.Now().Add(time.Hour), 100)
+	if err != nil {
+		t.Fatalf("ListGCEntries: %v", err)
+	}
+	if len(remaining) != 1 {
+		t.Fatalf("after RunOnce: %d remaining want 1 (Y)", len(remaining))
+	}
+	if remaining[0].Chunk.OID != "Y" {
+		t.Fatalf("remaining OID=%q want Y", remaining[0].Chunk.OID)
+	}
+
+	// Two further RunOnce passes — X never re-appears (ack'd); Y still
+	// retries because the transport error stays loop-fail.
+	for i := range 2 {
+		w.RunOnce(ctx)
+		remaining, err = store.ListGCEntries(ctx, "default", time.Now().Add(time.Hour), 100)
+		if err != nil {
+			t.Fatalf("ListGCEntries (pass %d): %v", i+2, err)
+		}
+		if len(remaining) != 1 || remaining[0].Chunk.OID != "Y" {
+			t.Fatalf("pass %d: remaining=%v want [Y]", i+2, remaining)
+		}
+	}
+
+	if be.deleteCount("X") != 1 {
+		t.Errorf("Delete(X) count=%d want 1 (ack'd after first pass)", be.deleteCount("X"))
+	}
+	if be.deleteCount("Y") != 3 {
+		t.Errorf("Delete(Y) count=%d want 3 (retried each pass)", be.deleteCount("Y"))
 	}
 }

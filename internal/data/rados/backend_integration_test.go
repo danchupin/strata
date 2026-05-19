@@ -6,11 +6,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"errors"
 	"io"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/data/rados"
 )
 
@@ -94,9 +96,13 @@ func TestRADOSBackend(t *testing.T) {
 		if err := be.Delete(ctx, manifest); err != nil {
 			t.Fatalf("Delete: %v", err)
 		}
-		// Second delete on the same manifest should be a no-op (ENOENT-tolerant path).
-		if err := be.Delete(ctx, manifest); err != nil {
-			t.Logf("second Delete returned %v (usually ENOENT, fine)", err)
+		// Second delete on the same manifest lifts the underlying
+		// goceph.ErrNotFound to data.ErrChunkNotFound so the gc worker
+		// can treat sibling-leader-swept chunks as terminal (US-001).
+		if err := be.Delete(ctx, manifest); err == nil {
+			t.Errorf("second Delete: got nil, want errors.Is(err, data.ErrChunkNotFound)")
+		} else if !errors.Is(err, data.ErrChunkNotFound) {
+			t.Errorf("second Delete: %v, want errors.Is(err, data.ErrChunkNotFound)", err)
 		}
 	})
 

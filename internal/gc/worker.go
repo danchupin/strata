@@ -2,6 +2,7 @@ package gc
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -222,6 +223,19 @@ func (w *Worker) drainCount(ctx context.Context) (int, error) {
 				}()
 				manifest := &data.Manifest{Chunks: []data.ChunkRef{e.Chunk}}
 				if err := w.Data.Delete(delCtx, manifest); err != nil {
+					if errors.Is(err, data.ErrChunkNotFound) {
+						w.Logger.InfoContext(ctx, "gc delete: chunk already absent (terminal ack)",
+							"pool", e.Chunk.Pool, "oid", e.Chunk.OID, "error", err.Error())
+						metrics.GCTerminalAck.WithLabelValues("enoent").Inc()
+						if ackErr := w.Meta.AckGCEntry(delCtx, w.Region, e); ackErr != nil {
+							w.Logger.WarnContext(ctx, "gc ack", "pool", e.Chunk.Pool, "oid", e.Chunk.OID, "error", ackErr.Error())
+							subErr = ackErr
+							recordErr(ackErr)
+							return nil
+						}
+						processed.Add(1)
+						return nil
+					}
 					w.Logger.WarnContext(ctx, "gc delete", "pool", e.Chunk.Pool, "oid", e.Chunk.OID, "error", err.Error())
 					subErr = err
 					recordErr(err)

@@ -488,3 +488,45 @@ func TestDeleteWithoutBackendRefIsNoOp(t *testing.T) {
 		t.Fatalf("Delete(chunks-shape): want nil, got %v", err)
 	}
 }
+
+// TestDeleteLiftsNoSuchKeyToErrChunkNotFound pins US-001 (ralph/polish-dx):
+// when the S3 backend's underlying DeleteObject surfaces NoSuchKey (the
+// object was already swept by a sibling leader), the BackendRef-shape
+// Delete must surface data.ErrChunkNotFound so the gc worker classifies
+// the queue entry as terminal and ack's it instead of looping forever.
+func TestDeleteLiftsNoSuchKeyToErrChunkNotFound(t *testing.T) {
+	ctx := context.Background()
+	seq := &sequenceTransport{
+		responses: []responseFn{noSuchKeyResponse},
+	}
+	b := openTestBackend(t, seq)
+
+	m := &data.Manifest{
+		Class:      "STANDARD",
+		Size:       1,
+		BackendRef: &data.BackendRef{Backend: BackendName, Key: "missing", Size: 1},
+	}
+	err := b.Delete(ctx, m)
+	if err == nil {
+		t.Fatal("Delete(NoSuchKey): want errors.Is(err, data.ErrChunkNotFound), got nil")
+	}
+	if !errors.Is(err, data.ErrChunkNotFound) {
+		t.Fatalf("Delete(NoSuchKey): %v, want errors.Is(err, data.ErrChunkNotFound)", err)
+	}
+}
+
+// TestDeleteObjectSwallowsNoSuchKey pins the legacy idempotent-shape
+// contract: DeleteObject (used by admin tools + integration tests) must
+// continue to treat NoSuchKey as success — only Delete(m) bubbles the
+// new sentinel up to the gc worker.
+func TestDeleteObjectSwallowsNoSuchKey(t *testing.T) {
+	ctx := context.Background()
+	seq := &sequenceTransport{
+		responses: []responseFn{noSuchKeyResponse},
+	}
+	b := openTestBackend(t, seq)
+
+	if err := b.DeleteObject(ctx, "missing", ""); err != nil {
+		t.Fatalf("DeleteObject(NoSuchKey): want nil, got %v", err)
+	}
+}
