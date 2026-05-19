@@ -90,8 +90,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Smoke validation: go test -race -count=5 -run TestThreeReplicaDistribution ./internal/lifecycle/... → 5/5 OK (~1.7s); full go test -race ./... ran in ~62s, only failure was internal/racetest TestRunCleanRunNoInconsistencies — a chaos-stress oracle that flakes independent of this cycle (passed on standalone rerun) and touches neither lifecycle nor gc nor data backend Delete. go vet ./..., go build ./... both clean. -tags ceph build requires librados headers, gated to CI Docker. ROADMAP: flipped 2 latent-bug entries (TestThreeReplicaDistribution + gc.Worker.drainCount) to Done; removed the informal 'Lifecycle worker has no retry' latent note (superseded by formal new P3 closed entry under Correctness & consistency); each carries (commit `pending`) for SHA backfill on main post-merge. PRD markdown removed via git rm."
     }
   ]
 }

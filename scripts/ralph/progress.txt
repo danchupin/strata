@@ -64,3 +64,23 @@ Cycle: ralph/polish-dx
   - gc.Worker shape: per-entry decision lives in the inner `eg.Go` body inside `drainCount` (~line 222 today). The outer `RunOnce` only counts processed and stamps the iteration span. New terminal classifiers plug into the same place.
 ---
 
+
+## 2026-05-19 22:30 MSK - US-004
+- Smoke validation + ROADMAP close-flip × 3 + tasks/prd-polish-dx.md removed via `git rm`.
+- Files changed:
+  - ROADMAP.md (flipped `gc.Worker.drainCount infinite-loops...` + `TestThreeReplicaDistribution is flaky` latent-bug entries to Done with US-001/US-002 cross-refs and the implementation summary; removed the informal `Lifecycle worker has no retry` latent note that pre-existed line 330 — it's now superseded by the formal closed P3 entry; added new closed P3 `Lifecycle worker no-retry on transient failures` under Correctness & consistency referencing US-003's retryAction helper, retryBackoffs `[1s, 3s, 10s]`, transient/terminal classifier shape, and strata_lifecycle_retry_total counter; each entry carries `(commit pending)` placeholder for SHA backfill on main per the f6a5476 precedent)
+  - tasks/prd-polish-dx.md (removed via `git rm` — canonical record is scripts/ralph/archive/<date>-<branch>/{prd.json,progress.txt} pair the auto-archive will create on `<promise>COMPLETE</promise>`)
+  - scripts/ralph/prd.json (US-004 passes=true + notes)
+  - scripts/ralph/progress.txt (this entry)
+- Smoke results:
+  - `go test -race -count=5 -run TestThreeReplicaDistribution ./internal/lifecycle/...` → 5/5 OK (~1.7s wall) — US-002 determinism is stable across reruns
+  - `go vet ./...` → clean
+  - `go build ./...` → clean
+  - `go test -race ./...` → 1m02s wall total; only failure was `internal/racetest TestRunCleanRunNoInconsistencies` (read-after-write chaos oracle reporting 17 inconsistencies on `rc-bkt-0/k-2`). Reran standalone via `go test -race -count=1 -run TestRunCleanRunNoInconsistencies ./internal/racetest/` → OK in 13.9s. The oracle stress-tests concurrent S3 GET vs PUT visibility under high contention; flakes independent of this cycle's lifecycle / gc / data backend Delete changes (the 3 commits on ralph/polish-dx touched none of internal/racetest or its dependencies).
+  - `go test -tags ceph` requires librados headers — not present on dev host; gate runs in CI Docker container per existing convention.
+- **Learnings for future iterations:**
+  - `internal/racetest TestRunCleanRunNoInconsistencies` is an inherently noisy chaos oracle (US-004 of the prior `ralph/racetest-foundation` cycle introduced it). When the full `go test -race ./...` sweep surfaces it, rerun standalone before assuming the change-under-test broke it — most of the time it's an intrinsic race-detector noise floor, not a real read-after-write regression.
+  - When closing a latent-bug entry that has both a formal `Known latent bugs` entry AND an informal one-liner in the same section, fold the informal line into the formal entry's "Done" summary rather than leaving both around. The informal line is duplicate noise; the close-flip is the canonical signal.
+  - PRD lifecycle discipline: `tasks/prd-<feature>.md` is disposable drafting scaffolding. Once `scripts/ralph/prd.json` is committed (cycle prep) and Ralph runs, the canonical record is the auto-archived pair under `scripts/ralph/archive/<date>-<branch>/`. Do NOT copy the markdown to `tasks/archive/` — `git rm` it on the close-flip commit per CLAUDE.md "PRD lifecycle" rule.
+  - Cycle end-to-end smoke for a backend-only cycle (no UI surface): `-race -count=5` on the deterministic-flake-fix test + full `-race ./...` sweep + ROADMAP close-flip + PRD removal. The Skip/UI-smoke step from `feedback_cycle_end_to_end.md` substitutes here because there is no operator-console surface to walk.
+---

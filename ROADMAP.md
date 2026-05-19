@@ -187,6 +187,27 @@ adding more, prove what is there.
   `InvalidPartOrder`. s3-test `test_multipart_resend_first_finishes_last` flips
   to PASS. (commit `d8aa9fa`)
 
+- ~~**P3 — Lifecycle worker no-retry on transient failures.**~~ — **Done.** Shipped via
+  the `ralph/polish-dx` cycle (US-003). The lifecycle worker's per-object
+  `w.Meta.DeleteObject` call sites in `expire` (line ~593) + `expireNoncurrent` (line ~393)
+  previously abandoned the partial batch on a single transient blip (network reset,
+  ctx-deadline, 503) — operator saw a 200 ms hiccup delay 999 successful expirations by
+  the full 5-minute tick. Fix: bounded `retryAction(ctx, fn)` helper in
+  `internal/lifecycle/retry.go` (production seam) + `retryActionWith(ctx, fn, sleep)`
+  (test seam taking an injectable sleeper). 3 attempts total, ctx-aware backoffs `[1s, 3s]`
+  consumed before attempts 2 and 3 (10s slot reserved in `retryBackoffs[2]` for a future
+  4th-attempt extension without rewriting the AC tests). Transient classifier covers
+  `context.DeadlineExceeded`, `syscall.ECONNRESET`, `syscall.ETIMEDOUT`, and any error
+  whose chain satisfies `interface{ Temporary() bool }` returning true. Terminal
+  short-circuit (no sleep, no retry) on `meta.ErrObjectNotFound`, `meta.ErrBucketNotFound`,
+  `data.ErrChunkNotFound`, `data.ErrNotFound`. Ctx-aware sleep via `ctxSleep` races
+  `time.After(d)` against `ctx.Done()` so a cancelled lifecycle worker exits its retry loop
+  immediately on shutdown. Counter `strata_lifecycle_retry_total{outcome=ok|terminal|exhausted}`
+  registered in `internal/metrics/metrics.go`. The transition pipeline's
+  `GetChunks → PutChunks → SetObjectStorage` chain is intentionally **not** wrapped — a
+  mid-transition retry would require unwinding partial manifest state, far beyond a polish
+  cycle. (commit `pending`)
+
 - **P3 — Object Lock `COMPLIANCE` audit log.** `audit_log` (US-022) records all
   state-changing requests, but a denied DELETE under `COMPLIANCE` is not flagged
   distinctly. Regulated customers want a queryable "blocked retention violation" feed —
@@ -327,26 +348,31 @@ Non-goals:
   `aws-chunked-trailer` (newer aws-cli variants). aws-cli 2.22 observed to use plain
   `x-amz-content-sha256: <hex>` for `s3api put-object` and STREAMING for `s3 cp`, both
   tested working.
-- Lifecycle worker has no retry on transient failures — next tick re-tries.
-- **`TestThreeReplicaDistribution` is flaky.** `internal/lifecycle/distribute_test.go:111`
-  seeds 9 buckets with random UUIDs and asserts each of 3 replicas processes 1..5 buckets
-  via `bucketReplicaIndex(bucket.ID, 3)`. With 9 random UUIDs the FNV-32a distribution can
-  legitimately produce 6/3/0 or 6/2/1 splits — observed flake rate ~30 % under `-count=20`.
-  The flake reproduces on `main` independent of US-003 changes. Fix: either seed UUIDs from
-  a fixed PRNG so the split is deterministic, or relax the guard to `0..6` (the test still
-  pins the `totalDeletes == buckets` invariant a few lines above, which is the real
-  correctness signal).
-- **`gc.Worker.drainCount` infinite-loops when `Data.Delete` fails persistently.**
-  `internal/gc/worker.go:123-126` logs the warn + returns `nil` from the goroutine
-  *without* ack'ing the entry; the outer `for {}` loop re-issues `ListGCEntries`
-  and gets the same batch back. Any non-retryable error (RADOS ENOENT for an OID
-  already swept by a sibling leader, pool not found, mis-routed cluster id) wedges
-  the worker on a single batch forever. Surfaced by the Phase 1 bench harness
-  (`strata admin bench-gc` against the real `strata.rgw.buckets.data` pool with
-  synthetic OIDs). Fix: ack on ENOENT (the chunk is already gone — that's the
-  terminal state) and on any non-retryable RADOS error class. Out of scope for
-  the gc-lifecycle-scale Phase 1 cycle; bench numbers in `docs/site/content/architecture/benchmarks/gc-lifecycle.md`
-  were captured against `STRATA_DATA_BACKEND=memory` to bypass the spin.
+- ~~**`TestThreeReplicaDistribution` is flaky.**~~ — **Done.** Shipped via the `ralph/polish-dx`
+  cycle (US-002). `internal/lifecycle/distribute_test.go::seedExpiringBucket` (line 54) used
+  `uuid.New()`; FNV-32a-mod-3 over 9 random UUIDs legitimately produced 6/3/0 or 6/2/1 splits,
+  flaking the `[1, 5]` per-replica guard ~30 % of runs (`-count=20` produced 4/20 fails on
+  observation). Fix: added `seedExpiringBucketWithID(t, ..., name, id)` variant accepting a
+  caller-supplied UUID, with `seedExpiringBucket` now a thin `uuid.New()` wrapper preserving the
+  other 4 callers' random-UUID coverage. `TestThreeReplicaDistribution` derives each bucket UUID
+  via `uuid.NewSHA1(uuid.Nil, []byte(fmt.Sprintf("bucket-%d", i)))` so the FNV split is
+  reproducible run-to-run; the `[1, 5]` band assertion is replaced with exact `[3]int{4, 1, 4}`
+  equality. New memory-only `memory.Store.CreateBucketWithID` test-helper (Cassandra + TiKV
+  allocate IDs server-side — no helper needed there). 20/20 pass at `-race -count=20`. (commit `pending`)
+- ~~**`gc.Worker.drainCount` infinite-loops when `Data.Delete` fails persistently.**~~ — **Done.**
+  Shipped via the `ralph/polish-dx` cycle (US-001). `internal/gc/worker.go` per-entry decision
+  inside the `drainCount` `eg.Go` body now classifies a backend-agnostic `data.ErrChunkNotFound`
+  sentinel as terminal: counter `strata_gc_terminal_ack_total{reason="enoent"}` bumps and the
+  same `w.Meta.AckGCEntry(delCtx, w.Region, e)` call used on the success path drops the entry from
+  `gc_entries_v2` so the queue keeps moving. Non-ENOENT errors keep the existing loop-fail
+  behaviour (log warn + retry on the next tick). New sentinel `data.ErrChunkNotFound` lives in
+  `internal/data/errors.go` (build-tag-free); the RADOS backend `Delete` (`//go:build ceph`) wraps
+  `goceph.ErrNotFound`; the S3 backend `deleteFromCluster` wraps `*s3types.NoSuchKey` AND the
+  generic `smithy.APIError` whose `ErrorCode()=="NoSuchKey"` (MinIO + emulators surface protocol
+  errors as generic API errors per the `rebalance.go:140` precedent); the memory backend is
+  unchanged (already no-op on missing). Out-of-scope original surface (pool-not-found,
+  mis-routed-cluster id, transport errors) still loop-retries per scope decision — operator
+  should still investigate those. (commit `pending`)
 
 ---
 
