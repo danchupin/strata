@@ -206,7 +206,7 @@ adding more, prove what is there.
   registered in `internal/metrics/metrics.go`. The transition pipeline's
   `GetChunks → PutChunks → SetObjectStorage` chain is intentionally **not** wrapped — a
   mid-transition retry would require unwinding partial manifest state, far beyond a polish
-  cycle. (commit `pending`)
+  cycle. (commit `77a9348`)
 
 - **P3 — Object Lock `COMPLIANCE` audit log.** `audit_log` (US-022) records all
   state-changing requests, but a denied DELETE under `COMPLIANCE` is not flagged
@@ -358,7 +358,7 @@ Non-goals:
   via `uuid.NewSHA1(uuid.Nil, []byte(fmt.Sprintf("bucket-%d", i)))` so the FNV split is
   reproducible run-to-run; the `[1, 5]` band assertion is replaced with exact `[3]int{4, 1, 4}`
   equality. New memory-only `memory.Store.CreateBucketWithID` test-helper (Cassandra + TiKV
-  allocate IDs server-side — no helper needed there). 20/20 pass at `-race -count=20`. (commit `pending`)
+  allocate IDs server-side — no helper needed there). 20/20 pass at `-race -count=20`. (commit `77a9348`)
 - ~~**`gc.Worker.drainCount` infinite-loops when `Data.Delete` fails persistently.**~~ — **Done.**
   Shipped via the `ralph/polish-dx` cycle (US-001). `internal/gc/worker.go` per-entry decision
   inside the `drainCount` `eg.Go` body now classifies a backend-agnostic `data.ErrChunkNotFound`
@@ -372,7 +372,7 @@ Non-goals:
   errors as generic API errors per the `rebalance.go:140` precedent); the memory backend is
   unchanged (already no-op on missing). Out-of-scope original surface (pool-not-found,
   mis-routed-cluster id, transport errors) still loop-retries per scope decision — operator
-  should still investigate those. (commit `pending`)
+  should still investigate those. (commit `77a9348`)
 
 ---
 
