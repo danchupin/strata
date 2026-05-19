@@ -790,3 +790,44 @@ Cycle: ralph/storage-correctness
     backend with a per-test capability shim. Reusable for future
     optional-interface validation tests.
 ---
+
+## 2026-05-20 - US-008 - Range zero-length edge tests
+- Single behavior change in internal/s3api/server.go::parseRange: suffix
+  range `Range: bytes=-N` against a zero-length object now returns
+  (offset=0, length=0, status=200, ok=true) instead of (..., status=206,
+  ok=true). The call site's `if status == http.StatusPartialContent &&
+  partNumber == 0` guard suppresses Content-Range when status is 200, so
+  the response is bare 200 + Content-Length: 0 + empty body — AWS parity
+  for empty objects. Open-ended `bytes=0-` and explicit `bytes=0-9` cases
+  on zero-length already returned 416 InvalidRange via the existing
+  `start >= size` guard; verified with a small standalone repro and the
+  new test cases.
+- New file internal/s3api/range_test.go consolidates the four zero-length
+  Range cases per PRD acceptance criteria (no Range / open-ended /
+  suffix / explicit). Nonzero-size happy path remains in
+  TestObjectRangeGet in object_test.go — both files now cover the Range
+  surface with no overlap.
+- Files changed: internal/s3api/server.go, internal/s3api/range_test.go
+  (new), scripts/ralph/prd.json (US-008 passes:true).
+- Quality: `go vet ./...` green; `go test -race ./internal/s3api/...`
+  green (13.7s wall-clock including the four new sub-tests). No s3-tests
+  run on this iteration — the fix only flips a single edge case (suffix
+  range on zero-length) that the suite is unlikely to exercise; US-010
+  will run the full suite + record pass-rate delta vs main baseline.
+- **Learnings for future iterations:**
+  - parseRange returns (offset, length, status, ok) — the call site uses
+    `ok=false` as the 416 InvalidRange signal AND status to drive the
+    response code on success. Returning status=200 for a "valid but
+    empty" suffix range is the AWS-parity escape hatch: ok=true keeps
+    the success path, status=200 keeps the response code, and the
+    `status == StatusPartialContent` guard naturally elides
+    Content-Range. Both fields are independent — don't conflate them.
+  - For zero-length objects the GetChunks path through memory.Backend
+    handles (offset=0, length=0) cleanly (length<=0 → length=Size-offset
+    = 0 → empty memReader). No need to short-circuit body emission at
+    the s3api layer.
+  - Range test fixtures should always assert both Content-Range header
+    (presence vs absence) AND status code — the two together pin the
+    AWS-wire response. A status-only check would have let the previous
+    206-with-empty-Content-Range shape slip through.
+---

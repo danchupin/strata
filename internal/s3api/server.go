@@ -1424,6 +1424,13 @@ func parseRange(header string, size int64) (offset, length int64, status int, ok
 		if err != nil || n <= 0 {
 			return 0, 0, 0, false
 		}
+		// AWS S3 parity: suffix range `bytes=-N` against a zero-length
+		// object returns 200 OK with an empty body (consistent with the
+		// suffix-range behavior when N > size — the client asked for the
+		// last N bytes, the server has fewer than N to return).
+		if size == 0 {
+			return 0, 0, http.StatusOK, true
+		}
 		if n > size {
 			n = size
 		}
