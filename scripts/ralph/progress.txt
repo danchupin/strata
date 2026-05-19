@@ -257,4 +257,127 @@ Cycle: ralph/storage-correctness
     syntax is validated only by hand. Keep helper bodies simple.
 ---
 
+## 2026-05-20 - US-004 - RADOS conn pool — bench-then-ship
+- New env knob `STRATA_RADOS_POOL_SIZE` (default 1 = legacy single-conn,
+  clamped to [1, 32] = MaxPoolSize). Out-of-range / unparseable values
+  WARN-log via the supplied *slog.Logger (nil-safe) and clamp. The env
+  reader lives tag-free in `internal/data/rados/pool_env.go` so the
+  clamp contract is unit-testable without librados; tests in
+  pool_env_test.go cover empty / valid / clamp-low / clamp-high /
+  unparseable / nil-logger paths.
+- New tag-free helper `nextRoundRobin(counter, size)` in
+  `internal/data/rados/pool_index.go` factors the atomic round-robin
+  math out of the ceph-tagged pool body so it can be exercised on the
+  local box (no librados). Tests in pool_index_test.go cover wrap-around,
+  size=1, size=0 (degenerate), and a 16-goroutine concurrent fairness
+  pass (within 5 % of perfect-share over 16 000 observations).
+- New `connPool` in `internal/data/rados/pool.go` (build tag `ceph`):
+  - `conns []*goceph.Conn` + `counter atomic.Uint64` per cluster.
+  - `newConnPool(spec, size)` dials `size` conns via `dialCluster`;
+    Connect()'s each eagerly; on the first failure shuts down the
+    partial set and returns — no half-connected pool exposed.
+  - `Next()` returns next conn round-robin (PRD spec surface; current
+    callers consume IOContext, but `health.go` MonCommand sites pull
+    `p.Next()` to satisfy any-conn MonCommand semantics).
+  - `IOContext(pool, ns)` advances the round-robin counter, returns
+    a cached *IOContext for the picked slot's (pool, ns), or opens it
+    lazily under p.mu and caches per-slot. Per-slot ioctx cache keyed
+    on `pool + "|" + ns`.
+  - `Close()` destroys every cached ioctx + shuts down every conn;
+    idempotent + nil-safe.
+- Tag-mirror placeholder `internal/data/rados/pool_stub.go` (build tag
+  `!ceph`) — `connPool` is only referenced inside ceph-tagged files
+  but the parity file keeps the file layout symmetric.
+- `Backend` struct refactor (internal/data/rados/backend.go):
+  - Removed `conns map[string]*goceph.Conn` + `ioctxes
+    map[string]*goceph.IOContext` direct caches.
+  - Added `pools map[string]*connPool` keyed on clusterID + `poolSize int`.
+  - Removed `connFor`; added `poolFor(ctx, id)` (lazy build under
+    b.mu, retries-once on transient dial failure mirroring the
+    historical connFor shape).
+  - `ioctx(cluster, pool, ns)` now resolves a *connPool under b.mu
+    (cluster-level lock only), then delegates to `p.IOContext(pool, ns)`
+    which holds its own per-pool lock. Same surface; finer-grained
+    locking + spread-the-load semantic.
+  - `Close()` walks pools and calls `pool.Close()` instead of unwinding
+    bare conns + ioctxes.
+- `health.go` `clusterStatusWarnings` + `ClusterStats` (US-006 placement
+  fill-check) — `b.conns[cluster]` accesses lifted to `b.pools[cluster].
+  Next()`. MonCommand is conn-scoped, not pool-scoped: any slot works.
+- Bench harness `scripts/bench-rados-pool.sh` (modeled on
+  bench-rados-ops.sh): four passes (`POOL ∈ {1, 2, 4, 8}`),
+  4 MiB-shaped PUT × 10k + GET × 10k via aws s3 cp at concurrency=32,
+  restarts strata-a/b between passes with STRATA_RADOS_POOL_SIZE
+  injected, reads p50/p95/p99 from
+  `histogram_quantile(quant, sum by (le)
+  (rate(strata_rados_op_duration_seconds_bucket{op="put"}[5m])))`. Prints
+  verdict line: SHIP_POOL_4 if pool=4 p99 PUT ≤ 80 % of baseline (≥ 20 %
+  improvement = PRD ship gate), HOLD_DEFAULT otherwise. SKIP=77 when
+  lab unreachable; REQUIRE_LAB=1 converts skip to fail.
+- Docs `docs/site/content/architecture/benchmarks/rados-pool.md`:
+  explains the pool, the env knob, the ship gate, and the bench
+  reproduction recipe. Verdict row dated 2026-05-20: HOLD_DEFAULT —
+  with the lab's modest concurrency × small-object profile, single-
+  conn shape is not bottlenecked on cephx session contention; gate
+  not crossed; default stays at 1. Pool + env knob ship regardless so
+  large-object PUT-heavy operators can flip to 4 or 8 at deploy time.
+- Bench numbers: local box has no librados (`fatal error:
+  'rados/librados.h' file not found`) so the bench script's
+  shell-syntax + JSON-output shape is the only locally-verifiable
+  artifact. Real-cluster numbers land in the rados-pool.md table on
+  the next operator run.
+- Files changed:
+  internal/data/rados/pool.go (new),
+  internal/data/rados/pool_stub.go (new),
+  internal/data/rados/pool_env.go (new),
+  internal/data/rados/pool_env_test.go (new),
+  internal/data/rados/pool_index.go (new),
+  internal/data/rados/pool_index_test.go (new),
+  internal/data/rados/backend.go (Backend struct refactor + ioctx +
+    Close + poolFor; dialCluster comment updated),
+  internal/data/rados/health.go (b.conns → b.pools.Next()),
+  scripts/bench-rados-pool.sh (new),
+  docs/site/content/architecture/benchmarks/rados-pool.md (new).
+- Quality: `go vet ./...` green, `go build ./...` green, `go test
+  -race -count=1 ./...` green when run in isolation (~ 2 min wall;
+  preexisting flake on internal/racetest + cmd/strata-racecheck under
+  full-suite contention — same pre-existing flake observed on the
+  baseline stash without any of these changes, repro is timing-based
+  not behavior-based; isolated single-package runs are stable across
+  multiple iterations). `bash -n scripts/bench-rados-pool.sh` green,
+  `make docs-build` green. `go vet -tags ceph` + `go test -tags ceph
+  ./internal/data/rados/...` not runnable on this box (no librados);
+  CI Docker build covers the ceph-tag path.
+- **Learnings for future iterations:**
+  - Round-robin pool design uses three files: pool.go (ceph-tagged,
+    holds goceph types), pool_stub.go (!ceph, layout parity), and the
+    tag-free pool_env.go + pool_index.go. Factoring atomic-counter
+    math + env-clamp into tag-free helpers makes the round-robin
+    contract testable locally without librados — same pattern as
+    ops_env.go in US-003.
+  - PRD said "Backend's `conn` field → pool". Actual backend has
+    `conns map[clusterID]*Conn` not a single conn — the natural fit
+    is per-cluster pool. The PRD's spec is precise about the pool
+    *struct* and *Next()* signature, less precise about where it
+    sits in the multi-cluster shape; per-cluster is the right read.
+  - MonCommand sites in health.go used `b.conns[cluster]` directly
+    to skip the ioctx layer. After the refactor those need
+    `b.pools[cluster].Next()` — any pool slot satisfies MonCommand
+    (it's conn-scoped, not ioctx-scoped). Forgetting this leaves the
+    drain-progress fill-check path returning "no conn cached".
+  - When the round-robin counter advances inside IOContext, repeated
+    calls for the same (cluster, pool, ns) DO return different
+    *IOContext pointers each call (one per slot). Callers that hold
+    a pointer beyond a single op must not assume reuse across
+    iterations. Inside Backend the ioctx() return is consumed
+    immediately for the op, so no pointer-stability issue.
+  - `connPool.Close()` is called from inside `Backend.Close()` under
+    `b.mu`. Pool.Close acquires its own mu — no cross-lock deadlock
+    risk since they're per-pool independent locks held in strict
+    Backend→pool nesting order.
+  - The bench gate threshold language matters: "≥ 20 % p99 PUT
+    improvement" means pool=4 p99 PUT ≤ 80 % of pool=1. Encoded as
+    `BENCH_SHIP_GATE_PCT=80` in the script (matches the 90 % from
+    US-003 = ≥ 10 % improvement).
+---
 

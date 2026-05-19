@@ -79,14 +79,18 @@ func (b *Backend) DataHealth(ctx context.Context) (*data.DataHealthReport, error
 }
 
 // clusterStatusWarnings runs `ceph status --format json` via MonCommand on
-// the per-cluster Conn (lazily dialed by the earlier ioctx() loop) and
-// returns up to radosCheckCap warning lines. HEALTH_OK returns an empty
-// slice.
+// a per-cluster Conn (any pool slot — MonCommand is conn-scoped, not
+// pool-scoped) and returns up to radosCheckCap warning lines. HEALTH_OK
+// returns an empty slice.
 func (b *Backend) clusterStatusWarnings(ctx context.Context, cluster string) []string {
 	b.mu.Lock()
-	conn, ok := b.conns[cluster]
+	p, ok := b.pools[cluster]
 	b.mu.Unlock()
 	if !ok {
+		return nil
+	}
+	conn := p.Next()
+	if conn == nil {
 		return nil
 	}
 	args, err := json.Marshal(map[string]string{"prefix": "status", "format": "json"})
@@ -255,10 +259,14 @@ func (b *Backend) ClusterStats(ctx context.Context, clusterID string) (int64, in
 		return 0, 0, fmt.Errorf("rados: open ioctx on %s/%s: %w", clusterID, seedPool, err)
 	}
 	b.mu.Lock()
-	conn, ok := b.conns[clusterID]
+	p, ok := b.pools[clusterID]
 	b.mu.Unlock()
 	if !ok {
-		return 0, 0, fmt.Errorf("rados: no conn cached for cluster %q", clusterID)
+		return 0, 0, fmt.Errorf("rados: no conn pool for cluster %q", clusterID)
+	}
+	conn := p.Next()
+	if conn == nil {
+		return 0, 0, fmt.Errorf("rados: empty conn pool for cluster %q", clusterID)
 	}
 	args, err := json.Marshal(map[string]string{"prefix": "df", "format": "json"})
 	if err != nil {
