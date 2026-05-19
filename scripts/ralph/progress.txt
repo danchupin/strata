@@ -19,3 +19,20 @@ Cycle: ralph/dx-lab
   - docs/site/content: `architecture/benchmarks/rebalance.md` exists (not `rebalance-multi.md`); `deploy/kubernetes.md` exists; `get-started/_index.md` exists; `developers/` has only `_index.md` (no `quickstart.md`).
   - ROADMAP lines 274/276/291/293 entries confirmed stable.
 
+## 2026-05-19 - US-001
+- Added `make dev` / `make dev-down` / `make dev-logs` targets to `Makefile` after `wait-strata-lab`.
+  - `dev` depends on `up-all wait-tikv wait-ceph wait-strata-lab` and then runs `docker compose -f deploy/docker/docker-compose.yml logs -f --tail=20 strata-a strata-b strata-lb-nginx` (TiKV-default canonical lab).
+  - `dev-down` aliases `down` (preserves volumes; full wipe stays a direct `docker compose down -v`).
+  - `dev-logs` re-attaches via `docker compose logs -f strata-a strata-b strata-lb-nginx` (no --tail).
+  - `.PHONY` extended with `dev dev-down dev-logs`.
+- Added a `## One-command dev` section to `docs/site/content/get-started/_index.md` documenting the three targets, the TiKV-default backend choice, and the composable underlying targets for CI / scripted use.
+- Quality checks: `make vet` green; `go test ./...` green; `make docs-build` green (73 pages). Dry-runs of `make dev` / `make dev-down` / `make dev-logs` print the expected command sequences.
+- Files changed: `Makefile`, `docs/site/content/get-started/_index.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Makefile `.PHONY` line lives at the top (line 4 onward) — extend the existing block when adding new phony targets; don't sprinkle additional `.PHONY:` lines through the file.
+  - `make dev` Ctrl-C semantics work because `docker compose logs -f` is the foreground process — SIGINT propagates to the compose CLI, which simply detaches from the stream; the containers themselves stay running. No special trap handling needed in the recipe.
+  - The `down` target already cleans up profile-gated services (`--profile cassandra --profile tracing --profile webhook-trap --profile ci`) so `dev-down: down` is sufficient — no need to duplicate the profile list.
+  - `dev` deliberately re-uses the existing `wait-*` chain rather than introducing a new one so the `up-all + wait-*` building blocks stay the single source of truth for "lab ready" semantics.
+  - Use `make -n dev` to verify the recipe chain without actually starting the stack — surfaces the full expansion of dependent targets.
+---
+

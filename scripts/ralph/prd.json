@@ -22,8 +22,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Makefile targets dev / dev-down / dev-logs added (after wait-strata-lab). dev chains up-all -> wait-tikv -> wait-ceph -> wait-strata-lab -> docker compose logs -f --tail=20 strata-a strata-b strata-lb-nginx. dev-down aliases down. dev-logs re-attaches without --tail. .PHONY updated. Header comments above each target. Docs: docs/site/content/get-started/_index.md `One-command dev` subsection. make vet + go test ./... + make docs-build green. Ctrl-C semantics rely on docker compose logs -f behavior (kills only stream)."
     },
     {
       "id": "US-002",

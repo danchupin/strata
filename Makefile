@@ -3,6 +3,7 @@ COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
 .PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test \
 	up up-all up-cassandra up-all-ci down \
+	dev dev-down dev-logs \
 	wait-cassandra wait-ceph wait-pd wait-tikv wait-strata wait-strata-a wait-strata-b wait-strata-lb-nginx wait-strata-lab \
 	ceph-pool run-memory run-cassandra run-strata run-gateway \
 	smoke smoke-signed smoke-grafana smoke-lab-tikv \
@@ -166,6 +167,27 @@ wait-strata-lb-nginx:
 
 # Combined readiness gate for the TiKV-default lab: both replicas + LB.
 wait-strata-lab: wait-strata-a wait-strata-b wait-strata-lb-nginx
+
+# One-command developer cluster: bring up the canonical TiKV-default lab,
+# wait for PD + ceph + both strata replicas + LB to report ready, then
+# stream the last 20 log lines per replica and the LB and follow live.
+# Ctrl-C kills only the log stream — the compose stack stays up so the
+# operator can re-attach via `make dev-logs` or drive smoke harnesses.
+# Backend default is TiKV (matches CLAUDE.md `## Compose shape`). The
+# Cassandra-backed regression lab stays under `make up-cassandra`.
+dev: up-all wait-tikv wait-ceph wait-strata-lab
+	$(COMPOSE) logs -f --tail=20 strata-a strata-b strata-lb-nginx
+
+# Tear down the dev cluster. Mirrors `make down` — same profile cleanup,
+# preserves named volumes by default. For a full data wipe run `docker
+# compose -f deploy/docker/docker-compose.yml down -v` directly.
+dev-down: down
+
+# Re-attach to the dev cluster log stream after Ctrl-C without re-tailing
+# the backlog. Use this between `make dev` and `make dev-down` to peek at
+# live traffic. Stack must already be up (run `make dev` first).
+dev-logs:
+	$(COMPOSE) logs -f strata-a strata-b strata-lb-nginx
 
 ceph-pool:
 	docker exec strata-ceph ceph osd pool create strata.rgw.buckets.data 8 8 replicated || true
