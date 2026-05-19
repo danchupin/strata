@@ -64,10 +64,12 @@ func TestClusterRebalanceProgressReturnsTotalsAndSeries(t *testing.T) {
 	movedExpr := fmt.Sprintf(rebalanceMovedTotalExprFmt, "alpha")
 	refusedExpr := fmt.Sprintf(rebalanceRefusedTotalExprFmt, "alpha")
 	rateExpr := fmt.Sprintf(rebalanceMovedRateExprFmt, "alpha")
+	bytesRateExpr := fmt.Sprintf(rebalanceBytesRate1mExprFmt, "alpha")
 	prom := stubProm(t,
 		map[string]string{
-			movedExpr:   fmt.Sprintf(vectorResponseBody, vectorSample("42")),
-			refusedExpr: fmt.Sprintf(vectorResponseBody, vectorSample("3")),
+			movedExpr:     fmt.Sprintf(vectorResponseBody, vectorSample("42")),
+			refusedExpr:   fmt.Sprintf(vectorResponseBody, vectorSample("3")),
+			bytesRateExpr: fmt.Sprintf(vectorResponseBody, vectorSample("10485760")),
 		},
 		map[string]string{
 			rateExpr: fmt.Sprintf(matrixResponseBody, matrixSeries("alpha",
@@ -92,6 +94,9 @@ func TestClusterRebalanceProgressReturnsTotalsAndSeries(t *testing.T) {
 	}
 	if got.RefusedTotal != 3 {
 		t.Errorf("refused_total=%v want 3", got.RefusedTotal)
+	}
+	if got.ObservedBytesPerSec != 10485760 {
+		t.Errorf("observed_bytes_per_sec=%v want 10485760 (10 MiB/s)", got.ObservedBytesPerSec)
 	}
 	if len(got.Series) != 2 {
 		t.Fatalf("series len=%d want 2", len(got.Series))

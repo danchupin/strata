@@ -30,6 +30,31 @@ Cycle: ralph/drain-rebalance-transparency
   - `061424a` strata compose admin auth defaults restored (`optional` + admin:adminpass:owner) post-collapse cycle regression
 - **End-to-end discipline** (per `feedback_cycle_end_to_end.md`): walkthrough covers happy path (drain with both ETAs visible + bandwidth indicator) + operator network-share concern walkthrough (1 GbE operator picks safe rate via runbook table) + edge cases (either endpoint errors, PromQL unavailable, mid-drain env change via gateway restart, GC_GRACE=0, GC_GRACE=999h, RATE_MB_S=0, multi-replica >2, sub-60s migrations before Prom window settles). State Truth Tables: chip rendering matrix + endpoint response shapes. Cache Invalidation Ledger: 2 new TanStack keys (staleTime: Infinity), no new server caches. Safety Claims Preconditions: ETA + bandwidth non-safety (deregister_ready unchanged); endpoints GET-only; degenerate inputs clamped; card hides on 404 (back-compat).
 
+## 2026-05-19 - US-002
+- Wired `<DrainProgressBar>` to /admin/v1/{gc,rebalance}-config + reused /admin/v1/clusters/{id}/rebalance-progress.observed_bytes_per_sec for live ETA + bandwidth
+- Awaiting GC chip: live ETA suffix (`~Nm ETA` / `~Nh Mm ETA` / `~24h+ ETA`) when gc-config resolves; dynamic tooltip enumerates grace/interval/batch/shards. gc-config 404 / loading → static pre-cycle tooltip
+- Migrating chip: observed bandwidth row `~Y MB/s observed` (cold-start variant `~0 MB/s observed (cold start)`) + formula ETA `~Zm ETA`. Either query loading/errored → pre-cycle `~Nm` fallback from drain-progress.eta_seconds
+- ETA formula: migratable × 4 MiB (CHUNK_SIZE_BYTES) over observed_bytes_per_sec (live) or (rate_mb_s × replicas_count × 1 MiB / 2) (fallback); Infinity → ~24h+ ETA cap (rate_mb_s=0 or replicas_count=0)
+- Backend support already staged in working tree: observed_bytes_per_sec added on /admin/v1/clusters/{id}/rebalance-progress (sum(rate(strata_rebalance_bytes_moved_total{to="<id>"}[1m]))) — committed alongside this story
+- Files changed:
+  - web/src/api/configs.ts (new — fetchGCConfig + fetchRebalanceConfig)
+  - web/src/api/client.ts (re-export configs)
+  - web/src/api/clusters.ts (+observed_bytes_per_sec on ClusterRebalanceProgress)
+  - web/src/lib/query.ts (+gcConfig +rebalanceConfig keys)
+  - web/src/components/storage/DrainProgressBar.tsx (queries + helpers + MigratingSummary)
+  - web/e2e/drain-progress.spec.ts (+6 scenarios — live ETA + 404 fallback + cold-start + rate_mb_s=0 cap + pre-cycle fallback)
+  - internal/adminapi/clusters_rebalance.go (+ObservedBytesPerSec field + Prom 1m bytes-rate query)
+  - internal/adminapi/clusters_rebalance_test.go (+observed_bytes_per_sec assertion)
+  - internal/adminapi/openapi.yaml (+observed_bytes_per_sec required field)
+- **Learnings for future iterations:**
+  - Reusing the existing `/admin/v1/clusters/{id}/rebalance-progress` endpoint avoided a second PromQL plumbing pass on the browser side — the Go handler already had `STRATA_PROMETHEUS_URL` wiring; adding a fourth `prom.Query` call (the 1m bytes-rate) was a 5-line change. The browser stays free of CORS / auth headaches and Prom URLs are an internal-only concern.
+  - `useQuery` with `staleTime: Infinity` + `refetchInterval: false` + `refetchOnWindowFocus: false` + `retry: false` is the right shape for env-static admin endpoints — a single fetch per session, no polling, no retry storm if the gateway is briefly 5xx. Plus `meta: { silent: true }` so a 404 on a legacy gateway never produces a toast — the consumer chip simply falls back to pre-cycle copy.
+  - The cluster page uses 3 useQuery hooks in `<DrainProgressBar>` already; adding 3 more (gc-config, rebalance-config, rebalance-progress) doesn't add fetch storm because:  (a) staleTime: Infinity dedupes the 2 config keys across all mounted DrainProgressBar instances + the upcoming RebalanceConfigCard (US-003);  (b) the existing RebalanceProgressChip uses the same `queryKeys.clusterRebalance(id)` key per cluster, so DrainProgressBar shares cache + poll cadence with it.
+  - When a Playwright spec mocks an admin endpoint via `page.route()`, default-behavior of returning 404 (omitted route) doesn't surface in DevTools but `useQuery` does mark the query as errored — handy for testing the "back-compat fallback" path without writing a separate spec case.
+  - Test mocking: don't compare flaky timestamps in chip tooltips — assert `RegExp` on the tooltip attribute with the constant input values (e.g., `STRATA_GC_GRACE \(300s\)` — the operator-facing label is the contract).
+  - The Migrating chip's chunks-remaining headline still reads from `primary` (physical when available else manifest) — the operator sees the pool-level count; the ETA / observed-bandwidth row uses `migratable` because that's what the rebalance worker actually moves. The two semantics are deliberately different and both shown so the operator can correlate them.
+---
+
 ## 2026-05-18 - US-001
 - Implemented `GET /admin/v1/gc-config` + `/admin/v1/rebalance-config` read-only endpoints
 - Added `GCConfig` + `RebalanceConfig` JSON types in `internal/adminapi/config_endpoints.go`; both audit-stamped (`admin:GetGCConfig` / `admin:GetRebalanceConfig`)

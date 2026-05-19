@@ -4,7 +4,12 @@ import { AlertCircle, CheckCircle2, Loader2 } from 'lucide-react';
 
 import {
   fetchClusterDrainProgress,
+  fetchClusterRebalanceProgress,
+  fetchGCConfig,
+  fetchRebalanceConfig,
   type BucketDrainProgressEntry,
+  type GCConfig,
+  type RebalanceConfig,
   DRAIN_NOT_READY_REASON_LABELS,
 } from '@/api/client';
 import { Button } from '@/components/ui/button';
@@ -14,6 +19,11 @@ import { cn } from '@/lib/utils';
 import { StuckBucketsDrawer } from './StuckBucketsDrawer';
 
 const DRAIN_PROGRESS_POLL_MS = 30_000;
+const REBALANCE_POLL_MS = 30_000;
+// RADOS stores data as 4 MiB chunks; the rebalance ETA formula multiplies
+// remaining chunk count by this constant to estimate bytes-to-move.
+const CHUNK_SIZE_BYTES = 4 * 1024 * 1024;
+const ETA_CAP_SECONDS = 24 * 3600;
 
 interface Props {
   clusterID: string;
@@ -45,8 +55,82 @@ function formatBytes(bytes: number): string {
 
 const PHYSICAL_UNAVAILABLE_TOOLTIP =
   'physical count unavailable on this backend';
-const AWAITING_GC_TOOLTIP =
+const AWAITING_GC_TOOLTIP_FALLBACK =
   'Physical delete completes after STRATA_GC_GRACE elapses (~5m default) plus the next gc worker tick.';
+
+function clampPositive(n: number): number {
+  return n > 0 ? n : 1;
+}
+
+// computeAwaitingGCEtaMinutes mirrors the formula laid out in US-002:
+//   eta_min = ceil(grace_seconds / 60)
+//             + ceil(gc_queue_pending
+//                    / (batch_size × shards × 1)
+//                    × (interval_seconds / 60))
+// Denominator components are clamped to 1 when zero so an operator with a
+// degenerate env doesn't divide-by-zero. Returns Infinity when the inputs
+// project past the 24h cap so callers render the `~24h+` label.
+function computeAwaitingGCEtaMinutes(
+  gcQueuePending: number,
+  cfg: GCConfig,
+): number {
+  const graceMin = Math.ceil(cfg.grace_seconds / 60);
+  const batch = clampPositive(cfg.batch_size);
+  const shards = clampPositive(cfg.shards);
+  const intervalMin = cfg.interval_seconds / 60;
+  const queue = Math.max(0, gcQueuePending);
+  const ticks = queue / (batch * shards);
+  const queueMin = Math.ceil(ticks * intervalMin);
+  const total = graceMin + queueMin;
+  if (!Number.isFinite(total) || total > ETA_CAP_SECONDS / 60) {
+    return Infinity;
+  }
+  return total;
+}
+
+function formatMinutes(min: number): string {
+  if (!Number.isFinite(min) || min <= 0) return '~0m';
+  if (min < 60) return `~${Math.round(min)}m`;
+  const h = Math.floor(min / 60);
+  const m = Math.round(min - h * 60);
+  return m > 0 ? `~${h}h ${m}m` : `~${h}h`;
+}
+
+function formatEtaMinutesCap(min: number): string {
+  if (!Number.isFinite(min) || min > ETA_CAP_SECONDS / 60) return '~24h+ ETA';
+  return `${formatMinutes(min)} ETA`;
+}
+
+function formatMBs(mbs: number): string {
+  if (!Number.isFinite(mbs) || mbs < 0) return '0';
+  if (mbs >= 100) return mbs.toFixed(0);
+  if (mbs >= 10) return mbs.toFixed(1);
+  return mbs.toFixed(2);
+}
+
+// computeMigratingEtaSeconds:
+//   Z = (remaining × chunk_size) / observed_rate     if observed > 0
+//   else (remaining × chunk_size) / (rate_mb_s × replicas_count / 2)
+// rate_mb_s × replicas_count / 2 is the aggregate effective forward
+// estimate from the runbook (chunk move costs read+write tokens).
+// Returns Infinity when the fallback denominator is 0 so the chip caps
+// at `~24h+`.
+function computeMigratingEtaSeconds(
+  remainingChunks: number,
+  observedBytesPerSec: number,
+  cfg: RebalanceConfig,
+): number {
+  const remaining = Math.max(0, remainingChunks);
+  if (remaining <= 0) return 0;
+  const bytes = remaining * CHUNK_SIZE_BYTES;
+  if (observedBytesPerSec > 0) {
+    return bytes / observedBytesPerSec;
+  }
+  const fallbackBytesPerSec =
+    (cfg.rate_mb_s * cfg.replicas_count * 1024 * 1024) / 2;
+  if (fallbackBytesPerSec <= 0) return Infinity;
+  return bytes / fallbackBytesPerSec;
+}
 
 function formatEta(seconds: number | null | undefined): string {
   if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) {
@@ -93,6 +177,37 @@ export function DrainProgressBar({
     refetchInterval: DRAIN_PROGRESS_POLL_MS,
     placeholderData: keepPreviousData,
     meta: { label: `drain progress ${clusterID}`, silent: true },
+  });
+  // gc-config + rebalance-config are env-static at boot (US-001) — fetch once
+  // per app session, never refetch. Silent meta so 404 on a legacy gateway
+  // doesn't surface a toast; the chip falls back to the pre-cycle copy.
+  const gcCfgQuery = useQuery({
+    queryKey: queryKeys.gcConfig,
+    queryFn: fetchGCConfig,
+    staleTime: Infinity,
+    refetchInterval: false,
+    refetchOnWindowFocus: false,
+    retry: false,
+    meta: { label: 'gc-config', silent: true },
+  });
+  const rebCfgQuery = useQuery({
+    queryKey: queryKeys.rebalanceConfig,
+    queryFn: fetchRebalanceConfig,
+    staleTime: Infinity,
+    refetchInterval: false,
+    refetchOnWindowFocus: false,
+    retry: false,
+    meta: { label: 'rebalance-config', silent: true },
+  });
+  // rebalance-progress feeds the Migrating chip's observed-bandwidth row
+  // (the existing RebalanceProgressChip shares this key so a card with
+  // both mounted issues one fetch).
+  const rebProgressQuery = useQuery({
+    queryKey: queryKeys.clusterRebalance(clusterID),
+    queryFn: () => fetchClusterRebalanceProgress(clusterID),
+    refetchInterval: REBALANCE_POLL_MS,
+    placeholderData: keepPreviousData,
+    meta: { label: `rebalance progress ${clusterID}`, silent: true },
   });
 
   if (q.isPending && !q.data) {
@@ -224,6 +339,21 @@ export function DrainProgressBar({
   // (physicalChunks != null) — null-physical backends fall through to
   // the existing not-ready / dereg-ready branches.
   if (chunks === 0 && physicalChunks != null && physicalChunks > 0) {
+    // Awaiting GC ETA: gc-config + gc_queue_pending feed the formula
+    // (US-002 drain-rebalance-transparency). When the config query is
+    // loading/errored, fall back to the static pre-cycle copy so the
+    // chip never blocks on a legacy gateway.
+    const gcCfg = gcCfgQuery.data;
+    const etaSuffix =
+      gcCfg != null
+        ? ` (${formatEtaMinutesCap(
+            computeAwaitingGCEtaMinutes(gcPending, gcCfg),
+          )})`
+        : '';
+    const tooltip =
+      gcCfg != null
+        ? `ETA computed from current GC queue depth (${gcPending} chunks), STRATA_GC_GRACE (${gcCfg.grace_seconds}s), STRATA_GC_INTERVAL (${gcCfg.interval_seconds}s), STRATA_GC_BATCH_SIZE (${gcCfg.batch_size}), STRATA_GC_SHARDS (${gcCfg.shards}).`
+        : AWAITING_GC_TOOLTIP_FALLBACK;
     return (
       <div className="space-y-1" data-testid="dp-evacuate">
         <div className="text-[10px] font-semibold uppercase tracking-wide text-red-700 dark:text-red-300">
@@ -231,13 +361,13 @@ export function DrainProgressBar({
         </div>
         <div
           className="flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-xs text-amber-800 dark:text-amber-300"
-          title={AWAITING_GC_TOOLTIP}
+          title={tooltip}
           data-testid="dp-awaiting-gc"
         >
           <AlertCircle className="h-3.5 w-3.5 shrink-0" aria-hidden />
           <span className="font-medium">
             Awaiting GC cleanup: {formatCount(physicalChunks)} chunks awaiting
-            physical delete
+            physical delete{etaSuffix}
           </span>
         </div>
         <DrainDetail
@@ -370,43 +500,23 @@ export function DrainProgressBar({
           }
         />
       </div>
-      <div
-        className={cn(
-          'tabular-nums text-xs',
-          stale ? 'text-muted-foreground/70' : 'text-muted-foreground',
-        )}
-        data-testid="dp-summary"
-      >
-        <span className="text-foreground">Migrating: </span>
-        <span
-          className="font-medium text-foreground"
-          data-testid="dp-primary-count"
-        >
-          {formatCount(primary ?? 0)}
-        </span>{' '}
-        chunks remaining
-        {physicalUnavailable && (
-          <span
-            className="ml-1 italic"
-            title={PHYSICAL_UNAVAILABLE_TOOLTIP}
-            data-testid="dp-physical-unavailable"
-          >
-            (physical count unavailable on this backend)
-          </span>
-        )}
-        {base != null && base > 0 && ` · ${formatCount(base)} at start`}
-        {migratable > 0 && data.eta_seconds != null && (
-          <> · ~{formatEta(data.eta_seconds)}</>
-        )}
-        {stale && (
-          <span
-            className="ml-1 italic"
-            title="Cache older than 2×STRATA_REBALANCE_INTERVAL"
-          >
-            (stale)
-          </span>
-        )}
-      </div>
+      <MigratingSummary
+        primary={primary}
+        physicalUnavailable={physicalUnavailable}
+        base={base}
+        migratable={migratable}
+        observedBytesPerSec={
+          rebProgressQuery.data?.metrics_available
+            ? rebProgressQuery.data.observed_bytes_per_sec
+            : null
+        }
+        rebalanceCfg={rebCfgQuery.data ?? null}
+        rebalanceCfgError={rebCfgQuery.isError}
+        rebalanceProgressError={rebProgressQuery.isError}
+        stale={stale}
+        fallbackEtaSeconds={data.eta_seconds ?? null}
+        clusterID={clusterID}
+      />
       <DrainDetail
         manifestChunks={chunks}
         gcPending={gcPending}
@@ -477,6 +587,125 @@ function DrainDetail({
         </dd>
       </dl>
     </details>
+  );
+}
+
+interface MigratingSummaryProps {
+  primary: number | null;
+  physicalUnavailable: boolean;
+  base: number | null;
+  migratable: number;
+  // observedBytesPerSec is the 1m-window rate from /admin/v1/clusters/.../
+  // rebalance-progress. null = metrics unavailable (Prom unset / endpoint
+  // 404 or 500 / query still loading) → caller falls back to pre-cycle
+  // eta_seconds. >0 = drive Z from observed; 0 = cold start (fallback for
+  // ETA, observed row reads cold-start copy).
+  observedBytesPerSec: number | null;
+  rebalanceCfg: RebalanceConfig | null;
+  rebalanceCfgError: boolean;
+  rebalanceProgressError: boolean;
+  stale: boolean;
+  fallbackEtaSeconds: number | null;
+  clusterID: string;
+}
+
+// MigratingSummary renders the dp-summary row of the Migrating chip.
+// Three rendering modes:
+//
+//   pre-cycle  — rebalance-config OR rebalance-progress query still
+//                loading or errored → original chunks-remaining + base +
+//                fallback eta_seconds copy
+//   live       — both queries resolved → chunks-remaining + observed
+//                bandwidth + formula-derived ETA. Tooltip enumerates
+//                rate cap + remaining chunks
+//   cold-start — live but observed_bytes_per_sec == 0 → observed reads
+//                "~0 MB/s observed (cold start)"; ETA uses fallback
+//                denominator (rate_mb_s × replicas_count / 2)
+function MigratingSummary({
+  primary,
+  physicalUnavailable,
+  base,
+  migratable,
+  observedBytesPerSec,
+  rebalanceCfg,
+  rebalanceCfgError,
+  rebalanceProgressError,
+  stale,
+  fallbackEtaSeconds,
+  clusterID,
+}: MigratingSummaryProps) {
+  const queriesReady =
+    !rebalanceCfgError &&
+    !rebalanceProgressError &&
+    rebalanceCfg != null &&
+    observedBytesPerSec != null;
+
+  let bandwidthSuffix: JSX.Element | null = null;
+  let tooltip: string | undefined;
+
+  if (queriesReady && migratable > 0) {
+    const cfg = rebalanceCfg;
+    const observed = observedBytesPerSec;
+    const observedMBs = observed / (1024 * 1024);
+    const etaSeconds = computeMigratingEtaSeconds(migratable, observed, cfg);
+    const etaLabel = !Number.isFinite(etaSeconds)
+      ? '~24h+ ETA'
+      : formatEtaMinutesCap(etaSeconds / 60);
+    const observedLabel =
+      observed > 0
+        ? `~${formatMBs(observedMBs)} MB/s observed`
+        : '~0 MB/s observed (cold start)';
+    bandwidthSuffix = (
+      <>
+        {' '}
+        · <span data-testid="dp-observed-mbs">{observedLabel}</span> ·{' '}
+        <span data-testid="dp-eta-formula">{etaLabel}</span>
+      </>
+    );
+    tooltip = `ETA from observed bandwidth (${formatMBs(observedMBs)} MB/s on cluster ${clusterID}) over remaining manifest chunks (${migratable}). Configured rate cap per replica: ${cfg.rate_mb_s} MB/s.`;
+  }
+
+  return (
+    <div
+      className={cn(
+        'tabular-nums text-xs',
+        stale ? 'text-muted-foreground/70' : 'text-muted-foreground',
+      )}
+      data-testid="dp-summary"
+      title={tooltip}
+    >
+      <span className="text-foreground">Migrating: </span>
+      <span
+        className="font-medium text-foreground"
+        data-testid="dp-primary-count"
+      >
+        {formatCount(primary ?? 0)}
+      </span>{' '}
+      chunks remaining
+      {physicalUnavailable && (
+        <span
+          className="ml-1 italic"
+          title={PHYSICAL_UNAVAILABLE_TOOLTIP}
+          data-testid="dp-physical-unavailable"
+        >
+          (physical count unavailable on this backend)
+        </span>
+      )}
+      {base != null && base > 0 && ` · ${formatCount(base)} at start`}
+      {bandwidthSuffix != null
+        ? bandwidthSuffix
+        : migratable > 0 && fallbackEtaSeconds != null && (
+            <> · ~{formatEta(fallbackEtaSeconds)}</>
+          )}
+      {stale && (
+        <span
+          className="ml-1 italic"
+          title="Cache older than 2×STRATA_REBALANCE_INTERVAL"
+        >
+          (stale)
+        </span>
+      )}
+    </div>
   );
 }
 

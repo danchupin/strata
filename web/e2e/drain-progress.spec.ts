@@ -64,9 +64,39 @@ async function login(page: Page) {
   await expect(page).toHaveURL(CONSOLE_HOME);
 }
 
+interface GCConfigShape {
+  grace_seconds: number;
+  interval_seconds: number;
+  batch_size: number;
+  concurrency: number;
+  shards: number;
+}
+
+interface RebalanceConfigShape {
+  interval_seconds: number;
+  rate_mb_s: number;
+  inflight: number;
+  shards: number;
+  replicas_count: number;
+}
+
+interface RebalanceProgressShape {
+  metrics_available: boolean;
+  moved_total: number;
+  refused_total: number;
+  observed_bytes_per_sec: number;
+  series: Array<[number, number]>;
+}
+
 interface SpoofState {
   clusters: ClusterRow[];
   progress: DrainProgressShape;
+  // Optional config + rebalance-progress overrides — when set the
+  // /admin/v1/gc-config + /admin/v1/rebalance-config endpoints serve
+  // these payloads instead of 404. US-002 drain-rebalance-transparency.
+  gcConfig?: GCConfigShape | { status: number };
+  rebalanceConfig?: RebalanceConfigShape | { status: number };
+  rebalanceProgress?: RebalanceProgressShape;
 }
 
 function installRoutes(page: Page, state: SpoofState) {
@@ -88,15 +118,49 @@ function installRoutes(page: Page, state: SpoofState) {
   });
 
   page.route('**/admin/v1/clusters/*/rebalance-progress', async (route) => {
+    const payload = state.rebalanceProgress ?? {
+      metrics_available: false,
+      moved_total: 0,
+      refused_total: 0,
+      observed_bytes_per_sec: 0,
+      series: [],
+    };
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
-        metrics_available: false,
-        moved_total: 0,
-        refused_total: 0,
-        series: [],
-      }),
+      body: JSON.stringify(payload),
+    });
+  });
+
+  page.route('**/admin/v1/gc-config', async (route) => {
+    if (state.gcConfig == null) {
+      await route.fulfill({ status: 404, body: 'not found' });
+      return;
+    }
+    if ('status' in state.gcConfig) {
+      await route.fulfill({ status: state.gcConfig.status, body: 'err' });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(state.gcConfig),
+    });
+  });
+
+  page.route('**/admin/v1/rebalance-config', async (route) => {
+    if (state.rebalanceConfig == null) {
+      await route.fulfill({ status: 404, body: 'not found' });
+      return;
+    }
+    if ('status' in state.rebalanceConfig) {
+      await route.fulfill({ status: state.rebalanceConfig.status, body: 'err' });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(state.rebalanceConfig),
     });
   });
 
@@ -308,5 +372,212 @@ test.describe('Strata console — drain-progress 3-state machine (US-002)', () =
     await expect(bar.getByTestId('dp-detail-bytes')).toContainText(
       'unavailable',
     );
+  });
+});
+
+// US-002 drain-rebalance-transparency — exercises the live ETA on the
+// Awaiting GC chip + live bandwidth / formula ETA on the Migrating chip
+// once /admin/v1/{gc,rebalance}-config + /admin/v1/clusters/<id>/
+// rebalance-progress.observed_bytes_per_sec ride along.
+test.describe('Strata console — drain-progress live ETA + bandwidth (US-002)', () => {
+  test('awaiting-gc chip: ETA suffix + dynamic tooltip from gc-config', async ({
+    page,
+  }) => {
+    const state: SpoofState = {
+      clusters: [
+        { id: 'cephb', state: 'evacuating', mode: 'evacuate', backend: 'rados' },
+      ],
+      progress: awaitingGCProgress(),
+      gcConfig: {
+        grace_seconds: 300,
+        interval_seconds: 60,
+        batch_size: 100,
+        concurrency: 4,
+        shards: 1,
+      },
+      rebalanceConfig: {
+        interval_seconds: 30,
+        rate_mb_s: 100,
+        inflight: 4,
+        shards: 1,
+        replicas_count: 2,
+      },
+    };
+    installRoutes(page, state);
+    await gotoStorageData(page);
+
+    const bar = page.getByTestId('dp-evacuate').first();
+    const chip = bar.getByTestId('dp-awaiting-gc');
+    await expect(chip).toBeVisible({ timeout: 10_000 });
+    // grace 300s → 5m; queue 80 / (100×1) = 0.8 ticks × (60/60 = 1m) → 1m
+    // total ≈ 5 + 1 = 6m ETA
+    await expect(chip).toContainText(/~6m ETA/);
+    await expect(chip).toHaveAttribute(
+      'title',
+      /ETA computed from current GC queue depth \(80 chunks\), STRATA_GC_GRACE \(300s\), STRATA_GC_INTERVAL \(60s\), STRATA_GC_BATCH_SIZE \(100\), STRATA_GC_SHARDS \(1\)/,
+    );
+  });
+
+  test('awaiting-gc chip: gc-config 404 → static fallback tooltip', async ({
+    page,
+  }) => {
+    const state: SpoofState = {
+      clusters: [
+        { id: 'cephb', state: 'evacuating', mode: 'evacuate', backend: 'rados' },
+      ],
+      progress: awaitingGCProgress(),
+      // gcConfig omitted → endpoint returns 404 → useQuery is in error
+      // state and the chip falls back to the pre-cycle static tooltip.
+    };
+    installRoutes(page, state);
+    await gotoStorageData(page);
+
+    const bar = page.getByTestId('dp-evacuate').first();
+    const chip = bar.getByTestId('dp-awaiting-gc');
+    await expect(chip).toBeVisible({ timeout: 10_000 });
+    await expect(chip).toHaveAttribute('title', /STRATA_GC_GRACE/);
+    // No ETA suffix in fallback mode.
+    await expect(chip).not.toContainText(/ETA\)/);
+  });
+
+  test('migrating chip: live bandwidth + formula ETA', async ({ page }) => {
+    const state: SpoofState = {
+      clusters: [
+        { id: 'cephb', state: 'evacuating', mode: 'evacuate', backend: 'rados' },
+      ],
+      progress: migratingProgress(),
+      gcConfig: {
+        grace_seconds: 300,
+        interval_seconds: 60,
+        batch_size: 100,
+        concurrency: 4,
+        shards: 1,
+      },
+      rebalanceConfig: {
+        interval_seconds: 30,
+        rate_mb_s: 100,
+        inflight: 4,
+        shards: 1,
+        replicas_count: 2,
+      },
+      rebalanceProgress: {
+        metrics_available: true,
+        moved_total: 50,
+        refused_total: 0,
+        // 50 MB/s — 200 chunks × 4 MiB / 50 MB/s ≈ 16.7s → rounds to 0m / 1m
+        observed_bytes_per_sec: 50 * 1024 * 1024,
+        series: [],
+      },
+    };
+    installRoutes(page, state);
+    await gotoStorageData(page);
+
+    const bar = page.getByTestId('dp-evacuate').first();
+    const summary = bar.getByTestId('dp-summary');
+    await expect(summary.getByTestId('dp-observed-mbs')).toHaveText(
+      '~50 MB/s observed',
+    );
+    await expect(summary.getByTestId('dp-eta-formula')).toContainText('ETA');
+    await expect(summary).toHaveAttribute(
+      'title',
+      /ETA from observed bandwidth \(50 MB\/s on cluster cephb\) over remaining manifest chunks \(200\)\. Configured rate cap per replica: 100 MB\/s\./,
+    );
+  });
+
+  test('migrating chip: PromQL cold start (observed=0) → fallback ETA + cold-start label', async ({
+    page,
+  }) => {
+    const state: SpoofState = {
+      clusters: [
+        { id: 'cephb', state: 'evacuating', mode: 'evacuate', backend: 'rados' },
+      ],
+      progress: migratingProgress(),
+      gcConfig: {
+        grace_seconds: 300,
+        interval_seconds: 60,
+        batch_size: 100,
+        concurrency: 4,
+        shards: 1,
+      },
+      rebalanceConfig: {
+        interval_seconds: 30,
+        rate_mb_s: 100,
+        inflight: 4,
+        shards: 1,
+        replicas_count: 2,
+      },
+      rebalanceProgress: {
+        metrics_available: true,
+        moved_total: 0,
+        refused_total: 0,
+        observed_bytes_per_sec: 0,
+        series: [],
+      },
+    };
+    installRoutes(page, state);
+    await gotoStorageData(page);
+
+    const summary = page.getByTestId('dp-evacuate').first().getByTestId('dp-summary');
+    await expect(summary.getByTestId('dp-observed-mbs')).toHaveText(
+      '~0 MB/s observed (cold start)',
+    );
+    // Fallback denominator: 100 MB/s × 2 / 2 = 100 MB/s effective.
+    // 200 chunks × 4 MiB / 100 MB/s ≈ 8.4s → rounds to 0m.
+    await expect(summary.getByTestId('dp-eta-formula')).toContainText('ETA');
+  });
+
+  test('migrating chip: rate_mb_s=0 → ~24h+ ETA cap', async ({ page }) => {
+    const state: SpoofState = {
+      clusters: [
+        { id: 'cephb', state: 'evacuating', mode: 'evacuate', backend: 'rados' },
+      ],
+      progress: migratingProgress(),
+      gcConfig: {
+        grace_seconds: 300,
+        interval_seconds: 60,
+        batch_size: 100,
+        concurrency: 4,
+        shards: 1,
+      },
+      rebalanceConfig: {
+        interval_seconds: 30,
+        rate_mb_s: 0,
+        inflight: 4,
+        shards: 1,
+        replicas_count: 2,
+      },
+      rebalanceProgress: {
+        metrics_available: true,
+        moved_total: 0,
+        refused_total: 0,
+        observed_bytes_per_sec: 0,
+        series: [],
+      },
+    };
+    installRoutes(page, state);
+    await gotoStorageData(page);
+
+    const summary = page.getByTestId('dp-evacuate').first().getByTestId('dp-summary');
+    await expect(summary.getByTestId('dp-eta-formula')).toHaveText('~24h+ ETA');
+  });
+
+  test('migrating chip: rebalance-config 404 → pre-cycle fallback (no live row)', async ({
+    page,
+  }) => {
+    const state: SpoofState = {
+      clusters: [
+        { id: 'cephb', state: 'evacuating', mode: 'evacuate', backend: 'rados' },
+      ],
+      progress: migratingProgress(),
+      // rebalanceConfig omitted → 404 → chip falls back to fallbackEtaSeconds.
+    };
+    installRoutes(page, state);
+    await gotoStorageData(page);
+
+    const summary = page.getByTestId('dp-evacuate').first().getByTestId('dp-summary');
+    await expect(summary.getByTestId('dp-observed-mbs')).toHaveCount(0);
+    await expect(summary.getByTestId('dp-eta-formula')).toHaveCount(0);
+    // Pre-cycle behavior: ~2m fallback from migratingProgress().eta_seconds=120
+    await expect(summary).toContainText(/~2m/);
   });
 });

@@ -176,6 +176,14 @@ export const queryKeys = {
   clusterRebalance: (id: string) => ['clusters', 'rebalance', id] as const,
   clusterDrainProgress: (id: string) =>
     ['clusters', 'drain-progress', id] as const,
+  // gcConfig + rebalanceConfig: env-static snapshots returned by
+  // /admin/v1/{gc,rebalance}-config (US-001 drain-rebalance-transparency).
+  // Callers set staleTime: Infinity — a gateway restart is the only event
+  // that can shift the values; rebalanceConfig is shared between
+  // <DrainProgressBar> (US-002) and <RebalanceConfigCard> (US-003) so the
+  // app issues at most one fetch per session.
+  gcConfig: ['admin', 'gc-config'] as const,
+  rebalanceConfig: ['admin', 'rebalance-config'] as const,
   clusterDrainImpact: (id: string) =>
     ['clusters', 'drain-impact', id] as const,
   clusterDrainImpactPage: (id: string, limit: number, offset: number) =>

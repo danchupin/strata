@@ -666,7 +666,7 @@ components:
 
     ClusterRebalanceProgress:
       type: object
-      required: [metrics_available, moved_total, refused_total, series]
+      required: [metrics_available, moved_total, refused_total, observed_bytes_per_sec, series]
       description: |
         Per-cluster rebalance counters + 1h / 1m-step sparkline returned by
         GET /clusters/{id}/rebalance-progress (US-005 placement-ui). When
@@ -685,6 +685,13 @@ components:
           description: |
             sum(strata_rebalance_refused_total{target="<id>"}) at sample
             time.
+        observed_bytes_per_sec:
+          type: number
+          description: |
+            sum(rate(strata_rebalance_bytes_moved_total{to="<id>"}[1m])) at
+            sample time — instant 1m bandwidth into this cluster. Feeds the
+            <DrainProgressBar> Migrating-chip observed-bandwidth row
+            (US-002 drain-rebalance-transparency). 0 on cold start.
         series:
           type: array
           description: |

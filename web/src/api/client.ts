@@ -80,6 +80,13 @@ export {
   type LoginRequest,
 } from './auth';
 
+export {
+  fetchGCConfig,
+  fetchRebalanceConfig,
+  type GCConfig,
+  type RebalanceConfig,
+} from './configs';
+
 // Placeholder wrappers for endpoints that land in later stories. Importing the
 // names here lets components reference them today without per-page file churn
 // when US-009/US-010/US-011 wire the real fetchers.

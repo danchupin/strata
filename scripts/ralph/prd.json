@@ -48,8 +48,8 @@
         "Typecheck passes"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped 2026-05-19. Added /admin/v1/{gc,rebalance}-config TanStack queries (`staleTime: Infinity`, `retry: false`, silent meta) to <DrainProgressBar>. Awaiting GC chip flips to live ETA when gc-config resolves: graceMin = ceil(grace/60); queueMin = ceil((queue/(batch×shards)) × intervalMin); cap at 24h+. Tooltip enumerates env values. Migrating chip uses observed_bytes_per_sec from existing /admin/v1/clusters/{id}/rebalance-progress (already wired with 1m PromQL rate of strata_rebalance_bytes_moved_total{to=<id>} in clusters_rebalance.go). ETA = (migratable × 4MiB)/observed when observed>0 else (migratable × 4MiB)/(rate_mb_s × replicas_count × 1MiB / 2). Cold-start reads `~0 MB/s observed (cold start)`. Either query loading/errored OR 404 → pre-cycle static fallback. Files: web/src/api/configs.ts (new), web/src/api/client.ts (re-exports), web/src/api/clusters.ts (+observed_bytes_per_sec field on ClusterRebalanceProgress), web/src/lib/query.ts (+gcConfig +rebalanceConfig keys), web/src/components/storage/DrainProgressBar.tsx (queries + helpers + MigratingSummary subcomponent), web/e2e/drain-progress.spec.ts (+6 scenarios). Backend ObservedBytesPerSec wired in internal/adminapi/clusters_rebalance.go + openapi.yaml + test."
     },
     {
       "id": "US-003",
