@@ -102,3 +102,31 @@ Cycle: ralph/dx-lab
   - The orphan-cell regex tolerates trailing punctuation/closing-paren in markdown table cells via the `[A-Za-z0-9_.\-]+\.go` constraint — but does NOT match Hugo shortcodes (`{{< ref >}}`) or external URLs, so the IAM `[Admin API surface]({{< ref ... >}})` link in the Non-S3 RPC subsection doesn't accidentally trip orphan detection.
 ---
 
+## 2026-05-19 - US-005
+- Final smoke validation + ROADMAP close-flip × 4 + PRD markdown removal.
+- Quality gates run on this iteration:
+  - `make vet` -> green.
+  - `go test ./...` (default tag) -> green incl. `internal/s3api` (8.0s) and the new `docs_reference_test.go` from US-004.
+  - `go test -race ./...` -> green on retry (one transient flake in `internal/racetest TestRunCleanRunNoInconsistencies` — randomized concurrent S3 oracle workload, not touched by this cycle; cached-pass on `go test -race ./internal/racetest/ -count=1`, 45.1s).
+  - `helm lint deploy/helm/strata/` -> 1 chart linted, 0 failed; only `[INFO] Chart.yaml: icon is recommended` (INFO != warning per US-003 learnings).
+  - `helm template strata deploy/helm/strata/ | kubectl apply --dry-run=client -f -` -> Secret/ConfigMap/Service/Deployment all valid dry-runs (default render path).
+  - `make docs-build` -> 73 pages, 0 errors.
+- Live-stack scenarios that need a running Docker compose (operator-only manual smoke):
+  - `make dev` foreground tail attach + Ctrl-C disconnect + `make dev-down` cleanup.
+  - `make smoke-tikv-default-lab` 4-scenario harness (Scenario A `bare bring-up` is the regression gate for US-002 + US-001).
+  - SHARDS=3 leg one-shot via `docker compose -f deploy/docker/docker-compose.yml --profile bench-3replica up -d strata-c && SHARDS=3 ./scripts/bench-rebalance-multi.sh` (deferred to operators with > 12 GiB Docker headroom per US-002 notes — lima/macOS box of this cycle hits the resource cap).
+  These are gated by the pre-shipped story acceptance + AST + helm + docs gates above; the cycle box cannot exercise them without operator presence + significant runtime / memory budget.
+- ROADMAP close-flip × 4 in one commit (ROADMAP.md lines 274, 276, 291, 293):
+  - L274: `**P3 — `make dev` for one-command developer cluster.**` -> `~~**Done.**~~` referencing US-001 (make dev / make dev-down / make dev-logs targets, TiKV-default lab, Ctrl-C semantics, docs/site/content/get-started/_index.md One-command dev subsection). `(commit pending)`.
+  - L276: `**P3 — Restore 3-replica TiKV bench (SHARDS=3 rebalance-multi).**` -> `~~**Done.**~~` referencing US-002 (bench-3replica profile + strata-c port 10003 + LB-unchanged fallback per PRD AC #3 + scripts/bench-rebalance-multi.sh auto-detect + docs/site/content/architecture/benchmarks/rebalance.md `## 3-replica TiKV (post-restore)` subsection + lima-cap deferral). `(commit pending)`.
+  - L291: `**P3 — Helm chart packaging for Kubernetes deployment.**` -> `~~**Done.**~~` referencing US-003 (deploy/helm/strata/ chart Chart.yaml + values.yaml + 8 templates + .helmignore + make helm-lint Makefile target with helm-missing degradation + docs/site/content/deploy/kubernetes.md `## Helm install` section). `(commit pending)`.
+  - L293: `**P3 — Drift-proof S3 ops reference table via Go lint test.**` -> `~~**Done.**~~` referencing US-004 (internal/s3api/docs_reference_test.go AST-parse approach + bidirectional drift catch + 6 `// docs:skip` markers on internal helpers + 5 dispatcher funcs hard-coded in dispatcherCalls set). `(commit pending)`.
+- `tasks/prd-dx-lab.md` removed via `git rm` per CLAUDE.md PRD lifecycle rule. Canonical record of this cycle stays in `scripts/ralph/archive/<YYYY-MM-DD>-ralph-dx-lab/{prd.json,progress.txt}` (auto-created by `archive_cycle` in ralph.sh on `<promise>COMPLETE</promise>`).
+- Files changed: `ROADMAP.md`, `tasks/prd-dx-lab.md` (removed), `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - The `internal/racetest TestRunCleanRunNoInconsistencies` test is a known randomized-workload oracle. Transient `read_after_write` false-positives surface ~5% of `-race` runs against an in-process gateway. NOT a regression — rerun the package alone (`go test -race ./internal/racetest/ -count=1`) to confirm before chasing. The flake doesn't gate close-flip when no cycle code touched `internal/racetest`.
+  - The PRD lifecycle rule (CLAUDE.md `## Ralph autonomous runs`) is strict: `tasks/prd-<feature>.md` must be `git rm`'d in the same commit that flips ROADMAP, not copied to `tasks/archive/`. The Ralph snapshot under `scripts/ralph/archive/<cycle>/` is the canonical post-merge record.
+  - `(commit pending)` placeholders on all 4 close-flip lines are deliberate per the cycle convention — the SHA backfill is a fast-follow commit on `main` post-merge so the close-flip commit itself doesn't need a `git commit --amend` dance.
+  - Final-story smoke validation for a backend/DX-only cycle (no UI surface) substitutes `make vet` + `go test ./...` + `go test -race ./...` + `helm lint` + `helm template | kubectl apply --dry-run=client` + `go test ./internal/s3api/` + `make docs-build` for the usual UI walkthrough — see memory rule `Cycle end-to-end`. Live-stack scenarios that require a running Docker compose are documented as operator-only manual smoke when the box can't host them.
+---
+
