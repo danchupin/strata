@@ -47,6 +47,14 @@ var (
 		Help: "RADOS chunks successfully deleted by the GC worker.",
 	})
 
+	GCTerminalAck = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_gc_terminal_ack_total",
+			Help: "GC queue entries ack'd as terminal without a successful Delete (e.g. chunk already swept by a sibling leader). reason=\"enoent\" today; future reasons may be added as the worker grows new terminal classifiers.",
+		},
+		[]string{"reason"},
+	)
+
 	LifecycleTransitions = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "strata_lifecycle_transitions_total",
@@ -303,7 +311,7 @@ func Register() {
 	prometheus.MustRegister(
 		HTTPRequests, HTTPDuration,
 		CassandraQueryDuration,
-		GCEnqueued, GCProcessed,
+		GCEnqueued, GCProcessed, GCTerminalAck,
 		LifecycleTransitions, LifecycleExpirations,
 		ReplicationLagSeconds, ReplicationCompleted, ReplicationFailed,
 		ReplicationQueueDepth, ReplicationQueueAge,

@@ -11,4 +11,25 @@ Cycle: ralph/polish-dx
 - **Lifecycle retry classifier (US-003)**: `internal/lifecycle/retry.go` (or fold into worker.go if < 30 LoC). Transient predicate: `context.DeadlineExceeded`, `syscall.ECONNRESET`, `syscall.ETIMEDOUT`, any `interface{ Temporary() bool }` returning true. Terminal: `meta.ErrNotFound`, `data.ErrChunkNotFound`, `data.ErrNoSuchKey`, `data.ErrNoSuchBucket`, anything not matching transient. 3 attempts total, backoff `1s → 3s → 10s`, sleep BEFORE attempts 2 and 3, ctx-aware (race `time.After` against `ctx.Done()`). Injectable `sleep func(time.Duration)` for unit testability. Counter `strata_lifecycle_retry_total{outcome=ok|exhausted|terminal}` in internal/metrics/lifecycle.go. Wrap each per-action call site (`expireNoncurrent` at line 393 calls `Meta.DeleteObject`; grep `w.Meta.DeleteObject\|w.Data.Delete` for the full enumeration) in `retryAction(ctx, func() error { return ... })`.
 - **ROADMAP discipline (US-004)**: 3 entries flip in one commit — 2 pre-existing (gc.Worker latent bug, TestThreeReplicaDistribution latent bug) + 1 new-and-closed for `Lifecycle worker no-retry on transient failures` per CLAUDE.md "Discovering a new gap" rule (US-003 is not pre-roadmapped). Each entry carries `(commit <pending>)` placeholder; SHA backfill lands on main as fast-follow commit (mirrors prior cycle's f6a5476-backfill pattern).
 - **No UI in this cycle** — none of the 3 fixes surfaces in the operator console. Per memory rule `Cycle end-to-end`, normally e2e smoke via UI walkthrough is required. This cycle's final-story validation is `go test -race -count=5 -run TestThreeReplicaDistribution` (proves US-002 stable) + full `go test -race ./...` + ROADMAP close-flip + PRD removal — substitutes the UI-smoke discipline because the value is backend-only.
+- **US-001 sentinel-import gotcha (S3 backend)**: `deleteFromCluster` must match BOTH `*s3types.NoSuchKey` (typed) and the generic `smithy.APIError` whose `ErrorCode()` returns `"NoSuchKey"` — MinIO + some emulators surface NoSuchKey as a generic api error (mirrors the `rebalance.go:140` precedent comment). Add `smithy "github.com/aws/smithy-go"` import. `DeleteObject` (the legacy admin/test helper) keeps the idempotent contract by swallowing `data.ErrChunkNotFound` to nil at the boundary; only the multi-cluster `Delete(m)` surface bubbles the sentinel to the gc worker.
+- **gc.Worker test pattern**: `metrics.GCTerminalAck` is a `prometheus.NewCounterVec` package-level var — tests can call `testutil.ToFloat64(metrics.GCTerminalAck.WithLabelValues("enoent"))` directly. Do NOT call `metrics.Register()` from tests: it uses `prometheus.MustRegister` which panics on duplicate registration if any other test (or the binary itself) already registered the counters.
+
+## 2026-05-19 19:30 MSK - US-001
+- Implemented backend-agnostic `data.ErrChunkNotFound` sentinel + RADOS / S3 backend lifts + gc.Worker terminal-ack classifier + `strata_gc_terminal_ack_total{reason}` counter.
+- Files changed:
+  - internal/data/errors.go (added ErrChunkNotFound)
+  - internal/data/rados/backend.go (Delete wraps goceph.ErrNotFound, behind `//go:build ceph`)
+  - internal/data/s3/backend.go (deleteFromCluster lifts NoSuchKey via both s3types.NoSuchKey + smithy.APIError; DeleteObject swallows sentinel; smithy import added)
+  - internal/gc/worker.go (eg.Go body checks errors.Is(err, data.ErrChunkNotFound) → bump counter + ack; non-ENOENT keeps loop-fail)
+  - internal/metrics/metrics.go (GCTerminalAck CounterVec registered)
+  - internal/gc/worker_test.go (TestWorker_TerminalAckOnChunkNotFound — X ack'd, Y retries, Z ack'd; counter delta=1)
+  - internal/data/s3/backend_test.go (TestDeleteLiftsNoSuchKeyToErrChunkNotFound + TestDeleteObjectSwallowsNoSuchKey)
+  - internal/data/rados/backend_integration_test.go (second-Delete asserts errors.Is(err, data.ErrChunkNotFound); `//go:build ceph && integration`)
+- Quality: `go vet ./...` clean, `go build ./...` clean, full `go test ./...` green (race-mode on gc/data subset: green). `go vet -tags ceph ./...` requires librados headers — not present on dev host; gate runs in CI Docker container.
+- **Learnings for future iterations:**
+  - The s3 backend's `DeleteObject` (legacy admin/test surface) must stay idempotent, so any new sentinel lifted in `deleteFromCluster` must be swallowed there — otherwise admin/integration tests that expect nil-on-missing break (see `TestDeleteObjectSwallowsNoSuchKey` for the pin).
+  - When wrapping native AWS SDK errors, match BOTH the typed `*s3types.<Code>` AND `smithy.APIError` by `ErrorCode()` — MinIO + some emulators surface protocol errors as generic api errors. The `rebalance.go:140` precedent already documents this.
+  - `prometheus.MustRegister` panics on duplicate. Tests reading counter values must NOT call `metrics.Register()` — read the package-level CounterVec leaf directly via `testutil.ToFloat64(metric.WithLabelValues(...))`.
+  - gc.Worker shape: per-entry decision lives in the inner `eg.Go` body inside `drainCount` (~line 222 today). The outer `RunOnce` only counts processed and stamps the iteration span. New terminal classifiers plug into the same place.
+---
 

@@ -10,6 +10,13 @@ import (
 // callers map this to S3 404 NoSuchKey instead of 500.
 var ErrNotFound = errors.New("data: object not found")
 
+// ErrChunkNotFound is the backend-agnostic sentinel returned by
+// data.Backend.Delete when the requested chunk is already absent on the
+// underlying store (RADOS goceph.ErrNotFound, S3 NoSuchKey, etc). The gc
+// worker treats this as terminal: ack the queue entry so a chunk swept
+// by a sibling leader doesn't loop forever.
+var ErrChunkNotFound = errors.New("data: chunk not found")
+
 // ErrClusterStatsNotSupported is returned by data backends that have no
 // way to surface cluster-fill telemetry (today: memory, s3). The
 // rebalance worker (US-006) treats this as "OK to proceed" — the

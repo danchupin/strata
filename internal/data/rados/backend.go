@@ -327,6 +327,9 @@ func (b *Backend) Delete(ctx context.Context, m *data.Manifest) error {
 		start := time.Now()
 		derr := ioctx.Delete(c.OID)
 		ObserveOp(ctx, b.logger, b.metrics, b.tracer, c.Pool, "del", c.OID, start, derr)
+		if derr != nil && errors.Is(derr, goceph.ErrNotFound) {
+			derr = fmt.Errorf("chunk %s: %w", c.OID, data.ErrChunkNotFound)
+		}
 		if derr != nil && firstErr == nil {
 			firstErr = derr
 		}
