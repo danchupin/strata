@@ -206,6 +206,109 @@ All three are env-only, read at worker `Build` time — no flags. Restart
 the replica that owns the `rebalance-leader` lease to pick up new
 values (or rolling-restart, the lease re-acquires on the next replica).
 
+## Bandwidth tuning
+
+`STRATA_REBALANCE_RATE_MB_S` is the single knob that decides whether
+migration coexists with user traffic on the same network or starves it.
+Pick the value from the network share calculator below; verify it live
+on the Cluster Overview rebalance card after a rolling restart.
+
+### Token-bucket model
+
+Each replica's rebalance worker has a token bucket sized at
+`STRATA_REBALANCE_RATE_MB_S` MB/s. A chunk move consumes
+`chunkSize × 2` tokens (read from source + write to target — both
+legs debit the same bucket). With `N` replicas, the aggregate ceiling
+is `N × rate_mb_s`; the **effective forward** (net new data written on
+the target cluster) is approximately `aggregate / 2`, because half of
+the token spend is read-side traffic that never crosses to the target.
+
+Implications:
+
+- Per-replica rate is what each replica's NIC actually carries on
+  migration traffic — pick it relative to the per-host pipe.
+- Aggregate is what the target cluster's pool absorbs on writes;
+  effective forward is what the dashboard "data moved" counter
+  climbs by per second.
+- The rebalance leader is a single replica per shard (see
+  [Multi-leader scaling](#multi-leader-scaling)) — only the
+  leader-holding replicas debit their bucket. Idle replicas
+  contribute nothing until they win a shard lease.
+
+### Network share calculator
+
+Pick `STRATA_REBALANCE_RATE_MB_S` to keep migration ≤ ~16 % of the
+per-host pipe (one-sixth headroom rule — leaves the remaining
+~84 % for user traffic + protocol overhead + the inevitable bursts).
+Table below assumes a 2-replica deploy (bare-default lab shape);
+scale per-replica values down proportionally for more replicas if
+the target cluster's write bandwidth is the bottleneck.
+
+| Per-host link | Peak MB/s | Safe per-replica `RATE_MB_S` | Aggregate (× 2 replicas) | Effective forward | % of pipe |
+| ------------- | --------- | ---------------------------- | ------------------------ | ----------------- | -------- |
+| 1 GbE   | ~125    | `10`   | ~20 MB/s    | ~10 MB/s    | ~16 % |
+| 10 GbE  | ~1 250  | `100`  | ~200 MB/s   | ~100 MB/s   | ~16 % |
+| 25 GbE  | ~3 125  | `250`  | ~500 MB/s   | ~250 MB/s   | ~16 % |
+| 100 GbE | ~12 500 | `1000` | ~2 000 MB/s | ~1 000 MB/s | ~16 % |
+
+The default `100` MB/s is calibrated for a 10 GbE host. Operators on
+1 GbE hosts who leave the default will see migration saturate the
+NIC — clients on the same hosts will see latency spikes. The first
+operator-facing symptom is usually a P99 GET-latency cliff that
+disappears when the rebalance worker stops; if you see that, drop
+`RATE_MB_S` to the table value for your link and rolling-restart.
+
+### Tuning workflows
+
+**Low-bandwidth lab (1 GbE virtual NIC).** The bare compose lab runs
+on the host's loopback, so the 10 MB/s setting is a *test-rig
+preset*, not a production recommendation:
+
+```bash
+STRATA_REBALANCE_RATE_MB_S=10 make up-all
+```
+
+The `scripts/smoke-drain-progress-ui.sh` smoke harness goes even
+lower (`RATE_MB_S=1`) to deliberately widen the Migrating phase past
+the 3 s poll cadence — that value is smoke-only and would stall
+real migration; never run prod gateways at it.
+
+**Production 10 GbE rolling restart.** Set the env on every replica
+in the Deployment / DaemonSet manifest and roll. The leader
+re-acquires on the next replica; the new rate takes effect on the
+next rebalance tick:
+
+```yaml
+# k8s Deployment fragment — apply to every strata replica
+env:
+  - name: STRATA_REBALANCE_RATE_MB_S
+    value: "100"
+```
+
+### Live observability + scripted health-check
+
+Two surfaces verify the value once the rolling restart completes:
+
+- **Cluster Overview rebalance card** (operator console) — renders
+  the per-replica rate, aggregate (× replicas), effective forward,
+  cadence, inflight, and shard count plus a live 1 m observed-MB/s
+  row driven by Prometheus. See the
+  [Drain progress states](#drain-progress-states--physical-vs-manifest-us-001us-003-drain-progress-physical)
+  section for the matching `<DrainProgressBar>` per-cluster
+  bandwidth indicator on the Migrating chip.
+- **Scripted health-check** — `curl` the read-only admin endpoint
+  from any pod or operator workstation that can reach the gateway:
+
+  ```bash
+  curl -s http://gateway:9999/admin/v1/rebalance-config | jq .
+  # → {"interval_seconds":300,"rate_mb_s":100,"inflight":4,"shards":1,"replicas_count":2}
+  ```
+
+  The endpoint is audit-stamped `admin:GetRebalanceConfig` and the
+  matching companion `GET /admin/v1/gc-config` exposes the GC
+  tunables read by the Awaiting GC chip ETA formula. Both are
+  env-static — restart picks up new values; no PUT counterpart.
+
 ## Safety rails
 
 The rebalance worker won't dispatch a move when:
@@ -990,7 +1093,11 @@ both read + write debit it; three replicas concurrently writing the
 same target RADOS pool also stack on shared OSD bandwidth. See the
 [rebalance bench]({{< ref "/architecture/benchmarks/rebalance" >}})
 page for the full cap-shape discussion + comparison with gc /
-lifecycle Phase 2.
+lifecycle Phase 2. Per-replica rate sizing for the host NIC is
+covered in [Bandwidth tuning](#bandwidth-tuning) — the network
+share calculator there maps GbE link size → safe `RATE_MB_S` value
+so the fan-out doesn't saturate the user-traffic pipe when several
+replicas hold shards concurrently.
 
 ### Single-replica fallback
 

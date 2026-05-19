@@ -203,6 +203,17 @@ container without the overrides).
 - ROADMAP — closed P3 entry "Drain progress UI shows manifest counts
   instead of physical chunks"; parked P3 follow-up "Precise
   drain-progress ETA from gateway GC tunables".
+- Follow-up cycle `ralph/drain-rebalance-transparency` (2026-05)
+  delivered the ETA + bandwidth-visibility pass parked above —
+  `<DrainProgressBar>` now folds a per-deploy ETA on both the
+  Awaiting GC chip (via `GET /admin/v1/gc-config`) and the
+  Migrating chip (via `GET /admin/v1/rebalance-config` + the live
+  1 m Prometheus rate of `strata_rebalance_bytes_moved_total{to}`),
+  and Cluster Overview gains a `<RebalanceConfigCard>` exposing
+  per-replica rate / aggregate / effective forward / cadence with
+  the matching network-share calculator in the
+  [Bandwidth tuning]({{< ref "/best-practices/placement-rebalance#bandwidth-tuning" >}})
+  runbook.
 - Best-practices runbook — see
   [Placement & rebalance → Drain progress states]({{< ref
   "/best-practices/placement-rebalance#drain-progress-states--physical-vs-manifest-us-001us-003-drain-progress-physical"

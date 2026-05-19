@@ -90,8 +90,8 @@
         "Typecheck passes"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped 2026-05-19. Added `## Bandwidth tuning` section (anchored `#bandwidth-tuning`) in docs/site/content/best-practices/placement-rebalance.md between `STRATA_REBALANCE_* env knobs` and `Safety rails`. Section opens with the token-bucket model (chunkSize × 2 tokens — both legs debit the same bucket; aggregate = N × rate; effective forward ≈ aggregate / 2). Network share calculator table covers 1 GbE / 10 GbE / 25 GbE / 100 GbE → safe per-replica RATE_MB_S (10/100/250/1000), aggregate (× 2 replicas), effective forward, ~16% of pipe (one-sixth headroom rule). Two tuning workflows: low-bandwidth lab (`STRATA_REBALANCE_RATE_MB_S=10 make up-all`) + prod 10 GbE k8s Deployment env yaml. Live observability subsection references the Cluster Overview rebalance card + per-cluster Migrating chip indicator, plus scripted health-check `curl http://gateway:9999/admin/v1/rebalance-config | jq .` (audit `admin:GetRebalanceConfig`; companion `/admin/v1/gc-config` mentioned). Cross-link from Multi-leader scaling Benchmark+speedup subsection added (`Per-replica rate sizing for the host NIC is covered in [Bandwidth tuning](#bandwidth-tuning)`). Migration note docs/site/content/architecture/migrations/drain-progress-physical.md `## Related cycles + references` gains follow-up bullet referencing `ralph/drain-rebalance-transparency` (2026-05) as the ETA + bandwidth-visibility pass that closed the parked ETA P3 + cross-links the Bandwidth tuning runbook. OpenAPI already documents both endpoints (shipped US-001 + US-003); no separate admin-api.md exists. `make docs-build` green (Hugo 0.161.1 extended; 63 pages, 0 errors); generated anchor `#bandwidth-tuning` confirmed in TOC + matches the US-003 Tune link target `/docs/best-practices/placement-rebalance/#bandwidth-tuning`."
     },
     {
       "id": "US-005",
