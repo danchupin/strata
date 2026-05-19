@@ -58,3 +58,29 @@ export async function fetchRebalanceConfig(): Promise<RebalanceConfig> {
     replicas_count: num(body.replicas_count),
   };
 }
+
+// RebalanceBandwidth mirrors the wire shape of
+// /admin/v1/rebalance-bandwidth (US-003 drain-rebalance-transparency).
+// metrics_available=false when Prom is unset/erroring — the consumer
+// (Cluster Overview rebalance card) hides the live-bandwidth row.
+export interface RebalanceBandwidth {
+  metrics_available: boolean;
+  bytes_per_sec: number;
+  chunks_per_sec: number;
+}
+
+export async function fetchRebalanceBandwidth(): Promise<RebalanceBandwidth> {
+  const resp = await fetch('/admin/v1/rebalance-bandwidth', {
+    method: 'GET',
+    credentials: 'same-origin',
+  });
+  if (!resp.ok) {
+    throw new Error(`rebalance-bandwidth: ${resp.status} ${resp.statusText}`);
+  }
+  const body = (await resp.json()) as Partial<RebalanceBandwidth>;
+  return {
+    metrics_available: body.metrics_available === true,
+    bytes_per_sec: num(body.bytes_per_sec),
+    chunks_per_sec: num(body.chunks_per_sec),
+  };
+}

@@ -921,6 +921,21 @@ components:
             store is unavailable or every row is stale (the UI then
             treats migration bandwidth as a `~24h+ ETA` fallback).
 
+    RebalanceBandwidth:
+      type: object
+      required: [metrics_available, bytes_per_sec, chunks_per_sec]
+      description: |
+        Cluster-wide 1m bandwidth roll-up sourced from Prometheus
+        `sum(rate(strata_rebalance_bytes_moved_total[1m]))` +
+        `sum(rate(strata_rebalance_chunks_moved_total[1m]))`. Returned by
+        `GET /admin/v1/rebalance-bandwidth` (US-003 drain-rebalance-
+        transparency). `metrics_available=false` when Prom is unset or
+        returns an error — UI hides the live-bandwidth row in that case.
+      properties:
+        metrics_available: { type: boolean }
+        bytes_per_sec: { type: number, format: double }
+        chunks_per_sec: { type: number, format: double }
+
   responses:
     Unauthorized:
       description: Authentication missing or invalid.
@@ -1856,6 +1871,28 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/RebalanceConfig' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /rebalance-bandwidth:
+    get:
+      summary: Cluster-wide 1m rebalance bandwidth roll-up
+      operationId: getRebalanceBandwidth
+      description: |
+        Returns `sum(rate(strata_rebalance_bytes_moved_total[1m]))` and
+        `sum(rate(strata_rebalance_chunks_moved_total[1m]))` — the
+        bandwidth + chunks/sec the rebalance worker is currently driving
+        across every destination cluster. Consumed by the Cluster
+        Overview rebalance card (US-003 drain-rebalance-transparency).
+        Degrades to `metrics_available=false` when Prom is unset or the
+        upstream call errors; the card hides the live-bandwidth row in
+        that case.
+      responses:
+        '200':
+          description: Aggregate bandwidth roll-up.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RebalanceBandwidth' }
         '401':
           $ref: '#/components/responses/Unauthorized'
 

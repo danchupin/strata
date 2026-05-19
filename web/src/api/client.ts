@@ -83,8 +83,10 @@ export {
 export {
   fetchGCConfig,
   fetchRebalanceConfig,
+  fetchRebalanceBandwidth,
   type GCConfig,
   type RebalanceConfig,
+  type RebalanceBandwidth,
 } from './configs';
 
 // Placeholder wrappers for endpoints that land in later stories. Importing the

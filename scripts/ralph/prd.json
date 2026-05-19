@@ -69,8 +69,8 @@
         "Typecheck passes"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped 2026-05-19. Added GET /admin/v1/rebalance-bandwidth (cluster-wide 1m roll-up: sum(rate(strata_rebalance_bytes_moved_total[1m])) + sum(rate(strata_rebalance_chunks_moved_total[1m]))); audit admin:GetRebalanceBandwidth; degrades to metrics_available=false on Prom unset/err. New <RebalanceConfigCard> mounted on Overview page under NodesTable; reads rebalanceConfig (TanStack key shared with <DrainProgressBar> — single fetch per app session) + rebalanceBandwidth (own 30s polling key). Renders four config rows (Per-replica rate / Aggregate (× N replicas) / Effective forward / Cadence + Inflight + Shards). Tooltip on Aggregate + Effective enumerates chunkSize × 2 tokens math. Tune link → /docs/best-practices/placement-rebalance/#bandwidth-tuning (new tab; anchor lands in US-004). Live observed row Observed last 1m: ~Y MB/s · ~Z chunks/sec visible only when bandwidth endpoint reports metrics_available=true; hidden on metrics_available=false. Entire card hidden on rebalance-config 404 (legacy gateway compat — no error toast). Files: internal/adminapi/rebalance_bandwidth.go (new handler + types); internal/adminapi/rebalance_bandwidth_test.go (new — happy path + Prom-unavailable + Prom-err); internal/adminapi/server.go (route); internal/adminapi/openapi.yaml (+RebalanceBandwidth schema + path); web/src/api/configs.ts (+fetchRebalanceBandwidth + RebalanceBandwidth type); web/src/api/client.ts (re-exports); web/src/lib/query.ts (+rebalanceBandwidth key); web/src/components/storage/RebalanceConfigCard.tsx (new); web/src/pages/Overview.tsx (mount card); web/e2e/cluster-overview-rebalance.spec.ts (new — 3 scenarios)."
     },
     {
       "id": "US-004",

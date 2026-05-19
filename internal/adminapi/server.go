@@ -491,6 +491,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/v1/metrics/timeseries", s.handleMetricsTimeseries)
 	mux.HandleFunc("GET /admin/v1/gc-config", s.handleGetGCConfig)
 	mux.HandleFunc("GET /admin/v1/rebalance-config", s.handleGetRebalanceConfig)
+	mux.HandleFunc("GET /admin/v1/rebalance-bandwidth", s.handleGetRebalanceBandwidth)
 	return mux
 }
 

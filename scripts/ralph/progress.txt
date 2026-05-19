@@ -82,3 +82,27 @@ Cycle: ralph/drain-rebalance-transparency
   - When a handler degrades gracefully (here: ListNodes failure → 200 with replicas_count=0 + counter increment), bake that into a unit test that mocks an `errHeartbeatStore` and asserts both the response shape AND the counter delta — the AC explicitly calls out "endpoint errors counter" so the assertion is load-bearing.
 ---
 
+
+## 2026-05-19 - US-003
+- Added GET /admin/v1/rebalance-bandwidth: cluster-wide 1m roll-up via sum(rate(strata_rebalance_bytes_moved_total[1m])) + sum(rate(strata_rebalance_chunks_moved_total[1m])). Audit admin:GetRebalanceBandwidth. metrics_available=false on Prom unset/err — UI hides observed row
+- Built <RebalanceConfigCard> mounted on Overview page under NodesTable. Four config rows (Per-replica rate / Aggregate (× N replicas) / Effective forward / Cadence + Inflight + Shards). chunkSize × 2 tokens tooltip on Aggregate + Effective. Tune link → /docs/best-practices/placement-rebalance/#bandwidth-tuning (US-004 anchor). Live observed row Observed last 1m: ~Y MB/s · ~Z chunks/sec gated on metrics_available=true. Entire card hidden on rebalance-config 404 (legacy gateway compat)
+- TanStack key `rebalanceConfig` shared with <DrainProgressBar> (staleTime: Infinity) — one fetch per app session. New `rebalanceBandwidth` key polls every 30s aligned with rebalance-progress cadence
+- Files changed:
+  - internal/adminapi/rebalance_bandwidth.go (new handler + RebalanceBandwidthResponse type + buildRebalanceBandwidth)
+  - internal/adminapi/rebalance_bandwidth_test.go (new — happy path + Prom-unavailable + Prom-err)
+  - internal/adminapi/server.go (route registration)
+  - internal/adminapi/openapi.yaml (+RebalanceBandwidth schema + /rebalance-bandwidth path)
+  - web/src/api/configs.ts (+fetchRebalanceBandwidth + RebalanceBandwidth type)
+  - web/src/api/client.ts (re-exports)
+  - web/src/lib/query.ts (+rebalanceBandwidth key)
+  - web/src/components/storage/RebalanceConfigCard.tsx (new)
+  - web/src/pages/Overview.tsx (mount RebalanceConfigCard under NodesTable)
+  - web/e2e/cluster-overview-rebalance.spec.ts (new — 3 scenarios: full render / metrics_available=false hides observed row / rebalance-config 404 hides card)
+- **Learnings for future iterations:**
+  - Aggregate PromQL roll-ups (no `to=<id>` filter) belong in a new admin endpoint, NOT inline in the UI — the gateway already owns Prom credentials + URL plumbing, and adding a third PromQL pass to clusters_rebalance.go would have re-used the per-cluster filter accidentally. New file `rebalance_bandwidth.go` mirrors the clusters_rebalance.go degrade-to-200 contract: `metrics_available=false` on Prom unset OR err so the UI never hard-fails on outage.
+  - Card-hidden-on-404 is implemented as `if (cfgQuery.isError) return null;` BEFORE the loading branch — `meta: { silent: true }` keeps the toast suppressed, `retry: false` short-circuits the failure into the error state. Loading branch still renders a skeleton so the layout stays stable while the env-static config resolves on first paint.
+  - The `rebalanceConfig` key is shared verbatim between <DrainProgressBar> and <RebalanceConfigCard>; both pass `staleTime: Infinity` + `refetchInterval: false` so the second mount hits the TanStack cache and never re-fetches. Don't override `staleTime` per-consumer — that breaks the sharing contract.
+  - Tune docs link uses Hugo's path shape `/docs/best-practices/placement-rebalance/#bandwidth-tuning` (trailing slash before `#`), not the source-tree `.md#anchor` shape. The PRD AC names the source path; the live link must use the served path.
+  - Counter math validation in tests: 50 × 1024 × 1024 (52,428,800) is exactly 50 MiB/s; UI formatter rounds `>=100` → `toFixed(0)` so `~52` would surface as `~52 MB/s`. Use `52428800` → 50 MiB → formatted "50 MB/s" to keep test expectations stable across MB-vs-MiB rounding bugs.
+  - Pure roll-up endpoints (no path params, no body) get audit verb `admin:Get<Name>` with resource `<endpoint-suffix>` and bucket `-`. The Audit middleware override pattern stays uniform across config + bandwidth endpoints.
+---

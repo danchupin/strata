@@ -184,6 +184,11 @@ export const queryKeys = {
   // app issues at most one fetch per session.
   gcConfig: ['admin', 'gc-config'] as const,
   rebalanceConfig: ['admin', 'rebalance-config'] as const,
+  // rebalanceBandwidth: cluster-wide 1m bandwidth roll-up backing the
+  // Cluster Overview rebalance card live row (US-003 drain-rebalance-
+  // transparency). 30s refresh aligns with the existing rebalance-progress
+  // chip cadence so a card mounted next to it shares Prom-poll pressure.
+  rebalanceBandwidth: ['admin', 'rebalance-bandwidth'] as const,
   clusterDrainImpact: (id: string) =>
     ['clusters', 'drain-impact', id] as const,
   clusterDrainImpactPage: (id: string, limit: number, offset: number) =>
