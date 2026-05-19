@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Architecture Decision Records on Strata Documentation</title><link>https://danchupin.github.io/strata/adr/</link><description>Recent content in Architecture Decision Records on Strata Documentation</description><generator>Hugo</generator><language>en</language><atom:link href="https://danchupin.github.io/strata/adr/index.xml" rel="self" type="application/rss+xml"/><item><title>ADR-0001: Skip RADOS omap for bucket index</title><link>https://danchupin.github.io/strata/adr/0001-skip-rados-omap/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/adr/0001-skip-rados-omap/</guid><description>&lt;h1 id="adr-0001-skip-rados-omap-for-bucket-index"&gt;ADR-0001: Skip RADOS omap for bucket index&lt;a class="anchor" href="#adr-0001-skip-rados-omap-for-bucket-index"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;h2 id="status"&gt;Status&lt;a class="anchor" href="#status"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;Accepted — April 2026&lt;/p&gt;
+&lt;h2 id="context"&gt;Context&lt;a class="anchor" href="#context"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;Strata is positioned as a drop-in replacement for Ceph RGW. RGW stores
+the bucket index in a small set of RADOS objects, each carrying an
+&lt;code&gt;omap&lt;/code&gt; (ordered key→value map) that lists the bucket&amp;rsquo;s objects in lex
+order. The omap is convenient — listing is a native ordered scan —
+but it has hard scale ceilings:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;The omap of a single index object lives in a single placement group.
+All listing traffic and all index mutations for that shard land on
+one OSD, capped by that OSD&amp;rsquo;s IOPS budget.&lt;/li&gt;
+&lt;li&gt;RGW&amp;rsquo;s only mitigation is bucket-index resharding (&lt;code&gt;radosgw-admin bucket reshard&lt;/code&gt;). Resharding rewrites the entire omap, must
+quiesce or rate-limit write traffic during the cut-over, and the
+shard count tops out before the largest production buckets do —
+beyond roughly 100M objects a single bucket exhausts the
+resharding ceiling and starts taking IOPS hits regardless.&lt;/li&gt;
+&lt;li&gt;The contract is opaque to the layer above. We cannot trade
+consistency for throughput, partition by a different key, or fan
+out across heterogeneous storage tiers without re-implementing the
+scan path.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;We considered (a) keeping omap with aggressive resharding and (b)
+moving the index to a separate ordered store. (a) inherits RGW&amp;rsquo;s
+ceiling; the project goal is to lift it, not match it.&lt;/p&gt;</description></item><item><title>ADR-0002: Derive IsLatest at read time</title><link>https://danchupin.github.io/strata/adr/0002-islatest-read-time/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/adr/0002-islatest-read-time/</guid><description>&lt;h1 id="adr-0002-derive-islatest-at-read-time"&gt;ADR-0002: Derive &lt;code&gt;IsLatest&lt;/code&gt; at read time&lt;a class="anchor" href="#adr-0002-derive-islatest-at-read-time"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;h2 id="status"&gt;Status&lt;a class="anchor" href="#status"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;Accepted — April 2026&lt;/p&gt;
+&lt;h2 id="context"&gt;Context&lt;a class="anchor" href="#context"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;S3 versioning requires every object row to expose an &lt;code&gt;IsLatest&lt;/code&gt; bit:
+the most recent (un-deleted) version of a key carries &lt;code&gt;IsLatest=true&lt;/code&gt;,
+every older version carries &lt;code&gt;IsLatest=false&lt;/code&gt;. The naive
+implementation flips the bit on the previous head whenever a new PUT
+lands — &lt;code&gt;UPDATE objects SET is_latest=false WHERE bucket_id=? AND key=? AND version_id=&amp;lt;prev&amp;gt;&lt;/code&gt; immediately after inserting the new
+version row.&lt;/p&gt;</description></item><item><title>ADR-0003: Single manifest blob column</title><link>https://danchupin.github.io/strata/adr/0003-manifest-blob-column/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/adr/0003-manifest-blob-column/</guid><description>&lt;h1 id="adr-0003-single-manifest-blob-column-for-object-metadata"&gt;ADR-0003: Single &lt;code&gt;manifest&lt;/code&gt; blob column for object metadata&lt;a class="anchor" href="#adr-0003-single-manifest-blob-column-for-object-metadata"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;h2 id="status"&gt;Status&lt;a class="anchor" href="#status"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;Accepted — April 2026&lt;/p&gt;
+&lt;h2 id="context"&gt;Context&lt;a class="anchor" href="#context"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;Per-object metadata in Strata is rich and growing: chunk OIDs, chunk
+sizes, MD5 / SHA256 digests, SSE wrap context, multipart part
+boundaries (&lt;code&gt;PartChunkCounts&lt;/code&gt;, &lt;code&gt;PartChunks&lt;/code&gt;), backend routing hints
+(&lt;code&gt;BackendRef.Cluster&lt;/code&gt;), and several smaller fields. A normalised
+schema would dedicate one column per field, possibly with side
+tables for the variable-length arrays (chunks, parts).&lt;/p&gt;
+&lt;p&gt;The cost of normalised columns on Cassandra is two-fold:&lt;/p&gt;</description></item><item><title>ADR-0004: One leader lease per background worker</title><link>https://danchupin.github.io/strata/adr/0004-leader-per-worker/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/adr/0004-leader-per-worker/</guid><description>&lt;h1 id="adr-0004-one-leader-lease-per-background-worker"&gt;ADR-0004: One leader lease per background worker&lt;a class="anchor" href="#adr-0004-one-leader-lease-per-background-worker"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;h2 id="status"&gt;Status&lt;a class="anchor" href="#status"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;Accepted — April 2026&lt;/p&gt;
+&lt;p&gt;(Reconsideration tracked under
+&lt;a href="https://github.com/danchupin/strata/blob/main/ROADMAP.md#consolidation--validation"&gt;ROADMAP &lt;code&gt;## Consolidation &amp;amp; validation&lt;/code&gt;&lt;/a&gt;.
+If the supervisor collapse lands, this ADR will be marked &lt;code&gt;Superseded by ADR-XXXX&lt;/code&gt;.)&lt;/p&gt;
+&lt;h2 id="context"&gt;Context&lt;a class="anchor" href="#context"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;code&gt;strata server&lt;/code&gt; ships roughly ten background workers — &lt;code&gt;gc&lt;/code&gt;,
+&lt;code&gt;lifecycle&lt;/code&gt;, &lt;code&gt;replicator&lt;/code&gt;, &lt;code&gt;notify&lt;/code&gt;, &lt;code&gt;access-log&lt;/code&gt;, &lt;code&gt;inventory&lt;/code&gt;,
+&lt;code&gt;audit-export&lt;/code&gt;, &lt;code&gt;manifest-rewriter&lt;/code&gt;, &lt;code&gt;rebalance&lt;/code&gt;,
+&lt;code&gt;quota-reconcile&lt;/code&gt;, &lt;code&gt;usage-rollup&lt;/code&gt;. Each of them must run on at most
+one replica at a time: GC must not double-delete, lifecycle must
+not duplicate transitions, etc. Some shape of singleton election is
+required regardless of the deploy footprint.&lt;/p&gt;</description></item></channel></rss>

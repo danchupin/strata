@@ -1,4 +1,61 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Strata Documentation</title><link>https://danchupin.github.io/strata/</link><description>Recent content on Strata Documentation</description><generator>Hugo</generator><language>en</language><atom:link href="https://danchupin.github.io/strata/index.xml" rel="self" type="application/rss+xml"/><item><title>Auth</title><link>https://danchupin.github.io/strata/architecture/auth/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/auth/</guid><description>&lt;h1 id="auth"&gt;Auth&lt;a class="anchor" href="#auth"&gt;#&lt;/a&gt;&lt;/h1&gt;
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Strata Documentation</title><link>https://danchupin.github.io/strata/</link><description>Recent content on Strata Documentation</description><generator>Hugo</generator><language>en</language><atom:link href="https://danchupin.github.io/strata/index.xml" rel="self" type="application/rss+xml"/><item><title>ADR-0001: Skip RADOS omap for bucket index</title><link>https://danchupin.github.io/strata/adr/0001-skip-rados-omap/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/adr/0001-skip-rados-omap/</guid><description>&lt;h1 id="adr-0001-skip-rados-omap-for-bucket-index"&gt;ADR-0001: Skip RADOS omap for bucket index&lt;a class="anchor" href="#adr-0001-skip-rados-omap-for-bucket-index"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;h2 id="status"&gt;Status&lt;a class="anchor" href="#status"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;Accepted — April 2026&lt;/p&gt;
+&lt;h2 id="context"&gt;Context&lt;a class="anchor" href="#context"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;Strata is positioned as a drop-in replacement for Ceph RGW. RGW stores
+the bucket index in a small set of RADOS objects, each carrying an
+&lt;code&gt;omap&lt;/code&gt; (ordered key→value map) that lists the bucket&amp;rsquo;s objects in lex
+order. The omap is convenient — listing is a native ordered scan —
+but it has hard scale ceilings:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;The omap of a single index object lives in a single placement group.
+All listing traffic and all index mutations for that shard land on
+one OSD, capped by that OSD&amp;rsquo;s IOPS budget.&lt;/li&gt;
+&lt;li&gt;RGW&amp;rsquo;s only mitigation is bucket-index resharding (&lt;code&gt;radosgw-admin bucket reshard&lt;/code&gt;). Resharding rewrites the entire omap, must
+quiesce or rate-limit write traffic during the cut-over, and the
+shard count tops out before the largest production buckets do —
+beyond roughly 100M objects a single bucket exhausts the
+resharding ceiling and starts taking IOPS hits regardless.&lt;/li&gt;
+&lt;li&gt;The contract is opaque to the layer above. We cannot trade
+consistency for throughput, partition by a different key, or fan
+out across heterogeneous storage tiers without re-implementing the
+scan path.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;We considered (a) keeping omap with aggressive resharding and (b)
+moving the index to a separate ordered store. (a) inherits RGW&amp;rsquo;s
+ceiling; the project goal is to lift it, not match it.&lt;/p&gt;</description></item><item><title>ADR-0002: Derive IsLatest at read time</title><link>https://danchupin.github.io/strata/adr/0002-islatest-read-time/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/adr/0002-islatest-read-time/</guid><description>&lt;h1 id="adr-0002-derive-islatest-at-read-time"&gt;ADR-0002: Derive &lt;code&gt;IsLatest&lt;/code&gt; at read time&lt;a class="anchor" href="#adr-0002-derive-islatest-at-read-time"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;h2 id="status"&gt;Status&lt;a class="anchor" href="#status"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;Accepted — April 2026&lt;/p&gt;
+&lt;h2 id="context"&gt;Context&lt;a class="anchor" href="#context"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;S3 versioning requires every object row to expose an &lt;code&gt;IsLatest&lt;/code&gt; bit:
+the most recent (un-deleted) version of a key carries &lt;code&gt;IsLatest=true&lt;/code&gt;,
+every older version carries &lt;code&gt;IsLatest=false&lt;/code&gt;. The naive
+implementation flips the bit on the previous head whenever a new PUT
+lands — &lt;code&gt;UPDATE objects SET is_latest=false WHERE bucket_id=? AND key=? AND version_id=&amp;lt;prev&amp;gt;&lt;/code&gt; immediately after inserting the new
+version row.&lt;/p&gt;</description></item><item><title>ADR-0003: Single manifest blob column</title><link>https://danchupin.github.io/strata/adr/0003-manifest-blob-column/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/adr/0003-manifest-blob-column/</guid><description>&lt;h1 id="adr-0003-single-manifest-blob-column-for-object-metadata"&gt;ADR-0003: Single &lt;code&gt;manifest&lt;/code&gt; blob column for object metadata&lt;a class="anchor" href="#adr-0003-single-manifest-blob-column-for-object-metadata"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;h2 id="status"&gt;Status&lt;a class="anchor" href="#status"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;Accepted — April 2026&lt;/p&gt;
+&lt;h2 id="context"&gt;Context&lt;a class="anchor" href="#context"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;Per-object metadata in Strata is rich and growing: chunk OIDs, chunk
+sizes, MD5 / SHA256 digests, SSE wrap context, multipart part
+boundaries (&lt;code&gt;PartChunkCounts&lt;/code&gt;, &lt;code&gt;PartChunks&lt;/code&gt;), backend routing hints
+(&lt;code&gt;BackendRef.Cluster&lt;/code&gt;), and several smaller fields. A normalised
+schema would dedicate one column per field, possibly with side
+tables for the variable-length arrays (chunks, parts).&lt;/p&gt;
+&lt;p&gt;The cost of normalised columns on Cassandra is two-fold:&lt;/p&gt;</description></item><item><title>ADR-0004: One leader lease per background worker</title><link>https://danchupin.github.io/strata/adr/0004-leader-per-worker/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/adr/0004-leader-per-worker/</guid><description>&lt;h1 id="adr-0004-one-leader-lease-per-background-worker"&gt;ADR-0004: One leader lease per background worker&lt;a class="anchor" href="#adr-0004-one-leader-lease-per-background-worker"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;h2 id="status"&gt;Status&lt;a class="anchor" href="#status"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;Accepted — April 2026&lt;/p&gt;
+&lt;p&gt;(Reconsideration tracked under
+&lt;a href="https://github.com/danchupin/strata/blob/main/ROADMAP.md#consolidation--validation"&gt;ROADMAP &lt;code&gt;## Consolidation &amp;amp; validation&lt;/code&gt;&lt;/a&gt;.
+If the supervisor collapse lands, this ADR will be marked &lt;code&gt;Superseded by ADR-XXXX&lt;/code&gt;.)&lt;/p&gt;
+&lt;h2 id="context"&gt;Context&lt;a class="anchor" href="#context"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;code&gt;strata server&lt;/code&gt; ships roughly ten background workers — &lt;code&gt;gc&lt;/code&gt;,
+&lt;code&gt;lifecycle&lt;/code&gt;, &lt;code&gt;replicator&lt;/code&gt;, &lt;code&gt;notify&lt;/code&gt;, &lt;code&gt;access-log&lt;/code&gt;, &lt;code&gt;inventory&lt;/code&gt;,
+&lt;code&gt;audit-export&lt;/code&gt;, &lt;code&gt;manifest-rewriter&lt;/code&gt;, &lt;code&gt;rebalance&lt;/code&gt;,
+&lt;code&gt;quota-reconcile&lt;/code&gt;, &lt;code&gt;usage-rollup&lt;/code&gt;. Each of them must run on at most
+one replica at a time: GC must not double-delete, lifecycle must
+not duplicate transitions, etc. Some shape of singleton election is
+required regardless of the deploy footprint.&lt;/p&gt;</description></item><item><title>Auth</title><link>https://danchupin.github.io/strata/architecture/auth/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/auth/</guid><description>&lt;h1 id="auth"&gt;Auth&lt;a class="anchor" href="#auth"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;The auth layer lives under &lt;code&gt;internal/auth/&lt;/code&gt;. Every request enters through
 &lt;code&gt;auth.Middleware&lt;/code&gt;, which verifies an AWS SigV4 signature, derives a stable
 identity, and stamps the result onto the request context. The router and
@@ -143,7 +200,15 @@ the box is the SPOF for HTTP traffic. For HA, see
  &lt;/tbody&gt;
 &lt;/table&gt;
 &lt;p&gt;For multi-tenant production traffic, scale to ≥2 replicas and pick a real
-metadata cluster (Cassandra ≥3 nodes or TiKV with PD ≥3 + TiKV ≥3).&lt;/p&gt;</description></item><item><title>Web UI (Strata Console)</title><link>https://danchupin.github.io/strata/best-practices/web-ui/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/web-ui/</guid><description>&lt;h1 id="strata-console-web-ui--operator-guide"&gt;Strata Console (Web UI) — Operator Guide&lt;a class="anchor" href="#strata-console-web-ui--operator-guide"&gt;#&lt;/a&gt;&lt;/h1&gt;
+metadata cluster (Cassandra ≥3 nodes or TiKV with PD ≥3 + TiKV ≥3).&lt;/p&gt;</description></item><item><title>STRATA_* environment variables</title><link>https://danchupin.github.io/strata/reference/env-vars/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/reference/env-vars/</guid><description>&lt;!--
+Source of truth: grep the codebase via `grep -rhoE 'STRATA_[A-Z_][A-Z0-9_]+' cmd/strata/ internal/ | sort -u`.
+Cross-reference defaults + clamp ranges at the consuming call sites (koanf envMap,
+worker `*FromEnv` helpers, `os.Getenv(...)`). Update this page when adding a new env var.
+--&gt;
+&lt;h1 id="strata_-environment-variables"&gt;&lt;code&gt;STRATA_*&lt;/code&gt; environment variables&lt;a class="anchor" href="#strata_-environment-variables"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;&lt;em&gt;Source of truth: grep the codebase via &lt;code&gt;grep -rhoE 'STRATA_[A-Z_][A-Z0-9_]+' cmd/strata/ internal/&lt;/code&gt;.&lt;/em&gt;
+&lt;em&gt;Update this page when adding a new env var — the &lt;a href="https://danchupin.github.io/strata/reference/"&gt;reference index&lt;/a&gt;
+links here as the operator-facing tuning manual.&lt;/em&gt;&lt;/p&gt;</description></item><item><title>Web UI (Strata Console)</title><link>https://danchupin.github.io/strata/best-practices/web-ui/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/web-ui/</guid><description>&lt;h1 id="strata-console-web-ui--operator-guide"&gt;Strata Console (Web UI) — Operator Guide&lt;a class="anchor" href="#strata-console-web-ui--operator-guide"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;The Strata Console is an embedded read-only web UI for cluster operators.
 It ships in the same binary as the gateway (&lt;code&gt;go:embed&lt;/code&gt;) and is served at
 &lt;code&gt;/console/&lt;/code&gt; on the gateway HTTP port. No separate process, no separate
@@ -191,7 +256,17 @@ the backends can all support without bolting a coordinator in front.&lt;/p&gt;
 &lt;/table&gt;
 &lt;p&gt;A new backend MUST satisfy &lt;code&gt;meta.Store&lt;/code&gt; and pass the contract suite at
 &lt;code&gt;internal/meta/storetest/contract.go&lt;/code&gt;. The suite is shared across all
-backends and is the parity oracle.&lt;/p&gt;</description></item><item><title>Data backend</title><link>https://danchupin.github.io/strata/architecture/data-backend/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/data-backend/</guid><description>&lt;h1 id="data-backend"&gt;Data backend&lt;a class="anchor" href="#data-backend"&gt;#&lt;/a&gt;&lt;/h1&gt;
+backends and is the parity oracle.&lt;/p&gt;</description></item><item><title>Admin API surface</title><link>https://danchupin.github.io/strata/reference/admin-api/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/reference/admin-api/</guid><description>&lt;!--
+Source of truth: `internal/adminapi/openapi.yaml`. This page is a derived flat
+index — rebuild it when paths are added/removed from the OpenAPI document.
+Audit-verb column mirrors the `s3api.SetAuditOverride(ctx, action, ...)` stamp
+in the handler. GET/HEAD/OPTIONS are skipped by the audit middleware regardless
+of any defensive stamp, so read-only rows show "—".
+--&gt;
+&lt;h1 id="admin-api-surface"&gt;Admin API surface&lt;a class="anchor" href="#admin-api-surface"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;&lt;em&gt;This page is the operator index. Authoritative contract lives in
+&lt;a href="https://github.com/danchupin/strata/blob/main/internal/adminapi/openapi.yaml"&gt;&lt;code&gt;internal/adminapi/openapi.yaml&lt;/code&gt;&lt;/a&gt;;
+rendered viewer at &lt;code&gt;/reference/admin-api-viewer/&lt;/code&gt; (authored in US-005).&lt;/em&gt;&lt;/p&gt;</description></item><item><title>Data backend</title><link>https://danchupin.github.io/strata/architecture/data-backend/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/data-backend/</guid><description>&lt;h1 id="data-backend"&gt;Data backend&lt;a class="anchor" href="#data-backend"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;&lt;code&gt;internal/data/backend.go&lt;/code&gt; defines the &lt;code&gt;data.Backend&lt;/code&gt; interface every chunk
 store implements. The metadata layer keeps the per-object manifest (chunk
 list, sizes, content hash); the data backend is responsible for opaque
@@ -386,7 +461,25 @@ current one drains to the wire. Memory-bounded; aborts on client cancel.&lt;/li&
 &lt;code&gt;manager.Uploader&lt;/code&gt; already parallelises multipart uploads. Memory backend is
 tests-only. Multi-cluster manifests (US-044) automatically benefit since
 chunk-write dispatch is cluster-agnostic — the worker pool dials the right
-ioctx per chunk via the existing &lt;code&gt;resolveClass&lt;/code&gt; / &lt;code&gt;ioctx&lt;/code&gt; helpers.&lt;/p&gt;</description></item><item><title>S3-over-S3 data backend</title><link>https://danchupin.github.io/strata/architecture/backends/s3/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/backends/s3/</guid><description>&lt;h1 id="s3-data-backend"&gt;S3 Data Backend&lt;a class="anchor" href="#s3-data-backend"&gt;#&lt;/a&gt;&lt;/h1&gt;
+ioctx per chunk via the existing &lt;code&gt;resolveClass&lt;/code&gt; / &lt;code&gt;ioctx&lt;/code&gt; helpers.&lt;/p&gt;</description></item><item><title>S3 API operations</title><link>https://danchupin.github.io/strata/reference/s3-api/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/reference/s3-api/</guid><description>&lt;!--
+Maintainer note: this table is hand-maintained. When adding a new handler
+in internal/s3api/, append a row here in the same PR. A lint test
+(docs_lint_test.go) that parses the `handleBucket` + `handleObject` switch
+arms in internal/s3api/server.go and asserts coverage is parked as a P3
+ROADMAP entry ("Drift-proof S3 ops reference table via Go lint test
+parsing internal/s3api/server.go switch arms").
+
+Row sourcing: walk the `case` arms of `handleBucket` / `handleObject` /
+`handleService` in `internal/s3api/server.go`. Each route arm becomes one
+row. `Handler file:line` points at the route arm in `server.go` OR the
+leaf handler in `internal/s3api/&lt;feature&gt;.go`.
+--&gt;
+&lt;h1 id="s3-api-operations"&gt;S3 API operations&lt;a class="anchor" href="#s3-api-operations"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;&lt;em&gt;This page is the operator + SDK-author index. The router is in
+&lt;a href="https://github.com/danchupin/strata/blob/main/internal/s3api/server.go"&gt;&lt;code&gt;internal/s3api/server.go&lt;/code&gt;&lt;/a&gt; —
+&lt;code&gt;ServeHTTP&lt;/code&gt; → &lt;code&gt;handleBucket&lt;/code&gt; (bucket-scope) → &lt;code&gt;handleObject&lt;/code&gt; (object-scope).
+Leaf handlers live in &lt;code&gt;internal/s3api/&amp;lt;feature&amp;gt;.go&lt;/code&gt;. AWS divergence column
+is empty when the operation is full-compat; one-liner otherwise.&lt;/em&gt;&lt;/p&gt;</description></item><item><title>S3-over-S3 data backend</title><link>https://danchupin.github.io/strata/architecture/backends/s3/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/backends/s3/</guid><description>&lt;h1 id="s3-data-backend"&gt;S3 Data Backend&lt;a class="anchor" href="#s3-data-backend"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;The S3-over-S3 data backend stores object bytes in any S3-compatible bucket
 (AWS S3, MinIO, Ceph RGW, Garage). One Strata object = one backend S3 object
 under the key &lt;code&gt;&amp;lt;bucket-uuid&amp;gt;/&amp;lt;object-uuid&amp;gt;&lt;/code&gt;. RADOS remains the default and
@@ -496,7 +589,15 @@ correlate with the meta + data ops it triggered.&lt;/p&gt;
 &lt;p&gt;The wire-up env vars + tail-sampler + ring buffer behaviour live in
 &lt;a href="https://danchupin.github.io/strata/best-practices/monitoring/#opentelemetry-tracing"&gt;Monitoring&lt;/a&gt;.
 This page is the operator-facing reference for &lt;strong&gt;what spans exist,
-how they are named, and how to filter them&lt;/strong&gt;.&lt;/p&gt;</description></item><item><title>Drain progress physical chunks</title><link>https://danchupin.github.io/strata/architecture/migrations/drain-progress-physical/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/migrations/drain-progress-physical/</guid><description>&lt;h1 id="migrating-to-the-physical-chunk-drain-progress"&gt;Migrating to the physical-chunk drain progress&lt;a class="anchor" href="#migrating-to-the-physical-chunk-drain-progress"&gt;#&lt;/a&gt;&lt;/h1&gt;
+how they are named, and how to filter them&lt;/strong&gt;.&lt;/p&gt;</description></item><item><title>Admin API viewer</title><link>https://danchupin.github.io/strata/reference/admin-api-viewer/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/reference/admin-api-viewer/</guid><description>&lt;h1 id="admin-api-viewer"&gt;Admin API viewer&lt;a class="anchor" href="#admin-api-viewer"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Interactive &lt;a href="https://github.com/Redocly/redoc"&gt;Redoc&lt;/a&gt; render of the canonical
+Admin-API OpenAPI contract (&lt;code&gt;internal/adminapi/openapi.yaml&lt;/code&gt;). The YAML is
+copied into the Hugo static dir at build time by &lt;code&gt;make docs-openapi-copy&lt;/code&gt;
+(a prerequisite of &lt;code&gt;make docs-build&lt;/code&gt; / &lt;code&gt;make docs-serve&lt;/code&gt;), so the viewer
+always reflects the contract at the same SHA as the rest of the docs site.&lt;/p&gt;
+&lt;p&gt;For a flat index of every admin endpoint with method, path, audit verb,
+and a one-line summary, see &lt;a href="https://danchupin.github.io/strata/reference/admin-api/"&gt;Admin API surface&lt;/a&gt;.
+For the raw contract, fetch &lt;a href="https://danchupin.github.io/strata/openapi.yaml"&gt;/openapi.yaml&lt;/a&gt;.&lt;/p&gt;</description></item><item><title>Drain progress physical chunks</title><link>https://danchupin.github.io/strata/architecture/migrations/drain-progress-physical/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/migrations/drain-progress-physical/</guid><description>&lt;h1 id="migrating-to-the-physical-chunk-drain-progress"&gt;Migrating to the physical-chunk drain progress&lt;a class="anchor" href="#migrating-to-the-physical-chunk-drain-progress"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;&lt;code&gt;GET /admin/v1/clusters/&amp;lt;id&amp;gt;/drain-progress&lt;/code&gt; and the operator console
 &lt;code&gt;&amp;lt;DrainProgressBar&amp;gt;&lt;/code&gt; used to surface &lt;code&gt;chunks_on_cluster&lt;/code&gt; — the
 manifest-derived chunk count — as the sole headline metric. After the
