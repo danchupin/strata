@@ -258,6 +258,72 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  # Third strata replica gated behind `--profile bench-3replica`. Used only
+  # by the 3-replica rebalance bench (scripts/bench-rebalance-multi.sh
+  # SHARDS=3 leg). Joins the same TiKV-backed locker pool so it races for
+  # `rebalance-leader-{0,1,2}` leases alongside strata-a + strata-b. Not
+  # added to the nginx LB upstream (LB stays on strata-a/b under the bare
+  # default); the bench script does not need a third HTTP endpoint — the
+  # rebalance worker shard fan-out runs over TiKV leases, independent of
+  # HTTP routing. Operator bring-up:
+  #   docker compose --profile bench-3replica up -d strata-c
+  # Tear down with `make down` (the `down` target already enumerates
+  # profile names; bench-3replica is appended).
+  strata-c:
+    image: strata:ceph
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    container_name: strata-c
+    profiles: ["bench-3replica"]
+    depends_on:
+      pd:
+        condition: service_healthy
+      tikv:
+        condition: service_started
+      ceph:
+        condition: service_healthy
+      ceph-b:
+        condition: service_healthy
+    environment:
+      STRATA_CONFIG_FILE: /etc/strata/strata.toml
+      STRATA_META_BACKEND: tikv
+      STRATA_TIKV_PD_ENDPOINTS: ${STRATA_TIKV_PD_ENDPOINTS:-pd:2379}
+      STRATA_NODE_ID: strata-c
+      STRATA_WORKERS: ${STRATA_WORKERS:-gc,lifecycle,rebalance}
+      STRATA_RADOS_CLUSTERS: ${STRATA_RADOS_CLUSTERS:-default:/etc/ceph-a/ceph.conf:/etc/ceph-a/ceph.client.admin.keyring,cephb:/etc/ceph-b/ceph.conf:/etc/ceph-b/ceph.client.admin.keyring}
+      STRATA_RADOS_CONF: "/etc/ceph-a/ceph.conf"
+      STRATA_RADOS_KEYRING: "/etc/ceph-a/ceph.client.admin.keyring"
+      STRATA_RADOS_CLASSES: ${STRATA_RADOS_CLASSES:-}
+      STRATA_REBALANCE_INTERVAL: ${STRATA_REBALANCE_INTERVAL:-30s}
+      STRATA_REBALANCE_RATE_MB_S: ${STRATA_REBALANCE_RATE_MB_S:-}
+      STRATA_REBALANCE_INFLIGHT: ${STRATA_REBALANCE_INFLIGHT:-}
+      STRATA_AUTH_MODE: ${STRATA_AUTH_MODE:-optional}
+      STRATA_STATIC_CREDENTIALS: ${STRATA_STATIC_CREDENTIALS:-admin:adminpass:owner}
+      STRATA_GC_INTERVAL: ${STRATA_GC_INTERVAL:-}
+      STRATA_GC_GRACE: ${STRATA_GC_GRACE:-}
+      STRATA_GC_SHARDS: ${STRATA_GC_SHARDS:-}
+      STRATA_GC_CONCURRENCY: ${STRATA_GC_CONCURRENCY:-}
+      STRATA_GC_DUAL_WRITE: ${STRATA_GC_DUAL_WRITE:-}
+      STRATA_LIFECYCLE_INTERVAL: ${STRATA_LIFECYCLE_INTERVAL:-}
+      STRATA_LIFECYCLE_UNIT: ${STRATA_LIFECYCLE_UNIT:-}
+      STRATA_NOTIFY_TARGETS: ${STRATA_NOTIFY_TARGETS:-}
+      STRATA_PROMETHEUS_URL: ${STRATA_PROMETHEUS_URL:-http://prometheus:9090}
+    ports:
+      - "10003:9000"
+    volumes:
+      - strata-ceph-etc:/etc/ceph-a:ro
+      - strata-cephb-etc:/etc/ceph-b:ro
+      - ../strata.toml:/etc/strata/strata.toml:ro
+      - strata-jwt-shared:/etc/strata/jwt-shared
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/readyz >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 30s
+    restart: unless-stopped
+
   # nginx LB fronting strata-a + strata-b at host port 9999. Config lives
   # in deploy/nginx/strata-lab.conf.
   strata-lb-nginx:

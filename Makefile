@@ -3,13 +3,14 @@ COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
 .PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test \
 	up up-all up-cassandra up-all-ci down \
+	dev dev-down dev-logs \
 	wait-cassandra wait-ceph wait-pd wait-tikv wait-strata wait-strata-a wait-strata-b wait-strata-lb-nginx wait-strata-lab \
 	ceph-pool run-memory run-cassandra run-strata run-gateway \
 	smoke smoke-signed smoke-grafana smoke-lab-tikv \
 	smoke-drain-lifecycle smoke-drain-transparency smoke-drain-progress-ui smoke-cluster-weights \
 	smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale \
 	smoke-single-binary smoke-tikv-default-lab \
-	race-soak race-soak-tikv lint-nginx-lab \
+	race-soak race-soak-tikv lint-nginx-lab helm-lint \
 	bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi \
 	docs-serve docs-build docs-openapi-copy clean
 
@@ -107,7 +108,7 @@ up-all-ci:
 # up too. Retired profile names (`tikv`, `lab-tikv*`, `lab-cassandra-3`) are
 # no-ops on this compose file; dropping them avoids stale flags.
 down:
-	$(COMPOSE) --profile cassandra --profile tracing --profile webhook-trap --profile ci down
+	$(COMPOSE) --profile cassandra --profile tracing --profile webhook-trap --profile ci --profile bench-3replica down
 
 # Wait for the Cassandra container to report healthy. Cassandra is gated
 # behind `--profile cassandra`, so the `ps` query includes the profile flag
@@ -166,6 +167,27 @@ wait-strata-lb-nginx:
 
 # Combined readiness gate for the TiKV-default lab: both replicas + LB.
 wait-strata-lab: wait-strata-a wait-strata-b wait-strata-lb-nginx
+
+# One-command developer cluster: bring up the canonical TiKV-default lab,
+# wait for PD + ceph + both strata replicas + LB to report ready, then
+# stream the last 20 log lines per replica and the LB and follow live.
+# Ctrl-C kills only the log stream — the compose stack stays up so the
+# operator can re-attach via `make dev-logs` or drive smoke harnesses.
+# Backend default is TiKV (matches CLAUDE.md `## Compose shape`). The
+# Cassandra-backed regression lab stays under `make up-cassandra`.
+dev: up-all wait-tikv wait-ceph wait-strata-lab
+	$(COMPOSE) logs -f --tail=20 strata-a strata-b strata-lb-nginx
+
+# Tear down the dev cluster. Mirrors `make down` — same profile cleanup,
+# preserves named volumes by default. For a full data wipe run `docker
+# compose -f deploy/docker/docker-compose.yml down -v` directly.
+dev-down: down
+
+# Re-attach to the dev cluster log stream after Ctrl-C without re-tailing
+# the backlog. Use this between `make dev` and `make dev-down` to peek at
+# live traffic. Stack must already be up (run `make dev` first).
+dev-logs:
+	$(COMPOSE) logs -f strata-a strata-b strata-lb-nginx
 
 ceph-pool:
 	docker exec strata-ceph ceph osd pool create strata.rgw.buckets.data 8 8 replicated || true
@@ -369,6 +391,14 @@ race-soak-tikv:
 	RACE_KEYS=$${RACE_KEYS:-4} \
 	  go test -tags integration -timeout $${RACE_DURATION:-1h} \
 	  -run '^TestRaceMixedOpsTiKV$$' ./internal/s3api/...
+
+# Helm chart lint for the TiKV-only deploy/helm/strata/ chart. Degrades
+# to a one-line hint + exit 0 when the helm binary is not installed so
+# `make test` is not gated on the toolchain. Operators with helm on PATH
+# get the full `helm lint` run.
+helm-lint:
+	@command -v helm > /dev/null || { echo "helm not installed — skip helm-lint (install: https://helm.sh/docs/intro/install/)"; exit 0; }
+	helm lint deploy/helm/strata/
 
 # Validate the nginx LB config used by the TiKV-default 2-replica lab.
 # nginx -t resolves upstream hostnames at parse time, so the test container

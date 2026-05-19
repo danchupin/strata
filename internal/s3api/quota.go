@@ -97,6 +97,7 @@ func (s *Server) userUsedBytes(ctx context.Context, user string) (int64, error) 
 // Caller passes the freshly-resolved owner (auth.FromContext(ctx).Owner).
 // Returns ErrQuotaExceeded if creating one more bucket would breach the cap.
 // MaxBuckets <= 0 means unlimited.
+// docs:skip
 func (s *Server) checkUserBucketQuota(ctx context.Context, owner string) error {
 	if owner == "" {
 		return nil

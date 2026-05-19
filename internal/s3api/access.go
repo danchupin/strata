@@ -81,6 +81,7 @@ func (s *Server) requireAccess(w http.ResponseWriter, r *http.Request, b *meta.B
 
 // requireObjectAccess runs the policy gate then the ACL gate for an object
 // action. Both gates must pass; an explicit policy Deny short-circuits.
+// docs:skip
 func (s *Server) requireObjectAccess(w http.ResponseWriter, r *http.Request, b *meta.Bucket, key, action string) bool {
 	if !s.requireAccess(w, r, b, action, objectARN(b.Name, key)) {
 		return false

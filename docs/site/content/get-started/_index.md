@@ -131,6 +131,28 @@ before `make up-all`, the gateway picks it up via the compose env passthrough
 
 Tear it all down with `make down`.
 
+## One-command dev
+
+For contributors who just want the canonical TiKV-default lab streaming
+logs in one shell, there's a `dev` target that wraps Option C:
+
+```bash
+make dev        # up-all + wait-tikv + wait-ceph + wait-strata-lab + follow logs
+make dev-logs   # re-attach to the log stream after Ctrl-C (stack stays up)
+make dev-down   # tear it all down (mirrors `make down`)
+```
+
+`make dev` exits 0 once the foreground `docker compose logs -f` is attached
+to `strata-a`, `strata-b`, and `strata-lb-nginx`. Ctrl-C kills only the log
+follow — the compose stack stays up so you can re-attach via `make dev-logs`
+or run smoke harnesses (`make smoke`, `make smoke-tikv-default-lab`, …).
+
+The backend is TiKV — the canonical lab default. The Cassandra-backed
+regression lab is still available under `make up-cassandra` (see Option B).
+For CI / scripted use prefer the composable underlying targets
+(`make up-all && make wait-tikv && make wait-ceph && make wait-strata-lab`)
+so the run doesn't block on an interactive log stream.
+
 ## Smoke pass
 
 A scripted PUT / GET / LIST / multipart round-trip lives in `scripts/smoke.sh`.

@@ -50,6 +50,7 @@ func (s *Server) getBucketLocation(w http.ResponseWriter, r *http.Request, bucke
 
 // bucketRegionFor returns the region label exposed via x-amz-bucket-region.
 // Buckets without a stored region fall back to the gateway's configured region.
+// docs:skip
 func (s *Server) bucketRegionFor(b *meta.Bucket) string {
 	if b.Region != "" {
 		return b.Region

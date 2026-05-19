@@ -156,6 +156,7 @@ func (s *Server) loadWebsiteConfig(r *http.Request, b *meta.Bucket) (*websiteCon
 // serveWebsiteRoot serves GET /<bucket>/ when website config is present:
 // fetches the configured IndexDocument; on miss falls back to ErrorDocument
 // with a 404 status. Returns true if the request was handled.
+// docs:skip
 func (s *Server) serveWebsiteRoot(w http.ResponseWriter, r *http.Request, b *meta.Bucket) bool {
 	cfg, err := s.loadWebsiteConfig(r, b)
 	if err != nil {
@@ -207,6 +208,7 @@ func (s *Server) serveWebsiteRoot(w http.ResponseWriter, r *http.Request, b *met
 // tryWebsiteRedirectAll loads bucket website config and, when
 // RedirectAllRequestsTo is set, writes a 301 redirect for the given key
 // (empty key for bucket root). Returns true if the request was handled.
+// docs:skip
 func (s *Server) tryWebsiteRedirectAll(w http.ResponseWriter, r *http.Request, b *meta.Bucket, key string) bool {
 	cfg, err := s.loadWebsiteConfig(r, b)
 	if err != nil || cfg == nil {
@@ -219,6 +221,7 @@ func (s *Server) tryWebsiteRedirectAll(w http.ResponseWriter, r *http.Request, b
 // rules match before the upstream lookup; HttpErrorCodeReturnedEquals rules
 // match only when the upstream lookup would 404. Returns true when a redirect
 // was written.
+// docs:skip
 func (s *Server) tryWebsiteRouting(w http.ResponseWriter, r *http.Request, b *meta.Bucket, key string) bool {
 	cfg, err := s.loadWebsiteConfig(r, b)
 	if err != nil || cfg == nil || cfg.RoutingRules == nil || len(cfg.RoutingRules.Rules) == 0 {

@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "strata.configMapName" . }}
+  labels:
+    {{- include "strata.labels" . | nindent 4 }}
+data:
+  STRATA_LISTEN: ":{{ .Values.service.port }}"
+  STRATA_REGION: {{ .Values.region | quote }}
+  STRATA_META_BACKEND: {{ .Values.meta.backend | quote }}
+  STRATA_DATA_BACKEND: {{ .Values.data.backend | quote }}
+  STRATA_TIKV_PD_ENDPOINTS: {{ .Values.meta.endpoints | quote }}
+  {{- if .Values.data.clusters }}
+  STRATA_RADOS_CLUSTERS: {{ .Values.data.clusters | quote }}
+  {{- end }}
+  STRATA_RADOS_USER: {{ .Values.data.user | quote }}
+  STRATA_RADOS_POOL: {{ .Values.data.pool | quote }}
+  STRATA_RADOS_CLASSES: {{ .Values.data.classes | quote }}
+  STRATA_WORKERS: {{ include "strata.workersCsv" . | quote }}
+  STRATA_GC_SHARDS: {{ .Values.gc.shards | quote }}
+  STRATA_GC_INTERVAL: {{ .Values.gc.interval | quote }}
+  STRATA_GC_GRACE: {{ .Values.gc.grace | quote }}
+  STRATA_LIFECYCLE_INTERVAL: {{ .Values.lifecycle.interval | quote }}
+  STRATA_LIFECYCLE_UNIT: {{ .Values.lifecycle.unit | quote }}
+  STRATA_AUTH_MODE: {{ .Values.auth.mode | quote }}
+  STRATA_LOG_LEVEL: {{ .Values.logging.level | quote }}
+  STRATA_VHOST_PATTERN: {{ .Values.vhostPattern | quote }}
+  STRATA_PROMETHEUS_URL: {{ .Values.prometheus.url | quote }}
+  {{- if .Values.otel.endpoint }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.otel.endpoint | quote }}
+  {{- end }}
+  STRATA_OTEL_SAMPLE_RATIO: {{ .Values.otel.sampleRatio | quote }}
+  STRATA_OTEL_RINGBUF: {{ .Values.otel.ringbuf | quote }}
+  STRATA_OTEL_RINGBUF_BYTES: {{ .Values.otel.ringbufBytes | quote }}
+  {{- range $k, $v := .Values.extraEnv }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}

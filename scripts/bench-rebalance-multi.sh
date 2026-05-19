@@ -8,12 +8,14 @@
 # ≤ 40 % of SHARDS=1 (>=2.5x), or `SPEEDUP_FAILED` if SHARDS=2 > 70 % of
 # SHARDS=1 (regression guard => exit 1).
 #
-# SHARDS=3 explicitly SKIP'd: cycle `ralph/tikv-default-lab` flipped the
-# bare default to 2 replicas (strata-a/b); the 3-replica bench is parked as a
-# P3 ROADMAP follow-up `Restore 3-replica TiKV bench (SHARDS=3 rebalance-
-# multi)`. Operators needing SHARDS=3 numbers spin a one-off third replica
-# via `docker compose run --rm -p 10003:9000 -e STRATA_NODE_ID=strata-c
-# -e STRATA_WORKERS=gc,lifecycle,rebalance strata-a` for the bench duration.
+# SHARDS=3 leg (US-002 of ralph/dx-lab): opt-in. Bring up the third replica
+# via `docker compose --profile bench-3replica up -d strata-c` BEFORE
+# running this script. The script auto-detects strata-c via
+# `docker compose ps -q strata-c`; when present the third pass runs and
+# its elapsed_s lands in the results JSONL alongside SHARDS=1/2. When
+# absent the leg SKIPs with a clear message and the script still exits
+# on the SHARDS=1/2 verdict alone. Tear-down: `make down` (cleans up the
+# bench-3replica profile too).
 #
 # The script does NOT bring up the lab. Operator stands the stack up with:
 #
@@ -53,13 +55,16 @@ BENCH_DRAIN_TIMEOUT_S="${BENCH_DRAIN_TIMEOUT_S:-1800}"
 BENCH_POLL_INTERVAL_S="${BENCH_POLL_INTERVAL_S:-5}"
 BENCH_SHARDS_BASELINE="${BENCH_SHARDS_BASELINE:-1}"
 BENCH_SHARDS_FANOUT="${BENCH_SHARDS_FANOUT:-2}"
+BENCH_SHARDS_3REPLICA="${BENCH_SHARDS_3REPLICA:-3}"
 BENCH_SPEEDUP_TARGET_PCT="${BENCH_SPEEDUP_TARGET_PCT:-40}"
 BENCH_REGRESSION_PCT="${BENCH_REGRESSION_PCT:-70}"
 BENCH_RESULTS_FILE="${BENCH_RESULTS_FILE:-bench-rebalance-multi-results.jsonl}"
 
 COMPOSE_FILE="${COMPOSE_FILE:-deploy/docker/docker-compose.yml}"
 COMPOSE_CMD="${COMPOSE_CMD:-docker compose -f $COMPOSE_FILE}"
+COMPOSE_CMD_3REPLICA="${COMPOSE_CMD_3REPLICA:-docker compose -f $COMPOSE_FILE --profile bench-3replica}"
 RESTART_CONTAINERS="${RESTART_CONTAINERS:-strata-a strata-b}"
+RESTART_CONTAINERS_3REPLICA="${RESTART_CONTAINERS_3REPLICA:-strata-a strata-b strata-c}"
 
 # BENCH_RESTART_HOOK is the bash command that restarts the strata replicas
 # with the SHARDS env baked into the container env. Default is a force-
@@ -67,6 +72,12 @@ RESTART_CONTAINERS="${RESTART_CONTAINERS:-strata-a strata-b}"
 # so the replica env passthrough picks it up. Operators on k8s / systemd
 # can override this with a hook that does whatever their lab needs.
 BENCH_RESTART_HOOK="${BENCH_RESTART_HOOK:-STRATA_REBALANCE_SHARDS=\$SHARDS STRATA_WORKERS=gc,lifecycle,rebalance $COMPOSE_CMD up -d --force-recreate $RESTART_CONTAINERS}"
+
+# Separate hook for the 3-replica leg — must use the bench-3replica profile
+# so strata-c is included in the up/force-recreate set. Override if the
+# operator's lab differs (k8s rollout, etc.). The hook is only invoked when
+# the 3-replica leg is gated on (strata-c container detected).
+BENCH_RESTART_HOOK_3REPLICA="${BENCH_RESTART_HOOK_3REPLICA:-STRATA_REBALANCE_SHARDS=\$SHARDS STRATA_WORKERS=gc,lifecycle,rebalance $COMPOSE_CMD_3REPLICA up -d --force-recreate $RESTART_CONTAINERS_3REPLICA}"
 
 CRED="${STRATA_STATIC_CREDENTIALS:-}"
 if [[ -z "$CRED" ]]; then
@@ -198,11 +209,12 @@ validate_lab() {
 
 restart_replicas_with_shards() {
   local SHARDS="$1"
+  local hook="${2:-$BENCH_RESTART_HOOK}"
   export SHARDS
   note "restarting replicas with STRATA_REBALANCE_SHARDS=$SHARDS"
   # eval so the operator-provided hook can interpolate $SHARDS at run time.
-  if ! eval "$BENCH_RESTART_HOOK"; then
-    fail "restart hook failed (cmd: $BENCH_RESTART_HOOK)"
+  if ! eval "$hook"; then
+    fail "restart hook failed (cmd: $hook)"
   fi
   unset SHARDS
   # Wait for the LB to come back ready before driving the bench.
@@ -256,10 +268,11 @@ unseed_buckets() {
 
 run_drain_pass() {
   local shards="$1"
+  local hook="${2:-$BENCH_RESTART_HOOK}"
   echo
   echo "== Pass shards=$shards"
 
-  restart_replicas_with_shards "$shards"
+  restart_replicas_with_shards "$shards" "$hook"
   validate_lab
   seed_buckets "$BENCH_BUCKETS" "$BENCH_CHUNKS_PER_BUCKET"
 
@@ -319,7 +332,20 @@ printf "  shards=%d  elapsed=%ds\n" "$BENCH_SHARDS_FANOUT"   "$T2"
 printf "  ratio    = %d %% (target ≤%d %%, regression >%d %%)\n" \
   "$RATIO_PCT" "$BENCH_SPEEDUP_TARGET_PCT" "$BENCH_REGRESSION_PCT"
 
-echo "SKIP: lab-tikv-3 retired in ralph/tikv-default-lab cycle; SHARDS=3 bench parked as P3 follow-up"
+# SHARDS=3 leg (US-002 of ralph/dx-lab). Auto-detect strata-c via
+# `docker compose ps -q strata-c`; opt-in via `docker compose
+# --profile bench-3replica up -d strata-c` before running.
+T3=""
+if [[ -n "$(eval "$COMPOSE_CMD_3REPLICA ps -q strata-c" 2>/dev/null)" ]]; then
+  note "strata-c detected; running SHARDS=$BENCH_SHARDS_3REPLICA leg"
+  T3=$(run_drain_pass "$BENCH_SHARDS_3REPLICA" "$BENCH_RESTART_HOOK_3REPLICA" | tail -n 1)
+  if ! [[ "$T3" =~ ^[0-9]+$ ]]; then fail "could not parse 3-replica elapsed: '$T3'"; fi
+  RATIO_PCT_3=$(( T3 * 100 / (T1 == 0 ? 1 : T1) ))
+  printf "  shards=%d  elapsed=%ds  ratio_vs_baseline=%d %%\n" \
+    "$BENCH_SHARDS_3REPLICA" "$T3" "$RATIO_PCT_3"
+else
+  echo "SKIP: SHARDS=$BENCH_SHARDS_3REPLICA leg requires the bench-3replica profile (3 strata replicas + 2 ceph clusters + pd + tikv may exceed lima/macOS memory caps; bring up via 'docker compose --profile bench-3replica up -d strata-c' when host has headroom)"
+fi
 
 if (( RATIO_PCT <= BENCH_SPEEDUP_TARGET_PCT )); then
   echo "VERDICT: SPEEDUP_OK"
