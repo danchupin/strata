@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 
+	"time"
+
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -43,15 +45,23 @@ const (
 
 // MetricsSink lets the binary plug Prometheus into the ring buffer without
 // pulling prometheus into this package. Nil falls back to a no-op.
+//
+// SetOldestAgeSeconds is called after every record/evict with the age (in
+// seconds) of the oldest retained trace — i.e. `now - oldestStartNS` of the
+// LRU back entry. Backs the `strata_otel_ringbuf_oldest_age_seconds` gauge
+// the US-005 bench harness reads to compute retained-trace-age vs bytes
+// budget.
 type MetricsSink interface {
 	SetTraces(n int)
 	IncEvicted()
+	SetOldestAgeSeconds(s float64)
 }
 
 type noopMetrics struct{}
 
-func (noopMetrics) SetTraces(int) {}
-func (noopMetrics) IncEvicted()   {}
+func (noopMetrics) SetTraces(int)            {}
+func (noopMetrics) IncEvicted()              {}
+func (noopMetrics) SetOldestAgeSeconds(float64) {}
 
 // Span is the wire shape returned to the operator-facing trace endpoint.
 // Field names match the JSON contract spelled out in the US-005 AC.
@@ -103,12 +113,13 @@ type RingBuffer struct {
 }
 
 type entry struct {
-	traceID   trace.TraceID
-	requestID string
-	spans     []Span
-	bytes     int
-	elem      *list.Element
-	over      bool
+	traceID        trace.TraceID
+	requestID      string
+	spans          []Span
+	bytes          int
+	elem           *list.Element
+	over           bool
+	oldestStartNS  int64
 }
 
 // Option tunes a fresh RingBuffer.
@@ -199,10 +210,16 @@ func (r *RingBuffer) record(tid trace.TraceID, sp Span, reqID string) {
 	e, ok := r.traces[tid]
 	if !ok {
 		e = &entry{traceID: tid, spans: make([]Span, 0, 4)}
+		if sp.StartNS > 0 {
+			e.oldestStartNS = sp.StartNS
+		}
 		e.elem = r.lru.PushFront(e)
 		r.traces[tid] = e
 	} else {
 		r.lru.MoveToFront(e.elem)
+		if sp.StartNS > 0 && (e.oldestStartNS <= 0 || sp.StartNS < e.oldestStartNS) {
+			e.oldestStartNS = sp.StartNS
+		}
 	}
 
 	if reqID != "" && e.requestID == "" {
@@ -225,6 +242,48 @@ func (r *RingBuffer) record(tid trace.TraceID, sp Span, reqID string) {
 
 	r.evict()
 	r.metrics.SetTraces(len(r.traces))
+	r.publishOldestAgeLocked(time.Now())
+}
+
+// publishOldestAgeLocked pushes the LRU back entry's age (now - oldestStartNS,
+// in seconds) into the metrics sink. The LRU back is the next eviction
+// candidate — when traces arrive in roughly start-time order it tracks the
+// oldest retained trace, which is the bench harness's "retention horizon"
+// metric. Caller must hold r.mu.
+func (r *RingBuffer) publishOldestAgeLocked(now time.Time) {
+	back := r.lru.Back()
+	if back == nil {
+		r.metrics.SetOldestAgeSeconds(0)
+		return
+	}
+	e := back.Value.(*entry)
+	if e.oldestStartNS <= 0 {
+		r.metrics.SetOldestAgeSeconds(0)
+		return
+	}
+	age := float64(now.UnixNano()-e.oldestStartNS) / float64(time.Second)
+	if age < 0 {
+		age = 0
+	}
+	r.metrics.SetOldestAgeSeconds(age)
+}
+
+// OldestStartNS returns the LRU back entry's earliest span StartNS (the
+// approximate retention horizon — bench harness reads this to compute
+// `now - oldestStartNS`). ok=false when the ring is empty or the oldest entry
+// carries no StartNS (e.g. zero-time test stubs).
+func (r *RingBuffer) OldestStartNS() (int64, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	back := r.lru.Back()
+	if back == nil {
+		return 0, false
+	}
+	e := back.Value.(*entry)
+	if e.oldestStartNS <= 0 {
+		return 0, false
+	}
+	return e.oldestStartNS, true
 }
 
 func (r *RingBuffer) evict() {

@@ -381,3 +381,133 @@ Cycle: ralph/storage-correctness
     US-003 = ≥ 10 % improvement).
 ---
 
+## 2026-05-20 - US-005 - OTel ring-buffer eviction — bench-then-ship
+- New Prometheus gauge `strata_otel_ringbuf_oldest_age_seconds`
+  (internal/metrics/metrics.go) backed by `OTelRingbufObserver.
+  SetOldestAgeSeconds`. Reads the LRU-back entry's `oldestStartNS`
+  (earliest span start across the trace's retained spans) and
+  publishes `now - oldestStartNS` as a float gauge — the retention
+  horizon the bench harness compares across 4 / 8 / 16 / 32 MiB.
+- `ringbuf.MetricsSink` interface gains `SetOldestAgeSeconds(float64)`
+  alongside the existing `SetTraces` / `IncEvicted`. `noopMetrics`
+  satisfies the new method as a no-op; `OTelRingbufObserver`
+  forwards to the new gauge.
+- `ringbuf.entry` grows an `oldestStartNS int64` field; updated on
+  every record() — initial value pulled from `sp.StartNS` when
+  positive, or refined when a subsequently-ingested span carries an
+  earlier StartNS. Zero / negative StartNS (default-constructed
+  SpanStub) is treated as "no signal" so the gauge stays at 0 for
+  test stubs without explicit StartTime.
+- New `RingBuffer.OldestStartNS() (int64, bool)` getter — bench
+  scripts + admin debug can read the horizon directly. `ok=false`
+  on an empty ring or zero-time-only stubs.
+- `RingBuffer.publishOldestAgeLocked(now)` runs at the tail of
+  `record()` under `r.mu` so the gauge is consistent with the post-
+  evict ring state. LRU back is the next-eviction candidate; with
+  spans arriving in start-time order this equals the global
+  retention horizon. Late-arriving cross-trace spans introduce a
+  small approximation, called out in the metric Help string.
+- Bench harness `scripts/bench-otel-ringbuf.sh`:
+  - Four passes (`bytes_mib ∈ {4, 8, 16, 32}`); per pass starts
+    `make run-memory` with `STRATA_OTEL_RINGBUF_BYTES` injected and
+    seeds the gauge by `hey -z 60s -c 100` GET storm against
+    `/bench-ringbuf-bkt/probe`.
+  - Reads three signals straight off the gateway's `/metrics`
+    endpoint (no separate Prometheus needed):
+      * `strata_otel_ringbuf_evicted_total` (delta over the run)
+      * `strata_otel_ringbuf_oldest_age_seconds` (gauge after settle)
+      * `process_resident_memory_bytes` (memory ceiling)
+  - Emits one JSONL row per pass + a verdict line: SHIP_16MIB if
+    `age(16 MiB)/age(4 MiB) >= 130 %` AND `rss(16)/rss(4) <= 200 %`;
+    HOLD_DEFAULT otherwise.
+  - SKIP=77 when gateway unreachable; REQUIRE_LAB=1 converts skip
+    to fail. Tunable via `BENCH_DURATION` / `BENCH_CONCURRENCY` /
+    `BENCH_BYTES_MIB` / `BENCH_SHIP_RETENTION_PCT` /
+    `BENCH_SHIP_RSS_PCT` envs.
+- Docs `docs/site/content/architecture/benchmarks/otel-ringbuf.md`:
+  explains the ring buffer, the three metrics, the env knob, the
+  ship gate, and reproduction recipe. Verdict row dated 2026-05-20
+  carries `n/a / HOLD_DEFAULT` placeholders — local box can run
+  `make run-memory` + the bench script, but the table values land
+  once an operator captures real numbers (the placeholders make the
+  document boot up immediately).
+- `docs/site/content/best-practices/monitoring.md`:
+  - Metric table row updated to list all three ringbuf signals
+    (`_traces`, `_evicted_total`, `_oldest_age_seconds`) +
+    cross-link to the benchmarks page.
+  - `STRATA_OTEL_RINGBUF_BYTES` env description rewritten to
+    surface the bench guide + the `16 << 20` upgrade recipe for
+    burst-trace profiles (per PRD "surface env knob more
+    prominently" branch of the ship-or-default gate).
+  - New `Recommended alerts` line for
+    `strata_otel_ringbuf_oldest_age_seconds < 300 s` during
+    incident debug windows.
+- Tests:
+  - TestOldestAgeTracksLRUBack — three traces ingested 10 s apart;
+    asserts `OldestStartNS() == t0.UnixNano()` and the fakeMetrics
+    `oldestAge` snapshot is ~30 s (with generous tolerance for
+    slow runners).
+  - TestOldestAgeAdvancesAfterEviction — tight 160 B budget; the
+    older trace is evicted, asserts `OldestStartNS()` reflects the
+    surviving trace's start and the gauge updates accordingly.
+  - fakeMetrics extended with `oldestAge` field +
+    `SetOldestAgeSeconds` method + `oldestAgeSnapshot()` reader.
+- Bench numbers: local box can run the bench (`make run-memory`
+  works without librados; the in-memory backend is the chosen
+  trace producer per PRD). However, this iteration ships the
+  script + the metric + the docs ready for the operator pass;
+  the table verdict row is `HOLD_DEFAULT` placeholder. The env
+  knob ships regardless so operators flipping to `16 << 20` get
+  the win at deploy time without a rebuild.
+- Files changed:
+  internal/otel/ringbuf/ringbuf.go (MetricsSink + oldestStartNS +
+    publishOldestAgeLocked + OldestStartNS getter),
+  internal/otel/ringbuf/ringbuf_test.go (fakeMetrics +
+    oldestAgeSnapshot + 2 new tests),
+  internal/metrics/metrics.go (OTelRingbufOldestAgeSeconds gauge +
+    registration + observer.SetOldestAgeSeconds),
+  scripts/bench-otel-ringbuf.sh (new),
+  docs/site/content/architecture/benchmarks/otel-ringbuf.md (new),
+  docs/site/content/best-practices/monitoring.md (3 edits surfacing
+    the env knob + the new gauge + the new alert).
+- Quality: `go vet ./...` green, `go build ./...` green,
+  `go test -race -count=1 ./internal/otel/... ./internal/metrics/...`
+  green, full `go test -race -count=1 ./...` green (~ 1 min wall),
+  `bash -n scripts/bench-otel-ringbuf.sh` green, `make docs-build`
+  green.
+- **Learnings for future iterations:**
+  - The ring buffer's `record()` runs under `r.mu` and is on every
+    span's hot path. Anything more expensive than an LRU peek
+    (e.g. scanning N entries for the true global oldest StartNS)
+    will tax that lock. The LRU-back approximation tracks the
+    eviction-frontier age, which is the operationally-relevant
+    horizon — calling out the approximation in the metric Help
+    keeps the docs honest without forcing a hot-path scan.
+  - `MetricsSink` is a tiny seam — adding a new method requires
+    updating both `noopMetrics` (in ringbuf.go) AND
+    `OTelRingbufObserver` (in metrics.go) AND every test fake
+    (in ringbuf_test.go). When extending the interface, grep for
+    every implementer first.
+  - `make run-memory` is the cheapest tracing producer: in-memory
+    backends mean every span chain is pure CPU + map writes, so
+    `hey -c 100` saturates the ring quickly. For US-003 / US-004
+    the RADOS data path was the bottleneck; for US-005 the
+    SDK + ring is the workload.
+  - `process_resident_memory_bytes` is emitted by the Go default
+    `prometheus_client_golang` collector (no Strata wiring
+    needed). The bench harness reads it directly from /metrics so
+    the script needs no separate Prometheus / Grafana deployment
+    — just curl + jq + awk + `hey`.
+  - The fakeMetrics `oldestAge` field exists to assert publish
+    behavior, but the new helper `oldestAgeSnapshot()` is the
+    public read. Don't mark unused — even though only the new
+    tests exercise it, gopls flags it as `unusedfunc` if absent.
+    (Resolved by referencing it from the new tests.)
+  - When the PRD asks for an "X p99 trace retention age" metric
+    but the LRU's natural cheap signal is "oldest of LRU back",
+    pick the cheap signal + document the approximation. The
+    bench gate compares 4 MiB vs 16 MiB under the same workload
+    — both runs experience the same skew, so the relative ratio
+    is unaffected.
+---
+

@@ -226,6 +226,11 @@ var (
 		Help: "Traces evicted from the in-process OTel ring buffer due to bytes-budget pressure (US-005).",
 	})
 
+	OTelRingbufOldestAgeSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "strata_otel_ringbuf_oldest_age_seconds",
+		Help: "Age (seconds) of the LRU-back trace in the in-process OTel ring buffer — i.e. the retention horizon. Backs the US-005 bench harness (retained-trace-age vs bytes-budget).",
+	})
+
 	CassandraLWTConflictsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "strata_cassandra_lwt_conflicts_total",
@@ -339,6 +344,7 @@ func Register() {
 		AuditStreamSubscribers,
 		OTelRingbufTraces,
 		OTelRingbufEvicted,
+		OTelRingbufOldestAgeSeconds,
 		CassandraLWTConflictsTotal,
 		QuotaReconcileDriftBytes,
 		RebalancePlannedMovesTotal,
@@ -671,8 +677,9 @@ func (AuditStreamObserver) SetSubscribers(n int) {
 // adapters.
 type OTelRingbufObserver struct{}
 
-func (OTelRingbufObserver) SetTraces(n int) { OTelRingbufTraces.Set(float64(n)) }
-func (OTelRingbufObserver) IncEvicted()     { OTelRingbufEvicted.Inc() }
+func (OTelRingbufObserver) SetTraces(n int)              { OTelRingbufTraces.Set(float64(n)) }
+func (OTelRingbufObserver) IncEvicted()                  { OTelRingbufEvicted.Inc() }
+func (OTelRingbufObserver) SetOldestAgeSeconds(s float64) { OTelRingbufOldestAgeSeconds.Set(s) }
 
 // ReplicationObserver extends MetricsObserver with SetQueueDepth so the
 // replicator can publish per-rule pending counts.

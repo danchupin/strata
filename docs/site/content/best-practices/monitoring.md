@@ -66,7 +66,7 @@ shortlist:
 | `strata_notify_delivery_total` | counter, labels `sink,status` | Notification delivery outcomes. `status ∈ {success,failure,dlq}`. | DLQ growth. |
 | `strata_cassandra_query_duration_seconds` | histogram, labels `table,op` | Per-query latency from the gocql QueryObserver. | LWT op p99. |
 | `strata_rados_op_duration_seconds` | histogram, labels `pool,op` | RADOS op latency from `internal/data/rados.ObserveOp`. | put / get p99 spikes. |
-| `strata_otel_ringbuf_traces` / `strata_otel_ringbuf_evicted_total` | gauge / counter | In-process OTel ring-buffer occupancy + evictions. | Eviction rate > 0 means raise `STRATA_OTEL_RINGBUF_BYTES`. |
+| `strata_otel_ringbuf_traces` / `strata_otel_ringbuf_evicted_total` / `strata_otel_ringbuf_oldest_age_seconds` | gauge / counter / gauge | In-process OTel ring-buffer occupancy, evictions, and retention horizon (age of the LRU-back trace). | Eviction rate > 0 means raise `STRATA_OTEL_RINGBUF_BYTES`. Retention horizon below the incident-debug window (e.g. < 5 min) → bump the budget. See [OTel ring-buffer bytes budget]({{< ref "/architecture/benchmarks/otel-ringbuf" >}}) for the bench harness + sizing guide. |
 | `strata_audit_stream_subscribers` | gauge | Live subscribers on `/admin/v1/audit/stream`. | Diagnostic only. |
 | `strata_meta_tikv_audit_sweep_deleted_total` | counter | Audit rows expunged by the TiKV retention sweeper (TiKV has no native TTL). | Steady-state non-zero on TiKV. |
 | `strata_bucket_bytes` | gauge, labels `bucket,storage_class` | Per-bucket bytes, sampled hourly. | Capacity dashboards. |
@@ -94,7 +94,7 @@ updating the dashboard fails CI.
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | unset → no-op | OTLP/HTTP collector endpoint (e.g. `http://otel-collector:4318`). Empty + ringbuf disabled installs a no-op tracer. |
 | `STRATA_OTEL_SAMPLE_RATIO` | `0.01` | Head-sample ratio. Failing spans (`status=Error` or `http.status_code >= 500`) bypass the ratio via tail sampling. |
 | `STRATA_OTEL_RINGBUF` | `on` | Toggle the in-process ring buffer (retains every span regardless of ratio). |
-| `STRATA_OTEL_RINGBUF_BYTES` | `4 MiB` | Bytes budget for the ring buffer; LRU-evicted on pressure. |
+| `STRATA_OTEL_RINGBUF_BYTES` | `4 MiB` | Bytes budget for the ring buffer; LRU-evicted on pressure. Sizing guide + bench gate: [OTel ring-buffer bytes budget]({{< ref "/architecture/benchmarks/otel-ringbuf" >}}). Bump to `16 << 20` (16 MiB) for burst-trace profiles when `strata_otel_ringbuf_oldest_age_seconds` falls below the incident-debug retention window. |
 
 The `internal/otel.NewMiddleware` wraps the gateway and starts a
 server-kind span per request, stamped with `request_id` so traces and
@@ -196,7 +196,11 @@ A minimal alert set:
   active rule.
 - `strata_gc_queue_depth` growing without drain for 10 min.
 - `strata_otel_ringbuf_evicted_total` increased — bump
-  `STRATA_OTEL_RINGBUF_BYTES`.
+  `STRATA_OTEL_RINGBUF_BYTES` (see
+  [OTel ring-buffer bytes budget]({{< ref "/architecture/benchmarks/otel-ringbuf" >}})).
+- `strata_otel_ringbuf_oldest_age_seconds` < 300 s during incident
+  postmortems — the retention horizon is below the operator's debug
+  window. Bump `STRATA_OTEL_RINGBUF_BYTES` to keep traces longer.
 - Cassandra cluster's own latency / availability alerts (upstream).
 
 Pair every alert with the runbook entry in
