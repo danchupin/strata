@@ -19,15 +19,26 @@ of any defensive stamp, so read-only rows show "—".
 rendered viewer at &lt;code&gt;/reference/admin-api-viewer/&lt;/code&gt; (authored in US-005).&lt;/em&gt;&lt;/p&gt;</description></item><item><title>S3 API operations</title><link>https://danchupin.github.io/strata/reference/s3-api/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/reference/s3-api/</guid><description>&lt;!--
 Maintainer note: this table is hand-maintained. When adding a new handler
 in internal/s3api/, append a row here in the same PR. A lint test
-(docs_lint_test.go) that parses the `handleBucket` + `handleObject` switch
-arms in internal/s3api/server.go and asserts coverage is parked as a P3
-ROADMAP entry ("Drift-proof S3 ops reference table via Go lint test
-parsing internal/s3api/server.go switch arms").
+(internal/s3api/docs_reference_test.go) AST-parses the dispatch functions
+ServeHTTP / handleBucket / handleObject / handleBucketInventory in
+internal/s3api/, collects every *Server method called directly from those
+bodies, and asserts each one either:
 
-Row sourcing: walk the `case` arms of `handleBucket` / `handleObject` /
-`handleService` in `internal/s3api/server.go`. Each route arm becomes one
-row. `Handler file:line` points at the route arm in `server.go` OR the
-leaf handler in `internal/s3api/&lt;feature&gt;.go`.
+ 1. appears in this markdown — matched by backtick'd function name OR by
+ a `Handler file:line` cell of the form `internal/s3api/&lt;file&gt;.go:&lt;line&gt;`
+ that points at the func declaration, OR
+ 2. carries a `// docs:skip` line comment immediately above the func
+ declaration (tolerated as intentionally-internal — non-S3 helpers
+ like auth gates, quota checks, website routing).
+
+The same test catches orphan rows: any `internal/s3api/&lt;file&gt;.go:&lt;line&gt;`
+cell that does NOT resolve to a *Server method body fails the build
+(handler renamed or removed without updating the row).
+
+Row sourcing: walk the dispatch arms in `internal/s3api/server.go` +
+`inventory.go`. Each route arm becomes one row. `Handler file:line` points
+at the route arm in `server.go` OR the leaf handler in
+`internal/s3api/&lt;feature&gt;.go`.
 --&gt;
 &lt;h1 id="s3-api-operations"&gt;S3 API operations&lt;a class="anchor" href="#s3-api-operations"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;&lt;em&gt;This page is the operator + SDK-author index. The router is in
