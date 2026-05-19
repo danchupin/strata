@@ -22,7 +22,7 @@
         "Tests pass (no Go tests touched — vacuous)"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

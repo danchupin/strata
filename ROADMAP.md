@@ -378,18 +378,15 @@ Non-goals:
 
 ## Design notes captured during MVP and "modern complete"
 
-Documented in `memory/project_strata.md` (internal) and in commit messages. A few that
-deserve a dedicated `docs/adr/` entry:
+Design rationale for foundational decisions is captured in the
+[Architecture Decision Records](docs/site/content/adr/) section — see
+ADR-0001 (skip RADOS omap), ADR-0002 (IsLatest read-time), ADR-0003
+(manifest blob column), ADR-0004 (leader-per-worker).
 
-- Why we skip RADOS omap entirely (the thing RGW uses and we are replacing).
-- Why `IsLatest` is derived at read-time from clustering order, not flipped on every PUT.
+Remaining notes still queued for ADR-form:
+
 - Why `go-ceph.NewConnWithUser("admin")` takes the short ID, not `client.admin`.
 - Why the runtime image is based on `quay.io/ceph/ceph:v19.2.3` (matching librados version,
   multi-arch) instead of stock debian librados (stale at v16).
-- Why `data.Manifest` lives in a JSON-encoded blob column instead of normalised columns —
-  schema-additive evolution without `ALTER`.
-- Why each background worker is leader-elected separately rather than co-locating them in
-  a single supervisor (and why that choice is being reconsidered — see Consolidation
-  section above).
 - Why the protobuf manifest (US-048/049) ships behind a decoder-first migration: every
   reader handles both shapes for one full release before the writer flips.
