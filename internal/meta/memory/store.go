@@ -746,6 +746,19 @@ func (s *Store) AckGCEntry(ctx context.Context, region string, e meta.GCEntry) e
 }
 
 func (s *Store) CreateBucket(ctx context.Context, name, owner, defaultClass string) (*meta.Bucket, error) {
+	return s.createBucketWithID(name, owner, defaultClass, uuid.New())
+}
+
+// CreateBucketWithID is a test-only helper that creates a bucket with a
+// caller-supplied UUID. Used to make hash-distribution tests reproducible by
+// pinning bucket.ID so `bucketReplicaIndex(id, N)` lands on a known replica.
+// Not part of the meta.Store interface — Cassandra/TiKV generate their own
+// UUIDs server-side and do not need this hook.
+func (s *Store) CreateBucketWithID(ctx context.Context, name, owner, defaultClass string, id uuid.UUID) (*meta.Bucket, error) {
+	return s.createBucketWithID(name, owner, defaultClass, id)
+}
+
+func (s *Store) createBucketWithID(name, owner, defaultClass string, id uuid.UUID) (*meta.Bucket, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.buckets[name]; ok {
@@ -753,7 +766,7 @@ func (s *Store) CreateBucket(ctx context.Context, name, owner, defaultClass stri
 	}
 	b := &meta.Bucket{
 		Name:         name,
-		ID:           uuid.New(),
+		ID:           id,
 		Owner:        owner,
 		CreatedAt:    time.Now().UTC(),
 		DefaultClass: defaultClass,

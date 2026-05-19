@@ -44,8 +44,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented: added memory.Store.CreateBucketWithID test-helper (Cassandra/TiKV don't need it — UUIDs are server-side). seedExpiringBucketWithID variant pins UUID via uuid.NewSHA1(uuid.Nil, \"bucket-N\"); deterministic split for 9 buckets / 3 replicas is [4,1,4]. 20/20 pass at -race -count=20. [1,5] guard replaced by hard-coded triple equality."
     },
     {
       "id": "US-003",

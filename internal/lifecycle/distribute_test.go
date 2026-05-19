@@ -117,7 +117,8 @@ func TestThreeReplicaDistribution(t *testing.T) {
 	const buckets = 9
 	const replicas = 3
 	for i := range buckets {
-		seedExpiringBucket(t, ctx, store, be, fmt.Sprintf("bkt-%02d", i))
+		id := uuid.NewSHA1(uuid.Nil, fmt.Appendf(nil, "bucket-%d", i))
+		seedExpiringBucketWithID(t, ctx, store, be, fmt.Sprintf("bkt-%02d", i), id)
 	}
 
 	bs, err := store.ListBuckets(ctx, "")
@@ -127,6 +128,13 @@ func TestThreeReplicaDistribution(t *testing.T) {
 	expectedPerReplica := make([]int, replicas)
 	for _, b := range bs {
 		expectedPerReplica[bucketReplicaIndex(b.ID.String(), replicas)]++
+	}
+	// Pinned by the deterministic UUIDs above; recompute via the helper
+	// scripts/ralph/* if uuid.NewSHA1 semantics ever shift.
+	wantSplit := [replicas]int{4, 1, 4}
+	gotSplit := [replicas]int{expectedPerReplica[0], expectedPerReplica[1], expectedPerReplica[2]}
+	if gotSplit != wantSplit {
+		t.Fatalf("hash split = %v want %v (deterministic UUID derivation regressed)", gotSplit, wantSplit)
 	}
 
 	type replicaState struct {
@@ -174,15 +182,6 @@ func TestThreeReplicaDistribution(t *testing.T) {
 	}
 	if totalDeletes != buckets {
 		t.Fatalf("total DeleteObject count across replicas = %d, expected %d (each bucket exactly once)", totalDeletes, buckets)
-	}
-
-	// Each replica's load is roughly 3-3-3 — the hash distribution is
-	// pinned by TestBucketReplicaIndexDistribution; this guard rejects
-	// pathological hash skew.
-	for i, n := range expectedPerReplica {
-		if n < 1 || n > 5 {
-			t.Errorf("replica %d expected to process %d buckets — distribution skewed", i, n)
-		}
 	}
 
 	// Every bucket's seeded object expired.
@@ -290,9 +289,19 @@ func fixedReplicaInfo(count, id int) func() (int, int) {
 // first cycle).
 func seedExpiringBucket(t *testing.T, ctx context.Context, store *memory.Store, be data.Backend, name string) {
 	t.Helper()
-	b, err := store.CreateBucket(ctx, name, "owner", "STANDARD")
+	seedExpiringBucketWithID(t, ctx, store, be, name, uuid.New())
+}
+
+// seedExpiringBucketWithID is the deterministic-UUID variant of
+// seedExpiringBucket: it lets the caller pin bucket.ID so hash-distribution
+// assertions (TestThreeReplicaDistribution) stay reproducible run-to-run.
+// The other 4 seedExpiringBucket callers keep their random-UUID coverage by
+// going through the wrapper above.
+func seedExpiringBucketWithID(t *testing.T, ctx context.Context, store *memory.Store, be data.Backend, name string, id uuid.UUID) {
+	t.Helper()
+	b, err := store.CreateBucketWithID(ctx, name, "owner", "STANDARD", id)
 	if err != nil {
-		t.Fatalf("CreateBucket(%s): %v", name, err)
+		t.Fatalf("CreateBucketWithID(%s): %v", name, err)
 	}
 	payload := fmt.Appendf(nil, "payload-%s", name)
 	manifest, err := be.PutChunks(ctx, bytes.NewReader(payload), "STANDARD")
