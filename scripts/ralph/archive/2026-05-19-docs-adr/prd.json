@@ -1,0 +1,113 @@
+{
+  "project": "Strata",
+  "branchName": "ralph/docs-adr",
+  "description": "Docs + ADR bundle — pure docs/site cycle. No code, no admin endpoint, no UI. Goal: drain the ROADMAP `## Design notes captured during MVP` backlog into formal ADRs (4 of 7 bullets — omap / IsLatest / manifest-blob / leader-per-worker; remaining 3 bullets parked), fill the placeholder `docs/site/content/reference/_index.md` with three authored pages (env-vars / admin-api / s3-api), and embed Redoc against `internal/adminapi/openapi.yaml` so operators self-serve admin-API exploration without leaving the docs site. 5 stories.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "ADR seed — Hugo section + 4 ADRs + ROADMAP migration",
+      "description": "As a contributor, I want canonical ADR pages capturing the four foundational design decisions so I can link to them instead of re-deriving the rationale from commits.",
+      "acceptanceCriteria": [
+        "Create Hugo section `docs/site/content/adr/_index.md` with frontmatter `title: \"Architecture Decision Records\"`, `weight: <next-after-best-practices — verify by listing existing top-level _index.md files>`, intro paragraph explaining what an ADR is (3-5 sentences), and an ADR template block (Status / Context / Decision / Consequences).",
+        "**No nav change required** — the docs site uses the `hugo-book` theme with `BookSection = '*'` in `docs/site/hugo.toml`, so the new `adr/` content section auto-appears in the sidebar. Verify after `make docs-build` that `/adr/` shows up under the top-level menu and lists the 4 ADR pages.",
+        "Author `docs/site/content/adr/0001-skip-rados-omap.md`: Status Accepted with rough date verified via `git log --diff-filter=A -- internal/data/rados/`; Context cites RGW's bucket-index omap ceiling on > 100M-object buckets (single PG bottleneck, no native sharding); Decision documents the Cassandra/TiKV sharded objects table; Consequences cover listing scale > 1B objects via 64-way Cassandra fan-out (`STRATA_BUCKET_SHARDS` default), two-store consistency invariant (manifest CAS + chunk PUT ordering), and the two-tier operational footprint.",
+        "Author `docs/site/content/adr/0002-islatest-read-time.md`: Context describes the naive PUT-flip approach + its write-amplification cost on Cassandra LWT; Decision documents `(bucket_id, shard) PARTITION BY ... CLUSTERING ORDER BY key ASC, version_id DESC` + the read-time dedupe; Consequences cite the zero write amplification on PUT, the in-memory ListObjects dedupe pass, and the load-bearing nature of the version-id `MaxUint64-ts8-BE` encoding (cross-link `internal/meta/tikv/keys.md`).",
+        "Author `docs/site/content/adr/0003-manifest-blob-column.md`: Context covers the ALTER TABLE cost on schema-additive changes; Decision documents the single `objects.manifest` blob column carrying protobuf (default since US-049) or JSON (legacy), format selected at write-time via `STRATA_MANIFEST_FORMAT`, sniff-on-read in `data.DecodeManifest`; Consequences cover schema-additive evolution without ALTER, the meta-store-can't-filter-on-manifest-innards contract, and the JSON↔proto coexistence read path + the one-shot `strata server --workers=manifest-rewriter` bulk converter.",
+        "Author `docs/site/content/adr/0004-leader-per-worker.md`: Context lists the ~10 background workers (gc / lifecycle / replicator / notify / access-log / inventory / audit-export / manifest-rewriter / rebalance / usage-rollup) all needing single-leader semantics; Decision documents the per-worker `<name>-leader` lease via `leader.Session` (no co-located supervisor) + the sharded-worker `SkipLease=true` carve-out for fan-out workers (gc, rebalance); Consequences cover fault isolation, independent `STRATA_WORKERS=` scaling per replica, and the higher Cassandra LWT churn; **Reconsideration note** links to ROADMAP `## Consolidation & validation` section and notes the future `Superseded by ADR-XXXX` transition path if the supervisor collapse happens.",
+        "**ROADMAP migration**: the `## Design notes captured during MVP and \"modern complete\"` section currently has **7 bullets** (omap, IsLatest, `go-ceph.NewConnWithUser`, runtime image base, JSON blob column, leader-per-worker, protobuf decoder-first migration). Replace the 4 bullets the new ADRs cover (omap, IsLatest, manifest-blob, leader-per-worker) with a single paragraph: `Design rationale for foundational decisions is captured in the [Architecture Decision Records](docs/adr/) section — see ADR-0001 (skip RADOS omap), ADR-0002 (IsLatest read-time), ADR-0003 (manifest blob column), ADR-0004 (leader-per-worker).` Keep the remaining **3 bullets** untouched (out of scope this cycle — `go-ceph.NewConnWithUser` short ID, runtime image `quay.io/ceph/ceph:v19.2.3` base, protobuf decoder-first migration).",
+        "Run `make docs-build` — Hugo generates 4 new ADR pages + `/adr/index.html`; zero warnings; exit code 0.",
+        "Spot-check generated HTML for at least one ADR (`docs/site/public/adr/0001-skip-rados-omap/index.html`) — verify the Status / Context / Decision / Consequences heading anchors render.",
+        "No code changes outside `docs/site/content/adr/` + `ROADMAP.md`.",
+        "Typecheck passes (no Go code touched — vacuous)",
+        "Tests pass (no Go tests touched — vacuous)"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Reference page — STRATA_* env vars table",
+      "description": "As an operator, I want a single page listing every STRATA_* env var with default, range, and consuming layer so I don't have to grep the source tree to tune a knob.",
+      "acceptanceCriteria": [
+        "Grep the codebase: `grep -rhoE 'STRATA_[A-Z_][A-Z0-9_]+' cmd/strata/ internal/ | sort -u` → sorted unique list. Cross-reference with `koanf` / `os.Getenv` / `env.Get` call sites to capture default + clamp range per var.",
+        "Author `docs/site/content/reference/env-vars.md` with frontmatter `title: \"STRATA_* environment variables\"`, `weight: 10` (under `/reference/`).",
+        "Markdown table columns: `Variable | Default | Range | Consuming layer | Notes`. Each row links the variable name to its primary doc (e.g. `STRATA_GC_GRACE` → `/best-practices/placement-rebalance/#bandwidth-tuning` or wherever the runbook treats it). `Consuming layer` is one of `gateway | gc worker | lifecycle worker | rebalance worker | notify worker | meta backend | data backend | health probe | tracing`.",
+        "Group rows by consuming layer (h2 per group) so the page scans top-to-bottom by operator concern, not alphabetically.",
+        "Top-of-page note (HTML comment + visible italic line): `Source of truth: grep the codebase via \"grep -rhoE 'STRATA_[A-Z_][A-Z0-9_]+' cmd/strata/ internal/\". Update this page when adding a new env var.`",
+        "**Rewrite `docs/site/content/reference/_index.md`** — the current file is NOT a pure placeholder; it carries a `## Worker env vars (selected)` section listing recently-shipped worker env vars + an `expansion deferred to a P3 follow-up` paragraph that becomes false once this cycle ships. Action: (a) **Migrate** the `## Worker env vars (selected)` section content into the appropriate row groups of the new `env-vars.md` table (rebalance / gc / worker-control env vars). Verify the grep-derived list in `env-vars.md` covers every var that section enumerates. (b) **Remove** the `expansion deferred to a P3 follow-up` paragraph + the trailing bullet list pointing at README / openapi.yaml / s3-compatibility — superseded by the 4 new reference pages. (c) **Replace** with a short index intro (1-2 sentences: \"This section is the operator reference. Four pages:\") + a bookmarked list of the 4 new reference pages with one-line descriptions each. Keep the existing frontmatter (`title`, `weight`, `bookFlatSection: true`, `description`).",
+        "Cover every `STRATA_*` var the grep finds. If a var is intentionally undocumented (debug-only, e.g. `STRATA_RADOS_HEALTH_OID`), include it with `Notes: internal — debug only`.",
+        "`make docs-build` green; rendered page resolves all internal links (grep generated HTML for `href=\"/best-practices` + `href=\"/reference` to verify no 404 anchors).",
+        "Typecheck passes (no Go code touched — vacuous)",
+        "Tests pass (no Go tests touched — vacuous)"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Reference page — Admin API surface",
+      "description": "As an operator, I want a flat page listing every admin endpoint with its method, path, audit verb, and a one-line summary so I can find the right one without scrolling 1000-line OpenAPI YAML.",
+      "acceptanceCriteria": [
+        "Author `docs/site/content/reference/admin-api.md` with frontmatter `title: \"Admin API surface\"`, `weight: 20`.",
+        "Parse `internal/adminapi/openapi.yaml` by hand (one-time author — the YAML is the source of truth; this page is a derived index). For each `paths.*.<method>` entry, render a markdown row.",
+        "Group sections by feature area (h2 each): Cluster lifecycle (drain / activate / weight / list / bucket-references) · Drain & rebalance (drain-progress / rebalance-config / rebalance-bandwidth / gc-config) · Placement (bucket placement / mode) · Buckets (CRUD) · IAM (users / keys / policies) · Diagnostics (trace / metrics). Cross-reference grouping with the existing `internal/adminapi/` file layout for naming consistency.",
+        "Per row: `Method | Path | Audit verb | Summary | Full schema`. The `Full schema` column links to the OpenAPI viewer page (US-005) with the operation-id anchor (Redoc auto-generates `#operation/<operationId>` anchors — document the anchor pattern in this page even if US-005 is built second).",
+        "Top-of-page note: `This page is the operator index. Authoritative contract lives in internal/adminapi/openapi.yaml; rendered viewer at /reference/admin-api-viewer/.`",
+        "All audit verbs match the `s3api.SetAuditOverride(ctx, action, ...)` stamps in the handler files — spot-check 5 random entries against grep `SetAuditOverride` in `internal/adminapi/`.",
+        "`make docs-build` green; rendered page resolves the cross-link to US-005's viewer page (run US-005 before this story, or land both then re-verify).",
+        "Typecheck passes (no Go code touched — vacuous)",
+        "Tests pass (no Go tests touched — vacuous)"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Reference page — S3 API operations table",
+      "description": "As a developer wiring a client or debugging compat issues, I want a flat table of every supported S3 operation with the handler location and any AWS-divergence notes so I can cross-reference expected behaviour to source.",
+      "acceptanceCriteria": [
+        "Author `docs/site/content/reference/s3-api.md` with frontmatter `title: \"S3 API operations\"`, `weight: 30`.",
+        "Source the operation list by reading the `handleBucket` + `handleObject` switch arms in `internal/s3api/server.go` (also check `handleService` if present). Each `case \"<query>\":` / route arm becomes one row.",
+        "Markdown table columns: `Operation | Handler file:line | Shipped in | AWS gotchas`. `Operation` is the AWS canonical name (PutObject, GetObject, ListObjectsV2, CreateBucket, …); `Handler file:line` points to `internal/s3api/<file>.go:LINE`; `Shipped in` references the ROADMAP / PRD that landed it (best-effort — leave blank for pre-roadmap operations); `AWS gotchas` is empty for full-compat, one-line note for divergences (e.g. `Range: bytes=-N where N > size`: `returns full body — matches AWS`).",
+        "Group by service area (h2 per group): Bucket lifecycle · Object lifecycle · Object metadata · Multipart upload · Versioning · ACL / Policy · Encryption · Replication · Tagging · Object Lock · Inventory · Notification.",
+        "Hand-curated this cycle (option 3A from scoping). Add a `<!-- Maintainer note: this table is hand-maintained. When adding a new handler in internal/s3api/, append a row here in the same PR. A lint test (docs_lint_test.go) is parked as a P3 ROADMAP entry. -->` HTML comment at top of file.",
+        "**NEW P3 entry** added to ROADMAP in US-005 (per CLAUDE.md `Discovering a new gap` rule): `Drift-proof S3 ops reference table via Go lint test parsing internal/s3api/server.go switch arms.` Parked, NOT closed in this cycle (option 3A explicitly defers the lint test).",
+        "Spot-check 10 random rows: handler file:line points to the actual switch arm; AWS gotcha (if any) matches a known `internal/s3api/conditional.go` or PRD comment.",
+        "`make docs-build` green.",
+        "Typecheck passes (no Go code touched — vacuous)",
+        "Tests pass (no Go tests touched — vacuous)"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "OpenAPI viewer (Redoc) + smoke + ROADMAP close-flip + PRD removal",
+      "description": "As an operator, I want an inline OpenAPI viewer so I can browse + interact with admin endpoints without leaving the docs site. Plus the standard cycle-end verification: smoke pass, ROADMAP close-flip, PRD removal.",
+      "acceptanceCriteria": [
+        "**Makefile target** for OpenAPI copy: add `docs-openapi-copy` recipe that copies `internal/adminapi/openapi.yaml` to `docs/site/static/openapi.yaml`. Wire as a `docs-build` prerequisite so `make docs-build` always grabs the latest YAML before Hugo runs. Document in the new Makefile comment + `docs/site/CONTRIBUTING.md` if it exists (else top of `make docs-build` recipe).",
+        "Add `docs/site/static/openapi.yaml` to `.gitignore` — the copy is build-time only; source of truth is `internal/adminapi/openapi.yaml`.",
+        "Author `docs/site/content/reference/admin-api-viewer.md` with frontmatter `title: \"Admin API viewer\"`, `weight: 40`. Verify if `hugo-book` theme supports a `bookHidden: true` / `bookFlatSection: false` / full-width frontmatter hint to drop the sidebar; if so use it (Redoc wants full width).",
+        "Body renders Redoc via raw HTML — `markup.goldmark.renderer.unsafe = true` is ALREADY set in `docs/site/hugo.toml`, so a raw `<script>` block in the markdown body works without a custom shortcode. Loads `/openapi.yaml` (relative — the Makefile-copied file lives at `static/openapi.yaml` so Hugo serves it at root).",
+        "Redoc bundle: pin the version — `<script src=\"https://cdn.jsdelivr.net/npm/redoc@2.5.0/bundles/redoc.standalone.js\"></script>` (NOT `@latest`). Embed via `<redoc spec-url='/openapi.yaml'></redoc>` tag.",
+        "Add a noscript fallback paragraph: `JavaScript required for the interactive viewer. Static contract: /openapi.yaml. Operator index: /reference/admin-api/`.",
+        "**Smoke pass**: `make docs-build` → exit 0; no Hugo warnings; `grep -r 'href=\"/reference' docs/site/public/reference/` → every link resolves (corresponding `index.html` exists); `grep -r 'href=\"/adr' docs/site/public/adr/` → same; manually run `make docs-serve` and open `http://127.0.0.1:1313/adr/`, `/reference/env-vars/`, `/reference/admin-api/`, `/reference/s3-api/`, `/reference/admin-api-viewer/` — capture a one-line confirmation per page in `scripts/ralph/progress.txt`.",
+        "**ROADMAP close-flip** in the same commit: (a) `Architecture decision records` (P3 Developer experience, line 288) → flipped to Done. Summary: 4 ADRs authored under `docs/site/content/adr/`; ROADMAP `## Design notes captured during MVP` section collapsed (4 bullets → 1 link-out paragraph + 3 bullets retained). (b) `OpenAPI viewer (Redoc / Swagger UI) embedded in the API reference section` (P3 Developer experience, line 291) → flipped to Done. Summary: Redoc 2.5.0 pinned, OpenAPI YAML auto-copied via Makefile prerequisite, viewer at `/reference/admin-api-viewer/`. (c) `Reference section expansion (env vars table, Admin API surface, S3 API operations table)` (P3 Developer experience, line 293) → flipped to Done. Summary: 3 pages authored (env-vars / admin-api / s3-api), hand-curated this cycle, S3 ops drift-proofing parked as new P3.",
+        "**NEW P3 entry** added under `## Developer experience` (per CLAUDE.md `Discovering a new gap` rule, from US-004): `Drift-proof S3 ops reference table via Go lint test parsing internal/s3api/server.go switch arms.` NOT closed in this cycle.",
+        "Each close-flip carries `(commit pending)` per the established convention; SHA backfill lands on `main` post-merge as fast-follow.",
+        "`tasks/prd-docs-adr.md` REMOVED via `git rm` per CLAUDE.md PRD lifecycle rule.",
+        "`scripts/ralph/progress.txt` carries one US-005 block summarising smoke results + the manual page click-through observations.",
+        "`make docs-build` final pass: green.",
+        "Typecheck passes (no Go code touched — vacuous; Makefile change only)",
+        "Tests pass (no Go tests touched — vacuous)"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": ""
+    }
+  ]
+}
