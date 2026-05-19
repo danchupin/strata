@@ -11,7 +11,7 @@ COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 	smoke-single-binary smoke-tikv-default-lab \
 	race-soak race-soak-tikv lint-nginx-lab \
 	bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi \
-	docs-serve docs-build clean
+	docs-serve docs-build docs-openapi-copy clean
 
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
@@ -480,10 +480,18 @@ bench-rebalance-multi:
 # gh-pages. Requires Hugo extended (>= 0.128) on PATH; the theme lives at
 # docs/site/themes/hugo-book/ as a Git submodule, so a fresh checkout needs
 # `git submodule update --init --recursive` first.
-docs-serve:
+# Copy the canonical Admin-API OpenAPI contract into the Hugo static dir so
+# Hugo serves it at /openapi.yaml. The destination is gitignored — source of
+# truth is internal/adminapi/openapi.yaml. Wired as a prerequisite of both
+# `docs-build` and `docs-serve` so every Hugo run grabs the latest YAML and
+# the Redoc viewer at /reference/admin-api-viewer/ stays drift-proof.
+docs-openapi-copy:
+	cp internal/adminapi/openapi.yaml docs/site/static/openapi.yaml
+
+docs-serve: docs-openapi-copy
 	cd docs/site && hugo server -D
 
-docs-build:
+docs-build: docs-openapi-copy
 	cd docs/site && hugo --minify
 
 clean:

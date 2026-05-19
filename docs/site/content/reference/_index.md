@@ -2,37 +2,14 @@
 title: 'Reference'
 weight: 60
 bookFlatSection: true
-description: 'Reference tables — env vars, Admin API, S3 surface. Expansion deferred to a P3 follow-up.'
+description: 'Reference tables — env vars, Admin API, S3 surface.'
 ---
 
 # Reference
 
-The full reference (env vars table, Admin API surface, S3 operations table)
-is queued as a P3 follow-up after the cycle closes. Until then:
+Operator reference. Four pages:
 
-- README has the canonical env-var table.
-- Admin API schema lives in `internal/adminapi/openapi.yaml`.
-- S3 surface coverage: see [S3 Compatibility]({{< ref "/s3-compatibility" >}}).
-
-## Worker env vars (selected)
-
-The full set lives in README; the entries that recently shipped and are
-not yet folded into the planned env-vars subpage:
-
-| Env | Default | Worker | Doc |
-|---|---|---|---|
-| `STRATA_QUOTA_RECONCILE_INTERVAL` | `6h` | `--workers=quota-reconcile` | [Quotas + billing]({{< ref "/best-practices/quotas-billing" >}}#drift-reconcile-workersquota-reconcile) |
-| `STRATA_USAGE_ROLLUP_AT` | `00:00` (UTC) | `--workers=usage-rollup` | [Quotas + billing]({{< ref "/best-practices/quotas-billing" >}}#usage-rollup-workersusage-rollup) |
-| `STRATA_USAGE_ROLLUP_INTERVAL` | `24h` | `--workers=usage-rollup` | [Quotas + billing]({{< ref "/best-practices/quotas-billing" >}}#usage-rollup-workersusage-rollup) |
-| `STRATA_RADOS_PUT_CONCURRENCY` | `32` (range `[1, 256]`) | gateway PUT path | [Parallel chunk PUT + GET]({{< ref "/architecture/benchmarks/parallel-chunks" >}}#tuning-knobs) |
-| `STRATA_RADOS_GET_PREFETCH` | `4` (range `[1, 64]`) | gateway GET path | [Parallel chunk PUT + GET]({{< ref "/architecture/benchmarks/parallel-chunks" >}}#tuning-knobs) |
-| `STRATA_S3_CLUSTERS` | (no default — required when `STRATA_DATA_BACKEND=s3`) | gateway S3 data path | [S3 multi-cluster routing]({{< ref "/best-practices/s3-multi-cluster" >}}#strata_s3_clusters--json-array) |
-| `STRATA_S3_CLASSES`  | (no default — required when `STRATA_DATA_BACKEND=s3`) | gateway S3 data path | [S3 multi-cluster routing]({{< ref "/best-practices/s3-multi-cluster" >}}#strata_s3_classes--json-object) |
-
-The 13 legacy `STRATA_S3_BACKEND_*` envs (`_ENDPOINT`, `_REGION`,
-`_BUCKET`, `_ACCESS_KEY`, `_SECRET_KEY`, `_FORCE_PATH_STYLE`, `_PART_SIZE`,
-`_UPLOAD_CONCURRENCY`, `_MAX_RETRIES`, `_OP_TIMEOUT_SECS`,
-`_MULTIPART_TIMEOUT_SECS`, `_SSE_MODE`, `_SSE_KMS_KEY_ID`) were retired
-in the `ralph/s3-multi-cluster` cycle. Replace with the two JSON envs
-above; deployments fail loudly at boot if the legacy envs are still set
-without the new ones.
+- [STRATA_* environment variables]({{< ref "/reference/env-vars" >}}) — every `STRATA_*` env var with default, range, and consuming layer, grouped by operator concern.
+- [Admin API surface]({{< ref "/reference/admin-api" >}}) — flat index of every admin endpoint (method, path, audit verb, summary) with cross-links into the interactive viewer.
+- [S3 API operations]({{< ref "/reference/s3-api" >}}) — flat table of supported S3 operations with handler `file:line` pointers and AWS-divergence notes.
+- [Admin API viewer]({{< ref "/reference/admin-api-viewer" >}}) — Redoc-rendered `internal/adminapi/openapi.yaml` for interactive exploration.
