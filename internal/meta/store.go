@@ -428,6 +428,22 @@ type BucketStats struct {
 	UpdatedAt   time.Time
 }
 
+// UserStats is the per-owner denormalised aggregate maintained in lockstep
+// with BucketStats so UserQuota.TotalMaxBytes / MaxBuckets checks resolve to
+// a single point lookup rather than a ListBuckets fan-out (ralph/storage-
+// correctness US-001). UsedBytes / UsedObjects are summed across every
+// bucket the user owns; BucketCount mirrors len(ListBuckets(owner)) and is
+// bumped atomically with bucket row creation / deletion. All three fields
+// admit negative deltas through the bump helpers; reconcile worker drift
+// correction (US-007 follow-up) covers any best-effort coherence gap.
+type UserStats struct {
+	Owner       string
+	UsedBytes   int64
+	UsedObjects int64
+	BucketCount int
+	UpdatedAt   time.Time
+}
+
 // UsageAggregate is one row in the per-(bucket, storage_class, day) usage
 // rollup feed (US-008) consumed by external billing. Day is normalised to
 // UTC midnight; ByteSeconds is the integral of UsedBytes over the day
@@ -1115,6 +1131,19 @@ type Store interface {
 	// concurrent bumps serialise without lost updates.
 	GetBucketStats(ctx context.Context, bucketID uuid.UUID) (BucketStats, error)
 	BumpBucketStats(ctx context.Context, bucketID uuid.UUID, deltaBytes, deltaObjects int64) (BucketStats, error)
+
+	// UserStats live aggregate (ralph/storage-correctness US-001). GetUserStats
+	// returns the current row (zero-value when no row exists yet — never an
+	// error for the missing case). BumpUserStats atomically increments the
+	// byte / object counters and returns the post-update row; IncrUserBucketCount
+	// adjusts BucketCount in lockstep with bucket row creation / deletion.
+	// Both bump primitives accept negative deltas. Cassandra batches the
+	// user_stats bump alongside the bucket_stats LWT into a single
+	// `BEGIN BATCH ... APPLY BATCH`; TiKV locks both keys in one pessimistic
+	// txn; memory backend updates both under the same critical section.
+	GetUserStats(ctx context.Context, owner string) (UserStats, error)
+	BumpUserStats(ctx context.Context, owner string, deltaBytes, deltaObjects int64) (UserStats, error)
+	IncrUserBucketCount(ctx context.Context, owner string, delta int) (UserStats, error)
 
 	// Usage aggregates (US-008). The leader-elected usage-rollup worker
 	// writes one row per (bucketID, storageClass, day) per tick. Day must be

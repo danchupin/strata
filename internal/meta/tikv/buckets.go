@@ -41,12 +41,18 @@ func (s *Store) CreateBucket(ctx context.Context, name, owner, defaultClass stri
 	if err != nil {
 		return nil, err
 	}
+	ownerKey := BucketOwnerKey(id)
+	userKey := UserStatsKey(owner)
 	txn, err := s.kv.Begin(ctx, true)
 	if err != nil {
 		return nil, err
 	}
 	defer rollbackOnError(txn, &err)
-	if err = txn.LockKeys(ctx, key); err != nil {
+	lockKeys := [][]byte{key, ownerKey}
+	if owner != "" {
+		lockKeys = append(lockKeys, userKey)
+	}
+	if err = txn.LockKeys(ctx, lockKeys...); err != nil {
 		return nil, err
 	}
 	_, found, err := txn.Get(ctx, key)
@@ -58,6 +64,14 @@ func (s *Store) CreateBucket(ctx context.Context, name, owner, defaultClass stri
 	}
 	if err = txn.Set(key, payload); err != nil {
 		return nil, err
+	}
+	if owner != "" {
+		if err = txn.Set(ownerKey, []byte(owner)); err != nil {
+			return nil, err
+		}
+		if err = bumpUserStatsInTxn(ctx, txn, userKey, owner, 0, 0, 1); err != nil {
+			return nil, err
+		}
 	}
 	if err = txn.Commit(ctx); err != nil {
 		return nil, err
@@ -118,6 +132,19 @@ func (s *Store) DeleteBucket(ctx context.Context, name string) (err error) {
 	}
 	if len(pairs) > 0 {
 		return meta.ErrBucketNotEmpty
+	}
+	if b.Owner != "" {
+		ownerKey := BucketOwnerKey(b.ID)
+		userKey := UserStatsKey(b.Owner)
+		if err = txn.LockKeys(ctx, ownerKey, userKey); err != nil {
+			return err
+		}
+		if err = txn.Delete(ownerKey); err != nil {
+			return err
+		}
+		if err = bumpUserStatsInTxn(ctx, txn, userKey, b.Owner, 0, 0, -1); err != nil {
+			return err
+		}
 	}
 	if err = txn.Delete(bucketKey); err != nil {
 		return err

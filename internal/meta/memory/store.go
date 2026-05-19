@@ -38,6 +38,8 @@ type Store struct {
 	bucketQuotas   map[uuid.UUID][]byte
 	userQuotas     map[string][]byte
 	bucketStats    map[uuid.UUID]meta.BucketStats
+	userStats      map[string]meta.UserStats
+	bucketOwners   map[uuid.UUID]string
 	usageAggs      map[usageKey]meta.UsageAggregate
 	inventoryConfigs map[uuid.UUID]map[string][]byte
 	accessPoints     map[string]*meta.AccessPoint
@@ -134,6 +136,8 @@ func New() *Store {
 		bucketQuotas: make(map[uuid.UUID][]byte),
 		userQuotas:   make(map[string][]byte),
 		bucketStats:  make(map[uuid.UUID]meta.BucketStats),
+		userStats:    make(map[string]meta.UserStats),
+		bucketOwners: make(map[uuid.UUID]string),
 		usageAggs:    make(map[usageKey]meta.UsageAggregate),
 		inventoryConfigs: make(map[uuid.UUID]map[string][]byte),
 		accessPoints:     make(map[string]*meta.AccessPoint),
@@ -776,6 +780,10 @@ func (s *Store) createBucketWithID(name, owner, defaultClass string, id uuid.UUI
 	s.buckets[name] = b
 	s.objects[b.ID] = make(map[string][]*meta.Object)
 	s.multiparts[b.ID] = make(map[string]*mpState)
+	if owner != "" {
+		s.bucketOwners[b.ID] = owner
+		s.bumpUserBucketCountLocked(owner, 1)
+	}
 	return b, nil
 }
 
@@ -802,6 +810,10 @@ func (s *Store) DeleteBucket(ctx context.Context, name string) error {
 	}
 	if len(s.multiparts[b.ID]) > 0 {
 		return meta.ErrBucketNotEmpty
+	}
+	if owner, ok := s.bucketOwners[b.ID]; ok && owner != "" {
+		s.bumpUserBucketCountLocked(owner, -1)
+		delete(s.bucketOwners, b.ID)
 	}
 	delete(s.buckets, name)
 	delete(s.objects, b.ID)
@@ -1825,13 +1837,83 @@ func (s *Store) bumpBucketStatsLocked(bucketID uuid.UUID, deltaBytes, deltaObjec
 	cur.UsedObjects += deltaObjects
 	cur.UpdatedAt = time.Now().UTC()
 	s.bucketStats[bucketID] = cur
+	if owner := s.ownerForBucketLocked(bucketID); owner != "" {
+		s.bumpUserStatsLocked(owner, deltaBytes, deltaObjects)
+	}
 	return cur
+}
+
+// ownerForBucketLocked resolves the owner of bucketID via the bucketOwners
+// index, falling back to a scan of s.buckets for legacy rows that bypassed
+// createBucketWithID (test-only paths that bypass the bookkeeping). Caller
+// must hold s.mu in write mode.
+func (s *Store) ownerForBucketLocked(bucketID uuid.UUID) string {
+	if owner, ok := s.bucketOwners[bucketID]; ok {
+		return owner
+	}
+	for _, b := range s.buckets {
+		if b.ID == bucketID {
+			if b.Owner != "" {
+				s.bucketOwners[bucketID] = b.Owner
+			}
+			return b.Owner
+		}
+	}
+	return ""
 }
 
 func (s *Store) BumpBucketStats(ctx context.Context, bucketID uuid.UUID, deltaBytes, deltaObjects int64) (meta.BucketStats, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.bumpBucketStatsLocked(bucketID, deltaBytes, deltaObjects), nil
+}
+
+func (s *Store) bumpUserStatsLocked(owner string, deltaBytes, deltaObjects int64) meta.UserStats {
+	cur := s.userStats[owner]
+	cur.Owner = owner
+	cur.UsedBytes += deltaBytes
+	cur.UsedObjects += deltaObjects
+	cur.UpdatedAt = time.Now().UTC()
+	s.userStats[owner] = cur
+	return cur
+}
+
+func (s *Store) bumpUserBucketCountLocked(owner string, delta int) meta.UserStats {
+	cur := s.userStats[owner]
+	cur.Owner = owner
+	cur.BucketCount += delta
+	cur.UpdatedAt = time.Now().UTC()
+	s.userStats[owner] = cur
+	return cur
+}
+
+// GetUserStats returns the current denormalised aggregate for owner. Missing
+// rows read back as zero-value (Owner set so callers can distinguish absence
+// of bumps from a never-seeded owner). ralph/storage-correctness US-001.
+func (s *Store) GetUserStats(ctx context.Context, owner string) (meta.UserStats, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	cur := s.userStats[owner]
+	cur.Owner = owner
+	return cur, nil
+}
+
+func (s *Store) BumpUserStats(ctx context.Context, owner string, deltaBytes, deltaObjects int64) (meta.UserStats, error) {
+	if owner == "" {
+		return meta.UserStats{}, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.bumpUserStatsLocked(owner, deltaBytes, deltaObjects), nil
+}
+
+func (s *Store) IncrUserBucketCount(ctx context.Context, owner string, delta int) (meta.UserStats, error) {
+	if owner == "" {
+		return meta.UserStats{}, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.bumpUserBucketCountLocked(owner, delta), nil
 }
 
 func normalizeDay(t time.Time) time.Time {

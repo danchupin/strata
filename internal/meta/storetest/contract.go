@@ -64,6 +64,8 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"UserQuotaRoundTrip", caseUserQuota},
 		{"BucketStatsRoundTrip", caseBucketStats},
 		{"BucketStatsHotPath", caseBucketStatsHotPath},
+		{"UserStatsRoundTrip", caseUserStats},
+		{"UserStatsConcurrent", caseUserStatsConcurrent},
 		{"UsageAggregateRoundTrip", caseUsageAggregate},
 		{"BucketPlacementRoundTrip", caseBucketPlacement},
 		{"BucketPlacementMode", casePlacementMode},
@@ -2600,6 +2602,124 @@ func caseBucketStatsHotPath(t *testing.T, s meta.Store) {
 		t.Fatalf("complete mp: %v", err)
 	}
 	mustStats("mp-complete", mp.ID, 192, 1)
+}
+
+// caseUserStats validates the per-owner denormalised aggregate maintained
+// in lockstep with bucket_stats (ralph/storage-correctness US-001). Seeds
+// 3 buckets across 2 owners, writes 100 chunks each, asserts GetUserStats
+// reports the correct totals; deletes a bucket, asserts the totals drop.
+func caseUserStats(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+
+	mustUser := func(label, owner string, wantBytes, wantObjects int64, wantBuckets int) {
+		t.Helper()
+		got, err := s.GetUserStats(ctx, owner)
+		if err != nil {
+			t.Fatalf("%s: get user stats: %v", label, err)
+		}
+		if got.UsedBytes != wantBytes || got.UsedObjects != wantObjects || got.BucketCount != wantBuckets {
+			t.Fatalf("%s: got %+v want bytes=%d objects=%d buckets=%d",
+				label, got, wantBytes, wantObjects, wantBuckets)
+		}
+	}
+
+	alice, err := s.CreateBucket(ctx, "us-a1", "alice", "STANDARD")
+	if err != nil {
+		t.Fatalf("create alice/a1: %v", err)
+	}
+	alice2, err := s.CreateBucket(ctx, "us-a2", "alice", "STANDARD")
+	if err != nil {
+		t.Fatalf("create alice/a2: %v", err)
+	}
+	bob, err := s.CreateBucket(ctx, "us-b1", "bob", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bob/b1: %v", err)
+	}
+
+	mustUser("alice-fresh", "alice", 0, 0, 2)
+	mustUser("bob-fresh", "bob", 0, 0, 1)
+
+	const chunks = 100
+	const size = int64(7)
+	for i := 0; i < chunks; i++ {
+		if _, err := s.BumpBucketStats(ctx, alice.ID, size, 1); err != nil {
+			t.Fatalf("bump alice/a1: %v", err)
+		}
+		if _, err := s.BumpBucketStats(ctx, alice2.ID, size, 1); err != nil {
+			t.Fatalf("bump alice/a2: %v", err)
+		}
+		if _, err := s.BumpBucketStats(ctx, bob.ID, size, 1); err != nil {
+			t.Fatalf("bump bob/b1: %v", err)
+		}
+	}
+
+	mustUser("alice-after-100", "alice", size*chunks*2, chunks*2, 2)
+	mustUser("bob-after-100", "bob", size*chunks, chunks, 1)
+
+	// Drain alice/a2 + delete it; bucket_count drops, byte tally drops.
+	if _, err := s.BumpBucketStats(ctx, alice2.ID, -size*chunks, -chunks); err != nil {
+		t.Fatalf("drain alice/a2: %v", err)
+	}
+	mustUser("alice-drain-a2", "alice", size*chunks, chunks, 2)
+
+	if err := s.DeleteBucket(ctx, "us-a2"); err != nil {
+		t.Fatalf("delete alice/a2: %v", err)
+	}
+	mustUser("alice-del-a2", "alice", size*chunks, chunks, 1)
+
+	// Bob's tally untouched by alice's churn.
+	mustUser("bob-isolation", "bob", size*chunks, chunks, 1)
+}
+
+// caseUserStatsConcurrent stresses BumpUserStats serialisation: 100
+// goroutines bump the same owner concurrently, the post-state must reflect
+// exactly N applications with no lost updates.
+func caseUserStatsConcurrent(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	const conc = 100
+	const size = int64(13)
+
+	type result struct{ err error }
+	results := make(chan result, conc)
+	for i := 0; i < conc; i++ {
+		go func() {
+			_, err := s.BumpUserStats(ctx, "race-user", size, 1)
+			results <- result{err: err}
+		}()
+	}
+	for i := 0; i < conc; i++ {
+		if r := <-results; r.err != nil {
+			t.Fatalf("concurrent BumpUserStats: %v", r.err)
+		}
+	}
+	got, err := s.GetUserStats(ctx, "race-user")
+	if err != nil {
+		t.Fatalf("get after concurrent: %v", err)
+	}
+	if got.UsedBytes != size*conc || got.UsedObjects != conc {
+		t.Fatalf("after concurrent: got %+v want bytes=%d objects=%d",
+			got, size*conc, conc)
+	}
+
+	// IncrUserBucketCount has its own concurrency path.
+	for i := 0; i < conc; i++ {
+		go func() {
+			_, err := s.IncrUserBucketCount(ctx, "race-user", 1)
+			results <- result{err: err}
+		}()
+	}
+	for i := 0; i < conc; i++ {
+		if r := <-results; r.err != nil {
+			t.Fatalf("concurrent IncrUserBucketCount: %v", r.err)
+		}
+	}
+	got, err = s.GetUserStats(ctx, "race-user")
+	if err != nil {
+		t.Fatalf("get after incr: %v", err)
+	}
+	if got.BucketCount != conc {
+		t.Fatalf("after incr: got %d want %d", got.BucketCount, conc)
+	}
 }
 
 // caseUsageAggregate exercises the usage rollup CRUD surface (US-008):

@@ -80,17 +80,22 @@ func (s *Store) GetBucketStats(ctx context.Context, bucketID uuid.UUID) (out met
 
 // BumpBucketStats applies (deltaBytes, deltaObjects) atomically inside a
 // pessimistic txn. LockKeys + Get + Set + Commit serialises concurrent
-// bumps. Returns the post-update row.
+// bumps. Folds a user_stats bump for the bucket's owner into the same txn
+// so both rows commit atomically (ralph/storage-correctness US-001). Owner
+// is resolved via the bucket_owners pointer seeded at CreateBucket; absence
+// (bucket created pre-feature) leaves user_stats untouched and the
+// quotareconcile worker repairs the drift.
 func (s *Store) BumpBucketStats(ctx context.Context, bucketID uuid.UUID, deltaBytes, deltaObjects int64) (out meta.BucketStats, err error) {
 	ctx, finish := s.observer.Start(ctx, "BumpBucketStats", "bucket_stats")
 	defer func() { finish(err) }()
 	key := BucketStatsKey(bucketID)
+	ownerKey := BucketOwnerKey(bucketID)
 	txn, err := s.kv.Begin(ctx, true)
 	if err != nil {
 		return meta.BucketStats{}, err
 	}
 	defer rollbackOnError(txn, &err)
-	if err = txn.LockKeys(ctx, key); err != nil {
+	if err = txn.LockKeys(ctx, key, ownerKey); err != nil {
 		return meta.BucketStats{}, err
 	}
 	raw, _, err := txn.Get(ctx, key)
@@ -112,6 +117,19 @@ func (s *Store) BumpBucketStats(ctx context.Context, bucketID uuid.UUID, deltaBy
 	}
 	if err = txn.Set(key, payload); err != nil {
 		return meta.BucketStats{}, err
+	}
+	ownerRaw, _, err := txn.Get(ctx, ownerKey)
+	if err != nil {
+		return meta.BucketStats{}, err
+	}
+	if owner := string(ownerRaw); owner != "" && (deltaBytes != 0 || deltaObjects != 0) {
+		userKey := UserStatsKey(owner)
+		if err = txn.LockKeys(ctx, userKey); err != nil {
+			return meta.BucketStats{}, err
+		}
+		if err = bumpUserStatsInTxn(ctx, txn, userKey, owner, deltaBytes, deltaObjects, 0); err != nil {
+			return meta.BucketStats{}, err
+		}
 	}
 	if err = txn.Commit(ctx); err != nil {
 		return meta.BucketStats{}, err

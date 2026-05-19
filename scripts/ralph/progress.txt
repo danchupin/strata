@@ -24,3 +24,62 @@ Cycle: ralph/storage-correctness
   - aws-chunked-trailer latent bug ROADMAP line 336.
   - 9 close-flip targets confirmed at lines 211/234/235/238/240/242/253/332/336.
 
+## 2026-05-19 - US-001 - user_stats denorm O(1) UserQuota
+- Implemented new `meta.UserStats` aggregate row (Owner / UsedBytes / UsedObjects / BucketCount /
+  UpdatedAt) plus 3 interface methods on `meta.Store`: GetUserStats, BumpUserStats,
+  IncrUserBucketCount.
+- Memory backend (internal/meta/memory/store.go):
+  - New maps `userStats[owner] meta.UserStats` and `bucketOwners[bucketID] owner` for O(1) lookup.
+  - `bumpBucketStatsLocked` resolves owner via the bookkeeping map (fallback scan when test paths
+    bypass createBucketWithID) and folds the user_stats bump into the same critical section.
+  - CreateBucket bumps bucket_count +1; DeleteBucket -1 (only when owner != "").
+- Cassandra backend (internal/meta/cassandra/store.go + schema.go):
+  - New `user_stats` table (owner PK + bigint counters) added to `tableDDL`.
+  - `bucket_stats` carries a new `owner text` column (`tableDDL` + idempotent `ALTER TABLE` in
+    alterStatements) — denormalised owner pointer so BumpBucketStats does not need to round-trip
+    through buckets on every PUT.
+  - Cross-partition LWT batches are illegal in Cassandra; the bucket_stats CAS commits first, then
+    a user_stats CAS loop applies the same delta (drift correctable by quotareconcile).
+  - CreateBucket / DeleteBucket call IncrUserBucketCount in lockstep with the bucket-row insert /
+    delete.
+- TiKV backend (new internal/meta/tikv/user_stats.go + edits to bucket_stats.go + buckets.go):
+  - New `prefixUserStats` (`s/us/<owner>`) + `prefixBucketOwner` (`s/bo/<bucket16>`) in keys.go.
+  - `BumpBucketStats` reads the bucket_owners pointer inside the same pessimistic txn, then folds
+    `bumpUserStatsInTxn` into the same Commit — single atomic LockKeys+Get+Set+Commit for both
+    rows.
+  - CreateBucket additionally writes the bucket_owners pointer + bumps bucket_count;
+    DeleteBucket clears them in the same txn.
+- s3api/quota.go fan-out lift (US-001 hot path):
+  - `userUsedBytes` → `Meta.GetUserStats(owner).UsedBytes` (was ListBuckets + per-bucket
+    GetBucketStats fan-out).
+  - `checkUserBucketQuota` → `Meta.GetUserStats(owner).BucketCount` (was `len(ListBuckets)`).
+- Contract tests (internal/meta/storetest/contract.go):
+  - `caseUserStats`: 3 buckets / 2 owners + 100 chunks each + bucket deletion → asserts
+    UsedBytes / UsedObjects / BucketCount on every owner.
+  - `caseUserStatsConcurrent`: 100 goroutines bumping BumpUserStats + IncrUserBucketCount, asserts
+    no lost updates.
+- Files changed: internal/meta/store.go, internal/meta/memory/store.go,
+  internal/meta/cassandra/store.go, internal/meta/cassandra/schema.go,
+  internal/meta/tikv/keys.go, internal/meta/tikv/buckets.go,
+  internal/meta/tikv/bucket_stats.go, internal/meta/tikv/user_stats.go (new),
+  internal/meta/storetest/contract.go, internal/s3api/quota.go.
+- Quality: `go vet ./...` green, `go test -race ./...` green (~2 min wall-clock including the 46s
+  racetest mix). Cassandra/TiKV integration suites pick up the new contract cases automatically
+  via storetest.Run when invoked under `-tags integration`.
+- **Learnings for future iterations:**
+  - Cassandra LWT batches across partitions are rejected — "batch a user_stats bump in the same
+    BEGIN BATCH" from the PRD is literally impossible. The correct pattern is bucket_stats LWT
+    commits first; a follow-up user_stats LWT applies the same delta; drift is corrected by the
+    quotareconcile worker.
+  - The owner-on-bucket_stats denorm column is needed because BumpBucketStats only carries the
+    bucket UUID, not the owner. Lazily filled on first INSERT IF NOT EXISTS so we don't pay a
+    GetBucket round-trip on every PUT.
+  - TiKV pessimistic txn can fold cross-prefix rows (bucket_stats + bucket_owners + user_stats)
+    into one Commit because every LockKeys call adds to the same txn's lock set — no extra round
+    trips vs the single-row bump.
+  - Memory backend `bumpBucketStatsLocked` already runs under the sync.RWMutex, so adding user
+    bookkeeping there is free.
+  - The PRD's "userBucketCount via ListBuckets" trap: even small test harnesses pay an O(N) scan;
+    GetUserStats(owner).BucketCount is one map lookup.
+---
+

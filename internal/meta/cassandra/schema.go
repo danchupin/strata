@@ -227,7 +227,15 @@ var tableDDL = []string{
 		bucket_id    uuid PRIMARY KEY,
 		used_bytes   bigint,
 		used_objects bigint,
-		updated_at   timestamp
+		updated_at   timestamp,
+		owner        text
+	)`,
+	`CREATE TABLE IF NOT EXISTS user_stats (
+		owner         text PRIMARY KEY,
+		used_bytes    bigint,
+		used_objects  bigint,
+		bucket_count  bigint,
+		updated_at    timestamp
 	)`,
 	`CREATE TABLE IF NOT EXISTS usage_aggregates (
 		bucket_id        uuid,
@@ -444,6 +452,7 @@ var alterStatements = []string{
 	`ALTER TABLE cluster_state ADD weight int`,
 	`ALTER TABLE multipart_uploads ADD cluster text`,
 	`ALTER TABLE buckets ADD placement_mode text`,
+	`ALTER TABLE bucket_stats ADD owner text`,
 }
 
 func isColumnAlreadyExists(err error) bool {
