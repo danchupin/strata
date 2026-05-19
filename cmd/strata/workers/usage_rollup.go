@@ -20,10 +20,11 @@ func buildUsageRollup(deps Dependencies) (Runner, error) {
 		at = "00:00"
 	}
 	return usagerollup.New(usagerollup.Config{
-		Meta:     deps.Meta,
-		Logger:   deps.Logger,
-		Interval: durationFromEnv("STRATA_USAGE_ROLLUP_INTERVAL", 24*time.Hour),
-		At:       at,
-		Tracer:   deps.Tracer.Tracer("strata.worker.usage-rollup"),
+		Meta:          deps.Meta,
+		Logger:        deps.Logger,
+		Interval:      durationFromEnv("STRATA_USAGE_ROLLUP_INTERVAL", 24*time.Hour),
+		At:            at,
+		SamplesPerDay: intFromEnv("STRATA_USAGE_ROLLUP_SAMPLES_PER_DAY", usagerollup.DefaultSamplesPerDay),
+		Tracer:        deps.Tracer.Tracer("strata.worker.usage-rollup"),
 	})
 }

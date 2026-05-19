@@ -149,15 +149,18 @@ strata server --workers=gateway,usage-rollup
 |---|---|---|
 | `STRATA_USAGE_ROLLUP_AT` | `00:00` | UTC hour:minute the daily tick fires. |
 | `STRATA_USAGE_ROLLUP_INTERVAL` | `24h` | Cadence between rollup ticks. |
+| `STRATA_USAGE_ROLLUP_SAMPLES_PER_DAY` | `24` | Number of intermediate sample ticks per `INTERVAL` (range `[1, 1440]`; clamped + WARN-logged otherwise). |
 
-Per tick the worker walks every bucket, samples `GetBucketStats` once,
-and writes:
+Per intermediate tick the worker walks every bucket and stores the live
+`GetBucketStats(bucket_id)` snapshot into an in-memory ring keyed by
+`(bucket_id, storage_class)`. On the daily roll-up tick the worker drains
+the ring per bucket and writes:
 
 ```
 (bucket_id, storage_class, yesterday-UTC,
-   byte_seconds  = used_bytes  * 86400,
-   object_count_avg = used_objects,
-   object_count_max = used_objects)
+   byte_seconds     = trapezoid(samples, 86400),
+   object_count_avg = mean(samples),
+   object_count_max = max(samples))
 ```
 
 Leader-elected on `usage-rollup-leader`. Days are normalised to UTC
@@ -165,16 +168,28 @@ midnight at the write boundary (Cassandra `date` codec, TiKV's
 `day-Unix / 86400` BE epoch, and the memory `int64` key all require
 midnight — reads and writes miss each other otherwise).
 
-### `byte_seconds × 24h` approximation — caveat
+### byte-seconds trapezoid integration
 
-v1 samples `bucket_stats` once per day. `byte_seconds = used_bytes × 86400`
-under-counts intra-day growth and over-counts intra-day shrinkage. A
-bucket that grew from 0 → 1 TiB at 12:00 UTC bills as if it had 1 TiB
-all day — overstates by 12 h × 1 TiB = 12 TiB·s. Inverse for shrinkage.
+`byte_seconds = Σ_{i=0..N-2} (s[i] + s[i+1]) / 2 × Δt + s[N-1] × Δt`
+where `Δt = 86400 / N` and `s[i]` is the `used_bytes` snapshot at the
+i-th intermediate tick. Each adjacent pair is averaged (trapezoid rule);
+the last segment carries the tail value forward as a rectangle, so a
+flat day integrates exactly back to `used_bytes × 86400`.
 
-The error band is bounded by the daily delta, which is small for steady
-workloads and accepted for v1. Continuous integration of `bucket_stats`
-across the day is a P3 follow-up tracked in `ROADMAP.md`.
+`SAMPLES_PER_DAY=1` (or zero ticks fired before the daily flush — e.g.
+a bucket created mid-day) degrades to the v0 single-sample math
+(`used_bytes × 86400`). This is the intentional fallback.
+
+Trapezoid worked example — bucket grew from `100` to `200` bytes at noon
+with `SAMPLES_PER_DAY=24` (hourly): the new math bills
+`13_140_000 B·s` (≈12.96 M ideal, within 1.4 %). The v0 single-sample
+math billed `200 × 86400 = 17_280_000 B·s` — over-counted by ~33 %.
+
+The ring is per-process and per-replica; only the leader-elected
+`usage-rollup` runner writes a roll-up row, so non-leader replicas idle
+without consuming meta IOPS. A leader flip mid-day starts a fresh ring
+on the new leader — the first day after the flip will have fewer
+samples + degrade gracefully (worst case 1 sample → v0 math).
 
 ### `usage_aggregates` schema
 

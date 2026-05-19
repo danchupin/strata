@@ -195,6 +195,130 @@ func TestRunCtxCancelExits(t *testing.T) {
 	}
 }
 
+// TestRunOnceTrapezoidsFullVirtualDay drives a virtual UTC day: 24 manual
+// SampleOnce calls (step-up at noon shape) then a daily RunOnce. Asserts the
+// emitted byte_seconds matches the trapezoid math from
+// trapezoid_test.TestTrapezoidStepUpAtNoon (13_140_000 for 100 → 200 step).
+func TestRunOnceTrapezoidsFullVirtualDay(t *testing.T) {
+	store := metamem.New()
+	ctx := context.Background()
+	b, err := store.CreateBucket(ctx, "rollup", "alice", "STANDARD")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	clock := time.Date(2026, 5, 9, 0, 0, 0, 0, time.UTC)
+	w, err := New(Config{
+		Meta:          store,
+		SamplesPerDay: 24,
+		Now:           func() time.Time { return clock },
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	// Bump to absolute 100 bytes / 1 object via delta.
+	if _, err := store.BumpBucketStats(ctx, b.ID, 100, 1); err != nil {
+		t.Fatalf("bump: %v", err)
+	}
+	// Hour 0..11 — usage = 100 bytes / 1 object.
+	for hour := range 12 {
+		clock = time.Date(2026, 5, 9, hour, 0, 0, 0, time.UTC)
+		if err := w.SampleOnce(ctx, clock); err != nil {
+			t.Fatalf("sample h%d: %v", hour, err)
+		}
+	}
+	// Step-up at noon: bump to 200 bytes / 4 objects via delta (+100 / +3).
+	if _, err := store.BumpBucketStats(ctx, b.ID, 100, 3); err != nil {
+		t.Fatalf("bump: %v", err)
+	}
+	for hour := 12; hour < 24; hour++ {
+		clock = time.Date(2026, 5, 9, hour, 0, 0, 0, time.UTC)
+		if err := w.SampleOnce(ctx, clock); err != nil {
+			t.Fatalf("sample h%d: %v", hour, err)
+		}
+	}
+	// Daily roll-up tick fires at start of next UTC day.
+	clock = time.Date(2026, 5, 10, 0, 0, 5, 0, time.UTC)
+	if _, err := w.RunOnce(ctx, clock); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	yesterday := time.Date(2026, 5, 9, 0, 0, 0, 0, time.UTC)
+	rows, err := store.ListUsageAggregates(ctx, b.ID, "STANDARD",
+		yesterday, yesterday.AddDate(0, 0, 1))
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows=%d (%+v)", len(rows), rows)
+	}
+	r := rows[0]
+	// Same expectation as TestTrapezoidStepUpAtNoon.
+	if r.ByteSeconds != 13_140_000 {
+		t.Fatalf("byte_seconds: got %d want 13_140_000", r.ByteSeconds)
+	}
+	// avg = (12*1 + 12*4)/24 = 60/24 = 2; max = 4.
+	if r.ObjectCountAvg != 2 {
+		t.Errorf("avg: got %d want 2", r.ObjectCountAvg)
+	}
+	if r.ObjectCountMax != 4 {
+		t.Errorf("max: got %d want 4", r.ObjectCountMax)
+	}
+}
+
+// TestRunOnceFallsBackToSingleSampleWhenRingEmpty asserts a bucket created
+// mid-day (no SampleOnce calls before RunOnce) still gets a usage_aggregates
+// row computed from the live bucket_stats × 86400.
+func TestRunOnceFallsBackToSingleSampleWhenRingEmpty(t *testing.T) {
+	store := metamem.New()
+	ctx := context.Background()
+	b, err := store.CreateBucket(ctx, "fresh", "alice", "STANDARD")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := store.BumpBucketStats(ctx, b.ID, 500, 2); err != nil {
+		t.Fatalf("bump: %v", err)
+	}
+	now := time.Date(2026, 5, 10, 0, 5, 0, 0, time.UTC)
+	w, err := New(Config{Meta: store, SamplesPerDay: 24, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	if _, err := w.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	yesterday := time.Date(2026, 5, 9, 0, 0, 0, 0, time.UTC)
+	rows, _ := store.ListUsageAggregates(ctx, b.ID, "STANDARD", yesterday, yesterday.AddDate(0, 0, 1))
+	if len(rows) != 1 || rows[0].ByteSeconds != int64(500)*86400 {
+		t.Fatalf("fallback math broken: %+v", rows)
+	}
+}
+
+func TestNewClampsSamplesPerDayOutOfRange(t *testing.T) {
+	w, err := New(Config{Meta: metamem.New(), SamplesPerDay: 5000})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	if w.cfg.SamplesPerDay != MaxSamplesPerDay {
+		t.Errorf("got %d want %d", w.cfg.SamplesPerDay, MaxSamplesPerDay)
+	}
+	w, err = New(Config{Meta: metamem.New(), SamplesPerDay: -3})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	if w.cfg.SamplesPerDay != 1 {
+		t.Errorf("negative clamp: got %d want 1", w.cfg.SamplesPerDay)
+	}
+}
+
+func TestNewDefaultsSamplesPerDayWhenZero(t *testing.T) {
+	w, err := New(Config{Meta: metamem.New()})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	if w.cfg.SamplesPerDay != DefaultSamplesPerDay {
+		t.Errorf("default: got %d want %d", w.cfg.SamplesPerDay, DefaultSamplesPerDay)
+	}
+}
+
 // Sanity: ensure the worker contract holds against a fresh-empty store.
 func TestRunOnceEmptyMeta(t *testing.T) {
 	store := metamem.New()

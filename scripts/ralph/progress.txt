@@ -14,6 +14,7 @@ Cycle: ralph/storage-correctness
 - **aws-chunked-trailer sha256-only (US-009)**: scope this story. Other algos (crc32, crc32c, sha1) respond ErrUnsupportedChecksumAlgorithm 400 + new P3 ROADMAP entry parked open. Chain-HMAC scheme extends prevSig to cover trailer chunk per AWS spec.
 - **ROADMAP close-flip (US-010)**: 9 P3 entries close (lines 211 / 234 / 235 / 238 / 240 / 242 / 253 / 332 / 336 — verified). + 1 NEW P3 entry added open for non-sha256 trailer algos. Each carries `(commit pending)`; SHA backfill on main as fast-follow.
 - **s3-tests baseline**: record pre-cycle pass-rate; only intentional changes from US-006 (additive audit rows, no wire impact) and US-009 (chunked-trailer-PUT goes from sig-invalid to 200 OK on aws-cli 2.22+). Any other regression = bug.
+- **usage-rollup trapezoid (US-002) reference**: env `STRATA_USAGE_ROLLUP_SAMPLES_PER_DAY` (default 24, clamp [1, 1440]). Pure math in `internal/usagerollup/trapezoid.go` (`Trapezoid`, `AverageObjects`, `MaxObjects`, `sampleRing`). Worker drives N intermediate `SampleOnce` ticks per Interval (single-select Run loop with ctx.Done / sample-ticker / daily-timer). Empty ring → falls back to `GetBucketStats × 86400` (legacy v0 math). Schema unchanged on all three backends — hard cutover, no `method` column.
 - **Verified codebase facts (PRD review):**
   - bucket_stats is BIGINT not counter — LWT batch shape works directly (no migration).
   - userUsedBytes line 80-94 + checkUserBucketQuota line 101-120 — both lift to user_stats.
@@ -82,4 +83,89 @@ Cycle: ralph/storage-correctness
   - The PRD's "userBucketCount via ListBuckets" trap: even small test harnesses pay an O(N) scan;
     GetUserStats(owner).BucketCount is one map lookup.
 ---
+
+## 2026-05-19 - US-002 - byte_seconds trapezoid integration
+- New env knob `STRATA_USAGE_ROLLUP_SAMPLES_PER_DAY` (default 24 = hourly, clamp
+  [1, 1440] with WARN log when out-of-range; treats 0 as "use default" so
+  callers passing the zero-value Config still get 24-sample shape).
+- New file internal/usagerollup/trapezoid.go: pure `Trapezoid(samples, totalSeconds)`
+  + `AverageObjects` / `MaxObjects` helpers + `sampleRing` (sync.Mutex-guarded
+  map keyed on `RingKey{BucketID, Class}`, cap-bounded at SamplesPerDay so a
+  long-running ring window does not leak). Trapezoid math:
+  `Σ_{i=0..N-2} (s[i]+s[i+1])/2 × Δt + s[N-1] × Δt` where `Δt = totalSeconds / N`
+  — last segment carries last sample forward as a rectangle so a flat day
+  integrates exactly back to `used_bytes × 86400`. `N=1` short-circuits to
+  `samples[0] × totalSeconds` (= legacy v0 single-sample math, intentional
+  fallback).
+- internal/usagerollup/worker.go: gained `SamplesPerDay` Config field, the
+  `ring *sampleRing` Worker field, `SampleOnce(ctx, now)` method (snapshot every
+  bucket's `GetBucketStats` into the ring), and the daily roll-up tick now
+  drains the per-(bucket, class) ring + computes `ByteSeconds = Trapezoid(samples, 86400)`,
+  `ObjectCountAvg = mean(samples)`, `ObjectCountMax = max(samples)`.
+  Empty-ring path falls back to a fresh `GetBucketStats` + single-sample
+  math so a bucket created mid-day still gets a roll-up row.
+- Run loop rewritten as single-select: ctx.Done / sample-ticker (fires every
+  Interval/SamplesPerDay when SamplesPerDay>1) / daily-timer (fires at the
+  configured At time, then resets to next-day). Replaces the previous
+  one-timer + sleep-Interval shape so sample ticks and the daily flush can
+  share the same goroutine.
+- cmd/strata/workers/usage_rollup.go: reads `STRATA_USAGE_ROLLUP_SAMPLES_PER_DAY`
+  via the existing `intFromEnv` helper (same shape as STRATA_GC_*); env
+  unset → DefaultSamplesPerDay (24).
+- Hard cutover per PRD: no `method` column on usage_aggregates; old `used × 86400`
+  math is the N=1 fallback path, not a parallel branch. Schemas unchanged
+  (Cassandra + TiKV + memory).
+- Tests:
+  - trapezoid_test.go: table-driven (flat, step-up at noon, step-down at noon,
+    sawtooth, single-sample, empty, zero-duration, avg/max helpers, ring drain
+    + cap-to-window). Step-up hand math: 11×(100·3600) + (100+200)/2·3600 +
+    11×(200·3600) + 200·3600 = 13_140_000 — within 1.4 % of the
+    perfect 12_960_000.
+  - worker_test.go: existing tests continue passing (single-sample fallback
+    preserves `used × 86400` math). New cases:
+    - TestRunOnceTrapezoidsFullVirtualDay: drives 24 manual SampleOnce calls
+      across hours 0..23 (step-up at noon, 100→200 bytes, 1→4 objects),
+      asserts ByteSeconds == 13_140_000, ObjectCountAvg == 2,
+      ObjectCountMax == 4.
+    - TestRunOnceFallsBackToSingleSampleWhenRingEmpty: bucket created
+      mid-day with no sample ticks → fallback to `used × 86400`.
+    - TestNewClampsSamplesPerDayOutOfRange: 5000 clamps to 1440; -3 clamps
+      to 1.
+    - TestNewDefaultsSamplesPerDayWhenZero: zero-value Config gets 24.
+- docs/site/content/best-practices/quotas-billing.md: replaced the v1 caveat
+  block with a "byte-seconds trapezoid integration" section that explains
+  the formula + N=1 fallback + worked example (100→200 step-up bills
+  13_140_000 B·s vs the v0 over-count of 17_280_000). Added the new env
+  knob to the env table.
+- Files changed: internal/usagerollup/trapezoid.go (new),
+  internal/usagerollup/trapezoid_test.go (new), internal/usagerollup/worker.go,
+  internal/usagerollup/worker_test.go,
+  cmd/strata/workers/usage_rollup.go,
+  docs/site/content/best-practices/quotas-billing.md.
+- Quality: `go vet ./...` green, `go build ./...` green, `make docs-build`
+  green, `go test -race ./internal/usagerollup/...` green, full
+  `go test -race ./...` green.
+- **Learnings for future iterations:**
+  - The ring is per-process; a leader flip mid-day starts a fresh ring on
+    the new leader. First post-flip day will have fewer samples and
+    degrade gracefully (worst case 1 sample → v0 math). No persisted state
+    needed — the daily roll-up reads bucket_stats at the boundary anyway.
+  - Run-loop refactor pattern: when you need N intermediate ticks PLUS a
+    daily-clock fire, use a single select with three cases (ctx.Done +
+    ticker + timer). Reset the daily timer on each daily fire to track
+    the new nextFire; do NOT use a ticker for the daily fire because the
+    "at HH:MM UTC" semantic is a wall-clock landmark, not a fixed cadence.
+  - `SamplesPerDay` Config field uses 0 as a sentinel for "use default"
+    so callers passing `Config{Meta: store}` (the worker_test shape) still
+    get the production 24-sample behavior. Negative values clamp to 1
+    (the trapezoid fallback path) with a WARN log; values above
+    MaxSamplesPerDay=1440 clamp down with a WARN.
+  - Memory backend has no `SetBucketStatsForTest` shortcut — tests must
+    drive `BumpBucketStats` with deltas. Easy to forget when porting
+    test fixtures from a Cassandra integration shape.
+  - Worker tests that exercise the daily-flush path do NOT need to enter
+    `Run()` — call `SampleOnce` + `RunOnce` directly. The full `Run` loop
+    is exercised by `TestRunCtxCancelExits` already.
+---
+
 
