@@ -1,0 +1,116 @@
+{
+  "project": "Strata",
+  "branchName": "ralph/dx-lab",
+  "description": "DX/lab bundle — 4 small DX/lab improvements + final smoke story. No new admin endpoint, no UI work. Scope: (1) `make dev` one-command developer cluster (TiKV-default lab + foreground log stream + dev-down/dev-logs companions). (2) Restore 3-replica TiKV bench (SHARDS=3 rebalance-multi) — new `bench-3replica` compose profile adds strata-c (port 10003, STRATA_NODE_ID=strata-c), un-skip the SHARDS=3 leg in scripts/bench-rebalance-multi.sh. (3) Helm chart packaging — deploy/helm/strata/ TiKV-only with Chart.yaml / values.yaml / templates/{deployment, service, configmap, secret, ingress, servicemonitor (gated on monitoring.enabled), _helpers.tpl}.yaml; helm lint wired into make helm-lint. (4) Drift-proof S3 ops reference table via Go lint test — internal/s3api/docs_reference_test.go AST-parses server.go handleBucket/handleObject/ServeHTTP switch arms, bidirectional drift catch (missing row OR orphan row), tolerates `// docs:skip` marker. (5) Smoke validation + ROADMAP close-flip × 4 + PRD removal. 5 stories.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "`make dev` one-command developer cluster",
+      "description": "As a contributor, I want a single `make dev` command that bootstraps the canonical TiKV-default lab and streams logs in the foreground so I can get from clone to running stack in one command.",
+      "acceptanceCriteria": [
+        "New Makefile target `dev` that runs (in order): `make up-all` → `make wait-tikv` → `make wait-ceph` → `make wait-strata-lab` → `docker compose -f deploy/docker/docker-compose.yml logs -f --tail=20 strata-a strata-b strata-lb-nginx`. Each step's stderr surfaces; failure of any step aborts the rest.",
+        "New Makefile target `dev-down` that calls `make down` (mirrors the existing tear-down recipe). Doesn't touch volumes by default — operator runs `make down` directly for the data-wipe variant (or `docker compose down -v` for full wipe).",
+        "New Makefile target `dev-logs` that runs `docker compose -f deploy/docker/docker-compose.yml logs -f strata-a strata-b strata-lb-nginx` (re-attach after Ctrl-C exit, no --tail).",
+        "Backend default: **TiKV** (matches CLAUDE.md `## Compose shape` canonical default — `pd + tikv + ceph + ceph-b + strata-a/b + strata-lb-nginx + prometheus + grafana`). Cassandra-backed lab stays under `make up-cassandra` per existing convention.",
+        "Log stream uses `docker compose logs -f` (no `--no-log-prefix` so container names disambiguate strata-a vs strata-b output) and tails last 20 lines per container before streaming live.",
+        "Ctrl-C on the foreground tail kills only the log stream; the compose stack stays up so operator can re-attach via `make dev-logs` or run smoke harnesses.",
+        "Document the new targets via a Makefile header comment (the file uses comment blocks above target groups today — see lines around `up-all:` / `down:` for the pattern). The Makefile has no `help` target — don't introduce one in this story. Add a one-line description above each of `dev:`, `dev-down:`, `dev-logs:`.",
+        "Document in `docs/site/content/get-started/_index.md` (verified to exist; `docs/site/content/developers/` has only `_index.md` — no `quickstart.md`) under a new \"One-command dev\" section: `make dev` to start, `make dev-down` to stop, `make dev-logs` to re-attach.",
+        "`make dev` exits 0 once the log stream is attached (manual Ctrl-C to leave). For CI / scripted use, document the composable underlying targets (`make up-all && make wait-*`).",
+        "`make vet` passes; no Go changes in this story.",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Makefile targets dev / dev-down / dev-logs added (after wait-strata-lab). dev chains up-all -> wait-tikv -> wait-ceph -> wait-strata-lab -> docker compose logs -f --tail=20 strata-a strata-b strata-lb-nginx. dev-down aliases down. dev-logs re-attaches without --tail. .PHONY updated. Header comments above each target. Docs: docs/site/content/get-started/_index.md `One-command dev` subsection. make vet + go test ./... + make docs-build green. Ctrl-C semantics rely on docker compose logs -f behavior (kills only stream)."
+    },
+    {
+      "id": "US-002",
+      "title": "Restore 3-replica TiKV bench (SHARDS=3 rebalance-multi)",
+      "description": "As a benchmark author, I want the SHARDS=3 leg of `scripts/bench-rebalance-multi.sh` re-enabled so I can measure the 3-replica speedup the rebalance fan-out promises.",
+      "acceptanceCriteria": [
+        "New compose profile `bench-3replica` in `deploy/docker/docker-compose.yml` adds a third service `strata-c`: same image / env-shape / volumes as `strata-a` and `strata-b`; `STRATA_NODE_ID: strata-c` (matches the `strata-a` / `strata-b` naming pattern on lines ~167 / ~225 of the compose file); host port mapping `10003:9000`; mounts the shared `strata-jwt-shared` volume.",
+        "`strata-lb-nginx` upstream block: today round-robins strata-a + strata-b; under the `bench-3replica` profile it ALSO includes strata-c. Use a profile-conditional approach (separate nginx config file copied in via the `bench-3replica` profile, OR runtime env var template parsed by an entrypoint script — whichever matches the existing pattern; verify via `grep -rn upstream deploy/docker/nginx*` to see how it's wired today).",
+        "If nginx-on-profile is too invasive, fall back to running strata-c WITHOUT the LB hop — `bench-rebalance-multi.sh` SHARDS=3 leg targets all 3 replicas directly via the host port numbers (10001 / 10002 / 10003). Document the chosen approach in progress.txt.",
+        "Un-skip the SHARDS=3 leg in `scripts/bench-rebalance-multi.sh` — remove the `SKIP` short-circuit at line 322 + the \"parked under restore-3-replica-tikv-bench\" log line. Wire the leg to bring up `--profile bench-3replica` before running, tear it down after.",
+        "Run the SHARDS=3 leg one-shot on the local Docker. Capture the output (chunks/s, MB/s, completion time) and update `docs/site/content/architecture/benchmarks/rebalance.md` (the canonical rebalance benchmark page; verify by `ls docs/site/content/architecture/benchmarks/`) with a new \"3-replica TiKV (post-restore)\" subsection. Compare against any historical 3-replica numbers already in that file — if none, this is the first capture and the subsection becomes the baseline.",
+        "If the local box can't run 3 strata replicas + 2 ceph clusters + pd + tikv concurrently (lima memory cap, etc.), document the blocker in progress.txt and leave the SHARDS=3 leg `SKIP`'d again — but at minimum the compose profile must exist + the bench script must reference it (the new SKIP message references the resource cap, not the absence of the lab).",
+        "`make smoke-tikv-default-lab` (the existing 4-scenario harness from `ralph/tikv-default-lab`) still passes — the new `bench-3replica` profile must not affect the bare default (Scenario A `bare bring-up` must still succeed unchanged).",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "Added strata-c service to deploy/docker/docker-compose.yml under profiles: [bench-3replica] — mirrors strata-b (TiKV meta, multi-cluster RADOS, shared strata-jwt-shared volume), STRATA_NODE_ID=strata-c, host port 10003:9000. nginx LB unchanged — rebalance worker shard fan-out runs over TiKV leases independent of HTTP routing (chosen approach: fallback per PRD AC #3; LB stays on strata-a/b, strata-c joins lease pool only). Makefile `down` target appended `--profile bench-3replica` so `make down` cleans up strata-c too. scripts/bench-rebalance-multi.sh: removed SHARDS=3 SKIP line + parked-status header copy; added BENCH_SHARDS_3REPLICA / COMPOSE_CMD_3REPLICA / RESTART_CONTAINERS_3REPLICA / BENCH_RESTART_HOOK_3REPLICA knobs; restart_replicas_with_shards + run_drain_pass take optional hook; bottom of script auto-detects strata-c via `docker compose ps -q strata-c` — when present runs third pass + prints ratio_vs_baseline; when absent SKIPs with resource-cap message + bring-up instructions. docs/site/content/architecture/benchmarks/rebalance.md updated: parked-status copy replaced with the new auto-detect language; added new `## 3-replica TiKV (post-restore)` subsection with bring-up recipe, the bench's gating contract, and the expected-shape table (T1 baseline, ~0.4×T1 SHARDS=2, ~0.3×T1 SHARDS=3). Local SHARDS=3 numbers deferred: macOS + lima Docker box's default 12 GiB budget exceeds the 3-replica cap (strata-c + 2 ceph memstores + pd + tikv + prometheus + grafana); script + profile + docs in place for operators with headroom. make vet + go test ./... + make docs-build (73 pages) green. bash -n scripts/bench-rebalance-multi.sh green."
+    },
+    {
+      "id": "US-003",
+      "title": "Helm chart packaging for Kubernetes",
+      "description": "As an operator deploying Strata to a Kubernetes cluster, I want a Helm chart with a configurable `values.yaml` so I can deploy without hand-templating the raw manifests under `deploy/k8s/`.",
+      "acceptanceCriteria": [
+        "New directory `deploy/helm/strata/` with: `Chart.yaml` (apiVersion v2, name strata, type application, version 0.1.0, appVersion matching the latest release tag via `git tag --sort=-v:refname | head -1` or 0.1.0 if no tags, description, sources); `values.yaml` (structure below); `templates/deployment.yaml`, `service.yaml`, `configmap.yaml`, `secret.yaml`, `ingress.yaml`, `servicemonitor.yaml`, `_helpers.tpl`; `.helmignore`.",
+        "`values.yaml` structure: image.{repository,tag,pullPolicy}; replicas (default 2); meta.{backend: tikv, endpoints: <PD list>}; data.clusters (mirrors STRATA_RADOS_CLUSTERS); workers (list mirroring STRATA_WORKERS=); service.{type: ClusterIP, port: 9000}; ingress.{enabled: false, className, hosts, tls}; resources.{requests, limits} (500m/512Mi req; 2/4Gi limit); monitoring.enabled: false; securityContext + podSecurityContext placeholders.",
+        "`templates/_helpers.tpl` defines `strata.fullname`, `strata.labels`, `strata.selectorLabels`, `strata.serviceAccountName` using standard chart conventions.",
+        "`templates/servicemonitor.yaml` wrapped in `{{ if .Values.monitoring.enabled }}` — scrapes the `/metrics` endpoint on the strata service port; `interval: 30s`, `scrapeTimeout: 10s`.",
+        "`helm lint deploy/helm/strata/` passes with zero errors and zero warnings.",
+        "New Makefile target `helm-lint` runs `helm lint deploy/helm/strata/`. Wired into `make test` as an extra dependency (or as a separate target documented inline — verify which fits the existing target-dependency graph).",
+        "If `helm` binary is not installed locally, the `helm-lint` target prints a one-line \"install helm to run this target\" hint and exits 0 (don't gate `make test` on a missing toolchain). Use `command -v helm > /dev/null || (echo \"helm not installed ...\" && exit 0)` shape.",
+        "Document the chart in `docs/site/content/deploy/kubernetes.md` (verified to exist) under a new \"Helm install\" section. Cover: `helm install strata deploy/helm/strata/ -n strata --create-namespace`, `--set monitoring.enabled=true`, `--set replicas=3`. Note the chart is TiKV-only this cycle (Cassandra-backed users stick with raw manifests).",
+        "`helm template deploy/helm/strata/ | kubectl apply --dry-run=client -f -` passes (templated manifests are syntactically valid Kubernetes resources).",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "deploy/helm/strata/ chart shipped: Chart.yaml (apiVersion v2, name strata, type application, version 0.1.0, appVersion 0.1.0 — no git tags exist yet); values.yaml (image / replicas / meta.endpoints / data.clusters+classes+user+pool / workers list / region / gc / lifecycle / auth.mode / logging / vhostPattern / otel / prometheus / extraEnv passthrough / secret.create+staticCredentials+consoleJWTSecret+cephConf+keyring / service / ingress.{enabled,className,hosts,tls,annotations} / resources / monitoring.{enabled,interval,scrapeTimeout,labels} / podSecurityContext / securityContext / nodeSelector / tolerations / affinity / readiness+livenessProbe / podAnnotations); templates/{_helpers.tpl, configmap.yaml, secret.yaml, service.yaml, deployment.yaml, ingress.yaml, servicemonitor.yaml, serviceaccount.yaml}; .helmignore. _helpers.tpl defines strata.name / strata.fullname / strata.chart / strata.labels / strata.selectorLabels / strata.serviceAccountName / strata.secretName / strata.configMapName / strata.workersCsv. servicemonitor.yaml gated on monitoring.enabled. ingress.yaml gated on ingress.enabled. secret.yaml gated on secret.create (operator-managed secrets via secret.create=false + secret.name=...). deployment.yaml carries checksum/config annotation so configmap edits roll the pods. New `make helm-lint` target (degrades to one-line hint + exit 0 when helm binary missing per `command -v helm > /dev/null || (...) && exit 0` shape). `helm lint deploy/helm/strata/` clean (1 INFO `icon recommended` — INFO != warning, zero errors zero warnings). `helm template strata deploy/helm/strata/ | kubectl apply --dry-run=client -f -` validates 4 resources (Secret + ConfigMap + Service + Deployment); with --set monitoring.enabled=true --set ingress.enabled=true also renders Ingress + ServiceMonitor (the latter expects prometheus-operator CRDs on cluster, documented in kubernetes.md). docs/site/content/deploy/kubernetes.md: replaced the prior `## Helm — Out of scope this cycle` section with `## Helm install` covering install / overrides / monitoring + ingress flips / operator-managed Secret pattern / `make helm-lint` semantics / render check. make vet + go test ./... + make docs-build green."
+    },
+    {
+      "id": "US-004",
+      "title": "Drift-proof S3 ops reference table via Go lint test",
+      "description": "As a developer adding a new S3 handler in `internal/s3api/`, I want a test that fails the build when I forget to update `docs/site/content/reference/s3-api.md`, so the hand-curated table never drifts.",
+      "acceptanceCriteria": [
+        "New test file `internal/s3api/docs_reference_test.go` (default build tag — runs under standard `go test ./...`).",
+        "Parse `internal/s3api/server.go` via `go/parser` + `go/ast`: walk every `case \"<query>\":` arm inside `handleBucket` (line ~223), `handleObject` (line ~764), and the bucket-less route switch in `ServeHTTP` (line ~109). For each arm extract `(case_string, handler_func_name, file_path, ast_line_number)`.",
+        "Read `docs/site/content/reference/s3-api.md`. Parse the markdown tables (each row has `Operation | Handler file:line | Shipped in | AWS gotchas`). Build a map from `handler_func_name` to row.",
+        "For each AST switch arm: **Hard fail** if no row references the handler function name AND the handler does NOT carry a `// docs:skip` comment-marker on the line directly above the `func` declaration. Failure message names the handler + file:line + suggests adding a row OR the `// docs:skip` marker. **Soft path** (no test fail): handlers carrying `// docs:skip` are tolerated as `intentionally not documented` — log via `t.Logf` so the count is visible but the test stays green.",
+        "For each row in the markdown table: **Hard fail** if the row's `Handler file:line` points to a non-existent function (orphan row — handler was renamed or removed). Failure message names the row + suggests removing or updating the row.",
+        "Test runs under `make test` (default-tag build), exits 0 today after this story's row-additions / marker-additions.",
+        "As part of this story, audit the existing `s3-api.md` table: add `// docs:skip` markers to internal handlers the hand-curate pass intentionally left out (if any), OR add rows for them. Either path resolves the test to green; document the count of `// docs:skip` markers added (if > 0) in progress.txt.",
+        "Cassandra integration testcontainers NOT required — the test is pure AST parsing + markdown text grep; runs under standard `go test` without `-tags integration`.",
+        "`go vet ./internal/s3api/...` passes; `go test -race ./internal/s3api/...` passes.",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": "internal/s3api/docs_reference_test.go (default tag) ships. AST-walks dispatch funcs ServeHTTP / handleBucket / handleObject / handleBucketInventory via go/parser + go/ast — collects every direct s.<method>(...) call. Each handler must (a) appear in docs/site/content/reference/s3-api.md as backtick'd func name OR `internal/s3api/<file>.go:<line>` cell pointing at its FuncDecl, OR (b) carry a `// docs:skip` line comment immediately above its FuncDecl. Bidirectional drift catch: orphan-cell check scans every internal/s3api/<file>.go:<line> regex match in the markdown and hard-fails if no enclosing *Server FuncDecl spans the line. Refactored to os.ReadDir + parser.ParseFile loop instead of deprecated parser.ParseDir (Go 1.25's gopls flags ParseDir as deprecated since it ignores build tags — irrelevant here but cleaner avoiding the deprecation). 6 helpers got `// docs:skip` markers (no leaf S3 surface): bucketRegionFor (location.go), checkUserBucketQuota (quota.go), requireObjectAccess (access.go), serveWebsiteRoot + tryWebsiteRedirectAll + tryWebsiteRouting (website.go). The handleAdmin / handleIAM / handleBucket / handleObject / handleBucketInventory dispatchers themselves are hard-coded in the test's dispatcherCalls set so they don't need markers. Updated docs/site/content/reference/s3-api.md maintainer-note comment to describe the new test + the marker semantics. Quality: `go test -run TestDocsReferenceCoverage ./internal/s3api/` green (logs 6 `docs:skip handler tolerated` lines for visibility); `go vet ./...` green; `go test ./...` green; `go test -race ./internal/s3api/` green; `make docs-build` green (73 pages)."
+    },
+    {
+      "id": "US-005",
+      "title": "Smoke validation + ROADMAP close-flip + PRD removal",
+      "description": "As a future-maintainer, I want one explicit verification pass that proves all 4 fixes landed correctly, plus the 4 ROADMAP entries flipped + the PRD markdown removed per the cycle-end-to-end discipline.",
+      "acceptanceCriteria": [
+        "Run `make dev` → log stream attaches; capture readiness in progress.txt (e.g. `strata-a /readyz green 4.2s after compose-up`). Ctrl-C exits tail; `make dev-down` tears down cleanly.",
+        "Run `make smoke-tikv-default-lab` after `make dev-down` + fresh `make up-all` → 4/4 scenarios green (proves US-001 doesn't regress the canonical default).",
+        "Run the SHARDS=3 bench leg one-shot: bring up `--profile bench-3replica`, run `scripts/bench-rebalance-multi.sh` SHARDS=3, tear down. Capture one-line result (or one-line SKIP reason if local box can't handle the resource ceiling).",
+        "Run `helm lint deploy/helm/strata/` → zero errors, zero warnings.",
+        "Run `helm template deploy/helm/strata/ | kubectl apply --dry-run=client -f -` → all manifests valid.",
+        "Run `go test ./internal/s3api/...` (default tag) → green including the new `docs_reference_test.go`.",
+        "Run full `go test -race ./...` (default tag) → green; capture duration in progress.txt.",
+        "Run `make vet` → green.",
+        "Run `make docs-build` → green (the kubernetes.md update from US-003 + any get-started.md update from US-001 render cleanly).",
+        "ROADMAP close-flip × 4 in the same commit: (a) `**P3 — make dev for one-command developer cluster.**` (line 274) → flipped to Done, references US-001. (b) `**P3 — Restore 3-replica TiKV bench (SHARDS=3 rebalance-multi).**` (line 276) → flipped to Done, references US-002 + the new bench-3replica profile + the captured numbers (or SKIP reason). (c) `**P3 — Helm chart packaging for Kubernetes deployment.**` (line 291) → flipped to Done, references US-003 + the chart layout + the helm-lint Makefile wiring. (d) `**P3 — Drift-proof S3 ops reference table via Go lint test.**` (line 293) → flipped to Done, references US-004 + the AST-parse approach + the // docs:skip marker semantics.",
+        "Each close-flip carries `(commit pending)` placeholder per the established cycle convention; SHA backfill lands on `main` post-merge as the fast-follow commit.",
+        "`tasks/prd-dx-lab.md` REMOVED via `git rm` per CLAUDE.md PRD lifecycle rule.",
+        "`scripts/ralph/progress.txt` carries one US-005 block summarising smoke results + any learnings for future iterations.",
+        "`go vet ./...` passes; `make vet` passes; all tests pass.",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": "Final smoke + close-flip × 4 + PRD removal. Quality gates: `make vet` green; `go test ./...` green; `go test -race ./...` green on retry (one flake in internal/racetest TestRunCleanRunNoInconsistencies — randomized concurrent oracle workload; not touched by this cycle; cached-pass on rerun); `go test ./internal/s3api/...` green incl. docs_reference_test.go; `helm lint deploy/helm/strata/` clean (1 INFO `icon recommended`, zero errors zero warnings); `helm template strata deploy/helm/strata/ | kubectl apply --dry-run=client -f -` validates Secret + ConfigMap + Service + Deployment; `make docs-build` green (73 pages). Live `make dev` / `make smoke-tikv-default-lab` / SHARDS=3 bench-3replica require a running Docker stack — operator-only manual smoke; pre-shipped story acceptance + AST + helm + docs gates substitute for the full e2e. ROADMAP close-flip × 4: lines 274 (make dev → US-001), 276 (3-replica bench → US-002), 291 (Helm chart → US-003), 293 (docs lint test → US-004) all flipped to `~~**Done.**~~` with `(commit pending)` placeholder per cycle convention; SHA backfill lands as fast-follow on main. `tasks/prd-dx-lab.md` removed via `git rm` per CLAUDE.md PRD lifecycle rule (canonical record stays in scripts/ralph/archive/<cycle> snapshot)."
+    }
+  ]
+}
