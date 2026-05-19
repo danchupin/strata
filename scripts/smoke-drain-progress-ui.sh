@@ -44,6 +44,7 @@
 set -euo pipefail
 
 BASE="${BASE:-http://127.0.0.1:9999}"
+PROM_BASE="${PROM_BASE:-http://127.0.0.1:9090}"
 WAIT_GRACE="${WAIT_GRACE:-30}"
 CLUSTER="${SMOKE_DPU_CLUSTER:-cephb}"
 OTHER_CLUSTER="${SMOKE_DPU_OTHER:-default}"
@@ -56,6 +57,9 @@ COMPOSE_CMD="${COMPOSE_CMD:-docker compose -f $COMPOSE_FILE}"
 STRATA_CONTAINER="${STRATA_CONTAINER:-strata}"
 REQUIRE_LAB="${REQUIRE_LAB:-0}"
 STAMP="$(date +%s)"
+EXPECTED_REPLICAS="${SMOKE_DPU_EXPECTED_REPLICAS:-2}"
+EXPECTED_RATE_MB_S="${SMOKE_DPU_EXPECTED_RATE_MB_S:-1}"
+EXPECTED_GRACE_S="${SMOKE_DPU_EXPECTED_GRACE_S:-60}"
 
 CRED="${STRATA_STATIC_CREDENTIALS:-}"
 if [[ -z "$CRED" ]]; then
@@ -82,6 +86,8 @@ BUCKET="dpu-$STAMP"
 OBSERVED_MIGRATING=0
 OBSERVED_AWAITING_GC=0
 OBSERVED_READY=0
+SAMPLED_PROM_RATE=0
+SAMPLED_GC_CONFIG=0
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "PASS: $*"; }
@@ -156,6 +162,23 @@ put_placement() {
 
 drain_progress() { curl -sf -b "$JAR" "$BASE/admin/v1/clusters/$CLUSTER/drain-progress"; }
 
+gc_config()        { curl -sf -b "$JAR" "$BASE/admin/v1/gc-config"; }
+rebalance_config() { curl -sf -b "$JAR" "$BASE/admin/v1/rebalance-config"; }
+
+# Sample sum(rate(strata_rebalance_bytes_moved_total{to="<cluster>"}[1m])) MB/s.
+# Returns numeric MB/s on stdout (0 on parse miss / Prom 4xx-5xx).
+prom_bytes_rate() {
+  local q out
+  q="rate(strata_rebalance_bytes_moved_total%7Bto%3D%22${CLUSTER}%22%7D%5B1m%5D)"
+  out=$(curl -sf "${PROM_BASE}/api/v1/query?query=${q}" 2>/dev/null) || { echo 0; return; }
+  local v
+  v=$(echo "$out" | jq -r '
+    (.data.result // [])
+    | (if length == 0 then 0
+       else (map(.value[1] | tonumber) | add) end)' 2>/dev/null) || v=0
+  awk -v b="$v" 'BEGIN { printf "%.3f", b / 1048576.0 }'
+}
+
 export AWS_ACCESS_KEY_ID="$AK"
 export AWS_SECRET_ACCESS_KEY="$SK"
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
@@ -186,6 +209,20 @@ CODE=$(curl -sS -o "$TMP/drain.out" -w '%{http_code}' \
 [[ "$CODE" == "200" || "$CODE" == "204" ]] \
   || fail "drain: HTTP $CODE body=$(cat "$TMP/drain.out")"
 pass "drain accepted; state=evacuating"
+
+banner "GET /admin/v1/rebalance-config — assert rate_mb_s=$EXPECTED_RATE_MB_S + replicas_count>=$EXPECTED_REPLICAS"
+RBC=$(rebalance_config) || fail "rebalance-config: HTTP error (gateway must expose endpoint per US-001)"
+rbc_rate=$(echo "$RBC" | jq -r '.rate_mb_s // empty')
+rbc_replicas=$(echo "$RBC" | jq -r '.replicas_count // empty')
+rbc_interval=$(echo "$RBC" | jq -r '.interval_seconds // empty')
+rbc_inflight=$(echo "$RBC" | jq -r '.inflight // empty')
+rbc_shards=$(echo "$RBC" | jq -r '.shards // empty')
+note "rebalance-config: rate_mb_s=$rbc_rate interval_seconds=$rbc_interval inflight=$rbc_inflight shards=$rbc_shards replicas_count=$rbc_replicas"
+[[ "$rbc_rate" == "$EXPECTED_RATE_MB_S" ]] \
+  || fail "rebalance-config rate_mb_s=$rbc_rate; expected $EXPECTED_RATE_MB_S (smoke env STRATA_REBALANCE_RATE_MB_S=1)"
+[[ -n "$rbc_replicas" && "$rbc_replicas" -ge "$EXPECTED_REPLICAS" ]] \
+  || fail "rebalance-config replicas_count=$rbc_replicas; expected >= $EXPECTED_REPLICAS (lab default strata-a + strata-b)"
+pass "rebalance-config shape valid (rate_mb_s=$rbc_rate replicas_count=$rbc_replicas)"
 
 banner "Poll /drain-progress every ${POLL_INTERVAL_S}s (timeout ${TIMEOUT_S}s) — assert all 3 states observed"
 
@@ -219,6 +256,50 @@ while (( $(date +%s) < deadline )); do
     last_state="$state"
   fi
 
+  # Migrating: sample Prom 1m byte-rate ONCE while migration is hot.
+  if [[ "$state" == "Migrating" && "$SAMPLED_PROM_RATE" == "0" ]]; then
+    mbs=$(prom_bytes_rate)
+    note "prom rate(strata_rebalance_bytes_moved_total{to=\"$CLUSTER\"}[1m]) = ${mbs} MB/s"
+    # `awk` boolean returns 1 when nonzero.
+    if awk -v m="$mbs" 'BEGIN { exit !(m > 0) }'; then
+      pass "Prom byte-rate > 0 MB/s (migration actively moving)"
+      SAMPLED_PROM_RATE=1
+    else
+      note "Prom byte-rate ~0 — retry on next poll (1m window may not have warmed yet)"
+    fi
+  fi
+
+  # AwaitingGC: sample /admin/v1/gc-config ONCE + assert formula vs polled gc_queue_pending.
+  if [[ "$state" == "AwaitingGC" && "$SAMPLED_GC_CONFIG" == "0" ]]; then
+    GCC=$(gc_config) || fail "gc-config: HTTP error (gateway must expose endpoint per US-001)"
+    gcc_grace=$(echo "$GCC" | jq -r '.grace_seconds // empty')
+    gcc_interval=$(echo "$GCC" | jq -r '.interval_seconds // empty')
+    gcc_batch=$(echo "$GCC" | jq -r '.batch_size // empty')
+    gcc_concurrency=$(echo "$GCC" | jq -r '.concurrency // empty')
+    gcc_shards=$(echo "$GCC" | jq -r '.shards // empty')
+    note "gc-config: grace_seconds=$gcc_grace interval_seconds=$gcc_interval batch_size=$gcc_batch concurrency=$gcc_concurrency shards=$gcc_shards"
+    [[ "$gcc_grace" == "$EXPECTED_GRACE_S" ]] \
+      || fail "gc-config grace_seconds=$gcc_grace; expected $EXPECTED_GRACE_S (smoke env STRATA_GC_GRACE=60s)"
+    # eta_min = ceil(grace/60) + ceil((queue/(batch*shards*1)) * (interval/60))
+    eta_min=$(awk -v g="$gcc_grace" -v i="$gcc_interval" -v b="$gcc_batch" -v s="$gcc_shards" -v q="$gcq" '
+      function ceil(x) { return (x == int(x)) ? x : int(x) + 1 }
+      BEGIN {
+        if (b < 1) b = 1
+        if (s < 1) s = 1
+        if (i < 1) i = 1
+        gm = ceil(g / 60.0)
+        qm = ceil((q / (b * s)) * (i / 60.0))
+        eta = gm + qm
+        if (eta > 1440) eta = 1440
+        printf "%d", eta
+      }')
+    note "eta_min formula (grace=$gcc_grace, interval=$gcc_interval, batch=$gcc_batch, shards=$gcc_shards, queue=$gcq) = $eta_min min"
+    [[ "$eta_min" -ge 0 && "$eta_min" -le 30 ]] \
+      || fail "eta_min=$eta_min out of sane band [0, 30] for smoke env"
+    pass "gc-config shape valid + eta_min=$eta_min within [0, 30]"
+    SAMPLED_GC_CONFIG=1
+  fi
+
   if (( OBSERVED_READY == 1 )); then break; fi
   sleep "$POLL_INTERVAL_S"
 done
@@ -232,5 +313,10 @@ done
 
 pass "all three drain-progress states observed (Migrating + AwaitingGC + Ready)"
 
+(( SAMPLED_PROM_RATE == 1 )) \
+  || fail "Prom byte-rate query (strata_rebalance_bytes_moved_total{to=\"$CLUSTER\"}[1m]) never reported > 0 MB/s while Migrating — check $PROM_BASE reachability + scrape config"
+(( SAMPLED_GC_CONFIG == 1 )) \
+  || fail "never sampled /admin/v1/gc-config during AwaitingGC — state may have flipped too fast or endpoint missing"
+
 echo
-echo "== drain-progress-ui smoke OK"
+echo "== drain-progress-ui smoke OK (gc-config + rebalance-config + Prom rate verified)"

@@ -112,8 +112,8 @@
         "Typecheck passes"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped 2026-05-19. Extended scripts/smoke-drain-progress-ui.sh: (a) GET /admin/v1/rebalance-config after drain accepted — asserts rate_mb_s==1 + replicas_count>=2 (lab default strata-a + strata-b); (b) During Migrating state, samples Prom query rate(strata_rebalance_bytes_moved_total{to=\"cephb\"}[1m]) via direct curl http://127.0.0.1:9090 (configurable PROM_BASE) and asserts > 0 MB/s — retries on subsequent polls if 1m window not warmed; (c) During AwaitingGC state, calls GET /admin/v1/gc-config, asserts grace_seconds==60, computes eta_min = ceil(grace/60) + ceil((queue/(batch×shards)) × (interval/60)) capped at 1440 via awk, asserts eta_min ∈ [0, 30] (sane smoke band). Two latch counters (SAMPLED_PROM_RATE + SAMPLED_GC_CONFIG) plus post-loop guards ensure each is exercised at least once. Existing 3-state observation preserved. Both ROADMAP entries close-flipped in ROADMAP.md (existing parked P3 ETA → Done + NEW P3 Rebalance bandwidth visibility added + closed at same SHA, commit SHA <pending> per CLAUDE.md backfill convention). tasks/prd-drain-rebalance-transparency.md removed (PRD lifecycle rule). make vet + make test + pnpm run build + make docs-build all green."
     }
   ]
 }
