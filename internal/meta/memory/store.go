@@ -795,6 +795,10 @@ func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error
 		return nil, meta.ErrBucketNotFound
 	}
 	cp := *b
+	if b.ECPolicy != nil {
+		ec := *b.ECPolicy
+		cp.ECPolicy = &ec
+	}
 	return &cp, nil
 }
 
@@ -1611,6 +1615,54 @@ func (s *Store) SetBucketPlacementMode(ctx context.Context, name, mode string) e
 		return meta.ErrBucketNotFound
 	}
 	b.PlacementMode = mode
+	return nil
+}
+
+// SetBucketECPolicy persists the EC policy on the bucket row (US-007).
+// Backend capability validation lives in the admin handler — this method
+// only enforces structural validity via meta.ValidateECPolicy.
+func (s *Store) SetBucketECPolicy(ctx context.Context, name string, policy meta.ECPolicy) error {
+	if err := meta.ValidateECPolicy(policy); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.buckets[name]
+	if !ok {
+		return meta.ErrBucketNotFound
+	}
+	cp := policy
+	b.ECPolicy = &cp
+	return nil
+}
+
+// GetBucketECPolicy returns the configured EC policy. Returns
+// (nil, meta.ErrNoSuchECPolicy) when no policy is configured so callers
+// can branch on the sentinel.
+func (s *Store) GetBucketECPolicy(ctx context.Context, name string) (*meta.ECPolicy, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	b, ok := s.buckets[name]
+	if !ok {
+		return nil, meta.ErrBucketNotFound
+	}
+	if b.ECPolicy == nil {
+		return nil, meta.ErrNoSuchECPolicy
+	}
+	cp := *b.ECPolicy
+	return &cp, nil
+}
+
+// DeleteBucketECPolicy clears the policy. Idempotent — clearing an unset
+// policy returns nil.
+func (s *Store) DeleteBucketECPolicy(ctx context.Context, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.buckets[name]
+	if !ok {
+		return meta.ErrBucketNotFound
+	}
+	b.ECPolicy = nil
 	return nil
 }
 

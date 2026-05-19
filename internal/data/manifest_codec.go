@@ -193,6 +193,12 @@ func manifestToProto(m *Manifest) *pb.Manifest {
 			KmsKeyId:  m.SSE.KMSKeyID,
 		}
 	}
+	if m.ECParams != nil {
+		out.EcParams = &pb.ECParams{
+			K: int32(m.ECParams.K),
+			M: int32(m.ECParams.M),
+		}
+	}
 	return out
 }
 
@@ -261,6 +267,12 @@ func manifestFromProto(p *pb.Manifest) *Manifest {
 			Mode:      s.GetMode(),
 			Algorithm: s.GetAlgorithm(),
 			KMSKeyID:  s.GetKmsKeyId(),
+		}
+	}
+	if ec := p.GetEcParams(); ec != nil {
+		out.ECParams = &ECParams{
+			K: int(ec.GetK()),
+			M: int(ec.GetM()),
 		}
 	}
 	return out

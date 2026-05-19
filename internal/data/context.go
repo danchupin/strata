@@ -194,3 +194,32 @@ func PlacementModeFromContext(ctx context.Context) (string, bool) {
 	}
 	return v, true
 }
+
+// ecPolicyKey carries the bucket's ECPolicy (K + M) onto the data-plane
+// ctx so PutChunks can stamp Manifest.ECParams without widening the
+// Backend interface (US-007 EC-aware manifest schema).
+type ecPolicyKey struct{}
+
+// WithECPolicy stores the bucket's EC policy on ctx. Nil policy returns
+// ctx unchanged so callers can pass-through buckets with no policy
+// configured.
+func WithECPolicy(ctx context.Context, k, m int) context.Context {
+	if k <= 0 || m <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, ecPolicyKey{}, ECParams{K: k, M: m})
+}
+
+// ECPolicyFromContext returns the EC policy stamped via WithECPolicy.
+// The second return is false when no policy is present — backends skip
+// the Manifest.ECParams stamp.
+func ECPolicyFromContext(ctx context.Context) (ECParams, bool) {
+	if ctx == nil {
+		return ECParams{}, false
+	}
+	v, ok := ctx.Value(ecPolicyKey{}).(ECParams)
+	if !ok || v.K <= 0 || v.M <= 0 {
+		return ECParams{}, false
+	}
+	return v, true
+}

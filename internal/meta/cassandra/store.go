@@ -176,15 +176,16 @@ func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error
 		region            string
 		mfaDelete         string
 		placementMode     string
+		ecPolicyBlob      string
 		createdAt         time.Time
 		shardCount        int
 		shardCountTarget  int
 		objectLockEnabled bool
 	)
 	err := s.s.Query(
-		`SELECT id, owner_id, created_at, default_class, versioning, shard_count, shard_count_target, acl, object_lock_enabled, region, mfa_delete, placement_mode FROM buckets WHERE name=?`,
+		`SELECT id, owner_id, created_at, default_class, versioning, shard_count, shard_count_target, acl, object_lock_enabled, region, mfa_delete, placement_mode, ec_policy FROM buckets WHERE name=?`,
 		name,
-	).WithContext(ctx).Scan(&idG, &owner, &createdAt, &class, &versioning, &shardCount, &shardCountTarget, &acl, &objectLockEnabled, &region, &mfaDelete, &placementMode)
+	).WithContext(ctx).Scan(&idG, &owner, &createdAt, &class, &versioning, &shardCount, &shardCountTarget, &acl, &objectLockEnabled, &region, &mfaDelete, &placementMode, &ecPolicyBlob)
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrBucketNotFound
 	}
@@ -196,6 +197,10 @@ func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error
 	}
 	bID := uuidFromGocql(idG)
 	s.cacheBucketName(bID, name)
+	ecPolicy, err := meta.DecodeBucketECPolicy([]byte(ecPolicyBlob))
+	if err != nil {
+		return nil, err
+	}
 	return &meta.Bucket{
 		Name:              name,
 		ID:                bID,
@@ -210,6 +215,7 @@ func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error
 		ShardCount:        shardCount,
 		TargetShardCount:  shardCountTarget,
 		PlacementMode:     placementMode,
+		ECPolicy:          ecPolicy,
 	}, nil
 }
 
@@ -3048,6 +3054,67 @@ func (s *Store) DeleteBucketPlacement(ctx context.Context, name string) error {
 		return err
 	}
 	return s.deleteBucketBlob(ctx, "bucket_placement", b.ID)
+}
+
+// SetBucketECPolicy persists the EC policy on the buckets row (US-007).
+// LWT for the same Paxos-lineage reason as SetBucketPlacementMode.
+func (s *Store) SetBucketECPolicy(ctx context.Context, name string, policy meta.ECPolicy) error {
+	if err := meta.ValidateECPolicy(policy); err != nil {
+		return err
+	}
+	blob, err := meta.EncodeBucketECPolicy(policy)
+	if err != nil {
+		return err
+	}
+	applied, err := s.s.Query(
+		`UPDATE buckets SET ec_policy=? WHERE name=? IF EXISTS`,
+		string(blob), name,
+	).WithContext(ctx).SerialConsistency(gocql.LocalSerial).ScanCAS(nil)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return meta.ErrBucketNotFound
+	}
+	return nil
+}
+
+// GetBucketECPolicy returns the EC policy or ErrNoSuchECPolicy when unset.
+func (s *Store) GetBucketECPolicy(ctx context.Context, name string) (*meta.ECPolicy, error) {
+	var blob string
+	err := s.s.Query(
+		`SELECT ec_policy FROM buckets WHERE name=?`, name,
+	).WithContext(ctx).Scan(&blob)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return nil, meta.ErrBucketNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	p, err := meta.DecodeBucketECPolicy([]byte(blob))
+	if err != nil {
+		return nil, err
+	}
+	if p == nil {
+		return nil, meta.ErrNoSuchECPolicy
+	}
+	return p, nil
+}
+
+// DeleteBucketECPolicy clears the EC policy. Idempotent — clearing an
+// unset row returns nil.
+func (s *Store) DeleteBucketECPolicy(ctx context.Context, name string) error {
+	applied, err := s.s.Query(
+		`UPDATE buckets SET ec_policy=? WHERE name=? IF EXISTS`,
+		"", name,
+	).WithContext(ctx).SerialConsistency(gocql.LocalSerial).ScanCAS(nil)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return meta.ErrBucketNotFound
+	}
+	return nil
 }
 
 // SetBucketPlacementMode persists the per-bucket placement mode on the

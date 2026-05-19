@@ -38,6 +38,20 @@ type Manifest struct {
 	// PartChecksums records the per-part stored x-amz-checksum-<algo>
 	// values in PartNumber order. Empty for single-PUT objects.
 	PartChecksums []map[string]string `json:",omitempty"`
+	// ECParams carries the K + M erasure-code parameters of the underlying
+	// RADOS pool the object's chunks live on. Stamped by the gateway at
+	// PutChunks time from bucket.ECPolicy when set; nil for replicated
+	// pools and pre-US-007 rows. The gateway does NOT encode/decode EC
+	// data itself — RADOS pool config still performs erasure coding.
+	ECParams *ECParams `json:",omitempty"`
+}
+
+// ECParams records the erasure-code parameters of the storage pool an
+// object lives on. K data shards + M parity shards (e.g. k=4, m=2 is the
+// classic 4+2 = 6-shard 33% overhead profile).
+type ECParams struct {
+	K int `json:",omitempty"`
+	M int `json:",omitempty"`
 }
 
 // PartRange describes one part of a multipart upload at byte-range

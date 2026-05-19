@@ -513,6 +513,7 @@ Cycle: ralph/storage-correctness
     is unaffected.
 ---
 
+
 ## 2026-05-20 - US-006 - Object Lock COMPLIANCE audit log
 - New audit verbs stamped via SetAuditOverride / direct EnqueueAudit:
   - `objectlock:CompliancePut` — PutObjectRetention path stamps the
@@ -643,3 +644,149 @@ Cycle: ralph/storage-correctness
     object-lock retention before expiring, mirroring DeleteObject.
 ---
 
+
+## 2026-05-20 - US-007 - EC-aware manifest schema + admin endpoint with full validation
+- Manifest schema (proto field 14): new `ECParams { K int32; M int32 }`
+  in internal/data/manifest.proto + regenerated manifestpb/manifest.pb.go
+  via `protoc --go_out=. --go_opt=paths=import`. data.Manifest gained
+  `ECParams *ECParams \`json:",omitempty"\`` + sibling `data.ECParams`
+  struct. Codec (manifest_codec.go) round-trips proto + JSON both ways.
+  Decoder transparent for old rows (zero value).
+- meta.Bucket gained `ECPolicy *ECPolicy \`json:"ec_policy,omitempty"\``
+  + sibling `meta.ECPolicy{K, M}` struct + `meta.ValidateECPolicy` (K>0,
+  M>0). New sentinels `ErrInvalidECPolicy`, `ErrNoSuchECPolicy`,
+  `ErrInconsistentECPolicy`. Encode/Decode helpers in
+  internal/meta/quota.go (mirrors EncodeBucketPlacement shape).
+- meta.Store interface gained 3 methods:
+  `SetBucketECPolicy(ctx, name, ECPolicy) error`,
+  `GetBucketECPolicy(ctx, name) (*ECPolicy, error)`,
+  `DeleteBucketECPolicy(ctx, name) error`. Get returns
+  ErrNoSuchECPolicy when unset (separate sentinel — buckets row exists
+  but the inline field is empty); ErrBucketNotFound when the bucket is
+  gone.
+- Memory backend (internal/meta/memory/store.go): in-struct on the
+  Bucket row. GetBucket deep-copies the ECPolicy pointer so callers
+  cannot mutate stored state through a returned snapshot.
+- Cassandra backend (internal/meta/cassandra): new ALTER
+  `ALTER TABLE buckets ADD ec_policy text` (JSON blob in a text column).
+  GetBucket extended to select + decode the column; Set/Delete use LWT
+  (`UPDATE ... IF EXISTS`) for the same Paxos-lineage reason as
+  SetBucketPlacementMode — non-LWT UPDATEs after CreateBucket can leave
+  Paxos state stale and cause LOCAL_QUORUM reads to observe the pre-
+  update value (the SetBucketVersioning lesson). Get reads the column
+  directly without round-tripping the full row.
+- TiKV backend (internal/meta/tikv/buckets.go): ECPolicy persists via
+  the existing `updateBucket` pessimistic-txn helper — JSON encoding
+  picks up the new field automatically through encodeBucket. No keys.go
+  change required.
+- data.Backend optional capability `ClusterECCapability`:
+  `ClusterECCapability(ctx, clusterID) (ec bool, k int, m int, err error)`.
+  - RADOS impl in internal/data/rados/ec.go (build tag ceph) probes the
+    target pool via two MonCommands: `osd pool get <pool>
+    erasure_code_profile` (replicated pools either fail or return empty
+    → reported as not-EC), then `osd erasure-code-profile get <profile>`
+    to read k + m. Picks the representative pool via the same
+    seedPoolForCluster fallback chain as ClusterStats.
+  - S3 backend reports `(false, 0, 0, nil)` for known clusters,
+    `data.ErrClusterUnknown` for unknown ids.
+  - Memory backend reports `(false, 0, 0, nil)`.
+- New `data.ECPolicyFromContext` / `WithECPolicy` carry the bucket's
+  EC policy onto the data-plane ctx via s3api.dataCtxForPutWith — same
+  pattern as WithPlacement / WithPlacementMode (Bucket field loaded
+  inline by GetBucket; ctx avoids widening the data.Backend interface).
+- PUT hot path stamps Manifest.ECParams from ctx in all three
+  backends (RADOS PutChunks tail, S3 PutChunks tail, memory PutChunks
+  tail). Pre-US-007 PUTs are untouched (ctx returns false → no stamp).
+- Admin endpoints (internal/adminapi/buckets_ec.go):
+  - PUT /admin/v1/buckets/{bucket}/ec-policy body `{k, m}`. Validates
+    structurally, resolves the bucket's effective placement
+    (explicit Placement entries with weight>0; falls back to the
+    synthesised cluster-weights default policy from DrainCache), then
+    probes every target cluster via data.Backend.ClusterECCapability.
+    Mismatch (replicated pool OR different k+m) returns 409
+    InconsistentECPolicy identifying the offending cluster. Empty
+    placement returns 409 NoPlacement (operator must set placement
+    before EC policy). Audit verb admin:UpdateBucketECPolicy.
+  - GET returns the policy or 404 NoSuchECPolicy.
+  - DELETE is idempotent (audit admin:DeleteBucketECPolicy).
+  - Wired in internal/adminapi/server.go right after the placement
+    routes.
+- OpenAPI: new `/buckets/{bucket}/ec-policy` operations + new
+  `BucketECPolicy` schema in internal/adminapi/openapi.yaml; mirror
+  copies in docs/site/static + docs/site/public synced.
+- Tests:
+  - internal/meta/storetest/contract.go::caseBucketECPolicy exercises
+    absent → set → get → update → delete round-trip + structural
+    validation + ErrBucketNotFound on every method against memory,
+    Cassandra, TiKV.
+  - internal/adminapi/buckets_ec_test.go: 6 cases via a fakeECBackend
+    that wraps the in-memory data backend and overrides
+    ClusterECCapability per cluster. GetNotConfigured,
+    PutRejectsBadStruct, PutWithoutPlacementRejected (NoPlacement
+    branch), PutMismatchReplicatedCluster (replicated pool → 409),
+    PutMismatchKMValues (different k+m → 409), PutHappyPath (matching
+    EC + round-trip GET), DeleteHappyAndIdempotent.
+  - internal/data/manifest_codec_test.go: sampleManifest now carries
+    `ECParams{K:4, M:2}` so the existing proto + JSON round-trip tests
+    cover the new field.
+  - internal/s3api/ec_put_test.go: harness-level PUT tests assert
+    that setting bucket.ECPolicy causes Manifest.ECParams to land on
+    the stored object row, and that a bucket without the policy keeps
+    Manifest.ECParams nil.
+- Files changed:
+  internal/data/manifest.proto, internal/data/manifestpb/manifest.pb.go
+    (regenerated), internal/data/manifest.go, internal/data/manifest_codec.go,
+    internal/data/manifest_codec_test.go, internal/data/context.go,
+    internal/data/backend.go, internal/data/errors.go,
+    internal/data/memory/backend.go, internal/data/s3/backend.go,
+    internal/data/rados/backend.go, internal/data/rados/ec.go (new),
+    internal/meta/store.go, internal/meta/quota.go,
+    internal/meta/memory/store.go, internal/meta/cassandra/store.go,
+    internal/meta/cassandra/schema.go, internal/meta/tikv/buckets.go,
+    internal/meta/storetest/contract.go,
+    internal/s3api/placement_ctx.go, internal/s3api/ec_put_test.go (new),
+    internal/adminapi/server.go, internal/adminapi/buckets_ec.go (new),
+    internal/adminapi/buckets_ec_test.go (new),
+    internal/adminapi/openapi.yaml,
+    docs/site/static/openapi.yaml, docs/site/public/openapi.yaml.
+- Quality: `go vet ./...` green, `go build ./...` green,
+  `go test -race -count=1 ./...` green (~ 2 min wall, 46.0s racetest
+  inside that), `make docs-build` green. `go vet -tags ceph` + tests
+  under the ceph tag not runnable on this box (no librados); the
+  RADOS-specific EC probe path is exercised by CI Docker build.
+- **Learnings for future iterations:**
+  - Protobuf regeneration in this repo: the package option
+    `go_package = ".../internal/data/manifestpb;manifestpb"` makes
+    `--go_opt=paths=source_relative` emit at the source-relative path
+    `internal/data/manifest.pb.go`, NOT under manifestpb/. Use
+    `--go_opt=paths=import` instead — it follows the go_package
+    pragma and writes into a temporary
+    `github.com/danchupin/strata/internal/data/manifestpb/` tree that
+    you `cp` back to the real manifestpb/ path. A future Makefile
+    target would memorialise this dance.
+  - `*ECPolicy` on meta.Bucket: GetBucket returns a `*meta.Bucket`
+    shallow-copy of the cached struct (`cp := *b`); the embedded
+    `*ECPolicy` shares storage with the cache, so a caller can mutate
+    server state through it. Always deep-copy pointer fields on the
+    way out — the memory backend was the only one with this issue;
+    Cassandra/TiKV decode fresh on every read.
+  - Cassandra ec_policy storage is JSON in a `text` column, not a
+    `blob`. The shipped helpers use base64-free `text` for
+    placement_mode so we mirror that — keeps `cqlsh` debugging
+    friendly without extra decoding.
+  - `data.Backend.ClusterECCapability` is an optional interface, NOT
+    a required method on data.Backend. The admin handler probes
+    via type-assert and rejects unconditionally if the assert fails
+    (no silent accept of unverifiable policies).
+  - Effective-target resolution for EC validation: when
+    bucket.Placement is set, the targets are its entries with
+    weight>0; when unset, the targets are the synthesised cluster-
+    weights default policy from DrainCache. Empty targets → 409
+    NoPlacement so operators don't accidentally pin a policy against
+    a cluster set that PUTs would not actually route to.
+  - The fakeECBackend embedding pattern in
+    internal/adminapi/buckets_ec_test.go (Go anonymous-field embed
+    + override) is the cleanest way to wrap the in-memory data
+    backend with a per-test capability shim. Reusable for future
+    optional-interface validation tests.
+---

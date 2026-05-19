@@ -1065,6 +1065,9 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 		},
 		SSE: c.manifestSSE(),
 	}
+	if ec, ok := data.ECPolicyFromContext(ctx); ok {
+		m.ECParams = &data.ECParams{K: ec.K, M: ec.M}
+	}
 	return m, nil
 }
 
@@ -1165,6 +1168,18 @@ func deleteFromCluster(ctx context.Context, c *s3Cluster, bucket, oid, versionID
 }
 
 func (b *Backend) Close() error { return nil }
+
+// ClusterECCapability satisfies data.ClusterECCapability. S3-over-S3 has
+// no concept of "erasure coding at the gateway hop" — the backend object
+// store handles redundancy opaquely. Reported as replicated regardless
+// of cluster id (US-007 EC-aware manifests). Returns ErrClusterUnknown
+// for cluster ids that are not configured.
+func (b *Backend) ClusterECCapability(ctx context.Context, clusterID string) (bool, int, int, error) {
+	if _, err := b.connFor(ctx, clusterID); err != nil {
+		return false, 0, 0, data.ErrClusterUnknown
+	}
+	return false, 0, 0, nil
+}
 
 // objectKey builds the backend object key. Format <bucket-uuid>/<object-
 // uuid> — UUID-shaped prefix gives random distribution for AWS-side

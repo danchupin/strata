@@ -70,6 +70,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"UsageAggregateRoundTrip", caseUsageAggregate},
 		{"BucketPlacementRoundTrip", caseBucketPlacement},
 		{"BucketPlacementMode", casePlacementMode},
+		{"BucketECPolicyRoundTrip", caseBucketECPolicy},
 		{"ClusterStateRoundTrip", caseClusterState},
 		{"ClusterStateModes", caseClusterStateModes},
 		{"ClusterStateWeights", caseClusterStateWeights},
@@ -3051,6 +3052,99 @@ func casePlacementMode(t *testing.T, s meta.Store) {
 	// Missing bucket: should surface ErrBucketNotFound, not ErrInvalidPlacementMode.
 	if err := s.SetBucketPlacementMode(ctx, "no-such-bucket", meta.PlacementModeStrict); err != meta.ErrBucketNotFound {
 		t.Errorf("set missing bucket: got %v want ErrBucketNotFound", err)
+	}
+}
+
+// caseBucketECPolicy exercises the per-bucket EC policy CRUD (US-007
+// EC-aware manifests). Absent → set → get (round-trip) → delete →
+// absent. Backend-capability validation lives in the admin handler, NOT
+// the meta store — this case only exercises structural validation +
+// round-trip.
+func caseBucketECPolicy(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	if _, err := s.CreateBucket(ctx, "ecbkt", "owner-ec", "STANDARD"); err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+
+	// Absent on a fresh bucket.
+	if _, err := s.GetBucketECPolicy(ctx, "ecbkt"); err != meta.ErrNoSuchECPolicy {
+		t.Fatalf("fresh GetBucketECPolicy: got %v want ErrNoSuchECPolicy", err)
+	}
+	got, err := s.GetBucket(ctx, "ecbkt")
+	if err != nil {
+		t.Fatalf("get fresh bucket: %v", err)
+	}
+	if got.ECPolicy != nil {
+		t.Fatalf("fresh Bucket.ECPolicy: got %+v want nil", got.ECPolicy)
+	}
+
+	// Structural validation: K or M zero/negative is rejected.
+	for _, bad := range []meta.ECPolicy{{K: 0, M: 0}, {K: 4, M: 0}, {K: 0, M: 2}, {K: -1, M: 2}} {
+		if err := s.SetBucketECPolicy(ctx, "ecbkt", bad); err != meta.ErrInvalidECPolicy {
+			t.Errorf("set invalid %+v: got %v want ErrInvalidECPolicy", bad, err)
+		}
+	}
+
+	// Round-trip via both GetBucketECPolicy and GetBucket.
+	want := meta.ECPolicy{K: 4, M: 2}
+	if err := s.SetBucketECPolicy(ctx, "ecbkt", want); err != nil {
+		t.Fatalf("set 4+2: %v", err)
+	}
+	round, err := s.GetBucketECPolicy(ctx, "ecbkt")
+	if err != nil {
+		t.Fatalf("GetBucketECPolicy after set: %v", err)
+	}
+	if round == nil || round.K != want.K || round.M != want.M {
+		t.Fatalf("GetBucketECPolicy round-trip: got %+v want %+v", round, want)
+	}
+	got, err = s.GetBucket(ctx, "ecbkt")
+	if err != nil {
+		t.Fatalf("get after ec set: %v", err)
+	}
+	if got.ECPolicy == nil || got.ECPolicy.K != want.K || got.ECPolicy.M != want.M {
+		t.Fatalf("Bucket.ECPolicy after set: got %+v want %+v", got.ECPolicy, want)
+	}
+
+	// Update path.
+	want2 := meta.ECPolicy{K: 8, M: 3}
+	if err := s.SetBucketECPolicy(ctx, "ecbkt", want2); err != nil {
+		t.Fatalf("set 8+3: %v", err)
+	}
+	round, err = s.GetBucketECPolicy(ctx, "ecbkt")
+	if err != nil {
+		t.Fatalf("GetBucketECPolicy after update: %v", err)
+	}
+	if round.K != want2.K || round.M != want2.M {
+		t.Fatalf("GetBucketECPolicy update: got %+v want %+v", round, want2)
+	}
+
+	// Delete + idempotent re-delete.
+	if err := s.DeleteBucketECPolicy(ctx, "ecbkt"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if err := s.DeleteBucketECPolicy(ctx, "ecbkt"); err != nil {
+		t.Fatalf("idempotent re-delete: %v", err)
+	}
+	if _, err := s.GetBucketECPolicy(ctx, "ecbkt"); err != meta.ErrNoSuchECPolicy {
+		t.Fatalf("GetBucketECPolicy after delete: got %v want ErrNoSuchECPolicy", err)
+	}
+	got, err = s.GetBucket(ctx, "ecbkt")
+	if err != nil {
+		t.Fatalf("get after delete: %v", err)
+	}
+	if got.ECPolicy != nil {
+		t.Fatalf("Bucket.ECPolicy after delete: got %+v want nil", got.ECPolicy)
+	}
+
+	// Missing bucket → ErrBucketNotFound on every method.
+	if err := s.SetBucketECPolicy(ctx, "no-such", meta.ECPolicy{K: 2, M: 1}); err != meta.ErrBucketNotFound {
+		t.Errorf("SetBucketECPolicy missing: got %v want ErrBucketNotFound", err)
+	}
+	if _, err := s.GetBucketECPolicy(ctx, "no-such"); err != meta.ErrBucketNotFound {
+		t.Errorf("GetBucketECPolicy missing: got %v want ErrBucketNotFound", err)
+	}
+	if err := s.DeleteBucketECPolicy(ctx, "no-such"); err != meta.ErrBucketNotFound {
+		t.Errorf("DeleteBucketECPolicy missing: got %v want ErrBucketNotFound", err)
 	}
 }
 

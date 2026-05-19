@@ -62,6 +62,9 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 		}
 	}
 	m.ETag = hex.EncodeToString(hash.Sum(nil))
+	if ec, ok := data.ECPolicyFromContext(ctx); ok {
+		m.ECParams = &data.ECParams{K: ec.K, M: ec.M}
+	}
 	return m, nil
 }
 
@@ -91,6 +94,13 @@ func (b *Backend) Delete(ctx context.Context, m *data.Manifest) error {
 }
 
 func (b *Backend) Close() error { return nil }
+
+// ClusterECCapability satisfies data.ClusterECCapability. The memory
+// backend has no underlying erasure-coded pool, so every cluster is
+// reported as replicated (US-007 EC-aware manifests).
+func (b *Backend) ClusterECCapability(ctx context.Context, clusterID string) (bool, int, int, error) {
+	return false, 0, 0, nil
+}
 
 // DataHealth implements data.HealthProbe — returns a single in-process pool
 // row whose BytesUsed is the sum of currently-held chunk bytes (process-RSS

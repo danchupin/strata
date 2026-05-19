@@ -27,6 +27,7 @@ func sampleManifest() *Manifest {
 			{},
 			{"x-amz-checksum-sha256": "abc"},
 		},
+		ECParams: &ECParams{K: 4, M: 2},
 	}
 }
 

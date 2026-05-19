@@ -269,6 +269,40 @@ func (s *Store) SetBucketPlacementMode(ctx context.Context, name, mode string) e
 	})
 }
 
+// SetBucketECPolicy persists the EC policy inline on the bucket row
+// (US-007). Validation via meta.ValidateECPolicy.
+func (s *Store) SetBucketECPolicy(ctx context.Context, name string, policy meta.ECPolicy) error {
+	if err := meta.ValidateECPolicy(policy); err != nil {
+		return err
+	}
+	return s.updateBucket(ctx, name, func(b *meta.Bucket) error {
+		cp := policy
+		b.ECPolicy = &cp
+		return nil
+	})
+}
+
+// GetBucketECPolicy returns the EC policy or ErrNoSuchECPolicy when unset.
+func (s *Store) GetBucketECPolicy(ctx context.Context, name string) (*meta.ECPolicy, error) {
+	b, err := s.GetBucket(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if b.ECPolicy == nil {
+		return nil, meta.ErrNoSuchECPolicy
+	}
+	cp := *b.ECPolicy
+	return &cp, nil
+}
+
+// DeleteBucketECPolicy clears the EC policy. Idempotent.
+func (s *Store) DeleteBucketECPolicy(ctx context.Context, name string) error {
+	return s.updateBucket(ctx, name, func(b *meta.Bucket) error {
+		b.ECPolicy = nil
+		return nil
+	})
+}
+
 // updateBucket is the pessimistic read-modify-write helper every bucket-row
 // mutator routes through. The lesson is the TiKV mirror of CLAUDE.md's
 // Cassandra LWT note: a plain Put after a previous LWT-equivalent INSERT

@@ -287,6 +287,9 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 		b.cleanupManifest(ctx, m.Chunks)
 		return nil, err
 	}
+	if ec, ok := data.ECPolicyFromContext(ctx); ok {
+		m.ECParams = &data.ECParams{K: ec.K, M: ec.M}
+	}
 	return m, nil
 }
 

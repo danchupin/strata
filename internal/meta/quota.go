@@ -63,3 +63,26 @@ func DecodeBucketPlacement(blob []byte) (map[string]int, error) {
 	}
 	return p, nil
 }
+
+// EncodeBucketECPolicy serialises an ECPolicy to the on-disk blob shape
+// used by every backend (US-007 EC-aware manifests).
+func EncodeBucketECPolicy(p ECPolicy) ([]byte, error) {
+	return json.Marshal(p)
+}
+
+// DecodeBucketECPolicy reverses EncodeBucketECPolicy. An empty / missing
+// blob yields a nil pointer so callers can branch on `policy == nil` for
+// the "no EC policy configured" case.
+func DecodeBucketECPolicy(blob []byte) (*ECPolicy, error) {
+	if len(blob) == 0 {
+		return nil, nil
+	}
+	var p ECPolicy
+	if err := json.Unmarshal(blob, &p); err != nil {
+		return nil, fmt.Errorf("decode bucket EC policy: %w", err)
+	}
+	if p.K == 0 && p.M == 0 {
+		return nil, nil
+	}
+	return &p, nil
+}
