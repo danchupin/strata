@@ -118,6 +118,44 @@ func TestBuildGCClampShardsAboveCeiling(t *testing.T) {
 	}
 }
 
+func TestResolveGCConfigEnv(t *testing.T) {
+	t.Setenv("STRATA_GC_INTERVAL", "45s")
+	t.Setenv("STRATA_GC_GRACE", "2m")
+	t.Setenv("STRATA_GC_BATCH_SIZE", "500")
+	t.Setenv("STRATA_GC_CONCURRENCY", "8")
+	t.Setenv("STRATA_GC_SHARDS", "16")
+	got := ResolveGCConfig()
+	want := ResolvedGCConfig{
+		GraceSeconds:    120,
+		IntervalSeconds: 45,
+		BatchSize:       500,
+		Concurrency:     8,
+		Shards:          16,
+	}
+	if got != want {
+		t.Fatalf("ResolveGCConfig=%+v want %+v", got, want)
+	}
+}
+
+func TestResolveGCConfigDefaults(t *testing.T) {
+	t.Setenv("STRATA_GC_INTERVAL", "")
+	t.Setenv("STRATA_GC_GRACE", "")
+	t.Setenv("STRATA_GC_BATCH_SIZE", "")
+	t.Setenv("STRATA_GC_CONCURRENCY", "")
+	t.Setenv("STRATA_GC_SHARDS", "")
+	got := ResolveGCConfig()
+	want := ResolvedGCConfig{
+		GraceSeconds:    300,
+		IntervalSeconds: 30,
+		BatchSize:       0,
+		Concurrency:     1,
+		Shards:          1,
+	}
+	if got != want {
+		t.Fatalf("ResolveGCConfig defaults=%+v want %+v", got, want)
+	}
+}
+
 func TestBuildGCClampShardsBelowFloor(t *testing.T) {
 	t.Setenv("STRATA_GC_SHARDS", "-7")
 	r, err := buildGC(Dependencies{

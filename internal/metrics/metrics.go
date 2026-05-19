@@ -289,6 +289,14 @@ var (
 		},
 		[]string{"cluster", "probe"},
 	)
+
+	AdminConfigEndpointErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_admin_config_endpoint_errors_total",
+			Help: "Internal failures on the read-only resolved-tunable admin endpoints (US-001 drain-rebalance-transparency). endpoint ∈ {gc-config, rebalance-config}. Today only rebalance-config has I/O (heartbeat ListNodes for replicas_count); gc-config is wired for symmetry / future inputs.",
+		},
+		[]string{"endpoint"},
+	)
 )
 
 func Register() {
@@ -324,6 +332,7 @@ func Register() {
 		PutChunksRefusedTotal,
 		DrainCompleteTotal,
 		DrainProgressProbeErrorsTotal,
+		AdminConfigEndpointErrorsTotal,
 	)
 }
 

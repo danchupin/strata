@@ -168,6 +168,10 @@ export interface ClusterRebalanceProgress {
   metrics_available: boolean;
   moved_total: number;
   refused_total: number;
+  // observed_bytes_per_sec: 1m-window rate of strata_rebalance_bytes_moved_total
+  // (US-002 drain-rebalance-transparency). Feeds the Migrating chip's observed
+  // bandwidth row. 0 on cold start / unavailable / metrics_available=false.
+  observed_bytes_per_sec: number;
   series: Array<[number, number]>;
 }
 
@@ -365,6 +369,9 @@ export async function fetchClusterRebalanceProgress(
     metrics_available: Boolean(body.metrics_available),
     moved_total: Number.isFinite(body.moved_total) ? body.moved_total : 0,
     refused_total: Number.isFinite(body.refused_total) ? body.refused_total : 0,
+    observed_bytes_per_sec: Number.isFinite(body.observed_bytes_per_sec)
+      ? body.observed_bytes_per_sec
+      : 0,
     series: Array.isArray(body.series) ? body.series : [],
   };
 }

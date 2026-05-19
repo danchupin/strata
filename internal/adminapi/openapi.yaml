@@ -666,7 +666,7 @@ components:
 
     ClusterRebalanceProgress:
       type: object
-      required: [metrics_available, moved_total, refused_total, series]
+      required: [metrics_available, moved_total, refused_total, observed_bytes_per_sec, series]
       description: |
         Per-cluster rebalance counters + 1h / 1m-step sparkline returned by
         GET /clusters/{id}/rebalance-progress (US-005 placement-ui). When
@@ -685,6 +685,13 @@ components:
           description: |
             sum(strata_rebalance_refused_total{target="<id>"}) at sample
             time.
+        observed_bytes_per_sec:
+          type: number
+          description: |
+            sum(rate(strata_rebalance_bytes_moved_total{to="<id>"}[1m])) at
+            sample time — instant 1m bandwidth into this cluster. Feeds the
+            <DrainProgressBar> Migrating-chip observed-bandwidth row
+            (US-002 drain-rebalance-transparency). 0 on cold start.
         series:
           type: array
           description: |
@@ -878,6 +885,56 @@ components:
         total:
           type: integer
           description: "Total retained traces in the in-process ring buffer (independent of limit/offset)"
+
+    GCConfig:
+      type: object
+      required: [grace_seconds, interval_seconds, batch_size, concurrency, shards]
+      description: |
+        Env-resolved GC worker tunable snapshot (US-001 drain-rebalance-
+        transparency). Captured at boot from STRATA_GC_* env vars; gateway
+        restart picks up changes. UI computes `Awaiting GC` ETA from these
+        values + the live gc_queue_pending sample.
+      properties:
+        grace_seconds: { type: integer, description: "STRATA_GC_GRACE in seconds" }
+        interval_seconds: { type: integer, description: "STRATA_GC_INTERVAL in seconds" }
+        batch_size: { type: integer, description: "STRATA_GC_BATCH_SIZE (0 = backend default)" }
+        concurrency: { type: integer, description: "STRATA_GC_CONCURRENCY (clamped 1..256)" }
+        shards: { type: integer, description: "STRATA_GC_SHARDS (clamped 1..1024)" }
+
+    RebalanceConfig:
+      type: object
+      required: [interval_seconds, rate_mb_s, inflight, shards, replicas_count]
+      description: |
+        Env-resolved rebalance worker tunable snapshot (US-001 drain-
+        rebalance-transparency). Knob fields captured at boot; replicas_count
+        derived per request from the heartbeat table filtered to live nodes
+        within `2 × HeartbeatInterval` of now.
+      properties:
+        interval_seconds: { type: integer, description: "STRATA_REBALANCE_INTERVAL in seconds (clamped 60..86400)" }
+        rate_mb_s: { type: integer, description: "STRATA_REBALANCE_RATE_MB_S per replica (clamped 1..10000)" }
+        inflight: { type: integer, description: "STRATA_REBALANCE_INFLIGHT (clamped 1..64)" }
+        shards: { type: integer, description: "STRATA_REBALANCE_SHARDS (clamped 1..1024)" }
+        replicas_count:
+          type: integer
+          description: |
+            Live replicas counted off the heartbeat store. 0 when the
+            store is unavailable or every row is stale (the UI then
+            treats migration bandwidth as a `~24h+ ETA` fallback).
+
+    RebalanceBandwidth:
+      type: object
+      required: [metrics_available, bytes_per_sec, chunks_per_sec]
+      description: |
+        Cluster-wide 1m bandwidth roll-up sourced from Prometheus
+        `sum(rate(strata_rebalance_bytes_moved_total[1m]))` +
+        `sum(rate(strata_rebalance_chunks_moved_total[1m]))`. Returned by
+        `GET /admin/v1/rebalance-bandwidth` (US-003 drain-rebalance-
+        transparency). `metrics_available=false` when Prom is unset or
+        returns an error — UI hides the live-bandwidth row in that case.
+      properties:
+        metrics_available: { type: boolean }
+        bytes_per_sec: { type: number, format: double }
+        chunks_per_sec: { type: number, format: double }
 
   responses:
     Unauthorized:
@@ -1770,6 +1827,72 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/MetricsTimeseries' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /gc-config:
+    get:
+      summary: Resolved GC worker tunables (read-only, env-static at boot)
+      operationId: getGCConfig
+      description: |
+        Returns the gateway's boot-time snapshot of STRATA_GC_* env vars
+        (grace, interval, batch_size, concurrency, shards). Read-only —
+        env stays the source of truth; gateway restart updates the
+        snapshot. Consumed by the `<DrainProgressBar>` Awaiting GC chip
+        for the live ETA formula (US-002).
+      responses:
+        '200':
+          description: GC tunable snapshot.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GCConfig' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /rebalance-config:
+    get:
+      summary: Resolved rebalance worker tunables + live replica count
+      operationId: getRebalanceConfig
+      description: |
+        Returns the gateway's boot-time snapshot of STRATA_REBALANCE_*
+        env vars (interval, rate_mb_s, inflight, shards) plus the live
+        replica count derived from the heartbeat table filtered to
+        nodes within `2 × HeartbeatInterval` of now. Read-only — env
+        stays the source of truth; gateway restart updates the env
+        snapshot. Consumed by the `<DrainProgressBar>` Migrating chip
+        (US-002) and the Cluster Overview rebalance card (US-003).
+        Failures of the heartbeat probe degrade gracefully:
+        replicas_count=0 + the
+        `strata_admin_config_endpoint_errors_total{endpoint="rebalance-config"}`
+        counter increments.
+      responses:
+        '200':
+          description: Rebalance tunable snapshot + live replicas count.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RebalanceConfig' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /rebalance-bandwidth:
+    get:
+      summary: Cluster-wide 1m rebalance bandwidth roll-up
+      operationId: getRebalanceBandwidth
+      description: |
+        Returns `sum(rate(strata_rebalance_bytes_moved_total[1m]))` and
+        `sum(rate(strata_rebalance_chunks_moved_total[1m]))` — the
+        bandwidth + chunks/sec the rebalance worker is currently driving
+        across every destination cluster. Consumed by the Cluster
+        Overview rebalance card (US-003 drain-rebalance-transparency).
+        Degrades to `metrics_available=false` when Prom is unset or the
+        upstream call errors; the card hides the live-bandwidth row in
+        that case.
+      responses:
+        '200':
+          description: Aggregate bandwidth roll-up.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RebalanceBandwidth' }
         '401':
           $ref: '#/components/responses/Unauthorized'
 

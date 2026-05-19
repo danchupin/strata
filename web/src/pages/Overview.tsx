@@ -38,6 +38,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { TopBucketsCard, TopConsumersCard } from '@/components/overview/TopWidgets';
+import { RebalanceConfigCard } from '@/components/storage/RebalanceConfigCard';
 import { cn } from '@/lib/utils';
 
 const HEARTBEAT_INTERVAL_S = 5;
@@ -480,6 +481,8 @@ export function OverviewPage() {
       )}
 
       <NodesTable nodes={sorted} loading={loading} onSelect={setDrilldown} />
+
+      <RebalanceConfigCard />
 
       <div className="grid gap-6 xl:grid-cols-2">
         <TopBucketsCard />

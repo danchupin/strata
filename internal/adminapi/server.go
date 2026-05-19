@@ -149,6 +149,19 @@ type Server struct {
 	// nil disables caching — probes fire on every poll.
 	ClusterStatsCache *placement.ClusterStatsCache
 
+	// GCConfig is the env-resolved GC worker tunable snapshot surfaced on
+	// GET /admin/v1/gc-config (US-001 drain-rebalance-transparency). Captured
+	// at boot from cmd/strata/workers.ResolveGCConfig so the read-only
+	// endpoint matches whatever the buildGC constructor saw at the same
+	// process start. Zero-value renders as `{0,0,0,0,0}`.
+	GCConfig GCConfig
+
+	// RebalanceConfig is the env-resolved rebalance worker tunable snapshot
+	// surfaced on GET /admin/v1/rebalance-config (US-001 drain-rebalance-
+	// transparency). replicas_count is derived per request from
+	// Heartbeat.ListNodes (not stored here).
+	RebalanceConfig RebalanceConfig
+
 	// hotBucketsMu guards lazy initialisation of hotBucketsCacheVal — the
 	// 30s TTL cache that absorbs burst polls of /admin/v1/diagnostics/
 	// hot-buckets (US-007).
@@ -261,6 +274,12 @@ type Config struct {
 	// ClusterStatsCache is the 10s-TTL per-cluster fill + object-count cache
 	// (US-001 drain-progress-physical). nil disables caching.
 	ClusterStatsCache *placement.ClusterStatsCache
+	// GCConfig + RebalanceConfig are the env-resolved worker tunable
+	// snapshots surfaced on the read-only config endpoints (US-001 drain-
+	// rebalance-transparency). serverapp populates these from
+	// cmd/strata/workers.ResolveGCConfig / .ResolveRebalanceConfig at boot.
+	GCConfig        GCConfig
+	RebalanceConfig RebalanceConfig
 }
 
 // New constructs a Server. Started defaults to now. JWTSecret empty means
@@ -306,6 +325,8 @@ func New(c Config) *Server {
 		DrainCache:           c.DrainCache,
 		RebalanceProgress:    c.RebalanceProgress,
 		ClusterStatsCache:    c.ClusterStatsCache,
+		GCConfig:             c.GCConfig,
+		RebalanceConfig:      c.RebalanceConfig,
 		Logger:               log.Default(),
 	}
 }
@@ -468,6 +489,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/v1/storage/health", s.handleStorageHealth)
 	mux.HandleFunc("GET /admin/v1/consumers/top", s.handleConsumersTop)
 	mux.HandleFunc("GET /admin/v1/metrics/timeseries", s.handleMetricsTimeseries)
+	mux.HandleFunc("GET /admin/v1/gc-config", s.handleGetGCConfig)
+	mux.HandleFunc("GET /admin/v1/rebalance-config", s.handleGetRebalanceConfig)
+	mux.HandleFunc("GET /admin/v1/rebalance-bandwidth", s.handleGetRebalanceBandwidth)
 	return mux
 }
 

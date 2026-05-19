@@ -17,11 +17,14 @@ import (
 // rebalance worker emits both counters with a {to=…} (moved) / {target=…}
 // (refused) label naming the destination cluster. Sparkline uses a 5m
 // rate window over the 1h history range so the points line up with the
-// per-minute cadence of the chip.
+// per-minute cadence of the chip. The 1m bytes-rate instant query
+// (US-002 drain-rebalance-transparency) drives the Migrating-chip
+// observed-bandwidth row.
 const (
 	rebalanceMovedTotalExprFmt   = `sum(strata_rebalance_chunks_moved_total{to="%s"})`
 	rebalanceRefusedTotalExprFmt = `sum(strata_rebalance_refused_total{target="%s"})`
 	rebalanceMovedRateExprFmt    = `sum(rate(strata_rebalance_chunks_moved_total{to="%s"}[5m]))`
+	rebalanceBytesRate1mExprFmt  = `sum(rate(strata_rebalance_bytes_moved_total{to="%s"}[1m]))`
 
 	rebalanceProgressRange = time.Hour
 	rebalanceProgressStep  = time.Minute
@@ -32,11 +35,16 @@ const (
 //
 // MetricsAvailable=false signals the UI to render "(metrics unavailable)"
 // in place of the chip body; Series stays nil/empty in that case.
+// ObservedBytesPerSec is the 1m-window instant rate of
+// strata_rebalance_bytes_moved_total{to="<id>"} — feeds the
+// <DrainProgressBar> Migrating-chip observed-bandwidth row (US-002
+// drain-rebalance-transparency). 0 on cold start / unavailable.
 type ClusterRebalanceProgressResponse struct {
-	MetricsAvailable bool          `json:"metrics_available"`
-	MovedTotal       float64       `json:"moved_total"`
-	RefusedTotal     float64       `json:"refused_total"`
-	Series           []MetricPoint `json:"series"`
+	MetricsAvailable    bool          `json:"metrics_available"`
+	MovedTotal          float64       `json:"moved_total"`
+	RefusedTotal        float64       `json:"refused_total"`
+	ObservedBytesPerSec float64       `json:"observed_bytes_per_sec"`
+	Series              []MetricPoint `json:"series"`
 }
 
 // handleClusterRebalanceProgress serves the per-cluster rebalance chip
@@ -92,6 +100,10 @@ func buildClusterRebalanceProgress(ctx context.Context, prom *promclient.Client,
 	if err != nil {
 		return out
 	}
+	bytesRateSamples, err := prom.Query(ctx, fmt.Sprintf(rebalanceBytesRate1mExprFmt, id))
+	if err != nil {
+		return out
+	}
 
 	out.MetricsAvailable = true
 	if v, ok := firstFiniteValue(movedSamples); ok {
@@ -99,6 +111,9 @@ func buildClusterRebalanceProgress(ctx context.Context, prom *promclient.Client,
 	}
 	if v, ok := firstFiniteValue(refusedSamples); ok {
 		out.RefusedTotal = v
+	}
+	if v, ok := firstFiniteValue(bytesRateSamples); ok {
+		out.ObservedBytesPerSec = v
 	}
 
 	if len(series) > 0 {
