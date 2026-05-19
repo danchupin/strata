@@ -79,3 +79,26 @@ Cycle: ralph/dx-lab
   - `helm` v4 binary is brew-installable on macOS arm64 (`brew install helm` -> /opt/homebrew/bin/helm). On CI runners that lack helm, the `make helm-lint` degradation path keeps the build green.
 ---
 
+## 2026-05-19 - US-004
+- Shipped `internal/s3api/docs_reference_test.go` (default build tag — runs under standard `go test ./...`). AST-walks the dispatch funcs `ServeHTTP` / `handleBucket` / `handleObject` / `handleBucketInventory` via `go/parser` + `go/ast`, collects every direct `s.<method>(...)` call where `<method>` is a `*Server` method declared in the package, and asserts each must either appear in `docs/site/content/reference/s3-api.md` (matched by backtick'd function name OR by `internal/s3api/<file>.go:<line>` cell pointing at the FuncDecl) OR carry a `// docs:skip` line comment immediately above the FuncDecl.
+- Bidirectional drift catch: orphan-cell check regex-extracts every `internal/s3api/<file>.go:<line>` reference in the markdown and hard-fails if no enclosing `*Server` FuncDecl spans the line (handler renamed or removed without doc update). Markdown rows pointing into inline switch arms still pass — those resolve to the enclosing dispatcher FuncDecl which exists.
+- Refactored away from `parser.ParseDir` (deprecated in Go 1.21+ since it ignores build tags) to `os.ReadDir` + `parser.ParseFile` per .go file in the cwd. Avoids the LSP/staticcheck deprecation warning without losing anything (the s3api package has no build-tag-gated files in scope).
+- Added `// docs:skip` markers to 6 internal helpers that are called from the dispatch funcs but are NOT leaf S3 surface (so they shouldn't appear in the operator-facing reference table):
+  - `bucketRegionFor` (location.go:54) — region-resolution helper for HEAD bucket
+  - `checkUserBucketQuota` (quota.go:101) — per-user MaxBuckets gate at CreateBucket
+  - `requireObjectAccess` (access.go:85) — policy+ACL gate for object actions
+  - `serveWebsiteRoot` (website.go:160) — website IndexDocument server for GET bucket root
+  - `tryWebsiteRedirectAll` (website.go:212) — website RedirectAllRequestsTo handler
+  - `tryWebsiteRouting` (website.go:225) — website RoutingRules evaluator
+- The 5 dispatcher funcs themselves (`handleAdmin` / `handleIAM` / `handleBucket` / `handleObject` / `handleBucketInventory`) are hard-coded in the test's `dispatcherCalls` set so they don't need markers — they're not leaf handlers, they're routers.
+- Updated the maintainer-note HTML comment at the top of `docs/site/content/reference/s3-api.md` to describe the new lint test, the two acceptance paths (row OR `// docs:skip`), and the orphan-row detection.
+- Quality: `go test -run TestDocsReferenceCoverage ./internal/s3api/ -v` green (logs 6 `docs:skip handler tolerated` lines for operator visibility); `go vet ./...` green; `go test ./...` green; `go test -race ./internal/s3api/` green (14.4s); `make docs-build` green (73 pages); `gofmt -l` clean on all 5 edited files.
+- Files changed: `internal/s3api/docs_reference_test.go` (new), `internal/s3api/location.go`, `internal/s3api/quota.go`, `internal/s3api/access.go`, `internal/s3api/website.go`, `docs/site/content/reference/s3-api.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - The actual dispatch shape in `internal/s3api/server.go` is `if q.Has("X") { switch r.Method { ... } }` — NOT `switch q.Get("X") { case "...": }`. The PRD's "case `<query>`: arm" description was conceptual; the test treats any direct `s.<method>(...)` CallExpr inside the dispatch funcs' bodies as a dispatch arm regardless of the surrounding control-flow shape.
+  - `parser.ParseDir` is deprecated in modern Go because it ignores build tags. The `os.ReadDir` + `parser.ParseFile` loop is the lint-friendly replacement for default-tag-only walks; pkg-level type resolution (which we don't need here) would call for `golang.org/x/tools/go/packages` instead.
+  - When the s3api package gains a NEW leaf handler called from the dispatch flow, this test fails the build until the markdown is updated. To intentionally hide a helper, add `// docs:skip` on the line immediately above the FuncDecl (godoc-attached comment).
+  - Method-call detection uses `SelectorExpr{X: Ident{Name:"s"}, Sel: ...}` — chained selectors like `s.Meta.GetBucket(...)` correctly DON'T match (their `X` is itself a SelectorExpr, not the bare `s` ident). This is intentional — `s.Meta.*` is the backend interface, not an s3api handler.
+  - The orphan-cell regex tolerates trailing punctuation/closing-paren in markdown table cells via the `[A-Za-z0-9_.\-]+\.go` constraint — but does NOT match Hugo shortcodes (`{{< ref >}}`) or external URLs, so the IAM `[Admin API surface]({{< ref ... >}})` link in the Non-S3 RPC subsection doesn't accidentally trip orphan detection.
+---
+

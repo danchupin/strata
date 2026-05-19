@@ -83,8 +83,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "internal/s3api/docs_reference_test.go (default tag) ships. AST-walks dispatch funcs ServeHTTP / handleBucket / handleObject / handleBucketInventory via go/parser + go/ast — collects every direct s.<method>(...) call. Each handler must (a) appear in docs/site/content/reference/s3-api.md as backtick'd func name OR `internal/s3api/<file>.go:<line>` cell pointing at its FuncDecl, OR (b) carry a `// docs:skip` line comment immediately above its FuncDecl. Bidirectional drift catch: orphan-cell check scans every internal/s3api/<file>.go:<line> regex match in the markdown and hard-fails if no enclosing *Server FuncDecl spans the line. Refactored to os.ReadDir + parser.ParseFile loop instead of deprecated parser.ParseDir (Go 1.25's gopls flags ParseDir as deprecated since it ignores build tags — irrelevant here but cleaner avoiding the deprecation). 6 helpers got `// docs:skip` markers (no leaf S3 surface): bucketRegionFor (location.go), checkUserBucketQuota (quota.go), requireObjectAccess (access.go), serveWebsiteRoot + tryWebsiteRedirectAll + tryWebsiteRouting (website.go). The handleAdmin / handleIAM / handleBucket / handleObject / handleBucketInventory dispatchers themselves are hard-coded in the test's dispatcherCalls set so they don't need markers. Updated docs/site/content/reference/s3-api.md maintainer-note comment to describe the new test + the marker semantics. Quality: `go test -run TestDocsReferenceCoverage ./internal/s3api/` green (logs 6 `docs:skip handler tolerated` lines for visibility); `go vet ./...` green; `go test ./...` green; `go test -race ./internal/s3api/` green; `make docs-build` green (73 pages)."
     },
     {
       "id": "US-005",
