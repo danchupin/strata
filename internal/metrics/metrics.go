@@ -182,6 +182,14 @@ var (
 		[]string{"action", "status"},
 	)
 
+	LifecycleRetryTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_lifecycle_retry_total",
+			Help: "Lifecycle worker per-action retry outcomes (US-003 polish-dx). outcome=ok (succeeded on a retry attempt), terminal (first non-retryable error), exhausted (3 transient failures in a row). No bump when the first attempt succeeds.",
+		},
+		[]string{"outcome"},
+	)
+
 	WorkerPanicTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "strata_worker_panic_total",
@@ -324,6 +332,7 @@ func Register() {
 		StorageClassBytes,
 		StorageClassObjects,
 		LifecycleTickTotal,
+		LifecycleRetryTotal,
 		NotifyDeliveryTotal,
 		WorkerPanicTotal,
 		MetaTikvAuditSweepDeleted,

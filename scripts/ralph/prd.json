@@ -66,8 +66,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented: internal/lifecycle/retry.go with retryAction (production seam) + retryActionWith (test seam taking injectable sleeper). 3 attempts, backoffs [1s, 3s] consumed before attempts 2+3. isTransient classifies context.DeadlineExceeded / syscall.ECONNRESET / syscall.ETIMEDOUT / errors satisfying interface{Temporary()bool}; meta.ErrObjectNotFound / meta.ErrBucketNotFound / data.ErrChunkNotFound / data.ErrNotFound short-circuit as terminal. ctxSleep races time.After against ctx.Done so shutdown drops out instantly. Wired into expire + expireNoncurrent in worker.go (the two Meta.DeleteObject sites — no Data.Delete per-action sites in the lifecycle worker today; transition's GetChunks/PutChunks/SetObjectStorage chain stays unretried per scope). Counter strata_lifecycle_retry_total{outcome=ok|terminal|exhausted} registered. PRD spec listed '1s→3s→10s' but AC and tests only consume 2 sleeps; retryBackoffs keeps the 10s slot for a future 4th-attempt extension without rewriting tests."
     },
     {
       "id": "US-004",
