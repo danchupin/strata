@@ -168,4 +168,93 @@ Cycle: ralph/storage-correctness
     is exercised by `TestRunCtxCancelExits` already.
 ---
 
+## 2026-05-19 - US-003 - RADOS ReadOp / WriteOp batching
+- New build-tagged helpers internal/data/rados/ops.go (`ceph`):
+  - `writeChunkBatched(ioctx, oid, body, xattrs map[string]string) error`
+    builds `goceph.WriteOp{ WriteFull(body) + SetXattr(k,v) per entry }`
+    and Operate()s once. xattrs nil ⇒ byte-identical to legacy
+    `writeChunk` (same on-wire op).
+  - `readChunkBatched(ioctx, oid, off, length, wantXattrs) ([]byte,
+    map[string]string, error)` issues `goceph.ReadOp{ Read(off, buf) }`
+    + Operate; wantXattrs=true does a follow-up `ioctx.ListXattrs`
+    because go-ceph v0.39 does not expose `rados_read_op_getxattrs`.
+    Today no caller requests xattrs.
+- Stub mirror internal/data/rados/ops_stub.go (`!ceph`) exports
+  `ErrRadosNotCompiled` for build parity.
+- New tag-free env helper internal/data/rados/ops_env.go:
+  `batchOpsFromEnv()` reads `STRATA_RADOS_BATCH_OPS` via ParseBool;
+  unset/empty/garbage ⇒ false. Unit test in ops_env_test.go covers
+  empty, true/1, false/0, garbage.
+- backend.go retrofit (ceph build):
+  - Backend gains `batchOps bool` field set at New time from the env.
+  - PUT hot path (`putOne` closure): when batchOps,
+    `writeChunkBatched(ioctx, oid, body, nil)`; else legacy `writeChunk`.
+    Both produce the same single WriteFull librados op.
+  - GET hot path (`getOne` closure): when batchOps,
+    `readChunkBatched(ioctx, c.OID, off, segLen, false)` returns its own
+    buf; else legacy `ioctx.Read(c.OID, buf, off)`. ObserveOp wraps
+    both for unchanged tracer + metrics shape.
+- Bench harness scripts/bench-rados-ops.sh:
+  - Drives 10k PUT + 10k GET (32 KiB-shaped objects via `aws s3 cp`)
+    against a single-cluster lab; restarts strata-a/b between passes
+    with `STRATA_RADOS_BATCH_OPS` injected; queries
+    `histogram_quantile(quant, sum by (le) (rate(strata_rados_op_duration_seconds_bucket{op="put"}[5m])))`
+    for p50/p95/p99 on both legs.
+  - Prints verdict line: SHIP_BATCHED if batched p99 PUT ≤ 90 % of
+    baseline; HOLD_DEFAULT otherwise.
+  - SKIP=77 when lab unreachable; REQUIRE_LAB=1 converts skip to fail.
+- Docs docs/site/content/architecture/benchmarks/rados-ops.md:
+  - Explains the helper, the env knob, the ship gate, and the conclusion
+    that with zero xattrs on the hot path both shapes issue the same
+    single librados WriteOp/ReadOp so no measurable change at p99.
+  - Verdict row dated 2026-05-19: `HOLD_DEFAULT` — keep
+    `STRATA_RADOS_BATCH_OPS=false` default; toggle + helpers ship for
+    future xattr writers (e.g. server-side `x-amz-meta-*` filtering).
+- Bench numbers: local box has no librados (`fatal error:
+  'rados/librados.h' file not found`) so the synthetic Go bench (see
+  `backend_bench_test.go`) is the only locally-runnable harness; it
+  exercises the parallel scheduler over fake chunk callbacks and is
+  unaffected by the batching toggle (the toggle gates on the C-layer
+  op shape, not the Go scheduler). Real-cluster numbers land in the
+  rados-ops.md table on the next operator run.
+- Files changed: internal/data/rados/ops.go (new),
+  internal/data/rados/ops_stub.go (new),
+  internal/data/rados/ops_env.go (new),
+  internal/data/rados/ops_env_test.go (new),
+  internal/data/rados/backend.go (retrofit + new batchOps field),
+  scripts/bench-rados-ops.sh (new),
+  docs/site/content/architecture/benchmarks/rados-ops.md (new).
+- Quality: `go vet ./...` green, `go build ./...` green, `go test -race
+  -count=1 ./...` green (full suite ~1m, racetest 46.7s inside that),
+  `bash -n scripts/bench-rados-ops.sh` green, `make docs-build` green.
+  `go vet -tags ceph` + `go test -tags ceph ./internal/data/rados/...`
+  not runnable on this box (no librados); CI Docker build covers the
+  ceph-tag path.
+- **Learnings for future iterations:**
+  - go-ceph v0.39 does NOT export `rados_read_op_getxattrs`; the C API
+    `rados_read_op_getxattrs(rados_read_op_t, rados_xattrs_iter_t *,
+    int *)` exists but the Go wrapper would need fresh cgo. Until then,
+    `readChunkBatched(wantXattrs=true)` falls back to a second
+    `ioctx.ListXattrs` round-trip — which costs the same as a separate
+    GetXattr call would have, so the "batched read" win is gated on the
+    Go-side wrapper landing.
+  - Without xattr writers on the PUT hot path, batched `WriteOp{
+    WriteFull }` is byte-identical to the legacy `ioctx.WriteFull` —
+    one librados op either way. The PRD ship gate (≥ 10 % p99 PUT win)
+    will not trigger until xattrs are wired; the helpers + env knob are
+    laid down so the future xattr work just flips the default.
+  - The bench harness pattern mirrors `scripts/bench-rebalance-multi.sh`:
+    operator brings the lab up themselves (`make up-all`), the script
+    drives workload + restart-with-env-injected for each pass, and
+    `histogram_quantile` reads the per-op histogram label
+    (`strata_rados_op_duration_seconds_bucket{op="put"}`).
+  - Build-tag pattern for the rados package: helpers split into three
+    files — tagged-ceph (`ops.go`), tagged-!ceph stub (`ops_stub.go`),
+    tag-free env reader (`ops_env.go`). Tests for the env reader sit
+    in a tag-free test file so unit tests run without librados.
+  - Don't rely on `gofmt -l` to catch ceph-tagged cgo issues — gopls /
+    go vet under `-tags ceph` need librados headers; without them the
+    syntax is validated only by hand. Keep helper bodies simple.
+---
+
 

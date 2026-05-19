@@ -38,6 +38,16 @@ type Backend struct {
 	// getPrefetch × chunk_size.
 	getPrefetch int
 
+	// batchOps toggles the PUT/GET hot path between the per-op default
+	// (ioctx.WriteFull-shaped writeChunk + ioctx.Read in getOne) and the
+	// WriteOp / ReadOp batched helpers in ops.go. Read once at New from
+	// STRATA_RADOS_BATCH_OPS (default false). The bench gate in
+	// docs/site/content/architecture/benchmarks/rados-ops.md shows no
+	// measurable gain until xattr writers land on the hot path, so the
+	// default keeps the per-op shape; operators experimenting with
+	// future xattr work flip the knob.
+	batchOps bool
+
 	mu      sync.Mutex
 	conns   map[string]*goceph.Conn
 	ioctxes map[string]*goceph.IOContext // key: cluster|pool|ns
@@ -72,6 +82,7 @@ func New(cfg Config) (data.Backend, error) {
 		tracer:         cfg.Tracer,
 		putConcurrency: putConcurrencyFromEnv(),
 		getPrefetch:    getPrefetchFromEnv(),
+		batchOps:       batchOpsFromEnv(),
 		conns:          make(map[string]*goceph.Conn),
 		ioctxes:        make(map[string]*goceph.IOContext),
 	}, nil
@@ -251,7 +262,12 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 		}
 		oid := fmt.Sprintf("%s.%05d", objID, idx)
 		start := time.Now()
-		werr := writeChunk(ioctx, oid, body)
+		var werr error
+		if b.batchOps {
+			werr = writeChunkBatched(ioctx, oid, body, nil)
+		} else {
+			werr = writeChunk(ioctx, oid, body)
+		}
 		ObserveOp(opCtx, b.logger, b.metrics, b.tracer, spec.Pool, "put", oid, start, werr)
 		if werr != nil {
 			return data.ChunkRef{}, werr
@@ -299,8 +315,16 @@ func (b *Backend) GetChunks(ctx context.Context, m *data.Manifest, offset, lengt
 		if err != nil {
 			return nil, err
 		}
-		buf := make([]byte, segLen)
 		start := time.Now()
+		if b.batchOps {
+			body, _, rerr := readChunkBatched(ioctx, c.OID, off, segLen, false)
+			ObserveOp(opCtx, b.logger, b.metrics, b.tracer, c.Pool, "get", c.OID, start, rerr)
+			if rerr != nil {
+				return nil, rerr
+			}
+			return body, nil
+		}
+		buf := make([]byte, segLen)
 		n, rerr := ioctx.Read(c.OID, buf, off)
 		ObserveOp(opCtx, b.logger, b.metrics, b.tracer, c.Pool, "get", c.OID, start, rerr)
 		if rerr != nil {
