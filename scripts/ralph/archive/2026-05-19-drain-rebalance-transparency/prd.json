@@ -1,0 +1,119 @@
+{
+  "project": "Strata",
+  "branchName": "ralph/drain-rebalance-transparency",
+  "description": "Drain + rebalance transparency. Two parked + freshly-surfaced operator-transparency gaps merged into one cycle. (1) Parked from ralph/drain-progress-physical: Awaiting GC chip ships with static-copy tooltip; operators with non-default GC envs get prose that doesn't match their cadence. (2) Newly surfaced 2026-05-18: rebalance bandwidth is invisible to operators (STRATA_REBALANCE_RATE_MB_S configurable but no UI/endpoint exposure → operator has no way to confirm migration won't saturate network). Fix: two parallel read-only admin endpoints (GET /admin/v1/gc-config + /admin/v1/rebalance-config), <DrainProgressBar> consumes both for live ETA on Awaiting GC chip + live bandwidth on Migrating chip, new Cluster Overview rebalance card surfaces per-replica rate / aggregate / effective forward / cadence / inflight / shards / live 1m bandwidth, operator runbook gets a Bandwidth tuning section with network-share calculator (1 GbE/10 GbE/25 GbE/100 GbE). 5 stories.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Two new admin endpoints — /admin/v1/gc-config + /admin/v1/rebalance-config",
+      "description": "As a developer, I need the gateway to expose its resolved GC + rebalance tunables as read-only admin endpoints so the UI can render them.",
+      "acceptanceCriteria": [
+        "New handler file `internal/adminapi/config_endpoints.go` (or fold into existing admin handler file if codebase convention warrants — verify): both endpoints share infra",
+        "`GET /admin/v1/gc-config` returns JSON `{grace_seconds: int, interval_seconds: int, batch_size: int, concurrency: int, shards: int}`. Audit-stamped `admin:GetGCConfig`",
+        "`GET /admin/v1/rebalance-config` returns JSON `{interval_seconds: int, rate_mb_s: int, inflight: int, shards: int, replicas_count: int}`. Audit-stamped `admin:GetRebalanceConfig`. `replicas_count` derived from `meta.Store.ListClusterNodes(ctx)` filtered to live heartbeats (within `2 × STRATA_HEARTBEAT_INTERVAL` of now) — NOT static",
+        "Both endpoints read-only: no PUT/PATCH/POST counterpart. Env stays source of truth; gateway restart updates the snapshot",
+        "GC values sourced from `cmd/strata/workers/gc.go::clampShards` neighbors + cache as a `GCConfig` struct on `adminapi.Server`. Wire through `adminapi.Config` for unit-test injection",
+        "Rebalance values sourced from `cmd/strata/workers/rebalance.go::buildRebalance` env reads. Same wiring pattern: `RebalanceConfig` struct on `adminapi.Server`",
+        "Response uses int seconds (not Go duration strings) for cross-tool friendliness — UI does `seconds / 60` for minutes",
+        "OpenAPI spec at `internal/adminapi/openapi.yaml` (if exists — verify) gains both endpoint definitions",
+        "Counter `strata_admin_config_endpoint_errors_total{endpoint}` (`endpoint ∈ {gc-config, rebalance-config}`) increments on internal error",
+        "Unit tests: both handlers return injected configs verbatim; degenerate (zero) values are handled (200 with zeros); rebalance-config replicas_count reflects mocked cluster_nodes list",
+        "Integration test against memory backend: `GET /admin/v1/gc-config` returns boot-time defaults; `GET /admin/v1/rebalance-config` returns 30s/100/4/1/1 (compose lab default values)",
+        "`go vet ./...` passes",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Shipped 2026-05-18. Added handlers in internal/adminapi/config_endpoints.go with GCConfig + RebalanceConfig types. ResolveGCConfig / ResolveRebalanceConfig helpers in cmd/strata/workers/ mirror buildGC/buildRebalance env reads. serverapp wires both at boot. Counter strata_admin_config_endpoint_errors_total{endpoint} added in internal/metrics. ReplicasCount derived per request from Heartbeat.ListNodes filtered to 2 × HeartbeatInterval window; ListNodes failure bumps the counter and returns replicas_count=0. OpenAPI updated. Unit tests cover injected snapshots, zero values, stale heartbeat filtering, and error-path counter."
+    },
+    {
+      "id": "US-002",
+      "title": "<DrainProgressBar> live ETA on Awaiting GC chip + live bandwidth on Migrating chip",
+      "description": "As an operator, I want both drain states to show a precise per-deploy ETA + live bandwidth so I know when the drain will complete and whether it's saturating my network.",
+      "acceptanceCriteria": [
+        "`<DrainProgressBar>` fetches `/admin/v1/gc-config` + `/admin/v1/rebalance-config` via two TanStack Query keys (`gc-config`, `rebalance-config`), both `staleTime: Infinity`",
+        "Awaiting GC chip live ETA: `eta_min = ceil(grace_seconds / 60) + ceil(gc_queue_pending / (batch_size × shards × 1) × (interval_seconds / 60))`. Denominator components clamped to 1 if zero. Cap at `~24h+` if > 24h",
+        "Awaiting GC chip label flips from static `Awaiting GC cleanup: X chunks awaiting physical delete` to `Awaiting GC cleanup: X chunks awaiting physical delete (~N m ETA)` (or `~Nh Mm` if N ≥ 60)",
+        "Awaiting GC tooltip enumerates inputs: `ETA computed from current GC queue depth (X chunks), STRATA_GC_GRACE (Y), STRATA_GC_INTERVAL (Z), STRATA_GC_BATCH_SIZE (B), STRATA_GC_SHARDS (S).`",
+        "Migrating chip live bandwidth: `Migrating: X chunks remaining · ~Y MB/s observed · ~Zm ETA`. Y = `rate(strata_rebalance_bytes_moved_total{to=<cluster_id>}[1m])` via existing `STRATA_PROMETHEUS_URL` plumbing. Z = `(remaining × chunk_size) / observed_rate` if observed > 0; else fallback `(remaining × chunk_size) / (rebalance_config.rate_mb_s × replicas_count / 2)`",
+        "Migrating chip tooltip: `ETA from observed bandwidth (Y MB/s on cluster <id>) over remaining manifest chunks (X). Configured rate cap per replica: <rate_mb_s> MB/s.`",
+        "When either query is loading: pre-cycle static fallback for that chip (manifest-only Migrating + static-copy Awaiting GC)",
+        "When either query errors (404/500): same pre-cycle fallback",
+        "When PromQL returns null/0 (cold start): Migrating chip uses formula fallback for ETA + observed row reads `~0 MB/s observed (cold start)`",
+        "When `rebalance-config.rate_mb_s` is 0 OR `replicas_count` is 0: ETA cap fires; chip reads `~24h+ ETA`",
+        "Playwright spec extends `web/e2e/drain-progress.spec.ts`: mocks responses for `/admin/v1/gc-config` + `/admin/v1/rebalance-config` + Prom query; asserts correct ETA + bandwidth + tooltip + error fallbacks",
+        "Verify in browser: drain cephb in lab; observe live ETA + bandwidth + chip transitions through all 3 states",
+        "`pnpm run build` succeeds",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "Shipped 2026-05-19. Added /admin/v1/{gc,rebalance}-config TanStack queries (`staleTime: Infinity`, `retry: false`, silent meta) to <DrainProgressBar>. Awaiting GC chip flips to live ETA when gc-config resolves: graceMin = ceil(grace/60); queueMin = ceil((queue/(batch×shards)) × intervalMin); cap at 24h+. Tooltip enumerates env values. Migrating chip uses observed_bytes_per_sec from existing /admin/v1/clusters/{id}/rebalance-progress (already wired with 1m PromQL rate of strata_rebalance_bytes_moved_total{to=<id>} in clusters_rebalance.go). ETA = (migratable × 4MiB)/observed when observed>0 else (migratable × 4MiB)/(rate_mb_s × replicas_count × 1MiB / 2). Cold-start reads `~0 MB/s observed (cold start)`. Either query loading/errored OR 404 → pre-cycle static fallback. Files: web/src/api/configs.ts (new), web/src/api/client.ts (re-exports), web/src/api/clusters.ts (+observed_bytes_per_sec field on ClusterRebalanceProgress), web/src/lib/query.ts (+gcConfig +rebalanceConfig keys), web/src/components/storage/DrainProgressBar.tsx (queries + helpers + MigratingSummary subcomponent), web/e2e/drain-progress.spec.ts (+6 scenarios). Backend ObservedBytesPerSec wired in internal/adminapi/clusters_rebalance.go + openapi.yaml + test."
+    },
+    {
+      "id": "US-003",
+      "title": "Cluster Overview rebalance config card + live bandwidth indicator",
+      "description": "As an operator, I want the Cluster Overview to surface the rebalance tunables + the current bandwidth utilisation so I can confirm at a glance that migration is configured safely.",
+      "acceptanceCriteria": [
+        "New card on Cluster Overview page (under existing cluster_nodes / leader heartbeats area): `<RebalanceConfigCard>` reads `/admin/v1/rebalance-config` + Prometheus rate of `strata_rebalance_bytes_moved_total` (sum across clusters)",
+        "Card renders four rows: `Per-replica rate: <rate_mb_s> MB/s` · `Aggregate (× <replicas_count> replicas): ~<rate_mb_s × replicas_count> MB/s` · `Effective forward: ~<aggregate / 2> MB/s` · `Cadence: every <interval_seconds>s · Inflight: <inflight> · Shards: <shards>`",
+        "Live bandwidth row below: `Observed last 1m: ~<rate> MB/s · ~<chunks> chunks/sec`. Hidden if PromQL endpoint unavailable",
+        "Tooltip on Aggregate / Effective forward explains chunkSize × 2 tokens math",
+        "Card has Tune link → `docs/site/content/best-practices/placement-rebalance.md#bandwidth-tuning` (new tab)",
+        "TanStack key `rebalance-config` SHARED with `<DrainProgressBar>` from US-002 (single fetch per app session)",
+        "When `/admin/v1/rebalance-config` returns 404 (legacy gateway): card hidden; no error toast",
+        "Playwright spec `web/e2e/cluster-overview-rebalance.spec.ts` (new): mocks rebalance-config + PromQL; asserts card renders correct values + tooltip + Tune link target",
+        "Verify in browser: lab default values render in card; tooltip displays correctly",
+        "`pnpm run build` succeeds",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "Shipped 2026-05-19. Added GET /admin/v1/rebalance-bandwidth (cluster-wide 1m roll-up: sum(rate(strata_rebalance_bytes_moved_total[1m])) + sum(rate(strata_rebalance_chunks_moved_total[1m]))); audit admin:GetRebalanceBandwidth; degrades to metrics_available=false on Prom unset/err. New <RebalanceConfigCard> mounted on Overview page under NodesTable; reads rebalanceConfig (TanStack key shared with <DrainProgressBar> — single fetch per app session) + rebalanceBandwidth (own 30s polling key). Renders four config rows (Per-replica rate / Aggregate (× N replicas) / Effective forward / Cadence + Inflight + Shards). Tooltip on Aggregate + Effective enumerates chunkSize × 2 tokens math. Tune link → /docs/best-practices/placement-rebalance/#bandwidth-tuning (new tab; anchor lands in US-004). Live observed row Observed last 1m: ~Y MB/s · ~Z chunks/sec visible only when bandwidth endpoint reports metrics_available=true; hidden on metrics_available=false. Entire card hidden on rebalance-config 404 (legacy gateway compat — no error toast). Files: internal/adminapi/rebalance_bandwidth.go (new handler + types); internal/adminapi/rebalance_bandwidth_test.go (new — happy path + Prom-unavailable + Prom-err); internal/adminapi/server.go (route); internal/adminapi/openapi.yaml (+RebalanceBandwidth schema + path); web/src/api/configs.ts (+fetchRebalanceBandwidth + RebalanceBandwidth type); web/src/api/client.ts (re-exports); web/src/lib/query.ts (+rebalanceBandwidth key); web/src/components/storage/RebalanceConfigCard.tsx (new); web/src/pages/Overview.tsx (mount card); web/e2e/cluster-overview-rebalance.spec.ts (new — 3 scenarios)."
+    },
+    {
+      "id": "US-004",
+      "title": "Operator runbook `Bandwidth tuning` section + admin-api docs",
+      "description": "As an operator, I need documented guidance on how to pick a non-saturating STRATA_REBALANCE_RATE_MB_S for my network so migration doesn't impact user traffic.",
+      "acceptanceCriteria": [
+        "New section `## Bandwidth tuning` in `docs/site/content/best-practices/placement-rebalance.md` (anchored `#bandwidth-tuning` for the Cluster Overview card's Tune link from US-003)",
+        "Section opens with the token-bucket model: `Each replica's rebalance worker has a token bucket sized at STRATA_REBALANCE_RATE_MB_S MB/s. A chunk move consumes chunkSize × 2 tokens (read from source + write to target). With N replicas, the aggregate ceiling is N × rate_mb_s; the effective forward (net new data on the target cluster) is approximately aggregate / 2.`",
+        "Network share calculator table (1 GbE / 10 GbE / 25 GbE / 100 GbE): safe per-replica rates, aggregate, effective forward, % of pipe",
+        "Two concrete tuning workflows documented: Low-bandwidth lab (`STRATA_REBALANCE_RATE_MB_S=10 make up-all`) + Production 10 GbE (`STRATA_REBALANCE_RATE_MB_S=100` in k8s manifest)",
+        "Reference to live observability via Cluster Overview rebalance card",
+        "Reference to the new admin endpoint: `curl http://gateway:9999/admin/v1/rebalance-config` for scripted health-check",
+        "Cross-link from existing `Multi-leader scaling` subsection",
+        "Migration note `docs/site/content/architecture/migrations/drain-progress-physical.md` (from prior cycle) gains a one-line update referencing this cycle as the ETA + bandwidth-visibility follow-up",
+        "OpenAPI spec / admin-api docs (e.g. `docs/site/content/architecture/admin-api.md` if exists) document both new endpoints",
+        "`make docs-build` passes",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": "Shipped 2026-05-19. Added `## Bandwidth tuning` section (anchored `#bandwidth-tuning`) in docs/site/content/best-practices/placement-rebalance.md between `STRATA_REBALANCE_* env knobs` and `Safety rails`. Section opens with the token-bucket model (chunkSize × 2 tokens — both legs debit the same bucket; aggregate = N × rate; effective forward ≈ aggregate / 2). Network share calculator table covers 1 GbE / 10 GbE / 25 GbE / 100 GbE → safe per-replica RATE_MB_S (10/100/250/1000), aggregate (× 2 replicas), effective forward, ~16% of pipe (one-sixth headroom rule). Two tuning workflows: low-bandwidth lab (`STRATA_REBALANCE_RATE_MB_S=10 make up-all`) + prod 10 GbE k8s Deployment env yaml. Live observability subsection references the Cluster Overview rebalance card + per-cluster Migrating chip indicator, plus scripted health-check `curl http://gateway:9999/admin/v1/rebalance-config | jq .` (audit `admin:GetRebalanceConfig`; companion `/admin/v1/gc-config` mentioned). Cross-link from Multi-leader scaling Benchmark+speedup subsection added (`Per-replica rate sizing for the host NIC is covered in [Bandwidth tuning](#bandwidth-tuning)`). Migration note docs/site/content/architecture/migrations/drain-progress-physical.md `## Related cycles + references` gains follow-up bullet referencing `ralph/drain-rebalance-transparency` (2026-05) as the ETA + bandwidth-visibility pass that closed the parked ETA P3 + cross-links the Bandwidth tuning runbook. OpenAPI already documents both endpoints (shipped US-001 + US-003); no separate admin-api.md exists. `make docs-build` green (Hugo 0.161.1 extended; 63 pages, 0 errors); generated anchor `#bandwidth-tuning` confirmed in TOC + matches the US-003 Tune link target `/docs/best-practices/placement-rebalance/#bandwidth-tuning`."
+    },
+    {
+      "id": "US-005",
+      "title": "Smoke + ROADMAP close-flip (2 entries) + PRD removal",
+      "description": "As an operator and as a future-maintainer, I need a smoke that exercises both endpoints + the formulas against a non-default deploy + documented migration + the ROADMAP entries flipped.",
+      "acceptanceCriteria": [
+        "Extend `scripts/smoke-drain-progress-ui.sh` (from prior cycle): the harness already configures `STRATA_REBALANCE_RATE_MB_S=1` + `STRATA_GC_GRACE=60s` for smoke-time isolation",
+        "After reaching Awaiting GC state, call `GET /admin/v1/gc-config`; assert response contains `grace_seconds: 60` (matches smoke-time override)",
+        "Compute `eta_min` from gc-config formula + polled `gc_queue_pending`; assert ETA within sane band (`0 ≤ eta_min ≤ 30`); assert formula output matches expected within ±1 min",
+        "Call `GET /admin/v1/rebalance-config`; assert response contains `rate_mb_s: 1` + `replicas_count: 2` (default lab has strata-a + strata-b)",
+        "During Migrating state, sample Prometheus query `rate(strata_rebalance_bytes_moved_total{to=\"cephb\"}[1m])` directly; assert > 0 MB/s (migration actively moving)",
+        "OR alternatively (implementer's discretion): separate `scripts/smoke-drain-rebalance-transparency.sh` that does ONLY the new endpoint + Prom-rate assertions. Pick the cleaner path",
+        "`make smoke-drain-progress-ui` (or new `make smoke-drain-rebalance-transparency`) Makefile target wraps the script",
+        "`ROADMAP.md` close-flip — TWO entries: existing parked P3 `Precise drain-progress ETA from gateway GC tunables` → `Done.` + commit pending; NEW P3 entry added + closed at the same commit `~~**P3 — Rebalance bandwidth visibility on Cluster Overview + drain progress.**~~ — **Done.** <one-line summary>. (commit \\`<pending>\\`)` (operator-requested live; not pre-roadmapped per CLAUDE.md `Discovering a new gap` rule)",
+        "Closing SHA backfilled on main in a follow-up commit",
+        "`tasks/prd-drain-rebalance-transparency.md` REMOVED in the same commit (CLAUDE.md PRD lifecycle rule)",
+        "`make docs-build`, `make vet`, `make test`, `pnpm run build`, smoke harness all green",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": "Shipped 2026-05-19. Extended scripts/smoke-drain-progress-ui.sh: (a) GET /admin/v1/rebalance-config after drain accepted — asserts rate_mb_s==1 + replicas_count>=2 (lab default strata-a + strata-b); (b) During Migrating state, samples Prom query rate(strata_rebalance_bytes_moved_total{to=\"cephb\"}[1m]) via direct curl http://127.0.0.1:9090 (configurable PROM_BASE) and asserts > 0 MB/s — retries on subsequent polls if 1m window not warmed; (c) During AwaitingGC state, calls GET /admin/v1/gc-config, asserts grace_seconds==60, computes eta_min = ceil(grace/60) + ceil((queue/(batch×shards)) × (interval/60)) capped at 1440 via awk, asserts eta_min ∈ [0, 30] (sane smoke band). Two latch counters (SAMPLED_PROM_RATE + SAMPLED_GC_CONFIG) plus post-loop guards ensure each is exercised at least once. Existing 3-state observation preserved. Both ROADMAP entries close-flipped in ROADMAP.md (existing parked P3 ETA → Done + NEW P3 Rebalance bandwidth visibility added + closed at same SHA, commit SHA <pending> per CLAUDE.md backfill convention). tasks/prd-drain-rebalance-transparency.md removed (PRD lifecycle rule). make vet + make test + pnpm run build + make docs-build all green."
+    }
+  ]
+}
