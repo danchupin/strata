@@ -47,6 +47,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"AuditLogRoundTrip", caseAuditLog},
 		{"AuditLogFiltered", caseAuditLogFiltered},
 		{"AuditLogPartitionExport", caseAuditLogPartitionExport},
+		{"ObjectLockComplianceAudit", caseObjectLockComplianceAudit},
 		{"ListSlowQueries", caseListSlowQueries},
 		{"VersioningNullSentinel", caseVersioningNullSentinel},
 		{"VersioningNullListVersions", caseVersioningNullListVersions},
@@ -1151,6 +1152,72 @@ func caseAuditLogPartitionExport(t *testing.T, s meta.Store) {
 	}
 	if len(parts2) != 0 {
 		t.Fatalf("expected zero aged partitions after delete, got %d", len(parts2))
+	}
+}
+
+// caseObjectLockComplianceAudit exercises the US-006 Object Lock COMPLIANCE
+// audit verbs end-to-end through the meta.Store audit_log surface: every
+// backend (memory, Cassandra, TiKV) must persist + return the three new
+// action strings unchanged so operator queries like
+// `audit_log WHERE action LIKE 'objectlock:%'` round-trip on every backend.
+func caseObjectLockComplianceAudit(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "lockaudit", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	now := time.Now().UTC()
+	verbs := []string{
+		"objectlock:CompliancePut",
+		"objectlock:ComplianceRetentionAttemptedReduce",
+		"objectlock:ComplianceRetentionExpired",
+	}
+	for i, verb := range verbs {
+		principal := "alice"
+		if verb == "objectlock:ComplianceRetentionExpired" {
+			principal = "system:lifecycle-worker"
+		}
+		row := &meta.AuditEvent{
+			BucketID:  b.ID,
+			Bucket:    b.Name,
+			EventID:   newTimeUUID(),
+			Time:      now.Add(time.Duration(i) * time.Millisecond),
+			Principal: principal,
+			Action:    verb,
+			Resource:  "object:" + b.Name + "/locked.bin",
+			Result:    "200",
+			RequestID: "req-" + verb,
+			SourceIP:  "10.0.0.1",
+		}
+		if err := s.EnqueueAudit(ctx, row, time.Hour); err != nil {
+			t.Fatalf("enqueue %s: %v", verb, err)
+		}
+	}
+	got, _, err := s.ListAuditFiltered(ctx, meta.AuditFilter{BucketID: b.ID, BucketScoped: true, Limit: 100})
+	if err != nil {
+		t.Fatalf("list filtered: %v", err)
+	}
+	want := map[string]string{
+		"objectlock:CompliancePut":                      "alice",
+		"objectlock:ComplianceRetentionAttemptedReduce": "alice",
+		"objectlock:ComplianceRetentionExpired":         "system:lifecycle-worker",
+	}
+	counts := map[string]int{}
+	principals := map[string]string{}
+	for _, r := range got {
+		if _, ok := want[r.Action]; !ok {
+			continue
+		}
+		counts[r.Action]++
+		principals[r.Action] = r.Principal
+	}
+	for verb, wantPrincipal := range want {
+		if counts[verb] != 1 {
+			t.Fatalf("verb %s emitted %d rows, want exactly 1", verb, counts[verb])
+		}
+		if principals[verb] != wantPrincipal {
+			t.Fatalf("verb %s principal=%q want %q", verb, principals[verb], wantPrincipal)
+		}
 	}
 }
 

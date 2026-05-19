@@ -15,6 +15,8 @@ Cycle: ralph/storage-correctness
 - **ROADMAP close-flip (US-010)**: 9 P3 entries close (lines 211 / 234 / 235 / 238 / 240 / 242 / 253 / 332 / 336 — verified). + 1 NEW P3 entry added open for non-sha256 trailer algos. Each carries `(commit pending)`; SHA backfill on main as fast-follow.
 - **s3-tests baseline**: record pre-cycle pass-rate; only intentional changes from US-006 (additive audit rows, no wire impact) and US-009 (chunked-trailer-PUT goes from sig-invalid to 200 OK on aws-cli 2.22+). Any other regression = bug.
 - **usage-rollup trapezoid (US-002) reference**: env `STRATA_USAGE_ROLLUP_SAMPLES_PER_DAY` (default 24, clamp [1, 1440]). Pure math in `internal/usagerollup/trapezoid.go` (`Trapezoid`, `AverageObjects`, `MaxObjects`, `sampleRing`). Worker drives N intermediate `SampleOnce` ticks per Interval (single-select Run loop with ctx.Done / sample-ticker / daily-timer). Empty ring → falls back to `GetBucketStats × 86400` (legacy v0 math). Schema unchanged on all three backends — hard cutover, no `method` column.
+- **Audit-from-worker pattern (US-006)**: workers stamp audit_log directly via `Meta.EnqueueAudit` with a synthetic `meta.AuditEvent` (no HTTP middleware in their path). Canonical templates: `rebalance.Worker.recordDrainCompleteAudit` and `lifecycle.Worker.recordComplianceRetentionExpiredAudit`. Worker fields `AuditTTL time.Duration` + `Default<X>AuditRetention` const (30d) keep the storage package free of the s3api import. Resource shape `<noun>:<scoped-id>` (object:<bucket>/<key>, cluster:<id>) lets operators grep with `action LIKE 'objectlock:%'` without overlap.
+- **TestDocsReferenceCoverage tripwire**: any edit to `internal/s3api/<handler>.go` that shifts line numbers MUST be paired in the same commit with a line-number bump in `docs/site/content/reference/s3-api.md` for affected handlers — the test fails the build if the doc gets stale. Insert helpers BELOW dispatch handlers to minimise churn.
 - **Verified codebase facts (PRD review):**
   - bucket_stats is BIGINT not counter — LWT batch shape works directly (no migration).
   - userUsedBytes line 80-94 + checkUserBucketQuota line 101-120 — both lift to user_stats.
@@ -509,5 +511,135 @@ Cycle: ralph/storage-correctness
     bench gate compares 4 MiB vs 16 MiB under the same workload
     — both runs experience the same skew, so the relative ratio
     is unaffected.
+---
+
+## 2026-05-20 - US-006 - Object Lock COMPLIANCE audit log
+- New audit verbs stamped via SetAuditOverride / direct EnqueueAudit:
+  - `objectlock:CompliancePut` — PutObjectRetention path stamps the
+    override whenever the body persists a COMPLIANCE-mode retention.
+    Resource shape `object:<bucket>/<key>`; principal = `Auth.Owner`.
+  - `objectlock:ComplianceRetentionAttemptedReduce` — PutObjectRetention
+    now reads the existing object retention first; if the existing row
+    is COMPLIANCE + RetainUntil > now and the requested (mode, until)
+    pair would weaken it (mode downgrade, clearing, or earlier
+    RetainUntilDate), the handler stamps the audit verb AND rejects
+    with `AccessDenied` 403 (AWS S3 parity). Pre-launch hard cutover —
+    the previously-lax overwrite behaviour is removed. Audit row
+    carries Result=403 so reviewers can filter `result != "200"` to
+    see only blocked reduce attempts.
+  - `objectlock:ComplianceRetentionExpired` — lifecycle worker's
+    `expire()` hook now calls `recordComplianceRetentionExpiredAudit`
+    on every successful DeleteObject whose removed row carried
+    COMPLIANCE retention with non-zero RetainUntil. Principal is
+    `system:lifecycle-worker`; row payload is built locally to keep
+    `internal/lifecycle` free of the `internal/s3api` import.
+- New helper `retentionWouldReduceCompliance(existing, mode, until)`
+  in objectlock.go captures the weakening rule: (a) any non-COMPLIANCE
+  new mode reduces; (b) zero new until reduces; (c) earlier new until
+  reduces. Keeps the handler readable and lets future GOVERNANCE-side
+  enforcement reuse the same shape.
+- New `Worker.AuditTTL time.Duration` + `DefaultComplianceAuditRetention`
+  (30d) follow the same convention as `rebalance.Worker.AuditTTL` /
+  `DefaultDrainAuditRetention` so operators can wire a single
+  STRATA_AUDIT_RETENTION knob through both at the supervisor layer.
+- Lifecycle reduce/lifecycle-expire contract is backend-agnostic: the
+  3 verbs round-trip through `meta.Store.EnqueueAudit` +
+  `ListAuditFiltered` on memory + Cassandra + TiKV via the new
+  `caseObjectLockComplianceAudit` shared contract case.
+- Test coverage:
+  - `internal/meta/storetest/contract.go::caseObjectLockComplianceAudit`
+    seeds 3 rows (one per verb) and asserts each verb round-trips with
+    its expected principal — runs against all three backends.
+  - `internal/s3api/objectlock_audit_test.go`:
+    * TestPutObjectRetentionEmitsCompliancePut — happy path COMPLIANCE
+      PUT emits `objectlock:CompliancePut` resource=object:lockaudit/k.
+    * TestPutObjectRetentionAttemptedReduceIsRejectedAndAudited — set
+      COMPLIANCE+future, then attempt shorter COMPLIANCE; assert 403 +
+      the audit verb with Result=403.
+    * TestPutObjectRetentionGovernanceDoesNotEmitComplianceVerb —
+      pin negative path: GOVERNANCE PUT emits the path-derived
+      PutObjectRetention fallback row, never a compliance verb.
+  - `internal/lifecycle/compliance_audit_test.go`:
+    * TestLifecycleExpireEmitsComplianceRetentionExpiredAudit — seed
+      COMPLIANCE retention with elapsed RetainUntil + Expiration rule,
+      RunOnce, assert exactly one `objectlock:ComplianceRetentionExpired`
+      row + principal=system:lifecycle-worker.
+    * TestLifecycleExpireSkipsAuditForNonComplianceRetention — pin
+      GOVERNANCE retention does NOT emit the compliance verb.
+- `TestObjectLockBlocksDelete` updated: the previously-tolerated
+  COMPLIANCE→GOVERNANCE retention rewrite now correctly returns 403.
+  The legal-hold-blocks-delete leg moved to a fresh object `/bkt/k2`
+  that starts with GOVERNANCE retention so it does not depend on the
+  removed lax behaviour.
+- Docs: `docs/site/content/architecture/observability.md` gained an
+  "Object Lock COMPLIANCE audit verbs" section under `## Audit log`
+  with a verb-by-verb table + operator SQL query example. Reference
+  doc `docs/site/content/reference/s3-api.md` updated to bump the
+  line numbers for the Retention/LegalHold handlers (objectlock.go
+  grew by ~30 lines for the new logic) + a note that COMPLIANCE
+  reductions are now rejected with AccessDenied.
+- Files changed:
+  internal/s3api/objectlock.go (existing-retention read,
+    reduce-detection helper, override stamping for the 2 PUT verbs),
+  internal/s3api/objectlock_audit_test.go (new),
+  internal/s3api/lifecycle_test.go (TestObjectLockBlocksDelete
+    rewritten to match AWS-parity rejection),
+  internal/lifecycle/worker.go (AuditTTL field +
+    DefaultComplianceAuditRetention const + recordComplianceRetentionExpiredAudit
+    helper + expire() hook),
+  internal/lifecycle/compliance_audit_test.go (new),
+  internal/meta/storetest/contract.go (caseObjectLockComplianceAudit +
+    table entry),
+  docs/site/content/architecture/observability.md (verb table +
+    operator query),
+  docs/site/content/reference/s3-api.md (line-number bump +
+    AccessDenied note).
+- Quality: `go vet ./...` green, `go build ./...` green,
+  `go test -race ./internal/s3api/... ./internal/meta/... ./internal/lifecycle/...`
+  green in isolation. `make docs-build` green. Full
+  `go test -race ./...` race-bumps `internal/racetest TestRunCleanRunNoInconsistencies`
+  identical to the pre-existing flake captured by US-004 (isolated
+  re-run passes; timing-based, behavior-unchanged).
+- **Learnings for future iterations:**
+  - When tightening a previously-lax server behaviour to match AWS,
+    grep `internal/s3api/*_test.go` for tests that *exercise* the lax
+    path — TestObjectLockBlocksDelete is one such canary. Pre-launch
+    [Pre-launch no deploys] license lets us update the test, but it
+    must be updated together with the handler in the same commit so
+    no intermediate SHA leaves both the lax acceptance AND the lax
+    test active.
+  - `internal/s3api/TestDocsReferenceCoverage` enforces that every
+    Server-method dispatch handler is referenced by
+    docs/site/content/reference/s3-api.md with a `file:line` link.
+    ANY edit to a handler file that shifts line numbers (e.g.
+    inserting a helper function inside the file) MUST be paired with
+    a line-number bump in s3-api.md — the test will catch it but
+    folding the bump into the same commit keeps the diff coherent.
+  - The audit-emit-from-worker pattern: workers stamp audit_log
+    directly via Meta.EnqueueAudit with a synthetic AuditEvent (no
+    HTTP middleware in their path). `recordDrainCompleteAudit` in
+    `internal/rebalance/worker.go` is the canonical template;
+    `recordComplianceRetentionExpiredAudit` follows the same shape.
+    Use Resource=`<noun>:<scoped-id>` (object:<bucket>/<key>,
+    cluster:<id>, …) so operators can grep with `LIKE 'objectlock:%'`
+    or `LIKE 'cluster:%'` without overlap.
+  - The audit override seam (`s3api.SetAuditOverride`) is the cleanest
+    way to flip a path-derived audit row to an operator-meaningful
+    one — installs a *AuditOverride pointer in ctx before
+    Next.ServeHTTP and the middleware reads it back. Mutate `Action`
+    last so a partial override (only Resource set) does not flip the
+    middleware to override mode — Action="" means "no override".
+  - The COMPLIANCE reduce semantic must be symmetric with the
+    `objectLockBlocksDelete` guard: any operation that weakens a
+    live COMPLIANCE retention is forbidden. PutObjectRetention is the
+    canonical write path; copy_object.go and server.go (PutObject
+    initial retention) do NOT need the same guard because PUT-new
+    cannot weaken an existing retention (no existing row to weaken).
+  - The lifecycle worker's existing `expire` path does NOT yet
+    consult ObjectLock — a still-live COMPLIANCE retention would not
+    block expiration. Out of scope for US-006 audit-only story (PRD
+    explicitly limits this story to the audit verb hook), but worth
+    flagging as a potential P3 follow-up: lifecycle should respect
+    object-lock retention before expiring, mirroring DeleteObject.
 ---
 

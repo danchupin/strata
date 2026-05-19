@@ -162,10 +162,10 @@ operation when known. Pre-roadmap MVP surface (most rows) shows `—`.
 |---|---|---|---|
 | `GetObjectLockConfiguration` | `internal/s3api/objectlock.go:72` | — | |
 | `PutObjectLockConfiguration` | `internal/s3api/objectlock.go:26` | — | Bucket-level Object Lock must be enabled at CreateBucket (`x-amz-bucket-object-lock-enabled: true`) or via this op. |
-| `GetObjectRetention` | `internal/s3api/objectlock.go:156` | — | |
-| `PutObjectRetention` | `internal/s3api/objectlock.go:125` | — | `GOVERNANCE` downgrades require `x-amz-bypass-governance-retention: true`. |
-| `GetObjectLegalHold` | `internal/s3api/objectlock.go:188` | — | |
-| `PutObjectLegalHold` | `internal/s3api/objectlock.go:169` | — | |
+| `GetObjectRetention` | `internal/s3api/objectlock.go:186` | — | |
+| `PutObjectRetention` | `internal/s3api/objectlock.go:125` | — | `GOVERNANCE` downgrades require `x-amz-bypass-governance-retention: true`. `COMPLIANCE` retention reductions are rejected with `AccessDenied` (AWS parity, US-006). |
+| `GetObjectLegalHold` | `internal/s3api/objectlock.go:218` | — | |
+| `PutObjectLegalHold` | `internal/s3api/objectlock.go:199` | — | |
 
 ## Inventory
 
