@@ -37,15 +37,18 @@ The make target wraps `scripts/bench-rebalance-multi.sh`. The script
 orchestrates two passes (`SHARDS=1` baseline + `SHARDS=2` fan-out), seeds
 buckets via aws-cli, drains `default` evacuate mode, polls
 `/admin/v1/clusters/default/drain-progress` until `chunks_on_cluster=0`,
-and prints a per-pass JSON line plus an aggregate ratio + verdict. The
-`SHARDS=3` leg explicitly SKIPs after the SHARDS=2 baseline — the
-3-replica lab was retired in `ralph/tikv-default-lab`; the SHARDS=3
-bench is parked under the ROADMAP P3 follow-up _Restore 3-replica TiKV
-bench (SHARDS=3 rebalance-multi)_. The restart between passes runs
-through `BENCH_RESTART_HOOK` (default: docker compose force-recreate of
-strata-a + strata-b with `STRATA_REBALANCE_SHARDS=$SHARDS` exported);
-override the hook to drive a k8s rollout or systemd restart on
-bare-metal labs.
+and prints a per-pass JSON line plus an aggregate ratio + verdict. A
+third `SHARDS=3` leg auto-runs when the bench-3replica profile is up —
+the script detects `strata-c` via `docker compose ps -q strata-c`. When
+strata-c is absent the leg SKIPs (operator bring-up: `docker compose
+--profile bench-3replica up -d strata-c` — see the [3-replica TiKV
+(post-restore)](#3-replica-tikv-post-restore) section below). The
+restart between passes runs through `BENCH_RESTART_HOOK` (default:
+docker compose force-recreate of strata-a + strata-b with
+`STRATA_REBALANCE_SHARDS=$SHARDS` exported); the 3-replica leg uses
+`BENCH_RESTART_HOOK_3REPLICA` which adds the bench-3replica profile +
+strata-c to the recreate set. Override either hook to drive a k8s
+rollout or systemd restart on bare-metal labs.
 
 Results land in `bench-rebalance-multi-results.jsonl` (one line per pass):
 
@@ -171,5 +174,68 @@ read+write round-trip on the per-chunk copy phase.
   TiKV-backed locker. Steady-state ownership rotation under churn
   (one replica restarted, leases redistributed) is exercised by
   scenario D of `scripts/smoke-rebalance-scale.sh` (US-005), not by
-  this bench. The 3-replica `rebalance-leader-{0,1,2}` race is parked
-  under the ROADMAP P3 follow-up _Restore 3-replica TiKV bench_.
+  this bench. The 3-replica `rebalance-leader-{0,1,2}` race is
+  available via the [3-replica TiKV (post-restore)](#3-replica-tikv-post-restore)
+  bench leg below.
+
+## 3-replica TiKV (post-restore)
+
+Restored by `ralph/dx-lab` US-002. The bench's `SHARDS=3` leg is opt-in
+via a new compose profile, `bench-3replica`, which layers a third
+strata gateway (`strata-c`, host port `10003:9000`,
+`STRATA_NODE_ID=strata-c`) on top of the bare-default 2-replica lab.
+The third replica joins the same TiKV-backed locker pool so it races
+for one of the `rebalance-leader-{0,1,2}` leases — no nginx LB change
+is required because the rebalance worker shard fan-out runs over TiKV
+leases, independent of HTTP routing (`strata-c` simply offers a third
+goroutine to claim a shard lease; the bench's seed-buckets + drain-
+trigger + drain-progress polls still go through the nginx LB on port
+9999 against `strata-a` / `strata-b`).
+
+### Bring-up
+
+```bash
+# Baseline lab.
+docker compose -f deploy/docker/docker-compose.yml up -d
+# Third replica (opt-in).
+docker compose -f deploy/docker/docker-compose.yml --profile bench-3replica up -d strata-c
+# Wait for strata-c /readyz on 10003 before driving the bench.
+until curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:10003/readyz | grep -q 200; do sleep 2; done
+make bench-rebalance-multi
+# Tear-down (cleans up bench-3replica profile too).
+make down
+```
+
+`scripts/bench-rebalance-multi.sh` auto-detects `strata-c` via
+`docker compose ps -q strata-c`. When present, the bench appends a
+third pass with `STRATA_REBALANCE_SHARDS=3` and prints
+`elapsed_s` + ratio vs the SHARDS=1 baseline. When absent, the bench
+prints a SKIP line referencing the resource cap (3 strata replicas + 2
+ceph clusters + pd + tikv on a single laptop / lima Docker host can
+exceed the 8–12 GiB memory budget typical for that shape) and exits on
+the SHARDS=1 / SHARDS=2 verdict alone.
+
+### Numbers
+
+This subsection is the baseline placeholder for the first three-replica
+capture. Local-run capture from this restore cycle was deferred — the
+canonical Ralph DX/lab box was a macOS + lima Docker context where the
+3-replica bench cap (~12 GiB combined for strata-c + 2 ceph memstores +
+pd + tikv + prometheus + grafana) exceeds the default lima memory
+budget. The bench-3replica profile + the script's auto-detected
+third-pass leg are wired in and exercised under bash syntax + `make
+docs-build` gates so operators with headroom can capture
+representative numbers on demand.
+
+When you do capture numbers, the expected shape is:
+
+| Replicas | Shards | Elapsed | Ratio vs baseline | Notes |
+|---------:|-------:|--------:|------------------:|:------|
+| 1 | 1 | T1 (baseline) | 100 % | Phase 1 byte-for-byte |
+| 2 | 2 | ~ 0.4 × T1 | ≤ 40 % | bare-default lab (SPEEDUP_OK threshold) |
+| 3 | 3 | ~ 0.3 × T1 | 25 – 35 % | linear-ish on disjoint shards, modulo RADOS target-pool write contention |
+
+The 3-replica ratio target sits closer to 30 % (3× speedup) rather
+than the strict 1/3 because per-replica RADOS write bandwidth shares
+the target-cluster pool (see [Cap shape](#cap-shape--when-does-phase-2-stop-scaling)
+above — point 1, target-cluster RADOS write throughput).

@@ -41,8 +41,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added strata-c service to deploy/docker/docker-compose.yml under profiles: [bench-3replica] — mirrors strata-b (TiKV meta, multi-cluster RADOS, shared strata-jwt-shared volume), STRATA_NODE_ID=strata-c, host port 10003:9000. nginx LB unchanged — rebalance worker shard fan-out runs over TiKV leases independent of HTTP routing (chosen approach: fallback per PRD AC #3; LB stays on strata-a/b, strata-c joins lease pool only). Makefile `down` target appended `--profile bench-3replica` so `make down` cleans up strata-c too. scripts/bench-rebalance-multi.sh: removed SHARDS=3 SKIP line + parked-status header copy; added BENCH_SHARDS_3REPLICA / COMPOSE_CMD_3REPLICA / RESTART_CONTAINERS_3REPLICA / BENCH_RESTART_HOOK_3REPLICA knobs; restart_replicas_with_shards + run_drain_pass take optional hook; bottom of script auto-detects strata-c via `docker compose ps -q strata-c` — when present runs third pass + prints ratio_vs_baseline; when absent SKIPs with resource-cap message + bring-up instructions. docs/site/content/architecture/benchmarks/rebalance.md updated: parked-status copy replaced with the new auto-detect language; added new `## 3-replica TiKV (post-restore)` subsection with bring-up recipe, the bench's gating contract, and the expected-shape table (T1 baseline, ~0.4×T1 SHARDS=2, ~0.3×T1 SHARDS=3). Local SHARDS=3 numbers deferred: macOS + lima Docker box's default 12 GiB budget exceeds the 3-replica cap (strata-c + 2 ceph memstores + pd + tikv + prometheus + grafana); script + profile + docs in place for operators with headroom. make vet + go test ./... + make docs-build (73 pages) green. bash -n scripts/bench-rebalance-multi.sh green."
     },
     {
       "id": "US-003",

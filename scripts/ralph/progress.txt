@@ -36,3 +36,24 @@ Cycle: ralph/dx-lab
   - Use `make -n dev` to verify the recipe chain without actually starting the stack — surfaces the full expansion of dependent targets.
 ---
 
+## 2026-05-19 - US-002
+- Added `strata-c` service to `deploy/docker/docker-compose.yml` under `profiles: ["bench-3replica"]`. Mirrors strata-b verbatim (TiKV meta, multi-cluster RADOS, shared `strata-jwt-shared` volume) with `STRATA_NODE_ID=strata-c` and host port `10003:9000`.
+- nginx LB intentionally unchanged: strata-c joins the rebalance-worker shard lease pool via the TiKV-backed locker independent of HTTP routing, so the bench measures fan-out without needing an LB-template change (the PRD's fallback path was the cleaner choice).
+- Updated `Makefile` `down` target to enumerate `--profile bench-3replica` alongside the existing four profile cleanups so `make down` removes strata-c.
+- `scripts/bench-rebalance-multi.sh`:
+  - Removed the SHARDS=3 SKIP line at the bottom + the parked-status copy in the header.
+  - Added knobs `BENCH_SHARDS_3REPLICA` (default 3), `COMPOSE_CMD_3REPLICA`, `RESTART_CONTAINERS_3REPLICA`, `BENCH_RESTART_HOOK_3REPLICA`.
+  - `restart_replicas_with_shards` + `run_drain_pass` now accept an optional restart-hook argument so the third pass force-recreates strata-a/b/c via the bench-3replica profile.
+  - Bottom of script auto-detects `strata-c` via `docker compose ps -q strata-c`. Present → third pass with `STRATA_REBALANCE_SHARDS=$BENCH_SHARDS_3REPLICA` runs and `elapsed_s` + ratio vs baseline land in the results JSONL. Absent → SKIP line referencing the lima/macOS memory cap + the bring-up command.
+- `docs/site/content/architecture/benchmarks/rebalance.md`: replaced the parked-status copy in the "Harness" section with the new auto-detect language; updated "Caveats" cross-references; added a new `## 3-replica TiKV (post-restore)` subsection with bring-up recipe, the bench's gating contract, and the expected-shape table.
+- Local SHARDS=3 capture deferred: macOS + lima Docker context's default ~12 GiB cap exceeds the combined memory budget for strata-c + 2 ceph memstores + pd + tikv + prometheus + grafana. The compose profile + bench script + docs are in place so an operator with headroom can capture representative numbers on demand.
+- Quality checks: `make vet` green; `go test ./...` green (notify 1.4s, racetest 44.4s, s3api 9.0s, no failures); `make docs-build` green (73 pages); `bash -n scripts/bench-rebalance-multi.sh` green; `docker compose -f deploy/docker/docker-compose.yml --profile bench-3replica config --services` lists strata-c alongside the bare-default services.
+- Files changed: `deploy/docker/docker-compose.yml`, `Makefile`, `scripts/bench-rebalance-multi.sh`, `docs/site/content/architecture/benchmarks/rebalance.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - `docker compose --profile <name> config --services` surfaces every service active under the profile + the baseline set — useful for validating that a profile-gated addition didn't accidentally trip into the default service list.
+  - The compose `down` target should explicitly enumerate every named profile; profile-gated services are otherwise left running after `make down` because compose only stops services in the active profile set when a profile flag is passed.
+  - `docker compose ps -q <service>` returns empty when the service isn't running OR when the service is profile-gated and the profile wasn't passed. Auto-detection via this command works because the bench script can probe presence without knowing whether the profile flag was set elsewhere.
+  - Rebalance worker shard fan-out runs over TiKV leases — adding a third worker replica does NOT require an nginx LB change. The HTTP load balancer fronts gateway requests; the rebalance worker is goroutine-local per replica and races for `rebalance-leader-<i>` leases through the shared TiKV-backed locker.
+  - Per-pass restart-hook injection in `run_drain_pass` keeps the SHARDS=1/2/3 legs independent — each pass can target a different compose profile + force-recreate set. The hook expansion uses `eval` so `$SHARDS` is interpolated at run time; the hook string itself contains an escaped `\$SHARDS` so the deferred expansion fires.
+---
+

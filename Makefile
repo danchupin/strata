@@ -108,7 +108,7 @@ up-all-ci:
 # up too. Retired profile names (`tikv`, `lab-tikv*`, `lab-cassandra-3`) are
 # no-ops on this compose file; dropping them avoids stale flags.
 down:
-	$(COMPOSE) --profile cassandra --profile tracing --profile webhook-trap --profile ci down
+	$(COMPOSE) --profile cassandra --profile tracing --profile webhook-trap --profile ci --profile bench-3replica down
 
 # Wait for the Cassandra container to report healthy. Cassandra is gated
 # behind `--profile cassandra`, so the `ps` query includes the profile flag
