@@ -1,0 +1,217 @@
+# Default values for the strata chart.
+# Override via `--set key=value` or `-f my-values.yaml`.
+
+image:
+  repository: ghcr.io/danchupin/strata
+  tag: ""           # overrides Chart.AppVersion when set
+  pullPolicy: IfNotPresent
+
+# Number of stateless gateway replicas. ≥3 for production raft-majority
+# survival semantics on worker leader-election.
+replicas: 2
+
+# Image pull secrets if you push to a private registry.
+imagePullSecrets: []
+
+# Pod-level service account. Leave empty to use the namespace default.
+serviceAccount:
+  create: false
+  name: ""
+  annotations: {}
+
+# Metadata backend. This chart only wires the TiKV backend; Cassandra
+# deployments stay on the raw manifests under deploy/k8s/.
+meta:
+  backend: tikv
+  # Comma-separated PD endpoints (cluster-DNS form).
+  endpoints: "pd.tikv.svc.cluster.local:2379"
+
+data:
+  backend: rados
+  # Mirrors STRATA_RADOS_CLUSTERS — comma-separated `<id>:<conf>` pairs
+  # for multi-cluster mode, empty string for single-cluster.
+  clusters: ""
+  # Storage class → pool map (mirrors STRATA_RADOS_CLASSES).
+  classes: "STANDARD=strata.rgw.buckets.data,STANDARD_IA=strata.rgw.buckets.ia,GLACIER_IR=strata.rgw.buckets.cold"
+  user: "client.strata"
+  pool: "strata.rgw.buckets.data"
+
+# Workers the gateway owns. Trim to the subset your deployment needs.
+workers:
+  - gc
+  - lifecycle
+  - notify
+  - replicator
+  - access-log
+  - inventory
+  - audit-export
+
+# Region label stamped on every audit/access-log row.
+region: "strata-prod"
+
+# Per-pod env knobs. Adjust the GC shard count to match the replica
+# count (or a small multiple of it) so each replica owns at least one
+# logical shard.
+gc:
+  shards: "3"
+  interval: "30s"
+  grace: "5m"
+
+lifecycle:
+  interval: "60s"
+  unit: "day"
+
+auth:
+  mode: "required"
+
+logging:
+  level: "INFO"
+
+# Virtual-hosted-style URL suffix. Must match the wildcard host in the
+# Ingress section below.
+vhostPattern: "*.s3.example.com"
+
+# OTel collector. Empty string disables tracing export entirely.
+otel:
+  endpoint: ""
+  sampleRatio: "0.01"
+  ringbuf: "on"
+  ringbufBytes: "4194304"
+
+prometheus:
+  url: "http://prometheus.monitoring.svc.cluster.local:9090"
+
+# Extra env entries (key/value). Useful for STRATA_* knobs the chart
+# does not surface explicitly.
+extraEnv: {}
+  # STRATA_NOTIFY_TARGETS: ""
+  # STRATA_REPLICATION_PEERS: ""
+
+# Secret-backed env. Placeholders below match deploy/k8s/secret.yaml.
+# Replace before installing — never commit a rendered secret in a public
+# repo. In production manage these via sealed-secrets / external-secrets
+# / vault-csi instead of `--set`.
+secret:
+  create: true
+  # When create: false, point at an existing Secret. Required fields:
+  # STRATA_STATIC_CREDENTIALS, STRATA_CONSOLE_JWT_SECRET, ceph.conf,
+  # keyring.
+  name: ""
+  staticCredentials: "REPLACE_ACCESS_KEY:REPLACE_SECRET_KEY:owner"
+  consoleJWTSecret: "REPLACE_64_HEX_CHARS"
+  cephConf: |
+    [global]
+    mon_host = ceph-mon.ceph.svc.cluster.local
+    auth_cluster_required = cephx
+    auth_service_required = cephx
+    auth_client_required = cephx
+  keyring: |
+    [client.strata]
+    key = REPLACE_BASE64_KEY
+
+service:
+  type: ClusterIP
+  port: 9000
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/upstream-vhost: "$host"
+    nginx.ingress.kubernetes.io/preserve-trailing-slash: "true"
+  hosts:
+    - host: s3.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+    - host: "*.s3.example.com"
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: strata-tls
+      hosts:
+        - s3.example.com
+        - "*.s3.example.com"
+
+resources:
+  requests:
+    cpu: "500m"
+    memory: "512Mi"
+  limits:
+    cpu: "2"
+    memory: "4Gi"
+
+# Wraps templates/servicemonitor.yaml. Requires prometheus-operator CRDs.
+monitoring:
+  enabled: false
+  interval: "30s"
+  scrapeTimeout: "10s"
+  labels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+
+tolerations: []
+
+# Per-node anti-affinity preferred (matches deploy/k8s/deployment.yaml).
+# Operators wanting multi-AZ spread can append a second podAffinityTerm
+# keyed on topology.kubernetes.io/zone.
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: strata
+              app.kubernetes.io/component: gateway
+          topologyKey: kubernetes.io/hostname
+
+terminationGracePeriodSeconds: 30
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 2
+  failureThreshold: 3
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 15
+  periodSeconds: 10
+  timeoutSeconds: 2
+  failureThreshold: 6
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "9000"
+  prometheus.io/path: "/metrics"
+
+podLabels: {}

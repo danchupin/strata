@@ -1,0 +1,23 @@
+apiVersion: v2
+name: strata
+description: |
+  Strata — Go-based, S3-compatible object gateway. Stateless gateway tier
+  in front of external metadata (TiKV) and object data (RADOS). This
+  chart is TiKV-only; Cassandra-backed deployments stay on the raw
+  manifests under deploy/k8s/.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+keywords:
+  - s3
+  - object-storage
+  - gateway
+  - tikv
+  - rados
+  - ceph
+home: https://github.com/danchupin/strata
+sources:
+  - https://github.com/danchupin/strata
+maintainers:
+  - name: danchupin

@@ -10,7 +10,7 @@ COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 	smoke-drain-lifecycle smoke-drain-transparency smoke-drain-progress-ui smoke-cluster-weights \
 	smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale \
 	smoke-single-binary smoke-tikv-default-lab \
-	race-soak race-soak-tikv lint-nginx-lab \
+	race-soak race-soak-tikv lint-nginx-lab helm-lint \
 	bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi \
 	docs-serve docs-build docs-openapi-copy clean
 
@@ -391,6 +391,14 @@ race-soak-tikv:
 	RACE_KEYS=$${RACE_KEYS:-4} \
 	  go test -tags integration -timeout $${RACE_DURATION:-1h} \
 	  -run '^TestRaceMixedOpsTiKV$$' ./internal/s3api/...
+
+# Helm chart lint for the TiKV-only deploy/helm/strata/ chart. Degrades
+# to a one-line hint + exit 0 when the helm binary is not installed so
+# `make test` is not gated on the toolchain. Operators with helm on PATH
+# get the full `helm lint` run.
+helm-lint:
+	@command -v helm > /dev/null || { echo "helm not installed — skip helm-lint (install: https://helm.sh/docs/intro/install/)"; exit 0; }
+	helm lint deploy/helm/strata/
 
 # Validate the nginx LB config used by the TiKV-default 2-replica lab.
 # nginx -t resolves upstream hostnames at parse time, so the test container

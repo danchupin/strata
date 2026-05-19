@@ -239,14 +239,63 @@ wastes per-shard heartbeat overhead.
 See [Multi-replica cluster]({{< ref "/deploy/multi-replica" >}}) for
 the full STRATA_GC_SHARDS sizing table + leader-election shape.
 
-## Helm
+## Helm install
 
-Out of scope this cycle. Helm chart packaging is queued as a P3
-ROADMAP follow-up; today, apply the example manifests under
-`deploy/k8s/` directly. Operators who already template against
-their own Helm conventions can lift the manifest set into a chart in
-~10 minutes — there is one Deployment, one Service, one ConfigMap, one
-Secret, one Ingress.
+A Helm chart ships at [`deploy/helm/strata/`](https://github.com/danchupin/strata/tree/main/deploy/helm/strata).
+It is **TiKV-only** this cycle — Cassandra-backed deployments stay on
+the raw manifests under `deploy/k8s/`.
+
+```bash
+helm install strata deploy/helm/strata/ -n strata --create-namespace
+```
+
+The default `values.yaml` mirrors the example manifests verbatim
+(2 gateway replicas, podAntiAffinity per node, `/readyz` + `/healthz`
+probes, securityContext locked down, JWT-shared `emptyDir` volume).
+Replace the credentials placeholders before installing:
+
+```bash
+helm install strata deploy/helm/strata/ -n strata --create-namespace \
+  --set secret.staticCredentials="$ACCESS:$SECRET:owner" \
+  --set secret.consoleJWTSecret="$(openssl rand -hex 32)" \
+  --set replicas=3
+```
+
+Enable the Prometheus-operator `ServiceMonitor` and the Ingress:
+
+```bash
+helm install strata deploy/helm/strata/ -n strata --create-namespace \
+  --set monitoring.enabled=true \
+  --set ingress.enabled=true \
+  --set ingress.hosts[0].host=s3.example.com
+```
+
+In production manage the Secret via sealed-secrets / external-secrets /
+vault-csi instead of `--set` — pass `--set secret.create=false
+--set secret.name=strata-secrets-managed` to point at the operator-
+managed Secret.
+
+The full knob surface is documented inline in
+[`values.yaml`](https://github.com/danchupin/strata/blob/main/deploy/helm/strata/values.yaml);
+the most-touched groups are `image.*`, `replicas`, `meta.endpoints`
+(PD endpoints), `data.clusters` (RADOS cluster map), `workers` (the
+list mirroring `STRATA_WORKERS=`), `gc.shards`, `auth.mode`,
+`vhostPattern`, and `otel.endpoint`. Anything not exposed can be
+pushed in via `extraEnv: { KEY: VALUE }`.
+
+`make helm-lint` runs `helm lint deploy/helm/strata/` (degrades to a
+one-line hint + exit 0 when the helm binary is not on PATH so `make
+test` is not gated on the toolchain).
+
+### Render check
+
+```bash
+helm template strata deploy/helm/strata/ | kubectl apply --dry-run=client -f -
+```
+
+All default-render manifests validate cleanly. The
+`ServiceMonitor` (`monitoring.enabled=true`) requires the
+prometheus-operator CRDs to be present on the target cluster.
 
 ## Apply test
 
