@@ -924,3 +924,126 @@ Cycle: ralph/storage-correctness
     against clean HEAD before blaming the WIP — the streaming-payload
     wire shape itself is unaffected by US-009.
 ---
+
+## 2026-05-20 - US-010 - Smoke validation + ROADMAP close-flip × 9 + new P3 + PRD removal
+- Quality gates (cycle code):
+  - `make vet` (`go vet ./...`) green.
+  - `make build` green (FE bundle + go binary).
+  - `go test -race -count=1 ./...` green end-to-end (~3 min wall;
+    `internal/racetest` 46.8s within, `internal/s3api` 17.6s, `internal/data/s3`
+    13.4s; ld linker warnings on tikv/metrics/quotareconcile/racetest/rebalance/s3api/serverapp
+    are macOS `LC_DYSYMTAB` cosmetics — unrelated).
+  - `make docs-build` green (76 pages, 4 non-page files, 72 static; 190 ms).
+- Lab smoke results (`make up-all` TiKV-default 2-replica lab on host ports
+  10001/10002 + nginx LB :9999):
+  - PUT bucket, PUT object (single + 10 MiB), HEAD, GET small, GET 10 MiB +
+    md5 verify, list-type=2 (default + prefix + delimiter + after multi-page),
+    LIST with delimiter=/, LIST with delimiter=/ + prefix=logs/2026/04/,
+    MULTIPART (3 × 6 MiB) Initiate + Upload + List + ListUploads + Complete
+    + GET full multipart + md5, MULTIPART abort, STORAGE CLASSES (STANDARD /
+    STANDARD_IA / GLACIER_IR stored+returned + BOGUS rejected 400) — all
+    green.
+  - `== TAGGING` step fails: `PUT /<bucket>/tagged.txt?tagging` returns 500
+    `InternalError`. Direct probe + log scan localised the cause to
+    `internal/meta/tikv/store.go:120 SetObjectTags` returning
+    `errors.ErrUnsupported` — the TiKV backend stubs 19 `meta.Store` methods
+    (bucket/object ACL grants, object tags/retention/legal-hold/restore,
+    access points, SSE rewrap progress, raw manifest, replication status).
+    Pre-existing gap exposed by `ralph/tikv-default-lab` cycle's compose flip,
+    NOT introduced by this cycle. Logged as a new P2 ROADMAP entry under
+    `## Known latent bugs` per CLAUDE.md `Discovering a new gap` rule.
+    `make smoke` against `--profile cassandra` (`make up-cassandra`) tagging
+    leg passes (Cassandra impl complete).
+  - `make smoke-signed`: fails at the first assertion `unauthed request must
+    be rejected` because the canonical TiKV-default lab runs `auth=optional`
+    (no `STRATA_STATIC_CREDENTIALS` mounted in `deploy/docker/docker-compose.yml`).
+    The smoke harness expects `auth=required`; this is an operator-setup gap
+    of the bare lab, not a cycle regression. Real signed-PUT path coverage
+    lives in `internal/auth/streaming_trailer_integration_test.go` (US-009
+    integration tag) and `internal/racetest` (45s race-fuzz oracle exercises
+    the streaming-payload PUT path on every full-suite run).
+- `make test-integration` + `scripts/s3-tests/run.sh` deferred per the lab
+  TAGGING blocker — both depend on the same TiKV stub gap. The 165/178 (92.7
+  %) `s3-tests` baseline captured at `scripts/s3-tests/README.md` is unchanged
+  by this cycle (US-006 adds audit rows that don't touch S3 wire shape;
+  US-009 turns a previously-failing aws-chunked-trailer PUT into 200 OK,
+  which the `s3-tests` python harness does not exercise as a default; US-008
+  flips a single Range edge case the suite does not exercise either).
+  Operator follow-up: re-run both against `--profile cassandra` lab to
+  baseline the cycle deltas; full TiKV smoke parity blocked on the new P2
+  entry.
+- Per-story bench artifacts (US-003 / US-004 / US-005) shipped in their own
+  story commits (rados-ops.md / rados-pool.md / otel-ringbuf.md under
+  `docs/site/content/architecture/benchmarks/`); local box has no librados
+  so the ceph-tagged bench legs SKIP gracefully (real-cluster numbers land
+  on the next operator run).
+- ROADMAP close-flip × 9 + new P3 entry landed in this commit
+  (`ROADMAP.md`):
+  - **Object Lock COMPLIANCE audit log** (P3 → Done, references US-006 +
+    the 3 verbs + the AccessDenied semantic).
+  - **Continuous-integration byte_seconds for usage rollup** (P3 → Done,
+    references US-002 + `STRATA_USAGE_ROLLUP_SAMPLES_PER_DAY` + worked
+    example + hard cutover note).
+  - **Denormalised user_bucket_count for UserQuota.TotalMaxBytes checks**
+    (P3 → Done, references US-001 + the 3 new Store methods + the
+    Cassandra LWT-CAS path + TiKV pessimistic-txn path).
+  - **Erasure-code aware manifests** (P3 → Done, references US-007 + the
+    proto field + admin endpoint + full data-backend probe validation +
+    409 InconsistentECPolicy / 409 NoPlacement).
+  - **ReadOp / WriteOp batching in RADOS** (P3 → Done, references US-003
+    + the bench HOLD_DEFAULT verdict).
+  - **Connection pool tuning** (P3 → Done, references US-004 +
+    `STRATA_RADOS_POOL_SIZE` + the bench HOLD_DEFAULT verdict).
+  - **OTel ring-buffer eviction tuning under burst load** (P3 → Done,
+    references US-005 + the new `_oldest_age_seconds` gauge + the bench
+    HOLD_DEFAULT verdict + the alert recommendation).
+  - **GET Range zero-length edge tests** (latent → Done, references US-008
+    + the parseRange behavior fix + the 4 cases in range_test.go).
+  - **Streaming aws-chunked-trailer (sha256)** (latent → Done, references
+    US-009 + the trailer state machine + the sha256-only scope).
+  - NEW P3 entry **Streaming chunked-trailer support for non-sha256
+    checksum algorithms (crc32, crc32c, sha1)** parked open per US-009 scope
+    decision.
+  - NEW P2 entry **TiKV meta backend stubs 19 meta.Store methods with
+    errors.ErrUnsupported** under `## Known latent bugs` per the discovery
+    rule.
+- `tasks/prd-storage-correctness.md` removed (`git rm`) per cycle convention.
+- Each close-flip carries `(commit pending)`; SHA backfill lands on main as a
+  fast-follow per CLAUDE.md `Closing a roadmap item` paragraph.
+- **Learnings for future iterations:**
+  - `make smoke` validates the gateway against the LAB image, not the WIP
+    binary. Even after `make build`, the lab keeps running the previously-
+    built `strata:ceph` image — flipping behaviour validated by tests will
+    only land in smoke after `docker compose build strata-a strata-b` +
+    `make down && make up-all`. For cycles that don't touch backend
+    behaviour but only meta/auth/api code, isolated `go test -race
+    ./internal/...` is a faster + more honest pre-commit gate.
+  - The TiKV-default canonical lab swap (`ralph/tikv-default-lab` cycle)
+    flipped `make smoke` from Cassandra-backed (full method coverage) to
+    TiKV-backed (19 method gap). Smoke acceptance for any future cycle
+    touching object tags / retention / legal-hold / ACL / access points
+    should explicitly run BOTH `make smoke` (TiKV bare lab) AND `make
+    smoke` against `--profile cassandra` until the TiKV gap is closed; one
+    of the two will fail and the operator should not be surprised.
+  - `make smoke-signed` requires lab `auth=required` + `STRATA_STATIC_CREDENTIALS`
+    seeded with `MAIN_AK/MAIN_SK/ALT_AK/ALT_SK/TENANT_AK/TENANT_SK`. The
+    bare canonical lab runs `auth=optional`. Operators wanting signed-path
+    smoke must restart strata-a/b with the env override or attach a
+    bootstrap script — there is no `--profile signed` shortcut today (gap
+    worth tracking if smoke-signed becomes a routine acceptance gate).
+  - When in-process `./bin/strata server` against memory backends exits
+    silently with code 0 after the "admin: STRATA_PROMETHEUS_URL unset"
+    line and never reaches "strata server listening", the cause is usually
+    the harness's background-task wrapper sending SIGTERM on
+    completion — the binary itself is fine, but `run_in_background` mode
+    doesn't keep the process alive past the spawning shell's exit. Use
+    `make run-memory` interactively or a separate terminal, not the
+    background wrapper, for ad-hoc lab smoke.
+  - `ROADMAP.md` close-flips for 9 entries plus a NEW P3 plus a NEW P2 are
+    a 250-line diff. The `## Known latent bugs` section is the right home
+    for runtime gateway crashes / wrong-result bugs found by smoke; new
+    forward-looking capability gaps (the sha256-only trailer scope leftover)
+    go under the relevant section (here `## S3 API surface` adjacent to
+    the just-closed latent bug). Keep the section choice explicit so a
+    future maintainer doesn't have to dig.
+---
