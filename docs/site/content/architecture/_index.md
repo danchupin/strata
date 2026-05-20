@@ -1,6 +1,6 @@
 ---
 title: 'Architecture'
-weight: 30
+weight: 60
 bookFlatSection: true
 description: 'Layer-by-layer architecture: auth, router, meta-store, data-backend, workers, sharding, observability, plus deep dives for the four critical flows.'
 ---

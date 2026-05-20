@@ -1,6 +1,6 @@
 ---
 title: 'Best Practices'
-weight: 40
+weight: 30
 bookFlatSection: true
 description: 'Tuning guides for placement, tracing, GC, lifecycle, quotas, billing, compliance, multi-cluster, and the operator console.'
 ---

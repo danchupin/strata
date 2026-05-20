@@ -56,3 +56,11 @@ flip the GitHub Pages source to publish from it:
    responds 200.
 
 Subsequent merges republish automatically; no further manual action.
+
+## See also
+
+- [Architecture]({{< relref "/architecture/" >}}) — the runtime layers
+  the docs describe.
+- [Architecture Decision Records]({{< relref "/adr/" >}}) — captured
+  design decisions, append-only.
+- [Strata Documentation]({{< relref "/" >}}) — back to top.

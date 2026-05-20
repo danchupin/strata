@@ -1,6 +1,6 @@
 ---
 title: 'Architecture Decision Records'
-weight: 45
+weight: 80
 bookFlatSection: true
 description: 'Captured design decisions for Strata — context, decision, and consequences for the load-bearing trade-offs.'
 ---
@@ -51,3 +51,11 @@ the rest of the codebase now depends on.
 | [ADR-0002]({{< ref "/adr/0002-islatest-read-time" >}}) | Derive `IsLatest` at read time |
 | [ADR-0003]({{< ref "/adr/0003-manifest-blob-column" >}}) | Single `manifest` blob column for object metadata |
 | [ADR-0004]({{< ref "/adr/0004-leader-per-worker" >}}) | One leader lease per background worker |
+
+## See also
+
+- [Architecture]({{< relref "/architecture/" >}}) — the constraints
+  each ADR locks in.
+- [Developers]({{< relref "/developers/" >}}) — how to edit the docs
+  that link these ADRs.
+- [Strata Documentation]({{< relref "/" >}}) — back to top.

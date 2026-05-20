@@ -1,6 +1,6 @@
 ---
 title: 'Reference'
-weight: 60
+weight: 40
 bookFlatSection: true
 description: 'Operator reference — env vars, Admin API surface, S3 API surface, interactive viewer.'
 ---
