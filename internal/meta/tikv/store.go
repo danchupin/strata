@@ -12,7 +12,6 @@ package tikv
 import (
 	"context"
 	"errors"
-	"time"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
@@ -106,18 +105,6 @@ func (s *Store) GetBucketGrants(ctx context.Context, bucketID uuid.UUID) ([]meta
 }
 
 func (s *Store) DeleteBucketGrants(ctx context.Context, bucketID uuid.UUID) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) SetObjectRetention(ctx context.Context, bucketID uuid.UUID, key, versionID, mode string, until time.Time) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) SetObjectLegalHold(ctx context.Context, bucketID uuid.UUID, key, versionID string, on bool) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) SetObjectRestoreStatus(ctx context.Context, bucketID uuid.UUID, key, versionID, status string) error {
 	return errors.ErrUnsupported
 }
 

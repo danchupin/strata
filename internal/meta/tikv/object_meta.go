@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"maps"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -104,6 +105,46 @@ func (s *Store) GetObjectGrants(ctx context.Context, bucketID uuid.UUID, key, ve
 		return nil, meta.ErrNoSuchGrants
 	}
 	return out, nil
+}
+
+// SetObjectRetention overwrites the object row's RetainMode + RetainUntil
+// fields. Empty mode + zero until clears retention (matches Cassandra
+// `nilIfEmpty(mode)` + `*time.Time` semantics — both surface as the
+// zero-value fields on the next Get). The COMPLIANCE-immutable check lives
+// in internal/s3api/objectlock.go (pre-call audit + ErrAccessDenied);
+// meta-layer parity with Cassandra/Memory means this impl never refuses.
+// Returns meta.ErrObjectNotFound when the addressed row is absent.
+func (s *Store) SetObjectRetention(ctx context.Context, bucketID uuid.UUID, key, versionID, mode string, until time.Time) (err error) {
+	ctx, finish := s.observer.Start(ctx, "SetObjectRetention", "objects")
+	defer func() { finish(err) }()
+	versionID = meta.ResolveVersionID(versionID)
+	return s.mutateObjectRow(ctx, bucketID, key, versionID, func(row *objectRow) {
+		row.RetainMode = mode
+		row.RetainUntil = until
+	})
+}
+
+// SetObjectLegalHold flips the object row's LegalHold flag. Returns
+// meta.ErrObjectNotFound when the row is absent.
+func (s *Store) SetObjectLegalHold(ctx context.Context, bucketID uuid.UUID, key, versionID string, on bool) (err error) {
+	ctx, finish := s.observer.Start(ctx, "SetObjectLegalHold", "objects")
+	defer func() { finish(err) }()
+	versionID = meta.ResolveVersionID(versionID)
+	return s.mutateObjectRow(ctx, bucketID, key, versionID, func(row *objectRow) {
+		row.LegalHold = on
+	})
+}
+
+// SetObjectRestoreStatus overwrites the object row's RestoreStatus field.
+// Empty status clears it (Cassandra parity: `nilIfEmpty(status)` → NULL →
+// "" on Get). Returns meta.ErrObjectNotFound when the row is absent.
+func (s *Store) SetObjectRestoreStatus(ctx context.Context, bucketID uuid.UUID, key, versionID, status string) (err error) {
+	ctx, finish := s.observer.Start(ctx, "SetObjectRestoreStatus", "objects")
+	defer func() { finish(err) }()
+	versionID = meta.ResolveVersionID(versionID)
+	return s.mutateObjectRow(ctx, bucketID, key, versionID, func(row *objectRow) {
+		row.RestoreStatus = status
+	})
 }
 
 // mutateObjectRow is the shared RMW helper: pessimistic txn, lock + Get the

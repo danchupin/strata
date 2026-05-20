@@ -76,6 +76,9 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"ClusterStateWeights", caseClusterStateWeights},
 		{"ObjectTagsRoundTrip", caseObjectTags},
 		{"ObjectGrantsRoundTrip", caseObjectGrants},
+		{"ObjectRetentionRoundTrip", caseObjectRetention},
+		{"ObjectLegalHoldRoundTrip", caseObjectLegalHold},
+		{"ObjectRestoreStatusRoundTrip", caseObjectRestoreStatus},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -3601,6 +3604,235 @@ func caseObjectGrants(t *testing.T, s meta.Store) {
 	}
 	if err := s.SetObjectGrants(ctx, b.ID, "ghost", "", grants); err != meta.ErrObjectNotFound {
 		t.Errorf("missing set: got %v want ErrObjectNotFound", err)
+	}
+}
+
+// caseObjectRetention exercises SetObjectRetention across (a) happy-path
+// round-trip via GetObject, (b) overwrite (last writer wins),
+// (c) per-version isolation, (d) clear via empty mode + zero until,
+// (e) missing object surfaces ErrObjectNotFound. The COMPLIANCE-immutable
+// guard is enforced in s3api before the meta call (matches Cassandra +
+// Memory), so this case does NOT assert a meta-layer refuse.
+// US-002 tikv-stubs.
+func caseObjectRetention(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "retbkt", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	if err := s.SetBucketVersioning(ctx, b.Name, meta.VersioningEnabled); err != nil {
+		t.Fatalf("enable versioning: %v", err)
+	}
+	v1 := &meta.Object{
+		BucketID: b.ID, Key: "k", StorageClass: "STANDARD", ETag: "e1", Size: 1,
+		Mtime: time.Now().UTC(), Manifest: &data.Manifest{Class: "STANDARD"}, VersionID: newTimeUUID(),
+	}
+	if err := s.PutObject(ctx, v1, true); err != nil {
+		t.Fatalf("put v1: %v", err)
+	}
+	v2 := &meta.Object{
+		BucketID: b.ID, Key: "k", StorageClass: "STANDARD", ETag: "e2", Size: 1,
+		Mtime: time.Now().UTC().Add(time.Second), Manifest: &data.Manifest{Class: "STANDARD"}, VersionID: newTimeUUID(),
+	}
+	if err := s.PutObject(ctx, v2, true); err != nil {
+		t.Fatalf("put v2: %v", err)
+	}
+
+	until := time.Now().UTC().Add(24 * time.Hour).Round(time.Second)
+	if err := s.SetObjectRetention(ctx, b.ID, "k", v1.VersionID, meta.LockModeGovernance, until); err != nil {
+		t.Fatalf("set v1: %v", err)
+	}
+	got, err := s.GetObject(ctx, b.ID, "k", v1.VersionID)
+	if err != nil {
+		t.Fatalf("get v1: %v", err)
+	}
+	if got.RetainMode != meta.LockModeGovernance {
+		t.Fatalf("v1 mode: got %q want %q", got.RetainMode, meta.LockModeGovernance)
+	}
+	if !got.RetainUntil.Equal(until) {
+		t.Fatalf("v1 until: got %v want %v", got.RetainUntil, until)
+	}
+
+	// (c) Per-version isolation.
+	gotV2, err := s.GetObject(ctx, b.ID, "k", v2.VersionID)
+	if err != nil {
+		t.Fatalf("get v2: %v", err)
+	}
+	if gotV2.RetainMode != "" || !gotV2.RetainUntil.IsZero() {
+		t.Fatalf("v2 leaked retention: mode=%q until=%v", gotV2.RetainMode, gotV2.RetainUntil)
+	}
+
+	// (b) Overwrite — flip to COMPLIANCE + later until.
+	laterUntil := until.Add(48 * time.Hour)
+	if err := s.SetObjectRetention(ctx, b.ID, "k", v1.VersionID, meta.LockModeCompliance, laterUntil); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	got, err = s.GetObject(ctx, b.ID, "k", v1.VersionID)
+	if err != nil {
+		t.Fatalf("get post-overwrite: %v", err)
+	}
+	if got.RetainMode != meta.LockModeCompliance || !got.RetainUntil.Equal(laterUntil) {
+		t.Fatalf("overwrite shape: mode=%q until=%v", got.RetainMode, got.RetainUntil)
+	}
+
+	// (d) Clear via empty mode + zero until.
+	if err := s.SetObjectRetention(ctx, b.ID, "k", v1.VersionID, "", time.Time{}); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	got, err = s.GetObject(ctx, b.ID, "k", v1.VersionID)
+	if err != nil {
+		t.Fatalf("get post-clear: %v", err)
+	}
+	if got.RetainMode != "" || !got.RetainUntil.IsZero() {
+		t.Fatalf("post-clear: mode=%q until=%v", got.RetainMode, got.RetainUntil)
+	}
+
+	// (e) Missing object.
+	if err := s.SetObjectRetention(ctx, b.ID, "ghost", "", meta.LockModeGovernance, until); err != meta.ErrObjectNotFound {
+		t.Errorf("set missing: got %v want ErrObjectNotFound", err)
+	}
+}
+
+// caseObjectLegalHold exercises SetObjectLegalHold across happy-path
+// round-trip, toggle off, per-version isolation, and missing-object
+// sentinel. US-002 tikv-stubs.
+func caseObjectLegalHold(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "lhbkt", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	if err := s.SetBucketVersioning(ctx, b.Name, meta.VersioningEnabled); err != nil {
+		t.Fatalf("enable versioning: %v", err)
+	}
+	v1 := &meta.Object{
+		BucketID: b.ID, Key: "k", StorageClass: "STANDARD", ETag: "e1", Size: 1,
+		Mtime: time.Now().UTC(), Manifest: &data.Manifest{Class: "STANDARD"}, VersionID: newTimeUUID(),
+	}
+	if err := s.PutObject(ctx, v1, true); err != nil {
+		t.Fatalf("put v1: %v", err)
+	}
+	v2 := &meta.Object{
+		BucketID: b.ID, Key: "k", StorageClass: "STANDARD", ETag: "e2", Size: 1,
+		Mtime: time.Now().UTC().Add(time.Second), Manifest: &data.Manifest{Class: "STANDARD"}, VersionID: newTimeUUID(),
+	}
+	if err := s.PutObject(ctx, v2, true); err != nil {
+		t.Fatalf("put v2: %v", err)
+	}
+
+	if err := s.SetObjectLegalHold(ctx, b.ID, "k", v1.VersionID, true); err != nil {
+		t.Fatalf("set on: %v", err)
+	}
+	got, err := s.GetObject(ctx, b.ID, "k", v1.VersionID)
+	if err != nil {
+		t.Fatalf("get v1: %v", err)
+	}
+	if !got.LegalHold {
+		t.Fatalf("v1 legal hold: got false want true")
+	}
+
+	// Per-version isolation.
+	gotV2, err := s.GetObject(ctx, b.ID, "k", v2.VersionID)
+	if err != nil {
+		t.Fatalf("get v2: %v", err)
+	}
+	if gotV2.LegalHold {
+		t.Fatalf("v2 leaked legal hold")
+	}
+
+	// Toggle off.
+	if err := s.SetObjectLegalHold(ctx, b.ID, "k", v1.VersionID, false); err != nil {
+		t.Fatalf("set off: %v", err)
+	}
+	got, err = s.GetObject(ctx, b.ID, "k", v1.VersionID)
+	if err != nil {
+		t.Fatalf("get post-off: %v", err)
+	}
+	if got.LegalHold {
+		t.Fatalf("post-off: still true")
+	}
+
+	// Missing object.
+	if err := s.SetObjectLegalHold(ctx, b.ID, "ghost", "", true); err != meta.ErrObjectNotFound {
+		t.Errorf("set missing: got %v want ErrObjectNotFound", err)
+	}
+}
+
+// caseObjectRestoreStatus exercises SetObjectRestoreStatus across
+// happy-path round-trip, overwrite (last writer wins), per-version
+// isolation, clear via empty status, and missing-object sentinel.
+// US-002 tikv-stubs.
+func caseObjectRestoreStatus(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "rsbkt", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	if err := s.SetBucketVersioning(ctx, b.Name, meta.VersioningEnabled); err != nil {
+		t.Fatalf("enable versioning: %v", err)
+	}
+	v1 := &meta.Object{
+		BucketID: b.ID, Key: "k", StorageClass: "STANDARD", ETag: "e1", Size: 1,
+		Mtime: time.Now().UTC(), Manifest: &data.Manifest{Class: "STANDARD"}, VersionID: newTimeUUID(),
+	}
+	if err := s.PutObject(ctx, v1, true); err != nil {
+		t.Fatalf("put v1: %v", err)
+	}
+	v2 := &meta.Object{
+		BucketID: b.ID, Key: "k", StorageClass: "STANDARD", ETag: "e2", Size: 1,
+		Mtime: time.Now().UTC().Add(time.Second), Manifest: &data.Manifest{Class: "STANDARD"}, VersionID: newTimeUUID(),
+	}
+	if err := s.PutObject(ctx, v2, true); err != nil {
+		t.Fatalf("put v2: %v", err)
+	}
+
+	if err := s.SetObjectRestoreStatus(ctx, b.ID, "k", v1.VersionID, "ongoing-request=\"true\""); err != nil {
+		t.Fatalf("set v1: %v", err)
+	}
+	got, err := s.GetObject(ctx, b.ID, "k", v1.VersionID)
+	if err != nil {
+		t.Fatalf("get v1: %v", err)
+	}
+	if got.RestoreStatus != "ongoing-request=\"true\"" {
+		t.Fatalf("v1 restore: %q", got.RestoreStatus)
+	}
+
+	// Per-version isolation.
+	gotV2, err := s.GetObject(ctx, b.ID, "k", v2.VersionID)
+	if err != nil {
+		t.Fatalf("get v2: %v", err)
+	}
+	if gotV2.RestoreStatus != "" {
+		t.Fatalf("v2 leaked restore: %q", gotV2.RestoreStatus)
+	}
+
+	// Overwrite — last writer wins.
+	if err := s.SetObjectRestoreStatus(ctx, b.ID, "k", v1.VersionID, "ongoing-request=\"false\", expiry-date=\"2026-01-01T00:00:00Z\""); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	got, err = s.GetObject(ctx, b.ID, "k", v1.VersionID)
+	if err != nil {
+		t.Fatalf("get post-overwrite: %v", err)
+	}
+	if got.RestoreStatus != "ongoing-request=\"false\", expiry-date=\"2026-01-01T00:00:00Z\"" {
+		t.Fatalf("overwrite: %q", got.RestoreStatus)
+	}
+
+	// Clear via empty status.
+	if err := s.SetObjectRestoreStatus(ctx, b.ID, "k", v1.VersionID, ""); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	got, err = s.GetObject(ctx, b.ID, "k", v1.VersionID)
+	if err != nil {
+		t.Fatalf("get post-clear: %v", err)
+	}
+	if got.RestoreStatus != "" {
+		t.Fatalf("post-clear: %q", got.RestoreStatus)
+	}
+
+	// Missing object.
+	if err := s.SetObjectRestoreStatus(ctx, b.ID, "ghost", "", "ongoing-request=\"true\""); err != meta.ErrObjectNotFound {
+		t.Errorf("set missing: got %v want ErrObjectNotFound", err)
 	}
 }
 

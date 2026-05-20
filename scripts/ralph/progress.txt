@@ -30,6 +30,19 @@ Cycle: ralph/tikv-stubs
 - **keycodec.go reach criteria**: PackKey is the helper for new key shapes that don't fit one of the entity constructors in keys.go (BucketKey, ObjectKey, AccessPointKey, …). US-001..US-005 piggyback paths don't need PackKey — they reuse existing object keys. Use PackKey only when adding a NEW prefix (e.g. if a future story needs a sse_rewrap_progress_history table the entity constructor would belong in keys.go, not as ad-hoc PackKey calls).
 - **Memory vs Cassandra divergence — empty grants list**: SetObjectGrants(nil) on Cassandra → blob NULL → Get returns ErrNoSuchGrants. Memory → stores nil slice in map (key present) → Get returns `(nil, nil)`. Contract test ObjectGrantsRoundTrip does NOT assert behavior after Set(nil) — divergence is pre-existing and out of scope for US-001. PRD says "empty != absent"; Memory matches, Cassandra doesn't. Future cycle can align Cassandra.
 
+## 2026-05-20 - US-002 — Object retention + legal-hold + restore-status
+- What was implemented:
+  - `internal/meta/tikv/object_meta.go` — added 3 method impls (SetObjectRetention/SetObjectLegalHold/SetObjectRestoreStatus). Each is a one-line wrapper around `mutateObjectRow` that writes RetainMode+RetainUntil / LegalHold / RestoreStatus respectively. Added `time` import.
+  - `internal/meta/tikv/store.go` — removed 3 stubs at former lines 112-122; pruned now-unused `time` import.
+  - `internal/meta/storetest/contract.go` — added cases ObjectRetentionRoundTrip + ObjectLegalHoldRoundTrip + ObjectRestoreStatusRoundTrip. Each exercises round-trip via GetObject, overwrite (last writer wins), per-version isolation, clear via empty value, missing-object → ErrObjectNotFound.
+- Quality checks: `go vet ./...` green; `go test -race ./internal/meta/...` green across memory + cassandra (unit-level) + tikv (mocked); `go build ./...` green.
+- **Learnings for future iterations:**
+  - PRD said "verify meta.ErrComplianceImmutable sentinel exists; if not, add". Decision: NOT added. Reason: COMPLIANCE-immutable guard lives in `internal/s3api/objectlock.go:152-159` (`retentionWouldReduceCompliance` + `SetAuditOverride("objectlock:ComplianceRetentionAttemptedReduce") + ErrAccessDenied`) — runs BEFORE the meta.SetObjectRetention call. Cassandra + Memory meta impls do NOT refuse at this layer (they just UPDATE the row). Adding a sentinel only in the TiKV impl would (a) break parity (b) be unreachable in s3api code path. The wiring is preserved as-is — TiKV impl matches Cassandra/Memory behavior, s3api enforces invariant pre-call.
+  - The objectRow struct already carries RetainMode/RetainUntil/LegalHold/RestoreStatus fields with `,omitempty` JSON tags — no codec change needed for US-002. Same pattern works for US-005 SSE-wrap (SSEKey, SSEKeyID already on objectRow) and SetObjectReplicationStatus (ReplicationStatus already on objectRow). Only the raw-manifest pair (GetObjectManifestRaw / UpdateObjectManifestRaw) needs a fresh helper because ManifestRaw bytes go through the data.EncodeManifest sniff path on read — direct field touch via mutateObjectRow keeps the bytes opaque.
+  - Cassandra `nilIfEmpty(mode)` + `*time.Time` semantics map cleanly to TiKV's JSON `,omitempty` — empty mode + zero until both surface as zero-value Go fields on Get, no sentinel needed.
+  - `meta.LockModeGovernance` + `meta.LockModeCompliance` constants live in `internal/meta/store.go`; reference them in contract tests instead of string literals to keep parity if names ever change.
+---
+
 ## 2026-05-20 - US-001 — Shared key codec + object tags + object grants
 - What was implemented:
   - `internal/meta/tikv/keycodec.go` — PackKey(prefix, segments...) supports string/[]byte/uuid.UUID; MarshalBlob + UnmarshalBlob wrap encoding/json with empty-input no-op.

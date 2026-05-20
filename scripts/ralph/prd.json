@@ -44,8 +44,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented via piggyback on objectRow (RetainMode/RetainUntil/LegalHold/RestoreStatus fields already exist on objectRow + meta.Object — no codec or key-shape change). 3 wrappers in object_meta.go around mutateObjectRow(ctx, ..., func(*objectRow) { row.<Field> = <value> }). PRD's `object_meta:<bucket>:<key>:<ver>:<kind>` separate-key shape replaced with single-row RMW — same pattern US-001 set for tags + grants. COMPLIANCE-immutable guard intentionally left at s3api layer (internal/s3api/objectlock.go:152-159 pre-call check + audit override + ErrAccessDenied) — Cassandra + Memory meta layer impls do NOT enforce, so adding meta.ErrComplianceImmutable would break parity. PRD's 'verify sentinel exists; if not, add' resolved to NOT add — sentinel is unused everywhere else and adding it would be dead code that doesn't match Cassandra/Memory. Contract cases ObjectRetentionRoundTrip + ObjectLegalHoldRoundTrip + ObjectRestoreStatusRoundTrip exercise round-trip, overwrite, per-version isolation, clear via empty value, missing-object sentinel."
     },
     {
       "id": "US-003",
