@@ -218,7 +218,7 @@ adding more, prove what is there.
   RetainUntilDate, principal=`system:lifecycle-worker`). Operator query shape:
   `audit_log WHERE action LIKE 'objectlock:%' AND resource LIKE 'object:<bucket>/%'`.
   Documented in [Observability — Audit log]({{< ref "/architecture/observability#audit-log" >}}).
-  (commit pending)
+  (commit `4d3c1ec`)
 
 ## Auth
 
@@ -248,7 +248,7 @@ adding more, prove what is there.
   backwards-compat shim. Worked example: 100→200 step-up at noon bills
   13,140,000 B·s vs v0 over-count of 17,280,000. Documented in
   [Quotas + billing — byte-seconds trapezoid]({{< ref "/best-practices/quotas-billing#byte-seconds-trapezoid-integration" >}}).
-  (commit pending)
+  (commit `4d3c1ec`)
 - ~~**P3 — Denormalised `user_bucket_count` for `UserQuota.TotalMaxBytes` checks.**~~ — **Done.**
   Shipped via the `ralph/storage-correctness` cycle (US-001). New
   `meta.UserStats{Owner, UsedBytes, UsedObjects, BucketCount}` aggregate row
@@ -261,7 +261,7 @@ adding more, prove what is there.
   together. The two PUT-hot-path fan-outs in `internal/s3api/quota.go`
   (`userUsedBytes`, `checkUserBucketQuota`) lift to single `GetUserStats` calls
   — O(buckets-owned) → O(1). Pre-launch hard cutover, no migration backfill.
-  (commit pending)
+  (commit `4d3c1ec`)
 - ~~**P2 — Parallel chunk upload in `PutChunks`.**~~ — **Done.** Shipped via the `ralph/parallel-chunks` cycle (US-001). Bounded errgroup worker pool dispatches RADOS chunk writes concurrently while a single dispatcher goroutine owns the byte-stream MD5 hasher; manifest order + ETag (MD5 of source bytes) preserved regardless of completion order. Knob `STRATA_RADOS_PUT_CONCURRENCY` (default 32, range `[1, 256]`) read at `rados.Backend` constructor. Scheduler lives in tag-free `internal/data/rados/parallel.go` (librados-free unit tests). Multi-cluster manifests (US-044) handled automatically — worker resolves per-chunk ioctx via existing `b.ioctx(...)`. (commit `7d341f9`)
 - ~~**P2 — Parallel chunk read / prefetch in `GetChunks`.**~~ — **Done.** Shipped via the `ralph/parallel-chunks` cycle (US-002). Bounded-depth prefetch reader fetches up to `STRATA_RADOS_GET_PREFETCH` chunks in flight while the caller drains the current chunk; default depth 4 (16 MiB inflight memory budget per request), range `[1, 64]`. Memory-bounded via semaphore + per-chunk size-1 future channel — peak buffered-but-unconsumed bytes ≤ depth × chunk_size. Range-GET (`offset`, `length`) still short-reads first/last chunks. Close cancels in-flight fetches and waits for goroutines within 500 ms (no leak — verified by `runtime.NumGoroutine()` baseline test). Scheduler lives in tag-free `internal/data/rados/prefetch.go` (librados-free unit tests). Bench harness `BenchmarkGetChunks_*_Prefetch` shows 3.7×–4.5× wall-clock speedup at 5 ms per-OSD latency; numbers in [Parallel chunk PUT + GET]({{< ref "/architecture/benchmarks/parallel-chunks" >}}). (commit `7d341f9`)
 - ~~**P3 — Erasure-code aware manifests.**~~ — **Done.** Shipped via the
@@ -279,7 +279,7 @@ adding more, prove what is there.
   placement is set) if the requested k+m doesn't match the underlying pool.
   PUT hot path stamps `Manifest.ECParams` from `bucket.ECPolicy` via
   ctx-threaded `data.WithECPolicy` (parity with `WithPlacement`). Decoder
-  transparent for legacy rows (zero value). OpenAPI extended. (commit pending)
+  transparent for legacy rows (zero value). OpenAPI extended. (commit `4d3c1ec`)
 - ~~**P3 — `ReadOp` / `WriteOp` batching in RADOS.**~~ — **Done.** Shipped via
   the `ralph/storage-correctness` cycle (US-003). New build-tagged helpers
   `internal/data/rados/ops.go` (`ceph`): `writeChunkBatched` (rados.WriteOp +
@@ -292,7 +292,7 @@ adding more, prove what is there.
   WriteOp/ReadOp; bench harness `scripts/bench-rados-ops.sh` keeps batched
   off-by-default + records the rationale in
   [Benchmarks — RADOS ops]({{< ref "/architecture/benchmarks/rados-ops" >}}).
-  Toggle ships so the future xattr-writer work just flips the default. (commit pending)
+  Toggle ships so the future xattr-writer work just flips the default. (commit `4d3c1ec`)
 - ~~**P3 — Connection pool tuning.**~~ — **Done.** Shipped via the
   `ralph/storage-correctness` cycle (US-004). New env `STRATA_RADOS_POOL_SIZE`
   (default 1 = legacy single-conn, clamp [1, 32]) drives a per-cluster
@@ -308,7 +308,7 @@ adding more, prove what is there.
   regardless so large-object PUT-heavy operators can flip to 4 or 8 at deploy
   time. Numbers in
   [Benchmarks — RADOS conn pool]({{< ref "/architecture/benchmarks/rados-pool" >}}).
-  (commit pending)
+  (commit `4d3c1ec`)
 
 ## Web UI
 
@@ -335,7 +335,7 @@ adding more, prove what is there.
   + a `_oldest_age_seconds < 300 s` alert recommendation for incident debug
   windows. Reproduction recipe in
   [Benchmarks — OTel ring buffer]({{< ref "/architecture/benchmarks/otel-ringbuf" >}}).
-  (commit pending)
+  (commit `4d3c1ec`)
 - ~~**P3 — Web UI — TiKV heartbeat backend.**~~ — **Done.** `internal/meta/tikv/heartbeat.go` implements `heartbeat.Store` against the TiKV transactional client. Rows live under `s/hb/<nodeID>` with a JSON payload carrying `ExpiresAt = LastHeartbeat + DefaultTTL`; readers lazy-skip expired rows and writers eager-delete up to 16 expired rows per write so the prefix does not leak disk. Wired in `internal/serverapp.buildHeartbeatStore`. (commit `c37487b`)
 - ~~**P3 — Heartbeat `leader_for` chip wired to actual lease state.**~~ — **Done.** `cmd/strata/workers.Supervisor` now exposes a buffered (cap 8) `LeaderEvents()` channel emitting `(workerName, acquired)` on every per-worker lease acquire/release; `internal/heartbeat.Heartbeater.SetLeaderFor(worker, owned)` mutates `Node.LeaderFor` under a mutex and the next write tick (~10 s) propagates to the cluster_nodes row consumed by Cluster Overview. `internal/serverapp.Run` wires a goroutine from `Supervisor.LeaderEvents()` into `hb.SetLeaderFor`. (commit `6f81734`)
 - ~~**P3 — Multi-replica lab (TiKV).**~~ — **Done.** New `lab-tikv` compose profile spins up two TiKV-backed Strata replicas (`strata-tikv-a`, `strata-tikv-b`) behind an `nginx` LB at host port 9999, sharing a JWT secret via the `strata-jwt-shared` named volume (file-based atomic bootstrap via POSIX `O_EXCL`). `Supervisor.LeaderEvents()` → `Heartbeater.SetLeaderFor` propagates lease rotation into the Cluster Overview `leader_for` chip within ~35 s of a holder kill. `scripts/multi-replica-smoke.sh` (target `make smoke-lab-tikv`) drives 5 host-side scenarios; `web/e2e/multi-replica.spec.ts` mirrors the same in a `[multi-replica]`-gated CI job (`e2e-ui-multi-replica`). Operator guide at `docs/site/content/deploy/multi-replica.md`. (commit `9e36975`)
@@ -425,7 +425,7 @@ Non-goals:
   on zero-length objects already returned 416 InvalidRange via the existing
   `start >= size` guard. Four zero-length cases consolidated in new
   `internal/s3api/range_test.go` (no Range / open-ended / suffix / explicit).
-  (commit pending)
+  (commit `4d3c1ec`)
 - ~~Streaming chunked decoder assumes `\r\n` strictly and reads via `bufio`. Does not handle
   `aws-chunked-trailer` (newer aws-cli variants). aws-cli 2.22 observed to use plain
   `x-amz-content-sha256: <hex>` for `s3api put-object` and STREAMING for `s3 cp`, both
@@ -442,7 +442,7 @@ Non-goals:
   scope** (option 4A in PRD): non-sha256 trailer algos (`crc32`, `crc32c`,
   `sha1`) reject with `auth.ErrUnsupportedChecksumAlgorithm` → HTTP 400
   `InvalidRequest`; see the new P3 entry below for the follow-up cycle.
-  (commit pending)
+  (commit `4d3c1ec`)
 - **P3 — Streaming chunked-trailer support for non-sha256 checksum algorithms (crc32, crc32c, sha1).**
   US-009 lands the sha256-only path (`X-Amz-Trailer: x-amz-checksum-sha256`).
   aws-cli 2.27+ + the v2 SDKs let the client opt into `crc32` / `crc32c` /
