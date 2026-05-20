@@ -21,3 +21,16 @@ Cycle: ralph/readme-docs-rewrite
 - **README Status & maturity section**: 3-line Shipped/In flight/Parked summary + link to ROADMAP.md. Production-grade — reader needs to know what's usable today without scanning the full ROADMAP. Phase status implementation table from current README REMOVED entirely.
 - **ROADMAP discipline (US-012)**: NEW entry under `## Developer experience` per CLAUDE.md `Discovering a new gap` rule (docs rewrite not pre-roadmapped). Title `User-facing README + docs rewrite (cockroachdb-style).` Added AND closed in same commit. `(commit pending)` placeholder; SHA backfill on main as fast-follow commit (mirrors prior cycles' precedent).
 
+## 2026-05-20 - US-001
+- Added `LICENSE` (Apache 2.0 canonical text, 201 lines, copyright `2024- Strata authors`).
+- Rewrote README.md 194→82 lines cockroachdb-style. Sections: Title + CI/license badges; Alpha banner; tagline; What is Strata (5 sentences, no internals); 7 key-feature bullets; 8-row Strata-vs-RGW table; Status & maturity with 3-line Shipped/In-flight/Parked; Quickstart × 2 (in-memory smoke + TiKV lab via `make up-all`+`make wait-strata-lab`+`make smoke`); docs link to danchupin.github.io/strata + `make docs-serve` hint; one-line Apache 2.0 footer.
+- Removed: phase status table, metadata/data-plane internals paragraph, env-var giant table, repository layout listing, Option 1-5 walkthrough, examples block — moved or implicit via docs link.
+- Files: `LICENSE` (new), `README.md` (rewrite), `scripts/ralph/prd.json` (US-001 passes=true).
+- Verification: `make docs-build` 0 errors / 76 pages; `make vet` clean; grep gate clean — zero hits for `gocql|goceph|LWT|bucket_stats|Phase [0-9]|internal/[a-z]|file:[0-9]` in README.
+- **Learnings for future iterations:**
+  - LICENSE canonical Apache 2.0 text is 201 lines, satisfying US-012 verification (`wc -l LICENSE ≥ 200`).
+  - README badges with `--` URL-encoding (`license-Apache--2.0-blue`) is the shields.io idiom for a single `-` in the badge label.
+  - Cockroachdb-style README reads as: alpha banner first, tagline second, feature bullets before any code, vs-RGW comparison table for differentiation, status section ahead of quickstart so readers calibrate expectations.
+  - Verified Makefile target names against the actual Makefile before quoting in README — `make up-all`, `make wait-strata-lab`, `make up-cassandra` exist; `make wait-tikv`/`wait-ceph`/`wait-cassandra` exist. Saves a future iteration from documenting non-existent targets.
+---
+
