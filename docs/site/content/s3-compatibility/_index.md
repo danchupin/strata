@@ -13,7 +13,27 @@ compatibility benchmark.
 
 [s3-tests]: https://github.com/ceph/s3-tests
 
-## Headline
+## What we support
+
+A summary of where Strata sits today against the AWS S3 surface:
+
+- **Buckets + objects + listing + versioning + multipart** — full surface,
+  including `ListObjects` v1/v2, `ListObjectVersions`, conditional headers,
+  range GET, presigned URLs.
+- **Access control** — bucket / object ACL, bucket policy, public-access
+  block, ownership controls, CORS.
+- **Encryption** — SSE-S3 (AES-256), SSE-KMS (AWS KMS or Vault Transit),
+  SSE-C. Master-key rotation via `strata admin rewrap`.
+- **Object Lock** — COMPLIANCE + GOVERNANCE, legal hold, bypass-governance
+  flag.
+- **Lifecycle / replication / inventory / logging / notification** —
+  rule storage + worker-driven execution (`STRATA_WORKERS=`).
+- **IAM + STS** — `CreateUser`, `CreateAccessKey`, `AssumeRole`, access points.
+- **SigV4** — path-style, virtual-hosted, presigned, streaming chunk decoder.
+
+Detailed bucket / object / IAM / auth tables below.
+
+### Headline
 
 ```
 tests=177  passed=162  failed=15  errors=0  skipped=0
@@ -39,6 +59,10 @@ The 15 remaining failures split into:
 
 Re-run the suite locally with `scripts/s3-tests/run.sh`. Output lands in
 `scripts/s3-tests/report/`.
+
+For the operator + SDK-author index of every operation (handler pointers,
+AWS-divergence one-liners), see
+[Reference — S3 API operations]({{< ref "/reference/s3-api" >}}).
 
 ---
 
@@ -90,7 +114,7 @@ Status legend: ✅ supported · ⚠️ partial · ❌ not supported.
 | `InitiateMultipartUpload`            |   ✅   | User-meta passthrough. Composite checksum algorithm echo on Initiate.                                       |
 | `UploadPart`                         |   ✅   | SSE-C, streaming chunk decoder.                                                                             |
 | `UploadPartCopy`                     |   ⚠️   | Range parser + special-char URL handling closed; **3 s3-tests fail on GET-side checksum echo divergence** — destination response emits source-side composite checksum, fails boto3 `FlexibleChecksum` validation. P2 ROADMAP `Multipart copy GET-side checksum echo divergence`. |
-| `CompleteMultipartUpload`            |   ⚠️   | Validate-then-flip via LWT (cassandra+memory) / pessimistic txn (TiKV). **Rejects duplicate `PartNumber` in Parts list** — strict-ascending guard surfaces `InvalidPartOrder` where AWS dedupes. P2 ROADMAP `Multipart Complete rejects duplicate PartNumber in Parts list`. |
+| `CompleteMultipartUpload`            |   ⚠️   | Validate-then-flip via compare-and-set on the multipart row across all meta backends. **Rejects duplicate `PartNumber` in Parts list** — strict-ascending guard surfaces `InvalidPartOrder` where AWS dedupes. P2 ROADMAP `Multipart Complete rejects duplicate PartNumber in Parts list`. |
 | `AbortMultipartUpload`               |   ✅   |                                                                                                             |
 | `ListParts` (GET ?uploadId=)         |   ✅   |                                                                                                             |
 | `?tagging` (object)                  |   ✅   | Per-version when versioning is enabled.                                                                     |
@@ -109,7 +133,9 @@ Status legend: ✅ supported · ⚠️ partial · ❌ not supported.
 ## IAM / STS surface
 
 `?Action=` requests against the gateway base URL drive the IAM control plane.
-The handler is in `internal/s3api/iam.go`.
+The handler dispatches on the `Action` parameter — see the
+[Reference — S3 API](/reference/s3-api/#non-s3-rpc-surface-routed-alongside-s3)
+row for the entry point.
 
 | Action               | Status | Notes                                                  |
 |----------------------|:------:|--------------------------------------------------------|

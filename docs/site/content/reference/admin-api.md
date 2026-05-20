@@ -4,29 +4,30 @@ weight: 20
 ---
 
 <!--
-Source of truth: `internal/adminapi/openapi.yaml`. This page is a derived flat
-index — rebuild it when paths are added/removed from the OpenAPI document.
-Audit-verb column mirrors the `s3api.SetAuditOverride(ctx, action, ...)` stamp
-in the handler. GET/HEAD/OPTIONS are skipped by the audit middleware regardless
+Maintainer note: source of truth is the admin API OpenAPI contract. This page
+is a derived flat index — rebuild when paths are added/removed from the
+OpenAPI document. Audit-verb column mirrors the SetAuditOverride stamp in
+each handler. GET/HEAD/OPTIONS are skipped by the audit middleware regardless
 of any defensive stamp, so read-only rows show "—".
 -->
 
 # Admin API surface
 
-_This page is the operator index. Authoritative contract lives in
-[`internal/adminapi/openapi.yaml`](https://github.com/danchupin/strata/blob/main/internal/adminapi/openapi.yaml);
-rendered viewer at `/reference/admin-api-viewer/` (authored in US-005)._
+This is the operator index. Authoritative contract lives in the admin API
+OpenAPI document — rendered interactively at the
+[Admin API viewer]({{< ref "/reference/admin-api-viewer" >}}); raw bytes at
+[`/openapi.yaml`](/openapi.yaml).
 
 All paths are relative to the `/admin/v1` prefix on the gateway port. Auth: SigV4
 or the `strata_session` cookie issued by `POST /auth/login`. The `Full schema`
 column links to the interactive viewer with a Redoc operation anchor
 (`#operation/<operationId>`) — the anchor is auto-generated from the
-`operationId` field on each `paths.*.<method>` entry.
+`operationId` field on each path's method entry.
 
-The `Audit verb` column reflects the
-`s3api.SetAuditOverride(ctx, action, ...)` stamp at the handler. GET/HEAD/OPTIONS
-requests skip the [`AuditMiddleware`]({{< ref "/architecture/auth" >}}) — those
-rows show `—`. Write operations (POST/PUT/DELETE) always emit one audit row.
+The `Audit verb` column reflects the audit override stamped by each handler.
+GET/HEAD/OPTIONS requests skip the
+[audit middleware]({{< ref "/architecture/auth" >}}) — those rows show `—`.
+Write operations (POST/PUT/DELETE) always emit one audit row.
 
 ## Session
 
@@ -52,7 +53,7 @@ rows show `—`. Write operations (POST/PUT/DELETE) always emit one audit row.
 | `POST` | `/clusters/{id}/undrain` | `admin:UndrainCluster` | Clear draining state — drops the row. Works from `draining_readonly` or `evacuating`. | [undrainCluster](/reference/admin-api-viewer/#operation/undrainCluster) |
 | `POST` | `/clusters/{id}/activate` | `admin:ActivateCluster` | Promote a `pending` cluster to `live` with the supplied default-routing weight. | [activateCluster](/reference/admin-api-viewer/#operation/activateCluster) |
 | `PUT` | `/clusters/{id}/weight` | `admin:UpdateClusterWeight` | Adjust default-routing weight `[0, 100]` on a live cluster. Cache invalidates synchronously. | [updateClusterWeight](/reference/admin-api-viewer/#operation/updateClusterWeight) |
-| `GET` | `/clusters/{id}/bucket-references` | — | Buckets whose `Placement[<id>] > 0`, joined with `bucket_stats` (paginated). | [getClusterBucketReferences](/reference/admin-api-viewer/#operation/getClusterBucketReferences) |
+| `GET` | `/clusters/{id}/bucket-references` | — | Buckets whose `Placement[<id>] > 0`, joined with bucket-usage stats (paginated). | [getClusterBucketReferences](/reference/admin-api-viewer/#operation/getClusterBucketReferences) |
 
 ## Drain & rebalance
 
@@ -112,10 +113,10 @@ rows show `—`. Write operations (POST/PUT/DELETE) always emit one audit row.
 
 ## Scope note
 
-`internal/adminapi/server.go` registers additional `/admin/v1/*` routes that are
-not yet documented in `openapi.yaml` — bucket lifecycle / CORS / policy /
-inventory / logging / ACL / object actions / multipart admin / IAM users + access
-keys + managed policies / audit log / diagnostics extras (hot buckets, hot
-shards, slow queries, node detail, trace by request id) / storage probes /
-settings. Stamping those endpoints into the YAML is tracked as a separate doc
-follow-up and not in scope for this reference page.
+The admin API router registers additional `/admin/v1/*` routes that are not
+yet documented in the OpenAPI contract — bucket lifecycle / CORS / policy /
+inventory / logging / ACL / object actions / multipart admin / IAM users +
+access keys + managed policies / audit log / diagnostics extras (hot buckets,
+hot shards, slow queries, node detail, trace by request id) / storage probes
+/ settings. Stamping those endpoints into the YAML is tracked as a separate
+doc follow-up and not in scope for this reference page.
