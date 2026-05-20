@@ -577,7 +577,29 @@ RADOS / TiKV / Cassandra-specific signals.&lt;/p&gt;
  &lt;/tr&gt;
  &lt;/tbody&gt;
 &lt;/table&gt;
-&lt;p&gt;Schema details live in &lt;code&gt;internal/adminapi/openapi.yaml&lt;/code&gt;.&lt;/p&gt;</description></item><item><title>Sharding</title><link>https://danchupin.github.io/strata/architecture/sharding/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/sharding/</guid><description>&lt;h1 id="sharding"&gt;Sharding&lt;a class="anchor" href="#sharding"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Schema details live in &lt;code&gt;internal/adminapi/openapi.yaml&lt;/code&gt;.&lt;/p&gt;</description></item><item><title>RADOS ReadOp / WriteOp batching</title><link>https://danchupin.github.io/strata/architecture/benchmarks/rados-ops/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/benchmarks/rados-ops/</guid><description>&lt;h1 id="rados-readop--writeop-batching"&gt;RADOS ReadOp / WriteOp batching&lt;a class="anchor" href="#rados-readop--writeop-batching"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Closes the &lt;code&gt;ROADMAP.md&lt;/code&gt; P3 entry &lt;strong&gt;ReadOp / WriteOp batching in RADOS&lt;/strong&gt;
+(US-003 of &lt;code&gt;ralph/storage-correctness&lt;/code&gt;).&lt;/p&gt;
+&lt;h2 id="what-batching-does"&gt;What batching does&lt;a class="anchor" href="#what-batching-does"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;code&gt;internal/data/rados/ops.go&lt;/code&gt; (build tag &lt;code&gt;ceph&lt;/code&gt;) defines two helpers that
+bundle a chunk Write / Read with N xattr ops into a single librados
+operation:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;writeChunkBatched(ioctx, oid, body, xattrs)&lt;/code&gt; — builds a &lt;code&gt;goceph.WriteOp&lt;/code&gt;,
+appends &lt;code&gt;WriteFull(body)&lt;/code&gt; + &lt;code&gt;SetXattr(k, v)&lt;/code&gt; per entry of &lt;code&gt;xattrs&lt;/code&gt;, then
+&lt;code&gt;Operate()&lt;/code&gt;s once. xattrs nil ⇒ byte-identical to the legacy &lt;code&gt;writeChunk&lt;/code&gt;
+in &lt;code&gt;backend.go&lt;/code&gt;.&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;readChunkBatched(ioctx, oid, off, length, wantXattrs)&lt;/code&gt; — builds a
+&lt;code&gt;goceph.ReadOp&lt;/code&gt; with &lt;code&gt;Read(off, buf)&lt;/code&gt;, then &lt;code&gt;Operate()&lt;/code&gt;s once. When
+&lt;code&gt;wantXattrs&lt;/code&gt; is true a follow-up &lt;code&gt;ioctx.ListXattrs&lt;/code&gt; runs to populate the
+xattrs map — go-ceph v0.39 does not expose &lt;code&gt;rados_read_op_getxattrs&lt;/code&gt;, so
+xattrs sit on a second client round-trip. Today no caller requests
+xattrs.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;code&gt;writeChunk&lt;/code&gt; (legacy) and &lt;code&gt;writeChunkBatched(_, _, _, nil)&lt;/code&gt; produce the
+same on-wire librados &lt;code&gt;WriteOp{ WriteFull }&lt;/code&gt;. The win materialises only
+when xattrs are added to the PUT hot path — a future cycle. The helpers
+exist now so the call sites are wired and the bench shape is established.&lt;/p&gt;</description></item><item><title>Sharding</title><link>https://danchupin.github.io/strata/architecture/sharding/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/sharding/</guid><description>&lt;h1 id="sharding"&gt;Sharding&lt;a class="anchor" href="#sharding"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;Sharding is the single biggest divergence from Ceph RGW: every bucket&amp;rsquo;s
 metadata is split across &lt;code&gt;N&lt;/code&gt; partitions instead of living in a single
 bucket-index object. The split avoids RGW&amp;rsquo;s bucket-index ceiling at
@@ -600,7 +622,26 @@ correlate with the meta + data ops it triggered.&lt;/p&gt;
 &lt;p&gt;The wire-up env vars + tail-sampler + ring buffer behaviour live in
 &lt;a href="https://danchupin.github.io/strata/best-practices/monitoring/#opentelemetry-tracing"&gt;Monitoring&lt;/a&gt;.
 This page is the operator-facing reference for &lt;strong&gt;what spans exist,
-how they are named, and how to filter them&lt;/strong&gt;.&lt;/p&gt;</description></item><item><title>Admin API viewer</title><link>https://danchupin.github.io/strata/reference/admin-api-viewer/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/reference/admin-api-viewer/</guid><description>&lt;h1 id="admin-api-viewer"&gt;Admin API viewer&lt;a class="anchor" href="#admin-api-viewer"&gt;#&lt;/a&gt;&lt;/h1&gt;
+how they are named, and how to filter them&lt;/strong&gt;.&lt;/p&gt;</description></item><item><title>RADOS conn-pool sizing</title><link>https://danchupin.github.io/strata/architecture/benchmarks/rados-pool/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/benchmarks/rados-pool/</guid><description>&lt;h1 id="rados-conn-pool-sizing"&gt;RADOS conn-pool sizing&lt;a class="anchor" href="#rados-conn-pool-sizing"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Closes the &lt;code&gt;ROADMAP.md&lt;/code&gt; P3 entry &lt;strong&gt;Connection pool tuning&lt;/strong&gt;
+(US-004 of &lt;code&gt;ralph/storage-correctness&lt;/code&gt;).&lt;/p&gt;
+&lt;h2 id="what-the-pool-does"&gt;What the pool does&lt;a class="anchor" href="#what-the-pool-does"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;A single librados &lt;code&gt;*Conn&lt;/code&gt; serialises ops through one cephx session and a
+per-conn thread pool. Write-heavy workloads that saturate that single
+session see contention even though the OSD layer has headroom. The
+&lt;code&gt;connPool&lt;/code&gt; in &lt;code&gt;internal/data/rados/pool.go&lt;/code&gt; (build tag &lt;code&gt;ceph&lt;/code&gt;) holds N
+pre-connected &lt;code&gt;*goceph.Conn&lt;/code&gt; instances per cluster and serves them
+round-robin via an atomic counter; per-conn IOContexts are cached
+lazily by &lt;code&gt;(pool, namespace)&lt;/code&gt;.&lt;/p&gt;</description></item><item><title>OTel ring-buffer bytes budget</title><link>https://danchupin.github.io/strata/architecture/benchmarks/otel-ringbuf/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/benchmarks/otel-ringbuf/</guid><description>&lt;h1 id="otel-ring-buffer-bytes-budget"&gt;OTel ring-buffer bytes budget&lt;a class="anchor" href="#otel-ring-buffer-bytes-budget"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Closes the &lt;code&gt;ROADMAP.md&lt;/code&gt; P3 entry &lt;strong&gt;OTel ring-buffer eviction tuning
+under burst load&lt;/strong&gt; (US-005 of &lt;code&gt;ralph/storage-correctness&lt;/code&gt;).&lt;/p&gt;
+&lt;h2 id="what-the-ring-buffer-does"&gt;What the ring buffer does&lt;a class="anchor" href="#what-the-ring-buffer-does"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;code&gt;internal/otel/ringbuf.RingBuffer&lt;/code&gt; is an in-process &lt;code&gt;SpanProcessor&lt;/code&gt;
+that retains every finished span under an LRU + bytes-budget. The
+&lt;code&gt;/admin/v1/diagnostics/trace/{requestID}&lt;/code&gt; admin endpoint reads from
+the ring so operators can debug a request without a Jaeger / Tempo
+deployment. Tail sampling on the exporter side still drops most spans
+on the wire — the ring keeps the full payload locally.&lt;/p&gt;</description></item><item><title>Admin API viewer</title><link>https://danchupin.github.io/strata/reference/admin-api-viewer/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/reference/admin-api-viewer/</guid><description>&lt;h1 id="admin-api-viewer"&gt;Admin API viewer&lt;a class="anchor" href="#admin-api-viewer"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;Interactive &lt;a href="https://github.com/Redocly/redoc"&gt;Redoc&lt;/a&gt; render of the canonical
 Admin-API OpenAPI contract (&lt;code&gt;internal/adminapi/openapi.yaml&lt;/code&gt;). The YAML is
 copied into the Hugo static dir at build time by &lt;code&gt;make docs-openapi-copy&lt;/code&gt;
