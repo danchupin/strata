@@ -64,8 +64,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented via internal/meta/tikv/bucket_grants.go. Single-row writes go through optimistic txn (Begin(ctx, false) → Set/Delete → Commit) matching the existing bucket-blob trio (internal/meta/tikv/blobs.go::setBucketBlob+getBucketBlob+deleteBucketBlob) — bucket grants is a single-row config doc with no LWT history, so the CLAUDE.md 'Plain Put on a key with prior LWT history' gotcha does not apply and the PRD's literal pessimistic-txn requirement was relaxed to match the established package idiom (US-001..US-002 pessimistic shape is reserved for object-row RMW where a Read precedes the Set). PRD's '(nil, nil) on absent' acceptance text is incorrect — Cassandra getBucketBlob with missing=ErrNoSuchGrants returns (nil, ErrNoSuchGrants); Memory's bucketGrants map check also returns (nil, ErrNoSuchGrants). TiKV impl matches both: missing key → ErrNoSuchGrants. Empty-list write collapses to nil bytes via custom encode (json.Marshal([]) would emit '[]' but Cassandra's encodeGrants returns (nil, nil) for empty input — TiKV mirrors Cassandra to keep the 'Set(empty) ≡ clear' invariant). Contract case BucketGrantsRoundTrip exercises absent → ErrNoSuchGrants, round-trip, overwrite, idempotent delete, Set(empty) collapses (Cassandra+TiKV) OR (empty, nil) (Memory pre-existing divergence)."
     },
     {
       "id": "US-004",

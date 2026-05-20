@@ -96,18 +96,6 @@ func (s *Store) Probe(ctx context.Context) error {
 	return s.kv.Probe(ctx)
 }
 
-func (s *Store) SetBucketGrants(ctx context.Context, bucketID uuid.UUID, grants []meta.Grant) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) GetBucketGrants(ctx context.Context, bucketID uuid.UUID) ([]meta.Grant, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) DeleteBucketGrants(ctx context.Context, bucketID uuid.UUID) error {
-	return errors.ErrUnsupported
-}
-
 func (s *Store) CreateAccessPoint(ctx context.Context, ap *meta.AccessPoint) error {
 	return errors.ErrUnsupported
 }

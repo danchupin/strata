@@ -79,6 +79,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"ObjectRetentionRoundTrip", caseObjectRetention},
 		{"ObjectLegalHoldRoundTrip", caseObjectLegalHold},
 		{"ObjectRestoreStatusRoundTrip", caseObjectRestoreStatus},
+		{"BucketGrantsRoundTrip", caseBucketGrants},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -3833,6 +3834,84 @@ func caseObjectRestoreStatus(t *testing.T, s meta.Store) {
 	// Missing object.
 	if err := s.SetObjectRestoreStatus(ctx, b.ID, "ghost", "", "ongoing-request=\"true\""); err != meta.ErrObjectNotFound {
 		t.Errorf("set missing: got %v want ErrObjectNotFound", err)
+	}
+}
+
+// caseBucketGrants exercises SetBucketGrants/GetBucketGrants/
+// DeleteBucketGrants across (a) absent → ErrNoSuchGrants,
+// (b) happy-path round-trip, (c) overwrite (last writer wins),
+// (d) delete is idempotent + flips back to ErrNoSuchGrants,
+// (e) Set with empty list collapses to ErrNoSuchGrants (Cassandra
+// parity — encodeGrants emits nil bytes for an empty slice).
+// US-003 tikv-stubs.
+func caseBucketGrants(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "bgr", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+
+	// (a) Absent → ErrNoSuchGrants.
+	if _, err := s.GetBucketGrants(ctx, b.ID); err != meta.ErrNoSuchGrants {
+		t.Fatalf("absent get: got %v want ErrNoSuchGrants", err)
+	}
+
+	grants := []meta.Grant{
+		{GranteeType: "CanonicalUser", ID: "owner", Permission: "FULL_CONTROL"},
+		{GranteeType: "Group", URI: "http://acs.amazonaws.com/groups/global/AllUsers", Permission: "READ"},
+	}
+	if err := s.SetBucketGrants(ctx, b.ID, grants); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	got, err := s.GetBucketGrants(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("get after set: %v", err)
+	}
+	if len(got) != 2 || got[0].Permission != "FULL_CONTROL" || got[1].URI == "" {
+		t.Fatalf("round-trip shape: %+v", got)
+	}
+
+	// (c) Overwrite.
+	if err := s.SetBucketGrants(ctx, b.ID, []meta.Grant{
+		{GranteeType: "CanonicalUser", ID: "other", Permission: "READ"},
+	}); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	got, err = s.GetBucketGrants(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("get post-overwrite: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "other" || got[0].Permission != "READ" {
+		t.Fatalf("overwrite shape: %+v", got)
+	}
+
+	// (d) Delete is idempotent + restores ErrNoSuchGrants.
+	if err := s.DeleteBucketGrants(ctx, b.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := s.GetBucketGrants(ctx, b.ID); err != meta.ErrNoSuchGrants {
+		t.Fatalf("get post-delete: got %v want ErrNoSuchGrants", err)
+	}
+	if err := s.DeleteBucketGrants(ctx, b.ID); err != nil {
+		t.Fatalf("delete idempotent: %v", err)
+	}
+
+	// (e) Cassandra parity: Set(empty) collapses to ErrNoSuchGrants on
+	// next read. Memory diverges here (stores empty slice in its map,
+	// returns nil,nil) — pre-existing divergence noted in US-001
+	// learnings; skip the assertion on Memory by reading the result and
+	// checking either nil-error+empty-slice or ErrNoSuchGrants.
+	if err := s.SetBucketGrants(ctx, b.ID, []meta.Grant{}); err != nil {
+		t.Fatalf("set empty: %v", err)
+	}
+	got, err = s.GetBucketGrants(ctx, b.ID)
+	switch {
+	case err == meta.ErrNoSuchGrants:
+		// Cassandra + TiKV path.
+	case err == nil && len(got) == 0:
+		// Memory path — empty slice round-trips as nil/empty without sentinel.
+	default:
+		t.Fatalf("set-empty round-trip: got (%v, %v); want either ErrNoSuchGrants or (empty, nil)", got, err)
 	}
 }
 
