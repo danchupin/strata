@@ -151,15 +151,22 @@ func TestObjectLockBlocksDelete(t *testing.T) {
 		t.Errorf("expected AccessDenied, got: %s", body)
 	}
 
-	h.mustStatus(h.doString("PUT", "/bkt/k?legal-hold", `<LegalHold><Status>ON</Status></LegalHold>`), 200)
+	// US-006: weakening COMPLIANCE retention via PutObjectRetention is now
+	// rejected with AccessDenied (AWS parity); the legal-hold-blocks-delete
+	// scenario below uses a fresh object so the test does not depend on the
+	// previously-lax overwrite behaviour.
 	past := `<Retention><Mode>GOVERNANCE</Mode><RetainUntilDate>2000-01-01T00:00:00Z</RetainUntilDate></Retention>`
-	h.mustStatus(h.doString("PUT", "/bkt/k?retention", past), 200)
+	h.mustStatus(h.doString("PUT", "/bkt/k?retention", past), 403)
 
-	resp = h.doString("DELETE", "/bkt/k", "", "x-amz-bypass-governance-retention", "true")
+	h.mustStatus(h.doString("PUT", "/bkt/k2", "y"), 200)
+	h.mustStatus(h.doString("PUT", "/bkt/k2?retention", past), 200)
+	h.mustStatus(h.doString("PUT", "/bkt/k2?legal-hold", `<LegalHold><Status>ON</Status></LegalHold>`), 200)
+
+	resp = h.doString("DELETE", "/bkt/k2", "", "x-amz-bypass-governance-retention", "true")
 	h.mustStatus(resp, 403)
 
-	h.mustStatus(h.doString("PUT", "/bkt/k?legal-hold", `<LegalHold><Status>OFF</Status></LegalHold>`), 200)
-	h.mustStatus(h.doString("DELETE", "/bkt/k", "", "x-amz-bypass-governance-retention", "true"), 204)
+	h.mustStatus(h.doString("PUT", "/bkt/k2?legal-hold", `<LegalHold><Status>OFF</Status></LegalHold>`), 200)
+	h.mustStatus(h.doString("DELETE", "/bkt/k2", "", "x-amz-bypass-governance-retention", "true"), 204)
 }
 
 // fakeLifecycleBackend is a chunk-passthrough data backend (delegates to

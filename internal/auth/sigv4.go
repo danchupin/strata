@@ -20,8 +20,13 @@ const (
 	sigDateFormat  = "20060102"
 	sigMaxSkew     = 15 * time.Minute
 	streamingBody  = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
-	unsignedBody   = "UNSIGNED-PAYLOAD"
-	emptyBodyHash  = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	// streamingBodyTrailer — STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER
+	// aws-cli 2.22+ default for `aws s3 cp`. Chunked transfer-encoding with
+	// per-chunk signatures + a trailing checksum header signed via the
+	// AWS4-HMAC-SHA256-TRAILER stringToSign (US-009).
+	streamingBodyTrailer = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER"
+	unsignedBody         = "UNSIGNED-PAYLOAD"
+	emptyBodyHash        = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 )
 
 type parsedAuth struct {

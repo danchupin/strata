@@ -14,6 +14,11 @@ var (
 	ErrUnsupportedBody  = errors.New("unsupported x-amz-content-sha256 mode")
 	ErrExpiredToken     = errors.New("expired token")
 	ErrInvalidToken     = errors.New("invalid security token")
+	// ErrUnsupportedChecksumAlgorithm — STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER
+	// requests carry X-Amz-Trailer: <algo>. Only x-amz-checksum-sha256 is
+	// supported in Cycle 1 of ralph/storage-correctness (US-009); other algos
+	// (crc32, crc32c, sha1) parked behind ROADMAP P3 follow-up.
+	ErrUnsupportedChecksumAlgorithm = errors.New("unsupported checksum algorithm")
 )
 
 type Credential struct {

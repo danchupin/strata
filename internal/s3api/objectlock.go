@@ -146,11 +146,41 @@ func (s *Server) putObjectRetention(w http.ResponseWriter, r *http.Request, b *m
 		writeError(w, r, ErrInvalidArgument)
 		return
 	}
-	if err := s.Meta.SetObjectRetention(r.Context(), b.ID, key, r.URL.Query().Get("versionId"), mode, until); err != nil {
+	versionID := r.URL.Query().Get("versionId")
+	resource := "object:" + b.Name + "/" + key
+	principal := principalFromContext(r)
+	if existing, gerr := s.Meta.GetObject(r.Context(), b.ID, key, versionID); gerr == nil &&
+		existing.RetainMode == meta.LockModeCompliance &&
+		!existing.RetainUntil.IsZero() &&
+		existing.RetainUntil.After(time.Now()) &&
+		retentionWouldReduceCompliance(existing, mode, until) {
+		SetAuditOverride(r.Context(), "objectlock:ComplianceRetentionAttemptedReduce", resource, b.Name, principal)
+		writeError(w, r, ErrAccessDenied)
+		return
+	}
+	if mode == meta.LockModeCompliance {
+		SetAuditOverride(r.Context(), "objectlock:CompliancePut", resource, b.Name, principal)
+	}
+	if err := s.Meta.SetObjectRetention(r.Context(), b.ID, key, versionID, mode, until); err != nil {
 		mapMetaErr(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+// retentionWouldReduceCompliance returns true when the requested (newMode,
+// newUntil) tuple would weaken the existing COMPLIANCE retention — that is,
+// downgrade to a non-COMPLIANCE mode, clear it entirely, or shorten the
+// RetainUntilDate. Per AWS S3 semantics COMPLIANCE retention can only be
+// extended; any weakening attempt is rejected with AccessDenied.
+func retentionWouldReduceCompliance(existing *meta.Object, newMode string, newUntil time.Time) bool {
+	if newMode != meta.LockModeCompliance {
+		return true
+	}
+	if newUntil.IsZero() {
+		return true
+	}
+	return newUntil.Before(existing.RetainUntil)
 }
 
 func (s *Server) getObjectRetention(w http.ResponseWriter, r *http.Request, b *meta.Bucket, key string) {

@@ -164,6 +164,20 @@ type ClusterStatsProbe interface {
 	ClusterStats(ctx context.Context, clusterID string) (usedBytes, totalBytes int64, err error)
 }
 
+// ClusterECCapability is the optional capability surface for data backends
+// that can report the erasure-code profile of the underlying storage pool
+// addressed by an operator-labelled cluster id (US-007 EC-aware manifest
+// schema). RADOS implements it by probing the configured pool's
+// `erasure_code_profile` metadata via `mon_command(osd pool get …)` and
+// then `osd erasure-code-profile get`. The S3 and in-memory backends do
+// not expose EC and return (false, 0, 0, nil) — operators that set a
+// non-trivial ECPolicy on an S3-backed bucket get rejected at PUT-policy
+// time by the admin handler. Returns ErrClusterUnknown when the cluster
+// id is not configured on the backend.
+type ClusterECCapability interface {
+	ClusterECCapability(ctx context.Context, clusterID string) (ec bool, k int, m int, err error)
+}
+
 // ClusterObjectCountProbe is the optional capability surface for data
 // backends that can report the per-cluster physical object count
 // (US-001 drain-progress-physical). RADOS implements it by walking the

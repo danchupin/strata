@@ -116,6 +116,16 @@ var (
 	// outside [0, totalShards) or totalShards < 1 (US-001 rebalance-
 	// scale-phase-2).
 	ErrInvalidShard            = errors.New("invalid shard id or count")
+	// ErrInvalidECPolicy signals a SetBucketECPolicy call with non-
+	// positive K or M (US-007 EC-aware manifests).
+	ErrInvalidECPolicy         = errors.New("invalid EC policy")
+	// ErrNoSuchECPolicy signals GetBucketECPolicy / DeleteBucketECPolicy
+	// against a bucket with no stored EC policy.
+	ErrNoSuchECPolicy          = errors.New("no EC policy configured")
+	// ErrInconsistentECPolicy signals that the requested (k, m) does
+	// not match the underlying cluster's erasure-code capability
+	// (US-007). Surfaced as HTTP 409 by the admin handler.
+	ErrInconsistentECPolicy    = errors.New("inconsistent EC policy")
 )
 
 const (
@@ -288,6 +298,17 @@ func IsDrainingForWrite(state string) bool {
 	}
 }
 
+// ValidateECPolicy enforces the structural rules on a bucket EC policy:
+// K > 0 (data shards), M > 0 (parity shards). Backend capability probing
+// (the (ec, k, m) must match the underlying pool) lives in the admin
+// handler, not the validator (US-007 EC-aware manifests).
+func ValidateECPolicy(p ECPolicy) error {
+	if p.K <= 0 || p.M <= 0 {
+		return ErrInvalidECPolicy
+	}
+	return nil
+}
+
 // ValidatePlacement enforces the structural rules on a bucket Placement
 // policy: weights in [0, 100], at least one positive weight, no empty
 // cluster ids. Cluster-name resolution against the data backend env lives
@@ -428,6 +449,22 @@ type BucketStats struct {
 	UpdatedAt   time.Time
 }
 
+// UserStats is the per-owner denormalised aggregate maintained in lockstep
+// with BucketStats so UserQuota.TotalMaxBytes / MaxBuckets checks resolve to
+// a single point lookup rather than a ListBuckets fan-out (ralph/storage-
+// correctness US-001). UsedBytes / UsedObjects are summed across every
+// bucket the user owns; BucketCount mirrors len(ListBuckets(owner)) and is
+// bumped atomically with bucket row creation / deletion. All three fields
+// admit negative deltas through the bump helpers; reconcile worker drift
+// correction (US-007 follow-up) covers any best-effort coherence gap.
+type UserStats struct {
+	Owner       string
+	UsedBytes   int64
+	UsedObjects int64
+	BucketCount int
+	UpdatedAt   time.Time
+}
+
 // UsageAggregate is one row in the per-(bucket, storage_class, day) usage
 // rollup feed (US-008) consumed by external billing. Day is normalised to
 // UTC midnight; ByteSeconds is the integral of UsedBytes over the day
@@ -490,6 +527,21 @@ type Bucket struct {
 	// DrainRefused; drain workflows refuse to fire). Loaded inline via
 	// GetBucket so the routing path does not need a second round-trip.
 	PlacementMode string `json:"placement_mode,omitempty"`
+	// ECPolicy is the per-bucket erasure-code declaration (US-007
+	// EC-aware manifests). Set via PUT /admin/v1/buckets/{name}/ec-policy
+	// after the admin handler validates the requested (k, m) against
+	// every target cluster's data.Backend.ClusterECCapability probe.
+	// Stamped onto Manifest.ECParams at PutChunks time; nil means the
+	// bucket has no EC declaration (RADOS pool config still decides the
+	// actual encoding regardless).
+	ECPolicy *ECPolicy `json:"ec_policy,omitempty"`
+}
+
+// ECPolicy mirrors data.ECParams at the bucket-declaration layer. K data
+// shards + M parity shards (e.g. k=4, m=2). Validated via ValidateECPolicy.
+type ECPolicy struct {
+	K int `json:"k"`
+	M int `json:"m"`
 }
 
 const (
@@ -1075,6 +1127,16 @@ type Store interface {
 	// (US-001 effective-placement).
 	SetBucketPlacementMode(ctx context.Context, name, mode string) error
 
+	// Bucket EC policy CRUD (US-007 EC-aware manifests). Persisted as a
+	// JSON blob on the buckets row so GetBucket loads it inline — no
+	// extra round-trip on the PUT hot path. Set validates via
+	// meta.ValidateECPolicy; backend capability probing happens in the
+	// admin handler. Get returns (nil, ErrNoSuchECPolicy) when unset.
+	// Delete is idempotent — clearing an unset policy is a no-op.
+	SetBucketECPolicy(ctx context.Context, name string, policy ECPolicy) error
+	GetBucketECPolicy(ctx context.Context, name string) (*ECPolicy, error)
+	DeleteBucketECPolicy(ctx context.Context, name string) error
+
 	// Cluster state CRUD (US-006 placement-rebalance, mode added in US-001
 	// drain-transparency, weight added in US-001 cluster-weights). Stored
 	// as a top-level row keyed on the operator-supplied cluster id (NOT
@@ -1115,6 +1177,19 @@ type Store interface {
 	// concurrent bumps serialise without lost updates.
 	GetBucketStats(ctx context.Context, bucketID uuid.UUID) (BucketStats, error)
 	BumpBucketStats(ctx context.Context, bucketID uuid.UUID, deltaBytes, deltaObjects int64) (BucketStats, error)
+
+	// UserStats live aggregate (ralph/storage-correctness US-001). GetUserStats
+	// returns the current row (zero-value when no row exists yet — never an
+	// error for the missing case). BumpUserStats atomically increments the
+	// byte / object counters and returns the post-update row; IncrUserBucketCount
+	// adjusts BucketCount in lockstep with bucket row creation / deletion.
+	// Both bump primitives accept negative deltas. Cassandra batches the
+	// user_stats bump alongside the bucket_stats LWT into a single
+	// `BEGIN BATCH ... APPLY BATCH`; TiKV locks both keys in one pessimistic
+	// txn; memory backend updates both under the same critical section.
+	GetUserStats(ctx context.Context, owner string) (UserStats, error)
+	BumpUserStats(ctx context.Context, owner string, deltaBytes, deltaObjects int64) (UserStats, error)
+	IncrUserBucketCount(ctx context.Context, owner string, delta int) (UserStats, error)
 
 	// Usage aggregates (US-008). The leader-elected usage-rollup worker
 	// writes one row per (bucketID, storageClass, day) per tick. Day must be

@@ -160,6 +160,11 @@ func (s *Store) CreateBucket(ctx context.Context, name, owner, defaultClass stri
 		return nil, meta.ErrBucketAlreadyExists
 	}
 	s.cacheBucketName(id, name)
+	if owner != "" {
+		if _, err := s.IncrUserBucketCount(ctx, owner, 1); err != nil {
+			return nil, err
+		}
+	}
 	return b, nil
 }
 
@@ -171,15 +176,16 @@ func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error
 		region            string
 		mfaDelete         string
 		placementMode     string
+		ecPolicyBlob      string
 		createdAt         time.Time
 		shardCount        int
 		shardCountTarget  int
 		objectLockEnabled bool
 	)
 	err := s.s.Query(
-		`SELECT id, owner_id, created_at, default_class, versioning, shard_count, shard_count_target, acl, object_lock_enabled, region, mfa_delete, placement_mode FROM buckets WHERE name=?`,
+		`SELECT id, owner_id, created_at, default_class, versioning, shard_count, shard_count_target, acl, object_lock_enabled, region, mfa_delete, placement_mode, ec_policy FROM buckets WHERE name=?`,
 		name,
-	).WithContext(ctx).Scan(&idG, &owner, &createdAt, &class, &versioning, &shardCount, &shardCountTarget, &acl, &objectLockEnabled, &region, &mfaDelete, &placementMode)
+	).WithContext(ctx).Scan(&idG, &owner, &createdAt, &class, &versioning, &shardCount, &shardCountTarget, &acl, &objectLockEnabled, &region, &mfaDelete, &placementMode, &ecPolicyBlob)
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrBucketNotFound
 	}
@@ -191,6 +197,10 @@ func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error
 	}
 	bID := uuidFromGocql(idG)
 	s.cacheBucketName(bID, name)
+	ecPolicy, err := meta.DecodeBucketECPolicy([]byte(ecPolicyBlob))
+	if err != nil {
+		return nil, err
+	}
 	return &meta.Bucket{
 		Name:              name,
 		ID:                bID,
@@ -205,6 +215,7 @@ func (s *Store) GetBucket(ctx context.Context, name string) (*meta.Bucket, error
 		ShardCount:        shardCount,
 		TargetShardCount:  shardCountTarget,
 		PlacementMode:     placementMode,
+		ECPolicy:          ecPolicy,
 	}, nil
 }
 
@@ -350,7 +361,15 @@ func (s *Store) DeleteBucket(ctx context.Context, name string) error {
 	if !empty {
 		return meta.ErrBucketNotEmpty
 	}
-	return s.s.Query(`DELETE FROM buckets WHERE name=?`, name).WithContext(ctx).Exec()
+	if err := s.s.Query(`DELETE FROM buckets WHERE name=?`, name).WithContext(ctx).Exec(); err != nil {
+		return err
+	}
+	if b.Owner != "" {
+		if _, err := s.IncrUserBucketCount(ctx, b.Owner, -1); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) bucketIsEmpty(ctx context.Context, bucketID uuid.UUID, shardCount int) (bool, error) {
@@ -3037,6 +3056,67 @@ func (s *Store) DeleteBucketPlacement(ctx context.Context, name string) error {
 	return s.deleteBucketBlob(ctx, "bucket_placement", b.ID)
 }
 
+// SetBucketECPolicy persists the EC policy on the buckets row (US-007).
+// LWT for the same Paxos-lineage reason as SetBucketPlacementMode.
+func (s *Store) SetBucketECPolicy(ctx context.Context, name string, policy meta.ECPolicy) error {
+	if err := meta.ValidateECPolicy(policy); err != nil {
+		return err
+	}
+	blob, err := meta.EncodeBucketECPolicy(policy)
+	if err != nil {
+		return err
+	}
+	applied, err := s.s.Query(
+		`UPDATE buckets SET ec_policy=? WHERE name=? IF EXISTS`,
+		string(blob), name,
+	).WithContext(ctx).SerialConsistency(gocql.LocalSerial).ScanCAS(nil)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return meta.ErrBucketNotFound
+	}
+	return nil
+}
+
+// GetBucketECPolicy returns the EC policy or ErrNoSuchECPolicy when unset.
+func (s *Store) GetBucketECPolicy(ctx context.Context, name string) (*meta.ECPolicy, error) {
+	var blob string
+	err := s.s.Query(
+		`SELECT ec_policy FROM buckets WHERE name=?`, name,
+	).WithContext(ctx).Scan(&blob)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return nil, meta.ErrBucketNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	p, err := meta.DecodeBucketECPolicy([]byte(blob))
+	if err != nil {
+		return nil, err
+	}
+	if p == nil {
+		return nil, meta.ErrNoSuchECPolicy
+	}
+	return p, nil
+}
+
+// DeleteBucketECPolicy clears the EC policy. Idempotent — clearing an
+// unset row returns nil.
+func (s *Store) DeleteBucketECPolicy(ctx context.Context, name string) error {
+	applied, err := s.s.Query(
+		`UPDATE buckets SET ec_policy=? WHERE name=? IF EXISTS`,
+		"", name,
+	).WithContext(ctx).SerialConsistency(gocql.LocalSerial).ScanCAS(nil)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return meta.ErrBucketNotFound
+	}
+	return nil
+}
+
 // SetBucketPlacementMode persists the per-bucket placement mode on the
 // buckets row (US-001 effective-placement). Uses LWT (`IF EXISTS`) so
 // the write participates in the same Paxos lineage as CreateBucket /
@@ -3326,19 +3406,28 @@ func (s *Store) DeleteUserQuota(ctx context.Context, userName string) error {
 // GetBucketStats returns the live counter row for the bucket, or zero stats
 // when no row exists yet (the first bump lazily upserts).
 func (s *Store) GetBucketStats(ctx context.Context, bucketID uuid.UUID) (meta.BucketStats, error) {
+	stats, _, err := s.getBucketStatsRow(ctx, bucketID)
+	return stats, err
+}
+
+// getBucketStatsRow returns the (stats, owner) pair stored on bucket_stats.
+// Owner column is the denormalised pointer to user_stats (ralph/storage-
+// correctness US-001). Missing row → zero values + empty owner.
+func (s *Store) getBucketStatsRow(ctx context.Context, bucketID uuid.UUID) (meta.BucketStats, string, error) {
 	var bytes, objects int64
 	var updated time.Time
+	var owner string
 	err := s.s.Query(
-		`SELECT used_bytes, used_objects, updated_at FROM bucket_stats WHERE bucket_id=?`,
+		`SELECT used_bytes, used_objects, updated_at, owner FROM bucket_stats WHERE bucket_id=?`,
 		gocqlUUID(bucketID),
-	).WithContext(ctx).Scan(&bytes, &objects, &updated)
+	).WithContext(ctx).Scan(&bytes, &objects, &updated, &owner)
 	if errors.Is(err, gocql.ErrNotFound) {
-		return meta.BucketStats{}, nil
+		return meta.BucketStats{}, "", nil
 	}
 	if err != nil {
-		return meta.BucketStats{}, err
+		return meta.BucketStats{}, "", err
 	}
-	return meta.BucketStats{UsedBytes: bytes, UsedObjects: objects, UpdatedAt: updated}, nil
+	return meta.BucketStats{UsedBytes: bytes, UsedObjects: objects, UpdatedAt: updated}, owner, nil
 }
 
 // BumpBucketStats atomically applies (deltaBytes, deltaObjects) to the row.
@@ -3346,10 +3435,19 @@ func (s *Store) GetBucketStats(ctx context.Context, bucketID uuid.UUID) (meta.Bu
 // IF NOT EXISTS; subsequent bumps re-read + LWT-update IF the prior counter
 // values still match. The IF predicate enforces read-after-write coherence
 // per the LWT gotcha in CLAUDE.md.
+//
+// On successful CAS, also bumps user_stats(used_bytes/used_objects) for the
+// owner denormalised on the bucket_stats row (ralph/storage-correctness
+// US-001). Cassandra rejects cross-partition LWT batches, so the bucket_stats
+// CAS and the user_stats bump are issued sequentially; the user_stats bump is
+// idempotent per (deltaBytes, deltaObjects) tuple via its own LWT loop so a
+// retry of an already-applied bucket_stats CAS would only re-apply the same
+// user-level delta. Drift correction (orphan owner column, stale bucket_stats
+// owner) is left to a follow-up quotareconcile sweep.
 func (s *Store) BumpBucketStats(ctx context.Context, bucketID uuid.UUID, deltaBytes, deltaObjects int64) (meta.BucketStats, error) {
 	const maxAttempts = 32
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		cur, err := s.GetBucketStats(ctx, bucketID)
+		cur, owner, err := s.getBucketStatsRow(ctx, bucketID)
 		if err != nil {
 			return meta.BucketStats{}, err
 		}
@@ -3359,15 +3457,21 @@ func (s *Store) BumpBucketStats(ctx context.Context, bucketID uuid.UUID, deltaBy
 			UpdatedAt:   time.Now().UTC(),
 		}
 		if cur.UpdatedAt.IsZero() {
+			if owner == "" {
+				owner = s.lookupBucketOwner(ctx, bucketID)
+			}
 			applied, err := s.s.Query(
-				`INSERT INTO bucket_stats (bucket_id, used_bytes, used_objects, updated_at)
-				   VALUES (?, ?, ?, ?) IF NOT EXISTS`,
-				gocqlUUID(bucketID), next.UsedBytes, next.UsedObjects, next.UpdatedAt,
+				`INSERT INTO bucket_stats (bucket_id, used_bytes, used_objects, updated_at, owner)
+				   VALUES (?, ?, ?, ?, ?) IF NOT EXISTS`,
+				gocqlUUID(bucketID), next.UsedBytes, next.UsedObjects, next.UpdatedAt, owner,
 			).WithContext(ctx).MapScanCAS(map[string]interface{}{})
 			if err != nil {
 				return meta.BucketStats{}, err
 			}
 			if applied {
+				if err := s.bumpUserStatsBytes(ctx, owner, deltaBytes, deltaObjects); err != nil {
+					return meta.BucketStats{}, err
+				}
 				return next, nil
 			}
 			continue
@@ -3382,10 +3486,157 @@ func (s *Store) BumpBucketStats(ctx context.Context, bucketID uuid.UUID, deltaBy
 			return meta.BucketStats{}, err
 		}
 		if applied {
+			if owner == "" {
+				owner = s.lookupBucketOwner(ctx, bucketID)
+				if owner != "" {
+					_, _ = s.s.Query(
+						`UPDATE bucket_stats SET owner=? WHERE bucket_id=? IF owner=null`,
+						owner, gocqlUUID(bucketID),
+					).WithContext(ctx).ScanCAS(nil)
+				}
+			}
+			if err := s.bumpUserStatsBytes(ctx, owner, deltaBytes, deltaObjects); err != nil {
+				return meta.BucketStats{}, err
+			}
 			return next, nil
 		}
 	}
 	return meta.BucketStats{}, fmt.Errorf("cassandra: bucket_stats CAS exhausted retries for bucket %s", bucketID)
+}
+
+// lookupBucketOwner resolves the owner for bucketID via the bucket_names
+// cache, falling back to a SELECT against the buckets table. Returns "" if
+// the bucket row cannot be located. Used by BumpBucketStats to seed the
+// denormalised owner column on first insert.
+func (s *Store) lookupBucketOwner(ctx context.Context, bucketID uuid.UUID) string {
+	s.bucketNamesMu.RLock()
+	name := s.bucketNames[bucketID]
+	s.bucketNamesMu.RUnlock()
+	if name == "" {
+		// Last-resort scan via ListBuckets — only triggered for buckets created
+		// outside CreateBucket (mp completion / pre-cache rows). Rare path.
+		all, err := s.ListBuckets(ctx, "")
+		if err != nil {
+			return ""
+		}
+		for _, b := range all {
+			s.cacheBucketName(b.ID, b.Name)
+			if b.ID == bucketID {
+				return b.Owner
+			}
+		}
+		return ""
+	}
+	var owner string
+	if err := s.s.Query(
+		`SELECT owner_id FROM buckets WHERE name=?`, name,
+	).WithContext(ctx).Scan(&owner); err != nil {
+		return ""
+	}
+	return owner
+}
+
+// GetUserStats returns the denormalised aggregate for owner, or zero values
+// when no row exists (a never-bumped owner). ralph/storage-correctness US-001.
+func (s *Store) GetUserStats(ctx context.Context, owner string) (meta.UserStats, error) {
+	if owner == "" {
+		return meta.UserStats{}, nil
+	}
+	var bytes, objects, buckets int64
+	var updated time.Time
+	err := s.s.Query(
+		`SELECT used_bytes, used_objects, bucket_count, updated_at FROM user_stats WHERE owner=?`,
+		owner,
+	).WithContext(ctx).Scan(&bytes, &objects, &buckets, &updated)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return meta.UserStats{Owner: owner}, nil
+	}
+	if err != nil {
+		return meta.UserStats{}, err
+	}
+	return meta.UserStats{
+		Owner:       owner,
+		UsedBytes:   bytes,
+		UsedObjects: objects,
+		BucketCount: int(buckets),
+		UpdatedAt:   updated,
+	}, nil
+}
+
+// BumpUserStats applies (deltaBytes, deltaObjects) to user_stats row via
+// LWT loop. Allows negative deltas (DELETE / lifecycle expire path).
+// bucket_count is not touched — use IncrUserBucketCount for that.
+func (s *Store) BumpUserStats(ctx context.Context, owner string, deltaBytes, deltaObjects int64) (meta.UserStats, error) {
+	if owner == "" {
+		return meta.UserStats{}, nil
+	}
+	return s.bumpUserStatsCAS(ctx, owner, deltaBytes, deltaObjects, 0)
+}
+
+// IncrUserBucketCount applies delta to user_stats.bucket_count atomically.
+// Called from CreateBucket (+1) and DeleteBucket (-1) so the operator-facing
+// MaxBuckets check resolves to an O(1) point read.
+func (s *Store) IncrUserBucketCount(ctx context.Context, owner string, delta int) (meta.UserStats, error) {
+	if owner == "" {
+		return meta.UserStats{}, nil
+	}
+	return s.bumpUserStatsCAS(ctx, owner, 0, 0, int64(delta))
+}
+
+// bumpUserStatsBytes is the internal hook BumpBucketStats calls after a
+// successful bucket_stats CAS to keep user_stats coherent.
+func (s *Store) bumpUserStatsBytes(ctx context.Context, owner string, deltaBytes, deltaObjects int64) error {
+	if owner == "" || (deltaBytes == 0 && deltaObjects == 0) {
+		return nil
+	}
+	_, err := s.bumpUserStatsCAS(ctx, owner, deltaBytes, deltaObjects, 0)
+	return err
+}
+
+// bumpUserStatsCAS read-modify-CAS loops user_stats for owner. LWT enforces
+// read-after-write coherence the same way bucket_stats does.
+func (s *Store) bumpUserStatsCAS(ctx context.Context, owner string, deltaBytes, deltaObjects, deltaBuckets int64) (meta.UserStats, error) {
+	const maxAttempts = 32
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		cur, err := s.GetUserStats(ctx, owner)
+		if err != nil {
+			return meta.UserStats{}, err
+		}
+		next := meta.UserStats{
+			Owner:       owner,
+			UsedBytes:   cur.UsedBytes + deltaBytes,
+			UsedObjects: cur.UsedObjects + deltaObjects,
+			BucketCount: cur.BucketCount + int(deltaBuckets),
+			UpdatedAt:   time.Now().UTC(),
+		}
+		if cur.UpdatedAt.IsZero() {
+			applied, err := s.s.Query(
+				`INSERT INTO user_stats (owner, used_bytes, used_objects, bucket_count, updated_at)
+				   VALUES (?, ?, ?, ?, ?) IF NOT EXISTS`,
+				owner, next.UsedBytes, next.UsedObjects, int64(next.BucketCount), next.UpdatedAt,
+			).WithContext(ctx).MapScanCAS(map[string]interface{}{})
+			if err != nil {
+				return meta.UserStats{}, err
+			}
+			if applied {
+				return next, nil
+			}
+			continue
+		}
+		applied, err := s.s.Query(
+			`UPDATE user_stats SET used_bytes=?, used_objects=?, bucket_count=?, updated_at=?
+			   WHERE owner=? IF used_bytes=? AND used_objects=? AND bucket_count=?`,
+			next.UsedBytes, next.UsedObjects, int64(next.BucketCount), next.UpdatedAt,
+			owner, cur.UsedBytes, cur.UsedObjects, int64(cur.BucketCount),
+		).WithContext(ctx).MapScanCAS(map[string]interface{}{})
+		if err != nil {
+			return meta.UserStats{}, err
+		}
+		if applied {
+			return next, nil
+		}
+	}
+	return meta.UserStats{}, fmt.Errorf("cassandra: user_stats CAS exhausted retries for owner %s", owner)
 }
 
 // WriteUsageAggregate persists one row in the (bucket, storageClass, day)

@@ -47,6 +47,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"AuditLogRoundTrip", caseAuditLog},
 		{"AuditLogFiltered", caseAuditLogFiltered},
 		{"AuditLogPartitionExport", caseAuditLogPartitionExport},
+		{"ObjectLockComplianceAudit", caseObjectLockComplianceAudit},
 		{"ListSlowQueries", caseListSlowQueries},
 		{"VersioningNullSentinel", caseVersioningNullSentinel},
 		{"VersioningNullListVersions", caseVersioningNullListVersions},
@@ -64,9 +65,12 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"UserQuotaRoundTrip", caseUserQuota},
 		{"BucketStatsRoundTrip", caseBucketStats},
 		{"BucketStatsHotPath", caseBucketStatsHotPath},
+		{"UserStatsRoundTrip", caseUserStats},
+		{"UserStatsConcurrent", caseUserStatsConcurrent},
 		{"UsageAggregateRoundTrip", caseUsageAggregate},
 		{"BucketPlacementRoundTrip", caseBucketPlacement},
 		{"BucketPlacementMode", casePlacementMode},
+		{"BucketECPolicyRoundTrip", caseBucketECPolicy},
 		{"ClusterStateRoundTrip", caseClusterState},
 		{"ClusterStateModes", caseClusterStateModes},
 		{"ClusterStateWeights", caseClusterStateWeights},
@@ -1149,6 +1153,72 @@ func caseAuditLogPartitionExport(t *testing.T, s meta.Store) {
 	}
 	if len(parts2) != 0 {
 		t.Fatalf("expected zero aged partitions after delete, got %d", len(parts2))
+	}
+}
+
+// caseObjectLockComplianceAudit exercises the US-006 Object Lock COMPLIANCE
+// audit verbs end-to-end through the meta.Store audit_log surface: every
+// backend (memory, Cassandra, TiKV) must persist + return the three new
+// action strings unchanged so operator queries like
+// `audit_log WHERE action LIKE 'objectlock:%'` round-trip on every backend.
+func caseObjectLockComplianceAudit(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "lockaudit", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	now := time.Now().UTC()
+	verbs := []string{
+		"objectlock:CompliancePut",
+		"objectlock:ComplianceRetentionAttemptedReduce",
+		"objectlock:ComplianceRetentionExpired",
+	}
+	for i, verb := range verbs {
+		principal := "alice"
+		if verb == "objectlock:ComplianceRetentionExpired" {
+			principal = "system:lifecycle-worker"
+		}
+		row := &meta.AuditEvent{
+			BucketID:  b.ID,
+			Bucket:    b.Name,
+			EventID:   newTimeUUID(),
+			Time:      now.Add(time.Duration(i) * time.Millisecond),
+			Principal: principal,
+			Action:    verb,
+			Resource:  "object:" + b.Name + "/locked.bin",
+			Result:    "200",
+			RequestID: "req-" + verb,
+			SourceIP:  "10.0.0.1",
+		}
+		if err := s.EnqueueAudit(ctx, row, time.Hour); err != nil {
+			t.Fatalf("enqueue %s: %v", verb, err)
+		}
+	}
+	got, _, err := s.ListAuditFiltered(ctx, meta.AuditFilter{BucketID: b.ID, BucketScoped: true, Limit: 100})
+	if err != nil {
+		t.Fatalf("list filtered: %v", err)
+	}
+	want := map[string]string{
+		"objectlock:CompliancePut":                      "alice",
+		"objectlock:ComplianceRetentionAttemptedReduce": "alice",
+		"objectlock:ComplianceRetentionExpired":         "system:lifecycle-worker",
+	}
+	counts := map[string]int{}
+	principals := map[string]string{}
+	for _, r := range got {
+		if _, ok := want[r.Action]; !ok {
+			continue
+		}
+		counts[r.Action]++
+		principals[r.Action] = r.Principal
+	}
+	for verb, wantPrincipal := range want {
+		if counts[verb] != 1 {
+			t.Fatalf("verb %s emitted %d rows, want exactly 1", verb, counts[verb])
+		}
+		if principals[verb] != wantPrincipal {
+			t.Fatalf("verb %s principal=%q want %q", verb, principals[verb], wantPrincipal)
+		}
 	}
 }
 
@@ -2602,6 +2672,124 @@ func caseBucketStatsHotPath(t *testing.T, s meta.Store) {
 	mustStats("mp-complete", mp.ID, 192, 1)
 }
 
+// caseUserStats validates the per-owner denormalised aggregate maintained
+// in lockstep with bucket_stats (ralph/storage-correctness US-001). Seeds
+// 3 buckets across 2 owners, writes 100 chunks each, asserts GetUserStats
+// reports the correct totals; deletes a bucket, asserts the totals drop.
+func caseUserStats(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+
+	mustUser := func(label, owner string, wantBytes, wantObjects int64, wantBuckets int) {
+		t.Helper()
+		got, err := s.GetUserStats(ctx, owner)
+		if err != nil {
+			t.Fatalf("%s: get user stats: %v", label, err)
+		}
+		if got.UsedBytes != wantBytes || got.UsedObjects != wantObjects || got.BucketCount != wantBuckets {
+			t.Fatalf("%s: got %+v want bytes=%d objects=%d buckets=%d",
+				label, got, wantBytes, wantObjects, wantBuckets)
+		}
+	}
+
+	alice, err := s.CreateBucket(ctx, "us-a1", "alice", "STANDARD")
+	if err != nil {
+		t.Fatalf("create alice/a1: %v", err)
+	}
+	alice2, err := s.CreateBucket(ctx, "us-a2", "alice", "STANDARD")
+	if err != nil {
+		t.Fatalf("create alice/a2: %v", err)
+	}
+	bob, err := s.CreateBucket(ctx, "us-b1", "bob", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bob/b1: %v", err)
+	}
+
+	mustUser("alice-fresh", "alice", 0, 0, 2)
+	mustUser("bob-fresh", "bob", 0, 0, 1)
+
+	const chunks = 100
+	const size = int64(7)
+	for i := 0; i < chunks; i++ {
+		if _, err := s.BumpBucketStats(ctx, alice.ID, size, 1); err != nil {
+			t.Fatalf("bump alice/a1: %v", err)
+		}
+		if _, err := s.BumpBucketStats(ctx, alice2.ID, size, 1); err != nil {
+			t.Fatalf("bump alice/a2: %v", err)
+		}
+		if _, err := s.BumpBucketStats(ctx, bob.ID, size, 1); err != nil {
+			t.Fatalf("bump bob/b1: %v", err)
+		}
+	}
+
+	mustUser("alice-after-100", "alice", size*chunks*2, chunks*2, 2)
+	mustUser("bob-after-100", "bob", size*chunks, chunks, 1)
+
+	// Drain alice/a2 + delete it; bucket_count drops, byte tally drops.
+	if _, err := s.BumpBucketStats(ctx, alice2.ID, -size*chunks, -chunks); err != nil {
+		t.Fatalf("drain alice/a2: %v", err)
+	}
+	mustUser("alice-drain-a2", "alice", size*chunks, chunks, 2)
+
+	if err := s.DeleteBucket(ctx, "us-a2"); err != nil {
+		t.Fatalf("delete alice/a2: %v", err)
+	}
+	mustUser("alice-del-a2", "alice", size*chunks, chunks, 1)
+
+	// Bob's tally untouched by alice's churn.
+	mustUser("bob-isolation", "bob", size*chunks, chunks, 1)
+}
+
+// caseUserStatsConcurrent stresses BumpUserStats serialisation: 100
+// goroutines bump the same owner concurrently, the post-state must reflect
+// exactly N applications with no lost updates.
+func caseUserStatsConcurrent(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	const conc = 100
+	const size = int64(13)
+
+	type result struct{ err error }
+	results := make(chan result, conc)
+	for i := 0; i < conc; i++ {
+		go func() {
+			_, err := s.BumpUserStats(ctx, "race-user", size, 1)
+			results <- result{err: err}
+		}()
+	}
+	for i := 0; i < conc; i++ {
+		if r := <-results; r.err != nil {
+			t.Fatalf("concurrent BumpUserStats: %v", r.err)
+		}
+	}
+	got, err := s.GetUserStats(ctx, "race-user")
+	if err != nil {
+		t.Fatalf("get after concurrent: %v", err)
+	}
+	if got.UsedBytes != size*conc || got.UsedObjects != conc {
+		t.Fatalf("after concurrent: got %+v want bytes=%d objects=%d",
+			got, size*conc, conc)
+	}
+
+	// IncrUserBucketCount has its own concurrency path.
+	for i := 0; i < conc; i++ {
+		go func() {
+			_, err := s.IncrUserBucketCount(ctx, "race-user", 1)
+			results <- result{err: err}
+		}()
+	}
+	for i := 0; i < conc; i++ {
+		if r := <-results; r.err != nil {
+			t.Fatalf("concurrent IncrUserBucketCount: %v", r.err)
+		}
+	}
+	got, err = s.GetUserStats(ctx, "race-user")
+	if err != nil {
+		t.Fatalf("get after incr: %v", err)
+	}
+	if got.BucketCount != conc {
+		t.Fatalf("after incr: got %d want %d", got.BucketCount, conc)
+	}
+}
+
 // caseUsageAggregate exercises the usage rollup CRUD surface (US-008):
 // per-(bucket, class) writes are isolated by partition key, ListUsageAggregates
 // applies a half-open [from, to) day filter, ListUserUsage sums across the
@@ -2864,6 +3052,99 @@ func casePlacementMode(t *testing.T, s meta.Store) {
 	// Missing bucket: should surface ErrBucketNotFound, not ErrInvalidPlacementMode.
 	if err := s.SetBucketPlacementMode(ctx, "no-such-bucket", meta.PlacementModeStrict); err != meta.ErrBucketNotFound {
 		t.Errorf("set missing bucket: got %v want ErrBucketNotFound", err)
+	}
+}
+
+// caseBucketECPolicy exercises the per-bucket EC policy CRUD (US-007
+// EC-aware manifests). Absent → set → get (round-trip) → delete →
+// absent. Backend-capability validation lives in the admin handler, NOT
+// the meta store — this case only exercises structural validation +
+// round-trip.
+func caseBucketECPolicy(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	if _, err := s.CreateBucket(ctx, "ecbkt", "owner-ec", "STANDARD"); err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+
+	// Absent on a fresh bucket.
+	if _, err := s.GetBucketECPolicy(ctx, "ecbkt"); err != meta.ErrNoSuchECPolicy {
+		t.Fatalf("fresh GetBucketECPolicy: got %v want ErrNoSuchECPolicy", err)
+	}
+	got, err := s.GetBucket(ctx, "ecbkt")
+	if err != nil {
+		t.Fatalf("get fresh bucket: %v", err)
+	}
+	if got.ECPolicy != nil {
+		t.Fatalf("fresh Bucket.ECPolicy: got %+v want nil", got.ECPolicy)
+	}
+
+	// Structural validation: K or M zero/negative is rejected.
+	for _, bad := range []meta.ECPolicy{{K: 0, M: 0}, {K: 4, M: 0}, {K: 0, M: 2}, {K: -1, M: 2}} {
+		if err := s.SetBucketECPolicy(ctx, "ecbkt", bad); err != meta.ErrInvalidECPolicy {
+			t.Errorf("set invalid %+v: got %v want ErrInvalidECPolicy", bad, err)
+		}
+	}
+
+	// Round-trip via both GetBucketECPolicy and GetBucket.
+	want := meta.ECPolicy{K: 4, M: 2}
+	if err := s.SetBucketECPolicy(ctx, "ecbkt", want); err != nil {
+		t.Fatalf("set 4+2: %v", err)
+	}
+	round, err := s.GetBucketECPolicy(ctx, "ecbkt")
+	if err != nil {
+		t.Fatalf("GetBucketECPolicy after set: %v", err)
+	}
+	if round == nil || round.K != want.K || round.M != want.M {
+		t.Fatalf("GetBucketECPolicy round-trip: got %+v want %+v", round, want)
+	}
+	got, err = s.GetBucket(ctx, "ecbkt")
+	if err != nil {
+		t.Fatalf("get after ec set: %v", err)
+	}
+	if got.ECPolicy == nil || got.ECPolicy.K != want.K || got.ECPolicy.M != want.M {
+		t.Fatalf("Bucket.ECPolicy after set: got %+v want %+v", got.ECPolicy, want)
+	}
+
+	// Update path.
+	want2 := meta.ECPolicy{K: 8, M: 3}
+	if err := s.SetBucketECPolicy(ctx, "ecbkt", want2); err != nil {
+		t.Fatalf("set 8+3: %v", err)
+	}
+	round, err = s.GetBucketECPolicy(ctx, "ecbkt")
+	if err != nil {
+		t.Fatalf("GetBucketECPolicy after update: %v", err)
+	}
+	if round.K != want2.K || round.M != want2.M {
+		t.Fatalf("GetBucketECPolicy update: got %+v want %+v", round, want2)
+	}
+
+	// Delete + idempotent re-delete.
+	if err := s.DeleteBucketECPolicy(ctx, "ecbkt"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if err := s.DeleteBucketECPolicy(ctx, "ecbkt"); err != nil {
+		t.Fatalf("idempotent re-delete: %v", err)
+	}
+	if _, err := s.GetBucketECPolicy(ctx, "ecbkt"); err != meta.ErrNoSuchECPolicy {
+		t.Fatalf("GetBucketECPolicy after delete: got %v want ErrNoSuchECPolicy", err)
+	}
+	got, err = s.GetBucket(ctx, "ecbkt")
+	if err != nil {
+		t.Fatalf("get after delete: %v", err)
+	}
+	if got.ECPolicy != nil {
+		t.Fatalf("Bucket.ECPolicy after delete: got %+v want nil", got.ECPolicy)
+	}
+
+	// Missing bucket → ErrBucketNotFound on every method.
+	if err := s.SetBucketECPolicy(ctx, "no-such", meta.ECPolicy{K: 2, M: 1}); err != meta.ErrBucketNotFound {
+		t.Errorf("SetBucketECPolicy missing: got %v want ErrBucketNotFound", err)
+	}
+	if _, err := s.GetBucketECPolicy(ctx, "no-such"); err != meta.ErrBucketNotFound {
+		t.Errorf("GetBucketECPolicy missing: got %v want ErrBucketNotFound", err)
+	}
+	if err := s.DeleteBucketECPolicy(ctx, "no-such"); err != meta.ErrBucketNotFound {
+		t.Errorf("DeleteBucketECPolicy missing: got %v want ErrBucketNotFound", err)
 	}
 }
 

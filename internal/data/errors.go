@@ -23,6 +23,11 @@ var ErrChunkNotFound = errors.New("data: chunk not found")
 // target-full safety rail only fires for backends with real probes.
 var ErrClusterStatsNotSupported = errors.New("data: cluster stats not supported")
 
+// ErrClusterUnknown signals a ClusterECCapability call against a
+// cluster id the backend does not have configured (US-007 EC-aware
+// manifests).
+var ErrClusterUnknown = errors.New("data: unknown cluster id")
+
 // ErrDrainRefused is the sentinel returned by data backends when the
 // placement picker fell back to a draining cluster on the PUT hot path.
 // Carries the resolved cluster id in a DrainRefusedError wrapper

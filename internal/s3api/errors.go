@@ -85,6 +85,12 @@ var (
 	// the non-AWS S3 code "QuotaExceeded" — RGW-compatible per ROADMAP so
 	// drop-in clients that already understand the code keep working.
 	ErrQuotaExceeded       = APIError{Code: "QuotaExceeded", Message: "Quota exceeded for bucket / user", Status: http.StatusForbidden}
+	// ErrUnsupportedChecksumAlgorithm — STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER
+	// requests carry X-Amz-Trailer naming the trailer-checksum algorithm.
+	// US-009 only supports x-amz-checksum-sha256; the other AWS-S3 algos
+	// (crc32, crc32c, sha1) currently reject with this 400 InvalidRequest
+	// pending the P3 ROADMAP follow-up.
+	ErrUnsupportedChecksumAlgorithm = APIError{Code: "InvalidRequest", Message: "Unsupported x-amz-trailer checksum algorithm (only x-amz-checksum-sha256 is accepted)", Status: http.StatusBadRequest}
 )
 
 type errorXML struct {
@@ -161,6 +167,8 @@ func WriteAuthDenied(w http.ResponseWriter, r *http.Request, err error) {
 			apiErr = ErrExpiredToken
 		case "invalid security token":
 			apiErr = ErrInvalidToken
+		case "unsupported checksum algorithm":
+			apiErr = ErrUnsupportedChecksumAlgorithm
 		default:
 			apiErr = ErrAccessDenied
 		}

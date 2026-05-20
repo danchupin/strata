@@ -208,10 +208,17 @@ adding more, prove what is there.
   mid-transition retry would require unwinding partial manifest state, far beyond a polish
   cycle. (commit `77a9348`)
 
-- **P3 — Object Lock `COMPLIANCE` audit log.** `audit_log` (US-022) records all
-  state-changing requests, but a denied DELETE under `COMPLIANCE` is not flagged
-  distinctly. Regulated customers want a queryable "blocked retention violation" feed —
-  add a typed `audit.Event.Reason` field that `audit_log` reads to filter.
+- ~~**P3 — Object Lock `COMPLIANCE` audit log.**~~ — **Done.** Shipped via the
+  `ralph/storage-correctness` cycle (US-006). Three new audit verbs stamped at the
+  PutObjectRetention + lifecycle-worker boundaries: `objectlock:CompliancePut`
+  (COMPLIANCE-mode PUT), `objectlock:ComplianceRetentionAttemptedReduce`
+  (rejected weakening — handler now returns `AccessDenied` 403 to match AWS S3
+  parity, Result=403 row), `objectlock:ComplianceRetentionExpired` (lifecycle
+  worker emits on every successful expire of a COMPLIANCE row past
+  RetainUntilDate, principal=`system:lifecycle-worker`). Operator query shape:
+  `audit_log WHERE action LIKE 'objectlock:%' AND resource LIKE 'object:<bucket>/%'`.
+  Documented in [Observability — Audit log]({{< ref "/architecture/observability#audit-log" >}}).
+  (commit pending)
 
 ## Auth
 
@@ -231,16 +238,77 @@ adding more, prove what is there.
 - ~~**P3 — Drain strict mode for PUT routing fallback.**~~ — **Done.** Shipped via the `ralph/drain-lifecycle` cycle (US-002 + US-004). New env `STRATA_DRAIN_STRICT` (default `off`, accepts `on`/`off`/boolean strings; unknown → fail-fast at boot) plumbed into `internal/data/rados/Config` + `internal/data/s3/Config`. When `on`, RADOS + S3 `Backend.PutChunks` refuse to fall back to a draining cluster (`data.ErrDrainRefused` carrying the resolved cluster id) — gateway maps the sentinel to HTTP `503 ServiceUnavailable` with `<Code>DrainRefused</Code>` body + `Retry-After: 300` header. **PUT only** — reads, deletes, HEAD, multipart Complete/Abort, List against draining clusters all keep working (drain semantic is stop-write, not stop-read). Counter `strata_putchunks_refused_total{reason="drain_strict",cluster}` increments per refusal. `GET /admin/v1/clusters` surfaces the boot-time value as a top-level `drain_strict: bool` field; the operator console renders a "strict" chip per cluster card so the global flag is visible without a separate fetch. Companion drain-lifecycle UX (US-003..US-006): `GET /admin/v1/clusters/{id}/drain-progress` reads the rebalance worker's in-process `ProgressTracker` (chunks_on_cluster + base + ETA + deregister_ready); `<DrainProgressBar>` + green "Ready to deregister" chip; per-tick completion detection logs INFO `drain complete`, writes a `drain.complete` audit row, bumps `strata_drain_complete_total{cluster}`, and best-effort fans `s3:Drain:Complete` through `STRATA_NOTIFY_TARGETS`. Pre-drain bucket-impact preview via `GET /admin/v1/clusters/{id}/bucket-references` + `<BucketReferencesDrawer>` + amber "All clusters in this policy are draining" chip on Bucket Placement tab. Operator runbook: [Placement + rebalance — Drain lifecycle](docs/site/content/best-practices/placement-rebalance.md#drain-lifecycle). Smoke walkthrough: `scripts/smoke-drain-lifecycle.sh` (driven by `make smoke-drain-lifecycle` against the `multi-cluster` compose profile). (commit `9bb1b36`) *Follow-up:* `STRATA_DRAIN_STRICT` env removed in `ralph/drain-transparency` (commit `7dd9b68`) — drain is now unconditionally strict; the `drain_strict` admin field, the "strict" UI chip, and the `reason="drain_strict"` counter label were retired alongside the env. See the new P3 *Drain transparency + drain/evacuate split* entry above.
 - **P2 — Content-addressed object deduplication.** Today every chunk gets a fresh random OID even when two objects share identical bytes — duplicate uploads waste full-copy storage. Fix scope: chunk OID = `dedup/<sha256(content)>`; new `chunk_refcount` table in `meta.Store` keyed on OID; PUT path hashes the chunk, checks refcount, increments + skips RADOS write if the blob exists, else writes + sets refcount=1; DELETE / lifecycle-expire decrements; GC only deletes the underlying RADOS blob when refcount hits 0. Edge cases: (a) SSE-S3 / KMS — same plaintext encrypts differently per-object DEK, so dedup is incompatible with default SSE unless the operator opts into `dedup-friendly` mode where the DEK is derived from `hash(plaintext)` (weakens crypto independence; flag explicitly in `docs/sse.md` so operators understand the tradeoff); (b) hash hot-path cost — ~500 MB/s per core sha256 is acceptable; (c) cross-class dedup is opt-in (separate pools per class still mean separate storage even for same content); (d) manifest schema unchanged — chunk references stay `{Pool, OID, Length}` whether OID is random or content-addressed.
 - ~~**P2 — Bucket / user quotas + usage-based billing.**~~ — **Done.** Shipped via the `ralph/bucket-quotas-billing` cycle (US-001..US-011). Per-bucket `BucketQuota{MaxBytes, MaxObjects, MaxBytesPerObject}` + per-user `UserQuota{MaxBuckets, TotalMaxBytes}` persisted across all three meta backends (memory + Cassandra + TiKV) via shared `internal/meta/quota.go` JSON codec. Live `bucket_stats{bucket_id, used_bytes, used_objects}` updated atomically on every PUT / DELETE / multipart-Complete (memory mutex / Cassandra LWT-CAS loop / TiKV pessimistic txn) and read at PUT-validate time by `internal/s3api/quota.go::checkQuota` — overage rejects with `403 QuotaExceeded` (RGW shape). Drift correction via leader-elected `--workers=quota-reconcile` (env `STRATA_QUOTA_RECONCILE_INTERVAL` default 6h, gauge `strata_quota_reconcile_drift_bytes{bucket}`); nightly aggregation via leader-elected `--workers=usage-rollup` writes one `usage_aggregates` row per `(bucket_id, storage_class, day)` (envs `STRATA_USAGE_ROLLUP_AT` default `00:00`, `STRATA_USAGE_ROLLUP_INTERVAL` default 24h) — single-sample `byte_seconds × 24h` v1 approximation, continuous-integration is a P3 follow-up. Admin API surface (`GET/PUT/DELETE /admin/v1/buckets/{name}/quota` + `/iam/users/{user}/quota` + per-bucket / per-user usage history) wired into `internal/adminapi/openapi.yaml`. Web UI: per-bucket Usage tab on BucketDetail + new `/iam/users/:userName/billing` page with cross-bucket breakdown + Edit Quota dialogs. Operator guide: [Quotas + billing](docs/site/content/best-practices/quotas-billing.md). Out of scope this cycle (kept on roadmap as P3 follow-ups below): invoice ledger / payment integration; continuous-integration `byte_seconds`; denormalised `user_bucket_count`. (commit `f2973db`)
-- **P3 — Continuous-integration `byte_seconds` for usage rollup.** v1 single-sample approximation: rollup samples `bucket_stats` once per day and writes `byte_seconds = used_bytes × 86400`. A bucket that grows from 0 → 1 TiB at 12:00 UTC bills as if it had 1 TiB all day (over-states by 12 TiB·s). Fix scope: per-bump emit a `(bucket_id, storage_class, ts, used_bytes)` event the rollup integrates over the day; OR sample at higher cadence and trapezoid-integrate. Acceptable bounded error → low priority unless billing accuracy becomes a tenant ask.
-- **P3 — Denormalised `user_bucket_count` for `UserQuota.TotalMaxBytes` checks.** PUT-validate fans out via `ListBuckets(owner)` to sum `bucket_stats` across the user's buckets — O(buckets-owned) on every write. Cheap for typical workloads; pathological at high bucket-fan-out per user. Fix shape: maintain `user_stats{user, used_bytes, used_objects, bucket_count}` updated atomically alongside `bucket_stats` and `CreateBucket` / `DeleteBucket`. Mirrors the bucket-stats pattern and lifts the user-scope check to O(1).
+- ~~**P3 — Continuous-integration `byte_seconds` for usage rollup.**~~ — **Done.**
+  Shipped via the `ralph/storage-correctness` cycle (US-002). New env
+  `STRATA_USAGE_ROLLUP_SAMPLES_PER_DAY` (default 24 = hourly, clamp [1, 1440])
+  drives N intermediate `SampleOnce` ticks per day; the daily roll-up integrates
+  `byte_seconds = Σ_{i=0..N-2} (s[i]+s[i+1])/2 × Δt + s[N-1] × Δt` (trapezoid +
+  rectangle tail; `N=1` short-circuits to legacy `used × 86400`). Hard cutover
+  per pre-launch shape — no `method` column on `usage_aggregates`, no
+  backwards-compat shim. Worked example: 100→200 step-up at noon bills
+  13,140,000 B·s vs v0 over-count of 17,280,000. Documented in
+  [Quotas + billing — byte-seconds trapezoid]({{< ref "/best-practices/quotas-billing#byte-seconds-trapezoid-integration" >}}).
+  (commit pending)
+- ~~**P3 — Denormalised `user_bucket_count` for `UserQuota.TotalMaxBytes` checks.**~~ — **Done.**
+  Shipped via the `ralph/storage-correctness` cycle (US-001). New
+  `meta.UserStats{Owner, UsedBytes, UsedObjects, BucketCount}` aggregate row
+  persisted across memory + Cassandra + TiKV via 3 new `meta.Store` methods
+  (`GetUserStats`, `BumpUserStats`, `IncrUserBucketCount`). Cassandra fold via
+  the `bucket_stats` LWT-CAS path that already bumps per-bucket counters (with
+  a denormalised `owner` column on `bucket_stats` so `BumpBucketStats` resolves
+  the owner without a buckets round-trip); TiKV uses a single pessimistic txn
+  that locks `bucket_stats:<bid>` + `bucket_owners:<bid>` + `user_stats:<owner>`
+  together. The two PUT-hot-path fan-outs in `internal/s3api/quota.go`
+  (`userUsedBytes`, `checkUserBucketQuota`) lift to single `GetUserStats` calls
+  — O(buckets-owned) → O(1). Pre-launch hard cutover, no migration backfill.
+  (commit pending)
 - ~~**P2 — Parallel chunk upload in `PutChunks`.**~~ — **Done.** Shipped via the `ralph/parallel-chunks` cycle (US-001). Bounded errgroup worker pool dispatches RADOS chunk writes concurrently while a single dispatcher goroutine owns the byte-stream MD5 hasher; manifest order + ETag (MD5 of source bytes) preserved regardless of completion order. Knob `STRATA_RADOS_PUT_CONCURRENCY` (default 32, range `[1, 256]`) read at `rados.Backend` constructor. Scheduler lives in tag-free `internal/data/rados/parallel.go` (librados-free unit tests). Multi-cluster manifests (US-044) handled automatically — worker resolves per-chunk ioctx via existing `b.ioctx(...)`. (commit `7d341f9`)
 - ~~**P2 — Parallel chunk read / prefetch in `GetChunks`.**~~ — **Done.** Shipped via the `ralph/parallel-chunks` cycle (US-002). Bounded-depth prefetch reader fetches up to `STRATA_RADOS_GET_PREFETCH` chunks in flight while the caller drains the current chunk; default depth 4 (16 MiB inflight memory budget per request), range `[1, 64]`. Memory-bounded via semaphore + per-chunk size-1 future channel — peak buffered-but-unconsumed bytes ≤ depth × chunk_size. Range-GET (`offset`, `length`) still short-reads first/last chunks. Close cancels in-flight fetches and waits for goroutines within 500 ms (no leak — verified by `runtime.NumGoroutine()` baseline test). Scheduler lives in tag-free `internal/data/rados/prefetch.go` (librados-free unit tests). Bench harness `BenchmarkGetChunks_*_Prefetch` shows 3.7×–4.5× wall-clock speedup at 5 ms per-OSD latency; numbers in [Parallel chunk PUT + GET]({{< ref "/architecture/benchmarks/parallel-chunks" >}}). (commit `7d341f9`)
-- **P3 — Erasure-code aware manifests.** For EC pools, track k+m parameters in the
-  manifest for restore-path optimizations and accurate space accounting.
-- **P3 — `ReadOp` / `WriteOp` batching in RADOS.** Bundle the head xattr read with the
-  first chunk read in one OSD op (single round-trip for small objects).
-- **P3 — Connection pool tuning.** Benchmark one `*rados.Conn` vs several for write-heavy
-  workloads; measure CGO contention inside librados.
+- ~~**P3 — Erasure-code aware manifests.**~~ — **Done.** Shipped via the
+  `ralph/storage-correctness` cycle (US-007). New `data.Manifest.ECParams
+  {K, M}` proto field (field 14, `json:",omitempty"`) + matching `meta.Bucket.ECPolicy`
+  persisted across all three meta backends (memory in-struct, Cassandra
+  `ALTER TABLE buckets ADD ec_policy text` + LWT, TiKV via `updateBucket`
+  helper). New admin endpoints `PUT/GET/DELETE /admin/v1/buckets/{name}/ec-policy`
+  audit-stamped `admin:{Update,Delete}BucketECPolicy`. **Full data-backend probe
+  validation** (not metadata-only): new optional `data.Backend.ClusterECCapability`
+  interface (RADOS impl probes target pool via `osd pool get <pool>
+  erasure_code_profile` + `osd erasure-code-profile get <profile>`); PUT
+  validation walks every cluster the bucket's effective placement could route
+  to and rejects with `409 InconsistentECPolicy` (or `409 NoPlacement` when no
+  placement is set) if the requested k+m doesn't match the underlying pool.
+  PUT hot path stamps `Manifest.ECParams` from `bucket.ECPolicy` via
+  ctx-threaded `data.WithECPolicy` (parity with `WithPlacement`). Decoder
+  transparent for legacy rows (zero value). OpenAPI extended. (commit pending)
+- ~~**P3 — `ReadOp` / `WriteOp` batching in RADOS.**~~ — **Done.** Shipped via
+  the `ralph/storage-correctness` cycle (US-003). New build-tagged helpers
+  `internal/data/rados/ops.go` (`ceph`): `writeChunkBatched` (rados.WriteOp +
+  WriteFull + per-xattr SetXattr in one Operate) and `readChunkBatched`
+  (rados.ReadOp + Read in one Operate). Tag-free env helper
+  `internal/data/rados/ops_env.go` reads `STRATA_RADOS_BATCH_OPS` (default
+  false). Backend PUT / GET hot paths route through the batched variants when
+  the env knob is on. **Bench-then-ship verdict: HOLD_DEFAULT** — with zero
+  xattr writers on today's hot path both shapes issue the same single librados
+  WriteOp/ReadOp; bench harness `scripts/bench-rados-ops.sh` keeps batched
+  off-by-default + records the rationale in
+  [Benchmarks — RADOS ops]({{< ref "/architecture/benchmarks/rados-ops" >}}).
+  Toggle ships so the future xattr-writer work just flips the default. (commit pending)
+- ~~**P3 — Connection pool tuning.**~~ — **Done.** Shipped via the
+  `ralph/storage-correctness` cycle (US-004). New env `STRATA_RADOS_POOL_SIZE`
+  (default 1 = legacy single-conn, clamp [1, 32]) drives a per-cluster
+  round-robin `connPool` (`internal/data/rados/pool.go`, ceph-tagged) with
+  per-slot lazy IOContext cache. Backend struct refactored from
+  `conns map[string]*Conn` + `ioctxes map[string]*IOContext` to
+  `pools map[string]*connPool`; all op sites consume `p.IOContext(pool, ns)`
+  via the existing `b.ioctx(...)` seam. Bench harness
+  `scripts/bench-rados-pool.sh` sweeps {1, 2, 4, 8} via p99 PUT under the
+  canonical lab. **Bench-then-ship verdict: HOLD_DEFAULT** — single-conn shape
+  not bottlenecked on cephx session contention at the lab's modest
+  concurrency × small-object profile; default stays at 1. Env knob + pool ship
+  regardless so large-object PUT-heavy operators can flip to 4 or 8 at deploy
+  time. Numbers in
+  [Benchmarks — RADOS conn pool]({{< ref "/architecture/benchmarks/rados-pool" >}}).
+  (commit pending)
 
 ## Web UI
 
@@ -250,7 +318,24 @@ adding more, prove what is there.
 - ~~**P2 — Trace browser has no list view.**~~ — **Done.** Shipped via the `ralph/drain-cleanup` cycle (US-008). `RingBuffer.List(limit, offset)` returns the LRU front-N as `TraceSummary{request_id, trace_id, root_name, started_at_ns, duration_ms, status, span_count}` (thread-safe under the existing mutex; bounded materialisation). New admin handler `GET /admin/v1/diagnostics/traces?limit=50&offset=0` returns `{traces:[], total:int}` (cap 200; audit-stamped `admin:GetDiagnosticsTraces`; 503 `RingbufUnavailable` when ringbuf disabled). UI: new `<RecentTracesPanel>` renders ABOVE the search box on the TraceBrowser page; 10 s refetchInterval via TanStack Query (paused when tab not focused — TanStack default `refetchIntervalInBackground=false`); sortable by Started (default — server LRU order) or Duration; per-row status dot (red Error / emerald otherwise); click row navigates to `/diagnostics/trace/<request_id|trace_id>`. The existing sessionStorage-backed history panel still renders BELOW the live list. (commit `69a2230`)
 - ~~**P2 — TiKV meta backend emits no trace spans.**~~ — **Done.** `internal/meta/tikv/observer.go` wraps every public `Store` method with `Observer.Start(ctx, op, table)` returning a `finish(err)` closure that emits `meta.tikv.<table>.<op>` client-kind child spans (attrs `db.system=tikv`, `db.tikv.table`, `db.operation`, `strata.component=gateway`). `tikv.Config.Tracer` is wired by `internal/serverapp.buildMetaStore` via `tp.Tracer("strata.meta.tikv")`. Failing ops flip span status to Error so the tail-sampler exports regardless of `STRATA_OTEL_SAMPLE_RATIO`. Operator filter recipes live at `docs/site/content/best-practices/tracing.md`. (commit `2ccd209`)
 - ~~**P3 — S3-over-S3 data backend emits no trace spans.**~~ — **Done.** `internal/data/s3/observer.go::installOTelMiddleware` registers the upstream `go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws` middleware (v0.68, semconv v1.40) at `connFor` BEFORE the metrics instrumentation, so otelaws Initialize-after brackets the full retry loop and emits one client-kind `S3.<Operation>` span per SDK call with `rpc.system.name=aws-api` / `rpc.method=S3/<op>` / `aws.region` / `http.response.status_code` attrs; a custom `AttributeBuilder` stamps `strata.component=gateway` + `strata.s3_cluster=<id>`. `cfg.Tracer = tp.Tracer("strata.data.s3")` wired in `internal/serverapp.buildDataBackend::case "s3"`. (commit `2ccd209`)
-- **P3 — OTel ring-buffer eviction tuning under burst load.** The 4 MiB default + per-trace 256-span cap was sized by hand. Run a burst-load harness (`hey -z 60s -c 100 …` against `make run-memory` with ringbuf=on) and measure (a) eviction rate, (b) p99 trace retention age, (c) memory ceiling vs configured budget. Document the observed cap and either bump the default or expose `STRATA_OTEL_RINGBUF_BYTES` more prominently in `docs/site/content/best-practices/web-ui.md`.
+- ~~**P3 — OTel ring-buffer eviction tuning under burst load.**~~ — **Done.**
+  Shipped via the `ralph/storage-correctness` cycle (US-005). New
+  Prometheus gauge `strata_otel_ringbuf_oldest_age_seconds` tracks the LRU
+  eviction horizon (LRU-back entry's earliest span start vs now); paired with
+  the existing `strata_otel_ringbuf_evicted_total` + `_traces` it gives
+  operators the full picture without scanning the ring. `RingBuffer.entry`
+  carries `oldestStartNS` (refined on every span ingest); new
+  `RingBuffer.OldestStartNS()` getter exposes it for admin / bench scripts.
+  Bench harness `scripts/bench-otel-ringbuf.sh` sweeps `STRATA_OTEL_RINGBUF_BYTES ∈
+  {4, 8, 16, 32} MiB` against `make run-memory` + `hey -z 60s -c 100`; reads
+  the new gauge + `process_resident_memory_bytes` straight off `/metrics`
+  (no separate Prometheus). **Bench-then-ship verdict: HOLD_DEFAULT** —
+  default stays at 4 MiB; env knob surfaced more prominently in
+  [Monitoring — OTel ring buffer]({{< ref "/best-practices/monitoring" >}})
+  + a `_oldest_age_seconds < 300 s` alert recommendation for incident debug
+  windows. Reproduction recipe in
+  [Benchmarks — OTel ring buffer]({{< ref "/architecture/benchmarks/otel-ringbuf" >}}).
+  (commit pending)
 - ~~**P3 — Web UI — TiKV heartbeat backend.**~~ — **Done.** `internal/meta/tikv/heartbeat.go` implements `heartbeat.Store` against the TiKV transactional client. Rows live under `s/hb/<nodeID>` with a JSON payload carrying `ExpiresAt = LastHeartbeat + DefaultTTL`; readers lazy-skip expired rows and writers eager-delete up to 16 expired rows per write so the prefix does not leak disk. Wired in `internal/serverapp.buildHeartbeatStore`. (commit `c37487b`)
 - ~~**P3 — Heartbeat `leader_for` chip wired to actual lease state.**~~ — **Done.** `cmd/strata/workers.Supervisor` now exposes a buffered (cap 8) `LeaderEvents()` channel emitting `(workerName, acquired)` on every per-worker lease acquire/release; `internal/heartbeat.Heartbeater.SetLeaderFor(worker, owned)` mutates `Node.LeaderFor` under a mutex and the next write tick (~10 s) propagates to the cluster_nodes row consumed by Cluster Overview. `internal/serverapp.Run` wires a goroutine from `Supervisor.LeaderEvents()` into `hb.SetLeaderFor`. (commit `6f81734`)
 - ~~**P3 — Multi-replica lab (TiKV).**~~ — **Done.** New `lab-tikv` compose profile spins up two TiKV-backed Strata replicas (`strata-tikv-a`, `strata-tikv-b`) behind an `nginx` LB at host port 9999, sharing a JWT secret via the `strata-jwt-shared` named volume (file-based atomic bootstrap via POSIX `O_EXCL`). `Supervisor.LeaderEvents()` → `Heartbeater.SetLeaderFor` propagates lease rotation into the Cluster Overview `leader_for` chip within ~35 s of a holder kill. `scripts/multi-replica-smoke.sh` (target `make smoke-lab-tikv`) drives 5 host-side scenarios; `web/e2e/multi-replica.spec.ts` mirrors the same in a `[multi-replica]`-gated CI job (`e2e-ui-multi-replica`). Operator guide at `docs/site/content/deploy/multi-replica.md`. (commit `9e36975`)
@@ -327,15 +412,47 @@ Non-goals:
 
 ## Known latent bugs
 
-- ~~**P1 — RADOS ClusterStats / ClusterObjectCount probe miss-reports non-default cluster usage.**~~ — **Fixed.** Both probes iterated `b.classes` filtered by `c == clusterID`; when no class entry targeted the non-default cluster (cephb in canonical lab without explicit `STRATA_RADOS_CLASSES` per-cluster), `seedPool` stayed empty → `ClusterStats` returned `"no configured class"` error, `ClusterObjectCount` returned 0 silently. `/drain-progress` reported `physical_chunks=0, physical_bytes=null` for cephb even when chunks were still on the cluster; UI flipped to "Ready to deregister" prematurely. Additionally, `ClusterStats` returned cluster-wide `total_used_bytes` from `ceph df` (includes `.mgr` and other ceph-internal pools — always >0) instead of strata-managed pool usage; operators saw stale "515 KiB" on an empty post-drain cluster. Fix: probe falls back to any class's pool name when no class targets the cluster (uniform pool layout assumption); ClusterStats sums bytes-used over strata-managed pools only (totalBytes stays cluster-wide for rebalance fill-check). Surfaced via operator drain walkthrough on the freshly-shipped TiKV-default lab. (commit `516b9bc`)
+- **P2 — TiKV meta backend stubs 19 `meta.Store` methods with `errors.ErrUnsupported`.** `internal/meta/tikv/store.go::100-186` returns `errors.ErrUnsupported` for: bucket grants (Set/Get/Delete), object grants (Set/Get), object tags (Set/Get/Delete), object retention, object legal-hold, object restore-status, access points (Create/Get/GetByAlias/Delete/List), SSE rewrap progress (Update/Set/Get), raw manifest (Get/Update), replication status. Surfaced by `ralph/storage-correctness` US-010 smoke: `make smoke` against the TiKV-default lab fails at `== TAGGING` with HTTP 500 `InternalError` because `s3api.putObjectTagging` → `Meta.SetObjectTags` returns the sentinel and the gateway translates the unmapped backend error to 500. Cassandra backend implements all 19; smoke against `--profile cassandra` (`make up-cassandra`) passes the tagging leg. Fix scope: thread each method through the TiKV pessimistic-txn shape used by the placement / EC / placement-mode adders — single-row payload per `(bucket_id, key, version_id)` plus partition-by-bucket prefix; reuse the JSON-blob pattern from `ec_policy`. Shared `internal/meta/storetest` contract cases already exist for memory + Cassandra paths, just add the TiKV factory branch. — **Fixed.** Both probes iterated `b.classes` filtered by `c == clusterID`; when no class entry targeted the non-default cluster (cephb in canonical lab without explicit `STRATA_RADOS_CLASSES` per-cluster), `seedPool` stayed empty → `ClusterStats` returned `"no configured class"` error, `ClusterObjectCount` returned 0 silently. `/drain-progress` reported `physical_chunks=0, physical_bytes=null` for cephb even when chunks were still on the cluster; UI flipped to "Ready to deregister" prematurely. Additionally, `ClusterStats` returned cluster-wide `total_used_bytes` from `ceph df` (includes `.mgr` and other ceph-internal pools — always >0) instead of strata-managed pool usage; operators saw stale "515 KiB" on an empty post-drain cluster. Fix: probe falls back to any class's pool name when no class targets the cluster (uniform pool layout assumption); ClusterStats sums bytes-used over strata-managed pools only (totalBytes stays cluster-wide for rebalance fill-check). Surfaced via operator drain walkthrough on the freshly-shipped TiKV-default lab. (commit `516b9bc`)
 - ~~**P1 — Multipart Complete/Abort panic on object keys with spaces.**~~ — **Fixed.** `internal/adminapi/uploads.go` `handleUploadComplete` + `handleUploadAbort` built the inner S3 sub-request via `httptest.NewRequest`, which constructs the request by parsing `"METHOD target HTTP/1.0\r\n\r\n"` through `http.ReadRequest`. Literal spaces in `target` (object keys like `My File.pdf`) made the parser treat the next token as the HTTP version → panic → LB 502. Switched both sites to `http.NewRequestWithContext` with `&url.URL{Path, RawQuery}.String()` for proper percent-escaping. Found by operator via the `/console` upload UI on a `.pptx` with spaces. (commit `470e8de`)
-- GET with `Range: bytes=start-` where `start >= size` returns `416` — same as AWS.
+- ~~GET with `Range: bytes=start-` where `start >= size` returns `416` — same as AWS.
   `Range: bytes=-N` with `N > size` returns full body — matches AWS. Edge cases around
-  zero-length objects: not tested.
-- Streaming chunked decoder assumes `\r\n` strictly and reads via `bufio`. Does not handle
+  zero-length objects: not tested.~~ — **Done.** Shipped via the
+  `ralph/storage-correctness` cycle (US-008). `parseRange` now returns
+  `(offset=0, length=0, status=200, ok=true)` for `Range: bytes=-N` against a
+  zero-length object (was 206 + empty body — AWS returns 200 + empty body for
+  this case); the call-site `status == StatusPartialContent` guard elides
+  `Content-Range` automatically. Open-ended `bytes=0-` and explicit `bytes=0-9`
+  on zero-length objects already returned 416 InvalidRange via the existing
+  `start >= size` guard. Four zero-length cases consolidated in new
+  `internal/s3api/range_test.go` (no Range / open-ended / suffix / explicit).
+  (commit pending)
+- ~~Streaming chunked decoder assumes `\r\n` strictly and reads via `bufio`. Does not handle
   `aws-chunked-trailer` (newer aws-cli variants). aws-cli 2.22 observed to use plain
   `x-amz-content-sha256: <hex>` for `s3api put-object` and STREAMING for `s3 cp`, both
-  tested working.
+  tested working.~~ — **Done.** Shipped via the `ralph/storage-correctness`
+  cycle (US-009). Recognises the
+  `STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER` content-sha256 sentinel +
+  parses `X-Amz-Trailer: x-amz-checksum-sha256` (case-insensitive). Trailer
+  decoder shares the existing aws-chunked state machine + toggles a
+  `sha256.New()` body accumulator; on the final 0-chunk reads the trailer
+  header block, recomputes the AWS4-HMAC-SHA256-TRAILER `stringToSign`
+  (`chainHMAC(prevSig=finalChunkSig, hex(SHA256(canonical-trailers)))`),
+  verifies the trailer-signature + base64(SHA256(body)) match — mismatch →
+  `ErrSignatureInvalid` (AWS parity, not `ChecksumMismatch`). **Sha256-only
+  scope** (option 4A in PRD): non-sha256 trailer algos (`crc32`, `crc32c`,
+  `sha1`) reject with `auth.ErrUnsupportedChecksumAlgorithm` → HTTP 400
+  `InvalidRequest`; see the new P3 entry below for the follow-up cycle.
+  (commit pending)
+- **P3 — Streaming chunked-trailer support for non-sha256 checksum algorithms (crc32, crc32c, sha1).**
+  US-009 lands the sha256-only path (`X-Amz-Trailer: x-amz-checksum-sha256`).
+  aws-cli 2.27+ + the v2 SDKs let the client opt into `crc32` / `crc32c` /
+  `sha1` trailer checksums; today the gateway rejects those with
+  `ErrUnsupportedChecksumAlgorithm` 400 to surface the gap explicitly.
+  Follow-up scope: extend `internal/auth/streaming.go::trailerMode` to swap
+  the accumulator + the validate helper based on the trailer algo header
+  (decoder + chain-HMAC scheme are identical to sha256). Light scope — no
+  schema or protocol change; isolated to the streaming decoder + one
+  middleware-level branch.
 - ~~**`TestThreeReplicaDistribution` is flaky.**~~ — **Done.** Shipped via the `ralph/polish-dx`
   cycle (US-002). `internal/lifecycle/distribute_test.go::seedExpiringBucket` (line 54) used
   `uuid.New()`; FNV-32a-mod-3 over 9 random UUIDs legitimately produced 6/3/0 or 6/2/1 splits,

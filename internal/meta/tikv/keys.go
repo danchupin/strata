@@ -67,6 +67,8 @@ const (
 	prefixAdminJob         = Namespace + "Aj/"  // s/Aj/<id>
 	prefixHeartbeat        = Namespace + "hb/"  // s/hb/<nodeID>
 	prefixClusterState     = Namespace + "cs/"  // s/cs/<clusterID>            (US-006 placement-rebalance drain sentinel)
+	prefixUserStats        = Namespace + "us/"  // s/us/<owner>                (ralph/storage-correctness US-001)
+	prefixBucketOwner      = Namespace + "bo/"  // s/bo/<uuid16>               (bucket_id → owner denorm)
 )
 
 // Bucket-scoped sub-prefixes. All are appended to a "s/B/<uuid16>/"
@@ -350,6 +352,23 @@ func BucketBlobKey(bucketID uuid.UUID, kind string) []byte {
 // internal/meta/tikv/store.go::BumpBucketStats.
 func BucketStatsKey(bucketID uuid.UUID) []byte {
 	return append(PrefixForBucket(bucketID), subBucketStats...)
+}
+
+// UserStatsKey is the per-owner denormalised aggregate slot
+// (ralph/storage-correctness US-001). owner is byte-stuffed so the prefix
+// stays distinct from other entities that may share an owner-shaped tail.
+func UserStatsKey(owner string) []byte {
+	return appendEscaped([]byte(prefixUserStats), owner)
+}
+
+// BucketOwnerKey is the bucket_id → owner pointer slot used by BumpBucketStats
+// to find the right user_stats partition without round-tripping through
+// the buckets table. Seeded by CreateBucket, dropped by DeleteBucket.
+func BucketOwnerKey(bucketID uuid.UUID) []byte {
+	id := bucketID
+	out := make([]byte, 0, len(prefixBucketOwner)+16)
+	out = append(out, prefixBucketOwner...)
+	return append(out, id[:]...)
 }
 
 // UsageAggregateKey is the per-(bucket, storageClass, day) usage rollup row

@@ -38,9 +38,26 @@ type Backend struct {
 	// getPrefetch × chunk_size.
 	getPrefetch int
 
-	mu      sync.Mutex
-	conns   map[string]*goceph.Conn
-	ioctxes map[string]*goceph.IOContext // key: cluster|pool|ns
+	// batchOps toggles the PUT/GET hot path between the per-op default
+	// (ioctx.WriteFull-shaped writeChunk + ioctx.Read in getOne) and the
+	// WriteOp / ReadOp batched helpers in ops.go. Read once at New from
+	// STRATA_RADOS_BATCH_OPS (default false). The bench gate in
+	// docs/site/content/architecture/benchmarks/rados-ops.md shows no
+	// measurable gain until xattr writers land on the hot path, so the
+	// default keeps the per-op shape; operators experimenting with
+	// future xattr work flip the knob.
+	batchOps bool
+
+	// poolSize is the conn-pool depth per cluster. Read once at New from
+	// STRATA_RADOS_POOL_SIZE (default 1 = legacy single-conn, clamped to
+	// [1, MaxPoolSize]). Each cluster's pool of N conns is dialled
+	// lazily on first ioctx() call; every conn is Connect()'d eagerly
+	// then — no half-connected pool is exposed to callers. See
+	// docs/site/content/architecture/benchmarks/rados-pool.md.
+	poolSize int
+
+	mu    sync.Mutex
+	pools map[string]*connPool // key: clusterID
 }
 
 var ErrUnknownStorageClass = errors.New("unknown storage class")
@@ -72,13 +89,15 @@ func New(cfg Config) (data.Backend, error) {
 		tracer:         cfg.Tracer,
 		putConcurrency: putConcurrencyFromEnv(),
 		getPrefetch:    getPrefetchFromEnv(),
-		conns:          make(map[string]*goceph.Conn),
-		ioctxes:        make(map[string]*goceph.IOContext),
+		batchOps:       batchOpsFromEnv(),
+		poolSize:       poolSizeFromEnv(cfg.Logger),
+		pools:          make(map[string]*connPool),
 	}, nil
 }
 
 // dialCluster opens + connects a fresh *goceph.Conn for one cluster spec.
-// Lifted out of connFor so it has no lock dependencies.
+// No lock dependencies — callable from inside connPool construction or
+// any other path that needs an extra raw conn.
 func dialCluster(spec ClusterSpec) (*goceph.Conn, error) {
 	user := spec.User
 	if user == "" {
@@ -106,34 +125,35 @@ func dialCluster(spec ClusterSpec) (*goceph.Conn, error) {
 	return conn, nil
 }
 
-// connFor lazy-dials the cluster on first use. Caller must hold b.mu.
-// Logs INFO + retries once on the first dial failure so a transient
-// outage at startup doesn't poison the cached map.
-func (b *Backend) connFor(ctx context.Context, id string) (*goceph.Conn, error) {
+// poolFor lazy-dials the cluster's conn pool on first use. Caller must
+// hold b.mu. Pool depth = b.poolSize; every conn inside is Connect()'d
+// eagerly. On dial failure the pool stays unset so the next caller
+// retries.
+func (b *Backend) poolFor(ctx context.Context, id string) (*connPool, error) {
 	if id == "" {
 		id = DefaultCluster
 	}
-	if c, ok := b.conns[id]; ok {
-		return c, nil
+	if p, ok := b.pools[id]; ok {
+		return p, nil
 	}
 	spec, ok := b.clusters[id]
 	if !ok {
 		return nil, fmt.Errorf("rados: unknown cluster %q", id)
 	}
-	c, err := dialCluster(spec)
+	p, err := newConnPool(spec, b.poolSize)
 	if err != nil {
 		if b.logger != nil {
-			b.logger.InfoContext(ctx, "rados: cluster dial failed; retrying once",
-				"cluster", id, "error", err.Error())
+			b.logger.InfoContext(ctx, "rados: pool dial failed; retrying once",
+				"cluster", id, "pool_size", b.poolSize, "error", err.Error())
 		}
 		var rerr error
-		c, rerr = dialCluster(spec)
+		p, rerr = newConnPool(spec, b.poolSize)
 		if rerr != nil {
-			return nil, fmt.Errorf("rados: cluster %q dial: %w", id, rerr)
+			return nil, fmt.Errorf("rados: cluster %q pool dial: %w", id, rerr)
 		}
 	}
-	b.conns[id] = c
-	return c, nil
+	b.pools[id] = p
+	return p, nil
 }
 
 func (b *Backend) resolveClass(class string) (ClassSpec, error) {
@@ -151,24 +171,16 @@ func (b *Backend) ioctx(ctx context.Context, cluster, pool, ns string) (*goceph.
 	if cluster == "" {
 		cluster = DefaultCluster
 	}
-	key := cluster + "|" + pool + "|" + ns
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	if x, ok := b.ioctxes[key]; ok {
-		return x, nil
-	}
-	conn, err := b.connFor(ctx, cluster)
+	p, err := b.poolFor(ctx, cluster)
+	b.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
-	x, err := conn.OpenIOContext(pool)
+	x, err := p.IOContext(pool, ns)
 	if err != nil {
-		return nil, fmt.Errorf("rados: open ioctx %s/%s: %w", cluster, pool, err)
+		return nil, fmt.Errorf("rados: %s/%s: %w", cluster, pool, err)
 	}
-	if ns != "" {
-		x.SetNamespace(ns)
-	}
-	b.ioctxes[key] = x
 	return x, nil
 }
 
@@ -251,7 +263,12 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 		}
 		oid := fmt.Sprintf("%s.%05d", objID, idx)
 		start := time.Now()
-		werr := writeChunk(ioctx, oid, body)
+		var werr error
+		if b.batchOps {
+			werr = writeChunkBatched(ioctx, oid, body, nil)
+		} else {
+			werr = writeChunk(ioctx, oid, body)
+		}
 		ObserveOp(opCtx, b.logger, b.metrics, b.tracer, spec.Pool, "put", oid, start, werr)
 		if werr != nil {
 			return data.ChunkRef{}, werr
@@ -269,6 +286,9 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 	if err != nil {
 		b.cleanupManifest(ctx, m.Chunks)
 		return nil, err
+	}
+	if ec, ok := data.ECPolicyFromContext(ctx); ok {
+		m.ECParams = &data.ECParams{K: ec.K, M: ec.M}
 	}
 	return m, nil
 }
@@ -299,8 +319,16 @@ func (b *Backend) GetChunks(ctx context.Context, m *data.Manifest, offset, lengt
 		if err != nil {
 			return nil, err
 		}
-		buf := make([]byte, segLen)
 		start := time.Now()
+		if b.batchOps {
+			body, _, rerr := readChunkBatched(ioctx, c.OID, off, segLen, false)
+			ObserveOp(opCtx, b.logger, b.metrics, b.tracer, c.Pool, "get", c.OID, start, rerr)
+			if rerr != nil {
+				return nil, rerr
+			}
+			return body, nil
+		}
+		buf := make([]byte, segLen)
 		n, rerr := ioctx.Read(c.OID, buf, off)
 		ObserveOp(opCtx, b.logger, b.metrics, b.tracer, c.Pool, "get", c.OID, start, rerr)
 		if rerr != nil {
@@ -340,14 +368,10 @@ func (b *Backend) Delete(ctx context.Context, m *data.Manifest) error {
 func (b *Backend) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for _, x := range b.ioctxes {
-		x.Destroy()
+	for _, p := range b.pools {
+		p.Close()
 	}
-	b.ioctxes = nil
-	for _, c := range b.conns {
-		c.Shutdown()
-	}
-	b.conns = nil
+	b.pools = nil
 	return nil
 }
 

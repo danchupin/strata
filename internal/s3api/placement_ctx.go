@@ -77,6 +77,9 @@ func dataCtxForPutWith(ctx context.Context, m meta.Store, b *meta.Bucket, key st
 	if b.PlacementMode != "" {
 		ctx = data.WithPlacementMode(ctx, b.PlacementMode)
 	}
+	if b.ECPolicy != nil {
+		ctx = data.WithECPolicy(ctx, b.ECPolicy.K, b.ECPolicy.M)
+	}
 	if len(draining) > 0 {
 		ctx = data.WithDrainingClusters(ctx, draining)
 	}

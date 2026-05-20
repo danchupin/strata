@@ -14,9 +14,10 @@ import (
 )
 
 type fakeMetrics struct {
-	mu      sync.Mutex
-	traces  int
-	evicted int
+	mu        sync.Mutex
+	traces    int
+	evicted   int
+	oldestAge float64
 }
 
 func (f *fakeMetrics) SetTraces(n int) {
@@ -29,11 +30,22 @@ func (f *fakeMetrics) IncEvicted() {
 	f.evicted++
 	f.mu.Unlock()
 }
+func (f *fakeMetrics) SetOldestAgeSeconds(s float64) {
+	f.mu.Lock()
+	f.oldestAge = s
+	f.mu.Unlock()
+}
 
 func (f *fakeMetrics) snapshot() (int, int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.traces, f.evicted
+}
+
+func (f *fakeMetrics) oldestAgeSnapshot() float64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.oldestAge
 }
 
 // fakeSpan returns a tracetest.SpanStub-backed read-only span suitable for
@@ -328,6 +340,65 @@ func TestListSummaryAggregatesStatusAndDuration(t *testing.T) {
 	}
 	if got.StartedAtNS != base.UnixNano() {
 		t.Errorf("started_at_ns=%d want %d", got.StartedAtNS, base.UnixNano())
+	}
+}
+
+func TestOldestAgeTracksLRUBack(t *testing.T) {
+	m := &fakeMetrics{}
+	rb := New(WithMetrics(m))
+
+	// Three traces with explicit StartTimes spaced 10 s apart. Insertion
+	// order maps to LRU order: oldest=trace-1 at the back.
+	t0 := time.Now().Add(-30 * time.Second)
+	stub1 := makeStubAt(1, 0xa, trace.SpanID{}, "PUT /bkt/a", "req-1", t0, 5*time.Millisecond, codes.Ok)
+	stub2 := makeStubAt(2, 0xb, trace.SpanID{}, "PUT /bkt/b", "req-2", t0.Add(10*time.Second), 5*time.Millisecond, codes.Ok)
+	stub3 := makeStubAt(3, 0xc, trace.SpanID{}, "PUT /bkt/c", "req-3", t0.Add(20*time.Second), 5*time.Millisecond, codes.Ok)
+
+	ingest(t, rb, stub1)
+	ingest(t, rb, stub2)
+	ingest(t, rb, stub3)
+
+	got, ok := rb.OldestStartNS()
+	if !ok {
+		t.Fatal("OldestStartNS returned ok=false on a populated ring")
+	}
+	if got != t0.UnixNano() {
+		t.Errorf("OldestStartNS = %d want %d (t0.UnixNano)", got, t0.UnixNano())
+	}
+
+	// Gauge published age should be roughly (now - t0) seconds; allow a
+	// generous tolerance so a slow runner doesn't flake.
+	age := m.oldestAgeSnapshot()
+	if age < 25 || age > 60 {
+		t.Errorf("oldest age gauge = %.3f s; expected ~30 s", age)
+	}
+}
+
+func TestOldestAgeAdvancesAfterEviction(t *testing.T) {
+	m := &fakeMetrics{}
+	rb := New(WithBytes(160), WithMetrics(m))
+
+	// Two traces; the second is large enough to evict the first under the
+	// tiny bytes budget. After eviction the LRU back is the surviving
+	// trace, so OldestStartNS must reflect ITS start time.
+	t0 := time.Now().Add(-2 * time.Minute)
+	stub1 := makeStubAt(1, 0xa, trace.SpanID{}, "PUT /bkt/old", "req-1", t0, 5*time.Millisecond, codes.Ok)
+	stub2 := makeStubAt(2, 0xb, trace.SpanID{}, "PUT /bkt/newaaaaaaaaaaaaaaaaaaaaaa", "req-2", t0.Add(time.Minute), 5*time.Millisecond, codes.Ok)
+	ingest(t, rb, stub1)
+	ingest(t, rb, stub2)
+
+	if _, ok := rb.GetByRequestID("req-1"); ok {
+		t.Fatal("expected req-1 evicted under tight budget; assertion premise broken")
+	}
+	got, ok := rb.OldestStartNS()
+	if !ok {
+		t.Fatal("OldestStartNS returned ok=false after eviction")
+	}
+	if got != t0.Add(time.Minute).UnixNano() {
+		t.Errorf("OldestStartNS = %d want %d (stub2 start)", got, t0.Add(time.Minute).UnixNano())
+	}
+	if age := m.oldestAgeSnapshot(); age < 50 || age > 120 {
+		t.Errorf("oldest age gauge = %.3f s; expected ~60 s", age)
 	}
 }
 

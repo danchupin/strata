@@ -66,6 +66,35 @@ override pointer in ctx before `Next.ServeHTTP` and reads it back
 after. Add the override stamp to every new admin write — listing
 handlers (GET) skip audit by `auditableMethod`.
 
+### Object Lock COMPLIANCE audit verbs
+
+S3 Object Lock writes against COMPLIANCE-mode retention emit three
+purpose-specific audit verbs so auditors can grep `audit_log` for
+retention-policy events without scanning every state-changing request:
+
+| Verb | When stamped | Principal | Resource |
+|------|--------------|-----------|----------|
+| `objectlock:CompliancePut` | `PUT /bkt/key?retention` with `<Mode>COMPLIANCE</Mode>` succeeds | `Auth.Owner` (caller) | `object:<bucket>/<key>` |
+| `objectlock:ComplianceRetentionAttemptedReduce` | A retention write would weaken an existing COMPLIANCE retention (downgrade mode, clear it, or shorten `RetainUntilDate`). Request is rejected with `AccessDenied`; the row records the attempt regardless of outcome. | `Auth.Owner` (caller) | `object:<bucket>/<key>` |
+| `objectlock:ComplianceRetentionExpired` | The lifecycle worker successfully expires an object whose COMPLIANCE `RetainUntilDate` has elapsed. | `system:lifecycle-worker` | `object:<bucket>/<key>` |
+
+Operator query — every retention-policy event for a bucket over the
+last 24 hours:
+
+```sql
+SELECT time, action, principal, resource, result
+FROM audit_log
+WHERE bucket_id = <bucket-uuid>
+  AND time > now() - INTERVAL '1 day'
+  AND action LIKE 'objectlock:%'
+ORDER BY time DESC;
+```
+
+`Resource` is always `object:<bucket>/<key>` — operator-facing rather
+than the URL-path-derived `/<bucket>/<key>` shape used by generic S3
+writes. This lets you filter compliance-relevant rows with a single
+`action LIKE 'objectlock:%'` clause without joining on path heuristics.
+
 ### Long-term retention
 
 `strata server --workers=audit-export` drains audit_log partitions

@@ -74,23 +74,16 @@ func (s *Server) checkQuota(ctx context.Context, b *meta.Bucket, intent quotaWri
 	return nil
 }
 
-// userUsedBytes sums BucketStats.UsedBytes across every bucket owned by user.
-// Walks ListBuckets; v1 shape — see CLAUDE.md note on the P3 denormalised
-// user_bucket_count follow-up.
+// userUsedBytes returns the cached UserStats.UsedBytes aggregate for user.
+// O(1) point read against the denormalised user_stats row maintained in
+// lockstep with bucket_stats (ralph/storage-correctness US-001) — replaces
+// the prior ListBuckets + per-bucket GetBucketStats fan-out.
 func (s *Server) userUsedBytes(ctx context.Context, user string) (int64, error) {
-	buckets, err := s.Meta.ListBuckets(ctx, user)
+	stats, err := s.Meta.GetUserStats(ctx, user)
 	if err != nil {
 		return 0, err
 	}
-	var total int64
-	for _, ub := range buckets {
-		stats, err := s.Meta.GetBucketStats(ctx, ub.ID)
-		if err != nil {
-			return 0, err
-		}
-		total += stats.UsedBytes
-	}
-	return total, nil
+	return stats.UsedBytes, nil
 }
 
 // checkUserBucketQuota enforces UserQuota.MaxBuckets at CreateBucket time.
@@ -109,11 +102,11 @@ func (s *Server) checkUserBucketQuota(ctx context.Context, owner string) error {
 	if !ok || uq.MaxBuckets <= 0 {
 		return nil
 	}
-	buckets, err := s.Meta.ListBuckets(ctx, owner)
+	stats, err := s.Meta.GetUserStats(ctx, owner)
 	if err != nil {
 		return err
 	}
-	if int32(len(buckets)) >= uq.MaxBuckets {
+	if int32(stats.BucketCount) >= uq.MaxBuckets {
 		return meta.ErrQuotaExceeded
 	}
 	return nil

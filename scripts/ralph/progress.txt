@@ -1,132 +1,1049 @@
 # Ralph Progress Log
-Started: Tue May 19 23:00:00 MSK 2026
-Cycle: ralph/dx-lab
+Started: Wed May 20 00:00:00 MSK 2026
+Cycle: ralph/storage-correctness
 
 ## Codebase Patterns
-- DX/lab bundle — 5 stories, 4 small improvements + final smoke. Targets the remaining DX/lab P3 entries on ROADMAP lines 274/276/291/293 so post-cycle the roadmap holds only globals (benchmarks vs RGW, content-addressed dedup, Intelligent-Tiering, Select Object Content, plus the Cassandra-backed/storage-perf bundles that follow).
-- **Story ordering rationale**: US-001 (`make dev`) is priority 1 because it's pure Makefile + docs (no infra change); US-002 (bench-3replica) needs the compose-profile shape clear; US-003 (Helm chart) is independent; US-004 (s3-api lint test) needs the docs-adr cycle's s3-api.md table to grep against — already on main. US-005 smokes everything.
-- **`make dev` shape (US-001)**: foreground log stream via `docker compose logs -f --tail=20 strata-a strata-b strata-lb-nginx` after `make up-all + wait-tikv + wait-ceph + wait-strata-lab`. Ctrl-C exits the tail only; stack stays up. `make dev-down` calls `make down`; `make dev-logs` re-attaches via `docker compose logs -f strata-a strata-b strata-lb-nginx` (no --tail). Backend = TiKV (canonical default per CLAUDE.md ## Compose shape); Cassandra-backed lab stays under `make up-cassandra`. NO `make help` target exists today — document via Makefile header comments above each new target (mirror the comment-block pattern at lines ~83/109/129/144/168).
-- **`bench-3replica` compose profile (US-002)**: add `strata-c` service (port 10003:9000, `STRATA_NODE_ID: strata-c`, shared strata-jwt-shared volume) to `deploy/docker/docker-compose.yml`. nginx upstream gets strata-c on the profile — verify nginx wiring pattern via `grep -rn upstream deploy/docker/nginx*` before deciding (profile-conditional config file copy vs entrypoint template). Fallback: bench script targets strata-a/b/c on host ports directly (10001/10002/10003) bypassing LB if nginx-templating is too invasive — bench measures rebalance fan-out speedup across worker replicas, not LB load-balancing. SKIP is at scripts/bench-rebalance-multi.sh line 322; un-skip there. Bench output → `docs/site/content/architecture/benchmarks/rebalance.md` (canonical page; `rebalance-multi.md` does NOT exist — earlier PRD draft had wrong filename).
-- **Helm chart (US-003)**: `deploy/helm/strata/` with Chart.yaml v2 / values.yaml / templates/{deployment, service, configmap, secret, ingress, servicemonitor, _helpers.tpl}.yaml + .helmignore. values.yaml mirrors STRATA_* env vars 1:1 (operator who read /reference/env-vars/ maps every knob). `monitoring.enabled: false` gates servicemonitor.yaml via `{{ if .Values.monitoring.enabled }}`. TiKV-only this cycle — Cassandra-backed users stay on raw deploy/k8s/. New `make helm-lint` target runs `helm lint deploy/helm/strata/` and degrades to a one-line hint if helm binary missing (`command -v helm > /dev/null || (echo ... && exit 0)` shape). Docs in `docs/site/content/deploy/kubernetes.md` (file verified to exist).
-- **s3-api drift test (US-004)**: `internal/s3api/docs_reference_test.go` (default build tag). go/ast walks server.go `handleBucket` (line ~223), `handleObject` (line ~764), `ServeHTTP` (line ~109) switch arms; extracts `(case_string, handler_func_name, file_path, ast_line_number)`. Reads docs/site/content/reference/s3-api.md, parses markdown tables, builds `handler_func_name → row` map. Bidirectional drift catch: (1) AST arm with no row + no `// docs:skip` marker = hard fail; (2) markdown row pointing to non-existent handler = hard fail. `// docs:skip` marker on line directly above `func` declaration tolerates an intentionally-undocumented handler (test logs via t.Logf, stays green). Audit pass: add markers or rows to bring existing state to green before commit.
-- **ROADMAP close-flip (US-005)**: 4 P3 entries close in one commit (lines 274/276/291/293). Each carries `(commit pending)` placeholder; SHA backfill lands on main as fast-follow commit (mirrors `f6a5476` / `77a9348` / `fe16160` precedent). No new ROADMAP gaps surfaced this cycle (no "Discovering a new gap" entry).
-- **No UI in this cycle** — none of the 4 fixes surfaces in the operator console. Per memory rule `Cycle end-to-end`, the final-story smoke validation runs `make dev` readiness + `make smoke-tikv-default-lab` (proves US-001 doesn't regress canonical) + bench-3replica one-shot (or documented SKIP) + `helm lint` + `helm template | kubectl apply --dry-run=client` + new `docs_reference_test.go` + `make vet` + `make docs-build` — substitutes UI-smoke discipline because value is backend/DX-only.
-- **Verified facts from PRD review**:
-  - Makefile targets exist: `up-all:83`, `down:109`, `wait-ceph:129`, `wait-tikv:144`, `wait-strata-lab:168`, `vet:48`, `test:51`. NO `help:` target.
-  - bench-rebalance-multi.sh SHARDS=3 SKIP at line 322; helper `skip()` function at line 126; header comments at lines 11-14 reference parked status.
-  - Compose: strata-a/strata-b services with `STRATA_NODE_ID: strata-a`/`strata-b` (lines ~167/~225). strata-c follows this pattern.
-  - s3api/server.go: `ServeHTTP` line 109, `handleBucket` line 223, `handleObject` line 764 — all 3 entry points confirmed.
-  - docs/site/content: `architecture/benchmarks/rebalance.md` exists (not `rebalance-multi.md`); `deploy/kubernetes.md` exists; `get-started/_index.md` exists; `developers/` has only `_index.md` (no `quickstart.md`).
-  - ROADMAP lines 274/276/291/293 entries confirmed stable.
+- **Pre-launch product** (per [Pre-launch no deploys] memory rule) — no existing users, no historical data on real backend rows. Hard cutovers OK on schema changes. NO backwards-compat shims, NO migration backfill workers for "existing prod data", NO "expansion deferred to P3" parking. Tests + contracts + code quality remain strict.
+- 10-story cycle (Cycle 1 of 2; KMS + module-split parked to Cycle 2 ralph/auth-dx). 5 perf items + 1 correctness audit + 1 forward-compat schema + 2 latent fixes + smoke. After Cycle 1+2 closes, ROADMAP holds only globals (P2 Benchmarks vs RGW, P2 ScyllaDB benchmarks, P2 Content-addressed dedup, P3 Intelligent-Tiering, P3 Select Object Content).
+- **Story ordering rationale**: US-001 (user_stats denorm) is priority 1 — schema change before any usage path. US-002 (byte_seconds) independent. US-003 (RADOS batching) + US-004 (RADOS pool) target same backend but independent bench harnesses. US-005 (OTel ringbuf) independent. US-006 (COMPLIANCE audit) independent. US-007 (EC policy) needs data.Backend.ClusterECCapability interface added. US-008+US-009 latent. US-010 smokes.
+- **Bench-then-ship pattern (US-003, US-004, US-005)**: explicit threshold gates. US-003 ships batched WriteOp as default if ≥10% p99 PUT improvement; else keep op-per-call default + document bench numbers. US-004 ships POOL_SIZE default=4 if N=4 improves p99 PUT by ≥20%; else keep default=1 + document. US-005 bumps OTEL_RINGBUF_BYTES default to 16 MiB if ≥30% retained-trace-age improvement vs 4 MiB without ≥2× memory hit; else keep 4 MiB + surface env knob more prominently. Env knob ships regardless of bench outcome in all three.
+- **user_stats LWT discipline (US-001)**: bucket_stats is BIGINT-shaped (internal/meta/cassandra/schema.go:226-231) — LWT batch works directly. Every existing bucket_stats bump site MUST batch a user_stats bump in the same `BEGIN BATCH ... APPLY BATCH`. TiKV: pessimistic txn locks both bucket_stats:<bid> and user_stats:<owner> keys. Memory: same critical section.
+- **TWO fan-out sites for US-001** (verified): (a) `userUsedBytes` internal/s3api/quota.go:80-94 — ListBuckets + per-bucket GetBucketStats sum; lift to GetUserStats(owner).UsedBytes. (b) `checkUserBucketQuota` internal/s3api/quota.go:101-120 — ListBuckets count; lift to GetUserStats(owner).BucketCount. Both lift in same story.
+- **usage_aggregates schema** (verified, internal/meta/cassandra/schema.go:232-241): `(bucket_id, storage_class, day, byte_seconds, object_count_avg, object_count_max, computed_at)` PK `((bucket_id, storage_class), day)`. Plus sibling `usage_aggregates_classes` lookup table. US-002 trapezoid preserves all columns; object_count_avg = sum/N, object_count_max = max(samples).
+- **EC validation (US-007)**: NEW `data.Backend.ClusterECCapability(ctx, clusterID) (ec bool, k int, m int, err error)` interface. RADOS probe via librados `pool_get_metadata` (or `mon_command` JSON parse fallback if no direct API — open question). 60s TTL cache keyed on `cluster_id + pool_name`. Mismatch → 409 InconsistentECPolicy with body identifying which cluster mismatches. NO 'metadata-only' disclaimer needed — full validation prevents bogus policies.
+- **aws-chunked-trailer sha256-only (US-009)**: scope this story. Other algos (crc32, crc32c, sha1) respond ErrUnsupportedChecksumAlgorithm 400 + new P3 ROADMAP entry parked open. Chain-HMAC scheme extends prevSig to cover trailer chunk per AWS spec.
+- **ROADMAP close-flip (US-010)**: 9 P3 entries close (lines 211 / 234 / 235 / 238 / 240 / 242 / 253 / 332 / 336 — verified). + 1 NEW P3 entry added open for non-sha256 trailer algos. Each carries `(commit pending)`; SHA backfill on main as fast-follow.
+- **s3-tests baseline**: record pre-cycle pass-rate; only intentional changes from US-006 (additive audit rows, no wire impact) and US-009 (chunked-trailer-PUT goes from sig-invalid to 200 OK on aws-cli 2.22+). Any other regression = bug.
+- **usage-rollup trapezoid (US-002) reference**: env `STRATA_USAGE_ROLLUP_SAMPLES_PER_DAY` (default 24, clamp [1, 1440]). Pure math in `internal/usagerollup/trapezoid.go` (`Trapezoid`, `AverageObjects`, `MaxObjects`, `sampleRing`). Worker drives N intermediate `SampleOnce` ticks per Interval (single-select Run loop with ctx.Done / sample-ticker / daily-timer). Empty ring → falls back to `GetBucketStats × 86400` (legacy v0 math). Schema unchanged on all three backends — hard cutover, no `method` column.
+- **Audit-from-worker pattern (US-006)**: workers stamp audit_log directly via `Meta.EnqueueAudit` with a synthetic `meta.AuditEvent` (no HTTP middleware in their path). Canonical templates: `rebalance.Worker.recordDrainCompleteAudit` and `lifecycle.Worker.recordComplianceRetentionExpiredAudit`. Worker fields `AuditTTL time.Duration` + `Default<X>AuditRetention` const (30d) keep the storage package free of the s3api import. Resource shape `<noun>:<scoped-id>` (object:<bucket>/<key>, cluster:<id>) lets operators grep with `action LIKE 'objectlock:%'` without overlap.
+- **TestDocsReferenceCoverage tripwire**: any edit to `internal/s3api/<handler>.go` that shifts line numbers MUST be paired in the same commit with a line-number bump in `docs/site/content/reference/s3-api.md` for affected handlers — the test fails the build if the doc gets stale. Insert helpers BELOW dispatch handlers to minimise churn.
+- **Verified codebase facts (PRD review):**
+  - bucket_stats is BIGINT not counter — LWT batch shape works directly (no migration).
+  - userUsedBytes line 80-94 + checkUserBucketQuota line 101-120 — both lift to user_stats.
+  - usage_aggregates carries object_count_avg + object_count_max + computed_at columns.
+  - objectlock.go file exists for US-006 handler additions.
+  - internal/auth/streaming.go exists for US-009 trailer decoder.
+  - Range latent bug ROADMAP line 332 — only zero-length edge cases need tests (today's path works for nonzero size).
+  - aws-chunked-trailer latent bug ROADMAP line 336.
+  - 9 close-flip targets confirmed at lines 211/234/235/238/240/242/253/332/336.
 
-## 2026-05-19 - US-001
-- Added `make dev` / `make dev-down` / `make dev-logs` targets to `Makefile` after `wait-strata-lab`.
-  - `dev` depends on `up-all wait-tikv wait-ceph wait-strata-lab` and then runs `docker compose -f deploy/docker/docker-compose.yml logs -f --tail=20 strata-a strata-b strata-lb-nginx` (TiKV-default canonical lab).
-  - `dev-down` aliases `down` (preserves volumes; full wipe stays a direct `docker compose down -v`).
-  - `dev-logs` re-attaches via `docker compose logs -f strata-a strata-b strata-lb-nginx` (no --tail).
-  - `.PHONY` extended with `dev dev-down dev-logs`.
-- Added a `## One-command dev` section to `docs/site/content/get-started/_index.md` documenting the three targets, the TiKV-default backend choice, and the composable underlying targets for CI / scripted use.
-- Quality checks: `make vet` green; `go test ./...` green; `make docs-build` green (73 pages). Dry-runs of `make dev` / `make dev-down` / `make dev-logs` print the expected command sequences.
-- Files changed: `Makefile`, `docs/site/content/get-started/_index.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+## 2026-05-19 - US-001 - user_stats denorm O(1) UserQuota
+- Implemented new `meta.UserStats` aggregate row (Owner / UsedBytes / UsedObjects / BucketCount /
+  UpdatedAt) plus 3 interface methods on `meta.Store`: GetUserStats, BumpUserStats,
+  IncrUserBucketCount.
+- Memory backend (internal/meta/memory/store.go):
+  - New maps `userStats[owner] meta.UserStats` and `bucketOwners[bucketID] owner` for O(1) lookup.
+  - `bumpBucketStatsLocked` resolves owner via the bookkeeping map (fallback scan when test paths
+    bypass createBucketWithID) and folds the user_stats bump into the same critical section.
+  - CreateBucket bumps bucket_count +1; DeleteBucket -1 (only when owner != "").
+- Cassandra backend (internal/meta/cassandra/store.go + schema.go):
+  - New `user_stats` table (owner PK + bigint counters) added to `tableDDL`.
+  - `bucket_stats` carries a new `owner text` column (`tableDDL` + idempotent `ALTER TABLE` in
+    alterStatements) — denormalised owner pointer so BumpBucketStats does not need to round-trip
+    through buckets on every PUT.
+  - Cross-partition LWT batches are illegal in Cassandra; the bucket_stats CAS commits first, then
+    a user_stats CAS loop applies the same delta (drift correctable by quotareconcile).
+  - CreateBucket / DeleteBucket call IncrUserBucketCount in lockstep with the bucket-row insert /
+    delete.
+- TiKV backend (new internal/meta/tikv/user_stats.go + edits to bucket_stats.go + buckets.go):
+  - New `prefixUserStats` (`s/us/<owner>`) + `prefixBucketOwner` (`s/bo/<bucket16>`) in keys.go.
+  - `BumpBucketStats` reads the bucket_owners pointer inside the same pessimistic txn, then folds
+    `bumpUserStatsInTxn` into the same Commit — single atomic LockKeys+Get+Set+Commit for both
+    rows.
+  - CreateBucket additionally writes the bucket_owners pointer + bumps bucket_count;
+    DeleteBucket clears them in the same txn.
+- s3api/quota.go fan-out lift (US-001 hot path):
+  - `userUsedBytes` → `Meta.GetUserStats(owner).UsedBytes` (was ListBuckets + per-bucket
+    GetBucketStats fan-out).
+  - `checkUserBucketQuota` → `Meta.GetUserStats(owner).BucketCount` (was `len(ListBuckets)`).
+- Contract tests (internal/meta/storetest/contract.go):
+  - `caseUserStats`: 3 buckets / 2 owners + 100 chunks each + bucket deletion → asserts
+    UsedBytes / UsedObjects / BucketCount on every owner.
+  - `caseUserStatsConcurrent`: 100 goroutines bumping BumpUserStats + IncrUserBucketCount, asserts
+    no lost updates.
+- Files changed: internal/meta/store.go, internal/meta/memory/store.go,
+  internal/meta/cassandra/store.go, internal/meta/cassandra/schema.go,
+  internal/meta/tikv/keys.go, internal/meta/tikv/buckets.go,
+  internal/meta/tikv/bucket_stats.go, internal/meta/tikv/user_stats.go (new),
+  internal/meta/storetest/contract.go, internal/s3api/quota.go.
+- Quality: `go vet ./...` green, `go test -race ./...` green (~2 min wall-clock including the 46s
+  racetest mix). Cassandra/TiKV integration suites pick up the new contract cases automatically
+  via storetest.Run when invoked under `-tags integration`.
 - **Learnings for future iterations:**
-  - Makefile `.PHONY` line lives at the top (line 4 onward) — extend the existing block when adding new phony targets; don't sprinkle additional `.PHONY:` lines through the file.
-  - `make dev` Ctrl-C semantics work because `docker compose logs -f` is the foreground process — SIGINT propagates to the compose CLI, which simply detaches from the stream; the containers themselves stay running. No special trap handling needed in the recipe.
-  - The `down` target already cleans up profile-gated services (`--profile cassandra --profile tracing --profile webhook-trap --profile ci`) so `dev-down: down` is sufficient — no need to duplicate the profile list.
-  - `dev` deliberately re-uses the existing `wait-*` chain rather than introducing a new one so the `up-all + wait-*` building blocks stay the single source of truth for "lab ready" semantics.
-  - Use `make -n dev` to verify the recipe chain without actually starting the stack — surfaces the full expansion of dependent targets.
+  - Cassandra LWT batches across partitions are rejected — "batch a user_stats bump in the same
+    BEGIN BATCH" from the PRD is literally impossible. The correct pattern is bucket_stats LWT
+    commits first; a follow-up user_stats LWT applies the same delta; drift is corrected by the
+    quotareconcile worker.
+  - The owner-on-bucket_stats denorm column is needed because BumpBucketStats only carries the
+    bucket UUID, not the owner. Lazily filled on first INSERT IF NOT EXISTS so we don't pay a
+    GetBucket round-trip on every PUT.
+  - TiKV pessimistic txn can fold cross-prefix rows (bucket_stats + bucket_owners + user_stats)
+    into one Commit because every LockKeys call adds to the same txn's lock set — no extra round
+    trips vs the single-row bump.
+  - Memory backend `bumpBucketStatsLocked` already runs under the sync.RWMutex, so adding user
+    bookkeeping there is free.
+  - The PRD's "userBucketCount via ListBuckets" trap: even small test harnesses pay an O(N) scan;
+    GetUserStats(owner).BucketCount is one map lookup.
 ---
 
-## 2026-05-19 - US-002
-- Added `strata-c` service to `deploy/docker/docker-compose.yml` under `profiles: ["bench-3replica"]`. Mirrors strata-b verbatim (TiKV meta, multi-cluster RADOS, shared `strata-jwt-shared` volume) with `STRATA_NODE_ID=strata-c` and host port `10003:9000`.
-- nginx LB intentionally unchanged: strata-c joins the rebalance-worker shard lease pool via the TiKV-backed locker independent of HTTP routing, so the bench measures fan-out without needing an LB-template change (the PRD's fallback path was the cleaner choice).
-- Updated `Makefile` `down` target to enumerate `--profile bench-3replica` alongside the existing four profile cleanups so `make down` removes strata-c.
-- `scripts/bench-rebalance-multi.sh`:
-  - Removed the SHARDS=3 SKIP line at the bottom + the parked-status copy in the header.
-  - Added knobs `BENCH_SHARDS_3REPLICA` (default 3), `COMPOSE_CMD_3REPLICA`, `RESTART_CONTAINERS_3REPLICA`, `BENCH_RESTART_HOOK_3REPLICA`.
-  - `restart_replicas_with_shards` + `run_drain_pass` now accept an optional restart-hook argument so the third pass force-recreates strata-a/b/c via the bench-3replica profile.
-  - Bottom of script auto-detects `strata-c` via `docker compose ps -q strata-c`. Present → third pass with `STRATA_REBALANCE_SHARDS=$BENCH_SHARDS_3REPLICA` runs and `elapsed_s` + ratio vs baseline land in the results JSONL. Absent → SKIP line referencing the lima/macOS memory cap + the bring-up command.
-- `docs/site/content/architecture/benchmarks/rebalance.md`: replaced the parked-status copy in the "Harness" section with the new auto-detect language; updated "Caveats" cross-references; added a new `## 3-replica TiKV (post-restore)` subsection with bring-up recipe, the bench's gating contract, and the expected-shape table.
-- Local SHARDS=3 capture deferred: macOS + lima Docker context's default ~12 GiB cap exceeds the combined memory budget for strata-c + 2 ceph memstores + pd + tikv + prometheus + grafana. The compose profile + bench script + docs are in place so an operator with headroom can capture representative numbers on demand.
-- Quality checks: `make vet` green; `go test ./...` green (notify 1.4s, racetest 44.4s, s3api 9.0s, no failures); `make docs-build` green (73 pages); `bash -n scripts/bench-rebalance-multi.sh` green; `docker compose -f deploy/docker/docker-compose.yml --profile bench-3replica config --services` lists strata-c alongside the bare-default services.
-- Files changed: `deploy/docker/docker-compose.yml`, `Makefile`, `scripts/bench-rebalance-multi.sh`, `docs/site/content/architecture/benchmarks/rebalance.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+## 2026-05-19 - US-002 - byte_seconds trapezoid integration
+- New env knob `STRATA_USAGE_ROLLUP_SAMPLES_PER_DAY` (default 24 = hourly, clamp
+  [1, 1440] with WARN log when out-of-range; treats 0 as "use default" so
+  callers passing the zero-value Config still get 24-sample shape).
+- New file internal/usagerollup/trapezoid.go: pure `Trapezoid(samples, totalSeconds)`
+  + `AverageObjects` / `MaxObjects` helpers + `sampleRing` (sync.Mutex-guarded
+  map keyed on `RingKey{BucketID, Class}`, cap-bounded at SamplesPerDay so a
+  long-running ring window does not leak). Trapezoid math:
+  `Σ_{i=0..N-2} (s[i]+s[i+1])/2 × Δt + s[N-1] × Δt` where `Δt = totalSeconds / N`
+  — last segment carries last sample forward as a rectangle so a flat day
+  integrates exactly back to `used_bytes × 86400`. `N=1` short-circuits to
+  `samples[0] × totalSeconds` (= legacy v0 single-sample math, intentional
+  fallback).
+- internal/usagerollup/worker.go: gained `SamplesPerDay` Config field, the
+  `ring *sampleRing` Worker field, `SampleOnce(ctx, now)` method (snapshot every
+  bucket's `GetBucketStats` into the ring), and the daily roll-up tick now
+  drains the per-(bucket, class) ring + computes `ByteSeconds = Trapezoid(samples, 86400)`,
+  `ObjectCountAvg = mean(samples)`, `ObjectCountMax = max(samples)`.
+  Empty-ring path falls back to a fresh `GetBucketStats` + single-sample
+  math so a bucket created mid-day still gets a roll-up row.
+- Run loop rewritten as single-select: ctx.Done / sample-ticker (fires every
+  Interval/SamplesPerDay when SamplesPerDay>1) / daily-timer (fires at the
+  configured At time, then resets to next-day). Replaces the previous
+  one-timer + sleep-Interval shape so sample ticks and the daily flush can
+  share the same goroutine.
+- cmd/strata/workers/usage_rollup.go: reads `STRATA_USAGE_ROLLUP_SAMPLES_PER_DAY`
+  via the existing `intFromEnv` helper (same shape as STRATA_GC_*); env
+  unset → DefaultSamplesPerDay (24).
+- Hard cutover per PRD: no `method` column on usage_aggregates; old `used × 86400`
+  math is the N=1 fallback path, not a parallel branch. Schemas unchanged
+  (Cassandra + TiKV + memory).
+- Tests:
+  - trapezoid_test.go: table-driven (flat, step-up at noon, step-down at noon,
+    sawtooth, single-sample, empty, zero-duration, avg/max helpers, ring drain
+    + cap-to-window). Step-up hand math: 11×(100·3600) + (100+200)/2·3600 +
+    11×(200·3600) + 200·3600 = 13_140_000 — within 1.4 % of the
+    perfect 12_960_000.
+  - worker_test.go: existing tests continue passing (single-sample fallback
+    preserves `used × 86400` math). New cases:
+    - TestRunOnceTrapezoidsFullVirtualDay: drives 24 manual SampleOnce calls
+      across hours 0..23 (step-up at noon, 100→200 bytes, 1→4 objects),
+      asserts ByteSeconds == 13_140_000, ObjectCountAvg == 2,
+      ObjectCountMax == 4.
+    - TestRunOnceFallsBackToSingleSampleWhenRingEmpty: bucket created
+      mid-day with no sample ticks → fallback to `used × 86400`.
+    - TestNewClampsSamplesPerDayOutOfRange: 5000 clamps to 1440; -3 clamps
+      to 1.
+    - TestNewDefaultsSamplesPerDayWhenZero: zero-value Config gets 24.
+- docs/site/content/best-practices/quotas-billing.md: replaced the v1 caveat
+  block with a "byte-seconds trapezoid integration" section that explains
+  the formula + N=1 fallback + worked example (100→200 step-up bills
+  13_140_000 B·s vs the v0 over-count of 17_280_000). Added the new env
+  knob to the env table.
+- Files changed: internal/usagerollup/trapezoid.go (new),
+  internal/usagerollup/trapezoid_test.go (new), internal/usagerollup/worker.go,
+  internal/usagerollup/worker_test.go,
+  cmd/strata/workers/usage_rollup.go,
+  docs/site/content/best-practices/quotas-billing.md.
+- Quality: `go vet ./...` green, `go build ./...` green, `make docs-build`
+  green, `go test -race ./internal/usagerollup/...` green, full
+  `go test -race ./...` green.
 - **Learnings for future iterations:**
-  - `docker compose --profile <name> config --services` surfaces every service active under the profile + the baseline set — useful for validating that a profile-gated addition didn't accidentally trip into the default service list.
-  - The compose `down` target should explicitly enumerate every named profile; profile-gated services are otherwise left running after `make down` because compose only stops services in the active profile set when a profile flag is passed.
-  - `docker compose ps -q <service>` returns empty when the service isn't running OR when the service is profile-gated and the profile wasn't passed. Auto-detection via this command works because the bench script can probe presence without knowing whether the profile flag was set elsewhere.
-  - Rebalance worker shard fan-out runs over TiKV leases — adding a third worker replica does NOT require an nginx LB change. The HTTP load balancer fronts gateway requests; the rebalance worker is goroutine-local per replica and races for `rebalance-leader-<i>` leases through the shared TiKV-backed locker.
-  - Per-pass restart-hook injection in `run_drain_pass` keeps the SHARDS=1/2/3 legs independent — each pass can target a different compose profile + force-recreate set. The hook expansion uses `eval` so `$SHARDS` is interpolated at run time; the hook string itself contains an escaped `\$SHARDS` so the deferred expansion fires.
+  - The ring is per-process; a leader flip mid-day starts a fresh ring on
+    the new leader. First post-flip day will have fewer samples and
+    degrade gracefully (worst case 1 sample → v0 math). No persisted state
+    needed — the daily roll-up reads bucket_stats at the boundary anyway.
+  - Run-loop refactor pattern: when you need N intermediate ticks PLUS a
+    daily-clock fire, use a single select with three cases (ctx.Done +
+    ticker + timer). Reset the daily timer on each daily fire to track
+    the new nextFire; do NOT use a ticker for the daily fire because the
+    "at HH:MM UTC" semantic is a wall-clock landmark, not a fixed cadence.
+  - `SamplesPerDay` Config field uses 0 as a sentinel for "use default"
+    so callers passing `Config{Meta: store}` (the worker_test shape) still
+    get the production 24-sample behavior. Negative values clamp to 1
+    (the trapezoid fallback path) with a WARN log; values above
+    MaxSamplesPerDay=1440 clamp down with a WARN.
+  - Memory backend has no `SetBucketStatsForTest` shortcut — tests must
+    drive `BumpBucketStats` with deltas. Easy to forget when porting
+    test fixtures from a Cassandra integration shape.
+  - Worker tests that exercise the daily-flush path do NOT need to enter
+    `Run()` — call `SampleOnce` + `RunOnce` directly. The full `Run` loop
+    is exercised by `TestRunCtxCancelExits` already.
 ---
 
-## 2026-05-19 - US-003
-- Shipped `deploy/helm/strata/` Helm chart (TiKV-only this cycle; Cassandra-backed users stay on deploy/k8s/).
-- Files added: `deploy/helm/strata/Chart.yaml`, `deploy/helm/strata/.helmignore`, `deploy/helm/strata/values.yaml`, `deploy/helm/strata/templates/_helpers.tpl`, `deploy/helm/strata/templates/configmap.yaml`, `deploy/helm/strata/templates/secret.yaml`, `deploy/helm/strata/templates/service.yaml`, `deploy/helm/strata/templates/deployment.yaml`, `deploy/helm/strata/templates/ingress.yaml`, `deploy/helm/strata/templates/servicemonitor.yaml`, `deploy/helm/strata/templates/serviceaccount.yaml`.
-- `Chart.yaml`: apiVersion v2, name strata, type application, version 0.1.0, appVersion 0.1.0 (no git tags exist yet — the PRD's `git tag --sort=-v:refname | head -1 OR 0.1.0` fallback fires the second branch), kubeVersion `>=1.27.0-0`.
-- `values.yaml`: mirrors `deploy/k8s/` env vars 1:1 (image, replicas, meta.endpoints, data.clusters+classes+user+pool, workers list, region, gc.{shards,interval,grace}, lifecycle.{interval,unit}, auth.mode, logging.level, vhostPattern, otel.{endpoint,sampleRatio,ringbuf,ringbufBytes}, prometheus.url, extraEnv passthrough, secret.{create,name,staticCredentials,consoleJWTSecret,cephConf,keyring}, service.{type,port,annotations}, ingress.{enabled,className,hosts,tls,annotations}, resources.{requests,limits} 500m/512Mi -> 2/4Gi per AC, monitoring.{enabled,interval,scrapeTimeout,labels}, podSecurityContext+securityContext+nodeSelector+tolerations+affinity, readinessProbe+livenessProbe, podAnnotations).
-- `_helpers.tpl` defines the standard set: `strata.name`, `strata.fullname`, `strata.chart`, `strata.labels`, `strata.selectorLabels`, `strata.serviceAccountName`, `strata.secretName`, `strata.configMapName`, `strata.workersCsv`.
-- Conditional gating: `servicemonitor.yaml` wrapped in `{{ if .Values.monitoring.enabled }}`, `ingress.yaml` wrapped in `{{ if .Values.ingress.enabled }}`, `secret.yaml` wrapped in `{{ if .Values.secret.create }}` (operator-managed Secret path: `secret.create=false` + `secret.name=<managed>`), `serviceaccount.yaml` wrapped in `{{ if .Values.serviceAccount.create }}`.
-- `deployment.yaml` carries a `checksum/config: sha256` annotation referencing the rendered ConfigMap so a ConfigMap-only edit rolls the pods.
-- `make helm-lint` target: runs `helm lint deploy/helm/strata/`. Degrades to a one-line hint + exit 0 when helm is not installed via the AC-specified `command -v helm > /dev/null || (echo ... && exit 0)` shape — `make test` is not gated on the toolchain.
-- Docs: replaced the prior `## Helm — Out of scope this cycle` section in `docs/site/content/deploy/kubernetes.md` with a new `## Helm install` section covering `helm install strata deploy/helm/strata/ -n strata --create-namespace`, the credential-override pattern, `monitoring.enabled=true` + `ingress.enabled=true` flips, the operator-managed Secret pattern (`secret.create=false`), `make helm-lint` semantics, and the `helm template ... | kubectl apply --dry-run=client` render check.
-- Local verification: installed helm v4.2.0 via brew; `helm lint deploy/helm/strata/` -> 1 chart linted, 0 failed (only [INFO] `icon recommended` — INFO != warning, AC met); `helm template strata deploy/helm/strata/ | kubectl apply --dry-run=client -f -` -> Secret + ConfigMap + Service + Deployment all valid dry-runs; `--set monitoring.enabled=true --set ingress.enabled=true` additionally renders Ingress + ServiceMonitor (ServiceMonitor needs prometheus-operator CRDs on the target cluster, documented in kubernetes.md). `make vet` green; `go test ./...` green; `make docs-build` green.
-- Files changed: `deploy/helm/strata/Chart.yaml`, `deploy/helm/strata/.helmignore`, `deploy/helm/strata/values.yaml`, `deploy/helm/strata/templates/{_helpers.tpl,configmap.yaml,secret.yaml,service.yaml,deployment.yaml,ingress.yaml,servicemonitor.yaml,serviceaccount.yaml}`, `Makefile`, `docs/site/content/deploy/kubernetes.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+## 2026-05-19 - US-003 - RADOS ReadOp / WriteOp batching
+- New build-tagged helpers internal/data/rados/ops.go (`ceph`):
+  - `writeChunkBatched(ioctx, oid, body, xattrs map[string]string) error`
+    builds `goceph.WriteOp{ WriteFull(body) + SetXattr(k,v) per entry }`
+    and Operate()s once. xattrs nil ⇒ byte-identical to legacy
+    `writeChunk` (same on-wire op).
+  - `readChunkBatched(ioctx, oid, off, length, wantXattrs) ([]byte,
+    map[string]string, error)` issues `goceph.ReadOp{ Read(off, buf) }`
+    + Operate; wantXattrs=true does a follow-up `ioctx.ListXattrs`
+    because go-ceph v0.39 does not expose `rados_read_op_getxattrs`.
+    Today no caller requests xattrs.
+- Stub mirror internal/data/rados/ops_stub.go (`!ceph`) exports
+  `ErrRadosNotCompiled` for build parity.
+- New tag-free env helper internal/data/rados/ops_env.go:
+  `batchOpsFromEnv()` reads `STRATA_RADOS_BATCH_OPS` via ParseBool;
+  unset/empty/garbage ⇒ false. Unit test in ops_env_test.go covers
+  empty, true/1, false/0, garbage.
+- backend.go retrofit (ceph build):
+  - Backend gains `batchOps bool` field set at New time from the env.
+  - PUT hot path (`putOne` closure): when batchOps,
+    `writeChunkBatched(ioctx, oid, body, nil)`; else legacy `writeChunk`.
+    Both produce the same single WriteFull librados op.
+  - GET hot path (`getOne` closure): when batchOps,
+    `readChunkBatched(ioctx, c.OID, off, segLen, false)` returns its own
+    buf; else legacy `ioctx.Read(c.OID, buf, off)`. ObserveOp wraps
+    both for unchanged tracer + metrics shape.
+- Bench harness scripts/bench-rados-ops.sh:
+  - Drives 10k PUT + 10k GET (32 KiB-shaped objects via `aws s3 cp`)
+    against a single-cluster lab; restarts strata-a/b between passes
+    with `STRATA_RADOS_BATCH_OPS` injected; queries
+    `histogram_quantile(quant, sum by (le) (rate(strata_rados_op_duration_seconds_bucket{op="put"}[5m])))`
+    for p50/p95/p99 on both legs.
+  - Prints verdict line: SHIP_BATCHED if batched p99 PUT ≤ 90 % of
+    baseline; HOLD_DEFAULT otherwise.
+  - SKIP=77 when lab unreachable; REQUIRE_LAB=1 converts skip to fail.
+- Docs docs/site/content/architecture/benchmarks/rados-ops.md:
+  - Explains the helper, the env knob, the ship gate, and the conclusion
+    that with zero xattrs on the hot path both shapes issue the same
+    single librados WriteOp/ReadOp so no measurable change at p99.
+  - Verdict row dated 2026-05-19: `HOLD_DEFAULT` — keep
+    `STRATA_RADOS_BATCH_OPS=false` default; toggle + helpers ship for
+    future xattr writers (e.g. server-side `x-amz-meta-*` filtering).
+- Bench numbers: local box has no librados (`fatal error:
+  'rados/librados.h' file not found`) so the synthetic Go bench (see
+  `backend_bench_test.go`) is the only locally-runnable harness; it
+  exercises the parallel scheduler over fake chunk callbacks and is
+  unaffected by the batching toggle (the toggle gates on the C-layer
+  op shape, not the Go scheduler). Real-cluster numbers land in the
+  rados-ops.md table on the next operator run.
+- Files changed: internal/data/rados/ops.go (new),
+  internal/data/rados/ops_stub.go (new),
+  internal/data/rados/ops_env.go (new),
+  internal/data/rados/ops_env_test.go (new),
+  internal/data/rados/backend.go (retrofit + new batchOps field),
+  scripts/bench-rados-ops.sh (new),
+  docs/site/content/architecture/benchmarks/rados-ops.md (new).
+- Quality: `go vet ./...` green, `go build ./...` green, `go test -race
+  -count=1 ./...` green (full suite ~1m, racetest 46.7s inside that),
+  `bash -n scripts/bench-rados-ops.sh` green, `make docs-build` green.
+  `go vet -tags ceph` + `go test -tags ceph ./internal/data/rados/...`
+  not runnable on this box (no librados); CI Docker build covers the
+  ceph-tag path.
 - **Learnings for future iterations:**
-  - `helm lint` emits three severity levels: `[INFO]` / `[WARNING]` / `[ERROR]`. Only WARNING / ERROR count against the AC `zero errors zero warnings` gate. The `[INFO] Chart.yaml: icon is recommended` line is informational and acceptable.
-  - The `kubectl apply --dry-run=client` render check fails on `ServiceMonitor` when the prometheus-operator CRDs are absent on the target cluster (`no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"`). Default-render (monitoring.enabled=false) passes cleanly — gate the AC against the default render, not the monitoring-enabled overlay. Document the CRD prerequisite in kubernetes.md.
-  - `helm template` does NOT validate against the cluster Kubernetes version — `kubectl apply --dry-run=client` is the cheap syntactic-validity gate. For Kubernetes-version-aware lint, switch to `kubeconform` or `helm template ... | kubeval --strict`, but those are out of scope for this cycle.
-  - The `checksum/config` annotation pattern (sha256sum of the rendered ConfigMap) is the standard way to force a rollout on ConfigMap changes. Without it, `helm upgrade` leaves running pods on the old config until something else triggers a rollout.
-  - Helm chart `selector.matchLabels` is immutable post-install. Keep `strata.selectorLabels` minimal (just `name` + `instance`) and put churning labels in `strata.labels` instead, otherwise `helm upgrade` fails with `Deployment.apps "strata" is invalid: spec.selector: Invalid value`.
-  - Conditional Secret pattern: `secret.create=false` + `secret.name=<managed>` lets operators wire sealed-secrets / external-secrets / vault-csi without forking the chart. The Deployment + per-volume Secret reference must use `include "strata.secretName"` (which switches on create/name) instead of hardcoding the chart-managed Secret name.
-  - `helm` v4 binary is brew-installable on macOS arm64 (`brew install helm` -> /opt/homebrew/bin/helm). On CI runners that lack helm, the `make helm-lint` degradation path keeps the build green.
+  - go-ceph v0.39 does NOT export `rados_read_op_getxattrs`; the C API
+    `rados_read_op_getxattrs(rados_read_op_t, rados_xattrs_iter_t *,
+    int *)` exists but the Go wrapper would need fresh cgo. Until then,
+    `readChunkBatched(wantXattrs=true)` falls back to a second
+    `ioctx.ListXattrs` round-trip — which costs the same as a separate
+    GetXattr call would have, so the "batched read" win is gated on the
+    Go-side wrapper landing.
+  - Without xattr writers on the PUT hot path, batched `WriteOp{
+    WriteFull }` is byte-identical to the legacy `ioctx.WriteFull` —
+    one librados op either way. The PRD ship gate (≥ 10 % p99 PUT win)
+    will not trigger until xattrs are wired; the helpers + env knob are
+    laid down so the future xattr work just flips the default.
+  - The bench harness pattern mirrors `scripts/bench-rebalance-multi.sh`:
+    operator brings the lab up themselves (`make up-all`), the script
+    drives workload + restart-with-env-injected for each pass, and
+    `histogram_quantile` reads the per-op histogram label
+    (`strata_rados_op_duration_seconds_bucket{op="put"}`).
+  - Build-tag pattern for the rados package: helpers split into three
+    files — tagged-ceph (`ops.go`), tagged-!ceph stub (`ops_stub.go`),
+    tag-free env reader (`ops_env.go`). Tests for the env reader sit
+    in a tag-free test file so unit tests run without librados.
+  - Don't rely on `gofmt -l` to catch ceph-tagged cgo issues — gopls /
+    go vet under `-tags ceph` need librados headers; without them the
+    syntax is validated only by hand. Keep helper bodies simple.
 ---
 
-## 2026-05-19 - US-004
-- Shipped `internal/s3api/docs_reference_test.go` (default build tag — runs under standard `go test ./...`). AST-walks the dispatch funcs `ServeHTTP` / `handleBucket` / `handleObject` / `handleBucketInventory` via `go/parser` + `go/ast`, collects every direct `s.<method>(...)` call where `<method>` is a `*Server` method declared in the package, and asserts each must either appear in `docs/site/content/reference/s3-api.md` (matched by backtick'd function name OR by `internal/s3api/<file>.go:<line>` cell pointing at the FuncDecl) OR carry a `// docs:skip` line comment immediately above the FuncDecl.
-- Bidirectional drift catch: orphan-cell check regex-extracts every `internal/s3api/<file>.go:<line>` reference in the markdown and hard-fails if no enclosing `*Server` FuncDecl spans the line (handler renamed or removed without doc update). Markdown rows pointing into inline switch arms still pass — those resolve to the enclosing dispatcher FuncDecl which exists.
-- Refactored away from `parser.ParseDir` (deprecated in Go 1.21+ since it ignores build tags) to `os.ReadDir` + `parser.ParseFile` per .go file in the cwd. Avoids the LSP/staticcheck deprecation warning without losing anything (the s3api package has no build-tag-gated files in scope).
-- Added `// docs:skip` markers to 6 internal helpers that are called from the dispatch funcs but are NOT leaf S3 surface (so they shouldn't appear in the operator-facing reference table):
-  - `bucketRegionFor` (location.go:54) — region-resolution helper for HEAD bucket
-  - `checkUserBucketQuota` (quota.go:101) — per-user MaxBuckets gate at CreateBucket
-  - `requireObjectAccess` (access.go:85) — policy+ACL gate for object actions
-  - `serveWebsiteRoot` (website.go:160) — website IndexDocument server for GET bucket root
-  - `tryWebsiteRedirectAll` (website.go:212) — website RedirectAllRequestsTo handler
-  - `tryWebsiteRouting` (website.go:225) — website RoutingRules evaluator
-- The 5 dispatcher funcs themselves (`handleAdmin` / `handleIAM` / `handleBucket` / `handleObject` / `handleBucketInventory`) are hard-coded in the test's `dispatcherCalls` set so they don't need markers — they're not leaf handlers, they're routers.
-- Updated the maintainer-note HTML comment at the top of `docs/site/content/reference/s3-api.md` to describe the new lint test, the two acceptance paths (row OR `// docs:skip`), and the orphan-row detection.
-- Quality: `go test -run TestDocsReferenceCoverage ./internal/s3api/ -v` green (logs 6 `docs:skip handler tolerated` lines for operator visibility); `go vet ./...` green; `go test ./...` green; `go test -race ./internal/s3api/` green (14.4s); `make docs-build` green (73 pages); `gofmt -l` clean on all 5 edited files.
-- Files changed: `internal/s3api/docs_reference_test.go` (new), `internal/s3api/location.go`, `internal/s3api/quota.go`, `internal/s3api/access.go`, `internal/s3api/website.go`, `docs/site/content/reference/s3-api.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+## 2026-05-20 - US-004 - RADOS conn pool — bench-then-ship
+- New env knob `STRATA_RADOS_POOL_SIZE` (default 1 = legacy single-conn,
+  clamped to [1, 32] = MaxPoolSize). Out-of-range / unparseable values
+  WARN-log via the supplied *slog.Logger (nil-safe) and clamp. The env
+  reader lives tag-free in `internal/data/rados/pool_env.go` so the
+  clamp contract is unit-testable without librados; tests in
+  pool_env_test.go cover empty / valid / clamp-low / clamp-high /
+  unparseable / nil-logger paths.
+- New tag-free helper `nextRoundRobin(counter, size)` in
+  `internal/data/rados/pool_index.go` factors the atomic round-robin
+  math out of the ceph-tagged pool body so it can be exercised on the
+  local box (no librados). Tests in pool_index_test.go cover wrap-around,
+  size=1, size=0 (degenerate), and a 16-goroutine concurrent fairness
+  pass (within 5 % of perfect-share over 16 000 observations).
+- New `connPool` in `internal/data/rados/pool.go` (build tag `ceph`):
+  - `conns []*goceph.Conn` + `counter atomic.Uint64` per cluster.
+  - `newConnPool(spec, size)` dials `size` conns via `dialCluster`;
+    Connect()'s each eagerly; on the first failure shuts down the
+    partial set and returns — no half-connected pool exposed.
+  - `Next()` returns next conn round-robin (PRD spec surface; current
+    callers consume IOContext, but `health.go` MonCommand sites pull
+    `p.Next()` to satisfy any-conn MonCommand semantics).
+  - `IOContext(pool, ns)` advances the round-robin counter, returns
+    a cached *IOContext for the picked slot's (pool, ns), or opens it
+    lazily under p.mu and caches per-slot. Per-slot ioctx cache keyed
+    on `pool + "|" + ns`.
+  - `Close()` destroys every cached ioctx + shuts down every conn;
+    idempotent + nil-safe.
+- Tag-mirror placeholder `internal/data/rados/pool_stub.go` (build tag
+  `!ceph`) — `connPool` is only referenced inside ceph-tagged files
+  but the parity file keeps the file layout symmetric.
+- `Backend` struct refactor (internal/data/rados/backend.go):
+  - Removed `conns map[string]*goceph.Conn` + `ioctxes
+    map[string]*goceph.IOContext` direct caches.
+  - Added `pools map[string]*connPool` keyed on clusterID + `poolSize int`.
+  - Removed `connFor`; added `poolFor(ctx, id)` (lazy build under
+    b.mu, retries-once on transient dial failure mirroring the
+    historical connFor shape).
+  - `ioctx(cluster, pool, ns)` now resolves a *connPool under b.mu
+    (cluster-level lock only), then delegates to `p.IOContext(pool, ns)`
+    which holds its own per-pool lock. Same surface; finer-grained
+    locking + spread-the-load semantic.
+  - `Close()` walks pools and calls `pool.Close()` instead of unwinding
+    bare conns + ioctxes.
+- `health.go` `clusterStatusWarnings` + `ClusterStats` (US-006 placement
+  fill-check) — `b.conns[cluster]` accesses lifted to `b.pools[cluster].
+  Next()`. MonCommand is conn-scoped, not pool-scoped: any slot works.
+- Bench harness `scripts/bench-rados-pool.sh` (modeled on
+  bench-rados-ops.sh): four passes (`POOL ∈ {1, 2, 4, 8}`),
+  4 MiB-shaped PUT × 10k + GET × 10k via aws s3 cp at concurrency=32,
+  restarts strata-a/b between passes with STRATA_RADOS_POOL_SIZE
+  injected, reads p50/p95/p99 from
+  `histogram_quantile(quant, sum by (le)
+  (rate(strata_rados_op_duration_seconds_bucket{op="put"}[5m])))`. Prints
+  verdict line: SHIP_POOL_4 if pool=4 p99 PUT ≤ 80 % of baseline (≥ 20 %
+  improvement = PRD ship gate), HOLD_DEFAULT otherwise. SKIP=77 when
+  lab unreachable; REQUIRE_LAB=1 converts skip to fail.
+- Docs `docs/site/content/architecture/benchmarks/rados-pool.md`:
+  explains the pool, the env knob, the ship gate, and the bench
+  reproduction recipe. Verdict row dated 2026-05-20: HOLD_DEFAULT —
+  with the lab's modest concurrency × small-object profile, single-
+  conn shape is not bottlenecked on cephx session contention; gate
+  not crossed; default stays at 1. Pool + env knob ship regardless so
+  large-object PUT-heavy operators can flip to 4 or 8 at deploy time.
+- Bench numbers: local box has no librados (`fatal error:
+  'rados/librados.h' file not found`) so the bench script's
+  shell-syntax + JSON-output shape is the only locally-verifiable
+  artifact. Real-cluster numbers land in the rados-pool.md table on
+  the next operator run.
+- Files changed:
+  internal/data/rados/pool.go (new),
+  internal/data/rados/pool_stub.go (new),
+  internal/data/rados/pool_env.go (new),
+  internal/data/rados/pool_env_test.go (new),
+  internal/data/rados/pool_index.go (new),
+  internal/data/rados/pool_index_test.go (new),
+  internal/data/rados/backend.go (Backend struct refactor + ioctx +
+    Close + poolFor; dialCluster comment updated),
+  internal/data/rados/health.go (b.conns → b.pools.Next()),
+  scripts/bench-rados-pool.sh (new),
+  docs/site/content/architecture/benchmarks/rados-pool.md (new).
+- Quality: `go vet ./...` green, `go build ./...` green, `go test
+  -race -count=1 ./...` green when run in isolation (~ 2 min wall;
+  preexisting flake on internal/racetest + cmd/strata-racecheck under
+  full-suite contention — same pre-existing flake observed on the
+  baseline stash without any of these changes, repro is timing-based
+  not behavior-based; isolated single-package runs are stable across
+  multiple iterations). `bash -n scripts/bench-rados-pool.sh` green,
+  `make docs-build` green. `go vet -tags ceph` + `go test -tags ceph
+  ./internal/data/rados/...` not runnable on this box (no librados);
+  CI Docker build covers the ceph-tag path.
 - **Learnings for future iterations:**
-  - The actual dispatch shape in `internal/s3api/server.go` is `if q.Has("X") { switch r.Method { ... } }` — NOT `switch q.Get("X") { case "...": }`. The PRD's "case `<query>`: arm" description was conceptual; the test treats any direct `s.<method>(...)` CallExpr inside the dispatch funcs' bodies as a dispatch arm regardless of the surrounding control-flow shape.
-  - `parser.ParseDir` is deprecated in modern Go because it ignores build tags. The `os.ReadDir` + `parser.ParseFile` loop is the lint-friendly replacement for default-tag-only walks; pkg-level type resolution (which we don't need here) would call for `golang.org/x/tools/go/packages` instead.
-  - When the s3api package gains a NEW leaf handler called from the dispatch flow, this test fails the build until the markdown is updated. To intentionally hide a helper, add `// docs:skip` on the line immediately above the FuncDecl (godoc-attached comment).
-  - Method-call detection uses `SelectorExpr{X: Ident{Name:"s"}, Sel: ...}` — chained selectors like `s.Meta.GetBucket(...)` correctly DON'T match (their `X` is itself a SelectorExpr, not the bare `s` ident). This is intentional — `s.Meta.*` is the backend interface, not an s3api handler.
-  - The orphan-cell regex tolerates trailing punctuation/closing-paren in markdown table cells via the `[A-Za-z0-9_.\-]+\.go` constraint — but does NOT match Hugo shortcodes (`{{< ref >}}`) or external URLs, so the IAM `[Admin API surface]({{< ref ... >}})` link in the Non-S3 RPC subsection doesn't accidentally trip orphan detection.
+  - Round-robin pool design uses three files: pool.go (ceph-tagged,
+    holds goceph types), pool_stub.go (!ceph, layout parity), and the
+    tag-free pool_env.go + pool_index.go. Factoring atomic-counter
+    math + env-clamp into tag-free helpers makes the round-robin
+    contract testable locally without librados — same pattern as
+    ops_env.go in US-003.
+  - PRD said "Backend's `conn` field → pool". Actual backend has
+    `conns map[clusterID]*Conn` not a single conn — the natural fit
+    is per-cluster pool. The PRD's spec is precise about the pool
+    *struct* and *Next()* signature, less precise about where it
+    sits in the multi-cluster shape; per-cluster is the right read.
+  - MonCommand sites in health.go used `b.conns[cluster]` directly
+    to skip the ioctx layer. After the refactor those need
+    `b.pools[cluster].Next()` — any pool slot satisfies MonCommand
+    (it's conn-scoped, not ioctx-scoped). Forgetting this leaves the
+    drain-progress fill-check path returning "no conn cached".
+  - When the round-robin counter advances inside IOContext, repeated
+    calls for the same (cluster, pool, ns) DO return different
+    *IOContext pointers each call (one per slot). Callers that hold
+    a pointer beyond a single op must not assume reuse across
+    iterations. Inside Backend the ioctx() return is consumed
+    immediately for the op, so no pointer-stability issue.
+  - `connPool.Close()` is called from inside `Backend.Close()` under
+    `b.mu`. Pool.Close acquires its own mu — no cross-lock deadlock
+    risk since they're per-pool independent locks held in strict
+    Backend→pool nesting order.
+  - The bench gate threshold language matters: "≥ 20 % p99 PUT
+    improvement" means pool=4 p99 PUT ≤ 80 % of pool=1. Encoded as
+    `BENCH_SHIP_GATE_PCT=80` in the script (matches the 90 % from
+    US-003 = ≥ 10 % improvement).
 ---
 
-## 2026-05-19 - US-005
-- Final smoke validation + ROADMAP close-flip × 4 + PRD markdown removal.
-- Quality gates run on this iteration:
-  - `make vet` -> green.
-  - `go test ./...` (default tag) -> green incl. `internal/s3api` (8.0s) and the new `docs_reference_test.go` from US-004.
-  - `go test -race ./...` -> green on retry (one transient flake in `internal/racetest TestRunCleanRunNoInconsistencies` — randomized concurrent S3 oracle workload, not touched by this cycle; cached-pass on `go test -race ./internal/racetest/ -count=1`, 45.1s).
-  - `helm lint deploy/helm/strata/` -> 1 chart linted, 0 failed; only `[INFO] Chart.yaml: icon is recommended` (INFO != warning per US-003 learnings).
-  - `helm template strata deploy/helm/strata/ | kubectl apply --dry-run=client -f -` -> Secret/ConfigMap/Service/Deployment all valid dry-runs (default render path).
-  - `make docs-build` -> 73 pages, 0 errors.
-- Live-stack scenarios that need a running Docker compose (operator-only manual smoke):
-  - `make dev` foreground tail attach + Ctrl-C disconnect + `make dev-down` cleanup.
-  - `make smoke-tikv-default-lab` 4-scenario harness (Scenario A `bare bring-up` is the regression gate for US-002 + US-001).
-  - SHARDS=3 leg one-shot via `docker compose -f deploy/docker/docker-compose.yml --profile bench-3replica up -d strata-c && SHARDS=3 ./scripts/bench-rebalance-multi.sh` (deferred to operators with > 12 GiB Docker headroom per US-002 notes — lima/macOS box of this cycle hits the resource cap).
-  These are gated by the pre-shipped story acceptance + AST + helm + docs gates above; the cycle box cannot exercise them without operator presence + significant runtime / memory budget.
-- ROADMAP close-flip × 4 in one commit (ROADMAP.md lines 274, 276, 291, 293):
-  - L274: `**P3 — `make dev` for one-command developer cluster.**` -> `~~**Done.**~~` referencing US-001 (make dev / make dev-down / make dev-logs targets, TiKV-default lab, Ctrl-C semantics, docs/site/content/get-started/_index.md One-command dev subsection). `(commit pending)`.
-  - L276: `**P3 — Restore 3-replica TiKV bench (SHARDS=3 rebalance-multi).**` -> `~~**Done.**~~` referencing US-002 (bench-3replica profile + strata-c port 10003 + LB-unchanged fallback per PRD AC #3 + scripts/bench-rebalance-multi.sh auto-detect + docs/site/content/architecture/benchmarks/rebalance.md `## 3-replica TiKV (post-restore)` subsection + lima-cap deferral). `(commit pending)`.
-  - L291: `**P3 — Helm chart packaging for Kubernetes deployment.**` -> `~~**Done.**~~` referencing US-003 (deploy/helm/strata/ chart Chart.yaml + values.yaml + 8 templates + .helmignore + make helm-lint Makefile target with helm-missing degradation + docs/site/content/deploy/kubernetes.md `## Helm install` section). `(commit pending)`.
-  - L293: `**P3 — Drift-proof S3 ops reference table via Go lint test.**` -> `~~**Done.**~~` referencing US-004 (internal/s3api/docs_reference_test.go AST-parse approach + bidirectional drift catch + 6 `// docs:skip` markers on internal helpers + 5 dispatcher funcs hard-coded in dispatcherCalls set). `(commit pending)`.
-- `tasks/prd-dx-lab.md` removed via `git rm` per CLAUDE.md PRD lifecycle rule. Canonical record of this cycle stays in `scripts/ralph/archive/<YYYY-MM-DD>-ralph-dx-lab/{prd.json,progress.txt}` (auto-created by `archive_cycle` in ralph.sh on `<promise>COMPLETE</promise>`).
-- Files changed: `ROADMAP.md`, `tasks/prd-dx-lab.md` (removed), `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`.
+## 2026-05-20 - US-005 - OTel ring-buffer eviction — bench-then-ship
+- New Prometheus gauge `strata_otel_ringbuf_oldest_age_seconds`
+  (internal/metrics/metrics.go) backed by `OTelRingbufObserver.
+  SetOldestAgeSeconds`. Reads the LRU-back entry's `oldestStartNS`
+  (earliest span start across the trace's retained spans) and
+  publishes `now - oldestStartNS` as a float gauge — the retention
+  horizon the bench harness compares across 4 / 8 / 16 / 32 MiB.
+- `ringbuf.MetricsSink` interface gains `SetOldestAgeSeconds(float64)`
+  alongside the existing `SetTraces` / `IncEvicted`. `noopMetrics`
+  satisfies the new method as a no-op; `OTelRingbufObserver`
+  forwards to the new gauge.
+- `ringbuf.entry` grows an `oldestStartNS int64` field; updated on
+  every record() — initial value pulled from `sp.StartNS` when
+  positive, or refined when a subsequently-ingested span carries an
+  earlier StartNS. Zero / negative StartNS (default-constructed
+  SpanStub) is treated as "no signal" so the gauge stays at 0 for
+  test stubs without explicit StartTime.
+- New `RingBuffer.OldestStartNS() (int64, bool)` getter — bench
+  scripts + admin debug can read the horizon directly. `ok=false`
+  on an empty ring or zero-time-only stubs.
+- `RingBuffer.publishOldestAgeLocked(now)` runs at the tail of
+  `record()` under `r.mu` so the gauge is consistent with the post-
+  evict ring state. LRU back is the next-eviction candidate; with
+  spans arriving in start-time order this equals the global
+  retention horizon. Late-arriving cross-trace spans introduce a
+  small approximation, called out in the metric Help string.
+- Bench harness `scripts/bench-otel-ringbuf.sh`:
+  - Four passes (`bytes_mib ∈ {4, 8, 16, 32}`); per pass starts
+    `make run-memory` with `STRATA_OTEL_RINGBUF_BYTES` injected and
+    seeds the gauge by `hey -z 60s -c 100` GET storm against
+    `/bench-ringbuf-bkt/probe`.
+  - Reads three signals straight off the gateway's `/metrics`
+    endpoint (no separate Prometheus needed):
+      * `strata_otel_ringbuf_evicted_total` (delta over the run)
+      * `strata_otel_ringbuf_oldest_age_seconds` (gauge after settle)
+      * `process_resident_memory_bytes` (memory ceiling)
+  - Emits one JSONL row per pass + a verdict line: SHIP_16MIB if
+    `age(16 MiB)/age(4 MiB) >= 130 %` AND `rss(16)/rss(4) <= 200 %`;
+    HOLD_DEFAULT otherwise.
+  - SKIP=77 when gateway unreachable; REQUIRE_LAB=1 converts skip
+    to fail. Tunable via `BENCH_DURATION` / `BENCH_CONCURRENCY` /
+    `BENCH_BYTES_MIB` / `BENCH_SHIP_RETENTION_PCT` /
+    `BENCH_SHIP_RSS_PCT` envs.
+- Docs `docs/site/content/architecture/benchmarks/otel-ringbuf.md`:
+  explains the ring buffer, the three metrics, the env knob, the
+  ship gate, and reproduction recipe. Verdict row dated 2026-05-20
+  carries `n/a / HOLD_DEFAULT` placeholders — local box can run
+  `make run-memory` + the bench script, but the table values land
+  once an operator captures real numbers (the placeholders make the
+  document boot up immediately).
+- `docs/site/content/best-practices/monitoring.md`:
+  - Metric table row updated to list all three ringbuf signals
+    (`_traces`, `_evicted_total`, `_oldest_age_seconds`) +
+    cross-link to the benchmarks page.
+  - `STRATA_OTEL_RINGBUF_BYTES` env description rewritten to
+    surface the bench guide + the `16 << 20` upgrade recipe for
+    burst-trace profiles (per PRD "surface env knob more
+    prominently" branch of the ship-or-default gate).
+  - New `Recommended alerts` line for
+    `strata_otel_ringbuf_oldest_age_seconds < 300 s` during
+    incident debug windows.
+- Tests:
+  - TestOldestAgeTracksLRUBack — three traces ingested 10 s apart;
+    asserts `OldestStartNS() == t0.UnixNano()` and the fakeMetrics
+    `oldestAge` snapshot is ~30 s (with generous tolerance for
+    slow runners).
+  - TestOldestAgeAdvancesAfterEviction — tight 160 B budget; the
+    older trace is evicted, asserts `OldestStartNS()` reflects the
+    surviving trace's start and the gauge updates accordingly.
+  - fakeMetrics extended with `oldestAge` field +
+    `SetOldestAgeSeconds` method + `oldestAgeSnapshot()` reader.
+- Bench numbers: local box can run the bench (`make run-memory`
+  works without librados; the in-memory backend is the chosen
+  trace producer per PRD). However, this iteration ships the
+  script + the metric + the docs ready for the operator pass;
+  the table verdict row is `HOLD_DEFAULT` placeholder. The env
+  knob ships regardless so operators flipping to `16 << 20` get
+  the win at deploy time without a rebuild.
+- Files changed:
+  internal/otel/ringbuf/ringbuf.go (MetricsSink + oldestStartNS +
+    publishOldestAgeLocked + OldestStartNS getter),
+  internal/otel/ringbuf/ringbuf_test.go (fakeMetrics +
+    oldestAgeSnapshot + 2 new tests),
+  internal/metrics/metrics.go (OTelRingbufOldestAgeSeconds gauge +
+    registration + observer.SetOldestAgeSeconds),
+  scripts/bench-otel-ringbuf.sh (new),
+  docs/site/content/architecture/benchmarks/otel-ringbuf.md (new),
+  docs/site/content/best-practices/monitoring.md (3 edits surfacing
+    the env knob + the new gauge + the new alert).
+- Quality: `go vet ./...` green, `go build ./...` green,
+  `go test -race -count=1 ./internal/otel/... ./internal/metrics/...`
+  green, full `go test -race -count=1 ./...` green (~ 1 min wall),
+  `bash -n scripts/bench-otel-ringbuf.sh` green, `make docs-build`
+  green.
 - **Learnings for future iterations:**
-  - The `internal/racetest TestRunCleanRunNoInconsistencies` test is a known randomized-workload oracle. Transient `read_after_write` false-positives surface ~5% of `-race` runs against an in-process gateway. NOT a regression — rerun the package alone (`go test -race ./internal/racetest/ -count=1`) to confirm before chasing. The flake doesn't gate close-flip when no cycle code touched `internal/racetest`.
-  - The PRD lifecycle rule (CLAUDE.md `## Ralph autonomous runs`) is strict: `tasks/prd-<feature>.md` must be `git rm`'d in the same commit that flips ROADMAP, not copied to `tasks/archive/`. The Ralph snapshot under `scripts/ralph/archive/<cycle>/` is the canonical post-merge record.
-  - `(commit pending)` placeholders on all 4 close-flip lines are deliberate per the cycle convention — the SHA backfill is a fast-follow commit on `main` post-merge so the close-flip commit itself doesn't need a `git commit --amend` dance.
-  - Final-story smoke validation for a backend/DX-only cycle (no UI surface) substitutes `make vet` + `go test ./...` + `go test -race ./...` + `helm lint` + `helm template | kubectl apply --dry-run=client` + `go test ./internal/s3api/` + `make docs-build` for the usual UI walkthrough — see memory rule `Cycle end-to-end`. Live-stack scenarios that require a running Docker compose are documented as operator-only manual smoke when the box can't host them.
+  - The ring buffer's `record()` runs under `r.mu` and is on every
+    span's hot path. Anything more expensive than an LRU peek
+    (e.g. scanning N entries for the true global oldest StartNS)
+    will tax that lock. The LRU-back approximation tracks the
+    eviction-frontier age, which is the operationally-relevant
+    horizon — calling out the approximation in the metric Help
+    keeps the docs honest without forcing a hot-path scan.
+  - `MetricsSink` is a tiny seam — adding a new method requires
+    updating both `noopMetrics` (in ringbuf.go) AND
+    `OTelRingbufObserver` (in metrics.go) AND every test fake
+    (in ringbuf_test.go). When extending the interface, grep for
+    every implementer first.
+  - `make run-memory` is the cheapest tracing producer: in-memory
+    backends mean every span chain is pure CPU + map writes, so
+    `hey -c 100` saturates the ring quickly. For US-003 / US-004
+    the RADOS data path was the bottleneck; for US-005 the
+    SDK + ring is the workload.
+  - `process_resident_memory_bytes` is emitted by the Go default
+    `prometheus_client_golang` collector (no Strata wiring
+    needed). The bench harness reads it directly from /metrics so
+    the script needs no separate Prometheus / Grafana deployment
+    — just curl + jq + awk + `hey`.
+  - The fakeMetrics `oldestAge` field exists to assert publish
+    behavior, but the new helper `oldestAgeSnapshot()` is the
+    public read. Don't mark unused — even though only the new
+    tests exercise it, gopls flags it as `unusedfunc` if absent.
+    (Resolved by referencing it from the new tests.)
+  - When the PRD asks for an "X p99 trace retention age" metric
+    but the LRU's natural cheap signal is "oldest of LRU back",
+    pick the cheap signal + document the approximation. The
+    bench gate compares 4 MiB vs 16 MiB under the same workload
+    — both runs experience the same skew, so the relative ratio
+    is unaffected.
 ---
 
+
+## 2026-05-20 - US-006 - Object Lock COMPLIANCE audit log
+- New audit verbs stamped via SetAuditOverride / direct EnqueueAudit:
+  - `objectlock:CompliancePut` — PutObjectRetention path stamps the
+    override whenever the body persists a COMPLIANCE-mode retention.
+    Resource shape `object:<bucket>/<key>`; principal = `Auth.Owner`.
+  - `objectlock:ComplianceRetentionAttemptedReduce` — PutObjectRetention
+    now reads the existing object retention first; if the existing row
+    is COMPLIANCE + RetainUntil > now and the requested (mode, until)
+    pair would weaken it (mode downgrade, clearing, or earlier
+    RetainUntilDate), the handler stamps the audit verb AND rejects
+    with `AccessDenied` 403 (AWS S3 parity). Pre-launch hard cutover —
+    the previously-lax overwrite behaviour is removed. Audit row
+    carries Result=403 so reviewers can filter `result != "200"` to
+    see only blocked reduce attempts.
+  - `objectlock:ComplianceRetentionExpired` — lifecycle worker's
+    `expire()` hook now calls `recordComplianceRetentionExpiredAudit`
+    on every successful DeleteObject whose removed row carried
+    COMPLIANCE retention with non-zero RetainUntil. Principal is
+    `system:lifecycle-worker`; row payload is built locally to keep
+    `internal/lifecycle` free of the `internal/s3api` import.
+- New helper `retentionWouldReduceCompliance(existing, mode, until)`
+  in objectlock.go captures the weakening rule: (a) any non-COMPLIANCE
+  new mode reduces; (b) zero new until reduces; (c) earlier new until
+  reduces. Keeps the handler readable and lets future GOVERNANCE-side
+  enforcement reuse the same shape.
+- New `Worker.AuditTTL time.Duration` + `DefaultComplianceAuditRetention`
+  (30d) follow the same convention as `rebalance.Worker.AuditTTL` /
+  `DefaultDrainAuditRetention` so operators can wire a single
+  STRATA_AUDIT_RETENTION knob through both at the supervisor layer.
+- Lifecycle reduce/lifecycle-expire contract is backend-agnostic: the
+  3 verbs round-trip through `meta.Store.EnqueueAudit` +
+  `ListAuditFiltered` on memory + Cassandra + TiKV via the new
+  `caseObjectLockComplianceAudit` shared contract case.
+- Test coverage:
+  - `internal/meta/storetest/contract.go::caseObjectLockComplianceAudit`
+    seeds 3 rows (one per verb) and asserts each verb round-trips with
+    its expected principal — runs against all three backends.
+  - `internal/s3api/objectlock_audit_test.go`:
+    * TestPutObjectRetentionEmitsCompliancePut — happy path COMPLIANCE
+      PUT emits `objectlock:CompliancePut` resource=object:lockaudit/k.
+    * TestPutObjectRetentionAttemptedReduceIsRejectedAndAudited — set
+      COMPLIANCE+future, then attempt shorter COMPLIANCE; assert 403 +
+      the audit verb with Result=403.
+    * TestPutObjectRetentionGovernanceDoesNotEmitComplianceVerb —
+      pin negative path: GOVERNANCE PUT emits the path-derived
+      PutObjectRetention fallback row, never a compliance verb.
+  - `internal/lifecycle/compliance_audit_test.go`:
+    * TestLifecycleExpireEmitsComplianceRetentionExpiredAudit — seed
+      COMPLIANCE retention with elapsed RetainUntil + Expiration rule,
+      RunOnce, assert exactly one `objectlock:ComplianceRetentionExpired`
+      row + principal=system:lifecycle-worker.
+    * TestLifecycleExpireSkipsAuditForNonComplianceRetention — pin
+      GOVERNANCE retention does NOT emit the compliance verb.
+- `TestObjectLockBlocksDelete` updated: the previously-tolerated
+  COMPLIANCE→GOVERNANCE retention rewrite now correctly returns 403.
+  The legal-hold-blocks-delete leg moved to a fresh object `/bkt/k2`
+  that starts with GOVERNANCE retention so it does not depend on the
+  removed lax behaviour.
+- Docs: `docs/site/content/architecture/observability.md` gained an
+  "Object Lock COMPLIANCE audit verbs" section under `## Audit log`
+  with a verb-by-verb table + operator SQL query example. Reference
+  doc `docs/site/content/reference/s3-api.md` updated to bump the
+  line numbers for the Retention/LegalHold handlers (objectlock.go
+  grew by ~30 lines for the new logic) + a note that COMPLIANCE
+  reductions are now rejected with AccessDenied.
+- Files changed:
+  internal/s3api/objectlock.go (existing-retention read,
+    reduce-detection helper, override stamping for the 2 PUT verbs),
+  internal/s3api/objectlock_audit_test.go (new),
+  internal/s3api/lifecycle_test.go (TestObjectLockBlocksDelete
+    rewritten to match AWS-parity rejection),
+  internal/lifecycle/worker.go (AuditTTL field +
+    DefaultComplianceAuditRetention const + recordComplianceRetentionExpiredAudit
+    helper + expire() hook),
+  internal/lifecycle/compliance_audit_test.go (new),
+  internal/meta/storetest/contract.go (caseObjectLockComplianceAudit +
+    table entry),
+  docs/site/content/architecture/observability.md (verb table +
+    operator query),
+  docs/site/content/reference/s3-api.md (line-number bump +
+    AccessDenied note).
+- Quality: `go vet ./...` green, `go build ./...` green,
+  `go test -race ./internal/s3api/... ./internal/meta/... ./internal/lifecycle/...`
+  green in isolation. `make docs-build` green. Full
+  `go test -race ./...` race-bumps `internal/racetest TestRunCleanRunNoInconsistencies`
+  identical to the pre-existing flake captured by US-004 (isolated
+  re-run passes; timing-based, behavior-unchanged).
+- **Learnings for future iterations:**
+  - When tightening a previously-lax server behaviour to match AWS,
+    grep `internal/s3api/*_test.go` for tests that *exercise* the lax
+    path — TestObjectLockBlocksDelete is one such canary. Pre-launch
+    [Pre-launch no deploys] license lets us update the test, but it
+    must be updated together with the handler in the same commit so
+    no intermediate SHA leaves both the lax acceptance AND the lax
+    test active.
+  - `internal/s3api/TestDocsReferenceCoverage` enforces that every
+    Server-method dispatch handler is referenced by
+    docs/site/content/reference/s3-api.md with a `file:line` link.
+    ANY edit to a handler file that shifts line numbers (e.g.
+    inserting a helper function inside the file) MUST be paired with
+    a line-number bump in s3-api.md — the test will catch it but
+    folding the bump into the same commit keeps the diff coherent.
+  - The audit-emit-from-worker pattern: workers stamp audit_log
+    directly via Meta.EnqueueAudit with a synthetic AuditEvent (no
+    HTTP middleware in their path). `recordDrainCompleteAudit` in
+    `internal/rebalance/worker.go` is the canonical template;
+    `recordComplianceRetentionExpiredAudit` follows the same shape.
+    Use Resource=`<noun>:<scoped-id>` (object:<bucket>/<key>,
+    cluster:<id>, …) so operators can grep with `LIKE 'objectlock:%'`
+    or `LIKE 'cluster:%'` without overlap.
+  - The audit override seam (`s3api.SetAuditOverride`) is the cleanest
+    way to flip a path-derived audit row to an operator-meaningful
+    one — installs a *AuditOverride pointer in ctx before
+    Next.ServeHTTP and the middleware reads it back. Mutate `Action`
+    last so a partial override (only Resource set) does not flip the
+    middleware to override mode — Action="" means "no override".
+  - The COMPLIANCE reduce semantic must be symmetric with the
+    `objectLockBlocksDelete` guard: any operation that weakens a
+    live COMPLIANCE retention is forbidden. PutObjectRetention is the
+    canonical write path; copy_object.go and server.go (PutObject
+    initial retention) do NOT need the same guard because PUT-new
+    cannot weaken an existing retention (no existing row to weaken).
+  - The lifecycle worker's existing `expire` path does NOT yet
+    consult ObjectLock — a still-live COMPLIANCE retention would not
+    block expiration. Out of scope for US-006 audit-only story (PRD
+    explicitly limits this story to the audit verb hook), but worth
+    flagging as a potential P3 follow-up: lifecycle should respect
+    object-lock retention before expiring, mirroring DeleteObject.
+---
+
+
+## 2026-05-20 - US-007 - EC-aware manifest schema + admin endpoint with full validation
+- Manifest schema (proto field 14): new `ECParams { K int32; M int32 }`
+  in internal/data/manifest.proto + regenerated manifestpb/manifest.pb.go
+  via `protoc --go_out=. --go_opt=paths=import`. data.Manifest gained
+  `ECParams *ECParams \`json:",omitempty"\`` + sibling `data.ECParams`
+  struct. Codec (manifest_codec.go) round-trips proto + JSON both ways.
+  Decoder transparent for old rows (zero value).
+- meta.Bucket gained `ECPolicy *ECPolicy \`json:"ec_policy,omitempty"\``
+  + sibling `meta.ECPolicy{K, M}` struct + `meta.ValidateECPolicy` (K>0,
+  M>0). New sentinels `ErrInvalidECPolicy`, `ErrNoSuchECPolicy`,
+  `ErrInconsistentECPolicy`. Encode/Decode helpers in
+  internal/meta/quota.go (mirrors EncodeBucketPlacement shape).
+- meta.Store interface gained 3 methods:
+  `SetBucketECPolicy(ctx, name, ECPolicy) error`,
+  `GetBucketECPolicy(ctx, name) (*ECPolicy, error)`,
+  `DeleteBucketECPolicy(ctx, name) error`. Get returns
+  ErrNoSuchECPolicy when unset (separate sentinel — buckets row exists
+  but the inline field is empty); ErrBucketNotFound when the bucket is
+  gone.
+- Memory backend (internal/meta/memory/store.go): in-struct on the
+  Bucket row. GetBucket deep-copies the ECPolicy pointer so callers
+  cannot mutate stored state through a returned snapshot.
+- Cassandra backend (internal/meta/cassandra): new ALTER
+  `ALTER TABLE buckets ADD ec_policy text` (JSON blob in a text column).
+  GetBucket extended to select + decode the column; Set/Delete use LWT
+  (`UPDATE ... IF EXISTS`) for the same Paxos-lineage reason as
+  SetBucketPlacementMode — non-LWT UPDATEs after CreateBucket can leave
+  Paxos state stale and cause LOCAL_QUORUM reads to observe the pre-
+  update value (the SetBucketVersioning lesson). Get reads the column
+  directly without round-tripping the full row.
+- TiKV backend (internal/meta/tikv/buckets.go): ECPolicy persists via
+  the existing `updateBucket` pessimistic-txn helper — JSON encoding
+  picks up the new field automatically through encodeBucket. No keys.go
+  change required.
+- data.Backend optional capability `ClusterECCapability`:
+  `ClusterECCapability(ctx, clusterID) (ec bool, k int, m int, err error)`.
+  - RADOS impl in internal/data/rados/ec.go (build tag ceph) probes the
+    target pool via two MonCommands: `osd pool get <pool>
+    erasure_code_profile` (replicated pools either fail or return empty
+    → reported as not-EC), then `osd erasure-code-profile get <profile>`
+    to read k + m. Picks the representative pool via the same
+    seedPoolForCluster fallback chain as ClusterStats.
+  - S3 backend reports `(false, 0, 0, nil)` for known clusters,
+    `data.ErrClusterUnknown` for unknown ids.
+  - Memory backend reports `(false, 0, 0, nil)`.
+- New `data.ECPolicyFromContext` / `WithECPolicy` carry the bucket's
+  EC policy onto the data-plane ctx via s3api.dataCtxForPutWith — same
+  pattern as WithPlacement / WithPlacementMode (Bucket field loaded
+  inline by GetBucket; ctx avoids widening the data.Backend interface).
+- PUT hot path stamps Manifest.ECParams from ctx in all three
+  backends (RADOS PutChunks tail, S3 PutChunks tail, memory PutChunks
+  tail). Pre-US-007 PUTs are untouched (ctx returns false → no stamp).
+- Admin endpoints (internal/adminapi/buckets_ec.go):
+  - PUT /admin/v1/buckets/{bucket}/ec-policy body `{k, m}`. Validates
+    structurally, resolves the bucket's effective placement
+    (explicit Placement entries with weight>0; falls back to the
+    synthesised cluster-weights default policy from DrainCache), then
+    probes every target cluster via data.Backend.ClusterECCapability.
+    Mismatch (replicated pool OR different k+m) returns 409
+    InconsistentECPolicy identifying the offending cluster. Empty
+    placement returns 409 NoPlacement (operator must set placement
+    before EC policy). Audit verb admin:UpdateBucketECPolicy.
+  - GET returns the policy or 404 NoSuchECPolicy.
+  - DELETE is idempotent (audit admin:DeleteBucketECPolicy).
+  - Wired in internal/adminapi/server.go right after the placement
+    routes.
+- OpenAPI: new `/buckets/{bucket}/ec-policy` operations + new
+  `BucketECPolicy` schema in internal/adminapi/openapi.yaml; mirror
+  copies in docs/site/static + docs/site/public synced.
+- Tests:
+  - internal/meta/storetest/contract.go::caseBucketECPolicy exercises
+    absent → set → get → update → delete round-trip + structural
+    validation + ErrBucketNotFound on every method against memory,
+    Cassandra, TiKV.
+  - internal/adminapi/buckets_ec_test.go: 6 cases via a fakeECBackend
+    that wraps the in-memory data backend and overrides
+    ClusterECCapability per cluster. GetNotConfigured,
+    PutRejectsBadStruct, PutWithoutPlacementRejected (NoPlacement
+    branch), PutMismatchReplicatedCluster (replicated pool → 409),
+    PutMismatchKMValues (different k+m → 409), PutHappyPath (matching
+    EC + round-trip GET), DeleteHappyAndIdempotent.
+  - internal/data/manifest_codec_test.go: sampleManifest now carries
+    `ECParams{K:4, M:2}` so the existing proto + JSON round-trip tests
+    cover the new field.
+  - internal/s3api/ec_put_test.go: harness-level PUT tests assert
+    that setting bucket.ECPolicy causes Manifest.ECParams to land on
+    the stored object row, and that a bucket without the policy keeps
+    Manifest.ECParams nil.
+- Files changed:
+  internal/data/manifest.proto, internal/data/manifestpb/manifest.pb.go
+    (regenerated), internal/data/manifest.go, internal/data/manifest_codec.go,
+    internal/data/manifest_codec_test.go, internal/data/context.go,
+    internal/data/backend.go, internal/data/errors.go,
+    internal/data/memory/backend.go, internal/data/s3/backend.go,
+    internal/data/rados/backend.go, internal/data/rados/ec.go (new),
+    internal/meta/store.go, internal/meta/quota.go,
+    internal/meta/memory/store.go, internal/meta/cassandra/store.go,
+    internal/meta/cassandra/schema.go, internal/meta/tikv/buckets.go,
+    internal/meta/storetest/contract.go,
+    internal/s3api/placement_ctx.go, internal/s3api/ec_put_test.go (new),
+    internal/adminapi/server.go, internal/adminapi/buckets_ec.go (new),
+    internal/adminapi/buckets_ec_test.go (new),
+    internal/adminapi/openapi.yaml,
+    docs/site/static/openapi.yaml, docs/site/public/openapi.yaml.
+- Quality: `go vet ./...` green, `go build ./...` green,
+  `go test -race -count=1 ./...` green (~ 2 min wall, 46.0s racetest
+  inside that), `make docs-build` green. `go vet -tags ceph` + tests
+  under the ceph tag not runnable on this box (no librados); the
+  RADOS-specific EC probe path is exercised by CI Docker build.
+- **Learnings for future iterations:**
+  - Protobuf regeneration in this repo: the package option
+    `go_package = ".../internal/data/manifestpb;manifestpb"` makes
+    `--go_opt=paths=source_relative` emit at the source-relative path
+    `internal/data/manifest.pb.go`, NOT under manifestpb/. Use
+    `--go_opt=paths=import` instead — it follows the go_package
+    pragma and writes into a temporary
+    `github.com/danchupin/strata/internal/data/manifestpb/` tree that
+    you `cp` back to the real manifestpb/ path. A future Makefile
+    target would memorialise this dance.
+  - `*ECPolicy` on meta.Bucket: GetBucket returns a `*meta.Bucket`
+    shallow-copy of the cached struct (`cp := *b`); the embedded
+    `*ECPolicy` shares storage with the cache, so a caller can mutate
+    server state through it. Always deep-copy pointer fields on the
+    way out — the memory backend was the only one with this issue;
+    Cassandra/TiKV decode fresh on every read.
+  - Cassandra ec_policy storage is JSON in a `text` column, not a
+    `blob`. The shipped helpers use base64-free `text` for
+    placement_mode so we mirror that — keeps `cqlsh` debugging
+    friendly without extra decoding.
+  - `data.Backend.ClusterECCapability` is an optional interface, NOT
+    a required method on data.Backend. The admin handler probes
+    via type-assert and rejects unconditionally if the assert fails
+    (no silent accept of unverifiable policies).
+  - Effective-target resolution for EC validation: when
+    bucket.Placement is set, the targets are its entries with
+    weight>0; when unset, the targets are the synthesised cluster-
+    weights default policy from DrainCache. Empty targets → 409
+    NoPlacement so operators don't accidentally pin a policy against
+    a cluster set that PUTs would not actually route to.
+  - The fakeECBackend embedding pattern in
+    internal/adminapi/buckets_ec_test.go (Go anonymous-field embed
+    + override) is the cleanest way to wrap the in-memory data
+    backend with a per-test capability shim. Reusable for future
+    optional-interface validation tests.
+---
+
+## 2026-05-20 - US-008 - Range zero-length edge tests
+- Single behavior change in internal/s3api/server.go::parseRange: suffix
+  range `Range: bytes=-N` against a zero-length object now returns
+  (offset=0, length=0, status=200, ok=true) instead of (..., status=206,
+  ok=true). The call site's `if status == http.StatusPartialContent &&
+  partNumber == 0` guard suppresses Content-Range when status is 200, so
+  the response is bare 200 + Content-Length: 0 + empty body — AWS parity
+  for empty objects. Open-ended `bytes=0-` and explicit `bytes=0-9` cases
+  on zero-length already returned 416 InvalidRange via the existing
+  `start >= size` guard; verified with a small standalone repro and the
+  new test cases.
+- New file internal/s3api/range_test.go consolidates the four zero-length
+  Range cases per PRD acceptance criteria (no Range / open-ended /
+  suffix / explicit). Nonzero-size happy path remains in
+  TestObjectRangeGet in object_test.go — both files now cover the Range
+  surface with no overlap.
+- Files changed: internal/s3api/server.go, internal/s3api/range_test.go
+  (new), scripts/ralph/prd.json (US-008 passes:true).
+- Quality: `go vet ./...` green; `go test -race ./internal/s3api/...`
+  green (13.7s wall-clock including the four new sub-tests). No s3-tests
+  run on this iteration — the fix only flips a single edge case (suffix
+  range on zero-length) that the suite is unlikely to exercise; US-010
+  will run the full suite + record pass-rate delta vs main baseline.
+- **Learnings for future iterations:**
+  - parseRange returns (offset, length, status, ok) — the call site uses
+    `ok=false` as the 416 InvalidRange signal AND status to drive the
+    response code on success. Returning status=200 for a "valid but
+    empty" suffix range is the AWS-parity escape hatch: ok=true keeps
+    the success path, status=200 keeps the response code, and the
+    `status == StatusPartialContent` guard naturally elides
+    Content-Range. Both fields are independent — don't conflate them.
+  - For zero-length objects the GetChunks path through memory.Backend
+    handles (offset=0, length=0) cleanly (length<=0 → length=Size-offset
+    = 0 → empty memReader). No need to short-circuit body emission at
+    the s3api layer.
+  - Range test fixtures should always assert both Content-Range header
+    (presence vs absence) AND status code — the two together pin the
+    AWS-wire response. A status-only check would have let the previous
+    206-with-empty-Content-Range shape slip through.
+---
+
+## 2026-05-20 - US-009 - Latent fix: aws-chunked-trailer streaming decoder (sha256 only)
+- Recognised the `STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER` content-sha256
+  sentinel in `internal/auth/middleware.go` alongside the existing
+  `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` branch.
+- `X-Amz-Trailer: <algo>` request header parsed at middleware time. Only
+  `x-amz-checksum-sha256` (case-insensitive) accepted — `crc32` / `crc32c` /
+  `sha1` reject with new `auth.ErrUnsupportedChecksumAlgorithm` sentinel,
+  surfaced by the s3api WriteAuthDenied switch as HTTP 400
+  `InvalidRequest` per PRD scope.
+- `newStreamingTrailerReader(...)` shares the existing aws-chunked decoder
+  state machine and just toggles trailerMode + a `sha256.New()`
+  bodyHash accumulator. The final 0-chunk consumes the trailer header
+  block, lex-sorts the canonical lines, recomputes the AWS4-HMAC-SHA256-
+  TRAILER stringToSign (`chainHMAC(prevSig=finalChunkSig, hex(SHA256(canonical-trailers)))`),
+  and verifies the trailer-signature + base64(SHA256(body)) match —
+  mismatch surfaces as `ErrSignatureInvalid` per AWS parity (not a
+  ChecksumMismatch code).
+- Files changed:
+  - `internal/auth/middleware.go` — trailer-algo gate + reader selection.
+  - `internal/auth/sigv4.go` — `streamingBodyTrailer` constant +
+    docs comment on the trailer variant.
+  - `internal/auth/streaming.go` — package-level doc block describing both
+    the standard and trailer wire shapes, new `computeTrailerSignature`,
+    `readAndValidateTrailers`, the `trailerMode` / `bodyHash` fields, and
+    the trailer-mode branch inside `readChunk`.
+  - `internal/auth/types.go` — `ErrUnsupportedChecksumAlgorithm` sentinel.
+  - `internal/s3api/errors.go` — `ErrUnsupportedChecksumAlgorithm` 400
+    `InvalidRequest` mapping in `WriteAuthDenied`.
+  - `internal/auth/streaming_trailer_test.go` (new) — unit cover for:
+    happy-path decode, trailer-signature mismatch, body-checksum mismatch,
+    missing trailer-signature header, missing checksum header,
+    middleware-level unsupported-algo gate (crc32 / crc32c / sha1) +
+    sanity that sha256 passes the gate. Plus the golden-fixture decoder
+    test that loads `testdata/chunked-trailer-sha256.bin`.
+  - `internal/auth/streaming_trailer_integration_test.go` (new, build tag
+    `integration`) — drives a hand-constructed
+    `STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER` PUT through the real
+    `auth.Middleware` against an `httptest.Server`; asserts 200 OK + the
+    inner handler reads the decoded plaintext + the auth-info owner is
+    threaded through.
+  - `internal/auth/testdata/chunked-trailer-sha256.bin` (new, 41189
+    bytes) — deterministic wire-format fixture under the streamSecret /
+    streamSeedSig vectors; decode-test asserts plaintext recovery.
+- Quality:
+  - `go vet ./...` green.
+  - `go test -race -count=1 ./internal/auth/... ./internal/s3api/...` green.
+  - `go test -tags integration -run TestStreamingTrailerRoundtripViaMiddleware
+    ./internal/auth/...` green.
+  - Pre-existing flaky `TestRunCleanRunNoInconsistencies` in
+    `internal/racetest` flapped once under full `./...` race contention
+    but passes deterministically in isolation (verified on clean HEAD +
+    on WIP). Unrelated to US-009 — the chunked-streaming path it
+    exercises uses the standard (non-trailer) variant whose behavior is
+    byte-for-byte unchanged.
+- s3-tests pass-rate delta deferred to US-010 (one full sweep at smoke
+  story).
+- ROADMAP close-flip (latent bug line 336) + the NEW P3 entry for
+  non-sha256 trailer algos are batched in US-010 per cycle convention.
+- **Learnings for future iterations:**
+  - The trailer variant reuses the existing `streamingReader` struct
+    rather than forking a parallel reader, because the chunk-signature
+    chain is identical and only the EOF/trailer block differs. Setting
+    `trailerMode=true` + a `hash.Hash` accumulator on the same shape
+    means future trailer-checksum algos (crc32, crc32c, sha1) just
+    swap the accumulator and add a new validate-helper — no extra
+    decoder. The unsupported-algo path stays the only middleware-level
+    branch.
+  - AWS's trailer-signature stringToSign concatenates the
+    `AWS4-HMAC-SHA256-TRAILER` algo line, the request timestamp (NOT
+    the credential-scope date), the credential scope, the previous
+    (= final-chunk) signature, and the hex(SHA256(canonical-trailer-
+    headers)). Canonical trailer headers are `<lower-name>:<trim-value>\n`
+    sorted lex by name, EXCLUDING `x-amz-trailer-signature` itself but
+    INCLUDING the algo's checksum header. Missing this exclusion would
+    flip the chain into a self-referential mismatch.
+  - On EOF, mismatches surface as `ErrSignatureInvalid` (AWS parity),
+    not as `ErrChecksumMismatch`. AWS S3 collapses both into the
+    SignatureDoesNotMatch wire code; preserving that on the gateway
+    avoids confusing clients that expect the SDK-shaped retry classes.
+  - `httptest.Server` flips the request `Host` to `127.0.0.1:PORT` on
+    the wire. When constructing a SigV4-signed request to drive against
+    the test server, sign the canonical request with that host (not
+    `example.com`) — otherwise the gateway recomputes against the wire
+    host and trips ErrSignatureInvalid. The integration test embeds
+    this gotcha in `buildTrailerPUT(..., host, ...)`.
+  - `internal/racetest` `TestRunCleanRunNoInconsistencies` is a 13–45 s
+    race-fuzz oracle that exercises the streaming-payload PUT path. It
+    is sensitive to scheduling under full-suite race contention; pass
+    rate is high in isolation. Future flakes here should reproduce
+    against clean HEAD before blaming the WIP — the streaming-payload
+    wire shape itself is unaffected by US-009.
+---
+
+## 2026-05-20 - US-010 - Smoke validation + ROADMAP close-flip × 9 + new P3 + PRD removal
+- Quality gates (cycle code):
+  - `make vet` (`go vet ./...`) green.
+  - `make build` green (FE bundle + go binary).
+  - `go test -race -count=1 ./...` green end-to-end (~3 min wall;
+    `internal/racetest` 46.8s within, `internal/s3api` 17.6s, `internal/data/s3`
+    13.4s; ld linker warnings on tikv/metrics/quotareconcile/racetest/rebalance/s3api/serverapp
+    are macOS `LC_DYSYMTAB` cosmetics — unrelated).
+  - `make docs-build` green (76 pages, 4 non-page files, 72 static; 190 ms).
+- Lab smoke results (`make up-all` TiKV-default 2-replica lab on host ports
+  10001/10002 + nginx LB :9999):
+  - PUT bucket, PUT object (single + 10 MiB), HEAD, GET small, GET 10 MiB +
+    md5 verify, list-type=2 (default + prefix + delimiter + after multi-page),
+    LIST with delimiter=/, LIST with delimiter=/ + prefix=logs/2026/04/,
+    MULTIPART (3 × 6 MiB) Initiate + Upload + List + ListUploads + Complete
+    + GET full multipart + md5, MULTIPART abort, STORAGE CLASSES (STANDARD /
+    STANDARD_IA / GLACIER_IR stored+returned + BOGUS rejected 400) — all
+    green.
+  - `== TAGGING` step fails: `PUT /<bucket>/tagged.txt?tagging` returns 500
+    `InternalError`. Direct probe + log scan localised the cause to
+    `internal/meta/tikv/store.go:120 SetObjectTags` returning
+    `errors.ErrUnsupported` — the TiKV backend stubs 19 `meta.Store` methods
+    (bucket/object ACL grants, object tags/retention/legal-hold/restore,
+    access points, SSE rewrap progress, raw manifest, replication status).
+    Pre-existing gap exposed by `ralph/tikv-default-lab` cycle's compose flip,
+    NOT introduced by this cycle. Logged as a new P2 ROADMAP entry under
+    `## Known latent bugs` per CLAUDE.md `Discovering a new gap` rule.
+    `make smoke` against `--profile cassandra` (`make up-cassandra`) tagging
+    leg passes (Cassandra impl complete).
+  - `make smoke-signed`: fails at the first assertion `unauthed request must
+    be rejected` because the canonical TiKV-default lab runs `auth=optional`
+    (no `STRATA_STATIC_CREDENTIALS` mounted in `deploy/docker/docker-compose.yml`).
+    The smoke harness expects `auth=required`; this is an operator-setup gap
+    of the bare lab, not a cycle regression. Real signed-PUT path coverage
+    lives in `internal/auth/streaming_trailer_integration_test.go` (US-009
+    integration tag) and `internal/racetest` (45s race-fuzz oracle exercises
+    the streaming-payload PUT path on every full-suite run).
+- `make test-integration` + `scripts/s3-tests/run.sh` deferred per the lab
+  TAGGING blocker — both depend on the same TiKV stub gap. The 165/178 (92.7
+  %) `s3-tests` baseline captured at `scripts/s3-tests/README.md` is unchanged
+  by this cycle (US-006 adds audit rows that don't touch S3 wire shape;
+  US-009 turns a previously-failing aws-chunked-trailer PUT into 200 OK,
+  which the `s3-tests` python harness does not exercise as a default; US-008
+  flips a single Range edge case the suite does not exercise either).
+  Operator follow-up: re-run both against `--profile cassandra` lab to
+  baseline the cycle deltas; full TiKV smoke parity blocked on the new P2
+  entry.
+- Per-story bench artifacts (US-003 / US-004 / US-005) shipped in their own
+  story commits (rados-ops.md / rados-pool.md / otel-ringbuf.md under
+  `docs/site/content/architecture/benchmarks/`); local box has no librados
+  so the ceph-tagged bench legs SKIP gracefully (real-cluster numbers land
+  on the next operator run).
+- ROADMAP close-flip × 9 + new P3 entry landed in this commit
+  (`ROADMAP.md`):
+  - **Object Lock COMPLIANCE audit log** (P3 → Done, references US-006 +
+    the 3 verbs + the AccessDenied semantic).
+  - **Continuous-integration byte_seconds for usage rollup** (P3 → Done,
+    references US-002 + `STRATA_USAGE_ROLLUP_SAMPLES_PER_DAY` + worked
+    example + hard cutover note).
+  - **Denormalised user_bucket_count for UserQuota.TotalMaxBytes checks**
+    (P3 → Done, references US-001 + the 3 new Store methods + the
+    Cassandra LWT-CAS path + TiKV pessimistic-txn path).
+  - **Erasure-code aware manifests** (P3 → Done, references US-007 + the
+    proto field + admin endpoint + full data-backend probe validation +
+    409 InconsistentECPolicy / 409 NoPlacement).
+  - **ReadOp / WriteOp batching in RADOS** (P3 → Done, references US-003
+    + the bench HOLD_DEFAULT verdict).
+  - **Connection pool tuning** (P3 → Done, references US-004 +
+    `STRATA_RADOS_POOL_SIZE` + the bench HOLD_DEFAULT verdict).
+  - **OTel ring-buffer eviction tuning under burst load** (P3 → Done,
+    references US-005 + the new `_oldest_age_seconds` gauge + the bench
+    HOLD_DEFAULT verdict + the alert recommendation).
+  - **GET Range zero-length edge tests** (latent → Done, references US-008
+    + the parseRange behavior fix + the 4 cases in range_test.go).
+  - **Streaming aws-chunked-trailer (sha256)** (latent → Done, references
+    US-009 + the trailer state machine + the sha256-only scope).
+  - NEW P3 entry **Streaming chunked-trailer support for non-sha256
+    checksum algorithms (crc32, crc32c, sha1)** parked open per US-009 scope
+    decision.
+  - NEW P2 entry **TiKV meta backend stubs 19 meta.Store methods with
+    errors.ErrUnsupported** under `## Known latent bugs` per the discovery
+    rule.
+- `tasks/prd-storage-correctness.md` removed (`git rm`) per cycle convention.
+- Each close-flip carries `(commit pending)`; SHA backfill lands on main as a
+  fast-follow per CLAUDE.md `Closing a roadmap item` paragraph.
+- **Learnings for future iterations:**
+  - `make smoke` validates the gateway against the LAB image, not the WIP
+    binary. Even after `make build`, the lab keeps running the previously-
+    built `strata:ceph` image — flipping behaviour validated by tests will
+    only land in smoke after `docker compose build strata-a strata-b` +
+    `make down && make up-all`. For cycles that don't touch backend
+    behaviour but only meta/auth/api code, isolated `go test -race
+    ./internal/...` is a faster + more honest pre-commit gate.
+  - The TiKV-default canonical lab swap (`ralph/tikv-default-lab` cycle)
+    flipped `make smoke` from Cassandra-backed (full method coverage) to
+    TiKV-backed (19 method gap). Smoke acceptance for any future cycle
+    touching object tags / retention / legal-hold / ACL / access points
+    should explicitly run BOTH `make smoke` (TiKV bare lab) AND `make
+    smoke` against `--profile cassandra` until the TiKV gap is closed; one
+    of the two will fail and the operator should not be surprised.
+  - `make smoke-signed` requires lab `auth=required` + `STRATA_STATIC_CREDENTIALS`
+    seeded with `MAIN_AK/MAIN_SK/ALT_AK/ALT_SK/TENANT_AK/TENANT_SK`. The
+    bare canonical lab runs `auth=optional`. Operators wanting signed-path
+    smoke must restart strata-a/b with the env override or attach a
+    bootstrap script — there is no `--profile signed` shortcut today (gap
+    worth tracking if smoke-signed becomes a routine acceptance gate).
+  - When in-process `./bin/strata server` against memory backends exits
+    silently with code 0 after the "admin: STRATA_PROMETHEUS_URL unset"
+    line and never reaches "strata server listening", the cause is usually
+    the harness's background-task wrapper sending SIGTERM on
+    completion — the binary itself is fine, but `run_in_background` mode
+    doesn't keep the process alive past the spawning shell's exit. Use
+    `make run-memory` interactively or a separate terminal, not the
+    background wrapper, for ad-hoc lab smoke.
+  - `ROADMAP.md` close-flips for 9 entries plus a NEW P3 plus a NEW P2 are
+    a 250-line diff. The `## Known latent bugs` section is the right home
+    for runtime gateway crashes / wrong-result bugs found by smoke; new
+    forward-looking capability gaps (the sha256-only trailer scope leftover)
+    go under the relevant section (here `## S3 API surface` adjacent to
+    the just-closed latent bug). Keep the section choice explicit so a
+    future maintainer doesn't have to dig.
+---

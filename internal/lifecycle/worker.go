@@ -27,6 +27,12 @@ import (
 // long enough that the renewing lease covers a worst-case bucket scan.
 const DefaultBucketLeaseTTL = 60 * time.Second
 
+// DefaultComplianceAuditRetention is the row TTL applied to
+// objectlock:ComplianceRetentionExpired audit_log entries when AuditTTL is
+// zero. Mirrors s3api.DefaultAuditRetention (30 days); hardcoded to keep the
+// lifecycle package free of the s3api import.
+const DefaultComplianceAuditRetention = 30 * 24 * time.Hour
+
 // LeaseName returns the per-bucket lifecycle lease key. Public so operator
 // dashboards / runbooks don't have to hard-code the format string.
 func LeaseName(bucketID string) string { return fmt.Sprintf("lifecycle-leader-%s", bucketID) }
@@ -82,6 +88,10 @@ type Worker struct {
 	// `lifecycle.transition_object` sub-op children. Nil falls back to a
 	// process-shared no-op tracer.
 	Tracer trace.Tracer
+	// AuditTTL is the row TTL applied to objectlock:ComplianceRetentionExpired
+	// audit_log entries (US-006). Zero falls back to
+	// DefaultComplianceAuditRetention.
+	AuditTTL time.Duration
 
 	// iterErrMu / iterErr accumulates per-cycle sticky errors so the
 	// iteration parent span can be marked Error when any sub-op fails. Set
@@ -623,4 +633,36 @@ func (w *Worker) expire(ctx context.Context, b *meta.Bucket, o *meta.Object, rul
 	metrics.LifecycleExpirations.Inc()
 	metrics.LifecycleTickTotal.WithLabelValues("expire", "success").Inc()
 	w.Logger.InfoContext(ctx, "lifecycle expired", "bucket", b.Name, "key", o.Key, "rule", ruleID, "versioned", versioned)
+	w.recordComplianceRetentionExpiredAudit(ctx, b, o)
+}
+
+// recordComplianceRetentionExpiredAudit appends one objectlock:
+// ComplianceRetentionExpired row to audit_log whenever the lifecycle worker
+// expires an object that previously held a COMPLIANCE retention whose
+// RetainUntilDate has now elapsed (US-006). Failure is logged WARN — never
+// propagated, audit is best-effort relative to the underlying expire op.
+func (w *Worker) recordComplianceRetentionExpiredAudit(ctx context.Context, b *meta.Bucket, o *meta.Object) {
+	if o == nil || o.RetainMode != meta.LockModeCompliance {
+		return
+	}
+	if o.RetainUntil.IsZero() || o.RetainUntil.After(time.Now()) {
+		return
+	}
+	ttl := w.AuditTTL
+	if ttl == 0 {
+		ttl = DefaultComplianceAuditRetention
+	}
+	row := &meta.AuditEvent{
+		BucketID:  b.ID,
+		Bucket:    b.Name,
+		Time:      time.Now().UTC(),
+		Principal: "system:lifecycle-worker",
+		Action:    "objectlock:ComplianceRetentionExpired",
+		Resource:  "object:" + b.Name + "/" + o.Key,
+		Result:    "200",
+	}
+	if err := w.Meta.EnqueueAudit(ctx, row, ttl); err != nil {
+		w.Logger.WarnContext(ctx, "lifecycle compliance audit enqueue failed",
+			"bucket", b.Name, "key", o.Key, "error", err.Error())
+	}
 }

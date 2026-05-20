@@ -1,13 +1,15 @@
 // Package usagerollup drives the leader-elected usage-rollup worker (US-008).
-// On each scheduled tick (default 24h at 00:00 UTC) the worker walks every
-// bucket, samples bucket_stats once, and writes a (bucket_id, storage_class,
-// yesterday-UTC, byte_seconds, object_count_avg, object_count_max) row into
-// the usage_aggregates feed used by external billing.
-//
-// v1 byte_seconds approximation: byte_seconds = used_bytes * 86400. This is
-// accurate when usage is constant across the day and over-counts spikes that
-// fall before the snapshot, under-counts spikes that fall after. Documented
-// in docs/site/content/best-practices/quotas-billing.md (US-011).
+// The worker schedules N intermediate sample ticks per UTC day (default 24 =
+// hourly via STRATA_USAGE_ROLLUP_SAMPLES_PER_DAY) plus one daily roll-up tick.
+// Each intermediate tick snapshots bucket_stats.used_bytes / used_objects into
+// an in-memory ring keyed by (bucket_id, storage_class). On the daily tick the
+// worker walks every (bucket, storage class) ring, integrates the samples via
+// the trapezoid rule (byte_seconds = Σ (s[i]+s[i+1])/2 × Δt + s[N-1] × Δt) and
+// writes one usage_aggregates row per (bucket, storage_class, yesterday-UTC).
+// N=1 (or zero samples for that day) degrades to the v0 single-sample math
+// (used_bytes × 86400) — intentional fallback when a bucket was created
+// mid-day or the worker just booted. Documented in
+// docs/site/content/best-practices/quotas-billing.md.
 package usagerollup
 
 import (
@@ -28,6 +30,12 @@ import (
 
 const secondsPerDay int64 = 86400
 
+// DefaultSamplesPerDay is the v1 trapezoid sample count (hourly).
+const DefaultSamplesPerDay = 24
+
+// MaxSamplesPerDay caps SamplesPerDay at 1 sample per minute.
+const MaxSamplesPerDay = 1440
+
 // Config wires a Worker. New() applies defaults.
 type Config struct {
 	Meta meta.Store
@@ -35,8 +43,13 @@ type Config struct {
 	Interval time.Duration
 	// At is the UTC clock time at which the daily tick fires. Format
 	// "HH:MM". Empty defaults to "00:00".
-	At     string
-	Logger *slog.Logger
+	At string
+	// SamplesPerDay is the number of intermediate sample ticks fired per
+	// Interval. The daily roll-up tick integrates these via the trapezoid
+	// rule. Default 24 (hourly). Out-of-range values are clamped to
+	// [1, MaxSamplesPerDay] with a WARN log.
+	SamplesPerDay int
+	Logger        *slog.Logger
 	// Now overrides the wall clock for tests. Returns UTC.
 	Now func() time.Time
 	// Tracer emits per-iteration parent spans (`worker.usage-rollup.tick`)
@@ -52,6 +65,7 @@ type Worker struct {
 	atMin   int
 	logger  *slog.Logger
 	nowFunc func() time.Time
+	ring    *sampleRing
 
 	iterErrMu sync.Mutex
 	iterErr   error
@@ -104,12 +118,26 @@ func New(cfg Config) (*Worker, error) {
 	if cfg.Now == nil {
 		cfg.Now = func() time.Time { return time.Now().UTC() }
 	}
+	samples := cfg.SamplesPerDay
+	clamped := samples
+	clamped = max(clamped, 1)
+	clamped = min(clamped, MaxSamplesPerDay)
+	if clamped != samples && samples != 0 {
+		cfg.Logger.Warn("usagerollup: clamped samples_per_day",
+			"requested", samples, "applied", clamped,
+			"range", fmt.Sprintf("[1, %d]", MaxSamplesPerDay))
+	}
+	if samples == 0 {
+		clamped = DefaultSamplesPerDay
+	}
+	cfg.SamplesPerDay = clamped
 	return &Worker{
 		cfg:     cfg,
 		atHour:  hh,
 		atMin:   mm,
 		logger:  cfg.Logger,
 		nowFunc: cfg.Now,
+		ring:    newSampleRing(clamped),
 	}, nil
 }
 
@@ -126,40 +154,49 @@ func parseAt(s string) (int, int, error) {
 
 // Stats summarises a single rollup pass.
 type Stats struct {
-	BucketsScanned  int
-	RowsWritten     int
-	BucketsErrored  int
+	BucketsScanned int
+	RowsWritten    int
+	BucketsErrored int
 }
 
 // Run sleeps until the next scheduled fire time, runs RunOnce, then loops on
-// cfg.Interval. ctx cancellation returns immediately.
+// cfg.Interval. Intermediate sample ticks fire every Interval/SamplesPerDay.
+// ctx cancellation returns immediately.
 func (w *Worker) Run(ctx context.Context) error {
 	w.logger.InfoContext(ctx, "usagerollup: starting",
 		"interval", w.cfg.Interval,
 		"at", w.cfg.At,
+		"samples_per_day", w.cfg.SamplesPerDay,
 	)
+
+	var sampleC <-chan time.Time
+	if w.cfg.SamplesPerDay > 1 {
+		st := time.NewTicker(w.cfg.Interval / time.Duration(w.cfg.SamplesPerDay))
+		defer st.Stop()
+		sampleC = st.C
+	}
+
+	daily := time.NewTimer(time.Until(w.nextFire(w.nowFunc())))
+	defer daily.Stop()
+
 	for {
-		next := w.nextFire(w.nowFunc())
-		wait := time.Until(next)
-		if wait <= 0 {
-			wait = 0
-		}
-		t := time.NewTimer(wait)
-		select {
-		case <-ctx.Done():
-			t.Stop()
-			return nil
-		case <-t.C:
-		}
-		if _, err := w.RunOnce(ctx, w.nowFunc()); err != nil && !errors.Is(err, context.Canceled) {
-			w.logger.WarnContext(ctx, "usagerollup: tick failed", "error", err.Error())
-		}
-		// Sleep one Interval before the next fire so a fast clock skew does
-		// not refire immediately.
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(w.cfg.Interval):
+		case <-sampleC:
+			if err := w.SampleOnce(ctx, w.nowFunc()); err != nil && !errors.Is(err, context.Canceled) {
+				w.logger.WarnContext(ctx, "usagerollup: sample failed", "error", err.Error())
+			}
+		case <-daily.C:
+			if _, err := w.RunOnce(ctx, w.nowFunc()); err != nil && !errors.Is(err, context.Canceled) {
+				w.logger.WarnContext(ctx, "usagerollup: tick failed", "error", err.Error())
+			}
+			next := w.nextFire(w.nowFunc())
+			wait := time.Until(next)
+			if wait <= 0 {
+				wait = w.cfg.Interval
+			}
+			daily.Reset(wait)
 		}
 	}
 }
@@ -174,6 +211,34 @@ func (w *Worker) nextFire(now time.Time) time.Time {
 		today = today.AddDate(0, 0, 1)
 	}
 	return today
+}
+
+// SampleOnce snapshots bucket_stats for every bucket into the in-memory ring.
+// Called from the intermediate sample ticker; safe to call manually from tests
+// to drive a virtual day.
+func (w *Worker) SampleOnce(ctx context.Context, _ time.Time) error {
+	buckets, err := w.cfg.Meta.ListBuckets(ctx, "")
+	if err != nil {
+		return fmt.Errorf("list buckets: %w", err)
+	}
+	for _, b := range buckets {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		bs, err := w.cfg.Meta.GetBucketStats(ctx, b.ID)
+		if err != nil {
+			w.logger.WarnContext(ctx, "usagerollup: sample bucket failed",
+				"bucket", b.Name, "error", err.Error())
+			continue
+		}
+		class := b.DefaultClass
+		if class == "" {
+			class = "STANDARD"
+		}
+		w.ring.add(RingKey{BucketID: b.ID, Class: class},
+			Sample{Bytes: bs.UsedBytes, Objects: bs.UsedObjects})
+	}
+	return nil
 }
 
 // RunOnce performs a single rollup pass: every bucket gets one usage_aggregates
@@ -235,22 +300,33 @@ func (w *Worker) runOnce(ctx context.Context, now time.Time) (Stats, error) {
 }
 
 func (w *Worker) rollupBucket(ctx context.Context, b *meta.Bucket, day time.Time) error {
-	bs, err := w.cfg.Meta.GetBucketStats(ctx, b.ID)
-	if err != nil {
-		return fmt.Errorf("get stats: %w", err)
-	}
 	storageClass := b.DefaultClass
 	if storageClass == "" {
 		storageClass = "STANDARD"
+	}
+	key := RingKey{BucketID: b.ID, Class: storageClass}
+	samples := w.ring.drain(key)
+	if len(samples) == 0 {
+		bs, err := w.cfg.Meta.GetBucketStats(ctx, b.ID)
+		if err != nil {
+			return fmt.Errorf("get stats: %w", err)
+		}
+		samples = []Sample{{Bytes: bs.UsedBytes, Objects: bs.UsedObjects}}
+	}
+	byteSamples := make([]int64, len(samples))
+	objectSamples := make([]int64, len(samples))
+	for i, s := range samples {
+		byteSamples[i] = s.Bytes
+		objectSamples[i] = s.Objects
 	}
 	agg := meta.UsageAggregate{
 		BucketID:       b.ID,
 		Bucket:         b.Name,
 		StorageClass:   storageClass,
 		Day:            day,
-		ByteSeconds:    bs.UsedBytes * secondsPerDay,
-		ObjectCountAvg: bs.UsedObjects,
-		ObjectCountMax: bs.UsedObjects,
+		ByteSeconds:    Trapezoid(byteSamples, secondsPerDay),
+		ObjectCountAvg: AverageObjects(objectSamples),
+		ObjectCountMax: MaxObjects(objectSamples),
 		ComputedAt:     w.nowFunc(),
 	}
 	return w.cfg.Meta.WriteUsageAggregate(ctx, agg)
