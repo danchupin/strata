@@ -74,6 +74,8 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"ClusterStateRoundTrip", caseClusterState},
 		{"ClusterStateModes", caseClusterStateModes},
 		{"ClusterStateWeights", caseClusterStateWeights},
+		{"ObjectTagsRoundTrip", caseObjectTags},
+		{"ObjectGrantsRoundTrip", caseObjectGrants},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -3391,6 +3393,214 @@ func caseClusterStateWeights(t *testing.T, s meta.Store) {
 	}
 	if all["drainme"].Weight != 60 {
 		t.Errorf("list drainme: %+v", all["drainme"])
+	}
+}
+
+// caseObjectTags exercises SetObjectTags/GetObjectTags/DeleteObjectTags
+// across (a) happy-path round-trip, (b) overwrite (last writer wins),
+// (c) delete clears, (d) read on un-tagged existing object returns the
+// empty TagSet not ErrObjectNotFound, (e) per-version isolation
+// (v1 tags do not leak into v2), (f) null-versionId routing alias.
+// US-001 tikv-stubs.
+func caseObjectTags(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "tagbkt", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	if err := s.SetBucketVersioning(ctx, b.Name, meta.VersioningEnabled); err != nil {
+		t.Fatalf("enable versioning: %v", err)
+	}
+	// Two versions of the same key so per-version isolation is observable.
+	v1 := &meta.Object{
+		BucketID: b.ID, Key: "k", StorageClass: "STANDARD", ETag: "e1", Size: 1,
+		Mtime: time.Now().UTC(), Manifest: &data.Manifest{Class: "STANDARD"}, VersionID: newTimeUUID(),
+	}
+	if err := s.PutObject(ctx, v1, true); err != nil {
+		t.Fatalf("put v1: %v", err)
+	}
+	v2 := &meta.Object{
+		BucketID: b.ID, Key: "k", StorageClass: "STANDARD", ETag: "e2", Size: 1,
+		Mtime: time.Now().UTC().Add(time.Second), Manifest: &data.Manifest{Class: "STANDARD"}, VersionID: newTimeUUID(),
+	}
+	if err := s.PutObject(ctx, v2, true); err != nil {
+		t.Fatalf("put v2: %v", err)
+	}
+
+	// (d) Un-tagged read returns empty TagSet, not an error.
+	got, err := s.GetObjectTags(ctx, b.ID, "k", v1.VersionID)
+	if err != nil {
+		t.Fatalf("get untagged v1: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("untagged v1: %+v", got)
+	}
+
+	// (a) Happy-path round-trip on v1.
+	if err := s.SetObjectTags(ctx, b.ID, "k", v1.VersionID, map[string]string{"a": "1"}); err != nil {
+		t.Fatalf("set v1: %v", err)
+	}
+	got, err = s.GetObjectTags(ctx, b.ID, "k", v1.VersionID)
+	if err != nil {
+		t.Fatalf("get v1: %v", err)
+	}
+	if got["a"] != "1" || len(got) != 1 {
+		t.Fatalf("v1 round-trip: %+v", got)
+	}
+
+	// (e) Per-version isolation: v2 stays untagged after writing v1.
+	got, err = s.GetObjectTags(ctx, b.ID, "k", v2.VersionID)
+	if err != nil {
+		t.Fatalf("get v2 after v1 set: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("v2 leaked v1 tags: %+v", got)
+	}
+
+	// (b) Overwrite — last writer wins.
+	if err := s.SetObjectTags(ctx, b.ID, "k", v1.VersionID, map[string]string{"b": "2"}); err != nil {
+		t.Fatalf("overwrite v1: %v", err)
+	}
+	got, err = s.GetObjectTags(ctx, b.ID, "k", v1.VersionID)
+	if err != nil {
+		t.Fatalf("get v1 post-overwrite: %v", err)
+	}
+	if _, has := got["a"]; has || got["b"] != "2" {
+		t.Fatalf("overwrite: %+v", got)
+	}
+
+	// (c) Delete clears.
+	if err := s.DeleteObjectTags(ctx, b.ID, "k", v1.VersionID); err != nil {
+		t.Fatalf("delete v1: %v", err)
+	}
+	got, err = s.GetObjectTags(ctx, b.ID, "k", v1.VersionID)
+	if err != nil {
+		t.Fatalf("get v1 post-delete: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("post-delete: %+v", got)
+	}
+
+	// Missing object → ErrObjectNotFound.
+	if _, err := s.GetObjectTags(ctx, b.ID, "ghost", ""); err != meta.ErrObjectNotFound {
+		t.Errorf("missing object: got %v want ErrObjectNotFound", err)
+	}
+	if err := s.SetObjectTags(ctx, b.ID, "ghost", "", map[string]string{"x": "y"}); err != meta.ErrObjectNotFound {
+		t.Errorf("set missing: got %v want ErrObjectNotFound", err)
+	}
+	if err := s.DeleteObjectTags(ctx, b.ID, "ghost", ""); err != meta.ErrObjectNotFound {
+		t.Errorf("delete missing: got %v want ErrObjectNotFound", err)
+	}
+
+	// (f) Null-versionId routing. Seed a non-versioned bucket so the null
+	// sentinel row is the only row; both "" and the wire literal "null"
+	// must resolve to it.
+	nb, err := s.CreateBucket(ctx, "tagnull", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create null bucket: %v", err)
+	}
+	nullObj := &meta.Object{
+		BucketID: nb.ID, Key: "k", StorageClass: "STANDARD", ETag: "n", Size: 1,
+		Mtime: time.Now().UTC(), Manifest: &data.Manifest{Class: "STANDARD"},
+	}
+	if err := s.PutObject(ctx, nullObj, false); err != nil {
+		t.Fatalf("put null: %v", err)
+	}
+	if err := s.SetObjectTags(ctx, nb.ID, "k", meta.NullVersionLiteral, map[string]string{"n": "1"}); err != nil {
+		t.Fatalf("set via 'null' literal: %v", err)
+	}
+	got, err = s.GetObjectTags(ctx, nb.ID, "k", "")
+	if err != nil {
+		t.Fatalf("get via empty versionID: %v", err)
+	}
+	if got["n"] != "1" {
+		t.Fatalf("null routing: %+v", got)
+	}
+	got, err = s.GetObjectTags(ctx, nb.ID, "k", meta.NullVersionID)
+	if err != nil {
+		t.Fatalf("get via NullVersionID: %v", err)
+	}
+	if got["n"] != "1" {
+		t.Fatalf("null routing via sentinel: %+v", got)
+	}
+}
+
+// caseObjectGrants exercises SetObjectGrants/GetObjectGrants across
+// (a) happy-path round-trip, (b) overwrite, (c) read on object without
+// grants returns ErrNoSuchGrants (not ErrObjectNotFound), (d) per-version
+// isolation, (e) missing object surfaces ErrObjectNotFound. There is no
+// DeleteObjectGrants in the meta.Store contract — Set with empty list is
+// the "clear" path and surfaces as ErrNoSuchGrants per Cassandra parity.
+// US-001 tikv-stubs.
+func caseObjectGrants(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "grbkt", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	if err := s.SetBucketVersioning(ctx, b.Name, meta.VersioningEnabled); err != nil {
+		t.Fatalf("enable versioning: %v", err)
+	}
+	v1 := &meta.Object{
+		BucketID: b.ID, Key: "k", StorageClass: "STANDARD", ETag: "e1", Size: 1,
+		Mtime: time.Now().UTC(), Manifest: &data.Manifest{Class: "STANDARD"}, VersionID: newTimeUUID(),
+	}
+	if err := s.PutObject(ctx, v1, true); err != nil {
+		t.Fatalf("put v1: %v", err)
+	}
+	v2 := &meta.Object{
+		BucketID: b.ID, Key: "k", StorageClass: "STANDARD", ETag: "e2", Size: 1,
+		Mtime: time.Now().UTC().Add(time.Second), Manifest: &data.Manifest{Class: "STANDARD"}, VersionID: newTimeUUID(),
+	}
+	if err := s.PutObject(ctx, v2, true); err != nil {
+		t.Fatalf("put v2: %v", err)
+	}
+
+	// (c) Object exists, no grants persisted → ErrNoSuchGrants.
+	if _, err := s.GetObjectGrants(ctx, b.ID, "k", v1.VersionID); err != meta.ErrNoSuchGrants {
+		t.Fatalf("untagged v1: got %v want ErrNoSuchGrants", err)
+	}
+
+	grants := []meta.Grant{
+		{GranteeType: "CanonicalUser", ID: "owner", Permission: "FULL_CONTROL"},
+		{GranteeType: "Group", URI: "http://acs.amazonaws.com/groups/global/AllUsers", Permission: "READ"},
+	}
+	if err := s.SetObjectGrants(ctx, b.ID, "k", v1.VersionID, grants); err != nil {
+		t.Fatalf("set v1: %v", err)
+	}
+	got, err := s.GetObjectGrants(ctx, b.ID, "k", v1.VersionID)
+	if err != nil {
+		t.Fatalf("get v1: %v", err)
+	}
+	if len(got) != 2 || got[0].Permission != "FULL_CONTROL" || got[1].URI == "" {
+		t.Fatalf("v1 round-trip: %+v", got)
+	}
+
+	// (d) Per-version isolation.
+	if _, err := s.GetObjectGrants(ctx, b.ID, "k", v2.VersionID); err != meta.ErrNoSuchGrants {
+		t.Fatalf("v2 leaked grants: got %v want ErrNoSuchGrants", err)
+	}
+
+	// (b) Overwrite.
+	if err := s.SetObjectGrants(ctx, b.ID, "k", v1.VersionID, []meta.Grant{
+		{GranteeType: "CanonicalUser", ID: "other", Permission: "READ"},
+	}); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	got, err = s.GetObjectGrants(ctx, b.ID, "k", v1.VersionID)
+	if err != nil {
+		t.Fatalf("get post-overwrite: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "other" || got[0].Permission != "READ" {
+		t.Fatalf("overwrite shape: %+v", got)
+	}
+
+	// (e) Missing object surfaces ErrObjectNotFound.
+	if _, err := s.GetObjectGrants(ctx, b.ID, "ghost", ""); err != meta.ErrObjectNotFound {
+		t.Errorf("missing get: got %v want ErrObjectNotFound", err)
+	}
+	if err := s.SetObjectGrants(ctx, b.ID, "ghost", "", grants); err != meta.ErrObjectNotFound {
+		t.Errorf("missing set: got %v want ErrObjectNotFound", err)
 	}
 }
 

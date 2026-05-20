@@ -24,8 +24,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented via piggyback on objectRow (tags + grants live on the same TiKV row that PutObject writes — Cassandra/Memory parity). PRD's `object_meta:<bucket>:<key>:<ver>:<kind>` separate-key shape replaced with single-row RMW: pessimistic txn → loadObjectForUpdate → decode → mutate Tags/Grants → encode → Set → Commit. Added Grants []byte (raw JSON blob) to objectRow in codec.go alongside the pre-existing Tags map. Helpers mutateObjectRow + snapshotObjectRow live in object_meta.go and decode objectRow directly (skipping the meta.Object roundtrip) so they can touch fields meta.Object does not surface. keycodec.go shipped with PackKey + MarshalBlob + UnmarshalBlob per acceptance; not consumed by US-001 itself but available for US-002..US-005 if a new key shape ever needs FoundationDB stuffing outside the entity constructors in keys.go. Contract cases ObjectTagsRoundTrip + ObjectGrantsRoundTrip exercise round-trip, overwrite, per-version isolation, null-versionId routing, missing-object sentinels."
     },
     {
       "id": "US-002",

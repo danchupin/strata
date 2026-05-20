@@ -109,26 +109,6 @@ func (s *Store) DeleteBucketGrants(ctx context.Context, bucketID uuid.UUID) erro
 	return errors.ErrUnsupported
 }
 
-func (s *Store) SetObjectGrants(ctx context.Context, bucketID uuid.UUID, key, versionID string, grants []meta.Grant) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) GetObjectGrants(ctx context.Context, bucketID uuid.UUID, key, versionID string) ([]meta.Grant, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) SetObjectTags(ctx context.Context, bucketID uuid.UUID, key, versionID string, tags map[string]string) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) GetObjectTags(ctx context.Context, bucketID uuid.UUID, key, versionID string) (map[string]string, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) DeleteObjectTags(ctx context.Context, bucketID uuid.UUID, key, versionID string) error {
-	return errors.ErrUnsupported
-}
-
 func (s *Store) SetObjectRetention(ctx context.Context, bucketID uuid.UUID, key, versionID, mode string, until time.Time) error {
 	return errors.ErrUnsupported
 }
