@@ -86,8 +86,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented via internal/meta/tikv/access_points.go (5 impls) + keys.go additions (AccessPointByBucketKey + AccessPointByBucketPrefix + new prefix `s/apb/`). Three-index layout: by_name (full JSON blob via AccessPointKey), by_alias (name pointer via AccessPointAliasKey), by_bucket (empty-value index via AccessPointByBucketKey under new global prefix). Create + Delete go through one pessimistic txn that locks all three keys; reads are optimistic. ListAccessPoints(uuid.Nil) scans the by_name prefix and decodes each payload directly; ListAccessPoints(bucketID) scans the by_bucket prefix and follow-up-Gets each by_name row, mirroring the Cassandra ALLOW FILTERING dodge but as a single-prefix range scan. GetByAlias race semantics: 2nd Get returns ErrAccessPointNotFound on concurrent Delete (linearizable 'deleted' view). Contract case caseAccessPointCRUD extended with multi-AP seed (2 APs on bucket b, 1 on b2) — exercises name-ascending global order, per-bucket isolation, alias-pointer cleanup on Delete, by_bucket index cleanup. Unit tests TestAccessPointCRUDLifecycle + TestAccessPointListByBucketIsolation in store_test.go cover the tikv-specific path against memBackend (no integration build tag needed)."
     },
     {
       "id": "US-005",

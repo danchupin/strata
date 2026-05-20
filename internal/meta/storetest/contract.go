@@ -1836,6 +1836,62 @@ func caseAccessPointCRUD(t *testing.T, s meta.Store) {
 	if err != nil || len(list) != 0 {
 		t.Fatalf("list after delete: err=%v list=%+v", err, list)
 	}
+
+	// Multi-AP seed: two access points on bucket b, one on a second bucket
+	// b2. Verifies (a) global list returns all three in Name-ascending order,
+	// (b) per-bucket list isolates correctly (no cross-bucket bleed),
+	// (c) GetByAlias still resolves after a sibling AP is deleted, (d) the
+	// three-index Delete cleans the alias-pointer + by-bucket index rows so
+	// GetByAlias on the removed alias surfaces ErrAccessPointNotFound and
+	// the per-bucket list no longer carries the deleted name.
+	b2, err := s.CreateBucket(ctx, "ap-bkt-2", "owner-a", "STANDARD")
+	if err != nil {
+		t.Fatalf("create second bucket: %v", err)
+	}
+	apA := &meta.AccessPoint{Name: "ap-alpha", BucketID: b.ID, Bucket: b.Name, Alias: "ap-aliasalpha", NetworkOrigin: "Internet", CreatedAt: time.Now().UTC().Truncate(time.Millisecond)}
+	apB := &meta.AccessPoint{Name: "ap-bravo", BucketID: b.ID, Bucket: b.Name, Alias: "ap-aliasbravoo", NetworkOrigin: "VPC", VPCID: "vpc-1", CreatedAt: time.Now().UTC().Truncate(time.Millisecond)}
+	apC := &meta.AccessPoint{Name: "ap-charlie", BucketID: b2.ID, Bucket: b2.Name, Alias: "ap-aliascharlie", NetworkOrigin: "Internet", CreatedAt: time.Now().UTC().Truncate(time.Millisecond)}
+	for _, ap := range []*meta.AccessPoint{apA, apB, apC} {
+		if err := s.CreateAccessPoint(ctx, ap); err != nil {
+			t.Fatalf("create %s: %v", ap.Name, err)
+		}
+	}
+
+	listAll, err := s.ListAccessPoints(ctx, uuid.Nil)
+	if err != nil || len(listAll) != 3 {
+		t.Fatalf("multi list all: err=%v list=%+v", err, listAll)
+	}
+	if listAll[0].Name != "ap-alpha" || listAll[1].Name != "ap-bravo" || listAll[2].Name != "ap-charlie" {
+		t.Fatalf("multi list all order: %+v", listAll)
+	}
+
+	listB, err := s.ListAccessPoints(ctx, b.ID)
+	if err != nil || len(listB) != 2 {
+		t.Fatalf("list bucket b: err=%v list=%+v", err, listB)
+	}
+	if listB[0].Name != "ap-alpha" || listB[1].Name != "ap-bravo" {
+		t.Fatalf("list bucket b order: %+v", listB)
+	}
+	listB2, err := s.ListAccessPoints(ctx, b2.ID)
+	if err != nil || len(listB2) != 1 || listB2[0].Name != "ap-charlie" {
+		t.Fatalf("list bucket b2: err=%v list=%+v", err, listB2)
+	}
+
+	gotAlpha, err := s.GetAccessPointByAlias(ctx, apA.Alias)
+	if err != nil || gotAlpha.Name != apA.Name || gotAlpha.BucketID != b.ID {
+		t.Fatalf("by alias alpha: %v %+v", err, gotAlpha)
+	}
+
+	if err := s.DeleteAccessPoint(ctx, "ap-alpha"); err != nil {
+		t.Fatalf("delete alpha: %v", err)
+	}
+	if _, err := s.GetAccessPointByAlias(ctx, apA.Alias); err != meta.ErrAccessPointNotFound {
+		t.Fatalf("by alias after delete: got %v want ErrAccessPointNotFound", err)
+	}
+	listB, err = s.ListAccessPoints(ctx, b.ID)
+	if err != nil || len(listB) != 1 || listB[0].Name != "ap-bravo" {
+		t.Fatalf("list bucket b after delete: err=%v list=%+v", err, listB)
+	}
 }
 
 // caseOnlineReshard exercises the US-045 reshard state machine end-to-end.
@@ -3927,4 +3983,3 @@ func padInt(i, width int) string {
 	}
 	return string(out)
 }
-

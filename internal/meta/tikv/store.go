@@ -96,26 +96,6 @@ func (s *Store) Probe(ctx context.Context) error {
 	return s.kv.Probe(ctx)
 }
 
-func (s *Store) CreateAccessPoint(ctx context.Context, ap *meta.AccessPoint) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) GetAccessPoint(ctx context.Context, name string) (*meta.AccessPoint, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) GetAccessPointByAlias(ctx context.Context, alias string) (*meta.AccessPoint, error) {
-	return nil, errors.ErrUnsupported
-}
-
-func (s *Store) DeleteAccessPoint(ctx context.Context, name string) error {
-	return errors.ErrUnsupported
-}
-
-func (s *Store) ListAccessPoints(ctx context.Context, bucketID uuid.UUID) ([]*meta.AccessPoint, error) {
-	return nil, errors.ErrUnsupported
-}
-
 func (s *Store) UpdateObjectSSEWrap(ctx context.Context, bucketID uuid.UUID, key, versionID string, wrapped []byte, keyID string) error {
 	return errors.ErrUnsupported
 }
