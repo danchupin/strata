@@ -72,6 +72,11 @@ type objectRow struct {
 	Expires           string            `json:"x,omitempty"`
 	ReplicationStatus string            `json:"rps,omitempty"`
 	ChecksumType      string            `json:"cty,omitempty"`
+	// Grants is the per-object ACL blob. Carried as the raw JSON bytes
+	// produced by encodeGrants (mirrors Cassandra's `grants blob` column);
+	// empty length means "no grants persisted" and surfaces as
+	// meta.ErrNoSuchGrants on Get.
+	Grants []byte `json:"gr,omitempty"`
 }
 
 // encodeObject serialises a meta.Object into its TiKV row payload.

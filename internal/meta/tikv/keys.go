@@ -55,6 +55,7 @@ const (
 	prefixPolicyUser       = Namespace + "pus/" // s/pus/<policyArn>\x00\x00<userName>
 	prefixAccessPoint      = Namespace + "ap/"  // s/ap/<name>
 	prefixAccessPointAlias = Namespace + "aa/"  // s/aa/<alias>
+	prefixAccessPointByBkt = Namespace + "apb/" // s/apb/<bucket16><escName>
 	prefixNotifyQueue      = Namespace + "qn/"  // s/qn/<bucket16><ts8><eventID>
 	prefixNotifyDLQ        = Namespace + "qd/"  // s/qd/<bucket16><ts8><eventID>
 	prefixReplicationQueue = Namespace + "qr/"  // s/qr/<bucket16><ts8><eventID>
@@ -74,19 +75,19 @@ const (
 // Bucket-scoped sub-prefixes. All are appended to a "s/B/<uuid16>/"
 // header.
 const (
-	subBucketGrants     = "g"   // single key
-	subObject           = "o/"  // s/B/<uuid16>/o/<escKey>\x00\x00<verDesc24>
-	subObjectGrants     = "og/" // same shape as subObject
-	subBucketBlob       = "c/"  // s/B/<uuid16>/c/<kind>      (kind is a fixed identifier, no escape)
-	subBucketStats      = "bs"  // s/B/<uuid16>/bs            (single key, live counter)
-	subUsageAgg         = "ua/" // s/B/<uuid16>/ua/<escClass>\x00\x00<day4>
-	subUsageClassIndex  = "uc/" // s/B/<uuid16>/uc/<escClass>\x00\x00 (presence row)
-	subInventoryConfig  = "i/"  // s/B/<uuid16>/i/<configID>
-	subMultipart        = "u/"  // s/B/<uuid16>/u/<uploadID>
-	subMultipartPart    = "up/" // s/B/<uuid16>/up/<uploadID>\x00\x00<partNum4>
-	subMultipartCompl   = "mc/" // s/B/<uuid16>/mc/<uploadID>
-	subReshardCursor    = "Rc/" // s/B/<uuid16>/Rc/<shard4> (per-shard progress; reserved, not yet exposed via meta.Store)
-	subRewrapProgress   = "rw"  // single key
+	subBucketGrants    = "g"   // single key
+	subObject          = "o/"  // s/B/<uuid16>/o/<escKey>\x00\x00<verDesc24>
+	subObjectGrants    = "og/" // same shape as subObject
+	subBucketBlob      = "c/"  // s/B/<uuid16>/c/<kind>      (kind is a fixed identifier, no escape)
+	subBucketStats     = "bs"  // s/B/<uuid16>/bs            (single key, live counter)
+	subUsageAgg        = "ua/" // s/B/<uuid16>/ua/<escClass>\x00\x00<day4>
+	subUsageClassIndex = "uc/" // s/B/<uuid16>/uc/<escClass>\x00\x00 (presence row)
+	subInventoryConfig = "i/"  // s/B/<uuid16>/i/<configID>
+	subMultipart       = "u/"  // s/B/<uuid16>/u/<uploadID>
+	subMultipartPart   = "up/" // s/B/<uuid16>/up/<uploadID>\x00\x00<partNum4>
+	subMultipartCompl  = "mc/" // s/B/<uuid16>/mc/<uploadID>
+	subReshardCursor   = "Rc/" // s/B/<uuid16>/Rc/<shard4> (per-shard progress; reserved, not yet exposed via meta.Store)
+	subRewrapProgress  = "rw"  // single key
 )
 
 // BucketBlobKind enumerates the per-bucket single-document config blobs
@@ -94,20 +95,20 @@ const (
 // pattern (CLAUDE.md, "blob-config helper"). Each kind has a fixed,
 // short identifier — kept short because every blob key carries it.
 const (
-	BlobLifecycle          = "lc"
-	BlobCORS               = "co"
-	BlobPolicy             = "po"
-	BlobPublicAccessBlock  = "pa"
-	BlobOwnershipControls  = "oc"
-	BlobEncryption         = "en"
-	BlobNotification       = "no"
-	BlobReplication        = "re"
-	BlobWebsite            = "ws"
-	BlobLogging            = "lg"
-	BlobTagging            = "tg"
-	BlobObjectLockConfig   = "ol"
-	BlobQuota              = "qu"
-	BlobPlacement          = "pl"
+	BlobLifecycle         = "lc"
+	BlobCORS              = "co"
+	BlobPolicy            = "po"
+	BlobPublicAccessBlock = "pa"
+	BlobOwnershipControls = "oc"
+	BlobEncryption        = "en"
+	BlobNotification      = "no"
+	BlobReplication       = "re"
+	BlobWebsite           = "ws"
+	BlobLogging           = "lg"
+	BlobTagging           = "tg"
+	BlobObjectLockConfig  = "ol"
+	BlobQuota             = "qu"
+	BlobPlacement         = "pl"
 )
 
 // versionDescLen is the length of the 24-byte version-DESC suffix
@@ -594,6 +595,28 @@ func AccessPointAliasKey(alias string) []byte {
 // the global ListAccessPoints fan-out (uuid.Nil filter).
 func AccessPointPrefix() []byte {
 	return []byte(prefixAccessPoint)
+}
+
+// AccessPointByBucketKey is the (bucketID, name) secondary-index row.
+// Lives under a global prefix so a per-bucket range scan returns every
+// access-point name attached to bucketID in lex (= name ascending) order
+// without ALLOW FILTERING. Value is empty — payload lives at
+// AccessPointKey(name).
+func AccessPointByBucketKey(bucketID uuid.UUID, name string) []byte {
+	out := make([]byte, 0, len(prefixAccessPointByBkt)+16+len(name)+2)
+	out = append(out, prefixAccessPointByBkt...)
+	id := bucketID
+	out = append(out, id[:]...)
+	return appendEscaped(out, name)
+}
+
+// AccessPointByBucketPrefix is the per-bucket scan origin for
+// ListAccessPoints(bucketID).
+func AccessPointByBucketPrefix(bucketID uuid.UUID) []byte {
+	out := make([]byte, 0, len(prefixAccessPointByBkt)+16)
+	out = append(out, prefixAccessPointByBkt...)
+	id := bucketID
+	return append(out, id[:]...)
 }
 
 // ----------------------------------------------------------------------------

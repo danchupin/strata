@@ -3068,3 +3068,110 @@ func TestLockerNilStore(t *testing.T) {
 	}
 }
 
+// ----------------------------------------------------------------------------
+// Access points (US-004 of ralph/tikv-stubs).
+// ----------------------------------------------------------------------------
+
+func TestAccessPointCRUDLifecycle(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "ap-bkt", "owner-a", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	ap := &meta.AccessPoint{
+		Name:              "ap-one",
+		BucketID:          b.ID,
+		Bucket:            b.Name,
+		Alias:             "ap-aliasoneeee",
+		NetworkOrigin:     "Internet",
+		Policy:            []byte(`{"Version":"2012-10-17"}`),
+		PublicAccessBlock: []byte(`<PublicAccessBlockConfiguration/>`),
+		CreatedAt:         time.Now().UTC().Truncate(time.Millisecond),
+	}
+	if err := s.CreateAccessPoint(ctx, ap); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := s.CreateAccessPoint(ctx, ap); !errors.Is(err, meta.ErrAccessPointAlreadyExists) {
+		t.Fatalf("dup: got %v want ErrAccessPointAlreadyExists", err)
+	}
+	got, err := s.GetAccessPoint(ctx, "ap-one")
+	if err != nil || got.BucketID != b.ID || got.Alias != ap.Alias {
+		t.Fatalf("get: %v %+v", err, got)
+	}
+	byAlias, err := s.GetAccessPointByAlias(ctx, ap.Alias)
+	if err != nil || byAlias.Name != ap.Name {
+		t.Fatalf("by alias: %v %+v", err, byAlias)
+	}
+	if _, err := s.GetAccessPoint(ctx, "missing"); !errors.Is(err, meta.ErrAccessPointNotFound) {
+		t.Fatalf("missing: %v want ErrAccessPointNotFound", err)
+	}
+	if _, err := s.GetAccessPointByAlias(ctx, "missing-alias"); !errors.Is(err, meta.ErrAccessPointNotFound) {
+		t.Fatalf("missing alias: %v want ErrAccessPointNotFound", err)
+	}
+	if err := s.DeleteAccessPoint(ctx, "ap-one"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	// The three-index Delete must clean the alias-pointer + by-bucket index
+	// rows so the dependent lookups no longer surface the row.
+	if _, err := s.GetAccessPointByAlias(ctx, ap.Alias); !errors.Is(err, meta.ErrAccessPointNotFound) {
+		t.Fatalf("alias after delete: %v want ErrAccessPointNotFound", err)
+	}
+	list, err := s.ListAccessPoints(ctx, b.ID)
+	if err != nil || len(list) != 0 {
+		t.Fatalf("list after delete: err=%v list=%+v", err, list)
+	}
+	if err := s.DeleteAccessPoint(ctx, "ap-one"); !errors.Is(err, meta.ErrAccessPointNotFound) {
+		t.Fatalf("second delete: %v want ErrAccessPointNotFound", err)
+	}
+}
+
+func TestAccessPointListByBucketIsolation(t *testing.T) {
+	s := newTestStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	b1, _ := s.CreateBucket(ctx, "bkt-1", "alice", "STANDARD")
+	b2, _ := s.CreateBucket(ctx, "bkt-2", "alice", "STANDARD")
+
+	mk := func(name, alias string, b *meta.Bucket) *meta.AccessPoint {
+		return &meta.AccessPoint{
+			Name:          name,
+			BucketID:      b.ID,
+			Bucket:        b.Name,
+			Alias:         alias,
+			NetworkOrigin: "Internet",
+			CreatedAt:     time.Now().UTC(),
+		}
+	}
+	for _, ap := range []*meta.AccessPoint{
+		mk("ap-bravo", "alias-bravo", b1),
+		mk("ap-alpha", "alias-alpha", b1),
+		mk("ap-charlie", "alias-charlie", b2),
+	} {
+		if err := s.CreateAccessPoint(ctx, ap); err != nil {
+			t.Fatalf("create %s: %v", ap.Name, err)
+		}
+	}
+
+	all, err := s.ListAccessPoints(ctx, uuid.Nil)
+	if err != nil || len(all) != 3 {
+		t.Fatalf("global list: err=%v len=%d", err, len(all))
+	}
+	if all[0].Name != "ap-alpha" || all[1].Name != "ap-bravo" || all[2].Name != "ap-charlie" {
+		t.Fatalf("global list order: %+v", all)
+	}
+	b1List, _ := s.ListAccessPoints(ctx, b1.ID)
+	if len(b1List) != 2 || b1List[0].Name != "ap-alpha" || b1List[1].Name != "ap-bravo" {
+		t.Fatalf("b1 list: %+v", b1List)
+	}
+	b2List, _ := s.ListAccessPoints(ctx, b2.ID)
+	if len(b2List) != 1 || b2List[0].Name != "ap-charlie" {
+		t.Fatalf("b2 list: %+v", b2List)
+	}
+	other, _ := s.ListAccessPoints(ctx, uuid.New())
+	if len(other) != 0 {
+		t.Fatalf("unknown bucket list non-empty: %+v", other)
+	}
+}
+

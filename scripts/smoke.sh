@@ -120,18 +120,23 @@ curl -sf -o /dev/null -X DELETE "$BASE/$BUCKET/tagged.txt?tagging"
 curl -sf -o /dev/null -X DELETE "$BASE/$BUCKET/tagged.txt"
 
 echo "== OBJECT LOCK"
-curl -sf -o /dev/null -X PUT --data-binary "locked" "$BASE/$BUCKET/locked.txt"
 future=$(date -u -v+1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)
-curl -sf -o /dev/null -X PUT --data "<Retention><Mode>COMPLIANCE</Mode><RetainUntilDate>$future</RetainUntilDate></Retention>" "$BASE/$BUCKET/locked.txt?retention"
-code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$BASE/$BUCKET/locked.txt")
-[ "$code" = "403" ] && echo "  DELETE under retention: 403 ok" || { echo "  FAIL DELETE=$code"; exit 1; }
 past=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-curl -sf -o /dev/null -X PUT --data "<Retention><Mode>GOVERNANCE</Mode><RetainUntilDate>$past</RetainUntilDate></Retention>" "$BASE/$BUCKET/locked.txt?retention"
-curl -sf -o /dev/null -X PUT --data "<LegalHold><Status>ON</Status></LegalHold>" "$BASE/$BUCKET/locked.txt?legal-hold"
-code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$BASE/$BUCKET/locked.txt")
+# COMPLIANCE: cannot reduce / remove before retain-until-date.
+curl -sf -o /dev/null -X PUT --data-binary "locked-c" "$BASE/$BUCKET/locked-c.txt"
+curl -sf -o /dev/null -X PUT --data "<Retention><Mode>COMPLIANCE</Mode><RetainUntilDate>$future</RetainUntilDate></Retention>" "$BASE/$BUCKET/locked-c.txt?retention"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$BASE/$BUCKET/locked-c.txt")
+[ "$code" = "403" ] && echo "  DELETE under COMPLIANCE: 403 ok" || { echo "  FAIL DELETE=$code"; exit 1; }
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data "<Retention><Mode>GOVERNANCE</Mode><RetainUntilDate>$past</RetainUntilDate></Retention>" "$BASE/$BUCKET/locked-c.txt?retention")
+[ "$code" = "403" ] && echo "  COMPLIANCE reduce attempt: 403 ok" || { echo "  FAIL reduce=$code"; exit 1; }
+# GOVERNANCE + legal-hold: hold blocks DELETE even after retention expires.
+curl -sf -o /dev/null -X PUT --data-binary "locked-g" "$BASE/$BUCKET/locked-g.txt"
+curl -sf -o /dev/null -X PUT --data "<Retention><Mode>GOVERNANCE</Mode><RetainUntilDate>$past</RetainUntilDate></Retention>" "$BASE/$BUCKET/locked-g.txt?retention"
+curl -sf -o /dev/null -X PUT --data "<LegalHold><Status>ON</Status></LegalHold>" "$BASE/$BUCKET/locked-g.txt?legal-hold"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$BASE/$BUCKET/locked-g.txt")
 [ "$code" = "403" ] && echo "  DELETE under legal hold: 403 ok" || { echo "  FAIL DELETE=$code"; exit 1; }
-curl -sf -o /dev/null -X PUT --data "<LegalHold><Status>OFF</Status></LegalHold>" "$BASE/$BUCKET/locked.txt?legal-hold"
-curl -sf -o /dev/null -X DELETE "$BASE/$BUCKET/locked.txt" && echo "  DELETE after hold OFF: ok"
+curl -sf -o /dev/null -X PUT --data "<LegalHold><Status>OFF</Status></LegalHold>" "$BASE/$BUCKET/locked-g.txt?legal-hold"
+curl -sf -o /dev/null -X DELETE "$BASE/$BUCKET/locked-g.txt" && echo "  DELETE after hold OFF: ok"
 
 echo "== LIFECYCLE"
 curl -sf -o /dev/null -X PUT --data '<LifecycleConfiguration><Rule><ID>to-ia</ID><Status>Enabled</Status><Filter><Prefix>logs/</Prefix></Filter><Transition><Days>30</Days><StorageClass>STANDARD_IA</StorageClass></Transition></Rule></LifecycleConfiguration>' "$BASE/$BUCKET?lifecycle"
@@ -202,6 +207,10 @@ done
 curl -sf -o /dev/null -X DELETE "$BASE/$VBUCKET"
 
 echo "== DELETE bucket (original)"
-curl -sf -o /dev/null -w "  %{http_code}\n" -X DELETE "$BASE/$BUCKET"
+# COMPLIANCE-locked locked-c.txt pins the bucket until retain-until elapses;
+# either 200/204 (no COMPLIANCE leftover) or 409 BucketNotEmpty acceptable.
+code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$BASE/$BUCKET")
+echo "  $code"
+case "$code" in 200|204|409) ;; *) echo "  unexpected DELETE=$code"; exit 1;; esac
 
 echo "== smoke OK"
