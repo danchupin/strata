@@ -252,8 +252,8 @@ manifest-rewriter) in `StartIteration` / `EndIteration` from
 `cmd/strata/workers.StartIteration` so the cmd-layer interface stays
 `workers.StartIteration(ctx, tracer, name)`). The supervisor passes a
 `*strataotel.Provider` to every worker via
-`workers.Dependencies.Tracer` (already wired at
-`internal/serverapp/serverapp.go:254`), and each worker resolves its
+`workers.Dependencies.Tracer` (already wired in `serverapp.Run` when
+the supervisor's `workers.Dependencies` is built), and each worker resolves its
 named tracer via `deps.Tracer.Tracer("strata.worker.<name>")`. No
 struct change is required when adding a new worker — the dependency
 is already there.
