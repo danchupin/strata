@@ -98,10 +98,12 @@ func (s *Store) GetBucket(ctx context.Context, name string) (out *meta.Bucket, e
 	return decodeBucket(raw)
 }
 
-// DeleteBucket asserts the bucket has no remaining bucket-scoped rows
-// (objects, configs, multipart uploads, ...) and only then drops the
-// bucket-by-name row. The pessimistic txn locks the bucket-by-name key so
-// concurrent CreateBucket-after-DeleteBucket is serialised.
+// DeleteBucket asserts the bucket has no remaining objects, then drops the
+// bucket-by-name row plus every bucket-scoped bookkeeping row (stats, blob
+// configs, grants, rewrap progress, ...). The pessimistic txn locks the
+// bucket-by-name key so concurrent CreateBucket-after-DeleteBucket is
+// serialised. "Empty" matches Cassandra semantics: no `objects` rows,
+// regardless of whether config/stats/grants rows exist.
 func (s *Store) DeleteBucket(ctx context.Context, name string) (err error) {
 	ctx, finish := s.observer.Start(ctx, "DeleteBucket", "buckets")
 	defer func() { finish(err) }()
@@ -125,13 +127,32 @@ func (s *Store) DeleteBucket(ctx context.Context, name string) (err error) {
 	if err != nil {
 		return err
 	}
-	scopedPrefix := PrefixForBucket(b.ID)
-	pairs, err := txn.Scan(ctx, scopedPrefix, prefixEnd(scopedPrefix), 1)
+	objPrefix := ObjectPrefix(b.ID)
+	pairs, err := txn.Scan(ctx, objPrefix, prefixEnd(objPrefix), 1)
 	if err != nil {
 		return err
 	}
 	if len(pairs) > 0 {
 		return meta.ErrBucketNotEmpty
+	}
+	scopedPrefix := PrefixForBucket(b.ID)
+	scopedEnd := prefixEnd(scopedPrefix)
+	for {
+		leftover, scanErr := txn.Scan(ctx, scopedPrefix, scopedEnd, 256)
+		if scanErr != nil {
+			return scanErr
+		}
+		if len(leftover) == 0 {
+			break
+		}
+		for _, kv := range leftover {
+			if err = txn.Delete(kv.Key); err != nil {
+				return err
+			}
+		}
+		if len(leftover) < 256 {
+			break
+		}
 	}
 	if b.Owner != "" {
 		ownerKey := BucketOwnerKey(b.ID)

@@ -137,8 +137,8 @@
         "Tests pass"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Smoke validation captured baseline (fail at TAGGING leg pre-fix) + green post-fix (TAGGING + OBJECT LOCK + LIFECYCLE + VERSIONING end-to-end). scripts/smoke.sh OBJECT LOCK leg restructured into 2 objects (locked-c.txt COMPLIANCE immutability + reduce-attempt audit + locked-g.txt GOVERNANCE+legal-hold flow); pre-cycle leg's attempt to reduce COMPLIANCE to GOVERNANCE+past was always blocked by retentionWouldReduceCompliance (s3api/objectlock.go:152-159 — shipped in ralph/storage-correctness US-006) but the leg never reached this code path because TAGGING failed first in the historical baseline. internal/meta/tikv/buckets.go::DeleteBucket emptiness probe scoped to ObjectPrefix(b.ID) (mirrors Cassandra `bucketIsEmpty`); cleanup loop scan+deletes bucket-scoped bookkeeping rows in the same txn (bucket_stats, blob configs, grants, rewrap). ROADMAP close-flip on the formerly-malformed line 415: P2 TiKV-stubs entry concatenated with the prior P1 RADOS-probe Fixed bullet (leading `- ` lost in 4d3c1ec append diff); split into 2 standalone bullets, TiKV-stubs flipped to Done with count corrected 19 → 22, RADOS-probe Fixed kept verbatim. tasks/prd-tikv-stubs.md removed via git rm. `(commit pending)` placeholder per established convention. Pre-existing blockers documented in progress.txt: smoke-signed (auth=optional lab posture), smoke-tikv-default-lab (per-request access log gap), manifest-rewriter strict smoke (deferred — contract-level US-005 coverage is parity oracle), perf budget + s3-tests baseline (deferred — separate bench/workload cycle). go vet + go test -race ./... full repo + make docs-build all green; TiKV testcontainers integration is the strict CI gate (.github/workflows/ci-tikv.yml)."
     }
   ]
 }
