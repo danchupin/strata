@@ -119,7 +119,7 @@ export function HotBucketsPage() {
                 gateway and restart to enable this view.
               </p>
               <a
-                href="https://danchupin.github.io/strata/best-practices/monitoring/#prometheus"
+                href="https://danchupin.github.io/strata/operate/monitoring/#prometheus"
                 target="_blank"
                 rel="noreferrer"
                 className="inline-flex items-center gap-1 text-amber-900 underline-offset-2 hover:underline dark:text-amber-100"

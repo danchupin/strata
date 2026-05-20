@@ -102,5 +102,5 @@ Run `rebalance` only on replicas in the region where you want the
 migration bandwidth to originate. See
 [Architecture: worker leader election]({{< relref "/architecture/" >}})
 for the implementation model and
-[Monitoring]({{< relref "/best-practices/monitoring" >}}) for the
-metrics each worker exports.
+[Monitoring]({{< relref "/operate/monitoring" >}}) for the metrics
+each worker exports.

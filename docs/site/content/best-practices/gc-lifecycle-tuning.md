@@ -212,9 +212,9 @@ For the underlying schema + key-shape changes, see
 
 ## See also
 
-- [Monitoring]({{< ref "/best-practices/monitoring" >}}) for the
-  worker metrics shortlist.
-- [Capacity planning]({{< ref "/best-practices/capacity-planning" >}})
-  for lifecycle cadence vs storage growth.
+- [Monitoring]({{< ref "/operate/monitoring" >}}) for the worker
+  metrics shortlist.
+- [Capacity planning]({{< ref "/operate/capacity-planning" >}}) for
+  lifecycle cadence vs storage growth.
 - [Architecture — Workers]({{< ref "/architecture/workers" >}}) for
   the supervisor + leader-election shape.

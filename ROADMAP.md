@@ -331,7 +331,7 @@ adding more, prove what is there.
   the new gauge + `process_resident_memory_bytes` straight off `/metrics`
   (no separate Prometheus). **Bench-then-ship verdict: HOLD_DEFAULT** —
   default stays at 4 MiB; env knob surfaced more prominently in
-  [Monitoring — OTel ring buffer]({{< ref "/best-practices/monitoring" >}})
+  [Monitoring — OTel ring buffer]({{< ref "/operate/monitoring" >}})
   + a `_oldest_age_seconds < 300 s` alert recommendation for incident debug
   windows. Reproduction recipe in
   [Benchmarks — OTel ring buffer]({{< ref "/architecture/benchmarks/otel-ringbuf" >}}).

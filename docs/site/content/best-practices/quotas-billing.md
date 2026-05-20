@@ -266,7 +266,7 @@ header.
 
 - Every quota / billing admin write writes a row to `audit_log` (kept
   for `STRATA_AUDIT_RETENTION`, default 30 d). See
-  [Monitoring]({{< ref "/best-practices/monitoring" >}}#audit-log).
+  [Monitoring]({{< ref "/operate/monitoring" >}}#audit-log).
 - `strata_quota_reconcile_drift_bytes{bucket}` exposes the last drift
   observation for alerting.
 - `403 QuotaExceeded` is counted in the standard
@@ -295,10 +295,10 @@ header.
 
 ## See also
 
-- [Monitoring]({{< ref "/best-practices/monitoring" >}}) for the alert
-  set and audit-log shape.
-- [Capacity planning]({{< ref "/best-practices/capacity-planning" >}})
-  for sizing before quota.
+- [Monitoring]({{< ref "/operate/monitoring" >}}) for the alert set
+  and audit-log shape.
+- [Capacity planning]({{< ref "/operate/capacity-planning" >}}) for
+  sizing before quota.
 - [Architecture — Workers]({{< ref "/architecture/workers" >}}) for the
   supervisor + leader-election shape behind every leader-elected
   worker.

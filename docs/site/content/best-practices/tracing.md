@@ -14,7 +14,7 @@ appears as a discrete trace so a slow / failing tick is easy to
 correlate with the meta + data ops it triggered.
 
 The wire-up env vars + tail-sampler + ring buffer behaviour live in
-[Monitoring]({{< ref "/best-practices/monitoring#opentelemetry-tracing" >}}).
+[Monitoring]({{< ref "/operate/monitoring#opentelemetry-tracing" >}}).
 This page is the operator-facing reference for **what spans exist,
 how they are named, and how to filter them**.
 
@@ -162,7 +162,7 @@ CLAUDE.md).
 
 ## See also
 
-- [Monitoring]({{< ref "/best-practices/monitoring#opentelemetry-tracing" >}})
+- [Monitoring]({{< ref "/operate/monitoring#opentelemetry-tracing" >}})
   — env knobs + ring buffer + bundled tracing stack.
 - [Observability deep dive]({{< ref "/architecture/observability" >}})
   — implementation rationale (tail-sampler, semconv version, observer

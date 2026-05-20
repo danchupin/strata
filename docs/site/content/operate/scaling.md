@@ -1,10 +1,10 @@
 ---
-title: 'Sizing'
-weight: 20
+title: 'Scaling'
+weight: 30
 description: 'CPU / RAM / disk per replica based on object PUTs/s, plus Cassandra / TiKV cluster sizing pointers.'
 ---
 
-# Sizing
+# Scaling
 
 Strata replicas are stateless gateways — they own no on-disk state, so
 sizing is a function of three signals: peak request rate (RPS), the
@@ -32,7 +32,7 @@ default).
 | Workload tier | RPS (sustained) | CPU (cores) | RAM (resident) | Notes |
 |---|---|---|---|---|
 | Small (lab / dev) | ≤ 200 | 1–2 | 512 MiB | `make run-memory` profile. SigV4 dominates. |
-| Medium (single-tenant prod) | 200 – 2,000 | 4 | 1.5 GiB | Single-replica `deploy/docker-compose`. Cassandra LWT is the next ceiling. |
+| Medium (single-tenant prod) | 200 – 2,000 | 4 | 1.5 GiB | Single-replica `deploy/docker-compose`. The metadata backend is the next ceiling. |
 | Large (multi-tenant prod) | 2,000 – 8,000 | 8 | 4 GiB | 3-replica deploy with `STRATA_GC_SHARDS=3`. Add LB. |
 | Very large | > 8,000 | scale out | 4 GiB / replica | Each additional replica adds ~3,000 RPS headroom; LB and TiKV scale with it. |
 
@@ -114,14 +114,14 @@ node:
 - The objects table is sharded `(bucket_id, shard)`; the 64-way default
   partition fan-out keeps any single partition under ~10 GiB.
 
-ScyllaDB is a CQL-compatible drop-in — the same gocql client works
-unchanged. ScyllaDB sizes more aggressively per node (more cores, more
-RAM); follow the upstream sizing guide. Strata's LWT path is the load
-shape that matters; budget for ~5× the read path's IOPS for LWT
-conflicts under contention.
+ScyllaDB is a CQL-compatible drop-in — the same Cassandra client
+works unchanged. ScyllaDB sizes more aggressively per node (more
+cores, more RAM); follow the upstream sizing guide. Strata's
+compare-and-set path is the load shape that matters; budget for ~5×
+the read path's IOPS for compare-and-set conflicts under contention.
 
 Cluster sizing target: aim for ≤ 60 % CPU at peak load on every node;
-LWT has a steep tail.
+the compare-and-set tail is steep.
 
 ### TiKV
 
@@ -174,7 +174,7 @@ The replicator worker is single-leader and queue-driven. One active
 replicator goroutine per replica (leader-elected on
 `replicator-leader`). Throughput is bounded by the peer S3 endpoint's
 PUT rate; sizing matches the peer's accepted RPS. See
-[Backup + restore]({{< ref "/best-practices/backup-restore" >}}).
+[Backup + restore]({{< ref "/operate/backup-restore" >}}).
 
 ## Headroom + scaling triggers
 
@@ -189,13 +189,14 @@ Trigger replica scale-out when:
 
 Trigger metadata-backend scale-out when:
 
-- p99 of `strata_cassandra_query_duration_seconds{op="LWT"}` > 50 ms,
-  OR Cassandra read latency from the cluster's own metrics breaches
-  upstream guidelines.
+- p99 of `strata_cassandra_query_duration_seconds` > 50 ms or
+  `strata_cassandra_lwt_conflicts_total` ticking faster than the
+  baseline conflict rate, OR Cassandra read latency from the cluster's
+  own metrics breaches upstream guidelines.
 - TiKV PD reports region-rebalance pressure (region-leader churn > 5 %
   per minute).
 
-See [Monitoring]({{< ref "/best-practices/monitoring" >}}) for the full
-metric set and the
+See [Monitoring]({{< ref "/operate/monitoring" >}}) for the full metric
+set and the
 [architecture deep dive]({{< ref "/architecture" >}}) for why each
 ceiling exists.

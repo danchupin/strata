@@ -203,7 +203,7 @@ A few defaults that operators sometimes assume work AWS-style and don't:
 - {{< ref "/architecture/auth" >}} — SigV4 internals, presigned URLs, STS.
 - {{< ref "/architecture/router" >}} — query-string dispatch shape behind
   the bucket / object tables above.
-- {{< ref "/best-practices/monitoring" >}} — what to alert on when surface
+- {{< ref "/operate/monitoring" >}} — what to alert on when surface
   starts misbehaving.
 - [`scripts/s3-tests/README.md`](https://github.com/danchupin/strata/blob/main/scripts/s3-tests/README.md)
   — full per-test breakdown + historical baselines.

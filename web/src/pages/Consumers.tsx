@@ -225,7 +225,7 @@ function ConsumersMetricsUnavailable() {
         </code>
         on the gateway and re-deploy. See{' '}
         <a
-          href="https://danchupin.github.io/strata/best-practices/monitoring/#prometheus"
+          href="https://danchupin.github.io/strata/operate/monitoring/#prometheus"
           target="_blank"
           rel="noreferrer"
           className="underline underline-offset-2"
