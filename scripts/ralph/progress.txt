@@ -831,3 +831,96 @@ Cycle: ralph/storage-correctness
     AWS-wire response. A status-only check would have let the previous
     206-with-empty-Content-Range shape slip through.
 ---
+
+## 2026-05-20 - US-009 - Latent fix: aws-chunked-trailer streaming decoder (sha256 only)
+- Recognised the `STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER` content-sha256
+  sentinel in `internal/auth/middleware.go` alongside the existing
+  `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` branch.
+- `X-Amz-Trailer: <algo>` request header parsed at middleware time. Only
+  `x-amz-checksum-sha256` (case-insensitive) accepted — `crc32` / `crc32c` /
+  `sha1` reject with new `auth.ErrUnsupportedChecksumAlgorithm` sentinel,
+  surfaced by the s3api WriteAuthDenied switch as HTTP 400
+  `InvalidRequest` per PRD scope.
+- `newStreamingTrailerReader(...)` shares the existing aws-chunked decoder
+  state machine and just toggles trailerMode + a `sha256.New()`
+  bodyHash accumulator. The final 0-chunk consumes the trailer header
+  block, lex-sorts the canonical lines, recomputes the AWS4-HMAC-SHA256-
+  TRAILER stringToSign (`chainHMAC(prevSig=finalChunkSig, hex(SHA256(canonical-trailers)))`),
+  and verifies the trailer-signature + base64(SHA256(body)) match —
+  mismatch surfaces as `ErrSignatureInvalid` per AWS parity (not a
+  ChecksumMismatch code).
+- Files changed:
+  - `internal/auth/middleware.go` — trailer-algo gate + reader selection.
+  - `internal/auth/sigv4.go` — `streamingBodyTrailer` constant +
+    docs comment on the trailer variant.
+  - `internal/auth/streaming.go` — package-level doc block describing both
+    the standard and trailer wire shapes, new `computeTrailerSignature`,
+    `readAndValidateTrailers`, the `trailerMode` / `bodyHash` fields, and
+    the trailer-mode branch inside `readChunk`.
+  - `internal/auth/types.go` — `ErrUnsupportedChecksumAlgorithm` sentinel.
+  - `internal/s3api/errors.go` — `ErrUnsupportedChecksumAlgorithm` 400
+    `InvalidRequest` mapping in `WriteAuthDenied`.
+  - `internal/auth/streaming_trailer_test.go` (new) — unit cover for:
+    happy-path decode, trailer-signature mismatch, body-checksum mismatch,
+    missing trailer-signature header, missing checksum header,
+    middleware-level unsupported-algo gate (crc32 / crc32c / sha1) +
+    sanity that sha256 passes the gate. Plus the golden-fixture decoder
+    test that loads `testdata/chunked-trailer-sha256.bin`.
+  - `internal/auth/streaming_trailer_integration_test.go` (new, build tag
+    `integration`) — drives a hand-constructed
+    `STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER` PUT through the real
+    `auth.Middleware` against an `httptest.Server`; asserts 200 OK + the
+    inner handler reads the decoded plaintext + the auth-info owner is
+    threaded through.
+  - `internal/auth/testdata/chunked-trailer-sha256.bin` (new, 41189
+    bytes) — deterministic wire-format fixture under the streamSecret /
+    streamSeedSig vectors; decode-test asserts plaintext recovery.
+- Quality:
+  - `go vet ./...` green.
+  - `go test -race -count=1 ./internal/auth/... ./internal/s3api/...` green.
+  - `go test -tags integration -run TestStreamingTrailerRoundtripViaMiddleware
+    ./internal/auth/...` green.
+  - Pre-existing flaky `TestRunCleanRunNoInconsistencies` in
+    `internal/racetest` flapped once under full `./...` race contention
+    but passes deterministically in isolation (verified on clean HEAD +
+    on WIP). Unrelated to US-009 — the chunked-streaming path it
+    exercises uses the standard (non-trailer) variant whose behavior is
+    byte-for-byte unchanged.
+- s3-tests pass-rate delta deferred to US-010 (one full sweep at smoke
+  story).
+- ROADMAP close-flip (latent bug line 336) + the NEW P3 entry for
+  non-sha256 trailer algos are batched in US-010 per cycle convention.
+- **Learnings for future iterations:**
+  - The trailer variant reuses the existing `streamingReader` struct
+    rather than forking a parallel reader, because the chunk-signature
+    chain is identical and only the EOF/trailer block differs. Setting
+    `trailerMode=true` + a `hash.Hash` accumulator on the same shape
+    means future trailer-checksum algos (crc32, crc32c, sha1) just
+    swap the accumulator and add a new validate-helper — no extra
+    decoder. The unsupported-algo path stays the only middleware-level
+    branch.
+  - AWS's trailer-signature stringToSign concatenates the
+    `AWS4-HMAC-SHA256-TRAILER` algo line, the request timestamp (NOT
+    the credential-scope date), the credential scope, the previous
+    (= final-chunk) signature, and the hex(SHA256(canonical-trailer-
+    headers)). Canonical trailer headers are `<lower-name>:<trim-value>\n`
+    sorted lex by name, EXCLUDING `x-amz-trailer-signature` itself but
+    INCLUDING the algo's checksum header. Missing this exclusion would
+    flip the chain into a self-referential mismatch.
+  - On EOF, mismatches surface as `ErrSignatureInvalid` (AWS parity),
+    not as `ErrChecksumMismatch`. AWS S3 collapses both into the
+    SignatureDoesNotMatch wire code; preserving that on the gateway
+    avoids confusing clients that expect the SDK-shaped retry classes.
+  - `httptest.Server` flips the request `Host` to `127.0.0.1:PORT` on
+    the wire. When constructing a SigV4-signed request to drive against
+    the test server, sign the canonical request with that host (not
+    `example.com`) — otherwise the gateway recomputes against the wire
+    host and trips ErrSignatureInvalid. The integration test embeds
+    this gotcha in `buildTrailerPUT(..., host, ...)`.
+  - `internal/racetest` `TestRunCleanRunNoInconsistencies` is a 13–45 s
+    race-fuzz oracle that exercises the streaming-payload PUT path. It
+    is sensitive to scheduling under full-suite race contention; pass
+    rate is high in isolation. Future flakes here should reproduce
+    against clean HEAD before blaming the WIP — the streaming-payload
+    wire shape itself is unaffected by US-009.
+---

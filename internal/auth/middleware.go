@@ -3,6 +3,7 @@ package auth
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -83,10 +84,23 @@ func (m *Middleware) validateHeader(r *http.Request) (*AuthInfo, error) {
 		}
 	}
 
-	if bodyHash == streamingBody {
+	if bodyHash == streamingBody || bodyHash == streamingBodyTrailer {
 		signingKey := deriveSigningKey(cred.Secret, parsed.Date, parsed.Region, parsed.Service)
 		scope := credentialScope(parsed.Date, parsed.Region, parsed.Service)
-		r.Body = newStreamingReader(r.Body, signingKey, reqDate, scope, parsed.Signature)
+		if bodyHash == streamingBodyTrailer {
+			// US-009 sha256-only scope. X-Amz-Trailer carries the algo
+			// name as a comma-separated list; only an exact
+			// `x-amz-checksum-sha256` (case-insensitive, single value) is
+			// accepted in Cycle 1. crc32 / crc32c / sha1 are parked
+			// behind a P3 ROADMAP follow-up.
+			algo := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Amz-Trailer")))
+			if algo != trailerHeaderChecksumSh {
+				return nil, ErrUnsupportedChecksumAlgorithm
+			}
+			r.Body = newStreamingTrailerReader(r.Body, signingKey, reqDate, scope, parsed.Signature)
+		} else {
+			r.Body = newStreamingReader(r.Body, signingKey, reqDate, scope, parsed.Signature)
+		}
 		if dec := r.Header.Get("X-Amz-Decoded-Content-Length"); dec != "" {
 			if n, err := strconv.ParseInt(dec, 10, 64); err == nil {
 				r.ContentLength = n
