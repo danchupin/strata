@@ -7,15 +7,21 @@ description: 'Production deployment guides — single-node, Docker Compose, mult
 
 # Deploy
 
-Strata supports four deployment shapes.
+Strata ships four deployment shapes. Each sub-page follows the same
+template — **Prerequisites → Install → Configure → Verify → Monitor →
+Troubleshoot** — so you can scan them side by side.
 
 | Shape | When to pick it | Guide |
 |---|---|---|
-| **Single-node** | Lab, dev, single-tenant pilot. One gateway against memory/Cassandra metadata + memory/RADOS data. | [`single-node`]({{< ref "/deploy/single-node" >}}) |
-| **Docker Compose** | Anything driven by the bundled `deploy/docker/docker-compose.yml`. Service map, ports, env, volumes, profiles (`tikv`, `lab-tikv`, `tracing`, `features`). | [`docker-compose`]({{< ref "/deploy/docker-compose" >}}) |
-| **Multi-replica** | HA HTTP traffic (≥2 gateway replicas) behind an LB with shared TiKV / RADOS storage. STRATA_GC_SHARDS-aware. | [`multi-replica`]({{< ref "/deploy/multi-replica" >}}) |
-| **Kubernetes** | 3-replica `Deployment` + `Service` + `ConfigMap` + `Secret` + `Ingress` against external TiKV + RADOS. Apply-tested manifests under `deploy/k8s/`. | [`kubernetes`]({{< ref "/deploy/kubernetes" >}}) |
+| **Single-node** | Lab, dev, single-tenant pilot. One gateway against memory or Cassandra metadata + memory or RADOS data. | [Single-node]({{< ref "/deploy/single-node" >}}) |
+| **Docker Compose** | The bundled reference stack — TiKV-default 2-replica lab, profile-gated Cassandra regression lab, profile-gated tracing collector. | [Docker Compose]({{< ref "/deploy/docker-compose" >}}) |
+| **Multi-replica** | ≥2 gateway replicas behind a load balancer against shared TiKV / RADOS storage. | [Multi-replica]({{< ref "/deploy/multi-replica" >}}) |
+| **Kubernetes** | 3-replica `Deployment` + `Service` + `Ingress` against external TiKV + RADOS. Raw manifests under `deploy/k8s/` plus a Helm chart under `deploy/helm/strata/`. | [Kubernetes]({{< ref "/deploy/kubernetes" >}}) |
 
-For the 5-minute first run, see [Get Started]({{< ref "/get-started" >}}).
-For the runtime layers each shape sits on top of, see
-[Architecture]({{< ref "/architecture" >}}).
+## Cross-references
+
+- [Get Started]({{< ref "/get-started" >}}) — 5-minute first run.
+- [Concepts]({{< ref "/concepts" >}}) — what Strata is, S3 surface, multi-cluster, drain.
+- [Operate](/operate/) — day-2 workflows (drain, scale, back up).
+- [Reference — environment variables]({{< ref "/reference/env-vars" >}}) — full env knob table.
+- [Architecture]({{< ref "/architecture" >}}) — the runtime layers each shape sits on top of.
