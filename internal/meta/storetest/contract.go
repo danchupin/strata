@@ -80,6 +80,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"ObjectLegalHoldRoundTrip", caseObjectLegalHold},
 		{"ObjectRestoreStatusRoundTrip", caseObjectRestoreStatus},
 		{"BucketGrantsRoundTrip", caseBucketGrants},
+		{"ObjectReplicationStatusRoundTrip", caseObjectReplicationStatus},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -3968,6 +3969,84 @@ func caseBucketGrants(t *testing.T, s meta.Store) {
 		// Memory path — empty slice round-trips as nil/empty without sentinel.
 	default:
 		t.Fatalf("set-empty round-trip: got (%v, %v); want either ErrNoSuchGrants or (empty, nil)", got, err)
+	}
+}
+
+// caseObjectReplicationStatus exercises SetObjectReplicationStatus across
+// (a) happy-path round-trip via GetObject, (b) overwrite (last writer
+// wins), (c) per-version isolation, (d) clear via empty status, and
+// (e) missing-object → ErrObjectNotFound. US-005 tikv-stubs.
+func caseObjectReplicationStatus(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "repsts", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	if err := s.SetBucketVersioning(ctx, b.Name, meta.VersioningEnabled); err != nil {
+		t.Fatalf("enable versioning: %v", err)
+	}
+	v1 := &meta.Object{
+		BucketID: b.ID, Key: "k", StorageClass: "STANDARD", ETag: "e1", Size: 1,
+		Mtime: time.Now().UTC(), Manifest: &data.Manifest{Class: "STANDARD"}, VersionID: newTimeUUID(),
+	}
+	if err := s.PutObject(ctx, v1, true); err != nil {
+		t.Fatalf("put v1: %v", err)
+	}
+	v2 := &meta.Object{
+		BucketID: b.ID, Key: "k", StorageClass: "STANDARD", ETag: "e2", Size: 1,
+		Mtime: time.Now().UTC().Add(time.Second), Manifest: &data.Manifest{Class: "STANDARD"}, VersionID: newTimeUUID(),
+	}
+	if err := s.PutObject(ctx, v2, true); err != nil {
+		t.Fatalf("put v2: %v", err)
+	}
+
+	if err := s.SetObjectReplicationStatus(ctx, b.ID, "k", v1.VersionID, "PENDING"); err != nil {
+		t.Fatalf("set v1: %v", err)
+	}
+	got, err := s.GetObject(ctx, b.ID, "k", v1.VersionID)
+	if err != nil {
+		t.Fatalf("get v1: %v", err)
+	}
+	if got.ReplicationStatus != "PENDING" {
+		t.Fatalf("v1 status: %q", got.ReplicationStatus)
+	}
+
+	// Per-version isolation.
+	gotV2, err := s.GetObject(ctx, b.ID, "k", v2.VersionID)
+	if err != nil {
+		t.Fatalf("get v2: %v", err)
+	}
+	if gotV2.ReplicationStatus != "" {
+		t.Fatalf("v2 leaked replication status: %q", gotV2.ReplicationStatus)
+	}
+
+	// Overwrite — last writer wins (PENDING → COMPLETE).
+	if err := s.SetObjectReplicationStatus(ctx, b.ID, "k", v1.VersionID, "COMPLETE"); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	got, err = s.GetObject(ctx, b.ID, "k", v1.VersionID)
+	if err != nil {
+		t.Fatalf("get post-overwrite: %v", err)
+	}
+	if got.ReplicationStatus != "COMPLETE" {
+		t.Fatalf("post-overwrite: %q", got.ReplicationStatus)
+	}
+
+	// Clear via empty status.
+	if err := s.SetObjectReplicationStatus(ctx, b.ID, "k", v1.VersionID, ""); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	got, err = s.GetObject(ctx, b.ID, "k", v1.VersionID)
+	if err != nil {
+		t.Fatalf("get post-clear: %v", err)
+	}
+	if got.ReplicationStatus != "" {
+		t.Fatalf("post-clear: %q", got.ReplicationStatus)
+	}
+
+	// Missing object.
+	if err := s.SetObjectReplicationStatus(ctx, b.ID, "ghost", "", "PENDING"); err != meta.ErrObjectNotFound {
+		t.Errorf("set missing: got %v want ErrObjectNotFound", err)
 	}
 }
 

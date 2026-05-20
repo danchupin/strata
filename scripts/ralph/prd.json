@@ -109,8 +109,8 @@
         "Tests pass"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented via internal/meta/tikv/sse_rewrap.go (6 impls). Four object-row mutators (UpdateObjectSSEWrap / UpdateObjectManifestRaw / SetObjectReplicationStatus + GetObjectManifestRaw read-only) reuse the shared mutateObjectRow + snapshotObjectRow helpers from object_meta.go — same single-row RMW shape US-001/US-002 set. SetRewrapProgress + GetRewrapProgress live under the existing RewrapProgressKey (s/B/<uuid16>/rw) per-bucket single-row slot; SetRewrapProgress uses optimistic txn (blind write, matches the bucket-blob trio idiom — Get is a snapshot Get). GetRewrapProgress on absent row returns meta.ErrNoRewrapProgress matching Cassandra + Memory parity (Cassandra/Memory both return ErrNoRewrapProgress on absent — PRD text 'returns (nil, nil) on absent key' was incorrect, same kind of PRD/code drift we saw on US-003). UpdateObjectSSEWrap empty-wrapped path clears row.SSEKey explicitly (mirrors Memory's `append([]byte(nil), wrapped...)` shape — nil bytes input emits nil, not an empty allocation). UpdateObjectManifestRaw empty raw path clears row.ManifestRaw (so manifest rewriter can null-out the field if it ever wanted to; not exercised in production). Package doc comment in store.go updated from the now-stale 'US-001 stubs' line — package no longer has any stubs. Contract case ObjectReplicationStatusRoundTrip added (caseObjectReplicationStatus); the other 5 methods are already exercised by pre-existing caseSSEWrapRotation + caseManifestRawRoundTrip — PRD acceptance text 'build on existing case' was precise."
     },
     {
       "id": "US-006",
