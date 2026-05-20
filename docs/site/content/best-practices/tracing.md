@@ -22,12 +22,12 @@ how they are named, and how to filter them**.
 
 | Tier | Span name shape | Emitter | `strata.component` | Extra attributes |
 |---|---|---|---|---|
-| HTTP server | `<METHOD> <path>` | `internal/otel/middleware.go` | `gateway` | `http.method`, `http.target`, `http.status_code`, `request_id` |
-| Cassandra meta | `meta.cassandra.<table>.<op>` | `internal/meta/cassandra/observer.go` (`gocql.QueryObserver`) | `gateway` | `db.system=cassandra`, `db.operation`, `db.cassandra.table`, `request_id`, retroactive `(q.Start, q.End)` timestamps |
-| TiKV meta | `meta.tikv.<table>.<op>` | `internal/meta/tikv/observer.go` (Store-method decorator) | `gateway` | `db.system=tikv`, `db.operation`, `db.tikv.table` |
-| RADOS data | `data.rados.<op>` | `internal/data/rados/observer.go::ObserveOp` | `gateway` | `pool`, `oid`, retroactive `(start, end)` timestamps |
-| S3-over-S3 data | `S3.<Operation>` | `go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws` v0.68 (semconv v1.40) installed via `internal/data/s3/observer.go::installOTelMiddleware` | `gateway` | `rpc.system.name=aws-api`, `rpc.method=S3/<op>`, `aws.region`, `http.response.status_code`, `strata.s3_cluster=<id>` |
-| Worker iteration (parent) | `worker.<name>.tick` | `internal/otel.StartIteration` / `EndIteration` (re-exported as `cmd/strata/workers.StartIteration`) | `worker` | `strata.worker=<name>`, `strata.iteration_id=<atomic.uint64>` |
+| HTTP server | `<METHOD> <path>` | `otel.NewMiddleware` | `gateway` | `http.method`, `http.target`, `http.status_code`, `request_id` |
+| Cassandra meta | `meta.cassandra.<table>.<op>` | the Cassandra query observer | `gateway` | `db.system=cassandra`, `db.operation`, `db.cassandra.table`, `request_id`, retroactive `(q.Start, q.End)` timestamps |
+| TiKV meta | `meta.tikv.<table>.<op>` | the TiKV Store-method decorator | `gateway` | `db.system=tikv`, `db.operation`, `db.tikv.table` |
+| RADOS data | `data.rados.<op>` | the RADOS `ObserveOp` helper | `gateway` | `pool`, `oid`, retroactive `(start, end)` timestamps |
+| S3-over-S3 data | `S3.<Operation>` | `go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws` v0.68 (semconv v1.40) installed by the S3 backend's OTel middleware hook | `gateway` | `rpc.system.name=aws-api`, `rpc.method=S3/<op>`, `aws.region`, `http.response.status_code`, `strata.s3_cluster=<id>` |
+| Worker iteration (parent) | `worker.<name>.tick` | `otel.StartIteration` / `EndIteration` (re-exported as `workers.StartIteration`) | `worker` | `strata.worker=<name>`, `strata.iteration_id=<atomic.uint64>` |
 | Worker sub-ops | see below | per-worker `tracer.Start(ctx, …)` under the iteration parent | `worker` | `strata.worker=<name>` + worker-specific keys |
 
 ### Worker sub-op spans
@@ -59,7 +59,7 @@ Every tier installs a named tracer via `tp.Tracer("strata.<area>")`:
 | `strata.data.s3` | S3 backend (otelaws middleware) |
 | `strata.worker.<name>` | each worker (gc, lifecycle, replicator, notify, access-log, inventory, audit-export, manifest-rewriter, quota-reconcile, usage-rollup, rebalance) |
 
-`internal/serverapp/serverapp.go` wires the meta + data tracers after
+The serverapp entrypoint wires the meta + data tracers after
 `strataotel.Init` runs (so the provider exists before backends are
 built); the supervisor passes `*strataotel.Provider` to every worker
 via `workers.Dependencies.Tracer`, and each worker resolves its named
@@ -109,8 +109,8 @@ strata.s3_cluster=secondary
 ```
 
 `strata.s3_cluster` is stamped per-cluster by the otelaws
-`AttributeBuilder` in `internal/data/s3/observer.go::stampStrataAttrs`,
-so multi-cluster routing (see
+`AttributeBuilder` registered in the S3 backend's OTel middleware
+hook, so multi-cluster routing (see
 [S3 multi-cluster]({{< ref "/best-practices/s3-multi-cluster" >}}))
 is filterable end-to-end.
 
@@ -126,7 +126,7 @@ sort Jaeger by duration to find the offender.
 
 ## Sampling
 
-The tail-sampler (`internal/otel/sampler.go`) decides at OnEnd:
+The tail-sampler (`otel.Sampler`) decides at OnEnd:
 
 - `status=Error` → exported.
 - `http.status_code >= 500` → exported.

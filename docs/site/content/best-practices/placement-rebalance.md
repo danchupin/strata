@@ -169,7 +169,7 @@ running `multi-cluster` compose profile; run via
 
 ## Routing — stable hash-mod
 
-`internal/data/placement.PickCluster` is the chunk PUT router:
+`placement.PickCluster` is the chunk PUT router:
 
 1. Empty / nil policy → return `""` so the caller falls back to the
    class's `$defaultCluster`.
@@ -337,17 +337,17 @@ by target-cluster ownership:
 
 | Backend  | Mover                              | Same-endpoint shortcut        | Cross-endpoint fallback                       |
 | -------- | ---------------------------------- | ----------------------------- | --------------------------------------------- |
-| RADOS    | `internal/rebalance/rados_mover.go` — `Read(srcIoctx, oid) → Write(tgtIoctx, newOID)` (fresh OID avoids cross-pool name collisions) | n/a (one cluster per pool) | n/a |
-| S3-over-S3 | `internal/rebalance/s3_mover.go` — server-side `awss3.CopyObject` when endpoint+region match | yes — no bytes through gateway | streaming `GetObject` → `manager.Uploader.PutObject` |
+| RADOS    | RADOS mover — `Read(srcIoctx, oid) → Write(tgtIoctx, newOID)` (fresh OID avoids cross-pool name collisions) | n/a (one cluster per pool) | n/a |
+| S3-over-S3 | S3 mover — server-side `awss3.CopyObject` when endpoint+region match | yes — no bytes through gateway | streaming `GetObject` → `manager.Uploader.PutObject` |
 
 After every move the mover issues a **per-object manifest CAS** via
 `meta.Store.SetObjectStorage(... expectedClass=currentClass)`. A pre-
 CAS sanity check inside `buildUpdatedManifest` (RADOS) /
 `buildUpdatedBackendManifest` (S3) verifies the live chunk locator
 still matches the planned `SrcRef` — a concurrent client write that
-rewrote the chunk between scan and Move is caught BEFORE the LWT so
-the rebalance doesn't clobber a newer locator. If the live row
-diverges, the new target chunks go to the GC queue and
+rewrote the chunk between scan and Move is caught BEFORE the
+compare-and-set so the rebalance doesn't clobber a newer locator. If
+the live row diverges, the new target chunks go to the GC queue and
 `strata_rebalance_cas_conflicts_total{bucket}` bumps.
 
 On CAS success the OLD chunks are enqueued via
@@ -361,7 +361,7 @@ collects them per `STRATA_GC_GRACE`.
 | `strata_rebalance_planned_moves_total`                      | `bucket`                | One increment per chunk whose current cluster ≠ `PickCluster` verdict. |
 | `strata_rebalance_bytes_moved_total`                        | `from`, `to`            | Bytes copied on the target write — retried reads don't double-count.  |
 | `strata_rebalance_chunks_moved_total`                       | `from`, `to`, `bucket`  | Chunks successfully copied (post target write).                        |
-| `strata_rebalance_cas_conflicts_total`                      | `bucket`                | LWT lost the race — target chunks routed to GC, live manifest intact. |
+| `strata_rebalance_cas_conflicts_total`                      | `bucket`                | Compare-and-set lost the race — target chunks routed to GC, live manifest intact. |
 | `strata_rebalance_refused_total`                            | `reason`, `target`      | `reason ∈ {target_full, target_draining}` — safety rail refusals.     |
 
 `from` / `to` carry the cluster id from `STRATA_RADOS_CLUSTERS` /
@@ -407,8 +407,9 @@ The plan keeps being built but no moves complete. Likely causes:
   `RATE_MB_S` MiB/s on the busier leg.
 - **CAS conflict storm.** Watch
   `strata_rebalance_cas_conflicts_total{bucket}`. Steady conflicts on
-  one bucket means concurrent client traffic keeps winning the LWT —
-  this is correct behavior (client always wins) and the chunks will
+  one bucket means concurrent client traffic keeps winning the
+  compare-and-set — this is correct behavior (client always wins) and
+  the chunks will
   re-plan next tick. If conflicts grow unboundedly, you have hot keys
   being rewritten faster than the rebalance loop can converge; pause
   the rebalance via `STRATA_REBALANCE_INTERVAL=24h` until traffic
@@ -416,7 +417,7 @@ The plan keeps being built but no moves complete. Likely causes:
 
 ### Target-full refusals
 
-The 90 % fill ceiling is hard-coded in `internal/rebalance/Worker.FillCeiling`.
+The 90 % fill ceiling is a hard-coded constant on the rebalance worker.
 Operators who want a different threshold should grow the cluster
 (easier) or open a tracking issue. S3-side has no fill probe — the
 worker proceeds. If your S3 backend has a quota, monitor it externally.
@@ -424,8 +425,8 @@ worker proceeds. If your S3 backend has a quota, monitor it externally.
 ### Drain cache TTL surprises
 
 The drain sentinel is cached in-process for 30 s
-(`DefaultDrainCacheTTL` in `internal/data/placement/draincache.go`).
-The drain / undrain admin handlers `Invalidate()` the cache so the
+(`placement.DefaultDrainCacheTTL`). The drain / undrain admin
+handlers `Invalidate()` the cache so the
 flip takes effect on the next PUT — operators never wait the TTL.
 Multi-replica deployments need to invalidate on every replica; the
 admin handler runs locally so an external load balancer must hit each
@@ -437,7 +438,7 @@ expecting cluster-wide quiescence.
 ### Rebalance worker never picks up the lease
 
 The lease is `rebalance-leader` on whatever `meta.Locker` you
-configured (`cassandra` LWT lease or in-process memory locker for
+configured (Cassandra-backed lease or in-process memory locker for
 dev). Check `strata server` logs for the `leader_for=rebalance`
 heartbeat chip; if absent, the worker isn't running. Common cause:
 `STRATA_WORKERS=...` doesn't include `rebalance`. Set
@@ -495,7 +496,7 @@ The picker order inside `placement.PickCluster` is:
 |---|-----------------|---------|--------------|
 | 1 | Edit `STRATA_RADOS_CLUSTERS`: add `cephc:/etc/ceph-c/ceph.conf` | env file edit | New cluster id appears at next restart. |
 | 2 | Rolling-restart strata replicas | `docker compose restart` | Out-of-band — orchestrator picks the cadence. |
-| 3 | Gateway boot reconcile (`internal/serverapp/cluster_reconcile.go`) | log INFO `"cluster auto-init"` | Compares env vs `cluster_state` rows. New id with no chunks → state=`pending` weight=0. Existing id whose `bucket_stats` already reference it → state=`live` weight=100 (backwards-compat). Idempotent on re-run. |
+| 3 | Gateway boot reconcile (`serverapp.ClusterReconcile`) | log INFO `"cluster auto-init"` | Compares env vs `cluster_state` rows. New id with no chunks → state=`pending` weight=0. Existing id whose bucket usage stats already reference it → state=`live` weight=100 (backwards-compat). Idempotent on re-run. |
 | 4 | Open `/console/storage` | Storage page | `<ClustersSubsection>` renders the new card. |
 | 5 | See cephc card with gray badge "Pending — not receiving writes" | `<ClusterCard>` (pending variant) | No Drain button. "Activate" CTA replaces it. |
 | 6 | Click Activate | `<ActivateClusterModal>` opens | Modal mirrors the typed-confirm precedent from `<ConfirmDrainModal>` — Submit stays disabled until you type the exact cluster id. |
@@ -522,8 +523,8 @@ The picker order inside `placement.PickCluster` is:
   empty → `PickCluster` returns `""` → caller falls back to class
   `spec.Cluster` (or 503 `<Code>DrainRefused</Code>` if the fallback
   cluster is draining).
-- **Boot reconcile sees an existing-live cluster (chunks via
-  `bucket_stats`)** → auto-creates `state=live weight=100`, not
+- **Boot reconcile sees an existing-live cluster (chunks via the
+  bucket usage stats)** → auto-creates `state=live weight=100`, not
   `pending`. Zero operator action required during upgrade from older
   strata versions.
 
@@ -880,7 +881,7 @@ or `removed`.
 | `POST /admin/v1/clusters/{id}/undrain` | Drops cluster_state row. Refuses from live/removed (409 InvalidTransition). Audit-stamped `admin:UndrainCluster`. | Undrain buttons |
 | `GET /admin/v1/clusters/{id}/drain-progress` | Per-cluster `{state, mode, chunks_on_cluster, bytes_on_cluster, base_chunks_at_start, migratable_chunks, stuck_single_policy_chunks, stuck_no_policy_chunks, by_bucket, last_scan_at, eta_seconds, deregister_ready, warnings}`. Reads from the rebalance worker's in-process `ProgressTracker` — never scans manifests synchronously. Readonly state returns null counts + a `"stop-writes mode — migration scan skipped"` warning. | `<DrainProgressBar>` (30 s poll) |
 | `GET /admin/v1/clusters/{id}/drain-impact` | Pre-evacuate analysis: `{cluster_id, current_state, migratable_chunks, stuck_single_policy_chunks, stuck_no_policy_chunks, total_chunks, by_bucket[], total_buckets, next_offset, last_scan_at}`. Each `by_bucket` entry carries category + chunk_count + `suggested_policies[]`. State ∈ {live, draining_readonly} → 200 (synchronous one-off scan, 5-min in-process cache); state ∈ {evacuating, removed} → 409 InvalidTransition (use /drain-progress instead). Paginated via `?limit=N&offset=M` (default 100, max 1000). Audit-stamped `admin:GetClusterDrainImpact`. | `<ConfirmDrainModal>` evacuate mode + `<BulkPlacementFixDialog>` |
-| `GET /admin/v1/clusters/{id}/bucket-references` | Coarser pre-drain preview: buckets whose `Placement[<id>] > 0` joined with `bucket_stats` for chunk_count + bytes_used. Drawer-shape — no suggested policies. | `<BucketReferencesDrawer>` |
+| `GET /admin/v1/clusters/{id}/bucket-references` | Coarser pre-drain preview: buckets whose `Placement[<id>] > 0` joined with the bucket usage stats for chunk_count + bytes_used. Drawer-shape — no suggested policies. | `<BucketReferencesDrawer>` |
 
 `drain-progress` numeric fields are nullable: when state=live every
 numeric field is `null`. When state=evacuating but no scan has
@@ -981,8 +982,8 @@ Negative paths covered:
   drained cluster's pool and are immediately readable. Validated in
   `scripts/smoke-drain-transparency.sh` Scenario A step 6.
 - **Undrain from live or removed → 409 InvalidTransition** — the 4-
-  state machine refuses no-op transitions. Validated in
-  `internal/adminapi/clusters_drain_test.go`.
+  state machine refuses no-op transitions. Validated by the admin API
+  clusters-drain integration test.
 
 ## Web UI
 
@@ -1035,8 +1036,8 @@ via `make up-cassandra` for a single Cassandra-backed replica
 
 The supervisor registers the worker with `SkipLease: true`; the
 worker owns its own leader election via the
-`internal/rebalance.ShardedFanOut` struct, which mirrors the
-`internal/gc/fanout.go` shape exactly. Each shard goroutine acquires
+`rebalance.ShardedFanOut` struct, which mirrors the GC worker's
+fan-out shape exactly. Each shard goroutine acquires
 `rebalance-leader-<i>` independently; the leader chip
 (`leader_for=rebalance` in `/admin/v1/cluster/nodes`) is **folded** —
 a replica holding N shards still flips the chip ON exactly once
@@ -1049,8 +1050,9 @@ TiKV) for individual shard ownership.
 ### Ownership distribution
 
 Lease distribution across replicas is opportunistic: each replica
-races to acquire `rebalance-leader-0..N-1`, the meta-backend LWT
-(Cassandra) or pessimistic txn (TiKV) decides the winner per shard.
+races to acquire `rebalance-leader-0..N-1`, the meta-backend
+compare-and-set (Cassandra) or pessimistic txn (TiKV) decides the
+winner per shard.
 On a steady-state lab with R replicas and N shards:
 
 | Replicas (R) | Shards (N) | Typical distribution |
