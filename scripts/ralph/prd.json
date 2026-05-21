@@ -60,8 +60,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Branch (a) confirmed per US-001 spike (final=100, zero CAS-exhausted at c=100, ~12.6× headroom vs maxAttempts=32). No-change confirmation: memory backend (sync.RWMutex) unchanged; Cassandra LWT CAS loop (internal/meta/cassandra/store.go:3447, maxAttempts=32) unchanged. New cross-backend regression anchor caseBucketStatsConcurrentBumps added to internal/meta/storetest/contract.go (50 concurrent +1 bumps → final=50, zero errors). Memory backend exercises it on every test run; TiKV+Cassandra+Scylla pick it up under -tags integration via the shared storetest.Run table. go vet ./... green; go test -race ./internal/meta/... green."
     },
     {
       "id": "US-004",

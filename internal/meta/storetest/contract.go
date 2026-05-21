@@ -64,6 +64,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"BucketQuotaRoundTrip", caseBucketQuota},
 		{"UserQuotaRoundTrip", caseUserQuota},
 		{"BucketStatsRoundTrip", caseBucketStats},
+		{"BucketStatsConcurrentBumps", caseBucketStatsConcurrentBumps},
 		{"BucketStatsHotPath", caseBucketStatsHotPath},
 		{"UserStatsRoundTrip", caseUserStats},
 		{"UserStatsConcurrent", caseUserStatsConcurrent},
@@ -2590,6 +2591,44 @@ func caseBucketStats(t *testing.T, s meta.Store) {
 	}
 	if next.UsedBytes != wantBytes-seqSize || next.UsedObjects != wantObjects-1 {
 		t.Fatalf("negative bump post-update: got %+v want bytes=%d objects=%d", next, wantBytes-seqSize, wantObjects-1)
+	}
+}
+
+// caseBucketStatsConcurrentBumps is the cross-backend regression anchor for
+// the bucket_stats RMW-saturation fix (ralph/p1-fixes US-001..US-003): 50
+// goroutines bump (+1 byte, +1 object) concurrently, the post-state must
+// reflect exactly 50 applications and zero error returns. CAS-exhausted on
+// Cassandra surfaces as `bucket_stats CAS exhausted retries for bucket …`
+// from the impl; TiKV pessimistic-txn retries are absorbed by the picker
+// fan-out; memory serialises via sync.RWMutex. Any per-bump error fails the
+// case.
+func caseBucketStatsConcurrentBumps(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "bsc", "owner-bsc", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+
+	const conc = 50
+	results := make(chan error, conc)
+	for i := 0; i < conc; i++ {
+		go func() {
+			_, err := s.BumpBucketStats(ctx, b.ID, 1, 1)
+			results <- err
+		}()
+	}
+	for i := 0; i < conc; i++ {
+		if err := <-results; err != nil {
+			t.Fatalf("concurrent bump %d: %v", i, err)
+		}
+	}
+
+	got, err := s.GetBucketStats(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("get after concurrent: %v", err)
+	}
+	if got.UsedBytes != conc || got.UsedObjects != conc {
+		t.Fatalf("after concurrent: got %+v want bytes=%d objects=%d", got, conc, conc)
 	}
 }
 
