@@ -173,8 +173,8 @@
         "Tests pass"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped: docs/site/content/architecture/benchmarks/rgw-comparison.md — full structure per PRD AC (a..f): Headline conclusion (3-regime narrative — small PUT/GET noise floor, multipart parity at OSD floor, ListObjects 100k as load-bearing claim) + Methodology (Lab box / bench tool verify-first chain / single-cluster Strata bench mode / stock-defaults caveat with the two lab-only ceph knobs from US-001 / run shape per workload) + Limitations (4 bullets per PRD MANDATORY shape: single-cluster Strata, shared OSDs on ceph-a, localhost loopback, lima penalty) + Workload-by-workload (11 sections per US-004..US-008: put-small/put-medium/get-small/get-medium with conc-sweep tables; put-large/get-large; multipart-5g per-part p99 + aggregate throughput + completion-per-upload; list-100k with bucket-index-claim verdict path; range-get; delete with US-008 bucket_stats LWT note; iam-auth) + Overall conclusion (expected narrative shape) + Reproducibility (one-cmd path + optional --include-cassandra 3-way + per-workload override + pre-flight checks + artifacts list). Numbers marked `_pending_` — US-012 measured run fills them in. Mermaid xychart-beta chart renders the Strata/RGW p99 ratio bar+line shape across 11 workloads with parity line at y=1.0 (placeholder 1.0 bars for cycle-prep; US-012 will swap to measured ratios). Cross-link added in docs/site/content/operate/scaling.md under '### RADOS (Ceph)' → /architecture/benchmarks/rgw-comparison. _index.md updated to list the new page. `make docs-build` green (Hugo 0.161.1+extended; 92 pages clean). `make vet` + `go test ./...` green."
     },
     {
       "id": "US-011",

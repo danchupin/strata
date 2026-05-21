@@ -724,3 +724,35 @@ Cycle: ralph/rgw-benchmarks
   - **JSONL aggregator's presence-of-target detection is robust.** `jq -r 'select(.target=="cassandra") | .target' "$RESULTS_FILE" | head -1` returns empty string when no cassandra rows exist; `[[ -n "$has_cassandra" ]]` then routes through the 2-target pivot path. This pattern keeps the JSONL schema unchanged (no new column needed) — only the aggregator widens.
   - **`local code` redeclaration inside per-gate blocks is legitimate bash.** The preflight_check refactor uses `local code` inside both the strata, cassandra, and rgw gates without shadowing issues (each block opens its own scope-level binding). Verified by `bash -n` + execution path.
 ---
+
+## 2026-05-21 22:30 MSK - US-010 (Report doc page + Methodology + Limitations + mermaid chart)
+- What was implemented:
+  - `docs/site/content/architecture/benchmarks/rgw-comparison.md` (NEW) — full PRD AC (a..f) shape:
+    - **(a) Headline conclusion** — 3-regime narrative (small-object PUT/GET noise floor, multipart parity at the OSD floor, ListObjects 100k as load-bearing bucket-index claim). Numbers marked `_pending_` until US-012's measured run.
+    - **(b) Methodology** — lab box (M3 Pro / lima VM / Docker Desktop), Strata commit `0f1c175` on `ralph/rgw-benchmarks` (-tags ceph), RGW image `quay.io/ceph/ceph:v19.2.3`, bench-tool verify-first chain (wasabi-tech 404 → minio/warp picked → dvassallo never needed), single-cluster Strata bench mode via `STRATA_BENCH_SINGLE_CLUSTER=1`, stock-defaults caveat with the two US-001 lab-only ceph knobs (`mon_max_pg_per_osd=1000` + autoscaler off), run-shape-per-workload table.
+    - **(c) Limitations** — 4 mandatory bullets per PRD shape (single-cluster Strata, shared OSDs on ceph-a, localhost loopback, lima penalty) + additional caveats (Strata 5m GC interval vs 30s ceph df snapshot cap, small-OSD memstore sizing).
+    - **(d) 11 workload sections** matching US-004..US-008 plus the optional 3rd target hint from US-009 (in Reproducibility). Each section has a per-workload table with `_pending_` cells, env knobs, conclusion placeholder. The list-100k section carries the load-bearing US-007 verdict path (P1 vs P3 escalation rule).
+    - **(e) Overall conclusion** — expected narrative shape (where Strata wins / on-par / loses) with the verdict-on-README-claim paragraph deferred to US-012.
+    - **(f) Reproducibility** — one-command `make up-all && make up-bench-rgw && make bench-rgw-comparison` (~120 min), optional `make bench-rgw-comparison-with-cassandra` (US-009 3-way), per-workload debug shape, pre-flight gates list, artifacts list.
+  - **Mermaid xychart-beta chart** — Strata/RGW p99 ratio bar+line shape across 11 workloads with parity line at y=1.0. Placeholder ratios (all 1.0) for cycle-prep; US-012 swaps to measured ratios in the close-flip commit. Hugo-book ships Mermaid (version supports xychart-beta per US-001 cycle-prep verification).
+  - **Cross-link from `/operate/scaling.md` → rgw-comparison.md** — added under `### RADOS (Ceph)` section. New paragraph cites the bench page as the canonical source for absolute throughput numbers + the headline workloads.
+  - **`docs/site/content/architecture/benchmarks/_index.md`** updated — RGW comparison listed after meta-backend-comparison.
+- Files changed:
+  - `docs/site/content/architecture/benchmarks/rgw-comparison.md` (NEW — ~360 lines)
+  - `docs/site/content/architecture/benchmarks/_index.md` (one-line addition)
+  - `docs/site/content/operate/scaling.md` (cross-link paragraph after RADOS sizing section)
+  - `scripts/ralph/prd.json` (US-010 passes=true + shipped notes)
+  - `scripts/ralph/progress.txt` (this block)
+- **Locally verified**:
+  - `hugo --minify` from `docs/site/`: green; 92 pages built clean in 185 ms. No warnings from the rgw-comparison page.
+  - `make vet` green.
+  - `go test ./...` green (all cached; no Go code changes — pure doc story).
+  - Cross-link path verified by inspecting the generated `public/operate/scaling/index.html` link target.
+- **Learnings for future iterations:**
+  - **Hugo `make docs-build` runs `hugo --quiet --minify` against `docs/site/`** — must `cd docs/site` first; the project Makefile target wraps this. No build flags needed for mermaid (hugo-book theme handles it natively via the `mermaid` shortcode AND fenced code blocks tagged ```` ```mermaid````).
+  - **Mermaid `xychart-beta` config block must use 3-dash YAML frontmatter inside the code fence** (`---\nconfig:\n  xyChart:\n    width: 900\n    height: 480\n---`). Verified rendering on hugo-book's bundled Mermaid 11.9+. Width/height attribs control SVG output dims; omitting them is fine but the chart can render uncomfortably tall on default viewport.
+  - **xychart-beta accepts both `bar` AND `line` traces** in the same chart — the line series at y=1.0 makes a great parity marker for ratio plots. Bars above the line = Strata slower; bars below = Strata faster. Naming convention 'Strata / RGW p99 ratio' makes the direction unambiguous in the title.
+  - **Pattern for pending-number doc pages in this cycle**: author the structure with `_pending_` markers, render a placeholder chart with parity values (all 1.0), and leave a verdict-path note in the bucket-index-claim section. US-012's measured run swaps placeholders for actual numbers in a single dedicated commit — keeps the structural review (US-010) separate from the numbers review (US-012).
+  - **Cross-link discipline**: scaling.md's `### RADOS (Ceph)` section is the natural anchor for the bench page since the bench's relative-vs-RGW shape feeds capacity planning. The benchmarks `_index.md` is the index-card landing.
+  - **No project CLAUDE.md updates needed**: the doc-page pattern is already exercised across multiple benchmark pages (`meta-backend-comparison.md`, `rebalance.md`, `gc-lifecycle.md`) — the new page mirrors that shape and adds no novel convention.
+---
