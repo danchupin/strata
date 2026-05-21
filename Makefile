@@ -11,7 +11,7 @@ COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 	smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale \
 	smoke-single-binary smoke-tikv-default-lab \
 	race-soak race-soak-tikv lint-nginx-lab helm-lint \
-	bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi \
+	bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi bench-rgw-comparison \
 	docs-serve docs-build docs-openapi-copy clean
 
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
@@ -527,6 +527,22 @@ bench-lifecycle-multi: build
 # env. Results JSONL lands in bench-rebalance-multi-results.jsonl.
 bench-rebalance-multi:
 	bash scripts/bench-rebalance-multi.sh
+
+# Strata vs RGW comparison sweep (US-002+ of ralph/rgw-benchmarks).
+# Drives minio/warp against both targets, capturing JSONL rows for the full
+# 8-workload set (US-004..US-008) once those land. US-002 ships the reference
+# `put-small` workload only — full sweep wired iteratively.
+#
+# Pre-reqs (operator):
+#   make up-all && make wait-strata-lab
+#   make up-bench-rgw && make wait-rgw
+#   bash scripts/bench-rgw-comparison.sh --extract-rgw-creds
+#   export STRATA_STATIC_CREDENTIALS=access:secret
+#
+# Estimated full duration: ~120 min (per PRD). Operator-run-only — NOT CI.
+bench-rgw-comparison:
+	bash scripts/bench-rgw-comparison.sh put-small both
+	bash scripts/bench-rgw-comparison.sh --report
 
 # Hugo docs site (docs/site/). `docs-serve` runs the local dev preview on
 # :1313 with drafts enabled; `docs-build` produces the minified static bundle

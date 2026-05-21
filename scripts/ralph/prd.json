@@ -38,8 +38,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped: scripts/bench-rgw-comparison.sh (warp-based scaffold with put-small reference workload, --runs/--concurrency/--report/--extract-rgw-creds flags), Makefile bench-rgw-comparison target, .gitignore for scripts/bench-results/ + rgw-creds.env. Tool decision: warp (wasabi-tech/s3-bench 404 on github). Locally verified put-small × 3 runs against strata target (p99 218±2ms, 224±12 ops/s on 1KiB × 8 concurrent × 5s); --report aggregator emits mean±stddev markdown. RGW-side smoke deferred — bench-rgw lab in stale state (period_update fails with EOVERFLOW + 'period does not have zone configured'; US-001 follow-up. Documented in progress.txt as known issue for US-012 to surface as ROADMAP entry)."
     },
     {
       "id": "US-003",

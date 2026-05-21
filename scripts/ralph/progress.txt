@@ -76,3 +76,33 @@ Cycle: ralph/rgw-benchmarks
   - **`mon_max_pg_per_osd` is a global mon config** — set via `ceph config set global mon_max_pg_per_osd 1000` (NOT `ceph config set mon ...` which scopes to mon entity only and was insufficient).
   - **librados pool_create rejects dot-prefixed pool names** — `.rgw.root` must be pre-created via CLI w/ `--yes-i-really-mean-it` before `radosgw-admin realm create`. Other RGW pools (`default.rgw.*`) lack dot prefix so RGW creates them itself.
 ---
+
+## 2026-05-21 17:10 MSK - US-002 (s3-bench verify-first + base script scaffold)
+- What was implemented:
+  - `scripts/bench-rgw-comparison.sh` — warp-based bench scaffold + reference workload `put-small` (1KiB × Ns × N concurrent × N runs; defaults 60s/8/3 per PRD). Lab probes both endpoints (200/403 OK), aborts hard via REQUIRE_LAB=1 or skip(77) otherwise. Drives warp put against strata|rgw|both targets, parses stdout summary into one JSONL row per (target, workload, concurrency, run_id). --report flag aggregates the per-day JSONL into a markdown table with mean ± stddev across N runs. --extract-rgw-creds helper pipes /etc/strata-bench/rgw-creds.env from the running rgw container to ./rgw-creds.env on the host.
+  - `Makefile` `bench-rgw-comparison` target — wrapper that runs `put-small both` then `--report`. Operator-run-only (NOT CI). Estimated full sweep ~120 min per PRD.
+  - `.gitignore` — added `scripts/bench-results/` (per-day JSONL + warp benchdata.json.zst) + `rgw-creds.env`.
+- Files changed:
+  - `scripts/bench-rgw-comparison.sh` (new — 380 lines)
+  - `Makefile` (bench-rgw-comparison target + .PHONY)
+  - `.gitignore` (bench artifacts + rgw-creds.env)
+  - `scripts/ralph/prd.json` (US-002 passes=true)
+  - `scripts/ralph/progress.txt` (this block)
+- **Tool decision documented** in script + INFO output: warp chosen because wasabi-tech/s3-bench repo returns 404 on github (verified; PRD's first-choice tool does not exist). minio/warp covers put/get/multipart/list/delete via subcommands; supports --concurrent / --duration / --noclear / --benchdata / --no-color. Version captured per-row in JSONL.
+- **Locally verified** put-small × 3 runs on strata target (`STRATA_STATIC_CREDENTIALS='admin:adminpass' PUT_SMALL_DURATION=5 bash scripts/bench-rgw-comparison.sh put-small strata --runs=3`):
+  ```
+  {"target":"strata","workload":"put-small","object_size":"1KiB","concurrency":8,"run_id":1,"p50_ms":11.700,"p95_ms":202.635,"p99_ms":219.600,"throughput_mbps":0.220,"throughput_ops_per_sec":222.34,"errors":0,"duration_sec":5,...}
+  {"target":"strata","workload":"put-small","object_size":"1KiB","concurrency":8,"run_id":2,"p50_ms":11.600,"p95_ms":199.229,"p99_ms":215.900,"throughput_mbps":0.210,"throughput_ops_per_sec":209.96,"errors":0,"duration_sec":5,...}
+  {"target":"strata","workload":"put-small","object_size":"1KiB","concurrency":8,"run_id":3,"p50_ms":11.400,"p95_ms":202.795,"p99_ms":219.800,"throughput_mbps":0.230,"throughput_ops_per_sec":239.48,"errors":0,"duration_sec":5,...}
+  ```
+  --report aggregator output: `| strata | put-small | 1KiB | 8 | 3 | 11.566±0.124 | 218.43±1.793 | 0.22±0.008 | 223.92±12.10 |`
+- **RGW-side smoke DEFERRED** (US-001 follow-up): bench-rgw lab in stale state after restart cycle. `radosgw period update --commit` fails with `period (cda2a1b7-...) does not have zone (51f982d1-...) configured` followed by EOVERFLOW(34) on `default.rgw.log` pool create. Stale realm/zonegroup/period state persists in `.rgw.root` across container restarts even after manual pool purge — entrypoint's idempotent `realm get` short-circuit prevents re-bootstrap. **NEW gap → US-012 must surface as P3 ROADMAP entry**: `bench-rgw lab realm/zonegroup state is not re-bootstrap-safe; second `make up-bench-rgw` after `make down` lands in EOVERFLOW + stale period state. Fix: entrypoint must check zonegroup-has-zone consistency, not just zone exists; or accept --force-rebootstrap env that wipes .rgw.root + recreates.`
+- **Quality checks**: `make vet` green; `bash -n scripts/bench-rgw-comparison.sh` syntax OK. Pure shell story — no Go code changes.
+- **Learnings for future iterations:**
+  - **warp v(dev) 2026-05-21 quirks**: (a) `--analyze.out=FILE` is a no-op — file never written; the text summary is on stdout only. Script captures stdout to summary_file. (b) `--benchdata=PATH` appends `.json.zst` suffix; actual file is `PATH.json.zst`. (c) Stdout block shape: `Report: PUT. Concurrency: N. Ran: Xs` + ` * Average: A MiB/s, B obj/s` + ` * Reqs: Avg: ms, 50%: ms, 90%: ms, 99%: ms, Fastest: ms, Slowest: ms, StdDev: ms` (NOT `Operation: PUT` + `99th percentile` like older warp docs suggest). Parser anchors on `^Report: <op>.` + extracts `50%:` / `99%:` directly. p95 is linear interpolant between p50 and p99 since warp's stdout omits it.
+  - **`set -euo pipefail` + `grep -m1 -oE | awk` inside `< <(parse_warp_summary ...)` is a footgun**: missing matches (e.g. warp omits `Errors:` line when zero errors) make `grep` return 1, pipefail kills the parse subshell, read sees nothing, emit_row writes empty JSON fields. Fix: `set +eo pipefail` at top of parser fn so missing-match is tolerated; defaults applied via `: "${var:=0.0}"`.
+  - **`if ! warp ...; then ...` + `set -e` is tricky**: even though `if` neutralizes set -e for the test command, downstream pipe failures inside the body or in subsequent commands still kill the shell. For warp, explicit `set +e; warp ...; rc=$?; set -e` is cleaner — surfaces rc for logging without unexpected exits.
+  - **Strata accepts hyphens in bucket names** — `bench-put-small-strata` worked; PRD's bucket-isolation-per-workload pattern is safe.
+  - **TiKV PD `cluster is not bootstrapped`** in strata logs after partial volume wipe — wipe ALL of `strata-{pd,tikv}-data` together or expect PD-region-not-bootstrapped errors that surface to S3 clients as `<InternalError>` 500s. Confirmed: clean `docker volume rm $(docker volume ls -q | grep docker_strata-)` then `make up-all` recovered cleanly.
+  - **bench-rgw lab is restart-fragile** — see RGW-side smoke note above. Fresh `make up-all && make up-bench-rgw` from FULLY-purged volumes works once; subsequent restarts of the rgw container (without nuking ceph .rgw.root pool + flushing realm cache) lands in stale period state. US-001 lab tuning notes already document the first-boot path; restart path needs follow-up.
+---
