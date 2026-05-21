@@ -57,8 +57,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped: preflight_check() (6 gates: strata /readyz=200, data_backend grep from docker compose logs strata-a, rgw 200/403, free disk >= STRATA_BENCH_MIN_DISK_GB=300, docker mem <= STRATA_BENCH_MAX_MEM_GB=6, log STRATA_RADOS_CLUSTERS), STRATA_BENCH_SINGLE_CLUSTER=1 restarts strata-a/b via compose-env override, cleanup_workload() with best-effort ceph df snapshot (cap 30s), assert_bucket_absent() sanity check between targets, --preflight / --skip-preflight flags. /readyz data_backend check chose docker-logs grep fallback (path 2) — pure bench cycle, no Go code change; documented inline. Locally verified: positive case OK against strata lab; STRATA_BENCH_MIN_DISK_GB=999999 aborts on disk gate; STRATA_BENCH_DATA_BACKEND_EXPECT=memory (lab is rados) aborts on backend mismatch."
     },
     {
       "id": "US-004",

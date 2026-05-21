@@ -39,6 +39,7 @@ Cycle: ralph/rgw-benchmarks
 - **README backfill discipline (US-011)**: grep-verify table structure FIRST + preserve ≤120 lines guard (ralph/readme-docs-rewrite US-001 constraint) + footnote link to Limitations.
 - **Disk budget**: 300GB free pre-flight required (US-003). Multipart × 2 targets × 3 runs = 150GB; PUT/GET 100MB × 2 × 3 = 120GB; small workloads negligible. Pre-flight aborts bench if insufficient.
 - **ROADMAP discipline (US-012)**: close-flip × 1 + 0-3 new entries (severity-tiered). `(commit pending)` placeholder; SHA backfill on main as fast-follow commit (mirrors `f6a5476`/`77a9348`/`fe16160`/`d5d3860`/`4d3c1ec`/`1275c98`/`fa8837a` precedent).
+- **Lab restart hygiene (cross-story)**: `make down && make up-all` is NOT guaranteed clean — ceph monmap persists IP `172.28.0.2` from prior run and re-bind fails `Cannot assign requested address` if docker default network shifts. Same risk for tikv (`cluster is not bootstrapped`). Fix between cycles: `docker volume ls -q | grep -E 'strata|ceph' | xargs docker volume rm` (wipes ALL of strata-{pd,tikv}-data + ceph mon/osd state together).
 - **RGW bench-rgw profile lab tuning (US-001)**: single-OSD memstore lab needs two ceph config knobs set by `rgw-entrypoint.sh` for RGW realm bootstrap to succeed:
   - `mon_max_pg_per_osd=1000` — default 250 cap is exhausted when strata's pre-existing pools + RGW's ~7 new pools exceed it; pool_create returns EOVERFLOW (34).
   - `osd_pool_default_pg_autoscale_mode=off` — keeps new RGW pools at pg_num=8 (autoscaler would target 32+ each, blowing the cap even at 1000 over a few drain cycles).
@@ -105,4 +106,75 @@ Cycle: ralph/rgw-benchmarks
   - **Strata accepts hyphens in bucket names** — `bench-put-small-strata` worked; PRD's bucket-isolation-per-workload pattern is safe.
   - **TiKV PD `cluster is not bootstrapped`** in strata logs after partial volume wipe — wipe ALL of `strata-{pd,tikv}-data` together or expect PD-region-not-bootstrapped errors that surface to S3 clients as `<InternalError>` 500s. Confirmed: clean `docker volume rm $(docker volume ls -q | grep docker_strata-)` then `make up-all` recovered cleanly.
   - **bench-rgw lab is restart-fragile** — see RGW-side smoke note above. Fresh `make up-all && make up-bench-rgw` from FULLY-purged volumes works once; subsequent restarts of the rgw container (without nuking ceph .rgw.root pool + flushing realm cache) lands in stale period state. US-001 lab tuning notes already document the first-boot path; restart path needs follow-up.
+---
+
+## 2026-05-21 17:35 MSK - US-003 (Pre-flight + cleanup + single-cluster Strata override)
+- What was implemented:
+  - `scripts/bench-rgw-comparison.sh` pre-flight gate (`preflight_check`) — 6 gates:
+    (a) strata /readyz=200, (b) strata data_backend grep from `docker compose logs strata-a` (chosen
+    fallback path — pure bench cycle, no Go code change), (c) rgw 200/403, (d) free disk
+    ≥ STRATA_BENCH_MIN_DISK_GB (default 300), (e) docker-stats mem ≤ STRATA_BENCH_MAX_MEM_GB
+    (default 6), (f) reflect STRATA_RADOS_CLUSTERS from running strata-a container.
+  - `STRATA_BENCH_SINGLE_CLUSTER=1` override — restarts strata-a + strata-b via `docker compose
+    up -d` with `STRATA_RADOS_CLUSTERS=default:/etc/ceph-a/...` (single-cluster fair-comparison
+    mode; multi-cluster benchmarking parked per PRD). Polls /readyz until 200 (cap 60s).
+  - `cleanup_workload()` — replaces inline cleanup in `workload_put`; drops bucket via aws-cli +
+    best-effort `ceph df` snapshot (cap 30s) for methodology disclosure (Strata GC default
+    interval 5m → 30s won't see full recovery; logged for documentation, not gating).
+  - `assert_bucket_absent()` — sanity assertion between targets in `both` mode; head-bucket on A
+    must return NoSuchBucket / 404 before B run.
+  - `--preflight`/`--skip-preflight` flags + new env knobs documented in usage block:
+    `STRATA_BENCH_SINGLE_CLUSTER`, `STRATA_BENCH_MIN_DISK_GB`, `STRATA_BENCH_MAX_MEM_GB`,
+    `STRATA_BENCH_DATA_BACKEND_EXPECT`, `BENCH_COMPOSE_FILE`.
+- Files changed:
+  - `scripts/bench-rgw-comparison.sh` (preflight + single-cluster + cleanup_workload +
+    assert_bucket_absent + new flags + usage block)
+  - `scripts/ralph/prd.json` (US-003 passes=true + shipped-notes)
+  - `scripts/ralph/progress.txt` (this block)
+- **/readyz data_backend field path chosen**: docker-logs grep (fallback path 2). Reasoning:
+  /readyz today returns plain text "ok" (no JSON shape); adding a `data_backend` field would
+  touch `internal/health/health.go` + every consumer (compose healthcheck, k8s probe, smoke
+  scripts). Pure bench cycle — no Go code change. Grep target: `"data":"<backend>"` field on
+  the startup `strata server listening` JSON-log line emitted by `internal/serverapp/serverapp.go:269`.
+  Caveat: requires `docker compose logs --tail=500` to reach the startup line; logs rotated past
+  it → WARN-and-proceed (rather than fail) so long-running labs don't trip preflight unnecessarily.
+- **Locally verified** (`make up-all && make wait-strata-lab`):
+  - Positive case `--preflight strata` → 5 gates pass; logged
+    `data_backend=rados`, `disk=384GB`, `mem=3.70GB`, `STRATA_RADOS_CLUSTERS=default:...,cephb:...`.
+  - Negative case backend mismatch (`STRATA_BENCH_DATA_BACKEND_EXPECT=memory` → exit 1, msg
+    `pre-flight: strata data_backend=rados, expected 'memory'. Bench meaningless on rados backend.`).
+  - Negative case low disk (`STRATA_BENCH_MIN_DISK_GB=999999` → exit 1, msg
+    `pre-flight: free disk 384GB < required 999999GB.`).
+  - Single-cluster mode (`STRATA_BENCH_SINGLE_CLUSTER=1 ... put-small strata --runs=1`) →
+    docker compose recreates strata-a/b, /readyz returns 200, gate (f) reflects
+    `STRATA_RADOS_CLUSTERS=default:...` (single entry — cephb dropped). cleanup_workload
+    snapshot logged `ceph df: hdd 4 GiB AVAIL ... 0.03 %RAW USED` post-bucket-drop.
+- Quality checks: `bash -n` syntax OK; `make vet` green; `go test ./...` green (pure shell story).
+- **Learnings for future iterations:**
+  - **macOS host `df`**: no `/var/lib/docker` (Docker Desktop / lima keeps the docker root inside
+    the VM, not host-visible). Script falls back through `[/, /var/lib/docker, $HOME]` and reads
+    df-Pk's 4th col (Available KB). On lima the host root reflects the shared 9p mount the VM
+    sees, so disk_free_gb returns realistic numbers.
+  - **`docker compose exec -T <svc> sh -c 'printf %s "$STRATA_RADOS_CLUSTERS"'`** is the cleanest
+    way to read a running container's env without parsing `docker inspect` JSON. Requires `-T`
+    (no TTY) for non-interactive shell.
+  - **Env-override compose-restart pattern**: `STRATA_RADOS_CLUSTERS=single docker compose up -d
+    strata-a strata-b` triggers compose to recreate the container only when env diff vs running
+    container detected. Compose handles the rolling restart (Recreate → Healthy → Started). Poll
+    /readyz to confirm gateway is reachable post-restart.
+  - **`docker stats --no-stream --format '{{.MemUsage}}'`** field 1 is `<value><unit>` e.g.
+    `123.4MiB` (no space). Parse with `match(n, /^[0-9.]+/)` then suffix-strip for the unit.
+    Total docker-mem snapshot includes EVERY running container globally — not just strata's set
+    (caveat noted: aggregate cap is intentional, the 6GB cap is total docker memory pressure).
+  - **bench-rgw lab restart-fragility recurs** — second clean `make down && make up-all` got
+    ceph stuck on `Cannot assign requested address` for v2:172.28.0.2:3300/0 (stale monmap
+    referencing prior network IP). Fix: `docker volume ls -q | grep ceph | xargs docker volume
+    rm` between cycles (strata + ceph monmap together). Documented in US-002 progress as
+    "TiKV PD `cluster is not bootstrapped` after partial volume wipe — wipe ALL of
+    `strata-{pd,tikv}-data` together"; same lesson applies to ceph monmap volumes.
+  - **Warp short-duration emits no Report block** — 3s duration test produced empty parse
+    (all zero JSONL fields, no errors). Real benches use 60s default — warp needs ≥ ~5s to
+    fill its histogram. Parser falls back to `: ${var:=0.0}` defaults so the row is well-formed
+    even on parse miss; future stories should warn the operator if all zeros land in the
+    output (defensive: bench duration likely too short OR warp couldn't bind to endpoint).
 ---

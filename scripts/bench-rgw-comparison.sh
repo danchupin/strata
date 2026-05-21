@@ -14,6 +14,7 @@
 #   bash scripts/bench-rgw-comparison.sh <workload> <target> [--concurrency=N] [--runs=N]
 #   bash scripts/bench-rgw-comparison.sh --report
 #   bash scripts/bench-rgw-comparison.sh --extract-rgw-creds
+#   bash scripts/bench-rgw-comparison.sh --preflight
 #
 # Args:
 #   <workload>  one of: put-small (US-002 reference). Others added in US-004+.
@@ -25,17 +26,29 @@
 #   --report          aggregate jsonl into markdown table on stdout (no run)
 #   --extract-rgw-creds   helper: `docker compose exec rgw cat /etc/strata-bench/rgw-creds.env`
 #                          pipes the bench user access/secret to ./rgw-creds.env on the host
+#   --preflight       run pre-flight checks only and exit (US-003)
+#   --skip-preflight  skip pre-flight checks (for dry-run / dev iteration)
 #
 # Env:
-#   STRATA_ENDPOINT_URL       default http://localhost:9999
-#   STRATA_STATIC_CREDENTIALS access:secret[,...] — first pair used (matches existing bench scripts)
-#   RGW_ENDPOINT_URL          default http://localhost:9991
-#   RGW_BENCH_CREDS_FILE      default ./rgw-creds.env — `access_key=...\nsecret_key=...` (written
-#                             by US-001 rgw-entrypoint.sh inside the rgw container at
-#                             /etc/strata-bench/rgw-creds.env; extract via --extract-rgw-creds).
-#   BENCH_RESULTS_DIR         default scripts/bench-results
-#   BENCH_TOOL_PATH           override warp binary path (default: $HOME/go/bin/warp)
-#   REQUIRE_LAB               if 1, lab-missing aborts hard instead of EXIT 77
+#   STRATA_ENDPOINT_URL          default http://localhost:9999
+#   STRATA_STATIC_CREDENTIALS    access:secret[,...] — first pair used (matches existing bench scripts)
+#   RGW_ENDPOINT_URL             default http://localhost:9991
+#   RGW_BENCH_CREDS_FILE         default ./rgw-creds.env — `access_key=...\nsecret_key=...` (written
+#                                by US-001 rgw-entrypoint.sh inside the rgw container at
+#                                /etc/strata-bench/rgw-creds.env; extract via --extract-rgw-creds).
+#   BENCH_RESULTS_DIR            default scripts/bench-results
+#   BENCH_TOOL_PATH              override warp binary path (default: $HOME/go/bin/warp)
+#   REQUIRE_LAB                  if 1, lab-missing aborts hard instead of EXIT 77
+#   STRATA_BENCH_SINGLE_CLUSTER  if 1, restart strata-a/b with single RADOS cluster
+#                                (default:/etc/ceph-a/...) to match RGW's cluster count for
+#                                fair comparison (US-003). Multi-cluster benchmarking parked.
+#   STRATA_BENCH_MIN_DISK_GB     pre-flight free-disk floor (default 300; multipart × 2
+#                                targets × 3 runs needs ~300GB transient).
+#   STRATA_BENCH_MAX_MEM_GB      pre-flight docker-mem ceiling (default 6; 8GB lima default
+#                                leaves 2GB headroom for warp).
+#   STRATA_BENCH_DATA_BACKEND_EXPECT  override expected /readyz data_backend (default "rados";
+#                                set to "any" to skip the check — useful for memory-backend dev runs).
+#   BENCH_COMPOSE_FILE           default deploy/docker/docker-compose.yml
 #
 # Exit codes: 0 success, 2 misconfig, 77 lab not reachable (skip).
 
@@ -51,6 +64,13 @@ RGW_BENCH_CREDS_FILE="${RGW_BENCH_CREDS_FILE:-./rgw-creds.env}"
 BENCH_RESULTS_DIR="${BENCH_RESULTS_DIR:-scripts/bench-results}"
 BENCH_TOOL_PATH="${BENCH_TOOL_PATH:-$HOME/go/bin/warp}"
 REQUIRE_LAB="${REQUIRE_LAB:-0}"
+STRATA_BENCH_SINGLE_CLUSTER="${STRATA_BENCH_SINGLE_CLUSTER:-0}"
+STRATA_BENCH_MIN_DISK_GB="${STRATA_BENCH_MIN_DISK_GB:-300}"
+STRATA_BENCH_MAX_MEM_GB="${STRATA_BENCH_MAX_MEM_GB:-6}"
+STRATA_BENCH_DATA_BACKEND_EXPECT="${STRATA_BENCH_DATA_BACKEND_EXPECT:-rados}"
+BENCH_COMPOSE_FILE="${BENCH_COMPOSE_FILE:-deploy/docker/docker-compose.yml}"
+SKIP_PREFLIGHT="${SKIP_PREFLIGHT:-0}"
+SINGLE_CLUSTER_ENV="default:/etc/ceph-a/ceph.conf:/etc/ceph-a/ceph.client.admin.keyring"
 
 DATE_TAG="$(date +%Y-%m-%d)"
 RESULTS_FILE="${BENCH_RESULTS_DIR}/rgw-comparison-${DATE_TAG}.jsonl"
@@ -199,6 +219,262 @@ parse_warp_summary() {
 }
 
 # -----------------------------------------------------------------------------
+# Pre-flight checks (US-003)
+#
+# Run before any workload. Catches lab in a bad state up-front rather than
+# letting the bench waste 2 hours producing garbage. Six gates:
+#
+#   (a) strata /readyz returns 200
+#   (b) strata data_backend == STRATA_BENCH_DATA_BACKEND_EXPECT ("rados" default).
+#       /readyz returns plain-text "ok" today (no JSON shape with data_backend
+#       field) so this gate falls back to grep'ing `docker compose logs
+#       strata-a` for the `"data":"<backend>"` field emitted on the
+#       "strata server listening" startup line. Chosen path: docker-logs grep.
+#       Reasoning: pure bench cycle, no Go code changes needed; /readyz body
+#       change would touch internal/health + every consumer. Caveat: requires
+#       docker compose available + recent enough log retention; warns and
+#       proceeds if logs gone. Override expectation via
+#       STRATA_BENCH_DATA_BACKEND_EXPECT=any.
+#   (c) rgw responds on / (200 or 403 — squid returns 200 with empty
+#       ListAllMyBucketsResult; older RGWs return 403 anonymous)
+#   (d) host free disk >= STRATA_BENCH_MIN_DISK_GB (default 300; multipart ×
+#       2 targets × 3 runs needs ~300GB transient)
+#   (e) total docker container memory <= STRATA_BENCH_MAX_MEM_GB (default 6;
+#       8GB lima default leaves 2GB headroom for warp)
+#   (f) STRATA_RADOS_CLUSTERS value logged so the report doc can reference
+#       actual lab config
+# -----------------------------------------------------------------------------
+
+compose_cmd() {
+  printf 'docker compose -f %s' "$BENCH_COMPOSE_FILE"
+}
+
+# Best-effort host free-disk in GB. Tries /var/lib/docker (Linux native), then
+# /, then $HOME. macOS + lima/colima typically mount the docker root inside a
+# VM not visible from the host — `df $HOME` captures host free disk available
+# to the lima VM via 9p/virtiofs.
+disk_free_gb() {
+  local candidates=("/var/lib/docker" "/" "$HOME") path avail_kb
+  for path in "${candidates[@]}"; do
+    [[ -d "$path" ]] || continue
+    avail_kb="$(df -Pk "$path" 2>/dev/null | awk 'NR==2 { print $4 }')"
+    if [[ -n "$avail_kb" && "$avail_kb" =~ ^[0-9]+$ ]]; then
+      awk -v kb="$avail_kb" 'BEGIN { printf("%d", kb/1024/1024) }'
+      return 0
+    fi
+  done
+  echo 0
+}
+
+# Total docker container memory usage in GB (sum of MEM USAGE first column).
+docker_mem_used_gb() {
+  if ! command -v docker >/dev/null 2>&1; then
+    echo 0; return 0
+  fi
+  docker stats --no-stream --format '{{.MemUsage}}' 2>/dev/null \
+    | awk '
+        function to_gib(v, u) {
+          if (u ~ /^Ki?B?$/) return v/1024/1024
+          if (u ~ /^Mi?B?$/) return v/1024
+          if (u ~ /^Gi?B?$/) return v
+          if (u ~ /^Ti?B?$/) return v*1024
+          return 0
+        }
+        {
+          # Field 1 is "<value><unit>" e.g. "123.4MiB"; split into number+unit.
+          n = $1
+          # match leading float, capture unit suffix
+          if (match(n, /^[0-9.]+/)) {
+            val = substr(n, RSTART, RLENGTH) + 0
+            unit = substr(n, RSTART+RLENGTH)
+          } else { val = 0; unit = "" }
+          total += to_gib(val, unit)
+        }
+        END { printf("%.2f", total+0) }
+      '
+}
+
+# Grep `docker compose logs strata-a` for the startup `"data":"<backend>"`
+# field. Emits backend name on stdout, empty if not found.
+strata_data_backend_from_logs() {
+  local svc="${1:-strata-a}"
+  local logs
+  logs="$($(compose_cmd) logs --tail=500 "$svc" 2>/dev/null)" || true
+  printf '%s\n' "$logs" \
+    | grep -m1 -oE '"data":"[a-z0-9]+"' \
+    | head -1 \
+    | sed -E 's/.*"data":"([a-z0-9]+)".*/\1/'
+}
+
+# Grep STRATA_RADOS_CLUSTERS env from running container (defensive — the env
+# value at boot time is the source of truth for the bench, not the compose
+# file default). Falls back to compose file default if container missing.
+strata_rados_clusters_from_container() {
+  local svc="${1:-strata-a}"
+  local v
+  v="$($(compose_cmd) exec -T "$svc" sh -c 'printf %s "$STRATA_RADOS_CLUSTERS"' 2>/dev/null)" || true
+  printf '%s' "$v"
+}
+
+preflight_check() {
+  local target="$1"
+  note "pre-flight checks (US-003)"
+
+  # (a) + (b) strata
+  if [[ "$target" == "strata" || "$target" == "both" ]]; then
+    local code
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 "$STRATA_ENDPOINT_URL/readyz" 2>/dev/null || true)"
+    if [[ "$code" != "200" ]]; then
+      fail "pre-flight: strata /readyz returned HTTP $code (expected 200). Bring lab up: make up-all && make wait-strata-lab"
+    fi
+    note "  [a] strata /readyz: 200 OK"
+
+    if [[ "$STRATA_BENCH_DATA_BACKEND_EXPECT" == "any" ]]; then
+      note "  [b] strata data_backend check skipped (STRATA_BENCH_DATA_BACKEND_EXPECT=any)"
+    else
+      local backend
+      backend="$(strata_data_backend_from_logs strata-a)"
+      if [[ -z "$backend" ]]; then
+        # Logs may have rotated past the startup line — WARN, do not fail.
+        note "  [b] strata data_backend: UNKNOWN (docker compose logs strata-a grep missed startup line — log rotation? proceeding with WARN)"
+      elif [[ "$backend" != "$STRATA_BENCH_DATA_BACKEND_EXPECT" ]]; then
+        fail "pre-flight: strata data_backend=$backend, expected '$STRATA_BENCH_DATA_BACKEND_EXPECT'. Bench meaningless on $backend backend. Override via STRATA_BENCH_DATA_BACKEND_EXPECT=any to skip."
+      else
+        note "  [b] strata data_backend: $backend (matches expected '$STRATA_BENCH_DATA_BACKEND_EXPECT')"
+      fi
+    fi
+  fi
+
+  # (c) rgw
+  if [[ "$target" == "rgw" || "$target" == "both" ]]; then
+    local code
+    code="$(probe_target "$RGW_ENDPOINT_URL")"
+    if [[ "$code" != "200" && "$code" != "403" ]]; then
+      fail "pre-flight: rgw $RGW_ENDPOINT_URL/ returned HTTP $code (expected 200 or 403). Bring lab up: make up-bench-rgw && make wait-rgw"
+    fi
+    note "  [c] rgw $RGW_ENDPOINT_URL: HTTP $code OK"
+  fi
+
+  # (d) disk
+  local free_gb
+  free_gb="$(disk_free_gb)"
+  if (( free_gb < STRATA_BENCH_MIN_DISK_GB )); then
+    fail "pre-flight: free disk ${free_gb}GB < required ${STRATA_BENCH_MIN_DISK_GB}GB. Multipart × 2 targets × 3 runs needs ~300GB transient. Free space or override STRATA_BENCH_MIN_DISK_GB."
+  fi
+  note "  [d] free disk: ${free_gb}GB (>= ${STRATA_BENCH_MIN_DISK_GB}GB required)"
+
+  # (e) mem
+  local used_gb
+  used_gb="$(docker_mem_used_gb)"
+  if awk -v u="$used_gb" -v m="$STRATA_BENCH_MAX_MEM_GB" 'BEGIN { exit !(u+0 > m+0) }'; then
+    fail "pre-flight: docker container memory used ${used_gb}GB > ceiling ${STRATA_BENCH_MAX_MEM_GB}GB. warp + lab will OOM on 8GB lima default. Stop unused services or override STRATA_BENCH_MAX_MEM_GB."
+  fi
+  note "  [e] docker mem: ${used_gb}GB used (<= ${STRATA_BENCH_MAX_MEM_GB}GB ceiling)"
+
+  # (f) reflected RADOS_CLUSTERS
+  local rados_clusters
+  rados_clusters="$(strata_rados_clusters_from_container strata-a)"
+  if [[ -z "$rados_clusters" ]]; then
+    note "  [f] STRATA_RADOS_CLUSTERS: <unable to read — strata-a not exec-able; methodology will note compose default>"
+  else
+    note "  [f] STRATA_RADOS_CLUSTERS=$rados_clusters"
+  fi
+}
+
+# -----------------------------------------------------------------------------
+# Single-cluster bench mode (US-003)
+#
+# Lab default is multi-cluster RADOS (default + cephb). RGW connects only to
+# ceph-a so a fair Strata-vs-RGW comparison must reduce Strata to one cluster
+# too. STRATA_BENCH_SINGLE_CLUSTER=1 restarts strata-a + strata-b with
+# STRATA_RADOS_CLUSTERS=default:... only. The compose env var is already
+# overridable (deploy/docker/docker-compose.yml uses ${STRATA_RADOS_CLUSTERS:-...}).
+#
+# After restart, polls /readyz until 200 (cap 60s) so the bench doesn't run
+# against half-initialized replicas.
+# -----------------------------------------------------------------------------
+
+apply_single_cluster_mode() {
+  [[ "$STRATA_BENCH_SINGLE_CLUSTER" == "1" ]] || return 0
+  note "single-cluster bench mode: restarting strata-a/b with STRATA_RADOS_CLUSTERS=$SINGLE_CLUSTER_ENV"
+  STRATA_RADOS_CLUSTERS="$SINGLE_CLUSTER_ENV" $(compose_cmd) up -d strata-a strata-b >&2 \
+    || abort "single-cluster mode: docker compose up -d strata-a strata-b failed"
+
+  local deadline=$(( SECONDS + 60 ))
+  while (( SECONDS < deadline )); do
+    local code
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 "$STRATA_ENDPOINT_URL/readyz" 2>/dev/null || true)"
+    if [[ "$code" == "200" ]]; then
+      note "single-cluster mode: strata /readyz 200 OK"
+      return 0
+    fi
+    sleep 1
+  done
+  fail "single-cluster mode: strata /readyz did not return 200 within 60s after restart"
+}
+
+# -----------------------------------------------------------------------------
+# Per-workload cleanup discipline (US-003)
+#
+# Runs after each (workload, target) cycle. Drops the workload bucket;
+# best-effort polls `ceph df` (capped at 30s) to surface async chunk-GC
+# progress so methodology can document the limitation. Strata's GC worker
+# runs on STRATA_GC_INTERVAL (default 5m) — 30s will NOT see full recovery;
+# we log the snapshot for documentation rather than gate on it.
+# -----------------------------------------------------------------------------
+
+cleanup_workload() {
+  local target="$1" workload="$2"
+  local endpoint creds_ak creds_sk bucket
+  case "$target" in
+    strata) endpoint="$STRATA_ENDPOINT_URL"; creds_ak="$STRATA_AK"; creds_sk="$STRATA_SK" ;;
+    rgw)    endpoint="$RGW_ENDPOINT_URL";    creds_ak="$RGW_AK";    creds_sk="$RGW_SK" ;;
+    *) note "cleanup_workload: unknown target $target — skip"; return 0 ;;
+  esac
+  bucket="bench-${workload}-${target}"
+
+  note "cleanup: drop bucket $bucket on $target"
+  AWS_ACCESS_KEY_ID="$creds_ak" AWS_SECRET_ACCESS_KEY="$creds_sk" AWS_DEFAULT_REGION=us-east-1 \
+    aws --endpoint-url "$endpoint" s3 rm "s3://$bucket" --recursive >/dev/null 2>&1 || true
+  AWS_ACCESS_KEY_ID="$creds_ak" AWS_SECRET_ACCESS_KEY="$creds_sk" AWS_DEFAULT_REGION=us-east-1 \
+    aws --endpoint-url "$endpoint" s3api delete-bucket --bucket "$bucket" >/dev/null 2>&1 || true
+
+  # Best-effort ceph df snapshot for methodology (cap 30s).
+  local snap_deadline=$(( SECONDS + 30 ))
+  while (( SECONDS < snap_deadline )); do
+    if $(compose_cmd) exec -T ceph ceph df --format json 2>/dev/null \
+        | grep -oE '"total_bytes":[0-9]+' | head -1 >/dev/null 2>&1; then
+      break
+    fi
+    sleep 2
+  done
+  local ceph_df_summary
+  ceph_df_summary="$($(compose_cmd) exec -T ceph ceph df 2>/dev/null | head -3 | tail -2 | tr '\n' '|' || true)"
+  [[ -n "$ceph_df_summary" ]] && note "  ceph df (post-cleanup snapshot): $ceph_df_summary"
+}
+
+# Sanity assertion between targets: before running on target B, verify the
+# workload bucket on target A is gone (cleanup_workload above ran best-effort
+# delete-bucket; this catches drift if rm or delete-bucket silently failed).
+assert_bucket_absent() {
+  local target="$1" workload="$2"
+  local endpoint creds_ak creds_sk
+  case "$target" in
+    strata) endpoint="$STRATA_ENDPOINT_URL"; creds_ak="$STRATA_AK"; creds_sk="$STRATA_SK" ;;
+    rgw)    endpoint="$RGW_ENDPOINT_URL";    creds_ak="$RGW_AK";    creds_sk="$RGW_SK" ;;
+    *) return 0 ;;
+  esac
+  local bucket="bench-${workload}-${target}"
+  local code
+  code="$(AWS_ACCESS_KEY_ID="$creds_ak" AWS_SECRET_ACCESS_KEY="$creds_sk" AWS_DEFAULT_REGION=us-east-1 \
+    aws --endpoint-url "$endpoint" s3api head-bucket --bucket "$bucket" 2>&1 | head -1)"
+  if [[ "$code" != *"Not Found"* && "$code" != *"NoSuchBucket"* && "$code" != *"404"* && -n "$code" ]]; then
+    # head-bucket returned no error → bucket still exists. Hard-fail to surface drift.
+    fail "sanity: bucket $bucket on $target still exists after cleanup_workload (head-bucket output: $code)"
+  fi
+}
+
+# -----------------------------------------------------------------------------
 # Workload runners (warp invocations)
 # -----------------------------------------------------------------------------
 
@@ -258,11 +534,7 @@ workload_put() {
       "$p50" "$p95" "$p99" "$mbps" "$ops" "$errs" "$duration"
   done
 
-  note "cleanup bucket $bucket"
-  AWS_ACCESS_KEY_ID="$creds_ak" AWS_SECRET_ACCESS_KEY="$creds_sk" AWS_DEFAULT_REGION=us-east-1 \
-    aws --endpoint-url "$endpoint" s3 rm "s3://$bucket" --recursive >/dev/null 2>&1 || true
-  AWS_ACCESS_KEY_ID="$creds_ak" AWS_SECRET_ACCESS_KEY="$creds_sk" AWS_DEFAULT_REGION=us-east-1 \
-    aws --endpoint-url "$endpoint" s3api delete-bucket --bucket "$bucket" >/dev/null 2>&1 || true
+  cleanup_workload "$target" "$workload"
 }
 
 # -----------------------------------------------------------------------------
@@ -339,7 +611,9 @@ while (($#)); do
     --runs=*) RUNS="${1#*=}" ;;
     --report) MODE="report" ;;
     --extract-rgw-creds) MODE="extract-rgw-creds" ;;
-    -h|--help) sed -n '1,40p' "$0"; exit 0 ;;
+    --preflight) MODE="preflight" ;;
+    --skip-preflight) SKIP_PREFLIGHT=1 ;;
+    -h|--help) sed -n '1,55p' "$0"; exit 0 ;;
     --) shift; break ;;
     -*) abort "unknown flag: $1" ;;
     *) POSITIONAL+=("$1") ;;
@@ -347,15 +621,22 @@ while (($#)); do
   shift
 done
 
-ensure_tool
-
 case "$MODE" in
   report)
+    ensure_tool
     do_report
     exit 0
     ;;
   extract-rgw-creds)
     do_extract_rgw_creds
+    exit 0
+    ;;
+  preflight)
+    TARGET="${POSITIONAL[0]:-both}"
+    extract_strata_creds
+    [[ "$TARGET" == "rgw" || "$TARGET" == "both" ]] && extract_rgw_creds
+    preflight_check "$TARGET"
+    note "pre-flight OK"
     exit 0
     ;;
   run)
@@ -365,6 +646,7 @@ case "$MODE" in
     ;;
 esac
 
+ensure_tool
 extract_strata_creds
 [[ "$TARGET" == "rgw" || "$TARGET" == "both" ]] && extract_rgw_creds
 
@@ -390,6 +672,16 @@ if [[ "$TARGET" == "rgw" || "$TARGET" == "both" ]]; then
   fi
 fi
 
+# Single-cluster mode (US-003) — flip BEFORE preflight so the data_backend
+# grep covers the restarted strata-a logs.
+apply_single_cluster_mode
+
+if [[ "$SKIP_PREFLIGHT" != "1" ]]; then
+  preflight_check "$TARGET"
+else
+  note "pre-flight checks skipped (SKIP_PREFLIGHT=1 / --skip-preflight)"
+fi
+
 note "results file: $RESULTS_FILE"
 
 case "$TARGET" in
@@ -398,7 +690,9 @@ case "$TARGET" in
     ;;
   both)
     dispatch_workload "$WORKLOAD" "strata" "$CONCURRENCY" "$RUNS"
+    assert_bucket_absent "strata" "$WORKLOAD"
     dispatch_workload "$WORKLOAD" "rgw" "$CONCURRENCY" "$RUNS"
+    assert_bucket_absent "rgw" "$WORKLOAD"
     ;;
   *)
     abort "target must be one of: strata, rgw, both (got '$TARGET')"
