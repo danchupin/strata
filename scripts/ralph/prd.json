@@ -75,8 +75,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped: workload_get (warp get auto-seeds bucket to --objects=N), warp_put_runs / warp_get_runs inner loops factored out of workload_put for sweep reuse, workload_put_sweep / workload_get_sweep iterate {1,8,32,128} default sweep with single bucket per workload (cleanup_workload at end of workload only — PRD 'light cleanup between conc points'). dispatch_workload extended: put-small/put-medium/get-small/get-medium each support single --concurrency=N (US-002 backwards compat) OR auto-sweep when --concurrency unset. --concurrency-sweep=A,B,C flag for custom sweep; --concurrency / --concurrency-sweep mutually exclusive (ABORT). do_report extended with per-workload pivot grid (rows=conc, cols=Strata p99 / RGW p99 / ratio (Strata/RGW) / combined p99 stddev sqrt(ss^2+rs^2)). Makefile bench-rgw-comparison sequences put-small/put-medium/get-small/get-medium then --report. Locally verified against strata: put-small sweep c=1/c=4 × 5s/1run JSONL emit; get-small sweep prepare phase + GET block parse (Report: GET. anchor); put-medium 1MiB at conc=2 → 93.8 MB/s; --report pivot rendered ratio 2.406 + combined sd 1.414 on synthetic 2-target jsonl. RGW-side sweep deferred (US-001 rebootstrap-safety issue documented in US-002 notes; surface as P3 ROADMAP entry in US-012). vet+test green."
     },
     {
       "id": "US-005",

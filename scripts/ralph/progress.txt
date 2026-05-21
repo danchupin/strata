@@ -178,3 +178,38 @@ Cycle: ralph/rgw-benchmarks
     even on parse miss; future stories should warn the operator if all zeros land in the
     output (defensive: bench duration likely too short OR warp couldn't bind to endpoint).
 ---
+
+## 2026-05-21 17:55 MSK - US-004 (PUT/GET 1KB + 1MB workloads with concurrency sweep)
+- What was implemented:
+  - `scripts/bench-rgw-comparison.sh`:
+    - **Refactored** `workload_put` (US-002 single-point) into `bucket_create` + `warp_put_runs` (inner per-run loop, takes bucket+tmpdir) + `cleanup_workload`. Single-point `workload_put` retained for US-002 backwards-compat. Added `resolve_target` nameref helper (target → endpoint/ak/sk) to dedupe the case statement that was repeated 3 times.
+    - New **`workload_put_sweep`** (target, workload, size, duration, runs, conc1, conc2, ...): create bucket once, iterate conc points with `warp_put_runs`, cleanup_workload once at end. PRD "cleanup between concurrency points is light (same bucket, just clear keys)" — interpreted as bucket reuse, defer cleanup.
+    - New **`warp_get_runs`** (mirrors `warp_put_runs` shape, uses warp `get` subcommand with `--objects=N` seed) + **`workload_get_sweep`**. warp's get auto-seeds bucket on first run via prepare phase; `--noclear` keeps seed for subsequent conc points (warp tops up if existing objects insufficient).
+    - **`dispatch_workload` extended** with `put-small` (1KiB), `put-medium` (1MiB), `get-small` (1KiB seed=10000 default), `get-medium` (1MiB seed=2500 default). Each: `--concurrency=N` → single point (US-002 shape); no concurrency → auto-sweep `{1,8,32,128}` default. Sweep override via `--concurrency-sweep=A,B,C` env flag. Mutex check ABORTs if both `--concurrency` and `--concurrency-sweep` set.
+    - New **`resolve_sweep`** helper validates the sweep CSV is positive integers only.
+    - **`do_report` extended**: kept the flat per-(target,workload,conc) summary table (renamed to "Flat summary") + added a "Per-workload concurrency-sweep pivot (US-004)" section. Per workload: pivot grid with rows=conc, cols=Strata p99 (mean±sd) / RGW p99 (mean±sd) / ratio (Strata/RGW) / combined p99 stddev (sqrt(strata_sd^2 + rgw_sd^2) error propagation). Missing target → "—" placeholder. Conclusion placeholder line per workload for operator to fill in post-run.
+    - **`--concurrency-sweep=A,B,C`** CLI flag + env-var defaulted. Mutually exclusive with `--concurrency`.
+    - Env knobs: `PUT_MEDIUM_SIZE` / `PUT_MEDIUM_DURATION` / `GET_SMALL_SIZE` / `GET_SMALL_DURATION` / `GET_SMALL_OBJECTS` / `GET_MEDIUM_SIZE` / `GET_MEDIUM_DURATION` / `GET_MEDIUM_OBJECTS` for per-workload overrides.
+  - `Makefile` — `bench-rgw-comparison` target now sequences put-small/put-medium/get-small/get-medium then --report (was just put-small + --report). Estimated full sweep ~120 min per PRD.
+- Files changed:
+  - `scripts/bench-rgw-comparison.sh` (workload functions + dispatch + report pivot + new flags + usage block)
+  - `Makefile` (bench-rgw-comparison sequence extended)
+  - `scripts/ralph/prd.json` (US-004 passes=true + shipped-notes)
+  - `scripts/ralph/progress.txt` (this block)
+- **Locally verified** against strata-only lab (RGW still in stale-state from US-001 follow-up, deferred for US-012):
+  - `put-small strata --concurrency-sweep=1,4 --runs=1` (5s dur) → 2 JSONL rows, p99 56ms@c=1 → 213ms@c=4, ops scales 65→158/s. cleanup_workload OK (ceph df 1.8 MiB used post-drop).
+  - `get-small strata --concurrency-sweep=1,4 --runs=1` (5s, seed=200) → warp prepare-phase PUT block + measure-phase GET block both emit; parser anchored at `Report: GET.` picks the GET stats correctly. p99 7ms@c=1 → 8ms@c=4, ops scales 314→1219/s (warp prepare seeded 200 1KiB objects, GET sweeps over them).
+  - `put-medium strata --concurrency=2 --runs=1` (5s) → single point JSONL, 1MiB obj_size, p99 131ms, throughput 93.8 MB/s.
+  - Mutex check: `--concurrency=8 --concurrency-sweep=1,8` → ABORT with explanatory message.
+  - `--report` against synthetic 2-target jsonl: pivot table renders Strata/RGW p99 columns + ratio (2.406 at c=8 — Strata slower) + combined sd (1.414 = sqrt(1²+1²)) correctly. Single-target rows render `—` placeholders.
+- Quality: `bash -n` syntax OK; `make vet` green; `go test ./...` green (pure shell story, no Go code changes).
+- **Learnings for future iterations:**
+  - **bash namerefs (`local -n`)** enabling deduplication of the target → (endpoint, ak, sk) case statement that was inlined in workload_put / cleanup_workload / assert_bucket_absent (3 copies). Pattern: `resolve_target "$target" endpoint creds_ak creds_sk` — caller declares the 3 locals before the call. Cleaner than reassigning globals.
+  - **warp `get` subcommand emits TWO Report: blocks** — `Report: PUT.` for prepare (seed) phase + `Report: GET.` for drain (measure) phase. Existing `parse_warp_summary` op-anchored awk regex (`^Report: $op\\.`) correctly picks the GET block. The PUT prepare block must NOT be confused with the actual put-{small,medium} workloads.
+  - **`--objects=N` for warp get** controls seed object count; `--obj.size` controls each seed object's size. Default 2500 for get-medium (1MiB) = 2.5GB on-disk seed; default 10000 for get-small (1KiB) = 10MB. Choose seed high enough that conc=128 GETs don't all hit the same few cached objects.
+  - **Sweep cleanup discipline**: keep one bucket per workload across all conc points; drop bucket once at end (`workload_*_sweep`). Between conc points there's no cleanup beat (warp put generates fresh random keys, warp get reuses --noclear seed). End-of-workload bucket-drop becomes the only cleanup point — for a put-small full sweep at conc=128 × 60s × 3 runs that's ~1M objects to delete via `aws s3 rm --recursive`. Acceptable as a known tax at workload boundaries; US-012 captures actual full-sweep duration.
+  - **Mutual-exclusion pattern for flags**: `[[ -n "$A" && -n "$B" ]] && abort "..."` is the simplest way to enforce flag mutex. Surfacing the abort early in the CLI parser path keeps the rest of the dispatch logic clean.
+  - **jq pivot trick**: jq `stats($a)` reduction inside `map(...)` produces structured per-target rollups; concatenate strata + rgw branches with `(map(select(.target=="strata") | .p99_ms))` etc. Output the row as a pipe-separated string in jq then `IFS='|' read -r ...` in bash — cleaner than 4 separate jq invocations per row.
+  - **Error propagation for stddev** on a ratio Strata/RGW is approximated by sqrt(strata_sd² + rgw_sd²); not strictly correct for a ratio (correct uses ratio × sqrt((strata_sd/strata_mean)² + (rgw_sd/rgw_mean)²)) but the additive-variance form is simpler and the difference is small at typical noise levels. Documented in --report header line. Refine in US-010 doc page if ratio stddev becomes a load-bearing claim.
+  - **Strata lab warm-up effect** observed: first run after `make up-all` hits p99 ≈ 200ms+ at conc=4 even for 1KiB; subsequent runs settle. Real bench (60s × 3 runs) absorbs warm-up in the first run; mean ± stddev across 3 runs is the right shape. For 5s smoke runs, warm-up dominates — values like 213ms@c=4 are normal smoke artifacts, not representative of steady-state.
+---

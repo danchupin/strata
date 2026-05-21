@@ -1,33 +1,44 @@
 #!/usr/bin/env bash
-# Strata vs RGW comparison bench (US-002 of ralph/rgw-benchmarks).
+# Strata vs RGW comparison bench (US-002..US-004 of ralph/rgw-benchmarks).
 #
 # Drives minio/warp against Strata (TiKV-default lab) and a side-by-side
 # RGW container (deploy/docker/docker-compose.yml `bench-rgw` profile) so
 # operators can validate the README "drop-in RGW replacement" claim.
 #
-# This story (US-002) ships the scaffold + reference workload `put-small`
-# (1KiB PUT × 60s × 8 concurrent × 3 runs). Subsequent stories US-004..US-008
-# extend with concurrency sweeps + larger object sizes + multipart + list +
-# range/delete/IAM workloads on top of the same scaffold.
+# US-002 shipped the scaffold + reference workload `put-small`. US-004 adds
+# put-medium / get-small / get-medium plus a concurrency sweep ({1, 8, 32, 128}
+# default) per workload. Subsequent stories US-005..US-008 extend with larger
+# objects, multipart, list, and range/delete/IAM workloads on top.
 #
 # Usage:
-#   bash scripts/bench-rgw-comparison.sh <workload> <target> [--concurrency=N] [--runs=N]
+#   bash scripts/bench-rgw-comparison.sh <workload> <target> [--concurrency=N | --concurrency-sweep=A,B,C] [--runs=N]
 #   bash scripts/bench-rgw-comparison.sh --report
 #   bash scripts/bench-rgw-comparison.sh --extract-rgw-creds
 #   bash scripts/bench-rgw-comparison.sh --preflight
 #
 # Args:
-#   <workload>  one of: put-small (US-002 reference). Others added in US-004+.
+#   <workload>  one of:
+#                 put-small   1KiB PUT (US-002 reference)
+#                 put-medium  1MiB PUT (US-004)
+#                 get-small   1KiB GET, warp auto-seeds (US-004)
+#                 get-medium  1MiB GET, warp auto-seeds (US-004)
+#               (US-005..US-008 add put-large, get-large, multipart-5g, list, range-get, delete, iam-auth)
 #   <target>    one of: strata, rgw, both
 #
 # Flags:
-#   --concurrency=N   override default concurrency for the workload (default 8 for put-small)
-#   --runs=N          number of repeated runs (default 3)
-#   --report          aggregate jsonl into markdown table on stdout (no run)
-#   --extract-rgw-creds   helper: `docker compose exec rgw cat /etc/strata-bench/rgw-creds.env`
-#                          pipes the bench user access/secret to ./rgw-creds.env on the host
-#   --preflight       run pre-flight checks only and exit (US-003)
-#   --skip-preflight  skip pre-flight checks (for dry-run / dev iteration)
+#   --concurrency=N           single concurrency point (default 8). Disables sweep.
+#   --concurrency-sweep=A,B,C concurrency sweep points (default "1,8,32,128" for US-004 workloads).
+#                              Sweep runs sequentially per workload; bucket reused across conc
+#                              points; cleanup_workload runs once at end of workload.
+#   --runs=N                  number of repeated runs per (workload, concurrency) point (default 3)
+#   --report                  aggregate jsonl into markdown tables on stdout (no run).
+#                              Emits the flat per-(target,workload,conc) summary table PLUS a
+#                              per-workload pivot grid (rows=conc, cols=Strata p99 / RGW p99 /
+#                              ratio / combined stddev) for any workload with both targets present.
+#   --extract-rgw-creds       helper: `docker compose exec rgw cat /etc/strata-bench/rgw-creds.env`
+#                              pipes the bench user access/secret to ./rgw-creds.env on the host
+#   --preflight               run pre-flight checks only and exit (US-003)
+#   --skip-preflight          skip pre-flight checks (for dry-run / dev iteration)
 #
 # Env:
 #   STRATA_ENDPOINT_URL          default http://localhost:9999
@@ -476,33 +487,49 @@ assert_bucket_absent() {
 
 # -----------------------------------------------------------------------------
 # Workload runners (warp invocations)
+#
+# Factored into bucket lifecycle + inner per-run loops + cleanup. This allows
+# a concurrency sweep (US-004) to reuse the same bucket across all conc points
+# instead of paying create/teardown per point — PRD specifies "cleanup between
+# concurrency points is light (same bucket, just clear keys)". For PUT this
+# means keys accumulate across the sweep (warp generates fresh random keys per
+# invocation, no overlap). For GET, warp's `get` subcommand auto-seeds the
+# bucket on first run and reuses existing objects when --noclear is set.
 # -----------------------------------------------------------------------------
 
-# Single put workload: 1KiB × duration × concurrency × runs.
-# Args: target workload object_size_label concurrency duration runs
-workload_put() {
-  local target="$1" workload="$2" size_label="$3" concurrency="$4" duration="$5" runs="$6"
-  local endpoint creds_ak creds_sk
+# Resolve target → (endpoint, ak, sk) tuple. Sets endpoint/creds_ak/creds_sk
+# via nameref to avoid global pollution.
+resolve_target() {
+  local target="$1"
+  local -n _endpoint="$2" _ak="$3" _sk="$4"
   case "$target" in
-    strata) endpoint="$STRATA_ENDPOINT_URL"; creds_ak="$STRATA_AK"; creds_sk="$STRATA_SK" ;;
-    rgw)    endpoint="$RGW_ENDPOINT_URL";    creds_ak="$RGW_AK";    creds_sk="$RGW_SK" ;;
+    strata) _endpoint="$STRATA_ENDPOINT_URL"; _ak="$STRATA_AK"; _sk="$STRATA_SK" ;;
+    rgw)    _endpoint="$RGW_ENDPOINT_URL";    _ak="$RGW_AK";    _sk="$RGW_SK" ;;
     *) abort "unknown target: $target" ;;
   esac
-  local host
-  host="$(url_host "$endpoint")"
+}
 
-  local bucket="bench-${workload}-${target}"
-  local tmpdir
-  tmpdir="$(mktemp -d)"
-  trap "rm -rf $tmpdir" RETURN
-
+bucket_create() {
+  local target="$1" bucket="$2"
+  local endpoint creds_ak creds_sk
+  resolve_target "$target" endpoint creds_ak creds_sk
   note "creating bucket $bucket on $target ($endpoint)"
   AWS_ACCESS_KEY_ID="$creds_ak" AWS_SECRET_ACCESS_KEY="$creds_sk" AWS_DEFAULT_REGION=us-east-1 \
     aws --endpoint-url "$endpoint" s3api create-bucket --bucket "$bucket" >/dev/null 2>&1 || true
+}
+
+# Inner: N warp put runs against an existing bucket at one concurrency point.
+# Args: target workload size_label concurrency duration runs bucket tmpdir
+warp_put_runs() {
+  local target="$1" workload="$2" size_label="$3" concurrency="$4" duration="$5" runs="$6" bucket="$7" tmpdir="$8"
+  local endpoint creds_ak creds_sk
+  resolve_target "$target" endpoint creds_ak creds_sk
+  local host
+  host="$(url_host "$endpoint")"
 
   for run in $(seq 1 "$runs"); do
-    local summary_file="$tmpdir/warp-$target-$workload-run$run.txt"
-    local benchdata_file="$tmpdir/warp-$target-$workload-run$run.bd"
+    local summary_file="$tmpdir/warp-$target-$workload-c$concurrency-run$run.txt"
+    local benchdata_file="$tmpdir/warp-$target-$workload-c$concurrency-run$run.bd"
     note "run $run/$runs: warp put $target obj=$size_label conc=$concurrency dur=${duration}s"
     # warp prints summary to stdout (--analyze.out is broken in v(dev)
     # 2026-05-21 — never writes the FILE arg). Capture stdout to
@@ -533,7 +560,108 @@ workload_put() {
     emit_row "$target" "$workload" "$size_label" "$concurrency" "$run" \
       "$p50" "$p95" "$p99" "$mbps" "$ops" "$errs" "$duration"
   done
+}
 
+# Inner: N warp get runs against an existing bucket at one concurrency point.
+# warp's `get` subcommand auto-seeds the bucket up to --objects=N (default
+# 2500) of size --obj.size, then drains for --duration at --concurrent. With
+# --noclear set, the seed is reused across runs / conc points (warp tops up
+# only if existing objects insufficient).
+#
+# Args: target workload size_label concurrency duration runs bucket tmpdir seed_objects
+warp_get_runs() {
+  local target="$1" workload="$2" size_label="$3" concurrency="$4" duration="$5" runs="$6" bucket="$7" tmpdir="$8" seed_objects="$9"
+  local endpoint creds_ak creds_sk
+  resolve_target "$target" endpoint creds_ak creds_sk
+  local host
+  host="$(url_host "$endpoint")"
+
+  for run in $(seq 1 "$runs"); do
+    local summary_file="$tmpdir/warp-$target-$workload-c$concurrency-run$run.txt"
+    local benchdata_file="$tmpdir/warp-$target-$workload-c$concurrency-run$run.bd"
+    note "run $run/$runs: warp get $target obj=$size_label conc=$concurrency dur=${duration}s seed=$seed_objects"
+    set +e
+    "$BENCH_TOOL_PATH" get \
+      --host="$host" \
+      --access-key="$creds_ak" \
+      --secret-key="$creds_sk" \
+      --bucket="$bucket" \
+      --obj.size="$size_label" \
+      --objects="$seed_objects" \
+      --concurrent="$concurrency" \
+      --duration="${duration}s" \
+      --noclear \
+      --benchdata="$benchdata_file" \
+      --no-color \
+      > "$summary_file" 2>&1
+    local warp_rc=$?
+    set -e
+    if [[ "$warp_rc" -ne 0 ]]; then
+      note "WARN: warp get failed on $target run $run (rc=$warp_rc) — see $summary_file"
+      tail -5 "$summary_file" >&2 || true
+      continue
+    fi
+
+    # warp get prints both Report: PUT. (prepare phase) and Report: GET.
+    # (measurement phase). Parser anchors at start-of-line on "Report: GET."
+    # so the prepare-phase PUT block is skipped.
+    read -r p50 p95 p99 mbps ops errs < <(parse_warp_summary "$summary_file" "GET") || true
+    emit_row "$target" "$workload" "$size_label" "$concurrency" "$run" \
+      "$p50" "$p95" "$p99" "$mbps" "$ops" "$errs" "$duration"
+  done
+}
+
+# Single-point PUT workload (US-002 shape — retained for backwards compat).
+# Args: target workload object_size_label concurrency duration runs
+workload_put() {
+  local target="$1" workload="$2" size_label="$3" concurrency="$4" duration="$5" runs="$6"
+  local bucket="bench-${workload}-${target}"
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  trap "rm -rf $tmpdir" RETURN
+
+  bucket_create "$target" "$bucket"
+  warp_put_runs "$target" "$workload" "$size_label" "$concurrency" "$duration" "$runs" "$bucket" "$tmpdir"
+  cleanup_workload "$target" "$workload"
+}
+
+# Sweep PUT workload across multiple concurrency points (US-004).
+# Args: target workload object_size_label duration runs <conc1 conc2 ...>
+workload_put_sweep() {
+  local target="$1" workload="$2" size_label="$3" duration="$4" runs="$5"
+  shift 5
+  local concs=("$@")
+  local bucket="bench-${workload}-${target}"
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  trap "rm -rf $tmpdir" RETURN
+
+  bucket_create "$target" "$bucket"
+  note "sweep PUT: $target / $workload / concs=${concs[*]} / dur=${duration}s × runs=$runs"
+  local c
+  for c in "${concs[@]}"; do
+    warp_put_runs "$target" "$workload" "$size_label" "$c" "$duration" "$runs" "$bucket" "$tmpdir"
+  done
+  cleanup_workload "$target" "$workload"
+}
+
+# Sweep GET workload across multiple concurrency points (US-004).
+# Args: target workload object_size_label duration runs seed_objects <conc1 conc2 ...>
+workload_get_sweep() {
+  local target="$1" workload="$2" size_label="$3" duration="$4" runs="$5" seed_objects="$6"
+  shift 6
+  local concs=("$@")
+  local bucket="bench-${workload}-${target}"
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  trap "rm -rf $tmpdir" RETURN
+
+  bucket_create "$target" "$bucket"
+  note "sweep GET: $target / $workload / concs=${concs[*]} / dur=${duration}s × runs=$runs / seed=$seed_objects"
+  local c
+  for c in "${concs[@]}"; do
+    warp_get_runs "$target" "$workload" "$size_label" "$c" "$duration" "$runs" "$bucket" "$tmpdir" "$seed_objects"
+  done
   cleanup_workload "$target" "$workload"
 }
 
@@ -541,19 +669,94 @@ workload_put() {
 # Workload dispatch
 # -----------------------------------------------------------------------------
 
+# Resolve sweep array from $CONCURRENCY_SWEEP (comma-separated). Falls back
+# to the 1/8/32/128 US-004 default if unset / empty.
+resolve_sweep() {
+  local raw="${1:-${CONCURRENCY_SWEEP:-1,8,32,128}}"
+  local -n _arr="$2"
+  IFS=',' read -ra _arr <<< "$raw"
+  if [[ "${#_arr[@]}" -eq 0 ]]; then
+    abort "concurrency sweep parsed to empty list from '$raw'"
+  fi
+  local c
+  for c in "${_arr[@]}"; do
+    if [[ ! "$c" =~ ^[0-9]+$ ]] || (( c < 1 )); then
+      abort "concurrency sweep value '$c' not a positive integer"
+    fi
+  done
+}
+
 dispatch_workload() {
   local workload="$1" target="$2" concurrency="$3" runs="$4"
+  local r="${runs:-3}"
   case "$workload" in
     put-small)
-      # 1KiB × 60s × 8 concurrent × 3 runs (default — overridable)
+      # 1KiB PUT. US-004 default = concurrency sweep {1,8,32,128} × 60s × 3 runs.
+      # Single-point shape (US-002 backwards compat) when --concurrency=N set.
       local size_label="${PUT_SMALL_SIZE:-1KiB}"
       local duration="${PUT_SMALL_DURATION:-60}"
-      local conc="${concurrency:-8}"
-      local r="${runs:-3}"
-      workload_put "$target" "put-small" "$size_label" "$conc" "$duration" "$r"
+      if [[ -n "$concurrency" ]]; then
+        workload_put "$target" "put-small" "$size_label" "$concurrency" "$duration" "$r"
+      else
+        local sweep_arr=()
+        resolve_sweep "" sweep_arr
+        workload_put_sweep "$target" "put-small" "$size_label" "$duration" "$r" "${sweep_arr[@]}"
+      fi
+      ;;
+    put-medium)
+      # 1MiB PUT. US-004: concurrency sweep {1,8,32,128} × 60s × 3 runs.
+      local size_label="${PUT_MEDIUM_SIZE:-1MiB}"
+      local duration="${PUT_MEDIUM_DURATION:-60}"
+      if [[ -n "$concurrency" ]]; then
+        workload_put "$target" "put-medium" "$size_label" "$concurrency" "$duration" "$r"
+      else
+        local sweep_arr=()
+        resolve_sweep "" sweep_arr
+        workload_put_sweep "$target" "put-medium" "$size_label" "$duration" "$r" "${sweep_arr[@]}"
+      fi
+      ;;
+    get-small)
+      # 1KiB GET (warp auto-seeds bucket to --objects=N).
+      # US-004: concurrency sweep {1,8,32,128} × 60s × 3 runs.
+      # Seed sized to absorb high-concurrency draws without trivial cache hits
+      # (10000 objects = 10MB on-disk for 1KiB shape).
+      local size_label="${GET_SMALL_SIZE:-1KiB}"
+      local duration="${GET_SMALL_DURATION:-60}"
+      local seed="${GET_SMALL_OBJECTS:-10000}"
+      if [[ -n "$concurrency" ]]; then
+        local bucket="bench-get-small-${target}"
+        local tmpdir; tmpdir="$(mktemp -d)"
+        trap "rm -rf $tmpdir" RETURN
+        bucket_create "$target" "$bucket"
+        warp_get_runs "$target" "get-small" "$size_label" "$concurrency" "$duration" "$r" "$bucket" "$tmpdir" "$seed"
+        cleanup_workload "$target" "get-small"
+      else
+        local sweep_arr=()
+        resolve_sweep "" sweep_arr
+        workload_get_sweep "$target" "get-small" "$size_label" "$duration" "$r" "$seed" "${sweep_arr[@]}"
+      fi
+      ;;
+    get-medium)
+      # 1MiB GET. US-004: concurrency sweep {1,8,32,128} × 60s × 3 runs.
+      # Seed default 2500 objects = 2.5GB on-disk.
+      local size_label="${GET_MEDIUM_SIZE:-1MiB}"
+      local duration="${GET_MEDIUM_DURATION:-60}"
+      local seed="${GET_MEDIUM_OBJECTS:-2500}"
+      if [[ -n "$concurrency" ]]; then
+        local bucket="bench-get-medium-${target}"
+        local tmpdir; tmpdir="$(mktemp -d)"
+        trap "rm -rf $tmpdir" RETURN
+        bucket_create "$target" "$bucket"
+        warp_get_runs "$target" "get-medium" "$size_label" "$concurrency" "$duration" "$r" "$bucket" "$tmpdir" "$seed"
+        cleanup_workload "$target" "get-medium"
+      else
+        local sweep_arr=()
+        resolve_sweep "" sweep_arr
+        workload_get_sweep "$target" "get-medium" "$size_label" "$duration" "$r" "$seed" "${sweep_arr[@]}"
+      fi
       ;;
     *)
-      abort "workload '$workload' not implemented yet (US-002 ships put-small; US-004+ add others)"
+      abort "workload '$workload' not implemented yet (US-002 ships put-small; US-004 adds put-medium/get-small/get-medium; US-005+ adds put-large/get-large/multipart-5g/list/range-get/delete/iam-auth)"
       ;;
   esac
 }
@@ -570,6 +773,8 @@ do_report() {
   echo "# rgw-comparison report ($DATE_TAG)"
   echo ""
   echo "Source: \`$RESULTS_FILE\`"
+  echo ""
+  echo "## Flat summary — per (target, workload, concurrency) point"
   echo ""
 
   # Group by (target, workload, concurrency) — emit mean ± stddev per group.
@@ -594,6 +799,65 @@ do_report() {
       | "| \($tgt) | \($wl) | \($sz) | \($conc) | \(.runs) | \(.p50|tostring|.[:6])±\(.p50sd|tostring|.[:5]) | \(.p99|tostring|.[:6])±\(.p99sd|tostring|.[:5]) | \(.mbps|tostring|.[:6])±\(.mbpsd|tostring|.[:5]) | \(.ops|tostring|.[:6])±\(.opssd|tostring|.[:5]) |"
     ' "$RESULTS_FILE"
   done <<< "$keys"
+
+  echo ""
+  echo "## Per-workload concurrency-sweep pivot (US-004)"
+  echo ""
+  echo "One block per workload. Rows = concurrency point; cols = Strata p99 / RGW p99 / ratio (Strata/RGW) / combined p99 stddev (sqrt(strata² + rgw²), error propagation). ratio > 1 = Strata slower; ratio < 1 = Strata faster."
+  echo ""
+
+  # Build the unique workload list and emit one pivot per workload that has
+  # both targets present (single-target workloads get a flat strata-only or
+  # rgw-only table, with ratio/combined-sd columns left blank).
+  local workloads
+  workloads="$(jq -r '.workload' "$RESULTS_FILE" | sort -u)"
+  local wl
+  for wl in $workloads; do
+    [[ -z "$wl" ]] && continue
+    # Resolve object_size for the workload (use first row's size — workload
+    # is intentionally single-size per US-004 design).
+    local sz
+    sz="$(jq -r --arg wl "$wl" 'select(.workload==$wl) | .object_size' "$RESULTS_FILE" | head -1)"
+    echo "### ${wl} (object_size: ${sz})"
+    echo ""
+    printf '| concurrency | Strata p99 (ms, mean±sd) | RGW p99 (ms, mean±sd) | ratio (Strata/RGW) | combined p99 stddev |\n'
+    printf '|-------------|--------------------------|------------------------|--------------------|---------------------|\n'
+
+    local concs
+    concs="$(jq -r --arg wl "$wl" 'select(.workload==$wl) | .concurrency' "$RESULTS_FILE" | sort -un)"
+    local c
+    for c in $concs; do
+      [[ -z "$c" ]] && continue
+      # jq emits "<strata_p99>|<strata_sd>|<rgw_p99>|<rgw_sd>" or empty for
+      # missing target; bash assembles ratio + combined sd.
+      local row
+      row="$(jq -rs --arg wl "$wl" --argjson c "$c" '
+        def stats($a):
+          ($a | add / length) as $m
+          | { mean: $m,
+              sd: ($a | map(. - $m) | map(. * .) | add / length | sqrt) };
+        def fmt($s): if $s == null then "—"
+          else "\($s.mean|tostring|.[:6])±\($s.sd|tostring|.[:5])" end;
+        map(select(.workload==$wl and .concurrency==$c))
+        | (map(select(.target=="strata") | .p99_ms)) as $sp
+        | (map(select(.target=="rgw") | .p99_ms)) as $rp
+        | (if ($sp|length) > 0 then stats($sp) else null end) as $sstats
+        | (if ($rp|length) > 0 then stats($rp) else null end) as $rstats
+        | { sm: (if $sstats then $sstats.mean else null end),
+            ss: (if $sstats then $sstats.sd else null end),
+            rm: (if $rstats then $rstats.mean else null end),
+            rs: (if $rstats then $rstats.sd else null end) }
+        | (if .sm and .rm and .rm > 0 then (.sm/.rm) else null end) as $ratio
+        | (if .ss and .rs then (.ss*.ss + .rs*.rs | sqrt) else null end) as $combined
+        | "\($c)|\(if .sm then "\(.sm|tostring|.[:6])±\(.ss|tostring|.[:5])" else "—" end)|\(if .rm then "\(.rm|tostring|.[:6])±\(.rs|tostring|.[:5])" else "—" end)|\(if $ratio then ($ratio|tostring|.[:5]) else "—" end)|\(if $combined then ($combined|tostring|.[:5]) else "—" end)"
+      ' "$RESULTS_FILE")"
+      IFS='|' read -r pcol scol rcol ratiocol combinedcol <<< "$row"
+      printf '| %s | %s | %s | %s | %s |\n' "$pcol" "$scol" "$rcol" "$ratiocol" "$combinedcol"
+    done
+    echo ""
+    echo "_Conclusion_: <operator fills in after run — e.g. \"Strata 1KB PUT scales sub-linearly at c=128 vs RGW; both saturate around 4000 ops/sec on lima lab\"._"
+    echo ""
+  done
 }
 
 # -----------------------------------------------------------------------------
@@ -601,6 +865,7 @@ do_report() {
 # -----------------------------------------------------------------------------
 
 CONCURRENCY=""
+CONCURRENCY_SWEEP="${CONCURRENCY_SWEEP:-}"
 RUNS=""
 MODE="run"
 POSITIONAL=()
@@ -608,18 +873,23 @@ POSITIONAL=()
 while (($#)); do
   case "$1" in
     --concurrency=*) CONCURRENCY="${1#*=}" ;;
+    --concurrency-sweep=*) CONCURRENCY_SWEEP="${1#*=}" ;;
     --runs=*) RUNS="${1#*=}" ;;
     --report) MODE="report" ;;
     --extract-rgw-creds) MODE="extract-rgw-creds" ;;
     --preflight) MODE="preflight" ;;
     --skip-preflight) SKIP_PREFLIGHT=1 ;;
-    -h|--help) sed -n '1,55p' "$0"; exit 0 ;;
+    -h|--help) sed -n '1,60p' "$0"; exit 0 ;;
     --) shift; break ;;
     -*) abort "unknown flag: $1" ;;
     *) POSITIONAL+=("$1") ;;
   esac
   shift
 done
+
+if [[ -n "$CONCURRENCY" && -n "$CONCURRENCY_SWEEP" ]]; then
+  abort "--concurrency=N and --concurrency-sweep=A,B,C are mutually exclusive"
+fi
 
 case "$MODE" in
   report)

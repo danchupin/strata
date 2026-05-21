@@ -530,8 +530,9 @@ bench-rebalance-multi:
 
 # Strata vs RGW comparison sweep (US-002+ of ralph/rgw-benchmarks).
 # Drives minio/warp against both targets, capturing JSONL rows for the full
-# 8-workload set (US-004..US-008) once those land. US-002 ships the reference
-# `put-small` workload only — full sweep wired iteratively.
+# 8-workload set (US-004..US-008) once those land. US-002 shipped the reference
+# put-small workload; US-004 adds put-medium/get-small/get-medium with the
+# concurrency sweep {1, 8, 32, 128}. US-005..US-008 fold in as they land.
 #
 # Pre-reqs (operator):
 #   make up-all && make wait-strata-lab
@@ -542,6 +543,9 @@ bench-rebalance-multi:
 # Estimated full duration: ~120 min (per PRD). Operator-run-only — NOT CI.
 bench-rgw-comparison:
 	bash scripts/bench-rgw-comparison.sh put-small both
+	bash scripts/bench-rgw-comparison.sh put-medium both
+	bash scripts/bench-rgw-comparison.sh get-small both
+	bash scripts/bench-rgw-comparison.sh get-medium both
 	bash scripts/bench-rgw-comparison.sh --report
 
 # Hugo docs site (docs/site/). `docs-serve` runs the local dev preview on
