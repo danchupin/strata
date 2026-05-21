@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Concepts on Strata Documentation</title><link>https://danchupin.github.io/strata/concepts/</link><description>Recent content in Concepts on Strata Documentation</description><generator>Hugo</generator><language>en</language><atom:link href="https://danchupin.github.io/strata/concepts/index.xml" rel="self" type="application/rss+xml"/><item><title>S3 surface</title><link>https://danchupin.github.io/strata/concepts/s3-surface/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/concepts/s3-surface/</guid><description>&lt;h1 id="s3-surface"&gt;S3 surface&lt;a class="anchor" href="#s3-surface"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata speaks the AWS S3 REST API over HTTP. The goal is compatibility with
+the Amazon S3 client ecosystem — the same &lt;code&gt;aws s3&lt;/code&gt; / &lt;code&gt;aws s3api&lt;/code&gt; / &lt;code&gt;mc&lt;/code&gt;
+commands and the same SDK calls work against Strata with only the endpoint
+URL changed. Compatibility is measured against Ceph&amp;rsquo;s upstream &lt;code&gt;s3-tests&lt;/code&gt;
+suite; the running pass rate lives on the
+&lt;a href="https://danchupin.github.io/strata/s3-compatibility/"&gt;S3 Compatibility&lt;/a&gt; page.&lt;/p&gt;
+&lt;p&gt;The rest of this page introduces each major operation family. None of the
+details below depend on which metadata or data backend you pick — the S3
+surface is identical across backends.&lt;/p&gt;</description></item><item><title>Multi-cluster routing</title><link>https://danchupin.github.io/strata/concepts/multi-cluster/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/concepts/multi-cluster/</guid><description>&lt;h1 id="multi-cluster-routing"&gt;Multi-cluster routing&lt;a class="anchor" href="#multi-cluster-routing"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;A single Strata gateway can fan writes across multiple data clusters. The
+clusters can be Ceph RADOS pools, S3-compatible buckets in different regions
+or providers, or a mix. The routing decision happens on every &lt;code&gt;PutObject&lt;/code&gt;
+and works the same for chunked RADOS writes and S3-over-S3 pass-through.&lt;/p&gt;
+&lt;h2 id="the-two-layers"&gt;The two layers&lt;a class="anchor" href="#the-two-layers"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;Routing is decided by two independent inputs, evaluated in order:&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;Bucket placement policy.&lt;/strong&gt; A bucket can carry an explicit
+&lt;code&gt;Placement&lt;/code&gt; map — &lt;code&gt;{cluster-a: 70, cluster-b: 30}&lt;/code&gt; — set via
+&lt;code&gt;PUT /admin/v1/buckets/{name}/placement&lt;/code&gt;. When present, this policy wins.
+The gateway weighted-picks among the live clusters in the policy and
+never routes the bucket elsewhere.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Cluster weights.&lt;/strong&gt; When the bucket has no explicit policy, the gateway
+synthesizes a default policy from per-cluster weights set via
+&lt;code&gt;PUT /admin/v1/clusters/{id}/weight {weight: N}&lt;/code&gt;. Weights are integers
+in &lt;code&gt;[0, 100]&lt;/code&gt;; clusters with weight &lt;code&gt;0&lt;/code&gt; accept reads and explicit-policy
+writes but receive no new default-routed writes.&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;The two layers do not combine. If a bucket has an explicit placement, the
+cluster-weight wheel is ignored for that bucket.&lt;/p&gt;</description></item><item><title>Drain &amp; rebalance</title><link>https://danchupin.github.io/strata/concepts/drain-rebalance/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/concepts/drain-rebalance/</guid><description>&lt;h1 id="drain--rebalance"&gt;Drain &amp;amp; rebalance&lt;a class="anchor" href="#drain--rebalance"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Taking a data cluster out of rotation is a multi-step process: stop new
+writes, move existing bytes off, then remove the cluster from the
+configuration. Strata models this as an explicit lifecycle so operators can
+follow progress and abort partway through if needed.&lt;/p&gt;
+&lt;h2 id="lifecycle"&gt;Lifecycle&lt;a class="anchor" href="#lifecycle"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;pre class="mermaid"&gt;stateDiagram-v2
+ [*] --&amp;gt; pending: cluster added to env
+ pending --&amp;gt; live: activate
+ live --&amp;gt; draining_readonly: drain mode=readonly
+ live --&amp;gt; evacuating: drain mode=evacuate
+ draining_readonly --&amp;gt; evacuating: upgrade
+ draining_readonly --&amp;gt; live: undrain
+ evacuating --&amp;gt; live: undrain
+ evacuating --&amp;gt; removed: deregister
+ removed --&amp;gt; [*]&lt;/pre&gt;&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;&lt;code&gt;pending&lt;/code&gt;&lt;/strong&gt; — a new cluster ID was added to &lt;code&gt;STRATA_RADOS_CLUSTERS&lt;/code&gt; or
+&lt;code&gt;STRATA_S3_CLUSTERS&lt;/code&gt; but the gateway has not yet been told to route
+default traffic to it. Reads and explicit-policy writes work; default
+routing skips it.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;&lt;code&gt;live&lt;/code&gt;&lt;/strong&gt; — normal operating state. The cluster participates in the
+default-routing weight wheel.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;&lt;code&gt;draining_readonly&lt;/code&gt;&lt;/strong&gt; — operator-initiated stop-write drain. New PUTs
+refuse with &lt;code&gt;503 DrainRefused&lt;/code&gt;. Reads, deletes, and in-flight multipart
+sessions keep working. The rebalance worker does not actively move
+data — use this for maintenance windows.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;&lt;code&gt;evacuating&lt;/code&gt;&lt;/strong&gt; — operator-initiated decommission drain. Same write
+refusal as &lt;code&gt;draining_readonly&lt;/code&gt;, plus the rebalance worker scans the
+cluster and migrates chunks to the remaining clusters honoring each
+bucket&amp;rsquo;s placement policy. A live progress chip in the operator console
+shows bytes moved, estimated time remaining, and per-bucket breakdown.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;&lt;code&gt;removed&lt;/code&gt;&lt;/strong&gt; — cluster is gone. Excluded from every code path.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2 id="drain-refusal-semantics"&gt;Drain refusal semantics&lt;a class="anchor" href="#drain-refusal-semantics"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;While a cluster is draining, the gateway answers PUTs that would have
+landed on it with &lt;code&gt;503 DrainRefused&lt;/code&gt; and a &lt;code&gt;Retry-After: 300&lt;/code&gt; header. This
+is &lt;strong&gt;PUT only&lt;/strong&gt; — reads, deletes, HEAD, multipart &lt;code&gt;UploadPart&lt;/code&gt; /
+&lt;code&gt;CompleteMultipartUpload&lt;/code&gt; / &lt;code&gt;AbortMultipartUpload&lt;/code&gt;, and &lt;code&gt;ListObjects&lt;/code&gt;
+continue working against the draining cluster. The intent is stop-write,
+not stop-read.&lt;/p&gt;</description></item><item><title>Workers</title><link>https://danchupin.github.io/strata/concepts/workers/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/concepts/workers/</guid><description>&lt;h1 id="workers"&gt;Workers&lt;a class="anchor" href="#workers"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;A Strata deployment runs the same &lt;code&gt;strata&lt;/code&gt; binary in two modes: the gateway
+handles S3 traffic, and one or more &lt;strong&gt;workers&lt;/strong&gt; handle the background work
+that does not belong on the request path. Workers run inside the same
+binary you already deploy — set &lt;code&gt;STRATA_WORKERS=gc,lifecycle,…&lt;/code&gt; on a
+gateway replica and it spawns those loops alongside the HTTP listener.&lt;/p&gt;
+&lt;p&gt;Every worker is &lt;strong&gt;leader-elected&lt;/strong&gt;: across N gateway replicas, one replica
+acquires the lease for a given worker and runs it; the others stand by and
+take over if the leader&amp;rsquo;s lease expires. Leases are scoped per-worker, so
+different replicas can lead different workers — &lt;code&gt;gc&lt;/code&gt; on replica A,
+&lt;code&gt;lifecycle&lt;/code&gt; on replica B. Workers panic-restart on exponential backoff so a
+single iteration error never takes a worker offline permanently.&lt;/p&gt;</description></item></channel></rss>

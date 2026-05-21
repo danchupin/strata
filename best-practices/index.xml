@@ -5,28 +5,7 @@ It ships in the same binary as the gateway (&lt;code&gt;go:embed&lt;/code&gt;) a
 deploy.&lt;/p&gt;
 &lt;p&gt;This document is the Phase 1 (foundation) operator guide. Phase 2 (admin
 write actions) and Phase 3 (debug tooling — heatmaps, slow queries, OTel
-trace browser) ship in their own cycles.&lt;/p&gt;</description></item><item><title>Sizing</title><link>https://danchupin.github.io/strata/best-practices/sizing/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/sizing/</guid><description>&lt;h1 id="sizing"&gt;Sizing&lt;a class="anchor" href="#sizing"&gt;#&lt;/a&gt;&lt;/h1&gt;
-&lt;p&gt;Strata replicas are stateless gateways — they own no on-disk state, so
-sizing is a function of three signals: peak request rate (RPS), the
-working-set bytes the gateway holds in flight (RAM), and the cores the
-SigV4 + crypto path consumes (CPU). The metadata + data tiers
-(Cassandra / TiKV / RADOS) follow their own upstream sizing guides; this
-page covers the gateway tier and points operators at the upstream
-references.&lt;/p&gt;</description></item><item><title>Monitoring</title><link>https://danchupin.github.io/strata/best-practices/monitoring/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/monitoring/</guid><description>&lt;h1 id="monitoring"&gt;Monitoring&lt;a class="anchor" href="#monitoring"&gt;#&lt;/a&gt;&lt;/h1&gt;
-&lt;p&gt;Strata exposes three observability surfaces and one operator console
-embedded in the gateway binary:&lt;/p&gt;
-&lt;ol&gt;
-&lt;li&gt;&lt;strong&gt;Prometheus metrics&lt;/strong&gt; at &lt;code&gt;/metrics&lt;/code&gt; (every replica).&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;Structured slog logs&lt;/strong&gt; to stdout, JSON-shaped, correlated by
-&lt;code&gt;request_id&lt;/code&gt;.&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;OpenTelemetry traces&lt;/strong&gt; exported via OTLP/HTTP, sampled tail-first
-with an in-process ring buffer for failed-trace replay.&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;Audit log&lt;/strong&gt; in the metadata backend (&lt;code&gt;audit_log&lt;/code&gt; table or TiKV
-prefix), one row per state-changing request.&lt;/li&gt;
-&lt;/ol&gt;
-&lt;p&gt;This page covers the wire-up; the
-&lt;a href="https://danchupin.github.io/strata/architecture/observability/"&gt;Observability deep dive&lt;/a&gt;
-covers the implementation rationale.&lt;/p&gt;</description></item><item><title>Tracing</title><link>https://danchupin.github.io/strata/best-practices/tracing/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/tracing/</guid><description>&lt;h1 id="tracing"&gt;Tracing&lt;a class="anchor" href="#tracing"&gt;#&lt;/a&gt;&lt;/h1&gt;
+trace browser) ship in their own cycles.&lt;/p&gt;</description></item><item><title>Tracing</title><link>https://danchupin.github.io/strata/best-practices/tracing/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/tracing/</guid><description>&lt;h1 id="tracing"&gt;Tracing&lt;a class="anchor" href="#tracing"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;Strata emits OpenTelemetry spans across every meaningful tier of the
 request and worker paths. Each span carries the &lt;code&gt;strata.component&lt;/code&gt;
 attribute so an operator can filter the entire gateway path or the
@@ -34,7 +13,7 @@ entire worker path in one Jaeger query, and each worker iteration
 appears as a discrete trace so a slow / failing tick is easy to
 correlate with the meta + data ops it triggered.&lt;/p&gt;
 &lt;p&gt;The wire-up env vars + tail-sampler + ring buffer behaviour live in
-&lt;a href="https://danchupin.github.io/strata/best-practices/monitoring/#opentelemetry-tracing"&gt;Monitoring&lt;/a&gt;.
+&lt;a href="https://danchupin.github.io/strata/operate/monitoring/#opentelemetry-tracing"&gt;Monitoring&lt;/a&gt;.
 This page is the operator-facing reference for &lt;strong&gt;what spans exist,
 how they are named, and how to filter them&lt;/strong&gt;.&lt;/p&gt;</description></item><item><title>GC + lifecycle tuning</title><link>https://danchupin.github.io/strata/best-practices/gc-lifecycle-tuning/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/gc-lifecycle-tuning/</guid><description>&lt;h1 id="gc--lifecycle-tuning"&gt;GC + lifecycle tuning&lt;a class="anchor" href="#gc--lifecycle-tuning"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;The gc and lifecycle workers run inside every gateway replica. The
@@ -49,50 +28,14 @@ queue in parallel.&lt;/li&gt;
 &lt;/ul&gt;
 &lt;p&gt;Both layers compose: a 3-replica deploy with &lt;code&gt;STRATA_GC_SHARDS=3&lt;/code&gt; and
 per-replica &lt;code&gt;STRATA_GC_CONCURRENCY=64&lt;/code&gt; runs three independent fan-outs
-against disjoint shards.&lt;/p&gt;</description></item><item><title>Backup + restore</title><link>https://danchupin.github.io/strata/best-practices/backup-restore/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/backup-restore/</guid><description>&lt;h1 id="backup--restore"&gt;Backup + restore&lt;a class="anchor" href="#backup--restore"&gt;#&lt;/a&gt;&lt;/h1&gt;
-&lt;p&gt;Strata splits backup responsibility along the same tiers the gateway
-splits state into:&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;&lt;strong&gt;Metadata tier (Cassandra / TiKV):&lt;/strong&gt; the source of truth for
-bucket / object / IAM rows. Backed up via the upstream tooling for
-each backend.&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;Data tier (RADOS / S3-over-S3):&lt;/strong&gt; chunk bytes. Backed up via Ceph
-pool snapshots or the upstream S3 service&amp;rsquo;s native versioning /
-replication.&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;Cross-region replication (replicator worker):&lt;/strong&gt; ships object PUT /
-DELETE events to a peer Strata cluster in near-real time.&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;Inventory worker:&lt;/strong&gt; writes manifest.json + CSV.gz pairs that
-document every object in a bucket — useful as an audit ledger for
-external backup tooling.&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;This page is a backup-strategy overview. Implementation details live in
-&lt;a href="https://danchupin.github.io/strata/architecture/workers/"&gt;Architecture — Workers&lt;/a&gt; (the
-inventory + replicator workers) and the upstream docs for Ceph /
-Cassandra / TiKV.&lt;/p&gt;</description></item><item><title>Quotas + billing</title><link>https://danchupin.github.io/strata/best-practices/quotas-billing/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/quotas-billing/</guid><description>&lt;h1 id="quotas--billing"&gt;Quotas + billing&lt;a class="anchor" href="#quotas--billing"&gt;#&lt;/a&gt;&lt;/h1&gt;
+against disjoint shards.&lt;/p&gt;</description></item><item><title>Quotas + billing</title><link>https://danchupin.github.io/strata/best-practices/quotas-billing/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/quotas-billing/</guid><description>&lt;h1 id="quotas--billing"&gt;Quotas + billing&lt;a class="anchor" href="#quotas--billing"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;Strata enforces hard per-bucket and per-user storage quotas at PUT-validate
 time and emits a nightly per-(bucket, storage class) usage aggregate that an
 external invoice generator can consume. The shape mirrors AWS / RGW so a
 RADOS Gateway tenant migrating to Strata sees the same &lt;code&gt;QuotaExceeded&lt;/code&gt; 403
 on overage.&lt;/p&gt;
 &lt;p&gt;The cycle stops at the usage feed. Invoice ledger / payment integration
-lives in a separate ops-layer service that consumes &lt;code&gt;usage_aggregates&lt;/code&gt;.&lt;/p&gt;</description></item><item><title>Capacity planning</title><link>https://danchupin.github.io/strata/best-practices/capacity-planning/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/capacity-planning/</guid><description>&lt;h1 id="capacity-planning"&gt;Capacity planning&lt;a class="anchor" href="#capacity-planning"&gt;#&lt;/a&gt;&lt;/h1&gt;
-&lt;p&gt;Capacity on a Strata deploy splits across three independently-scaled
-tiers:&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;&lt;strong&gt;Gateway tier:&lt;/strong&gt; stateless replicas. Capacity = peak RPS / SigV4 +
-routing budget per replica. Scale horizontally; see
-&lt;a href="https://danchupin.github.io/strata/best-practices/sizing/"&gt;Sizing&lt;/a&gt;.&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;Metadata tier:&lt;/strong&gt; Cassandra / TiKV. Capacity = total object-row
-count × per-row overhead, plus the LWT / pessimistic-txn rate during
-writes.&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;Data tier:&lt;/strong&gt; RADOS / S3-over-S3. Capacity = total object bytes ×
-pool replication factor, plus chunk fan-out overhead.&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;This page covers the math; pair with
-&lt;a href="https://danchupin.github.io/strata/best-practices/backup-restore/"&gt;Backup + restore&lt;/a&gt; for
-the backup overhead and
-&lt;a href="https://danchupin.github.io/strata/best-practices/gc-lifecycle-tuning/"&gt;GC + lifecycle tuning&lt;/a&gt;
-for the drain rate.&lt;/p&gt;</description></item><item><title>S3 multi-cluster routing</title><link>https://danchupin.github.io/strata/best-practices/s3-multi-cluster/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/s3-multi-cluster/</guid><description>&lt;h1 id="s3-multi-cluster-routing"&gt;S3 multi-cluster routing&lt;a class="anchor" href="#s3-multi-cluster-routing"&gt;#&lt;/a&gt;&lt;/h1&gt;
+lives in a separate ops-layer service that consumes &lt;code&gt;usage_aggregates&lt;/code&gt;.&lt;/p&gt;</description></item><item><title>S3 multi-cluster routing</title><link>https://danchupin.github.io/strata/best-practices/s3-multi-cluster/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/s3-multi-cluster/</guid><description>&lt;h1 id="s3-multi-cluster-routing"&gt;S3 multi-cluster routing&lt;a class="anchor" href="#s3-multi-cluster-routing"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;The S3 data backend supports routing per storage class to a distinct
 &lt;code&gt;(cluster, bucket)&lt;/code&gt; pair. Two envs hold the full config — &lt;code&gt;STRATA_S3_CLUSTERS&lt;/code&gt;
 (JSON array of bucket-less cluster specs) and &lt;code&gt;STRATA_S3_CLASSES&lt;/code&gt; (JSON object
@@ -100,7 +43,18 @@ mapping storage class names to &lt;code&gt;{cluster, bucket}&lt;/code&gt; tuples
 a cluster requires a gateway restart; multi-replica deployments hide
 per-instance downtime via rolling restart.&lt;/p&gt;
 &lt;p&gt;This page is the operator guide. For the conceptual S3 backend overview see
-&lt;a href="https://danchupin.github.io/strata/architecture/backends/s3/"&gt;S3 data backend&lt;/a&gt;.&lt;/p&gt;</description></item><item><title>Placement + rebalance</title><link>https://danchupin.github.io/strata/best-practices/placement-rebalance/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/placement-rebalance/</guid><description>&lt;h1 id="placement--rebalance"&gt;Placement + rebalance&lt;a class="anchor" href="#placement--rebalance"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;a href="https://danchupin.github.io/strata/architecture/backends/s3/"&gt;S3 data backend&lt;/a&gt;.&lt;/p&gt;</description></item><item><title>Compliance</title><link>https://danchupin.github.io/strata/best-practices/compliance/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/compliance/</guid><description>&lt;h1 id="compliance"&gt;Compliance&lt;a class="anchor" href="#compliance"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata implements S3 Object Lock with COMPLIANCE and GOVERNANCE retention
+modes plus legal hold. COMPLIANCE rows are immutable until their
+&lt;code&gt;RetainUntilDate&lt;/code&gt; elapses — not even the bucket owner can shorten the
+retention window or delete the object early. The audit log records every
+COMPLIANCE-mode write and every expiry the lifecycle worker performs so
+auditors can grep &lt;code&gt;audit_log&lt;/code&gt; for retention-policy events with a single
+&lt;code&gt;action LIKE 'objectlock:%'&lt;/code&gt; clause.&lt;/p&gt;
+&lt;p&gt;This page is the operator workflow guide. For the audit-log shape see
+&lt;a href="https://danchupin.github.io/strata/operate/monitoring/#audit-log"&gt;Monitoring — audit log&lt;/a&gt;; for
+the underlying retention semantics see the &lt;a href="https://danchupin.github.io/strata/s3-compatibility/"&gt;S3 Compatibility&lt;/a&gt;
+matrix.&lt;/p&gt;</description></item><item><title>Placement + rebalance</title><link>https://danchupin.github.io/strata/best-practices/placement-rebalance/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/placement-rebalance/</guid><description>&lt;h1 id="placement--rebalance"&gt;Placement + rebalance&lt;a class="anchor" href="#placement--rebalance"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;Once you run more than one RADOS / S3 cluster behind a single Strata
 deployment, you also need to control &lt;strong&gt;which&lt;/strong&gt; cluster a bucket&amp;rsquo;s chunks
 land on and how to migrate old chunks when a new cluster joins or an
@@ -117,4 +71,12 @@ chunks A → B until the two match.&lt;/li&gt;
 &lt;p&gt;A bucket without a policy (&lt;code&gt;Placement == nil&lt;/code&gt;) behaves exactly as
 before — chunks land on the storage class&amp;rsquo;s default cluster. No
 migration, no schema bump, no behavior change. The policy + worker are
-both opt-in.&lt;/p&gt;</description></item></channel></rss>
+both opt-in.&lt;/p&gt;</description></item><item><title>Billing</title><link>https://danchupin.github.io/strata/best-practices/billing/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/billing/</guid><description>&lt;h1 id="billing"&gt;Billing&lt;a class="anchor" href="#billing"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata does not ship an invoice generator. It ships the &lt;strong&gt;inputs an
+external invoice generator can consume&lt;/strong&gt;: a daily per-(bucket, storage
+class) row in &lt;code&gt;usage_aggregates&lt;/code&gt; whose &lt;code&gt;byte_seconds&lt;/code&gt; field integrates
+the bucket-usage counter across the UTC day with the trapezoid rule.&lt;/p&gt;
+&lt;p&gt;This page documents the integration math, the sampling cadence, and the
+env knob that tunes accuracy vs. meta-backend cost. For the live quota
+counter, the &lt;code&gt;QuotaExceeded&lt;/code&gt; shape, the reconcile worker, and the admin
+API surface, see &lt;a href="https://danchupin.github.io/strata/best-practices/quotas-billing/"&gt;Quotas + billing&lt;/a&gt;.&lt;/p&gt;</description></item></channel></rss>

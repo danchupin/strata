@@ -1,22 +1,25 @@
 <?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Reference on Strata Documentation</title><link>https://danchupin.github.io/strata/reference/</link><description>Recent content in Reference on Strata Documentation</description><generator>Hugo</generator><language>en</language><atom:link href="https://danchupin.github.io/strata/reference/index.xml" rel="self" type="application/rss+xml"/><item><title>STRATA_* environment variables</title><link>https://danchupin.github.io/strata/reference/env-vars/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/reference/env-vars/</guid><description>&lt;!--
-Source of truth: grep the codebase via `grep -rhoE 'STRATA_[A-Z_][A-Z0-9_]+' cmd/strata/ internal/ | sort -u`.
-Cross-reference defaults + clamp ranges at the consuming call sites (koanf envMap,
-worker `*FromEnv` helpers, `os.Getenv(...)`). Update this page when adding a new env var.
+Maintainer note: source of truth for new entries is the codebase. Grep with
+`grep -rhoE 'STRATA_[A-Z_][A-Z0-9_]+' cmd/strata/ internal/ | sort -u` and
+cross-reference defaults + clamp ranges at the consuming call sites (koanf
+envMap, worker `*FromEnv` helpers, `os.Getenv(...)`). Update this page when
+adding a new env var.
 --&gt;
 &lt;h1 id="strata_-environment-variables"&gt;&lt;code&gt;STRATA_*&lt;/code&gt; environment variables&lt;a class="anchor" href="#strata_-environment-variables"&gt;#&lt;/a&gt;&lt;/h1&gt;
-&lt;p&gt;&lt;em&gt;Source of truth: grep the codebase via &lt;code&gt;grep -rhoE 'STRATA_[A-Z_][A-Z0-9_]+' cmd/strata/ internal/&lt;/code&gt;.&lt;/em&gt;
-&lt;em&gt;Update this page when adding a new env var — the &lt;a href="https://danchupin.github.io/strata/reference/"&gt;reference index&lt;/a&gt;
-links here as the operator-facing tuning manual.&lt;/em&gt;&lt;/p&gt;</description></item><item><title>Admin API surface</title><link>https://danchupin.github.io/strata/reference/admin-api/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/reference/admin-api/</guid><description>&lt;!--
-Source of truth: `internal/adminapi/openapi.yaml`. This page is a derived flat
-index — rebuild it when paths are added/removed from the OpenAPI document.
-Audit-verb column mirrors the `s3api.SetAuditOverride(ctx, action, ...)` stamp
-in the handler. GET/HEAD/OPTIONS are skipped by the audit middleware regardless
+&lt;p&gt;Every &lt;code&gt;STRATA_*&lt;/code&gt; knob, grouped by the layer that consumes it. CLI flags on
+&lt;code&gt;strata server&lt;/code&gt; (&lt;code&gt;--listen&lt;/code&gt;, &lt;code&gt;--vhost-pattern&lt;/code&gt;, &lt;code&gt;--log-level&lt;/code&gt;, &lt;code&gt;--workers=&lt;/code&gt;)
+override the matching env var.&lt;/p&gt;</description></item><item><title>Admin API surface</title><link>https://danchupin.github.io/strata/reference/admin-api/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/reference/admin-api/</guid><description>&lt;!--
+Maintainer note: source of truth is the admin API OpenAPI contract. This page
+is a derived flat index — rebuild when paths are added/removed from the
+OpenAPI document. Audit-verb column mirrors the SetAuditOverride stamp in
+each handler. GET/HEAD/OPTIONS are skipped by the audit middleware regardless
 of any defensive stamp, so read-only rows show "—".
 --&gt;
 &lt;h1 id="admin-api-surface"&gt;Admin API surface&lt;a class="anchor" href="#admin-api-surface"&gt;#&lt;/a&gt;&lt;/h1&gt;
-&lt;p&gt;&lt;em&gt;This page is the operator index. Authoritative contract lives in
-&lt;a href="https://github.com/danchupin/strata/blob/main/internal/adminapi/openapi.yaml"&gt;&lt;code&gt;internal/adminapi/openapi.yaml&lt;/code&gt;&lt;/a&gt;;
-rendered viewer at &lt;code&gt;/reference/admin-api-viewer/&lt;/code&gt; (authored in US-005).&lt;/em&gt;&lt;/p&gt;</description></item><item><title>S3 API operations</title><link>https://danchupin.github.io/strata/reference/s3-api/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/reference/s3-api/</guid><description>&lt;!--
+&lt;p&gt;This is the operator index. Authoritative contract lives in the admin API
+OpenAPI document — rendered interactively at the
+&lt;a href="https://danchupin.github.io/strata/reference/admin-api-viewer/"&gt;Admin API viewer&lt;/a&gt;; raw bytes at
+&lt;a href="https://danchupin.github.io/strata/openapi.yaml"&gt;&lt;code&gt;/openapi.yaml&lt;/code&gt;&lt;/a&gt;.&lt;/p&gt;</description></item><item><title>S3 API operations</title><link>https://danchupin.github.io/strata/reference/s3-api/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/reference/s3-api/</guid><description>&lt;!--
 Maintainer note: this table is hand-maintained. When adding a new handler
 in internal/s3api/, append a row here in the same PR. A lint test
 (internal/s3api/docs_reference_test.go) AST-parses the dispatch functions
@@ -41,16 +44,18 @@ at the route arm in `server.go` OR the leaf handler in
 `internal/s3api/&lt;feature&gt;.go`.
 --&gt;
 &lt;h1 id="s3-api-operations"&gt;S3 API operations&lt;a class="anchor" href="#s3-api-operations"&gt;#&lt;/a&gt;&lt;/h1&gt;
-&lt;p&gt;&lt;em&gt;This page is the operator + SDK-author index. The router is in
-&lt;a href="https://github.com/danchupin/strata/blob/main/internal/s3api/server.go"&gt;&lt;code&gt;internal/s3api/server.go&lt;/code&gt;&lt;/a&gt; —
-&lt;code&gt;ServeHTTP&lt;/code&gt; → &lt;code&gt;handleBucket&lt;/code&gt; (bucket-scope) → &lt;code&gt;handleObject&lt;/code&gt; (object-scope).
-Leaf handlers live in &lt;code&gt;internal/s3api/&amp;lt;feature&amp;gt;.go&lt;/code&gt;. AWS divergence column
-is empty when the operation is full-compat; one-liner otherwise.&lt;/em&gt;&lt;/p&gt;</description></item><item><title>Admin API viewer</title><link>https://danchupin.github.io/strata/reference/admin-api-viewer/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/reference/admin-api-viewer/</guid><description>&lt;h1 id="admin-api-viewer"&gt;Admin API viewer&lt;a class="anchor" href="#admin-api-viewer"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Operator + SDK-author index of every S3 operation Strata answers. The router
+dispatches &lt;code&gt;ServeHTTP&lt;/code&gt; → &lt;code&gt;handleBucket&lt;/code&gt; (bucket-scope) → &lt;code&gt;handleObject&lt;/code&gt;
+(object-scope); leaf handlers live alongside each feature in the
+&lt;code&gt;s3api&lt;/code&gt; package. The &lt;code&gt;Handler file:line&lt;/code&gt; column is intentionally
+line-anchored — a lint test asserts every dispatched method shows up here
+(see the maintainer note above this section). AWS divergence column is empty
+when the operation is full-compat; one-liner otherwise.&lt;/p&gt;</description></item><item><title>Admin API viewer</title><link>https://danchupin.github.io/strata/reference/admin-api-viewer/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/reference/admin-api-viewer/</guid><description>&lt;h1 id="admin-api-viewer"&gt;Admin API viewer&lt;a class="anchor" href="#admin-api-viewer"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;Interactive &lt;a href="https://github.com/Redocly/redoc"&gt;Redoc&lt;/a&gt; render of the canonical
-Admin-API OpenAPI contract (&lt;code&gt;internal/adminapi/openapi.yaml&lt;/code&gt;). The YAML is
-copied into the Hugo static dir at build time by &lt;code&gt;make docs-openapi-copy&lt;/code&gt;
-(a prerequisite of &lt;code&gt;make docs-build&lt;/code&gt; / &lt;code&gt;make docs-serve&lt;/code&gt;), so the viewer
-always reflects the contract at the same SHA as the rest of the docs site.&lt;/p&gt;
+Admin-API OpenAPI contract. The YAML is copied into the Hugo static dir at
+build time by &lt;code&gt;make docs-openapi-copy&lt;/code&gt; (a prerequisite of &lt;code&gt;make docs-build&lt;/code&gt;
+/ &lt;code&gt;make docs-serve&lt;/code&gt;), so the viewer always reflects the contract at the same
+SHA as the rest of the docs site.&lt;/p&gt;
 &lt;p&gt;For a flat index of every admin endpoint with method, path, audit verb,
 and a one-line summary, see &lt;a href="https://danchupin.github.io/strata/reference/admin-api/"&gt;Admin API surface&lt;/a&gt;.
 For the raw contract, fetch &lt;a href="https://danchupin.github.io/strata/openapi.yaml"&gt;/openapi.yaml&lt;/a&gt;.&lt;/p&gt;</description></item></channel></rss>

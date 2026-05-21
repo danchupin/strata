@@ -49,7 +49,73 @@ method. This is the AWS S3 wire shape; we mirror it.&lt;/li&gt;
  default -&amp;gt; handleObject(...)&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;Auth middleware runs &lt;strong&gt;before&lt;/strong&gt; the access-point and vhost rewrites because
 those rewrites only mutate &lt;code&gt;r.URL.Path&lt;/code&gt; after SigV4 has already validated
 the original. See &lt;a href="https://danchupin.github.io/strata/architecture/auth/"&gt;Auth&lt;/a&gt; for the ordering
-rationale.&lt;/p&gt;</description></item><item><title>Meta store</title><link>https://danchupin.github.io/strata/architecture/meta-store/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/meta-store/</guid><description>&lt;h1 id="meta-store"&gt;Meta store&lt;a class="anchor" href="#meta-store"&gt;#&lt;/a&gt;&lt;/h1&gt;
+rationale.&lt;/p&gt;</description></item><item><title>PUT flow</title><link>https://danchupin.github.io/strata/architecture/put-flow/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/put-flow/</guid><description>&lt;h1 id="put-flow"&gt;PUT flow&lt;a class="anchor" href="#put-flow"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;A single S3 &lt;code&gt;PutObject&lt;/code&gt; traverses the gateway, the metadata store, and the
+data backend. The picture below names the components on the hot path so
+the prose that follows can stay focused on the interesting choices —
+streaming chunk decode, the manifest compare-and-set, and the failure
+modes when one tier wins a race against another.&lt;/p&gt;
+&lt;h2 id="sequence-diagram"&gt;Sequence diagram&lt;a class="anchor" href="#sequence-diagram"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;pre class="mermaid"&gt;sequenceDiagram
+ autonumber
+ participant C as S3 client
+ participant GW as s3api.Server
+ participant Auth as auth.Middleware
+ participant Meta as meta.Store
+ participant Data as data.Backend
+ C-&amp;gt;&amp;gt;GW: PUT /bucket/key (+ SigV4 headers, streaming body)
+ GW-&amp;gt;&amp;gt;Auth: verify signature (canonical request, chain HMAC if streaming)
+ Auth--&amp;gt;&amp;gt;GW: identity{Owner, AccessKeyID}
+ GW-&amp;gt;&amp;gt;Meta: LookupBucket(bucket) → policy + placement
+ GW-&amp;gt;&amp;gt;Data: PutChunks(stream, placement, classSpec)
+ Data-&amp;gt;&amp;gt;Data: split body into 4 MiB chunks, write to selected cluster
+ Data--&amp;gt;&amp;gt;GW: manifest{chunks[], etag, size, BackendRef}
+ GW-&amp;gt;&amp;gt;Meta: SetObjectManifest(bucket, key, prevVersion, manifest) — compare-and-set
+ alt CAS applied
+ Meta--&amp;gt;&amp;gt;GW: applied=true, version=v
+ GW--&amp;gt;&amp;gt;C: 200 OK, ETag, x-amz-version-id
+ else CAS rejected (concurrent writer landed first)
+ Meta--&amp;gt;&amp;gt;GW: applied=false
+ GW-&amp;gt;&amp;gt;Data: EnqueueChunkDeletion(losingChunks) — GC absorbs the orphan
+ GW--&amp;gt;&amp;gt;C: 200 OK with the winning manifest (retry-safe)
+ end&lt;/pre&gt;&lt;h2 id="step-by-step"&gt;Step-by-step&lt;a class="anchor" href="#step-by-step"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;ol&gt;
+&lt;li&gt;
+&lt;p&gt;&lt;strong&gt;SigV4 verify.&lt;/strong&gt; &lt;code&gt;auth.Middleware&lt;/code&gt; canonicalises the request, computes
+the expected signature against the secret in &lt;code&gt;auth.StaticStore&lt;/code&gt;, and
+rejects on mismatch. Streaming chunk uploads (&lt;code&gt;aws-chunked&lt;/code&gt;) carry a
+chain HMAC validated incrementally by &lt;code&gt;auth.streamingReader&lt;/code&gt; so a
+torn body fails before the manifest is touched. See
+&lt;a href="https://danchupin.github.io/strata/architecture/auth/"&gt;Auth&lt;/a&gt;.&lt;/p&gt;</description></item><item><title>Multi-cluster routing</title><link>https://danchupin.github.io/strata/architecture/multi-cluster-routing/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/multi-cluster-routing/</guid><description>&lt;h1 id="multi-cluster-routing"&gt;Multi-cluster routing&lt;a class="anchor" href="#multi-cluster-routing"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata can front multiple data clusters (multiple RADOS pools, multiple
+upstream S3 endpoints, or a mix). Every PUT picks exactly one cluster
+before any chunks land. The picker is a thin layer over three inputs:
+the bucket&amp;rsquo;s placement policy, the per-cluster weights from the
+&lt;code&gt;cluster_state&lt;/code&gt; table, and the storage-class spec inferred from the
+request headers.&lt;/p&gt;
+&lt;h2 id="flowchart"&gt;Flowchart&lt;a class="anchor" href="#flowchart"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;pre class="mermaid"&gt;flowchart TD
+ PUT[&amp;#34;s3api.Server.putObject&amp;#34;] --&amp;gt; Spec[&amp;#34;Resolve storage-class spec&amp;lt;br/&amp;gt;(default / standard-ia / glacier / @cluster)&amp;#34;]
+ Spec --&amp;gt; Pin{&amp;#34;spec.Cluster != &amp;#39;&amp;#39;&amp;lt;br/&amp;gt;(@cluster suffix?)&amp;#34;}
+ Pin -- yes --&amp;gt; PickPinned[&amp;#34;clusterForPlacement(pinnedID)&amp;#34;]
+ Pin -- no --&amp;gt; BPolicy{&amp;#34;bucket.Placement&amp;lt;br/&amp;gt;!= nil?&amp;#34;}
+ BPolicy -- yes --&amp;gt; Effective[&amp;#34;placement.EffectivePolicy(&amp;lt;br/&amp;gt;bucketPolicy, mode, weights, states)&amp;#34;]
+ Effective --&amp;gt; EffectiveNonEmpty{&amp;#34;non-empty?&amp;#34;}
+ EffectiveNonEmpty -- yes --&amp;gt; Wheel[&amp;#34;placement.PickClusterExcluding(&amp;lt;br/&amp;gt;policy, drainSet)&amp;#34;]
+ EffectiveNonEmpty -- no --&amp;gt; StrictCheck{&amp;#34;mode == strict?&amp;#34;}
+ StrictCheck -- yes --&amp;gt; Refuse[/&amp;#34;503 DrainRefused&amp;lt;br/&amp;gt;(compliance pin)&amp;#34;/]
+ StrictCheck -- no --&amp;gt; Default[&amp;#34;Synthesised default policy&amp;lt;br/&amp;gt;from cluster weights&amp;#34;]
+ Default --&amp;gt; Wheel
+ BPolicy -- no --&amp;gt; Default
+ Wheel --&amp;gt; Drain{&amp;#34;selected cluster&amp;lt;br/&amp;gt;draining?&amp;#34;}
+ Drain -- yes --&amp;gt; Refuse
+ Drain -- no --&amp;gt; Put[&amp;#34;data.Backend.PutChunks(...)&amp;#34;]
+ PickPinned --&amp;gt; DrainPin{&amp;#34;pinned cluster&amp;lt;br/&amp;gt;draining?&amp;#34;}
+ DrainPin -- yes --&amp;gt; Refuse
+ DrainPin -- no --&amp;gt; Put&lt;/pre&gt;&lt;h2 id="the-picker-contract"&gt;The picker contract&lt;a class="anchor" href="#the-picker-contract"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;code&gt;placement.PickCluster&lt;/code&gt; (and its drain-aware sibling
+&lt;code&gt;PickClusterExcluding&lt;/code&gt;) lives in &lt;code&gt;internal/data/placement/&lt;/code&gt;. The inputs
+are deterministic:&lt;/p&gt;</description></item><item><title>Meta store</title><link>https://danchupin.github.io/strata/architecture/meta-store/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/meta-store/</guid><description>&lt;h1 id="meta-store"&gt;Meta store&lt;a class="anchor" href="#meta-store"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;&lt;code&gt;internal/meta/store.go&lt;/code&gt; defines &lt;code&gt;meta.Store&lt;/code&gt;, the interface every metadata
 backend implements. The contract is intentionally narrow: only the
 operations the S3 surface needs, and only with the consistency primitives
@@ -83,7 +149,84 @@ the backends can all support without bolting a coordinator in front.&lt;/p&gt;
 &lt;/table&gt;
 &lt;p&gt;A new backend MUST satisfy &lt;code&gt;meta.Store&lt;/code&gt; and pass the contract suite at
 &lt;code&gt;internal/meta/storetest/contract.go&lt;/code&gt;. The suite is shared across all
-backends and is the parity oracle.&lt;/p&gt;</description></item><item><title>Data backend</title><link>https://danchupin.github.io/strata/architecture/data-backend/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/data-backend/</guid><description>&lt;h1 id="data-backend"&gt;Data backend&lt;a class="anchor" href="#data-backend"&gt;#&lt;/a&gt;&lt;/h1&gt;
+backends and is the parity oracle.&lt;/p&gt;</description></item><item><title>Drain pipeline</title><link>https://danchupin.github.io/strata/architecture/drain-pipeline/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/drain-pipeline/</guid><description>&lt;h1 id="drain-pipeline"&gt;Drain pipeline&lt;a class="anchor" href="#drain-pipeline"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;A draining cluster is one that the operator has flagged stop-write so
+it can be taken out of rotation safely. Strata models the lifecycle as
+a state machine on the &lt;code&gt;cluster_state&lt;/code&gt; row; the rebalance worker
+migrates chunks off in the &lt;code&gt;evacuating&lt;/code&gt; state; the deregister-ready
+gate keeps the operator honest before they drop the cluster from
+&lt;code&gt;STRATA_RADOS_CLUSTERS&lt;/code&gt;.&lt;/p&gt;
+&lt;h2 id="state-diagram"&gt;State diagram&lt;a class="anchor" href="#state-diagram"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;pre class="mermaid"&gt;stateDiagram-v2
+ [*] --&amp;gt; live: cluster_state row created&amp;lt;br/&amp;gt;(weight default 100)
+ [*] --&amp;gt; pending: env-only cluster&amp;lt;br/&amp;gt;(no chunks yet)
+ pending --&amp;gt; live: POST /activate {weight: N}
+ live --&amp;gt; live: PUT /weight {weight: N}
+ live --&amp;gt; draining_readonly: POST /drain {mode: &amp;#34;readonly&amp;#34;}
+ live --&amp;gt; evacuating: POST /drain {mode: &amp;#34;evacuate&amp;#34;}
+ draining_readonly --&amp;gt; evacuating: POST /drain {mode: &amp;#34;evacuate&amp;#34;}&amp;lt;br/&amp;gt;(upgrade — no readonly→evacuate skip)
+ draining_readonly --&amp;gt; live: POST /undrain
+ evacuating --&amp;gt; live: POST /undrain
+ evacuating --&amp;gt; removed: chunks_on_cluster == 0&amp;lt;br/&amp;gt;operator drops env entry
+ removed --&amp;gt; [*]: row remains as tombstone&lt;/pre&gt;&lt;h2 id="states"&gt;States&lt;a class="anchor" href="#states"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;table&gt;
+ &lt;thead&gt;
+ &lt;tr&gt;
+ &lt;th&gt;State&lt;/th&gt;
+ &lt;th&gt;Picker&lt;/th&gt;
+ &lt;th&gt;Reads&lt;/th&gt;
+ &lt;th&gt;Scan-on-tick&lt;/th&gt;
+ &lt;th&gt;Operator entry&lt;/th&gt;
+ &lt;/tr&gt;
+ &lt;/thead&gt;
+ &lt;tbody&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;pending&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;excluded from default wheel; explicit policy still routes&lt;/td&gt;
+ &lt;td&gt;works&lt;/td&gt;
+ &lt;td&gt;no&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;POST /admin/v1/clusters/{id}/activate {weight: N}&lt;/code&gt; flips to &lt;code&gt;live&lt;/code&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;live&lt;/code&gt; (weight &amp;gt; 0)&lt;/td&gt;
+ &lt;td&gt;included proportional to weight&lt;/td&gt;
+ &lt;td&gt;works&lt;/td&gt;
+ &lt;td&gt;no&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;PUT /admin/v1/clusters/{id}/weight&lt;/code&gt; adjusts in place&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;live&lt;/code&gt; (weight == 0)&lt;/td&gt;
+ &lt;td&gt;excluded from default wheel; explicit policy still routes&lt;/td&gt;
+ &lt;td&gt;works&lt;/td&gt;
+ &lt;td&gt;no&lt;/td&gt;
+ &lt;td&gt;legal &amp;ldquo;drained but not draining&amp;rdquo; state — useful for staged decommission&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;draining_readonly&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;excluded&lt;/td&gt;
+ &lt;td&gt;works&lt;/td&gt;
+ &lt;td&gt;&lt;strong&gt;no&lt;/strong&gt; — readonly is stop-write only&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;POST /admin/v1/clusters/{id}/drain {mode: &amp;quot;readonly&amp;quot;}&lt;/code&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;evacuating&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;excluded&lt;/td&gt;
+ &lt;td&gt;works&lt;/td&gt;
+ &lt;td&gt;&lt;strong&gt;yes&lt;/strong&gt; — rebalance worker migrates chunks off&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;POST /admin/v1/clusters/{id}/drain {mode: &amp;quot;evacuate&amp;quot;}&lt;/code&gt; or upgrade from readonly&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;removed&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;excluded everywhere&lt;/td&gt;
+ &lt;td&gt;n/a&lt;/td&gt;
+ &lt;td&gt;n/a&lt;/td&gt;
+ &lt;td&gt;operator-flow tombstone — set after deregister&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;Stop-write semantics: a draining cluster accepts reads, deletes, HEAD,
+multipart &lt;code&gt;UploadPart&lt;/code&gt; / &lt;code&gt;Complete&lt;/code&gt; / &lt;code&gt;Abort&lt;/code&gt;, and listings. Only fresh
+PUTs are refused with 503 &lt;code&gt;DrainRefused&lt;/code&gt; + &lt;code&gt;Retry-After: 300&lt;/code&gt;.&lt;/p&gt;</description></item><item><title>Data backend</title><link>https://danchupin.github.io/strata/architecture/data-backend/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/data-backend/</guid><description>&lt;h1 id="data-backend"&gt;Data backend&lt;a class="anchor" href="#data-backend"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;&lt;code&gt;internal/data/backend.go&lt;/code&gt; defines the &lt;code&gt;data.Backend&lt;/code&gt; interface every chunk
 store implements. The metadata layer keeps the per-object manifest (chunk
 list, sizes, content hash); the data backend is responsible for opaque
@@ -137,7 +280,33 @@ that calls &lt;code&gt;workers.Register&lt;/code&gt; from &lt;code&gt;init()&lt;
 &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;&lt;code&gt;Build&lt;/code&gt; constructs the per-worker runner from the shared &lt;code&gt;workers.Dependencies&lt;/code&gt;
 struct (&lt;code&gt;Logger&lt;/code&gt;, &lt;code&gt;Meta&lt;/code&gt;, &lt;code&gt;Data&lt;/code&gt;, &lt;code&gt;Tracer&lt;/code&gt;, &lt;code&gt;Locker&lt;/code&gt;, &lt;code&gt;Region&lt;/code&gt;, &lt;code&gt;EmitLeader&lt;/code&gt;).
 Per-worker tunables (&lt;code&gt;STRATA_GC_INTERVAL&lt;/code&gt;, &lt;code&gt;STRATA_LIFECYCLE_*&lt;/code&gt;, …) are read
-inside &lt;code&gt;Build&lt;/code&gt; directly so the dependency surface stays small.&lt;/p&gt;</description></item><item><title>Storage status</title><link>https://danchupin.github.io/strata/architecture/storage/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/storage/</guid><description>&lt;h1 id="storage-status--operator-guide"&gt;Storage status — operator guide&lt;a class="anchor" href="#storage-status--operator-guide"&gt;#&lt;/a&gt;&lt;/h1&gt;
+inside &lt;code&gt;Build&lt;/code&gt; directly so the dependency surface stays small.&lt;/p&gt;</description></item><item><title>Worker + leader election</title><link>https://danchupin.github.io/strata/architecture/worker-leader-election/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/worker-leader-election/</guid><description>&lt;h1 id="worker--leader-election"&gt;Worker + leader election&lt;a class="anchor" href="#worker--leader-election"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Every background worker shares a single supervisor shape: one
+goroutine per worker, leader-elected on a per-name lease, panic
+recovered with exponential backoff, heartbeat chip wired to the
+operator console. This page draws the lifecycle end-to-end and
+points at the per-worker carve-outs.&lt;/p&gt;
+&lt;h2 id="lifecycle-flowchart"&gt;Lifecycle flowchart&lt;a class="anchor" href="#lifecycle-flowchart"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;pre class="mermaid"&gt;flowchart TD
+ Boot[&amp;#34;cmd/strata server&amp;#34;] --&amp;gt; Resolve[&amp;#34;workers.Resolve(STRATA_WORKERS)&amp;#34;]
+ Resolve --&amp;gt;|valid| Build[&amp;#34;workers.Supervisor.Run(ctx, workers)&amp;#34;]
+ Resolve --&amp;gt;|unknown name| Exit[/&amp;#34;exit 2&amp;#34;/]
+ Build --&amp;gt; Spawn[&amp;#34;spawn 1 goroutine per worker&amp;#34;]
+ Spawn --&amp;gt; LeaseGate{&amp;#34;worker.SkipLease?&amp;#34;}
+ LeaseGate -- no --&amp;gt; Acquire[&amp;#34;leader.Session.Acquire(&amp;lt;name&amp;gt;-leader)&amp;#34;]
+ LeaseGate -- yes --&amp;gt; RunnerBuild[&amp;#34;Build(deps) → Runner&amp;#34;]
+ Acquire -- acquired --&amp;gt; Emit[&amp;#34;deps.EmitLeader(name, true)&amp;#34;]
+ Emit --&amp;gt; RunnerBuild
+ Acquire -- lost / partition --&amp;gt; Acquire
+ RunnerBuild --&amp;gt; Run[&amp;#34;runner.Run(ctx)&amp;#34;]
+ Run -- clean return --&amp;gt; Release[&amp;#34;release lease&amp;lt;br/&amp;gt;deps.EmitLeader(name, false)&amp;#34;]
+ Run -- panic --&amp;gt; PanicMetric[&amp;#34;strata_worker_panic_total{worker, shard}&amp;lt;br/&amp;gt;++&amp;#34;]
+ PanicMetric --&amp;gt; Release
+ Release --&amp;gt; Backoff{&amp;#34;healthy ≥ 5m?&amp;#34;}
+ Backoff -- yes --&amp;gt; Spawn
+ Backoff -- no --&amp;gt; Wait[&amp;#34;sleep 1s → 5s → 30s → 2m&amp;#34;]
+ Wait --&amp;gt; Spawn&lt;/pre&gt;&lt;h2 id="supervisor-responsibilities"&gt;Supervisor responsibilities&lt;a class="anchor" href="#supervisor-responsibilities"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;code&gt;workers.Supervisor.Run(ctx, []workers.Worker)&lt;/code&gt; is the entrypoint:&lt;/p&gt;</description></item><item><title>Storage status</title><link>https://danchupin.github.io/strata/architecture/storage/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/storage/</guid><description>&lt;h1 id="storage-status--operator-guide"&gt;Storage status — operator guide&lt;a class="anchor" href="#storage-status--operator-guide"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;The Storage page (&lt;code&gt;/console/storage&lt;/code&gt;) and the Cluster Overview Storage hero
 card surface the live health of the meta + data backends and the
 per-storage-class object distribution. This page covers the env vars the UI
