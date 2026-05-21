@@ -80,7 +80,7 @@ adding more, prove what is there.
   `auth.MultiStore` missing the TiKV `CredentialStore` branch entirely — both shipped on
   commit `cc7fa42`. See Limitations pointer at
   [/architecture/benchmarks/rgw-comparison#limitations]({{< ref "/architecture/benchmarks/rgw-comparison#limitations" >}}).
-  (commit pending)
+  (commit `d8e6ab3`)
 - **P2 — ScyllaDB benchmarks.** `docs/site/content/architecture/backends/scylla.md` (US-042) documents the path; the
   expected 3–5× LWT speedup on Paxos hot paths (bucket-create, versioning-flip,
   multipart-complete) needs measurement. Same harness as the RGW benches, swap the
