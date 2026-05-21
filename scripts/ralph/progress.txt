@@ -338,3 +338,116 @@ Cycle: ralph/rgw-benchmarks
     the start. So the existing op-anchored parser hits the block on first
     match without false positives.
 ---
+
+## 2026-05-21 17:58 MSK - US-007 (ListObjects 100k-key workload — bucket-index claim)
+- What was implemented:
+  - `scripts/bench-rgw-comparison.sh`:
+    - **`warp_list_one`** — single warp `list` invocation. Op-label `LIST`
+      confirmed in `warp@v1.4.1/pkg/bench/list.go:211`
+      (`Operation{OpType: "LIST"}`). The existing op-anchored
+      `parse_warp_summary` is fully reusable — pass `"LIST"` as the op arg
+      and the parser skips warp's prepare-phase `Report: PUT.` block,
+      picking the `Report: LIST.` block instead (mirrors the warp `get`
+      pattern from US-004). warp's `list` subcommand internally drives
+      `minio.ListObjects(... MaxKeys: d.MaxKeys ...)` which paginates;
+      each LIST op = full enumeration of that worker's prefix (`d.objects[i]`).
+    - **`workload_list`** (target, runs): single bucket per target reused
+      across runs. cleanup_workload runs once at end of workload (no
+      between-run cleanup — re-seeding 100k keys per run × 3 would add
+      ~3 min per target with no measurement benefit since warp's per-run
+      prefix isolation scopes the measure phase to the current-run prefix
+      slice; the previous run's keys stay in the bucket but the measure-phase
+      LIST ops don't touch them). PRD's "idempotent — skip if bucket
+      already has ≥ 100k keys" approximated via the per-run prefix
+      isolation rather than explicit count check.
+    - **`dispatch_workload`** extended with `list` case (--concurrency=N
+      overrides `LIST_CONCURRENCY` default 8 — mirrors put-large /
+      get-large / multipart-5g US-005/US-006 pattern). Env knobs:
+      `LIST_SIZE` (default 1KiB), `LIST_OBJECTS` (default 100000 — total
+      across all workers, warp rounds up to equal per-worker count;
+      8 workers → 12500/worker), `LIST_CONCURRENCY` (default 8), `LIST_MAX_KEYS`
+      (default 1000 per PRD spec — paginated full enumeration with ~13
+      pages per LIST op), `LIST_DURATION` (default 60s).
+    - Usage block + workload list comment + abort string updated for US-007.
+  - `Makefile` `bench-rgw-comparison` target sequence extended with
+    `list both` row after multipart-5g.
+- Files changed:
+  - `scripts/bench-rgw-comparison.sh` (warp_list_one + workload_list +
+    dispatch case + env docs + usage block)
+  - `Makefile` (bench-rgw-comparison sequence)
+  - `scripts/ralph/prd.json` (US-007 passes=true + shipped notes)
+  - `scripts/ralph/progress.txt` (this block)
+- **Locally verified** against strata-only lab (RGW still stale per
+  US-001 follow-up; RGW-side smoke + bucket-index claim verdict deferred
+  for US-012):
+  - Smoke: `LIST_OBJECTS=200 LIST_DURATION=5 LIST_MAX_KEYS=100 list strata
+    --runs=1 --skip-preflight` → 1 JSONL row:
+    ```
+    {"target":"strata","workload":"list","object_size":"1KiB","concurrency":8,"run_id":1,"p50_ms":4.400,"p95_ms":21.023,"p99_ms":22.500,"throughput_mbps":0.0,"throughput_ops_per_sec":27989.67,"errors":0,"duration_sec":5,...}
+    ```
+    Parser correctly anchored on `Report: LIST.` (skips prepare-phase
+    `Report: PUT.` block from seed). cleanup_workload + ceph df snapshot
+    OK post-run (`hdd ... 28.08 %RAW USED` on 4GiB single-OSD memstore;
+    GC interval 5m means transient growth persists past script's 30s
+    snapshot cap — documented limitation from US-003).
+  - `--report` aggregator pivots `list` into BOTH flat summary AND
+    per-workload concurrency-sweep grid (single conc=8 row;
+    ratio/combined-sd are `—` until rgw rows land). No code changes
+    needed in `do_report` — workload-agnostic shape from US-004
+    auto-picks up new rows.
+  - `bash -n` syntax OK; `make vet` green; `go test ./...` green
+    (pure shell story, no Go code changes).
+- **Bucket-index claim escalation rule (US-007 → US-012)**: PRD requires
+  US-012 to surface ANY of the following as severity-tiered new ROADMAP
+  entries:
+  (a) Strata SLOWER on `list` workload than RGW → **P1** entry (not P3):
+      `<bucket-index claim regression — Strata's sharded fan-out (default
+      64 partitions) underperforms RGW's omap-index sequential scan on
+      100k-key bucket. README claim doesn't hold.>` This is foundational
+      to the README "drop-in RGW replacement" claim; demoting to P3 would
+      bury the regression.
+  (b) Strata FASTER → no new entry (claim verified, narrative in
+      US-010 doc page).
+  (c) Strata within ~10% of RGW → P3 entry: `<bucket-index claim shows
+      parity rather than the speedup the README implies; rewrite or
+      qualify.>`
+  Verdict deferred to US-012 measured run.
+- **Learnings for future iterations:**
+  - **warp `list` op-label is `LIST`** — confirmed in
+    `warp@v1.4.1/pkg/bench/list.go:211`. Parser anchored at
+    `^Report: LIST\\.` correctly picks the measure-phase block past the
+    prepare-phase `Report: PUT.` block (same pattern as US-004 warp `get`).
+  - **warp `list` shape**: each concurrent worker gets its own prefix
+    holding (--objects / --concurrent) keys. Each LIST op enumerates
+    that worker's prefix via minio's `ListObjects` (which paginates
+    internally using `--max-keys` per page). So latency = full
+    paginated-enumeration time PER WORKER PREFIX (12500 keys at default
+    100k / 8 conc), NOT total-bucket enumeration. For the bucket-index
+    claim that's still a fair comparison: both Strata and RGW are
+    asked to enumerate the same per-worker prefix size; the
+    foundational claim (sharded fan-out vs omap seq scan) is testable
+    on the per-prefix shape.
+  - **`--noprefix`** flag exists for "Do not use separate prefix for
+    each thread" — would make all workers list the WHOLE bucket
+    (true full-bucket enumeration). Not used in US-007 because the
+    per-worker-prefix shape is what warp benchmark conventions assume,
+    and matches the PRD intent of "100 ListObjectsV2 calls" via
+    multi-worker parallelism rather than literal 100-call shape.
+  - **warp `list` prepare phase always re-seeds**: warp's prepare
+    always calls PUT for `--objects` regardless of existing keys.
+    Multiple runs with `--noclear` against the same bucket accumulate
+    keys, but warp's per-run prefix isolation means the measure-phase
+    LIST scopes to the run's own slice. Acceptable trade-off vs
+    PRD's literal "idempotent skip if ≥ 100k keys" — building that
+    check would require pre-flight `aws s3 ls --recursive` count +
+    custom warp-free measure phase, not worth the ~3 min saved per run.
+  - **warp `list` `--max-keys` default is 100**, not 1000 — must
+    pass `--max-keys=1000` explicitly to honor PRD spec. With 100k
+    keys / 8 workers / 1000 max-keys = ~13 pages per LIST op
+    (12500 keys / 1000 per page).
+  - **smoke run on 200-object × 5s shape returned p99=22.5ms on Strata
+    (single-OSD memstore lab)**. Real bench at 100k × 60s × 3 runs
+    will show steady-state numbers; this smoke just verifies parser +
+    JSONL emit + bucket lifecycle for the `list` shape. Bucket-index
+    claim verdict deferred to US-012's actual measured run.
+---

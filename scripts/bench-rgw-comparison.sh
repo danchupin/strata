@@ -9,8 +9,9 @@
 # put-medium / get-small / get-medium plus a concurrency sweep ({1, 8, 32, 128}
 # default) per workload. US-005 adds put-large / get-large (100MiB shape).
 # US-006 adds multipart-5g (warp multipart-put: 5 concurrent multipart uploads
-# of 5GB each, 80 × 64MiB parts). Subsequent stories US-007..US-008 extend
-# with list, range/delete/IAM workloads on top.
+# of 5GB each, 80 × 64MiB parts). US-007 adds list (100k 1KiB keys, ListObjectsV2
+# max-keys=1000 — the bucket-index claim workload). Subsequent stories US-008
+# extend with range/delete/IAM workloads on top.
 #
 # Usage:
 #   bash scripts/bench-rgw-comparison.sh <workload> <target> [--concurrency=N | --concurrency-sweep=A,B,C] [--runs=N]
@@ -28,7 +29,11 @@
 #                 get-large     100MiB GET, c=4, warp auto-seeds, cleanup between runs (US-005)
 #                 multipart-5g  5 concurrent multipart uploads, 80 × 64MiB parts each
 #                                = 5GiB per upload; warp PUTPART op label (US-006)
-#               (US-007..US-008 add list, range-get, delete, iam-auth)
+#                 list          ListObjectsV2 bench against ~100k 1KiB-keyed
+#                                bucket (warp's `list` subcommand, op-label
+#                                LIST, --max-keys=1000 paginated) — THE
+#                                bucket-index claim workload (US-007)
+#               (US-008 adds range-get, delete, iam-auth)
 #   <target>    one of: strata, rgw, both
 #
 # Flags:
@@ -71,6 +76,17 @@
 #   MULTIPART_5G_PART_CONCURRENCY in-session part-upload parallelism (default 20;
 #                                auto-capped to MULTIPART_5G_PARTS).
 #   MULTIPART_5G_DURATION        wall-clock seconds per multipart-5g run (default 60)
+#   LIST_SIZE                    object size for list workload seed (default 1KiB)
+#   LIST_OBJECTS                 total seeded objects per run for list workload (default
+#                                100000; warp distributes across --concurrent workers and
+#                                rounds up to equal per-worker count)
+#   LIST_CONCURRENCY             concurrent list workers (default 8; PRD's "32 concurrent"
+#                                refers to seed-phase PUT concurrency — warp uses the same
+#                                flag for seed + measure, so this also governs seed conc)
+#   LIST_DURATION                wall-clock seconds per list run (default 60)
+#   LIST_MAX_KEYS                ListObjectsV2 max-keys per page (default 1000 per PRD;
+#                                with 100k seed × 8 workers = 12500 keys/worker → ~13
+#                                pages per LIST op)
 #   BENCH_COMPOSE_FILE           default deploy/docker/docker-compose.yml
 #
 # Exit codes: 0 success, 2 misconfig, 77 lab not reachable (skip).
@@ -863,6 +879,108 @@ workload_multipart_5g() {
   done
 }
 
+# Single warp list invocation (US-007). Uses warp's `list` subcommand which:
+#   prepare phase: PUTs --objects objects of --obj.size shape (distributed
+#     across --concurrent workers with per-worker prefixes; each worker gets
+#     --objects/--concurrent objects, rounded up).
+#   measure phase: each worker loops ListObjectsV2 ops against its own prefix,
+#     paginated by --max-keys keys per page (full enumeration per op).
+#
+# warp emits op-label `LIST` (pkg/bench/list.go:211). Latency = full
+# paginated-enumeration time per worker prefix; throughput = objects-listed/s
+# across all workers. This is THE bucket-index claim workload — Strata's
+# 64-way Cassandra/TiKV fan-out vs RGW's omap-index sequential scan. If
+# Strata is slower on this row, US-012 surfaces as P1 (not P3) ROADMAP entry
+# per PRD escalation rule.
+#
+# Note: warp's prepare phase always seeds --objects unconditionally; calling
+# multiple runs against the same bucket with --noclear accumulates keys (warp
+# uses fresh run-scoped prefixes so the measure phase still operates on the
+# current run's slice, but the bucket grows). For PRD's 3-run × 2-target shape
+# that's 3 × 100k = 300k keys per target peak ≈ 300MiB at 1KiB — negligible.
+# cleanup_workload runs once at end of the workload (no between-run cleanup —
+# re-seeding 100k keys per run × 3 runs would add ~3 min per target with no
+# measurement benefit; the existing keys don't interfere with current-run
+# measure phase which scopes to the run-specific prefix).
+#
+# Args: target workload size_label objects concurrency max_keys duration run_id bucket tmpdir
+warp_list_one() {
+  local target="$1" workload="$2" size_label="$3" objects="$4" concurrency="$5" max_keys="$6" duration="$7" run="$8" bucket="$9" tmpdir="${10}"
+  local endpoint creds_ak creds_sk
+  resolve_target "$target" endpoint creds_ak creds_sk
+  local host
+  host="$(url_host "$endpoint")"
+
+  local summary_file="$tmpdir/warp-$target-$workload-c$concurrency-run$run.txt"
+  local benchdata_file="$tmpdir/warp-$target-$workload-c$concurrency-run$run.bd"
+  note "run $run: warp list $target obj=$size_label objects=$objects conc=$concurrency max-keys=$max_keys dur=${duration}s"
+  set +e
+  "$BENCH_TOOL_PATH" list \
+    --host="$host" \
+    --access-key="$creds_ak" \
+    --secret-key="$creds_sk" \
+    --bucket="$bucket" \
+    --obj.size="$size_label" \
+    --objects="$objects" \
+    --concurrent="$concurrency" \
+    --max-keys="$max_keys" \
+    --duration="${duration}s" \
+    --noclear \
+    --benchdata="$benchdata_file" \
+    --no-color \
+    > "$summary_file" 2>&1
+  local warp_rc=$?
+  set -e
+  if [[ "$warp_rc" -ne 0 ]]; then
+    note "WARN: warp list failed on $target run $run (rc=$warp_rc) — see $summary_file"
+    tail -5 "$summary_file" >&2 || true
+    return 1
+  fi
+
+  # warp list prints Report: PUT. (prepare phase) + Report: LIST. (measure
+  # phase). Parser anchored at start-of-line on "Report: LIST." picks the
+  # measure-phase block; the prepare-phase PUT block is skipped.
+  read -r p50 p95 p99 mbps ops errs < <(parse_warp_summary "$summary_file" "LIST") || true
+  emit_row "$target" "$workload" "$size_label" "$concurrency" "$run" \
+    "$p50" "$p95" "$p99" "$mbps" "$ops" "$errs" "$duration"
+}
+
+# ListObjects 100k-key workload (US-007). PRD: 100k keys, 1KiB each, seeded
+# via parallel PUT (32 concurrent in PRD spec — warp uses single --concurrent
+# for both seed + measure, so this story defaults to c=8 measure which also
+# governs seed conc; --concurrency=N override flips both). Then bench phase
+# measures ListObjectsV2 latency + throughput. THIS IS THE BUCKET-INDEX
+# CLAIM workload — Strata's sharded fan-out (default 64 partitions per bucket)
+# vs RGW's omap-index sequential scan. If Strata is SLOWER, US-012 must
+# surface as **P1** ROADMAP entry (bucket-index claim regression — foundational
+# README claim).
+#
+# Single bucket per target reused across runs; cleanup_workload at end. PRD's
+# "idempotent — skip if bucket already has ≥ 100k keys" approximated by
+# warp's per-run prefix isolation: each run's measure phase scopes to its
+# own prefix slice, so re-running the bench doesn't re-list the same keys.
+#
+# Args: target runs
+workload_list() {
+  local target="$1" runs="$2"
+  local size_label="${LIST_SIZE:-1KiB}"
+  local objects="${LIST_OBJECTS:-100000}"
+  local concurrency="${LIST_CONCURRENCY:-8}"
+  local max_keys="${LIST_MAX_KEYS:-1000}"
+  local duration="${LIST_DURATION:-60}"
+  local bucket="bench-list-${target}"
+  local tmpdir; tmpdir="$(mktemp -d)"
+  trap "rm -rf $tmpdir" RETURN
+
+  note "workload list: $target / $size_label × $objects objects × conc=$concurrency × max-keys=$max_keys × dur=${duration}s × runs=$runs"
+  bucket_create "$target" "$bucket"
+  local run
+  for run in $(seq 1 "$runs"); do
+    warp_list_one "$target" "list" "$size_label" "$objects" "$concurrency" "$max_keys" "$duration" "$run" "$bucket" "$tmpdir" || true
+  done
+  cleanup_workload "$target" "list"
+}
+
 # -----------------------------------------------------------------------------
 # Workload dispatch
 # -----------------------------------------------------------------------------
@@ -987,8 +1105,21 @@ dispatch_workload() {
         workload_multipart_5g "$target" "$r"
       fi
       ;;
+    list)
+      # ListObjects 100k-key workload (US-007) — THE bucket-index claim
+      # workload. warp `list` op-label LIST (--max-keys=1000 paginated full
+      # enumeration per worker prefix). Single bucket per target reused
+      # across runs; cleanup_workload at end. --concurrency=N overrides
+      # the default c=8 (governs both seed-phase PUT conc + measure-phase
+      # LIST conc — warp shares one --concurrent flag).
+      if [[ -n "$concurrency" ]]; then
+        LIST_CONCURRENCY="$concurrency" workload_list "$target" "$r"
+      else
+        workload_list "$target" "$r"
+      fi
+      ;;
     *)
-      abort "workload '$workload' not implemented yet (US-002 ships put-small; US-004 adds put-medium/get-small/get-medium; US-005 adds put-large/get-large; US-006 adds multipart-5g; US-007+ adds list/range-get/delete/iam-auth)"
+      abort "workload '$workload' not implemented yet (US-002 ships put-small; US-004 adds put-medium/get-small/get-medium; US-005 adds put-large/get-large; US-006 adds multipart-5g; US-007 adds list; US-008 adds range-get/delete/iam-auth)"
       ;;
   esac
 }

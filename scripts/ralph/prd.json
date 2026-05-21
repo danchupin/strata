@@ -126,8 +126,8 @@
         "Tests pass"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped: warp_list_one (warp `list` subcommand, op-label LIST confirmed in warp@v1.4.1/pkg/bench/list.go:211 — full paginated enumeration per worker prefix via minio.ListObjects), workload_list (single bucket per target reused across runs; cleanup_workload at end of workload; no between-run cleanup — re-seeding 100k keys per run × 3 would add ~3 min per target with no measurement benefit since warp's per-run prefix isolation scopes the measure phase to current-run prefix slice). dispatch_workload extended with `list` case (--concurrency=N overrides default LIST_CONCURRENCY=8). Env knobs: LIST_SIZE (default 1KiB), LIST_OBJECTS (default 100000 — total across all workers, warp rounds up to equal per-worker count), LIST_CONCURRENCY (default 8 — governs both seed-phase PUT conc + measure-phase LIST conc since warp shares one --concurrent flag), LIST_MAX_KEYS (default 1000 per PRD spec — paginated full enumeration with ~13 pages per LIST op at 100k seed / 8 workers = 12500 keys/worker), LIST_DURATION (default 60s). Makefile bench-rgw-comparison sequences `list both` after multipart-5g block. Locally verified: smoke (LIST_OBJECTS=200, LIST_DURATION=5, LIST_MAX_KEYS=100) on strata target → JSONL row {p50=4.4ms, p95=21ms, p99=22.5ms, ops/s=27989.67, errors=0}; --report aggregator pivots list into both flat summary and per-workload concurrency-sweep grid (single conc=8 row; ratio/combined-sd are `—` until rgw rows land). vet+test green. RGW-side smoke + bucket-index-claim verdict deferred — bench-rgw lab still in stale state per US-001 follow-up; surface in US-012 ROADMAP with severity-tiered new entry (P1 if Strata slower than RGW on list — bucket-index claim regression; P3 otherwise)."
     },
     {
       "id": "US-008",
