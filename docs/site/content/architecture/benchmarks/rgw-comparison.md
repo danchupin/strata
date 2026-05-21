@@ -152,6 +152,7 @@ Each subsection cites the `scripts/bench-rgw-comparison.sh` workload
 name + the per-workload env knobs. Defaults match the PRD shape; the
 `make bench-rgw-comparison` target runs every workload sequentially.
 
+<a id="put-small"></a>
 ### 1 KiB PUT — `put-small`
 
 Single-object PUT hot path at 1 KiB. Concurrency sweep
@@ -166,6 +167,7 @@ Single-object PUT hot path at 1 KiB. Concurrency sweep
 
 _Conclusion:_ filled in by US-012.
 
+<a id="put-medium"></a>
 ### 1 MiB PUT — `put-medium`
 
 Same shape, 1 MiB objects. Env: `PUT_MEDIUM_SIZE` (default 1MiB),
@@ -180,6 +182,7 @@ Same shape, 1 MiB objects. Env: `PUT_MEDIUM_SIZE` (default 1MiB),
 
 _Conclusion:_ filled in by US-012.
 
+<a id="get-small"></a>
 ### 1 KiB GET — `get-small`
 
 Warp's `get` prepare phase seeds the bucket; measure phase reads
@@ -194,6 +197,7 @@ back. Env: `GET_SMALL_OBJECTS` (default 10000), `GET_SMALL_DURATION`.
 
 _Conclusion:_ filled in by US-012.
 
+<a id="get-medium"></a>
 ### 1 MiB GET — `get-medium`
 
 Env: `GET_MEDIUM_SIZE`, `GET_MEDIUM_OBJECTS` (default 2500),
@@ -208,6 +212,7 @@ Env: `GET_MEDIUM_SIZE`, `GET_MEDIUM_OBJECTS` (default 2500),
 
 _Conclusion:_ filled in by US-012.
 
+<a id="put-large"></a>
 ### 100 MiB PUT — `put-large`
 
 Large-object PUT — exercises chunking + manifest writes. `c=4` × 60 s
@@ -223,6 +228,7 @@ transient per target without it). Env: `PUT_LARGE_SIZE`,
 _Conclusion:_ filled in by US-012. Expected close numbers: both
 gateways write 4 MiB chunks to RADOS; throughput floor is the OSD.
 
+<a id="get-large"></a>
 ### 100 MiB GET — `get-large`
 
 Same shape, `c=4`. Env: `GET_LARGE_SIZE`, `GET_LARGE_OBJECTS`
@@ -235,6 +241,7 @@ Same shape, `c=4`. Env: `GET_LARGE_SIZE`, `GET_LARGE_OBJECTS`
 
 _Conclusion:_ filled in by US-012.
 
+<a id="multipart-5g"></a>
 ### Multipart 5 GB — `multipart-5g`
 
 5 concurrent multipart upload sessions × 5 GiB each (80 parts × 64 MiB)
@@ -253,6 +260,7 @@ multipart-Complete CAS (LWT on `multipart_uploads.status`) vs RGW's
 omap-index bookkeeping. Both serialise at the Complete step; the
 per-part throughput should be close.
 
+<a id="list-100k"></a>
 ### `ListObjects` 100 k-key — `list`
 
 **The bucket-index claim.** Seed 100 k keys (1 KiB each, conc=8) per
@@ -273,6 +281,7 @@ note records the verdict path). **If Strata is faster**, the claim is
 verified and the narrative for the README + the headline above gets
 the actual ratio.
 
+<a id="range-get"></a>
 ### Range GET — `range-get`
 
 Random 1 MiB ranges against 10 × 100 MiB seed objects at conc=8.
@@ -286,6 +295,7 @@ Env: `RANGE_GET_OBJECTS`, `RANGE_GET_RANGE_SIZE` (default 1MiB),
 
 _Conclusion:_ filled in by US-012.
 
+<a id="delete"></a>
 ### Delete — `delete`
 
 1000 small-object DELETE ops at conc=8 after a seed phase.
@@ -304,6 +314,7 @@ concurrent DELETE on the TiKV-default lab surfaces a per-bucket
 serialises through `s/B/<bid>/bs`) — tracked separately as a P1
 ROADMAP entry surfaced by US-012.
 
+<a id="iam-auth"></a>
 ### IAM-authenticated GET — `iam-auth`
 
 Pre-create an IAM user via the target's admin API (Strata:
