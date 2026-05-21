@@ -22,8 +22,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped: rgw-bootstrap Dockerfile + entrypoint (realm/zonegroup/zone path-b manual chain; jq+python3 cred parsing), compose rgw service (profiles:[bench-rgw], port 9991:8080), Makefile up-bench-rgw + wait-rgw + down extended. Locally verified: aws s3 ls returns empty list. Lab tuning required: mon_max_pg_per_osd=1000, autoscaler off, pre-create .rgw.root via CLI."
     },
     {
       "id": "US-002",

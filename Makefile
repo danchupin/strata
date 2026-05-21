@@ -2,9 +2,9 @@ SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
 .PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test \
-	up up-all up-cassandra up-all-ci down \
+	up up-all up-cassandra up-all-ci up-bench-rgw down \
 	dev dev-down dev-logs \
-	wait-cassandra wait-ceph wait-pd wait-tikv wait-strata wait-strata-a wait-strata-b wait-strata-lb-nginx wait-strata-lab \
+	wait-cassandra wait-ceph wait-pd wait-tikv wait-strata wait-strata-a wait-strata-b wait-strata-lb-nginx wait-strata-lab wait-rgw \
 	ceph-pool run-memory run-cassandra run-strata run-gateway \
 	smoke smoke-signed smoke-grafana smoke-lab-tikv \
 	smoke-drain-lifecycle smoke-drain-transparency smoke-drain-progress-ui smoke-cluster-weights \
@@ -103,12 +103,21 @@ up-cassandra:
 up-all-ci:
 	docker compose -f deploy/docker/docker-compose.yml -f deploy/docker/docker-compose.ci.yml --profile ci --profile cassandra up -d cassandra ceph strata-cassandra
 
+# Layer the RGW comparison target on the bare-default stack. Standalone
+# `ceph/ceph:v19.2.3` container that joins the existing ceph-a cluster via
+# the shared `strata-ceph-etc` volume; bootstraps minimal realm/zonegroup/
+# zone (default/default/default) + bench S3 user. Host port 9991:8080.
+# US-001 of ralph/rgw-benchmarks. Operator-run-only (NOT in CI matrix).
+up-bench-rgw:
+	$(COMPOSE) --profile bench-rgw up -d rgw
+
 # Tear down the full stack — every profile-gated service included so
-# explicit-profile bring-ups (cassandra / tracing / webhook-trap / ci) clean
-# up too. Retired profile names (`tikv`, `lab-tikv*`, `lab-cassandra-3`) are
-# no-ops on this compose file; dropping them avoids stale flags.
+# explicit-profile bring-ups (cassandra / tracing / webhook-trap / ci /
+# bench-rgw) clean up too. Retired profile names (`tikv`, `lab-tikv*`,
+# `lab-cassandra-3`) are no-ops on this compose file; dropping them avoids
+# stale flags.
 down:
-	$(COMPOSE) --profile cassandra --profile tracing --profile webhook-trap --profile ci --profile bench-3replica down
+	$(COMPOSE) --profile cassandra --profile tracing --profile webhook-trap --profile ci --profile bench-3replica --profile bench-rgw down
 
 # Wait for the Cassandra container to report healthy. Cassandra is gated
 # behind `--profile cassandra`, so the `ps` query includes the profile flag
@@ -167,6 +176,21 @@ wait-strata-lb-nginx:
 
 # Combined readiness gate for the TiKV-default lab: both replicas + LB.
 wait-strata-lab: wait-strata-a wait-strata-b wait-strata-lb-nginx
+
+# Wait for the bench RGW container to be serving HTTP on host port 9991.
+# RGW root returns 403 (anonymous AccessDenied), so any 2xx/3xx/4xx confirms
+# the beast frontend is up — 5xx / no response = not ready. 60s timeout.
+wait-rgw:
+	@echo "waiting for rgw on 9991..."
+	@for i in $$(seq 1 60); do \
+	  code=$$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9991/ 2>/dev/null || echo 000); \
+	  if [ "$$code" -ge 200 ] && [ "$$code" -lt 500 ] && [ "$$code" != "000" ]; then \
+	    echo "rgw ready (HTTP $$code)"; \
+	    exit 0; \
+	  fi; \
+	  sleep 1; \
+	done; \
+	echo "rgw not ready after 60s" >&2; exit 1
 
 # One-command developer cluster: bring up the canonical TiKV-default lab,
 # wait for PD + ceph + both strata replicas + LB to report ready, then

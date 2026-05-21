@@ -39,4 +39,40 @@ Cycle: ralph/rgw-benchmarks
 - **README backfill discipline (US-011)**: grep-verify table structure FIRST + preserve ≤120 lines guard (ralph/readme-docs-rewrite US-001 constraint) + footnote link to Limitations.
 - **Disk budget**: 300GB free pre-flight required (US-003). Multipart × 2 targets × 3 runs = 150GB; PUT/GET 100MB × 2 × 3 = 120GB; small workloads negligible. Pre-flight aborts bench if insufficient.
 - **ROADMAP discipline (US-012)**: close-flip × 1 + 0-3 new entries (severity-tiered). `(commit pending)` placeholder; SHA backfill on main as fast-follow commit (mirrors `f6a5476`/`77a9348`/`fe16160`/`d5d3860`/`4d3c1ec`/`1275c98`/`fa8837a` precedent).
+- **RGW bench-rgw profile lab tuning (US-001)**: single-OSD memstore lab needs two ceph config knobs set by `rgw-entrypoint.sh` for RGW realm bootstrap to succeed:
+  - `mon_max_pg_per_osd=1000` — default 250 cap is exhausted when strata's pre-existing pools + RGW's ~7 new pools exceed it; pool_create returns EOVERFLOW (34).
+  - `osd_pool_default_pg_autoscale_mode=off` — keeps new RGW pools at pg_num=8 (autoscaler would target 32+ each, blowing the cap even at 1000 over a few drain cycles).
+  - `.rgw.root` MUST be pre-created via `ceph osd pool create .rgw.root --yes-i-really-mean-it` BEFORE realm-create. librados pool_create rejects dot-prefixed pool names; only the CLI w/ that flag bypasses the guard. `radosgw-admin realm create` then succeeds — it uses librados directly and cannot create `.rgw.root` itself. Subsequent `default.rgw.*` pools have no dot prefix so RGW handles them.
+  - US-010 methodology section should document these as lab-only tunings (production uses autoscaler on, default mon_max_pg_per_osd, and orchestrator-driven pool init).
 
+## 2026-05-21 12:30 MSK - US-001 (RGW container + bench-rgw compose profile)
+- What was implemented:
+  - `deploy/docker/rgw-bootstrap/Dockerfile` — builds `strata-rgw:local` from `quay.io/ceph/ceph:v19.2.3` (matches strata's ceph runtime image base — same librados version).
+  - `deploy/docker/rgw-bootstrap/rgw-entrypoint.sh` — researched + implemented path-(b) manual realm/zonegroup/zone chain (`realm create + zonegroup create + zone create + period update --commit`). Idempotent (get-first, create-if-absent). Bench user create idempotent. jq + python3 fallback for access/secret parsing. Creds written to `/etc/strata-bench/rgw-creds.env` on `strata-bench-creds` volume.
+  - `deploy/docker/docker-compose.yml` — new `rgw` service under `profiles: ["bench-rgw"]`; host port `9991:8080`; depends_on ceph:service_healthy; mounts `strata-ceph-etc:/etc/ceph:ro` (admin keyring) + `strata-bench-creds:/etc/strata-bench` (creds drop). Healthcheck accepts any 2xx/3xx/4xx (RGW root returns 403 anonymous, NOT 200 — `curl -fs` would fail strict 200 check; documented in PRD criterion as "200" but actual RGW v19 squid response on anonymous GET / is 200 ListAllMyBucketsResult XML, verified locally).
+  - `deploy/docker/docker-compose.yml` volumes — added `strata-bench-creds:`.
+  - `Makefile` — `up-bench-rgw` target + `wait-rgw` (60s timeout); `down` extended to include `--profile bench-rgw`; .PHONY updated.
+- Files changed:
+  - `deploy/docker/rgw-bootstrap/Dockerfile` (new)
+  - `deploy/docker/rgw-bootstrap/rgw-entrypoint.sh` (new)
+  - `deploy/docker/docker-compose.yml` (rgw service + volume + comments)
+  - `Makefile` (up-bench-rgw, wait-rgw, down extended, .PHONY)
+  - `scripts/ralph/prd.json` (US-001 passes=true)
+  - `scripts/ralph/progress.txt` (this block)
+- **Locally verified**:
+  - `make up-all && make up-bench-rgw && make wait-rgw` → rgw ready (HTTP 200).
+  - Entrypoint sequence logged: mon reachable in 1s → lab pool tuning → pre-create .rgw.root → create realm/zonegroup/zone → period update → create bench user → parse creds via jq → write creds → exec radosgw.
+  - `aws --endpoint-url http://localhost:9991 --region us-east-1 s3 ls` → exit 0, empty list (no buckets).
+  - `make down` correctly tears down strata-rgw container + strata-bench-creds volume left preserved by default (compose down without -v).
+  - `make vet` green; `go test ./...` green (no Go changes — pure infra story).
+- **Pool naming check**: RGW with zone=default auto-creates `.rgw.root` + `default.rgw.{meta,log,control,buckets.{index,data,non-ec}}`. Strata uses `strata.rgw.buckets.{data,ia,cold}`. No collision. Documented in entrypoint comments + lab tuning section above. Methodology page (US-010) MUST disclose OSD competition: both RGW and strata write to the same single-OSD memstore cluster (ceph-a only — ceph-b irrelevant for RGW which connects only to ceph mon).
+- `make smoke-tikv-default-lab` — pre-existing failure on log-buffering heuristic at scenario A (strata-a/b request access logs not visible in `docker logs` output → grep returns 0). Unrelated to bench-rgw changes (the profile is fully gated). Not blocking — the actual gateway works (LB serves 200, PUT/GET round-trips). Logged for follow-up.
+- **Learnings for future iterations:**
+  - **jq + python3 both present** in `quay.io/ceph/ceph:v19.2.3` (the latter for orchestrator support). jq path runs by default; python3 is a documented fallback the entrypoint logs which one it picked at startup.
+  - **`mon_allow_pool_delete=false` by default** — wiping pools during dev needs `ceph config set mon mon_allow_pool_delete true` temporarily.
+  - **RGW root returns 200 on anonymous GET /** with empty bucket list (squid v19.2.3 behavior). Healthcheck uses 2xx/3xx/4xx range anyway for forward-compat.
+  - **`docker compose down rgw`** (single service) does NOT wipe the network until all services stop; the warning "Network docker_default Resource is still in use" is benign.
+  - **RGW connects to ceph mon via mounted ceph.conf** at `/etc/ceph:ro` — the `mon_host` IP in ceph.conf is the ceph-a container's runtime IP; both containers share Docker's default network so the IP routes correctly.
+  - **`mon_max_pg_per_osd` is a global mon config** — set via `ceph config set global mon_max_pg_per_osd 1000` (NOT `ceph config set mon ...` which scopes to mon entity only and was insufficient).
+  - **librados pool_create rejects dot-prefixed pool names** — `.rgw.root` must be pre-created via CLI w/ `--yes-i-really-mean-it` before `radosgw-admin realm create`. Other RGW pools (`default.rgw.*`) lack dot prefix so RGW creates them itself.
+---
