@@ -392,6 +392,40 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  # Ceph RGW container under `--profile bench-rgw` — comparison target for the
+  # README "drop-in RGW replacement" benchmark cycle (US-001..US-012 of
+  # ralph/rgw-benchmarks). Joins the existing ceph-a cluster via the shared
+  # `strata-ceph-etc` volume (ro mount of /etc/ceph + ceph.client.admin.keyring);
+  # zone "default" so auto-created pools land at `default.rgw.buckets.data` and
+  # do NOT collide with strata's `strata.rgw.buckets.data`. Operator-run-only
+  # (NOT in CI matrix); ~120 min full sweep — see scripts/bench-rgw-comparison.sh.
+  rgw:
+    build:
+      context: rgw-bootstrap
+      dockerfile: Dockerfile
+    image: strata-rgw:local
+    container_name: strata-rgw
+    profiles: ["bench-rgw"]
+    depends_on:
+      ceph:
+        condition: service_healthy
+    ports:
+      - "9991:8080"
+    volumes:
+      - strata-ceph-etc:/etc/ceph:ro
+      - strata-bench-creds:/etc/strata-bench
+    healthcheck:
+      # RGW root returns 403 (anonymous AccessDenied) not 200 — any 2xx/3xx/4xx
+      # confirms the beast frontend is serving; 5xx / no response = not ready.
+      test:
+        - "CMD-SHELL"
+        - "code=$$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/ 2>/dev/null || echo 000); [ \"$$code\" -ge 200 ] && [ \"$$code\" -lt 500 ]"
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+    restart: unless-stopped
+
   # Webhook receiver used by the e2e-full CI job to verify the notify worker
   # round-trip. Lives behind the `webhook-trap` profile so the default stack
   # does not pull it. Strata reaches it on the compose default network at
@@ -477,3 +511,7 @@ volumes:
   strata-prometheus-data:
   strata-grafana-data:
   strata-jwt-shared:
+  # bench-rgw creds drop (US-001 of ralph/rgw-benchmarks). Written by the rgw
+  # container's entrypoint; consumed by scripts/bench-rgw-comparison.sh via
+  # RGW_BENCH_CREDS_FILE pointing at this volume's mount point on the host.
+  strata-bench-creds:

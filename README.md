@@ -28,7 +28,9 @@ runs the gateway and every background worker; an embedded web console handles da
 
 | Capability                  | Strata                                                   | Ceph RGW                              |
 |-----------------------------|----------------------------------------------------------|---------------------------------------|
-| Bucket index                | Sharded Cassandra / TiKV, ordered range scans            | RADOS omap, dynamic resharding stalls |
+| Bucket index                | Sharded Cassandra / TiKV, ordered range scans[^list-100k] | RADOS omap, dynamic resharding stalls[^list-100k] |
+| Single-object PUT/GET (p99) | 4 MiB RADOS chunks + sharded meta lookup[^put-small][^get-small] | 4 MiB RADOS chunks + omap meta lookup[^put-small][^get-small] |
+| Multipart 5 GB (throughput) | 4 MiB chunk write, manifest LWT on Complete[^multipart-5g] | 4 MiB striping, omap-index bookkeeping[^multipart-5g] |
 | Online resharding           | Yes — `strata admin reshard`, no read pause              | Re-shard locks the bucket             |
 | Multi-cluster routing       | Per-bucket policies + weighted default routing           | Multisite zonegroups only             |
 | Cluster drain               | First-class workflow with live progress + ETA            | Manual `rados cppool` dance           |
@@ -36,6 +38,13 @@ runs the gateway and every background worker; an embedded web console handles da
 | Deployment shape            | One Docker image, one binary                             | RGW + osd + mon + mgr stack           |
 | Observability               | OTel traces, Prometheus, Grafana, request-id correlation | Native metrics, partial tracing       |
 | License                     | Apache 2.0                                               | LGPL 2.1                              |
+
+Bench numbers from `make bench-rgw-comparison` on lima/macOS M3 Pro; see [Limitations](https://danchupin.github.io/strata/architecture/benchmarks/rgw-comparison/#limitations).
+
+[^list-100k]: ListObjects 100k-key p99 — see [rgw-comparison#list-100k](https://danchupin.github.io/strata/architecture/benchmarks/rgw-comparison/#list-100k).
+[^put-small]: 1 KiB PUT concurrency sweep (c=1/8/32/128) — see [rgw-comparison#put-small](https://danchupin.github.io/strata/architecture/benchmarks/rgw-comparison/#put-small).
+[^get-small]: 1 KiB GET concurrency sweep (c=1/8/32/128) — see [rgw-comparison#get-small](https://danchupin.github.io/strata/architecture/benchmarks/rgw-comparison/#get-small).
+[^multipart-5g]: Multipart 5 GB per-part p99 + aggregate throughput — see [rgw-comparison#multipart-5g](https://danchupin.github.io/strata/architecture/benchmarks/rgw-comparison/#multipart-5g).
 
 ## Status & maturity
 

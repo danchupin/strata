@@ -161,6 +161,10 @@ is upstream territory; the Strata-specific knobs:
 - **OSDs per node:** rule of thumb ≥ 8 OSDs per node so a single OSD
   failure stays under 12.5 % of node IO.
 
+For absolute throughput numbers vs Ceph RGW on the same RADOS cluster
+(headline p99 + multipart 5 GB + `ListObjects` 100k-key shapes), see
+[RGW comparison]({{< ref "/architecture/benchmarks/rgw-comparison" >}}).
+
 ### S3-over-S3
 
 Strata can target an upstream S3 bucket as the data backend (e.g. AWS

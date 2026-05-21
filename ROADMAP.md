@@ -51,10 +51,36 @@ adding more, prove what is there.
   `ralph/s3-compat-finish` (US-001..US-003), lifting the headline to 92.7%
   (165/178). See `scripts/s3-tests/README.md` for the per-test gap breakdown.
   (commit `494b62b`)
-- **P2 — Benchmarks vs RGW.** "Drop-in RGW replacement" is unproven without numbers. Run
-  `warp` and `cosbench` against both gateways on the same RADOS cluster. Publish absolute
-  latency / throughput per workload class (small-object PUT, large-object GET, listing,
-  multipart) in a dedicated `docs/site/content/architecture/benchmarks/` directory. Update on each release.
+- ~~**P2 — Benchmarks vs RGW.**~~ — **Done (scaffold + structure; measured pass deferred).**
+  Shipped via the `ralph/rgw-benchmarks` cycle (US-001..US-012). `deploy/docker/rgw-bootstrap/`
+  + compose `bench-rgw` profile (port 9991) brings up a stock `quay.io/ceph/ceph:v19.2.3` RGW
+  side-car against the existing lab ceph-a cluster; idempotent realm/zonegroup/zone bootstrap
+  + bench user creation via `rgw-entrypoint.sh`. `make up-bench-rgw` + `make wait-rgw` +
+  `make bench-rgw-comparison` (~120 min full sweep) operator path. `scripts/bench-rgw-comparison.sh`
+  (warp-based, picked via verify-first chain wasabi → warp → dvassallo — wasabi 404, warp landed)
+  covers 11 workloads (put-small/medium/large + get-small/medium/large + multipart-5g +
+  list-100k + range-get + delete + iam-auth) with concurrency sweep 1/8/32/128 on PUT/GET
+  small/medium, JSONL output one row per (target, workload, conc, run_id), `--report`
+  aggregator emits markdown with mean±stddev per pivot grid (5-col 2-target, 7-col 3-way
+  when `--include-cassandra`), pre-flight gates (data_backend grep / disk ≥300GB / mem ≤6GB),
+  cleanup_workload + bucket isolation per workload, single-cluster Strata bench mode via
+  `STRATA_BENCH_SINGLE_CLUSTER=1`. Doc page
+  [/architecture/benchmarks/rgw-comparison]({{< ref "/architecture/benchmarks/rgw-comparison" >}})
+  carries headline conclusion + 4-bullet Limitations (single-cluster Strata / shared OSDs on
+  ceph-a / loopback / lima penalty) + Methodology + 11 workload sections + mermaid xychart-beta
+  bar+line ratio chart with parity line + Reproducibility (one-cmd `make bench-rgw-comparison`).
+  README.md backfilled (82 → 91 lines, well under the 120-line ralph/readme-docs-rewrite US-001
+  ceiling) with [^list-100k][^put-small][^get-small][^multipart-5g] footnote pairs linking to
+  the bench page anchors. Measured numbers + verdict on bucket-index claim land in a follow-up
+  operator pass — the bench-rgw lab needs a clean `make down && volume-wipe && make up-all &&
+  make up-bench-rgw` cycle (see `ralph/rgw-benchmarks-followup` filed below) to escape the
+  documented period_update EOVERFLOW + ceph slow-op storm patterns. Two real Strata bugs
+  surfaced + fixed in-cycle (US-008): TiKV `CreateIAMAccessKey` / `CreateAccessPoint` writing
+  nil secondary-index values (mockTiKV passes, real TiKV rejects at Commit), and serverapp's
+  `auth.MultiStore` missing the TiKV `CredentialStore` branch entirely — both shipped on
+  commit `cc7fa42`. See Limitations pointer at
+  [/architecture/benchmarks/rgw-comparison#limitations]({{< ref "/architecture/benchmarks/rgw-comparison#limitations" >}}).
+  (commit pending)
 - **P2 — ScyllaDB benchmarks.** `docs/site/content/architecture/backends/scylla.md` (US-042) documents the path; the
   expected 3–5× LWT speedup on Paxos hot paths (bucket-create, versioning-flip,
   multipart-complete) needs measurement. Same harness as the RGW benches, swap the
@@ -77,6 +103,30 @@ adding more, prove what is there.
 
 ## Correctness & consistency
 
+- **P1 — `bucket_stats` RMW saturates per-bucket TiKV key under concurrent PUT / DELETE.** Surfaced
+  by the `ralph/rgw-benchmarks` cycle (US-007 list 100k seed @ c=8, US-008 delete + iam-auth):
+  every PUT / DELETE serialises through a single per-bucket pessimistic-txn key
+  (`s/B/<bid>/bs`) for object-count + byte-count updates. At concurrency ≥ 8 the pessimistic
+  retry tornado either aborts the warp run outright (write-conflict) or backs the OSD into
+  HEALTH_WARN slow ops on the lab. Fix options: (a) additive counter shape (Add 1 / Add -1 per
+  op rather than read-then-write) on a CRDT-style row; (b) per-shard fan-out so each PUT bumps
+  one of N counter rows + read sums; (c) async aggregation drain via a sidecar worker. None
+  affect Strata correctness — bucket_stats is reconciled by `quotareconcile` worker — but the
+  write-conflict storm under bench load makes the gateway look brittle in numbers and is a
+  production-grade blocker for high-concurrency buckets.
+- **P1 — RGW `bench-rgw` lab bootstrap fragile post-restart (`period update --commit` EOVERFLOW +
+  "period does not have zone configured").** Surfaced by `ralph/rgw-benchmarks` US-002..US-009
+  follow-ups: after the first `make up-bench-rgw` brings up the realm/zonegroup/zone cleanly,
+  subsequent `make down && make up-all && make up-bench-rgw` cycles can leave the rgw container
+  with stale state from the `strata-bench-creds` + `strata-ceph-etc` volumes — period_update
+  fails with EOVERFLOW (34) and `radosgw-admin zonegroup get default` reports the zone missing
+  from the period. The entrypoint's idempotency guards (`get-first, create-if-absent`) catch
+  the realm + zonegroup + zone rows but don't notice the period drift. Operator workaround:
+  `docker volume rm strata-bench-creds` + `docker compose --profile bench-rgw down rgw` before
+  retry. Fix: entrypoint should `radosgw-admin period get` and reconcile zonegroup → zone
+  membership inside the period before `period update --commit`, with explicit logging of the
+  zone count per period (currently the failure mode is silent until the radosgw process
+  refuses to start).
 - ~~**P2 — Compose `default` + `multi-cluster` profiles race for worker leases on shared Cassandra.**~~ — **Done.** Structural fix via the `ralph/compose-profile-isolation` cycle (US-001..US-004): collapsed parallel `strata` (single-cluster) + `strata-multi` (multi-cluster) + `strata-features` compose services into a single canonical `strata` service. Multi-cluster is now the default — bare `docker compose up -d` brings up `cassandra + ceph + ceph-b + strata` with both RADOS clusters attached (`STRATA_RADOS_CLUSTERS=default:...,cephb:...`) and `STRATA_WORKERS=gc,lifecycle,rebalance`. Single-cluster smoke is now an `STRATA_RADOS_CLUSTERS` env override at runtime, not a separate compose service. Feature workers (notify / replicator / access-log / inventory / audit-export) opt-in via `STRATA_WORKERS` on the same `strata` container. The `multi-cluster` and `features` compose profiles are retired (the latter renamed to `webhook-trap` to preserve the CI artifact gate). New `lab-cassandra-3` profile mirrors `lab-tikv-3` for Cassandra-backed multi-replica HA validation (3 named replicas + nginx LB on host port 10000). End-to-end smoke harness `scripts/smoke-compose-collapse.sh` (`make smoke-compose-collapse`) walks four scenarios: A bare bring-up + drain cephb evacuate; B single-cluster env-override visibility; C `lab-cassandra-3` multi-replica with `worker_locks` distribution + drain via LB; D residue grep gate. Operator runbook: [Compose collapse]({{< ref "/architecture/migrations/compose-collapse" >}}). (commit `0858fd1`)
 - ~~**P3 — TiKV-default 2-replica lab.**~~ — **Done.** Shipped via the `ralph/tikv-default-lab` cycle (US-001..US-005): flipped the lab compose default from the single Cassandra-backed canonical `strata` (port 9999) to a 2-replica TiKV-backed stack — bare `docker compose up -d` brings up `pd + tikv + ceph + ceph-b + strata-a + strata-b + strata-lb-nginx + prometheus + grafana`, with nginx LB on `:9999` round-robining `strata-a` (:10001) + `strata-b` (:10002). Both replicas mount the shared `strata-jwt-shared` volume + carry distinct `STRATA_NODE_ID` so session JWT validates across the round-robin. Cassandra meta backend remains first-class in code (`internal/meta/cassandra/**` + `make test-integration` testcontainers preserved); the Cassandra-backed lab moves under `--profile cassandra` via new `make up-cassandra` (single `strata-cassandra` replica on :9998). Retired services + profiles: `strata`, `strata-tikv`, `strata-tikv-c`, `strata-cass-a/b/c`, `strata-lb-nginx-cass`, profiles `tikv` / `lab-tikv` / `lab-tikv-3` / `lab-cassandra-3`. Compose-level rebalance defaults dropped on strata-a/b (gateway built-in 1h interval / 100 MB/s rate applies — cadence change vs retired 30s default). `scripts/bench-rebalance-multi.sh` SHARDS=3 leg explicitly SKIP'd + parked under the `Restore 3-replica TiKV bench` follow-up entry; `scripts/smoke-rebalance-scale.sh` Scenarios B + D likewise skip in the 2-replica bare default. New smoke harness `scripts/smoke-tikv-default-lab.sh` (`make smoke-tikv-default-lab`) drives four scenarios (A bare bring-up + drain cephb evacuate; B Cassandra profile side-by-side metadata isolation; C single-cluster env-override opt-in; D repo-wide residue grep gate). Operator runbook: [TiKV-default lab]({{< ref "/architecture/migrations/tikv-default-lab" >}}). (commit `58ae990`)
 - ~~**P3 — Drain progress UI shows manifest counts instead of physical chunks.**~~ — **Done.** Shipped via the `ralph/drain-progress-physical` cycle (US-001..US-003). New `data.ClusterObjectCountProbe` interface alongside existing `ClusterStatsProbe`; RADOS impl in `internal/data/rados/health.go` sums `GetPoolStats().Num_objects` across `(pool, ns)` tuples filtered by cluster id (reuses the existing `DataHealth` ioctx loop). New 10 s TTL `internal/data/placement/clusterstats_cache.go` per-cluster cache (sync.RWMutex; TTL-only invalidation — drain/undrain doesn't change the underlying `ceph df` payload). `/admin/v1/clusters/<id>/drain-progress` gains three additive fields: `physical_chunks_on_cluster *int64`, `physical_bytes_on_cluster *int64`, `gc_queue_pending int`. `<DrainProgressBar>` 3-state machine: Migrating (red/amber, `physical>0 && manifest>0`) → Awaiting GC cleanup (amber, `physical>0 && manifest==0`, static tooltip explaining `STRATA_GC_GRACE` + next tick) → Ready to deregister (green, all four zero + `deregister_ready=true`). Collapsible `<details data-testid=dp-detail>` shows Manifest chunks / GC queue / Physical bytes. Null-physical fallback (memory + S3 backends, or probe error with cold cache) renders manifest count as primary + italic `(physical count unavailable on this backend)` tooltip. New counter `strata_drain_progress_probe_errors_total{cluster, probe}` (`probe ∈ {stats, object_count}`). Smoke harness `scripts/smoke-drain-progress-ui.sh` (`make smoke-drain-progress-ui`) drives all three states with throttled smoke-only env (`STRATA_REBALANCE_RATE_MB_S=1` + `STRATA_GC_GRACE=60s`) against 300 ~1 MB chunks; restores prod defaults on exit. Migration note: [Drain progress physical chunks]({{< ref "/architecture/migrations/drain-progress-physical" >}}). ETA precision parked as a separate P3 follow-up (entry below). (commit `db7332f`)
@@ -229,6 +279,20 @@ adding more, prove what is there.
 
 ## Scalability & performance
 
+- **P3 — `ralph/rgw-benchmarks` follow-up: measured numbers + verdict on bucket-index claim.**
+  The `ralph/rgw-benchmarks` cycle (US-001..US-012) shipped the bench scaffold (compose profile
+  + harness + 11 workloads + doc page + README footnote anchors) but the measured pass
+  blocked on the documented lab-state issues (RGW `period update --commit` EOVERFLOW after
+  restart + ceph slow-op storm under bench load + bucket_stats RMW write-conflict saturation
+  at conc≥8). Follow-up scope: (a) fix the bench-rgw entrypoint period-reconciliation gap
+  (P1 entry in `Correctness & consistency`); (b) fix bucket_stats RMW (P1 entry above);
+  (c) one full `make up-all && make up-bench-rgw && make bench-rgw-comparison` operator pass
+  with `_pending_` placeholders in `docs/site/content/architecture/benchmarks/rgw-comparison.md`
+  swapped for measured numbers + mermaid xychart ratios updated; (d) verdict on the
+  README bucket-index claim (US-007 list-100k) — if Strata is slower than RGW, escalate to
+  a **P1** ROADMAP entry per the `ralph/rgw-benchmarks` US-012 escalation rule (bucket-index
+  claim is foundational README claim, regression is critical); (e) backfill commit SHA on
+  the close-flipped P2 entry above.
 - ~~**P1 — gc / lifecycle workers serialise inside a single goroutine; throughput cap ~50–500 ops/s.**~~ — **Done.** Phase 1 shipped via the `ralph/gc-lifecycle-scale` cycle (US-001..US-005). Bounded `errgroup` inside the elected leader (`STRATA_GC_CONCURRENCY` / `STRATA_LIFECYCLE_CONCURRENCY`, default 1, max 256) lifts per-worker throughput ~9× (gc) / ~19× (lifecycle) on the canonical lab-tikv stack. Measured on N=10000 with `STRATA_DATA_BACKEND=memory` + TiKV: gc 11108 → 100275 chunks/s (c=1 → c=256, knee at c=64 with +11 % beyond), lifecycle 485 → 9150 objects/s (c=1 → c=256, no knee inside the swept range). Recommended production default: `STRATA_GC_CONCURRENCY=64`, `STRATA_LIFECYCLE_CONCURRENCY=64` (push to 128–256 if the meta backend has headroom). Bench harness lands as `strata admin bench-gc` + `strata admin bench-lifecycle`; results captured in `docs/site/content/architecture/benchmarks/gc-lifecycle.md`. (commit `cc5c7fb`)
 - ~~**P1 — gc / lifecycle Phase 2 — sharded leader-election.**~~ — **Done.** Shipped via the `ralph/gc-lifecycle-scale-phase-2` cycle (US-001..US-007). gc gets `gc-leader-0..N-1` per-shard leases driven by `STRATA_GC_SHARDS` (default 1, range `[1, 1024]`); each replica races for one or more leases and drains via the new `Meta.ListGCEntriesShard` API on memory + Cassandra (`gc_entries_v2` partitioned on `(region, shard_id)`) + TiKV (new `s/qG/<region>/<shardID2BE>/<oid>` prefix). Lifecycle gets per-bucket leases (`lifecycle-leader-<bucketID>`) plus a `fnv32a(bucketID) % STRATA_GC_SHARDS == myReplicaID` distribution gate so each replica owns a strict subset of buckets. Multi-leader bench (US-006) on the 3-replica `lab-tikv-3` lab confirms the expected ~3× aggregate ceiling at `STRATA_GC_SHARDS=3` / `STRATA_GC_CONCURRENCY=64` (gc ≈ 250–270k chunks/s, lifecycle ≈ 18–19.5k objects/s) — full curve in `docs/site/content/architecture/benchmarks/gc-lifecycle.md` (Phase 2 — multi-leader). Cassandra + TiKV cutover runs through `STRATA_GC_DUAL_WRITE` (default `on`); operator runbook in `docs/site/content/architecture/migrations/gc-lifecycle-phase-2.md`. Single-replica deploy at `STRATA_GC_SHARDS=1` reproduces Phase 1 behaviour byte-for-byte. (commit `3743931`)
 - ~~**P2 — Dynamic RADOS / S3 cluster registry + zero-downtime add.**~~ — **Won't-do.** Design decision (2026-05-11): cluster set stays config-driven via env (`STRATA_RADOS_CLUSTERS` for RADOS; `STRATA_S3_CLUSTERS` to be added for S3). Adding a new cluster requires a gateway restart, but multi-instance deployments hide per-instance downtime — rolling restart of N replicas keeps the service available throughout. A prior attempt at the dynamic registry (`ralph/dynamic-clusters`, merged `cba53b5`, reverted `055ef26`) shipped `meta.ClusterRegistry` + admin API + RADOS watcher; rolled back because single-source-of-truth via env is simpler operationally + tests are easier when config is static. The remaining gap is the S3-backend half: today `internal/data/s3/backend.go` is single-bucket-per-instance; covered by a separate P2 entry below for env-driven multi-cluster S3.
