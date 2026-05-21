@@ -11,7 +11,7 @@ COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 	smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale \
 	smoke-single-binary smoke-tikv-default-lab \
 	race-soak race-soak-tikv lint-nginx-lab helm-lint \
-	bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi bench-rgw-comparison \
+	bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi bench-rgw-comparison bench-rgw-comparison-with-cassandra \
 	docs-serve docs-build docs-openapi-copy clean
 
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
@@ -553,6 +553,26 @@ bench-rgw-comparison:
 	bash scripts/bench-rgw-comparison.sh range-get both
 	bash scripts/bench-rgw-comparison.sh delete both
 	bash scripts/bench-rgw-comparison.sh iam-auth both
+	bash scripts/bench-rgw-comparison.sh --report
+
+# Optional 3-way sweep (US-009): adds Strata-Cassandra (port 9998) alongside
+# Strata-TiKV + RGW. Auto-boots strata-cassandra via `make up-cassandra` if
+# not already up. Adds ~50% to bench duration vs the 2-target shape above —
+# the default `bench-rgw-comparison` target remains 2-target per PRD. The
+# `--report` aggregator widens the per-workload pivot grid to a 7-column
+# 3-way table when cassandra rows are present.
+bench-rgw-comparison-with-cassandra:
+	bash scripts/bench-rgw-comparison.sh --include-cassandra put-small all
+	bash scripts/bench-rgw-comparison.sh --include-cassandra put-medium all
+	bash scripts/bench-rgw-comparison.sh --include-cassandra get-small all
+	bash scripts/bench-rgw-comparison.sh --include-cassandra get-medium all
+	bash scripts/bench-rgw-comparison.sh --include-cassandra put-large all
+	bash scripts/bench-rgw-comparison.sh --include-cassandra get-large all
+	bash scripts/bench-rgw-comparison.sh --include-cassandra multipart-5g all
+	bash scripts/bench-rgw-comparison.sh --include-cassandra list all
+	bash scripts/bench-rgw-comparison.sh --include-cassandra range-get all
+	bash scripts/bench-rgw-comparison.sh --include-cassandra delete all
+	bash scripts/bench-rgw-comparison.sh --include-cassandra iam-auth all
 	bash scripts/bench-rgw-comparison.sh --report
 
 # Hugo docs site (docs/site/). `docs-serve` runs the local dev preview on

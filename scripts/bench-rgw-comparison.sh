@@ -15,8 +15,13 @@
 # seeds + DELETEs N small objects), iam-auth (pre-create IAM user via target's
 # admin API, then run warp `get` under the IAM user's SigV4 creds).
 #
+# US-009 adds a 3rd target `cassandra` (Strata + Cassandra meta + same RADOS
+# data backend on port 9998 via `make up-cassandra`) plus the `all` target
+# value that runs strata + rgw + cassandra in sequence. The `--include-cassandra`
+# flag auto-boots the cassandra stack if not already up.
+#
 # Usage:
-#   bash scripts/bench-rgw-comparison.sh <workload> <target> [--concurrency=N | --concurrency-sweep=A,B,C] [--runs=N]
+#   bash scripts/bench-rgw-comparison.sh <workload> <target> [--concurrency=N | --concurrency-sweep=A,B,C] [--runs=N] [--include-cassandra]
 #   bash scripts/bench-rgw-comparison.sh --report
 #   bash scripts/bench-rgw-comparison.sh --extract-rgw-creds
 #   bash scripts/bench-rgw-comparison.sh --preflight
@@ -45,7 +50,13 @@
 #                                /admin/v1/iam, RGW radosgw-admin); op-label
 #                                GET, exercises full SigV4 + identity
 #                                resolution hot path (US-008)
-#   <target>    one of: strata, rgw, both
+#   <target>    one of: strata, rgw, cassandra, both, all
+#                 both = strata + rgw (default 2-target shape — US-002..US-008)
+#                 all  = strata + rgw + cassandra (US-009; requires --include-cassandra
+#                        unless cassandra endpoint already reachable)
+#                 cassandra = Strata + Cassandra meta + RADOS data on port 9998
+#                             (single target; US-009; requires --include-cassandra
+#                              unless cassandra endpoint already reachable)
 #
 # Flags:
 #   --concurrency=N           single concurrency point (default 8). Disables sweep.
@@ -53,10 +64,16 @@
 #                              Sweep runs sequentially per workload; bucket reused across conc
 #                              points; cleanup_workload runs once at end of workload.
 #   --runs=N                  number of repeated runs per (workload, concurrency) point (default 3)
+#   --include-cassandra       opt-in: boot strata-cassandra (port 9998) via `make up-cassandra`
+#                              if not already up, enable the `cassandra` / `all` target values
+#                              (US-009). Default bench remains 2-target (strata + rgw); the
+#                              optional 3rd target adds ~50% to full-sweep duration.
 #   --report                  aggregate jsonl into markdown tables on stdout (no run).
 #                              Emits the flat per-(target,workload,conc) summary table PLUS a
 #                              per-workload pivot grid (rows=conc, cols=Strata p99 / RGW p99 /
 #                              ratio / combined stddev) for any workload with both targets present.
+#                              When cassandra rows are present, an additional "Strata-Cassandra"
+#                              column is emitted in the pivot grid (US-009 3-way framing).
 #   --extract-rgw-creds       helper: `docker compose exec rgw cat /etc/strata-bench/rgw-creds.env`
 #                              pipes the bench user access/secret to ./rgw-creds.env on the host
 #   --preflight               run pre-flight checks only and exit (US-003)
@@ -69,6 +86,11 @@
 #   RGW_BENCH_CREDS_FILE         default ./rgw-creds.env — `access_key=...\nsecret_key=...` (written
 #                                by US-001 rgw-entrypoint.sh inside the rgw container at
 #                                /etc/strata-bench/rgw-creds.env; extract via --extract-rgw-creds).
+#   CASSANDRA_ENDPOINT_URL       default http://localhost:9998 — Strata-Cassandra gateway. Shares
+#                                STRATA_STATIC_CREDENTIALS with the TiKV-default lab (compose
+#                                env is identical across strata-a/b/strata-cassandra). US-009.
+#   BENCH_INCLUDE_CASSANDRA      env equivalent of --include-cassandra (set to 1 to opt-in
+#                                without re-passing the flag through Makefile wrappers).
 #   BENCH_RESULTS_DIR            default scripts/bench-results
 #   BENCH_TOOL_PATH              override warp binary path (default: $HOME/go/bin/warp)
 #   REQUIRE_LAB                  if 1, lab-missing aborts hard instead of EXIT 77
@@ -126,6 +148,7 @@ set -euo pipefail
 
 STRATA_ENDPOINT_URL="${STRATA_ENDPOINT_URL:-http://localhost:9999}"
 RGW_ENDPOINT_URL="${RGW_ENDPOINT_URL:-http://localhost:9991}"
+CASSANDRA_ENDPOINT_URL="${CASSANDRA_ENDPOINT_URL:-http://localhost:9998}"
 RGW_BENCH_CREDS_FILE="${RGW_BENCH_CREDS_FILE:-./rgw-creds.env}"
 BENCH_RESULTS_DIR="${BENCH_RESULTS_DIR:-scripts/bench-results}"
 BENCH_TOOL_PATH="${BENCH_TOOL_PATH:-$HOME/go/bin/warp}"
@@ -137,6 +160,7 @@ STRATA_BENCH_DATA_BACKEND_EXPECT="${STRATA_BENCH_DATA_BACKEND_EXPECT:-rados}"
 BENCH_COMPOSE_FILE="${BENCH_COMPOSE_FILE:-deploy/docker/docker-compose.yml}"
 SKIP_PREFLIGHT="${SKIP_PREFLIGHT:-0}"
 SINGLE_CLUSTER_ENV="default:/etc/ceph-a/ceph.conf:/etc/ceph-a/ceph.client.admin.keyring"
+INCLUDE_CASSANDRA="${BENCH_INCLUDE_CASSANDRA:-0}"
 
 DATE_TAG="$(date +%Y-%m-%d)"
 RESULTS_FILE="${BENCH_RESULTS_DIR}/rgw-comparison-${DATE_TAG}.jsonl"
@@ -386,8 +410,19 @@ preflight_check() {
   local target="$1"
   note "pre-flight checks (US-003)"
 
+  # Per-target gate booleans — `both` = strata+rgw, `all` = strata+rgw+cassandra
+  # (US-009). `cassandra` standalone = cassandra-only.
+  local want_strata=0 want_rgw=0 want_cassandra=0
+  case "$target" in
+    strata)    want_strata=1 ;;
+    rgw)       want_rgw=1 ;;
+    cassandra) want_cassandra=1 ;;
+    both)      want_strata=1; want_rgw=1 ;;
+    all)       want_strata=1; want_rgw=1; want_cassandra=1 ;;
+  esac
+
   # (a) + (b) strata
-  if [[ "$target" == "strata" || "$target" == "both" ]]; then
+  if (( want_strata )); then
     local code
     code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 "$STRATA_ENDPOINT_URL/readyz" 2>/dev/null || true)"
     if [[ "$code" != "200" ]]; then
@@ -411,8 +446,32 @@ preflight_check() {
     fi
   fi
 
+  # (a') + (b') strata-cassandra (US-009 — same shape as the strata gates).
+  if (( want_cassandra )); then
+    local code
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 "$CASSANDRA_ENDPOINT_URL/readyz" 2>/dev/null || true)"
+    if [[ "$code" != "200" ]]; then
+      fail "pre-flight: strata-cassandra /readyz returned HTTP $code (expected 200). Bring up: make up-cassandra && make wait-cassandra, or pass --include-cassandra to auto-boot."
+    fi
+    note "  [a'] strata-cassandra /readyz: 200 OK"
+
+    if [[ "$STRATA_BENCH_DATA_BACKEND_EXPECT" == "any" ]]; then
+      note "  [b'] strata-cassandra data_backend check skipped (STRATA_BENCH_DATA_BACKEND_EXPECT=any)"
+    else
+      local cbackend
+      cbackend="$(strata_data_backend_from_logs strata-cassandra)"
+      if [[ -z "$cbackend" ]]; then
+        note "  [b'] strata-cassandra data_backend: UNKNOWN (docker compose logs strata-cassandra grep missed startup line — proceeding with WARN)"
+      elif [[ "$cbackend" != "$STRATA_BENCH_DATA_BACKEND_EXPECT" ]]; then
+        fail "pre-flight: strata-cassandra data_backend=$cbackend, expected '$STRATA_BENCH_DATA_BACKEND_EXPECT'. Bench meaningless on $cbackend backend."
+      else
+        note "  [b'] strata-cassandra data_backend: $cbackend (matches expected '$STRATA_BENCH_DATA_BACKEND_EXPECT')"
+      fi
+    fi
+  fi
+
   # (c) rgw
-  if [[ "$target" == "rgw" || "$target" == "both" ]]; then
+  if (( want_rgw )); then
     local code
     code="$(probe_target "$RGW_ENDPOINT_URL")"
     if [[ "$code" != "200" && "$code" != "403" ]]; then
@@ -462,9 +521,18 @@ preflight_check() {
 
 apply_single_cluster_mode() {
   [[ "$STRATA_BENCH_SINGLE_CLUSTER" == "1" ]] || return 0
-  note "single-cluster bench mode: restarting strata-a/b with STRATA_RADOS_CLUSTERS=$SINGLE_CLUSTER_ENV"
-  STRATA_RADOS_CLUSTERS="$SINGLE_CLUSTER_ENV" $(compose_cmd) up -d strata-a strata-b >&2 \
-    || abort "single-cluster mode: docker compose up -d strata-a strata-b failed"
+  local services="strata-a strata-b"
+  # US-009: if cassandra is in play, restart strata-cassandra alongside with
+  # the same single-cluster env. Compose's `--profile cassandra` is implied by
+  # the service name (compose engine resolves profile-gated services when
+  # named directly in `up`).
+  if (( INCLUDE_CASSANDRA )); then
+    services="$services strata-cassandra"
+  fi
+  note "single-cluster bench mode: restarting $services with STRATA_RADOS_CLUSTERS=$SINGLE_CLUSTER_ENV"
+  # shellcheck disable=SC2086 # intentional word-split on services
+  STRATA_RADOS_CLUSTERS="$SINGLE_CLUSTER_ENV" $(compose_cmd) up -d $services >&2 \
+    || abort "single-cluster mode: docker compose up -d $services failed"
 
   local deadline=$(( SECONDS + 60 ))
   while (( SECONDS < deadline )); do
@@ -472,11 +540,54 @@ apply_single_cluster_mode() {
     code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 "$STRATA_ENDPOINT_URL/readyz" 2>/dev/null || true)"
     if [[ "$code" == "200" ]]; then
       note "single-cluster mode: strata /readyz 200 OK"
-      return 0
+      break
     fi
     sleep 1
   done
-  fail "single-cluster mode: strata /readyz did not return 200 within 60s after restart"
+  if (( INCLUDE_CASSANDRA )); then
+    local cdeadline=$(( SECONDS + 60 ))
+    while (( SECONDS < cdeadline )); do
+      local ccode
+      ccode="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 "$CASSANDRA_ENDPOINT_URL/readyz" 2>/dev/null || true)"
+      if [[ "$ccode" == "200" ]]; then
+        note "single-cluster mode: strata-cassandra /readyz 200 OK"
+        return 0
+      fi
+      sleep 1
+    done
+    fail "single-cluster mode: strata-cassandra /readyz did not return 200 within 60s after restart"
+  fi
+  return 0
+}
+
+# -----------------------------------------------------------------------------
+# US-009 cassandra-lab opt-in: boot strata-cassandra (+ underlying cassandra
+# service) via `make up-cassandra` if the endpoint isn't already reachable.
+# Idempotent — probes first, only invokes make on miss. The 3rd target adds
+# ~50% to the full sweep duration; default bench remains 2-target (strata+rgw).
+# -----------------------------------------------------------------------------
+ensure_cassandra_lab() {
+  local code
+  code="$(probe_target "$CASSANDRA_ENDPOINT_URL")"
+  if [[ "$code" == "200" || "$code" == "403" ]]; then
+    note "cassandra lab already up (HTTP $code on $CASSANDRA_ENDPOINT_URL/) — skipping make up-cassandra"
+    return 0
+  fi
+  note "booting strata-cassandra lab via make up-cassandra wait-cassandra wait-ceph (cassandra cold-start ~60s)"
+  make up-cassandra wait-cassandra wait-ceph >&2 \
+    || abort "make up-cassandra/wait-cassandra/wait-ceph failed (US-009 --include-cassandra)"
+  # Wait for strata-cassandra /readyz — wait-cassandra targets the Cassandra
+  # DB readiness, not the strata-cassandra gateway. Poll explicitly.
+  local deadline=$(( SECONDS + 60 ))
+  while (( SECONDS < deadline )); do
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 "$CASSANDRA_ENDPOINT_URL/readyz" 2>/dev/null || true)"
+    if [[ "$code" == "200" ]]; then
+      note "strata-cassandra /readyz 200 OK"
+      return 0
+    fi
+    sleep 2
+  done
+  abort "strata-cassandra /readyz did not return 200 within 60s of make up-cassandra"
 }
 
 # -----------------------------------------------------------------------------
@@ -493,8 +604,9 @@ cleanup_workload() {
   local target="$1" workload="$2"
   local endpoint creds_ak creds_sk bucket
   case "$target" in
-    strata) endpoint="$STRATA_ENDPOINT_URL"; creds_ak="$STRATA_AK"; creds_sk="$STRATA_SK" ;;
-    rgw)    endpoint="$RGW_ENDPOINT_URL";    creds_ak="$RGW_AK";    creds_sk="$RGW_SK" ;;
+    strata)    endpoint="$STRATA_ENDPOINT_URL";    creds_ak="$STRATA_AK"; creds_sk="$STRATA_SK" ;;
+    rgw)       endpoint="$RGW_ENDPOINT_URL";       creds_ak="$RGW_AK";    creds_sk="$RGW_SK" ;;
+    cassandra) endpoint="$CASSANDRA_ENDPOINT_URL"; creds_ak="$STRATA_AK"; creds_sk="$STRATA_SK" ;;
     *) note "cleanup_workload: unknown target $target — skip"; return 0 ;;
   esac
   bucket="bench-${workload}-${target}"
@@ -526,8 +638,9 @@ assert_bucket_absent() {
   local target="$1" workload="$2"
   local endpoint creds_ak creds_sk
   case "$target" in
-    strata) endpoint="$STRATA_ENDPOINT_URL"; creds_ak="$STRATA_AK"; creds_sk="$STRATA_SK" ;;
-    rgw)    endpoint="$RGW_ENDPOINT_URL";    creds_ak="$RGW_AK";    creds_sk="$RGW_SK" ;;
+    strata)    endpoint="$STRATA_ENDPOINT_URL";    creds_ak="$STRATA_AK"; creds_sk="$STRATA_SK" ;;
+    rgw)       endpoint="$RGW_ENDPOINT_URL";       creds_ak="$RGW_AK";    creds_sk="$RGW_SK" ;;
+    cassandra) endpoint="$CASSANDRA_ENDPOINT_URL"; creds_ak="$STRATA_AK"; creds_sk="$STRATA_SK" ;;
     *) return 0 ;;
   esac
   local bucket="bench-${workload}-${target}"
@@ -558,8 +671,13 @@ resolve_target() {
   local target="$1"
   local -n _endpoint="$2" _ak="$3" _sk="$4"
   case "$target" in
-    strata) _endpoint="$STRATA_ENDPOINT_URL"; _ak="$STRATA_AK"; _sk="$STRATA_SK" ;;
-    rgw)    _endpoint="$RGW_ENDPOINT_URL";    _ak="$RGW_AK";    _sk="$RGW_SK" ;;
+    strata)    _endpoint="$STRATA_ENDPOINT_URL";    _ak="$STRATA_AK"; _sk="$STRATA_SK" ;;
+    rgw)       _endpoint="$RGW_ENDPOINT_URL";       _ak="$RGW_AK";    _sk="$RGW_SK" ;;
+    # cassandra target (US-009): Strata-Cassandra shares the same
+    # STRATA_STATIC_CREDENTIALS as the TiKV-default lab — single static-creds
+    # env propagated to strata-a / strata-b / strata-cassandra via compose
+    # (deploy/docker/docker-compose.yml). Only the endpoint changes.
+    cassandra) _endpoint="$CASSANDRA_ENDPOINT_URL"; _ak="$STRATA_AK"; _sk="$STRATA_SK" ;;
     *) abort "unknown target: $target" ;;
   esac
 }
@@ -1195,30 +1313,36 @@ IAM_SK=""
 
 # Login to Strata admin API with the static bench admin creds, drop the
 # session cookie into the supplied jar file. Returns 1 on failure.
-strata_admin_login() {
-  local jar="$1"
+# US-009 generalised to accept an explicit endpoint so the cassandra target
+# reuses the exact same flow against the strata-cassandra gateway on port 9998.
+strata_admin_login_at() {
+  local endpoint="$1" jar="$2"
   local code
   code="$(curl -sS -o "$jar.body" -w '%{http_code}' \
     -c "$jar" \
-    -X POST "$STRATA_ENDPOINT_URL/admin/v1/auth/login" \
+    -X POST "$endpoint/admin/v1/auth/login" \
     -H 'Content-Type: application/json' \
     -d "{\"access_key\":\"$STRATA_AK\",\"secret_key\":\"$STRATA_SK\"}" \
     2>/dev/null || echo 000)"
   if [[ "$code" != "200" ]]; then
-    note "WARN: strata /admin/v1/auth/login returned HTTP $code"
+    note "WARN: $endpoint/admin/v1/auth/login returned HTTP $code"
     [[ -f "$jar.body" ]] && tail -3 "$jar.body" >&2 || true
     return 1
   fi
   return 0
 }
 
+strata_admin_login() { strata_admin_login_at "$STRATA_ENDPOINT_URL" "$1"; }
+
 # Strata: create IAM user + mint an access key. Idempotent on EntityAlreadyExists
 # (409) — falls through to look up an existing key (or mints a fresh one when
-# none exist). Sets IAM_AK / IAM_SK on success.
-create_iam_user_strata() {
-  local user="$1"
+# none exist). Sets IAM_AK / IAM_SK on success. The endpoint argument lets the
+# US-009 cassandra target reuse the function pointed at the Strata-Cassandra
+# gateway on port 9998 (admin API surface is identical between meta backends).
+create_iam_user_strata_at() {
+  local endpoint="$1" user="$2"
   local jar; jar="$(mktemp)"
-  if ! strata_admin_login "$jar"; then
+  if ! strata_admin_login_at "$endpoint" "$jar"; then
     rm -f "$jar" "$jar.body"
     return 1
   fi
@@ -1227,11 +1351,11 @@ create_iam_user_strata() {
   local code
   code="$(curl -sS -o "$jar.body" -w '%{http_code}' \
     -b "$jar" \
-    -X POST "$STRATA_ENDPOINT_URL/admin/v1/iam/users" \
+    -X POST "$endpoint/admin/v1/iam/users" \
     -H 'Content-Type: application/json' \
     -d "{\"user_name\":\"$user\"}" 2>/dev/null || echo 000)"
   if [[ "$code" != "200" && "$code" != "201" && "$code" != "204" && "$code" != "409" ]]; then
-    note "WARN: strata POST /admin/v1/iam/users returned HTTP $code"
+    note "WARN: $endpoint POST /admin/v1/iam/users returned HTTP $code"
     [[ -f "$jar.body" ]] && tail -3 "$jar.body" >&2 || true
     rm -f "$jar" "$jar.body"
     return 1
@@ -1240,38 +1364,42 @@ create_iam_user_strata() {
   # Mint a fresh access key — only response that carries the secret.
   local resp
   resp="$(curl -sS -b "$jar" \
-    -X POST "$STRATA_ENDPOINT_URL/admin/v1/iam/users/$user/access-keys" 2>/dev/null)"
+    -X POST "$endpoint/admin/v1/iam/users/$user/access-keys" 2>/dev/null)"
   IAM_AK="$(printf '%s' "$resp" | jq -r '.access_key_id // empty' 2>/dev/null)"
   IAM_SK="$(printf '%s' "$resp" | jq -r '.secret_access_key // empty' 2>/dev/null)"
   rm -f "$jar" "$jar.body"
   if [[ -z "$IAM_AK" || -z "$IAM_SK" ]]; then
-    note "WARN: strata POST /admin/v1/iam/users/$user/access-keys did not return access_key_id+secret_access_key"
+    note "WARN: $endpoint POST /admin/v1/iam/users/$user/access-keys did not return access_key_id+secret_access_key"
     note "  response (first 200 chars): $(printf '%s' "$resp" | head -c 200)"
     return 1
   fi
-  note "  iam_user (strata): $user / ak=${IAM_AK:0:6}…"
+  note "  iam_user ($endpoint): $user / ak=${IAM_AK:0:6}…"
   return 0
 }
 
+create_iam_user_strata() { create_iam_user_strata_at "$STRATA_ENDPOINT_URL" "$1"; }
+
 # Strata: cleanup IAM user — drops every access key then the user.
-cleanup_iam_user_strata() {
-  local user="$1"
+cleanup_iam_user_strata_at() {
+  local endpoint="$1" user="$2"
   local jar; jar="$(mktemp)"
-  if ! strata_admin_login "$jar"; then
+  if ! strata_admin_login_at "$endpoint" "$jar"; then
     rm -f "$jar" "$jar.body"
     return 0
   fi
   # List keys, delete each. Errors swallowed — cleanup is best-effort.
   local keys
-  keys="$(curl -sS -b "$jar" "$STRATA_ENDPOINT_URL/admin/v1/iam/users/$user/access-keys" 2>/dev/null \
+  keys="$(curl -sS -b "$jar" "$endpoint/admin/v1/iam/users/$user/access-keys" 2>/dev/null \
     | jq -r '.access_keys[]?.access_key_id // empty' 2>/dev/null)"
   local k
   for k in $keys; do
-    curl -sS -b "$jar" -X DELETE "$STRATA_ENDPOINT_URL/admin/v1/iam/access-keys/$k" >/dev/null 2>&1 || true
+    curl -sS -b "$jar" -X DELETE "$endpoint/admin/v1/iam/access-keys/$k" >/dev/null 2>&1 || true
   done
-  curl -sS -b "$jar" -X DELETE "$STRATA_ENDPOINT_URL/admin/v1/iam/users/$user" >/dev/null 2>&1 || true
+  curl -sS -b "$jar" -X DELETE "$endpoint/admin/v1/iam/users/$user" >/dev/null 2>&1 || true
   rm -f "$jar" "$jar.body"
 }
+
+cleanup_iam_user_strata() { cleanup_iam_user_strata_at "$STRATA_ENDPOINT_URL" "$1"; }
 
 # RGW: create bench user via `radosgw-admin user create --uid=...`. RGW's user
 # create returns full user JSON including keys[0].{access_key,secret_key}. On
@@ -1307,8 +1435,10 @@ cleanup_iam_user_rgw() {
 create_iam_user() {
   local target="$1" user="$2"
   case "$target" in
-    strata) create_iam_user_strata "$user" ;;
-    rgw)    create_iam_user_rgw "$user" ;;
+    strata)    create_iam_user_strata "$user" ;;
+    rgw)       create_iam_user_rgw "$user" ;;
+    # US-009: same admin-API surface against the Strata-Cassandra gateway.
+    cassandra) create_iam_user_strata_at "$CASSANDRA_ENDPOINT_URL" "$user" ;;
     *) note "WARN: create_iam_user unknown target $target"; return 1 ;;
   esac
 }
@@ -1316,8 +1446,9 @@ create_iam_user() {
 cleanup_iam_user() {
   local target="$1" user="$2"
   case "$target" in
-    strata) cleanup_iam_user_strata "$user" ;;
-    rgw)    cleanup_iam_user_rgw "$user" ;;
+    strata)    cleanup_iam_user_strata "$user" ;;
+    rgw)       cleanup_iam_user_rgw "$user" ;;
+    cassandra) cleanup_iam_user_strata_at "$CASSANDRA_ENDPOINT_URL" "$user" ;;
     *) return 0 ;;
   esac
 }
@@ -1442,8 +1573,9 @@ workload_iam_auth() {
 
   local endpoint
   case "$target" in
-    strata) endpoint="$STRATA_ENDPOINT_URL" ;;
-    rgw)    endpoint="$RGW_ENDPOINT_URL" ;;
+    strata)    endpoint="$STRATA_ENDPOINT_URL" ;;
+    rgw)       endpoint="$RGW_ENDPOINT_URL" ;;
+    cassandra) endpoint="$CASSANDRA_ENDPOINT_URL" ;;
     *) note "WARN: iam-auth unknown target $target"; cleanup_iam_user "$target" "$user"; return 0 ;;
   esac
 
@@ -1681,8 +1813,14 @@ do_report() {
   echo ""
   echo "## Per-workload concurrency-sweep pivot (US-004)"
   echo ""
-  echo "One block per workload. Rows = concurrency point; cols = Strata p99 / RGW p99 / ratio (Strata/RGW) / combined p99 stddev (sqrt(strata² + rgw²), error propagation). ratio > 1 = Strata slower; ratio < 1 = Strata faster."
+  echo "One block per workload. Rows = concurrency point; cols = Strata-TiKV p99 / RGW p99 / ratio (Strata-TiKV/RGW) / combined p99 stddev (sqrt(strata² + rgw²), error propagation). ratio > 1 = Strata-TiKV slower; ratio < 1 = Strata-TiKV faster. When --include-cassandra was used (US-009), an additional **Strata-Cassandra p99** column is emitted plus a **ratio (Strata-Cassandra/Strata-TiKV)** column for backend perf delta."
   echo ""
+
+  # US-009: detect presence of cassandra rows in the JSONL — if any exist,
+  # the pivot grid widens to a 7-column 3-way comparison; otherwise the
+  # 5-column 2-target shape is preserved (backwards-compat with US-004 doc).
+  local has_cassandra
+  has_cassandra="$(jq -r 'select(.target=="cassandra") | .target' "$RESULTS_FILE" | head -1)"
 
   # Build the unique workload list and emit one pivot per workload that has
   # both targets present (single-target workloads get a flat strata-only or
@@ -1698,42 +1836,78 @@ do_report() {
     sz="$(jq -r --arg wl "$wl" 'select(.workload==$wl) | .object_size' "$RESULTS_FILE" | head -1)"
     echo "### ${wl} (object_size: ${sz})"
     echo ""
-    printf '| concurrency | Strata p99 (ms, mean±sd) | RGW p99 (ms, mean±sd) | ratio (Strata/RGW) | combined p99 stddev |\n'
-    printf '|-------------|--------------------------|------------------------|--------------------|---------------------|\n'
+    if [[ -n "$has_cassandra" ]]; then
+      printf '| concurrency | Strata-TiKV p99 (ms) | RGW p99 (ms) | Strata-Cassandra p99 (ms) | ratio (TiKV/RGW) | ratio (Cass/TiKV) | combined p99 stddev |\n'
+      printf '|-------------|----------------------|--------------|---------------------------|------------------|-------------------|---------------------|\n'
+    else
+      printf '| concurrency | Strata p99 (ms, mean±sd) | RGW p99 (ms, mean±sd) | ratio (Strata/RGW) | combined p99 stddev |\n'
+      printf '|-------------|--------------------------|------------------------|--------------------|---------------------|\n'
+    fi
 
     local concs
     concs="$(jq -r --arg wl "$wl" 'select(.workload==$wl) | .concurrency' "$RESULTS_FILE" | sort -un)"
     local c
     for c in $concs; do
       [[ -z "$c" ]] && continue
-      # jq emits "<strata_p99>|<strata_sd>|<rgw_p99>|<rgw_sd>" or empty for
-      # missing target; bash assembles ratio + combined sd.
-      local row
-      row="$(jq -rs --arg wl "$wl" --argjson c "$c" '
-        def stats($a):
-          ($a | add / length) as $m
-          | { mean: $m,
-              sd: ($a | map(. - $m) | map(. * .) | add / length | sqrt) };
-        def fmt($s): if $s == null then "—"
-          else "\($s.mean|tostring|.[:6])±\($s.sd|tostring|.[:5])" end;
-        map(select(.workload==$wl and .concurrency==$c))
-        | (map(select(.target=="strata") | .p99_ms)) as $sp
-        | (map(select(.target=="rgw") | .p99_ms)) as $rp
-        | (if ($sp|length) > 0 then stats($sp) else null end) as $sstats
-        | (if ($rp|length) > 0 then stats($rp) else null end) as $rstats
-        | { sm: (if $sstats then $sstats.mean else null end),
-            ss: (if $sstats then $sstats.sd else null end),
-            rm: (if $rstats then $rstats.mean else null end),
-            rs: (if $rstats then $rstats.sd else null end) }
-        | (if .sm and .rm and .rm > 0 then (.sm/.rm) else null end) as $ratio
-        | (if .ss and .rs then (.ss*.ss + .rs*.rs | sqrt) else null end) as $combined
-        | "\($c)|\(if .sm then "\(.sm|tostring|.[:6])±\(.ss|tostring|.[:5])" else "—" end)|\(if .rm then "\(.rm|tostring|.[:6])±\(.rs|tostring|.[:5])" else "—" end)|\(if $ratio then ($ratio|tostring|.[:5]) else "—" end)|\(if $combined then ($combined|tostring|.[:5]) else "—" end)"
-      ' "$RESULTS_FILE")"
-      IFS='|' read -r pcol scol rcol ratiocol combinedcol <<< "$row"
-      printf '| %s | %s | %s | %s | %s |\n' "$pcol" "$scol" "$rcol" "$ratiocol" "$combinedcol"
+      if [[ -n "$has_cassandra" ]]; then
+        # US-009 3-way row. jq emits "<conc>|<tikv>|<rgw>|<cass>|<r_tr>|<r_ct>|<combined>".
+        local row
+        row="$(jq -rs --arg wl "$wl" --argjson c "$c" '
+          def stats($a):
+            ($a | add / length) as $m
+            | { mean: $m,
+                sd: ($a | map(. - $m) | map(. * .) | add / length | sqrt) };
+          map(select(.workload==$wl and .concurrency==$c))
+          | (map(select(.target=="strata") | .p99_ms)) as $sp
+          | (map(select(.target=="rgw") | .p99_ms)) as $rp
+          | (map(select(.target=="cassandra") | .p99_ms)) as $cp
+          | (if ($sp|length) > 0 then stats($sp) else null end) as $sstats
+          | (if ($rp|length) > 0 then stats($rp) else null end) as $rstats
+          | (if ($cp|length) > 0 then stats($cp) else null end) as $cstats
+          | { sm: (if $sstats then $sstats.mean else null end),
+              ss: (if $sstats then $sstats.sd else null end),
+              rm: (if $rstats then $rstats.mean else null end),
+              rs: (if $rstats then $rstats.sd else null end),
+              cm: (if $cstats then $cstats.mean else null end),
+              cs: (if $cstats then $cstats.sd else null end) }
+          | (if .sm and .rm and .rm > 0 then (.sm/.rm) else null end) as $r_tr
+          | (if .cm and .sm and .sm > 0 then (.cm/.sm) else null end) as $r_ct
+          | (if .ss and .rs then (.ss*.ss + .rs*.rs | sqrt) else null end) as $combined
+          | "\($c)|\(if .sm then "\(.sm|tostring|.[:6])±\(.ss|tostring|.[:5])" else "—" end)|\(if .rm then "\(.rm|tostring|.[:6])±\(.rs|tostring|.[:5])" else "—" end)|\(if .cm then "\(.cm|tostring|.[:6])±\(.cs|tostring|.[:5])" else "—" end)|\(if $r_tr then ($r_tr|tostring|.[:5]) else "—" end)|\(if $r_ct then ($r_ct|tostring|.[:5]) else "—" end)|\(if $combined then ($combined|tostring|.[:5]) else "—" end)"
+        ' "$RESULTS_FILE")"
+        IFS='|' read -r pcol scol rcol ccol r_tr r_ct combinedcol <<< "$row"
+        printf '| %s | %s | %s | %s | %s | %s | %s |\n' "$pcol" "$scol" "$rcol" "$ccol" "$r_tr" "$r_ct" "$combinedcol"
+      else
+        # 2-target shape (US-004 backwards-compat).
+        local row
+        row="$(jq -rs --arg wl "$wl" --argjson c "$c" '
+          def stats($a):
+            ($a | add / length) as $m
+            | { mean: $m,
+                sd: ($a | map(. - $m) | map(. * .) | add / length | sqrt) };
+          map(select(.workload==$wl and .concurrency==$c))
+          | (map(select(.target=="strata") | .p99_ms)) as $sp
+          | (map(select(.target=="rgw") | .p99_ms)) as $rp
+          | (if ($sp|length) > 0 then stats($sp) else null end) as $sstats
+          | (if ($rp|length) > 0 then stats($rp) else null end) as $rstats
+          | { sm: (if $sstats then $sstats.mean else null end),
+              ss: (if $sstats then $sstats.sd else null end),
+              rm: (if $rstats then $rstats.mean else null end),
+              rs: (if $rstats then $rstats.sd else null end) }
+          | (if .sm and .rm and .rm > 0 then (.sm/.rm) else null end) as $ratio
+          | (if .ss and .rs then (.ss*.ss + .rs*.rs | sqrt) else null end) as $combined
+          | "\($c)|\(if .sm then "\(.sm|tostring|.[:6])±\(.ss|tostring|.[:5])" else "—" end)|\(if .rm then "\(.rm|tostring|.[:6])±\(.rs|tostring|.[:5])" else "—" end)|\(if $ratio then ($ratio|tostring|.[:5]) else "—" end)|\(if $combined then ($combined|tostring|.[:5]) else "—" end)"
+        ' "$RESULTS_FILE")"
+        IFS='|' read -r pcol scol rcol ratiocol combinedcol <<< "$row"
+        printf '| %s | %s | %s | %s | %s |\n' "$pcol" "$scol" "$rcol" "$ratiocol" "$combinedcol"
+      fi
     done
     echo ""
-    echo "_Conclusion_: <operator fills in after run — e.g. \"Strata 1KB PUT scales sub-linearly at c=128 vs RGW; both saturate around 4000 ops/sec on lima lab\"._"
+    if [[ -n "$has_cassandra" ]]; then
+      echo "_Conclusion_: <operator fills in after run — 3-way framing per US-009: e.g. \"TiKV vs Cassandra on the same RADOS cluster shows X% delta; the choice is workload-dependent.\"_"
+    else
+      echo "_Conclusion_: <operator fills in after run — e.g. \"Strata 1KB PUT scales sub-linearly at c=128 vs RGW; both saturate around 4000 ops/sec on lima lab\"._"
+    fi
     echo ""
   done
 }
@@ -1757,7 +1931,8 @@ while (($#)); do
     --extract-rgw-creds) MODE="extract-rgw-creds" ;;
     --preflight) MODE="preflight" ;;
     --skip-preflight) SKIP_PREFLIGHT=1 ;;
-    -h|--help) sed -n '1,60p' "$0"; exit 0 ;;
+    --include-cassandra) INCLUDE_CASSANDRA=1 ;;
+    -h|--help) sed -n '1,70p' "$0"; exit 0 ;;
     --) shift; break ;;
     -*) abort "unknown flag: $1" ;;
     *) POSITIONAL+=("$1") ;;
@@ -1782,7 +1957,13 @@ case "$MODE" in
   preflight)
     TARGET="${POSITIONAL[0]:-both}"
     extract_strata_creds
-    [[ "$TARGET" == "rgw" || "$TARGET" == "both" ]] && extract_rgw_creds
+    if [[ "$TARGET" == "rgw" || "$TARGET" == "both" || "$TARGET" == "all" ]]; then
+      extract_rgw_creds
+    fi
+    # US-009: cassandra/all targets need the cassandra lab reachable.
+    if (( INCLUDE_CASSANDRA )) || [[ "$TARGET" == "cassandra" || "$TARGET" == "all" ]]; then
+      ensure_cassandra_lab
+    fi
     preflight_check "$TARGET"
     note "pre-flight OK"
     exit 0
@@ -1796,10 +1977,25 @@ esac
 
 ensure_tool
 extract_strata_creds
-[[ "$TARGET" == "rgw" || "$TARGET" == "both" ]] && extract_rgw_creds
+if [[ "$TARGET" == "rgw" || "$TARGET" == "both" || "$TARGET" == "all" ]]; then
+  extract_rgw_creds
+fi
+
+# US-009: cassandra/all targets need strata-cassandra running. --include-cassandra
+# auto-boots; without the flag we require an already-up lab and abort otherwise.
+if [[ "$TARGET" == "cassandra" || "$TARGET" == "all" ]]; then
+  if (( INCLUDE_CASSANDRA )); then
+    ensure_cassandra_lab
+  else
+    code="$(probe_target "$CASSANDRA_ENDPOINT_URL")"
+    if [[ "$code" != "200" && "$code" != "403" ]]; then
+      abort "target '$TARGET' requires strata-cassandra (port 9998) up. Pass --include-cassandra to auto-boot via 'make up-cassandra', or run it manually."
+    fi
+  fi
+fi
 
 # Lab probes — fail-soft via skip(77) unless REQUIRE_LAB=1.
-if [[ "$TARGET" == "strata" || "$TARGET" == "both" ]]; then
+if [[ "$TARGET" == "strata" || "$TARGET" == "both" || "$TARGET" == "all" ]]; then
   code="$(probe_target "$STRATA_ENDPOINT_URL")"
   if [[ "$code" != "200" && "$code" != "403" ]]; then
     if [[ "$REQUIRE_LAB" == "1" ]]; then
@@ -1809,13 +2005,23 @@ if [[ "$TARGET" == "strata" || "$TARGET" == "both" ]]; then
     fi
   fi
 fi
-if [[ "$TARGET" == "rgw" || "$TARGET" == "both" ]]; then
+if [[ "$TARGET" == "rgw" || "$TARGET" == "both" || "$TARGET" == "all" ]]; then
   code="$(probe_target "$RGW_ENDPOINT_URL")"
   if [[ "$code" != "200" && "$code" != "403" ]]; then
     if [[ "$REQUIRE_LAB" == "1" ]]; then
       fail "rgw endpoint $RGW_ENDPOINT_URL not ready (HTTP $code). Bring lab up: make up-bench-rgw && make wait-rgw"
     else
       skip "rgw endpoint $RGW_ENDPOINT_URL not ready (HTTP $code). Run 'make up-bench-rgw' first."
+    fi
+  fi
+fi
+if [[ "$TARGET" == "cassandra" || "$TARGET" == "all" ]]; then
+  code="$(probe_target "$CASSANDRA_ENDPOINT_URL")"
+  if [[ "$code" != "200" && "$code" != "403" ]]; then
+    if [[ "$REQUIRE_LAB" == "1" ]]; then
+      fail "cassandra endpoint $CASSANDRA_ENDPOINT_URL not ready (HTTP $code). Bring lab up: make up-cassandra && make wait-cassandra"
+    else
+      skip "cassandra endpoint $CASSANDRA_ENDPOINT_URL not ready (HTTP $code). Run 'make up-cassandra' or pass --include-cassandra."
     fi
   fi
 fi
@@ -1831,9 +2037,10 @@ else
 fi
 
 note "results file: $RESULTS_FILE"
+(( INCLUDE_CASSANDRA )) && note "US-009: --include-cassandra ON (3rd target enabled; default bench is 2-target — flag adds ~50% to sweep duration)"
 
 case "$TARGET" in
-  strata|rgw)
+  strata|rgw|cassandra)
     dispatch_workload "$WORKLOAD" "$TARGET" "$CONCURRENCY" "$RUNS"
     ;;
   both)
@@ -1842,8 +2049,21 @@ case "$TARGET" in
     dispatch_workload "$WORKLOAD" "rgw" "$CONCURRENCY" "$RUNS"
     assert_bucket_absent "rgw" "$WORKLOAD"
     ;;
+  all)
+    # US-009: strata + rgw + cassandra in sequence. Same RADOS cluster
+    # underneath all three (single-cluster bench mode in US-003 if enabled;
+    # otherwise the lab's multi-cluster default applies equally to both
+    # Strata flavors). Per-target assert_bucket_absent between phases catches
+    # cleanup drift.
+    dispatch_workload "$WORKLOAD" "strata" "$CONCURRENCY" "$RUNS"
+    assert_bucket_absent "strata" "$WORKLOAD"
+    dispatch_workload "$WORKLOAD" "rgw" "$CONCURRENCY" "$RUNS"
+    assert_bucket_absent "rgw" "$WORKLOAD"
+    dispatch_workload "$WORKLOAD" "cassandra" "$CONCURRENCY" "$RUNS"
+    assert_bucket_absent "cassandra" "$WORKLOAD"
+    ;;
   *)
-    abort "target must be one of: strata, rgw, both (got '$TARGET')"
+    abort "target must be one of: strata, rgw, cassandra, both, all (got '$TARGET')"
     ;;
 esac
 
