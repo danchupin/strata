@@ -686,7 +686,16 @@ current one drains to the wire. Memory-bounded; aborts on client cancel.&lt;/li&
 &lt;code&gt;manager.Uploader&lt;/code&gt; already parallelises multipart uploads. Memory backend is
 tests-only. Multi-cluster manifests (US-044) automatically benefit since
 chunk-write dispatch is cluster-agnostic — the worker pool dials the right
-ioctx per chunk via the existing &lt;code&gt;resolveClass&lt;/code&gt; / &lt;code&gt;ioctx&lt;/code&gt; helpers.&lt;/p&gt;</description></item><item><title>S3 API operations</title><link>https://danchupin.github.io/strata/reference/s3-api/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/reference/s3-api/</guid><description>&lt;!--
+ioctx per chunk via the existing &lt;code&gt;resolveClass&lt;/code&gt; / &lt;code&gt;ioctx&lt;/code&gt; helpers.&lt;/p&gt;</description></item><item><title>RGW comparison</title><link>https://danchupin.github.io/strata/architecture/benchmarks/rgw-comparison/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/benchmarks/rgw-comparison/</guid><description>&lt;h1 id="benchmarks-vs-ceph-rgw"&gt;Benchmarks vs Ceph RGW&lt;a class="anchor" href="#benchmarks-vs-ceph-rgw"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;This page captures the side-by-side numbers backing the README&amp;rsquo;s
+&amp;ldquo;drop-in RGW replacement&amp;rdquo; claim. Closes ROADMAP P2 &lt;em&gt;&amp;ldquo;Benchmarks vs RGW&amp;rdquo;&lt;/em&gt;
+via cycle &lt;code&gt;ralph/rgw-benchmarks&lt;/code&gt; (US-001..US-012).&lt;/p&gt;
+&lt;h2 id="headline-conclusion"&gt;Headline conclusion&lt;a class="anchor" href="#headline-conclusion"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;Strata and Ceph RGW v19 are measured against the same single-OSD &lt;code&gt;ceph-a&lt;/code&gt;
+cluster from the bare-default lab so the data tier is held constant.
+Strata&amp;rsquo;s metadata path differs: Cassandra/TiKV sharded fan-out (64-way by
+default) vs RGW&amp;rsquo;s per-bucket omap index. The bench surfaces three
+distinct regimes:&lt;/p&gt;</description></item><item><title>S3 API operations</title><link>https://danchupin.github.io/strata/reference/s3-api/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/reference/s3-api/</guid><description>&lt;!--
 Maintainer note: this table is hand-maintained. When adding a new handler
 in internal/s3api/, append a row here in the same PR. A lint test
 (internal/s3api/docs_reference_test.go) AST-parses the dispatch functions
