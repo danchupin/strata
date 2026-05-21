@@ -227,7 +227,12 @@ func (s *Store) CreateIAMAccessKey(ctx context.Context, ak *meta.IAMAccessKey) (
 	if err = txn.Set(akKey, payload); err != nil {
 		return err
 	}
-	if err = txn.Set(idxKey, nil); err != nil {
+	// Real TiKV (vs in-process testutils.NewMockTiKV) rejects nil OR empty
+	// values with "can not set nil value" — see txnkv/transaction/txn.go
+	// `Set` which guards against `value == nil || len(value) == 0`. The
+	// secondary-index row is a presence marker, so write a single sentinel
+	// byte (0x01) — readers never decode the value, just check existence.
+	if err = txn.Set(idxKey, []byte{1}); err != nil {
 		return err
 	}
 	return txn.Commit(ctx)

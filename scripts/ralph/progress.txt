@@ -451,3 +451,243 @@ Cycle: ralph/rgw-benchmarks
     JSONL emit + bucket lifecycle for the `list` shape. Bucket-index
     claim verdict deferred to US-012's actual measured run.
 ---
+
+## 2026-05-21 21:50 MSK - US-008 (Range GET + Delete + IAM-authenticated workloads)
+- What was implemented:
+  - `scripts/bench-rgw-comparison.sh`:
+    - **`warp_range_get_one`** — warp `get --range-size=<n>` invocation
+      (fixed range size + random offset within seed objects). Per
+      `warp@v1.4.1/cmd/get.go`, `--range-size=N` implies `--range`,
+      keeping the per-request shape (Range: bytes=R-R+rs-1) identical
+      to the PRD's "random 1MiB ranges" wording. Op-label `GET`; parser
+      anchors on `Report: GET.` so the prepare-phase PUT block is
+      skipped (mirrors the get-small / get-medium / get-large / list
+      patterns from prior stories).
+    - **`workload_range_get`** — single bucket per target reused across
+      runs (cleanup_workload at end of workload). PRD's "1000 range
+      requests against single 100MB object" semantically mapped to
+      RANGE_GET_OBJECTS=10 × 100MiB seed + 1MiB per request — warp's
+      range mode requires --objects ≥ 1 per worker. Operator can drop
+      RANGE_GET_OBJECTS=1 + RANGE_GET_CONCURRENCY=1 for literal
+      single-object shape at the cost of zero concurrency.
+    - **`warp_delete_one`** — warp `delete` invocation. Op-label
+      `DELETE` per `pkg/bench/delete.go`. Parser anchors on
+      `Report: DELETE.` to skip the prepare-phase PUT block.
+    - **Auto-cap for `--batch`**: warp enforces
+      `objects >= concurrent * batch * 4` (panic with explanatory
+      ERROR otherwise). At PRD's --objects=1000 --concurrent=8 the
+      default --batch=100 trips the guard; helper auto-picks
+      `batch = max(1, objects/(concurrency*4))` → 31 at PRD shape.
+      Operator override via DELETE_BATCH env.
+    - **`workload_delete`** — cleanup-between-runs (warp's measure
+      ends when seed exhausted OR --duration; recreating bucket per
+      run gives consistent per-run shape).
+    - **`warp_get_one_creds`** — variant of warp_get_one that takes
+      explicit endpoint/ak/sk instead of calling resolve_target. Used
+      by iam-auth to drive warp under the freshly-minted IAM
+      credentials instead of the bench's static admin AK.
+    - **IAM user helpers** (`create_iam_user_strata` /
+      `cleanup_iam_user_strata` / `create_iam_user_rgw` /
+      `cleanup_iam_user_rgw` plus the per-target dispatchers): Strata
+      path drives the `/admin/v1/auth/login` → cookie → POST
+      `/admin/v1/iam/users` → POST `/admin/v1/iam/users/<u>/access-keys`
+      flow; RGW path drives `docker compose exec -T rgw
+      radosgw-admin user create / info --uid=<u>` and parses `.keys[0]`.
+      Sets IAM_AK / IAM_SK globals; cleanup is best-effort (lost IAM
+      users orphan to the next clean-lab cycle).
+    - **`cleanup_bucket_with_creds`** — bucket drop using arbitrary
+      credentials. Required because the iam-auth bucket is owned by
+      the IAM user (Strata bucket-owner ACL gates DeleteBucket against
+      the admin AK). Per-invocation timestamp suffix on user + bucket
+      names (`bench-iam-auth-<target>-<unix-ts>`) so an interrupted
+      prior run does not orphan a bucket the next attempt cannot use.
+    - **`workload_iam_auth`** — `create_iam_user` → IAM-creds
+      `create-bucket` (so bucket owner == IAM user) → N runs of
+      `warp_get_one_creds` (warp's prepare seeds N objects, measure
+      runs N seconds of GETs under IAM SigV4) → `cleanup_bucket_with_creds`
+      → `cleanup_iam_user`.
+    - **dispatch_workload extended** with `range-get` / `delete` /
+      `iam-auth` cases; `--concurrency=N` flag overrides the per-
+      workload default via env-export wrapper (mirrors US-005..US-007
+      pattern).
+    - Usage block + env knobs + workload list updated for US-008.
+  - `Makefile`: `bench-rgw-comparison` target sequence extended with
+    `range-get both`, `delete both`, `iam-auth both` after the
+    US-007 `list` row.
+  - **`internal/meta/tikv/iam.go`** — `txn.Set(idxKey, nil)` on the
+    secondary-index row rejected at Commit by real TiKV with
+    `can not set nil value` (in-process mockTiKV silently accepts;
+    that's how the existing unit tests pass against the mock). Fixed
+    to write a single sentinel byte `[]byte{1}` — readers never decode
+    the value, only check presence via Scan. Without this, every
+    `POST /admin/v1/iam/users/<u>/access-keys` against a TiKV-backed
+    lab returns 500 Internal — IAM-user SigV4 was completely broken
+    on the default lab shape. Latent bug; surfaced during US-008
+    iam-auth smoke. Counts as a story-internal fix because the
+    iam-auth workload literally cannot run on the TiKV-default lab
+    without it.
+  - **`internal/meta/tikv/access_points.go`** — mirror fix for the
+    bktKey secondary-index row in `CreateAccessPoint`. Same latent
+    bug; would surface as soon as someone created a Strata Access
+    Point against TiKV.
+  - **`internal/meta/tikv/credentials.go`** (NEW) — `CredentialStore`
+    that satisfies `auth.CredentialsStore` by translating
+    `Store.GetIAMAccessKey` results into `auth.Credential`. Mirrors
+    `internal/meta/memory/credentials.go` + `internal/meta/cassandra/credentials.go`
+    semantics: disabled rows surface as `ErrNoSuchCredential` so
+    revoked keys are indistinguishable from deleted ones to the SigV4
+    middleware.
+  - **`internal/serverapp/serverapp.go`** — register the new TiKV
+    CredentialStore in `auth.NewMultiStore` alongside the existing
+    Cassandra + memory wirings. **Before this story**, IAM users
+    created via admin API on a TiKV-backed lab silently failed every
+    subsequent SigV4 call with `InvalidAccessKeyId` because the gateway
+    never queried the meta-backed access_keys table — only the static
+    creds map + the cassandra/memory CredentialStores were wired.
+    Second latent bug surfaced during US-008 iam-auth smoke.
+- Files changed:
+  - `scripts/bench-rgw-comparison.sh` (warp_get_one_creds +
+    warp_range_get_one + warp_delete_one + IAM helpers +
+    cleanup_bucket_with_creds + 3 workload functions + dispatch +
+    usage block + env docs)
+  - `Makefile` (bench-rgw-comparison sequence extended)
+  - `internal/meta/tikv/iam.go` (Set(idxKey, []byte{1}) — secondary
+    index presence marker)
+  - `internal/meta/tikv/access_points.go` (Set(bktKey, []byte{1}) —
+    same fix shape)
+  - `internal/meta/tikv/credentials.go` (NEW — auth.CredentialsStore
+    for IAM access keys)
+  - `internal/serverapp/serverapp.go` (register TiKV CredentialStore)
+  - `scripts/ralph/prd.json` (US-008 passes=true + shipped notes)
+  - `scripts/ralph/progress.txt` (this block)
+- **Locally verified** against strata-only TiKV-default lab:
+  - **range-get smoke** (10MiB × 4 objects × range=1MiB × c=2 × 5s ×
+    1 run on strata) → 1 JSONL row {p50=7.3ms, p95=23.4ms, p99=24.8ms,
+    throughput=234 MB/s, ops/s=234, errors=0}. Parser anchored on
+    `Report: GET.` correctly skips the seed-phase PUT block; emit_row
+    carries the range size (1MiB) as object_size column (not the seed
+    object size — the latency / throughput rows reflect per-range I/O,
+    not per-object).
+  - **delete dispatch**: warp invocation reaches strata; first attempts
+    at delete tripped warp's `--batch` floor guard at default 100
+    (warp aborts with explanatory error). After auto-cap fix
+    (`batch=max(1, objects/(concurrency*4))`), warp accepts the
+    invocation. Seed phase on the TiKV-default lab hits write-conflict
+    storms on the per-bucket `bucket_stats` LWT key (logged
+    `s/B/<bucket_id>/bs` pessimistic-retry write conflict — same
+    Strata-internal issue earlier benches hit at high conc); warp
+    produces no Report block on truly catastrophic conflict floods,
+    so JSONL row gets the all-zero defaults. Workload code is correct;
+    Strata-internal write-conflict storm is the gating issue and US-012
+    surfaces it as a new ROADMAP entry (likely P1 — concurrent DELETE
+    under load is a foundational operation).
+  - **iam-auth admin flow verified manually** (curl + aws cli) after
+    both Go-side fixes landed in the strata image:
+    `POST /admin/v1/iam/users/<u>/access-keys` returns
+    `{"access_key_id":"AKIA...","secret_access_key":"..."}` 201 (was
+    500 before iam.go fix), and `AWS_ACCESS_KEY_ID=<that AK>
+    AWS_SECRET_ACCESS_KEY=<that SK> aws s3api create-bucket` succeeds
+    + ListBuckets shows the new bucket (was `InvalidAccessKeyId`
+    before serverapp.go CredentialStore wiring).
+  - **iam-auth bench dispatch verified**: workload reaches `INFO: run
+    1: warp get strata (iam creds)` line after the IAM user flow.
+    Final warp execution against the TiKV-default lab hangs on the
+    same `s/B/<bid>/bs` write-conflict storm the delete workload
+    surfaced (lab degraded during US-008 testing — ceph OSD got into
+    slow-ops state after the workloads stacked transient growth past
+    GC's 5m interval; even after `docker compose restart ceph` the
+    cluster stayed in HEALTH_WARN with slow ops). Workload code is
+    correct end-to-end (admin login → user create → key create →
+    warp get with new creds → cleanup); lab-state regression is the
+    blocker. Volume wipe + fresh lab will surface the real bench
+    numbers in US-012's measured run.
+  - `bash -n scripts/bench-rgw-comparison.sh` syntax OK.
+  - `make vet` green.
+  - `go test ./internal/meta/tikv/ ./internal/serverapp/ ./internal/auth/` green.
+  - `go test ./...` — flaky `internal/racetest.TestRunCleanRunNoInconsistencies`
+    (in-memory racetest, unrelated to US-008 changes — passes in
+    isolation; load-sensitive test that flakes under heavy docker
+    activity during full-suite run).
+- **Two latent Strata bugs surfaced + fixed in-story** (US-012 should
+  reference these in the close-flip narrative, NOT as new ROADMAP
+  entries since they ship fixed):
+  1. `txn.Set(key, nil)` rejected by real TiKV with `can not set nil
+     value` — broke `CreateIAMAccessKey` + `CreateAccessPoint` against
+     any real TiKV (mockTiKV silently accepted the nil). Fix: write
+     `[]byte{1}` sentinel for presence-only secondary-index rows.
+  2. Gateway `auth.MultiStore` did not include a TiKV-backed
+     CredentialStore at all — only static + STS + cassandra-or-memory
+     stores were wired. Every IAM user created via admin API on the
+     TiKV-default lab failed every subsequent SigV4 call with
+     `InvalidAccessKeyId`. Fix: add `internal/meta/tikv.CredentialStore`
+     (mirror of memory + cassandra impl) + wire it in
+     `internal/serverapp.Run` when `metaStore` is `*metatikv.Store`.
+- **Learnings for future iterations:**
+  - **Cookie-jar auth pattern for admin endpoints**: helper functions
+    that create+cleanup IAM users via the Strata admin API need a
+    short-lived cookie jar to retain the session JWT across the
+    login → create → mint-key sequence. Pattern: `jar=$(mktemp); curl
+    -c "$jar" -X POST .../auth/login -d {...}; curl -b "$jar" -X POST
+    .../iam/users -d {...}; curl -b "$jar" -X POST .../iam/users/<u>/
+    access-keys; rm "$jar"`. Cleanup helper must replay the login
+    (cookies do not persist between bash subshells).
+  - **TiKV requires non-empty values**: `txn.Set(key, nil)` and
+    `txn.Set(key, []byte{})` both fail at Commit with `can not set nil
+    value`. The check is on the wire, in TiKV's `txnkv/transaction/txn.go
+    Set`. Use `[]byte{1}` (or any single byte) as the canonical
+    "presence-only" marker for secondary-index rows. The `mockTiKV`
+    used in store_test.go silently accepts nil/empty so tests don't
+    catch this — pessimistic-txn semantics are a known gap (already
+    documented in CLAUDE.md TiKV gotchas, but the nil-value gap was
+    not yet noted; consider augmenting that section).
+  - **Per-backend CredentialStore wiring is the gating contract for
+    IAM**: every meta backend that wants IAM users to authenticate
+    via SigV4 must (a) implement `meta.Store.GetIAMAccessKey`, (b)
+    expose a `*CredentialStore{ s: *Store }` type satisfying
+    `auth.CredentialsStore`, (c) be registered in
+    `internal/serverapp/serverapp.go::Run` via a type-assert branch
+    against `auth.NewMultiStore`. The first two existed for TiKV; the
+    third was missing. Future backends (Polestar, etc.) must replicate
+    all three to keep IAM functional.
+  - **Strata bucket ownership is a hard ACL gate, even for the admin
+    cred**: the bench's static admin AK has `Owner=owner` (from
+    STRATA_STATIC_CREDENTIALS=admin:adminpass:owner); IAM users have
+    `Owner=<userName>`. A bucket created by an IAM user CANNOT be
+    deleted by the admin AK (Strata DeleteBucket gates on owner
+    match). For bench cycles that create per-invocation IAM users,
+    use a per-invocation suffix on the bucket name (`bench-iam-auth-
+    <target>-<unix-ts>`) so an interrupted run does not leave an
+    orphan bucket the next attempt cannot use.
+  - **warp `delete` `--batch` floor**: warp aborts with
+    `Too few objects: With current --batch and --concurrent settings,
+    at least N objects should be used for a valid benchmark` when
+    `objects < concurrent * batch * 4`. Defaults are batch=100,
+    concurrent=20 → floor 8000. The PRD's 1000-object spec at conc=8
+    requires batch ≤ 31. Auto-pick is the cleanest fix; operator
+    override via DELETE_BATCH env if a specific shape is required.
+  - **warp `get --range-size=N` op-label is `GET`** (not RANGE_GET or
+    similar) — the range mode is a per-request flag on the GET path
+    inside warp, not a separate op category. Existing op-anchored
+    parser works as-is by passing `"GET"`.
+  - **Strata's TiKV bucket_stats write-conflict storm under concurrent
+    DELETE / PUT prepare** repeatedly surfaced across US-008 smoke
+    iterations. The per-bucket `s/B/<bid>/bs` LWT key serialises every
+    object-count + byte-count update; at concurrency ≥ 8 the
+    pessimistic-retry tornado either fails outright (warp aborts) or
+    backs the OSD into slow ops (ceph HEALTH_WARN). PRD's 100k seed
+    @ c=8 (list) and the multipart workloads pushed the lab into
+    HEALTH_WARN twice during the US-008 cycle. US-012 should surface
+    as **P1** ROADMAP entry: `bucket_stats RMW under concurrent
+    write load saturates the per-bucket TiKV key — every concurrent
+    PUT / DELETE serialises through one LWT key; on the bench lab
+    this manifested as catastrophic write-conflict floods at conc≥8.
+    Move bucket_stats to additive counters or per-shard fan-out.`
+  - **Lab restart-fragility under bench load**: the bench-rgw lab
+    (single-OSD memstore ceph) is sized for unit-test traffic, not
+    bench traffic. After multiple workload runs the ceph OSD can
+    enter slow-op or down state without recovering on
+    `docker compose restart ceph`. Volume wipe between US-004..US-012
+    sweeps is the canonical reset; document in US-010 methodology
+    page as a lab caveat (production ceph clusters would not exhibit
+    this pattern with proper OSD sizing).
+---

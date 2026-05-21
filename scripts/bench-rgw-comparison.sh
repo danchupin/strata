@@ -10,8 +10,10 @@
 # default) per workload. US-005 adds put-large / get-large (100MiB shape).
 # US-006 adds multipart-5g (warp multipart-put: 5 concurrent multipart uploads
 # of 5GB each, 80 × 64MiB parts). US-007 adds list (100k 1KiB keys, ListObjectsV2
-# max-keys=1000 — the bucket-index claim workload). Subsequent stories US-008
-# extend with range/delete/IAM workloads on top.
+# max-keys=1000 — the bucket-index claim workload). US-008 adds range-get
+# (random 1MiB ranges via warp `get --range-size=1MiB`), delete (warp `delete`
+# seeds + DELETEs N small objects), iam-auth (pre-create IAM user via target's
+# admin API, then run warp `get` under the IAM user's SigV4 creds).
 #
 # Usage:
 #   bash scripts/bench-rgw-comparison.sh <workload> <target> [--concurrency=N | --concurrency-sweep=A,B,C] [--runs=N]
@@ -33,7 +35,16 @@
 #                                bucket (warp's `list` subcommand, op-label
 #                                LIST, --max-keys=1000 paginated) — THE
 #                                bucket-index claim workload (US-007)
-#               (US-008 adds range-get, delete, iam-auth)
+#                 range-get     Random 1MiB-range GETs via warp's `get
+#                                --range-size=1MiB`; op-label GET, fixed
+#                                range size + random offset (US-008)
+#                 delete        warp `delete` — seeds N small objects then
+#                                DELETEs them; op-label DELETE (US-008)
+#                 iam-auth      warp `get` driven by IAM-user SigV4 creds
+#                                created via the target's admin API (Strata
+#                                /admin/v1/iam, RGW radosgw-admin); op-label
+#                                GET, exercises full SigV4 + identity
+#                                resolution hot path (US-008)
 #   <target>    one of: strata, rgw, both
 #
 # Flags:
@@ -87,6 +98,22 @@
 #   LIST_MAX_KEYS                ListObjectsV2 max-keys per page (default 1000 per PRD;
 #                                with 100k seed × 8 workers = 12500 keys/worker → ~13
 #                                pages per LIST op)
+#   RANGE_GET_SIZE               base object size for range-get seed (default 100MiB)
+#   RANGE_GET_OBJECTS            seeded objects for range-get (default 10 → ~1GiB seed)
+#   RANGE_GET_RANGE_SIZE         fixed range size per request (default 1MiB per PRD)
+#   RANGE_GET_CONCURRENCY        concurrent range-get workers (default 8)
+#   RANGE_GET_DURATION           wall-clock seconds per range-get run (default 60)
+#   DELETE_SIZE                  object size for delete seed (default 1KiB)
+#   DELETE_OBJECTS               seeded objects per delete run (default 1000 per PRD)
+#   DELETE_CONCURRENCY           concurrent delete workers (default 8)
+#   DELETE_BATCH                 DELETEs per batch (default auto = objects/(concurrency*4),
+#                                min 1; warp enforces objects >= concurrency*batch*4)
+#   DELETE_DURATION              wall-clock seconds per delete run (default 60)
+#   IAM_AUTH_SIZE                object size for iam-auth seed (default 1KiB)
+#   IAM_AUTH_OBJECTS             seeded objects per iam-auth run (default 1000 per PRD)
+#   IAM_AUTH_CONCURRENCY         concurrent iam-auth get workers (default 8)
+#   IAM_AUTH_DURATION            wall-clock seconds per iam-auth run (default 60)
+#   IAM_AUTH_USER                IAM user name created per run (default bench-iam)
 #   BENCH_COMPOSE_FILE           default deploy/docker/docker-compose.yml
 #
 # Exit codes: 0 success, 2 misconfig, 77 lab not reachable (skip).
@@ -981,6 +1008,462 @@ workload_list() {
   cleanup_workload "$target" "list"
 }
 
+# Single warp get invocation under explicit credentials (US-008 iam-auth).
+# Mirrors warp_get_one but does NOT call resolve_target — caller passes the
+# endpoint/ak/sk triple directly so the IAM-user creds (separate from the
+# bench's STRATA_AK/SK admin creds) drive both warp's prepare-phase PUTs and
+# its measure-phase GETs. Bucket must be writable by (endpoint, ak, sk) —
+# for the iam-auth flow the bucket is created via the same IAM creds, so the
+# IAM user owns the bucket (matches the Strata + RGW bucket-owner semantic).
+#
+# Args: target workload size_label concurrency duration run_id bucket tmpdir seed_objects endpoint ak sk
+warp_get_one_creds() {
+  local target="$1" workload="$2" size_label="$3" concurrency="$4" duration="$5" run="$6" bucket="$7" tmpdir="$8" seed_objects="$9"
+  local endpoint="${10}" creds_ak="${11}" creds_sk="${12}"
+  local host
+  host="$(url_host "$endpoint")"
+
+  local summary_file="$tmpdir/warp-$target-$workload-c$concurrency-run$run.txt"
+  local benchdata_file="$tmpdir/warp-$target-$workload-c$concurrency-run$run.bd"
+  note "run $run: warp get $target (iam creds) obj=$size_label conc=$concurrency dur=${duration}s seed=$seed_objects"
+  set +e
+  "$BENCH_TOOL_PATH" get \
+    --host="$host" \
+    --access-key="$creds_ak" \
+    --secret-key="$creds_sk" \
+    --bucket="$bucket" \
+    --obj.size="$size_label" \
+    --objects="$seed_objects" \
+    --concurrent="$concurrency" \
+    --duration="${duration}s" \
+    --noclear \
+    --benchdata="$benchdata_file" \
+    --no-color \
+    > "$summary_file" 2>&1
+  local warp_rc=$?
+  set -e
+  if [[ "$warp_rc" -ne 0 ]]; then
+    note "WARN: warp get (iam) failed on $target run $run (rc=$warp_rc) — see $summary_file"
+    tail -5 "$summary_file" >&2 || true
+    return 1
+  fi
+
+  read -r p50 p95 p99 mbps ops errs < <(parse_warp_summary "$summary_file" "GET") || true
+  emit_row "$target" "$workload" "$size_label" "$concurrency" "$run" \
+    "$p50" "$p95" "$p99" "$mbps" "$ops" "$errs" "$duration"
+}
+
+# Single warp range-get invocation (US-008 range-get). Uses warp's
+# `get --range-size=<n>` mode which keeps a FIXED range size while randomising
+# the offset within each seed object. PRD AC: 1000 range requests of random
+# 1MiB ranges against single 100MiB object. Warp's shape:
+#   prepare phase: PUT --objects of --obj.size each (default 10 × 100MiB
+#     = ~1GiB seed) distributed across --concurrent workers' prefixes.
+#   measure phase: each worker loops `GET Range: bytes=R-R+rs-1` (rs from
+#     --range-size, random offset) against its own prefix's objects.
+# warp's --range-size= flag implies --range, so we set it explicitly to land
+# the fixed-1MiB-range semantic the PRD asks for; the operator-readable
+# "random 1MiB" wording matches.
+#
+# warp emits op-label `GET` per range request (pkg/bench/get.go); parser
+# anchors on `Report: GET.` which skips the prepare-phase `Report: PUT.`
+# block (mirrors the get-small / get-medium / get-large / list pattern).
+#
+# Args: target workload size_label range_size objects concurrency duration run_id bucket tmpdir
+warp_range_get_one() {
+  local target="$1" workload="$2" size_label="$3" range_size="$4" objects="$5" concurrency="$6" duration="$7" run="$8" bucket="$9" tmpdir="${10}"
+  local endpoint creds_ak creds_sk
+  resolve_target "$target" endpoint creds_ak creds_sk
+  local host
+  host="$(url_host "$endpoint")"
+
+  local summary_file="$tmpdir/warp-$target-$workload-c$concurrency-run$run.txt"
+  local benchdata_file="$tmpdir/warp-$target-$workload-c$concurrency-run$run.bd"
+  note "run $run: warp range-get $target obj=$size_label range=$range_size objects=$objects conc=$concurrency dur=${duration}s"
+  set +e
+  "$BENCH_TOOL_PATH" get \
+    --host="$host" \
+    --access-key="$creds_ak" \
+    --secret-key="$creds_sk" \
+    --bucket="$bucket" \
+    --obj.size="$size_label" \
+    --objects="$objects" \
+    --range-size="$range_size" \
+    --concurrent="$concurrency" \
+    --duration="${duration}s" \
+    --noclear \
+    --benchdata="$benchdata_file" \
+    --no-color \
+    > "$summary_file" 2>&1
+  local warp_rc=$?
+  set -e
+  if [[ "$warp_rc" -ne 0 ]]; then
+    note "WARN: warp range-get failed on $target run $run (rc=$warp_rc) — see $summary_file"
+    tail -5 "$summary_file" >&2 || true
+    return 1
+  fi
+
+  read -r p50 p95 p99 mbps ops errs < <(parse_warp_summary "$summary_file" "GET") || true
+  # object_size column in JSONL carries the *range* size — that's the IO unit
+  # of the measure phase (the seed object size is captured in the workload
+  # label `range-get`).
+  emit_row "$target" "$workload" "$range_size" "$concurrency" "$run" \
+    "$p50" "$p95" "$p99" "$mbps" "$ops" "$errs" "$duration"
+}
+
+# Single warp delete invocation (US-008 delete). Warp's `delete` subcommand
+#   prepare phase: PUTs --objects --obj.size objects across --concurrent
+#     worker prefixes (each worker gets --objects/--concurrent rounded up).
+#   measure phase: each worker DELETEs from its own prefix in batches of
+#     --batch (default 100). Measure ends when either all objects are
+#     deleted OR --duration elapses, whichever comes first.
+#
+# Op-label `DELETE` per pkg/bench/delete.go; throughput is objects-deleted/s.
+# Throughput in MiB/s is reported by warp but reflects bytes-deleted/s which
+# is ≈ 0 for the 1KiB seed shape — focus on ops/s + p99.
+#
+# PRD spec: 1000 small objects deleted in concurrency 8 after seed phase.
+# Maps cleanly: --objects=1000 --concurrent=8 --duration=60s.
+#
+# warp enforces `objects >= concurrency * batch * 4` (pkg/bench/delete.go). With
+# the default --batch=100 + concurrency=8 the floor is 3200, which would
+# violate the PRD's 1000-object spec. We auto-pick batch=max(1, objects/
+# (concurrency*4)) so 1000 + c=8 lands batch=31, comfortably under the floor.
+# Operator can pin via DELETE_BATCH env if a specific shape is required.
+#
+# Args: target workload size_label objects concurrency duration run_id bucket tmpdir
+warp_delete_one() {
+  local target="$1" workload="$2" size_label="$3" objects="$4" concurrency="$5" duration="$6" run="$7" bucket="$8" tmpdir="$9"
+  local endpoint creds_ak creds_sk
+  resolve_target "$target" endpoint creds_ak creds_sk
+  local host
+  host="$(url_host "$endpoint")"
+
+  local batch="${DELETE_BATCH:-}"
+  if [[ -z "$batch" ]]; then
+    batch="$(awk -v o="$objects" -v c="$concurrency" 'BEGIN { b=int(o/(c*4)); if (b<1) b=1; printf("%d", b) }')"
+  fi
+
+  local summary_file="$tmpdir/warp-$target-$workload-c$concurrency-run$run.txt"
+  local benchdata_file="$tmpdir/warp-$target-$workload-c$concurrency-run$run.bd"
+  note "run $run: warp delete $target obj=$size_label objects=$objects conc=$concurrency batch=$batch dur=${duration}s"
+  set +e
+  "$BENCH_TOOL_PATH" delete \
+    --host="$host" \
+    --access-key="$creds_ak" \
+    --secret-key="$creds_sk" \
+    --bucket="$bucket" \
+    --obj.size="$size_label" \
+    --objects="$objects" \
+    --concurrent="$concurrency" \
+    --batch="$batch" \
+    --duration="${duration}s" \
+    --noclear \
+    --benchdata="$benchdata_file" \
+    --no-color \
+    > "$summary_file" 2>&1
+  local warp_rc=$?
+  set -e
+  if [[ "$warp_rc" -ne 0 ]]; then
+    note "WARN: warp delete failed on $target run $run (rc=$warp_rc) — see $summary_file"
+    tail -5 "$summary_file" >&2 || true
+    return 1
+  fi
+
+  # warp delete prints Report: PUT. (prepare) + Report: DELETE. (measure).
+  # Parser anchored at start-of-line on "Report: DELETE." picks the measure
+  # block; prepare-phase PUT block is skipped.
+  read -r p50 p95 p99 mbps ops errs < <(parse_warp_summary "$summary_file" "DELETE") || true
+  emit_row "$target" "$workload" "$size_label" "$concurrency" "$run" \
+    "$p50" "$p95" "$p99" "$mbps" "$ops" "$errs" "$duration"
+}
+
+# -----------------------------------------------------------------------------
+# IAM helpers (US-008 iam-auth workload)
+#
+# Sets IAM_AK / IAM_SK globals on success; returns 1 (and logs WARN) on
+# failure so the iam-auth workload can decide whether to skip the run.
+# Idempotent on the "user already exists" path — RGW radosgw-admin returns
+# the existing user info on a duplicate `user create`; Strata's admin API
+# returns 409 EntityAlreadyExists which the helper treats as "look up keys
+# instead". Cleanup helpers are best-effort (|| true) so a half-created
+# user does not strand the bench.
+# -----------------------------------------------------------------------------
+
+IAM_AK=""
+IAM_SK=""
+
+# Login to Strata admin API with the static bench admin creds, drop the
+# session cookie into the supplied jar file. Returns 1 on failure.
+strata_admin_login() {
+  local jar="$1"
+  local code
+  code="$(curl -sS -o "$jar.body" -w '%{http_code}' \
+    -c "$jar" \
+    -X POST "$STRATA_ENDPOINT_URL/admin/v1/auth/login" \
+    -H 'Content-Type: application/json' \
+    -d "{\"access_key\":\"$STRATA_AK\",\"secret_key\":\"$STRATA_SK\"}" \
+    2>/dev/null || echo 000)"
+  if [[ "$code" != "200" ]]; then
+    note "WARN: strata /admin/v1/auth/login returned HTTP $code"
+    [[ -f "$jar.body" ]] && tail -3 "$jar.body" >&2 || true
+    return 1
+  fi
+  return 0
+}
+
+# Strata: create IAM user + mint an access key. Idempotent on EntityAlreadyExists
+# (409) — falls through to look up an existing key (or mints a fresh one when
+# none exist). Sets IAM_AK / IAM_SK on success.
+create_iam_user_strata() {
+  local user="$1"
+  local jar; jar="$(mktemp)"
+  if ! strata_admin_login "$jar"; then
+    rm -f "$jar" "$jar.body"
+    return 1
+  fi
+
+  # Create user (tolerate 409 EntityAlreadyExists).
+  local code
+  code="$(curl -sS -o "$jar.body" -w '%{http_code}' \
+    -b "$jar" \
+    -X POST "$STRATA_ENDPOINT_URL/admin/v1/iam/users" \
+    -H 'Content-Type: application/json' \
+    -d "{\"user_name\":\"$user\"}" 2>/dev/null || echo 000)"
+  if [[ "$code" != "200" && "$code" != "201" && "$code" != "204" && "$code" != "409" ]]; then
+    note "WARN: strata POST /admin/v1/iam/users returned HTTP $code"
+    [[ -f "$jar.body" ]] && tail -3 "$jar.body" >&2 || true
+    rm -f "$jar" "$jar.body"
+    return 1
+  fi
+
+  # Mint a fresh access key — only response that carries the secret.
+  local resp
+  resp="$(curl -sS -b "$jar" \
+    -X POST "$STRATA_ENDPOINT_URL/admin/v1/iam/users/$user/access-keys" 2>/dev/null)"
+  IAM_AK="$(printf '%s' "$resp" | jq -r '.access_key_id // empty' 2>/dev/null)"
+  IAM_SK="$(printf '%s' "$resp" | jq -r '.secret_access_key // empty' 2>/dev/null)"
+  rm -f "$jar" "$jar.body"
+  if [[ -z "$IAM_AK" || -z "$IAM_SK" ]]; then
+    note "WARN: strata POST /admin/v1/iam/users/$user/access-keys did not return access_key_id+secret_access_key"
+    note "  response (first 200 chars): $(printf '%s' "$resp" | head -c 200)"
+    return 1
+  fi
+  note "  iam_user (strata): $user / ak=${IAM_AK:0:6}…"
+  return 0
+}
+
+# Strata: cleanup IAM user — drops every access key then the user.
+cleanup_iam_user_strata() {
+  local user="$1"
+  local jar; jar="$(mktemp)"
+  if ! strata_admin_login "$jar"; then
+    rm -f "$jar" "$jar.body"
+    return 0
+  fi
+  # List keys, delete each. Errors swallowed — cleanup is best-effort.
+  local keys
+  keys="$(curl -sS -b "$jar" "$STRATA_ENDPOINT_URL/admin/v1/iam/users/$user/access-keys" 2>/dev/null \
+    | jq -r '.access_keys[]?.access_key_id // empty' 2>/dev/null)"
+  local k
+  for k in $keys; do
+    curl -sS -b "$jar" -X DELETE "$STRATA_ENDPOINT_URL/admin/v1/iam/access-keys/$k" >/dev/null 2>&1 || true
+  done
+  curl -sS -b "$jar" -X DELETE "$STRATA_ENDPOINT_URL/admin/v1/iam/users/$user" >/dev/null 2>&1 || true
+  rm -f "$jar" "$jar.body"
+}
+
+# RGW: create bench user via `radosgw-admin user create --uid=...`. RGW's user
+# create returns full user JSON including keys[0].{access_key,secret_key}. On
+# duplicate user (already exists), `user info --uid=...` returns the same
+# shape. Sets IAM_AK / IAM_SK on success.
+create_iam_user_rgw() {
+  local user="$1"
+  local compose
+  compose="$(compose_cmd)"
+  local out
+  out="$($compose exec -T rgw radosgw-admin user create --uid="$user" --display-name="Bench IAM" 2>/dev/null || true)"
+  if [[ -z "$out" || "$(printf '%s' "$out" | jq -r '.keys[0].access_key // empty' 2>/dev/null)" == "" ]]; then
+    # Fall back to user info (user already exists path).
+    out="$($compose exec -T rgw radosgw-admin user info --uid="$user" 2>/dev/null || true)"
+  fi
+  IAM_AK="$(printf '%s' "$out" | jq -r '.keys[0].access_key // empty' 2>/dev/null)"
+  IAM_SK="$(printf '%s' "$out" | jq -r '.keys[0].secret_key // empty' 2>/dev/null)"
+  if [[ -z "$IAM_AK" || -z "$IAM_SK" ]]; then
+    note "WARN: rgw radosgw-admin user create/info for '$user' returned no keys"
+    return 1
+  fi
+  note "  iam_user (rgw): $user / ak=${IAM_AK:0:6}…"
+  return 0
+}
+
+cleanup_iam_user_rgw() {
+  local user="$1"
+  local compose
+  compose="$(compose_cmd)"
+  $compose exec -T rgw radosgw-admin user rm --uid="$user" --purge-data >/dev/null 2>&1 || true
+}
+
+create_iam_user() {
+  local target="$1" user="$2"
+  case "$target" in
+    strata) create_iam_user_strata "$user" ;;
+    rgw)    create_iam_user_rgw "$user" ;;
+    *) note "WARN: create_iam_user unknown target $target"; return 1 ;;
+  esac
+}
+
+cleanup_iam_user() {
+  local target="$1" user="$2"
+  case "$target" in
+    strata) cleanup_iam_user_strata "$user" ;;
+    rgw)    cleanup_iam_user_rgw "$user" ;;
+    *) return 0 ;;
+  esac
+}
+
+# Cleanup bucket using arbitrary credentials (vs the admin-only cleanup_workload
+# above). Used by iam-auth where the bucket is owned by the IAM user and the
+# admin AK doesn't have implicit access to it on every backend.
+#
+# Args: endpoint ak sk bucket
+cleanup_bucket_with_creds() {
+  local endpoint="$1" creds_ak="$2" creds_sk="$3" bucket="$4"
+  AWS_ACCESS_KEY_ID="$creds_ak" AWS_SECRET_ACCESS_KEY="$creds_sk" AWS_DEFAULT_REGION=us-east-1 \
+    aws --endpoint-url "$endpoint" s3 rm "s3://$bucket" --recursive >/dev/null 2>&1 || true
+  AWS_ACCESS_KEY_ID="$creds_ak" AWS_SECRET_ACCESS_KEY="$creds_sk" AWS_DEFAULT_REGION=us-east-1 \
+    aws --endpoint-url "$endpoint" s3api delete-bucket --bucket "$bucket" >/dev/null 2>&1 || true
+}
+
+# -----------------------------------------------------------------------------
+# US-008 workloads
+# -----------------------------------------------------------------------------
+
+# Range-GET workload (US-008). Random 1MiB ranges via warp `get --range-size=`.
+# Single bucket per target reused across runs; cleanup_workload at end. Mirrors
+# the list workload's run-shape — between-run re-seed would burn IO without
+# changing the measurement (each run's measure phase covers its own range
+# distribution against the seed).
+#
+# PRD: 1000 range requests of random 1MiB ranges against single 100MB object,
+# concurrency 8. Mapping deviation documented in the helper above: warp's
+# range-size mode requires --objects ≥ 1 per worker, so we seed 10 × 100MiB
+# objects (~1GiB) and distribute requests over them; the per-request shape
+# (Range: bytes=R-R+1MiB-1) is identical to the PRD's literal spec. Operator
+# can drop RANGE_GET_OBJECTS to 1 + RANGE_GET_CONCURRENCY=1 for the literal
+# single-object shape, at the cost of zero concurrency.
+#
+# Args: target runs
+workload_range_get() {
+  local target="$1" runs="$2"
+  local size_label="${RANGE_GET_SIZE:-100MiB}"
+  local objects="${RANGE_GET_OBJECTS:-10}"
+  local range_size="${RANGE_GET_RANGE_SIZE:-1MiB}"
+  local concurrency="${RANGE_GET_CONCURRENCY:-8}"
+  local duration="${RANGE_GET_DURATION:-60}"
+  local bucket="bench-range-get-${target}"
+  local tmpdir; tmpdir="$(mktemp -d)"
+  trap "rm -rf $tmpdir" RETURN
+
+  note "workload range-get: $target / $size_label × $objects objects × range=$range_size × conc=$concurrency × dur=${duration}s × runs=$runs"
+  bucket_create "$target" "$bucket"
+  local run
+  for run in $(seq 1 "$runs"); do
+    warp_range_get_one "$target" "range-get" "$size_label" "$range_size" "$objects" "$concurrency" "$duration" "$run" "$bucket" "$tmpdir" || true
+  done
+  cleanup_workload "$target" "range-get"
+}
+
+# Delete workload (US-008). warp `delete` — seeds N small objects then DELETEs
+# them. Cleanup-between-runs because warp's measure phase ends when the seed
+# is exhausted OR --duration elapses; recreating the bucket per run gives a
+# fresh seed each time and keeps the per-run shape consistent.
+#
+# Args: target runs
+workload_delete() {
+  local target="$1" runs="$2"
+  local size_label="${DELETE_SIZE:-1KiB}"
+  local objects="${DELETE_OBJECTS:-1000}"
+  local concurrency="${DELETE_CONCURRENCY:-8}"
+  local duration="${DELETE_DURATION:-60}"
+  local bucket="bench-delete-${target}"
+  local tmpdir; tmpdir="$(mktemp -d)"
+  trap "rm -rf $tmpdir" RETURN
+
+  note "workload delete: $target / $size_label × $objects objects × conc=$concurrency × dur=${duration}s × runs=$runs (cleanup between runs)"
+  local run
+  for run in $(seq 1 "$runs"); do
+    bucket_create "$target" "$bucket"
+    warp_delete_one "$target" "delete" "$size_label" "$objects" "$concurrency" "$duration" "$run" "$bucket" "$tmpdir" || true
+    cleanup_workload "$target" "delete"
+  done
+}
+
+# IAM-auth workload (US-008). Pre-create IAM user via target admin API, run
+# warp `get` under the IAM user's SigV4 credentials. The IAM user creates and
+# owns the bench bucket (matches Strata + RGW bucket-owner semantic), so no
+# explicit policy attach is required — owner has implicit full access on both
+# backends. Cleanup drops the bucket via IAM creds (admin AK doesn't own it),
+# then deletes the IAM user via admin API.
+#
+# Why this workload differs from get-small (US-004): get-small drives warp
+# with the static admin/owner creds, which the gateway resolves to the
+# in-process static credential store. iam-auth resolves the SigV4 access key
+# through the meta-backed IAM credentials path (cassandra/tikv access_keys
+# table → IAMCredentialStore.Lookup → MultiStore cache), exercising the
+# identity-resolve hot path that production IAM workflows hit.
+#
+# Args: target runs
+workload_iam_auth() {
+  local target="$1" runs="$2"
+  local size_label="${IAM_AUTH_SIZE:-1KiB}"
+  local objects="${IAM_AUTH_OBJECTS:-1000}"
+  local concurrency="${IAM_AUTH_CONCURRENCY:-8}"
+  local duration="${IAM_AUTH_DURATION:-60}"
+  local user_base="${IAM_AUTH_USER:-bench-iam}"
+  # Per-invocation suffix on both user + bucket names: an interrupted prior
+  # run leaves an IAM-owned bucket that the admin AK cannot delete (Strata's
+  # bucket-owner ACL gates DeleteBucket). With a fresh suffix per invocation,
+  # orphans don't block the next bench run. The cleanup_bucket_with_creds at
+  # the end of the workload does the best-effort drop while the IAM key is
+  # still valid.
+  local stamp; stamp="$(date +%s)"
+  local user="${user_base}-${target}-${stamp}"
+  local bucket="bench-iam-auth-${target}-${stamp}"
+  local tmpdir; tmpdir="$(mktemp -d)"
+  trap "rm -rf $tmpdir" RETURN
+
+  note "workload iam-auth: $target / $size_label × $objects objects × conc=$concurrency × dur=${duration}s × runs=$runs"
+  IAM_AK=""; IAM_SK=""
+  if ! create_iam_user "$target" "$user"; then
+    note "WARN: iam-auth: failed to create IAM user '$user' on $target — skipping"
+    return 0
+  fi
+
+  local endpoint
+  case "$target" in
+    strata) endpoint="$STRATA_ENDPOINT_URL" ;;
+    rgw)    endpoint="$RGW_ENDPOINT_URL" ;;
+    *) note "WARN: iam-auth unknown target $target"; cleanup_iam_user "$target" "$user"; return 0 ;;
+  esac
+
+  # Bucket owned by the IAM user — warp's prepare phase creates the bucket
+  # via authenticated PUT under the IAM creds if it doesn't already exist.
+  # We don't pre-create via admin AK because that would make the bucket
+  # admin-owned and either Strata's owner-mismatch ACL or RGW's similar
+  # check could fail subsequent IAM-user PUTs.
+  AWS_ACCESS_KEY_ID="$IAM_AK" AWS_SECRET_ACCESS_KEY="$IAM_SK" AWS_DEFAULT_REGION=us-east-1 \
+    aws --endpoint-url "$endpoint" s3api create-bucket --bucket "$bucket" >/dev/null 2>&1 || true
+
+  local run
+  for run in $(seq 1 "$runs"); do
+    warp_get_one_creds "$target" "iam-auth" "$size_label" "$concurrency" "$duration" "$run" "$bucket" "$tmpdir" "$objects" "$endpoint" "$IAM_AK" "$IAM_SK" || true
+  done
+
+  cleanup_bucket_with_creds "$endpoint" "$IAM_AK" "$IAM_SK" "$bucket"
+  cleanup_iam_user "$target" "$user"
+}
+
 # -----------------------------------------------------------------------------
 # Workload dispatch
 # -----------------------------------------------------------------------------
@@ -1118,8 +1601,40 @@ dispatch_workload() {
         workload_list "$target" "$r"
       fi
       ;;
+    range-get)
+      # Random fixed-1MiB ranges via warp `get --range-size=1MiB` (US-008).
+      # Single bucket per target reused across runs; cleanup_workload at end.
+      # --concurrency=N overrides the default c=8.
+      if [[ -n "$concurrency" ]]; then
+        RANGE_GET_CONCURRENCY="$concurrency" workload_range_get "$target" "$r"
+      else
+        workload_range_get "$target" "$r"
+      fi
+      ;;
+    delete)
+      # warp `delete` — seeds N small objects then DELETEs them (US-008).
+      # Cleanup between runs (warp's measure phase ends when seed exhausted;
+      # recreating bucket per run gives consistent per-run shape).
+      # --concurrency=N overrides the default c=8.
+      if [[ -n "$concurrency" ]]; then
+        DELETE_CONCURRENCY="$concurrency" workload_delete "$target" "$r"
+      else
+        workload_delete "$target" "$r"
+      fi
+      ;;
+    iam-auth)
+      # Pre-create IAM user via target admin API, run warp `get` under the
+      # IAM user's SigV4 creds (US-008). The IAM user creates and owns the
+      # bench bucket; cleanup drops bucket via IAM creds then deletes user
+      # via admin API. --concurrency=N overrides the default c=8.
+      if [[ -n "$concurrency" ]]; then
+        IAM_AUTH_CONCURRENCY="$concurrency" workload_iam_auth "$target" "$r"
+      else
+        workload_iam_auth "$target" "$r"
+      fi
+      ;;
     *)
-      abort "workload '$workload' not implemented yet (US-002 ships put-small; US-004 adds put-medium/get-small/get-medium; US-005 adds put-large/get-large; US-006 adds multipart-5g; US-007 adds list; US-008 adds range-get/delete/iam-auth)"
+      abort "workload '$workload' not implemented (US-002 ships put-small; US-004 adds put-medium/get-small/get-medium; US-005 adds put-large/get-large; US-006 adds multipart-5g; US-007 adds list; US-008 adds range-get/delete/iam-auth)"
       ;;
   esac
 }

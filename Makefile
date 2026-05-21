@@ -550,6 +550,9 @@ bench-rgw-comparison:
 	bash scripts/bench-rgw-comparison.sh get-large both
 	bash scripts/bench-rgw-comparison.sh multipart-5g both
 	bash scripts/bench-rgw-comparison.sh list both
+	bash scripts/bench-rgw-comparison.sh range-get both
+	bash scripts/bench-rgw-comparison.sh delete both
+	bash scripts/bench-rgw-comparison.sh iam-auth both
 	bash scripts/bench-rgw-comparison.sh --report
 
 # Hugo docs site (docs/site/). `docs-serve` runs the local dev preview on

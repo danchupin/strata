@@ -103,6 +103,9 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	if ms, ok := metaStore.(*metamem.Store); ok {
 		stores = append(stores, metamem.NewCredentialStore(ms))
 	}
+	if ts, ok := metaStore.(*metatikv.Store); ok {
+		stores = append(stores, metatikv.NewCredentialStore(ts))
+	}
 	if mode == auth.ModeRequired && len(credMap) == 0 && len(stores) == 2 {
 		return errors.New("auth: STRATA_AUTH_MODE=required but no credential stores are configured")
 	}
