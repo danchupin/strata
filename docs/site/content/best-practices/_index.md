@@ -1,31 +1,51 @@
 ---
 title: 'Best Practices'
-weight: 40
+weight: 30
 bookFlatSection: true
-description: 'Operational guidance — sizing, monitoring, GC + lifecycle tuning, backup, capacity planning.'
+description: 'Tuning guides for placement, tracing, GC, lifecycle, quotas, billing, compliance, multi-cluster, and the operator console.'
 ---
 
 # Best Practices
 
-Operator-facing guidance for running Strata in production. Each page
-covers one operational concern end-to-end with the env knobs, metrics,
-and runbook shape an on-call operator needs.
+Tuning guides for running Strata in production. Each page covers one
+operational concern end-to-end with the env knobs, metrics, and runbook
+shape an on-call operator needs. Day-2 workflows (drain a cluster,
+monitor, scale, back up, plan capacity) live under
+[Operate]({{< ref "/operate" >}}); the pages below cover the knobs the
+workflows reference.
 
-| Page | When to read it |
-|---|---|
-| [Sizing]({{< ref "/best-practices/sizing" >}}) | Picking CPU / RAM / disk per replica, plus Cassandra / TiKV cluster sizing pointers. |
-| [Monitoring]({{< ref "/best-practices/monitoring" >}}) | Wiring Prometheus, Grafana, OTel collector, and the in-process trace browser. |
-| [Tracing]({{< ref "/best-practices/tracing" >}}) | OpenTelemetry coverage matrix, span name conventions, `strata.component=gateway\|worker` filters, sampling. |
-| [GC + lifecycle tuning]({{< ref "/best-practices/gc-lifecycle-tuning" >}}) | Tuning `STRATA_GC_CONCURRENCY` / `STRATA_LIFECYCLE_CONCURRENCY` (Phase 1) and `STRATA_GC_SHARDS` (Phase 2), plus the dual-write cutover playbook. |
-| [Backup + restore]({{< ref "/best-practices/backup-restore" >}}) | Snapshot strategy across the metadata, data, and replication tiers. |
-| [Capacity planning]({{< ref "/best-practices/capacity-planning" >}}) | Chunk fan-out math, when to scale shards / replicas, dedup roadmap. |
-| [Quotas + billing]({{< ref "/best-practices/quotas-billing" >}}) | `BucketQuota` / `UserQuota` shape, `QuotaExceeded` 403, the `bucket_stats` counter, the reconcile + usage-rollup workers. |
-| [S3 multi-cluster routing]({{< ref "/best-practices/s3-multi-cluster" >}}) | `STRATA_S3_CLUSTERS` / `STRATA_S3_CLASSES` env shape, `credentials_ref` discriminator, per-class `(cluster, bucket)` routing, rolling-restart workflow. |
-| [Placement + rebalance]({{< ref "/best-practices/placement-rebalance" >}}) | Per-bucket `Placement` policy, `STRATA_REBALANCE_*` knobs, drain sentinel + safety rails, register → drain → deregister runbook. |
-| [Web UI (Strata Console)]({{< ref "/best-practices/web-ui" >}}) | Embedded operator console: pages, env vars, end-to-end tests. |
+{{% columns %}}
+
+- {{< card href="/best-practices/placement-rebalance" >}}**Placement + rebalance** — Per-bucket `Placement` policy, `STRATA_REBALANCE_*` knobs, drain sentinel + safety rails, register → drain → deregister runbook.{{< /card >}}
+
+- {{< card href="/best-practices/tracing" >}}**Tracing** — OpenTelemetry coverage matrix, span name conventions, `strata.component=gateway|worker` filters, sampling.{{< /card >}}
+
+- {{< card href="/best-practices/web-ui" >}}**Web UI (Strata Console)** — Embedded operator console: pages, env vars, end-to-end tests.{{< /card >}}
+
+{{% /columns %}}
+
+{{% columns %}}
+
+- {{< card href="/best-practices/gc-lifecycle-tuning" >}}**GC + lifecycle tuning** — Tuning `STRATA_GC_CONCURRENCY` / `STRATA_LIFECYCLE_CONCURRENCY` and `STRATA_GC_SHARDS`, plus the dual-write cutover playbook.{{< /card >}}
+
+- {{< card href="/best-practices/quotas-billing" >}}**Quotas + billing** — `BucketQuota` / `UserQuota` shape, `QuotaExceeded` 403, the bucket-usage counter, the reconcile + usage-rollup workers.{{< /card >}}
+
+- {{< card href="/best-practices/s3-multi-cluster" >}}**S3 multi-cluster routing** — `STRATA_S3_CLUSTERS` / `STRATA_S3_CLASSES` env shape, `credentials_ref` discriminator, per-class `(cluster, bucket)` routing, rolling-restart workflow.{{< /card >}}
+
+{{% /columns %}}
+
+{{% columns %}}
+
+- {{< card href="/best-practices/compliance" >}}**Compliance** — S3 Object Lock COMPLIANCE workflow, retention modes, legal hold, and the three `objectlock:*` audit verbs.{{< /card >}}
+
+- {{< card href="/best-practices/billing" >}}**Billing** — Byte-seconds trapezoid math, intra-day sampling, and the `usage_aggregates` feed external invoice generators consume.{{< /card >}}
+
+{{% /columns %}}
 
 ## See also
 
+- [Operate]({{< ref "/operate" >}}) for day-2 ops workflows — drain a
+  cluster, monitor, scale, back up, plan capacity.
 - [Architecture deep dive]({{< ref "/architecture" >}}) for the
   implementation rationale behind each knob.
 - [Deploy]({{< ref "/deploy" >}}) for end-to-end deployment guides

@@ -330,7 +330,7 @@ export function NodeDetailDrawer({
                     so the gateway can render per-node sparklines. See the{' '}
                     <a
                       className="underline"
-                      href="https://danchupin.github.io/strata/best-practices/monitoring/#prometheus"
+                      href="https://danchupin.github.io/strata/operate/monitoring/#prometheus"
                       target="_blank"
                       rel="noreferrer"
                     >

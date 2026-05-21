@@ -1,7 +1,7 @@
 ---
 title: 'Quotas + billing'
 weight: 50
-description: 'Per-bucket / per-user quotas, the live bucket_stats counter, the reconcile worker, and the nightly usage_aggregates rollup that feeds external billing.'
+description: 'Per-bucket / per-user quotas, the live bucket-usage counter, the reconcile worker, and the nightly usage_aggregates rollup that feeds external billing.'
 ---
 
 # Quotas + billing
@@ -27,12 +27,12 @@ admin API:
 
 `BucketQuota.MaxBytesPerObject` caps a single object's size; the other
 fields cap aggregate usage. `UserQuota.TotalMaxBytes` is enforced as the
-sum of `bucket_stats.UsedBytes` across every bucket the user owns.
+sum of the bucket-usage counter's `UsedBytes` across every bucket the
+user owns.
 
 ## What triggers `QuotaExceeded`
 
-The gateway-side check (`internal/s3api/quota.go::checkQuota`) runs BEFORE
-any chunk write on:
+The gateway-side quota check runs BEFORE any chunk write on:
 
 - `PutObject` — `Content-Length` is checked against `MaxBytesPerObject`,
   bucket bytes / objects, and the user's `TotalMaxBytes`.
@@ -64,22 +64,21 @@ checking — replacing a 100 MiB object with a 100 MiB object never trips
 `MaxBytes`. Versioned overwrites add the new version's size to the bucket
 total because both versions persist.
 
-## Live usage source — `bucket_stats`
+## Live usage source — bucket-usage counter
 
-`bucket_stats{bucket_id, used_bytes, used_objects, updated_at}` is the
-denormalised counter the quota check reads. It is updated atomically on
+The bucket-usage counter (`{bucketID, usedBytes, usedObjects, updatedAt}`)
+is the denormalised row the quota check reads. It is updated atomically on
 every successful `PutObject` / `DeleteObject` / `CompleteMultipartUpload`
 through `meta.Store.BumpBucketStats(ctx, bucketID, ΔBytes, ΔObjects)`.
 
 Backend-specific atomicity:
 
 - **Memory:** mutex-guarded read-modify-write.
-- **Cassandra:** `UPDATE … IF used_bytes = ? AND used_objects = ?` LWT
-  retry loop. Required because read-after-write coherence on a
-  previously-LWT-written row demands LWT writes (CLAUDE.md gotcha).
-- **TiKV:** pessimistic txn (`Begin → LockKeys → Get → Set → Commit`)
-  on key `bs/<bucketID>`. CAS-reject early-return paths call
-  `txn.Rollback()` explicitly.
+- **Cassandra:** compare-and-set retry loop. Required because read-after-write
+  coherence on a previously compare-and-set-written row demands compare-and-set
+  writes for subsequent updates.
+- **TiKV:** pessimistic txn (`Begin → LockKeys → Get → Set → Commit`).
+  Compare-and-set-reject early-return paths roll the txn back explicitly.
 
 Delete markers contribute `(0, 0)` — they occupy no bytes and the row
 count is absorbed into the marker, which sits on top of versions without
@@ -87,10 +86,10 @@ removing them.
 
 ## Drift reconcile — `--workers=quota-reconcile`
 
-`bucket_stats` can drift from the actual sum of object sizes when
-operators run direct meta repairs, when LWT timeouts mis-replicate
-under partition, or when the lifecycle worker bulk-expires objects
-during a counter race window. The reconcile worker corrects drift
+The bucket-usage counter can drift from the actual sum of object sizes
+when operators run direct meta repairs, when compare-and-set timeouts
+mis-replicate under partition, or when the lifecycle worker bulk-expires
+objects during a counter race window. The reconcile worker corrects drift
 periodically.
 
 ```bash
@@ -103,7 +102,7 @@ strata server --workers=gateway,quota-reconcile
 
 Per tick the worker fans out across every bucket: paginated
 `ListObjects` walk → sum bytes + objects (latest non-delete-marker
-only — that is exactly what `bucket_stats` represents) → re-sample
+only — that is exactly what the bucket-usage counter represents) → re-sample
 stats AFTER the walk → `drift = walk - statsAfter`. Sampling
 post-walk is the canonical pattern for any future denormalised-counter
 consistency check (concurrent activity during the walk composes safely
@@ -117,7 +116,8 @@ correctIf objectDrift != 0
 ```
 
 Defaults: `MinDriftBytes = 1 MiB`, `MinDriftRatio = 0.5 %`. Tiny drift is
-intentionally swallowed — re-bumping every tick churns LWT for no gain.
+intentionally swallowed — re-bumping every tick churns compare-and-set
+traffic for no gain.
 
 Correction itself goes through `BumpBucketStats(driftBytes, driftObjects)`,
 so a concurrent client PUT during the correction does not lose its update.
@@ -217,9 +217,9 @@ is an in-process map keyed on the same tuple.
 ## Admin API
 
 All endpoints stamp the audit log with an operator-meaningful action
-(`admin:PutBucketQuota`, `admin:DeleteUserQuota`, …) via
-`s3api.SetAuditOverride`. OpenAPI contract:
-`internal/adminapi/openapi.yaml`.
+(`admin:PutBucketQuota`, `admin:DeleteUserQuota`, …) via the audit-override
+helper. The full request/response shape lives in the admin API
+`openapi.yaml`.
 
 ### Bucket quota
 
@@ -251,7 +251,7 @@ User-scope usage fans out via `ListBuckets(owner)` + per-bucket
 The embedded operator console (`/console/`) surfaces both:
 
 - **Per-bucket Usage tab** (`web/src/components/BucketUsageTab.tsx`):
-  live `bucket_stats` progress bar against `BucketQuota.MaxBytes`
+  live bucket-usage progress bar against `BucketQuota.MaxBytes`
   (gray when no quota set), 30-day chart of `byteSeconds / 86400` per
   day, per-storage-class breakdown table, Edit / Remove quota buttons.
 - **Per-user Billing page** at `/iam/users/{user}/billing`
@@ -266,7 +266,7 @@ header.
 
 - Every quota / billing admin write writes a row to `audit_log` (kept
   for `STRATA_AUDIT_RETENTION`, default 30 d). See
-  [Monitoring]({{< ref "/best-practices/monitoring" >}}#audit-log).
+  [Monitoring]({{< ref "/operate/monitoring" >}}#audit-log).
 - `strata_quota_reconcile_drift_bytes{bucket}` exposes the last drift
   observation for alerting.
 - `403 QuotaExceeded` is counted in the standard
@@ -278,7 +278,7 @@ header.
 - **Operator-side mutation of `objects` rows that bypasses `BumpBucketStats`.**
   Drift accumulates until the next reconcile tick. If you must edit the
   meta backend directly, run a one-off reconcile via the worker (or
-  re-derive `bucket_stats` and `BumpBucketStats` manually).
+  re-derive the bucket-usage counter via `BumpBucketStats` manually).
 - **Setting `STRATA_USAGE_ROLLUP_AT` to a non-UTC time.** The worker
   treats the value as UTC. For Pacific 17:00 use `00:00` (next-day
   UTC). Mismatching this just shifts the sample point — the resulting
@@ -287,18 +287,20 @@ header.
   `MaxBytes` does not stop a single 10 TiB object that fits the
   remaining budget. Pair the two when you want both an aggregate and
   per-upload ceiling.
-- **Relying on `bucket_stats` for second-by-second accuracy in the
-  rollup.** The single-sample approximation is bounded by daily delta;
-  if billing accuracy matters more than that, the continuous-integration
-  follow-up (P3) is the right fix — not pushing
+- **Relying on the bucket-usage counter for second-by-second accuracy
+  in the rollup.** The single-sample approximation is bounded by daily
+  delta; if billing accuracy matters more than that, the
+  continuous-integration follow-up (P3) is the right fix — not pushing
   `STRATA_USAGE_ROLLUP_INTERVAL` to 1 h.
 
 ## See also
 
-- [Monitoring]({{< ref "/best-practices/monitoring" >}}) for the alert
-  set and audit-log shape.
-- [Capacity planning]({{< ref "/best-practices/capacity-planning" >}})
-  for sizing before quota.
+- [Billing]({{< ref "/best-practices/billing" >}}) for the byte-seconds
+  trapezoid math, sampling cadence, and downstream invoice consumers.
+- [Monitoring]({{< ref "/operate/monitoring" >}}) for the alert set
+  and audit-log shape.
+- [Capacity planning]({{< ref "/operate/capacity-planning" >}}) for
+  sizing before quota.
 - [Architecture — Workers]({{< ref "/architecture/workers" >}}) for the
   supervisor + leader-election shape behind every leader-elected
   worker.

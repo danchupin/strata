@@ -1,6 +1,6 @@
 ---
 title: 'Monitoring'
-weight: 30
+weight: 20
 description: 'Prometheus scrape config, key metrics, Grafana dashboards, OTel collector wire-up, in-process trace browser.'
 ---
 
@@ -47,9 +47,8 @@ shapes (`strata`, `strata-tikv-{a,b}`); use it as a template.
 
 ### Key metrics
 
-Every metric is documented in `internal/metrics/metrics.go`; the
-Prometheus `Help` strings are authoritative. The operator-facing
-shortlist:
+Every metric is registered in Strata's metrics package; the Prometheus
+`Help` strings are authoritative. The operator-facing shortlist:
 
 | Metric | Type | Meaning | Alert shape |
 |---|---|---|---|
@@ -58,17 +57,17 @@ shortlist:
 | `strata_worker_panic_total` | counter, labels `worker,shard` | Panics caught + recovered by the supervisor. `shard` is `"-"` outside the gc fan-out. | Any non-zero rate. |
 | `strata_replication_queue_age_seconds` | gauge, label `bucket` | Oldest pending replication row per source bucket. Backs the per-bucket Replication tab. | > 600 s for ≥ 10 min. |
 | `strata_replication_queue_depth` | gauge, label `rule_id` | Pending replication queue rows per rule. | Sustained growth without drain. |
-| `strata_cassandra_lwt_conflicts_total` | counter, labels `table,bucket,shard` | LWT conflicts (compare-and-set rejects). Backs the Hot Shards heatmap. | Spikes correlate with bucket-shard hot keys. |
+| `strata_cassandra_lwt_conflicts_total` | counter, labels `table,bucket,shard` | Compare-and-set rejects on Cassandra. Backs the Hot Shards heatmap. | Spikes correlate with bucket-shard hot keys. |
 | `strata_gc_queue_depth` | gauge, label `region` | Pending gc_queue rows per region. | Sustained growth without drain. |
 | `strata_gc_processed_chunks_total` | counter | Chunks deleted by the GC worker. | Drain rate visibility. |
 | `strata_gc_enqueued_chunks_total` | counter | Chunks enqueued for async deletion. | Pair with `processed_total` to compute net depth. |
 | `strata_lifecycle_tick_total` | counter, labels `action,status` | Per-action outcomes. `action ∈ {transition,expire,expire_noncurrent,abort_multipart}`, `status ∈ {success,error,skipped}`. | `error` rate spike. |
 | `strata_notify_delivery_total` | counter, labels `sink,status` | Notification delivery outcomes. `status ∈ {success,failure,dlq}`. | DLQ growth. |
-| `strata_cassandra_query_duration_seconds` | histogram, labels `table,op` | Per-query latency from the gocql QueryObserver. | LWT op p99. |
-| `strata_rados_op_duration_seconds` | histogram, labels `pool,op` | RADOS op latency from `internal/data/rados.ObserveOp`. | put / get p99 spikes. |
+| `strata_cassandra_query_duration_seconds` | histogram, labels `table,op` | Per-query latency on the Cassandra meta backend. | Compare-and-set tail p99. |
+| `strata_rados_op_duration_seconds` | histogram, labels `pool,op` | RADOS op latency from the data-backend observer. | put / get p99 spikes. |
 | `strata_otel_ringbuf_traces` / `strata_otel_ringbuf_evicted_total` / `strata_otel_ringbuf_oldest_age_seconds` | gauge / counter / gauge | In-process OTel ring-buffer occupancy, evictions, and retention horizon (age of the LRU-back trace). | Eviction rate > 0 means raise `STRATA_OTEL_RINGBUF_BYTES`. Retention horizon below the incident-debug window (e.g. < 5 min) → bump the budget. See [OTel ring-buffer bytes budget]({{< ref "/architecture/benchmarks/otel-ringbuf" >}}) for the bench harness + sizing guide. |
 | `strata_audit_stream_subscribers` | gauge | Live subscribers on `/admin/v1/audit/stream`. | Diagnostic only. |
-| `strata_meta_tikv_audit_sweep_deleted_total` | counter | Audit rows expunged by the TiKV retention sweeper (TiKV has no native TTL). | Steady-state non-zero on TiKV. |
+| `strata_meta_tikv_audit_sweep_deleted_total` | counter | Audit rows expunged by the TiKV retention sweeper (TiKV has no native row TTL). | Steady-state non-zero on TiKV. |
 | `strata_bucket_bytes` | gauge, labels `bucket,storage_class` | Per-bucket bytes, sampled hourly. | Capacity dashboards. |
 | `strata_bucket_shard_bytes` / `strata_bucket_shard_objects` | gauge, labels `bucket,shard` | Per-shard distribution for the top-N largest buckets. | Hot-shard detection. |
 
@@ -87,7 +86,7 @@ updating the dashboard fails CI.
 
 ## OpenTelemetry tracing
 
-`internal/otel.Init` reads the standard OTLP env vars at startup:
+The OTel init helper reads the standard OTLP env vars at startup:
 
 | Env | Default | Meaning |
 |---|---|---|
@@ -96,19 +95,15 @@ updating the dashboard fails CI.
 | `STRATA_OTEL_RINGBUF` | `on` | Toggle the in-process ring buffer (retains every span regardless of ratio). |
 | `STRATA_OTEL_RINGBUF_BYTES` | `4 MiB` | Bytes budget for the ring buffer; LRU-evicted on pressure. Sizing guide + bench gate: [OTel ring-buffer bytes budget]({{< ref "/architecture/benchmarks/otel-ringbuf" >}}). Bump to `16 << 20` (16 MiB) for burst-trace profiles when `strata_otel_ringbuf_oldest_age_seconds` falls below the incident-debug retention window. |
 
-The `internal/otel.NewMiddleware` wraps the gateway and starts a
-server-kind span per request, stamped with `request_id` so traces and
-logs cross-link. Per-storage observers emit child spans:
+The OTel HTTP middleware wraps the gateway and starts a server-kind
+span per request, stamped with `request_id` so traces and logs
+cross-link. Per-storage observers emit child spans:
 
-- `meta.cassandra.<table>.<op>` from the gocql QueryObserver
-  (Cassandra path).
-- `meta.tikv.<table>.<op>` from the Store-method decorator in
-  `internal/meta/tikv/observer.go` (TiKV path).
-- `data.rados.<op>` (`put` / `get` / `del`) from
-  `internal/data/rados.ObserveOp` (RADOS path).
-- `S3.<Operation>` from the AWS SDK otelaws middleware installed at
-  `internal/data/s3/observer.go::installOTelMiddleware` (S3-over-S3
-  data path), stamped with `strata.s3_cluster=<id>`.
+- `meta.cassandra.<table>.<op>` from the Cassandra query observer.
+- `meta.tikv.<table>.<op>` from the TiKV store-method observer.
+- `data.rados.<op>` (`put` / `get` / `del`) from the RADOS observer.
+- `S3.<Operation>` from the AWS SDK `otelaws` middleware installed by
+  the S3 data backend, stamped with `strata.s3_cluster=<id>`.
 
 Every gateway-side span carries `strata.component=gateway`. Background
 workers emit per-iteration parent spans named `worker.<name>.tick`
@@ -135,8 +130,8 @@ on `http://localhost:16686` shows the traces.
 
 ### In-process trace browser
 
-The ring buffer (`internal/otel/ringbuf`) retains every span the
-process emits, indexed by `request_id`. The operator console exposes
+The OTel ring buffer retains every span the process emits, indexed by
+`request_id`. The operator console exposes
 `/admin/v1/diagnostics/trace/{requestID}` to look up the full trace for
 any recent request — this is the lowest-friction debug path for "why
 was THIS request slow" without leaving the cluster.
@@ -206,4 +201,4 @@ A minimal alert set:
 Pair every alert with the runbook entry in
 [GC + Lifecycle tuning]({{< ref "/best-practices/gc-lifecycle-tuning" >}})
 or
-[Capacity planning]({{< ref "/best-practices/capacity-planning" >}}).
+[Capacity planning]({{< ref "/operate/capacity-planning" >}}).

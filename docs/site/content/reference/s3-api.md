@@ -30,14 +30,19 @@ at the route arm in `server.go` OR the leaf handler in
 
 # S3 API operations
 
-_This page is the operator + SDK-author index. The router is in
-[`internal/s3api/server.go`](https://github.com/danchupin/strata/blob/main/internal/s3api/server.go) —
-`ServeHTTP` → `handleBucket` (bucket-scope) → `handleObject` (object-scope).
-Leaf handlers live in `internal/s3api/<feature>.go`. AWS divergence column
-is empty when the operation is full-compat; one-liner otherwise._
+Operator + SDK-author index of every S3 operation Strata answers. The router
+dispatches `ServeHTTP` → `handleBucket` (bucket-scope) → `handleObject`
+(object-scope); leaf handlers live alongside each feature in the
+`s3api` package. The `Handler file:line` column is intentionally
+line-anchored — a lint test asserts every dispatched method shows up here
+(see the maintainer note above this section). AWS divergence column is empty
+when the operation is full-compat; one-liner otherwise.
 
 The "Shipped in" column references the ROADMAP / PRD that landed the
 operation when known. Pre-roadmap MVP surface (most rows) shows `—`.
+
+See [S3 compatibility]({{< ref "/s3-compatibility" >}}) for the headline
+pass-rate against the upstream Ceph `s3-tests` suite and the deliberate gaps.
 
 ## Bucket lifecycle
 

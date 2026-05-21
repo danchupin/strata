@@ -1,6 +1,6 @@
 ---
 title: 'Backup + restore'
-weight: 50
+weight: 40
 description: 'Bucket inventory, RADOS pool snapshots, Cassandra/TiKV snapshot strategy, cross-region replication.'
 ---
 
@@ -35,14 +35,15 @@ Cassandra / TiKV.
   same volume — fast, no IO impact, but consumes disk on the same
   filesystem until cleared.
 - **Restore:** stage SSTables back into the keyspace per the upstream
-  Cassandra runbook. Strata's schema migrations are additive
-  (`internal/meta/cassandra/schema.go::tableDDL` + `alterStatements`
-  are idempotent), so restoring from an older snapshot + rolling the
-  current binary will re-apply any new ALTERs on first boot.
-- **Off-cluster ship:** combine `nodetool snapshot` with
-  Medusa or a similar streaming backup tool to ship snapshots off-host
-  before clearing. The Cassandra LWT consistency story holds across
-  snapshots — restored rows preserve the Paxos state at snapshot time.
+  Cassandra runbook. Strata's Cassandra schema migrations are additive
+  + idempotent, so restoring from an older snapshot and rolling the
+  current binary re-applies any new `ALTER TABLE` statements on first
+  boot.
+- **Off-cluster ship:** combine `nodetool snapshot` with Medusa or a
+  similar streaming backup tool to ship snapshots off-host before
+  clearing. The Cassandra compare-and-set consistency story holds
+  across snapshots — restored rows preserve the Paxos state at
+  snapshot time.
 
 ### TiKV
 
@@ -52,12 +53,11 @@ Cassandra / TiKV.
 - **Restore:** `br restore` against a fresh PD + TiKV cluster.
   Pessimistic-txn state is preserved since `br` operates on the
   region's raft log.
-- **TiKV has no native TTL** — Strata-side row expiry is enforced via
-  `ExpiresAt` in the row payload + a leader-elected sweeper goroutine
-  (`internal/meta/tikv/sweeper.go`). Snapshots include un-expired and
-  not-yet-swept-expired rows; readers lazy-skip expired rows on
-  `Get`/`List` so a restored snapshot is correct without sweeper
-  catch-up.
+- **TiKV has no native row TTL** — Strata-side row expiry is enforced
+  via an `ExpiresAt` field in the row payload plus a leader-elected
+  sweeper goroutine. Snapshots include un-expired and not-yet-swept
+  expired rows; readers lazy-skip expired rows on `Get`/`List` so a
+  restored snapshot is correct without sweeper catch-up.
 
 ### Memory backend
 
@@ -201,7 +201,7 @@ quarterly at a minimum.
 
 - [Architecture — Workers]({{< ref "/architecture/workers" >}}) for
   the inventory + replicator + audit-export worker shapes.
-- [Capacity planning]({{< ref "/best-practices/capacity-planning" >}})
-  for storage growth math under lifecycle + replication.
-- [Monitoring]({{< ref "/best-practices/monitoring" >}}) for the
-  replication / inventory / audit-export metrics.
+- [Capacity planning]({{< ref "/operate/capacity-planning" >}}) for
+  storage growth math under lifecycle + replication.
+- [Monitoring]({{< ref "/operate/monitoring" >}}) for the replication
+  / inventory / audit-export metrics.

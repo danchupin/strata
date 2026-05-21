@@ -1,6 +1,6 @@
 ---
 title: 'Capacity planning'
-weight: 60
+weight: 50
 description: 'Chunk fan-out math, lifecycle cadence vs storage growth, when to scale shards / replicas, dedup roadmap.'
 ---
 
@@ -11,16 +11,16 @@ tiers:
 
 - **Gateway tier:** stateless replicas. Capacity = peak RPS / SigV4 +
   routing budget per replica. Scale horizontally; see
-  [Sizing]({{< ref "/best-practices/sizing" >}}).
+  [Scaling]({{< ref "/operate/scaling" >}}).
 - **Metadata tier:** Cassandra / TiKV. Capacity = total object-row
-  count × per-row overhead, plus the LWT / pessimistic-txn rate during
-  writes.
+  count × per-row overhead, plus the compare-and-set or pessimistic-txn
+  rate during writes.
 - **Data tier:** RADOS / S3-over-S3. Capacity = total object bytes ×
   pool replication factor, plus chunk fan-out overhead.
 
 This page covers the math; pair with
-[Backup + restore]({{< ref "/best-practices/backup-restore" >}}) for
-the backup overhead and
+[Backup + restore]({{< ref "/operate/backup-restore" >}}) for the
+backup overhead and
 [GC + lifecycle tuning]({{< ref "/best-practices/gc-lifecycle-tuning" >}})
 for the drain rate.
 
@@ -133,7 +133,7 @@ Shard count is set per bucket at creation time via
   Backed by `strata_bucket_shard_bytes{bucket=...}` /
   `strata_bucket_shard_objects{bucket=...}` for the top-N largest
   buckets, plus `strata_cassandra_lwt_conflicts_total{bucket,shard}`
-  for LWT conflict heatmaps.
+  for compare-and-set conflict heatmaps.
 - **Per-partition size limit.** Cassandra partitions over ~100 MB
   start hurting compaction; tune up the shard count for buckets that
   approach this.
@@ -141,8 +141,8 @@ Shard count is set per bucket at creation time via
   concurrently; doubling shard count doubles the list cost. Don't
   over-shard small buckets.
 
-The online reshard worker (`internal/reshard`) lets operators bump
-shard count on a live bucket without downtime; trigger via
+The online reshard worker lets operators bump shard count on a live
+bucket without downtime; trigger via
 `POST /admin/v1/bucket/<name>/reshard`. See
 [Architecture — Sharding]({{< ref "/architecture/sharding" >}}).
 
@@ -222,11 +222,10 @@ A few cadence patterns worth documenting:
 
 ## See also
 
-- [Sizing]({{< ref "/best-practices/sizing" >}}) for per-replica
-  budgets.
+- [Scaling]({{< ref "/operate/scaling" >}}) for per-replica budgets.
 - [GC + lifecycle tuning]({{< ref "/best-practices/gc-lifecycle-tuning" >}})
   for tuning the drain rate.
-- [Backup + restore]({{< ref "/best-practices/backup-restore" >}}) for
-  the storage cost of backup snapshots + replication.
+- [Backup + restore]({{< ref "/operate/backup-restore" >}}) for the
+  storage cost of backup snapshots + replication.
 - [Architecture — Sharding]({{< ref "/architecture/sharding" >}}) for
   the per-shard fan-out math.

@@ -50,7 +50,7 @@ retained-trace-age by ≥ 30 % over the 4 MiB baseline **without** ≥ 2×
 resident-memory hit, flip `ringbuf.DefaultBytesBudget` to `16 << 20`
 in `internal/otel/ringbuf/ringbuf.go`. Otherwise keep 4 MiB + surface
 the env knob more prominently in the
-[Monitoring]({{< ref "/best-practices/monitoring" >}}) page.
+[Monitoring]({{< ref "/operate/monitoring" >}}) page.
 
 ### Outcome
 

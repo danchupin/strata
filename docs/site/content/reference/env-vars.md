@@ -4,22 +4,28 @@ weight: 10
 ---
 
 <!--
-Source of truth: grep the codebase via `grep -rhoE 'STRATA_[A-Z_][A-Z0-9_]+' cmd/strata/ internal/ | sort -u`.
-Cross-reference defaults + clamp ranges at the consuming call sites (koanf envMap,
-worker `*FromEnv` helpers, `os.Getenv(...)`). Update this page when adding a new env var.
+Maintainer note: source of truth for new entries is the codebase. Grep with
+`grep -rhoE 'STRATA_[A-Z_][A-Z0-9_]+' cmd/strata/ internal/ | sort -u` and
+cross-reference defaults + clamp ranges at the consuming call sites (koanf
+envMap, worker `*FromEnv` helpers, `os.Getenv(...)`). Update this page when
+adding a new env var.
 -->
 
 # `STRATA_*` environment variables
 
-_Source of truth: grep the codebase via `grep -rhoE 'STRATA_[A-Z_][A-Z0-9_]+' cmd/strata/ internal/`._
-_Update this page when adding a new env var — the [reference index]({{< ref "/reference" >}})
-links here as the operator-facing tuning manual._
+Every `STRATA_*` knob, grouped by the layer that consumes it. CLI flags on
+`strata server` (`--listen`, `--vhost-pattern`, `--log-level`, `--workers=`)
+override the matching env var.
 
-Variables are grouped by the layer that consumes them. CLI flags on
-`strata server` (e.g. `--listen`, `--vhost-pattern`, `--log-level`) override
-the matching env var.
+This is the operator-facing tuning manual; see the
+[reference index]({{< ref "/reference" >}}) for the rest of the reference
+material.
 
 ## Gateway (core HTTP)
+
+See [Concepts — S3 surface]({{< ref "/concepts/s3-surface" >}}) for what the
+gateway speaks and [Architecture — router]({{< ref "/architecture/router" >}})
+for the dispatch shape.
 
 | Variable | Default | Range | Notes |
 |---|---|---|---|
@@ -49,7 +55,10 @@ the matching env var.
 
 ## Meta backend — Cassandra / ScyllaDB
 
-ScyllaDB uses the same gocql client; no code-level distinction.
+ScyllaDB is a CQL-compatible drop-in for Cassandra; the same envs apply.
+See [Concepts — workers]({{< ref "/concepts/workers" >}}) and
+[Architecture — meta-store]({{< ref "/architecture/meta-store" >}}) for
+the meta-backend contract.
 
 | Variable | Default | Range | Notes |
 |---|---|---|---|
@@ -60,9 +69,12 @@ ScyllaDB uses the same gocql client; no code-level distinction.
 | `STRATA_CASSANDRA_USER` | empty | string | Auth user. |
 | `STRATA_CASSANDRA_PASSWORD` | empty | string | Auth password. |
 | `STRATA_CASSANDRA_TIMEOUT` | `10s` | Go duration | Per-query timeout. |
-| `STRATA_CASSANDRA_SLOW_MS` | `100` | positive int (ms) | Slow-query WARN threshold for the gocql query observer. |
+| `STRATA_CASSANDRA_SLOW_MS` | `100` | positive int (ms) | Slow-query WARN threshold for the Cassandra query observer. |
 
 ## Meta backend — TiKV
+
+See [Architecture — backends/TiKV]({{< ref "/architecture/backends/tikv" >}})
+for the meta-backend contract + range-scan short-circuit.
 
 | Variable | Default | Range | Notes |
 |---|---|---|---|
@@ -70,6 +82,8 @@ ScyllaDB uses the same gocql client; no code-level distinction.
 | `STRATA_GC_DUAL_WRITE` | `on` | `on \| off` | Dual-write the legacy + denormalised GC tables. Flipped off after a migration cycle drains the legacy queue. Applies to Cassandra + TiKV. |
 
 ## Data backend — RADOS
+
+See [Architecture — data-backend]({{< ref "/architecture/data-backend" >}}).
 
 | Variable | Default | Range | Notes |
 |---|---|---|---|
@@ -93,6 +107,9 @@ ScyllaDB uses the same gocql client; no code-level distinction.
 
 ## Auth + admin console
 
+See [Architecture — auth]({{< ref "/architecture/auth" >}}) and
+[Best practices — operator console]({{< ref "/best-practices/web-ui" >}}).
+
 | Variable | Default | Range | Notes |
 |---|---|---|---|
 | `STRATA_AUTH_MODE` | `off` | `off \| disabled \| required \| optional` | SigV4 enforcement mode. |
@@ -104,7 +121,13 @@ ScyllaDB uses the same gocql client; no code-level distinction.
 
 ## SSE + KMS + master keys
 
-Precedence inside `crypto/master`: `STRATA_SSE_MASTER_KEYS` > `STRATA_SSE_MASTER_KEY_VAULT` > `STRATA_SSE_MASTER_KEY_FILE` > `STRATA_SSE_MASTER_KEY`.
+See [Best practices — compliance]({{< ref "/best-practices/compliance" >}})
+for the operator workflow and [Architecture — auth]({{< ref "/architecture/auth" >}})
+for the SSE wrap + KMS provider contract.
+
+Precedence inside the master-key resolver: `STRATA_SSE_MASTER_KEYS` >
+`STRATA_SSE_MASTER_KEY_VAULT` > `STRATA_SSE_MASTER_KEY_FILE` >
+`STRATA_SSE_MASTER_KEY`.
 
 | Variable | Default | Range | Notes |
 |---|---|---|---|
@@ -122,6 +145,8 @@ Precedence inside `crypto/master`: `STRATA_SSE_MASTER_KEYS` > `STRATA_SSE_MASTER
 
 ## GC worker (`--workers=gc`)
 
+See [Best practices — GC & lifecycle tuning]({{< ref "/best-practices/gc-lifecycle-tuning" >}}).
+
 | Variable | Default | Range | Notes |
 |---|---|---|---|
 | `STRATA_GC_INTERVAL` | `30s` | Go duration | Tick cadence. |
@@ -132,6 +157,8 @@ Precedence inside `crypto/master`: `STRATA_SSE_MASTER_KEYS` > `STRATA_SSE_MASTER
 | `STRATA_GC_METRICS_LISTEN` | `:9100` | host:port | Legacy GC metrics listener (subsumed by the main gateway exporter). |
 
 ## Lifecycle worker (`--workers=lifecycle`)
+
+See [Best practices — GC & lifecycle tuning]({{< ref "/best-practices/gc-lifecycle-tuning" >}}).
 
 | Variable | Default | Range | Notes |
 |---|---|---|---|
@@ -153,6 +180,8 @@ See [Placement & rebalance]({{< ref "/best-practices/placement-rebalance" >}}#ba
 
 ## Notify worker (`--workers=notify`)
 
+See [Concepts — workers]({{< ref "/concepts/workers" >}}).
+
 | Variable | Default | Range | Notes |
 |---|---|---|---|
 | `STRATA_NOTIFY_TARGETS` | empty | `type:arn=<url>\|<secret>,...` | Required when worker is enabled. |
@@ -162,6 +191,8 @@ See [Placement & rebalance]({{< ref "/best-practices/placement-rebalance" >}}#ba
 | `STRATA_NOTIFY_POLL_LIMIT` | `100` | positive int | Per-poll row cap. |
 
 ## Replicator worker (`--workers=replicator`)
+
+See [Concepts — workers]({{< ref "/concepts/workers" >}}).
 
 | Variable | Default | Range | Notes |
 |---|---|---|---|
@@ -174,6 +205,8 @@ See [Placement & rebalance]({{< ref "/best-practices/placement-rebalance" >}}#ba
 
 ## Access-log worker (`--workers=access-log`)
 
+See [Concepts — workers]({{< ref "/concepts/workers" >}}).
+
 | Variable | Default | Range | Notes |
 |---|---|---|---|
 | `STRATA_ACCESS_LOG_INTERVAL` | `5m` | Go duration | Flush cadence. |
@@ -182,12 +215,16 @@ See [Placement & rebalance]({{< ref "/best-practices/placement-rebalance" >}}#ba
 
 ## Inventory worker (`--workers=inventory`)
 
+See [Concepts — workers]({{< ref "/concepts/workers" >}}).
+
 | Variable | Default | Range | Notes |
 |---|---|---|---|
 | `STRATA_INVENTORY_INTERVAL` | `5m` | Go duration | Tick cadence. |
 | `STRATA_INVENTORY_REGION` | `deps.Region` fallback | string | Region tag for target-bucket writes. |
 
 ## Audit-export worker (`--workers=audit-export`)
+
+See [Best practices — compliance]({{< ref "/best-practices/compliance" >}}).
 
 | Variable | Default | Range | Notes |
 |---|---|---|---|
@@ -197,6 +234,8 @@ See [Placement & rebalance]({{< ref "/best-practices/placement-rebalance" >}}#ba
 | `STRATA_AUDIT_EXPORT_INTERVAL` | `24h` | Go duration | Tick cadence. |
 
 ## Manifest-rewriter worker (`--workers=manifest-rewriter`)
+
+See [Concepts — workers]({{< ref "/concepts/workers" >}}).
 
 | Variable | Default | Range | Notes |
 |---|---|---|---|

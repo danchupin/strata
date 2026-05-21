@@ -103,11 +103,11 @@ trace browser) ship in their own cycles.
 
 `/console/*` serves the embedded React+Vite bundle (with SPA fallback to
 `index.html` so deep links survive refresh). `/admin/v1/*` is the JSON
-API that powers the SPA — full schema lives in
-`internal/adminapi/openapi.yaml`. Both prefixes register ahead of the
-catch-all S3 router so they never collide with bucket names; `console`,
-`admin`, and `metrics` are reserved bucket names in
-`internal/s3api/validate.go`.
+API that powers the SPA — full schema lives in the admin API
+`openapi.yaml`. Both prefixes register ahead of the catch-all S3
+router so they never collide with bucket names; `console`, `admin`,
+and `metrics` are reserved bucket names enforced by the S3 router's
+bucket-name validator.
 
 ## Pages (Phase 1)
 

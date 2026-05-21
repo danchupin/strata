@@ -156,8 +156,8 @@ lab and update this file when that becomes a target.
 
 ## Latent bug discovered while running
 
-`internal/gc.Worker.drainCount` does **not** ack a GC entry when
-`Data.Delete` returns an error (see `internal/gc/worker.go:123-126`).
+`gc.Worker.drainCount` does **not** ack a GC entry when
+`Data.Delete` returns an error.
 Combined with the outer `for {}` loop that re-issues
 `ListGCEntries` until it returns `< Batch`, any persistent
 `Data.Delete` failure (RADOS pool not found, ENOENT for an OID that
