@@ -32,4 +32,28 @@ Cycle: ralph/p1-fixes
 - **README backfill discipline (US-008)**: grep-verify `Features vs RGW` table structure FIRST + preserve ≤120 lines guard (ralph/readme-docs-rewrite US-001 constraint). Footnote link to Limitations preserved.
 - **ROADMAP close-flip (US-009)**: × 3 entries (P1 line 106 + P1 line 117 + P3 line 282) + 0-1 new P1 if bucket-index claim refuted. `(commit pending)` placeholder; SHA backfill on main as fast-follow commit (mirrors precedent).
 - **Severity-tiered new entries (FR-13)**: bucket-index claim refuted = **P1** (foundational README claim regression, not P3). Other workloads > 1.5× slower = P3.
+- **US-001 spike outcome — BRANCH (a) selected**: Cassandra concurrency probe @ c=100 returned final UsedBytes/UsedObjects = exactly 100 (zero lost updates) with zero CAS-exhausted errors. Observed 253 retries across 100 goroutines (avg 2.53 retries/goroutine; max headroom factor vs 32-cap ≈ 12.6×). **Decision**: fan-out applies to TiKV ONLY. Cassandra `internal/meta/cassandra/store.go:3447` LWT CAS loop with maxAttempts=32 is sufficient. Memory backend (sync.RWMutex) unchanged. Cycle stays at 9 stories (no US-002b insertion). Probe artifact: `internal/meta/cassandra/bucket_stats_probe_integration_test.go` (build tag `integration`, kept as regression anchor).
+
+## [2026-05-22 00:34 MSK] - US-001
+- Spike: Cassandra BumpBucketStats concurrency probe @ c=100. No prod code changed.
+- Files changed:
+  - `internal/meta/cassandra/bucket_stats_probe_integration_test.go` (new throwaway-but-kept probe; build tag `integration`)
+  - `scripts/ralph/progress.txt` (decision-tree outcome recorded as contract for US-002+)
+- **Probe numbers (cassandra:5.0 testcontainer, SimpleStrategy RF=1, c=100, +1/+1 each)**:
+  - final UsedBytes = 100, final UsedObjects = 100 (no lost updates)
+  - bucket_stats INSERT count = 100 (all goroutines tried INSERT IF NOT EXISTS; only 1 wins, rest retry into UPDATE branch)
+  - bucket_stats UPDATE count = 253 (CAS retries on UPDATE … IF used_bytes=? AND used_objects=?)
+  - bucket_stats SELECT count = 354 (= 353 in-loop reads + 1 final test read)
+  - total CAS attempts = 353 → retries = 253 (avg 2.53/goroutine)
+  - CAS-exhausted errors = 0 (zero goroutines hit the 32-attempt ceiling)
+- **Decision branch (per US-001 AC tree)**: **(a)** Cassandra OK. Fan-out applies to **TiKV only**.
+- **Headroom analysis**: avg 2.53 retries/goroutine vs 32-attempt cap → 12.6× headroom. Even at c=400 (4× current load) Cassandra would average ~10 retries/goroutine, still comfortably under cap.
+- **Learnings for future iterations**:
+  - `cassandra.SessionConfig.Metrics` is the right hook for counting query attempts in concurrency probes — `ObserveQuery(table, op, duration, err)` fires once per CQL query incl. CAS retries. No need to instrument the impl.
+  - `parseStatement(stmt)` in `internal/meta/cassandra/observer.go` extracts (table, op) from CQL — INSERT/UPDATE/SELECT all parse to `bucket_stats` for the BumpBucketStats hot path. Filter by table to isolate per-table query traffic.
+  - Cassandra BumpBucketStats does NOT call `obs.RecordLWTConflict` on applied=false — so the LWT-conflict metric is empty for bucket_stats. Counting query attempts via ObserveQuery is the only path.
+  - testcontainers-go cassandra image: `cassandra:5.0` + `tccassandra.Run(ctx, "cassandra:5.0")` boots in ~5s, ready to accept LWT in ~4s after that. Total probe wall-clock ~14s incl. teardown.
+  - `DOCKER_HOST=unix:///Users/dochupin/.lima/avito/sock/docker.sock` is the lima sock path on this dev box (per CLAUDE.md macOS+lima note); `TESTCONTAINERS_RYUK_DISABLED=true` recommended on lima to skip the ryuk-reaper container that doesn't always shut down cleanly.
+  - **For US-002**: the TiKV-only fan-out scope is locked. Implementation hits `internal/meta/tikv/bucket_stats.go:88` (BumpBucketStats) + `:63` (GetBucketStats), per PRD-verified paths. Cassandra store untouched.
+---
 

@@ -6,7 +6,7 @@
     {
       "id": "US-001",
       "title": "bucket_stats fix scoping spike — Cassandra probe + decision tree",
-      "description": "As an implementer, I want a brief design spike that includes a Cassandra concurrency probe — PRD review found Cassandra's BumpBucketStats is also LWT RMW with bounded retry (maxAttempts=32), NOT a counter table. Spike outcome decides whether fan-out applies to TiKV only or to BOTH backends.",
+      "description": "As an implementer, I want a brief design spike that includes a Cassandra concurrency probe — PRD review found Cassandra's BumpBucketStats is also LWT RMW with bounded retry (maxAttempts=32), NOT a counter table. Spike outcome decides whether fan-out applies to TiKV only or to BOTH backends. OUTCOME: branch (a) — final=100, retries=253, CAS-exhausted=0 → TiKV-only fan-out, Cassandra unchanged.",
       "acceptanceCriteria": [
         "Read existing bucket_stats impls (verified paths): internal/meta/tikv/bucket_stats.go (BumpBucketStats line 88 / GetBucketStats line 63 — single per-bucket key s/B/<bid>/bs with pessimistic txn); internal/meta/cassandra/store.go (BumpBucketStats line 3447 — **LWT CAS loop, maxAttempts=32**, NOT counter table per schema.go:226-231 bigint columns); internal/meta/memory/store.go (sync.RWMutex on in-struct counter — no RMW contention beyond mutex; in-process serial).",
         "**Cassandra concurrency probe**: run 100 concurrent BumpBucketStats(+1) against Cassandra testcontainer. Capture: final count (= 100 if no lost updates), number of CAS retries observed, any CAS-exhausted errors (caller hit maxAttempts=32 ceiling). Sample via gocql query observer or attempt counter at the impl layer.",
@@ -21,8 +21,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Branch (a): final UsedBytes/UsedObjects=100, INSERT=100, UPDATE=253, SELECT=354, retries=253 (avg 2.53/goroutine), CAS-exhausted=0. Cassandra 32-cap headroom ~12.6×. Fan-out scope locked to TiKV only. Probe artifact: internal/meta/cassandra/bucket_stats_probe_integration_test.go (build tag integration)."
     },
     {
       "id": "US-002",
