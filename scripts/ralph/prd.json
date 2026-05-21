@@ -42,8 +42,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Sharded fan-out wired: keys.go gets bucketStatsShardCount=8 + subBucketStatsShard='bs/' + BucketStatsShardKey(uuid, uint8). bucket_stats.go BumpBucketStats picks `fnv32a(uuid.NewString()) % 8`, RMW via pessimistic txn on (shardKey, ownerKey), reads remaining 7 shards inside the same txn to return aggregate (preserves contract per-bump cumulative-total semantic). GetBucketStats sums all 8 shards in one snapshot txn (8 sequential txn.Get — no BatchGet in the kvTxn interface). Cmd-layer Metrics wiring: new tikv.Metrics interface + metrics.TiKVObserver{} + strata_bucket_stats_shard_writes_total{shard} counter. Race test internal/meta/tikv/bucket_stats_test.go (100 goroutines, asserts final=100, zero err, fan-out hits >=2 shards). Old BucketStatsKey helper deleted; subBucketStats const retained as documentation per PRD."
     },
     {
       "id": "US-003",

@@ -32,6 +32,9 @@ Cycle: ralph/p1-fixes
 - **README backfill discipline (US-008)**: grep-verify `Features vs RGW` table structure FIRST + preserve ≤120 lines guard (ralph/readme-docs-rewrite US-001 constraint). Footnote link to Limitations preserved.
 - **ROADMAP close-flip (US-009)**: × 3 entries (P1 line 106 + P1 line 117 + P3 line 282) + 0-1 new P1 if bucket-index claim refuted. `(commit pending)` placeholder; SHA backfill on main as fast-follow commit (mirrors precedent).
 - **Severity-tiered new entries (FR-13)**: bucket-index claim refuted = **P1** (foundational README claim regression, not P3). Other workloads > 1.5× slower = P3.
+- **Backend-package observability pattern** (validated US-002): define a `Metrics` interface inside the meta package (no prometheus import) → adapter struct in `internal/metrics` (`TiKVObserver`, mirrors `CassandraObserver` / `RADOSObserver` shape) → register the counter in `metrics.Register()` → wire `Metrics: metrics.TiKVObserver{}` in `serverapp.buildMetaStore`'s backend-build branch. Avoids a metrics→meta import cycle.
+- **TiKV fan-out: pick on fresh uuid, NOT on a stable key** (validated US-002). `fnv32a(uuid.NewString()) % shards` keeps the distribution unbiased across PUT/DELETE. Hashing on bucket id or object key collapses every op on a hot bucket onto one shard and defeats the fan-out. Keep the named helper (`pickBucketStatsShard()`) so the invariant is greppable.
+- **TiKV fan-out: in-txn aggregate read preserves contract** (validated US-002). After RMW on the picked shard inside a pessimistic txn, read the remaining shards via `txn.Get` and sum to return the cross-shard aggregate. Snapshot consistency within the txn handles concurrent-sibling writes. Callers of `BumpBucketStats` see the same cumulative-total contract as the pre-fan-out single-key shape.
 - **US-001 spike outcome — BRANCH (a) selected**: Cassandra concurrency probe @ c=100 returned final UsedBytes/UsedObjects = exactly 100 (zero lost updates) with zero CAS-exhausted errors. Observed 253 retries across 100 goroutines (avg 2.53 retries/goroutine; max headroom factor vs 32-cap ≈ 12.6×). **Decision**: fan-out applies to TiKV ONLY. Cassandra `internal/meta/cassandra/store.go:3447` LWT CAS loop with maxAttempts=32 is sufficient. Memory backend (sync.RWMutex) unchanged. Cycle stays at 9 stories (no US-002b insertion). Probe artifact: `internal/meta/cassandra/bucket_stats_probe_integration_test.go` (build tag `integration`, kept as regression anchor).
 
 ## [2026-05-22 00:34 MSK] - US-001
@@ -55,5 +58,36 @@ Cycle: ralph/p1-fixes
   - testcontainers-go cassandra image: `cassandra:5.0` + `tccassandra.Run(ctx, "cassandra:5.0")` boots in ~5s, ready to accept LWT in ~4s after that. Total probe wall-clock ~14s incl. teardown.
   - `DOCKER_HOST=unix:///Users/dochupin/.lima/avito/sock/docker.sock` is the lima sock path on this dev box (per CLAUDE.md macOS+lima note); `TESTCONTAINERS_RYUK_DISABLED=true` recommended on lima to skip the ryuk-reaper container that doesn't always shut down cleanly.
   - **For US-002**: the TiKV-only fan-out scope is locked. Implementation hits `internal/meta/tikv/bucket_stats.go:88` (BumpBucketStats) + `:63` (GetBucketStats), per PRD-verified paths. Cassandra store untouched.
+---
+
+## [2026-05-22 02:10 MSK] - US-002
+- TiKV per-shard fan-out (8 shards) wired into the bucket_stats live counter. Hard cutover — old single-key `s/B/<bid>/bs` slot removed (no migration backfill per pre-launch policy).
+- Files changed:
+  - `internal/meta/tikv/keys.go` — `bucketStatsShardCount = 8`, `subBucketStatsShard = "bs/"`, new `BucketStatsShardKey(bucketID uuid.UUID, shard uint8) []byte`. `BucketStatsKey` deleted; old `subBucketStats = "bs"` const retained as documentation per PRD.
+  - `internal/meta/tikv/bucket_stats.go` — `BumpBucketStats` picks `fnv32a(uuid.NewString()) % 8`, pessimistic txn on (shardKey, ownerKey), RMW the shard, then in-txn reads the other 7 shards to assemble the aggregate return value. `GetBucketStats` opens a non-pessimistic snapshot txn and sums all 8 shards via sequential `txn.Get`. `pickBucketStatsShard()` is the named helper so the unbiased-per-op contract is greppable.
+  - `internal/meta/tikv/metrics.go` (new) — `Metrics` interface exposing `IncBucketStatsShardWrite(shard int)`. `Store.metrics` field + `Config.Metrics` wiring.
+  - `internal/meta/tikv/store.go` — `Config.Metrics` + `Store.metrics` + `Open` propagation.
+  - `internal/metrics/metrics.go` — `BucketStatsShardWritesTotal` counter vec + `TiKVObserver` adapter (mirrors `CassandraObserver` / `RADOSObserver` shape; registered in `Register()`).
+  - `internal/serverapp/serverapp.go` — `metatikv.Open` call site passes `Metrics: metrics.TiKVObserver{}`.
+  - `internal/meta/tikv/bucket_stats_test.go` (new) — 100-goroutine race test with `fakeShardMetrics` sink. Asserts (i) `final UsedBytes / UsedObjects = exactly concN * delta`, (ii) zero per-call errors, (iii) fan-out hits ≥2 shards (else the test would silently pass against a regression that collapses the picker). Second test asserts the read path sums all shards.
+  - `CLAUDE.md` (root) — new TiKV-gotchas bullet documenting the fan-out shape + the "fresh uuid per call" picker invariant so future agents don't hash on a stable key and accidentally collapse the fan-out.
+- **Quality checks**:
+  - `go build ./...` green.
+  - `go vet ./...` green (no diagnostics on the touched files).
+  - `go test -race -count=1 ./internal/meta/tikv` → green; new race test passes.
+  - `go test -race -count=1 ./internal/meta/...` → all 4 backends green.
+  - `go test -race ./...` → only `cmd/strata-racecheck`'s `TestRunSmokeBinary` is flaky; verified pre-existing (fails 1/5 on `c3687fd` too — the pre-edit SHA). Unrelated to US-002.
+  - `go vet -tags ceph ./...` cannot run on the dev box (no `librados.h`); CI's docker-build leg covers it.
+- **Behavioral contract preserved**:
+  - `caseBucketStats` (storetest contract) — per-bump cumulative total assertion still passes because `BumpBucketStats` returns the in-txn aggregate (own shard + 7 sibling reads), not just the shard counter.
+  - `caseBucketStatsHotPath` — PUT / overwrite / DELETE / markers fold through `BumpBucketStats` unchanged at the call site (no callers needed editing; the public meta.Store surface is identical).
+- **Learnings for future iterations**:
+  - **Fan-out + per-shard return semantic — pick one carefully.** First draft of `BumpBucketStats` returned just the shard's post-write value. That broke the contract test's sequential loop (each iteration expects the cumulative total). Fix: inside the same pessimistic txn, after writing the shard, read the remaining 7 shards via `txn.Get` and sum. Adds 7 reads per bump but preserves the public contract. Snapshot consistency within the txn handles the concurrent-sibling case.
+  - **`fnv32a(uuid.NewString())` not `fnv32a(bucketID)` for shard pick.** Hashing on a stable key (bucket id, object key) collapses every bump on a hot bucket onto one shard and defeats the fan-out. The PRD AC explicitly calls out the unbiased uuid pattern — keep the named `pickBucketStatsShard()` helper greppable for future contributors.
+  - **kvTxn has no `BatchGet`.** Sequential `txn.Get` × 8 inside a snapshot txn is the closest equivalent. Adding `BatchGet` to the interface would be an invasive cross-backend change for a hot path that is already negligibly cheap (8 single-key gets in one round-trip-friendly snapshot).
+  - **`unusedfunc` info-level diagnostic on `subBucketStats` is acceptable.** PRD AC explicitly retains the constant for documentation continuity. `go vet` does not flag unused consts, only `gopls`-style hints. No `make vet` regression.
+  - **`cmd/strata-racecheck`'s `TestRunSmokeBinary` is pre-existing flake.** Verified by stash-then-rerun against `c3687fd`. Future iterations should not chase this from a clean-test perspective.
+  - **`go test -race ./...` on dev box: librados-tagged build leg always fails on macOS** without ceph headers. CI's docker-build job has librados linked and exercises the `-tags ceph` path. Skip locally; rely on CI for that leg.
+  - **Metric wiring pattern**: mirror `cassandra.SessionConfig.Metrics` / `rados.Config.Metrics` for any backend-package observability. Define the interface inside the meta package (no prometheus import) and an adapter struct in `internal/metrics` (the cmd-layer wiring point). Register the new counter in `metrics.Register()` and wire the `Metrics: metrics.TiKVObserver{}` field in `serverapp.buildMetaStore`.
 ---
 

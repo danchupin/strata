@@ -569,6 +569,16 @@ rewrap` is a one-shot operator command and stays untraced.
 - **`koanf` env provider stores env values as raw strings — no comma-split into `[]string`.** Multi-value config (TiKV
   PD endpoints) keeps `Config.TiKV.Endpoints` as `string` and splits with `strings.Split` + `TrimSpace` + drop-empty
   at use-site. Cleaner than wiring a custom mapstructure decode hook.
+- **`bucket_stats` live counter is fan-out, not single-key** (US-002 p1-fixes). TiKV stores per-bucket counters under
+  `s/B/<bid>/bs/<shard>` for `shard ∈ [0, bucketStatsShardCount)` (hard-coded 8 — no env knob, no per-bucket override).
+  `BumpBucketStats` picks via `fnv32a(uuid.NewString()) % 8` (fresh uuid per call — hashing on bucket id or any
+  stable key collapses the fan-out and defeats the purpose); `GetBucketStats` sums all 8 shards inside a single
+  non-pessimistic snapshot txn. The returned value of `BumpBucketStats` is the post-write aggregate (own shard +
+  in-txn read of the other 7), so the contract test's per-bump cumulative-total assertion still holds. Cassandra is
+  unchanged — its LWT CAS loop with `maxAttempts=32` absorbs c=100+ cleanly per the US-001 spike probe
+  (~2.5 retries/goroutine, ~12.6× headroom). The Prom counter `strata_bucket_stats_shard_writes_total{shard}`
+  exposes per-shard distribution; uniform = healthy, one shard dominating = the picker was misused (e.g. hashing
+  on a stable key).
 
 ## Cluster state machine — 5 states + per-cluster weight
 
