@@ -213,3 +213,29 @@ Cycle: ralph/rgw-benchmarks
   - **Error propagation for stddev** on a ratio Strata/RGW is approximated by sqrt(strata_sd² + rgw_sd²); not strictly correct for a ratio (correct uses ratio × sqrt((strata_sd/strata_mean)² + (rgw_sd/rgw_mean)²)) but the additive-variance form is simpler and the difference is small at typical noise levels. Documented in --report header line. Refine in US-010 doc page if ratio stddev becomes a load-bearing claim.
   - **Strata lab warm-up effect** observed: first run after `make up-all` hits p99 ≈ 200ms+ at conc=4 even for 1KiB; subsequent runs settle. Real bench (60s × 3 runs) absorbs warm-up in the first run; mean ± stddev across 3 runs is the right shape. For 5s smoke runs, warm-up dominates — values like 213ms@c=4 are normal smoke artifacts, not representative of steady-state.
 ---
+
+## 2026-05-21 17:50 MSK - US-005 (PUT/GET 100MB workload — large objects)
+- What was implemented:
+  - `scripts/bench-rgw-comparison.sh`:
+    - **Extracted** `warp_put_one` / `warp_get_one` (single-run helpers, caller supplies run_id) from US-004's `warp_put_runs` / `warp_get_runs`. The N-run loops now thinly wrap the one-shot helpers. Multi-bucket-per-run shapes (US-005's cleanup-between-runs) keep monotonic run_id in JSONL output because the helper takes run_id as an argument rather than maintaining its own counter.
+    - New **`workload_put_large`** (target, runs): 100MiB × c=4 × 60s × 3 runs default. Loops `bucket_create → warp_put_one → cleanup_workload` per run. `PUT_LARGE_{SIZE,DURATION,CONCURRENCY}` env overrides. cleanup-between-runs (not just end) keeps disk under the 300GB pre-flight budget — at steady ~25 ops × 100MiB × c=4 × 3 runs the bucket would otherwise accumulate ~30GB per target before drop.
+    - New **`workload_get_large`** (target, runs): mirrors put-large shape. warp `get`'s prepare phase auto-seeds bucket to `--objects=50` (~5GiB seed) per run, then drains for duration. `GET_LARGE_{SIZE,DURATION,CONCURRENCY,OBJECTS}` env overrides.
+    - **`dispatch_workload` extended** with `put-large` / `get-large` cases. `--concurrency=N` flag flips the default c=4 via env-export wrapper (`PUT_LARGE_CONCURRENCY=$concurrency workload_put_large …`) so single-point override stays compatible with US-002 backwards-compat shape.
+    - Usage block + workload list comment updated for US-005.
+  - `Makefile` `bench-rgw-comparison` target sequence extended with put-large + get-large rows.
+- Files changed:
+  - `scripts/bench-rgw-comparison.sh` (warp_put_one/get_one extraction + workload_put_large/get_large + dispatch + usage block)
+  - `Makefile` (bench-rgw-comparison sequence)
+  - `scripts/ralph/prd.json` (US-005 passes=true + shipped-notes)
+  - `scripts/ralph/progress.txt` (this block)
+- **Locally verified** against strata-only lab (RGW still stale per US-001 follow-up):
+  - `put-large strata --runs=2` (PUT_LARGE_SIZE=10MiB PUT_LARGE_DURATION=5 PUT_LARGE_CONCURRENCY=2) → 2 JSONL rows with run_id=1, run_id=2. p99 117ms (run 1) → 254ms (run 2), throughput ~310 MB/s. cleanup_workload + ceph df snapshot between runs OK (`hdd 4 GiB AVAIL 2.5 GiB → 1.4 GiB` between runs).
+  - `get-large strata --runs=2` (GET_LARGE_SIZE=10MiB GET_LARGE_DURATION=5 GET_LARGE_CONCURRENCY=2 GET_LARGE_OBJECTS=10) → 2 JSONL rows, p99 119ms / 111ms, ~350 MB/s. Each run re-seeds the bucket (cleanup wiped previous seed); seed phase emits Report: PUT. block + measure phase emits Report: GET. block; parser anchored at GET correctly picks the measurement block.
+  - `make vet` green; `go test ./...` green (pure shell story, no Go code changes — N=50 packages all OK).
+  - `bash -n scripts/bench-rgw-comparison.sh` syntax OK.
+- **Learnings for future iterations:**
+  - **warp duration-mode vs op-count mode**: warp's `put` subcommand has no `--objects=N` cap; it runs continuously for `--duration`. Op-count from PRD spec ("100MB × 50 ops") is achieved via duration shape (60s × c=4 against ~10s/100MB on lab → ~24 ops; operator can crank PUT_LARGE_DURATION up if denser histogram needed). The 50-ops figure in the PRD is approximate; mean±stddev across 3 runs is the load-bearing shape, not exact op count.
+  - **Cleanup-between-runs invariant**: the 100MiB workloads accumulate ~5-10GB per run per target. With c=4 × 3 runs × 2 targets, the budget would balloon past 60GB before any drop without between-run cleanup. The `workload_put_large` / `workload_get_large` loop pattern (`bucket_create → warp_put_one → cleanup_workload`) per run is the canonical shape for any future large-object workload (e.g. US-006 multipart-5g which lands at ~125GB transient per run — that one will need cleanup-EACH-run too, plus probably per-upload).
+  - **Extract `warp_put_one`/`warp_get_one` to keep run_id monotonic across multi-bucket-per-run shapes**. The original `warp_put_runs` had its own `for run in $(seq 1 $runs)` loop, which would emit run_id=1 every time it was called from a per-run wrapper. Pulling the warp invocation into a one-shot helper that takes `run_id` as an arg fixes this cleanly — and the existing US-004 `warp_put_runs` / `warp_get_runs` wrap the new helpers transparently so US-004 sweep paths stay byte-for-byte identical.
+  - **warp duration-mode short runs are warm-up dominated**: same as US-004 finding. 5s smoke shows p99 jump run-1 → run-2 from 117ms → 254ms; real 60s × 3 run sequence absorbs warm-up. Don't draw conclusions from <30s warp runs.
+---

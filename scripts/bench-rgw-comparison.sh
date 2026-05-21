@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Strata vs RGW comparison bench (US-002..US-004 of ralph/rgw-benchmarks).
+# Strata vs RGW comparison bench (US-002..US-005 of ralph/rgw-benchmarks).
 #
 # Drives minio/warp against Strata (TiKV-default lab) and a side-by-side
 # RGW container (deploy/docker/docker-compose.yml `bench-rgw` profile) so
@@ -7,8 +7,9 @@
 #
 # US-002 shipped the scaffold + reference workload `put-small`. US-004 adds
 # put-medium / get-small / get-medium plus a concurrency sweep ({1, 8, 32, 128}
-# default) per workload. Subsequent stories US-005..US-008 extend with larger
-# objects, multipart, list, and range/delete/IAM workloads on top.
+# default) per workload. US-005 adds put-large / get-large (100MiB shape).
+# Subsequent stories US-006..US-008 extend with multipart, list, and
+# range/delete/IAM workloads on top.
 #
 # Usage:
 #   bash scripts/bench-rgw-comparison.sh <workload> <target> [--concurrency=N | --concurrency-sweep=A,B,C] [--runs=N]
@@ -22,7 +23,9 @@
 #                 put-medium  1MiB PUT (US-004)
 #                 get-small   1KiB GET, warp auto-seeds (US-004)
 #                 get-medium  1MiB GET, warp auto-seeds (US-004)
-#               (US-005..US-008 add put-large, get-large, multipart-5g, list, range-get, delete, iam-auth)
+#                 put-large   100MiB PUT, c=4, cleanup between runs (US-005)
+#                 get-large   100MiB GET, c=4, warp auto-seeds, cleanup between runs (US-005)
+#               (US-006..US-008 add multipart-5g, list, range-get, delete, iam-auth)
 #   <target>    one of: strata, rgw, both
 #
 # Flags:
@@ -518,96 +521,116 @@ bucket_create() {
     aws --endpoint-url "$endpoint" s3api create-bucket --bucket "$bucket" >/dev/null 2>&1 || true
 }
 
+# Single warp put invocation. Caller controls run_id so multi-bucket-per-run
+# workloads (US-005 put-large with cleanup-between-runs) keep monotonic run_id
+# in the JSONL. Returns non-zero on warp failure so caller can decide whether
+# to continue.
+# Args: target workload size_label concurrency duration run_id bucket tmpdir
+warp_put_one() {
+  local target="$1" workload="$2" size_label="$3" concurrency="$4" duration="$5" run="$6" bucket="$7" tmpdir="$8"
+  local endpoint creds_ak creds_sk
+  resolve_target "$target" endpoint creds_ak creds_sk
+  local host
+  host="$(url_host "$endpoint")"
+
+  local summary_file="$tmpdir/warp-$target-$workload-c$concurrency-run$run.txt"
+  local benchdata_file="$tmpdir/warp-$target-$workload-c$concurrency-run$run.bd"
+  note "run $run: warp put $target obj=$size_label conc=$concurrency dur=${duration}s"
+  # warp prints summary to stdout (--analyze.out is broken in v(dev)
+  # 2026-05-21 — never writes the FILE arg). Capture stdout to
+  # summary_file; --benchdata still writes raw csv.zst.json.zst alongside
+  # for offline reanalysis.
+  set +e
+  "$BENCH_TOOL_PATH" put \
+    --host="$host" \
+    --access-key="$creds_ak" \
+    --secret-key="$creds_sk" \
+    --bucket="$bucket" \
+    --obj.size="$size_label" \
+    --concurrent="$concurrency" \
+    --duration="${duration}s" \
+    --noclear \
+    --benchdata="$benchdata_file" \
+    --no-color \
+    > "$summary_file" 2>&1
+  local warp_rc=$?
+  set -e
+  if [[ "$warp_rc" -ne 0 ]]; then
+    note "WARN: warp put failed on $target run $run (rc=$warp_rc) — see $summary_file"
+    tail -5 "$summary_file" >&2 || true
+    return 1
+  fi
+
+  read -r p50 p95 p99 mbps ops errs < <(parse_warp_summary "$summary_file" "PUT") || true
+  emit_row "$target" "$workload" "$size_label" "$concurrency" "$run" \
+    "$p50" "$p95" "$p99" "$mbps" "$ops" "$errs" "$duration"
+}
+
 # Inner: N warp put runs against an existing bucket at one concurrency point.
 # Args: target workload size_label concurrency duration runs bucket tmpdir
 warp_put_runs() {
   local target="$1" workload="$2" size_label="$3" concurrency="$4" duration="$5" runs="$6" bucket="$7" tmpdir="$8"
+  local run
+  for run in $(seq 1 "$runs"); do
+    warp_put_one "$target" "$workload" "$size_label" "$concurrency" "$duration" "$run" "$bucket" "$tmpdir" || true
+  done
+}
+
+# Single warp get invocation. Caller controls run_id (mirrors warp_put_one).
+# warp's `get` subcommand auto-seeds the bucket up to --objects=N (default
+# 2500) of size --obj.size, then drains for --duration at --concurrent.
+#
+# Args: target workload size_label concurrency duration run_id bucket tmpdir seed_objects
+warp_get_one() {
+  local target="$1" workload="$2" size_label="$3" concurrency="$4" duration="$5" run="$6" bucket="$7" tmpdir="$8" seed_objects="$9"
   local endpoint creds_ak creds_sk
   resolve_target "$target" endpoint creds_ak creds_sk
   local host
   host="$(url_host "$endpoint")"
 
-  for run in $(seq 1 "$runs"); do
-    local summary_file="$tmpdir/warp-$target-$workload-c$concurrency-run$run.txt"
-    local benchdata_file="$tmpdir/warp-$target-$workload-c$concurrency-run$run.bd"
-    note "run $run/$runs: warp put $target obj=$size_label conc=$concurrency dur=${duration}s"
-    # warp prints summary to stdout (--analyze.out is broken in v(dev)
-    # 2026-05-21 — never writes the FILE arg). Capture stdout to
-    # summary_file; --benchdata still writes raw csv.zst.json.zst alongside
-    # for offline reanalysis.
-    set +e
-    "$BENCH_TOOL_PATH" put \
-      --host="$host" \
-      --access-key="$creds_ak" \
-      --secret-key="$creds_sk" \
-      --bucket="$bucket" \
-      --obj.size="$size_label" \
-      --concurrent="$concurrency" \
-      --duration="${duration}s" \
-      --noclear \
-      --benchdata="$benchdata_file" \
-      --no-color \
-      > "$summary_file" 2>&1
-    local warp_rc=$?
-    set -e
-    if [[ "$warp_rc" -ne 0 ]]; then
-      note "WARN: warp put failed on $target run $run (rc=$warp_rc) — see $summary_file"
-      tail -5 "$summary_file" >&2 || true
-      continue
-    fi
+  local summary_file="$tmpdir/warp-$target-$workload-c$concurrency-run$run.txt"
+  local benchdata_file="$tmpdir/warp-$target-$workload-c$concurrency-run$run.bd"
+  note "run $run: warp get $target obj=$size_label conc=$concurrency dur=${duration}s seed=$seed_objects"
+  set +e
+  "$BENCH_TOOL_PATH" get \
+    --host="$host" \
+    --access-key="$creds_ak" \
+    --secret-key="$creds_sk" \
+    --bucket="$bucket" \
+    --obj.size="$size_label" \
+    --objects="$seed_objects" \
+    --concurrent="$concurrency" \
+    --duration="${duration}s" \
+    --noclear \
+    --benchdata="$benchdata_file" \
+    --no-color \
+    > "$summary_file" 2>&1
+  local warp_rc=$?
+  set -e
+  if [[ "$warp_rc" -ne 0 ]]; then
+    note "WARN: warp get failed on $target run $run (rc=$warp_rc) — see $summary_file"
+    tail -5 "$summary_file" >&2 || true
+    return 1
+  fi
 
-    read -r p50 p95 p99 mbps ops errs < <(parse_warp_summary "$summary_file" "PUT") || true
-    emit_row "$target" "$workload" "$size_label" "$concurrency" "$run" \
-      "$p50" "$p95" "$p99" "$mbps" "$ops" "$errs" "$duration"
-  done
+  # warp get prints both Report: PUT. (prepare phase) and Report: GET.
+  # (measurement phase). Parser anchors at start-of-line on "Report: GET."
+  # so the prepare-phase PUT block is skipped.
+  read -r p50 p95 p99 mbps ops errs < <(parse_warp_summary "$summary_file" "GET") || true
+  emit_row "$target" "$workload" "$size_label" "$concurrency" "$run" \
+    "$p50" "$p95" "$p99" "$mbps" "$ops" "$errs" "$duration"
 }
 
 # Inner: N warp get runs against an existing bucket at one concurrency point.
-# warp's `get` subcommand auto-seeds the bucket up to --objects=N (default
-# 2500) of size --obj.size, then drains for --duration at --concurrent. With
-# --noclear set, the seed is reused across runs / conc points (warp tops up
-# only if existing objects insufficient).
+# With --noclear set inside warp_get_one, the seed is reused across runs /
+# conc points (warp tops up only if existing objects insufficient).
 #
 # Args: target workload size_label concurrency duration runs bucket tmpdir seed_objects
 warp_get_runs() {
   local target="$1" workload="$2" size_label="$3" concurrency="$4" duration="$5" runs="$6" bucket="$7" tmpdir="$8" seed_objects="$9"
-  local endpoint creds_ak creds_sk
-  resolve_target "$target" endpoint creds_ak creds_sk
-  local host
-  host="$(url_host "$endpoint")"
-
+  local run
   for run in $(seq 1 "$runs"); do
-    local summary_file="$tmpdir/warp-$target-$workload-c$concurrency-run$run.txt"
-    local benchdata_file="$tmpdir/warp-$target-$workload-c$concurrency-run$run.bd"
-    note "run $run/$runs: warp get $target obj=$size_label conc=$concurrency dur=${duration}s seed=$seed_objects"
-    set +e
-    "$BENCH_TOOL_PATH" get \
-      --host="$host" \
-      --access-key="$creds_ak" \
-      --secret-key="$creds_sk" \
-      --bucket="$bucket" \
-      --obj.size="$size_label" \
-      --objects="$seed_objects" \
-      --concurrent="$concurrency" \
-      --duration="${duration}s" \
-      --noclear \
-      --benchdata="$benchdata_file" \
-      --no-color \
-      > "$summary_file" 2>&1
-    local warp_rc=$?
-    set -e
-    if [[ "$warp_rc" -ne 0 ]]; then
-      note "WARN: warp get failed on $target run $run (rc=$warp_rc) — see $summary_file"
-      tail -5 "$summary_file" >&2 || true
-      continue
-    fi
-
-    # warp get prints both Report: PUT. (prepare phase) and Report: GET.
-    # (measurement phase). Parser anchors at start-of-line on "Report: GET."
-    # so the prepare-phase PUT block is skipped.
-    read -r p50 p95 p99 mbps ops errs < <(parse_warp_summary "$summary_file" "GET") || true
-    emit_row "$target" "$workload" "$size_label" "$concurrency" "$run" \
-      "$p50" "$p95" "$p99" "$mbps" "$ops" "$errs" "$duration"
+    warp_get_one "$target" "$workload" "$size_label" "$concurrency" "$duration" "$run" "$bucket" "$tmpdir" "$seed_objects" || true
   done
 }
 
@@ -663,6 +686,59 @@ workload_get_sweep() {
     warp_get_runs "$target" "$workload" "$size_label" "$c" "$duration" "$runs" "$bucket" "$tmpdir" "$seed_objects"
   done
   cleanup_workload "$target" "$workload"
+}
+
+# Large-object PUT workload (US-005). Single concurrency point per PRD (100MiB
+# × c=4 by default — large objects exercise the chunking / manifest / network
+# buffer code paths, not the small-object scheduling shape that US-004 sweeps).
+# cleanup_workload runs BETWEEN runs (not just at end) — 100MiB × ~50 ops × 4
+# concurrent × 3 runs lands ~5GB per run in the bucket; accumulated 15GB+ per
+# target without between-run cleanup would burn the ~300GB disk pre-flight
+# budget allocated by US-003. Bucket is recreated before each run so warp can
+# uniformly emit fresh random keys.
+#
+# Args: target runs
+workload_put_large() {
+  local target="$1" runs="$2"
+  local size_label="${PUT_LARGE_SIZE:-100MiB}"
+  local duration="${PUT_LARGE_DURATION:-60}"
+  local concurrency="${PUT_LARGE_CONCURRENCY:-4}"
+  local bucket="bench-put-large-${target}"
+  local tmpdir; tmpdir="$(mktemp -d)"
+  trap "rm -rf $tmpdir" RETURN
+
+  note "workload put-large: $target / $size_label × c=$concurrency × dur=${duration}s × runs=$runs (cleanup between runs)"
+  local run
+  for run in $(seq 1 "$runs"); do
+    bucket_create "$target" "$bucket"
+    warp_put_one "$target" "put-large" "$size_label" "$concurrency" "$duration" "$run" "$bucket" "$tmpdir" || true
+    cleanup_workload "$target" "put-large"
+  done
+}
+
+# Large-object GET workload (US-005). Mirrors workload_put_large shape: single
+# concurrency point, cleanup between runs. warp's `get` auto-seeds the bucket
+# to --objects=N (default 50 = ~5GiB seed for 100MiB shape) on each run's
+# prepare phase, then drains for the configured duration.
+#
+# Args: target runs
+workload_get_large() {
+  local target="$1" runs="$2"
+  local size_label="${GET_LARGE_SIZE:-100MiB}"
+  local duration="${GET_LARGE_DURATION:-60}"
+  local concurrency="${GET_LARGE_CONCURRENCY:-4}"
+  local seed="${GET_LARGE_OBJECTS:-50}"
+  local bucket="bench-get-large-${target}"
+  local tmpdir; tmpdir="$(mktemp -d)"
+  trap "rm -rf $tmpdir" RETURN
+
+  note "workload get-large: $target / $size_label × c=$concurrency × dur=${duration}s × runs=$runs / seed=$seed (cleanup between runs)"
+  local run
+  for run in $(seq 1 "$runs"); do
+    bucket_create "$target" "$bucket"
+    warp_get_one "$target" "get-large" "$size_label" "$concurrency" "$duration" "$run" "$bucket" "$tmpdir" "$seed" || true
+    cleanup_workload "$target" "get-large"
+  done
 }
 
 # -----------------------------------------------------------------------------
@@ -755,8 +831,30 @@ dispatch_workload() {
         workload_get_sweep "$target" "get-medium" "$size_label" "$duration" "$r" "$seed" "${sweep_arr[@]}"
       fi
       ;;
+    put-large)
+      # 100MiB PUT × c=4 × 60s × 3 runs (US-005). Single conc point per PRD
+      # (large-object shape exercises chunking / manifest / network buffer, not
+      # the small-object scheduling shape US-004 sweeps). cleanup_workload
+      # runs BETWEEN runs to stay under the 300GB disk pre-flight budget.
+      # --concurrency=N override flips the default c=4.
+      if [[ -n "$concurrency" ]]; then
+        PUT_LARGE_CONCURRENCY="$concurrency" workload_put_large "$target" "$r"
+      else
+        workload_put_large "$target" "$r"
+      fi
+      ;;
+    get-large)
+      # 100MiB GET × c=4 × 60s × 3 runs (US-005). Mirrors put-large shape:
+      # single conc point, cleanup between runs. warp auto-seeds bucket to
+      # --objects=50 (= ~5GiB seed) per run.
+      if [[ -n "$concurrency" ]]; then
+        GET_LARGE_CONCURRENCY="$concurrency" workload_get_large "$target" "$r"
+      else
+        workload_get_large "$target" "$r"
+      fi
+      ;;
     *)
-      abort "workload '$workload' not implemented yet (US-002 ships put-small; US-004 adds put-medium/get-small/get-medium; US-005+ adds put-large/get-large/multipart-5g/list/range-get/delete/iam-auth)"
+      abort "workload '$workload' not implemented yet (US-002 ships put-small; US-004 adds put-medium/get-small/get-medium; US-005 adds put-large/get-large; US-006+ adds multipart-5g/list/range-get/delete/iam-auth)"
       ;;
   esac
 }

@@ -92,8 +92,8 @@
         "Tests pass"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped: warp_put_one / warp_get_one helpers extracted from US-004 warp_put_runs / warp_get_runs (caller controls run_id so multi-bucket-per-run shapes keep monotonic run_id in JSONL; warp_put_runs/get_runs now wrap the one-shot helpers). workload_put_large (target, runs) — 100MiB × c=4 × 60s × 3 runs default; PUT_LARGE_{SIZE,DURATION,CONCURRENCY} env overrides; cleanup_workload runs BETWEEN runs (not just at end) so 100MiB × ~25 ops × 4 conc × 3 runs ≈ 30GB transient per target stays under 300GB pre-flight budget; bucket recreated per run so warp generates fresh keys cleanly. workload_get_large mirrors put-large shape, --objects=50 (~5GiB seed) per run prepare phase, GET_LARGE_{SIZE,DURATION,CONCURRENCY,OBJECTS} env overrides. dispatch_workload extended with put-large / get-large cases (--concurrency=N override flips default c=4). Makefile bench-rgw-comparison sequences put-large + get-large after the US-004 small/medium block. Usage block + workload list updated for US-005. Locally verified: put-large strata 10MiB × c=2 × 5s × 2 runs → 2 JSONL rows (p99 117ms / 254ms, throughput ~310 MB/s); get-large strata 10MiB × c=2 × 5s × 2 runs → 2 JSONL rows (p99 119ms / 111ms, ~350 MB/s); cleanup_workload + ceph df snapshot logged between runs. vet+test green. RGW-side deferred (bench-rgw lab still in stale state per US-001 follow-up; surface in US-012)."
     },
     {
       "id": "US-006",
