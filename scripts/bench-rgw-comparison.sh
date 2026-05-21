@@ -8,8 +8,9 @@
 # US-002 shipped the scaffold + reference workload `put-small`. US-004 adds
 # put-medium / get-small / get-medium plus a concurrency sweep ({1, 8, 32, 128}
 # default) per workload. US-005 adds put-large / get-large (100MiB shape).
-# Subsequent stories US-006..US-008 extend with multipart, list, and
-# range/delete/IAM workloads on top.
+# US-006 adds multipart-5g (warp multipart-put: 5 concurrent multipart uploads
+# of 5GB each, 80 × 64MiB parts). Subsequent stories US-007..US-008 extend
+# with list, range/delete/IAM workloads on top.
 #
 # Usage:
 #   bash scripts/bench-rgw-comparison.sh <workload> <target> [--concurrency=N | --concurrency-sweep=A,B,C] [--runs=N]
@@ -19,13 +20,15 @@
 #
 # Args:
 #   <workload>  one of:
-#                 put-small   1KiB PUT (US-002 reference)
-#                 put-medium  1MiB PUT (US-004)
-#                 get-small   1KiB GET, warp auto-seeds (US-004)
-#                 get-medium  1MiB GET, warp auto-seeds (US-004)
-#                 put-large   100MiB PUT, c=4, cleanup between runs (US-005)
-#                 get-large   100MiB GET, c=4, warp auto-seeds, cleanup between runs (US-005)
-#               (US-006..US-008 add multipart-5g, list, range-get, delete, iam-auth)
+#                 put-small     1KiB PUT (US-002 reference)
+#                 put-medium    1MiB PUT (US-004)
+#                 get-small     1KiB GET, warp auto-seeds (US-004)
+#                 get-medium    1MiB GET, warp auto-seeds (US-004)
+#                 put-large     100MiB PUT, c=4, cleanup between runs (US-005)
+#                 get-large     100MiB GET, c=4, warp auto-seeds, cleanup between runs (US-005)
+#                 multipart-5g  5 concurrent multipart uploads, 80 × 64MiB parts each
+#                                = 5GiB per upload; warp PUTPART op label (US-006)
+#               (US-007..US-008 add list, range-get, delete, iam-auth)
 #   <target>    one of: strata, rgw, both
 #
 # Flags:
@@ -62,6 +65,12 @@
 #                                leaves 2GB headroom for warp).
 #   STRATA_BENCH_DATA_BACKEND_EXPECT  override expected /readyz data_backend (default "rados";
 #                                set to "any" to skip the check — useful for memory-backend dev runs).
+#   MULTIPART_5G_PART_SIZE       part size for multipart-5g workload (default 64MiB)
+#   MULTIPART_5G_PARTS           parts per multipart upload (default 80 → 5GiB total per upload)
+#   MULTIPART_5G_CONCURRENCY     parallel multipart sessions (default 5)
+#   MULTIPART_5G_PART_CONCURRENCY in-session part-upload parallelism (default 20;
+#                                auto-capped to MULTIPART_5G_PARTS).
+#   MULTIPART_5G_DURATION        wall-clock seconds per multipart-5g run (default 60)
 #   BENCH_COMPOSE_FILE           default deploy/docker/docker-compose.yml
 #
 # Exit codes: 0 success, 2 misconfig, 77 lab not reachable (skip).
@@ -741,6 +750,119 @@ workload_get_large() {
   done
 }
 
+# Single warp multipart-put invocation (US-006). Uses warp's `multipart-put`
+# subcommand which spawns `--concurrent` goroutines, each looping:
+#   createMultipartUpload → upload `--parts` parts (in `--concurrent` internal
+#   slots; one part per part-upload op) → completeMultipartUpload → repeat.
+#
+# warp emits op-label `PUTPART` per part-upload (pkg/bench/multipart_put.go:130);
+# the report block parser anchors on `^Report: PUTPART\.` so the throughput
+# / latency stats reflect per-part shape (PRD AC: aggregate throughput MB/s,
+# per-part p99 latency).
+#
+# PRD spec: 5 parallel multipart uploads of 5GiB each, part size 64MiB.
+#   --concurrent=5      → 5 simultaneous multipart sessions
+#   --parts=80          → 80 × 64MiB = 5120MiB ≈ 5GiB per multipart object
+#   --part.size=64MiB
+#   --part.concurrent=N → in-session part-upload parallelism (warp's flag,
+#                          default 20 in warp; capped to `parts` here so smoke
+#                          shapes with smaller --parts don't trip warp's
+#                          "part.concurrent can't be more than parts" guard).
+# In duration mode (default 60s) warp loops session create→parts→complete so
+# multiple multipart objects may complete per concurrent slot. Throughput shape
+# (MB/s) absorbs the looping; raw "5 GiB per upload" is the per-object spec
+# for the chunking / manifest-size code paths the bench targets.
+#
+# Args: target workload part_size parts concurrency part_concurrency duration run_id bucket tmpdir
+warp_multipart_one() {
+  local target="$1" workload="$2" part_size="$3" parts="$4" concurrency="$5" part_concurrency="$6" duration="$7" run="$8" bucket="$9" tmpdir="${10}"
+  # warp enforces part.concurrent <= parts; cap defensively.
+  if (( part_concurrency > parts )); then
+    part_concurrency="$parts"
+  fi
+  local endpoint creds_ak creds_sk
+  resolve_target "$target" endpoint creds_ak creds_sk
+  local host
+  host="$(url_host "$endpoint")"
+
+  local summary_file="$tmpdir/warp-$target-$workload-c$concurrency-run$run.txt"
+  local benchdata_file="$tmpdir/warp-$target-$workload-c$concurrency-run$run.bd"
+  # Object label reflects the synthesized per-upload size for operator readability:
+  # parts × part.size formatted as a SIZE_BYTES decimal (e.g. 5GiB at 80×64MiB).
+  local obj_label
+  obj_label="$(awk -v p="$parts" -v ps="$part_size" 'BEGIN {
+    n = ps + 0
+    if (ps ~ /KiB$/)  mul = 1024
+    else if (ps ~ /MiB$/) mul = 1024*1024
+    else if (ps ~ /GiB$/) mul = 1024*1024*1024
+    else mul = 1
+    total = n * mul * p
+    if (total >= 1024*1024*1024) printf("%.1fGiB", total/1024/1024/1024)
+    else if (total >= 1024*1024) printf("%.0fMiB", total/1024/1024)
+    else printf("%dB", total)
+  }')"
+  note "run $run: warp multipart-put $target part=$part_size × $parts (= $obj_label/upload) conc=$concurrency part.conc=$part_concurrency dur=${duration}s"
+  set +e
+  "$BENCH_TOOL_PATH" multipart-put \
+    --host="$host" \
+    --access-key="$creds_ak" \
+    --secret-key="$creds_sk" \
+    --bucket="$bucket" \
+    --part.size="$part_size" \
+    --parts="$parts" \
+    --concurrent="$concurrency" \
+    --part.concurrent="$part_concurrency" \
+    --duration="${duration}s" \
+    --noclear \
+    --benchdata="$benchdata_file" \
+    --no-color \
+    > "$summary_file" 2>&1
+  local warp_rc=$?
+  set -e
+  if [[ "$warp_rc" -ne 0 ]]; then
+    note "WARN: warp multipart-put failed on $target run $run (rc=$warp_rc) — see $summary_file"
+    tail -5 "$summary_file" >&2 || true
+    return 1
+  fi
+
+  read -r p50 p95 p99 mbps ops errs < <(parse_warp_summary "$summary_file" "PUTPART") || true
+  # object_size column in JSONL carries the per-part size (latency / throughput
+  # rows in the report are per-part); the per-upload object size lives in the
+  # workload label `multipart-5g` (= 80 × 64MiB synth).
+  emit_row "$target" "$workload" "$part_size" "$concurrency" "$run" \
+    "$p50" "$p95" "$p99" "$mbps" "$ops" "$errs" "$duration"
+}
+
+# Multipart workload (US-006). PRD: 5 parallel multipart uploads of 5GB each,
+# part size 64MB. Maps to warp's `multipart-put` subcommand: --concurrent=5
+# parallel multipart sessions, each session uploads --parts=80 parts of
+# --part.size=64MiB (= 5120MiB ≈ 5GiB per upload). Cleanup between runs is
+# mandatory — 25GiB per run × 3 runs would otherwise burn ~75GiB before drop;
+# with cleanup-between-runs the peak per-run transient stays at single-run
+# size (~5GiB × concurrent slots ≈ 25GiB). Bucket recreated per run so warp's
+# random object names don't accumulate stale uploads.
+#
+# Args: target runs
+workload_multipart_5g() {
+  local target="$1" runs="$2"
+  local part_size="${MULTIPART_5G_PART_SIZE:-64MiB}"
+  local parts="${MULTIPART_5G_PARTS:-80}"
+  local concurrency="${MULTIPART_5G_CONCURRENCY:-5}"
+  local part_concurrency="${MULTIPART_5G_PART_CONCURRENCY:-20}"
+  local duration="${MULTIPART_5G_DURATION:-60}"
+  local bucket="bench-multipart-5g-${target}"
+  local tmpdir; tmpdir="$(mktemp -d)"
+  trap "rm -rf $tmpdir" RETURN
+
+  note "workload multipart-5g: $target / part=$part_size × $parts × conc=$concurrency × part.conc=$part_concurrency × dur=${duration}s × runs=$runs (cleanup between runs)"
+  local run
+  for run in $(seq 1 "$runs"); do
+    bucket_create "$target" "$bucket"
+    warp_multipart_one "$target" "multipart-5g" "$part_size" "$parts" "$concurrency" "$part_concurrency" "$duration" "$run" "$bucket" "$tmpdir" || true
+    cleanup_workload "$target" "multipart-5g"
+  done
+}
+
 # -----------------------------------------------------------------------------
 # Workload dispatch
 # -----------------------------------------------------------------------------
@@ -853,8 +975,20 @@ dispatch_workload() {
         workload_get_large "$target" "$r"
       fi
       ;;
+    multipart-5g)
+      # warp multipart-put: 5 parallel multipart uploads of 5GiB each
+      # (80 × 64MiB parts) × 60s × 3 runs (US-006). PRD AC says 5 GB per
+      # upload — see workload_multipart_5g for the mapping. cleanup between
+      # runs mandatory to stay under the 300GB disk pre-flight budget.
+      # --concurrency=N overrides the default c=5.
+      if [[ -n "$concurrency" ]]; then
+        MULTIPART_5G_CONCURRENCY="$concurrency" workload_multipart_5g "$target" "$r"
+      else
+        workload_multipart_5g "$target" "$r"
+      fi
+      ;;
     *)
-      abort "workload '$workload' not implemented yet (US-002 ships put-small; US-004 adds put-medium/get-small/get-medium; US-005 adds put-large/get-large; US-006+ adds multipart-5g/list/range-get/delete/iam-auth)"
+      abort "workload '$workload' not implemented yet (US-002 ships put-small; US-004 adds put-medium/get-small/get-medium; US-005 adds put-large/get-large; US-006 adds multipart-5g; US-007+ adds list/range-get/delete/iam-auth)"
       ;;
   esac
 }

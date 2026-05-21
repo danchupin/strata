@@ -239,3 +239,102 @@ Cycle: ralph/rgw-benchmarks
   - **Extract `warp_put_one`/`warp_get_one` to keep run_id monotonic across multi-bucket-per-run shapes**. The original `warp_put_runs` had its own `for run in $(seq 1 $runs)` loop, which would emit run_id=1 every time it was called from a per-run wrapper. Pulling the warp invocation into a one-shot helper that takes `run_id` as an arg fixes this cleanly — and the existing US-004 `warp_put_runs` / `warp_get_runs` wrap the new helpers transparently so US-004 sweep paths stay byte-for-byte identical.
   - **warp duration-mode short runs are warm-up dominated**: same as US-004 finding. 5s smoke shows p99 jump run-1 → run-2 from 117ms → 254ms; real 60s × 3 run sequence absorbs warm-up. Don't draw conclusions from <30s warp runs.
 ---
+
+## 2026-05-21 17:57 MSK - US-006 (multipart 5GB workload)
+- What was implemented:
+  - `scripts/bench-rgw-comparison.sh`:
+    - **`warp_multipart_one`** — single warp `multipart-put` invocation. Op-label
+      `PUTPART` confirmed in `warp@v1.4.1/pkg/bench/multipart_put.go:130`
+      (Operation{OpType: "PUTPART"}); the existing `parse_warp_summary` is
+      op-anchored on `^Report: PUTPART\.` so the throughput / latency stats
+      reflect per-part shape (PRD AC: aggregate throughput MB/s, per-part p99
+      latency). Caller controls run_id so the cleanup-between-runs pattern
+      keeps monotonic run_id in JSONL.
+    - **Auto-cap for `--part.concurrent`**: warp enforces
+      `part.concurrent <= parts` and aborts otherwise (`<ERROR> part.concurrent
+      can't be more than parts`). Default `--part.concurrent=20` in warp;
+      smoke shapes with `--parts=4` would trip the guard, so the helper
+      defensively caps `part_concurrency` to `parts` before invocation.
+      Operator override via `MULTIPART_5G_PART_CONCURRENCY`.
+    - **`workload_multipart_5g`** (target, runs): cleanup-between-runs loop
+      (mandatory per PRD — 25GiB peak per run × 3 runs without between-run
+      drop would burn ~75GiB before cleanup; with the loop the peak stays
+      single-run ≈ 25GiB, well under the 300GB disk pre-flight budget).
+      Bucket recreated each run so warp's random object names don't accumulate
+      stale partial uploads. PRD spec → warp flag mapping documented inline:
+      5 parallel multipart uploads (`--concurrent=5`) × 5GiB each
+      (`--parts=80 × --part.size=64MiB` = 5120MiB ≈ 5GiB) × 60s × 3 runs.
+    - **`dispatch_workload`** extended with `multipart-5g` case. `--concurrency=N`
+      flag flips the default conc=5 via `MULTIPART_5G_CONCURRENCY` env-export
+      wrapper (mirrors put-large / get-large US-005 pattern).
+    - Env knobs documented in usage block: `MULTIPART_5G_PART_SIZE`,
+      `MULTIPART_5G_PARTS`, `MULTIPART_5G_CONCURRENCY`,
+      `MULTIPART_5G_PART_CONCURRENCY`, `MULTIPART_5G_DURATION`.
+  - `Makefile`: `bench-rgw-comparison` target sequence extended with
+    `multipart-5g both` row after the put-large/get-large block.
+- Files changed:
+  - `scripts/bench-rgw-comparison.sh` (warp_multipart_one + workload_multipart_5g + dispatch + env docs)
+  - `Makefile` (bench-rgw-comparison sequence)
+  - `scripts/ralph/prd.json` (US-006 passes=true + shipped notes)
+  - `scripts/ralph/progress.txt` (this block)
+- **Locally verified** against strata-only lab (RGW still stale per US-001
+  follow-up; RGW-side smoke deferred for US-012):
+  - Smoke: `MULTIPART_5G_PART_SIZE=5MiB MULTIPART_5G_PARTS=4
+    MULTIPART_5G_CONCURRENCY=2 MULTIPART_5G_DURATION=10 multipart-5g strata
+    --runs=2 --skip-preflight` → 2 JSONL rows:
+    ```
+    {"target":"strata","workload":"multipart-5g","object_size":"5MiB","concurrency":2,"run_id":1,"p50_ms":164.800,"p95_ms":293.192,"p99_ms":304.600,"throughput_mbps":155.600,"throughput_ops_per_sec":31.12,"errors":0,"duration_sec":10,...}
+    {"target":"strata","workload":"multipart-5g","object_size":"5MiB","concurrency":2,"run_id":2,"p50_ms":98.600,"p95_ms":311.669,"p99_ms":330.600,"throughput_mbps":154.810,"throughput_ops_per_sec":30.96,"errors":0,"duration_sec":10,...}
+    ```
+    Parser correctly anchored on `Report: PUTPART.` (throughput ~155 MB/s,
+    ~31 parts/s). part.conc auto-cap fired: log line shows `part.conc=4`
+    (default 20 → capped to parts=4). cleanup_workload ran between runs +
+    ceph df snapshot logged transient growth (`hdd ... 14.40 → 37.35 → 86.91
+    %RAW USED` across the runs — Strata's 5m GC interval means ceph df
+    won't show reclamation within the script's 30s cap; documented
+    limitation from US-003, surfaces clearly on the multipart shape).
+  - `--report` aggregator pivots multipart-5g into BOTH the flat summary
+    (one row: 155.20±0.394 MB/s, 317.6±13ms p99) AND the per-workload
+    concurrency-sweep grid (single conc=2 row; ratio/combined-sd are "—"
+    until rgw rows land). No code changes needed in `do_report` — the
+    workload-agnostic shape from US-004 picks up the new rows automatically.
+  - `bash -n` syntax OK; `make vet` green; `go test ./...` green
+    (pure shell story, no Go code changes).
+- **Learnings for future iterations:**
+  - **warp has TWO multipart subcommands**: `multipart` (single shared
+    multipart object across all threads; uses op-label `PUTPART` too) and
+    `multipart-put` (each thread runs its own create→parts→complete cycle).
+    PRD's "5 parallel multipart uploads" maps cleanly to `multipart-put`'s
+    semantics (5 threads, each looping its own multipart session). The
+    `multipart` subcommand would mean 5 threads adding parts to ONE shared
+    object — not what the PRD wants.
+  - **warp's `--part.concurrent` is independent of `--concurrent`**:
+    `--concurrent=N` controls the number of parallel multipart SESSIONS,
+    `--part.concurrent=M` controls in-session part-upload parallelism.
+    Default 20; auto-capped to `parts` to avoid warp's strict guard. For
+    a real bench (parts=80) the default 20 is fine — for smoke (parts=4)
+    the cap kicks in.
+  - **Op-label `PUTPART`**: confirmed in
+    `warp@v1.4.1/pkg/bench/multipart_put.go:130` as
+    `Operation{OpType: "PUTPART"}`. The existing `parse_warp_summary` is
+    fully reusable for multipart — just pass `"PUTPART"` as the op arg.
+    The Report-block shape (Average / Reqs / 50% / 99%) matches the PUT /
+    GET shape verbatim; no parser rewrite needed.
+  - **Smoke-shape ceph df transient growth + 5m GC interval**: the
+    multipart workload makes the GC delay very visible — 4GiB single-OSD
+    memstore went from 14% → 37% → 87% RAW USED across two short runs even
+    though buckets were dropped between them. Strata's `EnqueueChunkDeletion`
+    drops to GC queue but the GC worker fires only every
+    `STRATA_GC_INTERVAL` (default 5m). Real bench (60s × 3 runs × 5
+    sessions × 5GiB) on a 4GiB OSD would fill the cluster within run 1;
+    PRD's 300GB pre-flight is sized for a real 100+GB OSD lab cluster.
+    Document in US-010 methodology as a "small-OSD lab won't survive
+    multipart-5g; size the data backend OSD for ≥ 100GiB headroom"
+    caveat. Lab tuning note + observed-on-smoke result captured here.
+  - **warp `multipart-put` Report block shape under duration mode**:
+    matches the standard `put` / `get` shape — single `Report: PUTPART.`
+    block (no prepare-phase block like `get` has). Multipart-put doesn't
+    do a separate seed phase; it loops session create→parts→complete from
+    the start. So the existing op-anchored parser hits the block on first
+    match without false positives.
+---

@@ -109,8 +109,8 @@
         "Tests pass"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped: warp_multipart_one helper using warp `multipart-put` subcommand (op-label PUTPART confirmed in warp@v1.4.1 pkg/bench/multipart_put.go:130). workload_multipart_5g per-run loop (bucket_create → warp_multipart_one → cleanup_workload) — cleanup-between-runs mandatory (25GiB peak per run × 3 runs would otherwise burn ~75GiB before drop; PRD AC 150GB transient × 2 targets fits the 300GB pre-flight budget). dispatch_workload extended with multipart-5g case (--concurrency=N overrides default conc=5 via MULTIPART_5G_CONCURRENCY env). Env knobs: MULTIPART_5G_PART_SIZE (default 64MiB), MULTIPART_5G_PARTS (default 80 → 5GiB per upload), MULTIPART_5G_CONCURRENCY (default 5), MULTIPART_5G_PART_CONCURRENCY (default 20 — in-session part-upload parallelism; auto-capped to PARTS to avoid warp's 'part.concurrent can't be more than parts' guard on smoke shapes with PARTS<20), MULTIPART_5G_DURATION (default 60s). Makefile bench-rgw-comparison sequences multipart-5g after the US-005 large block. Locally verified: 20MiB/upload × conc=2 × 10s × 2 runs against strata target → 2 JSONL rows (PUTPART p99 304→330ms, ~155 MB/s, ~31 parts/s); --report aggregator pivots multipart-5g into both flat summary and per-workload grid; vet+test green. RGW-side deferred (US-001 rebootstrap-safety blocker documented in US-002 notes; will surface in US-012 ROADMAP entries)."
     },
     {
       "id": "US-007",
