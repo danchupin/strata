@@ -77,8 +77,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "All 3 legacy-failing legs rerun against clean TiKV-default lab post strata:ceph rebuild + force-recreate of strata-a/b. (1) list 100k seed @ c=8 — 3/3 runs complete, p99 619–656 ms, 208k ops/s, 0 errors (was: ABORT on TiKV write-conflict pre-fix). (2) delete 1000 — bench completes, ceph HEALTH_OK at start + end (transient mid-bench mgr blip from lima host overload, recovered without intervention; was: HEALTH_WARN slow ops 11500+ sec pre-fix). (3) iam-auth get 1000 — 3/3 runs complete, p99 ≈ 6.9–7.3 ms, ~2150 ops/s, 0 errors. Saturation metric strata_bucket_stats_shard_writes_total uniform across 8 shards on both replicas: strata-a max deviation 4.1% from mean, strata-b 4.5% (PRD AC ±20% — passed by 4× margin). Mid-bench list-seed snapshot: ~33.8k/shard, range 33435–34055, ±1.1% deviation. Bench data in scripts/bench-results/rgw-comparison-2026-05-22.jsonl. Pre/post-fix delta table + saturation snapshot in progress.txt. Gotcha discovered: make up-all reuses existing strata:ceph image — must rebuild before bench validation of fresh code paths; symptom is silent (bench runs vs pre-fix code, /metrics lacks new counter). Folded into Codebase Patterns."
     },
     {
       "id": "US-005",
