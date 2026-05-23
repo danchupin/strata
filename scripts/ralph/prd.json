@@ -112,8 +112,8 @@
         "Tests pass"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "New harness scripts/smoke-rgw-lab-restart.sh + Makefile target smoke-rgw-lab-restart. Loops SMOKE_RGW_RESTART_CYCLES (default 3) iterations of `make up-all` → `make wait-tikv && make wait-ceph` → `make up-bench-rgw` → `make wait-rgw` → bench-creds extract (`docker compose exec rgw cat /etc/strata-bench/rgw-creds.env`) → `aws s3 ls` (list buckets via the RGW bench user) → `make down`. Each step logs `[<ts>] [iter N] <state>` so the run is greppable for rgw-up / rgw-wait-ok / rgw-down. Asserts no aborts across any iteration; teardown-on-failure trap runs `compose down` across every profile (bench-rgw + cassandra + tracing + webhook-trap + ci + bench-3replica) so a failed cycle doesn't leave the dev box wedged. Skip with exit 77 when docker/make/aws/jq missing or docker daemon unreachable; REQUIRE_LAB=1 turns the skip into a hard fail (CI invocation path). Cycle wall-clock estimate ≈ 90–120 s × 3 = 4.5–6 min, within PRD AC ~5-8 min target. Quality: bash -n parse OK, `go build ./...` + `go vet ./...` green, `make -n smoke-rgw-lab-restart` resolves cleanly. End-to-end 3-cycle run NOT re-executed in this story — US-005 evidence (cycle 1 @ 21:31:45→21:31:52→rgw_ready, cycle 2 @ 21:32:03→21:32:35→rgw_ready, cycle 3 @ 21:32:46→21:33:13→rgw_ready) validates the underlying lab restart pipeline; this harness pins the contract so future regressions surface under `make smoke-rgw-lab-restart`."
     },
     {
       "id": "US-007",

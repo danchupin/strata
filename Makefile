@@ -9,7 +9,7 @@ COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 	smoke smoke-signed smoke-grafana smoke-lab-tikv \
 	smoke-drain-lifecycle smoke-drain-transparency smoke-drain-progress-ui smoke-cluster-weights \
 	smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale \
-	smoke-single-binary smoke-tikv-default-lab \
+	smoke-single-binary smoke-tikv-default-lab smoke-rgw-lab-restart \
 	race-soak race-soak-tikv lint-nginx-lab helm-lint \
 	bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi bench-rgw-comparison bench-rgw-comparison-with-cassandra \
 	docs-serve docs-build docs-openapi-copy clean
@@ -372,6 +372,19 @@ smoke-rebalance-scale:
 # SMOKE_TDL_*).
 smoke-tikv-default-lab:
 	bash scripts/smoke-tikv-default-lab.sh
+
+# RGW lab restart smoke (US-006 of ralph/p1-fixes). Loops 3 iterations of
+# `make up-all` → wait-tikv + wait-ceph → `make up-bench-rgw` → `make
+# wait-rgw` → `aws s3 ls` (list buckets via bench user creds extracted
+# from the running rgw container) → `make down`. Pins the contract that
+# the US-005 lab-restart fix (period reconcile + pool pre-create +
+# memstore↔mon-DB reset) keeps the restart loop green. Skips with exit
+# 77 when docker/make/aws/jq missing or the docker daemon is
+# unreachable; REQUIRE_LAB=1 turns the skip into a hard fail. See
+# scripts/smoke-rgw-lab-restart.sh for env knobs
+# (SMOKE_RGW_RESTART_CYCLES, RGW_ENDPOINT_URL, RGW_BENCH_CREDS_FILE).
+smoke-rgw-lab-restart:
+	bash scripts/smoke-rgw-lab-restart.sh
 
 # Single-binary dispatcher smoke (US-002 of ralph/single-binary).
 # Builds bin/strata and verifies post-consolidation shape: --help lists

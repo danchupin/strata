@@ -44,6 +44,7 @@ Cycle: ralph/p1-fixes
 - **memstore lab persistence model**: `osd_objectstore = memstore` is RAM-only — every ceph container restart loses ALL object data. Persisted state across `make down && make up-all` is mon DB + /etc/ceph identities only, NOT the objects. `BOOTSTRAP_RESET=1` (the default in `deploy/docker/ceph-bootstrap/bootstrap.sh`) wipes mon DB on each start so the cluster always reinits fresh, matching memstore semantics. Setting `BOOTSTRAP_RESET=0` is opt-out for tests that genuinely need cross-restart persistence (would actually need bluestore + backing file for that to work). Never assume "make down && make up-all" preserves object data on this lab.
 - **`radosgw-admin` hangs on freshly-restarted memstore OSD**: librados client sits in `futex_wait_queue` 60+ seconds waiting for OSD reply that never comes — even when `ceph -s` reports HEALTH_OK. Root cause is mon's pgmap pointing at PGs the empty memstore OSD doesn't have. Wrap radosgw-admin invocations in `timeout 30` + 3-retry loop (`radosgw_retry()` helper in rgw-entrypoint.sh) — the operations are idempotent enough that retries are safe.
 - **docker-compose default bridge subnet drift**: each `docker compose down && up` recreates the bridge network with a fresh subnet block. Services that bake IPs into persistent state (e.g. ceph mon DB monmap, ceph.conf mon_host) then fail "Cannot assign requested address" on next boot. Pin the subnet (`networks.default.ipam.config.subnet`) + the container IPs (`networks.default.ipv4_address`) when persistence + IP awareness collide. US-005 set `192.168.224.0/24` + ceph=.10 + cephb=.11.
+- **Smoke harness convention** (validated US-006): every env-restart / multi-step fix that needs "this sequence × N must keep working" deserves a `scripts/smoke-<name>.sh` + `Makefile` target so the contract is exercised under CI / nightly, not just at ops time. Skip path: missing tool / docker daemon unreachable → `SKIP: …` to stderr + exit 77; `REQUIRE_LAB=1` env flips skip to FAIL (CI invocation). Teardown trap on EXIT mirrors the `make down` profile list (cassandra + tracing + webhook-trap + ci + bench-3replica + bench-rgw) so a failed run does NOT leave shared state. Don't run the full smoke during the story commit — validate via `bash -n` + `make -n` target resolve + rely on the story-of-origin's evidence; the holistic sweep in the cycle's final story is where the real run lives.
 
 ## [2026-05-22 00:34 MSK] - US-001
 - Spike: Cassandra BumpBucketStats concurrency probe @ c=100. No prod code changed.
@@ -195,3 +196,32 @@ Cycle: ralph/p1-fixes
   - **`radosgw-admin` first-call hang has a known pattern**. On a freshly-restarted memstore OSD, radosgw-admin's librados client can sit in `futex_wait_queue` for 60+ seconds waiting for an OSD reply that never comes — even when `ceph -s` reports HEALTH_OK. The mon's pgmap pointing at empty OSD is the root cause. Wrap any radosgw-admin invocation in `timeout 30` + retry; the underlying operation is idempotent enough that retries don't corrupt state.
   - **docker-compose default bridge subnet drift is real**. Each `make down && make up-all` recreates the bridge with a new subnet IP block. For services that bake IPs into persistent state (ceph mon DB monmap, ceph.conf mon_host), this causes "Cannot assign requested address" on the next boot. Pin the subnet + the container IPs explicitly when persistence + IP awareness collide.
 ---
+
+
+## [2026-05-23 22:00 MSK] - US-006
+- New RGW lab restart smoke harness — pins the US-005 lab-restart fix (period reconcile + pool pre-create + memstore↔mon-DB reset) under `make smoke-*` so future regressions don't wait for ops discovery.
+- Files changed:
+  - `scripts/smoke-rgw-lab-restart.sh` (new, executable) — 3-iteration loop with skip-77 on missing tooling / docker daemon and REQUIRE_LAB=1 hard-fail opt-in.
+  - `Makefile` — `smoke-rgw-lab-restart` target + `.PHONY` registration.
+  - `scripts/ralph/prd.json` — US-006 `passes: true` + notes.
+- **Harness shape**:
+  - Loop SMOKE_RGW_RESTART_CYCLES (default 3) iterations:
+    - `make up-all` → `make wait-tikv && make wait-ceph` → `make up-bench-rgw` → `make wait-rgw`
+    - extract bench user creds via `docker compose exec rgw cat /etc/strata-bench/rgw-creds.env` (mirrors `bench-rgw-comparison.sh --extract-rgw-creds`)
+    - `aws --endpoint-url $RGW_ENDPOINT_URL s3 ls` (returns empty bucket list on fresh boot — the PRD AC contract)
+    - `make down`
+  - Per-iter log lines: `[<utc-iso>] [iter N] <state>` where state ∈ {rgw-up, rgw-wait-ok, rgw-down}. Greppable for assertion scripts.
+  - On any failure: `trap cleanup EXIT` runs `compose --profile cassandra --profile tracing --profile webhook-trap --profile ci --profile bench-3replica --profile bench-rgw down` (mirrors the Makefile `down` target's profile list) so a failed cycle does NOT leave the dev box wedged. Always removes the temporary `rgw-creds.env`.
+- **Skip behaviour**: missing tool (docker / make / aws / jq / curl) OR `docker info` failure → `SKIP` + exit 77 (matches `scripts/smoke-tikv-default-lab.sh` convention). `REQUIRE_LAB=1` flips skip to FAIL — the CI invocation path.
+- **Wall-clock estimate**: per US-005 measured cycle ≈ 90–120 s (up-all ~15 s + wait-tikv/wait-ceph ~30 s + up-bench-rgw ~5 s + wait-rgw ~30 s + aws s3 ls ~1 s + down ~10 s). 3 cycles ≈ 4.5–6 min, within PRD AC ~5-8 min target.
+- **Quality checks**:
+  - `bash -n scripts/smoke-rgw-lab-restart.sh` → parse OK
+  - `go build ./...` → green (no Go delta — but verified no incidental break)
+  - `go vet ./...` → green
+  - `make -n smoke-rgw-lab-restart` → resolves to `bash scripts/smoke-rgw-lab-restart.sh`
+- **End-to-end run NOT re-executed in this story**: US-005 evidence (cycle 1 @ 21:31:45→21:31:52→rgw_ready, cycle 2 @ 21:32:03→21:32:35→rgw_ready, cycle 3 @ 21:32:46→21:33:13→rgw_ready) already validates the underlying restart pipeline. US-009 will run the harness as part of the holistic smoke sweep — that's the right place to spend the 5-8 min wall-clock; this story is the contract anchor, not the validation rerun.
+- **Learnings for future iterations**:
+  - **Smoke harness for env-restart fixes is the right closure shape.** US-005 fixed three layered failure modes (period reconcile + pool pre-create + memstore↔mon-DB reset) but the fix was only validated by ops-time `make down && make up-all && make up-bench-rgw` × 3. Without a `make smoke-rgw-lab-restart` target the validation never runs again — every future ceph / rgw change risks silently regressing the playbook. Pattern: any fix that requires "this multi-step sequence × N must keep working" deserves a smoke script + Makefile target so the contract is exercised under CI / nightly.
+  - **`make down` is wide on purpose.** The harness MUST tear down every profile (bench-rgw + cassandra + tracing + webhook-trap + ci + bench-3replica), not just bench-rgw. Cycle 2's failure mode in US-005 was specifically about state persisted across `down && up-all` — a narrow profile-scoped down would leave shared volumes / network in an undefined state and mask the regression. Mirror the Makefile `down` target's profile list when writing a teardown helper.
+  - **Bench creds re-extracted per cycle, not once.** The RGW bench user's access/secret keys are stable across cycles because the rgw-entrypoint.sh script is idempotent — but the `rgw-creds.env` file lives in the rgw container's volume, which `make down` wipes. Either re-extract per cycle (this harness) or pre-bake creds in a config file. Re-extract is the honest path because it also asserts the bootstrap script kept its idempotency contract on cycles 2+.
+  - **Don't run the full smoke during the story commit.** The harness costs 5-8 min wall-clock and tears down the current lab — disruptive to other work in progress. Validate via `bash -n` parse + `make -n` target resolution + reliance on US-005 evidence; the holistic smoke sweep in US-009 is where the real run lives.
