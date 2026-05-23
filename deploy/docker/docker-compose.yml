@@ -37,6 +37,13 @@ services:
       MEMSTORE_BYTES: "4294967296"
       STRATA_POOL: strata.rgw.buckets.data
       STRATA_EXTRA_POOLS: "strata.rgw.buckets.ia strata.rgw.buckets.cold"
+    # Pin static IP so the persisted ceph mon DB (`/var/lib/ceph/mon`)
+    # binds to the same address on every cycle (US-005 of ralph/p1-fixes).
+    # Compose-assigned IPs vary by container start order, leaving the mon
+    # process stuck on "Cannot assign requested address" on cycle 2+.
+    networks:
+      default:
+        ipv4_address: 192.168.224.10
     volumes:
       - strata-ceph-etc:/etc/ceph
       - strata-ceph-data:/var/lib/ceph
@@ -63,6 +70,10 @@ services:
       MEMSTORE_BYTES: "4294967296"
       STRATA_POOL: strata.rgw.buckets.data
       STRATA_EXTRA_POOLS: "strata.rgw.buckets.ia strata.rgw.buckets.cold"
+    # Pin static IP — same reason as `ceph` above (US-005 of ralph/p1-fixes).
+    networks:
+      default:
+        ipv4_address: 192.168.224.11
     volumes:
       - strata-cephb-etc:/etc/ceph
       - strata-cephb-data:/var/lib/ceph
@@ -499,6 +510,20 @@ services:
       - "16686:16686"
       - "14250:14250"
     restart: unless-stopped
+
+networks:
+  # Pin the default bridge subnet so `make down && make up-all` cycles stay
+  # on the same IP range across runs (US-005 of ralph/p1-fixes). Without the
+  # pin, docker compose picks a fresh subnet each `up` and the persisted
+  # ceph mon DB rejects the new IP with "Cannot assign requested address",
+  # blocking cycle 2+ RGW bootstrap entirely (root cause of the
+  # cycle-2 rgw-entrypoint failure that US-005 also addresses via the
+  # period reconcile + pool pre-create fix). 192.168.224.0/24 picked to
+  # stay clear of common Lima/Colima host bridges (192.168.5.x, 192.168.80.x).
+  default:
+    ipam:
+      config:
+        - subnet: 192.168.224.0/24
 
 volumes:
   strata-cassandra-data:
