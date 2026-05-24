@@ -494,3 +494,135 @@ Cycle: ralph/auth-dx-trailer-lima
   workflow assumes the operator wires required checks before relying on
   the auto-merge gate.
 ---
+
+## 2026-05-24 — US-006
+- Final close-flip + smoke story for the `ralph/auth-dx-trailer-lima` cycle.
+- ROADMAP.md close-flip × 4 in one commit:
+  - **P3 line 254** "Per-bucket request signing keys (KMS-backed)" — Done.
+    Summary references US-001..US-002 + per-bucket DEK schema (3 columns:
+    `signing_wrapped_dek` / `signing_key_id` / `signing_key_created_at`) +
+    `meta.Store.{Get,Set,Delete}BucketSigningKey` + `caseBucketSigningKey`
+    contract + SigV4 middleware `BucketSigningResolver` (TTL via
+    `STRATA_DEK_CACHE_TTL`) + 3 admin endpoints
+    (`POST/GET/DELETE /admin/v1/buckets/{name}/signing-key{/rotate,/status,}`) +
+    `STRATA_KEY_MAX_AGE` enforcement (401 KeyExpired) + fail-closed semantics
+    (503 KMSUnavailable + Retry-After: 30, no IAM fallback) + LocalStack +
+    Vault Transit integration tests + operator runbook.
+  - **P3 line 260** "`bench-rgw-comparison` full 144-row sweep blocked by lima
+    capacity" — Done. Summary references US-005 + self-hosted runner
+    (`[self-hosted, strata-bench]`) + weekly cron (`0 4 * * 0`) + auto-PR
+    with markdown table + `BENCH_REGRESSION_THRESHOLD` 10% gate +
+    operator runbook `docs/site/content/developers/bench-runner-setup.md`.
+  - **P3 line 386** "Module tags cleanup" — Done. Summary references US-003 +
+    `internal/data/rados/cephimpl/` separate Go module (`module
+    github.com/danchupin/strata/cephimpl`) + `go.work` workspace MVS pitfall
+    + `replace google.golang.org/genproto` for split-monolithic conflict +
+    serverapp + bench branching via `//go:build ceph` files + hermetic check
+    `GOWORK=off go mod graph | grep -c go-ceph` → 0.
+  - **P3 line 498** "Streaming chunked-trailer non-sha256 algos" — Done.
+    Summary references US-004 + `selectTrailerHash` factory + all 4 algos
+    (sha256 + sha1 + crc32 + crc32c) via stdlib (`hash/crc32` Castagnoli
+    table + `crypto/sha1`) + shared chain-HMAC scheme + env-gated regen
+    test for fixtures.
+  - Each entry carries `(commit pending)` placeholder; SHA backfill on
+    `main` as fast-follow per cycle convention.
+- `tasks/prd-auth-dx-trailer-lima.md` removed via `git rm`.
+- Smoke validation (clean stack — `make down && make up-all && make
+  wait-tikv && make wait-ceph && make wait-strata-lab` first, since the
+  21h-old TiKV had wedged into a Raft heartbeat slow-op loop):
+  - `make smoke` — green (== smoke OK).
+  - `make smoke-signed` — green (requires `STRATA_AUTH_MODE=required` on
+    strata-a/b + `AWS_ACCESS_KEY_ID=admin AWS_SECRET_ACCESS_KEY=adminpass`
+    matching compose default static creds).
+  - aws-cli 2.22.35 4-algo chunked-trailer smoke (verifies US-004 end-to-
+    end): `for algo in sha256 sha1 crc32 crc32c; do
+    AWS_REQUEST_CHECKSUM_CALCULATION=when_required aws --endpoint-url
+    http://127.0.0.1:9999 s3api put-object --bucket trailertest --key
+    key-$algo --body /tmp/tt.txt --checksum-algorithm $algo; done` —
+    all 4 returned 200 + identical ETag.
+  - Hermetic default-build check (verifies US-003): `GOWORK=off go mod
+    graph | grep -c 'github.com/ceph/go-ceph'` → 0. Equivalent to the
+    PRD's "clean-clone" recipe (both compute the same answer: main
+    module's go.mod has no direct go-ceph require).
+  - `make docs-build` — green (94 pages, 0 errors via `hugo
+    --quiet`).
+  - `go vet ./...` + `make vet` — clean. cephimpl/ vet skipped locally
+    (no librados); CI exercises it via the `docker-build` + `e2e` jobs.
+  - `go test -race ./...` — green across the full main-module package
+    set (cassandra + memory + tikv contract suites; auth; adminapi;
+    serverapp; s3api; gc; lifecycle; rebalance; …). Duration ~3 min.
+- Smoke not executed locally this cycle (already validated in prior
+  cycles and/or not feasible in the current envelope):
+  - `make smoke-tikv-default-lab` — Scenario A burst-count gate fails
+    against a working LB (see new P3 Known-latent-bug entry below).
+    nginx logs confirm 10/10 burst requests round-robin successfully;
+    the assertion just greps `docker logs strata-{a,b}` for an
+    `/admin/v1/clusters` line that the logging middleware never emits.
+    Pre-existing harness bug, not regressed by this cycle.
+  - `make smoke-rgw-lab-restart` — covered by `ralph/p1-fixes` US-006
+    (commit `8c6d7be` shipped the 3-cycle smoke + green capture); not
+    re-run here to save the ~10 minute three-cycle teardown.
+  - `make test-integration` — Cassandra + LocalStack + Vault
+    testcontainers exercised in US-001 + US-002 of this cycle; not
+    re-run holistically (each takes 1-2 minutes per container start).
+  - cephimpl module under ceph docker image — covered by CI's `e2e`
+    job (`cd internal/data/rados/cephimpl && go test -tags integration
+    ./...`); no librados on the dev box.
+  - bench-rgw workflow manual trigger — needs a registered
+    `[self-hosted, strata-bench]` runner; operator-step per
+    `docs/site/content/developers/bench-runner-setup.md`.
+- New ROADMAP entry (Known latent bugs section):
+  - P3 "`scripts/smoke-tikv-default-lab.sh` Scenario A burst-count
+    assertion can never match" — surfaced during the US-006 smoke pass;
+    the assertion greps `docker logs strata-{a,b}` for per-request
+    `/admin/v1/clusters` access-log lines that `internal/logging.
+    Middleware` does not emit. PRD's "NO new ROADMAP entries" wish
+    yields to the CLAUDE.md `Discovering a new gap` invariant — gaps
+    surfaced during a cycle must be filed in the same commit. Fix
+    scope (suggested): either add a per-request slog InfoContext line
+    to the logging middleware (preferred — gives operators a real
+    stdout access log on every replica) and update the harness gate
+    to match the new shape, OR rewrite the assertion to inspect
+    `docker logs strata-lb-nginx` for the burst path.
+- Files: `ROADMAP.md` (4 close-flips + 1 new P3 entry — net change
+  -3 entries vs the PRD's wish of -4), `scripts/ralph/prd.json`
+  (US-006 passes=true), `scripts/ralph/progress.txt` (this block),
+  `tasks/prd-auth-dx-trailer-lima.md` (git rm).
+
+**Learnings for future iterations:**
+- The TiKV-default lab's `docker compose` services include
+  `strata-tikv-storage` as a long-running container. After ~21 hours
+  of uptime on the lima dev box it can wedge into a Raft slow-op loop
+  (`peer.rs:744` 200+ms tick handlers, "store messages" backlog) where
+  PUT requests through strata-a/b time out 504 even though `/healthz`
+  returns 200. Symptom: `docker ps` shows `strata-tikv-storage Up Less
+  than a second` (auto-restart loop). Fix is `make down && make up-all`
+  — full teardown of the volumes is NOT needed; the persisted Raft state
+  recovers cleanly on a fresh container.
+- `make smoke-signed` runs against the same compose default but with
+  `STRATA_AUTH_MODE=required` recreated on strata-a/b + the matching
+  `AWS_ACCESS_KEY_ID=admin AWS_SECRET_ACCESS_KEY=adminpass` (compose
+  default static creds). Recreate via `STRATA_AUTH_MODE=required
+  docker compose up -d strata-a strata-b strata-lb-nginx
+  --force-recreate` — the LB needs the recreate too so it picks up
+  fresh upstream endpoints.
+- The "discovered gap" invariant in `CLAUDE.md` (`## Roadmap
+  maintenance` — Every commit that surfaces something not yet on the
+  roadmap MUST add a new entry) overrides any per-cycle PRD wish like
+  "NO new ROADMAP entries". Better to file a P3 in the same commit
+  than to suppress visibility into a latent harness bug.
+- `internal/logging.Middleware` (`internal/logging/logging.go:103`)
+  does NOT emit a per-request stdout log line — it only attaches a
+  `request_id` to the context. If you want a per-request access log
+  in stdout for operator debugging, add a `slog.InfoContext(ctx,
+  "request", "method", r.Method, "path", r.URL.Path, "status", code,
+  "duration_ms", elapsed)` call from a `responseRecorder` shim. Any
+  smoke harness greping `docker logs <strata>` for `/admin/v1/...`
+  will fail until that emission exists.
+- aws-cli 2.22.35 `s3api put-object --checksum-algorithm <algo>`
+  drives the chunked-trailer codepath when
+  `AWS_REQUEST_CHECKSUM_CALCULATION=when_required` is set; without
+  the env, aws-cli falls back to the legacy non-trailer signing for
+  many object sizes. Useful seam to verify trailer-side changes
+  end-to-end on the lab.
+---
