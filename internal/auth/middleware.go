@@ -10,6 +10,11 @@ import (
 type Middleware struct {
 	Store CredentialsStore
 	Mode  Mode
+	// BucketSigning enables per-bucket signing-key SigV4 derivation
+	// (US-001 auth-dx-trailer-lima). When non-nil and the bucket has a
+	// per-bucket key set in meta, that DEK replaces cred.Secret in the
+	// SigV4 chain; otherwise the IAM access-key path is used as today.
+	BucketSigning *BucketSigningResolver
 }
 
 type DenyHandler func(w http.ResponseWriter, r *http.Request, err error)
@@ -69,12 +74,30 @@ func (m *Middleware) validateHeader(r *http.Request) (*AuthInfo, error) {
 		return nil, err
 	}
 
+	secret := cred.Secret
+	if m.BucketSigning != nil {
+		dek, ok, derr := m.BucketSigning.ResolveSecret(r.Context(), r)
+		if derr != nil {
+			return nil, derr
+		}
+		if ok {
+			// Per-bucket DEK is the raw 32-byte key from
+			// kms.Provider.GenerateDataKey. SigV4's deriveSigningKey
+			// expects a string secret — encode as hex so the chain
+			// stays deterministic regardless of the underlying byte
+			// distribution. Operators sign with the same hex
+			// representation on the client side.
+			secret = encodeDEKAsSecret(dek)
+			zero(dek)
+		}
+	}
+
 	bodyHash := r.Header.Get("X-Amz-Content-Sha256")
 	if bodyHash == "" {
 		bodyHash = unsignedBody
 	}
 	canonical := canonicalRequest(r, parsed.SignedHeaders, bodyHash)
-	expected := computeSignature(cred.Secret, parsed, reqDate, canonical)
+	expected := computeSignature(secret, parsed, reqDate, canonical)
 	if !constantTimeEqual(expected, parsed.Signature) {
 		return nil, ErrSignatureInvalid
 	}
@@ -85,7 +108,7 @@ func (m *Middleware) validateHeader(r *http.Request) (*AuthInfo, error) {
 	}
 
 	if bodyHash == streamingBody || bodyHash == streamingBodyTrailer {
-		signingKey := deriveSigningKey(cred.Secret, parsed.Date, parsed.Region, parsed.Service)
+		signingKey := deriveSigningKey(secret, parsed.Date, parsed.Region, parsed.Service)
 		scope := credentialScope(parsed.Date, parsed.Region, parsed.Service)
 		if bodyHash == streamingBodyTrailer {
 			// US-009 sha256-only scope. X-Amz-Trailer carries the algo

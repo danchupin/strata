@@ -28,3 +28,87 @@ Cycle: ralph/auth-dx-trailer-lima
 - **Lima envelope CI (US-005)**: self-hosted runner (`[self-hosted, strata-bench]`) provisioned by operator (16GB RAM, 200GB disk, Ubuntu 22.04, Docker 24+). Weekly cron `0 4 * * 0` (Sun 04:00 UTC) + manual `workflow_dispatch`. Auto-PR with markdown table from jsonl; auto-merge if max p99 regression < 10%, else manual review.
 - **ROADMAP discipline (US-006)**: 4 entries close (lines 254 + 260 + 386 + 478) — no new entries. `(commit pending)` placeholder; SHA backfill on main as fast-follow commit (mirrors precedent).
 
+## 2026-05-24 — US-001
+- Per-bucket signing key persisted on bucket meta: new `meta.ErrBucketSigningKeyNotSet`
+  sentinel, 3-method surface `GetBucketSigningKey/SetBucketSigningKey/DeleteBucketSigningKey`
+  implemented across memory + cassandra + tikv in lockstep.
+- Cassandra: 3 ALTERs on `buckets` (`signing_wrapped_dek blob`, `signing_key_id text`,
+  `signing_key_created_at timestamp`). Get reads the trio with `errors.Is(gocql.ErrNotFound)`
+  → ErrBucketNotFound, empty trio → ErrBucketSigningKeyNotSet. Set/Delete LWT (`IF EXISTS`)
+  for Paxos lineage parity with SetBucketVersioning.
+- TiKV: 3 fields added on `meta.Bucket` (json:omitempty); existing `updateBucket` helper
+  handles persistence — JSON marshal is the codec.
+- Memory: in-struct fields; locker scoped Get/Set/Delete; idempotent re-delete.
+- Contract test `caseBucketSigningKey` added: absent → set → roundtrip → re-set bumps
+  createdAt → delete → absent → missing-bucket paths. Memory backend passes; cassandra
+  + tikv exercised under -tags integration.
+- DEK cache (`internal/auth/bucket_signing.go`): sync.Map keyed on bucket, TTL via
+  `time.Now() + ttl`; plaintext zeroed via `subtle.ConstantTimeCopy(1, b, zeros)` on
+  evict / invalidate / replace. `NewDEKCache(ttl)` clamped via serverapp's `dekCacheTTL`
+  helper to [30s, 1h]. Test clock injectable via SetClockForTest.
+- BucketSigningResolver: composes Store + KMS + Cache + counter + bucket extractor.
+  ResolveSecret returns (nil, false, nil) on absent/IAM-only path; (dek, true, nil) on
+  hit; (nil, false, err) on KMS error so caller can surface 503/401. Default bucket
+  extractor: path-style first segment; skips `/admin/`, `/healthz`, `/readyz`,
+  `/metrics`.
+- Auth middleware (`internal/auth/middleware.go`): new `BucketSigning` field. When
+  resolver returns a DEK, `secret = hex(DEK)` replaces `cred.Secret` for both the
+  request-canonical signature and the chunked streaming signing key derivation.
+  Plaintext DEK zeroed after `encodeDEKAsSecret`.
+- HTTP mapping (`internal/s3api/errors.go`): new `ErrKMSUnavailable`(503 + Retry-After:30),
+  `ErrKMSKeyDenied`(401), `ErrKMSKeyTampered`(401). `WriteAuthDenied` routes via
+  errors.Is on `auth.ErrKMS{Unavailable,Denied,Tampered}`.
+- Counter `strata_kms_decrypt_total{provider, outcome}` added to
+  `internal/metrics/metrics.go` with outcomes ∈ {cache_hit, cache_miss_ok,
+  unavailable, denied, tampered}; provider label derived in serverapp via type-assert
+  on `*kms.AWSKMSProvider | *kms.VaultProvider | *kms.LocalHSMProvider`.
+- ServerApp wiring (`internal/serverapp/serverapp.go` +
+  `internal/serverapp/bucket_signing.go`): when `kmsProvider != nil`,
+  `mw.BucketSigning = buildBucketSigningResolver(metaStore, kmsProvider, logger)`.
+  KMS-less deployments stay zero-impact (resolver nil → middleware short-circuits).
+- LocalStack KMS integration test (`internal/crypto/kms/aws_integration_test.go`,
+  build-tag integration): pinned `localstack/localstack:3.8`, CreateKey symmetric
+  + roundtrip + wrong-key-id error path.
+- Vault Transit dev-mode integration test (`internal/crypto/kms/vault_integration_test.go`,
+  build-tag integration): pinned `hashicorp/vault:1.15`, AppRole bootstrap inside the
+  test (transit engine enable → CMK → approle enable → policy → role → role-id +
+  secret-id mint), then `kms.NewVaultProvider(...).{GenerateDataKey, UnwrapDEK}`.
+- Env-vars docs: `STRATA_DEK_CACHE_TTL` documented in
+  `docs/site/content/reference/env-vars.md` (default 5m, range [30s, 1h]).
+- Quality: `go vet ./...` + `go test -race ./internal/meta/... ./internal/auth/...
+  ./internal/crypto/kms/... ./internal/serverapp/... ./internal/s3api/...` all green;
+  full unit-test suite passes.
+- Files: `internal/meta/store.go`, `internal/meta/memory/store.go`,
+  `internal/meta/cassandra/store.go`, `internal/meta/cassandra/schema.go`,
+  `internal/meta/tikv/buckets.go`, `internal/meta/storetest/contract.go`,
+  `internal/auth/bucket_signing.go`, `internal/auth/bucket_signing_test.go`,
+  `internal/auth/middleware.go`, `internal/auth/middleware_bucket_signing_test.go`,
+  `internal/metrics/metrics.go`, `internal/s3api/errors.go`,
+  `internal/serverapp/serverapp.go`, `internal/serverapp/bucket_signing.go`,
+  `internal/crypto/kms/aws_integration_test.go`,
+  `internal/crypto/kms/vault_integration_test.go`,
+  `docs/site/content/reference/env-vars.md`.
+
+**Learnings for future iterations:**
+- meta.Bucket gains 3 fields → TiKV codec is JSON marshal, so persistence is free.
+  Cassandra needs explicit ALTER + Get/Set column selection. Memory backend stores
+  meta.Bucket directly.
+- LWT (`UPDATE ... IF EXISTS`) on Cassandra is required for the signing-key trio
+  to participate in the same Paxos lineage as CreateBucket — mirrors the
+  SetBucketVersioning lesson (CLAUDE.md captures it).
+- `subtle.ConstantTimeCopy(1, dst, src)` is the canonical zero-out for sensitive
+  byte slices on eviction.
+- HTTP middleware deny handler `s3api.WriteAuthDenied` switches on `err.Error()`
+  string equality for legacy auth errors AND `errors.Is` for new typed sentinels —
+  mixing both is the established pattern.
+- Per-bucket signing key shape: SigV4 derives signing key from
+  `hex(DEK)`-as-secret. Operators sign with the same hex on the client side; AWS
+  CLI accepts arbitrary `aws_secret_access_key` so this is wire-compatible.
+- Testcontainers v0.41.0 LocalStack image: pin `localstack/localstack:3.8` —
+  `:latest` flips behavior periodically. Health endpoint
+  `/_localstack/health` returns 200 once `SERVICES=kms` is up.
+- Vault dev-mode in container: pass `Cmd: ["server", "-dev"]` + env
+  `VAULT_DEV_ROOT_TOKEN_ID=root` + `VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200`.
+  Wait via HTTP 200/429/472/473 — Vault sealed/standby surfaces these.
+---
+

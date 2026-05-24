@@ -80,6 +80,16 @@ var (
 	ErrInvalidArgument     = APIError{Code: "InvalidArgument", Message: "Invalid argument", Status: http.StatusBadRequest}
 	ErrNotImplemented      = APIError{Code: "NotImplemented", Message: "A header you provided implies functionality that is not implemented", Status: http.StatusNotImplemented}
 	ErrInternal            = APIError{Code: "InternalError", Message: "We encountered an internal error", Status: http.StatusInternalServerError}
+	// ErrKMSUnavailable — per-bucket signing-key DEK unwrap hit a transient
+	// KMS error (US-002 fail-closed). Operator must rotate or wait for the
+	// KMS to recover; Retry-After:30 hints client backoff.
+	ErrKMSUnavailable      = APIError{Code: "KMSUnavailable", Message: "KMS provider is currently unavailable", Status: http.StatusServiceUnavailable}
+	// ErrKMSKeyDenied — KMS authoritatively rejected the unwrap (wrong
+	// CMK ARN / IAM-policy deny). Operator must rotate to recover.
+	ErrKMSKeyDenied        = APIError{Code: "KeyDenied", Message: "KMS denied unwrap of per-bucket signing key", Status: http.StatusUnauthorized}
+	// ErrKMSKeyTampered — wrapped-DEK HMAC mismatch on LocalHSMProvider
+	// (or equivalent integrity check on a future provider).
+	ErrKMSKeyTampered      = APIError{Code: "KeyTampered", Message: "Per-bucket signing key wrapped DEK is corrupt", Status: http.StatusUnauthorized}
 	// ErrQuotaExceeded is the gateway-level response for any write that
 	// breaches a configured BucketQuota or UserQuota (US-006). HTTP 403 with
 	// the non-AWS S3 code "QuotaExceeded" — RGW-compatible per ROADMAP so
@@ -153,6 +163,14 @@ func WriteAuthDenied(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case err == nil:
 		apiErr = ErrAccessDenied
+	case errors.Is(err, auth.ErrKMSUnavailable):
+		// 503 + Retry-After:30 per US-002 fail-closed semantics.
+		w.Header().Set("Retry-After", "30")
+		apiErr = ErrKMSUnavailable
+	case errors.Is(err, auth.ErrKMSTampered):
+		apiErr = ErrKMSKeyTampered
+	case errors.Is(err, auth.ErrKMSDenied):
+		apiErr = ErrKMSKeyDenied
 	default:
 		switch err.Error() {
 		case "signature does not match":

@@ -326,6 +326,14 @@ var (
 		},
 		[]string{"shard"},
 	)
+
+	KMSDecryptTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_kms_decrypt_total",
+			Help: "Per-bucket signing-key DEK unwrap attempts on the SigV4 hot path (US-001 auth-dx-trailer-lima). provider ∈ {aws_kms, vault, local_hsm}; outcome ∈ {cache_hit, cache_miss_ok, unavailable, denied, tampered}.",
+		},
+		[]string{"provider", "outcome"},
+	)
 )
 
 func Register() {
@@ -365,6 +373,7 @@ func Register() {
 		DrainProgressProbeErrorsTotal,
 		AdminConfigEndpointErrorsTotal,
 		BucketStatsShardWritesTotal,
+		KMSDecryptTotal,
 	)
 }
 

@@ -126,6 +126,12 @@ var (
 	// not match the underlying cluster's erasure-code capability
 	// (US-007). Surfaced as HTTP 409 by the admin handler.
 	ErrInconsistentECPolicy    = errors.New("inconsistent EC policy")
+	// ErrBucketSigningKeyNotSet signals GetBucketSigningKey against a
+	// bucket that has no per-bucket signing key persisted (US-001
+	// auth-dx-trailer-lima). Callers must treat this as "not set" and
+	// fall through to the IAM access-key SigV4 path — per-bucket signing
+	// keys are OPT-IN per bucket.
+	ErrBucketSigningKeyNotSet  = errors.New("no per-bucket signing key set")
 )
 
 const (
@@ -535,6 +541,16 @@ type Bucket struct {
 	// bucket has no EC declaration (RADOS pool config still decides the
 	// actual encoding regardless).
 	ECPolicy *ECPolicy `json:"ec_policy,omitempty"`
+	// SigningWrappedDEK / SigningKeyID / SigningKeyCreatedAt are the
+	// per-bucket signing-key envelope (US-001 auth-dx-trailer-lima):
+	// SigningWrappedDEK is the KMS-wrapped DEK bytes (opaque),
+	// SigningKeyID is the KMS key handle used to wrap (and required to
+	// unwrap), SigningKeyCreatedAt is the wall-clock time the operator
+	// rotated. Absence (zero values) means the bucket has no per-bucket
+	// signing key and SigV4 falls through to the IAM access-key path.
+	SigningWrappedDEK    []byte    `json:"signing_wrapped_dek,omitempty"`
+	SigningKeyID         string    `json:"signing_key_id,omitempty"`
+	SigningKeyCreatedAt  time.Time `json:"signing_key_created_at,omitempty"`
 }
 
 // ECPolicy mirrors data.ECParams at the bucket-declaration layer. K data
@@ -1126,6 +1142,19 @@ type Store interface {
 	// loaded inline by GetBucket — no separate Get/Delete needed
 	// (US-001 effective-placement).
 	SetBucketPlacementMode(ctx context.Context, name, mode string) error
+
+	// Per-bucket signing key CRUD (US-001 auth-dx-trailer-lima). Stored
+	// inline on the buckets row as (wrapped_dek, key_id, created_at).
+	// GetBucketSigningKey returns ErrBucketSigningKeyNotSet when no key
+	// is persisted so callers fall through to the IAM access-key SigV4
+	// path; per-bucket signing keys are OPT-IN per bucket. SetBucketSigningKey
+	// overwrites the row and bumps SigningKeyCreatedAt to time.Now().UTC()
+	// — operators rotate by calling this with a fresh
+	// kms.Provider.GenerateDataKey output.
+	// DeleteBucketSigningKey clears the trio (falls back to IAM auth).
+	GetBucketSigningKey(ctx context.Context, name string) (wrapped []byte, keyID string, createdAt time.Time, err error)
+	SetBucketSigningKey(ctx context.Context, name string, wrapped []byte, keyID string) error
+	DeleteBucketSigningKey(ctx context.Context, name string) error
 
 	// Bucket EC policy CRUD (US-007 EC-aware manifests). Persisted as a
 	// JSON blob on the buckets row so GetBucket loads it inline — no

@@ -72,6 +72,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"BucketPlacementRoundTrip", caseBucketPlacement},
 		{"BucketPlacementMode", casePlacementMode},
 		{"BucketECPolicyRoundTrip", caseBucketECPolicy},
+		{"BucketSigningKey", caseBucketSigningKey},
 		{"ClusterStateRoundTrip", caseClusterState},
 		{"ClusterStateModes", caseClusterStateModes},
 		{"ClusterStateWeights", caseClusterStateWeights},
@@ -4086,6 +4087,83 @@ func caseObjectReplicationStatus(t *testing.T, s meta.Store) {
 	// Missing object.
 	if err := s.SetObjectReplicationStatus(ctx, b.ID, "ghost", "", "PENDING"); err != meta.ErrObjectNotFound {
 		t.Errorf("set missing: got %v want ErrObjectNotFound", err)
+	}
+}
+
+// caseBucketSigningKey exercises per-bucket signing-key CRUD (US-001
+// auth-dx-trailer-lima): absent → set → get round-trip → re-set bumps
+// createdAt → delete → absent. Missing-bucket paths surface
+// ErrBucketNotFound.
+func caseBucketSigningKey(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	if _, err := s.CreateBucket(ctx, "sigbkt", "owner-sk", "STANDARD"); err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+
+	// Absent on fresh bucket.
+	if _, _, _, err := s.GetBucketSigningKey(ctx, "sigbkt"); err != meta.ErrBucketSigningKeyNotSet {
+		t.Fatalf("fresh GetBucketSigningKey: got %v want ErrBucketSigningKeyNotSet", err)
+	}
+
+	// Round-trip.
+	wrapped := []byte{0x01, 0x02, 0x03, 0x04}
+	if err := s.SetBucketSigningKey(ctx, "sigbkt", wrapped, "kms-key-1"); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	gotWrapped, gotKeyID, gotCreated, err := s.GetBucketSigningKey(ctx, "sigbkt")
+	if err != nil {
+		t.Fatalf("get after set: %v", err)
+	}
+	if string(gotWrapped) != string(wrapped) {
+		t.Fatalf("wrapped roundtrip: got %x want %x", gotWrapped, wrapped)
+	}
+	if gotKeyID != "kms-key-1" {
+		t.Fatalf("keyID roundtrip: got %q want %q", gotKeyID, "kms-key-1")
+	}
+	if gotCreated.IsZero() {
+		t.Fatalf("createdAt: zero after set")
+	}
+
+	// Re-set bumps createdAt.
+	time.Sleep(5 * time.Millisecond)
+	wrapped2 := []byte{0xAA, 0xBB, 0xCC}
+	if err := s.SetBucketSigningKey(ctx, "sigbkt", wrapped2, "kms-key-2"); err != nil {
+		t.Fatalf("re-set: %v", err)
+	}
+	gotWrapped2, gotKeyID2, gotCreated2, err := s.GetBucketSigningKey(ctx, "sigbkt")
+	if err != nil {
+		t.Fatalf("get after re-set: %v", err)
+	}
+	if string(gotWrapped2) != string(wrapped2) {
+		t.Fatalf("re-set wrapped: got %x want %x", gotWrapped2, wrapped2)
+	}
+	if gotKeyID2 != "kms-key-2" {
+		t.Fatalf("re-set keyID: got %q", gotKeyID2)
+	}
+	if !gotCreated2.After(gotCreated) {
+		t.Fatalf("re-set createdAt did not advance: %v -> %v", gotCreated, gotCreated2)
+	}
+
+	// Delete + idempotent re-delete.
+	if err := s.DeleteBucketSigningKey(ctx, "sigbkt"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if err := s.DeleteBucketSigningKey(ctx, "sigbkt"); err != nil {
+		t.Fatalf("idempotent re-delete: %v", err)
+	}
+	if _, _, _, err := s.GetBucketSigningKey(ctx, "sigbkt"); err != meta.ErrBucketSigningKeyNotSet {
+		t.Fatalf("post-delete: got %v want ErrBucketSigningKeyNotSet", err)
+	}
+
+	// Missing bucket.
+	if _, _, _, err := s.GetBucketSigningKey(ctx, "no-such-bkt"); err != meta.ErrBucketNotFound {
+		t.Fatalf("missing GetBucketSigningKey: got %v want ErrBucketNotFound", err)
+	}
+	if err := s.SetBucketSigningKey(ctx, "no-such-bkt", wrapped, "kms-key-x"); err != meta.ErrBucketNotFound {
+		t.Fatalf("missing SetBucketSigningKey: got %v want ErrBucketNotFound", err)
+	}
+	if err := s.DeleteBucketSigningKey(ctx, "no-such-bkt"); err != meta.ErrBucketNotFound {
+		t.Fatalf("missing DeleteBucketSigningKey: got %v want ErrBucketNotFound", err)
 	}
 }
 

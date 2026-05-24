@@ -142,6 +142,7 @@ Precedence inside the master-key resolver: `STRATA_SSE_MASTER_KEYS` >
 | `STRATA_KMS_LOCAL_HSM_SEED` | empty | hex 32 | Deterministic local HSM stand-in for tests. Internal — debug only. |
 | `STRATA_KMS_VAULT_ADDR` | empty | URL | Vault Transit endpoint. |
 | `STRATA_KMS_VAULT_PATH` | empty | string | Vault Transit mount path (e.g. `transit`). |
+| `STRATA_DEK_CACHE_TTL` | `5m` | Go duration ∈ [`30s`, `1h`] | TTL for the per-bucket signing-key DEK cache on the SigV4 hot path (US-001 auth-dx-trailer-lima). Plaintext DEK is zeroed via `subtle.ConstantTimeCopy` on eviction. Out-of-range values clamp + WARN. |
 
 ## GC worker (`--workers=gc`)
 
