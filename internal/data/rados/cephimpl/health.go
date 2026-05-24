@@ -1,6 +1,4 @@
-//go:build ceph
-
-package rados
+package cephimpl
 
 import (
 	"context"
@@ -10,52 +8,40 @@ import (
 	"sort"
 
 	"github.com/danchupin/strata/internal/data"
+	"github.com/danchupin/strata/internal/data/rados"
 )
 
 // radosCheckCap is the maximum number of MonCommand `status` check
-// summaries appended to DataHealthReport.Warnings per cluster. The wire
-// payload stays small while still giving the operator enough fingerprint
-// to drill into HEALTH_WARN/HEALTH_ERR via `ceph status` directly.
+// summaries appended to DataHealthReport.Warnings per cluster.
 const radosCheckCap = 5
 
-// DataHealth implements data.HealthProbe (US-002 web-ui-storage-status).
-// Walks the configured classes map, groups by unique (cluster, pool, ns),
-// reports per-pool stats via IOContext.GetPoolStats(), and folds the
-// cluster-wide MonCommand `status` JSON's HEALTH_WARN/HEALTH_ERR checks
-// into Warnings (up to radosCheckCap entries per cluster).
-//
-// Failure-isolated: a single pool / cluster error degrades just that row
-// and adds a warning; the rest of the report still renders so the storage
-// page can show partial state instead of bouncing the operator off a 502.
+// DataHealth implements data.HealthProbe.
 func (b *Backend) DataHealth(ctx context.Context) (*data.DataHealthReport, error) {
 	if b == nil {
 		return nil, errors.New("rados backend closed")
 	}
 
-	pending := buildPendingPoolStatuses(b.classes, b.clusters)
+	pending := rados.BuildPendingPoolStatuses(b.classes, b.clusters)
 	pools := make([]data.PoolStatus, 0, len(pending))
 	var warnings []string
 	clusters := make(map[string]struct{})
 	for _, p := range pending {
-		k := p.group
-		ps := p.status
-		clusters[k.cluster] = struct{}{}
-		ioctx, err := b.ioctx(ctx, k.cluster, k.pool, k.ns)
+		clusters[p.Group.Cluster] = struct{}{}
+		ps := p.Status
+		ioctx, err := b.ioctx(ctx, p.Group.Cluster, p.Group.Pool, p.Group.NS)
 		if err != nil {
 			ps.State = "error"
-			warnings = append(warnings, fmt.Sprintf("pool %s/%s: %v", k.cluster, k.pool, err))
+			warnings = append(warnings, fmt.Sprintf("pool %s/%s: %v", p.Group.Cluster, p.Group.Pool, err))
 			pools = append(pools, ps)
 			continue
 		}
 		stat, err := ioctx.GetPoolStats()
 		if err != nil {
 			ps.State = "error"
-			warnings = append(warnings, fmt.Sprintf("pool %s/%s: stats: %v", k.cluster, k.pool, err))
+			warnings = append(warnings, fmt.Sprintf("pool %s/%s: stats: %v", p.Group.Cluster, p.Group.Pool, err))
 			pools = append(pools, ps)
 			continue
 		}
-		// PRD: BytesUsed = Num_kb * 1024 (Num_bytes is unreliable on some
-		// older Ceph builds; Num_kb is the documented stable contract).
 		ps.BytesUsed = stat.Num_kb * 1024
 		ps.ChunkCount = stat.Num_objects
 		ps.State = "ok"
@@ -78,10 +64,6 @@ func (b *Backend) DataHealth(ctx context.Context) (*data.DataHealthReport, error
 	}, nil
 }
 
-// clusterStatusWarnings runs `ceph status --format json` via MonCommand on
-// a per-cluster Conn (any pool slot — MonCommand is conn-scoped, not
-// pool-scoped) and returns up to radosCheckCap warning lines. HEALTH_OK
-// returns an empty slice.
 func (b *Backend) clusterStatusWarnings(ctx context.Context, cluster string) []string {
 	b.mu.Lock()
 	p, ok := b.pools[cluster]
@@ -145,34 +127,24 @@ var _ data.HealthProbe = (*Backend)(nil)
 var _ data.ClusterStatsProbe = (*Backend)(nil)
 var _ data.ClusterObjectCountProbe = (*Backend)(nil)
 
-// ClusterObjectCount implements data.ClusterObjectCountProbe (US-001
-// drain-progress-physical). Walks the configured classes map, filters by
-// clusterID, opens an ioctx per unique (cluster, pool, namespace), and
-// sums Num_objects across pools via the existing GetPoolStats path
-// (mirrors DataHealth so we reuse the same code path proven against
-// pool-stat field-name churn). Returns (0, err) on any per-pool failure
-// — the caller surfaces null, not a partial sum.
+// ClusterObjectCount implements data.ClusterObjectCountProbe.
 func (b *Backend) ClusterObjectCount(ctx context.Context, clusterID string) (int64, error) {
 	if b == nil {
 		return 0, errors.New("rados backend closed")
 	}
 	if clusterID == "" {
-		clusterID = DefaultCluster
+		clusterID = rados.DefaultCluster
 	}
 	if _, ok := b.clusters[clusterID]; !ok {
 		return 0, fmt.Errorf("rados: unknown cluster %q", clusterID)
 	}
 	type poolKey struct{ pool, ns string }
-	// First pass: collect pools from classes that explicitly target this
-	// cluster. This is the canonical path when the operator's
-	// STRATA_RADOS_CLASSES env names per-cluster classes (e.g.
-	// STANDARD@cephb=cephb:strata.rgw.buckets.data).
 	targeted := make(map[poolKey]struct{})
 	allPools := make(map[poolKey]struct{})
 	for _, spec := range b.classes {
 		c := spec.Cluster
 		if c == "" {
-			c = DefaultCluster
+			c = rados.DefaultCluster
 		}
 		k := poolKey{pool: spec.Pool, ns: spec.Namespace}
 		allPools[k] = struct{}{}
@@ -180,17 +152,12 @@ func (b *Backend) ClusterObjectCount(ctx context.Context, clusterID string) (int
 			targeted[k] = struct{}{}
 		}
 	}
-	// Fallback: lab + most prod setups use uniform pool layout across
-	// clusters (ceph-bootstrap creates the same pool names on every
-	// cluster). When no class targets clusterID, query all known pool
-	// names against this cluster directly — ioctx() will surface a
-	// clear error if a pool genuinely doesn't exist on the target.
 	pools := targeted
 	if len(pools) == 0 {
 		pools = allPools
 	}
 	if len(pools) == 0 {
-		return 0, nil // no class config at all → nothing to count
+		return 0, nil
 	}
 	var total int64
 	for k := range pools {
@@ -207,32 +174,22 @@ func (b *Backend) ClusterObjectCount(ctx context.Context, clusterID string) (int
 	return total, nil
 }
 
-// ClusterStats implements data.ClusterStatsProbe (US-006 placement-rebalance).
-// Runs `ceph df --format json` via MonCommand on the per-cluster Conn and
-// returns total_used_bytes / total_bytes from the `stats` block. The
-// rebalance worker uses this to refuse moves into clusters above the
-// configured fill ceiling.
+// ClusterStats implements data.ClusterStatsProbe.
 func (b *Backend) ClusterStats(ctx context.Context, clusterID string) (int64, int64, error) {
 	if b == nil {
 		return 0, 0, errors.New("rados backend closed")
 	}
 	if clusterID == "" {
-		clusterID = DefaultCluster
+		clusterID = rados.DefaultCluster
 	}
 	if _, ok := b.clusters[clusterID]; !ok {
 		return 0, 0, fmt.Errorf("rados: unknown cluster %q", clusterID)
 	}
-	// Force a Conn dial via a per-cluster ioctx against any pool we know
-	// about — MonCommand needs an open Conn but does not care which pool.
-	// First pass: class targeted at this cluster. Fallback: any class's
-	// pool name (lab + most prod setups have uniform pool layout across
-	// clusters via ceph-bootstrap). ioctx() surfaces a clear error if a
-	// pool genuinely doesn't exist on the target cluster.
 	var seedPool, seedNS string
 	for _, spec := range b.classes {
 		c := spec.Cluster
 		if c == "" {
-			c = DefaultCluster
+			c = rados.DefaultCluster
 		}
 		if c == clusterID {
 			seedPool = spec.Pool
@@ -241,9 +198,6 @@ func (b *Backend) ClusterStats(ctx context.Context, clusterID string) (int64, in
 		}
 	}
 	if seedPool == "" {
-		// No class targets this cluster. Pick any class's pool name as
-		// the seed — MonCommand still works once Conn is dialed (open
-		// ioctx against a pool that exists on the target cluster).
 		for _, spec := range b.classes {
 			if spec.Pool != "" {
 				seedPool = spec.Pool
@@ -280,13 +234,6 @@ func (b *Backend) ClusterStats(ctx context.Context, clusterID string) (int64, in
 	if err := json.Unmarshal(out, &df); err != nil {
 		return 0, 0, fmt.Errorf("rados: df parse: %w", err)
 	}
-	// Sum bytes-used over strata-managed pools only (those registered in
-	// `b.classes`). The cluster-wide `stats.total_used_bytes` includes
-	// ceph internal pools like `.mgr` (always >0 even on empty clusters)
-	// which is misleading to the drain-progress operator UX: physical
-	// bytes should reflect *strata's* footprint on the cluster, not
-	// ceph internals. totalBytes stays cluster-wide capacity (rebalance
-	// worker fill-check semantic: "how full is the cluster overall").
 	strataPools := make(map[string]struct{})
 	for _, spec := range b.classes {
 		if spec.Pool != "" {
@@ -301,9 +248,6 @@ func (b *Backend) ClusterStats(ctx context.Context, clusterID string) (int64, in
 			}
 		}
 	} else {
-		// No classes registered → fall back to cluster-wide
-		// total_used_bytes so the fill-check semantic still works on
-		// degenerate setups.
 		strataUsedBytes = df.Stats.TotalUsedBytes
 	}
 	return strataUsedBytes, df.Stats.TotalBytes, nil

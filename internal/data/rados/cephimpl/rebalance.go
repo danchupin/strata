@@ -1,27 +1,33 @@
-//go:build ceph
-
-package rados
+package cephimpl
 
 import (
 	"context"
 	"fmt"
 
 	goceph "github.com/ceph/go-ceph/rados"
-
-	"github.com/danchupin/strata/internal/rebalance"
 )
 
+// RadosCluster is the per-cluster facade cephimpl exposes for the
+// rebalance worker. It is structurally compatible with
+// internal/rebalance.RadosCluster — the worker (in main module) does the
+// implicit interface conversion at the call site. Keeping the interface
+// here means cephimpl never imports internal/rebalance and the main
+// module is the sole place where rebalance's transitive dependencies
+// (tikv pulls in old google.golang.org/genproto) get loaded — otherwise
+// the workspace MVS conflates new + old genproto.
+type RadosCluster interface {
+	ID() string
+	Read(ctx context.Context, pool, namespace, oid string) ([]byte, error)
+	Write(ctx context.Context, pool, namespace, oid string, body []byte) error
+}
+
 // RebalanceClusters returns a librados-backed RadosCluster facade per
-// configured cluster on b. Used by the cmd binary's rebalance-worker
-// build (cmd/strata/workers/rebalance_movers_ceph.go) to feed a
-// rebalance.RadosMover. The returned facades share b's ioctx cache so
-// rebalance reads/writes hit the same goceph connection pool the PUT
-// hot path already warms.
-func RebalanceClusters(b *Backend) map[string]rebalance.RadosCluster {
+// configured cluster on b.
+func RebalanceClusters(b *Backend) map[string]RadosCluster {
 	if b == nil {
 		return nil
 	}
-	out := make(map[string]rebalance.RadosCluster, len(b.clusters))
+	out := make(map[string]RadosCluster, len(b.clusters))
 	for id := range b.clusters {
 		out[id] = &radosClusterFacade{backend: b, id: id}
 	}
@@ -35,11 +41,6 @@ type radosClusterFacade struct {
 
 func (r *radosClusterFacade) ID() string { return r.id }
 
-// Read pulls one chunk from RADOS. Stats the object first to size the
-// buffer exactly so the reader does not allocate extra. ENOENT is
-// surfaced as an error — rebalance treats it as a per-chunk failure
-// (the source manifest is the source of truth, missing chunk == data
-// loss already, can't recover by moving).
 func (r *radosClusterFacade) Read(ctx context.Context, pool, namespace, oid string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -63,9 +64,6 @@ func (r *radosClusterFacade) Read(ctx context.Context, pool, namespace, oid stri
 	return buf[:n], nil
 }
 
-// Write copies one chunk body into RADOS at oid. Uses the same
-// WriteFull primitive PutChunks does so the operation is atomic from
-// the cluster's perspective.
 func (r *radosClusterFacade) Write(ctx context.Context, pool, namespace, oid string, body []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err

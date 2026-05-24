@@ -1,6 +1,6 @@
-//go:build ceph && integration
+//go:build integration
 
-package rados_test
+package cephimpl_test
 
 import (
 	"bytes"
@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/danchupin/strata/cephimpl"
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/data/rados"
 )
@@ -21,7 +22,8 @@ import (
 // STRATA_TEST_CEPH_CONF or /etc/ceph/ceph.conf, plus the usual classes pool.
 // Skipped when no config is reachable so the build stays green outside of CI.
 //
-// Runs only under `go test -tags "ceph integration"`.
+// Runs only under `go test -tags integration` against the cephimpl module
+// (which already require-pulls go-ceph in its go.mod).
 func TestRADOSBackend(t *testing.T) {
 	confPath := os.Getenv("STRATA_TEST_CEPH_CONF")
 	if confPath == "" {
@@ -44,7 +46,7 @@ func TestRADOSBackend(t *testing.T) {
 		t.Fatalf("parse classes %q: %v", classesEnv, err)
 	}
 
-	be, err := rados.New(rados.Config{
+	be, err := cephimpl.New(rados.Config{
 		ConfigFile: confPath,
 		User:       envOr("STRATA_TEST_CEPH_USER", "admin"),
 		Pool:       pool,
@@ -57,7 +59,7 @@ func TestRADOSBackend(t *testing.T) {
 
 	t.Run("PutGetDelete", func(t *testing.T) {
 		ctx := context.Background()
-		src := make([]byte, 9<<20) // 9 MiB → 3 chunks of 4+4+1 MiB
+		src := make([]byte, 9<<20)
 		if _, err := rand.Read(src); err != nil {
 			t.Fatal(err)
 		}
@@ -96,9 +98,6 @@ func TestRADOSBackend(t *testing.T) {
 		if err := be.Delete(ctx, manifest); err != nil {
 			t.Fatalf("Delete: %v", err)
 		}
-		// Second delete on the same manifest lifts the underlying
-		// goceph.ErrNotFound to data.ErrChunkNotFound so the gc worker
-		// can treat sibling-leader-swept chunks as terminal (US-001).
 		if err := be.Delete(ctx, manifest); err == nil {
 			t.Errorf("second Delete: got nil, want errors.Is(err, data.ErrChunkNotFound)")
 		} else if !errors.Is(err, data.ErrChunkNotFound) {

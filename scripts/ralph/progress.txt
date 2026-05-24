@@ -27,6 +27,7 @@ Cycle: ralph/auth-dx-trailer-lima
 - **Chunked-trailer algos (US-004)**: all stdlib (`hash/crc32` for crc32 + crc32c via Castagnoli table, `crypto/sha1`). Shared parsing factory `selectTrailerHash` slots each algo into existing chain-HMAC scheme from sha256 path (ralph/storage-correctness US-009). Test fixtures captured per algo from aws-cli 2.22+.
 - **Lima envelope CI (US-005)**: self-hosted runner (`[self-hosted, strata-bench]`) provisioned by operator (16GB RAM, 200GB disk, Ubuntu 22.04, Docker 24+). Weekly cron `0 4 * * 0` (Sun 04:00 UTC) + manual `workflow_dispatch`. Auto-PR with markdown table from jsonl; auto-merge if max p99 regression < 10%, else manual review.
 - **ROADMAP discipline (US-006)**: 4 entries close (lines 254 + 260 + 386 + 478) — no new entries. `(commit pending)` placeholder; SHA backfill on main as fast-follow commit (mirrors precedent).
+- **cephimpl module pattern (US-003)**: Sub-module under main repo tree (`internal/data/rados/cephimpl/`) keeps `internal/` import semantics workable because the cephimpl module path (`github.com/danchupin/strata/cephimpl`) is a subpath of the main module's path. Local `replace github.com/danchupin/strata => ../../../..` in cephimpl's go.mod keeps `go mod download` working inside containers without publishing. Workspace MVS combines transitive closures across `use ()` modules — pin pre-split versions via `replace` in `go.work` if path collisions appear (e.g. `google.golang.org/genproto` monolithic-vs-split). Hermetic check is `GOWORK=off go mod graph | grep -c <dep>` (workspace off, main-module-only graph). Sub-modules should avoid importing heavy main packages (e.g. `internal/rebalance`) — re-declare structurally-compatible interfaces locally and let the main caller do the implicit conversion.
 
 ## 2026-05-24 — US-001
 - Per-bucket signing key persisted on bucket meta: new `meta.ErrBucketSigningKeyNotSet`
@@ -212,5 +213,121 @@ Cycle: ralph/auth-dx-trailer-lima
   blob-style append works well for JSON history lists.
 - `cmd/strata/workers` has a flaky unit test pre-existing; ignore on
   one-run failure and re-run.
+---
+
+## 2026-05-24 — US-003
+- Module split for the librados-linked RADOS backend: new Go module at
+  `internal/data/rados/cephimpl/` (`module github.com/danchupin/strata/cephimpl`)
+  with its own `go.mod` requiring `github.com/ceph/go-ceph v0.39.0`. Main
+  module's `go.mod` no longer requires go-ceph (verified via
+  `GOWORK=off go mod graph | grep -c go-ceph` → 0).
+- `go.work` checked in at repo root; lists main module + cephimpl. Workspace
+  MVS pitfall resolved via in-`go.work` `replace google.golang.org/genproto
+  => v0.0.0-20240903143218-8af14fe29dc1` to dodge the new-split-vs-old-
+  monolithic genproto path collision tikv pulled in.
+- Files moved from `internal/data/rados/` → `internal/data/rados/cephimpl/`
+  (build tag `//go:build ceph` dropped — every cephimpl file links go-ceph
+  by default): backend.go, ec.go, health.go, ops.go, pool.go, rebalance.go,
+  backend_integration_test.go.
+- Stub-side rename: main rados pkg's `stub.go` lost the `!ceph` tag —
+  always-on stub `New(Config) → data.ErrRADOSNotCompiled`. `pool_stub.go`
+  removed (no longer needed). `ops_stub.go` keeps the legacy
+  `ErrRadosNotCompiled` sentinel but is tag-free.
+- New `data.ErrRADOSNotCompiled` sentinel (in `internal/data/errors.go`)
+  for cross-package use.
+- Shared helpers exported from main rados pkg so cephimpl can consume them
+  without duplication: `ChunkPutFn` (alias), `PutChunksParallel`,
+  `PutConcurrencyFromEnv`, `ChunkGetFn` (alias), `NewPrefetchReader`,
+  `GetPrefetchFromEnv`, `BatchOpsFromEnv`, `PoolSizeFromEnv`,
+  `NextRoundRobin`, `BuildPendingPoolStatuses` (+ `PoolGroup`,
+  `PendingPoolStatus` uppercase shapes). In-package lowercase names kept
+  for the existing test surface.
+- cephimpl exposes its own `RadosCluster` interface (structurally identical
+  to `internal/rebalance.RadosCluster`) and `RebalanceClusters(*Backend) →
+  map[string]RadosCluster`. Cephimpl deliberately does NOT import
+  `internal/rebalance` — that would pull rebalance's tikv-transitive
+  dependency chain into cephimpl's MVS view and break workspace
+  resolution.
+- Caller branching via build tag:
+  - `internal/serverapp/data_rados_ceph.go` (//go:build ceph) →
+    `cephimpl.New`; `data_rados_stub.go` (//go:build !ceph) →
+    `data.ErrRADOSNotCompiled`. `serverapp.buildDataBackend` calls the
+    new `newRADOSBackend` helper.
+  - `cmd/strata/admin/bench_rados_{ceph,stub}.go` mirrors the same pattern
+    for the bench harness.
+  - `cmd/strata/workers/rebalance_movers_ceph.go` switched to
+    `*cephimpl.Backend` + `cephimpl.RebalanceClusters`; converts to
+    `map[string]rebalance.RadosCluster` at the call site.
+  - `internal/rebalance/rados_mover_integration_test.go` (//go:build ceph
+    && integration) updated to call `cephimpl.New` + type-assert
+    `*cephimpl.Backend`.
+- Makefile: `make vet` extended with a soft cephimpl vet attempt
+  (GOWORK=off + -tags integration; falls through with a message when
+  librados isn't installed). `make test-rados` now shells into the
+  cephimpl dir inside the ceph docker image and runs
+  `go test -tags integration ./...` — no `ceph` tag needed at the test
+  command since the module is ceph-only by construction.
+- `.github/workflows/ci.yml` `lint-build` job gained a `cd cephimpl &&
+  GOWORK=off go mod tidy -diff` step to catch cephimpl go.mod drift on
+  every PR. The librados-linked compile path runs via the existing
+  `docker-build` + `e2e` jobs.
+- `deploy/docker/Dockerfile` ships `go.work` + `go.work.sum` +
+  cephimpl's `go.{mod,sum}` into the build stage so `go mod download` +
+  `go build -tags ceph ./cmd/strata` works inside the ceph image.
+- CLAUDE.md gained a "RADOS / cephimpl module split" section before
+  "Single-binary invariant" documenting the layout, the workspace MVS
+  pitfall + genproto replace, and the GOWORK=off hermetic check.
+- Quality: `go vet ./...` + `go test -count=1 ./...` green (full unit
+  test suite, including racecheck soak). Build matrix verified manually:
+  default-tag `go build ./...` clean, `GOWORK=off go build ./...` clean
+  with zero go-ceph in `go mod graph`, `go build -tags ceph ./...` fails
+  on librados as expected on a librados-less host (the ceph docker image
+  in CI/lab has it).
+- Files: deleted internal/data/rados/{backend,backend_integration_test,
+  ec,health,ops,pool,pool_stub,rebalance}.go; added
+  internal/data/rados/cephimpl/{go.mod,go.sum,backend,backend_integration_test,
+  ec,health,ops,pool,rebalance}.go; new internal/serverapp/
+  data_rados_{ceph,stub}.go; new cmd/strata/admin/
+  bench_rados_{ceph,stub}.go; new go.work + go.work.sum;
+  edited internal/data/errors.go, internal/data/rados/{health_helper,
+  ops_env,ops_stub,parallel,pool_env,pool_index,prefetch,stub}.go,
+  internal/rebalance/rados_mover_integration_test.go,
+  internal/serverapp/serverapp.go, cmd/strata/admin/bench_common.go,
+  cmd/strata/workers/rebalance_movers_ceph.go, Makefile,
+  deploy/docker/Dockerfile, .github/workflows/ci.yml, CLAUDE.md.
+
+**Learnings for future iterations:**
+- Workspace MVS combines the transitive closure of ALL `use ()` modules,
+  so a sibling module's transitive require can resurface a pre-pruned
+  dep in the main module's view. The genproto monolithic-vs-split case
+  is the canonical breakage; pin to a post-split monolithic version via
+  `replace` in `go.work` to keep import paths unambiguous.
+- `internal/` import restriction is BY IMPORTER PATH, not by importer's
+  module — so `github.com/danchupin/strata/cephimpl` (a subpath of
+  `github.com/danchupin/strata/`) can legally import
+  `github.com/danchupin/strata/internal/...`. That's why cephimpl
+  doesn't need to live outside the main repo tree.
+- A new sub-module under main module's tree (e.g. `internal/data/rados/
+  cephimpl/`) needs a `replace github.com/danchupin/strata => ../../../..`
+  in its `go.mod` so `go.work`-less builds (and `go mod download` inside
+  containers) resolve the parent without needing it published as a real
+  go module.
+- Avoid sub-module imports of `internal/rebalance` or other heavy main
+  module packages — workspace MVS pulls the entire transitive dep graph
+  in. Re-declare structurally-compatible interfaces inside the sub-module
+  and let the main-module caller do the implicit conversion.
+- Hermetic check `GOWORK=off go mod graph | grep -c go-ceph` → 0 only
+  works because `go.work` is NOT auto-respected with GOWORK=off. Without
+  the override, workspace-on `go mod graph` includes cephimpl's
+  transitive go-ceph (count ≥ 1) — that's not a regression of the
+  hermetic invariant.
+- `make test-rados` no longer passes `-tags ceph` because the cephimpl
+  module's source is all ceph-linked by construction — every file in
+  cephimpl imports go-ceph. Only `-tags integration` is needed to
+  enable the integration_test.go gating.
+- `go mod tidy` at the workspace root fails when a sibling module is
+  imported only via go.work (no main `require`). Run tidy per-module
+  with `GOWORK=off cd <module-dir> && go mod tidy`. CI's drift check
+  (`go mod tidy -diff`) uses the same pattern.
 ---
 

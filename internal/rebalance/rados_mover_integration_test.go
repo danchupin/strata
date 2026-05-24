@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/danchupin/strata/cephimpl"
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/data/rados"
 	"github.com/danchupin/strata/internal/meta"
@@ -56,17 +57,21 @@ func TestRebalanceRADOSTwoClusters(t *testing.T) {
 		"c1": {ID: "c1", ConfigFile: confPath},
 		"c2": {ID: "c2", ConfigFile: confPath},
 	}
-	be, err := rados.New(rados.Config{Clusters: clusters, Classes: classes})
+	be, err := cephimpl.New(rados.Config{Clusters: clusters, Classes: classes})
 	if err != nil {
 		t.Skipf("cannot connect to ceph (probably no cluster running): %v", err)
 	}
 	t.Cleanup(func() { _ = be.Close() })
 
-	bk, ok := be.(*rados.Backend)
+	bk, ok := be.(*cephimpl.Backend)
 	if !ok {
 		t.Fatalf("unexpected backend type %T", be)
 	}
-	cmap := rados.RebalanceClusters(bk)
+	cmapCeph := cephimpl.RebalanceClusters(bk)
+	cmap := make(map[string]rebalance.RadosCluster, len(cmapCeph))
+	for id, c := range cmapCeph {
+		cmap[id] = c
+	}
 	if _, hasSrc := cmap["c1"]; !hasSrc {
 		t.Fatalf("rebalance cluster map missing c1: %v", cmap)
 	}

@@ -425,7 +425,7 @@ func buildDataBackend(cfg *config.Config, logger *slog.Logger, tp *strataotel.Pr
 		if err != nil {
 			return nil, err
 		}
-		return datarados.New(datarados.Config{
+		return newRADOSBackend(datarados.Config{
 			ConfigFile: cfg.RADOS.ConfigFile,
 			User:       cfg.RADOS.User,
 			Keyring:    cfg.RADOS.Keyring,

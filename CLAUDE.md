@@ -316,6 +316,57 @@ Virtual-hosted-style routing (`internal/s3api/vhost.go`): `STRATA_VHOST_PATTERN`
 original `Host` + `URL.Path`; `Server.ServeHTTP` then strips the prefix from `r.Host` and prepends `/<bucket>` to
 `r.URL.Path` before path-style routing — never rewrite before SigV4 verification or signatures break.
 
+## RADOS / cephimpl module split
+
+`github.com/ceph/go-ceph` is **NOT** a direct require of the main module's
+`go.mod`. The librados-linked backend lives in a separate Go module at
+`internal/data/rados/cephimpl/` (`module github.com/danchupin/strata/cephimpl`),
+which is the only place that pulls in `go-ceph`. `go.work` at the repo root
+unifies main + cephimpl at dev time; IDEs auto-discover both.
+
+`internal/data/rados/` (main module) keeps the shared shape — `Config`,
+`ClassSpec`, `ClusterSpec`, `Metrics`, `DefaultCluster`, `ParseClasses`,
+`ParseClusters`, `BuildClusters`, `ValidateClusterRefs`, plus exported
+helpers used by cephimpl (`PutChunksParallel` + `ChunkPutFn`,
+`NewPrefetchReader` + `ChunkGetFn`, `PutConcurrencyFromEnv`,
+`GetPrefetchFromEnv`, `BatchOpsFromEnv`, `PoolSizeFromEnv`, `ObserveOp`,
+`LogOp`, `BuildPendingPoolStatuses` + `PoolGroup` + `PendingPoolStatus`,
+`NextRoundRobin`). `rados.New` is always-on (no build tag) and returns
+`data.ErrRADOSNotCompiled`; serverapp + bench branch via `//go:build ceph`
+files (`data_rados_ceph.go` + `data_rados_stub.go`,
+`bench_rados_ceph.go` + `bench_rados_stub.go`) that either delegate to
+`cephimpl.New` or return the not-compiled sentinel.
+
+`cephimpl` exposes its own `RadosCluster` interface (structurally identical
+to `internal/rebalance.RadosCluster`) so it does NOT need to import
+`internal/rebalance` — the workspace MVS would otherwise re-load the whole
+rebalance + tikv transitive closure. The ceph-tagged worker wiring
+(`cmd/strata/workers/rebalance_movers_ceph.go`) converts
+`map[string]cephimpl.RadosCluster` → `map[string]rebalance.RadosCluster`
+at the call site.
+
+**Workspace MVS pitfall**: `tikv/client-go/v2` transitively requires the
+pre-split `google.golang.org/genproto@v0.0.0-20230331144136`. Combined with
+main's direct requires on the split `googleapis/{api,rpc}` modules under
+workspace MVS, the same import paths (`googleapis/api/httpbody`,
+`googleapis/rpc/status`) get claimed by two modules → "ambiguous import"
+build failure. `go.work` ships with a
+`replace google.golang.org/genproto => v0.0.0-20240903143218-8af14fe29dc1`
+directive to bump the monolithic module past the split so the conflicting
+paths are owned only by the split modules.
+
+**Hermetic check** (default-tag, no workspace): `GOWORK=off go mod graph |
+grep -c go-ceph` → 0. Workspace-on graphs include go-ceph because cephimpl
+itself requires it — that's expected and not a regression of the hermetic
+invariant.
+
+`make build` (default tag) produces a go-ceph-free binary;
+`make build-ceph` (docker compose build) drives the ceph image which has
+librados available. CI's `lint-build` job vets the main module on
+ubuntu-latest without librados; the `e2e` job runs `make test-rados` which
+shells into the ceph image and runs `cd internal/data/rados/cephimpl && go
+test -tags integration ./...` against the real backend.
+
 ## Single-binary invariant
 
 **ALL functionality lives in one `strata` binary.** Admin commands (rewrap, future one-shot tools) are subcommands of `strata`:

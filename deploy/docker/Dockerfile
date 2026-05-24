@@ -34,10 +34,15 @@ RUN ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
 
 ENV CGO_ENABLED=1 PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin GOTOOLCHAIN=local
 WORKDIR /src
-COPY go.mod go.sum ./
+# go.work + cephimpl/go.mod are needed at module-download time because the
+# ceph-tagged build of cmd/strata transitively imports cephimpl (the
+# librados-linked module split out in US-003 of ralph/auth-dx-trailer-lima).
+COPY go.mod go.sum go.work go.work.sum ./
+COPY internal/data/rados/cephimpl/go.mod internal/data/rados/cephimpl/go.sum ./internal/data/rados/cephimpl/
 RUN --mount=type=cache,target=/root/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    go mod download
+    go mod download && \
+    cd internal/data/rados/cephimpl && go mod download
 COPY . .
 COPY --from=web /web/dist ./web/dist
 RUN --mount=type=cache,target=/root/go/pkg/mod \

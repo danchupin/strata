@@ -1,6 +1,4 @@
-//go:build ceph
-
-package rados
+package cephimpl
 
 import (
 	"context"
@@ -10,31 +8,16 @@ import (
 	"strconv"
 
 	"github.com/danchupin/strata/internal/data"
+	"github.com/danchupin/strata/internal/data/rados"
 )
 
-// ClusterECCapability implements data.ClusterECCapability (US-007 EC-aware
-// manifest schema). Picks a representative pool for the target cluster
-// (the first class entry whose Cluster matches the requested clusterID;
-// fallback to any class pool when nothing is explicitly targeted —
-// mirrors the seed-pool selection in ClusterStats), then runs two
-// MonCommands:
-//
-//  1. `osd pool get <pool> erasure_code_profile` returns the profile name
-//     (or the `erasure_code_profile` field is empty / the command errors
-//     for replicated pools, in which case the pool is reported as not EC).
-//  2. `osd erasure-code-profile get <profile>` returns the k + m
-//     parameters for the named profile.
-//
-// Returns (false, 0, 0, nil) for replicated pools so the admin handler
-// can reject any non-trivial EC policy against a replicated pool with
-// 409 InconsistentECPolicy. Returns data.ErrClusterUnknown when the
-// cluster id is not configured.
+// ClusterECCapability implements data.ClusterECCapability.
 func (b *Backend) ClusterECCapability(ctx context.Context, clusterID string) (bool, int, int, error) {
 	if b == nil {
 		return false, 0, 0, errors.New("rados backend closed")
 	}
 	if clusterID == "" {
-		clusterID = DefaultCluster
+		clusterID = rados.DefaultCluster
 	}
 	if _, ok := b.clusters[clusterID]; !ok {
 		return false, 0, 0, data.ErrClusterUnknown
@@ -57,7 +40,6 @@ func (b *Backend) ClusterECCapability(ctx context.Context, clusterID string) (bo
 		return false, 0, 0, fmt.Errorf("rados: empty conn pool for cluster %q", clusterID)
 	}
 
-	// Step 1: read pool's erasure_code_profile name.
 	args, err := json.Marshal(map[string]string{
 		"prefix": "osd pool get",
 		"pool":   pool,
@@ -69,8 +51,6 @@ func (b *Backend) ClusterECCapability(ctx context.Context, clusterID string) (bo
 	}
 	out, _, err := conn.MonCommand(args)
 	if err != nil {
-		// Replicated pools either return EINVAL or a "does not apply"
-		// string. Either way: not EC.
 		return false, 0, 0, nil
 	}
 	var poolGet struct {
@@ -80,7 +60,6 @@ func (b *Backend) ClusterECCapability(ctx context.Context, clusterID string) (bo
 		return false, 0, 0, nil
 	}
 
-	// Step 2: read k/m for the named profile.
 	args2, err := json.Marshal(map[string]string{
 		"prefix": "osd erasure-code-profile get",
 		"name":   poolGet.Profile,
@@ -108,15 +87,11 @@ func (b *Backend) ClusterECCapability(ctx context.Context, clusterID string) (bo
 	return true, k, m, nil
 }
 
-// seedPoolForCluster picks a representative (pool, namespace) for the
-// supplied cluster id by walking b.classes. First pass: classes whose
-// Cluster matches. Fallback: any class's pool name (lab and most prod
-// setups use uniform pool layout across clusters via ceph-bootstrap).
 func (b *Backend) seedPoolForCluster(clusterID string) (pool, ns string) {
 	for _, spec := range b.classes {
 		c := spec.Cluster
 		if c == "" {
-			c = DefaultCluster
+			c = rados.DefaultCluster
 		}
 		if c == clusterID && spec.Pool != "" {
 			return spec.Pool, spec.Namespace

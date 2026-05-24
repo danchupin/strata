@@ -1,0 +1,14 @@
+go 1.25.1
+
+use (
+	.
+	./internal/data/rados/cephimpl
+)
+
+// Pin the old monolithic genproto out of the workspace MVS so it doesn't
+// shadow the split googleapis/{api,rpc} modules. Without this pin the
+// workspace union of main + cephimpl re-introduces tikv-client-go's
+// transitive require on the pre-split genproto, which still exposes the
+// `googleapis/api/httpbody` + `googleapis/rpc/status` paths that the new
+// split modules also own — go build then fails with `ambiguous import`.
+replace google.golang.org/genproto => google.golang.org/genproto v0.0.0-20240903143218-8af14fe29dc1

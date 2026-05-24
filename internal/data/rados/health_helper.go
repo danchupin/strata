@@ -13,6 +13,13 @@ type poolGroup struct {
 	cluster, pool, ns string
 }
 
+// PoolGroup is the exported shape returned by BuildPendingPoolStatuses
+// (cephimpl/ alias). Field accessors live on the value, since the
+// in-package poolGroup keeps the historical lowercase shape.
+type PoolGroup struct {
+	Cluster, Pool, NS string
+}
+
 // pendingPoolStatus pairs the source group key with the pre-populated
 // row (Name/Class/Cluster filled). The ceph-tagged DataHealth folds in
 // runtime stats (BytesUsed/ChunkCount/State) before pushing the inner
@@ -20,6 +27,34 @@ type poolGroup struct {
 type pendingPoolStatus struct {
 	group  poolGroup
 	status data.PoolStatus
+}
+
+// PendingPoolStatus is the exported shape used by cephimpl/ via
+// BuildPendingPoolStatuses. The Status field carries the pre-populated
+// data.PoolStatus row; DataHealth then folds in live BytesUsed /
+// ChunkCount / State.
+type PendingPoolStatus struct {
+	Group  PoolGroup
+	Status data.PoolStatus
+}
+
+// BuildPendingPoolStatuses is the exported entry point for cephimpl/.
+// Wraps buildPendingPoolStatuses and re-shapes the result into
+// uppercase-field public types.
+func BuildPendingPoolStatuses(classes map[string]ClassSpec, clusters map[string]ClusterSpec) []PendingPoolStatus {
+	in := buildPendingPoolStatuses(classes, clusters)
+	out := make([]PendingPoolStatus, 0, len(in))
+	for _, p := range in {
+		out = append(out, PendingPoolStatus{
+			Group: PoolGroup{
+				Cluster: p.group.cluster,
+				Pool:    p.group.pool,
+				NS:      p.group.ns,
+			},
+			Status: p.status,
+		})
+	}
+	return out
 }
 
 // buildPendingPoolStatuses emits one pendingPoolStatus per (cluster, pool,

@@ -48,6 +48,8 @@ docker-build:
 
 vet:
 	go vet ./...
+	cd internal/data/rados/cephimpl && GOWORK=off go vet -tags integration ./... 2>/dev/null || \
+		echo "cephimpl/ vet skipped (librados not installed locally; CI has the linker)"
 
 test:
 	go test ./...
@@ -63,13 +65,17 @@ test-integration:
 
 # Run RADOS integration tests inside a container that already has librados
 # (reuses the Dockerfile build stage). Assumes `make up-all` is running.
+# The integration tests live in the separate `cephimpl/` Go module
+# (`github.com/danchupin/strata/cephimpl`); -tags integration suffices —
+# the build tag `ceph` is the module-wide default since every cephimpl
+# file links go-ceph.
 test-rados:
 	docker build --target build -f deploy/docker/Dockerfile -t strata:test .
 	docker run --rm --network docker_default \
 		-v docker_strata-ceph-etc:/etc/ceph:ro \
 		-e STRATA_TEST_CEPH_CONF=/etc/ceph/ceph.conf \
 		-e STRATA_TEST_CEPH_POOL=strata.rgw.buckets.data \
-		strata:test go test -tags "ceph integration" -timeout 10m ./internal/data/rados/
+		strata:test sh -c 'cd internal/data/rados/cephimpl && go test -tags integration -timeout 10m ./...'
 
 # Bare bring-up: TiKV-default 2-replica lab (pd + tikv + ceph + ceph-b +
 # strata-a + strata-b + strata-lb-nginx + prometheus + grafana). The nginx
