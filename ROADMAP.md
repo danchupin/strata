@@ -386,6 +386,26 @@ adding more, prove what is there.
 - **P3 — Module tags cleanup.** `github.com/ceph/go-ceph` is in `go.mod` regardless of
   `-tags ceph`. A `go mod tidy` without the tag removes it, breaking reproducibility. Fix
   by wrapping the import in a default-on tag file, or pinning it as an explicit `require`.
+- **P2 — Full config coverage in `strata.toml` (env + TOML parity).** `internal/config/config.go`
+  uses koanf with `toml` + `env` + `structs` providers — infra exists, `STRATA_CONFIG_FILE`
+  points at a TOML file, and `deploy/strata.toml.example` lives in-tree. **Gap**: many env knobs
+  added across recent cycles (`STRATA_GC_*`, `STRATA_REBALANCE_*`, `STRATA_USAGE_ROLLUP_*`,
+  `STRATA_KMS_*`, `STRATA_DEK_CACHE_TTL`, `STRATA_KEY_MAX_AGE`, `STRATA_BUCKET_STATS_SHARDS`,
+  `STRATA_MANIFEST_FORMAT`, `STRATA_OTEL_*`, `STRATA_AUDIT_RETENTION`, etc.) ship env-only —
+  not wired through the koanf `structs` schema, not documented in `strata.toml.example`, not
+  loadable via TOML. Reference page `docs/site/content/reference/env-vars.md` (US-002 of
+  ralph/readme-docs-rewrite) lists 116 vars; only a subset (~30-40, verify via diff) has TOML
+  parity. **Fix scope**: (a) audit every `STRATA_*` env grep against `Config struct` in
+  `internal/config/config.go` — list gaps. (b) for each gap, add the corresponding field to
+  `Config struct` + map via koanf `structs` provider so env continues to override TOML. (c)
+  refresh `deploy/strata.toml.example` with every field documented (one-line comment per knob,
+  `# STRATA_X = "default"` shape). (d) `internal/config/config_test.go` adds
+  `TestEveryEnvVarHasTOMLField` lint that greps both surfaces + asserts 1:1 parity (drift-
+  proofing — same shape as the `docs_reference_test.go` discipline from ralph/dx-lab US-004).
+  (e) doc page `/reference/env-vars.md` gets a column `TOML key` for each row. Outcome: any
+  knob settable via env is also settable via TOML, both surfaces stay in lockstep, drift caught
+  by the lint test on every PR. Forgetting TOML wiring on new env knobs has been an accumulating
+  debt across the last ~10 cycles — explicit lint stops it.
 - ~~**P3 — `make dev` for one-command developer cluster.**~~ — **Done.** New Makefile targets `dev` / `dev-down` / `dev-logs` (US-001): `make dev` chains `up-all → wait-tikv → wait-ceph → wait-strata-lab → docker compose logs -f --tail=20 strata-a strata-b strata-lb-nginx` (TiKV-default canonical lab); Ctrl-C exits only the foreground tail and the stack stays up. `make dev-logs` re-attaches without `--tail`; `make dev-down` aliases `make down`. Documented under `## One-command dev` in `docs/site/content/get-started/_index.md`. (commit `d5d3860`)
 - ~~**P3 — Restore 3-replica TiKV bench (SHARDS=3 rebalance-multi).**~~ — **Done.** New compose profile `bench-3replica` adds `strata-c` (port 10003, `STRATA_NODE_ID=strata-c`, shared `strata-jwt-shared` volume) to `deploy/docker/docker-compose.yml` (US-002); LB-unchanged fallback per PRD AC #3 (rebalance fan-out runs over TiKV leases independent of HTTP routing). `scripts/bench-rebalance-multi.sh` SHARDS=3 leg un-SKIPped — auto-detects `strata-c` via `docker compose ps -q strata-c` and runs / SKIPs accordingly; the SKIP line now references the resource-cap reason + bring-up recipe instead of "parked". `make down` cleans up `--profile bench-3replica`. Documented in `docs/site/content/architecture/benchmarks/rebalance.md` under the new `## 3-replica TiKV (post-restore)` subsection. Local SHARDS=3 capture deferred to operators with > 12 GiB Docker headroom (the cycle box is lima-capped). (commit `d5d3860`)
 - ~~**P3 — Architecture decision records.**~~ — **Done.** Four ADRs authored under `docs/site/content/adr/` (ADR-0001 skip RADOS omap, ADR-0002 IsLatest read-time, ADR-0003 manifest blob column, ADR-0004 leader-per-worker); `## Design notes captured during MVP` section collapsed (4 bullets → 1 link-out paragraph + 3 bullets retained). (commit `fe16160`)
