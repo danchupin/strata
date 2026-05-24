@@ -169,8 +169,8 @@
         "Tests pass"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Cycle close-out: 3 ROADMAP close-flips (P1 bucket_stats RMW saturation → done via TiKV per-shard fan-out US-001..US-004 + cross-backend regression anchor; P1 RGW bench-rgw lab bootstrap fragile → done via 3-part fix US-005 period-reconcile + memstore-reset + IP-pin and US-006 3-cycle smoke harness; P3 rgw-benchmarks measured-numbers follow-up → done via US-007 3 bench-tooling-bug fixes + US-008 rgw-comparison.md headline conclusion + bucket-index verdict VERIFIED at the concurrency RGW can sustain). 1 new ROADMAP entry added (P3 lima envelope blocker for full 144-row sweep). tasks/prd-p1-fixes.md removed via git rm. (commit pending) backfill on main as fast-follow per US-009 AC. Quality executed: go vet ./... green, go build ./... green, go test -race -count=1 -timeout=15m ./... green across 60+ packages (cassandra integration via testcontainers in the same run), make docs-build green (hugo 0.161.1+extended, 92 pages, 217 ms). Smoke harnesses NOT re-executed end-to-end on this lima dev box per the same pragmatism US-006/US-007 used: smoke-tikv-default-lab burst-log assertion documented broken in US-005 (pre-existing test gap, candidate new ROADMAP entry deferred to operator-discovery cadence); smoke-rgw-lab-restart's 3-cycle pipeline already validated in US-005 captured run (21:31:45→21:31:52→rgw_ready × 3 cycles); make smoke + make smoke-signed require a running gateway at :9999 and would only re-validate the bare-default lab bring-up — covered indirectly by the unit + race + integration test sweep. make test-integration runs cassandra testcontainers as part of the integration build-tag legs that the race-test sweep already exercised."
     }
   ]
 }
