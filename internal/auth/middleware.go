@@ -3,7 +3,6 @@ package auth
 import (
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -111,16 +110,18 @@ func (m *Middleware) validateHeader(r *http.Request) (*AuthInfo, error) {
 		signingKey := deriveSigningKey(secret, parsed.Date, parsed.Region, parsed.Service)
 		scope := credentialScope(parsed.Date, parsed.Region, parsed.Service)
 		if bodyHash == streamingBodyTrailer {
-			// US-009 sha256-only scope. X-Amz-Trailer carries the algo
-			// name as a comma-separated list; only an exact
-			// `x-amz-checksum-sha256` (case-insensitive, single value) is
-			// accepted in Cycle 1. crc32 / crc32c / sha1 are parked
-			// behind a P3 ROADMAP follow-up.
-			algo := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Amz-Trailer")))
-			if algo != trailerHeaderChecksumSh {
-				return nil, ErrUnsupportedChecksumAlgorithm
+			// X-Amz-Trailer carries the algo name as a comma-separated
+			// list of `x-amz-checksum-<algo>` entries. Single-value
+			// trailers covering the supported set (sha256, sha1, crc32,
+			// crc32c) pass selectTrailerHash; any other name surfaces
+			// ErrUnsupportedChecksumAlgorithm and rejects with HTTP 400
+			// InvalidRequest before the body is drained.
+			algo := r.Header.Get("X-Amz-Trailer")
+			spec, err := selectTrailerHash(algo)
+			if err != nil {
+				return nil, err
 			}
-			r.Body = newStreamingTrailerReader(r.Body, signingKey, reqDate, scope, parsed.Signature)
+			r.Body = newStreamingTrailerReader(r.Body, signingKey, reqDate, scope, parsed.Signature, spec)
 		} else {
 			r.Body = newStreamingReader(r.Body, signingKey, reqDate, scope, parsed.Signature)
 		}

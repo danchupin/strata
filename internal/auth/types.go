@@ -15,9 +15,10 @@ var (
 	ErrExpiredToken     = errors.New("expired token")
 	ErrInvalidToken     = errors.New("invalid security token")
 	// ErrUnsupportedChecksumAlgorithm — STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER
-	// requests carry X-Amz-Trailer: <algo>. Only x-amz-checksum-sha256 is
-	// supported in Cycle 1 of ralph/storage-correctness (US-009); other algos
-	// (crc32, crc32c, sha1) parked behind ROADMAP P3 follow-up.
+	// requests carry X-Amz-Trailer: <algo>. The supported set is sha256
+	// (US-009 of ralph/storage-correctness) + sha1 + crc32 + crc32c (US-004
+	// of ralph/auth-dx-trailer-lima). Names outside that set (md5, sha512,
+	// ...) reject with this sentinel — mapped to HTTP 400 InvalidRequest.
 	ErrUnsupportedChecksumAlgorithm = errors.New("unsupported checksum algorithm")
 )
 

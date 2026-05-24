@@ -6,11 +6,12 @@
 //	...
 //	0;chunk-signature=<final-sig>\r\n
 //
-// Trailer mode (STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER, US-009): same as
-// standard mode but the final 0-chunk is followed by trailer headers. Only
-// x-amz-checksum-sha256 is accepted as the trailing algorithm; other algos
-// (crc32, crc32c, sha1) are rejected at middleware time with
-// ErrUnsupportedChecksumAlgorithm. The trailer-signature stringToSign:
+// Trailer mode (STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER, US-009 + US-004 of
+// ralph/auth-dx-trailer-lima): same as standard mode but the final 0-chunk is
+// followed by trailer headers. Accepted trailing checksum algorithms:
+// x-amz-checksum-{sha256, sha1, crc32, crc32c}. Unknown algos are rejected at
+// middleware time with ErrUnsupportedChecksumAlgorithm. The trailer-signature
+// stringToSign:
 //
 //	"AWS4-HMAC-SHA256-TRAILER" + "\n" +
 //	<reqDate> + "\n" +
@@ -19,20 +20,22 @@
 //	hex(SHA256(<canonical-trailer-headers>))
 //
 // canonical-trailer-headers is the concatenation of `<lower-name>:<trim-value>\n`
-// for every non-signature trailer header, sorted by name. Body sha256 is
-// accumulated as the chunked body streams; on EOF it is base64-compared to the
-// trailer's checksum value — mismatch surfaces as ErrSignatureInvalid (AWS
-// parity — sig-invalid, not checksum-mismatch).
+// for every non-signature trailer header, sorted by name. The per-algorithm
+// body checksum is accumulated as the chunked body streams; on EOF it is
+// base64-compared to the trailer's checksum value — mismatch surfaces as
+// ErrSignatureInvalid (AWS parity — sig-invalid, not checksum-mismatch).
 package auth
 
 import (
 	"bufio"
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash"
+	"hash/crc32"
 	"io"
 	"sort"
 	"strconv"
@@ -40,11 +43,46 @@ import (
 )
 
 const (
-	chunkPayloadAlgorithm   = "AWS4-HMAC-SHA256-PAYLOAD"
-	chunkTrailerAlgorithm   = "AWS4-HMAC-SHA256-TRAILER"
-	trailerHeaderSig        = "x-amz-trailer-signature"
-	trailerHeaderChecksumSh = "x-amz-checksum-sha256"
+	chunkPayloadAlgorithm       = "AWS4-HMAC-SHA256-PAYLOAD"
+	chunkTrailerAlgorithm       = "AWS4-HMAC-SHA256-TRAILER"
+	trailerHeaderSig            = "x-amz-trailer-signature"
+	trailerHeaderChecksumSha256 = "x-amz-checksum-sha256"
+	trailerHeaderChecksumSha1   = "x-amz-checksum-sha1"
+	trailerHeaderChecksumCRC32  = "x-amz-checksum-crc32"
+	trailerHeaderChecksumCRC32C = "x-amz-checksum-crc32c"
 )
+
+// crc32CastagnoliTable backs hash/crc32 in Castagnoli mode (the crc32c
+// polynomial used by AWS S3 trailer checksums).
+var crc32CastagnoliTable = crc32.MakeTable(crc32.Castagnoli)
+
+// trailerHashSpec captures the per-algorithm decoder shape: the canonical
+// trailer-header name to look up in the trailer block and the hash.Hash
+// constructor used to accumulate the body checksum as the chunked body
+// streams.
+type trailerHashSpec struct {
+	header string
+	newH   func() hash.Hash
+}
+
+// selectTrailerHash maps the lower-cased X-Amz-Trailer header value to a
+// trailerHashSpec. Returns ErrUnsupportedChecksumAlgorithm for any name
+// outside the supported set so the caller can surface HTTP 400 InvalidRequest
+// before the body is drained.
+func selectTrailerHash(algoHeader string) (*trailerHashSpec, error) {
+	switch strings.ToLower(strings.TrimSpace(algoHeader)) {
+	case trailerHeaderChecksumSha256:
+		return &trailerHashSpec{header: trailerHeaderChecksumSha256, newH: sha256.New}, nil
+	case trailerHeaderChecksumSha1:
+		return &trailerHashSpec{header: trailerHeaderChecksumSha1, newH: sha1.New}, nil
+	case trailerHeaderChecksumCRC32:
+		return &trailerHashSpec{header: trailerHeaderChecksumCRC32, newH: func() hash.Hash { return crc32.NewIEEE() }}, nil
+	case trailerHeaderChecksumCRC32C:
+		return &trailerHashSpec{header: trailerHeaderChecksumCRC32C, newH: func() hash.Hash { return crc32.New(crc32CastagnoliTable) }}, nil
+	default:
+		return nil, ErrUnsupportedChecksumAlgorithm
+	}
+}
 
 type streamingReader struct {
 	src        io.ReadCloser
@@ -58,9 +96,13 @@ type streamingReader struct {
 	done       bool
 
 	// Trailer-mode state (zero values disable trailer handling — standard
-	// aws-chunked body keeps its existing semantics).
-	trailerMode bool
-	bodyHash    hash.Hash
+	// aws-chunked body keeps its existing semantics). trailerHeader is the
+	// canonical `x-amz-checksum-<algo>` header name to look up in the
+	// trailer block (set by selectTrailerHash); bodyHash accumulates the
+	// per-algorithm checksum over plaintext chunks.
+	trailerMode   bool
+	bodyHash      hash.Hash
+	trailerHeader string
 }
 
 func newStreamingReader(body io.ReadCloser, signingKey []byte, reqDate, scope, seedSig string) io.ReadCloser {
@@ -78,16 +120,17 @@ func newStreamingReader(body io.ReadCloser, signingKey []byte, reqDate, scope, s
 // requests. Behaves identically to newStreamingReader for the chunk-signature
 // chain, then validates the trailer headers + trailer signature + body
 // checksum on EOF.
-func newStreamingTrailerReader(body io.ReadCloser, signingKey []byte, reqDate, scope, seedSig string) io.ReadCloser {
+func newStreamingTrailerReader(body io.ReadCloser, signingKey []byte, reqDate, scope, seedSig string, spec *trailerHashSpec) io.ReadCloser {
 	return &streamingReader{
-		src:         body,
-		br:          bufio.NewReader(body),
-		signingKey:  signingKey,
-		reqDate:     reqDate,
-		scope:       scope,
-		prevSig:     seedSig,
-		trailerMode: true,
-		bodyHash:    sha256.New(),
+		src:           body,
+		br:            bufio.NewReader(body),
+		signingKey:    signingKey,
+		reqDate:       reqDate,
+		scope:         scope,
+		prevSig:       seedSig,
+		trailerMode:   true,
+		bodyHash:      spec.newH(),
+		trailerHeader: spec.header,
 	}
 }
 
@@ -185,15 +228,15 @@ func (s *streamingReader) readChunk() error {
 // readAndValidateTrailers consumes the trailer header block following the
 // final 0-chunk and verifies (a) the trailer signature chained from prevSig
 // (= final-chunk signature) over the canonical non-signature trailer headers,
-// and (b) the body sha256 matches the value carried in the
-// x-amz-checksum-sha256 trailer header. Mismatches surface as
-// ErrSignatureInvalid per AWS parity.
+// and (b) the per-algorithm body checksum matches the value carried in the
+// trailer header chosen at request time (sha256 / sha1 / crc32 / crc32c).
+// Mismatches surface as ErrSignatureInvalid per AWS parity.
 func (s *streamingReader) readAndValidateTrailers() error {
 	var (
-		trailerSig   string
-		checksumB64  string
-		nonSigLines  []string
-		sawChecksum  bool
+		trailerSig  string
+		checksumB64 string
+		nonSigLines []string
+		sawChecksum bool
 	)
 	for {
 		line, err := s.br.ReadString('\n')
@@ -218,7 +261,7 @@ func (s *streamingReader) readAndValidateTrailers() error {
 		switch name {
 		case trailerHeaderSig:
 			trailerSig = value
-		case trailerHeaderChecksumSh:
+		case s.trailerHeader:
 			checksumB64 = value
 			sawChecksum = true
 			nonSigLines = append(nonSigLines, name+":"+value+"\n")

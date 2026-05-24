@@ -331,3 +331,73 @@ Cycle: ralph/auth-dx-trailer-lima
   (`go mod tidy -diff`) uses the same pattern.
 ---
 
+
+## 2026-05-24 — US-004
+- Chunked-trailer decoder accepts 4 algos: sha256 (US-009) + sha1 + crc32 +
+  crc32c (US-004). Shared `selectTrailerHash(algoHeader)` factory in
+  `internal/auth/streaming.go` returns a `*trailerHashSpec` (canonical
+  trailer-header name + `hash.Hash` constructor). Unknown names →
+  `ErrUnsupportedChecksumAlgorithm` (HTTP 400 InvalidRequest).
+- `newStreamingTrailerReader` now accepts the spec; the body checksum is
+  accumulated through the algo-specific `hash.Hash`. `readAndValidateTrailers`
+  switches on `s.trailerHeader` (instance-bound) instead of the previous
+  fixed `trailerHeaderChecksumSh` const.
+- `internal/auth/middleware.go` drops the sha256-only gate. The trailer
+  header is parsed via `selectTrailerHash` and threaded into the streaming
+  reader. Anything outside the 4-algo set surfaces
+  `ErrUnsupportedChecksumAlgorithm` before the body is drained — preserves
+  the US-009 reject-early semantic.
+- All stdlib: `crypto/sha1`, `hash/crc32`. Castagnoli table cached as a
+  package-level var (`crc32CastagnoliTable`). No new deps.
+- Test fixtures: `testdata/chunked-trailer-{sha1,crc32,crc32c}.bin`
+  generated via `STRATA_REGEN_TRAILER_FIXTURES=1 go test -run
+  TestRegenerateTrailerFixtures`. The regen test is skipped on default
+  runs (env-gated) so CI never rewrites them. `.gitattributes` updated to
+  mark all 4 fixtures binary.
+- `TestStreamingTrailerReaderGoldenFixture` widened to all 4 algos —
+  decodes each committed fixture and verifies plaintext recovery.
+- New `TestStreamingTrailerReaderAllAlgos` exercises happy-path +
+  body-checksum-mismatch round-trip per algo (8 subtests).
+- New `TestSelectTrailerHashUnsupported` covers `""`, md5, sha512, `foo`.
+- `TestMiddlewareUnsupportedTrailerAlgo` renamed to
+  `TestMiddlewareSupportedTrailerAlgos`. Flipped semantics: 4 known algos
+  pass validation; only `md5` (or other unknown) rejects.
+- Integration test `streaming_trailer_integration_test.go` parameterised
+  on algo (4 subtests). `buildTrailerPUT` accepts header + `newH` and
+  signs the request under the chosen algo. All 4 round-trip via
+  httptest.Server → middleware → inner handler.
+- Quality: `go vet ./...` clean. `go test -race ./internal/auth/...` green.
+  `go test ./...` full unit suite green (no flakes). Integration test
+  `go test -tags integration ./internal/auth/` green for all 4 algos.
+- Files: `internal/auth/streaming.go` (factory + spec + sha1/crc32
+  imports + trailerHeader field), `internal/auth/middleware.go` (drop
+  sha256-only gate, thread spec into reader), `internal/auth/types.go`
+  (docstring update for ErrUnsupportedChecksumAlgorithm),
+  `internal/auth/streaming_trailer_test.go` (helper accepts algo +
+  newH, all-algo + unsupported tests),
+  `internal/auth/streaming_trailer_fixtures_test.go` (new, env-gated
+  regen test), `internal/auth/streaming_trailer_integration_test.go`
+  (parameterised over 4 algos), `internal/auth/testdata/.gitattributes`,
+  `internal/auth/testdata/chunked-trailer-sha1.bin` (new),
+  `internal/auth/testdata/chunked-trailer-crc32.bin` (new),
+  `internal/auth/testdata/chunked-trailer-crc32c.bin` (new).
+
+**Learnings for future iterations:**
+- `hash.Hash.Sum(nil)` for `hash/crc32` already produces a 4-byte
+  big-endian slice. AWS S3 trailer checksum encodes that slice as
+  base64. So the existing base64-string compare against the trailer
+  header value works uniformly across sha256 / sha1 / crc32 / crc32c —
+  no per-algo decode function needed at the decoder boundary.
+- A test-only fixture-generation file gated by an env var
+  (`STRATA_REGEN_TRAILER_FIXTURES=1`) keeps the regen path inside the
+  package's test surface without leaking into normal `go test` runs.
+  Pattern reusable for any other deterministic golden-fixture workflow.
+- `selectTrailerHash` is the single seam to extend if a new algo
+  (e.g. crc64-nvme — pending AWS adoption) needs to land. The factory
+  + spec shape means the decoder/middleware never change again — only
+  one switch arm.
+- When refactoring a `func` signature shared across tests + production
+  call sites, the GO compiler diagnostics surface every stale call
+  site at once. `Edit` with `replace_all` on the exact call shape is
+  the fastest way to rebase test files in lockstep.
+---

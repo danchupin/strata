@@ -1,1 +1,4 @@
 chunked-trailer-sha256.bin binary
+chunked-trailer-sha1.bin binary
+chunked-trailer-crc32.bin binary
+chunked-trailer-crc32c.bin binary
