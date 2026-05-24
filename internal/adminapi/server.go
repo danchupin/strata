@@ -20,6 +20,7 @@ import (
 	"github.com/danchupin/strata/internal/auditstream"
 	"github.com/danchupin/strata/internal/auth"
 	"github.com/danchupin/strata/internal/bucketstats"
+	"github.com/danchupin/strata/internal/crypto/kms"
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/data/placement"
 	"github.com/danchupin/strata/internal/heartbeat"
@@ -148,6 +149,15 @@ type Server struct {
 	// (US-001 drain-progress-physical). 10 s TTL; TTL-only invalidation.
 	// nil disables caching — probes fire on every poll.
 	ClusterStatsCache *placement.ClusterStatsCache
+
+	// SigningKey carries the operator-facing per-bucket signing-key knobs:
+	// the live kms.Provider (used by Rotate to generate a fresh DEK), the
+	// auth-side DEK cache (Invalidate dropped on Rotate / Delete so the next
+	// SigV4 attempt re-fetches), the default CMK id, and the configured
+	// max-age window so the Status endpoint can flag `expired: true`
+	// (US-002). nil disables the 3 endpoints — kms-less deployments still
+	// boot but the signing-key surface returns 503 SigningKeyDisabled.
+	SigningKey SigningKeyConfig
 
 	// GCConfig is the env-resolved GC worker tunable snapshot surfaced on
 	// GET /admin/v1/gc-config (US-001 drain-rebalance-transparency). Captured
@@ -280,6 +290,36 @@ type Config struct {
 	// cmd/strata/workers.ResolveGCConfig / .ResolveRebalanceConfig at boot.
 	GCConfig        GCConfig
 	RebalanceConfig RebalanceConfig
+
+	// SigningKey carries the per-bucket signing-key admin surface (US-002
+	// auth-dx-trailer-lima). Zero value disables the 3 endpoints.
+	SigningKey SigningKeyConfig
+}
+
+// SigningKeyConfig carries the per-bucket signing-key admin surface
+// (US-002 auth-dx-trailer-lima): the live kms.Provider, the auth-side
+// DEK cache (Rotate / Delete drop the cached entry), the default CMK id
+// applied when the operator omits {key_id} on Rotate, and the
+// STRATA_KEY_MAX_AGE rotation window surfaced on Status. Zero value
+// disables every endpoint with 503 SigningKeyDisabled so kms-less rigs
+// stay bootable.
+type SigningKeyConfig struct {
+	// Provider is the live KMS provider. nil disables Rotate.
+	Provider kms.Provider
+	// Cache is the auth-side DEK cache; admin Rotate / Delete handlers
+	// call Invalidate(bucket) so the next SigV4 attempt re-fetches under
+	// the new wrapping. nil is tolerated — the next 5-min TTL flip would
+	// still pick up the new envelope.
+	Cache *auth.DEKCache
+	// DefaultKeyID is the CMK id applied when the operator omits
+	// {key_id} on POST /signing-key/rotate. Empty falls back to the
+	// bucket name — both AWS KMS aliases and Vault Transit allow that as
+	// a CMK handle, so dev rigs work out of the box.
+	DefaultKeyID string
+	// MaxAge is the STRATA_KEY_MAX_AGE rotation window surfaced on Status.
+	// Zero disables max-age annotation; the auth path also stops
+	// enforcing on zero (parity with absent env).
+	MaxAge time.Duration
 }
 
 // New constructs a Server. Started defaults to now. JWTSecret empty means
@@ -327,6 +367,7 @@ func New(c Config) *Server {
 		ClusterStatsCache:    c.ClusterStatsCache,
 		GCConfig:             c.GCConfig,
 		RebalanceConfig:      c.RebalanceConfig,
+		SigningKey:           c.SigningKey,
 		Logger:               log.Default(),
 	}
 }
@@ -420,6 +461,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/placement", s.handleBucketGetPlacement)
 	mux.HandleFunc("PUT /admin/v1/buckets/{bucket}/placement", s.handleBucketSetPlacement)
 	mux.HandleFunc("DELETE /admin/v1/buckets/{bucket}/placement", s.handleBucketDeletePlacement)
+	mux.HandleFunc("POST /admin/v1/buckets/{bucket}/signing-key/rotate", s.handleBucketSigningKeyRotate)
+	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/signing-key/status", s.handleBucketSigningKeyStatus)
+	mux.HandleFunc("DELETE /admin/v1/buckets/{bucket}/signing-key", s.handleBucketSigningKeyDelete)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/ec-policy", s.handleBucketGetECPolicy)
 	mux.HandleFunc("PUT /admin/v1/buckets/{bucket}/ec-policy", s.handleBucketSetECPolicy)
 	mux.HandleFunc("DELETE /admin/v1/buckets/{bucket}/ec-policy", s.handleBucketDeleteECPolicy)

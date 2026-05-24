@@ -112,3 +112,105 @@ Cycle: ralph/auth-dx-trailer-lima
   Wait via HTTP 200/429/472/473 — Vault sealed/standby surfaces these.
 ---
 
+## 2026-05-24 — US-002
+- Admin signing-key surface shipped: 3 new `/admin/v1/buckets/{name}/signing-key`
+  endpoints — `POST /rotate`, `GET /status`, `DELETE` — all stamped with
+  audit verbs (`admin:RotateBucketSigningKey`,
+  `admin:GetBucketSigningKeyStatus`, `admin:DeleteBucketSigningKey`).
+  Rotate optionally accepts `{key_id}` body to override the default CMK.
+- `STRATA_KEY_MAX_AGE` env (default `2160h`/90d, range `[24h, 8760h]`)
+  enforced at the SigV4 path. Auth resolver gains `MaxAge` field + a
+  pre-unwrap check that returns the new `auth.ErrKMSKeyExpired`
+  sentinel → s3api maps to HTTP 401 `KeyExpired`. Counter outcome
+  `expired` added; KMS not consulted for expired keys (saves an unwrap
+  round-trip on the rejected path).
+- Fail-closed semantics: `kms.ErrKMSUnavailable` sentinel added.
+  `kms.WrapTransient` helper detects `net.Error.Timeout`, `*net.OpError`,
+  `context.DeadlineExceeded`, plus a short list of well-known transport
+  phrases (connection refused, i/o timeout, throttlingexception, ...).
+  AWS + Vault providers wrap UnwrapDEK / GenerateDataKey errors via
+  `WrapTransient`; Vault additionally maps HTTP 5xx → `ErrKMSUnavailable`.
+- `BucketSigningResolver.ClassifyUnwrap` hook: serverapp installs a
+  translator that maps `kms.ErrKMSUnavailable` → `auth.ErrKMSUnavailable`
+  (→ 503 + `Retry-After: 30`), `kms.ErrKeyIDMismatch` and every other
+  KMS error → `auth.ErrKMSDenied` (→ 401 KeyDenied). NO fallback to IAM
+  — opting a bucket in means rotation semantics are enforced.
+- Admin layer Server gains `SigningKey SigningKeyConfig{Provider, Cache,
+  DefaultKeyID, MaxAge}`. Rotate calls `Provider.GenerateDataKey`,
+  persists wrapped form, drops cached DEK via `Cache.Invalidate`. Status
+  reads meta + computes `age_days`/`expired`. Delete drops meta row +
+  invalidates cache. Missing provider → 503 `SigningKeyDisabled` (kms-
+  less deploys still boot).
+- OpenAPI YAML extended with 3 endpoints + their schemas + 503
+  `SigningKeyDisabled` / `KMSUnavailable` annotations. Both
+  `docs/site/static/openapi.yaml` and `docs/site/public/openapi.yaml`
+  updated in lockstep.
+- Docs: new `docs/site/content/operate/key-rotation.md` (operator
+  runbook: when to rotate, response shape, max-age semantics, fail-
+  closed response matrix, status monitoring, tuning table, audit verbs,
+  recovery flow). `STRATA_KEY_MAX_AGE` + `STRATA_KMS_DEFAULT_KEY_ID`
+  added to `docs/site/content/reference/env-vars.md`.
+- Tests: `internal/auth/bucket_signing_test.go` extended with 3 max-age
+  cases (expired / fresh / disabled). `internal/serverapp/
+  bucket_signing_test.go` covers `keyMaxAge` env clamping + default +
+  parse-error fall-back + `classifyKMSUnwrapErr` translation matrix +
+  `WrapTransient` for `net.Error` timeouts. `internal/adminapi/
+  buckets_signing_key_test.go` covers happy-path rotate, override
+  `key_id`, bucket missing, KMS unavailable → 503 + `Retry-After`,
+  no provider → 503 `SigningKeyDisabled`, status not-set 404, status
+  fresh, status expired, idempotent delete, meta-error surfacing.
+  Integration: `internal/crypto/kms/aws_rotation_integration_test.go`
+  exercises a full rotation cycle on LocalStack — 2 CMKs, GenerateDataKey
+  under each, cross-CMK unwrap refuses via `ErrKeyIDMismatch`.
+- Quality: `go vet ./...` + `go test -race ./internal/auth/...
+  ./internal/adminapi/... ./internal/crypto/kms/...
+  ./internal/serverapp/... ./internal/meta/... ./internal/s3api/...`
+  all green; full `go test ./...` green (transient flake in
+  `cmd/strata/workers` re-runs clean — pre-existing).
+- Files: `internal/auth/bucket_signing.go` (+ MaxAge / ClassifyUnwrap /
+  ErrKMSKeyExpired), `internal/auth/bucket_signing_test.go`,
+  `internal/crypto/kms/kms.go` (ErrKMSUnavailable),
+  `internal/crypto/kms/classify.go` (new — WrapTransient + isTransient),
+  `internal/crypto/kms/aws.go` (WrapTransient at boundary),
+  `internal/crypto/kms/vault.go` (WrapTransient + 5xx → ErrKMSUnavailable),
+  `internal/crypto/kms/aws_rotation_integration_test.go` (new),
+  `internal/s3api/errors.go` (ErrKMSKeyExpired + mapping),
+  `internal/metrics/metrics.go` (help text adds `expired` outcome),
+  `internal/serverapp/bucket_signing.go` (keyMaxAge env + classifier +
+  buildSigningKeyAdminConfig), `internal/serverapp/bucket_signing_test.go`
+  (new), `internal/serverapp/serverapp.go` (resolver var exposed +
+  SigningKey wired into adminapi.Config),
+  `internal/adminapi/server.go` (SigningKey field + 3 routes),
+  `internal/adminapi/buckets_signing_key.go` (handlers, new),
+  `internal/adminapi/buckets_signing_key_test.go` (new),
+  `docs/site/content/operate/key-rotation.md` (new),
+  `docs/site/content/reference/env-vars.md`,
+  `docs/site/static/openapi.yaml`, `docs/site/public/openapi.yaml`.
+
+**Learnings for future iterations:**
+- `BucketSigningResolver.ClassifyUnwrap` keeps the `auth` package
+  import-free of `kms` — kms-side sentinels translate to auth-side
+  sentinels at wiring time. Future provider additions (e.g. GCP KMS)
+  can return `kms.ErrKMSUnavailable` for transient and the existing
+  serverapp classifier picks them up without code changes.
+- `kms.WrapTransient` is the canonical "decide between 503 and 401"
+  shim. New providers MUST call it at every external-call boundary so
+  the auth path can fail-closed correctly. The string-marker list in
+  `classify.go::transientMarkers` is intentionally short — extend with
+  caution to avoid hiding permanent misconfigurations as 503.
+- `adminapi.Server.SigningKey` is the shared admin-side surface for the
+  3 rotate endpoints. Plumbing more rotation tooling (key-history,
+  CMK migration) lands here without touching the gateway middleware.
+- The DEK plaintext is returned ONCE in `POST /rotate` response —
+  consumers (the operator console UI, scripted automation) must capture
+  it client-side immediately. Subsequent `GET /status` does NOT expose
+  the secret. Same one-shot pattern as the IAM access-key create flow.
+- `meta.Bucket` schema is unchanged for US-002 — US-001 already shipped
+  the trio (`signing_wrapped_dek`, `signing_key_id`,
+  `signing_key_created_at`). When extending the surface (e.g. key
+  history), prefer extending the existing trio over adding new columns;
+  blob-style append works well for JSON history lists.
+- `cmd/strata/workers` has a flaky unit test pre-existing; ignore on
+  one-run failure and re-run.
+---
+

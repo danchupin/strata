@@ -90,6 +90,10 @@ var (
 	// ErrKMSKeyTampered — wrapped-DEK HMAC mismatch on LocalHSMProvider
 	// (or equivalent integrity check on a future provider).
 	ErrKMSKeyTampered      = APIError{Code: "KeyTampered", Message: "Per-bucket signing key wrapped DEK is corrupt", Status: http.StatusUnauthorized}
+	// ErrKMSKeyExpired — per-bucket signing key is older than the
+	// STRATA_KEY_MAX_AGE rotation window (US-002). Operator must rotate
+	// (POST /admin/v1/buckets/{name}/signing-key/rotate) to recover.
+	ErrKMSKeyExpired       = APIError{Code: "KeyExpired", Message: "Per-bucket signing key is past max age; rotate to recover", Status: http.StatusUnauthorized}
 	// ErrQuotaExceeded is the gateway-level response for any write that
 	// breaches a configured BucketQuota or UserQuota (US-006). HTTP 403 with
 	// the non-AWS S3 code "QuotaExceeded" — RGW-compatible per ROADMAP so
@@ -171,6 +175,8 @@ func WriteAuthDenied(w http.ResponseWriter, r *http.Request, err error) {
 		apiErr = ErrKMSKeyTampered
 	case errors.Is(err, auth.ErrKMSDenied):
 		apiErr = ErrKMSKeyDenied
+	case errors.Is(err, auth.ErrKMSKeyExpired):
+		apiErr = ErrKMSKeyExpired
 	default:
 		switch err.Error() {
 		case "signature does not match":

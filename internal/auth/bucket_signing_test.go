@@ -171,6 +171,64 @@ func TestBucketSigningResolverKMSDenied(t *testing.T) {
 	}
 }
 
+func TestBucketSigningResolverMaxAgeExpired(t *testing.T) {
+	// Key created an hour ago; max-age is 30 min → expired.
+	createdAt := time.Now().Add(-1 * time.Hour)
+	store := &fakeKeyStore{wrapped: []byte{0xAB}, keyID: "kms-1", created: createdAt}
+	kms := &fakeKMS{plaintext: []byte{0xCD}}
+	var counterCalls []string
+	r := &BucketSigningResolver{
+		Store: store, KMS: kms, Provider: "aws_kms",
+		MaxAge: 30 * time.Minute,
+		CounterInc: func(_, outcome string) { counterCalls = append(counterCalls, outcome) },
+	}
+	req := httptest.NewRequest("GET", "/bkt/key", nil)
+	dek, ok, err := r.ResolveSecret(context.Background(), req)
+	if !errors.Is(err, ErrKMSKeyExpired) {
+		t.Fatalf("expected ErrKMSKeyExpired, got err=%v ok=%v dek=%x", err, ok, dek)
+	}
+	if ok {
+		t.Fatal("expected ok=false on expired key")
+	}
+	if len(counterCalls) != 1 || counterCalls[0] != "expired" {
+		t.Fatalf("expected expired outcome, got %v", counterCalls)
+	}
+	if atomic.LoadInt32(&kms.calls) != 0 {
+		t.Fatalf("KMS unwrap should not run for expired keys; calls=%d", kms.calls)
+	}
+}
+
+func TestBucketSigningResolverMaxAgeFresh(t *testing.T) {
+	// Key created 1 minute ago; max-age is 30 min → still valid.
+	createdAt := time.Now().Add(-1 * time.Minute)
+	store := &fakeKeyStore{wrapped: []byte{0xAB}, keyID: "kms-1", created: createdAt}
+	kms := &fakeKMS{plaintext: []byte{0xCD, 0xEF}}
+	r := &BucketSigningResolver{
+		Store: store, KMS: kms, Provider: "aws_kms",
+		MaxAge: 30 * time.Minute,
+	}
+	req := httptest.NewRequest("GET", "/bkt/key", nil)
+	dek, ok, err := r.ResolveSecret(context.Background(), req)
+	if err != nil || !ok || string(dek) != string(kms.plaintext) {
+		t.Fatalf("expected fresh unwrap to succeed: err=%v ok=%v dek=%x", err, ok, dek)
+	}
+}
+
+func TestBucketSigningResolverMaxAgeDisabled(t *testing.T) {
+	// Key created 1 year ago; max-age zero (disabled) → still valid.
+	createdAt := time.Now().Add(-365 * 24 * time.Hour)
+	store := &fakeKeyStore{wrapped: []byte{0xAB}, keyID: "kms-1", created: createdAt}
+	kms := &fakeKMS{plaintext: []byte{0xCD}}
+	r := &BucketSigningResolver{
+		Store: store, KMS: kms, Provider: "aws_kms",
+	}
+	req := httptest.NewRequest("GET", "/bkt/key", nil)
+	_, ok, err := r.ResolveSecret(context.Background(), req)
+	if err != nil || !ok {
+		t.Fatalf("max-age 0 should bypass enforcement: err=%v ok=%v", err, ok)
+	}
+}
+
 func TestPathBucket(t *testing.T) {
 	cases := map[string]string{
 		"":              "",

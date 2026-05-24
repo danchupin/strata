@@ -1668,6 +1668,137 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /buckets/{bucket}/signing-key/rotate:
+    post:
+      summary: Rotate per-bucket signing key (US-002 auth-dx-trailer-lima)
+      operationId: rotateBucketSigningKey
+      description: |
+        Generates a fresh 32-byte DEK via the configured KMS provider
+        (`STRATA_KMS_VAULT_*` / `STRATA_KMS_AWS_REGION` /
+        `STRATA_KMS_LOCAL_HSM_SEED`), wraps it under the supplied
+        `key_id` (or the configured default / bucket name), and persists
+        the wrapped form on bucket meta. The plaintext is returned ONCE
+        in the response as the SigV4 secret material — the operator MUST
+        capture it client-side before the response is discarded. The
+        gateway cannot recover the plaintext after this response.
+
+        Cache invalidation: the auth-side DEK cache entry for this
+        bucket is dropped synchronously so the next SigV4 attempt
+        re-fetches via `Provider.UnwrapDEK`. Audit verb
+        `admin:RotateBucketSigningKey`.
+      parameters:
+        - name: bucket
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                key_id:
+                  type: string
+                  description: |
+                    KMS CMK handle to wrap the new DEK under. Empty
+                    falls back to `STRATA_KMS_DEFAULT_KEY_ID` (or the
+                    bucket name when that is also unset).
+      responses:
+        '200':
+          description: Rotation complete; secret_access_key returned ONCE.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [key_id, secret_access_key, created_at, wrapped_dek_length]
+                properties:
+                  key_id: { type: string }
+                  secret_access_key:
+                    type: string
+                    description: Hex-encoded 32-byte DEK. Use as SigV4 client secret.
+                  created_at:
+                    type: integer
+                    format: int64
+                    description: Unix seconds.
+                  wrapped_dek_length:
+                    type: integer
+                    description: Size of the persisted wrapped DEK in bytes.
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          description: |
+            `SigningKeyDisabled` — no KMS provider configured; or
+            `KMSUnavailable` — provider returned a transient error.
+            `Retry-After: 30` header set on KMSUnavailable.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /buckets/{bucket}/signing-key/status:
+    get:
+      summary: Per-bucket signing-key status (US-002 auth-dx-trailer-lima)
+      operationId: getBucketSigningKeyStatus
+      description: |
+        Returns the CMK handle currently in use, the persisted creation
+        timestamp, the elapsed age, the `STRATA_KEY_MAX_AGE` window, and
+        a precomputed `expired` flag. Operators use this on the rotation
+        runbook to confirm whether the next SigV4 attempt would be
+        rejected (HTTP 401 `KeyExpired`). Audit verb
+        `admin:GetBucketSigningKeyStatus`.
+      parameters:
+        - name: bucket
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Status of the persisted signing key.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [key_id, created_at, age_days, max_age_days, expired]
+                properties:
+                  key_id: { type: string }
+                  created_at: { type: integer, format: int64 }
+                  age_days: { type: number, format: double }
+                  max_age_days: { type: number, format: double }
+                  expired: { type: boolean }
+        '404':
+          description: |
+            `NoSuchBucket` — bucket missing; or `NoSigningKey` — bucket
+            exists but no per-bucket signing key is configured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /buckets/{bucket}/signing-key:
+    delete:
+      summary: Drop per-bucket signing key (US-002 auth-dx-trailer-lima)
+      operationId: deleteBucketSigningKey
+      description: |
+        Drops the persisted signing key and the cached DEK so the next
+        SigV4 attempt falls back to the IAM access-key path.
+        Idempotent — returns 204 even when no key is configured. Audit
+        verb `admin:DeleteBucketSigningKey`.
+      parameters:
+        - name: bucket
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Signing key removed (or never existed).
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   /buckets/{bucket}/ec-policy:
     get:
       summary: Get bucket erasure-code policy (US-007 EC-aware manifests)

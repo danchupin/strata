@@ -55,6 +55,13 @@ var ErrKMSDenied = errors.New("kms denied")
 // mismatch on LocalHSMProvider). Surfaced as 401 KeyTampered.
 var ErrKMSTampered = errors.New("kms wrapped dek tampered")
 
+// ErrKMSKeyExpired signals a per-bucket signing key older than the
+// configured STRATA_KEY_MAX_AGE window (US-002). Surfaced as HTTP 401
+// KeyExpired — the operator must Rotate to recover; auth does NOT fall
+// through to the IAM access-key path because the bucket explicitly opted
+// in to per-bucket signing.
+var ErrKMSKeyExpired = errors.New("kms signing key expired")
+
 // dekCacheEntry holds a cached plaintext DEK plus its expiry.
 type dekCacheEntry struct {
 	plaintext []byte
@@ -163,13 +170,29 @@ type BucketSigningResolver struct {
 	Provider string // "aws_kms" | "vault" | "local_hsm" — counter label only
 	Cache    *DEKCache
 	// CounterInc is a callback invoked once per ResolveSecret with the
-	// outcome label ∈ {"cache_hit","cache_miss_ok","unavailable","denied","tampered"}.
+	// outcome label ∈ {"cache_hit","cache_miss_ok","unavailable","denied","tampered","expired"}.
 	// Nil counters are tolerated — wiring is opt-in.
 	CounterInc func(provider, outcome string)
+	// ClassifyUnwrap translates a provider-side UnwrapDEK error into one of
+	// the auth-side typed sentinels (ErrKMSUnavailable / ErrKMSDenied /
+	// ErrKMSTampered). Wired by serverapp so the kms-package details (e.g.
+	// kms.ErrKMSUnavailable, kms.ErrKeyIDMismatch) stay behind the auth
+	// package's import surface. Nil falls through unchanged — the existing
+	// raw-err propagation path used by every pre-US-002 test.
+	ClassifyUnwrap func(error) error
 	// BucketFor extracts the bucket name from the request. If nil the
 	// resolver defaults to the first path segment (path-style routing,
 	// which is the shape sigv4 already signs).
 	BucketFor func(*http.Request) string
+	// MaxAge enforces the STRATA_KEY_MAX_AGE rotation window (US-002).
+	// A non-zero value rejects per-bucket signing keys whose
+	// createdAt is older than now() - MaxAge with ErrKMSKeyExpired;
+	// the middleware maps that sentinel to HTTP 401 KeyExpired. Zero
+	// disables enforcement (legacy / unset).
+	MaxAge time.Duration
+	// Now overrides the wall clock for deterministic max-age tests.
+	// Defaults to time.Now when nil.
+	Now func() time.Time
 }
 
 // ResolveSecret looks up the per-bucket signing DEK and returns its
@@ -185,7 +208,7 @@ func (r *BucketSigningResolver) ResolveSecret(ctx context.Context, req *http.Req
 	if bucket == "" {
 		return nil, false, nil
 	}
-	wrapped, keyID, _, lookupErr := r.Store.GetBucketSigningKey(ctx, bucket)
+	wrapped, keyID, createdAt, lookupErr := r.Store.GetBucketSigningKey(ctx, bucket)
 	if lookupErr != nil {
 		if errors.Is(lookupErr, ErrBucketSigningKeyNotSet) {
 			return nil, false, nil
@@ -194,6 +217,13 @@ func (r *BucketSigningResolver) ResolveSecret(ctx context.Context, req *http.Req
 		// per-bucket key" — the SigV4 path should not fail because a
 		// bucket lookup blipped. Audited via the counter still.
 		return nil, false, nil
+	}
+	if r.MaxAge > 0 && !createdAt.IsZero() {
+		now := r.now()
+		if now.Sub(createdAt) > r.MaxAge {
+			r.bump("expired")
+			return nil, false, ErrKMSKeyExpired
+		}
 	}
 	if r.Cache != nil {
 		if plain, hit := r.Cache.Get(bucket, keyID); hit {
@@ -207,6 +237,9 @@ func (r *BucketSigningResolver) ResolveSecret(ctx context.Context, req *http.Req
 	}
 	plain, err := r.KMS.UnwrapDEK(ctx, keyID, wrapped)
 	if err != nil {
+		if r.ClassifyUnwrap != nil {
+			err = r.ClassifyUnwrap(err)
+		}
 		r.bump(classifyUnwrapErr(err))
 		return nil, false, err
 	}
@@ -215,6 +248,13 @@ func (r *BucketSigningResolver) ResolveSecret(ctx context.Context, req *http.Req
 	}
 	r.bump("cache_miss_ok")
 	return plain, true, nil
+}
+
+func (r *BucketSigningResolver) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
 }
 
 func (r *BucketSigningResolver) bucket(req *http.Request) string {
@@ -265,6 +305,8 @@ func classifyUnwrapErr(err error) string {
 		return "unavailable"
 	case errors.Is(err, ErrKMSTampered):
 		return "tampered"
+	case errors.Is(err, ErrKMSKeyExpired):
+		return "expired"
 	default:
 		return "denied"
 	}

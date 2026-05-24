@@ -153,8 +153,10 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	// Wired only when a KMS provider is configured — without it
 	// UnwrapDEK cannot run; absent per-bucket keys still fall through
 	// to the IAM access-key path so KMS-less deployments keep working.
+	var bucketSigningResolver *auth.BucketSigningResolver
 	if kmsProvider != nil {
-		mw.BucketSigning = buildBucketSigningResolver(metaStore, kmsProvider, logger)
+		bucketSigningResolver = buildBucketSigningResolver(metaStore, kmsProvider, logger)
+		mw.BucketSigning = bucketSigningResolver
 	}
 	apiHandler.VHostPatterns = vhostPatterns()
 	drainCache := placement.NewDrainCache(metaStore.ListClusterStates, 0)
@@ -256,6 +258,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 			Inflight:        rebalanceResolved.Inflight,
 			Shards:          rebalanceResolved.Shards,
 		},
+		SigningKey: buildSigningKeyAdminConfig(kmsProvider, bucketSigningResolver, logger),
 	})
 
 	mux := http.NewServeMux()
