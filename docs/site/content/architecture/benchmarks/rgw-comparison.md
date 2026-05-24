@@ -193,6 +193,27 @@ Additional caveats:
   fraction that fits; the rest is reproducible on a Linux box with
   ≥ 32 GiB RAM + dedicated NVMe OSDs (tracked as a follow-up).
 
+<!-- BENCH-AUTO-START -->
+
+## Latest refresh (auto-generated)
+
+_Last refresh: 2026-05-24 via `.github/workflows/bench-rgw.yml`._
+
+- Strata commit: `4660611571b4a5efd7b1f1c7ca5054473c148e5e`
+- RGW image: `quay.io/ceph/ceph:v19.2.3`
+- Source JSONL: `rgw-comparison-2026-05-24.jsonl`
+
+| target | workload | object size | concurrency | p50 ms | p95 ms | p99 ms | MB/s | ops/s | errors | runs |
+| ------ | -------- | ----------- | ----------- | ------ | ------ | ------ | ---- | ----- | ------ | ---- |
+| strata | put-small | 1KiB | 1 | 9.600 | 15.753 | 16.300 | 0.100 | 101.450 | 0 | 7 |
+| strata | put-small | 1KiB | 8 | 11.400 | 195.447 | 211.800 | 0.200 | 209.020 | 0 | 3 |
+| strata | put-small | 1KiB | 32 | 107.200 | 256.720 | 269.800 | 0.280 | 289.660 | 0 | 3 |
+| strata | put-small | 1KiB | 128 | 262.200 | 389.011 | 400.500 | 0.480 | 487.260 | 0 | 3 |
+| rgw | put-small | 1KiB | 1 | 1.300 | 2.035 | 2.100 | 0.740 | 759.530 | 0 | 3 |
+| rgw | put-small | 1KiB | 8 | 18481.900 | 21436.485 | 21699.000 | 0.020 | 16.830 | 0 | 3 |
+
+<!-- BENCH-AUTO-END -->
+
 ## Workload-by-workload
 
 > **Status:** post-fix numbers captured `2026-05-22` (US-004

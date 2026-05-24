@@ -401,3 +401,96 @@ Cycle: ralph/auth-dx-trailer-lima
   site at once. `Edit` with `replace_all` on the exact call shape is
   the fastest way to rebase test files in lockstep.
 ---
+
+## 2026-05-24 — US-005
+- New GitHub Actions workflow `.github/workflows/bench-rgw.yml`: weekly
+  cron `0 4 * * 0` (Sun 04:00 UTC) + manual `workflow_dispatch` (inputs:
+  `regression_threshold`, `bench_args`). `runs-on: [self-hosted, strata-bench]`,
+  `timeout-minutes: 240`, `concurrency: bench-rgw` (no in-flight cancel).
+  Steps: checkout → collect runner specs (host/cpu/cores/mem/disk/kernel/
+  docker) → `make up-all && wait-tikv && wait-ceph && wait-strata-lab` →
+  `make up-bench-rgw && wait-rgw` + `--extract-rgw-creds` →
+  `make $BENCH_MAKE_TARGET` → upload `rgw-comparison-*.jsonl` artifact
+  (retention 90d) → `scripts/bench-update-doc.sh` (emits
+  `max_regression_pct` / `changed` / `regression_detail` via GITHUB_OUTPUT)
+  → tear down lab → branch `bench/rgw-comparison-<YYYY-MM-DD>` + commit
+  + push + `gh pr create` against `main` → auto-merge gate: if Strata
+  p99 regression < `BENCH_REGRESSION_THRESHOLD` (default 10) →
+  `gh pr merge --auto --squash --delete-branch`, else
+  `gh pr comment @danchupin` for manual review.
+- New `scripts/bench-update-doc.sh`: reads latest
+  `scripts/bench-results/rgw-comparison-*.jsonl` (lexical sort), groups
+  rows by `(target, workload, object_size, concurrency)`, medians
+  p50/p95/p99/MB-s/ops-s + sums errors, renders the auto-managed block
+  between `<!-- BENCH-AUTO-START -->` / `<!-- BENCH-AUTO-END -->` markers
+  in the doc, persists a baseline JSON
+  (`docs/site/content/architecture/benchmarks/data/rgw-bench-baseline.json`),
+  computes max p99 regression vs previous baseline (Strata target only —
+  RGW jitter is noisy on the lima envelope per PRD), and prints
+  `max_regression_pct=<N>` / `changed=<bool>` to stdout + appends to
+  `$GITHUB_OUTPUT` when set. Refresh date is sourced from the JSONL
+  filename so re-runs against the same JSONL produce byte-identical doc
+  bytes. `--check` mode validates doc matches latest JSONL without
+  writing (drift detector for CI). `--help`/`-h` prints the embedded
+  usage block. Idempotence smoke-verified: `bash scripts/bench-update-doc.sh`
+  + diff → 0 lines changed, `--check` → `OK: doc matches latest jsonl`.
+- New baseline JSON `rgw-bench-baseline.json` (~6 Strata + RGW rows from
+  the existing `rgw-comparison-2026-05-24.jsonl`). Sorted keys → byte-
+  stable diffs. Persisted under `docs/site/content/architecture/benchmarks/data/`
+  so Hugo doesn't surface it as a page but a future workflow run has
+  numerical anchor for regression diff.
+- Doc edit `docs/site/content/architecture/benchmarks/rgw-comparison.md`:
+  auto-managed block injected before `## Workload-by-workload` carrying
+  date / commit / RGW image / JSONL name / full per-row table. Operator-
+  curated sections (`Methodology`, `Workload-by-workload`,
+  `Reproducibility`, `See also`, etc.) untouched.
+- New operator runbook `docs/site/content/developers/bench-runner-setup.md`:
+  required hardware (8 cores / 16 GiB RAM / 200 GiB disk / Ubuntu 22.04
+  / Docker 24.x), Docker install steps, GitHub Actions self-hosted runner
+  registration with both labels (`self-hosted,strata-bench`), systemd
+  service install, manual-dispatch verification, auto-PR behaviour,
+  Lima box reduced smoke (`scripts/bench-rgw-comparison.sh put-small both
+  --runs=1 --concurrency=8`), troubleshooting (queued runs, disk pre-
+  flight, no-diff PR, GraphQL permission). Cross-linked from
+  `docs/site/content/developers/_index.md` "See also".
+- Quality: `go vet ./...` clean (no Go-side churn). `bash scripts/bench-
+  update-doc.sh` smoke + idempotent re-run + `--check` mode all green.
+  `python3 -c "import yaml; yaml.safe_load(open(...))"` validates the
+  workflow YAML. `cd docs/site && hugo --quiet` exits 0 (doc renders).
+- Files: `.github/workflows/bench-rgw.yml` (new),
+  `scripts/bench-update-doc.sh` (new, executable),
+  `docs/site/content/architecture/benchmarks/data/rgw-bench-baseline.json`
+  (new), `docs/site/content/architecture/benchmarks/rgw-comparison.md`
+  (auto-block injected), `docs/site/content/developers/bench-runner-setup.md`
+  (new), `docs/site/content/developers/_index.md` (cross-link added).
+
+**Learnings for future iterations:**
+- The doc auto-managed block uses HTML-comment markers
+  (`<!-- BENCH-AUTO-START -->` / `<!-- BENCH-AUTO-END -->`) — same
+  pattern works for any future doc auto-block. The Python splicer in
+  `bench-update-doc.sh` is reusable as-is; copy + change the marker
+  names + the per-row formatter.
+- Refresh date derived from the JSONL filename, NOT `datetime.now()`,
+  is the canonical trick for byte-identical re-runs on the same JSONL.
+  Without it, idempotence smoke (`scripts/bench-update-doc.sh && diff`)
+  reports false drift.
+- Sorted JSON keys (`sort_keys=True` in `json.dump`) keep baseline diffs
+  reviewer-friendly. Pair with the explicit `(target, workload, conc)`
+  group-sort in the markdown table for both files to be diff-stable.
+- Workflow `concurrency: bench-rgw` + `cancel-in-progress: false`
+  serialises overlapping cron + manual dispatches without dropping the
+  in-flight run. Critical for 4-hour bench cycles where mid-run cancel
+  wastes the entire wall clock.
+- Self-hosted runner labels are AND-matched — `runs-on: [self-hosted,
+  strata-bench]` requires BOTH labels on the runner; missing either
+  queues the job indefinitely. Bench-runner-setup.md surfaces this in
+  the troubleshooting section.
+- `BENCH_REGRESSION_THRESHOLD` watches only the Strata side because RGW
+  jitter on the single-OSD memstore is large (per rgw-comparison.md
+  Limitations). If you ever extend the gate to RGW p99, raise the
+  threshold (~30%) to absorb the noise floor.
+- `gh pr merge --auto --squash` requires branch-protection-required-checks
+  to be configured; without them the merge happens immediately. The
+  workflow assumes the operator wires required checks before relying on
+  the auto-merge gate.
+---

@@ -1,0 +1,209 @@
+name: Bench RGW comparison
+
+# US-005 of ralph/auth-dx-trailer-lima — close the lima envelope blocker on
+# `docs/site/content/architecture/benchmarks/rgw-comparison.md`. Runs the full
+# rgw-comparison sweep on a self-hosted runner (operator-provisioned per
+# `docs/site/content/developers/bench-runner-setup.md`) on a weekly cron, then
+# regenerates the doc's auto-managed block via `scripts/bench-update-doc.sh`
+# and opens a PR when numbers move. Auto-merges the PR if max p99 regression
+# on the Strata target is below `BENCH_REGRESSION_THRESHOLD` (default 10 %);
+# otherwise leaves the PR open + pings the maintainer.
+#
+# This workflow is opt-in by labels — `runs-on: [self-hosted, strata-bench]`.
+# Without a registered runner with both labels GitHub queues the job
+# indefinitely. Setup steps are documented at:
+#   docs/site/content/developers/bench-runner-setup.md
+#
+# Triggers:
+#   - weekly cron Sun 04:00 UTC
+#   - manual dispatch (workflow_dispatch) — useful for after-fix re-runs.
+
+on:
+  schedule:
+    - cron: '0 4 * * 0'
+  workflow_dispatch:
+    inputs:
+      regression_threshold:
+        description: 'Max p99 regression % (Strata side) below which auto-merge fires'
+        required: false
+        default: '10'
+      bench_args:
+        description: 'Override the `make bench-rgw-comparison` target (e.g. `bench-rgw-comparison-with-cassandra`)'
+        required: false
+        default: 'bench-rgw-comparison'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# At most one bench run in flight — sequential cron + manual dispatches
+# do not race for the same self-hosted box.
+concurrency:
+  group: bench-rgw
+  cancel-in-progress: false
+
+jobs:
+  bench-rgw:
+    name: Cycled rgw-comparison bench
+    runs-on: [self-hosted, strata-bench]
+    timeout-minutes: 240
+    env:
+      BENCH_REGRESSION_THRESHOLD: ${{ github.event.inputs.regression_threshold || '10' }}
+      BENCH_MAKE_TARGET: ${{ github.event.inputs.bench_args || 'bench-rgw-comparison' }}
+      STRATA_STATIC_CREDENTIALS: strataAK:strataSK:strata
+      AWS_ACCESS_KEY_ID: strataAK
+      AWS_SECRET_ACCESS_KEY: strataSK
+      AWS_DEFAULT_REGION: us-east-1
+      BENCH_RGW_IMAGE: 'quay.io/ceph/ceph:v19.2.3'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Collect runner specs
+        id: specs
+        run: |
+          set -euo pipefail
+          {
+            echo "host=$(hostname)"
+            echo "cpu=$(lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^ +/,"",$2); print $2; exit}' || uname -p)"
+            echo "cores=$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+            echo "mem=$(free -h 2>/dev/null | awk '/^Mem:/ {print $2}' || sysctl -n hw.memsize)"
+            echo "disk=$(df -h "$PWD" 2>/dev/null | awk 'NR==2 {print $4 " avail / " $2 " total"}')"
+            echo "kernel=$(uname -srm)"
+            echo "docker=$(docker --version 2>/dev/null | head -1)"
+            echo "strata_sha=${GITHUB_SHA}"
+            echo "rgw_image=${BENCH_RGW_IMAGE}"
+          } | tee runner-specs.txt
+
+      - name: Bring up TiKV-default lab
+        run: |
+          make up-all
+          make wait-tikv
+          make wait-ceph
+          make wait-strata-lab
+
+      - name: Bring up bench RGW
+        run: |
+          make up-bench-rgw
+          make wait-rgw
+          bash scripts/bench-rgw-comparison.sh --extract-rgw-creds
+
+      - name: Run rgw-comparison bench
+        env:
+          STRATA_BENCH_SINGLE_CLUSTER: '1'
+        run: |
+          make "${BENCH_MAKE_TARGET}"
+
+      - name: Upload raw JSONL
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rgw-comparison-jsonl
+          path: scripts/bench-results/rgw-comparison-*.jsonl
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Regenerate doc block + baseline
+        id: update_doc
+        env:
+          BENCH_COMMIT_SHA: ${{ github.sha }}
+          BENCH_RUNNER_INFO: |
+            host:    $(cat runner-specs.txt | awk -F= '/^host=/    {print $2}')
+            cpu:     $(cat runner-specs.txt | awk -F= '/^cpu=/     {print $2}')
+            cores:   $(cat runner-specs.txt | awk -F= '/^cores=/   {print $2}')
+            mem:     $(cat runner-specs.txt | awk -F= '/^mem=/     {print $2}')
+            disk:    $(cat runner-specs.txt | awk -F= '/^disk=/    {print $2}')
+            kernel:  $(cat runner-specs.txt | awk -F= '/^kernel=/  {print $2}')
+            docker:  $(cat runner-specs.txt | awk -F= '/^docker=/  {print $2}')
+        run: |
+          # Resolve $(...) interpolation in BENCH_RUNNER_INFO (multi-line env).
+          BENCH_RUNNER_INFO="$(echo "${BENCH_RUNNER_INFO}" | envsubst)"
+          export BENCH_RUNNER_INFO
+          bash scripts/bench-update-doc.sh
+
+      - name: Tear down lab
+        if: always()
+        run: make down
+
+      - name: Open PR with refreshed numbers
+        if: steps.update_doc.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGRESSION_PCT: ${{ steps.update_doc.outputs.max_regression_pct }}
+          REGRESSION_DETAIL: ${{ steps.update_doc.outputs.regression_detail }}
+        run: |
+          set -euo pipefail
+          DATE_TAG="$(date -u +%Y-%m-%d)"
+          BRANCH="bench/rgw-comparison-${DATE_TAG}"
+
+          git config user.name "strata-bench-bot"
+          git config user.email "strata-bench-bot@users.noreply.github.com"
+          git checkout -b "${BRANCH}"
+          git add docs/site/content/architecture/benchmarks/rgw-comparison.md \
+                  docs/site/content/architecture/benchmarks/data/rgw-bench-baseline.json
+
+          COMMIT_MSG_FILE="$(mktemp)"
+          {
+            echo "bench: rgw-comparison refresh (week of ${DATE_TAG})"
+            echo
+            echo "Auto-generated by .github/workflows/bench-rgw.yml."
+            echo
+            echo "Max p99 regression (Strata side): ${REGRESSION_PCT}%"
+            echo "Regression threshold: ${BENCH_REGRESSION_THRESHOLD}%"
+            if [[ -n "${REGRESSION_DETAIL}" ]]; then
+              echo "Detail: ${REGRESSION_DETAIL}"
+            fi
+            echo
+            echo "Co-Authored-By: strata-bench-bot <strata-bench-bot@users.noreply.github.com>"
+          } > "${COMMIT_MSG_FILE}"
+          git commit -F "${COMMIT_MSG_FILE}"
+          git push -u origin "${BRANCH}"
+
+          PR_BODY_FILE="$(mktemp)"
+          {
+            echo "## Auto-refreshed rgw-comparison numbers"
+            echo
+            echo "Generated by \`.github/workflows/bench-rgw.yml\` on $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+            echo
+            echo "### Runner specs"
+            echo '```text'
+            cat runner-specs.txt
+            echo '```'
+            echo
+            echo "### Regression summary"
+            echo "- Max p99 regression (Strata side): **${REGRESSION_PCT}%**"
+            echo "- Threshold for auto-merge: ${BENCH_REGRESSION_THRESHOLD}%"
+            if [[ -n "${REGRESSION_DETAIL}" ]]; then
+              echo "- Detail: \`${REGRESSION_DETAIL}\`"
+            fi
+            echo
+            echo "### Sources"
+            echo "- Raw JSONL uploaded as workflow artifact \`rgw-comparison-jsonl\`."
+            echo "- Doc block + baseline updated under \`docs/site/content/architecture/benchmarks/\`."
+          } > "${PR_BODY_FILE}"
+
+          PR_URL="$(gh pr create \
+            --base main \
+            --head "${BRANCH}" \
+            --title "bench: rgw-comparison refresh (week of ${DATE_TAG})" \
+            --body-file "${PR_BODY_FILE}")"
+          echo "PR_URL=${PR_URL}" >> "${GITHUB_ENV}"
+
+          # Auto-merge gate: regression < threshold → squash auto-merge;
+          # otherwise leave open + ping maintainer.
+          if awk -v r="${REGRESSION_PCT}" -v t="${BENCH_REGRESSION_THRESHOLD}" \
+              'BEGIN { exit !(r+0 < t+0) }'; then
+            gh pr merge "${PR_URL}" --auto --squash --delete-branch
+            echo "auto-merge enabled (regression ${REGRESSION_PCT}% < ${BENCH_REGRESSION_THRESHOLD}%)"
+          else
+            gh pr comment "${PR_URL}" --body "@danchupin manual review required — Strata-side p99 regression ${REGRESSION_PCT}% exceeds ${BENCH_REGRESSION_THRESHOLD}% threshold."
+            echo "auto-merge skipped (regression ${REGRESSION_PCT}% >= ${BENCH_REGRESSION_THRESHOLD}%)"
+          fi
+
+      - name: No-op summary (no diff)
+        if: steps.update_doc.outputs.changed != 'true'
+        run: |
+          echo "bench-rgw doc unchanged — no PR needed (numbers identical or within float-format tolerance)."
