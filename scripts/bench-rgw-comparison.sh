@@ -645,8 +645,11 @@ assert_bucket_absent() {
   esac
   local bucket="bench-${workload}-${target}"
   local code
+  # head-bucket exits 254 on missing-bucket. Without `|| true` the pipefail
+  # propagates aws's 254 through cmdsub → assignment → set -e kills the script
+  # silently between strata + rgw legs of `both` (no FAIL line, just exit 254).
   code="$(AWS_ACCESS_KEY_ID="$creds_ak" AWS_SECRET_ACCESS_KEY="$creds_sk" AWS_DEFAULT_REGION=us-east-1 \
-    aws --endpoint-url "$endpoint" s3api head-bucket --bucket "$bucket" 2>&1 | head -1)"
+    aws --endpoint-url "$endpoint" s3api head-bucket --bucket "$bucket" 2>&1 | head -1 || true)"
   if [[ "$code" != *"Not Found"* && "$code" != *"NoSuchBucket"* && "$code" != *"404"* && -n "$code" ]]; then
     # head-bucket returned no error → bucket still exists. Hard-fail to surface drift.
     fail "sanity: bucket $bucket on $target still exists after cleanup_workload (head-bucket output: $code)"

@@ -318,6 +318,14 @@ var (
 		},
 		[]string{"endpoint"},
 	)
+
+	BucketStatsShardWritesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_bucket_stats_shard_writes_total",
+			Help: "Per-shard BumpBucketStats commits on the TiKV meta backend (US-002 p1-fixes). Uniform distribution across shard labels = healthy fan-out; one shard dominating points at a hash-collision or a degenerate caller hashing on a stable key instead of a fresh uuid per op.",
+		},
+		[]string{"shard"},
+	)
 )
 
 func Register() {
@@ -356,6 +364,7 @@ func Register() {
 		DrainCompleteTotal,
 		DrainProgressProbeErrorsTotal,
 		AdminConfigEndpointErrorsTotal,
+		BucketStatsShardWritesTotal,
 	)
 }
 
@@ -437,6 +446,15 @@ func TemplatePath(p string) string {
 		return "/{bucket}/{key}"
 	}
 	return "/{bucket}"
+}
+
+// TiKVObserver implements the tikv.Metrics interface (US-002 p1-fixes). The
+// tikv package keeps prometheus out of its import set; the cmd-layer wiring
+// plugs in this adapter. Mirrors the CassandraObserver / RADOSObserver shape.
+type TiKVObserver struct{}
+
+func (TiKVObserver) IncBucketStatsShardWrite(shard int) {
+	BucketStatsShardWritesTotal.WithLabelValues(strconv.Itoa(shard)).Inc()
 }
 
 // CassandraObserver implements the cassandra.Metrics interface defined in

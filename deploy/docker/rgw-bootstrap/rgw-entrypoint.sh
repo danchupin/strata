@@ -64,31 +64,170 @@ if ! ceph osd pool ls 2>/dev/null | grep -qx '\.rgw\.root'; then
   ceph osd pool application enable .rgw.root rgw || true
 fi
 
+# Pre-create RGW backing pools BEFORE `period update --commit` — breaks the
+# chicken-and-egg deadlock observed on Ceph squid (v19.2.x):
+#   radosgw-admin period commit refuses while "current period does not have
+#   zone configured", and the zone -> period propagation step internally
+#   calls librados pool_create on `default.rgw.{control,meta,log}` which
+#   returns EOVERFLOW (34, "Numerical result out of range") in single-OSD
+#   lab mode. The period commit then never lands; subsequent cycles inherit
+#   the empty period and RGW refuses to serve I/O. Pre-creating the pools
+#   side-steps the librados path entirely so period commit's zone -> period
+#   propagation can succeed on first boot.
+#
+# All three are non-dot-prefixed so the plain `osd pool create` CLI accepts
+# them. pg_num/pgp_num pinned to 8 + autoscaler off (via the global config
+# set above) so the OSD's mon_max_pg_per_osd budget stays comfortable.
+for pool in default.rgw.control default.rgw.meta default.rgw.log; do
+  if ! ceph osd pool ls 2>/dev/null | grep -qx "${pool}"; then
+    echo "rgw-entrypoint: pre-creating ${pool} pool"
+    ceph osd pool create "${pool}" 8 8 replicated
+    ceph osd pool application enable "${pool}" rgw || true
+  fi
+done
+
+# US-007 pre-create RGW bucket-backing pools. Without these, the FIRST
+# CreateBucket against RGW returns `<Code>InvalidRange</Code><Message></Message>`
+# (botocore then crashes with `TypeError: argument of type 'NoneType' is not
+# iterable` on the empty Message — surfaces to the operator as a confusing
+# aws-cli stack trace, not the real "pool missing" cause). Root cause: RGW's
+# default zone references `default.rgw.buckets.{index,data,non-ec}` for bucket
+# placement, and the auto-create path inside RGW hits the same EOVERFLOW that
+# the control/meta/log pools hit (single-OSD memstore can't allocate PGs
+# transparently). Pre-creating the three bucket pools side-steps the auto-create
+# path and lets the bench harness's CreateBucket succeed on cycle 1.
+for pool in default.rgw.buckets.index default.rgw.buckets.data default.rgw.buckets.non-ec; do
+  if ! ceph osd pool ls 2>/dev/null | grep -qx "${pool}"; then
+    echo "rgw-entrypoint: pre-creating ${pool} pool"
+    ceph osd pool create "${pool}" 8 8 replicated
+    ceph osd pool application enable "${pool}" rgw || true
+  fi
+done
+
+# radosgw-admin's first invocation against a freshly-restarted single-OSD
+# memstore lab can hang on internal librados-client thread sync (observed
+# stuck in `futex_wait_queue` for >60s on cycle 2+ even though `ceph -s`
+# and `ceph osd pool stats .rgw.root` return immediately). Wrap every
+# radosgw-admin invocation below in a 30s-timeout + 3-retry loop so the
+# bootstrap recovers from the hang transparently. Idempotent semantics of
+# every radosgw-admin call invoked here (get/info/create-if-absent) make
+# retries safe.
+radosgw_retry() {
+  local attempt
+  for attempt in 1 2 3; do
+    if timeout 30 radosgw-admin "$@"; then
+      return 0
+    fi
+    local rc=$?
+    if [ "${rc}" -eq 124 ]; then
+      echo "rgw-entrypoint: radosgw-admin $1 hung (attempt ${attempt}/3) — retrying" >&2
+    elif [ "${attempt}" -lt 3 ]; then
+      echo "rgw-entrypoint: radosgw-admin $1 exited ${rc} (attempt ${attempt}/3) — retrying" >&2
+    fi
+  done
+  return 1
+}
+radosgw_retry_quiet() {
+  local attempt
+  for attempt in 1 2 3; do
+    if timeout 30 radosgw-admin "$@" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Realm/zonegroup/zone bootstrap (idempotent — get-first, create-if-absent).
-if ! radosgw-admin realm get --rgw-realm="${REALM}" >/dev/null 2>&1; then
+if ! radosgw_retry_quiet realm get --rgw-realm="${REALM}"; then
   echo "rgw-entrypoint: creating realm ${REALM}"
-  radosgw-admin realm create --rgw-realm="${REALM}" --default
+  radosgw_retry realm create --rgw-realm="${REALM}" --default >/dev/null
 fi
 
-if ! radosgw-admin zonegroup get --rgw-zonegroup="${ZONEGROUP}" >/dev/null 2>&1; then
+if ! radosgw_retry_quiet zonegroup get --rgw-zonegroup="${ZONEGROUP}"; then
   echo "rgw-entrypoint: creating zonegroup ${ZONEGROUP}"
-  radosgw-admin zonegroup create --rgw-zonegroup="${ZONEGROUP}" --rgw-realm="${REALM}" --master --default
+  radosgw_retry zonegroup create --rgw-zonegroup="${ZONEGROUP}" --rgw-realm="${REALM}" --master --default >/dev/null
 fi
 
-if ! radosgw-admin zone get --rgw-zone="${ZONE}" >/dev/null 2>&1; then
+if ! radosgw_retry_quiet zone get --rgw-zone="${ZONE}"; then
   echo "rgw-entrypoint: creating zone ${ZONE}"
-  radosgw-admin zone create --rgw-zone="${ZONE}" --rgw-zonegroup="${ZONEGROUP}" --rgw-realm="${REALM}" --master --default
+  radosgw_retry zone create --rgw-zone="${ZONE}" --rgw-zonegroup="${ZONEGROUP}" --rgw-realm="${REALM}" --master --default >/dev/null
 fi
+
+# Period reconcile — investigation (US-005 of ralph/p1-fixes):
+#
+# Drift symptom on `make down && make up-all && make up-bench-rgw` × N: cycle 1
+# brings up RGW cleanly, cycle 2+ hangs at `wait-rgw` because RGW daemon refuses
+# to serve I/O until the period agrees with the zonegroup membership.
+#
+# Root cause: `radosgw-admin zone create --rgw-zonegroup=X --master --default`
+# creates the zone row but does NOT always add the zone to the zonegroup's
+# `zones[]` array. The `period update --commit` immediately after the zone
+# create reads `zonegroup.zones[] = []` and commits a period whose zonegroup
+# has no zones. On the next container boot the zone/zonegroup/realm rows still
+# exist (idempotent guards skip create), but the latest committed period still
+# references the empty zones[] from cycle 1 — period_update_commit on cycle 2
+# is a no-op increment. RGW daemon starts pointing at zone=Z but the period's
+# zonegroup has zones[] empty → no rgw_zonegroup → 503 / hang.
+#
+# Diff between cycle-1 and cycle-2 `radosgw-admin period get` JSON:
+#   period_map.zonegroups[?(.name="default")].zones — empty on both cycles
+#   (the drift is silent — period commit doesn't repopulate zones[] from
+#   the zone-create side).
+#
+# Fix: before `period update --commit`, reconcile zonegroup → zone membership
+# explicitly via `radosgw-admin zonegroup add --rgw-zone=Z`. Idempotent — no-op
+# if zone is already a member. Also ensure master_zone is set so RGW can
+# resolve the master endpoint for replication metadata.
+echo "rgw-entrypoint: period reconcile — inspecting zonegroup ${ZONEGROUP} for zone ${ZONE}"
+ZG_JSON="$(radosgw_retry zonegroup get --rgw-zonegroup="${ZONEGROUP}")"
+zone_in_zg=0
+if command -v jq >/dev/null 2>&1; then
+  if echo "${ZG_JSON}" | jq -e --arg z "${ZONE}" '.zones[]? | select(.name == $z)' >/dev/null 2>&1; then
+    zone_in_zg=1
+  fi
+  master_zone_id="$(echo "${ZG_JSON}" | jq -r '.master_zone // ""')"
+  zone_id="$(radosgw_retry zone get --rgw-zone="${ZONE}" | jq -r '.id // ""')"
+else
+  if echo "${ZG_JSON}" | python3 -c 'import sys,json; d=json.load(sys.stdin); n=sys.argv[1]; sys.exit(0 if any(z.get("name")==n for z in d.get("zones",[])) else 1)' "${ZONE}" 2>/dev/null; then
+    zone_in_zg=1
+  fi
+  master_zone_id="$(echo "${ZG_JSON}" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("master_zone",""))')"
+  zone_id="$(radosgw_retry zone get --rgw-zone="${ZONE}" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("id",""))')"
+fi
+
+if [ "${zone_in_zg}" -ne 1 ]; then
+  echo "rgw-entrypoint: period reconcile — zone ${ZONE} missing from zonegroup ${ZONEGROUP}, adding"
+  radosgw_retry zonegroup add --rgw-zonegroup="${ZONEGROUP}" --rgw-zone="${ZONE}" >/dev/null
+else
+  echo "rgw-entrypoint: period reconcile — zone ${ZONE} already in zonegroup ${ZONEGROUP}"
+fi
+
+if [ -n "${zone_id}" ] && [ "${master_zone_id}" != "${zone_id}" ]; then
+  echo "rgw-entrypoint: period reconcile — setting master_zone=${zone_id} on zonegroup ${ZONEGROUP} (was: '${master_zone_id}')"
+  radosgw_retry zonegroup modify --rgw-zonegroup="${ZONEGROUP}" --rgw-zone="${ZONE}" --master --default >/dev/null
+fi
+
+# Operator visibility — final zonegroup snapshot summarising zonegroup count
+# (period_map.zonegroups[]) + per-zonegroup zone count. Format keeps the line
+# greppable and matches the AC contract in tasks/prd-p1-fixes / scripts/ralph
+# US-005.
+ZG_AFTER="$(radosgw_retry zonegroup get --rgw-zonegroup="${ZONEGROUP}")"
+if command -v jq >/dev/null 2>&1; then
+  zg_summary="$(echo "${ZG_AFTER}" | jq -r '"\(.name):\(.zones | length)"')"
+else
+  zg_summary="$(echo "${ZG_AFTER}" | python3 -c 'import sys,json; d=json.load(sys.stdin); print("%s:%d" % (d.get("name",""), len(d.get("zones",[]))))')"
+fi
+echo "strata-rgw-bootstrap: period reconcile — zonegroups=1, zones-per-zonegroup=[${zg_summary}]"
 
 echo "rgw-entrypoint: period update --commit"
-radosgw-admin period update --commit --rgw-realm="${REALM}" >/dev/null
+radosgw_retry period update --commit --rgw-realm="${REALM}" >/dev/null
 
 # Bench S3 user — `radosgw-admin user create` errors if uid exists, so guard
 # by `user info` first (PRD allows `|| true` on duplicate; explicit check is
 # cleaner so a real failure still surfaces).
-if ! radosgw-admin user info --uid=bench >/dev/null 2>&1; then
+if ! radosgw_retry_quiet user info --uid=bench; then
   echo "rgw-entrypoint: creating bench user"
-  radosgw-admin user create --uid=bench --display-name="Bench" >/dev/null
+  radosgw_retry user create --uid=bench --display-name="Bench" >/dev/null
 else
   echo "rgw-entrypoint: bench user already present"
 fi
@@ -108,7 +247,7 @@ chown -R ceph:ceph "${RGW_KEYRING_DIR}"
 # fallback (verified present in ceph/ceph:v19.2.3 image — needed by the
 # orchestrator). Log which parser was chosen so operator can debug.
 echo "rgw-entrypoint: parsing user creds"
-USER_JSON="$(radosgw-admin user info --uid=bench)"
+USER_JSON="$(radosgw_retry user info --uid=bench)"
 if command -v jq >/dev/null 2>&1; then
   echo "rgw-entrypoint: using jq for cred parsing"
   ACCESS_KEY="$(echo "${USER_JSON}" | jq -r '.keys[0].access_key')"
@@ -129,6 +268,11 @@ mkdir -p "${BENCH_CREDS_DIR}"
 cat > "${BENCH_CREDS_FILE}" <<EOF
 # Generated by rgw-entrypoint.sh — bench user S3 creds for the rgw container.
 # Sourced by scripts/bench-rgw-comparison.sh (US-002).
+# Lowercase keys match the documented parser contract (extract_rgw_creds in
+# bench-rgw-comparison.sh greps ^access_key=/^secret_key=). Uppercase RGW_*
+# aliases retained for callers that shell-source the file directly.
+access_key=${ACCESS_KEY}
+secret_key=${SECRET_KEY}
 RGW_ACCESS_KEY=${ACCESS_KEY}
 RGW_SECRET_KEY=${SECRET_KEY}
 RGW_ENDPOINT_URL=http://localhost:9991

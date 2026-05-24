@@ -645,6 +645,7 @@ func buildMetaStore(cfg *config.Config, logger *slog.Logger, tp *strataotel.Prov
 		return metatikv.Open(metatikv.Config{
 			PDEndpoints: eps,
 			Tracer:      tp.Tracer("strata.meta.tikv"),
+			Metrics:     metrics.TiKVObserver{},
 		})
 	default:
 		return nil, errors.New("unknown meta backend")

@@ -28,8 +28,9 @@ runs the gateway and every background worker; an embedded web console handles da
 
 | Capability                  | Strata                                                   | Ceph RGW                              |
 |-----------------------------|----------------------------------------------------------|---------------------------------------|
-| Bucket index                | Sharded Cassandra / TiKV, ordered range scans[^list-100k] | RADOS omap, dynamic resharding stalls[^list-100k] |
-| Single-object PUT/GET (p99) | 4 MiB RADOS chunks + sharded meta lookup[^put-small][^get-small] | 4 MiB RADOS chunks + omap meta lookup[^put-small][^get-small] |
+| Bucket index                | 208k ops/s on a 100k-key bucket; RGW saturates the OSD on the seed phase[^list-100k] | RADOS omap, dynamic resharding stalls[^list-100k] |
+| Concurrent 1 KiB PUT (p99)  | ~211 ms @ c=8 — sharded `bucket_stats` fan-out absorbs writes[^put-small] | 11–22 s @ c=8 — omap-index serialises every PUT[^put-small] |
+| Single-object PUT/GET (p99) | ~12 ms @ c=1 (user-space SigV4)[^get-small] | ~2 ms @ c=1 (in-process auth)[^get-small] |
 | Multipart 5 GB (throughput) | 4 MiB chunk write, manifest LWT on Complete[^multipart-5g] | 4 MiB striping, omap-index bookkeeping[^multipart-5g] |
 | Online resharding           | Yes — `strata admin reshard`, no read pause              | Re-shard locks the bucket             |
 | Multi-cluster routing       | Per-bucket policies + weighted default routing           | Multisite zonegroups only             |

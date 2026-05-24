@@ -30,6 +30,10 @@ type Config struct {
 	// serverapp.buildMetaStore; tests leave it nil). Mirrors
 	// cassandra.SessionConfig.Tracer.
 	Tracer trace.Tracer
+	// Metrics receives optional per-op signals (currently the per-shard
+	// BucketStats counter — US-002 p1-fixes). Nil disables counters; production
+	// paths wire metrics.TiKVObserver{} via serverapp.buildMetaStore.
+	Metrics Metrics
 }
 
 // WithGCDualWrite is a helper for tests / callers that want to set the
@@ -44,6 +48,7 @@ type Store struct {
 	kv          kvBackend
 	gcDualWrite bool
 	observer    *Observer
+	metrics     Metrics
 }
 
 // Open dials the cluster identified by cfg.PDEndpoints and returns a Store
@@ -58,7 +63,7 @@ func Open(cfg Config) (*Store, error) {
 	if cfg.GCDualWrite != nil {
 		gcDualWrite = *cfg.GCDualWrite
 	}
-	return &Store{cfg: cfg, kv: b, gcDualWrite: gcDualWrite, observer: NewObserver(cfg.Tracer)}, nil
+	return &Store{cfg: cfg, kv: b, gcDualWrite: gcDualWrite, observer: NewObserver(cfg.Tracer), metrics: cfg.Metrics}, nil
 }
 
 // openWithBackend builds a Store backed by the supplied kvBackend. Used by

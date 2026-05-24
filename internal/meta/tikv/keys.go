@@ -79,7 +79,8 @@ const (
 	subObject          = "o/"  // s/B/<uuid16>/o/<escKey>\x00\x00<verDesc24>
 	subObjectGrants    = "og/" // same shape as subObject
 	subBucketBlob      = "c/"  // s/B/<uuid16>/c/<kind>      (kind is a fixed identifier, no escape)
-	subBucketStats     = "bs"  // s/B/<uuid16>/bs            (single key, live counter)
+	subBucketStats     = "bs"  // s/B/<uuid16>/bs            (legacy single-key slot — retained as documentation; live counter now sharded under subBucketStatsShard)
+	subBucketStatsShard = "bs/" // s/B/<uuid16>/bs/<shard1B>  (US-002 p1-fixes: per-shard live counter fan-out)
 	subUsageAgg        = "ua/" // s/B/<uuid16>/ua/<escClass>\x00\x00<day4>
 	subUsageClassIndex = "uc/" // s/B/<uuid16>/uc/<escClass>\x00\x00 (presence row)
 	subInventoryConfig = "i/"  // s/B/<uuid16>/i/<configID>
@@ -348,11 +349,25 @@ func BucketBlobKey(bucketID uuid.UUID, kind string) []byte {
 	return append(out, kind...)
 }
 
-// BucketStatsKey is the single-row live counter slot for a bucket
-// (US-004..US-005). Bumped via a pessimistic txn under
-// internal/meta/tikv/store.go::BumpBucketStats.
-func BucketStatsKey(bucketID uuid.UUID) []byte {
-	return append(PrefixForBucket(bucketID), subBucketStats...)
+// bucketStatsShardCount is the per-bucket fan-out for live-counter bumps
+// (US-002 p1-fixes). Hard-coded to 8 — the scoping decision in
+// scripts/ralph/prd.json US-001 picked a fixed power-of-two width so
+// `fnv32a(uuid.NewString()) % bucketStatsShardCount` distributes write traffic
+// uniformly without a per-bucket override or an env knob. Read path costs
+// 8 sequential Get calls per GetBucketStats — still negligible for the
+// dashboard/quota probe cadence — and write path serialises only on one of
+// 8 sibling keys, dropping pessimistic-txn LockKeys contention by ~8× at
+// the lab c=128 hot-bucket workload that surfaced the saturation.
+const bucketStatsShardCount = 8
+
+// BucketStatsShardKey is the per-shard live counter slot for a bucket
+// (US-002 p1-fixes). `shard` ∈ [0, bucketStatsShardCount). The 1-byte
+// fixed-width suffix uses no byte-stuffing — values < 0x80 never collide
+// with any other sub-prefix and a forward scan over the unshared
+// `s/B/<uuid16>/bs/` prefix returns all 8 shards in ascending shard order.
+func BucketStatsShardKey(bucketID uuid.UUID, shard uint8) []byte {
+	out := append(PrefixForBucket(bucketID), subBucketStatsShard...)
+	return append(out, shard)
 }
 
 // UserStatsKey is the per-owner denormalised aggregate slot

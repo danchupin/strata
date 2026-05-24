@@ -11,6 +11,21 @@ MEMSTORE_BYTES="${MEMSTORE_BYTES:-4294967296}"
 STRATA_POOL="${STRATA_POOL:-strata.rgw.buckets.data}"
 STRATA_EXTRA_POOLS="${STRATA_EXTRA_POOLS:-}"
 
+# Memstore is RAM-only: every container restart loses the OSD's objects.
+# The mon DB on the persisted volume, however, survives the restart and
+# keeps a pgmap pointing at osd.0's expected pgs. Result on cycle 2+ of
+# `make down && make up-all`: OSD comes up empty, mon still thinks pgs
+# are on it, PGs sit stuck-inactive, every librados client request
+# blocks indefinitely (US-005 of ralph/p1-fixes — RGW lab restart). The
+# fix is to wipe the persisted mon / osd / mgr state at the start of
+# every boot so the cluster always reinitialises fresh, matching the
+# memstore "no persistence" semantic. Skip for `BOOTSTRAP_RESET=0` so
+# tests that need cross-restart persistence can opt out.
+if [ "${BOOTSTRAP_RESET:-1}" = "1" ] && [ -d /var/lib/ceph/mon ]; then
+  echo "bootstrap: resetting persisted ceph state (memstore is non-persistent — match the storage tier)"
+  rm -rf /var/lib/ceph/mon /var/lib/ceph/osd /var/lib/ceph/mgr /var/lib/ceph/tmp /etc/ceph/ceph.conf /etc/ceph/ceph.client.admin.keyring
+fi
+
 mkdir -p /etc/ceph /var/lib/ceph/{mon,osd,mgr,tmp}
 chown -R ceph:ceph /var/lib/ceph /etc/ceph
 
