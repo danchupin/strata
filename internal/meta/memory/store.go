@@ -1666,6 +1666,55 @@ func (s *Store) DeleteBucketECPolicy(ctx context.Context, name string) error {
 	return nil
 }
 
+// GetBucketSigningKey returns the per-bucket signing-key envelope or
+// ErrBucketSigningKeyNotSet when no key is persisted (US-001
+// auth-dx-trailer-lima).
+func (s *Store) GetBucketSigningKey(ctx context.Context, name string) ([]byte, string, time.Time, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	b, ok := s.buckets[name]
+	if !ok {
+		return nil, "", time.Time{}, meta.ErrBucketNotFound
+	}
+	if len(b.SigningWrappedDEK) == 0 || b.SigningKeyID == "" {
+		return nil, "", time.Time{}, meta.ErrBucketSigningKeyNotSet
+	}
+	out := make([]byte, len(b.SigningWrappedDEK))
+	copy(out, b.SigningWrappedDEK)
+	return out, b.SigningKeyID, b.SigningKeyCreatedAt, nil
+}
+
+// SetBucketSigningKey persists the trio and stamps CreatedAt=now (US-001).
+func (s *Store) SetBucketSigningKey(ctx context.Context, name string, wrapped []byte, keyID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.buckets[name]
+	if !ok {
+		return meta.ErrBucketNotFound
+	}
+	cp := make([]byte, len(wrapped))
+	copy(cp, wrapped)
+	b.SigningWrappedDEK = cp
+	b.SigningKeyID = keyID
+	b.SigningKeyCreatedAt = time.Now().UTC()
+	return nil
+}
+
+// DeleteBucketSigningKey clears the signing-key trio (falls back to IAM
+// auth). Idempotent.
+func (s *Store) DeleteBucketSigningKey(ctx context.Context, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.buckets[name]
+	if !ok {
+		return meta.ErrBucketNotFound
+	}
+	b.SigningWrappedDEK = nil
+	b.SigningKeyID = ""
+	b.SigningKeyCreatedAt = time.Time{}
+	return nil
+}
+
 // SetClusterState persists the (state, mode, weight) row under the
 // cluster id. Validates the (state, mode) combo via
 // meta.ValidateClusterStateMode and the weight via

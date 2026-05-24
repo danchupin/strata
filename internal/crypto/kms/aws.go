@@ -57,7 +57,7 @@ func (p *AWSKMSProvider) GenerateDataKey(ctx context.Context, keyID string) ([]b
 		KeySpec: kmstypes.DataKeySpecAes256,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("kms aws GenerateDataKey: %w", err)
+		return nil, nil, WrapTransient(fmt.Errorf("kms aws GenerateDataKey: %w", err))
 	}
 	if len(out.Plaintext) != DEKSize {
 		return nil, nil, fmt.Errorf("kms aws: plaintext %d bytes, want %d", len(out.Plaintext), DEKSize)
@@ -83,7 +83,7 @@ func (p *AWSKMSProvider) UnwrapDEK(ctx context.Context, keyID string, wrapped []
 		KeyId:          aws.String(keyID),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("kms aws Decrypt: %w", err)
+		return nil, WrapTransient(fmt.Errorf("kms aws Decrypt: %w", err))
 	}
 	if out.KeyId != nil && !sameKeyARN(*out.KeyId, keyID) {
 		return nil, fmt.Errorf("%w: ciphertext was wrapped under %s", ErrKeyIDMismatch, *out.KeyId)

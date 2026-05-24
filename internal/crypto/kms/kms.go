@@ -16,6 +16,16 @@ var ErrNoConfig = errors.New("strata/crypto/kms: no provider configured")
 // an empty key id.
 var ErrMissingKeyID = errors.New("strata/crypto/kms: key id required")
 
+// ErrKMSUnavailable signals a transient provider failure (network
+// timeout, throttling, sealed Vault, etc.) where the caller MUST surface
+// a 503 retry rather than fail-closed-as-denied (US-002). Providers wrap
+// retryable errors with this sentinel via WrapTransient; the auth-side
+// resolver translates it into auth.ErrKMSUnavailable so the gateway
+// emits HTTP 503 KMSUnavailable + Retry-After:30. Non-retryable errors
+// (ErrKeyIDMismatch / ErrMissingKeyID / opaque crypto failures) bypass
+// this and surface as 401 KeyDenied.
+var ErrKMSUnavailable = errors.New("strata/crypto/kms: provider unavailable")
+
 // Provider wraps and unwraps per-object DEKs against a remote KMS.
 // Implementations must be safe for concurrent use.
 type Provider interface {

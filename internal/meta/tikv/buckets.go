@@ -324,6 +324,47 @@ func (s *Store) DeleteBucketECPolicy(ctx context.Context, name string) error {
 	})
 }
 
+// GetBucketSigningKey returns the per-bucket signing-key envelope, or
+// ErrBucketSigningKeyNotSet when no key is persisted (US-001
+// auth-dx-trailer-lima). The fields ride on the JSON-encoded bucket row
+// so the wire shape stays additive.
+func (s *Store) GetBucketSigningKey(ctx context.Context, name string) ([]byte, string, time.Time, error) {
+	b, err := s.GetBucket(ctx, name)
+	if err != nil {
+		return nil, "", time.Time{}, err
+	}
+	if len(b.SigningWrappedDEK) == 0 || b.SigningKeyID == "" {
+		return nil, "", time.Time{}, meta.ErrBucketSigningKeyNotSet
+	}
+	out := make([]byte, len(b.SigningWrappedDEK))
+	copy(out, b.SigningWrappedDEK)
+	return out, b.SigningKeyID, b.SigningKeyCreatedAt, nil
+}
+
+// SetBucketSigningKey overwrites the signing-key trio and bumps
+// SigningKeyCreatedAt to now (US-001).
+func (s *Store) SetBucketSigningKey(ctx context.Context, name string, wrapped []byte, keyID string) error {
+	return s.updateBucket(ctx, name, func(b *meta.Bucket) error {
+		cp := make([]byte, len(wrapped))
+		copy(cp, wrapped)
+		b.SigningWrappedDEK = cp
+		b.SigningKeyID = keyID
+		b.SigningKeyCreatedAt = time.Now().UTC()
+		return nil
+	})
+}
+
+// DeleteBucketSigningKey clears the trio (falls back to IAM auth).
+// Idempotent.
+func (s *Store) DeleteBucketSigningKey(ctx context.Context, name string) error {
+	return s.updateBucket(ctx, name, func(b *meta.Bucket) error {
+		b.SigningWrappedDEK = nil
+		b.SigningKeyID = ""
+		b.SigningKeyCreatedAt = time.Time{}
+		return nil
+	})
+}
+
 // updateBucket is the pessimistic read-modify-write helper every bucket-row
 // mutator routes through. The lesson is the TiKV mirror of CLAUDE.md's
 // Cassandra LWT note: a plain Put after a previous LWT-equivalent INSERT

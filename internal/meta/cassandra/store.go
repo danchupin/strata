@@ -3117,6 +3117,64 @@ func (s *Store) DeleteBucketECPolicy(ctx context.Context, name string) error {
 	return nil
 }
 
+// GetBucketSigningKey returns the per-bucket signing-key envelope
+// persisted on the buckets row. Returns ErrBucketSigningKeyNotSet when
+// the trio is empty so callers fall through to the IAM access-key SigV4
+// path (US-001 auth-dx-trailer-lima).
+func (s *Store) GetBucketSigningKey(ctx context.Context, name string) ([]byte, string, time.Time, error) {
+	var (
+		wrapped   []byte
+		keyID     string
+		createdAt time.Time
+	)
+	err := s.s.Query(
+		`SELECT signing_wrapped_dek, signing_key_id, signing_key_created_at FROM buckets WHERE name=?`,
+		name,
+	).WithContext(ctx).Scan(&wrapped, &keyID, &createdAt)
+	if errors.Is(err, gocql.ErrNotFound) {
+		return nil, "", time.Time{}, meta.ErrBucketNotFound
+	}
+	if err != nil {
+		return nil, "", time.Time{}, err
+	}
+	if len(wrapped) == 0 || keyID == "" {
+		return nil, "", time.Time{}, meta.ErrBucketSigningKeyNotSet
+	}
+	return wrapped, keyID, createdAt, nil
+}
+
+// SetBucketSigningKey overwrites the signing-key trio and bumps
+// signing_key_created_at to now. Uses LWT (`IF EXISTS`) for the same
+// Paxos-lineage reason as SetBucketVersioning / SetBucketPlacementMode.
+func (s *Store) SetBucketSigningKey(ctx context.Context, name string, wrapped []byte, keyID string) error {
+	applied, err := s.s.Query(
+		`UPDATE buckets SET signing_wrapped_dek=?, signing_key_id=?, signing_key_created_at=? WHERE name=? IF EXISTS`,
+		wrapped, keyID, time.Now().UTC(), name,
+	).WithContext(ctx).SerialConsistency(gocql.LocalSerial).ScanCAS(nil)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return meta.ErrBucketNotFound
+	}
+	return nil
+}
+
+// DeleteBucketSigningKey clears the signing-key trio. Idempotent.
+func (s *Store) DeleteBucketSigningKey(ctx context.Context, name string) error {
+	applied, err := s.s.Query(
+		`UPDATE buckets SET signing_wrapped_dek=?, signing_key_id=?, signing_key_created_at=? WHERE name=? IF EXISTS`,
+		[]byte(nil), "", time.Time{}, name,
+	).WithContext(ctx).SerialConsistency(gocql.LocalSerial).ScanCAS(nil)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return meta.ErrBucketNotFound
+	}
+	return nil
+}
+
 // SetBucketPlacementMode persists the per-bucket placement mode on the
 // buckets row (US-001 effective-placement). Uses LWT (`IF EXISTS`) so
 // the write participates in the same Paxos lineage as CreateBucket /

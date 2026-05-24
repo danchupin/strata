@@ -15,10 +15,14 @@ const (
 	maxGetPrefetch     = 64
 )
 
-// chunkGetFn fetches the bytes [off, off+length) of a single chunk from the
+// ChunkGetFn fetches the bytes [off, off+length) of a single chunk from the
 // data backend. Implementations are responsible for ioctx resolution and
 // per-op observability. The reader dispatches calls to a bounded prefetch
 // pool (depth concurrent fetches) and consumes results in source order.
+// Exported so cephimpl/ (the real RADOS impl in its own Go module) can
+// hand callbacks to NewPrefetchReader.
+type ChunkGetFn = chunkGetFn
+
 type chunkGetFn func(ctx context.Context, ref data.ChunkRef, off uint64, length int64) ([]byte, error)
 
 // chunkSegment is one slice of a manifest chunk that contributes to the
@@ -56,11 +60,17 @@ type prefetchReader struct {
 	closeOnce sync.Once
 }
 
-// newPrefetchReader builds a reader over the bytes [offset, offset+length)
-// of the manifest. depth bounds the count of concurrent in-flight chunk
-// fetches and the in-flight memory budget (depth × chunk payload). Fetch
-// errors propagate to Read; Close cancels in-flight fetches and waits for
-// dispatch + fetch goroutines to exit.
+// NewPrefetchReader builds an io.ReadCloser over the bytes
+// [offset, offset+length) of the manifest. depth bounds the count of
+// concurrent in-flight chunk fetches and the in-flight memory budget
+// (depth × chunk payload). Fetch errors propagate to Read; Close cancels
+// in-flight fetches and waits for dispatch + fetch goroutines to exit.
+// Exported so cephimpl/ (the real RADOS impl) can build a reader without
+// duplicating the scheduler.
+func NewPrefetchReader(ctx context.Context, m *data.Manifest, offset, length int64, depth int, getOne ChunkGetFn) (io.ReadCloser, error) {
+	return newPrefetchReader(ctx, m, offset, length, depth, getOne)
+}
+
 func newPrefetchReader(ctx context.Context, m *data.Manifest, offset, length int64, depth int, getOne chunkGetFn) (*prefetchReader, error) {
 	if m == nil {
 		return nil, errors.New("nil manifest")
@@ -216,8 +226,11 @@ func (r *prefetchReader) Close() error {
 	return nil
 }
 
-// getPrefetchFromEnv reads STRATA_RADOS_GET_PREFETCH and clamps to [1, 64];
-// unset or unparseable falls back to defaultGetPrefetch (4).
+// GetPrefetchFromEnv reads STRATA_RADOS_GET_PREFETCH and clamps to [1, 64];
+// unset or unparseable falls back to defaultGetPrefetch (4). Exported for
+// cephimpl/.
+func GetPrefetchFromEnv() int { return getPrefetchFromEnv() }
+
 func getPrefetchFromEnv() int {
 	return clampGetPrefetch(intFromEnv("STRATA_RADOS_GET_PREFETCH", defaultGetPrefetch))
 }

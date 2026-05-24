@@ -148,6 +148,16 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	if kmsProvider != nil {
 		apiHandler.KMS = kmsProvider
 	}
+
+	// Per-bucket signing-key resolver (US-001 auth-dx-trailer-lima).
+	// Wired only when a KMS provider is configured — without it
+	// UnwrapDEK cannot run; absent per-bucket keys still fall through
+	// to the IAM access-key path so KMS-less deployments keep working.
+	var bucketSigningResolver *auth.BucketSigningResolver
+	if kmsProvider != nil {
+		bucketSigningResolver = buildBucketSigningResolver(metaStore, kmsProvider, logger)
+		mw.BucketSigning = bucketSigningResolver
+	}
 	apiHandler.VHostPatterns = vhostPatterns()
 	drainCache := placement.NewDrainCache(metaStore.ListClusterStates, 0)
 	apiHandler.DrainCache = drainCache
@@ -248,6 +258,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 			Inflight:        rebalanceResolved.Inflight,
 			Shards:          rebalanceResolved.Shards,
 		},
+		SigningKey: buildSigningKeyAdminConfig(kmsProvider, bucketSigningResolver, logger),
 	})
 
 	mux := http.NewServeMux()
@@ -414,7 +425,7 @@ func buildDataBackend(cfg *config.Config, logger *slog.Logger, tp *strataotel.Pr
 		if err != nil {
 			return nil, err
 		}
-		return datarados.New(datarados.Config{
+		return newRADOSBackend(datarados.Config{
 			ConfigFile: cfg.RADOS.ConfigFile,
 			User:       cfg.RADOS.User,
 			Keyring:    cfg.RADOS.Keyring,

@@ -28,6 +28,14 @@ var ErrClusterStatsNotSupported = errors.New("data: cluster stats not supported"
 // manifests).
 var ErrClusterUnknown = errors.New("data: unknown cluster id")
 
+// ErrRADOSNotCompiled is the cross-package sentinel returned by the
+// main rados package's stub New() when the binary was built without the
+// librados-linked cephimpl/ module. The real backend lives in
+// `github.com/danchupin/strata/cephimpl`; callers that need it (the
+// gateway, bench tooling) import cephimpl directly under a ceph build
+// tag and route around this stub.
+var ErrRADOSNotCompiled = errors.New("data: rados backend not compiled (use cephimpl/ + go.work)")
+
 // ErrDrainRefused is the sentinel returned by data backends when the
 // placement picker fell back to a draining cluster on the PUT hot path.
 // Carries the resolved cluster id in a DrainRefusedError wrapper

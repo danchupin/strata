@@ -20,22 +20,30 @@ const (
 	maxPutConcurrency     = 256
 )
 
-// chunkPutFn writes one chunk's body to the data backend and returns the
+// ChunkPutFn writes one chunk's body to the data backend and returns the
 // ChunkRef that names it. Implementations are responsible for OID
 // derivation, ioctx resolution, and per-op observability. The coordinator
 // dispatches calls to a bounded worker pool but feeds chunks to it in
 // strict source byte order; idx is the submission index and is unique per
-// PutChunks invocation.
+// PutChunks invocation. Exported so the separate cephimpl/ Go module (the
+// real RADOS impl) can hand callbacks back to PutChunksParallel.
+type ChunkPutFn = chunkPutFn
+
 type chunkPutFn func(ctx context.Context, idx int, body []byte) (data.ChunkRef, error)
 
-// putChunksParallel splits r into chunkSize-sized buffers and dispatches each
+// PutChunksParallel splits r into chunkSize-sized buffers and dispatches each
 // to putOne via a bounded worker pool of `concurrency` goroutines. The MD5
 // hasher is fed chunk bytes in strict source order so the resulting ETag
 // matches the byte-stream MD5 regardless of worker completion order. The
 // returned manifest's Chunks slice is in source order. On any worker error,
 // gctx is cancelled, in-flight workers drain, and the partial Chunks slice
-// is returned alongside the error so the caller can run cleanupManifest
-// over OIDs that landed in the data tier.
+// is returned alongside the error so the caller can run cleanup over OIDs
+// that landed in the data tier.
+func PutChunksParallel(ctx context.Context, r io.Reader, class string, concurrency int, putOne ChunkPutFn) (*data.Manifest, error) {
+	return putChunksParallelWithChunkSize(ctx, r, class, concurrency, data.DefaultChunkSize, putOne)
+}
+
+// putChunksParallel is the internal name kept for in-package tests/benches.
 func putChunksParallel(ctx context.Context, r io.Reader, class string, concurrency int, putOne chunkPutFn) (*data.Manifest, error) {
 	return putChunksParallelWithChunkSize(ctx, r, class, concurrency, data.DefaultChunkSize, putOne)
 }
@@ -139,8 +147,12 @@ func putChunksParallelWithChunkSize(ctx context.Context, r io.Reader, class stri
 	return m, nil
 }
 
-// putConcurrencyFromEnv reads STRATA_RADOS_PUT_CONCURRENCY and clamps to
+// PutConcurrencyFromEnv reads STRATA_RADOS_PUT_CONCURRENCY and clamps to
 // [1, 256]; unset or unparseable falls back to defaultPutConcurrency (32).
+// Exported for cephimpl/ — the real RADOS backend lives in its own Go
+// module to keep the main module hermetic.
+func PutConcurrencyFromEnv() int { return putConcurrencyFromEnv() }
+
 func putConcurrencyFromEnv() int {
 	return clampPutConcurrency(intFromEnv("STRATA_RADOS_PUT_CONCURRENCY", defaultPutConcurrency))
 }

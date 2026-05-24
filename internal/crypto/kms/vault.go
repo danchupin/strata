@@ -216,11 +216,15 @@ func (p *VaultProvider) callDatakeyLocked(ctx context.Context, keyID string) ([]
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := p.cfg.HTTPClient.Do(req)
 	if err != nil {
-		return nil, nil, fmt.Errorf("kms vault datakey: %w", err)
+		return nil, nil, WrapTransient(fmt.Errorf("kms vault datakey: %w", err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return nil, nil, errVaultAuth
+	}
+	if resp.StatusCode >= 500 {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, nil, fmt.Errorf("%w: kms vault datakey status %d: %s", ErrKMSUnavailable, resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
@@ -260,11 +264,15 @@ func (p *VaultProvider) callDecryptLocked(ctx context.Context, keyID string, wra
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := p.cfg.HTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("kms vault decrypt: %w", err)
+		return nil, WrapTransient(fmt.Errorf("kms vault decrypt: %w", err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return nil, errVaultAuth
+	}
+	if resp.StatusCode >= 500 {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("%w: kms vault decrypt status %d: %s", ErrKMSUnavailable, resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)

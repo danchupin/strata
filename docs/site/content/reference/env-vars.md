@@ -142,6 +142,9 @@ Precedence inside the master-key resolver: `STRATA_SSE_MASTER_KEYS` >
 | `STRATA_KMS_LOCAL_HSM_SEED` | empty | hex 32 | Deterministic local HSM stand-in for tests. Internal — debug only. |
 | `STRATA_KMS_VAULT_ADDR` | empty | URL | Vault Transit endpoint. |
 | `STRATA_KMS_VAULT_PATH` | empty | string | Vault Transit mount path (e.g. `transit`). |
+| `STRATA_DEK_CACHE_TTL` | `5m` | Go duration ∈ [`30s`, `1h`] | TTL for the per-bucket signing-key DEK cache on the SigV4 hot path (US-001 auth-dx-trailer-lima). Plaintext DEK is zeroed via `subtle.ConstantTimeCopy` on eviction. Out-of-range values clamp + WARN. |
+| `STRATA_KEY_MAX_AGE` | `2160h` (90d) | Go duration ∈ [`24h`, `8760h`] | Max age for a per-bucket signing key before the SigV4 path rejects requests with `401 KeyExpired` (US-002 auth-dx-trailer-lima). Operator must `POST /admin/v1/buckets/{name}/signing-key/rotate` to recover. Default 90 days matches PCI-DSS / SOX rotation policy; out-of-range values clamp + WARN. |
+| `STRATA_KMS_DEFAULT_KEY_ID` | empty | KMS CMK handle | Default CMK applied by `POST /signing-key/rotate` when the operator omits `key_id` (US-002). Empty falls back to the bucket name (works for AWS KMS aliases + Vault Transit). |
 
 ## GC worker (`--workers=gc`)
 

@@ -18,6 +18,10 @@ const (
 	MaxPoolSize = 32
 )
 
+// PoolSizeFromEnv is the exported entry point for cephimpl/ — same shape
+// as the in-package poolSizeFromEnv.
+func PoolSizeFromEnv(logger *slog.Logger) int { return poolSizeFromEnv(logger) }
+
 // poolSizeFromEnv reads STRATA_RADOS_POOL_SIZE and clamps to
 // [1, MaxPoolSize]. Unset / unparseable falls back to DefaultPoolSize.
 // Out-of-range values are clamped + WARN-logged via the supplied logger

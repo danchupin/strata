@@ -1,6 +1,4 @@
-//go:build ceph
-
-package rados
+package cephimpl
 
 import (
 	"fmt"
@@ -8,14 +6,11 @@ import (
 	goceph "github.com/ceph/go-ceph/rados"
 )
 
-// writeChunkBatched bundles WriteFull + per-xattr SetXattr into one librados
-// WriteOp so the PUT path pays one round-trip regardless of xattr count.
-// xattrs may be nil — degrades to a single WriteFull, byte-identical to
-// writeChunk in backend.go. Wired in via the STRATA_RADOS_BATCH_OPS toggle
-// (see internal/data/rados/ops_env.go).
-//
-// Bench numbers + ship-or-default gate logic:
-// docs/site/content/architecture/benchmarks/rados-ops.md.
+// writeChunkBatched bundles WriteFull + per-xattr SetXattr into one
+// librados WriteOp so the PUT path pays one round-trip regardless of
+// xattr count. xattrs may be nil — degrades to a single WriteFull,
+// byte-identical to writeChunk. Wired in via the STRATA_RADOS_BATCH_OPS
+// toggle (see rados.BatchOpsFromEnv).
 func writeChunkBatched(ioctx *goceph.IOContext, oid string, body []byte, xattrs map[string]string) error {
 	op := goceph.CreateWriteOp()
 	defer op.Release()
@@ -32,10 +27,7 @@ func writeChunkBatched(ioctx *goceph.IOContext, oid string, body []byte, xattrs 
 // readChunkBatched performs a ReadOp.Read into a freshly-allocated buffer
 // covering [off, off+length). When wantXattrs is true a follow-up
 // ioctx.ListXattrs runs to populate the xattrs map — librados in go-ceph
-// v0.39 does not expose `rados_read_op_getxattrs`, so xattrs sit on a
-// second client round-trip. Today no caller requests xattrs; the helper
-// exists for parity with writeChunkBatched and for the future xattr
-// reader path. Mirror retrofit point: getOne in backend.go GetChunks.
+// v0.39 does not expose `rados_read_op_getxattrs`.
 func readChunkBatched(ioctx *goceph.IOContext, oid string, off uint64, length int64, wantXattrs bool) ([]byte, map[string]string, error) {
 	if length < 0 {
 		return nil, nil, fmt.Errorf("rados: read %s: negative length %d", oid, length)

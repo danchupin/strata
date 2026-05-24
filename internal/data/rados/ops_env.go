@@ -5,6 +5,10 @@ import (
 	"strconv"
 )
 
+// BatchOpsFromEnv is the exported entry point for cephimpl/ (the real
+// RADOS backend in its own Go module).
+func BatchOpsFromEnv() bool { return batchOpsFromEnv() }
+
 // batchOpsFromEnv reads STRATA_RADOS_BATCH_OPS. Default is false (off):
 // the synthetic bench in scripts/bench-rados-ops.sh shows no measurable
 // gain over the per-op default until xattrs are added to the PUT/GET hot

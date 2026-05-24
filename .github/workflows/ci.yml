@@ -75,6 +75,13 @@ jobs:
       # `go vet ./...` still covers every package transitively imported.
       - run: go build -o bin/strata ./cmd/strata
       - run: go vet ./...
+      # cephimpl is a separate Go module (US-003 auth-dx-trailer-lima cycle).
+      # Vet under GOWORK=off so the host doesn't need librados — vet wants to
+      # compile the package; the librados-less host fails the cgo link. The
+      # full ceph build runs in the docker-build job below where librados is
+      # available; here we only confirm the module's go.mod still tidies.
+      - run: cd internal/data/rados/cephimpl && GOWORK=off go mod tidy -diff || \
+          (echo "cephimpl/ go.mod drift" && exit 1)
 
   unit:
     name: Unit tests (-race)

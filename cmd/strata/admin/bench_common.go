@@ -39,7 +39,7 @@ func buildBenchDataBackend(cfg *config.Config, logger *slog.Logger) (data.Backen
 		if err != nil {
 			return nil, err
 		}
-		return datarados.New(datarados.Config{
+		return newBenchRADOSBackend(datarados.Config{
 			ConfigFile: cfg.RADOS.ConfigFile,
 			User:       cfg.RADOS.User,
 			Keyring:    cfg.RADOS.Keyring,

@@ -454,6 +454,9 @@ var alterStatements = []string{
 	`ALTER TABLE buckets ADD placement_mode text`,
 	`ALTER TABLE bucket_stats ADD owner text`,
 	`ALTER TABLE buckets ADD ec_policy text`,
+	`ALTER TABLE buckets ADD signing_wrapped_dek blob`,
+	`ALTER TABLE buckets ADD signing_key_id text`,
+	`ALTER TABLE buckets ADD signing_key_created_at timestamp`,
 }
 
 func isColumnAlreadyExists(err error) bool {

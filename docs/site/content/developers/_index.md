@@ -63,4 +63,7 @@ Subsequent merges republish automatically; no further manual action.
   the docs describe.
 - [Architecture Decision Records]({{< relref "/adr/" >}}) — captured
   design decisions, append-only.
+- [Bench runner setup]({{< relref "/developers/bench-runner-setup" >}})
+  — self-hosted runner provisioning for the weekly rgw-comparison bench
+  cycle.
 - [Strata Documentation]({{< relref "/" >}}) — back to top.

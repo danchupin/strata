@@ -1,6 +1,10 @@
-//go:build ceph
-
-package rados
+// Package cephimpl is the ceph-linked RADOS data backend, split into a
+// separate Go module so the main module's go.mod stays free of
+// github.com/ceph/go-ceph. Only operators building with librados on the
+// host (and the matching docker images in CI) pull in this module; the
+// main module's internal/data/rados/stub.go covers the default-tag
+// build path.
+package cephimpl
 
 import (
 	"context"
@@ -17,13 +21,15 @@ import (
 
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/data/placement"
+	"github.com/danchupin/strata/internal/data/rados"
 )
 
+// Backend is the librados-backed implementation of data.Backend.
 type Backend struct {
-	clusters map[string]ClusterSpec
-	classes  map[string]ClassSpec
+	clusters map[string]rados.ClusterSpec
+	classes  map[string]rados.ClassSpec
 	logger   *slog.Logger
-	metrics  Metrics
+	metrics  rados.Metrics
 	tracer   trace.Tracer
 
 	// putConcurrency caps the per-PutChunks worker pool that dispatches
@@ -40,45 +46,42 @@ type Backend struct {
 
 	// batchOps toggles the PUT/GET hot path between the per-op default
 	// (ioctx.WriteFull-shaped writeChunk + ioctx.Read in getOne) and the
-	// WriteOp / ReadOp batched helpers in ops.go. Read once at New from
-	// STRATA_RADOS_BATCH_OPS (default false). The bench gate in
-	// docs/site/content/architecture/benchmarks/rados-ops.md shows no
-	// measurable gain until xattr writers land on the hot path, so the
-	// default keeps the per-op shape; operators experimenting with
-	// future xattr work flip the knob.
+	// WriteOp / ReadOp batched helpers in ops.go.
 	batchOps bool
 
 	// poolSize is the conn-pool depth per cluster. Read once at New from
 	// STRATA_RADOS_POOL_SIZE (default 1 = legacy single-conn, clamped to
-	// [1, MaxPoolSize]). Each cluster's pool of N conns is dialled
-	// lazily on first ioctx() call; every conn is Connect()'d eagerly
-	// then — no half-connected pool is exposed to callers. See
-	// docs/site/content/architecture/benchmarks/rados-pool.md.
+	// [1, MaxPoolSize]).
 	poolSize int
 
 	mu    sync.Mutex
 	pools map[string]*connPool // key: clusterID
 }
 
+// ErrUnknownStorageClass mirrors the original rados-package sentinel.
 var ErrUnknownStorageClass = errors.New("unknown storage class")
 
-func New(cfg Config) (data.Backend, error) {
+// New builds a ceph-linked Backend from the same Config shape the main
+// rados package exposes. Returned data.Backend identity matches *Backend
+// so callers (cmd/strata/workers/rebalance) can type-assert when the
+// build tag is set.
+func New(cfg rados.Config) (data.Backend, error) {
 	classes := cfg.Classes
 	if len(classes) == 0 {
 		if cfg.Pool == "" && len(cfg.Clusters) == 0 {
 			return nil, errors.New("rados: either Classes or Pool must be set")
 		}
 		if cfg.Pool != "" {
-			classes = map[string]ClassSpec{
-				"STANDARD": {Cluster: DefaultCluster, Pool: cfg.Pool, Namespace: cfg.Namespace},
+			classes = map[string]rados.ClassSpec{
+				"STANDARD": {Cluster: rados.DefaultCluster, Pool: cfg.Pool, Namespace: cfg.Namespace},
 			}
 		}
 	}
-	clusters, err := BuildClusters(cfg)
+	clusters, err := rados.BuildClusters(cfg)
 	if err != nil {
 		return nil, err
 	}
-	if err := ValidateClusterRefs(classes, clusters); err != nil {
+	if err := rados.ValidateClusterRefs(classes, clusters); err != nil {
 		return nil, err
 	}
 	return &Backend{
@@ -87,18 +90,16 @@ func New(cfg Config) (data.Backend, error) {
 		logger:         cfg.Logger,
 		metrics:        cfg.Metrics,
 		tracer:         cfg.Tracer,
-		putConcurrency: putConcurrencyFromEnv(),
-		getPrefetch:    getPrefetchFromEnv(),
-		batchOps:       batchOpsFromEnv(),
-		poolSize:       poolSizeFromEnv(cfg.Logger),
+		putConcurrency: rados.PutConcurrencyFromEnv(),
+		getPrefetch:    rados.GetPrefetchFromEnv(),
+		batchOps:       rados.BatchOpsFromEnv(),
+		poolSize:       rados.PoolSizeFromEnv(cfg.Logger),
 		pools:          make(map[string]*connPool),
 	}, nil
 }
 
 // dialCluster opens + connects a fresh *goceph.Conn for one cluster spec.
-// No lock dependencies — callable from inside connPool construction or
-// any other path that needs an extra raw conn.
-func dialCluster(spec ClusterSpec) (*goceph.Conn, error) {
+func dialCluster(spec rados.ClusterSpec) (*goceph.Conn, error) {
 	user := spec.User
 	if user == "" {
 		user = "admin"
@@ -125,13 +126,9 @@ func dialCluster(spec ClusterSpec) (*goceph.Conn, error) {
 	return conn, nil
 }
 
-// poolFor lazy-dials the cluster's conn pool on first use. Caller must
-// hold b.mu. Pool depth = b.poolSize; every conn inside is Connect()'d
-// eagerly. On dial failure the pool stays unset so the next caller
-// retries.
 func (b *Backend) poolFor(ctx context.Context, id string) (*connPool, error) {
 	if id == "" {
-		id = DefaultCluster
+		id = rados.DefaultCluster
 	}
 	if p, ok := b.pools[id]; ok {
 		return p, nil
@@ -156,20 +153,20 @@ func (b *Backend) poolFor(ctx context.Context, id string) (*connPool, error) {
 	return p, nil
 }
 
-func (b *Backend) resolveClass(class string) (ClassSpec, error) {
+func (b *Backend) resolveClass(class string) (rados.ClassSpec, error) {
 	if class == "" {
 		class = "STANDARD"
 	}
 	spec, ok := b.classes[class]
 	if !ok {
-		return ClassSpec{}, fmt.Errorf("%w: %s", ErrUnknownStorageClass, class)
+		return rados.ClassSpec{}, fmt.Errorf("%w: %s", ErrUnknownStorageClass, class)
 	}
 	return spec, nil
 }
 
 func (b *Backend) ioctx(ctx context.Context, cluster, pool, ns string) (*goceph.IOContext, error) {
 	if cluster == "" {
-		cluster = DefaultCluster
+		cluster = rados.DefaultCluster
 	}
 	b.mu.Lock()
 	p, err := b.poolFor(ctx, cluster)
@@ -189,23 +186,6 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 	if err != nil {
 		return nil, err
 	}
-	// Placement routing (US-003 effective-placement): per-chunk hash-mod
-	// stable picker over the EffectivePolicy verdict, which folds three
-	// layers:
-	//   1. bucket.Placement (data.PlacementFromContext) filtered to live
-	//      clusters — wins outright when at least one entry survives.
-	//   2. Else if the class has an explicit `@cluster` pin
-	//      (spec.ClusterPinned), route to spec.Cluster — class env wins
-	//      over default-routing synthesis.
-	//   3. Else the synthesised cluster-weight policy
-	//      (data.DefaultPlacementFromContext) filtered to live clusters.
-	//   4. Else fall back to spec.Cluster (existing strict-refuse
-	//      semantic still applies when spec.Cluster is itself draining).
-	// PlacementMode toggles the auto-fallback to step 3: mode=strict
-	// keeps the bucket pinned to its (now-empty) Placement instead of
-	// silently routing via cluster.weights.
-	// Pool + namespace inherit from the class spec — operators are expected
-	// to use the same pool layout across clusters within one class.
 	bucketPolicy, _ := data.PlacementFromContext(ctx)
 	defaultPolicy, _ := data.DefaultPlacementFromContext(ctx)
 	bucketID, _ := data.BucketIDFromContext(ctx)
@@ -213,20 +193,12 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 	draining, _ := data.DrainingClustersFromContext(ctx)
 	mode, _ := data.PlacementModeFromContext(ctx)
 	states, _ := placement.ClusterStatesFromContext(ctx)
-	// Effective resolution per US-003: bucket Placement's live subset
-	// wins; if empty under mode=strict (and bucket had a policy) → no
-	// auto-fallback so we surface the "compliance refuse" path through
-	// spec.Cluster; if empty under weighted → fall to the class-pin
-	// shortcut OR the synthesised cluster-weights policy (live subset).
 	activePolicy := placement.LiveSubset(bucketPolicy, states)
 	if activePolicy == nil {
 		strictRefuse := mode == "strict" && len(bucketPolicy) > 0
 		switch {
 		case strictRefuse:
-			// Leave activePolicy nil — strict + all-drained bucket
-			// falls to spec.Cluster (which may strict-refuse if drained).
 		case spec.ClusterPinned:
-			// Class env wins over default-routing synthesis.
 		default:
 			activePolicy = placement.LiveSubset(defaultPolicy, states)
 		}
@@ -269,7 +241,7 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 		} else {
 			werr = writeChunk(ioctx, oid, body)
 		}
-		ObserveOp(opCtx, b.logger, b.metrics, b.tracer, spec.Pool, "put", oid, start, werr)
+		rados.ObserveOp(opCtx, b.logger, b.metrics, b.tracer, spec.Pool, "put", oid, start, werr)
 		if werr != nil {
 			return data.ChunkRef{}, werr
 		}
@@ -282,7 +254,7 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 		}, nil
 	}
 
-	m, err := putChunksParallel(ctx, r, class, b.putConcurrency, putOne)
+	m, err := rados.PutChunksParallel(ctx, r, class, b.putConcurrency, putOne)
 	if err != nil {
 		b.cleanupManifest(ctx, m.Chunks)
 		return nil, err
@@ -322,7 +294,7 @@ func (b *Backend) GetChunks(ctx context.Context, m *data.Manifest, offset, lengt
 		start := time.Now()
 		if b.batchOps {
 			body, _, rerr := readChunkBatched(ioctx, c.OID, off, segLen, false)
-			ObserveOp(opCtx, b.logger, b.metrics, b.tracer, c.Pool, "get", c.OID, start, rerr)
+			rados.ObserveOp(opCtx, b.logger, b.metrics, b.tracer, c.Pool, "get", c.OID, start, rerr)
 			if rerr != nil {
 				return nil, rerr
 			}
@@ -330,13 +302,13 @@ func (b *Backend) GetChunks(ctx context.Context, m *data.Manifest, offset, lengt
 		}
 		buf := make([]byte, segLen)
 		n, rerr := ioctx.Read(c.OID, buf, off)
-		ObserveOp(opCtx, b.logger, b.metrics, b.tracer, c.Pool, "get", c.OID, start, rerr)
+		rados.ObserveOp(opCtx, b.logger, b.metrics, b.tracer, c.Pool, "get", c.OID, start, rerr)
 		if rerr != nil {
 			return nil, fmt.Errorf("rados: read %s: %w", c.OID, rerr)
 		}
 		return buf[:n], nil
 	}
-	return newPrefetchReader(ctx, m, offset, length, b.getPrefetch, getOne)
+	return rados.NewPrefetchReader(ctx, m, offset, length, b.getPrefetch, getOne)
 }
 
 func (b *Backend) Delete(ctx context.Context, m *data.Manifest) error {
@@ -354,7 +326,7 @@ func (b *Backend) Delete(ctx context.Context, m *data.Manifest) error {
 		}
 		start := time.Now()
 		derr := ioctx.Delete(c.OID)
-		ObserveOp(ctx, b.logger, b.metrics, b.tracer, c.Pool, "del", c.OID, start, derr)
+		rados.ObserveOp(ctx, b.logger, b.metrics, b.tracer, c.Pool, "del", c.OID, start, derr)
 		if derr != nil && errors.Is(derr, goceph.ErrNotFound) {
 			derr = fmt.Errorf("chunk %s: %w", c.OID, data.ErrChunkNotFound)
 		}
@@ -376,9 +348,8 @@ func (b *Backend) Close() error {
 }
 
 // Probe stats a canary OID in the STANDARD-class pool to confirm RADOS is
-// reachable. ENOENT (canary missing) still proves connectivity and counts as
-// success — only transport / auth errors fail. Honours ctx via a goroutine
-// + select; the underlying librados Stat itself is blocking.
+// reachable. ENOENT (canary missing) still proves connectivity and counts
+// as success — only transport / auth errors fail.
 func (b *Backend) Probe(ctx context.Context, oid string) error {
 	if b == nil {
 		return errors.New("rados backend closed")
