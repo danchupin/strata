@@ -686,7 +686,18 @@ current one drains to the wire. Memory-bounded; aborts on client cancel.&lt;/li&
 &lt;code&gt;manager.Uploader&lt;/code&gt; already parallelises multipart uploads. Memory backend is
 tests-only. Multi-cluster manifests (US-044) automatically benefit since
 chunk-write dispatch is cluster-agnostic — the worker pool dials the right
-ioctx per chunk via the existing &lt;code&gt;resolveClass&lt;/code&gt; / &lt;code&gt;ioctx&lt;/code&gt; helpers.&lt;/p&gt;</description></item><item><title>RGW comparison</title><link>https://danchupin.github.io/strata/architecture/benchmarks/rgw-comparison/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/benchmarks/rgw-comparison/</guid><description>&lt;h1 id="benchmarks-vs-ceph-rgw"&gt;Benchmarks vs Ceph RGW&lt;a class="anchor" href="#benchmarks-vs-ceph-rgw"&gt;#&lt;/a&gt;&lt;/h1&gt;
+ioctx per chunk via the existing &lt;code&gt;resolveClass&lt;/code&gt; / &lt;code&gt;ioctx&lt;/code&gt; helpers.&lt;/p&gt;</description></item><item><title>Per-bucket signing key rotation</title><link>https://danchupin.github.io/strata/operate/key-rotation/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/operate/key-rotation/</guid><description>&lt;h1 id="per-bucket-signing-key-rotation"&gt;Per-bucket signing key rotation&lt;a class="anchor" href="#per-bucket-signing-key-rotation"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata supports KMS-backed per-bucket SigV4 signing keys (US-001 /
+US-002 of &lt;code&gt;ralph/auth-dx-trailer-lima&lt;/code&gt;). Each opted-in bucket carries a
+32-byte DEK wrapped under a KMS CMK (AWS KMS / Vault Transit /
+LocalHSMProvider) plus a creation timestamp. The auth middleware
+unwraps on cache miss and uses &lt;code&gt;hex(DEK)&lt;/code&gt; as the SigV4 secret in place
+of the IAM access-key secret.&lt;/p&gt;
+&lt;p&gt;This page covers the day-2 rotation runbook. The
+&lt;a href="https://danchupin.github.io/strata/reference/env-vars/"&gt;KMS provider reference&lt;/a&gt; lists
+the per-provider env vars; the
+&lt;a href="https://danchupin.github.io/strata/reference/admin-api/"&gt;admin API reference&lt;/a&gt; documents
+the three rotation endpoints.&lt;/p&gt;</description></item><item><title>RGW comparison</title><link>https://danchupin.github.io/strata/architecture/benchmarks/rgw-comparison/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/architecture/benchmarks/rgw-comparison/</guid><description>&lt;h1 id="benchmarks-vs-ceph-rgw"&gt;Benchmarks vs Ceph RGW&lt;a class="anchor" href="#benchmarks-vs-ceph-rgw"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;This page captures the side-by-side numbers backing the README&amp;rsquo;s
 &amp;ldquo;drop-in RGW replacement&amp;rdquo; claim. Closes ROADMAP P2 &lt;em&gt;&amp;ldquo;Benchmarks vs RGW&amp;rdquo;&lt;/em&gt;
 via cycle &lt;code&gt;ralph/rgw-benchmarks&lt;/code&gt; (US-001..US-012); the post-fix rerun
@@ -989,7 +1000,23 @@ acquires the lease for a given worker and runs it; the others stand by and
 take over if the leader&amp;rsquo;s lease expires. Leases are scoped per-worker, so
 different replicas can lead different workers — &lt;code&gt;gc&lt;/code&gt; on replica A,
 &lt;code&gt;lifecycle&lt;/code&gt; on replica B. Workers panic-restart on exponential backoff so a
-single iteration error never takes a worker offline permanently.&lt;/p&gt;</description></item><item><title>Capacity planning</title><link>https://danchupin.github.io/strata/operate/capacity-planning/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/operate/capacity-planning/</guid><description>&lt;h1 id="capacity-planning"&gt;Capacity planning&lt;a class="anchor" href="#capacity-planning"&gt;#&lt;/a&gt;&lt;/h1&gt;
+single iteration error never takes a worker offline permanently.&lt;/p&gt;</description></item><item><title>Bench runner setup (self-hosted)</title><link>https://danchupin.github.io/strata/developers/bench-runner-setup/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/developers/bench-runner-setup/</guid><description>&lt;h1 id="bench-runner-setup-self-hosted"&gt;Bench runner setup (self-hosted)&lt;a class="anchor" href="#bench-runner-setup-self-hosted"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;The weekly RGW comparison bench
+(&lt;a href="https://danchupin.github.io/strata/architecture/benchmarks/rgw-comparison/"&gt;&lt;code&gt;.github/workflows/bench-rgw.yml&lt;/code&gt;&lt;/a&gt;)
+runs on a self-hosted GitHub Actions runner labelled
+&lt;code&gt;[self-hosted, strata-bench]&lt;/code&gt;. The runner is operator-provisioned once;
+afterwards the cron + manual-dispatch triggers fire on schedule with zero
+human input. Auto-PRs land against &lt;code&gt;main&lt;/code&gt; carrying refreshed numbers and
+the runner&amp;rsquo;s specs.&lt;/p&gt;
+&lt;p&gt;This page covers the one-time provision. Closes ROADMAP P3
+&lt;em&gt;&amp;ldquo;bench-rgw lima envelope fix&amp;rdquo;&lt;/em&gt; via US-005 of cycle
+&lt;code&gt;ralph/auth-dx-trailer-lima&lt;/code&gt;.&lt;/p&gt;
+&lt;h2 id="required-hardware"&gt;Required hardware&lt;a class="anchor" href="#required-hardware"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;The bench cycle exercises an 11-workload sweep with multipart uploads up
+to 25 GiB transient and a 100 k-key list seed. The lima dev box does not
+have the RAM envelope for the full sweep
+(&lt;a href="./../architecture/benchmarks/rgw-comparison/#limitations"&gt;&lt;code&gt;rgw-comparison.md&lt;/code&gt; Limitations&lt;/a&gt;).
+A dedicated Linux box clears the blocker.&lt;/p&gt;</description></item><item><title>Capacity planning</title><link>https://danchupin.github.io/strata/operate/capacity-planning/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/operate/capacity-planning/</guid><description>&lt;h1 id="capacity-planning"&gt;Capacity planning&lt;a class="anchor" href="#capacity-planning"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;Capacity on a Strata deploy splits across three independently-scaled
 tiers:&lt;/p&gt;
 &lt;ul&gt;

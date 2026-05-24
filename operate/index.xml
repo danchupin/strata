@@ -23,7 +23,18 @@ prefix), one row per state-changing request.&lt;/li&gt;
 &lt;/ol&gt;
 &lt;p&gt;This page covers the wire-up; the
 &lt;a href="https://danchupin.github.io/strata/architecture/observability/"&gt;Observability deep dive&lt;/a&gt;
-covers the implementation rationale.&lt;/p&gt;</description></item><item><title>Scaling</title><link>https://danchupin.github.io/strata/operate/scaling/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/operate/scaling/</guid><description>&lt;h1 id="scaling"&gt;Scaling&lt;a class="anchor" href="#scaling"&gt;#&lt;/a&gt;&lt;/h1&gt;
+covers the implementation rationale.&lt;/p&gt;</description></item><item><title>Per-bucket signing key rotation</title><link>https://danchupin.github.io/strata/operate/key-rotation/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/operate/key-rotation/</guid><description>&lt;h1 id="per-bucket-signing-key-rotation"&gt;Per-bucket signing key rotation&lt;a class="anchor" href="#per-bucket-signing-key-rotation"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata supports KMS-backed per-bucket SigV4 signing keys (US-001 /
+US-002 of &lt;code&gt;ralph/auth-dx-trailer-lima&lt;/code&gt;). Each opted-in bucket carries a
+32-byte DEK wrapped under a KMS CMK (AWS KMS / Vault Transit /
+LocalHSMProvider) plus a creation timestamp. The auth middleware
+unwraps on cache miss and uses &lt;code&gt;hex(DEK)&lt;/code&gt; as the SigV4 secret in place
+of the IAM access-key secret.&lt;/p&gt;
+&lt;p&gt;This page covers the day-2 rotation runbook. The
+&lt;a href="https://danchupin.github.io/strata/reference/env-vars/"&gt;KMS provider reference&lt;/a&gt; lists
+the per-provider env vars; the
+&lt;a href="https://danchupin.github.io/strata/reference/admin-api/"&gt;admin API reference&lt;/a&gt; documents
+the three rotation endpoints.&lt;/p&gt;</description></item><item><title>Scaling</title><link>https://danchupin.github.io/strata/operate/scaling/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/operate/scaling/</guid><description>&lt;h1 id="scaling"&gt;Scaling&lt;a class="anchor" href="#scaling"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;Strata replicas are stateless gateways — they own no on-disk state, so
 sizing is a function of three signals: peak request rate (RPS), the
 working-set bytes the gateway holds in flight (RAM), and the cores the
