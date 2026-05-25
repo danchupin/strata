@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -129,6 +130,19 @@ func NewMiddleware(logger *slog.Logger, next http.Handler) *Middleware {
 	return &Middleware{Logger: logger, Next: next, NewID: uuid.NewString}
 }
 
+// statusWriter shims http.ResponseWriter to capture the status code so the
+// per-request access-log line below records it. Defaults to 200 because Go's
+// http.ResponseWriter contract treats Write without WriteHeader as 200 OK.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (sw *statusWriter) WriteHeader(code int) {
+	sw.status = code
+	sw.ResponseWriter.WriteHeader(code)
+}
+
 func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	id := r.Header.Get(HeaderRequestID)
 	if id == "" {
@@ -145,6 +159,15 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	ctx = WithLogger(ctx, logger.With("request_id", id))
-	m.Next.ServeHTTP(w, r.WithContext(ctx))
+	reqLogger := logger.With("request_id", id)
+	ctx = WithLogger(ctx, reqLogger)
+	sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+	start := time.Now()
+	m.Next.ServeHTTP(sw, r.WithContext(ctx))
+	reqLogger.InfoContext(ctx, "request",
+		"method", r.Method,
+		"path", r.URL.Path,
+		"status", sw.status,
+		"duration_ms", time.Since(start).Milliseconds(),
+	)
 }
