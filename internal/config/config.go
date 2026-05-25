@@ -25,6 +25,7 @@ type Config struct {
 	RADOS     RADOSConfig     `koanf:"rados"`
 	S3        S3Config        `koanf:"s3"`
 	Auth      AuthConfig      `koanf:"auth"`
+	KMS       KMSConfig       `koanf:"kms"`
 	Workers   WorkersConfig   `koanf:"workers"`
 
 	DefaultBucketShards int `koanf:"default_bucket_shards"`
@@ -74,8 +75,44 @@ type S3Config struct {
 }
 
 type AuthConfig struct {
-	Mode              string `koanf:"mode"`
-	StaticCredentials string `koanf:"static_credentials"`
+	Mode              string        `koanf:"mode"`
+	StaticCredentials string        `koanf:"static_credentials"`
+	STSDuration       time.Duration `koanf:"sts_duration"`
+	KeyMaxAge         time.Duration `koanf:"key_max_age"`
+}
+
+// KMSConfig collects every SSE-KMS knob under a single nested TOML section.
+// Adapter selects the provider explicitly ("vault"|"aws"|"local_hsm");
+// empty falls back to the FromEnv precedence (vault > aws > local_hsm).
+// DEKCacheTTL drives the wall-clock TTL on the auth-side DEK cache; range
+// [30s, 1h] (clamped in validate). DefaultKeyID feeds the admin
+// SigningKeyConfig as the default CMK id when the operator does not pass
+// one per Rotate call.
+type KMSConfig struct {
+	Adapter      string           `koanf:"adapter"`
+	DEKCacheTTL  time.Duration    `koanf:"dek_cache_ttl"`
+	DefaultKeyID string           `koanf:"default_key_id"`
+	AWS          KMSAWSConfig     `koanf:"aws"`
+	Vault        KMSVaultConfig   `koanf:"vault"`
+	LocalHSM     KMSLocalHSMConfig `koanf:"local_hsm"`
+}
+
+type KMSAWSConfig struct {
+	Region   string `koanf:"region"`
+	Endpoint string `koanf:"endpoint"`
+	RoleARN  string `koanf:"role_arn"`
+}
+
+type KMSVaultConfig struct {
+	Address  string `koanf:"address"`
+	Mount    string `koanf:"mount"`
+	Token    string `koanf:"token"`
+	RoleID   string `koanf:"role_id"`
+	SecretID string `koanf:"secret_id"`
+}
+
+type KMSLocalHSMConfig struct {
+	Seed string `koanf:"seed"`
 }
 
 // WorkersConfig collects every worker knob under a single nested TOML
@@ -191,7 +228,14 @@ func defaults() Config {
 			User:       "admin",
 			Pool:       "strata.rgw.buckets.data",
 		},
-		Auth: AuthConfig{Mode: "off"},
+		Auth: AuthConfig{
+			Mode:        "off",
+			STSDuration: time.Hour,
+			KeyMaxAge:   90 * 24 * time.Hour,
+		},
+		KMS: KMSConfig{
+			DEKCacheTTL: 5 * time.Minute,
+		},
 		Workers: WorkersConfig{
 			GC: WorkerGCConfig{
 				Interval:      30 * time.Second,
@@ -285,6 +329,20 @@ var envMap = map[string]string{
 	"STRATA_S3_CLASSES":                      "s3.classes",
 	"STRATA_AUTH_MODE":                       "auth.mode",
 	"STRATA_STATIC_CREDENTIALS":              "auth.static_credentials",
+	"STRATA_STS_DURATION":                    "auth.sts_duration",
+	"STRATA_KEY_MAX_AGE":                     "auth.key_max_age",
+	"STRATA_KMS_ADAPTER":                     "kms.adapter",
+	"STRATA_DEK_CACHE_TTL":                   "kms.dek_cache_ttl",
+	"STRATA_KMS_DEFAULT_KEY_ID":              "kms.default_key_id",
+	"STRATA_KMS_AWS_REGION":                  "kms.aws.region",
+	"STRATA_KMS_AWS_ENDPOINT":                "kms.aws.endpoint",
+	"STRATA_KMS_AWS_ROLE_ARN":                "kms.aws.role_arn",
+	"STRATA_KMS_VAULT_ADDR":                  "kms.vault.address",
+	"STRATA_KMS_VAULT_PATH":                  "kms.vault.mount",
+	"STRATA_KMS_VAULT_TOKEN":                 "kms.vault.token",
+	"STRATA_SSE_VAULT_ROLE_ID":               "kms.vault.role_id",
+	"STRATA_SSE_VAULT_SECRET_ID":             "kms.vault.secret_id",
+	"STRATA_KMS_LOCAL_HSM_SEED":              "kms.local_hsm.seed",
 	"STRATA_WORKERS":                         "workers.enabled",
 	"STRATA_GC_INTERVAL":                     "workers.gc.interval",
 	"STRATA_GC_GRACE":                        "workers.gc.grace",
@@ -395,8 +453,25 @@ func (c *Config) validate() error {
 		return fmt.Errorf("default_bucket_shards must be positive (got %d)", c.DefaultBucketShards)
 	}
 	c.clampWorkers()
+	c.clampAuthKMS()
 	warnLegacyDrainStrict()
 	return nil
+}
+
+// clampAuthKMS enforces the historical env-side ranges on the new
+// auth + kms TOML fields so TOML-loaded and env-loaded values get the
+// same WARN-and-clamp treatment. Zero values pass through (treated as
+// "default" by downstream consumers).
+func (c *Config) clampAuthKMS() {
+	if c.Auth.STSDuration != 0 {
+		c.Auth.STSDuration = clampDuration("auth.sts_duration", c.Auth.STSDuration, 15*time.Minute, 12*time.Hour)
+	}
+	if c.Auth.KeyMaxAge != 0 {
+		c.Auth.KeyMaxAge = clampDuration("auth.key_max_age", c.Auth.KeyMaxAge, 24*time.Hour, 365*24*time.Hour)
+	}
+	if c.KMS.DEKCacheTTL != 0 {
+		c.KMS.DEKCacheTTL = clampDuration("kms.dek_cache_ttl", c.KMS.DEKCacheTTL, 30*time.Second, time.Hour)
+	}
 }
 
 // clampWorkers enforces the same numeric ranges that the legacy per-worker

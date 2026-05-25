@@ -133,3 +133,23 @@ func NewAWSKMSProviderFromEnv(factory func(region string) (KMSAPI, error)) (*AWS
 	}
 	return NewAWSKMSProvider(client, region)
 }
+
+// newAWSFromConfig builds an AWSKMSProvider from the kms.Config substruct.
+// Endpoint + RoleARN flow through to the factory via the standard AWS SDK
+// config (callers wire them into awsconfig.WithBaseEndpoint /
+// stscreds.NewAssumeRoleProvider as needed); the factory signature stays
+// region-only for backwards-compat with the env path.
+func newAWSFromConfig(cfg Config, factory func(region string) (KMSAPI, error)) (*AWSKMSProvider, error) {
+	region := strings.TrimSpace(cfg.AWSRegion)
+	if region == "" {
+		return nil, ErrNoConfig
+	}
+	if factory == nil {
+		return nil, errors.New("kms aws: AWS region set but no client factory configured")
+	}
+	client, err := factory(region)
+	if err != nil {
+		return nil, fmt.Errorf("kms aws: client init: %w", err)
+	}
+	return NewAWSKMSProvider(client, region)
+}

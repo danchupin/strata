@@ -98,6 +98,23 @@ func NewVaultProviderFromEnv() (*VaultProvider, error) {
 	})
 }
 
+// newVaultFromConfig builds a VaultProvider from the kms.Config substruct.
+// Reused by FromConfig; the kms package keeps its own Config shape so it
+// does not import internal/config.
+func newVaultFromConfig(cfg Config) (*VaultProvider, error) {
+	addr := strings.TrimSpace(cfg.VaultAddr)
+	path := strings.TrimSpace(cfg.VaultPath)
+	if addr == "" || path == "" {
+		return nil, ErrNoConfig
+	}
+	return NewVaultProvider(VaultConfig{
+		Addr:        addr,
+		TransitPath: path,
+		RoleID:      cfg.VaultRoleID,
+		SecretID:    cfg.VaultSecret,
+	})
+}
+
 // GenerateDataKey returns a fresh 32-byte DEK plus the Vault-wrapped form.
 func (p *VaultProvider) GenerateDataKey(ctx context.Context, keyID string) ([]byte, []byte, error) {
 	if keyID == "" {

@@ -33,6 +33,30 @@ classes = "STANDARD=strata.rgw.buckets.data,STANDARD_IA=strata.rgw.buckets.ia,GL
 [auth]
 mode              = "off"       # "off" | "required"
 static_credentials = ""         # "access:secret[:owner],..."
+sts_duration      = "1h"        # Default AssumeRole TTL. Range: [15m, 12h].
+key_max_age       = "2160h"     # Per-bucket signing-key rotation window (90d). Range: [24h, 8760h].
+
+[kms]
+# adapter selects the SSE-KMS provider explicitly. Empty -> auto via
+# precedence vault > aws > local_hsm (first configured wins).
+adapter        = ""             # "" | "vault" | "aws" | "local_hsm"
+dek_cache_ttl  = "5m"           # Auth-side DEK cache TTL. Range: [30s, 1h].
+default_key_id = ""             # Default CMK id used by the admin Rotate handler when none specified.
+
+[kms.aws]
+region    = ""                  # Required for adapter=aws (or auto when set).
+endpoint  = ""                  # Optional custom AWS KMS endpoint (LocalStack/moto).
+role_arn  = ""                  # Optional STS assume-role for KMS client credentials.
+
+[kms.vault]
+address   = ""                  # Required for adapter=vault. Vault server URL.
+mount     = ""                  # Required for adapter=vault. Transit mount path (e.g. "transit").
+token     = ""                  # Optional static Vault token; alternative to AppRole.
+role_id   = ""                  # AppRole RoleID; shared with the SSE-S3 master-key Vault provider.
+secret_id = ""                  # AppRole SecretID; shared with the SSE-S3 master-key Vault provider.
+
+[kms.local_hsm]
+seed = ""                       # Hex 32 bytes. Dev/test only — NOT a security boundary.
 
 [workers]
 # Comma-separated worker names (overrides STRATA_WORKERS).

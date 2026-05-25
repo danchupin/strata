@@ -129,6 +129,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	apiHandler.Region = cfg.RegionName
 	apiHandler.InvalidateCredential = multi.Invalidate
 	apiHandler.STS = sts
+	apiHandler.STSDefaultDuration = cfg.Auth.STSDuration
 	mfaSecrets, err := s3api.ParseMFASecrets(os.Getenv("STRATA_MFA_SECRETS"))
 	if err != nil {
 		return fmt.Errorf("mfa secrets: %w", err)
@@ -141,7 +142,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	if masterProvider != nil {
 		apiHandler.Master = masterProvider
 	}
-	kmsProvider, err := kms.FromEnv(kms.WithAWSKMSClientFactory(awsKMSClientFactory))
+	kmsProvider, err := kms.FromConfig(kmsConfigFromAppConfig(cfg), kms.WithAWSKMSClientFactory(awsKMSClientFactory))
 	if err != nil && !errors.Is(err, kms.ErrNoConfig) {
 		return fmt.Errorf("sse-kms provider: %w", err)
 	}
@@ -155,7 +156,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	// to the IAM access-key path so KMS-less deployments keep working.
 	var bucketSigningResolver *auth.BucketSigningResolver
 	if kmsProvider != nil {
-		bucketSigningResolver = buildBucketSigningResolver(metaStore, kmsProvider, logger)
+		bucketSigningResolver = buildBucketSigningResolver(cfg, metaStore, kmsProvider, logger)
 		mw.BucketSigning = bucketSigningResolver
 	}
 	apiHandler.VHostPatterns = vhostPatterns()
@@ -258,7 +259,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 			Inflight:        rebalanceResolved.Inflight,
 			Shards:          rebalanceResolved.Shards,
 		},
-		SigningKey: buildSigningKeyAdminConfig(kmsProvider, bucketSigningResolver, logger),
+		SigningKey: buildSigningKeyAdminConfig(cfg, kmsProvider, bucketSigningResolver, logger),
 	})
 
 	mux := http.NewServeMux()

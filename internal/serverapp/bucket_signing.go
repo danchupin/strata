@@ -9,6 +9,7 @@ import (
 
 	"github.com/danchupin/strata/internal/adminapi"
 	"github.com/danchupin/strata/internal/auth"
+	"github.com/danchupin/strata/internal/config"
 	"github.com/danchupin/strata/internal/crypto/kms"
 	"github.com/danchupin/strata/internal/meta"
 	"github.com/danchupin/strata/internal/metrics"
@@ -24,27 +25,23 @@ const (
 	maxKeyMaxAge     = 365 * 24 * time.Hour
 )
 
-// dekCacheTTL reads STRATA_DEK_CACHE_TTL (Go duration) and clamps to
-// [30s, 1h]. Default 5m. Out-of-range values log a WARN and are clamped
-// to the nearest valid bound (US-001 auth-dx-trailer-lima).
-func dekCacheTTL(logger *slog.Logger) time.Duration {
-	raw := os.Getenv("STRATA_DEK_CACHE_TTL")
-	if raw == "" {
+// dekCacheTTL resolves the DEK cache TTL from the loaded Config. cfg.KMS.
+// DEKCacheTTL is already range-clamped to [30s, 1h] by config.validate;
+// zero indicates "operator left it unset" and falls back to defaultDEKCacheTTL.
+// The legacy env-side STRATA_DEK_CACHE_TTL still flows through cfg via
+// the koanf env provider, so explicit env overrides keep working.
+func dekCacheTTL(cfg *config.Config, logger *slog.Logger) time.Duration {
+	if cfg == nil || cfg.KMS.DEKCacheTTL == 0 {
 		return defaultDEKCacheTTL
 	}
-	d, err := time.ParseDuration(raw)
-	if err != nil {
-		logger.Warn("STRATA_DEK_CACHE_TTL parse failed; using default",
-			"value", raw, "default", defaultDEKCacheTTL.String(), "error", err.Error())
-		return defaultDEKCacheTTL
-	}
+	d := cfg.KMS.DEKCacheTTL
 	switch {
 	case d < minDEKCacheTTL:
-		logger.Warn("STRATA_DEK_CACHE_TTL below minimum; clamping",
+		logger.Warn("kms.dek_cache_ttl below minimum; clamping",
 			"value", d.String(), "min", minDEKCacheTTL.String())
 		return minDEKCacheTTL
 	case d > maxDEKCacheTTL:
-		logger.Warn("STRATA_DEK_CACHE_TTL above maximum; clamping",
+		logger.Warn("kms.dek_cache_ttl above maximum; clamping",
 			"value", d.String(), "max", maxDEKCacheTTL.String())
 		return maxDEKCacheTTL
 	}
@@ -67,27 +64,21 @@ func kmsProviderLabel(p kms.Provider) string {
 	}
 }
 
-// keyMaxAge reads STRATA_KEY_MAX_AGE (Go duration) and clamps to
-// [24h, 8760h]. Default 90d. Out-of-range values log a WARN and are
-// clamped to the nearest valid bound (US-002 auth-dx-trailer-lima).
-func keyMaxAge(logger *slog.Logger) time.Duration {
-	raw := os.Getenv("STRATA_KEY_MAX_AGE")
-	if raw == "" {
+// keyMaxAge resolves the per-bucket signing key rotation window from the
+// loaded Config. cfg.Auth.KeyMaxAge is already range-clamped to
+// [24h, 8760h] by config.validate; zero falls back to defaultKeyMaxAge.
+func keyMaxAge(cfg *config.Config, logger *slog.Logger) time.Duration {
+	if cfg == nil || cfg.Auth.KeyMaxAge == 0 {
 		return defaultKeyMaxAge
 	}
-	d, err := time.ParseDuration(raw)
-	if err != nil {
-		logger.Warn("STRATA_KEY_MAX_AGE parse failed; using default",
-			"value", raw, "default", defaultKeyMaxAge.String(), "error", err.Error())
-		return defaultKeyMaxAge
-	}
+	d := cfg.Auth.KeyMaxAge
 	switch {
 	case d < minKeyMaxAge:
-		logger.Warn("STRATA_KEY_MAX_AGE below minimum; clamping",
+		logger.Warn("auth.key_max_age below minimum; clamping",
 			"value", d.String(), "min", minKeyMaxAge.String())
 		return minKeyMaxAge
 	case d > maxKeyMaxAge:
-		logger.Warn("STRATA_KEY_MAX_AGE above maximum; clamping",
+		logger.Warn("auth.key_max_age above maximum; clamping",
 			"value", d.String(), "max", maxKeyMaxAge.String())
 		return maxKeyMaxAge
 	}
@@ -98,8 +89,8 @@ func keyMaxAge(logger *slog.Logger) time.Duration {
 // the configured KMS provider, a wall-clock TTL cache and the
 // strata_kms_decrypt_total counter into a single resolver consumed by
 // the SigV4 middleware.
-func buildBucketSigningResolver(store meta.Store, provider kms.Provider, logger *slog.Logger) *auth.BucketSigningResolver {
-	ttl := dekCacheTTL(logger)
+func buildBucketSigningResolver(cfg *config.Config, store meta.Store, provider kms.Provider, logger *slog.Logger) *auth.BucketSigningResolver {
+	ttl := dekCacheTTL(cfg, logger)
 	cache := auth.NewDEKCache(ttl)
 	label := kmsProviderLabel(provider)
 	return &auth.BucketSigningResolver{
@@ -107,7 +98,7 @@ func buildBucketSigningResolver(store meta.Store, provider kms.Provider, logger 
 		KMS:      provider,
 		Provider: label,
 		Cache:    cache,
-		MaxAge:   keyMaxAge(logger),
+		MaxAge:   keyMaxAge(cfg, logger),
 		CounterInc: func(prov, outcome string) {
 			metrics.KMSDecryptTotal.WithLabelValues(prov, outcome).Inc()
 		},
@@ -118,24 +109,28 @@ func buildBucketSigningResolver(store meta.Store, provider kms.Provider, logger 
 // buildSigningKeyAdminConfig wires the operator-facing admin surface
 // (US-002): the live KMS provider for Rotate, the auth resolver's DEK
 // cache so Rotate / Delete drop the cached entry synchronously, the
-// default CMK id from STRATA_KMS_DEFAULT_KEY_ID (empty falls back to
-// the bucket name per resolveCMKID), and the max-age window for the
-// Status endpoint's expired flag. Zero value is returned when no KMS
-// provider is configured — the admin endpoints surface 503
-// SigningKeyDisabled in that case.
-func buildSigningKeyAdminConfig(provider kms.Provider, resolver *auth.BucketSigningResolver, logger *slog.Logger) adminapi.SigningKeyConfig {
+// default CMK id from cfg.KMS.DefaultKeyID (empty falls back to the
+// bucket name per resolveCMKID), and the max-age window for the Status
+// endpoint's expired flag. Zero value is returned when no KMS provider
+// is configured — the admin endpoints surface 503 SigningKeyDisabled
+// in that case.
+func buildSigningKeyAdminConfig(cfg *config.Config, provider kms.Provider, resolver *auth.BucketSigningResolver, logger *slog.Logger) adminapi.SigningKeyConfig {
 	if provider == nil {
 		return adminapi.SigningKeyConfig{}
 	}
-	cfg := adminapi.SigningKeyConfig{
+	defaultKeyID := ""
+	if cfg != nil {
+		defaultKeyID = cfg.KMS.DefaultKeyID
+	}
+	acfg := adminapi.SigningKeyConfig{
 		Provider:     provider,
-		DefaultKeyID: os.Getenv("STRATA_KMS_DEFAULT_KEY_ID"),
-		MaxAge:       keyMaxAge(logger),
+		DefaultKeyID: defaultKeyID,
+		MaxAge:       keyMaxAge(cfg, logger),
 	}
 	if resolver != nil {
-		cfg.Cache = resolver.Cache
+		acfg.Cache = resolver.Cache
 	}
-	return cfg
+	return acfg
 }
 
 // classifyKMSUnwrapErr translates a kms.Provider error into one of the
@@ -157,3 +152,27 @@ func classifyKMSUnwrapErr(err error) error {
 	}
 	return fmt.Errorf("%w: %v", auth.ErrKMSDenied, err)
 }
+
+// kmsConfigFromAppConfig projects the relevant fields from cfg.KMS into
+// the kms package's self-contained Config shape. Keeps the kms package
+// free of an internal/config import (the dependency direction is config
+// knows about kms, never the reverse).
+func kmsConfigFromAppConfig(cfg *config.Config) kms.Config {
+	if cfg == nil {
+		return kms.Config{}
+	}
+	return kms.Config{
+		Adapter:      cfg.KMS.Adapter,
+		AWSRegion:    cfg.KMS.AWS.Region,
+		AWSEndpoint:  cfg.KMS.AWS.Endpoint,
+		VaultAddr:    cfg.KMS.Vault.Address,
+		VaultPath:    cfg.KMS.Vault.Mount,
+		VaultToken:   cfg.KMS.Vault.Token,
+		VaultRoleID:  cfg.KMS.Vault.RoleID,
+		VaultSecret:  cfg.KMS.Vault.SecretID,
+		LocalHSMSeed: cfg.KMS.LocalHSM.Seed,
+	}
+}
+
+// silence unused-import lint when only one helper above touches os.
+var _ = os.Getenv

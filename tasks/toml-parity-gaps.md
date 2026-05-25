@@ -17,107 +17,63 @@ canonical section name — the heuristic shown in the **Expected TOML key**
 column below is the naive first-underscore split and WILL be wrong for
 multi-word sections. The actual envMap entry is the source of truth.
 
-**Counts** (post-audit, 2026-05-25):
+**Counts** (post US-003 audit, 2026-05-25):
 
 | Bucket                  | Count |
 |-------------------------|------:|
-| Total STRATA_* env vars |   139 |
-| In envMap (wired)       |    31 |
-| Exempt (test/bootstrap) |    34 |
-| Unmapped (gap)          |    74 |
+| Total STRATA_* env vars |   134 |
+| In envMap (wired)       |    82 |
+| Exempt (test/bootstrap) |    24 |
+| Unmapped (gap)          |    28 |
 | Present in example TOML |    27 |
 
 Story coverage hints (final placement decided by each story's author):
 
 - **US-002 workers** — gc.* / lifecycle.* / rebalance.* / usage_rollup.* /
   manifest_rewriter.* / audit_export.* / quota_reconcile.* / `workers` /
-  notify.* / replicator.* / access_log.* / inventory.* knobs.
-- **US-003 auth + KMS** — auth.* / kms.* / key.max_age / sse.* / jwt.* /
-  console.jwt_secret / mfa.* / dek.cache_ttl.
+  notify.* / replicator.* / access_log.* / inventory.* knobs. ✅ DONE.
+- **US-003 auth + KMS** — auth.* / kms.* / key.max_age / sse.vault.* /
+  kms.dek_cache_ttl. ✅ DONE.
 - **US-004 observability** — otel.* / log.level / cassandra.slow_ms /
   audit.retention / console.theme_default / prometheus.url.
 - **US-005 misc sweep** — bucketstats.* / rados.health_oid / rados.pool_size /
   rados.batch_ops / rados.get_prefetch / rados.put_concurrency /
-  manifest.format / vhost.pattern / cluster.name / node.id.
+  manifest.format / vhost.pattern / cluster.name / node.id /
+  sse.master_* / mfa.secrets / console.jwt_secret / jwt.secret_file /
+  jwt.shared.
 
-## Gap rows
+## Gap rows (remaining after US-003)
 
 | Env var                                | Expected TOML key (heuristic)   | In TOML example? | Likely story |
 |----------------------------------------|---------------------------------|------------------|--------------|
-| `STRATA_ACCESS_LOG_INTERVAL`           | `access.log_interval` (→ `access_log.interval`)         | no | US-002 |
-| `STRATA_ACCESS_LOG_MAX_FLUSH_BYTES`    | `access.log_max_flush_bytes` (→ `access_log.max_flush_bytes`) | no | US-002 |
-| `STRATA_ACCESS_LOG_POLL_LIMIT`         | `access.log_poll_limit` (→ `access_log.poll_limit`)     | no | US-002 |
-| `STRATA_AUDIT_EXPORT_AFTER`            | `audit.export_after` (→ `audit_export.after`)           | no | US-002 |
-| `STRATA_AUDIT_EXPORT_BUCKET`           | `audit.export_bucket` (→ `audit_export.bucket`)         | no | US-002 |
-| `STRATA_AUDIT_EXPORT_INTERVAL`         | `audit.export_interval` (→ `audit_export.interval`)     | no | US-002 |
-| `STRATA_AUDIT_EXPORT_PREFIX`           | `audit.export_prefix` (→ `audit_export.prefix`)         | no | US-002 |
 | `STRATA_AUDIT_RETENTION`               | `audit.retention` (→ `audit_log.retention`)             | no | US-004 |
 | `STRATA_BUCKETSTATS_INTERVAL`          | `bucketstats.interval` (→ `bucket_stats.interval`)      | no | US-005 |
 | `STRATA_BUCKETSTATS_TOPN`              | `bucketstats.topn` (→ `bucket_stats.topn`)              | no | US-005 |
 | `STRATA_CASSANDRA_SLOW_MS`             | `cassandra.slow_ms`                                     | no | US-004 |
 | `STRATA_CLUSTER_NAME`                  | `cluster.name`                                          | no | US-005 |
-| `STRATA_CONSOLE_JWT_SECRET`            | `console.jwt_secret`                                    | no | US-003 |
+| `STRATA_CONSOLE_JWT_SECRET`            | `console.jwt_secret`                                    | no | US-005 |
 | `STRATA_CONSOLE_THEME_DEFAULT`         | `console.theme_default`                                 | no | US-004 |
-| `STRATA_DEK_CACHE_TTL`                 | `dek.cache_ttl` (→ `kms.dek_cache_ttl`)                 | no | US-003 |
-| `STRATA_GC_BATCH_SIZE`                 | `gc.batch_size`                                         | no | US-002 |
-| `STRATA_GC_CONCURRENCY`                | `gc.concurrency`                                        | no | US-002 |
-| `STRATA_GC_DUAL_WRITE`                 | `gc.dual_write`                                         | no | US-002 |
-| `STRATA_GC_SHARDS`                     | `gc.shards`                                             | no | US-002 |
-| `STRATA_INVENTORY_INTERVAL`            | `inventory.interval`                                    | no | US-002 |
-| `STRATA_INVENTORY_REGION`              | `inventory.region`                                      | no | US-002 |
-| `STRATA_JWT_SECRET_FILE`               | `jwt.secret_file` (→ `auth.jwt_secret_file`)            | no | US-003 |
-| `STRATA_JWT_SHARED`                    | `jwt.shared` (→ `auth.jwt_shared`)                      | no | US-003 |
-| `STRATA_KEY_MAX_AGE`                   | `key.max_age` (→ `auth.key_max_age`)                    | no | US-003 |
-| `STRATA_KMS_AWS_REGION`                | `kms.aws_region`                                        | no | US-003 |
-| `STRATA_KMS_DEFAULT_KEY_ID`            | `kms.default_key_id`                                    | no | US-003 |
-| `STRATA_KMS_LOCAL_HSM_SEED`            | `kms.local_hsm_seed`                                    | no | US-003 |
-| `STRATA_KMS_VAULT_ADDR`                | `kms.vault_addr`                                        | no | US-003 |
-| `STRATA_KMS_VAULT_PATH`                | `kms.vault_path`                                        | no | US-003 |
-| `STRATA_LIFECYCLE_CONCURRENCY`         | `lifecycle.concurrency`                                 | no | US-002 |
+| `STRATA_JWT_SECRET_FILE`               | `jwt.secret_file` (→ `auth.jwt_secret_file`)            | no | US-005 |
+| `STRATA_JWT_SHARED`                    | `jwt.shared` (→ `auth.jwt_shared`)                      | no | US-005 |
 | `STRATA_LOG_LEVEL`                     | `log.level` (→ `logging.level`)                         | no | US-004 |
 | `STRATA_MANIFEST_FORMAT`               | `manifest.format`                                       | no | US-005 |
-| `STRATA_MANIFEST_REWRITER_BATCH_LIMIT` | `manifest.rewriter_batch_limit` (→ `manifest_rewriter.batch_limit`) | no | US-002 |
-| `STRATA_MANIFEST_REWRITER_DRY_RUN`     | `manifest.rewriter_dry_run` (→ `manifest_rewriter.dry_run`)         | no | US-002 |
-| `STRATA_MANIFEST_REWRITER_INTERVAL`    | `manifest.rewriter_interval` (→ `manifest_rewriter.interval`)       | no | US-002 |
-| `STRATA_MFA_SECRETS`                   | `mfa.secrets` (→ `auth.mfa_secrets`)                    | no | US-003 |
+| `STRATA_MFA_SECRETS`                   | `mfa.secrets` (→ `auth.mfa_secrets`)                    | no | US-005 |
 | `STRATA_NODE_ID`                       | `node.id`                                               | no | US-005 |
-| `STRATA_NOTIFY_BACKOFF_BASE`           | `notify.backoff_base`                                   | no | US-002 |
-| `STRATA_NOTIFY_INTERVAL`               | `notify.interval`                                       | no | US-002 |
-| `STRATA_NOTIFY_MAX_RETRIES`            | `notify.max_retries`                                    | no | US-002 |
-| `STRATA_NOTIFY_POLL_LIMIT`             | `notify.poll_limit`                                     | no | US-002 |
-| `STRATA_NOTIFY_TARGETS`                | `notify.targets`                                        | no | US-002 |
 | `STRATA_OTEL_RINGBUF`                  | `otel.ringbuf`                                          | no | US-004 |
 | `STRATA_OTEL_RINGBUF_BYTES`            | `otel.ringbuf_bytes`                                    | no | US-004 |
 | `STRATA_OTEL_SAMPLE_RATIO`             | `otel.sample_ratio`                                     | no | US-004 |
 | `STRATA_PROMETHEUS_URL`                | `prometheus.url`                                        | no | US-004 |
-| `STRATA_QUOTA_RECONCILE_INTERVAL`      | `quota.reconcile_interval` (→ `quota_reconcile.interval`) | no | US-002 |
 | `STRATA_RADOS_BATCH_OPS`               | `rados.batch_ops`                                       | no | US-005 |
 | `STRATA_RADOS_GET_PREFETCH`            | `rados.get_prefetch`                                    | no | US-005 |
 | `STRATA_RADOS_HEALTH_OID`              | `rados.health_oid`                                      | no | US-005 |
 | `STRATA_RADOS_POOL_SIZE`               | `rados.pool_size`                                       | no | US-005 |
 | `STRATA_RADOS_PUT_CONCURRENCY`         | `rados.put_concurrency`                                 | no | US-005 |
-| `STRATA_REBALANCE_INFLIGHT`            | `rebalance.inflight`                                    | no | US-002 |
-| `STRATA_REBALANCE_INTERVAL`            | `rebalance.interval`                                    | no | US-002 |
-| `STRATA_REBALANCE_RATE_MB_S`           | `rebalance.rate_mb_s`                                   | no | US-002 |
-| `STRATA_REBALANCE_SHARDS`              | `rebalance.shards`                                      | no | US-002 |
-| `STRATA_REPLICATOR_BACKOFF_BASE`       | `replicator.backoff_base`                               | no | US-002 |
-| `STRATA_REPLICATOR_HTTP_TIMEOUT`       | `replicator.http_timeout`                               | no | US-002 |
-| `STRATA_REPLICATOR_INTERVAL`           | `replicator.interval`                                   | no | US-002 |
-| `STRATA_REPLICATOR_MAX_RETRIES`        | `replicator.max_retries`                                | no | US-002 |
-| `STRATA_REPLICATOR_PEER_SCHEME`        | `replicator.peer_scheme`                                | no | US-002 |
-| `STRATA_REPLICATOR_POLL_LIMIT`         | `replicator.poll_limit`                                 | no | US-002 |
-| `STRATA_SSE_MASTER_KEY`                | `sse.master_key`                                        | no | US-003 |
-| `STRATA_SSE_MASTER_KEY_FILE`           | `sse.master_key_file`                                   | no | US-003 |
-| `STRATA_SSE_MASTER_KEY_ID`             | `sse.master_key_id`                                     | no | US-003 |
-| `STRATA_SSE_MASTER_KEY_VAULT`          | `sse.master_key_vault`                                  | no | US-003 |
-| `STRATA_SSE_MASTER_KEYS`               | `sse.master_keys`                                       | no | US-003 |
-| `STRATA_SSE_VAULT_ROLE_ID`             | `sse.vault_role_id`                                     | no | US-003 |
-| `STRATA_SSE_VAULT_SECRET_ID`           | `sse.vault_secret_id`                                   | no | US-003 |
-| `STRATA_USAGE_ROLLUP_AT`               | `usage.rollup_at` (→ `usage_rollup.at`)                 | no | US-002 |
-| `STRATA_USAGE_ROLLUP_INTERVAL`         | `usage.rollup_interval` (→ `usage_rollup.interval`)     | no | US-002 |
-| `STRATA_USAGE_ROLLUP_SAMPLES_PER_DAY`  | `usage.rollup_samples_per_day` (→ `usage_rollup.samples_per_day`) | no | US-002 |
+| `STRATA_SSE_MASTER_KEY`                | `sse.master_key`                                        | no | US-005 |
+| `STRATA_SSE_MASTER_KEY_FILE`           | `sse.master_key_file`                                   | no | US-005 |
+| `STRATA_SSE_MASTER_KEY_ID`             | `sse.master_key_id`                                     | no | US-005 |
+| `STRATA_SSE_MASTER_KEY_VAULT`          | `sse.master_key_vault`                                  | no | US-005 |
+| `STRATA_SSE_MASTER_KEYS`               | `sse.master_keys`                                       | no | US-005 |
 | `STRATA_VHOST_PATTERN`                 | `vhost.pattern`                                         | no | US-005 |
-| `STRATA_WORKERS`                       | `workers`                                               | no | US-002 |
 
 ## Exempt rows (no action — kept for transparency)
 
@@ -141,7 +97,7 @@ both the audit script and the US-006 drift-lint test):
 
 ## Already wired (envMap rows — no action required)
 
-See `internal/config/config.go::envMap` for the full set (31 entries today).
+See `internal/config/config.go::envMap` for the full set (82 entries today).
 Highlights:
 
 - Listen / region / data_backend / meta_backend / shutdown_wait /
@@ -152,9 +108,12 @@ Highlights:
 - RADOS block (config_file / user / keyring / pool / namespace / classes /
   clusters).
 - S3 backend (clusters / classes).
-- Auth (mode / static_credentials).
-- Lifecycle (interval / unit / metrics_listen).
-- GC (interval / grace / metrics_listen).
+- Auth (mode / static_credentials / sts_duration / key_max_age).
+- KMS (adapter / dek_cache_ttl / default_key_id / aws.* / vault.* /
+  local_hsm.seed).
+- Workers (`workers.enabled` + per-worker sub-sections: gc / lifecycle /
+  rebalance / usage_rollup / manifest_rewriter / audit_export /
+  quota_reconcile / notify / replicator / access_log / inventory).
 
 These rows MUST stay wired through US-002..US-005 and US-006 — any
 regression failing the drift lint is a CI break.

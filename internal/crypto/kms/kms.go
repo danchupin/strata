@@ -80,3 +80,53 @@ func FromEnv(opts ...EnvOption) (Provider, error) {
 	}
 	return nil, ErrNoConfig
 }
+
+// Config mirrors the relevant fields from internal/config.KMSConfig. The
+// kms package keeps a self-contained shape so it does not import
+// internal/config (which would invert the dependency direction; config is
+// allowed to know about kms, not vice versa). serverapp builds this
+// struct from cfg.KMS before calling FromConfig.
+type Config struct {
+	Adapter      string // "vault" | "aws" | "local_hsm" | "" (auto via precedence)
+	AWSRegion    string
+	AWSEndpoint  string
+	VaultAddr    string
+	VaultPath    string
+	VaultToken   string
+	VaultRoleID  string
+	VaultSecret  string
+	LocalHSMSeed string
+}
+
+// FromConfig builds a Provider from an explicit config. When Adapter is
+// non-empty it picks that provider directly; empty falls back to the same
+// precedence as FromEnv (vault > aws > local_hsm) using cfg fields instead
+// of env reads. Returns ErrNoConfig when no provider can be built.
+func FromConfig(cfg Config, opts ...EnvOption) (Provider, error) {
+	envOpts := envCfg{}
+	for _, opt := range opts {
+		opt(&envOpts)
+	}
+	switch cfg.Adapter {
+	case "vault":
+		return newVaultFromConfig(cfg)
+	case "aws", "aws_kms", "aws-kms":
+		return newAWSFromConfig(cfg, envOpts.awsKMSFactory)
+	case "local_hsm", "local-hsm", "localhsm":
+		return newLocalHSMFromConfig(cfg)
+	case "":
+		// auto-precedence
+	default:
+		return nil, errors.New("strata/crypto/kms: unknown adapter " + cfg.Adapter)
+	}
+	if cfg.VaultAddr != "" && cfg.VaultPath != "" {
+		return newVaultFromConfig(cfg)
+	}
+	if cfg.AWSRegion != "" {
+		return newAWSFromConfig(cfg, envOpts.awsKMSFactory)
+	}
+	if cfg.LocalHSMSeed != "" {
+		return newLocalHSMFromConfig(cfg)
+	}
+	return nil, ErrNoConfig
+}

@@ -5,46 +5,47 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/danchupin/strata/internal/auth"
+	"github.com/danchupin/strata/internal/config"
 	"github.com/danchupin/strata/internal/crypto/kms"
 )
 
+// cfgWithKeyMaxAge returns a *config.Config carrying the supplied
+// KeyMaxAge value verbatim — bypassing config.Load so the helper's own
+// clamp logic is exercised in isolation from the config-side clamp.
+func cfgWithKeyMaxAge(d time.Duration) *config.Config {
+	return &config.Config{Auth: config.AuthConfig{KeyMaxAge: d}}
+}
+
+// cfgWithDEKCacheTTL mirrors cfgWithKeyMaxAge for the KMS side.
+func cfgWithDEKCacheTTL(d time.Duration) *config.Config {
+	return &config.Config{KMS: config.KMSConfig{DEKCacheTTL: d}}
+}
+
 func TestKeyMaxAge_Default(t *testing.T) {
-	t.Setenv("STRATA_KEY_MAX_AGE", "")
-	if got := keyMaxAge(discardLogger()); got != defaultKeyMaxAge {
+	if got := keyMaxAge(nil, discardLogger()); got != defaultKeyMaxAge {
 		t.Fatalf("default: got %s want %s", got, defaultKeyMaxAge)
 	}
 }
 
 func TestKeyMaxAge_Parsed(t *testing.T) {
-	t.Setenv("STRATA_KEY_MAX_AGE", "120h")
-	if got := keyMaxAge(discardLogger()); got != 120*time.Hour {
+	if got := keyMaxAge(cfgWithKeyMaxAge(120*time.Hour), discardLogger()); got != 120*time.Hour {
 		t.Fatalf("parsed: got %s want 120h", got)
 	}
 }
 
 func TestKeyMaxAge_ClampBelowMin(t *testing.T) {
-	t.Setenv("STRATA_KEY_MAX_AGE", "10m")
-	if got := keyMaxAge(discardLogger()); got != minKeyMaxAge {
+	if got := keyMaxAge(cfgWithKeyMaxAge(10*time.Minute), discardLogger()); got != minKeyMaxAge {
 		t.Fatalf("below-min: got %s want %s", got, minKeyMaxAge)
 	}
 }
 
 func TestKeyMaxAge_ClampAboveMax(t *testing.T) {
-	t.Setenv("STRATA_KEY_MAX_AGE", "9000h")
-	if got := keyMaxAge(discardLogger()); got != maxKeyMaxAge {
+	if got := keyMaxAge(cfgWithKeyMaxAge(9000*time.Hour), discardLogger()); got != maxKeyMaxAge {
 		t.Fatalf("above-max: got %s want %s", got, maxKeyMaxAge)
-	}
-}
-
-func TestKeyMaxAge_ParseError(t *testing.T) {
-	t.Setenv("STRATA_KEY_MAX_AGE", "not-a-duration")
-	if got := keyMaxAge(discardLogger()); got != defaultKeyMaxAge {
-		t.Fatalf("parse-error: got %s want default %s", got, defaultKeyMaxAge)
 	}
 }
 
@@ -108,15 +109,14 @@ func TestKMSWrapTransient_PreservesKeyIDMismatch(t *testing.T) {
 	}
 }
 
-func TestDekCacheTTL_EnvOverride(t *testing.T) {
-	t.Setenv("STRATA_DEK_CACHE_TTL", "45s")
-	if got := dekCacheTTL(discardLogger()); got != 45*time.Second {
+func TestDekCacheTTL_FromConfig(t *testing.T) {
+	if got := dekCacheTTL(cfgWithDEKCacheTTL(45*time.Second), discardLogger()); got != 45*time.Second {
 		t.Fatalf("got %s want 45s", got)
 	}
 }
 
 func TestBuildSigningKeyAdminConfig_NilProvider(t *testing.T) {
-	cfg := buildSigningKeyAdminConfig(nil, nil, discardLogger())
+	cfg := buildSigningKeyAdminConfig(nil, nil, nil, discardLogger())
 	if cfg.Provider != nil {
 		t.Fatalf("nil provider should yield empty config; got %+v", cfg)
 	}
@@ -127,8 +127,8 @@ func TestBuildSigningKeyAdminConfig_PopulatesFromResolver(t *testing.T) {
 	resolver := &auth.BucketSigningResolver{
 		Cache: auth.NewDEKCache(time.Minute),
 	}
-	t.Setenv("STRATA_KMS_DEFAULT_KEY_ID", "alias/strata-test")
-	cfg := buildSigningKeyAdminConfig(prov, resolver, discardLogger())
+	appCfg := &config.Config{KMS: config.KMSConfig{DefaultKeyID: "alias/strata-test"}}
+	cfg := buildSigningKeyAdminConfig(appCfg, prov, resolver, discardLogger())
 	if cfg.Provider != prov {
 		t.Fatalf("provider plumbing broken")
 	}
@@ -153,6 +153,3 @@ func (fakeKMSProvider) GenerateDataKey(ctx context.Context, keyID string) ([]byt
 func (fakeKMSProvider) UnwrapDEK(ctx context.Context, keyID string, wrapped []byte) ([]byte, error) {
 	return nil, errors.New("not used")
 }
-
-// silence unused-import lint if test list shrinks.
-var _ = os.Setenv

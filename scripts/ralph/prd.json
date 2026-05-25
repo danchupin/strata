@@ -61,8 +61,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Auth + KMS knobs landed in Config: Config.Auth gains STSDuration + KeyMaxAge; new Config.KMS substruct collects Adapter / DEKCacheTTL / DefaultKeyID / AWS (Region/Endpoint/RoleARN) / Vault (Address/Mount/Token/RoleID/SecretID) / LocalHSM.Seed. envMap gains 15 new entries — STRATA_STS_DURATION / STRATA_KEY_MAX_AGE / STRATA_KMS_ADAPTER / STRATA_DEK_CACHE_TTL / STRATA_KMS_DEFAULT_KEY_ID / STRATA_KMS_AWS_{REGION,ENDPOINT,ROLE_ARN} / STRATA_KMS_VAULT_{ADDR,PATH,TOKEN} / STRATA_SSE_VAULT_{ROLE_ID,SECRET_ID} / STRATA_KMS_LOCAL_HSM_SEED. Range clamps in Config.clampAuthKMS: STSDuration [15m,12h], KeyMaxAge [24h,365d], DEKCacheTTL [30s,1h]. internal/crypto/kms gains FromConfig(Config, opts...) alongside FromEnv — kms package keeps its own Config shape (kms.Config) to avoid importing internal/config. Per-provider newVaultFromConfig / newAWSFromConfig / newLocalHSMFromConfig helpers wrap the existing constructors. internal/serverapp wires cfg via kmsConfigFromAppConfig → kms.FromConfig; bucket_signing.go::dekCacheTTL + keyMaxAge consume cfg directly (no more os.Getenv in serverapp); buildSigningKeyAdminConfig consumes cfg.KMS.DefaultKeyID. internal/s3api.Server gains STSDefaultDuration time.Duration; stsAssumeRole falls back to auth.DefaultSTSDuration when zero. 4 new contract tests in internal/config/auth_kms_test.go (TOML-only round-trip / env override / clamp / defaults). bucket_signing_test refactored to consume cfg helpers (legacy STRATA_KEY_MAX_AGE/STRATA_DEK_CACHE_TTL t.Setenv path no longer needed — covered by config-side tests). deploy/strata.toml.example gains [auth] sts_duration + key_max_age + full [kms] / [kms.aws] / [kms.vault] / [kms.local_hsm] blocks. Audit re-run: 82 wired (+14), 28 unmapped (US-004 obs ~6 / US-005 misc ~22). docs/site/content/reference/s3-api.md handler line refs shifted +4 to absorb the Server struct expansion."
     },
     {
       "id": "US-004",
