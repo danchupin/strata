@@ -203,8 +203,8 @@ done
 sleep 2  # give logs time to flush
 NOW="$(date +%s)"
 SINCE="$(( NOW - BURST_START + 5 ))s"
-A_LOGS="$(docker logs strata-a --since "$SINCE" 2>&1 | grep -c '/admin/v1/clusters' || true)"
-B_LOGS="$(docker logs strata-b --since "$SINCE" 2>&1 | grep -c '/admin/v1/clusters' || true)"
+A_LOGS="$(docker logs strata-a --since "$SINCE" 2>&1 | grep -c '"msg":"request".*"path":"/admin/v1/clusters"' || true)"
+B_LOGS="$(docker logs strata-b --since "$SINCE" 2>&1 | grep -c '"msg":"request".*"path":"/admin/v1/clusters"' || true)"
 note "A:burst log hits — strata-a=$A_LOGS strata-b=$B_LOGS"
 (( A_LOGS >= 5 )) || fail "A:strata-a saw $A_LOGS GETs in burst (expected >= 5 — LB round-robin broken?)"
 (( B_LOGS >= 5 )) || fail "A:strata-b saw $B_LOGS GETs in burst (expected >= 5 — LB round-robin broken?)"

@@ -58,12 +58,30 @@ func TestMiddlewareGeneratesUUIDWhenHeaderMissing(t *testing.T) {
 		t.Fatalf("response header %q != ctx id %q", got, seenID)
 	}
 
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("want >=2 log lines (handler + access-log), got %d: %q", len(lines), buf.String())
+	}
 	var rec map[string]any
-	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &rec); err != nil {
-		t.Fatalf("log line not JSON: %v: %q", err, buf.String())
+	if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
+		t.Fatalf("handler log line not JSON: %v: %q", err, lines[0])
 	}
 	if rec["request_id"] != seenID {
-		t.Fatalf("log request_id=%v want %s", rec["request_id"], seenID)
+		t.Fatalf("handler log request_id=%v want %s", rec["request_id"], seenID)
+	}
+	// Access-log line emitted by the middleware itself; verify shape.
+	var access map[string]any
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &access); err != nil {
+		t.Fatalf("access log line not JSON: %v: %q", err, lines[len(lines)-1])
+	}
+	if access["msg"] != "request" {
+		t.Fatalf("access log msg=%v want \"request\"", access["msg"])
+	}
+	if access["path"] != "/" || access["method"] != "GET" || access["status"] != float64(200) {
+		t.Fatalf("access log fields wrong: %v", access)
+	}
+	if _, ok := access["duration_ms"]; !ok {
+		t.Fatalf("access log missing duration_ms: %v", access)
 	}
 }
 
@@ -114,8 +132,9 @@ func TestMiddlewareSameIDAcrossLogLines(t *testing.T) {
 		}
 		ids = append(ids, rec["request_id"].(string))
 	}
-	if len(ids) != 3 {
-		t.Fatalf("got %d log lines want 3", len(ids))
+	// 3 lines from handler + 1 access-log line emitted by the middleware itself.
+	if len(ids) != 4 {
+		t.Fatalf("got %d log lines want 4 (3 handler + 1 middleware access-log)", len(ids))
 	}
 	for _, id := range ids {
 		if id != "abc-123" {
