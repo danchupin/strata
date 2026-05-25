@@ -206,6 +206,12 @@ Maintainer note: source of truth for new entries is the codebase. Grep with
 cross-reference defaults + clamp ranges at the consuming call sites (koanf
 envMap, worker `*FromEnv` helpers, `os.Getenv(...)`). Update this page when
 adding a new env var.
+
+The `TOML key` column mirrors `envMap` in `internal/config/config.go`.
+Exempt env vars (bootstrap, test-only, retired, build metadata) show `—`.
+The drift-lint test `internal/config/env_toml_parity_test.go` fails the
+build if a STRATA_* var is added without wiring through Config + envMap +
+this page, so keep all three in lockstep.
 --&gt;
 &lt;h1 id="strata_-environment-variables"&gt;&lt;code&gt;STRATA_*&lt;/code&gt; environment variables&lt;a class="anchor" href="#strata_-environment-variables"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;Every &lt;code&gt;STRATA_*&lt;/code&gt; knob, grouped by the layer that consumes it. CLI flags on
