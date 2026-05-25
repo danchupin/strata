@@ -367,8 +367,6 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 			}
 			workerErr <- nil
 		}()
-	} else {
-		workerErr <- nil
 	}
 
 	select {
@@ -378,7 +376,9 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 		<-serverErr
-		<-workerErr
+		if supervisor != nil {
+			<-workerErr
+		}
 		return nil
 	case err := <-serverErr:
 		return err

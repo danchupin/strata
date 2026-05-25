@@ -382,26 +382,29 @@ adding more, prove what is there.
 ## Developer experience
 
 - ~~**P3 — Module tags cleanup.**~~ — **Done.** Shipped via the `ralph/auth-dx-trailer-lima` cycle (US-003). True module split: `github.com/ceph/go-ceph` no longer a direct require of the main `go.mod`; the librados-linked backend lives in a separate Go module `internal/data/rados/cephimpl/` (`module github.com/danchupin/strata/cephimpl`) which is the only place that pulls in `go-ceph`. `go.work` at repo root unifies main + cephimpl at dev time (IDE auto-discovers both); workspace MVS pitfall around `google.golang.org/genproto` monolithic-vs-split conflict resolved via in-`go.work` `replace genproto => v0.0.0-20240903143218-8af14fe29dc1`. `internal/serverapp.buildDataBackend` branches via `//go:build ceph` files (`data_rados_ceph.go` → `cephimpl.New`, `data_rados_stub.go` → `data.ErrRADOSNotCompiled`); same shape for `cmd/strata/admin/bench_rados_{ceph,stub}.go`. Hermetic check `GOWORK=off go mod graph | grep -c go-ceph` → 0. CI: `lint-build` job vets main on ubuntu-latest without librados + drift-checks cephimpl via `cd cephimpl && GOWORK=off go mod tidy -diff`; `e2e` job runs `cd internal/data/rados/cephimpl && go test -tags integration ./...` against the real backend in the ceph image. `make build` produces a go-ceph-free binary; `make build-ceph` produces the ceph-capable binary. (commit `dce65ce`)
-- **P2 — Full config coverage in `strata.toml` (env + TOML parity).** `internal/config/config.go`
-  uses koanf with `toml` + `env` + `structs` providers — infra exists, `STRATA_CONFIG_FILE`
-  points at a TOML file, and `deploy/strata.toml.example` lives in-tree. **Gap**: many env knobs
-  added across recent cycles (`STRATA_GC_*`, `STRATA_REBALANCE_*`, `STRATA_USAGE_ROLLUP_*`,
-  `STRATA_KMS_*`, `STRATA_DEK_CACHE_TTL`, `STRATA_KEY_MAX_AGE`, `STRATA_BUCKET_STATS_SHARDS`,
-  `STRATA_MANIFEST_FORMAT`, `STRATA_OTEL_*`, `STRATA_AUDIT_RETENTION`, etc.) ship env-only —
-  not wired through the koanf `structs` schema, not documented in `strata.toml.example`, not
-  loadable via TOML. Reference page `docs/site/content/reference/env-vars.md` (US-002 of
-  ralph/readme-docs-rewrite) lists 116 vars; only a subset (~30-40, verify via diff) has TOML
-  parity. **Fix scope**: (a) audit every `STRATA_*` env grep against `Config struct` in
-  `internal/config/config.go` — list gaps. (b) for each gap, add the corresponding field to
-  `Config struct` + map via koanf `structs` provider so env continues to override TOML. (c)
-  refresh `deploy/strata.toml.example` with every field documented (one-line comment per knob,
-  `# STRATA_X = "default"` shape). (d) `internal/config/config_test.go` adds
-  `TestEveryEnvVarHasTOMLField` lint that greps both surfaces + asserts 1:1 parity (drift-
-  proofing — same shape as the `docs_reference_test.go` discipline from ralph/dx-lab US-004).
-  (e) doc page `/reference/env-vars.md` gets a column `TOML key` for each row. Outcome: any
-  knob settable via env is also settable via TOML, both surfaces stay in lockstep, drift caught
-  by the lint test on every PR. Forgetting TOML wiring on new env knobs has been an accumulating
-  debt across the last ~10 cycles — explicit lint stops it.
+- ~~**P2 — Full config coverage in `strata.toml` (env + TOML parity).**~~ — **Done.** Shipped
+  via the `ralph/toml-parity` cycle (US-001..US-006). 112 of 135 `STRATA_*` env vars wired
+  through `Config struct` + `envMap` registry (23 exempt — `STRATA_CONFIG_FILE` bootstrap,
+  `STRATA_BENCH_*` / `STRATA_REGEN_TRAILER_FIXTURES` / `STRATA_COLD` test-and-tag-only). New
+  substructs: `Workers.{GC,Lifecycle,Rebalance,UsageRollup,ManifestRewriter,AuditExport,QuotaReconcile,Notify,Replicator,AccessLog,Inventory}`,
+  `Auth.{STSDuration,KeyMaxAge}`, `KMS.{Adapter,DEKCacheTTL,DefaultKeyID,AWS,Vault,LocalHSM}`,
+  `OTel.{Endpoint,SampleRatio,Ringbuf,RingbufBytes}`, `Logging.{Level,Format}`,
+  `AuditLog.Retention`, plus `BucketStats / Cluster / Console / JWT / Manifest / MFA / Node /
+  Prometheus / SSE / VHost` for misc sweep. TOML key naming: `STRATA_<SECTION>_<KNOB>` →
+  `<section>.<knob>` (one underscore splits section; multi-word sections like `bucket_stats`
+  / `audit_log` / `usage_rollup` declared explicitly in `envMap`). Per-provider `FromConfig`
+  helpers (`kms.FromConfig`, `master.FromConfig`) keep `internal/config` out of the leaf
+  provider packages. Range validation symmetric for env + TOML sources via `Config.validate`.
+  Audit script `scripts/audit-env-toml-parity.sh` + `make audit-toml-parity` target +
+  hard-coded exemption list `internal/config/exempt_env_vars.go`. Drift-lint test
+  `internal/config/env_toml_parity_test.go` (default build tag) hard-fails CI on any future
+  env var added without `Config` + `envMap` + `deploy/strata.toml.example` line + reference
+  page row. `deploy/strata.toml.example` refreshed with every section block (122 keys).
+  Reference page `docs/site/content/reference/env-vars.md` grows 6th `TOML key` column across
+  all 122 rows (em-dash for exempt). One latent gateway bug fixed in the same cycle: when
+  `STRATA_WORKERS` was empty the supervisor-less branch eagerly sent `nil` into `workerErr`
+  causing the server to exit immediately after the listening log; the no-supervisor branch
+  now leaves the channel empty so the select blocks on `ctx.Done` instead. (commit pending)
 - ~~**P3 — `make dev` for one-command developer cluster.**~~ — **Done.** New Makefile targets `dev` / `dev-down` / `dev-logs` (US-001): `make dev` chains `up-all → wait-tikv → wait-ceph → wait-strata-lab → docker compose logs -f --tail=20 strata-a strata-b strata-lb-nginx` (TiKV-default canonical lab); Ctrl-C exits only the foreground tail and the stack stays up. `make dev-logs` re-attaches without `--tail`; `make dev-down` aliases `make down`. Documented under `## One-command dev` in `docs/site/content/get-started/_index.md`. (commit `d5d3860`)
 - ~~**P3 — Restore 3-replica TiKV bench (SHARDS=3 rebalance-multi).**~~ — **Done.** New compose profile `bench-3replica` adds `strata-c` (port 10003, `STRATA_NODE_ID=strata-c`, shared `strata-jwt-shared` volume) to `deploy/docker/docker-compose.yml` (US-002); LB-unchanged fallback per PRD AC #3 (rebalance fan-out runs over TiKV leases independent of HTTP routing). `scripts/bench-rebalance-multi.sh` SHARDS=3 leg un-SKIPped — auto-detects `strata-c` via `docker compose ps -q strata-c` and runs / SKIPs accordingly; the SKIP line now references the resource-cap reason + bring-up recipe instead of "parked". `make down` cleans up `--profile bench-3replica`. Documented in `docs/site/content/architecture/benchmarks/rebalance.md` under the new `## 3-replica TiKV (post-restore)` subsection. Local SHARDS=3 capture deferred to operators with > 12 GiB Docker headroom (the cycle box is lima-capped). (commit `d5d3860`)
 - ~~**P3 — Architecture decision records.**~~ — **Done.** Four ADRs authored under `docs/site/content/adr/` (ADR-0001 skip RADOS omap, ADR-0002 IsLatest read-time, ADR-0003 manifest blob column, ADR-0004 leader-per-worker); `## Design notes captured during MVP` section collapsed (4 bullets → 1 link-out paragraph + 3 bullets retained). (commit `fe16160`)
