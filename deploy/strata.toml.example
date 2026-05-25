@@ -20,6 +20,8 @@ replication = "{'class': 'NetworkTopologyStrategy', 'dc1': 3, 'dc2': 3}"
 username    = ""
 password    = ""
 timeout     = "10s"
+# WARN threshold (ms) for gocql QueryObserver. 0 falls back to default (100).
+slow_ms     = 0
 
 [rados]
 config_file = "/etc/ceph/ceph.conf"
@@ -29,6 +31,19 @@ pool        = "strata.rgw.buckets.data"
 namespace   = ""
 # Format: CLASS=pool[@cluster[/namespace]], comma-separated.
 classes = "STANDARD=strata.rgw.buckets.data,STANDARD_IA=strata.rgw.buckets.ia,GLACIER_IR=strata.rgw.buckets.cold"
+# Multi-cluster spec: comma-separated "<id>:<conf>:<keyring>". Empty uses
+# the single-cluster fields above as the implicit "default" cluster.
+clusters         = ""
+# Canary OID stat'd by /readyz against RADOS. Empty -> "strata-readyz-canary".
+health_oid       = ""
+# Per-cluster connection-pool depth. 0 -> default (1). Range: [1, 32].
+pool_size        = 0
+# Per-PutChunks worker fan-out. 0 -> default (32). Range: [1, 256].
+put_concurrency  = 0
+# Per-GetChunks read prefetch depth. 0 -> default (4). Range: [1, 64].
+get_prefetch     = 0
+# Toggles WriteOp/ReadOp batched helpers. Default off.
+batch_ops        = false
 
 [auth]
 mode              = "off"       # "off" | "required"
@@ -143,3 +158,58 @@ format = "json"                 # json | text
 # Row TTL applied to audit_log writes. Accepts Go duration ("720h") and
 # legacy "<N>d" suffix when supplied via env. Range: [1m, 87600h (10y)].
 retention = "720h"              # 30 days
+
+[bucket_stats]
+# Per-process bucket-stats sampler cadence + top-N cap. Zero falls back
+# to the sampler default (1h interval, bucketstats.DefaultTopN).
+interval = "0s"
+top_n    = 0
+
+[cluster]
+# Cluster identifier surfaced by /admin/v1/cluster/status.
+name = ""
+
+[console]
+# Hex-encoded HS256 secret for /admin/v1 session cookies. Empty -> ephemeral
+# (warns at boot; sessions invalidate on restart).
+jwt_secret    = ""
+# Console default UI theme: system | light | dark.
+theme_default = "system"
+
+[jwt]
+# Secret file persisted by handleRotateJWTSecret. Empty -> adminapi.DefaultJWTSecretFile.
+secret_file = ""
+# Multi-replica bootstrap file path (mounted volume in lab compose).
+shared_file = ""
+
+[manifest]
+# Encoding for the data.Manifest blob column. proto | json. Default proto.
+format = "proto"
+
+[mfa]
+# MFA-Delete secrets: "<serial>:<base32-secret>[,…]". Empty disables.
+secrets = ""
+
+[node]
+# Heartbeat node identifier. Empty falls back to OS hostname.
+id = ""
+
+[prometheus]
+# Upstream PromQL endpoint for the metrics-aware admin handlers. Empty
+# disables (admin handlers report metrics_available=false).
+url = ""
+
+[sse]
+# SSE-S3 master key sources. Precedence: master_keys > master_key_vault >
+# master_key_file > master_key. Empty (all four) disables SSE-S3.
+master_key       = ""           # Hex 32 bytes; bound to master_key_id.
+master_key_id    = ""           # Optional key id; defaults to "env-1".
+master_key_file  = ""           # Path to hex 32 bytes file; mtime hot-reload.
+master_key_vault = ""           # "<addr>:<transit-export-path>" — uses AppRole role/secret from [kms.vault].
+# Rotation list: "<id>:<hex64>[,<id>:<hex64>...]". First entry is active wrap key.
+master_keys      = ""
+
+[vhost]
+# Virtual-hosted-style host patterns. Comma-separated "*.<suffix>" entries.
+# Default: "*.s3.local". Set to "-" to disable vhost extraction.
+pattern = "*.s3.local"

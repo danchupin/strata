@@ -84,16 +84,32 @@ func New(cfg rados.Config) (data.Backend, error) {
 	if err := rados.ValidateClusterRefs(classes, clusters); err != nil {
 		return nil, err
 	}
+	putConc := cfg.PutConcurrency
+	if putConc == 0 {
+		putConc = rados.PutConcurrencyFromEnv()
+	}
+	getPre := cfg.GetPrefetch
+	if getPre == 0 {
+		getPre = rados.GetPrefetchFromEnv()
+	}
+	poolSize := cfg.PoolSize
+	if poolSize == 0 {
+		poolSize = rados.PoolSizeFromEnv(cfg.Logger)
+	}
+	batchOps := cfg.BatchOps
+	if !batchOps {
+		batchOps = rados.BatchOpsFromEnv()
+	}
 	return &Backend{
 		clusters:       clusters,
 		classes:        classes,
 		logger:         cfg.Logger,
 		metrics:        cfg.Metrics,
 		tracer:         cfg.Tracer,
-		putConcurrency: rados.PutConcurrencyFromEnv(),
-		getPrefetch:    rados.GetPrefetchFromEnv(),
-		batchOps:       rados.BatchOpsFromEnv(),
-		poolSize:       rados.PoolSizeFromEnv(cfg.Logger),
+		putConcurrency: putConc,
+		getPrefetch:    getPre,
+		batchOps:       batchOps,
+		poolSize:       poolSize,
 		pools:          make(map[string]*connPool),
 	}, nil
 }

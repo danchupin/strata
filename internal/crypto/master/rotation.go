@@ -75,7 +75,11 @@ func NewRotationProvider(entries []KeyEntry) (*RotationProvider, error) {
 // NewRotationProviderFromEnv parses STRATA_SSE_MASTER_KEYS. Returns ErrNoConfig
 // when unset.
 func NewRotationProviderFromEnv() (*RotationProvider, error) {
-	raw := strings.TrimSpace(os.Getenv(EnvMasterKeys))
+	return newRotationFromConfig(os.Getenv(EnvMasterKeys))
+}
+
+func newRotationFromConfig(raw string) (*RotationProvider, error) {
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, ErrNoConfig
 	}

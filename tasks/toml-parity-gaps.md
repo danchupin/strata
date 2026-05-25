@@ -17,15 +17,15 @@ canonical section name — the heuristic shown in the **Expected TOML key**
 column below is the naive first-underscore split and WILL be wrong for
 multi-word sections. The actual envMap entry is the source of truth.
 
-**Counts** (post US-004 audit, 2026-05-25):
+**Counts** (post US-005 audit, 2026-05-25):
 
 | Bucket                  | Count |
 |-------------------------|------:|
 | Total STRATA_* env vars |   136 |
-| In envMap (wired)       |    89 |
+| In envMap (wired)       |   112 |
 | Exempt (test/bootstrap) |    24 |
-| Unmapped (gap)          |    23 |
-| Present in example TOML |    34 |
+| Unmapped (gap)          |     0 |
+| Present in example TOML |    58 |
 
 Story coverage hints (final placement decided by each story's author):
 
@@ -41,35 +41,13 @@ Story coverage hints (final placement decided by each story's author):
   rados.batch_ops / rados.get_prefetch / rados.put_concurrency /
   manifest.format / vhost.pattern / cluster.name / node.id /
   sse.master_* / mfa.secrets / console.jwt_secret / jwt.secret_file /
-  jwt.shared.
+  jwt.shared. ✅ DONE.
 
-## Gap rows (remaining after US-004)
+## Gap rows (remaining after US-005)
 
-| Env var                                | Expected TOML key (heuristic)   | In TOML example? | Likely story |
-|----------------------------------------|---------------------------------|------------------|--------------|
-| `STRATA_BUCKETSTATS_INTERVAL`          | `bucketstats.interval` (→ `bucket_stats.interval`)      | no | US-005 |
-| `STRATA_BUCKETSTATS_TOPN`              | `bucketstats.topn` (→ `bucket_stats.topn`)              | no | US-005 |
-| `STRATA_CASSANDRA_SLOW_MS`             | `cassandra.slow_ms`                                     | no | US-005 |
-| `STRATA_CLUSTER_NAME`                  | `cluster.name`                                          | no | US-005 |
-| `STRATA_CONSOLE_JWT_SECRET`            | `console.jwt_secret`                                    | no | US-005 |
-| `STRATA_CONSOLE_THEME_DEFAULT`         | `console.theme_default`                                 | no | US-005 |
-| `STRATA_JWT_SECRET_FILE`               | `jwt.secret_file` (→ `auth.jwt_secret_file`)            | no | US-005 |
-| `STRATA_JWT_SHARED`                    | `jwt.shared` (→ `auth.jwt_shared`)                      | no | US-005 |
-| `STRATA_MANIFEST_FORMAT`               | `manifest.format`                                       | no | US-005 |
-| `STRATA_MFA_SECRETS`                   | `mfa.secrets` (→ `auth.mfa_secrets`)                    | no | US-005 |
-| `STRATA_NODE_ID`                       | `node.id`                                               | no | US-005 |
-| `STRATA_PROMETHEUS_URL`                | `prometheus.url`                                        | no | US-005 |
-| `STRATA_RADOS_BATCH_OPS`               | `rados.batch_ops`                                       | no | US-005 |
-| `STRATA_RADOS_GET_PREFETCH`            | `rados.get_prefetch`                                    | no | US-005 |
-| `STRATA_RADOS_HEALTH_OID`              | `rados.health_oid`                                      | no | US-005 |
-| `STRATA_RADOS_POOL_SIZE`               | `rados.pool_size`                                       | no | US-005 |
-| `STRATA_RADOS_PUT_CONCURRENCY`         | `rados.put_concurrency`                                 | no | US-005 |
-| `STRATA_SSE_MASTER_KEY`                | `sse.master_key`                                        | no | US-005 |
-| `STRATA_SSE_MASTER_KEY_FILE`           | `sse.master_key_file`                                   | no | US-005 |
-| `STRATA_SSE_MASTER_KEY_ID`             | `sse.master_key_id`                                     | no | US-005 |
-| `STRATA_SSE_MASTER_KEY_VAULT`          | `sse.master_key_vault`                                  | no | US-005 |
-| `STRATA_SSE_MASTER_KEYS`               | `sse.master_keys`                                       | no | US-005 |
-| `STRATA_VHOST_PATTERN`                 | `vhost.pattern`                                         | no | US-005 |
+None — every non-exempt STRATA_* env is wired through envMap + Config.
+US-006 drift-lint will hard-fail any future addition that skips this
+pipeline.
 
 ## Exempt rows (no action — kept for transparency)
 

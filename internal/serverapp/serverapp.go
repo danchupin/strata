@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"runtime/debug"
-	"strconv"
 	"strings"
 	"time"
 
@@ -53,7 +52,7 @@ import (
 // Supervisor with the resolved worker set. Blocks until ctx is cancelled
 // or the listener fails. Returns nil on a clean ctx-driven shutdown.
 func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected []workers.Worker) error {
-	if v := os.Getenv("STRATA_MANIFEST_FORMAT"); v != "" {
+	if v := cfg.Manifest.Format; v != "" {
 		if err := data.SetManifestFormat(v); err != nil {
 			return fmt.Errorf("manifest format: %w", err)
 		}
@@ -135,12 +134,12 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	apiHandler.InvalidateCredential = multi.Invalidate
 	apiHandler.STS = sts
 	apiHandler.STSDefaultDuration = cfg.Auth.STSDuration
-	mfaSecrets, err := s3api.ParseMFASecrets(os.Getenv("STRATA_MFA_SECRETS"))
+	mfaSecrets, err := s3api.ParseMFASecrets(cfg.MFA.Secrets)
 	if err != nil {
 		return fmt.Errorf("mfa secrets: %w", err)
 	}
 	apiHandler.MFASecrets = mfaSecrets
-	masterProvider, err := master.FromEnv()
+	masterProvider, err := master.FromConfig(masterConfigFromAppConfig(cfg))
 	if err != nil && !errors.Is(err, master.ErrNoConfig) {
 		return fmt.Errorf("sse master key: %w", err)
 	}
@@ -164,7 +163,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		bucketSigningResolver = buildBucketSigningResolver(cfg, metaStore, kmsProvider, logger)
 		mw.BucketSigning = bucketSigningResolver
 	}
-	apiHandler.VHostPatterns = vhostPatterns()
+	apiHandler.VHostPatterns = vhostPatterns(cfg)
 	drainCache := placement.NewDrainCache(metaStore.ListClusterStates, 0)
 	apiHandler.DrainCache = drainCache
 
@@ -197,15 +196,15 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		}
 	}
 
-	healthHandler := buildHealthHandler(metaStore, dataBackend)
+	healthHandler := buildHealthHandler(cfg, metaStore, dataBackend)
 
-	jwtSecret, jwtSource, jwtFile := loadJWTSecret(logger)
+	jwtSecret, jwtSource, jwtFile := loadJWTSecret(cfg, logger)
 	logger.Info("admin jwt secret", "source", jwtSource, "file", jwtFile)
 	jwtEphemeral := strings.HasPrefix(jwtSource, "ephemeral")
-	clusterName := os.Getenv("STRATA_CLUSTER_NAME")
+	clusterName := cfg.Cluster.Name
 	hbStore := buildHeartbeatStore(cfg, metaStore)
 	version := buildVersion()
-	prom := promclient.New(os.Getenv("STRATA_PROMETHEUS_URL"))
+	prom := promclient.New(cfg.Prometheus.URL)
 	if !prom.Available() {
 		logger.Info("admin: STRATA_PROMETHEUS_URL unset; top-buckets/consumers + metrics dashboard will report metrics_available=false")
 	}
@@ -232,10 +231,10 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		JWTSecret:            jwtSecret,
 		JWTEphemeral:         jwtEphemeral,
 		JWTSecretFile:        jwtFile,
-		PrometheusURL:        os.Getenv("STRATA_PROMETHEUS_URL"),
+		PrometheusURL:        cfg.Prometheus.URL,
 		OtelEndpoint:         cfg.OTel.Endpoint,
 		HeartbeatInterval:    heartbeat.DefaultInterval,
-		ConsoleThemeDefault:  consoleThemeDefault(),
+		ConsoleThemeDefault:  consoleThemeDefault(cfg),
 		CassandraSettings:    cassandraSettings(cfg),
 		RADOSSettings:        radosSettings(cfg),
 		TiKVSettings:         tikvSettings(cfg),
@@ -307,8 +306,8 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 			ClassSink: metrics.BucketStatsObserver{},
 			Snapshot:  storageClassSnapshot,
 			Logger:    logger,
-			TopN:      bucketStatsTopN(logger),
-			Interval:  bucketStatsInterval(logger),
+			TopN:      bucketStatsTopN(cfg),
+			Interval:  cfg.BucketStats.Interval,
 		}
 		if err := sampler.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			logger.Warn("bucketstats", "error", err.Error())
@@ -340,7 +339,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		hb = &heartbeat.Heartbeater{
 			Store: hbStore,
 			Node: heartbeat.Node{
-				ID:        heartbeat.DefaultNodeID(),
+				ID:        heartbeat.NodeIDOr(cfg.Node.ID),
 				Address:   cfg.Listen,
 				Version:   version,
 				StartedAt: time.Now().UTC(),
@@ -433,16 +432,20 @@ func buildDataBackend(cfg *config.Config, logger *slog.Logger, tp *strataotel.Pr
 			return nil, err
 		}
 		return newRADOSBackend(datarados.Config{
-			ConfigFile: cfg.RADOS.ConfigFile,
-			User:       cfg.RADOS.User,
-			Keyring:    cfg.RADOS.Keyring,
-			Pool:       cfg.RADOS.Pool,
-			Namespace:  cfg.RADOS.Namespace,
-			Classes:    classes,
-			Clusters:   clusters,
-			Logger:     logger,
-			Metrics:    metrics.RADOSObserver{},
-			Tracer:     tp.Tracer("strata.data.rados"),
+			ConfigFile:     cfg.RADOS.ConfigFile,
+			User:           cfg.RADOS.User,
+			Keyring:        cfg.RADOS.Keyring,
+			Pool:           cfg.RADOS.Pool,
+			Namespace:      cfg.RADOS.Namespace,
+			Classes:        classes,
+			Clusters:       clusters,
+			Logger:         logger,
+			Metrics:        metrics.RADOSObserver{},
+			Tracer:         tp.Tracer("strata.data.rados"),
+			PutConcurrency: cfg.RADOS.PutConcurrency,
+			GetPrefetch:    cfg.RADOS.GetPrefetch,
+			PoolSize:       cfg.RADOS.PoolSize,
+			BatchOps:       cfg.RADOS.BatchOps,
 		})
 	case "s3":
 		s3Clusters, err := datas3.ParseClusters(cfg.S3.Clusters)
@@ -465,10 +468,11 @@ func buildDataBackend(cfg *config.Config, logger *slog.Logger, tp *strataotel.Pr
 }
 
 // healthCanaryOID returns the RADOS OID stat'd by /readyz to confirm
-// connectivity. Defaults to a fixed canary; override via env to point at a
-// known-existing OID (operator-installed).
-func healthCanaryOID() string {
-	if v := os.Getenv("STRATA_RADOS_HEALTH_OID"); v != "" {
+// connectivity. Defaults to a fixed canary; override via cfg (env
+// STRATA_RADOS_HEALTH_OID) to point at a known-existing OID
+// (operator-installed).
+func healthCanaryOID(cfg *config.Config) string {
+	if v := strings.TrimSpace(cfg.RADOS.HealthOID); v != "" {
 		return v
 	}
 	return "strata-readyz-canary"
@@ -542,46 +546,14 @@ func rebalanceInterval(logger *slog.Logger) time.Duration {
 	return d
 }
 
-// bucketStatsInterval reads STRATA_BUCKETSTATS_INTERVAL (Go duration). Empty
-// or unparseable falls back to the sampler default (1h via Sampler.Run).
-// Surfaced primarily so e2e specs can drive the sampler at sub-second cadence
-// without waiting the production-shape default.
-func bucketStatsInterval(logger *slog.Logger) time.Duration {
-	v := strings.TrimSpace(os.Getenv("STRATA_BUCKETSTATS_INTERVAL"))
-	if v == "" {
-		return 0
+// bucketStatsTopN returns the cap for the per-shard distribution
+// sampling pass (US-012). Falls back to bucketstats.DefaultTopN when
+// cfg leaves the field at zero.
+func bucketStatsTopN(cfg *config.Config) int {
+	if cfg.BucketStats.TopN > 0 {
+		return cfg.BucketStats.TopN
 	}
-	d, err := time.ParseDuration(v)
-	if err != nil || d <= 0 {
-		logger.Warn("bucketstats interval parse failed; using default",
-			"value", v, "error", errString(err))
-		return 0
-	}
-	return d
-}
-
-// bucketStatsTopN reads STRATA_BUCKETSTATS_TOPN and returns the cap for the
-// per-shard distribution sampling pass (US-012). Falls back to
-// bucketstats.DefaultTopN on unset / parse error / non-positive value.
-func bucketStatsTopN(logger *slog.Logger) int {
-	v := strings.TrimSpace(os.Getenv("STRATA_BUCKETSTATS_TOPN"))
-	if v == "" {
-		return bucketstats.DefaultTopN
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n <= 0 {
-		logger.Warn("bucketstats topN parse failed; using default",
-			"value", v, "default", bucketstats.DefaultTopN, "error", errString(err))
-		return bucketstats.DefaultTopN
-	}
-	return n
-}
-
-func errString(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
+	return bucketstats.DefaultTopN
 }
 
 // auditRetention returns the row TTL applied to audit_log writes. Consumes
@@ -596,13 +568,13 @@ func auditRetention(cfg *config.Config) time.Duration {
 }
 
 // vhostPatterns returns the configured virtual-hosted-style host patterns.
-// Reads STRATA_VHOST_PATTERN as a comma-separated list of "*.<suffix>"
-// entries; defaults to "*.s3.local" so a fresh deployment supports
-// virtual-hosted-style URLs out of the box. Set the env var to "-" to
-// disable vhost extraction entirely.
-func vhostPatterns() []string {
-	v, ok := os.LookupEnv("STRATA_VHOST_PATTERN")
-	if !ok {
+// Reads cfg.VHost.Pattern (sourced from STRATA_VHOST_PATTERN /
+// vhost.pattern via koanf precedence); defaults to "*.s3.local" so a
+// fresh deployment supports virtual-hosted-style URLs out of the box.
+// "-" disables vhost extraction entirely.
+func vhostPatterns(cfg *config.Config) []string {
+	v := cfg.VHost.Pattern
+	if v == "" {
 		return []string{"*.s3.local"}
 	}
 	if v == "-" {
@@ -619,13 +591,13 @@ type radosProber interface {
 	Probe(ctx context.Context, oid string) error
 }
 
-func buildHealthHandler(metaStore meta.Store, dataBackend data.Backend) *health.Handler {
+func buildHealthHandler(cfg *config.Config, metaStore meta.Store, dataBackend data.Backend) *health.Handler {
 	probes := map[string]health.Probe{}
 	if cp, ok := metaStore.(cassandraProber); ok {
 		probes["cassandra"] = cp.Probe
 	}
 	if rp, ok := dataBackend.(radosProber); ok {
-		oid := healthCanaryOID()
+		oid := healthCanaryOID(cfg)
 		probes["rados"] = func(ctx context.Context) error { return rp.Probe(ctx, oid) }
 	}
 	return &health.Handler{Probes: probes}
@@ -646,7 +618,7 @@ func buildMetaStore(cfg *config.Config, logger *slog.Logger, tp *strataotel.Prov
 				Password:    cfg.Cassandra.Password,
 				Timeout:     cfg.Cassandra.Timeout,
 				Logger:      logger,
-				SlowMS:      metacassandra.SlowMSFromEnv(),
+				SlowMS:      metacassandra.SlowMSOr(cfg.Cassandra.SlowMS),
 				Metrics:     metrics.CassandraObserver{},
 				Tracer:      tp.Tracer("strata.meta.cassandra"),
 			},
@@ -693,22 +665,27 @@ var jwtSharedSecretFile = "/etc/strata/jwt-shared/secret"
 // plus the file path used by the rotate-secret endpoint (US-019).
 //
 // Resolution order:
-//  1. STRATA_CONSOLE_JWT_SECRET (32 bytes hex)            — env wins
-//  2. STRATA_JWT_SECRET_FILE (default /etc/strata/jwt-secret) — read at boot
+//  1. cfg.Console.JWTSecret (32 bytes hex; env STRATA_CONSOLE_JWT_SECRET) wins
+//  2. cfg.JWT.SecretFile (default /etc/strata/jwt-secret) — read at boot
 //     so rotated keys persist across restarts
-//  3. /etc/strata/jwt-shared/secret — file-based atomic bootstrap shared
-//     across replicas via a docker volume; first writer wins per POSIX
-//     O_EXCL, losers re-read with backoff
+//  3. cfg.JWT.SharedFile (default /etc/strata/jwt-shared/secret) —
+//     file-based atomic bootstrap shared across replicas via a docker
+//     volume; first writer wins per POSIX O_EXCL, losers re-read with
+//     backoff
 //  4. generate ephemeral 32-byte secret + WARN
 //
 // The returned file path is what handleRotateJWTSecret writes to; an empty
 // string means rotation falls back to adminapi.DefaultJWTSecretFile.
-func loadJWTSecret(logger *slog.Logger) ([]byte, string, string) {
-	target := os.Getenv("STRATA_JWT_SECRET_FILE")
+func loadJWTSecret(cfg *config.Config, logger *slog.Logger) ([]byte, string, string) {
+	target := cfg.JWT.SecretFile
 	if target == "" {
 		target = adminapi.DefaultJWTSecretFile
 	}
-	return loadJWTSecretFrom(os.Getenv("STRATA_CONSOLE_JWT_SECRET"), target, jwtSharedSecretFile, logger)
+	shared := cfg.JWT.SharedFile
+	if shared == "" {
+		shared = jwtSharedSecretFile
+	}
+	return loadJWTSecretFrom(cfg.Console.JWTSecret, target, shared, logger)
 }
 
 func loadJWTSecretFrom(envSecret, secretFile, sharedFile string, logger *slog.Logger) ([]byte, string, string) {
@@ -802,15 +779,35 @@ func readJWTSecretFile(path string, logger *slog.Logger) ([]byte, bool) {
 	return b, true
 }
 
-// consoleThemeDefault reads STRATA_CONSOLE_THEME_DEFAULT (system|light|dark);
-// empty / invalid resolves to "system".
-func consoleThemeDefault() string {
-	v := strings.ToLower(strings.TrimSpace(os.Getenv("STRATA_CONSOLE_THEME_DEFAULT")))
+// consoleThemeDefault returns the console UI default theme. Reads
+// cfg.Console.ThemeDefault (env STRATA_CONSOLE_THEME_DEFAULT); accepts
+// {system, light, dark}. Empty / invalid resolves to "system".
+func consoleThemeDefault(cfg *config.Config) string {
+	v := strings.ToLower(strings.TrimSpace(cfg.Console.ThemeDefault))
 	switch v {
 	case "system", "light", "dark":
 		return v
 	default:
 		return "system"
+	}
+}
+
+// masterConfigFromAppConfig projects internal/config.SSEConfig into the
+// master package's self-contained Config shape so the master package
+// stays free of an internal/config import. Auth-side Vault AppRole
+// credentials (cfg.KMS.Vault.RoleID/.SecretID) double-duty as the SSE
+// master-key Vault provider's role-id/secret-id — same env vars
+// (STRATA_SSE_VAULT_ROLE_ID / _SECRET_ID) feed both today (see CLAUDE.md
+// "Vault.Token field exists but is currently inert" note from US-003).
+func masterConfigFromAppConfig(cfg *config.Config) master.Config {
+	return master.Config{
+		Key:           cfg.SSE.MasterKey,
+		KeyID:         cfg.SSE.MasterKeyID,
+		KeyFile:       cfg.SSE.MasterKeyFile,
+		KeyVault:      cfg.SSE.MasterKeyVault,
+		Keys:          cfg.SSE.MasterKeys,
+		VaultRoleID:   cfg.KMS.Vault.RoleID,
+		VaultSecretID: cfg.KMS.Vault.SecretID,
 	}
 }
 

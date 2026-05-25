@@ -93,15 +93,31 @@ func NewVaultProvider(cfg VaultConfig) (*VaultProvider, error) {
 // NewVaultProviderFromEnv reads STRATA_SSE_MASTER_KEY_VAULT plus the AppRole
 // vars. Returns ErrNoConfig when the vault var is unset.
 func NewVaultProviderFromEnv() (*VaultProvider, error) {
-	addr, path, ok := parseVaultAddrPath(os.Getenv(EnvMasterKeyVault))
+	return newVaultFromConfig(Config{
+		KeyVault:      os.Getenv(EnvMasterKeyVault),
+		VaultRoleID:   os.Getenv(EnvVaultRoleID),
+		VaultSecretID: os.Getenv(EnvVaultSecretID),
+	})
+}
+
+func newVaultFromConfig(cfg Config) (*VaultProvider, error) {
+	addr, path, ok := parseVaultAddrPath(cfg.KeyVault)
 	if !ok {
 		return nil, ErrNoConfig
+	}
+	roleID := cfg.VaultRoleID
+	if roleID == "" {
+		roleID = os.Getenv(EnvVaultRoleID)
+	}
+	secretID := cfg.VaultSecretID
+	if secretID == "" {
+		secretID = os.Getenv(EnvVaultSecretID)
 	}
 	return NewVaultProvider(VaultConfig{
 		Addr:        addr,
 		TransitPath: path,
-		RoleID:      os.Getenv(EnvVaultRoleID),
-		SecretID:    os.Getenv(EnvVaultSecretID),
+		RoleID:      roleID,
+		SecretID:    secretID,
 	})
 }
 

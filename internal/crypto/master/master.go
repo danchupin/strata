@@ -65,6 +65,40 @@ func FromEnv() (Provider, error) {
 	return nil, ErrNoConfig
 }
 
+// Config is the cfg-driven shape consumed by FromConfig. The fields
+// mirror the STRATA_SSE_MASTER_* env vars one-for-one so the gateway
+// can populate them from internal/config.SSEConfig without the master
+// package importing internal/config.
+type Config struct {
+	Key            string
+	KeyID          string
+	KeyFile        string
+	KeyVault       string
+	Keys           string
+	VaultRoleID    string
+	VaultSecretID  string
+}
+
+// FromConfig mirrors FromEnv's precedence but reads from cfg instead of
+// the process environment. Returns ErrNoConfig when every field is empty.
+// Empty cfg means "no master key configured" — the caller treats
+// ErrNoConfig as "SSE-S3 disabled".
+func FromConfig(cfg Config) (Provider, error) {
+	if cfg.Keys != "" {
+		return newRotationFromConfig(cfg.Keys)
+	}
+	if cfg.KeyVault != "" {
+		return newVaultFromConfig(cfg)
+	}
+	if cfg.KeyFile != "" {
+		return NewFileProvider(cfg.KeyFile), nil
+	}
+	if cfg.Key != "" {
+		return newEnvFromConfig(cfg)
+	}
+	return nil, ErrNoConfig
+}
+
 // decodeHexKey trims whitespace, hex-decodes, and enforces KeySize.
 func decodeHexKey(raw string) ([]byte, error) {
 	raw = strings.TrimSpace(raw)

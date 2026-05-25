@@ -22,16 +22,26 @@ type Config struct {
 	MetaBackend  string        `koanf:"meta_backend"`
 	ShutdownWait time.Duration `koanf:"shutdown_wait"`
 
-	Cassandra CassandraConfig `koanf:"cassandra"`
-	TiKV      TiKVConfig      `koanf:"tikv"`
-	RADOS     RADOSConfig     `koanf:"rados"`
-	S3        S3Config        `koanf:"s3"`
-	Auth      AuthConfig      `koanf:"auth"`
-	KMS       KMSConfig       `koanf:"kms"`
-	Workers   WorkersConfig   `koanf:"workers"`
-	OTel      OTelConfig      `koanf:"otel"`
-	Logging   LoggingConfig   `koanf:"logging"`
-	AuditLog  AuditLogConfig  `koanf:"audit_log"`
+	Cassandra   CassandraConfig   `koanf:"cassandra"`
+	TiKV        TiKVConfig        `koanf:"tikv"`
+	RADOS       RADOSConfig       `koanf:"rados"`
+	S3          S3Config          `koanf:"s3"`
+	Auth        AuthConfig        `koanf:"auth"`
+	KMS         KMSConfig         `koanf:"kms"`
+	Workers     WorkersConfig     `koanf:"workers"`
+	OTel        OTelConfig        `koanf:"otel"`
+	Logging     LoggingConfig     `koanf:"logging"`
+	AuditLog    AuditLogConfig    `koanf:"audit_log"`
+	BucketStats BucketStatsConfig `koanf:"bucket_stats"`
+	Cluster     ClusterConfig     `koanf:"cluster"`
+	Console     ConsoleConfig     `koanf:"console"`
+	JWT         JWTConfig         `koanf:"jwt"`
+	Manifest    ManifestConfig    `koanf:"manifest"`
+	MFA         MFAConfig         `koanf:"mfa"`
+	Node        NodeConfig        `koanf:"node"`
+	Prometheus  PrometheusConfig  `koanf:"prometheus"`
+	SSE         SSEConfig         `koanf:"sse"`
+	VHost       VHostConfig       `koanf:"vhost"`
 
 	DefaultBucketShards int `koanf:"default_bucket_shards"`
 }
@@ -44,6 +54,10 @@ type CassandraConfig struct {
 	Username    string        `koanf:"username"`
 	Password    string        `koanf:"password"`
 	Timeout     time.Duration `koanf:"timeout"`
+	// SlowMS is the WARN threshold (in milliseconds) applied by the
+	// gocql QueryObserver. 0 disables; unset falls back to the
+	// observer's DefaultSlowQueryMS (100ms). Wired via STRATA_CASSANDRA_SLOW_MS.
+	SlowMS int `koanf:"slow_ms"`
 }
 
 // TiKVConfig holds connection parameters for the TiKV-backed meta store
@@ -66,6 +80,22 @@ type RADOSConfig struct {
 	// format details. Existing single-cluster fields above coexist as the
 	// implicit "default" cluster.
 	Clusters string `koanf:"clusters"`
+	// HealthOID is the canary OID stat'd by /readyz against RADOS. Empty
+	// falls back to the cephimpl default ("strata-readyz-canary"). Wired
+	// via STRATA_RADOS_HEALTH_OID.
+	HealthOID string `koanf:"health_oid"`
+	// PoolSize is the per-cluster connection-pool depth. 0 → cephimpl
+	// reads STRATA_RADOS_POOL_SIZE (default 1). Range [1, 32].
+	PoolSize int `koanf:"pool_size"`
+	// PutConcurrency caps the per-PutChunks worker fan-out. 0 → cephimpl
+	// reads STRATA_RADOS_PUT_CONCURRENCY (default 32). Range [1, 256].
+	PutConcurrency int `koanf:"put_concurrency"`
+	// GetPrefetch caps the per-GetChunks in-flight read prefetch. 0 →
+	// cephimpl reads STRATA_RADOS_GET_PREFETCH (default 4). Range [1, 64].
+	GetPrefetch int `koanf:"get_prefetch"`
+	// BatchOps toggles the WriteOp/ReadOp batched helpers. Default off.
+	// Wired via STRATA_RADOS_BATCH_OPS.
+	BatchOps bool `koanf:"batch_ops"`
 }
 
 // S3Config carries the multi-cluster S3 data-backend wiring (US-004).
@@ -240,6 +270,83 @@ type AuditLogConfig struct {
 	Retention time.Duration `koanf:"retention"`
 }
 
+// BucketStatsConfig drives the per-process bucket-stats sampler. Interval
+// 0 falls back to the sampler's internal default (1h); TopN 0 falls back
+// to bucketstats.DefaultTopN. Wired via STRATA_BUCKETSTATS_INTERVAL /
+// STRATA_BUCKETSTATS_TOPN (legacy env names without underscore between
+// "bucket" and "stats" — TOML key remains [bucket_stats]).
+type BucketStatsConfig struct {
+	Interval time.Duration `koanf:"interval"`
+	TopN     int           `koanf:"top_n"`
+}
+
+// ClusterConfig collects single-knob cluster-identity fields. Name feeds
+// the /admin/v1/cluster/status response. Wired via STRATA_CLUSTER_NAME.
+type ClusterConfig struct {
+	Name string `koanf:"name"`
+}
+
+// ConsoleConfig carries the admin-console knobs the gateway consumes at
+// boot. JWTSecret is the hex-encoded HS256 key for session cookies (env
+// wins via STRATA_CONSOLE_JWT_SECRET); ThemeDefault picks the console UI
+// default theme.
+type ConsoleConfig struct {
+	JWTSecret    string `koanf:"jwt_secret"`
+	ThemeDefault string `koanf:"theme_default"`
+}
+
+// JWTConfig collects JWT-secret persistence knobs. SecretFile is the
+// on-disk path read at boot and written by handleRotateJWTSecret;
+// SharedFile is the multi-replica bootstrap file (mounted from a docker
+// volume in the lab compose profile).
+type JWTConfig struct {
+	SecretFile string `koanf:"secret_file"`
+	SharedFile string `koanf:"shared_file"`
+}
+
+// ManifestConfig drives the data.Manifest blob encoder. Format ∈
+// {"proto","json"}; default proto. Wired via STRATA_MANIFEST_FORMAT.
+type ManifestConfig struct {
+	Format string `koanf:"format"`
+}
+
+// MFAConfig wires multi-factor delete secrets. Secrets is the raw
+// STRATA_MFA_SECRETS spec (see s3api.ParseMFASecrets).
+type MFAConfig struct {
+	Secrets string `koanf:"secrets"`
+}
+
+// NodeConfig pins the heartbeat node identifier. Empty falls back to the
+// OS hostname via heartbeat.DefaultNodeID().
+type NodeConfig struct {
+	ID string `koanf:"id"`
+}
+
+// PrometheusConfig points the admin API at an upstream PromQL endpoint
+// for the metrics-aware admin handlers. Empty disables (admin handlers
+// degrade with metrics_available=false).
+type PrometheusConfig struct {
+	URL string `koanf:"url"`
+}
+
+// SSEConfig collects the SSE-S3 master-key sourcing knobs. Precedence
+// (highest first): Keys (rotation list) > KeyVault > KeyFile > Key.
+// See internal/crypto/master.FromConfig for resolution.
+type SSEConfig struct {
+	MasterKey      string `koanf:"master_key"`
+	MasterKeyID    string `koanf:"master_key_id"`
+	MasterKeyFile  string `koanf:"master_key_file"`
+	MasterKeyVault string `koanf:"master_key_vault"`
+	MasterKeys     string `koanf:"master_keys"`
+}
+
+// VHostConfig pins the virtual-hosted-style S3 host suffixes. Pattern is
+// a comma-separated list of "*.<suffix>" entries; "-" disables vhost
+// extraction. Wired via STRATA_VHOST_PATTERN.
+type VHostConfig struct {
+	Pattern string `koanf:"pattern"`
+}
+
 func defaults() Config {
 	return Config{
 		Listen:              ":9000",
@@ -342,6 +449,15 @@ func defaults() Config {
 		AuditLog: AuditLogConfig{
 			Retention: 30 * 24 * time.Hour,
 		},
+		Manifest: ManifestConfig{
+			Format: "proto",
+		},
+		Console: ConsoleConfig{
+			ThemeDefault: "system",
+		},
+		VHost: VHostConfig{
+			Pattern: "*.s3.local",
+		},
 	}
 }
 
@@ -437,6 +553,29 @@ var envMap = map[string]string{
 	"STRATA_LOG_LEVEL":                       "logging.level",
 	"STRATA_LOG_FORMAT":                      "logging.format",
 	"STRATA_AUDIT_RETENTION":                 "audit_log.retention",
+	"STRATA_BUCKETSTATS_INTERVAL":            "bucket_stats.interval",
+	"STRATA_BUCKETSTATS_TOPN":                "bucket_stats.top_n",
+	"STRATA_CASSANDRA_SLOW_MS":               "cassandra.slow_ms",
+	"STRATA_CLUSTER_NAME":                    "cluster.name",
+	"STRATA_CONSOLE_JWT_SECRET":              "console.jwt_secret",
+	"STRATA_CONSOLE_THEME_DEFAULT":           "console.theme_default",
+	"STRATA_JWT_SECRET_FILE":                 "jwt.secret_file",
+	"STRATA_JWT_SHARED":                      "jwt.shared_file",
+	"STRATA_MANIFEST_FORMAT":                 "manifest.format",
+	"STRATA_MFA_SECRETS":                     "mfa.secrets",
+	"STRATA_NODE_ID":                         "node.id",
+	"STRATA_PROMETHEUS_URL":                  "prometheus.url",
+	"STRATA_RADOS_HEALTH_OID":                "rados.health_oid",
+	"STRATA_RADOS_POOL_SIZE":                 "rados.pool_size",
+	"STRATA_RADOS_PUT_CONCURRENCY":           "rados.put_concurrency",
+	"STRATA_RADOS_GET_PREFETCH":              "rados.get_prefetch",
+	"STRATA_RADOS_BATCH_OPS":                 "rados.batch_ops",
+	"STRATA_SSE_MASTER_KEY":                  "sse.master_key",
+	"STRATA_SSE_MASTER_KEY_ID":               "sse.master_key_id",
+	"STRATA_SSE_MASTER_KEY_FILE":             "sse.master_key_file",
+	"STRATA_SSE_MASTER_KEY_VAULT":            "sse.master_key_vault",
+	"STRATA_SSE_MASTER_KEYS":                 "sse.master_keys",
+	"STRATA_VHOST_PATTERN":                   "vhost.pattern",
 }
 
 func Load() (*Config, error) {
@@ -519,8 +658,51 @@ func (c *Config) validate() error {
 	c.clampWorkers()
 	c.clampAuthKMS()
 	c.clampObservability()
+	if err := c.validateMisc(); err != nil {
+		return err
+	}
+	c.clampMisc()
 	warnLegacyDrainStrict()
 	return nil
+}
+
+// validateMisc validates the US-005 sweep knobs that require a finite
+// set of values. Zero-valued enums pass through (treated as "default" by
+// consumers).
+func (c *Config) validateMisc() error {
+	switch strings.ToLower(c.Manifest.Format) {
+	case "", "proto", "json":
+	default:
+		return fmt.Errorf("manifest.format %q is not one of {proto, json}", c.Manifest.Format)
+	}
+	switch strings.ToLower(c.Console.ThemeDefault) {
+	case "", "system", "light", "dark":
+	default:
+		return fmt.Errorf("console.theme_default %q is not one of {system, light, dark}", c.Console.ThemeDefault)
+	}
+	return nil
+}
+
+// clampMisc enforces the historical env-side ranges on the US-005 sweep
+// fields. Zero values pass through (consumers treat them as "use default").
+func (c *Config) clampMisc() {
+	if c.RADOS.PoolSize != 0 {
+		c.RADOS.PoolSize = clampInt("rados.pool_size", c.RADOS.PoolSize, 1, 32)
+	}
+	if c.RADOS.PutConcurrency != 0 {
+		c.RADOS.PutConcurrency = clampInt("rados.put_concurrency", c.RADOS.PutConcurrency, 1, 256)
+	}
+	if c.RADOS.GetPrefetch != 0 {
+		c.RADOS.GetPrefetch = clampInt("rados.get_prefetch", c.RADOS.GetPrefetch, 1, 64)
+	}
+	if c.Cassandra.SlowMS < 0 {
+		slog.Warn("clamping config value", "key", "cassandra.slow_ms", "value", c.Cassandra.SlowMS, "min", 0)
+		c.Cassandra.SlowMS = 0
+	}
+	if c.BucketStats.TopN < 0 {
+		slog.Warn("clamping config value", "key", "bucket_stats.top_n", "value", c.BucketStats.TopN, "min", 0)
+		c.BucketStats.TopN = 0
+	}
 }
 
 // clampObservability enforces the historical env-side ranges on the new
