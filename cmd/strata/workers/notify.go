@@ -19,7 +19,9 @@ func init() {
 }
 
 func buildNotify(deps Dependencies) (Runner, error) {
-	router, err := notify.RouterFromEnv(notify.WithSQSClientFactory(sqsClientFactory))
+	cfg := workerCfg(deps)
+	nCfg := cfg.Workers.Notify
+	router, err := notify.RouterFromSpec(nCfg.Targets, notify.WithSQSClientFactory(sqsClientFactory))
 	if err != nil {
 		return nil, err
 	}
@@ -28,10 +30,10 @@ func buildNotify(deps Dependencies) (Runner, error) {
 		Router:      router,
 		Logger:      deps.Logger,
 		Metrics:     metrics.NotifyObserver{},
-		Interval:    durationFromEnv("STRATA_NOTIFY_INTERVAL", 5*time.Second),
-		MaxRetries:  intFromEnv("STRATA_NOTIFY_MAX_RETRIES", 6),
-		BackoffBase: durationFromEnv("STRATA_NOTIFY_BACKOFF_BASE", 1*time.Second),
-		PollLimit:   intFromEnv("STRATA_NOTIFY_POLL_LIMIT", 100),
+		Interval:    orDuration(nCfg.Interval, 5*time.Second),
+		MaxRetries:  orInt(nCfg.MaxRetries, 6),
+		BackoffBase: orDuration(nCfg.BackoffBase, 1*time.Second),
+		PollLimit:   orInt(nCfg.PollLimit, 100),
 		Tracer:      deps.Tracer.Tracer("strata.worker.notify"),
 	})
 }

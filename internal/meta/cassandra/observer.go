@@ -91,6 +91,17 @@ func SlowMSFromEnv() int {
 	return n
 }
 
+// SlowMSOr returns override when non-zero (the gateway passes
+// cfg.Cassandra.SlowMS via config.Load — env > TOML > default), otherwise
+// falls back to SlowMSFromEnv() so call sites that do not have a *Config
+// keep working.
+func SlowMSOr(override int) int {
+	if override > 0 {
+		return override
+	}
+	return SlowMSFromEnv()
+}
+
 // ObserveQuery is called by gocql for every query. The metrics sink (if set)
 // records every observation; the logger emits WARN only for slow or failed
 // queries; the tracer (if set) emits one child span per query.

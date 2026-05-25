@@ -46,7 +46,10 @@ func (s *Server) stsAssumeRole(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, errIAMValidation)
 		return
 	}
-	ttl := auth.DefaultSTSDuration
+	ttl := s.STSDefaultDuration
+	if ttl <= 0 {
+		ttl = auth.DefaultSTSDuration
+	}
 	if raw := iamParam(r, "DurationSeconds"); raw != "" {
 		n, err := strconv.Atoi(raw)
 		if err != nil || n < 900 || n > 43200 {

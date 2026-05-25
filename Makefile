@@ -51,6 +51,9 @@ vet:
 	cd internal/data/rados/cephimpl && GOWORK=off go vet -tags integration ./... 2>/dev/null || \
 		echo "cephimpl/ vet skipped (librados not installed locally; CI has the linker)"
 
+audit-toml-parity:
+	bash scripts/audit-env-toml-parity.sh
+
 test:
 	go test ./...
 

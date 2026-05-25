@@ -58,6 +58,20 @@ func NewLocalHSMProviderFromEnv() (*LocalHSMProvider, error) {
 	return NewLocalHSMProvider(seed)
 }
 
+// newLocalHSMFromConfig builds the local-hsm provider from the kms.Config
+// substruct. Empty seed -> ErrNoConfig.
+func newLocalHSMFromConfig(cfg Config) (*LocalHSMProvider, error) {
+	raw := strings.TrimSpace(cfg.LocalHSMSeed)
+	if raw == "" {
+		return nil, ErrNoConfig
+	}
+	seed, err := hex.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("kms local-hsm: seed decode: %w", err)
+	}
+	return NewLocalHSMProvider(seed)
+}
+
 // GenerateDataKey returns a deterministic-from-(seed, keyID, nonce) DEK plus
 // the wrapped form. The nonce is fresh per call so DEKs differ across objects
 // even under the same keyID.

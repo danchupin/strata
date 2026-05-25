@@ -3,7 +3,6 @@ package workers
 import (
 	"log/slog"
 	"testing"
-	"time"
 
 	datamem "github.com/danchupin/strata/internal/data/memory"
 	metamem "github.com/danchupin/strata/internal/meta/memory"
@@ -151,33 +150,7 @@ func TestRebalanceResolveAcceptsName(t *testing.T) {
 	}
 }
 
-func TestClampDurationHelper(t *testing.T) {
-	deps := Dependencies{Logger: slog.Default()}
-	got := clampDuration(deps, "STRATA_REBALANCE_INTERVAL_TEST_ABSENT", 30*time.Minute, time.Minute, time.Hour)
-	if got != 30*time.Minute {
-		t.Errorf("default returned: %v", got)
-	}
-	t.Setenv("STRATA_REBALANCE_INTERVAL_TEST_LO", "10s")
-	if got := clampDuration(deps, "STRATA_REBALANCE_INTERVAL_TEST_LO", 30*time.Minute, time.Minute, time.Hour); got != time.Minute {
-		t.Errorf("clamp-lo: got %v want 1m", got)
-	}
-	t.Setenv("STRATA_REBALANCE_INTERVAL_TEST_HI", "100h")
-	if got := clampDuration(deps, "STRATA_REBALANCE_INTERVAL_TEST_HI", 30*time.Minute, time.Minute, time.Hour); got != time.Hour {
-		t.Errorf("clamp-hi: got %v want 1h", got)
-	}
-}
-
-func TestClampIntHelper(t *testing.T) {
-	deps := Dependencies{Logger: slog.Default()}
-	if got := clampInt(deps, "STRATA_REBALANCE_RATE_MB_S_TEST_ABSENT", 100, 1, 1000); got != 100 {
-		t.Errorf("default: got %d", got)
-	}
-	t.Setenv("STRATA_REBALANCE_RATE_MB_S_TEST_LO", "-5")
-	if got := clampInt(deps, "STRATA_REBALANCE_RATE_MB_S_TEST_LO", 100, 1, 1000); got != 1 {
-		t.Errorf("clamp-lo: got %d want 1", got)
-	}
-	t.Setenv("STRATA_REBALANCE_RATE_MB_S_TEST_HI", "99999")
-	if got := clampInt(deps, "STRATA_REBALANCE_RATE_MB_S_TEST_HI", 100, 1, 1000); got != 1000 {
-		t.Errorf("clamp-hi: got %d want 1000", got)
-	}
-}
+// Clamp helpers moved into internal/config (clampInt + clampDuration
+// applied during Config.validate() so TOML + env loads land at the same
+// post-clamp values). The dedicated unit tests now live in
+// internal/config/workers_test.go.

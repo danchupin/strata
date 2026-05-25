@@ -32,7 +32,7 @@ type fakeData struct {
 func (f *fakeData) Probe(_ context.Context, _ string) error { return f.probeErr }
 
 func TestBuildHealthHandlerMemoryBackendsHaveNoProbes(t *testing.T) {
-	h := buildHealthHandler(metamem.New(), datamem.New())
+	h := buildHealthHandler(&config.Config{}, metamem.New(), datamem.New())
 	if got := len(h.Probes); got != 0 {
 		t.Fatalf("memory backends should register no probes, got %d", got)
 	}
@@ -52,6 +52,7 @@ func TestBuildHealthHandlerMemoryBackendsHaveNoProbes(t *testing.T) {
 
 func TestBuildHealthHandlerProbersAllOK(t *testing.T) {
 	h := buildHealthHandler(
+		&config.Config{},
 		&fakeMeta{Store: metamem.New()},
 		&fakeData{Backend: datamem.New()},
 	)
@@ -67,6 +68,7 @@ func TestBuildHealthHandlerProbersAllOK(t *testing.T) {
 
 func TestBuildHealthHandlerCassandraDown(t *testing.T) {
 	h := buildHealthHandler(
+		&config.Config{},
 		&fakeMeta{Store: metamem.New(), probeErr: errors.New("connection refused")},
 		&fakeData{Backend: datamem.New()},
 	)
@@ -85,6 +87,7 @@ func TestBuildHealthHandlerCassandraDown(t *testing.T) {
 
 func TestBuildHealthHandlerRadosDown(t *testing.T) {
 	h := buildHealthHandler(
+		&config.Config{},
 		&fakeMeta{Store: metamem.New()},
 		&fakeData{Backend: datamem.New(), probeErr: errors.New("ENOENT pool")},
 	)
@@ -173,12 +176,11 @@ func TestS3BackendSettingsPassesEnvBlobsThrough(t *testing.T) {
 }
 
 func TestHealthCanaryOIDDefault(t *testing.T) {
-	t.Setenv("STRATA_RADOS_HEALTH_OID", "")
-	if got := healthCanaryOID(); got != "strata-readyz-canary" {
+	if got := healthCanaryOID(&config.Config{}); got != "strata-readyz-canary" {
 		t.Fatalf("default OID=%q", got)
 	}
-	t.Setenv("STRATA_RADOS_HEALTH_OID", "custom-oid")
-	if got := healthCanaryOID(); got != "custom-oid" {
+	cfg := &config.Config{RADOS: config.RADOSConfig{HealthOID: "custom-oid"}}
+	if got := healthCanaryOID(cfg); got != "custom-oid" {
 		t.Fatalf("override OID=%q", got)
 	}
 }

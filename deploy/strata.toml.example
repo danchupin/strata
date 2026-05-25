@@ -12,6 +12,16 @@ meta_backend = "cassandra"     # "memory" | "cassandra"
 shutdown_wait = "10s"
 default_bucket_shards = 64
 
+[tikv]
+# Required when meta_backend=tikv. Comma-separated PD endpoints.
+pd_endpoints = ""
+
+[s3]
+# Required when data_backend=s3. JSON array of S3ClusterSpec.
+clusters = ""
+# Required when data_backend=s3. JSON object of ClassSpec.
+classes  = ""
+
 [cassandra]
 hosts       = ["cassandra"]
 keyspace    = "strata"
@@ -20,6 +30,8 @@ replication = "{'class': 'NetworkTopologyStrategy', 'dc1': 3, 'dc2': 3}"
 username    = ""
 password    = ""
 timeout     = "10s"
+# WARN threshold (ms) for gocql QueryObserver. 0 falls back to default (100).
+slow_ms     = 0
 
 [rados]
 config_file = "/etc/ceph/ceph.conf"
@@ -29,17 +41,185 @@ pool        = "strata.rgw.buckets.data"
 namespace   = ""
 # Format: CLASS=pool[@cluster[/namespace]], comma-separated.
 classes = "STANDARD=strata.rgw.buckets.data,STANDARD_IA=strata.rgw.buckets.ia,GLACIER_IR=strata.rgw.buckets.cold"
+# Multi-cluster spec: comma-separated "<id>:<conf>:<keyring>". Empty uses
+# the single-cluster fields above as the implicit "default" cluster.
+clusters         = ""
+# Canary OID stat'd by /readyz against RADOS. Empty -> "strata-readyz-canary".
+health_oid       = ""
+# Per-cluster connection-pool depth. 0 -> default (1). Range: [1, 32].
+pool_size        = 0
+# Per-PutChunks worker fan-out. 0 -> default (32). Range: [1, 256].
+put_concurrency  = 0
+# Per-GetChunks read prefetch depth. 0 -> default (4). Range: [1, 64].
+get_prefetch     = 0
+# Toggles WriteOp/ReadOp batched helpers. Default off.
+batch_ops        = false
 
 [auth]
 mode              = "off"       # "off" | "required"
 static_credentials = ""         # "access:secret[:owner],..."
+sts_duration      = "1h"        # Default AssumeRole TTL. Range: [15m, 12h].
+key_max_age       = "2160h"     # Per-bucket signing-key rotation window (90d). Range: [24h, 8760h].
 
-[lifecycle]
-interval       = "60s"
-unit           = "day"          # "day" | "hour" | "minute" | "second"
-metrics_listen = ":9101"
+[kms]
+# adapter selects the SSE-KMS provider explicitly. Empty -> auto via
+# precedence vault > aws > local_hsm (first configured wins).
+adapter        = ""             # "" | "vault" | "aws" | "local_hsm"
+dek_cache_ttl  = "5m"           # Auth-side DEK cache TTL. Range: [30s, 1h].
+default_key_id = ""             # Default CMK id used by the admin Rotate handler when none specified.
 
-[gc]
+[kms.aws]
+region    = ""                  # Required for adapter=aws (or auto when set).
+endpoint  = ""                  # Optional custom AWS KMS endpoint (LocalStack/moto).
+role_arn  = ""                  # Optional STS assume-role for KMS client credentials.
+
+[kms.vault]
+address   = ""                  # Required for adapter=vault. Vault server URL.
+mount     = ""                  # Required for adapter=vault. Transit mount path (e.g. "transit").
+token     = ""                  # Optional static Vault token; alternative to AppRole.
+role_id   = ""                  # AppRole RoleID; shared with the SSE-S3 master-key Vault provider.
+secret_id = ""                  # AppRole SecretID; shared with the SSE-S3 master-key Vault provider.
+
+[kms.local_hsm]
+seed = ""                       # Hex 32 bytes. Dev/test only — NOT a security boundary.
+
+[workers]
+# Comma-separated worker names (overrides STRATA_WORKERS).
+enabled = ""
+
+[workers.gc]
 interval       = "30s"
 grace          = "5m"
+batch_size     = 0              # 0 = use gc.Worker.Batch default
+concurrency    = 1              # Range: [1, 256]
+shards         = 1              # Range: [1, 1024]
+dual_write     = false
 metrics_listen = ":9100"
+
+[workers.lifecycle]
+interval       = "60s"
+unit           = "day"          # "day" | "hour" | "minute" | "second"
+concurrency    = 1              # Range: [1, 256]
+metrics_listen = ":9101"
+
+[workers.rebalance]
+interval  = "5m"                # Range: [1m, 24h]
+rate_mb_s = 100                 # Range: [1, 10000]
+inflight  = 4                   # Range: [1, 64]
+shards    = 1                   # Range: [1, 1024]
+
+[workers.usage_rollup]
+at               = "00:00"
+interval         = "24h"
+samples_per_day  = 24
+
+[workers.manifest_rewriter]
+interval     = "24h"
+batch_limit  = 500
+dry_run      = false
+
+[workers.audit_export]
+bucket   = ""                   # Required when audit-export worker enabled.
+prefix   = ""
+after    = "720h"               # 30d default
+interval = "24h"
+
+[workers.quota_reconcile]
+interval = "6h"
+
+[workers.notify]
+# <key>=<spec>,…  (webhook = "url|secret"; SQS = "sqs:queue|region")
+targets      = ""
+interval     = "5s"
+max_retries  = 6
+backoff_base = "1s"
+poll_limit   = 100
+
+[workers.replicator]
+interval     = "5s"
+max_retries  = 6
+backoff_base = "1s"
+poll_limit   = 100
+http_timeout = "30s"
+peer_scheme  = "https"
+
+[workers.access_log]
+interval        = "5m"
+max_flush_bytes = 5242880       # 5 MiB
+poll_limit      = 10000
+
+[workers.inventory]
+interval = "5m"
+region   = ""                   # Falls back to top-level `region` when empty.
+
+[otel]
+# Endpoint defaults to OTEL_EXPORTER_OTLP_ENDPOINT (W3C-spec env var) when
+# unset here. Empty + ringbuf=false yields a no-op tracer provider.
+endpoint      = ""              # e.g. "http://otel-collector:4318"
+sample_ratio  = 0.01            # Tail-sampled. Range: [0.0, 1.0]. Errors always export.
+ringbuf       = true            # In-process trace ring buffer (/admin/v1/diagnostics/trace).
+ringbuf_bytes = 4194304         # 4 MiB. Range: [1 MiB, 1 GiB].
+
+[logging]
+level  = "INFO"                 # DEBUG | INFO | WARN | ERROR
+format = "json"                 # json | text
+
+[audit_log]
+# Row TTL applied to audit_log writes. Accepts Go duration ("720h") and
+# legacy "<N>d" suffix when supplied via env. Range: [1m, 87600h (10y)].
+retention = "720h"              # 30 days
+
+[bucket_stats]
+# Per-process bucket-stats sampler cadence + top-N cap. Zero falls back
+# to the sampler default (1h interval, bucketstats.DefaultTopN).
+interval = "0s"
+top_n    = 0
+
+[cluster]
+# Cluster identifier surfaced by /admin/v1/cluster/status.
+name = ""
+
+[console]
+# Hex-encoded HS256 secret for /admin/v1 session cookies. Empty -> ephemeral
+# (warns at boot; sessions invalidate on restart).
+jwt_secret    = ""
+# Console default UI theme: system | light | dark.
+theme_default = "system"
+
+[jwt]
+# Secret file persisted by handleRotateJWTSecret. Empty -> adminapi.DefaultJWTSecretFile.
+secret_file = ""
+# Multi-replica bootstrap file path (mounted volume in lab compose).
+shared_file = ""
+
+[manifest]
+# Encoding for the data.Manifest blob column. proto | json. Default proto.
+format = "proto"
+
+[mfa]
+# MFA-Delete secrets: "<serial>:<base32-secret>[,…]". Empty disables.
+secrets = ""
+
+[node]
+# Heartbeat node identifier. Empty falls back to OS hostname.
+id = ""
+
+[prometheus]
+# Upstream PromQL endpoint for the metrics-aware admin handlers. Empty
+# disables (admin handlers report metrics_available=false).
+url = ""
+
+[sse]
+# SSE-S3 master key sources. Precedence: master_keys > master_key_vault >
+# master_key_file > master_key. Empty (all four) disables SSE-S3.
+master_key       = ""           # Hex 32 bytes; bound to master_key_id.
+master_key_id    = ""           # Optional key id; defaults to "env-1".
+master_key_file  = ""           # Path to hex 32 bytes file; mtime hot-reload.
+master_key_vault = ""           # "<addr>:<transit-export-path>" — uses AppRole role/secret from [kms.vault].
+# Rotation list: "<id>:<hex64>[,<id>:<hex64>...]". First entry is active wrap key.
+master_keys      = ""
+
+[vhost]
+# Virtual-hosted-style host patterns. Comma-separated "*.<suffix>" entries.
+# Default: "*.s3.local". Set to "-" to disable vhost extraction.
+pattern = "*.s3.local"

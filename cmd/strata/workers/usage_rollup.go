@@ -1,7 +1,6 @@
 package workers
 
 import (
-	"os"
 	"time"
 
 	"github.com/danchupin/strata/internal/usagerollup"
@@ -15,16 +14,14 @@ func init() {
 }
 
 func buildUsageRollup(deps Dependencies) (Runner, error) {
-	at := os.Getenv("STRATA_USAGE_ROLLUP_AT")
-	if at == "" {
-		at = "00:00"
-	}
+	cfg := workerCfg(deps)
+	urCfg := cfg.Workers.UsageRollup
 	return usagerollup.New(usagerollup.Config{
 		Meta:          deps.Meta,
 		Logger:        deps.Logger,
-		Interval:      durationFromEnv("STRATA_USAGE_ROLLUP_INTERVAL", 24*time.Hour),
-		At:            at,
-		SamplesPerDay: intFromEnv("STRATA_USAGE_ROLLUP_SAMPLES_PER_DAY", usagerollup.DefaultSamplesPerDay),
+		Interval:      orDuration(urCfg.Interval, 24*time.Hour),
+		At:            orString(urCfg.At, "00:00"),
+		SamplesPerDay: orInt(urCfg.SamplesPerDay, usagerollup.DefaultSamplesPerDay),
 		Tracer:        deps.Tracer.Tracer("strata.worker.usage-rollup"),
 	})
 }

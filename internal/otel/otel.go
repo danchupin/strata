@@ -139,6 +139,10 @@ func (p *Provider) Shutdown(ctx context.Context) error {
 // STRATA_OTEL_SAMPLE_RATIO, STRATA_OTEL_RINGBUF, STRATA_OTEL_RINGBUF_BYTES.
 // Pass logger + metrics through opts so the ring buffer's WARN/gauge wiring
 // stays out of the env layer.
+//
+// Prefer InitWithSettings when the caller already holds a resolved *config.Config —
+// it skips the env re-reads and respects the env > TOML > defaults precedence
+// installed by config.Load.
 func Init(ctx context.Context, opts InitOptions) (*Provider, error) {
 	return InitWithConfig(ctx, Config{
 		Endpoint:       os.Getenv(EnvEndpoint),
@@ -146,6 +150,35 @@ func Init(ctx context.Context, opts InitOptions) (*Provider, error) {
 		ServiceName:    DefaultServiceName,
 		Ringbuf:        ringbufFromEnv(),
 		RingbufBytes:   ringbufBytesFromEnv(),
+		RingbufLogger:  opts.Logger,
+		RingbufMetrics: opts.RingbufMetrics,
+	})
+}
+
+// Settings is the projection of internal/config.Config.OTel that the
+// gateway feeds into InitWithSettings. Defined here (rather than imported
+// from internal/config) to keep the otel package free of config imports.
+type Settings struct {
+	Endpoint     string
+	SampleRatio  float64
+	Ringbuf      bool
+	RingbufBytes int
+}
+
+// InitWithSettings builds a Provider from a config-driven Settings struct.
+// Empty Endpoint + Ringbuf=false yields a no-op provider. SampleRatio is
+// clamped at the config layer; this entry point trusts the caller.
+func InitWithSettings(ctx context.Context, s Settings, opts InitOptions) (*Provider, error) {
+	bytes := s.RingbufBytes
+	if bytes <= 0 {
+		bytes = ringbuf.DefaultBytesBudget
+	}
+	return InitWithConfig(ctx, Config{
+		Endpoint:       s.Endpoint,
+		SampleRatio:    s.SampleRatio,
+		ServiceName:    DefaultServiceName,
+		Ringbuf:        s.Ringbuf,
+		RingbufBytes:   bytes,
 		RingbufLogger:  opts.Logger,
 		RingbufMetrics: opts.RingbufMetrics,
 	})

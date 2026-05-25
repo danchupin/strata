@@ -14,10 +14,11 @@ func init() {
 }
 
 func buildQuotaReconcile(deps Dependencies) (Runner, error) {
+	cfg := workerCfg(deps)
 	return quotareconcile.New(quotareconcile.Config{
 		Meta:     deps.Meta,
 		Logger:   deps.Logger,
-		Interval: durationFromEnv("STRATA_QUOTA_RECONCILE_INTERVAL", 6*time.Hour),
+		Interval: orDuration(cfg.Workers.QuotaReconcile.Interval, 6*time.Hour),
 		Tracer:   deps.Tracer.Tracer("strata.worker.quota-reconcile"),
 	})
 }

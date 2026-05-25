@@ -67,7 +67,7 @@ func TestBuildLifecycleDefaultsWhenEnvUnset(t *testing.T) {
 	}
 }
 
-func TestAgeUnitFromEnv(t *testing.T) {
+func TestAgeUnitOrDefault(t *testing.T) {
 	cases := map[string]time.Duration{
 		"second": time.Second,
 		"minute": time.Minute,
@@ -77,10 +77,9 @@ func TestAgeUnitFromEnv(t *testing.T) {
 		"weird":  7 * time.Hour, // fallback
 	}
 	for in, want := range cases {
-		t.Setenv("STRATA_LIFECYCLE_UNIT", in)
-		got := ageUnitFromEnv("STRATA_LIFECYCLE_UNIT", 7*time.Hour)
+		got := ageUnitOrDefault(in, 7*time.Hour)
 		if got != want {
-			t.Errorf("ageUnitFromEnv(%q)=%v want %v", in, got, want)
+			t.Errorf("ageUnitOrDefault(%q)=%v want %v", in, got, want)
 		}
 	}
 }

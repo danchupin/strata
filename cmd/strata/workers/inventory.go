@@ -14,19 +14,21 @@ func init() {
 }
 
 func buildInventory(deps Dependencies) (Runner, error) {
+	cfg := workerCfg(deps)
+	invCfg := cfg.Workers.Inventory
 	return inventory.New(inventory.Config{
 		Meta:     deps.Meta,
 		Data:     deps.Data,
 		Logger:   deps.Logger,
-		Interval: durationFromEnv("STRATA_INVENTORY_INTERVAL", 5*time.Minute),
-		Region:   inventoryRegion(deps.Region),
+		Interval: orDuration(invCfg.Interval, 5*time.Minute),
+		Region:   inventoryRegion(invCfg.Region, deps.Region),
 		Tracer:   deps.Tracer.Tracer("strata.worker.inventory"),
 	})
 }
 
-func inventoryRegion(depsRegion string) string {
-	if v := stringFromEnv("STRATA_INVENTORY_REGION", ""); v != "" {
-		return v
+func inventoryRegion(cfgRegion, depsRegion string) string {
+	if cfgRegion != "" {
+		return cfgRegion
 	}
 	if depsRegion != "" {
 		return depsRegion

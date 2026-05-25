@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/knadh/koanf/parsers/toml"
@@ -20,13 +22,26 @@ type Config struct {
 	MetaBackend  string        `koanf:"meta_backend"`
 	ShutdownWait time.Duration `koanf:"shutdown_wait"`
 
-	Cassandra CassandraConfig `koanf:"cassandra"`
-	TiKV      TiKVConfig      `koanf:"tikv"`
-	RADOS     RADOSConfig     `koanf:"rados"`
-	S3        S3Config        `koanf:"s3"`
-	Auth      AuthConfig      `koanf:"auth"`
-	Lifecycle LifecycleConfig `koanf:"lifecycle"`
-	GC        GCConfig        `koanf:"gc"`
+	Cassandra   CassandraConfig   `koanf:"cassandra"`
+	TiKV        TiKVConfig        `koanf:"tikv"`
+	RADOS       RADOSConfig       `koanf:"rados"`
+	S3          S3Config          `koanf:"s3"`
+	Auth        AuthConfig        `koanf:"auth"`
+	KMS         KMSConfig         `koanf:"kms"`
+	Workers     WorkersConfig     `koanf:"workers"`
+	OTel        OTelConfig        `koanf:"otel"`
+	Logging     LoggingConfig     `koanf:"logging"`
+	AuditLog    AuditLogConfig    `koanf:"audit_log"`
+	BucketStats BucketStatsConfig `koanf:"bucket_stats"`
+	Cluster     ClusterConfig     `koanf:"cluster"`
+	Console     ConsoleConfig     `koanf:"console"`
+	JWT         JWTConfig         `koanf:"jwt"`
+	Manifest    ManifestConfig    `koanf:"manifest"`
+	MFA         MFAConfig         `koanf:"mfa"`
+	Node        NodeConfig        `koanf:"node"`
+	Prometheus  PrometheusConfig  `koanf:"prometheus"`
+	SSE         SSEConfig         `koanf:"sse"`
+	VHost       VHostConfig       `koanf:"vhost"`
 
 	DefaultBucketShards int `koanf:"default_bucket_shards"`
 }
@@ -39,6 +54,10 @@ type CassandraConfig struct {
 	Username    string        `koanf:"username"`
 	Password    string        `koanf:"password"`
 	Timeout     time.Duration `koanf:"timeout"`
+	// SlowMS is the WARN threshold (in milliseconds) applied by the
+	// gocql QueryObserver. 0 disables; unset falls back to the
+	// observer's DefaultSlowQueryMS (100ms). Wired via STRATA_CASSANDRA_SLOW_MS.
+	SlowMS int `koanf:"slow_ms"`
 }
 
 // TiKVConfig holds connection parameters for the TiKV-backed meta store
@@ -61,6 +80,22 @@ type RADOSConfig struct {
 	// format details. Existing single-cluster fields above coexist as the
 	// implicit "default" cluster.
 	Clusters string `koanf:"clusters"`
+	// HealthOID is the canary OID stat'd by /readyz against RADOS. Empty
+	// falls back to the cephimpl default ("strata-readyz-canary"). Wired
+	// via STRATA_RADOS_HEALTH_OID.
+	HealthOID string `koanf:"health_oid"`
+	// PoolSize is the per-cluster connection-pool depth. 0 → cephimpl
+	// reads STRATA_RADOS_POOL_SIZE (default 1). Range [1, 32].
+	PoolSize int `koanf:"pool_size"`
+	// PutConcurrency caps the per-PutChunks worker fan-out. 0 → cephimpl
+	// reads STRATA_RADOS_PUT_CONCURRENCY (default 32). Range [1, 256].
+	PutConcurrency int `koanf:"put_concurrency"`
+	// GetPrefetch caps the per-GetChunks in-flight read prefetch. 0 →
+	// cephimpl reads STRATA_RADOS_GET_PREFETCH (default 4). Range [1, 64].
+	GetPrefetch int `koanf:"get_prefetch"`
+	// BatchOps toggles the WriteOp/ReadOp batched helpers. Default off.
+	// Wired via STRATA_RADOS_BATCH_OPS.
+	BatchOps bool `koanf:"batch_ops"`
 }
 
 // S3Config carries the multi-cluster S3 data-backend wiring (US-004).
@@ -75,20 +110,241 @@ type S3Config struct {
 }
 
 type AuthConfig struct {
-	Mode              string `koanf:"mode"`
-	StaticCredentials string `koanf:"static_credentials"`
+	Mode              string        `koanf:"mode"`
+	StaticCredentials string        `koanf:"static_credentials"`
+	STSDuration       time.Duration `koanf:"sts_duration"`
+	KeyMaxAge         time.Duration `koanf:"key_max_age"`
 }
 
-type LifecycleConfig struct {
-	Interval      time.Duration `koanf:"interval"`
-	Unit          string        `koanf:"unit"`
-	MetricsListen string        `koanf:"metrics_listen"`
+// KMSConfig collects every SSE-KMS knob under a single nested TOML section.
+// Adapter selects the provider explicitly ("vault"|"aws"|"local_hsm");
+// empty falls back to the FromEnv precedence (vault > aws > local_hsm).
+// DEKCacheTTL drives the wall-clock TTL on the auth-side DEK cache; range
+// [30s, 1h] (clamped in validate). DefaultKeyID feeds the admin
+// SigningKeyConfig as the default CMK id when the operator does not pass
+// one per Rotate call.
+type KMSConfig struct {
+	Adapter      string           `koanf:"adapter"`
+	DEKCacheTTL  time.Duration    `koanf:"dek_cache_ttl"`
+	DefaultKeyID string           `koanf:"default_key_id"`
+	AWS          KMSAWSConfig     `koanf:"aws"`
+	Vault        KMSVaultConfig   `koanf:"vault"`
+	LocalHSM     KMSLocalHSMConfig `koanf:"local_hsm"`
 }
 
-type GCConfig struct {
+type KMSAWSConfig struct {
+	Region   string `koanf:"region"`
+	Endpoint string `koanf:"endpoint"`
+	RoleARN  string `koanf:"role_arn"`
+}
+
+type KMSVaultConfig struct {
+	Address  string `koanf:"address"`
+	Mount    string `koanf:"mount"`
+	Token    string `koanf:"token"`
+	RoleID   string `koanf:"role_id"`
+	SecretID string `koanf:"secret_id"`
+}
+
+type KMSLocalHSMConfig struct {
+	Seed string `koanf:"seed"`
+}
+
+// WorkersConfig collects every worker knob under a single nested TOML
+// section. Enabled mirrors STRATA_WORKERS (comma-separated worker names);
+// each substruct collects per-worker tunables.
+type WorkersConfig struct {
+	Enabled          string                 `koanf:"enabled"`
+	GC               WorkerGCConfig         `koanf:"gc"`
+	Lifecycle        WorkerLifecycleConfig  `koanf:"lifecycle"`
+	Rebalance        RebalanceConfig        `koanf:"rebalance"`
+	UsageRollup      UsageRollupConfig      `koanf:"usage_rollup"`
+	ManifestRewriter ManifestRewriterConfig `koanf:"manifest_rewriter"`
+	AuditExport      AuditExportConfig      `koanf:"audit_export"`
+	QuotaReconcile   QuotaReconcileConfig   `koanf:"quota_reconcile"`
+	Notify           NotifyConfig           `koanf:"notify"`
+	Replicator       ReplicatorConfig       `koanf:"replicator"`
+	AccessLog        AccessLogConfig        `koanf:"access_log"`
+	Inventory        InventoryConfig        `koanf:"inventory"`
+}
+
+type WorkerGCConfig struct {
 	Interval      time.Duration `koanf:"interval"`
 	Grace         time.Duration `koanf:"grace"`
+	BatchSize     int           `koanf:"batch_size"`
+	Concurrency   int           `koanf:"concurrency"`
+	Shards        int           `koanf:"shards"`
+	DualWrite     bool          `koanf:"dual_write"`
 	MetricsListen string        `koanf:"metrics_listen"`
+}
+
+type WorkerLifecycleConfig struct {
+	Interval      time.Duration `koanf:"interval"`
+	Unit          string        `koanf:"unit"`
+	Concurrency   int           `koanf:"concurrency"`
+	MetricsListen string        `koanf:"metrics_listen"`
+}
+
+type RebalanceConfig struct {
+	Interval   time.Duration `koanf:"interval"`
+	RateMBPerS int           `koanf:"rate_mb_s"`
+	Inflight   int           `koanf:"inflight"`
+	Shards     int           `koanf:"shards"`
+}
+
+type UsageRollupConfig struct {
+	At            string        `koanf:"at"`
+	Interval      time.Duration `koanf:"interval"`
+	SamplesPerDay int           `koanf:"samples_per_day"`
+}
+
+type ManifestRewriterConfig struct {
+	Interval   time.Duration `koanf:"interval"`
+	BatchLimit int           `koanf:"batch_limit"`
+	DryRun     bool          `koanf:"dry_run"`
+}
+
+type AuditExportConfig struct {
+	Bucket   string        `koanf:"bucket"`
+	Prefix   string        `koanf:"prefix"`
+	After    time.Duration `koanf:"after"`
+	Interval time.Duration `koanf:"interval"`
+}
+
+type QuotaReconcileConfig struct {
+	Interval time.Duration `koanf:"interval"`
+}
+
+type NotifyConfig struct {
+	Targets     string        `koanf:"targets"`
+	Interval    time.Duration `koanf:"interval"`
+	MaxRetries  int           `koanf:"max_retries"`
+	BackoffBase time.Duration `koanf:"backoff_base"`
+	PollLimit   int           `koanf:"poll_limit"`
+}
+
+type ReplicatorConfig struct {
+	Interval    time.Duration `koanf:"interval"`
+	MaxRetries  int           `koanf:"max_retries"`
+	BackoffBase time.Duration `koanf:"backoff_base"`
+	PollLimit   int           `koanf:"poll_limit"`
+	HTTPTimeout time.Duration `koanf:"http_timeout"`
+	PeerScheme  string        `koanf:"peer_scheme"`
+}
+
+type AccessLogConfig struct {
+	Interval      time.Duration `koanf:"interval"`
+	MaxFlushBytes int64         `koanf:"max_flush_bytes"`
+	PollLimit     int           `koanf:"poll_limit"`
+}
+
+type InventoryConfig struct {
+	Interval time.Duration `koanf:"interval"`
+	Region   string        `koanf:"region"`
+}
+
+// OTelConfig collects the OpenTelemetry tracing knobs. Endpoint defaults
+// to the W3C-spec OTEL_EXPORTER_OTLP_ENDPOINT env var (read at Load time
+// when STRATA_OTEL_EXPORTER_ENDPOINT is unset). Empty Endpoint + Ringbuf
+// false yields a no-op tracer provider. SampleRatio drives tail-based
+// sampling — failing spans are exported regardless.
+type OTelConfig struct {
+	Endpoint     string  `koanf:"endpoint"`
+	SampleRatio  float64 `koanf:"sample_ratio"`
+	Ringbuf      bool    `koanf:"ringbuf"`
+	RingbufBytes int     `koanf:"ringbuf_bytes"`
+}
+
+// LoggingConfig drives the gateway slog setup. Level ∈ {DEBUG,INFO,WARN,
+// ERROR}; Format ∈ {json,text} — only json is supported today, the field
+// exists for forward-compat with a text handler.
+type LoggingConfig struct {
+	Level  string `koanf:"level"`
+	Format string `koanf:"format"`
+}
+
+// AuditLogConfig carries audit_log table TTL knobs. Retention is the row
+// TTL applied to every audit row written via s3api.AuditMiddleware.
+// Accepts standard Go durations.
+type AuditLogConfig struct {
+	Retention time.Duration `koanf:"retention"`
+}
+
+// BucketStatsConfig drives the per-process bucket-stats sampler. Interval
+// 0 falls back to the sampler's internal default (1h); TopN 0 falls back
+// to bucketstats.DefaultTopN. Wired via STRATA_BUCKETSTATS_INTERVAL /
+// STRATA_BUCKETSTATS_TOPN (legacy env names without underscore between
+// "bucket" and "stats" — TOML key remains [bucket_stats]).
+type BucketStatsConfig struct {
+	Interval time.Duration `koanf:"interval"`
+	TopN     int           `koanf:"top_n"`
+}
+
+// ClusterConfig collects single-knob cluster-identity fields. Name feeds
+// the /admin/v1/cluster/status response. Wired via STRATA_CLUSTER_NAME.
+type ClusterConfig struct {
+	Name string `koanf:"name"`
+}
+
+// ConsoleConfig carries the admin-console knobs the gateway consumes at
+// boot. JWTSecret is the hex-encoded HS256 key for session cookies (env
+// wins via STRATA_CONSOLE_JWT_SECRET); ThemeDefault picks the console UI
+// default theme.
+type ConsoleConfig struct {
+	JWTSecret    string `koanf:"jwt_secret"`
+	ThemeDefault string `koanf:"theme_default"`
+}
+
+// JWTConfig collects JWT-secret persistence knobs. SecretFile is the
+// on-disk path read at boot and written by handleRotateJWTSecret;
+// SharedFile is the multi-replica bootstrap file (mounted from a docker
+// volume in the lab compose profile).
+type JWTConfig struct {
+	SecretFile string `koanf:"secret_file"`
+	SharedFile string `koanf:"shared_file"`
+}
+
+// ManifestConfig drives the data.Manifest blob encoder. Format ∈
+// {"proto","json"}; default proto. Wired via STRATA_MANIFEST_FORMAT.
+type ManifestConfig struct {
+	Format string `koanf:"format"`
+}
+
+// MFAConfig wires multi-factor delete secrets. Secrets is the raw
+// STRATA_MFA_SECRETS spec (see s3api.ParseMFASecrets).
+type MFAConfig struct {
+	Secrets string `koanf:"secrets"`
+}
+
+// NodeConfig pins the heartbeat node identifier. Empty falls back to the
+// OS hostname via heartbeat.DefaultNodeID().
+type NodeConfig struct {
+	ID string `koanf:"id"`
+}
+
+// PrometheusConfig points the admin API at an upstream PromQL endpoint
+// for the metrics-aware admin handlers. Empty disables (admin handlers
+// degrade with metrics_available=false).
+type PrometheusConfig struct {
+	URL string `koanf:"url"`
+}
+
+// SSEConfig collects the SSE-S3 master-key sourcing knobs. Precedence
+// (highest first): Keys (rotation list) > KeyVault > KeyFile > Key.
+// See internal/crypto/master.FromConfig for resolution.
+type SSEConfig struct {
+	MasterKey      string `koanf:"master_key"`
+	MasterKeyID    string `koanf:"master_key_id"`
+	MasterKeyFile  string `koanf:"master_key_file"`
+	MasterKeyVault string `koanf:"master_key_vault"`
+	MasterKeys     string `koanf:"master_keys"`
+}
+
+// VHostConfig pins the virtual-hosted-style S3 host suffixes. Pattern is
+// a comma-separated list of "*.<suffix>" entries; "-" disables vhost
+// extraction. Wired via STRATA_VHOST_PATTERN.
+type VHostConfig struct {
+	Pattern string `koanf:"pattern"`
 }
 
 func defaults() Config {
@@ -111,16 +367,96 @@ func defaults() Config {
 			User:       "admin",
 			Pool:       "strata.rgw.buckets.data",
 		},
-		Auth: AuthConfig{Mode: "off"},
-		Lifecycle: LifecycleConfig{
-			Interval:      60 * time.Second,
-			Unit:          "day",
-			MetricsListen: ":9101",
+		Auth: AuthConfig{
+			Mode:        "off",
+			STSDuration: time.Hour,
+			KeyMaxAge:   90 * 24 * time.Hour,
 		},
-		GC: GCConfig{
-			Interval:      30 * time.Second,
-			Grace:         5 * time.Minute,
-			MetricsListen: ":9100",
+		KMS: KMSConfig{
+			DEKCacheTTL: 5 * time.Minute,
+		},
+		Workers: WorkersConfig{
+			GC: WorkerGCConfig{
+				Interval:      30 * time.Second,
+				Grace:         5 * time.Minute,
+				BatchSize:     0,
+				Concurrency:   1,
+				Shards:        1,
+				DualWrite:     false,
+				MetricsListen: ":9100",
+			},
+			Lifecycle: WorkerLifecycleConfig{
+				Interval:      60 * time.Second,
+				Unit:          "day",
+				Concurrency:   1,
+				MetricsListen: ":9101",
+			},
+			Rebalance: RebalanceConfig{
+				Interval:   5 * time.Minute,
+				RateMBPerS: 100,
+				Inflight:   4,
+				Shards:     1,
+			},
+			UsageRollup: UsageRollupConfig{
+				At:            "00:00",
+				Interval:      24 * time.Hour,
+				SamplesPerDay: 24,
+			},
+			ManifestRewriter: ManifestRewriterConfig{
+				Interval:   24 * time.Hour,
+				BatchLimit: 500,
+				DryRun:     false,
+			},
+			AuditExport: AuditExportConfig{
+				After:    30 * 24 * time.Hour,
+				Interval: 24 * time.Hour,
+			},
+			QuotaReconcile: QuotaReconcileConfig{
+				Interval: 6 * time.Hour,
+			},
+			Notify: NotifyConfig{
+				Interval:    5 * time.Second,
+				MaxRetries:  6,
+				BackoffBase: 1 * time.Second,
+				PollLimit:   100,
+			},
+			Replicator: ReplicatorConfig{
+				Interval:    5 * time.Second,
+				MaxRetries:  6,
+				BackoffBase: 1 * time.Second,
+				PollLimit:   100,
+				HTTPTimeout: 30 * time.Second,
+				PeerScheme:  "https",
+			},
+			AccessLog: AccessLogConfig{
+				Interval:      5 * time.Minute,
+				MaxFlushBytes: 5 * 1024 * 1024,
+				PollLimit:     10000,
+			},
+			Inventory: InventoryConfig{
+				Interval: 5 * time.Minute,
+			},
+		},
+		OTel: OTelConfig{
+			SampleRatio:  0.01,
+			Ringbuf:      true,
+			RingbufBytes: 4 << 20,
+		},
+		Logging: LoggingConfig{
+			Level:  "INFO",
+			Format: "json",
+		},
+		AuditLog: AuditLogConfig{
+			Retention: 30 * 24 * time.Hour,
+		},
+		Manifest: ManifestConfig{
+			Format: "proto",
+		},
+		Console: ConsoleConfig{
+			ThemeDefault: "system",
+		},
+		VHost: VHostConfig{
+			Pattern: "*.s3.local",
 		},
 	}
 }
@@ -128,37 +464,118 @@ func defaults() Config {
 // envMap declares the explicit mapping from environment variables to koanf paths.
 // Keeping it explicit avoids surprises from auto-mangling underscores into dots.
 var envMap = map[string]string{
-	"STRATA_LISTEN":                   "listen",
-	"STRATA_REGION":                   "region",
-	"STRATA_DATA_BACKEND":             "data_backend",
-	"STRATA_META_BACKEND":             "meta_backend",
-	"STRATA_BUCKET_SHARDS":            "default_bucket_shards",
-	"STRATA_SHUTDOWN_WAIT":            "shutdown_wait",
-	"STRATA_CASSANDRA_HOSTS":          "cassandra.hosts",
-	"STRATA_CASSANDRA_KEYSPACE":       "cassandra.keyspace",
-	"STRATA_CASSANDRA_DC":             "cassandra.local_dc",
-	"STRATA_CASSANDRA_REPLICATION":    "cassandra.replication",
-	"STRATA_CASSANDRA_USER":           "cassandra.username",
-	"STRATA_CASSANDRA_PASSWORD":       "cassandra.password",
-	"STRATA_CASSANDRA_TIMEOUT":        "cassandra.timeout",
-	"STRATA_TIKV_PD_ENDPOINTS":        "tikv.pd_endpoints",
-	"STRATA_RADOS_CONF":               "rados.config_file",
-	"STRATA_RADOS_USER":               "rados.user",
-	"STRATA_RADOS_KEYRING":            "rados.keyring",
-	"STRATA_RADOS_POOL":               "rados.pool",
-	"STRATA_RADOS_NAMESPACE":          "rados.namespace",
-	"STRATA_RADOS_CLASSES":            "rados.classes",
-	"STRATA_RADOS_CLUSTERS":           "rados.clusters",
-	"STRATA_S3_CLUSTERS":              "s3.clusters",
-	"STRATA_S3_CLASSES":               "s3.classes",
-	"STRATA_AUTH_MODE":                "auth.mode",
-	"STRATA_STATIC_CREDENTIALS":       "auth.static_credentials",
-	"STRATA_LIFECYCLE_INTERVAL":       "lifecycle.interval",
-	"STRATA_LIFECYCLE_UNIT":           "lifecycle.unit",
-	"STRATA_LIFECYCLE_METRICS_LISTEN": "lifecycle.metrics_listen",
-	"STRATA_GC_INTERVAL":              "gc.interval",
-	"STRATA_GC_GRACE":                 "gc.grace",
-	"STRATA_GC_METRICS_LISTEN":        "gc.metrics_listen",
+	"STRATA_LISTEN":                          "listen",
+	"STRATA_REGION":                          "region",
+	"STRATA_DATA_BACKEND":                    "data_backend",
+	"STRATA_META_BACKEND":                    "meta_backend",
+	"STRATA_BUCKET_SHARDS":                   "default_bucket_shards",
+	"STRATA_SHUTDOWN_WAIT":                   "shutdown_wait",
+	"STRATA_CASSANDRA_HOSTS":                 "cassandra.hosts",
+	"STRATA_CASSANDRA_KEYSPACE":              "cassandra.keyspace",
+	"STRATA_CASSANDRA_DC":                    "cassandra.local_dc",
+	"STRATA_CASSANDRA_REPLICATION":           "cassandra.replication",
+	"STRATA_CASSANDRA_USER":                  "cassandra.username",
+	"STRATA_CASSANDRA_PASSWORD":              "cassandra.password",
+	"STRATA_CASSANDRA_TIMEOUT":               "cassandra.timeout",
+	"STRATA_TIKV_PD_ENDPOINTS":               "tikv.pd_endpoints",
+	"STRATA_RADOS_CONF":                      "rados.config_file",
+	"STRATA_RADOS_USER":                      "rados.user",
+	"STRATA_RADOS_KEYRING":                   "rados.keyring",
+	"STRATA_RADOS_POOL":                      "rados.pool",
+	"STRATA_RADOS_NAMESPACE":                 "rados.namespace",
+	"STRATA_RADOS_CLASSES":                   "rados.classes",
+	"STRATA_RADOS_CLUSTERS":                  "rados.clusters",
+	"STRATA_S3_CLUSTERS":                     "s3.clusters",
+	"STRATA_S3_CLASSES":                      "s3.classes",
+	"STRATA_AUTH_MODE":                       "auth.mode",
+	"STRATA_STATIC_CREDENTIALS":              "auth.static_credentials",
+	"STRATA_STS_DURATION":                    "auth.sts_duration",
+	"STRATA_KEY_MAX_AGE":                     "auth.key_max_age",
+	"STRATA_KMS_ADAPTER":                     "kms.adapter",
+	"STRATA_DEK_CACHE_TTL":                   "kms.dek_cache_ttl",
+	"STRATA_KMS_DEFAULT_KEY_ID":              "kms.default_key_id",
+	"STRATA_KMS_AWS_REGION":                  "kms.aws.region",
+	"STRATA_KMS_AWS_ENDPOINT":                "kms.aws.endpoint",
+	"STRATA_KMS_AWS_ROLE_ARN":                "kms.aws.role_arn",
+	"STRATA_KMS_VAULT_ADDR":                  "kms.vault.address",
+	"STRATA_KMS_VAULT_PATH":                  "kms.vault.mount",
+	"STRATA_KMS_VAULT_TOKEN":                 "kms.vault.token",
+	"STRATA_SSE_VAULT_ROLE_ID":               "kms.vault.role_id",
+	"STRATA_SSE_VAULT_SECRET_ID":             "kms.vault.secret_id",
+	"STRATA_KMS_LOCAL_HSM_SEED":              "kms.local_hsm.seed",
+	"STRATA_WORKERS":                         "workers.enabled",
+	"STRATA_GC_INTERVAL":                     "workers.gc.interval",
+	"STRATA_GC_GRACE":                        "workers.gc.grace",
+	"STRATA_GC_BATCH_SIZE":                   "workers.gc.batch_size",
+	"STRATA_GC_CONCURRENCY":                  "workers.gc.concurrency",
+	"STRATA_GC_SHARDS":                       "workers.gc.shards",
+	"STRATA_GC_DUAL_WRITE":                   "workers.gc.dual_write",
+	"STRATA_GC_METRICS_LISTEN":               "workers.gc.metrics_listen",
+	"STRATA_LIFECYCLE_INTERVAL":              "workers.lifecycle.interval",
+	"STRATA_LIFECYCLE_UNIT":                  "workers.lifecycle.unit",
+	"STRATA_LIFECYCLE_CONCURRENCY":           "workers.lifecycle.concurrency",
+	"STRATA_LIFECYCLE_METRICS_LISTEN":        "workers.lifecycle.metrics_listen",
+	"STRATA_REBALANCE_INTERVAL":              "workers.rebalance.interval",
+	"STRATA_REBALANCE_RATE_MB_S":             "workers.rebalance.rate_mb_s",
+	"STRATA_REBALANCE_INFLIGHT":              "workers.rebalance.inflight",
+	"STRATA_REBALANCE_SHARDS":                "workers.rebalance.shards",
+	"STRATA_USAGE_ROLLUP_AT":                 "workers.usage_rollup.at",
+	"STRATA_USAGE_ROLLUP_INTERVAL":           "workers.usage_rollup.interval",
+	"STRATA_USAGE_ROLLUP_SAMPLES_PER_DAY":    "workers.usage_rollup.samples_per_day",
+	"STRATA_MANIFEST_REWRITER_INTERVAL":      "workers.manifest_rewriter.interval",
+	"STRATA_MANIFEST_REWRITER_BATCH_LIMIT":   "workers.manifest_rewriter.batch_limit",
+	"STRATA_MANIFEST_REWRITER_DRY_RUN":       "workers.manifest_rewriter.dry_run",
+	"STRATA_AUDIT_EXPORT_BUCKET":             "workers.audit_export.bucket",
+	"STRATA_AUDIT_EXPORT_PREFIX":             "workers.audit_export.prefix",
+	"STRATA_AUDIT_EXPORT_AFTER":              "workers.audit_export.after",
+	"STRATA_AUDIT_EXPORT_INTERVAL":           "workers.audit_export.interval",
+	"STRATA_QUOTA_RECONCILE_INTERVAL":        "workers.quota_reconcile.interval",
+	"STRATA_NOTIFY_TARGETS":                  "workers.notify.targets",
+	"STRATA_NOTIFY_INTERVAL":                 "workers.notify.interval",
+	"STRATA_NOTIFY_MAX_RETRIES":              "workers.notify.max_retries",
+	"STRATA_NOTIFY_BACKOFF_BASE":             "workers.notify.backoff_base",
+	"STRATA_NOTIFY_POLL_LIMIT":               "workers.notify.poll_limit",
+	"STRATA_REPLICATOR_INTERVAL":             "workers.replicator.interval",
+	"STRATA_REPLICATOR_MAX_RETRIES":          "workers.replicator.max_retries",
+	"STRATA_REPLICATOR_BACKOFF_BASE":         "workers.replicator.backoff_base",
+	"STRATA_REPLICATOR_POLL_LIMIT":           "workers.replicator.poll_limit",
+	"STRATA_REPLICATOR_HTTP_TIMEOUT":         "workers.replicator.http_timeout",
+	"STRATA_REPLICATOR_PEER_SCHEME":          "workers.replicator.peer_scheme",
+	"STRATA_ACCESS_LOG_INTERVAL":             "workers.access_log.interval",
+	"STRATA_ACCESS_LOG_MAX_FLUSH_BYTES":      "workers.access_log.max_flush_bytes",
+	"STRATA_ACCESS_LOG_POLL_LIMIT":           "workers.access_log.poll_limit",
+	"STRATA_INVENTORY_INTERVAL":              "workers.inventory.interval",
+	"STRATA_INVENTORY_REGION":                "workers.inventory.region",
+	"STRATA_OTEL_EXPORTER_ENDPOINT":          "otel.endpoint",
+	"STRATA_OTEL_SAMPLE_RATIO":               "otel.sample_ratio",
+	"STRATA_OTEL_RINGBUF":                    "otel.ringbuf",
+	"STRATA_OTEL_RINGBUF_BYTES":              "otel.ringbuf_bytes",
+	"STRATA_LOG_LEVEL":                       "logging.level",
+	"STRATA_LOG_FORMAT":                      "logging.format",
+	"STRATA_AUDIT_RETENTION":                 "audit_log.retention",
+	"STRATA_BUCKETSTATS_INTERVAL":            "bucket_stats.interval",
+	"STRATA_BUCKETSTATS_TOPN":                "bucket_stats.top_n",
+	"STRATA_CASSANDRA_SLOW_MS":               "cassandra.slow_ms",
+	"STRATA_CLUSTER_NAME":                    "cluster.name",
+	"STRATA_CONSOLE_JWT_SECRET":              "console.jwt_secret",
+	"STRATA_CONSOLE_THEME_DEFAULT":           "console.theme_default",
+	"STRATA_JWT_SECRET_FILE":                 "jwt.secret_file",
+	"STRATA_JWT_SHARED":                      "jwt.shared_file",
+	"STRATA_MANIFEST_FORMAT":                 "manifest.format",
+	"STRATA_MFA_SECRETS":                     "mfa.secrets",
+	"STRATA_NODE_ID":                         "node.id",
+	"STRATA_PROMETHEUS_URL":                  "prometheus.url",
+	"STRATA_RADOS_HEALTH_OID":                "rados.health_oid",
+	"STRATA_RADOS_POOL_SIZE":                 "rados.pool_size",
+	"STRATA_RADOS_PUT_CONCURRENCY":           "rados.put_concurrency",
+	"STRATA_RADOS_GET_PREFETCH":              "rados.get_prefetch",
+	"STRATA_RADOS_BATCH_OPS":                 "rados.batch_ops",
+	"STRATA_SSE_MASTER_KEY":                  "sse.master_key",
+	"STRATA_SSE_MASTER_KEY_ID":               "sse.master_key_id",
+	"STRATA_SSE_MASTER_KEY_FILE":             "sse.master_key_file",
+	"STRATA_SSE_MASTER_KEY_VAULT":            "sse.master_key_vault",
+	"STRATA_SSE_MASTER_KEYS":                 "sse.master_keys",
+	"STRATA_VHOST_PATTERN":                   "vhost.pattern",
 }
 
 func Load() (*Config, error) {
@@ -179,7 +596,16 @@ func Load() (*Config, error) {
 		if v == "" {
 			return "", nil
 		}
-		return envMap[s], v
+		key, ok := envMap[s]
+		if !ok {
+			return "", nil
+		}
+		if key == "audit_log.retention" {
+			if d, err := ParseAuditRetention(v); err == nil {
+				v = d.String()
+			}
+		}
+		return key, v
 	}), nil); err != nil {
 		return nil, fmt.Errorf("config env: %w", err)
 	}
@@ -187,6 +613,10 @@ func Load() (*Config, error) {
 	var out Config
 	if err := k.Unmarshal("", &out); err != nil {
 		return nil, fmt.Errorf("config unmarshal: %w", err)
+	}
+
+	if out.OTel.Endpoint == "" {
+		out.OTel.Endpoint = os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
 	}
 
 	if err := out.validate(); err != nil {
@@ -225,8 +655,149 @@ func (c *Config) validate() error {
 	if c.DefaultBucketShards <= 0 {
 		return fmt.Errorf("default_bucket_shards must be positive (got %d)", c.DefaultBucketShards)
 	}
+	c.clampWorkers()
+	c.clampAuthKMS()
+	c.clampObservability()
+	if err := c.validateMisc(); err != nil {
+		return err
+	}
+	c.clampMisc()
 	warnLegacyDrainStrict()
 	return nil
+}
+
+// validateMisc validates the US-005 sweep knobs that require a finite
+// set of values. Zero-valued enums pass through (treated as "default" by
+// consumers).
+func (c *Config) validateMisc() error {
+	switch strings.ToLower(c.Manifest.Format) {
+	case "", "proto", "json":
+	default:
+		return fmt.Errorf("manifest.format %q is not one of {proto, json}", c.Manifest.Format)
+	}
+	switch strings.ToLower(c.Console.ThemeDefault) {
+	case "", "system", "light", "dark":
+	default:
+		return fmt.Errorf("console.theme_default %q is not one of {system, light, dark}", c.Console.ThemeDefault)
+	}
+	return nil
+}
+
+// clampMisc enforces the historical env-side ranges on the US-005 sweep
+// fields. Zero values pass through (consumers treat them as "use default").
+func (c *Config) clampMisc() {
+	if c.RADOS.PoolSize != 0 {
+		c.RADOS.PoolSize = clampInt("rados.pool_size", c.RADOS.PoolSize, 1, 32)
+	}
+	if c.RADOS.PutConcurrency != 0 {
+		c.RADOS.PutConcurrency = clampInt("rados.put_concurrency", c.RADOS.PutConcurrency, 1, 256)
+	}
+	if c.RADOS.GetPrefetch != 0 {
+		c.RADOS.GetPrefetch = clampInt("rados.get_prefetch", c.RADOS.GetPrefetch, 1, 64)
+	}
+	if c.Cassandra.SlowMS < 0 {
+		slog.Warn("clamping config value", "key", "cassandra.slow_ms", "value", c.Cassandra.SlowMS, "min", 0)
+		c.Cassandra.SlowMS = 0
+	}
+	if c.BucketStats.TopN < 0 {
+		slog.Warn("clamping config value", "key", "bucket_stats.top_n", "value", c.BucketStats.TopN, "min", 0)
+		c.BucketStats.TopN = 0
+	}
+}
+
+// clampObservability enforces the historical env-side ranges on the new
+// otel + audit_log TOML fields. Zero values pass through (consumers treat
+// them as "use default").
+func (c *Config) clampObservability() {
+	if c.OTel.SampleRatio < 0 {
+		slog.Warn("clamping config value", "key", "otel.sample_ratio", "value", c.OTel.SampleRatio, "min", 0.0)
+		c.OTel.SampleRatio = 0
+	}
+	if c.OTel.SampleRatio > 1 {
+		slog.Warn("clamping config value", "key", "otel.sample_ratio", "value", c.OTel.SampleRatio, "max", 1.0)
+		c.OTel.SampleRatio = 1
+	}
+	if c.OTel.RingbufBytes != 0 {
+		c.OTel.RingbufBytes = clampInt("otel.ringbuf_bytes", c.OTel.RingbufBytes, 1<<20, 1<<30)
+	}
+	if c.AuditLog.Retention != 0 {
+		c.AuditLog.Retention = clampDuration("audit_log.retention", c.AuditLog.Retention, time.Minute, 10*365*24*time.Hour)
+	}
+}
+
+// ParseAuditRetention parses an audit_log retention string. Accepts plain
+// Go durations and a bare "<N>d" days suffix (historical operator UX).
+// Empty input returns 0 — callers fall back to defaults() (30d).
+func ParseAuditRetention(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	if trimmed, ok := strings.CutSuffix(s, "d"); ok {
+		n, err := strconv.Atoi(trimmed)
+		if err != nil {
+			return 0, fmt.Errorf("audit_log.retention: %q: %w", s, err)
+		}
+		if n < 0 {
+			return 0, fmt.Errorf("audit_log.retention: negative value %q", s)
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	return time.ParseDuration(s)
+}
+
+// clampAuthKMS enforces the historical env-side ranges on the new
+// auth + kms TOML fields so TOML-loaded and env-loaded values get the
+// same WARN-and-clamp treatment. Zero values pass through (treated as
+// "default" by downstream consumers).
+func (c *Config) clampAuthKMS() {
+	if c.Auth.STSDuration != 0 {
+		c.Auth.STSDuration = clampDuration("auth.sts_duration", c.Auth.STSDuration, 15*time.Minute, 12*time.Hour)
+	}
+	if c.Auth.KeyMaxAge != 0 {
+		c.Auth.KeyMaxAge = clampDuration("auth.key_max_age", c.Auth.KeyMaxAge, 24*time.Hour, 365*24*time.Hour)
+	}
+	if c.KMS.DEKCacheTTL != 0 {
+		c.KMS.DEKCacheTTL = clampDuration("kms.dek_cache_ttl", c.KMS.DEKCacheTTL, 30*time.Second, time.Hour)
+	}
+}
+
+// clampWorkers enforces the same numeric ranges that the legacy per-worker
+// env-read helpers used, so TOML-loaded values get the same clamp + WARN
+// log as STRATA_*-loaded values. Mirrors the per-worker constructor
+// invariants documented in CLAUDE.md.
+func (c *Config) clampWorkers() {
+	c.Workers.GC.Concurrency = clampInt("workers.gc.concurrency", c.Workers.GC.Concurrency, 1, 256)
+	c.Workers.GC.Shards = clampInt("workers.gc.shards", c.Workers.GC.Shards, 1, 1024)
+	c.Workers.Lifecycle.Concurrency = clampInt("workers.lifecycle.concurrency", c.Workers.Lifecycle.Concurrency, 1, 256)
+	c.Workers.Rebalance.Interval = clampDuration("workers.rebalance.interval", c.Workers.Rebalance.Interval, time.Minute, 24*time.Hour)
+	c.Workers.Rebalance.RateMBPerS = clampInt("workers.rebalance.rate_mb_s", c.Workers.Rebalance.RateMBPerS, 1, 10000)
+	c.Workers.Rebalance.Inflight = clampInt("workers.rebalance.inflight", c.Workers.Rebalance.Inflight, 1, 64)
+	c.Workers.Rebalance.Shards = clampInt("workers.rebalance.shards", c.Workers.Rebalance.Shards, 1, 1024)
+}
+
+func clampInt(key string, v, lo, hi int) int {
+	if v < lo {
+		slog.Warn("clamping config value", "key", key, "value", v, "min", lo)
+		return lo
+	}
+	if v > hi {
+		slog.Warn("clamping config value", "key", key, "value", v, "max", hi)
+		return hi
+	}
+	return v
+}
+
+func clampDuration(key string, v, lo, hi time.Duration) time.Duration {
+	if v < lo {
+		slog.Warn("clamping config value", "key", key, "value", v.String(), "min", lo.String())
+		return lo
+	}
+	if v > hi {
+		slog.Warn("clamping config value", "key", key, "value", v.String(), "max", hi.String())
+		return hi
+	}
+	return v
 }
 
 // warnLegacyDrainStrict logs a WARN when the retired STRATA_DRAIN_STRICT

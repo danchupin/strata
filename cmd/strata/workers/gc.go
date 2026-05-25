@@ -2,7 +2,6 @@ package workers
 
 import (
 	"os"
-	"strconv"
 	"time"
 
 	"github.com/danchupin/strata/internal/gc"
@@ -23,11 +22,13 @@ func init() {
 }
 
 func buildGC(deps Dependencies) (Runner, error) {
-	interval := durationFromEnv("STRATA_GC_INTERVAL", 30*time.Second)
-	grace := durationFromEnv("STRATA_GC_GRACE", 5*time.Minute)
-	batch := intFromEnv("STRATA_GC_BATCH_SIZE", 0)
-	concurrency := clampConcurrency(intFromEnv("STRATA_GC_CONCURRENCY", 1))
-	shards := clampShards(intFromEnv("STRATA_GC_SHARDS", 1))
+	cfg := workerCfg(deps)
+	gcCfg := cfg.Workers.GC
+	interval := orDuration(gcCfg.Interval, 30*time.Second)
+	grace := orDuration(gcCfg.Grace, 5*time.Minute)
+	batch := gcCfg.BatchSize
+	concurrency := clampConcurrency(orInt(gcCfg.Concurrency, 1))
+	shards := clampShards(orInt(gcCfg.Shards, 1))
 	tracer := deps.Tracer.Tracer("strata.worker.gc")
 
 	fan := &gc.FanOut{
@@ -95,16 +96,19 @@ type ResolvedGCConfig struct {
 	Shards          int
 }
 
-// ResolveGCConfig re-reads STRATA_GC_* env vars with the same defaults +
+// ResolveGCConfig re-reads workers.gc.* tunables (env > TOML precedence
+// already applied at config.Load() time) with the same defaults +
 // clamping as buildGC. Read-only; no side effects. Kept in this file
 // (rather than the adminapi layer) so the snapshot stays lock-step with
 // the worker constructor.
 func ResolveGCConfig() ResolvedGCConfig {
-	interval := durationFromEnv("STRATA_GC_INTERVAL", 30*time.Second)
-	grace := durationFromEnv("STRATA_GC_GRACE", 5*time.Minute)
-	batch := intFromEnv("STRATA_GC_BATCH_SIZE", 0)
-	concurrency := clampConcurrency(intFromEnv("STRATA_GC_CONCURRENCY", 1))
-	shards := clampShards(intFromEnv("STRATA_GC_SHARDS", 1))
+	cfg := workerCfg(Dependencies{})
+	gcCfg := cfg.Workers.GC
+	interval := orDuration(gcCfg.Interval, 30*time.Second)
+	grace := orDuration(gcCfg.Grace, 5*time.Minute)
+	batch := gcCfg.BatchSize
+	concurrency := clampConcurrency(orInt(gcCfg.Concurrency, 1))
+	shards := clampShards(orInt(gcCfg.Shards, 1))
 	return ResolvedGCConfig{
 		GraceSeconds:    int(grace.Seconds()),
 		IntervalSeconds: int(interval.Seconds()),
@@ -114,19 +118,45 @@ func ResolveGCConfig() ResolvedGCConfig {
 	}
 }
 
+// orDuration returns v when non-zero, else fallback. Defaults flow through
+// config.defaults() in production; tests that bypass Cfg via workerCfg
+// fallback get a zero-valued config, so the explicit fallback keeps the
+// historical default contract.
+func orDuration(v, fallback time.Duration) time.Duration {
+	if v == 0 {
+		return fallback
+	}
+	return v
+}
+
+func orInt(v, fallback int) int {
+	if v == 0 {
+		return fallback
+	}
+	return v
+}
+
+func orInt64(v, fallback int64) int64 {
+	if v == 0 {
+		return fallback
+	}
+	return v
+}
+
+func orString(v, fallback string) string {
+	if v == "" {
+		return fallback
+	}
+	return v
+}
+
+// durationFromEnv is retained for the small set of env knobs that are owned
+// by config sections wired in later cycles (e.g. STRATA_AUDIT_RETENTION,
+// owned by US-004 audit_log section).
 func durationFromEnv(key string, fallback time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			return d
-		}
-	}
-	return fallback
-}
-
-func intFromEnv(key string, fallback int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
 		}
 	}
 	return fallback

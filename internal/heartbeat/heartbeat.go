@@ -15,6 +15,7 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -139,6 +140,16 @@ func IsAlive(n Node, ttl time.Duration) bool {
 // DefaultNodeID returns the node identifier used when STRATA_NODE_ID is unset:
 // the OS hostname, falling back to "strata" if the lookup fails.
 func DefaultNodeID() string {
+	return NodeIDOr("")
+}
+
+// NodeIDOr returns override when non-empty (the gateway passes
+// cfg.Node.ID), otherwise falls back to STRATA_NODE_ID, then OS hostname,
+// then the literal "strata".
+func NodeIDOr(override string) string {
+	if v := strings.TrimSpace(override); v != "" {
+		return v
+	}
 	if v := os.Getenv("STRATA_NODE_ID"); v != "" {
 		return v
 	}

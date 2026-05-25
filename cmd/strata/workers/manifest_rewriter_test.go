@@ -74,24 +74,9 @@ func TestBuildManifestRewriterRequiresMeta(t *testing.T) {
 	}
 }
 
-func TestBoolFromEnv(t *testing.T) {
-	t.Setenv("STRATA_MANIFEST_REWRITER_BOOL_TEST", "")
-	if got := boolFromEnv("STRATA_MANIFEST_REWRITER_BOOL_TEST", true); got != true {
-		t.Errorf("boolFromEnv unset = %v, want true", got)
-	}
-	t.Setenv("STRATA_MANIFEST_REWRITER_BOOL_TEST", "true")
-	if got := boolFromEnv("STRATA_MANIFEST_REWRITER_BOOL_TEST", false); got != true {
-		t.Errorf("boolFromEnv true = %v, want true", got)
-	}
-	t.Setenv("STRATA_MANIFEST_REWRITER_BOOL_TEST", "false")
-	if got := boolFromEnv("STRATA_MANIFEST_REWRITER_BOOL_TEST", true); got != false {
-		t.Errorf("boolFromEnv false = %v, want false", got)
-	}
-	t.Setenv("STRATA_MANIFEST_REWRITER_BOOL_TEST", "garbage")
-	if got := boolFromEnv("STRATA_MANIFEST_REWRITER_BOOL_TEST", true); got != true {
-		t.Errorf("boolFromEnv malformed = %v, want fallback true", got)
-	}
-}
+// boolFromEnv was replaced by koanf's TOML-native bool parsing in
+// config.Config.Workers.ManifestRewriter.DryRun. Empty / malformed env
+// values fall back to the in-defaults() false.
 
 // TestManifestRewriterRunnerIdempotentReRun exercises the supervisor's
 // re-run path: the runner runs the worker once, sleeps a tiny interval,

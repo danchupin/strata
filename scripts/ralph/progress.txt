@@ -1,628 +1,199 @@
 # Ralph Progress Log
-Started: Sat May 24 22:00:00 MSK 2026
-Cycle: ralph/auth-dx-trailer-lima
+Started: Sun May 25 12:00:00 MSK 2026
+Cycle: ralph/toml-parity
 
 ## Codebase Patterns
-- **Final non-globals bundle**: 4 P3 entries close in this cycle. Post-cycle ROADMAP holds ONLY 5 globals (P2 ScyllaDB benchmarks, P2 Content-addressed dedup, P3 Intelligent-Tiering, P3 Select Object Content, plus consolidated globals). User vision "leave only globals" fulfilled. Pre-launch product per [Pre-launch no deploys] memory.
-- **6 stories** (shrunk from initial 9 after PRD review): US-001 per-bucket signing key schema + meta + KMS wiring + integration tests | US-002 admin API + STRATA_KEY_MAX_AGE + fail-closed | US-003 module split (cephimpl/ separate go.mod + go.work) | US-004 chunked-trailer non-sha256 algos (sha1/crc32/crc32c) | US-005 lima envelope CI workflow + auto-PR | US-006 smoke + ROADMAP close-flip × 4 + PRD removal.
-- **CRITICAL discovery during PRD review**: `internal/crypto/kms` package ALREADY ships with `Provider` interface (`GenerateDataKey` + `UnwrapDEK`) + `AWSKMSProvider` (`aws-sdk-go-v2/service/kms`) + `VaultProvider` (`hashicorp/vault/api`) + `LocalHSMProvider`. Per `internal/crypto/kms/CLAUDE.md`. PRD initially planned US-001/002/003 building these from scratch — DROPPED. Cycle now WIRES existing provider, not builds new.
-- **Story ordering**: US-001 (schema + wiring) BEFORE US-002 (admin API + max-age enforcement) — admin endpoints need the meta CRUD + auth path in place. US-003 (module split) independent (data backend, not auth). US-004 (trailer algos) independent. US-005 (CI workflow) independent. US-006 smokes everything.
+- **Final tactical cycle** to complete user vision "leave only globals in ROADMAP". P2 entry line 385 (full env+TOML config parity) closes; post-cycle ROADMAP holds 4 globals + 1 P3 latent only.
+- **7 stories**: US-001 audit script + gap-list (drift-lint foundation) | US-002 workers env knobs → Config.Workers.* | US-003 auth + KMS env knobs → Config.Auth.* + Config.KMS.* | US-004 observability env knobs → Config.OTel.* + Config.AuditLog.* + Config.Logging.* | US-005 misc sweep (BUCKET_STATS_SHARDS / MANIFEST_FORMAT / HEARTBEAT_INTERVAL / RADOS_*) | US-006 strata.toml.example refresh + drift-lint test + reference page TOML column | US-007 smoke + ROADMAP close-flip + PRD removal + TOML-only boot smoke.
+- **Story ordering rationale**: US-001 audit BEFORE US-002..005 wiring (decision tree drives gap coverage); US-002/003/004 grouped by knob domain; US-005 sweeps remainder; US-006 finalizes example file + drift lint after all wiring done; US-007 smokes everything.
 - **Verified codebase facts from PRD review**:
-  - `internal/crypto/kms/` package ships full Provider + 3 impls + CLAUDE.md. Tests use fakes (`fakeKMS`, `fakeVault`) — NO LocalStack/dev-Vault integration tests yet. US-001 adds them.
-  - `go.mod` HAS `require github.com/ceph/go-ceph v0.39.0` direct (verified via grep). Module split IS real fix (premise from polish-dx US-004 drop was incorrect — current state IS hermetic at code level but NOT at go.mod level).
-  - `internal/data/rados/` already has stub.go + ops_stub.go + pool_stub.go (build-tag-flipped). Stub-mirror pattern partial; cephimpl/ split completes it.
-  - `internal/serverapp/serverapp.go:404` `buildDataBackend(cfg)` is config-driven (not direct env grep).
-  - `internal/meta/cassandra/schema.go:164` shows `access_keys` table is IAM-scoped (user-bound). Per-bucket signing keys are NEW schema (additive columns on `buckets`), NOT replace.
-  - ROADMAP line 254 entry wording explicitly says `Hooks onto the existing Vault provider` — confirms scope is wiring, not building.
-- **Decisions zashited** (4 of 4 post-review picks):
-  - 1A envelope encryption (per-bucket DEK wrapped by KMS CMK).
-  - 2C self-hosted runner (zero ongoing cost; operator provides 16GB+ box).
-  - 3A CI workflow + auto-PR with 10% regression threshold (auto-merge if < 10%, manual review > 10%).
-  - 4A `go.work` checked into repo (simplest dev UX, IDE auto-discovers).
-- **Per-bucket signing key shape (US-001)**: meta columns `signing_wrapped_dek blob`, `signing_key_id text`, `signing_key_created_at timestamp` added across all 3 backends. New `meta.Store` methods `GetBucketSigningKey` + `SetBucketSigningKey`. Auth middleware (sigv4.go) checks per-bucket key first; if absent (`ErrBucketSigningKeyNotSet`), falls through to existing IAM access-key path. Per-bucket key is OPT-IN per bucket.
-- **DEK cache discipline (US-001)**: sync.Map TTL 5 min default (env `STRATA_DEK_CACHE_TTL`, range [30s, 1h]). Plaintext zeroed via `subtle.ConstantTimeCopy` before eviction. Cache invalidated on Rotate. Counter `strata_kms_decrypt_total{provider, outcome}` for ops visibility.
-- **Fail-closed semantics (US-002)**: on `kms.ErrKMSUnavailable` (Provider.UnwrapDEK transient + cache miss) → HTTP 503 `KMSUnavailable` + `Retry-After: 30`. **NO fallback** to IAM access-key path — explicit per-bucket signing key means operator opted in; silent degradation breaks rotation semantics.
-- **STRATA_KEY_MAX_AGE enforcement (US-002)**: default 90d (matches PCI-DSS / SOX rotation policy), range [1d, 365d]. Auth middleware rejects keys older than max-age with HTTP 401 `KeyExpired`. Operator must Rotate to recover.
-- **Module split shape (US-003)**: `internal/data/rados/cephimpl/` separate Go module with own go.mod. Main module DROPS `github.com/ceph/go-ceph` require entirely. `go.work` checked into repo. Interface boundary: stub package exposes typed `Backend` interface; cephimpl provides concrete. Clean-clone hermetic check `go mod graph | grep -c go-ceph` = 0 (US-006 regression smoke).
-- **Chunked-trailer algos (US-004)**: all stdlib (`hash/crc32` for crc32 + crc32c via Castagnoli table, `crypto/sha1`). Shared parsing factory `selectTrailerHash` slots each algo into existing chain-HMAC scheme from sha256 path (ralph/storage-correctness US-009). Test fixtures captured per algo from aws-cli 2.22+.
-- **Lima envelope CI (US-005)**: self-hosted runner (`[self-hosted, strata-bench]`) provisioned by operator (16GB RAM, 200GB disk, Ubuntu 22.04, Docker 24+). Weekly cron `0 4 * * 0` (Sun 04:00 UTC) + manual `workflow_dispatch`. Auto-PR with markdown table from jsonl; auto-merge if max p99 regression < 10%, else manual review.
-- **ROADMAP discipline (US-006)**: 4 entries close (lines 254 + 260 + 386 + 478) — no new entries. `(commit pending)` placeholder; SHA backfill on main as fast-follow commit (mirrors precedent).
-- **cephimpl module pattern (US-003)**: Sub-module under main repo tree (`internal/data/rados/cephimpl/`) keeps `internal/` import semantics workable because the cephimpl module path (`github.com/danchupin/strata/cephimpl`) is a subpath of the main module's path. Local `replace github.com/danchupin/strata => ../../../..` in cephimpl's go.mod keeps `go mod download` working inside containers without publishing. Workspace MVS combines transitive closures across `use ()` modules — pin pre-split versions via `replace` in `go.work` if path collisions appear (e.g. `google.golang.org/genproto` monolithic-vs-split). Hermetic check is `GOWORK=off go mod graph | grep -c <dep>` (workspace off, main-module-only graph). Sub-modules should avoid importing heavy main packages (e.g. `internal/rebalance`) — re-declare structurally-compatible interfaces locally and let the main caller do the implicit conversion.
+  - **Env var count is 122** (NOT 116 as initial PRD claimed). Reference page `docs/site/content/reference/env-vars.md` shows 122 STRATA_* rows.
+  - **`envMap` central registry** lives at `internal/config/config.go` (~13 entries today as `\"STRATA_X\": \"toml.key\"` pairs at module level). This is THE central env→TOML mapping ledger — every wired env var MUST be in it.
+  - **Config struct shape today**: `Config`, `CassandraConfig`, `TiKVConfig`, `RADOSConfig`, `AuthConfig`, `LifecycleConfig`, `GCConfig` exist. NEW substructs for this cycle: `WorkersConfig`, `KMSConfig`, `OTelConfig`, `LoggingConfig`, `RebalanceConfig`, `UsageRollupConfig`, `ManifestRewriterConfig`, `AuditExportConfig`, `QuotaReconcileConfig`.
+  - **Precedence verified**: `defaults() → file (TOML) → env`. env > TOML > defaults — env overrides TOML (matches PRD claim).
+  - **`STRATA_CONFIG_FILE` bootstrap env** read directly at `internal/config/config.go:172` (bypasses koanf). Bootstrap env points AT TOML file; can't itself be IN TOML — added to exempt list.
+  - **Direct `os.Getenv(\"STRATA_*\")` sites verified outside config.go** (refactor targets): `cmd/strata/server.go`, `cmd/strata/admin/bench_common.go`, `cmd/strata/admin/run.go`, `cmd/strata/workers/usage_rollup.go`, `cmd/strata/workers/rebalance.go`, `internal/serverapp/serverapp.go` (14 reads), `internal/serverapp/bucket_signing.go` (3 reads), `internal/heartbeat/heartbeat.go`, `internal/data/rados/ops_env.go`, `internal/data/rados/pool_env.go`. Test-only / bench-only sites stay (added to exempt list).
+  - **`STRATA_RADOS_CLUSTERS` + `STRATA_RADOS_CLASSES` ALREADY in envMap** — verified. US-005 sweep skips them.
+  - **`TestLoadEmptyEnvDoesNotOverrideTOMLValue`** regression pinned at `internal/config/config_test.go` — koanf empty-env callback returns `(\"\", nil)` so env doesn't stomp TOML/defaults on unset. This invariant MUST survive the refactor across US-002..005.
+- **Decisions zashited** (3 of 3 post-review picks):
+  - 1B audit script + manual verify — `scripts/audit-env-toml-parity.sh` generates jsonl + becomes drift-lint base in US-006.
+  - 2A `<section>.<knob>` TOML key naming — single underscore splits section; remaining `_` stay snake_case inside knob.
+  - 3A hard-coded exemption list in `internal/config/exempt_env_vars.go` — `STRATA_CONFIG_FILE` + `STRATA_BENCH_*` + `STRATA_REGEN_TRAILER_FIXTURES`.
+- **envMap discipline**: every direct `os.Getenv(\"STRATA_*\")` refactor MUST land 3 things in one commit: (1) new field in Config struct with koanf tag, (2) new entry in envMap, (3) corresponding commented line in deploy/strata.toml.example. Drift lint (US-006) hard-fails any missing piece.
+- **Range validation symmetry**: TOML unmarshal goes through same `Config.validate()` hook as env reads. Clamp logic stays in one place; both surfaces get the same WARN log on out-of-range values.
+- **Backward-compat preserved**: env > TOML precedence stays — CI envs that set `STRATA_*` continue working; existing tests that `t.Setenv(\"STRATA_X\", \"y\")` continue working without TOML setup.
+- **TOML-only boot smoke (US-007)**: full TOML config (every field from strata.toml.example uncommented with default values) + zero STRATA_* env vars except STRATA_CONFIG_FILE → server boots + /healthz 200 + aws s3 ls empty. Proves operator can fully configure via TOML.
+- **ROADMAP discipline (US-007)**: 1 entry closes (line 385) — no new entries surfaced. `(commit pending)` placeholder; SHA backfill on main as fast-follow commit (mirrors precedent).
+- **Post-cycle ROADMAP state**: 4 globals (P2 ScyllaDB benchmarks, P2 Content-addressed dedup, P3 Intelligent-Tiering, P3 Select Object Content) + 1 P3 latent (smoke-tikv burst-count assertion). User vision "leave only globals" effectively complete (1 latent is operator-surfaced test-script tweak, not feature work).
+- **Audit script env-var collection** uses TWO regex sources (US-001 learning): (a) `\("STRATA_X"` for function-call args, (b) `= "STRATA_X"` for const/var assignments (e.g. `EnvAWSKMSRegion = "STRATA_KMS_AWS_REGION"` — read at call sites via the constant, NOT a string literal). Both shapes union'd + de-duped against envMap keys. Pure `STRATA_*` grep is too broad (catches string literals like the `STRATA_COLD` storage-class identifier in lifecycle XML); the args-only filter is too narrow (misses const-indirected reads like KMS). Belt-and-braces avoids both errors.
+- **Exempt list shape** (`internal/config/exempt_env_vars.go`): `Exact []string` + `Prefixes []string` + `Suffixes []string` + `IsExempt(name)` helper. Drift lint (US-006) MUST consume this — duplicating the list in test code is fragile. Audit script parses the .go file via awk to keep the bash side dependency-free.
 
-## 2026-05-24 — US-001
-- Per-bucket signing key persisted on bucket meta: new `meta.ErrBucketSigningKeyNotSet`
-  sentinel, 3-method surface `GetBucketSigningKey/SetBucketSigningKey/DeleteBucketSigningKey`
-  implemented across memory + cassandra + tikv in lockstep.
-- Cassandra: 3 ALTERs on `buckets` (`signing_wrapped_dek blob`, `signing_key_id text`,
-  `signing_key_created_at timestamp`). Get reads the trio with `errors.Is(gocql.ErrNotFound)`
-  → ErrBucketNotFound, empty trio → ErrBucketSigningKeyNotSet. Set/Delete LWT (`IF EXISTS`)
-  for Paxos lineage parity with SetBucketVersioning.
-- TiKV: 3 fields added on `meta.Bucket` (json:omitempty); existing `updateBucket` helper
-  handles persistence — JSON marshal is the codec.
-- Memory: in-struct fields; locker scoped Get/Set/Delete; idempotent re-delete.
-- Contract test `caseBucketSigningKey` added: absent → set → roundtrip → re-set bumps
-  createdAt → delete → absent → missing-bucket paths. Memory backend passes; cassandra
-  + tikv exercised under -tags integration.
-- DEK cache (`internal/auth/bucket_signing.go`): sync.Map keyed on bucket, TTL via
-  `time.Now() + ttl`; plaintext zeroed via `subtle.ConstantTimeCopy(1, b, zeros)` on
-  evict / invalidate / replace. `NewDEKCache(ttl)` clamped via serverapp's `dekCacheTTL`
-  helper to [30s, 1h]. Test clock injectable via SetClockForTest.
-- BucketSigningResolver: composes Store + KMS + Cache + counter + bucket extractor.
-  ResolveSecret returns (nil, false, nil) on absent/IAM-only path; (dek, true, nil) on
-  hit; (nil, false, err) on KMS error so caller can surface 503/401. Default bucket
-  extractor: path-style first segment; skips `/admin/`, `/healthz`, `/readyz`,
-  `/metrics`.
-- Auth middleware (`internal/auth/middleware.go`): new `BucketSigning` field. When
-  resolver returns a DEK, `secret = hex(DEK)` replaces `cred.Secret` for both the
-  request-canonical signature and the chunked streaming signing key derivation.
-  Plaintext DEK zeroed after `encodeDEKAsSecret`.
-- HTTP mapping (`internal/s3api/errors.go`): new `ErrKMSUnavailable`(503 + Retry-After:30),
-  `ErrKMSKeyDenied`(401), `ErrKMSKeyTampered`(401). `WriteAuthDenied` routes via
-  errors.Is on `auth.ErrKMS{Unavailable,Denied,Tampered}`.
-- Counter `strata_kms_decrypt_total{provider, outcome}` added to
-  `internal/metrics/metrics.go` with outcomes ∈ {cache_hit, cache_miss_ok,
-  unavailable, denied, tampered}; provider label derived in serverapp via type-assert
-  on `*kms.AWSKMSProvider | *kms.VaultProvider | *kms.LocalHSMProvider`.
-- ServerApp wiring (`internal/serverapp/serverapp.go` +
-  `internal/serverapp/bucket_signing.go`): when `kmsProvider != nil`,
-  `mw.BucketSigning = buildBucketSigningResolver(metaStore, kmsProvider, logger)`.
-  KMS-less deployments stay zero-impact (resolver nil → middleware short-circuits).
-- LocalStack KMS integration test (`internal/crypto/kms/aws_integration_test.go`,
-  build-tag integration): pinned `localstack/localstack:3.8`, CreateKey symmetric
-  + roundtrip + wrong-key-id error path.
-- Vault Transit dev-mode integration test (`internal/crypto/kms/vault_integration_test.go`,
-  build-tag integration): pinned `hashicorp/vault:1.15`, AppRole bootstrap inside the
-  test (transit engine enable → CMK → approle enable → policy → role → role-id +
-  secret-id mint), then `kms.NewVaultProvider(...).{GenerateDataKey, UnwrapDEK}`.
-- Env-vars docs: `STRATA_DEK_CACHE_TTL` documented in
-  `docs/site/content/reference/env-vars.md` (default 5m, range [30s, 1h]).
-- Quality: `go vet ./...` + `go test -race ./internal/meta/... ./internal/auth/...
-  ./internal/crypto/kms/... ./internal/serverapp/... ./internal/s3api/...` all green;
-  full unit-test suite passes.
-- Files: `internal/meta/store.go`, `internal/meta/memory/store.go`,
-  `internal/meta/cassandra/store.go`, `internal/meta/cassandra/schema.go`,
-  `internal/meta/tikv/buckets.go`, `internal/meta/storetest/contract.go`,
-  `internal/auth/bucket_signing.go`, `internal/auth/bucket_signing_test.go`,
-  `internal/auth/middleware.go`, `internal/auth/middleware_bucket_signing_test.go`,
-  `internal/metrics/metrics.go`, `internal/s3api/errors.go`,
-  `internal/serverapp/serverapp.go`, `internal/serverapp/bucket_signing.go`,
-  `internal/crypto/kms/aws_integration_test.go`,
-  `internal/crypto/kms/vault_integration_test.go`,
-  `docs/site/content/reference/env-vars.md`.
-
-**Learnings for future iterations:**
-- meta.Bucket gains 3 fields → TiKV codec is JSON marshal, so persistence is free.
-  Cassandra needs explicit ALTER + Get/Set column selection. Memory backend stores
-  meta.Bucket directly.
-- LWT (`UPDATE ... IF EXISTS`) on Cassandra is required for the signing-key trio
-  to participate in the same Paxos lineage as CreateBucket — mirrors the
-  SetBucketVersioning lesson (CLAUDE.md captures it).
-- `subtle.ConstantTimeCopy(1, dst, src)` is the canonical zero-out for sensitive
-  byte slices on eviction.
-- HTTP middleware deny handler `s3api.WriteAuthDenied` switches on `err.Error()`
-  string equality for legacy auth errors AND `errors.Is` for new typed sentinels —
-  mixing both is the established pattern.
-- Per-bucket signing key shape: SigV4 derives signing key from
-  `hex(DEK)`-as-secret. Operators sign with the same hex on the client side; AWS
-  CLI accepts arbitrary `aws_secret_access_key` so this is wire-compatible.
-- Testcontainers v0.41.0 LocalStack image: pin `localstack/localstack:3.8` —
-  `:latest` flips behavior periodically. Health endpoint
-  `/_localstack/health` returns 200 once `SERVICES=kms` is up.
-- Vault dev-mode in container: pass `Cmd: ["server", "-dev"]` + env
-  `VAULT_DEV_ROOT_TOKEN_ID=root` + `VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200`.
-  Wait via HTTP 200/429/472/473 — Vault sealed/standby surfaces these.
+## [2026-05-25] - US-001
+- Implemented audit script + gap-list contract for US-002..US-005.
+- Files changed:
+  - `scripts/audit-env-toml-parity.sh` (new — collects env vars via dual regex, parses envMap + TOML example + exempt list, emits jsonl + summary).
+  - `internal/config/exempt_env_vars.go` (new — `ExemptEnvVars` struct with Exact/Prefixes/Suffixes + `IsExempt` helper).
+  - `Makefile` (added `audit-toml-parity` target).
+  - `tasks/toml-parity-gaps.md` (new — gap-list grouped by section, 74 unmapped rows with story-hint column).
+  - `scripts/audit-results/env-toml-parity-2026-05-25.jsonl` (audit output — committed for downstream story consumption).
+- **Audit numbers** (2026-05-25 snapshot):
+  - Total STRATA_* env vars: 139
+  - In envMap (wired): 31 (22.3%)
+  - Exempt: 34 (24.5%)
+  - Present in TOML example: 27 (19.4%)
+  - **Unmapped gaps: 74 (53.2%)** — closed across US-002 (workers, ~38 vars), US-003 (auth+KMS, ~13 vars), US-004 (observability, ~6 vars), US-005 (misc sweep, ~10 vars).
+- Quality gates: `go vet ./...` green, `go test ./internal/config/...` green, `go build ./...` green.
+- **Learnings for future iterations:**
+  - Two regex sources are required for env-var collection (function-call args + const/var assigns). One-pattern grep loses const-indirected reads (KMS uses this shape via `EnvAWSKMSRegion = "STRATA_KMS_AWS_REGION"`). See US-001 progress block above.
+  - First-underscore section split is a HEURISTIC — multi-word sections (`access_log`, `audit_export`, `usage_rollup`, `manifest_rewriter`, `bucket_stats`, `quota_reconcile`) MUST be declared explicitly in envMap. The gap-list shows the heuristic value with a `(→ canonical)` annotation when multi-word. US-002..US-005 envMap entries override the heuristic per the canonical name.
+  - `STRATA_COLD` is a storage-class identifier (S3 lifecycle XML), NOT an env var — added to exempt list with a comment so future audit re-runs don't re-flag it.
+  - `STRATA_TIKV_TEST_PD_ENDPOINTS` is test-only — exempt'd alongside other test/bench vars. The `STRATA_TEST_*` prefix family is broader; this specific name doesn't match because the `TIKV` infix breaks the prefix shape — added as Exact.
+  - Audit script is dependency-free bash + jq (no `go run` required) — keeps Make target instant and decouples it from build state. Drift-lint test (US-006) will re-implement the same parsing logic in Go for hard CI gating.
+  - `STRATA_BUCKETSTATS_*` env names use no underscore between `bucket` and `stats` (legacy) — when US-005 wires them, decide whether to keep the legacy env name and map to `bucket_stats.interval` TOML key, or rename the env (breaking change OK per [Pre-launch no deploys]).
+  - `STRATA_AUDIT_RETENTION` maps to `audit_log.retention` (per PRD US-004 acceptance), NOT `audit.retention` — heuristic split is misleading. Same for `STRATA_DEK_CACHE_TTL` → `kms.dek_cache_ttl` (NOT `dek.cache_ttl`).
 ---
 
-## 2026-05-24 — US-002
-- Admin signing-key surface shipped: 3 new `/admin/v1/buckets/{name}/signing-key`
-  endpoints — `POST /rotate`, `GET /status`, `DELETE` — all stamped with
-  audit verbs (`admin:RotateBucketSigningKey`,
-  `admin:GetBucketSigningKeyStatus`, `admin:DeleteBucketSigningKey`).
-  Rotate optionally accepts `{key_id}` body to override the default CMK.
-- `STRATA_KEY_MAX_AGE` env (default `2160h`/90d, range `[24h, 8760h]`)
-  enforced at the SigV4 path. Auth resolver gains `MaxAge` field + a
-  pre-unwrap check that returns the new `auth.ErrKMSKeyExpired`
-  sentinel → s3api maps to HTTP 401 `KeyExpired`. Counter outcome
-  `expired` added; KMS not consulted for expired keys (saves an unwrap
-  round-trip on the rejected path).
-- Fail-closed semantics: `kms.ErrKMSUnavailable` sentinel added.
-  `kms.WrapTransient` helper detects `net.Error.Timeout`, `*net.OpError`,
-  `context.DeadlineExceeded`, plus a short list of well-known transport
-  phrases (connection refused, i/o timeout, throttlingexception, ...).
-  AWS + Vault providers wrap UnwrapDEK / GenerateDataKey errors via
-  `WrapTransient`; Vault additionally maps HTTP 5xx → `ErrKMSUnavailable`.
-- `BucketSigningResolver.ClassifyUnwrap` hook: serverapp installs a
-  translator that maps `kms.ErrKMSUnavailable` → `auth.ErrKMSUnavailable`
-  (→ 503 + `Retry-After: 30`), `kms.ErrKeyIDMismatch` and every other
-  KMS error → `auth.ErrKMSDenied` (→ 401 KeyDenied). NO fallback to IAM
-  — opting a bucket in means rotation semantics are enforced.
-- Admin layer Server gains `SigningKey SigningKeyConfig{Provider, Cache,
-  DefaultKeyID, MaxAge}`. Rotate calls `Provider.GenerateDataKey`,
-  persists wrapped form, drops cached DEK via `Cache.Invalidate`. Status
-  reads meta + computes `age_days`/`expired`. Delete drops meta row +
-  invalidates cache. Missing provider → 503 `SigningKeyDisabled` (kms-
-  less deploys still boot).
-- OpenAPI YAML extended with 3 endpoints + their schemas + 503
-  `SigningKeyDisabled` / `KMSUnavailable` annotations. Both
-  `docs/site/static/openapi.yaml` and `docs/site/public/openapi.yaml`
-  updated in lockstep.
-- Docs: new `docs/site/content/operate/key-rotation.md` (operator
-  runbook: when to rotate, response shape, max-age semantics, fail-
-  closed response matrix, status monitoring, tuning table, audit verbs,
-  recovery flow). `STRATA_KEY_MAX_AGE` + `STRATA_KMS_DEFAULT_KEY_ID`
-  added to `docs/site/content/reference/env-vars.md`.
-- Tests: `internal/auth/bucket_signing_test.go` extended with 3 max-age
-  cases (expired / fresh / disabled). `internal/serverapp/
-  bucket_signing_test.go` covers `keyMaxAge` env clamping + default +
-  parse-error fall-back + `classifyKMSUnwrapErr` translation matrix +
-  `WrapTransient` for `net.Error` timeouts. `internal/adminapi/
-  buckets_signing_key_test.go` covers happy-path rotate, override
-  `key_id`, bucket missing, KMS unavailable → 503 + `Retry-After`,
-  no provider → 503 `SigningKeyDisabled`, status not-set 404, status
-  fresh, status expired, idempotent delete, meta-error surfacing.
-  Integration: `internal/crypto/kms/aws_rotation_integration_test.go`
-  exercises a full rotation cycle on LocalStack — 2 CMKs, GenerateDataKey
-  under each, cross-CMK unwrap refuses via `ErrKeyIDMismatch`.
-- Quality: `go vet ./...` + `go test -race ./internal/auth/...
-  ./internal/adminapi/... ./internal/crypto/kms/...
-  ./internal/serverapp/... ./internal/meta/... ./internal/s3api/...`
-  all green; full `go test ./...` green (transient flake in
-  `cmd/strata/workers` re-runs clean — pre-existing).
-- Files: `internal/auth/bucket_signing.go` (+ MaxAge / ClassifyUnwrap /
-  ErrKMSKeyExpired), `internal/auth/bucket_signing_test.go`,
-  `internal/crypto/kms/kms.go` (ErrKMSUnavailable),
-  `internal/crypto/kms/classify.go` (new — WrapTransient + isTransient),
-  `internal/crypto/kms/aws.go` (WrapTransient at boundary),
-  `internal/crypto/kms/vault.go` (WrapTransient + 5xx → ErrKMSUnavailable),
-  `internal/crypto/kms/aws_rotation_integration_test.go` (new),
-  `internal/s3api/errors.go` (ErrKMSKeyExpired + mapping),
-  `internal/metrics/metrics.go` (help text adds `expired` outcome),
-  `internal/serverapp/bucket_signing.go` (keyMaxAge env + classifier +
-  buildSigningKeyAdminConfig), `internal/serverapp/bucket_signing_test.go`
-  (new), `internal/serverapp/serverapp.go` (resolver var exposed +
-  SigningKey wired into adminapi.Config),
-  `internal/adminapi/server.go` (SigningKey field + 3 routes),
-  `internal/adminapi/buckets_signing_key.go` (handlers, new),
-  `internal/adminapi/buckets_signing_key_test.go` (new),
-  `docs/site/content/operate/key-rotation.md` (new),
-  `docs/site/content/reference/env-vars.md`,
-  `docs/site/static/openapi.yaml`, `docs/site/public/openapi.yaml`.
-
-**Learnings for future iterations:**
-- `BucketSigningResolver.ClassifyUnwrap` keeps the `auth` package
-  import-free of `kms` — kms-side sentinels translate to auth-side
-  sentinels at wiring time. Future provider additions (e.g. GCP KMS)
-  can return `kms.ErrKMSUnavailable` for transient and the existing
-  serverapp classifier picks them up without code changes.
-- `kms.WrapTransient` is the canonical "decide between 503 and 401"
-  shim. New providers MUST call it at every external-call boundary so
-  the auth path can fail-closed correctly. The string-marker list in
-  `classify.go::transientMarkers` is intentionally short — extend with
-  caution to avoid hiding permanent misconfigurations as 503.
-- `adminapi.Server.SigningKey` is the shared admin-side surface for the
-  3 rotate endpoints. Plumbing more rotation tooling (key-history,
-  CMK migration) lands here without touching the gateway middleware.
-- The DEK plaintext is returned ONCE in `POST /rotate` response —
-  consumers (the operator console UI, scripted automation) must capture
-  it client-side immediately. Subsequent `GET /status` does NOT expose
-  the secret. Same one-shot pattern as the IAM access-key create flow.
-- `meta.Bucket` schema is unchanged for US-002 — US-001 already shipped
-  the trio (`signing_wrapped_dek`, `signing_key_id`,
-  `signing_key_created_at`). When extending the surface (e.g. key
-  history), prefer extending the existing trio over adding new columns;
-  blob-style append works well for JSON history lists.
-- `cmd/strata/workers` has a flaky unit test pre-existing; ignore on
-  one-run failure and re-run.
+## [2026-05-25] - US-002
+- Wired every worker tunable through `Config.Workers.*` (TOML > defaults; env overrides both via koanf provider chain). 37 new envMap entries; existing 6 GC+Lifecycle entries remapped to `workers.<name>.*` prefix (hard cutover OK per [Pre-launch no deploys]).
+- New substructs in `internal/config/config.go`: WorkersConfig with sub-substructs GC, Lifecycle, Rebalance, UsageRollup, ManifestRewriter, AuditExport, QuotaReconcile, Notify, Replicator, AccessLog, Inventory. Root `WorkersConfig.Enabled` carries `STRATA_WORKERS` → `workers.enabled`.
+- `Config.validate()` learned `clampWorkers()` which enforces GC concurrency [1,256] / shards [1,1024] + rebalance interval [1m,24h] / rate_mb_s [1,10000] / inflight [1,64] / shards [1,1024]. Out-of-range values get a single `slog.Warn` (`clamping config value` key) — symmetric for env + TOML sources.
+- `cmd/strata/workers/registry.go`: Dependencies grows `Cfg *config.Config`. `workerCfg(deps)` helper returns `deps.Cfg` if set, else falls back to a fresh `config.Load()` (which itself reads env). Tests that build Dependencies without setting Cfg keep working via t.Setenv → Load fall-back.
+- Worker Build sites refactored to consume `cfg.Workers.<X>.*`: gc.go, lifecycle.go, rebalance.go, usage_rollup.go, manifest_rewriter.go, audit_export.go, quota_reconcile.go, notify.go, replicator.go, access_log.go, inventory.go. Helpers `orDuration` / `orInt` / `orInt64` / `orString` cover the "fall back to default if cfg field is zero-value" idiom.
+- `internal/notify`: extracted `RouterFromSpec(raw, opts...)` from `RouterFromEnv` so workers can pass `cfg.Workers.Notify.Targets` through. `RouterFromEnv` becomes a `RouterFromSpec(os.Getenv(EnvNotifyTargets))` wrapper; existing notify tests pass unchanged.
+- `cmd/strata/server.go::runServer` now reads `STRATA_WORKERS` via `cfg.Workers.Enabled` (was `os.Getenv` direct).
+- `internal/serverapp/serverapp.go::Run` plumbs `cfg` onto `workers.Dependencies.Cfg`.
+- Tests: 4 new contract tests in `internal/config/workers_test.go` (TestLoadWorkersFromTOMLOnly / TestEnvOverridesTOMLForWorkers / TestClampWorkersOnLoad / TestDefaultWorkerKnobs). Worker-package tests adapted: `boolFromEnv` / `int64FromEnv` / `stringFromEnv` / `clampDuration` / `clampInt` / `ageUnitFromEnv` removed in favour of `orX` helper checks + the central clamps in config package.
+- Audit re-run (post-US-002): 68 wired (+37), 37 unmapped (US-003 auth+KMS ~16 / US-004 observability ~5 / US-005 misc ~10 / leftover ~6 reads not yet refactored).
+- Files changed: `internal/config/config.go`, `internal/config/config_test.go`, `internal/config/workers_test.go`, `internal/notify/router_env.go`, `cmd/strata/server.go`, `cmd/strata/workers/{registry,gc,lifecycle,rebalance,usage_rollup,manifest_rewriter,audit_export,quota_reconcile,notify,replicator,access_log,inventory}.go`, `cmd/strata/workers/{gc,lifecycle,rebalance,access_log,replicator,inventory,manifest_rewriter}_test.go`, `internal/serverapp/serverapp.go`, `deploy/strata.toml.example`, `scripts/audit-results/env-toml-parity-2026-05-25.jsonl`.
+- Quality gates: `go vet ./...` green; `go test ./...` green (non-race); `go test -race ./internal/config/... ./cmd/strata/workers/... ./internal/notify/...` green; `go build ./...` green; ceph-tagged build NOT exercised on host (no librados; CI image runs it).
+- **Learnings for future iterations:**
+  - **Backward-compat hybrid pattern**: When a worker Build switches from env-only to Cfg-driven, the easiest test-preserving path is `workerCfg(deps)` that returns deps.Cfg if set, else calls config.Load() in fallback. Existing `t.Setenv` tests keep working without touching the test surface — Load() honors env precedence. New production code path always sets deps.Cfg via serverapp wiring.
+  - **Clamp logic belongs in config.validate**, not in each worker Build. Pre-US-002 had GC clamping in workers/gc.go (clampShards) AND rebalance clamping in workers/rebalance.go (clampInt/clampDuration). Centralising in config keeps TOML + env paths symmetric and removes ~6 redundant helper variants. Build sites just read clamped values out of cfg.
+  - **`*FromEnv` helpers in shared packages should accept the raw string too**: `notify.RouterFromEnv` was the canonical example. Adding `RouterFromSpec(raw, opts...)` next to it gives cfg-driven callers a clean entry point without breaking the env-driven test suite. Mirror the pattern for any future `XXXFromEnv` (e.g. `kms.FromEnv` next cycle).
+  - **`koanf` nested-section TOML key**: `cfg.Workers.GC.Interval` maps to `workers.gc.interval`. Field path matches TOML path via koanf tags on each nested struct. Don't try to coalesce into a single root-level `[gc]` section — koanf would silently bind to whichever path it sees first, and the regression test `TestLoadEmptyEnvDoesNotOverrideTOMLValue` only catches the empty-env case.
+  - **`STRATA_GC_INTERVAL` shorthand → nested `workers.gc.interval`**: PRD US-002 explicitly overrides the option 2A naming convention (which would have produced `gc.interval`) by nesting under `workers.*`. Document why: every worker knob lives under `workers.*` so the operator can grep one section instead of scattered top-level keys. The convention 2A still applies to non-worker knobs (auth.*, kms.*, otel.*, etc).
+  - **Hard cutover on env keys**: existing operators using `STRATA_GC_INTERVAL` are unaffected (env still wins via koanf precedence). Only TOML files that previously used `[gc] interval = "30s"` need to migrate to `[workers.gc] interval = "30s"`. Update the regression test in lockstep to avoid a silent test → flaky regression.
+  - **`bucketstats` env vars remain** outside the worker section (read directly in `internal/serverapp/serverapp.go::bucketStatsTopN` + `bucketStatsInterval`). They're not workers — they're a side-loop on the gateway process. Maps cleanly to `bucket_stats.*` in US-005.
 ---
 
-## 2026-05-24 — US-003
-- Module split for the librados-linked RADOS backend: new Go module at
-  `internal/data/rados/cephimpl/` (`module github.com/danchupin/strata/cephimpl`)
-  with its own `go.mod` requiring `github.com/ceph/go-ceph v0.39.0`. Main
-  module's `go.mod` no longer requires go-ceph (verified via
-  `GOWORK=off go mod graph | grep -c go-ceph` → 0).
-- `go.work` checked in at repo root; lists main module + cephimpl. Workspace
-  MVS pitfall resolved via in-`go.work` `replace google.golang.org/genproto
-  => v0.0.0-20240903143218-8af14fe29dc1` to dodge the new-split-vs-old-
-  monolithic genproto path collision tikv pulled in.
-- Files moved from `internal/data/rados/` → `internal/data/rados/cephimpl/`
-  (build tag `//go:build ceph` dropped — every cephimpl file links go-ceph
-  by default): backend.go, ec.go, health.go, ops.go, pool.go, rebalance.go,
-  backend_integration_test.go.
-- Stub-side rename: main rados pkg's `stub.go` lost the `!ceph` tag —
-  always-on stub `New(Config) → data.ErrRADOSNotCompiled`. `pool_stub.go`
-  removed (no longer needed). `ops_stub.go` keeps the legacy
-  `ErrRadosNotCompiled` sentinel but is tag-free.
-- New `data.ErrRADOSNotCompiled` sentinel (in `internal/data/errors.go`)
-  for cross-package use.
-- Shared helpers exported from main rados pkg so cephimpl can consume them
-  without duplication: `ChunkPutFn` (alias), `PutChunksParallel`,
-  `PutConcurrencyFromEnv`, `ChunkGetFn` (alias), `NewPrefetchReader`,
-  `GetPrefetchFromEnv`, `BatchOpsFromEnv`, `PoolSizeFromEnv`,
-  `NextRoundRobin`, `BuildPendingPoolStatuses` (+ `PoolGroup`,
-  `PendingPoolStatus` uppercase shapes). In-package lowercase names kept
-  for the existing test surface.
-- cephimpl exposes its own `RadosCluster` interface (structurally identical
-  to `internal/rebalance.RadosCluster`) and `RebalanceClusters(*Backend) →
-  map[string]RadosCluster`. Cephimpl deliberately does NOT import
-  `internal/rebalance` — that would pull rebalance's tikv-transitive
-  dependency chain into cephimpl's MVS view and break workspace
-  resolution.
-- Caller branching via build tag:
-  - `internal/serverapp/data_rados_ceph.go` (//go:build ceph) →
-    `cephimpl.New`; `data_rados_stub.go` (//go:build !ceph) →
-    `data.ErrRADOSNotCompiled`. `serverapp.buildDataBackend` calls the
-    new `newRADOSBackend` helper.
-  - `cmd/strata/admin/bench_rados_{ceph,stub}.go` mirrors the same pattern
-    for the bench harness.
-  - `cmd/strata/workers/rebalance_movers_ceph.go` switched to
-    `*cephimpl.Backend` + `cephimpl.RebalanceClusters`; converts to
-    `map[string]rebalance.RadosCluster` at the call site.
-  - `internal/rebalance/rados_mover_integration_test.go` (//go:build ceph
-    && integration) updated to call `cephimpl.New` + type-assert
-    `*cephimpl.Backend`.
-- Makefile: `make vet` extended with a soft cephimpl vet attempt
-  (GOWORK=off + -tags integration; falls through with a message when
-  librados isn't installed). `make test-rados` now shells into the
-  cephimpl dir inside the ceph docker image and runs
-  `go test -tags integration ./...` — no `ceph` tag needed at the test
-  command since the module is ceph-only by construction.
-- `.github/workflows/ci.yml` `lint-build` job gained a `cd cephimpl &&
-  GOWORK=off go mod tidy -diff` step to catch cephimpl go.mod drift on
-  every PR. The librados-linked compile path runs via the existing
-  `docker-build` + `e2e` jobs.
-- `deploy/docker/Dockerfile` ships `go.work` + `go.work.sum` +
-  cephimpl's `go.{mod,sum}` into the build stage so `go mod download` +
-  `go build -tags ceph ./cmd/strata` works inside the ceph image.
-- CLAUDE.md gained a "RADOS / cephimpl module split" section before
-  "Single-binary invariant" documenting the layout, the workspace MVS
-  pitfall + genproto replace, and the GOWORK=off hermetic check.
-- Quality: `go vet ./...` + `go test -count=1 ./...` green (full unit
-  test suite, including racecheck soak). Build matrix verified manually:
-  default-tag `go build ./...` clean, `GOWORK=off go build ./...` clean
-  with zero go-ceph in `go mod graph`, `go build -tags ceph ./...` fails
-  on librados as expected on a librados-less host (the ceph docker image
-  in CI/lab has it).
-- Files: deleted internal/data/rados/{backend,backend_integration_test,
-  ec,health,ops,pool,pool_stub,rebalance}.go; added
-  internal/data/rados/cephimpl/{go.mod,go.sum,backend,backend_integration_test,
-  ec,health,ops,pool,rebalance}.go; new internal/serverapp/
-  data_rados_{ceph,stub}.go; new cmd/strata/admin/
-  bench_rados_{ceph,stub}.go; new go.work + go.work.sum;
-  edited internal/data/errors.go, internal/data/rados/{health_helper,
-  ops_env,ops_stub,parallel,pool_env,pool_index,prefetch,stub}.go,
-  internal/rebalance/rados_mover_integration_test.go,
-  internal/serverapp/serverapp.go, cmd/strata/admin/bench_common.go,
-  cmd/strata/workers/rebalance_movers_ceph.go, Makefile,
-  deploy/docker/Dockerfile, .github/workflows/ci.yml, CLAUDE.md.
-
-**Learnings for future iterations:**
-- Workspace MVS combines the transitive closure of ALL `use ()` modules,
-  so a sibling module's transitive require can resurface a pre-pruned
-  dep in the main module's view. The genproto monolithic-vs-split case
-  is the canonical breakage; pin to a post-split monolithic version via
-  `replace` in `go.work` to keep import paths unambiguous.
-- `internal/` import restriction is BY IMPORTER PATH, not by importer's
-  module — so `github.com/danchupin/strata/cephimpl` (a subpath of
-  `github.com/danchupin/strata/`) can legally import
-  `github.com/danchupin/strata/internal/...`. That's why cephimpl
-  doesn't need to live outside the main repo tree.
-- A new sub-module under main module's tree (e.g. `internal/data/rados/
-  cephimpl/`) needs a `replace github.com/danchupin/strata => ../../../..`
-  in its `go.mod` so `go.work`-less builds (and `go mod download` inside
-  containers) resolve the parent without needing it published as a real
-  go module.
-- Avoid sub-module imports of `internal/rebalance` or other heavy main
-  module packages — workspace MVS pulls the entire transitive dep graph
-  in. Re-declare structurally-compatible interfaces inside the sub-module
-  and let the main-module caller do the implicit conversion.
-- Hermetic check `GOWORK=off go mod graph | grep -c go-ceph` → 0 only
-  works because `go.work` is NOT auto-respected with GOWORK=off. Without
-  the override, workspace-on `go mod graph` includes cephimpl's
-  transitive go-ceph (count ≥ 1) — that's not a regression of the
-  hermetic invariant.
-- `make test-rados` no longer passes `-tags ceph` because the cephimpl
-  module's source is all ceph-linked by construction — every file in
-  cephimpl imports go-ceph. Only `-tags integration` is needed to
-  enable the integration_test.go gating.
-- `go mod tidy` at the workspace root fails when a sibling module is
-  imported only via go.work (no main `require`). Run tidy per-module
-  with `GOWORK=off cd <module-dir> && go mod tidy`. CI's drift check
-  (`go mod tidy -diff`) uses the same pattern.
+## [2026-05-25] - US-003
+- Wired auth + KMS env knobs through Config struct. 15 new envMap entries; Config.Auth gains STSDuration + KeyMaxAge; new Config.KMS substruct (Adapter / DEKCacheTTL / DefaultKeyID / AWS / Vault / LocalHSM).
+- New `internal/crypto/kms.FromConfig(Config, opts...)` alongside `FromEnv`. The kms package keeps its own `kms.Config` shape so it does NOT import `internal/config` (dependency direction stays config → kms). Per-provider `newVaultFromConfig` / `newAWSFromConfig` / `newLocalHSMFromConfig` helpers wrap existing constructors.
+- `internal/serverapp/bucket_signing.go` refactored: `dekCacheTTL(cfg, logger)` + `keyMaxAge(cfg, logger)` consume cfg fields (no more `os.Getenv` reads); `buildBucketSigningResolver` + `buildSigningKeyAdminConfig` take cfg too. New `kmsConfigFromAppConfig(cfg)` projection helper produces the kms.Config shape.
+- `internal/serverapp/serverapp.go::Run` calls `kms.FromConfig(kmsConfigFromAppConfig(cfg), kms.WithAWSKMSClientFactory(...))` instead of `kms.FromEnv`. `apiHandler.STSDefaultDuration = cfg.Auth.STSDuration` plumbs the new STS default through to s3api.
+- `internal/s3api/server.go::Server` gains `STSDefaultDuration time.Duration` field; `stsAssumeRole` uses it as the default when DurationSeconds is absent (fallback to `auth.DefaultSTSDuration` when zero — keeps unit-test surface untouched).
+- `Config.clampAuthKMS()` enforces STSDuration ∈ [15m, 12h], KeyMaxAge ∈ [24h, 365d], DEKCacheTTL ∈ [30s, 1h]. Symmetric for env + TOML sources.
+- Tests: 4 new contract tests in `internal/config/auth_kms_test.go` (TOML-only round-trip / env override / clamp / defaults). `internal/serverapp/bucket_signing_test.go` rewritten to drive helpers via `*config.Config` builders (the legacy `t.Setenv("STRATA_KEY_MAX_AGE", ...)` shape moved to the config-side test).
+- `deploy/strata.toml.example` gains `[auth] sts_duration + key_max_age` and full `[kms] / [kms.aws] / [kms.vault] / [kms.local_hsm]` blocks with inline defaults + ranges.
+- `docs/site/content/reference/s3-api.md` handler line refs shifted +4 to absorb the Server struct expansion (one struct field grew → 4 lines).
+- Audit re-run (post-US-003): 82 wired (+14 from US-002's 68), 28 unmapped (US-004 obs ~6 / US-005 misc ~22 / leftover ~few). `tasks/toml-parity-gaps.md` updated.
+- Files changed: `internal/config/{config,auth_kms_test}.go`, `internal/crypto/kms/{kms,vault,aws,local_hsm}.go`, `internal/serverapp/{bucket_signing,bucket_signing_test,serverapp}.go`, `internal/s3api/{server,sts}.go`, `deploy/strata.toml.example`, `tasks/toml-parity-gaps.md`, `scripts/audit-results/env-toml-parity-2026-05-25.jsonl`, `docs/site/content/reference/s3-api.md`.
+- Quality gates: `go vet ./...` green; `go build ./...` green; `go test ./...` green (non-race); `go test -race ./internal/config/... ./internal/serverapp/... ./internal/crypto/kms/... ./internal/auth/...` green; ceph-tagged build NOT exercised on host (no librados; CI image runs it).
+- **Learnings for future iterations:**
+  - **`kms.Config` lives in the kms package**, NOT a wrapper around `internal/config.KMSConfig`. The kms package would otherwise pull `internal/config` (which itself imports `internal/serverapp`'s shape indirectly) and invert the dependency direction. Pattern: each provider package defines its own self-contained config shape; serverapp owns the projection (e.g. `kmsConfigFromAppConfig`). Cleaner than `internal/config` exporting a "subset for kms" struct.
+  - **Helper signature evolution** (`dekCacheTTL` / `keyMaxAge` / `buildSigningKeyAdminConfig`): legacy env-only signature `(logger *slog.Logger)` → new cfg-driven signature `(cfg *config.Config, logger *slog.Logger)`. Test files break; the cleanest fix is to add tiny `cfgWithKeyMaxAge(d)` / `cfgWithDEKCacheTTL(d)` builders in the test file rather than re-deriving via `Load()` so each test stays focused on the helper's clamp logic without touching env.
+  - **`Server` struct field additions shift line numbers** consumed by `TestDocsReferenceCoverage` in `internal/s3api/docs_reference_test.go`. The test parses `internal/s3api/server.go:<N>` refs in `docs/site/content/reference/s3-api.md`. Quick fix: `python3 -c "import re; ... open(p, 'w').write(re.sub(r'server\.go:(\d+)', lambda m: f'server.go:{int(m.group(1))+N}', open(p).read()))"` to bulk-shift all refs. Drift-lint test (US-006) is its own thing — server.go line refs are docs hygiene, not env-toml parity.
+  - **STS default duration is server-side, not env-side**: the AssumeRole spec gives clients DurationSeconds (900..43200). The new `STRATA_STS_DURATION` knob is the fallback when the client omits DurationSeconds. Stored on `s3api.Server.STSDefaultDuration`; zero falls back to `auth.DefaultSTSDuration` (1h) so the unit-test path stays env-free.
+  - **`STRATA_SSE_VAULT_ROLE_ID` + `STRATA_SSE_VAULT_SECRET_ID` are shared** between the SSE-S3 master-key Vault provider AND the SSE-KMS Vault provider (US-036 history). The envMap maps them to `kms.vault.role_id` + `kms.vault.secret_id`; the SSE-S3 master path still reads the env directly (US-005 will refactor it). For now both paths see the env value, but only the KMS side reads via cfg.
+  - **Adapter empty falls back to auto-precedence** (vault > aws > local_hsm) matching `FromEnv` behavior. Setting `adapter = "vault"` skips the auto-detect and forces a vault build (errors with ErrNoConfig if the vault section is empty). Useful for operators who want a hard fail on misconfiguration rather than silent fallback.
+  - **`Vault.Token` field exists but is currently inert** — the NewVaultProvider constructor only consumes AppRole credentials (RoleID/SecretID). Field stays for forward-compat with token-auth Vault setups; future cycle wires it if needed without breaking the TOML/env surface today.
 ---
 
 
-## 2026-05-24 — US-004
-- Chunked-trailer decoder accepts 4 algos: sha256 (US-009) + sha1 + crc32 +
-  crc32c (US-004). Shared `selectTrailerHash(algoHeader)` factory in
-  `internal/auth/streaming.go` returns a `*trailerHashSpec` (canonical
-  trailer-header name + `hash.Hash` constructor). Unknown names →
-  `ErrUnsupportedChecksumAlgorithm` (HTTP 400 InvalidRequest).
-- `newStreamingTrailerReader` now accepts the spec; the body checksum is
-  accumulated through the algo-specific `hash.Hash`. `readAndValidateTrailers`
-  switches on `s.trailerHeader` (instance-bound) instead of the previous
-  fixed `trailerHeaderChecksumSh` const.
-- `internal/auth/middleware.go` drops the sha256-only gate. The trailer
-  header is parsed via `selectTrailerHash` and threaded into the streaming
-  reader. Anything outside the 4-algo set surfaces
-  `ErrUnsupportedChecksumAlgorithm` before the body is drained — preserves
-  the US-009 reject-early semantic.
-- All stdlib: `crypto/sha1`, `hash/crc32`. Castagnoli table cached as a
-  package-level var (`crc32CastagnoliTable`). No new deps.
-- Test fixtures: `testdata/chunked-trailer-{sha1,crc32,crc32c}.bin`
-  generated via `STRATA_REGEN_TRAILER_FIXTURES=1 go test -run
-  TestRegenerateTrailerFixtures`. The regen test is skipped on default
-  runs (env-gated) so CI never rewrites them. `.gitattributes` updated to
-  mark all 4 fixtures binary.
-- `TestStreamingTrailerReaderGoldenFixture` widened to all 4 algos —
-  decodes each committed fixture and verifies plaintext recovery.
-- New `TestStreamingTrailerReaderAllAlgos` exercises happy-path +
-  body-checksum-mismatch round-trip per algo (8 subtests).
-- New `TestSelectTrailerHashUnsupported` covers `""`, md5, sha512, `foo`.
-- `TestMiddlewareUnsupportedTrailerAlgo` renamed to
-  `TestMiddlewareSupportedTrailerAlgos`. Flipped semantics: 4 known algos
-  pass validation; only `md5` (or other unknown) rejects.
-- Integration test `streaming_trailer_integration_test.go` parameterised
-  on algo (4 subtests). `buildTrailerPUT` accepts header + `newH` and
-  signs the request under the chosen algo. All 4 round-trip via
-  httptest.Server → middleware → inner handler.
-- Quality: `go vet ./...` clean. `go test -race ./internal/auth/...` green.
-  `go test ./...` full unit suite green (no flakes). Integration test
-  `go test -tags integration ./internal/auth/` green for all 4 algos.
-- Files: `internal/auth/streaming.go` (factory + spec + sha1/crc32
-  imports + trailerHeader field), `internal/auth/middleware.go` (drop
-  sha256-only gate, thread spec into reader), `internal/auth/types.go`
-  (docstring update for ErrUnsupportedChecksumAlgorithm),
-  `internal/auth/streaming_trailer_test.go` (helper accepts algo +
-  newH, all-algo + unsupported tests),
-  `internal/auth/streaming_trailer_fixtures_test.go` (new, env-gated
-  regen test), `internal/auth/streaming_trailer_integration_test.go`
-  (parameterised over 4 algos), `internal/auth/testdata/.gitattributes`,
-  `internal/auth/testdata/chunked-trailer-sha1.bin` (new),
-  `internal/auth/testdata/chunked-trailer-crc32.bin` (new),
-  `internal/auth/testdata/chunked-trailer-crc32c.bin` (new).
-
-**Learnings for future iterations:**
-- `hash.Hash.Sum(nil)` for `hash/crc32` already produces a 4-byte
-  big-endian slice. AWS S3 trailer checksum encodes that slice as
-  base64. So the existing base64-string compare against the trailer
-  header value works uniformly across sha256 / sha1 / crc32 / crc32c —
-  no per-algo decode function needed at the decoder boundary.
-- A test-only fixture-generation file gated by an env var
-  (`STRATA_REGEN_TRAILER_FIXTURES=1`) keeps the regen path inside the
-  package's test surface without leaking into normal `go test` runs.
-  Pattern reusable for any other deterministic golden-fixture workflow.
-- `selectTrailerHash` is the single seam to extend if a new algo
-  (e.g. crc64-nvme — pending AWS adoption) needs to land. The factory
-  + spec shape means the decoder/middleware never change again — only
-  one switch arm.
-- When refactoring a `func` signature shared across tests + production
-  call sites, the GO compiler diagnostics surface every stale call
-  site at once. `Edit` with `replace_all` on the exact call shape is
-  the fastest way to rebase test files in lockstep.
+## [2026-05-25] - US-004
+- Wired OTel + Logging + AuditLog env knobs through Config struct. 7 new envMap entries; Config gains OTel (Endpoint / SampleRatio / Ringbuf / RingbufBytes), Logging (Level / Format), AuditLog (Retention) substructs.
+- **OTEL_EXPORTER_OTLP_ENDPOINT bootstrap-env fallback**: the W3C-spec env var doesn't carry the STRATA_ prefix so the koanf env provider can't see it. Post-env step in Load() reads os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") and fills cfg.OTel.Endpoint only when STRATA_OTEL_EXPORTER_ENDPOINT and TOML both left it empty. Precedence: STRATA_OTEL_EXPORTER_ENDPOINT (env) > TOML > OTEL_EXPORTER_OTLP_ENDPOINT (bootstrap) > defaults.
+- **STRATA_AUDIT_RETENTION '<N>d' suffix**: koanf's time.Duration unmarshal hook only accepts standard Go syntax (h/m/s). The env callback now pre-converts `"7d"` to `"168h"` via the new `config.ParseAuditRetention` helper before handing it to koanf. TOML files MUST use Go duration syntax (`retention = "720h"` not `"30d"`) — documented in deploy/strata.toml.example.
+- **internal/otel.InitWithSettings(ctx, Settings, opts)** alongside the env-driven Init: serverapp::Run consumes cfg.OTel.* directly. Falls back to ringbuf.DefaultBytesBudget on zero RingbufBytes so the new field stays a no-op when the operator doesn't set it.
+- **internal/logging.SetupWithLevel(level, format) + NewWithLevel** alongside env-driven Setup(): cmd/strata/server.go::runServer now calls `logging.SetupWithLevel(logging.ParseLevel(cfg.Logging.Level), cfg.Logging.Format)` so TOML-only boot honors the configured log level. Format="text" selects slog.NewTextHandler; any other value (default "json") selects JSON.
+- **Cmd-flag precedence preserved**: `--log-level=DEBUG` still works because applyServerFlagOverrides calls os.Setenv("STRATA_LOG_LEVEL", flag) BEFORE config.Load runs, so the env layer captures the flag and overrides TOML/defaults. flag > env > TOML > defaults.
+- serverapp::auditRetention(cfg) now reads cfg.AuditLog.Retention (zero falls back to s3api.DefaultAuditRetention); rebalance worker reads cfg.AuditLog.Retention via deps.Cfg too. auditRetentionFromEnv + parseAuditRetention helpers deleted from cmd/strata/workers/rebalance.go.
+- adminapi Config.OtelEndpoint now reads cfg.OTel.Endpoint instead of os.Getenv(strataotel.EnvEndpoint) — the /admin/v1/cluster/status `otel_endpoint` field continues working identically.
+- Config.clampObservability enforces SampleRatio ∈ [0.0, 1.0], RingbufBytes ∈ [1 MiB, 1 GiB], AuditLog.Retention ∈ [1m, 10y]. Symmetric for env + TOML sources.
+- Tests: 6 contract tests in internal/config/observability_test.go (TOML-only round-trip / env override + '7d' parse / OTEL_EXPORTER_OTLP_ENDPOINT fallback / clamp / negative-ratio clamp / defaults). Existing otel + logging package tests unchanged.
+- deploy/strata.toml.example gains [otel] / [logging] / [audit_log] blocks with inline defaults + ranges. Note: TOML retention must use Go duration (`"720h"`), only env accepts `"30d"`.
+- Audit re-run (post-US-004): 89 wired (+7 from US-003's 82), 23 unmapped (US-005 sweep territory: bucketstats / cassandra.slow_ms / cluster.name / jwt.* / manifest.format / mfa.secrets / node.id / prometheus.url / rados.batch_ops / rados.get_prefetch / rados.health_oid / rados.pool_size / rados.put_concurrency / sse.master_* / vhost.pattern / console.theme_default / console.jwt_secret). `tasks/toml-parity-gaps.md` updated.
+- Files changed: `internal/config/{config,observability_test}.go`, `internal/otel/otel.go`, `internal/logging/logging.go`, `internal/serverapp/serverapp.go`, `cmd/strata/server.go`, `cmd/strata/workers/rebalance.go`, `deploy/strata.toml.example`, `tasks/toml-parity-gaps.md`, `scripts/audit-results/env-toml-parity-2026-05-25.jsonl`.
+- Quality gates: `go vet ./...` green; `go build ./...` green; `go test ./...` green; `go test -race ./internal/config/... ./internal/otel/... ./internal/logging/... ./cmd/strata/workers/... ./internal/serverapp/... ./internal/s3api/...` green; ceph-tagged build NOT exercised on host (no librados; CI image runs it).
+- **Learnings for future iterations:**
+  - **Non-STRATA bootstrap envs need a post-env fallback**: the koanf env provider has a `STRATA_` prefix filter for cleanliness, so OTEL_EXPORTER_OTLP_ENDPOINT can't ride through the same channel. Pattern: read it explicitly after `k.Unmarshal` and fill the field only when still empty. Same pattern will apply to any future bootstrap env that lacks the STRATA_ prefix (Vault `VAULT_ADDR`, AWS_REGION, etc — case by case).
+  - **koanf time.Duration parsing rejects '<N>d'**: standard Go `time.ParseDuration` only knows h/m/s. For operator-friendly knobs that historically accepted "30d", convert in the env-provider callback (`func(s, v string) (string, any)`) by sniffing the koanf key and pre-parsing the value into Go duration string before handing back. TOML files must use Go syntax — document the constraint in the example file.
+  - **`logging.Setup` ergonomics**: keep the env-driven `Setup()` for older entry points (admin CLI, tests) that don't carry a *config.Config. Add a parallel `SetupWithLevel(level, format)` for the serverapp/cmd path. Mirror pattern for any future package whose env-driven constructor needs a cfg-driven sibling — don't break the env signature.
+  - **Cmd-flag precedence via os.Setenv before Load**: `applyServerFlagOverrides` promotes flag values to STRATA_* env vars BEFORE `config.Load()` runs. This keeps flag > env > TOML > defaults working even when the flag conceptually maps to a non-env-named koanf field. Cleaner than threading flag values through Load explicitly.
+  - **`Config.Logging.Format` is forward-compat**: only `"json"` (default) and `"text"` are wired. Adding `"console"` later doesn't break the surface — `NewWithLevel` switches via strings.EqualFold. Pattern: leave the field free-form; switch in one place; document supported values in the .toml.example comment.
+  - **AuditLog.Retention zero-fallback in helper**: `auditRetention(cfg)` returns `s3api.DefaultAuditRetention` when cfg.AuditLog.Retention == 0 instead of asserting non-zero post-clamp. The clamp helper skips zero values (treats them as "default"), so a TOML file that omits `audit_log.retention` lands a zero in cfg.AuditLog.Retention; the fallback restores the production default. Same shape as the worker-fallback `orDuration` helpers in US-002.
+  - **`STRATA_AUDIT_RETENTION` `<N>d` env parsing was historically duplicated** in 3 places: `s3api.ParseAuditRetention` (audit handler), `cmd/strata/workers/rebalance.parseAuditRetention` (drain.complete audit row), `internal/serverapp.auditRetention` (gateway TTL). US-004 consolidates the env-side parse into `config.ParseAuditRetention` (used by the env callback inside Load); the s3api version stays for backward-compat callers but is no longer in the gateway hot path. The workers/rebalance copy was deleted.
 ---
 
-## 2026-05-24 — US-005
-- New GitHub Actions workflow `.github/workflows/bench-rgw.yml`: weekly
-  cron `0 4 * * 0` (Sun 04:00 UTC) + manual `workflow_dispatch` (inputs:
-  `regression_threshold`, `bench_args`). `runs-on: [self-hosted, strata-bench]`,
-  `timeout-minutes: 240`, `concurrency: bench-rgw` (no in-flight cancel).
-  Steps: checkout → collect runner specs (host/cpu/cores/mem/disk/kernel/
-  docker) → `make up-all && wait-tikv && wait-ceph && wait-strata-lab` →
-  `make up-bench-rgw && wait-rgw` + `--extract-rgw-creds` →
-  `make $BENCH_MAKE_TARGET` → upload `rgw-comparison-*.jsonl` artifact
-  (retention 90d) → `scripts/bench-update-doc.sh` (emits
-  `max_regression_pct` / `changed` / `regression_detail` via GITHUB_OUTPUT)
-  → tear down lab → branch `bench/rgw-comparison-<YYYY-MM-DD>` + commit
-  + push + `gh pr create` against `main` → auto-merge gate: if Strata
-  p99 regression < `BENCH_REGRESSION_THRESHOLD` (default 10) →
-  `gh pr merge --auto --squash --delete-branch`, else
-  `gh pr comment @danchupin` for manual review.
-- New `scripts/bench-update-doc.sh`: reads latest
-  `scripts/bench-results/rgw-comparison-*.jsonl` (lexical sort), groups
-  rows by `(target, workload, object_size, concurrency)`, medians
-  p50/p95/p99/MB-s/ops-s + sums errors, renders the auto-managed block
-  between `<!-- BENCH-AUTO-START -->` / `<!-- BENCH-AUTO-END -->` markers
-  in the doc, persists a baseline JSON
-  (`docs/site/content/architecture/benchmarks/data/rgw-bench-baseline.json`),
-  computes max p99 regression vs previous baseline (Strata target only —
-  RGW jitter is noisy on the lima envelope per PRD), and prints
-  `max_regression_pct=<N>` / `changed=<bool>` to stdout + appends to
-  `$GITHUB_OUTPUT` when set. Refresh date is sourced from the JSONL
-  filename so re-runs against the same JSONL produce byte-identical doc
-  bytes. `--check` mode validates doc matches latest JSONL without
-  writing (drift detector for CI). `--help`/`-h` prints the embedded
-  usage block. Idempotence smoke-verified: `bash scripts/bench-update-doc.sh`
-  + diff → 0 lines changed, `--check` → `OK: doc matches latest jsonl`.
-- New baseline JSON `rgw-bench-baseline.json` (~6 Strata + RGW rows from
-  the existing `rgw-comparison-2026-05-24.jsonl`). Sorted keys → byte-
-  stable diffs. Persisted under `docs/site/content/architecture/benchmarks/data/`
-  so Hugo doesn't surface it as a page but a future workflow run has
-  numerical anchor for regression diff.
-- Doc edit `docs/site/content/architecture/benchmarks/rgw-comparison.md`:
-  auto-managed block injected before `## Workload-by-workload` carrying
-  date / commit / RGW image / JSONL name / full per-row table. Operator-
-  curated sections (`Methodology`, `Workload-by-workload`,
-  `Reproducibility`, `See also`, etc.) untouched.
-- New operator runbook `docs/site/content/developers/bench-runner-setup.md`:
-  required hardware (8 cores / 16 GiB RAM / 200 GiB disk / Ubuntu 22.04
-  / Docker 24.x), Docker install steps, GitHub Actions self-hosted runner
-  registration with both labels (`self-hosted,strata-bench`), systemd
-  service install, manual-dispatch verification, auto-PR behaviour,
-  Lima box reduced smoke (`scripts/bench-rgw-comparison.sh put-small both
-  --runs=1 --concurrency=8`), troubleshooting (queued runs, disk pre-
-  flight, no-diff PR, GraphQL permission). Cross-linked from
-  `docs/site/content/developers/_index.md` "See also".
-- Quality: `go vet ./...` clean (no Go-side churn). `bash scripts/bench-
-  update-doc.sh` smoke + idempotent re-run + `--check` mode all green.
-  `python3 -c "import yaml; yaml.safe_load(open(...))"` validates the
-  workflow YAML. `cd docs/site && hugo --quiet` exits 0 (doc renders).
-- Files: `.github/workflows/bench-rgw.yml` (new),
-  `scripts/bench-update-doc.sh` (new, executable),
-  `docs/site/content/architecture/benchmarks/data/rgw-bench-baseline.json`
-  (new), `docs/site/content/architecture/benchmarks/rgw-comparison.md`
-  (auto-block injected), `docs/site/content/developers/bench-runner-setup.md`
-  (new), `docs/site/content/developers/_index.md` (cross-link added).
-
-**Learnings for future iterations:**
-- The doc auto-managed block uses HTML-comment markers
-  (`<!-- BENCH-AUTO-START -->` / `<!-- BENCH-AUTO-END -->`) — same
-  pattern works for any future doc auto-block. The Python splicer in
-  `bench-update-doc.sh` is reusable as-is; copy + change the marker
-  names + the per-row formatter.
-- Refresh date derived from the JSONL filename, NOT `datetime.now()`,
-  is the canonical trick for byte-identical re-runs on the same JSONL.
-  Without it, idempotence smoke (`scripts/bench-update-doc.sh && diff`)
-  reports false drift.
-- Sorted JSON keys (`sort_keys=True` in `json.dump`) keep baseline diffs
-  reviewer-friendly. Pair with the explicit `(target, workload, conc)`
-  group-sort in the markdown table for both files to be diff-stable.
-- Workflow `concurrency: bench-rgw` + `cancel-in-progress: false`
-  serialises overlapping cron + manual dispatches without dropping the
-  in-flight run. Critical for 4-hour bench cycles where mid-run cancel
-  wastes the entire wall clock.
-- Self-hosted runner labels are AND-matched — `runs-on: [self-hosted,
-  strata-bench]` requires BOTH labels on the runner; missing either
-  queues the job indefinitely. Bench-runner-setup.md surfaces this in
-  the troubleshooting section.
-- `BENCH_REGRESSION_THRESHOLD` watches only the Strata side because RGW
-  jitter on the single-OSD memstore is large (per rgw-comparison.md
-  Limitations). If you ever extend the gate to RGW p99, raise the
-  threshold (~30%) to absorb the noise floor.
-- `gh pr merge --auto --squash` requires branch-protection-required-checks
-  to be configured; without them the merge happens immediately. The
-  workflow assumes the operator wires required checks before relying on
-  the auto-merge gate.
+## [2026-05-25] - US-005
+- Final 23 unmapped env knobs wired through Config + envMap. Post-cycle audit: 112 wired (+23) / 24 exempt / 0 unmapped of 136 STRATA_* vars (100%).
+- New Config substructs (top-level): `BucketStats` / `Cluster` / `Console` / `JWT` / `Manifest` / `MFA` / `Node` / `Prometheus` / `SSE` / `VHost`. Existing `CassandraConfig` grows `SlowMS int`; `RADOSConfig` grows `HealthOID / PoolSize / PutConcurrency / GetPrefetch / BatchOps`. Defaults seeded for `Manifest.Format="proto"`, `Console.ThemeDefault="system"`, `VHost.Pattern="*.s3.local"` so TOML-only boot matches pre-US-005 env-only boot.
+- envMap entries (23 added): `STRATA_BUCKETSTATS_INTERVAL`/`_TOPN` → `bucket_stats.{interval,top_n}`; `STRATA_CASSANDRA_SLOW_MS` → `cassandra.slow_ms`; `STRATA_CLUSTER_NAME` → `cluster.name`; `STRATA_CONSOLE_JWT_SECRET`/`_THEME_DEFAULT` → `console.{jwt_secret,theme_default}`; `STRATA_JWT_SECRET_FILE`/`_SHARED` → `jwt.{secret_file,shared_file}`; `STRATA_MANIFEST_FORMAT` → `manifest.format`; `STRATA_MFA_SECRETS` → `mfa.secrets`; `STRATA_NODE_ID` → `node.id`; `STRATA_PROMETHEUS_URL` → `prometheus.url`; `STRATA_RADOS_HEALTH_OID`/`_POOL_SIZE`/`_PUT_CONCURRENCY`/`_GET_PREFETCH`/`_BATCH_OPS` → `rados.{health_oid,pool_size,put_concurrency,get_prefetch,batch_ops}`; `STRATA_SSE_MASTER_KEY`/`_ID`/`_FILE`/`_VAULT`/`STRATA_SSE_MASTER_KEYS` → `sse.master_*`; `STRATA_VHOST_PATTERN` → `vhost.pattern`. Convention 2A applies cleanly except `STRATA_BUCKETSTATS_*` (legacy env name without underscore) which maps to multi-word `bucket_stats.*` TOML section per US-001 learning.
+- `Config.validate()` learned `clampMisc()` (rados.pool_size [1,32] / put_concurrency [1,256] / get_prefetch [1,64]; zero passes through so consumers fall back to *FromEnv) + `validateMisc()` (manifest.format ∈ {proto,json}, console.theme_default ∈ {system,light,dark}). Range invariants symmetric for env + TOML sources.
+- Refactored consumers in `internal/serverapp/serverapp.go::Run`: `cfg.Manifest.Format` → `data.SetManifestFormat` (replaces `os.Getenv("STRATA_MANIFEST_FORMAT")`); `cfg.MFA.Secrets` → `s3api.ParseMFASecrets`; `cfg.Cluster.Name` → `adminapi.Config.ClusterName`; `cfg.Prometheus.URL` → `promclient.New` + `adminapi.Config.PrometheusURL`; `cfg.BucketStats.{Interval,TopN}` → `bucketstats.Sampler.{Interval,TopN}`; `cfg.RADOS.HealthOID` → `healthCanaryOID(cfg)`; `cfg.VHost.Pattern` → `vhostPatterns(cfg)`; `cfg.Console.JWTSecret` + `cfg.JWT.{SecretFile,SharedFile}` → `loadJWTSecret(cfg, logger)`; `cfg.Console.ThemeDefault` → `consoleThemeDefault(cfg)`; `cfg.Node.ID` → `heartbeat.NodeIDOr(cfg.Node.ID)`. `buildHealthHandler` + `healthCanaryOID` signatures grow `*config.Config` (test fixture adapted). `bucketStatsInterval` helper removed (replaced by direct cfg field read); `bucketStatsTopN(cfg)` simplified to cfg field read + DefaultTopN fallback.
+- `internal/crypto/master` gains `FromConfig(Config)` alongside `FromEnv`. The master package keeps its own `Config` shape (no internal/config import) — mirrors `kms.FromConfig` pattern from US-003. Per-provider helpers: `newRotationFromConfig(raw)`, `newVaultFromConfig(Config)`, `newEnvFromConfig(Config)` (env case wraps cfg.Key + cfg.KeyID into a frozen single-entry RotationProvider — does NOT re-read os.Getenv on every Resolve, unlike the legacy EnvProvider). `serverapp::masterConfigFromAppConfig(cfg)` projects cfg.SSE.* + cfg.KMS.Vault.{RoleID,SecretID} into master.Config so the SSE-S3 Vault provider shares AppRole credentials with the SSE-KMS Vault provider (existing env-var sharing carries over).
+- `internal/data/rados/cephimpl/backend.go` reads `rados.Config.{PutConcurrency,GetPrefetch,PoolSize,BatchOps}` at New time; zero falls back to `rados.{PutConcurrencyFromEnv,GetPrefetchFromEnv,PoolSizeFromEnv,BatchOpsFromEnv}` so the env-only path keeps working for direct callers. `rados.Config` grows the four tuning fields populated by serverapp from `cfg.RADOS.*`.
+- `internal/meta/cassandra.SlowMSOr(int)` helper added alongside `SlowMSFromEnv`. `serverapp::buildMetaStore` wires `metacassandra.SlowMSOr(cfg.Cassandra.SlowMS)` — non-zero cfg wins; zero falls back to FromEnv (which itself returns DefaultSlowQueryMS when env unset).
+- `internal/heartbeat.NodeIDOr(string)` helper added alongside `DefaultNodeID`. `serverapp::Run` wires `heartbeat.NodeIDOr(cfg.Node.ID)`. `DefaultNodeID()` is now a thin wrapper around `NodeIDOr("")`.
+- 5 contract tests in `internal/config/misc_test.go` (TOML-only round-trip across all 23 knobs / env override / clamp / invalid manifest.format + console.theme_default rejection / defaults baseline).
+- `deploy/strata.toml.example` gains [bucket_stats] / [cluster] / [console] / [jwt] / [manifest] / [mfa] / [node] / [prometheus] / [sse] / [vhost] blocks; [rados] grows clusters/health_oid/pool_size/put_concurrency/get_prefetch/batch_ops fields; [cassandra] grows slow_ms field.
+- Files changed: `internal/config/{config.go,misc_test.go}`, `internal/crypto/master/{master.go,env.go,rotation.go,vault.go}`, `internal/data/rados/{config.go,cephimpl/backend.go}`, `internal/meta/cassandra/observer.go`, `internal/heartbeat/heartbeat.go`, `internal/serverapp/{serverapp.go,serverapp_test.go}`, `deploy/strata.toml.example`, `tasks/toml-parity-gaps.md`, `scripts/audit-results/env-toml-parity-2026-05-25.jsonl`.
+- Quality gates: `go vet ./...` green; `go build ./...` green; `go test ./...` green; `go test -race ./internal/config/... ./internal/serverapp/... ./internal/crypto/master/... ./internal/heartbeat/... ./internal/meta/cassandra/... ./internal/data/rados/...` green; ceph-tagged build NOT exercised on host (no librados; CI image runs it).
+- **Learnings for future iterations:**
+  - **Provider package pattern for cfg-driven boot**: when a leaf package owns its own env-driven `FromEnv`, the cleanest cfg-driven sibling is `FromConfig(Self.Config{...})` where Self.Config mirrors the env field shape one-to-one. The provider package does NOT import `internal/config`; serverapp owns a tiny `xxxConfigFromAppConfig(cfg)` projection helper. Established for `kms.FromConfig` (US-003); now `master.FromConfig` (US-005). Future provider extractions: same shape.
+  - **cephimpl tuning knobs flow via rados.Config fields, not via cephimpl-specific config**: adding fields to `internal/data/rados/config.go::Config` keeps the cephimpl entry point's signature stable (`cephimpl.New(rados.Config)`) and lets serverapp populate them once at boot from `cfg.RADOS.*`. Zero values fall back to the existing `*FromEnv` helpers so direct callers (bench harnesses, ceph-tagged tests) keep working without code change.
+  - **Env-override fallback in `Or` helpers**: `cassandra.SlowMSOr(int) int` returns the cfg int when >0, else `SlowMSFromEnv()`. Same shape as `bucketStatsTopN(cfg)` and `heartbeat.NodeIDOr(string)` — the cfg layer is authoritative when set, otherwise consult the legacy env path. Keeps tests that `t.Setenv("STRATA_X", ...)` working without rewriting the test surface AND lets TOML-only boot stay self-contained.
+  - **Convention 2A overrides for legacy multi-word env names**: `STRATA_BUCKETSTATS_*` env names predate the convention (no underscore between "bucket" and "stats"). TOML section name is the cleaner `bucket_stats.*` (per US-001 learning on multi-word sections). The envMap is the source of truth — declare the override explicitly; the audit-script heuristic gets it wrong and the gap-list flags it (which is correct).
+  - **Manifest.Format enum validation** belongs in `config.validateMisc()`, NOT in `data.SetManifestFormat` (which already errors on bad input). The double check is fine — config catches misconfiguration at boot before any data path runs, with a clear error message keyed by the TOML key path (`manifest.format`), and data.SetManifestFormat keeps its self-contained guard for direct callers.
+  - **VHost.Pattern empty vs explicit-empty distinction is lost** by koanf — both unset env + unset TOML and `STRATA_VHOST_PATTERN=""` (explicit empty) land as `cfg.VHost.Pattern == ""`. Default is now applied via the `defaults()` seed (`Pattern: "*.s3.local"`) so unset → default; the legacy `LookupEnv ok=false` distinction is gone. The "-" sentinel still disables vhost extraction. Hard cutover OK per [Pre-launch no deploys] memory — explicit-empty was a no-op anyway (`s3api.ParseVHostPatterns("")` returns nil).
+  - **`STRATA_SSE_VAULT_ROLE_ID` / `_SECRET_ID` are doubly-mapped**: from US-003 the envMap maps them to `kms.vault.role_id` + `kms.vault.secret_id`. The SSE-S3 master-key Vault provider also needs them. `masterConfigFromAppConfig(cfg)` passes `cfg.KMS.Vault.{RoleID,SecretID}` into `master.Config.{VaultRoleID,VaultSecretID}` — no separate `sse.vault.*` TOML keys, the operator configures Vault credentials ONCE under `[kms.vault]` and both providers see them. Future: if the two providers ever need distinct credentials, split the master.Config fields out — for now they share.
+  - **`bucketStatsInterval` helper deleted, not refactored**: when cfg owns the duration directly (`cfg.BucketStats.Interval time.Duration`), there's no parse step left for the helper to perform — koanf already handles the duration unmarshal at Load. Delete the helper; pass `cfg.BucketStats.Interval` to the Sampler directly. Same pattern applies whenever a helper's only job was env-string-to-typed-value conversion.
+  - **DefaultNodeID() retained as a `NodeIDOr("")` wrapper**: there are heartbeat tests + admin handlers that consume `DefaultNodeID()` directly without a *config.Config. Don't delete the entry point — make it a thin wrapper around the new cfg-aware sibling. Same pattern as `logging.Setup` (env-driven) coexisting with `logging.SetupWithLevel(level, format)` (cfg-driven) from US-004.
 ---
 
-## 2026-05-24 — US-006
-- Final close-flip + smoke story for the `ralph/auth-dx-trailer-lima` cycle.
-- ROADMAP.md close-flip × 4 in one commit:
-  - **P3 line 254** "Per-bucket request signing keys (KMS-backed)" — Done.
-    Summary references US-001..US-002 + per-bucket DEK schema (3 columns:
-    `signing_wrapped_dek` / `signing_key_id` / `signing_key_created_at`) +
-    `meta.Store.{Get,Set,Delete}BucketSigningKey` + `caseBucketSigningKey`
-    contract + SigV4 middleware `BucketSigningResolver` (TTL via
-    `STRATA_DEK_CACHE_TTL`) + 3 admin endpoints
-    (`POST/GET/DELETE /admin/v1/buckets/{name}/signing-key{/rotate,/status,}`) +
-    `STRATA_KEY_MAX_AGE` enforcement (401 KeyExpired) + fail-closed semantics
-    (503 KMSUnavailable + Retry-After: 30, no IAM fallback) + LocalStack +
-    Vault Transit integration tests + operator runbook.
-  - **P3 line 260** "`bench-rgw-comparison` full 144-row sweep blocked by lima
-    capacity" — Done. Summary references US-005 + self-hosted runner
-    (`[self-hosted, strata-bench]`) + weekly cron (`0 4 * * 0`) + auto-PR
-    with markdown table + `BENCH_REGRESSION_THRESHOLD` 10% gate +
-    operator runbook `docs/site/content/developers/bench-runner-setup.md`.
-  - **P3 line 386** "Module tags cleanup" — Done. Summary references US-003 +
-    `internal/data/rados/cephimpl/` separate Go module (`module
-    github.com/danchupin/strata/cephimpl`) + `go.work` workspace MVS pitfall
-    + `replace google.golang.org/genproto` for split-monolithic conflict +
-    serverapp + bench branching via `//go:build ceph` files + hermetic check
-    `GOWORK=off go mod graph | grep -c go-ceph` → 0.
-  - **P3 line 498** "Streaming chunked-trailer non-sha256 algos" — Done.
-    Summary references US-004 + `selectTrailerHash` factory + all 4 algos
-    (sha256 + sha1 + crc32 + crc32c) via stdlib (`hash/crc32` Castagnoli
-    table + `crypto/sha1`) + shared chain-HMAC scheme + env-gated regen
-    test for fixtures.
-  - Each entry carries `(commit pending)` placeholder; SHA backfill on
-    `main` as fast-follow per cycle convention.
-- `tasks/prd-auth-dx-trailer-lima.md` removed via `git rm`.
-- Smoke validation (clean stack — `make down && make up-all && make
-  wait-tikv && make wait-ceph && make wait-strata-lab` first, since the
-  21h-old TiKV had wedged into a Raft heartbeat slow-op loop):
-  - `make smoke` — green (== smoke OK).
-  - `make smoke-signed` — green (requires `STRATA_AUTH_MODE=required` on
-    strata-a/b + `AWS_ACCESS_KEY_ID=admin AWS_SECRET_ACCESS_KEY=adminpass`
-    matching compose default static creds).
-  - aws-cli 2.22.35 4-algo chunked-trailer smoke (verifies US-004 end-to-
-    end): `for algo in sha256 sha1 crc32 crc32c; do
-    AWS_REQUEST_CHECKSUM_CALCULATION=when_required aws --endpoint-url
-    http://127.0.0.1:9999 s3api put-object --bucket trailertest --key
-    key-$algo --body /tmp/tt.txt --checksum-algorithm $algo; done` —
-    all 4 returned 200 + identical ETag.
-  - Hermetic default-build check (verifies US-003): `GOWORK=off go mod
-    graph | grep -c 'github.com/ceph/go-ceph'` → 0. Equivalent to the
-    PRD's "clean-clone" recipe (both compute the same answer: main
-    module's go.mod has no direct go-ceph require).
-  - `make docs-build` — green (94 pages, 0 errors via `hugo
-    --quiet`).
-  - `go vet ./...` + `make vet` — clean. cephimpl/ vet skipped locally
-    (no librados); CI exercises it via the `docker-build` + `e2e` jobs.
-  - `go test -race ./...` — green across the full main-module package
-    set (cassandra + memory + tikv contract suites; auth; adminapi;
-    serverapp; s3api; gc; lifecycle; rebalance; …). Duration ~3 min.
-- Smoke not executed locally this cycle (already validated in prior
-  cycles and/or not feasible in the current envelope):
-  - `make smoke-tikv-default-lab` — Scenario A burst-count gate fails
-    against a working LB (see new P3 Known-latent-bug entry below).
-    nginx logs confirm 10/10 burst requests round-robin successfully;
-    the assertion just greps `docker logs strata-{a,b}` for an
-    `/admin/v1/clusters` line that the logging middleware never emits.
-    Pre-existing harness bug, not regressed by this cycle.
-  - `make smoke-rgw-lab-restart` — covered by `ralph/p1-fixes` US-006
-    (commit `8c6d7be` shipped the 3-cycle smoke + green capture); not
-    re-run here to save the ~10 minute three-cycle teardown.
-  - `make test-integration` — Cassandra + LocalStack + Vault
-    testcontainers exercised in US-001 + US-002 of this cycle; not
-    re-run holistically (each takes 1-2 minutes per container start).
-  - cephimpl module under ceph docker image — covered by CI's `e2e`
-    job (`cd internal/data/rados/cephimpl && go test -tags integration
-    ./...`); no librados on the dev box.
-  - bench-rgw workflow manual trigger — needs a registered
-    `[self-hosted, strata-bench]` runner; operator-step per
-    `docs/site/content/developers/bench-runner-setup.md`.
-- New ROADMAP entry (Known latent bugs section):
-  - P3 "`scripts/smoke-tikv-default-lab.sh` Scenario A burst-count
-    assertion can never match" — surfaced during the US-006 smoke pass;
-    the assertion greps `docker logs strata-{a,b}` for per-request
-    `/admin/v1/clusters` access-log lines that `internal/logging.
-    Middleware` does not emit. PRD's "NO new ROADMAP entries" wish
-    yields to the CLAUDE.md `Discovering a new gap` invariant — gaps
-    surfaced during a cycle must be filed in the same commit. Fix
-    scope (suggested): either add a per-request slog InfoContext line
-    to the logging middleware (preferred — gives operators a real
-    stdout access log on every replica) and update the harness gate
-    to match the new shape, OR rewrite the assertion to inspect
-    `docker logs strata-lb-nginx` for the burst path.
-- Files: `ROADMAP.md` (4 close-flips + 1 new P3 entry — net change
-  -3 entries vs the PRD's wish of -4), `scripts/ralph/prd.json`
-  (US-006 passes=true), `scripts/ralph/progress.txt` (this block),
-  `tasks/prd-auth-dx-trailer-lima.md` (git rm).
+## [2026-05-25] - US-006
+- Drift-lint test + reference page TOML key column + TOML example refresh — all three pieces of the US-006 acceptance criteria land in one commit. Audit re-run shows 100% mapped (112 wired / 23 exempt of 135 STRATA_* vars).
+- New `internal/config/env_toml_parity_test.go` (default build tag — runs under `go test`):
+  - `collectEnvVars`: walks cmd/ + internal/ .go files via two regexes (`\("STRATA_X"` function-call args + `=\s+"STRATA_X"` const/var assigns), unions with envMap keys (catches const-indirected reads).
+  - `collectConfigKeys`: reflect.TypeFor[Config]() recursive descent — each koanf-tagged field becomes a dotted leaf key (substructs recurse, primitives + time.Duration terminate).
+  - `collectTOMLExampleKeys`: line-by-line regex for `[section]` + `# ?key = …` lines; nested sections like `[kms.aws]` parse via `[a-z_][a-z0-9_.]*`.
+  - `collectDocRows`: scans rows starting with `| `STRATA_*`; extracts last pipe-delimited cell as TOML key (trims backticks); test-only rows that list "A / B" via slashes get both env names mapped to the same TOML key cell.
+  - 4 assertions: (a) non-exempt env vars in envMap; (b) envMap targets reach a real koanf-tagged Config leaf; (c) every Config leaf has a commented/live TOML example line; (d) docs rows carry the expected TOML key (em-dash for exempt).
+- `deploy/strata.toml.example` gains `[tikv]` + `[s3]` sections (previously missed — TOML example covered the structs but not the section blocks themselves; assertion (c) caught the gap).
+- `docs/site/content/reference/env-vars.md` grows the 6th `TOML key` column across all 122 rows; exempt rows carry em-dash (`—`); maintainer-note callout documents the drift-lint contract.
+- `scripts/audit-env-toml-parity.sh` awk section-regex extended from `[a-z_][a-z0-9_]*` to `[a-z_][a-z0-9_.]*` so nested sections like `[kms.aws]` / `[workers.gc]` produce dotted keys (matches the Go test's collectTOMLExampleKeys behavior).
+- `internal/config/exempt_env_vars.go` STRATA_COLD comment cleanup (was referencing the deprecated single-regex audit shape).
+- Audit final state: 135 vars total, 112 wired (83.0%), 23 exempt (17.0%), 0 unmapped. Drift lint goes green; CI hard-fails any future env var added without Config + envMap + TOML example + docs page entry.
+- Files changed: `internal/config/env_toml_parity_test.go` (new), `internal/config/exempt_env_vars.go`, `deploy/strata.toml.example`, `docs/site/content/reference/env-vars.md`, `scripts/audit-env-toml-parity.sh`, `scripts/audit-results/env-toml-parity-2026-05-25.jsonl`.
+- Quality gates: `go vet ./...` green; `go build ./...` green; `go test ./...` green (47 packages); `go test -race ./internal/config/...` green; `make docs-build` green (94 pages, hugo 0.161.1 extended).
+- **Learnings for future iterations:**
+  - **Drift-lint reflect-based walker beats parsing config.go via AST**: `reflect.TypeFor[Config]()` + struct-tag recursion gives every koanf leaf for free, no separate go/parser pass. Caveats: `time.Duration` is an int64 alias so `reflect.Kind() != reflect.Struct` → terminates correctly. Slice fields (Cassandra.Hosts) also terminate at the slice kind — good, the koanf path stops at the slice owner.
+  - **Em-dash placeholder for exempt docs rows** keeps the column well-formed so an operator scanning the page sees "no TOML key here, intentional" rather than a blank cell. The drift-lint test enforces both flavours of em-dash (`—` U+2014 and ASCII `-`) so a future author can type either without breaking CI.
+  - **Section regex `[a-z_][a-z0-9_.]*`** (allows dots) is required for nested TOML sections like `[kms.aws]` or `[workers.gc]`. The previous shell awk + the test's first-draft regex both used `[a-z_][a-z0-9_]*` and silently lost nested keys. When adding nested sections, double-check both audit script + test regex in lockstep.
+  - **Docs page parser handles multi-name rows**: a row like `| `STRATA_TEST_AK` / `STRATA_TEST_SK` | ...` lists multiple env names in cell 0. The token-regex extracts both, and both map to the same TOML cell value. Lets the test-only block stay compact (one row per topic) while the drift-lint still verifies every name is covered.
+  - **TOML example assertion (c) catches missing section blocks**, not just missing keys**: the test walks Config leaves and asserts each is present in the example. The first run failed on `tikv.pd_endpoints` and `s3.clusters` / `s3.classes` — the structs existed in Config but the example only had keyless top-level fields. Section blocks for tikv + s3 were added to make the example self-documenting + lint-clean. Future Config substructs MUST get a section block in the example, even if every field defaults to empty string.
+  - **Maintainer-note callout in env-vars.md** documents the drift-lint contract inline so an author opening the docs file sees "if you add a new var, you also need envMap + Config + this row + commented TOML line — drift-lint will fail otherwise." Prevents the docs page from drifting out of sync without anyone noticing for months.
+---
 
-**Learnings for future iterations:**
-- The TiKV-default lab's `docker compose` services include
-  `strata-tikv-storage` as a long-running container. After ~21 hours
-  of uptime on the lima dev box it can wedge into a Raft slow-op loop
-  (`peer.rs:744` 200+ms tick handlers, "store messages" backlog) where
-  PUT requests through strata-a/b time out 504 even though `/healthz`
-  returns 200. Symptom: `docker ps` shows `strata-tikv-storage Up Less
-  than a second` (auto-restart loop). Fix is `make down && make up-all`
-  — full teardown of the volumes is NOT needed; the persisted Raft state
-  recovers cleanly on a fresh container.
-- `make smoke-signed` runs against the same compose default but with
-  `STRATA_AUTH_MODE=required` recreated on strata-a/b + the matching
-  `AWS_ACCESS_KEY_ID=admin AWS_SECRET_ACCESS_KEY=adminpass` (compose
-  default static creds). Recreate via `STRATA_AUTH_MODE=required
-  docker compose up -d strata-a strata-b strata-lb-nginx
-  --force-recreate` — the LB needs the recreate too so it picks up
-  fresh upstream endpoints.
-- The "discovered gap" invariant in `CLAUDE.md` (`## Roadmap
-  maintenance` — Every commit that surfaces something not yet on the
-  roadmap MUST add a new entry) overrides any per-cycle PRD wish like
-  "NO new ROADMAP entries". Better to file a P3 in the same commit
-  than to suppress visibility into a latent harness bug.
-- `internal/logging.Middleware` (`internal/logging/logging.go:103`)
-  does NOT emit a per-request stdout log line — it only attaches a
-  `request_id` to the context. If you want a per-request access log
-  in stdout for operator debugging, add a `slog.InfoContext(ctx,
-  "request", "method", r.Method, "path", r.URL.Path, "status", code,
-  "duration_ms", elapsed)` call from a `responseRecorder` shim. Any
-  smoke harness greping `docker logs <strata>` for `/admin/v1/...`
-  will fail until that emission exists.
-- aws-cli 2.22.35 `s3api put-object --checksum-algorithm <algo>`
-  drives the chunked-trailer codepath when
-  `AWS_REQUEST_CHECKSUM_CALCULATION=when_required` is set; without
-  the env, aws-cli falls back to the legacy non-trailer signing for
-  many object sizes. Useful seam to verify trailer-side changes
-  end-to-end on the lab.
+## [2026-05-25] - US-007
+- TOML-only boot smoke surfaced a latent gateway exit bug that pre-dated the cycle: when no workers were selected (`STRATA_WORKERS` empty / TOML `workers.enabled = ""`), `internal/serverapp.Run` eagerly pushed `nil` into the `workerErr` channel in the no-supervisor branch — the `select` then read it immediately and the process exited rc 0 right after the `strata server listening` log. Fix: drop the eager send; the supervisor goroutine is the only producer; the shutdown drain skips the channel when supervisor is nil. With the fix, `STRATA_CONFIG_FILE=/tmp/full.toml strata server` (zero `STRATA_*` env vars except the bootstrap pointer) boots cleanly with memory backends, `/healthz` returns 200, anonymous `ListBuckets` returns 200 + empty `<Buckets/>`. The bug had been latent since commit `97b9706` (registry migration) — surfaced now only because US-007's TOML-only smoke exercises the no-workers path.
+- Smoke matrix:
+  - `make smoke` (auth=optional lab) → green.
+  - `STRATA_AUTH_MODE=required` lab restart + `AWS_ACCESS_KEY_ID=admin AWS_SECRET_ACCESS_KEY=adminpass make smoke-signed` → green (signed PUT/GET/multipart/DELETE round-trip + bad-creds reject).
+  - `STRATA_STATIC_CREDENTIALS=admin:adminpass:owner make smoke-tikv-default-lab` → Scenario A burst-count assertion fails (KNOWN ROADMAP P3 latent — `internal/logging.Middleware` doesn't emit per-request stdout, the harness greps the wrong surface). Scenarios B/C/D not reached because Scenario A is sequential. Latent stays on ROADMAP; out of scope for US-007.
+  - `make vet` green; `go vet ./...` green.
+  - `go test -race ./...` green (one flaky `internal/racetest.TestRunCleanRunNoInconsistencies` passed on re-run — racetest doesn't import `serverapp` so the flake is unrelated to the fix).
+  - `make docs-build` green (94 pages, hugo 0.161.1 extended).
+  - `DOCKER_HOST=unix:///Users/dochupin/.lima/avito/sock/docker.sock make test-integration` green (cassandra testcontainers + drift-lint).
+- Audit final: 135 STRATA_* vars / 112 wired (83.0%) / 23 exempt (17.0%) / 0 unmapped. Drift-lint `internal/config/env_toml_parity_test.go` passes under default build tag.
+- ROADMAP close-flip: line 385 (P2 — Full config coverage in `strata.toml`) flipped to `~~Done.~~` with summary of US-001..US-006 work + the serverapp.Run no-workers exit fix. `(commit pending)` placeholder; SHA backfill on `main` as fast-follow per ROADMAP discipline.
+- `tasks/prd-toml-parity.md` REMOVED via `git rm`. `tasks/toml-parity-gaps.md` (US-001 artifact) REMOVED via `git rm` — drift-lint is the ongoing enforcement, no need for the static gap file.
+- Post-cycle ROADMAP state: 4 globals (P2 ScyllaDB benchmarks, P2 Content-addressed dedup, P3 Intelligent-Tiering, P3 Select Object Content) + 1 P3 latent (smoke-tikv burst-count assertion). User vision "leave only globals" effectively complete.
+- Files changed: `internal/serverapp/serverapp.go` (no-workers branch fix), `ROADMAP.md` (close-flip), `tasks/prd-toml-parity.md` (deleted), `tasks/toml-parity-gaps.md` (deleted), `scripts/ralph/progress.txt` (this entry), `scripts/ralph/prd.json` (US-007 passes=true).
+- **Learnings for future iterations:**
+  - **TOML-only smoke is a load-bearing acceptance criterion** for any cycle that touches config wiring. It exercises code paths an env-driven smoke can't reach (notably the no-workers default branch surfaced here). Future cycles that add Config substructs should sanity-check `STRATA_CONFIG_FILE=… strata server` with zero other `STRATA_*` env vars at story-close time, not at cycle-close.
+  - **`workerErr <- nil` in the no-supervisor branch was a latent bug since commit `97b9706`** — would have killed `make run-memory` at any time but nobody noticed because all live invocations set `STRATA_WORKERS` (deploy/docker/docker-compose.yml sets it, ralph runs set it, dev scripts set it). The fix is two lines: drop the else branch, gate the shutdown-drain `<-workerErr` on `supervisor != nil`. Future "this works in our lab but exits 0 on a fresh box" reports — check the workerErr branch first.
+  - **`make smoke-tikv-default-lab` Scenario A burst gate** is gated on a `docker logs strata-{a,b} | grep -c '/admin/v1/clusters'` matching a per-request access-log line `internal/logging.Middleware` does NOT emit. Has been an open P3 latent since `ralph/auth-dx-trailer-lima`. When this gate breaks expansion of unrelated work, the right move is NOT to plumb access-log lines as a side-effect of an unrelated cycle — split it as its own P3 fix (per-request slog.Info in the middleware + harness regex bump).
+  - **Auth-mode flip pattern for smoke runs**: `cd deploy/docker && STRATA_AUTH_MODE=<mode> docker compose up -d strata-a strata-b strata-lb-nginx; make wait-strata-lab`. The compose `${STRATA_AUTH_MODE:-optional}` default makes the env var the only switch. Both `make smoke` (needs optional/off) and `make smoke-signed` (needs required) can't share a single lab session — operators running both must flip + restart between runs. Documented for future autonomous loops.
+  - **PRD removal precedent (close-flip)**: per CLAUDE.md "PRD lifecycle" — markdown PRD lives in `tasks/` only while the cycle is active; once the Ralph cycle is shipped + ROADMAP flipped, the markdown is removed in the same commit. Ralph snapshot in `scripts/ralph/archive/` becomes the canonical record. The gap-list artifact (`tasks/toml-parity-gaps.md`) is also removed — it was the cycle contract; the drift-lint test is the ongoing enforcement, the gap-list itself is stale within hours of US-005 close.
 ---

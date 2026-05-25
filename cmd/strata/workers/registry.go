@@ -11,6 +11,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/danchupin/strata/internal/config"
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/leader"
 	"github.com/danchupin/strata/internal/meta"
@@ -31,8 +32,10 @@ type RunnerFunc func(ctx context.Context) error
 func (f RunnerFunc) Run(ctx context.Context) error { return f(ctx) }
 
 // Dependencies carries the shared services every worker may need at Build
-// time. Per-worker tunables (STRATA_GC_INTERVAL, STRATA_LIFECYCLE_*, …) are
-// read by each worker's Build directly so this surface stays small.
+// time. Per-worker tunables live under deps.Cfg.Workers.<Worker>.* (env > TOML
+// precedence applied at config.Load() time); workers reach for env directly
+// only for vars owned by other config sections (e.g. STRATA_AUDIT_RETENTION
+// — wired in a later cycle).
 type Dependencies struct {
 	Logger *slog.Logger
 	Meta   meta.Store
@@ -40,6 +43,11 @@ type Dependencies struct {
 	Tracer *strataotel.Provider
 	Locker leader.Locker
 	Region string
+	// Cfg is the loaded gateway config. Workers consume their per-knob
+	// tunables via cfg.Workers.<X>. Tests that build a Dependencies struct
+	// without setting Cfg fall back to a fresh config.Load() (which honors
+	// the in-test STRATA_* env vars set via t.Setenv); see workerCfg().
+	Cfg *config.Config
 	// EmitLeader is wired by the supervisor at Run-time so workers that
 	// manage their own leader sessions (SkipLease=true) can publish lease
 	// transitions on the supervisor's LeaderEvents channel. Workers under
@@ -119,6 +127,27 @@ func Reset() {
 	regMu.Lock()
 	defer regMu.Unlock()
 	reg = map[string]Worker{}
+}
+
+// workerCfg returns deps.Cfg if set, otherwise loads a fresh Config from
+// env + defaults. The fallback is the path tests take: they t.Setenv
+// individual STRATA_* knobs and call buildX directly without plumbing a
+// Cfg through Dependencies. Production callers always set deps.Cfg.
+//
+// A Load() failure in the fallback branch silently degrades to a zero
+// Config — Build functions then see zero-valued knobs and apply their
+// own type-zero handling. Defaults are merged from config.defaults() so
+// this stays a quiet fall-through in tests; in production a Load failure
+// would have already failed startup before any worker Build ran.
+func workerCfg(deps Dependencies) *config.Config {
+	if deps.Cfg != nil {
+		return deps.Cfg
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return &config.Config{}
+	}
+	return cfg
 }
 
 // Resolve maps a list of names (already deduplicated by the caller) to the

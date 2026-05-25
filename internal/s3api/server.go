@@ -40,6 +40,10 @@ type Server struct {
 	// STS, when set, enables the ?Action=AssumeRole endpoint and is the
 	// backing store for temporary credentials.
 	STS *auth.STSStore
+	// STSDefaultDuration overrides auth.DefaultSTSDuration when the
+	// AssumeRole caller omits DurationSeconds. Zero falls back to the
+	// auth-package default (1h). Wired by serverapp from cfg.Auth.STSDuration.
+	STSDefaultDuration time.Duration
 	// MFASecrets maps an MFA device serial to its raw TOTP secret. Populated
 	// from STRATA_MFA_SECRETS at startup; consulted when MFA Delete is enabled
 	// on a bucket and the request is a DeleteObjectVersion.

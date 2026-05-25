@@ -48,20 +48,20 @@ pass-rate against the upstream Ceph `s3-tests` suite and the deliberate gaps.
 
 | Operation | Handler file:line | Shipped in | AWS gotchas |
 |---|---|---|---|
-| `CreateBucket` | `internal/s3api/server.go:422` | — | `x-amz-bucket-object-lock-enabled: true` flips the bucket-level Object Lock setting on creation. `x-amz-acl` canned ACL header honoured. Idempotent for same-owner re-`PUT` (returns 200 + `Location`). |
-| `DeleteBucket` | `internal/s3api/server.go:470` | — | 409 `BucketNotEmpty` when objects (incl. delete markers) remain. Operator force-empty available via `POST /admin/v1/buckets/{name}/force-empty`. |
-| `HeadBucket` | `internal/s3api/server.go:476` | — | `x-amz-bucket-region` echoed from the bucket row (default `default`). |
-| `ListBuckets` | `internal/s3api/server.go:198` | — | Anonymous principal returns empty `<Buckets>` element rather than 403. |
+| `CreateBucket` | `internal/s3api/server.go:426` | — | `x-amz-bucket-object-lock-enabled: true` flips the bucket-level Object Lock setting on creation. `x-amz-acl` canned ACL header honoured. Idempotent for same-owner re-`PUT` (returns 200 + `Location`). |
+| `DeleteBucket` | `internal/s3api/server.go:474` | — | 409 `BucketNotEmpty` when objects (incl. delete markers) remain. Operator force-empty available via `POST /admin/v1/buckets/{name}/force-empty`. |
+| `HeadBucket` | `internal/s3api/server.go:480` | — | `x-amz-bucket-region` echoed from the bucket row (default `default`). |
+| `ListBuckets` | `internal/s3api/server.go:202` | — | Anonymous principal returns empty `<Buckets>` element rather than 403. |
 | `GetBucketLocation` | `internal/s3api/location.go:42` | — | Returns `<LocationConstraint>` of the bucket's stored region; empty for `default` region (matches AWS for `us-east-1`). |
 
 ## Object lifecycle
 
 | Operation | Handler file:line | Shipped in | AWS gotchas |
 |---|---|---|---|
-| `PutObject` | `internal/s3api/server.go:887` (→ `putObject` server.go:918) | — | `If-Match` / `If-None-Match` evaluated pre-write. `x-amz-storage-class` falls back to bucket `DefaultClass`. Quota check before body read; SSE-S3/KMS/SSE-C wrap on `body` reader. |
-| `GetObject` | `internal/s3api/server.go:898` (→ `getObject` server.go:1144) | — | `partNumber=N` on non-multipart object returns whole body when `N=1`, `InvalidPart` otherwise (s3-tests parity). Range GET suppresses `x-amz-checksum-*` (boto3 1.36+ FlexibleChecksum mismatch). |
-| `HeadObject` | `internal/s3api/server.go:903` (same `getObject` with `body=false`) | — | Same code path as GetObject; `partNumber=N` returns part metadata + composite multipart ETag. |
-| `DeleteObject` | `internal/s3api/server.go:912` (→ `deleteObject` server.go:1452) | — | Suspended versioning: unversioned DELETE replaces null version. MFA-Delete enforced when `?versionId=` set + bucket has MfaDelete enabled. Object Lock `GOVERNANCE` bypassable with `x-amz-bypass-governance-retention: true`. |
+| `PutObject` | `internal/s3api/server.go:891` (→ `putObject` server.go:918) | — | `If-Match` / `If-None-Match` evaluated pre-write. `x-amz-storage-class` falls back to bucket `DefaultClass`. Quota check before body read; SSE-S3/KMS/SSE-C wrap on `body` reader. |
+| `GetObject` | `internal/s3api/server.go:902` (→ `getObject` server.go:1144) | — | `partNumber=N` on non-multipart object returns whole body when `N=1`, `InvalidPart` otherwise (s3-tests parity). Range GET suppresses `x-amz-checksum-*` (boto3 1.36+ FlexibleChecksum mismatch). |
+| `HeadObject` | `internal/s3api/server.go:907` (same `getObject` with `body=false`) | — | Same code path as GetObject; `partNumber=N` returns part metadata + composite multipart ETag. |
+| `DeleteObject` | `internal/s3api/server.go:916` (→ `deleteObject` server.go:1452) | — | Suspended versioning: unversioned DELETE replaces null version. MFA-Delete enforced when `?versionId=` set + bucket has MfaDelete enabled. Object Lock `GOVERNANCE` bypassable with `x-amz-bypass-governance-retention: true`. |
 | `DeleteObjects` (POST `?delete`) | `internal/s3api/delete_objects.go:44` | — | Quiet mode honoured. Per-key Object Lock checks; failures returned in `<Errors>` element, partial-success preserved. |
 | `CopyObject` | `internal/s3api/copy_object.go:53` | — | Triggered by `x-amz-copy-source` on `PUT`. `x-amz-metadata-directive=REPLACE` swaps user metadata; `COPY` (default) preserves. SSE-C source key required when source is SSE-C-encrypted. |
 | `RestoreObject` (POST `?restore`) | `internal/s3api/restore.go:21` | — | Transition target restored to STANDARD per request body `<Days>`; sync restore (no async polling — restore completes in-handler). |
@@ -81,20 +81,20 @@ pass-rate against the upstream Ceph `s3-tests` suite and the deliberate gaps.
 
 | Operation | Handler file:line | Shipped in | AWS gotchas |
 |---|---|---|---|
-| `CreateMultipartUpload` (POST `?uploads`) | `internal/s3api/server.go:784` (→ `initiateMultipart` multipart.go:40) | — | SSE headers persisted on the multipart session; per-part SSE-C key required on every UploadPart (AWS parity). `BackendUploadID` opaque handle binds the session to the originating cluster (drain-survival, US-004 drain-followup). |
-| `UploadPart` (PUT `?uploadId=&partNumber=`) | `internal/s3api/server.go:851` (→ `uploadPart` multipart.go:177) | — | `Content-MD5` accepted but not validated against streaming body (P2 ROADMAP gap). Part-checksum headers (`x-amz-checksum-*`) persisted per part for Complete verification. |
+| `CreateMultipartUpload` (POST `?uploads`) | `internal/s3api/server.go:788` (→ `initiateMultipart` multipart.go:40) | — | SSE headers persisted on the multipart session; per-part SSE-C key required on every UploadPart (AWS parity). `BackendUploadID` opaque handle binds the session to the originating cluster (drain-survival, US-004 drain-followup). |
+| `UploadPart` (PUT `?uploadId=&partNumber=`) | `internal/s3api/server.go:855` (→ `uploadPart` multipart.go:177) | — | `Content-MD5` accepted but not validated against streaming body (P2 ROADMAP gap). Part-checksum headers (`x-amz-checksum-*`) persisted per part for Complete verification. |
 | `UploadPartCopy` (PUT `?uploadId=&partNumber=` + `x-amz-copy-source`) | `internal/s3api/multipart.go:311` (dispatched from `uploadPart` at multipart.go:189) | — | `x-amz-copy-source-range: bytes=lo-hi` honoured with strict `lo<=hi<size` parse. |
-| `CompleteMultipartUpload` (POST `?uploadId=`) | `internal/s3api/server.go:858` (→ `completeMultipart` multipart.go:448) | — | LWT `IF status='uploading' → completing` blocks concurrent retries with `NoSuchUpload`. Composite ETag = `md5(concat(part-md5s))-<count>`. Per-part `x-amz-checksum-*` aggregated into object-level `ChecksumType=COMPOSITE`. |
-| `AbortMultipartUpload` (DELETE `?uploadId=`) | `internal/s3api/server.go:864` (→ `abortMultipart` multipart.go:733) | — | Uploaded parts queue into the GC worker via `enqueueChunks`. Idempotent — 204 even when upload already aborted. |
-| `ListParts` (GET `?uploadId=`) | `internal/s3api/server.go:870` (→ `listParts` multipart.go:748) | — | Pagination via `part-number-marker` + `max-parts`. |
-| `ListMultipartUploads` (GET `?uploads`) | `internal/s3api/server.go:387` (→ `listMultipartUploads` multipart.go:779) | — | Pagination via `key-marker` + `upload-id-marker`. |
+| `CompleteMultipartUpload` (POST `?uploadId=`) | `internal/s3api/server.go:862` (→ `completeMultipart` multipart.go:448) | — | LWT `IF status='uploading' → completing` blocks concurrent retries with `NoSuchUpload`. Composite ETag = `md5(concat(part-md5s))-<count>`. Per-part `x-amz-checksum-*` aggregated into object-level `ChecksumType=COMPOSITE`. |
+| `AbortMultipartUpload` (DELETE `?uploadId=`) | `internal/s3api/server.go:868` (→ `abortMultipart` multipart.go:733) | — | Uploaded parts queue into the GC worker via `enqueueChunks`. Idempotent — 204 even when upload already aborted. |
+| `ListParts` (GET `?uploadId=`) | `internal/s3api/server.go:874` (→ `listParts` multipart.go:748) | — | Pagination via `part-number-marker` + `max-parts`. |
+| `ListMultipartUploads` (GET `?uploads`) | `internal/s3api/server.go:391` (→ `listMultipartUploads` multipart.go:779) | — | Pagination via `key-marker` + `upload-id-marker`. |
 
 ## Listing
 
 | Operation | Handler file:line | Shipped in | AWS gotchas |
 |---|---|---|---|
-| `ListObjects` (v1, GET no `list-type`) | `internal/s3api/server.go:484` (→ `listObjects` server.go:497) | — | Sharded fan-out across `STRATA_BUCKET_SHARDS` partitions (Cassandra) OR ordered range scan (TiKV via `RangeScanStore`). `marker` is the literal last-key from prior page. |
-| `ListObjectsV2` (GET `list-type=2`) | `internal/s3api/server.go:484` (same `listObjects`, `v2=true`) | — | `ContinuationToken` is opaque base64-URL JSON (`listV2Token`) — clients carrying older literal-marker tokens still resume via decode fallback (US-006). |
+| `ListObjects` (v1, GET no `list-type`) | `internal/s3api/server.go:488` (→ `listObjects` server.go:497) | — | Sharded fan-out across `STRATA_BUCKET_SHARDS` partitions (Cassandra) OR ordered range scan (TiKV via `RangeScanStore`). `marker` is the literal last-key from prior page. |
+| `ListObjectsV2` (GET `list-type=2`) | `internal/s3api/server.go:488` (same `listObjects`, `v2=true`) | — | `ContinuationToken` is opaque base64-URL JSON (`listV2Token`) — clients carrying older literal-marker tokens still resume via decode fallback (US-006). |
 | `ListObjectVersions` (GET `?versions`) | `internal/s3api/versioning.go:95` | — | Heap-merge of `(key ASC, version_id DESC)` across shards. Delete markers interleaved per AWS shape. |
 
 ## Versioning

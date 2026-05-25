@@ -38,13 +38,24 @@ func WithSQSClientFactory(factory func(region string) (SQSAPI, error)) EnvOption
 }
 
 // RouterFromEnv parses EnvNotifyTargets into a StaticRouter populated with
-// per-target sinks. Returns ErrNoTargets if the env var is empty.
+// per-target sinks. Returns ErrNoTargets if the env var is empty. Kept
+// for callers (tests) that read env directly; prefer RouterFromSpec when
+// the targets string comes from cfg.Workers.Notify.Targets.
 func RouterFromEnv(opts ...EnvOption) (StaticRouter, error) {
+	return RouterFromSpec(os.Getenv(EnvNotifyTargets), opts...)
+}
+
+// RouterFromSpec parses the same `<key>=<spec>,…` format that
+// RouterFromEnv would read from STRATA_NOTIFY_TARGETS but takes the raw
+// string directly. Lets callers route config through koanf
+// (cfg.Workers.Notify.Targets) so env > TOML precedence flows through
+// without each call site re-reading os.Getenv.
+func RouterFromSpec(raw string, opts ...EnvOption) (StaticRouter, error) {
 	cfg := envCfg{}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	raw := strings.TrimSpace(os.Getenv(EnvNotifyTargets))
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, ErrNoTargets
 	}

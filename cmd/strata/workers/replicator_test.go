@@ -57,20 +57,18 @@ func TestBuildReplicatorDefaultsWhenEnvUnset(t *testing.T) {
 	}
 }
 
-func TestStringFromEnv(t *testing.T) {
-	t.Setenv("STRATA_REPLICATOR_PEER_SCHEME_TEST", "")
-	if got := stringFromEnv("STRATA_REPLICATOR_PEER_SCHEME_TEST", "https"); got != "https" {
-		t.Errorf("stringFromEnv unset = %q, want https", got)
+func TestOrString(t *testing.T) {
+	if got := orString("", "https"); got != "https" {
+		t.Errorf("orString unset = %q, want https", got)
 	}
-	t.Setenv("STRATA_REPLICATOR_PEER_SCHEME_TEST", "http")
-	if got := stringFromEnv("STRATA_REPLICATOR_PEER_SCHEME_TEST", "https"); got != "http" {
-		t.Errorf("stringFromEnv set = %q, want http", got)
+	if got := orString("http", "https"); got != "http" {
+		t.Errorf("orString set = %q, want http", got)
 	}
 }
 
 func TestReplicatorDefaultIntervalMatchesLegacy(t *testing.T) {
 	want := 5 * time.Second
-	if got := durationFromEnv("STRATA_REPLICATOR_INTERVAL_UNSET", want); got != want {
-		t.Errorf("durationFromEnv default = %v, want %v", got, want)
+	if got := orDuration(0, want); got != want {
+		t.Errorf("orDuration default = %v, want %v", got, want)
 	}
 }

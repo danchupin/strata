@@ -26,6 +26,14 @@ type Config struct {
 	// Tracer, when set, emits one OTel child span per RADOS op. Cmd-layer
 	// plugs tracerProvider.Tracer("strata.data.rados"); nil disables.
 	Tracer trace.Tracer
+	// PutConcurrency / GetPrefetch / PoolSize / BatchOps mirror the four
+	// rados-tuning env knobs (STRATA_RADOS_PUT_CONCURRENCY /
+	// _GET_PREFETCH / _POOL_SIZE / _BATCH_OPS). Zero falls back to the
+	// per-helper *FromEnv default; non-zero overrides it.
+	PutConcurrency int
+	GetPrefetch    int
+	PoolSize       int
+	BatchOps       bool
 }
 
 // Metrics is the narrow interface RADOS observers implement. The cmd binary
