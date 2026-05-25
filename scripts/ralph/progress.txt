@@ -25,4 +25,31 @@ Cycle: ralph/toml-parity
 - **TOML-only boot smoke (US-007)**: full TOML config (every field from strata.toml.example uncommented with default values) + zero STRATA_* env vars except STRATA_CONFIG_FILE → server boots + /healthz 200 + aws s3 ls empty. Proves operator can fully configure via TOML.
 - **ROADMAP discipline (US-007)**: 1 entry closes (line 385) — no new entries surfaced. `(commit pending)` placeholder; SHA backfill on main as fast-follow commit (mirrors precedent).
 - **Post-cycle ROADMAP state**: 4 globals (P2 ScyllaDB benchmarks, P2 Content-addressed dedup, P3 Intelligent-Tiering, P3 Select Object Content) + 1 P3 latent (smoke-tikv burst-count assertion). User vision "leave only globals" effectively complete (1 latent is operator-surfaced test-script tweak, not feature work).
+- **Audit script env-var collection** uses TWO regex sources (US-001 learning): (a) `\("STRATA_X"` for function-call args, (b) `= "STRATA_X"` for const/var assignments (e.g. `EnvAWSKMSRegion = "STRATA_KMS_AWS_REGION"` — read at call sites via the constant, NOT a string literal). Both shapes union'd + de-duped against envMap keys. Pure `STRATA_*` grep is too broad (catches string literals like the `STRATA_COLD` storage-class identifier in lifecycle XML); the args-only filter is too narrow (misses const-indirected reads like KMS). Belt-and-braces avoids both errors.
+- **Exempt list shape** (`internal/config/exempt_env_vars.go`): `Exact []string` + `Prefixes []string` + `Suffixes []string` + `IsExempt(name)` helper. Drift lint (US-006) MUST consume this — duplicating the list in test code is fragile. Audit script parses the .go file via awk to keep the bash side dependency-free.
+
+## [2026-05-25] - US-001
+- Implemented audit script + gap-list contract for US-002..US-005.
+- Files changed:
+  - `scripts/audit-env-toml-parity.sh` (new — collects env vars via dual regex, parses envMap + TOML example + exempt list, emits jsonl + summary).
+  - `internal/config/exempt_env_vars.go` (new — `ExemptEnvVars` struct with Exact/Prefixes/Suffixes + `IsExempt` helper).
+  - `Makefile` (added `audit-toml-parity` target).
+  - `tasks/toml-parity-gaps.md` (new — gap-list grouped by section, 74 unmapped rows with story-hint column).
+  - `scripts/audit-results/env-toml-parity-2026-05-25.jsonl` (audit output — committed for downstream story consumption).
+- **Audit numbers** (2026-05-25 snapshot):
+  - Total STRATA_* env vars: 139
+  - In envMap (wired): 31 (22.3%)
+  - Exempt: 34 (24.5%)
+  - Present in TOML example: 27 (19.4%)
+  - **Unmapped gaps: 74 (53.2%)** — closed across US-002 (workers, ~38 vars), US-003 (auth+KMS, ~13 vars), US-004 (observability, ~6 vars), US-005 (misc sweep, ~10 vars).
+- Quality gates: `go vet ./...` green, `go test ./internal/config/...` green, `go build ./...` green.
+- **Learnings for future iterations:**
+  - Two regex sources are required for env-var collection (function-call args + const/var assigns). One-pattern grep loses const-indirected reads (KMS uses this shape via `EnvAWSKMSRegion = "STRATA_KMS_AWS_REGION"`). See US-001 progress block above.
+  - First-underscore section split is a HEURISTIC — multi-word sections (`access_log`, `audit_export`, `usage_rollup`, `manifest_rewriter`, `bucket_stats`, `quota_reconcile`) MUST be declared explicitly in envMap. The gap-list shows the heuristic value with a `(→ canonical)` annotation when multi-word. US-002..US-005 envMap entries override the heuristic per the canonical name.
+  - `STRATA_COLD` is a storage-class identifier (S3 lifecycle XML), NOT an env var — added to exempt list with a comment so future audit re-runs don't re-flag it.
+  - `STRATA_TIKV_TEST_PD_ENDPOINTS` is test-only — exempt'd alongside other test/bench vars. The `STRATA_TEST_*` prefix family is broader; this specific name doesn't match because the `TIKV` infix breaks the prefix shape — added as Exact.
+  - Audit script is dependency-free bash + jq (no `go run` required) — keeps Make target instant and decouples it from build state. Drift-lint test (US-006) will re-implement the same parsing logic in Go for hard CI gating.
+  - `STRATA_BUCKETSTATS_*` env names use no underscore between `bucket` and `stats` (legacy) — when US-005 wires them, decide whether to keep the legacy env name and map to `bucket_stats.interval` TOML key, or rename the env (breaking change OK per [Pre-launch no deploys]).
+  - `STRATA_AUDIT_RETENTION` maps to `audit_log.retention` (per PRD US-004 acceptance), NOT `audit.retention` — heuristic split is misleading. Same for `STRATA_DEK_CACHE_TTL` → `kms.dek_cache_ttl` (NOT `dek.cache_ttl`).
+---
 

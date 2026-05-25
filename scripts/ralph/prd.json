@@ -19,8 +19,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Audit script `scripts/audit-env-toml-parity.sh` + Makefile target `make audit-toml-parity` + exempt list `internal/config/exempt_env_vars.go` (Exact/Prefixes/Suffixes + IsExempt helper) + gap-list `tasks/toml-parity-gaps.md` (74 unmapped, 31 envMap-wired, 34 exempt out of 139 total). Audit script collects env vars from (a) function-call args `\\(\"STRATA_X\"`, (b) const/var assigns `= \"STRATA_X\"`, (c) envMap keys; joins against envMap + TOML example; emits jsonl + summary. Drift-lint (US-006) will consume the same sources."
     },
     {
       "id": "US-002",
