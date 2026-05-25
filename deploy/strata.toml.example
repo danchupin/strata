@@ -126,3 +126,20 @@ poll_limit      = 10000
 [workers.inventory]
 interval = "5m"
 region   = ""                   # Falls back to top-level `region` when empty.
+
+[otel]
+# Endpoint defaults to OTEL_EXPORTER_OTLP_ENDPOINT (W3C-spec env var) when
+# unset here. Empty + ringbuf=false yields a no-op tracer provider.
+endpoint      = ""              # e.g. "http://otel-collector:4318"
+sample_ratio  = 0.01            # Tail-sampled. Range: [0.0, 1.0]. Errors always export.
+ringbuf       = true            # In-process trace ring buffer (/admin/v1/diagnostics/trace).
+ringbuf_bytes = 4194304         # 4 MiB. Range: [1 MiB, 1 GiB].
+
+[logging]
+level  = "INFO"                 # DEBUG | INFO | WARN | ERROR
+format = "json"                 # json | text
+
+[audit_log]
+# Row TTL applied to audit_log writes. Accepts Go duration ("720h") and
+# legacy "<N>d" suffix when supplied via env. Range: [1m, 87600h (10y)].
+retention = "720h"              # 30 days

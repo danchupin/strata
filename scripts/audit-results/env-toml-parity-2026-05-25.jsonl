@@ -9,7 +9,7 @@
 {"env_var":"STRATA_AUDIT_EXPORT_INTERVAL","in_env_map":true,"expected_toml_key":"workers.audit_export.interval","present_in_example":false,"exempt":false}
 {"env_var":"STRATA_AUDIT_EXPORT_INTERVAL_UNSET","in_env_map":false,"expected_toml_key":"audit.export_interval_unset","present_in_example":false,"exempt":true}
 {"env_var":"STRATA_AUDIT_EXPORT_PREFIX","in_env_map":true,"expected_toml_key":"workers.audit_export.prefix","present_in_example":false,"exempt":false}
-{"env_var":"STRATA_AUDIT_RETENTION","in_env_map":false,"expected_toml_key":"audit.retention","present_in_example":false,"exempt":false}
+{"env_var":"STRATA_AUDIT_RETENTION","in_env_map":true,"expected_toml_key":"audit_log.retention","present_in_example":true,"exempt":false}
 {"env_var":"STRATA_AUTH_MODE","in_env_map":true,"expected_toml_key":"auth.mode","present_in_example":true,"exempt":false}
 {"env_var":"STRATA_BUCKET_SHARDS","in_env_map":true,"expected_toml_key":"default_bucket_shards","present_in_example":true,"exempt":false}
 {"env_var":"STRATA_BUCKETSTATS_INTERVAL","in_env_map":false,"expected_toml_key":"bucketstats.interval","present_in_example":false,"exempt":false}
@@ -56,7 +56,8 @@
 {"env_var":"STRATA_LIFECYCLE_METRICS_LISTEN","in_env_map":true,"expected_toml_key":"workers.lifecycle.metrics_listen","present_in_example":false,"exempt":false}
 {"env_var":"STRATA_LIFECYCLE_UNIT","in_env_map":true,"expected_toml_key":"workers.lifecycle.unit","present_in_example":false,"exempt":false}
 {"env_var":"STRATA_LISTEN","in_env_map":true,"expected_toml_key":"listen","present_in_example":true,"exempt":false}
-{"env_var":"STRATA_LOG_LEVEL","in_env_map":false,"expected_toml_key":"log.level","present_in_example":false,"exempt":false}
+{"env_var":"STRATA_LOG_FORMAT","in_env_map":true,"expected_toml_key":"logging.format","present_in_example":true,"exempt":false}
+{"env_var":"STRATA_LOG_LEVEL","in_env_map":true,"expected_toml_key":"logging.level","present_in_example":true,"exempt":false}
 {"env_var":"STRATA_MANIFEST_FORMAT","in_env_map":false,"expected_toml_key":"manifest.format","present_in_example":false,"exempt":false}
 {"env_var":"STRATA_MANIFEST_REWRITER_BATCH_LIMIT","in_env_map":true,"expected_toml_key":"workers.manifest_rewriter.batch_limit","present_in_example":false,"exempt":false}
 {"env_var":"STRATA_MANIFEST_REWRITER_DRY_RUN","in_env_map":true,"expected_toml_key":"workers.manifest_rewriter.dry_run","present_in_example":false,"exempt":false}
@@ -70,9 +71,10 @@
 {"env_var":"STRATA_NOTIFY_MAX_RETRIES","in_env_map":true,"expected_toml_key":"workers.notify.max_retries","present_in_example":false,"exempt":false}
 {"env_var":"STRATA_NOTIFY_POLL_LIMIT","in_env_map":true,"expected_toml_key":"workers.notify.poll_limit","present_in_example":false,"exempt":false}
 {"env_var":"STRATA_NOTIFY_TARGETS","in_env_map":true,"expected_toml_key":"workers.notify.targets","present_in_example":false,"exempt":false}
-{"env_var":"STRATA_OTEL_RINGBUF","in_env_map":false,"expected_toml_key":"otel.ringbuf","present_in_example":false,"exempt":false}
-{"env_var":"STRATA_OTEL_RINGBUF_BYTES","in_env_map":false,"expected_toml_key":"otel.ringbuf_bytes","present_in_example":false,"exempt":false}
-{"env_var":"STRATA_OTEL_SAMPLE_RATIO","in_env_map":false,"expected_toml_key":"otel.sample_ratio","present_in_example":false,"exempt":false}
+{"env_var":"STRATA_OTEL_EXPORTER_ENDPOINT","in_env_map":true,"expected_toml_key":"otel.endpoint","present_in_example":true,"exempt":false}
+{"env_var":"STRATA_OTEL_RINGBUF","in_env_map":true,"expected_toml_key":"otel.ringbuf","present_in_example":true,"exempt":false}
+{"env_var":"STRATA_OTEL_RINGBUF_BYTES","in_env_map":true,"expected_toml_key":"otel.ringbuf_bytes","present_in_example":true,"exempt":false}
+{"env_var":"STRATA_OTEL_SAMPLE_RATIO","in_env_map":true,"expected_toml_key":"otel.sample_ratio","present_in_example":true,"exempt":false}
 {"env_var":"STRATA_PROM_PUSHGATEWAY","in_env_map":false,"expected_toml_key":"prom.pushgateway","present_in_example":false,"exempt":true}
 {"env_var":"STRATA_PROMETHEUS_URL","in_env_map":false,"expected_toml_key":"prometheus.url","present_in_example":false,"exempt":false}
 {"env_var":"STRATA_QUOTA_RECONCILE_INTERVAL","in_env_map":true,"expected_toml_key":"workers.quota_reconcile.interval","present_in_example":false,"exempt":false}

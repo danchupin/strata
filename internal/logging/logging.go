@@ -50,6 +50,28 @@ func Setup() *slog.Logger {
 	return l
 }
 
+// NewWithLevel builds a slog.Logger writing to w at the supplied level. Format
+// selects the handler shape: "text" produces slog.NewTextHandler output, any
+// other value (default "json") produces slog.NewJSONHandler. Pass the level
+// already resolved by config.Load — this entry point trusts the caller.
+func NewWithLevel(w io.Writer, level slog.Level, format string) *slog.Logger {
+	opts := &slog.HandlerOptions{Level: level}
+	if strings.EqualFold(strings.TrimSpace(format), "text") {
+		return slog.New(slog.NewTextHandler(w, opts))
+	}
+	return slog.New(slog.NewJSONHandler(w, opts))
+}
+
+// SetupWithLevel builds the logger via NewWithLevel(os.Stdout, level, format)
+// and installs it as slog.Default. Prefer this over Setup when a resolved
+// *config.Config is already in hand — skips the env re-read so TOML-only
+// boot honours the configured log level.
+func SetupWithLevel(level slog.Level, format string) *slog.Logger {
+	l := NewWithLevel(os.Stdout, level, format)
+	slog.SetDefault(l)
+	return l
+}
+
 type ctxKey int
 
 const (

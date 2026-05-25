@@ -117,7 +117,7 @@ func (a *app) runServer(ctx context.Context, args []string) int {
 		return 2
 	}
 
-	logger := logging.Setup()
+	logger := logging.SetupWithLevel(logging.ParseLevel(cfg.Logging.Level), cfg.Logging.Format)
 
 	// Resolve the requested worker list against the package-level registry
 	// before any backend is built so unknown names fail startup immediately

@@ -60,7 +60,12 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	}
 	logger.Info("manifest encoder", "format", data.ManifestFormat())
 
-	tracerProvider, err := strataotel.Init(ctx, strataotel.InitOptions{
+	tracerProvider, err := strataotel.InitWithSettings(ctx, strataotel.Settings{
+		Endpoint:     cfg.OTel.Endpoint,
+		SampleRatio:  cfg.OTel.SampleRatio,
+		Ringbuf:      cfg.OTel.Ringbuf,
+		RingbufBytes: cfg.OTel.RingbufBytes,
+	}, strataotel.InitOptions{
 		Logger:         logger,
 		RingbufMetrics: metrics.OTelRingbufObserver{},
 	})
@@ -205,7 +210,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		logger.Info("admin: STRATA_PROMETHEUS_URL unset; top-buckets/consumers + metrics dashboard will report metrics_available=false")
 	}
 	adminLocker := buildLocker(cfg, metaStore)
-	auditTTL := auditRetention(logger)
+	auditTTL := auditRetention(cfg)
 	auditBroadcaster := auditstream.New(logger, metrics.AuditStreamObserver{})
 	storageClassSnapshot := bucketstats.NewSnapshot(poolsByClass(cfg, logger))
 	rebalanceProgress := rebalance.NewProgressTracker(rebalanceInterval(logger))
@@ -228,7 +233,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		JWTEphemeral:         jwtEphemeral,
 		JWTSecretFile:        jwtFile,
 		PrometheusURL:        os.Getenv("STRATA_PROMETHEUS_URL"),
-		OtelEndpoint:         os.Getenv(strataotel.EnvEndpoint),
+		OtelEndpoint:         cfg.OTel.Endpoint,
 		HeartbeatInterval:    heartbeat.DefaultInterval,
 		ConsoleThemeDefault:  consoleThemeDefault(),
 		CassandraSettings:    cassandraSettings(cfg),
@@ -579,18 +584,15 @@ func errString(err error) string {
 	return err.Error()
 }
 
-// auditRetention reads STRATA_AUDIT_RETENTION (Go duration or "<N>d") and
-// returns the row TTL applied to audit_log writes. Falls back to
-// s3api.DefaultAuditRetention on parse error and logs a WARN.
-func auditRetention(logger *slog.Logger) time.Duration {
-	v := os.Getenv("STRATA_AUDIT_RETENTION")
-	d, err := s3api.ParseAuditRetention(v)
-	if err != nil {
-		logger.Warn("audit retention parse failed; using default",
-			"value", v, "default", s3api.DefaultAuditRetention.String(), "error", err.Error())
-		return s3api.DefaultAuditRetention
+// auditRetention returns the row TTL applied to audit_log writes. Consumes
+// cfg.AuditLog.Retention (env > TOML > defaults precedence handled by
+// config.Load); zero values fall back to s3api.DefaultAuditRetention so the
+// post-clamp invariant of "non-zero" stays the worker contract.
+func auditRetention(cfg *config.Config) time.Duration {
+	if cfg.AuditLog.Retention > 0 {
+		return cfg.AuditLog.Retention
 	}
-	return d
+	return s3api.DefaultAuditRetention
 }
 
 // vhostPatterns returns the configured virtual-hosted-style host patterns.

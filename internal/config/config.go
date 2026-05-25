@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/knadh/koanf/parsers/toml"
@@ -27,6 +29,9 @@ type Config struct {
 	Auth      AuthConfig      `koanf:"auth"`
 	KMS       KMSConfig       `koanf:"kms"`
 	Workers   WorkersConfig   `koanf:"workers"`
+	OTel      OTelConfig      `koanf:"otel"`
+	Logging   LoggingConfig   `koanf:"logging"`
+	AuditLog  AuditLogConfig  `koanf:"audit_log"`
 
 	DefaultBucketShards int `koanf:"default_bucket_shards"`
 }
@@ -208,6 +213,33 @@ type InventoryConfig struct {
 	Region   string        `koanf:"region"`
 }
 
+// OTelConfig collects the OpenTelemetry tracing knobs. Endpoint defaults
+// to the W3C-spec OTEL_EXPORTER_OTLP_ENDPOINT env var (read at Load time
+// when STRATA_OTEL_EXPORTER_ENDPOINT is unset). Empty Endpoint + Ringbuf
+// false yields a no-op tracer provider. SampleRatio drives tail-based
+// sampling — failing spans are exported regardless.
+type OTelConfig struct {
+	Endpoint     string  `koanf:"endpoint"`
+	SampleRatio  float64 `koanf:"sample_ratio"`
+	Ringbuf      bool    `koanf:"ringbuf"`
+	RingbufBytes int     `koanf:"ringbuf_bytes"`
+}
+
+// LoggingConfig drives the gateway slog setup. Level ∈ {DEBUG,INFO,WARN,
+// ERROR}; Format ∈ {json,text} — only json is supported today, the field
+// exists for forward-compat with a text handler.
+type LoggingConfig struct {
+	Level  string `koanf:"level"`
+	Format string `koanf:"format"`
+}
+
+// AuditLogConfig carries audit_log table TTL knobs. Retention is the row
+// TTL applied to every audit row written via s3api.AuditMiddleware.
+// Accepts standard Go durations.
+type AuditLogConfig struct {
+	Retention time.Duration `koanf:"retention"`
+}
+
 func defaults() Config {
 	return Config{
 		Listen:              ":9000",
@@ -298,6 +330,18 @@ func defaults() Config {
 				Interval: 5 * time.Minute,
 			},
 		},
+		OTel: OTelConfig{
+			SampleRatio:  0.01,
+			Ringbuf:      true,
+			RingbufBytes: 4 << 20,
+		},
+		Logging: LoggingConfig{
+			Level:  "INFO",
+			Format: "json",
+		},
+		AuditLog: AuditLogConfig{
+			Retention: 30 * 24 * time.Hour,
+		},
 	}
 }
 
@@ -386,6 +430,13 @@ var envMap = map[string]string{
 	"STRATA_ACCESS_LOG_POLL_LIMIT":           "workers.access_log.poll_limit",
 	"STRATA_INVENTORY_INTERVAL":              "workers.inventory.interval",
 	"STRATA_INVENTORY_REGION":                "workers.inventory.region",
+	"STRATA_OTEL_EXPORTER_ENDPOINT":          "otel.endpoint",
+	"STRATA_OTEL_SAMPLE_RATIO":               "otel.sample_ratio",
+	"STRATA_OTEL_RINGBUF":                    "otel.ringbuf",
+	"STRATA_OTEL_RINGBUF_BYTES":              "otel.ringbuf_bytes",
+	"STRATA_LOG_LEVEL":                       "logging.level",
+	"STRATA_LOG_FORMAT":                      "logging.format",
+	"STRATA_AUDIT_RETENTION":                 "audit_log.retention",
 }
 
 func Load() (*Config, error) {
@@ -406,7 +457,16 @@ func Load() (*Config, error) {
 		if v == "" {
 			return "", nil
 		}
-		return envMap[s], v
+		key, ok := envMap[s]
+		if !ok {
+			return "", nil
+		}
+		if key == "audit_log.retention" {
+			if d, err := ParseAuditRetention(v); err == nil {
+				v = d.String()
+			}
+		}
+		return key, v
 	}), nil); err != nil {
 		return nil, fmt.Errorf("config env: %w", err)
 	}
@@ -414,6 +474,10 @@ func Load() (*Config, error) {
 	var out Config
 	if err := k.Unmarshal("", &out); err != nil {
 		return nil, fmt.Errorf("config unmarshal: %w", err)
+	}
+
+	if out.OTel.Endpoint == "" {
+		out.OTel.Endpoint = os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
 	}
 
 	if err := out.validate(); err != nil {
@@ -454,8 +518,50 @@ func (c *Config) validate() error {
 	}
 	c.clampWorkers()
 	c.clampAuthKMS()
+	c.clampObservability()
 	warnLegacyDrainStrict()
 	return nil
+}
+
+// clampObservability enforces the historical env-side ranges on the new
+// otel + audit_log TOML fields. Zero values pass through (consumers treat
+// them as "use default").
+func (c *Config) clampObservability() {
+	if c.OTel.SampleRatio < 0 {
+		slog.Warn("clamping config value", "key", "otel.sample_ratio", "value", c.OTel.SampleRatio, "min", 0.0)
+		c.OTel.SampleRatio = 0
+	}
+	if c.OTel.SampleRatio > 1 {
+		slog.Warn("clamping config value", "key", "otel.sample_ratio", "value", c.OTel.SampleRatio, "max", 1.0)
+		c.OTel.SampleRatio = 1
+	}
+	if c.OTel.RingbufBytes != 0 {
+		c.OTel.RingbufBytes = clampInt("otel.ringbuf_bytes", c.OTel.RingbufBytes, 1<<20, 1<<30)
+	}
+	if c.AuditLog.Retention != 0 {
+		c.AuditLog.Retention = clampDuration("audit_log.retention", c.AuditLog.Retention, time.Minute, 10*365*24*time.Hour)
+	}
+}
+
+// ParseAuditRetention parses an audit_log retention string. Accepts plain
+// Go durations and a bare "<N>d" days suffix (historical operator UX).
+// Empty input returns 0 — callers fall back to defaults() (30d).
+func ParseAuditRetention(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	if trimmed, ok := strings.CutSuffix(s, "d"); ok {
+		n, err := strconv.Atoi(trimmed)
+		if err != nil {
+			return 0, fmt.Errorf("audit_log.retention: %q: %w", s, err)
+		}
+		if n < 0 {
+			return 0, fmt.Errorf("audit_log.retention: negative value %q", s)
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	return time.ParseDuration(s)
 }
 
 // clampAuthKMS enforces the historical env-side ranges on the new

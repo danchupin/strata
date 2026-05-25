@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"time"
 
 	"github.com/google/uuid"
@@ -60,7 +59,10 @@ func buildRebalance(deps Dependencies) (Runner, error) {
 	}
 	notifier := buildDrainCompleteNotifier(deps.Logger, cfg.Workers.Notify.Targets)
 	tracer := deps.Tracer.Tracer("strata.worker.rebalance")
-	auditTTL := auditRetentionFromEnv(deps.Logger)
+	auditTTL := cfg.AuditLog.Retention
+	if auditTTL <= 0 {
+		auditTTL = rebalance.DefaultDrainAuditRetention
+	}
 	build := func(shardID int) *rebalance.Worker {
 		w, err := rebalance.New(rebalance.Config{
 			Meta:         deps.Meta,
@@ -163,46 +165,6 @@ func randomEventID() string {
 		return fmt.Sprintf("drain-%d", time.Now().UnixNano())
 	}
 	return "drain-" + hex.EncodeToString(buf[:])
-}
-
-// auditRetentionFromEnv re-reads STRATA_AUDIT_RETENTION inside the
-// rebalance worker so the drain.complete audit rows share the gateway's
-// TTL contract. Parse failure logs WARN and falls back to the rebalance
-// default (30d), matching s3api.DefaultAuditRetention. The env knob is
-// owned by US-004 (audit_log section); this stays an env read until
-// then.
-func auditRetentionFromEnv(logger *slog.Logger) time.Duration {
-	raw := os.Getenv("STRATA_AUDIT_RETENTION")
-	if raw == "" {
-		return rebalance.DefaultDrainAuditRetention
-	}
-	d, err := parseAuditRetention(raw)
-	if err != nil {
-		logger.Warn("rebalance: audit retention parse failed; using default",
-			"value", raw, "default", rebalance.DefaultDrainAuditRetention.String(), "error", err.Error())
-		return rebalance.DefaultDrainAuditRetention
-	}
-	if d <= 0 {
-		return rebalance.DefaultDrainAuditRetention
-	}
-	return d
-}
-
-// parseAuditRetention mirrors s3api.ParseAuditRetention without taking
-// the s3api dep — keeps the worker package free of HTTP imports.
-// Accepts plain Go durations and a bare "<N>d" days suffix.
-func parseAuditRetention(s string) (time.Duration, error) {
-	if len(s) > 0 && s[len(s)-1] == 'd' {
-		var n int
-		if _, err := fmt.Sscanf(s, "%dd", &n); err != nil {
-			return 0, err
-		}
-		if n < 0 {
-			return 0, fmt.Errorf("negative retention: %q", s)
-		}
-		return time.Duration(n) * 24 * time.Hour, nil
-	}
-	return time.ParseDuration(s)
 }
 
 // ResolvedRebalanceConfig is the env-resolved rebalance worker tunable

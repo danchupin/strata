@@ -17,15 +17,15 @@ canonical section name — the heuristic shown in the **Expected TOML key**
 column below is the naive first-underscore split and WILL be wrong for
 multi-word sections. The actual envMap entry is the source of truth.
 
-**Counts** (post US-003 audit, 2026-05-25):
+**Counts** (post US-004 audit, 2026-05-25):
 
 | Bucket                  | Count |
 |-------------------------|------:|
-| Total STRATA_* env vars |   134 |
-| In envMap (wired)       |    82 |
+| Total STRATA_* env vars |   136 |
+| In envMap (wired)       |    89 |
 | Exempt (test/bootstrap) |    24 |
-| Unmapped (gap)          |    28 |
-| Present in example TOML |    27 |
+| Unmapped (gap)          |    23 |
+| Present in example TOML |    34 |
 
 Story coverage hints (final placement decided by each story's author):
 
@@ -34,35 +34,31 @@ Story coverage hints (final placement decided by each story's author):
   notify.* / replicator.* / access_log.* / inventory.* knobs. ✅ DONE.
 - **US-003 auth + KMS** — auth.* / kms.* / key.max_age / sse.vault.* /
   kms.dek_cache_ttl. ✅ DONE.
-- **US-004 observability** — otel.* / log.level / cassandra.slow_ms /
-  audit.retention / console.theme_default / prometheus.url.
+- **US-004 observability** — otel.* / logging.level / logging.format /
+  audit_log.retention. ✅ DONE. (cassandra.slow_ms / console.theme_default /
+  prometheus.url remain — moved to US-005 sweep.)
 - **US-005 misc sweep** — bucketstats.* / rados.health_oid / rados.pool_size /
   rados.batch_ops / rados.get_prefetch / rados.put_concurrency /
   manifest.format / vhost.pattern / cluster.name / node.id /
   sse.master_* / mfa.secrets / console.jwt_secret / jwt.secret_file /
   jwt.shared.
 
-## Gap rows (remaining after US-003)
+## Gap rows (remaining after US-004)
 
 | Env var                                | Expected TOML key (heuristic)   | In TOML example? | Likely story |
 |----------------------------------------|---------------------------------|------------------|--------------|
-| `STRATA_AUDIT_RETENTION`               | `audit.retention` (→ `audit_log.retention`)             | no | US-004 |
 | `STRATA_BUCKETSTATS_INTERVAL`          | `bucketstats.interval` (→ `bucket_stats.interval`)      | no | US-005 |
 | `STRATA_BUCKETSTATS_TOPN`              | `bucketstats.topn` (→ `bucket_stats.topn`)              | no | US-005 |
-| `STRATA_CASSANDRA_SLOW_MS`             | `cassandra.slow_ms`                                     | no | US-004 |
+| `STRATA_CASSANDRA_SLOW_MS`             | `cassandra.slow_ms`                                     | no | US-005 |
 | `STRATA_CLUSTER_NAME`                  | `cluster.name`                                          | no | US-005 |
 | `STRATA_CONSOLE_JWT_SECRET`            | `console.jwt_secret`                                    | no | US-005 |
-| `STRATA_CONSOLE_THEME_DEFAULT`         | `console.theme_default`                                 | no | US-004 |
+| `STRATA_CONSOLE_THEME_DEFAULT`         | `console.theme_default`                                 | no | US-005 |
 | `STRATA_JWT_SECRET_FILE`               | `jwt.secret_file` (→ `auth.jwt_secret_file`)            | no | US-005 |
 | `STRATA_JWT_SHARED`                    | `jwt.shared` (→ `auth.jwt_shared`)                      | no | US-005 |
-| `STRATA_LOG_LEVEL`                     | `log.level` (→ `logging.level`)                         | no | US-004 |
 | `STRATA_MANIFEST_FORMAT`               | `manifest.format`                                       | no | US-005 |
 | `STRATA_MFA_SECRETS`                   | `mfa.secrets` (→ `auth.mfa_secrets`)                    | no | US-005 |
 | `STRATA_NODE_ID`                       | `node.id`                                               | no | US-005 |
-| `STRATA_OTEL_RINGBUF`                  | `otel.ringbuf`                                          | no | US-004 |
-| `STRATA_OTEL_RINGBUF_BYTES`            | `otel.ringbuf_bytes`                                    | no | US-004 |
-| `STRATA_OTEL_SAMPLE_RATIO`             | `otel.sample_ratio`                                     | no | US-004 |
-| `STRATA_PROMETHEUS_URL`                | `prometheus.url`                                        | no | US-004 |
+| `STRATA_PROMETHEUS_URL`                | `prometheus.url`                                        | no | US-005 |
 | `STRATA_RADOS_BATCH_OPS`               | `rados.batch_ops`                                       | no | US-005 |
 | `STRATA_RADOS_GET_PREFETCH`            | `rados.get_prefetch`                                    | no | US-005 |
 | `STRATA_RADOS_HEALTH_OID`              | `rados.health_oid`                                      | no | US-005 |
@@ -97,7 +93,7 @@ both the audit script and the US-006 drift-lint test):
 
 ## Already wired (envMap rows — no action required)
 
-See `internal/config/config.go::envMap` for the full set (82 entries today).
+See `internal/config/config.go::envMap` for the full set (89 entries today).
 Highlights:
 
 - Listen / region / data_backend / meta_backend / shutdown_wait /
@@ -114,6 +110,9 @@ Highlights:
 - Workers (`workers.enabled` + per-worker sub-sections: gc / lifecycle /
   rebalance / usage_rollup / manifest_rewriter / audit_export /
   quota_reconcile / notify / replicator / access_log / inventory).
+- OTel (endpoint / sample_ratio / ringbuf / ringbuf_bytes).
+- Logging (level / format).
+- Audit log (retention).
 
 These rows MUST stay wired through US-002..US-005 and US-006 — any
 regression failing the drift lint is a CI break.
