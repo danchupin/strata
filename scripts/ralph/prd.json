@@ -116,8 +116,8 @@
         "Tests pass"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Drift-lint test `internal/config/env_toml_parity_test.go` landed (default build tag — runs under standard `go test`). Walks Config via reflect.TypeFor[Config]() to collect koanf-leaf keys; parses deploy/strata.toml.example via line-by-line regex (section `[a.b]` + commented/live `key =` lines, mirrors audit-script awk); parses docs/site/content/reference/env-vars.md row table (last column = TOML key, em-dash placeholder for exempt rows). Four assertions: (a) every non-exempt env var has an envMap entry, (b) every envMap value points at a real koanf-tagged Config field, (c) every Config koanf leaf has a commented/live line in TOML example, (d) every non-exempt env var has a docs row whose TOML cell matches envMap (exempt rows MUST carry em-dash). deploy/strata.toml.example gains [tikv] + [s3] blocks (previously missed by US-002..005 — covered by new assertion (c)). docs/site/content/reference/env-vars.md grows 6th `TOML key` column across all 122 rows; em-dash placeholder for the 5 exempt rows (CONFIG_FILE / VERSION / STORAGE_HEALTH_OVERRIDE / ADMIN_ENDPOINT / ADMIN_PRINCIPAL / PROM_PUSHGATEWAY / DRAIN_STRICT / S3_BACKEND_* legacy block / test-only block); maintainer-note callout updated to document the drift-lint gate. scripts/audit-env-toml-parity.sh awk section-regex extended to `[a-z_][a-z0-9_.]*` so nested sections like `[kms.aws]` / `[workers.gc]` produce dotted keys; exempt-list comment cleanup (the COLD comment referenced an outdated audit-collector flavour). Audit re-run: 135 STRATA_* vars, 112 wired (83.0%), 23 exempt (17.0%), 0 unmapped. Quality gates: `go vet ./...` green; `go build ./...` green; `go test ./...` green (47 packages); `go test -race ./internal/config/...` green; `make docs-build` green (94 pages, hugo 0.161.1 extended). No new tests required beyond the drift-lint suite — every existing contract test still passes unchanged."
     },
     {
       "id": "US-007",

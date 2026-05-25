@@ -12,6 +12,16 @@ meta_backend = "cassandra"     # "memory" | "cassandra"
 shutdown_wait = "10s"
 default_bucket_shards = 64
 
+[tikv]
+# Required when meta_backend=tikv. Comma-separated PD endpoints.
+pd_endpoints = ""
+
+[s3]
+# Required when data_backend=s3. JSON array of S3ClusterSpec.
+clusters = ""
+# Required when data_backend=s3. JSON object of ClassSpec.
+classes  = ""
+
 [cassandra]
 hosts       = ["cassandra"]
 keyspace    = "strata"

@@ -46,9 +46,9 @@ var ExemptEnvVars = struct {
 		"STRATA_ADMIN_PRINCIPAL",
 		"STRATA_PROM_PUSHGATEWAY",
 		"STRATA_TIKV_TEST_PD_ENDPOINTS",
-		// "STRATA_COLD" is a storage-class identifier used in S3 lifecycle
+		// STRATA_COLD is a storage-class identifier used in S3 lifecycle
 		// rules, not an environment variable. The audit's broad
-		// `= "STRATA_X"` collector picks it up — exempt it explicitly.
+		// quoted-literal collector picks it up — exempt it explicitly.
 		"STRATA_COLD",
 	},
 	Prefixes: []string{

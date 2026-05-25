@@ -68,7 +68,7 @@ envmap_value_for() {
 # --- 3. TOML keys present in deploy/strata.toml.example (both live + commented). -
 TOML_KEYS="$(mktemp)"
 awk '
-  /^\[[a-z_][a-z0-9_]*\]/ {
+  /^\[[a-z_][a-z0-9_.]*\]/ {
     s=$0; gsub(/\[|\]/, "", s); section=s; next
   }
   /^[[:space:]]*#?[[:space:]]*[a-z_][a-z0-9_]*[[:space:]]*=/ {
