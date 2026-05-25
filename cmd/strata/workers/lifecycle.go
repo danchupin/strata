@@ -1,7 +1,6 @@
 package workers
 
 import (
-	"os"
 	"time"
 
 	"github.com/danchupin/strata/internal/lifecycle"
@@ -16,14 +15,16 @@ func init() {
 }
 
 func buildLifecycle(deps Dependencies) (Runner, error) {
-	replicaCount := clampShards(intFromEnv("STRATA_GC_SHARDS", 1))
+	cfg := workerCfg(deps)
+	lcCfg := cfg.Workers.Lifecycle
+	replicaCount := clampShards(orInt(cfg.Workers.GC.Shards, 1))
 	return &lifecycle.Worker{
 		Meta:        deps.Meta,
 		Data:        deps.Data,
 		Region:      deps.Region,
-		Interval:    durationFromEnv("STRATA_LIFECYCLE_INTERVAL", 60*time.Second),
-		AgeUnit:     ageUnitFromEnv("STRATA_LIFECYCLE_UNIT", 24*time.Hour),
-		Concurrency: clampConcurrency(intFromEnv("STRATA_LIFECYCLE_CONCURRENCY", 1)),
+		Interval:    orDuration(lcCfg.Interval, 60*time.Second),
+		AgeUnit:     ageUnitOrDefault(lcCfg.Unit, 24*time.Hour),
+		Concurrency: clampConcurrency(orInt(lcCfg.Concurrency, 1)),
 		Logger:      deps.Logger,
 		Locker:      deps.Locker,
 		ReplicaInfo: lifecycleReplicaInfo(replicaCount),
@@ -51,11 +52,11 @@ func lifecycleReplicaInfo(replicaCount int) func() (int, int) {
 	}
 }
 
-// ageUnitFromEnv mirrors the legacy cmd/strata-lifecycle string -> duration
-// switch so existing STRATA_LIFECYCLE_UNIT values (second/minute/hour/day)
-// keep working byte-for-byte.
-func ageUnitFromEnv(key string, fallback time.Duration) time.Duration {
-	switch os.Getenv(key) {
+// ageUnitOrDefault maps the cfg-resolved unit string ("second" | "minute" |
+// "hour" | "day") to a time.Duration; unrecognised / empty values fall back
+// to the supplied default.
+func ageUnitOrDefault(unit string, fallback time.Duration) time.Duration {
+	switch unit {
 	case "second":
 		return time.Second
 	case "minute":

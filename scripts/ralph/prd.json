@@ -40,8 +40,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Workers section wired: Config.Workers.{Enabled, GC, Lifecycle, Rebalance, UsageRollup, ManifestRewriter, AuditExport, QuotaReconcile, Notify, Replicator, AccessLog, Inventory}. envMap gains 37 worker entries (existing GC + Lifecycle entries remapped to workers.<name>.* prefix; hard cutover OK per [Pre-launch no deploys]). Validate() now clamps GC concurrency [1,256] / shards [1,1024] + rebalance interval [1m,24h] / rate_mb_s [1,10000] / inflight [1,64] / shards [1,1024] with WARN log on out-of-range. Worker Build functions consume deps.Cfg.Workers.<X>.* via workerCfg helper (Cfg field added to Dependencies; serverapp wires; tests fall back to config.Load when Cfg nil so t.Setenv flows through unchanged). notify.RouterFromSpec extracted from RouterFromEnv so workers/notify.go + rebalance drain-complete sink consume cfg.Workers.Notify.Targets (env precedence preserved via koanf). 4 contract tests in internal/config/workers_test.go (TOML-only round-trip / env override / clamp on Load / defaults baseline). Audit re-run: 68 wired (+37) vs 37 unmapped (US-003/004/005 territory). deploy/strata.toml.example refreshed with full [workers.*] block; legacy [gc] + [lifecycle] removed (no users — pre-launch)."
     },
     {
       "id": "US-003",

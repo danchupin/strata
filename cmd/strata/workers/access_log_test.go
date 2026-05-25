@@ -51,24 +51,18 @@ func TestBuildAccessLogDefaultsWhenEnvUnset(t *testing.T) {
 	}
 }
 
-func TestInt64FromEnv(t *testing.T) {
-	t.Setenv("STRATA_ACCESS_LOG_INT64_TEST", "")
-	if got := int64FromEnv("STRATA_ACCESS_LOG_INT64_TEST", 5); got != 5 {
-		t.Errorf("int64FromEnv unset = %d, want 5", got)
+func TestOrInt64(t *testing.T) {
+	if got := orInt64(0, 5); got != 5 {
+		t.Errorf("orInt64 unset = %d, want 5", got)
 	}
-	t.Setenv("STRATA_ACCESS_LOG_INT64_TEST", "1024")
-	if got := int64FromEnv("STRATA_ACCESS_LOG_INT64_TEST", 5); got != 1024 {
-		t.Errorf("int64FromEnv set = %d, want 1024", got)
-	}
-	t.Setenv("STRATA_ACCESS_LOG_INT64_TEST", "not-a-number")
-	if got := int64FromEnv("STRATA_ACCESS_LOG_INT64_TEST", 5); got != 5 {
-		t.Errorf("int64FromEnv malformed = %d, want fallback 5", got)
+	if got := orInt64(1024, 5); got != 1024 {
+		t.Errorf("orInt64 set = %d, want 1024", got)
 	}
 }
 
 func TestAccessLogDefaultIntervalMatchesLegacy(t *testing.T) {
 	want := 5 * time.Minute
-	if got := durationFromEnv("STRATA_ACCESS_LOG_INTERVAL_UNSET", want); got != want {
-		t.Errorf("durationFromEnv default = %v, want %v", got, want)
+	if got := orDuration(0, want); got != want {
+		t.Errorf("orDuration default = %v, want %v", got, want)
 	}
 }

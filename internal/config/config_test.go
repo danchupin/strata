@@ -161,7 +161,7 @@ func TestLoadEmptyEnvDoesNotOverrideTOMLValue(t *testing.T) {
 
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "strata.toml")
-	if err := os.WriteFile(cfgPath, []byte("[gc]\ninterval = \"30s\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(cfgPath, []byte("[workers.gc]\ninterval = \"30s\"\n"), 0o600); err != nil {
 		t.Fatalf("write toml: %v", err)
 	}
 	t.Setenv("STRATA_CONFIG_FILE", cfgPath)
@@ -171,8 +171,8 @@ func TestLoadEmptyEnvDoesNotOverrideTOMLValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.GC.Interval != 30*time.Second {
-		t.Fatalf("gc.interval after empty STRATA_GC_INTERVAL: got %s want 30s "+
-			"(empty env regressed: re-clobbering TOML/default)", cfg.GC.Interval)
+	if cfg.Workers.GC.Interval != 30*time.Second {
+		t.Fatalf("workers.gc.interval after empty STRATA_GC_INTERVAL: got %s want 30s "+
+			"(empty env regressed: re-clobbering TOML/default)", cfg.Workers.GC.Interval)
 	}
 }

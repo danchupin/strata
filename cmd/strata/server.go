@@ -122,7 +122,9 @@ func (a *app) runServer(ctx context.Context, args []string) int {
 	// Resolve the requested worker list against the package-level registry
 	// before any backend is built so unknown names fail startup immediately
 	// (US-004 acceptance: "unknown names cause immediate startup error").
-	selected, err := workers.Resolve(parseWorkers(os.Getenv("STRATA_WORKERS")))
+	// cfg.Workers.Enabled carries STRATA_WORKERS via the koanf env provider
+	// (env > TOML > defaults precedence).
+	selected, err := workers.Resolve(parseWorkers(cfg.Workers.Enabled))
 	if err != nil {
 		fmt.Fprintln(a.err, "strata server: workers:", err.Error())
 		return 2

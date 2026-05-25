@@ -2,7 +2,6 @@ package workers
 
 import (
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/danchupin/strata/internal/metrics"
@@ -17,9 +16,11 @@ func init() {
 }
 
 func buildReplicator(deps Dependencies) (Runner, error) {
+	cfg := workerCfg(deps)
+	rCfg := cfg.Workers.Replicator
 	dispatcher := &replication.HTTPDispatcher{
-		Client: &http.Client{Timeout: durationFromEnv("STRATA_REPLICATOR_HTTP_TIMEOUT", 30*time.Second)},
-		Scheme: stringFromEnv("STRATA_REPLICATOR_PEER_SCHEME", "https"),
+		Client: &http.Client{Timeout: orDuration(rCfg.HTTPTimeout, 30*time.Second)},
+		Scheme: orString(rCfg.PeerScheme, "https"),
 	}
 	return replication.New(replication.Config{
 		Meta:        deps.Meta,
@@ -27,17 +28,10 @@ func buildReplicator(deps Dependencies) (Runner, error) {
 		Dispatcher:  dispatcher,
 		Logger:      deps.Logger,
 		Metrics:     metrics.ReplicationObserver{},
-		Interval:    durationFromEnv("STRATA_REPLICATOR_INTERVAL", 5*time.Second),
-		MaxRetries:  intFromEnv("STRATA_REPLICATOR_MAX_RETRIES", 6),
-		BackoffBase: durationFromEnv("STRATA_REPLICATOR_BACKOFF_BASE", 1*time.Second),
-		PollLimit:   intFromEnv("STRATA_REPLICATOR_POLL_LIMIT", 100),
+		Interval:    orDuration(rCfg.Interval, 5*time.Second),
+		MaxRetries:  orInt(rCfg.MaxRetries, 6),
+		BackoffBase: orDuration(rCfg.BackoffBase, 1*time.Second),
+		PollLimit:   orInt(rCfg.PollLimit, 100),
 		Tracer:      deps.Tracer.Tracer("strata.worker.replicator"),
 	})
-}
-
-func stringFromEnv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }

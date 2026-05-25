@@ -34,12 +34,71 @@ classes = "STANDARD=strata.rgw.buckets.data,STANDARD_IA=strata.rgw.buckets.ia,GL
 mode              = "off"       # "off" | "required"
 static_credentials = ""         # "access:secret[:owner],..."
 
-[lifecycle]
-interval       = "60s"
-unit           = "day"          # "day" | "hour" | "minute" | "second"
-metrics_listen = ":9101"
+[workers]
+# Comma-separated worker names (overrides STRATA_WORKERS).
+enabled = ""
 
-[gc]
+[workers.gc]
 interval       = "30s"
 grace          = "5m"
+batch_size     = 0              # 0 = use gc.Worker.Batch default
+concurrency    = 1              # Range: [1, 256]
+shards         = 1              # Range: [1, 1024]
+dual_write     = false
 metrics_listen = ":9100"
+
+[workers.lifecycle]
+interval       = "60s"
+unit           = "day"          # "day" | "hour" | "minute" | "second"
+concurrency    = 1              # Range: [1, 256]
+metrics_listen = ":9101"
+
+[workers.rebalance]
+interval  = "5m"                # Range: [1m, 24h]
+rate_mb_s = 100                 # Range: [1, 10000]
+inflight  = 4                   # Range: [1, 64]
+shards    = 1                   # Range: [1, 1024]
+
+[workers.usage_rollup]
+at               = "00:00"
+interval         = "24h"
+samples_per_day  = 24
+
+[workers.manifest_rewriter]
+interval     = "24h"
+batch_limit  = 500
+dry_run      = false
+
+[workers.audit_export]
+bucket   = ""                   # Required when audit-export worker enabled.
+prefix   = ""
+after    = "720h"               # 30d default
+interval = "24h"
+
+[workers.quota_reconcile]
+interval = "6h"
+
+[workers.notify]
+# <key>=<spec>,…  (webhook = "url|secret"; SQS = "sqs:queue|region")
+targets      = ""
+interval     = "5s"
+max_retries  = 6
+backoff_base = "1s"
+poll_limit   = 100
+
+[workers.replicator]
+interval     = "5s"
+max_retries  = 6
+backoff_base = "1s"
+poll_limit   = 100
+http_timeout = "30s"
+peer_scheme  = "https"
+
+[workers.access_log]
+interval        = "5m"
+max_flush_bytes = 5242880       # 5 MiB
+poll_limit      = 10000
+
+[workers.inventory]
+interval = "5m"
+region   = ""                   # Falls back to top-level `region` when empty.

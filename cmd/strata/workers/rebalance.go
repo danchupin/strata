@@ -33,27 +33,22 @@ func init() {
 	})
 }
 
-// buildRebalance reads STRATA_REBALANCE_INTERVAL / _RATE_MB_S / _INFLIGHT
-// / _SHARDS at constructor time, clamps out-of-range values with a WARN,
-// and wires the prometheus observer. Phase 2 (US-002 rebalance-scale):
+// buildRebalance consumes deps.Cfg.Workers.Rebalance for tunables.
+// Range clamping happens inside config.Config.clampWorkers so TOML +
+// env loads land at the same post-clamp values; the worker reads the
+// clamped value directly. Phase 2 (US-002 rebalance-scale):
 // SkipLease=true — the per-shard leases `rebalance-leader-<i>` are owned
 // by *rebalance.ShardedFanOut, not the outer supervisor. The PlanEmitter
 // is a MoverChain seeded with whichever movers the build tag enables
 // (RADOS under `ceph`, S3 under US-005); chains with no movers fall back
 // to the plan-logging behaviour shipped in US-003.
 func buildRebalance(deps Dependencies) (Runner, error) {
-	interval := clampDuration(deps,
-		"STRATA_REBALANCE_INTERVAL", 5*time.Minute,
-		1*time.Minute, 24*time.Hour,
-	)
-	rateMBPerSec := clampInt(deps, "STRATA_REBALANCE_RATE_MB_S", 100, 1, 10000)
-	inflight := clampInt(deps, "STRATA_REBALANCE_INFLIGHT", 4, 1, 64)
-	rawShards := intFromEnv("STRATA_REBALANCE_SHARDS", 1)
-	shards := clampShards(rawShards)
-	if shards != rawShards {
-		deps.Logger.Warn("rebalance: clamping env",
-			"env", "STRATA_REBALANCE_SHARDS", "value", rawShards, "clamped", shards)
-	}
+	cfg := workerCfg(deps)
+	rbCfg := cfg.Workers.Rebalance
+	interval := orDuration(rbCfg.Interval, 5*time.Minute)
+	rateMBPerSec := orInt(rbCfg.RateMBPerS, 100)
+	inflight := orInt(rbCfg.Inflight, 4)
+	shards := clampShards(orInt(rbCfg.Shards, 1))
 	throttle := rebalance.NewThrottle(int64(rateMBPerSec)*1024*1024, int64(rateMBPerSec)*1024*1024)
 	chain := &rebalance.MoverChain{
 		Movers: rebalanceMovers(deps, throttle, inflight),
@@ -63,7 +58,7 @@ func buildRebalance(deps Dependencies) (Runner, error) {
 	if p, ok := deps.Data.(data.ClusterStatsProbe); ok {
 		probe = p
 	}
-	notifier := buildDrainCompleteNotifier(deps.Logger)
+	notifier := buildDrainCompleteNotifier(deps.Logger, cfg.Workers.Notify.Targets)
 	tracer := deps.Tracer.Tracer("strata.worker.rebalance")
 	auditTTL := auditRetentionFromEnv(deps.Logger)
 	build := func(shardID int) *rebalance.Worker {
@@ -104,14 +99,14 @@ func buildRebalance(deps Dependencies) (Runner, error) {
 	return fan, nil
 }
 
-// buildDrainCompleteNotifier resolves STRATA_NOTIFY_TARGETS into a
-// best-effort drain-complete fan-out (US-005 drain-lifecycle).
-// `ErrNoTargets` (env unset) returns nil — the worker still logs +
+// buildDrainCompleteNotifier resolves the workers.notify.targets spec
+// into a best-effort drain-complete fan-out (US-005 drain-lifecycle).
+// `ErrNoTargets` (spec unset) returns nil — the worker still logs +
 // audits + bumps the metric on every transition; the notifier is purely
 // additive. Any other parse error logs a WARN and returns nil so a
-// malformed env never blocks the rebalance worker from starting.
-func buildDrainCompleteNotifier(logger *slog.Logger) rebalance.DrainNotifier {
-	router, err := notify.RouterFromEnv(notify.WithSQSClientFactory(sqsClientFactory))
+// malformed spec never blocks the rebalance worker from starting.
+func buildDrainCompleteNotifier(logger *slog.Logger, targets string) rebalance.DrainNotifier {
+	router, err := notify.RouterFromSpec(targets, notify.WithSQSClientFactory(sqsClientFactory))
 	if err != nil {
 		if !errors.Is(err, notify.ErrNoTargets) {
 			logger.Warn("rebalance: drain-complete notifier disabled",
@@ -173,7 +168,9 @@ func randomEventID() string {
 // auditRetentionFromEnv re-reads STRATA_AUDIT_RETENTION inside the
 // rebalance worker so the drain.complete audit rows share the gateway's
 // TTL contract. Parse failure logs WARN and falls back to the rebalance
-// default (30d), matching s3api.DefaultAuditRetention.
+// default (30d), matching s3api.DefaultAuditRetention. The env knob is
+// owned by US-004 (audit_log section); this stays an env read until
+// then.
 func auditRetentionFromEnv(logger *slog.Logger) time.Duration {
 	raw := os.Getenv("STRATA_AUDIT_RETENTION")
 	if raw == "" {
@@ -220,65 +217,21 @@ type ResolvedRebalanceConfig struct {
 	Shards          int
 }
 
-// ResolveRebalanceConfig re-reads STRATA_REBALANCE_* env vars with the
+// ResolveRebalanceConfig re-reads workers.rebalance.* tunables with the
 // same clamps as buildRebalance. Read-only; no side effects. Kept here
 // (rather than the adminapi layer) so the snapshot stays lock-step with
 // the worker constructor.
 func ResolveRebalanceConfig() ResolvedRebalanceConfig {
-	interval := durationFromEnv("STRATA_REBALANCE_INTERVAL", 5*time.Minute)
-	switch {
-	case interval < time.Minute:
-		interval = time.Minute
-	case interval > 24*time.Hour:
-		interval = 24 * time.Hour
-	}
-	rateMBPerSec := clampRange(intFromEnv("STRATA_REBALANCE_RATE_MB_S", 100), 1, 10000)
-	inflight := clampRange(intFromEnv("STRATA_REBALANCE_INFLIGHT", 4), 1, 64)
-	shards := clampShards(intFromEnv("STRATA_REBALANCE_SHARDS", 1))
+	cfg := workerCfg(Dependencies{})
+	rbCfg := cfg.Workers.Rebalance
+	interval := orDuration(rbCfg.Interval, 5*time.Minute)
+	rateMBPerSec := orInt(rbCfg.RateMBPerS, 100)
+	inflight := orInt(rbCfg.Inflight, 4)
+	shards := clampShards(orInt(rbCfg.Shards, 1))
 	return ResolvedRebalanceConfig{
 		IntervalSeconds: int(interval.Seconds()),
 		RateMBPerSec:    rateMBPerSec,
 		Inflight:        inflight,
 		Shards:          shards,
 	}
-}
-
-func clampRange(v, lo, hi int) int {
-	if v < lo {
-		return lo
-	}
-	if v > hi {
-		return hi
-	}
-	return v
-}
-
-func clampDuration(deps Dependencies, key string, fallback, lo, hi time.Duration) time.Duration {
-	v := durationFromEnv(key, fallback)
-	if v < lo {
-		deps.Logger.Warn("rebalance: clamping env",
-			"env", key, "value", v.String(), "min", lo.String())
-		return lo
-	}
-	if v > hi {
-		deps.Logger.Warn("rebalance: clamping env",
-			"env", key, "value", v.String(), "max", hi.String())
-		return hi
-	}
-	return v
-}
-
-func clampInt(deps Dependencies, key string, fallback, lo, hi int) int {
-	v := intFromEnv(key, fallback)
-	if v < lo {
-		deps.Logger.Warn("rebalance: clamping env",
-			"env", key, "value", v, "min", lo)
-		return lo
-	}
-	if v > hi {
-		deps.Logger.Warn("rebalance: clamping env",
-			"env", key, "value", v, "max", hi)
-		return hi
-	}
-	return v
 }

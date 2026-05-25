@@ -324,6 +324,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 				Locker:            adminLocker,
 				Region:            cfg.RegionName,
 				RebalanceProgress: rebalanceProgress,
+				Cfg:               cfg,
 			},
 		}
 	}

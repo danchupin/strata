@@ -47,21 +47,19 @@ func TestBuildInventoryDefaultsWhenEnvUnset(t *testing.T) {
 
 func TestInventoryDefaultIntervalMatchesLegacy(t *testing.T) {
 	want := 5 * time.Minute
-	if got := durationFromEnv("STRATA_INVENTORY_INTERVAL_UNSET", want); got != want {
-		t.Errorf("durationFromEnv default = %v, want %v", got, want)
+	if got := orDuration(0, want); got != want {
+		t.Errorf("orDuration default = %v, want %v", got, want)
 	}
 }
 
 func TestInventoryRegionPrecedence(t *testing.T) {
-	t.Setenv("STRATA_INVENTORY_REGION", "")
-	if got := inventoryRegion(""); got != "default" {
+	if got := inventoryRegion("", ""); got != "default" {
 		t.Errorf("inventoryRegion empty = %q, want default", got)
 	}
-	if got := inventoryRegion("us-east-2"); got != "us-east-2" {
+	if got := inventoryRegion("", "us-east-2"); got != "us-east-2" {
 		t.Errorf("inventoryRegion deps = %q, want us-east-2", got)
 	}
-	t.Setenv("STRATA_INVENTORY_REGION", "eu-west-1")
-	if got := inventoryRegion("us-east-2"); got != "eu-west-1" {
-		t.Errorf("inventoryRegion env wins = %q, want eu-west-1", got)
+	if got := inventoryRegion("eu-west-1", "us-east-2"); got != "eu-west-1" {
+		t.Errorf("inventoryRegion cfg wins = %q, want eu-west-1", got)
 	}
 }
