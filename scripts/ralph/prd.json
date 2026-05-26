@@ -27,8 +27,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped via commit 3c9d8bd. 9 PRD metrics + 3 rebalance categorisation gauges registered + prewarmed; observer adapters wired across heartbeat / rados / bucketstats / tikv / data-s3 / inventory / workers / rebalance; smoke probe confirms 9 sample + 9 HELP lines."
     },
     {
       "id": "US-002",
