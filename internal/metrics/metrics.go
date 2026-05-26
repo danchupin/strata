@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -344,7 +345,13 @@ var (
 	)
 )
 
+var registerOnce sync.Once
+
 func Register() {
+	registerOnce.Do(register)
+}
+
+func register() {
 	prometheus.MustRegister(
 		HTTPRequests, HTTPDuration,
 		CassandraQueryDuration,

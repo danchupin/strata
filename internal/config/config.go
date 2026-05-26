@@ -26,6 +26,7 @@ type Config struct {
 
 	HTTP        HTTPConfig        `koanf:"http"`
 	TLS         TLSConfig         `koanf:"tls"`
+	AdminListen AdminListenConfig `koanf:"admin_listen"`
 	Cassandra   CassandraConfig   `koanf:"cassandra"`
 	TiKV        TiKVConfig        `koanf:"tikv"`
 	RADOS       RADOSConfig       `koanf:"rados"`
@@ -63,6 +64,38 @@ type HTTPConfig struct {
 	WriteTimeout      time.Duration `koanf:"write_timeout"`
 	IdleTimeout       time.Duration `koanf:"idle_timeout"`
 	MaxHeaderBytes    int           `koanf:"max_header_bytes"`
+}
+
+// AdminListenConfig wires the optional admin/console/metrics/healthz listener
+// onto a separate port (US-008 harden-gateway). Empty Listen → backwards-
+// compat single-port shape preserved (S3 + admin share cfg.Listen). Set Listen
+// to e.g. "127.0.0.1:9001" to bind admin endpoints to loopback or RFC1918
+// while keeping the S3 surface on cfg.Listen.
+//
+// When split, the admin listener owns: /admin/v1/, /console/, /metrics,
+// /healthz, /readyz. The S3 catch-all (/*) stays on the primary listener.
+//
+// HTTP timeouts apply to the admin listener only; defaults match the main
+// HTTP family except WriteTimeout=2m (no large multipart on admin).
+//
+// TLS is optional: empty CertFile/KeyFile → plain HTTP (typical loopback
+// shape). When set, the listener terminates TLS. ClientCAFile flips to
+// RequireAndVerifyClientCert (mTLS); empty leaves client auth disabled.
+type AdminListenConfig struct {
+	Listen string         `koanf:"listen"`
+	HTTP   HTTPConfig     `koanf:"http"`
+	TLS    AdminTLSConfig `koanf:"tls"`
+}
+
+// AdminTLSConfig wires the optional admin-listener TLS terminator (US-008).
+// Empty CertFile + KeyFile → plain HTTP on the admin listener. When set, the
+// admin listener uses a fresh tls.Config built from these PEMs (no SNI / no
+// hot-reload — kept simple). ClientCAFile (PEM) enables mTLS via
+// RequireAndVerifyClientCert.
+type AdminTLSConfig struct {
+	CertFile     string `koanf:"cert_file"`
+	KeyFile      string `koanf:"key_file"`
+	ClientCAFile string `koanf:"client_ca_file"`
 }
 
 // TLSConfig wires the built-in TLS listener (US-002 + US-003
@@ -470,6 +503,15 @@ func defaults() Config {
 			CipherProfile:  "mozilla-modern",
 			ReloadInterval: 60 * time.Second,
 		},
+		AdminListen: AdminListenConfig{
+			HTTP: HTTPConfig{
+				ReadHeaderTimeout: 10 * time.Second,
+				ReadTimeout:       60 * time.Second,
+				WriteTimeout:      2 * time.Minute,
+				IdleTimeout:       120 * time.Second,
+				MaxHeaderBytes:    1 << 20,
+			},
+		},
 		Cassandra: CassandraConfig{
 			Hosts:       []string{"127.0.0.1"},
 			Keyspace:    "strata",
@@ -597,6 +639,15 @@ var envMap = map[string]string{
 	"STRATA_TLS_CERT_DIR":                    "tls.cert_dir",
 	"STRATA_TLS_CLIENT_CA_FILE":              "tls.client_ca_file",
 	"STRATA_TLS_RELOAD_INTERVAL":             "tls.reload_interval",
+	"STRATA_ADMIN_LISTEN":                    "admin_listen.listen",
+	"STRATA_ADMIN_HTTP_READ_HEADER_TIMEOUT":  "admin_listen.http.read_header_timeout",
+	"STRATA_ADMIN_HTTP_READ_TIMEOUT":         "admin_listen.http.read_timeout",
+	"STRATA_ADMIN_HTTP_WRITE_TIMEOUT":        "admin_listen.http.write_timeout",
+	"STRATA_ADMIN_HTTP_IDLE_TIMEOUT":         "admin_listen.http.idle_timeout",
+	"STRATA_ADMIN_HTTP_MAX_HEADER_BYTES":     "admin_listen.http.max_header_bytes",
+	"STRATA_ADMIN_TLS_CERT_FILE":             "admin_listen.tls.cert_file",
+	"STRATA_ADMIN_TLS_KEY_FILE":              "admin_listen.tls.key_file",
+	"STRATA_ADMIN_TLS_CLIENT_CA_FILE":        "admin_listen.tls.client_ca_file",
 	"STRATA_CASSANDRA_HOSTS":                 "cassandra.hosts",
 	"STRATA_CASSANDRA_KEYSPACE":              "cassandra.keyspace",
 	"STRATA_CASSANDRA_DC":                    "cassandra.local_dc",
@@ -799,6 +850,10 @@ func (c *Config) validate() error {
 		return err
 	}
 	c.clampHTTP()
+	if err := c.validateAdminListen(); err != nil {
+		return err
+	}
+	c.clampAdminListen()
 	if err := c.validateTLS(); err != nil {
 		return err
 	}
@@ -823,20 +878,41 @@ func (c *Config) validate() error {
 // valid value (net/http treats zero as "disabled"); negative values fail
 // fast at boot.
 func (c *Config) validateHTTP() error {
-	if c.HTTP.ReadHeaderTimeout < 0 {
-		return fmt.Errorf("http.read_header_timeout %s: must be >= 0", c.HTTP.ReadHeaderTimeout)
+	return validateHTTPSection("http", c.HTTP)
+}
+
+// validateAdminListen rejects negative admin-listener timeouts +
+// half-paired admin TLS cert/key (US-008 harden-gateway). Empty Listen
+// passes through (single-port shape; admin endpoints stay on the main
+// listener).
+func (c *Config) validateAdminListen() error {
+	if err := validateHTTPSection("admin_listen.http", c.AdminListen.HTTP); err != nil {
+		return err
 	}
-	if c.HTTP.ReadTimeout < 0 {
-		return fmt.Errorf("http.read_timeout %s: must be >= 0", c.HTTP.ReadTimeout)
+	if (c.AdminListen.TLS.CertFile == "") != (c.AdminListen.TLS.KeyFile == "") {
+		return fmt.Errorf("admin_listen.tls.cert_file and admin_listen.tls.key_file must both be set or both unset")
 	}
-	if c.HTTP.WriteTimeout < 0 {
-		return fmt.Errorf("http.write_timeout %s: must be >= 0", c.HTTP.WriteTimeout)
+	if c.AdminListen.TLS.ClientCAFile != "" && c.AdminListen.TLS.CertFile == "" {
+		return fmt.Errorf("admin_listen.tls.client_ca_file requires admin_listen.tls.cert_file + admin_listen.tls.key_file (mTLS needs a server cert)")
 	}
-	if c.HTTP.IdleTimeout < 0 {
-		return fmt.Errorf("http.idle_timeout %s: must be >= 0", c.HTTP.IdleTimeout)
+	return nil
+}
+
+func validateHTTPSection(prefix string, h HTTPConfig) error {
+	if h.ReadHeaderTimeout < 0 {
+		return fmt.Errorf("%s.read_header_timeout %s: must be >= 0", prefix, h.ReadHeaderTimeout)
 	}
-	if c.HTTP.MaxHeaderBytes < 0 {
-		return fmt.Errorf("http.max_header_bytes %d: must be >= 0", c.HTTP.MaxHeaderBytes)
+	if h.ReadTimeout < 0 {
+		return fmt.Errorf("%s.read_timeout %s: must be >= 0", prefix, h.ReadTimeout)
+	}
+	if h.WriteTimeout < 0 {
+		return fmt.Errorf("%s.write_timeout %s: must be >= 0", prefix, h.WriteTimeout)
+	}
+	if h.IdleTimeout < 0 {
+		return fmt.Errorf("%s.idle_timeout %s: must be >= 0", prefix, h.IdleTimeout)
+	}
+	if h.MaxHeaderBytes < 0 {
+		return fmt.Errorf("%s.max_header_bytes %d: must be >= 0", prefix, h.MaxHeaderBytes)
 	}
 	return nil
 }
@@ -904,13 +980,22 @@ func (c *Config) validateTrustedProxies() error {
 // fat-finger 999h timeout doesn't silently disable slowloris protection.
 // Zero passes through (consumers treat zero as "disabled" per net/http).
 func (c *Config) clampHTTP() {
-	if c.HTTP.WriteTimeout > 24*time.Hour {
-		slog.Warn("clamping config value", "key", "http.write_timeout", "value", c.HTTP.WriteTimeout.String(), "max", (24 * time.Hour).String())
-		c.HTTP.WriteTimeout = 24 * time.Hour
+	clampHTTPSection("http", &c.HTTP)
+}
+
+// clampAdminListen mirrors clampHTTP for the admin listener (US-008).
+func (c *Config) clampAdminListen() {
+	clampHTTPSection("admin_listen.http", &c.AdminListen.HTTP)
+}
+
+func clampHTTPSection(prefix string, h *HTTPConfig) {
+	if h.WriteTimeout > 24*time.Hour {
+		slog.Warn("clamping config value", "key", prefix+".write_timeout", "value", h.WriteTimeout.String(), "max", (24 * time.Hour).String())
+		h.WriteTimeout = 24 * time.Hour
 	}
-	if c.HTTP.MaxHeaderBytes > 16<<20 {
-		slog.Warn("clamping config value", "key", "http.max_header_bytes", "value", c.HTTP.MaxHeaderBytes, "max", 16<<20)
-		c.HTTP.MaxHeaderBytes = 16 << 20
+	if h.MaxHeaderBytes > 16<<20 {
+		slog.Warn("clamping config value", "key", prefix+".max_header_bytes", "value", h.MaxHeaderBytes, "max", 16<<20)
+		h.MaxHeaderBytes = 16 << 20
 	}
 }
 

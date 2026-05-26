@@ -329,3 +329,42 @@ Cycle: ralph/harden-gateway
 - **Nil-safe receiver methods unlock pointer-or-nil ergonomics**: `(*TrustedProxies).Contains` / `Empty` / `ClientIP` / `ForwardedProto` all handle nil. Means callers can leave the field unset (zero-value default) and the secure semantic still holds. Cheaper than scattering `if tp != nil { ... }` at every call site.
 - **RFC 7239 left-to-right walk**: when XFF carries multiple hops (`client, proxy1, proxy2`), the leftmost UNTRUSTED hop is the original client. `tp.ClientIP` walks left-to-right and returns the first hop NOT in any trusted CIDR. Single-value XFF is the trivial case; the multi-hop walk only matters when chained proxies are deployed.
 ---
+
+## 2026-05-26 - US-008 — Admin endpoint on separate listener
+
+- New `config.AdminListenConfig` substruct (`Listen` string + nested `HTTP HTTPConfig` reusing the US-001 shape + nested `AdminTLSConfig{CertFile, KeyFile, ClientCAFile}`).
+- 9 envMap entries (`STRATA_ADMIN_LISTEN`, `STRATA_ADMIN_HTTP_*` × 5, `STRATA_ADMIN_TLS_CERT_FILE`/`KEY_FILE`/`CLIENT_CA_FILE`) → koanf paths `admin_listen.listen` / `admin_listen.http.*` / `admin_listen.tls.*`.
+- Defaults: admin HTTP timeouts match `[http]` family except `WriteTimeout=2m` (no large multipart on admin). TLS empty by default = plain HTTP (loopback shape).
+- `Config.validate()` refactor: factored `validateHTTPSection(prefix, h HTTPConfig)` helper from `validateHTTP` so both `[http]` and `[admin_listen.http]` share the same negative-duration / negative-MaxHeaderBytes rejection. Same for `clampHTTPSection(prefix, h *HTTPConfig)` (WriteTimeout>24h → 24h, MaxHeaderBytes>16MiB → 16MiB).
+- `Config.validateAdminListen()` adds: TLS half-pair rejection + `client_ca_file` requires `cert_file` (mTLS needs a server cert). Empty `Listen` = backwards-compat single-port shape preserved.
+- New `internal/serverapp/admin_listener.go`: `newAdminHTTPServer(addr, handler, cfg)` (clones the `[http]` factory shape against `cfg.AdminListen.HTTP`) + `buildAdminTLSConfig(cfg)` returns `(nil, nil)` for plain HTTP, otherwise loads cert + optional client CA pool. No SNI / cert-dir / hot-reload — admin is a single endpoint per replica (kept simple per PRD AC).
+- `serverapp.Run` rewired: builds `s3Chain` (otel + logging + metrics + auth + access-log + audit + S3) once. When `cfg.AdminListen.Listen == ""` (backwards-compat): single mux with `/metrics`, `/healthz`, `/readyz`, `/console/`, `/admin/v1/` (audit-wrapped via shared `adminAudit`) plus `/` (s3Chain). When `cfg.AdminListen.Listen != ""` (split): main mux carries only `/` (s3Chain); admin mux carries the 5 admin routes; second `http.Server` built via `newAdminHTTPServer` + optional admin TLS. Both listeners share the OTel tracer + logger + auditBroadcaster + audit middleware instances (created once before mux registration, registered on whichever mux owns the route).
+- Graceful shutdown: ctx cancel fans out via `sync.WaitGroup.Go` over both `srv.Shutdown` and `adminSrv.Shutdown` within `cfg.ShutdownWait`; main listener `serverErr` + admin listener `adminErr` channels both drained before return. Listener-level fail-fast (`select` adds admin err branch).
+- `internal/metrics.Register()` wrapped in `sync.Once` (process-level — `prometheus.MustRegister` panics on duplicate; the new in-process Run tests need to call Run repeatedly).
+- `deploy/strata.toml.example`: new `[admin_listen]` + `[admin_listen.http]` + `[admin_listen.tls]` sections (placed before `[tikv]`).
+- `docs/site/content/reference/env-vars.md`: 9 new rows under the Gateway table.
+- Unit + integration test `internal/serverapp/admin_listener_test.go` (8 sub-tests): split routing (admin routes only on admin port; main port returns S3 catch-all 404 for `/healthz`) / backwards-compat single-port shape / loopback bind unreachable from `127.0.0.2` / SIGTERM drains both listeners within ShutdownWait / admin TLS handshake against self-signed cert / admin mTLS rejects client without cert / half-pair admin TLS fail-fast at boot / negative admin HTTP timeout fail-fast / admin defaults verified (`WriteTimeout=2m`).
+- New smoke `scripts/smoke-admin-split.sh`: builds strata, runs with main `:19000` + admin `127.0.0.1:19001`, probes (a) `/healthz` on admin = 200, (b) `/metrics` on admin = 200, (c) `/healthz` on main = non-200 (S3 catch-all 404), (d) arbitrary S3 path on admin = 404, (e) admin loopback dial succeeds, (f) SIGTERM drains both listeners cleanly. Memory-backed; no Docker. <2s.
+- `internal/config/env_toml_parity_test.go` drift-lint stays green (9 new envs, 9 new TOML keys, 9 new docs rows).
+- `go vet ./...` clean. `go build ./...` clean. `go test -race ./internal/config/ ./internal/serverapp/` clean. `bash scripts/smoke-admin-split.sh` PASS. `bash scripts/smoke-tls.sh` PASS (backwards-compat — admin split disabled).
+
+### Files changed
+- `internal/config/config.go`
+- `internal/serverapp/serverapp.go`
+- `internal/serverapp/admin_listener.go` (new)
+- `internal/serverapp/admin_listener_test.go` (new)
+- `internal/metrics/metrics.go` (sync.Once wrap)
+- `deploy/strata.toml.example`
+- `docs/site/content/reference/env-vars.md`
+- `scripts/smoke-admin-split.sh` (new)
+- `scripts/ralph/prd.json` (passes flip)
+
+### Learnings for future iterations
+- **`prometheus.MustRegister` panics on duplicate registration**: any code path that calls `metrics.Register()` more than once per process (e.g. multiple in-process Run() invocations in a unit-test file) crashes with "duplicate metrics collector registration attempted". `sync.Once` wrap fixes this transparently — tests no longer need to worry, the second call is a no-op. Future workers / tests that call Register() inherit the fix.
+- **`http.Server.Shutdown` is idempotent + concurrent-safe**: spinning two `Shutdown(ctx)` goroutines via `sync.WaitGroup.Go` is the canonical multi-listener drain pattern. Go 1.25's `wg.Go(func(){...})` replaces the `wg.Add(1) + go func(){defer wg.Done(); ...}` boilerplate one-for-one — use it on every new graceful-shutdown helper.
+- **`net.Listen("127.0.0.1:port")` truly binds loopback only**: the integration test that proves admin is unreachable from non-loopback works on Linux (full 127/8 loopback aliases) but is best-effort on macOS (only 127.0.0.1 by default). The test branches on `runtime_supports_127_0_0_2()` so it skips the negative case when the alias isn't routable — this preserves the assertion meaning without flaking on macOS. Future tests for interface-specific binds should follow the same pattern.
+- **Shared middleware instances vs per-listener wrapping**: PRD said "middleware instances themselves shared (NOT re-wrapped per listener)". Concrete shape: build `adminAudit` + `auditHandler` + `accessLog` + the OTel/logging chain ONCE before mux registration, then register the same handler reference on whichever mux owns the route. Both muxes can share the same OTel tracer provider, logger, audit broadcaster, audit middleware instance — only the mux+http.Server pair is duplicated. Avoid building a fresh middleware chain per listener; the second copy doubles trace cardinality and audit instance state.
+- **`HTTPConfig` reuse for the admin listener**: the admin substruct embeds `HTTPConfig` directly rather than duplicating the 5 fields. `validateHTTPSection` + `clampHTTPSection` helpers take an `HTTPConfig` (by value for validate, by pointer for clamp so mutations persist) + a prefix label for error messages — single source of truth, single set of clamps. Pattern for future "this listener gets its own timeout block" features: add an `HTTPConfig` field, register the env entries, route through the existing helpers.
+- **`STRATA_ADMIN_LISTEN` empty default**: critical for backwards-compat. Every existing smoke / lab / docker-compose binding stays on the single-port shape until the operator opts in. The split mode is recommended (`127.0.0.1:9001` loopback) for prod but never forced — matches the US-001..US-007 opt-in discipline of this cycle.
+- **In-package Run tests need ports + ctx + run goroutine + cancel + drain**: pattern in admin_listener_test.go reusable for any future Run-level test. `freePort(t)` returns a 127.0.0.1:0-bound port, releases the listener so Run can rebind. `waitListen(t, addr)` polls TCP dial until ready. `cancel()` + `<-runErr` blocks for clean shutdown. The whole shape fits in ~20 lines per test and avoids the metrics-Register panic via the `sync.Once` wrap above.
+---

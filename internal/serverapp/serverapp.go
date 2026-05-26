@@ -5,6 +5,7 @@ package serverapp
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -277,21 +279,29 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		TrustedProxies: trustedProxies,
 	})
 
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", metrics.Handler())
-	mux.HandleFunc("/healthz", healthHandler.Healthz)
-	mux.HandleFunc("/readyz", healthHandler.Readyz)
-	mux.Handle("/console/", strataconsole.ConsoleHandler())
 	adminAudit := s3api.NewAuditMiddleware(metaStore, auditTTL, adminServer.Handler())
 	adminAudit.Publisher = auditBroadcaster
 	adminAudit.TrustedProxies = trustedProxies
-	mux.Handle("/admin/v1/", adminAudit)
 	auditHandler := s3api.NewAuditMiddleware(metaStore, auditTTL, apiHandler)
 	auditHandler.Publisher = auditBroadcaster
 	auditHandler.TrustedProxies = trustedProxies
 	accessLog := s3api.NewAccessLogMiddleware(metaStore, auditHandler)
 	accessLog.TrustedProxies = trustedProxies
-	mux.Handle("/", strataotel.NewMiddleware(tracerProvider, logging.NewMiddleware(logger, metrics.ObserveHTTP(mw.Wrap(accessLog, s3api.NewAuthDenyHandler(metaStore))))))
+	s3Chain := strataotel.NewMiddleware(tracerProvider, logging.NewMiddleware(logger, metrics.ObserveHTTP(mw.Wrap(accessLog, s3api.NewAuthDenyHandler(metaStore)))))
+
+	adminSplit := cfg.AdminListen.Listen != ""
+
+	mux := http.NewServeMux()
+	if !adminSplit {
+		// Single-port shape: all admin/console/metrics/health routes
+		// share the gateway mux with the S3 catch-all.
+		mux.Handle("/metrics", metrics.Handler())
+		mux.HandleFunc("/healthz", healthHandler.Healthz)
+		mux.HandleFunc("/readyz", healthHandler.Readyz)
+		mux.Handle("/console/", strataconsole.ConsoleHandler())
+		mux.Handle("/admin/v1/", adminAudit)
+	}
+	mux.Handle("/", s3Chain)
 
 	srv := newHTTPServer(cfg.Listen, mux, cfg)
 
@@ -314,6 +324,25 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		go reloader.run(ctx)
 	}
 
+	var adminSrv *http.Server
+	var adminTLSCfg *tls.Config
+	if adminSplit {
+		adminMux := http.NewServeMux()
+		adminMux.Handle("/metrics", metrics.Handler())
+		adminMux.HandleFunc("/healthz", healthHandler.Healthz)
+		adminMux.HandleFunc("/readyz", healthHandler.Readyz)
+		adminMux.Handle("/console/", strataconsole.ConsoleHandler())
+		adminMux.Handle("/admin/v1/", adminAudit)
+		adminSrv = newAdminHTTPServer(cfg.AdminListen.Listen, adminMux, cfg)
+		adminTLSCfg, err = buildAdminTLSConfig(cfg)
+		if err != nil {
+			return fmt.Errorf("admin tls config: %w", err)
+		}
+		if adminTLSCfg != nil {
+			adminSrv.TLSConfig = adminTLSCfg
+		}
+	}
+
 	serverErr := make(chan error, 1)
 	go func() {
 		logger.Info("strata server listening",
@@ -322,7 +351,8 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 			"meta", cfg.MetaBackend,
 			"region", cfg.RegionName,
 			"auth", cfg.Auth.Mode,
-			"tls", tlsCfg != nil)
+			"tls", tlsCfg != nil,
+			"admin_split", adminSplit)
 		var listenErr error
 		if tlsCfg != nil {
 			listenErr = srv.ListenAndServeTLS("", "")
@@ -335,6 +365,27 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		}
 		serverErr <- nil
 	}()
+
+	adminErr := make(chan error, 1)
+	if adminSrv != nil {
+		go func() {
+			logger.Info("strata admin listener",
+				"listen", cfg.AdminListen.Listen,
+				"tls", adminTLSCfg != nil,
+				"mtls", adminTLSCfg != nil && adminTLSCfg.ClientAuth == tls.RequireAndVerifyClientCert)
+			var listenErr error
+			if adminTLSCfg != nil {
+				listenErr = adminSrv.ListenAndServeTLS("", "")
+			} else {
+				listenErr = adminSrv.ListenAndServe()
+			}
+			if listenErr != nil && !errors.Is(listenErr, http.ErrServerClosed) {
+				adminErr <- listenErr
+				return
+			}
+			adminErr <- nil
+		}()
+	}
 
 	go func() {
 		sampler := &bucketstats.Sampler{
@@ -412,13 +463,23 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		logger.Info("shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownWait)
 		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
+		var wg sync.WaitGroup
+		wg.Go(func() { _ = srv.Shutdown(shutdownCtx) })
+		if adminSrv != nil {
+			wg.Go(func() { _ = adminSrv.Shutdown(shutdownCtx) })
+		}
+		wg.Wait()
 		<-serverErr
+		if adminSrv != nil {
+			<-adminErr
+		}
 		if supervisor != nil {
 			<-workerErr
 		}
 		return nil
 	case err := <-serverErr:
+		return err
+	case err := <-adminErr:
 		return err
 	case err := <-workerErr:
 		return err

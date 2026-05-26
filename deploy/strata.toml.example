@@ -47,6 +47,32 @@ client_ca_file  = ""
 # Range: [10s, 1h]. 0 disables (fsnotify-only).
 reload_interval = "60s"
 
+[admin_listen]
+# Admin / console / metrics / healthz listener split (US-008 harden-gateway).
+# Empty (default) → single-port shape preserved (admin routes share `listen`).
+# Set to e.g. "127.0.0.1:9001" or ":9001" to bind admin endpoints to a separate
+# port (loopback / RFC1918 recommended). S3 catch-all stays on `listen`.
+listen = ""
+
+[admin_listen.http]
+# Per-connection timeouts for the admin listener. Defaults match [http] except
+# write_timeout = 2m (no large multipart on admin). Zero = disabled.
+read_header_timeout = "10s"
+read_timeout        = "60s"
+write_timeout       = "2m"
+idle_timeout        = "120s"
+max_header_bytes    = 1048576
+
+[admin_listen.tls]
+# Optional TLS for the admin listener. Empty cert_file/key_file → plain HTTP
+# (typical loopback shape). Set both to terminate TLS on the admin port. When
+# client_ca_file is set the listener requires mTLS
+# (ClientAuth=RequireAndVerifyClientCert). No SNI / hot-reload — admin is a
+# single endpoint per replica.
+cert_file       = ""
+key_file        = ""
+client_ca_file  = ""
+
 [tikv]
 # Required when meta_backend=tikv. Comma-separated PD endpoints.
 pd_endpoints = ""
