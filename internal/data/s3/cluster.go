@@ -34,6 +34,10 @@ const (
 // S3ClusterSpec is the per-cluster connection config. Bucket-less — the
 // per-class ClassSpec carries the bucket name. Two classes can therefore
 // share one S3 cluster but route to different buckets.
+//
+// TLS, when non-nil, overrides the global Config.TLS bundle ENTIRELY for
+// this cluster (no merge — any single key on the per-cluster block replaces
+// the global block to avoid surprise semantics when one knob is omitted).
 type S3ClusterSpec struct {
 	ID                string         `json:"id"`
 	Endpoint          string         `json:"endpoint"`
@@ -46,6 +50,26 @@ type S3ClusterSpec struct {
 	MaxRetries        int64          `json:"max_retries,omitempty"`
 	OpTimeoutSecs     int            `json:"op_timeout_secs,omitempty"`
 	Credentials       CredentialsRef `json:"credentials"`
+	TLS               *ClusterTLS    `json:"tls,omitempty"`
+}
+
+// ClusterTLS is the per-cluster mTLS bundle for the S3-upstream backend
+// (US-006 harden-gateway). Presence on S3ClusterSpec replaces the global
+// Config.TLS block for the cluster outright — there is no merge.
+// CertFile + KeyFile must both be set or both unset; CAFile alone enables
+// server-cert pinning without a client cert.
+type ClusterTLS struct {
+	CAFile     string `json:"ca_file,omitempty"`
+	CertFile   string `json:"cert_file,omitempty"`
+	KeyFile    string `json:"key_file,omitempty"`
+	SkipVerify bool   `json:"skip_verify,omitempty"`
+}
+
+// HasAny returns true when any TLS knob is set — the resolver treats a
+// fully-zero struct as "use global default" rather than as an explicit
+// "force plain HTTP" override.
+func (t ClusterTLS) HasAny() bool {
+	return t.CAFile != "" || t.CertFile != "" || t.KeyFile != "" || t.SkipVerify
 }
 
 // ParseClusters parses a STRATA_S3_CLUSTERS JSON array into an id->spec
@@ -81,6 +105,12 @@ func ParseClusters(jsonStr string) (map[string]S3ClusterSpec, error) {
 		}
 		if err := validateCredentialsRef(spec.ID, spec.Credentials); err != nil {
 			return nil, err
+		}
+		if spec.TLS != nil {
+			if (spec.TLS.CertFile == "") != (spec.TLS.KeyFile == "") {
+				return nil, fmt.Errorf("s3 clusters: cluster %q tls.cert_file and tls.key_file must both be set or both unset",
+					spec.ID)
+			}
 		}
 		out[spec.ID] = spec
 	}

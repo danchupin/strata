@@ -237,3 +237,46 @@ Cycle: ralph/harden-gateway
 - **PD HTTP scheme inference**: PD endpoints are stored as bare host:port strings in `STRATA_TIKV_PD_ENDPOINTS`. With TLS configured, the pdClient defaults `scheme=https`; without TLS, `scheme=http`. The scheme is consulted only when an endpoint omits its scheme — explicit `https://` and `http://` prefixes win. Avoids breaking the operator UX where `pd-server.example.com:2379` is the natural form.
 - **`config.UpdateGlobal` is global state**: any concurrent meta.Store construction from another package would race. Today there is only one `metatikv.Open` call per process (from `serverapp.buildMetaStore`), so this is fine. If a future story builds two TiKV stores with distinct TLS bundles in the same process, switch to forking `txnkv.NewClient` with a per-client TLS injection (current upstream API exposes no such hook — would need a vendored fork).
 ---
+
+## 2026-05-26 - US-006 — S3-upstream mTLS (global + per-cluster) + RADOS cephx doc note
+
+- New `config.S3TLSConfig` substruct on `Config.S3.TLS` (CAFile / CertFile / KeyFile / SkipVerify; all zero-valued = Go-default HTTP client, no client cert, system roots).
+- 4 envMap entries (`STRATA_S3_TLS_CA_FILE` → `s3.tls.ca_file` etc).
+- `Config.validateBackendTLS()` extended: rejects half-pair `s3.tls.cert_file` ↔ `s3.tls.key_file` at boot. Cassandra + TiKV guards unchanged; all three backends share the same site.
+- `internal/data/s3.S3ClusterSpec` extended with optional `TLS *ClusterTLS` field (json:"tls,omitempty"). `ParseClusters` rejects per-cluster half-pair at parse time. **Resolution rule**: per-cluster wins outright — any single per-cluster TLS key replaces the global block entirely (no merge, per US-006 PRD AC). `ClusterTLS.HasAny()` is the zero/non-zero discriminator.
+- `internal/data/s3.Config.TLS ClusterTLS` global default. Backend stores it as `tlsDefault`; `connFor` calls `resolveClusterTLS(spec, tlsDefault)` and, when non-zero, builds an `*http.Client` via `buildTLSClient` whose `Transport` is `http.DefaultTransport.Clone()` with `TLSClientConfig` carrying `RootCAs` (from CAFile), `Certificates` (from CertFile+KeyFile pair), and `InsecureSkipVerify` (from SkipVerify). PEM parse failures surface at `connFor` boot path, not at first SDK call.
+- `internal/data/s3/tls.go` (new): `resolveClusterTLS` + `buildTLSClient`. Test cert pool helpers (`writeServerCertAsPEM`, `writeUnrelatedCAPEM`, `certPool`) live in `internal/data/s3/tls_test.go`.
+- `metrics.BackendTLSSkipVerify` GaugeVec labels extended from `{backend}` to `{backend, cluster}`. Cassandra/TiKV call sites pass empty cluster (`""`); s3 wiring loops every cluster id and bumps `WithLabelValues("s3", id)` per cluster. Hard-cutover acceptable per pre-launch policy — no existing operator dashboard.
+- `serverapp.buildDataBackend` case "s3": translates `Config.S3.TLS` → `datas3.ClusterTLS` global; per-cluster effective resolution computed inline so the per-cluster gauge bumps match the effective bundle (per-cluster override OR global default). Single WARN per cluster when SkipVerify=true.
+- Unit tests `internal/data/s3/tls_test.go` (9 new): HasAny matrix / per-cluster wins outright / nil + zero per-cluster fall back to global / zero global returns nil client / CAFile completes TLS handshake against httptest.NewTLSServer / wrong CA surfaces x509 error / SkipVerify bypasses validation / malformed client cert/key fails at load / parse-time per-cluster tls.cert_file half-pair rejected.
+- Integration test pattern: `httptest.NewTLSServer` + extract leaf cert from `srv.TLS.Certificates[0]` (httptest signs leaf self-signed so the leaf doubles as trust anchor — no separate CA file). Same trick used by US-004 cassandra TLS integration test, distilled into helpers.
+- 3 new config tests in `internal/config/misc_test.go`: half-pair rejection (both directions), env-wires-through round-trip, default plain-HTTP shape.
+- `deploy/strata.toml.example`: new `[s3.tls]` section (4 keys + comment noting per-cluster JSON override semantic).
+- `docs/site/content/reference/env-vars.md`: 4 new rows under the Data backend — S3 pass-through table.
+- New doc stub `docs/site/content/operate/tls-termination.md` (draft: true). Contains the US-006 placeholder section "RADOS uses cephx, not TLS" explaining cephx is the production-supported mutual-auth path + `ms_cluster_mode=secure` for wire-level confidentiality. US-010 fills in the 4 deploy shapes + cert-provisioning recipes + per-backend mTLS sections, then removes `draft: true`.
+- `internal/config/env_toml_parity_test.go` drift-lint stays green (4 new envs, 4 new TOML keys, 4 new docs rows).
+- `go vet ./...` clean. `go build ./...` clean. `go test ./...` 53 packages green. `go test -race ./internal/data/s3/ ./internal/config/ ./internal/serverapp/` clean.
+
+### Files changed
+- `internal/config/config.go`
+- `internal/config/misc_test.go`
+- `internal/metrics/metrics.go`
+- `internal/data/s3/cluster.go`
+- `internal/data/s3/tls.go` (new)
+- `internal/data/s3/tls_test.go` (new)
+- `internal/data/s3/backend.go`
+- `internal/serverapp/serverapp.go`
+- `deploy/strata.toml.example`
+- `docs/site/content/reference/env-vars.md`
+- `docs/site/content/operate/tls-termination.md` (new, draft: true)
+- `scripts/ralph/prd.json` (passes flip)
+
+### Learnings for future iterations
+- **`*http.Transport.Clone()` is the safe primitive for transport overrides**: `http.DefaultTransport.(*http.Transport).Clone()` returns a fresh transport with the SDK-friendly defaults (DialContext, ForceAttemptHTTP2, MaxIdleConns…) pre-set. Mutating `transport.TLSClientConfig` on the clone never bleeds into the default transport shared by other tests / unrelated SDK clients in the same process. Same pattern works for `aws-sdk-go-v2`'s `aws.Config.HTTPClient` swap because the SDK wraps whatever `*http.Client` you hand it without re-cloning the transport.
+- **`httptest.NewTLSServer` leaf-cert-as-CA trick** is reusable across backends — leaves are self-signed (Issuer==Subject) so writing the leaf DER to a PEM file gives you a valid trust anchor without poking at the unexported test-internal CA. Same code path used by US-004 Cassandra TLS integration test; lifted into the s3 tls_test.go as `writeServerCertAsPEM`. Eliminates the need for any cert-generation library inside the s3 test surface.
+- **Per-cluster vs global TLS resolution must be "winner-takes-all"**: tempting to merge per-cluster + global on a per-field basis (per-cluster ca_file but global skip_verify, etc), but that creates surprise semantics when one knob is omitted (operator forgets to set `skip_verify: false` on a per-cluster override, inherits a global `skip_verify: true` they didn't expect). Decision: any single per-cluster TLS key replaces the global block ENTIRELY. `ClusterTLS.HasAny()` discriminates zero vs partial-zero — `nil` and `&ClusterTLS{}` both fall through to global; any field set on the per-cluster block locks in the per-cluster bundle.
+- **GaugeVec label changes are a breaking change for existing series**: extending `strata_backend_tls_skip_verify` from `{backend}` to `{backend, cluster}` means any existing PromQL `strata_backend_tls_skip_verify{backend="cassandra"}` query that previously matched will no longer match unless `cluster=""` is added — Prometheus treats different label sets as different series. Pre-launch hard-cutover is acceptable per project policy; for post-launch backends the equivalent would be a new gauge name (`strata_backend_tls_skip_verify_v2`) deployed alongside the old one until dashboards migrate. Going forward, design label sets to anticipate multi-cluster from the outset (`cluster=""` for single-instance backends is cheaper than adding a label later).
+- **Per-cluster `tls` field on `S3ClusterSpec` uses `*ClusterTLS` not `ClusterTLS`**: distinguishes "operator opted out of TLS for this cluster explicitly" (impossible — there is no opt-out, only opt-in) from "operator did not configure the field, fall back to global". `json:",omitempty"` on a pointer marshals as missing when nil — keeps the legacy `STRATA_S3_CLUSTERS` JSON shape unchanged for clusters that don't need a per-cluster override. The `HasAny()` helper bridges the "operator explicitly set `tls: {}` empty" edge case to fall through to global (any single field empty on the value path is treated the same as missing).
+- **PEM parse + cert/key load happen at `connFor` boot path, not at first request**: surfacing PEM-decode / x509 parse / mismatched cert/key errors as gateway-boot errors gives operators a fast feedback loop. The penalty for deferring to first SDK call is a generic HTTP 500 on the first data-plane PUT, plus a leaking goroutine that retries. Mirror this pattern for any future backend mTLS wiring — load cert materials in the construction path, not the hot path.
+- **`crypto/tls.Config` `Certificates` slice fully replaces client-cert chain**: setting `Certificates = []tls.Certificate{cert}` overrides any prior chain; appending is rarely what you want. `RootCAs` is the trust anchor pool (server-side cert validation); `Certificates` is the local client cert chain. Both fields are independent — populate either / both / neither.
+---

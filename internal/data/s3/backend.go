@@ -78,6 +78,11 @@ type Backend struct {
 	// `strata.component=gateway` + `strata.s3_cluster=<id>` so operators
 	// can filter Jaeger waterfalls per cluster.
 	tracerProvider trace.TracerProvider
+
+	// tlsDefault is the global Config.TLS bundle resolved at New time.
+	// Per-cluster spec.TLS overrides it; otherwise this populates the
+	// resolved TLS for every cluster.
+	tlsDefault ClusterTLS
 }
 
 // s3Cluster carries the per-cluster SDK wiring + resolved config knobs.
@@ -133,8 +138,15 @@ type Config struct {
 
 	// HTTPClient overrides the SDK's default HTTP client. Tests inject
 	// counting/synthetic transports here. Applies to every cluster
-	// built by New / Open.
+	// built by New / Open. Ignored on clusters that resolve a non-zero
+	// TLS bundle (per-cluster `tls` or the global Config.TLS) — those
+	// build their own *http.Client around a TLS-enabled Transport.
 	HTTPClient *http.Client
+
+	// TLS is the global default mTLS bundle (US-006 harden-gateway)
+	// applied to every cluster whose S3ClusterSpec.TLS is nil/zero.
+	// Empty all-fields keeps the historical Go-default HTTP client.
+	TLS ClusterTLS
 
 	// SkipProbe disables the boot-time writability probe.
 	SkipProbe bool
@@ -208,6 +220,7 @@ func New(cfg Config) (*Backend, error) {
 		classes:        copyClasses(cfg.Classes),
 		httpClient:     cfg.HTTPClient,
 		tracerProvider: resolveTracerProvider(cfg),
+		tlsDefault:     cfg.TLS,
 	}
 	for id, spec := range cfg.Clusters {
 		spec.ID = id
@@ -366,7 +379,16 @@ func (b *Backend) connFor(ctx context.Context, id string) (*s3Cluster, error) {
 	if c.client != nil {
 		return c, nil
 	}
-	awscfg, err := loadAWSConfig(ctx, c.spec, c.legacyAccessKey, c.legacySecretKey, b.httpClient)
+	httpClient := b.httpClient
+	tlsBundle := resolveClusterTLS(c.spec, b.tlsDefault)
+	if tlsBundle.HasAny() {
+		tlsClient, err := buildTLSClient(tlsBundle, b.httpClient)
+		if err != nil {
+			return nil, fmt.Errorf("s3: cluster %q: %w", id, err)
+		}
+		httpClient = tlsClient
+	}
+	awscfg, err := loadAWSConfig(ctx, c.spec, c.legacyAccessKey, c.legacySecretKey, httpClient)
 	if err != nil {
 		return nil, fmt.Errorf("s3: cluster %q: %w", id, err)
 	}

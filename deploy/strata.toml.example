@@ -62,6 +62,20 @@ clusters = ""
 # Required when data_backend=s3. JSON object of ClassSpec.
 classes  = ""
 
+[s3.tls]
+# S3-upstream mTLS global default (US-006 harden-gateway). Empty all-three
+# (ca_file + cert_file + key_file) → Go-default HTTP client (no client cert,
+# system roots). cert_file/key_file must be set together (half-pair rejected
+# at boot). Per-cluster `tls` blocks on STRATA_S3_CLUSTERS entries override
+# this block ENTIRELY for the cluster (no merge — any single key wins
+# outright). skip_verify=true bumps
+# strata_backend_tls_skip_verify{backend="s3",cluster=<id>}=1 — never set in
+# production.
+ca_file     = ""
+cert_file   = ""
+key_file    = ""
+skip_verify = false
+
 [cassandra]
 hosts       = ["cassandra"]
 keyspace    = "strata"

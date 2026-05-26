@@ -133,6 +133,10 @@ See [Architecture — data-backend]({{< ref "/architecture/data-backend" >}}).
 |---|---|---|---|---|
 | `STRATA_S3_CLUSTERS` | empty | JSON array of `S3ClusterSpec` | Required when `STRATA_DATA_BACKEND=s3`. See [S3 multi-cluster routing]({{< ref "/best-practices/s3-multi-cluster" >}}#strata_s3_clusters--json-array). | `s3.clusters` |
 | `STRATA_S3_CLASSES` | empty | JSON object of `ClassSpec` | Required when `STRATA_DATA_BACKEND=s3`. See [S3 multi-cluster routing]({{< ref "/best-practices/s3-multi-cluster" >}}#strata_s3_classes--json-object). | `s3.classes` |
+| `STRATA_S3_TLS_CA_FILE` | empty | PEM path | S3-upstream mTLS — PEM-encoded CA bundle for server-cert validation. Global default; per-cluster `tls.ca_file` on `STRATA_S3_CLUSTERS` overrides outright. | `s3.tls.ca_file` |
+| `STRATA_S3_TLS_CERT_FILE` | empty | PEM path | S3-upstream mTLS — PEM-encoded client certificate. Paired with `STRATA_S3_TLS_KEY_FILE`; half-pair rejected at boot. | `s3.tls.cert_file` |
+| `STRATA_S3_TLS_KEY_FILE` | empty | PEM path | S3-upstream mTLS — PEM-encoded client private key. Paired with `STRATA_S3_TLS_CERT_FILE`. | `s3.tls.key_file` |
+| `STRATA_S3_TLS_SKIP_VERIFY` | `false` | bool | Disable server-cert validation on the S3-upstream client. Bumps `strata_backend_tls_skip_verify{backend="s3",cluster=<id>}=1` for every cluster that resolves to this bundle. Never set in production. | `s3.tls.skip_verify` |
 
 ## Auth + admin console
 

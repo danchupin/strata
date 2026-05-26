@@ -338,9 +338,9 @@ var (
 	BackendTLSSkipVerify = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "strata_backend_tls_skip_verify",
-			Help: "1 if the backend's TLS client is running with InsecureSkipVerify=true (mTLS server-cert validation disabled). Set at boot per backend (cassandra, tikv, s3). Operators should alert on >0 in any production environment.",
+			Help: "1 if the backend's TLS client is running with InsecureSkipVerify=true (mTLS server-cert validation disabled). Set at boot per backend (cassandra, tikv, s3). For multi-cluster backends (s3) the cluster label carries the cluster id; for single-instance backends (cassandra, tikv) cluster is empty. Operators should alert on sum(strata_backend_tls_skip_verify) > 0 in any production environment.",
 		},
-		[]string{"backend"},
+		[]string{"backend", "cluster"},
 	)
 )
 

@@ -181,9 +181,31 @@ type RADOSConfig struct {
 // ClassSpec). Parsed + validated by `internal/data/s3.ParseClusters` /
 // `ParseClasses`; cross-validated (every class.Cluster references a known
 // cluster) by `s3.New`. Both required when DataBackend=s3.
+//
+// TLS carries the global default mTLS bundle applied to every S3-upstream
+// SDK client unless a per-cluster `tls` block in STRATA_S3_CLUSTERS overrides
+// it. Per-cluster override replaces the global block ENTIRELY for that
+// cluster — no merge, to avoid surprise semantics when one knob is omitted.
 type S3Config struct {
-	Clusters string `koanf:"clusters"`
-	Classes  string `koanf:"classes"`
+	Clusters string      `koanf:"clusters"`
+	Classes  string      `koanf:"classes"`
+	TLS      S3TLSConfig `koanf:"tls"`
+}
+
+// S3TLSConfig wires net/http.Transport TLS for the S3-upstream data backend
+// (US-006 harden-gateway). Empty CAFile + CertFile + KeyFile → plain HTTP
+// (or TLS without client cert + system roots — Go default). SkipVerify=true
+// logs a single WARN at boot + bumps
+// strata_backend_tls_skip_verify{backend="s3",cluster=<id>}=1.
+//
+// Per-cluster overrides via the `tls` field on each S3ClusterSpec JSON
+// entry win outright when set; this global block is the fallback for every
+// cluster that has no per-cluster TLS shape.
+type S3TLSConfig struct {
+	CAFile     string `koanf:"ca_file"`
+	CertFile   string `koanf:"cert_file"`
+	KeyFile    string `koanf:"key_file"`
+	SkipVerify bool   `koanf:"skip_verify"`
 }
 
 type AuthConfig struct {
@@ -596,6 +618,10 @@ var envMap = map[string]string{
 	"STRATA_RADOS_CLUSTERS":                  "rados.clusters",
 	"STRATA_S3_CLUSTERS":                     "s3.clusters",
 	"STRATA_S3_CLASSES":                      "s3.classes",
+	"STRATA_S3_TLS_CA_FILE":                  "s3.tls.ca_file",
+	"STRATA_S3_TLS_CERT_FILE":                "s3.tls.cert_file",
+	"STRATA_S3_TLS_KEY_FILE":                 "s3.tls.key_file",
+	"STRATA_S3_TLS_SKIP_VERIFY":              "s3.tls.skip_verify",
 	"STRATA_AUTH_MODE":                       "auth.mode",
 	"STRATA_STATIC_CREDENTIALS":              "auth.static_credentials",
 	"STRATA_STS_DURATION":                    "auth.sts_duration",
@@ -839,15 +865,19 @@ func (c *Config) validateTLS() error {
 }
 
 // validateBackendTLS rejects half-paired client cert/key envs on every
-// backend that supports mTLS (Cassandra + TiKV today; S3 lands in US-006).
+// backend that supports mTLS (Cassandra + TiKV + S3-upstream global default).
 // Empty all-three (CA + cert + key) = plain backend, the backwards-compat
-// default.
+// default. Per-cluster TLS overrides on STRATA_S3_CLUSTERS entries get their
+// own half-pair guard in internal/data/s3.ParseClusters.
 func (c *Config) validateBackendTLS() error {
 	if (c.Cassandra.TLS.CertFile == "") != (c.Cassandra.TLS.KeyFile == "") {
 		return fmt.Errorf("cassandra.tls.cert_file and cassandra.tls.key_file must both be set or both unset")
 	}
 	if (c.TiKV.TLS.CertFile == "") != (c.TiKV.TLS.KeyFile == "") {
 		return fmt.Errorf("tikv.tls.cert_file and tikv.tls.key_file must both be set or both unset")
+	}
+	if (c.S3.TLS.CertFile == "") != (c.S3.TLS.KeyFile == "") {
+		return fmt.Errorf("s3.tls.cert_file and s3.tls.key_file must both be set or both unset")
 	}
 	return nil
 }

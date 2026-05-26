@@ -479,9 +479,34 @@ func buildDataBackend(cfg *config.Config, logger *slog.Logger, tp *strataotel.Pr
 		if err != nil {
 			return nil, fmt.Errorf("STRATA_S3_CLASSES: %w", err)
 		}
+		globalTLS := datas3.ClusterTLS{
+			CAFile:     cfg.S3.TLS.CAFile,
+			CertFile:   cfg.S3.TLS.CertFile,
+			KeyFile:    cfg.S3.TLS.KeyFile,
+			SkipVerify: cfg.S3.TLS.SkipVerify,
+		}
+		// Per-cluster gauge bump (US-006). Effective TLS = per-cluster
+		// override (when set) OR global default; SkipVerify=true on the
+		// effective bundle flips the gauge to 1 + WARN-logs once per
+		// cluster.
+		for id, spec := range s3Clusters {
+			eff := globalTLS
+			if spec.TLS != nil && spec.TLS.HasAny() {
+				eff = *spec.TLS
+			}
+			if eff.SkipVerify {
+				logger.Warn("S3 TLS verification disabled — never set in production",
+					"cluster", id,
+					"env", "STRATA_S3_TLS_SKIP_VERIFY")
+				metrics.BackendTLSSkipVerify.WithLabelValues("s3", id).Set(1)
+			} else if eff.HasAny() {
+				metrics.BackendTLSSkipVerify.WithLabelValues("s3", id).Set(0)
+			}
+		}
 		return datas3.New(datas3.Config{
 			Clusters:       s3Clusters,
 			Classes:        s3Classes,
+			TLS:            globalTLS,
 			Tracer:         tp.Tracer("strata.data.s3"),
 			TracerProvider: tp.TracerProvider(),
 		})
@@ -640,9 +665,9 @@ func buildMetaStore(cfg *config.Config, logger *slog.Logger, tp *strataotel.Prov
 		if tlsCfg.SkipVerify {
 			logger.Warn("Cassandra TLS verification disabled — never set in production",
 				"env", "STRATA_CASSANDRA_TLS_SKIP_VERIFY")
-			metrics.BackendTLSSkipVerify.WithLabelValues("cassandra").Set(1)
+			metrics.BackendTLSSkipVerify.WithLabelValues("cassandra", "").Set(1)
 		} else if tlsCfg.HasAny() {
-			metrics.BackendTLSSkipVerify.WithLabelValues("cassandra").Set(0)
+			metrics.BackendTLSSkipVerify.WithLabelValues("cassandra", "").Set(0)
 		}
 		return metacassandra.Open(
 			metacassandra.SessionConfig{
@@ -675,9 +700,9 @@ func buildMetaStore(cfg *config.Config, logger *slog.Logger, tp *strataotel.Prov
 		if tlsCfg.SkipVerify {
 			logger.Warn("TiKV TLS verification disabled — never set in production",
 				"env", "STRATA_TIKV_TLS_SKIP_VERIFY")
-			metrics.BackendTLSSkipVerify.WithLabelValues("tikv").Set(1)
+			metrics.BackendTLSSkipVerify.WithLabelValues("tikv", "").Set(1)
 		} else if tlsCfg.HasAny() {
-			metrics.BackendTLSSkipVerify.WithLabelValues("tikv").Set(0)
+			metrics.BackendTLSSkipVerify.WithLabelValues("tikv", "").Set(0)
 		}
 		return metatikv.Open(metatikv.Config{
 			PDEndpoints: eps,

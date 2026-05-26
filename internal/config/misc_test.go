@@ -343,6 +343,64 @@ func TestTiKVTLSDefaultPlainGRPC(t *testing.T) {
 	}
 }
 
+// TestS3TLSHalfPairRejected mirrors validateBackendTLS's half-pair guard for
+// the S3-upstream backend mTLS pair (US-006): setting cert_file without
+// key_file (or vice versa) must fail at boot.
+func TestS3TLSHalfPairRejected(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("STRATA_S3_TLS_CERT_FILE", "/tmp/client.crt")
+	if _, err := Load(); err == nil {
+		t.Fatal("cert_file without key_file must fail Load")
+	}
+	clearEnv(t)
+	t.Setenv("STRATA_S3_TLS_KEY_FILE", "/tmp/client.key")
+	if _, err := Load(); err == nil {
+		t.Fatal("key_file without cert_file must fail Load")
+	}
+}
+
+// TestS3TLSEnvWiresThrough confirms the four envs land on the Config.S3.TLS
+// substruct verbatim. The gauge bump + WARN log live in
+// serverapp.buildDataBackend.
+func TestS3TLSEnvWiresThrough(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("STRATA_S3_TLS_CA_FILE", "/tmp/ca.pem")
+	t.Setenv("STRATA_S3_TLS_CERT_FILE", "/tmp/c.pem")
+	t.Setenv("STRATA_S3_TLS_KEY_FILE", "/tmp/k.pem")
+	t.Setenv("STRATA_S3_TLS_SKIP_VERIFY", "true")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.S3.TLS.CAFile != "/tmp/ca.pem" {
+		t.Errorf("ca_file=%q", cfg.S3.TLS.CAFile)
+	}
+	if cfg.S3.TLS.CertFile != "/tmp/c.pem" {
+		t.Errorf("cert_file=%q", cfg.S3.TLS.CertFile)
+	}
+	if cfg.S3.TLS.KeyFile != "/tmp/k.pem" {
+		t.Errorf("key_file=%q", cfg.S3.TLS.KeyFile)
+	}
+	if !cfg.S3.TLS.SkipVerify {
+		t.Errorf("skip_verify=%v want true", cfg.S3.TLS.SkipVerify)
+	}
+}
+
+// TestS3TLSDefaultPlainHTTP confirms the empty default leaves every TLS
+// field zero-valued so the s3 backend keeps the Go-default HTTP-client
+// shape (system roots, no client cert).
+func TestS3TLSDefaultPlainHTTP(t *testing.T) {
+	clearEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.S3.TLS.CAFile != "" || cfg.S3.TLS.CertFile != "" ||
+		cfg.S3.TLS.KeyFile != "" || cfg.S3.TLS.SkipVerify {
+		t.Errorf("default s3.tls non-empty: %+v", cfg.S3.TLS)
+	}
+}
+
 // TestInvalidManifestFormatRejected pins the enum validation for
 // manifest.format — only proto / json are accepted.
 func TestInvalidManifestFormatRejected(t *testing.T) {
