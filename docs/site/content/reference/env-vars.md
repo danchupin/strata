@@ -89,6 +89,10 @@ the meta-backend contract.
 | `STRATA_CASSANDRA_PASSWORD` | empty | string | Auth password. | `cassandra.password` |
 | `STRATA_CASSANDRA_TIMEOUT` | `10s` | Go duration | Per-query timeout. | `cassandra.timeout` |
 | `STRATA_CASSANDRA_SLOW_MS` | `100` | positive int (ms) | Slow-query WARN threshold for the Cassandra query observer. | `cassandra.slow_ms` |
+| `STRATA_CASSANDRA_TLS_CA_FILE` | empty | path | PEM CA bundle for server-cert verification. Empty → system root pool (when any TLS field is set) or plain-TCP (when all TLS fields unset). | `cassandra.tls.ca_file` |
+| `STRATA_CASSANDRA_TLS_CERT_FILE` | empty | path | PEM client certificate for mutual TLS. Must be paired with `STRATA_CASSANDRA_TLS_KEY_FILE`. | `cassandra.tls.cert_file` |
+| `STRATA_CASSANDRA_TLS_KEY_FILE` | empty | path | PEM private key matching `STRATA_CASSANDRA_TLS_CERT_FILE`. | `cassandra.tls.key_file` |
+| `STRATA_CASSANDRA_TLS_SKIP_VERIFY` | `false` | bool | Disables server-cert verification (sets `tls.Config.InsecureSkipVerify` + `gocql.SslOptions.EnableHostVerification=false`). Bumps `strata_backend_tls_skip_verify{backend="cassandra"}=1` and logs a WARN at boot. Never set in production. | `cassandra.tls.skip_verify` |
 
 ## Meta backend — TiKV
 

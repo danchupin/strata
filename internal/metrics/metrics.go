@@ -334,6 +334,14 @@ var (
 		},
 		[]string{"provider", "outcome"},
 	)
+
+	BackendTLSSkipVerify = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "strata_backend_tls_skip_verify",
+			Help: "1 if the backend's TLS client is running with InsecureSkipVerify=true (mTLS server-cert validation disabled). Set at boot per backend (cassandra, tikv, s3). Operators should alert on >0 in any production environment.",
+		},
+		[]string{"backend"},
+	)
 )
 
 func Register() {
@@ -374,6 +382,7 @@ func Register() {
 		AdminConfigEndpointErrorsTotal,
 		BucketStatsShardWritesTotal,
 		KMSDecryptTotal,
+		BackendTLSSkipVerify,
 	)
 }
 

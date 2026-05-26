@@ -631,6 +631,19 @@ func buildMetaStore(cfg *config.Config, logger *slog.Logger, tp *strataotel.Prov
 	case "memory":
 		return metamem.New(), nil
 	case "cassandra":
+		tlsCfg := metacassandra.TLSConfig{
+			CAFile:     cfg.Cassandra.TLS.CAFile,
+			CertFile:   cfg.Cassandra.TLS.CertFile,
+			KeyFile:    cfg.Cassandra.TLS.KeyFile,
+			SkipVerify: cfg.Cassandra.TLS.SkipVerify,
+		}
+		if tlsCfg.SkipVerify {
+			logger.Warn("Cassandra TLS verification disabled — never set in production",
+				"env", "STRATA_CASSANDRA_TLS_SKIP_VERIFY")
+			metrics.BackendTLSSkipVerify.WithLabelValues("cassandra").Set(1)
+		} else if tlsCfg.HasAny() {
+			metrics.BackendTLSSkipVerify.WithLabelValues("cassandra").Set(0)
+		}
 		return metacassandra.Open(
 			metacassandra.SessionConfig{
 				Hosts:       cfg.Cassandra.Hosts,
@@ -644,6 +657,7 @@ func buildMetaStore(cfg *config.Config, logger *slog.Logger, tp *strataotel.Prov
 				SlowMS:      metacassandra.SlowMSOr(cfg.Cassandra.SlowMS),
 				Metrics:     metrics.CassandraObserver{},
 				Tracer:      tp.Tracer("strata.meta.cassandra"),
+				TLS:         tlsCfg,
 			},
 			metacassandra.Options{DefaultShardCount: cfg.DefaultBucketShards},
 		)

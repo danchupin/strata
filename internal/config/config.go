@@ -100,7 +100,25 @@ type CassandraConfig struct {
 	// SlowMS is the WARN threshold (in milliseconds) applied by the
 	// gocql QueryObserver. 0 disables; unset falls back to the
 	// observer's DefaultSlowQueryMS (100ms). Wired via STRATA_CASSANDRA_SLOW_MS.
-	SlowMS int `koanf:"slow_ms"`
+	SlowMS int                `koanf:"slow_ms"`
+	TLS    CassandraTLSConfig `koanf:"tls"`
+}
+
+// CassandraTLSConfig wires gocql.SslOptions for the Cassandra meta backend
+// (US-004 harden-gateway). Empty CAFile + CertFile + KeyFile → plain-TCP
+// (no SslOptions on the cluster config; backwards-compat preserved).
+//
+// CAFile (optional, PEM) populates a root pool used to verify the server
+// certificate. CertFile + KeyFile (PEM, both or neither) supply the client
+// certificate for mutual TLS. SkipVerify=true sets tls.Config.InsecureSkipVerify
+// and disables gocql's EnableHostVerification — operators get a single
+// WARN at boot plus a `strata_backend_tls_skip_verify{backend="cassandra"}=1`
+// gauge bump so dashboards can flag the unsafe shape.
+type CassandraTLSConfig struct {
+	CAFile     string `koanf:"ca_file"`
+	CertFile   string `koanf:"cert_file"`
+	KeyFile    string `koanf:"key_file"`
+	SkipVerify bool   `koanf:"skip_verify"`
 }
 
 // TiKVConfig holds connection parameters for the TiKV-backed meta store
@@ -544,6 +562,10 @@ var envMap = map[string]string{
 	"STRATA_CASSANDRA_USER":                  "cassandra.username",
 	"STRATA_CASSANDRA_PASSWORD":              "cassandra.password",
 	"STRATA_CASSANDRA_TIMEOUT":               "cassandra.timeout",
+	"STRATA_CASSANDRA_TLS_CA_FILE":           "cassandra.tls.ca_file",
+	"STRATA_CASSANDRA_TLS_CERT_FILE":         "cassandra.tls.cert_file",
+	"STRATA_CASSANDRA_TLS_KEY_FILE":          "cassandra.tls.key_file",
+	"STRATA_CASSANDRA_TLS_SKIP_VERIFY":       "cassandra.tls.skip_verify",
 	"STRATA_TIKV_PD_ENDPOINTS":               "tikv.pd_endpoints",
 	"STRATA_RADOS_CONF":                      "rados.config_file",
 	"STRATA_RADOS_USER":                      "rados.user",
@@ -729,6 +751,9 @@ func (c *Config) validate() error {
 	if err := c.validateTLS(); err != nil {
 		return err
 	}
+	if err := c.validateBackendTLS(); err != nil {
+		return err
+	}
 	c.clampWorkers()
 	c.clampAuthKMS()
 	c.clampObservability()
@@ -789,6 +814,17 @@ func (c *Config) validateTLS() error {
 	}
 	if c.TLS.ReloadInterval != 0 {
 		c.TLS.ReloadInterval = clampDuration("tls.reload_interval", c.TLS.ReloadInterval, 10*time.Second, time.Hour)
+	}
+	return nil
+}
+
+// validateBackendTLS rejects half-paired client cert/key envs on every
+// backend that supports mTLS (Cassandra today; TiKV + S3 land in US-005 +
+// US-006). Empty all-three (CA + cert + key) = plain backend, the
+// backwards-compat default.
+func (c *Config) validateBackendTLS() error {
+	if (c.Cassandra.TLS.CertFile == "") != (c.Cassandra.TLS.KeyFile == "") {
+		return fmt.Errorf("cassandra.tls.cert_file and cassandra.tls.key_file must both be set or both unset")
 	}
 	return nil
 }

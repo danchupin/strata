@@ -158,3 +158,42 @@ Cycle: ralph/harden-gateway
 - **`x509.ParseCertificate` for cert leaf in `tls.Certificate.Leaf`**: `tls.LoadX509KeyPair` does NOT populate `.Leaf` by default (only `.Certificate[0]` is the DER). Populate manually via `x509.ParseCertificate(cert.Certificate[0])` so DNSName / CN extraction works without re-parsing per handshake. Cheaper than re-parsing the DER inside `GetCertificate`.
 - **kubelet `..data` symlink basename is the universal probe**: cert-manager, EKS Pod Identity, csi-driver-secrets-store, and stock kubelet all use the `..data` projected name for the inner version dir. Watching for events on `..data` basename gives backend-agnostic hot-reload without poking at cert-manager-specific paths.
 ---
+
+## 2026-05-26 - US-004 — Cassandra mTLS (gocql SslOptions)
+
+- New `config.CassandraTLSConfig` substruct on `Config.Cassandra.TLS` (CAFile / CertFile / KeyFile / SkipVerify; all zero-valued by default = plain-TCP).
+- 4 envMap entries (`STRATA_CASSANDRA_TLS_CA_FILE` → `cassandra.tls.ca_file` etc).
+- New `Config.validateBackendTLS()` rejects half-pair (cert without key or vice-versa) at boot. Plumbed under `validate()` next to validateTLS.
+- New `metrics.BackendTLSSkipVerify GaugeVec{backend}` registered globally. Bumped to 1 by `serverapp.buildMetaStore` when `STRATA_CASSANDRA_TLS_SKIP_VERIFY=true`; bumped to 0 when TLS is configured *with* verification. Per-backend cardinality (cassandra, tikv, s3 — last two land in US-005/US-006).
+- Extended `cassandra.SessionConfig` with `TLS TLSConfig{CAFile, CertFile, KeyFile, SkipVerify}` field. `TLSConfig.HasAny()` returns false for zero-value (plain-TCP fast path).
+- `cassandra.newCluster` now returns `(*gocql.ClusterConfig, error)` so `buildSslOptions` can surface file-open / PEM-parse errors at session construction (vs at first query). Connect/connectNoKeyspace updated.
+- `buildSslOptions` builds `*tls.Config` from PEM materials: CAFile → `tls.Config.RootCAs` (parse failure → error naming the file), CertFile+KeyFile → `tls.Config.Certificates` via `tls.LoadX509KeyPair`. SkipVerify=true flips both `tls.Config.InsecureSkipVerify=true` AND `gocql.SslOptions.EnableHostVerification=false` (matched pair — gocql's historical disclaimer says one alone leaves it in a half-checked state).
+- `serverapp.buildMetaStore` translates `Config.Cassandra.TLS` → `cassandra.TLSConfig` at the boundary so the cassandra package keeps internal/config out of its import set. Logs single WARN at boot when SkipVerify=true.
+- Unit tests `internal/meta/cassandra/tls_test.go`: TLSConfig.HasAny matrix / plain-TCP cluster keeps SslOpts nil / mTLS cluster wires RootCAs + Certificates + EnableHostVerification=true / SkipVerify=true wires the matched pair / CA-only (server-auth) accepted / missing CAFile fails with clear error / malformed CA fails with "no certificates parsed".
+- Integration test `internal/meta/cassandra/tls_integration_test.go` (build tag `integration`): boots a TLS-enabled Cassandra container via `tccassandra.Run(ctx, image, tccassandra.WithTLS())`, extracts the auto-generated CA from the peer cert chain via an `InsecureSkipVerify=true` probe (`extractServerCA` helper), writes it to a tempdir, and asserts (a) Probe succeeds with valid CA, (b) Open fails with an unrelated CA (`writeUnrelatedSelfSignedCA`), (c) `SkipVerify=true` bypasses CA verification.
+- 3 new config tests in `internal/config/misc_test.go`: half-pair rejection (both directions), env-wires-through round-trip, default plain-TCP shape.
+- `deploy/strata.toml.example`: new `[cassandra.tls]` section (4 keys + range comments).
+- `docs/site/content/reference/env-vars.md`: 4 new rows under the Cassandra table with TOML-key column.
+- `internal/config/env_toml_parity_test.go` drift-lint stays green.
+- `go vet ./...` clean. `go test -race ./internal/serverapp/ ./internal/config/ ./internal/meta/cassandra/` clean. `go test ./...` green (racetest is flaky in parallel runs — passes deterministically when run in isolation; pre-existing, unrelated).
+
+### Files changed
+- `internal/config/config.go`
+- `internal/config/misc_test.go`
+- `internal/metrics/metrics.go`
+- `internal/meta/cassandra/session.go`
+- `internal/meta/cassandra/tls_test.go` (new)
+- `internal/meta/cassandra/tls_integration_test.go` (new, build tag integration)
+- `internal/serverapp/serverapp.go`
+- `deploy/strata.toml.example`
+- `docs/site/content/reference/env-vars.md`
+- `scripts/ralph/prd.json` (passes flip)
+
+### Learnings for future iterations
+- **gocql `SslOptions` insecure-by-default trap**: per the upstream doc (`conn.go:111-123`), if `SslOptions.Config == nil` then `EnableHostVerification=false` skips hostname verification — operators who set `STRATA_CASSANDRA_TLS_CA_FILE` and stopped there would still be vulnerable to a MitM with a CA-signed cert for any host. We sidestep by always building an explicit `*tls.Config` AND keeping `EnableHostVerification=true` unless SkipVerify is explicitly set. Pair both flips — leaving one and not the other leaves gocql in a half-checked state.
+- **Backend mTLS substruct shape**: every backend gets `Config.<Backend>.TLS{CAFile, CertFile, KeyFile, SkipVerify}` with empty CA + cert + key + SkipVerify=false = plain-TCP. Mirror for US-005 (TiKV) + US-006 (S3-upstream). The validateBackendTLS half-pair rule applies uniformly; extend it as each backend lands so the validation site is the single place for the rule.
+- **Operator gauge shape for skip-verify**: `strata_backend_tls_skip_verify{backend=<id>}=1` when SkipVerify is on. Bump it in the backend's wiring path (serverapp.buildMetaStore for meta backends, equivalent in the data-backend builder). Dashboards alert on the sum across all backends > 0 — single PromQL covers cassandra / tikv / s3.
+- **CA extraction trick for integration tests**: `tccassandra.WithTLS()` auto-generates a CA but does NOT expose it as PEM (`TLSConfig.RootCAs` is an opaque `*x509.CertPool`). Workaround: dial the SSL port with `tls.Dial` + `InsecureSkipVerify=true`, capture `ConnectionState().PeerCertificates`, write the self-signed root (Issuer==Subject) to PEM. The keystore baked by `createTLSCerts` ships the CA in the chain so it's always present. Same trick will work for TiKV + S3 integration tests if their TLS containers don't expose CA-as-file.
+- **`gocql.ClusterConfig` returns from `newCluster` are now error-fallible** since TLS file loading must surface PEM parse failures at session-build time (NOT at first-query time which would surface as a generic "failed to connect"). All call sites — connect / connectNoKeyspace — updated to propagate. Future helper-builder edits must keep the `(cfg, error)` shape.
+- **`createTLSCerts` from testcontainers/cassandra@v0.41.0 keystore quirk**: the auto-generated cert SAN is `localhost` + `127.0.0.1`. `ConnectionHost(ctx)` returns `host:port` where host is `localhost` on Linux + `127.0.0.1` on macOS Docker Desktop. Both match the server SAN, so `EnableHostVerification=true` works against either. If a future module ships a SAN-less cert, the gocql handshake will fail with a generic "x509: cannot validate certificate for X because it doesn't contain any IP SANs" — set ServerName explicitly via `tls.Config.ServerName` if needed.
+---

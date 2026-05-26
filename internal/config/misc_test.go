@@ -219,6 +219,66 @@ func TestClampMiscOnLoad(t *testing.T) {
 	}
 }
 
+// TestCassandraTLSHalfPairRejected mirrors validateTLS's half-pair guard for
+// the Cassandra backend mTLS pair (US-004): setting cert_file without
+// key_file (or vice versa) must fail at boot rather than silently fall back
+// to server-auth-only TLS.
+func TestCassandraTLSHalfPairRejected(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("STRATA_CASSANDRA_TLS_CERT_FILE", "/tmp/client.crt")
+	if _, err := Load(); err == nil {
+		t.Fatal("cert_file without key_file must fail Load")
+	}
+	clearEnv(t)
+	t.Setenv("STRATA_CASSANDRA_TLS_KEY_FILE", "/tmp/client.key")
+	if _, err := Load(); err == nil {
+		t.Fatal("key_file without cert_file must fail Load")
+	}
+}
+
+// TestCassandraTLSEnvWiresThrough confirms the four envs land on the
+// Config.Cassandra.TLS substruct verbatim. Boot-time skip_verify=true is
+// the operator's signal to bump the strata_backend_tls_skip_verify gauge —
+// the gauge wiring itself lives in serverapp.buildMetaStore.
+func TestCassandraTLSEnvWiresThrough(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("STRATA_CASSANDRA_TLS_CA_FILE", "/tmp/ca.pem")
+	t.Setenv("STRATA_CASSANDRA_TLS_CERT_FILE", "/tmp/c.pem")
+	t.Setenv("STRATA_CASSANDRA_TLS_KEY_FILE", "/tmp/k.pem")
+	t.Setenv("STRATA_CASSANDRA_TLS_SKIP_VERIFY", "true")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Cassandra.TLS.CAFile != "/tmp/ca.pem" {
+		t.Errorf("ca_file=%q", cfg.Cassandra.TLS.CAFile)
+	}
+	if cfg.Cassandra.TLS.CertFile != "/tmp/c.pem" {
+		t.Errorf("cert_file=%q", cfg.Cassandra.TLS.CertFile)
+	}
+	if cfg.Cassandra.TLS.KeyFile != "/tmp/k.pem" {
+		t.Errorf("key_file=%q", cfg.Cassandra.TLS.KeyFile)
+	}
+	if !cfg.Cassandra.TLS.SkipVerify {
+		t.Errorf("skip_verify=%v want true", cfg.Cassandra.TLS.SkipVerify)
+	}
+}
+
+// TestCassandraTLSDefaultPlainTCP confirms the empty default leaves every
+// TLS field zero-valued, so the gocql cluster builder keeps the historical
+// plain-TCP shape.
+func TestCassandraTLSDefaultPlainTCP(t *testing.T) {
+	clearEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Cassandra.TLS.CAFile != "" || cfg.Cassandra.TLS.CertFile != "" ||
+		cfg.Cassandra.TLS.KeyFile != "" || cfg.Cassandra.TLS.SkipVerify {
+		t.Errorf("default cassandra.tls non-empty: %+v", cfg.Cassandra.TLS)
+	}
+}
+
 // TestInvalidManifestFormatRejected pins the enum validation for
 // manifest.format — only proto / json are accepted.
 func TestInvalidManifestFormatRejected(t *testing.T) {

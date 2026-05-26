@@ -61,6 +61,17 @@ timeout     = "10s"
 # WARN threshold (ms) for gocql QueryObserver. 0 falls back to default (100).
 slow_ms     = 0
 
+[cassandra.tls]
+# Cassandra mTLS (US-004 harden-gateway). Empty all-three (ca_file +
+# cert_file + key_file) → plain-TCP. cert_file/key_file must be set together
+# (half-pair rejected at boot). skip_verify=true disables server-cert
+# validation and bumps strata_backend_tls_skip_verify{backend="cassandra"}=1
+# — never set in production.
+ca_file     = ""
+cert_file   = ""
+key_file    = ""
+skip_verify = false
+
 [rados]
 config_file = "/etc/ceph/ceph.conf"
 user        = "admin"
