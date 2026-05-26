@@ -13,6 +13,8 @@ import (
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/providers/structs"
 	"github.com/knadh/koanf/v2"
+
+	"github.com/danchupin/strata/internal/trustedproxies"
 )
 
 type Config struct {
@@ -44,6 +46,8 @@ type Config struct {
 	Prometheus  PrometheusConfig  `koanf:"prometheus"`
 	SSE         SSEConfig         `koanf:"sse"`
 	VHost       VHostConfig       `koanf:"vhost"`
+
+	TrustedProxies string `koanf:"trusted_proxies"`
 
 	DefaultBucketShards int `koanf:"default_bucket_shards"`
 }
@@ -711,6 +715,7 @@ var envMap = map[string]string{
 	"STRATA_SSE_MASTER_KEY_VAULT":            "sse.master_key_vault",
 	"STRATA_SSE_MASTER_KEYS":                 "sse.master_keys",
 	"STRATA_VHOST_PATTERN":                   "vhost.pattern",
+	"STRATA_TRUSTED_PROXIES":                 "trusted_proxies",
 }
 
 func Load() (*Config, error) {
@@ -800,6 +805,9 @@ func (c *Config) validate() error {
 	if err := c.validateBackendTLS(); err != nil {
 		return err
 	}
+	if err := c.validateTrustedProxies(); err != nil {
+		return err
+	}
 	c.clampWorkers()
 	c.clampAuthKMS()
 	c.clampObservability()
@@ -878,6 +886,16 @@ func (c *Config) validateBackendTLS() error {
 	}
 	if (c.S3.TLS.CertFile == "") != (c.S3.TLS.KeyFile == "") {
 		return fmt.Errorf("s3.tls.cert_file and s3.tls.key_file must both be set or both unset")
+	}
+	return nil
+}
+
+// validateTrustedProxies rejects malformed CIDR entries in
+// STRATA_TRUSTED_PROXIES at boot (US-007 harden-gateway). Empty input is
+// valid — default is "never trust forwarded headers".
+func (c *Config) validateTrustedProxies() error {
+	if _, err := trustedproxies.Parse(c.TrustedProxies); err != nil {
+		return err
 	}
 	return nil
 }

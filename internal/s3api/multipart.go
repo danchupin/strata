@@ -690,7 +690,7 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 		Size:      obj.Size,
 		ETag:      obj.ETag,
 		VersionID: obj.VersionID,
-		SourceIP:  clientSourceIP(r),
+		SourceIP:  clientSourceIP(s.TrustedProxies, r),
 		Principal: principalFromContext(r),
 	})
 	w.WriteHeader(http.StatusOK)

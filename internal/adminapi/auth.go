@@ -53,12 +53,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "InternalError", "issue session token")
 		return
 	}
-	http.SetCookie(w, sessionCookie(r, tok, int(sessionTTL.Seconds())))
+	http.SetCookie(w, s.sessionCookie(r, tok, int(sessionTTL.Seconds())))
 	writeJSON(w, http.StatusOK, sessionResponse{AccessKey: cred.AccessKey, ExpiresAt: claims.Exp})
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, sessionCookie(r, "", -1))
+	http.SetCookie(w, s.sessionCookie(r, "", -1))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -79,23 +79,27 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 
 // sessionCookie builds the Set-Cookie value per the PRD spec. The Secure
 // flag is set only when the request was received over TLS so dev (`make
-// run-memory` over plain HTTP) keeps working — production gateways always
-// terminate TLS upstream.
-func sessionCookie(r *http.Request, value string, maxAge int) *http.Cookie {
+// run-memory` over plain HTTP) keeps working. `X-Forwarded-Proto: https`
+// is honored only when the request source matches a configured
+// STRATA_TRUSTED_PROXIES CIDR (US-007 harden-gateway).
+func (s *Server) sessionCookie(r *http.Request, value string, maxAge int) *http.Cookie {
 	return &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    value,
 		Path:     "/admin",
 		HttpOnly: true,
-		Secure:   isHTTPS(r),
+		Secure:   s.isHTTPS(r),
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   maxAge,
 	}
 }
 
-func isHTTPS(r *http.Request) bool {
+// isHTTPS reports whether the request was received over TLS, optionally
+// honoring X-Forwarded-Proto when the source matches a trusted-proxy
+// CIDR. Default-empty STRATA_TRUSTED_PROXIES = forwarded header ignored.
+func (s *Server) isHTTPS(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
-	return r.Header.Get("X-Forwarded-Proto") == "https"
+	return s.TrustedProxies.ForwardedProto(r) == "https"
 }

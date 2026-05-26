@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/danchupin/strata/internal/meta"
+	"github.com/danchupin/strata/internal/trustedproxies"
 )
 
 // AccessLogMiddleware buffers one server-access-log row per request when the
@@ -19,6 +20,9 @@ type AccessLogMiddleware struct {
 	Meta meta.Store
 	Next http.Handler
 	Now  func() time.Time
+	// TrustedProxies gates X-Forwarded-* / X-Real-IP header trust when
+	// resolving the access-log row's SourceIP (US-007 harden-gateway).
+	TrustedProxies *trustedproxies.TrustedProxies
 }
 
 // NewAccessLogMiddleware wraps next so each request that targets a bucket
@@ -57,7 +61,7 @@ func (m *AccessLogMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		Time:        start,
 		RequestID:   r.Header.Get("X-Request-Id"),
 		Principal:   principalFromContext(r),
-		SourceIP:    clientSourceIP(r),
+		SourceIP:    clientSourceIP(m.TrustedProxies, r),
 		Op:          deriveAccessLogOp(r.Method, key, q),
 		Key:         key,
 		Status:      rw.status,

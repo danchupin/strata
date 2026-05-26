@@ -45,6 +45,7 @@ import (
 	"github.com/danchupin/strata/internal/promclient"
 	"github.com/danchupin/strata/internal/rebalance"
 	"github.com/danchupin/strata/internal/s3api"
+	"github.com/danchupin/strata/internal/trustedproxies"
 )
 
 // Run starts the S3 gateway: builds the data + meta backends, wires the
@@ -129,11 +130,20 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		}
 		return ai.AccessKey
 	}
+	trustedProxies, err := trustedproxies.Parse(cfg.TrustedProxies)
+	if err != nil {
+		return fmt.Errorf("trusted proxies: %w", err)
+	}
+	if trustedProxies.Empty() {
+		logger.Info("trusted proxies: none configured — X-Forwarded-* / X-Real-IP headers ignored")
+	}
+
 	apiHandler := s3api.New(dataBackend, metaStore)
 	apiHandler.Region = cfg.RegionName
 	apiHandler.InvalidateCredential = multi.Invalidate
 	apiHandler.STS = sts
 	apiHandler.STSDefaultDuration = cfg.Auth.STSDuration
+	apiHandler.TrustedProxies = trustedProxies
 	mfaSecrets, err := s3api.ParseMFASecrets(cfg.MFA.Secrets)
 	if err != nil {
 		return fmt.Errorf("mfa secrets: %w", err)
@@ -263,7 +273,8 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 			Inflight:        rebalanceResolved.Inflight,
 			Shards:          rebalanceResolved.Shards,
 		},
-		SigningKey: buildSigningKeyAdminConfig(cfg, kmsProvider, bucketSigningResolver, logger),
+		SigningKey:     buildSigningKeyAdminConfig(cfg, kmsProvider, bucketSigningResolver, logger),
+		TrustedProxies: trustedProxies,
 	})
 
 	mux := http.NewServeMux()
@@ -273,10 +284,14 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	mux.Handle("/console/", strataconsole.ConsoleHandler())
 	adminAudit := s3api.NewAuditMiddleware(metaStore, auditTTL, adminServer.Handler())
 	adminAudit.Publisher = auditBroadcaster
+	adminAudit.TrustedProxies = trustedProxies
 	mux.Handle("/admin/v1/", adminAudit)
 	auditHandler := s3api.NewAuditMiddleware(metaStore, auditTTL, apiHandler)
 	auditHandler.Publisher = auditBroadcaster
-	mux.Handle("/", strataotel.NewMiddleware(tracerProvider, logging.NewMiddleware(logger, metrics.ObserveHTTP(mw.Wrap(s3api.NewAccessLogMiddleware(metaStore, auditHandler), s3api.NewAuthDenyHandler(metaStore))))))
+	auditHandler.TrustedProxies = trustedProxies
+	accessLog := s3api.NewAccessLogMiddleware(metaStore, auditHandler)
+	accessLog.TrustedProxies = trustedProxies
+	mux.Handle("/", strataotel.NewMiddleware(tracerProvider, logging.NewMiddleware(logger, metrics.ObserveHTTP(mw.Wrap(accessLog, s3api.NewAuthDenyHandler(metaStore))))))
 
 	srv := newHTTPServer(cfg.Listen, mux, cfg)
 

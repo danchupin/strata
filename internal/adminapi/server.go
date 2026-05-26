@@ -29,6 +29,7 @@ import (
 	"github.com/danchupin/strata/internal/otel/ringbuf"
 	"github.com/danchupin/strata/internal/promclient"
 	"github.com/danchupin/strata/internal/rebalance"
+	"github.com/danchupin/strata/internal/trustedproxies"
 )
 
 // Server holds dependencies the /admin/v1/* handlers need.
@@ -158,6 +159,11 @@ type Server struct {
 	// (US-002). nil disables the 3 endpoints — kms-less deployments still
 	// boot but the signing-key surface returns 503 SigningKeyDisabled.
 	SigningKey SigningKeyConfig
+
+	// TrustedProxies gates X-Forwarded-* trust when computing the session
+	// cookie's Secure flag (US-007 harden-gateway). nil / empty = forwarded
+	// proto header NEVER honored; cookie Secure follows r.TLS only.
+	TrustedProxies *trustedproxies.TrustedProxies
 
 	// GCConfig is the env-resolved GC worker tunable snapshot surfaced on
 	// GET /admin/v1/gc-config (US-001 drain-rebalance-transparency). Captured
@@ -294,6 +300,10 @@ type Config struct {
 	// SigningKey carries the per-bucket signing-key admin surface (US-002
 	// auth-dx-trailer-lima). Zero value disables the 3 endpoints.
 	SigningKey SigningKeyConfig
+
+	// TrustedProxies gates X-Forwarded-Proto trust when computing the
+	// session cookie's Secure flag (US-007 harden-gateway).
+	TrustedProxies *trustedproxies.TrustedProxies
 }
 
 // SigningKeyConfig carries the per-bucket signing-key admin surface
@@ -368,6 +378,7 @@ func New(c Config) *Server {
 		GCConfig:             c.GCConfig,
 		RebalanceConfig:      c.RebalanceConfig,
 		SigningKey:           c.SigningKey,
+		TrustedProxies:       c.TrustedProxies,
 		Logger:               log.Default(),
 	}
 }

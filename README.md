@@ -80,6 +80,15 @@ open http://localhost:9999/console/
 Bare `docker compose up -d` is the canonical 2-replica TiKV lab. Cassandra-backed regression lab layers on with
 `make up-cassandra` (adds the Cassandra-backed Strata replica at `:9998` behind the same compose stack).
 
+## Breaking changes
+
+- **`X-Forwarded-Proto` / `X-Forwarded-For` / `X-Real-IP` no longer blindly trusted** (US-007 harden-gateway).
+  Operators fronting Strata with a load balancer or ingress MUST set `STRATA_TRUSTED_PROXIES` to the proxy's
+  source CIDR (comma-separated, IPv4 / IPv6). Default empty = forwarded headers ignored (safe for direct
+  exposure). Affected surfaces: admin session-cookie `Secure` flag, S3 notification event `SourceIP`,
+  `audit_log.source_ip`, `access_log.source_ip`. See
+  [reference/env-vars]({{< ref "/reference/env-vars" >}}) → `STRATA_TRUSTED_PROXIES`.
+
 ## Documentation
 
 Full guides — Get Started, Concepts, Deploy, Operate, Best Practices, Architecture deep dive, Reference, S3

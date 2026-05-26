@@ -51,7 +51,7 @@ pass-rate against the upstream Ceph `s3-tests` suite and the deliberate gaps.
 | `CreateBucket` | `internal/s3api/server.go:426` | — | `x-amz-bucket-object-lock-enabled: true` flips the bucket-level Object Lock setting on creation. `x-amz-acl` canned ACL header honoured. Idempotent for same-owner re-`PUT` (returns 200 + `Location`). |
 | `DeleteBucket` | `internal/s3api/server.go:474` | — | 409 `BucketNotEmpty` when objects (incl. delete markers) remain. Operator force-empty available via `POST /admin/v1/buckets/{name}/force-empty`. |
 | `HeadBucket` | `internal/s3api/server.go:480` | — | `x-amz-bucket-region` echoed from the bucket row (default `default`). |
-| `ListBuckets` | `internal/s3api/server.go:202` | — | Anonymous principal returns empty `<Buckets>` element rather than 403. |
+| `ListBuckets` | `internal/s3api/server.go:207` | — | Anonymous principal returns empty `<Buckets>` element rather than 403. |
 | `GetBucketLocation` | `internal/s3api/location.go:42` | — | Returns `<LocationConstraint>` of the bucket's stored region; empty for `default` region (matches AWS for `us-east-1`). |
 
 ## Object lifecycle
@@ -185,8 +185,8 @@ pass-rate against the upstream Ceph `s3-tests` suite and the deliberate gaps.
 
 | Operation | Handler file:line | Shipped in | AWS gotchas |
 |---|---|---|---|
-| `GetBucketNotificationConfiguration` | `internal/s3api/notification.go:91` | — | |
-| `PutBucketNotificationConfiguration` | `internal/s3api/notification.go:56` | — | Notify worker (`STRATA_WORKERS=notify`) drains `notify_queue` to webhook / SQS sinks per `STRATA_NOTIFY_TARGETS`. |
+| `GetBucketNotificationConfiguration` | `internal/s3api/notification.go:92` | — | |
+| `PutBucketNotificationConfiguration` | `internal/s3api/notification.go:57` | — | Notify worker (`STRATA_WORKERS=notify`) drains `notify_queue` to webhook / SQS sinks per `STRATA_NOTIFY_TARGETS`. |
 
 ## Logging
 

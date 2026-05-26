@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -418,6 +419,48 @@ func TestInvalidConsoleThemeRejected(t *testing.T) {
 	t.Setenv("STRATA_CONSOLE_THEME_DEFAULT", "neon")
 	if _, err := Load(); err == nil {
 		t.Fatal("invalid console.theme_default must fail Load")
+	}
+}
+
+// TestTrustedProxiesEnvWiresThrough confirms STRATA_TRUSTED_PROXIES lands
+// on the top-level Config field verbatim (US-007 harden-gateway).
+func TestTrustedProxiesEnvWiresThrough(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("STRATA_TRUSTED_PROXIES", "10.0.0.0/8, fd00::/8")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.TrustedProxies != "10.0.0.0/8, fd00::/8" {
+		t.Errorf("trusted_proxies=%q", cfg.TrustedProxies)
+	}
+}
+
+// TestTrustedProxiesMalformedRejected confirms a bad CIDR fails at boot
+// (US-007 harden-gateway). The error message must name the offending entry
+// so operators can fix it without grepping the source.
+func TestTrustedProxiesMalformedRejected(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("STRATA_TRUSTED_PROXIES", "10.0.0.0/8,not-a-cidr")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("malformed CIDR must fail Load")
+	}
+	if !strings.Contains(err.Error(), "not-a-cidr") {
+		t.Errorf("error should name bad entry: %v", err)
+	}
+}
+
+// TestTrustedProxiesDefaultEmpty confirms the secure default (forwarded
+// headers ignored — no trusted proxies).
+func TestTrustedProxiesDefaultEmpty(t *testing.T) {
+	clearEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.TrustedProxies != "" {
+		t.Errorf("default trusted_proxies non-empty: %q", cfg.TrustedProxies)
 	}
 }
 

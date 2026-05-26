@@ -12,6 +12,7 @@ import (
 
 	"github.com/danchupin/strata/internal/auth"
 	"github.com/danchupin/strata/internal/meta"
+	"github.com/danchupin/strata/internal/trustedproxies"
 )
 
 type notificationConfiguration struct {
@@ -108,12 +109,14 @@ func (s *Server) getBucketNotification(w http.ResponseWriter, r *http.Request, b
 	_, _ = w.Write(blob)
 }
 
-func clientSourceIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if i := strings.Index(xff, ","); i >= 0 {
-			return strings.TrimSpace(xff[:i])
-		}
-		return strings.TrimSpace(xff)
+// clientSourceIP resolves the request's source IP. When tp is non-empty
+// AND r.RemoteAddr matches a trusted CIDR, the leftmost untrusted hop of
+// X-Forwarded-For (then X-Real-IP) wins per RFC 7239 §5.2. Otherwise the
+// bare host portion of r.RemoteAddr is used — forwarded headers ignored.
+// US-007 harden-gateway.
+func clientSourceIP(tp *trustedproxies.TrustedProxies, r *http.Request) string {
+	if !tp.Empty() {
+		return tp.ClientIP(r)
 	}
 	if r.RemoteAddr == "" {
 		return ""

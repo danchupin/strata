@@ -12,6 +12,7 @@ import (
 
 	"github.com/danchupin/strata/internal/logging"
 	"github.com/danchupin/strata/internal/meta"
+	"github.com/danchupin/strata/internal/trustedproxies"
 )
 
 // AuditOverride lets a downstream handler (e.g. /admin/v1/* under adminapi)
@@ -91,6 +92,10 @@ type AuditMiddleware struct {
 	TTL       time.Duration
 	Now       func() time.Time
 	Publisher AuditPublisher
+	// TrustedProxies gates X-Forwarded-* / X-Real-IP header trust when
+	// resolving the audit row's SourceIP (US-007 harden-gateway). nil /
+	// empty = forwarded headers ignored; the bare r.RemoteAddr host wins.
+	TrustedProxies *trustedproxies.TrustedProxies
 }
 
 // NewAuditMiddleware wraps next so each state-changing request is appended to
@@ -144,7 +149,7 @@ func (m *AuditMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Resource:    deriveAuditResource(bucket, key, iamAction),
 		Result:      strconv.Itoa(rw.status),
 		RequestID:   logging.RequestIDFromContext(ctx),
-		SourceIP:    clientSourceIP(r),
+		SourceIP:    clientSourceIP(m.TrustedProxies, r),
 		UserAgent:   r.UserAgent(),
 		TotalTimeMS: totalMS,
 	}
@@ -182,7 +187,7 @@ func (m *AuditMiddleware) recordOverride(r *http.Request, rw *auditWriter, ov *A
 		Resource:    ov.Resource,
 		Result:      strconv.Itoa(rw.status),
 		RequestID:   logging.RequestIDFromContext(ctx),
-		SourceIP:    clientSourceIP(r),
+		SourceIP:    clientSourceIP(m.TrustedProxies, r),
 		UserAgent:   r.UserAgent(),
 		TotalTimeMS: totalMS,
 	}

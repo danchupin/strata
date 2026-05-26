@@ -54,6 +54,7 @@ for the dispatch shape.
 | `STRATA_TLS_CLIENT_CA_FILE` | empty | path | PEM CA bundle for client-cert verification. When set, the gateway requires mTLS (`ClientAuth=RequireAndVerifyClientCert`). | `tls.client_ca_file` |
 | `STRATA_TLS_RELOAD_INTERVAL` | `60s` | Go duration in `[10s, 1h]` or `0` | Periodic re-stat fallback for fsnotify drops + k8s ConfigMap atomic-symlink swaps. `0` disables (fsnotify-only). | `tls.reload_interval` |
 | `STRATA_VHOST_PATTERN` | `*.s3.local` | comma-separated `*.<suffix>`; `-` to disable | Virtual-hosted-style routing. CLI: `--vhost-pattern`. | `vhost.pattern` |
+| `STRATA_TRUSTED_PROXIES` | empty | comma-separated CIDR list (IPv4 / IPv6) | Upstream proxies allowed to set `X-Forwarded-*` / `X-Real-IP`. Default empty → forwarded headers ignored (safe for direct exposure). Set to your ingress / LB source range when fronting Strata with a TLS terminator (US-007 harden-gateway). | `trusted_proxies` |
 | `STRATA_LOG_LEVEL` | `INFO` | `DEBUG \| INFO \| WARN \| ERROR` | slog handler level. CLI: `--log-level`. | `logging.level` |
 | `STRATA_LOG_FORMAT` | `json` | `json \| text` | slog handler format. | `logging.format` |
 | `STRATA_NODE_ID` | hostname-derived | string | Replica identity, stamped on heartbeats + leader leases. | `node.id` |

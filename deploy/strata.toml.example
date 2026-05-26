@@ -12,6 +12,13 @@ meta_backend = "cassandra"     # "memory" | "cassandra"
 shutdown_wait = "10s"
 default_bucket_shards = 64
 
+# Comma-separated CIDR list (IPv4 / IPv6) of upstream proxies allowed to
+# set X-Forwarded-* and X-Real-IP headers. Default empty → forwarded
+# headers NEVER trusted (US-007 harden-gateway). Set to your ingress /
+# load-balancer source range when fronting Strata with a TLS terminator.
+# Example: "10.0.0.0/8,192.168.0.0/16,fd00::/8".
+trusted_proxies = ""
+
 [http]
 # Per-connection timeouts for the gateway listener. Zero = disabled
 # (net/http semantic; dev / loopback profile). Negative rejected at boot.

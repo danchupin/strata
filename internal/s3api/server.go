@@ -21,6 +21,7 @@ import (
 	"github.com/danchupin/strata/internal/data/placement"
 	"github.com/danchupin/strata/internal/meta"
 	"github.com/danchupin/strata/internal/metrics"
+	"github.com/danchupin/strata/internal/trustedproxies"
 )
 
 func metricsGCEnqueued(n int) {
@@ -74,6 +75,10 @@ type Server struct {
 	// disables the check — set by serverapp when the gateway is wired
 	// against a meta backend.
 	DrainCache *placement.DrainCache
+	// TrustedProxies gates X-Forwarded-* / X-Real-IP header trust (US-007
+	// harden-gateway). nil / empty list = forwarded headers NEVER honored;
+	// SourceIP audit + notification fields use r.RemoteAddr directly.
+	TrustedProxies *trustedproxies.TrustedProxies
 }
 
 func New(d data.Backend, m meta.Store) *Server {
@@ -1139,7 +1144,7 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		Size:      obj.Size,
 		ETag:      obj.ETag,
 		VersionID: obj.VersionID,
-		SourceIP:  clientSourceIP(r),
+		SourceIP:  clientSourceIP(s.TrustedProxies, r),
 		Principal: principalFromContext(r),
 	})
 	w.WriteHeader(http.StatusOK)
@@ -1533,7 +1538,7 @@ func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request, b *meta.Bu
 			EventName: eventName,
 			Key:       key,
 			VersionID: o.VersionID,
-			SourceIP:  clientSourceIP(r),
+			SourceIP:  clientSourceIP(s.TrustedProxies, r),
 			Principal: principalFromContext(r),
 		})
 	}

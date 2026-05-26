@@ -280,3 +280,52 @@ Cycle: ralph/harden-gateway
 - **PEM parse + cert/key load happen at `connFor` boot path, not at first request**: surfacing PEM-decode / x509 parse / mismatched cert/key errors as gateway-boot errors gives operators a fast feedback loop. The penalty for deferring to first SDK call is a generic HTTP 500 on the first data-plane PUT, plus a leaking goroutine that retries. Mirror this pattern for any future backend mTLS wiring — load cert materials in the construction path, not the hot path.
 - **`crypto/tls.Config` `Certificates` slice fully replaces client-cert chain**: setting `Certificates = []tls.Certificate{cert}` overrides any prior chain; appending is rarely what you want. `RootCAs` is the trust anchor pool (server-side cert validation); `Certificates` is the local client cert chain. Both fields are independent — populate either / both / neither.
 ---
+
+## 2026-05-26 - US-007 — Trusted proxies + replace blind-trust sites + README Breaking changes section
+
+- New `internal/trustedproxies` standalone package — `TrustedProxies` type, `Parse(s)` (CSV CIDR list, IPv4/IPv6, malformed entry fails with offending string quoted), `Contains(remoteAddr)`, `ClientIP(r)` (RFC 7239 left-to-right walk, skipping trusted hops to find first untrusted), `ForwardedProto(r)` (returns `http`/`https` only when source matches trusted CIDR), `Empty()`. Nil receiver safe.
+- Standalone package (NOT in `internal/serverapp/`) — chosen to break the `s3api → serverapp` cycle (serverapp already imports s3api). PRD's "internal/serverapp/trusted_proxies.go" language interpreted as the WIRING site; the type owner moved out to avoid the cycle.
+- `Config.TrustedProxies string` top-level field + `STRATA_TRUSTED_PROXIES` envMap entry → `trusted_proxies` koanf path. New `validateTrustedProxies()` calls `trustedproxies.Parse` at boot; malformed entry exits with the bad substring quoted.
+- All blind-trust call sites rewritten:
+  - `internal/s3api/notification.go::clientSourceIP` takes `*trustedproxies.TrustedProxies` first arg. Empty / nil = forwarded headers ignored, fall back to `r.RemoteAddr` host. Re-greps confirmed exactly 2 forwarded-header reads at audit baseline (`adminapi/auth.go:isHTTPS`, `s3api/notification.go:clientSourceIP`) — no new sites since 2026-05-25.
+  - `s3api.Server`, `s3api.AuditMiddleware`, `s3api.AccessLogMiddleware` each gain a `TrustedProxies *trustedproxies.TrustedProxies` field. 5 callers updated (`server.go:1147,1541`, `multipart.go:693`, `audit.go:152,190`, `access_log.go:64`).
+  - `adminapi.Server` gains `TrustedProxies` field. `isHTTPS` + `sessionCookie` converted from package-level funcs to methods so they read `s.TrustedProxies`. `isHTTPS` honors `X-Forwarded-Proto` ONLY when the request source matches a trusted CIDR. Callers: `auth.go:handleLogin`, `auth.go:handleLogout`, `uploads.go:512`.
+- `internal/serverapp/serverapp.go::Run`: parses cfg.TrustedProxies once at boot, returns fail-fast error on bad CIDR, logs `INFO trusted proxies: none configured ...` when empty. Plumbs the parsed `*TrustedProxies` onto every receiver (s3api.Server.TrustedProxies, AuditMiddleware.TrustedProxies, AccessLogMiddleware.TrustedProxies, adminapi.Config.TrustedProxies). `adminapi.New` propagates Config→Server.
+- README `## Breaking changes` section CREATED (file had no such section). Placed between `## Quickstart` and `## Documentation`. Body calls out the X-Forwarded-* trust change + `STRATA_TRUSTED_PROXIES` setup instruction + pre-launch hard-cutover acceptable.
+- `deploy/strata.toml.example`: new top-level `trusted_proxies = ""` key (no section — placed under the bare `listen/region/...` cluster before `[http]`).
+- `docs/site/content/reference/env-vars.md`: 1 new row under the Gateway table with `trusted_proxies` TOML key.
+- Unit tests:
+  - `internal/trustedproxies/trustedproxies_test.go` (12 sub-tests): empty parse, ipv4+ipv6 match matrix, malformed CIDR rejected (error names bad entry), bare IP without prefix rejected, nil receiver safe, ClientIP empty list ignores XFF, trusted source honors XFF, walks left-to-right, skips trusted hops finds first untrusted, untrusted source ignores XFF, X-Real-IP fallback, ForwardedProto matrix.
+  - `internal/config/misc_test.go`: 3 new tests (env-wires-through, malformed CIDR fails Load, default empty).
+- `docs/site/content/reference/s3-api.md` line-number refs updated: `listBuckets` 202→207, `getBucketNotification` 91→92, `putBucketNotification` 56→57 (drift caused by US-007 adding trustedproxies field to `s3api.Server` struct). `TestDocsReferenceCoverage` stays green.
+- `internal/config/env_toml_parity_test.go` drift-lint green (1 new env, 1 new TOML key, 1 new docs row).
+- `go vet ./...` clean. `go build ./...` clean. `go test ./...` 50+ packages green (including `-race` on serverapp/s3api/adminapi/trustedproxies/config).
+
+### Files changed
+- `internal/trustedproxies/trustedproxies.go` (new)
+- `internal/trustedproxies/trustedproxies_test.go` (new)
+- `internal/config/config.go`
+- `internal/config/misc_test.go`
+- `internal/s3api/server.go`
+- `internal/s3api/audit.go`
+- `internal/s3api/access_log.go`
+- `internal/s3api/multipart.go`
+- `internal/s3api/notification.go`
+- `internal/adminapi/server.go`
+- `internal/adminapi/auth.go`
+- `internal/adminapi/uploads.go`
+- `internal/serverapp/serverapp.go`
+- `deploy/strata.toml.example`
+- `docs/site/content/reference/env-vars.md`
+- `docs/site/content/reference/s3-api.md`
+- `README.md`
+- `scripts/ralph/prd.json` (passes flip)
+
+### Learnings for future iterations
+- **PRD-literal vs cycle-safe placement**: AC said "New `internal/serverapp/trusted_proxies.go` package" but `serverapp` already imports `s3api`, so a type defined there cannot be referenced from `s3api.Server`. Resolution: type lives in `internal/trustedproxies/` (cycle-free standalone package); the wiring file in `internal/serverapp/` (`serverapp.go::Run`) parses cfg + injects the typed pointer. When the PRD ACs collide with Go's import graph, the import graph wins — note the variance in the progress log.
+- **Forwarded-header trust is THE blind-trust knob in this codebase** — re-grep `grep -rEn 'X-Forwarded|X-Real-IP' internal/` AFTER the change to confirm no new blind-trust sites slipped in via parallel cycles. Pattern for adding a new feature that reads forwarded headers: route through `tp.ClientIP(r)` / `tp.ForwardedProto(r)` (never `r.Header.Get(...)` directly).
+- **Refactoring package-level funcs to methods** can cascade: when a free function depends on per-Server state, converting to a method forces every caller to upgrade `funcName(args)` → `s.funcName(args)`. This change touched 5 call sites for `clientSourceIP` (kept as a free func taking `*TrustedProxies`) + 3 sites for `isHTTPS` (converted to method since `sessionCookie` was already going through Server). Pick the lower-churn shape per caller density.
+- **`s3api.Server` struct edits shift line numbers in `docs/site/content/reference/s3-api.md`** — the `TestDocsReferenceCoverage` lint will fail every time a new field is added above existing methods. Cheap fix: re-grep `^func (s \*Server) <name>` for the moved lines and update the docs page row in the same commit. Or: list NEW fields at the BOTTOM of the struct to minimize line-number drift.
+- **Nil-safe receiver methods unlock pointer-or-nil ergonomics**: `(*TrustedProxies).Contains` / `Empty` / `ClientIP` / `ForwardedProto` all handle nil. Means callers can leave the field unset (zero-value default) and the secure semantic still holds. Cheaper than scattering `if tp != nil { ... }` at every call site.
+- **RFC 7239 left-to-right walk**: when XFF carries multiple hops (`client, proxy1, proxy2`), the leftmost UNTRUSTED hop is the original client. `tp.ClientIP` walks left-to-right and returns the first hop NOT in any trusted CIDR. Single-value XFF is the trivial case; the multi-hop walk only matters when chained proxies are deployed.
+---

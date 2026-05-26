@@ -509,7 +509,7 @@ func (s *Server) mintPresignedURL(r *http.Request, method, path string, query ur
 		region = "default"
 	}
 	scheme := "https"
-	if !isHTTPS(r) {
+	if !s.isHTTPS(r) {
 		scheme = "http"
 	}
 	host := r.Host
