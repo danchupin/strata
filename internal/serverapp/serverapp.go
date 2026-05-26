@@ -280,12 +280,23 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 
 	srv := newHTTPServer(cfg.Listen, mux, cfg)
 
-	tlsCfg, err := buildTLSConfig(cfg)
+	tlsCfg, certs, err := buildTLSConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("tls config: %w", err)
 	}
 	if tlsCfg != nil {
 		srv.TLSConfig = tlsCfg
+	}
+	if certs != nil {
+		reloader := &certReloader{
+			store:    certs,
+			logger:   logger,
+			certFile: cfg.TLS.CertFile,
+			keyFile:  cfg.TLS.KeyFile,
+			certDir:  cfg.TLS.CertDir,
+			interval: cfg.TLS.ReloadInterval,
+		}
+		go reloader.run(ctx)
 	}
 
 	serverErr := make(chan error, 1)

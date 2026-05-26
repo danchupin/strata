@@ -2,47 +2,75 @@ package serverapp
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"os"
 
 	"github.com/danchupin/strata/internal/config"
 )
 
-// buildTLSConfig builds a *tls.Config from cfg.TLS (US-002 harden-gateway).
-// Returns (nil, nil) when CertFile is empty — caller falls back to plain
-// HTTP. config.validateTLS guarantees CertFile + KeyFile are both set or
-// both empty, so a non-empty CertFile here implies KeyFile is non-empty
-// too. The certificate is loaded at boot via tls.LoadX509KeyPair and
-// stamped onto Certificates so srv.ListenAndServeTLS("","") picks it up.
+// buildTLSConfig builds a *tls.Config from cfg.TLS (US-002 + US-003
+// harden-gateway). Returns (nil, nil, nil) when neither CertFile nor
+// CertDir is set — caller falls back to plain HTTP. config.validateTLS
+// guarantees CertFile + KeyFile are both set or both empty and that
+// CertFile + CertDir are mutually exclusive.
 //
 // MinVersion enum: "TLS1.2" → tls.VersionTLS12, "TLS1.3" → tls.VersionTLS13.
 // Empty falls back to TLS 1.2.
 //
 // CipherProfile shapes the TLS 1.2 CipherSuites field:
-//   - mozilla-modern (default): only the three TLS 1.3 AEAD suites
-//     (TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384,
-//     TLS_CHACHA20_POLY1305_SHA256). TLS 1.2 clients have no matching
-//     cipher and the handshake fails — effectively TLS-1.3-only mode.
-//   - mozilla-intermediate: ECDHE + AEAD suites per Mozilla Intermediate
-//     profile; supports TLS 1.2 + 1.3.
-//   - go-default: CipherSuites left nil; Go's curated safe defaults apply.
+//   - mozilla-modern (default): the three TLS 1.3 AEAD suites plus two
+//     TLS 1.2 ECDHE-AES-128-GCM entries required by Go's http2 server.
+//   - mozilla-intermediate: ECDHE + AEAD suites per Mozilla Intermediate.
+//   - go-default: CipherSuites left nil; Go's curated safe defaults.
 //
 // CipherSuites is informational on TLS 1.3 connections per RFC 8446 (Go's
 // tls package ignores the field there).
-func buildTLSConfig(cfg *config.Config) (*tls.Config, error) {
-	if cfg.TLS.CertFile == "" {
-		return nil, nil
+//
+// US-003 adds:
+//   - SNI multi-cert dispatch via a certStore-backed GetCertificate
+//     callback (atomic.Pointer snapshot; lock-free per-handshake reads).
+//   - Optional client-cert verification via ClientCAFile (PEM); enabling
+//     it flips ClientAuth to RequireAndVerifyClientCert.
+//
+// The returned certStore is non-nil when TLS is enabled; the caller
+// hands it to a certReloader for hot-reload + periodic reconciliation.
+func buildTLSConfig(cfg *config.Config) (*tls.Config, *certStore, error) {
+	if cfg.TLS.CertFile == "" && cfg.TLS.CertDir == "" {
+		return nil, nil, nil
 	}
-	cert, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
+	store := &certStore{}
+	var initial *certSnapshot
+	var err error
+	if cfg.TLS.CertDir != "" {
+		initial, err = buildSnapshotFromDir(cfg.TLS.CertDir)
+	} else {
+		initial, err = buildSnapshotFromSingle(cfg.TLS.CertFile, cfg.TLS.KeyFile)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("tls load key pair: %w", err)
+		return nil, nil, fmt.Errorf("tls init: %w", err)
 	}
+	store.swap(initial)
+
 	tlsCfg := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tlsMinVersion(cfg.TLS.MinVersion),
-		CipherSuites: tlsCipherSuites(cfg.TLS.CipherProfile),
-		NextProtos:   []string{"h2", "http/1.1"},
+		GetCertificate: store.GetCertificate,
+		MinVersion:     tlsMinVersion(cfg.TLS.MinVersion),
+		CipherSuites:   tlsCipherSuites(cfg.TLS.CipherProfile),
+		NextProtos:     []string{"h2", "http/1.1"},
 	}
-	return tlsCfg, nil
+	if cfg.TLS.ClientCAFile != "" {
+		caPEM, err := os.ReadFile(cfg.TLS.ClientCAFile)
+		if err != nil {
+			return nil, nil, fmt.Errorf("tls client CA %s: %w", cfg.TLS.ClientCAFile, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, nil, fmt.Errorf("tls client CA %s: AppendCertsFromPEM failed (no valid PEM blocks)", cfg.TLS.ClientCAFile)
+		}
+		tlsCfg.ClientCAs = pool
+		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+	return tlsCfg, store, nil
 }
 
 func tlsMinVersion(v string) uint16 {

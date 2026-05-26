@@ -61,17 +61,32 @@ type HTTPConfig struct {
 	MaxHeaderBytes    int           `koanf:"max_header_bytes"`
 }
 
-// TLSConfig wires the built-in TLS listener (US-002 harden-gateway). Empty
-// CertFile + KeyFile → plain HTTP. MinVersion ∈ {"", "TLS1.2", "TLS1.3"};
-// default "TLS1.2". CipherProfile ∈ {"", "mozilla-modern",
-// "mozilla-intermediate", "go-default"}; default "mozilla-modern". Profile
-// is informational only when MinVersion=TLS1.3 (Go's tls package picks TLS
-// 1.3 ciphers regardless per RFC 8446).
+// TLSConfig wires the built-in TLS listener (US-002 + US-003
+// harden-gateway). Empty CertFile + KeyFile + CertDir → plain HTTP.
+// MinVersion ∈ {"", "TLS1.2", "TLS1.3"}; default "TLS1.2". CipherProfile ∈
+// {"", "mozilla-modern", "mozilla-intermediate", "go-default"}; default
+// "mozilla-modern". Profile is informational only when MinVersion=TLS1.3
+// (Go's tls package picks TLS 1.3 ciphers regardless per RFC 8446).
+//
+// CertDir is mutually exclusive with CertFile/KeyFile. When set, the
+// directory is walked for *.crt + matching *.key pairs and an SNI-driven
+// GetCertificate callback dispatches per-handshake. Cert store is backed
+// by an atomic.Pointer so hot-reload via fsnotify (parent-dir watch for
+// k8s symlink-swap semantics) plus periodic reconciliation never blocks
+// the read path. ReloadInterval controls the periodic reconciler fallback
+// (range [10s, 1h]; 0 disables).
+//
+// ClientCAFile (optional, PEM) enables RequireAndVerifyClientCert for the
+// gateway listener — every TLS handshake must present a cert signed by
+// the configured CA.
 type TLSConfig struct {
-	CertFile      string `koanf:"cert_file"`
-	KeyFile       string `koanf:"key_file"`
-	MinVersion    string `koanf:"min_version"`
-	CipherProfile string `koanf:"cipher_profile"`
+	CertFile       string        `koanf:"cert_file"`
+	KeyFile        string        `koanf:"key_file"`
+	MinVersion     string        `koanf:"min_version"`
+	CipherProfile  string        `koanf:"cipher_profile"`
+	CertDir        string        `koanf:"cert_dir"`
+	ClientCAFile   string        `koanf:"client_ca_file"`
+	ReloadInterval time.Duration `koanf:"reload_interval"`
 }
 
 type CassandraConfig struct {
@@ -391,8 +406,9 @@ func defaults() Config {
 			MaxHeaderBytes:    1 << 20,
 		},
 		TLS: TLSConfig{
-			MinVersion:    "TLS1.2",
-			CipherProfile: "mozilla-modern",
+			MinVersion:     "TLS1.2",
+			CipherProfile:  "mozilla-modern",
+			ReloadInterval: 60 * time.Second,
 		},
 		Cassandra: CassandraConfig{
 			Hosts:       []string{"127.0.0.1"},
@@ -518,6 +534,9 @@ var envMap = map[string]string{
 	"STRATA_TLS_KEY_FILE":                    "tls.key_file",
 	"STRATA_TLS_MIN_VERSION":                 "tls.min_version",
 	"STRATA_TLS_CIPHER_PROFILE":              "tls.cipher_profile",
+	"STRATA_TLS_CERT_DIR":                    "tls.cert_dir",
+	"STRATA_TLS_CLIENT_CA_FILE":              "tls.client_ca_file",
+	"STRATA_TLS_RELOAD_INTERVAL":             "tls.reload_interval",
 	"STRATA_CASSANDRA_HOSTS":                 "cassandra.hosts",
 	"STRATA_CASSANDRA_KEYSPACE":              "cassandra.keyspace",
 	"STRATA_CASSANDRA_DC":                    "cassandra.local_dc",
@@ -752,6 +771,9 @@ func (c *Config) validateTLS() error {
 	if (c.TLS.CertFile == "") != (c.TLS.KeyFile == "") {
 		return fmt.Errorf("tls.cert_file and tls.key_file must both be set or both unset")
 	}
+	if c.TLS.CertDir != "" && c.TLS.CertFile != "" {
+		return fmt.Errorf("tls.cert_dir and tls.cert_file are mutually exclusive — set only one")
+	}
 	switch c.TLS.MinVersion {
 	case "", "TLS1.2", "TLS1.3":
 	default:
@@ -761,6 +783,12 @@ func (c *Config) validateTLS() error {
 	case "", "mozilla-modern", "mozilla-intermediate", "go-default":
 	default:
 		return fmt.Errorf("tls.cipher_profile %q is not one of {mozilla-modern, mozilla-intermediate, go-default}", c.TLS.CipherProfile)
+	}
+	if c.TLS.ReloadInterval < 0 {
+		return fmt.Errorf("tls.reload_interval %s: must be >= 0", c.TLS.ReloadInterval)
+	}
+	if c.TLS.ReloadInterval != 0 {
+		c.TLS.ReloadInterval = clampDuration("tls.reload_interval", c.TLS.ReloadInterval, 10*time.Second, time.Hour)
 	}
 	return nil
 }

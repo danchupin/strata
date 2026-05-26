@@ -1,6 +1,7 @@
 package serverapp
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -11,7 +12,6 @@ import (
 	"math/big"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -27,7 +27,7 @@ func TestBuildTLSConfigDisabledByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
-	got, err := buildTLSConfig(cfg)
+	got, _, err := buildTLSConfig(cfg)
 	if err != nil {
 		t.Fatalf("buildTLSConfig: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestBuildTLSConfigDefaultsToMozillaModern(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
-	tlsCfg, err := buildTLSConfig(cfg)
+	tlsCfg, _, err := buildTLSConfig(cfg)
 	if err != nil {
 		t.Fatalf("buildTLSConfig: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestBuildTLSConfigMinVersionTLS13(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
-	tlsCfg, err := buildTLSConfig(cfg)
+	tlsCfg, _, err := buildTLSConfig(cfg)
 	if err != nil {
 		t.Fatalf("buildTLSConfig: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestBuildTLSConfigIntermediateProfile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
-	tlsCfg, err := buildTLSConfig(cfg)
+	tlsCfg, _, err := buildTLSConfig(cfg)
 	if err != nil {
 		t.Fatalf("buildTLSConfig: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestBuildTLSConfigGoDefaultProfile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
-	tlsCfg, err := buildTLSConfig(cfg)
+	tlsCfg, _, err := buildTLSConfig(cfg)
 	if err != nil {
 		t.Fatalf("buildTLSConfig: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestHTTPSHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
-	tlsCfg, err := buildTLSConfig(cfg)
+	tlsCfg, _, err := buildTLSConfig(cfg)
 	if err != nil {
 		t.Fatalf("buildTLSConfig: %v", err)
 	}
@@ -174,24 +174,21 @@ func TestHTTPSHandshake(t *testing.T) {
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
-	ts := httptest.NewUnstartedServer(mux)
-	ts.TLS = tlsCfg
-	ts.StartTLS()
-	t.Cleanup(ts.Close)
+	addr := startTLSListener(t, tlsCfg, mux)
 
 	pool := x509.NewCertPool()
-	pem, err := os.ReadFile(certPath)
+	pemBytes, err := os.ReadFile(certPath)
 	if err != nil {
 		t.Fatalf("read cert: %v", err)
 	}
-	if !pool.AppendCertsFromPEM(pem) {
+	if !pool.AppendCertsFromPEM(pemBytes) {
 		t.Fatal("AppendCertsFromPEM failed")
 	}
 	client := &http.Client{
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}},
 		Timeout:   3 * time.Second,
 	}
-	resp, err := client.Get(ts.URL)
+	resp, err := client.Get("https://" + addr + "/")
 	if err != nil {
 		t.Fatalf("https get: %v", err)
 	}
@@ -218,17 +215,14 @@ func TestTLS13MinRejectsTLS12Client(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
-	tlsCfg, err := buildTLSConfig(cfg)
+	tlsCfg, _, err := buildTLSConfig(cfg)
 	if err != nil {
 		t.Fatalf("buildTLSConfig: %v", err)
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	ts := httptest.NewUnstartedServer(mux)
-	ts.TLS = tlsCfg
-	ts.StartTLS()
-	t.Cleanup(ts.Close)
+	addr := startTLSListener(t, tlsCfg, mux)
 
 	pool := x509.NewCertPool()
 	pemBytes, _ := os.ReadFile(certPath)
@@ -238,8 +232,7 @@ func TestTLS13MinRejectsTLS12Client(t *testing.T) {
 		RootCAs:    pool,
 		MaxVersion: tls.VersionTLS12,
 	}
-	host := ts.Listener.Addr().String()
-	conn, err := tls.Dial("tcp", host, clientCfg)
+	conn, err := tls.Dial("tcp", addr, clientCfg)
 	if err == nil {
 		conn.Close()
 		t.Fatal("expected handshake failure for TLS 1.2 client against TLS1.3-min server")
@@ -257,24 +250,19 @@ func TestMozillaModernRejectsWeakCipher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
-	tlsCfg, err := buildTLSConfig(cfg)
+	tlsCfg, _, err := buildTLSConfig(cfg)
 	if err != nil {
 		t.Fatalf("buildTLSConfig: %v", err)
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	ts := httptest.NewUnstartedServer(mux)
-	ts.TLS = tlsCfg
-	ts.StartTLS()
-	t.Cleanup(ts.Close)
+	addr := startTLSListener(t, tlsCfg, mux)
 
 	pool := x509.NewCertPool()
 	pemBytes, _ := os.ReadFile(certPath)
 	pool.AppendCertsFromPEM(pemBytes)
 
-	// Client offers only legacy non-ECDHE-GCM ciphers — mozilla-modern
-	// has none of these; handshake_failure expected.
 	clientCfg := &tls.Config{
 		RootCAs:    pool,
 		MaxVersion: tls.VersionTLS12,
@@ -283,12 +271,35 @@ func TestMozillaModernRejectsWeakCipher(t *testing.T) {
 			tls.TLS_RSA_WITH_AES_128_CBC_SHA,
 		},
 	}
-	host := ts.Listener.Addr().String()
-	conn, err := tls.Dial("tcp", host, clientCfg)
+	conn, err := tls.Dial("tcp", addr, clientCfg)
 	if err == nil {
 		conn.Close()
 		t.Fatal("expected handshake failure: mozilla-modern has no matching cipher")
 	}
+}
+
+// startTLSListener binds an http.Server to a random 127.0.0.1 port and
+// runs ServeTLS with the provided tls.Config. Returns the dial address
+// (host:port). Replaces httptest.NewUnstartedServer + StartTLS because
+// the latter unconditionally overwrites tls.Config.Certificates when the
+// slice is empty (Go 1.25 stdlib behavior — see server.go:167), which
+// defeats the US-003 GetCertificate-backed dispatch when the client
+// sends no SNI (IP-literal handshakes).
+func startTLSListener(t *testing.T, tlsCfg *tls.Config, handler http.Handler) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	srv := &http.Server{Handler: handler, TLSConfig: tlsCfg}
+	go func() { _ = srv.ServeTLS(ln, "", "") }()
+	t.Cleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+		_ = ln.Close()
+	})
+	return ln.Addr().String()
 }
 
 // writeSelfSignedCert creates a fresh self-signed P-256 ECDSA cert valid

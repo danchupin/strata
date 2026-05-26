@@ -116,3 +116,45 @@ Cycle: ralph/harden-gateway
 - **HTTPS test pattern via `httptest`**: `httptest.NewUnstartedServer(mux)` → `ts.TLS = tlsCfg` → `ts.StartTLS()` lets you inject the exact `tls.Config` you'd build at production boot. The cert pool for the test client comes from reading the same cert PEM file written by `writeSelfSignedCert` helper. Round-trip latency is < 5 ms — fits unit-test budgets.
 - **Self-signed cert generation in Go tests**: `ecdsa.GenerateKey(elliptic.P256(), rand.Reader)` + `x509.CreateCertificate` with SerialNumber/Subject/Validity. For 127.0.0.1 / IP-based SAN, set `tmpl.IPAddresses = []net.IP{ip}` (NOT `DNSNames`). `tmpl.IsCA = true` + `BasicConstraintsValid = true` makes the cert self-signed-CA so it can sign itself. PEM-encode the DER bytes with `pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})`.
 ---
+
+## 2026-05-26 - US-003 — TLS SNI multi-cert + hot-reload (atomic.Pointer + k8s-mount aware)
+
+- `config.TLSConfig` extended with 3 new fields: `CertDir`, `ClientCAFile`, `ReloadInterval` (default 60s).
+- 3 new envMap entries (`STRATA_TLS_CERT_DIR` / `STRATA_TLS_CLIENT_CA_FILE` / `STRATA_TLS_RELOAD_INTERVAL`).
+- `Config.validateTLS()` extended: mutual exclusion of `cert_file` ↔ `cert_dir`, negative `reload_interval` rejected, in-range clamp [10s, 1h] applied for non-zero values.
+- New `internal/serverapp/cert_store.go`: `certStore` is an `atomic.Pointer[certSnapshot]` — per-handshake read is a single atomic Load + map lookup (no RWMutex contention). `certSnapshot` carries `fallback`, `byName` (SAN/CN-indexed, lowercased), `pairs` (with on-disk fingerprints for change detection). Includes `GetCertificate(chi)` callback with SNI lookup + wildcard fallback (`*.example.com` matches `foo.example.com`) + first-pair fallback for empty ServerName.
+- New `internal/serverapp/tls_reloader.go`: `certReloader.run(ctx)` fans an `fsnotify.Watcher` on parent dirs of single-cert paths + the cert dir itself, plus a periodic re-stat ticker (interval-driven; 0 disables periodic fallback). Reacts to CREATE/RENAME/WRITE/REMOVE on `*.crt`/`*.key` basenames AND the `..data` symlink basename (kubelet Secret + ConfigMap atomic-mount semantic). On snapshot diff (any path's fingerprint changed) atomic-swaps the pointer; build errors log WARN and keep the previous snapshot live (gateway never falls back to plain HTTP mid-flight).
+- `buildTLSConfig(cfg)` signature changed to return `(*tls.Config, *certStore, error)` — caller wires the store onto a `certReloader` and `go reloader.run(ctx)`. `tls.Config.GetCertificate=store.GetCertificate`, `tls.Config.Certificates` left empty so SNI dispatch is the only code path.
+- `STRATA_TLS_CLIENT_CA_FILE` (PEM) flips `tls.Config.ClientAuth` to `RequireAndVerifyClientCert` with a `ClientCAs` pool built via `x509.NewCertPool().AppendCertsFromPEM`. Empty CA → cert validation disabled (US-002 single-cert default preserved).
+- Unit tests `internal/serverapp/tls_reload_test.go`: SNI dispatch picks correct cert per ServerName, atomic snapshot swap continues in-flight TLS session without re-handshake, periodic reconciler picks up new cert dir entry (fsnotify skipped), k8s symlink-swap parent-dir watch fires, wildcard SNI matches subdomain, `STRATA_TLS_CLIENT_CA_FILE` flips ClientAuth, mutual exclusion + negative reload_interval fail-fast at boot.
+- Integration test `internal/serverapp/tls_k8s_mount_test.go` (build tag `integration`): end-to-end kubelet Secret-mount layout (`..data` symlink + versioned subdirs + outer `tls.crt` symlink-of-symlink) with cert-manager-shape atomic rotation; verifies the post-swap GetCertificate returns the v2 leaf bytes (not stale v1).
+- `internal/serverapp/tls_test.go`: replaced `httptest.NewUnstartedServer + StartTLS` with a `startTLSListener` helper. Go 1.25 stdlib `httptest.StartTLS` at line 167 of `net/http/httptest/server.go` unconditionally overwrites `tls.Config.Certificates` when the slice is empty, defeating the US-003 GetCertificate-backed dispatch for SNI-less clients (IP-literal handshakes have empty ServerName per RFC 6066). The helper binds a raw `net.Listen("tcp","127.0.0.1:0")` + `http.Server.ServeTLS` keeping our `tls.Config` untouched.
+- `deploy/strata.toml.example`: `[tls]` section extended with `cert_dir`, `client_ca_file`, `reload_interval`.
+- `docs/site/content/reference/env-vars.md`: 3 new rows under the Gateway table.
+- `go.mod`: `github.com/fsnotify/fsnotify v1.9.0` promoted from `// indirect` to direct require. `go mod tidy` cannot run cleanly in this workspace (cephimpl is workspace-local, fails the `latest` query); edited manually.
+- `go vet ./...` clean. `go test -race ./internal/serverapp/ ./internal/config/` clean. `go test ./...` 53 packages green (rados/s3/cassandra/etc).
+- `go test -tags integration -run TestK8sSecretMountAtomicRotation ./internal/serverapp/` PASS (verifies the kubelet symlink-swap path end-to-end).
+
+### Files changed
+- `internal/config/config.go`
+- `internal/serverapp/cert_store.go` (new)
+- `internal/serverapp/tls_reloader.go` (new)
+- `internal/serverapp/tls.go`
+- `internal/serverapp/serverapp.go`
+- `internal/serverapp/tls_test.go`
+- `internal/serverapp/tls_reload_test.go` (new)
+- `internal/serverapp/tls_k8s_mount_test.go` (new, build tag integration)
+- `deploy/strata.toml.example`
+- `docs/site/content/reference/env-vars.md`
+- `go.mod`
+- `scripts/ralph/prd.json` (passes flip)
+
+### Learnings for future iterations
+- **`httptest.StartTLS` clobbers `tls.Config.Certificates`** when the slice is empty (Go 1.25 stdlib `net/http/httptest/server.go:167`): `if len(s.TLS.Certificates) == 0 { s.TLS.Certificates = []tls.Certificate{cert} }`. This silently overwrites GetCertificate-only configs because the server-side selection at `crypto/tls.Config.getCertificate` returns from `Certificates` when `clientHello.ServerName == ""`. IP-literal connections (e.g. `https://127.0.0.1:port`) emit no SNI per RFC 6066. Workaround for tests that need to assert GetCertificate-backed dispatch: bind a raw `net.Listen("tcp","127.0.0.1:0")` + `http.Server.ServeTLS(ln,"","")` and never go through `httptest`.
+- **`atomic.Pointer[T]` for hot-reloadable read paths**: every TLS handshake does a single `Pointer.Load()` returning an immutable snapshot — zero contention with reload-side writers. The snapshot stays alive for any in-flight handshakes referencing it; Go GC reclaims when the last reference drops. Reload-side cost: build new snapshot (off the read path) + `Pointer.Store(new)`. Avoid RWMutex for read-heavy hot paths where the write rate is low.
+- **fsnotify on k8s ConfigMap/Secret mounts**: never watch the file basename, always watch the parent directory. Kubelet stores data in a versioned `..YYYY_MM_DD_HH_MM_SS.abc/` subdir and exposes a `..data` symlink to the current version. Rotation creates a new versioned dir and atomically renames `..data_tmp` onto `..data` via `os.Rename` (POSIX atomic). `fsnotify.Add(file)` on the outer `tls.crt` symlink fires once on initial-symlink-deletion-via-rename then stops firing because the watch is keyed on inode and the new inode is different. Watch the parent dir for RENAME/CREATE events on the `..data` basename (kubelet projects this name unconditionally) AND on outer symlink basenames. Always pair fsnotify with a periodic re-stat ticker (default 60s) because the watch dies silently on some filesystems (overlayfs, gVisor, etc).
+- **fsnotify v1.9.0 is already in `go.sum`** as a transitive dep (via `knadh/koanf` → `knadh/koanf/providers/file`). Direct use just requires promoting it from `// indirect` to a top-level require in `go.mod`. Do NOT run `go mod tidy` in this workspace — `cephimpl` is workspace-resolved and tidy attempts `latest` query against the public module proxy which fails. Manual go.mod edit is the path.
+- **`tls.Config.GetCertificate` precedence**: server-side cert selection prefers `GetCertificate(chi)` over `Certificates` if and only if `GetCertificate != nil && (len(Certificates) == 0 || chi.ServerName != "")`. Leaving `Certificates` empty forces every handshake through `GetCertificate`. The wildcard branch in our store does `byName["*"+name[dot:]]` so `foo.example.com` matches `*.example.com`. Subject CN is also indexed lowercased — legacy certs without SAN still dispatch.
+- **`x509.ParseCertificate` for cert leaf in `tls.Certificate.Leaf`**: `tls.LoadX509KeyPair` does NOT populate `.Leaf` by default (only `.Certificate[0]` is the DER). Populate manually via `x509.ParseCertificate(cert.Certificate[0])` so DNSName / CN extraction works without re-parsing per handshake. Cheaper than re-parsing the DER inside `GetCertificate`.
+- **kubelet `..data` symlink basename is the universal probe**: cert-manager, EKS Pod Identity, csi-driver-secrets-store, and stock kubelet all use the `..data` projected name for the inner version dir. Watching for events on `..data` basename gives backend-agnostic hot-reload without poking at cert-manager-specific paths.
+---

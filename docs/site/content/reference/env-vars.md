@@ -50,6 +50,9 @@ for the dispatch shape.
 | `STRATA_TLS_KEY_FILE` | empty | path | PEM private key matching `STRATA_TLS_CERT_FILE`. | `tls.key_file` |
 | `STRATA_TLS_MIN_VERSION` | `TLS1.2` | `TLS1.2 \| TLS1.3` | Minimum negotiated TLS protocol version. | `tls.min_version` |
 | `STRATA_TLS_CIPHER_PROFILE` | `mozilla-modern` | `mozilla-modern \| mozilla-intermediate \| go-default` | TLS 1.2 cipher suite selection. `mozilla-modern` pins TLS 1.3 AEAD suites only (TLS 1.2 clients rejected). Informational on TLS 1.3 connections per RFC 8446. | `tls.cipher_profile` |
+| `STRATA_TLS_CERT_DIR` | empty | path | SNI multi-cert directory (US-003). Walked for `*.crt` + matching `*.key` pairs; cert dispatched per-handshake via `tls.Config.GetCertificate`. Mutually exclusive with `STRATA_TLS_CERT_FILE`. | `tls.cert_dir` |
+| `STRATA_TLS_CLIENT_CA_FILE` | empty | path | PEM CA bundle for client-cert verification. When set, the gateway requires mTLS (`ClientAuth=RequireAndVerifyClientCert`). | `tls.client_ca_file` |
+| `STRATA_TLS_RELOAD_INTERVAL` | `60s` | Go duration in `[10s, 1h]` or `0` | Periodic re-stat fallback for fsnotify drops + k8s ConfigMap atomic-symlink swaps. `0` disables (fsnotify-only). | `tls.reload_interval` |
 | `STRATA_VHOST_PATTERN` | `*.s3.local` | comma-separated `*.<suffix>`; `-` to disable | Virtual-hosted-style routing. CLI: `--vhost-pattern`. | `vhost.pattern` |
 | `STRATA_LOG_LEVEL` | `INFO` | `DEBUG \| INFO \| WARN \| ERROR` | slog handler level. CLI: `--log-level`. | `logging.level` |
 | `STRATA_LOG_FORMAT` | `json` | `json \| text` | slog handler format. | `logging.format` |
