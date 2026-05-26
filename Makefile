@@ -403,6 +403,18 @@ smoke-rgw-lab-restart:
 smoke-single-binary:
 	bash scripts/smoke-single-binary.sh
 
+# End-to-end harden-gateway smoke (US-010 of ralph/harden-gateway).
+# Boots strata with EVERY harden-gateway feature wired simultaneously:
+# HTTPS (US-002), SNI hot-reload watcher armed (US-003), admin listener
+# split on 127.0.0.1 (US-008), trusted-proxies CIDR (US-007), per-IP
+# rate limit (US-009), backend-mTLS skip-verify gauge clean
+# (US-004/005/006). Slowloris (US-001) via `go test -run TestSlowloris`
+# — NOT shell nc; BusyBox semantics differ. Memory-backed by design;
+# the per-feature smokes + unit tests cover the TLS-enabled backend
+# paths in isolation.
+smoke-harden-gateway:
+	bash scripts/smoke-harden-gateway.sh
+
 # Race-soak driver (US-006). Brings up the Cassandra-backed stack
 # (`make up-all-ci` when CI=true, else `make up-cassandra`), waits for
 # /readyz on 9998 (strata-cassandra), then runs `bin/strata-racecheck`

@@ -40,6 +40,8 @@ workflows reference.
 
 - {{< card href="/best-practices/billing" >}}**Billing** — Byte-seconds trapezoid math, intra-day sampling, and the `usage_aggregates` feed external invoice generators consume.{{< /card >}}
 
+- {{< card href="/best-practices/production-hardening" >}}**Production hardening** — 12-line checklist for prod readiness: HTTP timeouts, built-in TLS, backend mTLS, trusted proxies, split admin listener, ingress rate limit.{{< /card >}}
+
 {{% /columns %}}
 
 ## See also
