@@ -42,3 +42,39 @@ Cycle: ralph/harden-gateway
 - **Post-cycle ROADMAP state**: 4 globals open (P2 ScyllaDB benchmarks, P2 Content-addressed dedup, P3 Intelligent-Tiering, P3 Select Object Content) — unchanged. Cycle A entry flipped Done. Plus 9 remaining cycles (B Observability, C Supply-chain, D K8s HA, E Policy engine v2, F Chaos+fuzz, G Restore drill, H Release engineering, I S3-compat-finish-v2, J Compliance audit log) tracked in plan doc but NOT yet in ROADMAP.
 - **CI surface that must stay green**: `web-build`, `lint-build`, `lint-nginx-lab`, `unit` (-race), `integration-cassandra`, `docker-build`, `e2e`, `e2e-full`, `e2e-ui`, `ci-tikv`, `ci-scylla`, `race-nightly`. New integration tests (Cassandra TLS, TiKV TLS, k8s mount) extend `integration-cassandra` + `ci-tikv` runtimes by ~5-10 min total — acceptable.
 - **Smoke surface that must stay green**: `make smoke`, `make smoke-signed`, `make smoke-tikv-default-lab`, every `scripts/smoke-*.sh` shipped. New smokes added: `scripts/smoke-tls.sh` (US-002), `scripts/smoke-admin-split.sh` (US-008), `scripts/smoke-rate-limit.sh` (US-009), `scripts/smoke-harden-gateway.sh` (US-010 — runs ALL features together).
+
+## 2026-05-26 - US-001 — HTTP server timeouts + ROADMAP entry create
+
+- New `config.HTTPConfig` substruct (5 fields) + defaults (RH=10s, R=60s, W=30m, I=120s, MHB=1 MiB) baked into `internal/config/config.go::defaults()`.
+- 5 envMap entries (`STRATA_HTTP_READ_HEADER_TIMEOUT` etc → `http.*`).
+- New `Config.validateHTTP()` rejects negative durations / negative MaxHeaderBytes (fail-fast at boot).
+- New `Config.clampHTTP()` clamps `WriteTimeout > 24h → 24h` + `MaxHeaderBytes > 16 MiB → 16 MiB` with WARN log.
+- New `internal/serverapp/timeouts.go::newHTTPServer(addr, handler, cfg)` factored out of the in-line `&http.Server{...}` site; serverapp.go:281 now calls it.
+- Unit tests `internal/serverapp/timeouts_test.go`: defaults / env-override / `0s = disabled` / negative fail-fast (all 5 fields) / WriteTimeout 48h clamp / MaxHeaderBytes 32MiB clamp.
+- Go-native slowloris chaos test `internal/serverapp/timeouts_chaos_test.go::TestSlowlorisDropsConnection`: real `net.Dial` against an in-process gateway with 200ms ReadHeaderTimeout; dribbles header bytes past the budget and asserts `io.ReadAll` does NOT terminate with a deadline timeout (EOF / RST both count as a clean drop). Smoke calls it via `go test -run TestSlowloris` (no BusyBox `nc` shenanigans).
+- `deploy/strata.toml.example` gains `[http]` section with all 5 keys + range comments.
+- `docs/site/content/reference/env-vars.md` gains 5 rows under the Gateway table with the matching TOML key column.
+- `ROADMAP.md` under `## Correctness & consistency`: NEW open entry `P0 — Cycle A: harden-gateway (...)` for the close-flip protocol baseline (US-010 flips it to Done with SHA backfill).
+- `internal/config/env_toml_parity_test.go` drift-lint stays green (every new env wired through Config + envMap + TOML example + reference page).
+- `go vet ./...` clean. `go test ./internal/config/... ./internal/serverapp/...` clean. `go build ./...` clean.
+
+### Files changed
+- `internal/config/config.go`
+- `internal/serverapp/serverapp.go`
+- `internal/serverapp/timeouts.go` (new)
+- `internal/serverapp/timeouts_test.go` (new)
+- `internal/serverapp/timeouts_chaos_test.go` (new)
+- `deploy/strata.toml.example`
+- `docs/site/content/reference/env-vars.md`
+- `ROADMAP.md`
+- `scripts/ralph/prd.json` (passes flip)
+
+### Learnings for future iterations
+- **Config substruct pattern**: every new env knob lives on a substruct under `Config`, with a koanf tag, a default in `config.defaults()`, an envMap entry, validation/clamp in `config.validate()`, a row in `deploy/strata.toml.example`, AND a row in `docs/site/content/reference/env-vars.md`. The drift-lint test `internal/config/env_toml_parity_test.go` catches misses on any of the four — running it post-change is faster than searching for missed sites.
+- **Zero-as-disabled is a Go HTTP idiom**: `net/http.Server` treats zero-valued `ReadTimeout`/`WriteTimeout`/`IdleTimeout`/`ReadHeaderTimeout`/`MaxHeaderBytes` as "no timeout / default". US-001 mirrors that semantic for the operator UX (set `0s` → opt out) without inventing a sentinel value.
+- **Negative duration parsing**: `time.ParseDuration("-1s")` succeeds with a negative `time.Duration`. Validation MUST explicitly reject negatives because koanf will accept them silently. Mirror this for every new duration env added in later stories.
+- **Test pattern for env-driven config**: use `t.Setenv("STRATA_*", "...")` then call `config.Load()`. `t.Setenv` auto-cleans at test end so the helper composes cleanly with subtests. `STRATA_HTTP_WRITE_TIMEOUT=0s` round-trips through koanf as `time.Duration(0)` — no special-casing needed for the "explicit zero" path.
+- **Slowloris chaos test shape**: spawn a real `http.Server` via `net.Listen("tcp", "127.0.0.1:0")` + `srv.Serve(ln)`, dial raw with `net.Dial`, dribble bytes, then `io.ReadAll` with `SetReadDeadline`. `io.ReadAll` returns `nil` on EOF (Go convention), surfaces RST as a non-timeout error, and only returns a `net.Error.Timeout()=true` when the server kept the socket open past the slack window. The deadline branch is the only failure mode.
+- **`internal/data/rados/cephimpl/backend.go` build-tag diagnostic** (`OperationNoFlag` type mismatch) is unrelated to the default build — it surfaces only under `-tags ceph`. Default `go vet ./...` and `go build ./...` ignore it; CI's e2e job catches the tagged build separately.
+- **ROADMAP "Cycle A" entry pattern**: NEW open entry inserted at the top of `## Correctness & consistency` in US-001; US-010 flips it to `~~Done~~` shape with the closing-SHA backfill on a follow-up commit. Mirrors the 12-prior-cycle close protocol — do NOT skip the open entry.
+---

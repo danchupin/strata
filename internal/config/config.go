@@ -22,6 +22,7 @@ type Config struct {
 	MetaBackend  string        `koanf:"meta_backend"`
 	ShutdownWait time.Duration `koanf:"shutdown_wait"`
 
+	HTTP        HTTPConfig        `koanf:"http"`
 	Cassandra   CassandraConfig   `koanf:"cassandra"`
 	TiKV        TiKVConfig        `koanf:"tikv"`
 	RADOS       RADOSConfig       `koanf:"rados"`
@@ -44,6 +45,19 @@ type Config struct {
 	VHost       VHostConfig       `koanf:"vhost"`
 
 	DefaultBucketShards int `koanf:"default_bucket_shards"`
+}
+
+// HTTPConfig carries per-connection timeout knobs applied to the gateway
+// listener (US-001 harden-gateway). Defaults are slowloris-safe:
+// ReadHeaderTimeout=10s, ReadTimeout=60s, WriteTimeout=30m (5 GiB ÷ 30m ≈
+// 2.8 MB/s minimum throughput — cellular safe), IdleTimeout=120s,
+// MaxHeaderBytes=1 MiB. A zero value is honored by net/http as "disabled".
+type HTTPConfig struct {
+	ReadHeaderTimeout time.Duration `koanf:"read_header_timeout"`
+	ReadTimeout       time.Duration `koanf:"read_timeout"`
+	WriteTimeout      time.Duration `koanf:"write_timeout"`
+	IdleTimeout       time.Duration `koanf:"idle_timeout"`
+	MaxHeaderBytes    int           `koanf:"max_header_bytes"`
 }
 
 type CassandraConfig struct {
@@ -355,6 +369,13 @@ func defaults() Config {
 		MetaBackend:         "memory",
 		ShutdownWait:        10 * time.Second,
 		DefaultBucketShards: 64,
+		HTTP: HTTPConfig{
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       60 * time.Second,
+			WriteTimeout:      30 * time.Minute,
+			IdleTimeout:       120 * time.Second,
+			MaxHeaderBytes:    1 << 20,
+		},
 		Cassandra: CassandraConfig{
 			Hosts:       []string{"127.0.0.1"},
 			Keyspace:    "strata",
@@ -470,6 +491,11 @@ var envMap = map[string]string{
 	"STRATA_META_BACKEND":                    "meta_backend",
 	"STRATA_BUCKET_SHARDS":                   "default_bucket_shards",
 	"STRATA_SHUTDOWN_WAIT":                   "shutdown_wait",
+	"STRATA_HTTP_READ_HEADER_TIMEOUT":        "http.read_header_timeout",
+	"STRATA_HTTP_READ_TIMEOUT":               "http.read_timeout",
+	"STRATA_HTTP_WRITE_TIMEOUT":              "http.write_timeout",
+	"STRATA_HTTP_IDLE_TIMEOUT":               "http.idle_timeout",
+	"STRATA_HTTP_MAX_HEADER_BYTES":           "http.max_header_bytes",
 	"STRATA_CASSANDRA_HOSTS":                 "cassandra.hosts",
 	"STRATA_CASSANDRA_KEYSPACE":              "cassandra.keyspace",
 	"STRATA_CASSANDRA_DC":                    "cassandra.local_dc",
@@ -655,6 +681,10 @@ func (c *Config) validate() error {
 	if c.DefaultBucketShards <= 0 {
 		return fmt.Errorf("default_bucket_shards must be positive (got %d)", c.DefaultBucketShards)
 	}
+	if err := c.validateHTTP(); err != nil {
+		return err
+	}
+	c.clampHTTP()
 	c.clampWorkers()
 	c.clampAuthKMS()
 	c.clampObservability()
@@ -664,6 +694,42 @@ func (c *Config) validate() error {
 	c.clampMisc()
 	warnLegacyDrainStrict()
 	return nil
+}
+
+// validateHTTP rejects negative timeouts / max-header-bytes. Zero is a
+// valid value (net/http treats zero as "disabled"); negative values fail
+// fast at boot.
+func (c *Config) validateHTTP() error {
+	if c.HTTP.ReadHeaderTimeout < 0 {
+		return fmt.Errorf("http.read_header_timeout %s: must be >= 0", c.HTTP.ReadHeaderTimeout)
+	}
+	if c.HTTP.ReadTimeout < 0 {
+		return fmt.Errorf("http.read_timeout %s: must be >= 0", c.HTTP.ReadTimeout)
+	}
+	if c.HTTP.WriteTimeout < 0 {
+		return fmt.Errorf("http.write_timeout %s: must be >= 0", c.HTTP.WriteTimeout)
+	}
+	if c.HTTP.IdleTimeout < 0 {
+		return fmt.Errorf("http.idle_timeout %s: must be >= 0", c.HTTP.IdleTimeout)
+	}
+	if c.HTTP.MaxHeaderBytes < 0 {
+		return fmt.Errorf("http.max_header_bytes %d: must be >= 0", c.HTTP.MaxHeaderBytes)
+	}
+	return nil
+}
+
+// clampHTTP enforces upper bounds on WriteTimeout + MaxHeaderBytes so a
+// fat-finger 999h timeout doesn't silently disable slowloris protection.
+// Zero passes through (consumers treat zero as "disabled" per net/http).
+func (c *Config) clampHTTP() {
+	if c.HTTP.WriteTimeout > 24*time.Hour {
+		slog.Warn("clamping config value", "key", "http.write_timeout", "value", c.HTTP.WriteTimeout.String(), "max", (24 * time.Hour).String())
+		c.HTTP.WriteTimeout = 24 * time.Hour
+	}
+	if c.HTTP.MaxHeaderBytes > 16<<20 {
+		slog.Warn("clamping config value", "key", "http.max_header_bytes", "value", c.HTTP.MaxHeaderBytes, "max", 16<<20)
+		c.HTTP.MaxHeaderBytes = 16 << 20
+	}
 }
 
 // validateMisc validates the US-005 sweep knobs that require a finite

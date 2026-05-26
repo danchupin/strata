@@ -278,10 +278,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	auditHandler.Publisher = auditBroadcaster
 	mux.Handle("/", strataotel.NewMiddleware(tracerProvider, logging.NewMiddleware(logger, metrics.ObserveHTTP(mw.Wrap(s3api.NewAccessLogMiddleware(metaStore, auditHandler), s3api.NewAuthDenyHandler(metaStore))))))
 
-	srv := &http.Server{
-		Addr:    cfg.Listen,
-		Handler: mux,
-	}
+	srv := newHTTPServer(cfg.Listen, mux, cfg)
 
 	serverErr := make(chan error, 1)
 	go func() {

@@ -41,6 +41,11 @@ for the dispatch shape.
 | `STRATA_META_BACKEND` | `memory` | `memory \| cassandra \| tikv` | Meta-backend selector. Required at boot. | `meta_backend` |
 | `STRATA_BUCKET_SHARDS` | `64` | positive int | Per-bucket default shard count for the `objects` table; see [sharded objects]({{< ref "/architecture/sharding" >}}). | `default_bucket_shards` |
 | `STRATA_SHUTDOWN_WAIT` | `10s` | Go duration | Graceful-shutdown drain window before `http.Server.Close`. | `shutdown_wait` |
+| `STRATA_HTTP_READ_HEADER_TIMEOUT` | `10s` | Go duration ≥ 0 | Slowloris-safe ceiling on header receipt. `0` = disabled (net/http semantic). | `http.read_header_timeout` |
+| `STRATA_HTTP_READ_TIMEOUT` | `60s` | Go duration ≥ 0 | Header + body receipt ceiling. `0` = disabled. | `http.read_timeout` |
+| `STRATA_HTTP_WRITE_TIMEOUT` | `30m` | Go duration in `[0, 24h]` | Response-write ceiling. 30m default ≈ 2.8 MB/s minimum on a 5 GiB body (cellular safe). `0` = disabled. | `http.write_timeout` |
+| `STRATA_HTTP_IDLE_TIMEOUT` | `120s` | Go duration ≥ 0 | Keep-alive idle ceiling. `0` = disabled. | `http.idle_timeout` |
+| `STRATA_HTTP_MAX_HEADER_BYTES` | `1048576` (1 MiB) | int in `[0, 16777216]` | Header byte cap per request. `0` = net/http default (1 MiB). | `http.max_header_bytes` |
 | `STRATA_VHOST_PATTERN` | `*.s3.local` | comma-separated `*.<suffix>`; `-` to disable | Virtual-hosted-style routing. CLI: `--vhost-pattern`. | `vhost.pattern` |
 | `STRATA_LOG_LEVEL` | `INFO` | `DEBUG \| INFO \| WARN \| ERROR` | slog handler level. CLI: `--log-level`. | `logging.level` |
 | `STRATA_LOG_FORMAT` | `json` | `json \| text` | slog handler format. | `logging.format` |

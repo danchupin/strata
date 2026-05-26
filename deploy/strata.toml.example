@@ -12,6 +12,15 @@ meta_backend = "cassandra"     # "memory" | "cassandra"
 shutdown_wait = "10s"
 default_bucket_shards = 64
 
+[http]
+# Per-connection timeouts for the gateway listener. Zero = disabled
+# (net/http semantic; dev / loopback profile). Negative rejected at boot.
+read_header_timeout = "10s"     # Slowloris ceiling on header receipt.
+read_timeout        = "60s"     # Header + body ceiling.
+write_timeout       = "30m"     # 5 GiB / 30m ≈ 2.8 MB/s minimum. Range: [0, 24h].
+idle_timeout        = "120s"    # Keep-alive idle ceiling.
+max_header_bytes    = 1048576   # 1 MiB. Range: [0, 16 MiB].
+
 [tikv]
 # Required when meta_backend=tikv. Comma-separated PD endpoints.
 pd_endpoints = ""
