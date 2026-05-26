@@ -21,6 +21,14 @@ write_timeout       = "30m"     # 5 GiB / 30m ≈ 2.8 MB/s minimum. Range: [0, 2
 idle_timeout        = "120s"    # Keep-alive idle ceiling.
 max_header_bytes    = 1048576   # 1 MiB. Range: [0, 16 MiB].
 
+[tls]
+# Built-in TLS listener (US-002 harden-gateway). Empty cert + key → plain
+# HTTP. Both must be set together — fail-fast at boot otherwise.
+cert_file      = ""             # PEM cert (optional intermediate chain concatenated).
+key_file       = ""             # PEM private key matching cert_file.
+min_version    = "TLS1.2"       # TLS1.2 | TLS1.3.
+cipher_profile = "mozilla-modern" # mozilla-modern | mozilla-intermediate | go-default. Informational on TLS 1.3.
+
 [tikv]
 # Required when meta_backend=tikv. Comma-separated PD endpoints.
 pd_endpoints = ""

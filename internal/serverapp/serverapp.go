@@ -280,6 +280,14 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 
 	srv := newHTTPServer(cfg.Listen, mux, cfg)
 
+	tlsCfg, err := buildTLSConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("tls config: %w", err)
+	}
+	if tlsCfg != nil {
+		srv.TLSConfig = tlsCfg
+	}
+
 	serverErr := make(chan error, 1)
 	go func() {
 		logger.Info("strata server listening",
@@ -287,9 +295,16 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 			"data", cfg.DataBackend,
 			"meta", cfg.MetaBackend,
 			"region", cfg.RegionName,
-			"auth", cfg.Auth.Mode)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serverErr <- err
+			"auth", cfg.Auth.Mode,
+			"tls", tlsCfg != nil)
+		var listenErr error
+		if tlsCfg != nil {
+			listenErr = srv.ListenAndServeTLS("", "")
+		} else {
+			listenErr = srv.ListenAndServe()
+		}
+		if listenErr != nil && !errors.Is(listenErr, http.ErrServerClosed) {
+			serverErr <- listenErr
 			return
 		}
 		serverErr <- nil

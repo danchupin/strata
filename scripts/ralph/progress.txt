@@ -78,3 +78,41 @@ Cycle: ralph/harden-gateway
 - **`internal/data/rados/cephimpl/backend.go` build-tag diagnostic** (`OperationNoFlag` type mismatch) is unrelated to the default build — it surfaces only under `-tags ceph`. Default `go vet ./...` and `go build ./...` ignore it; CI's e2e job catches the tagged build separately.
 - **ROADMAP "Cycle A" entry pattern**: NEW open entry inserted at the top of `## Correctness & consistency` in US-001; US-010 flips it to `~~Done~~` shape with the closing-SHA backfill on a follow-up commit. Mirrors the 12-prior-cycle close protocol — do NOT skip the open entry.
 ---
+
+## 2026-05-26 - US-002 — Built-in TLS listener (single-cert + min-version + cipher profile enum)
+
+- New `config.TLSConfig` substruct (`CertFile`, `KeyFile`, `MinVersion`, `CipherProfile`) + defaults (MinVersion=`TLS1.2`, CipherProfile=`mozilla-modern`, empty cert/key = plain HTTP) baked into `internal/config/config.go::defaults()`.
+- 4 envMap entries (`STRATA_TLS_CERT_FILE` → `tls.cert_file`, etc).
+- New `Config.validateTLS()`: rejects half-pair (cert without key or vice-versa), unknown MinVersion (only `TLS1.2`/`TLS1.3`), unknown CipherProfile (only `mozilla-modern`/`mozilla-intermediate`/`go-default`).
+- New `internal/serverapp/tls.go::buildTLSConfig(cfg)` returns `(*tls.Config, nil)` or `(nil, nil)` for plain HTTP. Loads cert via `tls.LoadX509KeyPair`, builds `tls.Config{Certificates, MinVersion, CipherSuites, NextProtos: ["h2","http/1.1"]}`.
+- Cipher profiles:
+  - `mozilla-modern` (default): 3 TLS 1.3 AEAD ciphers (TLS_AES_128_GCM_SHA256 / TLS_AES_256_GCM_SHA384 / TLS_CHACHA20_POLY1305_SHA256) PLUS 2 TLS 1.2 ECDHE-AES-128-GCM (TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256). The TLS 1.2 minimum is REQUIRED by `golang.org/x/net/http2.ConfigureServer` per RFC 7540 — Go's http2 server refuses if CipherSuites is non-empty and lacks an AES_128_GCM_SHA256 TLS 1.2 ECDHE entry. Pure "TLS 1.3 only" → pair with MinVersion=TLS1.3.
+  - `mozilla-intermediate`: 6 TLS 1.2 ECDHE AEAD suites (GCM + CHACHA, ECDSA + RSA).
+  - `go-default`: CipherSuites=nil → Go's curated safe defaults.
+- `internal/serverapp/serverapp.go` `Run`: branches between `srv.ListenAndServeTLS("","")` (TLSConfig set with cert loaded into `Certificates`) and `srv.ListenAndServe()` (plain HTTP).
+- Unit tests `internal/serverapp/tls_test.go`: nil-config when CertFile empty / defaults pin mozilla-modern + TLS1.2 / MinVersion=TLS1.3 flows through / intermediate profile expands / go-default leaves nil / invalid MinVersion + invalid CipherProfile + half-pair all fail-fast / real HTTPS handshake via httptest.NewTLSServer + custom CA pool / MinVersion=TLS1.3 rejects TLS 1.2 client / mozilla-modern rejects weak-cipher-only client.
+- `deploy/strata.toml.example`: new `[tls]` section after `[http]` (4 keys + range comments).
+- `docs/site/content/reference/env-vars.md`: 4 new rows under the Gateway table with TOML-key column.
+- New `scripts/smoke-tls.sh`: generates self-signed P-256 ECDSA cert via `openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1`, boots strata on `:19443` with mozilla-modern/TLS1.2, probes HTTPS handshake via `curl -sv --cacert`, asserts TLS 1.2+ negotiated, `/healthz` returns 200 over HTTPS, HTTP/2 ALPN negotiation succeeds. Runs in <2s. memory-backed; no Docker / Cassandra / TiKV needed.
+- `internal/config/env_toml_parity_test.go` drift-lint stays green.
+- `go vet ./...` clean. `go test -race ./...` clean (37 packages). `bash scripts/smoke-tls.sh` PASS.
+
+### Files changed
+- `internal/config/config.go`
+- `internal/serverapp/serverapp.go`
+- `internal/serverapp/tls.go` (new)
+- `internal/serverapp/tls_test.go` (new)
+- `deploy/strata.toml.example`
+- `docs/site/content/reference/env-vars.md`
+- `scripts/smoke-tls.sh` (new)
+- `scripts/ralph/prd.json` (passes flip)
+
+### Learnings for future iterations
+- **Go's http2 ConfigureServer cipher gotcha**: when `srv.TLSConfig.CipherSuites` is non-empty, `golang.org/x/net/http2.ConfigureServer` (called automatically by `ListenAndServeTLS`) returns `"http2: TLSConfig.CipherSuites is missing an HTTP/2-required AES_128_GCM_SHA256 cipher"` unless at least one of `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256` / `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` is present. The check is naive — it does NOT recognize TLS 1.3 ciphersuites (TLS_AES_128_GCM_SHA256 etc) as satisfying RFC 7540's intent. Workaround: always include the two TLS 1.2 ECDHE-AES-128-GCM ciphers in any non-nil CipherSuites list, regardless of TLS 1.3-only intent. Alternative: set CipherSuites=nil and rely on Go's defaults.
+- **Cert chain via `srv.TLSConfig.Certificates`** is the modern path — call `srv.ListenAndServeTLS("", "")` and Go reads from `Certificates`/`GetCertificate`. The cert/key file path args are only consulted when both fields are nil. This sets US-003 up cleanly (SNI multi-cert dispatch via `GetCertificate` swap).
+- **Mozilla SSL Config profiles → Go cipher list mapping**: Modern is "TLS 1.3 only" per Mozilla's actual recipe (Mozilla doesn't pin Go-specific TLS 1.3 cipher IDs — those are always all 3 by RFC 8446). Intermediate is 6 TLS 1.2 ECDHE AEAD ciphers (GCM-128, GCM-256, CHACHA20, each × ECDSA/RSA). Go's `tls` package treats TLS 1.3 cipher IDs as constants that can sit in `CipherSuites` but are never actually negotiated — they're ignored at handshake time per RFC 8446 ("TLS 1.3 ciphersuites are not configurable").
+- **`openssl req` ec keygen on macOS**: prefer `openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 …` over the bash process-substitution form `-newkey ec:<(openssl ecparam -name prime256v1)`. The substitution form hangs silently on LibreSSL (macOS default). The `-pkeyopt` form works on both LibreSSL + OpenSSL 3.
+- **`openssl s_client` is too interactive for unattended smoke** even with `echo Q | openssl s_client …` — LibreSSL on macOS hangs differently. Prefer `curl -sv --cacert <ca> https://host:port/path 2>&1` and grep for `SSL connection using TLSv1\.[23]` / `SSL certificate verify ok`. Bonus: curl also tests `--http2` ALPN negotiation in the same invocation.
+- **HTTPS test pattern via `httptest`**: `httptest.NewUnstartedServer(mux)` → `ts.TLS = tlsCfg` → `ts.StartTLS()` lets you inject the exact `tls.Config` you'd build at production boot. The cert pool for the test client comes from reading the same cert PEM file written by `writeSelfSignedCert` helper. Round-trip latency is < 5 ms — fits unit-test budgets.
+- **Self-signed cert generation in Go tests**: `ecdsa.GenerateKey(elliptic.P256(), rand.Reader)` + `x509.CreateCertificate` with SerialNumber/Subject/Validity. For 127.0.0.1 / IP-based SAN, set `tmpl.IPAddresses = []net.IP{ip}` (NOT `DNSNames`). `tmpl.IsCA = true` + `BasicConstraintsValid = true` makes the cert self-signed-CA so it can sign itself. PEM-encode the DER bytes with `pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})`.
+---

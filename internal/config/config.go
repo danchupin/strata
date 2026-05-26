@@ -23,6 +23,7 @@ type Config struct {
 	ShutdownWait time.Duration `koanf:"shutdown_wait"`
 
 	HTTP        HTTPConfig        `koanf:"http"`
+	TLS         TLSConfig         `koanf:"tls"`
 	Cassandra   CassandraConfig   `koanf:"cassandra"`
 	TiKV        TiKVConfig        `koanf:"tikv"`
 	RADOS       RADOSConfig       `koanf:"rados"`
@@ -58,6 +59,19 @@ type HTTPConfig struct {
 	WriteTimeout      time.Duration `koanf:"write_timeout"`
 	IdleTimeout       time.Duration `koanf:"idle_timeout"`
 	MaxHeaderBytes    int           `koanf:"max_header_bytes"`
+}
+
+// TLSConfig wires the built-in TLS listener (US-002 harden-gateway). Empty
+// CertFile + KeyFile → plain HTTP. MinVersion ∈ {"", "TLS1.2", "TLS1.3"};
+// default "TLS1.2". CipherProfile ∈ {"", "mozilla-modern",
+// "mozilla-intermediate", "go-default"}; default "mozilla-modern". Profile
+// is informational only when MinVersion=TLS1.3 (Go's tls package picks TLS
+// 1.3 ciphers regardless per RFC 8446).
+type TLSConfig struct {
+	CertFile      string `koanf:"cert_file"`
+	KeyFile       string `koanf:"key_file"`
+	MinVersion    string `koanf:"min_version"`
+	CipherProfile string `koanf:"cipher_profile"`
 }
 
 type CassandraConfig struct {
@@ -376,6 +390,10 @@ func defaults() Config {
 			IdleTimeout:       120 * time.Second,
 			MaxHeaderBytes:    1 << 20,
 		},
+		TLS: TLSConfig{
+			MinVersion:    "TLS1.2",
+			CipherProfile: "mozilla-modern",
+		},
 		Cassandra: CassandraConfig{
 			Hosts:       []string{"127.0.0.1"},
 			Keyspace:    "strata",
@@ -496,6 +514,10 @@ var envMap = map[string]string{
 	"STRATA_HTTP_WRITE_TIMEOUT":              "http.write_timeout",
 	"STRATA_HTTP_IDLE_TIMEOUT":               "http.idle_timeout",
 	"STRATA_HTTP_MAX_HEADER_BYTES":           "http.max_header_bytes",
+	"STRATA_TLS_CERT_FILE":                   "tls.cert_file",
+	"STRATA_TLS_KEY_FILE":                    "tls.key_file",
+	"STRATA_TLS_MIN_VERSION":                 "tls.min_version",
+	"STRATA_TLS_CIPHER_PROFILE":              "tls.cipher_profile",
 	"STRATA_CASSANDRA_HOSTS":                 "cassandra.hosts",
 	"STRATA_CASSANDRA_KEYSPACE":              "cassandra.keyspace",
 	"STRATA_CASSANDRA_DC":                    "cassandra.local_dc",
@@ -685,6 +707,9 @@ func (c *Config) validate() error {
 		return err
 	}
 	c.clampHTTP()
+	if err := c.validateTLS(); err != nil {
+		return err
+	}
 	c.clampWorkers()
 	c.clampAuthKMS()
 	c.clampObservability()
@@ -714,6 +739,28 @@ func (c *Config) validateHTTP() error {
 	}
 	if c.HTTP.MaxHeaderBytes < 0 {
 		return fmt.Errorf("http.max_header_bytes %d: must be >= 0", c.HTTP.MaxHeaderBytes)
+	}
+	return nil
+}
+
+// validateTLS rejects invalid TLS knob values at boot. Empty CertFile +
+// KeyFile is valid (plain HTTP). Setting one without the other is rejected
+// — fail fast rather than silently fall back to plain HTTP and surprise the
+// operator. MinVersion / CipherProfile are enum-checked; empty passes
+// through to the default ("TLS1.2" / "mozilla-modern").
+func (c *Config) validateTLS() error {
+	if (c.TLS.CertFile == "") != (c.TLS.KeyFile == "") {
+		return fmt.Errorf("tls.cert_file and tls.key_file must both be set or both unset")
+	}
+	switch c.TLS.MinVersion {
+	case "", "TLS1.2", "TLS1.3":
+	default:
+		return fmt.Errorf("tls.min_version %q is not one of {TLS1.2, TLS1.3}", c.TLS.MinVersion)
+	}
+	switch c.TLS.CipherProfile {
+	case "", "mozilla-modern", "mozilla-intermediate", "go-default":
+	default:
+		return fmt.Errorf("tls.cipher_profile %q is not one of {mozilla-modern, mozilla-intermediate, go-default}", c.TLS.CipherProfile)
 	}
 	return nil
 }

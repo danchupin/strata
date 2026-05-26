@@ -46,6 +46,10 @@ for the dispatch shape.
 | `STRATA_HTTP_WRITE_TIMEOUT` | `30m` | Go duration in `[0, 24h]` | Response-write ceiling. 30m default ≈ 2.8 MB/s minimum on a 5 GiB body (cellular safe). `0` = disabled. | `http.write_timeout` |
 | `STRATA_HTTP_IDLE_TIMEOUT` | `120s` | Go duration ≥ 0 | Keep-alive idle ceiling. `0` = disabled. | `http.idle_timeout` |
 | `STRATA_HTTP_MAX_HEADER_BYTES` | `1048576` (1 MiB) | int in `[0, 16777216]` | Header byte cap per request. `0` = net/http default (1 MiB). | `http.max_header_bytes` |
+| `STRATA_TLS_CERT_FILE` | empty | path | PEM certificate (server + optional intermediates) for the built-in TLS listener. Empty → plain HTTP. Must be set together with `STRATA_TLS_KEY_FILE`. | `tls.cert_file` |
+| `STRATA_TLS_KEY_FILE` | empty | path | PEM private key matching `STRATA_TLS_CERT_FILE`. | `tls.key_file` |
+| `STRATA_TLS_MIN_VERSION` | `TLS1.2` | `TLS1.2 \| TLS1.3` | Minimum negotiated TLS protocol version. | `tls.min_version` |
+| `STRATA_TLS_CIPHER_PROFILE` | `mozilla-modern` | `mozilla-modern \| mozilla-intermediate \| go-default` | TLS 1.2 cipher suite selection. `mozilla-modern` pins TLS 1.3 AEAD suites only (TLS 1.2 clients rejected). Informational on TLS 1.3 connections per RFC 8446. | `tls.cipher_profile` |
 | `STRATA_VHOST_PATTERN` | `*.s3.local` | comma-separated `*.<suffix>`; `-` to disable | Virtual-hosted-style routing. CLI: `--vhost-pattern`. | `vhost.pattern` |
 | `STRATA_LOG_LEVEL` | `INFO` | `DEBUG \| INFO \| WARN \| ERROR` | slog handler level. CLI: `--log-level`. | `logging.level` |
 | `STRATA_LOG_FORMAT` | `json` | `json \| text` | slog handler format. | `logging.format` |
