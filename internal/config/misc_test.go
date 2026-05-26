@@ -464,6 +464,59 @@ func TestTrustedProxiesDefaultEmpty(t *testing.T) {
 	}
 }
 
+// TestRateLimitEnvWiresThrough confirms the four rate-limit envs land on
+// Config.RateLimit verbatim (US-009 harden-gateway).
+func TestRateLimitEnvWiresThrough(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("STRATA_RATE_LIMIT_PER_KEY", "50")
+	t.Setenv("STRATA_RATE_LIMIT_PER_IP", "100")
+	t.Setenv("STRATA_RATE_LIMIT_BURST", "250")
+	t.Setenv("STRATA_RATE_LIMIT_CACHE_SIZE", "5000")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RateLimit.PerKey != 50 || cfg.RateLimit.PerIP != 100 ||
+		cfg.RateLimit.Burst != 250 || cfg.RateLimit.CacheSize != 5000 {
+		t.Errorf("rate_limit wired wrong: %+v", cfg.RateLimit)
+	}
+}
+
+// TestRateLimitDefaultsDisabled — both per-key + per-IP default to 0
+// (disabled); CacheSize defaults to 100000.
+func TestRateLimitDefaultsDisabled(t *testing.T) {
+	clearEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RateLimit.PerKey != 0 || cfg.RateLimit.PerIP != 0 || cfg.RateLimit.Burst != 0 {
+		t.Errorf("default rate_limit not zero: %+v", cfg.RateLimit)
+	}
+	if cfg.RateLimit.CacheSize != 100_000 {
+		t.Errorf("default cache_size=%d want 100000", cfg.RateLimit.CacheSize)
+	}
+}
+
+// TestRateLimitNegativeRejected — every rate-limit knob fails fast at boot
+// when set negative (mirrors the US-001 timeout discipline).
+func TestRateLimitNegativeRejected(t *testing.T) {
+	for _, env := range []string{
+		"STRATA_RATE_LIMIT_PER_KEY",
+		"STRATA_RATE_LIMIT_PER_IP",
+		"STRATA_RATE_LIMIT_BURST",
+		"STRATA_RATE_LIMIT_CACHE_SIZE",
+	} {
+		t.Run(env, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv(env, "-1")
+			if _, err := Load(); err == nil {
+				t.Fatalf("%s=-1 must fail Load", env)
+			}
+		})
+	}
+}
+
 // TestDefaultMiscKnobs pins the default values for the US-005 sweep.
 func TestDefaultMiscKnobs(t *testing.T) {
 	clearEnv(t)

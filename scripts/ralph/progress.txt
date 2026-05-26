@@ -368,3 +368,49 @@ Cycle: ralph/harden-gateway
 - **`STRATA_ADMIN_LISTEN` empty default**: critical for backwards-compat. Every existing smoke / lab / docker-compose binding stays on the single-port shape until the operator opts in. The split mode is recommended (`127.0.0.1:9001` loopback) for prod but never forced — matches the US-001..US-007 opt-in discipline of this cycle.
 - **In-package Run tests need ports + ctx + run goroutine + cancel + drain**: pattern in admin_listener_test.go reusable for any future Run-level test. `freePort(t)` returns a 127.0.0.1:0-bound port, releases the listener so Run can rebind. `waitListen(t, addr)` polls TCP dial until ready. `cancel()` + `<-runErr` blocks for clean shutdown. The whole shape fits in ~20 lines per test and avoids the metrics-Register panic via the `sync.Once` wrap above.
 ---
+
+## 2026-05-26 - US-009 — Per-IP + per-key ingress rate limiter + go.mod direct requires
+
+- New `config.RateLimitConfig` substruct on `Config.RateLimit` (4 fields: PerKey, PerIP, Burst, CacheSize). Defaults: PerKey=0 / PerIP=0 (disabled) / Burst=0 (auto: 2 × max layer rate) / CacheSize=100_000.
+- 4 envMap entries (`STRATA_RATE_LIMIT_PER_KEY` → `rate_limit.per_key` etc).
+- New `Config.validateRateLimit()` rejects negative knobs at boot. `Config.clampRateLimit()` pins ranges (PerKey/PerIP [1, 100000], Burst [1, 1000000], CacheSize [1000, 10000000]) — zero passes through (= disabled).
+- New `metrics.IngressRateLimitRefused CounterVec{reason}` registered globally.
+- `go.mod`: added direct require `github.com/hashicorp/golang-lru/v2 v2.0.7`. `golang.org/x/time` is already a direct require since the rebalance throttle landed — no further mod edit needed there. `go mod tidy` cannot run in this workspace (cephimpl module-resolved); manual go.mod + go.sum edits (sum + go.mod sum from `go mod download -json`).
+- New `internal/serverapp/rate_limit.go`: `rateLimiter` struct holding two LRU caches (`*lru.Cache[string, *rate.Limiter]`) — one per layer. Per-key keyed on `auth.FromContext(ctx).AccessKey`; anonymous skips. Per-IP keyed on `trustedproxies.TrustedProxies.ClientIP(r)` so the limiter sees the real client when a trusted proxy fronts strata. Allow returns false on refusal → 429 + `<Code>SlowDown</Code>` body + `Retry-After: 1` + counter increment. `Wrap(next)` is identity for nil receiver so the disabled path stays zero-cost.
+- `serverapp.Run` wiring: `newRateLimiter(cfg, trustedProxies)` built right after audit + accesslog middleware construction; `rateLimit.Wrap(accessLog)` slots into the s3Chain between auth (`mw.Wrap`) and audit. Single-port shape + admin-split shape both flow through the same s3Chain handler — admin/metrics/healthz/readyz/console routes register directly on their own mux entries and bypass the limiter.
+- Burst auto-size: `2 × max(per_key, per_ip)` per AC ("default `2 × limit`"). max() builtin keeps it clean.
+- LRU eviction: `golang-lru/v2` evicts the oldest entry at cap. Eviction grants the evicted client a fresh bucket on next hit (forgets recent usage — conservative, per AC).
+- `deploy/strata.toml.example`: new `[rate_limit]` section (4 keys + range comments).
+- `docs/site/content/reference/env-vars.md`: 4 new rows under the Gateway table.
+- Unit tests `internal/serverapp/rate_limit_test.go` (9): disabled no-op / per-IP fires & refills / per-key fires + counter / anonymous bypass / burst absorbs spike / LRU eviction at cap / trusted-proxy client IP honored / negative env fail-fast (per-knob subtest) / burst auto-size = 2 × max(per_key, per_ip). Plus end-to-end `TestRateLimitEndToEndPerIP` that boots `Run()` against in-memory backends and asserts /healthz bypasses while /somebucket/ hits the 429 path with proper headers + XML body.
+- 3 new config tests in `internal/config/misc_test.go`: env-wires-through (4 envs), defaults disabled (per_key=per_ip=0, cache_size=100000), negative rejected (per-knob subtest).
+- New smoke `scripts/smoke-rate-limit.sh`: boots strata on `:19500` with `STRATA_RATE_LIMIT_PER_IP=5 STRATA_RATE_LIMIT_BURST=2`, sanity-checks /healthz bypass, then floods /somebucket/ with 30 GETs and asserts ≥1 refusal carrying `<Code>SlowDown</Code>` + `Retry-After: 1`, then waits 1.5s and confirms refill. Memory-backed; no Docker. <3s.
+- `internal/config/env_toml_parity_test.go` drift-lint stays green (4 new envs, 4 new TOML keys, 4 new docs rows).
+- `go vet ./...` clean. `go build ./...` clean. `go test -count=1 ./...` 50+ packages green (racetest is the pre-existing parallel-only flake — passes deterministically in isolation per US-004 progress note). `go test -race ./internal/config/ ./internal/serverapp/` clean. `bash scripts/smoke-rate-limit.sh` PASS. `bash scripts/smoke-admin-split.sh` PASS. `bash scripts/smoke-tls.sh` PASS.
+
+### Files changed
+- `go.mod`
+- `go.sum`
+- `internal/config/config.go`
+- `internal/config/misc_test.go`
+- `internal/metrics/metrics.go`
+- `internal/serverapp/rate_limit.go` (new)
+- `internal/serverapp/rate_limit_test.go` (new)
+- `internal/serverapp/serverapp.go`
+- `deploy/strata.toml.example`
+- `docs/site/content/reference/env-vars.md`
+- `scripts/smoke-rate-limit.sh` (new)
+- `scripts/ralph/prd.json` (passes flip)
+
+### Learnings for future iterations
+- **`golang.org/x/time/rate` + `golang-lru/v2` is the canonical "per-(key|IP) token bucket with LRU eviction" combo**: `lru.New[string, *rate.Limiter](size)` gives an O(1) GetOrAdd hot path. `*rate.Limiter.Allow()` is lock-free per-call (atomic last-event + token math). The library's `Cache.Get` + `Cache.Add` are independently concurrent-safe; the rare double-Add race produces one wasted Limiter, acceptable. Pattern reusable for any future "per-X budget" middleware (per-bucket, per-tenant, per-endpoint).
+- **`max` builtin (Go 1.21+) for the "auto-size burst" idiom**: `burst = max(1, 2*max(PerKey, PerIP))`. Replaces the historical `if a > b { return a }` helper; vet flags the helper as `minmax` lint. Apply universally going forward — no per-package maxInt/minInt helpers.
+- **`testutil.ToFloat64(prometheus.Counter)`** is the right primitive for asserting counter increments in tests. Avoid hand-rolling the dto-write dance; the helper is in `client_golang/prometheus/testutil` and is already in use across `internal/gc/`, `internal/lifecycle/`, `internal/data/s3/`. Reset between tests by swapping the `metrics.<Counter>` package-level var to a fresh CounterVec in a t.Cleanup-restored shim — `prometheus.Counter` cannot be decremented and `prometheus.Unregister` would break siblings.
+- **`go.work` workspace blocks `go mod tidy`**: the cephimpl module is workspace-resolved (`replace ./internal/data/rados/cephimpl`), but `tidy` issues a `latest` query against the public proxy for every required module — including any newly added third-party dep — and fails on the workspace-local one. Direct edits to go.mod + go.sum are the only path. Use `go mod download -json <module>@<version>` to get the `Sum` + `GoModSum` for the go.sum line pair (`<mod> h1:...=` + `<mod>/go.mod h1:...=`).
+- **`lru.Cache.Get` is concurrent-safe but `lru.Cache.Add` evicts atomically**: the v2 generics API also lifts away the cast-to-`*rate.Limiter` boilerplate. v2 needs Go 1.18+ — fine for our Go 1.25 module.
+- **Middleware order in `serverapp.Run`**: chain is `otel → logging → metrics.ObserveHTTP → mw.Wrap(auth, denyHandler) → rateLimit.Wrap(accessLog → auditHandler → apiHandler)`. Rate limiter sits **inside** `mw.Wrap` so per-key sees the resolved `AccessKey`, but **above** audit so refused requests don't fill the audit log. Critical invariant — moving it outside auth breaks per-key keying; moving it inside audit floods the audit table during a flood.
+- **Per-IP keying via trustedproxies.TrustedProxies.ClientIP**: when a trusted proxy is upstream, the per-IP layer keys on the real client IP from XFF (left-to-right walk per RFC 7239). When the source is untrusted, the bare `r.RemoteAddr` host is the key. Without this routing the limiter would punish the LB IP itself, making the per-IP layer useless behind any non-direct deployment. US-007's `*TrustedProxies` plumbing is the right primitive; new "per-client" middlewares should use it the same way.
+- **AWS S3 SlowDown error contract**: `<Code>SlowDown</Code>` + `<Message>Rate limit exceeded</Message>` + `Retry-After: 1` is the AWS-S3-recognised throttle response — SDKs back off on its receipt. Don't invent a new code; `SlowDown` is the canonical name for "the server is rejecting you with hope you'll come back later". (`Throttling`/`ThrottlingException` are KMS/STS conventions, not S3.)
+- **`STRATA_RATE_LIMIT_*` empty default**: both layers off keeps every existing smoke / lab / docker-compose green. Operators opt in by setting `STRATA_RATE_LIMIT_PER_IP=N` and/or `STRATA_RATE_LIMIT_PER_KEY=N` — mirrors the US-001..US-008 opt-in discipline of this cycle. Default-zero in `Config.RateLimit` is what `serverapp.newRateLimiter` short-circuits on; downstream wiring stays zero-cost.
+- **PrePending pattern when adding a counter that's reset between tests**: package-level `var IngressRateLimitRefused = prometheus.NewCounterVec(...)` lets tests swap the variable with a fresh CounterVec in t.Cleanup-scoped helpers. Counters can't be decremented; `prometheus.Unregister` would leak; rebinding the var is the cleanest local reset. Existing pattern at sites like `internal/gc/worker_test.go` uses delta-against-baseline instead — also valid but more verbose. Pick per-test convention.
+---

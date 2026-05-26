@@ -343,6 +343,14 @@ var (
 		},
 		[]string{"backend", "cluster"},
 	)
+
+	IngressRateLimitRefused = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_ingress_rate_limit_refused_total",
+			Help: "S3 hot-path requests refused by the ingress rate limiter (US-009 harden-gateway). reason=\"key\" for per-access-key refusals; reason=\"ip\" for per-remote-IP refusals.",
+		},
+		[]string{"reason"},
+	)
 )
 
 var registerOnce sync.Once
@@ -390,6 +398,7 @@ func register() {
 		BucketStatsShardWritesTotal,
 		KMSDecryptTotal,
 		BackendTLSSkipVerify,
+		IngressRateLimitRefused,
 	)
 }
 

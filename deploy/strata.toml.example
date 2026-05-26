@@ -73,6 +73,19 @@ cert_file       = ""
 key_file        = ""
 client_ca_file  = ""
 
+[rate_limit]
+# Per-IP + per-access-key ingress rate limiter (US-009 harden-gateway). Both
+# layers default off (0 = disabled). When set the limiter wraps the S3 hot
+# path AFTER auth (so per_key sees the resolved AccessKey) and BEFORE audit
+# (refused requests do not fill the audit log). Admin / console / metrics /
+# healthz / readyz endpoints bypass.
+# Refusal: HTTP 429 + <Code>SlowDown</Code> + Retry-After:1 + counter
+# strata_ingress_rate_limit_refused_total{reason="key"|"ip"} increments.
+per_key    = 0          # req/sec per IAM access key. Range: [0, 100000]. 0 = disabled.
+per_ip     = 0          # req/sec per resolved client IP (US-007 trusted_proxies aware). Range: [0, 100000]. 0 = disabled.
+burst      = 0          # Token-bucket peak. 0 → 2 × max(per_key, per_ip). Range: [0, 1000000].
+cache_size = 100000     # LRU cap for (key|ip) limiter entries. Range: [1000, 10000000].
+
 [tikv]
 # Required when meta_backend=tikv. Comma-separated PD endpoints.
 pd_endpoints = ""

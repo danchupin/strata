@@ -287,7 +287,21 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	auditHandler.TrustedProxies = trustedProxies
 	accessLog := s3api.NewAccessLogMiddleware(metaStore, auditHandler)
 	accessLog.TrustedProxies = trustedProxies
-	s3Chain := strataotel.NewMiddleware(tracerProvider, logging.NewMiddleware(logger, metrics.ObserveHTTP(mw.Wrap(accessLog, s3api.NewAuthDenyHandler(metaStore)))))
+	rateLimit, err := newRateLimiter(cfg, trustedProxies)
+	if err != nil {
+		return fmt.Errorf("rate limiter: %w", err)
+	}
+	if rateLimit != nil {
+		logger.Info("ingress rate limiter enabled",
+			"per_key", cfg.RateLimit.PerKey,
+			"per_ip", cfg.RateLimit.PerIP,
+			"burst", rateLimit.keyBurst,
+			"cache_size", cfg.RateLimit.CacheSize)
+	}
+	// Rate limiter runs AFTER auth (so per-key sees the resolved AccessKey)
+	// but BEFORE audit (so refused requests don't fill the audit log).
+	rateLimited := rateLimit.Wrap(accessLog)
+	s3Chain := strataotel.NewMiddleware(tracerProvider, logging.NewMiddleware(logger, metrics.ObserveHTTP(mw.Wrap(rateLimited, s3api.NewAuthDenyHandler(metaStore)))))
 
 	adminSplit := cfg.AdminListen.Listen != ""
 

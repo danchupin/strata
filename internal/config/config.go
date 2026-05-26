@@ -27,6 +27,7 @@ type Config struct {
 	HTTP        HTTPConfig        `koanf:"http"`
 	TLS         TLSConfig         `koanf:"tls"`
 	AdminListen AdminListenConfig `koanf:"admin_listen"`
+	RateLimit   RateLimitConfig   `koanf:"rate_limit"`
 	Cassandra   CassandraConfig   `koanf:"cassandra"`
 	TiKV        TiKVConfig        `koanf:"tikv"`
 	RADOS       RADOSConfig       `koanf:"rados"`
@@ -124,6 +125,27 @@ type TLSConfig struct {
 	CertDir        string        `koanf:"cert_dir"`
 	ClientCAFile   string        `koanf:"client_ca_file"`
 	ReloadInterval time.Duration `koanf:"reload_interval"`
+}
+
+// RateLimitConfig wires the per-IP + per-key ingress rate limiter (US-009
+// harden-gateway). Both layers default off (0 = disabled) — opt-in to
+// preserve backwards-compat. Limits apply to the S3 hot path only; admin /
+// console / metrics / healthz / readyz bypass.
+//
+// PerKey limits requests per `auth.AuthInfo.AccessKey`; empty access key
+// (anonymous mode) skips this layer. PerIP limits by remote IP, resolved
+// via `trustedproxies.ClientIP` when a trusted proxy CIDR matches.
+//
+// Burst is the token-bucket burst capacity (peak above the sustained
+// rate). Zero → max(PerKey, PerIP, 1) × 2 (≈ 2× the larger limit) so a
+// short spike absorbs cleanly. CacheSize bounds the LRU of per-(key|IP)
+// limiters; eviction grants the evicted client a fresh bucket on next
+// hit (conservative).
+type RateLimitConfig struct {
+	PerKey    int `koanf:"per_key"`
+	PerIP     int `koanf:"per_ip"`
+	Burst     int `koanf:"burst"`
+	CacheSize int `koanf:"cache_size"`
 }
 
 type CassandraConfig struct {
@@ -512,6 +534,12 @@ func defaults() Config {
 				MaxHeaderBytes:    1 << 20,
 			},
 		},
+		RateLimit: RateLimitConfig{
+			PerKey:    0,
+			PerIP:     0,
+			Burst:     0,
+			CacheSize: 100_000,
+		},
 		Cassandra: CassandraConfig{
 			Hosts:       []string{"127.0.0.1"},
 			Keyspace:    "strata",
@@ -648,6 +676,10 @@ var envMap = map[string]string{
 	"STRATA_ADMIN_TLS_CERT_FILE":             "admin_listen.tls.cert_file",
 	"STRATA_ADMIN_TLS_KEY_FILE":              "admin_listen.tls.key_file",
 	"STRATA_ADMIN_TLS_CLIENT_CA_FILE":        "admin_listen.tls.client_ca_file",
+	"STRATA_RATE_LIMIT_PER_KEY":              "rate_limit.per_key",
+	"STRATA_RATE_LIMIT_PER_IP":               "rate_limit.per_ip",
+	"STRATA_RATE_LIMIT_BURST":                "rate_limit.burst",
+	"STRATA_RATE_LIMIT_CACHE_SIZE":           "rate_limit.cache_size",
 	"STRATA_CASSANDRA_HOSTS":                 "cassandra.hosts",
 	"STRATA_CASSANDRA_KEYSPACE":              "cassandra.keyspace",
 	"STRATA_CASSANDRA_DC":                    "cassandra.local_dc",
@@ -863,6 +895,10 @@ func (c *Config) validate() error {
 	if err := c.validateTrustedProxies(); err != nil {
 		return err
 	}
+	if err := c.validateRateLimit(); err != nil {
+		return err
+	}
+	c.clampRateLimit()
 	c.clampWorkers()
 	c.clampAuthKMS()
 	c.clampObservability()
@@ -974,6 +1010,46 @@ func (c *Config) validateTrustedProxies() error {
 		return err
 	}
 	return nil
+}
+
+// validateRateLimit rejects negative rate-limit knobs at boot (US-009
+// harden-gateway). Zero is valid (= disabled per layer). Ranges:
+//
+//	PerKey, PerIP ∈ [0, 100000] req/s
+//	Burst         ∈ [0, 1000000] (token-bucket capacity)
+//	CacheSize     ∈ [1000, 10000000] when non-zero (zero falls through to
+//	                default at consume site)
+func (c *Config) validateRateLimit() error {
+	if c.RateLimit.PerKey < 0 {
+		return fmt.Errorf("rate_limit.per_key %d: must be >= 0", c.RateLimit.PerKey)
+	}
+	if c.RateLimit.PerIP < 0 {
+		return fmt.Errorf("rate_limit.per_ip %d: must be >= 0", c.RateLimit.PerIP)
+	}
+	if c.RateLimit.Burst < 0 {
+		return fmt.Errorf("rate_limit.burst %d: must be >= 0", c.RateLimit.Burst)
+	}
+	if c.RateLimit.CacheSize < 0 {
+		return fmt.Errorf("rate_limit.cache_size %d: must be >= 0", c.RateLimit.CacheSize)
+	}
+	return nil
+}
+
+// clampRateLimit pins the rate-limit knobs to operator-sane ranges. Zero
+// passes through (= disabled / use default).
+func (c *Config) clampRateLimit() {
+	if c.RateLimit.PerKey > 0 {
+		c.RateLimit.PerKey = clampInt("rate_limit.per_key", c.RateLimit.PerKey, 1, 100_000)
+	}
+	if c.RateLimit.PerIP > 0 {
+		c.RateLimit.PerIP = clampInt("rate_limit.per_ip", c.RateLimit.PerIP, 1, 100_000)
+	}
+	if c.RateLimit.Burst > 0 {
+		c.RateLimit.Burst = clampInt("rate_limit.burst", c.RateLimit.Burst, 1, 1_000_000)
+	}
+	if c.RateLimit.CacheSize > 0 {
+		c.RateLimit.CacheSize = clampInt("rate_limit.cache_size", c.RateLimit.CacheSize, 1_000, 10_000_000)
+	}
 }
 
 // clampHTTP enforces upper bounds on WriteTimeout + MaxHeaderBytes so a
