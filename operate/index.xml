@@ -77,4 +77,12 @@ pool replication factor, plus chunk fan-out overhead.&lt;/li&gt;
 &lt;a href="https://danchupin.github.io/strata/operate/backup-restore/"&gt;Backup + restore&lt;/a&gt; for the
 backup overhead and
 &lt;a href="https://danchupin.github.io/strata/best-practices/gc-lifecycle-tuning/"&gt;GC + lifecycle tuning&lt;/a&gt;
-for the drain rate.&lt;/p&gt;</description></item></channel></rss>
+for the drain rate.&lt;/p&gt;</description></item><item><title>TLS termination + backend mTLS</title><link>https://danchupin.github.io/strata/operate/tls-termination/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/operate/tls-termination/</guid><description>&lt;h1 id="tls-termination--backend-mtls"&gt;TLS termination + backend mTLS&lt;a class="anchor" href="#tls-termination--backend-mtls"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;This is the operator playbook for putting Strata on the wire securely.
+The gateway can terminate TLS itself (recommended for prod) or sit behind
+a load balancer that handles termination upstream. Backend connections
+(Cassandra, TiKV, S3-upstream) each take an opt-in mutual-TLS bundle so a
+network intruder cannot impersonate the gateway. RADOS is the one
+exception: it authenticates via Ceph&amp;rsquo;s native cephx protocol and ignores
+the TLS layer entirely (see &lt;a href="#rados-uses-cephx-not-tls"&gt;RADOS uses cephx&lt;/a&gt;
+below).&lt;/p&gt;</description></item></channel></rss>

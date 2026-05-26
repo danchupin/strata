@@ -1054,7 +1054,94 @@ RADOS pair. TiKV was opt-in via &lt;code&gt;--profile tikv&lt;/code&gt; (&lt;cod
 labs, and a parallel 3-replica Cassandra lab lived under
 &lt;code&gt;--profile lab-cassandra-3&lt;/code&gt;. Four distinct profile shapes plus the
 always-on bare default — each rarely-used, each one a maintenance
-surface to keep green across CI + smoke + bench scripts.&lt;/p&gt;</description></item><item><title>S3 multi-cluster routing</title><link>https://danchupin.github.io/strata/best-practices/s3-multi-cluster/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/s3-multi-cluster/</guid><description>&lt;h1 id="s3-multi-cluster-routing"&gt;S3 multi-cluster routing&lt;a class="anchor" href="#s3-multi-cluster-routing"&gt;#&lt;/a&gt;&lt;/h1&gt;
+surface to keep green across CI + smoke + bench scripts.&lt;/p&gt;</description></item><item><title>TLS termination + backend mTLS</title><link>https://danchupin.github.io/strata/operate/tls-termination/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/operate/tls-termination/</guid><description>&lt;h1 id="tls-termination--backend-mtls"&gt;TLS termination + backend mTLS&lt;a class="anchor" href="#tls-termination--backend-mtls"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;This is the operator playbook for putting Strata on the wire securely.
+The gateway can terminate TLS itself (recommended for prod) or sit behind
+a load balancer that handles termination upstream. Backend connections
+(Cassandra, TiKV, S3-upstream) each take an opt-in mutual-TLS bundle so a
+network intruder cannot impersonate the gateway. RADOS is the one
+exception: it authenticates via Ceph&amp;rsquo;s native cephx protocol and ignores
+the TLS layer entirely (see &lt;a href="#rados-uses-cephx-not-tls"&gt;RADOS uses cephx&lt;/a&gt;
+below).&lt;/p&gt;</description></item><item><title>Production hardening</title><link>https://danchupin.github.io/strata/best-practices/production-hardening/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/production-hardening/</guid><description>&lt;h1 id="production-hardening"&gt;Production hardening&lt;a class="anchor" href="#production-hardening"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;12-line checklist to run through before flipping a Strata replica into
+prod traffic. Each line links to the runbook section that explains the
+knob, the metric, and the failure mode it prevents. Every knob is opt-in
+and zero-by-default — running through the list flips a memory / lab
+deployment into a prod-ready shape without touching code.&lt;/p&gt;
+&lt;table&gt;
+ &lt;thead&gt;
+ &lt;tr&gt;
+ &lt;th&gt;#&lt;/th&gt;
+ &lt;th&gt;Check&lt;/th&gt;
+ &lt;th&gt;Runbook&lt;/th&gt;
+ &lt;/tr&gt;
+ &lt;/thead&gt;
+ &lt;tbody&gt;
+ &lt;tr&gt;
+ &lt;td&gt;1&lt;/td&gt;
+ &lt;td&gt;HTTP server timeouts non-zero (&lt;code&gt;STRATA_HTTP_READ_HEADER_TIMEOUT=10s&lt;/code&gt; / &lt;code&gt;STRATA_HTTP_READ_TIMEOUT=60s&lt;/code&gt; / &lt;code&gt;STRATA_HTTP_WRITE_TIMEOUT=30m&lt;/code&gt; / &lt;code&gt;STRATA_HTTP_IDLE_TIMEOUT=120s&lt;/code&gt; / &lt;code&gt;STRATA_HTTP_MAX_HEADER_BYTES=1048576&lt;/code&gt;). Defaults already match — only verify if you tuned them.&lt;/td&gt;
+ &lt;td&gt;&lt;a href="https://danchupin.github.io/strata/reference/env-vars/#gateway-core-http"&gt;STRATA_HTTP_*&lt;/a&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;2&lt;/td&gt;
+ &lt;td&gt;TLS terminated on the gateway (&lt;code&gt;STRATA_TLS_CERT_FILE&lt;/code&gt; / &lt;code&gt;STRATA_TLS_KEY_FILE&lt;/code&gt;, or &lt;code&gt;STRATA_TLS_CERT_DIR&lt;/code&gt; for SNI multi-tenant) — or behind an ingress with &lt;code&gt;STRATA_TRUSTED_PROXIES&lt;/code&gt; set to the ingress source CIDR.&lt;/td&gt;
+ &lt;td&gt;&lt;a href="https://danchupin.github.io/strata/operate/tls-termination/#deploy-shapes"&gt;TLS termination — shapes B/C&lt;/a&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;3&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;STRATA_TLS_MIN_VERSION=TLS1.2&lt;/code&gt; (default) and &lt;code&gt;STRATA_TLS_CIPHER_PROFILE=mozilla-modern&lt;/code&gt; (default). Bump &lt;code&gt;MIN_VERSION=TLS1.3&lt;/code&gt; if every client supports it.&lt;/td&gt;
+ &lt;td&gt;&lt;a href="https://danchupin.github.io/strata/operate/tls-termination/#deploy-shapes"&gt;TLS shapes&lt;/a&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;4&lt;/td&gt;
+ &lt;td&gt;Cert hot-reload enabled (&lt;code&gt;STRATA_TLS_RELOAD_INTERVAL=60s&lt;/code&gt;, default) so cert-manager / Vault PKI rotation is picked up without restart.&lt;/td&gt;
+ &lt;td&gt;&lt;a href="https://danchupin.github.io/strata/operate/tls-termination/#cert-manager-kubernetes"&gt;cert-manager recipe&lt;/a&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;5&lt;/td&gt;
+ &lt;td&gt;Admin / console / metrics on a separate listener (&lt;code&gt;STRATA_ADMIN_LISTEN=127.0.0.1:9001&lt;/code&gt; recommended; loopback or RFC1918 only). Optionally pin operator client certs via &lt;code&gt;STRATA_ADMIN_TLS_CLIENT_CA_FILE&lt;/code&gt;.&lt;/td&gt;
+ &lt;td&gt;&lt;a href="https://danchupin.github.io/strata/operate/tls-termination/#shape-c--strata-terminated-split-admin--s3-listeners"&gt;Shape C — split admin listener&lt;/a&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;6&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;STRATA_TRUSTED_PROXIES&lt;/code&gt; set to the ingress / LB source CIDR. Default empty = &lt;code&gt;X-Forwarded-*&lt;/code&gt; ignored. Required for the &lt;code&gt;Secure&lt;/code&gt; cookie flag + audit-log client-IP fidelity behind any proxy.&lt;/td&gt;
+ &lt;td&gt;&lt;a href="https://github.com/danchupin/strata/blob/main/README.md#breaking-changes"&gt;Trusted proxies — README breaking change&lt;/a&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;7&lt;/td&gt;
+ &lt;td&gt;Per-IP + per-key ingress rate limit on (&lt;code&gt;STRATA_RATE_LIMIT_PER_IP=N&lt;/code&gt; and / or &lt;code&gt;STRATA_RATE_LIMIT_PER_KEY=N&lt;/code&gt;). Default 0 = disabled. Refusal returns HTTP 429 + &lt;code&gt;&amp;lt;Code&amp;gt;SlowDown&amp;lt;/Code&amp;gt;&lt;/code&gt;.&lt;/td&gt;
+ &lt;td&gt;&lt;a href="https://danchupin.github.io/strata/reference/env-vars/#gateway-core-http"&gt;STRATA_RATE_LIMIT_*&lt;/a&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;8&lt;/td&gt;
+ &lt;td&gt;Cassandra mTLS (&lt;code&gt;STRATA_CASSANDRA_TLS_CA_FILE&lt;/code&gt; + &lt;code&gt;STRATA_CASSANDRA_TLS_CERT_FILE&lt;/code&gt; + &lt;code&gt;STRATA_CASSANDRA_TLS_KEY_FILE&lt;/code&gt;). &lt;code&gt;SKIP_VERIFY&lt;/code&gt; must be &lt;code&gt;false&lt;/code&gt; (default).&lt;/td&gt;
+ &lt;td&gt;&lt;a href="https://danchupin.github.io/strata/operate/tls-termination/#cassandra"&gt;Cassandra mTLS&lt;/a&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;9&lt;/td&gt;
+ &lt;td&gt;TiKV mTLS (&lt;code&gt;STRATA_TIKV_TLS_CA_FILE&lt;/code&gt; is &lt;strong&gt;required&lt;/strong&gt; when any other TLS knob is set — the upstream silently downgrades on empty CA). PD endpoints accept &lt;code&gt;https://&lt;/code&gt;.&lt;/td&gt;
+ &lt;td&gt;&lt;a href="https://danchupin.github.io/strata/operate/tls-termination/#tikv"&gt;TiKV mTLS&lt;/a&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;10&lt;/td&gt;
+ &lt;td&gt;S3-upstream mTLS (&lt;code&gt;STRATA_S3_TLS_*&lt;/code&gt; global default; per-cluster &lt;code&gt;tls&lt;/code&gt; override on &lt;code&gt;STRATA_S3_CLUSTERS&lt;/code&gt; JSON wins outright per cluster).&lt;/td&gt;
+ &lt;td&gt;&lt;a href="https://danchupin.github.io/strata/operate/tls-termination/#s3-upstream"&gt;S3-upstream mTLS&lt;/a&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;11&lt;/td&gt;
+ &lt;td&gt;RADOS cephx in place — &lt;code&gt;STRATA_RADOS_KEYRING&lt;/code&gt; populated; &lt;code&gt;ms_cluster_mode=secure&lt;/code&gt; set in &lt;code&gt;ceph.conf&lt;/code&gt; if wire-level confidentiality is required. (No Strata-side TLS knob for RADOS.)&lt;/td&gt;
+ &lt;td&gt;&lt;a href="https://danchupin.github.io/strata/operate/tls-termination/#rados-uses-cephx-not-tls"&gt;RADOS uses cephx&lt;/a&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;12&lt;/td&gt;
+ &lt;td&gt;Prometheus alert on &lt;code&gt;sum(strata_backend_tls_skip_verify) &amp;gt; 0&lt;/code&gt; (any backend with &lt;code&gt;SKIP_VERIFY=true&lt;/code&gt;) AND on &lt;code&gt;rate(strata_ingress_rate_limit_refused_total[5m]) &amp;gt; N&lt;/code&gt; (sustained client floods).&lt;/td&gt;
+ &lt;td&gt;&lt;a href="https://danchupin.github.io/strata/operate/monitoring/"&gt;Monitoring — alert recipes&lt;/a&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h2 id="what-this-checklist-closes"&gt;What this checklist closes&lt;a class="anchor" href="#what-this-checklist-closes"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;Every line above closes a P0 gap from the 2026-05-25 prod-readiness
+audit:&lt;/p&gt;</description></item><item><title>S3 multi-cluster routing</title><link>https://danchupin.github.io/strata/best-practices/s3-multi-cluster/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/best-practices/s3-multi-cluster/</guid><description>&lt;h1 id="s3-multi-cluster-routing"&gt;S3 multi-cluster routing&lt;a class="anchor" href="#s3-multi-cluster-routing"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;The S3 data backend supports routing per storage class to a distinct
 &lt;code&gt;(cluster, bucket)&lt;/code&gt; pair. Two envs hold the full config — &lt;code&gt;STRATA_S3_CLUSTERS&lt;/code&gt;
 (JSON array of bucket-less cluster specs) and &lt;code&gt;STRATA_S3_CLASSES&lt;/code&gt; (JSON object
