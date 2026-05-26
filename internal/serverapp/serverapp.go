@@ -666,10 +666,24 @@ func buildMetaStore(cfg *config.Config, logger *slog.Logger, tp *strataotel.Prov
 		if len(eps) == 0 {
 			return nil, errors.New("tikv: STRATA_TIKV_PD_ENDPOINTS is empty")
 		}
+		tlsCfg := metatikv.TLSConfig{
+			CAFile:     cfg.TiKV.TLS.CAFile,
+			CertFile:   cfg.TiKV.TLS.CertFile,
+			KeyFile:    cfg.TiKV.TLS.KeyFile,
+			SkipVerify: cfg.TiKV.TLS.SkipVerify,
+		}
+		if tlsCfg.SkipVerify {
+			logger.Warn("TiKV TLS verification disabled — never set in production",
+				"env", "STRATA_TIKV_TLS_SKIP_VERIFY")
+			metrics.BackendTLSSkipVerify.WithLabelValues("tikv").Set(1)
+		} else if tlsCfg.HasAny() {
+			metrics.BackendTLSSkipVerify.WithLabelValues("tikv").Set(0)
+		}
 		return metatikv.Open(metatikv.Config{
 			PDEndpoints: eps,
 			Tracer:      tp.Tracer("strata.meta.tikv"),
 			Metrics:     metrics.TiKVObserver{},
+			TLS:         tlsCfg,
 		})
 	default:
 		return nil, errors.New("unknown meta backend")

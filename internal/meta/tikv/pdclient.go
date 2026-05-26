@@ -12,10 +12,13 @@ package tikv
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -66,14 +69,49 @@ type pdStoresResponse struct {
 type pdClient struct {
 	endpoints []string
 	http      *http.Client
+	// scheme is "http" when TLS is unconfigured, "https" when a TLS bundle
+	// is wired via TLSConfig. The fetchStores helper consults this when an
+	// endpoint omits scheme.
+	scheme string
 }
 
-func newPDClient(endpoints []string) *pdClient {
+// newPDClientWithTLS builds a pdClient whose http.Client carries a
+// *tls.Config when tlsCfg.HasAny() returns true. CAFile populates the root
+// pool; CertFile + KeyFile install a client cert for mTLS; SkipVerify
+// short-circuits hostname + chain verification on this control-plane
+// transport.
+//
+// Returns a zero-cert client on TLSConfig parse error — callers fail at
+// boot via newTiKVBackend before MetaHealth ever runs, so this path is
+// defensive only.
+func newPDClientWithTLS(endpoints []string, tlsCfg TLSConfig) *pdClient {
+	scheme := "http"
+	transport := http.DefaultTransport
+	if tlsCfg.HasAny() {
+		scheme = "https"
+		tc := &tls.Config{InsecureSkipVerify: tlsCfg.SkipVerify}
+		if tlsCfg.CAFile != "" {
+			if pemBytes, err := os.ReadFile(tlsCfg.CAFile); err == nil {
+				pool := x509.NewCertPool()
+				if pool.AppendCertsFromPEM(pemBytes) {
+					tc.RootCAs = pool
+				}
+			}
+		}
+		if tlsCfg.CertFile != "" && tlsCfg.KeyFile != "" {
+			if pair, err := tls.LoadX509KeyPair(tlsCfg.CertFile, tlsCfg.KeyFile); err == nil {
+				tc.Certificates = []tls.Certificate{pair}
+			}
+		}
+		transport = &http.Transport{TLSClientConfig: tc}
+	}
 	return &pdClient{
 		endpoints: endpoints,
 		http: &http.Client{
-			Timeout: pdEndpointTimeout,
+			Timeout:   pdEndpointTimeout,
+			Transport: transport,
 		},
+		scheme: scheme,
 	}
 }
 
@@ -98,7 +136,11 @@ func (c *pdClient) listStores(ctx context.Context) (*pdStoresResponse, error) {
 func (c *pdClient) fetchStores(ctx context.Context, endpoint string) (*pdStoresResponse, error) {
 	url := strings.TrimRight(endpoint, "/")
 	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-		url = "http://" + url
+		scheme := c.scheme
+		if scheme == "" {
+			scheme = "http"
+		}
+		url = scheme + "://" + url
 	}
 	url += "/pd/api/v1/stores"
 

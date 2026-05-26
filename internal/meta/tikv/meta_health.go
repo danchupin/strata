@@ -21,7 +21,7 @@ func (s *Store) MetaHealth(ctx context.Context) (report *meta.MetaHealthReport, 
 		}, nil
 	}
 
-	client := newPDClient(s.cfg.PDEndpoints)
+	client := newPDClientWithTLS(s.cfg.PDEndpoints, s.cfg.TLS)
 	var resp *pdStoresResponse
 	resp, err = client.listStores(ctx)
 	if err != nil {

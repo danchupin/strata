@@ -44,6 +44,18 @@ reload_interval = "60s"
 # Required when meta_backend=tikv. Comma-separated PD endpoints.
 pd_endpoints = ""
 
+[tikv.tls]
+# TiKV mTLS (US-005 harden-gateway). Empty all-three (ca_file + cert_file +
+# key_file) → plain-gRPC. ca_file is required when any other TLS knob is set
+# (tikv-client-go's Security.ToTLSConfig short-circuits on empty ClusterSSLCA).
+# cert_file/key_file must be set together (half-pair rejected at boot).
+# skip_verify=true affects the PD HTTP control plane and bumps
+# strata_backend_tls_skip_verify{backend="tikv"}=1 — never set in production.
+ca_file     = ""
+cert_file   = ""
+key_file    = ""
+skip_verify = false
+
 [s3]
 # Required when data_backend=s3. JSON array of S3ClusterSpec.
 clusters = ""

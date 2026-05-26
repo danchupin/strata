@@ -2,11 +2,13 @@ package tikv
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"math"
 	"time"
 
+	tikvcfg "github.com/tikv/client-go/v2/config"
 	tikverr "github.com/tikv/client-go/v2/error"
 	tikvkv "github.com/tikv/client-go/v2/kv"
 	"github.com/tikv/client-go/v2/txnkv"
@@ -20,16 +22,48 @@ type tikvBackend struct {
 }
 
 // newTiKVBackend dials PD and returns a backend ready for Begin. The caller
-// is responsible for closing it.
-func newTiKVBackend(pdEndpoints []string) (*tikvBackend, error) {
+// is responsible for closing it. When tlsCfg.HasAny() returns true, the
+// tikv-client-go global Security is updated before NewClient so the gRPC
+// data path negotiates mTLS against TiKV + PD.
+func newTiKVBackend(pdEndpoints []string, tlsCfg TLSConfig) (*tikvBackend, error) {
 	if len(pdEndpoints) == 0 {
 		return nil, errors.New("tikv: PDEndpoints must contain at least one address")
+	}
+	if tlsCfg.HasAny() {
+		if err := applyTiKVSecurity(tlsCfg); err != nil {
+			return nil, err
+		}
 	}
 	cli, err := txnkv.NewClient(pdEndpoints)
 	if err != nil {
 		return nil, fmt.Errorf("tikv: dial PD %v: %w", pdEndpoints, err)
 	}
 	return &tikvBackend{cli: cli}, nil
+}
+
+// applyTiKVSecurity validates the supplied TLS materials and installs them
+// onto tikv-client-go's global config.Security so subsequent NewClient calls
+// pick them up. CAFile is required when TLS is enabled — the upstream
+// Security.ToTLSConfig() short-circuits on empty ClusterSSLCA and falls back
+// to plain-gRPC, which would silently defeat operator intent. CertFile +
+// KeyFile must come paired. The cert pair is pre-loaded so PEM parse errors
+// surface here rather than at first RPC.
+func applyTiKVSecurity(tlsCfg TLSConfig) error {
+	if tlsCfg.CAFile == "" {
+		return errors.New("tikv tls: ca_file is required when any other tikv.tls.* knob is set (tikv-client-go Security.ToTLSConfig requires ClusterSSLCA)")
+	}
+	if (tlsCfg.CertFile == "") != (tlsCfg.KeyFile == "") {
+		return errors.New("tikv tls: cert_file and key_file must both be set or both unset")
+	}
+	if tlsCfg.CertFile != "" {
+		if _, err := tls.LoadX509KeyPair(tlsCfg.CertFile, tlsCfg.KeyFile); err != nil {
+			return fmt.Errorf("tikv tls cert/key: %w", err)
+		}
+	}
+	tikvcfg.UpdateGlobal(func(c *tikvcfg.Config) {
+		c.Security = tikvcfg.NewSecurity(tlsCfg.CAFile, tlsCfg.CertFile, tlsCfg.KeyFile, nil)
+	})
+	return nil
 }
 
 func (b *tikvBackend) Probe(ctx context.Context) error {

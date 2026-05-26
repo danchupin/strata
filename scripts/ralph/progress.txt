@@ -197,3 +197,43 @@ Cycle: ralph/harden-gateway
 - **`gocql.ClusterConfig` returns from `newCluster` are now error-fallible** since TLS file loading must surface PEM parse failures at session-build time (NOT at first-query time which would surface as a generic "failed to connect"). All call sites — connect / connectNoKeyspace — updated to propagate. Future helper-builder edits must keep the `(cfg, error)` shape.
 - **`createTLSCerts` from testcontainers/cassandra@v0.41.0 keystore quirk**: the auto-generated cert SAN is `localhost` + `127.0.0.1`. `ConnectionHost(ctx)` returns `host:port` where host is `localhost` on Linux + `127.0.0.1` on macOS Docker Desktop. Both match the server SAN, so `EnableHostVerification=true` works against either. If a future module ships a SAN-less cert, the gocql handshake will fail with a generic "x509: cannot validate certificate for X because it doesn't contain any IP SANs" — set ServerName explicitly via `tls.Config.ServerName` if needed.
 ---
+
+## 2026-05-26 - US-005 — TiKV mTLS (config.Security)
+
+- New `config.TiKVTLSConfig` substruct on `Config.TiKV.TLS` (CAFile / CertFile / KeyFile / SkipVerify; all zero-valued = plain-gRPC).
+- 4 envMap entries (`STRATA_TIKV_TLS_CA_FILE` → `tikv.tls.ca_file` etc).
+- `Config.validateBackendTLS()` extended: rejects half-pair `tikv.tls.cert_file` ↔ `tikv.tls.key_file` at boot. The Cassandra guard is unchanged; both backends now share the same site.
+- Extended `tikv.Config` with `TLS TLSConfig{CAFile, CertFile, KeyFile, SkipVerify}` + `HasAny()` helper (subset of internal/config.TiKVTLSConfig consumed at the boundary — keeps tikv package free of internal/config imports).
+- `newTiKVBackend(pdEndpoints, tlsCfg)` signature extended; calls `applyTiKVSecurity` BEFORE `txnkv.NewClient` so the upstream global config has `Security` populated when the gRPC dial runs.
+- `applyTiKVSecurity` validates the TLS bundle: CAFile required when any other TLS knob is set (upstream `Security.ToTLSConfig` short-circuits on empty `ClusterSSLCA`, silently downgrading to plain-gRPC — surfacing it at boot prevents intent-to-actual drift). CertFile + KeyFile half-pair rejected; pair pre-loaded via `tls.LoadX509KeyPair` so PEM parse errors fire at boot, not at first RPC. Uses `tikvcfg.UpdateGlobal` to install Security onto the library's atomic.Value-backed global config.
+- `pdclient.go` extended: new `newPDClientWithTLS(endpoints, tlsCfg)` constructor builds `*http.Transport` with a `*tls.Config` carrying `RootCAs` (from CAFile), `Certificates` (from CertFile+KeyFile pair), and `InsecureSkipVerify` (from SkipVerify). Adds `scheme string` field — `https` when TLS is configured, `http` otherwise; `fetchStores` consults this when an endpoint omits its scheme so PD's TLS-only listener responds. The legacy `newPDClient([]string)` helper was deleted (unused after meta_health.go switched to `newPDClientWithTLS`).
+- `serverapp.buildMetaStore` extended for the `case "tikv":` branch: translates `Config.TiKV.TLS` → `metatikv.TLSConfig` at the boundary; bumps `metrics.BackendTLSSkipVerify{backend="tikv"}=1` when SkipVerify=true (with single WARN log), or =0 when TLS is configured with verification.
+- Unit tests `internal/meta/tikv/tls_test.go`: TLSConfig.HasAny matrix / applyTiKVSecurity rejects missing CA (lib short-circuit guard) / applyTiKVSecurity rejects half-pair / applyTiKVSecurity rejects malformed cert/key / applyTiKVSecurity installs Security on global config so subsequent ToTLSConfig() returns a valid pool / newPDClientWithTLS picks scheme=https / zero TLS picks scheme=http / SkipVerify wires InsecureSkipVerify on PD transport / CAFile populates RootCAs on PD transport.
+- Integration test `internal/meta/tikv/tls_integration_test.go` (build tag `integration`): drives the pdClient TLS handshake against an `httptest.NewTLSServer` simulating PD's `/pd/api/v1/stores` payload. Verifies (a) CAFile path completes the handshake + decodes Count=1, (b) SkipVerify=true bypasses chain validation, (c) unrelated CA surfaces an x509 verification error. Full TLS-enabled PD + TiKV testcontainers would require custom image configuration (cert mounts + PD/TiKV YAML with `security.cacert-path` etc); scope-deferred — the gRPC data-plane TLS path is bound to tikv-client-go's global Security and exercised by smoke runs against operator-managed clusters.
+- 3 new config tests in `internal/config/misc_test.go`: half-pair rejection (both directions), env-wires-through round-trip, default plain-gRPC shape.
+- `deploy/strata.toml.example`: new `[tikv.tls]` section (4 keys + range comments noting the CAFile-required gotcha).
+- `docs/site/content/reference/env-vars.md`: 4 new rows under the Meta backend — TiKV table with TOML-key column.
+- `internal/config/env_toml_parity_test.go` drift-lint stays green.
+- `go vet ./...` clean. `go build ./...` clean. `go test ./...` 50+ packages green. `go test -race ./internal/config/ ./internal/meta/tikv/ ./internal/serverapp/ ./internal/meta/cassandra/` clean.
+
+### Files changed
+- `internal/config/config.go`
+- `internal/config/misc_test.go`
+- `internal/meta/tikv/store.go`
+- `internal/meta/tikv/kv_tikv.go`
+- `internal/meta/tikv/pdclient.go`
+- `internal/meta/tikv/meta_health.go`
+- `internal/meta/tikv/tls_test.go` (new)
+- `internal/meta/tikv/tls_integration_test.go` (new, build tag integration)
+- `internal/serverapp/serverapp.go`
+- `deploy/strata.toml.example`
+- `docs/site/content/reference/env-vars.md`
+- `scripts/ralph/prd.json` (passes flip)
+
+### Learnings for future iterations
+- **tikv-client-go Security gotcha**: `Security.ToTLSConfig()` short-circuits on empty `ClusterSSLCA` and returns a nil `*tls.Config` — `tikv.NewRPCClient` then dials with `insecure.NewCredentials()`. Operators who set `STRATA_TIKV_TLS_SKIP_VERIFY=true` without CAFile would silently get plain-gRPC instead of TLS-with-skip-verify. Surface this as a boot-time error rather than allowing the silent downgrade. The library has no `InsecureSkipVerify` knob on the gRPC path; SkipVerify is only honored on the PD HTTP control plane (which we own).
+- **`tikvcfg.UpdateGlobal` semantics**: tikv-client-go reads `config.GetGlobalConfig().Security` inside `txnkv.NewClient`. The global is an `atomic.Value` so `UpdateGlobal(f)` is a copy-mutate-store; safe to call concurrently with other readers, but a NEW client must be opened after the update for the change to take effect. Mirror the cassandra TLS pattern: install Security at backend construction time, return early errors so a misconfigured bundle never reaches the dial path. The store's gocql + tikv tests both restore the previous global on cleanup (`t.Cleanup(func() { tikvcfg.StoreGlobalConfig(prev) })`).
+- **TLS-enabled PD + TiKV via testcontainers**: there is no upstream `tctikv.WithTLS()` analog to `tccassandra.WithTLS()`. A real TLS integration would require a custom Dockerfile or volume-mount the cert PEMs into the upstream images + driving the PD/TiKV CLI flags `--cacert`/`--cert`/`--key`. Pragmatic alternative: validate the TLS-surface code we own (pdClient.go) via `httptest.NewTLSServer` simulating the `/pd/api/v1/stores` payload, and defer the gRPC-path TLS smoke to operator-managed clusters. Cassandra's `tccassandra.WithTLS()` is a luxury not available everywhere.
+- **PD HTTP scheme inference**: PD endpoints are stored as bare host:port strings in `STRATA_TIKV_PD_ENDPOINTS`. With TLS configured, the pdClient defaults `scheme=https`; without TLS, `scheme=http`. The scheme is consulted only when an endpoint omits its scheme — explicit `https://` and `http://` prefixes win. Avoids breaking the operator UX where `pd-server.example.com:2379` is the natural form.
+- **`config.UpdateGlobal` is global state**: any concurrent meta.Store construction from another package would race. Today there is only one `metatikv.Open` call per process (from `serverapp.buildMetaStore`), so this is fine. If a future story builds two TiKV stores with distinct TLS bundles in the same process, switch to forking `txnkv.NewClient` with a per-client TLS injection (current upstream API exposes no such hook — would need a vendored fork).
+---

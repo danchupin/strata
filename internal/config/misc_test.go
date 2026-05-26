@@ -279,6 +279,70 @@ func TestCassandraTLSDefaultPlainTCP(t *testing.T) {
 	}
 }
 
+// TestTiKVTLSHalfPairRejected mirrors validateBackendTLS's half-pair guard
+// for the TiKV backend mTLS pair (US-005): setting cert_file without
+// key_file (or vice versa) must fail at boot.
+func TestTiKVTLSHalfPairRejected(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("STRATA_META_BACKEND", "tikv")
+	t.Setenv("STRATA_TIKV_PD_ENDPOINTS", "pd0:2379")
+	t.Setenv("STRATA_TIKV_TLS_CERT_FILE", "/tmp/client.crt")
+	if _, err := Load(); err == nil {
+		t.Fatal("cert_file without key_file must fail Load")
+	}
+	clearEnv(t)
+	t.Setenv("STRATA_META_BACKEND", "tikv")
+	t.Setenv("STRATA_TIKV_PD_ENDPOINTS", "pd0:2379")
+	t.Setenv("STRATA_TIKV_TLS_KEY_FILE", "/tmp/client.key")
+	if _, err := Load(); err == nil {
+		t.Fatal("key_file without cert_file must fail Load")
+	}
+}
+
+// TestTiKVTLSEnvWiresThrough confirms the four envs land on the
+// Config.TiKV.TLS substruct verbatim. The gauge bump + WARN log live in
+// serverapp.buildMetaStore.
+func TestTiKVTLSEnvWiresThrough(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("STRATA_META_BACKEND", "tikv")
+	t.Setenv("STRATA_TIKV_PD_ENDPOINTS", "pd0:2379")
+	t.Setenv("STRATA_TIKV_TLS_CA_FILE", "/tmp/ca.pem")
+	t.Setenv("STRATA_TIKV_TLS_CERT_FILE", "/tmp/c.pem")
+	t.Setenv("STRATA_TIKV_TLS_KEY_FILE", "/tmp/k.pem")
+	t.Setenv("STRATA_TIKV_TLS_SKIP_VERIFY", "true")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.TiKV.TLS.CAFile != "/tmp/ca.pem" {
+		t.Errorf("ca_file=%q", cfg.TiKV.TLS.CAFile)
+	}
+	if cfg.TiKV.TLS.CertFile != "/tmp/c.pem" {
+		t.Errorf("cert_file=%q", cfg.TiKV.TLS.CertFile)
+	}
+	if cfg.TiKV.TLS.KeyFile != "/tmp/k.pem" {
+		t.Errorf("key_file=%q", cfg.TiKV.TLS.KeyFile)
+	}
+	if !cfg.TiKV.TLS.SkipVerify {
+		t.Errorf("skip_verify=%v want true", cfg.TiKV.TLS.SkipVerify)
+	}
+}
+
+// TestTiKVTLSDefaultPlainGRPC confirms the empty default leaves every TLS
+// field zero-valued so tikv-client-go keeps the historical plain-gRPC
+// shape.
+func TestTiKVTLSDefaultPlainGRPC(t *testing.T) {
+	clearEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.TiKV.TLS.CAFile != "" || cfg.TiKV.TLS.CertFile != "" ||
+		cfg.TiKV.TLS.KeyFile != "" || cfg.TiKV.TLS.SkipVerify {
+		t.Errorf("default tikv.tls non-empty: %+v", cfg.TiKV.TLS)
+	}
+}
+
 // TestInvalidManifestFormatRejected pins the enum validation for
 // manifest.format — only proto / json are accepted.
 func TestInvalidManifestFormatRejected(t *testing.T) {

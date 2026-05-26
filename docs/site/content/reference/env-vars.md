@@ -102,6 +102,10 @@ for the meta-backend contract + range-scan short-circuit.
 | Variable | Default | Range | Notes | TOML key |
 |---|---|---|---|---|
 | `STRATA_TIKV_PD_ENDPOINTS` | empty | comma-separated PD addrs | Required when `STRATA_META_BACKEND=tikv`. | `tikv.pd_endpoints` |
+| `STRATA_TIKV_TLS_CA_FILE` | empty | path | PEM CA bundle for server-cert verification. Required when any other `STRATA_TIKV_TLS_*` knob is set (tikv-client-go's `Security.ToTLSConfig` short-circuits on empty `ClusterSSLCA`). Empty all-four → plain-gRPC. | `tikv.tls.ca_file` |
+| `STRATA_TIKV_TLS_CERT_FILE` | empty | path | PEM client certificate for mutual TLS. Must be paired with `STRATA_TIKV_TLS_KEY_FILE`. | `tikv.tls.cert_file` |
+| `STRATA_TIKV_TLS_KEY_FILE` | empty | path | PEM private key matching `STRATA_TIKV_TLS_CERT_FILE`. | `tikv.tls.key_file` |
+| `STRATA_TIKV_TLS_SKIP_VERIFY` | `false` | bool | Disables server-cert verification on the PD HTTP control plane. Bumps `strata_backend_tls_skip_verify{backend="tikv"}=1` and logs a WARN at boot. Never set in production. | `tikv.tls.skip_verify` |
 | `STRATA_GC_DUAL_WRITE` | `on` | `on \| off` | Dual-write the legacy + denormalised GC tables. Flipped off after a migration cycle drains the legacy queue. Applies to Cassandra + TiKV. | `workers.gc.dual_write` |
 
 ## Data backend — RADOS

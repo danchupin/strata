@@ -34,6 +34,32 @@ type Config struct {
 	// BucketStats counter — US-002 p1-fixes). Nil disables counters; production
 	// paths wire metrics.TiKVObserver{} via serverapp.buildMetaStore.
 	Metrics Metrics
+	// TLS wires tikv-client-go config.Security at Open time when any field
+	// is set (US-005 harden-gateway). Empty CAFile + CertFile + KeyFile +
+	// SkipVerify=false = plain-gRPC = current backwards-compat behavior.
+	// CertFile + KeyFile must come as a pair; CAFile populates RootCAs.
+	// SkipVerify=true logs a WARN at boot via the caller (serverapp) and
+	// is honored on the PD HTTP control plane; the gRPC data plane is bound
+	// to tikv-client-go's Security.ToTLSConfig() (does NOT expose
+	// InsecureSkipVerify — library limitation).
+	TLS TLSConfig
+}
+
+// TLSConfig is the subset of TiKVTLSConfig consumed by the tikv backend.
+// The serverapp layer translates internal/config.TiKVTLSConfig →
+// tikv.TLSConfig at the boundary so this package never imports
+// internal/config.
+type TLSConfig struct {
+	CAFile     string
+	CertFile   string
+	KeyFile    string
+	SkipVerify bool
+}
+
+// HasAny reports whether any TLS knob is set. Used by the dial path to
+// decide between plain-gRPC (zero value) and Security-wired TLS.
+func (t TLSConfig) HasAny() bool {
+	return t.CAFile != "" || t.CertFile != "" || t.KeyFile != "" || t.SkipVerify
 }
 
 // WithGCDualWrite is a helper for tests / callers that want to set the
@@ -55,7 +81,7 @@ type Store struct {
 // ready for use. Use openWithBackend (test-only) to inject the in-process
 // memBackend.
 func Open(cfg Config) (*Store, error) {
-	b, err := newTiKVBackend(cfg.PDEndpoints)
+	b, err := newTiKVBackend(cfg.PDEndpoints, cfg.TLS)
 	if err != nil {
 		return nil, err
 	}

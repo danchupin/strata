@@ -126,7 +126,23 @@ type CassandraTLSConfig struct {
 // splits + trims it before dialling. Empty until STRATA_META_BACKEND=tikv
 // is in play.
 type TiKVConfig struct {
-	Endpoints string `koanf:"pd_endpoints"`
+	Endpoints string        `koanf:"pd_endpoints"`
+	TLS       TiKVTLSConfig `koanf:"tls"`
+}
+
+// TiKVTLSConfig wires tikv-client-go config.Security for the TiKV meta
+// backend (US-005 harden-gateway). Empty CAFile + CertFile + KeyFile →
+// plain-gRPC = current backwards-compat behavior. SkipVerify=true logs a
+// single WARN at boot + bumps strata_backend_tls_skip_verify{backend="tikv"}=1.
+//
+// Note: tikv-client-go's Security.ToTLSConfig() requires CAFile to enable
+// TLS; the serverapp layer routes SkipVerify-only configs through a custom
+// dial path. CertFile + KeyFile must come as a pair.
+type TiKVTLSConfig struct {
+	CAFile     string `koanf:"ca_file"`
+	CertFile   string `koanf:"cert_file"`
+	KeyFile    string `koanf:"key_file"`
+	SkipVerify bool   `koanf:"skip_verify"`
 }
 
 type RADOSConfig struct {
@@ -567,6 +583,10 @@ var envMap = map[string]string{
 	"STRATA_CASSANDRA_TLS_KEY_FILE":          "cassandra.tls.key_file",
 	"STRATA_CASSANDRA_TLS_SKIP_VERIFY":       "cassandra.tls.skip_verify",
 	"STRATA_TIKV_PD_ENDPOINTS":               "tikv.pd_endpoints",
+	"STRATA_TIKV_TLS_CA_FILE":                "tikv.tls.ca_file",
+	"STRATA_TIKV_TLS_CERT_FILE":              "tikv.tls.cert_file",
+	"STRATA_TIKV_TLS_KEY_FILE":               "tikv.tls.key_file",
+	"STRATA_TIKV_TLS_SKIP_VERIFY":            "tikv.tls.skip_verify",
 	"STRATA_RADOS_CONF":                      "rados.config_file",
 	"STRATA_RADOS_USER":                      "rados.user",
 	"STRATA_RADOS_KEYRING":                   "rados.keyring",
@@ -819,12 +839,15 @@ func (c *Config) validateTLS() error {
 }
 
 // validateBackendTLS rejects half-paired client cert/key envs on every
-// backend that supports mTLS (Cassandra today; TiKV + S3 land in US-005 +
-// US-006). Empty all-three (CA + cert + key) = plain backend, the
-// backwards-compat default.
+// backend that supports mTLS (Cassandra + TiKV today; S3 lands in US-006).
+// Empty all-three (CA + cert + key) = plain backend, the backwards-compat
+// default.
 func (c *Config) validateBackendTLS() error {
 	if (c.Cassandra.TLS.CertFile == "") != (c.Cassandra.TLS.KeyFile == "") {
 		return fmt.Errorf("cassandra.tls.cert_file and cassandra.tls.key_file must both be set or both unset")
+	}
+	if (c.TiKV.TLS.CertFile == "") != (c.TiKV.TLS.KeyFile == "") {
+		return fmt.Errorf("tikv.tls.cert_file and tikv.tls.key_file must both be set or both unset")
 	}
 	return nil
 }
