@@ -407,6 +407,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 			Sink:      metrics.BucketStatsObserver{},
 			ShardSink: metrics.BucketStatsObserver{},
 			ClassSink: metrics.BucketStatsObserver{},
+			QuotaSink: metrics.BucketStatsObserver{},
 			Snapshot:  storageClassSnapshot,
 			Logger:    logger,
 			TopN:      bucketStatsTopN(cfg),
@@ -448,6 +449,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 				StartedAt: time.Now().UTC(),
 				Workers:   workerNamesFromList(selected),
 			},
+			Metrics: metrics.HeartbeatObserver{},
 		}
 		if supervisor != nil {
 			events := supervisor.LeaderEvents()
@@ -599,6 +601,7 @@ func buildDataBackend(cfg *config.Config, logger *slog.Logger, tp *strataotel.Pr
 			TLS:            globalTLS,
 			Tracer:         tp.Tracer("strata.data.s3"),
 			TracerProvider: tp.TracerProvider(),
+			APIMetrics:     metrics.S3APIObserver{},
 		})
 	default:
 		return nil, errors.New("unknown data backend")

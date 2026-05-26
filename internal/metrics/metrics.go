@@ -1,3 +1,10 @@
+// Package metrics is the cmd-layer Prometheus surface for Strata.
+//
+// Histogram bucket convention (US-001 cycle B prod-observability): new
+// histograms MUST use explicit bucket specs — for sub-second ops prefer
+// `prometheus.ExponentialBuckets(0.001, 2, 16)` (1ms..32s); for byte counts
+// prefer `prometheus.ExponentialBuckets(1024, 4, 10)` (1 KiB..1 GiB). Pinning
+// boundaries keeps dashboard heatmap math stable across refactors.
 package metrics
 
 import (
@@ -351,12 +358,137 @@ var (
 		},
 		[]string{"reason"},
 	)
+
+	// US-001 Cycle B prod-observability — 9 metric gap-fills referenced by
+	// the upcoming alert rules + dashboards (US-002..US-009).
+
+	HeartbeatLastWriteTimestamp = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "strata_heartbeat_last_write_timestamp",
+		Help: "Unix seconds of the last successful heartbeat write by this replica. Powers the StrataHeartbeatStale alert (US-002).",
+	})
+
+	RADOSClusterObjectCount = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "strata_rados_cluster_object_count",
+			Help: "Per-cluster object count sampled by the RADOS DataHealth probe (US-001 cycle B prod-observability).",
+		},
+		[]string{"cluster"},
+	)
+
+	RADOSClusterBytesUsed = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "strata_rados_cluster_bytes_used",
+			Help: "Per-cluster used bytes sampled by the RADOS DataHealth probe (US-001 cycle B prod-observability). Sourced from the per-cluster `ceph df` Pools[] aggregate.",
+		},
+		[]string{"cluster"},
+	)
+
+	BucketQuotaBytes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "strata_bucket_quota_bytes",
+			Help: "Per-bucket MaxBytes quota sampled by the bucketstats Sampler (US-001 cycle B prod-observability). 0 = unlimited.",
+		},
+		[]string{"bucket"},
+	)
+
+	TiKVPessimisticTxnTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_tikv_pessimistic_txn_total",
+			Help: "TiKV pessimistic-transaction outcomes per Store method (US-001 cycle B prod-observability). outcome ∈ {commit, rollback, conflict}.",
+		},
+		[]string{"op", "outcome"},
+	)
+
+	DataS3APICallsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_data_s3_api_calls_total",
+			Help: "AWS SDK calls issued by the s3-over-s3 data backend per cluster + operation (US-001 cycle B prod-observability). outcome ∈ {success, error, throttled}.",
+		},
+		[]string{"cluster", "operation", "outcome"},
+	)
+
+	DataS3ThrottledTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_data_s3_throttled_total",
+			Help: "AWS SDK throttle responses observed by the s3-over-s3 data backend (US-001 cycle B prod-observability). Bumped on ThrottlingException / SlowDown / RequestLimitExceeded.",
+		},
+		[]string{"cluster", "operation"},
+	)
+
+	InventoryObjectsTotal = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "strata_inventory_objects_total",
+			Help: "Per-(bucket, configID) object count walked by the latest inventory worker tick (US-001 cycle B prod-observability).",
+		},
+		[]string{"bucket", "config_id"},
+	)
+
+	WorkerLeaderEventsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_worker_leader_events_total",
+			Help: "Worker leader-lease transitions emitted by the supervisor (US-001 cycle B prod-observability). event ∈ {acquired, released}.",
+		},
+		[]string{"worker", "event"},
+	)
+
+	// US-001 Cycle B fold-in — referenced by US-007 cluster dashboard drain-
+	// progress panel. Mirrors the rebalance.ProgressTracker per-cluster
+	// merged snapshot fields. Set by the rebalance worker after every
+	// CommitScan; absence of a series for a cluster means the worker has
+	// not yet committed a scan for it.
+
+	RebalanceMigratableChunksTotal = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "strata_rebalance_migratable_chunks_total",
+			Help: "Per-cluster migratable chunk count observed by the rebalance worker's drain-progress scan (US-001 cycle B prod-observability).",
+		},
+		[]string{"cluster"},
+	)
+
+	RebalanceStuckSinglePolicyChunksTotal = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "strata_rebalance_stuck_single_policy_chunks_total",
+			Help: "Per-cluster chunks stuck on a single-policy bucket whose effective placement is empty under strict mode (US-001 cycle B prod-observability).",
+		},
+		[]string{"cluster"},
+	)
+
+	RebalanceStuckNoPolicyChunksTotal = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "strata_rebalance_stuck_no_policy_chunks_total",
+			Help: "Per-cluster chunks stuck on a bucket with no live policy target and no cluster-weight fallback (US-001 cycle B prod-observability).",
+		},
+		[]string{"cluster"},
+	)
 )
 
 var registerOnce sync.Once
 
 func Register() {
 	registerOnce.Do(register)
+}
+
+// prewarmUS001Series materialises one zero-valued series per US-001 cycle B
+// labeled metric so `/metrics` exposes the metric name (and HELP) from boot
+// even before the first natural bump. Without this, CounterVec / GaugeVec
+// instances stay empty under a bare lab (e.g. memory backend with no
+// workers) and the boot-time smoke check `grep ^strata_<name>` returns 0.
+// Series carry the `_init` label sentinel so an operator can distinguish
+// boot-time placeholders from real samples. The unlabeled
+// `strata_heartbeat_last_write_timestamp` gauge needs no prewarm — its
+// boot-time zero is already self-evident.
+func prewarmUS001Series() {
+	RADOSClusterObjectCount.WithLabelValues("_init").Set(0)
+	RADOSClusterBytesUsed.WithLabelValues("_init").Set(0)
+	BucketQuotaBytes.WithLabelValues("_init").Set(0)
+	TiKVPessimisticTxnTotal.WithLabelValues("_init", "_init").Add(0)
+	DataS3APICallsTotal.WithLabelValues("_init", "_init", "_init").Add(0)
+	DataS3ThrottledTotal.WithLabelValues("_init", "_init").Add(0)
+	InventoryObjectsTotal.WithLabelValues("_init", "_init").Set(0)
+	WorkerLeaderEventsTotal.WithLabelValues("_init", "_init").Add(0)
+	RebalanceMigratableChunksTotal.WithLabelValues("_init").Set(0)
+	RebalanceStuckSinglePolicyChunksTotal.WithLabelValues("_init").Set(0)
+	RebalanceStuckNoPolicyChunksTotal.WithLabelValues("_init").Set(0)
 }
 
 func register() {
@@ -399,7 +531,20 @@ func register() {
 		KMSDecryptTotal,
 		BackendTLSSkipVerify,
 		IngressRateLimitRefused,
+		HeartbeatLastWriteTimestamp,
+		RADOSClusterObjectCount,
+		RADOSClusterBytesUsed,
+		BucketQuotaBytes,
+		TiKVPessimisticTxnTotal,
+		DataS3APICallsTotal,
+		DataS3ThrottledTotal,
+		InventoryObjectsTotal,
+		WorkerLeaderEventsTotal,
+		RebalanceMigratableChunksTotal,
+		RebalanceStuckSinglePolicyChunksTotal,
+		RebalanceStuckNoPolicyChunksTotal,
 	)
+	prewarmUS001Series()
 }
 
 func Handler() http.Handler { return promhttp.Handler() }
@@ -491,6 +636,86 @@ func (TiKVObserver) IncBucketStatsShardWrite(shard int) {
 	BucketStatsShardWritesTotal.WithLabelValues(strconv.Itoa(shard)).Inc()
 }
 
+// IncPessimisticTxn bumps strata_tikv_pessimistic_txn_total{op, outcome}
+// once per terminal txn outcome (commit / rollback / conflict). Empty
+// inputs collapse to safe defaults so a missing op label never silently
+// drops the sample (US-001 cycle B prod-observability).
+func (TiKVObserver) IncPessimisticTxn(op, outcome string) {
+	if op == "" {
+		op = "unknown"
+	}
+	if outcome == "" {
+		outcome = "unknown"
+	}
+	TiKVPessimisticTxnTotal.WithLabelValues(op, outcome).Inc()
+}
+
+// HeartbeatObserver implements the heartbeat.Metrics interface. The
+// heartbeat package keeps prometheus out of its import set; the cmd-layer
+// wiring plugs in this adapter (US-001 cycle B prod-observability).
+type HeartbeatObserver struct{}
+
+func (HeartbeatObserver) SetLastWriteTimestamp(unixSeconds int64) {
+	HeartbeatLastWriteTimestamp.Set(float64(unixSeconds))
+}
+
+// InventoryObserver implements the inventory.Metrics interface (US-001
+// cycle B prod-observability). Bumped once per inventory worker tick that
+// produces a report.
+type InventoryObserver struct{}
+
+func (InventoryObserver) SetObjectsTotal(bucket, configID string, n int64) {
+	if bucket == "" {
+		bucket = "unknown"
+	}
+	if configID == "" {
+		configID = "unknown"
+	}
+	InventoryObjectsTotal.WithLabelValues(bucket, configID).Set(float64(n))
+}
+
+// S3APIObserver implements the s3.APIMetrics interface (US-001 cycle B
+// prod-observability). Per-cluster + per-operation counters bumped by the
+// s3 backend's smithy middleware.
+type S3APIObserver struct{}
+
+func (S3APIObserver) IncAPICall(cluster, operation, outcome string) {
+	if cluster == "" {
+		cluster = "unknown"
+	}
+	if operation == "" {
+		operation = "unknown"
+	}
+	if outcome == "" {
+		outcome = "unknown"
+	}
+	DataS3APICallsTotal.WithLabelValues(cluster, operation, outcome).Inc()
+}
+
+func (S3APIObserver) IncThrottled(cluster, operation string) {
+	if cluster == "" {
+		cluster = "unknown"
+	}
+	if operation == "" {
+		operation = "unknown"
+	}
+	DataS3ThrottledTotal.WithLabelValues(cluster, operation).Inc()
+}
+
+// IncLeaderEvent bumps strata_worker_leader_events_total{worker, event}
+// (US-001 cycle B prod-observability). Used by the cmd/strata/workers
+// supervisor — wired directly via the package-level helper since the
+// supervisor already imports internal/metrics for the panic counter.
+func IncLeaderEvent(worker, event string) {
+	if worker == "" {
+		worker = "unknown"
+	}
+	if event == "" {
+		event = "unknown"
+	}
+	WorkerLeaderEventsTotal.WithLabelValues(worker, event).Inc()
+}
+
 // CassandraObserver implements the cassandra.Metrics interface defined in
 // internal/meta/cassandra. The cassandra package keeps prometheus out of its
 // import set; the binary wiring layer plugs in this adapter.
@@ -534,6 +759,23 @@ func (RADOSObserver) ObserveOp(pool, op string, duration time.Duration, err erro
 		op = "unknown"
 	}
 	RADOSOpDuration.WithLabelValues(pool, op).Observe(duration.Seconds())
+}
+
+// SetClusterObjectCount / SetClusterBytesUsed publish the per-cluster
+// gauges sampled by the RADOS DataHealth probe (US-001 cycle B prod-
+// observability).
+func (RADOSObserver) SetClusterObjectCount(cluster string, objects int64) {
+	if cluster == "" {
+		cluster = "unknown"
+	}
+	RADOSClusterObjectCount.WithLabelValues(cluster).Set(float64(objects))
+}
+
+func (RADOSObserver) SetClusterBytesUsed(cluster string, bytes int64) {
+	if cluster == "" {
+		cluster = "unknown"
+	}
+	RADOSClusterBytesUsed.WithLabelValues(cluster).Set(float64(bytes))
 }
 
 // GCObserver implements the gc.Metrics interface. SetQueueDepth updates the
@@ -588,6 +830,16 @@ func (BucketStatsObserver) SetBucketBytes(bucket, class string, bytes int64) {
 		class = "STANDARD"
 	}
 	BucketBytes.WithLabelValues(bucket, class).Set(float64(bytes))
+}
+
+// SetBucketQuotaBytes publishes the per-bucket MaxBytes quota gauge sampled
+// by the bucketstats Sampler (US-001 cycle B prod-observability). Zero
+// indicates no configured quota (unlimited).
+func (BucketStatsObserver) SetBucketQuotaBytes(bucket string, bytes int64) {
+	if bucket == "" {
+		bucket = "unknown"
+	}
+	BucketQuotaBytes.WithLabelValues(bucket).Set(float64(bytes))
 }
 
 // SetBucketShardBytes / SetBucketShardObjects publish per-shard distribution
@@ -714,6 +966,31 @@ func (RebalanceObserver) IncDrainComplete(cluster string) {
 		cluster = "unknown"
 	}
 	DrainCompleteTotal.WithLabelValues(cluster).Inc()
+}
+
+// SetMigratableChunks / SetStuckSinglePolicyChunks / SetStuckNoPolicyChunks
+// publish the per-cluster drain-progress categorisation gauges sampled by
+// the rebalance worker after every CommitScan (US-001 cycle B prod-
+// observability). Referenced by the US-007 cluster dashboard.
+func (RebalanceObserver) SetMigratableChunks(cluster string, n int64) {
+	if cluster == "" {
+		cluster = "unknown"
+	}
+	RebalanceMigratableChunksTotal.WithLabelValues(cluster).Set(float64(n))
+}
+
+func (RebalanceObserver) SetStuckSinglePolicyChunks(cluster string, n int64) {
+	if cluster == "" {
+		cluster = "unknown"
+	}
+	RebalanceStuckSinglePolicyChunksTotal.WithLabelValues(cluster).Set(float64(n))
+}
+
+func (RebalanceObserver) SetStuckNoPolicyChunks(cluster string, n int64) {
+	if cluster == "" {
+		cluster = "unknown"
+	}
+	RebalanceStuckNoPolicyChunksTotal.WithLabelValues(cluster).Set(float64(n))
 }
 
 // AuditStreamObserver implements the auditstream.MetricsSink interface. The

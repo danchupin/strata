@@ -55,6 +55,17 @@ type Config struct {
 	// `inventory.scan_bucket` sub-op children. Nil falls back to a process-
 	// shared no-op tracer.
 	Tracer trace.Tracer
+	// Metrics receives per-tick observability signals (US-001 cycle B prod-
+	// observability). Cmd-layer plugs metrics.InventoryObserver{}; nil
+	// disables.
+	Metrics Metrics
+}
+
+// Metrics is the optional Prom sink the inventory worker bumps once per
+// produced report (US-001 cycle B prod-observability). bucket / configID
+// label the gauge; n is the row count walked in this tick.
+type Metrics interface {
+	SetObjectsTotal(bucket, configID string, n int64)
 }
 
 // Worker drains every bucket's inventory configurations on each tick and
@@ -355,6 +366,9 @@ func (w *Worker) runConfig(ctx context.Context, src *meta.Bucket, configID strin
 		"data_key", dataKey,
 		"rows", len(rows),
 	)
+	if w.cfg.Metrics != nil {
+		w.cfg.Metrics.SetObjectsTotal(src.Name, configID, int64(len(rows)))
+	}
 	return nil
 }
 

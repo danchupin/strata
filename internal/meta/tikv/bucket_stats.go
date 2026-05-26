@@ -130,7 +130,7 @@ func (s *Store) BumpBucketStats(ctx context.Context, bucketID uuid.UUID, deltaBy
 	shard := pickBucketStatsShard()
 	shardKey := BucketStatsShardKey(bucketID, shard)
 	ownerKey := BucketOwnerKey(bucketID)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return meta.BucketStats{}, err
 	}

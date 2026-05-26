@@ -43,7 +43,7 @@ func (s *Store) CreateBucket(ctx context.Context, name, owner, defaultClass stri
 	}
 	ownerKey := BucketOwnerKey(id)
 	userKey := UserStatsKey(owner)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +108,7 @@ func (s *Store) DeleteBucket(ctx context.Context, name string) (err error) {
 	ctx, finish := s.observer.Start(ctx, "DeleteBucket", "buckets")
 	defer func() { finish(err) }()
 	bucketKey := BucketKey(name)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return err
 	}
@@ -375,7 +375,7 @@ func (s *Store) updateBucket(ctx context.Context, name string, mutate func(*meta
 	ctx, finish := s.observer.Start(ctx, "UpdateBucket", "buckets")
 	defer func() { finish(err) }()
 	key := BucketKey(name)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return err
 	}

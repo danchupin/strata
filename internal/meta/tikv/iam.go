@@ -100,7 +100,7 @@ func (s *Store) CreateIAMUser(ctx context.Context, u *meta.IAMUser) (err error) 
 		return err
 	}
 	key := IAMUserKey(u.UserName)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return err
 	}
@@ -177,7 +177,7 @@ func (s *Store) DeleteIAMUser(ctx context.Context, userName string) (err error) 
 	ctx, finish := s.observer.Start(ctx, "DeleteIAMUser", "iam_users")
 	defer func() { finish(err) }()
 	key := IAMUserKey(userName)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return err
 	}
@@ -216,7 +216,7 @@ func (s *Store) CreateIAMAccessKey(ctx context.Context, ak *meta.IAMAccessKey) (
 	}
 	akKey := IAMAccessKeyKey(ak.AccessKeyID)
 	idxKey := IAMUserAccessKeyKey(ak.UserName, ak.AccessKeyID)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return err
 	}
@@ -325,7 +325,7 @@ func (s *Store) UpdateIAMAccessKeyDisabled(ctx context.Context, accessKeyID stri
 	ctx, finish := s.observer.Start(ctx, "UpdateIAMAccessKeyDisabled", "iam_access_keys")
 	defer func() { finish(err) }()
 	akKey := IAMAccessKeyKey(accessKeyID)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -367,7 +367,7 @@ func (s *Store) DeleteIAMAccessKey(ctx context.Context, accessKeyID string) (ak 
 	ctx, finish := s.observer.Start(ctx, "DeleteIAMAccessKey", "iam_access_keys")
 	defer func() { finish(err) }()
 	akKey := IAMAccessKeyKey(accessKeyID)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return nil, err
 	}

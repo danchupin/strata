@@ -42,8 +42,12 @@ func (o *Observer) WrapOp(ctx context.Context, op, table string, fn func(ctx con
 // Start returns a child-span context plus an end-function the caller invokes
 // via defer when wrapping a method body with named-return-driven error
 // reporting. When the observer is nil or has no tracer, Start is identity
-// (returns the original ctx and a no-op end-function).
+// (returns the original ctx and a no-op end-function). Either way the op
+// label is stashed in ctx via withOp so the pessimistic-txn outcome
+// counter (US-001 cycle B prod-observability) can label outcomes without
+// per-callsite plumbing.
 func (o *Observer) Start(ctx context.Context, op, table string) (context.Context, func(error)) {
+	ctx = withOp(ctx, op)
 	if o == nil || o.tracer == nil {
 		return ctx, func(error) {}
 	}

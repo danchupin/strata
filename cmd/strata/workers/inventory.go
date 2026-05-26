@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/danchupin/strata/internal/inventory"
+	"github.com/danchupin/strata/internal/metrics"
 )
 
 func init() {
@@ -23,6 +24,7 @@ func buildInventory(deps Dependencies) (Runner, error) {
 		Interval: orDuration(invCfg.Interval, 5*time.Minute),
 		Region:   inventoryRegion(invCfg.Region, deps.Region),
 		Tracer:   deps.Tracer.Tracer("strata.worker.inventory"),
+		Metrics:  metrics.InventoryObserver{},
 	})
 }
 

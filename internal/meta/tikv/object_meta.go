@@ -153,7 +153,7 @@ func (s *Store) SetObjectRestoreStatus(ctx context.Context, bucketID uuid.UUID, 
 // (objectRow.Grants) that the meta.Object→objectRow conversion in
 // encodeObject does not surface.
 func (s *Store) mutateObjectRow(ctx context.Context, bucketID uuid.UUID, key, versionID string, mutate func(*objectRow)) (err error) {
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return err
 	}

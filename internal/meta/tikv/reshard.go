@@ -42,7 +42,7 @@ func (s *Store) StartReshard(ctx context.Context, bucketID uuid.UUID, target int
 		return nil, meta.ErrReshardInvalidTarget
 	}
 	jobKey := ReshardJobKey(bucketID)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +138,7 @@ func (s *Store) UpdateReshardJob(ctx context.Context, job *meta.ReshardJob) (err
 		return nil
 	}
 	key := ReshardJobKey(job.BucketID)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return err
 	}
@@ -177,7 +177,7 @@ func (s *Store) CompleteReshard(ctx context.Context, bucketID uuid.UUID) (err er
 	ctx, finish := s.observer.Start(ctx, "CompleteReshard", "reshard_jobs")
 	defer func() { finish(err) }()
 	jobKey := ReshardJobKey(bucketID)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return err
 	}

@@ -57,6 +57,27 @@ func (b *Backend) DataHealth(ctx context.Context) (*data.DataHealthReport, error
 		warnings = append(warnings, b.clusterStatusWarnings(ctx, cluster)...)
 	}
 
+	// Per-cluster metrics (US-001 cycle B prod-observability). Aggregate
+	// pool stats by cluster and emit one gauge sample per cluster — fired
+	// once per DataHealth walk so the per-tick cost mirrors the existing
+	// MonCommand fan-out. Pool rows with State=error are skipped so a
+	// single broken pool does not zero out the cluster aggregate.
+	if b.metrics != nil {
+		objectsByCluster := map[string]uint64{}
+		bytesByCluster := map[string]uint64{}
+		for _, ps := range pools {
+			if ps.State == "error" {
+				continue
+			}
+			objectsByCluster[ps.Cluster] += ps.ChunkCount
+			bytesByCluster[ps.Cluster] += ps.BytesUsed
+		}
+		for _, cluster := range clusterNames {
+			b.metrics.SetClusterObjectCount(cluster, int64(objectsByCluster[cluster]))
+			b.metrics.SetClusterBytesUsed(cluster, int64(bytesByCluster[cluster]))
+		}
+	}
+
 	return &data.DataHealthReport{
 		Backend:  "rados",
 		Pools:    pools,

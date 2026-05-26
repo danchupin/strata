@@ -89,13 +89,23 @@ type Metrics interface {
 	// lifecycle). Idempotent at the tracker layer — the counter mirrors
 	// the observed transitions, not the underlying audit log.
 	IncDrainComplete(cluster string)
+	// SetMigratableChunks / SetStuckSinglePolicyChunks /
+	// SetStuckNoPolicyChunks publish the per-cluster drain-progress
+	// categorisation gauges after every CommitScan (US-001 cycle B
+	// prod-observability). Referenced by the US-007 cluster dashboard.
+	SetMigratableChunks(cluster string, n int64)
+	SetStuckSinglePolicyChunks(cluster string, n int64)
+	SetStuckNoPolicyChunks(cluster string, n int64)
 }
 
 type nopMetrics struct{}
 
-func (nopMetrics) IncPlannedMove(string)       {}
-func (nopMetrics) IncRefused(string, string)   {}
-func (nopMetrics) IncDrainComplete(string)     {}
+func (nopMetrics) IncPlannedMove(string)                     {}
+func (nopMetrics) IncRefused(string, string)                 {}
+func (nopMetrics) IncDrainComplete(string)                   {}
+func (nopMetrics) SetMigratableChunks(string, int64)         {}
+func (nopMetrics) SetStuckSinglePolicyChunks(string, int64)  {}
+func (nopMetrics) SetStuckNoPolicyChunks(string, int64)      {}
 
 // DrainCompleteEvent is the wire payload handed to a DrainNotifier when
 // the rebalance worker detects a cluster's drain has reached zero
@@ -325,6 +335,22 @@ func (w *Worker) runOnce(ctx context.Context) error {
 	}
 	tickEnd := w.cfg.Now()
 	completions := prog.commit(w.cfg.Progress, scanFor, tickEnd, w.cfg.ShardID)
+	// US-001 cycle B prod-observability — publish the per-cluster
+	// drain-progress categorisation gauges after the commit so dashboards
+	// reflect the latest merged snapshot. Skips clusters that have no
+	// snapshot yet (first tick before any scan). Fires per tick so a
+	// drained cluster's gauges decay to zero once the snapshot updates.
+	if w.cfg.Progress != nil {
+		for id := range scanFor {
+			snap, ok := w.cfg.Progress.Snapshot(id)
+			if !ok {
+				continue
+			}
+			w.cfg.Metrics.SetMigratableChunks(id, snap.MigratableChunks)
+			w.cfg.Metrics.SetStuckSinglePolicyChunks(id, snap.StuckSinglePolicyChunks)
+			w.cfg.Metrics.SetStuckNoPolicyChunks(id, snap.StuckNoPolicyChunks)
+		}
+	}
 	for _, ev := range completions {
 		w.handleDrainComplete(ctx, ev, tickEnd.Sub(tickStart))
 	}

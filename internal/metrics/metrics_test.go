@@ -311,6 +311,134 @@ func TestExposedMetricNames(t *testing.T) {
 	}
 }
 
+// TestUS001MetricGapFillRegistered asserts the 9 metrics added in US-001
+// cycle B prod-observability are reachable by Describe() and carry a
+// non-empty Help string. Future US-002+ alerts + dashboards reference these
+// names verbatim — drift here breaks the alert/dashboard drift-lint
+// (US-010). Also covers the 3 rebalance categorisation gauges folded into
+// US-001 for US-007's cluster dashboard drain-progress panel.
+func TestUS001MetricGapFillRegistered(t *testing.T) {
+	required := map[string]prometheus.Collector{
+		"strata_heartbeat_last_write_timestamp":              HeartbeatLastWriteTimestamp,
+		"strata_rados_cluster_object_count":                  RADOSClusterObjectCount,
+		"strata_rados_cluster_bytes_used":                    RADOSClusterBytesUsed,
+		"strata_bucket_quota_bytes":                          BucketQuotaBytes,
+		"strata_tikv_pessimistic_txn_total":                  TiKVPessimisticTxnTotal,
+		"strata_data_s3_api_calls_total":                     DataS3APICallsTotal,
+		"strata_data_s3_throttled_total":                     DataS3ThrottledTotal,
+		"strata_inventory_objects_total":                     InventoryObjectsTotal,
+		"strata_worker_leader_events_total":                  WorkerLeaderEventsTotal,
+		"strata_rebalance_migratable_chunks_total":           RebalanceMigratableChunksTotal,
+		"strata_rebalance_stuck_single_policy_chunks_total":  RebalanceStuckSinglePolicyChunksTotal,
+		"strata_rebalance_stuck_no_policy_chunks_total":      RebalanceStuckNoPolicyChunksTotal,
+	}
+	for name, c := range required {
+		ch := make(chan *prometheus.Desc, 4)
+		go func() {
+			c.Describe(ch)
+			close(ch)
+		}()
+		var seenName, seenHelp bool
+		for d := range ch {
+			s := d.String()
+			if strings.Contains(s, `"`+name+`"`) {
+				seenName = true
+			}
+			// Desc.String() shape: `Desc{fqName: "X", help: "Y", ...}`.
+			if strings.Contains(s, `help: ""`) {
+				continue
+			}
+			seenHelp = true
+		}
+		if !seenName {
+			t.Errorf("metric %q not exposed by its Describe()", name)
+		}
+		if !seenHelp {
+			t.Errorf("metric %q missing Help string", name)
+		}
+	}
+}
+
+// TestUS001ObserverAdapters smoke-tests the new observer methods so a
+// missing wiring (e.g. forgotten registration) surfaces here rather than
+// in the smoke. Each method bumps a series — assert the underlying value
+// landed.
+func TestUS001ObserverAdapters(t *testing.T) {
+	HeartbeatLastWriteTimestamp.Set(0)
+	HeartbeatObserver{}.SetLastWriteTimestamp(1234567890)
+	if v := gaugeValue(t, HeartbeatLastWriteTimestamp); v != 1234567890 {
+		t.Fatalf("heartbeat ts: %v", v)
+	}
+
+	RADOSClusterObjectCount.Reset()
+	RADOSClusterBytesUsed.Reset()
+	RADOSObserver{}.SetClusterObjectCount("ceph-a", 42)
+	RADOSObserver{}.SetClusterBytesUsed("ceph-a", 9999)
+	if v := gaugeValue(t, RADOSClusterObjectCount.WithLabelValues("ceph-a")); v != 42 {
+		t.Fatalf("rados objects: %v", v)
+	}
+	if v := gaugeValue(t, RADOSClusterBytesUsed.WithLabelValues("ceph-a")); v != 9999 {
+		t.Fatalf("rados bytes: %v", v)
+	}
+
+	BucketQuotaBytes.Reset()
+	BucketStatsObserver{}.SetBucketQuotaBytes("bkt", 1024)
+	if v := gaugeValue(t, BucketQuotaBytes.WithLabelValues("bkt")); v != 1024 {
+		t.Fatalf("quota: %v", v)
+	}
+
+	TiKVPessimisticTxnTotal.Reset()
+	TiKVObserver{}.IncPessimisticTxn("CreateBucket", "commit")
+	if v := counterValue(t, TiKVPessimisticTxnTotal.WithLabelValues("CreateBucket", "commit")); v != 1 {
+		t.Fatalf("tikv pessimistic: %v", v)
+	}
+
+	DataS3APICallsTotal.Reset()
+	DataS3ThrottledTotal.Reset()
+	S3APIObserver{}.IncAPICall("us-east-1", "put", "success")
+	S3APIObserver{}.IncThrottled("us-east-1", "put")
+	if v := counterValue(t, DataS3APICallsTotal.WithLabelValues("us-east-1", "put", "success")); v != 1 {
+		t.Fatalf("s3 api: %v", v)
+	}
+	if v := counterValue(t, DataS3ThrottledTotal.WithLabelValues("us-east-1", "put")); v != 1 {
+		t.Fatalf("s3 throttled: %v", v)
+	}
+
+	InventoryObjectsTotal.Reset()
+	InventoryObserver{}.SetObjectsTotal("bkt", "cfg1", 9001)
+	if v := gaugeValue(t, InventoryObjectsTotal.WithLabelValues("bkt", "cfg1")); v != 9001 {
+		t.Fatalf("inventory: %v", v)
+	}
+
+	WorkerLeaderEventsTotal.Reset()
+	IncLeaderEvent("gc", "acquired")
+	IncLeaderEvent("gc", "released")
+	if v := counterValue(t, WorkerLeaderEventsTotal.WithLabelValues("gc", "acquired")); v != 1 {
+		t.Fatalf("leader acquired: %v", v)
+	}
+	if v := counterValue(t, WorkerLeaderEventsTotal.WithLabelValues("gc", "released")); v != 1 {
+		t.Fatalf("leader released: %v", v)
+	}
+
+	RebalanceMigratableChunksTotal.Reset()
+	RebalanceStuckSinglePolicyChunksTotal.Reset()
+	RebalanceStuckNoPolicyChunksTotal.Reset()
+	var ro RebalanceObserver
+	ro.SetMigratableChunks("c1", 7)
+	ro.SetStuckSinglePolicyChunks("c1", 3)
+	ro.SetStuckNoPolicyChunks("c1", 1)
+	if v := gaugeValue(t, RebalanceMigratableChunksTotal.WithLabelValues("c1")); v != 7 {
+		t.Fatalf("migratable: %v", v)
+	}
+	if v := gaugeValue(t, RebalanceStuckSinglePolicyChunksTotal.WithLabelValues("c1")); v != 3 {
+		t.Fatalf("stuck single: %v", v)
+	}
+	if v := gaugeValue(t, RebalanceStuckNoPolicyChunksTotal.WithLabelValues("c1")); v != 1 {
+		t.Fatalf("stuck nopolicy: %v", v)
+	}
+}
+
+
 func TestBucketShardObserverSetsAndResets(t *testing.T) {
 	BucketShardBytes.Reset()
 	BucketShardObjects.Reset()

@@ -13,4 +13,9 @@ type Metrics interface {
 	// pickBucketStatsShard hash-collision pattern or a degenerate caller
 	// (e.g. hashing on a stable key instead of a fresh uuid).
 	IncBucketStatsShardWrite(shard int)
+	// IncPessimisticTxn bumps strata_tikv_pessimistic_txn_total{op, outcome}
+	// once per terminal pessimistic-txn outcome (US-001 cycle B prod-
+	// observability). outcome ∈ {commit, rollback, conflict}. op is the
+	// Store method name stashed in ctx by observer.Start.
+	IncPessimisticTxn(op, outcome string)
 }

@@ -45,6 +45,14 @@ type Store interface {
 	ListNodes(ctx context.Context) ([]Node, error)
 }
 
+// Metrics is the optional observability sink the Heartbeater consumes. The
+// cmd-layer plugs in metrics.HeartbeatObserver{}; nil disables (US-001
+// cycle B prod-observability). Method receives Unix seconds of the last
+// successful Store.WriteHeartbeat — failed writes do not bump.
+type Metrics interface {
+	SetLastWriteTimestamp(unixSeconds int64)
+}
+
 // Heartbeater writes Node into Store on every Interval tick. The first write
 // is synchronous on Run() so the local replica appears immediately.
 type Heartbeater struct {
@@ -52,6 +60,9 @@ type Heartbeater struct {
 	Node     Node
 	Interval time.Duration
 	Logger   *log.Logger
+	// Metrics is an optional sink for per-tick observability signals.
+	// nil disables (no-op).
+	Metrics Metrics
 
 	mu sync.Mutex
 }
@@ -89,6 +100,10 @@ func (h *Heartbeater) write(ctx context.Context) {
 	n.LastHeartbeat = time.Now().UTC()
 	if err := h.Store.WriteHeartbeat(ctx, n); err != nil {
 		h.Logger.Printf("heartbeat: write %s: %v", n.ID, err)
+		return
+	}
+	if h.Metrics != nil {
+		h.Metrics.SetLastWriteTimestamp(n.LastHeartbeat.Unix())
 	}
 }
 

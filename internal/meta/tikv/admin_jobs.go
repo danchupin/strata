@@ -18,7 +18,7 @@ func (s *Store) CreateAdminJob(ctx context.Context, job *meta.AdminJob) (err err
 		return meta.ErrAdminJobNotFound
 	}
 	key := AdminJobKey(job.ID)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return err
 	}
@@ -79,7 +79,7 @@ func (s *Store) UpdateAdminJob(ctx context.Context, job *meta.AdminJob) (err err
 		return meta.ErrAdminJobNotFound
 	}
 	key := AdminJobKey(job.ID)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return err
 	}

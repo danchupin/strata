@@ -46,6 +46,13 @@ type ClassSink interface {
 	ResetBucketClass(bucket string)
 }
 
+// QuotaSink receives per-bucket MaxBytes quota at the end of each sample
+// pass (US-001 cycle B prod-observability). Bytes == 0 means no configured
+// quota (unlimited).
+type QuotaSink interface {
+	SetBucketQuotaBytes(bucket string, bytes int64)
+}
+
 // ClassStat is per-class bytes + object count for a single bucket pass, and
 // (separately) the per-class cluster-wide totals stored in Snapshot.
 type ClassStat struct {
@@ -66,6 +73,7 @@ type Sampler struct {
 	Sink      Sink
 	ShardSink ShardSink
 	ClassSink ClassSink
+	QuotaSink QuotaSink
 	Snapshot  *Snapshot
 	Interval  time.Duration
 	Logger    *slog.Logger
@@ -110,7 +118,7 @@ func (s *Sampler) Run(ctx context.Context) error {
 
 // RunOnce runs a single sample pass; exported for tests + cmd --once flag.
 func (s *Sampler) RunOnce(ctx context.Context) error {
-	if s.Sink == nil && s.ShardSink == nil && s.ClassSink == nil && s.Snapshot == nil {
+	if s.Sink == nil && s.ShardSink == nil && s.ClassSink == nil && s.QuotaSink == nil && s.Snapshot == nil {
 		return nil
 	}
 	if s.PageLimit <= 0 {
@@ -153,6 +161,16 @@ func (s *Sampler) RunOnce(ctx context.Context) error {
 			agg.Bytes += st.Bytes
 			agg.Objects += st.Objects
 			classTotals[class] = agg
+		}
+		if s.QuotaSink != nil {
+			q, ok, qerr := s.Meta.GetBucketQuota(ctx, b.ID)
+			if qerr != nil {
+				s.Logger.WarnContext(ctx, "bucketstats: quota fetch failed", "bucket", b.Name, "error", qerr.Error())
+			} else if ok {
+				s.QuotaSink.SetBucketQuotaBytes(b.Name, q.MaxBytes)
+			} else {
+				s.QuotaSink.SetBucketQuotaBytes(b.Name, 0)
+			}
 		}
 		totalsPerBucket = append(totalsPerBucket, bucketTotal{bucket: b, bytes: sum, stats: stats})
 	}

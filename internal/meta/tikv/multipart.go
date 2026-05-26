@@ -38,7 +38,7 @@ func (s *Store) CreateMultipartUpload(ctx context.Context, mu *meta.MultipartUpl
 		return err
 	}
 	key := MultipartKey(mu.BucketID, mu.UploadID)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return err
 	}
@@ -129,7 +129,7 @@ func (s *Store) SavePart(ctx context.Context, bucketID uuid.UUID, uploadID strin
 		return err
 	}
 
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return err
 	}
@@ -204,7 +204,7 @@ func (s *Store) CompleteMultipartUpload(ctx context.Context, obj *meta.Object, u
 	defer func() { finish(err) }()
 	uploadKey := MultipartKey(obj.BucketID, uploadID)
 
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -386,7 +386,7 @@ func (s *Store) AbortMultipartUpload(ctx context.Context, bucketID uuid.UUID, up
 	defer func() { finish(err) }()
 	uploadKey := MultipartKey(bucketID, uploadID)
 
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -446,7 +446,7 @@ func (s *Store) RecordMultipartCompletion(ctx context.Context, rec *meta.Multipa
 		return err
 	}
 	key := MultipartCompletionKey(rec.BucketID, rec.UploadID)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return err
 	}
@@ -495,7 +495,7 @@ func (s *Store) UpdateMultipartUploadSSEWrap(ctx context.Context, bucketID uuid.
 	ctx, finish := s.observer.Start(ctx, "UpdateMultipartUploadSSEWrap", "multipart")
 	defer func() { finish(err) }()
 	key := MultipartKey(bucketID, uploadID)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return err
 	}

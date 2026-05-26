@@ -78,6 +78,10 @@ func (c *countingMetrics) IncDrainComplete(cluster string) {
 	c.drainsDone[cluster]++
 }
 
+func (c *countingMetrics) SetMigratableChunks(string, int64)        {}
+func (c *countingMetrics) SetStuckSinglePolicyChunks(string, int64) {}
+func (c *countingMetrics) SetStuckNoPolicyChunks(string, int64)     {}
+
 // seedObject installs one Object on the memory store with `n` chunks at
 // the supplied per-chunk cluster ids.
 func seedObject(t *testing.T, m meta.Store, bucketID uuid.UUID, key string, chunkClusters []string) {

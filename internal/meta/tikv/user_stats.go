@@ -67,7 +67,7 @@ func (s *Store) BumpUserStats(ctx context.Context, owner string, deltaBytes, del
 		return meta.UserStats{}, nil
 	}
 	key := UserStatsKey(owner)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return meta.UserStats{}, err
 	}
@@ -94,7 +94,7 @@ func (s *Store) IncrUserBucketCount(ctx context.Context, owner string, delta int
 		return meta.UserStats{}, nil
 	}
 	key := UserStatsKey(owner)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return meta.UserStats{}, err
 	}

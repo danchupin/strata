@@ -21,6 +21,11 @@ func (m *fakeShardMetrics) IncBucketStatsShardWrite(shard int) {
 	m.counts[shard]++
 }
 
+func (m *fakeShardMetrics) IncPessimisticTxn(op, outcome string) {
+	_ = op
+	_ = outcome
+}
+
 func (m *fakeShardMetrics) snapshot() (out [bucketStatsShardCount]int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

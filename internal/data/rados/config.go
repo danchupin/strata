@@ -41,4 +41,10 @@ type Config struct {
 // prometheus.
 type Metrics interface {
 	ObserveOp(pool, op string, duration time.Duration, err error)
+	// SetClusterObjectCount / SetClusterBytesUsed publish per-cluster
+	// gauges populated by the DataHealth probe (US-001 cycle B prod-
+	// observability). Implementations may be no-ops; both methods are
+	// best-effort and fired once per DataHealth walk.
+	SetClusterObjectCount(cluster string, objects int64)
+	SetClusterBytesUsed(cluster string, bytes int64)
 }

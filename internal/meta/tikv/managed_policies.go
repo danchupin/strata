@@ -79,7 +79,7 @@ func (s *Store) CreateManagedPolicy(ctx context.Context, p *meta.ManagedPolicy) 
 		return err
 	}
 	key := ManagedPolicyKey(p.Arn)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return err
 	}
@@ -157,7 +157,7 @@ func (s *Store) UpdateManagedPolicyDocument(ctx context.Context, arn string, doc
 		updatedAt = time.Now().UTC()
 	}
 	key := ManagedPolicyKey(arn)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return err
 	}
@@ -195,7 +195,7 @@ func (s *Store) DeleteManagedPolicy(ctx context.Context, arn string) (err error)
 	ctx, finish := s.observer.Start(ctx, "DeleteManagedPolicy", "managed_policies")
 	defer func() { finish(err) }()
 	key := ManagedPolicyKey(arn)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return err
 	}
@@ -236,7 +236,7 @@ func (s *Store) AttachUserPolicy(ctx context.Context, userName, policyArn string
 	policyKey := ManagedPolicyKey(policyArn)
 	upKey := UserPolicyKey(userName, policyArn)
 	puKey := PolicyUserKey(policyArn, userName)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return err
 	}
@@ -284,7 +284,7 @@ func (s *Store) DetachUserPolicy(ctx context.Context, userName, policyArn string
 	defer func() { finish(err) }()
 	upKey := UserPolicyKey(userName, policyArn)
 	puKey := PolicyUserKey(policyArn, userName)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return err
 	}

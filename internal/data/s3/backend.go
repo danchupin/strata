@@ -83,6 +83,11 @@ type Backend struct {
 	// Per-cluster spec.TLS overrides it; otherwise this populates the
 	// resolved TLS for every cluster.
 	tlsDefault ClusterTLS
+
+	// apiMetrics, when non-nil, receives per-cluster API call counters
+	// (US-001 cycle B prod-observability). Threaded onto the
+	// per-cluster smithy middleware in connFor.
+	apiMetrics APIMetrics
 }
 
 // s3Cluster carries the per-cluster SDK wiring + resolved config knobs.
@@ -169,6 +174,12 @@ type Config struct {
 	// (otel.GetTracerProvider) is used. Tests inject an in-memory
 	// exporter-backed provider here.
 	TracerProvider trace.TracerProvider
+
+	// APIMetrics, when non-nil, receives per-cluster + per-operation
+	// counter bumps for every AWS SDK call (US-001 cycle B prod-
+	// observability). Cmd-layer plugs metrics.S3APIObserver{}; tests
+	// leave it nil.
+	APIMetrics APIMetrics
 }
 
 // Validate performs cross-field checks on the multi-cluster Config:
@@ -221,6 +232,7 @@ func New(cfg Config) (*Backend, error) {
 		httpClient:     cfg.HTTPClient,
 		tracerProvider: resolveTracerProvider(cfg),
 		tlsDefault:     cfg.TLS,
+		apiMetrics:     cfg.APIMetrics,
 	}
 	for id, spec := range cfg.Clusters {
 		spec.ID = id
@@ -404,7 +416,7 @@ func (b *Backend) connFor(ctx context.Context, id string) (*s3Cluster, error) {
 		// so the otelaws Initialize-after hook brackets every retry
 		// attempt (matches the metrics observer position).
 		installOTelMiddleware(&o.APIOptions, b.tracerProvider, id)
-		o.APIOptions = append(o.APIOptions, instrumentStack)
+		o.APIOptions = append(o.APIOptions, instrumentStack(id, b.apiMetrics))
 	})
 	partSize := c.spec.PartSize
 	if partSize <= 0 {

@@ -90,7 +90,7 @@ func (s *Store) CreateAccessPoint(ctx context.Context, ap *meta.AccessPoint) (er
 	nameKey := AccessPointKey(row.Name)
 	aliasKey := AccessPointAliasKey(row.Alias)
 	bktKey := AccessPointByBucketKey(row.BucketID, row.Name)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return err
 	}
@@ -181,7 +181,7 @@ func (s *Store) DeleteAccessPoint(ctx context.Context, name string) (err error) 
 	ctx, finish := s.observer.Start(ctx, "DeleteAccessPoint", "access_points")
 	defer func() { finish(err) }()
 	nameKey := AccessPointKey(name)
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return err
 	}

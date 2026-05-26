@@ -91,6 +91,15 @@ func (s *Supervisor) LeaderEvents() <-chan LeaderEvent {
 }
 
 func (s *Supervisor) emitLeader(name string, acquired bool) {
+	// US-001 cycle B prod-observability — bump per-worker leader-event
+	// counter regardless of whether a heartbeat consumer is attached.
+	// Fires once per acquire/release transition so dashboard authors can
+	// detect lease flap without a heartbeat subscription.
+	event := "released"
+	if acquired {
+		event = "acquired"
+	}
+	metrics.IncLeaderEvent(name, event)
 	if s.leaderEvents == nil {
 		return
 	}

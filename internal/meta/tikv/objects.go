@@ -40,7 +40,7 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) (
 		return err
 	}
 
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return err
 	}
@@ -213,7 +213,7 @@ func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versi
 		if kerr != nil {
 			return nil, meta.ErrObjectNotFound
 		}
-		txn, err := s.kv.Begin(ctx, true)
+		txn, err := s.beginPessimistic(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -262,7 +262,7 @@ func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versi
 		return marker, nil
 	}
 
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -331,7 +331,7 @@ func (s *Store) SetObjectStorage(ctx context.Context, bucketID uuid.UUID, key, v
 	defer func() { finish(err) }()
 	versionID = meta.ResolveVersionID(versionID)
 
-	txn, err := s.kv.Begin(ctx, true)
+	txn, err := s.beginPessimistic(ctx)
 	if err != nil {
 		return false, err
 	}
