@@ -2,6 +2,12 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+# Strata SLO recording rules + alert rules (US-002 cycle B prod-observability).
+# alerts.yml ships next to this file under deploy/prometheus/; the path is
+# resolved relative to the prometheus binary's --config.file argument.
+rule_files:
+  - alerts.yml
+
 scrape_configs:
   # TiKV-default 2-replica lab (bare `docker compose up -d`): strata-a +
   # strata-b expose /metrics on the gateway port (cfg.Listen, default

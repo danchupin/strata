@@ -82,6 +82,14 @@ jobs:
       # available; here we only confirm the module's go.mod still tidies.
       - run: cd internal/data/rados/cephimpl && GOWORK=off go mod tidy -diff || \
           (echo "cephimpl/ go.mod drift" && exit 1)
+      # promtool lint of deploy/prometheus/alerts.yml — US-002 cycle B
+      # prod-observability. Installs the Prometheus reference promtool
+      # from the upstream module so the rule semantics match what the lab
+      # Prometheus loads at runtime.
+      - name: Install promtool
+        run: go install github.com/prometheus/prometheus/cmd/promtool@latest
+      - name: make promtool-check
+        run: make promtool-check
 
   unit:
     name: Unit tests (-race)

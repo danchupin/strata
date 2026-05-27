@@ -48,8 +48,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped deploy/prometheus/alerts.yml — 8 recording rules in strata.recording group (5 SLO targets + 3 5m SLI ratios) + 18 alert rules across 7 groups (availability, latency, workers, replication, backends, security, drain). All exprs reference real metric names. prometheus.yml wired with rule_files: [alerts.yml]. New make promtool-check target degrades to WARN when promtool missing (mirrors helm-lint pattern). CI lint-build job installs promtool + runs make promtool-check. Local promtool installed via prometheus-3.6.0.darwin-arm64 tarball; promtool check rules reports SUCCESS: 26 rules found."
     },
     {
       "id": "US-003",

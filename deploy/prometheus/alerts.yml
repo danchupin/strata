@@ -1,0 +1,347 @@
+# Strata alert + recording rules (US-002 cycle B prod-observability).
+#
+# Shipped rules:
+#   * 8 SLO recording rules in `strata.recording` — centralize SLO targets
+#     + 5m SLI ratios. SLO target change = 1-file edit; alert rules below
+#     reference these via `strata:*:target` so they auto-track.
+#   * 18 alert rules across 7 SLO/SLI-aligned groups (availability, latency,
+#     workers, replication, backends, security, drain).
+#
+# Burn-rate alerts (4-window multi-burn-rate, Google SRE workbook ch.5) +
+# matching per-window SLI ratios are layered on top of this file in US-003
+# (`strata.burn_rate` group, 12 alerts; 9 more recording rules for the
+# longer windows). Until that lands operators get the standard 5m SLI
+# threshold check via Strata5xxRateHigh.
+#
+# Label conventions (see docs/site/content/operate/alerts.md for the
+# Alertmanager routing recipe):
+#   * severity ∈ {critical, warning, info}
+#   * team = storage (single team owns Strata today)
+#   * slo ∈ {availability, latency, durability} or omitted for non-SLO rules
+#
+# Validate via `make promtool-check`. CI installs promtool; locally the
+# target degrades to WARN + exit 0 when the binary is missing (mirrors
+# `make helm-lint`).
+
+groups:
+  - name: strata.recording
+    interval: 30s
+    rules:
+      # ---- SLO target constants ----------------------------------------
+      # Change a single line here to re-tune the SLO; every alert + burn-
+      # rate alert that references the target rule auto-tracks.
+      - record: strata:slo_availability:target
+        expr: vector(0.999)
+      - record: strata:slo_latency_get_put_seconds:target
+        expr: vector(0.5)
+      - record: strata:slo_latency_list_seconds:target
+        expr: vector(2)
+      - record: strata:slo_latency_multipart_complete_seconds:target
+        expr: vector(1)
+      - record: strata:slo_durability_error_rate:target
+        expr: vector(0)
+
+      # ---- 5m SLI ratios ------------------------------------------------
+      # Availability: non-5xx ratio over the S3 traffic surface (admin
+      # paths excluded; admin 5xx is operator-visible separately).
+      - record: strata:availability:ratio_rate5m
+        expr: |
+          1 - (
+            sum(rate(strata_http_requests_total{code=~"5..",bucket!="_admin"}[5m]))
+            /
+            clamp_min(sum(rate(strata_http_requests_total{bucket!="_admin"}[5m])), 1)
+          )
+
+      # Latency: p99 over GET + PUT across all S3 buckets.
+      - record: strata:latency_get_put:p99_rate5m
+        expr: histogram_quantile(0.99, sum by (le) (rate(strata_http_request_duration_seconds_bucket{method=~"GET|PUT"}[5m])))
+
+      # Durability: rate of non-ENOENT non-OK terminal GC acks. Always-on
+      # signal — no inventory dependency. Powers the 90-day durability SLO
+      # (see /operate/slo.md).
+      - record: strata:durability:error_rate5m
+        expr: sum(rate(strata_gc_terminal_ack_total{reason!="enoent",reason!="ok"}[5m]))
+
+  - name: strata.availability
+    interval: 30s
+    rules:
+      - alert: Strata5xxRateHigh
+        expr: (1 - strata:availability:ratio_rate5m) > (1 - strata:slo_availability:target) * 14.4
+        for: 5m
+        labels:
+          severity: critical
+          team: storage
+          slo: availability
+        annotations:
+          summary: Strata 5xx rate burning availability SLO at >=14.4× budget
+          description: |
+            5m availability ratio {{ printf "%.4f" $value }} below SLO target.
+            Burning error budget at >=14.4× — at this rate the 30-day budget
+            is consumed in ~2 days. Investigate gateway / backend errors
+            via /admin/v1/diagnostics + recent logs.
+          runbook_url: /operate/alerts.md#strata5xxratehigh
+
+  - name: strata.latency
+    interval: 30s
+    rules:
+      - alert: StrataLatencyP99Above500ms
+        expr: strata:latency_get_put:p99_rate5m > strata:slo_latency_get_put_seconds:target
+        for: 5m
+        labels:
+          severity: warning
+          team: storage
+          slo: latency
+        annotations:
+          summary: GET/PUT p99 latency above SLO target
+          description: |
+            5m p99 GET/PUT latency {{ printf "%.3fs" $value }} above SLO
+            target 500ms. Investigate hot buckets, slow backend ops via
+            /admin/v1/diagnostics + the latency dashboard.
+          runbook_url: /operate/alerts.md#stratalatencyp99above500ms
+
+  - name: strata.workers
+    interval: 30s
+    rules:
+      - alert: StrataWorkerPanic
+        expr: rate(strata_worker_panic_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          team: storage
+        annotations:
+          summary: Worker {{ $labels.worker }} (shard {{ $labels.shard }}) panicked
+          description: |
+            Recovered worker panic on worker={{ $labels.worker }} shard={{ $labels.shard }}.
+            Supervisor restarts on exponential backoff (1s→5s→30s→2m).
+            Check the worker iteration span + logs for the panic stack.
+          runbook_url: /operate/alerts.md#strataworkerpanic
+
+      - alert: StrataGCQueueGrowth
+        expr: max by (region) (deriv(strata_gc_queue_depth[15m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+          team: storage
+        annotations:
+          summary: GC queue depth growing in region {{ $labels.region }}
+          description: |
+            GC queue depth growing ({{ $value }}/s slope over 15m) in
+            region={{ $labels.region }}. Either chunk deletion is failing
+            (check strata_gc_terminal_ack_total) or producer rate exceeds
+            consumer capacity (consider scaling STRATA_GC_CONCURRENCY /
+            STRATA_GC_SHARDS).
+          runbook_url: /operate/alerts.md#stratagcqueuegrowth
+
+      - alert: StrataLifecycleErrorSpike
+        expr: sum(rate(strata_lifecycle_tick_total{status="error"}[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          team: storage
+        annotations:
+          summary: Lifecycle worker error rate elevated
+          description: |
+            Lifecycle worker error rate {{ printf "%.3f" $value }}/s over 5m.
+            Investigate per-action breakdown via
+            sum by (action) (rate(strata_lifecycle_tick_total{status="error"}[5m])).
+          runbook_url: /operate/alerts.md#stratalifecycleerrorspike
+
+      - alert: StrataNotifyDLQGrowth
+        expr: sum(rate(strata_notify_delivery_total{status="dlq"}[10m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+          team: storage
+        annotations:
+          summary: Notify worker DLQ accruing deliveries
+          description: |
+            Notify worker has shipped {{ printf "%.3f" $value }}/s deliveries
+            to DLQ over 10m. Check sink reachability + DLQ contents via
+            /admin/v1/notify/dlq.
+          runbook_url: /operate/alerts.md#stratanotifydlqgrowth
+
+      - alert: StrataHeartbeatStale
+        expr: time() - max(strata_heartbeat_last_write_timestamp) > 60
+        for: 2m
+        labels:
+          severity: critical
+          team: storage
+        annotations:
+          summary: No replica has written heartbeat in >60s
+          description: |
+            Most recent heartbeat write was {{ printf "%.0f" $value }}s ago.
+            Either meta backend is unhealthy (heartbeat write requires
+            Cassandra/TiKV liveness) or every gateway replica has stalled.
+            Check /readyz + meta backend status immediately.
+          runbook_url: /operate/alerts.md#strataheartbeatstale
+
+  - name: strata.replication
+    interval: 30s
+    rules:
+      - alert: StrataReplicationQueueAge
+        expr: max by (bucket) (strata_replication_queue_age_seconds) > 600
+        for: 10m
+        labels:
+          severity: warning
+          team: storage
+        annotations:
+          summary: Replication queue oldest row >10m in bucket {{ $labels.bucket }}
+          description: |
+            Oldest pending replication_queue row in bucket={{ $labels.bucket }}
+            is {{ printf "%.0f" $value }}s old. Peer reachability or
+            replicator throughput is degraded.
+          runbook_url: /operate/alerts.md#stratareplicationqueueage
+
+      - alert: StrataReplicationQueueGrowth
+        expr: max by (rule_id) (deriv(strata_replication_queue_depth[15m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+          team: storage
+        annotations:
+          summary: Replication queue depth growing for rule {{ $labels.rule_id }}
+          description: |
+            Replication queue depth for rule_id={{ $labels.rule_id }}
+            growing at {{ printf "%.3f" $value }}/s slope over 15m.
+            Producer rate exceeds replicator throughput.
+          runbook_url: /operate/alerts.md#stratareplicationqueuegrowth
+
+  - name: strata.backends
+    interval: 30s
+    rules:
+      - alert: StrataCassandraLwtConflictSpike
+        expr: sum by (bucket, shard) (rate(strata_cassandra_lwt_conflicts_total[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+          team: storage
+        annotations:
+          summary: Cassandra LWT conflicts spiking on bucket {{ $labels.bucket }} shard {{ $labels.shard }}
+          description: |
+            LWT conflict rate {{ printf "%.1f" $value }}/s on
+            bucket={{ $labels.bucket }} shard={{ $labels.shard }} over 5m.
+            Hot key — investigate per-bucket Hot Shards heatmap.
+          runbook_url: /operate/alerts.md#stratacassandralwtconflictspike
+
+      - alert: StrataCassandraQueryP99Spike
+        expr: histogram_quantile(0.99, sum by (le, table, op) (rate(strata_cassandra_query_duration_seconds_bucket[5m]))) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          team: storage
+        annotations:
+          summary: Cassandra p99 query latency >100ms (table={{ $labels.table }} op={{ $labels.op }})
+          description: |
+            Cassandra p99 query latency {{ printf "%.3fs" $value }} on
+            table={{ $labels.table }} op={{ $labels.op }}. Investigate
+            slow-query log (STRATA_CASSANDRA_SLOW_MS) + cluster health.
+          runbook_url: /operate/alerts.md#stratacassandraqueryp99spike
+
+      - alert: StrataRADOSOpP99Spike
+        expr: histogram_quantile(0.99, sum by (le, pool, op) (rate(strata_rados_op_duration_seconds_bucket[5m]))) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          team: storage
+        annotations:
+          summary: RADOS p99 op latency >500ms (pool={{ $labels.pool }} op={{ $labels.op }})
+          description: |
+            RADOS p99 op latency {{ printf "%.3fs" $value }} on
+            pool={{ $labels.pool }} op={{ $labels.op }}. Investigate
+            cluster OSD health + recovery state.
+          runbook_url: /operate/alerts.md#stratradosopp99spike
+
+      - alert: StrataBucketStatsShardImbalance
+        expr: max(strata_bucket_stats_shard_writes_total) / clamp_min(sum(strata_bucket_stats_shard_writes_total), 1) > 0.5
+        for: 30m
+        labels:
+          severity: info
+          team: storage
+        annotations:
+          summary: bucket_stats shard fan-out imbalanced (one shard owns >50% of writes)
+          description: |
+            One bucket_stats shard absorbed {{ printf "%.2f" $value }}
+            fraction of writes over 30m (>0.50 is the fan-out warning
+            line). Picker likely hashing on a stable key instead of a
+            fresh uuid. See CLAUDE.md `bucket_stats live counter is
+            fan-out, not single-key`.
+          runbook_url: /operate/alerts.md#stratabucketstatsshardimbalance
+
+      - alert: StrataOTelRingbufHorizonLow
+        expr: strata_otel_ringbuf_oldest_age_seconds < 300
+        for: 5m
+        labels:
+          severity: info
+          team: storage
+        annotations:
+          summary: OTel ringbuf retention horizon <5min
+          description: |
+            OTel ring buffer oldest trace age {{ printf "%.0f" $value }}s.
+            Trace browser will miss older requests under load — consider
+            growing STRATA_OTEL_RINGBUF_BYTES.
+          runbook_url: /operate/alerts.md#strataotelringbufhorizonlow
+
+  - name: strata.security
+    interval: 30s
+    rules:
+      - alert: StrataBackendTLSSkipVerify
+        expr: sum(strata_backend_tls_skip_verify) > 0
+        for: 1m
+        labels:
+          severity: critical
+          team: storage
+        annotations:
+          summary: Backend TLS InsecureSkipVerify=true in production
+          description: |
+            {{ printf "%.0f" $value }} backend TLS clients have
+            InsecureSkipVerify=true. Server-cert validation is OFF —
+            traffic is vulnerable to MITM. Re-issue trusted CA bundle +
+            unset STRATA_*_TLS_SKIP_VERIFY immediately.
+          runbook_url: /operate/alerts.md#stratabackendtlsskipverify
+
+      - alert: StrataRateLimitRefusalSpike
+        expr: sum(rate(strata_ingress_rate_limit_refused_total[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+          team: storage
+        annotations:
+          summary: Ingress rate-limit refusals spiking (>10/s)
+          description: |
+            Ingress rate limiter refused {{ printf "%.1f" $value }}/s
+            requests over 5m. Either a misbehaving client / DDoS or limits
+            tuned too tight. Inspect by (reason) and consider scaling
+            STRATA_RATE_LIMIT_PER_*.
+          runbook_url: /operate/alerts.md#stratarratelimitrefusalspike
+
+      - alert: StrataAuditStreamSubscriberLeak
+        expr: strata_audit_stream_subscribers > 50
+        for: 10m
+        labels:
+          severity: warning
+          team: storage
+        annotations:
+          summary: Audit stream subscribers >50 (likely leak)
+          description: |
+            Audit stream broadcaster has {{ printf "%.0f" $value }} live
+            subscribers. Operator dashboards rarely exceed ~5; this
+            indicates leaked /admin/v1/audit/stream connections.
+          runbook_url: /operate/alerts.md#strataauditstreamsubscriberleak
+
+  - name: strata.drain
+    interval: 30s
+    rules:
+      - alert: StrataDrainProgressStalled
+        expr: (sum(changes(strata_rebalance_chunks_moved_total[15m])) == 0) and on() (sum(strata_drain_complete_total) == 0)
+        for: 15m
+        labels:
+          severity: warning
+          team: storage
+        annotations:
+          summary: Drain progress stalled (no chunk moves in 15m, no completion)
+          description: |
+            Rebalance worker has moved zero chunks over 15m and no drain
+            completion event has fired. Check /admin/v1/clusters drain
+            state + per-cluster drain-progress for stuck buckets
+            (stuck_single_policy / stuck_no_policy).
+          runbook_url: /operate/alerts.md#stratadrainprogressstalled

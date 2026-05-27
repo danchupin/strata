@@ -10,7 +10,7 @@ COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 	smoke-drain-lifecycle smoke-drain-transparency smoke-drain-progress-ui smoke-cluster-weights \
 	smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale \
 	smoke-single-binary smoke-tikv-default-lab smoke-rgw-lab-restart \
-	race-soak race-soak-tikv lint-nginx-lab helm-lint \
+	race-soak race-soak-tikv lint-nginx-lab helm-lint promtool-check \
 	bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi bench-rgw-comparison bench-rgw-comparison-with-cassandra \
 	docs-serve docs-build docs-openapi-copy clean
 
@@ -457,6 +457,15 @@ race-soak-tikv:
 helm-lint:
 	@command -v helm > /dev/null || { echo "helm not installed — skip helm-lint (install: https://helm.sh/docs/intro/install/)"; exit 0; }
 	helm lint deploy/helm/strata/
+
+# Prometheus rules lint for deploy/prometheus/alerts.yml (US-002 cycle B
+# prod-observability). Mirrors the helm-lint degradation pattern — when
+# promtool is missing locally the target prints a WARN + exit 0 so
+# `make test` is not gated on the toolchain. CI installs promtool via
+# `go install github.com/prometheus/prometheus/cmd/promtool@latest`.
+promtool-check:
+	@command -v promtool > /dev/null || { echo "promtool not installed — skip promtool-check (install: go install github.com/prometheus/prometheus/cmd/promtool@latest)"; exit 0; }
+	promtool check rules deploy/prometheus/alerts.yml
 
 # Validate the nginx LB config used by the TiKV-default 2-replica lab.
 # nginx -t resolves upstream hostnames at parse time, so the test container
