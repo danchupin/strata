@@ -1,0 +1,205 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "title": "Strata Overview",
+      "type": "link",
+      "url": "/d/strata-overview",
+      "icon": "external link",
+      "tags": [],
+      "targetBlank": false
+    }
+  ],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Tenant: access_key=$access_key bucket=$bucket",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Request rate by method",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 1},
+      "description": "sum by (method) (rate(strata_http_requests_total{access_key=~\"$access_key\", bucket=~\"$bucket\"}[5m])) — per-tenant request rate split by S3 method.",
+      "fieldConfig": {
+        "defaults": {"unit": "reqps"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (method) (rate(strata_http_requests_total{access_key=~\"$access_key\", bucket=~\"$bucket\"}[5m]))",
+          "legendFormat": "{{method}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Error rate by code class",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 1},
+      "description": "Per-tenant 4xx + 5xx response rate. Grouped by HTTP status class via label_replace so 401/403/404/429 etc collapse to a single '4xx' legend entry; 500/502/503 to '5xx'. Non-error 2xx/3xx excluded.",
+      "fieldConfig": {
+        "defaults": {"unit": "reqps"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (class) (label_replace(rate(strata_http_requests_total{access_key=~\"$access_key\", bucket=~\"$bucket\", code=~\"4..\"}[5m]), \"class\", \"4xx\", \"code\", \".*\"))",
+          "legendFormat": "{{class}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (class) (label_replace(rate(strata_http_requests_total{access_key=~\"$access_key\", bucket=~\"$bucket\", code=~\"5..\"}[5m]), \"class\", \"5xx\", \"code\", \".*\"))",
+          "legendFormat": "{{class}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Bucket bytes by storage class",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 9},
+      "description": "strata_bucket_bytes{bucket=~\"$bucket\"} — per-bucket size sampled hourly by the gateway, split by storage class. Per-request size histogram does not exist in this codebase; the gauge is the canonical bytes signal.",
+      "fieldConfig": {
+        "defaults": {"unit": "bytes"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (bucket, storage_class) (strata_bucket_bytes{bucket=~\"$bucket\"})",
+          "legendFormat": "{{bucket}} / {{storage_class}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Quota utilization",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 9},
+      "description": "sum(strata_bucket_bytes) / strata_bucket_quota_bytes, per bucket. 0.8 = 80% full (warning band); 1.0 = at quota. Quota = 0 means unlimited and the ratio is skipped (clamp_min guard).",
+      "fieldConfig": {
+        "defaults": {"unit": "percentunit", "min": 0, "max": 1.5},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (bucket) (strata_bucket_bytes{bucket=~\"$bucket\"}) / clamp_min(strata_bucket_quota_bytes{bucket=~\"$bucket\"}, 1)",
+          "legendFormat": "{{bucket}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Rate-limit refusals (ingress)",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 17},
+      "description": "rate(strata_ingress_rate_limit_refused_total{reason=~\"key|ip\"}[5m]) — gateway-level rate-limit refusals. Note: this counter has NO bucket/access_key labels (cycle A harden-gateway publishes only the reason dimension), so the panel is global rather than per-tenant. Spikes here correlate with tenants exceeding their per-key or per-IP RPS budget.",
+      "fieldConfig": {
+        "defaults": {"unit": "ops"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (reason) (rate(strata_ingress_rate_limit_refused_total{reason=~\"key|ip\"}[5m]))",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["strata", "tenants"],
+  "templating": {
+    "list": [
+      {
+        "name": "access_key",
+        "label": "Access key",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+        "definition": "query_result(topk(50, sum by(access_key) (rate(strata_http_requests_total[5m]))))",
+        "query": {
+          "query": "query_result(topk(50, sum by(access_key) (rate(strata_http_requests_total[5m]))))",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "regex": "/access_key=\"([^\"]*)\"/",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "hide": 0,
+        "current": {"selected": false, "text": "All", "value": "$__all"},
+        "options": []
+      },
+      {
+        "name": "bucket",
+        "label": "Bucket",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+        "definition": "query_result(topk(50, sum by(bucket) (rate(strata_http_requests_total[5m]))))",
+        "query": {
+          "query": "query_result(topk(50, sum by(bucket) (rate(strata_http_requests_total[5m]))))",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "regex": "/bucket=\"([^\"]*)\"/",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "hide": 0,
+        "current": {"selected": false, "text": "All", "value": "$__all"},
+        "options": []
+      }
+    ]
+  },
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "Strata Tenants",
+  "uid": "strata-tenants",
+  "version": 1,
+  "weekStart": ""
+}

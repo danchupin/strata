@@ -220,6 +220,9 @@
       "title": "Multipart active by bucket",
       "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
       "gridPos": {"h": 8, "w": 8, "x": 8, "y": 28},
+      "links": [
+        {"title": "Open tenant dashboard for bucket", "url": "/d/strata-tenants?var-bucket=${__field.labels.bucket}", "targetBlank": false}
+      ],
       "fieldConfig": {
         "defaults": {"unit": "short"},
         "overrides": []
@@ -275,6 +278,9 @@
       "title": "Bucket bytes by storage class",
       "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
       "gridPos": {"h": 8, "w": 24, "x": 0, "y": 37},
+      "links": [
+        {"title": "Open tenant dashboard for bucket", "url": "/d/strata-tenants?var-bucket=${__field.labels.bucket}", "targetBlank": false}
+      ],
       "fieldConfig": {
         "defaults": {"unit": "bytes"},
         "overrides": []
