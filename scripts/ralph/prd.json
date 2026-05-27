@@ -154,8 +154,8 @@
         "Tests pass"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped deploy/grafana/dashboards/strata-clusters.json — schemaVersion 39 (pinned for US-010 drift-lint), uid strata-clusters, tags [strata, clusters], default 1h time range, template var cluster driven by label_values(strata_rados_cluster_object_count, cluster) refresh-on-time-range-change. 6 panels: chunks_used (strata_rados_cluster_object_count{cluster=$cluster}), bytes_used (strata_rados_cluster_bytes_used{cluster=$cluster}), drain-progress 3-line plot (migratable/stuck_single_policy/stuck_no_policy from US-001 categorisation gauges), rebalance moves in/out (rate from/to=$cluster on strata_rebalance_chunks_moved_total), refusals (rate by reason on strata_rebalance_refused_total{target} + strata_putchunks_refused_total{cluster}), TLS skip-verify (stat panel with OK/INSECURE value mappings on strata_backend_tls_skip_verify{cluster}). Hero dashboard strata-dashboard.json gains panel-level drill-down links on RADOS op latency p99 + RADOS op rate panels pointing at /d/strata-clusters (US-006 hardcoded-URL convention since RADOS metrics carry pool not cluster label). All 9 PromQL metric references resolve to real names registered in internal/metrics/metrics.go. go vet + go test ./deploy/grafana/... + go test ./internal/metrics/... clean."
     },
     {
       "id": "US-008",

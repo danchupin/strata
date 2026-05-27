@@ -1,0 +1,238 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "title": "Strata Overview",
+      "type": "link",
+      "url": "/d/strata-overview",
+      "icon": "external link",
+      "tags": [],
+      "targetBlank": false
+    }
+  ],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Cluster: $cluster",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Chunks used",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 1},
+      "description": "strata_rados_cluster_object_count{cluster=\"$cluster\"} — per-cluster object count sampled by the RADOS DataHealth probe (US-001).",
+      "fieldConfig": {
+        "defaults": {"unit": "short"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "strata_rados_cluster_object_count{cluster=\"$cluster\"}",
+          "legendFormat": "{{cluster}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Bytes used",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 1},
+      "description": "strata_rados_cluster_bytes_used{cluster=\"$cluster\"} — per-cluster used bytes from the `ceph df` Pools[] aggregate (US-001).",
+      "fieldConfig": {
+        "defaults": {"unit": "bytes"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "strata_rados_cluster_bytes_used{cluster=\"$cluster\"}",
+          "legendFormat": "{{cluster}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Drain progress (migratable / stuck single-policy / stuck no-policy)",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 9},
+      "description": "Per-cluster drain-progress categorisation from the rebalance worker (US-001). `migratable` chunks are movable under the current policy + cluster-weights; `stuck_single_policy` are stuck on a strict-mode bucket whose only policy target is draining; `stuck_no_policy` have no live policy target and no cluster-weight fallback. A successful drain trends `migratable → 0` while the two `stuck_*` series remain at 0; non-zero `stuck_*` requires operator intervention (see /operate/drain-cluster).",
+      "fieldConfig": {
+        "defaults": {"unit": "short"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "strata_rebalance_migratable_chunks_total{cluster=\"$cluster\"}",
+          "legendFormat": "migratable",
+          "refId": "A"
+        },
+        {
+          "expr": "strata_rebalance_stuck_single_policy_chunks_total{cluster=\"$cluster\"}",
+          "legendFormat": "stuck_single_policy",
+          "refId": "B"
+        },
+        {
+          "expr": "strata_rebalance_stuck_no_policy_chunks_total{cluster=\"$cluster\"}",
+          "legendFormat": "stuck_no_policy",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Rebalance moves in / out",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 17},
+      "description": "Per-cluster rebalance throughput. `out` = chunks copied away from this cluster (drain direction); `in` = chunks copied into this cluster (target of a sibling drain).",
+      "fieldConfig": {
+        "defaults": {"unit": "ops"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(strata_rebalance_chunks_moved_total{from=\"$cluster\"}[5m]))",
+          "legendFormat": "out",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(strata_rebalance_chunks_moved_total{to=\"$cluster\"}[5m]))",
+          "legendFormat": "in",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Refusals (rebalance + PutChunks)",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 17},
+      "description": "Rebalance worker refusals (`strata_rebalance_refused_total{target=\"$cluster\"}` — target_full / target_draining safety rails) + PutChunks hot-path drain refusals (`strata_putchunks_refused_total{cluster=\"$cluster\"}` — drain_refused). Non-zero rate during a drain is expected; non-zero outside a drain is a misconfiguration.",
+      "fieldConfig": {
+        "defaults": {"unit": "ops"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (reason) (rate(strata_rebalance_refused_total{target=\"$cluster\"}[5m]))",
+          "legendFormat": "rebalance / {{reason}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (reason) (rate(strata_putchunks_refused_total{cluster=\"$cluster\"}[5m]))",
+          "legendFormat": "putchunks / {{reason}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Backend TLS skip-verify",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 25},
+      "description": "strata_backend_tls_skip_verify{cluster=\"$cluster\"} — 1 if the backend's TLS client is running with InsecureSkipVerify=true (mTLS server-cert validation disabled). Any value of 1 in production is an incident; alert StrataBackendTLSSkipVerify pages on sum > 0.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "mappings": [
+            {"options": {"0": {"text": "OK", "color": "green"}}, "type": "value"},
+            {"options": {"1": {"text": "INSECURE", "color": "red"}}, "type": "value"}
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "red", "value": 1}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "orientation": "horizontal"
+      },
+      "targets": [
+        {
+          "expr": "strata_backend_tls_skip_verify{cluster=\"$cluster\"}",
+          "legendFormat": "{{backend}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["strata", "clusters"],
+  "templating": {
+    "list": [
+      {
+        "name": "cluster",
+        "label": "Cluster",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+        "definition": "label_values(strata_rados_cluster_object_count, cluster)",
+        "query": {
+          "query": "label_values(strata_rados_cluster_object_count, cluster)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "multi": false,
+        "includeAll": false,
+        "hide": 0,
+        "current": {"selected": false, "text": "", "value": ""},
+        "options": []
+      }
+    ]
+  },
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "Strata Clusters",
+  "uid": "strata-clusters",
+  "version": 1,
+  "weekStart": ""
+}

@@ -137,6 +137,9 @@
       "title": "RADOS op latency p99 by pool",
       "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 19},
+      "links": [
+        {"title": "Open clusters dashboard", "url": "/d/strata-clusters", "targetBlank": false}
+      ],
       "fieldConfig": {
         "defaults": {"unit": "s"},
         "overrides": []
@@ -159,6 +162,9 @@
       "title": "RADOS op rate",
       "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 19},
+      "links": [
+        {"title": "Open clusters dashboard", "url": "/d/strata-clusters", "targetBlank": false}
+      ],
       "fieldConfig": {
         "defaults": {"unit": "ops"},
         "overrides": []
