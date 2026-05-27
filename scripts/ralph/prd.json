@@ -210,8 +210,8 @@
         "Tests pass"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped deploy/grafana/dashboard_test.go extension — TestDashboardJSONValid now walks every *.json under deploy/grafana/ + deploy/grafana/dashboards/ (6 dashboards: 1 hero + 5 specialized) as a t.Run subtest per file, asserts schemaVersion >= 39 (Grafana 10 baseline, pinned via const dashboardSchemaVersionMin), non-empty title/uid/panels. TestDashboardHasRequiredPanels kept hero-only (covers PRD-mandated metric list + 3 quantiles). New TestDashboardMetricsRegisteredInExporter cross-checks every strata_<name> token extracted via regex `strata_[a-z_][a-z0-9_]*` from panel.targets[].expr (incl nested panels via walkPanels recursion) against the set of metric names parsed out of internal/metrics/*.go via go/ast — finds every KeyValueExpr with Name key + string-literal strata_* value across prometheus.{Counter|Histogram|Gauge}{,Vec}Opts struct literals. resolveRegisteredMetric() tries the full name first so real-metric-with-_count suffix (strata_rados_cluster_object_count) is not mis-stripped to strata_rados_cluster_object; only falls back to virtual-series suffix strip (_bucket/_count/_sum via strings.CutSuffix) when full lookup misses. Non-strata metrics (process_*, go_*, prometheus_*, node_*) excluded by regex scope — text-panel markdown references to strata_meta_memory_rows_total in strata-meta-backends.json are not scanned because they live in options.content, not targets[].expr. Worker iteration counter decision: US-006 already folded `worker.<name>.tick_total` OTel span family into Prom counter `strata_worker_iteration_total{worker, status}` registered in internal/metrics/metrics.go — no PRD-allowed exemption path needed. loadRegisteredMetrics swapped from deprecated parser.ParseDir to filepath.Glob + parser.ParseFile loop. Test runs under `go test ./deploy/grafana/...` — no new build tag. All 3 tests green: TestDashboardJSONValid (6 subtests), TestDashboardHasRequiredPanels, TestDashboardMetricsRegisteredInExporter. go vet ./... clean."
     },
     {
       "id": "US-011",
