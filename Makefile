@@ -9,7 +9,7 @@ COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 	smoke smoke-signed smoke-grafana smoke-lab-tikv \
 	smoke-drain-lifecycle smoke-drain-transparency smoke-drain-progress-ui smoke-cluster-weights \
 	smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale \
-	smoke-single-binary smoke-tikv-default-lab smoke-rgw-lab-restart \
+	smoke-single-binary smoke-tikv-default-lab smoke-rgw-lab-restart smoke-observability \
 	race-soak race-soak-tikv lint-nginx-lab helm-lint promtool-check slo-report \
 	bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi bench-rgw-comparison bench-rgw-comparison-with-cassandra \
 	docs-serve docs-build docs-openapi-copy clean
@@ -414,6 +414,19 @@ smoke-single-binary:
 # paths in isolation.
 smoke-harden-gateway:
 	bash scripts/smoke-harden-gateway.sh
+
+# Cycle B prod-observability composite smoke (US-011 of ralph/prod-observability).
+# Validates that every feature in the cycle composes cleanly:
+#   - promtool check rules deploy/prometheus/alerts.yml (US-002/US-003 rules)
+#   - go test ./deploy/grafana/... (US-006..US-010 dashboards + drift-lint)
+#   - boot strata + capture + decode a heap profile (US-004 pprof endpoint)
+#   - bin/strata admin slo-report --window 7d (US-005 subcommand)
+#
+# Memory-backed; Docker not required. STRATA_OBSERVABILITY_PROMETHEUS_URL
+# overrides the slo-report Prometheus endpoint (default http://localhost:9090);
+# missing Prom is downgraded to WARN since the unit tests cover the real signal.
+smoke-observability:
+	bash scripts/smoke-observability.sh
 
 # Race-soak driver (US-006). Brings up the Cassandra-backed stack
 # (`make up-all-ci` when CI=true, else `make up-cassandra`), waits for

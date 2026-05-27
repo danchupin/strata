@@ -6,7 +6,68 @@
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "id": null,
-  "links": [],
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "external link",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Workers",
+      "tooltip": "Per-worker iteration / panic / lease / tick-duration dashboard",
+      "type": "link",
+      "url": "/d/strata-workers"
+    },
+    {
+      "asDropdown": false,
+      "icon": "external link",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Clusters",
+      "tooltip": "Per-cluster chunks / bytes / drain / rebalance dashboard",
+      "type": "link",
+      "url": "/d/strata-clusters"
+    },
+    {
+      "asDropdown": false,
+      "icon": "external link",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Tenants",
+      "tooltip": "Per-tenant (access_key + bucket) request / error / quota dashboard",
+      "type": "link",
+      "url": "/d/strata-tenants"
+    },
+    {
+      "asDropdown": false,
+      "icon": "external link",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Meta backends",
+      "tooltip": "Cassandra / TiKV / memory meta-backend health dashboard",
+      "type": "link",
+      "url": "/d/strata-meta-backends"
+    },
+    {
+      "asDropdown": false,
+      "icon": "external link",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Data backends",
+      "tooltip": "RADOS / S3-upstream / memory data-backend health dashboard",
+      "type": "link",
+      "url": "/d/strata-data-backends"
+    }
+  ],
   "liveNow": false,
   "panels": [
     {

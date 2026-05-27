@@ -62,6 +62,13 @@ backup. Implementation details and tuning rationale live in
   Availability / latency / durability baselines + `strata admin
   slo-report` weekly compliance workflow.
   {{< /card >}}
+
+- {{< card href="/operate/alerts/" >}}
+  **Alerts**  
+  18 SLO-anchored alerts + 12 burn-rate alerts (Google SRE workbook
+  ch.5 MWMBR) — label conventions, Alertmanager routing, per-rule
+  runbook stubs.
+  {{< /card >}}
 {{% /columns %}}
 
 ## See also
