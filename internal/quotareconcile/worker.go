@@ -140,6 +140,7 @@ func (w *Worker) Run(ctx context.Context) error {
 // aggregate stats; per-bucket drift is also published via the
 // strata_quota_reconcile_drift_bytes gauge.
 func (w *Worker) RunOnce(ctx context.Context) (Stats, error) {
+	start := time.Now()
 	iterCtx, span := strataotel.StartIteration(ctx, w.tracerOrNoop(), "quota-reconcile")
 	stats, err := w.runOnce(iterCtx)
 	if err == nil {
@@ -148,6 +149,7 @@ func (w *Worker) RunOnce(ctx context.Context) (Stats, error) {
 		_ = w.takeIterErr()
 	}
 	strataotel.EndIteration(span, err)
+	metrics.ObserveWorkerTick("quota-reconcile", err, time.Since(start))
 	return stats, err
 }
 

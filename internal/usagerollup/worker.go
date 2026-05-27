@@ -25,6 +25,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/danchupin/strata/internal/meta"
+	"github.com/danchupin/strata/internal/metrics"
 	strataotel "github.com/danchupin/strata/internal/otel"
 )
 
@@ -244,6 +245,7 @@ func (w *Worker) SampleOnce(ctx context.Context, _ time.Time) error {
 // RunOnce performs a single rollup pass: every bucket gets one usage_aggregates
 // row for the UTC day strictly before `now`. Returns aggregate stats.
 func (w *Worker) RunOnce(ctx context.Context, now time.Time) (Stats, error) {
+	start := time.Now()
 	iterCtx, span := strataotel.StartIteration(ctx, w.tracerOrNoop(), "usage-rollup")
 	stats, err := w.runOnce(iterCtx, now)
 	if err == nil {
@@ -252,6 +254,7 @@ func (w *Worker) RunOnce(ctx context.Context, now time.Time) (Stats, error) {
 		_ = w.takeIterErr()
 	}
 	strataotel.EndIteration(span, err)
+	metrics.ObserveWorkerTick("usage-rollup", err, time.Since(start))
 	return stats, err
 }
 

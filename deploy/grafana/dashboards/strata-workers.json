@@ -1,0 +1,244 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "title": "Strata Overview",
+      "type": "link",
+      "url": "/d/strata-overview",
+      "icon": "external link",
+      "tags": [],
+      "targetBlank": false
+    }
+  ],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Worker: $worker",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Iteration rate by status (success / error)",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 1},
+      "description": "Per-iteration outcomes from strata_worker_iteration_total{worker=\"$worker\"}. Sustained `error` traffic = the worker is failing every tick — page on the alert StrataWorker* family.",
+      "fieldConfig": {
+        "defaults": {"unit": "ops"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(strata_worker_iteration_total{worker=\"$worker\"}[5m]))",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Error ratio",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 1},
+      "description": "errors / total iterations over a 5m window. 0 = healthy; sustained >0.1 = page.",
+      "fieldConfig": {
+        "defaults": {"unit": "percentunit", "min": 0, "max": 1},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(strata_worker_iteration_total{worker=\"$worker\",status=\"error\"}[5m])) / clamp_min(sum(rate(strata_worker_iteration_total{worker=\"$worker\"}[5m])), 1)",
+          "legendFormat": "error ratio",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Panic rate (per-shard)",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 9},
+      "description": "rate(strata_worker_panic_total{worker=\"$worker\"}[5m]) — supervisor catches the panic and restarts on backoff; any non-zero rate fires StrataWorkerPanic.",
+      "fieldConfig": {
+        "defaults": {"unit": "ops"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (shard) (rate(strata_worker_panic_total{worker=\"$worker\"}[5m]))",
+          "legendFormat": "shard {{shard}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Leader-lease churn",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 9},
+      "description": "rate(strata_worker_leader_events_total{worker=\"$worker\"}[5m]) — `acquired` + `released` per second. Healthy steady-state = 0 (lease held by one replica). Spikes indicate replica thrash / network partition / leader-key contention.",
+      "fieldConfig": {
+        "defaults": {"unit": "ops"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (event) (rate(strata_worker_leader_events_total{worker=\"$worker\"}[5m]))",
+          "legendFormat": "{{event}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "heatmap",
+      "title": "Per-tick duration (heatmap)",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 17},
+      "description": "strata_worker_tick_duration_seconds{worker=\"$worker\"} histogram. Bucket convention: 1ms..32s exponential (16 bins, base 2). Hot upper-bucket band = ticks running away from their interval budget.",
+      "fieldConfig": {
+        "defaults": {"unit": "s"},
+        "overrides": []
+      },
+      "options": {
+        "calculate": false,
+        "yAxis": {"unit": "s"},
+        "color": {"mode": "scheme", "scheme": "Spectral", "fill": "dark-orange", "reverse": false},
+        "tooltip": {"show": true, "yHistogram": true},
+        "legend": {"show": true}
+      },
+      "targets": [
+        {
+          "expr": "sum by (le) (increase(strata_worker_tick_duration_seconds_bucket{worker=\"$worker\"}[$__rate_interval]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Per-tick duration p50 / p95 / p99",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 26},
+      "description": "Quantile view over the same histogram for at-a-glance trend tracking.",
+      "fieldConfig": {
+        "defaults": {"unit": "s"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(strata_worker_tick_duration_seconds_bucket{worker=\"$worker\"}[5m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(strata_worker_tick_duration_seconds_bucket{worker=\"$worker\"}[5m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(strata_worker_tick_duration_seconds_bucket{worker=\"$worker\"}[5m])))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Queue depth (gc + replicator only)",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 26},
+      "description": "Worker-specific queues: strata_gc_queue_depth (only valid when $worker=gc), strata_replication_queue_depth (only valid when $worker=replicator). Empty plot for workers without a queue.",
+      "fieldConfig": {
+        "defaults": {"unit": "short"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "strata_gc_queue_depth",
+          "legendFormat": "gc {{region}}",
+          "refId": "A"
+        },
+        {
+          "expr": "strata_replication_queue_depth",
+          "legendFormat": "replicator {{rule_id}}",
+          "refId": "B"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["strata", "workers"],
+  "templating": {
+    "list": [
+      {
+        "name": "worker",
+        "label": "Worker",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+        "definition": "label_values(strata_worker_iteration_total, worker)",
+        "query": {
+          "query": "label_values(strata_worker_iteration_total, worker)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "multi": false,
+        "includeAll": false,
+        "hide": 0,
+        "current": {"selected": false, "text": "", "value": ""},
+        "options": []
+      }
+    ]
+  },
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "Strata Workers",
+  "uid": "strata-workers",
+  "version": 1,
+  "weekStart": ""
+}

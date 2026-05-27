@@ -431,6 +431,27 @@ var (
 		[]string{"worker", "event"},
 	)
 
+	// US-006 Cycle B prod-observability — per-worker iteration + tick
+	// duration counters backing the per-worker Grafana dashboard. Bumped by
+	// every worker that wraps its tick in workers.StartIteration /
+	// workers.EndIteration via the metrics.ObserveWorkerTick helper.
+	WorkerIterationTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_worker_iteration_total",
+			Help: "Per-worker iteration outcomes (US-006 cycle B prod-observability). worker carries the registered worker name (gc, lifecycle, replicator, …); status ∈ {success, error}.",
+		},
+		[]string{"worker", "status"},
+	)
+
+	WorkerTickDurationSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "strata_worker_tick_duration_seconds",
+			Help:    "Per-worker per-iteration tick duration (US-006 cycle B prod-observability). Per the package histogram-bucket convention: 1ms..32s exponential buckets, base 2, 16 bins.",
+			Buckets: prometheus.ExponentialBuckets(0.001, 2, 16),
+		},
+		[]string{"worker"},
+	)
+
 	// US-001 Cycle B fold-in — referenced by US-007 cluster dashboard drain-
 	// progress panel. Mirrors the rebalance.ProgressTracker per-cluster
 	// merged snapshot fields. Set by the rebalance worker after every
@@ -543,8 +564,44 @@ func register() {
 		RebalanceMigratableChunksTotal,
 		RebalanceStuckSinglePolicyChunksTotal,
 		RebalanceStuckNoPolicyChunksTotal,
+		WorkerIterationTotal,
+		WorkerTickDurationSeconds,
 	)
 	prewarmUS001Series()
+	prewarmUS006Series()
+}
+
+// prewarmUS006Series materialises one zero-valued series per registered
+// worker name so `/metrics` exposes the worker_iteration_total +
+// worker_tick_duration_seconds families from boot. The US-006 per-worker
+// dashboard template variable reads worker names off this metric family so
+// an unpopulated label set leaves the picker empty.
+func prewarmUS006Series() {
+	for _, w := range registeredWorkerNames {
+		WorkerIterationTotal.WithLabelValues(w, "success").Add(0)
+		WorkerIterationTotal.WithLabelValues(w, "error").Add(0)
+		WorkerTickDurationSeconds.WithLabelValues(w).Observe(0)
+	}
+}
+
+// registeredWorkerNames mirrors the workers.Register() set in
+// cmd/strata/workers/*. Kept here as a string slice so internal/metrics
+// stays free of an import on cmd/strata/workers (which would form a cycle).
+// Update both lists together when adding a new worker. Reshard is excluded
+// — it is a one-shot admin-driven helper without a continuous tick loop, so
+// it never calls ObserveWorkerTick and the dashboard picker omits it.
+var registeredWorkerNames = []string{
+	"gc",
+	"lifecycle",
+	"replicator",
+	"notify",
+	"access-log",
+	"inventory",
+	"audit-export",
+	"manifest-rewriter",
+	"quota-reconcile",
+	"usage-rollup",
+	"rebalance",
 }
 
 func Handler() http.Handler { return promhttp.Handler() }
@@ -700,6 +757,24 @@ func (S3APIObserver) IncThrottled(cluster, operation string) {
 		operation = "unknown"
 	}
 	DataS3ThrottledTotal.WithLabelValues(cluster, operation).Inc()
+}
+
+// ObserveWorkerTick bumps strata_worker_iteration_total{worker, status} and
+// observes strata_worker_tick_duration_seconds{worker} in one shot (US-006
+// cycle B prod-observability). status = "error" if err != nil else
+// "success". Workers call this from the same site that wraps the tick in
+// workers.StartIteration / workers.EndIteration so the Prom counter +
+// duration histogram track the OTel iteration span 1:1.
+func ObserveWorkerTick(worker string, err error, d time.Duration) {
+	if worker == "" {
+		worker = "unknown"
+	}
+	status := "success"
+	if err != nil {
+		status = "error"
+	}
+	WorkerIterationTotal.WithLabelValues(worker, status).Inc()
+	WorkerTickDurationSeconds.WithLabelValues(worker).Observe(d.Seconds())
 }
 
 // IncLeaderEvent bumps strata_worker_leader_events_total{worker, event}

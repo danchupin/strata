@@ -189,6 +189,9 @@
       "title": "GC queue depth by region",
       "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
       "gridPos": {"h": 8, "w": 8, "x": 0, "y": 28},
+      "links": [
+        {"title": "Open gc worker dashboard", "url": "/d/strata-workers?var-worker=gc", "targetBlank": false}
+      ],
       "fieldConfig": {
         "defaults": {"unit": "short"},
         "overrides": []
@@ -233,6 +236,9 @@
       "title": "Lifecycle tick rate (action/status)",
       "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
       "gridPos": {"h": 8, "w": 8, "x": 16, "y": 28},
+      "links": [
+        {"title": "Open lifecycle worker dashboard", "url": "/d/strata-workers?var-worker=lifecycle", "targetBlank": false}
+      ],
       "fieldConfig": {
         "defaults": {"unit": "ops"},
         "overrides": []
@@ -315,6 +321,9 @@
       "title": "Replication queue depth + outcomes",
       "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 46},
+      "links": [
+        {"title": "Open replicator worker dashboard", "url": "/d/strata-workers?var-worker=replicator", "targetBlank": false}
+      ],
       "fieldConfig": {
         "defaults": {"unit": "short"},
         "overrides": []
@@ -355,6 +364,9 @@
       "title": "Notify delivery rate by sink+status",
       "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
       "gridPos": {"h": 8, "w": 24, "x": 0, "y": 55},
+      "links": [
+        {"title": "Open notify worker dashboard", "url": "/d/strata-workers?var-worker=notify", "targetBlank": false}
+      ],
       "fieldConfig": {
         "defaults": {"unit": "ops"},
         "overrides": []

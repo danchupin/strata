@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
+	"github.com/danchupin/strata/internal/metrics"
 	strataotel "github.com/danchupin/strata/internal/otel"
 )
 
@@ -92,6 +94,7 @@ func New(cfg Config) (*Worker, error) {
 // Run walks every bucket and converts any JSON manifest to protobuf.
 // Returns aggregated stats. Honours ctx cancellation between rows.
 func (w *Worker) Run(ctx context.Context) (Stats, error) {
+	start := time.Now()
 	iterCtx, span := strataotel.StartIteration(ctx, w.tracerOrNoop(), "manifest-rewriter")
 	stats, err := w.runOnce(iterCtx)
 	if err == nil {
@@ -100,6 +103,7 @@ func (w *Worker) Run(ctx context.Context) (Stats, error) {
 		_ = w.takeIterErr()
 	}
 	strataotel.EndIteration(span, err)
+	metrics.ObserveWorkerTick("manifest-rewriter", err, time.Since(start))
 	return stats, err
 }
 

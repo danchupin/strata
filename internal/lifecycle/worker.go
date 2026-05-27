@@ -166,6 +166,7 @@ func (w *Worker) Run(ctx context.Context) error {
 }
 
 func (w *Worker) RunOnce(ctx context.Context) error {
+	start := time.Now()
 	iterCtx, span := strataotel.StartIteration(ctx, w.tracerOrNoop(), "lifecycle")
 	err := w.runOnce(iterCtx)
 	if err == nil {
@@ -174,6 +175,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		_ = w.takeIterErr()
 	}
 	strataotel.EndIteration(span, err)
+	metrics.ObserveWorkerTick("lifecycle", err, time.Since(start))
 	return err
 }
 

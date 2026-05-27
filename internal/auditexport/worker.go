@@ -26,6 +26,7 @@ import (
 
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
+	"github.com/danchupin/strata/internal/metrics"
 	strataotel "github.com/danchupin/strata/internal/otel"
 )
 
@@ -134,6 +135,7 @@ func (w *Worker) Run(ctx context.Context) error {
 // missing — the worker logs and skips so a misconfigured operator can
 // repair without restart.
 func (w *Worker) RunOnce(ctx context.Context) error {
+	start := time.Now()
 	iterCtx, span := strataotel.StartIteration(ctx, w.tracerOrNoop(), "audit-export")
 	err := w.runOnce(iterCtx)
 	if err == nil {
@@ -142,6 +144,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		_ = w.takeIterErr()
 	}
 	strataotel.EndIteration(span, err)
+	metrics.ObserveWorkerTick("audit-export", err, time.Since(start))
 	return err
 }
 

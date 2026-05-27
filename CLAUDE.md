@@ -411,6 +411,15 @@ goroutine ad-hoc inside `internal/serverapp` — the supervisor owns the lifecyc
 `STRATA_GC_SHARDS` (default 1, range [1, 1024]) from env at Build time (no per-worker flags); other workers
 follow the same env-only convention.
 
+Every tick-loop worker MUST wrap its iteration body in `metrics.ObserveWorkerTick(name, err, time.Since(start))`
+at the same site as `strataotel.StartIteration` / `strataotel.EndIteration` so the per-worker Grafana dashboard
+(`deploy/grafana/dashboards/strata-workers.json`) gets `strata_worker_iteration_total{worker, status}` +
+`strata_worker_tick_duration_seconds{worker}` populated 1:1 with the OTel iteration span. The helper coerces
+empty `name` → `"unknown"` and routes nil err → `status="success"` / non-nil → `"error"`. When adding a new
+worker, also extend `internal/metrics/metrics.go::registeredWorkerNames` so the prewarm seeds zero-valued
+series and the dashboard's `label_values(strata_worker_iteration_total, worker)` picker exposes it on boot.
+Reshard is intentionally absent — it is admin-driven one-shot, not a continuous tick.
+
 ## meta.Store interface — the contract
 
 `internal/meta/store.go` is the abstraction every backend must satisfy. **Both `internal/meta/memory`

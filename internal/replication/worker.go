@@ -15,6 +15,7 @@ import (
 
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
+	"github.com/danchupin/strata/internal/metrics"
 	strataotel "github.com/danchupin/strata/internal/otel"
 )
 
@@ -189,6 +190,7 @@ func (w *Worker) Run(ctx context.Context) error {
 // iteration span still flips to Error when sub-op spans recorded one so the
 // tail-sampler exports the trace.
 func (w *Worker) RunOnce(ctx context.Context) error {
+	start := time.Now()
 	iterCtx, span := strataotel.StartIteration(ctx, w.tracerOrNoop(), "replicator")
 	err := w.runOnce(iterCtx)
 	spanErr := err
@@ -196,6 +198,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		spanErr = sticky
 	}
 	strataotel.EndIteration(span, spanErr)
+	metrics.ObserveWorkerTick("replicator", spanErr, time.Since(start))
 	return err
 }
 

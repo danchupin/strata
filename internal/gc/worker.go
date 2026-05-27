@@ -116,18 +116,22 @@ func (w *Worker) RunOnce(ctx context.Context) int {
 	if w.Logger == nil {
 		w.Logger = slog.Default()
 	}
+	start := time.Now()
 	iterCtx, span := strataotel.StartIteration(ctx, w.tracerOrNoop(), "gc")
 	span.SetAttributes(attribute.Int("strata.gc.shard_id", w.ShardID))
 	n, err := w.drainCount(iterCtx)
 	strataotel.EndIteration(span, err)
+	metrics.ObserveWorkerTick("gc", err, time.Since(start))
 	return n
 }
 
 func (w *Worker) drain(ctx context.Context) {
+	start := time.Now()
 	iterCtx, span := strataotel.StartIteration(ctx, w.tracerOrNoop(), "gc")
 	span.SetAttributes(attribute.Int("strata.gc.shard_id", w.ShardID))
 	_, err := w.drainCount(iterCtx)
 	strataotel.EndIteration(span, err)
+	metrics.ObserveWorkerTick("gc", err, time.Since(start))
 }
 
 // effectiveConcurrency clamps Concurrency to [1, 256]; zero/negative -> 1.

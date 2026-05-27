@@ -24,6 +24,7 @@ import (
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/data/placement"
 	"github.com/danchupin/strata/internal/meta"
+	"github.com/danchupin/strata/internal/metrics"
 	strataotel "github.com/danchupin/strata/internal/otel"
 )
 
@@ -283,6 +284,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	if w.cfg.ShardID < 0 || w.cfg.ShardID >= w.cfg.ShardCount {
 		w.cfg.ShardID = 0
 	}
+	start := time.Now()
 	iterCtx, span := strataotel.StartIteration(ctx, w.tracerOrNoop(), "rebalance")
 	span.SetAttributes(
 		attribute.Int("strata.rebalance.shard", w.cfg.ShardID),
@@ -293,6 +295,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		err = sticky
 	}
 	strataotel.EndIteration(span, err)
+	metrics.ObserveWorkerTick("rebalance", err, time.Since(start))
 	return err
 }
 

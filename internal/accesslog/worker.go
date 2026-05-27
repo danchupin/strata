@@ -21,6 +21,7 @@ import (
 
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
+	"github.com/danchupin/strata/internal/metrics"
 	strataotel "github.com/danchupin/strata/internal/otel"
 )
 
@@ -122,6 +123,7 @@ func (w *Worker) Run(ctx context.Context) error {
 // RunOnce performs a single drain-and-flush pass over every bucket. Exposed
 // for tests + the cmd binary's --once flag.
 func (w *Worker) RunOnce(ctx context.Context) error {
+	start := time.Now()
 	iterCtx, span := strataotel.StartIteration(ctx, w.tracerOrNoop(), "access-log")
 	err := w.runOnce(iterCtx)
 	if err == nil {
@@ -130,6 +132,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		_ = w.takeIterErr()
 	}
 	strataotel.EndIteration(span, err)
+	metrics.ObserveWorkerTick("access-log", err, time.Since(start))
 	return err
 }
 

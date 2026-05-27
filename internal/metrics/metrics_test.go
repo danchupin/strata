@@ -439,6 +439,53 @@ func TestUS001ObserverAdapters(t *testing.T) {
 }
 
 
+// TestUS006WorkerTickMetrics asserts the strata_worker_iteration_total +
+// strata_worker_tick_duration_seconds families ship via Describe() and the
+// ObserveWorkerTick helper bumps the right (worker, status) pair.
+func TestUS006WorkerTickMetrics(t *testing.T) {
+	for _, want := range []string{
+		"strata_worker_iteration_total",
+		"strata_worker_tick_duration_seconds",
+	} {
+		ch := make(chan *prometheus.Desc, 4)
+		go func(name string) {
+			if name == "strata_worker_iteration_total" {
+				WorkerIterationTotal.Describe(ch)
+			} else {
+				WorkerTickDurationSeconds.Describe(ch)
+			}
+			close(ch)
+		}(want)
+		var seen bool
+		for d := range ch {
+			if strings.Contains(d.String(), `"`+want+`"`) {
+				seen = true
+			}
+		}
+		if !seen {
+			t.Errorf("metric %q not exposed by Describe()", want)
+		}
+	}
+
+	WorkerIterationTotal.Reset()
+	WorkerTickDurationSeconds.Reset()
+	ObserveWorkerTick("gc", nil, 25*time.Millisecond)
+	ObserveWorkerTick("gc", errors.New("boom"), 9*time.Millisecond)
+	ObserveWorkerTick("", nil, time.Millisecond)
+	if v := counterValue(t, WorkerIterationTotal.WithLabelValues("gc", "success")); v != 1 {
+		t.Fatalf("gc success: %v", v)
+	}
+	if v := counterValue(t, WorkerIterationTotal.WithLabelValues("gc", "error")); v != 1 {
+		t.Fatalf("gc error: %v", v)
+	}
+	if v := counterValue(t, WorkerIterationTotal.WithLabelValues("unknown", "success")); v != 1 {
+		t.Fatalf("unknown worker fallback: %v", v)
+	}
+	if c := histogramCount(t, WorkerTickDurationSeconds.WithLabelValues("gc")); c != 2 {
+		t.Fatalf("gc tick histogram count: %d", c)
+	}
+}
+
 func TestBucketShardObserverSetsAndResets(t *testing.T) {
 	BucketShardBytes.Reset()
 	BucketShardObjects.Reset()

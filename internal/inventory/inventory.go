@@ -29,6 +29,7 @@ import (
 
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
+	"github.com/danchupin/strata/internal/metrics"
 	strataotel "github.com/danchupin/strata/internal/otel"
 )
 
@@ -196,6 +197,7 @@ func (w *Worker) Run(ctx context.Context) error {
 
 // RunOnce performs a single inventory pass over every bucket.
 func (w *Worker) RunOnce(ctx context.Context) error {
+	start := time.Now()
 	iterCtx, span := strataotel.StartIteration(ctx, w.tracerOrNoop(), "inventory")
 	err := w.runOnce(iterCtx)
 	if err == nil {
@@ -204,6 +206,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		_ = w.takeIterErr()
 	}
 	strataotel.EndIteration(span, err)
+	metrics.ObserveWorkerTick("inventory", err, time.Since(start))
 	return err
 }
 

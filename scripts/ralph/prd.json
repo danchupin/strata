@@ -136,8 +136,8 @@
         "Tests pass"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped per-worker Grafana dashboard deploy/grafana/dashboards/strata-workers.json + worker iteration counter strata_worker_iteration_total{worker, status} + tick duration histogram strata_worker_tick_duration_seconds{worker} (1ms..32s exponential buckets per pkg histogram-bucket convention). metrics.ObserveWorkerTick(name, err, d) helper wired into 11 tick-loop workers (gc, lifecycle, replicator, notify, access-log, inventory, audit-export, manifest-rewriter, quota-reconcile, usage-rollup, rebalance) at the same site as strataotel.StartIteration / EndIteration. Reshard intentionally excluded (admin-driven one-shot, no tick loop). Prewarm seeds 11 zero-valued series per metric on Register() so the dashboard's label_values picker is non-empty from boot. Dashboard: schemaVersion 39 (pinned for US-010 drift-lint), uid strata-workers, tags [strata, workers], default 1h time range, template var worker uses label_values(strata_worker_iteration_total, worker) refresh-on-time-range-change. 8 panels: iteration rate by status, error ratio, panic rate by shard, leader-lease churn, per-tick duration heatmap + p50/p95/p99, queue depths (gc + replicator). All PromQL references real metric names registered in internal/metrics/. Hero dashboard strata-dashboard.json gains 4 panel-level drill-down links (GC queue depth, Lifecycle tick, Replication queue, Notify delivery) targeting /d/strata-workers?var-worker=<name>. CLAUDE.md Background workers section documents the mandatory ObserveWorkerTick wiring. go vet + go test ./... + go test ./deploy/grafana/... all clean. New TestUS006WorkerTickMetrics covers Describe + ObserveWorkerTick contract."
     },
     {
       "id": "US-007",
