@@ -1,20 +1,19 @@
-# Strata alert + recording rules (US-002 cycle B prod-observability).
+# Strata alert + recording rules (cycle B prod-observability).
 #
 # Shipped rules:
-#   * 8 SLO recording rules in `strata.recording` — centralize SLO targets
-#     + 5m SLI ratios. SLO target change = 1-file edit; alert rules below
-#     reference these via `strata:*:target` so they auto-track.
+#   * 17 SLO recording rules in `strata.recording` — centralize SLO targets
+#     + per-window SLI ratios (5m / 1h / 6h / 1d). SLO target change =
+#     1-file edit; alert rules below reference these via `strata:*:target`
+#     so they auto-track.
 #   * 18 alert rules across 7 SLO/SLI-aligned groups (availability, latency,
-#     workers, replication, backends, security, drain).
+#     workers, replication, backends, security, drain) — US-002.
+#   * 12 burn-rate alerts in `strata.burn_rate` (4-window multi-burn-rate,
+#     Google SRE workbook ch.5: 4 windows × 3 SLOs) — US-003.
 #
-# Burn-rate alerts (4-window multi-burn-rate, Google SRE workbook ch.5) +
-# matching per-window SLI ratios are layered on top of this file in US-003
-# (`strata.burn_rate` group, 12 alerts; 9 more recording rules for the
-# longer windows). Until that lands operators get the standard 5m SLI
-# threshold check via Strata5xxRateHigh.
+# Total: 47 rules. See docs/site/content/operate/alerts.md for runbooks +
+# Alertmanager routing recipe + burn-rate philosophy.
 #
-# Label conventions (see docs/site/content/operate/alerts.md for the
-# Alertmanager routing recipe):
+# Label conventions:
 #   * severity ∈ {critical, warning, info}
 #   * team = storage (single team owns Strata today)
 #   * slo ∈ {availability, latency, durability} or omitted for non-SLO rules
@@ -61,6 +60,47 @@ groups:
       # (see /operate/slo.md).
       - record: strata:durability:error_rate5m
         expr: sum(rate(strata_gc_terminal_ack_total{reason!="enoent",reason!="ok"}[5m]))
+
+      # ---- Per-window SLI ratios (US-003 burn-rate) ---------------------
+      # Long-window SLI ratios for 4-window multi-burn-rate alerts. 5m
+      # short window above pairs with these. 30m + 3d windows are inlined
+      # in the burn-rate alert expressions (windows the Google SRE workbook
+      # uses as the "secondary short" / "secondary long" pair members).
+      - record: strata:availability:ratio_rate1h
+        expr: |
+          1 - (
+            sum(rate(strata_http_requests_total{code=~"5..",bucket!="_admin"}[1h]))
+            /
+            clamp_min(sum(rate(strata_http_requests_total{bucket!="_admin"}[1h])), 1)
+          )
+      - record: strata:availability:ratio_rate6h
+        expr: |
+          1 - (
+            sum(rate(strata_http_requests_total{code=~"5..",bucket!="_admin"}[6h]))
+            /
+            clamp_min(sum(rate(strata_http_requests_total{bucket!="_admin"}[6h])), 1)
+          )
+      - record: strata:availability:ratio_rate1d
+        expr: |
+          1 - (
+            sum(rate(strata_http_requests_total{code=~"5..",bucket!="_admin"}[1d]))
+            /
+            clamp_min(sum(rate(strata_http_requests_total{bucket!="_admin"}[1d])), 1)
+          )
+
+      - record: strata:latency_get_put:p99_rate1h
+        expr: histogram_quantile(0.99, sum by (le) (rate(strata_http_request_duration_seconds_bucket{method=~"GET|PUT"}[1h])))
+      - record: strata:latency_get_put:p99_rate6h
+        expr: histogram_quantile(0.99, sum by (le) (rate(strata_http_request_duration_seconds_bucket{method=~"GET|PUT"}[6h])))
+      - record: strata:latency_get_put:p99_rate1d
+        expr: histogram_quantile(0.99, sum by (le) (rate(strata_http_request_duration_seconds_bucket{method=~"GET|PUT"}[1d])))
+
+      - record: strata:durability:error_rate1h
+        expr: sum(rate(strata_gc_terminal_ack_total{reason!="enoent",reason!="ok"}[1h]))
+      - record: strata:durability:error_rate6h
+        expr: sum(rate(strata_gc_terminal_ack_total{reason!="enoent",reason!="ok"}[6h]))
+      - record: strata:durability:error_rate1d
+        expr: sum(rate(strata_gc_terminal_ack_total{reason!="enoent",reason!="ok"}[1d]))
 
   - name: strata.availability
     interval: 30s
@@ -249,7 +289,7 @@ groups:
             RADOS p99 op latency {{ printf "%.3fs" $value }} on
             pool={{ $labels.pool }} op={{ $labels.op }}. Investigate
             cluster OSD health + recovery state.
-          runbook_url: /operate/alerts.md#stratradosopp99spike
+          runbook_url: /operate/alerts.md#strataradosopp99spike
 
       - alert: StrataBucketStatsShardImbalance
         expr: max(strata_bucket_stats_shard_writes_total) / clamp_min(sum(strata_bucket_stats_shard_writes_total), 1) > 0.5
@@ -312,7 +352,7 @@ groups:
             requests over 5m. Either a misbehaving client / DDoS or limits
             tuned too tight. Inspect by (reason) and consider scaling
             STRATA_RATE_LIMIT_PER_*.
-          runbook_url: /operate/alerts.md#stratarratelimitrefusalspike
+          runbook_url: /operate/alerts.md#strataratelimitrefusalspike
 
       - alert: StrataAuditStreamSubscriberLeak
         expr: strata_audit_stream_subscribers > 50
@@ -345,3 +385,329 @@ groups:
             state + per-cluster drain-progress for stuck buckets
             (stuck_single_policy / stuck_no_policy).
           runbook_url: /operate/alerts.md#stratadrainprogressstalled
+
+  # ----------------------------------------------------------------------
+  # Burn-rate alerts (US-003) — 4 windows × 3 SLOs = 12 alerts.
+  #
+  # Google SRE workbook ch.5 multi-window multi-burn-rate (MWMBR):
+  #   * 5m + 1h    @ 14.4× — page critical (2m). 30-day budget burned in ~2d.
+  #   * 30m + 6h   @ 6×    — page critical (15m). Budget burned in ~5d.
+  #   * 6h  + 1d   @ 3×    — ticket warning (1h). Budget burned in ~10d.
+  #   * 24h + 3d   @ 1×    — ticket info (3h). Budget meets SLO floor.
+  #
+  # Both windows must breach the multiplier-scaled threshold simultaneously
+  # → noise suppression without sacrificing latency-to-alert. Recording
+  # rules from strata.recording above carry the 5m / 1h / 6h / 1d windows;
+  # 30m + 3d windows are inlined here (omitted from recording rules to
+  # keep the rule count tight at 17 — matches PRD AC's 8 + 9 budget).
+  # ----------------------------------------------------------------------
+  - name: strata.burn_rate
+    interval: 30s
+    rules:
+      # ---- Availability SLO --------------------------------------------
+      - alert: StrataAvailabilityBurnRateFast
+        expr: |
+          (1 - strata:availability:ratio_rate5m) > (1 - strata:slo_availability:target) * 14.4
+          and
+          (1 - strata:availability:ratio_rate1h) > (1 - strata:slo_availability:target) * 14.4
+        for: 2m
+        labels:
+          severity: critical
+          team: storage
+          slo: availability
+          burn_window: 5m_1h
+          burn_rate: "14.4"
+        annotations:
+          summary: Availability SLO burning at >=14.4× budget (5m+1h windows)
+          description: |
+            5m error fraction {{ printf "%.4f" $value }} and 1h error
+            fraction both exceed 14.4× the SLO error budget. At this rate
+            the 30-day budget burns in ~2 days. Page on-call immediately.
+          error_budget_remaining_pct: |
+            PromQL: 100 * (1 - (
+              sum(increase(strata_http_requests_total{code=~"5..",bucket!="_admin"}[30d]))
+              /
+              clamp_min(sum(increase(strata_http_requests_total{bucket!="_admin"}[30d])), 1)
+            ) / (1 - strata:slo_availability:target))
+          runbook_url: /operate/alerts.md#strataavailabilityburnratefast
+
+      - alert: StrataAvailabilityBurnRateMedium
+        expr: |
+          (
+            sum(rate(strata_http_requests_total{code=~"5..",bucket!="_admin"}[30m]))
+            /
+            clamp_min(sum(rate(strata_http_requests_total{bucket!="_admin"}[30m])), 1)
+          ) > (1 - strata:slo_availability:target) * 6
+          and
+          (1 - strata:availability:ratio_rate6h) > (1 - strata:slo_availability:target) * 6
+        for: 15m
+        labels:
+          severity: critical
+          team: storage
+          slo: availability
+          burn_window: 30m_6h
+          burn_rate: "6"
+        annotations:
+          summary: Availability SLO burning at >=6× budget (30m+6h windows)
+          description: |
+            30m + 6h error fractions both exceed 6× the SLO error budget.
+            Budget burns in ~5 days at this pace. Investigate before it
+            escalates to the 14.4× page.
+          error_budget_remaining_pct: |
+            PromQL: 100 * (1 - (
+              sum(increase(strata_http_requests_total{code=~"5..",bucket!="_admin"}[30d]))
+              /
+              clamp_min(sum(increase(strata_http_requests_total{bucket!="_admin"}[30d])), 1)
+            ) / (1 - strata:slo_availability:target))
+          runbook_url: /operate/alerts.md#strataavailabilityburnratemedium
+
+      - alert: StrataAvailabilityBurnRateSlow
+        expr: |
+          (1 - strata:availability:ratio_rate6h) > (1 - strata:slo_availability:target) * 3
+          and
+          (1 - strata:availability:ratio_rate1d) > (1 - strata:slo_availability:target) * 3
+        for: 1h
+        labels:
+          severity: warning
+          team: storage
+          slo: availability
+          burn_window: 6h_1d
+          burn_rate: "3"
+        annotations:
+          summary: Availability SLO burning at >=3× budget (6h+1d windows)
+          description: |
+            6h + 1d error fractions both exceed 3× the SLO error budget.
+            Budget burns in ~10 days. Ticket-grade — schedule investigation
+            before it accelerates.
+          error_budget_remaining_pct: |
+            PromQL: 100 * (1 - (
+              sum(increase(strata_http_requests_total{code=~"5..",bucket!="_admin"}[30d]))
+              /
+              clamp_min(sum(increase(strata_http_requests_total{bucket!="_admin"}[30d])), 1)
+            ) / (1 - strata:slo_availability:target))
+          runbook_url: /operate/alerts.md#strataavailabilityburnrateslow
+
+      - alert: StrataAvailabilityBurnRateBaseline
+        expr: |
+          (1 - strata:availability:ratio_rate1d) > (1 - strata:slo_availability:target) * 1
+          and
+          (
+            sum(rate(strata_http_requests_total{code=~"5..",bucket!="_admin"}[3d]))
+            /
+            clamp_min(sum(rate(strata_http_requests_total{bucket!="_admin"}[3d])), 1)
+          ) > (1 - strata:slo_availability:target) * 1
+        for: 3h
+        labels:
+          severity: info
+          team: storage
+          slo: availability
+          burn_window: 1d_3d
+          burn_rate: "1"
+        annotations:
+          summary: Availability SLO burning at SLO floor (1d+3d windows)
+          description: |
+            1d + 3d error fractions both hover at the SLO floor — budget
+            consumption tracks SLO target exactly. Worth observing trend;
+            no immediate action.
+          error_budget_remaining_pct: |
+            PromQL: 100 * (1 - (
+              sum(increase(strata_http_requests_total{code=~"5..",bucket!="_admin"}[30d]))
+              /
+              clamp_min(sum(increase(strata_http_requests_total{bucket!="_admin"}[30d])), 1)
+            ) / (1 - strata:slo_availability:target))
+          runbook_url: /operate/alerts.md#strataavailabilityburnratebaseline
+
+      # ---- Latency SLO -------------------------------------------------
+      - alert: StrataLatencyBurnRateFast
+        expr: |
+          strata:latency_get_put:p99_rate5m > strata:slo_latency_get_put_seconds:target * 14.4
+          and
+          strata:latency_get_put:p99_rate1h > strata:slo_latency_get_put_seconds:target * 14.4
+        for: 2m
+        labels:
+          severity: critical
+          team: storage
+          slo: latency
+          burn_window: 5m_1h
+          burn_rate: "14.4"
+        annotations:
+          summary: GET/PUT p99 latency at >=14.4× SLO target (5m+1h windows)
+          description: |
+            5m p99 latency {{ printf "%.3fs" $value }} and 1h p99 both
+            exceed 14.4× the 500ms SLO target. Severe budget burn — page
+            on-call.
+          error_budget_remaining_pct: |
+            PromQL: 100 * (1 - (
+              histogram_quantile(0.99, sum by (le) (rate(strata_http_request_duration_seconds_bucket{method=~"GET|PUT"}[30d])))
+              / strata:slo_latency_get_put_seconds:target
+            ))
+          runbook_url: /operate/alerts.md#stratalatencyburnratefast
+
+      - alert: StrataLatencyBurnRateMedium
+        expr: |
+          histogram_quantile(0.99, sum by (le) (rate(strata_http_request_duration_seconds_bucket{method=~"GET|PUT"}[30m]))) > strata:slo_latency_get_put_seconds:target * 6
+          and
+          strata:latency_get_put:p99_rate6h > strata:slo_latency_get_put_seconds:target * 6
+        for: 15m
+        labels:
+          severity: critical
+          team: storage
+          slo: latency
+          burn_window: 30m_6h
+          burn_rate: "6"
+        annotations:
+          summary: GET/PUT p99 latency at >=6× SLO target (30m+6h windows)
+          description: |
+            30m + 6h p99 latency both exceed 6× the 500ms SLO target.
+            Sustained slowness — page on-call before it escalates.
+          error_budget_remaining_pct: |
+            PromQL: 100 * (1 - (
+              histogram_quantile(0.99, sum by (le) (rate(strata_http_request_duration_seconds_bucket{method=~"GET|PUT"}[30d])))
+              / strata:slo_latency_get_put_seconds:target
+            ))
+          runbook_url: /operate/alerts.md#stratalatencyburnratemedium
+
+      - alert: StrataLatencyBurnRateSlow
+        expr: |
+          strata:latency_get_put:p99_rate6h > strata:slo_latency_get_put_seconds:target * 3
+          and
+          strata:latency_get_put:p99_rate1d > strata:slo_latency_get_put_seconds:target * 3
+        for: 1h
+        labels:
+          severity: warning
+          team: storage
+          slo: latency
+          burn_window: 6h_1d
+          burn_rate: "3"
+        annotations:
+          summary: GET/PUT p99 latency at >=3× SLO target (6h+1d windows)
+          description: |
+            6h + 1d p99 latency both exceed 3× the 500ms SLO target.
+            Ticket-grade — investigate hot buckets / slow backend ops.
+          error_budget_remaining_pct: |
+            PromQL: 100 * (1 - (
+              histogram_quantile(0.99, sum by (le) (rate(strata_http_request_duration_seconds_bucket{method=~"GET|PUT"}[30d])))
+              / strata:slo_latency_get_put_seconds:target
+            ))
+          runbook_url: /operate/alerts.md#stratalatencyburnrateslow
+
+      - alert: StrataLatencyBurnRateBaseline
+        expr: |
+          strata:latency_get_put:p99_rate1d > strata:slo_latency_get_put_seconds:target * 1
+          and
+          histogram_quantile(0.99, sum by (le) (rate(strata_http_request_duration_seconds_bucket{method=~"GET|PUT"}[3d]))) > strata:slo_latency_get_put_seconds:target * 1
+        for: 3h
+        labels:
+          severity: info
+          team: storage
+          slo: latency
+          burn_window: 1d_3d
+          burn_rate: "1"
+        annotations:
+          summary: GET/PUT p99 latency at SLO target (1d+3d windows)
+          description: |
+            1d + 3d p99 latency hover at the 500ms SLO target. Track the
+            trend — no immediate action required.
+          error_budget_remaining_pct: |
+            PromQL: 100 * (1 - (
+              histogram_quantile(0.99, sum by (le) (rate(strata_http_request_duration_seconds_bucket{method=~"GET|PUT"}[30d])))
+              / strata:slo_latency_get_put_seconds:target
+            ))
+          runbook_url: /operate/alerts.md#stratalatencyburnratebaseline
+
+      # ---- Durability SLO ----------------------------------------------
+      # SLO target is 0 errors/s. Multiplier × 0 = 0, so the literal
+      # multi-window check reduces to "error rate is non-zero over both
+      # windows" — multi-window framing still suppresses noise (single
+      # blip on either window cancels) while preserving zero-tolerance
+      # semantics. Severity escalates by window pair (slow-burn ticket vs
+      # fast-burn page) so operators distinguish steady-state errors from
+      # sudden onset.
+      - alert: StrataDurabilityBurnRateFast
+        expr: |
+          strata:durability:error_rate5m > strata:slo_durability_error_rate:target * 14.4
+          and
+          strata:durability:error_rate1h > strata:slo_durability_error_rate:target * 14.4
+        for: 2m
+        labels:
+          severity: critical
+          team: storage
+          slo: durability
+          burn_window: 5m_1h
+          burn_rate: "14.4"
+        annotations:
+          summary: Durability terminal-ack error rate non-zero (5m+1h windows)
+          description: |
+            Non-ENOENT non-OK terminal GC acks fired in both 5m and 1h
+            windows ({{ printf "%.4f" $value }}/s at 5m). Chunk deletion is
+            failing — data could be at risk. Page on-call.
+          error_budget_remaining_pct: |
+            PromQL: 100 (zero-tolerance SLO; any persistent error consumes
+            full budget). Inspect via
+            sum by (reason) (rate(strata_gc_terminal_ack_total{reason!="enoent",reason!="ok"}[1h]))
+          runbook_url: /operate/alerts.md#stratadurabilityburnratefast
+
+      - alert: StrataDurabilityBurnRateMedium
+        expr: |
+          sum(rate(strata_gc_terminal_ack_total{reason!="enoent",reason!="ok"}[30m])) > strata:slo_durability_error_rate:target * 6
+          and
+          strata:durability:error_rate6h > strata:slo_durability_error_rate:target * 6
+        for: 15m
+        labels:
+          severity: critical
+          team: storage
+          slo: durability
+          burn_window: 30m_6h
+          burn_rate: "6"
+        annotations:
+          summary: Durability terminal-ack error rate non-zero (30m+6h windows)
+          description: |
+            Non-ENOENT non-OK terminal GC acks persist across 30m + 6h
+            windows. Sustained chunk-delete failures — escalate before
+            5m+1h breaks.
+          error_budget_remaining_pct: |
+            PromQL: 100 (zero-tolerance SLO; inspect per-reason breakdown).
+          runbook_url: /operate/alerts.md#stratadurabilityburnratemedium
+
+      - alert: StrataDurabilityBurnRateSlow
+        expr: |
+          strata:durability:error_rate6h > strata:slo_durability_error_rate:target * 3
+          and
+          strata:durability:error_rate1d > strata:slo_durability_error_rate:target * 3
+        for: 1h
+        labels:
+          severity: warning
+          team: storage
+          slo: durability
+          burn_window: 6h_1d
+          burn_rate: "3"
+        annotations:
+          summary: Durability terminal-ack error rate non-zero (6h+1d windows)
+          description: |
+            Non-ENOENT non-OK terminal GC acks persist across 6h + 1d
+            windows. Ticket-grade — schedule per-reason root cause.
+          error_budget_remaining_pct: |
+            PromQL: 100 (zero-tolerance SLO; inspect per-reason breakdown).
+          runbook_url: /operate/alerts.md#stratadurabilityburnrateslow
+
+      - alert: StrataDurabilityBurnRateBaseline
+        expr: |
+          strata:durability:error_rate1d > strata:slo_durability_error_rate:target * 1
+          and
+          sum(rate(strata_gc_terminal_ack_total{reason!="enoent",reason!="ok"}[3d])) > strata:slo_durability_error_rate:target * 1
+        for: 3h
+        labels:
+          severity: info
+          team: storage
+          slo: durability
+          burn_window: 1d_3d
+          burn_rate: "1"
+        annotations:
+          summary: Durability terminal-ack error rate non-zero (1d+3d windows)
+          description: |
+            Non-ENOENT non-OK terminal GC acks observed across 1d + 3d
+            windows. Long-tail trend — observe; investigate if pattern
+            persists across cycles.
+          error_budget_remaining_pct: |
+            PromQL: 100 (zero-tolerance SLO; inspect per-reason breakdown).
+          runbook_url: /operate/alerts.md#stratadurabilityburnratebaseline

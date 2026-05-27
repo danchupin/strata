@@ -69,8 +69,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped deploy/prometheus/alerts.yml extension — 9 new per-window SLI recording rules (3 SLOs × {1h, 6h, 1d}) folded into strata.recording group + 12 burn-rate alerts in new strata.burn_rate group (4 windows × 3 SLOs per Google SRE workbook ch.5 MWMBR pattern: 5m+1h@14.4× critical, 30m+6h@6× critical, 6h+1d@3× warning, 1d+3d@1× info). 30m + 3d windows inlined (kept off recording rules per PRD AC's 8+9 budget). Each burn-rate alert carries burn_window + burn_rate labels for routing + error_budget_remaining_pct PromQL recipe annotation. Durability SLO target=0 zero-tolerance semantics preserved (multiplier × 0 = 0 → multi-window framing suppresses single-blip noise, severity escalates by window pair). New doc page docs/site/content/operate/alerts.md ships label conventions + Alertmanager routing recipe + burn-rate philosophy table + per-rule runbook stubs for all 30 alerts. Fixed 2 typo'd runbook_url anchors from US-002 (stratradosopp99spike → strataradosopp99spike, stratarratelimitrefusalspike → strataratelimitrefusalspike). promtool check rules → SUCCESS: 47 rules found (matches PRD AC). hugo --minify clean. make vet clean."
     },
     {
       "id": "US-004",
