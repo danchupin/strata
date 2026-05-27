@@ -56,6 +56,14 @@ backup. Implementation details and tuning rationale live in
   {{< /card >}}
 {{% /columns %}}
 
+{{% columns %}}
+- {{< card href="/operate/slo/" >}}
+  **SLO / SLI**  
+  Availability / latency / durability baselines + `strata admin
+  slo-report` weekly compliance workflow.
+  {{< /card >}}
+{{% /columns %}}
+
 ## See also
 
 - [Get Started]({{< relref "/get-started/" >}}) — first install and

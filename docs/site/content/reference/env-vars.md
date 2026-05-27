@@ -81,6 +81,7 @@ for the dispatch shape.
 | `STRATA_PPROF_BLOCK_RATE` | `0` | int | `runtime.SetBlockProfileRate(N)` argument. `0` keeps block profile data empty. | `pprof.block_rate` |
 | `STRATA_PPROF_MUTEX_RATE` | `0` | int | `runtime.SetMutexProfileFraction(N)` argument. `0` keeps mutex profile data empty. | `pprof.mutex_rate` |
 | `STRATA_PROM_PUSHGATEWAY` | empty | URL | Pushgateway target for `strata admin bench-*` throughput gauges. | — |
+| `STRATA_ALERTMANAGER_URL` | empty | URL | `strata admin slo-report` Alertmanager target (lists active SLO-labelled alerts). CLI default; not server config. | — |
 | `STRATA_AUDIT_RETENTION` | `720h` (30d) | Go duration or `<N>d` | Row TTL on `audit_log`. See [audit log retention]({{< ref "/best-practices/quotas-billing" >}}). | `audit_log.retention` |
 | `STRATA_MANIFEST_FORMAT` | `proto` | `proto \| json` | Write-format for `objects.manifest`. Read path sniffs both. | `manifest.format` |
 | `STRATA_MFA_SECRETS` | empty | `serial:base32,...` | Optional TOTP secrets for MFA Delete; see [auth]({{< ref "/architecture/auth" >}}). | `mfa.secrets` |

@@ -10,7 +10,7 @@ COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 	smoke-drain-lifecycle smoke-drain-transparency smoke-drain-progress-ui smoke-cluster-weights \
 	smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale \
 	smoke-single-binary smoke-tikv-default-lab smoke-rgw-lab-restart \
-	race-soak race-soak-tikv lint-nginx-lab helm-lint promtool-check \
+	race-soak race-soak-tikv lint-nginx-lab helm-lint promtool-check slo-report \
 	bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi bench-rgw-comparison bench-rgw-comparison-with-cassandra \
 	docs-serve docs-build docs-openapi-copy clean
 
@@ -466,6 +466,13 @@ helm-lint:
 promtool-check:
 	@command -v promtool > /dev/null || { echo "promtool not installed — skip promtool-check (install: go install github.com/prometheus/prometheus/cmd/promtool@latest)"; exit 0; }
 	promtool check rules deploy/prometheus/alerts.yml
+
+# Render a weekly SLO compliance report (US-005 cycle B prod-observability).
+# Wraps `strata admin slo-report` with lab defaults — Prometheus on
+# localhost:9090, 7-day window, markdown to stdout. Operators override via
+# `make slo-report SLO_REPORT_FLAGS="--window 30d --out /tmp/slo.md"`.
+slo-report: build
+	bin/strata admin slo-report $(SLO_REPORT_FLAGS)
 
 # Validate the nginx LB config used by the TiKV-default 2-replica lab.
 # nginx -t resolves upstream hostnames at parse time, so the test container

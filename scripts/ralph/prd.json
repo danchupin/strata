@@ -115,8 +115,8 @@
         "Tests pass"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped docs/site/content/operate/slo.md — availability/latency/durability baselines with SLI formulas + recording rule references + Prom 90d retention guidance + cross-links to /operate/alerts (burn-rate philosophy + recording rules) + /operate/monitoring + /operate/profiling. strata admin slo-report subcommand (cmd/strata/admin/slo_report.go) preserves single-binary invariant; flags --prometheus-url --window 7d|30d|90d --out --format markdown|json --alertmanager-url; uses internal/promclient (existing net/http wrapper — no new direct require on client_golang/api). Alertmanager v2 GET /api/v2/alerts filtered by slo label; documents currently-firing semantic since AM lacks historical counts. statusForRatioSLO/LatencySLO/DurabilitySLO classify ok/warning/breached with within-10% warning band. slo_report_test.go covers healthy/breached/empty-vector/AM-integration/CLI-markdown/CLI-json/invalid-window paths via httptest Prom + AM mocks. make slo-report Makefile target wraps subcommand with override-friendly SLO_REPORT_FLAGS knob. _index.md card grid extended. env-vars.md adds STRATA_ALERTMANAGER_URL row (CLI-only, em-dash TOML key); STRATA_PROMETHEUS_URL already wired via PrometheusConfig. STRATA_ALERTMANAGER_URL exempted in internal/config/exempt_env_vars.go::ExemptEnvVars.Exact. hugo --minify clean. go vet + go test ./cmd/strata/admin/... + ./internal/config/... clean."
     },
     {
       "id": "US-006",

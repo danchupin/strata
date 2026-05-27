@@ -45,6 +45,11 @@ var ExemptEnvVars = struct {
 		"STRATA_ADMIN_ENDPOINT",
 		"STRATA_ADMIN_PRINCIPAL",
 		"STRATA_PROM_PUSHGATEWAY",
+		// STRATA_ALERTMANAGER_URL defaults the --alertmanager-url flag on
+		// the `strata admin slo-report` subcommand (US-005). CLI client
+		// convenience — not server config. STRATA_PROMETHEUS_URL is NOT
+		// exempt; it backs `prometheus.url` via PrometheusConfig.
+		"STRATA_ALERTMANAGER_URL",
 		// STRATA_PPROF_SMOKE_PROFILE points the TestPprofDecode entrypoint at
 		// a captured pprof file for scripts/smoke-pprof.sh — test-only hook,
 		// no runtime config knob.
