@@ -45,6 +45,7 @@ type Config struct {
 	Manifest    ManifestConfig    `koanf:"manifest"`
 	MFA         MFAConfig         `koanf:"mfa"`
 	Node        NodeConfig        `koanf:"node"`
+	Pprof       PprofConfig       `koanf:"pprof"`
 	Prometheus  PrometheusConfig  `koanf:"prometheus"`
 	SSE         SSEConfig         `koanf:"sse"`
 	VHost       VHostConfig       `koanf:"vhost"`
@@ -480,6 +481,21 @@ type NodeConfig struct {
 	ID string `koanf:"id"`
 }
 
+// PprofConfig wires the opt-in pprof endpoint (US-004 prod-observability).
+// Enabled=false (default) → /debug/pprof/* never registered on any mux.
+// Enabled=true + Listen empty → handlers attach to the admin listener
+// (cfg.AdminListen.Listen must be set; boot fails otherwise — pprof MUST
+// NOT share the S3 hot path). Listen non-empty → dedicated pprof listener
+// (e.g. "127.0.0.1:9002"). BlockRate / MutexRate drive
+// runtime.SetBlockProfileRate / SetMutexProfileFraction; 0 leaves them
+// disabled (block + mutex profiles return empty without the rates).
+type PprofConfig struct {
+	Enabled   bool   `koanf:"enabled"`
+	Listen    string `koanf:"listen"`
+	BlockRate int    `koanf:"block_rate"`
+	MutexRate int    `koanf:"mutex_rate"`
+}
+
 // PrometheusConfig points the admin API at an upstream PromQL endpoint
 // for the metrics-aware admin handlers. Empty disables (admin handlers
 // degrade with metrics_available=false).
@@ -786,6 +802,10 @@ var envMap = map[string]string{
 	"STRATA_MANIFEST_FORMAT":                 "manifest.format",
 	"STRATA_MFA_SECRETS":                     "mfa.secrets",
 	"STRATA_NODE_ID":                         "node.id",
+	"STRATA_PPROF_ENABLED":                   "pprof.enabled",
+	"STRATA_PPROF_LISTEN":                    "pprof.listen",
+	"STRATA_PPROF_BLOCK_RATE":                "pprof.block_rate",
+	"STRATA_PPROF_MUTEX_RATE":                "pprof.mutex_rate",
 	"STRATA_PROMETHEUS_URL":                  "prometheus.url",
 	"STRATA_RADOS_HEALTH_OID":                "rados.health_oid",
 	"STRATA_RADOS_POOL_SIZE":                 "rados.pool_size",
@@ -906,8 +926,44 @@ func (c *Config) validate() error {
 		return err
 	}
 	c.clampMisc()
+	if err := c.validatePprof(); err != nil {
+		return err
+	}
+	c.clampPprof()
 	warnLegacyDrainStrict()
 	return nil
+}
+
+// validatePprof enforces non-negative profiling rates + fails fast when
+// pprof is enabled without any listener (admin or dedicated). Half-paired
+// listener config catches operator typos at boot rather than silently
+// running without admin auth.
+func (c *Config) validatePprof() error {
+	if c.Pprof.BlockRate < 0 {
+		return fmt.Errorf("pprof.block_rate %d: must be >= 0", c.Pprof.BlockRate)
+	}
+	if c.Pprof.MutexRate < 0 {
+		return fmt.Errorf("pprof.mutex_rate %d: must be >= 0", c.Pprof.MutexRate)
+	}
+	if c.Pprof.Enabled && c.Pprof.Listen == "" && c.AdminListen.Listen == "" {
+		return fmt.Errorf("pprof.enabled=true requires pprof.listen or admin_listen.listen to be set " +
+			"(pprof MUST NOT share the S3 hot path)")
+	}
+	return nil
+}
+
+// clampPprof clamps BlockRate + MutexRate to operator-sane ranges.
+// BlockRate is a nanosecond threshold; values in [1, 1e9] cover the
+// "sample every Nns" idiom. MutexRate is "sample 1/N mutex events";
+// values in [1, 1e6] cover the spectrum from "sample every event" to
+// "rare sample".
+func (c *Config) clampPprof() {
+	if c.Pprof.BlockRate > 0 {
+		c.Pprof.BlockRate = clampInt("pprof.block_rate", c.Pprof.BlockRate, 1, 1_000_000_000)
+	}
+	if c.Pprof.MutexRate > 0 {
+		c.Pprof.MutexRate = clampInt("pprof.mutex_rate", c.Pprof.MutexRate, 1, 1_000_000)
+	}
 }
 
 // validateHTTP rejects negative timeouts / max-header-bytes. Zero is a

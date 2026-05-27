@@ -76,6 +76,10 @@ for the dispatch shape.
 | `STRATA_VERSION` | empty | string | Version label overridden at build time; surfaced via `/version` + admin metadata. | — |
 | `STRATA_CLUSTER_NAME` | empty | string | Logical cluster name surfaced to the admin console. | `cluster.name` |
 | `STRATA_PROMETHEUS_URL` | empty | URL | PromQL endpoint for hot-bucket / lag / metrics dashboards. Unset → admin reports `metrics_available=false`. | `prometheus.url` |
+| `STRATA_PPROF_ENABLED` | `false` | bool | Master switch for `/debug/pprof/*` (US-004 prod-observability). Opt-in even when admin listener set — heap profiles may leak in-flight buffer contents. | `pprof.enabled` |
+| `STRATA_PPROF_LISTEN` | empty | `host:port` | Optional dedicated pprof listener (e.g. `127.0.0.1:9002`). Empty + `STRATA_PPROF_ENABLED=true` → handlers attach to `STRATA_ADMIN_LISTEN`. Boot fails when both empty. | `pprof.listen` |
+| `STRATA_PPROF_BLOCK_RATE` | `0` | int | `runtime.SetBlockProfileRate(N)` argument. `0` keeps block profile data empty. | `pprof.block_rate` |
+| `STRATA_PPROF_MUTEX_RATE` | `0` | int | `runtime.SetMutexProfileFraction(N)` argument. `0` keeps mutex profile data empty. | `pprof.mutex_rate` |
 | `STRATA_PROM_PUSHGATEWAY` | empty | URL | Pushgateway target for `strata admin bench-*` throughput gauges. | — |
 | `STRATA_AUDIT_RETENTION` | `720h` (30d) | Go duration or `<N>d` | Row TTL on `audit_log`. See [audit log retention]({{< ref "/best-practices/quotas-billing" >}}). | `audit_log.retention` |
 | `STRATA_MANIFEST_FORMAT` | `proto` | `proto \| json` | Write-format for `objects.manifest`. Read path sniffs both. | `manifest.format` |

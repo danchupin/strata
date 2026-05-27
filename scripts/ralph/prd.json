@@ -92,8 +92,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped opt-in /debug/pprof/* endpoint behind admin auth chain. 4 envs (STRATA_PPROF_ENABLED/_LISTEN/_BLOCK_RATE/_MUTEX_RATE) + [pprof] TOML section wired through Config + envMap + env-vars.md + strata.toml.example (drift-lint green). Routes wired explicitly via pprof.Index/Cmdline/Profile/Symbol/Trace + pprof.Handler('heap'|'allocs'|'goroutine'|'block'|'mutex'|'threadcreate') — no side-effect import of net/http/pprof (Strata never uses DefaultServeMux). Three attach modes: dedicated listener (STRATA_PPROF_LISTEN), admin listener fallback, or fail-fast at boot when both empty. adminapi.Server exposes WrapWithAdminAuth(http.Handler) so pprof reuses the same session-cookie/SigV4 chain that protects /admin/v1/*. github.com/google/pprof promoted to direct require via new internal/pprofutil/decode.go wrapping profile.Parse. Tests: internal/serverapp/pprof_test.go covers disabled-404, admin-listener-serves, dedicated-listener-routing, anon-401, config-validation; pprof_decode_test.go ships TestPprofDecode (smoke entry; reads STRATA_PPROF_SMOKE_PROFILE) + TestPprofDecodeRoundTrip (in-process heap dump round-trip). scripts/smoke-pprof.sh boots strata, captures heap + cpu profiles via scripts/pprof-fetch (SigV4-signed Go one-shot mirroring the test helper), decodes via TestPprofDecode — no go tool pprof needed. docs/site/content/operate/profiling.md ships profile-type matrix + go tool pprof recipes + flamegraph workflow + security caveats + STRATA_PPROF_SKIP_TOOL_CHECK reservation. operate/_index.md card grid extended. Smoke + go vet + go test ./... clean."
     },
     {
       "id": "US-005",

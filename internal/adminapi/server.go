@@ -422,6 +422,14 @@ func (s *Server) Handler() http.Handler {
 	return s.authMiddleware(s.routes())
 }
 
+// WrapWithAdminAuth wraps next with the same session-cookie / SigV4 chain
+// the /admin/v1/* mux uses. Exposed for non-admin endpoints that still need
+// admin-only access (e.g. /debug/pprof/* per US-004 prod-observability).
+// The login + logout bypass paths do NOT apply outside /admin/v1/auth/.
+func (s *Server) WrapWithAdminAuth(next http.Handler) http.Handler {
+	return s.authMiddleware(next)
+}
+
 // routes builds the inner mux without authentication — exposed to tests in
 // this package so handler shape can be asserted independently of SigV4.
 func (s *Server) routes() http.Handler {

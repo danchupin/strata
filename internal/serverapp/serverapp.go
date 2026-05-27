@@ -305,6 +305,16 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 
 	adminSplit := cfg.AdminListen.Listen != ""
 
+	applyPprofProfilingRates(cfg)
+	pprofWire := resolvePprofWiring(cfg, adminServer)
+	if cfg.Pprof.Enabled {
+		logger.Info("pprof endpoint enabled",
+			"listen", cfg.Pprof.Listen,
+			"admin_attach", pprofWire.AdminAttach != nil,
+			"block_rate", cfg.Pprof.BlockRate,
+			"mutex_rate", cfg.Pprof.MutexRate)
+	}
+
 	mux := http.NewServeMux()
 	if !adminSplit {
 		// Single-port shape: all admin/console/metrics/health routes
@@ -314,6 +324,9 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		mux.HandleFunc("/readyz", healthHandler.Readyz)
 		mux.Handle("/console/", strataconsole.ConsoleHandler())
 		mux.Handle("/admin/v1/", adminAudit)
+		if pprofWire.AdminAttach != nil {
+			mux.Handle("/debug/pprof/", pprofWire.AdminAttach)
+		}
 	}
 	mux.Handle("/", s3Chain)
 
@@ -347,6 +360,9 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		adminMux.HandleFunc("/readyz", healthHandler.Readyz)
 		adminMux.Handle("/console/", strataconsole.ConsoleHandler())
 		adminMux.Handle("/admin/v1/", adminAudit)
+		if pprofWire.AdminAttach != nil {
+			adminMux.Handle("/debug/pprof/", pprofWire.AdminAttach)
+		}
 		adminSrv = newAdminHTTPServer(cfg.AdminListen.Listen, adminMux, cfg)
 		adminTLSCfg, err = buildAdminTLSConfig(cfg)
 		if err != nil {
@@ -398,6 +414,23 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 				return
 			}
 			adminErr <- nil
+		}()
+	}
+
+	var pprofSrv *http.Server
+	pprofErr := make(chan error, 1)
+	if pprofWire.Dedicated != nil {
+		pprofMux := http.NewServeMux()
+		pprofMux.Handle("/debug/pprof/", pprofWire.Dedicated)
+		pprofSrv = newAdminHTTPServer(cfg.Pprof.Listen, pprofMux, cfg)
+		go func() {
+			logger.Info("strata pprof listener", "listen", cfg.Pprof.Listen)
+			listenErr := pprofSrv.ListenAndServe()
+			if listenErr != nil && !errors.Is(listenErr, http.ErrServerClosed) {
+				pprofErr <- listenErr
+				return
+			}
+			pprofErr <- nil
 		}()
 	}
 
@@ -484,10 +517,16 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 		if adminSrv != nil {
 			wg.Go(func() { _ = adminSrv.Shutdown(shutdownCtx) })
 		}
+		if pprofSrv != nil {
+			wg.Go(func() { _ = pprofSrv.Shutdown(shutdownCtx) })
+		}
 		wg.Wait()
 		<-serverErr
 		if adminSrv != nil {
 			<-adminErr
+		}
+		if pprofSrv != nil {
+			<-pprofErr
 		}
 		if supervisor != nil {
 			<-workerErr
@@ -496,6 +535,8 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	case err := <-serverErr:
 		return err
 	case err := <-adminErr:
+		return err
+	case err := <-pprofErr:
 		return err
 	case err := <-workerErr:
 		return err

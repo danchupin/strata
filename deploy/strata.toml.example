@@ -315,6 +315,20 @@ secrets = ""
 # Heartbeat node identifier. Empty falls back to OS hostname.
 id = ""
 
+[pprof]
+# Opt-in pprof endpoint (US-004 prod-observability). enabled=false (default)
+# never registers /debug/pprof/* anywhere. enabled=true + listen empty →
+# pprof attaches to [admin_listen].listen (must be set). enabled=true +
+# listen non-empty → dedicated third listener. Boot fails fast when
+# enabled=true and neither listener is configured — pprof MUST NOT share
+# the S3 hot path. block_rate / mutex_rate flip on
+# runtime.SetBlockProfileRate / SetMutexProfileFraction; 0 leaves them
+# disabled (profiles still register but return empty data).
+enabled    = false
+listen     = ""
+block_rate = 0
+mutex_rate = 0
+
 [prometheus]
 # Upstream PromQL endpoint for the metrics-aware admin handlers. Empty
 # disables (admin handlers report metrics_available=false).

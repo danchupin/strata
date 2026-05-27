@@ -45,6 +45,11 @@ var ExemptEnvVars = struct {
 		"STRATA_ADMIN_ENDPOINT",
 		"STRATA_ADMIN_PRINCIPAL",
 		"STRATA_PROM_PUSHGATEWAY",
+		// STRATA_PPROF_SMOKE_PROFILE points the TestPprofDecode entrypoint at
+		// a captured pprof file for scripts/smoke-pprof.sh — test-only hook,
+		// no runtime config knob.
+		"STRATA_PPROF_SMOKE_PROFILE",
+		"STRATA_PPROF_SKIP_TOOL_CHECK",
 		"STRATA_TIKV_TEST_PD_ENDPOINTS",
 		// STRATA_COLD is a storage-class identifier used in S3 lifecycle
 		// rules, not an environment variable. The audit's broad

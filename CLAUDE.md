@@ -440,6 +440,43 @@ try the new shape first, fall back to the legacy shape. The proto side stays wir
 field number and only rename the label. To convert pre-existing JSON rows to proto, run
 `strata server --workers=manifest-rewriter` (leader-elected, idempotent — re-runs skip already-proto rows).
 
+## pprof endpoint (US-004 prod-observability)
+
+`/debug/pprof/*` is opt-in via `STRATA_PPROF_ENABLED=true` (default false — heap profiles may
+leak in-flight buffer contents in error paths). Routes wired explicitly in
+`internal/serverapp/pprof.go::pprofHandler` via `pprof.Index/Cmdline/Profile/Symbol/Trace` +
+`pprof.Handler("heap"|"allocs"|"goroutine"|"block"|"mutex"|"threadcreate")` — NEVER use the
+side-effect import `_ "net/http/pprof"` because Strata does not serve `http.DefaultServeMux`.
+
+Attach modes (mutually exclusive, ordered by precedence):
+- `STRATA_PPROF_LISTEN` set → dedicated third listener (e.g. `127.0.0.1:9002`).
+- `STRATA_PPROF_LISTEN` empty + `STRATA_ADMIN_LISTEN` set → handlers attach to admin mux at
+  `/debug/pprof/`.
+- Both empty + `STRATA_PPROF_ENABLED=true` → `config.Load` returns an error at boot. pprof
+  MUST NOT share the S3 hot path.
+
+Auth: `adminapi.Server.WrapWithAdminAuth(http.Handler)` exposes the same session-cookie /
+SigV4 chain that protects `/admin/v1/*`. The pprof wiring (`resolvePprofWiring`) calls it so
+both the admin-mux and dedicated-listener branches share the auth surface.
+
+Block + mutex profiles need explicit rate flips: `runtime.SetBlockProfileRate(N)` /
+`SetMutexProfileFraction(N)`. Gated by `STRATA_PPROF_BLOCK_RATE` (default 0 = disabled) +
+`STRATA_PPROF_MUTEX_RATE` (default 0 = disabled). With rates at 0 the profiles still register
+but return empty data.
+
+Decode helper: `internal/pprofutil.Parse` wraps `github.com/google/pprof/profile.Parse`. The
+test suite (`internal/serverapp/pprof_decode_test.go`) ships `TestPprofDecode` which reads
+`STRATA_PPROF_SMOKE_PROFILE` and validates the captured bytes. Reused by
+`scripts/smoke-pprof.sh` so operators on hosts without `go tool pprof` can still validate a
+captured profile. **`google/pprof` must stay a direct require**: `go mod tidy` re-adds the
+`// indirect` marker for deps only consumed by test files even when the importing package
+belongs to the main module. The dep is referenced from non-test code (`internal/pprofutil/decode.go`)
+to keep the require direct after tidy.
+
+`scripts/pprof-fetch` is the SigV4-signed Go one-shot used by the smoke; mirrors
+`internal/serverapp/pprof_test.go::signSigV4`. Keep the two in lockstep when bumping the
+SigV4 wire shape.
+
 ## Logging (slog)
 
 `internal/logging` is the canonical setup. The `cmd/strata` binary (both `strata server` and `strata admin`) calls

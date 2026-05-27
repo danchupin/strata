@@ -48,6 +48,12 @@ backup. Implementation details and tuning rationale live in
   Chunk fan-out math, lifecycle drain rate vs PUT rate, when to scale
   bucket shards, dedup roadmap math.
   {{< /card >}}
+
+- {{< card href="/operate/profiling/" >}}
+  **Profiling**  
+  Opt-in `/debug/pprof/*` behind admin auth — heap, CPU, goroutine,
+  block, mutex, trace recipes for perf incident response.
+  {{< /card >}}
 {{% /columns %}}
 
 ## See also
