@@ -1,0 +1,219 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "title": "Strata Overview",
+      "type": "link",
+      "url": "/d/strata-overview",
+      "icon": "external link",
+      "tags": [],
+      "targetBlank": false
+    }
+  ],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "RADOS",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "RADOS op latency p50 by pool",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 1},
+      "description": "Median per-pool RADOS op latency (put/get/del) observed via internal/data/rados/observer.go::LogOp. Baseline: p50 < 5 ms on healthy librados. Sustained > 25 ms → check Ceph cluster health (`ceph -s` HEALTH_OK + `ceph osd df` balance).",
+      "fieldConfig": {
+        "defaults": {"unit": "s"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le, pool, op) (rate(strata_rados_op_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50 {{pool}} {{op}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "RADOS op latency p99 by pool",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 1},
+      "description": "Per-pool p99 RADOS op latency. Powered by US-002 alert StrataRADOSOpP99Spike when global p99 > 500 ms.",
+      "fieldConfig": {
+        "defaults": {"unit": "s"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, pool, op) (rate(strata_rados_op_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99 {{pool}} {{op}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "RADOS put / get / del throughput by pool",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 9},
+      "description": "Per-pool op rate split by put/get/del. Operator read: a healthy cluster shows get >> put under read-heavy workloads; del lags both. Sudden put-rate drop with steady get may indicate hot-path PutChunks refusal (cross-check Per-cluster dashboard → Refusals panel).",
+      "fieldConfig": {
+        "defaults": {"unit": "ops"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (pool, op) (rate(strata_rados_op_duration_seconds_count[5m]))",
+          "legendFormat": "{{pool}} {{op}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "S3-upstream",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 17},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "S3 API call rate (success) by cluster + operation",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 18},
+      "description": "strata_data_s3_api_calls_total{cluster, operation, outcome=\"success\"} (US-001). Per-(cluster, operation) AWS SDK call rate as observed by internal/data/s3/observer.go middleware. Pair with the error / throttled panels below to derive the success ratio.",
+      "fieldConfig": {
+        "defaults": {"unit": "ops"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (cluster, operation) (rate(strata_data_s3_api_calls_total{outcome=\"success\"}[5m]))",
+          "legendFormat": "{{cluster}} {{operation}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "S3 API error rate by cluster + operation",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 18},
+      "description": "Non-success outcomes from the s3-over-s3 data backend. Excludes throttled (which has its own panel) — `outcome=\"error\"` is post-retry-chain failure. Persistent errors require a peek at the OTel S3.<Operation> spans for the upstream HTTP status + AWS error code.",
+      "fieldConfig": {
+        "defaults": {"unit": "ops"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (cluster, operation) (rate(strata_data_s3_api_calls_total{outcome=\"error\"}[5m]))",
+          "legendFormat": "{{cluster}} {{operation}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "S3 throttling rate by cluster + operation",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 26},
+      "description": "strata_data_s3_throttled_total{cluster, operation} (US-001). Bumped on ThrottlingException / SlowDown / RequestLimitExceeded / RequestThrottled / TooManyRequestsException / ProvisionedThroughputExceededException / BandwidthLimitExceeded. retry.GetAttemptResults walks attempt errors so intermediate throttles that ultimately succeed still bump. Sustained throttle rate → request a TPS quota bump from the upstream provider OR back off concurrent writers via STRATA_DATA_S3_CONCURRENCY.",
+      "fieldConfig": {
+        "defaults": {"unit": "ops"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (cluster, operation) (rate(strata_data_s3_throttled_total[5m]))",
+          "legendFormat": "{{cluster}} {{operation}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Memory (lab only)",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 34},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Gateway process RSS",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 35},
+      "description": "process_resident_memory_bytes — Prometheus client_golang built-in. Proxy for in-memory data backend usage (lab smoke / unit tests). On a memory-backed lab a sustained growth curve indicates leaked buffers or test fixtures that never released; on RADOS/S3-upstream production deployments this reflects gateway working-set + in-flight Put/Get buffer pool sizing (STRATA_*_PREFETCH / STRATA_*_BATCH_OPS).",
+      "fieldConfig": {
+        "defaults": {"unit": "bytes"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "process_resident_memory_bytes{job=\"strata\"}",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["strata", "data-backends"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "Strata Data Backends",
+  "uid": "strata-data-backends",
+  "version": 1,
+  "weekStart": ""
+}

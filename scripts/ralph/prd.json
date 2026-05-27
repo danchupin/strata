@@ -189,8 +189,8 @@
         "Tests pass"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Shipped deploy/grafana/dashboards/strata-meta-backends.json (uid strata-meta-backends, tags [strata, meta-backends], schemaVersion 39, default 1h, refresh 30s) — Cassandra row: LWT-conflicts heatmap by (bucket, shard) on strata_cassandra_lwt_conflicts_total + p50/p99 query duration per table on strata_cassandra_query_duration_seconds_bucket; TiKV row: pessimistic-txn rate by (op, outcome) on strata_tikv_pessimistic_txn_total + audit-sweep delete rate on strata_meta_tikv_audit_sweep_deleted_total; Memory row: markdown text panel (no strata_meta_memory_rows_total instrumented per PRD AC fallback). Shipped deploy/grafana/dashboards/strata-data-backends.json (uid strata-data-backends, tags [strata, data-backends], schemaVersion 39) — RADOS row: p50/p99 op latency per pool + put/get/del throughput on strata_rados_op_duration_seconds_*; S3-upstream row: API call rate (success) + error rate + throttling rate per (cluster, operation) on strata_data_s3_api_calls_total + strata_data_s3_throttled_total (US-001); Memory row: gateway process RSS proxy on process_resident_memory_bytes{job=\"strata\"} (Prom built-in). Hero dashboard strata-dashboard.json gains 2 panel-level drill-down links on Cassandra p99 + Cassandra rate panels → /d/strata-meta-backends + 2 links appended to RADOS p99 + RADOS rate panels (alongside existing clusters link) → /d/strata-data-backends. All 8 metric refs verified against internal/metrics/metrics.go (label sets match: cassandra_lwt_conflicts_total{table,bucket,shard}, cassandra_query_duration_seconds{table,op}, tikv_pessimistic_txn_total{op,outcome}, meta_tikv_audit_sweep_deleted_total (no labels), rados_op_duration_seconds{pool,op}, data_s3_api_calls_total{cluster,operation,outcome}, data_s3_throttled_total{cluster,operation}, process_resident_memory_bytes built-in). go vet + go test ./deploy/grafana/... clean."
     },
     {
       "id": "US-010",

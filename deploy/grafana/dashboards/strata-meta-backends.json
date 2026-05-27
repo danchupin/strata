@@ -1,0 +1,188 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "title": "Strata Overview",
+      "type": "link",
+      "url": "/d/strata-overview",
+      "icon": "external link",
+      "tags": [],
+      "targetBlank": false
+    }
+  ],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Cassandra",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "heatmap",
+      "title": "Cassandra LWT conflicts by (bucket, shard)",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 1},
+      "description": "Hot-shards heatmap. strata_cassandra_lwt_conflicts_total{table, bucket, shard} bumps on every applied=false LWT CAS. Concentrated hotspots indicate a bucket's shard is contended — operator action: bump STRATA_BUCKET_SHARDS at next bucket creation OR rebalance writes via the sharded objects table. Cardinality bound: ~1000 buckets × 64 shards. Powered by US-002 alert StrataCassandraLwtConflictSpike when per-(bucket, shard) rate > 10/s.",
+      "fieldConfig": {
+        "defaults": {"unit": "ops"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"show": true},
+        "tooltip": {"show": true, "yHistogram": false},
+        "yAxis": {"axisPlacement": "left"},
+        "calculate": false,
+        "color": {"mode": "scheme", "scheme": "Spectral", "exponent": 0.5, "steps": 64},
+        "cellGap": 1
+      },
+      "targets": [
+        {
+          "expr": "sum by (bucket, shard) (rate(strata_cassandra_lwt_conflicts_total[5m]))",
+          "legendFormat": "{{bucket}}/{{shard}}",
+          "refId": "A",
+          "format": "heatmap"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Cassandra query duration p50 by table",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 9},
+      "description": "Median per-table query latency observed via the gocql QueryObserver hook (internal/meta/cassandra/observer.go::SlowQueryObserver). Baseline: p50 < 5 ms on healthy LOCAL_QUORUM. Sustained > 25 ms → check `STRATA_CASSANDRA_SLOW_MS` slow-query logs.",
+      "fieldConfig": {
+        "defaults": {"unit": "s"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le, table) (rate(strata_cassandra_query_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50 {{table}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Cassandra query duration p99 by table",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 9},
+      "description": "Per-table p99 query latency. Powered by US-002 alert StrataCassandraQueryP99Spike when global p99 > 100 ms.",
+      "fieldConfig": {
+        "defaults": {"unit": "s"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, table) (rate(strata_cassandra_query_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99 {{table}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "TiKV",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 17},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "TiKV pessimistic-txn rate by op + outcome",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 16, "x": 0, "y": 18},
+      "description": "strata_tikv_pessimistic_txn_total{op, outcome} (US-001). outcome ∈ {commit, rollback, conflict}. Sustained rollback / conflict spikes signal contention on a hot key — typical hot keys: bucket_stats shards (US-001 picker uses fnv32a(uuid) so this should be uniform), bucket-policy CAS on a single bucket. Cross-check against meta.tikv span errors in OTel.",
+      "fieldConfig": {
+        "defaults": {"unit": "ops"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (op, outcome) (rate(strata_tikv_pessimistic_txn_total[5m]))",
+          "legendFormat": "{{op}} / {{outcome}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "TiKV audit sweep deletes",
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 18},
+      "description": "strata_meta_tikv_audit_sweep_deleted_total — audit rows expunged by the TiKV audit-retention sweeper. TiKV has no native TTL: every expirable row carries ExpiresAt and the leader-elected sweeper goroutine (internal/meta/tikv/sweeper.go) eager-deletes them. Steady non-zero rate is healthy; sudden drop to 0 may indicate sweeper leader loss.",
+      "fieldConfig": {
+        "defaults": {"unit": "ops"},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "single", "sort": "none"}
+      },
+      "targets": [
+        {
+          "expr": "rate(strata_meta_tikv_audit_sweep_deleted_total[5m])",
+          "legendFormat": "sweeper",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Memory (lab only)",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 26},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 21,
+      "type": "text",
+      "title": "Memory backend",
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 27},
+      "options": {
+        "mode": "markdown",
+        "content": "The **in-memory** meta backend is for tests and the smoke pass only. It exposes no dedicated row-count metric (`strata_meta_memory_rows_total` not instrumented in this codebase). For a quick liveness signal use `process_resident_memory_bytes{job=\"strata\"}` on the [data-backends dashboard](/d/strata-data-backends) which proxies the gateway's RSS — sustained growth on a memory-backed lab indicates leaked rows or test fixtures not cleaned up. Production deployments use **Cassandra** (or ScyllaDB drop-in) or **TiKV** — see the upper rows."
+      }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["strata", "meta-backends"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "Strata Meta Backends",
+  "uid": "strata-meta-backends",
+  "version": 1,
+  "weekStart": ""
+}

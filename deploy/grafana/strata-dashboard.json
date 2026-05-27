@@ -85,6 +85,9 @@
       "title": "Cassandra query latency p99 by table",
       "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 10},
+      "links": [
+        {"title": "Open meta-backends dashboard", "url": "/d/strata-meta-backends", "targetBlank": false}
+      ],
       "fieldConfig": {
         "defaults": {"unit": "s"},
         "overrides": []
@@ -107,6 +110,9 @@
       "title": "Cassandra query rate by table+op",
       "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 10},
+      "links": [
+        {"title": "Open meta-backends dashboard", "url": "/d/strata-meta-backends", "targetBlank": false}
+      ],
       "fieldConfig": {
         "defaults": {"unit": "ops"},
         "overrides": []
@@ -138,7 +144,8 @@
       "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 19},
       "links": [
-        {"title": "Open clusters dashboard", "url": "/d/strata-clusters", "targetBlank": false}
+        {"title": "Open clusters dashboard", "url": "/d/strata-clusters", "targetBlank": false},
+        {"title": "Open data-backends dashboard", "url": "/d/strata-data-backends", "targetBlank": false}
       ],
       "fieldConfig": {
         "defaults": {"unit": "s"},
@@ -163,7 +170,8 @@
       "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 19},
       "links": [
-        {"title": "Open clusters dashboard", "url": "/d/strata-clusters", "targetBlank": false}
+        {"title": "Open clusters dashboard", "url": "/d/strata-clusters", "targetBlank": false},
+        {"title": "Open data-backends dashboard", "url": "/d/strata-data-backends", "targetBlank": false}
       ],
       "fieldConfig": {
         "defaults": {"unit": "ops"},
