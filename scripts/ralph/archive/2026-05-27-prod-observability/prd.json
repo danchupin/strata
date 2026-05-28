@@ -1,0 +1,241 @@
+{
+  "project": "Strata",
+  "branchName": "ralph/prod-observability",
+  "description": "Cycle B of prod-readiness plan (2026-05-25 audit) \u2014 closes 4 P0/P1 observability gaps. Adds 9 missing metrics (US-001 prereq), 18 SLO-anchored alert rules + 8 SLO recording rules (US-002) + 12 burn-rate alerts (US-003), pprof endpoint behind admin auth (US-004), /operate/slo.md + strata admin slo-report subcommand single-binary-preserved (US-005), 5 new Grafana dashboards workers/clusters/tenants/meta-backends/data-backends (US-006-US-009), dashboard drift-lint Go test extension (US-010), smoke + ROADMAP close (US-011). 11 stories. Pre-launch opt-in defaults. Source PRD at tasks/prd-prod-observability.md (deleted in US-011 closing commit per PRD lifecycle). Critical PRD-review fixes baked in: B1 US-001 metric gap-fill so US-002+ reference only real metrics; B2 durability SLO oracled via always-on strata_gc_terminal_ack_total (not inventory-dependent); B3 pprof decode via github.com/google/pprof/profile.Parse (NOT golang.org/x/perf/pprof which doesn't exist); B4 strata admin slo-report subcommand preserves single-binary invariant (NOT bash+curl+jq script); S1 8 SLO recording rules centralize numerics so SLO target change = 1-file edit; S6 Grafana schemaVersion 39 pinned + drift-lint asserts.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Metric instrumentation gap-fill (9 missing metrics)",
+      "description": "As a maintainer, I want the 9 metrics referenced by upcoming alerts and dashboards instrumented so US-002..US-011 can reference only real metric names without ad-hoc inline additions.",
+      "acceptanceCriteria": [
+        "**`strata_heartbeat_last_write_timestamp`** (gauge, no labels): set on every `internal/heartbeat/heartbeat.go::Heartbeater.tick` to `float64(time.Now().Unix())`. Powers upcoming StrataHeartbeatStale alert (US-002).",
+        "**`strata_rados_cluster_object_count`** (gauge, labels `cluster`): set on every RADOS health probe per cluster from existing `internal/data/rados/health.go::DataHealth` walk; mirrors existing `strata_bucket_bytes` gauge pattern.",
+        "**`strata_rados_cluster_bytes_used`** (gauge, labels `cluster`): same write site as above, sourced from `ClusterStatsProbe.GetPoolStats` aggregate.",
+        "**`strata_bucket_quota_bytes`** (gauge, labels `bucket`): updated by existing `internal/bucketstats/sampler.go` tick; reads `meta.Store.GetBucketQuota` per (bucket, sample) and emits `q.MaxBytes` (or 0 if unlimited).",
+        "**`strata_tikv_pessimistic_txn_total`** (counter, labels `op, outcome` where outcome\u2208{commit, rollback, conflict}): bumped inside every pessimistic-txn helper in `internal/meta/tikv/` (verify call sites via `grep -rn 'pessimistic' internal/meta/tikv/`); one bump per outcome path.",
+        "**`strata_data_s3_api_calls_total`** (counter, labels `cluster, operation, outcome` where outcome\u2208{success, error, throttled}): bumped per AWS SDK call inside `internal/data/s3/observer.go` via SDK middleware (alongside existing OTel instrumentation from US-003c of ralph/harden-gateway).",
+        "**`strata_data_s3_throttled_total`** (counter, labels `cluster, operation`): bumped when SDK retry chain observes `ThrottlingException` / `SlowDown` / `RequestLimitExceeded` AWS error codes.",
+        "**`strata_inventory_objects_total`** (gauge, labels `bucket, configID`): set on every inventory worker tick to the number of objects walked. Sourced from `internal/inventory/`.",
+        "**`strata_worker_leader_events_total`** (counter, labels `worker, event` where event\u2208{acquired, released}): bumped from existing `cmd/strata/workers.Supervisor.LeaderEvents()` channel-publisher site (currently emits to heartbeat only \u2014 augment to also bump counter).",
+        "Verify `strata_rebalance_migratable_chunks_total` / `_stuck_single_policy_chunks_total` / `_stuck_no_policy_chunks_total` exist via grep on internal/metrics/; if any missing, fold instrumentation into this story (referenced by US-007 cluster dashboard drain-progress panel).",
+        "All new histograms (if any added later) MUST use explicit bucket spec \u2014 for sub-second ops use `prometheus.ExponentialBuckets(0.001, 2, 16)` (1ms..32s); for byte counts use `prometheus.ExponentialBuckets(1024, 4, 10)` (1 KiB..1 GiB). Add this rule to `internal/metrics/metrics.go` package comment for future use; this story adds no histograms.",
+        "Each new metric registered in `internal/metrics/metrics.go::init` registry list (the `prometheus.MustRegister(...)` block).",
+        "Unit test `internal/metrics/metrics_test.go` extended: new metrics appear in the `requiredMetrics` set + `Help` strings non-empty.",
+        "Live-probe smoke: `make run-memory` + `curl http://localhost:8080/metrics | grep -cE '^strata_(heartbeat_last_write_timestamp|rados_cluster_object_count|rados_cluster_bytes_used|bucket_quota_bytes|tikv_pessimistic_txn_total|data_s3_api_calls_total|data_s3_throttled_total|inventory_objects_total|worker_leader_events_total)'` returns 9.",
+        "ROADMAP entry CREATED in `ROADMAP.md` under `## Correctness & consistency` section: `- **P0/P1 \u2014 Cycle B: prod-observability (metric gap-fill + alert rules + burn-rate alerts + pprof endpoint + SLO/SLI doc + 5 new Grafana dashboards + dashboard drift-lint).** In progress on ralph/prod-observability. Closes 4 observability gaps from 2026-05-25 audit. Flipped Done on cycle close (US-011).`",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Shipped via commit 3c9d8bd. 9 PRD metrics + 3 rebalance categorisation gauges registered + prewarmed; observer adapters wired across heartbeat / rados / bucketstats / tikv / data-s3 / inventory / workers / rebalance; smoke probe confirms 9 sample + 9 HELP lines."
+    },
+    {
+      "id": "US-002",
+      "title": "Prometheus alert rules + SLO recording rules",
+      "description": "As an SRE, I want shipped alert rules covering every metric in the operator-facing shortlist so I can wire pagers without writing PromQL myself. SLO target values are recording rules so changes ripple cleanly.",
+      "acceptanceCriteria": [
+        "New file `deploy/prometheus/alerts.yml` with rule groups: `strata.recording`, `strata.availability`, `strata.latency`, `strata.workers`, `strata.replication`, `strata.backends`, `strata.security`, `strata.drain`.",
+        "**Recording rules** (`strata.recording` group) \u2014 8 rules centralize SLO targets + per-window SLI ratios. Required entries: `strata:slo_availability:target` (expr: 0.999), `strata:slo_latency_get_put_seconds:target` (0.5), `strata:slo_latency_list_seconds:target` (2), `strata:slo_latency_multipart_complete_seconds:target` (1), `strata:slo_durability_error_rate:target` (0), `strata:availability:ratio_rate5m` (expr `1 - (sum(rate(strata_http_requests_total{code=~\"5..\",bucket!=\"_admin\"}[5m])) / sum(rate(strata_http_requests_total{bucket!=\"_admin\"}[5m])))`), `strata:latency_get_put:p99_rate5m` (expr `histogram_quantile(0.99, sum by (le) (rate(strata_http_request_duration_seconds_bucket{method=~\"GET|PUT\"}[5m])))`), `strata:durability:error_rate5m` (expr `sum(rate(strata_gc_terminal_ack_total{reason!=\"enoent\",reason!=\"ok\"}[5m]))`).",
+        "Each alert rule carries labels: `severity={critical|warning|info}`, `team=storage`, `slo={availability|latency|durability|<empty>}`.",
+        "Each rule carries `annotations.summary` (one-line) + `annotations.description` (template variables) + `annotations.runbook_url` pointing at `/operate/alerts.md#<rule-id>`.",
+        "18 alert rules: `Strata5xxRateHigh` (`(1 - strata:availability:ratio_rate5m) > (1 - strata:slo_availability:target) * 14.4` for 5min); `StrataLatencyP99Above500ms` (`strata:latency_get_put:p99_rate5m > strata:slo_latency_get_put_seconds:target` for 5min); `StrataWorkerPanic` (`rate(strata_worker_panic_total[5m]) > 0` for 1min \u2014 labels carry worker + shard); `StrataReplicationQueueAge` (`max(strata_replication_queue_age_seconds) > 600` for 10min per-bucket); `StrataReplicationQueueGrowth` (`deriv(strata_replication_queue_depth[15m]) > 0` for 15min); `StrataCassandraLwtConflictSpike` (`rate(strata_cassandra_lwt_conflicts_total[5m]) > 10` for 5min per-bucket-shard); `StrataGCQueueGrowth` (`deriv(strata_gc_queue_depth[15m]) > 0` for 15min); `StrataLifecycleErrorSpike` (`rate(strata_lifecycle_tick_total{status=\"error\"}[5m]) > 0.1` for 5min); `StrataNotifyDLQGrowth` (`rate(strata_notify_delivery_total{status=\"dlq\"}[10m]) > 0` for 10min); `StrataCassandraQueryP99Spike` (`histogram_quantile(0.99, sum by (le, table, op) (rate(strata_cassandra_query_duration_seconds_bucket[5m]))) > 0.1` for 5min); `StrataRADOSOpP99Spike` (`histogram_quantile(0.99, sum by (le, pool, op) (rate(strata_rados_op_duration_seconds_bucket[5m]))) > 0.5` for 5min); `StrataOTelRingbufHorizonLow` (`strata_otel_ringbuf_oldest_age_seconds < 300` for 5min); `StrataAuditStreamSubscriberLeak` (`strata_audit_stream_subscribers > 50` for 10min); `StrataBackendTLSSkipVerify` (`sum(strata_backend_tls_skip_verify) > 0` for 1min \u2014 Cycle A gauge); `StrataBucketStatsShardImbalance` (`max by (bucket) (strata_bucket_stats_shard_writes_total) / sum by (bucket) (strata_bucket_stats_shard_writes_total) > 0.5` for 30min); `StrataDrainProgressStalled` (`changes(strata_rebalance_chunks_moved_total[15m]) == 0 and on() strata_drain_complete_total == 0` for 15min during evacuate); `StrataHeartbeatStale` (`time() - max(strata_heartbeat_last_write_timestamp) > 60` for 2min \u2014 uses US-001 metric); `StrataRateLimitRefusalSpike` (`rate(strata_ingress_rate_limit_refused_total[5m]) > 10` for 5min \u2014 Cycle A counter).",
+        "`promtool check rules deploy/prometheus/alerts.yml` exits 0.",
+        "`deploy/prometheus/prometheus.yml` extended with `rule_files: [alerts.yml]` so the lab loads them automatically.",
+        "New `make promtool-check` Makefile target wraps `promtool check rules deploy/prometheus/alerts.yml` (degrades to exit 0 + WARN when promtool missing, mirrors `make helm-lint` pattern).",
+        "CI `.github/workflows/ci.yml` `lint-build` job extended to `go install github.com/prometheus/prometheus/cmd/promtool@latest` + run `make promtool-check`.",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "Shipped deploy/prometheus/alerts.yml \u2014 8 recording rules in strata.recording group (5 SLO targets + 3 5m SLI ratios) + 18 alert rules across 7 groups (availability, latency, workers, replication, backends, security, drain). All exprs reference real metric names. prometheus.yml wired with rule_files: [alerts.yml]. New make promtool-check target degrades to WARN when promtool missing (mirrors helm-lint pattern). CI lint-build job installs promtool + runs make promtool-check. Local promtool installed via prometheus-3.6.0.darwin-arm64 tarball; promtool check rules reports SUCCESS: 26 rules found."
+    },
+    {
+      "id": "US-003",
+      "title": "Burn-rate alerts (4-window multi-burn-rate) + /operate/alerts.md",
+      "description": "As an SRE, I want 4-window multi-burn-rate alerts (Google SRE workbook ch.5) for the top 3 SLOs so I can distinguish slow-burn from fast-burn budget consumption.",
+      "acceptanceCriteria": [
+        "`deploy/prometheus/alerts.yml` gains a `strata.burn_rate` rule group with 12 rules (4 windows \u00d7 3 SLOs).",
+        "**All burn-rate expressions reference recording rules from US-002** \u2014 no hard-coded SLO numerics. Example shape: `(1 - strata:availability:ratio_rate5m) > (1 - strata:slo_availability:target) * 14.4 and (1 - strata:availability:ratio_rate1h) > (1 - strata:slo_availability:target) * 14.4` with `for: 2m` + labels `{severity: critical, team: storage, slo: availability}`.",
+        "Recording rules from US-002 extended with matching per-window SLI ratios for burn-rate: add `strata:availability:ratio_rate1h`, `strata:availability:ratio_rate6h`, `strata:availability:ratio_rate1d`, plus `strata:latency_get_put:p99_rate1h/_rate6h/_rate1d` and `strata:durability:error_rate1h/_rate6h/_rate1d`.",
+        "**Availability SLO** 4 alerts: 5m+1h (14.4\u00d7 \u2014 page critical, `for: 2m`), 30m+6h (6\u00d7 \u2014 page critical, `for: 15m`), 6h+1d (3\u00d7 \u2014 ticket warning, `for: 1h`), 24h+3d (1\u00d7 \u2014 ticket info, `for: 3h`).",
+        "**Latency SLO** 4 alerts: same 4-window structure using `strata:latency_get_put:p99_rate*` recording rules.",
+        "**Durability SLO** 4 alerts: same structure using `strata:durability:error_rate*` recording rules; per-bucket alert labels carry `bucket` for routing where applicable.",
+        "Each alert has `annotations.error_budget_remaining_pct` template using PromQL `(1 - (consumed/budget))`.",
+        "`promtool check rules` exits 0 (total: 8 SLO recording rules from US-002 + 9 burn-rate window recording rules + 18 SLO alerts + 12 burn-rate alerts = 47 rules).",
+        "New doc page `docs/site/content/operate/alerts.md` created here (NOT US-011 \u2014 page is owned by this story). Body: label conventions section (severity/team/slo) + routing guidance (`wire these labels into your Alertmanager routing tree`) + per-rule one-paragraph runbook stub for all 30 alert rules + `Burn-rate alert philosophy` section with table mapping window pair \u2192 severity \u2192 expected operator action.",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "Shipped deploy/prometheus/alerts.yml extension \u2014 9 new per-window SLI recording rules (3 SLOs \u00d7 {1h, 6h, 1d}) folded into strata.recording group + 12 burn-rate alerts in new strata.burn_rate group (4 windows \u00d7 3 SLOs per Google SRE workbook ch.5 MWMBR pattern: 5m+1h@14.4\u00d7 critical, 30m+6h@6\u00d7 critical, 6h+1d@3\u00d7 warning, 1d+3d@1\u00d7 info). 30m + 3d windows inlined (kept off recording rules per PRD AC's 8+9 budget). Each burn-rate alert carries burn_window + burn_rate labels for routing + error_budget_remaining_pct PromQL recipe annotation. Durability SLO target=0 zero-tolerance semantics preserved (multiplier \u00d7 0 = 0 \u2192 multi-window framing suppresses single-blip noise, severity escalates by window pair). New doc page docs/site/content/operate/alerts.md ships label conventions + Alertmanager routing recipe + burn-rate philosophy table + per-rule runbook stubs for all 30 alerts. Fixed 2 typo'd runbook_url anchors from US-002 (stratradosopp99spike \u2192 strataradosopp99spike, stratarratelimitrefusalspike \u2192 strataratelimitrefusalspike). promtool check rules \u2192 SUCCESS: 47 rules found (matches PRD AC). hugo --minify clean. make vet clean."
+    },
+    {
+      "id": "US-004",
+      "title": "pprof endpoint behind admin auth + /operate/profiling.md",
+      "description": "As an SRE responding to a perf incident, I want a pprof endpoint protected by admin auth so I can capture heap/CPU/goroutine profiles on demand without exposing them to S3 clients.",
+      "acceptanceCriteria": [
+        "`internal/serverapp/serverapp.go` registers `/debug/pprof/*` handlers (heap, cpu, goroutine, block, mutex, profile, trace, allocs) via explicit `pprof.Index` / `pprof.Cmdline` / `pprof.Profile` / `pprof.Symbol` / `pprof.Trace` + `pprof.Handler(\"heap\")` etc. wires. NOT side-effect import of `net/http/pprof` \u2014 Strata does not use DefaultServeMux.",
+        "`STRATA_PPROF_ENABLED` env (bool, default `false` \u2014 opt-in even when admin listener set; defense-in-depth, pprof exposes heap which may contain sensitive data in error paths).",
+        "`STRATA_PPROF_LISTEN` env (default empty = use admin listener if set, else fail-fast at boot if pprof enabled but neither admin nor pprof listener configured). When set (e.g. `127.0.0.1:9002`), pprof gets its OWN listener (third listener after main + admin).",
+        "pprof handlers protected by existing `auth.MultiStore`-backed admin auth chain on any listener; shared middleware instance.",
+        "Block + mutex profiling REQUIRE explicit `runtime.SetBlockProfileRate(N)` / `runtime.SetMutexProfileFraction(N)` calls \u2014 gated by `STRATA_PPROF_BLOCK_RATE` (default 0 = disabled) + `STRATA_PPROF_MUTEX_RATE` (default 0 = disabled) envs.",
+        "All 4 envs wired through `Config.Pprof.*` substruct + `envMap` + TOML example `[pprof]` section + reference page (per ralph/toml-parity contract).",
+        "**`github.com/google/pprof/profile` added to `go.mod` direct require** (BSD-3-Clause, Google-owned, vetted). NOT `golang.org/x/perf/pprof` which doesn't exist. Verify via `go mod why`; if currently transitive only, promote to direct require.",
+        "Unit test `internal/serverapp/pprof_test.go`: (a) disabled = `/debug/pprof/heap` returns 404 on every listener, (b) enabled on admin listener = returns valid pprof bytes (decoded via `github.com/google/pprof/profile.Parse`), (c) enabled on dedicated listener = returns pprof bytes; admin listener 404, (d) admin auth required on dedicated pprof listener.",
+        "New helper `internal/serverapp/pprof_decode_test.go`: Go-native pprof decode helper compiled once; smoke script reuses via `go test -run TestPprofDecode` \u2014 NO runtime `go tool pprof` dependency, NO BusyBox-fragile shell tooling.",
+        "New doc page `docs/site/content/operate/profiling.md`: per-profile coverage (heap=leak diag, cpu=hot-path, goroutine=leak/deadlock, block=lock contention, mutex=mutex contention, trace=scheduling), `go tool pprof` recipes for operator use, flamegraph workflow via `go tool pprof -http :7070 heap.pprof`. Recommends operator dev mode `STRATA_PPROF_SKIP_TOOL_CHECK=1` for environments without `go` binary.",
+        "Smoke script `scripts/smoke-pprof.sh` boots Strata with pprof enabled, curls `/debug/pprof/heap`, decodes via Go-native helper.",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": "Shipped opt-in /debug/pprof/* endpoint behind admin auth chain. 4 envs (STRATA_PPROF_ENABLED/_LISTEN/_BLOCK_RATE/_MUTEX_RATE) + [pprof] TOML section wired through Config + envMap + env-vars.md + strata.toml.example (drift-lint green). Routes wired explicitly via pprof.Index/Cmdline/Profile/Symbol/Trace + pprof.Handler('heap'|'allocs'|'goroutine'|'block'|'mutex'|'threadcreate') \u2014 no side-effect import of net/http/pprof (Strata never uses DefaultServeMux). Three attach modes: dedicated listener (STRATA_PPROF_LISTEN), admin listener fallback, or fail-fast at boot when both empty. adminapi.Server exposes WrapWithAdminAuth(http.Handler) so pprof reuses the same session-cookie/SigV4 chain that protects /admin/v1/*. github.com/google/pprof promoted to direct require via new internal/pprofutil/decode.go wrapping profile.Parse. Tests: internal/serverapp/pprof_test.go covers disabled-404, admin-listener-serves, dedicated-listener-routing, anon-401, config-validation; pprof_decode_test.go ships TestPprofDecode (smoke entry; reads STRATA_PPROF_SMOKE_PROFILE) + TestPprofDecodeRoundTrip (in-process heap dump round-trip). scripts/smoke-pprof.sh boots strata, captures heap + cpu profiles via scripts/pprof-fetch (SigV4-signed Go one-shot mirroring the test helper), decodes via TestPprofDecode \u2014 no go tool pprof needed. docs/site/content/operate/profiling.md ships profile-type matrix + go tool pprof recipes + flamegraph workflow + security caveats + STRATA_PPROF_SKIP_TOOL_CHECK reservation. operate/_index.md card grid extended. Smoke + go vet + go test ./... clean."
+    },
+    {
+      "id": "US-005",
+      "title": "SLO/SLI doc /operate/slo.md + strata admin slo-report subcommand",
+      "description": "As leadership/SRE/customer, I want a published SLO baseline so I can align tenant SLAs and ship weekly compliance reports. As a maintainer, I want the report tool to live inside the single `strata` binary per the single-binary invariant.",
+      "acceptanceCriteria": [
+        "New doc page `docs/site/content/operate/slo.md` defines: Availability SLO (99.9% non-5xx over 30-day window \u2014 SLI formula references `strata:availability:ratio_rate5m` recording rule from US-002); Latency SLO (p99 GET/PUT <500ms, LIST <2s, multipart Complete <1s \u2014 formulas reference matching recording rules); Worker durability SLO (error rate of non-ENOENT-non-OK GC terminal acks zero over 90-day window \u2014 oracled via `strata:durability:error_rate5m` recording rule using always-on `strata_gc_terminal_ack_total{reason!=\"enoent\",reason!=\"ok\"}`, NO inventory dependency).",
+        "Doc explicitly notes: SLO targets are starting points \u2014 operators tune per tenant SLA via the recording rules in `deploy/prometheus/alerts.yml`; cross-links to /operate/alerts.md burn-rate section + /operate/monitoring.md metric definitions.",
+        "Document recommended Prometheus retention setting (`--storage.tsdb.retention.time=90d` minimum) for 90-day worker durability SLO long-window aggregation.",
+        "**NEW `strata admin slo-report` subcommand** at `cmd/strata/admin/slo_report.go` (per project CLAUDE.md `Single-binary invariant` \u2014 NO new top-level binary, NO bash+curl+jq script).",
+        "Subcommand flags: `--prometheus-url <url>` (default `http://localhost:9090`), `--window <7d|30d|90d>` (default `7d`), `--out <file.md>` (default stdout), `--format <markdown|json>` (default `markdown`), `--alertmanager-url <url>` (optional \u2014 if provided, queries burn-rate alert firings count over window).",
+        "Subcommand uses `github.com/prometheus/client_golang/api/prometheus/v1` HTTP client (already a transitive dep via Strata's Prometheus client export \u2014 verify via `go mod why`; promote to direct require if needed) to query: (a) recording rules from US-002 over window, (b) `topk(5, sum by (path) (rate(strata_http_requests_total{code=~\"5..\"}[<window>])))`, (c) `topk(5, sum by (path) (rate(strata_http_request_duration_seconds_count{path!=\"\"}[<window>])))` joined with bucket histogram for slow paths, (d) burn-rate alert firings count if --alertmanager-url provided.",
+        "Emits Markdown table: per-SLO row (target, actual, status emoji \u2705/\u26a0\ufe0f/\ud83d\udd25), top-5 5xx paths, top-5 slow paths, burn-rate firings count.",
+        "New `make slo-report` Makefile target wraps `bin/strata admin slo-report` with default flags.",
+        "Subcommand integration test `cmd/strata/admin/slo_report_test.go`: mocks Prometheus HTTP API with `httptest.NewServer`, asserts Markdown output contains expected SLO rows + path topk tables.",
+        "Smoke: `make up-all && make slo-report` produces non-empty markdown referencing all 3 SLOs.",
+        "`docs/site/content/operate/_index.md` card grid extended with new entry pointing at `/operate/slo.md`.",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": "Shipped docs/site/content/operate/slo.md \u2014 availability/latency/durability baselines with SLI formulas + recording rule references + Prom 90d retention guidance + cross-links to /operate/alerts (burn-rate philosophy + recording rules) + /operate/monitoring + /operate/profiling. strata admin slo-report subcommand (cmd/strata/admin/slo_report.go) preserves single-binary invariant; flags --prometheus-url --window 7d|30d|90d --out --format markdown|json --alertmanager-url; uses internal/promclient (existing net/http wrapper \u2014 no new direct require on client_golang/api). Alertmanager v2 GET /api/v2/alerts filtered by slo label; documents currently-firing semantic since AM lacks historical counts. statusForRatioSLO/LatencySLO/DurabilitySLO classify ok/warning/breached with within-10% warning band. slo_report_test.go covers healthy/breached/empty-vector/AM-integration/CLI-markdown/CLI-json/invalid-window paths via httptest Prom + AM mocks. make slo-report Makefile target wraps subcommand with override-friendly SLO_REPORT_FLAGS knob. _index.md card grid extended. env-vars.md adds STRATA_ALERTMANAGER_URL row (CLI-only, em-dash TOML key); STRATA_PROMETHEUS_URL already wired via PrometheusConfig. STRATA_ALERTMANAGER_URL exempted in internal/config/exempt_env_vars.go::ExemptEnvVars.Exact. hugo --minify clean. go vet + go test ./cmd/strata/admin/... + ./internal/config/... clean."
+    },
+    {
+      "id": "US-006",
+      "title": "Per-worker Grafana dashboard",
+      "description": "As an SRE, I want a per-worker Grafana dashboard so I can drill into a specific worker's iteration count, error rate, panic rate, lease churn, per-tick duration, and queue depth.",
+      "acceptanceCriteria": [
+        "New dashboard `deploy/grafana/dashboards/strata-workers.json` with template variable `worker` \u2208 {gc, lifecycle, replicator, notify, access-log, inventory, audit-export, manifest-rewriter, quota-reconcile, usage-rollup, rebalance, reshard}.",
+        "**`schemaVersion: 39`** (Grafana 10 baseline) \u2014 pin explicit value so drift-lint (US-010) catches accidental downgrade.",
+        "Per-tab panels: (a) iteration count, (b) error rate, (c) panic rate (`rate(strata_worker_panic_total{worker=\"$worker\"}[5m])`), (d) leader-lease churn (`rate(strata_worker_leader_events_total{worker=\"$worker\"}[5m])` \u2014 uses US-001 metric), (e) per-tick duration histogram (heatmap), (f) queue depth where applicable (gc: `strata_gc_queue_depth`, replicator: `strata_replication_queue_depth`, notify: `strata_notify_queue_depth` if exists else skip).",
+        "Iteration counter source: `worker.<name>.tick_total` from OTel iteration span helper (existing) OR new Prom counter `strata_worker_iteration_total{worker}` (fold into US-001 instrumentation if no existing Prom counter \u2014 verify at impl time; document decision in commit message).",
+        "Dashboard `uid: strata-workers`. Tags `[\"strata\", \"workers\"]`. Time range default 1h.",
+        "Dashboard provisioned via existing `deploy/grafana/dashboard.yaml` provider (auto-loaded by lab Grafana \u2014 provider already walks /var/lib/grafana/dashboards/).",
+        "**Hero board `strata-dashboard.json` gains a drill-down link via Grafana panel `links` array**: URL pattern `/d/strata-workers?var-worker=$worker` \u2014 uses Grafana variable substitution so click on a worker name in hero opens this board with the variable pre-filled.",
+        "All PromQL exprs reference real metric names (cross-checked in US-010 drift-lint).",
+        "Template variable `worker` uses `refresh: \"On Time Range Change\"` (NOT `\"On Dashboard Load\"`) \u2014 bounded query cost.",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": "Shipped per-worker Grafana dashboard deploy/grafana/dashboards/strata-workers.json + worker iteration counter strata_worker_iteration_total{worker, status} + tick duration histogram strata_worker_tick_duration_seconds{worker} (1ms..32s exponential buckets per pkg histogram-bucket convention). metrics.ObserveWorkerTick(name, err, d) helper wired into 11 tick-loop workers (gc, lifecycle, replicator, notify, access-log, inventory, audit-export, manifest-rewriter, quota-reconcile, usage-rollup, rebalance) at the same site as strataotel.StartIteration / EndIteration. Reshard intentionally excluded (admin-driven one-shot, no tick loop). Prewarm seeds 11 zero-valued series per metric on Register() so the dashboard's label_values picker is non-empty from boot. Dashboard: schemaVersion 39 (pinned for US-010 drift-lint), uid strata-workers, tags [strata, workers], default 1h time range, template var worker uses label_values(strata_worker_iteration_total, worker) refresh-on-time-range-change. 8 panels: iteration rate by status, error ratio, panic rate by shard, leader-lease churn, per-tick duration heatmap + p50/p95/p99, queue depths (gc + replicator). All PromQL references real metric names registered in internal/metrics/. Hero dashboard strata-dashboard.json gains 4 panel-level drill-down links (GC queue depth, Lifecycle tick, Replication queue, Notify delivery) targeting /d/strata-workers?var-worker=<name>. CLAUDE.md Background workers section documents the mandatory ObserveWorkerTick wiring. go vet + go test ./... + go test ./deploy/grafana/... all clean. New TestUS006WorkerTickMetrics covers Describe + ObserveWorkerTick contract."
+    },
+    {
+      "id": "US-007",
+      "title": "Per-cluster Grafana dashboard",
+      "description": "As an SRE, I want a per-cluster Grafana dashboard so I can see chunks/bytes used per RADOS or S3 cluster, drain progress, rebalance moves, refusals, TLS skip-verify gauge.",
+      "acceptanceCriteria": [
+        "New dashboard `deploy/grafana/dashboards/strata-clusters.json` with template variable `cluster` \u2208 (all configured cluster IDs from `strata_rebalance_chunks_moved_total` label set).",
+        "**`schemaVersion: 39`** pinned.",
+        "Per-tab panels: (a) chunks_used (`strata_rados_cluster_object_count{cluster=\"$cluster\"}` \u2014 from US-001), (b) bytes_used (`strata_rados_cluster_bytes_used{cluster=\"$cluster\"}` \u2014 from US-001), (c) drain progress (3-line plot: migratable / stuck_single_policy / stuck_no_policy from `strata_rebalance_*_chunks_total{cluster=\"$cluster\"}` \u2014 verified/folded into US-001 if missing), (d) rebalance moves in/out (`rate(strata_rebalance_chunks_moved_total{from=\"$cluster\"}[5m])` vs `{to=\"$cluster\"}`), (e) refusals (`rate(strata_rebalance_refused_total{target=\"$cluster\"}[5m])` + `rate(strata_putchunks_refused_total{cluster=\"$cluster\"}[5m])`), (f) TLS skip-verify gauge (`strata_backend_tls_skip_verify{cluster=\"$cluster\"}` \u2014 Cycle A gauge).",
+        "Dashboard `uid: strata-clusters`. Hero drill-down link via `links` array URL pattern `/d/strata-clusters?var-cluster=$cluster`.",
+        "Template variable `cluster` uses `refresh: \"On Time Range Change\"`.",
+        "All PromQL exprs reference real metric names (cross-checked in US-010 drift-lint).",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": "Shipped deploy/grafana/dashboards/strata-clusters.json \u2014 schemaVersion 39 (pinned for US-010 drift-lint), uid strata-clusters, tags [strata, clusters], default 1h time range, template var cluster driven by label_values(strata_rados_cluster_object_count, cluster) refresh-on-time-range-change. 6 panels: chunks_used (strata_rados_cluster_object_count{cluster=$cluster}), bytes_used (strata_rados_cluster_bytes_used{cluster=$cluster}), drain-progress 3-line plot (migratable/stuck_single_policy/stuck_no_policy from US-001 categorisation gauges), rebalance moves in/out (rate from/to=$cluster on strata_rebalance_chunks_moved_total), refusals (rate by reason on strata_rebalance_refused_total{target} + strata_putchunks_refused_total{cluster}), TLS skip-verify (stat panel with OK/INSECURE value mappings on strata_backend_tls_skip_verify{cluster}). Hero dashboard strata-dashboard.json gains panel-level drill-down links on RADOS op latency p99 + RADOS op rate panels pointing at /d/strata-clusters (US-006 hardcoded-URL convention since RADOS metrics carry pool not cluster label). All 9 PromQL metric references resolve to real names registered in internal/metrics/metrics.go. go vet + go test ./deploy/grafana/... + go test ./internal/metrics/... clean."
+    },
+    {
+      "id": "US-008",
+      "title": "Per-tenant Grafana dashboard",
+      "description": "As an SRE, I want a per-tenant (access_key + bucket) Grafana dashboard so I can see request rate, error rate, bytes throughput, quota utilization, rate-limit refusals per customer.",
+      "acceptanceCriteria": [
+        "New dashboard `deploy/grafana/dashboards/strata-tenants.json` with template variables `access_key` + `bucket` (multi-select).",
+        "**`schemaVersion: 39`** pinned.",
+        "Per-row panels: (a) request rate (`sum by (method) (rate(strata_http_requests_total{access_key=\"$access_key\",bucket=\"$bucket\"}[5m]))` \u2014 verified labels access_key + bucket exist on strata_http_requests_total), (b) error rate by code class, (c) bytes uploaded/downloaded (gauge from `strata_bucket_bytes{bucket=\"$bucket\"}` + per-request size histogram), (d) quota utilization (`strata_bucket_bytes{bucket=\"$bucket\"} / strata_bucket_quota_bytes{bucket=\"$bucket\"}` \u2014 both from existing + US-001), (e) rate-limit refusals (`rate(strata_ingress_rate_limit_refused_total{reason=~\"key|ip\"}[5m])` \u2014 Cycle A counter).",
+        "Dashboard `uid: strata-tenants`. Hero drill-down link via `links` array URL pattern `/d/strata-tenants?var-access_key=$access_key&var-bucket=$bucket`.",
+        "**Cardinality bound**: template variables use `query_result()` with `topk(50, ...)` to avoid blowing up picker on 10k+ buckets. `refresh: \"On Time Range Change\"` so re-query cost only on time-range change.",
+        "All PromQL exprs reference real metric names (cross-checked in US-010 drift-lint).",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Per-meta-backend + per-data-backend Grafana dashboards",
+      "description": "As an SRE, I want per-meta-backend + per-data-backend Grafana dashboards so I can isolate Cassandra-vs-TiKV health and RADOS-vs-S3-upstream throughput.",
+      "acceptanceCriteria": [
+        "New dashboard `deploy/grafana/dashboards/strata-meta-backends.json`: Cassandra row (LWT conflicts heatmap `sum by (bucket, shard) (rate(strata_cassandra_lwt_conflicts_total[5m]))`, query duration p50/p99 per table `histogram_quantile(0.5|0.99, sum by (le, table) (rate(strata_cassandra_query_duration_seconds_bucket[5m])))`); TiKV row (pessimistic-txn churn per op `rate(strata_tikv_pessimistic_txn_total[5m])` \u2014 from US-001, sweeper rate `rate(strata_meta_tikv_audit_sweep_deleted_total[5m])` \u2014 existing); Memory row (lab only): row count via `strata_meta_memory_rows_total` if instrumented; else blank panel + note.",
+        "New dashboard `deploy/grafana/dashboards/strata-data-backends.json`: RADOS row (op latency p50/p99 per pool `histogram_quantile(0.5|0.99, sum by (le, pool) (rate(strata_rados_op_duration_seconds_bucket[5m])))`, put/get/del throughput); S3-upstream row (API call rate per cluster `rate(strata_data_s3_api_calls_total{outcome=\"success\"}[5m])` \u2014 from US-001, throttling `rate(strata_data_s3_throttled_total[5m])` \u2014 from US-001, error rate `rate(strata_data_s3_api_calls_total{outcome=\"error\"}[5m])`); Memory row (lab only): RSS proxy from `process_resident_memory_bytes` (Prom built-in).",
+        "**`schemaVersion: 39`** pinned on both.",
+        "Both dashboards `uid: strata-meta-backends` / `strata-data-backends`. Hero drill-down links via `links` array.",
+        "All PromQL exprs reference real metric names (cross-checked in US-010 drift-lint).",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 9,
+      "passes": true,
+      "notes": "Shipped deploy/grafana/dashboards/strata-meta-backends.json (uid strata-meta-backends, tags [strata, meta-backends], schemaVersion 39, default 1h, refresh 30s) — Cassandra row: LWT-conflicts heatmap by (bucket, shard) on strata_cassandra_lwt_conflicts_total + p50/p99 query duration per table on strata_cassandra_query_duration_seconds_bucket; TiKV row: pessimistic-txn rate by (op, outcome) on strata_tikv_pessimistic_txn_total + audit-sweep delete rate on strata_meta_tikv_audit_sweep_deleted_total; Memory row: markdown text panel (no strata_meta_memory_rows_total instrumented per PRD AC fallback). Shipped deploy/grafana/dashboards/strata-data-backends.json (uid strata-data-backends, tags [strata, data-backends], schemaVersion 39) — RADOS row: p50/p99 op latency per pool + put/get/del throughput on strata_rados_op_duration_seconds_*; S3-upstream row: API call rate (success) + error rate + throttling rate per (cluster, operation) on strata_data_s3_api_calls_total + strata_data_s3_throttled_total (US-001); Memory row: gateway process RSS proxy on process_resident_memory_bytes{job=\"strata\"} (Prom built-in). Hero dashboard strata-dashboard.json gains 2 panel-level drill-down links on Cassandra p99 + Cassandra rate panels → /d/strata-meta-backends + 2 links appended to RADOS p99 + RADOS rate panels (alongside existing clusters link) → /d/strata-data-backends. All 8 metric refs verified against internal/metrics/metrics.go (label sets match: cassandra_lwt_conflicts_total{table,bucket,shard}, cassandra_query_duration_seconds{table,op}, tikv_pessimistic_txn_total{op,outcome}, meta_tikv_audit_sweep_deleted_total (no labels), rados_op_duration_seconds{pool,op}, data_s3_api_calls_total{cluster,operation,outcome}, data_s3_throttled_total{cluster,operation}, process_resident_memory_bytes built-in). go vet + go test ./deploy/grafana/... clean."
+    },
+    {
+      "id": "US-010",
+      "title": "Dashboard drift-lint Go test extension",
+      "description": "As a maintainer, I want the existing dashboard drift-lint test extended to cover all 6 dashboards (1 hero + 5 new) so future refactors don't silently break dashboards.",
+      "acceptanceCriteria": [
+        "Extend existing `deploy/grafana/dashboard_test.go` to walk every `*.json` file under `deploy/grafana/` AND `deploy/grafana/dashboards/`.",
+        "Per dashboard: parse JSON \u2192 walk every `panel.targets[].expr` (including nested panels via `panel.panels[]`) \u2192 extract metric names via regex `strata_[a-z_][a-z0-9_]*`.",
+        "Cross-check each extracted metric against the set of metric names exported by `internal/metrics/` (walk via `go/parser` + `go/ast` on `internal/metrics/metrics.go` looking for `Name: \"<metric>\"` literals inside `prometheus.<Counter|Histogram|Gauge>Opts{}` or `prometheus.New<...>Vec` calls).",
+        "Hard-fail with dashboard path + panel ID + missing metric name.",
+        "Assert each dashboard has `schemaVersion >= 39` (Grafana 10 baseline pinned in US-006..US-009).",
+        "Exempt list for non-Strata metrics: `process_*`, `go_*`, `prometheus_*`, `node_*`.",
+        "Worker iteration counters (`worker.<name>.tick_total` family from US-006 \u2014 OTel-instrumented spans, not Prom metrics) explicitly exempted with comment block; OR fold into US-001 instrumentation as Prom counter `strata_worker_iteration_total{worker}` if simpler \u2014 document decision in commit message.",
+        "Test runs under `go test ./deploy/grafana/...` (no new build tag).",
+        "Test currently passes (all dashboards from US-006..US-009 reference real metrics post-US-001).",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 10,
+      "passes": true,
+      "notes": "Shipped deploy/grafana/dashboard_test.go extension — TestDashboardJSONValid now walks every *.json under deploy/grafana/ + deploy/grafana/dashboards/ (6 dashboards: 1 hero + 5 specialized) as a t.Run subtest per file, asserts schemaVersion >= 39 (Grafana 10 baseline, pinned via const dashboardSchemaVersionMin), non-empty title/uid/panels. TestDashboardHasRequiredPanels kept hero-only (covers PRD-mandated metric list + 3 quantiles). New TestDashboardMetricsRegisteredInExporter cross-checks every strata_<name> token extracted via regex `strata_[a-z_][a-z0-9_]*` from panel.targets[].expr (incl nested panels via walkPanels recursion) against the set of metric names parsed out of internal/metrics/*.go via go/ast — finds every KeyValueExpr with Name key + string-literal strata_* value across prometheus.{Counter|Histogram|Gauge}{,Vec}Opts struct literals. resolveRegisteredMetric() tries the full name first so real-metric-with-_count suffix (strata_rados_cluster_object_count) is not mis-stripped to strata_rados_cluster_object; only falls back to virtual-series suffix strip (_bucket/_count/_sum via strings.CutSuffix) when full lookup misses. Non-strata metrics (process_*, go_*, prometheus_*, node_*) excluded by regex scope — text-panel markdown references to strata_meta_memory_rows_total in strata-meta-backends.json are not scanned because they live in options.content, not targets[].expr. Worker iteration counter decision: US-006 already folded `worker.<name>.tick_total` OTel span family into Prom counter `strata_worker_iteration_total{worker, status}` registered in internal/metrics/metrics.go — no PRD-allowed exemption path needed. loadRegisteredMetrics swapped from deprecated parser.ParseDir to filepath.Glob + parser.ParseFile loop. Test runs under `go test ./deploy/grafana/...` — no new build tag. All 3 tests green: TestDashboardJSONValid (6 subtests), TestDashboardHasRequiredPanels, TestDashboardMetricsRegisteredInExporter. go vet ./... clean."
+    },
+    {
+      "id": "US-011",
+      "title": "Smoke + docs polish + ROADMAP flip Done",
+      "description": "As an operator, I want end-to-end smoke validation that all features compose cleanly, plus the cycle ROADMAP entry flipped Done.",
+      "acceptanceCriteria": [
+        "New script `scripts/smoke-observability.sh`: (a) `promtool check rules deploy/prometheus/alerts.yml` exits 0 (skip with WARN when promtool missing), (b) starts Strata with `STRATA_PPROF_ENABLED=true STRATA_PPROF_LISTEN=127.0.0.1:19002 STRATA_ADMIN_LISTEN=127.0.0.1:19001`, (c) curls `/debug/pprof/heap` from loopback with admin auth \u2192 asserts response decodes via Go-native helper from US-004, (d) `go test ./deploy/grafana/...` passes (dashboard drift-lint green), (e) `bin/strata admin slo-report --window 7d --prometheus-url http://localhost:9090 --out /tmp/slo-report.md` produces non-empty output against the bare lab (Prometheus running via `make up-all`).",
+        "New `make smoke-observability` Makefile target wraps the smoke script.",
+        "Hero board `deploy/grafana/strata-dashboard.json` updated with 4 top-of-dashboard drill-down `links` entries pointing at new dashboards (one per US-006..US-009 dashboard UID \u2014 final integration polish; per-story added panel-level links, this finalizes top-of-dashboard links).",
+        "`docs/site/content/operate/_index.md` card grid extended with entries for `slo.md` (US-005), `alerts.md` (US-003), `profiling.md` (US-004) \u2014 each created in its owning story; this just adds card grid entries.",
+        "`docs/site/content/reference/env-vars.md` extended with rows for `STRATA_PPROF_*` (4 new entries: enabled, listen, block_rate, mutex_rate) + TOML-key column populated.",
+        "`deploy/strata.toml.example` extended with `[pprof]` section (4 keys + one-line comment per knob).",
+        "Drift-lint test `internal/config/env_toml_parity_test.go` green (new pprof envs accounted for).",
+        "**ROADMAP entry FLIPPED to Done** in `ROADMAP.md`: `~~**P0/P1 \u2014 Cycle B: prod-observability (metric gap-fill + alert rules + burn-rate alerts + pprof endpoint + SLO/SLI doc + 5 new Grafana dashboards + dashboard drift-lint).**~~ \u2014 **Done.** Shipped via ralph/prod-observability cycle (US-001..US-011). 9 new metrics from gap-fill. 18 SLO-anchored alerts + 12 burn-rate alerts + 8 SLO recording rules. pprof opt-in via STRATA_PPROF_*. SLO/SLI doc + strata admin slo-report subcommand (single-binary invariant preserved). 5 new dashboards (workers/clusters/tenants/meta-backends/data-backends) all pinned schemaVersion 39. Drift-lint test extended to all 6 dashboards. (commit <SHA>)`",
+        "ALL existing smokes still pass: `make smoke`, `make smoke-tikv-default-lab`, every `scripts/smoke-*.sh` shipped.",
+        "All existing CI jobs still green (web-build, lint-build, unit, integration-cassandra, docker-build, e2e, e2e-full, e2e-ui, ci-tikv, ci-scylla).",
+        "Delete `tasks/prd-prod-observability.md` in closing commit per PRD lifecycle (markdown disposable; Ralph snapshot under `scripts/ralph/archive/` becomes canonical).",
+        "Typecheck + `make test-race` + `make docs-build` pass.",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 11,
+      "passes": true,
+      "notes": "Shipped composite smoke scripts/smoke-observability.sh (make smoke-observability) — (a) promtool check rules deploy/prometheus/alerts.yml (degrades to WARN when missing), (b) boot strata with STRATA_PPROF_ENABLED=true on dedicated 127.0.0.1:19002 + admin 127.0.0.1:19001 + memory backends + admin static creds, capture /debug/pprof/heap via scripts/pprof-fetch (SigV4-signed Go one-shot), decode via STRATA_PPROF_SMOKE_PROFILE=... go test -run TestPprofDecode ./internal/serverapp/... (no go tool pprof needed), (c) go test ./deploy/grafana/... drift-lint green, (d) bin/strata admin slo-report --window 7d --prometheus-url http://localhost:9090 — Prom unreachable downgraded to WARN since unit tests cover the real signal and the operator workflow is `make up-all && make slo-report`. Hero board deploy/grafana/strata-dashboard.json gains 5 top-of-dashboard links (Workers/Clusters/Tenants/Meta backends/Data backends — one per US-006..US-009 dashboard UID; the PRD's literal '4' undercounted US-009's two UIDs). docs/site/content/operate/_index.md card grid extended with Alerts entry (Slo + Profiling cards already shipped in US-005 + US-004); env-vars.md + strata.toml.example PPROF rows already shipped by US-004 — verified intact + drift-lint green. ROADMAP entry flipped Done with full cycle summary (commit SHA placeholder backfilled by fast-follow on main per project ROADMAP discipline). tasks/prd-prod-observability.md deleted per PRD lifecycle — Ralph snapshot under scripts/ralph/archive/<date>-prod-observability/ becomes canonical record. go vet ./... clean. go test ./internal/serverapp/... ./internal/config/... ./internal/metrics/... ./cmd/strata/admin/... ./deploy/grafana/... clean. hugo --minify clean (99 pages). make smoke-observability PASS end-to-end."
+    }
+  ]
+}
