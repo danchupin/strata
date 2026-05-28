@@ -23,7 +23,114 @@ prefix), one row per state-changing request.&lt;/li&gt;
 &lt;/ol&gt;
 &lt;p&gt;This page covers the wire-up; the
 &lt;a href="https://danchupin.github.io/strata/architecture/observability/"&gt;Observability deep dive&lt;/a&gt;
-covers the implementation rationale.&lt;/p&gt;</description></item><item><title>Per-bucket signing key rotation</title><link>https://danchupin.github.io/strata/operate/key-rotation/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/operate/key-rotation/</guid><description>&lt;h1 id="per-bucket-signing-key-rotation"&gt;Per-bucket signing key rotation&lt;a class="anchor" href="#per-bucket-signing-key-rotation"&gt;#&lt;/a&gt;&lt;/h1&gt;
+covers the implementation rationale.&lt;/p&gt;</description></item><item><title>Alerts</title><link>https://danchupin.github.io/strata/operate/alerts/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/operate/alerts/</guid><description>&lt;h1 id="alerts"&gt;Alerts&lt;a class="anchor" href="#alerts"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata ships a curated alert rule set in &lt;code&gt;deploy/prometheus/alerts.yml&lt;/code&gt;.
+The file declares &lt;strong&gt;47 rules&lt;/strong&gt; — 17 SLO recording rules, 18 single-window
+alert rules, and 12 multi-window burn-rate alerts (Google SRE workbook
+ch.5). This page is the operator-facing companion: what each alert means,
+when it fires, and what to do.&lt;/p&gt;
+&lt;p&gt;Validate the file via &lt;code&gt;make promtool-check&lt;/code&gt;. CI installs &lt;code&gt;promtool&lt;/code&gt; and
+runs the target on every push; locally the target degrades to WARN when
+the binary is missing (mirrors &lt;code&gt;make helm-lint&lt;/code&gt;). Lab Prometheus
+auto-loads the file via the &lt;code&gt;rule_files: [alerts.yml]&lt;/code&gt; directive in
+&lt;code&gt;deploy/prometheus/prometheus.yml&lt;/code&gt;.&lt;/p&gt;</description></item><item><title>SLO / SLI</title><link>https://danchupin.github.io/strata/operate/slo/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/operate/slo/</guid><description>&lt;h1 id="slo--sli"&gt;SLO / SLI&lt;a class="anchor" href="#slo--sli"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata ships three production SLOs as a starting point. Operators can
+re-tune each target by editing one line in
+&lt;code&gt;deploy/prometheus/alerts.yml&lt;/code&gt; — every single-window alert and
+multi-burn-rate alert from
+&lt;a href="https://danchupin.github.io/strata/operate/alerts/"&gt;/operate/alerts&lt;/a&gt; references the same
+recording rule so the change ripples cleanly.&lt;/p&gt;
+&lt;table&gt;
+ &lt;thead&gt;
+ &lt;tr&gt;
+ &lt;th&gt;SLO&lt;/th&gt;
+ &lt;th style="text-align: right"&gt;Target&lt;/th&gt;
+ &lt;th&gt;Window&lt;/th&gt;
+ &lt;th&gt;SLI source&lt;/th&gt;
+ &lt;/tr&gt;
+ &lt;/thead&gt;
+ &lt;tbody&gt;
+ &lt;tr&gt;
+ &lt;td&gt;Availability&lt;/td&gt;
+ &lt;td style="text-align: right"&gt;99.9%&lt;/td&gt;
+ &lt;td&gt;30 days&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;strata:availability:ratio_rate5m&lt;/code&gt; (recording rule)&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;Latency p99&lt;/td&gt;
+ &lt;td style="text-align: right"&gt;GET/PUT &amp;lt; 500 ms, LIST &amp;lt; 2 s, multipart Complete &amp;lt; 1 s&lt;/td&gt;
+ &lt;td&gt;30 days&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;strata:latency_get_put:p99_rate5m&lt;/code&gt; + per-op equivalents&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;Durability&lt;/td&gt;
+ &lt;td style="text-align: right"&gt;0 non-OK terminal GC acks&lt;/td&gt;
+ &lt;td&gt;90 days&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;strata:durability:error_rate5m&lt;/code&gt; (always-on; no inventory dep)&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h2 id="availability"&gt;Availability&lt;a class="anchor" href="#availability"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;blockquote class='book-hint '&gt;
+&lt;p&gt;99.9% of S3 requests over a rolling 30-day window return a non-5xx
+status. Admin paths (&lt;code&gt;bucket=&amp;quot;_admin&amp;quot;&lt;/code&gt;) excluded — admin error rate is
+tracked separately under the per-tenant dashboard.&lt;/p&gt;</description></item><item><title>Profiling</title><link>https://danchupin.github.io/strata/operate/profiling/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/operate/profiling/</guid><description>&lt;h1 id="profiling"&gt;Profiling&lt;a class="anchor" href="#profiling"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata exposes the Go runtime&amp;rsquo;s standard &lt;code&gt;/debug/pprof/*&lt;/code&gt; endpoints when
+&lt;code&gt;STRATA_PPROF_ENABLED=true&lt;/code&gt;. Profiles are protected by the same auth
+chain that guards &lt;code&gt;/admin/v1/*&lt;/code&gt; (session cookie or SigV4). The
+endpoints are &lt;strong&gt;opt-in&lt;/strong&gt; — defense-in-depth — because the heap profile
+can leak the contents of in-flight buffers in error paths.&lt;/p&gt;
+&lt;h2 id="quick-start"&gt;Quick start&lt;a class="anchor" href="#quick-start"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;div class="highlight"&gt;&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-bash" data-lang="bash"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# Boot Strata with pprof attached to the admin listener.&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nv"&gt;STRATA_PPROF_ENABLED&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="nb"&gt;true&lt;/span&gt; &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nv"&gt;STRATA_ADMIN_LISTEN&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;127.0.0.1:9001 &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nv"&gt;STRATA_AUTH_MODE&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;required &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="nv"&gt;STRATA_STATIC_CREDENTIALS&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;AKADMIN:SKADMIN:admin &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; strata server
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# Capture a 30s CPU profile (SigV4 from go tool pprof via aws-cli sigv4 wrapper&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# OR from a pre-signed URL; for loopback dev use the admin session cookie).&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;go tool pprof -seconds&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="m"&gt;30&lt;/span&gt; -http&lt;span class="o"&gt;=&lt;/span&gt;:7070 &lt;span class="se"&gt;\
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; -url &lt;span class="s1"&gt;&amp;#39;http://127.0.0.1:9001/debug/pprof/profile?seconds=30&amp;#39;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;h2 id="configuration"&gt;Configuration&lt;a class="anchor" href="#configuration"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;table&gt;
+ &lt;thead&gt;
+ &lt;tr&gt;
+ &lt;th&gt;Env var&lt;/th&gt;
+ &lt;th&gt;TOML key&lt;/th&gt;
+ &lt;th&gt;Default&lt;/th&gt;
+ &lt;th&gt;Description&lt;/th&gt;
+ &lt;/tr&gt;
+ &lt;/thead&gt;
+ &lt;tbody&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;STRATA_PPROF_ENABLED&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;pprof.enabled&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;false&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;Master switch. &lt;code&gt;true&lt;/code&gt; registers &lt;code&gt;/debug/pprof/*&lt;/code&gt;.&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;STRATA_PPROF_LISTEN&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;pprof.listen&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;empty&lt;/td&gt;
+ &lt;td&gt;Optional dedicated listener (e.g. &lt;code&gt;127.0.0.1:9002&lt;/code&gt;). Empty → attach to &lt;code&gt;admin_listen.listen&lt;/code&gt;. One of the two MUST be set when enabled — pprof never attaches to the S3 hot path.&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;STRATA_PPROF_BLOCK_RATE&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;pprof.block_rate&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;0&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;runtime.SetBlockProfileRate(N)&lt;/code&gt; argument. &lt;code&gt;0&lt;/code&gt; keeps block profile data empty.&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;&lt;code&gt;STRATA_PPROF_MUTEX_RATE&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;pprof.mutex_rate&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;0&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;runtime.SetMutexProfileFraction(N)&lt;/code&gt; argument. &lt;code&gt;0&lt;/code&gt; keeps mutex profile data empty.&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;&lt;code&gt;STRATA_PPROF_ENABLED=true&lt;/code&gt; with neither &lt;code&gt;STRATA_PPROF_LISTEN&lt;/code&gt; nor
+&lt;code&gt;STRATA_ADMIN_LISTEN&lt;/code&gt; set fails fast at boot — the gateway refuses to
+silently expose profiling on the public S3 listener.&lt;/p&gt;</description></item><item><title>Per-bucket signing key rotation</title><link>https://danchupin.github.io/strata/operate/key-rotation/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/operate/key-rotation/</guid><description>&lt;h1 id="per-bucket-signing-key-rotation"&gt;Per-bucket signing key rotation&lt;a class="anchor" href="#per-bucket-signing-key-rotation"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;Strata supports KMS-backed per-bucket SigV4 signing keys (US-001 /
 US-002 of &lt;code&gt;ralph/auth-dx-trailer-lima&lt;/code&gt;). Each opted-in bucket carries a
 32-byte DEK wrapped under a KMS CMK (AWS KMS / Vault Transit /
