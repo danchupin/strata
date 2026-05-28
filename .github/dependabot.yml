@@ -1,0 +1,162 @@
+# Dependabot config (US-004 Cycle C supply-chain-security).
+#
+# 5 ecosystems × 6 entries (Docker covers TWO Dockerfile dirs per CLAUDE.md
+# RADOS / cephimpl module split):
+#   - Go main module (/go.mod)
+#   - Go cephimpl module (/internal/data/rados/cephimpl/go.mod)
+#   - GitHub Actions (/)
+#   - npm (/web)
+#   - Docker base images (/deploy/docker/ + /deploy/docker/ceph-bootstrap/)
+#
+# Per-ecosystem grouping (PRD S6): Go ecosystems split into go-prod-patch
+# (patches) + go-prod-minor-major (minor + major) — patch-class group is
+# auto-mergeable via .github/workflows/dependabot-auto-merge.yml; the
+# minor-major group always requires human review. Actions ecosystem
+# single actions-all group (low-churn). npm split same as Go. Docker
+# entries: no grouping (one Dockerfile = one base image).
+#
+# Weekly Friday 06:00 UTC keeps weekend turnaround tight. Goal:
+# ≤2 PRs/ecosystem/week absent CVE; CVE-driven advisories ship within
+# 1 week per SECURITY.md (US-005) patch-class advisory cadence.
+#
+# Commit message convention: `chore(deps): <scope> <package> <old> → <new>`
+# via commit-message.prefix — auto-merge workflow keys on this shape.
+
+version: 2
+
+updates:
+  # 1. Go main module.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: friday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(deps)
+      include: scope
+    labels:
+      - dependencies
+      - go
+    groups:
+      go-prod-patch:
+        applies-to: version-updates
+        update-types:
+          - patch
+      go-prod-minor-major:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - major
+
+  # 2. Go cephimpl module (separate go.mod per CLAUDE.md RADOS / cephimpl
+  #    module split — go-ceph dependency lives here, NOT in main).
+  - package-ecosystem: gomod
+    directory: /internal/data/rados/cephimpl
+    schedule:
+      interval: weekly
+      day: friday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(deps)
+      include: scope
+    labels:
+      - dependencies
+      - go
+      - cephimpl
+    groups:
+      go-cephimpl-patch:
+        applies-to: version-updates
+        update-types:
+          - patch
+      go-cephimpl-minor-major:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - major
+
+  # 3. GitHub Actions (low-churn — single group covers patch + minor + major).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: friday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(deps)
+      include: scope
+    labels:
+      - dependencies
+      - github-actions
+    groups:
+      actions-all:
+        applies-to: version-updates
+        update-types:
+          - patch
+          - minor
+          - major
+
+  # 4. npm (web/ frontend bundle — Vite + React + Playwright).
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+      day: friday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(deps)
+      include: scope
+    labels:
+      - dependencies
+      - npm
+    groups:
+      npm-patch:
+        applies-to: version-updates
+        update-types:
+          - patch
+      npm-minor-major:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - major
+
+  # 5a. Docker base image — gateway runtime (quay.io/ceph/ceph).
+  - package-ecosystem: docker
+    directory: /deploy/docker
+    schedule:
+      interval: weekly
+      day: friday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(deps)
+      include: scope
+    labels:
+      - dependencies
+      - docker
+
+  # 5b. Docker base image — ceph-bootstrap lab helper.
+  - package-ecosystem: docker
+    directory: /deploy/docker/ceph-bootstrap
+    schedule:
+      interval: weekly
+      day: friday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(deps)
+      include: scope
+    labels:
+      - dependencies
+      - docker
+      - ceph-bootstrap
