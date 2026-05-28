@@ -89,6 +89,7 @@ func newPDClientWithTLS(endpoints []string, tlsCfg TLSConfig) *pdClient {
 	transport := http.DefaultTransport
 	if tlsCfg.HasAny() {
 		scheme = "https"
+		// #nosec G402: operator-opt-in SkipVerify (STRATA_TIKV_TLS_SKIP_VERIFY); WARN-logged at boot.
 		tc := &tls.Config{InsecureSkipVerify: tlsCfg.SkipVerify}
 		if tlsCfg.CAFile != "" {
 			if pemBytes, err := os.ReadFile(tlsCfg.CAFile); err == nil {

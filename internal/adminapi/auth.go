@@ -83,6 +83,7 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 // is honored only when the request source matches a configured
 // STRATA_TRUSTED_PROXIES CIDR (US-007 harden-gateway).
 func (s *Server) sessionCookie(r *http.Request, value string, maxAge int) *http.Cookie {
+	// #nosec G124: Secure flag set conditionally via s.isHTTPS(r) so plain-HTTP dev keeps working; HttpOnly + SameSite=Strict explicit.
 	return &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    value,

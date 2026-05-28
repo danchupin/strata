@@ -10,7 +10,7 @@ COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 	smoke-drain-lifecycle smoke-drain-transparency smoke-drain-progress-ui smoke-cluster-weights \
 	smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale \
 	smoke-single-binary smoke-tikv-default-lab smoke-rgw-lab-restart smoke-observability \
-	race-soak race-soak-tikv lint-nginx-lab helm-lint promtool-check govulncheck trivy-check slo-report \
+	race-soak race-soak-tikv lint-nginx-lab helm-lint promtool-check govulncheck trivy-check gosec slo-report \
 	bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi bench-rgw-comparison bench-rgw-comparison-with-cassandra \
 	docs-serve docs-build docs-openapi-copy clean
 
@@ -502,6 +502,18 @@ trivy-check:
 	@command -v trivy > /dev/null || { echo "trivy not installed — skip trivy-check (install: https://aquasecurity.github.io/trivy/latest/getting-started/installation/)"; exit 0; }
 	bash scripts/check-trivy.sh
 	bash scripts/check-trivy.sh --high
+
+# gosec — Go static-analysis CVE / anti-pattern scan against main module
+# (US-003 cycle C supply-chain-security). Wraps scripts/check-gosec.sh;
+# hard-fails on MEDIUM+ findings, surfaces LOW as WARN-only via the
+# --low flag (same script, second invocation). Rule + path excludes
+# documented in .gosec.yml. Degrades to WARN + exit 0 when gosec
+# missing — matches helm-lint / promtool-check / govulncheck /
+# trivy-check pattern.
+gosec:
+	@command -v gosec > /dev/null || { echo "gosec not installed — skip gosec (install: go install github.com/securego/gosec/v2/cmd/gosec@latest)"; exit 0; }
+	bash scripts/check-gosec.sh
+	bash scripts/check-gosec.sh --low
 
 # Render a weekly SLO compliance report (US-005 cycle B prod-observability).
 # Wraps `strata admin slo-report` with lab defaults — Prometheus on

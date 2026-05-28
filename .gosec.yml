@@ -1,0 +1,106 @@
+# .gosec.yml — gosec config + rule-exclude rationale for Strata
+# (US-003 cycle C supply-chain-security).
+#
+# Gosec ships its rule-exclude knob as a CLI flag (`-exclude=Gxxx`),
+# NOT a config-file key. This file documents the rationale for every
+# rule excluded by `scripts/check-gosec.sh` + the CI gate in
+# .github/workflows/ci.yml :: gosec — keep this file + the wrapper's
+# GOSEC_EXCLUDE_RULES list + the workflow `-exclude=...` invocation in
+# lockstep when adding / removing a rule.
+#
+# Severity gate: MEDIUM+ (CLI flag `-severity=medium`). LOW findings
+# log as WARN via the WARN-only pass but do NOT fail CI.
+#
+# Per-line annotation budget: ≤5 `// #nosec G<n>: <reason>` lines
+# (per US-003 AC). Current count = 3 (G402 × 2 + G124 × 1) — see grep
+# `// #nosec` for the live list.
+
+global:
+  # Allow `// #nosec` annotations to suppress findings on the
+  # offending line. Annotations must carry the rule id + rationale:
+  # `// #nosec G402: operator-opt-in InsecureSkipVerify`.
+  nosec: enabled
+
+  # Emit one row per audit-pass finding into the JSON report (gosec
+  # `audit` semantic — surface every nosec'd line for review).
+  audit: enabled
+
+# --- Rule-exclude rationale (CLI `-exclude=` keeps these out of CI) ---
+#
+# G101 — Hardcoded credentials. False-positives:
+#   - `EnvVaultSecretID = "STRATA_SSE_VAULT_SECRET_ID"` — env var name
+#     literal, NOT a credential value.
+#   - `DefaultJWTSecretFile = "/etc/strata/jwt-secret"` — file path,
+#     NOT a credential value. ConfigMap mount point.
+#   - `var envMap = map[string]string{"STRATA_LISTEN": ..., ...}` —
+#     env var name allowlist for the koanf provider (US-014 of the
+#     env-toml parity audit).
+#   Gosec's regex flags any string containing "secret" / "password" /
+#   "token". The codebase has zero hardcoded credentials by design;
+#   audit happens at code-review time.
+#
+# G104 — Unhandled errors. Too noisy without errcheck integration;
+#   deferred. The codebase enforces error handling via `errcheck` in
+#   `make vet` — duplicating gosec's check adds no signal.
+#
+# G115 — Integer conversion overflow. Idiomatic Go pattern at scale
+#   (uint64 ↔ int64 conversions in chunk size / offset / row count
+#   arithmetic). gosec flags 39 such conversions across the codebase
+#   — all bounded by Cassandra/TiKV row limits or HTTP body caps that
+#   make overflow physically impossible. Revisit if a real overflow
+#   surfaces in fuzz / chaos testing (Cycle F).
+#
+# G304 — File path provided as taint input. Strata reads operator-
+#   supplied paths at boot (cert / CA / config files). The trust
+#   boundary is the process-launch environment (env / flags), NOT the
+#   HTTP request body — gosec's taint model doesn't distinguish.
+#
+# G401, G501, G505 — Use of MD5/SHA1 weak crypto. Required by the
+#   S3 protocol: MD5 for `Content-MD5` headers + ETag computation
+#   (`s3api/encryption.go`, `s3api/multipart.go`, `s3api/sse_io.go`,
+#   `inventory/inventory.go`, `accesslog/format.go`,
+#   `data/memory/backend.go`, `data/rados/parallel.go`); SHA1 for
+#   `streaming-chunk-prev-sig` HMAC chain in SigV4 streaming
+#   (`auth/streaming.go`) + TOTP MFA (`s3api/mfa.go`) + S3
+#   `x-amz-checksum-sha1` header (`s3api/checksum.go`). These are
+#   non-negotiable for upstream S3 compatibility. crypto/sha256 is
+#   used everywhere a strong hash is appropriate (SigV4 main, content
+#   integrity).
+#
+# G703 — Path traversal via taint analysis. False-positive on
+#   `console.go::http.ServeFileFS(w, r, root, rel)` — `root` is an
+#   `embed.FS` of pre-built web/ assets; only embedded paths resolve.
+#   No filesystem escape possible.
+#
+# G704 — SSRF via taint analysis. False-positive on
+#   `cmd/strata/admin/slo_report.go::http.NewRequestWithContext(...,
+#   baseURL+"/api/v2/alerts")` — `baseURL` is operator-supplied via
+#   `--prometheus-url` flag at command invocation, trust boundary is
+#   process-launch env, NOT HTTP request body.
+#
+# G705 — XSS via taint analysis. False-positive on `w.Write(blob)`
+#   sites where `blob` is a pre-validated XML / JSON / policy
+#   document round-tripped through Strata's own encoder (NOT
+#   reflected user input). Targets: `s3api/multipart.go:730` (XML
+#   multipart Complete echo), `s3api/inventory.go:161` (inventory
+#   manifest blob), `adminapi/buckets_policy.go:49` (bucket policy
+#   JSON blob).
+#
+# G709 — Unsafe deserialization via taint analysis. False-positive
+#   on every `xml.Unmarshal(blob, &cfg)` call. `xml.Unmarshal`'s
+#   target struct enforces the schema — no gadget chain
+#   reachable. The blobs are bucket config payloads (lifecycle,
+#   CORS, inventory, logging, replication, policy) under operator
+#   control; HTTP request bodies are length-capped upstream.
+#
+# --- Path-exclude rationale (CLI `-exclude-dir=...`) ---
+#
+# internal/racetest/ — race-test harness, not the gateway hot path.
+#   G404 (weak rand) and similar are intentional (deterministic
+#   workload seeding). Excluded from the gate via -exclude-dir. The
+#   companion `cmd/strata-racecheck` binary follows the same
+#   pattern.
+#
+# scripts/ — developer / operator one-shot utilities (race baseline
+#   generator, env audit, etc.). G301 / G302 file-perm findings on
+#   the genbaseline tool are dev-only. Excluded via -exclude-dir.
