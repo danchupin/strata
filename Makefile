@@ -10,7 +10,7 @@ COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 	smoke-drain-lifecycle smoke-drain-transparency smoke-drain-progress-ui smoke-cluster-weights \
 	smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale \
 	smoke-single-binary smoke-tikv-default-lab smoke-rgw-lab-restart smoke-observability \
-	race-soak race-soak-tikv lint-nginx-lab helm-lint promtool-check slo-report \
+	race-soak race-soak-tikv lint-nginx-lab helm-lint promtool-check govulncheck slo-report \
 	bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi bench-rgw-comparison bench-rgw-comparison-with-cassandra \
 	docs-serve docs-build docs-openapi-copy clean
 
@@ -479,6 +479,17 @@ helm-lint:
 promtool-check:
 	@command -v promtool > /dev/null || { echo "promtool not installed — skip promtool-check (install: go install github.com/prometheus/prometheus/cmd/promtool@latest)"; exit 0; }
 	promtool check rules deploy/prometheus/alerts.yml
+
+# govulncheck — Go CVE callgraph scan against main + cephimpl modules
+# (US-001 cycle C supply-chain-security). Wraps scripts/check-govulncheck.sh;
+# hard-fails on HIGH/CRITICAL findings whose callgraph reaches Strata code
+# under internal/ or cmd/, WARN-only for /internal/racetest, /scripts/,
+# and *_test.go matches. Degrades to WARN + exit 0 when govulncheck binary
+# missing — matches helm-lint / promtool-check pattern.
+govulncheck:
+	@command -v govulncheck > /dev/null || { echo "govulncheck not installed — skip govulncheck (install: go install golang.org/x/vuln/cmd/govulncheck@latest)"; exit 0; }
+	bash scripts/check-govulncheck.sh
+	bash scripts/check-govulncheck.sh --cephimpl
 
 # Render a weekly SLO compliance report (US-005 cycle B prod-observability).
 # Wraps `strata admin slo-report` with lab defaults — Prometheus on
