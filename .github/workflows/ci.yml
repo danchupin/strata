@@ -139,6 +139,67 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  trivy-image:
+    name: trivy (image CVE scan)
+    runs-on: ubuntu-latest
+    needs: docker-build
+    # Parallel scanner job — sibling of e2e / e2e-full, both depend on
+    # docker-build (US-002 cycle C supply-chain-security). Rebuilds
+    # strata:ceph in-job (artifact pass via docker save | docker load
+    # of a multi-GB image is slower than rebuilding under buildx cache,
+    # which is what e2e / e2e-full already do). Gate semantics:
+    #   CRITICAL → hard-fail (trivy-action exit-code=1) + SARIF upload
+    #              to GitHub Code Scanning (repo Security tab).
+    #   HIGH     → WARN-only (exit-code=0) + JSON artifact (operator
+    #              review-only; not a merge gate).
+    # security-events: write required for codeql-action SARIF upload.
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build gateway image
+        run: docker build -f deploy/docker/Dockerfile -t strata:ceph .
+      # SHA-pinned third-party actions (US-002 AC):
+      #   aquasecurity/trivy-action v0.36.0 →
+      #       ed142fd0673e97e23eac54620cfb913e5ce36c25 (annotated tag commit)
+      #   github/codeql-action v3.36.0 →
+      #       03e4368ac7daa2bd82b3e85262f3bf87ee112f57 (annotated tag commit)
+      - name: trivy (CRITICAL gate)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: 'strata:ceph'
+          format: 'sarif'
+          output: 'trivy-critical.sarif'
+          severity: 'CRITICAL'
+          exit-code: '1'
+          trivy-config: 'trivy.yaml'
+      - name: Upload CRITICAL SARIF to Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@03e4368ac7daa2bd82b3e85262f3bf87ee112f57 # v3.36.0
+        with:
+          sarif_file: 'trivy-critical.sarif'
+          category: 'trivy-critical'
+      - name: trivy (HIGH WARN-only)
+        if: always()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: 'strata:ceph'
+          format: 'json'
+          output: 'trivy-high.json'
+          severity: 'HIGH'
+          exit-code: '0'
+          trivy-config: 'trivy.yaml'
+      - name: Upload HIGH JSON artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-high
+          path: trivy-high.json
+          if-no-files-found: warn
+          retention-days: 14
+
   unit:
     name: Unit tests (-race)
     runs-on: ubuntu-latest

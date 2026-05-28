@@ -10,7 +10,7 @@ COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 	smoke-drain-lifecycle smoke-drain-transparency smoke-drain-progress-ui smoke-cluster-weights \
 	smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale \
 	smoke-single-binary smoke-tikv-default-lab smoke-rgw-lab-restart smoke-observability \
-	race-soak race-soak-tikv lint-nginx-lab helm-lint promtool-check govulncheck slo-report \
+	race-soak race-soak-tikv lint-nginx-lab helm-lint promtool-check govulncheck trivy-check slo-report \
 	bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi bench-rgw-comparison bench-rgw-comparison-with-cassandra \
 	docs-serve docs-build docs-openapi-copy clean
 
@@ -490,6 +490,18 @@ govulncheck:
 	@command -v govulncheck > /dev/null || { echo "govulncheck not installed — skip govulncheck (install: go install golang.org/x/vuln/cmd/govulncheck@latest)"; exit 0; }
 	bash scripts/check-govulncheck.sh
 	bash scripts/check-govulncheck.sh --cephimpl
+
+# trivy-check — image CVE scan against locally-built strata:ceph
+# (US-002 cycle C supply-chain-security). Wraps scripts/check-trivy.sh;
+# hard-fails on CRITICAL severity, surfaces HIGH as WARN-only via the
+# --high flag (same script, second invocation). Operator runs
+# `make docker-build` first to populate the image. Degrades to WARN +
+# exit 0 when trivy missing, docker missing, or strata:ceph absent —
+# matches helm-lint / promtool-check / govulncheck pattern.
+trivy-check:
+	@command -v trivy > /dev/null || { echo "trivy not installed — skip trivy-check (install: https://aquasecurity.github.io/trivy/latest/getting-started/installation/)"; exit 0; }
+	bash scripts/check-trivy.sh
+	bash scripts/check-trivy.sh --high
 
 # Render a weekly SLO compliance report (US-005 cycle B prod-observability).
 # Wraps `strata admin slo-report` with lab defaults — Prometheus on
