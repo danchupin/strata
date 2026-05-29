@@ -39,9 +39,14 @@ for the order.
 
 | Mode | Behaviour |
 |---|---|
-| `""` (default) | Auth off. Every request is allowed. Used by `make run-memory` for local development. |
-| `optional` | Verify if a signature is present; allow unsigned requests through with the anonymous principal. |
-| `required` | Reject unsigned requests with `AccessDenied`. |
+| `required` (**default**) | Reject unsigned requests with `AccessDenied`; every request must carry a valid SigV4 signature. Secure-by-default — an unconfigured deployment is locked down. |
+| `optional` | Verify if a signature is present; allow unsigned requests through with the anonymous principal (which is then gated by bucket policy/ACL — anonymous can only reach public resources). |
+| `off` / `disabled` / `""` | **Dev-only.** Bypasses SigV4 *and* the bucket policy/ACL stack entirely — every request is full-access. Never use in production; the gateway logs a `WARN` at boot when off is active. Set explicitly by `make run-memory` and the e2e harness. |
+
+> **Secure-by-default note.** The default flipped from `off` to `required`. A
+> gateway started with no `STRATA_AUTH_MODE` now demands valid signatures. Local
+> dev paths opt into `off` explicitly; production should run `required` (or
+> `optional` for public-bucket workloads).
 
 ## Presigned URLs
 
@@ -88,8 +93,8 @@ identity carries:
 
 - `Owner` — canonical user (used as the bucket / object owner on writes).
 - `AccessKey` — the SigV4 access key id (audited on every write).
-- `Anonymous bool` — set when the request was unsigned and the auth mode
-  is `""` or `optional`.
+- `IsAnonymous bool` — set when the request was unsigned under `optional` mode.
+- `FullAccess bool` — set under `off` mode; bypasses the policy/ACL gates.
 
 Handlers reach the identity via `auth.FromContext(r.Context())`. The
 audit log middleware (`internal/s3api/audit.go`) reads the same value to

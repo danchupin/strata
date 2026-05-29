@@ -228,6 +228,7 @@ ceph-pool:
 
 run-memory: build
 	STRATA_LISTEN=:9999 STRATA_META_BACKEND=memory STRATA_DATA_BACKEND=memory \
+	STRATA_AUTH_MODE=off \
 		./bin/strata server
 
 # Dev-only path: runs the strata binary directly (no compose) against a
@@ -239,6 +240,7 @@ run-cassandra: build
 	STRATA_META_BACKEND=cassandra STRATA_DATA_BACKEND=memory \
 	STRATA_CASSANDRA_HOSTS=127.0.0.1 STRATA_CASSANDRA_DC=datacenter1 \
 	STRATA_WORKERS=gc,lifecycle \
+	STRATA_AUTH_MODE=off \
 		./bin/strata server
 
 # Bring up the strata gateway replicas + nginx LB without (re-)starting
