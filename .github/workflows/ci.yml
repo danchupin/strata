@@ -80,8 +80,9 @@ jobs:
       # compile the package; the librados-less host fails the cgo link. The
       # full ceph build runs in the docker-build job below where librados is
       # available; here we only confirm the module's go.mod still tidies.
-      - run: cd internal/data/rados/cephimpl && GOWORK=off go mod tidy -diff || \
-          (echo "cephimpl/ go.mod drift" && exit 1)
+      - run: |
+          cd internal/data/rados/cephimpl && GOWORK=off go mod tidy -diff \
+            || (echo "cephimpl/ go.mod drift" && exit 1)
       # promtool lint of deploy/prometheus/alerts.yml — US-002 cycle B
       # prod-observability. Installs the Prometheus reference promtool
       # from the upstream module so the rule semantics match what the lab
