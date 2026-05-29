@@ -230,3 +230,18 @@ Cycle: ralph/supply-chain-security
   - hugo does NOT fail on broken {{< relref >}} by default — docs-build green ≠ all refs resolve. Used relref only to existing pages (/operate/tls-termination, /deploy/). External GitHub blob/tree links for deploy/k8s files (not in Hugo content tree).
   - operate/_index.md uses {{% columns %}} blocks (Hugo Book theme) — one new {{% columns %}} per added card row; weights on operate pages now span 10..55 (image-verification=55, after tls-termination=50).
 ---
+
+## 2026-05-29 - US-011 (Composite smoke + ROADMAP flip Done + PRD removal)
+- scripts/smoke-supply-chain.sh: composite gate runner (a-f): make govulncheck / trivy-check / gosec / license-audit, scripts/smoke-image-verification.sh, .github/dependabot.yml YAML validity. yq primary, python-yaml fallback, WARN-skip when neither. Each sub-gate self-degrades to WARN+exit0 on missing toolchain; composite hard-fails ONLY on a real finding/parse-error.
+- Makefile: smoke-supply-chain target + .PHONY entry.
+- ROADMAP.md: Cycle C entry flipped to Done (US-001..US-011 summary). SHA backfilled in follow-up commit (af36469) per repo precedent (Cycle B did same, commit 9ed21ca) — amend moves the hash, so close-flip SHA is a separate backfill commit, not an amend.
+- Deleted tasks/prd-supply-chain-security.md (PRD lifecycle: Ralph snapshot is canonical).
+- Files: scripts/smoke-supply-chain.sh (new), Makefile, ROADMAP.md, tasks/prd-supply-chain-security.md (deleted).
+- Verified: make smoke-supply-chain green (govulncheck/trivy WARN-skip not-installed, gosec+license PASS, image-verify PASS, dependabot YAML valid), make test-race clean (no FAIL/panic), make docs-build OK, make vet + make build pass.
+- **Learnings for future iterations:**
+  - ROADMAP close-flip SHA: amend changes commit hash, so you can't embed the final SHA inside the commit that flips. Repo pattern = separate `docs: ROADMAP backfill SHA for Cycle <X> close-flip` commit (see 9ed21ca Cycle B, af36469 Cycle C).
+  - CLAUDE.md had a pre-existing uncommitted compression at session start (caveman:compress style, lossy) — left it OUT of the US-011 commit since unrelated to the story. Don't blind-commit pre-existing working-tree edits as part of a story.
+  - Composite-smoke degradation contract: sub-gates WARN+exit0 on missing toolchain → safe to run on any dev box; only a real finding fails. Reuse scripts/lib/severity.sh color helpers (severity_green/yellow/red/reset) for consistent output.
+  - make test-race takes ~50s (racetest harness dominates at 46s); budget accordingly.
+- CYCLE COMPLETE: all 11 stories pass. Tag push v0.0.1-alpha.1 + live release-image.yml/CI run remain maintainer outward-facing steps (not sandbox-executable).
+---
