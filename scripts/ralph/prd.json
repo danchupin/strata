@@ -105,7 +105,7 @@
         "Tests pass"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -125,8 +125,8 @@
         "Tests pass"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "release-image.yml shipped: build+push job (docker login/metadata/build-push, all SHA-pinned) → SLSA generator_container_slsa3.yml@v2.1.0 reusable workflow attesting the pushed digest. SLSA generator referenced by TAG not SHA (upstream trust-root self-verify requirement — documented in-file). build job exposes image+digest outputs for US-007/US-008. Annotated tag v0.0.1-alpha.1 cut locally on closing commit; `git push origin v0.0.1-alpha.1` is the maintainer-run outward-facing publish trigger (live ghcr push + Actions run not executable/verifiable from sandbox)."
     },
     {
       "id": "US-007",
@@ -144,8 +144,8 @@
         "Tests pass"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "sbom job appended to release-image.yml: needs [build, provenance] so SBOM anchors the same digest the SLSA generator attested. anchore/sbom-action@v0.24.0 (SHA e22c3899) scans image BY DIGEST (build job output, not a mutable-tag re-resolve), emits SPDX 2.3 JSON, auto-uploads 90-day workflow artifact. GHCR login step required (syft pulls via docker cred store). softprops/action-gh-release@v3.0.0 (SHA b4309332) attaches strata-<ref>-sbom.spdx.json to the GitHub Release ONLY on v* tag push (fail_on_unmatched_files:true). Smoke against published image deferred to maintainer tag-push (no live ghcr image in sandbox)."
     },
     {
       "id": "US-008",
