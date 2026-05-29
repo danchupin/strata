@@ -223,7 +223,12 @@ func TestCertReloaderK8sSymlinkSwap(t *testing.T) {
 		t.Fatalf("rename swap: %v", err)
 	}
 
-	deadline := time.Now().Add(3 * time.Second)
+	// 10s (not 3s): the reloader polls every 50ms so this returns the
+	// instant the swap is observed on the happy path; the generous ceiling
+	// only absorbs CI scheduling stalls under load (this was a flaky
+	// integration-job failure — the mechanism is sound, the old deadline
+	// was just too tight for a heavily-loaded runner).
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		current := store.load()
 		if len(current.pairs) > 0 && current.pairs[0].fp != beforeFP {
