@@ -63,8 +63,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Root cause: internal/s3api/audit.go auditWriter wraps the ResponseWriter for the per-request audit-row hook but did NOT forward Flush(). mux.Handle('/admin/v1/', adminAudit) -> AuditMiddleware wraps w in *auditWriter -> authMiddleware (cookie path) passes it straight through -> adminapi.handleAuditStream type-asserts w.(http.Flusher). With auditWriter hiding the std-lib writer's Flusher, ok=false -> 500 'streaming unsupported' -> the EventSource errors and never reaches state 'open', so the AuditTail page never renders 'connected' and debug.spec.ts:52 times out. Never caught by adminapi/audit_stream_test.go because that test drives the handler with httptest.ResponseRecorder (which DOES implement Flusher) instead of through the wired auditWriter. Fix: added a Flush() method to *auditWriter that forwards to the underlying ResponseWriter when it supports flushing (standard wrapper pattern). Regression guard: TestAuditWriterForwardsFlush in internal/s3api/audit_test.go mounts AuditMiddleware over an SSE-shaped handler via httptest.NewServer (real http server => real Flusher) and asserts a GET to /admin/v1/audit/stream returns 200 text/event-stream with the streamed frame, not 500. Verified locally: 'playwright test debug.spec.ts -g audit-tail' PASS (connected + PutObject row + N events streamed); full debug.spec.ts 5/5 PASS; web pnpm typecheck clean; go test ./internal/s3api ./internal/adminapi ./internal/auditstream PASS; go build + vet clean. CI run id: PENDING (verify End-to-end UI (Playwright) job green after push)."
     },
     {
       "id": "US-005",

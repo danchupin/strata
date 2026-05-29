@@ -292,3 +292,49 @@ func TestParseAuditRetention(t *testing.T) {
 		t.Fatal("garbage input should error")
 	}
 }
+
+// TestAuditWriterForwardsFlush is the regression guard for US-004: the
+// AuditMiddleware wraps the ResponseWriter in *auditWriter, which must
+// forward Flush() to the underlying std-lib writer. Without it, SSE handlers
+// downstream (adminapi.handleAuditStream) fail their `w.(http.Flusher)`
+// assertion and 500 ("streaming unsupported"), so the live audit-tail
+// EventSource never reaches the `open`/"connected" state. A GET is used so
+// the audit-row write path is skipped (auditableMethod==false) — this test
+// is about the writer shape, not the row hook.
+func TestAuditWriterForwardsFlush(t *testing.T) {
+	store := metamem.New()
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		f.Flush()
+		_, _ = w.Write([]byte("data: ping\n\n"))
+		f.Flush()
+	})
+	ts := httptest.NewServer(s3api.NewAuditMiddleware(store, time.Hour, inner))
+	t.Cleanup(ts.Close)
+
+	resp, err := http.Get(ts.URL + "/admin/v1/audit/stream")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status: got %d want 200; body=%s", resp.StatusCode, string(body))
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Fatalf("content-type: got %q want text/event-stream", ct)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !strings.Contains(string(body), "data: ping") {
+		t.Fatalf("streamed frame missing; body=%q", string(body))
+	}
+}
