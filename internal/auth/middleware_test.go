@@ -116,9 +116,10 @@ func TestMiddleware_RequiredMode_NoAuthHeaderRejected(t *testing.T) {
 	}
 }
 
-// US-024: disabled mode (alias of off) treats every request as anonymous,
-// even when an Authorization header is present.
-func TestMiddleware_DisabledMode_AlwaysAnonymous(t *testing.T) {
+// Disabled mode (alias of off) is the dev-only "no auth at all" posture: it
+// injects a FullAccess identity that bypasses the data-plane authz gates,
+// regardless of any Authorization header present.
+func TestMiddleware_DisabledMode_FullAccess(t *testing.T) {
 	mw := &Middleware{
 		Store: &stubStore{err: ErrNoSuchCredential},
 		Mode:  ModeDisabled,
@@ -135,8 +136,11 @@ func TestMiddleware_DisabledMode_AlwaysAnonymous(t *testing.T) {
 		t.Fatalf("status: got %d want %d", rr.Code, http.StatusNoContent)
 	}
 	info := *captured
-	if info == nil || !info.IsAnonymous {
-		t.Fatalf("expected anonymous identity, got %+v", info)
+	if info == nil || !info.FullAccess {
+		t.Fatalf("expected full-access identity, got %+v", info)
+	}
+	if info.IsAnonymous {
+		t.Fatalf("full-access identity must not be anonymous: %+v", info)
 	}
 }
 

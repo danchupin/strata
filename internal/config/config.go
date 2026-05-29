@@ -569,7 +569,9 @@ func defaults() Config {
 			Pool:       "strata.rgw.buckets.data",
 		},
 		Auth: AuthConfig{
-			Mode:        "off",
+			// Secure-by-default: an unconfigured deployment demands valid
+			// SigV4. Dev/test paths opt into STRATA_AUTH_MODE=off explicitly.
+			Mode:        "required",
 			STSDuration: time.Hour,
 			KeyMaxAge:   90 * 24 * time.Hour,
 		},

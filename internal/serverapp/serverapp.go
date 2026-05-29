@@ -98,6 +98,9 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	if err != nil {
 		return fmt.Errorf("auth: %w", err)
 	}
+	if mode == auth.ModeOff {
+		logger.Warn("AUTH DISABLED — STRATA_AUTH_MODE=off bypasses SigV4 and all bucket policy/ACL checks; dev-only, never use in production")
+	}
 	credMap, err := auth.ParseStaticCredentials(cfg.Auth.StaticCredentials)
 	if err != nil {
 		return fmt.Errorf("auth credentials: %w", err)

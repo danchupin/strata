@@ -43,6 +43,9 @@ func (s *Server) loadBucketPolicy(r *http.Request, b *meta.Bucket) (*policy.Docu
 // pass-through; a side with a policy must Allow. Either side's Deny short
 // circuits to 403.
 func (s *Server) requireAccess(w http.ResponseWriter, r *http.Request, b *meta.Bucket, action, resourceARN string) bool {
+	if info := auth.FromContext(r.Context()); info != nil && info.FullAccess {
+		return true // ModeOff dev posture — no data-plane authz.
+	}
 	doc, err := s.loadBucketPolicy(r, b)
 	if err != nil {
 		writeError(w, r, ErrInternal)
@@ -95,6 +98,9 @@ func (s *Server) requireObjectAccess(w http.ResponseWriter, r *http.Request, b *
 // persisted grants take priority over the canned ACL otherwise.
 func (s *Server) requireACL(w http.ResponseWriter, r *http.Request, b *meta.Bucket, key, action string) bool {
 	info := auth.FromContext(r.Context())
+	if info != nil && info.FullAccess {
+		return true // ModeOff dev posture — no data-plane authz.
+	}
 	if info != nil && info.Owner != "" && info.Owner == b.Owner {
 		return true
 	}

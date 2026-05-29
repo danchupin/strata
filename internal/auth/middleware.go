@@ -21,7 +21,7 @@ type DenyHandler func(w http.ResponseWriter, r *http.Request, err error)
 func (m *Middleware) Wrap(next http.Handler, deny DenyHandler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if m.Mode == ModeOff {
-			ctx := WithAuth(r.Context(), AnonymousIdentity())
+			ctx := WithAuth(r.Context(), FullAccessIdentity())
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}

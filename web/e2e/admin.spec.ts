@@ -217,6 +217,9 @@ test.describe('Strata admin console — Phase 2 critical paths', () => {
     const uploadID = m![1];
 
     await page.goto('/console/multipart');
+    // The watchdog defaults to a 24h minimum-age filter (it surfaces *stale*
+    // uploads); drop it to 0 so the just-created upload is in scope.
+    await page.getByLabel('Minimum age (hours)').fill('0');
     await page.getByRole('button', { name: 'Refresh multipart uploads' }).click();
     const row = page.getByRole('row', { name: new RegExp(bucket) });
     await expect(row).toBeVisible({ timeout: 15_000 });
