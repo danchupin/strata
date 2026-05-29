@@ -12,7 +12,7 @@
 # log as WARN via the WARN-only pass but do NOT fail CI.
 #
 # Per-line annotation budget: ≤5 `// #nosec G<n>: <reason>` lines
-# (per US-003 AC). Current count = 3 (G402 × 2 + G124 × 1) — see grep
+# (per US-003 AC). Current count = 4 (G402 × 3 + G124 × 1) — see grep
 # `// #nosec` for the live list.
 
 global:
