@@ -31,8 +31,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Root cause: the securego/gosec docker action (pulls ghcr.io/securego/gosec:2.25.0) walks the filesystem for ./..., and with go.work present at the repo root it descends into the separate cephimpl module (internal/data/rados/cephimpl). cephimpl/backend.go imports github.com/ceph/go-ceph/rados (cgo -> needs librados.h), absent in the gosec container -> package load failure -> the MEDIUM+ gate exits non-zero even at 0 genuine findings. Locally the dev's newer gosec tolerates the load error (files:303, exit 0) so it never reproduced. Confirmed from failing run 26642343276 job log: 'Import directory: .../cephimpl' with no following 'Checking package: cephimpl'. The workflow comment ALREADY claimed 'Scans the main Go module only (cephimpl ... no incremental signal)' but the args never enforced it. Fix: added -exclude-dir=internal/data/rados/cephimpl to BOTH gosec steps in ci.yml (MEDIUM gate + LOW WARN), to scripts/check-gosec.sh GOSEC_EXCLUDE_DIRS, and documented the load-bearing rationale in .gosec.yml -- all three in lockstep. Proved locally: clean tree -> check-gosec.sh PASS exit 0; injected throwaway MEDIUM G107 (http.Get(varURL)) -> FAIL exit 1; removed -> PASS exit 0. ci.yml YAML parses. cephimpl behaviour stays covered by e2e make test-rados against the real backend (it cannot be gosec-scanned without librados anyway). CI run id: PENDING (verify gosec job green after push)."
     },
     {
       "id": "US-003",

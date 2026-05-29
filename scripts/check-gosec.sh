@@ -33,8 +33,12 @@ source "${SCRIPT_DIR}/lib/severity.sh"
 
 # Rule excludes — see .gosec.yml for rationale per rule.
 GOSEC_EXCLUDE_RULES="G101,G104,G115,G304,G401,G501,G505,G703,G704,G705,G709"
-# Path excludes — race-test harness + dev one-shot scripts.
-GOSEC_EXCLUDE_DIRS=(--exclude-dir=internal/racetest --exclude-dir=scripts)
+# Path excludes — race-test harness + dev one-shot scripts + cephimpl.
+# The cephimpl exclude is load-bearing under go.work: gosec's ./...
+# file-walk would otherwise descend into the separate cephimpl module,
+# whose backend.go imports go-ceph cgo (needs librados, absent off the
+# ceph image) → package load failure. See .gosec.yml.
+GOSEC_EXCLUDE_DIRS=(--exclude-dir=internal/racetest --exclude-dir=scripts --exclude-dir=internal/data/rados/cephimpl)
 
 severity="medium"
 exit_on_finding=1

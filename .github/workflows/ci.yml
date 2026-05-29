@@ -167,7 +167,12 @@ jobs:
     # Parallel scanner job — sibling of govulncheck / lint-build / unit
     # (US-003 cycle C supply-chain-security). Scans the main Go module
     # only (cephimpl is unannotated rados glue — same vendor deps as
-    # main, no incremental signal). Gate semantics:
+    # main, no incremental signal). The cephimpl exclude is LOAD-BEARING,
+    # not cosmetic: go.work makes gosec's ./... file-walk descend into
+    # internal/data/rados/cephimpl, whose backend.go imports go-ceph cgo
+    # (needs librados, absent in the gosec container) → package load
+    # failure fails the gate even at 0 findings. -exclude-dir keeps the
+    # walk on the main module. Gate semantics:
     #   MEDIUM+ → hard-fail (gosec exit-code=1 on findings) + SARIF
     #             upload to GitHub Code Scanning (repo Security tab).
     #   LOW     → WARN-only second pass (gosec -no-fail), JSON artifact
@@ -196,7 +201,7 @@ jobs:
       - name: gosec (MEDIUM+ gate, SARIF emit)
         uses: securego/gosec@4a3bd8af174872c778439083ded7adbf3747e770 # v2.26.1
         with:
-          args: '-severity=medium -exclude=G101,G104,G115,G304,G401,G501,G505,G703,G704,G705,G709 -exclude-dir=internal/racetest -exclude-dir=scripts -fmt=sarif -out=gosec.sarif ./...'
+          args: '-severity=medium -exclude=G101,G104,G115,G304,G401,G501,G505,G703,G704,G705,G709 -exclude-dir=internal/racetest -exclude-dir=scripts -exclude-dir=internal/data/rados/cephimpl -fmt=sarif -out=gosec.sarif ./...'
       # SHA-pinned third-party action (US-003 AC):
       #   github/codeql-action v3.36.0 →
       #       03e4368ac7daa2bd82b3e85262f3bf87ee112f57 (annotated tag commit)
@@ -210,7 +215,7 @@ jobs:
         if: always()
         uses: securego/gosec@4a3bd8af174872c778439083ded7adbf3747e770 # v2.26.1
         with:
-          args: '-severity=low -exclude=G101,G104,G115,G304,G401,G501,G505,G703,G704,G705,G709 -exclude-dir=internal/racetest -exclude-dir=scripts -no-fail -fmt=json -out=gosec-low.json ./...'
+          args: '-severity=low -exclude=G101,G104,G115,G304,G401,G501,G505,G703,G704,G705,G709 -exclude-dir=internal/racetest -exclude-dir=scripts -exclude-dir=internal/data/rados/cephimpl -no-fail -fmt=json -out=gosec-low.json ./...'
       - name: Upload gosec artifacts
         if: always()
         uses: actions/upload-artifact@v4

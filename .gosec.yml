@@ -104,3 +104,19 @@ global:
 # scripts/ — developer / operator one-shot utilities (race baseline
 #   generator, env audit, etc.). G301 / G302 file-perm findings on
 #   the genbaseline tool are dev-only. Excluded via -exclude-dir.
+#
+# internal/data/rados/cephimpl/ — LOAD-BEARING exclude, not just
+#   "no incremental signal". This is the separate go-ceph-linked
+#   module (`module github.com/danchupin/strata/cephimpl`); go.work
+#   unifies it with main at the repo root, so gosec's ./... file-walk
+#   descends into it. `cephimpl/backend.go` imports
+#   `github.com/ceph/go-ceph/rados` (cgo → needs librados.h), which is
+#   absent in the gosec docker container (`ghcr.io/securego/gosec`) —
+#   the package fails to load and gosec exits non-zero, failing the
+#   MEDIUM+ gate even at 0 genuine findings. It CANNOT be meaningfully
+#   scanned here regardless: no librados, no cgo. cephimpl shares
+#   main's vendor deps (same go.sum lineage) so it carries no
+#   incremental gosec signal, and its behaviour is covered by the e2e
+#   `make test-rados` pass against the real backend. Keep this exclude
+#   in lockstep across .github/workflows/ci.yml (both gosec steps) +
+#   scripts/check-gosec.sh GOSEC_EXCLUDE_DIRS.

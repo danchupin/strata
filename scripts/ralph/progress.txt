@@ -7,6 +7,10 @@ Cycle: ralph/ci-green-speedup
 - CI go version: actions/setup-go go-version '1.25', go.mod `go 1.25.10`. go 1.25 REJECTS `go install pkg@version` when the TARGET module's go.mod has replace/exclude directives (1.24.x tolerated them). Bit promtool — never assume a `go install …@latest` CI step that "used to work" still does after a go-toolchain bump.
 - For 3rd-party tools whose module won't `go install` (prometheus/promtool), fetch the pinned prebuilt release tarball into /usr/local/bin (on PATH for ubuntu runners) with a bounded curl retry loop.
 - Stories here are CI-infra; "Tests pass" mostly means the workflow YAML parses + the touched make target runs green locally. Full CI green is verified by pushing the branch (record run id).
+- DIAGNOSE CI-only failures from the actual run log, not local repro: `gh run list --branch main`, `gh run view <id>`, `gh run view --job <jobid> --log`. Many failures (gosec cephimpl, etc.) DON'T reproduce locally because the dev's tool versions differ from the SHA-pinned CI ones.
+- go.work unifies main + cephimpl. Any CI tool that file-walks `./...` (gosec) descends into cephimpl, whose backend.go imports go-ceph cgo (needs librados, absent off the ceph image) -> package load failure. Such tools MUST `-exclude-dir=internal/data/rados/cephimpl`. `go list ./...` does NOT include it (module boundary), so the discrepancy is tool-specific.
+- gosec lockstep trio: `.github/workflows/ci.yml` (both MEDIUM+LOW steps) + `scripts/check-gosec.sh` (GOSEC_EXCLUDE_RULES + GOSEC_EXCLUDE_DIRS) + `.gosec.yml` (rationale). Change one -> change all three.
+- Pipe-to-tail masks the upstream exit code (`$?` = tail's). Capture tool exit with `cmd >/tmp/log 2>&1; echo $?`.
 
 ## Fri May 29 - US-001 (Pin promtool version in Build+vet job)
 - Replaced the `go install github.com/prometheus/prometheus/cmd/promtool@latest` step in .github/workflows/ci.yml with a pinned (PROMTOOL_VERSION=3.6.0) prebuilt-release download + 3-attempt curl retry, installing promtool to /usr/local/bin.
@@ -17,4 +21,15 @@ Cycle: ralph/ci-green-speedup
   - The PRD's stated cause ("flaky prometheus@vX fetch") was wrong — real cause is go-toolchain strictness. Diagnose before pinning.
   - `command -v promtool` gate in `make promtool-check` means promtool only needs to be on PATH; /usr/local/bin works on ubuntu-latest, no GITHUB_PATH plumbing needed.
   - CI run id verification still PENDING — push branch and confirm Build+vet job green.
+---
+
+## Fri May 29 - US-002 (Fix gosec gate failing with zero findings)
+- Added `-exclude-dir=internal/data/rados/cephimpl` to BOTH gosec steps in .github/workflows/ci.yml (MEDIUM+ gate + LOW WARN-only), to scripts/check-gosec.sh GOSEC_EXCLUDE_DIRS, and documented the load-bearing rationale in .gosec.yml.
+- Files changed: .github/workflows/ci.yml, scripts/check-gosec.sh, .gosec.yml.
+- Root cause (from failing run 26642343276 gosec job log, not local repro): securego/gosec docker action (image ghcr.io/securego/gosec:2.25.0) file-walks ./... ; go.work drags in the separate cephimpl module; cephimpl/backend.go imports go-ceph cgo (needs librados.h, absent in the gosec container) -> package load failure -> MEDIUM+ gate exits non-zero at 0 genuine findings. Workflow comment already claimed "main module only" but args never enforced it (lockstep gap).
+- Proved both directions locally with scripts/check-gosec.sh: clean tree -> PASS exit 0; throwaway MEDIUM G107 (http.Get(varURL)) injected into internal/health -> FAIL exit 1 listing the finding; removed -> PASS exit 0. ci.yml YAML parses.
+- **Learnings for future iterations:**
+  - The dev box's gosec ("dev"/newer) tolerates cephimpl's cgo load error (files:303, exit 0); CI's pinned 2.25.0 does not. Never trust local gosec green to predict the SHA-pinned CI gosec — diagnose from the run log.
+  - gosec G204 (subprocess) did NOT fire on `exec.Command(param)` in this gosec build; G107 (http.Get with variable URL, MEDIUM) and G404 (math/rand, HIGH) are reliable throwaway triggers for proving the gate's fail-on-finding behaviour.
+  - CI run id verification still PENDING — push branch, confirm gosec job green.
 ---
