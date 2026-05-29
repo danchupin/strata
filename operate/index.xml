@@ -192,4 +192,60 @@ a load balancer that handles termination upstream. Backend connections
 network intruder cannot impersonate the gateway. RADOS is the one
 exception: it authenticates via Ceph&amp;rsquo;s native cephx protocol and ignores
 the TLS layer entirely (see &lt;a href="#rados-uses-cephx-not-tls"&gt;RADOS uses cephx&lt;/a&gt;
-below).&lt;/p&gt;</description></item></channel></rss>
+below).&lt;/p&gt;</description></item><item><title>Image verification</title><link>https://danchupin.github.io/strata/operate/image-verification/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/operate/image-verification/</guid><description>&lt;h1 id="image-verification"&gt;Image verification&lt;a class="anchor" href="#image-verification"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Every Strata image published to &lt;code&gt;ghcr.io/danchupin/strata&lt;/code&gt; is signed,
+attested, and inventoried by the release pipeline
+(&lt;code&gt;.github/workflows/release-image.yml&lt;/code&gt;). This page is the operator
+playbook for verifying that supply-chain evidence &lt;strong&gt;before&lt;/strong&gt; the image
+reaches a node, plus two Kubernetes admission-control shapes that make
+the check mandatory at deploy time.&lt;/p&gt;
+&lt;p&gt;The pipeline produces four pieces of evidence, all anchored to the same
+image digest:&lt;/p&gt;
+&lt;table&gt;
+ &lt;thead&gt;
+ &lt;tr&gt;
+ &lt;th&gt;Evidence&lt;/th&gt;
+ &lt;th&gt;Producer&lt;/th&gt;
+ &lt;th&gt;Story&lt;/th&gt;
+ &lt;th&gt;Verified with&lt;/th&gt;
+ &lt;/tr&gt;
+ &lt;/thead&gt;
+ &lt;tbody&gt;
+ &lt;tr&gt;
+ &lt;td&gt;cosign signature (keyless OIDC)&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;sigstore/cosign&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;US-008&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;cosign verify&lt;/code&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;SLSA L3 provenance&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;slsa-github-generator&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;US-006&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;cosign verify-attestation&lt;/code&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;SPDX 2.3 SBOM&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;anchore/sbom-action&lt;/code&gt; (syft)&lt;/td&gt;
+ &lt;td&gt;US-007&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;grype&lt;/code&gt; / &lt;code&gt;trivy sbom&lt;/code&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;tr&gt;
+ &lt;td&gt;License inventory&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;go-licenses&lt;/code&gt;&lt;/td&gt;
+ &lt;td&gt;US-009&lt;/td&gt;
+ &lt;td&gt;&lt;code&gt;go-licenses report&lt;/code&gt;&lt;/td&gt;
+ &lt;/tr&gt;
+ &lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h2 id="what-signing-buys-you"&gt;What signing buys you&lt;a class="anchor" href="#what-signing-buys-you"&gt;#&lt;/a&gt;&lt;/h2&gt;
+&lt;p&gt;Keyless signing gives you a &lt;strong&gt;non-repudiable provenance trail from source
+to running image&lt;/strong&gt;: the GitHub Actions OIDC identity that built the image
+is the signer, Fulcio issues a short-lived certificate bound to that
+identity, and the signature lands in the Rekor public transparency log.
+Because the signature covers the image &lt;strong&gt;digest&lt;/strong&gt; (not a mutable tag), a
+verified image is tamper-proof — repush a different layer and the
+signature no longer matches. There is &lt;strong&gt;no maintainer-held private key to
+leak or rotate&lt;/strong&gt;; the trust root is GitHub&amp;rsquo;s OIDC issuer plus the public
+Sigstore infrastructure. The Rekor entry is append-only and publicly
+queryable, so a forensic investigation can prove exactly which workflow
+run, at which commit, produced a given digest — even years later.&lt;/p&gt;</description></item></channel></rss>
