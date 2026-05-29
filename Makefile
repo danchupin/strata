@@ -9,7 +9,7 @@ COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 	smoke smoke-signed smoke-grafana smoke-lab-tikv \
 	smoke-drain-lifecycle smoke-drain-transparency smoke-drain-progress-ui smoke-cluster-weights \
 	smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale \
-	smoke-single-binary smoke-tikv-default-lab smoke-rgw-lab-restart smoke-observability \
+	smoke-single-binary smoke-tikv-default-lab smoke-rgw-lab-restart smoke-observability smoke-supply-chain \
 	race-soak race-soak-tikv lint-nginx-lab helm-lint promtool-check govulncheck trivy-check gosec license-audit slo-report \
 	bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi bench-rgw-comparison bench-rgw-comparison-with-cassandra \
 	docs-serve docs-build docs-openapi-copy clean
@@ -427,6 +427,17 @@ smoke-harden-gateway:
 # missing Prom is downgraded to WARN since the unit tests cover the real signal.
 smoke-observability:
 	bash scripts/smoke-observability.sh
+
+# Cycle C supply-chain-security composite smoke (US-011 of
+# ralph/supply-chain-security). Validates every gate shipped across
+# US-001..US-010 composes cleanly: make govulncheck / trivy-check / gosec /
+# license-audit, the cosign sign/verify roundtrip
+# (scripts/smoke-image-verification.sh), and .github/dependabot.yml YAML
+# validity. Each sub-gate self-degrades to WARN + exit 0 when its toolchain
+# is missing, so this never hard-fails on a clean machine without the
+# scanners — it fails only on a real finding / parse error.
+smoke-supply-chain:
+	bash scripts/smoke-supply-chain.sh
 
 # Race-soak driver (US-006). Brings up the Cassandra-backed stack
 # (`make up-all-ci` when CI=true, else `make up-cassandra`), waits for
