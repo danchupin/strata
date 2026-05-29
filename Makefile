@@ -10,7 +10,7 @@ COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 	smoke-drain-lifecycle smoke-drain-transparency smoke-drain-progress-ui smoke-cluster-weights \
 	smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale \
 	smoke-single-binary smoke-tikv-default-lab smoke-rgw-lab-restart smoke-observability \
-	race-soak race-soak-tikv lint-nginx-lab helm-lint promtool-check govulncheck trivy-check gosec slo-report \
+	race-soak race-soak-tikv lint-nginx-lab helm-lint promtool-check govulncheck trivy-check gosec license-audit slo-report \
 	bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi bench-rgw-comparison bench-rgw-comparison-with-cassandra \
 	docs-serve docs-build docs-openapi-copy clean
 
@@ -514,6 +514,20 @@ gosec:
 	@command -v gosec > /dev/null || { echo "gosec not installed — skip gosec (install: go install github.com/securego/gosec/v2/cmd/gosec@latest)"; exit 0; }
 	bash scripts/check-gosec.sh
 	bash scripts/check-gosec.sh --low
+
+# license-audit — go-licenses forbidden/restricted gate against main +
+# cephimpl modules (US-009 cycle C supply-chain-security). Wraps
+# scripts/check-license.sh; hard-fails on GPL/AGPL/LGPL + unallowlisted
+# unknown licenses. Allowlist in .licensei.yml. Degrades to WARN + exit 0
+# when go-licenses missing — matches helm-lint / promtool-check /
+# govulncheck / trivy-check / gosec pattern. Install go-licenses from the
+# repo dir so go.mod's `go 1.25.10` directive picks a toolchain new enough
+# to dodge upstream issue #128 (stdlib "Non go modules projects" on older
+# Go); v2.0.x is pinned-out for the same reason.
+license-audit:
+	@command -v go-licenses > /dev/null || { echo "go-licenses not installed — skip license-audit (install: go install github.com/google/go-licenses@v1.6.0)"; exit 0; }
+	bash scripts/check-license.sh
+	bash scripts/check-license.sh --cephimpl
 
 # Render a weekly SLO compliance report (US-005 cycle B prod-observability).
 # Wraps `strata admin slo-report` with lab defaults — Prometheus on

@@ -183,8 +183,8 @@
         "Tests pass"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "license-audit parallel job added to ci.yml (needs [web-build], matrix [main, cephimpl]) wrapping scripts/check-license.sh (sources scripts/lib/severity.sh degrade pattern). go-licenses PINNED to v1.6.0 (SHA 5348b744d0983d85713295ea08a20cca1654a45e) NOT latest v2.0.1 — v2.0.x fails every scan with stdlib 'Non go modules projects' (upstream issue #128). Gate: check ./... --disallowed_types=forbidden,restricted; baseline = 0 forbidden/restricted across 106 main + 24 cephimpl deps (62 Apache-2.0, 21 BSD-3, 20 MIT, 2 BSD-2, 1 MPL-2.0=reciprocal class=allowed). Allowlist .licensei.yml: github.com/cznic/mathutil (verbatim BSD-3, classifier low-confidence -> unknown) + cephimpl self-module (no subdir LICENSE). Wrapper runs GOWORK=off readonly (NOT -mod=mod: v1.6.0 mis-reports stdlib under -mod=mod). go.sum backfilled x/sync v0.20.0 h1 hash (go.work.sum-only since US-001) so main module is self-consistent under GOWORK=off. go-licenses MUST be built with go>=1.25.10 toolchain (1.25.1-built binary hits #128); CI setup-go '1.25' + go.mod toolchain directive guarantee it. make license-audit target + per-axis license-report CSV artifact (14d retention)."
     },
     {
       "id": "US-010",

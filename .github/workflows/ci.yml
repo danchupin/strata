@@ -262,6 +262,67 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  license-audit:
+    name: license-audit (go-licenses forbidden/restricted gate)
+    runs-on: ubuntu-latest
+    needs: web-build
+    # Parallel scanner job — sibling of govulncheck / gosec / lint-build
+    # (US-009 cycle C supply-chain-security). Matrix axis: main module +
+    # cephimpl module (CLAUDE.md RADOS / cephimpl module split). Hard-fails
+    # when any dependency carries a forbidden (GPL/AGPL) or restricted
+    # (LGPL strong-copyleft) license, or an UNKNOWN license not allowlisted
+    # in .licensei.yml. Wraps scripts/check-license.sh.
+    strategy:
+      fail-fast: false
+      matrix:
+        axis: [main, cephimpl]
+    steps:
+      - uses: actions/checkout@v4
+      # setup-go with go-version '1.25' resolves to the latest 1.25.x
+      # patch (>=1.25.10). go-licenses v1.6.0 MUST be built with that
+      # toolchain — built against go1.25.1 it mis-reports stdlib packages
+      # as "Non go modules projects" (upstream issue #128). The repo's
+      # go.mod `go 1.25.10` directive + GOTOOLCHAIN=auto guarantee the
+      # `go install` below picks the working toolchain.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+      - name: Install librados-dev (cephimpl axis only)
+        if: matrix.axis == 'cephimpl'
+        run: sudo apt-get update && sudo apt-get install -y librados-dev
+      # SHA-pinned third-party tool (US-009 AC):
+      #   github.com/google/go-licenses v1.6.0 →
+      #       5348b744d0983d85713295ea08a20cca1654a45e (release tag commit)
+      # NOTE: pinned to v1.6.0 NOT the latest v2.0.1 release — go-licenses
+      # v2.0.x cannot load stdlib package module info on this codebase
+      # ("Non go modules projects are no longer supported", upstream
+      # issue #128) and fails every scan. v1.6.0 is the latest WORKING
+      # stable. Revisit when v2 fixes #128.
+      - name: Install go-licenses
+        run: go install github.com/google/go-licenses@5348b744d0983d85713295ea08a20cca1654a45e
+      - name: Run gate (${{ matrix.axis }})
+        env:
+          GOLICENSES_OUTPUT_DIR: ${{ github.workspace }}/license-results
+        run: |
+          if [ "${{ matrix.axis }}" = "cephimpl" ]; then
+            bash scripts/check-license.sh --cephimpl
+          else
+            bash scripts/check-license.sh
+          fi
+      - name: Upload license report (CSV)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: license-report-${{ matrix.axis }}
+          path: license-results/
+          if-no-files-found: warn
+          retention-days: 14
+
   unit:
     name: Unit tests (-race)
     runs-on: ubuntu-latest
