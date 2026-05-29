@@ -142,7 +142,7 @@ func (w *workerCtx) runOnce(workerID, iter int, rng *rand.Rand, class string) {
 		})
 		w.bump(OpList)
 	case OpMultipart:
-		ok, etag, vid, size := doMultipartCycle(w.ctx, w.sink, w.client, w.sgn, w.endpoint, bucket, key, workerID, iter)
+		ok, etag, vid, size := doMultipartCycle(w.ctx, w.tracker, w.sink, w.client, w.sgn, w.endpoint, bucket, key, workerID, iter)
 		if ok {
 			if w.tracker != nil {
 				w.tracker.RecordPut(bucket, key, etag, vid, size, time.Now().UTC())
@@ -365,7 +365,7 @@ func doSigned(ctx context.Context, client *http.Client, sgn *signer, endpoint, m
 // X-Amz-Version-Id header (empty if versioning is suspended), and the
 // total wire-payload size — all three needed by the Tracker to record
 // the resulting object for the read-after-write oracle.
-func doMultipartCycle(ctx context.Context, sink EventSink, client *http.Client, sgn *signer, endpoint, bucket, key string, workerID, iter int) (bool, string, string, int64) {
+func doMultipartCycle(ctx context.Context, tracker *Tracker, sink EventSink, client *http.Client, sgn *signer, endpoint, bucket, key string, workerID, iter int) (bool, string, string, int64) {
 	path := "/" + bucket + "/" + key
 	cycleStart := time.Now().UTC()
 	sink.Emit(Event{Event: "op_started", Timestamp: cycleStart, WorkerID: workerID, Class: OpMultipart, Bucket: bucket, Key: key})
@@ -416,6 +416,19 @@ func doMultipartCycle(ctx context.Context, sink EventSink, client *http.Client, 
 		abort()
 		finishDone(partStatus, partErr)
 		return false, "", "", 0
+	}
+	// Pre-register the expected final ETag BEFORE Complete, mirroring the
+	// PUT recordIntent path. A Complete can commit server-side yet the client
+	// gets a transport error / empty-ETag response (the ok=false / finalETag=""
+	// paths below) — leaving the object's real ETag untracked and tripping the
+	// verifier's "etag the workload never PUT" oracle under CI load. strata's
+	// multipart ETag is hex(md5(concat(raw md5 of each part))) + "-<numparts>";
+	// for this single-part cycle that is md5(hexDecode(partETag)) + "-1".
+	if tracker != nil {
+		if raw, decErr := hex.DecodeString(partETag); decErr == nil {
+			sum := md5.Sum(raw)
+			tracker.RecordIntent(bucket, key, hex.EncodeToString(sum[:])+"-1", int64(len(partBody)))
+		}
 	}
 	completeBody := []byte(fmt.Sprintf(
 		`<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>"%s"</ETag></Part></CompleteMultipartUpload>`,
