@@ -203,8 +203,8 @@
         "Tests pass"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "image-verification.md shipped: What-signing-buys-you + 4-step verify chain (cosign verify / verify-attestation slsaprovenance / grype sbom / go-licenses check), all anchored-escaped-suffix regexp pair matching US-008 workflow comment + Rekor forensic query (cosign triangulate -> rekor-cli search) + troubleshooting table (5 common errors). deploy/k8s/admission-controllers/: kyverno-strata-image-signed.yaml (ClusterPolicy verifyImages, mutateDigest, subject glob /*, failurePolicy Fail) + sigstore-policy-strata.yaml (ClusterImagePolicy keyless authority, subjectRegExp ^https://github\\.com/danchupin/strata/.*, enforce). operate/_index.md card grid extended. make docs-build green (100 pages)."
     },
     {
       "id": "US-011",

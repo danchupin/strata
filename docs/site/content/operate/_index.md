@@ -71,6 +71,15 @@ backup. Implementation details and tuning rationale live in
   {{< /card >}}
 {{% /columns %}}
 
+{{% columns %}}
+- {{< card href="/operate/image-verification/" >}}
+  **Image verification**  
+  Verify the cosign signature, SLSA provenance, SBOM, and license
+  inventory of a released image before deploy — plus Kyverno +
+  Sigstore admission-control manifests and a Rekor forensic query.
+  {{< /card >}}
+{{% /columns %}}
+
 ## See also
 
 - [Get Started]({{< relref "/get-started/" >}}) — first install and

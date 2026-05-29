@@ -1,0 +1,43 @@
+# Sigstore policy-controller ClusterImagePolicy — gate Strata deploys on a
+# valid keyless cosign signature. Native-Sigstore alternative to the Kyverno
+# policy in this directory; apply ONE, not both.
+#
+# Requires: Sigstore policy-controller installed
+# (https://docs.sigstore.dev/policy-controller/overview/).
+# Apply with:  kubectl apply -f sigstore-policy-strata.yaml
+#
+# Activation: the policy-controller only enforces in namespaces it watches.
+# Opt a namespace in:
+#   kubectl label namespace <ns> policy.sigstore.dev/include=true
+#
+# What it does: any image matching ghcr.io/danchupin/strata** must carry a
+# keyless cosign signature whose Fulcio certificate identity + OIDC issuer
+# match the Strata GitHub Actions identity. The subjectRegExp/issuer pair is
+# the same anchored, escaped, suffix-matched regexp as the cosign CLI recipe
+# in /operate/image-verification.md. Pods pulling an unsigned or look-alike
+# image are denied at admission.
+apiVersion: policy.sigstore.dev/v1beta1
+kind: ClusterImagePolicy
+metadata:
+  name: strata-image-signed
+spec:
+  images:
+    # Glob over the Strata repository. ** matches tag/digest suffixes.
+    - glob: "ghcr.io/danchupin/strata**"
+  authorities:
+    - name: github-actions-keyless
+      keyless:
+        # Fulcio is the public-good CA that issues the short-lived signing
+        # cert bound to the GitHub Actions OIDC identity.
+        url: "https://fulcio.sigstore.dev"
+        identities:
+          - issuer: "https://token.actions.githubusercontent.com"
+            # Anchored + escaped + suffix-matched — accepts any workflow path
+            # under danchupin/strata, rejects look-alike repos.
+            subjectRegExp: "^https://github\\.com/danchupin/strata/.*"
+      # Require the signature entry to be present in the Rekor transparency
+      # log (default public instance).
+      ctlog:
+        url: "https://rekor.sigstore.dev"
+  # Deny admission when no authority is satisfied (unsigned / wrong identity).
+  mode: enforce

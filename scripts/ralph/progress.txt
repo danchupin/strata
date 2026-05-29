@@ -216,3 +216,17 @@ Cycle: ralph/supply-chain-security
   - **Do NOT pass `GOFLAGS=-mod=mod` to go-licenses v1.6.0** — it re-triggers the issue-#128 stdlib "Non go modules projects" error. Run plain readonly (`GOWORK=off` only) once go.sum is complete.
   - **The `severity.sh` degrade + color pattern is the canonical shape for ALL scanner wrappers** (govulncheck, gosec, trivy, license) — source it, `command -v <tool> || WARN+exit 0`, classify, FAIL red / PASS green. Reuse for any future supply-chain gate.
 ---
+
+## 2026-05-29 - US-010
+- Shipped operator image-verification doc + k8s admission-control examples.
+- Files:
+  - NEW docs/site/content/operate/image-verification.md (weight 55): What-signing-buys-you paragraph + evidence table (cosign sig / SLSA prov / SPDX SBOM / license inv); 4-step verify chain (a) cosign verify (b) cosign verify-attestation --type slsaprovenance (c) grype sbom: (d) go-licenses check; Rekor forensic query (cosign triangulate --type digest -> rekor-cli search --sha); Kyverno + Sigstore admission sections; 5-row troubleshooting table.
+  - NEW deploy/k8s/admission-controllers/kyverno-strata-image-signed.yaml (ClusterPolicy, verifyImages, mutateDigest+verifyDigest, keyless subject "https://github.com/danchupin/strata/*" issuer GH actions, rekor, failurePolicy Fail, validationFailureAction Enforce).
+  - NEW deploy/k8s/admission-controllers/sigstore-policy-strata.yaml (ClusterImagePolicy keyless authority, fulcio+rekor, subjectRegExp ^https://github\.com/danchupin/strata/.*, mode enforce, glob ghcr.io/danchupin/strata**).
+  - docs/site/content/operate/_index.md card grid extended with Image-verification card.
+- Checks: make docs-build green (100 pages, hugo --minify); make build + make vet green.
+- **Learnings for future iterations:**
+  - Regexp pair MUST stay byte-identical across cosign workflow comment (release-image.yml ~L204), the doc verify recipe, and the sigstore CR subjectRegExp: ^https://github\.com/danchupin/strata/.* (anchored+escaped+suffix). Kyverno uses glob form "https://github.com/danchupin/strata/*" not regexp — different engine, equivalent semantics.
+  - hugo does NOT fail on broken {{< relref >}} by default — docs-build green ≠ all refs resolve. Used relref only to existing pages (/operate/tls-termination, /deploy/). External GitHub blob/tree links for deploy/k8s files (not in Hugo content tree).
+  - operate/_index.md uses {{% columns %}} blocks (Hugo Book theme) — one new {{% columns %}} per added card row; weights on operate pages now span 10..55 (image-verification=55, after tls-termination=50).
+---
