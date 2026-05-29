@@ -54,12 +54,23 @@ func TestRunSmokeBinary(t *testing.T) {
 	report := filepath.Join(t.TempDir(), "race.jsonl")
 	var stdout, stderr bytes.Buffer
 
+	// --verify-every=-1ms disables the periodic verifier oracle. This
+	// test's job is to guard flag wiring + the exit-code mapping (run ->
+	// racetest.Run -> 0/1/2), NOT oracle correctness — that lives in
+	// internal/racetest's own tests + the nightly soak. The oracle is
+	// timing-sensitive (e.g. a deadline-straddling multipart Complete can
+	// commit server-side after the client's RecordPut window closed,
+	// false-flagging read_after_write), so leaving it on coupled this
+	// smoke's exit-code assertion to CPU-starvation luck under -race and
+	// made it flaky. Disabling it makes the run deterministic and also
+	// skips the multi-second delete-grace drain budget.
 	args := []string{
 		"--endpoint=" + ts.URL,
 		"--duration=1500ms",
 		"--concurrency=4",
 		"--buckets=2",
 		"--keys-per-bucket=4",
+		"--verify-every=-1ms",
 		"--report=" + report,
 	}
 	rc := run(args, &stdout, &stderr)
