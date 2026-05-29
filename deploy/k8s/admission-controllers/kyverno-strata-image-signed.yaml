@@ -1,0 +1,57 @@
+# Kyverno ClusterPolicy — gate Strata deploys on a valid keyless cosign
+# signature.
+#
+# Requires: Kyverno installed in the cluster (https://kyverno.io).
+# Apply with:  kubectl apply -f kyverno-strata-image-signed.yaml
+#
+# What it does: any pod whose image matches ghcr.io/danchupin/strata* MUST
+# carry a keyless cosign signature issued to the Strata GitHub Actions OIDC
+# identity. On a match Kyverno mutates the image reference to its verified
+# digest so a later mutable-tag repush cannot bypass the check. Unsigned or
+# look-alike images (danchupin/strata-evil, evil/strata) are rejected at
+# admission because failurePolicy is Fail.
+#
+# The subject/issuer pair mirrors the cosign CLI recipe in
+# /operate/image-verification.md exactly:
+#   --certificate-identity-regexp='^https://github\.com/danchupin/strata/.*'
+#   --certificate-oidc-issuer-regexp='^https://token\.actions\.githubusercontent\.com$'
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: strata-image-signed
+  annotations:
+    policies.kyverno.io/title: Strata image signature required
+    policies.kyverno.io/category: Supply Chain Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Require a valid keyless cosign signature from the Strata GitHub
+      Actions OIDC identity for every ghcr.io/danchupin/strata image.
+spec:
+  validationFailureAction: Enforce # reject on verify failure (was "audit")
+  failurePolicy: Fail # admission denied if the webhook cannot run
+  webhookTimeoutSeconds: 30
+  background: false # signature verify needs registry egress; skip on background scans
+  rules:
+    - name: verify-strata-signature
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      verifyImages:
+        - imageReferences:
+            - "ghcr.io/danchupin/strata*"
+          mutateDigest: true # pin verified tag -> digest
+          verifyDigest: true
+          required: true
+          attestors:
+            - count: 1
+              entries:
+                - keyless:
+                    # subject == OIDC certificate identity. Kyverno treats a
+                    # trailing /* as a prefix glob, matching any workflow path
+                    # under the repo (equivalent to the CLI's ^…/.* regexp).
+                    subject: "https://github.com/danchupin/strata/*"
+                    issuer: "https://token.actions.githubusercontent.com"
+                    rekor:
+                      url: "https://rekor.sigstore.dev"

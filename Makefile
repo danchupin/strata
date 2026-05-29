@@ -9,8 +9,8 @@ COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 	smoke smoke-signed smoke-grafana smoke-lab-tikv \
 	smoke-drain-lifecycle smoke-drain-transparency smoke-drain-progress-ui smoke-cluster-weights \
 	smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale \
-	smoke-single-binary smoke-tikv-default-lab smoke-rgw-lab-restart smoke-observability \
-	race-soak race-soak-tikv lint-nginx-lab helm-lint promtool-check slo-report \
+	smoke-single-binary smoke-tikv-default-lab smoke-rgw-lab-restart smoke-observability smoke-supply-chain \
+	race-soak race-soak-tikv lint-nginx-lab helm-lint promtool-check govulncheck trivy-check gosec license-audit slo-report \
 	bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi bench-rgw-comparison bench-rgw-comparison-with-cassandra \
 	docs-serve docs-build docs-openapi-copy clean
 
@@ -428,6 +428,17 @@ smoke-harden-gateway:
 smoke-observability:
 	bash scripts/smoke-observability.sh
 
+# Cycle C supply-chain-security composite smoke (US-011 of
+# ralph/supply-chain-security). Validates every gate shipped across
+# US-001..US-010 composes cleanly: make govulncheck / trivy-check / gosec /
+# license-audit, the cosign sign/verify roundtrip
+# (scripts/smoke-image-verification.sh), and .github/dependabot.yml YAML
+# validity. Each sub-gate self-degrades to WARN + exit 0 when its toolchain
+# is missing, so this never hard-fails on a clean machine without the
+# scanners — it fails only on a real finding / parse error.
+smoke-supply-chain:
+	bash scripts/smoke-supply-chain.sh
+
 # Race-soak driver (US-006). Brings up the Cassandra-backed stack
 # (`make up-all-ci` when CI=true, else `make up-cassandra`), waits for
 # /readyz on 9998 (strata-cassandra), then runs `bin/strata-racecheck`
@@ -479,6 +490,55 @@ helm-lint:
 promtool-check:
 	@command -v promtool > /dev/null || { echo "promtool not installed — skip promtool-check (install: go install github.com/prometheus/prometheus/cmd/promtool@latest)"; exit 0; }
 	promtool check rules deploy/prometheus/alerts.yml
+
+# govulncheck — Go CVE callgraph scan against main + cephimpl modules
+# (US-001 cycle C supply-chain-security). Wraps scripts/check-govulncheck.sh;
+# hard-fails on HIGH/CRITICAL findings whose callgraph reaches Strata code
+# under internal/ or cmd/, WARN-only for /internal/racetest, /scripts/,
+# and *_test.go matches. Degrades to WARN + exit 0 when govulncheck binary
+# missing — matches helm-lint / promtool-check pattern.
+govulncheck:
+	@command -v govulncheck > /dev/null || { echo "govulncheck not installed — skip govulncheck (install: go install golang.org/x/vuln/cmd/govulncheck@latest)"; exit 0; }
+	bash scripts/check-govulncheck.sh
+	bash scripts/check-govulncheck.sh --cephimpl
+
+# trivy-check — image CVE scan against locally-built strata:ceph
+# (US-002 cycle C supply-chain-security). Wraps scripts/check-trivy.sh;
+# hard-fails on CRITICAL severity, surfaces HIGH as WARN-only via the
+# --high flag (same script, second invocation). Operator runs
+# `make docker-build` first to populate the image. Degrades to WARN +
+# exit 0 when trivy missing, docker missing, or strata:ceph absent —
+# matches helm-lint / promtool-check / govulncheck pattern.
+trivy-check:
+	@command -v trivy > /dev/null || { echo "trivy not installed — skip trivy-check (install: https://aquasecurity.github.io/trivy/latest/getting-started/installation/)"; exit 0; }
+	bash scripts/check-trivy.sh
+	bash scripts/check-trivy.sh --high
+
+# gosec — Go static-analysis CVE / anti-pattern scan against main module
+# (US-003 cycle C supply-chain-security). Wraps scripts/check-gosec.sh;
+# hard-fails on MEDIUM+ findings, surfaces LOW as WARN-only via the
+# --low flag (same script, second invocation). Rule + path excludes
+# documented in .gosec.yml. Degrades to WARN + exit 0 when gosec
+# missing — matches helm-lint / promtool-check / govulncheck /
+# trivy-check pattern.
+gosec:
+	@command -v gosec > /dev/null || { echo "gosec not installed — skip gosec (install: go install github.com/securego/gosec/v2/cmd/gosec@latest)"; exit 0; }
+	bash scripts/check-gosec.sh
+	bash scripts/check-gosec.sh --low
+
+# license-audit — go-licenses forbidden/restricted gate against main +
+# cephimpl modules (US-009 cycle C supply-chain-security). Wraps
+# scripts/check-license.sh; hard-fails on GPL/AGPL/LGPL + unallowlisted
+# unknown licenses. Allowlist in .licensei.yml. Degrades to WARN + exit 0
+# when go-licenses missing — matches helm-lint / promtool-check /
+# govulncheck / trivy-check / gosec pattern. Install go-licenses from the
+# repo dir so go.mod's `go 1.25.10` directive picks a toolchain new enough
+# to dodge upstream issue #128 (stdlib "Non go modules projects" on older
+# Go); v2.0.x is pinned-out for the same reason.
+license-audit:
+	@command -v go-licenses > /dev/null || { echo "go-licenses not installed — skip license-audit (install: go install github.com/google/go-licenses@v1.6.0)"; exit 0; }
+	bash scripts/check-license.sh
+	bash scripts/check-license.sh --cephimpl
 
 # Render a weekly SLO compliance report (US-005 cycle B prod-observability).
 # Wraps `strata admin slo-report` with lab defaults — Prometheus on

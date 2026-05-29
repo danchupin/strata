@@ -38,22 +38,15 @@ in-memory backend is for tests and the smoke pass; no other backends are support
 | Hugo docs site — local preview on :1313                                | `make docs-serve` (Hugo extended required; theme is a git submodule)     |
 | Hugo docs site — produce static bundle under `docs/site/public/`       | `make docs-build`                                                        |
 
-macOS + lima Docker note: `make test-integration` needs `DOCKER_HOST=unix:///Users/.../.lima/.../sock/docker.sock` for
-testcontainers to find the engine.
+macOS + lima: `make test-integration` needs `DOCKER_HOST=unix:///Users/.../.lima/.../sock/docker.sock` so testcontainers finds the engine.
 
-**Compose shape**: TiKV-default 2-replica multi-cluster lab is the canonical default. Bare
-`docker compose up -d` brings up `pd + tikv + ceph + ceph-b + strata-a + strata-b + strata-lb-nginx
-+ prometheus + grafana`. Both strata replicas have `STRATA_META_BACKEND=tikv`,
-`STRATA_RADOS_CLUSTERS=default:...,cephb:...`, distinct `STRATA_NODE_ID`, and share the
-`strata-jwt-shared` volume so session JWT issued by either replica validates on the other. The nginx
-LB at `:9999` round-robins; direct-replica ports `:10001` / `:10002` poke `strata-a` / `strata-b`.
-`make up-cassandra` (= `docker compose --profile cassandra up -d`) layers `cassandra` +
-`strata-cassandra` (:9998) on top — the Cassandra meta backend remains first-class in code (only the
-lab compose default flipped). For a single-cluster smoke, override `STRATA_RADOS_CLUSTERS` at
-runtime — there is no separate single-cluster service or profile. Feature workers (notify /
-replicator / access-log / inventory / audit-export) opt-in via `STRATA_WORKERS` on the same strata
-container — no separate feature-worker sidecar. See
-`docs/site/content/architecture/migrations/tikv-default-lab.md` for the full migration note.
+**Compose shape**: TiKV-default 2-replica multi-cluster lab is canonical. Bare `docker compose up -d` →
+`pd + tikv + ceph + ceph-b + strata-a + strata-b + strata-lb-nginx + prometheus + grafana`. Both replicas
+`STRATA_META_BACKEND=tikv`, distinct `STRATA_NODE_ID`, share `strata-jwt-shared` volume (cross-replica JWT).
+nginx LB `:9999` round-robins; direct ports `:10001`/`:10002`. `make up-cassandra` (profile `cassandra`) adds
+`cassandra` + `strata-cassandra` (:9998) — backend stays first-class in code. Feature workers opt-in via
+`STRATA_WORKERS` on the same container. Full note:
+`docs/site/content/architecture/migrations/tikv-default-lab.md`.
 
 ## Big-picture architecture
 
@@ -87,219 +80,53 @@ container — no separate feature-worker sidecar. See
                 |   cassandra)     |
                 +------------------+
 
-  strata server --workers=lifecycle -> meta.Store + data.Backend
-                          (transitions / expirations / mp-abort). Phase 2
-                          (US-005): per-bucket lease `lifecycle-leader-<bid>`
-                          gated by `fnv32a(bucketID) % STRATA_GC_SHARDS ==
-                          min(GCFanOut.HeldShards())`. The legacy global
-                          `lifecycle-leader` lease is retired.
-  strata server --workers=gc -> meta.Store (GCEntry queue) + data.Backend
-                          (chunk delete). Leader-elected on `gc-leader`.
-  strata server --workers=notify -> meta.Store (notify_queue + DLQ) ->
-                          webhook / SQS sinks via STRATA_NOTIFY_TARGETS.
-                          Leader-elected on `notify-leader`.
-  strata server --workers=replicator -> meta.Store (replication_queue) +
-                          data.Backend, copies to peer Strata via HTTP PUT
-                          (HTTPDispatcher). Leader-elected on
-                          `replicator-leader`.
-  strata server --workers=access-log -> meta.Store (access_log_buffer) +
-                          data.Backend, drains buffered rows per source
-                          bucket and writes one AWS-format log object per
-                          flush into the target bucket configured by
-                          PutBucketLogging. Leader-elected on
-                          `access-log-leader`.
-  strata server --workers=inventory -> meta.Store (bucket
-                          InventoryConfiguration blobs) + data.Backend,
-                          ticks per (bucket, configID), walks the source
-                          bucket and writes manifest.json + CSV.gz pairs
-                          into the configured target bucket. Leader-elected
-                          on `inventory-leader`.
-  strata server --workers=rebalance -> internal/rebalance: leader-elected on
-                          per-shard leases `rebalance-leader-0..N-1`
-                          via the `internal/rebalance.ShardedFanOut`
-                          (registered SkipLease=true; fan-out shape
-                          mirrors `internal/gc/fanout.go`). Shard count
-                          via `STRATA_REBALANCE_SHARDS` (default 1,
-                          range [1, 1024]; out-of-range clamped +
-                          WARN-logged at worker build time). Each
-                          shard owns a disjoint bucket subset via
-                          `meta.Store.ListBucketsShard(ctx, shardID,
-                          totalShards)` — `fnv32a(bucketID) % shards
-                          == shardID`. `SHARDS=1` reproduces Phase 1
-                          byte-for-byte (single lease, single
-                          goroutine). Leader chip
-                          (`leader_for=rebalance`) folded — a replica
-                          holding N shards emits one acquired event
-                          and one released event regardless of N.
-                          Per-shard panics increment
-                          `strata_worker_panic_total{worker="rebalance",shard="<i>"}`
-                          and restart on exponential backoff (1s→5s→30s
-                          →2m, reset after 5 min healthy). The
-                          `ProgressTracker` widens to
-                          `progressCache map[clusterID]map[shardID]ProgressSnapshot`;
-                          `Snapshot(clusterID)` returns merged snapshot
-                          (Migratable/StuckSinglePolicy/StuckNoPolicy/
-                          Bytes summed across shards, latest LastScanAt,
-                          per-bucket maps merged). Completion
-                          fire-once tracked at cluster level so
-                          multi-shard 0-transitions fire one event;
-                          refill on any shard re-arms the gate.
-                          `/drain-progress` reads the merged
-                          snapshot — operator wire shape unchanged.
-                          `/drain-impact` synchronous-scan path keeps
-                          full `ListBuckets` (one-shot operator
-                          preview behind 5-min cache, NOT per-tick).
-                          Walks every bucket with a
-                          non-nil Placement, plans per-chunk moves whose
-                          current cluster does not match placement.PickCluster,
-                          and dispatches the plan via a MoverChain emitter.
-                          Build-tag `ceph` plugs a RadosMover that reads from
-                          the source cluster, writes a fresh OID on the
-                          target, then issues per-object manifest CAS via
-                          meta.Store.SetObjectStorage; CAS losers (old chunks
-                          on success, new chunks on reject) go to the GC
-                          queue via EnqueueChunkDeletion. Build-tag-free
-                          S3Mover (US-005) plugs into the same MoverChain
-                          when deps.Data is *s3.Backend: same-endpoint+region
-                          short-circuits to awss3.CopyObject, mismatched
-                          endpoints fall back to Get→Put streaming via
-                          manager.Uploader. BackendRef-shape manifests carry
-                          BackendRef.Cluster (populated at PutChunks time);
-                          the scan emits a single virtual move per S3 object
-                          and the S3Mover updates manifest.BackendRef in
-                          place. GC enqueue uses chunk-shape entries where
-                          chunk.Cluster matches an S3 cluster id — the s3
-                          backend's Delete dispatches such entries via
-                          (cluster, bucket=chunk.Pool, key=chunk.OID).
-                          Knobs: STRATA_REBALANCE_INTERVAL (default 5m,
-                          range [1m, 24h]), STRATA_REBALANCE_RATE_MB_S
-                          (default 100, range [1, 10000]; both read + write
-                          consume from the same token-bucket so a chunk
-                          move costs chunkSize × 2 tokens),
-                          STRATA_REBALANCE_INFLIGHT (default 4, range
-                          [1, 64]; per-Move(plan) errgroup bound shared
-                          between copy and CAS phases). Safety rails
-                          (US-006): refuses moves into `draining`
-                          clusters and (RADOS only) clusters above
-                          90% utilisation via data.ClusterStatsProbe
-                          (MonCommand `df`); both bump
-                          `strata_rebalance_refused_total{reason,target}`.
-                          The PUT hot path consults the same drain
-                          sentinel via an in-process 30s-TTL cache
-                          (`internal/data/placement/draincache.go`)
-                          that the admin drain/undrain handlers
-                          invalidate so flips take effect without
-                          waiting out the TTL. `placement.PickCluster`
-                          and `PickClusterExcluding` skip draining
-                          clusters; cluster_state ∈ {live, draining,
-                          removed} is meta-backed via the new
-                          `cluster_state` CRUD on meta.Store, with
-                          rows defaulting to "live" (absence == live).
-                          Admin: POST `/admin/v1/clusters/{id}/drain`
-                          and `.../undrain`, GET `/admin/v1/clusters`
-                          (audit `admin:DrainCluster` /
-                          `admin:UndrainCluster`). Per-tick progress
-                          scan (US-003 drain-lifecycle, refined in
-                          US-002 drain-transparency) populates
-                          `rebalance.ProgressTracker` (categorized
-                          MigratableChunks / StuckSinglePolicyChunks /
-                          StuckNoPolicyChunks plus Bytes / BaseChunks /
-                          BaseBytes / LastScanAt / CompletionFiredAt +
-                          per-(cluster, bucket) ByBucket breakdown per
-                          draining cluster); the adminapi handler reads
-                          it without scanning synchronously. **Scan
-                          only fires when `state=evacuating`** —
-                          `draining_readonly` clusters keep stop-write
-                          semantics but skip the per-tick scan to save
-                          IO (the picker-exclusion set folds both
-                          draining states; the scan-focus set is
-                          evacuating-only). Use
-                          `loadClusterDrainSets` to obtain both sets in
-                          lockstep — mixing them silently re-enables
-                          move-into-readonly or scans clusters that
-                          shouldn't be scanned. Completion detection
-                          (US-005):
-                          a `>0 → 0` chunks_on_cluster transition fires
-                          one event per cluster (idempotent on
-                          CompletionFiredAt; refills reset the slot so
-                          drain→fill→drain re-fires). Each event logs
-                          INFO `drain complete`, writes a
-                          `drain.complete` audit row
-                          (`system:rebalance-worker`,
-                          `cluster:<id>`), bumps
-                          `strata_drain_complete_total{cluster}`, and
-                          best-effort fans the payload
-                          `{cluster, bytes_moved, completed_at}`
-                          through `notify.Sink.Send` for every target
-                          configured in `STRATA_NOTIFY_TARGETS`.
-                          Always-strict drain (US-007 drain-
-                          transparency): RADOS + S3
-                          `Backend.PutChunks` unconditionally consult
-                          the drain map after
-                          `placement.PickClusterExcluding` returns ""
-                          (empty / all-excluded policy) and return
-                          `data.ErrDrainRefused` if the resolved class
-                          default cluster is draining. No env gate —
-                          the former opt-in `STRATA_DRAIN_STRICT` env
-                          was retired (legacy values in the environ
-                          log a single WARN at boot and are ignored).
-                          The gateway maps the sentinel to HTTP 503
-                          `<Code>DrainRefused</Code>` +
-                          `Retry-After: 300`; counter
-                          `strata_putchunks_refused_total{reason="drain_refused",cluster}`
-                          bumps per refusal (label flipped from
-                          `drain_strict` — breaking change for
-                          dashboards). **PUT only** — reads, deletes,
-                          HEAD, multipart UploadPart / Complete /
-                          Abort, List against draining clusters keep
-                          working (drain semantic is stop-write, not
-                          stop-read). In-flight multipart sessions
-                          persist the initial cluster id in the
-                          opaque BackendUploadID handle
-                          (`cluster\x00bucket\x00key\x00uploadID`) so
-                          UploadPart / Complete / Abort recover
-                          routing directly from the handle and never
-                          re-consult the placement picker — drained
-                          uploads finish gracefully on the original
-                          cluster. The `drain_strict: bool` field on
-                          `GET /admin/v1/clusters` and the "strict"
-                          UI chip were removed. Pre-drain bucket impact
-                          preview (US-006 drain-lifecycle):
-                          `GET /admin/v1/clusters/{id}/bucket-references`
-                          lists buckets whose `Placement[<id>] > 0`
-                          joined with `bucket_stats` (chunk_count =
-                          UsedObjects, bytes_used = UsedBytes); reads
-                          via Meta only, no manifest walk. Paginated
-                          via `?limit=N&offset=M` (default 100, max
-                          1000). Audit-stamped
-                          `admin:GetClusterBucketReferences`.
-  internal/reshard      -> per-bucket online shard-resize worker (US-045);
-                          driven synchronously via /admin/bucket/reshard or
-                          as a daemon.
-  strata server --workers=audit-export -> internal/auditexport: drains
-                          audit_log partitions older than
-                          STRATA_AUDIT_EXPORT_AFTER (default 30d) into
-                          gzipped JSON-lines objects in the configured
-                          export bucket, then deletes the source partition
-                          (US-046). Leader-elected on `audit-export-leader`.
-  strata server --workers=manifest-rewriter -> internal/manifestrewriter:
-                          walks every bucket and converts any JSON-encoded
-                          objects.manifest blob to protobuf in place
-                          (US-049). Idempotent re-runs skip already-proto
-                          rows. Leader-elected on `manifest-rewriter-leader`.
-                          Cadence via STRATA_MANIFEST_REWRITER_INTERVAL
-                          (default 24h).
-  strata server --workers=usage-rollup -> internal/usagerollup: nightly
-                          (default 00:00 UTC, 24h interval) samples
-                          bucket_stats and writes one usage_aggregates row
-                          per (bucket, storage_class, yesterday-UTC). Feeds
-                          external billing. Cadence via
-                          STRATA_USAGE_ROLLUP_AT + STRATA_USAGE_ROLLUP_INTERVAL.
-                          Leader-elected on `usage-rollup-leader`.
-  strata admin rewrap   -> one-shot SSE master-key rotation. Walks every
-                          object and rewraps DEKs to --target-key-id (or
-                          the active key). Idempotent + resumable via
-                          rewrap_progress.
+  Leader-elected tick workers (each on `<name>-leader` unless noted):
+  lifecycle    -> transitions/expirations/mp-abort. Per-bucket lease
+                  `lifecycle-leader-<bid>` gated by `fnv32a(bid)%STRATA_GC_SHARDS`.
+  gc           -> GCEntry queue → chunk delete. Per-shard fan-out (SkipLease).
+  notify       -> notify_queue + DLQ → webhook/SQS via STRATA_NOTIFY_TARGETS.
+  replicator   -> replication_queue → peer Strata HTTP PUT (HTTPDispatcher).
+  access-log   -> access_log_buffer → AWS-format log object per flush into
+                  PutBucketLogging target bucket.
+  inventory    -> per (bucket, configID): walk source → manifest.json + CSV.gz
+                  into target bucket.
+  strata server --workers=rebalance -> internal/rebalance: migrates chunks off
+                          draining clusters. Leader-elected on per-shard leases
+                          `rebalance-leader-0..N-1` via `ShardedFanOut`
+                          (SkipLease=true; mirrors `internal/gc/fanout.go`).
+                          `STRATA_REBALANCE_SHARDS` count, `fnv32a(bucketID) %
+                          shards` ownership via `ListBucketsShard`. Scan fires
+                          ONLY for `state=evacuating` (readonly = stop-write, no
+                          scan). Movers via MoverChain: `ceph`-tag RadosMover
+                          (read src → write new OID → manifest CAS via
+                          SetObjectStorage, CAS losers → GC queue); tag-free
+                          S3Mover (CopyObject same-endpoint, else Get→Put).
+                          Safety rails: refuses moves into draining or >90%-full
+                          clusters. Completion `>0→0` fires one event/cluster
+                          (audit `drain.complete` + notify fan-out).
+                          Knobs/metrics/ProgressTracker internals + admin
+                          drain/undrain/bucket-references endpoints: see
+                          `internal/rebalance/` + cluster-state section below +
+                          `docs/site/content/architecture/`.
+                          DRAIN INVARIANT (always-strict, no env gate): RADOS+S3
+                          `PutChunks` return `data.ErrDrainRefused` → HTTP 503
+                          `DrainRefused` + `Retry-After: 300` when resolved
+                          cluster draining. PUT-only stop-write — reads/deletes/
+                          HEAD/in-flight-multipart keep working. Multipart routing
+                          recovered from `BackendUploadID` handle
+                          (`cluster\x00bucket\x00key\x00uploadID`), never
+                          re-consults picker.
+  audit-export -> drains audit_log partitions older than
+                  STRATA_AUDIT_EXPORT_AFTER (default 30d) → gzipped JSON-lines
+                  in export bucket, then deletes source partition.
+  manifest-rewriter -> walks buckets, converts JSON manifest blobs → protobuf
+                  in place. Idempotent. Cadence STRATA_MANIFEST_REWRITER_INTERVAL.
+  usage-rollup -> nightly samples bucket_stats → one usage_aggregates row per
+                  (bucket, storage_class, yesterday-UTC). Feeds billing.
+  internal/reshard -> per-bucket online shard-resize, admin-driven one-shot
+                  (/admin/bucket/reshard) or daemon — NOT a tick worker.
+  strata admin rewrap -> one-shot SSE master-key rotation. Rewraps DEKs to
+                  --target-key-id. Idempotent + resumable via rewrap_progress.
 ```
 
 The S3 router is in `internal/s3api/server.go`. Bucket-scoped queries (`?cors`, `?policy`, `?lifecycle`, …) dispatch via
@@ -390,16 +217,11 @@ runs the Runner under a supervised context, releases on exit, and recovers from 
 backoff (1s → 5s → 30s → 2m, reset to 1s after 5 minutes healthy). Lease loss restarts immediately (no
 backoff). One worker's panic or lease loss never affects the gateway or sibling workers.
 
-Workers that own their leader-election internally (US-004's gc fan-out is the canonical case: per-shard
-`gc-leader-<shardID>` leases — `STRATA_GC_SHARDS` controls the count, default 1) register with
-`SkipLease: true` so the supervisor skips the outer `<name>-leader` lease entirely. The runner manages its
-own leases and must call `deps.EmitLeader(name, acquired)` from each acquire/release transition so the
-heartbeat `leader_for=<name>` chip still flips on the supervisor's `LeaderEvents()` channel. The supervisor
-still owns panic recovery + backoff for SkipLease workers — the only thing skipped is the outer
-leader.Session. The gc fan-out additionally folds multi-shard ownership inside one replica into a single
-heartbeat-level acquired/released pair: the chip flips at most twice per cycle even though the underlying
-fan-out may hold N shards. Per-shard panics on the gc fan-out increment
-`strata_worker_panic_total{worker="gc",shard="<i>"}` (shard label is `"-"` for non-fan-out workers).
+Workers owning leader-election internally (gc fan-out: per-shard `gc-leader-<shardID>` leases, `STRATA_GC_SHARDS`)
+register `SkipLease: true` — supervisor skips the outer `<name>-leader` lease but STILL owns panic recovery +
+backoff. The runner manages its own leases and MUST call `deps.EmitLeader(name, acquired)` on each transition so
+the heartbeat `leader_for=<name>` chip flips. Per-shard panics increment
+`strata_worker_panic_total{worker,shard="<i>"}` (shard `"-"` for non-fan-out).
 
 `cmd/strata/server.go::runServer` validates `STRATA_WORKERS` (or `--workers=`) via `workers.Resolve` BEFORE any
 backend is built — unknown names exit 2 immediately. The resolved `[]workers.Worker` is then handed to
@@ -451,160 +273,59 @@ field number and only rename the label. To convert pre-existing JSON rows to pro
 
 ## pprof endpoint (US-004 prod-observability)
 
-`/debug/pprof/*` is opt-in via `STRATA_PPROF_ENABLED=true` (default false — heap profiles may
-leak in-flight buffer contents in error paths). Routes wired explicitly in
-`internal/serverapp/pprof.go::pprofHandler` via `pprof.Index/Cmdline/Profile/Symbol/Trace` +
-`pprof.Handler("heap"|"allocs"|"goroutine"|"block"|"mutex"|"threadcreate")` — NEVER use the
-side-effect import `_ "net/http/pprof"` because Strata does not serve `http.DefaultServeMux`.
-
-Attach modes (mutually exclusive, ordered by precedence):
-- `STRATA_PPROF_LISTEN` set → dedicated third listener (e.g. `127.0.0.1:9002`).
-- `STRATA_PPROF_LISTEN` empty + `STRATA_ADMIN_LISTEN` set → handlers attach to admin mux at
-  `/debug/pprof/`.
-- Both empty + `STRATA_PPROF_ENABLED=true` → `config.Load` returns an error at boot. pprof
-  MUST NOT share the S3 hot path.
-
-Auth: `adminapi.Server.WrapWithAdminAuth(http.Handler)` exposes the same session-cookie /
-SigV4 chain that protects `/admin/v1/*`. The pprof wiring (`resolvePprofWiring`) calls it so
-both the admin-mux and dedicated-listener branches share the auth surface.
-
-Block + mutex profiles need explicit rate flips: `runtime.SetBlockProfileRate(N)` /
-`SetMutexProfileFraction(N)`. Gated by `STRATA_PPROF_BLOCK_RATE` (default 0 = disabled) +
-`STRATA_PPROF_MUTEX_RATE` (default 0 = disabled). With rates at 0 the profiles still register
-but return empty data.
-
-Decode helper: `internal/pprofutil.Parse` wraps `github.com/google/pprof/profile.Parse`. The
-test suite (`internal/serverapp/pprof_decode_test.go`) ships `TestPprofDecode` which reads
-`STRATA_PPROF_SMOKE_PROFILE` and validates the captured bytes. Reused by
-`scripts/smoke-pprof.sh` so operators on hosts without `go tool pprof` can still validate a
-captured profile. **`google/pprof` must stay a direct require**: `go mod tidy` re-adds the
-`// indirect` marker for deps only consumed by test files even when the importing package
-belongs to the main module. The dep is referenced from non-test code (`internal/pprofutil/decode.go`)
-to keep the require direct after tidy.
-
-`scripts/pprof-fetch` is the SigV4-signed Go one-shot used by the smoke; mirrors
-`internal/serverapp/pprof_test.go::signSigV4`. Keep the two in lockstep when bumping the
-SigV4 wire shape.
+`/debug/pprof/*` opt-in via `STRATA_PPROF_ENABLED=true` (default off). Routes wired explicitly in
+`serverapp/pprof.go` — **NEVER `_ "net/http/pprof"` side-effect import** (Strata doesn't serve
+`http.DefaultServeMux`). Attach precedence: `STRATA_PPROF_LISTEN` (dedicated listener) > `STRATA_ADMIN_LISTEN`
+(admin mux) > both-empty errors at boot (MUST NOT share S3 hot path). Auth via `WrapWithAdminAuth`. Block/mutex
+profiles need rate flips (`STRATA_PPROF_BLOCK_RATE`/`_MUTEX_RATE`, default 0).
+**`google/pprof` must stay a direct require** — referenced from non-test `internal/pprofutil/decode.go` so
+`go mod tidy` doesn't re-mark it `// indirect`. Operator config (modes, smoke scripts): see `docs/`.
 
 ## Logging (slog)
 
-`internal/logging` is the canonical setup. The `cmd/strata` binary (both `strata server` and `strata admin`) calls
-`logging.Setup()` first thing to install a JSON-handler `*slog.Logger` driven by `STRATA_LOG_LEVEL`
-(DEBUG/INFO/WARN/ERROR; default INFO) and use the returned logger for binary-level errors. Workers (`leader.Session`, `gc.Worker`, `lifecycle.Worker`,
-`notify.Config`, etc.) take `*slog.Logger`, never `*log.Logger`. The HTTP gateway wraps its mux handler with
-`logging.NewMiddleware(logger, next)` which reads / generates `X-Request-Id`, sets it on both `r.Header` (so
-downstream middlewares like `internal/s3api/access_log.go` keep reading it via `r.Header.Get`) and `w.Header()`
-(client correlation), and attaches a child logger with `request_id` to the request context. Inside handlers, prefer
-`logging.LoggerFromContext(r.Context()).InfoContext(ctx, msg, "key", value)` — passing the bound logger keeps lines
-correlated without additional plumbing. Use `WarnContext`/`InfoContext`/`ErrorContext` (not the no-context variants)
-so future ctx-bound loggers ride through.
+`internal/logging` is canonical. `cmd/strata` calls `logging.Setup()` first thing → JSON `*slog.Logger` driven by
+`STRATA_LOG_LEVEL` (default INFO). Workers take `*slog.Logger`, never `*log.Logger`. Gateway wraps mux with
+`logging.NewMiddleware` — reads/generates `X-Request-Id`, sets it on both `r.Header` (downstream middlewares read
+via `r.Header.Get`) and `w.Header()`, attaches a `request_id`-bound child logger to ctx. In handlers use
+`logging.LoggerFromContext(r.Context()).InfoContext(...)` and the `*Context` variants so ctx-bound loggers ride through.
 
-Audit log: `internal/s3api.AuditMiddleware` appends one row to the `audit_log`
-table per state-changing HTTP request (US-022). GET/HEAD/OPTIONS are skipped;
-PUT/POST/DELETE always emit. The middleware lives between the access-log
-middleware and the API handler so it sees the inner-handler status (auth-deny
-rows are still emitted because the audit middleware sits inside `mw.Wrap`).
-Row TTL is `STRATA_AUDIT_RETENTION` (Go duration like `720h` or `<N>d`;
-default 30 days). Cassandra applies TTL via `USING TTL`; the memory backend
-prunes lazily on `ListAudit`. IAM `?Action=` requests carry `BucketID=uuid.Nil`
-+ `Bucket="-"` and `Resource="iam:<Action>"`. The middleware is best-effort —
-meta failures never fail the underlying request.
+Audit log: `s3api.AuditMiddleware` appends one `audit_log` row per state-changing request (PUT/POST/DELETE;
+GET/HEAD/OPTIONS skipped). Sits inside `mw.Wrap` so auth-deny rows still emit. TTL `STRATA_AUDIT_RETENTION`
+(default 30d; Cassandra `USING TTL`, memory prunes lazily). IAM `?Action=` rows carry `BucketID=uuid.Nil` +
+`Resource="iam:<Action>"`. Best-effort — meta failure never fails the request. `/admin/v1/*` also wrapped:
+handlers stamp `s3api.SetAuditOverride(ctx, action, resource, bucket, principal)` with `action=admin:<Verb>`;
+empty Action → path-derived fallback. **Add the override stamp to every new admin write** (GET listings skip
+via `auditableMethod`).
 
-`/admin/v1/*` (the embedded operator console JSON API) is also wrapped in
-`AuditMiddleware`. Admin handlers stamp the operator-meaningful audit row by
-calling `s3api.SetAuditOverride(ctx, action, resource, bucket, principal)`
-inside the handler — `action` is `admin:<Verb>` (e.g. `admin:CreateBucket`),
-`resource` is the operator-facing label (`bucket:<name>`, `iam:<UserName>`,
-…). The middleware installs an `*AuditOverride` pointer in ctx before
-`Next.ServeHTTP` and reads it back after; if `Action == ""` the middleware
-falls back to the path-derived shape used by S3 traffic. Add the override
-stamp to every new admin write — listing handlers (GET) skip audit by
-`auditableMethod`.
+Health probes: `internal/health.Handler` serves `/healthz` (always 200) + `/readyz` (fans probes, 1s timeout).
+Probes injected via type-assertion on `cassandraProber`/`radosProber` in `serverapp.go::buildHealthHandler` (keeps
+package import-free). `cassandra.Store.Probe` = `SELECT now()`; `rados.Backend.Probe` stats canary OID
+(`STRATA_RADOS_HEALTH_OID`), `ErrNotFound`=success. Memory backends register no probe (always ready). Both endpoints
+ahead of `/` on the mux → bypass auth + access-log.
 
-Health probes: `internal/health.Handler` serves `/healthz` (always 200) and `/readyz` (fans out probes
-concurrently with a 1s timeout). Probes are injected by the cmd binary via type-assertion against
-`cassandraProber` / `radosProber` interfaces in `internal/serverapp/serverapp.go::buildHealthHandler`, so the package
-stays free of cassandra/rados imports. `cassandra.Store.Probe(ctx)` runs `SELECT now() FROM system.local`;
-`rados.Backend.Probe(ctx, oid)` stats a canary OID (`STRATA_RADOS_HEALTH_OID`, default `strata-readyz-canary`)
-and treats `goceph.ErrNotFound` as success — only transport/auth errors fail. Memory backends register no probe,
-so a pure in-memory gateway is always ready. Both endpoints sit on the mux ahead of `/`, so they bypass auth
-and the access-log middleware regardless of `STRATA_AUTH_MODE`.
+Per-storage observers: `cassandra.SessionConfig{Logger, SlowMS}` → `SlowQueryObserver` logs WARN for queries over
+`STRATA_CASSANDRA_SLOW_MS` (default 100) or with errors. `rados.Config.Logger` → per-op DEBUG via `LogOp`. Both pull
+`request_id` via `logging.RequestIDFromContext` for correlation. RADOS observer helper is build-tag-free (unit-testable
+without librados).
 
-Per-storage observers: `cassandra.SessionConfig{Logger, SlowMS}` installs `gocql.QueryObserver`
-(`internal/meta/cassandra/observer.go::SlowQueryObserver`) — queries over `STRATA_CASSANDRA_SLOW_MS` (default 100) or
-with errors log WARN with `request_id`/`table`/`op`/`duration_ms`/`statement`. `rados.Config.Logger` enables per-op DEBUG
-(`put`/`get`/`del`) via `internal/data/rados/observer.go::LogOp`. Both observers pull `request_id` via
-`logging.RequestIDFromContext(ctx)` so per-query/per-op lines correlate with the gateway request. The RADOS observer
-helper lives in a build-tag-free file so it's unit-testable without librados; the ceph-tagged backend calls it.
+OpenTelemetry tracing: `internal/otel.Init` reads `OTEL_EXPORTER_OTLP_ENDPOINT` + `STRATA_OTEL_SAMPLE_RATIO`
+(default 0.01) + ringbuf toggle (`STRATA_OTEL_RINGBUF` default `on`). Tail-sampler decides at OnEnd so failing
+spans (`status=Error` OR `http.status_code >= 500`) always export regardless of ratio. Ringbuf retains every
+span under a bytes-budgeted LRU; `/admin/v1/diagnostics/trace/{requestID}` reads it. HTTP middleware
+(`internal/otel.NewMiddleware`) wired ahead of logging middleware so the span covers the full request. Empty
+endpoint + ringbuf off → noop provider (callers stay nil-free). Per-storage spans piggyback on the observer
+hooks (`cassandra/rados/tikv` `.Tracer`); S3-backend uses upstream `otelaws` middleware. Wiring in
+`serverapp.go::buildMetaStore`/`buildDataBackend` after `strataotel.Init`.
 
-OpenTelemetry tracing: `internal/otel.Init(ctx, InitOptions{Logger, RingbufMetrics})` reads
-`OTEL_EXPORTER_OTLP_ENDPOINT` (W3C-spec env var), `STRATA_OTEL_SAMPLE_RATIO`, and the ring-buffer toggle
-(`STRATA_OTEL_RINGBUF` default `on`, `STRATA_OTEL_RINGBUF_BYTES` default 4 MiB) and returns a `*Provider`.
-Empty endpoint + ringbuf disabled installs a `tracenoop.NewTracerProvider` and a no-op Shutdown so callers
-stay nil-free. Endpoint set builds an OTLP/HTTP exporter wrapped in a tail-sampling `SpanProcessor`
-(`internal/otel/sampler.go`) — sampling decides at OnEnd, so failing spans (`status=Error` OR
-`http.status_code` >= 500) always export regardless of `STRATA_OTEL_SAMPLE_RATIO` (default 0.01). When the
-ring buffer is on, `internal/otel/ringbuf.RingBuffer` is registered as a parallel SpanProcessor so it
-retains every span (regardless of sample ratio) under a bytes-budgeted LRU; the
-`/admin/v1/diagnostics/trace/{requestID}` admin endpoint reads it via `Provider.Ringbuf()`. The HTTP
-middleware `internal/otel.NewMiddleware(provider, next)` extracts traceparent via the global propagator,
-starts a server-kind span named `<METHOD> <path>`, captures status via a `responseWriter` shim, marks the
-span Error on >= 500, and stamps `request_id` on the span (read from `r.Header["X-Request-Id"]` after the
-inner logging middleware has set it) so the ring buffer can index by request id. Wired in
-`internal/serverapp/serverapp.go` ahead of the logging middleware so the span covers the full request
-including auth/access-log/audit. **semconv import version must match the SDK's `resource.Default()`
-schema URL** — SDK 1.41 → `semconv/v1.39.0`, SDK 1.43 → `semconv/v1.40.0`. Mismatch fails at runtime
-with "conflicting Schema URL". Bump together when bumping the SDK.
+**semconv import version MUST match the SDK's `resource.Default()` schema URL** — SDK 1.41 → `semconv/v1.39.0`,
+SDK 1.43 → `semconv/v1.40.0`. Mismatch fails at runtime with "conflicting Schema URL". Bump together.
 
-Per-storage span emission piggybacks on the existing observer hooks. `cassandra.SessionConfig.Tracer`
-plugs a `trace.Tracer` into `SlowQueryObserver`; the observer emits one client-kind child span per
-gocql query, named `meta.cassandra.<table>.<op>`, timestamped to `(q.Start, q.End)` so the SDK records
-the actual query duration even though `ObserveQuery` runs after the query returns. `rados.Config.Tracer`
-threads a tracer onto `Backend`; `ObserveOp(ctx, logger, metrics, tracer, pool, op, oid, start, err)`
-emits `data.rados.<op>` spans (`put`/`get`/`del`) with the same retroactive-timestamp trick. Failing
-queries / ops set span status to Error so the tail-sampler exports the full trace regardless of ratio.
-Tracer wiring happens in `internal/serverapp/serverapp.go::buildMetaStore` + `buildDataBackend` after
-`strataotel.Init` runs (move OTel init ahead of meta/data construction; its lifetime spans the whole
-process). The TiKV meta backend gets `cfg.Tracer = tp.Tracer("strata.meta.tikv")` on the tikv branch of
-`buildMetaStore`; `internal/meta/tikv/observer.go::Observer.Start(ctx, op, table)` wraps every public
-Store method and emits `meta.tikv.<table>.<op>` client-kind spans with `db.system=tikv` /
-`db.tikv.table` / `db.operation` attrs. The S3-over-S3 data backend installs the upstream
-`go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws` middleware (v0.68,
-semconv v1.40) via `internal/data/s3/observer.go::installOTelMiddleware` BEFORE the metrics
-instrumentation in `connFor` — `cfg.Tracer = tp.Tracer("strata.data.s3")` on the `case "s3":` branch of
-`buildDataBackend`. The middleware auto-emits `S3.<Operation>` spans with `rpc.system.name=aws-api` /
-`rpc.method=S3/<op>` / `aws.region` / `http.response.status_code`; a custom `AttributeBuilder` stamps
-`strata.component=gateway` + `strata.s3_cluster=<id>` per-call. For tracing-only deploy,
-`deploy/docker/docker-compose.yml` ships an OTLP collector + Jaeger all-in-one behind the `tracing`
-profile (`docker compose --profile tracing up otel-collector jaeger`); collector config in
-`deploy/otel/collector-config.yaml` fans incoming OTLP traces to Jaeger at `jaeger:4317`.
-
-Every gateway-side observer also stamps `strata.component=gateway` via the shared constants
-`internal/otel.AttrComponentGateway` / `AttrComponentWorker` (file `internal/otel/component.go`) so
-operators can filter the full gateway path in one Jaeger query (`strata.component=gateway`) or the
-full worker path (`strata.component=worker`) without naming every span. The
-[Tracing best-practices](docs/site/content/best-practices/tracing.md) page lists the full coverage
-matrix + per-worker filter recipes.
-
-Workers under `strata server` (gc, lifecycle, replicator, notify, access-log, inventory, audit-export,
-manifest-rewriter, quota-reconcile, usage-rollup) emit per-iteration spans via the
-`workers.StartIteration` / `workers.EndIteration` helper (re-export of
-`internal/otel/iteration_span.go`). The supervisor already wires `*strataotel.Provider` onto
-`workers.Dependencies.Tracer` at `serverapp.go:254`, so each worker just calls
-`deps.Tracer.Tracer("strata.worker.<name>")` from its `Build` constructor and threads the resulting
-`trace.Tracer` onto its inner runner. Per iteration: parent span `worker.<name>.tick` with
-`strata.component=worker` + `strata.worker=<name>` + `strata.iteration_id=<atomic.uint64>`
-(per-worker counter, process-local); sub-op child spans like `gc.delete_chunk` /
-`lifecycle.transition_object` / `replicator.copy_object` / `notify.deliver_event` /
-`access_log.flush_bucket` / `inventory.scan_bucket` / `audit_export.export_partition` /
-`manifest_rewriter.rewrite_bucket` / `quota_reconcile.scan_bucket` / `usage_rollup.sample_bucket`
-emit under the parent via `tracer.Start(ctx, …)`. Sub-op errors `RecordError` + `SetStatus(Error)` and
-flow into a sync.Mutex-guarded sticky-err accumulator so the iteration parent flips to Error and the
-tail-sampler exports the full iteration regardless of `STRATA_OTEL_SAMPLE_RATIO`. `tracer == nil`
-falls back to `strataotel.NoopTracer()` (a real but discarding tracer) so unit tests without OTel
-wiring keep working. **Adding a new worker: just call `deps.Tracer.Tracer("strata.worker.<name>")`
-and wrap your tick body in `StartIteration` / `EndIteration` — no struct change.** `strata admin
-rewrap` is a one-shot operator command and stays untraced.
+Workers emit per-iteration spans. **Adding a worker: call `deps.Tracer.Tracer("strata.worker.<name>")` in
+`Build` and wrap the tick body in `workers.StartIteration`/`EndIteration` — no struct change.** `tracer == nil`
+→ `strataotel.NoopTracer()`. Every gateway observer stamps `strata.component=gateway`, workers
+`=worker` (`internal/otel/component.go`) for one-query Jaeger filtering. Coverage matrix + span-name list +
+per-worker filter recipes: [docs/site/content/best-practices/tracing.md](docs/site/content/best-practices/tracing.md).
+`strata admin rewrap` stays untraced.
 
 ## Cassandra gotchas (real ones, hit during this codebase's lifetime)
 
@@ -666,83 +387,40 @@ rewrap` is a one-shot operator command and stays untraced.
 - **`koanf` env provider stores env values as raw strings — no comma-split into `[]string`.** Multi-value config (TiKV
   PD endpoints) keeps `Config.TiKV.Endpoints` as `string` and splits with `strings.Split` + `TrimSpace` + drop-empty
   at use-site. Cleaner than wiring a custom mapstructure decode hook.
-- **`bucket_stats` live counter is fan-out, not single-key** (US-002 p1-fixes). TiKV stores per-bucket counters under
-  `s/B/<bid>/bs/<shard>` for `shard ∈ [0, bucketStatsShardCount)` (hard-coded 8 — no env knob, no per-bucket override).
-  `BumpBucketStats` picks via `fnv32a(uuid.NewString()) % 8` (fresh uuid per call — hashing on bucket id or any
-  stable key collapses the fan-out and defeats the purpose); `GetBucketStats` sums all 8 shards inside a single
-  non-pessimistic snapshot txn. The returned value of `BumpBucketStats` is the post-write aggregate (own shard +
-  in-txn read of the other 7), so the contract test's per-bump cumulative-total assertion still holds. Cassandra is
-  unchanged — its LWT CAS loop with `maxAttempts=32` absorbs c=100+ cleanly per the US-001 spike probe
-  (~2.5 retries/goroutine, ~12.6× headroom). The Prom counter `strata_bucket_stats_shard_writes_total{shard}`
-  exposes per-shard distribution; uniform = healthy, one shard dominating = the picker was misused (e.g. hashing
-  on a stable key).
+- **`bucket_stats` live counter is fan-out, not single-key.** TiKV stores 8 shards `s/B/<bid>/bs/<shard>`;
+  `BumpBucketStats` picks via `fnv32a(uuid.NewString()) % 8` (FRESH uuid per call — hashing on a stable key
+  collapses the fan-out); `GetBucketStats` sums all 8 in one snapshot txn. Cassandra unchanged (LWT CAS loop
+  `maxAttempts=32`). Distribution via `strata_bucket_stats_shard_writes_total{shard}` — one shard dominating =
+  picker misused.
 
 ## Cluster state machine — 5 states + per-cluster weight
 
-`cluster_state` rows model the cross-cluster lifecycle. Shipped across two cycles: the 4 drain-aware states landed in
-`ralph/drain-transparency`; `pending` + `weight int (0..100)` landed in `ralph/cluster-weights` (US-001..US-005).
+`cluster_state` rows model the cross-cluster lifecycle. 5 states (`meta.ClusterState*`) + per-cluster `weight ∈ [0,100]`.
+Picker behavior is what matters for code:
 
-States (`meta.ClusterState*` constants):
+- `pending` — new env cluster, no chunks yet. Excluded from weight wheel; explicit bucket policy still routes there. `/activate` → live.
+- `live` — `weight` drives default-routing share. `weight=0+live` legal (reads + explicit policy work, no new default writes). `/weight` adjusts.
+- `draining_readonly` / `evacuating` — both excluded from picker; PUT landing here → 503 `DrainRefused`. `evacuating` additionally scanned+migrated by rebalance worker (`deregister_ready` when chunks→0). `/drain {mode}`, `/undrain` deletes row (absence==live).
+- `removed` — tombstone, excluded everywhere.
 
-| State | When | Picker behavior | Operator entry |
-|-------|------|-----------------|----------------|
-| `pending` | New cluster id in `STRATA_RADOS_CLUSTERS` env that has no chunks yet (boot reconcile creates the row) | Excluded from default-routing weight wheel. Bucket policy that names a pending cluster still routes there. | `POST /admin/v1/clusters/{id}/activate {weight:N}` flips → live. |
-| `live` | Normal operating state. `weight ∈ [0, 100]` drives default routing share. | Included in synthesised default policy proportionally to `weight`. `weight=0 + state=live` is legal — reads + explicit policies work, no new default-routed writes. | `PUT /admin/v1/clusters/{id}/weight {weight:N}` adjusts in place. |
-| `draining_readonly` | Maintenance stop-write drain (mode=readonly). | Excluded from picker. PUTs that would land here → 503 `DrainRefused`. Reads + deletes + in-flight multipart continue. | `POST /admin/v1/clusters/{id}/drain {mode:"readonly"}`. |
-| `evacuating` | Decommission drain (mode=evacuate). Rebalance worker scans + migrates chunks off. | Same picker exclusion as readonly. `deregister_ready=true` when chunks_on_cluster reaches 0. | `POST /admin/v1/clusters/{id}/drain {mode:"evacuate"}` or upgrade from readonly. |
-| `removed` | Permanent tombstone after deregister. | Excluded from every code path. | Set by operator deregister flow (drop from env + cleanup). |
+Transitions rejected with `409 InvalidTransition`. Boot reconcile auto-inits `(no row)→pending` (or `→live weight=100` if `bucket_stats` already references it). States snapshot via `placement.DrainCache.States(ctx)` (30s TTL, admin handlers invalidate synchronously).
 
-Transitions (rejected with `409 InvalidTransition` otherwise):
+**Two weight layers — NEVER COMBINE (picker call sites `rados.Backend.PutChunks` + `s3.Backend.clusterForPlacement`
+MUST short-circuit on `Placement != nil` BEFORE consulting weights — else bucket-policy-wins breaks):**
 
-- `(no row) → pending` (auto-init at boot for new env clusters with no `bucket_stats` reference)
-- `(no row) → live weight=100` (auto-init at boot when `bucket_stats` already references the cluster — existing-live backwards-compat path)
-- `pending → live` via `/activate`
-- `live → live` via `/weight` (in-place weight adjustment)
-- `live → draining_readonly | evacuating` via `/drain`
-- `draining_readonly → evacuating` (upgrade — modal hides the readonly radio)
-- `draining_* → live` via `/undrain` (deletes the row → absence == live; weight resets to default reconcile path)
-
-**Two weight layers — NEVER COMBINE:**
-
-- `bucket.Placement != nil` → policy = bucket.Placement, cluster.weight IGNORED for this bucket.
-- `bucket.Placement == nil` AND class env spec.Cluster == "" → synthesise `{<each-live>: <its-weight>}` via `placement.DefaultPolicy`.
+- `bucket.Placement != nil` → policy = bucket.Placement, cluster.weight IGNORED.
+- `Placement == nil` AND class spec.Cluster == "" → synthesise `{<live>: <weight>}` via `placement.DefaultPolicy`.
 - Class env `@cluster` suffix sets `spec.Cluster` → bypass synthesis (explicit per-class pin).
 
-The picker call sites (`rados.Backend.PutChunks`, `s3.Backend.clusterForPlacement`) must short-circuit on
-`bucket.Placement != nil` BEFORE consulting weights, otherwise the bucket-policy-wins invariant breaks. The
-states snapshot is sourced from `placement.DrainCache.States(ctx)` (30 s TTL, invalidated synchronously by
-`/activate` + `/weight` + `/drain` + `/undrain` admin handlers).
-
-**Per-bucket `PlacementMode` ∈ {`weighted` (default), `strict`}** (US-001..US-006 of
-`ralph/effective-placement`). Adds an opt-in compliance pin on top of the bucket-policy-wins invariant.
-Resolution lives in `placement.EffectivePolicy(bucketPolicy, mode, clusterWeights, clusterStates) map[string]int`
-in `internal/data/placement/policy.go`:
-
-1. `liveSubset(bucketPolicy)` filters policy entries to (cluster live OR absent from states per
-   absence==live semantic) AND weight>0. Non-empty → return as-is.
-2. If `liveSubset(bucketPolicy)` is empty AND `len(bucketPolicy) > 0` AND `mode == "strict"` → return nil
-   (compliance refuse — caller falls through to spec.Cluster which strict-refuses if drained → 503
-   `DrainRefused`). This preserves the explicit-pin semantic for data-sovereignty / replication-design
-   buckets even when every cluster in the bucket's policy is draining.
-3. Otherwise (mode != strict, OR bucketPolicy nil entirely) → return `liveSubset(clusterWeights)` so the
-   cluster-weights wheel covers the gap.
-
-`mode == ""` (legacy rows) is coerced to `weighted` via `meta.NormalizePlacementMode`. Nil-policy + strict
-is treated as weighted at the helper boundary — strict is meaningless without an explicit policy to pin.
-Both `rados.Backend.PutChunks` and `s3.Backend.clusterForPlacement` route through `EffectivePolicy`; the
-rebalance worker classifier `internal/rebalance.ClassifyBucket(raw, effective, mode)` derives
-`migratable | stuck_single_policy | stuck_no_policy` from the same triple so /drain-impact categorisation
-matches actual PUT routing behavior. `stuck_single_policy` fires ONLY for strict-flagged buckets that
-have a non-empty Placement with every entry draining — the operator-facing
-`<BulkPlacementFixDialog>` filters its row list to that subset and offers a per-row "Flip to weighted"
-shortcut so the cluster.weights fallback can absorb the drain without forcing a manual policy edit.
-
-Per-bucket mode is persisted across all three meta backends (memory in-struct, Cassandra
-`ALTER TABLE buckets ADD placement_mode text` + LWT `UPDATE ... IF EXISTS`, TiKV via `updateBucket`
-helper). Admin `PUT /admin/v1/buckets/{name}/placement` body extended with optional `mode: "weighted"|"strict"`;
-audit row stamped `admin:UpdateBucketPlacementMode` when the field is present (vs the existing
-`admin:PutBucketPlacement` when only the policy changes). GET response always carries `mode` field
-(coerced via NormalizePlacementMode so legacy NULL → `"weighted"`).
+**Per-bucket `PlacementMode` ∈ {`weighted` (default), `strict`}** — opt-in compliance pin atop the
+bucket-policy-wins invariant. Resolution in `placement.EffectivePolicy(bucketPolicy, mode, clusterWeights,
+clusterStates)` (`internal/data/placement/policy.go`): live-subset of bucket policy wins; if empty AND policy
+non-empty AND `strict` → return nil (compliance refuse → 503 `DrainRefused`, preserves data-sovereignty pin);
+else fall back to live-subset of cluster-weights wheel. `mode==""` coerced to `weighted` via
+`meta.NormalizePlacementMode`. Both PUT picker sites route through `EffectivePolicy`; rebalance classifier
+`ClassifyBucket` derives `migratable | stuck_single_policy | stuck_no_policy` from the same triple (drives
+`/drain-impact` + `<BulkPlacementFixDialog>` "flip to weighted"). Persisted all 3 backends; admin
+`PUT /admin/v1/buckets/{name}/placement` body takes optional `mode`, audit `admin:UpdateBucketPlacementMode`.
 
 Boot reconcile (`internal/serverapp/cluster_reconcile.go`) is idempotent — re-running it creates no duplicates and
 overwrites nothing. Lives between drain-cache wiring and listener start; fail-soft on transient meta errors so a
@@ -809,62 +487,20 @@ heap-merges by clustering order (key ASC, version_id DESC). See `cassandra/store
 
 ## Ralph autonomous runs
 
-`scripts/ralph/` contains a Ralph loop runner that drives `claude --print` (or Amp) through `scripts/ralph/prd.json`. It
-commits per story and writes `progress.txt`. `scripts/ralph/CLAUDE.md` is Ralph's *task prompt* — do not put project
-knowledge there. This root `CLAUDE.md` is the project memory and is auto-loaded by every Claude Code invocation,
-including Ralph's. Update this file (not Ralph's) when you discover something a future iteration should know.
+`scripts/ralph/` drives `claude --print` through `prd.json`, commits per story, writes `progress.txt`.
+`scripts/ralph/CLAUDE.md` is Ralph's *task prompt* — project knowledge goes HERE (root, auto-loaded), not there.
 
-**PRD lifecycle — single source of truth is the Ralph snapshot.** A markdown PRD in `tasks/prd-<feature>.md` is a
-disposable design draft used to brief operators / Claude Code during the prep step. Once `scripts/ralph/prd.json` is
-committed (cycle prep) and Ralph runs, the canonical record of what was actually built is the auto-archived pair
-`scripts/ralph/archive/<YYYY-MM-DD>-<branch>/{prd.json,progress.txt}` (created by `archive_cycle` in `ralph.sh` on
-`<promise>COMPLETE</promise>`). Markdown PRD must NOT be copied to `tasks/archive/` on close-flip — delete it from
-`tasks/` instead. `tasks/archive/` is reserved for design intent that has no Ralph snapshot (work folded into another
-cycle, or pre-`archive_cycle` legacy). Active drafts that are pre-cycle prep stay under `tasks/prd-*.md`; once the
-cycle is merged into main, the markdown is removed in the same commit that flips the ROADMAP entry to Done.
+**PRD lifecycle — canonical record is the Ralph snapshot.** Markdown `tasks/prd-<feature>.md` is a disposable
+design draft. After cycle prep, truth is the auto-archived `scripts/ralph/archive/<date>-<branch>/{prd.json,progress.txt}`
+(via `archive_cycle`). On close-flip: DELETE the markdown from `tasks/` (don't copy to `tasks/archive/`).
+`tasks/archive/` is only for design intent with no Ralph snapshot.
 
 ## Roadmap maintenance
 
-`ROADMAP.md` is the canonical project state list. It MUST stay an honest reflection of what is shipped vs pending at
-every SHA. The PRDs in `tasks/` (and `scripts/ralph/prd.json`) are scoped to specific cycles and do NOT need to mirror
-the roadmap — only `ROADMAP.md` is canonical.
+`ROADMAP.md` is the canonical shipped-vs-pending list at every SHA (PRDs in `tasks/` are cycle-scoped, don't mirror).
+Applies to Ralph + human commits alike.
 
-This rule applies to **all** work — Ralph autonomous runs and human-driven commits alike.
-
-**Closing a roadmap item.** Every commit that closes a `ROADMAP.md` item MUST flip the bullet to the format:
-
-```
-~~**P<n> — <title>.**~~ — **Done.** <one-line summary>. (commit `<sha>`)
-```
-
-…in the same commit. If the closing SHA is needed inline (commit-then-amend is undesirable here — see "Commits and PRs"
-above), the immediate follow-up commit may carry the SHA edit instead.
-
-Example diff shape (close-flip):
-
-```diff
--- **P1 — Single-binary `strata` (CockroachDB-shape).** Today there are 10 `cmd/` binaries,
---  most of them background workers. Collapse `cmd/strata-{gateway,gc,...}` into a single
---  `cmd/strata` ...
-++ ~~**P1 — Single-binary `strata` (CockroachDB-shape).**~~ — **Done.** Single `strata`
-++  binary; `server` + `admin` subcommands; workers selected via `STRATA_WORKERS=`. (commit `abc1234`)
-```
-
-**Discovering a new gap, latent bug, or regression.** Every commit that surfaces something not yet on the roadmap MUST
-add a new entry in `ROADMAP.md` in the same commit. Place it under the appropriate severity section: P1 for correctness
-or production-blockers, P2 for meaningful gaps expected by serious deployments, P3 for nice-to-haves and DX, or
-`Known latent bugs` for live bugs.
-
-Example diff shape (new discovery):
-
-```diff
- ## Correctness & consistency
-
-++- **P2 — Multipart UploadPart `Content-MD5` not validated.** `s3api.uploadPart` accepts the
-++  client-supplied `Content-MD5` header but never recomputes/compares; mismatches silently
-++  succeed. Add the check on the streaming-decoder hot path.
-+
- - **P3 — Object Lock `COMPLIANCE` audit log.** ...
-```
-
-Code-only commits that touch neither a roadmap item nor a new gap do not need a roadmap edit.
+- **Close an item** in the same commit: `~~**P<n> — <title>.**~~ — **Done.** <summary>. (commit `<sha>`)`.
+- **Surface a new gap/bug** → add a `ROADMAP.md` entry same commit, severity P1 (correctness/prod-blocker) / P2
+  (meaningful gap) / P3 (DX) / `Known latent bugs`.
+- Code-only commits touching neither need no roadmap edit.

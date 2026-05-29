@@ -30,7 +30,8 @@ func buildTLSClient(t ClusterTLS, base *http.Client) (*http.Client, error) {
 		return nil, nil
 	}
 	tlsCfg := &tls.Config{
-		InsecureSkipVerify: t.SkipVerify, //nolint:gosec // operator-opt-in; gauged + WARN-logged at boot
+		// #nosec G402: operator-opt-in SkipVerify; gauged + WARN-logged at boot. (Legacy //nolint:gosec preserved as gosec-native annotation.)
+		InsecureSkipVerify: t.SkipVerify,
 	}
 	if t.CAFile != "" {
 		pem, err := os.ReadFile(t.CAFile)

@@ -96,6 +96,10 @@ Compatibility — live at **[danchupin.github.io/strata](https://danchupin.githu
 
 For source-tree readers: `make docs-serve` runs the Hugo site locally on `:1313`.
 
+## Security
+
+Report vulnerabilities via [GitHub Security Advisories](https://github.com/danchupin/strata/security/advisories/new). See [SECURITY.md](SECURITY.md) for the disclosure policy, SLA, and in-scope surfaces.
+
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE).

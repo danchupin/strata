@@ -1,0 +1,50 @@
+name: Dependabot auto-merge (patch-only)
+
+# Patch-class Dependabot PRs auto-merge when CI is green (US-004 Cycle C
+# supply-chain-security). Minor + major updates leave PR open for human
+# review. Auto-merge enabled via `gh pr merge --auto --squash` — GitHub
+# completes the merge once required status checks pass.
+#
+# Triggered on pull_request_target so the workflow_token has write scope
+# even on PRs opened by `dependabot[bot]` from the bot's fork-shape branch.
+# pull_request_target SECURITY: this workflow runs on the BASE ref (main),
+# NOT the PR ref, so the PR's mutable code cannot tamper with the auto-merge
+# logic. Only Dependabot's pre-signed metadata is consumed via the
+# dependabot/fetch-metadata action — no untrusted code from the PR runs here.
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+
+permissions:
+  contents: read
+
+jobs:
+  auto-merge:
+    name: Auto-merge patch updates
+    runs-on: ubuntu-latest
+    if: ${{ github.actor == 'dependabot[bot]' }}
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # dependabot/fetch-metadata v3.1.0 (SHA-pinned per US-004 AC + S1).
+      # Lightweight tag — single-hop resolution via
+      # `gh api repos/dependabot/fetch-metadata/git/refs/tags/v3.1.0`
+      # → .object.sha (type=commit).
+      - name: Fetch Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Enable auto-merge for patch updates
+        if: ${{ steps.metadata.outputs.update-type == 'version-update:semver-patch' }}
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,30 @@
+# .licensei.yml — license-audit allowlist for the supply-chain CI gate
+# (US-009 cycle C supply-chain-security).
+#
+# Consumed by scripts/check-license.sh: every entry under `ignore:` is
+# passed to `go-licenses check` as a `--ignore <module>` flag. Use this
+# ONLY for packages whose LICENSE text is present + manually verified as
+# an ALLOWED class (Apache-2.0 / MIT / BSD / ISC / Unlicense) but which
+# go-licenses' classifier scores below its confidence threshold and
+# reports as "unknown". NEVER add a genuinely forbidden/restricted
+# (GPL / AGPL / LGPL strong-copyleft) module here — remediate via dep
+# removal/replacement instead.
+#
+# Each entry MUST carry a `# <license> — <reason>` trailing comment so
+# the exception is auditable. The wrapper parses only the module path
+# token (first field after the leading `- `); the comment is for humans.
+
+ignore:
+  # BSD-3-Clause — LICENSE file is verbatim 3-clause BSD ("Neither the
+  # names of the authors ... may be used to endorse"). go-licenses'
+  # classifier scores below confidence on the non-canonical header and
+  # reports "unknown". Manually verified permissive. Transitive via
+  # github.com/tikv/client-go/v2 internal/latch.
+  - github.com/cznic/mathutil
+
+  # Self — the cephimpl Go module (github.com/danchupin/strata/cephimpl)
+  # has no LICENSE file at its subdir root (the repo root LICENSE covers
+  # it). go-licenses logs "failed to find license" for the module under
+  # analysis on the cephimpl axis; ignoring the first-party module path
+  # silences the noise. Harmless on the main axis (path not present).
+  - github.com/danchupin/strata/cephimpl

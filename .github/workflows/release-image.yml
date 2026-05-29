@@ -1,0 +1,241 @@
+# Release pipeline: build + push the Strata container image to GHCR and
+# emit non-falsifiable SLSA L3 build provenance via the
+# slsa-framework/slsa-github-generator reusable workflow.
+#
+# Cycle C supply-chain-security, US-006. Triggered on `v*` tag push
+# (the release shape) + workflow_dispatch (manual rebuild of an existing
+# ref without cutting a new tag).
+#
+# Pipeline shape (canonical SLSA *container* pattern):
+#   1. `build` job  — logs in to GHCR, builds deploy/docker/Dockerfile
+#                     against the repo root context, pushes the image,
+#                     and exposes the pushed manifest `digest` + `image`
+#                     name as job outputs.
+#   2. `provenance` job — the slsa-github-generator
+#                     `generator_container_slsa3.yml` REUSABLE workflow.
+#                     It consumes the build job's digest and generates +
+#                     uploads SLSA L3 provenance attestation for that
+#                     exact digest to the registry + Rekor transparency
+#                     log. SLSA L3 trust derives from this attestation
+#                     being produced by an isolated, GitHub-controlled
+#                     reusable workflow the calling repo cannot tamper
+#                     with — NOT from co-locating build steps.
+#
+# NOTE on the B2 PRD acceptance criterion ("generator owns build+push+
+# attest end-to-end, do NOT split"): the SLSA *container* generator
+# (`generator_container_slsa3.yml`) does NOT build images — it attests an
+# already-pushed image referenced by digest. (Only the *Go-builder*
+# generator compiles its artifact.) The build+push therefore MUST live in
+# a preceding job whose digest output feeds the generator. This is the
+# upstream-canonical container pattern and the only correct wiring; the
+# single-digest contract (one build, one digest, attested + signed +
+# SBOM'd downstream) is preserved exactly as B2 intends.
+#
+# NOTE on SHA-pinning (S1 PRD criterion): every THIRD-PARTY action below
+# is SHA-pinned to its release commit. The lone exception is the SLSA
+# reusable workflow itself, which MUST be referenced by an immutable
+# semantic-version TAG (`@v2.1.0`) — the generator self-verifies its own
+# release tag to anchor the provenance trust root and HARD-FAILS the
+# build if referenced by a raw commit SHA. This is a documented upstream
+# requirement, not an oversight. See
+# https://github.com/slsa-framework/slsa-github-generator/blob/main/internal/builders/container/README.md
+name: release-image
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+# Top-level minimal default; jobs widen as needed (least-privilege).
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: ghcr.io/danchupin/strata
+
+jobs:
+  build:
+    name: Build + push image to GHCR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # GHCR push
+    outputs:
+      image: ${{ env.IMAGE_NAME }}
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # SHA-pinned third-party action (US-006 AC / S1):
+      #   docker/login-action v4.2.0 →
+      #       650006c6eb7dba73a995cc03b0b2d7f5ca915bee
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # SHA-pinned third-party action (US-006 AC / S1):
+      #   docker/metadata-action v6.1.0 →
+      #       80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9
+      # Tags the v* ref as :<version> and promotes :latest on any v* tag.
+      - name: Derive image tags + labels
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=sha
+
+      # SHA-pinned third-party action (US-006 AC / S1):
+      #   docker/build-push-action v7.2.0 →
+      #       f9f3042f7e2789586610d6e8b85c8f03e5195baf
+      # Context = repo root; Dockerfile = deploy/docker/Dockerfile (same
+      # build invocation as the ci.yml docker-build job, which links
+      # librados via the -tags ceph build inside the Dockerfile).
+      # provenance:false + sbom:false force a single plain image manifest
+      # so steps.push.outputs.digest is the manifest digest the SLSA
+      # container generator expects (an OCI index with an embedded
+      # attestation manifest would feed the generator the wrong digest).
+      - name: Build + push
+        id: push
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          sbom: false
+
+  # SLSA L3 provenance for the exact pushed digest. This is the
+  # generator_container_slsa3.yml REUSABLE workflow — referenced by TAG
+  # (NOT SHA) per the upstream trust-root requirement documented above.
+  # Its `image`/`digest` inputs come straight from the build job so the
+  # attestation, the cosign signature (US-008), and the SBOM (US-007) all
+  # anchor on one identical digest.
+  provenance:
+    name: SLSA L3 provenance
+    needs: build
+    permissions:
+      actions: read # read the workflow run for provenance
+      id-token: write # OIDC keyless signing of the attestation
+      packages: write # push the attestation to GHCR
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
+    with:
+      image: ${{ needs.build.outputs.image }}
+      digest: ${{ needs.build.outputs.digest }}
+      registry-username: ${{ github.actor }}
+    secrets:
+      registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+  # SPDX 2.3 SBOM for the exact pushed digest (US-007). Runs AFTER the SLSA
+  # provenance reusable workflow completes so the SBOM, the attestation, and
+  # the (US-008) cosign signature all anchor on one identical digest — there
+  # is no race where syft scans a different image than was attested. The
+  # digest comes straight from the build job output (NOT a re-resolve of a
+  # mutable tag), guaranteeing same-digest SBOM. syft (via anchore/sbom-action)
+  # is used over trivy's SBOM emitter for richer Go-module + OS-package
+  # detection.
+  sbom:
+    name: SPDX SBOM (syft)
+    needs: [build, provenance]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # attach SBOM asset to the GitHub Release on a v* tag
+      packages: read # pull the pushed image from GHCR for syft to scan
+    steps:
+      # syft pulls the image from GHCR via the local docker credential store,
+      # so a GHCR login is required even though we only read.
+      # SHA-pinned third-party action (reused from build job): docker/login-action
+      #   v4.2.0 → 650006c6eb7dba73a995cc03b0b2d7f5ca915bee
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # SHA-pinned third-party action (US-007 AC / S1):
+      #   anchore/sbom-action v0.24.0 →
+      #       e22c389904149dbc22b58101806040fa8d37a610
+      # Scans the image BY DIGEST (build job output), emits SPDX 2.3 JSON, and
+      # auto-uploads the file as a 90-day-retention workflow artifact.
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+          format: spdx-json
+          output-file: strata-${{ github.ref_name }}-sbom.spdx.json
+          artifact-name: strata-${{ github.ref_name }}-sbom.spdx.json
+          upload-artifact: true
+          upload-artifact-retention: 90
+
+      # SHA-pinned third-party action (US-007 AC / S1):
+      #   softprops/action-gh-release v3.0.0 →
+      #       b4309332981a82ec1c5618f44dd2e27cc8bfbfda
+      # Attaches the SBOM to the matching GitHub Release — ONLY on a v* tag
+      # push (workflow_dispatch of a branch has no release to attach to).
+      - name: Attach SBOM to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          files: strata-${{ github.ref_name }}-sbom.spdx.json
+          fail_on_unmatched_files: true
+
+  # cosign keyless OIDC signature for the exact pushed digest (US-008). Runs
+  # AFTER the SLSA provenance reusable workflow so the cosign signature, the
+  # SLSA attestation (US-006), and the SBOM (US-007) all anchor on ONE
+  # identical digest. The digest comes straight from the build job output
+  # (NOT a re-resolve of a mutable tag) — same single-digest contract.
+  #
+  # KEYLESS signing: no static signing key exists. The GitHub Actions OIDC
+  # identity (`id-token: write`) is the signer; Fulcio issues a short-lived
+  # certificate bound to that identity and the signature lands in the Rekor
+  # public transparency log. Operators verify with the anchored, escaped,
+  # suffix-matched regexp pair pinned in /operate/image-verification.md
+  # (US-010):
+  #
+  #   cosign verify \
+  #     --certificate-identity-regexp='^https://github\.com/danchupin/strata/.*' \
+  #     --certificate-oidc-issuer-regexp='^https://token\.actions\.githubusercontent\.com$' \
+  #     ghcr.io/danchupin/strata:v0.0.1-alpha.1
+  cosign-sign:
+    name: cosign keyless OIDC sign
+    needs: [build, provenance]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC identity for keyless Fulcio signing
+      packages: write # push the signature artifact to GHCR
+    steps:
+      # cosign pushes the signature to GHCR alongside the image, so a GHCR
+      # login is required.
+      # SHA-pinned third-party action (reused from build job): docker/login-action
+      #   v4.2.0 → 650006c6eb7dba73a995cc03b0b2d7f5ca915bee
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # SHA-pinned third-party action (US-008 AC / S1):
+      #   sigstore/cosign-installer v4.1.2 →
+      #       6f9f17788090df1f26f669e9d70d6ae9567deba6
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # Sign the exact pushed digest (build job output) — never a tag. The
+      # --yes flag confirms the Rekor transparency-log upload (interactive
+      # prompt is suppressed in CI). COSIGN_EXPERIMENTAL is no longer needed
+      # for keyless on cosign ≥2.x — OIDC is the default in CI.
+      - name: cosign sign (keyless)
+        run: |
+          cosign sign --yes \
+            "${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}"

@@ -91,6 +91,238 @@ jobs:
       - name: make promtool-check
         run: make promtool-check
 
+  govulncheck:
+    name: govulncheck (Go CVE callgraph scan)
+    runs-on: ubuntu-latest
+    needs: web-build
+    # Parallel scanner job — sibling of lint-build / unit (US-001 cycle C
+    # supply-chain-security). Matrix axis: main module + cephimpl module
+    # (CLAUDE.md RADOS / cephimpl module split). Hard-fails when any
+    # callgraph hit reaches code under internal/ or cmd/; WARN-only for
+    # /internal/racetest, /scripts/, *_test.go (see scripts/lib/severity.sh).
+    strategy:
+      fail-fast: false
+      matrix:
+        axis: [main, cephimpl]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+      - name: Install jq (fallback)
+        run: command -v jq >/dev/null || sudo apt-get install -y jq
+      - name: Install librados-dev (cephimpl axis only)
+        if: matrix.axis == 'cephimpl'
+        run: sudo apt-get update && sudo apt-get install -y librados-dev
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: Run gate (${{ matrix.axis }})
+        env:
+          GOVULNCHECK_OUTPUT_DIR: ${{ github.workspace }}/govulncheck-results
+        run: |
+          if [ "${{ matrix.axis }}" = "cephimpl" ]; then
+            bash scripts/check-govulncheck.sh --cephimpl
+          else
+            bash scripts/check-govulncheck.sh
+          fi
+      - name: Upload findings (JSON)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: govulncheck-${{ matrix.axis }}
+          path: govulncheck-results/
+          if-no-files-found: warn
+          retention-days: 14
+
+  gosec:
+    name: gosec (Go static-analysis scan)
+    runs-on: ubuntu-latest
+    needs: web-build
+    # Parallel scanner job — sibling of govulncheck / lint-build / unit
+    # (US-003 cycle C supply-chain-security). Scans the main Go module
+    # only (cephimpl is unannotated rados glue — same vendor deps as
+    # main, no incremental signal). Gate semantics:
+    #   MEDIUM+ → hard-fail (gosec exit-code=1 on findings) + SARIF
+    #             upload to GitHub Code Scanning (repo Security tab).
+    #   LOW     → WARN-only second pass (gosec -no-fail), JSON artifact
+    #             uploaded for operator review; never fails CI.
+    # Rule + path excludes documented in .gosec.yml + applied via
+    # scripts/check-gosec.sh's GOSEC_EXCLUDE_RULES / EXCLUDE_DIRS lists.
+    # The composite action runs gosec inside a docker container with
+    # the workspace mounted; output files land directly in the runner
+    # workspace. security-events: write required for codeql-action
+    # SARIF upload.
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+      # SHA-pinned third-party action (US-003 AC):
+      #   securego/gosec v2.26.1 →
+      #       4a3bd8af174872c778439083ded7adbf3747e770 (annotated tag commit)
+      # Args mirror scripts/check-gosec.sh so local + CI gate semantics
+      # match. Without -no-fail, the action exits 1 on any MEDIUM+
+      # finding — hard-fail gate.
+      - name: gosec (MEDIUM+ gate, SARIF emit)
+        uses: securego/gosec@4a3bd8af174872c778439083ded7adbf3747e770 # v2.26.1
+        with:
+          args: '-severity=medium -exclude=G101,G104,G115,G304,G401,G501,G505,G703,G704,G705,G709 -exclude-dir=internal/racetest -exclude-dir=scripts -fmt=sarif -out=gosec.sarif ./...'
+      # SHA-pinned third-party action (US-003 AC):
+      #   github/codeql-action v3.36.0 →
+      #       03e4368ac7daa2bd82b3e85262f3bf87ee112f57 (annotated tag commit)
+      - name: Upload gosec SARIF to Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@03e4368ac7daa2bd82b3e85262f3bf87ee112f57 # v3.36.0
+        with:
+          sarif_file: 'gosec.sarif'
+          category: 'gosec'
+      - name: gosec (LOW WARN-only)
+        if: always()
+        uses: securego/gosec@4a3bd8af174872c778439083ded7adbf3747e770 # v2.26.1
+        with:
+          args: '-severity=low -exclude=G101,G104,G115,G304,G401,G501,G505,G703,G704,G705,G709 -exclude-dir=internal/racetest -exclude-dir=scripts -no-fail -fmt=json -out=gosec-low.json ./...'
+      - name: Upload gosec artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gosec-reports
+          path: |
+            gosec.sarif
+            gosec-low.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  trivy-image:
+    name: trivy (image CVE scan)
+    runs-on: ubuntu-latest
+    needs: docker-build
+    # Parallel scanner job — sibling of e2e / e2e-full, both depend on
+    # docker-build (US-002 cycle C supply-chain-security). Rebuilds
+    # strata:ceph in-job (artifact pass via docker save | docker load
+    # of a multi-GB image is slower than rebuilding under buildx cache,
+    # which is what e2e / e2e-full already do). Gate semantics:
+    #   CRITICAL → hard-fail (trivy-action exit-code=1) + SARIF upload
+    #              to GitHub Code Scanning (repo Security tab).
+    #   HIGH     → WARN-only (exit-code=0) + JSON artifact (operator
+    #              review-only; not a merge gate).
+    # security-events: write required for codeql-action SARIF upload.
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build gateway image
+        run: docker build -f deploy/docker/Dockerfile -t strata:ceph .
+      # SHA-pinned third-party actions (US-002 AC):
+      #   aquasecurity/trivy-action v0.36.0 →
+      #       ed142fd0673e97e23eac54620cfb913e5ce36c25 (annotated tag commit)
+      #   github/codeql-action v3.36.0 →
+      #       03e4368ac7daa2bd82b3e85262f3bf87ee112f57 (annotated tag commit)
+      - name: trivy (CRITICAL gate)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: 'strata:ceph'
+          format: 'sarif'
+          output: 'trivy-critical.sarif'
+          severity: 'CRITICAL'
+          exit-code: '1'
+          trivy-config: 'trivy.yaml'
+      - name: Upload CRITICAL SARIF to Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@03e4368ac7daa2bd82b3e85262f3bf87ee112f57 # v3.36.0
+        with:
+          sarif_file: 'trivy-critical.sarif'
+          category: 'trivy-critical'
+      - name: trivy (HIGH WARN-only)
+        if: always()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: 'strata:ceph'
+          format: 'json'
+          output: 'trivy-high.json'
+          severity: 'HIGH'
+          exit-code: '0'
+          trivy-config: 'trivy.yaml'
+      - name: Upload HIGH JSON artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-high
+          path: trivy-high.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  license-audit:
+    name: license-audit (go-licenses forbidden/restricted gate)
+    runs-on: ubuntu-latest
+    needs: web-build
+    # Parallel scanner job — sibling of govulncheck / gosec / lint-build
+    # (US-009 cycle C supply-chain-security). Matrix axis: main module +
+    # cephimpl module (CLAUDE.md RADOS / cephimpl module split). Hard-fails
+    # when any dependency carries a forbidden (GPL/AGPL) or restricted
+    # (LGPL strong-copyleft) license, or an UNKNOWN license not allowlisted
+    # in .licensei.yml. Wraps scripts/check-license.sh.
+    strategy:
+      fail-fast: false
+      matrix:
+        axis: [main, cephimpl]
+    steps:
+      - uses: actions/checkout@v4
+      # setup-go with go-version '1.25' resolves to the latest 1.25.x
+      # patch (>=1.25.10). go-licenses v1.6.0 MUST be built with that
+      # toolchain — built against go1.25.1 it mis-reports stdlib packages
+      # as "Non go modules projects" (upstream issue #128). The repo's
+      # go.mod `go 1.25.10` directive + GOTOOLCHAIN=auto guarantee the
+      # `go install` below picks the working toolchain.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+      - name: Install librados-dev (cephimpl axis only)
+        if: matrix.axis == 'cephimpl'
+        run: sudo apt-get update && sudo apt-get install -y librados-dev
+      # SHA-pinned third-party tool (US-009 AC):
+      #   github.com/google/go-licenses v1.6.0 →
+      #       5348b744d0983d85713295ea08a20cca1654a45e (release tag commit)
+      # NOTE: pinned to v1.6.0 NOT the latest v2.0.1 release — go-licenses
+      # v2.0.x cannot load stdlib package module info on this codebase
+      # ("Non go modules projects are no longer supported", upstream
+      # issue #128) and fails every scan. v1.6.0 is the latest WORKING
+      # stable. Revisit when v2 fixes #128.
+      - name: Install go-licenses
+        run: go install github.com/google/go-licenses@5348b744d0983d85713295ea08a20cca1654a45e
+      - name: Run gate (${{ matrix.axis }})
+        env:
+          GOLICENSES_OUTPUT_DIR: ${{ github.workspace }}/license-results
+        run: |
+          if [ "${{ matrix.axis }}" = "cephimpl" ]; then
+            bash scripts/check-license.sh --cephimpl
+          else
+            bash scripts/check-license.sh
+          fi
+      - name: Upload license report (CSV)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: license-report-${{ matrix.axis }}
+          path: license-results/
+          if-no-files-found: warn
+          retention-days: 14
+
   unit:
     name: Unit tests (-race)
     runs-on: ubuntu-latest

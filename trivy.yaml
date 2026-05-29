@@ -1,0 +1,38 @@
+# Trivy config (US-002 cycle C supply-chain-security).
+#
+# Baseline policy for the `trivy-image` parallel CI gate in
+# .github/workflows/ci.yml + the `make trivy-check` operator helper.
+# Operators MAY extend per-release-branch policy via PR; this is the
+# cycle-C baseline that must stay green on every commit to main.
+#
+# Gate shape lives at the workflow layer:
+#   CRITICAL severity → hard-fail (trivy-action exit-code=1)
+#   HIGH severity     → WARN-only (trivy-action exit-code=0, JSON artifact)
+# The same precedence applies to `make trivy-check` (CRITICAL only).
+#
+# Scanner scope: vuln only — secret scanning is gosec's domain (US-003),
+# license scanning is go-licenses' domain (US-009). Keeping each gate
+# single-concern simplifies failure attribution.
+scan:
+  scanners:
+    - vuln
+
+# CI runners get a fresh DB each run; skip-update=false keeps the upstream
+# vuln DB current. Operators on flaky networks may flip to true via local
+# override after a warm cache.
+db:
+  skip-update: false
+
+vulnerability:
+  type:
+    - os
+    - library
+  # Surface unfixed advisories too — informational signal for the HIGH
+  # WARN-only pass; the CRITICAL gate still fails on unfixed CRITs so
+  # the operator must remediate via base-image bump or vendor patch.
+  ignore-unfixed: false
+
+# Image-scan timeout. Trivy default is 5m, but the ceph base image
+# carries ~600 OS packages — bump to 10m to keep CI predictable under
+# vuln-DB load spikes.
+timeout: 10m
