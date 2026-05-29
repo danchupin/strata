@@ -1,6 +1,7 @@
 package serverapp
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -46,15 +47,16 @@ type loadedPair struct {
 	cert     *tls.Certificate
 }
 
-// fileFingerprint captures stat-derived identity for change detection.
-// (size, mtimeNanos, inode/dev) is sufficient: cert-manager + k8s
-// atomic-symlink swaps replace the underlying file so at least one field
-// flips; in-place writes flip mtime.
+// fileFingerprint captures content-derived identity for change detection.
+// We hash the cert + key bytes (sha256) rather than stat metadata: a
+// stat-based (size, mtime) fingerprint MISSES a k8s atomic-symlink swap when
+// the two versioned files share a size and land in the same coarse mtime tick
+// (observed on CI filesystems with second-granularity mtime — the swap was
+// never detected). Content hashing is the ground truth: any cert/key change
+// flips the hash regardless of size, mtime granularity, or inode reuse.
 type fileFingerprint struct {
-	certSize  int64
-	certMtime int64
-	keySize   int64
-	keyMtime  int64
+	cert [sha256.Size]byte
+	key  [sha256.Size]byte
 }
 
 func (s *certStore) load() *certSnapshot {
@@ -166,19 +168,17 @@ func loadPair(certPath, keyPath string) (loadedPair, error) {
 }
 
 func fingerprintPair(certPath, keyPath string) (fileFingerprint, error) {
-	cs, err := os.Stat(certPath)
+	certBytes, err := os.ReadFile(certPath)
 	if err != nil {
 		return fileFingerprint{}, err
 	}
-	ks, err := os.Stat(keyPath)
+	keyBytes, err := os.ReadFile(keyPath)
 	if err != nil {
 		return fileFingerprint{}, err
 	}
 	return fileFingerprint{
-		certSize:  cs.Size(),
-		certMtime: cs.ModTime().UnixNano(),
-		keySize:   ks.Size(),
-		keyMtime:  ks.ModTime().UnixNano(),
+		cert: sha256.Sum256(certBytes),
+		key:  sha256.Sum256(keyBytes),
 	}, nil
 }
 
