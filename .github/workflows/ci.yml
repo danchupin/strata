@@ -84,11 +84,31 @@ jobs:
           cd internal/data/rados/cephimpl && GOWORK=off go mod tidy -diff \
             || (echo "cephimpl/ go.mod drift" && exit 1)
       # promtool lint of deploy/prometheus/alerts.yml — US-002 cycle B
-      # prod-observability. Installs the Prometheus reference promtool
-      # from the upstream module so the rule semantics match what the lab
-      # Prometheus loads at runtime.
+      # prod-observability. Installs the Prometheus reference promtool so the
+      # rule semantics match what the lab Prometheus loads at runtime.
+      #
+      # We pin an explicit release and fetch the official prebuilt binary
+      # instead of `go install …@latest`: go 1.25 hard-rejects `go install`
+      # of the prometheus module (any version) because its go.mod carries
+      # replace/exclude directives — the old `@latest` step started failing
+      # the build once the runner moved to go 1.25 (US-001 ci-green cycle).
+      # Bounded 3-attempt retry absorbs a transient release-CDN hiccup.
       - name: Install promtool
-        run: go install github.com/prometheus/prometheus/cmd/promtool@latest
+        env:
+          PROMTOOL_VERSION: "3.6.0"
+        run: |
+          set -euo pipefail
+          url="https://github.com/prometheus/prometheus/releases/download/v${PROMTOOL_VERSION}/prometheus-${PROMTOOL_VERSION}.linux-amd64.tar.gz"
+          ok=
+          for attempt in 1 2 3; do
+            if curl -fsSL "$url" -o /tmp/prometheus.tgz; then ok=1; break; fi
+            echo "promtool download attempt ${attempt} failed; retrying in 5s" >&2
+            sleep 5
+          done
+          [ -n "$ok" ] || { echo "promtool download failed after 3 attempts" >&2; exit 1; }
+          tar -xzf /tmp/prometheus.tgz -C /tmp
+          sudo install -m 0755 "/tmp/prometheus-${PROMTOOL_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
+          promtool --version
       - name: make promtool-check
         run: make promtool-check
 

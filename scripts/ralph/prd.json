@@ -15,8 +15,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Root cause was NOT a flaky @latest fetch: go 1.25 (CI runner go-version '1.25', go.mod 'go 1.25.10') hard-rejects `go install github.com/prometheus/prometheus/cmd/promtool@<any-version>` because the prometheus go.mod carries replace/exclude directives — verified all of v0.300.0/v0.302.1/v0.305.3/v0.306.0/v0.308.1/v0.311.3 fail with 'must not contain directives'. The Sep-2025 working binary (3.6.0) was installed under go 1.24.7, which tolerated the directives. v2.x/v3.x tags also fail the major-version-path check. Fix: pin PROMTOOL_VERSION=3.6.0 and fetch the official prebuilt release tarball (github.com/prometheus/prometheus/releases/download/v3.6.0/prometheus-3.6.0.linux-amd64.tar.gz), install promtool to /usr/local/bin, wrapped in a bounded 3-attempt curl retry. Verified locally: tarball 200 + contains promtool; `make promtool-check` SUCCESS (47 rules); ci.yml parses. Deviated from the AC's literal `go install …@vX.Y.Z` because that mechanism is impossible under go 1.25 — release-binary download satisfies the pin+retry+no-@latest intent. CI run id: PENDING (verify Build+vet green after push)."
     },
     {
       "id": "US-002",

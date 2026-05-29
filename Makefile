@@ -487,10 +487,11 @@ helm-lint:
 # Prometheus rules lint for deploy/prometheus/alerts.yml (US-002 cycle B
 # prod-observability). Mirrors the helm-lint degradation pattern — when
 # promtool is missing locally the target prints a WARN + exit 0 so
-# `make test` is not gated on the toolchain. CI installs promtool via
-# `go install github.com/prometheus/prometheus/cmd/promtool@latest`.
+# `make test` is not gated on the toolchain. CI installs a pinned prebuilt
+# promtool release binary (go 1.25 rejects `go install` of the prometheus
+# module — its go.mod carries replace/exclude directives). See ci.yml.
 promtool-check:
-	@command -v promtool > /dev/null || { echo "promtool not installed — skip promtool-check (install: go install github.com/prometheus/prometheus/cmd/promtool@latest)"; exit 0; }
+	@command -v promtool > /dev/null || { echo "promtool not installed — skip promtool-check (install: download prebuilt from github.com/prometheus/prometheus/releases)"; exit 0; }
 	promtool check rules deploy/prometheus/alerts.yml
 
 # govulncheck — Go CVE callgraph scan against main + cephimpl modules
