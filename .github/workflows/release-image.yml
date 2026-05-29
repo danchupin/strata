@@ -187,3 +187,55 @@ jobs:
         with:
           files: strata-${{ github.ref_name }}-sbom.spdx.json
           fail_on_unmatched_files: true
+
+  # cosign keyless OIDC signature for the exact pushed digest (US-008). Runs
+  # AFTER the SLSA provenance reusable workflow so the cosign signature, the
+  # SLSA attestation (US-006), and the SBOM (US-007) all anchor on ONE
+  # identical digest. The digest comes straight from the build job output
+  # (NOT a re-resolve of a mutable tag) — same single-digest contract.
+  #
+  # KEYLESS signing: no static signing key exists. The GitHub Actions OIDC
+  # identity (`id-token: write`) is the signer; Fulcio issues a short-lived
+  # certificate bound to that identity and the signature lands in the Rekor
+  # public transparency log. Operators verify with the anchored, escaped,
+  # suffix-matched regexp pair pinned in /operate/image-verification.md
+  # (US-010):
+  #
+  #   cosign verify \
+  #     --certificate-identity-regexp='^https://github\.com/danchupin/strata/.*' \
+  #     --certificate-oidc-issuer-regexp='^https://token\.actions\.githubusercontent\.com$' \
+  #     ghcr.io/danchupin/strata:v0.0.1-alpha.1
+  cosign-sign:
+    name: cosign keyless OIDC sign
+    needs: [build, provenance]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC identity for keyless Fulcio signing
+      packages: write # push the signature artifact to GHCR
+    steps:
+      # cosign pushes the signature to GHCR alongside the image, so a GHCR
+      # login is required.
+      # SHA-pinned third-party action (reused from build job): docker/login-action
+      #   v4.2.0 → 650006c6eb7dba73a995cc03b0b2d7f5ca915bee
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # SHA-pinned third-party action (US-008 AC / S1):
+      #   sigstore/cosign-installer v4.1.2 →
+      #       6f9f17788090df1f26f669e9d70d6ae9567deba6
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # Sign the exact pushed digest (build job output) — never a tag. The
+      # --yes flag confirms the Rekor transparency-log upload (interactive
+      # prompt is suppressed in CI). COSIGN_EXPERIMENTAL is no longer needed
+      # for keyless on cosign ≥2.x — OIDC is the default in CI.
+      - name: cosign sign (keyless)
+        run: |
+          cosign sign --yes \
+            "${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}"

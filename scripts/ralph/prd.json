@@ -163,8 +163,8 @@
         "Tests pass"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "cosign-sign job appended to release-image.yml: needs [build, provenance] so the signature anchors the same digest SLSA attested + syft SBOM'd. Keyless OIDC (id-token:write) — cosign sign --yes <image>@<digest> via sigstore/cosign-installer@v4.1.2 (SHA 6f9f1778). GHCR login step required (cosign pushes signature artifact to registry). Verify recipe (anchored/escaped regexp pair) lives in workflow comment + deferred to US-010's /operate/image-verification.md. scripts/smoke-image-verification.sh: dev-mode offline roundtrip — ephemeral local registry:2, tiny built image, cosign generate-key-pair + sign --key + verify --key (correct=PASS, wrong-key=REJECT negative test). Degrades WARN+exit0 when cosign/docker missing; timeout-wrapped cosign calls guard cold-TUF-init hang. Verified locally with cosign v3.0.6: PASS."
     },
     {
       "id": "US-009",
