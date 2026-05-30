@@ -389,13 +389,16 @@ jobs:
       # exercised — CI grep the log for `TestCassandraNullSentinelOnDisk`
       # and the `VersioningNullSentinel` storetest case to confirm neither
       # silently went `Skip`-ed.
-      # 25m (was 15m): the full integration suite spins a testcontainer per
-      # backend (cassandra + minio + localstack) across meta/data/kms/rebalance/
-      # s3api packages run serially under one `go test ./...` invocation. Once
-      # the previously-failing-fast tests were fixed they actually run to
-      # completion, pushing cumulative wall-clock past the old 15m global
-      # deadline (the cassandra package, last to run, ate the timeout panic).
-      - run: go test -v -tags integration -timeout 25m ./...
+      # -p 1 is LOAD-BEARING: `go test ./...` runs package test binaries in
+      # parallel (default -p = GOMAXPROCS), so the cassandra / tikv / minio /
+      # localstack integration packages spin their testcontainers ALL AT ONCE
+      # on a single runner. The resulting CPU/IO contention starved the
+      # cassandra container, blowing the 30s gocql query timeout in the
+      # storetest contract round-trips (they pass in ~17s locally, uncontended).
+      # -p 1 serialises the package binaries so only one backend's containers
+      # run at a time — no cross-backend contention. 30m timeout gives the
+      # now-serial suite headroom (cumulative, not concurrent, wall-clock).
+      - run: go test -v -tags integration -timeout 30m -p 1 ./...
 
   docker-build:
     name: Docker build (librados linking)
