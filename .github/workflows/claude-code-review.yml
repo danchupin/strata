@@ -21,7 +21,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
+      # write (was read): the review action needs it to POST inline review
+      # comments back to the PR. With read-only it ran green every PR (burning
+      # the CLAUDE_CODE_OAUTH_TOKEN quota) but silently posted nothing.
+      pull-requests: write
       issues: read
       id-token: write
 
