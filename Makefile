@@ -2,6 +2,7 @@ SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
 .PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test \
+	test-cover \
 	up up-all up-cassandra up-all-ci up-bench-rgw down \
 	dev dev-down dev-logs \
 	wait-cassandra wait-ceph wait-pd wait-tikv wait-strata wait-strata-a wait-strata-b wait-strata-lb-nginx wait-strata-lab wait-rgw \
@@ -56,6 +57,14 @@ audit-toml-parity:
 
 test:
 	go test ./...
+
+# Per-package coverage baseline for the QA production-readiness cycle (US-001).
+# Runs `go test -cover ./...` on the default tag (TiKV + memory, no ceph) and
+# splices a per-package table into tasks/qa-readiness-report.md. On Linux CI
+# every package builds; on a macOS box a few cgo-runtime / darwin-gosigar
+# packages are recorded as "CI" (the Linux run is the source of truth, FR-4).
+test-cover:
+	bash scripts/qa/coverage.sh
 
 test-race:
 	go test -race ./...

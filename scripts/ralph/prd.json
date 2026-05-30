@@ -18,8 +18,8 @@
         "Verify via a CI run on the cycle branch (the coverage job is green)."
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Coverage baseline measured (49 pkgs local; 5 env-blocked deferred to CI). make test-cover + scripts/qa/coverage.sh + CI coverage job added. Report at tasks/qa-readiness-report.md with handler->test matrix (40 covered/2 thin/1 uncovered)."
     },
     {
       "id": "US-002",

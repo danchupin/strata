@@ -1,16 +1,22 @@
 # Ralph Progress Log
-Started: Sat May 30 2026
+Started: Sat May 30 20:07:14 MSK 2026
 Cycle: ralph/qa-production-readiness
 ---
 
 ## Codebase Patterns
-- CI on Linux is the source of truth. Many failures (cgo/Xcode, gosec cephimpl, Cassandra Paxos starvation, SSE-KMS, drain/rebalance) do NOT reproduce on a local macOS/lima box. Verify every story by pushing the cycle branch and reading the actual run log (`gh run list --branch ralph/qa-production-readiness`, `gh run view <id>`, `gh run view --job <jobid> --log`), not local repro.
-- `internal/s3api` test build needs cgo; on a macOS box without the Xcode license it fails `build failed: Xcode license` — env issue, not a code bug. Take s3api coverage from CI; locally `CGO_ENABLED=0`-skip with a logged note.
-- Test harness entry points to REUSE (do not fork parallel harnesses — FR-2 no-duplication): `internal/s3api/testutil_test.go` (`newHarness(t)`, `h.doString`, `h.mustStatus`); `internal/meta/storetest` (`Run(t, factory)` contract on TiKV + memory); `internal/racetest/workload.go` + `tracker.go` (RecordIntent before Complete for multipart etag); the `*_integration_test.go` MinIO pattern (`startMinio`, `MINIO_KMS_SECRET_KEY=strata-test-key:OSMM+vkKUTCvQs9YL/CVMIMt43HFhkUpqJxTmGl6rYw=` for SSE).
-- Cassandra is NOT on the per-PR CI gate (JVM-heavy Paxos starves the runner — known latent P2). If a story needs the Cassandra contract, use the existing gated/integration path, not the PR gate. Cassandra stays first-class in code.
-- FR-8 split rule: if a story can't land in one iteration, SPLIT into US-00N + a trailing story rather than half-finishing — and record the split here. US-009/US-010 (drain vs mover) already split. US-005 (auth matrix), US-011 (multi-backend corruption) are next likely split candidates.
-- The cycle's single tracked artifact is `tasks/qa-readiness-report.md` — updated incrementally each story, finalized in US-013. Verdict stays PENDING until US-013.
-- Verified-correct premises (checked against code at PRD time): `conditional.go` = etagMatches+checkConditional, 0 direct tests; memory backend HAS `CorruptFirstChunk()` at `internal/data/memory/backend.go:148` (the `sse_object_test.go:207` skip is stale); `ErrKeyIDMismatch` in kms/aws.go+classify.go; `ListMultipartUploadsByCluster` in store.go+tikv/queues.go; `strata_bucket_stats_shard_writes_total` in metrics.go.
-- s3-tests is NOT a CI job — re-baseline (`scripts/s3-tests/run.sh`) is manual/local against the compose stack. Current baseline 92.7% (165/178); the 13 misses are deliberate SigV2/boto3-prefix/anonymous-list gaps, not real bugs.
-- Branch-protection edits are a MANUAL post-merge step (headless Ralph lacks admin-API auth). Stories prepare the `gh api` command + new check context in the report; a human applies it after merge.
+- Coverage baseline: `make test-cover` → `scripts/qa/coverage.sh` (2 passes: default CGO + CGO_ENABLED=0, keep real number from whichever built each pkg). Table spliced into tasks/qa-readiness-report.md between `<!-- COVERAGE-TABLE-START/END -->` markers. Idempotent.
+- Local macOS box: Xcode license NOT accepted → cgo runtime build-fails for cmd/strata, cmd/strata/admin, internal/meta/tikv, internal/metrics, internal/serverapp (darwin gosigar sysctl under CGO0 too). ENV issue, not code. CI (Linux) is source of truth (FR-4). `go vet ./...` / `make build` hit the same block locally — verify on CI.
+- s3api handler test mapping: handler `foo.go` usually paired with `foo_test.go`; gates live in `*_gate_test.go` (acl_gate, policy_gate), auth modes in `auth_mode_test.go`, drain in `drain_strict_test.go`.
+
+## 2026-05-30 - US-001
+- Coverage audit + readiness-report skeleton.
+- Added: scripts/qa/coverage.sh (two-pass cover, marker splice), Makefile `test-cover` target (+ .PHONY), .github/workflows/ci.yml `coverage` job (Linux, full table = FR-4 source of truth, uploads report artifact), tasks/qa-readiness-report.md (coverage table, dimension matrix, handler->test matrix for all 43 s3api handlers, residual risks R1-R5, Go/No-Go PENDING).
+- Baseline: 49 pkgs measured locally (s3api 75.9%, root 78.3%, lowest hot-path: data 56.0% / lifecycle 56.0%); 5 env-blocked → CI. These exact numbers = US-013 ratchet floor.
+- Handler matrix: 40 covered / 2 thin (conditional.go GET-side If-* = US-002; placement_ctx.go drain helpers = US-009) / 1 uncovered (delete_objects.go multi-delete = R1).
+- No production Go code changed (audit only).
+- **Learnings for future iterations:**
+  - delete_objects.go has ZERO direct test (R1) — real P2 gap, batch/partial-fail/quiet-mode/versioned paths unverified. Candidate follow-up.
+  - GET-side checkConditional (If-Modified-Since/If-None-Match on GET/HEAD) untested — US-002 must cover it (PUT-side + copy-side already covered).
+  - coverage.sh is idempotent: re-running regenerates identical table when no test changes. Run it after adding tests to refresh the baseline before US-013.
+  - make build runs web-build (pnpm) first — web/dist must be populated or go build fails on `pattern web/dist: no matching files found`.
 ---
