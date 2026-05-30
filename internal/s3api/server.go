@@ -1158,6 +1158,21 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		mapMetaErr(w, r, err)
 		return
 	}
+	if o.IsDeleteMarker {
+		// AWS-parity: a GET/HEAD that resolves to a delete marker — only
+		// reachable via an explicit ?versionId, since the latest-version store
+		// path returns ErrObjectNotFound for a delete-marker head — returns 405
+		// MethodNotAllowed with the x-amz-delete-marker + Last-Modified markers.
+		// A delete marker carries a nil manifest, so falling through to the body
+		// path would 500 on GetChunks(nil) (caught under versioning contention,
+		// US-008).
+		w.Header().Set("x-amz-delete-marker", "true")
+		w.Header().Set("x-amz-version-id", wireVersionID(o))
+		w.Header().Set("Last-Modified", o.Mtime.UTC().Format(http.TimeFormat))
+		w.Header().Set("Allow", "DELETE")
+		writeError(w, r, ErrMethodNotAllowed)
+		return
+	}
 	partNumberStr := q.Get("partNumber")
 	var (
 		partNumber int

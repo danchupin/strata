@@ -55,6 +55,17 @@ adding more, prove what is there.
   `TestSSEKMS_MultipartPerPartDecrypt` asserts a 3-part aws:kms upload decrypts via the
   `Manifest.PartChunkCounts` per-part locator). No SSE-KMS or rotation bug found beyond
   the SSE-C status.
+- ~~**P2 — `GET`/`HEAD ?versionId=<delete-marker>` returned 500 instead of 405.**~~ —
+  **Done.** US-008 (QA cycle) surfaced — via the suspended replace-null contention race in
+  `internal/racetest/versioning_race.go` — that a `GET`/`HEAD` resolving (through an explicit
+  `?versionId`) to a delete marker fell through to the body path; a delete marker carries a
+  nil manifest, so `s.Data.GetChunks(nil, …)` errored → `500 InternalError`. AWS-parity is
+  `405 MethodNotAllowed` + `x-amz-delete-marker: true` + `Last-Modified`. Fixed by guarding
+  `getObject` on `o.IsDeleteMarker` before any manifest read (`internal/s3api/server.go`, new
+  `ErrMethodNotAllowed` sentinel in `errors.go`). The latest-version (no-versionId) path was
+  already correct (store returns `ErrObjectNotFound` → 404). Pinned by
+  `TestGetDeleteMarkerByVersionIDReturns405` (GET + HEAD, Enabled TimeUUID marker + Suspended
+  null marker) plus the `TestRaceVersioning{Memory,TiKV}` contention scenarios.
 - ~~**P1 — Single-binary `strata` (CockroachDB-shape).**~~ — **Done.** Single `strata`
   binary with `server` + `admin` subcommands; `strata server` runs the gateway plus an
   opt-in subset of workers (gc, lifecycle, notify, replicator, access-log, inventory,

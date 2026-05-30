@@ -420,3 +420,55 @@ func TestVersioningObjSuspendedCopy(t *testing.T) {
 		t.Errorf("cross-bucket copy body: got %q want \"null content\"", body)
 	}
 }
+
+// TestGetDeleteMarkerByVersionIDReturns405 pins the US-008 fix: a GET or HEAD
+// that resolves (via an explicit ?versionId) to a delete marker must return
+// 405 MethodNotAllowed with x-amz-delete-marker:true — NOT a 500 from reading
+// the marker's nil manifest. The latest-version path (no versionId) still
+// 404s. Covers both the Enabled-mode TimeUUID marker and the Suspended-mode
+// null marker.
+func TestGetDeleteMarkerByVersionIDReturns405(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+	enableVersioning(h, "bkt")
+
+	putObjectReturnVersion(t, h, "/bkt/doc", "v1")
+
+	// Unversioned DELETE on an Enabled bucket appends a delete marker with a
+	// fresh TimeUUID version id.
+	delResp := h.doString("DELETE", "/bkt/doc", "")
+	h.mustStatus(delResp, 204)
+	markerVID := delResp.Header.Get("X-Amz-Version-Id")
+	if markerVID == "" || markerVID == "null" {
+		t.Fatalf("enabled DELETE marker version-id: got %q, want a TimeUUID", markerVID)
+	}
+
+	// Latest GET hits the marker → 404 (store returns ErrObjectNotFound).
+	h.mustStatus(h.doString("GET", "/bkt/doc", ""), 404)
+
+	// GET ?versionId=<marker> → 405 + x-amz-delete-marker, not 500.
+	for _, method := range []string{"GET", "HEAD"} {
+		resp := h.doString(method, "/bkt/doc?versionId="+markerVID, "")
+		h.mustStatus(resp, 405)
+		if got := resp.Header.Get("X-Amz-Delete-Marker"); got != "true" {
+			t.Errorf("%s ?versionId=<marker>: x-amz-delete-marker=%q, want \"true\"", method, got)
+		}
+		if got := resp.Header.Get("X-Amz-Version-Id"); got != markerVID {
+			t.Errorf("%s ?versionId=<marker>: x-amz-version-id=%q, want %q", method, got, markerVID)
+		}
+		h.readBody(resp)
+	}
+
+	// Suspended-mode null delete marker: same 405 via ?versionId=null.
+	h.mustStatus(h.doString("PUT", "/bkt2", ""), 200)
+	h.mustStatus(h.doString("PUT", "/bkt2?versioning",
+		"<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>"), 200)
+	h.mustStatus(h.doString("PUT", "/bkt2/doc", "body"), 200)
+	h.mustStatus(h.doString("DELETE", "/bkt2/doc", ""), 204)
+	resp := h.doString("GET", "/bkt2/doc?versionId=null", "")
+	h.mustStatus(resp, 405)
+	if got := resp.Header.Get("X-Amz-Delete-Marker"); got != "true" {
+		t.Errorf("GET ?versionId=null on null marker: x-amz-delete-marker=%q, want \"true\"", got)
+	}
+	h.readBody(resp)
+}

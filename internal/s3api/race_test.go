@@ -55,3 +55,12 @@ func TestRaceMultipartMemory(t *testing.T) {
 	f := newMemoryRaceFixture(t)
 	racetest.RunMultipartRaceScenario(t, f)
 }
+
+// TestRaceVersioningMemory drives the focused versioning/CAS-contention
+// scenario (PUT-vs-delete-marker, SetObjectStorage CAS, suspended replace-null)
+// against the memory backend. Always-on so the -race CI job covers it; the
+// TiKV variant lives in race_integration_test.go.
+func TestRaceVersioningMemory(t *testing.T) {
+	f := newMemoryRaceFixture(t)
+	racetest.RunVersioningRaceScenario(t, f)
+}

@@ -128,6 +128,16 @@ func TestRaceMultipartTiKV(t *testing.T) {
 	racetest.RunMultipartRaceScenario(t, f)
 }
 
+// TestRaceVersioningTiKV runs the focused versioning/CAS-contention scenario
+// (PUT-vs-delete-marker, SetObjectStorage CAS, suspended replace-null) against
+// a TiKV-backed meta.Store, where the version-chain head flip and the
+// SetObjectStorage CAS are real pessimistic-txn LWTs (not a coarse in-process
+// mutex). Build-tag-gated to integration like the mixed-ops variant.
+func TestRaceVersioningTiKV(t *testing.T) {
+	f := newTiKVRaceFixture(t)
+	racetest.RunVersioningRaceScenario(t, f)
+}
+
 // newTiKVRaceFixture brings up a PD + TiKV pair (or an operator-supplied
 // cluster via STRATA_TIKV_TEST_PD_ENDPOINTS — see internal/meta/tikv/tikvtest)
 // and wires a racetest.Fixture against it. Shared by the mixed-ops and
