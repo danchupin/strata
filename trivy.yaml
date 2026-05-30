@@ -13,6 +13,16 @@
 # Scanner scope: vuln only — secret scanning is gosec's domain (US-003),
 # license scanning is go-licenses' domain (US-009). Keeping each gate
 # single-concern simplifies failure attribution.
+# Severity filter for the CRITICAL gate. This MUST live in the config file,
+# not only the trivy-action `severity:` input: when `trivy-config` is passed,
+# the config file's severity wins and an absent key defaults to ALL severities
+# — which made the "CRITICAL gate" fail on HIGH/MEDIUM base-image CVEs
+# (setuptools / scikit-learn in the ceph image) that aren't critical at all.
+# The HIGH WARN-only CI step intentionally does NOT load this config (it sets
+# severity: HIGH inline) so it still surfaces HIGH advisories for operators.
+severity:
+  - CRITICAL
+
 scan:
   scanners:
     - vuln

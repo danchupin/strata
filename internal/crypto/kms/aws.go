@@ -83,6 +83,15 @@ func (p *AWSKMSProvider) UnwrapDEK(ctx context.Context, keyID string, wrapped []
 		KeyId:          aws.String(keyID),
 	})
 	if err != nil {
+		// Decrypt with an explicit KeyId that does not match the key the
+		// ciphertext was wrapped under fails fast with IncorrectKeyException
+		// (real AWS + LocalStack >=3.8 enforce this) — the success-path
+		// out.KeyId comparison below never runs in that case. Map it to the
+		// stable ErrKeyIDMismatch sentinel the gateway turns into AccessDenied.
+		var incorrectKey *kmstypes.IncorrectKeyException
+		if errors.As(err, &incorrectKey) {
+			return nil, fmt.Errorf("%w: %s", ErrKeyIDMismatch, err.Error())
+		}
 		return nil, WrapTransient(fmt.Errorf("kms aws Decrypt: %w", err))
 	}
 	if out.KeyId != nil && !sameKeyARN(*out.KeyId, keyID) {

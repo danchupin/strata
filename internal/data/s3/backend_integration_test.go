@@ -22,11 +22,19 @@ import (
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/google/uuid"
+	"github.com/testcontainers/testcontainers-go"
 	tcminio "github.com/testcontainers/testcontainers-go/modules/minio"
 
 	"github.com/danchupin/strata/internal/data"
 	s3backend "github.com/danchupin/strata/internal/data/s3"
 )
+
+// minioKMSSecretKey enables MinIO's built-in SSE-S3 (AES256) auto-encryption.
+// The s3-over-s3 backend applies AES256 server-side encryption on uploads in
+// its default passthrough mode (encrypt-at-rest on the backing store); recent
+// minio/minio images reject SSE-S3 with 501 "KMS is not configured" unless a
+// KMS secret key is provisioned. Value = <key-name>:<base64 32-byte key>.
+const minioKMSSecretKey = "strata-test-key:OSMM+vkKUTCvQs9YL/CVMIMt43HFhkUpqJxTmGl6rYw="
 
 // TestPutStreams100MiBBoundedMemory exercises US-002 against a real MinIO
 // container: a 100 MiB streaming upload must complete and never buffer
@@ -45,6 +53,7 @@ func TestPutStreams100MiBBoundedMemory(t *testing.T) {
 	container, err := tcminio.Run(ctx, "minio/minio:latest",
 		tcminio.WithUsername(username),
 		tcminio.WithPassword(password),
+		testcontainers.WithEnv(map[string]string{"MINIO_KMS_SECRET_KEY": minioKMSSecretKey}),
 	)
 	if err != nil {
 		t.Fatalf("start minio: %v", err)
@@ -167,6 +176,7 @@ func TestPutAbortsOnContextCancel(t *testing.T) {
 	container, err := tcminio.Run(ctx, "minio/minio:latest",
 		tcminio.WithUsername(username),
 		tcminio.WithPassword(password),
+		testcontainers.WithEnv(map[string]string{"MINIO_KMS_SECRET_KEY": minioKMSSecretKey}),
 	)
 	if err != nil {
 		t.Fatalf("start minio: %v", err)
@@ -244,6 +254,7 @@ func TestGetRangeReads1KiBFrom100MiB(t *testing.T) {
 	container, err := tcminio.Run(ctx, "minio/minio:latest",
 		tcminio.WithUsername(username),
 		tcminio.WithPassword(password),
+		testcontainers.WithEnv(map[string]string{"MINIO_KMS_SECRET_KEY": minioKMSSecretKey}),
 	)
 	if err != nil {
 		t.Fatalf("start minio: %v", err)
@@ -339,6 +350,7 @@ func TestGetReturnsErrNotFoundForMissingKey(t *testing.T) {
 	container, err := tcminio.Run(ctx, "minio/minio:latest",
 		tcminio.WithUsername(username),
 		tcminio.WithPassword(password),
+		testcontainers.WithEnv(map[string]string{"MINIO_KMS_SECRET_KEY": minioKMSSecretKey}),
 	)
 	if err != nil {
 		t.Fatalf("start minio: %v", err)
@@ -401,6 +413,7 @@ func TestDeleteBatchUnversionedSingleHTTPCall(t *testing.T) {
 	container, err := tcminio.Run(ctx, "minio/minio:latest",
 		tcminio.WithUsername(username),
 		tcminio.WithPassword(password),
+		testcontainers.WithEnv(map[string]string{"MINIO_KMS_SECRET_KEY": minioKMSSecretKey}),
 	)
 	if err != nil {
 		t.Fatalf("start minio: %v", err)
@@ -492,6 +505,7 @@ func TestDeleteBatchVersionedNoDeleteMarkers(t *testing.T) {
 	container, err := tcminio.Run(ctx, "minio/minio:latest",
 		tcminio.WithUsername(username),
 		tcminio.WithPassword(password),
+		testcontainers.WithEnv(map[string]string{"MINIO_KMS_SECRET_KEY": minioKMSSecretKey}),
 	)
 	if err != nil {
 		t.Fatalf("start minio: %v", err)
@@ -582,6 +596,7 @@ func TestDeleteBatchMixedVersionIDs(t *testing.T) {
 	container, err := tcminio.Run(ctx, "minio/minio:latest",
 		tcminio.WithUsername(username),
 		tcminio.WithPassword(password),
+		testcontainers.WithEnv(map[string]string{"MINIO_KMS_SECRET_KEY": minioKMSSecretKey}),
 	)
 	if err != nil {
 		t.Fatalf("start minio: %v", err)
@@ -699,6 +714,7 @@ func TestOpenProbeFailsOnMissingBucket(t *testing.T) {
 	container, err := tcminio.Run(ctx, "minio/minio:latest",
 		tcminio.WithUsername(username),
 		tcminio.WithPassword(password),
+		testcontainers.WithEnv(map[string]string{"MINIO_KMS_SECRET_KEY": minioKMSSecretKey}),
 	)
 	if err != nil {
 		t.Fatalf("start minio: %v", err)
@@ -740,6 +756,7 @@ func TestOpenProbeLeavesBucketCleanOnVersioned(t *testing.T) {
 	container, err := tcminio.Run(ctx, "minio/minio:latest",
 		tcminio.WithUsername(username),
 		tcminio.WithPassword(password),
+		testcontainers.WithEnv(map[string]string{"MINIO_KMS_SECRET_KEY": minioKMSSecretKey}),
 	)
 	if err != nil {
 		t.Fatalf("start minio: %v", err)
@@ -800,6 +817,7 @@ func TestDeleteObjectIdempotent(t *testing.T) {
 	container, err := tcminio.Run(ctx, "minio/minio:latest",
 		tcminio.WithUsername(username),
 		tcminio.WithPassword(password),
+		testcontainers.WithEnv(map[string]string{"MINIO_KMS_SECRET_KEY": minioKMSSecretKey}),
 	)
 	if err != nil {
 		t.Fatalf("start minio: %v", err)
@@ -852,6 +870,7 @@ func TestPutChunksGetChunksDeleteRoundTrip(t *testing.T) {
 	container, err := tcminio.Run(ctx, "minio/minio:latest",
 		tcminio.WithUsername(username),
 		tcminio.WithPassword(password),
+		testcontainers.WithEnv(map[string]string{"MINIO_KMS_SECRET_KEY": minioKMSSecretKey}),
 	)
 	if err != nil {
 		t.Fatalf("start minio: %v", err)
@@ -963,6 +982,7 @@ func TestPutChunksGetChunksRoundTripAllSSEModes(t *testing.T) {
 	container, err := tcminio.Run(ctx, "minio/minio:latest",
 		tcminio.WithUsername(username),
 		tcminio.WithPassword(password),
+		testcontainers.WithEnv(map[string]string{"MINIO_KMS_SECRET_KEY": minioKMSSecretKey}),
 	)
 	if err != nil {
 		t.Fatalf("start minio: %v", err)
