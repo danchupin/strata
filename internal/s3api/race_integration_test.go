@@ -113,8 +113,29 @@ var raceKeyspaceSeq int64
 // the data backend is referenced by some object manifest OR sits in the GC
 // queue (no orphans).
 func TestRaceMixedOpsTiKV(t *testing.T) {
+	f := newTiKVRaceFixture(t)
+	racetest.RunScenario(t, f)
+	racetest.VerifyInvariants(t, f)
+}
+
+// TestRaceMultipartTiKV runs the focused multipart-concurrency scenario
+// (Complete-vs-Abort on one upload id + same-key/different-upload-id races)
+// against a TiKV-backed meta.Store, where Complete's status flip is a real LWT
+// (not a coarse in-process mutex). Build-tag-gated to integration like the
+// mixed-ops variant.
+func TestRaceMultipartTiKV(t *testing.T) {
+	f := newTiKVRaceFixture(t)
+	racetest.RunMultipartRaceScenario(t, f)
+}
+
+// newTiKVRaceFixture brings up a PD + TiKV pair (or an operator-supplied
+// cluster via STRATA_TIKV_TEST_PD_ENDPOINTS — see internal/meta/tikv/tikvtest)
+// and wires a racetest.Fixture against it. Shared by the mixed-ops and
+// multipart-race TiKV entrypoints.
+func newTiKVRaceFixture(t *testing.T) *racetest.Fixture {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	t.Cleanup(cancel)
 
 	endpoints, cleanup := tikvtest.AcquireCluster(ctx, t)
 	t.Cleanup(cleanup)
@@ -126,7 +147,7 @@ func TestRaceMixedOpsTiKV(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 
 	probeCtx, probeCancel := context.WithTimeout(ctx, 30*time.Second)
-	defer probeCancel()
+	t.Cleanup(probeCancel)
 	if err := tikvtest.WaitProbe(probeCtx, store); err != nil {
 		t.Fatalf("probe TiKV cluster at %v: %v", endpoints, err)
 	}
@@ -145,7 +166,7 @@ func TestRaceMixedOpsTiKV(t *testing.T) {
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 
-	f := &racetest.Fixture{
+	return &racetest.Fixture{
 		Server:  api,
 		TS:      ts,
 		Client:  racetest.NewClient(racetest.Workers),
@@ -159,7 +180,4 @@ func TestRaceMixedOpsTiKV(t *testing.T) {
 			return out
 		},
 	}
-
-	racetest.RunScenario(t, f)
-	racetest.VerifyInvariants(t, f)
 }

@@ -46,3 +46,12 @@ func TestRaceMixedOpsMemory(t *testing.T) {
 	racetest.RunScenario(t, f)
 	racetest.VerifyInvariants(t, f)
 }
+
+// TestRaceMultipartMemory drives the focused multipart-concurrency scenario
+// (Complete-vs-Abort on one upload id + same-key/different-upload-id races)
+// against the memory backend. Always-on so the -race CI job covers it; the
+// TiKV variant lives in race_integration_test.go.
+func TestRaceMultipartMemory(t *testing.T) {
+	f := newMemoryRaceFixture(t)
+	racetest.RunMultipartRaceScenario(t, f)
+}

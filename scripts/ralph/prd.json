@@ -109,7 +109,7 @@
         "Verify via a CI run on the cycle branch (the `-race` job covers it)."
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
