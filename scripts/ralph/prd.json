@@ -139,6 +139,20 @@
       "priority": 9,
       "passes": false,
       "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Fix TestCertReloaderK8sSymlinkSwap real CI failure",
+      "description": "As a CI maintainer, I want the cert-reloader to detect k8s atomic symlink swaps in CI (not in original PRD — surfaced as a real Unit/Integration blocker).",
+      "acceptanceCriteria": [
+        "Root cause: fileFingerprint was stat-based (size+mtime, no inode) -> identical fp on CI coarse-mtime FS -> swap undetected",
+        "Fix: content-hash (sha256) fingerprint of cert+key bytes",
+        "Unit tests (-race) green on CI",
+        "Tests pass"
+      ],
+      "priority": 10,
+      "passes": true,
+      "notes": "CI-verified green run 26655172144. content-hash in internal/serverapp/cert_store.go."
     }
   ]
 }

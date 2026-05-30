@@ -61,3 +61,33 @@ Cycle: ralph/ci-green-speedup
   - debug.spec.ts boots a real `go run ./cmd/strata server` (memory backend, STRATA_AUTH_MODE=off) via playwright webServer on :9999 with the embedded console (web/dist). A backend-only Go fix is picked up on the next `go run` recompile; web/dist need not be rebuilt.
   - CI run id verification still PENDING — push branch, confirm End-to-end UI (Playwright) job green.
 ---
+
+## 2026-05-30 - US-001..004,010 (driven interactively by parent session)
+- Ralph autonomous run hit session limit after US-001..004; parent session took over.
+- CI-verified GREEN (run 26655172144): Build+vet (US-001 promtool pin v3.6.0 tarball+retry),
+  gosec (US-002 G402 #nosec on tls.go MinVersion helper false-positive + cephimpl -exclude-dir),
+  Unit -race (US-003 racetest --verify-every flag + oracle multipart RecordIntent;
+  US-010 cert-reloader content-hash fingerprint), End-to-end UI (US-004 auditWriter Flush()
+  + multipart-watchdog min-age=0).
+- 11/15 jobs green. Remaining red are container/infra-blocked (no working host docker;
+  lima VM docker works but host-sock forward broken):
+  - Integration: testcontainers (TestAWSKMSProviderRotationCycle localstack, data-backend
+    round-trips) — needs host docker.
+  - e2e (compose+smoke): docker build curl exit 22.
+  - e2e-full (workers+notify): aws-cli read timeout to gateway.
+  - trivy (CRITICAL gate): CVE in built image; trivy.yaml ignore-unfixed:false intentionally
+    fails on unfixed criticals -> remediate via ceph base bump (Dependabot PR #7 v20.2.1) or
+    .trivyignore-with-justification. Policy decision, not a code fix.
+- **Learnings:**
+  - go 1.25 rejects `go install` of modules with replace/exclude directives (prometheus) —
+    pin prebuilt release tarballs instead of @latest.
+  - gosec: go.work makes the action descend into cephimpl (go-ceph cgo, no librados in
+    container) -> load failure fails the gate at 0 findings -> -exclude-dir is load-bearing.
+  - racetest oracle: multipart Complete can commit server-side but return error/empty-etag to
+    client -> untracked etag -> false read_after_write. Pre-register expected multipart etag
+    (md5(hexDecode(partETag))+"-1") via RecordIntent before Complete, mirroring PUT.
+  - cert-reloader: stat-based (size+mtime) fingerprint misses k8s symlink swap on coarse-mtime
+    CI filesystems -> content-hash (sha256) is the robust ground truth.
+  - US-005..009 (caching, e2e verify, protection expansion) still pending; container-blocked
+    ones need a working host docker session.
+---
