@@ -1017,6 +1017,20 @@ func drainVersionHeap(h *versionHeap) {
 	}
 }
 
+// versionTimeKey returns the v1-timeuuid timestamp (UnixNano) of a version_id
+// for chronological ordering. The null sentinel (all-zeros, version 0) and any
+// non-v1 / unparseable id sort oldest. Lexical string comparison of v1 UUIDs is
+// NOT chronological — the low 32 time bits lead the string — so any Go-side
+// "latest version" pick must order by parsed time, matching Cassandra's native
+// timeuuid clustering.
+func versionTimeKey(vid string) int64 {
+	u, err := gocql.ParseUUID(vid)
+	if err != nil || u.Version() != 1 {
+		return 0
+	}
+	return u.Time().UnixNano()
+}
+
 // AllObjectVersions returns every stored object version across every shard
 // of the bucket as deep copies, with IsLatest set on the first (highest
 // version_id) row per key. Test-only escape hatch for invariant checks
@@ -1069,24 +1083,51 @@ func (s *Store) AllObjectVersions(ctx context.Context, bucketID uuid.UUID) ([]*m
 			return nil, err
 		}
 	}
-	// Sort by (key ASC, version_id DESC) so we can stamp IsLatest on the head
-	// of each per-key chain. Cassandra's clustering order delivers within a
-	// shard but across shards the merge order is not preserved.
+	// Sort by (key ASC, version_id-time DESC) so we can stamp IsLatest on the
+	// head of each per-key chain. Cassandra's clustering order delivers within
+	// a shard but across shards the merge order is not preserved, so we re-sort
+	// in Go. CRITICAL: compare version_ids by their v1-timeuuid TIMESTAMP, not
+	// lexically — the low 32 time bits lead the UUID string and wrap ~every
+	// 429s, so string order is NOT chronological. A lexical sort picked a
+	// stale row as the head (and thus IsLatest), diverging from GetObject /
+	// Cassandra's native timeuuid clustering and tripping the race-harness
+	// "latest row Mtime older than chain max" invariant under load.
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Key != out[j].Key {
 			return out[i].Key < out[j].Key
 		}
-		return out[i].VersionID > out[j].VersionID
+		return versionTimeKey(out[i].VersionID) > versionTimeKey(out[j].VersionID)
 	})
-	var lastKey string
-	first := true
-	for _, o := range out {
-		if o.Key != lastKey {
-			first = true
-			lastKey = o.Key
+	// Stamp IsLatest per key, mirroring GetObject's "latest" resolution
+	// (NOT just the version_id head): a Suspended PUT writes a null-sentinel
+	// row that sorts LAST in version_id DESC, so when the null row is the most
+	// recent write by mtime it — not the highest-version_id row — is the
+	// latest. Without this reconciliation the listing's IsLatest diverged from
+	// GetObject under concurrent versioning flips, surfacing as the race
+	// harness "latest row Mtime older than chain max" invariant breach.
+	i := 0
+	for i < len(out) {
+		j := i
+		for j < len(out) && out[j].Key == out[i].Key {
+			j++
 		}
-		o.IsLatest = first
-		first = false
+		group := out[i:j]
+		head := group[0] // highest version_id
+		var nullRow *meta.Object
+		for _, o := range group {
+			if o.IsNull {
+				nullRow = o
+				break
+			}
+		}
+		latest := head
+		if nullRow != nil && !head.IsNull && nullRow.Mtime.After(head.Mtime) {
+			latest = nullRow
+		}
+		for _, o := range group {
+			o.IsLatest = o == latest
+		}
+		i = j
 	}
 	return out, nil
 }
@@ -1235,7 +1276,12 @@ func (h versionHeap) Less(i, j int) bool {
 	if h[i].current.Key != h[j].current.Key {
 		return h[i].current.Key < h[j].current.Key
 	}
-	return h[i].current.VersionID > h[j].current.VersionID
+	// Same-key tiebreak by v1-timeuuid TIME (newest first), not lexical
+	// version_id string — the UUID string is not chronological. All versions
+	// of a key live in one shard so a single cursor delivers them in Cassandra
+	// clustering order; this tiebreak is a defensive safety net that must still
+	// agree with that ordering.
+	return versionTimeKey(h[i].current.VersionID) > versionTimeKey(h[j].current.VersionID)
 }
 func (h versionHeap) Swap(i, j int)   { h[i], h[j] = h[j], h[i] }
 func (h *versionHeap) Push(x any)     { *h = append(*h, x.(*versionCursor)) }
