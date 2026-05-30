@@ -134,6 +134,61 @@ func TestRADOSBackend(t *testing.T) {
 			t.Errorf("expected unknown-class error, got %v", err)
 		}
 	})
+
+	// ChunkLossFailsLoud completes the US-011 split on the librados data plane,
+	// mirroring the memory (internal/data/memory) and MinIO (internal/data/s3)
+	// durability contract: seed a multi-chunk object, sanity-read it clean,
+	// destroy the FIRST backing chunk via the backend's OWN Delete (no new
+	// corruption hook — AC NOTE), then assert the next full read FAILS LOUD
+	// rather than returning a silently-truncated body.
+	t.Run("ChunkLossFailsLoud", func(t *testing.T) {
+		ctx := context.Background()
+		src := make([]byte, 9<<20) // 9 MiB → 3 chunks at 4 MiB
+		if _, err := rand.Read(src); err != nil {
+			t.Fatal(err)
+		}
+		manifest, err := be.PutChunks(ctx, bytes.NewReader(src), "STANDARD")
+		if err != nil {
+			t.Fatalf("PutChunks: %v", err)
+		}
+		if len(manifest.Chunks) < 2 {
+			t.Fatalf("need >=2 chunks to prove non-trivial loss, got %d", len(manifest.Chunks))
+		}
+		t.Cleanup(func() { _ = be.Delete(context.Background(), manifest) })
+
+		// Sanity: clean read returns the exact payload before destroying anything.
+		rc, err := be.GetChunks(ctx, manifest, 0, manifest.Size)
+		if err != nil {
+			t.Fatalf("GetChunks (pre-loss): %v", err)
+		}
+		clean, err := io.ReadAll(rc)
+		_ = rc.Close()
+		if err != nil || !bytes.Equal(clean, src) {
+			t.Fatalf("pre-loss round-trip mismatch: err=%v len=%d", err, len(clean))
+		}
+
+		// Destroy ONLY the first backing chunk via the backend's own Delete: a
+		// single-chunk manifest removes exactly that OID (Delete routes per
+		// ChunkRef) while the full manifest still references it.
+		if manifest.Chunks[0].OID == "" {
+			t.Fatal("first chunk has empty OID")
+		}
+		if err := be.Delete(ctx, &data.Manifest{Chunks: manifest.Chunks[:1]}); err != nil {
+			t.Fatalf("delete first chunk: %v", err)
+		}
+
+		// Full read must now FAIL LOUD — an error at open, OR a short body. It
+		// must NOT return the full clean payload (silent truncation = data loss).
+		rc, err = be.GetChunks(ctx, manifest, 0, manifest.Size)
+		if err != nil {
+			return // fail-loud at open — acceptable
+		}
+		got, readErr := io.ReadAll(rc)
+		_ = rc.Close()
+		if readErr == nil && int64(len(got)) == manifest.Size {
+			t.Fatalf("read after chunk loss returned the full %d-byte body — silent truncation", len(got))
+		}
+	})
 }
 
 func envOr(k, def string) string {

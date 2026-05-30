@@ -183,7 +183,7 @@
         "Verify via the CI ceph e2e job (`make test-rados`) -- librados, CI-only; not buildable on a macOS/lima box."
       ],
       "priority": 11.5,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
