@@ -55,7 +55,7 @@ func BenchmarkCassandraStore(b *testing.B) {
 			Keyspace:    ks,
 			LocalDC:     "datacenter1",
 			Replication: "{'class': 'SimpleStrategy', 'replication_factor': '1'}",
-			Timeout:     30 * time.Second,
+			Timeout:     60 * time.Second,
 		}, cassandra.Options{DefaultShardCount: 64})
 		if err != nil {
 			b.Fatalf("open keyspace %s: %v", ks, err)

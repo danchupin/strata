@@ -120,6 +120,17 @@ services:
     depends_on:
       pd:
         condition: service_healthy
+    # TiKV refuses to start unless it can open >=123880 file descriptors and
+    # FATAL-crash-loops otherwise ("the maximum number of open file descriptors
+    # is too small, got 65536, expect greater or equal to 123880"). The GitHub
+    # Actions runner caps container nofile at 65536, so the cluster never
+    # bootstrapped in CI (every gateway write hit NOT_BOOTSTRAPPED -> 500 /
+    # read-timeout, failing both e2e jobs). Raise the limit explicitly; works on
+    # any host regardless of the daemon default.
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
     command:
       - --pd-endpoints=pd:2379
       - --addr=0.0.0.0:20160

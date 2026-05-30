@@ -113,7 +113,7 @@ func TestCassandraBucketStatsConcurrencyProbe(t *testing.T) {
 		Keyspace:    "strata_probe",
 		LocalDC:     "datacenter1",
 		Replication: "{'class': 'SimpleStrategy', 'replication_factor': '1'}",
-		Timeout:     30 * time.Second,
+		Timeout:     60 * time.Second,
 		Metrics:     metrics,
 	}, cassandra.Options{DefaultShardCount: 64})
 	if err != nil {

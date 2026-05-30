@@ -70,7 +70,27 @@ func (b *tikvBackend) Probe(ctx context.Context) error {
 	if b == nil || b.cli == nil {
 		return errors.New("tikv: backend not initialised")
 	}
-	_, err := b.cli.GetTimestamp(ctx)
+	// GetTimestamp alone is NOT a readiness signal: PD serves TSO even while
+	// the cluster is still NOT_BOOTSTRAPPED (no TiKV store registered / no
+	// region created yet), so it returns success before any key is readable
+	// or writable. /readyz would flip green while the very first CreateBucket
+	// still 500s with "cluster is not bootstrapped" — exactly the e2e flake
+	// where smoke's first PUT bucket raced the TiKV bootstrap.
+	//
+	// Do a real key read instead: locating the region for any key exercises
+	// the bootstrap path. A missing key (ErrNotFound) means the cluster is
+	// bootstrapped + reachable = ready. A NOT_BOOTSTRAPPED / region-load error
+	// keeps readiness false; the readyz handler's per-probe 1s ctx timeout
+	// caps the client's region backoff so the probe returns promptly.
+	txn, err := b.cli.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = txn.Rollback() }()
+	_, err = txn.Get(ctx, []byte("s/__readyz_probe__"))
+	if err == nil || tikverr.IsErrNotFound(err) || errors.Is(err, tikverr.ErrNotExist) {
+		return nil
+	}
 	return err
 }
 
