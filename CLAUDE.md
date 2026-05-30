@@ -493,6 +493,13 @@ caveman style does not:
   GC double-delete, concurrency, leaks, auth boundary); pre-launch = ignore
   backwards-compat / rolling-upgrade / migration concerns (noise here).
 
+**Reviewing code** — run `/review-strata` (orchestrates the domain reviewer
+subagents in `.claude/agents/`: correctness foreground + tests/s3-compat/errors in
+parallel, severity-aggregated). It is the entry point for in-session review; the
+agents are not auto-invoked. `/review-strata correctness tests` runs a subset.
+`/code-review ultra` remains the cloud whole-branch/PR review. After implementing a
+non-trivial change, prefer `/review-strata` before committing.
+
 ## Commits and PRs
 
 - Subject is `<area>: <imperative summary>` (e.g. `s3api: implement DeleteObjects`).
