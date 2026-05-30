@@ -335,3 +335,14 @@ func (w *auditWriter) Write(p []byte) (int, error) {
 	}
 	return w.ResponseWriter.Write(p)
 }
+
+// Flush forwards to the underlying ResponseWriter when it supports flushing.
+// Without this, the type assertion `w.(http.Flusher)` in SSE handlers (e.g.
+// adminapi.handleAuditStream for GET /admin/v1/audit/stream) fails because
+// the wrapper hides the std-lib writer's Flusher — the live audit tail then
+// 500s ("streaming unsupported") and the EventSource never reaches `open`.
+func (w *auditWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}

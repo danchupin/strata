@@ -47,6 +47,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	endpoint := fs.String("endpoint", "http://localhost:9999", "gateway base URL")
 	duration := fs.Duration("duration", time.Hour, "wall-clock window each worker runs for")
 	concurrency := fs.Int("concurrency", 32, "worker goroutines (refused if > 64)")
+	verifyEvery := fs.Duration("verify-every", 0, "verifier oracle cadence; 0 = default 1s, <0 disables the oracle")
 	buckets := fs.Int("buckets", 4, "number of buckets the workload spreads ops across")
 	keysPer := fs.Int("keys-per-bucket", 8, "per-bucket key cardinality")
 	report := fs.String("report", "", "JSON-lines events report path (empty = no events file)")
@@ -69,6 +70,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		HTTPEndpoint: *endpoint,
 		Duration:     *duration,
 		Concurrency:  *concurrency,
+		VerifyEvery:  *verifyEvery,
 		BucketCount:  *buckets,
 		ObjectKeys:   *keysPer,
 		AccessKey:    *accessKey,

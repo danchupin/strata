@@ -52,7 +52,10 @@ func buildTLSConfig(cfg *config.Config) (*tls.Config, *certStore, error) {
 	}
 	store.swap(initial)
 
-	tlsCfg := &tls.Config{
+	// MinVersion comes from tlsMinVersion(), which floors at tls.VersionTLS12
+	// (default) and only ever goes up to TLS1.3 — never below 1.2. gosec G402
+	// can't trace the helper return, so it false-positives "MinVersion too low".
+	tlsCfg := &tls.Config{ // #nosec G402 -- MinVersion >= TLS1.2 via tlsMinVersion()
 		GetCertificate: store.GetCertificate,
 		MinVersion:     tlsMinVersion(cfg.TLS.MinVersion),
 		CipherSuites:   tlsCipherSuites(cfg.TLS.CipherProfile),
