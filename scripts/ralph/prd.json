@@ -64,8 +64,8 @@
         "Verify via a CI run on the cycle branch."
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "presigned_adversarial_test.go: TestPresigned_AdversarialMatrix (expired X-Amz-Expires→ErrClockSkew/RequestTimeTooSkewed, future-dated→ErrClockSkew, tampered signed query param/path/SignedHeaders→ErrSignatureInvalid/SignatureDoesNotMatch, method-mismatch GET→PUT→ErrSignatureInvalid) + TestPresigned_ValidVariantsPass (7 positive controls) + TestPresigned_ValidReplayWithinWindow (documents replay-within-window IS permitted — AWS parity, no server-side nonce — validated 3x). signPresigned helper mirrors validatePresigned exactly (canonicalQueryWithout(sig)→canonicalRequestWithQuery over UNSIGNED-PAYLOAD→computeSignature with full-ts reqDate). streaming_adversarial_test.go: TestStreamingReaderOutOfOrderChunkRejected (swapped wire order → chain mismatch → ErrSignatureInvalid) + TestStreamingReaderTruncatedChunkDataRejected (declared 64B, 10B present → io.ErrUnexpectedEOF, fails loud). Did NOT duplicate streaming_test.go (broken chain/mutated/missing-final/missing-sig/tampered-final) or streaming_trailer_test.go (trailer-sig + body-checksum mismatch, 4 algos); committed trailer fixtures reused, not regenerated. NO bug found — every presigned + streaming tamper class rejects with exact sentinel. No production code changed. Reused adv* creds/stubStore/newAdvMiddleware/wantS3Code from sigv4_adversarial_test.go (same package). All green locally (non-cgo pkg); CI is source of truth."
     },
     {
       "id": "US-005",

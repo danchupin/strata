@@ -115,7 +115,7 @@ story; `—` = not yet started.
 | Dimension | Status | Stories | Evidence |
 |-----------|--------|---------|----------|
 | **Functional** | Baseline (near-ceiling) | s3-tests suite | `scripts/s3-tests/README.md` |
-| **Auth / security (adversarial)** | SigV4 done; US-004/005/006 pending | US-003, US-004, US-005, US-006 | US-003: `TestSigV4_AdversarialMatrix` (13 tamper classes) + `TestSigV4_ValidVariantsPass` (7 positive controls) in `internal/auth/sigv4_adversarial_test.go` — no bug found (all classes reject with the exact sentinel + S3 code) |
+| **Auth / security (adversarial)** | SigV4 + presigned + streaming done; US-005/006 pending | US-003, US-004, US-005, US-006 | US-003: `TestSigV4_AdversarialMatrix` (13 tamper classes) + `TestSigV4_ValidVariantsPass` (7 positive controls) in `internal/auth/sigv4_adversarial_test.go`. US-004: `TestPresigned_AdversarialMatrix` (expired / future / tampered-query / method-mismatch / tampered-path / tampered-SignedHeaders) + `TestPresigned_ValidVariantsPass` + `TestPresigned_ValidReplayWithinWindow` (documents replay-within-window is permitted, AWS parity) in `presigned_adversarial_test.go`; `TestStreamingReaderOutOfOrderChunkRejected` + `TestStreamingReaderTruncatedChunkDataRejected` in `streaming_adversarial_test.go` (chain-HMAC / trailer-checksum legs already in `streaming_test.go` + `streaming_trailer_test.go`) — no bug found (every class rejects with the exact sentinel + S3 code) |
 | **Concurrency / race** | — | US-007, US-008, US-012 | (pending) |
 | **Durability / fault-injection** | — | US-009, US-010, US-011 | (pending) |
 

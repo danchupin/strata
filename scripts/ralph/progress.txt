@@ -45,3 +45,15 @@ Cycle: ralph/qa-production-readiness
   - ETag from PUT response header is the quoted strong form clients send back in If-Match — capture it, don't recompute MD5. putCondObject helper in conditional_test.go.
   - If-Modified/Unmodified-Since granularity is seconds; use fixed far-past ("Mon, 02 Jan 2006...") + far-future ("Fri, 01 Jan 2100...") dates for deterministic mtime comparison vs put-time now.
 ---
+
+## 2026-05-30 - US-004
+- Presigned + streaming chunk-signature adversarial.
+- Added: internal/auth/presigned_adversarial_test.go (TestPresigned_AdversarialMatrix 6 classes + ValidVariantsPass 7 + ValidReplayWithinWindow), internal/auth/streaming_adversarial_test.go (OutOfOrderChunk + TruncatedChunkData). Report: Auth dimension row updated (SigV4+presigned+streaming done).
+- **NO bug found** — every presigned + streaming tamper class rejects with the exact sentinel. No production code changed. Replay-within-window documented as permitted (AWS parity, no nonce) — NOT a finding.
+- **Learnings for future iterations:**
+  - validatePresigned (middleware.go:143) signs over UNSIGNED-PAYLOAD body + the canonical query MINUS X-Amz-Signature; reqDate passed to computeSignature is the FULL timestamp (reqTime.UTC().Format(sigTimeFormat)), while parsed.Date (scope + signing-key derivation) is the YYYYMMDD day. signPresigned helper must split these or the sig won't match.
+  - Presigned lifetime gate is ONE check: now.Before(reqTime-15m) || now.After(reqTime+expires*sec) → ErrClockSkew (BOTH expired AND future-dated map to ErrClockSkew → RequestTimeTooSkewed, NOT a dedicated "expired" sentinel). No separate signature step for the window — skew fires before sig compare, same as header path.
+  - Streaming chain is order-binding: emitting correctly-signed chunks in swapped wire order fails because the reader's prevSig (seeded) no longer matches the first wire chunk's chained sig → ErrSignatureInvalid. Distinct sentinels by failure mode: bad/missing/out-of-order sig → ErrSignatureInvalid; truncated DATA section (declared size > bytes present) → io.ErrUnexpectedEOF from io.ReadFull (returned raw, NOT wrapped). Missing terminator (complete data, no 0-chunk) → ErrSignatureInvalid (readChunk EOF path).
+  - sigv4_adversarial_test.go (US-003) is the shared adversarial fixture base for the whole auth package: reuse adv* consts, stubStore, newAdvMiddleware, wantS3Code (sentinel→S3-code mirror of s3api.WriteAuthDenied) — do NOT redefine. New auth adversarial tests in the same package just add build funcs.
+  - Trailer checksum-mismatch + chain-HMAC legs were ALREADY covered (streaming_test.go + streaming_trailer_test.go all-algos). US-004's value was the two missing streaming classes + the ENTIRELY-missing presigned adversarial surface. Check both files before adding streaming cases to avoid duplication.
+---
