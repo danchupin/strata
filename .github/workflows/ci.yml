@@ -278,7 +278,10 @@ jobs:
           output: 'trivy-high.json'
           severity: 'HIGH'
           exit-code: '0'
-          trivy-config: 'trivy.yaml'
+          scanners: 'vuln'
+          # NOTE: deliberately NOT loading trivy.yaml here — that config pins
+          # severity to CRITICAL for the gate; the WARN pass needs HIGH so the
+          # severity input above stays authoritative.
       - name: Upload HIGH JSON artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -386,7 +389,13 @@ jobs:
       # exercised — CI grep the log for `TestCassandraNullSentinelOnDisk`
       # and the `VersioningNullSentinel` storetest case to confirm neither
       # silently went `Skip`-ed.
-      - run: go test -v -tags integration -timeout 15m ./...
+      # 25m (was 15m): the full integration suite spins a testcontainer per
+      # backend (cassandra + minio + localstack) across meta/data/kms/rebalance/
+      # s3api packages run serially under one `go test ./...` invocation. Once
+      # the previously-failing-fast tests were fixed they actually run to
+      # completion, pushing cumulative wall-clock past the old 15m global
+      # deadline (the cassandra package, last to run, ate the timeout panic).
+      - run: go test -v -tags integration -timeout 25m ./...
 
   docker-build:
     name: Docker build (librados linking)
