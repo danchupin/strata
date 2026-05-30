@@ -451,7 +451,12 @@ jobs:
           AWS_DEFAULT_REGION: us-east-1
         run: |
           docker compose -f deploy/docker/docker-compose.yml up -d --force-recreate strata-a strata-b
-          until curl -s -o /dev/null http://127.0.0.1:9999/readyz; do sleep 1; done
+          # -sf (NOT -s): without -f, curl exits 0 on a 502/503, so the loop
+          # broke out the instant the LB answered "no live upstreams" while the
+          # just-recreated strata-a/b were still restarting -> smoke-signed's
+          # first GET hit 502 instead of the expected 403. -f makes the wait
+          # loop until a real HTTP 200 from a live replica.
+          until curl -sf -o /dev/null http://127.0.0.1:9999/readyz; do sleep 1; done
           bash scripts/smoke-signed.sh http://127.0.0.1:9999
 
       - name: RADOS integration tests (go test -tags "ceph integration")
