@@ -1,81 +1,83 @@
 {
   "project": "Strata",
-  "branchName": "ralph/ci-green-speedup",
-  "description": "CI stabilization + speedup: drive main's long-broken CI fully green (infra/flake fixes) so branch-protection required-checks can be expanded, and cut CI wall-clock via GitHub-native layer/asset caching. Most failures do NOT reproduce locally — each story is verified by a CI run on this cycle branch. Source PRD at tasks/prd-ci-green-speedup.md.",
+  "branchName": "ralph/qa-production-readiness",
+  "description": "QA Production-Readiness Hardening — senior-QA critical pass over the S3 gateway. Audit existing coverage, close real gaps with focused tests (no duplication), fix every real bug found, and deliver a go/no-go production-readiness report. Value lands in three under-exercised dimensions atop near-ceiling functional correctness: adversarial security/auth, concurrency/race, durability/fault-injection. Backends in scope: TiKV + memory (canonical CI default), RADOS/ceph, S3-compatible (MinIO). Cassandra stays first-class in code but gated off the per-PR CI gate. Every story is verified by a CI run on the cycle branch — CI on Linux is the source of truth; many failure modes do not reproduce on a local macOS/lima box. FR-8 split rule: if a story cannot land in one Ralph iteration, split it into US-00N + a trailing story and record the split in progress.txt (US-009/US-010 already split; US-005, US-011 are next likely candidates). Source PRD at tasks/prd-qa-production-readiness.md.",
   "userStories": [
     {
       "id": "US-001",
-      "title": "Pin promtool version in Build+vet job",
-      "description": "As a CI maintainer, I want the Build+vet 'Install promtool' step to stop fetching @latest so a flaky prometheus@vX fetch no longer fails the build.",
+      "title": "Coverage audit + readiness-report skeleton",
+      "description": "As a QA engineer, I need a baseline coverage map and a living report document so the release decision has evidence, not vibes.",
       "acceptanceCriteria": [
-        "The 'Install promtool' step in .github/workflows/ci.yml pins an explicit known-good version (go install github.com/prometheus/prometheus/cmd/promtool@vX.Y.Z), no @latest",
-        "If still network-fragile, wrap the install in a bounded retry (e.g. 3 attempts) so one transient registry hiccup does not fail the job",
-        "The pinned version resolves + installs on the runner",
-        "Build + vet job is green on a CI run on this cycle branch (record run id in notes)",
-        "Tests pass"
+        "Add a `make test-cover` target (or `scripts/qa/coverage.sh`) that runs `go test -cover ./...` on the default tag (TiKV + memory, no ceph) and emits a per-package coverage table to `tasks/qa-readiness-report.md`.",
+        "CGO note: `internal/s3api` (and any cgo-touching package) builds its tests with cgo; on a macOS box without the Xcode license accepted this fails with `build failed: Xcode license` — that is an env issue, not a code bug. The coverage numbers for those packages are taken from the CI (Linux) run, the source of truth (FR-4); the local target may `CGO_ENABLED=0`-skip them with a logged note rather than failing.",
+        "The measured per-package numbers are recorded verbatim in the report as the named baseline — these exact numbers become the ratchet-floor for the US-013 coverage gate (no aspirational targets invented later).",
+        "Report skeleton committed at `tasks/qa-readiness-report.md` with sections: Coverage by package, Dimension matrix (functional / auth / concurrency / durability), Residual risks, Go/No-Go verdict (verdict left PENDING until US-013).",
+        "Handler→test matrix for `internal/s3api/` enumerated in the report; every handler `.go` is marked covered / thin / uncovered with the test file that covers it (by function reference, not filename).",
+        "No production code changed in this story (audit only).",
+        "`make build` + `make vet` pass.",
+        "Verify via a CI run on the cycle branch (the coverage job is green)."
       ],
       "priority": 1,
-      "passes": true,
-      "notes": "Root cause was NOT a flaky @latest fetch: go 1.25 (CI runner go-version '1.25', go.mod 'go 1.25.10') hard-rejects `go install github.com/prometheus/prometheus/cmd/promtool@<any-version>` because the prometheus go.mod carries replace/exclude directives — verified all of v0.300.0/v0.302.1/v0.305.3/v0.306.0/v0.308.1/v0.311.3 fail with 'must not contain directives'. The Sep-2025 working binary (3.6.0) was installed under go 1.24.7, which tolerated the directives. v2.x/v3.x tags also fail the major-version-path check. Fix: pin PROMTOOL_VERSION=3.6.0 and fetch the official prebuilt release tarball (github.com/prometheus/prometheus/releases/download/v3.6.0/prometheus-3.6.0.linux-amd64.tar.gz), install promtool to /usr/local/bin, wrapped in a bounded 3-attempt curl retry. Verified locally: tarball 200 + contains promtool; `make promtool-check` SUCCESS (47 rules); ci.yml parses. Deviated from the AC's literal `go install …@vX.Y.Z` because that mechanism is impossible under go 1.25 — release-binary download satisfies the pin+retry+no-@latest intent. CI run id: PENDING (verify Build+vet green after push)."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-002",
-      "title": "Fix gosec gate failing with zero findings",
-      "description": "As a CI maintainer, I want the gosec MEDIUM+ gate to pass on a clean tree, because gosec -severity=medium finds 0 issues locally with the CI args yet the job fails.",
+      "title": "RFC 7232 conditional-request test matrix",
+      "description": "As a QA engineer, I need conditional requests covered, because `internal/s3api/conditional.go` currently has zero direct tests and these control read-after-write and lost-update safety for clients.",
       "acceptanceCriteria": [
-        "Root cause identified (gosec docker-action exit semantics / upload-sarif step / gosec failing to compile ceph build-tagged files in internal/data/rados/cephimpl)",
-        "Fix applied at the real root cause, not masked: gate passes at 0 MEDIUM+ findings AND still fails at >=1 genuine MEDIUM+ finding (prove by temporarily introducing then removing a throwaway finding)",
-        ".gosec.yml + scripts/check-gosec.sh + the workflow -exclude= list stay in lockstep",
-        "Single-binary / cephimpl module-split invariants preserved (no blanket-excluding real code)",
-        "gosec job is green on a CI run on this cycle branch (record run id in notes)",
-        "Tests pass"
+        "New `internal/s3api/conditional_test.go` exercises GET + HEAD with `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`: strong-ETag match/mismatch, `*` wildcard, multi-value lists, and the precedence rules (If-Match over If-Modified-Since per RFC 7232 §6).",
+        "PUT-side `If-Match` / `If-None-Match` (lost-update + create-if-absent) paths covered, including the `If-None-Match: *` overwrite-rejection (412).",
+        "Assert exact status codes: 200 / 206 / 304 / 412 for each branch.",
+        "Any divergence from AWS behaviour found is fixed in `conditional.go` (or `putObject`) in this story, or filed as a `ROADMAP.md` P-item if it cannot be fixed in one iteration.",
+        "Does NOT duplicate `range_test.go`; reuses `newHarness(t)`.",
+        "`make test` passes locally; verify via a CI run on the cycle branch."
       ],
       "priority": 2,
-      "passes": true,
-      "notes": "Root cause: the securego/gosec docker action (pulls ghcr.io/securego/gosec:2.25.0) walks the filesystem for ./..., and with go.work present at the repo root it descends into the separate cephimpl module (internal/data/rados/cephimpl). cephimpl/backend.go imports github.com/ceph/go-ceph/rados (cgo -> needs librados.h), absent in the gosec container -> package load failure -> the MEDIUM+ gate exits non-zero even at 0 genuine findings. Locally the dev's newer gosec tolerates the load error (files:303, exit 0) so it never reproduced. Confirmed from failing run 26642343276 job log: 'Import directory: .../cephimpl' with no following 'Checking package: cephimpl'. The workflow comment ALREADY claimed 'Scans the main Go module only (cephimpl ... no incremental signal)' but the args never enforced it. Fix: added -exclude-dir=internal/data/rados/cephimpl to BOTH gosec steps in ci.yml (MEDIUM gate + LOW WARN), to scripts/check-gosec.sh GOSEC_EXCLUDE_DIRS, and documented the load-bearing rationale in .gosec.yml -- all three in lockstep. Proved locally: clean tree -> check-gosec.sh PASS exit 0; injected throwaway MEDIUM G107 (http.Get(varURL)) -> FAIL exit 1; removed -> PASS exit 0. ci.yml YAML parses. cephimpl behaviour stays covered by e2e make test-rados against the real backend (it cannot be gosec-scanned without librados anyway). CI run id: PENDING (verify gosec job green after push)."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-003",
-      "title": "Make TestRunSmokeBinary deterministic",
-      "description": "As a CI maintainer, I want cmd/strata-racecheck's TestRunSmokeBinary to stop intermittently exiting non-zero under CI load (passes 3/3 locally in isolation) so it stops flaking Unit tests (-race).",
+      "title": "SigV4 adversarial auth matrix",
+      "description": "As a QA engineer, I need to prove SigV4 rejects every tampering class, because auth is the security boundary of the gateway.",
       "acceptanceCriteria": [
-        "Flake mechanism identified (duration budget vs concurrency vs exit-code mapping in cmd/strata-racecheck/main.go)",
-        "Test made robust under load (generous duration ceiling that still returns early on success, and/or deterministic completion gate) WITHOUT weakening assertions",
-        "go test ./cmd/strata-racecheck/ -run TestRunSmokeBinary -count=20 passes locally",
-        "Unit tests (-race) job is green on a CI run on this cycle branch (record run id in notes)",
-        "Tests pass"
+        "Table-driven test in `internal/auth/` covering: bad signature, expired request (`X-Amz-Date` skew beyond tolerance), wrong region, wrong service, tampered canonical request (mutated header/path/query after signing), missing `Host`, missing `x-amz-content-sha256`, and unsigned-payload vs signed-payload mismatch — each asserting `ErrSignatureInvalid` (or the exact sentinel) and the resulting S3 `APIError` code.",
+        "Positive control: a correctly-signed request for each case passes (proves the negative is the tamper, not a setup error).",
+        "Extends the existing `internal/auth/sigv4_test.go` surface; does not duplicate cases already asserted there.",
+        "Any accepted-when-should-reject finding fixed in `internal/auth/` this story.",
+        "Verify via a CI run on the cycle branch."
       ],
       "priority": 3,
-      "passes": true,
-      "notes": "Flake mechanism: the timing-sensitive verifier oracle (internal/racetest/verifier.go, on by default at 1s cadence) produces transient false-positive inconsistencies under CPU starvation -> racetest.Run returns >0 Inconsistencies -> main.run() maps that to exitInconsistency(1) -> test's `rc != exitOK` fails. Worst false-positive path: a deadline-straddling multipart Complete commits server-side AFTER the client's RecordPut window closed (multipart has NO RecordIntent pre-registration, unlike PUT/conditional-PUT which pre-register the md5-of-body etag), so the verifier GETs an etag the tracker never recorded -> read_after_write flag. Load- + duration-dependent => never reproduces in isolated 3/3 local runs. Fix: exposed the already-documented Config.VerifyEvery knob (semantics: 0=default 1s, <0 disables oracle) as a new `--verify-every` flag in cmd/strata-racecheck/main.go, and set the smoke test to `--verify-every=-1ms`. The smoke's stated job is flag-wiring + exit-code-mapping regression (run -> racetest.Run -> 0/1/2), NOT oracle correctness (covered by internal/racetest oracle_test.go/runner_test.go + nightly soak), so disabling the oracle removes the nondeterminism WITHOUT weakening any assertion (still asserts exit 0, report has op_started/op_done/summary, stdout names all op classes). Bonus: with verEvery<=0 the multi-second delete-grace drain budget is skipped, so the test dropped from ~7.5s to ~1.5s. scripts/racecheck/run.sh does NOT pass --verify-every, so the nightly soak keeps the oracle on (default). Verified: `go test ./cmd/strata-racecheck/ -run 'TestRunSmokeBinary|TestBadConfigExitsTwo' -count=20` PASS; `GOMAXPROCS=2 go test -race ... -count=10` PASS; racetest package + vet + build clean. CI run id: PENDING (verify Unit tests (-race) job green after push)."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-004",
-      "title": "Fix live audit-tail SSE in debug console e2e",
-      "description": "As an operator using the debug console, I want the live audit-tail SSE stream to connect so the debug.spec.ts audit-tail e2e test (times out at web/e2e/debug.spec.ts:52 waiting for 'connected') passes against the memory-backend harness.",
+      "title": "Presigned + streaming chunk-signature adversarial",
+      "description": "As a QA engineer, I need presigned-URL and streaming-upload auth hardened against expiry, replay, and chain-HMAC tampering.",
       "acceptanceCriteria": [
-        "Root cause of the SSE EventSource never flipping to 'connected' identified (SSE route auth/cookie flow, memory-backend audit source, or proxy/buffering)",
-        "Fix applied so the audit-tail stream connects and a freshly PUT object's audit row appears in the live tail",
-        "playwright test debug.spec.ts -g audit-tail passes locally",
-        "End-to-end UI (Playwright) job is green on a CI run on this cycle branch (all critical-path + admin + debug + storage specs)",
-        "Verify in browser using dev-browser skill that the live tail shows 'connected' + a new audit row",
-        "Typecheck passes",
-        "Tests pass"
+        "Presigned tests: expired `X-Amz-Expires`, future-dated, tampered signed query param, method mismatch (signed GET used for PUT), and a valid replay within the window (documents whether replay is permitted — AWS allows it).",
+        "Streaming tests (`internal/auth/streaming.go`, US-022 surface): broken chain-HMAC (mutated `prevSig`), out-of-order chunk, truncated final chunk, and `STREAMING-...-TRAILER` checksum mismatch — each rejected with the exact sentinel.",
+        "Reuses existing trailer fixtures (`STRATA_REGEN_TRAILER_FIXTURES` path); does not regenerate or duplicate them.",
+        "Any bug fixed in `internal/auth/` this story.",
+        "Verify via a CI run on the cycle branch."
       ],
       "priority": 4,
-      "passes": true,
-      "notes": "Root cause: internal/s3api/audit.go auditWriter wraps the ResponseWriter for the per-request audit-row hook but did NOT forward Flush(). mux.Handle('/admin/v1/', adminAudit) -> AuditMiddleware wraps w in *auditWriter -> authMiddleware (cookie path) passes it straight through -> adminapi.handleAuditStream type-asserts w.(http.Flusher). With auditWriter hiding the std-lib writer's Flusher, ok=false -> 500 'streaming unsupported' -> the EventSource errors and never reaches state 'open', so the AuditTail page never renders 'connected' and debug.spec.ts:52 times out. Never caught by adminapi/audit_stream_test.go because that test drives the handler with httptest.ResponseRecorder (which DOES implement Flusher) instead of through the wired auditWriter. Fix: added a Flush() method to *auditWriter that forwards to the underlying ResponseWriter when it supports flushing (standard wrapper pattern). Regression guard: TestAuditWriterForwardsFlush in internal/s3api/audit_test.go mounts AuditMiddleware over an SSE-shaped handler via httptest.NewServer (real http server => real Flusher) and asserts a GET to /admin/v1/audit/stream returns 200 text/event-stream with the streamed frame, not 500. Verified locally: 'playwright test debug.spec.ts -g audit-tail' PASS (connected + PutObject row + N events streamed); full debug.spec.ts 5/5 PASS; web pnpm typecheck clean; go test ./internal/s3api ./internal/adminapi ./internal/auditstream PASS; go build + vet clean. CI run id: PENDING (verify End-to-end UI (Playwright) job green after push)."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-005",
-      "title": "Docker layer caching for docker-build (type=gha)",
-      "description": "As a CI maintainer, I want docker-build to cache image layers via the GitHub Actions cache backend so the ceph base + go mod download are not rebuilt from scratch every run.",
+      "title": "Anonymous + auth-mode enforcement matrix",
+      "description": "As a QA engineer, I need the auth-mode × public-access matrix proven so the secure default cannot silently regress to open access. (FR-8 split candidate: if the full matrix overflows one iteration, split signed/anonymous halves.)",
       "acceptanceCriteria": [
-        "docker-build job switched from plain 'docker build' to docker/build-push-action@v6 with cache-from: type=gha + cache-to: type=gha,mode=max, distinct scope= per image (strata-ceph, strata-ceph-bootstrap)",
-        "load: true so the built image stays available downstream; tags unchanged (strata:ceph, strata-ceph:local)",
-        "Second consecutive CI run on an unchanged Dockerfile shows a materially faster docker-build (cache hit in logs); record before/after wall-clock in notes",
-        "docker-build job green on a CI run on this cycle branch",
-        "Tests pass"
+        "Matrix test over auth mode `{off (full-access), optional, required}` × request `{anonymous, signed}` × `{public-access-block on/off, bucket-policy grants anon, bucket/object ACL public-read}` asserting allow/deny per cell.",
+        "Explicitly asserts: `required` (default) denies all anonymous; `off` grants full access (dev-only, documented); `optional` honours ACL/policy for anon.",
+        "Asserts `public-access-block` overrides a permissive bucket policy (block wins).",
+        "Lives in `internal/s3api/` (reuses `newHarness`); does not duplicate `access.go` unit assertions already present elsewhere.",
+        "Any enforcement bug fixed this story.",
+        "Verify via a CI run on the cycle branch."
       ],
       "priority": 5,
       "passes": false,
@@ -83,14 +85,13 @@
     },
     {
       "id": "US-006",
-      "title": "Extend gha cache to compose + ceph-bootstrap builds",
-      "description": "As a CI maintainer, I want the e2e/e2e-full compose builds and the ceph-bootstrap image to reuse the type=gha cache so the ceph image is effectively built once per CI run.",
+      "title": "SSE negative + key-mismatch + rotation hardening",
+      "description": "As a QA engineer, I need encryption failure paths covered, not just happy-path round-trips, so a misconfigured key never silently returns plaintext or the wrong object.",
       "acceptanceCriteria": [
-        "Compose service build sections (or a pre-build step before docker compose up) consume the type=gha cache for the strata/ceph images (build.cache_from in compose, or pre-build with build-push-action + --load so compose reuses the local image)",
-        "ceph-bootstrap image build participates in the gha cache (own scope=)",
-        "No duplicate full ceph rebuild across docker-build + e2e + e2e-full in one CI run (verified from logs)",
-        "e2e and e2e-full jobs green on a CI run on this cycle branch",
-        "Tests pass"
+        "Negative tests added (extending `sse_c_test.go` / `sse_object_test.go`, no duplication of happy-path round-trips): SSE-C GET with wrong customer key → 403; SSE-C with missing/short key → 400; SSE-KMS unwrap with wrong key id → maps to `ErrKeyIDMismatch` (the `IncorrectKeyException` path).",
+        "Multipart SSE: complete a multipart upload under SSE-KMS and assert each part decrypts via the per-part locator (`Manifest.PartChunkCounts`).",
+        "Rotation: a `strata admin rewrap` to a new key id followed by a GET still decrypts (reuses the rotation integration test harness, MinIO KMS + `internal/crypto/kms` fake).",
+        "Verify via a CI run on the cycle branch (integration-tagged, MinIO + KMS containers)."
       ],
       "priority": 6,
       "passes": false,
@@ -98,13 +99,14 @@
     },
     {
       "id": "US-007",
-      "title": "Playwright browser cache",
-      "description": "As a CI maintainer, I want chromium cached across runs so the e2e-ui job stops re-downloading it every run.",
+      "title": "Multipart concurrency race tests",
+      "description": "As a QA engineer, I need multipart races covered under `-race`, because concurrent complete/abort is where LWT correctness is easiest to break.",
       "acceptanceCriteria": [
-        "actions/cache@v4 added to the e2e-ui job for ~/.cache/ms-playwright, keyed on runner.os + hashFiles('web/pnpm-lock.yaml') with a restore-key prefix",
-        "playwright install becomes a cache-hit no-op on the second run (no chromium download in logs)",
-        "End-to-end UI (Playwright) job still green on a CI run on this cycle branch",
-        "Tests pass"
+        "New scenario in `internal/racetest/` (extends `workload.go`; does not fork a parallel harness): N goroutines racing `CompleteMultipartUpload` + `AbortMultipartUpload` on the same upload id — exactly one Complete wins, the rest get `ErrMultipartInProgress`/`NoSuchUpload`, no double object row, no orphaned chunks left un-GC'd.",
+        "Concurrent uploads of the same key by different upload ids resolve to a single latest object with a consistent manifest.",
+        "Runs green under `go test -race` on TiKV + memory backends.",
+        "Any race/correctness bug fixed in the handler or `meta.Store` this story.",
+        "Verify via a CI run on the cycle branch (the `-race` job covers it)."
       ],
       "priority": 7,
       "passes": false,
@@ -112,13 +114,14 @@
     },
     {
       "id": "US-008",
-      "title": "Verify e2e + e2e-full (compose + smoke) green",
-      "description": "As a CI maintainer, I want the compose-based e2e jobs confirmed green on the cycle branch (Go-pin-fixed but never observed green), fixing any residual breakage.",
+      "title": "Versioning + LWT/CAS contention races",
+      "description": "As a QA engineer, I need versioning and CAS contention covered so concurrent writers cannot corrupt the version chain or lose updates.",
       "acceptanceCriteria": [
-        "End-to-end (compose + smoke) and End-to-end (all workers + notify round-trip) jobs are green on a CI run on this cycle branch",
-        "Any residual failure root-caused + fixed; smoke scripts that start/expect a gateway set STRATA_AUTH_MODE explicitly (post secure-by-default flip)",
-        "Progress note records the green run id + per-job conclusions",
-        "Tests pass"
+        "Race scenario: concurrent `PutObject` + `DeleteObject` (delete-marker) on a versioned key — the version chain stays monotonic, `IsLatest` is held by exactly one row, and `?versionId=null` resolves deterministically.",
+        "CAS contention: concurrent `SetObjectStorage` (lifecycle-transition vs client overwrite) — the loser's chunks land in the GC queue, the winner's manifest is the one read back (the documented lifecycle-CAS invariant).",
+        "Suspended-versioning replace-null path covered under contention (`VersioningSuspendedReplaceNull` semantics) on TiKV + memory.",
+        "Runs green under `-race`; any bug fixed this story.",
+        "Verify via a CI run on the cycle branch."
       ],
       "priority": 8,
       "passes": false,
@@ -126,15 +129,13 @@
     },
     {
       "id": "US-009",
-      "title": "Full green CI + expand branch-protection required checks",
-      "description": "As the repo owner, I want the now-stable check contexts added to main branch-protection so only fully-passing PRs can merge.",
+      "title": "Drain stop-write invariant under concurrent load",
+      "description": "As a QA engineer, I need the drain stop-write invariant proven under live traffic, because evacuation is a production-critical, hard-to-reverse operation. (Split from the original combined drain+rebalance story — too large for one iteration; the mover is US-010.)",
       "acceptanceCriteria": [
-        "A full CI run on this cycle branch's PR is green end-to-end (every non-skipped job success)",
-        "main branch-protection required_status_checks.checks updated via gh api -X PUT repos/danchupin/strata/branches/main/protection to ADD: 'Build + vet', 'Unit tests (-race)', 'gosec (Go static-analysis scan)', 'End-to-end UI (Playwright)', 'End-to-end (compose + smoke)', 'End-to-end (all workers + notify round-trip)' on top of the existing 7",
-        "Applied protection read back via gh api .../protection and the required list asserted to contain the full set (verify it landed, do not trust the PUT response alone)",
-        "If the runtime token lacks admin:repo scope to set protection, write the exact gh api command + target required-set into ROADMAP.md/docs and flag for the operator instead of silently passing",
-        "ROADMAP.md CI/quality entry flipped to Done with cycle summary + closing SHA",
-        "Tests pass"
+        "Integration test: mark a cluster `evacuating`, fire concurrent PUTs at it → every PUT gets `503 DrainRefused` + `Retry-After: 300`; reads / deletes / HEAD keep working (the always-strict drain invariant).",
+        "An in-flight multipart session bound to the draining cluster survives to completion (routing recovered from `BackendUploadID`, never re-picks).",
+        "`deregister_ready` does NOT flip to true while a multipart session is still bound to the cluster (the `ListMultipartUploadsByCluster` safety gate).",
+        "Verify via a CI run on the cycle branch (integration + e2e jobs)."
       ],
       "priority": 9,
       "passes": false,
@@ -142,17 +143,66 @@
     },
     {
       "id": "US-010",
-      "title": "Fix TestCertReloaderK8sSymlinkSwap real CI failure",
-      "description": "As a CI maintainer, I want the cert-reloader to detect k8s atomic symlink swaps in CI (not in original PRD — surfaced as a real Unit/Integration blocker).",
+      "title": "Rebalance mover correctness under load",
+      "description": "As a QA engineer, I need the rebalance mover proven to move chunks correctly while traffic flows, so evacuation never loses or duplicates data. (Split from US-009.)",
       "acceptanceCriteria": [
-        "Root cause: fileFingerprint was stat-based (size+mtime, no inode) -> identical fp on CI coarse-mtime FS -> swap undetected",
-        "Fix: content-hash (sha256) fingerprint of cert+key bytes",
-        "Unit tests (-race) green on CI",
-        "Tests pass"
+        "Extends `internal/rebalance/s3_mover_integration_test.go` (and the RADOS mover path) — no duplication of the existing single-pass move test.",
+        "Under concurrent client writes, the mover moves chunks with correct manifest CAS: the winner's locator is read back, CAS losers' chunks land in the GC queue (the documented mover invariant).",
+        "Old source keys are queued in the `_by_cluster` GC table after the move; the object body is readable on the destination cluster afterwards.",
+        "Mover refuses moves into a draining or >90 %-full cluster (the safety rails).",
+        "Verify via a CI run on the cycle branch (integration + e2e jobs)."
       ],
       "priority": 10,
-      "passes": true,
-      "notes": "CI-verified green run 26655172144. content-hash in internal/serverapp/cert_store.go."
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "Chunk-loss / corruption / partial-write recovery",
+      "description": "As a QA engineer, I need to prove a damaged data plane fails loud, never silently returning truncated or wrong bytes. (FR-8 split candidate: if the multi-backend matrix overflows, split memory/default vs RADOS+MinIO integration halves.)",
+      "acceptanceCriteria": [
+        "Corruption test: a corrupted/missing chunk on GET returns an error (5xx/IO error), never a silently-truncated 200 body — for both RADOS (`CorruptFirstChunk` hook) and the S3/MinIO backend.",
+        "Partial-write rollback: a `PutChunks` that fails mid-stream does not leave a readable half-object (manifest is only committed after all chunks land).",
+        "ETag/size mismatch on read is detected (the racecheck verifier path) and surfaced, not swallowed.",
+        "NOTE: the memory backend already exposes `CorruptFirstChunk()` (`internal/data/memory/backend.go:148`). The skip at `internal/s3api/sse_object_test.go:207` is stale — it fires when the call returns false (no chunk stored), not because the method is absent. Fix the stale guard so the corruption assertion runs on the memory backend on the default CI tag (no container needed) in addition to RADOS + MinIO.",
+        "Corruption assertion runs on memory (default tag) + RADOS + MinIO (integration tag). No new corruption hook is added — memory's existing one is reused.",
+        "Verify via a CI run on the cycle branch (unit + integration + e2e jobs)."
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "GC + bucket_stats fan-out concurrency consistency",
+      "description": "As a QA engineer, I need the fan-out counters and GC queue proven consistent under concurrency, because these drive billing and storage reclaim.",
+      "acceptanceCriteria": [
+        "Concurrent `BumpBucketStats` from N goroutines: `GetBucketStats` sums to the exact expected total (no lost increments), and the `strata_bucket_stats_shard_writes_total{shard}` distribution is non-degenerate (picker uses a fresh uuid per call, not a stable key).",
+        "Concurrent `EnqueueChunkDeletion` + `AckGCEntry` keep `gc_entries_v2` and `gc_entries_by_cluster` in lockstep (the dual-write invariant); no entry is acked twice, none leaked.",
+        "GC under per-shard fan-out deletes each chunk exactly once (no double-delete, no skip).",
+        "Runs on TiKV + memory; any bug fixed this story.",
+        "Verify via a CI run on the cycle branch."
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "Production-readiness report + close-flip + final green CI",
+      "description": "As a QA engineer, I need to deliver the go/no-go verdict backed by a fully green CI run so the team can make the release call. Final story: produce the report, close-flip ROADMAP, re-baseline s3-tests (manual/local), and prepare the branch-protection apply as a manual post-merge step.",
+      "acceptanceCriteria": [
+        "`tasks/qa-readiness-report.md` filled in: final coverage table (before/after), the dimension matrix all populated, every bug found+fixed listed with its commit, residual risks enumerated with severity, and an explicit GO / NO-GO verdict with justification.",
+        "`scripts/s3-tests/README.md` re-baselined if any functional story moved the pass rate; the 13 deliberate gaps re-confirmed as deliberate. NOTE: `s3-tests` is not a CI job — this re-baseline is run manually/locally against the compose stack (`scripts/s3-tests/run.sh`), not verified by the cycle CI run.",
+        "`ROADMAP.md` close-flipped for this cycle; any unfixable finding added as a P1/P2/P3 entry in the same commit.",
+        "A full CI run on the cycle branch is green end-to-end (all required checks).",
+        "The coverage table is promoted to a CI gate: a coverage job whose per-package floor is set to the US-001 baseline numbers (ratchet-floor — fail only on regression below the measured baseline, never an aspirational target) for the core packages (`internal/auth`, `internal/s3api`, `internal/meta/{memory,tikv}`, `internal/data/{memory,placement}`, `internal/crypto/kms`). The job runs green on the cycle branch before the gate is wired.",
+        "Branch-protection update is prepared as a documented manual post-merge step (the new check context + the `gh api` command), NOT executed by the autonomous cycle — headless Ralph lacks admin-API auth (same posture as the ci-green cycle, where protection was applied by hand after merge). The story's job is to make the check green and write the exact apply command into the report.",
+        "Verify via the final green CI run on the cycle branch."
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": ""
     }
   ]
 }
