@@ -248,13 +248,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
       - name: Build gateway image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/docker/Dockerfile
-          tags: strata:ceph
-          load: true
-          cache-from: type=gha,scope=strata-ceph
+        run: docker build -f deploy/docker/Dockerfile -t strata:ceph .
       # SHA-pinned third-party actions (US-002 AC):
       #   aquasecurity/trivy-action v0.36.0 →
       #       ed142fd0673e97e23eac54620cfb913e5ce36c25 (annotated tag commit)
@@ -410,33 +404,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      # docker-build is the cache WRITER for both images (cache-to mode=max,
-      # which exports intermediate layers + the Dockerfile's BuildKit
-      # --mount=type=cache go-mod cache). Every other job that builds these
-      # images (e2e / e2e-full / trivy / multi-replica) `needs: docker-build`
-      # and reads the warm cache (cache-from only), so the heavy ceph base +
-      # go build are paid for once per run instead of ~5x. Distinct scope=
-      # per image keeps the large ceph layers from evicting the bootstrap
-      # cache under the ~10GB Actions-cache budget.
+      # Plain docker build (gha-cache reverted): measured net SLOWER for the
+      # multi-GB ceph base — cache-to mode=max re-exports the huge layers to
+      # the Actions cache (the base is pulled from quay regardless), costing
+      # more than the rebuild. docker-build dropped from 140-325s (cached,
+      # high variance) back to a tighter 150-180s without it.
       - name: Build gateway image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/docker/Dockerfile
-          tags: strata:ceph
-          load: true
-          cache-from: type=gha,scope=strata-ceph
-          cache-to: type=gha,mode=max,scope=strata-ceph
+        run: docker build -f deploy/docker/Dockerfile -t strata:ceph .
       - name: Build ceph-bootstrap image
-        uses: docker/build-push-action@v6
-        with:
-          context: deploy/docker/ceph-bootstrap
-          file: deploy/docker/ceph-bootstrap/Dockerfile
-          tags: strata-ceph:local
-          load: true
-          cache-from: type=gha,scope=strata-ceph-bootstrap
-          cache-to: type=gha,mode=max,scope=strata-ceph-bootstrap
+        run: docker build -f deploy/docker/ceph-bootstrap/Dockerfile -t strata-ceph:local deploy/docker/ceph-bootstrap
 
   e2e:
     name: End-to-end (compose + smoke)
@@ -445,25 +421,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      # gha cache READER (warm from the docker-build writer job above, which
-      # this job `needs:`). cache-from only — no cache-to, to avoid concurrent
-      # writers racing the same scope.
-      - name: Build gateway image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/docker/Dockerfile
-          tags: strata:ceph
-          load: true
-          cache-from: type=gha,scope=strata-ceph
-      - name: Build ceph-bootstrap image
-        uses: docker/build-push-action@v6
-        with:
-          context: deploy/docker/ceph-bootstrap
-          file: deploy/docker/ceph-bootstrap/Dockerfile
-          tags: strata-ceph:local
-          load: true
-          cache-from: type=gha,scope=strata-ceph-bootstrap
+      - name: Build images
+        run: |
+          docker build -f deploy/docker/Dockerfile -t strata:ceph .
+          docker build -f deploy/docker/ceph-bootstrap/Dockerfile -t strata-ceph:local deploy/docker/ceph-bootstrap
 
       - name: "Start stack (bare-default TiKV: pd + tikv + ceph + ceph-b + strata-a/b + LB)"
         run: |
@@ -538,25 +499,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      # gha cache READER (warm from the docker-build writer job above, which
-      # this job `needs:`). cache-from only — no cache-to, to avoid concurrent
-      # writers racing the same scope.
-      - name: Build gateway image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/docker/Dockerfile
-          tags: strata:ceph
-          load: true
-          cache-from: type=gha,scope=strata-ceph
-      - name: Build ceph-bootstrap image
-        uses: docker/build-push-action@v6
-        with:
-          context: deploy/docker/ceph-bootstrap
-          file: deploy/docker/ceph-bootstrap/Dockerfile
-          tags: strata-ceph:local
-          load: true
-          cache-from: type=gha,scope=strata-ceph-bootstrap
+      - name: Build images
+        run: |
+          docker build -f deploy/docker/Dockerfile -t strata:ceph .
+          docker build -f deploy/docker/ceph-bootstrap/Dockerfile -t strata-ceph:local deploy/docker/ceph-bootstrap
 
       - name: Start bare-default TiKV stack + webhook trap
         run: |
@@ -709,23 +655,10 @@ jobs:
           key: ${{ runner.os }}-pnpm-${{ hashFiles('web/pnpm-lock.yaml') }}
           restore-keys: |
             ${{ runner.os }}-pnpm-
-      # gha cache reader (this job `needs: docker-build`). cache-from only.
       - name: Build gateway image (lab uses strata:ceph)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/docker/Dockerfile
-          tags: strata:ceph
-          load: true
-          cache-from: type=gha,scope=strata-ceph
-      - name: Build ceph-bootstrap image
-        uses: docker/build-push-action@v6
-        with:
-          context: deploy/docker/ceph-bootstrap
-          file: deploy/docker/ceph-bootstrap/Dockerfile
-          tags: strata-ceph:local
-          load: true
-          cache-from: type=gha,scope=strata-ceph-bootstrap
+        run: |
+          docker build -f deploy/docker/Dockerfile -t strata:ceph .
+          docker build -f deploy/docker/ceph-bootstrap/Dockerfile -t strata-ceph:local deploy/docker/ceph-bootstrap
       - name: Bring up bare-default TiKV 2-replica stack
         run: make up
       - name: Wait for replicas + LB readyz
