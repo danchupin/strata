@@ -49,8 +49,8 @@
         "Verify via a CI run on the cycle branch."
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "sigv4_adversarial_test.go added: TestSigV4_AdversarialMatrix (13 tamper classes — bad sig, past/future skew, wrong region, wrong service, tampered path/query/Host, missing Host, missing x-amz-content-sha256, missing x-amz-date, unsigned↔signed payload mismatch) each asserting the exact sentinel (ErrSignatureInvalid/ErrClockSkew/ErrMalformedAuth) + the documented S3 APIError code (SignatureDoesNotMatch/RequestTimeTooSkewed/AccessDenied) via wantS3Code mirror of s3api.WriteAuthDenied. TestSigV4_ValidVariantsPass = 7 positive controls (per-case baseline also re-asserts a valid request passes). signV4 helper reuses prod canonicalRequest/computeSignature; tampers diverge only the attacked field. NO bug found — auth rejects every class. No production code changed. Strata does NOT pin region/service server-side (self-consistent any-region request passes); the adversarial 'wrong region/service' = tampered Authorization scope vs original signature → mismatch. All green locally (non-cgo pkg); CI is source of truth."
     },
     {
       "id": "US-004",

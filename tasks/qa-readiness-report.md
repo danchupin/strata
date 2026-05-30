@@ -115,7 +115,7 @@ story; `—` = not yet started.
 | Dimension | Status | Stories | Evidence |
 |-----------|--------|---------|----------|
 | **Functional** | Baseline (near-ceiling) | s3-tests suite | `scripts/s3-tests/README.md` |
-| **Auth / security (adversarial)** | — | US-003, US-004, US-005, US-006 | (pending) |
+| **Auth / security (adversarial)** | SigV4 done; US-004/005/006 pending | US-003, US-004, US-005, US-006 | US-003: `TestSigV4_AdversarialMatrix` (13 tamper classes) + `TestSigV4_ValidVariantsPass` (7 positive controls) in `internal/auth/sigv4_adversarial_test.go` — no bug found (all classes reject with the exact sentinel + S3 code) |
 | **Concurrency / race** | — | US-007, US-008, US-012 | (pending) |
 | **Durability / fault-injection** | — | US-009, US-010, US-011 | (pending) |
 

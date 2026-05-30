@@ -21,6 +21,19 @@ Cycle: ralph/qa-production-readiness
   - make build runs web-build (pnpm) first — web/dist must be populated or go build fails on `pattern web/dist: no matching files found`.
 ---
 
+## 2026-05-30 - US-003
+- SigV4 adversarial auth matrix.
+- Added: internal/auth/sigv4_adversarial_test.go — TestSigV4_AdversarialMatrix (13 tamper classes) + TestSigV4_ValidVariantsPass (7 positive controls). signV4 helper builds a fully-valid signed request from signOpts, reusing prod canonicalRequest/computeSignature; each case applies ONE tamper then asserts the sentinel + S3 code.
+- Report: dimension matrix Auth row updated (SigV4 done, US-004/005/006 pending).
+- **NO bug found** — auth rejects every tamper class with the exact sentinel. No production code changed.
+- **Learnings for future iterations:**
+  - Strata does NOT pin region/service server-side. validateHeader derives the signing key from parsed.Region/Service (taken from the Authorization Credential scope), so a self-consistent any-region request PASSES. The adversarial "wrong region/service" is therefore a TAMPERED scope (header claims region B) vs the original signature (signed for region A) → key mismatch → ErrSignatureInvalid. Do not expect a dedicated "region mismatch" sentinel.
+  - validateHeader order: parse → require X-Amz-Date (missing → ErrMalformedAuth, NOT ErrSignatureInvalid) → parse date (bad → ErrMalformedAuth) → skew check (ErrClockSkew, fires BEFORE signature so a correctly-signed-but-old request is ErrClockSkew not ErrSignatureInvalid) → Lookup cred → compute+compare sig (ErrSignatureInvalid) → session-token check.
+  - bodyHash defaults to unsignedBody when X-Amz-Content-Sha256 absent. Deleting the (signed) header changes BOTH the canonical header value AND the payload hash → mismatch.
+  - sentinel→S3-code mapping lives in s3api.WriteAuthDenied (internal/s3api/errors.go:180), a switch on err.Error() STRING. auth tests can't import s3api (cycle) — mirror the map locally (wantS3Code) and keep it in lockstep. "signature does not match"→SignatureDoesNotMatch, "request time outside permitted window"→RequestTimeTooSkewed, malformed/default→AccessDenied.
+  - stubStore (middleware_test.go) is the in-package CredentialsStore fake; reuse it. mw.validate(r) dispatches header-path when no presigned query params present.
+---
+
 ## 2026-05-30 - US-002
 - RFC 7232 conditional-request matrix.
 - Added: internal/s3api/conditional_test.go — TestConditionalGetMatrix (GET+HEAD × all If-* branches, *, multi-value lists, precedence pairs, exact 200/304/412), TestConditionalGetRange206 (206 when precond passes, 412 short-circuit before range), TestConditionalPutPreconditions (If-None-Match:* overwrite-reject/create-absent, If-Match lost-update hit/miss, If-Match-on-missing → 412).
