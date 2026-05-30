@@ -20,3 +20,15 @@ Cycle: ralph/qa-production-readiness
   - coverage.sh is idempotent: re-running regenerates identical table when no test changes. Run it after adding tests to refresh the baseline before US-013.
   - make build runs web-build (pnpm) first — web/dist must be populated or go build fails on `pattern web/dist: no matching files found`.
 ---
+
+## 2026-05-30 - US-002
+- RFC 7232 conditional-request matrix.
+- Added: internal/s3api/conditional_test.go — TestConditionalGetMatrix (GET+HEAD × all If-* branches, *, multi-value lists, precedence pairs, exact 200/304/412), TestConditionalGetRange206 (206 when precond passes, 412 short-circuit before range), TestConditionalPutPreconditions (If-None-Match:* overwrite-reject/create-absent, If-Match lost-update hit/miss, If-Match-on-missing → 412).
+- **BUG FOUND + FIXED** in conditional.go: checkConditional evaluated If-Unmodified-Since unconditionally — If-Match:<match> + If-Unmodified-Since:<past> returned 412 instead of 200. RFC 7232 §6 + AWS docs: If-Match suppresses If-Unmodified-Since (match wins → serve). Fixed by moving If-Unmodified-Since into the If-Match-absent else branch (mirrors existing If-None-Match ⊳ If-Modified-Since).
+- Report: R2 closed, handler matrix conditional.go thin→covered (41 covered/1 thin/1 uncovered). ROADMAP: P2 Done entry added.
+- **Learnings for future iterations:**
+  - conditional.go GET/HEAD path is ONE helper (checkConditional, server.go:1205) shared by GET+body=false HEAD; PUT-side is separate inline (server.go:928), multipart-Complete separate (multipart.go:499), copy separate (copy_object.go:225). 4 distinct precondition sites — do NOT unify (multipart If-Match-on-missing diverges to 404, single-PUT keeps 412).
+  - RFC 7232 §6 precedence is two PAIRS: (If-Match ⊳ If-Unmodified-Since) and (If-None-Match ⊳ If-Modified-Since). The AC's "If-Match over If-Modified-Since" phrasing is loose; the real suppression pairs are match/unmod and none-match/mod. Each higher-precedence header's presence must gate its partner via else.
+  - ETag from PUT response header is the quoted strong form clients send back in If-Match — capture it, don't recompute MD5. putCondObject helper in conditional_test.go.
+  - If-Modified/Unmodified-Since granularity is seconds; use fixed far-past ("Mon, 02 Jan 2006...") + far-future ("Fri, 01 Jan 2100...") dates for deterministic mtime comparison vs put-time now.
+---

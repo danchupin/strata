@@ -34,8 +34,8 @@
         "`make test` passes locally; verify via a CI run on the cycle branch."
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "conditional_test.go added: GET/HEAD matrix (If-Match/If-None-Match/If-Modified-Since/If-Unmodified-Since, *, multi-value, precedence, 206 via Range) + single-PUT preconditions. BUG FOUND+FIXED in conditional.go: If-Unmodified-Since was evaluated even when If-Match present; RFC 7232 §6 + AWS require If-Match to suppress If-Unmodified-Since (match+unmod-fail -> 200). Gated behind If-Match-absent else. R2 closed in report; ROADMAP P2 entry added (Done). All s3api tests green CGO_ENABLED=0 locally; CI is source of truth."
     },
     {
       "id": "US-003",

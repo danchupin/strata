@@ -23,6 +23,14 @@ S3-compatibility headline: **92.7% (165/178)** on the executable subset of `ceph
 These are not feature work. The codebase shipped a lot of surface in a short window; before
 adding more, prove what is there.
 
+- ~~**P2 — Conditional GET `If-Match` did not suppress `If-Unmodified-Since`.**~~ —
+  **Done.** US-002 (QA cycle) found `checkConditional` (`internal/s3api/conditional.go`)
+  evaluated `If-Unmodified-Since` unconditionally, so `If-Match: <match>` +
+  `If-Unmodified-Since: <past>` returned `412` instead of `200`. RFC 7232 §6 + AWS
+  docs require `If-Match` to take precedence over `If-Unmodified-Since` (match wins →
+  serve). Fixed by gating `If-Unmodified-Since` behind the `If-Match`-absent `else`
+  branch (mirrors the existing `If-None-Match` ⊳ `If-Modified-Since` suppression).
+  GET/HEAD adversarial matrix added in `conditional_test.go`.
 - ~~**P1 — Single-binary `strata` (CockroachDB-shape).**~~ — **Done.** Single `strata`
   binary with `server` + `admin` subcommands; `strata server` runs the gateway plus an
   opt-in subset of workers (gc, lifecycle, notify, replicator, access-log, inventory,

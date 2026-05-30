@@ -138,7 +138,7 @@ reference** (not just filename). 43 handler files audited.
 | `audit_query.go` | covered | `TestAuditFilterByBucket`, `TestAuditFilterByPrincipal`, `TestAuditPaginationRoundTrip` |
 | `audit.go` | covered | `TestAuditEmitsRowForStateChangingObjectWrites`, `TestAuditSkipsReadPaths`, `TestAuditTTLPurgesExpiredRows` |
 | `checksum.go` | covered | `TestChecksumRoundTripPerAlgo`, `TestChecksumMismatchPerAlgo`, `TestCRC64NVMEKnownVector`, `TestChecksumMode*` |
-| `conditional.go` | **thin** | PUT-side `If-Match`/`If-None-Match` via `TestMultipartCompleteIfMatch*`; copy-side via `TestCopyObjectIfMatch*`. **GET-side `checkConditional` (If-Modified-Since/If-None-Match on GET) has NO direct matrix** — US-002 scope. |
+| `conditional.go` | covered | GET/HEAD read-path matrix via `TestConditionalGetMatrix` (If-Match/If-None-Match/If-Modified-Since/If-Unmodified-Since + precedence + 206 via `TestConditionalGetRange206`); single-PUT preconditions via `TestConditionalPutPreconditions`; multipart/copy preconditions via `TestMultipartCompleteIfMatch*` / `TestCopyObjectIfMatch*` (US-002). |
 | `copy_object.go` | covered | `TestCopyObjectMetadataDirective*`, `TestCopyObjectIfMatch*`, `TestCopyObjectIfModifiedSince*` (14) |
 | `cors.go` | covered | `TestCORSConfigCRUD`, `TestCORSPreflightMatch`, `TestPutBucketCORSTranslatesToBackend` |
 | `delete_objects.go` | **uncovered** | No direct test for multi-object `DeleteObjects` (`<Delete>` batch). Only an indirect mention in `race_integration_test.go` comment. **Real gap** — see residual risks. |
@@ -173,7 +173,7 @@ reference** (not just filename). 43 handler files audited.
 | `website.go` | covered | `TestBucketWebsiteIndexServing`, `TestBucketWebsiteRedirectAllRequestsTo`, `TestBucketWebsiteRoutingRulePrefix` |
 | `xml.go` | covered (n/a) | Marshalling helpers; exercised transitively by every XML round-trip test. No standalone funcs. |
 
-**Summary:** 40 covered · 2 thin (`conditional.go`, `placement_ctx.go`) · 1
+**Summary:** 41 covered · 1 thin (`placement_ctx.go`) · 1
 uncovered (`delete_objects.go`).
 
 ---
@@ -186,7 +186,7 @@ Open risks tracked across the cycle. Severity mirrors `ROADMAP.md`
 | # | Risk | Severity | Owner story |
 |---|------|----------|-------------|
 | R1 | `delete_objects.go` (multi-object `DeleteObjects`) has **no direct test** — batch delete, partial failure, quiet mode, versioned-delete-marker paths unverified. | P2 | (to be scheduled; candidate US-008 follow-up) |
-| R2 | GET-side conditional requests (`checkConditional`: If-Modified-Since / If-None-Match on GET/HEAD) lack an adversarial matrix. | P2 | US-002 |
+| R2 | ~~GET-side conditional requests lack an adversarial matrix.~~ **Closed (US-002).** Matrix added; **bug found+fixed**: `checkConditional` evaluated `If-Unmodified-Since` even when `If-Match` was present — RFC 7232 §6 / AWS require If-Match to suppress If-Unmodified-Since (If-Match match + If-Unmodified-Since fail → 200). Fixed in `conditional.go`. | P2 → Done | US-002 |
 | R3 | `placement_ctx.go` drain/cluster-state helpers thin on direct coverage. | P3 | US-009 |
 | R4 | `internal/data` (56.0%) and `internal/lifecycle` (56.0%) — lowest real coverage among hot-path logic packages; durability paths under-exercised. | P2 | US-011 |
 | R5 | Cassandra backend gated off per-PR CI — Paxos/LWT contention paths not on the gate (first-class in code, run locally only). | P2 (accepted) | US-013 verdict note |
