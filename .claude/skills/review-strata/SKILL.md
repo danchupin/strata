@@ -1,6 +1,6 @@
 ---
 name: review-strata
-description: Orchestrate Strata's domain reviewer subagents over a change — correctness (foreground) + tests/s3-compat/errors/simplifier (parallel), severity-aggregated. Use when reviewing a diff, branch, or PR in-session. Args optional: a subset of aspects (e.g. "correctness tests"), or a PR number / branch / paths.
+description: Orchestrate Strata's domain reviewer subagents over a change — correctness (foreground) + tests/s3-compat/errors/simplifier (parallel), severity-aggregated. Use PROACTIVELY before committing a non-trivial change, and whenever the user asks to review a diff, branch, or PR. Args optional: a subset of aspects (e.g. "correctness tests"), or a PR number / branch / paths.
 ---
 
 # Review Strata
