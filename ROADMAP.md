@@ -43,6 +43,18 @@ adding more, prove what is there.
   serve). Fixed by gating `If-Unmodified-Since` behind the `If-Match`-absent `else`
   branch (mirrors the existing `If-None-Match` ⊳ `If-Modified-Since` suppression).
   GET/HEAD adversarial matrix added in `conditional_test.go`.
+- ~~**P2 — SSE-C wrong customer key on GET returned 400 instead of 403.**~~ —
+  **Done.** US-006 (QA cycle) found `ErrSSECKeyMismatch` (`internal/s3api/errors.go`)
+  carried HTTP `400`; AWS-parity (s3-tests `test_encryption_sse_c_other_key`) is `403`
+  `AccessDenied` — a self-consistent but wrong customer key fails the stored-`KeyMD5`
+  comparison in `requireSSECMatch` before the AEAD layer. Flipped the sentinel status to
+  `403` (covers both the GET gate and copy-source `copy_object.go`). SSE negative matrix
+  added: `TestSSECGetWrongKey` / `TestSSECGetShortKey` (`sse_c_test.go`) +
+  `sse_kms_test.go` (`TestSSEKMS_WrongKeyID_AccessDenied` drives the
+  `kms.ErrKeyIDMismatch` → 403 IncorrectKeyException path via `LocalHSMProvider`;
+  `TestSSEKMS_MultipartPerPartDecrypt` asserts a 3-part aws:kms upload decrypts via the
+  `Manifest.PartChunkCounts` per-part locator). No SSE-KMS or rotation bug found beyond
+  the SSE-C status.
 - ~~**P1 — Single-binary `strata` (CockroachDB-shape).**~~ — **Done.** Single `strata`
   binary with `server` + `admin` subcommands; `strata server` runs the gateway plus an
   opt-in subset of workers (gc, lifecycle, notify, replicator, access-log, inventory,

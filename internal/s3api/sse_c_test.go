@@ -109,15 +109,75 @@ func TestSSECGetWrongMD5(t *testing.T) {
 		"x-amz-server-side-encryption-customer-key", keyB64,
 		"x-amz-server-side-encryption-customer-key-MD5", keyMD5), 200)
 
+	// A self-consistent but DIFFERENT key (key+MD5 both for 0x99). The MD5
+	// validates against its own key, but mismatches the stored object's
+	// KeyMD5 → AWS-parity 403 AccessDenied (s3-tests test_encryption_sse_c_other_key).
 	other := makeKey(0x99)
 	_, otherB64, otherMD5 := ssecHeaders(other)
 	resp := h.doString("GET", "/bkt/k", "",
 		"x-amz-server-side-encryption-customer-algorithm", "AES256",
 		"x-amz-server-side-encryption-customer-key", otherB64,
 		"x-amz-server-side-encryption-customer-key-MD5", otherMD5)
-	h.mustStatus(resp, 400)
+	h.mustStatus(resp, 403)
 	if body := h.readBody(resp); !strings.Contains(body, "AccessDenied") {
 		t.Fatalf("expected AccessDenied, got: %s", body)
+	}
+}
+
+// TestSSECGetWrongKey is the explicit "wrong customer key on GET" negative the
+// US-006 matrix names: the supplied key is a valid 32-byte AES key whose MD5 is
+// self-consistent, but it is NOT the key the object was encrypted with. AWS
+// returns 403 AccessDenied here (the key bytes never reach the AEAD layer; the
+// stored KeyMD5 mismatch short-circuits first). Distinct from TestSSECGetWrongMD5
+// only in intent — kept separate so the matrix reads as a checklist.
+func TestSSECGetWrongKey(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+
+	key := makeKey(0x42)
+	algo, keyB64, keyMD5 := ssecHeaders(key)
+	h.mustStatus(h.doString("PUT", "/bkt/k", "payload",
+		"x-amz-server-side-encryption-customer-algorithm", algo,
+		"x-amz-server-side-encryption-customer-key", keyB64,
+		"x-amz-server-side-encryption-customer-key-MD5", keyMD5), 200)
+
+	wrong := makeKey(0x77)
+	_, wrongB64, wrongMD5 := ssecHeaders(wrong)
+	resp := h.doString("GET", "/bkt/k", "",
+		"x-amz-server-side-encryption-customer-algorithm", "AES256",
+		"x-amz-server-side-encryption-customer-key", wrongB64,
+		"x-amz-server-side-encryption-customer-key-MD5", wrongMD5)
+	h.mustStatus(resp, 403)
+	if body := h.readBody(resp); !strings.Contains(body, "AccessDenied") {
+		t.Fatalf("expected AccessDenied, got: %s", body)
+	}
+}
+
+// TestSSECGetShortKey covers the "short key on GET → 400" leg of the matrix.
+// A 16-byte key (with a self-consistent MD5) fails the 32-byte length gate in
+// parseSSECTriple BEFORE the stored-KeyMD5 comparison → 400 InvalidArgument.
+func TestSSECGetShortKey(t *testing.T) {
+	h := newHarness(t)
+	h.mustStatus(h.doString("PUT", "/bkt", ""), 200)
+
+	key := makeKey(0x42)
+	algo, keyB64, keyMD5 := ssecHeaders(key)
+	h.mustStatus(h.doString("PUT", "/bkt/k", "payload",
+		"x-amz-server-side-encryption-customer-algorithm", algo,
+		"x-amz-server-side-encryption-customer-key", keyB64,
+		"x-amz-server-side-encryption-customer-key-MD5", keyMD5), 200)
+
+	short := make([]byte, 16)
+	shortB64 := base64.StdEncoding.EncodeToString(short)
+	sum := md5.Sum(short)
+	shortMD5 := base64.StdEncoding.EncodeToString(sum[:])
+	resp := h.doString("GET", "/bkt/k", "",
+		"x-amz-server-side-encryption-customer-algorithm", "AES256",
+		"x-amz-server-side-encryption-customer-key", shortB64,
+		"x-amz-server-side-encryption-customer-key-MD5", shortMD5)
+	h.mustStatus(resp, 400)
+	if body := h.readBody(resp); !strings.Contains(body, "InvalidArgument") {
+		t.Fatalf("expected InvalidArgument, got: %s", body)
 	}
 }
 

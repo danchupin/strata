@@ -94,7 +94,7 @@
         "Verify via a CI run on the cycle branch (integration-tagged, MinIO + KMS containers)."
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
