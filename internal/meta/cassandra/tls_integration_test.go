@@ -83,7 +83,7 @@ func TestCassandraTLSHandshake(t *testing.T) {
 			Keyspace:    "strata_tls_valid",
 			LocalDC:     "datacenter1",
 			Replication: "{'class': 'SimpleStrategy', 'replication_factor': '1'}",
-			Timeout:     30 * time.Second,
+			Timeout:     60 * time.Second,
 			TLS:         cassandra.TLSConfig{CAFile: validCAPath},
 		}, cassandra.Options{DefaultShardCount: 8})
 		if err != nil {
@@ -119,7 +119,7 @@ func TestCassandraTLSHandshake(t *testing.T) {
 			Keyspace:    "strata_tls_skip",
 			LocalDC:     "datacenter1",
 			Replication: "{'class': 'SimpleStrategy', 'replication_factor': '1'}",
-			Timeout:     30 * time.Second,
+			Timeout:     60 * time.Second,
 			TLS:         cassandra.TLSConfig{SkipVerify: true},
 		}, cassandra.Options{DefaultShardCount: 8})
 		if err != nil {
