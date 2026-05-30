@@ -23,6 +23,18 @@ S3-compatibility headline: **92.7% (165/178)** on the executable subset of `ceph
 These are not feature work. The codebase shipped a lot of surface in a short window; before
 adding more, prove what is there.
 
+- ~~**P1 — PublicAccessBlock failed open (never enforced at eval time).**~~ —
+  **Done.** US-005 (QA cycle) found the `PublicAccessBlock` config was pure CRUD —
+  `requireAccess` / `requireACL` (`internal/s3api/access.go`) never consulted it, so a
+  block silently failed open: a permissive bucket policy or public-read ACL still granted
+  anonymous access despite `RestrictPublicBuckets` / `IgnorePublicAcls` being set.
+  Fixed: `requireAccess` now suppresses an anonymous policy grant when
+  `RestrictPublicBuckets` is set, and `requireACL` disregards public ACL grants (canned
+  public-read/public-read-write + AllUsers group) when `IgnorePublicAcls` is set — block
+  wins. Enforcement matrix in `auth_public_access_matrix_test.go`. Surfaced a separate
+  pre-existing gap (R6): object access is an intersection of policy AND ACL gates, so a
+  bucket policy alone does not grant a non-owner anonymous GET (AWS treats them as a
+  union) — left for a follow-up.
 - ~~**P2 — Conditional GET `If-Match` did not suppress `If-Unmodified-Since`.**~~ —
   **Done.** US-002 (QA cycle) found `checkConditional` (`internal/s3api/conditional.go`)
   evaluated `If-Unmodified-Since` unconditionally, so `If-Match: <match>` +

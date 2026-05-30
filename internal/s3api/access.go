@@ -43,9 +43,11 @@ func (s *Server) loadBucketPolicy(r *http.Request, b *meta.Bucket) (*policy.Docu
 // pass-through; a side with a policy must Allow. Either side's Deny short
 // circuits to 403.
 func (s *Server) requireAccess(w http.ResponseWriter, r *http.Request, b *meta.Bucket, action, resourceARN string) bool {
-	if info := auth.FromContext(r.Context()); info != nil && info.FullAccess {
+	info := auth.FromContext(r.Context())
+	if info != nil && info.FullAccess {
 		return true // ModeOff dev posture — no data-plane authz.
 	}
+	anon := info != nil && info.IsAnonymous
 	doc, err := s.loadBucketPolicy(r, b)
 	if err != nil {
 		writeError(w, r, ErrInternal)
@@ -61,6 +63,20 @@ func (s *Server) requireAccess(w http.ResponseWriter, r *http.Request, b *meta.B
 		if decision != policy.Allow {
 			writeError(w, r, ErrAccessDenied)
 			return false
+		}
+		// An anonymous principal can only be granted by a public bucket
+		// policy. A PublicAccessBlock with RestrictPublicBuckets suppresses
+		// that grant — block wins over a permissive policy.
+		if anon {
+			pab, perr := s.effectivePublicAccessBlock(r, b)
+			if perr != nil {
+				writeError(w, r, ErrInternal)
+				return false
+			}
+			if pab != nil && pab.RestrictPublicBuckets {
+				writeError(w, r, ErrAccessDenied)
+				return false
+			}
 		}
 	}
 	if ap := accessPointFromContext(r.Context()); ap != nil && len(ap.Policy) > 0 {
@@ -106,9 +122,23 @@ func (s *Server) requireACL(w http.ResponseWriter, r *http.Request, b *meta.Buck
 	}
 	want := requiredPermForAction(action)
 
+	// A PublicAccessBlock with IgnorePublicAcls makes the data-plane gate
+	// disregard public ACL grants (canned public-read/public-read-write and
+	// the AllUsers group grant) for anonymous callers — block wins over a
+	// permissive ACL.
+	ignorePublic := false
+	if info != nil && info.IsAnonymous {
+		pab, perr := s.effectivePublicAccessBlock(r, b)
+		if perr != nil {
+			writeError(w, r, ErrInternal)
+			return false
+		}
+		ignorePublic = pab != nil && pab.IgnorePublicAcls
+	}
+
 	if action == "s3:GetObject" && key != "" {
 		if grants, err := s.Meta.GetObjectGrants(r.Context(), b.ID, key, ""); err == nil {
-			if grantsAllow(grants, info, want) {
+			if grantsAllow(grants, info, want, ignorePublic) {
 				return true
 			}
 			writeError(w, r, ErrAccessDenied)
@@ -117,14 +147,14 @@ func (s *Server) requireACL(w http.ResponseWriter, r *http.Request, b *meta.Buck
 	}
 
 	if grants, err := s.Meta.GetBucketGrants(r.Context(), b.ID); err == nil {
-		if grantsAllow(grants, info, want) {
+		if grantsAllow(grants, info, want, ignorePublic) {
 			return true
 		}
 		writeError(w, r, ErrAccessDenied)
 		return false
 	}
 
-	if cannedAllows(b.ACL, action, info) {
+	if cannedAllows(b.ACL, action, info, ignorePublic) {
 		return true
 	}
 	writeError(w, r, ErrAccessDenied)
@@ -141,11 +171,17 @@ func requiredPermForAction(action string) string {
 	return ""
 }
 
-func cannedAllows(canned, action string, info *auth.AuthInfo) bool {
+func cannedAllows(canned, action string, info *auth.AuthInfo, ignorePublic bool) bool {
 	switch canned {
 	case cannedPublicRead:
+		if ignorePublic {
+			return false
+		}
 		return action == "s3:GetObject" || action == "s3:ListBucket" || action == "s3:ListBucketVersions" || action == "s3:ListMultipartUploadParts"
 	case cannedPublicReadWrite:
+		if ignorePublic {
+			return false
+		}
 		return true
 	case cannedAuthenticatedRead:
 		if info == nil || info.IsAnonymous {
@@ -156,7 +192,7 @@ func cannedAllows(canned, action string, info *auth.AuthInfo) bool {
 	return false
 }
 
-func grantsAllow(grants []meta.Grant, info *auth.AuthInfo, want string) bool {
+func grantsAllow(grants []meta.Grant, info *auth.AuthInfo, want string, ignorePublic bool) bool {
 	if want == "" {
 		return false
 	}
@@ -164,7 +200,7 @@ func grantsAllow(grants []meta.Grant, info *auth.AuthInfo, want string) bool {
 		if !permissionCovers(g.Permission, want) {
 			continue
 		}
-		if granteeMatches(g, info) {
+		if granteeMatches(g, info, ignorePublic) {
 			return true
 		}
 	}
@@ -175,12 +211,12 @@ func permissionCovers(have, want string) bool {
 	return have == "FULL_CONTROL" || have == want
 }
 
-func granteeMatches(g meta.Grant, info *auth.AuthInfo) bool {
+func granteeMatches(g meta.Grant, info *auth.AuthInfo, ignorePublic bool) bool {
 	switch g.GranteeType {
 	case "Group":
 		switch g.URI {
 		case groupAllUsers:
-			return true
+			return !ignorePublic
 		case groupAuthenticatedUsers:
 			return info != nil && !info.IsAnonymous
 		}

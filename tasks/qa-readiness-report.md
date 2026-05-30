@@ -115,7 +115,7 @@ story; `—` = not yet started.
 | Dimension | Status | Stories | Evidence |
 |-----------|--------|---------|----------|
 | **Functional** | Baseline (near-ceiling) | s3-tests suite | `scripts/s3-tests/README.md` |
-| **Auth / security (adversarial)** | SigV4 + presigned + streaming done; US-005/006 pending | US-003, US-004, US-005, US-006 | US-003: `TestSigV4_AdversarialMatrix` (13 tamper classes) + `TestSigV4_ValidVariantsPass` (7 positive controls) in `internal/auth/sigv4_adversarial_test.go`. US-004: `TestPresigned_AdversarialMatrix` (expired / future / tampered-query / method-mismatch / tampered-path / tampered-SignedHeaders) + `TestPresigned_ValidVariantsPass` + `TestPresigned_ValidReplayWithinWindow` (documents replay-within-window is permitted, AWS parity) in `presigned_adversarial_test.go`; `TestStreamingReaderOutOfOrderChunkRejected` + `TestStreamingReaderTruncatedChunkDataRejected` in `streaming_adversarial_test.go` (chain-HMAC / trailer-checksum legs already in `streaming_test.go` + `streaming_trailer_test.go`) — no bug found (every class rejects with the exact sentinel + S3 code) |
+| **Auth / security (adversarial)** | SigV4 + presigned + streaming + anon/PAB done; US-006 pending | US-003, US-004, US-005, US-006 | US-003: `TestSigV4_AdversarialMatrix` (13 tamper classes) + `TestSigV4_ValidVariantsPass` (7 positive controls) in `internal/auth/sigv4_adversarial_test.go`. US-004: `TestPresigned_AdversarialMatrix` (expired / future / tampered-query / method-mismatch / tampered-path / tampered-SignedHeaders) + `TestPresigned_ValidVariantsPass` + `TestPresigned_ValidReplayWithinWindow` (documents replay-within-window is permitted, AWS parity) in `presigned_adversarial_test.go`; `TestStreamingReaderOutOfOrderChunkRejected` + `TestStreamingReaderTruncatedChunkDataRejected` in `streaming_adversarial_test.go` (chain-HMAC / trailer-checksum legs already in `streaming_test.go` + `streaming_trailer_test.go`) — no bug found. US-005: auth-mode × anon/signed × ACL/policy already in `auth_mode_test.go` / `policy_gate_test.go` / `acl_gate_test.go`; **new** `auth_public_access_matrix_test.go` (`TestPAB_RestrictPublicBuckets_OverridesAnonPolicy`, `TestPAB_IgnorePublicAcls_OverridesPublicReadACL`, `TestPAB_NonEvalFlagDoesNotBlock`, `TestPAB_AnonGetEnforcementMatrix`) — **bug found+fixed**: PublicAccessBlock was pure CRUD, never consulted by the data-plane gates → a block silently failed open. Now `requireAccess` honours `RestrictPublicBuckets` (suppresses anon policy grant) and `requireACL` honours `IgnorePublicAcls` (suppresses public ACL grant) |
 | **Concurrency / race** | — | US-007, US-008, US-012 | (pending) |
 | **Durability / fault-injection** | — | US-009, US-010, US-011 | (pending) |
 
@@ -132,7 +132,7 @@ reference** (not just filename). 43 handler files audited.
 | `access_log.go` | covered | `TestAccessLogPutWithLoggingEnabledWritesRow`, `TestAccessLogSubresourceOpDerivation` |
 | `access_point_routing.go` | covered | `TestAccessPointRouting_*` (7), `TestExtractAccessPointAlias` |
 | `access_points.go` | covered | `TestAccessPoints_RoundTripCRUD`, `TestAccessPoints_AnonymousDenied`, `TestAccessPoints_DoubleCreateConflict` |
-| `access.go` | covered | `TestPolicyGate_*`, `TestACLGate_*`, `TestAuthMode_*` |
+| `access.go` | covered | `TestPolicyGate_*`, `TestACLGate_*`, `TestAuthMode_*`, `TestPAB_*` (PAB override) |
 | `acl.go` | covered | `TestPutBucketACLBodyRoundTrip`, `TestGetBucketACLFallsBackToCanned`, `TestPutObjectACLBodyRoundTrip` |
 | `admin.go` | covered | `TestAdmin_*` (19: LifecycleTick, GCDrain, BucketInspect, ReplicateRetry, BucketReshard, IAMRotateAccessKey) |
 | `audit_query.go` | covered | `TestAuditFilterByBucket`, `TestAuditFilterByPrincipal`, `TestAuditPaginationRoundTrip` |
@@ -159,7 +159,7 @@ reference** (not just filename). 43 handler files audited.
 | `ownership.go` | covered | `TestOwnershipControlsCRUD`, `TestOwnershipControlsRejectsInvalid` |
 | `placement_ctx.go` | **thin** | `dataCtxForPut` exercised via `TestPutStampsManifestECParamsFromBucket` + `TestPutObjectDrainRefusedMapsTo503`. `drainingClusters`/`clusterStates`/`defaultPlacement` lack a direct matrix — concurrency/drain stories (US-009) exercise more. |
 | `policy.go` | covered | `TestBucketPolicyCRUD`, `TestBucketPolicyMalformed`, `TestPolicyGate_*` |
-| `public_access_block.go` | covered | `TestPublicAccessBlockCRUD` |
+| `public_access_block.go` | covered | `TestPublicAccessBlockCRUD`; eval-time enforcement `TestPAB_*` (US-005) |
 | `quota.go` | covered | `TestPutObjectPastBucketBytesQuotaRejected`, `TestMultipartCompletePastQuotaRejected` (10 quota tests) |
 | `replication.go` | covered | `TestBucketReplicationCRUD`, `TestReplicationPutEnqueuesRowAndPending`, `TestPutObjectReplicationStatusMatchPrefix` |
 | `restore.go` | covered | `TestRestoreObjectRoundTrip`, `TestRestoreObjectMalformedXML` |
@@ -190,6 +190,7 @@ Open risks tracked across the cycle. Severity mirrors `ROADMAP.md`
 | R3 | `placement_ctx.go` drain/cluster-state helpers thin on direct coverage. | P3 | US-009 |
 | R4 | `internal/data` (56.0%) and `internal/lifecycle` (56.0%) — lowest real coverage among hot-path logic packages; durability paths under-exercised. | P2 | US-011 |
 | R5 | Cassandra backend gated off per-PR CI — Paxos/LWT contention paths not on the gate (first-class in code, run locally only). | P2 (accepted) | US-013 verdict note |
+| R6 | Object-access gate is an **intersection** (`requireObjectAccess` = bucket-policy gate AND ACL gate). A bucket policy granting anonymous `s3:GetObject` to a non-owner does **not** grant access on its own — the ACL gate still denies when the ACL is private (AWS treats policy/ACL as a union). Surfaced by `TestPAB_AnonGetEnforcementMatrix/policy/no-pab` (403). Pre-existing; existing `TestPolicyGate_*` only pass because the in-memory harness owner-matches the anonymous identity. Not changed in US-005 (semantic shift, out of scope). | P2 | (to be scheduled) |
 
 ---
 

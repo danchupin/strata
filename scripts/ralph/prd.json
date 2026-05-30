@@ -80,7 +80,7 @@
         "Verify via a CI run on the cycle branch."
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
