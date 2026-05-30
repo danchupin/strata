@@ -475,6 +475,24 @@ heap-merges by clustering order (key ASC, version_id DESC). See `cassandra/store
 5. Add a Cassandra schema migration via `alterStatements` or a new entry in `tableDDL`.
 6. Tests: round-trip happy path, malformed body, not-configured 404. Bucket name `/bkt`.
 
+## Engineering rules (`.claude/rules/`)
+
+Consult these before writing tests or reviewing — they own the substance the
+caveman style does not:
+
+- `.claude/rules/test-discipline.md` — never weaken an assertion to go green (a
+  red test usually found a real bug — fix the source first, not the test); bug
+  fixes need red/green proof; every `t.Skip` cites a ROADMAP P-item or a concrete
+  env condition + reason (no bare/stale skips — re-validate when you touch the
+  area); table-driven canons (inputs-first, `expected`-prefixed, one concern per
+  case, name = intent); reuse harnesses (`newHarness`/`storetest`/`racetest`),
+  don't fork; CI (Linux) is the source of truth.
+- `.claude/rules/review.md` — severity-gate findings (blocking / suggestion / nit,
+  suppress nits unless asked); never silently drop a review aspect (name it);
+  Strata's high-value correctness lenses (LWT/CAS coherence, drain stop-write,
+  GC double-delete, concurrency, leaks, auth boundary); pre-launch = ignore
+  backwards-compat / rolling-upgrade / migration concerns (noise here).
+
 ## Commits and PRs
 
 - Subject is `<area>: <imperative summary>` (e.g. `s3api: implement DeleteObjects`).
