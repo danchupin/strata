@@ -169,6 +169,20 @@
         "Verify via a CI run on the cycle branch (unit + integration + e2e jobs)."
       ],
       "priority": 11,
+      "passes": true,
+      "notes": "Memory(default-tag) + MinIO(integration) durability half; RADOS half SPLIT to US-011b (FR-8). (1) Stale-skip FIXED: sse_object_test.go TestSSECorruptedCiphertext now t.Fatal (was t.Skip) when CorruptFirstChunk()==false -> the corruption assertion always RUNS on the memory default tag; the SSE AEAD open over the flipped ciphertext fails loud (non-2xx), never a silent 200. The 1 KiB AES256 PUT guarantees a non-empty ciphertext chunk so the hook returns true; the old skip only ever masked a missing chunk (a PUT regression). (2) NEW internal/data/memory/corruption_test.go: TestPutChunksPartialWriteCommitsNoManifest (reader errors mid-stream after ~9 MiB -> PutChunks returns errMidStream + NIL manifest; gateway persists the meta row only after a non-nil manifest, so no readable half-object lands -- AC2 partial-write rollback), TestPutChunksContextCancelCommitsNoManifest (pre-cancelled ctx -> context.Canceled + nil manifest), TestGetChunksZeroByteManifestReadsClean (control: empty object clean EOF, proves the fail-loud asserts detect real damage not everything). (3) NEW internal/data/s3/corruption_integration_test.go TestGetChunksMissingBackendObjectFailsLoud (//go:build integration, MinIO): PutChunks -> read-clean sanity -> admin DeleteObject the backing object -> GetChunks(0,size) fails loud with data.ErrNotFound (surfaces at open via GetChunks->GetRange), never a usable reader yielding a short silent body. Exercises the manifest-level GetChunks path the GET handler drives; does NOT duplicate the existing b.Get/b.GetRange missing-key tests. (4) AC3 ETag/size-mismatch ALREADY covered by racetest verifier.go checkReadAfterWrite (flags 'GET returned an etag/size pair the workload never PUT' over a backoff window) -- referenced in report, no code. NO bug found -- fail-loud invariants hold on both backends. memory + s3api green locally CGO_ENABLED=0; MinIO test vets -tags integration, runs on CI (FR-4 source of truth). SPLIT rationale: RADOS has no CorruptFirstChunk hook (NOTE forbids adding one) and the ceph-tagged module has a pre-existing go-ceph build break (cephimpl backend.go:288 goceph.OperationNoFlag) -> RADOS corruption is best developed against live-ceph CI in US-011b."
+    },
+    {
+      "id": "US-011b",
+      "title": "RADOS chunk-loss / corruption fail-loud (integration)",
+      "description": "As a QA engineer, I need the RADOS data plane proven to fail loud on a corrupted/missing chunk, completing the US-011 split (memory + MinIO landed in US-011).",
+      "acceptanceCriteria": [
+        "Integration test (`ceph && integration`) in internal/data/rados (or cephimpl): a missing/corrupted chunk on GetChunks returns an error (data.ErrNotFound / IO error), never a silently-truncated success body. No new corruption hook is added (NOTE) -- corrupt via the backend's own Delete / direct librados overwrite of a stored chunk OID; memory's CorruptFirstChunk is reused only on the default tag.",
+        "Mirror the US-011 MinIO shape: seed -> read-clean sanity -> destroy the backing chunk -> GetChunks fails loud.",
+        "Resolve (or file as a ROADMAP P-item) the pre-existing ceph-tagged build break `cephimpl backend.go:288 goceph.OperationNoFlag` if it blocks the test-rados job.",
+        "Verify via the CI ceph e2e job (`make test-rados`) -- librados, CI-only; not buildable on a macOS/lima box."
+      ],
+      "priority": 11.5,
       "passes": false,
       "notes": ""
     },
