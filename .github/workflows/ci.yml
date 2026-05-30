@@ -374,8 +374,8 @@ jobs:
           path: web/dist
       - run: go test -race ./...
 
-  integration-cassandra:
-    name: Integration tests (Cassandra via testcontainers)
+  integration:
+    name: Integration tests (TiKV + backends)
     runs-on: ubuntu-latest
     needs: web-build
     steps:
