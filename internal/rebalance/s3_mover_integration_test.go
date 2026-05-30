@@ -17,6 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/google/uuid"
+	"github.com/testcontainers/testcontainers-go"
 	tcminio "github.com/testcontainers/testcontainers-go/modules/minio"
 
 	"github.com/danchupin/strata/internal/data"
@@ -186,6 +187,9 @@ func startMinio(t *testing.T, ctx context.Context, ak, sk string) (*tcminio.Mini
 	container, err := tcminio.Run(ctx, "minio/minio:latest",
 		tcminio.WithUsername(ak),
 		tcminio.WithPassword(sk),
+		// SSE-S3 (AES256) auto-encryption needs a KMS secret key on recent
+		// minio images, else uploads 501 "KMS is not configured".
+		testcontainers.WithEnv(map[string]string{"MINIO_KMS_SECRET_KEY": "strata-test-key:OSMM+vkKUTCvQs9YL/CVMIMt43HFhkUpqJxTmGl6rYw="}),
 	)
 	if err != nil {
 		t.Fatalf("start minio: %v", err)
