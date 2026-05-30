@@ -153,8 +153,8 @@
         "Verify via a CI run on the cycle branch (integration + e2e jobs)."
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "TestRebalanceS3ConcurrentClientWrites (s3_mover_integration_test.go, MinIO x2) + chunk-based mirror TestRebalanceRADOSConcurrentClientWrites (rados_mover_integration_test.go, ceph&&integration). Both prove the mover CAS invariant under a racing client write: a client PUT rewrites the manifest locator on half the objects between plan emission and the mover's CAS -> buildUpdatedBackendManifest/buildUpdatedManifest sees br.Key/chunk.OID != plan SrcRef.OID -> ok=false -> CAS conflict -> mover's freshly-copied TARGET object discarded to GC, client's locator survives + body readable. Clean half moves normally: manifest->c2, body readable on c2, old c1 key in GC. GC accounting exact: 1 entry/object (clean->c1 source, raced->c2 loser), no leak, no double. Safety rails (refuse into draining/>90%-full target) ALREADY covered by worker_test.go (TestWorkerRefusesMovesIntoFullTarget 95%>0.90, TestWorkerSkipsDrainingTargetsAtPlanTime, TestWorkerMovesOutOfDrainingCluster, TestWorkerRefusesIntoDrainingDefenseInDepth) — NOT duplicated (safety rails are Worker.applySafetyRails; the mover receives an already-filtered plan). NO bug found — mover never clobbers a racing client write; CAS losers reclaimed. No production code changed. S3 test vets clean -tags integration (CGO0); RADOS test ceph&&integration (librados, CI-only). Verified on CI integration+e2e jobs (source of truth)."
     },
     {
       "id": "US-011",
