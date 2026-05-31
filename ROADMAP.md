@@ -66,7 +66,7 @@ adding more, prove what is there.
   `auth_public_access_matrix_test.go`: buckets now owned by a distinct principal so a genuine
   non-owner anon exercises the union (the old fixtures passed only because the anon caller
   owner-matched the anon-owned bucket); red/green proof — anon GET allowed by policy but denied
-  by a private ACL flipped 403 → 200, `TestPAB_*` + the policy/ACL matrices stay green.
+  by a private ACL flipped 403 → 200, `TestPAB_*` + the policy/ACL matrices stay green. (commit `92c3439`)
 - ~~**P2 — Conditional GET `If-Match` did not suppress `If-Unmodified-Since`.**~~ —
   **Done.** US-002 (QA cycle) found `checkConditional` (`internal/s3api/conditional.go`)
   evaluated `If-Unmodified-Since` unconditionally, so `If-Match: <match>` +
