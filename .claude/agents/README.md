@@ -5,6 +5,10 @@ but tuned to Strata's domain (S3 gateway over distributed TiKV/Cassandra metadat
 and RADOS/S3 data). They encode the gotchas from `CLAUDE.md` and the discipline in
 `.claude/rules/` so a review catches the bugs that actually bite this codebase.
 
+> Invoked via the `/review-strata` orchestrator skill (see
+> `.claude/skills/review-strata`), which CI's claude-review runs as a second pass
+> alongside the generic code-review.
+
 ## The set
 
 | Agent | Lens | When |
