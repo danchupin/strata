@@ -37,8 +37,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Cassandra transitional read/write: target-layout writes, union source+target reads (target wins collision), clear-both-shards overwrite/delete, widened LIST fan-out + cross-shard delete-marker suppression. Memory/TiKV no-op. Proof: caseReshardTransitionalKeySet + integration TestCassandraReshardTransitional + TestCassandraReshardDeleteMarkerNoResurrect."
     },
     {
       "id": "US-003",

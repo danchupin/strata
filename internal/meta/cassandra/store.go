@@ -192,17 +192,129 @@ func (s *Store) bucketShardCounts(ctx context.Context, bucketID uuid.UUID) (acti
 	return active, target, nil
 }
 
-// shardForKey resolves the active shard partition for (bucketID, key). The
-// steady-state read/delete/mutate addressing helper for US-001 — replaces the
-// 9 shardOf(key, s.defaultShard) sites. The reshard transitional model (route
-// writes to the target layout, union-read source+target) is layered on top in
-// US-002; this helper deliberately returns only the active layout.
-func (s *Store) shardForKey(ctx context.Context, bucketID uuid.UUID, key string) (int, error) {
-	active, _, err := s.bucketShardCounts(ctx, bucketID)
+// shardLayout resolves a key's active shard and, while a reshard is in flight,
+// its target shard (US-002 transitional model). `active` is fnv(key)%shard_count;
+// `target` is fnv(key)%shard_count_target while shard_count_target!=0, else -1.
+//
+// TWO-LAYOUT INVARIANT: a reshard has exactly two layouts in flight at once —
+// the source (fnv%active) and the target (fnv%target) — so a key's transitional
+// read/write/clear set is AT MOST TWO partitions, regardless of how many
+// power-of-two steps the target is above the source. This is what makes the
+// {active, target} pair sufficient here and objectFanCount = max(active,target)
+// a valid superset for the union scan.
+//
+// POWER-OF-TWO DOUBLING INVARIANT (meta.IsValidShardCount enforces power-of-two;
+// StartReshard rejects target<=source): for the canonical doubling case
+// targetCount = 2*activeCount, fnv%targetCount mod activeCount == fnv%activeCount,
+// so each old shard s maps to exactly {s, s+activeCount} — never a three-way
+// split. The US-003 rebalance worker relies on this clean s→{s, s+active}
+// mapping to move rows; the US-002 union read above does not, holding for any
+// power-of-two target.
+func (s *Store) shardLayout(ctx context.Context, bucketID uuid.UUID, key string) (active, target int, err error) {
+	a, t, err := s.bucketShardCounts(ctx, bucketID)
+	if err != nil {
+		return 0, 0, err
+	}
+	active = shardOf(key, a)
+	target = -1
+	if t > 0 {
+		target = shardOf(key, t)
+	}
+	return active, target, nil
+}
+
+// writeShardForKey returns the partition a write must land in and the set of
+// partitions an overwrite/delete must clear. During a reshard writes go to the
+// TARGET layout (so the post-flip active count addresses them without a move);
+// the clear set spans both source and target so an overwrite never strands a
+// stale source-layout row that union-read would surface as a duplicate. Steady
+// state: a single active partition (unchanged from US-001).
+func (s *Store) writeShardForKey(ctx context.Context, bucketID uuid.UUID, key string) (write int, clear []int, err error) {
+	active, target, err := s.shardLayout(ctx, bucketID, key)
+	if err != nil {
+		return 0, nil, err
+	}
+	if target < 0 || target == active {
+		return active, []int{active}, nil
+	}
+	return target, []int{target, active}, nil
+}
+
+// readShardsForKey returns the partitions a point read must probe, TARGET FIRST
+// so the target row wins on a (key, version_id) collision (US-002). targetShard
+// is the target partition (or -1 in steady state) so callers can identify it for
+// the newest-write tie-break. Steady state: the single active partition.
+func (s *Store) readShardsForKey(ctx context.Context, bucketID uuid.UUID, key string) (shards []int, targetShard int, err error) {
+	active, target, err := s.shardLayout(ctx, bucketID, key)
+	if err != nil {
+		return nil, -1, err
+	}
+	if target < 0 || target == active {
+		return []int{active}, -1, nil
+	}
+	return []int{target, active}, target, nil
+}
+
+// objectFanCount returns how many shard partitions the LIST / scan paths must
+// fan out across. During a reshard the target layout's partitions [0,target) are
+// a numeric SUPERSET of the source [0,active) — both layouts write into the same
+// `objects` table keyed by (bucket_id, shard) — so scanning [0, max(active,
+// target)) reads every row regardless of which layout placed it. Dedup by key
+// (ListObjects) / (key,version_id) (ListObjectVersions) collapses any
+// half-migrated duplicates; target rows carry the newer version and win.
+func (s *Store) objectFanCount(ctx context.Context, bucketID uuid.UUID) (int, error) {
+	active, target, err := s.bucketShardCounts(ctx, bucketID)
 	if err != nil {
 		return 0, err
 	}
-	return shardOf(key, active), nil
+	if target > active {
+		return target, nil
+	}
+	return active, nil
+}
+
+// latestAtShard resolves the "latest" row for a key within ONE shard, applying
+// the null-sentinel-vs-highest-version reconciliation GetObject needs (a
+// Suspended PUT writes a null-sentinel row that sorts LAST in version_id DESC,
+// so the LIMIT-1 query alone misses it). Returns nil (no error) when the shard
+// holds no row for the key.
+func (s *Store) latestAtShard(ctx context.Context, bucketID uuid.UUID, shard int, key string) (*meta.Object, error) {
+	latestByVersion, errA := s.scanObjectLimit1(ctx, bucketID, shard, key)
+	if errA != nil && !errors.Is(errA, meta.ErrObjectNotFound) {
+		return nil, errA
+	}
+	nullUUID, _ := versionToCQL(meta.NullVersionID)
+	nullRow, errB := s.scanObjectByVersion(ctx, bucketID, shard, key, nullUUID)
+	if errB != nil && !errors.Is(errB, meta.ErrObjectNotFound) {
+		return nil, errB
+	}
+	switch {
+	case latestByVersion != nil && nullRow != nil:
+		if !latestByVersion.IsNull && nullRow.Mtime.After(latestByVersion.Mtime) {
+			return nullRow, nil
+		}
+		return latestByVersion, nil
+	case latestByVersion != nil:
+		return latestByVersion, nil
+	case nullRow != nil:
+		return nullRow, nil
+	}
+	return nil, nil
+}
+
+// objLater reports whether candidate should replace the current cross-shard
+// winner: newer write time wins, and on an exact tie the target-layout row wins
+// (US-002 "target wins on (key, version_id) collision"). Mtime is the write-time
+// proxy — every PUT stamps time.Now, so the freshest write (which during a
+// reshard lands in the target layout) has the largest Mtime.
+func objLater(cand, cur *meta.Object, candTarget, curTarget bool) bool {
+	if cand.Mtime.After(cur.Mtime) {
+		return true
+	}
+	if cand.Mtime.Equal(cur.Mtime) && candTarget && !curTarget {
+		return true
+	}
+	return false
 }
 
 // bucketForShards loads a bucket by ID for shard resolution. Fast path uses the
@@ -567,7 +679,7 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 	if err != nil {
 		return err
 	}
-	shard, err := s.shardForKey(ctx, o.BucketID, o.Key)
+	shard, clearShards, err := s.writeShardForKey(ctx, o.BucketID, o.Key)
 	if err != nil {
 		return err
 	}
@@ -595,31 +707,48 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 	// contribute 0 bytes and 0 to object count — only non-marker rows count.
 	var prior *meta.Object
 	if !versioned {
-		p, err := s.scanObjectLimit1(ctx, o.BucketID, shard, o.Key)
-		if err != nil && !errors.Is(err, meta.ErrObjectNotFound) {
-			return err
+		// Read the prior row across every clear shard (during a reshard the prior
+		// row may live in the source layout while the new write lands in target)
+		// so the bucket_stats delta accounts for the replaced bytes, then DELETE
+		// from all clear shards so no stale source-layout row survives to be
+		// double-emitted by the union read.
+		for _, cs := range clearShards {
+			p, err := s.scanObjectLimit1(ctx, o.BucketID, cs, o.Key)
+			if err != nil && !errors.Is(err, meta.ErrObjectNotFound) {
+				return err
+			}
+			if p != nil && (prior == nil || p.Mtime.After(prior.Mtime)) {
+				prior = p
+			}
 		}
-		prior = p
-		if err := s.s.Query(
-			`DELETE FROM objects WHERE bucket_id=? AND shard=? AND key=?`,
-			gocqlUUID(o.BucketID), shard, o.Key,
-		).WithContext(ctx).Exec(); err != nil {
-			return err
+		for _, cs := range clearShards {
+			if err := s.s.Query(
+				`DELETE FROM objects WHERE bucket_id=? AND shard=? AND key=?`,
+				gocqlUUID(o.BucketID), cs, o.Key,
+			).WithContext(ctx).Exec(); err != nil {
+				return err
+			}
 		}
 	} else if o.IsNull {
 		// Suspended-mode null PUT: atomically drop any prior null-versioned
-		// row (LWT IF EXISTS — applied=false is fine, no prior null row).
+		// row (LWT IF EXISTS — applied=false is fine, no prior null row). During
+		// a reshard the prior null row may sit in the source layout, so probe and
+		// clear every clear shard.
 		nullUUID, _ := versionToCQL(meta.NullVersionID)
-		p, err := s.scanObjectByVersion(ctx, o.BucketID, shard, o.Key, nullUUID)
-		if err != nil && !errors.Is(err, meta.ErrObjectNotFound) {
-			return err
-		}
-		prior = p
-		if err := s.s.Query(
-			`DELETE FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=? IF EXISTS`,
-			gocqlUUID(o.BucketID), shard, o.Key, nullUUID,
-		).WithContext(ctx).Exec(); err != nil {
-			return err
+		for _, cs := range clearShards {
+			p, err := s.scanObjectByVersion(ctx, o.BucketID, cs, o.Key, nullUUID)
+			if err != nil && !errors.Is(err, meta.ErrObjectNotFound) {
+				return err
+			}
+			if p != nil {
+				prior = p
+			}
+			if err := s.s.Query(
+				`DELETE FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=? IF EXISTS`,
+				gocqlUUID(o.BucketID), cs, o.Key, nullUUID,
+			).WithContext(ctx).Exec(); err != nil {
+				return err
+			}
 		}
 	}
 	deltaBytes, deltaObjects := bucketStatsDelta(prior, o)
@@ -694,7 +823,9 @@ func nilIfEmpty(s string) interface{} {
 
 func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionID string) (*meta.Object, error) {
 	versionID = meta.ResolveVersionID(versionID)
-	shard, err := s.shardForKey(ctx, bucketID, key)
+	// US-002 transitional model: during a reshard a key's rows may be split
+	// across the source and target layouts. Probe both (target first) and merge.
+	shards, targetShard, err := s.readShardsForKey(ctx, bucketID, key)
 	if err != nil {
 		return nil, err
 	}
@@ -704,28 +835,24 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 		// writes a v1-zero null-sentinel row that sorts LAST in version_id DESC,
 		// so the LIMIT-1 query alone returns a stale prior real-timeuuid row
 		// even when the null row is the most recent write. (US-005 suspended-copy.)
-		latestByVersion, errA := s.scanObjectLimit1(ctx, bucketID, shard, key)
-		if errA != nil && !errors.Is(errA, meta.ErrObjectNotFound) {
-			return nil, errA
-		}
-		nullUUID, _ := versionToCQL(meta.NullVersionID)
-		nullRow, errB := s.scanObjectByVersion(ctx, bucketID, shard, key, nullUUID)
-		if errB != nil && !errors.Is(errB, meta.ErrObjectNotFound) {
-			return nil, errB
-		}
+		// latestAtShard does that reconciliation per shard; objLater then picks
+		// the newest across shards, target winning on a write-time tie.
 		var winner *meta.Object
-		switch {
-		case latestByVersion != nil && nullRow != nil:
-			if !latestByVersion.IsNull && nullRow.Mtime.After(latestByVersion.Mtime) {
-				winner = nullRow
-			} else {
-				winner = latestByVersion
+		winnerTarget := false
+		for _, sh := range shards {
+			w, err := s.latestAtShard(ctx, bucketID, sh, key)
+			if err != nil {
+				return nil, err
 			}
-		case latestByVersion != nil:
-			winner = latestByVersion
-		case nullRow != nil:
-			winner = nullRow
-		default:
+			if w == nil {
+				continue
+			}
+			isTarget := sh == targetShard
+			if winner == nil || objLater(w, winner, isTarget, winnerTarget) {
+				winner, winnerTarget = w, isTarget
+			}
+		}
+		if winner == nil {
 			return nil, meta.ErrObjectNotFound
 		}
 		if winner.IsDeleteMarker {
@@ -737,7 +864,19 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 	if perr != nil {
 		return nil, meta.ErrObjectNotFound
 	}
-	return s.scanObjectByVersion(ctx, bucketID, shard, key, vUUID)
+	// shards is target-first, so the first shard that holds this exact version
+	// is the target row — it wins on a (key, version_id) collision.
+	for _, sh := range shards {
+		o, err := s.scanObjectByVersion(ctx, bucketID, sh, key, vUUID)
+		if errors.Is(err, meta.ErrObjectNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		return o, nil
+	}
+	return nil, meta.ErrObjectNotFound
 }
 
 func (s *Store) scanObjectLimit1(ctx context.Context, bucketID uuid.UUID, shard int, key string) (*meta.Object, error) {
@@ -862,7 +1001,9 @@ func (s *Store) DeleteObjectNullReplacement(ctx context.Context, bucketID uuid.U
 
 func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versionID string, versioned bool) (*meta.Object, error) {
 	versionID = meta.ResolveVersionID(versionID)
-	shard, err := s.shardForKey(ctx, bucketID, key)
+	// US-002 transitional model: during a reshard the row may live in the source
+	// or target layout, so clear every candidate shard (DELETE is idempotent).
+	_, clearShards, err := s.writeShardForKey(ctx, bucketID, key)
 	if err != nil {
 		return nil, err
 	}
@@ -876,11 +1017,13 @@ func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versi
 		if err != nil {
 			return nil, err
 		}
-		if err := s.s.Query(
-			`DELETE FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
-			gocqlUUID(bucketID), shard, key, vUUID,
-		).WithContext(ctx).Exec(); err != nil {
-			return nil, err
+		for _, cs := range clearShards {
+			if err := s.s.Query(
+				`DELETE FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
+				gocqlUUID(bucketID), cs, key, vUUID,
+			).WithContext(ctx).Exec(); err != nil {
+				return nil, err
+			}
 		}
 		db, dc := bucketStatsDelta(o, nil)
 		if db != 0 || dc != 0 {
@@ -913,11 +1056,13 @@ func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versi
 	if err != nil {
 		return nil, err
 	}
-	if err := s.s.Query(
-		`DELETE FROM objects WHERE bucket_id=? AND shard=? AND key=?`,
-		gocqlUUID(bucketID), shard, key,
-	).WithContext(ctx).Exec(); err != nil {
-		return nil, err
+	for _, cs := range clearShards {
+		if err := s.s.Query(
+			`DELETE FROM objects WHERE bucket_id=? AND shard=? AND key=?`,
+			gocqlUUID(bucketID), cs, key,
+		).WithContext(ctx).Exec(); err != nil {
+			return nil, err
+		}
 	}
 	db, dc := bucketStatsDelta(o, nil)
 	if db != 0 || dc != 0 {
@@ -933,7 +1078,9 @@ func (s *Store) ListObjects(ctx context.Context, bucketID uuid.UUID, opts meta.L
 	if limit <= 0 || limit > 1000 {
 		limit = 1000
 	}
-	shardCount, _, err := s.bucketShardCounts(ctx, bucketID)
+	// Fan out across max(active, target) partitions so a reshard's union read
+	// sees both layouts (US-002). Steady state this is just the active count.
+	shardCount, err := s.objectFanCount(ctx, bucketID)
 	if err != nil {
 		return nil, err
 	}
@@ -996,6 +1143,15 @@ func (s *Store) ListObjects(ctx context.Context, bucketID uuid.UUID, opts meta.L
 		}
 		lastKey = obj.Key
 
+		// Delete-marker HEAD consumes the key but emits nothing: the marker is
+		// the newest version (heap version-time tiebreak put it first), so the
+		// object is deleted and must not be listed — nor contribute a common
+		// prefix. Setting lastKey above already suppresses any stale older
+		// version of this key from a sibling shard (US-002 union read).
+		if obj.IsDeleteMarker {
+			continue
+		}
+
 		if opts.Prefix != "" && !strings.HasPrefix(obj.Key, opts.Prefix) {
 			if obj.Key > opts.Prefix {
 				break
@@ -1035,7 +1191,9 @@ func (s *Store) ListObjectVersions(ctx context.Context, bucketID uuid.UUID, opts
 	if limit <= 0 || limit > 1000 {
 		limit = 1000
 	}
-	shardCount, _, err := s.bucketShardCounts(ctx, bucketID)
+	// Fan out across max(active, target) partitions so a reshard's union read
+	// sees both layouts (US-002). Steady state this is just the active count.
+	shardCount, err := s.objectFanCount(ctx, bucketID)
 	if err != nil {
 		return nil, err
 	}
@@ -1083,6 +1241,8 @@ func (s *Store) ListObjectVersions(ctx context.Context, bucketID uuid.UUID, opts
 	res := &meta.ListVersionsResult{}
 	seenPrefix := make(map[string]struct{})
 	var lastKey string
+	var dupKey, dupVersion string
+	haveDup := false
 	firstVersionForKey := true
 
 	for h.Len() > 0 {
@@ -1093,6 +1253,16 @@ func (s *Store) ListObjectVersions(ctx context.Context, bucketID uuid.UUID, opts
 		} else {
 			top.close()
 		}
+
+		// US-002 union read: a mid-migration copy can place the SAME
+		// (key, version_id) in both the source and target partitions. The heap
+		// orders (key ASC, version-time DESC) so identical pairs pop adjacently;
+		// drop the duplicate so a version is never double-emitted. No-op in
+		// steady state (each version lives in exactly one partition).
+		if haveDup && obj.Key == dupKey && obj.VersionID == dupVersion {
+			continue
+		}
+		dupKey, dupVersion, haveDup = obj.Key, obj.VersionID, true
 
 		if obj.Key != lastKey {
 			firstVersionForKey = true
@@ -1160,7 +1330,9 @@ func versionTimeKey(vid string) int64 {
 // (whose 1000-row hard cap makes it unfit for the race-harness verification
 // pass).
 func (s *Store) AllObjectVersions(ctx context.Context, bucketID uuid.UUID) ([]*meta.Object, error) {
-	shardCount, _, err := s.bucketShardCounts(ctx, bucketID)
+	// Fan out across max(active, target) partitions so a reshard's union read
+	// sees both layouts (US-002). Steady state this is just the active count.
+	shardCount, err := s.objectFanCount(ctx, bucketID)
 	if err != nil {
 		return nil, err
 	}
@@ -1224,6 +1396,21 @@ func (s *Store) AllObjectVersions(ctx context.Context, bucketID uuid.UUID) ([]*m
 		}
 		return versionTimeKey(out[i].VersionID) > versionTimeKey(out[j].VersionID)
 	})
+	// US-002 union read: a mid-migration copy can place the SAME (key,
+	// version_id) in both the source and target partitions. The sort puts those
+	// adjacent; collapse them so a version is counted once. No-op in steady
+	// state (each version lives in exactly one partition).
+	if len(out) > 1 {
+		deduped := out[:1]
+		for _, o := range out[1:] {
+			last := deduped[len(deduped)-1]
+			if o.Key == last.Key && o.VersionID == last.VersionID {
+				continue
+			}
+			deduped = append(deduped, o)
+		}
+		out = deduped
+	}
 	// Stamp IsLatest per key, mirroring GetObject's "latest" resolution
 	// (NOT just the version_id head): a Suspended PUT writes a null-sentinel
 	// row that sorts LAST in version_id DESC, so when the null row is the most
@@ -1465,8 +1652,21 @@ func (c *shardCursor) advance() bool {
 			continue
 		}
 		if isDeleteMark {
-			c.current = &meta.Object{Key: key, IsDeleteMarker: true}
-			continue
+			// Surface the delete-marker HEAD (with its real version_id + mtime)
+			// rather than swallowing it. US-002 union read: a key may be live in
+			// the source shard and delete-marked (newest) in the target shard;
+			// the marker must reach the merge heap so the version-time tiebreak
+			// sorts it ahead of the stale live row and the ListObjects loop can
+			// suppress the key. Steady state is unchanged — the loop skips a
+			// marker head exactly as the old cursor-swallow did, since both rows
+			// live in one shard and clustering-DESC already heads with the marker.
+			c.current = &meta.Object{
+				Key:            key,
+				VersionID:      versionFromCQL(versionID),
+				IsDeleteMarker: true,
+				Mtime:          mtime,
+			}
+			return true
 		}
 		m, _ := decodeManifest(manifestBlob)
 		c.current = &meta.Object{
@@ -1508,8 +1708,20 @@ func (s *Store) openShardCursor(ctx context.Context, bucketID uuid.UUID, shard i
 
 type cursorHeap []*shardCursor
 
-func (h cursorHeap) Len() int           { return len(h) }
-func (h cursorHeap) Less(i, j int) bool { return h[i].current.Key < h[j].current.Key }
+func (h cursorHeap) Len() int { return len(h) }
+func (h cursorHeap) Less(i, j int) bool {
+	if h[i].current.Key != h[j].current.Key {
+		return h[i].current.Key < h[j].current.Key
+	}
+	// Same-key tiebreak by v1-timeuuid TIME (newest first): during a reshard a
+	// key's latest may exist in both the source and target partitions (e.g. a
+	// versioned overwrite — old version in source, newer in target). The merge
+	// loop keeps the FIRST row popped per key, so the newer-version (target)
+	// row must sort ahead of the stale source row (US-002 union read). All
+	// versions of a key live in one partition in steady state, so this is a
+	// no-op there.
+	return versionTimeKey(h[i].current.VersionID) > versionTimeKey(h[j].current.VersionID)
+}
 func (h cursorHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
 func (h *cursorHeap) Push(x any)        { *h = append(*h, x.(*shardCursor)) }
 func (h *cursorHeap) Pop() any {
@@ -2014,20 +2226,11 @@ func (s *Store) ListPendingReplications(ctx context.Context, bucketID uuid.UUID,
 }
 
 func (s *Store) SetObjectReplicationStatus(ctx context.Context, bucketID uuid.UUID, key, versionID, status string) error {
-	shard, err := s.shardForKey(ctx, bucketID, key)
+	// resolveVersionID handles latest/explicit AND the source-vs-target shard a
+	// reshard split the row into (US-002).
+	vUUID, shard, err := s.resolveVersionID(ctx, bucketID, key, meta.ResolveVersionID(versionID))
 	if err != nil {
 		return err
-	}
-	if versionID == "" {
-		o, err := s.GetObject(ctx, bucketID, key, "")
-		if err != nil {
-			return err
-		}
-		versionID = o.VersionID
-	}
-	vUUID, err := versionToCQL(versionID)
-	if err != nil {
-		return meta.ErrObjectNotFound
 	}
 	return s.s.Query(
 		`UPDATE objects SET replication_status=? WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
@@ -2537,27 +2740,79 @@ func (s *Store) ListSlowQueries(ctx context.Context, since time.Duration, minMs 
 	return out, next, nil
 }
 
+// resolveVersionID returns the (version_id, shard) a point-mutate must address.
+// It is the single resolution funnel for every UPDATE/DELETE-by-version path
+// (SetObjectStorage, SetObjectTags, retention, legal-hold, replication, …), so
+// teaching it the US-002 transitional model fixes those paths at once: during a
+// reshard a row may live in the source OR target layout, so we probe both
+// (target first — it wins on a collision) and return the shard that actually
+// holds the row. Steady state is unchanged: a single active shard, no extra
+// probe for an explicit version.
 func (s *Store) resolveVersionID(ctx context.Context, bucketID uuid.UUID, key, versionID string) (gocql.UUID, int, error) {
-	shard, err := s.shardForKey(ctx, bucketID, key)
+	shards, targetShard, err := s.readShardsForKey(ctx, bucketID, key)
 	if err != nil {
 		return gocql.UUID{}, 0, err
 	}
+
 	if versionID != "" {
 		v, err := versionToCQL(versionID)
 		if err != nil {
 			return gocql.UUID{}, 0, meta.ErrObjectNotFound
 		}
-		return v, shard, nil
+		if len(shards) == 1 {
+			// Steady state: trust the active shard without an existence probe
+			// (preserves the pre-US-002 hot-path round-trip count).
+			return v, shards[0], nil
+		}
+		// Reshard: find which layout holds this exact version (target first).
+		for _, sh := range shards {
+			var got gocql.UUID
+			err := s.s.Query(
+				`SELECT version_id FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
+				gocqlUUID(bucketID), sh, key, v,
+			).WithContext(ctx).Scan(&got)
+			if err == nil {
+				return v, sh, nil
+			}
+			if !errors.Is(err, gocql.ErrNotFound) {
+				return gocql.UUID{}, 0, err
+			}
+		}
+		// Absent in both — address the target (write) layout so a follow-on
+		// write lands in the live layout. shards is target-first.
+		return v, shards[0], nil
 	}
-	var v gocql.UUID
-	err = s.s.Query(
-		`SELECT version_id FROM objects WHERE bucket_id=? AND shard=? AND key=? LIMIT 1`,
-		gocqlUUID(bucketID), shard, key,
-	).WithContext(ctx).Scan(&v)
-	if errors.Is(err, gocql.ErrNotFound) {
+
+	// Latest: probe each layout's LIMIT-1 head and pick the newest write,
+	// target winning on a tie (mirrors GetObject's cross-shard merge).
+	var (
+		best       gocql.UUID
+		bestShard  = -1
+		bestTime   int64
+		bestTarget bool
+	)
+	for _, sh := range shards {
+		var v gocql.UUID
+		err := s.s.Query(
+			`SELECT version_id FROM objects WHERE bucket_id=? AND shard=? AND key=? LIMIT 1`,
+			gocqlUUID(bucketID), sh, key,
+		).WithContext(ctx).Scan(&v)
+		if errors.Is(err, gocql.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return gocql.UUID{}, 0, err
+		}
+		tk := versionTimeKey(v.String())
+		isTarget := sh == targetShard
+		if bestShard == -1 || tk > bestTime || (tk == bestTime && isTarget && !bestTarget) {
+			best, bestShard, bestTime, bestTarget = v, sh, tk, isTarget
+		}
+	}
+	if bestShard == -1 {
 		return gocql.UUID{}, 0, meta.ErrObjectNotFound
 	}
-	return v, shard, err
+	return best, bestShard, nil
 }
 
 func (s *Store) SetObjectStorage(ctx context.Context, bucketID uuid.UUID, key, versionID, expectedClass, newClass string, manifest *data.Manifest) (bool, error) {
@@ -4251,20 +4506,12 @@ func (s *Store) ListAccessPoints(ctx context.Context, bucketID uuid.UUID) ([]*me
 }
 
 func (s *Store) UpdateObjectSSEWrap(ctx context.Context, bucketID uuid.UUID, key, versionID string, wrapped []byte, keyID string) error {
-	shard, err := s.shardForKey(ctx, bucketID, key)
+	// resolveVersionID resolves both "latest" ("") and an explicit version, AND
+	// the shard the row actually lives in (source or target during a reshard,
+	// US-002), so the UPDATE addresses the right partition.
+	vUUID, shard, err := s.resolveVersionID(ctx, bucketID, key, meta.ResolveVersionID(versionID))
 	if err != nil {
 		return err
-	}
-	if versionID == "" {
-		o, err := s.GetObject(ctx, bucketID, key, "")
-		if err != nil {
-			return err
-		}
-		versionID = o.VersionID
-	}
-	vUUID, err := versionToCQL(versionID)
-	if err != nil {
-		return meta.ErrObjectNotFound
 	}
 	return s.s.Query(
 		`UPDATE objects SET sse_key=?, sse_key_id=?
@@ -4291,19 +4538,9 @@ func (s *Store) UpdateMultipartUploadSSEWrap(ctx context.Context, bucketID uuid.
 // object version (US-049). When versionID is "" or "null" the latest row is
 // returned. Returns ErrObjectNotFound when no row matches.
 func (s *Store) GetObjectManifestRaw(ctx context.Context, bucketID uuid.UUID, key, versionID string) ([]byte, error) {
-	resolved := meta.ResolveVersionID(versionID)
-	if resolved == "" {
-		o, err := s.GetObject(ctx, bucketID, key, "")
-		if err != nil {
-			return nil, err
-		}
-		resolved = o.VersionID
-	}
-	vUUID, err := versionToCQL(resolved)
-	if err != nil {
-		return nil, meta.ErrObjectNotFound
-	}
-	shard, err := s.shardForKey(ctx, bucketID, key)
+	// resolveVersionID handles latest/explicit AND the source-vs-target shard a
+	// reshard split the row into (US-002).
+	vUUID, shard, err := s.resolveVersionID(ctx, bucketID, key, meta.ResolveVersionID(versionID))
 	if err != nil {
 		return nil, err
 	}
@@ -4325,19 +4562,9 @@ func (s *Store) GetObjectManifestRaw(ctx context.Context, bucketID uuid.UUID, ke
 // object version. The store does not validate the bytes; callers are
 // expected to pass a valid JSON or proto manifest blob.
 func (s *Store) UpdateObjectManifestRaw(ctx context.Context, bucketID uuid.UUID, key, versionID string, raw []byte) error {
-	resolved := meta.ResolveVersionID(versionID)
-	if resolved == "" {
-		o, err := s.GetObject(ctx, bucketID, key, "")
-		if err != nil {
-			return err
-		}
-		resolved = o.VersionID
-	}
-	vUUID, err := versionToCQL(resolved)
-	if err != nil {
-		return meta.ErrObjectNotFound
-	}
-	shard, err := s.shardForKey(ctx, bucketID, key)
+	// resolveVersionID handles latest/explicit AND the source-vs-target shard a
+	// reshard split the row into (US-002).
+	vUUID, shard, err := s.resolveVersionID(ctx, bucketID, key, meta.ResolveVersionID(versionID))
 	if err != nil {
 		return err
 	}

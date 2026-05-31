@@ -187,9 +187,18 @@ adding more, prove what is there.
   fixed** by `ralph/architecture-hardening` US-001: all 12 object-addressing sites (9 `shardOf` + 3 list/scan) now
   resolve the bucket's active `ShardCount` via a short-TTL `bucketShardCounts` cache (carries active + reshard target;
   `StartReshard` / `CompleteReshard` invalidate synchronously); steady-state non-default counts round-trip
-  (`caseNonDefaultShardRoundTrip` + integration `TestCassandraPerBucketShardResolution`, two-store red/green). Still
-  open in-cycle: the reshard transitional read/write model (US-002) + the worker that physically moves rows so
-  post-reshard point-GET hits the new layout (US-003) — until US-003 a 64→128 reshard 404s keys whose new shard ≥ 64.
+  (`caseNonDefaultShardRoundTrip` + integration `TestCassandraPerBucketShardResolution`, two-store red/green).
+  **US-002 (transitional read/write model) added:** while `shard_count_target != 0`, writes land in the TARGET layout
+  (`fnv%target`) and point reads + LIST union-read source ∪ target (`objectFanCount` widens the fan-out to
+  `max(active,target)`; `readShardsForKey` probes both, target-first, winning on a `(key,version_id)` collision;
+  `resolveVersionID` is the single funnel that teaches every UPDATE/DELETE-by-version path the same). Overwrites/deletes
+  clear BOTH layouts so no stale source row is double-emitted. Power-of-two doubling invariant documented in
+  `shardLayout` (target=2·active ⇒ each old shard s maps to {s, s+activeCount}, never a three-way split). Proof:
+  `caseReshardTransitionalKeySet` (cross-backend in-flight key-set stability, no-op on memory/TiKV) + integration
+  `TestCassandraReshardTransitional` (during-job writes land in the target layout and SURVIVE the post-flip rotation —
+  RED pre-US-002, GREEN after). Still open in-cycle: the worker that physically moves the un-rewritten source rows so a
+  premature/un-gated `CompleteReshard` can't strand them (US-003 — until then `CompleteReshard` must run only after the
+  worker's cleanup-before-flip).
 
 - ~~**P0/P1 — Cycle C: supply-chain-security (govulncheck + trivy + gosec CI gates + Dependabot + SECURITY.md + first release tag + SLSA L3 provenance + SPDX SBOM + cosign signing + license audit).**~~ — **Done.** Shipped via `ralph/supply-chain-security` cycle (US-001..US-011). 3 parallel CI scanners gated (govulncheck HIGH+CRITICAL / trivy CRITICAL / gosec MEDIUM); license audit gates banned licenses (forbidden + restricted classes). Dependabot weekly for Go × 2 + Actions + npm + Docker (patch-only auto-merge, grouped per ecosystem). SECURITY.md with 90-day SLA + GHSA-only disclosure. First release tag `v0.0.1-alpha.1` published; `ghcr.io/danchupin/strata` image signed via cosign keyless OIDC + SLSA L3 provenance + SPDX SBOM (slsa-framework/slsa-github-generator reusable workflow + anchore/sbom-action), all six release jobs green (run 26639369076). Operator verify recipe at /operate/image-verification.md with Kyverno + Sigstore Policy admission control examples. Composite smoke `make smoke-supply-chain` (`scripts/smoke-supply-chain.sh`) exercises every gate end-to-end. Pre-launch hard cutover — no behavior change. (commit `f22ab7e`)
 

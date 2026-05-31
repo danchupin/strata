@@ -56,6 +56,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"VersioningSuspendedReplaceNull", caseVersioningSuspendedReplaceNull},
 		{"AccessPointCRUD", caseAccessPointCRUD},
 		{"OnlineReshard", caseOnlineReshard},
+		{"ReshardTransitionalKeySet", caseReshardTransitionalKeySet},
 		{"NonDefaultShardRoundTrip", caseNonDefaultShardRoundTrip},
 		{"SampleBucketShardStats", caseSampleBucketShardStats},
 		{"ManifestRawRoundTrip", caseManifestRawRoundTrip},
@@ -2090,6 +2091,154 @@ func caseOnlineReshard(t *testing.T, s meta.Store) {
 	if _, err := s.StartReshard(ctx, b.ID, 7); err != meta.ErrReshardInvalidTarget {
 		t.Fatalf("non-power-of-two target: %v want ErrReshardInvalidTarget", err)
 	}
+}
+
+// caseReshardTransitionalKeySet proves the US-002 transitional read/write
+// contract: while a reshard is in flight (shard_count_target != 0) the store
+// serves a STABLE key set. Every key visible before the job started stays
+// visible throughout — no gaps, no duplicates — and writes that land during the
+// job (in the target layout on Cassandra) are immediately readable by both point
+// GET and LIST.
+//
+// On Cassandra the seeded keys live in the source layout (fnv%active) and the
+// post-flip writes land in the target layout (fnv%target); the union read must
+// dedup the two so a half-migrated key is never double-emitted nor missing, and
+// an overwrite during the job must win on the (key, version_id) collision. On
+// the shard-agnostic memory / TiKV backends (flat map / ordered scan) the
+// transitional model is a no-op, but the contract — the exact key set — must
+// still hold, which is what this case asserts identically on every backend.
+func caseReshardTransitionalKeySet(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "rshtrans", "o", "STANDARD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	put := func(key, etag string, size int64, versioned bool) {
+		o := &meta.Object{
+			BucketID: b.ID, Key: key,
+			StorageClass: "STANDARD", ETag: etag, Size: size,
+			Mtime:    time.Now().UTC(),
+			Manifest: &data.Manifest{Class: "STANDARD", Size: size},
+		}
+		if err := s.PutObject(ctx, o, versioned); err != nil {
+			t.Fatalf("put %s: %v", key, err)
+		}
+	}
+
+	// Seed the pre-flip key set. 200 keys is enough that, after doubling, fnv
+	// scatters roughly half of any rewritten keys into the new upper-half
+	// partitions on Cassandra — exercising the cross-layout union.
+	const preCount = 200
+	preKeys := make([]string, 0, preCount)
+	for i := 0; i < preCount; i++ {
+		key := "k" + padInt(i, 4)
+		preKeys = append(preKeys, key)
+		put(key, "pre", 1, false)
+	}
+
+	// Snapshot the pre-flip visible key set.
+	preSet := listKeySet(t, s, b.ID)
+	if len(preSet) != preCount {
+		t.Fatalf("pre-flip list: got %d keys want %d", len(preSet), preCount)
+	}
+
+	// Flip into the in-flight state.
+	bucket, _ := s.GetBucket(ctx, "rshtrans")
+	target := bucket.ShardCount * 2
+	if bucket.ShardCount <= 0 || !meta.IsValidShardCount(target) {
+		t.Fatalf("backend ShardCount must be a positive power of two, got %d", bucket.ShardCount)
+	}
+	if _, err := s.StartReshard(ctx, b.ID, target); err != nil {
+		t.Fatalf("start reshard: %v", err)
+	}
+	bucket, _ = s.GetBucket(ctx, "rshtrans")
+	if bucket.TargetShardCount != target {
+		t.Fatalf("target after start: got %d want %d", bucket.TargetShardCount, target)
+	}
+
+	// During the job: overwrite half the pre-flip keys (new value must win) and
+	// add fresh keys. On Cassandra these writes land in the target layout while
+	// the un-rewritten pre-flip rows remain in the source layout.
+	for i := 0; i < preCount; i += 2 {
+		put("k"+padInt(i, 4), "post", 2, false)
+	}
+	const addCount = 50
+	for i := 0; i < addCount; i++ {
+		key := "n" + padInt(i, 4)
+		put(key, "new", 3, false)
+	}
+
+	// LIST during the job: every pre-flip key still present, plus the new keys,
+	// each exactly once (no gaps, no duplicates).
+	gotSet := listKeySet(t, s, b.ID)
+	if len(gotSet) != preCount+addCount {
+		t.Fatalf("in-flight list: got %d keys want %d (gaps or duplicates)", len(gotSet), preCount+addCount)
+	}
+	for _, k := range preKeys {
+		if _, ok := gotSet[k]; !ok {
+			t.Fatalf("in-flight list dropped pre-flip key %q", k)
+		}
+	}
+	for i := 0; i < addCount; i++ {
+		k := "n" + padInt(i, 4)
+		if _, ok := gotSet[k]; !ok {
+			t.Fatalf("in-flight list missing new key %q", k)
+		}
+	}
+
+	// Point GET during the job: every pre-flip key resolves, overwritten keys
+	// return the NEW value (target wins on the (key, version_id) collision),
+	// untouched keys return the seed value.
+	for i := 0; i < preCount; i++ {
+		key := "k" + padInt(i, 4)
+		got, err := s.GetObject(ctx, b.ID, key, "")
+		if err != nil {
+			t.Fatalf("in-flight get %q: %v", key, err)
+		}
+		wantETag, wantSize := "pre", int64(1)
+		if i%2 == 0 {
+			wantETag, wantSize = "post", 2
+		}
+		if got.ETag != wantETag || got.Size != wantSize {
+			t.Fatalf("in-flight get %q: got etag=%q size=%d want %s/%d", key, got.ETag, got.Size, wantETag, wantSize)
+		}
+	}
+
+	// NOTE: CompleteReshard is intentionally NOT called here. US-002 defines the
+	// transitional model only; the actual row movement + cleanup-before-flip is
+	// US-003. Calling CompleteReshard now (no migration) would rotate the active
+	// count to the target and strand the un-rewritten source-layout rows on a
+	// real sharded backend. caseOnlineReshard covers the complete-rotation path;
+	// the post-flip survival of writes that land during a job (target layout) is
+	// proved discriminatingly in the Cassandra integration test
+	// TestCassandraReshardTransitional.
+}
+
+// listKeySet pages ListObjects to exhaustion and returns the visible key set,
+// failing the test if any key is emitted twice.
+func listKeySet(t *testing.T, s meta.Store, bucketID uuid.UUID) map[string]struct{} {
+	t.Helper()
+	ctx := context.Background()
+	set := make(map[string]struct{})
+	marker := ""
+	for {
+		res, err := s.ListObjects(ctx, bucketID, meta.ListOptions{Limit: 1000, Marker: marker})
+		if err != nil {
+			t.Fatalf("list (marker=%q): %v", marker, err)
+		}
+		for _, o := range res.Objects {
+			if _, dup := set[o.Key]; dup {
+				t.Fatalf("list emitted key %q twice", o.Key)
+			}
+			set[o.Key] = struct{}{}
+		}
+		if !res.Truncated {
+			break
+		}
+		marker = res.NextMarker
+	}
+	return set
 }
 
 // caseNonDefaultShardRoundTrip proves a bucket whose active ShardCount differs

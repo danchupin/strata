@@ -434,6 +434,22 @@ heap-merges by clustering order (key ASC, version_id DESC). See `cassandra/store
 `versionHeap` types. A new range-scan-capable backend (e.g. TiKV) would short-circuit this via the optional
 `RangeScanStore` interface (see ROADMAP).
 
+**Per-bucket shard resolution + reshard transitional model (US-001/US-002).** Every object-addressing site resolves the
+bucket's stored `ShardCount` via `bucketShardCounts` (short-TTL cache), NEVER the process-global `s.defaultShard` — a
+mismatch point-reads the wrong partition and 404s. While a reshard is in flight (`shard_count_target != 0`) the store
+runs a TWO-LAYOUT transitional model: writes land in the TARGET layout (`fnv%target`); point reads + LIST union-read
+source (`fnv%active`) ∪ target, target winning a `(key,version_id)` collision. Helpers: `shardLayout` /
+`writeShardForKey` (write + clear set) / `readShardsForKey` (probe set, target-first) / `objectFanCount`
+(`max(active,target)` for LIST) / `latestAtShard` / `objLater`. **`resolveVersionID` is the single point-mutate funnel
+— teach IT the source/target probe and every UPDATE/DELETE-by-version path inherits it.** Overwrites + deletes clear
+BOTH shards so no stale source row is double-emitted. **Delete-marker cross-shard gotcha:** `shardCursor.advance` MUST
+surface a delete-marker head (with real version/mtime), not swallow it — otherwise a key deleted in the target shard is
+resurrected by the older live row still in the source shard during a reshard; the `ListObjects` merge loop suppresses
+marker heads after setting `lastKey`. **`CompleteReshard` is a pure flip with no row movement (the US-003 rebalance
+worker does the migration + gates the flip behind cleanup-before-flip)** — calling it before migration strands
+un-rewritten diverging keys. Memory + TiKV are shard-agnostic (flat map / ordered scan) so the transitional model is a
+no-op there; the discriminating proof lives in Cassandra integration tests.
+
 ## S3-specific conventions in this repo
 
 - **Bucket names must be ≥3 chars, lowercase, DNS-safe.** `internal/s3api/validate.go: validBucketName` enforces this on

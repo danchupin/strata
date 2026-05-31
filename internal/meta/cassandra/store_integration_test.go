@@ -349,3 +349,296 @@ func shardOfKey(key string, n int) int {
 	_, _ = h.Write([]byte(key))
 	return int(h.Sum32() % uint32(n))
 }
+
+// TestCassandraReshardTransitional is the discriminating red/green proof for the
+// US-002 transitional read/write model on Cassandra (the storetest contract case
+// is a no-op on the shard-agnostic memory/TiKV backends).
+//
+// The headline guarantee: a write that lands DURING a reshard must go to the
+// TARGET layout so it survives the post-flip active-count rotation. We seed a
+// bucket at shard_count=8, StartReshard to 16, write keys whose source shard
+// (fnv%8) differs from their target shard (fnv%16), then CompleteReshard (which
+// rotates active→16) and GET them.
+//
+//   - WITH US-002: the during-job writes landed in the target layout (fnv%16), so
+//     the post-flip read addresses the right partition → GREEN.
+//   - WITHOUT US-002: writes went to the source layout (fnv%8); after the flip the
+//     read uses fnv%16 ≠ fnv%8 for the diverging keys → ErrObjectNotFound (RED).
+//
+// We also assert the in-flight union read: an overwrite during the job returns
+// the new value and lists exactly once (target wins the (key, version_id)
+// collision; the stale source row is never double-emitted). NOTE we do NOT
+// assert post-flip survival of un-rewritten pre-flip rows — US-002 has no
+// migration worker (US-003), so those rows remain physically in the source
+// layout; the worker is what gates CompleteReshard behind cleanup-before-flip.
+func TestCassandraReshardTransitional(t *testing.T) {
+	if os.Getenv("STRATA_SCYLLA_TEST") == "1" {
+		t.Skip("STRATA_SCYLLA_TEST=1: ScyllaDB suite runs in TestScyllaStoreContract")
+	}
+
+	ctx := context.Background()
+
+	container, err := tccassandra.Run(ctx, "cassandra:5.0")
+	if err != nil {
+		t.Fatalf("start cassandra: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := container.Terminate(context.Background()); err != nil {
+			t.Logf("terminate: %v", err)
+		}
+	})
+	host, err := container.ConnectionHost(ctx)
+	if err != nil {
+		t.Fatalf("connection host: %v", err)
+	}
+
+	const activeCount = 8
+	const targetCount = 16
+
+	store, err := cassandra.Open(cassandra.SessionConfig{
+		Hosts:       []string{host},
+		Keyspace:    "strata_reshard_trans",
+		LocalDC:     "datacenter1",
+		Replication: "{'class': 'SimpleStrategy', 'replication_factor': '1'}",
+		Timeout:     60 * time.Second,
+	}, cassandra.Options{DefaultShardCount: activeCount})
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	bucket, err := store.CreateBucket(ctx, "rsh-trans", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	if bucket.ShardCount != activeCount {
+		t.Fatalf("bucket shard_count: got %d want %d", bucket.ShardCount, activeCount)
+	}
+
+	put := func(key, etag string, size int64) {
+		o := &meta.Object{
+			BucketID: bucket.ID, Key: key,
+			StorageClass: "STANDARD", ETag: etag, Size: size,
+			Mtime:    time.Now().UTC(),
+			Manifest: &data.Manifest{Class: "STANDARD", Size: size},
+		}
+		if err := store.PutObject(ctx, o, false); err != nil {
+			t.Fatalf("put %s: %v", key, err)
+		}
+	}
+
+	// Seed pre-flip keys (source layout). Collect the ones whose source and
+	// target partitions diverge — those are the keys the bug strands post-flip.
+	const nKeys = 120
+	var diverging []string
+	for i := 0; i < nKeys; i++ {
+		key := fmt.Sprintf("obj-%03d", i)
+		put(key, "pre", 1)
+		if shardOfKey(key, activeCount) != shardOfKey(key, targetCount) {
+			diverging = append(diverging, key)
+		}
+	}
+	if len(diverging) < 4 {
+		t.Fatalf("only %d/%d keys diverge between active=%d and target=%d — test would be near-vacuous",
+			len(diverging), nKeys, activeCount, targetCount)
+	}
+	t.Logf("%d/%d keys address a different partition under target=%d vs active=%d",
+		len(diverging), nKeys, targetCount, activeCount)
+
+	// Flip into the in-flight state.
+	if _, err := store.StartReshard(ctx, bucket.ID, targetCount); err != nil {
+		t.Fatalf("start reshard: %v", err)
+	}
+
+	// During the job: overwrite a diverging pre-flip key. The new row lands in
+	// the target layout; the stale source row must be cleared so the union read
+	// neither double-emits nor returns the old value.
+	overwritten := diverging[0]
+	put(overwritten, "post", 2)
+
+	if got, err := store.GetObject(ctx, bucket.ID, overwritten, ""); err != nil {
+		t.Fatalf("in-flight get overwritten %s: %v", overwritten, err)
+	} else if got.ETag != "post" || got.Size != 2 {
+		t.Fatalf("in-flight get overwritten %s: got etag=%q size=%d want post/2", overwritten, got.ETag, got.Size)
+	}
+
+	// In-flight LIST: full set, every key exactly once (no gaps, no duplicates).
+	seen := make(map[string]int)
+	marker := ""
+	for {
+		res, err := store.ListObjects(ctx, bucket.ID, meta.ListOptions{Limit: 1000, Marker: marker})
+		if err != nil {
+			t.Fatalf("in-flight list (marker=%q): %v", marker, err)
+		}
+		for _, o := range res.Objects {
+			seen[o.Key]++
+		}
+		if !res.Truncated {
+			break
+		}
+		marker = res.NextMarker
+	}
+	if len(seen) != nKeys {
+		t.Fatalf("in-flight list: got %d distinct keys want %d", len(seen), nKeys)
+	}
+	for k, n := range seen {
+		if n != 1 {
+			t.Fatalf("in-flight list emitted key %q %d times — union read double-emitted a half-migrated key", k, n)
+		}
+	}
+
+	// Add a fresh diverging key during the job — it has no source-layout row at
+	// all, so it can only be found if writes go to the target layout AND reads
+	// probe it.
+	var newKey string
+	for i := nKeys; i < nKeys*4; i++ {
+		k := fmt.Sprintf("obj-%03d", i)
+		if shardOfKey(k, activeCount) != shardOfKey(k, targetCount) {
+			newKey = k
+			break
+		}
+	}
+	if newKey == "" {
+		t.Fatal("could not find a diverging fresh key")
+	}
+	put(newKey, "new", 3)
+	if got, err := store.GetObject(ctx, bucket.ID, newKey, ""); err != nil {
+		t.Fatalf("in-flight get new key %s: %v", newKey, err)
+	} else if got.ETag != "new" {
+		t.Fatalf("in-flight get new key %s: etag=%q want new", newKey, got.ETag)
+	}
+
+	// Complete the reshard — active count rotates to the target. (In production
+	// the rebalance worker calls this only after migrating every source row;
+	// here we drive it directly to prove the during-job writes survive the flip.)
+	if err := store.CompleteReshard(ctx, bucket.ID); err != nil {
+		t.Fatalf("complete reshard: %v", err)
+	}
+	flipped, err := store.GetBucket(ctx, "rsh-trans")
+	if err != nil {
+		t.Fatalf("get bucket post-complete: %v", err)
+	}
+	if flipped.ShardCount != targetCount || flipped.TargetShardCount != 0 {
+		t.Fatalf("post-complete layout: shard_count=%d target=%d want %d/0", flipped.ShardCount, flipped.TargetShardCount, targetCount)
+	}
+
+	// THE DISCRIMINATOR: the writes that landed during the job must survive the
+	// flip. They diverge (source shard != target shard), so pre-US-002 they were
+	// written to the source layout and the post-flip fnv%16 read misses them.
+	if got, err := store.GetObject(ctx, bucket.ID, overwritten, ""); err != nil {
+		t.Fatalf("post-flip get overwritten %s: %v (during-job write did not land in the target layout — US-002 transitional write regressed)", overwritten, err)
+	} else if got.ETag != "post" {
+		t.Fatalf("post-flip get overwritten %s: etag=%q want post", overwritten, got.ETag)
+	}
+	if got, err := store.GetObject(ctx, bucket.ID, newKey, ""); err != nil {
+		t.Fatalf("post-flip get new key %s: %v (during-job write did not land in the target layout)", newKey, err)
+	} else if got.ETag != "new" {
+		t.Fatalf("post-flip get new key %s: etag=%q want new", newKey, got.ETag)
+	}
+}
+
+// TestCassandraReshardDeleteMarkerNoResurrect proves the US-002 union read does
+// not resurrect a deleted object during a reshard. A versioned object live in
+// the SOURCE layout, then delete-marked DURING the job, has its marker land in
+// the TARGET layout (newest version). Because the source shard still holds the
+// older live version, a naive union read that swallows the cross-shard marker
+// would emit the stale live row and resurrect the object. The cursor must
+// surface the delete-marker head so the merge suppresses the key.
+//
+//   - GREEN: ListObjects omits the key; GetObject returns ErrObjectNotFound.
+//   - RED (cursor swallows the marker): the source shard's live row is listed and
+//     GET would return it — the object is resurrected.
+func TestCassandraReshardDeleteMarkerNoResurrect(t *testing.T) {
+	if os.Getenv("STRATA_SCYLLA_TEST") == "1" {
+		t.Skip("STRATA_SCYLLA_TEST=1: ScyllaDB suite runs in TestScyllaStoreContract")
+	}
+
+	ctx := context.Background()
+
+	container, err := tccassandra.Run(ctx, "cassandra:5.0")
+	if err != nil {
+		t.Fatalf("start cassandra: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := container.Terminate(context.Background()); err != nil {
+			t.Logf("terminate: %v", err)
+		}
+	})
+	host, err := container.ConnectionHost(ctx)
+	if err != nil {
+		t.Fatalf("connection host: %v", err)
+	}
+
+	const activeCount = 8
+	const targetCount = 16
+
+	store, err := cassandra.Open(cassandra.SessionConfig{
+		Hosts:       []string{host},
+		Keyspace:    "strata_reshard_delmarker",
+		LocalDC:     "datacenter1",
+		Replication: "{'class': 'SimpleStrategy', 'replication_factor': '1'}",
+		Timeout:     60 * time.Second,
+	}, cassandra.Options{DefaultShardCount: activeCount})
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	bucket, err := store.CreateBucket(ctx, "rsh-delmark", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	if err := store.SetBucketVersioning(ctx, "rsh-delmark", meta.VersioningEnabled); err != nil {
+		t.Fatalf("enable versioning: %v", err)
+	}
+
+	// Pick a key whose source (fnv%8) and target (fnv%16) shards diverge, so the
+	// live version and the delete marker land in different partitions.
+	var victim string
+	for i := 0; i < 10000; i++ {
+		k := fmt.Sprintf("del-%04d", i)
+		if shardOfKey(k, activeCount) != shardOfKey(k, targetCount) {
+			victim = k
+			break
+		}
+	}
+	if victim == "" {
+		t.Fatal("could not find a diverging key")
+	}
+
+	// Live version in the source layout (pre-reshard).
+	if err := store.PutObject(ctx, &meta.Object{
+		BucketID: bucket.ID, Key: victim,
+		StorageClass: "STANDARD", ETag: "live", Size: 1,
+		Mtime:    time.Now().UTC(),
+		Manifest: &data.Manifest{Class: "STANDARD", Size: 1},
+	}, true); err != nil {
+		t.Fatalf("put live version: %v", err)
+	}
+
+	if _, err := store.StartReshard(ctx, bucket.ID, targetCount); err != nil {
+		t.Fatalf("start reshard: %v", err)
+	}
+
+	// Delete during the job — the marker (newest version) lands in the target
+	// layout while the live version remains in the source layout.
+	if _, err := store.DeleteObject(ctx, bucket.ID, victim, "", true); err != nil {
+		t.Fatalf("delete during reshard: %v", err)
+	}
+
+	// ListObjects must NOT resurrect the deleted key.
+	res, err := store.ListObjects(ctx, bucket.ID, meta.ListOptions{Limit: 1000})
+	if err != nil {
+		t.Fatalf("list during reshard: %v", err)
+	}
+	for _, o := range res.Objects {
+		if o.Key == victim {
+			t.Fatalf("ListObjects resurrected deleted key %q during reshard (cross-shard delete marker swallowed)", victim)
+		}
+	}
+
+	// GetObject latest must report the object as gone.
+	if _, err := store.GetObject(ctx, bucket.ID, victim, ""); err != meta.ErrObjectNotFound {
+		t.Fatalf("get deleted key %q during reshard: got %v want ErrObjectNotFound", victim, err)
+	}
+}
