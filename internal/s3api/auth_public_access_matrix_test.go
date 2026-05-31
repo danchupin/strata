@@ -16,11 +16,12 @@ import (
 //
 // newHarness requests carry no Authorization header, so auth.FromContext
 // resolves to the anonymous identity (Owner="anonymous", IsAnonymous=true).
-// A bucket created with no X-Test-Principal is also owned by "anonymous", so
-// the requireACL owner-match short-circuits the ACL gate — that isolates the
-// POLICY gate (requireAccess) for the RestrictPublicBuckets assertions. To
-// exercise the ACL gate for the IgnorePublicAcls assertions the bucket is
-// owned by a DISTINCT principal so the anonymous caller is never the owner.
+// Every bucket here is owned by a DISTINCT principal so the anonymous caller is
+// never the owner — the requireACL owner-match never masks the assertion. That
+// matters under the US-008 policy-UNION-ACL gate: with an anon-owned bucket a
+// RestrictPublicBuckets suppression would fall through to the ACL gate and
+// owner-match the anon caller, hiding the block. A real non-owner anon keeps
+// the suppression visible.
 
 const (
 	pabPolicyAllowAnonGet = `{
@@ -49,9 +50,10 @@ const (
 // callers — block wins over the policy Allow.
 func TestPAB_RestrictPublicBuckets_OverridesAnonPolicy(t *testing.T) {
 	h := newHarness(t)
-	h.mustStatus(h.doString("PUT", "/bkt", ""), http.StatusOK)
-	h.mustStatus(h.doString("PUT", "/bkt/k", "hi"), http.StatusOK)
-	h.mustStatus(h.doString("PUT", "/bkt?policy", pabPolicyAllowAnonGet), http.StatusNoContent)
+	const owner = "owner-restrict"
+	h.mustStatus(h.doString("PUT", "/bkt", "", testPrincipalHeader, owner), http.StatusOK)
+	h.mustStatus(h.doString("PUT", "/bkt/k", "hi", testPrincipalHeader, owner), http.StatusOK)
+	h.mustStatus(h.doString("PUT", "/bkt?policy", pabPolicyAllowAnonGet, testPrincipalHeader, owner), http.StatusNoContent)
 
 	// Baseline: public policy grants anonymous GET.
 	h.mustStatus(h.doString("GET", "/bkt/k", ""), http.StatusOK)
@@ -117,7 +119,7 @@ func TestPAB_AnonGetEnforcementMatrix(t *testing.T) {
 		pab      string // "" means no PAB configured
 		wantCode int
 	}{
-		{"policy/no-pab", "policy", "", http.StatusForbidden},          // intersection gate: ACL gate denies non-owner anon
+		{"policy/no-pab", "policy", "", http.StatusOK},                 // union gate (US-008): policy Allow grants despite private ACL
 		{"policy/restrict-public", "policy", pabRestrictPublicBuckets, http.StatusForbidden},
 		{"acl/no-pab", "acl", "", http.StatusOK},
 		{"acl/ignore-public-acls", "acl", pabIgnorePublicAcls, http.StatusForbidden},

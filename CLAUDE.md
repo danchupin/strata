@@ -473,6 +473,15 @@ specific-version DELETE vs the copy window) named in `MigrateReshardKey` + ROADM
   `PUT /<bucket>`. Tests use `/bkt`, never `/b` — the latter rejects with 400 InvalidBucketName.
 - **Test harness:** `internal/s3api/testutil_test.go` exposes `newHarness(t)` returning a server hooked up to in-memory
   `data` + `meta`. Drive it with `h.doString(method, path, body, headers...)` and `h.mustStatus(resp, code)`.
+  **Auth-gate fixture gotcha:** a request with no `X-Test-Principal` resolves to the anonymous identity
+  (`Owner="anonymous"`); a bucket created the same way is ALSO owned by `"anonymous"`, so `requireACL`'s
+  owner-match short-circuits and silently masks the ACL/policy gate under test. To genuinely exercise a
+  non-owner path, own the bucket with a DISTINCT `X-Test-Principal` and issue the request as a real non-owner.
+- **Object access is policy-UNION-ACL** (AWS semantics, US-008): `requireObjectAccess` grants on an explicit
+  bucket-policy Allow regardless of the ACL, an explicit policy Deny always wins, and a neutral policy falls
+  back to the ACL gate. `RestrictPublicBuckets` suppresses an anon public-policy grant; access-point policy
+  stays an intersection gate on top. Use `policy.EvaluateExplicit` (not `Evaluate`) when you must tell a
+  neutral no-match apart from an explicit Allow/Deny — `Evaluate` collapses no-match into `Deny`.
 - **Conditional headers (RFC 7232) on GET** flow through `checkConditional` in `internal/s3api/conditional.go`. PUT-side
   `If-Match` / `If-None-Match` checks live inline in `putObject`.
 - **Lifecycle worker uses CAS on transition** via

@@ -49,9 +49,24 @@ adding more, prove what is there.
   `RestrictPublicBuckets` is set, and `requireACL` disregards public ACL grants (canned
   public-read/public-read-write + AllUsers group) when `IgnorePublicAcls` is set — block
   wins. Enforcement matrix in `auth_public_access_matrix_test.go`. Surfaced a separate
-  pre-existing gap (R6): object access is an intersection of policy AND ACL gates, so a
-  bucket policy alone does not grant a non-owner anonymous GET (AWS treats them as a
-  union) — left for a follow-up.
+  pre-existing gap (R6): object access was an intersection of policy AND ACL gates, so a
+  bucket policy alone did not grant a non-owner anonymous GET (AWS treats them as a
+  union) — closed by the R6 entry below.
+- ~~**P2 — Object access was policy-INTERSECT-ACL, not the AWS policy-UNION-ACL (QA-cycle R6).**~~ —
+  **Done.** US-008 (architecture-hardening). `requireObjectAccess`
+  (`internal/s3api/access.go`) gated object actions on policy AND ACL, so a bucket policy
+  granting `s3:GetObject` to a non-owner did not actually grant access when the object/bucket
+  ACL was private — diverging from AWS, where bucket policy and ACL form a UNION. Rewrote it to
+  AWS precedence: an explicit policy Deny wins; an explicit policy Allow grants regardless of
+  the ACL gate (subject to `RestrictPublicBuckets` suppression of a public-policy grant for
+  anonymous callers); a neutral policy falls back to the ACL gate. New
+  `policy.EvaluateExplicit` distinguishes explicit-Deny / explicit-Allow / neutral (plain
+  `Evaluate` collapsed no-match into Deny). Access-point policy stays an additional required
+  gate (intersection) layered on top. Fixture rework in `policy_gate_test.go` +
+  `auth_public_access_matrix_test.go`: buckets now owned by a distinct principal so a genuine
+  non-owner anon exercises the union (the old fixtures passed only because the anon caller
+  owner-matched the anon-owned bucket); red/green proof — anon GET allowed by policy but denied
+  by a private ACL flipped 403 → 200, `TestPAB_*` + the policy/ACL matrices stay green.
 - ~~**P2 — Conditional GET `If-Match` did not suppress `If-Unmodified-Since`.**~~ —
   **Done.** US-002 (QA cycle) found `checkConditional` (`internal/s3api/conditional.go`)
   evaluated `If-Unmodified-Since` unconditionally, so `If-Match: <match>` +

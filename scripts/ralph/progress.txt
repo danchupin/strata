@@ -226,3 +226,35 @@ Cycle: ralph/architecture-hardening
   - Versioned response shaping (delete_objects.go:124-132): request-VersionId echoed into entry.VersionID first; then if versioned && o.IsDeleteMarker -> DeleteMarker=true + DeleteMarkerVersionId=wireVersionID(o) (and VersionId stays the request value, "" for an unversioned-style delete); else if explicit versionId -> entry.VersionID=wireVersionID(o) (actual removed version). Deleting a delete-marker BY its versionId also yields a DeleteMarker=true row.
   - s3api package builds/tests locally under CGO_ENABLED=0 (does NOT pull gosigar): `CGO_ENABLED=0 go test ./internal/s3api/`. `make vet` (go vet ./...) still cgo-blocks locally — CI Linux is source of truth.
 ---
+
+## 2026-05-31 - US-008
+- Object access flipped from policy-INTERSECT-ACL to AWS policy-UNION-ACL (closes R6).
+- internal/auth/policy/policy.go: added EvaluateExplicit(doc,...) -> (allow, deny, err) so a
+  neutral no-match is distinguishable from explicit Allow/Deny (plain Evaluate collapses no-match
+  into Deny, which cannot drive a union).
+- internal/s3api/access.go: rewrote requireObjectAccess. Precedence: explicit policy Deny -> 403;
+  explicit policy Allow -> grant regardless of ACL (anon grant suppressed by RestrictPublicBuckets);
+  access-point policy stays a required intersection gate on top; neutral policy -> requireACL fallback.
+  No longer delegates to requireAccess (that stays intersection for bucket-level ListBucket).
+- Fixture rework: policy_gate_test.go + auth_public_access_matrix_test.go now own buckets via a
+  DISTINCT X-Test-Principal so a GENUINE non-owner anon exercises the union. Added direct cases for
+  owner-full-control and explicit-Deny-wins-over-owner.
+- Red/green proof: reverted access.go to HEAD, ran new tests -> FAIL (anon-allowed-by-policy/private-ACL
+  = 403, matrix policy/no-pab = 403); restored union impl -> PASS. Matrix cell policy/no-pab flipped 403->200.
+- ROADMAP R6 close-flipped; inline R6 follow-up note updated.
+- CGO_ENABLED=0 go test ./internal/s3api ./internal/auth/... PASS; go vet PASS. (local cgo/Xcode
+  blocks the default-tag build; CI Linux is source of truth.)
+- strata-correctness-reviewer: no blocking issues on the security-sensitive widening.
+
+**Learnings for future iterations:**
+- HARNESS OWNER-MATCH MASK: no X-Test-Principal => anon identity Owner="anonymous"; a bucket PUT the same
+  way is owned by "anonymous", so requireACL owner-match (info.Owner==b.Owner) trivially passes and HIDES
+  the gate under test. Any auth-gate test that means to exercise a non-owner MUST own the bucket with a
+  distinct principal. This silently made the old TestPolicyGate_* pass under intersection.
+- policy.Evaluate returns only Allow|Deny (no-match == Deny). For any UNION-style gate use the new
+  EvaluateExplicit to separate neutral from explicit Deny.
+- requireObjectAccess no longer calls requireAccess; if you add object-action authz, edit requireObjectAccess
+  directly (it inlines bucket-policy + RestrictPublicBuckets + access-point + ACL fallback).
+- Local default-tag build/test dies on Xcode license (runtime/cgo) and CGO_ENABLED=0 dies on gosigar/darwin;
+  scope tests to the changed packages with CGO_ENABLED=0 and lean on CI Linux.
+---
