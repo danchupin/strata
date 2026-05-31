@@ -47,18 +47,25 @@ jobs:
           plugins: 'code-review@claude-code-plugins'
           # Two complementary passes, posted as ONE review:
           #  1. the generic code-review plugin (broad correctness/reuse/efficiency),
-          #  2. our repo-local /review-strata skill, which orchestrates the
-          #     .claude/agents domain reviewers for this codebase's specific failure
-          #     modes (LWT/CAS coherence, drain stop-write, GC dual-write,
-          #     sentinel<->APIError, S3 parity). The skill + agents ship in the
-          #     checked-out repo's .claude/, so the action discovers them.
+          #  2. Strata's domain lenses, INLINED below.
+          # NOTE: claude-code-action sandboxes the PR's repo-local `.claude/`
+          # (preserved to `.claude-pr/`, NOT executed) as prompt-injection defence,
+          # so the `/review-strata` skill + `.claude/agents` CANNOT run in CI. The
+          # domain checklist is therefore inlined here as prompt text (executed by
+          # the action's own review agent). `/review-strata` stays for local/
+          # in-session review where repo `.claude/` is live. Keep the two in sync.
           prompt: |
-            Review pull request ${{ github.repository }}/pull/${{ github.event.pull_request.number }} with TWO complementary passes, then post the combined result as ONE PR review.
+            Review pull request ${{ github.repository }}/pull/${{ github.event.pull_request.number }} and post the findings as ONE PR review.
 
-            1. General pass — run the /code-review:code-review skill for ${{ github.repository }}/pull/${{ github.event.pull_request.number }} (broad correctness, reuse, efficiency).
-            2. Strata-domain pass — invoke the /review-strata skill on the same PR. It is repo-local (.claude/skills/review-strata) and fans out the .claude/agents reviewers (correctness, tests, s3-compat, errors) for failure modes the generic pass does not specialize in: LWT/CAS read-after-write coherence, the drain stop-write invariant, GC dual-write lockstep, the sentinel<->APIError mapping, and S3/AWS parity.
+            First run the /code-review:code-review skill for ${{ github.repository }}/pull/${{ github.event.pull_request.number }} (broad correctness, reuse, efficiency). THEN apply these Strata-domain lenses to the diff:
 
-            Merge both passes into a single review: dedupe overlapping findings, severity-gate to blocking/suggestion (suppress nits), and label each finding's source. Strata is pre-launch — do NOT raise backwards-compat, rolling-upgrade, or migration-backfill concerns.
+            - Correctness / distributed-meta: LWT/CAS read-after-write coherence — Cassandra: an UPDATE on a row read at quorum after an LWT INSERT must itself be LWT; TiKV: an RMW needing coherence uses a pessimistic txn, and any non-error early return inside a LockKeys txn MUST call txn.Rollback() or it leaks the lock / deadlocks. Drain stop-write: a PUT into a draining/evacuating cluster must return 503 DrainRefused + Retry-After:300, while reads/deletes/HEAD/in-flight-multipart keep working; multipart routing is recovered from BackendUploadID, never re-picked. Placement: bucket.Placement != nil must short-circuit BEFORE cluster weights. GC: each chunk deleted exactly once; the _by_cluster lookup tables dual-written in lockstep.
+            - Concurrency / leaks: mutex/goroutine/channel discipline; Close()/defer on every path including error paths; worker panic/lease-loss isolation.
+            - Tests: assert behaviour not implementation; a bug fix needs a red/green test (fails before, passes after); no assertion weakened just to go green; every t.Skip cites a ROADMAP P-item or a concrete env condition (flag stale skips); table-driven canons (inputs first, expected-prefixed, one concern per case).
+            - S3 / AWS parity: exact status codes (200/206/304/400/403/404/409/412/416/503); error responses via an s3api APIError; a new meta.Store sentinel that reaches clients needs a wired APIError; RFC 7232 conditional precedence pairs; Range suffix / zero-length edge cases; vhost prefix stripped only AFTER SigV4 verification.
+            - Errors: errors.Is/As across boundaries (not string compare — except the documented WriteAuthDenied switch, flag drift there); best-effort paths (audit/notify/access-log) never fail the request; the data plane fails LOUD — a corrupt/missing chunk or an ETag/size mismatch returns an error, never a silently-truncated 200.
+
+            Post ONE review: dedupe overlapping findings, severity-gate to blocking/suggestion (suppress nits), and label each finding's source. Strata is pre-launch — do NOT raise backwards-compat, rolling-upgrade, or migration-backfill concerns.
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
 
