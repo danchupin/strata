@@ -18,6 +18,7 @@ import (
 	"github.com/danchupin/strata/internal/meta"
 	"github.com/danchupin/strata/internal/meta/cassandra"
 	"github.com/danchupin/strata/internal/meta/storetest"
+	"github.com/danchupin/strata/internal/reshard"
 )
 
 // TestCassandraStoreContract runs the shared meta.Store contract against a
@@ -640,5 +641,213 @@ func TestCassandraReshardDeleteMarkerNoResurrect(t *testing.T) {
 	// GetObject latest must report the object as gone.
 	if _, err := store.GetObject(ctx, bucket.ID, victim, ""); err != meta.ErrObjectNotFound {
 		t.Fatalf("get deleted key %q during reshard: got %v want ErrObjectNotFound", victim, err)
+	}
+}
+
+// TestCassandraReshardWorkerMovesRows is the discriminating red/green proof for
+// US-003: the reshard worker must PHYSICALLY relocate each diverging row into the
+// target partition (and clean the source orphan) before CompleteReshard flips the
+// active count. Against the pre-US-003 skeleton (which only walked rows, never
+// moved them) the post-flip point-GET of a diverging key addresses the empty
+// target partition and 404s (RED). After US-003 the worker drives
+// MigrateReshardKey, the row lives in the target layout, and the read resolves
+// (GREEN).
+//
+// Coverage: a population of unversioned keys (the bulk discriminator) plus one
+// versioned key with three versions (every version moves together, ordering
+// preserved post-flip).
+func TestCassandraReshardWorkerMovesRows(t *testing.T) {
+	if os.Getenv("STRATA_SCYLLA_TEST") == "1" {
+		t.Skip("STRATA_SCYLLA_TEST=1: ScyllaDB suite runs in TestScyllaStoreContract")
+	}
+
+	ctx := context.Background()
+
+	container, err := tccassandra.Run(ctx, "cassandra:5.0")
+	if err != nil {
+		t.Fatalf("start cassandra: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := container.Terminate(context.Background()); err != nil {
+			t.Logf("terminate: %v", err)
+		}
+	})
+	host, err := container.ConnectionHost(ctx)
+	if err != nil {
+		t.Fatalf("connection host: %v", err)
+	}
+
+	const activeCount = 64
+	const targetCount = 128
+
+	store, err := cassandra.Open(cassandra.SessionConfig{
+		Hosts:       []string{host},
+		Keyspace:    "strata_reshard_worker",
+		LocalDC:     "datacenter1",
+		Replication: "{'class': 'SimpleStrategy', 'replication_factor': '1'}",
+		Timeout:     60 * time.Second,
+	}, cassandra.Options{DefaultShardCount: activeCount})
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	bucket, err := store.CreateBucket(ctx, "rsh-worker", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+
+	// Seed unversioned keys; track which diverge between active=64 and target=128.
+	const nKeys = 300
+	keys := make([]string, nKeys)
+	diverging := 0
+	for i := 0; i < nKeys; i++ {
+		keys[i] = fmt.Sprintf("obj-%04d", i)
+		if err := store.PutObject(ctx, &meta.Object{
+			BucketID: bucket.ID, Key: keys[i],
+			StorageClass: "STANDARD", ETag: fmt.Sprintf("etag-%04d", i), Size: int64(i + 1),
+			Mtime:    time.Now().UTC(),
+			Manifest: &data.Manifest{Class: "STANDARD", Size: int64(i + 1)},
+		}, false); err != nil {
+			t.Fatalf("put %s: %v", keys[i], err)
+		}
+		if shardOfKey(keys[i], activeCount) != shardOfKey(keys[i], targetCount) {
+			diverging++
+		}
+	}
+	if diverging < 16 {
+		t.Fatalf("only %d/%d keys diverge between active=%d and target=%d — test near-vacuous",
+			diverging, nKeys, activeCount, targetCount)
+	}
+	t.Logf("%d/%d unversioned keys diverge under target=%d vs active=%d", diverging, nKeys, targetCount, activeCount)
+
+	// One versioned key with three versions; choose a diverging one so the move
+	// is exercised. Versioning must be enabled before the writes.
+	if err := store.SetBucketVersioning(ctx, "rsh-worker", meta.VersioningEnabled); err != nil {
+		t.Fatalf("enable versioning: %v", err)
+	}
+	var verKey string
+	for i := 0; i < 100000; i++ {
+		k := fmt.Sprintf("ver-%05d", i)
+		if shardOfKey(k, activeCount) != shardOfKey(k, targetCount) {
+			verKey = k
+			break
+		}
+	}
+	if verKey == "" {
+		t.Fatal("could not find a diverging versioned key")
+	}
+	var verIDs []string
+	for v := 0; v < 3; v++ {
+		o := &meta.Object{
+			BucketID: bucket.ID, Key: verKey,
+			StorageClass: "STANDARD", ETag: fmt.Sprintf("v%d", v), Size: int64(10 + v),
+			Mtime:    time.Now().UTC(),
+			Manifest: &data.Manifest{Class: "STANDARD", Size: int64(10 + v)},
+		}
+		if err := store.PutObject(ctx, o, true); err != nil {
+			t.Fatalf("put version %d of %s: %v", v, verKey, err)
+		}
+		verIDs = append(verIDs, o.VersionID)
+	}
+
+	// Kick the reshard and drive the worker to completion.
+	if _, err := store.StartReshard(ctx, bucket.ID, targetCount); err != nil {
+		t.Fatalf("start reshard: %v", err)
+	}
+	worker, err := reshard.New(reshard.Config{Meta: store, BatchLimit: 50})
+	if err != nil {
+		t.Fatalf("worker new: %v", err)
+	}
+	stats, err := worker.RunOnce(ctx)
+	if err != nil {
+		t.Fatalf("worker run: %v", err)
+	}
+	if stats.JobsCompleted != 1 {
+		t.Fatalf("jobs completed: got %d want 1", stats.JobsCompleted)
+	}
+	// Only diverging keys move; each unversioned diverging key moves 1 row, the
+	// versioned diverging key moves all 3. A skeleton worker moves 0 (RED here too).
+	wantMoved := diverging + 3
+	if stats.ObjectsCopied != wantMoved {
+		t.Fatalf("rows moved: got %d want %d (diverging unversioned %d + 3 versions)", stats.ObjectsCopied, wantMoved, diverging)
+	}
+
+	// Active count flipped to the target; job removed.
+	flipped, err := store.GetBucket(ctx, "rsh-worker")
+	if err != nil {
+		t.Fatalf("get bucket post-complete: %v", err)
+	}
+	if flipped.ShardCount != targetCount || flipped.TargetShardCount != 0 {
+		t.Fatalf("post-complete layout: shard_count=%d target=%d want %d/0", flipped.ShardCount, flipped.TargetShardCount, targetCount)
+	}
+	if _, err := store.GetReshardJob(ctx, bucket.ID); err != meta.ErrReshardNotFound {
+		t.Fatalf("post-reshard job lookup: %v", err)
+	}
+
+	// THE DISCRIMINATOR: every key must be reachable via post-flip point-GET. The
+	// diverging keys' rows were physically moved into shards [64,128); without the
+	// move they would 404 here.
+	for i, k := range keys {
+		got, err := store.GetObject(ctx, bucket.ID, k, "")
+		if err != nil {
+			t.Fatalf("post-flip get %s: %v (row not moved to the target partition — reshard worker did not migrate rows)", k, err)
+		}
+		if got.ETag != fmt.Sprintf("etag-%04d", i) {
+			t.Fatalf("post-flip get %s: etag=%q want etag-%04d", k, got.ETag, i)
+		}
+	}
+
+	// LIST emits each unversioned key exactly once (no duplicate from a stranded
+	// source orphan).
+	seen := make(map[string]int)
+	marker := ""
+	for {
+		res, err := store.ListObjects(ctx, bucket.ID, meta.ListOptions{Limit: 1000, Marker: marker})
+		if err != nil {
+			t.Fatalf("post-flip list (marker=%q): %v", marker, err)
+		}
+		for _, o := range res.Objects {
+			seen[o.Key]++
+		}
+		if !res.Truncated {
+			break
+		}
+		marker = res.NextMarker
+	}
+	for _, k := range keys {
+		if seen[k] != 1 {
+			t.Fatalf("post-flip list emitted unversioned key %q %d times — stranded source orphan double-emitted", k, seen[k])
+		}
+	}
+
+	// Versioned key: all three versions moved together, reachable by version id,
+	// and ListObjectVersions emits each exactly once in newest-first order.
+	for v, vid := range verIDs {
+		got, err := store.GetObject(ctx, bucket.ID, verKey, vid)
+		if err != nil {
+			t.Fatalf("post-flip get %s version %s (v%d): %v (versioned row not moved)", verKey, vid, v, err)
+		}
+		if got.ETag != fmt.Sprintf("v%d", v) {
+			t.Fatalf("post-flip get %s version %d: etag=%q want v%d", verKey, v, got.ETag, v)
+		}
+	}
+	if got, err := store.GetObject(ctx, bucket.ID, verKey, ""); err != nil {
+		t.Fatalf("post-flip get latest %s: %v", verKey, err)
+	} else if got.ETag != "v2" {
+		t.Fatalf("post-flip latest %s: etag=%q want v2 (latest-version ordering not preserved)", verKey, got.ETag)
+	}
+	vres, err := store.ListObjectVersions(ctx, bucket.ID, meta.ListOptions{Prefix: verKey, Limit: 1000})
+	if err != nil {
+		t.Fatalf("post-flip list versions: %v", err)
+	}
+	verCount := 0
+	for _, o := range vres.Versions {
+		if o.Key == verKey {
+			verCount++
+		}
+	}
+	if verCount != 3 {
+		t.Fatalf("post-flip versioned key %q: got %d versions want 3", verKey, verCount)
 	}
 }

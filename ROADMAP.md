@@ -196,9 +196,17 @@ adding more, prove what is there.
   `shardLayout` (target=2·active ⇒ each old shard s maps to {s, s+activeCount}, never a three-way split). Proof:
   `caseReshardTransitionalKeySet` (cross-backend in-flight key-set stability, no-op on memory/TiKV) + integration
   `TestCassandraReshardTransitional` (during-job writes land in the target layout and SURVIVE the post-flip rotation —
-  RED pre-US-002, GREEN after). Still open in-cycle: the worker that physically moves the un-rewritten source rows so a
-  premature/un-gated `CompleteReshard` can't strand them (US-003 — until then `CompleteReshard` must run only after the
-  worker's cleanup-before-flip).
+  RED pre-US-002, GREEN after). **US-003 (worker physically moves rows + cleanup-before-flip) added:** Cassandra
+  implements the optional `meta.ReshardMigrator` (`MigrateReshardKey` relocates every version row of a key from its
+  source shard to its target shard via `INSERT … IF NOT EXISTS` — never clobbering a newer concurrent target write —
+  then deletes the source orphan; idempotent + crash-safe). `internal/reshard`'s `runJob` walks the in-flight union read
+  key-by-key, drives `MigrateReshardKey` per key under a `LastKey` watermark, and only after every diverging row is moved
+  + its source orphan deleted does `RunOnce` call the LWT `CompleteReshard` flip (`IF EXISTS`). Shard-agnostic backends
+  (memory, TiKV) don't implement the interface → immediate-complete no-op. Proof: integration
+  `TestCassandraReshardWorkerMovesRows` (64→128, 300 unversioned + one 3-version key; post-flip every key point-GETs,
+  LIST emits each once, all 3 versions reachable in order — RED against the row-walking skeleton that 404s the diverging
+  half, GREEN after) + worker unit tests via a recording `meta.ReshardMigrator` fake (dedup-per-key + watermark resume).
+  This entry's P1 is now **fully fixed** for the steady-state + transitional + physical-move path.
 
 - ~~**P0/P1 — Cycle C: supply-chain-security (govulncheck + trivy + gosec CI gates + Dependabot + SECURITY.md + first release tag + SLSA L3 provenance + SPDX SBOM + cosign signing + license audit).**~~ — **Done.** Shipped via `ralph/supply-chain-security` cycle (US-001..US-011). 3 parallel CI scanners gated (govulncheck HIGH+CRITICAL / trivy CRITICAL / gosec MEDIUM); license audit gates banned licenses (forbidden + restricted classes). Dependabot weekly for Go × 2 + Actions + npm + Docker (patch-only auto-merge, grouped per ecosystem). SECURITY.md with 90-day SLA + GHSA-only disclosure. First release tag `v0.0.1-alpha.1` published; `ghcr.io/danchupin/strata` image signed via cosign keyless OIDC + SLSA L3 provenance + SPDX SBOM (slsa-framework/slsa-github-generator reusable workflow + anchore/sbom-action), all six release jobs green (run 26639369076). Operator verify recipe at /operate/image-verification.md with Kyverno + Sigstore Policy admission control examples. Composite smoke `make smoke-supply-chain` (`scripts/smoke-supply-chain.sh`) exercises every gate end-to-end. Pre-launch hard cutover — no behavior change. (commit `f22ab7e`)
 
@@ -566,6 +574,15 @@ Non-goals:
 
 ## Known latent bugs
 
+- **P2 — Cassandra reshard migration vs a concurrent specific-version DELETE can resurrect that version.** The US-003
+  reshard mover (`MigrateReshardKey`) copies a key's rows source→target then deletes the source orphan (copy-first, so
+  the US-002 union read never sees a gap). A client `DELETE ?versionId=v` landing AFTER the mover's source read but
+  BEFORE its target `INSERT … IF NOT EXISTS` resurrects `v` in the target: the client cleared both layouts on an empty
+  target, then the mover's insert re-creates it. Window is microseconds and only during an active reshard. The
+  alternative (delete-source-first) would open a worse window where the key is in NEITHER partition, violating the
+  stable-key-set guarantee. Closing it for real needs cross-partition atomicity Cassandra lacks (e.g. a per-key move
+  lease or a tombstone the mover honours). Operator guidance: prefer a low-traffic window for reshard; US-005's
+  concurrent-write smoke stresses the common paths. (`ralph/architecture-hardening` US-003)
 - ~~**P1 — `TestRaceMixedOpsCassandra` consistency-invariant violation (`AllObjectVersions` IsLatest).**~~ — **Fixed.** Root cause was NOT a backend race: `AllObjectVersions` re-sorted rows in Go with a **lexical** version_id string compare to pick each key's IsLatest head, but v1 timeuuid strings are not chronological (the low 32 time bits lead the string and wrap ~every 429s) — so a stale version got flagged latest, diverging from `GetObject` + Cassandra's native timeuuid clustering. Fix: `versionTimeKey()` sorts by parsed timeuuid TIME; null-row mtime reconciliation retained; `versionHeap.Less` hardened to the same order. Reproduced locally at `RACE_WORKERS=64 RACE_KEYS=2`, green 3× after fix; the `TestRaceMixedOpsCassandra` CI variant (s3api package) passes. (`ralph/ci-green-speedup` cycle)
 - ~~**P2 — e2e compose + e2e-full CI jobs red (full-stack runtime).**~~ — **Fixed.** Both rooted in TiKV never bootstrapping in CI: the tikv container FATAL-crash-looped on `nofile` (65536 < required 123880, GitHub-runner cap), so every gateway write hit NOT_BOOTSTRAPPED → smoke `PUT bucket` 500 (compose) / notify aws read-timeout (full). Fix: `ulimits.nofile=1048576` on the tikv compose service + the readyz TiKV probe now does a real key read (not just GetTimestamp, which succeeds while NOT_BOOTSTRAPPED) so `until /readyz` actually waits for writability. Also fixed the signed-smoke readiness loop using `curl -s` (no `-f`) → broke out on a 502 during the strata-a/b force-recreate; now `-sf`. e2e compose + e2e-full both green in CI.
 - **P2 — Cassandra integration tests gated off per-PR CI (TiKV is the tested default).** The Cassandra `meta.Store` LWT/Paxos contract round-trips (`TestCassandraStoreContract/*RoundTrip`, `GCQueueShardFanOut`, `VersioningSuspendedReplaceNull`) hang for the full gocql timeout on the resource-constrained GitHub runner — Cassandra is JVM-heavy and these Paxos ops starve where TiKV does not (they pass in ~17s locally). `internal/meta/cassandra` is excluded from the per-PR Integration `go test` for now; the backend-agnostic surface stays covered via the storetest contract on TiKV + memory. Re-enable via a dedicated/nightly job with a beefier runner or per-test resource limits, or root-cause the Cassandra-container starvation (heap cap / readiness). Cassandra remains first-class in code. (`ralph/ci-green-speedup` cycle)

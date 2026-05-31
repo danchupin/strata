@@ -445,10 +445,17 @@ source (`fnv%active`) ∪ target, target winning a `(key,version_id)` collision.
 BOTH shards so no stale source row is double-emitted. **Delete-marker cross-shard gotcha:** `shardCursor.advance` MUST
 surface a delete-marker head (with real version/mtime), not swallow it — otherwise a key deleted in the target shard is
 resurrected by the older live row still in the source shard during a reshard; the `ListObjects` merge loop suppresses
-marker heads after setting `lastKey`. **`CompleteReshard` is a pure flip with no row movement (the US-003 rebalance
-worker does the migration + gates the flip behind cleanup-before-flip)** — calling it before migration strands
-un-rewritten diverging keys. Memory + TiKV are shard-agnostic (flat map / ordered scan) so the transitional model is a
-no-op there; the discriminating proof lives in Cassandra integration tests.
+marker heads after setting `lastKey`. **`CompleteReshard` is a pure flip with no row movement** — the `internal/reshard`
+worker (`runJob`) does the physical migration and gates the flip behind cleanup-before-flip: calling `CompleteReshard`
+before migration strands un-rewritten diverging keys. **US-003 row mover (Cassandra):** the worker walks the in-flight
+union read key-by-key and drives the optional `meta.ReshardMigrator.MigrateReshardKey` (Cassandra-only) per key, which
+relocates every version row of the key from its source shard to its target shard via `INSERT … IF NOT EXISTS` (never
+clobbers a newer concurrent target write) then deletes the source orphan (idempotent + crash-safe under a `LastKey`
+watermark). `RunOnce` calls `CompleteReshard` only after the walk drains, so the source layout holds no diverging row at
+flip time. Memory + TiKV are shard-agnostic (flat map / ordered scan) — they don't implement `ReshardMigrator`, so the
+worker moves nothing (immediate-complete no-op) and the transitional model is a no-op there; the discriminating proof
+lives in Cassandra integration tests (`TestCassandraReshardWorkerMovesRows`). Narrow known race (concurrent
+specific-version DELETE vs the copy window) named in `MigrateReshardKey` + ROADMAP.
 
 ## S3-specific conventions in this repo
 

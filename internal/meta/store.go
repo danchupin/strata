@@ -1418,6 +1418,31 @@ type RangeScanStore interface {
 	ScanObjects(ctx context.Context, bucketID uuid.UUID, opts ListOptions) (*ListResult, error)
 }
 
+// ReshardMigrator is the optional capability implemented by meta backends whose
+// physical layout pins a key to a partition derived from the shard count — i.e.
+// Cassandra's sharded `objects` table, where an object lives in
+// (bucket_id, fnv(key)%shard_count). During an online reshard the reshard worker
+// calls MigrateReshardKey for every key of the bucket to physically relocate its
+// rows from the source layout (fnv%active) to the target layout (fnv%target)
+// BEFORE CompleteReshard flips the active count — without the move, a post-flip
+// point-read of a diverging key addresses an empty partition and 404s.
+//
+// Range-scan (TiKV) and flat-map (memory) backends are shard-agnostic: a key's
+// physical placement does not depend on the bucket's shard count, so a reshard
+// moves nothing. They deliberately do NOT implement this interface, and the
+// worker treats a non-implementing store as an immediate-complete no-op (the key
+// set is identical before, during, and after — see US-004).
+type ReshardMigrator interface {
+	// MigrateReshardKey relocates every stored version row of key from its
+	// source shard to its target shard for the in-flight reshard on bucketID,
+	// then deletes the source orphans, and returns the number of rows moved.
+	// Returns 0 when no reshard is in flight or the key does not diverge.
+	// Idempotent + crash-safe: a re-run after a partial move converges, never
+	// clobbers a newer concurrent write already in the target, and never deletes
+	// a row the target does not already hold.
+	MigrateReshardKey(ctx context.Context, bucketID uuid.UUID, key string) (moved int, err error)
+}
+
 func IsVersioningActive(state string) bool {
 	return state == VersioningEnabled || state == VersioningSuspended
 }

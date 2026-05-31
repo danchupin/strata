@@ -55,8 +55,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Cassandra implements optional meta.ReshardMigrator (MigrateReshardKey): relocates every version row of a key src-shard→dst-shard via INSERT … IF NOT EXISTS (MapScanCAS; never clobbers a newer concurrent target write) then deletes the source orphan — idempotent + crash-safe. New helpers scanAllVersionsAtShard + insertObjectRowAtShard (full-column copy, mirrors PutObject INSERT exactly, NO bucket_stats bump) + objectSelectCols const (scanObjectLimit1/scanObjectByVersion refactored onto it). internal/reshard/runJob rewritten: walks the in-flight union ListObjectVersions key-by-key, drives MigrateReshardKey per distinct key (dedup via lastMigrated) under a LastKey watermark with a forward-progress guard (inclusive marker + over-large-key), accumulates moved rows; RunOnce flips via LWT CompleteReshard ONLY after the walk drains (cleanup-before-flip). Memory/TiKV don't implement the interface → immediate-complete no-op (0 moved). Red/green proof: integration TestCassandraReshardWorkerMovesRows (64→128, 300 unversioned + one 3-version key; post-flip every key point-GETs, LIST emits each once, all 3 versions reachable in order — RED against the row-walking skeleton that 404s the diverging half). Worker unit tests use a recordingStore meta.ReshardMigrator fake (dedup-per-key + watermark resume stay meaningful + green on memory). strata-correctness-reviewer: no blocking issues, all 5 verifications pass. Narrow known race (concurrent specific-version DELETE vs copy window) named in code + ROADMAP P2. make vet + reshard/memory/s3api suites green locally CGO_ENABLED=0; cassandra leg integration/CI."
     },
     {
       "id": "US-004",

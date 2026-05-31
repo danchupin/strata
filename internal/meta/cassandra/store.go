@@ -881,10 +881,7 @@ func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionI
 
 func (s *Store) scanObjectLimit1(ctx context.Context, bucketID uuid.UUID, shard int, key string) (*meta.Object, error) {
 	q := s.s.Query(
-		`SELECT version_id, is_latest, is_delete_marker, size, etag, content_type,
-		        storage_class, mtime, manifest, user_meta, tags,
-		        retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
-		        cache_control, expires, parts_count, sse_key, sse_key_id, replication_status, part_sizes, checksum_type, is_null
+		`SELECT `+objectSelectCols+`
 		 FROM objects WHERE bucket_id=? AND shard=? AND key=? LIMIT 1`,
 		gocqlUUID(bucketID), shard, key,
 	).WithContext(ctx)
@@ -893,10 +890,7 @@ func (s *Store) scanObjectLimit1(ctx context.Context, bucketID uuid.UUID, shard 
 
 func (s *Store) scanObjectByVersion(ctx context.Context, bucketID uuid.UUID, shard int, key string, vUUID gocql.UUID) (*meta.Object, error) {
 	q := s.s.Query(
-		`SELECT version_id, is_latest, is_delete_marker, size, etag, content_type,
-		        storage_class, mtime, manifest, user_meta, tags,
-		        retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
-		        cache_control, expires, parts_count, sse_key, sse_key_id, replication_status, part_sizes, checksum_type, is_null
+		`SELECT `+objectSelectCols+`
 		 FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
 		gocqlUUID(bucketID), shard, key, vUUID,
 	).WithContext(ctx)

@@ -9,11 +9,14 @@
 // union of the active and target layouts so clients see the same key set
 // throughout — that union read is the responsibility of the meta backend.
 //
-// The memory backend's storage is shard-agnostic (a flat map per bucket),
-// so the worker pass against memory is a state-machine exercise: it
-// iterates ListObjectVersions to bound the scan with LastKey watermarks,
-// then calls CompleteReshard. Cassandra's per-row partition rewrite lands
-// on top of this skeleton in a follow-up story.
+// The memory and TiKV backends are shard-agnostic (a flat map / a single
+// ordered range scan), so a key's physical placement does not depend on the
+// shard count: the worker pass against them moves no rows and is an
+// immediate-complete state-machine exercise that walks ListObjectVersions to
+// bound the scan with LastKey watermarks, then calls CompleteReshard. Cassandra
+// implements meta.ReshardMigrator and the worker drives MigrateReshardKey per
+// key to physically rewrite each row into the target partition (cleanup of the
+// source orphan inline) before the flip — US-003.
 package reshard
 
 import (
@@ -32,6 +35,9 @@ import (
 type Stats struct {
 	JobsScanned   int
 	JobsCompleted int
+	// ObjectsCopied is the number of rows physically relocated into the target
+	// shard layout (sum of MigrateReshardKey moves). Zero on shard-agnostic
+	// backends (memory, TiKV) — they have nothing to move.
 	ObjectsCopied int
 }
 
@@ -116,39 +122,68 @@ func (w *Worker) RunOnce(ctx context.Context) (Stats, error) {
 	return stats, nil
 }
 
-// runJob walks every object version of the bucket and persists a watermark
-// after each batch so a crash resumes from LastKey.
+// runJob walks every object key of the bucket under the in-flight union read and
+// physically relocates each key's rows from the source shard layout to the target
+// layout, persisting a LastKey watermark after each batch so a crash resumes from
+// where it stopped. The row move is delegated to the backend's optional
+// meta.ReshardMigrator (Cassandra's sharded objects table); shard-agnostic
+// backends (memory, TiKV) don't implement it, so the walk moves nothing and the
+// caller proceeds straight to CompleteReshard — the immediate-complete no-op.
+//
+// Cleanup-before-flip: MigrateReshardKey copies a key's rows into the target and
+// deletes the source orphans inline, so once this walk drains every key the
+// source layout holds no diverging row. RunOnce only then calls CompleteReshard —
+// flipping the active count before the orphans were cleaned would let the
+// post-flip listing double-emit a moved key. Returns the number of rows moved.
 func (w *Worker) runJob(ctx context.Context, job *meta.ReshardJob) (int, error) {
 	if job == nil {
 		return 0, nil
 	}
-	copied := 0
+	migrator, _ := w.cfg.Meta.(meta.ReshardMigrator)
+	moved := 0
 	cursor := job.LastKey
+	lastMigrated := "" // last key handed to the migrator — dedups a key's versions
 	for {
 		if ctx.Err() != nil {
-			return copied, ctx.Err()
+			return moved, ctx.Err()
 		}
+		startMarker := cursor
 		opts := meta.ListOptions{Limit: w.cfg.BatchLimit, Marker: cursor}
 		res, err := w.cfg.Meta.ListObjectVersions(ctx, job.BucketID, opts)
 		if err != nil {
-			return copied, err
+			return moved, err
 		}
 		if len(res.Versions) == 0 {
 			break
 		}
 		for _, v := range res.Versions {
-			copied++
+			if migrator != nil && v.Key != lastMigrated {
+				n, err := migrator.MigrateReshardKey(ctx, job.BucketID, v.Key)
+				if err != nil {
+					return moved, err
+				}
+				moved += n
+				lastMigrated = v.Key
+			}
 			cursor = v.Key
 		}
 		job.LastKey = cursor
 		if err := w.cfg.Meta.UpdateReshardJob(ctx, job); err != nil {
-			return copied, err
+			return moved, err
 		}
 		if !res.Truncated {
 			break
 		}
+		// Forward-progress guard: the version-marker (key >= marker) is inclusive
+		// and the union read does not resume mid-key, so a key with more versions
+		// than one page would pin the marker on itself forever. MigrateReshardKey
+		// already moved ALL of that key's versions on first sight, so stepping the
+		// marker just past it is safe and guarantees termination.
+		if cursor == startMarker {
+			cursor += "\x00"
+		}
 	}
-	return copied, nil
+	return moved, nil
 }
 
 // StartReshard is a thin wrapper for callers that don't want to import

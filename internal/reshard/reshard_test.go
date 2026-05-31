@@ -3,8 +3,11 @@ package reshard_test
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
@@ -12,8 +15,38 @@ import (
 	"github.com/danchupin/strata/internal/reshard"
 )
 
+// recordingStore wraps a shard-agnostic backend (memory) with a
+// meta.ReshardMigrator that records which keys the worker asks to migrate and
+// reports one row moved per key. Memory itself does NOT implement
+// ReshardMigrator (a reshard moves nothing on a flat map), so this fake is the
+// in-package stand-in for a partition-rewriting backend (Cassandra) — it lets
+// the worker tests assert the orchestration (walk every key, dedup a key's
+// versions, resume from the watermark) deterministically without a container.
+// The discriminating physical-move proof lives in the Cassandra integration
+// suite (TestCassandraReshardWorkerMovesRows).
+type recordingStore struct {
+	meta.Store
+	mu       sync.Mutex
+	migrated []string
+}
+
+func (r *recordingStore) MigrateReshardKey(_ context.Context, _ uuid.UUID, key string) (int, error) {
+	r.mu.Lock()
+	r.migrated = append(r.migrated, key)
+	r.mu.Unlock()
+	return 1, nil
+}
+
+func (r *recordingStore) keys() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.migrated))
+	copy(out, r.migrated)
+	return out
+}
+
 func TestReshardWorkerCompletes1000Objects(t *testing.T) {
-	store := memory.New()
+	store := &recordingStore{Store: memory.New()}
 	ctx := context.Background()
 
 	b, err := store.CreateBucket(ctx, "bkt", "owner", "STANDARD")
@@ -73,8 +106,13 @@ func TestReshardWorkerCompletes1000Objects(t *testing.T) {
 	if stats.JobsCompleted != 1 {
 		t.Fatalf("jobs completed: %d", stats.JobsCompleted)
 	}
-	if stats.ObjectsCopied < 1000 {
-		t.Fatalf("objects copied: %d", stats.ObjectsCopied)
+	// The worker must drive MigrateReshardKey for every distinct key exactly
+	// once (versions of a key dedup to a single call), so all 1000 keys move.
+	if stats.ObjectsCopied != 1000 {
+		t.Fatalf("objects copied: got %d want 1000", stats.ObjectsCopied)
+	}
+	if migrated := store.keys(); len(migrated) != 1000 {
+		t.Fatalf("migrate calls: got %d want 1000 (a key's versions must dedup to one call)", len(migrated))
 	}
 
 	got, _ = store.GetBucket(ctx, "bkt")
@@ -111,7 +149,7 @@ func TestReshardRejectsInvalidTarget(t *testing.T) {
 }
 
 func TestReshardResumesFromWatermark(t *testing.T) {
-	store := memory.New()
+	store := &recordingStore{Store: memory.New()}
 	ctx := context.Background()
 	b, _ := store.CreateBucket(ctx, "bkt", "o", "STANDARD")
 	for i := 0; i < 50; i++ {
@@ -137,8 +175,16 @@ func TestReshardResumesFromWatermark(t *testing.T) {
 	if stats.JobsCompleted != 1 {
 		t.Fatalf("jobs: %d", stats.JobsCompleted)
 	}
+	// Resume from the "k-25" watermark must skip the already-migrated prefix
+	// k-00..k-24 — the worker only hands keys at or after the watermark to the
+	// migrator, so fewer than half move.
 	if stats.ObjectsCopied >= 50 {
 		t.Fatalf("resume should skip already-copied keys: copied=%d", stats.ObjectsCopied)
+	}
+	for _, k := range store.keys() {
+		if k < "k-25" {
+			t.Fatalf("resume migrated key %q before the watermark k-25 — watermark not honoured", k)
+		}
 	}
 }
 
