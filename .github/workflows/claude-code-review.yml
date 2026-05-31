@@ -41,7 +41,20 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+          # Two complementary passes, posted as ONE review:
+          #  1. the generic code-review plugin (broad correctness/reuse/efficiency),
+          #  2. our repo-local /review-strata skill, which orchestrates the
+          #     .claude/agents domain reviewers for this codebase's specific failure
+          #     modes (LWT/CAS coherence, drain stop-write, GC dual-write,
+          #     sentinel<->APIError, S3 parity). The skill + agents ship in the
+          #     checked-out repo's .claude/, so the action discovers them.
+          prompt: |
+            Review pull request ${{ github.repository }}/pull/${{ github.event.pull_request.number }} with TWO complementary passes, then post the combined result as ONE PR review.
+
+            1. General pass — run the /code-review:code-review skill for ${{ github.repository }}/pull/${{ github.event.pull_request.number }} (broad correctness, reuse, efficiency).
+            2. Strata-domain pass — invoke the /review-strata skill on the same PR. It is repo-local (.claude/skills/review-strata) and fans out the .claude/agents reviewers (correctness, tests, s3-compat, errors) for failure modes the generic pass does not specialize in: LWT/CAS read-after-write coherence, the drain stop-write invariant, GC dual-write lockstep, the sentinel<->APIError mapping, and S3/AWS parity.
+
+            Merge both passes into a single review: dedupe overlapping findings, severity-gate to blocking/suggestion (suppress nits), and label each finding's source. Strata is pre-launch — do NOT raise backwards-compat, rolling-upgrade, or migration-backfill concerns.
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
 

@@ -113,9 +113,9 @@ pass-rate against the upstream Ceph `s3-tests` suite and the deliberate gaps.
 | `GetBucketPolicy` | `internal/s3api/policy.go:35` | — | 404 `NoSuchBucketPolicy` when unset (AWS parity). |
 | `PutBucketPolicy` | `internal/s3api/policy.go:12` | — | JSON body validated for required `Version` + `Statement` fields. |
 | `DeleteBucketPolicy` | `internal/s3api/policy.go:55` | — | Idempotent. |
-| `GetPublicAccessBlock` | `internal/s3api/public_access_block.go:43` | — | |
-| `PutPublicAccessBlock` | `internal/s3api/public_access_block.go:20` | — | |
-| `DeletePublicAccessBlock` | `internal/s3api/public_access_block.go:63` | — | |
+| `GetPublicAccessBlock` | `internal/s3api/public_access_block.go:67` | — | |
+| `PutPublicAccessBlock` | `internal/s3api/public_access_block.go:44` | — | |
+| `DeletePublicAccessBlock` | `internal/s3api/public_access_block.go:87` | — | |
 | `GetBucketOwnershipControls` | `internal/s3api/ownership.go:53` | — | |
 | `PutBucketOwnershipControls` | `internal/s3api/ownership.go:22` | — | |
 | `DeleteBucketOwnershipControls` | `internal/s3api/ownership.go:73` | — | |

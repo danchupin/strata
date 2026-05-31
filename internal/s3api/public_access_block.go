@@ -17,6 +17,30 @@ type publicAccessBlockConfiguration struct {
 	RestrictPublicBuckets bool     `xml:"RestrictPublicBuckets"`
 }
 
+// effectivePublicAccessBlock loads + parses the bucket's PublicAccessBlock
+// configuration for use by the data-plane access gates. A missing config
+// (ErrNoSuchPublicAccessBlock) or an empty blob both mean "no block" and
+// return (nil, nil) — absence is not an error. A malformed stored blob (which
+// putBucketPublicAccessBlock rejects, so should never occur) surfaces as an
+// error so the gate fails closed via ErrInternal rather than silently opening.
+func (s *Server) effectivePublicAccessBlock(r *http.Request, b *meta.Bucket) (*publicAccessBlockConfiguration, error) {
+	blob, err := s.Meta.GetBucketPublicAccessBlock(r.Context(), b.ID)
+	if err != nil {
+		if errors.Is(err, meta.ErrNoSuchPublicAccessBlock) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if len(blob) == 0 {
+		return nil, nil
+	}
+	var cfg publicAccessBlockConfiguration
+	if err := xml.Unmarshal(blob, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
 func (s *Server) putBucketPublicAccessBlock(w http.ResponseWriter, r *http.Request, bucket string) {
 	b, err := s.Meta.GetBucket(r.Context(), bucket)
 	if err != nil {

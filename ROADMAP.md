@@ -23,6 +23,82 @@ S3-compatibility headline: **92.7% (165/178)** on the executable subset of `ceph
 These are not feature work. The codebase shipped a lot of surface in a short window; before
 adding more, prove what is there.
 
+- ~~**P1 — QA production-readiness hardening pass (`ralph/qa-production-readiness`).**~~ —
+  **Done (verdict: GO).** US-001..US-013 ran a senior-QA adversarial pass over the three
+  under-exercised dimensions atop near-ceiling functional correctness: **auth/security**
+  (SigV4 13-tamper matrix, presigned, streaming chain-HMAC + trailer, anon + auth-mode +
+  PublicAccessBlock, SSE-C/KMS negatives), **concurrency/race** (multipart Complete/Abort,
+  versioning + `SetObjectStorage` CAS contention, GC + `bucket_stats` fan-out exactly-once /
+  dual-write lockstep, drain stop-write under load — memory always-on under `-race`, TiKV LWT
+  on the integration job), **durability/fault-injection** (drain stop-write invariant,
+  rebalance mover CAS-loss reclaim, chunk-loss/corruption/partial-write fail-loud on
+  memory + MinIO + RADOS). Four real bugs found+fixed with red→green proof (the P1
+  PublicAccessBlock fail-open + the three P2 entries directly below). Coverage promoted to a
+  hard CI ratchet gate (`make coverage-gate`, `scripts/qa/coverage-{floors.txt,gate.sh}`,
+  CI job "Coverage baseline (QA readiness)") — seven core packages floored at the US-001
+  baseline; `internal/data/memory` rose 6.5% → 41.9% (US-011). Full evidence + GO/NO-GO
+  justification + residual-risk acceptance (R1/R5/R6/R9) + the manual post-merge steps
+  (tikv floor hard-wire, branch-protection apply) in `tasks/qa-readiness-report.md`. s3-tests
+  headline unchanged at 92.7% (the fixes are outside the default subset).
+- ~~**P1 — PublicAccessBlock failed open (never enforced at eval time).**~~ —
+  **Done.** US-005 (QA cycle) found the `PublicAccessBlock` config was pure CRUD —
+  `requireAccess` / `requireACL` (`internal/s3api/access.go`) never consulted it, so a
+  block silently failed open: a permissive bucket policy or public-read ACL still granted
+  anonymous access despite `RestrictPublicBuckets` / `IgnorePublicAcls` being set.
+  Fixed: `requireAccess` now suppresses an anonymous policy grant when
+  `RestrictPublicBuckets` is set, and `requireACL` disregards public ACL grants (canned
+  public-read/public-read-write + AllUsers group) when `IgnorePublicAcls` is set — block
+  wins. Enforcement matrix in `auth_public_access_matrix_test.go`. Surfaced a separate
+  pre-existing gap (R6): object access is an intersection of policy AND ACL gates, so a
+  bucket policy alone does not grant a non-owner anonymous GET (AWS treats them as a
+  union) — left for a follow-up.
+- ~~**P2 — Conditional GET `If-Match` did not suppress `If-Unmodified-Since`.**~~ —
+  **Done.** US-002 (QA cycle) found `checkConditional` (`internal/s3api/conditional.go`)
+  evaluated `If-Unmodified-Since` unconditionally, so `If-Match: <match>` +
+  `If-Unmodified-Since: <past>` returned `412` instead of `200`. RFC 7232 §6 + AWS
+  docs require `If-Match` to take precedence over `If-Unmodified-Since` (match wins →
+  serve). Fixed by gating `If-Unmodified-Since` behind the `If-Match`-absent `else`
+  branch (mirrors the existing `If-None-Match` ⊳ `If-Modified-Since` suppression).
+  GET/HEAD adversarial matrix added in `conditional_test.go`.
+- ~~**P2 — SSE-C wrong customer key on GET returned 400 instead of 403.**~~ —
+  **Done.** US-006 (QA cycle) found `ErrSSECKeyMismatch` (`internal/s3api/errors.go`)
+  carried HTTP `400`; AWS-parity (s3-tests `test_encryption_sse_c_other_key`) is `403`
+  `AccessDenied` — a self-consistent but wrong customer key fails the stored-`KeyMD5`
+  comparison in `requireSSECMatch` before the AEAD layer. Flipped the sentinel status to
+  `403` (covers both the GET gate and copy-source `copy_object.go`). SSE negative matrix
+  added: `TestSSECGetWrongKey` / `TestSSECGetShortKey` (`sse_c_test.go`) +
+  `sse_kms_test.go` (`TestSSEKMS_WrongKeyID_AccessDenied` drives the
+  `kms.ErrKeyIDMismatch` → 403 IncorrectKeyException path via `LocalHSMProvider`;
+  `TestSSEKMS_MultipartPerPartDecrypt` asserts a 3-part aws:kms upload decrypts via the
+  `Manifest.PartChunkCounts` per-part locator). No SSE-KMS or rotation bug found beyond
+  the SSE-C status.
+- ~~**P2 — `GET`/`HEAD ?versionId=<delete-marker>` returned 500 instead of 405.**~~ —
+  **Done.** US-008 (QA cycle) surfaced — via the suspended replace-null contention race in
+  `internal/racetest/versioning_race.go` — that a `GET`/`HEAD` resolving (through an explicit
+  `?versionId`) to a delete marker fell through to the body path; a delete marker carries a
+  nil manifest, so `s.Data.GetChunks(nil, …)` errored → `500 InternalError`. AWS-parity is
+  `405 MethodNotAllowed` + `x-amz-delete-marker: true` + `Last-Modified`. Fixed by guarding
+  `getObject` on `o.IsDeleteMarker` before any manifest read (`internal/s3api/server.go`, new
+  `ErrMethodNotAllowed` sentinel in `errors.go`). The latest-version (no-versionId) path was
+  already correct (store returns `ErrObjectNotFound` → 404). Pinned by
+  `TestGetDeleteMarkerByVersionIDReturns405` (GET + HEAD, Enabled TimeUUID marker + Suspended
+  null marker) plus the `TestRaceVersioning{Memory,TiKV}` contention scenarios.
+- **P2 — `DeleteObjects` (multi-object delete) has no direct test (QA-cycle R1).** The
+  `internal/s3api/delete_objects.go` handler — batch delete, partial-failure rows, quiet
+  mode, versioned delete-marker creation — is only exercised indirectly through the
+  `internal/racetest` workload; there is no focused unit/contract matrix asserting the
+  `<Delete>` request → `<DeleteResult>` shape, per-key `<Error>` reporting, the 1000-key
+  cap, or versioned-vs-unversioned semantics. Surfaced + accepted (non-blocking) in the
+  `ralph/qa-production-readiness` cycle. Fix scope: a table-driven handler test over the
+  in-memory harness (`newHarness`) covering quiet/verbose, mixed success/NoSuchKey, and a
+  versioned bucket (delete-marker creation + explicit `?versionId`).
+- **P3 — Plaintext (non-SSE) at-rest byte-flip is not detected on the read path (QA-cycle R9).**
+  Neither the memory nor the RADOS data plane carries a per-chunk checksum verified on read,
+  so a flipped byte inside a *plaintext* chunk returns a full-length corrupted `200`. Only
+  *truncation* / missing-chunk fails loud (`data.ErrNotFound`), and SSE objects are caught by
+  the AEAD layer. Surfaced + accepted (defence-in-depth, superseded by SSE) in the
+  `ralph/qa-production-readiness` cycle (US-011). Fix scope: store a per-chunk CRC/sha in the
+  manifest `ChunkRef` and verify on `GetChunks`; fail loud on mismatch.
 - ~~**P1 — Single-binary `strata` (CockroachDB-shape).**~~ — **Done.** Single `strata`
   binary with `server` + `admin` subcommands; `strata server` runs the gateway plus an
   opt-in subset of workers (gc, lifecycle, notify, replicator, access-log, inventory,

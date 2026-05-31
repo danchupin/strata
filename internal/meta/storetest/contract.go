@@ -6,6 +6,7 @@ package storetest
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,6 +35,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"GCQueueRoundTrip", caseGCQueueRoundTrip},
 		{"GCQueueShardFanOut", caseGCQueueShardFanOut},
 		{"ChunkDeletionsByCluster", caseChunkDeletionsByCluster},
+		{"GCConcurrentEnqueueAckLockstep", caseGCConcurrentEnqueueAckLockstep},
 		{"ListMultipartUploadsByCluster", caseListMultipartUploadsByCluster},
 		{"BucketLifecycleRulesBlob", caseLifecycleBlob},
 		{"ListObjectsHidesDeleteMarkers", caseListHidesDeleteMarkers},
@@ -380,6 +382,115 @@ func caseChunkDeletionsByCluster(t *testing.T, s meta.Store) {
 	if got != 0 {
 		t.Errorf("cl-nope: got %d want 0", got)
 	}
+}
+
+// caseGCConcurrentEnqueueAckLockstep is the US-012 anchor for the GC
+// dual-write invariant under concurrency: concurrent EnqueueChunkDeletion and
+// AckGCEntry must keep the primary queue (ListGCEntries) and the per-cluster
+// view (ListChunkDeletionsByCluster) in lockstep — every enqueued chunk is
+// visible in both, every ack removes it from both, no entry is acked twice,
+// nothing leaks. On TiKV the two views are the v2 sharded prefix and the
+// dual-written rows; on memory they read the same slice. The lockstep
+// assertion (per-cluster count == primary count filtered by cluster) holds on
+// both backends regardless of the dual-write toggle.
+//
+// Phase 1: 2*perCluster producers each enqueue ONE unique-OID chunk
+// concurrently; the primary queue must hold every distinct chunk and each
+// per-cluster view must equal its producer count (no lost / duplicated
+// enqueue, dual-write landed both rows). Phase 2: every listed entry is handed
+// to exactly one of `ackers` goroutines; after the drain both views must be
+// empty (no leak, no entry surviving a racing ack).
+func caseGCConcurrentEnqueueAckLockstep(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	const (
+		region     = "default"
+		perCluster = 100
+		clusterA   = "cl-a"
+		clusterB   = "cl-b"
+		total      = 2 * perCluster
+	)
+
+	var wg sync.WaitGroup
+	enqueue := func(cluster, prefix string, n int) {
+		for i := 0; i < n; i++ {
+			oid := fmt.Sprintf("%s-%05d", prefix, i)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				err := s.EnqueueChunkDeletion(ctx, region, []data.ChunkRef{
+					{Cluster: cluster, Pool: "p", OID: oid, Size: 1},
+				})
+				if err != nil {
+					t.Errorf("enqueue %s: %v", oid, err)
+				}
+			}()
+		}
+	}
+	enqueue(clusterA, "a", perCluster)
+	enqueue(clusterB, "b", perCluster)
+	wg.Wait()
+
+	assertClusterCount := func(label, cluster string, want int) {
+		t.Helper()
+		got, err := s.ListChunkDeletionsByCluster(ctx, region, cluster, total+100)
+		if err != nil {
+			t.Fatalf("%s: by-cluster count: %v", label, err)
+		}
+		if got != want {
+			t.Fatalf("%s: by-cluster count=%d want %d (dual-write out of lockstep)", label, got, want)
+		}
+	}
+
+	// Lockstep after concurrent enqueue.
+	entries, err := s.ListGCEntries(ctx, region, time.Now().Add(time.Hour), total+100)
+	if err != nil {
+		t.Fatalf("list after enqueue: %v", err)
+	}
+	if len(entries) != total {
+		t.Fatalf("primary queue size=%d want %d (lost or duplicated enqueue)", len(entries), total)
+	}
+	seen := make(map[string]struct{}, total)
+	for _, e := range entries {
+		if _, dup := seen[e.Chunk.OID]; dup {
+			t.Fatalf("duplicate OID %q in queue (enqueue raced)", e.Chunk.OID)
+		}
+		seen[e.Chunk.OID] = struct{}{}
+	}
+	assertClusterCount("post-enqueue cl-a", clusterA, perCluster)
+	assertClusterCount("post-enqueue cl-b", clusterB, perCluster)
+
+	// Concurrent ack: each listed entry is acked by exactly one goroutine, so
+	// any double-removal or stuck-row surfaces as a non-empty post-drain view.
+	const ackers = 16
+	jobs := make(chan meta.GCEntry, len(entries))
+	for _, e := range entries {
+		jobs <- e
+	}
+	close(jobs)
+	var ackWG sync.WaitGroup
+	for range ackers {
+		ackWG.Add(1)
+		go func() {
+			defer ackWG.Done()
+			for e := range jobs {
+				if err := s.AckGCEntry(ctx, region, e); err != nil {
+					t.Errorf("ack %s: %v", e.Chunk.OID, err)
+				}
+			}
+		}()
+	}
+	ackWG.Wait()
+
+	// Lockstep after concurrent ack: both views fully drained.
+	remaining, err := s.ListGCEntries(ctx, region, time.Now().Add(time.Hour), total+100)
+	if err != nil {
+		t.Fatalf("list after ack: %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("primary queue size=%d after full drain want 0 (leak)", len(remaining))
+	}
+	assertClusterCount("post-ack cl-a", clusterA, 0)
+	assertClusterCount("post-ack cl-b", clusterB, 0)
 }
 
 // caseListMultipartUploadsByCluster exercises the per-cluster multipart

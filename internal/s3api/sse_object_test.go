@@ -198,15 +198,21 @@ func TestSSECorruptedCiphertext(t *testing.T) {
 	h.mustStatus(h.doString("PUT", "/bkt/k", body, "x-amz-server-side-encryption", "AES256"), 200)
 
 	// Mutate the stored chunk in the memory data backend so AEAD verification
-	// fails on read. The backend exposes the chunk map only via Delete; reach
-	// in by reflection-free side door: use the Manifest fetched via GET HEAD,
-	// then mutate via a public hook. The memory backend has no public hook,
-	// so instead we round-trip a deliberately corrupted GET by overwriting
-	// the underlying byte using the test-only Corrupt helper exposed below.
+	// fails on read. CorruptFirstChunk flips a byte in the first stored chunk
+	// and is always available on the memory backend (backend.go:148); the
+	// 1 KiB AES256 PUT above guarantees a non-empty ciphertext chunk, so the
+	// helper must return true. A false here means no chunk was stored — a real
+	// regression in the PUT path — so fail loud rather than silently skip
+	// (US-011: damaged data plane must never read clean). The previous
+	// t.Skip("…does not expose CorruptFirstChunk") was a stale guard: the hook
+	// has existed since the SSE cycle and the skip only ever masked a missing
+	// chunk.
 	if !internals.dataBackend.CorruptFirstChunk() {
-		t.Skip("memory backend does not expose CorruptFirstChunk; skip corruption test")
+		t.Fatal("CorruptFirstChunk returned false: no ciphertext chunk was stored for a 1 KiB SSE PUT")
 	}
 
+	// GET must fail loud: the AEAD open over the flipped ciphertext fails on
+	// the first read, before any 2xx body is committed. Never a silent 200.
 	resp := h.doString("GET", "/bkt/k", "")
 	if resp.StatusCode/100 == 2 {
 		_ = resp.Body.Close()

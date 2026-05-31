@@ -7,6 +7,7 @@ dist/
 # Top-level binary built by `go build ./cmd/strata` / bench harness
 /strata
 coverage.*
+!scripts/qa/coverage.sh
 .env
 .env.local
 .DS_Store

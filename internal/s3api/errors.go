@@ -36,19 +36,22 @@ var (
 	ErrExpiredToken          = APIError{Code: "ExpiredToken", Message: "The provided token has expired", Status: http.StatusForbidden}
 	ErrInvalidToken          = APIError{Code: "InvalidToken", Message: "The provided token is malformed or otherwise invalid", Status: http.StatusForbidden}
 	ErrNoSuchBucket          = APIError{Code: "NoSuchBucket", Message: "The specified bucket does not exist", Status: http.StatusNotFound}
-	ErrNoSuchKey           = APIError{Code: "NoSuchKey", Message: "The specified key does not exist", Status: http.StatusNotFound}
-	ErrNoSuchUpload        = APIError{Code: "NoSuchUpload", Message: "The specified multipart upload does not exist", Status: http.StatusNotFound}
-	ErrBucketNotEmpty      = APIError{Code: "BucketNotEmpty", Message: "The bucket you tried to delete is not empty", Status: http.StatusConflict}
-	ErrBucketExists        = APIError{Code: "BucketAlreadyOwnedByYou", Message: "Bucket already exists and is owned by you", Status: http.StatusConflict}
-	ErrBucketTaken         = APIError{Code: "BucketAlreadyExists", Message: "The requested bucket name is not available", Status: http.StatusConflict}
-	ErrInvalidURI          = APIError{Code: "InvalidURI", Message: "Couldn't parse the specified URI.", Status: http.StatusBadRequest}
-	ErrEntityTooSmall      = APIError{Code: "EntityTooSmall", Message: "Your proposed upload is smaller than the minimum allowed size", Status: http.StatusBadRequest}
-	ErrInvalidRange        = APIError{Code: "InvalidRange", Message: "The requested range is not satisfiable", Status: http.StatusRequestedRangeNotSatisfiable}
-	ErrInvalidBucketName   = APIError{Code: "InvalidBucketName", Message: "The specified bucket name is invalid", Status: http.StatusBadRequest}
-	ErrInvalidPart         = APIError{Code: "InvalidPart", Message: "One or more of the specified parts could not be found", Status: http.StatusBadRequest}
-	ErrInvalidPartOrder    = APIError{Code: "InvalidPartOrder", Message: "The list of parts was not in ascending order", Status: http.StatusBadRequest}
-	ErrInvalidStorageClass = APIError{Code: "InvalidStorageClass", Message: "The storage class you specified is not valid", Status: http.StatusBadRequest}
-	ErrObjectLockedErr     = APIError{Code: "AccessDenied", Message: "Object is protected by object lock retention or legal hold", Status: http.StatusForbidden}
+	ErrNoSuchKey             = APIError{Code: "NoSuchKey", Message: "The specified key does not exist", Status: http.StatusNotFound}
+	// ErrMethodNotAllowed — AWS-parity for a GET/HEAD that resolves (via an
+	// explicit ?versionId) to a delete marker: 405 with x-amz-delete-marker.
+	ErrMethodNotAllowed             = APIError{Code: "MethodNotAllowed", Message: "The specified method is not allowed against this resource.", Status: http.StatusMethodNotAllowed}
+	ErrNoSuchUpload                 = APIError{Code: "NoSuchUpload", Message: "The specified multipart upload does not exist", Status: http.StatusNotFound}
+	ErrBucketNotEmpty               = APIError{Code: "BucketNotEmpty", Message: "The bucket you tried to delete is not empty", Status: http.StatusConflict}
+	ErrBucketExists                 = APIError{Code: "BucketAlreadyOwnedByYou", Message: "Bucket already exists and is owned by you", Status: http.StatusConflict}
+	ErrBucketTaken                  = APIError{Code: "BucketAlreadyExists", Message: "The requested bucket name is not available", Status: http.StatusConflict}
+	ErrInvalidURI                   = APIError{Code: "InvalidURI", Message: "Couldn't parse the specified URI.", Status: http.StatusBadRequest}
+	ErrEntityTooSmall               = APIError{Code: "EntityTooSmall", Message: "Your proposed upload is smaller than the minimum allowed size", Status: http.StatusBadRequest}
+	ErrInvalidRange                 = APIError{Code: "InvalidRange", Message: "The requested range is not satisfiable", Status: http.StatusRequestedRangeNotSatisfiable}
+	ErrInvalidBucketName            = APIError{Code: "InvalidBucketName", Message: "The specified bucket name is invalid", Status: http.StatusBadRequest}
+	ErrInvalidPart                  = APIError{Code: "InvalidPart", Message: "One or more of the specified parts could not be found", Status: http.StatusBadRequest}
+	ErrInvalidPartOrder             = APIError{Code: "InvalidPartOrder", Message: "The list of parts was not in ascending order", Status: http.StatusBadRequest}
+	ErrInvalidStorageClass          = APIError{Code: "InvalidStorageClass", Message: "The storage class you specified is not valid", Status: http.StatusBadRequest}
+	ErrObjectLockedErr              = APIError{Code: "AccessDenied", Message: "Object is protected by object lock retention or legal hold", Status: http.StatusForbidden}
 	ErrNoSuchLifecycleConfiguration = APIError{Code: "NoSuchLifecycleConfiguration", Message: "The lifecycle configuration does not exist", Status: http.StatusNotFound}
 	ErrNoSuchCORSConfiguration      = APIError{Code: "NoSuchCORSConfiguration", Message: "The CORS configuration does not exist", Status: http.StatusNotFound}
 	ErrNoSuchBucketPolicy           = APIError{Code: "NoSuchBucketPolicy", Message: "The bucket policy does not exist", Status: http.StatusNotFound}
@@ -72,33 +75,33 @@ var (
 	ErrInvalidRequest               = APIError{Code: "InvalidRequest", Message: "The request is invalid", Status: http.StatusBadRequest}
 	ErrInvalidDigest                = APIError{Code: "InvalidDigest", Message: "The provided digest does not match the supplied data", Status: http.StatusBadRequest}
 	ErrSSECRequired                 = APIError{Code: "InvalidRequest", Message: "The object was stored using server-side encryption with a customer-provided key; matching SSE-C headers are required", Status: http.StatusBadRequest}
-	ErrSSECKeyMismatch              = APIError{Code: "AccessDenied", Message: "The provided customer key does not match the key the object was encrypted with", Status: http.StatusBadRequest}
+	ErrSSECKeyMismatch              = APIError{Code: "AccessDenied", Message: "The provided customer key does not match the key the object was encrypted with", Status: http.StatusForbidden}
 	ErrMFARequired                  = APIError{Code: "AccessDenied", Message: "Mfa Authentication must be used for this request", Status: http.StatusForbidden}
 	ErrCORSNotEnabled               = APIError{Code: "CORSResponse", Message: "CORS is not enabled for this bucket", Status: http.StatusForbidden}
-	ErrMalformedXML        = APIError{Code: "MalformedXML", Message: "The XML you provided was not well-formed", Status: http.StatusBadRequest}
-	ErrMalformedACLError   = APIError{Code: "MalformedACLError", Message: "The XML you provided was not well-formed or did not validate against our published schema", Status: http.StatusBadRequest}
-	ErrInvalidArgument     = APIError{Code: "InvalidArgument", Message: "Invalid argument", Status: http.StatusBadRequest}
-	ErrNotImplemented      = APIError{Code: "NotImplemented", Message: "A header you provided implies functionality that is not implemented", Status: http.StatusNotImplemented}
-	ErrInternal            = APIError{Code: "InternalError", Message: "We encountered an internal error", Status: http.StatusInternalServerError}
+	ErrMalformedXML                 = APIError{Code: "MalformedXML", Message: "The XML you provided was not well-formed", Status: http.StatusBadRequest}
+	ErrMalformedACLError            = APIError{Code: "MalformedACLError", Message: "The XML you provided was not well-formed or did not validate against our published schema", Status: http.StatusBadRequest}
+	ErrInvalidArgument              = APIError{Code: "InvalidArgument", Message: "Invalid argument", Status: http.StatusBadRequest}
+	ErrNotImplemented               = APIError{Code: "NotImplemented", Message: "A header you provided implies functionality that is not implemented", Status: http.StatusNotImplemented}
+	ErrInternal                     = APIError{Code: "InternalError", Message: "We encountered an internal error", Status: http.StatusInternalServerError}
 	// ErrKMSUnavailable — per-bucket signing-key DEK unwrap hit a transient
 	// KMS error (US-002 fail-closed). Operator must rotate or wait for the
 	// KMS to recover; Retry-After:30 hints client backoff.
-	ErrKMSUnavailable      = APIError{Code: "KMSUnavailable", Message: "KMS provider is currently unavailable", Status: http.StatusServiceUnavailable}
+	ErrKMSUnavailable = APIError{Code: "KMSUnavailable", Message: "KMS provider is currently unavailable", Status: http.StatusServiceUnavailable}
 	// ErrKMSKeyDenied — KMS authoritatively rejected the unwrap (wrong
 	// CMK ARN / IAM-policy deny). Operator must rotate to recover.
-	ErrKMSKeyDenied        = APIError{Code: "KeyDenied", Message: "KMS denied unwrap of per-bucket signing key", Status: http.StatusUnauthorized}
+	ErrKMSKeyDenied = APIError{Code: "KeyDenied", Message: "KMS denied unwrap of per-bucket signing key", Status: http.StatusUnauthorized}
 	// ErrKMSKeyTampered — wrapped-DEK HMAC mismatch on LocalHSMProvider
 	// (or equivalent integrity check on a future provider).
-	ErrKMSKeyTampered      = APIError{Code: "KeyTampered", Message: "Per-bucket signing key wrapped DEK is corrupt", Status: http.StatusUnauthorized}
+	ErrKMSKeyTampered = APIError{Code: "KeyTampered", Message: "Per-bucket signing key wrapped DEK is corrupt", Status: http.StatusUnauthorized}
 	// ErrKMSKeyExpired — per-bucket signing key is older than the
 	// STRATA_KEY_MAX_AGE rotation window (US-002). Operator must rotate
 	// (POST /admin/v1/buckets/{name}/signing-key/rotate) to recover.
-	ErrKMSKeyExpired       = APIError{Code: "KeyExpired", Message: "Per-bucket signing key is past max age; rotate to recover", Status: http.StatusUnauthorized}
+	ErrKMSKeyExpired = APIError{Code: "KeyExpired", Message: "Per-bucket signing key is past max age; rotate to recover", Status: http.StatusUnauthorized}
 	// ErrQuotaExceeded is the gateway-level response for any write that
 	// breaches a configured BucketQuota or UserQuota (US-006). HTTP 403 with
 	// the non-AWS S3 code "QuotaExceeded" — RGW-compatible per ROADMAP so
 	// drop-in clients that already understand the code keep working.
-	ErrQuotaExceeded       = APIError{Code: "QuotaExceeded", Message: "Quota exceeded for bucket / user", Status: http.StatusForbidden}
+	ErrQuotaExceeded = APIError{Code: "QuotaExceeded", Message: "Quota exceeded for bucket / user", Status: http.StatusForbidden}
 	// ErrUnsupportedChecksumAlgorithm — STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER
 	// requests carry X-Amz-Trailer naming the trailer-checksum algorithm.
 	// US-009 only supports x-amz-checksum-sha256; the other AWS-S3 algos

@@ -1,0 +1,28 @@
+# scripts/qa/coverage-floors.txt — per-package coverage RATCHET FLOORS for the
+# QA-readiness coverage gate (US-013). Consumed by scripts/qa/coverage-gate.sh.
+#
+# Format: <import-path-suffix> <floor-percent | CI-ESTABLISH>
+#   <floor-percent>  hard gate — the gate FAILS if measured coverage drops below
+#                    this floor (ratchet-floor: catch regressions, never an
+#                    aspirational target).
+#   CI-ESTABLISH     soft — print the measured value, never fail. Used for a
+#                    package whose baseline cannot be measured on the author's
+#                    local box (cgo-blocked) and is established on the first
+#                    green CI coverage run, then hard-wired post-merge.
+#
+# Floors are derived from the US-001 §1 baseline in tasks/qa-readiness-report.md,
+# truncated DOWN to whole percent so normal CI-vs-local run variance never
+# false-fails the gate. data/memory is set to the cycle's NEW sustained measured
+# baseline (US-011 lifted it 6.5% → 41.9%) rather than the stale US-001 6.5% — a
+# 6% floor would leave a regression hole. Raise a floor ONLY to a newly
+# measured-and-sustained value; never to a target nobody has hit.
+#
+# Core packages (AC5: internal/auth, internal/s3api, internal/meta/{memory,tikv},
+# internal/data/{memory,placement}, internal/crypto/kms).
+internal/auth 84
+internal/s3api 75
+internal/meta/memory 74
+internal/meta/tikv CI-ESTABLISH
+internal/data/memory 40
+internal/data/placement 90
+internal/crypto/kms 72
