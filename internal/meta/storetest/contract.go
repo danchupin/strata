@@ -56,6 +56,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"VersioningSuspendedReplaceNull", caseVersioningSuspendedReplaceNull},
 		{"AccessPointCRUD", caseAccessPointCRUD},
 		{"OnlineReshard", caseOnlineReshard},
+		{"NonDefaultShardRoundTrip", caseNonDefaultShardRoundTrip},
 		{"SampleBucketShardStats", caseSampleBucketShardStats},
 		{"ManifestRawRoundTrip", caseManifestRawRoundTrip},
 		{"AdminJobRoundTrip", caseAdminJobRoundTrip},
@@ -2088,6 +2089,99 @@ func caseOnlineReshard(t *testing.T, s meta.Store) {
 
 	if _, err := s.StartReshard(ctx, b.ID, 7); err != meta.ErrReshardInvalidTarget {
 		t.Fatalf("non-power-of-two target: %v want ErrReshardInvalidTarget", err)
+	}
+}
+
+// caseNonDefaultShardRoundTrip proves a bucket whose active ShardCount differs
+// from the process default round-trips PUT→GET→LIST→DELETE (US-001). Cassandra
+// addresses objects by (bucket_id, fnv(key)%shardCount); before US-001 the hot
+// path used the process-global s.defaultShard at every site, so a bucket whose
+// stored shard_count differed from the running process default point-read the
+// wrong partition and 404'd. Here we drive the bucket to a non-default count via
+// a completed reshard, then exercise a fresh object's full lifecycle at that
+// count. Memory/TiKV are shard-agnostic (flat map / ordered scan) so the case is
+// a no-op pass there; the discriminating cross-process red/green proof (one store
+// writes at count=128, another reads at default=64) lives in the Cassandra
+// integration test TestCassandraPerBucketShardResolution.
+func caseNonDefaultShardRoundTrip(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "shres", "o", "STANDARD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultCount := b.ShardCount
+
+	// Seed a handful of keys at the default count, then complete a reshard so
+	// the bucket's active shard count is no longer the process default.
+	for i := 0; i < 50; i++ {
+		o := &meta.Object{
+			BucketID: b.ID, Key: "seed" + padInt(i, 3),
+			StorageClass: "STANDARD", ETag: "e", Size: 1,
+			Mtime:    time.Now().UTC(),
+			Manifest: &data.Manifest{Class: "STANDARD"},
+		}
+		if err := s.PutObject(ctx, o, false); err != nil {
+			t.Fatalf("seed put %d: %v", i, err)
+		}
+	}
+
+	target := defaultCount * 2
+	if defaultCount <= 0 || !meta.IsValidShardCount(target) {
+		t.Fatalf("backend ShardCount must be a positive power of two, got %d", defaultCount)
+	}
+	if _, err := s.StartReshard(ctx, b.ID, target); err != nil {
+		t.Fatalf("start reshard: %v", err)
+	}
+	if err := s.CompleteReshard(ctx, b.ID); err != nil {
+		t.Fatalf("complete reshard: %v", err)
+	}
+
+	bucket, err := s.GetBucket(ctx, "shres")
+	if err != nil {
+		t.Fatalf("get bucket post-reshard: %v", err)
+	}
+	if bucket.ShardCount != target {
+		t.Fatalf("post-reshard ShardCount: got %d want %d", bucket.ShardCount, target)
+	}
+
+	// A fresh object written at the now-non-default count must round-trip: the
+	// PUT and the GET both resolve the bucket's ShardCount, so they address the
+	// same partition. If the read path regressed to the process default, the
+	// point-GET below would 404.
+	const key = "post-flip-object"
+	put := &meta.Object{
+		BucketID: bucket.ID, Key: key,
+		StorageClass: "STANDARD", ETag: "abc123", Size: 7,
+		Mtime:    time.Now().UTC(),
+		Manifest: &data.Manifest{Class: "STANDARD", Size: 7},
+	}
+	if err := s.PutObject(ctx, put, false); err != nil {
+		t.Fatalf("put at non-default count: %v", err)
+	}
+	got, err := s.GetObject(ctx, bucket.ID, key, "")
+	if err != nil {
+		t.Fatalf("get at non-default count: %v", err)
+	}
+	if got.ETag != "abc123" || got.Size != 7 {
+		t.Fatalf("round-trip object: got etag=%q size=%d want abc123/7", got.ETag, got.Size)
+	}
+
+	// LIST must surface every seeded key plus the post-flip key under the
+	// resolved fan-out.
+	res, err := s.ListObjects(ctx, bucket.ID, meta.ListOptions{Limit: 5000})
+	if err != nil {
+		t.Fatalf("list at non-default count: %v", err)
+	}
+	if len(res.Objects) != 51 {
+		t.Fatalf("list at non-default count: got %d objects want 51", len(res.Objects))
+	}
+
+	// DELETE addresses the same partition the PUT wrote; a subsequent GET 404s.
+	if _, err := s.DeleteObject(ctx, bucket.ID, key, "", false); err != nil {
+		t.Fatalf("delete at non-default count: %v", err)
+	}
+	if _, err := s.GetObject(ctx, bucket.ID, key, ""); err != meta.ErrObjectNotFound {
+		t.Fatalf("get after delete: got %v want ErrObjectNotFound", err)
 	}
 }
 

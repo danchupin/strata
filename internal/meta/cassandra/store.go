@@ -62,7 +62,32 @@ type Store struct {
 	metaHealthMu     sync.Mutex
 	metaHealthCache  *meta.MetaHealthReport
 	metaHealthExpiry time.Time
+
+	// shardCacheMu guards the short-TTL per-bucket shard-count cache (US-001).
+	// Every object-addressing path resolves the bucket's ShardCount through
+	// bucketShardCounts rather than the process-global s.defaultShard — the
+	// global ignores per-bucket STRATA_BUCKET_SHARDS and 404s every point-read
+	// on a non-default bucket. The entry carries BOTH the active count and the
+	// in-flight reshard target so a transitional writer routes without a second
+	// lookup; StartReshard / CompleteReshard invalidate the entry synchronously.
+	shardCacheMu sync.Mutex
+	shardCache   map[uuid.UUID]shardCacheEntry
 }
+
+// shardCacheEntry is one bucket's resolved shard layout. active is the live
+// ShardCount used by reads/lists/deletes; target is the reshard TargetShardCount
+// (0 when no reshard is in flight).
+type shardCacheEntry struct {
+	active int
+	target int
+	expiry time.Time
+}
+
+// shardCacheTTL bounds how long a resolved shard layout is reused before a
+// fresh buckets read. Short so a reshard flip not caught by synchronous
+// invalidation still converges quickly; long enough to keep the object hot
+// path off a buckets round-trip per op.
+const shardCacheTTL = 10 * time.Second
 
 type Options struct {
 	DefaultShardCount int
@@ -103,6 +128,7 @@ func Open(cfg SessionConfig, opts Options) (*Store, error) {
 		keyspace:     cfg.Keyspace,
 		bucketNames:  make(map[uuid.UUID]string),
 		gcDualWrite:  gcDualWrite,
+		shardCache:   make(map[uuid.UUID]shardCacheEntry),
 	}
 	store.obs = NewQueryObserver(cfg.Logger, time.Duration(cfg.SlowMS)*time.Millisecond, cfg.Metrics, cfg.Tracer)
 	return store, nil
@@ -132,6 +158,83 @@ func shardOf(key string, n int) int {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(key))
 	return int(h.Sum32() % uint32(n))
+}
+
+// bucketShardCounts resolves a bucket's active shard count and in-flight
+// reshard target (0 when none) from a short-TTL cache, falling back to a
+// buckets read on miss. Every object-addressing path on Cassandra MUST route
+// through this rather than s.defaultShard: the process-global default ignores
+// per-bucket STRATA_BUCKET_SHARDS, so a non-default bucket would point-read the
+// wrong partition and 404 (US-001). A legacy row with shard_count<=0 (created
+// before the column existed) falls back to the process default.
+func (s *Store) bucketShardCounts(ctx context.Context, bucketID uuid.UUID) (active, target int, err error) {
+	now := time.Now()
+	s.shardCacheMu.Lock()
+	if e, ok := s.shardCache[bucketID]; ok && now.Before(e.expiry) {
+		s.shardCacheMu.Unlock()
+		return e.active, e.target, nil
+	}
+	s.shardCacheMu.Unlock()
+
+	b, err := s.bucketForShards(ctx, bucketID)
+	if err != nil {
+		return 0, 0, err
+	}
+	active = b.ShardCount
+	if active <= 0 {
+		active = s.defaultShard
+	}
+	target = b.TargetShardCount
+
+	s.shardCacheMu.Lock()
+	s.shardCache[bucketID] = shardCacheEntry{active: active, target: target, expiry: now.Add(shardCacheTTL)}
+	s.shardCacheMu.Unlock()
+	return active, target, nil
+}
+
+// shardForKey resolves the active shard partition for (bucketID, key). The
+// steady-state read/delete/mutate addressing helper for US-001 — replaces the
+// 9 shardOf(key, s.defaultShard) sites. The reshard transitional model (route
+// writes to the target layout, union-read source+target) is layered on top in
+// US-002; this helper deliberately returns only the active layout.
+func (s *Store) shardForKey(ctx context.Context, bucketID uuid.UUID, key string) (int, error) {
+	active, _, err := s.bucketShardCounts(ctx, bucketID)
+	if err != nil {
+		return 0, err
+	}
+	return shardOf(key, active), nil
+}
+
+// bucketForShards loads a bucket by ID for shard resolution. Fast path uses the
+// bucketID→name cache (warmed by the gateway's bucket lookup that precedes every
+// object op) for a single-partition GetBucket; cold misses fall back to the
+// full-scan getBucketByID. Never serves a stale shard count — it reads buckets
+// fresh; the TTL cache above is what bounds the round-trip rate.
+func (s *Store) bucketForShards(ctx context.Context, bucketID uuid.UUID) (*meta.Bucket, error) {
+	s.bucketNamesMu.RLock()
+	name := s.bucketNames[bucketID]
+	s.bucketNamesMu.RUnlock()
+	if name != "" {
+		b, err := s.GetBucket(ctx, name)
+		if err == nil {
+			return b, nil
+		}
+		if !errors.Is(err, meta.ErrBucketNotFound) {
+			return nil, err
+		}
+		// Cached name no longer resolves (rename is impossible in this codebase,
+		// but a dropped+recreated bucket could collide) — fall through to scan.
+	}
+	return s.getBucketByID(ctx, bucketID)
+}
+
+// invalidateShardCache drops a bucket's cached shard layout so the next object
+// op re-reads it. Called synchronously by StartReshard / CompleteReshard around
+// the shard_count / shard_count_target flips.
+func (s *Store) invalidateShardCache(bucketID uuid.UUID) {
+	s.shardCacheMu.Lock()
+	delete(s.shardCache, bucketID)
+	s.shardCacheMu.Unlock()
 }
 
 func (s *Store) CreateBucket(ctx context.Context, name, owner, defaultClass string) (*meta.Bucket, error) {
@@ -354,7 +457,11 @@ func (s *Store) DeleteBucket(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	empty, err := s.bucketIsEmpty(ctx, b.ID, s.defaultShard)
+	shardCount := b.ShardCount
+	if shardCount <= 0 {
+		shardCount = s.defaultShard
+	}
+	empty, err := s.bucketIsEmpty(ctx, b.ID, shardCount)
 	if err != nil {
 		return err
 	}
@@ -460,7 +567,10 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 	if err != nil {
 		return err
 	}
-	shard := shardOf(o.Key, s.defaultShard)
+	shard, err := s.shardForKey(ctx, o.BucketID, o.Key)
+	if err != nil {
+		return err
+	}
 	var versionID gocql.UUID
 	if !versioned {
 		o.VersionID = meta.NullVersionID
@@ -584,7 +694,10 @@ func nilIfEmpty(s string) interface{} {
 
 func (s *Store) GetObject(ctx context.Context, bucketID uuid.UUID, key, versionID string) (*meta.Object, error) {
 	versionID = meta.ResolveVersionID(versionID)
-	shard := shardOf(key, s.defaultShard)
+	shard, err := s.shardForKey(ctx, bucketID, key)
+	if err != nil {
+		return nil, err
+	}
 	if versionID == "" {
 		// "Latest" with versioning history requires comparing the highest-
 		// clustering row against the null sentinel by mtime: a Suspended PUT
@@ -749,7 +862,10 @@ func (s *Store) DeleteObjectNullReplacement(ctx context.Context, bucketID uuid.U
 
 func (s *Store) DeleteObject(ctx context.Context, bucketID uuid.UUID, key, versionID string, versioned bool) (*meta.Object, error) {
 	versionID = meta.ResolveVersionID(versionID)
-	shard := shardOf(key, s.defaultShard)
+	shard, err := s.shardForKey(ctx, bucketID, key)
+	if err != nil {
+		return nil, err
+	}
 
 	if versionID != "" {
 		vUUID, err := versionToCQL(versionID)
@@ -817,7 +933,10 @@ func (s *Store) ListObjects(ctx context.Context, bucketID uuid.UUID, opts meta.L
 	if limit <= 0 || limit > 1000 {
 		limit = 1000
 	}
-	shardCount := s.defaultShard
+	shardCount, _, err := s.bucketShardCounts(ctx, bucketID)
+	if err != nil {
+		return nil, err
+	}
 
 	cursors := make([]*shardCursor, 0, shardCount)
 	var mu sync.Mutex
@@ -916,7 +1035,10 @@ func (s *Store) ListObjectVersions(ctx context.Context, bucketID uuid.UUID, opts
 	if limit <= 0 || limit > 1000 {
 		limit = 1000
 	}
-	shardCount := s.defaultShard
+	shardCount, _, err := s.bucketShardCounts(ctx, bucketID)
+	if err != nil {
+		return nil, err
+	}
 
 	cursors := make([]*versionCursor, 0, shardCount)
 	var mu sync.Mutex
@@ -1038,8 +1160,12 @@ func versionTimeKey(vid string) int64 {
 // (whose 1000-row hard cap makes it unfit for the race-harness verification
 // pass).
 func (s *Store) AllObjectVersions(ctx context.Context, bucketID uuid.UUID) ([]*meta.Object, error) {
+	shardCount, _, err := s.bucketShardCounts(ctx, bucketID)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]*meta.Object, 0)
-	for shard := 0; shard < s.defaultShard; shard++ {
+	for shard := 0; shard < shardCount; shard++ {
 		iter := s.s.Query(
 			`SELECT key, version_id, is_delete_marker, size, etag, content_type,
 			        storage_class, mtime, manifest, user_meta, is_null
@@ -1139,7 +1265,11 @@ func (s *Store) AllObjectVersions(ctx context.Context, bucketID uuid.UUID) ([]*m
 // ALLOW FILTERING. Used by the bucketstats sampler (US-012).
 func (s *Store) SampleBucketShardStats(ctx context.Context, bucketID uuid.UUID, shardCount int) (map[int]meta.ShardStat, error) {
 	if shardCount <= 0 {
-		shardCount = s.defaultShard
+		active, _, err := s.bucketShardCounts(ctx, bucketID)
+		if err != nil {
+			return nil, err
+		}
+		shardCount = active
 	}
 	out := make(map[int]meta.ShardStat, shardCount)
 	for shard := 0; shard < shardCount; shard++ {
@@ -1157,11 +1287,11 @@ func (s *Store) SampleBucketShardStats(ctx context.Context, bucketID uuid.UUID, 
 			isDeleteMarker bool
 			size           int64
 
-			lastKey         string
-			haveLast        bool
-			latestVersion   gocql.UUID
-			latestSize      int64
-			latestIsDelete  bool
+			lastKey        string
+			haveLast       bool
+			latestVersion  gocql.UUID
+			latestSize     int64
+			latestIsDelete bool
 		)
 		flush := func() {
 			if !haveLast {
@@ -1283,8 +1413,8 @@ func (h versionHeap) Less(i, j int) bool {
 	// agree with that ordering.
 	return versionTimeKey(h[i].current.VersionID) > versionTimeKey(h[j].current.VersionID)
 }
-func (h versionHeap) Swap(i, j int)   { h[i], h[j] = h[j], h[i] }
-func (h *versionHeap) Push(x any)     { *h = append(*h, x.(*versionCursor)) }
+func (h versionHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *versionHeap) Push(x any)   { *h = append(*h, x.(*versionCursor)) }
 func (h *versionHeap) Pop() any {
 	old := *h
 	n := len(old)
@@ -1378,10 +1508,10 @@ func (s *Store) openShardCursor(ctx context.Context, bucketID uuid.UUID, shard i
 
 type cursorHeap []*shardCursor
 
-func (h cursorHeap) Len() int            { return len(h) }
-func (h cursorHeap) Less(i, j int) bool  { return h[i].current.Key < h[j].current.Key }
-func (h cursorHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
-func (h *cursorHeap) Push(x any)         { *h = append(*h, x.(*shardCursor)) }
+func (h cursorHeap) Len() int           { return len(h) }
+func (h cursorHeap) Less(i, j int) bool { return h[i].current.Key < h[j].current.Key }
+func (h cursorHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *cursorHeap) Push(x any)        { *h = append(*h, x.(*shardCursor)) }
 func (h *cursorHeap) Pop() any {
 	old := *h
 	n := len(old)
@@ -1688,10 +1818,10 @@ func (s *Store) ListPendingNotifications(ctx context.Context, bucketID uuid.UUID
 			gocqlUUID(bucketID), partition, limit-len(out),
 		).WithContext(ctx).Iter()
 		var (
-			eventID                                                gocql.UUID
-			bucket, key, name, configID, targetType, targetARN     string
-			eventTime                                              time.Time
-			payload                                                []byte
+			eventID                                            gocql.UUID
+			bucket, key, name, configID, targetType, targetARN string
+			eventTime                                          time.Time
+			payload                                            []byte
 		)
 		for iter.Scan(&eventID, &bucket, &key, &name, &eventTime, &configID, &targetType, &targetARN, &payload) {
 			out = append(out, meta.NotificationEvent{
@@ -1854,9 +1984,9 @@ func (s *Store) ListPendingReplications(ctx context.Context, bucketID uuid.UUID,
 			gocqlUUID(bucketID), partition, limit-len(out),
 		).WithContext(ctx).Iter()
 		var (
-			eventID                                                                                  gocql.UUID
+			eventID                                                                                    gocql.UUID
 			bucket, key, versionID, name, ruleID, destinationBucket, storageClass, destinationEndpoint string
-			eventTime                                                                                time.Time
+			eventTime                                                                                  time.Time
 		)
 		for iter.Scan(&eventID, &bucket, &key, &versionID, &name, &eventTime, &ruleID, &destinationBucket, &storageClass, &destinationEndpoint) {
 			out = append(out, meta.ReplicationEvent{
@@ -1884,7 +2014,10 @@ func (s *Store) ListPendingReplications(ctx context.Context, bucketID uuid.UUID,
 }
 
 func (s *Store) SetObjectReplicationStatus(ctx context.Context, bucketID uuid.UUID, key, versionID, status string) error {
-	shard := shardOf(key, s.defaultShard)
+	shard, err := s.shardForKey(ctx, bucketID, key)
+	if err != nil {
+		return err
+	}
 	if versionID == "" {
 		o, err := s.GetObject(ctx, bucketID, key, "")
 		if err != nil {
@@ -1960,11 +2093,11 @@ func (s *Store) ListPendingAccessLog(ctx context.Context, bucketID uuid.UUID, li
 			gocqlUUID(bucketID), partition, limit-len(out),
 		).WithContext(ctx).Iter()
 		var (
-			eventID                                                                  gocql.UUID
-			ts                                                                       time.Time
-			requestID, principal, sourceIP, op, key, referrer, userAgent, versionID  string
-			status, totalTimeMS, turnAroundMS                                        int
-			bytesSent, objectSize                                                    int64
+			eventID                                                                 gocql.UUID
+			ts                                                                      time.Time
+			requestID, principal, sourceIP, op, key, referrer, userAgent, versionID string
+			status, totalTimeMS, turnAroundMS                                       int
+			bytesSent, objectSize                                                   int64
 		)
 		for iter.Scan(&eventID, &ts, &requestID, &principal, &sourceIP, &op, &key, &status, &bytesSent, &objectSize, &totalTimeMS, &turnAroundMS, &referrer, &userAgent, &versionID) {
 			out = append(out, meta.AccessLogEntry{
@@ -2405,7 +2538,10 @@ func (s *Store) ListSlowQueries(ctx context.Context, since time.Duration, minMs 
 }
 
 func (s *Store) resolveVersionID(ctx context.Context, bucketID uuid.UUID, key, versionID string) (gocql.UUID, int, error) {
-	shard := shardOf(key, s.defaultShard)
+	shard, err := s.shardForKey(ctx, bucketID, key)
+	if err != nil {
+		return gocql.UUID{}, 0, err
+	}
 	if versionID != "" {
 		v, err := versionToCQL(versionID)
 		if err != nil {
@@ -2414,7 +2550,7 @@ func (s *Store) resolveVersionID(ctx context.Context, bucketID uuid.UUID, key, v
 		return v, shard, nil
 	}
 	var v gocql.UUID
-	err := s.s.Query(
+	err = s.s.Query(
 		`SELECT version_id FROM objects WHERE bucket_id=? AND shard=? AND key=? LIMIT 1`,
 		gocqlUUID(bucketID), shard, key,
 	).WithContext(ctx).Scan(&v)
@@ -4115,7 +4251,10 @@ func (s *Store) ListAccessPoints(ctx context.Context, bucketID uuid.UUID) ([]*me
 }
 
 func (s *Store) UpdateObjectSSEWrap(ctx context.Context, bucketID uuid.UUID, key, versionID string, wrapped []byte, keyID string) error {
-	shard := shardOf(key, s.defaultShard)
+	shard, err := s.shardForKey(ctx, bucketID, key)
+	if err != nil {
+		return err
+	}
 	if versionID == "" {
 		o, err := s.GetObject(ctx, bucketID, key, "")
 		if err != nil {
@@ -4164,7 +4303,10 @@ func (s *Store) GetObjectManifestRaw(ctx context.Context, bucketID uuid.UUID, ke
 	if err != nil {
 		return nil, meta.ErrObjectNotFound
 	}
-	shard := shardOf(key, s.defaultShard)
+	shard, err := s.shardForKey(ctx, bucketID, key)
+	if err != nil {
+		return nil, err
+	}
 	var blob []byte
 	err = s.s.Query(
 		`SELECT manifest FROM objects WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
@@ -4195,7 +4337,10 @@ func (s *Store) UpdateObjectManifestRaw(ctx context.Context, bucketID uuid.UUID,
 	if err != nil {
 		return meta.ErrObjectNotFound
 	}
-	shard := shardOf(key, s.defaultShard)
+	shard, err := s.shardForKey(ctx, bucketID, key)
+	if err != nil {
+		return err
+	}
 	return s.s.Query(
 		`UPDATE objects SET manifest=? WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
 		nilIfEmptyBytes(raw),

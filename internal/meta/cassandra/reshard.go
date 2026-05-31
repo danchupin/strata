@@ -52,6 +52,9 @@ func (s *Store) StartReshard(ctx context.Context, bucketID uuid.UUID, target int
 	).WithContext(ctx).SerialConsistency(gocql.LocalSerial).ScanCAS(nil); err != nil {
 		return nil, err
 	}
+	// Drop the cached layout so in-flight object ops re-read and pick up the
+	// new shard_count_target (US-001 cache + US-002 transitional routing).
+	s.invalidateShardCache(bucketID)
 	return job, nil
 }
 
@@ -92,6 +95,9 @@ func (s *Store) CompleteReshard(ctx context.Context, bucketID uuid.UUID) error {
 	).WithContext(ctx).SerialConsistency(gocql.LocalSerial).ScanCAS(nil); err != nil {
 		return err
 	}
+	// Synchronously invalidate so the very next object op resolves the flipped
+	// active shard_count instead of a stale cached layout (US-001).
+	s.invalidateShardCache(bucketID)
 	return s.s.Query(
 		`DELETE FROM reshard_jobs WHERE bucket_id=?`,
 		gocqlUUID(bucketID),

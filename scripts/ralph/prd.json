@@ -1,222 +1,211 @@
 {
   "project": "Strata",
-  "branchName": "ralph/qa-production-readiness",
-  "description": "QA Production-Readiness Hardening \u2014 senior-QA critical pass over the S3 gateway. Audit existing coverage, close real gaps with focused tests (no duplication), fix every real bug found, and deliver a go/no-go production-readiness report. Value lands in three under-exercised dimensions atop near-ceiling functional correctness: adversarial security/auth, concurrency/race, durability/fault-injection. Backends in scope: TiKV + memory (canonical CI default), RADOS/ceph, S3-compatible (MinIO). Cassandra stays first-class in code but gated off the per-PR CI gate. Every story is verified by a CI run on the cycle branch \u2014 CI on Linux is the source of truth; many failure modes do not reproduce on a local macOS/lima box. FR-8 split rule: if a story cannot land in one Ralph iteration, split it into US-00N + a trailing story and record the split in progress.txt (US-009/US-010 already split; US-005, US-011 are next likely candidates). Source PRD at tasks/prd-qa-production-readiness.md.",
+  "branchName": "ralph/architecture-hardening",
+  "description": "Pre-production architecture hardening. A senior-architect critical review found Strata mostly production-ready (s3-tests 92.7%, QA GO) but with one load-bearing claim the code does not back - per-bucket object sharding + online reshard are advertised as the Cassandra-side answer to RGW's bucket-index ceiling, yet the Cassandra hot path ignores bucket.ShardCount (uses the process-global s.defaultShard at all 9 shardOf call sites) and internal/reshard/runJob is a skeleton that counts rows but never moves them. This cycle makes the claim true: real per-bucket sharding on Cassandra, a genuine online reshard that rewrites rows with a target-only-write + union-read + cleanup-before-flip transitional model, and TiKV+Cassandra parity (Cassandra contract back on a green required CI check). It also closes three accepted QA-cycle P2 residual risks: DeleteObjects direct test (R1), object-access policy-UNION-ACL semantics (R6), and a per-chunk CRC32C verified on the read path to fail loud on plaintext byte-flip (R9). Every behavioural fix ships with red->green proof. Resolved decisions: CRC32C on-by-default (STRATA_CHUNK_CRC_VERIFY); TiKV/memory reshard = immediate-complete no-op job (API success, UI disabled); target-only writes + union-read + post-flip cleanup; reshard console UI in-cycle; Cassandra contract via dedicated nightly job this cycle with per-PR-runner starvation root-cause as a tracked must-fix. Backends in scope: TiKV + memory (canonical per-PR CI), Cassandra (integration, dedicated job), RADOS/ceph + MinIO under integration tags. CI on Linux is the source of truth; many failure modes do not reproduce on a local macOS/lima box. If a story cannot land in one Ralph iteration, split it into US-00N + a trailing story and record the split in progress.txt. Source PRD at tasks/prd-architecture-hardening.md.",
   "userStories": [
     {
       "id": "US-001",
-      "title": "Coverage audit + readiness-report skeleton",
-      "description": "As a QA engineer, I need a baseline coverage map and a living report document so the release decision has evidence, not vibes.",
+      "title": "Cassandra hot path resolves per-bucket shard count",
+      "description": "As an operator who created a bucket with a non-default STRATA_BUCKET_SHARDS, I want reads and writes to that bucket to use its shard count, so the per-bucket sharding the docs promise actually takes effect.",
       "acceptanceCriteria": [
-        "Add a `make test-cover` target (or `scripts/qa/coverage.sh`) that runs `go test -cover ./...` on the default tag (TiKV + memory, no ceph) and emits a per-package coverage table to `tasks/qa-readiness-report.md`.",
-        "CGO note: `internal/s3api` (and any cgo-touching package) builds its tests with cgo; on a macOS box without the Xcode license accepted this fails with `build failed: Xcode license` \u2014 that is an env issue, not a code bug. The coverage numbers for those packages are taken from the CI (Linux) run, the source of truth (FR-4); the local target may `CGO_ENABLED=0`-skip them with a logged note rather than failing.",
-        "The measured per-package numbers are recorded verbatim in the report as the named baseline \u2014 these exact numbers become the ratchet-floor for the US-013 coverage gate (no aspirational targets invented later).",
-        "Report skeleton committed at `tasks/qa-readiness-report.md` with sections: Coverage by package, Dimension matrix (functional / auth / concurrency / durability), Residual risks, Go/No-Go verdict (verdict left PENDING until US-013).",
-        "Handler\u2192test matrix for `internal/s3api/` enumerated in the report; every handler `.go` is marked covered / thin / uncovered with the test file that covers it (by function reference, not filename).",
-        "No production code changed in this story (audit only).",
-        "`make build` + `make vet` pass.",
-        "Verify via a CI run on the cycle branch (the coverage job is green)."
+        "ALL nine shardOf(key, s.defaultShard) call sites in internal/meta/cassandra/store.go resolve the bucket's ShardCount instead of the global: PutObject:463, GetObject:587, DeleteObject:752, SetObjectReplicationStatus:1887, resolveVersionID:2408 (CRITICAL - resolves ?versionId; missing it 404s every versioned point-read on a non-default bucket), UpdateObjectSSEWrap:4118, and the two further object-mutation sites at :4167 and :4198",
+        "The three list/scan sites shardCount := s.defaultShard (ListObjects:820, ListObjectVersions:919) and the helpers bucketIsEmpty:357 / loop :1042 / SampleBucketShardStats:1142 likewise resolve the bucket's ShardCount",
+        "A grep assertion in review confirms no remaining s.defaultShard on any object-addressing path (missing any one site reintroduces the 404 bug)",
+        "A shard-count resolver cache keyed on bucketID with a short TTL avoids a buckets round-trip on every object op; cache miss falls back to a read; the cache carries BOTH ShardCount (active) and TargetShardCount so in-flight writers route without a second lookup; CompleteReshard invalidates the entry synchronously",
+        "Steady-state only (no in-flight reshard transition in this story): a bucket created with shard_count=128 round-trips PUT->GET->LIST->DELETE correctly; a bucket with shard_count=16 likewise; both differ from the process default",
+        "TiKV + memory backends unchanged (TiKV is range-scan, shard-agnostic)",
+        "New contract case in internal/meta/storetest proves non-default per-bucket shard count round-trips (memory always-on; Cassandra leg under -tags integration)",
+        "make vet passes",
+        "Tests pass"
       ],
       "priority": 1,
       "passes": true,
-      "notes": "Coverage baseline measured (49 pkgs local; 5 env-blocked deferred to CI). make test-cover + scripts/qa/coverage.sh + CI coverage job added. Report at tasks/qa-readiness-report.md with handler->test matrix (40 covered/2 thin/1 uncovered)."
+      "notes": "All 12 object-addressing sites in cassandra/store.go now resolve the bucket's ShardCount via bucketShardCounts (short-TTL cache, carries active+target, invalidated synchronously by StartReshard/CompleteReshard). shardForKey helper replaces shardOf(key,s.defaultShard) at the 9 mutation/point-read sites; the 3 list/scan sites + AllObjectVersions + SampleBucketShardStats fallback + bucketIsEmpty resolve active count. grep confirms no s.defaultShard on object-addressing paths (remaining uses: comments, CreateBucket INSERT, legacy<=0 guards). Generic contract case caseNonDefaultShardRoundTrip (memory+tikv+cassandra). Discriminating red/green proof: integration TestCassandraPerBucketShardResolution — two stores over same keyspace, writer default=128/16, reader default=64, reader must resolve stored count or 404. make vet + memory suite green locally; cassandra+tikv legs under integration/containers (CI). Verified locally CGO_ENABLED=0 on darwin (cgo blocked per progress patterns)."
     },
     {
       "id": "US-002",
-      "title": "RFC 7232 conditional-request test matrix",
-      "description": "As a QA engineer, I need conditional requests covered, because `internal/s3api/conditional.go` currently has zero direct tests and these control read-after-write and lost-update safety for clients.",
+      "title": "Reshard transitional read/write model (meta contract)",
+      "description": "As the system, while a reshard job is in flight I must serve a stable key set - every key visible before the job started stays visible throughout - so clients see no gaps or duplicates during a resize.",
       "acceptanceCriteria": [
-        "New `internal/s3api/conditional_test.go` exercises GET + HEAD with `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`: strong-ETag match/mismatch, `*` wildcard, multi-value lists, and the precedence rules (If-Match over If-Modified-Since per RFC 7232 \u00a76).",
-        "PUT-side `If-Match` / `If-None-Match` (lost-update + create-if-absent) paths covered, including the `If-None-Match: *` overwrite-rejection (412).",
-        "Assert exact status codes: 200 / 206 / 304 / 412 for each branch.",
-        "Any divergence from AWS behaviour found is fixed in `conditional.go` (or `putObject`) in this story, or filed as a `ROADMAP.md` P-item if it cannot be fixed in one iteration.",
-        "Does NOT duplicate `range_test.go`; reuses `newHarness(t)`.",
-        "`make test` passes locally; verify via a CI run on the cycle branch."
+        "Transitional contract defined: while shard_count_target != 0, writes land in the target layout (fnv%target) and reads return the deduplicated union of source (fnv%active) and target partitions, target row wins on (key, version_id) collision",
+        "GetObject point lookups during a job probe both the source-shard and target-shard partition for the key and return the newest by version",
+        "ListObjects/ListObjectVersions during a job merge source-union-target with dedup so a half-migrated key is never double-emitted and never missing",
+        "A storetest contract case seeds a bucket, flips it into the in-flight state with rows split across both layouts, and asserts the listed/point-read key set equals the pre-flip set exactly",
+        "Power-of-two doubling invariant documented in code: target = 2*active, each old shard s maps to s or s+active; no three-way splits (meta.IsValidShardCount enforces power-of-two)",
+        "Memory backend (shard-agnostic flat map) returns the same key set - transitional model is a no-op but the contract test still passes",
+        "make vet passes",
+        "Tests pass"
       ],
       "priority": 2,
-      "passes": true,
-      "notes": "conditional_test.go added: GET/HEAD matrix (If-Match/If-None-Match/If-Modified-Since/If-Unmodified-Since, *, multi-value, precedence, 206 via Range) + single-PUT preconditions. BUG FOUND+FIXED in conditional.go: If-Unmodified-Since was evaluated even when If-Match present; RFC 7232 \u00a76 + AWS require If-Match to suppress If-Unmodified-Since (match+unmod-fail -> 200). Gated behind If-Match-absent else. R2 closed in report; ROADMAP P2 entry added (Done). All s3api tests green CGO_ENABLED=0 locally; CI is source of truth."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-003",
-      "title": "SigV4 adversarial auth matrix",
-      "description": "As a QA engineer, I need to prove SigV4 rejects every tampering class, because auth is the security boundary of the gateway.",
+      "title": "Reshard worker actually rewrites rows + cleanup",
+      "description": "As an operator resizing a hot bucket's shards, I want the reshard worker to physically move each row to its new partition and then flip the active shard count, so post-flip point-GET addresses the right partition.",
       "acceptanceCriteria": [
-        "Table-driven test in `internal/auth/` covering: bad signature, expired request (`X-Amz-Date` skew beyond tolerance), wrong region, wrong service, tampered canonical request (mutated header/path/query after signing), missing `Host`, missing `x-amz-content-sha256`, and unsigned-payload vs signed-payload mismatch \u2014 each asserting `ErrSignatureInvalid` (or the exact sentinel) and the resulting S3 `APIError` code.",
-        "Positive control: a correctly-signed request for each case passes (proves the negative is the tamper, not a setup error).",
-        "Extends the existing `internal/auth/sigv4_test.go` surface; does not duplicate cases already asserted there.",
-        "Any accepted-when-should-reject finding fixed in `internal/auth/` this story.",
-        "Verify via a CI run on the cycle branch."
+        "internal/reshard/reshard.go::runJob is rewritten: for each source partition scan rows; for every row whose fnv%target != fnv%active, copy it to the target partition (INSERT under the new layout); persist the LastKey watermark per batch for crash-resume",
+        "Ordering is cleanup-BEFORE-flip: while the job is in-flight (target != 0) union-read is active, so the worker first deletes each moved source-partition orphan, THEN CompleteReshard LWT-flips active = target and clears shard_count_target - flipping first would let post-flip listing double-emit the moved key",
+        "Cleanup is idempotent and crash-safe (re-running after a partial cleanup converges; no row deleted that the target does not already hold)",
+        "The flip itself is LWT (IF EXISTS) per the codebase LWT-on-LWT rule, or a quorum read can observe a stale shard_count; do not overclaim atomicity - move+flip is NOT one atomic op, only the flip is atomic",
+        "Red/green proof: seed a bucket with N keys at shard_count=64, run a 64->128 reshard to completion, then assert every key is reachable via point-GET (today keys whose new shard >= 64 would 404) and ListObjectVersions emits each key exactly once; capture the test failing against the skeleton, passing after",
+        "Versioned keys: every version of a key moves together; latest-version ordering preserved post-flip",
+        "make vet passes (Cassandra leg under -tags integration)",
+        "Tests pass"
       ],
       "priority": 3,
-      "passes": true,
-      "notes": "sigv4_adversarial_test.go added: TestSigV4_AdversarialMatrix (13 tamper classes \u2014 bad sig, past/future skew, wrong region, wrong service, tampered path/query/Host, missing Host, missing x-amz-content-sha256, missing x-amz-date, unsigned\u2194signed payload mismatch) each asserting the exact sentinel (ErrSignatureInvalid/ErrClockSkew/ErrMalformedAuth) + the documented S3 APIError code (SignatureDoesNotMatch/RequestTimeTooSkewed/AccessDenied) via wantS3Code mirror of s3api.WriteAuthDenied. TestSigV4_ValidVariantsPass = 7 positive controls (per-case baseline also re-asserts a valid request passes). signV4 helper reuses prod canonicalRequest/computeSignature; tampers diverge only the attacked field. NO bug found \u2014 auth rejects every class. No production code changed. Strata does NOT pin region/service server-side (self-consistent any-region request passes); the adversarial 'wrong region/service' = tampered Authorization scope vs original signature \u2192 mismatch. All green locally (non-cgo pkg); CI is source of truth."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-004",
-      "title": "Presigned + streaming chunk-signature adversarial",
-      "description": "As a QA engineer, I need presigned-URL and streaming-upload auth hardened against expiry, replay, and chain-HMAC tampering.",
+      "title": "Reshard semantics on TiKV + memory (immediate-complete no-op)",
+      "description": "As a developer, I want StartReshard/CompleteReshard to have defined, tested behaviour on every backend so the admin surface is backend-safe.",
       "acceptanceCriteria": [
-        "Presigned tests: expired `X-Amz-Expires`, future-dated, tampered signed query param, method mismatch (signed GET used for PUT), and a valid replay within the window (documents whether replay is permitted \u2014 AWS allows it).",
-        "Streaming tests (`internal/auth/streaming.go`, US-022 surface): broken chain-HMAC (mutated `prevSig`), out-of-order chunk, truncated final chunk, and `STREAMING-...-TRAILER` checksum mismatch \u2014 each rejected with the exact sentinel.",
-        "Reuses existing trailer fixtures (`STRATA_REGEN_TRAILER_FIXTURES` path); does not regenerate or duplicate them.",
-        "Any bug fixed in `internal/auth/` this story.",
-        "Verify via a CI run on the cycle branch."
+        "TiKV internal/meta/tikv/reshard.go::StartReshard today runs a REAL pessimistic-txn reshard flow (locks the bucket key, validates target > ShardCount, queues a job) - rework it to an immediate-complete no-op: StartReshard returns a job that RunOnce completes at once with zero rows moved (TiKV is range-scan, nothing to move); the old job-queueing path is removed/short-circuited",
+        "Memory backend internal/meta/memory/store.go:2898 StartReshard (already implemented) gets the same immediate-complete no-op semantics; shard-agnostic flat map keeps the key set intact before/during/after",
+        "meta.IsValidShardCount (power-of-two, n&(n-1)==0 at store.go:1429) still gates the target on all backends so an invalid target is rejected even where reshard is a no-op",
+        "Contract case asserts the no-op semantics on TiKV + memory: a reshard request leaves the full key set readable before, during, and after; a direct API/CLI caller gets success, not an error",
+        "docs/site/content/architecture/sharding.md updated: reshard applies to the Cassandra fan-out backend; TiKV needs no resharding (range scan)",
+        "make vet passes",
+        "Tests pass"
       ],
       "priority": 4,
-      "passes": true,
-      "notes": "presigned_adversarial_test.go: TestPresigned_AdversarialMatrix (expired X-Amz-Expires\u2192ErrClockSkew/RequestTimeTooSkewed, future-dated\u2192ErrClockSkew, tampered signed query param/path/SignedHeaders\u2192ErrSignatureInvalid/SignatureDoesNotMatch, method-mismatch GET\u2192PUT\u2192ErrSignatureInvalid) + TestPresigned_ValidVariantsPass (7 positive controls) + TestPresigned_ValidReplayWithinWindow (documents replay-within-window IS permitted \u2014 AWS parity, no server-side nonce \u2014 validated 3x). signPresigned helper mirrors validatePresigned exactly (canonicalQueryWithout(sig)\u2192canonicalRequestWithQuery over UNSIGNED-PAYLOAD\u2192computeSignature with full-ts reqDate). streaming_adversarial_test.go: TestStreamingReaderOutOfOrderChunkRejected (swapped wire order \u2192 chain mismatch \u2192 ErrSignatureInvalid) + TestStreamingReaderTruncatedChunkDataRejected (declared 64B, 10B present \u2192 io.ErrUnexpectedEOF, fails loud). Did NOT duplicate streaming_test.go (broken chain/mutated/missing-final/missing-sig/tampered-final) or streaming_trailer_test.go (trailer-sig + body-checksum mismatch, 4 algos); committed trailer fixtures reused, not regenerated. NO bug found \u2014 every presigned + streaming tamper class rejects with exact sentinel. No production code changed. Reused adv* creds/stubStore/newAdvMiddleware/wantS3Code from sigv4_adversarial_test.go (same package). All green locally (non-cgo pkg); CI is source of truth."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-005",
-      "title": "Anonymous + auth-mode enforcement matrix",
-      "description": "As a QA engineer, I need the auth-mode \u00d7 public-access matrix proven so the secure default cannot silently regress to open access. (FR-8 split candidate: if the full matrix overflows one iteration, split signed/anonymous halves.)",
+      "title": "Online-reshard admin endpoint (async) + concurrent-write smoke",
+      "description": "As an operator, I want to trigger a reshard and have it complete correctly while clients keep writing, proving the transitional model under load.",
       "acceptanceCriteria": [
-        "Matrix test over auth mode `{off (full-access), optional, required}` \u00d7 request `{anonymous, signed}` \u00d7 `{public-access-block on/off, bucket-policy grants anon, bucket/object ACL public-read}` asserting allow/deny per cell.",
-        "Explicitly asserts: `required` (default) denies all anonymous; `off` grants full access (dev-only, documented); `optional` honours ACL/policy for anon.",
-        "Asserts `public-access-block` overrides a permissive bucket policy (block wins).",
-        "Lives in `internal/s3api/` (reuses `newHarness`); does not duplicate `access.go` unit assertions already present elsewhere.",
-        "Any enforcement bug fixed this story.",
-        "Verify via a CI run on the cycle branch."
+        "Existing endpoint reworked not built fresh: adminBucketReshard (internal/s3api/admin.go:343) today drives the reshard synchronously inline (worker.RunOnce in the request goroutine) - wrong once US-003 moves real data (a 64->128 reshard of a large bucket would block the HTTP request for minutes/hours); split into a trigger (queue the job + return a job id immediately) + a separate progress read (job watermark / % complete / state)",
+        "Async drive: reshard is NOT a registered tick-worker today (absent from cmd/strata/workers/; there is no --workers=reshard path - do not assume one); either (a recommended) register a real leader-elected reshard background worker that picks up queued jobs and update the CLAUDE.md note, or (b) run RunOnce in a server-managed goroutine keyed off the job row",
+        "admin: audit stamp on the trigger (endpoint currently has no audit override - add it per the CLAUDE.md 'every new admin write' rule)",
+        "GetReshardJob (already on meta.Store) backs the progress read on all backends",
+        "Smoke harness scripts/smoke-reshard.sh + make smoke-reshard against the Cassandra profile: seed a bucket, kick a 64->128 reshard, drive concurrent PUT/GET/DELETE throughout, assert (a) no client sees a 5xx or spurious 404 during the job, (b) the key set is identical before and after, (c) post-flip point-GET hits the new layout",
+        "Crash-resume leg: kill the worker mid-job, restart, confirm it resumes from the watermark and still converges to a correct key set",
+        "make vet passes; smoke documented in the operator runbook",
+        "Tests pass"
       ],
       "priority": 5,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-006",
-      "title": "SSE negative + key-mismatch + rotation hardening",
-      "description": "As a QA engineer, I need encryption failure paths covered, not just happy-path round-trips, so a misconfigured key never silently returns plaintext or the wrong object.",
+      "title": "Reshard progress in the web console",
+      "description": "As an operator, I want to start and watch a reshard from the console - mirroring the existing drain-progress UX - so the feature is not server-only.",
       "acceptanceCriteria": [
-        "Negative tests added (extending `sse_c_test.go` / `sse_object_test.go`, no duplication of happy-path round-trips): SSE-C GET with wrong customer key \u2192 403; SSE-C with missing/short key \u2192 400; SSE-KMS unwrap with wrong key id \u2192 maps to `ErrKeyIDMismatch` (the `IncorrectKeyException` path).",
-        "Multipart SSE: complete a multipart upload under SSE-KMS and assert each part decrypts via the per-part locator (`Manifest.PartChunkCounts`).",
-        "Rotation: a `strata admin rewrap` to a new key id followed by a GET still decrypts (reuses the rotation integration test harness, MinIO KMS + `internal/crypto/kms` fake).",
-        "Verify via a CI run on the cycle branch (integration-tagged, MinIO + KMS containers)."
+        "Bucket detail surfaces shard count + a Reshard action (target = next power-of-two, typed-confirm) when the backend supports it; on TiKV the button is disabled with an explanatory tooltip 'range-scan backend needs no resharding' (API = no-op success, UI = disabled, both consistent)",
+        "A progress indicator reads the US-005 progress endpoint (state + % complete + ETA) reusing the DrainProgressBar-style component pattern",
+        "Playwright spec covers: trigger -> in-progress -> complete, plus the TiKV-disabled state",
+        "Typecheck/lint passes",
+        "Verify in browser using dev-browser skill"
       ],
       "priority": 6,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-007",
-      "title": "Multipart concurrency race tests",
-      "description": "As a QA engineer, I need multipart races covered under `-race`, because concurrent complete/abort is where LWT correctness is easiest to break.",
+      "title": "Direct test matrix for DeleteObjects (closes R1)",
+      "description": "As a maintainer, I want the multi-object delete handler directly tested so its batch/partial-failure/versioned semantics are pinned, not just exercised incidentally by the race workload.",
       "acceptanceCriteria": [
-        "New scenario in `internal/racetest/` (extends `workload.go`; does not fork a parallel harness): N goroutines racing `CompleteMultipartUpload` + `AbortMultipartUpload` on the same upload id \u2014 exactly one Complete wins, the rest get `ErrMultipartInProgress`/`NoSuchUpload`, no double object row, no orphaned chunks left un-GC'd.",
-        "Concurrent uploads of the same key by different upload ids resolve to a single latest object with a consistent manifest.",
-        "Runs green under `go test -race` on TiKV + memory backends.",
-        "Any race/correctness bug fixed in the handler or `meta.Store` this story.",
-        "Verify via a CI run on the cycle branch (the `-race` job covers it)."
+        "Table-driven handler test over newHarness covering: quiet vs verbose mode, mixed success + NoSuchKey rows, the 1000-key cap (1001 -> error), malformed <Delete> body, and the <DeleteResult>/per-key <Error> wire shape",
+        "Versioned-bucket leg: unversioned-style delete creates a delete marker; explicit ?versionId removes a specific version; both reflected in the response rows",
+        "Tests fail against any deliberately-broken assertion (sanity), pass on main",
+        "ROADMAP R1 entry close-flipped with the commit sha",
+        "make vet passes",
+        "Tests pass"
       ],
       "priority": 7,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-008",
-      "title": "Versioning + LWT/CAS contention races",
-      "description": "As a QA engineer, I need versioning and CAS contention covered so concurrent writers cannot corrupt the version chain or lose updates.",
+      "title": "Object-access policy UNION ACL semantics (closes R6)",
+      "description": "As an S3 client, I want a bucket policy granting me s3:GetObject to actually grant access even when the object ACL is private - matching AWS, where policy and ACL are a union, not an intersection.",
       "acceptanceCriteria": [
-        "Race scenario: concurrent `PutObject` + `DeleteObject` (delete-marker) on a versioned key \u2014 the version chain stays monotonic, `IsLatest` is held by exactly one row, and `?versionId=null` resolves deterministically.",
-        "CAS contention: concurrent `SetObjectStorage` (lifecycle-transition vs client overwrite) \u2014 the loser's chunks land in the GC queue, the winner's manifest is the one read back (the documented lifecycle-CAS invariant).",
-        "Suspended-versioning replace-null path covered under contention (`VersioningSuspendedReplaceNull` semantics) on TiKV + memory.",
-        "Runs green under `-race`; any bug fixed this story.",
-        "Verify via a CI run on the cycle branch."
+        "requireObjectAccess (internal/s3api/access.go:104) is changed from policy-INTERSECT-ACL to policy-UNION-ACL: an explicit policy Allow grants access regardless of the ACL gate (and vice-versa), while an explicit policy Deny still wins (AWS precedence: explicit deny > allow)",
+        "PublicAccessBlock interaction preserved: RestrictPublicBuckets / IgnorePublicAcls still suppress the respective public grant (QA-cycle US-005 PAB tests must not regress)",
+        "Red/green proof: a test where an anonymous/non-owner GET is allowed by bucket policy but denied by a private ACL now returns 200 (was 403); TestPAB_* and the existing policy/ACL gate matrices stay green",
+        "Fixture rework: existing TestPolicyGate_* pass today only because the in-memory harness owner-matches the anonymous identity - flip to a genuine non-owner anon principal exercising the union; the owner-full-control path and the explicit-Deny-wins precedence each get a direct case (security-sensitive widening - prove it does not grant beyond AWS)",
+        "ROADMAP R6 entry close-flipped with the commit sha",
+        "make vet passes",
+        "Tests pass"
       ],
       "priority": 8,
-      "passes": true,
-      "notes": "versioning_race.go added: RunVersioningRaceScenario wired via TestRaceVersioningMemory (always-on, -race CI) + TestRaceVersioningTiKV (integration). (1) concurrent PUT+DELETE-marker on versioned key -> chain monotonic, exactly 1 IsLatest, no 5xx. (2) SetObjectStorage CAS contention mirrors internal/lifecycle/worker.go: N racers read same expectedClass, each writes fresh manifest under distinct newClass, flip via LWT CAS -> exactly 1 applies, read-back manifest+class is winner's, every loser's fresh chunks + winner's superseded chunks land in GC queue (lifecycle-CAS invariant), no orphans. (3) suspended replace-null under contention (PUT vs DeleteObjectNullReplacement) -> at most 1 null-versioned row, exactly 1 IsLatest, GET ?versionId=null deterministic across repeated reads (empty bodies keep sub-scenario chunk-free so global orphan check stays clean). BUG FOUND+FIXED (P2/R8): GET|HEAD ?versionId=<delete-marker> returned 500 (delete marker has nil manifest -> GetChunks(nil) errored) instead of AWS 405 MethodNotAllowed + x-amz-delete-marker:true. Guarded getObject on o.IsDeleteMarker (server.go, new ErrMethodNotAllowed sentinel in errors.go). Pinned by TestGetDeleteMarkerByVersionIDReturns405. Did NOT fork harness \u2014 reused racetest Fixture/keyVersions/mustBucketID/CollectManifestOIDs. Memory makes IsLatest structural (head==latest); real LWT contention = TiKV integration. -race itself = CI Linux (local cgo blocked). Green CGO0 x3 locally + full s3api+racetest suite green; CI is source of truth."
-    },
-    {
-      "id": "US-009",
-      "title": "Drain stop-write invariant under concurrent load",
-      "description": "As a QA engineer, I need the drain stop-write invariant proven under live traffic, because evacuation is a production-critical, hard-to-reverse operation. (Split from the original combined drain+rebalance story \u2014 too large for one iteration; the mover is US-010.)",
-      "acceptanceCriteria": [
-        "Integration test: mark a cluster `evacuating`, fire concurrent PUTs at it \u2192 every PUT gets `503 DrainRefused` + `Retry-After: 300`; reads / deletes / HEAD keep working (the always-strict drain invariant).",
-        "An in-flight multipart session bound to the draining cluster survives to completion (routing recovered from `BackendUploadID`, never re-picks).",
-        "`deregister_ready` does NOT flip to true while a multipart session is still bound to the cluster (the `ListMultipartUploadsByCluster` safety gate).",
-        "Verify via a CI run on the cycle branch (integration + e2e jobs)."
-      ],
-      "priority": 9,
-      "passes": true,
+      "passes": false,
       "notes": ""
     },
     {
-      "id": "US-010",
-      "title": "Rebalance mover correctness under load",
-      "description": "As a QA engineer, I need the rebalance mover proven to move chunks correctly while traffic flows, so evacuation never loses or duplicates data. (Split from US-009.)",
+      "id": "US-009",
+      "title": "Per-chunk CRC32C on the read path, fail-loud (closes R9)",
+      "description": "As a data-integrity-conscious operator, I want a flipped byte in a plaintext (non-SSE) chunk to fail the read loudly instead of returning a corrupted 200, so silent at-rest corruption is detectable.",
       "acceptanceCriteria": [
-        "Extends `internal/rebalance/s3_mover_integration_test.go` (and the RADOS mover path) \u2014 no duplication of the existing single-pass move test.",
-        "Under concurrent client writes, the mover moves chunks with correct manifest CAS: the winner's locator is read back, CAS losers' chunks land in the GC queue (the documented mover invariant).",
-        "Old source keys are queued in the `_by_cluster` GC table after the move; the object body is readable on the destination cluster afterwards.",
-        "Mover refuses moves into a draining or >90 %-full cluster (the safety rails).",
-        "Verify via a CI run on the cycle branch (integration + e2e jobs)."
+        "data.ChunkRef (internal/data/manifest.go:102, proto message ChunkRef internal/data/manifest.proto:54) carries a per-chunk CRC32C checksum, set on PutChunks, schema-additive: Go field + proto field 6 (fields 1-5 cluster/pool/namespace/oid/size are taken; 6 is next free) + JSON omitempty; legacy rows with no checksum decode to zero and skip verification (zero = absent, not CRC of zero bytes - guard the sentinel)",
+        "GetChunks verifies each chunk against its stored CRC32C and fails loud (data.ErrChecksumMismatch, surfaced as a 5xx / aborted stream - never a silent short or corrupted 200) on mismatch",
+        "Red/green proof: flip a byte in a stored plaintext chunk -> read fails loud (today it returns a corrupted 200); a clean chunk reads normally; SSE objects unaffected (AEAD already covers them)",
+        "Range-GET boundary handling: the CRC covers a whole 4 MiB chunk but a Range request reads first/last chunk partially - pick and implement one explicit behaviour: (a default) read the full boundary chunk to verify then slice, or (b) skip verification on the partial chunk and bump strata_chunk_crc_unverified_total{reason=range_boundary}; fully-covered interior chunks always verified; document + test it",
+        "Verification on by default with env opt-out STRATA_CHUNK_CRC_VERIFY (default on); hot-path cost measured/noted",
+        "ROADMAP R9 entry close-flipped with the commit sha",
+        "make vet passes (memory always-on; RADOS leg under ceph/integration if a backend hook is needed)",
+        "Tests pass"
       ],
-      "priority": 10,
-      "passes": true,
-      "notes": "TestRebalanceS3ConcurrentClientWrites (s3_mover_integration_test.go, MinIO x2) + chunk-based mirror TestRebalanceRADOSConcurrentClientWrites (rados_mover_integration_test.go, ceph&&integration). Both prove the mover CAS invariant under a racing client write: a client PUT rewrites the manifest locator on half the objects between plan emission and the mover's CAS -> buildUpdatedBackendManifest/buildUpdatedManifest sees br.Key/chunk.OID != plan SrcRef.OID -> ok=false -> CAS conflict -> mover's freshly-copied TARGET object discarded to GC, client's locator survives + body readable. Clean half moves normally: manifest->c2, body readable on c2, old c1 key in GC. GC accounting exact: 1 entry/object (clean->c1 source, raced->c2 loser), no leak, no double. Safety rails (refuse into draining/>90%-full target) ALREADY covered by worker_test.go (TestWorkerRefusesMovesIntoFullTarget 95%>0.90, TestWorkerSkipsDrainingTargetsAtPlanTime, TestWorkerMovesOutOfDrainingCluster, TestWorkerRefusesIntoDrainingDefenseInDepth) \u2014 NOT duplicated (safety rails are Worker.applySafetyRails; the mover receives an already-filtered plan). NO bug found \u2014 mover never clobbers a racing client write; CAS losers reclaimed. No production code changed. S3 test vets clean -tags integration (CGO0); RADOS test ceph&&integration (librados, CI-only). Verified on CI integration+e2e jobs (source of truth)."
-    },
-    {
-      "id": "US-011",
-      "title": "Chunk-loss / corruption / partial-write recovery",
-      "description": "As a QA engineer, I need to prove a damaged data plane fails loud, never silently returning truncated or wrong bytes. (FR-8 split candidate: if the multi-backend matrix overflows, split memory/default vs RADOS+MinIO integration halves.)",
-      "acceptanceCriteria": [
-        "Corruption test: a corrupted/missing chunk on GET returns an error (5xx/IO error), never a silently-truncated 200 body \u2014 for both RADOS (`CorruptFirstChunk` hook) and the S3/MinIO backend.",
-        "Partial-write rollback: a `PutChunks` that fails mid-stream does not leave a readable half-object (manifest is only committed after all chunks land).",
-        "ETag/size mismatch on read is detected (the racecheck verifier path) and surfaced, not swallowed.",
-        "NOTE: the memory backend already exposes `CorruptFirstChunk()` (`internal/data/memory/backend.go:148`). The skip at `internal/s3api/sse_object_test.go:207` is stale \u2014 it fires when the call returns false (no chunk stored), not because the method is absent. Fix the stale guard so the corruption assertion runs on the memory backend on the default CI tag (no container needed) in addition to RADOS + MinIO.",
-        "Corruption assertion runs on memory (default tag) + RADOS + MinIO (integration tag). No new corruption hook is added \u2014 memory's existing one is reused.",
-        "Verify via a CI run on the cycle branch (unit + integration + e2e jobs)."
-      ],
-      "priority": 11,
-      "passes": true,
-      "notes": "Memory(default-tag) + MinIO(integration) durability half; RADOS half SPLIT to US-011b (FR-8). (1) Stale-skip FIXED: sse_object_test.go TestSSECorruptedCiphertext now t.Fatal (was t.Skip) when CorruptFirstChunk()==false -> the corruption assertion always RUNS on the memory default tag; the SSE AEAD open over the flipped ciphertext fails loud (non-2xx), never a silent 200. The 1 KiB AES256 PUT guarantees a non-empty ciphertext chunk so the hook returns true; the old skip only ever masked a missing chunk (a PUT regression). (2) NEW internal/data/memory/corruption_test.go: TestPutChunksPartialWriteCommitsNoManifest (reader errors mid-stream after ~9 MiB -> PutChunks returns errMidStream + NIL manifest; gateway persists the meta row only after a non-nil manifest, so no readable half-object lands -- AC2 partial-write rollback), TestPutChunksContextCancelCommitsNoManifest (pre-cancelled ctx -> context.Canceled + nil manifest), TestGetChunksZeroByteManifestReadsClean (control: empty object clean EOF, proves the fail-loud asserts detect real damage not everything). (3) NEW internal/data/s3/corruption_integration_test.go TestGetChunksMissingBackendObjectFailsLoud (//go:build integration, MinIO): PutChunks -> read-clean sanity -> admin DeleteObject the backing object -> GetChunks(0,size) fails loud with data.ErrNotFound (surfaces at open via GetChunks->GetRange), never a usable reader yielding a short silent body. Exercises the manifest-level GetChunks path the GET handler drives; does NOT duplicate the existing b.Get/b.GetRange missing-key tests. (4) AC3 ETag/size-mismatch ALREADY covered by racetest verifier.go checkReadAfterWrite (flags 'GET returned an etag/size pair the workload never PUT' over a backoff window) -- referenced in report, no code. NO bug found -- fail-loud invariants hold on both backends. memory + s3api green locally CGO_ENABLED=0; MinIO test vets -tags integration, runs on CI (FR-4 source of truth). SPLIT rationale: RADOS has no CorruptFirstChunk hook (NOTE forbids adding one) and the ceph-tagged module has a pre-existing go-ceph build break (cephimpl backend.go:288 goceph.OperationNoFlag) -> RADOS corruption is best developed against live-ceph CI in US-011b."
-    },
-    {
-      "id": "US-011b",
-      "title": "RADOS chunk-loss / corruption fail-loud (integration)",
-      "description": "As a QA engineer, I need the RADOS data plane proven to fail loud on a corrupted/missing chunk, completing the US-011 split (memory + MinIO landed in US-011).",
-      "acceptanceCriteria": [
-        "Integration test (`ceph && integration`) in internal/data/rados (or cephimpl): a missing/corrupted chunk on GetChunks returns an error (data.ErrNotFound / IO error), never a silently-truncated success body. No new corruption hook is added (NOTE) -- corrupt via the backend's own Delete / direct librados overwrite of a stored chunk OID; memory's CorruptFirstChunk is reused only on the default tag.",
-        "Mirror the US-011 MinIO shape: seed -> read-clean sanity -> destroy the backing chunk -> GetChunks fails loud.",
-        "Resolve (or file as a ROADMAP P-item) the pre-existing ceph-tagged build break `cephimpl backend.go:288 goceph.OperationNoFlag` if it blocks the test-rados job.",
-        "Verify via the CI ceph e2e job (`make test-rados`) -- librados, CI-only; not buildable on a macOS/lima box."
-      ],
-      "priority": 11.5,
-      "passes": true,
+      "priority": 9,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-012",
-      "title": "GC + bucket_stats fan-out concurrency consistency",
-      "description": "As a QA engineer, I need the fan-out counters and GC queue proven consistent under concurrency, because these drive billing and storage reclaim.",
+      "title": "Cassandra ListObjects fan-out rebuilt for production",
+      "description": "As an operator running the Cassandra backend at scale, I want the listing fan-out to be bounded and consistent so concurrent listings don't exhaust goroutines/connections and reads have a defined consistency guarantee - not the silent cluster default.",
       "acceptanceCriteria": [
-        "Concurrent `BumpBucketStats` from N goroutines: `GetBucketStats` sums to the exact expected total (no lost increments), and the `strata_bucket_stats_shard_writes_total{shard}` distribution is non-degenerate (picker uses a fresh uuid per call, not a stable key).",
-        "Concurrent `EnqueueChunkDeletion` + `AckGCEntry` keep `gc_entries_v2` and `gc_entries_by_cluster` in lockstep (the dual-write invariant); no entry is acked twice, none leaked.",
-        "GC under per-shard fan-out deletes each chunk exactly once (no double-delete, no skip).",
-        "Runs on TiKV + memory; any bug fixed this story.",
-        "Verify via a CI run on the cycle branch."
+        "ListObjects/ListObjectVersions fan-out is bounded: today internal/meta/cassandra/store.go::ListObjects (~line 827) spawns shardCount goroutines per request with NO semaphore - at high per-bucket shard counts x concurrent list requests this explodes goroutines and the gocql connection pool; replace with a bounded worker pool (knob, sane default) so concurrency is capped regardless of shard count",
+        "Read consistency pinned explicitly (e.g. LOCAL_QUORUM) on the listing queries rather than relying on the cluster/session default - the listing read-consistency guarantee must not depend on an operator not having changed a Cassandra default",
+        "Memory budget bounded: the cursor/heap-merge holds at most boundedConcurrency x pageSize rows in flight, not shardCount x pageSize; documented",
+        "Pagination cookies still resume per-shard cursors correctly under the bounded pool (no page gap/dup when concurrency < shardCount)",
+        "Red/green proof: a test driving many concurrent ListObjects against a high-shard-count bucket asserts goroutine count stays bounded (no linear-in-shardCount blowup) and the listed key set is correct/stable; a consistency test asserts a write at LOCAL_QUORUM is visible to the very next list at LOCAL_QUORUM",
+        "TiKV unaffected (single ordered scan, no fan-out)",
+        "make vet passes (Cassandra leg under -tags integration)",
+        "Tests pass"
       ],
-      "priority": 12,
-      "passes": true,
-      "notes": "Test-only; no bug found. AC1 pre-covered (caseBucketStatsConcurrentBumps + TestBumpBucketStatsConcurrent). AC2 new caseGCConcurrentEnqueueAckLockstep (contract memory+tikv) + TestGCDualWriteConcurrentLockstep (tikv dual-write v2<->legacy). AC3 new TestWorker_FanOutExactlyOnceConcurrent (gc)."
+      "priority": 10,
+      "passes": false,
+      "notes": ""
     },
     {
-      "id": "US-013",
-      "title": "Production-readiness report + close-flip + final green CI",
-      "description": "As a QA engineer, I need to deliver the go/no-go verdict backed by a fully green CI run so the team can make the release call. Final story: produce the report, close-flip ROADMAP, re-baseline s3-tests (manual/local), and prepare the branch-protection apply as a manual post-merge step.",
+      "id": "US-010",
+      "title": "Cassandra integration tests back on a CI gate (parity)",
+      "description": "As a maintainer aiming for TiKV + Cassandra parity, I want the Cassandra meta.Store LWT/Paxos contract running on CI so Cassandra regressions are caught, not just found locally.",
       "acceptanceCriteria": [
-        "`tasks/qa-readiness-report.md` filled in: final coverage table (before/after), the dimension matrix all populated, every bug found+fixed listed with its commit, residual risks enumerated with severity, and an explicit GO / NO-GO verdict with justification.",
-        "`scripts/s3-tests/README.md` re-baselined if any functional story moved the pass rate; the 13 deliberate gaps re-confirmed as deliberate. NOTE: `s3-tests` is not a CI job \u2014 this re-baseline is run manually/locally against the compose stack (`scripts/s3-tests/run.sh`), not verified by the cycle CI run.",
-        "`ROADMAP.md` close-flipped for this cycle; any unfixable finding added as a P1/P2/P3 entry in the same commit.",
-        "A full CI run on the cycle branch is green end-to-end (all required checks).",
-        "The coverage table is promoted to a CI gate: a coverage job whose per-package floor is set to the US-001 baseline numbers (ratchet-floor \u2014 fail only on regression below the measured baseline, never an aspirational target) for the core packages (`internal/auth`, `internal/s3api`, `internal/meta/{memory,tikv}`, `internal/data/{memory,placement}`, `internal/crypto/kms`). The job runs green on the cycle branch before the gate is wired.",
-        "Branch-protection update is prepared as a documented manual post-merge step (the new check context + the `gh api` command), NOT executed by the autonomous cycle \u2014 headless Ralph lacks admin-API auth (same posture as the ci-green cycle, where protection was applied by hand after merge). The story's job is to make the check green and write the exact apply command into the report.",
-        "Verify via the final green CI run on the cycle branch."
+        "Cassandra contract round-trips (TestCassandraStoreContract/*, GCQueueShardFanOut, VersioningSuspendedReplaceNull, plus the new shard/reshard cases from US-001..US-005) run on a green required CI check - delivered this cycle as a dedicated job on a beefier runner because the A1b parity decision does not allow Cassandra to stay untested",
+        "Root-cause the per-PR-runner JVM/Paxos starvation (heap cap / readiness / per-test resource limits) so Cassandra can rejoin the per-PR gate; if the root-cause lands this cycle run it per-PR, else the dedicated job is required and the root-cause is a tracked owned ticket (not 'someday')",
+        "The job is green and its name is added to branch-protection required checks (documented as a manual post-merge step if admin token is needed, mirroring the QA-cycle coverage-gate step)",
+        "ROADMAP 'Cassandra integration tests gated off per-PR CI' entry close-flipped or updated with the new job reference",
+        "CI config validates locally; make vet unaffected"
       ],
-      "priority": 13,
-      "passes": true,
-      "notes": "GO verdict. Report \u00a75 filled; coverage ratchet gate wired (scripts/qa/coverage-{floors.txt,gate.sh} + CI coverage job + make coverage-gate); ROADMAP close-flipped (umbrella + R1/R9); s3-tests README re-confirmed 92.7%; branch-protection + tikv-floor documented as manual post-merge (report \u00a76)."
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "End-to-end pre-prod validation walkthrough",
+      "description": "As the release owner, I want one e2e pass that exercises the whole hardened path on both backends so the GO/NO-GO decision rests on observed behaviour, not story-by-story claims.",
+      "acceptanceCriteria": [
+        "A single documented walkthrough (script + runbook section) brings up both the TiKV-default and the Cassandra-profile labs and exercises: per-bucket non-default shard count, an online 64->128 reshard under concurrent writes (Cassandra), DeleteObjects batch + versioned, a policy-only anonymous GET (union semantics), and a plaintext chunk-corruption fail-loud",
+        "The console reshard UI (US-006) is driven in the same pass",
+        "Outcome captured in a short readiness note (pass/fail per leg) committed under tasks/",
+        "make vet passes; the new smokes pass",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
     }
   ]
 }
