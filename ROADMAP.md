@@ -89,7 +89,7 @@ adding more, prove what is there.
   (empty key → `MalformedXML`), the 1000-key cap (1001/zero/malformed → 400 `MalformedXML`,
   exactly-1000 boundary accepted), and a versioned-bucket leg (no-versionId delete creates a
   delete marker, explicit `?versionId` removes that version, deleting the marker's own version
-  restores the prior latest). Sanity-checked red against a deliberately-broken assertion. (commit `f7aea65`)
+  restores the prior latest). Sanity-checked red against a deliberately-broken assertion. (commit `ba7131d`)
 - **P3 — Plaintext (non-SSE) at-rest byte-flip is not detected on the read path (QA-cycle R9).**
   Neither the memory nor the RADOS data plane carries a per-chunk checksum verified on read,
   so a flipped byte inside a *plaintext* chunk returns a full-length corrupted `200`. Only
