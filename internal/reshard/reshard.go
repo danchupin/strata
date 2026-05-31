@@ -11,12 +11,13 @@
 //
 // The memory and TiKV backends are shard-agnostic (a flat map / a single
 // ordered range scan), so a key's physical placement does not depend on the
-// shard count: the worker pass against them moves no rows and is an
-// immediate-complete state-machine exercise that walks ListObjectVersions to
-// bound the scan with LastKey watermarks, then calls CompleteReshard. Cassandra
-// implements meta.ReshardMigrator and the worker drives MigrateReshardKey per
-// key to physically rewrite each row into the target partition (cleanup of the
-// source orphan inline) before the flip — US-003.
+// shard count: they do NOT implement meta.ReshardMigrator, the worker pass
+// against them moves no rows, and runJob completes the job AT ONCE — no
+// ListObjectVersions walk, no watermark writes — before calling CompleteReshard
+// (US-004 immediate-complete no-op). Cassandra implements meta.ReshardMigrator
+// and the worker drives MigrateReshardKey per key to physically rewrite each row
+// into the target partition (cleanup of the source orphan inline) before the
+// flip — US-003.
 package reshard
 
 import (
@@ -127,8 +128,9 @@ func (w *Worker) RunOnce(ctx context.Context) (Stats, error) {
 // layout, persisting a LastKey watermark after each batch so a crash resumes from
 // where it stopped. The row move is delegated to the backend's optional
 // meta.ReshardMigrator (Cassandra's sharded objects table); shard-agnostic
-// backends (memory, TiKV) don't implement it, so the walk moves nothing and the
-// caller proceeds straight to CompleteReshard — the immediate-complete no-op.
+// backends (memory, TiKV) don't implement it, so runJob returns immediately
+// without walking and the caller proceeds straight to CompleteReshard — the
+// immediate-complete no-op.
 //
 // Cleanup-before-flip: MigrateReshardKey copies a key's rows into the target and
 // deletes the source orphans inline, so once this walk drains every key the
@@ -139,7 +141,16 @@ func (w *Worker) runJob(ctx context.Context, job *meta.ReshardJob) (int, error) 
 	if job == nil {
 		return 0, nil
 	}
-	migrator, _ := w.cfg.Meta.(meta.ReshardMigrator)
+	migrator, ok := w.cfg.Meta.(meta.ReshardMigrator)
+	if !ok {
+		// Shard-agnostic backend (memory flat map, TiKV ordered range scan): a
+		// key's physical placement does not depend on the shard count, so there
+		// is nothing to relocate. Complete the job AT ONCE — skip the
+		// ListObjectVersions walk and the per-batch watermark writes entirely
+		// (US-004 immediate-complete no-op). The caller (RunOnce) proceeds
+		// straight to CompleteReshard, which flips the bucket's shard count.
+		return 0, nil
+	}
 	moved := 0
 	cursor := job.LastKey
 	lastMigrated := "" // last key handed to the migrator — dedups a key's versions

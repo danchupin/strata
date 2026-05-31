@@ -136,6 +136,116 @@ func TestReshardWorkerCompletes1000Objects(t *testing.T) {
 	}
 }
 
+// countingStore wraps a shard-agnostic backend and counts the two calls a
+// real-migration pass would make per batch — ListObjectVersions (the walk) and
+// UpdateReshardJob (the watermark write). A backend that does NOT implement
+// meta.ReshardMigrator must be completed AT ONCE, so neither call may fire.
+// Deliberately does NOT implement MigrateReshardKey — that is the property
+// under test.
+type countingStore struct {
+	meta.Store
+	listVersionsCalls int
+	updateJobCalls    int
+}
+
+func (c *countingStore) ListObjectVersions(ctx context.Context, bucketID uuid.UUID, opts meta.ListOptions) (*meta.ListVersionsResult, error) {
+	c.listVersionsCalls++
+	return c.Store.ListObjectVersions(ctx, bucketID, opts)
+}
+
+func (c *countingStore) UpdateReshardJob(ctx context.Context, job *meta.ReshardJob) error {
+	c.updateJobCalls++
+	return c.Store.UpdateReshardJob(ctx, job)
+}
+
+// TestReshardNoOpOnShardAgnosticBackend proves the US-004 immediate-complete
+// no-op: against a backend with no meta.ReshardMigrator (memory == TiKV
+// semantics) the worker completes the job moving zero rows AND without walking
+// the object set — no ListObjectVersions, no watermark write. The full key set
+// stays readable before, during, and after, and the bucket shard count flips.
+func TestReshardNoOpOnShardAgnosticBackend(t *testing.T) {
+	store := &countingStore{Store: memory.New()}
+	ctx := context.Background()
+	b, err := store.CreateBucket(ctx, "bkt", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+
+	const objects = 500
+	want := make(map[string]struct{}, objects)
+	for i := 0; i < objects; i++ {
+		key := fmt.Sprintf("k-%04d", i)
+		want[key] = struct{}{}
+		if err := store.PutObject(ctx, &meta.Object{
+			BucketID: b.ID, Key: key, StorageClass: "STANDARD", ETag: "e",
+			Mtime: time.Now().UTC(), Manifest: &data.Manifest{Class: "STANDARD"},
+		}, false); err != nil {
+			t.Fatalf("put %d: %v", i, err)
+		}
+	}
+
+	keySet := func(phase string) {
+		res, err := store.ListObjects(ctx, b.ID, meta.ListOptions{Limit: 5000})
+		if err != nil {
+			t.Fatalf("list %s: %v", phase, err)
+		}
+		got := make(map[string]struct{}, len(res.Objects))
+		for _, o := range res.Objects {
+			got[o.Key] = struct{}{}
+		}
+		if len(got) != len(want) {
+			t.Fatalf("key set %s: got %d keys want %d", phase, len(got), len(want))
+		}
+		for k := range want {
+			if _, ok := got[k]; !ok {
+				t.Fatalf("key set %s: missing %q", phase, k)
+			}
+		}
+	}
+
+	keySet("before")
+
+	if _, err := store.StartReshard(ctx, b.ID, 128); err != nil {
+		t.Fatalf("start reshard: %v", err)
+	}
+	// In flight: TargetShardCount stamped, active count unchanged, key set intact.
+	if got, _ := store.GetBucket(ctx, "bkt"); got.TargetShardCount != 128 || got.ShardCount != 64 {
+		t.Fatalf("during reshard: shard=%d target=%d want 64/128", got.ShardCount, got.TargetShardCount)
+	}
+	keySet("during")
+
+	worker, err := reshard.New(reshard.Config{Meta: store, BatchLimit: 100})
+	if err != nil {
+		t.Fatalf("worker new: %v", err)
+	}
+	stats, err := worker.RunOnce(ctx)
+	if err != nil {
+		t.Fatalf("worker run: %v", err)
+	}
+	if stats.JobsCompleted != 1 {
+		t.Fatalf("jobs completed: got %d want 1", stats.JobsCompleted)
+	}
+	if stats.ObjectsCopied != 0 {
+		t.Fatalf("objects copied: got %d want 0 (shard-agnostic backend moves nothing)", stats.ObjectsCopied)
+	}
+	// Immediate-complete: the job is finished without walking the object set or
+	// writing a watermark. A walk would fire these counters.
+	if store.listVersionsCalls != 0 {
+		t.Fatalf("ListObjectVersions called %d times — no-op reshard must not walk the object set", store.listVersionsCalls)
+	}
+	if store.updateJobCalls != 0 {
+		t.Fatalf("UpdateReshardJob called %d times — no-op reshard writes no watermark", store.updateJobCalls)
+	}
+
+	if got, _ := store.GetBucket(ctx, "bkt"); got.ShardCount != 128 || got.TargetShardCount != 0 {
+		t.Fatalf("post-reshard: shard=%d target=%d want 128/0", got.ShardCount, got.TargetShardCount)
+	}
+	if _, err := store.GetReshardJob(ctx, b.ID); err != meta.ErrReshardNotFound {
+		t.Fatalf("post-reshard job lookup: %v want ErrReshardNotFound", err)
+	}
+	keySet("after")
+}
+
 func TestReshardRejectsInvalidTarget(t *testing.T) {
 	store := memory.New()
 	ctx := context.Background()

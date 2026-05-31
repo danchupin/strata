@@ -104,12 +104,31 @@ and flips the bucket's `shardCount` once the rewrite catches up. The
 worker is driven synchronously via `/admin/bucket/reshard` or as a
 daemon under `STRATA_WORKERS=`.
 
+**Reshard only does physical work on the Cassandra fan-out backend.**
+The objects table is partitioned by `(bucket_id, shard)`, so changing
+`shardCount` moves a key to a different partition — that is the rewrite
+the worker performs. Cassandra implements `meta.ReshardMigrator`; the
+worker drives `MigrateReshardKey` per key.
+
 The power-of-two constraint matters here: doubling from `N=64` to
 `N=128` means every old shard either stays in place (keys whose
 `fnv32a(key) % 128 < 64`) or moves to its new sibling shard (`+ 64`).
 No three-way splits. The reshard worker exploits this — it reads each
 old shard once and either keeps the row in place or writes it to the
 sibling, never to two destinations.
+
+**TiKV and memory need no resharding.** TiKV addresses objects through
+a single globally-ordered range scan and the memory backend through a
+flat map — a key's physical placement does not depend on `shardCount`,
+so there is nothing to move. These backends do **not** implement
+`meta.ReshardMigrator`; `StartReshard` queues a job that the worker
+completes **at once with zero rows moved** — no `ListObjectVersions`
+walk, no watermark writes (US-004 immediate-complete no-op). A direct
+API/CLI caller gets success, not an error, and the full key set stays
+readable before, during, and after. The web console (US-006) disables
+the Reshard action on these backends — offering a button that does
+nothing is worse UX than hiding it; API = no-op success, UI = disabled,
+both consistent with "nothing to reshard".
 
 ## Per-bucket / per-shard observability
 

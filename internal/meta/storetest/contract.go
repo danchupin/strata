@@ -2020,8 +2020,28 @@ func caseOnlineReshard(t *testing.T, s meta.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	want := make(map[string]struct{}, 1000)
+	// assertKeySet proves the full key set is readable at a phase of the reshard
+	// — the US-004 invariant that a reshard (a no-op on the shard-agnostic memory
+	// / TiKV backends, a real row-move on Cassandra) never drops or duplicates a
+	// key before, during, or after.
+	assertKeySet := func(phase string) {
+		res, err := s.ListObjects(ctx, b.ID, meta.ListOptions{Limit: 5000})
+		if err != nil {
+			t.Fatalf("list %s: %v", phase, err)
+		}
+		if len(res.Objects) != len(want) {
+			t.Fatalf("list %s: got %d keys want %d", phase, len(res.Objects), len(want))
+		}
+		for _, o := range res.Objects {
+			if _, ok := want[o.Key]; !ok {
+				t.Fatalf("list %s: unexpected key %q", phase, o.Key)
+			}
+		}
+	}
 	for i := 0; i < 1000; i++ {
 		key := "k" + padInt(i, 4)
+		want[key] = struct{}{}
 		o := &meta.Object{
 			BucketID: b.ID, Key: key,
 			StorageClass: "STANDARD", ETag: "e", Size: 1,
@@ -2032,6 +2052,8 @@ func caseOnlineReshard(t *testing.T, s meta.Store) {
 			t.Fatalf("put %d: %v", i, err)
 		}
 	}
+
+	assertKeySet("before reshard")
 
 	bucket, _ := s.GetBucket(ctx, "rsh")
 	startTarget := bucket.ShardCount * 4
@@ -2055,13 +2077,7 @@ func caseOnlineReshard(t *testing.T, s meta.Store) {
 		t.Fatalf("target after start: got %d want %d", bucket.TargetShardCount, startTarget)
 	}
 
-	res, err := s.ListObjects(ctx, b.ID, meta.ListOptions{Limit: 5000})
-	if err != nil {
-		t.Fatalf("list during reshard: %v", err)
-	}
-	if len(res.Objects) != 1000 {
-		t.Fatalf("list during reshard: %d want 1000", len(res.Objects))
-	}
+	assertKeySet("during reshard")
 
 	jobs, err := s.ListReshardJobs(ctx)
 	if err != nil || len(jobs) != 1 {
@@ -2083,10 +2099,7 @@ func caseOnlineReshard(t *testing.T, s meta.Store) {
 		t.Fatalf("post-complete get: %v want ErrReshardNotFound", err)
 	}
 
-	res, err = s.ListObjects(ctx, b.ID, meta.ListOptions{Limit: 5000})
-	if err != nil || len(res.Objects) != 1000 {
-		t.Fatalf("list after reshard: err=%v len=%d", err, len(res.Objects))
-	}
+	assertKeySet("after reshard")
 
 	if _, err := s.StartReshard(ctx, b.ID, 7); err != meta.ErrReshardInvalidTarget {
 		t.Fatalf("non-power-of-two target: %v want ErrReshardInvalidTarget", err)

@@ -72,8 +72,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Immediate-complete no-op realized in worker runJob: short-circuits (no walk, no watermark) when backend has no meta.ReshardMigrator (memory/TiKV). StartReshard queueing kept intentionally — decision #4 requires a job for RunOnce to complete, and the shared caseOnlineReshard contract (green on all backends) asserts target-stamp + ErrReshardInProgress + flip. Red/green proven (6->0 ListObjectVersions calls)."
     },
     {
       "id": "US-005",

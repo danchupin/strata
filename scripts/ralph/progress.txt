@@ -63,3 +63,52 @@ Cycle: ralph/architecture-hardening
   - cleanup-before-flip is the load-bearing ordering: MigrateReshardKey copies-THEN-deletes the source inline, so once the walk drains, the source layout holds no diverging row; CompleteReshard (LWT IF EXISTS) runs only after. Copy-first (not delete-first) is deliberate — delete-first opens a window where the key is in NEITHER partition (breaks US-002 stable-key-set). The trade is a named narrow race: a concurrent specific-version DELETE in the copy window can resurrect that version (ROADMAP P2, Known latent bugs).
   - A single in-process store still can't discriminate the post-reshard-404 bug for point-GET in a same-process test (writer+reader agree). The integration test seeds at DefaultShardCount=64, StartReshard(128), runs the REAL worker.RunOnce, then asserts post-flip point-GET — the skeleton (no row move) leaves the diverging half in shards [0,64) while fnv%128 addresses [64,128) → 404. That's the discriminator.
 ---
+
+## 2026-05-31 - US-004
+- Reshard semantics on TiKV + memory: immediate-complete no-op.
+- internal/reshard/reshard.go `runJob`: short-circuit when backend does NOT
+  implement meta.ReshardMigrator (memory flat map, TiKV range scan) — return
+  (0,nil) WITHOUT the ListObjectVersions walk or per-batch UpdateReshardJob
+  watermark writes. RunOnce then calls CompleteReshard → "completes at once,
+  zero rows moved". Package + runJob doc comments updated.
+- DESIGN CALL (important): did NOT gut TiKV/memory StartReshard despite AC1's
+  "old job-queueing path removed" wording. Decision #4 itself requires
+  "StartReshard returns a job that RunOnce completes", and the SHARED
+  storetest caseOnlineReshard (runs on memory+tikv+cassandra) asserts the full
+  state machine: job queued, TargetShardCount stamped, second start =>
+  ErrReshardInProgress, CompleteReshard flips+clears+deletes. Removing the
+  queue would break that green contract on the per-PR CI gate. The "no-op" is
+  a WORKER property (zero moved, no walk), not a StartReshard gutting. Honors
+  intent without weakening a shipped contract.
+- Tests:
+  - internal/reshard/reshard_test.go: new TestReshardNoOpOnShardAgnosticBackend
+    + countingStore (counts ListObjectVersions/UpdateReshardJob). Asserts
+    JobsCompleted=1, ObjectsCopied=0, listVersionsCalls=0, updateJobCalls=0,
+    ShardCount flips 64->128, full key set readable before/during/after.
+    RED/GREEN PROVEN: reverting the runJob short-circuit => 6 ListObjectVersions
+    calls (FAIL); with it => 0 (PASS).
+  - internal/meta/storetest/contract.go caseOnlineReshard: strengthened the
+    during/after count-only checks into full key-SET equality (assertKeySet)
+    + added an explicit "before reshard" snapshot. Additive, reuses harness.
+- docs/site/content/architecture/sharding.md: reshard does physical work only
+  on Cassandra fan-out; TiKV/memory shard-agnostic => no-op success, console
+  disabled (US-006).
+- AC3 (IsValidShardCount gate) already satisfied on both backends; covered by
+  existing TestReshardRejectsInvalidTarget (memory) + TestReshardStartInvalidTarget (tikv).
+- **Learnings for future iterations:**
+  - The reshard "no-op" lives in internal/reshard/reshard.go runJob (the only
+    place that can "complete at once"), NOT in StartReshard. StartReshard MUST
+    keep queueing + stamping TargetShardCount — caseOnlineReshard locks that in
+    on every backend.
+  - meta.ReshardMigrator is implemented ONLY by Cassandra. memory + TiKV rely on
+    the nil-migrator path. A `w.cfg.Meta.(meta.ReshardMigrator)` type-assert is
+    the backend discriminator.
+  - storetest.Run runs on memory, tikv, AND cassandra (cassandra+scylla
+    integration). A contract case that calls CompleteReshard WITHOUT migration
+    strands rows on Cassandra (source layout) — fine while US-010/US-012 keep
+    Cassandra off the per-PR gate, but don't add new after-flip-no-migration
+    assertions expecting Cassandra green.
+  - Local macOS: `make vet` / `go build ./...` fail on cgo (Xcode license +
+    gosigar under CGO_ENABLED=0). Validate pure-Go packages with
+    `CGO_ENABLED=0 go test ./internal/<pkg>/...`; CI Linux is source of truth.
+---
