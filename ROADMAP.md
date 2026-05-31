@@ -83,15 +83,13 @@ adding more, prove what is there.
   already correct (store returns `ErrObjectNotFound` → 404). Pinned by
   `TestGetDeleteMarkerByVersionIDReturns405` (GET + HEAD, Enabled TimeUUID marker + Suspended
   null marker) plus the `TestRaceVersioning{Memory,TiKV}` contention scenarios.
-- **P2 — `DeleteObjects` (multi-object delete) has no direct test (QA-cycle R1).** The
-  `internal/s3api/delete_objects.go` handler — batch delete, partial-failure rows, quiet
-  mode, versioned delete-marker creation — is only exercised indirectly through the
-  `internal/racetest` workload; there is no focused unit/contract matrix asserting the
-  `<Delete>` request → `<DeleteResult>` shape, per-key `<Error>` reporting, the 1000-key
-  cap, or versioned-vs-unversioned semantics. Surfaced + accepted (non-blocking) in the
-  `ralph/qa-production-readiness` cycle. Fix scope: a table-driven handler test over the
-  in-memory harness (`newHarness`) covering quiet/verbose, mixed success/NoSuchKey, and a
-  versioned bucket (delete-marker creation + explicit `?versionId`).
+- ~~**P2 — `DeleteObjects` (multi-object delete) has no direct test (QA-cycle R1).**~~ — **Done.**
+  `internal/s3api/delete_objects_test.go` adds a table-driven handler matrix over `newHarness`:
+  quiet vs verbose, idempotent existing+missing-key success rows, per-key `<Error>` wire shape
+  (empty key → `MalformedXML`), the 1000-key cap (1001/zero/malformed → 400 `MalformedXML`,
+  exactly-1000 boundary accepted), and a versioned-bucket leg (no-versionId delete creates a
+  delete marker, explicit `?versionId` removes that version, deleting the marker's own version
+  restores the prior latest). Sanity-checked red against a deliberately-broken assertion. (commit `f7aea65`)
 - **P3 — Plaintext (non-SSE) at-rest byte-flip is not detected on the read path (QA-cycle R9).**
   Neither the memory nor the RADOS data plane carries a per-chunk checksum verified on read,
   so a flipped byte inside a *plaintext* chunk returns a full-length corrupted `200`. Only
