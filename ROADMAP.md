@@ -220,6 +220,20 @@ adding more, prove what is there.
   source count until the resumed walk drains). CLI `strata admin bucket reshard --wait` polls progress to idle.
   End-to-end `make smoke-reshard` (`scripts/smoke-reshard.sh`) drives a 64→128 reshard under concurrent
   PUT/GET/DELETE on the Cassandra lab + a `docker restart` mid-job crash-resume leg.
+  **US-006 (web-console reshard UX) added:** the bucket-detail Distribution tab now hosts a `<BucketReshardPanel>`
+  that mirrors the drain-progress UX — a typed-confirm Reshard action (target defaults to the next power of two)
+  and a progress indicator that polls the reshard endpoint (queued → running with the `LastKey` cursor + elapsed
+  → idle/complete). New cookie-authenticated adminapi pair `GET|POST /admin/v1/buckets/{bucket}/reshard`
+  (`internal/adminapi/buckets_reshard.go`) carries a `supported` flag derived from the active meta backend
+  (`cassandra` ⇒ true; TiKV/memory ⇒ false): on a range-scan backend the action is disabled with the tooltip
+  "range-scan backend needs no resharding" (API stays a no-op success, UI stays disabled — both consistent). POST
+  stamps the `admin:BucketReshard` audit override. Proof: Go handler tests (idle/supported/queue/conflict/
+  invalid-target/not-found/audited) + Playwright `reshard-progress.spec.ts` (trigger → in-progress → complete on a
+  reshardable backend + the TiKV-disabled state) + `bucket-reshard-panel.test.mjs` (nextPowerOfTwo + state→label +
+  supported→enabled gating). NOTE: exact %-complete / numeric ETA are NOT surfaced — the US-005 progress endpoint
+  exposes only `state` + `LastKey` (no per-row migration counter), so the bar is honestly determinate at the
+  endpoints (queued primer / animated running / complete) with the watermark cursor + elapsed time as the
+  server-backed signals. A precise progress bar would need the worker to persist moved/total row counts (follow-up).
 
 - ~~**P0/P1 — Cycle C: supply-chain-security (govulncheck + trivy + gosec CI gates + Dependabot + SECURITY.md + first release tag + SLSA L3 provenance + SPDX SBOM + cosign signing + license audit).**~~ — **Done.** Shipped via `ralph/supply-chain-security` cycle (US-001..US-011). 3 parallel CI scanners gated (govulncheck HIGH+CRITICAL / trivy CRITICAL / gosec MEDIUM); license audit gates banned licenses (forbidden + restricted classes). Dependabot weekly for Go × 2 + Actions + npm + Docker (patch-only auto-merge, grouped per ecosystem). SECURITY.md with 90-day SLA + GHSA-only disclosure. First release tag `v0.0.1-alpha.1` published; `ghcr.io/danchupin/strata` image signed via cosign keyless OIDC + SLSA L3 provenance + SPDX SBOM (slsa-framework/slsa-github-generator reusable workflow + anchore/sbom-action), all six release jobs green (run 26639369076). Operator verify recipe at /operate/image-verification.md with Kyverno + Sigstore Policy admission control examples. Composite smoke `make smoke-supply-chain` (`scripts/smoke-supply-chain.sh`) exercises every gate end-to-end. Pre-launch hard cutover — no behavior change. (commit `f22ab7e`)
 

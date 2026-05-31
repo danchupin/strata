@@ -20,7 +20,7 @@
       ],
       "priority": 1,
       "passes": true,
-      "notes": "All 12 object-addressing sites in cassandra/store.go now resolve the bucket's ShardCount via bucketShardCounts (short-TTL cache, carries active+target, invalidated synchronously by StartReshard/CompleteReshard). shardForKey helper replaces shardOf(key,s.defaultShard) at the 9 mutation/point-read sites; the 3 list/scan sites + AllObjectVersions + SampleBucketShardStats fallback + bucketIsEmpty resolve active count. grep confirms no s.defaultShard on object-addressing paths (remaining uses: comments, CreateBucket INSERT, legacy<=0 guards). Generic contract case caseNonDefaultShardRoundTrip (memory+tikv+cassandra). Discriminating red/green proof: integration TestCassandraPerBucketShardResolution \u2014 two stores over same keyspace, writer default=128/16, reader default=64, reader must resolve stored count or 404. make vet + memory suite green locally; cassandra+tikv legs under integration/containers (CI). Verified locally CGO_ENABLED=0 on darwin (cgo blocked per progress patterns)."
+      "notes": "All 12 object-addressing sites in cassandra/store.go now resolve the bucket's ShardCount via bucketShardCounts (short-TTL cache, carries active+target, invalidated synchronously by StartReshard/CompleteReshard). shardForKey helper replaces shardOf(key,s.defaultShard) at the 9 mutation/point-read sites; the 3 list/scan sites + AllObjectVersions + SampleBucketShardStats fallback + bucketIsEmpty resolve active count. grep confirms no s.defaultShard on object-addressing paths (remaining uses: comments, CreateBucket INSERT, legacy<=0 guards). Generic contract case caseNonDefaultShardRoundTrip (memory+tikv+cassandra). Discriminating red/green proof: integration TestCassandraPerBucketShardResolution — two stores over same keyspace, writer default=128/16, reader default=64, reader must resolve stored count or 404. make vet + memory suite green locally; cassandra+tikv legs under integration/containers (CI). Verified locally CGO_ENABLED=0 on darwin (cgo blocked per progress patterns)."
     },
     {
       "id": "US-002",
@@ -56,7 +56,7 @@
       ],
       "priority": 3,
       "passes": true,
-      "notes": "Cassandra implements optional meta.ReshardMigrator (MigrateReshardKey): relocates every version row of a key src-shard\u2192dst-shard via INSERT \u2026 IF NOT EXISTS (MapScanCAS; never clobbers a newer concurrent target write) then deletes the source orphan \u2014 idempotent + crash-safe. New helpers scanAllVersionsAtShard + insertObjectRowAtShard (full-column copy, mirrors PutObject INSERT exactly, NO bucket_stats bump) + objectSelectCols const (scanObjectLimit1/scanObjectByVersion refactored onto it). internal/reshard/runJob rewritten: walks the in-flight union ListObjectVersions key-by-key, drives MigrateReshardKey per distinct key (dedup via lastMigrated) under a LastKey watermark with a forward-progress guard (inclusive marker + over-large-key), accumulates moved rows; RunOnce flips via LWT CompleteReshard ONLY after the walk drains (cleanup-before-flip). Memory/TiKV don't implement the interface \u2192 immediate-complete no-op (0 moved). Red/green proof: integration TestCassandraReshardWorkerMovesRows (64\u2192128, 300 unversioned + one 3-version key; post-flip every key point-GETs, LIST emits each once, all 3 versions reachable in order \u2014 RED against the row-walking skeleton that 404s the diverging half). Worker unit tests use a recordingStore meta.ReshardMigrator fake (dedup-per-key + watermark resume stay meaningful + green on memory). strata-correctness-reviewer: no blocking issues, all 5 verifications pass. Narrow known race (concurrent specific-version DELETE vs copy window) named in code + ROADMAP P2. make vet + reshard/memory/s3api suites green locally CGO_ENABLED=0; cassandra leg integration/CI."
+      "notes": "Cassandra implements optional meta.ReshardMigrator (MigrateReshardKey): relocates every version row of a key src-shard→dst-shard via INSERT … IF NOT EXISTS (MapScanCAS; never clobbers a newer concurrent target write) then deletes the source orphan — idempotent + crash-safe. New helpers scanAllVersionsAtShard + insertObjectRowAtShard (full-column copy, mirrors PutObject INSERT exactly, NO bucket_stats bump) + objectSelectCols const (scanObjectLimit1/scanObjectByVersion refactored onto it). internal/reshard/runJob rewritten: walks the in-flight union ListObjectVersions key-by-key, drives MigrateReshardKey per distinct key (dedup via lastMigrated) under a LastKey watermark with a forward-progress guard (inclusive marker + over-large-key), accumulates moved rows; RunOnce flips via LWT CompleteReshard ONLY after the walk drains (cleanup-before-flip). Memory/TiKV don't implement the interface → immediate-complete no-op (0 moved). Red/green proof: integration TestCassandraReshardWorkerMovesRows (64→128, 300 unversioned + one 3-version key; post-flip every key point-GETs, LIST emits each once, all 3 versions reachable in order — RED against the row-walking skeleton that 404s the diverging half). Worker unit tests use a recordingStore meta.ReshardMigrator fake (dedup-per-key + watermark resume stay meaningful + green on memory). strata-correctness-reviewer: no blocking issues, all 5 verifications pass. Narrow known race (concurrent specific-version DELETE vs copy window) named in code + ROADMAP P2. make vet + reshard/memory/s3api suites green locally CGO_ENABLED=0; cassandra leg integration/CI."
     },
     {
       "id": "US-004",
@@ -73,7 +73,7 @@
       ],
       "priority": 4,
       "passes": true,
-      "notes": "Immediate-complete no-op realized in worker runJob: short-circuits (no walk, no watermark) when backend has no meta.ReshardMigrator (memory/TiKV). StartReshard queueing kept intentionally \u2014 decision #4 requires a job for RunOnce to complete, and the shared caseOnlineReshard contract (green on all backends) asserts target-stamp + ErrReshardInProgress + flip. Red/green proven (6->0 ListObjectVersions calls)."
+      "notes": "Immediate-complete no-op realized in worker runJob: short-circuits (no walk, no watermark) when backend has no meta.ReshardMigrator (memory/TiKV). StartReshard queueing kept intentionally — decision #4 requires a job for RunOnce to complete, and the shared caseOnlineReshard contract (green on all backends) asserts target-stamp + ErrReshardInProgress + flip. Red/green proven (6->0 ListObjectVersions calls)."
     },
     {
       "id": "US-005",
@@ -105,7 +105,7 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

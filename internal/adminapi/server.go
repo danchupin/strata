@@ -480,6 +480,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/placement", s.handleBucketGetPlacement)
 	mux.HandleFunc("PUT /admin/v1/buckets/{bucket}/placement", s.handleBucketSetPlacement)
 	mux.HandleFunc("DELETE /admin/v1/buckets/{bucket}/placement", s.handleBucketDeletePlacement)
+	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/reshard", s.handleBucketGetReshard)
+	mux.HandleFunc("POST /admin/v1/buckets/{bucket}/reshard", s.handleBucketReshard)
 	mux.HandleFunc("POST /admin/v1/buckets/{bucket}/signing-key/rotate", s.handleBucketSigningKeyRotate)
 	mux.HandleFunc("GET /admin/v1/buckets/{bucket}/signing-key/status", s.handleBucketSigningKeyStatus)
 	mux.HandleFunc("DELETE /admin/v1/buckets/{bucket}/signing-key", s.handleBucketSigningKeyDelete)
