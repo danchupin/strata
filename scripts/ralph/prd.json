@@ -198,8 +198,8 @@
         "Verify via a CI run on the cycle branch."
       ],
       "priority": 12,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Test-only; no bug found. AC1 pre-covered (caseBucketStatsConcurrentBumps + TestBumpBucketStatsConcurrent). AC2 new caseGCConcurrentEnqueueAckLockstep (contract memory+tikv) + TestGCDualWriteConcurrentLockstep (tikv dual-write v2<->legacy). AC3 new TestWorker_FanOutExactlyOnceConcurrent (gc)."
     },
     {
       "id": "US-013",
