@@ -1,7 +1,7 @@
 {
   "project": "Strata",
   "branchName": "ralph/qa-production-readiness",
-  "description": "QA Production-Readiness Hardening — senior-QA critical pass over the S3 gateway. Audit existing coverage, close real gaps with focused tests (no duplication), fix every real bug found, and deliver a go/no-go production-readiness report. Value lands in three under-exercised dimensions atop near-ceiling functional correctness: adversarial security/auth, concurrency/race, durability/fault-injection. Backends in scope: TiKV + memory (canonical CI default), RADOS/ceph, S3-compatible (MinIO). Cassandra stays first-class in code but gated off the per-PR CI gate. Every story is verified by a CI run on the cycle branch — CI on Linux is the source of truth; many failure modes do not reproduce on a local macOS/lima box. FR-8 split rule: if a story cannot land in one Ralph iteration, split it into US-00N + a trailing story and record the split in progress.txt (US-009/US-010 already split; US-005, US-011 are next likely candidates). Source PRD at tasks/prd-qa-production-readiness.md.",
+  "description": "QA Production-Readiness Hardening \u2014 senior-QA critical pass over the S3 gateway. Audit existing coverage, close real gaps with focused tests (no duplication), fix every real bug found, and deliver a go/no-go production-readiness report. Value lands in three under-exercised dimensions atop near-ceiling functional correctness: adversarial security/auth, concurrency/race, durability/fault-injection. Backends in scope: TiKV + memory (canonical CI default), RADOS/ceph, S3-compatible (MinIO). Cassandra stays first-class in code but gated off the per-PR CI gate. Every story is verified by a CI run on the cycle branch \u2014 CI on Linux is the source of truth; many failure modes do not reproduce on a local macOS/lima box. FR-8 split rule: if a story cannot land in one Ralph iteration, split it into US-00N + a trailing story and record the split in progress.txt (US-009/US-010 already split; US-005, US-011 are next likely candidates). Source PRD at tasks/prd-qa-production-readiness.md.",
   "userStories": [
     {
       "id": "US-001",
@@ -9,10 +9,10 @@
       "description": "As a QA engineer, I need a baseline coverage map and a living report document so the release decision has evidence, not vibes.",
       "acceptanceCriteria": [
         "Add a `make test-cover` target (or `scripts/qa/coverage.sh`) that runs `go test -cover ./...` on the default tag (TiKV + memory, no ceph) and emits a per-package coverage table to `tasks/qa-readiness-report.md`.",
-        "CGO note: `internal/s3api` (and any cgo-touching package) builds its tests with cgo; on a macOS box without the Xcode license accepted this fails with `build failed: Xcode license` — that is an env issue, not a code bug. The coverage numbers for those packages are taken from the CI (Linux) run, the source of truth (FR-4); the local target may `CGO_ENABLED=0`-skip them with a logged note rather than failing.",
-        "The measured per-package numbers are recorded verbatim in the report as the named baseline — these exact numbers become the ratchet-floor for the US-013 coverage gate (no aspirational targets invented later).",
+        "CGO note: `internal/s3api` (and any cgo-touching package) builds its tests with cgo; on a macOS box without the Xcode license accepted this fails with `build failed: Xcode license` \u2014 that is an env issue, not a code bug. The coverage numbers for those packages are taken from the CI (Linux) run, the source of truth (FR-4); the local target may `CGO_ENABLED=0`-skip them with a logged note rather than failing.",
+        "The measured per-package numbers are recorded verbatim in the report as the named baseline \u2014 these exact numbers become the ratchet-floor for the US-013 coverage gate (no aspirational targets invented later).",
         "Report skeleton committed at `tasks/qa-readiness-report.md` with sections: Coverage by package, Dimension matrix (functional / auth / concurrency / durability), Residual risks, Go/No-Go verdict (verdict left PENDING until US-013).",
-        "Handler→test matrix for `internal/s3api/` enumerated in the report; every handler `.go` is marked covered / thin / uncovered with the test file that covers it (by function reference, not filename).",
+        "Handler\u2192test matrix for `internal/s3api/` enumerated in the report; every handler `.go` is marked covered / thin / uncovered with the test file that covers it (by function reference, not filename).",
         "No production code changed in this story (audit only).",
         "`make build` + `make vet` pass.",
         "Verify via a CI run on the cycle branch (the coverage job is green)."
@@ -26,7 +26,7 @@
       "title": "RFC 7232 conditional-request test matrix",
       "description": "As a QA engineer, I need conditional requests covered, because `internal/s3api/conditional.go` currently has zero direct tests and these control read-after-write and lost-update safety for clients.",
       "acceptanceCriteria": [
-        "New `internal/s3api/conditional_test.go` exercises GET + HEAD with `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`: strong-ETag match/mismatch, `*` wildcard, multi-value lists, and the precedence rules (If-Match over If-Modified-Since per RFC 7232 §6).",
+        "New `internal/s3api/conditional_test.go` exercises GET + HEAD with `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`: strong-ETag match/mismatch, `*` wildcard, multi-value lists, and the precedence rules (If-Match over If-Modified-Since per RFC 7232 \u00a76).",
         "PUT-side `If-Match` / `If-None-Match` (lost-update + create-if-absent) paths covered, including the `If-None-Match: *` overwrite-rejection (412).",
         "Assert exact status codes: 200 / 206 / 304 / 412 for each branch.",
         "Any divergence from AWS behaviour found is fixed in `conditional.go` (or `putObject`) in this story, or filed as a `ROADMAP.md` P-item if it cannot be fixed in one iteration.",
@@ -35,14 +35,14 @@
       ],
       "priority": 2,
       "passes": true,
-      "notes": "conditional_test.go added: GET/HEAD matrix (If-Match/If-None-Match/If-Modified-Since/If-Unmodified-Since, *, multi-value, precedence, 206 via Range) + single-PUT preconditions. BUG FOUND+FIXED in conditional.go: If-Unmodified-Since was evaluated even when If-Match present; RFC 7232 §6 + AWS require If-Match to suppress If-Unmodified-Since (match+unmod-fail -> 200). Gated behind If-Match-absent else. R2 closed in report; ROADMAP P2 entry added (Done). All s3api tests green CGO_ENABLED=0 locally; CI is source of truth."
+      "notes": "conditional_test.go added: GET/HEAD matrix (If-Match/If-None-Match/If-Modified-Since/If-Unmodified-Since, *, multi-value, precedence, 206 via Range) + single-PUT preconditions. BUG FOUND+FIXED in conditional.go: If-Unmodified-Since was evaluated even when If-Match present; RFC 7232 \u00a76 + AWS require If-Match to suppress If-Unmodified-Since (match+unmod-fail -> 200). Gated behind If-Match-absent else. R2 closed in report; ROADMAP P2 entry added (Done). All s3api tests green CGO_ENABLED=0 locally; CI is source of truth."
     },
     {
       "id": "US-003",
       "title": "SigV4 adversarial auth matrix",
       "description": "As a QA engineer, I need to prove SigV4 rejects every tampering class, because auth is the security boundary of the gateway.",
       "acceptanceCriteria": [
-        "Table-driven test in `internal/auth/` covering: bad signature, expired request (`X-Amz-Date` skew beyond tolerance), wrong region, wrong service, tampered canonical request (mutated header/path/query after signing), missing `Host`, missing `x-amz-content-sha256`, and unsigned-payload vs signed-payload mismatch — each asserting `ErrSignatureInvalid` (or the exact sentinel) and the resulting S3 `APIError` code.",
+        "Table-driven test in `internal/auth/` covering: bad signature, expired request (`X-Amz-Date` skew beyond tolerance), wrong region, wrong service, tampered canonical request (mutated header/path/query after signing), missing `Host`, missing `x-amz-content-sha256`, and unsigned-payload vs signed-payload mismatch \u2014 each asserting `ErrSignatureInvalid` (or the exact sentinel) and the resulting S3 `APIError` code.",
         "Positive control: a correctly-signed request for each case passes (proves the negative is the tamper, not a setup error).",
         "Extends the existing `internal/auth/sigv4_test.go` surface; does not duplicate cases already asserted there.",
         "Any accepted-when-should-reject finding fixed in `internal/auth/` this story.",
@@ -50,29 +50,29 @@
       ],
       "priority": 3,
       "passes": true,
-      "notes": "sigv4_adversarial_test.go added: TestSigV4_AdversarialMatrix (13 tamper classes — bad sig, past/future skew, wrong region, wrong service, tampered path/query/Host, missing Host, missing x-amz-content-sha256, missing x-amz-date, unsigned↔signed payload mismatch) each asserting the exact sentinel (ErrSignatureInvalid/ErrClockSkew/ErrMalformedAuth) + the documented S3 APIError code (SignatureDoesNotMatch/RequestTimeTooSkewed/AccessDenied) via wantS3Code mirror of s3api.WriteAuthDenied. TestSigV4_ValidVariantsPass = 7 positive controls (per-case baseline also re-asserts a valid request passes). signV4 helper reuses prod canonicalRequest/computeSignature; tampers diverge only the attacked field. NO bug found — auth rejects every class. No production code changed. Strata does NOT pin region/service server-side (self-consistent any-region request passes); the adversarial 'wrong region/service' = tampered Authorization scope vs original signature → mismatch. All green locally (non-cgo pkg); CI is source of truth."
+      "notes": "sigv4_adversarial_test.go added: TestSigV4_AdversarialMatrix (13 tamper classes \u2014 bad sig, past/future skew, wrong region, wrong service, tampered path/query/Host, missing Host, missing x-amz-content-sha256, missing x-amz-date, unsigned\u2194signed payload mismatch) each asserting the exact sentinel (ErrSignatureInvalid/ErrClockSkew/ErrMalformedAuth) + the documented S3 APIError code (SignatureDoesNotMatch/RequestTimeTooSkewed/AccessDenied) via wantS3Code mirror of s3api.WriteAuthDenied. TestSigV4_ValidVariantsPass = 7 positive controls (per-case baseline also re-asserts a valid request passes). signV4 helper reuses prod canonicalRequest/computeSignature; tampers diverge only the attacked field. NO bug found \u2014 auth rejects every class. No production code changed. Strata does NOT pin region/service server-side (self-consistent any-region request passes); the adversarial 'wrong region/service' = tampered Authorization scope vs original signature \u2192 mismatch. All green locally (non-cgo pkg); CI is source of truth."
     },
     {
       "id": "US-004",
       "title": "Presigned + streaming chunk-signature adversarial",
       "description": "As a QA engineer, I need presigned-URL and streaming-upload auth hardened against expiry, replay, and chain-HMAC tampering.",
       "acceptanceCriteria": [
-        "Presigned tests: expired `X-Amz-Expires`, future-dated, tampered signed query param, method mismatch (signed GET used for PUT), and a valid replay within the window (documents whether replay is permitted — AWS allows it).",
-        "Streaming tests (`internal/auth/streaming.go`, US-022 surface): broken chain-HMAC (mutated `prevSig`), out-of-order chunk, truncated final chunk, and `STREAMING-...-TRAILER` checksum mismatch — each rejected with the exact sentinel.",
+        "Presigned tests: expired `X-Amz-Expires`, future-dated, tampered signed query param, method mismatch (signed GET used for PUT), and a valid replay within the window (documents whether replay is permitted \u2014 AWS allows it).",
+        "Streaming tests (`internal/auth/streaming.go`, US-022 surface): broken chain-HMAC (mutated `prevSig`), out-of-order chunk, truncated final chunk, and `STREAMING-...-TRAILER` checksum mismatch \u2014 each rejected with the exact sentinel.",
         "Reuses existing trailer fixtures (`STRATA_REGEN_TRAILER_FIXTURES` path); does not regenerate or duplicate them.",
         "Any bug fixed in `internal/auth/` this story.",
         "Verify via a CI run on the cycle branch."
       ],
       "priority": 4,
       "passes": true,
-      "notes": "presigned_adversarial_test.go: TestPresigned_AdversarialMatrix (expired X-Amz-Expires→ErrClockSkew/RequestTimeTooSkewed, future-dated→ErrClockSkew, tampered signed query param/path/SignedHeaders→ErrSignatureInvalid/SignatureDoesNotMatch, method-mismatch GET→PUT→ErrSignatureInvalid) + TestPresigned_ValidVariantsPass (7 positive controls) + TestPresigned_ValidReplayWithinWindow (documents replay-within-window IS permitted — AWS parity, no server-side nonce — validated 3x). signPresigned helper mirrors validatePresigned exactly (canonicalQueryWithout(sig)→canonicalRequestWithQuery over UNSIGNED-PAYLOAD→computeSignature with full-ts reqDate). streaming_adversarial_test.go: TestStreamingReaderOutOfOrderChunkRejected (swapped wire order → chain mismatch → ErrSignatureInvalid) + TestStreamingReaderTruncatedChunkDataRejected (declared 64B, 10B present → io.ErrUnexpectedEOF, fails loud). Did NOT duplicate streaming_test.go (broken chain/mutated/missing-final/missing-sig/tampered-final) or streaming_trailer_test.go (trailer-sig + body-checksum mismatch, 4 algos); committed trailer fixtures reused, not regenerated. NO bug found — every presigned + streaming tamper class rejects with exact sentinel. No production code changed. Reused adv* creds/stubStore/newAdvMiddleware/wantS3Code from sigv4_adversarial_test.go (same package). All green locally (non-cgo pkg); CI is source of truth."
+      "notes": "presigned_adversarial_test.go: TestPresigned_AdversarialMatrix (expired X-Amz-Expires\u2192ErrClockSkew/RequestTimeTooSkewed, future-dated\u2192ErrClockSkew, tampered signed query param/path/SignedHeaders\u2192ErrSignatureInvalid/SignatureDoesNotMatch, method-mismatch GET\u2192PUT\u2192ErrSignatureInvalid) + TestPresigned_ValidVariantsPass (7 positive controls) + TestPresigned_ValidReplayWithinWindow (documents replay-within-window IS permitted \u2014 AWS parity, no server-side nonce \u2014 validated 3x). signPresigned helper mirrors validatePresigned exactly (canonicalQueryWithout(sig)\u2192canonicalRequestWithQuery over UNSIGNED-PAYLOAD\u2192computeSignature with full-ts reqDate). streaming_adversarial_test.go: TestStreamingReaderOutOfOrderChunkRejected (swapped wire order \u2192 chain mismatch \u2192 ErrSignatureInvalid) + TestStreamingReaderTruncatedChunkDataRejected (declared 64B, 10B present \u2192 io.ErrUnexpectedEOF, fails loud). Did NOT duplicate streaming_test.go (broken chain/mutated/missing-final/missing-sig/tampered-final) or streaming_trailer_test.go (trailer-sig + body-checksum mismatch, 4 algos); committed trailer fixtures reused, not regenerated. NO bug found \u2014 every presigned + streaming tamper class rejects with exact sentinel. No production code changed. Reused adv* creds/stubStore/newAdvMiddleware/wantS3Code from sigv4_adversarial_test.go (same package). All green locally (non-cgo pkg); CI is source of truth."
     },
     {
       "id": "US-005",
       "title": "Anonymous + auth-mode enforcement matrix",
-      "description": "As a QA engineer, I need the auth-mode × public-access matrix proven so the secure default cannot silently regress to open access. (FR-8 split candidate: if the full matrix overflows one iteration, split signed/anonymous halves.)",
+      "description": "As a QA engineer, I need the auth-mode \u00d7 public-access matrix proven so the secure default cannot silently regress to open access. (FR-8 split candidate: if the full matrix overflows one iteration, split signed/anonymous halves.)",
       "acceptanceCriteria": [
-        "Matrix test over auth mode `{off (full-access), optional, required}` × request `{anonymous, signed}` × `{public-access-block on/off, bucket-policy grants anon, bucket/object ACL public-read}` asserting allow/deny per cell.",
+        "Matrix test over auth mode `{off (full-access), optional, required}` \u00d7 request `{anonymous, signed}` \u00d7 `{public-access-block on/off, bucket-policy grants anon, bucket/object ACL public-read}` asserting allow/deny per cell.",
         "Explicitly asserts: `required` (default) denies all anonymous; `off` grants full access (dev-only, documented); `optional` honours ACL/policy for anon.",
         "Asserts `public-access-block` overrides a permissive bucket policy (block wins).",
         "Lives in `internal/s3api/` (reuses `newHarness`); does not duplicate `access.go` unit assertions already present elsewhere.",
@@ -88,7 +88,7 @@
       "title": "SSE negative + key-mismatch + rotation hardening",
       "description": "As a QA engineer, I need encryption failure paths covered, not just happy-path round-trips, so a misconfigured key never silently returns plaintext or the wrong object.",
       "acceptanceCriteria": [
-        "Negative tests added (extending `sse_c_test.go` / `sse_object_test.go`, no duplication of happy-path round-trips): SSE-C GET with wrong customer key → 403; SSE-C with missing/short key → 400; SSE-KMS unwrap with wrong key id → maps to `ErrKeyIDMismatch` (the `IncorrectKeyException` path).",
+        "Negative tests added (extending `sse_c_test.go` / `sse_object_test.go`, no duplication of happy-path round-trips): SSE-C GET with wrong customer key \u2192 403; SSE-C with missing/short key \u2192 400; SSE-KMS unwrap with wrong key id \u2192 maps to `ErrKeyIDMismatch` (the `IncorrectKeyException` path).",
         "Multipart SSE: complete a multipart upload under SSE-KMS and assert each part decrypts via the per-part locator (`Manifest.PartChunkCounts`).",
         "Rotation: a `strata admin rewrap` to a new key id followed by a GET still decrypts (reuses the rotation integration test harness, MinIO KMS + `internal/crypto/kms` fake).",
         "Verify via a CI run on the cycle branch (integration-tagged, MinIO + KMS containers)."
@@ -102,7 +102,7 @@
       "title": "Multipart concurrency race tests",
       "description": "As a QA engineer, I need multipart races covered under `-race`, because concurrent complete/abort is where LWT correctness is easiest to break.",
       "acceptanceCriteria": [
-        "New scenario in `internal/racetest/` (extends `workload.go`; does not fork a parallel harness): N goroutines racing `CompleteMultipartUpload` + `AbortMultipartUpload` on the same upload id — exactly one Complete wins, the rest get `ErrMultipartInProgress`/`NoSuchUpload`, no double object row, no orphaned chunks left un-GC'd.",
+        "New scenario in `internal/racetest/` (extends `workload.go`; does not fork a parallel harness): N goroutines racing `CompleteMultipartUpload` + `AbortMultipartUpload` on the same upload id \u2014 exactly one Complete wins, the rest get `ErrMultipartInProgress`/`NoSuchUpload`, no double object row, no orphaned chunks left un-GC'd.",
         "Concurrent uploads of the same key by different upload ids resolve to a single latest object with a consistent manifest.",
         "Runs green under `go test -race` on TiKV + memory backends.",
         "Any race/correctness bug fixed in the handler or `meta.Store` this story.",
@@ -117,22 +117,22 @@
       "title": "Versioning + LWT/CAS contention races",
       "description": "As a QA engineer, I need versioning and CAS contention covered so concurrent writers cannot corrupt the version chain or lose updates.",
       "acceptanceCriteria": [
-        "Race scenario: concurrent `PutObject` + `DeleteObject` (delete-marker) on a versioned key — the version chain stays monotonic, `IsLatest` is held by exactly one row, and `?versionId=null` resolves deterministically.",
-        "CAS contention: concurrent `SetObjectStorage` (lifecycle-transition vs client overwrite) — the loser's chunks land in the GC queue, the winner's manifest is the one read back (the documented lifecycle-CAS invariant).",
+        "Race scenario: concurrent `PutObject` + `DeleteObject` (delete-marker) on a versioned key \u2014 the version chain stays monotonic, `IsLatest` is held by exactly one row, and `?versionId=null` resolves deterministically.",
+        "CAS contention: concurrent `SetObjectStorage` (lifecycle-transition vs client overwrite) \u2014 the loser's chunks land in the GC queue, the winner's manifest is the one read back (the documented lifecycle-CAS invariant).",
         "Suspended-versioning replace-null path covered under contention (`VersioningSuspendedReplaceNull` semantics) on TiKV + memory.",
         "Runs green under `-race`; any bug fixed this story.",
         "Verify via a CI run on the cycle branch."
       ],
       "priority": 8,
       "passes": true,
-      "notes": "versioning_race.go added: RunVersioningRaceScenario wired via TestRaceVersioningMemory (always-on, -race CI) + TestRaceVersioningTiKV (integration). (1) concurrent PUT+DELETE-marker on versioned key -> chain monotonic, exactly 1 IsLatest, no 5xx. (2) SetObjectStorage CAS contention mirrors internal/lifecycle/worker.go: N racers read same expectedClass, each writes fresh manifest under distinct newClass, flip via LWT CAS -> exactly 1 applies, read-back manifest+class is winner's, every loser's fresh chunks + winner's superseded chunks land in GC queue (lifecycle-CAS invariant), no orphans. (3) suspended replace-null under contention (PUT vs DeleteObjectNullReplacement) -> at most 1 null-versioned row, exactly 1 IsLatest, GET ?versionId=null deterministic across repeated reads (empty bodies keep sub-scenario chunk-free so global orphan check stays clean). BUG FOUND+FIXED (P2/R8): GET|HEAD ?versionId=<delete-marker> returned 500 (delete marker has nil manifest -> GetChunks(nil) errored) instead of AWS 405 MethodNotAllowed + x-amz-delete-marker:true. Guarded getObject on o.IsDeleteMarker (server.go, new ErrMethodNotAllowed sentinel in errors.go). Pinned by TestGetDeleteMarkerByVersionIDReturns405. Did NOT fork harness — reused racetest Fixture/keyVersions/mustBucketID/CollectManifestOIDs. Memory makes IsLatest structural (head==latest); real LWT contention = TiKV integration. -race itself = CI Linux (local cgo blocked). Green CGO0 x3 locally + full s3api+racetest suite green; CI is source of truth."
+      "notes": "versioning_race.go added: RunVersioningRaceScenario wired via TestRaceVersioningMemory (always-on, -race CI) + TestRaceVersioningTiKV (integration). (1) concurrent PUT+DELETE-marker on versioned key -> chain monotonic, exactly 1 IsLatest, no 5xx. (2) SetObjectStorage CAS contention mirrors internal/lifecycle/worker.go: N racers read same expectedClass, each writes fresh manifest under distinct newClass, flip via LWT CAS -> exactly 1 applies, read-back manifest+class is winner's, every loser's fresh chunks + winner's superseded chunks land in GC queue (lifecycle-CAS invariant), no orphans. (3) suspended replace-null under contention (PUT vs DeleteObjectNullReplacement) -> at most 1 null-versioned row, exactly 1 IsLatest, GET ?versionId=null deterministic across repeated reads (empty bodies keep sub-scenario chunk-free so global orphan check stays clean). BUG FOUND+FIXED (P2/R8): GET|HEAD ?versionId=<delete-marker> returned 500 (delete marker has nil manifest -> GetChunks(nil) errored) instead of AWS 405 MethodNotAllowed + x-amz-delete-marker:true. Guarded getObject on o.IsDeleteMarker (server.go, new ErrMethodNotAllowed sentinel in errors.go). Pinned by TestGetDeleteMarkerByVersionIDReturns405. Did NOT fork harness \u2014 reused racetest Fixture/keyVersions/mustBucketID/CollectManifestOIDs. Memory makes IsLatest structural (head==latest); real LWT contention = TiKV integration. -race itself = CI Linux (local cgo blocked). Green CGO0 x3 locally + full s3api+racetest suite green; CI is source of truth."
     },
     {
       "id": "US-009",
       "title": "Drain stop-write invariant under concurrent load",
-      "description": "As a QA engineer, I need the drain stop-write invariant proven under live traffic, because evacuation is a production-critical, hard-to-reverse operation. (Split from the original combined drain+rebalance story — too large for one iteration; the mover is US-010.)",
+      "description": "As a QA engineer, I need the drain stop-write invariant proven under live traffic, because evacuation is a production-critical, hard-to-reverse operation. (Split from the original combined drain+rebalance story \u2014 too large for one iteration; the mover is US-010.)",
       "acceptanceCriteria": [
-        "Integration test: mark a cluster `evacuating`, fire concurrent PUTs at it → every PUT gets `503 DrainRefused` + `Retry-After: 300`; reads / deletes / HEAD keep working (the always-strict drain invariant).",
+        "Integration test: mark a cluster `evacuating`, fire concurrent PUTs at it \u2192 every PUT gets `503 DrainRefused` + `Retry-After: 300`; reads / deletes / HEAD keep working (the always-strict drain invariant).",
         "An in-flight multipart session bound to the draining cluster survives to completion (routing recovered from `BackendUploadID`, never re-picks).",
         "`deregister_ready` does NOT flip to true while a multipart session is still bound to the cluster (the `ListMultipartUploadsByCluster` safety gate).",
         "Verify via a CI run on the cycle branch (integration + e2e jobs)."
@@ -146,7 +146,7 @@
       "title": "Rebalance mover correctness under load",
       "description": "As a QA engineer, I need the rebalance mover proven to move chunks correctly while traffic flows, so evacuation never loses or duplicates data. (Split from US-009.)",
       "acceptanceCriteria": [
-        "Extends `internal/rebalance/s3_mover_integration_test.go` (and the RADOS mover path) — no duplication of the existing single-pass move test.",
+        "Extends `internal/rebalance/s3_mover_integration_test.go` (and the RADOS mover path) \u2014 no duplication of the existing single-pass move test.",
         "Under concurrent client writes, the mover moves chunks with correct manifest CAS: the winner's locator is read back, CAS losers' chunks land in the GC queue (the documented mover invariant).",
         "Old source keys are queued in the `_by_cluster` GC table after the move; the object body is readable on the destination cluster afterwards.",
         "Mover refuses moves into a draining or >90 %-full cluster (the safety rails).",
@@ -154,18 +154,18 @@
       ],
       "priority": 10,
       "passes": true,
-      "notes": "TestRebalanceS3ConcurrentClientWrites (s3_mover_integration_test.go, MinIO x2) + chunk-based mirror TestRebalanceRADOSConcurrentClientWrites (rados_mover_integration_test.go, ceph&&integration). Both prove the mover CAS invariant under a racing client write: a client PUT rewrites the manifest locator on half the objects between plan emission and the mover's CAS -> buildUpdatedBackendManifest/buildUpdatedManifest sees br.Key/chunk.OID != plan SrcRef.OID -> ok=false -> CAS conflict -> mover's freshly-copied TARGET object discarded to GC, client's locator survives + body readable. Clean half moves normally: manifest->c2, body readable on c2, old c1 key in GC. GC accounting exact: 1 entry/object (clean->c1 source, raced->c2 loser), no leak, no double. Safety rails (refuse into draining/>90%-full target) ALREADY covered by worker_test.go (TestWorkerRefusesMovesIntoFullTarget 95%>0.90, TestWorkerSkipsDrainingTargetsAtPlanTime, TestWorkerMovesOutOfDrainingCluster, TestWorkerRefusesIntoDrainingDefenseInDepth) — NOT duplicated (safety rails are Worker.applySafetyRails; the mover receives an already-filtered plan). NO bug found — mover never clobbers a racing client write; CAS losers reclaimed. No production code changed. S3 test vets clean -tags integration (CGO0); RADOS test ceph&&integration (librados, CI-only). Verified on CI integration+e2e jobs (source of truth)."
+      "notes": "TestRebalanceS3ConcurrentClientWrites (s3_mover_integration_test.go, MinIO x2) + chunk-based mirror TestRebalanceRADOSConcurrentClientWrites (rados_mover_integration_test.go, ceph&&integration). Both prove the mover CAS invariant under a racing client write: a client PUT rewrites the manifest locator on half the objects between plan emission and the mover's CAS -> buildUpdatedBackendManifest/buildUpdatedManifest sees br.Key/chunk.OID != plan SrcRef.OID -> ok=false -> CAS conflict -> mover's freshly-copied TARGET object discarded to GC, client's locator survives + body readable. Clean half moves normally: manifest->c2, body readable on c2, old c1 key in GC. GC accounting exact: 1 entry/object (clean->c1 source, raced->c2 loser), no leak, no double. Safety rails (refuse into draining/>90%-full target) ALREADY covered by worker_test.go (TestWorkerRefusesMovesIntoFullTarget 95%>0.90, TestWorkerSkipsDrainingTargetsAtPlanTime, TestWorkerMovesOutOfDrainingCluster, TestWorkerRefusesIntoDrainingDefenseInDepth) \u2014 NOT duplicated (safety rails are Worker.applySafetyRails; the mover receives an already-filtered plan). NO bug found \u2014 mover never clobbers a racing client write; CAS losers reclaimed. No production code changed. S3 test vets clean -tags integration (CGO0); RADOS test ceph&&integration (librados, CI-only). Verified on CI integration+e2e jobs (source of truth)."
     },
     {
       "id": "US-011",
       "title": "Chunk-loss / corruption / partial-write recovery",
       "description": "As a QA engineer, I need to prove a damaged data plane fails loud, never silently returning truncated or wrong bytes. (FR-8 split candidate: if the multi-backend matrix overflows, split memory/default vs RADOS+MinIO integration halves.)",
       "acceptanceCriteria": [
-        "Corruption test: a corrupted/missing chunk on GET returns an error (5xx/IO error), never a silently-truncated 200 body — for both RADOS (`CorruptFirstChunk` hook) and the S3/MinIO backend.",
+        "Corruption test: a corrupted/missing chunk on GET returns an error (5xx/IO error), never a silently-truncated 200 body \u2014 for both RADOS (`CorruptFirstChunk` hook) and the S3/MinIO backend.",
         "Partial-write rollback: a `PutChunks` that fails mid-stream does not leave a readable half-object (manifest is only committed after all chunks land).",
         "ETag/size mismatch on read is detected (the racecheck verifier path) and surfaced, not swallowed.",
-        "NOTE: the memory backend already exposes `CorruptFirstChunk()` (`internal/data/memory/backend.go:148`). The skip at `internal/s3api/sse_object_test.go:207` is stale — it fires when the call returns false (no chunk stored), not because the method is absent. Fix the stale guard so the corruption assertion runs on the memory backend on the default CI tag (no container needed) in addition to RADOS + MinIO.",
-        "Corruption assertion runs on memory (default tag) + RADOS + MinIO (integration tag). No new corruption hook is added — memory's existing one is reused.",
+        "NOTE: the memory backend already exposes `CorruptFirstChunk()` (`internal/data/memory/backend.go:148`). The skip at `internal/s3api/sse_object_test.go:207` is stale \u2014 it fires when the call returns false (no chunk stored), not because the method is absent. Fix the stale guard so the corruption assertion runs on the memory backend on the default CI tag (no container needed) in addition to RADOS + MinIO.",
+        "Corruption assertion runs on memory (default tag) + RADOS + MinIO (integration tag). No new corruption hook is added \u2014 memory's existing one is reused.",
         "Verify via a CI run on the cycle branch (unit + integration + e2e jobs)."
       ],
       "priority": 11,
@@ -207,16 +207,16 @@
       "description": "As a QA engineer, I need to deliver the go/no-go verdict backed by a fully green CI run so the team can make the release call. Final story: produce the report, close-flip ROADMAP, re-baseline s3-tests (manual/local), and prepare the branch-protection apply as a manual post-merge step.",
       "acceptanceCriteria": [
         "`tasks/qa-readiness-report.md` filled in: final coverage table (before/after), the dimension matrix all populated, every bug found+fixed listed with its commit, residual risks enumerated with severity, and an explicit GO / NO-GO verdict with justification.",
-        "`scripts/s3-tests/README.md` re-baselined if any functional story moved the pass rate; the 13 deliberate gaps re-confirmed as deliberate. NOTE: `s3-tests` is not a CI job — this re-baseline is run manually/locally against the compose stack (`scripts/s3-tests/run.sh`), not verified by the cycle CI run.",
+        "`scripts/s3-tests/README.md` re-baselined if any functional story moved the pass rate; the 13 deliberate gaps re-confirmed as deliberate. NOTE: `s3-tests` is not a CI job \u2014 this re-baseline is run manually/locally against the compose stack (`scripts/s3-tests/run.sh`), not verified by the cycle CI run.",
         "`ROADMAP.md` close-flipped for this cycle; any unfixable finding added as a P1/P2/P3 entry in the same commit.",
         "A full CI run on the cycle branch is green end-to-end (all required checks).",
-        "The coverage table is promoted to a CI gate: a coverage job whose per-package floor is set to the US-001 baseline numbers (ratchet-floor — fail only on regression below the measured baseline, never an aspirational target) for the core packages (`internal/auth`, `internal/s3api`, `internal/meta/{memory,tikv}`, `internal/data/{memory,placement}`, `internal/crypto/kms`). The job runs green on the cycle branch before the gate is wired.",
-        "Branch-protection update is prepared as a documented manual post-merge step (the new check context + the `gh api` command), NOT executed by the autonomous cycle — headless Ralph lacks admin-API auth (same posture as the ci-green cycle, where protection was applied by hand after merge). The story's job is to make the check green and write the exact apply command into the report.",
+        "The coverage table is promoted to a CI gate: a coverage job whose per-package floor is set to the US-001 baseline numbers (ratchet-floor \u2014 fail only on regression below the measured baseline, never an aspirational target) for the core packages (`internal/auth`, `internal/s3api`, `internal/meta/{memory,tikv}`, `internal/data/{memory,placement}`, `internal/crypto/kms`). The job runs green on the cycle branch before the gate is wired.",
+        "Branch-protection update is prepared as a documented manual post-merge step (the new check context + the `gh api` command), NOT executed by the autonomous cycle \u2014 headless Ralph lacks admin-API auth (same posture as the ci-green cycle, where protection was applied by hand after merge). The story's job is to make the check green and write the exact apply command into the report.",
         "Verify via the final green CI run on the cycle branch."
       ],
       "priority": 13,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "GO verdict. Report \u00a75 filled; coverage ratchet gate wired (scripts/qa/coverage-{floors.txt,gate.sh} + CI coverage job + make coverage-gate); ROADMAP close-flipped (umbrella + R1/R9); s3-tests README re-confirmed 92.7%; branch-protection + tikv-floor documented as manual post-merge (report \u00a76)."
     }
   ]
 }

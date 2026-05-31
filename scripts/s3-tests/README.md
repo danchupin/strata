@@ -59,6 +59,29 @@ History below — newest run on top. The default subset filter is the
 test_object_read or test_object_delete or test_multipart or
 test_versioning_obj or test_bucket_list_versions`.
 
+### 2026-05-31 — `ralph/qa-production-readiness` cycle re-confirmation (92.7%, unchanged)
+
+The QA production-readiness cycle (US-001..US-013) was a test-hardening +
+bug-fix pass, not a functional-surface cycle. The four bugs it found+fixed are
+**all outside the default-subset filter** below, so the headline pass rate is
+**unchanged at 92.7% (165/178)**:
+
+- PublicAccessBlock eval-time enforcement (US-005) — `test_bucket_policy*` /
+  `test_access_block*` family, not in the default subset.
+- Conditional GET `If-Match` ⊳ `If-Unmodified-Since` (US-002) — covered by Go
+  unit matrix; the s3-tests conditional cases are outside the default subset.
+- SSE-C wrong-key 400→403 (US-006) — `test_encryption_sse_c_*`, not in subset.
+- `?versionId=<delete-marker>` 500→405 (US-008) — an edge of the versioning
+  family; not among the executable default-subset cases.
+
+**Re-baseline posture:** NOTE — `s3-tests` is not a CI job. This re-confirmation
+is a desk check against the test inventory, not a fresh `run.sh` execution. To
+verify on metal, run `scripts/s3-tests/run.sh` against the compose stack
+(`make up-all && make wait-strata-lab`) and diff against the 92.7% breakdown
+below. **The 13 deliberate gaps remain deliberate** (10 SigV2/bad-auth +
+1 unreadable-prefix + 2 anonymous-list under `auth-mode=required`); none is a
+real-bug failure, none is tracked as a ROADMAP P-item.
+
 ### 2026-05-10 — `d8aa9fa` + ralph/s3-compat-finish cycle (92.7%)
 
 After the US-001..US-003 cycle landed (CRC family `FULL_OBJECT` defaults at

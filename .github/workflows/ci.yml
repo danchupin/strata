@@ -385,11 +385,19 @@ jobs:
       # Default tag (TiKV + memory, no ceph/librados). On Linux every package
       # builds, so this run measures the full per-package table — the source of
       # truth (FR-4) for the rows the local macOS run records as
-      # "CI (local env-blocked)". US-013 turns this into the ratchet gate.
+      # "CI (local env-blocked)".
       - name: make test-cover
         run: make test-cover
       - name: Show measured table
         run: CHECK=1 bash scripts/qa/coverage.sh
+      # US-013: ratchet gate. FAILS the job if any core package regresses below
+      # its US-001 baseline floor (scripts/qa/coverage-floors.txt). On Linux CI
+      # every core package builds, so internal/s3api + internal/meta/tikv are
+      # measured here (locally they are cgo-blocked). This is the new required
+      # check context — see the branch-protection apply command in
+      # tasks/qa-readiness-report.md §6.
+      - name: Coverage ratchet gate
+        run: make coverage-gate
       - name: Upload regenerated report
         uses: actions/upload-artifact@v4
         with:

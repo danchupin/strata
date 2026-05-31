@@ -2,7 +2,7 @@ SHELL := bash
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
 .PHONY: build build-ceph docker-build web-build web-typecheck web-clean vet test \
-	test-cover \
+	test-cover coverage-gate \
 	up up-all up-cassandra up-all-ci up-bench-rgw down \
 	dev dev-down dev-logs \
 	wait-cassandra wait-ceph wait-pd wait-tikv wait-strata wait-strata-a wait-strata-b wait-strata-lb-nginx wait-strata-lab wait-rgw \
@@ -65,6 +65,12 @@ test:
 # packages are recorded as "CI" (the Linux run is the source of truth, FR-4).
 test-cover:
 	bash scripts/qa/coverage.sh
+
+# Coverage RATCHET GATE (US-013) — fails if any core package regresses below the
+# US-001 baseline floor in scripts/qa/coverage-floors.txt. Wired into the CI
+# `coverage` job; runs green on the cycle branch before the gate is enforced.
+coverage-gate:
+	bash scripts/qa/coverage-gate.sh
 
 test-race:
 	go test -race ./...

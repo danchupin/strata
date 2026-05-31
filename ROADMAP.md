@@ -23,6 +23,23 @@ S3-compatibility headline: **92.7% (165/178)** on the executable subset of `ceph
 These are not feature work. The codebase shipped a lot of surface in a short window; before
 adding more, prove what is there.
 
+- ~~**P1 — QA production-readiness hardening pass (`ralph/qa-production-readiness`).**~~ —
+  **Done (verdict: GO).** US-001..US-013 ran a senior-QA adversarial pass over the three
+  under-exercised dimensions atop near-ceiling functional correctness: **auth/security**
+  (SigV4 13-tamper matrix, presigned, streaming chain-HMAC + trailer, anon + auth-mode +
+  PublicAccessBlock, SSE-C/KMS negatives), **concurrency/race** (multipart Complete/Abort,
+  versioning + `SetObjectStorage` CAS contention, GC + `bucket_stats` fan-out exactly-once /
+  dual-write lockstep, drain stop-write under load — memory always-on under `-race`, TiKV LWT
+  on the integration job), **durability/fault-injection** (drain stop-write invariant,
+  rebalance mover CAS-loss reclaim, chunk-loss/corruption/partial-write fail-loud on
+  memory + MinIO + RADOS). Four real bugs found+fixed with red→green proof (the P1
+  PublicAccessBlock fail-open + the three P2 entries directly below). Coverage promoted to a
+  hard CI ratchet gate (`make coverage-gate`, `scripts/qa/coverage-{floors.txt,gate.sh}`,
+  CI job "Coverage baseline (QA readiness)") — seven core packages floored at the US-001
+  baseline; `internal/data/memory` rose 6.5% → 41.9% (US-011). Full evidence + GO/NO-GO
+  justification + residual-risk acceptance (R1/R5/R6/R9) + the manual post-merge steps
+  (tikv floor hard-wire, branch-protection apply) in `tasks/qa-readiness-report.md`. s3-tests
+  headline unchanged at 92.7% (the fixes are outside the default subset).
 - ~~**P1 — PublicAccessBlock failed open (never enforced at eval time).**~~ —
   **Done.** US-005 (QA cycle) found the `PublicAccessBlock` config was pure CRUD —
   `requireAccess` / `requireACL` (`internal/s3api/access.go`) never consulted it, so a
@@ -66,6 +83,22 @@ adding more, prove what is there.
   already correct (store returns `ErrObjectNotFound` → 404). Pinned by
   `TestGetDeleteMarkerByVersionIDReturns405` (GET + HEAD, Enabled TimeUUID marker + Suspended
   null marker) plus the `TestRaceVersioning{Memory,TiKV}` contention scenarios.
+- **P2 — `DeleteObjects` (multi-object delete) has no direct test (QA-cycle R1).** The
+  `internal/s3api/delete_objects.go` handler — batch delete, partial-failure rows, quiet
+  mode, versioned delete-marker creation — is only exercised indirectly through the
+  `internal/racetest` workload; there is no focused unit/contract matrix asserting the
+  `<Delete>` request → `<DeleteResult>` shape, per-key `<Error>` reporting, the 1000-key
+  cap, or versioned-vs-unversioned semantics. Surfaced + accepted (non-blocking) in the
+  `ralph/qa-production-readiness` cycle. Fix scope: a table-driven handler test over the
+  in-memory harness (`newHarness`) covering quiet/verbose, mixed success/NoSuchKey, and a
+  versioned bucket (delete-marker creation + explicit `?versionId`).
+- **P3 — Plaintext (non-SSE) at-rest byte-flip is not detected on the read path (QA-cycle R9).**
+  Neither the memory nor the RADOS data plane carries a per-chunk checksum verified on read,
+  so a flipped byte inside a *plaintext* chunk returns a full-length corrupted `200`. Only
+  *truncation* / missing-chunk fails loud (`data.ErrNotFound`), and SSE objects are caught by
+  the AEAD layer. Surfaced + accepted (defence-in-depth, superseded by SSE) in the
+  `ralph/qa-production-readiness` cycle (US-011). Fix scope: store a per-chunk CRC/sha in the
+  manifest `ChunkRef` and verify on `GetChunks`; fail loud on mismatch.
 - ~~**P1 — Single-binary `strata` (CockroachDB-shape).**~~ — **Done.** Single `strata`
   binary with `server` + `admin` subcommands; `strata server` runs the gateway plus an
   opt-in subset of workers (gc, lifecycle, notify, replicator, access-log, inventory,
