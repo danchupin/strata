@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/danchupin/strata/internal/auth"
 	"github.com/danchupin/strata/internal/crypto/master"
@@ -306,12 +307,18 @@ func TestApp_RunBucketInspect_HumanOutput(t *testing.T) {
 	}
 }
 
+// TestApp_BucketReshard covers the async trigger CLI: `bucket reshard` queues
+// a job and prints state=queued WITHOUT waiting for the migration. The bucket's
+// active shard count must NOT flip on return — the leader-elected reshard
+// worker does the migration out-of-band.
 func TestApp_BucketReshard(t *testing.T) {
 	h := newGatewayHarness(t, nil)
 	ctx := context.Background()
 	if _, err := h.store.CreateBucket(ctx, "bkt", "alice", "STANDARD"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
+	b, _ := h.store.GetBucket(ctx, "bkt")
+	source := b.ShardCount
 
 	var stdout, stderr bytes.Buffer
 	a := newApp(&stdout, &stderr, []string{
@@ -323,12 +330,75 @@ func TestApp_BucketReshard(t *testing.T) {
 		t.Fatalf("run: %v stderr=%s", err, stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "bucket=bkt") || !strings.Contains(out, "target=256") {
+	if !strings.Contains(out, "bucket=bkt") || !strings.Contains(out, "target=256") || !strings.Contains(out, "state=queued") {
 		t.Fatalf("unexpected output: %q", out)
 	}
+	// Async: the trigger queued a job and stamped the target, but the active
+	// count stays at source until the worker completes the migration.
 	got, _ := h.store.GetBucket(ctx, "bkt")
-	if got.ShardCount != 256 {
-		t.Fatalf("post-reshard shard count: %d", got.ShardCount)
+	if got.ShardCount != source {
+		t.Fatalf("trigger flipped shard count inline: got %d want %d", got.ShardCount, source)
+	}
+	if got.TargetShardCount != 256 {
+		t.Fatalf("trigger did not stamp target: got %d want 256", got.TargetShardCount)
+	}
+	if _, err := h.store.GetReshardJob(ctx, b.ID); err != nil {
+		t.Fatalf("trigger did not queue a job: %v", err)
+	}
+}
+
+// TestApp_BucketReshardWait covers the --wait poll path + BucketReshardStatus
+// client method: the CLI queues a job then polls progress until state=idle.
+// CompleteReshard (driven here in lieu of the background worker) is the terminal
+// the worker reaches — once it deletes the job, the next poll reads idle and the
+// CLI prints the completed shard count.
+func TestApp_BucketReshardWait(t *testing.T) {
+	h := newGatewayHarness(t, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := h.store.CreateBucket(ctx, "bkt", "alice", "STANDARD"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	b, _ := h.store.GetBucket(ctx, "bkt")
+
+	var stdout, stderr bytes.Buffer
+	a := newApp(&stdout, &stderr, []string{
+		"--endpoint", h.ts.URL,
+		"--principal", s3api.IAMRootPrincipal,
+		"bucket", "reshard", "--bucket", "bkt", "--target", "256",
+		"--wait", "--poll-interval", "10ms",
+	})
+	done := make(chan error, 1)
+	go func() { done <- a.run(ctx) }()
+
+	// Wait for the trigger to queue the job, then simulate the worker draining
+	// it (flip + delete) so the CLI's next poll observes idle.
+	deadline := time.After(3 * time.Second)
+	for {
+		if _, err := h.store.GetReshardJob(ctx, b.ID); err == nil {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("trigger never queued a job")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	if err := h.store.CompleteReshard(ctx, b.ID); err != nil {
+		t.Fatalf("complete reshard: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("--wait run: %v stderr=%s", err, stderr.String())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("--wait did not return after the job completed")
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "complete") || !strings.Contains(out, "shard_count=256") {
+		t.Fatalf("unexpected --wait output: %q", out)
 	}
 }
 

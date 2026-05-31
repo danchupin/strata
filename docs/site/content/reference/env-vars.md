@@ -303,6 +303,19 @@ See [Concepts — workers]({{< ref "/concepts/workers" >}}).
 | `STRATA_MANIFEST_REWRITER_BATCH_LIMIT` | `500` | positive int | Per-tick rewrite cap. | `workers.manifest_rewriter.batch_limit` |
 | `STRATA_MANIFEST_REWRITER_DRY_RUN` | `false` | `true \| false` | Skip the write phase; log diffs only. | `workers.manifest_rewriter.dry_run` |
 
+## Reshard worker (`--workers=reshard`)
+
+Leader-elected background worker that drains queued online-reshard jobs
+(`POST /admin/bucket/reshard`). Idempotent + resumable from each job's `LastKey`
+watermark, so a crash mid-job is recovered on the next tick. Cassandra does the
+physical row migration; memory/TiKV are shard-agnostic (immediate-complete
+no-op). Enable on at least one replica.
+
+| Variable | Default | Range | Notes | TOML key |
+|---|---|---|---|---|
+| `STRATA_RESHARD_INTERVAL` | `30s` | Go duration `[1s, 1h]` | Poll cadence between drain passes. | `workers.reshard.interval` |
+| `STRATA_RESHARD_BATCH_LIMIT` | `500` | positive int | Object-walk page size; a crash resumes from the last watermark. | `workers.reshard.batch_limit` |
+
 ## Quota-reconcile worker (`--workers=quota-reconcile`)
 
 See [Quotas + billing]({{< ref "/best-practices/quotas-billing" >}}#drift-reconcile-workersquota-reconcile).

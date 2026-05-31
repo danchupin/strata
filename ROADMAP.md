@@ -207,6 +207,19 @@ adding more, prove what is there.
   LIST emits each once, all 3 versions reachable in order — RED against the row-walking skeleton that 404s the diverging
   half, GREEN after) + worker unit tests via a recording `meta.ReshardMigrator` fake (dedup-per-key + watermark resume).
   This entry's P1 is now **fully fixed** for the steady-state + transitional + physical-move path.
+  **US-005 (async drive + endpoint split) added:** `adminBucketReshard` no longer runs `worker.RunOnce` inline in
+  the HTTP request goroutine (a 64→128 reshard of a large bucket would block the request for minutes). The endpoint
+  now SPLITS into a trigger (`POST /admin/bucket/reshard` → `StartReshard` + `202 {state:"queued"}` +
+  `admin:BucketReshard` audit stamp) and a progress read (`GET /admin/bucket/reshard?bucket=` → `GetReshardJob` →
+  `queued|running|idle` on every backend). The physical migration is driven by a NEW leader-elected background
+  worker — `reshard` registered in `cmd/strata/workers/reshard.go` (lease `reshard-leader`, `STRATA_RESHARD_INTERVAL`
+  default 30s / `STRATA_RESHARD_BATCH_LIMIT` default 500), wrapping each `RunOnce` in
+  `StartIteration`/`EndIteration` + `ObserveWorkerTick("reshard", …)` (added to `registeredWorkerNames`). Crash-resume
+  is the `LastKey` watermark: a worker that dies mid-job resumes on the next tick / next leader and converges
+  (proof: `TestReshardCrashResumesFromWatermark` — RED would flip the count on a crashed job; GREEN holds the
+  source count until the resumed walk drains). CLI `strata admin bucket reshard --wait` polls progress to idle.
+  End-to-end `make smoke-reshard` (`scripts/smoke-reshard.sh`) drives a 64→128 reshard under concurrent
+  PUT/GET/DELETE on the Cassandra lab + a `docker restart` mid-job crash-resume leg.
 
 - ~~**P0/P1 — Cycle C: supply-chain-security (govulncheck + trivy + gosec CI gates + Dependabot + SECURITY.md + first release tag + SLSA L3 provenance + SPDX SBOM + cosign signing + license audit).**~~ — **Done.** Shipped via `ralph/supply-chain-security` cycle (US-001..US-011). 3 parallel CI scanners gated (govulncheck HIGH+CRITICAL / trivy CRITICAL / gosec MEDIUM); license audit gates banned licenses (forbidden + restricted classes). Dependabot weekly for Go × 2 + Actions + npm + Docker (patch-only auto-merge, grouped per ecosystem). SECURITY.md with 90-day SLA + GHSA-only disclosure. First release tag `v0.0.1-alpha.1` published; `ghcr.io/danchupin/strata` image signed via cosign keyless OIDC + SLSA L3 provenance + SPDX SBOM (slsa-framework/slsa-github-generator reusable workflow + anchore/sbom-action), all six release jobs green (run 26639369076). Operator verify recipe at /operate/image-verification.md with Kyverno + Sigstore Policy admission control examples. Composite smoke `make smoke-supply-chain` (`scripts/smoke-supply-chain.sh`) exercises every gate end-to-end. Pre-launch hard cutover — no behavior change. (commit `f22ab7e`)
 

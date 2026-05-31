@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 )
 
 // Run is the entrypoint dispatched by `strata admin`. It parses `args`
@@ -292,6 +293,8 @@ func (a *app) cmdBucketReshard(ctx context.Context, c *Client, jsonOut bool, arg
 	fs.SetOutput(a.err)
 	bucket := fs.String("bucket", "", "bucket name")
 	target := fs.Int("target", 0, "target shard count (positive power of two, larger than current)")
+	wait := fs.Bool("wait", false, "poll progress until the reshard job completes (requires the reshard worker running)")
+	pollEvery := fs.Duration("poll-interval", 2*time.Second, "poll cadence when --wait is set")
 	if err := fs.Parse(args); err != nil {
 		return ErrUsage
 	}
@@ -305,16 +308,40 @@ func (a *app) cmdBucketReshard(ctx context.Context, c *Client, jsonOut bool, arg
 	if err != nil {
 		return err
 	}
-	if jsonOut {
-		return writeJSON(a.out, res)
+	if !*wait {
+		if jsonOut {
+			return writeJSON(a.out, res)
+		}
+		fmt.Fprintf(a.out, "bucket reshard queued: bucket=%s source=%d target=%d state=%s\n",
+			res.Bucket, res.Source, res.Target, res.State)
+		fmt.Fprintf(a.out, "  poll: strata admin bucket reshard --bucket %s (GET) or add --wait\n", res.Bucket)
+		return nil
 	}
-	fmt.Fprintf(a.out, "bucket reshard: bucket=%s source=%d target=%d\n", res.Bucket, res.Source, res.Target)
-	fmt.Fprintf(a.out, "  jobs:    scanned=%d completed=%d\n", res.JobsScanned, res.JobsCompleted)
-	fmt.Fprintf(a.out, "  objects: copied=%d\n", res.ObjectsCopied)
-	if res.Error != "" {
-		fmt.Fprintf(a.out, "  error:   %s\n", res.Error)
+	// --wait: poll the progress read until the worker drains the job (state
+	// flips to "idle" once GetReshardJob returns ErrReshardNotFound). The
+	// reshard worker must be running on a replica for this to converge.
+	for {
+		st, err := c.BucketReshardStatus(ctx, *bucket)
+		if err != nil {
+			return err
+		}
+		if st.State == "idle" {
+			if jsonOut {
+				return writeJSON(a.out, st)
+			}
+			fmt.Fprintf(a.out, "bucket reshard complete: bucket=%s shard_count=%d\n", st.Bucket, st.ShardCount)
+			return nil
+		}
+		if !jsonOut {
+			fmt.Fprintf(a.out, "  reshard %s: state=%s last_key=%q (target=%d)\n",
+				st.Bucket, st.State, st.LastKey, st.Target)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(*pollEvery):
+		}
 	}
-	return nil
 }
 
 func writeJSON(w io.Writer, v any) error {

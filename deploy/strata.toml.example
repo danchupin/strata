@@ -229,6 +229,10 @@ interval     = "24h"
 batch_limit  = 500
 dry_run      = false
 
+[workers.reshard]
+interval     = "30s"            # Poll cadence for the leader-elected reshard worker.
+batch_limit  = 500             # Object-walk page size; a crash resumes from the last watermark.
+
 [workers.audit_export]
 bucket   = ""                   # Required when audit-export worker enabled.
 prefix   = ""

@@ -16,6 +16,9 @@ Cycle: ralph/architecture-hardening
 - US-002 transitional model (Cassandra): while shard_count_target!=0, writes→target layout (fnv%target), reads union source(fnv%active)+target target-first (target wins (key,version_id) collision). Helpers: shardLayout/writeShardForKey/readShardsForKey/objectFanCount/latestAtShard/objLater. resolveVersionID is the single point-mutate funnel (probe both shards) — teach IT, not each caller. LIST uses objectFanCount=max(active,target); overwrite/delete clear BOTH shards.
 - DELETE-MARKER CROSS-SHARD GOTCHA: shardCursor.advance() must SURFACE a delete-marker head (real VersionID+Mtime), NOT swallow it — else during a reshard the source shard's older live row resurrects a key deleted in the target shard. ListObjects merge loop suppresses marker heads (`if obj.IsDeleteMarker { continue }` after setting lastKey). Memory backend can't catch this (shard-agnostic) — needs a Cassandra integration test.
 - CompleteReshard is a PURE FLIP with no migration. US-003 added the mover: Cassandra implements optional meta.ReshardMigrator (MigrateReshardKey, type-asserted in internal/reshard/runJob — same optional-interface pattern as meta.RangeScanStore). Memory/TiKV don't implement it → worker is an immediate-complete no-op there. Worker walks union ListObjectVersions per key, copies-THEN-deletes source inline (cleanup-before-flip), CompleteReshard only after the walk drains. Copy-first is deliberate (delete-first = key-in-neither-partition gap). insertObjectRowAtShard INSERT cols MUST track PutObject; objectSelectCols const tracks scanObjectQuery Scan order — drift silently corrupts reads.
+- ADDING A WORKER = 5 lockstep spots (US-005): (1) Register{} init() in cmd/strata/workers/<name>.go, (2) "<name>" in internal/metrics/metrics.go registeredWorkerNames, (3) WorkersConfig.<Name> field + defaults() + clampWorkers() in internal/config/config.go, (4) STRATA_<NAME>_* rows in envKeyMap, (5) [workers.<name>] in deploy/strata.toml.example + a row in docs/site/content/reference/env-vars.md. Miss (4)/(5) and TestEnvTOMLParity (config pkg) goes red, not the build. Optionally add a knownWorkers entry in cmd/strata/server.go so `strata server --help` lists it. Runner wraps each RunOnce in workers.StartIteration/EndIteration + metrics.ObserveWorkerTick("<name>",...) (see manifestRewriterRunner / reshardRunner).
+- LOCAL BUILD MATRIX (US-005): darwin cgo blocked by Xcode license AND gosigar needs cgo on darwin → packages pulling gosigar (cmd/strata/**, internal/metrics, internal/serverapp, internal/meta/tikv) can't build locally either way. Pure-Go packages (internal/config, internal/reshard) + internal/s3api (does NOT pull gosigar) DO build: `CGO_ENABLED=0 go vet ./internal/s3api/...` compiles s3api tests. Everything else: CI Linux is source of truth.
+- ADMIN AUDIT TEST PATTERN (US-005): /admin/* (handleAdmin) is gated on Owner==IAMRootPrincipal ("iam-root"); the base s3api newHarness does NOT wrap AuditMiddleware. To assert an admin write stamped its SetAuditOverride row, wire s3api.NewAuditMiddleware around a handler that injects auth.WithAuth(IAMRootPrincipal), then read store.ListAudit (see TestAdmin_BucketReshard_TriggerAudited). Resource convention for admin bucket writes is "bucket:<name>".
 ---
 
 ## 2026-05-31 - US-001 Cassandra hot path resolves per-bucket shard count
@@ -111,4 +114,84 @@ Cycle: ralph/architecture-hardening
   - Local macOS: `make vet` / `go build ./...` fail on cgo (Xcode license +
     gosigar under CGO_ENABLED=0). Validate pure-Go packages with
     `CGO_ENABLED=0 go test ./internal/<pkg>/...`; CI Linux is source of truth.
+---
+
+## 2026-05-31 - US-005 Online-reshard admin endpoint (async) + concurrent-write smoke
+- SPLIT adminBucketReshard (internal/s3api/admin.go) into trigger + progress:
+  POST /admin/bucket/reshard?bucket&target -> StartReshard + 202 {state:"queued"}
+  (NO inline worker.RunOnce — a large bucket's migration must not block the HTTP
+  request) + SetAuditOverride("admin:BucketReshard","bucket:<name>",...). New
+  GET /admin/bucket/reshard?bucket -> GetReshardJob -> {state: queued|running|idle}
+  on every backend (idle reports b.ShardCount when no job in flight). Reworked
+  the shared adminBucketReshardResponse (dropped JobsScanned/Completed/Copied/
+  DurationMs; added State/LastKey/ShardCount). Removed the internal/reshard import
+  from admin.go.
+- ASYNC DRIVE = registered leader-elected worker (option a, recommended).
+  cmd/strata/workers/reshard.go: Register{Name:"reshard"} (SkipLease=false ->
+  supervisor `reshard-leader` lease). reshardRunner.Run loops worker.RunOnce on
+  STRATA_RESHARD_INTERVAL, wrapping each pass in StartIteration/EndIteration +
+  metrics.ObserveWorkerTick("reshard",...). Added "reshard" to
+  internal/metrics/metrics.go registeredWorkerNames (+ updated the "intentionally
+  absent" comment there and the two CLAUDE.md notes + the architecture diagram).
+- CONFIG: WorkersConfig.Reshard{Interval,BatchLimit}; defaults 30s/500; clamp
+  [1s,1h]/[1,100000]; env STRATA_RESHARD_INTERVAL / STRATA_RESHARD_BATCH_LIMIT in
+  envKeyMap; deploy/strata.toml.example [workers.reshard]; docs env-vars.md row;
+  knownWorkers entry in cmd/strata/server.go so `strata server --help` lists it.
+- CLI (cmd/strata/admin): BucketReshard now async (prints state=queued); new
+  BucketReshardStatus (GET); `bucket reshard --wait [--poll-interval]` polls the
+  progress read until state=idle.
+- SMOKE: scripts/smoke-reshard.sh + `make smoke-reshard`. Drives 64->128 against
+  the Cassandra lab (:9998) with concurrent PUT/GET/DELETE; asserts no client 5xx/
+  spurious-404, identical seed key set before/after, post-flip point-GET; Scenario
+  C does `docker restart strata-cassandra` mid-job to prove crash-resume. Skips
+  (77) when lab down unless REQUIRE_LAB=1. Requires the reshard worker enabled:
+  STRATA_WORKERS=...,reshard. Operator runbook in
+  docs/site/content/architecture/sharding.md (## Online reshard).
+- TESTS:
+  - internal/reshard/reshard_test.go: TestReshardCrashResumesFromWatermark
+    (crashingStore migrator fails on k-25 first pass -> RunOnce errors, job stays
+    queued, ShardCount NOT flipped, watermark pinned at k-18 [inclusive-marker
+    batching: k-00..k-09,k-09..k-18,k-18..]; second RunOnce resumes + converges).
+    RED/GREEN: a buggy worker that flips on a crashed job fails the "ShardCount
+    must stay 64" assert.
+  - internal/s3api/admin_test.go: TriggerIsAsync (202+queued, count NOT flipped
+    inline, progress queued->idle after a manual worker pass), InProgressConflict
+    (409), StatusIdleWhenNoJob, StatusRunning (LastKey watermark), TriggerAudited
+    (admin:BucketReshard row via a self-wired AuditMiddleware+root injector).
+    Rewrote the old synchronous TestAdmin_BucketReshard_RoundTrip (it asserted the
+    inline flip — deliberately removed behavior).
+  - cmd/strata/workers/reshard_test.go: registered (SkipLease=false), env reads,
+    defaults, requires-meta, and a runner end-to-end (queued job drained on first
+    tick, clean ctx-cancel stop).
+  - cmd/strata/admin/run_test.go: TestApp_BucketReshard rewritten for async
+    (state=queued output, count stays at source, job queued).
+- Files: internal/s3api/admin.go, internal/s3api/admin_test.go,
+  cmd/strata/workers/reshard.go (+_test), cmd/strata/admin/{client,run}.go (+run_test),
+  cmd/strata/server.go, internal/config/config.go, internal/metrics/metrics.go,
+  internal/reshard/reshard_test.go, deploy/strata.toml.example,
+  docs/site/content/reference/env-vars.md, docs/site/content/architecture/sharding.md,
+  scripts/smoke-reshard.sh, Makefile, CLAUDE.md, ROADMAP.md, scripts/ralph/prd.json.
+- **Learnings for future iterations:**
+  - LOCAL BUILD: cmd/strata/workers + cmd/strata/admin + internal/metrics pull
+    gosigar -> can't build on darwin with CGO off (gosigar darwin needs cgo) NOR
+    with cgo (Xcode license). internal/s3api does NOT pull gosigar, so
+    `CGO_ENABLED=0 go vet ./internal/s3api/...` DOES compile its tests — use it to
+    validate s3api handler+test changes locally. config + reshard are pure-Go too.
+    Everything else: CI Linux is the source of truth.
+  - ListObjectVersions Marker is INCLUSIVE (key >= marker): each reshard batch
+    re-lists the prior batch's last key, and the per-run `lastMigrated` dedup skips
+    it. So the persisted watermark after batch N is that batch's LAST key, and a
+    crash mid-batch N+1 rewinds to it (re-walked keys re-migrate idempotently). A
+    crash-resume test's expected watermark is the last CLEAN batch tail, not the
+    failing key minus one.
+  - The admin reshard endpoint is the OLD /admin/* (handleAdmin) surface, gated on
+    Owner==IAMRootPrincipal ("iam-root") via SigV4 (curl --aws-sigv4 / aws cli with
+    a root-owner static cred), NOT the /admin/v1 cookie-login adminapi surface. The
+    base s3api newHarness does NOT wrap AuditMiddleware — to assert an audit row,
+    wire NewAuditMiddleware around a principal-injecting handler yourself (see
+    TestAdmin_BucketReshard_TriggerAudited).
+  - Adding a worker now touches FIVE lockstep spots: Register init() +
+    registeredWorkerNames + WorkersConfig field+defaults+clamp + envKeyMap +
+    env_toml_parity (toml.example + env-vars.md doc). Missing any one fails
+    TestEnvTOMLParity, not the build.
 ---

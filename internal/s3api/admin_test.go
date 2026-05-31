@@ -4,10 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/danchupin/strata/internal/auth"
+	datamem "github.com/danchupin/strata/internal/data/memory"
 	"github.com/danchupin/strata/internal/meta"
+	metamem "github.com/danchupin/strata/internal/meta/memory"
+	"github.com/danchupin/strata/internal/reshard"
 	"github.com/danchupin/strata/internal/s3api"
 )
 
@@ -290,7 +296,13 @@ func TestAdmin_IAMRotateAccessKey_MissingParam(t *testing.T) {
 	resp.Body.Close()
 }
 
-func TestAdmin_BucketReshard_RoundTrip(t *testing.T) {
+// TestAdmin_BucketReshard_TriggerIsAsync proves the US-005 split: the POST
+// trigger queues a job and returns 202 immediately WITHOUT driving the worker
+// inline — the bucket's active shard count must NOT have flipped on return
+// (the leader-elected reshard worker does the migration out-of-band). A
+// separate GET progress read then reports the queued job, and once the worker
+// runs the progress flips to state=idle at the target count.
+func TestAdmin_BucketReshard_TriggerIsAsync(t *testing.T) {
 	h := newNotifyHarness(t)
 	ctx := context.Background()
 	if _, err := h.store.CreateBucket(ctx, "bkt", "alice", "STANDARD"); err != nil {
@@ -301,24 +313,192 @@ func TestAdmin_BucketReshard_RoundTrip(t *testing.T) {
 	target := source * 4
 
 	resp := h.doString("POST", "/admin/bucket/reshard?bucket=bkt&target="+itoa(target), "", testPrincipalHeader, s3api.IAMRootPrincipal)
-	h.mustStatus(resp, http.StatusOK)
+	h.mustStatus(resp, http.StatusAccepted)
 	var body struct {
-		OK            bool   `json:"ok"`
-		Bucket        string `json:"bucket"`
-		Source        int    `json:"source"`
-		Target        int    `json:"target"`
-		JobsCompleted int    `json:"jobs_completed"`
+		OK     bool   `json:"ok"`
+		Bucket string `json:"bucket"`
+		Source int    `json:"source"`
+		Target int    `json:"target"`
+		State  string `json:"state"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	resp.Body.Close()
-	if !body.OK || body.Bucket != "bkt" || body.Source != source || body.Target != target || body.JobsCompleted != 1 {
-		t.Fatalf("body=%+v", body)
+	if !body.OK || body.Bucket != "bkt" || body.Source != source || body.Target != target || body.State != "queued" {
+		t.Fatalf("trigger body=%+v", body)
 	}
+	// Async: the active count must still be the source — the trigger did NOT
+	// drive the worker inline. The job is queued and the target is stamped.
 	got, _ := h.store.GetBucket(ctx, "bkt")
-	if got.ShardCount != target {
-		t.Fatalf("post-call shard count=%d want %d", got.ShardCount, target)
+	if got.ShardCount != source {
+		t.Fatalf("trigger flipped shard count inline: got %d want %d (must stay until the worker completes)", got.ShardCount, source)
+	}
+	if got.TargetShardCount != target {
+		t.Fatalf("trigger did not stamp target: got %d want %d", got.TargetShardCount, target)
+	}
+
+	// Progress read while queued.
+	resp = h.doString("GET", "/admin/bucket/reshard?bucket=bkt", "", testPrincipalHeader, s3api.IAMRootPrincipal)
+	h.mustStatus(resp, http.StatusOK)
+	var prog struct {
+		State      string `json:"state"`
+		Source     int    `json:"source"`
+		Target     int    `json:"target"`
+		ShardCount int    `json:"shard_count"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&prog); err != nil {
+		t.Fatalf("decode progress: %v", err)
+	}
+	resp.Body.Close()
+	if prog.State != "queued" || prog.Target != target {
+		t.Fatalf("progress (queued) body=%+v", prog)
+	}
+
+	// Drive the worker the way the registered background worker would, then the
+	// progress read must report the completed (idle) state at the target count.
+	worker, err := reshard.New(reshard.Config{Meta: h.store})
+	if err != nil {
+		t.Fatalf("worker new: %v", err)
+	}
+	if _, err := worker.RunOnce(ctx); err != nil {
+		t.Fatalf("worker run: %v", err)
+	}
+	resp = h.doString("GET", "/admin/bucket/reshard?bucket=bkt", "", testPrincipalHeader, s3api.IAMRootPrincipal)
+	h.mustStatus(resp, http.StatusOK)
+	if err := json.NewDecoder(resp.Body).Decode(&prog); err != nil {
+		t.Fatalf("decode progress after: %v", err)
+	}
+	resp.Body.Close()
+	if prog.State != "idle" || prog.ShardCount != target {
+		t.Fatalf("progress (after worker) body=%+v want state=idle shard_count=%d", prog, target)
+	}
+}
+
+// TestAdmin_BucketReshard_InProgressConflict pins the 409 on a second trigger
+// while a job is already queued.
+func TestAdmin_BucketReshard_InProgressConflict(t *testing.T) {
+	h := newNotifyHarness(t)
+	ctx := context.Background()
+	if _, err := h.store.CreateBucket(ctx, "bkt", "alice", "STANDARD"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	resp := h.doString("POST", "/admin/bucket/reshard?bucket=bkt&target=256", "", testPrincipalHeader, s3api.IAMRootPrincipal)
+	h.mustStatus(resp, http.StatusAccepted)
+	resp.Body.Close()
+
+	resp = h.doString("POST", "/admin/bucket/reshard?bucket=bkt&target=512", "", testPrincipalHeader, s3api.IAMRootPrincipal)
+	h.mustStatus(resp, http.StatusConflict)
+	resp.Body.Close()
+}
+
+// TestAdmin_BucketReshard_StatusIdleWhenNoJob covers the progress read with no
+// job in flight: state=idle reports the bucket's current shard count.
+func TestAdmin_BucketReshard_StatusIdleWhenNoJob(t *testing.T) {
+	h := newNotifyHarness(t)
+	ctx := context.Background()
+	if _, err := h.store.CreateBucket(ctx, "bkt", "alice", "STANDARD"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	b, _ := h.store.GetBucket(ctx, "bkt")
+
+	resp := h.doString("GET", "/admin/bucket/reshard?bucket=bkt", "", testPrincipalHeader, s3api.IAMRootPrincipal)
+	h.mustStatus(resp, http.StatusOK)
+	var prog struct {
+		State      string `json:"state"`
+		ShardCount int    `json:"shard_count"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&prog); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	resp.Body.Close()
+	if prog.State != "idle" || prog.ShardCount != b.ShardCount {
+		t.Fatalf("body=%+v want state=idle shard_count=%d", prog, b.ShardCount)
+	}
+}
+
+// TestAdmin_BucketReshard_StatusRunning covers the queued->running transition:
+// once the worker advances the LastKey watermark, the progress read reports
+// state=running with the watermark.
+func TestAdmin_BucketReshard_StatusRunning(t *testing.T) {
+	h := newNotifyHarness(t)
+	ctx := context.Background()
+	if _, err := h.store.CreateBucket(ctx, "bkt", "alice", "STANDARD"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	b, _ := h.store.GetBucket(ctx, "bkt")
+	job, err := h.store.StartReshard(ctx, b.ID, b.ShardCount*2)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	job.LastKey = "k-042"
+	if err := h.store.UpdateReshardJob(ctx, job); err != nil {
+		t.Fatalf("update job: %v", err)
+	}
+
+	resp := h.doString("GET", "/admin/bucket/reshard?bucket=bkt", "", testPrincipalHeader, s3api.IAMRootPrincipal)
+	h.mustStatus(resp, http.StatusOK)
+	var prog struct {
+		State   string `json:"state"`
+		LastKey string `json:"last_key"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&prog); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	resp.Body.Close()
+	if prog.State != "running" || prog.LastKey != "k-042" {
+		t.Fatalf("body=%+v want state=running last_key=k-042", prog)
+	}
+}
+
+// TestAdmin_BucketReshard_TriggerAudited proves the trigger stamps the
+// admin:BucketReshard audit override (CLAUDE.md "every new admin write" rule).
+func TestAdmin_BucketReshard_TriggerAudited(t *testing.T) {
+	store := metamem.New()
+	api := s3api.New(datamem.New(), store)
+	api.Region = "default"
+	api.Master = harnessMasterProvider{}
+	rootInjector := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := auth.WithAuth(r.Context(), &auth.AuthInfo{Owner: s3api.IAMRootPrincipal, AccessKey: s3api.IAMRootPrincipal})
+		api.ServeHTTP(w, r.WithContext(ctx))
+	})
+	ts := httptest.NewServer(s3api.NewAuditMiddleware(store, time.Hour, rootInjector))
+	t.Cleanup(ts.Close)
+
+	ctx := context.Background()
+	if _, err := store.CreateBucket(ctx, "bkt", "alice", "STANDARD"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	b, _ := store.GetBucket(ctx, "bkt")
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/admin/bucket/reshard?bucket=bkt&target="+itoa(b.ShardCount*2), nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status=%d want 202", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	rows, err := store.ListAudit(ctx, b.ID, 100)
+	if err != nil {
+		t.Fatalf("list audit: %v", err)
+	}
+	var found bool
+	for _, row := range rows {
+		if row.Action == "admin:BucketReshard" {
+			found = true
+			if row.Resource != "bucket:bkt" {
+				t.Fatalf("audit resource=%q want bucket:bkt", row.Resource)
+			}
+			if row.Principal != s3api.IAMRootPrincipal {
+				t.Fatalf("audit principal=%q want %q", row.Principal, s3api.IAMRootPrincipal)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no admin:BucketReshard audit row; rows=%+v", rows)
 	}
 }
 

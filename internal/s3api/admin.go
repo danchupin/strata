@@ -3,6 +3,7 @@ package s3api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -14,7 +15,6 @@ import (
 	"github.com/danchupin/strata/internal/gc"
 	"github.com/danchupin/strata/internal/lifecycle"
 	"github.com/danchupin/strata/internal/meta"
-	"github.com/danchupin/strata/internal/reshard"
 	"github.com/danchupin/strata/internal/rewrap"
 )
 
@@ -64,11 +64,14 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, sub string)
 		}
 		s.adminBucketInspect(w, r)
 	case "bucket/reshard":
-		if r.Method != http.MethodPost {
+		switch r.Method {
+		case http.MethodPost:
+			s.adminBucketReshard(w, r)
+		case http.MethodGet:
+			s.adminBucketReshardStatus(w, r)
+		default:
 			writeError(w, r, errAdminMethodNotAllowed)
-			return
 		}
-		s.adminBucketReshard(w, r)
 	default:
 		writeError(w, r, ErrNotImplemented)
 	}
@@ -324,22 +327,28 @@ func encodeConfigBlob(blob []byte) json.RawMessage {
 	return json.RawMessage(quoted)
 }
 
+// adminBucketReshardResponse is the async-reshard payload. State is one of
+// "queued" (job created, worker has not started moving rows), "running" (the
+// worker has advanced the LastKey watermark at least once), or "idle" (no job
+// in flight — the bucket already sits at ShardCount).
 type adminBucketReshardResponse struct {
-	OK            bool   `json:"ok"`
-	Bucket        string `json:"bucket"`
-	Source        int    `json:"source"`
-	Target        int    `json:"target"`
-	JobsScanned   int    `json:"jobs_scanned"`
-	JobsCompleted int    `json:"jobs_completed"`
-	ObjectsCopied int    `json:"objects_copied"`
-	DurationMs    int64  `json:"duration_ms"`
-	Error         string `json:"error,omitempty"`
+	OK         bool   `json:"ok"`
+	Bucket     string `json:"bucket"`
+	Source     int    `json:"source"`
+	Target     int    `json:"target"`
+	State      string `json:"state"`
+	LastKey    string `json:"last_key,omitempty"`
+	ShardCount int    `json:"shard_count,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 // adminBucketReshard queues an online shard-resize for the named bucket and
-// drives the reshard worker to completion synchronously. Operators with very
-// large buckets can prefer running strata-reshard as a daemon; this verb is
-// useful for small/medium buckets where a single HTTP call is acceptable.
+// returns immediately (202 Accepted) with a job descriptor. The physical row
+// migration is driven asynchronously by the leader-elected `reshard` worker
+// (cmd/strata/workers/reshard.go) — a large bucket's 64->128 reshard must not
+// block the HTTP request for minutes. Operators poll progress via
+// GET /admin/bucket/reshard?bucket=<name> (adminBucketReshardStatus). Enable
+// the worker with STRATA_WORKERS=...,reshard on at least one replica.
 func (s *Server) adminBucketReshard(w http.ResponseWriter, r *http.Request) {
 	bucketName := r.URL.Query().Get("bucket")
 	if bucketName == "" {
@@ -372,29 +381,59 @@ func (s *Server) adminBucketReshard(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	worker, werr := reshard.New(reshard.Config{Meta: s.Meta})
-	if werr != nil {
-		writeError(w, r, ErrInternal)
+	SetAuditOverride(r.Context(), "admin:BucketReshard", "bucket:"+bucketName, bucketName, principalFromContext(r))
+	writeAdminJSON(w, http.StatusAccepted, adminBucketReshardResponse{
+		OK:     true,
+		Bucket: bucketName,
+		Source: job.Source,
+		Target: job.Target,
+		State:  "queued",
+	})
+}
+
+// adminBucketReshardStatus reads the queued/running reshard job for a bucket
+// so operators can watch a long-running reshard converge. When no job is in
+// flight it reports state="idle" with the bucket's current ShardCount — the
+// signal that an async reshard has completed. Backed by meta.GetReshardJob on
+// every backend (memory/TiKV report the no-op job between Start and the
+// worker's immediate-complete pass).
+func (s *Server) adminBucketReshardStatus(w http.ResponseWriter, r *http.Request) {
+	bucketName := r.URL.Query().Get("bucket")
+	if bucketName == "" {
+		writeError(w, r, ErrInvalidArgument)
 		return
 	}
-	start := time.Now()
-	stats, runErr := worker.RunOnce(r.Context())
-	resp := adminBucketReshardResponse{
-		OK:            runErr == nil,
-		Bucket:        bucketName,
-		Source:        job.Source,
-		Target:        job.Target,
-		JobsScanned:   stats.JobsScanned,
-		JobsCompleted: stats.JobsCompleted,
-		ObjectsCopied: stats.ObjectsCopied,
-		DurationMs:    time.Since(start).Milliseconds(),
+	b, err := s.Meta.GetBucket(r.Context(), bucketName)
+	if err != nil {
+		mapMetaErr(w, r, err)
+		return
 	}
-	status := http.StatusOK
-	if runErr != nil {
-		resp.Error = runErr.Error()
-		status = http.StatusInternalServerError
+	job, err := s.Meta.GetReshardJob(r.Context(), b.ID)
+	if errors.Is(err, meta.ErrReshardNotFound) {
+		writeAdminJSON(w, http.StatusOK, adminBucketReshardResponse{
+			OK:         true,
+			Bucket:     bucketName,
+			State:      "idle",
+			ShardCount: b.ShardCount,
+		})
+		return
 	}
-	writeAdminJSON(w, status, resp)
+	if err != nil {
+		mapMetaErr(w, r, err)
+		return
+	}
+	state := "queued"
+	if job.LastKey != "" {
+		state = "running"
+	}
+	writeAdminJSON(w, http.StatusOK, adminBucketReshardResponse{
+		OK:      true,
+		Bucket:  bucketName,
+		Source:  job.Source,
+		Target:  job.Target,
+		State:   state,
+		LastKey: job.LastKey,
+	})
 }
 
 func writeAdminJSON(w http.ResponseWriter, status int, body any) {

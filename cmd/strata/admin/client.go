@@ -88,17 +88,18 @@ type BucketInspectResult struct {
 	Configs           map[string]json.RawMessage `json:"configs,omitempty"`
 }
 
-// BucketReshardResult is the payload returned by POST /admin/bucket/reshard.
+// BucketReshardResult is the payload returned by the async reshard endpoints
+// (POST queues a job, GET reads progress). State is "queued" | "running" |
+// "idle"; "idle" with the target ShardCount means the async reshard converged.
 type BucketReshardResult struct {
-	OK            bool   `json:"ok"`
-	Bucket        string `json:"bucket"`
-	Source        int    `json:"source"`
-	Target        int    `json:"target"`
-	JobsScanned   int    `json:"jobs_scanned"`
-	JobsCompleted int    `json:"jobs_completed"`
-	ObjectsCopied int    `json:"objects_copied"`
-	DurationMs    int64  `json:"duration_ms"`
-	Error         string `json:"error,omitempty"`
+	OK         bool   `json:"ok"`
+	Bucket     string `json:"bucket"`
+	Source     int    `json:"source"`
+	Target     int    `json:"target"`
+	State      string `json:"state"`
+	LastKey    string `json:"last_key,omitempty"`
+	ShardCount int    `json:"shard_count,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 // HTTPError is returned when the gateway responds with a non-2xx status.
@@ -185,11 +186,24 @@ func (c *Client) ReplicateRetry(ctx context.Context, bucket string) (*ReplicateR
 	return &out, nil
 }
 
-// BucketReshard queues + drives a single online shard-resize pass for a bucket.
+// BucketReshard queues an online shard-resize for a bucket and returns
+// immediately. The leader-elected reshard worker drives the row migration
+// asynchronously; poll BucketReshardStatus to watch it converge.
 func (c *Client) BucketReshard(ctx context.Context, bucket string, target int) (*BucketReshardResult, error) {
 	q := url.Values{"bucket": {bucket}, "target": {fmt.Sprintf("%d", target)}}
 	var out BucketReshardResult
 	if err := c.adminJSON(ctx, http.MethodPost, "/admin/bucket/reshard?"+q.Encode(), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// BucketReshardStatus reads the queued/running reshard job for a bucket, or
+// state="idle" with the current ShardCount when no job is in flight.
+func (c *Client) BucketReshardStatus(ctx context.Context, bucket string) (*BucketReshardResult, error) {
+	q := url.Values{"bucket": {bucket}}
+	var out BucketReshardResult
+	if err := c.adminJSON(ctx, http.MethodGet, "/admin/bucket/reshard?"+q.Encode(), nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

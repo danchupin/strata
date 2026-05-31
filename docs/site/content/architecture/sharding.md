@@ -100,9 +100,42 @@ lifecycle work distributes in lockstep with the gc fan-out.
 
 `internal/reshard` is a per-bucket online shard-resize worker (US-045).
 It drains the source shards, rewrites every key under the new modulo,
-and flips the bucket's `shardCount` once the rewrite catches up. The
-worker is driven synchronously via `/admin/bucket/reshard` or as a
-daemon under `STRATA_WORKERS=`.
+and flips the bucket's `shardCount` once the rewrite catches up. As of
+US-005 it runs **asynchronously** as a leader-elected background worker
+(`STRATA_WORKERS=…,reshard`, lease `reshard-leader`) — the admin
+endpoint only queues the job and returns immediately.
+
+### Operator runbook (async trigger + progress)
+
+1. **Enable the worker** on at least one replica:
+   `STRATA_WORKERS=gc,lifecycle,rebalance,reshard`. Tunables:
+   `STRATA_RESHARD_INTERVAL` (default `30s`, range `[1s,1h]`) and
+   `STRATA_RESHARD_BATCH_LIMIT` (default `500`).
+2. **Trigger** (queues the job, returns `202` immediately — never blocks
+   on the migration):
+   `POST /admin/bucket/reshard?bucket=<name>&target=<power-of-two>` →
+   `{"ok":true,"state":"queued","source":64,"target":128}`. Stamps the
+   `admin:BucketReshard` audit row. A second trigger while a job is in
+   flight returns `409 OperationAborted`.
+3. **Watch progress**:
+   `GET /admin/bucket/reshard?bucket=<name>` →
+   `state` is `queued` (no rows moved yet), `running` (`last_key`
+   watermark advancing), or `idle` (no job in flight — `shard_count`
+   reports the live count, the signal the reshard converged).
+4. **CLI**: `strata admin bucket reshard --bucket <name> --target 128`
+   queues and prints the job; add `--wait` to poll progress until the
+   worker drains the job.
+
+**Crash-safe + resumable.** The worker persists a `LastKey` watermark
+after each batch. A crash (or leader handover) mid-job resumes from that
+watermark on the next tick; `MigrateReshardKey` is idempotent, so
+re-walking the partial batch never double-moves or strands a key.
+`CompleteReshard` (the `shard_count` flip) fires only after the walk
+drains every key — cleanup-before-flip, so a post-flip listing never
+double-emits a moved key. The `make smoke-reshard` harness
+(`scripts/smoke-reshard.sh`) exercises the full path against the
+Cassandra lab: async trigger, concurrent PUT/GET/DELETE under load, and
+a `docker restart` mid-job crash-resume leg.
 
 **Reshard only does physical work on the Cassandra fan-out backend.**
 The objects table is partitioned by `(bucket_id, shard)`, so changing

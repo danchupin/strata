@@ -298,6 +298,107 @@ func TestReshardResumesFromWatermark(t *testing.T) {
 	}
 }
 
+// crashingStore is a meta.ReshardMigrator that fails the first time it is asked
+// to migrate failKey, then succeeds on every subsequent call. It models a
+// worker crash mid-job: the failed pass returns an error before CompleteReshard,
+// so the job stays queued and the watermark holds at the last fully-migrated
+// batch boundary. A restart resumes from that watermark and converges.
+type crashingStore struct {
+	meta.Store
+	failKey  string
+	failed   bool
+	migrated []string
+}
+
+func (c *crashingStore) MigrateReshardKey(_ context.Context, _ uuid.UUID, key string) (int, error) {
+	if key == c.failKey && !c.failed {
+		c.failed = true
+		return 0, fmt.Errorf("simulated crash migrating %q", key)
+	}
+	c.migrated = append(c.migrated, key)
+	return 1, nil
+}
+
+// TestReshardCrashResumesFromWatermark proves the US-005 crash-resume leg: a
+// worker that dies partway through a job must, on restart, resume from the
+// persisted LastKey watermark and still converge to a correct key set. The
+// first RunOnce errors mid-walk (job NOT completed, shard count NOT flipped,
+// watermark pinned at the last clean batch); the second RunOnce finishes the
+// job. MigrateReshardKey is idempotent, so re-walking the partial batch is safe.
+func TestReshardCrashResumesFromWatermark(t *testing.T) {
+	store := &crashingStore{Store: memory.New(), failKey: "k-25"}
+	ctx := context.Background()
+	b, err := store.CreateBucket(ctx, "bkt", "o", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	const objects = 50
+	for i := 0; i < objects; i++ {
+		if err := store.PutObject(ctx, &meta.Object{
+			BucketID: b.ID, Key: fmt.Sprintf("k-%02d", i), StorageClass: "STANDARD",
+			ETag: "e", Mtime: time.Now().UTC(), Manifest: &data.Manifest{Class: "STANDARD"},
+		}, false); err != nil {
+			t.Fatalf("put %d: %v", i, err)
+		}
+	}
+	if _, err := store.StartReshard(ctx, b.ID, 128); err != nil {
+		t.Fatalf("start reshard: %v", err)
+	}
+
+	worker, err := reshard.New(reshard.Config{Meta: store, BatchLimit: 10})
+	if err != nil {
+		t.Fatalf("worker new: %v", err)
+	}
+
+	// First pass: must error at the simulated crash and leave the job queued.
+	if _, err := worker.RunOnce(ctx); err == nil {
+		t.Fatal("first RunOnce: expected error from simulated crash, got nil")
+	}
+	job, err := store.GetReshardJob(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("job must survive a crash: %v", err)
+	}
+	// The ListObjectVersions marker is inclusive (key >= marker), so each batch
+	// re-lists the prior batch's last key. With BatchLimit=10 the batches are
+	// k-00..k-09, k-09..k-18, k-18..k-27 — the crash on k-25 lands in the third
+	// batch, so the last persisted watermark is the second batch's tail, k-18.
+	if job.LastKey != "k-18" {
+		t.Fatalf("watermark after crash: got %q want k-18", job.LastKey)
+	}
+	if got, _ := store.GetBucket(ctx, "bkt"); got.ShardCount != 64 {
+		t.Fatalf("shard count must NOT flip on a crashed job: got %d want 64", got.ShardCount)
+	}
+
+	// Second pass: the crash flag is spent, so the worker resumes from k-19 and
+	// drives the job to completion.
+	stats, err := worker.RunOnce(ctx)
+	if err != nil {
+		t.Fatalf("resume RunOnce: %v", err)
+	}
+	if stats.JobsCompleted != 1 {
+		t.Fatalf("resume jobs completed: got %d want 1", stats.JobsCompleted)
+	}
+	if got, _ := store.GetBucket(ctx, "bkt"); got.ShardCount != 128 || got.TargetShardCount != 0 {
+		t.Fatalf("post-resume: shard=%d target=%d want 128/0", got.ShardCount, got.TargetShardCount)
+	}
+	if _, err := store.GetReshardJob(ctx, b.ID); err != meta.ErrReshardNotFound {
+		t.Fatalf("post-resume job lookup: %v want ErrReshardNotFound", err)
+	}
+
+	// Convergence: every key must have been migrated at least once across the
+	// two passes (the watermark-replayed prefix may appear twice — idempotent).
+	seen := make(map[string]struct{}, objects)
+	for _, k := range store.migrated {
+		seen[k] = struct{}{}
+	}
+	for i := 0; i < objects; i++ {
+		k := fmt.Sprintf("k-%02d", i)
+		if _, ok := seen[k]; !ok {
+			t.Fatalf("key %q never migrated — crash-resume did not converge", k)
+		}
+	}
+}
+
 func errInProgress(err error) bool {
 	return err == meta.ErrReshardInProgress
 }

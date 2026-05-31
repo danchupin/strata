@@ -319,6 +319,7 @@ type WorkersConfig struct {
 	Rebalance        RebalanceConfig        `koanf:"rebalance"`
 	UsageRollup      UsageRollupConfig      `koanf:"usage_rollup"`
 	ManifestRewriter ManifestRewriterConfig `koanf:"manifest_rewriter"`
+	Reshard          ReshardConfig          `koanf:"reshard"`
 	AuditExport      AuditExportConfig      `koanf:"audit_export"`
 	QuotaReconcile   QuotaReconcileConfig   `koanf:"quota_reconcile"`
 	Notify           NotifyConfig           `koanf:"notify"`
@@ -361,6 +362,15 @@ type ManifestRewriterConfig struct {
 	Interval   time.Duration `koanf:"interval"`
 	BatchLimit int           `koanf:"batch_limit"`
 	DryRun     bool          `koanf:"dry_run"`
+}
+
+// ReshardConfig tunes the leader-elected reshard worker (US-005). Interval is
+// the poll cadence between RunOnce passes that drain queued reshard jobs;
+// BatchLimit is the per-page object walk size handed to the row mover so a
+// crash resumes from the last persisted watermark.
+type ReshardConfig struct {
+	Interval   time.Duration `koanf:"interval"`
+	BatchLimit int           `koanf:"batch_limit"`
 }
 
 type AuditExportConfig struct {
@@ -610,6 +620,10 @@ func defaults() Config {
 				BatchLimit: 500,
 				DryRun:     false,
 			},
+			Reshard: ReshardConfig{
+				Interval:   30 * time.Second,
+				BatchLimit: 500,
+			},
 			AuditExport: AuditExportConfig{
 				After:    30 * 24 * time.Hour,
 				Interval: 24 * time.Hour,
@@ -765,6 +779,8 @@ var envMap = map[string]string{
 	"STRATA_MANIFEST_REWRITER_INTERVAL":      "workers.manifest_rewriter.interval",
 	"STRATA_MANIFEST_REWRITER_BATCH_LIMIT":   "workers.manifest_rewriter.batch_limit",
 	"STRATA_MANIFEST_REWRITER_DRY_RUN":       "workers.manifest_rewriter.dry_run",
+	"STRATA_RESHARD_INTERVAL":                "workers.reshard.interval",
+	"STRATA_RESHARD_BATCH_LIMIT":             "workers.reshard.batch_limit",
 	"STRATA_AUDIT_EXPORT_BUCKET":             "workers.audit_export.bucket",
 	"STRATA_AUDIT_EXPORT_PREFIX":             "workers.audit_export.prefix",
 	"STRATA_AUDIT_EXPORT_AFTER":              "workers.audit_export.after",
@@ -1241,6 +1257,8 @@ func (c *Config) clampWorkers() {
 	c.Workers.Rebalance.RateMBPerS = clampInt("workers.rebalance.rate_mb_s", c.Workers.Rebalance.RateMBPerS, 1, 10000)
 	c.Workers.Rebalance.Inflight = clampInt("workers.rebalance.inflight", c.Workers.Rebalance.Inflight, 1, 64)
 	c.Workers.Rebalance.Shards = clampInt("workers.rebalance.shards", c.Workers.Rebalance.Shards, 1, 1024)
+	c.Workers.Reshard.Interval = clampDuration("workers.reshard.interval", c.Workers.Reshard.Interval, time.Second, time.Hour)
+	c.Workers.Reshard.BatchLimit = clampInt("workers.reshard.batch_limit", c.Workers.Reshard.BatchLimit, 1, 100000)
 }
 
 func clampInt(key string, v, lo, hi int) int {

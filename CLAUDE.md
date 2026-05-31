@@ -123,8 +123,14 @@ nginx LB `:9999` round-robins; direct ports `:10001`/`:10002`. `make up-cassandr
                   in place. Idempotent. Cadence STRATA_MANIFEST_REWRITER_INTERVAL.
   usage-rollup -> nightly samples bucket_stats → one usage_aggregates row per
                   (bucket, storage_class, yesterday-UTC). Feeds billing.
-  internal/reshard -> per-bucket online shard-resize, admin-driven one-shot
-                  (/admin/bucket/reshard) or daemon — NOT a tick worker.
+  reshard      -> per-bucket online shard-resize. US-005: now a leader-elected
+                  background worker (`--workers=reshard`, `reshard-leader`
+                  lease) that drains queued jobs. `POST /admin/bucket/reshard`
+                  QUEUES a job (202, async) + stamps `admin:BucketReshard`;
+                  `GET /admin/bucket/reshard?bucket=` reads progress
+                  (queued|running|idle). Idempotent + resumable from the job
+                  `LastKey` watermark (crash-safe). Cassandra moves rows;
+                  memory/TiKV immediate-complete no-op.
   strata admin rewrap -> one-shot SSE master-key rotation. Rewraps DEKs to
                   --target-key-id. Idempotent + resumable via rewrap_progress.
 ```
@@ -240,7 +246,11 @@ at the same site as `strataotel.StartIteration` / `strataotel.EndIteration` so t
 empty `name` → `"unknown"` and routes nil err → `status="success"` / non-nil → `"error"`. When adding a new
 worker, also extend `internal/metrics/metrics.go::registeredWorkerNames` so the prewarm seeds zero-valued
 series and the dashboard's `label_values(strata_worker_iteration_total, worker)` picker exposes it on boot.
-Reshard is intentionally absent — it is admin-driven one-shot, not a continuous tick.
+Reshard joined the worker set in US-005 (`reshard` in `registeredWorkerNames`): its `reshardRunner.Run` loop
+wraps each `RunOnce` in `workers.StartIteration`/`EndIteration` + `metrics.ObserveWorkerTick("reshard", …)`.
+The admin endpoint only QUEUES the job (`StartReshard`); the worker drains it out-of-band — never drive
+`RunOnce` inline in the HTTP request goroutine (a large bucket's migration would block the request for
+minutes). Knobs: `STRATA_RESHARD_INTERVAL` (default 30s, [1s,1h]) / `STRATA_RESHARD_BATCH_LIMIT` (default 500).
 
 ## meta.Store interface — the contract
 
