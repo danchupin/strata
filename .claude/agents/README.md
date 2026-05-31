@@ -5,6 +5,13 @@ but tuned to Strata's domain (S3 gateway over distributed TiKV/Cassandra metadat
 and RADOS/S3 data). They encode the gotchas from `CLAUDE.md` and the discipline in
 `.claude/rules/` so a review catches the bugs that actually bite this codebase.
 
+> Invoked locally / in-session via the `/review-strata` orchestrator skill (see
+> `.claude/skills/review-strata`). **CI cannot run this skill**: GitHub's
+> claude-code-action sandboxes the PR's repo-local `.claude/` (preserves it to
+> `.claude-pr/`, does not execute it) as prompt-injection defence. So CI review
+> (`.github/workflows/claude-code-review.yml`) **inlines these same domain lenses
+> directly in its prompt** instead. Keep the inline prompt and these agents in sync.
+
 ## The set
 
 | Agent | Lens | When |

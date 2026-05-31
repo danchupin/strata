@@ -498,7 +498,10 @@ subagents in `.claude/agents/`: correctness foreground + tests/s3-compat/errors 
 parallel, severity-aggregated). It is the entry point for in-session review; the
 agents are not auto-invoked. `/review-strata correctness tests` runs a subset.
 `/code-review ultra` remains the cloud whole-branch/PR review. After implementing a
-non-trivial change, prefer `/review-strata` before committing.
+non-trivial change, prefer `/review-strata` before committing. NOTE: the CI PR
+reviewer (`.github/workflows/claude-code-review.yml`) cannot run this skill — the
+action sandboxes the PR's `.claude/` — so it inlines the same domain lenses in its
+prompt; keep the two in sync when you change a reviewer.
 
 ## Commits and PRs
 
