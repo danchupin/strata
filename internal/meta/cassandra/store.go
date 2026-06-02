@@ -380,6 +380,14 @@ func (s *Store) CreateBucket(ctx context.Context, name, owner, defaultClass stri
 		CreatedAt:    time.Now().UTC(),
 		DefaultClass: defaultClass,
 		Versioning:   meta.VersioningDisabled,
+		// The INSERT persists shard_count = s.defaultShard; the returned
+		// struct MUST carry the same value (US-001). Leaving it zero made
+		// callers that address objects off the freshly returned bucket use
+		// ShardCount=0 — the parity oracle (memory CreateBucket) sets it, and
+		// the Cassandra integration suite (NonDefaultShardRoundTrip,
+		// PerBucketShardResolution, ReshardTransitional) caught the gap once
+		// US-010 put the gate back on CI.
+		ShardCount: s.defaultShard,
 	}
 	existing := make(map[string]interface{})
 	applied, err := s.s.Query(
@@ -1243,6 +1251,10 @@ func (s *Store) ListObjectVersions(ctx context.Context, bucketID uuid.UUID, opts
 	var dupKey, dupVersion string
 	haveDup := false
 	firstVersionForKey := true
+	// keyHead points at the row currently flagged IsLatest for lastKey so the
+	// suspended-null reconciliation below can flip it in place (res.Versions
+	// holds the same *meta.Object pointers).
+	var keyHead *meta.Object
 
 	for h.Len() > 0 {
 		top := heap.Pop(h).(*versionCursor)
@@ -1266,6 +1278,7 @@ func (s *Store) ListObjectVersions(ctx context.Context, bucketID uuid.UUID, opts
 		if obj.Key != lastKey {
 			firstVersionForKey = true
 			lastKey = obj.Key
+			keyHead = nil
 		}
 
 		if opts.Prefix != "" && !strings.HasPrefix(obj.Key, opts.Prefix) {
@@ -1287,7 +1300,23 @@ func (s *Store) ListObjectVersions(ctx context.Context, bucketID uuid.UUID, opts
 		}
 
 		obj.IsLatest = firstVersionForKey
+		if firstVersionForKey {
+			keyHead = obj
+		}
 		firstVersionForKey = false
+		// Suspended-null reconciliation, mirroring GetObject + the buffered
+		// lister (listAllObjects): a null-sentinel row written AFTER the
+		// version_id head is the real latest even though its sentinel sorts
+		// LAST in version-time DESC. The head popped first (flagged IsLatest);
+		// flip it off and promote the null row in place. Without this,
+		// ListObjectVersions stamped IsLatest on the highest-version_id row and
+		// diverged from GetObject (caught by caseVersioningSuspendedReplaceNull
+		// once US-010 put the Cassandra gate on CI).
+		if obj.IsNull && keyHead != nil && obj != keyHead && !keyHead.IsNull && obj.Mtime.After(keyHead.Mtime) {
+			keyHead.IsLatest = false
+			obj.IsLatest = true
+			keyHead = obj
+		}
 
 		if len(res.Versions) >= limit {
 			res.Truncated = true
@@ -1735,35 +1764,55 @@ func (h *cursorHeap) Pop() any {
 	return x
 }
 
+// gcEnqueueBatchChunks bounds how many ChunkRefs go into a single CQL batch.
+// Each chunk emits up to 3 INSERTs (gc_entries_v2 + the by_cluster lookup +
+// the legacy gc_queue dual-write), all in DISTINCT partitions, so a naive
+// single batch over a large slice both blows past Cassandra's
+// batch_size_fail_threshold ("Batch too large") and abuses the logged-batch
+// machinery across hundreds of partitions. 50 chunks ⇒ ≤150 statements per
+// batch — comfortably under the default thresholds. Sub-batch boundaries are
+// not atomic, which is fine: GC enqueue is idempotent and the lookup rows are
+// reconciled by ReconcileLookupTables on boot.
+const gcEnqueueBatchChunks = 50
+
 func (s *Store) EnqueueChunkDeletion(ctx context.Context, region string, chunks []data.ChunkRef) error {
 	if len(chunks) == 0 {
 		return nil
 	}
 	now := time.Now().UTC()
-	batch := s.s.NewBatch(gocql.LoggedBatch).WithContext(ctx)
-	for _, c := range chunks {
-		shardID := meta.GCShardID(c.OID)
-		batch.Query(
-			`INSERT INTO gc_entries_v2 (region, shard_id, enqueued_at, oid, pool, cluster, namespace)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			region, shardID, now, c.OID, c.Pool, c.Cluster, c.Namespace,
-		)
-		if c.Cluster != "" {
-			batch.Query(
-				`INSERT INTO gc_entries_by_cluster (cluster, region, enqueued_at, oid, pool, namespace)
-				 VALUES (?, ?, ?, ?, ?, ?)`,
-				c.Cluster, region, now, c.OID, c.Pool, c.Namespace,
-			)
+	for start := 0; start < len(chunks); start += gcEnqueueBatchChunks {
+		end := start + gcEnqueueBatchChunks
+		if end > len(chunks) {
+			end = len(chunks)
 		}
-		if s.gcDualWrite {
+		batch := s.s.NewBatch(gocql.LoggedBatch).WithContext(ctx)
+		for _, c := range chunks[start:end] {
+			shardID := meta.GCShardID(c.OID)
 			batch.Query(
-				`INSERT INTO gc_queue (region, enqueued_at, oid, pool, cluster, namespace)
-				 VALUES (?, ?, ?, ?, ?, ?)`,
-				region, now, c.OID, c.Pool, c.Cluster, c.Namespace,
+				`INSERT INTO gc_entries_v2 (region, shard_id, enqueued_at, oid, pool, cluster, namespace)
+				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				region, shardID, now, c.OID, c.Pool, c.Cluster, c.Namespace,
 			)
+			if c.Cluster != "" {
+				batch.Query(
+					`INSERT INTO gc_entries_by_cluster (cluster, region, enqueued_at, oid, pool, namespace)
+					 VALUES (?, ?, ?, ?, ?, ?)`,
+					c.Cluster, region, now, c.OID, c.Pool, c.Namespace,
+				)
+			}
+			if s.gcDualWrite {
+				batch.Query(
+					`INSERT INTO gc_queue (region, enqueued_at, oid, pool, cluster, namespace)
+					 VALUES (?, ?, ?, ?, ?, ?)`,
+					region, now, c.OID, c.Pool, c.Cluster, c.Namespace,
+				)
+			}
+		}
+		if err := s.s.ExecuteBatch(batch); err != nil {
+			return err
 		}
 	}
-	return s.s.ExecuteBatch(batch)
+	return nil
 }
 
 func (s *Store) ListGCEntries(ctx context.Context, region string, before time.Time, limit int) ([]meta.GCEntry, error) {
@@ -2752,6 +2801,16 @@ func (s *Store) ListSlowQueries(ctx context.Context, since time.Duration, minMs 
 // holds the row. Steady state is unchanged: a single active shard, no extra
 // probe for an explicit version.
 func (s *Store) resolveVersionID(ctx context.Context, bucketID uuid.UUID, key, versionID string) (gocql.UUID, int, error) {
+	// Normalize the S3 "null" wire literal to the canonical NullVersionID
+	// sentinel HERE — resolveVersionID is the single point-mutate funnel, so
+	// every caller (SetObjectTags/GetObjectTags/SetObjectStorage/deletes)
+	// inherits it. Some callers also wrap with meta.ResolveVersionID; that
+	// stays correct because the mapping is idempotent (NullVersionID is not
+	// the literal). Skipping it here let SetObjectTags(..., "null") feed a
+	// raw "null" into versionToCQL → ParseUUID failure → spurious
+	// ErrObjectNotFound (caught once US-010 put the Cassandra gate on CI).
+	versionID = meta.ResolveVersionID(versionID)
+
 	shards, targetShard, err := s.readShardsForKey(ctx, bucketID, key)
 	if err != nil {
 		return gocql.UUID{}, 0, err
