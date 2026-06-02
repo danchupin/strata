@@ -1,0 +1,56 @@
+name: CI (Cassandra)
+
+# Dedicated Cassandra meta.Store integration gate (US-010, architecture-hardening
+# cycle). The A1b parity decision does not allow Cassandra to stay untested: the
+# main `integration` job in ci.yml gates the Cassandra package OFF the per-PR run
+# because the LWT/Paxos contract used to hang for the full gocql timeout on the
+# shared 2-vCPU runner. This job runs the WHOLE Cassandra integration package on
+# its own runner with JVM heap tuning (see below) so the contract +
+# shard/reshard cases are a green required check again.
+#
+# Runs on every PR + push to main — same trigger surface as ci.yml so it can be
+# added to branch protection as a required check (manual post-merge admin step,
+# documented in ROADMAP / tasks/qa-readiness-report.md §6, mirroring the
+# coverage-gate step).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integration-cassandra:
+    name: Integration tests (Cassandra LWT/Paxos contract)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Root-cause tuning for the per-PR-runner Paxos starvation (US-010): the
+      # testcontainers cassandra module defaults to MAX_HEAP_SIZE=1024M /
+      # HEAP_NEWSIZE=128M. On a CPU-starved runner the tiny new-gen forces
+      # frequent young-GC pauses that stall Paxos prepare/propose past gocql's
+      # 60s timeout. A larger, deterministic heap with a fatter new-gen removes
+      # the GC thrash. cassandraTuningOpts() reads these in
+      # internal/meta/cassandra/testcontainer_integration_test.go.
+      STRATA_CASSANDRA_MAX_HEAP: '3072M'
+      STRATA_CASSANDRA_NEW_HEAP: '768M'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - name: Pre-pull Cassandra image (warms docker cache)
+        run: docker pull cassandra:5.0
+      # Whole Cassandra integration package: TestCassandraStoreContract/* (the
+      # storetest contract incl. GCQueueShardFanOut + VersioningSuspendedReplaceNull),
+      # plus the US-001..US-005 per-bucket shard + online-reshard cases
+      # (PerBucketShardResolution / ReshardTransitional / ReshardDeleteMarkerNoResurrect /
+      # ReshardWorkerMovesRows / ListBoundedFanOut) and the bucket-stats probe.
+      # The Scylla + TLS cases self-skip here (STRATA_SCYLLA_TEST unset; TLS runs
+      # too). -p 1 serialises the single package binary's testcontainer boots.
+      - name: Cassandra integration package
+        run: go test -v -tags integration -timeout 25m -p 1 ./internal/meta/cassandra/...

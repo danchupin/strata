@@ -326,7 +326,41 @@ gh api repos/danchupin/strata/branches/main/protection/required_status_checks \
 # expect the existing contexts PLUS: Coverage baseline (QA readiness)
 ```
 
-### 6.3 Re-run the s3-tests baseline (optional, local)
+### 6.3 Add the Cassandra integration gate to branch protection (US-010)
+
+The architecture-hardening cycle re-enabled the Cassandra `meta.Store` LWT/Paxos
+contract as a dedicated CI job (`.github/workflows/ci-cassandra.yml`). It
+introduces a new **required status check context**:
+`Integration tests (Cassandra LWT/Paxos contract)` (the `integration-cassandra`
+job's `name:`). Add it to `main` branch protection the same way as the coverage
+gate (admin token required):
+
+```bash
+# Fetch current required checks, append the new context, re-apply.
+gh api repos/danchupin/strata/branches/main/protection/required_status_checks \
+  --jq '.checks' > /tmp/checks.json
+
+gh api -X PATCH repos/danchupin/strata/branches/main/protection/required_status_checks \
+  -F strict=true \
+  -f 'checks[][context]=Integration tests (Cassandra LWT/Paxos contract)' \
+  # ...re-supply every EXISTING context from /tmp/checks.json so none is dropped
+```
+
+Verify with:
+
+```bash
+gh api repos/danchupin/strata/branches/main/protection/required_status_checks \
+  --jq '.checks[].context'
+# expect the existing contexts PLUS: Integration tests (Cassandra LWT/Paxos contract)
+```
+
+Root-cause of the prior per-PR-runner Paxos starvation + the JVM-heap tuning that
+fixes it is captured in `internal/meta/cassandra/testcontainer_integration_test.go`
+(`cassandraTuningOpts`). Follow-up (P3 in `ROADMAP.md`): once the tuning is proven
+to hold on the shared runner, fold the Cassandra package back into the
+`ci.yml::integration` job and drop the dedicated workflow.
+
+### 6.4 Re-run the s3-tests baseline (optional, local)
 
 `s3-tests` is **not** a CI job. The four bug fixes in this cycle are all outside
 the default-subset filter (`test_bucket_* / test_object_* / test_multipart /

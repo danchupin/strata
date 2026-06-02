@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/testcontainers/testcontainers-go"
 	tccassandra "github.com/testcontainers/testcontainers-go/modules/cassandra"
 
 	"github.com/danchupin/strata/internal/meta/cassandra"
@@ -51,7 +52,10 @@ func TestCassandraTLSHandshake(t *testing.T) {
 
 	ctx := context.Background()
 
-	container, err := tccassandra.Run(ctx, "cassandra:5.0", tccassandra.WithTLS())
+	// Keeps the container inline (TLSConfig is read off it below) but inherits
+	// the same CI-safe JVM tuning as startCassandra (US-010).
+	tlsOpts := append([]testcontainers.ContainerCustomizer{tccassandra.WithTLS()}, cassandraTuningOpts()...)
+	container, err := tccassandra.Run(ctx, cassandraImage(), tlsOpts...)
 	if err != nil {
 		t.Fatalf("start cassandra: %v", err)
 	}
@@ -197,4 +201,3 @@ func writeUnrelatedSelfSignedCA(t *testing.T, path string) {
 		t.Fatalf("write: %v", err)
 	}
 }
-

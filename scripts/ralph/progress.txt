@@ -298,3 +298,52 @@ Cycle: ralph/architecture-hardening
   - The bounded fan-out only parallelises the OPEN phase (running each shard's first query); the heap-merge after wg/pool drains is single-goroutine. So the goroutine/connection-pool blowup was always in the open burst — a semaphore there is the whole fix. Cursors stay open for the merge lifetime (one bounded page each), so resident memory is still shardCount-linear in pages but with a SMALL constant page (256), not limit (≤1000).
   - A single in-process store CAN discriminate the bounded-vs-unbounded fan-out at the HELPER level (TestRunBoundedFanOut_CapsConcurrency asserts peak in-flight ≤ concurrency) — no Cassandra needed for the goroutine-bound proof. The integration leg adds the read-after-write LOCAL_QUORUM + concurrent-list-stability proof that needs a real cluster. t.Fatalf is UNSAFE from spawned goroutines — listAll returns (keys,error); concurrent readers push err to a channel the test goroutine drains.
 ---
+
+## 2026-06-02 - US-010 (Cassandra integration tests back on a CI gate)
+- Re-enabled the Cassandra meta.Store LWT/Paxos contract as a CI gate via a
+  DEDICATED job `.github/workflows/ci-cassandra.yml` (`integration-cassandra`,
+  ubuntu-latest, 30m). Runs the WHOLE `internal/meta/cassandra` integration
+  package: storetest contract (incl. GCQueueShardFanOut +
+  VersioningSuspendedReplaceNull) + US-001..US-005 shard/reshard cases
+  (PerBucketShardResolution / ReshardTransitional / ReshardDeleteMarkerNoResurrect
+  / ReshardWorkerMovesRows / ListBoundedFanOut) + bucket-stats probe + TLS.
+  Same PR+push trigger surface as ci.yml so it qualifies as a per-PR required check.
+- ROOT-CAUSE of the per-PR-runner Paxos starvation: testcontainers cassandra
+  module defaults to MAX_HEAP_SIZE=1024M / HEAP_NEWSIZE=128M; on a 2-vCPU runner
+  the tiny new-gen forces young-GC pauses that stall Paxos prepare/propose past
+  gocql's 60s timeout. Mitigation = shared env-overridable JVM-tuning helper
+  `internal/meta/cassandra/testcontainer_integration_test.go` (cassandraTuningOpts /
+  startCassandra / cassandraImage / envOr) bumping heap to 3072M/768M on the
+  dedicated job. Routed ALL Cassandra testcontainer call sites through it
+  (9 sites: 7 in store_integration_test.go + bucket_stats + bench + TLS inline).
+  Net dedup: ~12 lines of container boot/cleanup boilerplate per site collapsed to
+  `host := startCassandra(t)`.
+- Branch-protection required-check add documented as manual post-merge admin step
+  in tasks/qa-readiness-report.md §6.3 (mirrors the coverage-gate §6.2 step).
+- ROADMAP: close-flipped "Cassandra integration tests gated off per-PR CI" (P2)
+  + added the P3 follow-up (fold Cassandra back into the shared per-PR integration
+  job once heap tuning is proven on the shared runner) as the tracked owned must-fix.
+- Files changed: .github/workflows/ci-cassandra.yml (new),
+  internal/meta/cassandra/testcontainer_integration_test.go (new helper),
+  store_integration_test.go / store_bench_integration_test.go /
+  bucket_stats_probe_integration_test.go / tls_integration_test.go (routed
+  through helper, dropped unused tccassandra/context imports + dead ctx),
+  ROADMAP.md, tasks/qa-readiness-report.md, scripts/ralph/prd.json.
+- Verified locally: `CGO_ENABLED=0 GOWORK=off go vet -tags integration
+  ./internal/meta/cassandra/...` clean; YAML parses; gofmt clean on all edited
+  files. `make vet` default tag is UNAFFECTED (all changes are //go:build
+  integration test files + workflow + markdown — excluded from the default build).
+- **Learnings for future iterations:**
+  - testcontainers.WithEnv MERGES (maps.Copy) and the cassandra module appends
+    caller opts AFTER its own defaults, so passing WithEnv({MAX_HEAP_SIZE:..}) as
+    a Run customizer OVERRIDES the module default without dropping snitch/DC env.
+  - The cassandra module's default heap (128M new / 1024M max) is the real Paxos
+    starvation root cause on CPU-starved runners, not the gocql timeout.
+  - When you remove a `tccassandra.Run` call site you usually also strip an
+    otherwise-unused `ctx := context.Background()` — vet flags one func at a time;
+    use a per-func ctx-usage scan to find them all in one pass.
+  - CANNOT confirm the CI run is green from a local macOS/lima box (cgo/Xcode +
+    no Linux runner). Per .claude/rules/test-discipline.md "CI is the source of
+    truth" — the actual green `integration-cassandra` run must be confirmed on the
+    PR before the branch-protection step is applied.
+---

@@ -23,8 +23,6 @@ import (
 	"testing"
 	"time"
 
-	tccassandra "github.com/testcontainers/testcontainers-go/modules/cassandra"
-
 	"github.com/danchupin/strata/internal/meta/cassandra"
 )
 
@@ -92,20 +90,7 @@ func TestCassandraBucketStatsConcurrencyProbe(t *testing.T) {
 
 	ctx := context.Background()
 
-	container, err := tccassandra.Run(ctx, "cassandra:5.0")
-	if err != nil {
-		t.Fatalf("start cassandra: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := container.Terminate(context.Background()); err != nil {
-			t.Logf("terminate: %v", err)
-		}
-	})
-
-	host, err := container.ConnectionHost(ctx)
-	if err != nil {
-		t.Fatalf("connection host: %v", err)
-	}
+	host := startCassandra(t)
 
 	metrics := newProbeMetrics()
 	store, err := cassandra.Open(cassandra.SessionConfig{

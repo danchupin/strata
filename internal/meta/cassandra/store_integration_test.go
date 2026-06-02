@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/gocql/gocql"
-	tccassandra "github.com/testcontainers/testcontainers-go/modules/cassandra"
 
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
@@ -32,22 +31,7 @@ func TestCassandraStoreContract(t *testing.T) {
 		t.Skip("STRATA_SCYLLA_TEST=1: ScyllaDB suite runs in TestScyllaStoreContract")
 	}
 
-	ctx := context.Background()
-
-	container, err := tccassandra.Run(ctx, "cassandra:5.0")
-	if err != nil {
-		t.Fatalf("start cassandra: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := container.Terminate(context.Background()); err != nil {
-			t.Logf("terminate: %v", err)
-		}
-	})
-
-	host, err := container.ConnectionHost(ctx)
-	if err != nil {
-		t.Fatalf("connection host: %v", err)
-	}
+	host := startCassandra(t)
 
 	var seq int64
 	newStore := func(t *testing.T) meta.Store {
@@ -95,20 +79,7 @@ func TestCassandraNullSentinelOnDisk(t *testing.T) {
 
 	ctx := context.Background()
 
-	container, err := tccassandra.Run(ctx, "cassandra:5.0")
-	if err != nil {
-		t.Fatalf("start cassandra: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := container.Terminate(context.Background()); err != nil {
-			t.Logf("terminate: %v", err)
-		}
-	})
-
-	host, err := container.ConnectionHost(ctx)
-	if err != nil {
-		t.Fatalf("connection host: %v", err)
-	}
+	host := startCassandra(t)
 
 	store, err := cassandra.Open(cassandra.SessionConfig{
 		Hosts:       []string{host},
@@ -217,20 +188,7 @@ func TestCassandraPerBucketShardResolution(t *testing.T) {
 
 	ctx := context.Background()
 
-	container, err := tccassandra.Run(ctx, "cassandra:5.0")
-	if err != nil {
-		t.Fatalf("start cassandra: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := container.Terminate(context.Background()); err != nil {
-			t.Logf("terminate: %v", err)
-		}
-	})
-
-	host, err := container.ConnectionHost(ctx)
-	if err != nil {
-		t.Fatalf("connection host: %v", err)
-	}
+	host := startCassandra(t)
 
 	openStore := func(keyspace string, shards int) *cassandra.Store {
 		store, err := cassandra.Open(cassandra.SessionConfig{
@@ -379,19 +337,7 @@ func TestCassandraReshardTransitional(t *testing.T) {
 
 	ctx := context.Background()
 
-	container, err := tccassandra.Run(ctx, "cassandra:5.0")
-	if err != nil {
-		t.Fatalf("start cassandra: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := container.Terminate(context.Background()); err != nil {
-			t.Logf("terminate: %v", err)
-		}
-	})
-	host, err := container.ConnectionHost(ctx)
-	if err != nil {
-		t.Fatalf("connection host: %v", err)
-	}
+	host := startCassandra(t)
 
 	const activeCount = 8
 	const targetCount = 16
@@ -556,19 +502,7 @@ func TestCassandraReshardDeleteMarkerNoResurrect(t *testing.T) {
 
 	ctx := context.Background()
 
-	container, err := tccassandra.Run(ctx, "cassandra:5.0")
-	if err != nil {
-		t.Fatalf("start cassandra: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := container.Terminate(context.Background()); err != nil {
-			t.Logf("terminate: %v", err)
-		}
-	})
-	host, err := container.ConnectionHost(ctx)
-	if err != nil {
-		t.Fatalf("connection host: %v", err)
-	}
+	host := startCassandra(t)
 
 	const activeCount = 8
 	const targetCount = 16
@@ -663,19 +597,7 @@ func TestCassandraReshardWorkerMovesRows(t *testing.T) {
 
 	ctx := context.Background()
 
-	container, err := tccassandra.Run(ctx, "cassandra:5.0")
-	if err != nil {
-		t.Fatalf("start cassandra: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := container.Terminate(context.Background()); err != nil {
-			t.Logf("terminate: %v", err)
-		}
-	})
-	host, err := container.ConnectionHost(ctx)
-	if err != nil {
-		t.Fatalf("connection host: %v", err)
-	}
+	host := startCassandra(t)
 
 	const activeCount = 64
 	const targetCount = 128
@@ -867,19 +789,7 @@ func TestCassandraListBoundedFanOut(t *testing.T) {
 
 	ctx := context.Background()
 
-	container, err := tccassandra.Run(ctx, "cassandra:5.0")
-	if err != nil {
-		t.Fatalf("start cassandra: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := container.Terminate(context.Background()); err != nil {
-			t.Logf("terminate: %v", err)
-		}
-	})
-	host, err := container.ConnectionHost(ctx)
-	if err != nil {
-		t.Fatalf("connection host: %v", err)
-	}
+	host := startCassandra(t)
 
 	const (
 		shardCount = 128

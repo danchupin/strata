@@ -3,13 +3,10 @@
 package cassandra_test
 
 import (
-	"context"
 	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	tccassandra "github.com/testcontainers/testcontainers-go/modules/cassandra"
 
 	"github.com/danchupin/strata/internal/meta"
 	"github.com/danchupin/strata/internal/meta/cassandra"
@@ -29,22 +26,7 @@ import (
 // The container boots once for the entire benchmark run; each sub-bench
 // gets a fresh keyspace so per-bench fixtures do not collide.
 func BenchmarkCassandraStore(b *testing.B) {
-	ctx := context.Background()
-
-	container, err := tccassandra.Run(ctx, "cassandra:5.0")
-	if err != nil {
-		b.Fatalf("start cassandra: %v", err)
-	}
-	b.Cleanup(func() {
-		if err := container.Terminate(context.Background()); err != nil {
-			b.Logf("terminate: %v", err)
-		}
-	})
-
-	host, err := container.ConnectionHost(ctx)
-	if err != nil {
-		b.Fatalf("connection host: %v", err)
-	}
+	host := startCassandra(b)
 
 	var seq int64
 	newStore := func() meta.Store {
