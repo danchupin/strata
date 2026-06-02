@@ -47,10 +47,11 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 			b.mu.Unlock()
 			hash.Write(chunk)
 			m.Chunks = append(m.Chunks, data.ChunkRef{
-				Cluster: "mem",
-				Pool:    "mem",
-				OID:     oid,
-				Size:    int64(n),
+				Cluster:  "mem",
+				Pool:     "mem",
+				OID:      oid,
+				Size:     int64(n),
+				Checksum: data.ComputeChunkCRC(chunk),
 			})
 			m.Size += int64(n)
 		}
@@ -142,9 +143,12 @@ func (b *Backend) ChunkOIDs() []string {
 	return out
 }
 
-// CorruptFirstChunk flips a byte in the first stored chunk and returns true.
-// Test-only helper used by SSE round-trip tests to simulate at-rest tampering;
-// returns false if there are no chunks.
+// CorruptFirstChunk flips a byte in an arbitrary stored chunk and returns
+// true. Test-only helper used by SSE round-trip tests to simulate at-rest
+// tampering; returns false if there are no chunks. NOTE: chunks is a map, so
+// "first" is whichever chunk map iteration yields — non-deterministic. For a
+// test that must corrupt a SPECIFIC chunk (e.g. the one a range window
+// touches), use CorruptChunkByOID instead.
 func (b *Backend) CorruptFirstChunk() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -157,6 +161,22 @@ func (b *Backend) CorruptFirstChunk() bool {
 		return true
 	}
 	return false
+}
+
+// CorruptChunkByOID deterministically flips a byte in the chunk named by oid
+// and returns true; false if the OID is absent or the chunk is empty.
+// Test-only helper for CRC tests that must corrupt the exact chunk a read
+// window covers (US-009 range-boundary verification).
+func (b *Backend) CorruptChunkByOID(oid string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	data, ok := b.chunks[oid]
+	if !ok || len(data) == 0 {
+		return false
+	}
+	data[0] ^= 0xFF
+	b.chunks[oid] = data
+	return true
 }
 
 type memReader struct {
@@ -194,13 +214,20 @@ func (r *memReader) seekToChunk() error {
 	for i, c := range r.m.Chunks {
 		if r.pos < base+c.Size {
 			r.b.mu.RLock()
-			data, ok := r.b.chunks[c.OID]
+			chunkBytes, ok := r.b.chunks[c.OID]
 			r.b.mu.RUnlock()
 			if !ok {
 				return fmt.Errorf("chunk %s missing", c.OID)
 			}
+			// US-009: verify the WHOLE chunk against its stored CRC32C
+			// before slicing the range window out of it (option a:
+			// full-chunk verification on range boundaries). VerifyChunk
+			// is a no-op for legacy zero-checksum rows or when disabled.
+			if err := data.VerifyChunk(c, chunkBytes); err != nil {
+				return err
+			}
 			off := r.pos - base
-			r.cur = bytes.NewReader(data[off:])
+			r.cur = bytes.NewReader(chunkBytes[off:])
 			r.curIdx = i
 			r.curBase = base
 			return nil

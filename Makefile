@@ -11,6 +11,7 @@ COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 	smoke-drain-lifecycle smoke-drain-transparency smoke-drain-progress-ui smoke-cluster-weights \
 	smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale \
 	smoke-single-binary smoke-tikv-default-lab smoke-rgw-lab-restart smoke-observability smoke-supply-chain \
+	smoke-reshard smoke-architecture-hardening \
 	race-soak race-soak-tikv lint-nginx-lab helm-lint promtool-check govulncheck trivy-check gosec license-audit slo-report \
 	bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi bench-rgw-comparison bench-rgw-comparison-with-cassandra \
 	docs-serve docs-build docs-openapi-copy clean
@@ -455,6 +456,30 @@ smoke-observability:
 # scanners — it fails only on a real finding / parse error.
 smoke-supply-chain:
 	bash scripts/smoke-supply-chain.sh
+
+# Online-reshard async + concurrent-write + crash-resume smoke (US-005 of
+# ralph/architecture-hardening). Drives a 64->128 reshard against the
+# Cassandra lab (:9998) while clients keep writing, asserts no client error +
+# stable key set + post-flip new-layout reads, then restarts the worker
+# container mid-job to prove crash-resume. SKIPs (exit 77) when the lab is
+# down unless REQUIRE_LAB=1. Needs the reshard worker enabled:
+#   STRATA_WORKERS=gc,lifecycle,rebalance,reshard make up-cassandra
+# See scripts/smoke-reshard.sh for env knobs (CASS_BASE, SMOKE_RS_*).
+smoke-reshard:
+	bash scripts/smoke-reshard.sh
+
+# Composite architecture-hardening e2e walkthrough (US-011). One pass across
+# BOTH labs (TiKV :9999 + Cassandra :9998) exercising per-bucket non-default
+# shard count, online 64->128 reshard under concurrent writes (Cassandra), the
+# TiKV no-op reshard parity, DeleteObjects batch+versioned, policy-UNION-ACL
+# anonymous GET, the /admin/v1 console reshard UI, and a plaintext
+# chunk-corruption fail-loud (CRC32C, runs even with no lab up). Each leg
+# WARN-skips when its lab is down; only a real assertion failure fails the run
+# (REQUIRE_LAB=1 promotes a down lab to a hard fail). See
+# scripts/smoke-architecture-hardening.sh for env knobs (TIKV_BASE, CASS_BASE,
+# SMOKE_AH_*) and the readiness note tasks/architecture-hardening-readiness.md.
+smoke-architecture-hardening:
+	bash scripts/smoke-architecture-hardening.sh
 
 # Race-soak driver (US-006). Brings up the Cassandra-backed stack
 # (`make up-all-ci` when CI=true, else `make up-cassandra`), waits for

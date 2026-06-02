@@ -40,6 +40,7 @@ for the dispatch shape.
 | `STRATA_DATA_BACKEND` | `memory` | `memory \| rados \| s3` | Data-backend selector. Required at boot. | `data_backend` |
 | `STRATA_META_BACKEND` | `memory` | `memory \| cassandra \| tikv` | Meta-backend selector. Required at boot. | `meta_backend` |
 | `STRATA_BUCKET_SHARDS` | `64` | positive int | Per-bucket default shard count for the `objects` table; see [sharded objects]({{< ref "/architecture/sharding" >}}). | `default_bucket_shards` |
+| `STRATA_CHUNK_CRC_VERIFY` | `true` | `true \| false` | Read-path per-chunk CRC32C verification (US-009). On: a byte-flip in a stored plaintext chunk fails the read loud (`ErrChecksumMismatch`) instead of a corrupted 200. Off: operator escape hatch. | `chunk_crc_verify` |
 | `STRATA_SHUTDOWN_WAIT` | `10s` | Go duration | Graceful-shutdown drain window before `http.Server.Close`. | `shutdown_wait` |
 | `STRATA_HTTP_READ_HEADER_TIMEOUT` | `10s` | Go duration ≥ 0 | Slowloris-safe ceiling on header receipt. `0` = disabled (net/http semantic). | `http.read_header_timeout` |
 | `STRATA_HTTP_READ_TIMEOUT` | `60s` | Go duration ≥ 0 | Header + body receipt ceiling. `0` = disabled. | `http.read_timeout` |
@@ -108,6 +109,7 @@ the meta-backend contract.
 | `STRATA_CASSANDRA_PASSWORD` | empty | string | Auth password. | `cassandra.password` |
 | `STRATA_CASSANDRA_TIMEOUT` | `10s` | Go duration | Per-query timeout. | `cassandra.timeout` |
 | `STRATA_CASSANDRA_SLOW_MS` | `100` | positive int (ms) | Slow-query WARN threshold for the Cassandra query observer. | `cassandra.slow_ms` |
+| `STRATA_CASSANDRA_LIST_CONCURRENCY` | `16` | int `[1, 256]` | Per-request shard fan-out cap for `ListObjects` / `ListObjectVersions`. Bounds gocql connections/goroutines regardless of a bucket's shard count (US-012). 0/unset → 16; above 256 clamps. | `cassandra.list_concurrency` |
 | `STRATA_CASSANDRA_TLS_CA_FILE` | empty | path | PEM CA bundle for server-cert verification. Empty → system root pool (when any TLS field is set) or plain-TCP (when all TLS fields unset). | `cassandra.tls.ca_file` |
 | `STRATA_CASSANDRA_TLS_CERT_FILE` | empty | path | PEM client certificate for mutual TLS. Must be paired with `STRATA_CASSANDRA_TLS_KEY_FILE`. | `cassandra.tls.cert_file` |
 | `STRATA_CASSANDRA_TLS_KEY_FILE` | empty | path | PEM private key matching `STRATA_CASSANDRA_TLS_CERT_FILE`. | `cassandra.tls.key_file` |
@@ -303,6 +305,19 @@ See [Concepts — workers]({{< ref "/concepts/workers" >}}).
 | `STRATA_MANIFEST_REWRITER_BATCH_LIMIT` | `500` | positive int | Per-tick rewrite cap. | `workers.manifest_rewriter.batch_limit` |
 | `STRATA_MANIFEST_REWRITER_DRY_RUN` | `false` | `true \| false` | Skip the write phase; log diffs only. | `workers.manifest_rewriter.dry_run` |
 
+## Reshard worker (`--workers=reshard`)
+
+Leader-elected background worker that drains queued online-reshard jobs
+(`POST /admin/bucket/reshard`). Idempotent + resumable from each job's `LastKey`
+watermark, so a crash mid-job is recovered on the next tick. Cassandra does the
+physical row migration; memory/TiKV are shard-agnostic (immediate-complete
+no-op). Enable on at least one replica.
+
+| Variable | Default | Range | Notes | TOML key |
+|---|---|---|---|---|
+| `STRATA_RESHARD_INTERVAL` | `30s` | Go duration `[1s, 1h]` | Poll cadence between drain passes. | `workers.reshard.interval` |
+| `STRATA_RESHARD_BATCH_LIMIT` | `500` | positive int | Object-walk page size; a crash resumes from the last watermark. | `workers.reshard.batch_limit` |
+
 ## Quota-reconcile worker (`--workers=quota-reconcile`)
 
 See [Quotas + billing]({{< ref "/best-practices/quotas-billing" >}}#drift-reconcile-workersquota-reconcile).
@@ -349,6 +364,7 @@ The standard W3C `OTEL_EXPORTER_OTLP_ENDPOINT` controls OTLP/HTTP export
 |---|---|---|
 | `STRATA_TIKV_TEST_PD_ENDPOINTS` | Operator-provided PD endpoints for TiKV integration tests (bypasses testcontainers). | — |
 | `STRATA_SCYLLA_TEST` / `STRATA_SCYLLA_IMAGE` | Gates + image override for the ScyllaDB contract suite. | — |
+| `STRATA_CASSANDRA_IMAGE` / `STRATA_CASSANDRA_MAX_HEAP` / `STRATA_CASSANDRA_NEW_HEAP` | Image override + JVM heap sizing for the Cassandra integration testcontainer (US-010 CI gate). | — |
 | `STRATA_TEST_AK` / `STRATA_TEST_SK` | Static AK/SK pair consumed by the S3 multi-cluster contract suite via `CredentialsEnv`. | — |
 | `STRATA_TEST_CEPH_CONF` / `STRATA_TEST_CEPH_POOL` / `STRATA_TEST_CEPH_CLASSES` | RADOS integration-test cluster wiring. | — |
 | `STRATA_TEST_REBALANCE_SRC_POOL` / `STRATA_TEST_REBALANCE_TGT_POOL` | RADOS rebalance mover integration-test pools. | — |

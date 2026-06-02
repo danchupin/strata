@@ -49,9 +49,24 @@ adding more, prove what is there.
   `RestrictPublicBuckets` is set, and `requireACL` disregards public ACL grants (canned
   public-read/public-read-write + AllUsers group) when `IgnorePublicAcls` is set — block
   wins. Enforcement matrix in `auth_public_access_matrix_test.go`. Surfaced a separate
-  pre-existing gap (R6): object access is an intersection of policy AND ACL gates, so a
-  bucket policy alone does not grant a non-owner anonymous GET (AWS treats them as a
-  union) — left for a follow-up.
+  pre-existing gap (R6): object access was an intersection of policy AND ACL gates, so a
+  bucket policy alone did not grant a non-owner anonymous GET (AWS treats them as a
+  union) — closed by the R6 entry below.
+- ~~**P2 — Object access was policy-INTERSECT-ACL, not the AWS policy-UNION-ACL (QA-cycle R6).**~~ —
+  **Done.** US-008 (architecture-hardening). `requireObjectAccess`
+  (`internal/s3api/access.go`) gated object actions on policy AND ACL, so a bucket policy
+  granting `s3:GetObject` to a non-owner did not actually grant access when the object/bucket
+  ACL was private — diverging from AWS, where bucket policy and ACL form a UNION. Rewrote it to
+  AWS precedence: an explicit policy Deny wins; an explicit policy Allow grants regardless of
+  the ACL gate (subject to `RestrictPublicBuckets` suppression of a public-policy grant for
+  anonymous callers); a neutral policy falls back to the ACL gate. New
+  `policy.EvaluateExplicit` distinguishes explicit-Deny / explicit-Allow / neutral (plain
+  `Evaluate` collapsed no-match into Deny). Access-point policy stays an additional required
+  gate (intersection) layered on top. Fixture rework in `policy_gate_test.go` +
+  `auth_public_access_matrix_test.go`: buckets now owned by a distinct principal so a genuine
+  non-owner anon exercises the union (the old fixtures passed only because the anon caller
+  owner-matched the anon-owned bucket); red/green proof — anon GET allowed by policy but denied
+  by a private ACL flipped 403 → 200, `TestPAB_*` + the policy/ACL matrices stay green. (commit `92c3439`)
 - ~~**P2 — Conditional GET `If-Match` did not suppress `If-Unmodified-Since`.**~~ —
   **Done.** US-002 (QA cycle) found `checkConditional` (`internal/s3api/conditional.go`)
   evaluated `If-Unmodified-Since` unconditionally, so `If-Match: <match>` +
@@ -83,22 +98,25 @@ adding more, prove what is there.
   already correct (store returns `ErrObjectNotFound` → 404). Pinned by
   `TestGetDeleteMarkerByVersionIDReturns405` (GET + HEAD, Enabled TimeUUID marker + Suspended
   null marker) plus the `TestRaceVersioning{Memory,TiKV}` contention scenarios.
-- **P2 — `DeleteObjects` (multi-object delete) has no direct test (QA-cycle R1).** The
-  `internal/s3api/delete_objects.go` handler — batch delete, partial-failure rows, quiet
-  mode, versioned delete-marker creation — is only exercised indirectly through the
-  `internal/racetest` workload; there is no focused unit/contract matrix asserting the
-  `<Delete>` request → `<DeleteResult>` shape, per-key `<Error>` reporting, the 1000-key
-  cap, or versioned-vs-unversioned semantics. Surfaced + accepted (non-blocking) in the
-  `ralph/qa-production-readiness` cycle. Fix scope: a table-driven handler test over the
-  in-memory harness (`newHarness`) covering quiet/verbose, mixed success/NoSuchKey, and a
-  versioned bucket (delete-marker creation + explicit `?versionId`).
-- **P3 — Plaintext (non-SSE) at-rest byte-flip is not detected on the read path (QA-cycle R9).**
-  Neither the memory nor the RADOS data plane carries a per-chunk checksum verified on read,
-  so a flipped byte inside a *plaintext* chunk returns a full-length corrupted `200`. Only
-  *truncation* / missing-chunk fails loud (`data.ErrNotFound`), and SSE objects are caught by
-  the AEAD layer. Surfaced + accepted (defence-in-depth, superseded by SSE) in the
-  `ralph/qa-production-readiness` cycle (US-011). Fix scope: store a per-chunk CRC/sha in the
-  manifest `ChunkRef` and verify on `GetChunks`; fail loud on mismatch.
+- ~~**P2 — `DeleteObjects` (multi-object delete) has no direct test (QA-cycle R1).**~~ — **Done.**
+  `internal/s3api/delete_objects_test.go` adds a table-driven handler matrix over `newHarness`:
+  quiet vs verbose, idempotent existing+missing-key success rows, per-key `<Error>` wire shape
+  (empty key → `MalformedXML`), the 1000-key cap (1001/zero/malformed → 400 `MalformedXML`,
+  exactly-1000 boundary accepted), and a versioned-bucket leg (no-versionId delete creates a
+  delete marker, explicit `?versionId` removes that version, deleting the marker's own version
+  restores the prior latest). Sanity-checked red against a deliberately-broken assertion. (commit `ba7131d`)
+- ~~**P3 — Plaintext (non-SSE) at-rest byte-flip is not detected on the read path (QA-cycle R9).**~~
+  — **Done.** `data.ChunkRef` now carries a per-chunk CRC32C (Castagnoli) — proto field 6
+  `crc32c` + Go `Checksum uint32` (`json:",omitempty"`), stamped at `PutChunks` time
+  (memory: in-loop; RADOS: centrally in `PutChunksParallel`). The read path verifies each
+  chunk against it and fails loud with `data.ErrChecksumMismatch` (memory `memReader`;
+  RADOS `prefetchReader.fetchSegment`) — a flipped byte now aborts the stream instead of
+  returning a corrupted `200`. Zero == absent: pre-US-009 rows decode with no checksum and
+  skip verification. Range-GET boundary handling is option (a): a partial boundary chunk is
+  fetched in full, verified, then sliced (interior chunks always verified). Verification
+  on by default, env opt-out `STRATA_CHUNK_CRC_VERIFY=false`. SSE unaffected (AEAD already
+  covers it). Red/green proof in `internal/data/memory/corruption_test.go` +
+  `internal/data/rados/prefetch_test.go`. (commit `120013d`)
 - ~~**P1 — Single-binary `strata` (CockroachDB-shape).**~~ — **Done.** Single `strata`
   binary with `server` + `admin` subcommands; `strata server` runs the gateway plus an
   opt-in subset of workers (gc, lifecycle, notify, replicator, access-log, inventory,
@@ -178,6 +196,77 @@ adding more, prove what is there.
   from the roadmap. (commit `40b45de`)
 
 ## Correctness & consistency
+
+- **P1 — Cassandra hot path ignores per-bucket `shard_count` (advertised per-bucket sharding is a no-op).** The
+  `objects` table is partitioned by `(bucket_id, fnv(key)%shard_count)`, but every object-addressing site in
+  `internal/meta/cassandra/store.go` used the process-global `s.defaultShard` (from `STRATA_BUCKET_SHARDS`) instead of
+  the bucket's stored `ShardCount`. A bucket created under one `STRATA_BUCKET_SHARDS` then served by a process started
+  with a different default point-reads the wrong partition → every versioned point-read / GET / DELETE 404s. **Partially
+  fixed** by `ralph/architecture-hardening` US-001: all 12 object-addressing sites (9 `shardOf` + 3 list/scan) now
+  resolve the bucket's active `ShardCount` via a short-TTL `bucketShardCounts` cache (carries active + reshard target;
+  `StartReshard` / `CompleteReshard` invalidate synchronously); steady-state non-default counts round-trip
+  (`caseNonDefaultShardRoundTrip` + integration `TestCassandraPerBucketShardResolution`, two-store red/green).
+  **US-002 (transitional read/write model) added:** while `shard_count_target != 0`, writes land in the TARGET layout
+  (`fnv%target`) and point reads + LIST union-read source ∪ target (`objectFanCount` widens the fan-out to
+  `max(active,target)`; `readShardsForKey` probes both, target-first, winning on a `(key,version_id)` collision;
+  `resolveVersionID` is the single funnel that teaches every UPDATE/DELETE-by-version path the same). Overwrites/deletes
+  clear BOTH layouts so no stale source row is double-emitted. Power-of-two doubling invariant documented in
+  `shardLayout` (target=2·active ⇒ each old shard s maps to {s, s+activeCount}, never a three-way split). Proof:
+  `caseReshardTransitionalKeySet` (cross-backend in-flight key-set stability, no-op on memory/TiKV) + integration
+  `TestCassandraReshardTransitional` (during-job writes land in the target layout and SURVIVE the post-flip rotation —
+  RED pre-US-002, GREEN after). **US-003 (worker physically moves rows + cleanup-before-flip) added:** Cassandra
+  implements the optional `meta.ReshardMigrator` (`MigrateReshardKey` relocates every version row of a key from its
+  source shard to its target shard via `INSERT … IF NOT EXISTS` — never clobbering a newer concurrent target write —
+  then deletes the source orphan; idempotent + crash-safe). `internal/reshard`'s `runJob` walks the in-flight union read
+  key-by-key, drives `MigrateReshardKey` per key under a `LastKey` watermark, and only after every diverging row is moved
+  + its source orphan deleted does `RunOnce` call the LWT `CompleteReshard` flip (`IF EXISTS`). Shard-agnostic backends
+  (memory, TiKV) don't implement the interface → immediate-complete no-op. Proof: integration
+  `TestCassandraReshardWorkerMovesRows` (64→128, 300 unversioned + one 3-version key; post-flip every key point-GETs,
+  LIST emits each once, all 3 versions reachable in order — RED against the row-walking skeleton that 404s the diverging
+  half, GREEN after) + worker unit tests via a recording `meta.ReshardMigrator` fake (dedup-per-key + watermark resume).
+  This entry's P1 is now **fully fixed** for the steady-state + transitional + physical-move path.
+  **US-005 (async drive + endpoint split) added:** `adminBucketReshard` no longer runs `worker.RunOnce` inline in
+  the HTTP request goroutine (a 64→128 reshard of a large bucket would block the request for minutes). The endpoint
+  now SPLITS into a trigger (`POST /admin/bucket/reshard` → `StartReshard` + `202 {state:"queued"}` +
+  `admin:BucketReshard` audit stamp) and a progress read (`GET /admin/bucket/reshard?bucket=` → `GetReshardJob` →
+  `queued|running|idle` on every backend). The physical migration is driven by a NEW leader-elected background
+  worker — `reshard` registered in `cmd/strata/workers/reshard.go` (lease `reshard-leader`, `STRATA_RESHARD_INTERVAL`
+  default 30s / `STRATA_RESHARD_BATCH_LIMIT` default 500), wrapping each `RunOnce` in
+  `StartIteration`/`EndIteration` + `ObserveWorkerTick("reshard", …)` (added to `registeredWorkerNames`). Crash-resume
+  is the `LastKey` watermark: a worker that dies mid-job resumes on the next tick / next leader and converges
+  (proof: `TestReshardCrashResumesFromWatermark` — RED would flip the count on a crashed job; GREEN holds the
+  source count until the resumed walk drains). CLI `strata admin bucket reshard --wait` polls progress to idle.
+  End-to-end `make smoke-reshard` (`scripts/smoke-reshard.sh`) drives a 64→128 reshard under concurrent
+  PUT/GET/DELETE on the Cassandra lab + a `docker restart` mid-job crash-resume leg.
+  **US-006 (web-console reshard UX) added:** the bucket-detail Distribution tab now hosts a `<BucketReshardPanel>`
+  that mirrors the drain-progress UX — a typed-confirm Reshard action (target defaults to the next power of two)
+  and a progress indicator that polls the reshard endpoint (queued → running with the `LastKey` cursor + elapsed
+  → idle/complete). New cookie-authenticated adminapi pair `GET|POST /admin/v1/buckets/{bucket}/reshard`
+  (`internal/adminapi/buckets_reshard.go`) carries a `supported` flag derived from the active meta backend
+  (`cassandra` ⇒ true; TiKV/memory ⇒ false): on a range-scan backend the action is disabled with the tooltip
+  "range-scan backend needs no resharding" (API stays a no-op success, UI stays disabled — both consistent). POST
+  stamps the `admin:BucketReshard` audit override. Proof: Go handler tests (idle/supported/queue/conflict/
+  invalid-target/not-found/audited) + Playwright `reshard-progress.spec.ts` (trigger → in-progress → complete on a
+  reshardable backend + the TiKV-disabled state) + `bucket-reshard-panel.test.mjs` (nextPowerOfTwo + state→label +
+  supported→enabled gating). NOTE: exact %-complete / numeric ETA are NOT surfaced — the US-005 progress endpoint
+  exposes only `state` + `LastKey` (no per-row migration counter), so the bar is honestly determinate at the
+  endpoints (queued primer / animated running / complete) with the watermark cursor + elapsed time as the
+  server-backed signals. A precise progress bar would need the worker to persist moved/total row counts (follow-up).
+  **US-011 (e2e pre-prod validation walkthrough) added — closes the cycle:** one composite pass
+  `make smoke-architecture-hardening` (`scripts/smoke-architecture-hardening.sh`) brings up both labs and exercises
+  the whole hardened path as six independent legs — A: Cassandra per-bucket non-default shard count + online 64→128
+  reshard under concurrent writes + crash-resume (delegates to `smoke-reshard.sh`, no fork); B: TiKV reshard parity
+  (immediate-complete no-op, object still readable); C: DeleteObjects batch (idempotent, missing-key = success row) +
+  versioned delete → `DeleteMarker`; D: policy-UNION-ACL anonymous GET (denied pre-policy, granted by an explicit
+  `s3:GetObject` Allow to `Principal:"*"`); E: the `/admin/v1` console reshard UI (`supported=true` Cassandra /
+  `false` TiKV-disabled + queue) plus the CI-only Playwright `reshard-progress.spec.ts`; F: plaintext
+  chunk-corruption fail-loud (`CGO_ENABLED=0` runs the `internal/data/{memory,rados}` CRC32C read-path tests — a live
+  gateway exposes no byte-flip hook by design, so corruption is injected at the backend test seam). Each leg
+  WARN-skips on a down lab and exits 0; `REQUIRE_LAB=1` promotes a down lab to a hard fail (CI). Runbook
+  `docs/site/content/operate/pre-prod-validation.md`; GO/NO-GO evidence note
+  `tasks/architecture-hardening-readiness.md` (pass/fail per leg; leg F observed-green locally, A–E PENDING-LAB with
+  the discriminating per-PR / dedicated-CI test cited per leg). Verdict: conditional GO pending one observed
+  `REQUIRE_LAB=1` run with both labs up.
 
 - ~~**P0/P1 — Cycle C: supply-chain-security (govulncheck + trivy + gosec CI gates + Dependabot + SECURITY.md + first release tag + SLSA L3 provenance + SPDX SBOM + cosign signing + license audit).**~~ — **Done.** Shipped via `ralph/supply-chain-security` cycle (US-001..US-011). 3 parallel CI scanners gated (govulncheck HIGH+CRITICAL / trivy CRITICAL / gosec MEDIUM); license audit gates banned licenses (forbidden + restricted classes). Dependabot weekly for Go × 2 + Actions + npm + Docker (patch-only auto-merge, grouped per ecosystem). SECURITY.md with 90-day SLA + GHSA-only disclosure. First release tag `v0.0.1-alpha.1` published; `ghcr.io/danchupin/strata` image signed via cosign keyless OIDC + SLSA L3 provenance + SPDX SBOM (slsa-framework/slsa-github-generator reusable workflow + anchore/sbom-action), all six release jobs green (run 26639369076). Operator verify recipe at /operate/image-verification.md with Kyverno + Sigstore Policy admission control examples. Composite smoke `make smoke-supply-chain` (`scripts/smoke-supply-chain.sh`) exercises every gate end-to-end. Pre-launch hard cutover — no behavior change. (commit `f22ab7e`)
 
@@ -347,6 +436,7 @@ adding more, prove what is there.
 - ~~**P2 — Per-bucket placement policy + cross-cluster rebalance worker.**~~ — **Done.** Shipped via the `ralph/placement-rebalance` cycle (US-001..US-007). Per-bucket policy lives on `meta.Bucket.Placement` (`{cluster: weight}` map, validated weight ∈ [0,100] + sum>0, JSON blob persisted via `setBucketBlob` on memory / Cassandra / TiKV); `internal/data/placement.PickCluster` routes via stable `fnv32a("<bucketID>/<key>/<chunkIdx>") % sum(weights)` walk over sorted cluster ids so the same chunk always lands on the same cluster across retries. RADOS + S3 `Backend.PutChunks` consult the policy via ctx-threaded helpers (`data.WithPlacement` / `WithObjectKey` / `WithBucketID`); legacy buckets with `Placement == nil` short-circuit to the class default — zero schema or behavior change. New `strata server --workers=rebalance` (leader-elected on `rebalance-leader`, env knobs `STRATA_REBALANCE_INTERVAL` / `_RATE_MB_S` / `_INFLIGHT` clamped + WARN-logged) walks every bucket with a policy, plans per-chunk moves whose current cluster ≠ verdict, and dispatches through a `MoverChain`: RADOS mover (`Read(srcIoctx) → Write(tgtIoctx, fresh OID)`) and S3 mover (`awss3.CopyObject` server-side when endpoint+region match, else streaming `GetObject → manager.Uploader.PutObject`). Per-object manifest CAS via `meta.Store.SetObjectStorage` with pre-CAS sanity check on the live chunk locator; CAS losers (old chunks on success, new on reject) routed to GC via `meta.EnqueueChunkDeletion`. Safety rails refuse moves into `draining` clusters (new `cluster_state` row backed by meta + admin API `POST /admin/v1/clusters/{id}/drain|undrain` + 30s-TTL in-process `placement.DrainCache` invalidated on flip) and (RADOS only) into clusters above 90% fill via optional `data.ClusterStatsProbe` capability that runs `MonCommand({"prefix":"df"})`; refusals bump `strata_rebalance_refused_total{reason,target}`. Metric family `strata_rebalance_planned_moves_total` / `_bytes_moved_total{from,to}` / `_chunks_moved_total{from,to,bucket}` / `_cas_conflicts_total{bucket}` / `_refused_total{reason,target}`; trace shapes `worker.rebalance.tick` / `rebalance.scan_bucket` / `rebalance.move_chunk`. `data.BackendRef.Cluster` populated at PutChunks time so the rebalance scan can emit a single virtual move per S3 object. Operator runbook: [Placement + rebalance](docs/site/content/best-practices/placement-rebalance.md). Operator workflow `register → set Placement → drain old → rebalance → deregister` is now zero-downtime. (commit `97d4984`)
 - ~~**P3 — Pools table shows class routing config, not actual cluster distribution.**~~ — **Done.** Shipped via the `ralph/drain-lifecycle` cycle (US-001). `internal/data/rados/health.go::DataHealth` + `internal/data/s3/health.go::DataHealth` rewritten to iterate `(cluster, distinct-pool)` matrix instead of `class → spec.Cluster`. The Pools table now returns `#clusters × #distinct-pools` rows (e.g. 2 clusters × 3 pools = 6 rows in the multi-cluster lab) with per-cluster `BytesUsed` populated independently per cluster via `ClusterStatsProbe.GetPoolStats(pool)`. Memory backend keeps the single `Cluster=""` synthetic row. Multi-class-per-pool aggregates to a comma-joined sorted class label, matching the memory + S3 convention. Operators can now see the true per-cluster footprint that drives drain decisions. (commit `9bb1b36`)
 - ~~**P3 — Drain strict mode for PUT routing fallback.**~~ — **Done.** Shipped via the `ralph/drain-lifecycle` cycle (US-002 + US-004). New env `STRATA_DRAIN_STRICT` (default `off`, accepts `on`/`off`/boolean strings; unknown → fail-fast at boot) plumbed into `internal/data/rados/Config` + `internal/data/s3/Config`. When `on`, RADOS + S3 `Backend.PutChunks` refuse to fall back to a draining cluster (`data.ErrDrainRefused` carrying the resolved cluster id) — gateway maps the sentinel to HTTP `503 ServiceUnavailable` with `<Code>DrainRefused</Code>` body + `Retry-After: 300` header. **PUT only** — reads, deletes, HEAD, multipart Complete/Abort, List against draining clusters all keep working (drain semantic is stop-write, not stop-read). Counter `strata_putchunks_refused_total{reason="drain_strict",cluster}` increments per refusal. `GET /admin/v1/clusters` surfaces the boot-time value as a top-level `drain_strict: bool` field; the operator console renders a "strict" chip per cluster card so the global flag is visible without a separate fetch. Companion drain-lifecycle UX (US-003..US-006): `GET /admin/v1/clusters/{id}/drain-progress` reads the rebalance worker's in-process `ProgressTracker` (chunks_on_cluster + base + ETA + deregister_ready); `<DrainProgressBar>` + green "Ready to deregister" chip; per-tick completion detection logs INFO `drain complete`, writes a `drain.complete` audit row, bumps `strata_drain_complete_total{cluster}`, and best-effort fans `s3:Drain:Complete` through `STRATA_NOTIFY_TARGETS`. Pre-drain bucket-impact preview via `GET /admin/v1/clusters/{id}/bucket-references` + `<BucketReferencesDrawer>` + amber "All clusters in this policy are draining" chip on Bucket Placement tab. Operator runbook: [Placement + rebalance — Drain lifecycle](docs/site/content/best-practices/placement-rebalance.md#drain-lifecycle). Smoke walkthrough: `scripts/smoke-drain-lifecycle.sh` (driven by `make smoke-drain-lifecycle` against the `multi-cluster` compose profile). (commit `9bb1b36`) *Follow-up:* `STRATA_DRAIN_STRICT` env removed in `ralph/drain-transparency` (commit `7dd9b68`) — drain is now unconditionally strict; the `drain_strict` admin field, the "strict" UI chip, and the `reason="drain_strict"` counter label were retired alongside the env. See the new P3 *Drain transparency + drain/evacuate split* entry above.
+- ~~**P2 — Cassandra `ListObjects` fan-out unbounded + read consistency unpinned.**~~ — **Done.** Shipped via the `ralph/architecture-hardening` cycle (US-012). `ListObjects` / `ListObjectVersions` previously spawned one goroutine + one gocql connection checkout per shard partition with NO semaphore — at `high-per-bucket-shard-count × concurrent-list-requests` this exploded goroutines and the connection pool. New `runBoundedFanOut` worker pool (`internal/meta/cassandra/listfanout.go`, sized by `STRATA_CASSANDRA_LIST_CONCURRENCY` → `Store.listConcurrency`, config-wired `cassandra.list_concurrency`, default 16, clamp `[1,256]`) caps concurrent shard queries regardless of `N`. Per-cursor page bounded to `listPageSize=256` (decoupled from the request `limit ≤1000`; the heap-merge auto-pages via `advance()`, so a small page is a fetch-granularity choice, never a truncation one — truncation counts emitted rows) → resident listing memory `N × listPageSize` heads + `listConcurrency × listPageSize` concurrent fetch burst, not the old `N × (limit+1)`. Listing queries pin `gocql.LocalQuorum` EXPLICITLY (`openShardCursor` / `openVersionCursor` / `AllObjectVersions`) so read-after-write coherence doesn't ride on a lowered session default. Proof: pure-Go unit `TestRunBoundedFanOut_CapsConcurrency` (peak in-flight ≤ concurrency vs the old one-goroutine-per-shard) + error/cancellation/clamp cases + `TestListConcurrencyFromEnv`; integration `TestCassandraListBoundedFanOut` (128-shard bucket, `ListConcurrency=4`, read-after-write at LOCAL_QUORUM + 16 concurrent listings return a stable complete sorted key set). TiKV unaffected (single ordered range scan, no fan-out). Docs: `docs/site/content/architecture/sharding.md` (Bounded fan-out + read consistency). (commit `bde6368`)
 - **P2 — Content-addressed object deduplication.** Today every chunk gets a fresh random OID even when two objects share identical bytes — duplicate uploads waste full-copy storage. Fix scope: chunk OID = `dedup/<sha256(content)>`; new `chunk_refcount` table in `meta.Store` keyed on OID; PUT path hashes the chunk, checks refcount, increments + skips RADOS write if the blob exists, else writes + sets refcount=1; DELETE / lifecycle-expire decrements; GC only deletes the underlying RADOS blob when refcount hits 0. Edge cases: (a) SSE-S3 / KMS — same plaintext encrypts differently per-object DEK, so dedup is incompatible with default SSE unless the operator opts into `dedup-friendly` mode where the DEK is derived from `hash(plaintext)` (weakens crypto independence; flag explicitly in `docs/sse.md` so operators understand the tradeoff); (b) hash hot-path cost — ~500 MB/s per core sha256 is acceptable; (c) cross-class dedup is opt-in (separate pools per class still mean separate storage even for same content); (d) manifest schema unchanged — chunk references stay `{Pool, OID, Length}` whether OID is random or content-addressed.
 - ~~**P2 — Bucket / user quotas + usage-based billing.**~~ — **Done.** Shipped via the `ralph/bucket-quotas-billing` cycle (US-001..US-011). Per-bucket `BucketQuota{MaxBytes, MaxObjects, MaxBytesPerObject}` + per-user `UserQuota{MaxBuckets, TotalMaxBytes}` persisted across all three meta backends (memory + Cassandra + TiKV) via shared `internal/meta/quota.go` JSON codec. Live `bucket_stats{bucket_id, used_bytes, used_objects}` updated atomically on every PUT / DELETE / multipart-Complete (memory mutex / Cassandra LWT-CAS loop / TiKV pessimistic txn) and read at PUT-validate time by `internal/s3api/quota.go::checkQuota` — overage rejects with `403 QuotaExceeded` (RGW shape). Drift correction via leader-elected `--workers=quota-reconcile` (env `STRATA_QUOTA_RECONCILE_INTERVAL` default 6h, gauge `strata_quota_reconcile_drift_bytes{bucket}`); nightly aggregation via leader-elected `--workers=usage-rollup` writes one `usage_aggregates` row per `(bucket_id, storage_class, day)` (envs `STRATA_USAGE_ROLLUP_AT` default `00:00`, `STRATA_USAGE_ROLLUP_INTERVAL` default 24h) — single-sample `byte_seconds × 24h` v1 approximation, continuous-integration is a P3 follow-up. Admin API surface (`GET/PUT/DELETE /admin/v1/buckets/{name}/quota` + `/iam/users/{user}/quota` + per-bucket / per-user usage history) wired into `internal/adminapi/openapi.yaml`. Web UI: per-bucket Usage tab on BucketDetail + new `/iam/users/:userName/billing` page with cross-bucket breakdown + Edit Quota dialogs. Operator guide: [Quotas + billing](docs/site/content/best-practices/quotas-billing.md). Out of scope this cycle (kept on roadmap as P3 follow-ups below): invoice ledger / payment integration; continuous-integration `byte_seconds`; denormalised `user_bucket_count`. (commit `f2973db`)
 - ~~**P3 — Continuous-integration `byte_seconds` for usage rollup.**~~ — **Done.**
@@ -545,9 +635,19 @@ Non-goals:
 
 ## Known latent bugs
 
+- **P2 — Cassandra reshard migration vs a concurrent specific-version DELETE can resurrect that version.** The US-003
+  reshard mover (`MigrateReshardKey`) copies a key's rows source→target then deletes the source orphan (copy-first, so
+  the US-002 union read never sees a gap). A client `DELETE ?versionId=v` landing AFTER the mover's source read but
+  BEFORE its target `INSERT … IF NOT EXISTS` resurrects `v` in the target: the client cleared both layouts on an empty
+  target, then the mover's insert re-creates it. Window is microseconds and only during an active reshard. The
+  alternative (delete-source-first) would open a worse window where the key is in NEITHER partition, violating the
+  stable-key-set guarantee. Closing it for real needs cross-partition atomicity Cassandra lacks (e.g. a per-key move
+  lease or a tombstone the mover honours). Operator guidance: prefer a low-traffic window for reshard; US-005's
+  concurrent-write smoke stresses the common paths. (`ralph/architecture-hardening` US-003)
 - ~~**P1 — `TestRaceMixedOpsCassandra` consistency-invariant violation (`AllObjectVersions` IsLatest).**~~ — **Fixed.** Root cause was NOT a backend race: `AllObjectVersions` re-sorted rows in Go with a **lexical** version_id string compare to pick each key's IsLatest head, but v1 timeuuid strings are not chronological (the low 32 time bits lead the string and wrap ~every 429s) — so a stale version got flagged latest, diverging from `GetObject` + Cassandra's native timeuuid clustering. Fix: `versionTimeKey()` sorts by parsed timeuuid TIME; null-row mtime reconciliation retained; `versionHeap.Less` hardened to the same order. Reproduced locally at `RACE_WORKERS=64 RACE_KEYS=2`, green 3× after fix; the `TestRaceMixedOpsCassandra` CI variant (s3api package) passes. (`ralph/ci-green-speedup` cycle)
 - ~~**P2 — e2e compose + e2e-full CI jobs red (full-stack runtime).**~~ — **Fixed.** Both rooted in TiKV never bootstrapping in CI: the tikv container FATAL-crash-looped on `nofile` (65536 < required 123880, GitHub-runner cap), so every gateway write hit NOT_BOOTSTRAPPED → smoke `PUT bucket` 500 (compose) / notify aws read-timeout (full). Fix: `ulimits.nofile=1048576` on the tikv compose service + the readyz TiKV probe now does a real key read (not just GetTimestamp, which succeeds while NOT_BOOTSTRAPPED) so `until /readyz` actually waits for writability. Also fixed the signed-smoke readiness loop using `curl -s` (no `-f`) → broke out on a 502 during the strata-a/b force-recreate; now `-sf`. e2e compose + e2e-full both green in CI.
-- **P2 — Cassandra integration tests gated off per-PR CI (TiKV is the tested default).** The Cassandra `meta.Store` LWT/Paxos contract round-trips (`TestCassandraStoreContract/*RoundTrip`, `GCQueueShardFanOut`, `VersioningSuspendedReplaceNull`) hang for the full gocql timeout on the resource-constrained GitHub runner — Cassandra is JVM-heavy and these Paxos ops starve where TiKV does not (they pass in ~17s locally). `internal/meta/cassandra` is excluded from the per-PR Integration `go test` for now; the backend-agnostic surface stays covered via the storetest contract on TiKV + memory. Re-enable via a dedicated/nightly job with a beefier runner or per-test resource limits, or root-cause the Cassandra-container starvation (heap cap / readiness). Cassandra remains first-class in code. (`ralph/ci-green-speedup` cycle)
+- ~~**P2 — Cassandra integration tests gated off per-PR CI (TiKV is the tested default).**~~ — **Done.** Shipped via the `ralph/architecture-hardening` cycle (US-010). Cassandra is back on a CI gate as a DEDICATED job (`.github/workflows/ci-cassandra.yml`, `integration-cassandra`) running the WHOLE `internal/meta/cassandra` integration package on its own runner — the full storetest contract (incl. `GCQueueShardFanOut`, `VersioningSuspendedReplaceNull`) plus the US-001..US-005 per-bucket-shard + online-reshard cases (`PerBucketShardResolution` / `ReshardTransitional` / `ReshardDeleteMarkerNoResurrect` / `ReshardWorkerMovesRows` / `ListBoundedFanOut`). Root-cause of the per-PR-runner Paxos starvation: the testcontainers cassandra module defaults to a tiny `HEAP_NEWSIZE=128M` / `MAX_HEAP_SIZE=1024M` heap, so on a CPU-starved 2-vCPU runner young-GC pauses stall Paxos prepare/propose past gocql's 60s timeout. Mitigation is a shared, env-overridable JVM-tuning helper (`internal/meta/cassandra/testcontainer_integration_test.go::cassandraTuningOpts` / `startCassandra`, routed through every Cassandra testcontainer call site incl. TLS) bumping the heap to a deterministic `MAX_HEAP_SIZE=3072M` / `HEAP_NEWSIZE=768M` on the dedicated job. The job runs on the same PR+push trigger surface as `ci.yml` so it is a per-PR gate; **branch-protection required-check add is a manual post-merge admin step** (`integration-cassandra`, mirroring the QA-cycle coverage-gate step in `tasks/qa-readiness-report.md` §6). Follow-up tracked below as a P3: folding the Cassandra package back into the SHARED per-PR `integration` job (single runner) once the heap tuning is proven to hold there, instead of a dedicated job. Cassandra remains first-class in code. (`ralph/architecture-hardening` cycle)
+- **P3 — Fold the Cassandra integration package back into the shared per-PR `integration` job.** US-010 re-enabled the Cassandra LWT/Paxos contract as a DEDICATED `integration-cassandra` job with JVM-heap tuning (`cassandraTuningOpts` bumps `MAX_HEAP_SIZE`/`HEAP_NEWSIZE`). The remaining work is to confirm the same tuning holds when the Cassandra package runs alongside tikv/minio/localstack on the SHARED `ci.yml::integration` runner (it is excluded there via `grep -v '/internal/meta/cassandra'`), then drop the dedicated job to save a runner. Owned must-fix, not "someday": the dedicated job is the safety net; collapsing to one runner is the optimisation. (`ralph/architecture-hardening` cycle)
 - ~~**P2 — TiKV meta backend stubs 22 `meta.Store` methods with `errors.ErrUnsupported`.**~~ — **Done.** Shipped via the `ralph/tikv-stubs` cycle (US-001..US-006). All 22 stubs at `internal/meta/tikv/store.go::100-186` replaced with prod-ready impls: object tags + object grants (US-001), object retention + legal-hold + restore-status (US-002), bucket grants (US-003), access points Create/Get/GetByAlias/Delete/List with three-index layout — by_name + by_alias + by_bucket (US-004), SSE rewrap progress + raw manifest + replication status (US-005). Per-object scalar fields piggyback on the single `objects` row via shared `mutateObjectRow` + `snapshotObjectRow` helpers (CLAUDE.md "per-object metadata pattern"). Pessimistic txns gate every RMW per the "Plain Put on a key with prior LWT history" gotcha; blind single-row writes use optimistic txns matching the existing bucket-blob trio idiom. Contract tests in `internal/meta/storetest` extended to exercise tags, grants, retention, legal-hold, restore-status, replication-status, access-point list-by-bucket multi-AP isolation, alias-cleanup-on-Delete. `make smoke` against the TiKV-default lab now passes the `== TAGGING` + `== OBJECT LOCK` legs end-to-end (was HTTP 500 at TAGGING). ROADMAP's earlier "19 methods" count was incorrect — actual stub count was 22. Fix scope also corrected `DeleteBucket` to mirror Cassandra semantics ("bucket is empty" iff no `objects` rows; cleanup the bucket-scoped bookkeeping rows in the same txn). (commit `1275c98`)
 - ~~**P1 — RADOS ClusterStats / ClusterObjectCount probe miss-reports non-default cluster usage.**~~ — **Fixed.** Both probes iterated `b.classes` filtered by `c == clusterID`; when no class entry targeted the non-default cluster (cephb in canonical lab without explicit `STRATA_RADOS_CLASSES` per-cluster), `seedPool` stayed empty → `ClusterStats` returned `"no configured class"` error, `ClusterObjectCount` returned 0 silently. `/drain-progress` reported `physical_chunks=0, physical_bytes=null` for cephb even when chunks were still on the cluster; UI flipped to "Ready to deregister" prematurely. Additionally, `ClusterStats` returned cluster-wide `total_used_bytes` from `ceph df` (includes `.mgr` and other ceph-internal pools — always >0) instead of strata-managed pool usage; operators saw stale "515 KiB" on an empty post-drain cluster. Fix: probe falls back to any class's pool name when no class targets the cluster (uniform pool layout assumption); ClusterStats sums bytes-used over strata-managed pools only (totalBytes stays cluster-wide for rebalance fill-check). Surfaced via operator drain walkthrough on the freshly-shipped TiKV-default lab. (commit `516b9bc`)
 - ~~**P1 — Multipart Complete/Abort panic on object keys with spaces.**~~ — **Fixed.** `internal/adminapi/uploads.go` `handleUploadComplete` + `handleUploadAbort` built the inner S3 sub-request via `httptest.NewRequest`, which constructs the request by parsing `"METHOD target HTTP/1.0\r\n\r\n"` through `http.ReadRequest`. Literal spaces in `target` (object keys like `My File.pdf`) made the parser treat the next token as the HTTP version → panic → LB 502. Switched both sites to `http.NewRequestWithContext` with `&url.URL{Path, RawQuery}.String()` for proper percent-escaping. Found by operator via the `/console` upload UI on a `.pptx` with spaces. (commit `470e8de`)

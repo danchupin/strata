@@ -11,6 +11,10 @@ data_backend = "rados"         # "memory" | "rados"
 meta_backend = "cassandra"     # "memory" | "cassandra"
 shutdown_wait = "10s"
 default_bucket_shards = 64
+# Read-path per-chunk CRC32C verification (US-009). Default on; a byte-flip
+# in a stored plaintext chunk then fails the read loud instead of returning a
+# corrupted 200. Set false to disable (operator escape hatch).
+chunk_crc_verify = true
 
 # Comma-separated CIDR list (IPv4 / IPv6) of upstream proxies allowed to
 # set X-Forwarded-* and X-Real-IP headers. Default empty → forwarded
@@ -132,6 +136,10 @@ password    = ""
 timeout     = "10s"
 # WARN threshold (ms) for gocql QueryObserver. 0 falls back to default (100).
 slow_ms     = 0
+# Per-request shard fan-out cap for ListObjects / ListObjectVersions (US-012).
+# Bounds gocql connections/goroutines regardless of bucket shard count.
+# 0 falls back to default (16); clamped to [1, 256].
+# list_concurrency = 16
 
 [cassandra.tls]
 # Cassandra mTLS (US-004 harden-gateway). Empty all-three (ca_file +
@@ -228,6 +236,10 @@ samples_per_day  = 24
 interval     = "24h"
 batch_limit  = 500
 dry_run      = false
+
+[workers.reshard]
+interval     = "30s"            # Poll cadence for the leader-elected reshard worker.
+batch_limit  = 500             # Object-walk page size; a crash resumes from the last watermark.
 
 [workers.audit_export]
 bucket   = ""                   # Required when audit-export worker enabled.

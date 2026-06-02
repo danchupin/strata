@@ -115,6 +115,33 @@ func Evaluate(doc *Document, principal, action, resource string, ctx EvalContext
 	return Deny, nil
 }
 
+// EvaluateExplicit reports the explicit policy decision so a caller
+// implementing AWS policy-UNION-ACL object-access semantics can tell a neutral
+// no-match (fall back to the ACL gate) apart from an explicit Allow (grant) or
+// explicit Deny (deny, highest precedence). allow is true when some matching
+// statement has Effect=Allow; deny is true when some matching statement has
+// Effect=Deny. Both false means the document is neutral for the request. An
+// explicit Deny short-circuits to (false, true) — deny wins over any allow.
+func EvaluateExplicit(doc *Document, principal, action, resource string, ctx EvalContext) (allow, deny bool, err error) {
+	if doc == nil {
+		return false, false, nil
+	}
+	for i, st := range doc.Statements {
+		if !st.matches(principal, action, resource, ctx) {
+			continue
+		}
+		switch st.Effect {
+		case EffectDeny:
+			return false, true, nil
+		case EffectAllow:
+			allow = true
+		default:
+			return false, false, fmt.Errorf("policy: statement[%d]: invalid Effect %q", i, st.Effect)
+		}
+	}
+	return allow, false, nil
+}
+
 func (s *Statement) matches(principal, action, resource string, ctx EvalContext) bool {
 	if !s.Principal.matches(principal) {
 		return false

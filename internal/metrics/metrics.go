@@ -587,9 +587,11 @@ func prewarmUS006Series() {
 // registeredWorkerNames mirrors the workers.Register() set in
 // cmd/strata/workers/*. Kept here as a string slice so internal/metrics
 // stays free of an import on cmd/strata/workers (which would form a cycle).
-// Update both lists together when adding a new worker. Reshard is excluded
-// — it is a one-shot admin-driven helper without a continuous tick loop, so
-// it never calls ObserveWorkerTick and the dashboard picker omits it.
+// Update both lists together when adding a new worker. Reshard joined the set
+// in US-005 (architecture-hardening): it is now a leader-elected background
+// worker that drains queued reshard jobs on a tick, so it wraps RunOnce in
+// workers.StartIteration/EndIteration + ObserveWorkerTick like every other
+// worker.
 var registeredWorkerNames = []string{
 	"gc",
 	"lifecycle",
@@ -602,6 +604,7 @@ var registeredWorkerNames = []string{
 	"quota-reconcile",
 	"usage-rollup",
 	"rebalance",
+	"reshard",
 }
 
 func Handler() http.Handler { return promhttp.Handler() }

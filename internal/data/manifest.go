@@ -105,6 +105,14 @@ type ChunkRef struct {
 	Namespace string `json:",omitempty"`
 	OID       string
 	Size      int64
+	// Checksum is the CRC32C (Castagnoli) of the chunk's stored bytes,
+	// stamped at PutChunks time (US-009). The read path verifies each
+	// chunk against it and fails loud (ErrChecksumMismatch) on a
+	// mismatch so at-rest byte-flips never surface as a corrupt 200.
+	// Zero == absent: pre-US-009 rows decode with no checksum and skip
+	// verification (a non-empty chunk whose real CRC is 0 is ~1/2^32 and
+	// is treated as absent — documented, accepted).
+	Checksum uint32 `json:",omitempty"`
 }
 
 // BackendRef points at a single object in an external object-store backend

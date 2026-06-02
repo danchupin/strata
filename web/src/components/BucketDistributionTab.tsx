@@ -27,6 +27,7 @@ import {
 } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
+import { BucketReshardPanel } from '@/components/BucketReshardPanel';
 
 const POLL_INTERVAL_MS = 30_000;
 // Skew banner threshold: max(shard) / median(shard) > 5 means one shard is at
@@ -119,6 +120,8 @@ export function BucketDistributionTab({ bucket }: Props) {
 
   return (
     <div className="space-y-4">
+      <BucketReshardPanel bucket={bucket} />
+
       {showSkew && (
         <Card className="border-amber-500/40 bg-amber-500/5">
           <CardContent className="flex items-start gap-3 py-4 text-sm text-amber-900 dark:text-amber-200">

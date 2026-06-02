@@ -53,6 +53,11 @@ type Config struct {
 	TrustedProxies string `koanf:"trusted_proxies"`
 
 	DefaultBucketShards int `koanf:"default_bucket_shards"`
+
+	// ChunkCRCVerify gates read-path per-chunk CRC32C verification
+	// (US-009). Default on; set STRATA_CHUNK_CRC_VERIFY=false to disable
+	// the at-rest corruption check (the explicit operator escape hatch).
+	ChunkCRCVerify bool `koanf:"chunk_crc_verify"`
 }
 
 // HTTPConfig carries per-connection timeout knobs applied to the gateway
@@ -160,8 +165,14 @@ type CassandraConfig struct {
 	// SlowMS is the WARN threshold (in milliseconds) applied by the
 	// gocql QueryObserver. 0 disables; unset falls back to the
 	// observer's DefaultSlowQueryMS (100ms). Wired via STRATA_CASSANDRA_SLOW_MS.
-	SlowMS int                `koanf:"slow_ms"`
-	TLS    CassandraTLSConfig `koanf:"tls"`
+	SlowMS int `koanf:"slow_ms"`
+	// ListConcurrency caps how many shard partitions a single ListObjects /
+	// ListObjectVersions request queries concurrently (US-012). Bounds the
+	// gocql connection-pool / goroutine footprint regardless of a bucket's
+	// shard count. 0 / unset falls back to DefaultListConcurrency (16);
+	// values above 256 clamp. Wired via STRATA_CASSANDRA_LIST_CONCURRENCY.
+	ListConcurrency int                `koanf:"list_concurrency"`
+	TLS             CassandraTLSConfig `koanf:"tls"`
 }
 
 // CassandraTLSConfig wires gocql.SslOptions for the Cassandra meta backend
@@ -319,6 +330,7 @@ type WorkersConfig struct {
 	Rebalance        RebalanceConfig        `koanf:"rebalance"`
 	UsageRollup      UsageRollupConfig      `koanf:"usage_rollup"`
 	ManifestRewriter ManifestRewriterConfig `koanf:"manifest_rewriter"`
+	Reshard          ReshardConfig          `koanf:"reshard"`
 	AuditExport      AuditExportConfig      `koanf:"audit_export"`
 	QuotaReconcile   QuotaReconcileConfig   `koanf:"quota_reconcile"`
 	Notify           NotifyConfig           `koanf:"notify"`
@@ -361,6 +373,15 @@ type ManifestRewriterConfig struct {
 	Interval   time.Duration `koanf:"interval"`
 	BatchLimit int           `koanf:"batch_limit"`
 	DryRun     bool          `koanf:"dry_run"`
+}
+
+// ReshardConfig tunes the leader-elected reshard worker (US-005). Interval is
+// the poll cadence between RunOnce passes that drain queued reshard jobs;
+// BatchLimit is the per-page object walk size handed to the row mover so a
+// crash resumes from the last persisted watermark.
+type ReshardConfig struct {
+	Interval   time.Duration `koanf:"interval"`
+	BatchLimit int           `koanf:"batch_limit"`
 }
 
 type AuditExportConfig struct {
@@ -529,6 +550,7 @@ func defaults() Config {
 		MetaBackend:         "memory",
 		ShutdownWait:        10 * time.Second,
 		DefaultBucketShards: 64,
+		ChunkCRCVerify:      true,
 		HTTP: HTTPConfig{
 			ReadHeaderTimeout: 10 * time.Second,
 			ReadTimeout:       60 * time.Second,
@@ -610,6 +632,10 @@ func defaults() Config {
 				BatchLimit: 500,
 				DryRun:     false,
 			},
+			Reshard: ReshardConfig{
+				Interval:   30 * time.Second,
+				BatchLimit: 500,
+			},
 			AuditExport: AuditExportConfig{
 				After:    30 * 24 * time.Hour,
 				Interval: 24 * time.Hour,
@@ -672,6 +698,7 @@ var envMap = map[string]string{
 	"STRATA_DATA_BACKEND":                    "data_backend",
 	"STRATA_META_BACKEND":                    "meta_backend",
 	"STRATA_BUCKET_SHARDS":                   "default_bucket_shards",
+	"STRATA_CHUNK_CRC_VERIFY":                "chunk_crc_verify",
 	"STRATA_SHUTDOWN_WAIT":                   "shutdown_wait",
 	"STRATA_HTTP_READ_HEADER_TIMEOUT":        "http.read_header_timeout",
 	"STRATA_HTTP_READ_TIMEOUT":               "http.read_timeout",
@@ -765,6 +792,8 @@ var envMap = map[string]string{
 	"STRATA_MANIFEST_REWRITER_INTERVAL":      "workers.manifest_rewriter.interval",
 	"STRATA_MANIFEST_REWRITER_BATCH_LIMIT":   "workers.manifest_rewriter.batch_limit",
 	"STRATA_MANIFEST_REWRITER_DRY_RUN":       "workers.manifest_rewriter.dry_run",
+	"STRATA_RESHARD_INTERVAL":                "workers.reshard.interval",
+	"STRATA_RESHARD_BATCH_LIMIT":             "workers.reshard.batch_limit",
 	"STRATA_AUDIT_EXPORT_BUCKET":             "workers.audit_export.bucket",
 	"STRATA_AUDIT_EXPORT_PREFIX":             "workers.audit_export.prefix",
 	"STRATA_AUDIT_EXPORT_AFTER":              "workers.audit_export.after",
@@ -796,6 +825,7 @@ var envMap = map[string]string{
 	"STRATA_BUCKETSTATS_INTERVAL":            "bucket_stats.interval",
 	"STRATA_BUCKETSTATS_TOPN":                "bucket_stats.top_n",
 	"STRATA_CASSANDRA_SLOW_MS":               "cassandra.slow_ms",
+	"STRATA_CASSANDRA_LIST_CONCURRENCY":      "cassandra.list_concurrency",
 	"STRATA_CLUSTER_NAME":                    "cluster.name",
 	"STRATA_CONSOLE_JWT_SECRET":              "console.jwt_secret",
 	"STRATA_CONSOLE_THEME_DEFAULT":           "console.theme_default",
@@ -1166,6 +1196,9 @@ func (c *Config) clampMisc() {
 		slog.Warn("clamping config value", "key", "cassandra.slow_ms", "value", c.Cassandra.SlowMS, "min", 0)
 		c.Cassandra.SlowMS = 0
 	}
+	if c.Cassandra.ListConcurrency != 0 {
+		c.Cassandra.ListConcurrency = clampInt("cassandra.list_concurrency", c.Cassandra.ListConcurrency, 1, 256)
+	}
 	if c.BucketStats.TopN < 0 {
 		slog.Warn("clamping config value", "key", "bucket_stats.top_n", "value", c.BucketStats.TopN, "min", 0)
 		c.BucketStats.TopN = 0
@@ -1241,6 +1274,8 @@ func (c *Config) clampWorkers() {
 	c.Workers.Rebalance.RateMBPerS = clampInt("workers.rebalance.rate_mb_s", c.Workers.Rebalance.RateMBPerS, 1, 10000)
 	c.Workers.Rebalance.Inflight = clampInt("workers.rebalance.inflight", c.Workers.Rebalance.Inflight, 1, 64)
 	c.Workers.Rebalance.Shards = clampInt("workers.rebalance.shards", c.Workers.Rebalance.Shards, 1, 1024)
+	c.Workers.Reshard.Interval = clampDuration("workers.reshard.interval", c.Workers.Reshard.Interval, time.Second, time.Hour)
+	c.Workers.Reshard.BatchLimit = clampInt("workers.reshard.batch_limit", c.Workers.Reshard.BatchLimit, 1, 100000)
 }
 
 func clampInt(key string, v, lo, hi int) int {

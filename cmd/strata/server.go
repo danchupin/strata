@@ -73,6 +73,10 @@ var knownWorkers = []knownWorker{
 		"STRATA_MANIFEST_REWRITER_BATCH_LIMIT (default 500) — page size for ListObjectVersions",
 		"STRATA_MANIFEST_REWRITER_DRY_RUN (default false) — scan-only mode; no writes",
 	}},
+	{"reshard", []string{
+		"STRATA_RESHARD_INTERVAL (default 30s) — poll cadence between online-reshard drain passes",
+		"STRATA_RESHARD_BATCH_LIMIT (default 500) — object-walk page size; a crash resumes from the last watermark",
+	}},
 }
 
 // serverFlags is the cross-cutting flag set understood by `strata server`.

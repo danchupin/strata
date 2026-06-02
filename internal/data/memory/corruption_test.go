@@ -107,3 +107,146 @@ func TestGetChunksZeroByteManifestReadsClean(t *testing.T) {
 	// Guard against an accidental import-only reference to data.
 	_ = data.DefaultChunkSize
 }
+
+// TestGetChunksCRCMismatchFailsLoud is the US-009 red/green proof: a byte
+// flipped in a stored plaintext chunk makes the read fail loud with
+// data.ErrChecksumMismatch instead of returning a corrupted 200. Before the
+// fix the same read returned the tampered bytes with a nil error.
+func TestGetChunksCRCMismatchFailsLoud(t *testing.T) {
+	b := datamem.New()
+	t.Cleanup(func() { _ = b.Close() })
+
+	payload := bytes.Repeat([]byte("z"), 6*1024*1024) // two chunks
+	m, err := b.PutChunks(context.Background(), bytes.NewReader(payload), "STANDARD")
+	if err != nil {
+		t.Fatalf("PutChunks: %v", err)
+	}
+	if len(m.Chunks) == 0 || m.Chunks[0].Checksum == 0 {
+		t.Fatalf("PutChunks did not stamp a chunk CRC32C: %+v", m.Chunks)
+	}
+
+	if !b.CorruptChunkByOID(m.Chunks[0].OID) {
+		t.Fatalf("CorruptChunkByOID(%s) found no chunk to flip", m.Chunks[0].OID)
+	}
+
+	rc, err := b.GetChunks(context.Background(), m, 0, m.Size)
+	if err != nil {
+		t.Fatalf("GetChunks open: %v", err)
+	}
+	_, err = io.ReadAll(rc)
+	_ = rc.Close()
+	if !errors.Is(err, data.ErrChecksumMismatch) {
+		t.Fatalf("read of corrupted chunk: want ErrChecksumMismatch, got %v", err)
+	}
+}
+
+// TestGetChunksCleanReadVerifies is the green half: an untampered object
+// reads back byte-for-byte with verification on.
+func TestGetChunksCleanReadVerifies(t *testing.T) {
+	b := datamem.New()
+	t.Cleanup(func() { _ = b.Close() })
+
+	payload := bytes.Repeat([]byte("ok"), 3*1024*1024) // 6 MiB, two chunks
+	m, err := b.PutChunks(context.Background(), bytes.NewReader(payload), "STANDARD")
+	if err != nil {
+		t.Fatalf("PutChunks: %v", err)
+	}
+	rc, err := b.GetChunks(context.Background(), m, 0, m.Size)
+	if err != nil {
+		t.Fatalf("GetChunks: %v", err)
+	}
+	got, err := io.ReadAll(rc)
+	_ = rc.Close()
+	if err != nil {
+		t.Fatalf("clean read errored: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("clean read mismatch: %d bytes vs %d", len(got), len(payload))
+	}
+}
+
+// TestGetChunksRangeBoundaryVerifiesFullChunk proves option (a): a Range
+// read that touches only part of a corrupted boundary chunk still fails
+// loud, because the whole chunk is verified before the window is sliced.
+func TestGetChunksRangeBoundaryVerifiesFullChunk(t *testing.T) {
+	b := datamem.New()
+	t.Cleanup(func() { _ = b.Close() })
+
+	payload := bytes.Repeat([]byte("r"), 5*1024*1024) // chunk0 4MiB + chunk1 1MiB
+	m, err := b.PutChunks(context.Background(), bytes.NewReader(payload), "STANDARD")
+	if err != nil {
+		t.Fatalf("PutChunks: %v", err)
+	}
+	if !b.CorruptChunkByOID(m.Chunks[0].OID) { // deterministically corrupt chunk0
+		t.Fatalf("CorruptChunkByOID(%s) found no chunk", m.Chunks[0].OID)
+	}
+	// Read a 16-byte window entirely inside the corrupted first chunk.
+	rc, err := b.GetChunks(context.Background(), m, 100, 16)
+	if err != nil {
+		t.Fatalf("GetChunks: %v", err)
+	}
+	_, err = io.ReadAll(rc)
+	_ = rc.Close()
+	if !errors.Is(err, data.ErrChecksumMismatch) {
+		t.Fatalf("range read of corrupted boundary chunk: want ErrChecksumMismatch, got %v", err)
+	}
+}
+
+// TestGetChunksOptOutSkipsVerification proves STRATA_CHUNK_CRC_VERIFY=off
+// (SetChunkCRCVerify(false)) returns the tampered bytes without erroring —
+// the explicit operator escape hatch.
+func TestGetChunksOptOutSkipsVerification(t *testing.T) {
+	b := datamem.New()
+	t.Cleanup(func() { _ = b.Close() })
+
+	data.SetChunkCRCVerify(false)
+	t.Cleanup(func() { data.SetChunkCRCVerify(true) })
+
+	payload := bytes.Repeat([]byte("q"), 4*1024*1024)
+	m, err := b.PutChunks(context.Background(), bytes.NewReader(payload), "STANDARD")
+	if err != nil {
+		t.Fatalf("PutChunks: %v", err)
+	}
+	if !b.CorruptFirstChunk() {
+		t.Fatal("CorruptFirstChunk found no chunk")
+	}
+	rc, err := b.GetChunks(context.Background(), m, 0, m.Size)
+	if err != nil {
+		t.Fatalf("GetChunks: %v", err)
+	}
+	_, err = io.ReadAll(rc)
+	_ = rc.Close()
+	if err != nil {
+		t.Fatalf("opt-out read should not verify, got %v", err)
+	}
+}
+
+// TestGetChunksLegacyZeroChecksumSkipped proves a pre-US-009 row (chunks
+// with Checksum==0) is read without verification — zero is treated as
+// absent, not as the CRC of the bytes.
+func TestGetChunksLegacyZeroChecksumSkipped(t *testing.T) {
+	b := datamem.New()
+	t.Cleanup(func() { _ = b.Close() })
+
+	payload := bytes.Repeat([]byte("L"), 4*1024*1024)
+	m, err := b.PutChunks(context.Background(), bytes.NewReader(payload), "STANDARD")
+	if err != nil {
+		t.Fatalf("PutChunks: %v", err)
+	}
+	// Simulate a legacy manifest: clear the stamped checksums.
+	for i := range m.Chunks {
+		m.Chunks[i].Checksum = 0
+	}
+	if !b.CorruptFirstChunk() {
+		t.Fatal("CorruptFirstChunk found no chunk")
+	}
+	rc, err := b.GetChunks(context.Background(), m, 0, m.Size)
+	if err != nil {
+		t.Fatalf("GetChunks: %v", err)
+	}
+	_, err = io.ReadAll(rc)
+	_ = rc.Close()
+	if err != nil {
+		t.Fatalf("legacy zero-checksum read should skip verification, got %v", err)
+	}
+}

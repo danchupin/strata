@@ -57,6 +57,32 @@ resumes exactly where the previous left off. This is the
 N-way-fan-out path the gateway uses when the meta backend does NOT
 implement `RangeScanStore`.
 
+### Bounded fan-out + read consistency (US-012)
+
+The fan-out is **bounded**, not one-goroutine-per-shard. A worker pool
+(`runBoundedFanOut`, sized by `STRATA_CASSANDRA_LIST_CONCURRENCY`, default
+`16`, clamped `[1, 256]`) caps how many shard partitions a single listing
+queries concurrently, so the gocql connection pool and goroutine count stay
+bounded no matter how high `N` (per-bucket shard count) climbs or how many
+listings run at once. The earlier unbounded fan-out spawned `N` goroutines +
+`N` connection checkouts per request and exploded under
+`high-N × concurrent-lists`.
+
+**Memory.** Each shard cursor buffers at most one bounded gocql page
+(`listPageSize = 256` rows) regardless of the request `limit` (up to 1000);
+the heap-merge auto-pages a cursor via `advance()` so a small page is purely a
+fetch-granularity choice, never a correctness/truncation one (truncation is
+decided by counting emitted rows). Resident listing memory is therefore
+`N × listPageSize` rows of buffered page plus the `N` heap heads — and the
+concurrently-fetching burst is capped at `listConcurrency × listPageSize` — not
+the old `N × (limit+1)`.
+
+**Consistency.** The listing queries pin `LOCAL_QUORUM` explicitly rather than
+inheriting the cluster/session default, so the read-after-write guarantee a
+client expects (a `LOCAL_QUORUM` write is visible to the very next
+`LOCAL_QUORUM` list) does not depend on an operator not having lowered a
+Cassandra default.
+
 ## RangeScanStore short-circuit
 
 Backends with a globally-ordered keyspace skip the fan-out. `meta.RangeScanStore`
@@ -100,9 +126,48 @@ lifecycle work distributes in lockstep with the gc fan-out.
 
 `internal/reshard` is a per-bucket online shard-resize worker (US-045).
 It drains the source shards, rewrites every key under the new modulo,
-and flips the bucket's `shardCount` once the rewrite catches up. The
-worker is driven synchronously via `/admin/bucket/reshard` or as a
-daemon under `STRATA_WORKERS=`.
+and flips the bucket's `shardCount` once the rewrite catches up. As of
+US-005 it runs **asynchronously** as a leader-elected background worker
+(`STRATA_WORKERS=…,reshard`, lease `reshard-leader`) — the admin
+endpoint only queues the job and returns immediately.
+
+### Operator runbook (async trigger + progress)
+
+1. **Enable the worker** on at least one replica:
+   `STRATA_WORKERS=gc,lifecycle,rebalance,reshard`. Tunables:
+   `STRATA_RESHARD_INTERVAL` (default `30s`, range `[1s,1h]`) and
+   `STRATA_RESHARD_BATCH_LIMIT` (default `500`).
+2. **Trigger** (queues the job, returns `202` immediately — never blocks
+   on the migration):
+   `POST /admin/bucket/reshard?bucket=<name>&target=<power-of-two>` →
+   `{"ok":true,"state":"queued","source":64,"target":128}`. Stamps the
+   `admin:BucketReshard` audit row. A second trigger while a job is in
+   flight returns `409 OperationAborted`.
+3. **Watch progress**:
+   `GET /admin/bucket/reshard?bucket=<name>` →
+   `state` is `queued` (no rows moved yet), `running` (`last_key`
+   watermark advancing), or `idle` (no job in flight — `shard_count`
+   reports the live count, the signal the reshard converged).
+4. **CLI**: `strata admin bucket reshard --bucket <name> --target 128`
+   queues and prints the job; add `--wait` to poll progress until the
+   worker drains the job.
+
+**Crash-safe + resumable.** The worker persists a `LastKey` watermark
+after each batch. A crash (or leader handover) mid-job resumes from that
+watermark on the next tick; `MigrateReshardKey` is idempotent, so
+re-walking the partial batch never double-moves or strands a key.
+`CompleteReshard` (the `shard_count` flip) fires only after the walk
+drains every key — cleanup-before-flip, so a post-flip listing never
+double-emits a moved key. The `make smoke-reshard` harness
+(`scripts/smoke-reshard.sh`) exercises the full path against the
+Cassandra lab: async trigger, concurrent PUT/GET/DELETE under load, and
+a `docker restart` mid-job crash-resume leg.
+
+**Reshard only does physical work on the Cassandra fan-out backend.**
+The objects table is partitioned by `(bucket_id, shard)`, so changing
+`shardCount` moves a key to a different partition — that is the rewrite
+the worker performs. Cassandra implements `meta.ReshardMigrator`; the
+worker drives `MigrateReshardKey` per key.
 
 The power-of-two constraint matters here: doubling from `N=64` to
 `N=128` means every old shard either stays in place (keys whose
@@ -110,6 +175,19 @@ The power-of-two constraint matters here: doubling from `N=64` to
 No three-way splits. The reshard worker exploits this — it reads each
 old shard once and either keeps the row in place or writes it to the
 sibling, never to two destinations.
+
+**TiKV and memory need no resharding.** TiKV addresses objects through
+a single globally-ordered range scan and the memory backend through a
+flat map — a key's physical placement does not depend on `shardCount`,
+so there is nothing to move. These backends do **not** implement
+`meta.ReshardMigrator`; `StartReshard` queues a job that the worker
+completes **at once with zero rows moved** — no `ListObjectVersions`
+walk, no watermark writes (US-004 immediate-complete no-op). A direct
+API/CLI caller gets success, not an error, and the full key set stays
+readable before, during, and after. The web console (US-006) disables
+the Reshard action on these backends — offering a button that does
+nothing is worse UX than hiding it; API = no-op success, UI = disabled,
+both consistent with "nothing to reshard".
 
 ## Per-bucket / per-shard observability
 

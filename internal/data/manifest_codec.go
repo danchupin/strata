@@ -143,6 +143,7 @@ func manifestToProto(m *Manifest) *pb.Manifest {
 				Namespace: c.Namespace,
 				Oid:       c.OID,
 				Size:      c.Size,
+				Crc32C:    c.Checksum,
 			}
 		}
 	}
@@ -218,6 +219,7 @@ func manifestFromProto(p *pb.Manifest) *Manifest {
 				Namespace: c.GetNamespace(),
 				OID:       c.GetOid(),
 				Size:      c.GetSize(),
+				Checksum:  c.GetCrc32C(),
 			}
 		}
 	}

@@ -123,8 +123,14 @@ nginx LB `:9999` round-robins; direct ports `:10001`/`:10002`. `make up-cassandr
                   in place. Idempotent. Cadence STRATA_MANIFEST_REWRITER_INTERVAL.
   usage-rollup -> nightly samples bucket_stats → one usage_aggregates row per
                   (bucket, storage_class, yesterday-UTC). Feeds billing.
-  internal/reshard -> per-bucket online shard-resize, admin-driven one-shot
-                  (/admin/bucket/reshard) or daemon — NOT a tick worker.
+  reshard      -> per-bucket online shard-resize. US-005: now a leader-elected
+                  background worker (`--workers=reshard`, `reshard-leader`
+                  lease) that drains queued jobs. `POST /admin/bucket/reshard`
+                  QUEUES a job (202, async) + stamps `admin:BucketReshard`;
+                  `GET /admin/bucket/reshard?bucket=` reads progress
+                  (queued|running|idle). Idempotent + resumable from the job
+                  `LastKey` watermark (crash-safe). Cassandra moves rows;
+                  memory/TiKV immediate-complete no-op.
   strata admin rewrap -> one-shot SSE master-key rotation. Rewraps DEKs to
                   --target-key-id. Idempotent + resumable via rewrap_progress.
 ```
@@ -240,7 +246,11 @@ at the same site as `strataotel.StartIteration` / `strataotel.EndIteration` so t
 empty `name` → `"unknown"` and routes nil err → `status="success"` / non-nil → `"error"`. When adding a new
 worker, also extend `internal/metrics/metrics.go::registeredWorkerNames` so the prewarm seeds zero-valued
 series and the dashboard's `label_values(strata_worker_iteration_total, worker)` picker exposes it on boot.
-Reshard is intentionally absent — it is admin-driven one-shot, not a continuous tick.
+Reshard joined the worker set in US-005 (`reshard` in `registeredWorkerNames`): its `reshardRunner.Run` loop
+wraps each `RunOnce` in `workers.StartIteration`/`EndIteration` + `metrics.ObserveWorkerTick("reshard", …)`.
+The admin endpoint only QUEUES the job (`StartReshard`); the worker drains it out-of-band — never drive
+`RunOnce` inline in the HTTP request goroutine (a large bucket's migration would block the request for
+minutes). Knobs: `STRATA_RESHARD_INTERVAL` (default 30s, [1s,1h]) / `STRATA_RESHARD_BATCH_LIMIT` (default 500).
 
 ## meta.Store interface — the contract
 
@@ -434,12 +444,54 @@ heap-merges by clustering order (key ASC, version_id DESC). See `cassandra/store
 `versionHeap` types. A new range-scan-capable backend (e.g. TiKV) would short-circuit this via the optional
 `RangeScanStore` interface (see ROADMAP).
 
+**Bounded fan-out (US-012).** The fan-out is NOT one-goroutine-per-shard. `runBoundedFanOut`
+(`cassandra/listfanout.go`, sized by `STRATA_CASSANDRA_LIST_CONCURRENCY` → `Store.listConcurrency`, default 16,
+clamp [1,256]) caps concurrent shard queries so gocql connections/goroutines stay bounded regardless of `N`. Each
+cursor buffers at most one bounded page (`listPageSize=256`), decoupled from the request `limit` (≤1000) — the
+merge auto-pages via `advance()`, so a small page is a fetch-granularity choice, never a truncation one (truncation
+= counting emitted rows). Listing queries pin `gocql.LocalQuorum` EXPLICITLY (`openShardCursor` /
+`openVersionCursor` / `AllObjectVersions`) so read-after-write coherence doesn't ride on a session default. The
+knob is config-wired (`cassandra.list_concurrency`); `Options.ListConcurrency<=0` falls back to
+`ListConcurrencyFromEnv()`.
+
+**Per-bucket shard resolution + reshard transitional model (US-001/US-002).** Every object-addressing site resolves the
+bucket's stored `ShardCount` via `bucketShardCounts` (short-TTL cache), NEVER the process-global `s.defaultShard` — a
+mismatch point-reads the wrong partition and 404s. While a reshard is in flight (`shard_count_target != 0`) the store
+runs a TWO-LAYOUT transitional model: writes land in the TARGET layout (`fnv%target`); point reads + LIST union-read
+source (`fnv%active`) ∪ target, target winning a `(key,version_id)` collision. Helpers: `shardLayout` /
+`writeShardForKey` (write + clear set) / `readShardsForKey` (probe set, target-first) / `objectFanCount`
+(`max(active,target)` for LIST) / `latestAtShard` / `objLater`. **`resolveVersionID` is the single point-mutate funnel
+— teach IT the source/target probe and every UPDATE/DELETE-by-version path inherits it.** Overwrites + deletes clear
+BOTH shards so no stale source row is double-emitted. **Delete-marker cross-shard gotcha:** `shardCursor.advance` MUST
+surface a delete-marker head (with real version/mtime), not swallow it — otherwise a key deleted in the target shard is
+resurrected by the older live row still in the source shard during a reshard; the `ListObjects` merge loop suppresses
+marker heads after setting `lastKey`. **`CompleteReshard` is a pure flip with no row movement** — the `internal/reshard`
+worker (`runJob`) does the physical migration and gates the flip behind cleanup-before-flip: calling `CompleteReshard`
+before migration strands un-rewritten diverging keys. **US-003 row mover (Cassandra):** the worker walks the in-flight
+union read key-by-key and drives the optional `meta.ReshardMigrator.MigrateReshardKey` (Cassandra-only) per key, which
+relocates every version row of the key from its source shard to its target shard via `INSERT … IF NOT EXISTS` (never
+clobbers a newer concurrent target write) then deletes the source orphan (idempotent + crash-safe under a `LastKey`
+watermark). `RunOnce` calls `CompleteReshard` only after the walk drains, so the source layout holds no diverging row at
+flip time. Memory + TiKV are shard-agnostic (flat map / ordered scan) — they don't implement `ReshardMigrator`, so the
+worker moves nothing (immediate-complete no-op) and the transitional model is a no-op there; the discriminating proof
+lives in Cassandra integration tests (`TestCassandraReshardWorkerMovesRows`). Narrow known race (concurrent
+specific-version DELETE vs the copy window) named in `MigrateReshardKey` + ROADMAP.
+
 ## S3-specific conventions in this repo
 
 - **Bucket names must be ≥3 chars, lowercase, DNS-safe.** `internal/s3api/validate.go: validBucketName` enforces this on
   `PUT /<bucket>`. Tests use `/bkt`, never `/b` — the latter rejects with 400 InvalidBucketName.
 - **Test harness:** `internal/s3api/testutil_test.go` exposes `newHarness(t)` returning a server hooked up to in-memory
   `data` + `meta`. Drive it with `h.doString(method, path, body, headers...)` and `h.mustStatus(resp, code)`.
+  **Auth-gate fixture gotcha:** a request with no `X-Test-Principal` resolves to the anonymous identity
+  (`Owner="anonymous"`); a bucket created the same way is ALSO owned by `"anonymous"`, so `requireACL`'s
+  owner-match short-circuits and silently masks the ACL/policy gate under test. To genuinely exercise a
+  non-owner path, own the bucket with a DISTINCT `X-Test-Principal` and issue the request as a real non-owner.
+- **Object access is policy-UNION-ACL** (AWS semantics, US-008): `requireObjectAccess` grants on an explicit
+  bucket-policy Allow regardless of the ACL, an explicit policy Deny always wins, and a neutral policy falls
+  back to the ACL gate. `RestrictPublicBuckets` suppresses an anon public-policy grant; access-point policy
+  stays an intersection gate on top. Use `policy.EvaluateExplicit` (not `Evaluate`) when you must tell a
+  neutral no-match apart from an explicit Allow/Deny — `Evaluate` collapses no-match into `Deny`.
 - **Conditional headers (RFC 7232) on GET** flow through `checkConditional` in `internal/s3api/conditional.go`. PUT-side
   `If-Match` / `If-None-Match` checks live inline in `putObject`.
 - **Lifecycle worker uses CAS on transition** via

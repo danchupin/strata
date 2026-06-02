@@ -10,7 +10,7 @@ RUN pnpm install --frozen-lockfile
 COPY web/ ./
 RUN pnpm run build
 
-FROM quay.io/ceph/ceph:v19.2.3 AS build
+FROM quay.io/ceph/ceph:v19.2.4 AS build
 
 RUN printf '%s\n' \
     '[ceph-squid]' \
@@ -49,7 +49,7 @@ RUN --mount=type=cache,target=/root/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go build -tags ceph -trimpath -o /out/strata ./cmd/strata
 
-FROM quay.io/ceph/ceph:v19.2.3
+FROM quay.io/ceph/ceph:v19.2.4
 ARG GIT_SHA=unknown
 LABEL org.opencontainers.image.title="strata" \
       org.opencontainers.image.description="S3-compatible object gateway (single strata binary; admin operations via the `admin` subcommand)" \

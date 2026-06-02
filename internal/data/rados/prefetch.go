@@ -161,12 +161,55 @@ func (r *prefetchReader) dispatch(ctx context.Context, segments []chunkSegment, 
 		idx := i
 		s := seg
 		r.wg.Go(func() {
-			body, err := getOne(ctx, s.ref, s.off, s.length)
+			body, err := fetchSegment(ctx, s, getOne)
 			// futures[idx] is buffered size-1 and only ever written here;
 			// the send never blocks.
 			r.futures[idx] <- getResult{body: body, err: err}
 		})
 	}
+}
+
+// fetchSegment retrieves the bytes a segment contributes to the range and,
+// when read-path CRC32C verification is on (US-009), verifies the WHOLE
+// chunk before handing the (possibly partial) window upward.
+//
+// Range-boundary handling is option (a): for a partial segment (off != 0 or
+// length != chunk size) the FULL chunk is fetched, verified, then sliced —
+// so a byte-flip anywhere in a boundary chunk fails the read loud rather
+// than slipping through an unverified partial read. Interior chunks are
+// already full-chunk reads and verify directly. When verification is off or
+// the ref carries no checksum (legacy row, ref.Checksum == 0) only the
+// requested window is fetched — the pre-US-009 cheap path, unchanged.
+func fetchSegment(ctx context.Context, s chunkSegment, getOne chunkGetFn) ([]byte, error) {
+	verify := data.ChunkCRCVerifyEnabled() && s.ref.Checksum != 0
+	if !verify {
+		return getOne(ctx, s.ref, s.off, s.length)
+	}
+	full := s.off == 0 && s.length == s.ref.Size
+	if full {
+		body, err := getOne(ctx, s.ref, 0, s.ref.Size)
+		if err != nil {
+			return nil, err
+		}
+		if err := data.VerifyChunk(s.ref, body); err != nil {
+			return nil, err
+		}
+		return body, nil
+	}
+	// Partial boundary chunk: read the whole chunk to verify, then slice the
+	// requested window out of it.
+	fullBytes, err := getOne(ctx, s.ref, 0, s.ref.Size)
+	if err != nil {
+		return nil, err
+	}
+	if err := data.VerifyChunk(s.ref, fullBytes); err != nil {
+		return nil, err
+	}
+	end := s.off + uint64(s.length)
+	if end > uint64(len(fullBytes)) {
+		end = uint64(len(fullBytes))
+	}
+	return append([]byte(nil), fullBytes[s.off:end]...), nil
 }
 
 func (r *prefetchReader) Read(p []byte) (int, error) {

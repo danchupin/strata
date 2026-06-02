@@ -98,13 +98,82 @@ func (s *Server) requireAccess(w http.ResponseWriter, r *http.Request, b *meta.B
 	return true
 }
 
-// requireObjectAccess runs the policy gate then the ACL gate for an object
-// action. Both gates must pass; an explicit policy Deny short-circuits.
+// requireObjectAccess gates an object action with AWS policy-UNION-ACL
+// semantics: an explicit bucket-policy Allow grants access regardless of the
+// object/bucket ACL, an explicit bucket-policy Deny always wins (explicit
+// deny > allow), and a neutral policy (no matching statement) falls back to the
+// ACL gate. An access-point policy, when the request was routed through one, is
+// an additional required gate (intersection) layered on top. PublicAccessBlock
+// still suppresses the matching public grant: RestrictPublicBuckets drops a
+// public-policy Allow for anonymous callers (here), IgnorePublicAcls drops
+// public ACL grants (in requireACL).
 // docs:skip
 func (s *Server) requireObjectAccess(w http.ResponseWriter, r *http.Request, b *meta.Bucket, key, action string) bool {
-	if !s.requireAccess(w, r, b, action, objectARN(b.Name, key)) {
+	info := auth.FromContext(r.Context())
+	if info != nil && info.FullAccess {
+		return true // ModeOff dev posture — no data-plane authz.
+	}
+	anon := info != nil && info.IsAnonymous
+	resourceARN := objectARN(b.Name, key)
+	principal := principalForRequest(r)
+
+	doc, err := s.loadBucketPolicy(r, b)
+	if err != nil {
+		writeError(w, r, ErrInternal)
 		return false
 	}
+
+	policyAllow := false
+	if doc != nil {
+		allow, deny, eerr := policy.EvaluateExplicit(doc, principal, action, resourceARN, nil)
+		if eerr != nil {
+			writeError(w, r, ErrInternal)
+			return false
+		}
+		if deny {
+			// Explicit policy Deny wins over any ACL grant (AWS precedence).
+			writeError(w, r, ErrAccessDenied)
+			return false
+		}
+		if allow && anon {
+			// A public-policy Allow for an anonymous caller is suppressed by
+			// RestrictPublicBuckets — block wins. Suppression drops the policy
+			// grant and falls through to the ACL gate; it never grants alone.
+			pab, perr := s.effectivePublicAccessBlock(r, b)
+			if perr != nil {
+				writeError(w, r, ErrInternal)
+				return false
+			}
+			if pab != nil && pab.RestrictPublicBuckets {
+				allow = false
+			}
+		}
+		policyAllow = allow
+	}
+
+	// Access-point policy, when present, is an additional required gate
+	// (intersection) regardless of the bucket-side grant.
+	if ap := accessPointFromContext(r.Context()); ap != nil && len(ap.Policy) > 0 {
+		apDoc, perr := policy.Parse(ap.Policy)
+		if perr != nil {
+			writeError(w, r, ErrInternal)
+			return false
+		}
+		decision, derr := policy.Evaluate(apDoc, principal, action, resourceARN, nil)
+		if derr != nil {
+			writeError(w, r, ErrInternal)
+			return false
+		}
+		if decision != policy.Allow {
+			writeError(w, r, ErrAccessDenied)
+			return false
+		}
+	}
+
+	if policyAllow {
+		return true // explicit policy Allow grants regardless of the ACL.
+	}
+	// Neutral bucket policy → the ACL gate is the decision (policy-UNION-ACL).
 	return s.requireACL(w, r, b, key, action)
 }
 

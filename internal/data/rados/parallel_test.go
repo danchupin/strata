@@ -368,3 +368,45 @@ func (e *erroringReader) Read(p []byte) (int, error) {
 	e.read += n
 	return n, nil
 }
+
+// TestPutChunksParallelStampsCRC pins US-009: the coordinator stamps each
+// produced ChunkRef with the CRC32C of the exact bytes handed to putOne,
+// regardless of what putOne itself returns. Deleting the central stamp in
+// PutChunksParallel would leave Checksum==0 → every RADOS GET silently skips
+// verification — this test fails loud on that regression.
+func TestPutChunksParallelStampsCRC(t *testing.T) {
+	const chunkSize = 64
+	src := bytes.Repeat([]byte("A"), chunkSize)
+	src = append(src, bytes.Repeat([]byte("B"), chunkSize)...)
+	src = append(src, []byte("tail")...) // partial trailing chunk
+
+	var mu sync.Mutex
+	stored := make(map[string][]byte)
+	// putOne deliberately returns a zero Checksum to prove the coordinator —
+	// not the callback — is the source of the stamp.
+	put := func(ctx context.Context, idx int, body []byte) (data.ChunkRef, error) {
+		oid := fmt.Sprintf("oid.%05d", idx)
+		mu.Lock()
+		stored[oid] = append([]byte(nil), body...)
+		mu.Unlock()
+		return data.ChunkRef{OID: oid, Size: int64(len(body))}, nil
+	}
+
+	m, err := putChunksParallelWithChunkSize(context.Background(), bytes.NewReader(src), "STANDARD", 4, chunkSize, put)
+	if err != nil {
+		t.Fatalf("putChunksParallel: %v", err)
+	}
+	if len(m.Chunks) != 3 {
+		t.Fatalf("chunk count: got %d want 3", len(m.Chunks))
+	}
+	for i, ref := range m.Chunks {
+		body := stored[ref.OID]
+		want := data.ComputeChunkCRC(body)
+		if ref.Checksum != want {
+			t.Fatalf("chunk %d (%s): Checksum=%08x want %08x", i, ref.OID, ref.Checksum, want)
+		}
+		if ref.Checksum == 0 {
+			t.Fatalf("chunk %d: Checksum is zero — coordinator did not stamp", i)
+		}
+	}
+}
