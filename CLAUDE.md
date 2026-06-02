@@ -173,8 +173,14 @@ nginx LB `:9999` round-robins; direct ports `:10001`/`:10002`. `make up-cassandr
                   written (wrapped DEK was in the lost meta). Lost metadata
                   (Content-Type/user-meta/tags/ACL/storage-class) reported lost,
                   not fabricated. SSE-algo STAMPING at PUT + the RADOS per-chunk
-                  size probe are SPLIT to US-004b — engine ships CI-green on
-                  memory via an injected fake scanner.
+                  size probe shipped in US-004b: the gateway populates
+                  BackrefAttrs.SSEAlgo (putObject from the resolved sse label,
+                  copyObject from srcObj.SSE) and RADOS/S3 PutChunks thread it
+                  into the stamped back-reference; rados.EnumerateOptions.WithSize
+                  stats each chunk inline so RADOSScanner surfaces PoolObject.Size
+                  (rebuild range-reads the right byte count — Size=0 would
+                  zero-read). Real-RADOS red/green:
+                  cephimpl/rebuild_integration_test.go.
 ```
 
 The S3 router is in `internal/s3api/server.go`. Bucket-scoped queries (`?cors`, `?policy`, `?lifecycle`, …) dispatch via
@@ -245,9 +251,11 @@ ROADMAP P2). **Carries NO key material** (no plaintext, no wrapped DEK) —
 safe under SSE. `SSEAlgo` (US-004) is the encryption-algorithm LABEL only
 ("AES256"/"aws:kms", empty for plaintext) so `rebuild-index` reports SSE
 objects unrecoverable instead of serving ciphertext; it is NOT key material.
-**Note (US-004 split):** the gateway + RADOS/S3 backends do NOT yet POPULATE
-`SSEAlgo` at PUT — the field + wire exist and the rebuild engine reads it, but
-write-side stamping is the trailing `US-004b`. **Mtime is
+**SSEAlgo population (US-004b, done):** the gateway populates `BackrefAttrs.SSEAlgo`
+at PUT — `putObject` from the resolved `sse` disposition label, `copyObject` from
+`srcObj.SSE` (copy does no gateway re-encryption, so the dst chunks inherit the
+source's ciphertext-ness); RADOS (`cephimpl.PutChunks` inline leg) + S3-passthrough
+(`s3.Backend.PutChunks`) thread `a.SSEAlgo` into the stamped back-reference. **Mtime is
 REQUIRED** — version_id orders the chain but can't derive IsLatest when a
 suspended-null version (ts=0) coexists. The identity is threaded onto the
 data-plane ctx via `data.WithBackref`/`BackrefFromContext`; the gateway

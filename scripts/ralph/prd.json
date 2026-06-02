@@ -142,7 +142,7 @@
         "Tests pass"
       ],
       "priority": 12,
-      "passes": false,
+      "passes": true,
       "notes": "Trailing split from US-004 (engine + CLI + plaintext red/green on memory shipped). The Backref.SSEAlgo field + wire already exist (round-trip tested); this story only adds the WRITE-side stamping + the RADOS per-chunk-size probe. Pick up alongside the US-003b cephimpl ChunkStater integration work."
     },
     {

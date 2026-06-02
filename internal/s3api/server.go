@@ -1054,7 +1054,7 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		versionID = meta.NewVersionID()
 	}
 	putCtx := data.WithBackref(s.dataCtxForPut(ctx, b, key),
-		data.BackrefAttrs{BucketID: b.ID, Key: key, VersionID: versionID, Mtime: putMtime})
+		data.BackrefAttrs{BucketID: b.ID, Key: key, VersionID: versionID, Mtime: putMtime, SSEAlgo: sse})
 	m, err := s.Data.PutChunks(putCtx, body, class)
 	if err != nil {
 		if errors.Is(err, auth.ErrSignatureInvalid) {

@@ -135,8 +135,13 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, dstBucket *m
 	if dstBucket.Versioning == meta.VersioningEnabled {
 		versionID = meta.NewVersionID()
 	}
+	// CopyObject performs no gateway-side SSE re-encryption — the dst chunks are
+	// the source's stored bytes. If the source was gateway-SSE (SSE-S3/KMS), the
+	// copied bytes are ciphertext whose wrapped DEK lives only in meta, so the
+	// dst back-reference must carry the same SSE label (US-004b): rebuild-index
+	// then reports the copy unrecoverable rather than serving ciphertext.
 	putCtx := data.WithBackref(s.dataCtxForPut(r.Context(), dstBucket, dstKey),
-		data.BackrefAttrs{BucketID: dstBucket.ID, Key: dstKey, VersionID: versionID, Mtime: putMtime})
+		data.BackrefAttrs{BucketID: dstBucket.ID, Key: dstKey, VersionID: versionID, Mtime: putMtime, SSEAlgo: srcObj.SSE})
 	m, err := s.Data.PutChunks(putCtx, rc, class)
 	if err != nil {
 		var drainRefused *data.DrainRefusedError

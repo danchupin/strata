@@ -270,6 +270,7 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 					VersionID: a.VersionID,
 					ChunkIdx:  idx,
 					Mtime:     a.Mtime,
+					SSEAlgo:   a.SSEAlgo,
 				})
 				xattrs = map[string]string{data.BackrefXattrName: string(enc)}
 			}

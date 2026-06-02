@@ -1087,6 +1087,7 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 				VersionID: a.VersionID,
 				ChunkIdx:  0,
 				Mtime:     a.Mtime,
+				SSEAlgo:   a.SSEAlgo,
 			})
 			in.Metadata = map[string]string{
 				data.BackrefMetaKey: base64.StdEncoding.EncodeToString(enc),

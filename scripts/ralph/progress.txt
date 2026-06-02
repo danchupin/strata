@@ -707,3 +707,17 @@ Cycle: ralph/metadata-data-reconcile
     INSERT VALUES placeholder count, UPDATE SET, and the Scan var list (in
     matching projection order). Plus the storetest contract round-trip.
 ---
+
+## 2026-06-03 - US-004b
+- rebuild-index SSE-algo stamping at PUT + RADOS per-chunk-size probe (the trailing US-004 split).
+- Gateway: putObject stamps BackrefAttrs.SSEAlgo from resolved `sse` label; copyObject from srcObj.SSE (copy does no gateway re-encryption → dst chunks inherit source ciphertext-ness).
+- Backends: cephimpl.PutChunks inline-PUT leg + s3.Backend.PutChunks now thread a.SSEAlgo into the stamped back-reference (xattr / x-amz-meta). StampBackref legs already carried it.
+- Per-chunk Size: new rados.EnumerateOptions.WithSize + PoolObject.Size; cephimpl EnumeratePool stats each OID inline (readChunkSize, ENOENT→0); reconcile.RADOSScanner sets WithSize + populates ScannedChunk.Size. Without it rebuild.readChunk range-reads 0 bytes → md5("") ETags.
+- Files: internal/s3api/server.go, internal/s3api/copy_object.go, internal/data/rados/cephimpl/backend.go, internal/data/s3/backend.go, internal/data/rados/enumerate.go, internal/data/rados/cephimpl/enumerate.go, internal/reconcile/scan_rados.go, internal/data/rados/cephimpl/rebuild_integration_test.go (new), ROADMAP.md, CLAUDE.md.
+- Tests: full `go test ./...` green (default tag). New integration test TestRebuildIndexFromRADOS (build tag integration, real ceph) covers plaintext-2-versions / SSE-unrecoverable / gapped.
+- **Learnings for future iterations:**
+  - internal/meta/memory imports github.com/gocql/gocql (TimeUUID helper) → pulls gocql transitively. Do NOT import meta/memory from the cephimpl module (separate go.mod) — it would force gocql into cephimpl/go.mod and break the go-ceph/main-module dep split. Use a tiny in-test fake embedding meta.Store instead.
+  - cephimpl integration tests run UNDER the workspace: `make test-rados` runs plain `go test -tags integration` (go.work active), NOT GOWORK=off. So a cephimpl test may import any main-module package that resolves through the workspace; only the standalone `make vet` leg uses GOWORK=off (and it's skipped locally without librados).
+  - reconcile.ScannedChunk.Size feeds rebuild.readChunk/restore.readChunkBytes via a single-chunk manifest with GetChunks(m,0,ref.Size). A scanner that leaves Size=0 silently zero-reads every chunk — the S3 scanner sets it from native object size; the RADOS scanner needed WithSize.
+  - SSEAlgo is the gateway SSE disposition string ("AES256"/"aws:kms"/""), same value multipart's mu.SSE uses — matches data.SSEAlgorithm* constants. It's an algorithm LABEL only, never key material.
+---

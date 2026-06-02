@@ -103,6 +103,13 @@ type EnumerateOptions struct {
 	// back-reference (legacy / STRATA_CHUNK_BACKREF=false) yields a nil
 	// PoolObject.Backref, not an error.
 	WithBackref bool
+	// WithSize makes the enumerator stat each chunk inline (one extra rados
+	// Stat riding the same ioctx) and surface the byte length on
+	// PoolObject.Size. rebuild-index (US-004b) needs the real chunk size to
+	// range-read the bytes back from RADOS: the back-reference does not carry
+	// it, and a ChunkRef with Size=0 reads zero bytes. The S3 scanner reuses
+	// the native object size and does not need this flag.
+	WithSize bool
 }
 
 // PoolObject is one enumerated object: its name plus the namespace it lives
@@ -115,6 +122,10 @@ type PoolObject struct {
 	// data.DecodeBackref. nil also signals "no back-reference present" — a
 	// legacy chunk or one written with STRATA_CHUNK_BACKREF=false.
 	Backref []byte
+	// Size is the chunk's byte length, populated when
+	// EnumerateOptions.WithSize is set (else 0). rebuild-index reads it to
+	// range-read each chunk back from the pool.
+	Size int64
 }
 
 // PoolVisitor is invoked once per enumerated object with a resume cursor

@@ -51,6 +51,22 @@ func readBackrefXattr(ioctx *goceph.IOContext, oid string) ([]byte, error) {
 	return out, nil
 }
 
+// readChunkSize stats oid on the supplied (already namespace-bound) ioctx and
+// returns its byte length. A vanished object (ENOENT — the chunk was deleted
+// between the Iter step and the Stat, a benign restore/GC race) returns
+// (0, nil): rebuild treats a zero-size chunk as degraded rather than failing
+// the walk. A real IO error propagates.
+func readChunkSize(ioctx *goceph.IOContext, oid string) (int64, error) {
+	st, err := ioctx.Stat(oid)
+	if err != nil {
+		if ec, ok := err.(errCoder); ok && ec.ErrorCode() == errnoENOENT {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return int64(st.Size), nil
+}
+
 // EnumeratePool walks every object in (cluster, opts.Pool, opts.Namespace)
 // via librados' rados_nobjects_list (go-ceph ioctx.Iter), streaming object
 // names to visit. It implements rados.PoolEnumerator so the always-on
@@ -106,6 +122,17 @@ func (b *Backend) EnumeratePool(ctx context.Context, cluster string, opts rados.
 				return fmt.Errorf("rados: enumerate read backref %s: %w", oid, gerr)
 			}
 			obj.Backref = br
+		}
+		if opts.WithSize {
+			// One Stat riding the same cached ioctx (no second Iter). A
+			// vanished object (restore/GC race between Iter and Stat) yields
+			// size 0, not an error — reconcile/rebuild treats a zero-size read
+			// as a degraded chunk rather than failing the whole walk.
+			sz, serr := readChunkSize(ioctx, oid)
+			if serr != nil {
+				return fmt.Errorf("rados: enumerate stat %s: %w", oid, serr)
+			}
+			obj.Size = sz
 		}
 		if err := visit(obj, rados.EnumerateCursor(uint32(iter.Token()))); err != nil {
 			return err

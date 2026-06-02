@@ -41,6 +41,11 @@ func (s *RADOSScanner) Scan(ctx context.Context, scope ScanScope, startCursor st
 		RatePerSec:    s.RatePerSec,
 		ChunkOIDsOnly: true,
 		WithBackref:   true,
+		// rebuild-index (US-004b) range-reads each chunk back from the pool to
+		// recompute its CRC + the object ETag; the back-reference carries no
+		// size, so the enumerator stats each chunk inline and surfaces it on
+		// PoolObject.Size.
+		WithSize: true,
 	}
 	return rados.EnumeratePool(ctx, s.Backend, scope.Cluster, opts, func(obj rados.PoolObject, resume rados.EnumerateCursor) error {
 		c := ScannedChunk{
@@ -48,6 +53,7 @@ func (s *RADOSScanner) Scan(ctx context.Context, scope ScanScope, startCursor st
 			Pool:      scope.Pool,
 			Namespace: obj.Namespace,
 			OID:       obj.OID,
+			Size:      obj.Size,
 		}
 		if len(obj.Backref) > 0 {
 			// A malformed back-reference is treated as absent (HasBackref
