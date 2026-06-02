@@ -364,6 +364,7 @@ The standard W3C `OTEL_EXPORTER_OTLP_ENDPOINT` controls OTLP/HTTP export
 |---|---|---|
 | `STRATA_TIKV_TEST_PD_ENDPOINTS` | Operator-provided PD endpoints for TiKV integration tests (bypasses testcontainers). | — |
 | `STRATA_SCYLLA_TEST` / `STRATA_SCYLLA_IMAGE` | Gates + image override for the ScyllaDB contract suite. | — |
+| `STRATA_CASSANDRA_IMAGE` / `STRATA_CASSANDRA_MAX_HEAP` / `STRATA_CASSANDRA_NEW_HEAP` | Image override + JVM heap sizing for the Cassandra integration testcontainer (US-010 CI gate). | — |
 | `STRATA_TEST_AK` / `STRATA_TEST_SK` | Static AK/SK pair consumed by the S3 multi-cluster contract suite via `CredentialsEnv`. | — |
 | `STRATA_TEST_CEPH_CONF` / `STRATA_TEST_CEPH_POOL` / `STRATA_TEST_CEPH_CLASSES` | RADOS integration-test cluster wiring. | — |
 | `STRATA_TEST_REBALANCE_SRC_POOL` / `STRATA_TEST_REBALANCE_TGT_POOL` | RADOS rebalance mover integration-test pools. | — |

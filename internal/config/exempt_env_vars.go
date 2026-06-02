@@ -42,6 +42,13 @@ var ExemptEnvVars = struct {
 		"STRATA_STORAGE_HEALTH_OVERRIDE",
 		"STRATA_SCYLLA_IMAGE",
 		"STRATA_SCYLLA_TEST",
+		// Cassandra integration testcontainer knobs (US-010 CI gate): image
+		// override + JVM heap sizing read by
+		// internal/meta/cassandra/testcontainer_integration_test.go. Same
+		// category as STRATA_SCYLLA_IMAGE — test harness, not server config.
+		"STRATA_CASSANDRA_IMAGE",
+		"STRATA_CASSANDRA_MAX_HEAP",
+		"STRATA_CASSANDRA_NEW_HEAP",
 		"STRATA_ADMIN_ENDPOINT",
 		"STRATA_ADMIN_PRINCIPAL",
 		"STRATA_PROM_PUSHGATEWAY",
