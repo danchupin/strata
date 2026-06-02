@@ -43,6 +43,13 @@ backup. Implementation details and tuning rationale live in
   and the replicator + inventory + audit-export workers.
   {{< /card >}}
 
+- {{< card href="/operate/metadata-data-reconcile/" >}}
+  **Reconcile + rebuild-index**  
+  Post-restore runbook — realign RADOS↔meta (orphan chunks, dangling
+  manifests) via the `reconcile` worker; last-resort
+  `strata admin rebuild-index` for a lost meta backup.
+  {{< /card >}}
+
 - {{< card href="/operate/capacity-planning/" >}}
   **Capacity planning**  
   Chunk fan-out math, lifecycle drain rate vs PUT rate, when to scale

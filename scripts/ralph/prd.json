@@ -157,8 +157,8 @@
         "Docs build clean (make docs-build)"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Docs-only. New operator runbook docs/site/content/operate/metadata-data-reconcile.md (weight 45, slots after backup-restore) + card in operate/_index.md. Covers: shared-responsibility boundary table (operator owns nodetool/br/rados snapshot+restore; Strata owns the back-reference + reconcile worker + rebuild-index realignment); the chunk back-reference shape {bucket_id,key,version_id,chunk_idx,mtime} + STRATA_CHUNK_BACKREF opt-out + no-key-material/SSE-safe note; Lustre LFSCK + HDFS fsck prior-art cross-link; two skew directions (data->meta orphan pool-scoped cluster=&pool=; meta->data dangling bucket-scoped bucket=); post-restore procedure report->review->resolve->rebuild with EXACT verified commands (POST/GET /admin/reconcile, 202 queue + id poll, STRATA_WORKERS=...,reconcile) and the rebuild-index CLI flags (--cluster/--pool/--namespace/--bucket-id/--force/--dry-run, dry-run-first); job summary field table (scanned/orphans_*/absent_backref/manifests_scanned/dangling_*/errors) + state machine queued->running->done|error; LOUD rebuild-index recovery boundary (SSE unrecoverable_sse never served, gaps flagged not stitched, lost metadata reported not fabricated, single-part ETag recomputed); metrics table (strata_reconcile_chunks_scanned_total/_orphans_found_total{resolution}/_dangling_manifests_total{resolution}/_errors_total) + STRATA_RECONCILE_SCAN_RATE. Policy caveats documented: restore rejected (US-002b), dangling delete split (US-003b). make docs-build clean (102 pages, no relref errors); page rendered at public/operate/metadata-data-reconcile/index.html."
     },
     {
       "id": "US-006",

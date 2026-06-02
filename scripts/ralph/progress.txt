@@ -403,3 +403,51 @@ Cycle: ralph/metadata-data-reconcile
   config.Load; sibling rewrap unit-tests only reorderProvider, same precedent.
 - 9 rebuild tests green; full Linux build green.
 ---
+
+## 2026-06-02 - US-005 Shared-responsibility ops note + reconcile runbook
+- Docs-only story. Wrote the post-restore operator runbook for the
+  metadata<->data reconcile feature.
+- Files changed:
+  - docs/site/content/operate/metadata-data-reconcile.md (NEW, weight 45 —
+    slots right after backup-restore weight 40, since reconcile is the
+    post-restore step): shared-responsibility boundary table (operator owns
+    nodetool/br/rados backup+restore; Strata owns the back-reference +
+    reconcile worker + rebuild-index that realigns the tiers — Strata does NOT
+    reimplement br/nodetool); chunk back-reference shape + STRATA_CHUNK_BACKREF
+    opt-out + no-key-material/SSE-safe note; Lustre LFSCK + HDFS fsck prior-art
+    cross-link; two skew directions (orphan data->meta pool-scoped; dangling
+    meta->data bucket-scoped); report->review->resolve->rebuild procedure with
+    EXACT verified commands; job-summary field table + state machine; LOUD
+    rebuild-index recovery boundary (SSE unrecoverable, gaps flagged, metadata
+    lost-not-fabricated); metrics table + STRATA_RECONCILE_SCAN_RATE.
+  - docs/site/content/operate/_index.md: added a Reconcile + rebuild-index card
+    in the backup-restore columns group.
+- Verification: `make docs-build` clean — 102 pages, no relref errors (Hugo
+  fails the build on a broken {{< relref >}}, so a clean build proves every
+  cross-link resolves); page rendered at
+  public/operate/metadata-data-reconcile/index.html.
+- **Learnings for future iterations:**
+  - Operator runbooks live under docs/site/content/operate/*.md (frontmatter:
+    title/weight/description). Weights are sparse (10,20,22,23,24,30,40,45,50,
+    55,60) — pick a gap; reconcile=45 sits next to backup-restore=40.
+    Day-2 ops pages answer "what do I run, in what order, what do I watch?";
+    tuning rationale lives in best-practices/, internals in architecture/.
+  - Add a {{< card href=... >}} to operate/_index.md for every new page or it
+    is orphaned from the section landing.
+  - `make docs-build` (Hugo extended, present locally) is the gate; it errors
+    on a broken relref, so a green build == every cross-link valid. No CI dep.
+  - VERIFIED admin/CLI facts for the runbook (file:line): admin route is
+    `/admin/reconcile` (NOT /admin/v1 — server.go:162 prefix `/admin/`;
+    admin.go:75 case "reconcile"), IAM-root gated, presigned rejected. POST
+    queues -> 202; GET ?id= reads progress (admin.go:490,542). Orphan pass:
+    cluster+pool required, policy report|gc (default report). Dangling pass:
+    bucket=<name>, policy report|quarantine. restore rejected (US-002b),
+    dangling delete rejected (US-003b) — IsValidReconcilePolicy=report|gc,
+    IsValidDanglingPolicy=report|quarantine (store.go:469,476). States:
+    queued|running|done|error (store.go:459-462). rebuild-index flags:
+    --cluster/--pool/--namespace/--bucket-id/--force/--dry-run
+    (rebuild_index.go); dispatch run.go:85 `rest[0]=="rebuild-index"`. Metrics
+    metrics.go:218-253. STRATA_RECONCILE_SCAN_RATE objects/sec, 0/unset =
+    unlimited (enumerate.go ScanRateFromEnv). Worker enabled via
+    STRATA_WORKERS=...,reconcile; "reconcile" in registeredWorkerNames:666.
+---
