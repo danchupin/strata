@@ -25,6 +25,7 @@ import (
 	"github.com/danchupin/strata/internal/crypto/master"
 	ssecrypto "github.com/danchupin/strata/internal/crypto/sse"
 	"github.com/danchupin/strata/internal/data"
+	"github.com/danchupin/strata/internal/logging"
 	"github.com/danchupin/strata/internal/meta"
 	"github.com/danchupin/strata/internal/metrics"
 )
@@ -622,6 +623,17 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, b *me
 			s.enqueueChunks(r.Context(), m.Chunks)
 		}
 	}
+	// US-001b: part chunks were written at UploadPart time, before the final
+	// object {version_id, global chunk index} existed, so they carry NO
+	// back-reference. Now that CompleteMultipartUpload has minted the object
+	// identity (obj.VersionID / obj.Mtime are set in place by the meta backend),
+	// re-stamp every chunk of the assembled manifest so reconcile / rebuild can
+	// recover the multipart object from data alone — matching the single-PUT
+	// path. Best-effort: the manifest is already durable, a stamp failure leaves
+	// chunks recoverable-degraded (reconcile reports AbsentBackref, never
+	// deletes). Read obj.VersionID AFTER the meta write so it matches the stored
+	// row exactly regardless of backend version_id policy.
+	s.stampMultipartBackref(r.Context(), b, key, obj, mu.SSE)
 
 	headers := map[string]string{}
 	for algo, val := range composite {
@@ -815,6 +827,36 @@ func multipartETag(parts []meta.CompletePart) (string, error) {
 		}
 	}
 	return hex.EncodeToString(h.Sum(nil)) + "-" + strconv.Itoa(len(parts)), nil
+}
+
+// stampMultipartBackref re-stamps the US-001 chunk back-reference on a
+// just-completed multipart object's chunks (US-001b). Part chunks are written
+// at UploadPart time before the object identity exists, so the back-reference
+// can only be written here, after CompleteMultipartUpload mints obj.VersionID /
+// obj.Mtime. ChunkIdx is assigned by the backend from the position in
+// obj.Manifest.Chunks (the global order across concatenated parts).
+//
+// Backends that cannot stamp cheaply do not implement data.BackrefStamper
+// (memory) — the call is skipped and reconcile / rebuild degrade gracefully.
+// Best-effort: a stamp failure is logged, never surfaced to the client — the
+// object bytes + manifest are already durable.
+func (s *Server) stampMultipartBackref(ctx context.Context, b *meta.Bucket, key string, obj *meta.Object, sseAlgo string) {
+	stamper, ok := s.Data.(data.BackrefStamper)
+	if !ok || obj == nil || obj.Manifest == nil || len(obj.Manifest.Chunks) == 0 {
+		return
+	}
+	attrs := data.BackrefAttrs{
+		BucketID:  b.ID,
+		Key:       key,
+		VersionID: obj.VersionID,
+		Mtime:     obj.Mtime,
+		SSEAlgo:   sseAlgo,
+	}
+	if err := stamper.StampBackref(ctx, obj.Manifest, attrs); err != nil {
+		logging.LoggerFromContext(ctx).WarnContext(ctx,
+			"multipart back-reference stamp failed; object recoverable-degraded",
+			"bucket", b.Name, "key", key, "version_id", obj.VersionID, "error", err)
+	}
 }
 
 var _ = data.DefaultChunkSize

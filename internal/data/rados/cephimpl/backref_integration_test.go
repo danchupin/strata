@@ -156,3 +156,124 @@ func TestPutChunksStampsBackrefXattr(t *testing.T) {
 		}
 	}
 }
+
+// TestStampBackrefRestampsMultipartChunks proves the US-001b RADOS leg against
+// a live cluster: two PutChunks calls written WITHOUT a back-reference (the
+// multipart-part case, where the final object identity is not yet known) land
+// chunks with no xattr; a Complete-time StampBackref over the ASSEMBLED
+// manifest then writes the back-reference on every chunk with the final
+// {bucket,key,version,mtime} and a GLOBAL ChunkIdx running 0..n-1 across the
+// concatenated parts — the contiguous sequence reconcile.OrderChunks /
+// rebuild require to reassemble the object from data alone.
+func TestStampBackrefRestampsMultipartChunks(t *testing.T) {
+	confPath := os.Getenv("STRATA_TEST_CEPH_CONF")
+	if confPath == "" {
+		confPath = "/etc/ceph/ceph.conf"
+	}
+	if _, err := os.Stat(confPath); err != nil {
+		t.Skipf("ceph config not reachable at %s: %v", confPath, err)
+	}
+	pool := os.Getenv("STRATA_TEST_CEPH_POOL")
+	if pool == "" {
+		pool = "strata.rgw.buckets.data"
+	}
+	classesEnv := os.Getenv("STRATA_TEST_CEPH_CLASSES")
+	if classesEnv == "" {
+		classesEnv = "STANDARD=" + pool
+	}
+	classes, err := rados.ParseClasses(classesEnv)
+	if err != nil {
+		t.Fatalf("parse classes %q: %v", classesEnv, err)
+	}
+	user := os.Getenv("STRATA_TEST_CEPH_USER")
+	if user == "" {
+		user = "admin"
+	}
+
+	t.Setenv("STRATA_CHUNK_BACKREF", "true")
+	beIface, err := New(rados.Config{ConfigFile: confPath, User: user, Pool: pool, Classes: classes})
+	if err != nil {
+		t.Skipf("cannot connect to ceph (probably no cluster running): %v", err)
+	}
+	be := beIface.(*Backend)
+	t.Cleanup(func() { _ = be.Close() })
+
+	// Two parts written WITHOUT WithBackref on ctx — chunks land un-stamped,
+	// exactly as UploadPart does before the object version_id exists.
+	part1 := make([]byte, 5<<20) // 2 chunks: 4 + 1 MiB
+	part2 := make([]byte, 3<<20) // 1 chunk
+	if _, err := rand.Read(part1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rand.Read(part2); err != nil {
+		t.Fatal(err)
+	}
+	m1, err := be.PutChunks(context.Background(), bytes.NewReader(part1), "STANDARD")
+	if err != nil {
+		t.Fatalf("PutChunks part1: %v", err)
+	}
+	m2, err := be.PutChunks(context.Background(), bytes.NewReader(part2), "STANDARD")
+	if err != nil {
+		t.Fatalf("PutChunks part2: %v", err)
+	}
+
+	assembled := &data.Manifest{Class: "STANDARD"}
+	assembled.Chunks = append(assembled.Chunks, m1.Chunks...)
+	assembled.Chunks = append(assembled.Chunks, m2.Chunks...)
+	t.Cleanup(func() { be.cleanupManifest(context.Background(), assembled.Chunks) })
+	if len(assembled.Chunks) != 3 {
+		t.Fatalf("want 3 assembled chunks, got %d", len(assembled.Chunks))
+	}
+
+	// Pre-condition: no chunk carries a back-reference yet.
+	for i, c := range assembled.Chunks {
+		ix, err := be.ioctx(context.Background(), c.Cluster, c.Pool, c.Namespace)
+		if err != nil {
+			t.Fatalf("ioctx chunk %d: %v", i, err)
+		}
+		buf := make([]byte, 4096)
+		if _, err := ix.GetXattr(c.OID, data.BackrefXattrName, buf); err == nil {
+			t.Fatalf("chunk %d (%s) unexpectedly carried a back-reference before StampBackref", i, c.OID)
+		}
+	}
+
+	bid := uuid.New()
+	ver := uuid.New().String()
+	const key = "mp/restamp/object"
+	mtime := time.Unix(1717009999, 0).UTC()
+	if err := be.StampBackref(context.Background(), assembled, data.BackrefAttrs{
+		BucketID:  bid,
+		Key:       key,
+		VersionID: ver,
+		Mtime:     mtime,
+	}); err != nil {
+		t.Fatalf("StampBackref: %v", err)
+	}
+
+	// Post-condition: every chunk now carries the final identity with a global
+	// contiguous ChunkIdx 0..n-1.
+	for i, c := range assembled.Chunks {
+		ix, err := be.ioctx(context.Background(), c.Cluster, c.Pool, c.Namespace)
+		if err != nil {
+			t.Fatalf("ioctx chunk %d: %v", i, err)
+		}
+		buf := make([]byte, 4096)
+		n, err := ix.GetXattr(c.OID, data.BackrefXattrName, buf)
+		if err != nil {
+			t.Fatalf("GetXattr chunk %d (%s): %v", i, c.OID, err)
+		}
+		ref, err := data.DecodeBackref(buf[:n])
+		if err != nil {
+			t.Fatalf("DecodeBackref chunk %d: %v", i, err)
+		}
+		if ref.BucketID != bid || ref.Key != key || ref.VersionID != ver {
+			t.Errorf("chunk %d identity mismatch: %+v", i, ref)
+		}
+		if ref.ChunkIdx != i {
+			t.Errorf("chunk %d global ChunkIdx: want %d, got %d", i, i, ref.ChunkIdx)
+		}
+		if !ref.Mtime.Equal(mtime) {
+			t.Errorf("chunk %d Mtime: want %v, got %v", i, mtime, ref.Mtime)
+		}
+	}
+}

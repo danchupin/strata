@@ -53,6 +53,27 @@ type ChunkLister interface {
 	ListChunks(ctx context.Context, cluster, class, startCursor string, visit func(ListedChunk, string) error) error
 }
 
+// BackrefStamper is the optional capability a data backend advertises to
+// (re)write the US-001 self-describing chunk back-reference on the chunks of
+// an ALREADY-written manifest. The gateway uses it at CompleteMultipartUpload
+// (US-001b): a multipart part's chunks are written at UploadPart time — before
+// the final object {version_id, global chunk index} exists — so they land with
+// NO back-reference. Once Complete mints the object identity, the gateway walks
+// the assembled manifest and stamps every chunk, assigning ChunkIdx by position
+// in m.Chunks (the global order across concatenated parts) so the rebuild
+// engine's contiguous-0..n-1 ordering holds.
+//
+// Best-effort at the call site: the manifest is already durable when Stamp runs,
+// so a failure leaves chunks recoverable-degraded (reconcile counts them
+// AbsentBackref and never deletes them) — it MUST NOT corrupt the completed
+// object or fail the request. Backends that cannot stamp cheaply do not
+// implement it (memory no-ops by absence); the RADOS leg rewrites the
+// BackrefXattrName xattr per OID, the S3-passthrough leg rewrites the
+// x-amz-meta-strata-backref user-metadata on the backing object.
+type BackrefStamper interface {
+	StampBackref(ctx context.Context, m *Manifest, attrs BackrefAttrs) error
+}
+
 // MultipartBackend is the optional capability surface for data backends that
 // can map a Strata multipart upload 1:1 onto their own multipart protocol
 // (US-010 S3-over-S3). Today only the s3 backend implements it; the gateway

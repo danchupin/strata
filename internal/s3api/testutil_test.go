@@ -11,6 +11,7 @@ import (
 
 	"github.com/danchupin/strata/internal/auth"
 	"github.com/danchupin/strata/internal/crypto/kms"
+	"github.com/danchupin/strata/internal/data"
 	datamem "github.com/danchupin/strata/internal/data/memory"
 	metamem "github.com/danchupin/strata/internal/meta/memory"
 	"github.com/danchupin/strata/internal/s3api"
@@ -25,9 +26,16 @@ type testHarness struct {
 }
 
 func newHarness(t *testing.T) *testHarness {
+	return newHarnessWithBackend(t, datamem.New())
+}
+
+// newHarnessWithBackend builds the standard in-memory harness but with a
+// caller-supplied data backend, so a test can wrap/spy the backend (e.g. to
+// observe data.BackrefStamper calls) without forking the harness.
+func newHarnessWithBackend(t *testing.T, backend data.Backend) *testHarness {
 	t.Helper()
 	metaStore := metamem.New()
-	api := s3api.New(datamem.New(), metaStore)
+	api := s3api.New(backend, metaStore)
 	api.Region = "default"
 	api.Master = harnessMasterProvider{}
 	api.KMS = newHarnessKMSProvider(t)

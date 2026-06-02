@@ -81,13 +81,13 @@ pass-rate against the upstream Ceph `s3-tests` suite and the deliberate gaps.
 
 | Operation | Handler file:line | Shipped in | AWS gotchas |
 |---|---|---|---|
-| `CreateMultipartUpload` (POST `?uploads`) | `internal/s3api/server.go:788` (→ `initiateMultipart` multipart.go:40) | — | SSE headers persisted on the multipart session; per-part SSE-C key required on every UploadPart (AWS parity). `BackendUploadID` opaque handle binds the session to the originating cluster (drain-survival, US-004 drain-followup). |
-| `UploadPart` (PUT `?uploadId=&partNumber=`) | `internal/s3api/server.go:855` (→ `uploadPart` multipart.go:177) | — | `Content-MD5` accepted but not validated against streaming body (P2 ROADMAP gap). Part-checksum headers (`x-amz-checksum-*`) persisted per part for Complete verification. |
-| `UploadPartCopy` (PUT `?uploadId=&partNumber=` + `x-amz-copy-source`) | `internal/s3api/multipart.go:311` (dispatched from `uploadPart` at multipart.go:189) | — | `x-amz-copy-source-range: bytes=lo-hi` honoured with strict `lo<=hi<size` parse. |
-| `CompleteMultipartUpload` (POST `?uploadId=`) | `internal/s3api/server.go:862` (→ `completeMultipart` multipart.go:448) | — | LWT `IF status='uploading' → completing` blocks concurrent retries with `NoSuchUpload`. Composite ETag = `md5(concat(part-md5s))-<count>`. Per-part `x-amz-checksum-*` aggregated into object-level `ChecksumType=COMPOSITE`. |
-| `AbortMultipartUpload` (DELETE `?uploadId=`) | `internal/s3api/server.go:868` (→ `abortMultipart` multipart.go:733) | — | Uploaded parts queue into the GC worker via `enqueueChunks`. Idempotent — 204 even when upload already aborted. |
-| `ListParts` (GET `?uploadId=`) | `internal/s3api/server.go:874` (→ `listParts` multipart.go:748) | — | Pagination via `part-number-marker` + `max-parts`. |
-| `ListMultipartUploads` (GET `?uploads`) | `internal/s3api/server.go:391` (→ `listMultipartUploads` multipart.go:779) | — | Pagination via `key-marker` + `upload-id-marker`. |
+| `CreateMultipartUpload` (POST `?uploads`) | `internal/s3api/server.go:788` (→ `initiateMultipart` multipart.go:41) | — | SSE headers persisted on the multipart session; per-part SSE-C key required on every UploadPart (AWS parity). `BackendUploadID` opaque handle binds the session to the originating cluster (drain-survival, US-004 drain-followup). |
+| `UploadPart` (PUT `?uploadId=&partNumber=`) | `internal/s3api/server.go:855` (→ `uploadPart` multipart.go:178) | — | `Content-MD5` accepted but not validated against streaming body (P2 ROADMAP gap). Part-checksum headers (`x-amz-checksum-*`) persisted per part for Complete verification. |
+| `UploadPartCopy` (PUT `?uploadId=&partNumber=` + `x-amz-copy-source`) | `internal/s3api/multipart.go:312` (dispatched from `uploadPart` at multipart.go:191) | — | `x-amz-copy-source-range: bytes=lo-hi` honoured with strict `lo<=hi<size` parse. |
+| `CompleteMultipartUpload` (POST `?uploadId=`) | `internal/s3api/server.go:862` (→ `completeMultipart` multipart.go:449) | — | LWT `IF status='uploading' → completing` blocks concurrent retries with `NoSuchUpload`. Composite ETag = `md5(concat(part-md5s))-<count>`. Per-part `x-amz-checksum-*` aggregated into object-level `ChecksumType=COMPOSITE`. |
+| `AbortMultipartUpload` (DELETE `?uploadId=`) | `internal/s3api/server.go:868` (→ `abortMultipart` multipart.go:745) | — | Uploaded parts queue into the GC worker via `enqueueChunks`. Idempotent — 204 even when upload already aborted. |
+| `ListParts` (GET `?uploadId=`) | `internal/s3api/server.go:874` (→ `listParts` multipart.go:760) | — | Pagination via `part-number-marker` + `max-parts`. |
+| `ListMultipartUploads` (GET `?uploads`) | `internal/s3api/server.go:391` (→ `listMultipartUploads` multipart.go:791) | — | Pagination via `key-marker` + `upload-id-marker`. |
 
 ## Listing
 

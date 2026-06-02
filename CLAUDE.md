@@ -265,12 +265,23 @@ as `x-amz-meta-strata-backref` user-metadata (one backing object per PUT →
 ChunkIdx 0; reconciles via native ListObjects, no pool-enumeration dep).
 Memory backend no-ops. On by default; opt out with `STRATA_CHUNK_BACKREF=false`
 (`data.BackrefEnabledFromEnv`, read once at backend New) → legacy no-xattr,
-reconcile/rebuild degrade gracefully. **Multipart-origin chunks are NOT yet
-covered** (part chunks are written before the final object version_id is
-known) — deferred to trailing story `US-001b`, see ROADMAP "Known latent
-bugs". Hot-path cost (one SetXattr riding the existing WriteOp) is within
-bare-WriteFull p99 noise — see
-`docs/site/content/architecture/benchmarks/rados-ops.md`.
+reconcile/rebuild degrade gracefully. **Multipart-origin chunks are covered
+via a Complete-time re-stamp (US-001b).** Part chunks are written un-stamped at
+UploadPart/UploadPartCopy (the object version_id is not yet minted); once
+`CompleteMultipartUpload` sets `obj.VersionID`+`obj.Mtime` in place,
+`completeMultipart`→`stampMultipartBackref` reads them back (so the stamped
+version_id matches the stored row for ANY backend policy) and re-stamps every
+chunk of the assembled manifest through the optional `data.BackrefStamper`
+(`cephimpl.StampBackref` = per-OID SetXattr; `s3.Backend.StampBackref` =
+HEAD-then-CopyObject-REPLACE on `x-amz-meta-strata-backref`). `ChunkIdx` is
+assigned by position in `m.Chunks` (GLOBAL order across concatenated parts) so
+`reconcile.OrderChunks`/rebuild see a contiguous 0..n-1. Best-effort: a stamp
+failure leaves chunks recoverable-degraded (reconcile counts `AbsentBackref`,
+never deletes), never fails the completed upload. Memory no-ops (no
+`BackrefStamper`). Hot-path cost of the single-PUT leg (one SetXattr riding the
+existing WriteOp) is within bare-WriteFull p99 noise — see
+`docs/site/content/architecture/benchmarks/rados-ops.md`; the multipart re-stamp
+runs at Complete, NOT the UploadPart hot path.
 
 **Reconcile worker — orphan-chunk detection (US-002 metadata-data-reconcile).**
 A leader-elected `reconcile` worker (`internal/reconcile/` +

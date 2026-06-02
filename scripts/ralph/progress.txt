@@ -602,3 +602,58 @@ Cycle: ralph/metadata-data-reconcile
   - rebuild recomputes a SINGLE-PART ETag = md5(concat of ordered chunk bytes); a 2-chunk version's ETag
     assertion must hash the concatenation, not the per-chunk manifest ETag.
 ---
+
+## 2026-06-03 - US-001b Chunk back-reference for multipart-origin chunks
+- Approach: Complete-time RE-STAMP pass (not upload-identity-in-part-xattr).
+  Part chunks land un-stamped at UploadPart/UploadPartCopy (object version_id
+  not yet minted). After CompleteMultipartUpload sets obj.VersionID+obj.Mtime
+  IN PLACE, gateway completeMultipart->stampMultipartBackref reads them back
+  (so stamped version_id matches stored meta row for ANY backend policy) and
+  re-stamps the assembled manifest via new optional data.BackrefStamper.
+  ChunkIdx assigned by position in m.Chunks (GLOBAL order across parts) so
+  reconcile.OrderChunks/rebuild see contiguous 0..n-1.
+- Files:
+  - internal/data/backend.go: new BackrefStamper optional interface.
+  - internal/data/rados/cephimpl/backend.go: StampBackref = per-OID SetXattr
+    (one WriteOp/chunk via ioctx.SetXattr), ObserveOp("setxattr"). Best-effort
+    firstErr accumulate. cephimpl integration test added (re-stamp 2-part/3-chunk,
+    asserts pre=no-xattr, post=global ChunkIdx 0..2 + identity).
+  - internal/data/s3/backref.go: StampBackref = HEAD (preserve metadata+CT)
+    then self-CopyObject MetadataDirective=REPLACE rewriting x-amz-meta-strata-backref.
+    Unit test (captureTransport routes HEAD vs copy by method/header) + disabled-noop.
+  - internal/s3api/multipart.go: stampMultipartBackref helper, called after
+    CompleteMultipartUpload + orphan enqueue. Best-effort: WarnContext on error,
+    never fails the durable completed upload. Memory backend no-ops (no interface).
+  - internal/s3api/testutil_test.go: newHarnessWithBackend(t, backend) factored
+    out so a spy backend can be injected (reuse, no harness fork).
+  - internal/s3api/multipart_backref_test.go: gateway red/green — spy records
+    StampBackref, asserts version_id==stored row, bucketID, 2 chunks in one pass.
+    RED proof: stub out the call -> 0 calls -> fail; GREEN with wiring.
+  - ROADMAP.md: closed the P2 "Multipart-origin chunks carry no back-reference"
+    Known-latent-bug entry (Done, US-001b).
+  - CLAUDE.md: updated the US-001 multipart note (now covered via re-stamp).
+  - docs/site/content/reference/s3-api.md: bumped multipart.go handler line
+    refs (the +import and +stamp-helper shifted lines; TestDocsReferenceCoverage
+    enforces them).
+- **Learnings for future iterations:**
+  - DOCS LINE-REF GOTCHA: docs/site/content/reference/s3-api.md hard-codes
+    `internal/s3api/<file>.go:<line>` for each handler; TestDocsReferenceCoverage
+    AST-checks them. ANY edit to multipart.go/server.go that shifts a handler's
+    func-decl line breaks the test. Re-grep `^func (s *Server) <name>` and patch
+    the rows. (Same applies to other s3api files referenced there.)
+  - To make a chunk backref match the stored version_id WITHOUT touching each
+    backend's version policy: don't pre-decide it at the multipart layer — read
+    obj.VersionID BACK after CompleteMultipartUpload (all 3 backends mutate the
+    passed *meta.Object in place: memory inline, cassandra/tikv via PutObject).
+  - Optional data-backend capabilities = type-assert at the call site
+    (s.Data.(data.BackrefStamper)); memory opts out by NOT implementing it ->
+    graceful skip. Mirrors ChunkStater/ChunkLister/MultipartBackend pattern.
+  - S3 user-metadata rewrite needs HEAD-then-CopyObject(REPLACE) to preserve
+    existing metadata + content-type (REPLACE drops everything not re-supplied).
+    Fake it in tests with a method/header-routing http.RoundTripper; SDK sends
+    user metadata as X-Amz-Meta-<key> and the directive as X-Amz-Metadata-Directive.
+  - S3-passthrough multipart is NOT gateway-wired (no CreateBackendMultipart
+    caller); the gateway always chunk-concatenates. So S3-backed multipart yields
+    an empty obj.Manifest.Chunks and stampMultipartBackref no-ops there — the
+    s3.Backend.StampBackref leg is exercised only at the backend unit seam.
+---

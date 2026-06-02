@@ -635,16 +635,21 @@ Non-goals:
 
 ## Known latent bugs
 
-- **P2 — Multipart-origin chunks carry no back-reference (US-001 split).** The chunk back-reference
-  (`user.strata.backref` xattr / `x-amz-meta-strata-backref`) is stamped on the single-object PUT and
-  CopyObject paths, where the object's `version_id` + `mtime` can be decided BEFORE `PutChunks` and threaded
-  via `data.WithBackref`. Multipart part chunks are written at UploadPart / UploadPartCopy time, when the final
-  object's `version_id` is not yet known (it is minted at CompleteMultipartUpload) — so those chunks land with
-  NO back-reference rather than a wrong one. Reconcile (US-002/003) + rebuild (US-004) therefore can't recover a
-  multipart object from data alone yet; they degrade gracefully (an absent back-reference is logged, not
-  fatal). Closing it needs either a re-stamp pass at Complete (extra round-trip per part chunk — defeats the
-  "same WriteOp" cost goal) or carrying the upload identity in the part xattr and rewriting the version on
-  Complete. Tracked as the trailing `US-001b` story in `scripts/ralph/prd.json`. (`ralph/metadata-data-reconcile` US-001)
+- ~~**P2 — Multipart-origin chunks carry no back-reference (US-001 split).**~~ — **Done.** US-001b. Approach:
+  a Complete-time re-stamp pass (NOT carrying upload identity in part xattrs). Part chunks still land
+  un-stamped at UploadPart / UploadPartCopy (the object `version_id` is not yet minted); once
+  CompleteMultipartUpload sets `obj.VersionID` + `obj.Mtime` in place, the gateway
+  (`completeMultipart` → `stampMultipartBackref`) reads them back — so the stamped `version_id` matches the
+  stored meta row regardless of backend version policy — and re-stamps every chunk of the assembled manifest
+  via the new optional `data.BackrefStamper`. `ChunkIdx` is assigned by position in `m.Chunks` (the GLOBAL
+  order across concatenated parts) so `reconcile.OrderChunks` / rebuild see a contiguous `0..n-1`. RADOS leg
+  (`cephimpl.StampBackref`) rewrites the `user.strata.backref` xattr per OID; S3-passthrough leg
+  (`s3.Backend.StampBackref`) HEAD-then-CopyObject-REPLACE rewrites `x-amz-meta-strata-backref`. Round-trip
+  trade-off: one SetXattr (RADOS) / HEAD+COPY (S3) per chunk, run at Complete — NOT on the UploadPart hot path.
+  Best-effort: the manifest is already durable, so a stamp failure leaves chunks recoverable-degraded
+  (reconcile counts `AbsentBackref`, never deletes), never corrupts the object or fails the request. Memory
+  backend no-ops (does not implement `BackrefStamper`). SSE objects: the re-stamp carries `mu.SSE` as the
+  algorithm label so rebuild reports them unrecoverable (no key material). (`ralph/metadata-data-reconcile` US-001b)
 - ~~**P3 — Reconcile `restore` policy + S3-passthrough chunk scanner deferred (US-002 split).**~~ — **Done.**
   US-002b. `meta.IsValidReconcilePolicy` now accepts `restore`; the reconcile worker resolves an orphan under
   `restore` by rebuilding the manifest row from the back-reference — it accumulates orphan chunks during the scan,

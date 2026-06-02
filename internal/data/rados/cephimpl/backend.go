@@ -308,6 +308,48 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 	return m, nil
 }
 
+// StampBackref implements data.BackrefStamper (US-001b): it (re)writes the
+// per-chunk back-reference xattr (data.BackrefXattrName) on every chunk of an
+// already-written manifest, assigning ChunkIdx by position in m.Chunks so the
+// global order across concatenated multipart parts is contiguous 0..n-1.
+//
+// Round-trip trade-off: one SetXattr per chunk, run at CompleteMultipartUpload
+// (NOT the UploadPart hot path) — bounded by the chunk count of the completed
+// object and never on the per-part write latency. Best-effort: the chunk body
+// is already durable, so a SetXattr failure leaves the chunk recoverable-
+// degraded (reconcile counts it AbsentBackref, never deletes it); the first
+// error is returned so the caller can log it, but the object is not corrupted.
+func (b *Backend) StampBackref(ctx context.Context, m *data.Manifest, attrs data.BackrefAttrs) error {
+	if !b.backref || m == nil {
+		return nil
+	}
+	var firstErr error
+	for idx, c := range m.Chunks {
+		ioctx, err := b.ioctx(ctx, c.Cluster, c.Pool, c.Namespace)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		enc := data.EncodeBackref(data.Backref{
+			BucketID:  attrs.BucketID,
+			Key:       attrs.Key,
+			VersionID: attrs.VersionID,
+			ChunkIdx:  idx,
+			Mtime:     attrs.Mtime,
+			SSEAlgo:   attrs.SSEAlgo,
+		})
+		start := time.Now()
+		serr := ioctx.SetXattr(c.OID, data.BackrefXattrName, enc)
+		rados.ObserveOp(ctx, b.logger, b.metrics, b.tracer, c.Pool, "setxattr", c.OID, start, serr)
+		if serr != nil && firstErr == nil {
+			firstErr = fmt.Errorf("rados: stamp backref %s: %w", c.OID, serr)
+		}
+	}
+	return firstErr
+}
+
 func writeChunk(ioctx *goceph.IOContext, oid string, chunk []byte) error {
 	op := goceph.CreateWriteOp()
 	defer op.Release()
