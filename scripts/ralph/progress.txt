@@ -1,25 +1,61 @@
 # Ralph Progress Log
-Started: Mon Jun 02 2026
+Started: Tue Jun  2 16:01:20 MSK 2026
 Cycle: ralph/metadata-data-reconcile
 ---
 
 ## Codebase Patterns
-- CI on Linux is the SOURCE OF TRUTH. Local macOS/lima: Xcode license not accepted -> cgo runtime build-fails for cmd/strata, cmd/strata/admin, internal/meta/tikv, internal/metrics, internal/serverapp (darwin gosigar needs cgo under CGO_ENABLED=0 too). Pure-Go pkgs (internal/config, internal/data, internal/s3api without gosigar) DO build with `CGO_ENABLED=0 go vet ./...`. Cassandra (Paxos starvation), RADOS, SSE-KMS, drain/race-timing failure modes DO NOT reproduce locally — verify on CI.
-- meta.Store contract: adding a method = update internal/meta/memory AND internal/meta/cassandra AND internal/meta/tikv in lockstep + a caseX in internal/meta/storetest/contract.go (runs on memory + TiKV; Cassandra under -tags integration, dedicated CI job).
-- ADDING A WORKER = 5 lockstep spots: (1) workers.Register{} init() in cmd/strata/workers/<name>.go, (2) "<name>" in internal/metrics/metrics.go registeredWorkerNames, (3) WorkersConfig.<Name> field + defaults() + clampWorkers() in internal/config/config.go, (4) STRATA_<NAME>_* rows in envMap, (5) [workers.<name>] in deploy/strata.toml.example + a row in docs/site/content/reference/env-vars.md. Miss (4)/(5) -> TestEnvTOMLParity (internal/config) RED, not the build. Runner wraps each RunOnce in workers.StartIteration/EndIteration + metrics.ObserveWorkerTick("<name>",...). reconcile (US-002/003) is a worker draining admin-queued jobs — mirror the reshard worker+admin-queue pattern (POST queues -> 202, GET reads progress).
-- ENV KNOB = 4 lockstep spots OR exempt: ANY new STRATA_* literal in cmd/+internal/ (incl. `const Env = "STRATA_X"`) is caught by TestEnvTOMLParity. Wire (1) Config koanf field, (2) envMap row -> koanf path, (3) deploy/strata.toml.example commented line, (4) docs/site/content/reference/env-vars.md row with the koanf key — OR add to internal/config/exempt_env_vars.go (test-only knobs use the em-dash placeholder; integration testcontainer knobs go here, e.g. STRATA_CASSANDRA_IMAGE/_MAX_HEAP/_NEW_HEAP). STRATA_CHUNK_BACKREF (US-001) needs this. config.go is NOT gofmt-clean on main (hand-aligned) — match neighbor columns by hand.
-- ChunkRef: internal/data/manifest.go (Go struct) + internal/data/manifest.proto message ChunkRef (proto fields 1-6 USED: cluster/pool/namespace/oid/size + crc32c=6 from US-009). NEXT free proto field = 7. Manifest decode sniffs first byte ({ = JSON, else proto3 wire); new proto fields with json omitempty are schema-additive, legacy rows decode zero-valued. US-009 already shipped per-chunk CRC32C (Checksum uint32) — the CRC proves bytes intact; THIS cycle's back-reference proves whose chunk it is.
-- RADOS / cephimpl module split: go-ceph is NOT a direct require of the main module. Librados-linked code lives in internal/data/rados/cephimpl/ (separate go.mod). Main-module internal/data/rados/ keeps the shared shape + always-on stubs returning data.ErrRADOSNotCompiled; serverapp branches via //go:build ceph files. Hermetic check: GOWORK=off go mod graph | grep -c go-ceph == 0. US-000's pool-enumeration primitive follows this: real impl in cephimpl (wraps ioctx.Iter()), main-module sentinel off the ceph tag.
-- writeChunkBatched SetXattr seam EXISTS (internal/data/rados/cephimpl/ops.go): bundles WriteFull + per-xattr SetXattr in ONE WriteOp, gated by STRATA_RADOS_BATCH_OPS. US-001 wires the back-reference through it (one Operate, no extra round-trip). Reconcile reads xattrs via ioctx.ListXattrs(oid) (ops.go) — go-ceph v0.39 does NOT expose rados_read_op_getxattrs.
-- s3api handler test harness: newHarness(t) + h.doString(method,path,body,headers...) + h.mustStatus(resp,code) in internal/s3api/testutil_test.go. Auth-gate fixture gotcha: no X-Test-Principal -> Owner="anonymous"; a bucket created the same way is owned by "anonymous" so requireACL owner-match trivially passes and MASKS the gate — own the bucket with a DISTINCT principal to exercise a real non-owner.
-- ADMIN AUDIT TEST PATTERN: /admin/* (handleAdmin) gated on Owner==IAMRootPrincipal ("iam-root"); base newHarness does NOT wrap AuditMiddleware. To assert an admin write stamped SetAuditOverride, wrap s3api.NewAuditMiddleware around a handler injecting auth.WithAuth(IAMRootPrincipal), read store.ListAudit. Add the override stamp to every new admin write (reconcile trigger endpoint).
-- gopls modernize hints (rangeint, minmax, interface{}->any) fire pre-existing all over cassandra/store.go + others — NOT lint failures, don't churn them.
+- RADOS data-plane primitives live in TWO places: always-on shared shape +
+  sentinel in main module `internal/data/rados/` (no go-ceph, builds CGO-free),
+  real librados impl in the separate `cephimpl/` Go module. Mirror `rados.New`:
+  a main-module dispatcher type-asserts `data.Backend` to a capability interface
+  and returns `data.ErrRADOSNotCompiled` when it's not the librados backend.
+  Keep reusable helpers (rate limiters, parsers) in the main module so cephimpl
+  needs no extra deps. Hermetic gate: `GOWORK=off go mod graph | grep -c go-ceph`
+  must stay 0.
+- Local macOS CANNOT compile cephimpl (cgo + Xcode license + gosigar darwin).
+  Verify main-module logic with `CGO_ENABLED=0 GOWORK=off go test ./internal/data/rados/`;
+  cephimpl integration legs are CI-only (`make test-rados`). CI (Linux) = truth.
+- Chunk OID format is `fmt.Sprintf("%s.%05d", uuid.NewString(), idx)` →
+  `<uuid>.<>=5 digits>`. `rados.ParseChunkOID`/`IsChunkOID` is the inverse filter.
 
-## Resolved cycle decisions (do NOT re-litigate)
-- Orphan default policy = report (never auto-delete; gc/restore explicit per-run).
-- Back-reference payload = {schema_byte, bucket_id, key, version_id, chunk_idx, mtime}. mtime REQUIRED: version_id orders the chain but can't derive IsLatest when a suspended-null version (ts=0) coexists. schema_byte reserves room for a future refcount-aware shape (dedup interaction). NO key material (SSE-safe).
-- rebuild-index is PLAINTEXT-ONLY: wrapped DEK (meta.Object.SSEKey) lives only in meta, so a lost meta makes SSE ciphertext undecryptable — SSE objects flagged unrecoverable, never silently served. Object metadata absent from the back-reference (Content-Type/user-meta/tags/ACL/storage-class/multipart-ETag) reported lost, not fabricated.
-- S3-passthrough backend gets a back-reference too (object tags/metadata; reconciles via native ListObjects — no US-000 pool primitive needed there).
-- reconcile = leader-elected worker draining admin-queued jobs (reshard pattern); rebuild-index = strata admin CLI one-shot (single-binary invariant, cmd/strata/admin), NEVER a worker.
-- US-000 (RADOS pool enumeration) is the FOUNDATION — lands before US-002/US-004 which depend on it.
+## 2026-06-02 - US-000 RADOS pool object-enumeration primitive
+- Implemented the foundation primitive for reconcile/rebuild: walk every object
+  in a RADOS pool (orphan-chunk detection + last-resort rebuild can ONLY be found
+  by enumerating the pool, never via meta).
+- Files added:
+  - internal/data/rados/enumerate.go (always-on, CGO-free): ParseChunkOID/IsChunkOID
+    filter (<uuid>.<>=5 digits>), EnumerateCursor (PG-hash, resumable), EnumerateOptions,
+    PoolObject, PoolVisitor, PoolEnumerator interface, EnumeratePool dispatcher
+    (sentinel data.ErrRADOSNotCompiled when backend isn't librados — mirrors rados.New),
+    ScanLimiter token bucket + ScanRateFromEnv (STRATA_RECONCILE_SCAN_RATE objects/sec),
+    EnumerateAllNamespaces ("\x01" == LIBRADOS_ALL_NSPACES).
+  - internal/data/rados/cephimpl/enumerate.go: (*Backend).EnumeratePool wrapping
+    go-ceph ioctx.Iter() (rados_nobjects_list). Resumable via Seek(token),
+    ctx-cancellable per-object, rate-limited, ChunkOIDsOnly filtered, namespace-aware.
+    iter.Close() deferred on every path; ioctx is connPool-owned (NOT closed here).
+  - internal/data/rados/enumerate_test.go: unit tests (no ceph) — table-driven
+    ParseChunkOID (valid/foreign/edge), ScanRateFromEnv, nil-safe ScanLimiter +
+    cancel, sentinel dispatch on nil/non-enumerator backend, happy-path dispatch.
+  - internal/data/rados/cephimpl/enumerate_integration_test.go (integration tag):
+    seed N=12 chunk OIDs + 3 foreign into an isolated namespace → ChunkOIDsOnly
+    enumerate returns EXACTLY the N (no dup/drop, foreign skipped); resume from a
+    mid-walk cursor → no-drop past cursor + prefix∪resume covers all N + (guarded
+    on cursor differing) forward-progress proof len(seen)<n so a Seek-no-op regression fails.
+- CLAUDE.md: documented the primitive in the RADOS/cephimpl section.
+- Quality: gofmt clean; CGO_ENABLED=0 GOWORK=off go test ./internal/data/rados/ OK;
+  hermetic go-ceph count = 0. cephimpl build/integration leg verified on CI only
+  (local Xcode-license blocks cgo).
+- **Learnings for future iterations:**
+  - go-ceph IterToken is a uint32 PG-HASH position — Seek is PG-granular, so resume
+    is at-least-once (replays current PG), never drops. Callers MUST dedup by OID
+    against the meta set (US-002/003 reconcile already compares meta↔data, so free).
+  - Reviewer caught: a naive resume test passes even if Seek silently no-ops back to 0
+    (full replay still satisfies no-drop). Add a guarded strict-less assertion to
+    actually prove forward-progress. Guard on cursor!=walk[0].cursor so a single-PG
+    pool (all cursors equal) doesn't false-fail.
+  - EnumeratePool returns only a bare error mid-walk — callers checkpoint the cursor
+    from the VISITOR (last good object), not the return value.
+  - go mod tidy can't run standalone here (cmd/strata/admin imports cephimpl, only
+    resolvable via go.work). Don't run `GOWORK=off go mod tidy` — it errors. x/time
+    is already a direct require (go.mod:40), used by internal/rebalance/throttle.go.
 ---

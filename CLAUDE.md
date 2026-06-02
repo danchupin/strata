@@ -170,6 +170,28 @@ files (`data_rados_ceph.go` + `data_rados_stub.go`,
 `bench_rados_ceph.go` + `bench_rados_stub.go`) that either delegate to
 `cephimpl.New` or return the not-compiled sentinel.
 
+**Pool object-enumeration primitive (US-000 metadata-data-reconcile).** The
+reconcile/rebuild tooling walks a RADOS pool directly (orphan-chunk +
+last-resort rebuild can ONLY be found by enumerating the pool, never via
+meta). Always-on shape in `internal/data/rados/enumerate.go`:
+`rados.EnumeratePool(ctx, backend, cluster, EnumerateOptions, PoolVisitor)`
+type-asserts the `data.Backend` to the `PoolEnumerator` interface and
+returns `data.ErrRADOSNotCompiled` when it is not the librados backend —
+same sentinel shape as `rados.New`, so default-tag builds stay
+go-ceph-free. The real impl is `(*cephimpl.Backend).EnumeratePool`
+(`cephimpl/enumerate.go`) wrapping go-ceph `ioctx.Iter()`
+(`rados_nobjects_list`): resumable from an `EnumerateCursor` (PG-hash
+position — resume is at-least-once / PG-granular, NEVER drops; callers dedup
+by OID against the meta set), ctx-cancellable, rate-limited via
+`rados.ScanLimiter` (token bucket, `STRATA_RECONCILE_SCAN_RATE` objects/sec
+via `rados.ScanRateFromEnv`, 0 = unlimited), and filtered to Strata chunk
+OIDs via `rados.IsChunkOID` / `ParseChunkOID` (a chunk OID is
+`<objID-uuid>.<>=5 decimal digits>` — the `fmt.Sprintf("%s.%05d", …)` PUT
+format). Namespace-aware: `EnumerateOptions.Namespace` empty = default ns,
+concrete = one class, `rados.EnumerateAllNamespaces` ("\x01" == librados
+`LIBRADOS_ALL_NSPACES`) = every namespace. `ScanLimiter` lives in the
+always-on main module (not cephimpl) so the go-ceph side needs no rate dep.
+
 `cephimpl` exposes its own `RadosCluster` interface (structurally identical
 to `internal/rebalance.RadosCluster`) so it does NOT need to import
 `internal/rebalance` — the workspace MVS would otherwise re-load the whole
